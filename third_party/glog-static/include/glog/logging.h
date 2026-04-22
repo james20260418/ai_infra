@@ -85,7 +85,7 @@
 #include <inttypes.h>           // a third place for uint16_t or u_int16_t
 #endif
 
-#if 0
+#if 1
 #include <gflags/gflags.h>
 #endif
 
@@ -414,7 +414,7 @@ typedef void(*CustomPrefixCallback)(std::ostream& s, const LogMessageInfo& l, vo
 // uint32 specialization
 #define DECLARE_uint32(name) \
   DECLARE_VARIABLE(google::uint32, U, name, uint32)
-#endif // !defined(DECLARE_uint32) && !(0)
+#endif // !defined(DECLARE_uint32) && !(1)
 
 // Special case for string, because we have to specify the namespace
 // std::string, which doesn't play nicely with our FLAG__namespace hackery.

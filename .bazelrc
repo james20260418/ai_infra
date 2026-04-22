@@ -73,5 +73,5 @@ test --test_env=GLOG_logtostderr=1
 test --test_output=all
 
 # Also set for run commands
-run --run_env=GLOG_minloglevel=0
-run --run_env=GLOG_logtostderr=1
+run --action_env=GLOG_minloglevel=0
+run --action_env=GLOG_logtostderr=1
