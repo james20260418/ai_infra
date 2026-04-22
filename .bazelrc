@@ -1,0 +1,77 @@
+# ============================================
+# .bazelrc for ai_infra project
+# Suppresses warnings from third-party libraries
+# ============================================
+
+# Suppress common warnings from third-party libraries
+# These warnings are often false positives or from library code we can't fix
+build --copt=-Wno-stringop-overflow      # Protobuf and other libs
+build --copt=-Wno-implicit-fallthrough   # Missing break in switch statements (zlib, gflags)
+build --copt=-Wno-array-bounds           # GCC array bounds checking
+build --copt=-Wno-maybe-uninitialized    # Uninitialized variable warnings
+build --copt=-Wno-unused-parameter       # Unused function parameters
+build --copt=-Wno-sign-compare           # Signed/unsigned comparison
+build --copt=-Wno-deprecated-declarations # Deprecated API usage
+build --copt=-Wno-class-memaccess        # memcpy/memset on non-trivial classes
+build --copt=-Wno-cast-function-type     # gflags function pointer casts
+build --copt=-Wno-unused-but-set-parameter # Unused but set parameters
+build --copt=-Wno-free-nonheap-object    # Free non-heap object warnings
+
+# Keep important warnings for our own code
+build --copt=-Wall
+build --copt=-Wextra
+build --copt=-Werror=return-type
+build --copt=-Werror=non-virtual-dtor
+
+# C++ standard
+build --cxxopt=-std=c++20
+
+# Optimization and debugging
+build --copt=-g
+build --copt=-O2
+
+# Parallel builds for faster compilation
+build --jobs=auto
+
+# Sandbox for hermetic builds
+build --spawn_strategy=standalone
+build --genrule_strategy=standalone
+
+# Test output
+test --test_output=errors  # Show errors but not all output by default
+test --test_summary=detailed
+
+# Verbose output for debugging (comment out for normal use)
+# build --subcommands
+# build --verbose_failures
+
+# Named configuration for warning suppression
+build:suppress_warnings --copt=-Wno-stringop-overflow
+build:suppress_warnings --copt=-Wno-implicit-fallthrough
+build:suppress_warnings --copt=-Wno-array-bounds
+build:suppress_warnings --copt=-Wno-maybe-uninitialized
+build:suppress_warnings --copt=-Wno-unused-parameter
+build:suppress_warnings --copt=-Wno-sign-compare
+build:suppress_warnings --copt=-Wno-deprecated-declarations
+build:suppress_warnings --copt=-Wno-class-memaccess
+build:suppress_warnings --copt=-Wno-cast-function-type
+build:suppress_warnings --copt=-Wno-unused-but-set-parameter
+build:suppress_warnings --copt=-Wno-free-nonheap-object
+
+# Apply warning suppression by default
+build --config=suppress_warnings
+
+# ============================================
+# Glog configuration
+# ============================================
+
+# Set glog environment variables for test execution
+# GLOG_minloglevel: 0=INFO, 1=WARNING, 2=ERROR, 3=FATAL
+# GLOG_logtostderr: 1=log to stderr (for tests)
+test --test_env=GLOG_minloglevel=0
+test --test_env=GLOG_logtostderr=1
+test --test_output=all
+
+# Also set for run commands
+run --run_env=GLOG_minloglevel=0
+run --run_env=GLOG_logtostderr=1

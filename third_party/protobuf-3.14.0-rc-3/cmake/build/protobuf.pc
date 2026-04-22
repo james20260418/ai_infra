@@ -1,0 +1,11 @@
+prefix=/james/ai_infra/third_party/protobuf-3.14.0-rc-3/protobuf-install
+exec_prefix=/james/ai_infra/third_party/protobuf-3.14.0-rc-3/protobuf-install
+libdir=/james/ai_infra/third_party/protobuf-3.14.0-rc-3/protobuf-install/lib
+includedir=/james/ai_infra/third_party/protobuf-3.14.0-rc-3/protobuf-install/include
+
+Name: Protocol Buffers
+Description: Google's Data Interchange Format
+Version: 3.14.0.3
+Libs: -L${libdir} -lprotobuf 
+Cflags: -I${includedir} 
+Conflicts: protobuf-lite

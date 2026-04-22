@@ -1,0 +1,1 @@
+workspace(name = "glog_static")
