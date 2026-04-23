@@ -3,8 +3,9 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "glog",
     srcs = ["lib/libglog.a"],
-    hdrs = glob(["include/glog/*.h"]),
+    hdrs = glob(["include/glog/*.h", "include/gflags/*.h"]),
     includes = ["include"],
-    linkstatic = 1,  # 1 means static linking
-    linkopts = ["-lgflags", "-lpthread"],  # glog requires gflags and pthread
+    deps = ["@com_github_gflags_gflags//:gflags"],
+    linkstatic = 1,
+    linkopts = ["-lpthread"],
 )
