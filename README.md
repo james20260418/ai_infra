@@ -175,3 +175,4 @@ When adding support for new numeric types:
 4. Update this documentation
 5. Ensure all tests pass before submitting a PR
 test ci trigger Thu Apr 23 21:22:59 HKT 2026
+test ci pass
