@@ -18,13 +18,13 @@ namespace geom {
 
 	// For a non-virtual function, by redeclaring it in child class, you are not overriding it, you are hiding it.
 
-	template <typename T, int Dim>
+	templat <typename T, int Dim>
 	struct Vec;
 
 	namespace {
 		// General n-dimensional vector class.
 		// It be slow but we allow it to happen, what we need for now is the basic functionality.
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		struct VecBase {
 			static_assert(Dim > 0);
 			using reference = T&;
@@ -81,10 +81,10 @@ namespace geom {
 
 			void operator-=(const Vec<T, Dim>& other);
 
-			template<typename TScalar>
+			templat<typename TScalar>
 			void operator*=(TScalar scalar);
 
-			template<typename TScalar>
+			templat<typename TScalar>
 			Vec<T, Dim> operator*(TScalar scalar) const;
 
 			// ===== Unary operators =====
@@ -146,7 +146,7 @@ namespace geom {
 			T m[Dim] = { 0 };
 		};
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		Vec<T, Dim> VecBase<T, Dim>::RandomInBox(const Vec<T, Dim>& lb, const Vec<T, Dim>& ub, std::mt19937* seed) {
 			Vec<T, Dim> result;
 			for (int i = 0; i < Dim; ++i) {
@@ -156,7 +156,7 @@ namespace geom {
 		}
 
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		Vec<T, Dim> VecBase<T, Dim>::operator+(const Vec<T, Dim>& other) const {
 			Vec<T, Dim> result;
 			for (int i = 0; i < Dim; ++i) {
@@ -165,7 +165,7 @@ namespace geom {
 			return result;
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		Vec<T, Dim> VecBase<T, Dim>::operator-(const Vec<T, Dim>& other) const {
 			Vec<T, Dim> result;
 			for (int i = 0; i < Dim; ++i) {
@@ -174,30 +174,30 @@ namespace geom {
 			return result;
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		void VecBase<T, Dim>::operator+=(const Vec<T, Dim>& other) {
 			for (int i = 0; i < Dim; ++i) {
 				m[i] += other.m[i];
 			}
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		void VecBase<T, Dim>::operator-=(const Vec<T, Dim>& other) {
 			for (int i = 0; i < Dim; ++i) {
 				m[i] -= other.m[i];
 			}
 		}
 
-		template <typename T, int Dim>
-		template<typename TScalar>
+		templat <typename T, int Dim>
+		templat<typename TScalar>
 		void VecBase<T, Dim>::operator*=(TScalar scalar) {
 			for (int i = 0; i < Dim; ++i) {
 				m[i] *= scalar;
 			}
 		}
 
-		template <typename T, int Dim>
-		template<typename TScalar>
+		templat <typename T, int Dim>
+		templat<typename TScalar>
 		Vec<T, Dim> VecBase<T, Dim>::operator*(TScalar scalar) const {
 			Vec<T, Dim> result;
 			for (int i = 0; i < Dim; ++i) {
@@ -207,7 +207,7 @@ namespace geom {
 		}
 
 		// ===== Unary operators =====
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		Vec<T, Dim> VecBase<T, Dim>::operator-() const {
 			Vec<T, Dim> result;
 			for (int i = 0; i < Dim; ++i) {
@@ -216,28 +216,28 @@ namespace geom {
 			return result;
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		constexpr T& VecBase<T, Dim>::operator[](size_t i) {
 			DCHECK_LT(i, Dim);
 			DCHECK_GE(i, 0);
 			return m[i];
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		constexpr typename VecBase<T, Dim>::const_reference VecBase<T, Dim>::operator[](size_t i) const {
 			DCHECK_LT(i, Dim);
 			DCHECK_GE(i, 0);
 			return m[i];
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		void VecBase<T, Dim>::operator=(const Vec<T, Dim>& other) {
 			for (int i = 0; i < Dim; ++i) {
 				m[i] = other.m[i];
 			}
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		bool VecBase<T, Dim>::operator==(const Vec<T, Dim>& other) const {
 			for (int i = 0; i < Dim; ++i) {
 				if (m[i] != other.m[i]) {
@@ -247,7 +247,7 @@ namespace geom {
 			return true;
 		}
 
-		template <typename T, int Dim>
+		templat <typename T, int Dim>
 		T VecBase<T, Dim>::Sqr() const {
 			T sum = 0.0;
 			for (int i = 0; i < Dim; ++i) {
@@ -260,7 +260,7 @@ namespace geom {
 	}  // namespace
 
 
-	template <typename T, int Dim>
+	templat <typename T, int Dim>
 	struct Vec : public VecBase<T, Dim> {
 
 		Vec(const std::vector<T>& list) : VecBase<T, Dim>(list) {};
@@ -269,12 +269,12 @@ namespace geom {
 	};
 
 	// Binary operators with Vec on the right
-	template <typename T, int Dim, typename TScalar>
+	templat <typename T, int Dim, typename TScalar>
 	constexpr Vec<T, Dim> operator*(TScalar scalar, const Vec<T, Dim>& vec) {
 		return vec * scalar;
 	}
 
-	template <typename T, int Dim>
+	templat <typename T, int Dim>
 	std::ostream& operator<<(std::ostream& os, const Vec<T, Dim>& vec)
 	{
 		os << vec.DebugString();
@@ -288,10 +288,10 @@ namespace geom {
 	// Vec<T,2> is:
 	// 1, First of all a partial specialization of Vec<T, Dim>.
 	// 2, A child class of VecBase<T, 2>.
-	template <typename T>
+	templat <typename T>
 	struct Vec<T, 2> : public VecBase<T, 2> {
 		// Syntax "typename" is used to let compiler
-		// identify template class member as type.
+		// identify templat class member as type.
 		using typename VecBase<T, 2>::reference;
 		using typename VecBase<T, 2>::const_reference;
 		using VecBase<T, 2>::m;
@@ -424,27 +424,27 @@ namespace geom {
 		}
 	};
 
-	template <typename T>
+	templat <typename T>
 	constexpr void  Vec<T, 2>::Rotate90() {
 		T old_x = x();
 		x() = -y();
 		y() = old_x;
 	}
 
-	template <typename T>
+	templat <typename T>
 	constexpr void  Vec<T, 2>::Rotate180() {
 		x() = -x();
 		y() = -y();
 	}
 
-	template <typename T>
+	templat <typename T>
 	constexpr void Vec<T, 2>::Rotate270() {
 		T old_x = x();
 		x() = y();
 		y() = -old_x;
 	}
 
-	template <typename T>
+	templat <typename T>
 	constexpr void Vec<T, 2>::RotateByUnit(const Vec<T, 2>& unit) {
 		T new_x = x() * unit.x() - y() * unit.y();
 		T new_y = x() * unit.y() + y() * unit.x();
@@ -452,19 +452,19 @@ namespace geom {
 		y() = new_y;
 	}
 
-	template <typename T>
+	templat <typename T>
 	constexpr Vec<T, 2>  Vec<T, 2>::RotatedByUnit(const Vec<T, 2>& unit) const {
 		return Vec<T, 2> { x()* unit.x() - y() * unit.y(),
 			x()* unit.y() + y() * unit.x()};
 	}
 
-	template <typename T>
+	templat <typename T>
 	constexpr Vec<T, 2>  Vec<T, 2>::RotatedByUnit(T x, T y) const {
 		return Vec<T, 2> { this->x()* x - this->y() * y,
 			this->x()* y + this->y() * x};
 	}
 
-	template <typename T>
+	templat <typename T>
 	T Vec<T, 2>::SquareAngle() const {
 		// Get sign and abs of x.
 		T abs_x = x();
@@ -493,7 +493,7 @@ namespace geom {
 		}
 	}
 	 
-	template <typename T>
+	templat <typename T>
 	Vec<T, 2> Vec<T, 2>::SquareUnitFromSquareAngle(T angle) {
 		angle = geom::NormalizeSquareAngle(angle);
 		if (angle >= -1.0 && angle < 3.0) {
@@ -530,10 +530,10 @@ namespace geom {
 	// Vec<T,3> is:
 	// 1, First of all a partial specialization of Vec<T, Dim>.
 	// 2, A child class of VecBase<T, 3>.
-	template <typename T>
+	templat <typename T>
 	struct Vec<T, 3> : public VecBase<T, 3> {
 		// Syntax "typename" is used to let compiler
-		// identify template class member as type.
+		// identify templat class member as type.
 		using typename VecBase<T, 3>::reference;
 		using typename VecBase<T, 3>::const_reference;
 		using VecBase<T, 3>::m;
@@ -635,7 +635,7 @@ namespace geom {
 		}
 	};
 
-	template <typename T>
+	templat <typename T>
 	Vec<T, 3> Vec<T, 3>::RandomUnit(std::mt19937* seed) {
 		constexpr int kMaxIter = 20;  // 0.5^20 ~ 0.000001.
 		for (int i = 0; i < kMaxIter; ++i) {
@@ -651,7 +651,7 @@ namespace geom {
 		return  Vec<T, 3>(1.0, 0.0, 0.0);
 	}
 
-	template <typename T>
+	templat <typename T>
 	Vec<T, 3> Vec<T, 3>::UnitFromAngle(T theta, T phi) {
 		const T xy_unit_length = std::sin(theta);
 		return Vec<T, 3>(
@@ -661,7 +661,7 @@ namespace geom {
 		);
 	}
 
-	template <typename T>
+	templat <typename T>
 	Vec<T, 3> Vec<T, 3>::RotatedBy(const Vec<T, 3>& axis, T angle) const {
 		const Vec<T, 3> parallel_part = this->Dot(axis) * axis;
 
@@ -672,16 +672,16 @@ namespace geom {
 		return std::cos(angle) * u + std::sin(angle) * v + parallel_part;
 	}
 
-	template <typename T>
+	templat <typename T>
 	using Vec1 = Vec<T, 1>;
 
-	template <typename T>
+	templat <typename T>
 	using Vec2 = Vec<T, 2>;
 
-	template <typename T>
+	templat <typename T>
 	using Vec3 = Vec<T, 3>;
 
-	template <typename T>
+	templat <typename T>
 	using Vec4 = Vec<T, 4>;
 
 	using Vec1d = Vec<double, 1>;
