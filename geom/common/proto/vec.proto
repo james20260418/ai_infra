@@ -1,0 +1,8 @@
+syntax = "proto3";
+package geom;
+
+// Next id: 3
+message Vec2dProto {
+	double x = 1;
+	double y = 2;
+}
