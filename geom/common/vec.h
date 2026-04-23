@@ -3,7 +3,7 @@
 
 #include <vector>
 #include <random>
-#include <math.h>
+#include <cmath>
 #include <string>
 
 #include "geom/common/check.h"
@@ -43,8 +43,11 @@ namespace geom {
 
 
 			Vec<T, Dim> MakeCopy() const {
-				// Create a copy using copy constructor
-				return *static_cast<const Vec<T, Dim>*>(this);
+				Vec<T, Dim> result;
+				for (int i = 0; i < Dim; ++i) {
+					result.m[i] = m[i];
+				}
+				return result;
 			}
 
 
@@ -100,7 +103,7 @@ namespace geom {
 			}
 
 			// 2-Norm
-			// TODO(huaiyuan): Maybe https://en.wikipedia.org/wiki/Methods_of_computing_square_roots#Babylonian_method.
+			// TODO(huaiyuan): Maybe https://en.wikipedia.org/wiki/Methods_ofcomputing_square_roots#Babylonian_method.
 			constexpr T Norm() const {
 				return std::sqrt(Sqr());
 			}
@@ -260,7 +263,7 @@ namespace geom {
 	template <typename T, int Dim>
 	struct Vec : public VecBase<T, Dim> {
 
-		Vec(const std::vector<T>& list) : VecBase<T, Dim>(list) {}
+		Vec(const std::vector<T>& list) : VecBase<T, Dim>(list) {};
 
 		Vec() = default;
 	};
@@ -295,7 +298,7 @@ namespace geom {
 
 
 		// 2d vector constructor.
-		constexpr Vec<T, 2>(T x, T y) {
+		constexpr Vec(T x, T y) {
 			m[0] = x;
 			m[1] = y;
 		}
@@ -537,7 +540,7 @@ namespace geom {
 
 
 		// 3d vector constructor.
-		constexpr Vec<T, 3>(T x, T y, T z) {
+		constexpr Vec(T x, T y, T z) {
 			m[0] = x;
 			m[1] = y;
 			m[2] = z;
@@ -687,4 +690,3 @@ namespace geom {
 	using Vec4d = Vec<double, 4>;
 
 }  // namespace geom
-
