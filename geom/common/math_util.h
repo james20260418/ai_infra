@@ -100,3 +100,4 @@ namespace geom {
 		return start + angle_span * ratio;
 	}
 }  // namespace geom
+

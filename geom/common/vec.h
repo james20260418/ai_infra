@@ -687,3 +687,4 @@ namespace geom {
 	using Vec4d = Vec<double, 4>;
 
 }  // namespace geom
+

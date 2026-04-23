@@ -4,6 +4,13 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_proto_library")
 
+# Documentation
+filegroup(
+    name = "docs",
+    srcs = ["README.md"],
+    visibility = ["//visibility:public"],
+)
+
 # Basic utility libraries
 cc_library(
     name = "check",
@@ -64,28 +71,6 @@ cc_test(
         ":vec",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
-    ],
-    copts = ["-std=c++20"],
-)
-
-# Simple example to test vec library
-cc_binary(
-    name = "test_vec_example",
-    srcs = ["test_vec_example.cc"],
-    deps = [
-        ":vec",
-        "@glog_static//:glog",
-    ],
-    copts = ["-std=c++20"],
-)
-
-# Even simpler test
-cc_binary(
-    name = "test_vec_simple",
-    srcs = ["test_vec_simple.cc"],
-    deps = [
-        ":vec",
-        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
 )

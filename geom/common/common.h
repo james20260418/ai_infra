@@ -42,3 +42,4 @@ namespace geom {
 	std::string RemoveFileExtension(const std::string& file_path);
 
 }  // namespace geom
+

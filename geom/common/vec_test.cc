@@ -167,3 +167,4 @@ TEST_F(VecTest, AccessorsAndMutators) {
 }
 
 }  // namespace geom
+
