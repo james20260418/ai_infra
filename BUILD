@@ -43,8 +43,3 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
-
-cc_binary(
-    name = "test_compile_flags",
-    srcs = [],
-)

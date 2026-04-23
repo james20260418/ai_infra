@@ -43,6 +43,13 @@ load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_
 rules_proto_dependencies()
 rules_proto_toolchains()
 
+# Local OpenCV static library dependency
+new_local_repository(
+    name = "opencv_static",
+    path = "third_party/opencv-static",
+    build_file = "third_party/opencv-static/BUILD",
+)
+
 # Set environment variables for warning suppression
 # These will be picked up by the compiler
 register_toolchains("@local_config_cc//:all")

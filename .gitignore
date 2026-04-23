@@ -7,3 +7,6 @@ __pycache__/
 
 # Compiled library output (rebuild from source when needed)
 third_party/glog-install/
+output/
+third_party/opencv-static/lib/
+third_party/opencv-static/include/
