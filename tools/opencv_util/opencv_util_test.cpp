@@ -12,11 +12,14 @@ using namespace geom;
 class OpencvUtilTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        std::string cmd = "mkdir -p " + std::string(kTestOutputPath);
+        const char* tmpdir = std::getenv("TEST_TMPDIR");
+        std::string base = (tmpdir != nullptr) ? std::string(tmpdir) : "/tmp";
+        kTestOutputPath = base + "/tools/opencv_util/";
+        std::string cmd = "mkdir -p " + kTestOutputPath;
         system(cmd.c_str());
     }
 
-    static constexpr char kTestOutputPath[] = "/james/ai_infra/output/";
+    std::string kTestOutputPath;
 };
 
 TEST_F(OpencvUtilTest, BasicDrawing) {
