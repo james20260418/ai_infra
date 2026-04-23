@@ -27,7 +27,7 @@ namespace geom {
 		constexpr int kMaxStringSize = 1000;
 		char buffer[kMaxStringSize];
 
-		sprintf_s(buffer, fmt.c_str(), args...);
+		snprintf(buffer, kMaxStringSize, fmt.c_str(), args...);
 		return buffer;
 	}
 	
