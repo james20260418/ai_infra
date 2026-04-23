@@ -9,19 +9,7 @@
 #include <iomanip>
 #include <random>
 
-#ifndef EXPECT_TRUE
 
-#define EXPECT_TRUE(x) CHECK(x)<<"(In Unit Test)"
-#define EXPECT_FALSE(x) CHECK(!(x))<<"(In Unit Test)"
-
-#define EXPECT_GE(x,y) CHECK_GE(x,y)<<"(In Unit Test)"
-#define EXPECT_LE(x,y) CHECK_LE(x,y)<<"(In Unit Test)"
-#define EXPECT_GT(x,y) CHECK_GT(x,y)<<"(In Unit Test)"
-#define EXPECT_LT(x,y) CHECK_LT(x,y)<<"(In Unit Test)"
-#define EXPECT_EQ(x,y) CHECK_EQ(x,y)<<"(In Unit Test)"
-#define EXPECT_NEAR(a,b,e) CHECK_LE(std::abs((a)-(b)),e)<<"(In Unit Test)"
-
-#endif
 
 namespace geom {
 	constexpr double kEpsilon = 1e-9; 

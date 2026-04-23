@@ -43,12 +43,8 @@ namespace geom {
 
 
 			Vec<T, Dim> MakeCopy() const {
-				// Create a copy by constructing from current values
-				std::vector<T> values;
-				for (int i = 0; i < Dim; ++i) {
-					values.push_back(m[i]);
-				}
-				return Vec<T, Dim>(values);
+				// Create a copy using copy constructor
+				return *static_cast<const Vec<T, Dim>*>(this);
 			}
 
 

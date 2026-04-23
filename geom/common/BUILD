@@ -56,10 +56,10 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-# Vec tests
+# Vec tests (GTest format)
 cc_test(
     name = "vec_test",
-    srcs = ["vec_test.cpp", "vec_test.h"],
+    srcs = ["vec_test.cc"],
     deps = [
         ":vec",
         "@glog_static//:glog",
