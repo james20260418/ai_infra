@@ -40,17 +40,6 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-# Geometry legacy (AABox2 alias + remaining legacy code)
-cc_library(
-    name = "geometry_legacy",
-    hdrs = ["geometry_legacy.h"],
-    deps = [
-        ":aabox2",
-        "//geom/common:vec",
-        "//geom/common:check",
-    ],
-    copts = ["-std=c++20"],
-)
 
 # Segment2 tests
 cc_test(
