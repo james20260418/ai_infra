@@ -75,3 +75,20 @@ test --test_output=all
 # Also set for run commands
 run --action_env=GLOG_minloglevel=0
 run --action_env=GLOG_logtostderr=1
+
+# ============================================
+# Windows cross-compilation (MinGW)
+# ============================================
+
+build:windows --incompatible_enable_cc_toolchain_resolution
+build:windows --platforms=//platforms:windows_x86_64
+build:windows --extra_toolchains=//toolchains:mingw_windows_toolchain
+build:windows --spawn_strategy=standalone
+build:windows --genrule_strategy=standalone
+build:windows --copt=-static
+build:windows --linkopt=-static
+build:windows --linkopt=-lpthread
+
+build:windows --features=-layering_check
+build:windows --features=-header_modules
+build:windows --noincompatible_strict_action_env

@@ -19,8 +19,26 @@ jobs:
           chmod +x bazelisk-linux-amd64
           sudo mv bazelisk-linux-amd64 /usr/local/bin/bazel
 
-      - name: Build
+      - name: Build (Linux)
         run: bazel build //...
 
-      - name: Test
+      - name: Test (Linux)
         run: bazel test //...
+
+  windows-build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bazelisk
+        run: |
+          curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64"
+          chmod +x bazelisk-linux-amd64
+          sudo mv bazelisk-linux-amd64 /usr/local/bin/bazel
+
+      - name: Install MinGW cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+
+      - name: Build (Windows cross-compile)
+        run: bazel build //demo/... --config=windows
