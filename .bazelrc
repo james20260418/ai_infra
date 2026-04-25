@@ -88,6 +88,7 @@ build:windows --genrule_strategy=standalone
 build:windows --copt=-static
 build:windows --linkopt=-static
 build:windows --linkopt=-lpthread
+
 build:windows --features=-layering_check
 build:windows --features=-header_modules
 build:windows --noincompatible_strict_action_env
