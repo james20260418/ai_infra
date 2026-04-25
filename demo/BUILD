@@ -13,3 +13,10 @@ cc_binary(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+genrule(
+    name = "copy_windows_helloworld",
+    srcs = [":windows_helloworld.exe"],
+    outs = ["windows_helloworld_output.exe"],
+    cmd = "cp $< $@",
+)

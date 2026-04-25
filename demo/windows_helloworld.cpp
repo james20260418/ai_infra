@@ -55,5 +55,14 @@ int main(int argc, char* argv[]) {
   LOG(INFO) << "Exiting successfully.";
 
   google::ShutdownGoogleLogging();
+
+  std::cout << std::endl;
+  std::cout << "Press any key to exit..." << std::endl;
+#ifdef _WIN32
+  system("pause > nul");
+#else
+  std::cin.get();
+#endif
+
   return 0;
 }
