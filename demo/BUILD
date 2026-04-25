@@ -7,6 +7,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
 cc_binary(
     name = "windows_helloworld.exe",
     srcs = ["windows_helloworld.cpp"],
+    deps = [
+        "@glog_static//:glog",
+    ],
     copts = ["-std=c++20"],
     linkstatic = 1,
 )

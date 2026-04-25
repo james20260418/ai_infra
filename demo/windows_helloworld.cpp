@@ -1,13 +1,22 @@
 /// @brief A simple Windows console application demonstrating
-///        cross-compilation with MinGW.
+///        cross-compilation with MinGW and glog logging.
 ///
 /// Build with:
-///   bazel build //demo:windows_helloworld --config=windows
+///   bazel build //demo:windows_helloworld.exe --config=windows
 ///
 /// The resulting .exe can be run on Windows (via Wine or directly).
 
 #include <iostream>
-#include <cstdio>
+
+#ifdef _WIN32
+// Must define this before including glog headers to avoid
+// conflict between Windows ERROR macro and glog::ERROR enum
+#ifndef GLOG_NO_ABBREVIATED_SEVERITIES
+#define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
+#endif
+
+#include <glog/logging.h>
 
 #ifdef __MINGW32__
 #define PLATFORM_STRING "MinGW-w64"
@@ -18,19 +27,33 @@
 #endif
 
 int main(int argc, char* argv[]) {
-  std::cout << "================================" << std::endl;
-  std::cout << "  Windows Hello World!" << std::endl;
-  std::cout << "================================" << std::endl;
-  std::cout << "Platform: " << PLATFORM_STRING << std::endl;
-  std::cout << "Architecture: x86_64" << std::endl;
-  std::cout << "Built with: Bazel + MinGW" << std::endl;
-  std::cout << "================================" << std::endl;
+  // Initialize Google's logging library.
+  google::InitGoogleLogging(argv[0]);
+
+  // Force logging to stderr (equivalent to --logtostderr=1)
+  FLAGS_logtostderr = true;
+  FLAGS_minloglevel = 0;  // Show all log levels
+
+  LOG(INFO) << "Windows Hello World!";
+  LOG(INFO) << "Platform: " << PLATFORM_STRING;
 
 #ifdef _WIN32
-  std::cout << "Target: Windows" << std::endl;
+  LOG(INFO) << "Running on Windows!";
 #else
-  std::cout << "Cross-compiled from Linux" << std::endl;
+  LOG(INFO) << "Cross-compiled from Linux for Windows target";
 #endif
 
+  LOG(INFO) << "Architecture: x86_64";
+  LOG(WARNING) << "This binary was cross-compiled using Bazel + MinGW";
+  LOG(ERROR) << "This is an example error message (not a real error)";
+
+  std::cout << std::endl;
+  std::cout << "Hello, World from Windows!" << std::endl;
+  std::cout << "Platform: " << PLATFORM_STRING << std::endl;
+  std::cout << "Built with: Bazel + MinGW" << std::endl;
+
+  LOG(INFO) << "Exiting successfully.";
+
+  google::ShutdownGoogleLogging();
   return 0;
 }
