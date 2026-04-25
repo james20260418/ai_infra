@@ -30,24 +30,48 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-# Geometry legacy (AABox2)
+# AABox2 library (moved from geometry_legacy)
 cc_library(
-    name = "geometry_legacy",
-    hdrs = ["geometry_legacy.h"],
+    name = "aabox2",
+    hdrs = ["aabox2.h"],
     deps = [
-        "//geom/common:vec",
         "//geom/common:check",
     ],
     copts = ["-std=c++20"],
 )
 
-# Tests will be added later
-# cc_test(
-#     name = "segment_2_test",
-#     srcs = ["segment_2_test.cc"],
-#     deps = [
-#         ":segment_2",
-#         "@gtest//:gtest_main",
-#     ],
-#     copts = ["-std=c++20"],
-# )
+
+# Segment2 tests
+cc_test(
+    name = "segment_2_test",
+    srcs = ["segment_2_test.cc"],
+    deps = [
+        ":segment_2",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# Polyline2d tests
+cc_test(
+    name = "polyline_2d_test",
+    srcs = ["polyline_2d_test.cc"],
+    deps = [
+        ":polyline_2d",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# AABox2 tests
+cc_test(
+    name = "aabox2_test",
+    srcs = ["aabox2_test.cc"],
+    deps = [
+        ":aabox2",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
