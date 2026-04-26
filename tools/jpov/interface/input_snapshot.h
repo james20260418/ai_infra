@@ -7,6 +7,12 @@
 // - 事件由框架层基于原始升降沿时序计算，OneIteration 只消费结果
 // - 鼠标/键盘事件互斥：同一输入源的每个通道同一帧只能有一种事件
 // - 低帧率（1fps）下仍保持语义正确，降采样不会丢失 Click 判断
+//
+// 坐标系统一约定：
+// - 屏幕坐标：原点在窗口左上角，x 向右为正，y 向下为正
+//   右上角 = (width, 0)，左下角 = (0, height)，右下角 = (width, height)
+// - 值类型（float）允许子像素精度
+// - 3D 世界坐标属于渲染层，不在 InputSnapshot 中定义
 
 #ifndef JPOV_INPUT_SNAPSHOT_H_
 #define JPOV_INPUT_SNAPSHOT_H_
@@ -26,44 +32,46 @@ enum class MouseEvent : uint8_t {
 };
 
 // 一次单击的详细信息
+// x/y — click 释放时鼠标的窗口位置（像素坐标，左上角为原点）
+// time_ratio — 帧内时刻 [0, 1]，0=帧开始，1=帧结束
 struct ClickEvent {
-    float x;           // 推算的点击位置 X（mouse_pos.x - mouse_delta.x * (1 - time_ratio)）
-    float y;           // 推算的点击位置 Y
-    float time_ratio;  // 帧内时刻 [0, 1]
+    float x;
+    float y;
+    float time_ratio;
 };
 
-// 鼠标单键状态（左/中/右共享此结构）
-// 内部存储：用一个 int8_t 编码
-//   -1  → Drag（整帧按下）
-//    0  → None
+// 鼠标单键状态（左/中/右各一个）
+// 内部存储：int8_t 编码
+//   -1  → Drag（整帧按下，包括位移为零的情况）
+//    0  → None（默认构造）
 //    1~8 → Click 事件，数值 = 本帧单击次数
 struct MouseState {
     // 公开接口
-    MouseEvent event() const;
+    bool IsNone() const;
+    bool IsClick() const;
+    bool IsDrag() const;
     int click_count() const;       // 仅 Click 时有意义
-    const ClickEvent* clicks() const;   // 仅 Click 时有意义
-    int clicks_capacity() const;        // clicks 数组容量（固定 8）
 
     // 内部访问（窗口层设置用）
-    int8_t raw;  // 编码值
+    int8_t raw;  // 编码值，默认 0（None）
 };
 
 static_assert(sizeof(MouseState) == 1, "MouseState must be 1 byte");
 
 // 键盘单键状态
-// 内部存储：用一个 int8_t 编码
+// 内部存储：int8_t 编码
 //   -1  → Hold（全程按下）
-//    0  → None
+//    0  → None（默认构造）
 //    1~8 → Click 事件，数值 = 本帧单击次数
 struct KeyState {
     // 公开接口
-    bool IsDown() const;     // true if Click or Hold
-    bool IsClick() const;    // true if Click
-    bool IsHold() const;     // true if Hold
+    bool IsNone() const;
+    bool IsClick() const;
+    bool IsHold() const;
     int click_count() const; // 仅 Click 时有意义
 
     // 内部访问（窗口层设置用）
-    int8_t raw;  // 编码值
+    int8_t raw;  // 编码值，默认 0（None）
 };
 
 static_assert(sizeof(KeyState) == 1, "KeyState must be 1 byte");
@@ -114,84 +122,83 @@ enum class KeyCode : uint16_t {
 
 constexpr int kMaxKeyCode = static_cast<int>(KeyCode::MaxKey) + 1;
 
-// ==================== InputSnapshot ====================
+// ==================== 常量 ====================
 
-constexpr int kMaxClicksPerFrame = 8;  // 1fps × 250ms CLICK_DELTA = 4，给余量
+// 每键每帧最大单击次数
+// 1fps = 1000ms/帧，CLICK_DELTA = 250ms → 最多 4 次/帧
+// 取 8 给足余量
+constexpr int kMaxClicksPerFrame = 8;
+
+// ==================== InputSnapshot ====================
 
 struct InputSnapshot {
     // ---- 鼠标 ----
-    float mouse_x;      // 本帧帧末鼠标位置 X
+    float mouse_x;      // 本帧帧末鼠标位置 X（像素坐标，左上角为原点）
     float mouse_y;      // 本帧帧末鼠标位置 Y
     float mouse_dx;     // 本帧相对上一帧的位移 X
     float mouse_dy;     // 本帧相对上一帧的位移 Y
-    float scroll_delta; // 本帧滚轮增量（向上为正）
+    float scroll_delta; // 本帧滚轮增量（1.0 = 滚一格 / 一个 notch，正=向上）
 
     MouseState left;    // 左键
     MouseState right;   // 右键
     MouseState middle;  // 中键
 
-    // 单击详情（仅 left/middle/right 中任一为 Click 时有效）
-    // 所有 Click 事件共用此池，窗口层按点击顺序填入
-    ClickEvent click_pool[kMaxClicksPerFrame * 3];  // 最多 3 键 × 8 次
+    // 单击详情（每个键独立池）
+    // 仅该键为 Click 时有效，窗口层按时间顺序填入
+    ClickEvent left_clicks[kMaxClicksPerFrame];
+    ClickEvent right_clicks[kMaxClicksPerFrame];
+    ClickEvent middle_clicks[kMaxClicksPerFrame];
 
     // ---- 键盘 ----
     KeyState keys[kMaxKeyCode];  // 索引 = KeyCode 数值
 
     // ---- 辅助方法 ----
+
+    // Pre-condition: key > KeyCode::Unknown && key <= KeyCode::MaxKey
     const KeyState& GetKey(KeyCode key) const {
-        return keys[static_cast<int>(key)];
+        int idx = static_cast<int>(key);
+        // CHECK 保护：索引越界会直接 crash，暴露 bug
+        // 不允许传入 Unknown (0) 或超 MaxKey 的值
+        if (idx <= 0 || idx >= kMaxKeyCode) {
+            // LOG(FATAL) 替代方案：访问越界是编程错误，快速失败
+            __builtin_trap();
+        }
+        return keys[idx];
     }
 
     bool IsCtrlDown() const {
-        return GetKey(KeyCode::LeftCtrl).IsDown() ||
-               GetKey(KeyCode::RightCtrl).IsDown();
+        return GetKey(KeyCode::LeftCtrl).IsClick() ||
+               GetKey(KeyCode::RightCtrl).IsClick() ||
+               GetKey(KeyCode::LeftCtrl).IsHold() ||
+               GetKey(KeyCode::RightCtrl).IsHold();
     }
     bool IsShiftDown() const {
-        return GetKey(KeyCode::LeftShift).IsDown() ||
-               GetKey(KeyCode::RightShift).IsDown();
+        return GetKey(KeyCode::LeftShift).IsClick() ||
+               GetKey(KeyCode::RightShift).IsClick() ||
+               GetKey(KeyCode::LeftShift).IsHold() ||
+               GetKey(KeyCode::RightShift).IsHold();
     }
     bool IsAltDown() const {
-        return GetKey(KeyCode::LeftAlt).IsDown() ||
-               GetKey(KeyCode::RightAlt).IsDown();
+        return GetKey(KeyCode::LeftAlt).IsClick() ||
+               GetKey(KeyCode::RightAlt).IsClick() ||
+               GetKey(KeyCode::LeftAlt).IsHold() ||
+               GetKey(KeyCode::RightAlt).IsHold();
     }
 };
 
 // ==================== 实现 ====================
 
 // --- MouseState ---
-inline MouseEvent MouseState::event() const {
-    if (raw < 0) return MouseEvent::Drag;
-    if (raw > 0) return MouseEvent::Click;
-    return MouseEvent::None;
-}
+inline bool MouseState::IsNone()  const { return raw == 0; }
+inline bool MouseState::IsClick() const { return raw > 0; }
+inline bool MouseState::IsDrag()  const { return raw < 0; }
 
 inline int MouseState::click_count() const {
     return (raw > 0) ? static_cast<int>(raw) : 0;
 }
 
-// 注意：clicks() 和 clicks_capacity() 需要外部传入 click_pool 和偏移量
-// 不在 MouseState 内部维护，因为 click_pool 是 InputSnapshot 级别的资源。
-// 使用方式见下面 InputSnapshot 的辅助方法。
-
-inline int MouseState::clicks_capacity() const {
-    return jpov::kMaxClicksPerFrame;
-}
-
-// 在 InputSnapshot 上添加鼠标辅助方法
-inline const ClickEvent* GetLeftClicks(const InputSnapshot& snap) {
-    return snap.left.event() == MouseEvent::Click ? snap.click_pool : nullptr;
-}
-
-inline const ClickEvent* GetRightClicks(const InputSnapshot& snap) {
-    return snap.right.event() == MouseEvent::Click ? snap.click_pool + kMaxClicksPerFrame : nullptr;
-}
-
-inline const ClickEvent* GetMiddleClicks(const InputSnapshot& snap) {
-    return snap.right.event() == MouseEvent::Click ? snap.click_pool + kMaxClicksPerFrame * 2 : nullptr;
-}
-
 // --- KeyState ---
-inline bool KeyState::IsDown()  const { return raw != 0; }
+inline bool KeyState::IsNone()  const { return raw == 0; }
 inline bool KeyState::IsClick() const { return raw > 0; }
 inline bool KeyState::IsHold()  const { return raw < 0; }
 
