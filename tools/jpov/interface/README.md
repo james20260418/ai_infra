@@ -7,6 +7,9 @@ JPOV 的纯头文件接口定义，可被 OneIteration 用户直接 include。
 | 文件 | 说明 |
 |------|------|
 | `input_snapshot.h` | 帧级输入抽象 InputSnapshot |
+| `camera.h` | 透视相机配置 Camera |
+| `window_info.h` | 帧级窗口信息 WindowInfo |
+| `render_command.h` | 渲染指令输出 RenderCommandList + DrawCommand + Vertex + Color + Vec2/Vec3 |
 
 ## 编码方案
 
