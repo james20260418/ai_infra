@@ -1,15 +1,16 @@
 # JPOV Interface
 
-JPOV 的纯头文件接口定义，可被 OneIteration 用户直接 include。
+JPOV 的纯头文件接口定义，每个接口对应一个独立的 cc_library，方便按需引用。
 
-## 文件
+## 文件与库
 
-| 文件 | 说明 |
-|------|------|
-| `input_snapshot.h` | 帧级输入抽象 InputSnapshot |
-| `camera.h` | 透视相机配置 Camera |
-| `window_info.h` | 帧级窗口信息 WindowInfo |
-| `render_command.h` | 渲染指令输出 RenderCommandList + DrawCommand + Vertex + Color + Vec2/Vec3 |
+| cc_library | 文件 | 说明 |
+|------------|------|------|
+| `input_snapshot` | `input_snapshot.h` | 帧级输入抽象 InputSnapshot |
+| `camera` | `camera.h` | 透视相机配置 Camera（含 viewport 矩形） |
+| `window_info` | `window_info.h` | 帧级窗口信息 WindowInfo（宽/高/宽高比） |
+| `render_command` | `render_command.h` | 渲染指令输出 RenderCommandList（含各类图元命令） |
+| `jpov_interface` | 全部 | 聚合所有接口，方便一次性引用 |
 
 ## 编码方案
 
@@ -25,7 +26,18 @@ Click 的数值 = 本帧单击次数。上限 8（1fps × 250ms CLICK_DELTA ≈ 
 
 ### 坐标系统
 
-屏幕坐标：原点在窗口左上角，x 向右为正，y 向下为正。值类型为 float，支持子像素精度。
+- **2D 屏幕坐标**：原点在窗口左上角，x 向右为正，y 向下为正。float 类型，支持子像素精度。
+- **3D 世界坐标**：右手系（x 向右，y 向上，z 向后）。
+
+### 依赖关系
+
+```
+jpov_interface
+├── camera        → render_command → geom/common:vec, glog_static
+├── input_snapshot                  → glog_static
+├── render_command → geom/common:vec, glog_static
+└── window_info                      → glog_static
+```
 
 ### InputSnapshot 内存布局
 
@@ -45,7 +57,7 @@ Total: ~444 bytes
 
 凡是有 crash 风险的函数（如数组索引访问），必须：
 1. 在头文件声明时加 `// Pre-condition:` 注释说明输入参数约束
-2. 内部用 `__builtin_trap()` （或后续用 LOG(FATAL)）快速失败
+2. 内部用 `CHECK_*` 宏快速失败
 
 不允许"静默处理"越界输入——crash 是暴露 bug 的途径。
 

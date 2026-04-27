@@ -1,13 +1,12 @@
-// JPOV RenderCommandList — 帧级渲染指令输出
+// JPOV RenderCommand — 帧级渲染指令输出
 //
 // OneIteration::Step() 产出 RenderCommandList，描述本帧要绘制的所有内容。
-// 渲染后端消费这组指令将其画到屏幕上。
+// 渲染后端消费这些指令将其画到屏幕上。
 //
 // 设计原则：
 // - 流式绘制：每帧从零构建，无跨帧资源（顶点/颜色/文本都是字面量）
-// - 指令列表 = 有序的绘制操作序列，按画家算法：先 3D 后 2D
-// - 无 GPU 抽象：指令描述"画什么"，不描述"怎么画"
-// - 全栈分配，无堆分配（可用 arena 或 std::vector，当前用 vector）
+// - 不同图元命令类型不同，每种类型独立存储，通过 order 队列声明绘制顺序
+// - 指令描述"画什么"，不描述"怎么画"
 //
 // 坐标系统一约定：
 //   - 2D：屏幕像素坐标，原点在窗口左上角（x→右，y→下）
@@ -20,192 +19,218 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include <glog/logging.h>
+#include "geom/common/vec.h"
 
 namespace jpov {
 
-// ==================== 基础类型 ====================
+// ==================== 类型别名 ====================
 
-struct Vec2 {
-    float x, y;
-};
+// 复用 geom 库的向量类型
+// Vec2f 用于屏幕空间（像素坐标），Vec3f 用于世界空间
+using Vec2f = geom::Vec2<float>;
+using Vec3f = geom::Vec3<float>;
 
-struct Vec3 {
-    float x, y, z;
-};
+// ==================== 颜色 ====================
 
 // RGBA 颜色，分量 [0, 1]
 struct Color {
     float r, g, b, a;
-
-    // 常用颜色常量
-    static const Color Red;
-    static const Color Green;
-    static const Color Blue;
-    static const Color White;
-    static const Color Black;
-    static const Color Transparent;
 };
 
-// ==================== 绘制指令类型 ====================
+// 常用颜色常量
+extern const Color kColorRed;
+extern const Color kColorGreen;
+extern const Color kColorBlue;
+extern const Color kColorWhite;
+extern const Color kColorBlack;
+extern const Color kColorTransparent;
 
-// 渲染命令类型枚举
-//
-// Stream2D — 屏幕空间 2D 图元（线/矩形/圆/文本），由顶点列表描述
-// Stream3D — 世界空间 3D 图元（线/三角形/包围盒/文本），由顶点列表描述
-//
-// MVP 阶段只输出这两种流式指令。未来扩展见底部注释。
+// ==================== 渲染指令类型 ====================
+
+// 渲染命令类型的枚举。
+// 每种类型对应一种图元的绘制，拥有独立的结构体。
 enum class DrawCommandType : uint8_t {
-    Stream2D = 0,
-    Stream3D = 1,
+    kPolyline2D,        // 2D 折线（屏幕空间，像素坐标）
+    kRect2D,            // 2D 实心矩形（屏幕空间）
+    kCircle2D,          // 2D 实心圆（屏幕空间）
+    kText2D,            // 2D 文本（屏幕空间）
+    kLine3D,            // 3D 线段（世界空间）
+    kTriangle3D,        // 3D 三角形（世界空间）
+    kWireBox3D,         // 3D 包围盒线框（世界空间）
+    kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
-// 顶点格式（MVP 阶段：位置 + 颜色）
-//
-// position — 位置坐标（2D：像素坐标栈；3D：世界空间坐标）
-// color    — 顶点颜色（RGBA）
-// uv       — 纹理坐标（保留，MVP 阶段不启用）
-struct Vertex {
-    Vec2 position;
+// ==================== 各类绘制命令结构体 ====================
+
+// 2D 折线（屏幕空间）—— 非闭合，方角端点，无限细（1px 宽）
+// vertices: 折线的顶点序列
+// color: 整条线统一颜色
+// debug_label: 语义标签（可选，供 AI 语义校验使用）
+struct Polyline2DCommand {
+    std::vector<Vec2f> vertices;
     Color color;
-
-    // Pre-condition: uv_x/uv_y 在 MVP 阶段无意义，调用者应设为 0
-    float uv_x = 0.0f;
-    float uv_y = 0.0f;
+    std::string debug_label;
 };
 
-// ==================== 图元类型 ====================
-
-// 图元拓扑（映射到 glDrawArrays 的 mode 参数）
-//
-// Lines        — 每两个顶点构成一条独立线段
-// LineStrip    — 连续线段（顶点 1-2, 2-3, 3-4, ...）
-// Triangles    — 每三个顶点构成一个独立三角形
-// TriangleStrip — 连续三角带
-//
-// MVP 阶段默认使用 Lines 和 Triangles。
-enum class PrimitiveTopology : uint8_t {
-    Lines         = 0,
-    LineStrip     = 1,
-    Triangles     = 2,
-    TriangleStrip = 3,
+// 2D 实心矩形（屏幕空间）
+// pos: 矩形左上角
+// size: 矩形宽高
+// color: 填充颜色
+// debug_label: 语义标签
+struct Rect2DCommand {
+    Vec2f pos;
+    Vec2f size;
+    Color color;
+    std::string debug_label;
 };
 
-// ==================== 绘制指令 ====================
+// 2D 实心圆（屏幕空间）
+// center: 圆心
+// radius: 半径（像素单位）
+// color: 填充颜色
+// debug_label: 语义标签
+struct Circle2DCommand {
+    Vec2f center;
+    float radius;
+    Color color;
+    std::string debug_label;
+};
 
-// 一条渲染命令
+// 2D 文本（屏幕空间）
+// text: 文本内容
+// pos: 文本左下角基线坐标（像素）
+// font_size: 字号（像素单位）
+// color: 文本颜色
+// debug_label: 语义标签
+struct Text2DCommand {
+    std::string text;
+    Vec2f pos;
+    float font_size;
+    Color color;
+    std::string debug_label;
+};
+
+// 3D 线段（世界空间）
+// p1, p2: 线段端点（世界坐标）
+// color: 线段颜色
+// debug_label: 语义标签
 //
-// type       — Stream2D 或 Stream3D
-// topology   — 图元拓扑（Lines / Triangles 等）
-// vertices   — 顶点列表
-// debug_label — 语义标签，供 AI 校验使用（可选，默认为空）
-struct DrawCommand {
-    DrawCommandType type;
-    PrimitiveTopology topology;
-    std::vector<Vertex> vertices;
+// width 在 3D 空间中表示线的"视觉厚度"：
+//   - 软件渲染器简化为 1px（最小单位）
+//   - GL 后端可用 glLineWidth 处理
+//   不表示圆柱体或条带，仅在光栅化阶段影响像素覆盖。
+struct Line3DCommand {
+    Vec3f p1;
+    Vec3f p2;
+    Color color;
+    std::string debug_label;
+};
+
+// 3D 三角形（世界空间，实心，参与深度测试）
+struct Triangle3DCommand {
+    Vec3f p1;
+    Vec3f p2;
+    Vec3f p3;
+    Color color;
+    std::string debug_label;
+};
+
+// 3D 包围盒线框（世界空间，12条线段）
+struct WireBox3DCommand {
+    Vec3f min;
+    Vec3f max;
+    Color color;
+    std::string debug_label;
+};
+
+// 3D 文本（世界空间，面向摄像机）
+//
+// 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
+// 参与深度测试，被 3D 物体遮挡时自动隐藏。
+struct Text3DCommand {
+    std::string text;
+    Vec3f pos;
+    float font_size;
+    Color color;
     std::string debug_label;
 };
 
 // ==================== 渲染指令列表 ====================
 
-// 帧级输出：有序的绘制指令列表
+// 帧级输出：有序的绘制指令集合
+//
+// 不同的命令类型分别存储在各自的 vector 中，
+// order 队列声明绘制顺序（先 3D 后 2D，画家算法）。
 //
 // 渲染顺序：
-//   1. 所有 Stream3D 指令（按添加顺序，由深度测试自动处理遮挡）
-//   2. 所有 Stream2D 指令（按添加顺序，后画覆先画）
-//
-// 用户通过辅助方法添加指令，无需直接操作 commands vector。
+//   1. 所有 3D 指令（按 order 顺序，由深度测试自动处理遮挡）
+//   2. 所有 2D 指令（按 order 顺序，后画覆先画，无深度测试）
 struct RenderCommandList {
-    std::vector<DrawCommand> commands;
+    // 各类命令的存储池
+    std::vector<Polyline2DCommand> polyline2d;
+    std::vector<Rect2DCommand> rect2d;
+    std::vector<Circle2DCommand> circle2d;
+    std::vector<Text2DCommand> text2d;
+    std::vector<Line3DCommand> line3d;
+    std::vector<Triangle3DCommand> triangle3d;
+    std::vector<WireBox3DCommand> wirebox3d;
+    std::vector<Text3DCommand> text3d;
+
+    // 绘制顺序队列：(类型, 索引)
+    // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
+    // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
+    std::vector<std::pair<DrawCommandType, int>> order;
 
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();
 
-    // ---- 2D 绘制（屏幕空间，像素坐标） ----
+    // ---- 2D 绘制辅助方法（屏幕空间，像素坐标） ----
 
-    // 2D 线段
-    //
-    // Pre-condition: width > 0
-    void DrawLine(Vec2 p1, Vec2 p2, Color color, float width = 1.0f,
+    // 2D 折线（方角端点，无限细 1px 宽）
+    // vertices: 折线的顶点序列
+    // color: 整条线统一颜色
+    // debug_label: 语义标签（可选）
+    void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color,
+                      const std::string& debug_label = "");
+
+    // 2D 实心矩形
+    void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color,
                   const std::string& debug_label = "");
 
-    // 2D 矩形
-    //
-    // pos — 矩形左上角（像素坐标）
-    // size — 矩形宽高
-    // filled — true=实心，false=空心
-    void DrawRect(Vec2 pos, Vec2 size, Color color, bool filled = true,
-                  const std::string& debug_label = "");
-
-    // 2D 圆形
-    //
-    // center — 圆心坐标
-    // radius — 半径（像素单位）
-    // filled — true=实心，false=空心
-    //
+    // 2D 实心圆
     // Pre-condition: radius > 0
-    void DrawCircle(Vec2 center, float radius, Color color, bool filled = true,
+    void DrawCircle(const Vec2f& center, float radius, const Color& color,
                     const std::string& debug_label = "");
 
     // 2D 文本
-    //
-    // str — 文本内容
-    // pos — 文本左下角基线坐标
-    // font_size — 字号（像素单位）
-    //
     // Pre-condition: font_size > 0
-    void DrawText(const std::string& str, Vec2 pos, float font_size,
-                  Color color, const std::string& debug_label = "");
+    void DrawText(const std::string& text, const Vec2f& pos, float font_size,
+                  const Color& color, const std::string& debug_label = "");
 
-    // ---- 3D 绘制（世界空间，右手系） ----
+    // ---- 3D 绘制辅助方法（世界空间，右手系） ----
 
     // 3D 线段
-    //
-    // Pre-condition: width > 0
-    void DrawLine3D(Vec3 p1, Vec3 p2, Color color, float width = 1.0f,
+    void DrawLine3D(const Vec3f& p1, const Vec3f& p2, const Color& color,
                     const std::string& debug_label = "");
 
-    // 3D 三角形
-    //
-    // filled — true=实心，false=空心
-    void DrawTriangle3D(Vec3 p1, Vec3 p2, Vec3 p3, Color color,
-                        bool filled = true,
+    // 3D 实心三角形（参与深度测试）
+    void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
+                        const Color& color,
                         const std::string& debug_label = "");
 
     // 3D 包围盒线框
-    //
-    // min — 包围盒最小坐标
-    // max — 包围盒最大坐标
-    //
     // Pre-condition: min.x < max.x && min.y < max.y && min.z < max.z
-    void DrawWireBox(Vec3 min, Vec3 max, Color color,
+    void DrawWireBox(const Vec3f& min, const Vec3f& max, const Color& color,
                      const std::string& debug_label = "");
 
-    // 3D 文本（面向摄像机的标签）
-    //
-    // str — 文本内容
-    // pos — 世界空间位置
-    // font_size — 字号（像素单位）
-    //
+    // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0
-    void DrawText3D(const std::string& str, Vec3 pos, float font_size,
-                    Color color, const std::string& debug_label = "");
+    void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
+                    const Color& color, const std::string& debug_label = "");
 };
-
-// ==================== 未来扩展类型（注释） ====================
-//
-// 以下类型预留接口但不在 MVP 阶段实现：
-//
-// enum class DrawCommandType : uint8_t {
-//     Stream2D,       // MVP
-//     Stream3D,       // MVP
-//     // 以下为未来：
-//     StaticMesh,     // 常驻 mesh：mesh_id + transform
-//     ImGuiBatch,     // ImGui 顶点/索引/纹理
-//     ParticleSystem, // 粒子：base_mesh + instance data
-// };
-//
 
 }  // namespace jpov
 
