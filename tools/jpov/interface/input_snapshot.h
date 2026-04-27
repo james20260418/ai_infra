@@ -19,16 +19,29 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <glog/logging.h>
 
 namespace jpov {
 
 // ==================== 类型定义 ====================
 
 // 鼠标事件：每帧每个按键（左/中/右）互斥
+//
+// Click — 单击：该键在本帧内"按下并释放"，且按下到释放的间隔
+//         不超过 CLICK_DELTA（默认 250ms）。多个 Click 可出现在同一帧
+//         （低帧率场景，如 1fps 下最多 4 次），每次记录释放时刻的位置。
+//         典型使用：按钮点击、选项选择、单次操作触发。
+//
+// Drag  — 拖拽：该键在本帧开始前已按住不放，或在本帧内按下后
+//         一直未释放。代码中只关心"该键在此帧处于按下状态"，
+//         不需要区分是上一帧延续过来的还是本帧刚按下的。
+//         典型使用：窗口拖动、选区框选、视角旋转。
+//
+// None  — 悬空：该键在本帧没有任何交互。
 enum class MouseEvent : uint8_t {
-    None  = 0,  // 悬空：没有交互
-    Click = 1,  // 单击：按下+释放在 CLICK_DELTA 内
-    Drag  = 2,  // 拖拽：整帧始终按下（可能位移为零）
+    None  = 0,
+    Click = 1,
+    Drag  = 2,
 };
 
 // 一次单击的详细信息
@@ -154,35 +167,13 @@ struct InputSnapshot {
 
     // ---- 辅助方法 ----
 
-    // Pre-condition: key > KeyCode::Unknown && key <= KeyCode::MaxKey
+    // Pre-condition: key != KeyCode::Unknown && key <= KeyCode::MaxKey
+    // 传入 Unknown 或超出 MaxKey 的非法值会导致 CHECK crash
     const KeyState& GetKey(KeyCode key) const {
         int idx = static_cast<int>(key);
-        // CHECK 保护：索引越界会直接 crash，暴露 bug
-        // 不允许传入 Unknown (0) 或超 MaxKey 的值
-        if (idx <= 0 || idx >= kMaxKeyCode) {
-            // LOG(FATAL) 替代方案：访问越界是编程错误，快速失败
-            __builtin_trap();
-        }
+        CHECK_GE(idx, 1);  // Unknown(0) 不允许访问
+        CHECK_LT(idx, kMaxKeyCode);
         return keys[idx];
-    }
-
-    bool IsCtrlDown() const {
-        return GetKey(KeyCode::LeftCtrl).IsClick() ||
-               GetKey(KeyCode::RightCtrl).IsClick() ||
-               GetKey(KeyCode::LeftCtrl).IsHold() ||
-               GetKey(KeyCode::RightCtrl).IsHold();
-    }
-    bool IsShiftDown() const {
-        return GetKey(KeyCode::LeftShift).IsClick() ||
-               GetKey(KeyCode::RightShift).IsClick() ||
-               GetKey(KeyCode::LeftShift).IsHold() ||
-               GetKey(KeyCode::RightShift).IsHold();
-    }
-    bool IsAltDown() const {
-        return GetKey(KeyCode::LeftAlt).IsClick() ||
-               GetKey(KeyCode::RightAlt).IsClick() ||
-               GetKey(KeyCode::LeftAlt).IsHold() ||
-               GetKey(KeyCode::RightAlt).IsHold();
     }
 };
 
