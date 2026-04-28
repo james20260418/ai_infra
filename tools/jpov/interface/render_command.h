@@ -59,7 +59,6 @@ enum class DrawCommandType : uint8_t {
     kText2D,            // 2D 文本（屏幕空间）
     kLine3D,            // 3D 线段（世界空间）
     kTriangle3D,        // 3D 三角形（世界空间）
-    kWireBox3D,         // 3D 包围盒线框（世界空间）
     kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
@@ -129,13 +128,6 @@ struct Triangle3DCommand {
     Color color;
 };
 
-// 3D 包围盒线框（世界空间，12条线段）
-struct WireBox3DCommand {
-    Vec3f min;
-    Vec3f max;
-    Color color;
-};
-
 // 3D 文本（世界空间，面向摄像机）
 //
 // 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
@@ -167,7 +159,6 @@ struct RenderCommandList {
     std::vector<Text2DCommand> text2d;
     std::vector<Line3DCommand> line3d;
     std::vector<Triangle3DCommand> triangle3d;
-    std::vector<WireBox3DCommand> wirebox3d;
     std::vector<Text3DCommand> text3d;
 
     // 绘制顺序队列：(类型, 索引)
@@ -209,10 +200,6 @@ struct RenderCommandList {
     // 3D 实心三角形（参与深度测试）
     void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
                         const Color& color);
-
-    // 3D 包围盒线框
-    // Pre-condition: min.x < max.x && min.y < max.y && min.z < max.z
-    void DrawWireBox(const Vec3f& min, const Vec3f& max, const Color& color);
 
     // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0
