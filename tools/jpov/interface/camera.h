@@ -9,9 +9,7 @@
 #ifndef JPOV_CAMERA_H_
 #define JPOV_CAMERA_H_
 
-#include <cstdint>
-
-#include "render_command.h"
+#include "geom/common/vec.h"
 
 namespace jpov {
 
@@ -24,7 +22,7 @@ namespace jpov {
 // near     — 近裁剪面距离，默认 0.1
 // far      — 远裁剪面距离，默认 1000.0
 //
-// viewport — 3D 世界渲染在窗口内的矩形区域（像素坐标）
+// viewport — 3D 世界渲染在窗口内的矩形区域（窗口坐标）
 //            x,y: 矩形左上角在窗口中的位置
 //            width, height: 矩形宽高
 //            默认值：x=y=0, width=height=0（表示全窗口）
@@ -43,12 +41,12 @@ struct Camera {
     float near     = 0.1f;
     float far      = 1000.0f;
 
-    // 3D 视口矩形（像素坐标，左上角为原点）
+    // 3D 视口矩形（窗口坐标，左上角为原点）
     // 用 0 宽高表示"全窗口"，OneIteration 或渲染后端自动填入实际窗口尺寸
-    int viewport_x = 0;
-    int viewport_y = 0;
-    int viewport_width = 0;
-    int viewport_height = 0;
+    float viewport_x = 0.0f;
+    float viewport_y = 0.0f;
+    float viewport_width = 0.0f;
+    float viewport_height = 0.0f;
 };
 
 }  // namespace jpov

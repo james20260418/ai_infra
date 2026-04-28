@@ -60,7 +60,6 @@ enum class DrawCommandType : uint8_t {
     kLine3D,            // 3D 线段（世界空间）
     kTriangle3D,        // 3D 三角形（世界空间）
     kWireBox3D,         // 3D 包围盒线框（世界空间）
-    kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -68,35 +67,29 @@ enum class DrawCommandType : uint8_t {
 // 2D 折线（屏幕空间）—— 非闭合，方角端点，无限细（1px 宽）
 // vertices: 折线的顶点序列
 // color: 整条线统一颜色
-// debug_label: 语义标签（可选，供 AI 语义校验使用）
 struct Polyline2DCommand {
     std::vector<Vec2f> vertices;
     Color color;
-    std::string debug_label;
 };
 
 // 2D 实心矩形（屏幕空间）
 // pos: 矩形左上角
 // size: 矩形宽高
 // color: 填充颜色
-// debug_label: 语义标签
 struct Rect2DCommand {
     Vec2f pos;
     Vec2f size;
     Color color;
-    std::string debug_label;
 };
 
 // 2D 实心圆（屏幕空间）
 // center: 圆心
 // radius: 半径（像素单位）
 // color: 填充颜色
-// debug_label: 语义标签
 struct Circle2DCommand {
     Vec2f center;
     float radius;
     Color color;
-    std::string debug_label;
 };
 
 // 2D 文本（屏幕空间）
@@ -104,29 +97,25 @@ struct Circle2DCommand {
 // pos: 文本左下角基线坐标（像素）
 // font_size: 字号（像素单位）
 // color: 文本颜色
-// debug_label: 语义标签
 struct Text2DCommand {
     std::string text;
     Vec2f pos;
     float font_size;
     Color color;
-    std::string debug_label;
 };
 
 // 3D 线段（世界空间）
 // p1, p2: 线段端点（世界坐标）
 // color: 线段颜色
-// debug_label: 语义标签
-//
-// width 在 3D 空间中表示线的"视觉厚度"：
-//   - 软件渲染器简化为 1px（最小单位）
-//   - GL 后端可用 glLineWidth 处理
-//   不表示圆柱体或条带，仅在光栅化阶段影响像素覆盖。
+// width: 线段视觉厚度
+//         软件渲染器简化为 1px（最小单位），
+//         GL 后端可用 glLineWidth 处理。
+//         不表示圆柱体或条带，仅在光栅化阶段影响像素覆盖。
 struct Line3DCommand {
     Vec3f p1;
     Vec3f p2;
     Color color;
-    std::string debug_label;
+    float width;
 };
 
 // 3D 三角形（世界空间，实心，参与深度测试）
@@ -135,7 +124,6 @@ struct Triangle3DCommand {
     Vec3f p2;
     Vec3f p3;
     Color color;
-    std::string debug_label;
 };
 
 // 3D 包围盒线框（世界空间，12条线段）
@@ -143,19 +131,6 @@ struct WireBox3DCommand {
     Vec3f min;
     Vec3f max;
     Color color;
-    std::string debug_label;
-};
-
-// 3D 文本（世界空间，面向摄像机）
-//
-// 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
-// 参与深度测试，被 3D 物体遮挡时自动隐藏。
-struct Text3DCommand {
-    std::string text;
-    Vec3f pos;
-    float font_size;
-    Color color;
-    std::string debug_label;
 };
 
 // ==================== 渲染指令列表 ====================
@@ -177,7 +152,6 @@ struct RenderCommandList {
     std::vector<Line3DCommand> line3d;
     std::vector<Triangle3DCommand> triangle3d;
     std::vector<WireBox3DCommand> wirebox3d;
-    std::vector<Text3DCommand> text3d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -192,44 +166,34 @@ struct RenderCommandList {
     // 2D 折线（方角端点，无限细 1px 宽）
     // vertices: 折线的顶点序列
     // color: 整条线统一颜色
-    // debug_label: 语义标签（可选）
-    void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color,
-                      const std::string& debug_label = "");
+    void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color);
 
     // 2D 实心矩形
-    void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color,
-                  const std::string& debug_label = "");
+    void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color);
 
     // 2D 实心圆
     // Pre-condition: radius > 0
-    void DrawCircle(const Vec2f& center, float radius, const Color& color,
-                    const std::string& debug_label = "");
+    void DrawCircle(const Vec2f& center, float radius, const Color& color);
 
     // 2D 文本
     // Pre-condition: font_size > 0
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
-                  const Color& color, const std::string& debug_label = "");
+                  const Color& color);
 
     // ---- 3D 绘制辅助方法（世界空间，右手系） ----
 
     // 3D 线段
+    // Pre-condition: width > 0
     void DrawLine3D(const Vec3f& p1, const Vec3f& p2, const Color& color,
-                    const std::string& debug_label = "");
+                    float width = 1.0f);
 
     // 3D 实心三角形（参与深度测试）
     void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
-                        const Color& color,
-                        const std::string& debug_label = "");
+                        const Color& color);
 
     // 3D 包围盒线框
     // Pre-condition: min.x < max.x && min.y < max.y && min.z < max.z
-    void DrawWireBox(const Vec3f& min, const Vec3f& max, const Color& color,
-                     const std::string& debug_label = "");
-
-    // 3D 文本（面向摄像机标签，参与深度测试）
-    // Pre-condition: font_size > 0
-    void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
-                    const Color& color, const std::string& debug_label = "");
+    void DrawWireBox(const Vec3f& min, const Vec3f& max, const Color& color);
 };
 
 }  // namespace jpov

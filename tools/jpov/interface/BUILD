@@ -27,7 +27,7 @@ cc_library(
     hdrs = ["camera.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":render_command",
+        "//geom/common:vec",
     ],
 )
 
