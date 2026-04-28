@@ -60,6 +60,7 @@ enum class DrawCommandType : uint8_t {
     kLine3D,            // 3D 线段（世界空间）
     kTriangle3D,        // 3D 三角形（世界空间）
     kWireBox3D,         // 3D 包围盒线框（世界空间）
+    kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -135,6 +136,19 @@ struct WireBox3DCommand {
     Color color;
 };
 
+// 3D 文本（世界空间，面向摄像机）
+//
+// 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
+// 参与深度测试，被 3D 物体遮挡时自动隐藏。
+//
+// font_size: 世界空间中的文本大小（不是像素，是 3D 坐标单位）
+struct Text3DCommand {
+    std::string text;
+    Vec3f pos;
+    float font_size;
+    Color color;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -154,6 +168,7 @@ struct RenderCommandList {
     std::vector<Line3DCommand> line3d;
     std::vector<Triangle3DCommand> triangle3d;
     std::vector<WireBox3DCommand> wirebox3d;
+    std::vector<Text3DCommand> text3d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -198,6 +213,11 @@ struct RenderCommandList {
     // 3D 包围盒线框
     // Pre-condition: min.x < max.x && min.y < max.y && min.z < max.z
     void DrawWireBox(const Vec3f& min, const Vec3f& max, const Color& color);
+
+    // 3D 文本（面向摄像机标签，参与深度测试）
+    // Pre-condition: font_size > 0
+    void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
+                    const Color& color);
 };
 
 }  // namespace jpov
