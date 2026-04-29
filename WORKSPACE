@@ -43,6 +43,20 @@ load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_
 rules_proto_dependencies()
 rules_proto_toolchains()
 
+# Local GLFW static library (MinGW cross-compiled, for Windows)
+new_local_repository(
+    name = "glfw_mingw",
+    path = "third_party/glfw-mingw",
+    build_file = "third_party/glfw-mingw/BUILD",
+)
+
+# Local GLFW static library dependency (3.3.10, from source)
+new_local_repository(
+    name = "glfw_static",
+    path = "third_party/glfw-static",
+    build_file = "third_party/glfw-static/BUILD",
+)
+
 # Local OpenCV static library dependency
 new_local_repository(
     name = "opencv_static",
