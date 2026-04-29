@@ -16,6 +16,7 @@ build --copt=-Wno-class-memaccess        # memcpy/memset on non-trivial classes
 build --copt=-Wno-cast-function-type     # gflags function pointer casts
 build --copt=-Wno-unused-but-set-parameter # Unused but set parameters
 build --copt=-Wno-free-nonheap-object    # Free non-heap object warnings
+build --copt=-Wno-subobject-linkage      # Anonymous namespace inheritance (geom)
 
 # Keep important warnings for our own code
 build --copt=-Wall
@@ -57,6 +58,7 @@ build:suppress_warnings --copt=-Wno-class-memaccess
 build:suppress_warnings --copt=-Wno-cast-function-type
 build:suppress_warnings --copt=-Wno-unused-but-set-parameter
 build:suppress_warnings --copt=-Wno-free-nonheap-object
+build:suppress_warnings --copt=-Wno-subobject-linkage
 
 # Apply warning suppression by default
 build --config=suppress_warnings
