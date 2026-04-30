@@ -10,6 +10,7 @@
 #define JPOV_CAMERA_H_
 
 #include "geom/common/vec.h"
+#include "tools/jpov/interface/render_command.h"
 
 namespace jpov {
 

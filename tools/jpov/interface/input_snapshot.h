@@ -27,23 +27,25 @@ namespace jpov {
 
 // 鼠标事件：每帧每个按键（左/中/右）互斥
 //
-// Click — 单击：该键在本帧有释放事件，窗口层在事件队列中向前回溯
-//         最多 2×CLICK_DELTA（默认 250ms），寻找最近的按下事件，
-//         若按下与释放的时间间隔 < CLICK_DELTA，则判定为一次 Click。
-//         按下事件可能发生在上一帧或更早。每次 Click 记录释放时刻的位置。
-//         多个 Click 可出现在同一帧（低帧率场景，如 1fps 下最多 4 次）。
+// None  — 悬空：该键在本帧没有任何交互。
+//
+// Click — 单击：本帧有释放事件，且按下期间鼠标无移动。
+//         每次 Click 记录释放时刻的位置。
+//         多个 Click 可出现在同一帧（低帧率场景）。
 //         典型使用：按钮点击、选项选择、单次操作触发。
 //
-// Drag  — 拖拽：该键在本帧开始前已按住不放，或在本帧内按下后
-//         一直未释放。代码中只关心"该键在此帧处于按下状态"，
-//         不需要区分是上一帧延续过来的还是本帧刚按下的。
-//         典型使用：窗口拖动、选区框选、视角旋转。
+// Hold  — 按住不放：键处于按下状态，且按下期间鼠标无移动。
+//         是 Click 的按下态延续。
+//         典型使用：等待用户决定是 click 还是 drag。
 //
-// None  — 悬空：该键在本帧没有任何交互。
+// Drag  — 拖拽：键处于按下状态，且按下期间鼠标有过移动。
+//         一旦移动过就永远不算 Click。
+//         典型使用：窗口拖动、选区框选、视角旋转。
 enum class MouseEvent : uint8_t {
     None  = 0,
     Click = 1,
-    Drag  = 2,
+    Hold  = 2,
+    Drag  = 3,
 };
 
 // 一次单击的详细信息
@@ -57,13 +59,15 @@ struct ClickEvent {
 
 // 鼠标单键状态（左/中/右各一个）
 // 内部存储：int8_t 编码
-//   -1  → Drag（整帧按下，包括位移为零的情况）
+//   -2  → Hold（按下但未移动）
+//   -1  → Drag（按下且移动过）
 //    0  → None（默认构造）
 //    1~8 → Click 事件，数值 = 本帧单击次数
 struct MouseState {
     // 公开接口
     bool IsNone() const;
     bool IsClick() const;
+    bool IsHold() const;
     bool IsDrag() const;
     int click_count() const;       // 仅 Click 时有意义
 
@@ -75,7 +79,7 @@ static_assert(sizeof(MouseState) == 1, "MouseState must be 1 byte");
 
 // 键盘单键状态
 // 内部存储：int8_t 编码
-//   -1  → Hold（全程按下）
+//   -2  → Hold（帧末按下且本帧无 release）
 //    0  → None（默认构造）
 //    1~8 → Click 事件，数值 = 本帧单击次数
 struct KeyState {
@@ -171,7 +175,7 @@ struct InputSnapshot {
 
     // Pre-condition: key != KeyCode::Unknown && key <= KeyCode::MaxKey
     // 传入 Unknown 或超出 MaxKey 的非法值会导致 CHECK crash
-    const KeyState& GetKey(KeyCode key) const {
+    const KeyState& GetKey(KeyCode key /*input*/) const {
         int idx = static_cast<int>(key);
         CHECK_GE(idx, 1);  // Unknown(0) 不允许访问
         CHECK_LT(idx, kMaxKeyCode);
@@ -184,7 +188,8 @@ struct InputSnapshot {
 // --- MouseState ---
 inline bool MouseState::IsNone()  const { return raw == 0; }
 inline bool MouseState::IsClick() const { return raw > 0; }
-inline bool MouseState::IsDrag()  const { return raw < 0; }
+inline bool MouseState::IsHold()  const { return raw == -2; }
+inline bool MouseState::IsDrag()  const { return raw == -1; }
 
 inline int MouseState::click_count() const {
     return (raw > 0) ? static_cast<int>(raw) : 0;
@@ -193,7 +198,7 @@ inline int MouseState::click_count() const {
 // --- KeyState ---
 inline bool KeyState::IsNone()  const { return raw == 0; }
 inline bool KeyState::IsClick() const { return raw > 0; }
-inline bool KeyState::IsHold()  const { return raw < 0; }
+inline bool KeyState::IsHold()  const { return raw == -2; }
 
 inline int KeyState::click_count() const {
     return (raw > 0) ? static_cast<int>(raw) : 0;
