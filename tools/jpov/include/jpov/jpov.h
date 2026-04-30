@@ -70,11 +70,13 @@ private:
         bool is_down = false;
 
         // 本帧内是否收到过 GLFW_RELEASE
-        // Drag 判定条件：is_down && !released_this_frame
         bool released_this_frame = false;
 
         // 最近一次 GLFW_PRESS 的时刻（glfwGetTime 值，秒）
         double press_time = 0.0;
+
+        // 自最近一次按下以来鼠标是否有移动
+        bool moved_since_press = false;
     };
 
     // ---- 帧内累计事件（CaptureInput 每帧末结算） ----
@@ -132,20 +134,14 @@ private:
     double FrameInterval() const;
 
     // 将一个鼠标键的帧内事件结算到 InputSnapshot
-    // now 为帧末时刻（glfwGetTime），用于计算按下持续时间
     static void FlushMouseButton(jpov::MouseState* out,
                                  jpov::ClickEvent* out_clicks,
                                  const MouseButtonState& btn,
                                  int click_count,
-                                 const jpov::ClickEvent* click_detail,
-                                 double now);
+                                 const jpov::ClickEvent* click_detail);
 
-    // Click 超时阈值（秒）：按下到释放 < kClickDelta 判为 Click
+    // Click 超时阈值（秒）：按下有移动但释放快于 kClickDelta 仍算 Click
     static constexpr double kClickDelta = 0.3;
-
-    // Drag 最小持续时间（秒）：按下到帧末 ≥ kMinDragDuration 才判为 Drag
-    // 设为 1.5× kClickDelta，确保与 Click 不相交
-    static constexpr double kMinDragDuration = kClickDelta * 1.5;
 
 };
 

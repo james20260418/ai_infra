@@ -142,15 +142,14 @@ void JPOV::FlushMouseButton(jpov::MouseState* out,
                               jpov::ClickEvent* out_clicks,
                               const MouseButtonState& btn,
                               int click_count,
-                              const jpov::ClickEvent* click_detail,
-                              double now) {
+                              const jpov::ClickEvent* click_detail) {
     int8_t raw;
     if (click_count > 0) {
         raw = static_cast<int8_t>(click_count);
         for (int i = 0; i < click_count && i < jpov::kMaxClicksPerFrame; ++i) {
             out_clicks[i] = click_detail[i];
         }
-    } else if (btn.is_down && (now - btn.press_time) >= kMinDragDuration) {
+    } else if (btn.is_down && btn.moved_since_press) {
         raw = -1;  // Drag
     } else {
         raw = 0;   // None
@@ -179,14 +178,12 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     frame_start_time_ = glfwGetTime();
 
     // ---- 鼠标三键状态结算 ----
-    double now = glfwGetTime();
-
     FlushMouseButton(&input->left,   input->left_clicks,
-                     left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail, now);
+                     left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail);
     FlushMouseButton(&input->right,  input->right_clicks,
-                     right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail, now);
+                     right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail);
     FlushMouseButton(&input->middle, input->middle_clicks,
-                     middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail, now);
+                     middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail);
 
     // ---- 帧末重置帧内累计 ----
     frame_.left_clicks   = 0;
@@ -232,11 +229,20 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
     if (action == GLFW_PRESS) {
         slot.state->press_time = now;
         slot.state->is_down = true;
+        // 新一次按下，清除移动标记
+        slot.state->moved_since_press = false;
     } else if (action == GLFW_RELEASE) {
         slot.state->released_this_frame = true;
 
-        double elapsed = now - slot.state->press_time;
-        if (elapsed < kClickDelta && *slot.click_count < jpov::kMaxClicksPerFrame) {
+        // 判 Click：按下期间没有移动 → 无论时长都算 Click
+        bool should_click = !slot.state->moved_since_press;
+        if (!should_click) {
+            // 有移动时，仅短按（< kClickDelta）仍然算 Click
+            double elapsed = now - slot.state->press_time;
+            should_click = (elapsed < kClickDelta);
+        }
+
+        if (should_click && *slot.click_count < jpov::kMaxClicksPerFrame) {
             int idx = *slot.click_count;
             slot.click_pool[idx].x = static_cast<float>(mouse_x_);
             slot.click_pool[idx].y = static_cast<float>(mouse_y_);
@@ -252,8 +258,16 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
 }
 
 void JPOV::HandleMouseMove(double xpos, double ypos) {
-    mouse_x_ = xpos;
-    mouse_y_ = ypos;
+    // 检测鼠标实际位置变化，排除 GLFW 虚假的重复回调
+    if (xpos != mouse_x_ || ypos != mouse_y_) {
+        mouse_x_ = xpos;
+        mouse_y_ = ypos;
+
+        // 如果任意键处于按下状态，标记为已移动
+        if (left_btn_.is_down)   left_btn_.moved_since_press = true;
+        if (right_btn_.is_down)  right_btn_.moved_since_press = true;
+        if (middle_btn_.is_down) middle_btn_.moved_since_press = true;
+    }
 }
 
 void JPOV::HandleScroll(double yoffset) {
