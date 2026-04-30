@@ -79,7 +79,7 @@ static_assert(sizeof(MouseState) == 1, "MouseState must be 1 byte");
 
 // 键盘单键状态
 // 内部存储：int8_t 编码
-//   -1  → Hold（全程按下）
+//   -2  → Hold（帧末按下且本帧无 release）
 //    0  → None（默认构造）
 //    1~8 → Click 事件，数值 = 本帧单击次数
 struct KeyState {
@@ -198,7 +198,7 @@ inline int MouseState::click_count() const {
 // --- KeyState ---
 inline bool KeyState::IsNone()  const { return raw == 0; }
 inline bool KeyState::IsClick() const { return raw > 0; }
-inline bool KeyState::IsHold()  const { return raw < 0; }
+inline bool KeyState::IsHold()  const { return raw == -2; }
 
 inline int KeyState::click_count() const {
     return (raw > 0) ? static_cast<int>(raw) : 0;

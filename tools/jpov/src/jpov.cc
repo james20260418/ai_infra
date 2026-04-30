@@ -185,6 +185,9 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     FlushMouseButton(&input->middle, input->middle_clicks,
                      middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail);
 
+    // ---- 键盘 ----
+    FlushKeyboard(input);
+
     // ---- 帧末重置帧内累计 ----
     frame_.left_clicks   = 0;
     frame_.right_clicks  = 0;
@@ -194,6 +197,12 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     left_btn_.released_this_frame   = false;
     right_btn_.released_this_frame  = false;
     middle_btn_.released_this_frame = false;
+
+    // 重置键盘帧内状态（点击计数和 release 标记）
+    for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
+        keys_[i].click_count = 0;
+        keys_[i].released_this_frame = false;
+    }
 }
 
 void JPOV::RenderCommands(const jpov::RenderCommandList& cmds) {
@@ -274,6 +283,42 @@ double JPOV::FrameInterval() const {
     return (config_.target_fps > 0) ? (1.0 / config_.target_fps) : (1.0 / 60.0);
 }
 
-void JPOV::HandleKey(int /*key*/, int /*scancode*/, int /*action*/, int /*mods*/) {
-    // 暂未实现键盘
+void JPOV::HandleKey(int key, int /*scancode*/, int action, int /*mods*/) {
+    if (key < 0 || key >= jpov::kMaxKeyCode) {
+        return;
+    }
+    KeyButtonState& k = keys_[key];
+
+    if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+        // GLFW_REPEAT (长按连续触发) 视同已按住，不做特殊处理
+        if (!k.is_down) {
+            k.is_down = true;
+        }
+    } else if (action == GLFW_RELEASE) {
+        k.released_this_frame = true;
+        ++k.click_count;
+        k.is_down = false;
+    }
+}
+
+void JPOV::FlushKeyboard(jpov::InputSnapshot* input) const {
+    // 键盘：Click = 本帧有 release，Hold = is_down && 无 release，None = 其它
+    for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
+        const KeyButtonState& k = keys_[i];
+        int8_t raw;
+        if (k.click_count > 0) {
+            raw = static_cast<int8_t>(k.click_count);
+            if (raw > jpov::kMaxClicksPerFrame) {
+                raw = jpov::kMaxClicksPerFrame;
+            }
+        } else if (k.is_down) {
+            raw = -2;  // Hold
+        } else {
+            raw = 0;   // None
+        }
+        // 跳过默认 None（节省赋值开销，但其实差异不大）
+        if (raw != 0 || input->keys[i].raw != 0) {
+            const_cast<jpov::InputSnapshot*>(input)->keys[i].raw = raw;
+        }
+    }
 }

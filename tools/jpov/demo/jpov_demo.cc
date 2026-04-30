@@ -40,6 +40,24 @@ public:
         print_events("R-", input.right,  input.right_clicks,  input.mouse_x, input.mouse_y);
         print_events("M-", input.middle, input.middle_clicks, input.mouse_x, input.mouse_y);
 
+        // ---- 键盘事件打印 ----
+        // GLFW keycode → 显示字符
+        auto print_key = [&input](jpov::KeyCode code, const char* name) {
+            const auto& k = input.GetKey(code);
+            if (k.IsClick()) {
+                std::printf("Key %s Click\n", name);
+            } else if (k.IsHold()) {
+                std::printf("Key %s Hold\n", name);
+            }
+        };
+
+        print_key(jpov::KeyCode::A, "A");
+        print_key(jpov::KeyCode::S, "S");
+        print_key(jpov::KeyCode::D, "D");
+        print_key(jpov::KeyCode::W, "W");
+        print_key(jpov::KeyCode::Escape, "Esc");
+        print_key(jpov::KeyCode::Space, "Space");
+
         std::fflush(stdout);
     }
 };

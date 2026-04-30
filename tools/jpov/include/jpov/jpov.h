@@ -79,6 +79,13 @@ private:
         bool moved_since_press = false;
     };
 
+    // ---- 键盘按键跨帧状态 ----
+    struct KeyButtonState {
+        bool is_down = false;
+        bool released_this_frame = false;
+        int  click_count = 0;
+    };
+
     // ---- 帧内累计事件（CaptureInput 每帧末结算） ----
     struct FrameEvents {
         int left_clicks   = 0;
@@ -102,6 +109,7 @@ private:
     MouseButtonState left_btn_;
     MouseButtonState right_btn_;
     MouseButtonState middle_btn_;
+    KeyButtonState keys_[jpov::kMaxKeyCode];
     FrameEvents frame_;
     double frame_start_time_ = 0.0;  // 当前帧开始时刻（glfwGetTime）
     Config config_;
@@ -139,6 +147,9 @@ private:
                                  const MouseButtonState& btn,
                                  int click_count,
                                  const jpov::ClickEvent* click_detail);
+
+    // 将键盘帧内事件结算到 InputSnapshot（跳过第一帧初始化）
+    void FlushKeyboard(jpov::InputSnapshot* input) const;
 
     // Click 超时阈值（秒）：按下有移动但释放快于 kClickDelta 仍算 Click
     static constexpr double kClickDelta = 0.3;
