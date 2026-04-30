@@ -132,14 +132,20 @@ private:
     double FrameInterval() const;
 
     // 将一个鼠标键的帧内事件结算到 InputSnapshot
+    // now 为帧末时刻（glfwGetTime），用于计算按下持续时间
     static void FlushMouseButton(jpov::MouseState* out,
                                  jpov::ClickEvent* out_clicks,
                                  const MouseButtonState& btn,
                                  int click_count,
-                                 const jpov::ClickEvent* click_detail);
+                                 const jpov::ClickEvent* click_detail,
+                                 double now);
 
-    // Click 超时阈值（秒）
+    // Click 超时阈值（秒）：按下到释放 < kClickDelta 判为 Click
     static constexpr double kClickDelta = 0.3;
+
+    // Drag 最小持续时间（秒）：按下到帧末 ≥ kMinDragDuration 才判为 Drag
+    // 设为 1.5× kClickDelta，确保与 Click 不相交
+    static constexpr double kMinDragDuration = kClickDelta * 1.5;
 
 };
 

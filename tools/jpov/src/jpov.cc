@@ -142,14 +142,15 @@ void JPOV::FlushMouseButton(jpov::MouseState* out,
                               jpov::ClickEvent* out_clicks,
                               const MouseButtonState& btn,
                               int click_count,
-                              const jpov::ClickEvent* click_detail) {
+                              const jpov::ClickEvent* click_detail,
+                              double now) {
     int8_t raw;
     if (click_count > 0) {
         raw = static_cast<int8_t>(click_count);
         for (int i = 0; i < click_count && i < jpov::kMaxClicksPerFrame; ++i) {
             out_clicks[i] = click_detail[i];
         }
-    } else if (btn.is_down && !btn.released_this_frame) {
+    } else if (btn.is_down && (now - btn.press_time) >= kMinDragDuration) {
         raw = -1;  // Drag
     } else {
         raw = 0;   // None
@@ -178,12 +179,14 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     frame_start_time_ = glfwGetTime();
 
     // ---- 鼠标三键状态结算 ----
+    double now = glfwGetTime();
+
     FlushMouseButton(&input->left,   input->left_clicks,
-                     left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail);
+                     left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail, now);
     FlushMouseButton(&input->right,  input->right_clicks,
-                     right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail);
+                     right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail, now);
     FlushMouseButton(&input->middle, input->middle_clicks,
-                     middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail);
+                     middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail, now);
 
     // ---- 帧末重置帧内累计 ----
     frame_.left_clicks   = 0;
