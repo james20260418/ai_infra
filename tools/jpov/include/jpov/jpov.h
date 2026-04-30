@@ -65,7 +65,6 @@ public:
 
 private:
     // ---- 鼠标按键跨帧状态 ----
-    // ---- 鼠标按键跨帧状态 ----
     struct MouseButtonState {
         // 鼠标当前是否处于按下状态
         bool is_down = false;
@@ -115,7 +114,7 @@ private:
     // 回调内部转发目标（通过 glfwGetWindowUserPointer 获取 this）
     void HandleMouseButton(int button, int action, double now);
     void HandleMouseMove(double xpos, double ypos);
-    void HandleScroll(double xoffset, double yoffset);
+    void HandleScroll(double yoffset);
     void HandleKey(int key, int scancode, int action, int mods);
 
     // ---- 帧循环子步骤 ----
@@ -129,12 +128,19 @@ private:
     // Pre-condition: cmds 已由 OneIteration 填充
     void RenderCommands(const jpov::RenderCommandList& cmds);
 
+    // 帧间隔（秒）：target_fps > 0 则返回 1/target_fps，否则返回 1/60
+    double FrameInterval() const;
+
+    // 将一个鼠标键的帧内事件结算到 InputSnapshot
+    static void FlushMouseButton(jpov::MouseState* out,
+                                 jpov::ClickEvent* out_clicks,
+                                 const MouseButtonState& btn,
+                                 int click_count,
+                                 const jpov::ClickEvent* click_detail);
+
     // Click 超时阈值（秒）
     static constexpr double kClickDelta = 0.3;
 
-    // 记录一次 Click 详情（由 HandleMouseButton 在释放事件时调用）
-    // Pre-condition: click_count_ptr 非空
-    void RecordClick(jpov::ClickEvent* pool, int* count, double now);
 };
 
 #endif  // JPOV_JPOV_H_
