@@ -175,7 +175,7 @@ struct InputSnapshot {
 
     // Pre-condition: key != KeyCode::Unknown && key <= KeyCode::MaxKey
     // 传入 Unknown 或超出 MaxKey 的非法值会导致 CHECK crash
-    const KeyState& GetKey(KeyCode key) const {
+    const KeyState& GetKey(KeyCode key /*input*/) const {
         int idx = static_cast<int>(key);
         CHECK_GE(idx, 1);  // Unknown(0) 不允许访问
         CHECK_LT(idx, kMaxKeyCode);

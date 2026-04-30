@@ -64,7 +64,7 @@ public:
 
 int main() {
     JPOV::Config cfg;
-    cfg.target_fps = 5;
+    cfg.target_fps = 30;
     DemoApp app(cfg);
     app.Run();
     return 0;

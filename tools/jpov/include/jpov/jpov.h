@@ -48,17 +48,17 @@ public:
 
     // 用户实现的每帧渲染逻辑
     //
-    // frame_count — 从 0 开始的帧计数器，单调递增
-    // input       — 本帧输入快照（鼠标/键盘状态）
-    // winfo       — 本帧窗口尺寸信息
-    // cmds        — 输出：填充渲染指令列表，帧末由框架消费。非空指针。
+    // frame_count — input: 从 0 开始的帧计数器，单调递增
+    // input       — input: 本帧输入快照（鼠标/键盘状态）
+    // winfo       — input: 本帧窗口尺寸信息
+    // cmds        — output: 填充渲染指令列表，帧末由框架消费。非空指针。
     //
     // Pre-condition: frame_count >= 0
     // Pre-condition: cmds != nullptr
     virtual void OneIteration(int64_t frame_count,
                               const jpov::InputSnapshot& input,
                               const jpov::WindowInfo& winfo,
-                              jpov::RenderCommandList* cmds) = 0;
+                              jpov::RenderCommandList* cmds /*output*/) = 0;
 
     // 创建窗口并进入事件循环，阻塞到退出
     void Run();
@@ -132,24 +132,24 @@ private:
     // 采集本帧输入（鼠标/键盘/窗口事件），填充 InputSnapshot
     // Pre-condition: window_ 非空有效
     // Post-condition: input 已由 GLFW 回调数据填充
-    void CaptureInput(jpov::InputSnapshot* input);
+    void CaptureInput(jpov::InputSnapshot* input /*output*/);
 
     // 消费渲染指令列表，提交绘制到当前帧
     // Pre-condition: cmds 已由 OneIteration 填充
-    void RenderCommands(const jpov::RenderCommandList& cmds);
+    void RenderCommands(const jpov::RenderCommandList& cmds /*input*/);
 
     // 帧间隔（秒）：target_fps > 0 则返回 1/target_fps，否则返回 1/60
     double FrameInterval() const;
 
     // 将一个鼠标键的帧内事件结算到 InputSnapshot
-    static void FlushMouseButton(jpov::MouseState* out,
-                                 jpov::ClickEvent* out_clicks,
-                                 const MouseButtonState& btn,
-                                 int click_count,
-                                 const jpov::ClickEvent* click_detail);
+    static void FlushMouseButton(const MouseButtonState& btn /*input*/,
+                                 int click_count /*input*/,
+                                 const jpov::ClickEvent* click_detail /*input*/,
+                                 jpov::MouseState* out /*output*/,
+                                 jpov::ClickEvent* out_clicks /*output*/);
 
-    // 将键盘帧内事件结算到 InputSnapshot（跳过第一帧初始化）
-    void FlushKeyboard(jpov::InputSnapshot* input) const;
+    // 将键盘帧内事件结算到 InputSnapshot
+    void FlushKeyboard(jpov::InputSnapshot* input /*output*/);
 
     // Click 超时阈值（秒）：按下有移动但释放快于 kClickDelta 仍算 Click
     static constexpr double kClickDelta = 0.3;

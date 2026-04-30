@@ -138,11 +138,11 @@ void JPOV::Run() {
     LOG(INFO) << "JPOV::Run() — exiting (" << frame << " frames)";
 }
 
-void JPOV::FlushMouseButton(jpov::MouseState* out,
-                              jpov::ClickEvent* out_clicks,
-                              const MouseButtonState& btn,
-                              int click_count,
-                              const jpov::ClickEvent* click_detail) {
+void JPOV::FlushMouseButton(const MouseButtonState& btn /*input*/,
+                              int click_count /*input*/,
+                              const jpov::ClickEvent* click_detail /*input*/,
+                              jpov::MouseState* out /*output*/,
+                              jpov::ClickEvent* out_clicks /*output*/) {
     int8_t raw;
     if (click_count > 0) {
         raw = static_cast<int8_t>(click_count);
@@ -178,12 +178,12 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     frame_start_time_ = glfwGetTime();
 
     // ---- 鼠标三键状态结算 ----
-    FlushMouseButton(&input->left,   input->left_clicks,
-                     left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail);
-    FlushMouseButton(&input->right,  input->right_clicks,
-                     right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail);
-    FlushMouseButton(&input->middle, input->middle_clicks,
-                     middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail);
+    FlushMouseButton(left_btn_,   frame_.left_clicks,   frame_.left_clicks_detail,
+                     &input->left,   input->left_clicks);
+    FlushMouseButton(right_btn_,  frame_.right_clicks,  frame_.right_clicks_detail,
+                     &input->right,  input->right_clicks);
+    FlushMouseButton(middle_btn_, frame_.middle_clicks, frame_.middle_clicks_detail,
+                     &input->middle, input->middle_clicks);
 
     // ---- 键盘 ----
     FlushKeyboard(input);
@@ -301,7 +301,7 @@ void JPOV::HandleKey(int key, int /*scancode*/, int action, int /*mods*/) {
     }
 }
 
-void JPOV::FlushKeyboard(jpov::InputSnapshot* input) const {
+void JPOV::FlushKeyboard(jpov::InputSnapshot* input /*output*/) {
     // 键盘：Click = 本帧有 release，Hold = is_down && 无 release，None = 其它
     for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
         const KeyButtonState& k = keys_[i];
@@ -316,9 +316,6 @@ void JPOV::FlushKeyboard(jpov::InputSnapshot* input) const {
         } else {
             raw = 0;   // None
         }
-        // 跳过默认 None（节省赋值开销，但其实差异不大）
-        if (raw != 0 || input->keys[i].raw != 0) {
-            const_cast<jpov::InputSnapshot*>(input)->keys[i].raw = raw;
-        }
+        input->keys[i].raw = raw;
     }
 }
