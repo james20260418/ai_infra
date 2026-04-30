@@ -234,13 +234,9 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
     } else if (action == GLFW_RELEASE) {
         slot.state->released_this_frame = true;
 
-        // 判 Click：按下期间没有移动 → 无论时长都算 Click
+        // 判 Click：仅按下期间没有移动才算 Click（无论时长）
+        // 有移动 → 不算 Click，也不 Drag（释放了，帧末 is_down=false，由 CaptureInput 判 None）
         bool should_click = !slot.state->moved_since_press;
-        if (!should_click) {
-            // 有移动时，仅短按（< kClickDelta）仍然算 Click
-            double elapsed = now - slot.state->press_time;
-            should_click = (elapsed < kClickDelta);
-        }
 
         if (should_click && *slot.click_count < jpov::kMaxClicksPerFrame) {
             int idx = *slot.click_count;
