@@ -14,11 +14,10 @@ public:
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
-                      jpov::RenderCommandList& cmds) override {
+                      jpov::RenderCommandList* cmds) override {
         (void)winfo;
         (void)cmds;
 
-        // 鼠标左键点击时打印
         if (input.left.IsClick()) {
             std::printf(".");
             std::fflush(stdout);
