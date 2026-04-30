@@ -149,8 +149,8 @@ void JPOV::FlushMouseButton(jpov::MouseState* out,
         for (int i = 0; i < click_count && i < jpov::kMaxClicksPerFrame; ++i) {
             out_clicks[i] = click_detail[i];
         }
-    } else if (btn.is_down && btn.moved_since_press) {
-        raw = -1;  // Drag
+    } else if (btn.is_down) {
+        raw = btn.moved_since_press ? -1 : -2;  // Drag / Hold
     } else {
         raw = 0;   // None
     }
