@@ -4,6 +4,7 @@
 //   bazel run //tools/jpov:jpov_demo
 
 #include <cstdint>
+#include <cstdio>
 
 #include "tools/jpov/include/jpov/jpov.h"
 
@@ -14,10 +15,14 @@ public:
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList& cmds) override {
-        // 目前什么都不画，只打印帧号
-        (void)input;
         (void)winfo;
         (void)cmds;
+
+        // 鼠标左键点击时打印
+        if (input.left.IsClick()) {
+            std::printf(".");
+            std::fflush(stdout);
+        }
 
         if (frame_count % 60 == 0) {
             // 每秒打印一次（60fps 假设下）

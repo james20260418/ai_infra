@@ -13,7 +13,15 @@ cc_library(
         "//tools/jpov/interface:input_snapshot",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
+        "@glfw_static//:glfw",
         "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkopts = ["-lGL"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
     ],
 )
 
