@@ -85,7 +85,11 @@ void JPOV::Run() {
     glfwSetKeyCallback(window_, OnKey);
 
     // 目标帧间隔（秒）
-    double frame_interval = (config_.target_fps > 0) ? (1.0 / config_.target_fps) : 0.0;
+    // 帧间隔（秒），用于帧率控制 + time_ratio 估算
+    double frame_interval = (config_.target_fps > 0) ? (1.0 / config_.target_fps) : (1.0 / 60.0);
+
+    // 初始帧开始时间
+    frame_start_time_ = glfwGetTime();
 
     int64_t frame = 0;
 
@@ -93,8 +97,6 @@ void JPOV::Run() {
         if (glfwWindowShouldClose(window_)) {
             break;
         }
-
-        double frame_start = glfwGetTime();
 
         // 1. 采集输入
         jpov::InputSnapshot input{};
@@ -119,23 +121,17 @@ void JPOV::Run() {
         glfwPollEvents();
 
         // 6. 帧率控制
-        if (frame_interval > 0.0) {
-            double elapsed = glfwGetTime() - frame_start;
-            double remaining = frame_interval - elapsed;
-            if (remaining > 0.0) {
-                // 用 glfwWaitEventsTimeout 让出 CPU 同时仍可响应事件
-                // 但这里用 sleep 更干净——事件已在 glfwPollEvents 中处理完毕
-                // 简单 spin-wait 不可取，用平台 sleep
-                // glfwWaitEventsTimeout 会重新触发事件循环，可能不恰当
-                // 用系统 sleep
-                double sleep_s = remaining;
-                // 粗略睡眠（毫秒级精度）
-                struct timespec ts;
-                ts.tv_sec  = static_cast<time_t>(sleep_s);
-                ts.tv_nsec = static_cast<long>((sleep_s - ts.tv_sec) * 1e9);
-                nanosleep(&ts, nullptr);
-            }
+        double elapsed = glfwGetTime() - frame_start_time_;
+        double remaining = frame_interval - elapsed;
+        if (remaining > 0.0) {
+            struct timespec ts;
+            ts.tv_sec  = static_cast<time_t>(remaining);
+            ts.tv_nsec = static_cast<long>((remaining - ts.tv_sec) * 1e9);
+            nanosleep(&ts, nullptr);
         }
+
+        // 更新下一帧开始时间（在帧末设，CaptureInput 开头会清 frame_start_time_）
+        // 但这里不清——CaptureInput 开头设 frame_start_time_ = glfwGetTime()
 
         ++frame;
     }
@@ -161,12 +157,19 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     // ---- 滚轮 ----
     input->scroll_delta = static_cast<float>(scroll_delta_);
 
+    // ---- 更新本帧开始时间（用于 ClickEvent time_ratio 计算） ----
+    // 在捕获输入前设置，这样 HandleMouseButton 回调在 glfwPollEvents 中
+    // 触发时 frame_start_time_ 已经是正确的本帧开始时刻。
+    frame_start_time_ = glfwGetTime();
+
     // ---- 鼠标左键 ----
     if (frame_.left_clicks > 0) {
         input->left.raw = static_cast<int8_t>(frame_.left_clicks);
-        // TODO: fill left_clicks[] with actual click positions
-    } else if (left_btn_.pressed_this_frame && left_btn_.is_down) {
-        // 整帧内都是 down：本帧收到了 GLFW_PRESS，且帧末仍处于按下状态
+        for (int i = 0; i < frame_.left_clicks && i < jpov::kMaxClicksPerFrame; ++i) {
+            input->left_clicks[i] = frame_.left_clicks_detail[i];
+        }
+    } else if (left_btn_.is_down && !left_btn_.released_this_frame) {
+        // 本帧从未释放过且帧末仍按下 = 整帧 drag
         input->left.raw = -1;  // Drag
     } else {
         input->left.raw = 0;   // None
@@ -175,7 +178,10 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     // ---- 鼠标右键 ----
     if (frame_.right_clicks > 0) {
         input->right.raw = static_cast<int8_t>(frame_.right_clicks);
-    } else if (right_btn_.pressed_this_frame && right_btn_.is_down) {
+        for (int i = 0; i < frame_.right_clicks && i < jpov::kMaxClicksPerFrame; ++i) {
+            input->right_clicks[i] = frame_.right_clicks_detail[i];
+        }
+    } else if (right_btn_.is_down && !right_btn_.released_this_frame) {
         input->right.raw = -1;
     } else {
         input->right.raw = 0;
@@ -184,7 +190,10 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     // ---- 鼠标中键 ----
     if (frame_.middle_clicks > 0) {
         input->middle.raw = static_cast<int8_t>(frame_.middle_clicks);
-    } else if (middle_btn_.pressed_this_frame && middle_btn_.is_down) {
+        for (int i = 0; i < frame_.middle_clicks && i < jpov::kMaxClicksPerFrame; ++i) {
+            input->middle_clicks[i] = frame_.middle_clicks_detail[i];
+        }
+    } else if (middle_btn_.is_down && !middle_btn_.released_this_frame) {
         input->middle.raw = -1;
     } else {
         input->middle.raw = 0;
@@ -196,10 +205,10 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     frame_.middle_clicks = 0;
     scroll_delta_        = 0.0;
 
-    // 重置 pressed_this_frame（下一帧重新统计）
-    left_btn_.pressed_this_frame   = false;
-    right_btn_.pressed_this_frame  = false;
-    middle_btn_.pressed_this_frame = false;
+    // 重置 released_this_frame（下一帧重新统计）
+    left_btn_.released_this_frame   = false;
+    right_btn_.released_this_frame  = false;
+    middle_btn_.released_this_frame = false;
 }
 
 void JPOV::RenderCommands(const jpov::RenderCommandList& cmds) {
@@ -232,11 +241,31 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
 
     if (action == GLFW_PRESS) {
         btn->press_time = now;
-        btn->pressed_this_frame = true;
         btn->is_down = true;
     } else if (action == GLFW_RELEASE) {
+        btn->released_this_frame = true;
+
         double elapsed = now - btn->press_time;
         if (elapsed < kClickDelta && *click_count < jpov::kMaxClicksPerFrame) {
+            // 确定用哪个 ClickEvent 池
+            jpov::ClickEvent* pool = nullptr;
+            if (button == GLFW_MOUSE_BUTTON_LEFT) {
+                pool = frame_.left_clicks_detail;
+            } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+                pool = frame_.right_clicks_detail;
+            } else {
+                pool = frame_.middle_clicks_detail;
+            }
+            // 填入释放位置和 time_ratio
+            int idx = *click_count;
+            pool[idx].x = static_cast<float>(mouse_x_);
+            pool[idx].y = static_cast<float>(mouse_y_);
+            // time_ratio = (释放时刻 - 帧开始时间) / 目标帧间隔
+            // 近似值：帧实际时长未知，用目标帧间隔估算
+            double target_interval = (config_.target_fps > 0) ? (1.0 / config_.target_fps) : (1.0 / 60.0);
+            double frame_elapsed = now - frame_start_time_;
+            pool[idx].time_ratio = static_cast<float>(std::min(frame_elapsed / target_interval, 1.0));
+
             ++(*click_count);
         }
         btn->is_down = false;

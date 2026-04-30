@@ -65,14 +65,14 @@ public:
 
 private:
     // ---- 鼠标按键跨帧状态 ----
+    // ---- 鼠标按键跨帧状态 ----
     struct MouseButtonState {
-        // 该键在本帧的任意时刻是否被按下过
-        // true  = 本帧 glfwPollEvents 期间收到了 GLFW_PRESS
-        // false = 本帧未收到 GLFW_PRESS（帧首也不处于按下状态）
-        bool pressed_this_frame = false;
-
         // 鼠标当前是否处于按下状态
         bool is_down = false;
+
+        // 本帧内是否收到过 GLFW_RELEASE
+        // Drag 判定条件：is_down && !released_this_frame
+        bool released_this_frame = false;
 
         // 最近一次 GLFW_PRESS 的时刻（glfwGetTime 值，秒）
         double press_time = 0.0;
@@ -83,6 +83,12 @@ private:
         int left_clicks   = 0;
         int right_clicks  = 0;
         int middle_clicks = 0;
+
+        // ClickEvent 暂存区：HandleMouseButton 释放时填入
+        // CaptureInput 结算时写入 InputSnapshot 对应数组
+        jpov::ClickEvent left_clicks_detail[jpov::kMaxClicksPerFrame];
+        jpov::ClickEvent right_clicks_detail[jpov::kMaxClicksPerFrame];
+        jpov::ClickEvent middle_clicks_detail[jpov::kMaxClicksPerFrame];
     };
 
     // ---- 鼠标跟踪 ----
@@ -96,6 +102,7 @@ private:
     MouseButtonState right_btn_;
     MouseButtonState middle_btn_;
     FrameEvents frame_;
+    double frame_start_time_ = 0.0;  // 当前帧开始时刻（glfwGetTime）
     Config config_;
     GLFWwindow* window_ = nullptr;
 
@@ -124,6 +131,10 @@ private:
 
     // Click 超时阈值（秒）
     static constexpr double kClickDelta = 0.3;
+
+    // 记录一次 Click 详情（由 HandleMouseButton 在释放事件时调用）
+    // Pre-condition: click_count_ptr 非空
+    void RecordClick(jpov::ClickEvent* pool, int* count, double now);
 };
 
 #endif  // JPOV_JPOV_H_
