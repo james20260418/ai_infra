@@ -1,9 +1,9 @@
 // JPOV 示例：带宽度的动态 Lissajous 曲线
 //
-// 演示 Renderer 的 polyline2D 绘制能力：
+// 演示 Renderer 的 polyline2D 绘制能力（CPU 端 miter join + triangle strip）：
 //   - 每帧生成大量顶点（~1000 个点）
 //   - 曲线形状和线宽每帧变化
-//   - 通过 geometry shader 展开为带厚度的四边形
+//   - CPU 端展开为带宽度的 triangle strip，无 geometry shader
 //   - 所有顶点通过流式 VBO（orphan + subdata）上传
 //
 // 编译运行：
@@ -25,7 +25,7 @@ public:
                       jpov::RenderCommandList* cmds) override {
         (void)winfo;
 
-        // ---- 键盘事件打印（保留原有调试能力） ----
+        // ---- 键盘事件打印（保留调试能力） ----
         auto print_key = [&input](jpov::KeyCode code, const char* name) {
             const auto& k = input.GetKey(code);
             if (k.IsClick()) {
@@ -52,19 +52,18 @@ public:
                 std::printf("%sDrag (%.0f, %.0f)\n", prefix, mx, my);
             }
         };
-        print_events("",   input.left,   input.left_clicks,   input.mouse_x, input.mouse_y);
-
+        print_events("", input.left, input.left_clicks, input.mouse_x, input.mouse_y);
         std::fflush(stdout);
 
-        // ---- Lissajous 曲线（大小和宽度放大 3 倍） ----
+        // ---- Lissajous 曲线（适配 1280×720 窗口） ----
         double t = static_cast<double>(frame_count) * 0.02;
         double a = 5.0 + 1.0 * std::sin(t * 0.3);
         double b = 4.0 + 1.0 * std::cos(t * 0.2);
         double delta = t * 0.5;
 
-        // 放大 3 倍：scale 200 → 600
-        double scale = 600.0;
-        double cx = 640.0, cy = 360.0;
+        // 保证在窗口内：中心 (640, 360)，max 幅度 = 300（窗口最短边 360，留 60 像素边距）
+        float scale = 300.0f;
+        float cx = 640.0f, cy = 360.0f;
 
         const int kNumPoints = 1000;
         std::vector<jpov::Vec2f> vertices;
@@ -72,12 +71,12 @@ public:
 
         for (int i = 0; i < kNumPoints; ++i) {
             double theta = 2.0 * M_PI * i / (kNumPoints - 1);
-            double x = cx + scale * std::cos(a * theta + delta) * std::cos(theta);
-            double y = cy + scale * std::sin(b * theta) * std::sin(theta);
-            vertices.emplace_back(static_cast<float>(x), static_cast<float>(y));
+            float x = cx + scale * std::cos(a * theta + delta) * std::cos(theta);
+            float y = cy + scale * std::sin(b * theta) * std::sin(theta);
+            vertices.emplace_back(x, y);
         }
 
-        // 线宽放大 3 倍：3 ~ 15 → 9 ~ 45 像素
+        // 线宽 3 ~ 45 像素（放大展示 miter join 效果）
         float line_width = 9.0f + 36.0f * (0.5f + 0.5f * std::sin(t * 0.5f));
 
         jpov::Color color;
@@ -92,7 +91,7 @@ public:
 
 int main() {
     JPOV::Config cfg;
-    cfg.title    = "JPOV — Polyline2D with Width (Lissajous)";
+    cfg.title    = "JPOV — Polyline2D with Width (CPU Miter Join)";
     cfg.width    = 1280;
     cfg.height   = 720;
     cfg.target_fps = 30;

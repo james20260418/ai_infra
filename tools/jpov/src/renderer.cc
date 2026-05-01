@@ -7,6 +7,7 @@
 
 #include "tools/jpov/src/renderer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -25,6 +26,7 @@ namespace {
 // 内嵌 GLSL 源码
 // ============================================================
 
+// 顶点着色器：像素坐标 → NDC
 const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -37,30 +39,7 @@ void main() {
 }
 )glsl";
 
-const char* kGs = R"glsl(
-#version 330 core
-layout(lines) in;
-layout(triangle_strip, max_vertices = 4) out;
-
-uniform float uLineWidthNDC;
-
-void main() {
-    vec2 p0 = gl_in[0].gl_Position.xy;
-    vec2 p1 = gl_in[1].gl_Position.xy;
-
-    vec2 dir = normalize(p1 - p0);
-    vec2 perp = vec2(-dir.y, dir.x);
-
-    vec2 offset = perp * uLineWidthNDC * 0.5;
-
-    gl_Position = vec4(p0 - offset, 0.0, 1.0); EmitVertex();
-    gl_Position = vec4(p0 + offset, 0.0, 1.0); EmitVertex();
-    gl_Position = vec4(p1 - offset, 0.0, 1.0); EmitVertex();
-    gl_Position = vec4(p1 + offset, 0.0, 1.0); EmitVertex();
-    EndPrimitive();
-}
-)glsl";
-
+// 片段着色器：纯色
 const char* kFs = R"glsl(
 #version 330 core
 out vec4 FragColor;
@@ -87,17 +66,15 @@ unsigned int CompileShader(GLenum type, const char* source) {
         glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
         const char* type_name = "?";
         if (type == GL_VERTEX_SHADER)      type_name = "VS";
-        else if (type == GL_GEOMETRY_SHADER) type_name = "GS";
         else if (type == GL_FRAGMENT_SHADER) type_name = "FS";
         LOG(FATAL) << "Shader compile error [" << type_name << "]: " << log;
     }
     return shader;
 }
 
-unsigned int LinkProgram(unsigned int vs, unsigned int gs, unsigned int fs) {
+unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
     unsigned int prog = glCreateProgram();
     glAttachShader(prog, vs);
-    if (gs) glAttachShader(prog, gs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
 
@@ -109,16 +86,127 @@ unsigned int LinkProgram(unsigned int vs, unsigned int gs, unsigned int fs) {
         LOG(FATAL) << "Program link error: " << log;
     }
     glDeleteShader(vs);
-    if (gs) glDeleteShader(gs);
     glDeleteShader(fs);
     return prog;
 }
 
 unsigned int BuildPolyline2DProgram() {
     unsigned int vs = CompileShader(GL_VERTEX_SHADER, kVs);
-    unsigned int gs = CompileShader(GL_GEOMETRY_SHADER, kGs);
     unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, kFs);
-    return LinkProgram(vs, gs, fs);
+    return LinkProgram(vs, fs);
+}
+
+// ============================================================
+// CPU 端折线宽度展开（miter join）
+//
+// 输入：折线顶点数组 + 线宽
+// 输出：GL_TRIANGLE_STRIP 的顶点序列（2D 像素坐标）
+//
+// Miter join 原理：
+//   相邻两段的法向量 avg → miter 方向
+//   miter 长度 = half_width / cos(夹角/2)
+//   夹角接近 180° 时 miter 趋于无穷，限制最大长度避免尖刺
+// ============================================================
+
+struct Vec2 {
+    float x, y;
+
+    Vec2 operator+(const Vec2& o) const { return {x + o.x, y + o.y}; }
+    Vec2 operator-(const Vec2& o) const { return {x - o.x, y - o.y}; }
+    Vec2 operator*(float s) const { return {x * s, y * s}; }
+
+    float Dot(const Vec2& o) const { return x * o.x + y * o.y; }
+    float Cross(const Vec2& o) const { return x * o.y - y * o.x; }
+    float Len() const { return std::sqrt(x * x + y * y); }
+    Vec2 Unit() const {
+        float len = Len();
+        if (len < 1e-8f) return {1.0f, 0.0f};
+        return {x / len, y / len};
+    }
+    Vec2 Perp() const { return {-y, x}; }
+};
+
+static std::vector<float> BuildThickPolyline(
+    const float* pts, size_t n, float line_width)
+{
+    std::vector<float> out;
+    if (n < 2) return out;
+
+    // 最多 (n*2 + (n-1)) 个顶点：每段两个三角形的STRIP需要约 4*段 个顶点
+    // 为简化，我们用足够大的预留空间
+    out.reserve(n * 4 * 2);
+
+    float half_w = line_width * 0.5f;
+
+    // 计算每个顶点的法向量
+    // 对于内部顶点（两端之间的点），法向量 = 前后段法向量的平均（miter）
+    // 对于端点，法向量 = 唯一段的垂直方向
+    struct VertexNormals {
+        Vec2 left;   // 向左侧偏移方向
+        Vec2 right;  // 向右侧偏移方向
+    };
+    std::vector<VertexNormals> normals(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        Vec2 dir;
+        if (n == 1) {
+            dir = {1.0f, 0.0f};
+        } else if (i == 0) {
+            dir = {pts[2] - pts[0], pts[3] - pts[1]};
+        } else if (i == n - 1) {
+            dir = {pts[(i-1)*2] - pts[i*2], pts[(i-1)*2+1] - pts[i*2+1]};
+        } else {
+            Vec2 prev = {pts[(i-1)*2] - pts[i*2], pts[(i-1)*2+1] - pts[i*2+1]};
+            Vec2 next = {pts[i*2] - pts[(i+1)*2], pts[i*2+1] - pts[(i+1)*2+1]};
+            dir = prev + next;
+        }
+        dir = dir.Unit();
+        Vec2 perp = dir.Perp();
+
+        // 检查是否使用了 miter（相邻段）
+        if (i == 0 || i == n - 1 || n == 2) {
+            // 端点：直接用垂直方向
+            normals[i].left  = perp;
+            normals[i].right = {-perp.x, -perp.y};
+        } else {
+            // 内部点：前后段法向量平均，限制最大 miter 长度
+            Vec2 prev_dir = {pts[(i-1)*2] - pts[i*2], pts[(i-1)*2+1] - pts[i*2+1]};
+            Vec2 next_dir = {pts[i*2] - pts[(i+1)*2], pts[i*2+1] - pts[(i+1)*2+1]};
+            prev_dir = prev_dir.Unit();
+            next_dir = next_dir.Unit();
+
+            Vec2 prev_perp = prev_dir.Perp();
+            Vec2 next_perp = next_dir.Perp();
+
+            // miter = left 侧两个法向量的和
+            Vec2 miter_left = prev_perp + next_perp;
+            miter_left = miter_left.Unit();
+
+            // miter 长度因子：1 / cos(夹角/2) = 1 / |prev_perp · miter_left|
+            float cos_half = std::abs(prev_perp.Dot(miter_left));
+            float miter_len = (cos_half > 1e-4f) ? (1.0f / cos_half) : 10.0f;
+            miter_len = std::min(miter_len, 4.0f);  // 限制最大倍率
+
+            normals[i].left  = miter_left * miter_len;
+            normals[i].right = {-miter_left.x * miter_len, -miter_left.y * miter_len};
+        }
+    }
+
+    // 生成 triangle strip
+    // 策略：对每段输出 (left_i, right_i, left_{i+1}, right_{i+1})
+    // 这构成一个连续 strip，没有额外三角形但 miter 已经处理了接缝
+    for (size_t i = 0; i < n; ++i) {
+        auto add_vert = [&](const Vec2& p) {
+            out.push_back(p.x);
+            out.push_back(p.y);
+        };
+
+        Vec2 cur = {pts[i*2], pts[i*2+1]};
+        add_vert(cur + normals[i].left * half_w);
+        add_vert(cur + normals[i].right * half_w);
+    }
+
+    return out;
 }
 
 }  // anonymous namespace
@@ -181,9 +269,6 @@ void Renderer::CreateStreamVBO() {
 
     glGenBuffers(1, &stream_vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-
-    // orphan 策略：每帧 glBufferData(nullptr) + glBufferSubData
-    // 兼容性好，不需要 GL 4.4+ persistent mapping
     glBufferData(GL_ARRAY_BUFFER, buf_size, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -208,7 +293,7 @@ void Renderer::BeginFrame() {
 
 void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                        const WindowInfo& winfo) {
-    (void)camera;  // MVP 阶段只做 2D
+    (void)camera;
     (void)winfo;
 
     glEnable(GL_BLEND);
@@ -254,6 +339,24 @@ void Renderer::CapturePixels(uint8_t* out_pixels /*output*/,
 void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
     if (cmd.vertices.size() < 2) return;
 
+    // ---- CPU 端展开带宽度的 polyline（miter join） ----
+    // 输入：cmd.vertices（Vec2f 数组）
+    // 输出：flat TS 顶点数组（float array, 每两个 float 一个顶点）
+
+    size_t n = cmd.vertices.size();
+    std::vector<float> raw_pts;
+    raw_pts.reserve(n * 2);
+    for (const auto& v : cmd.vertices) {
+        raw_pts.push_back(v.x());
+        raw_pts.push_back(v.y());
+    }
+
+    std::vector<float> strip = BuildThickPolyline(
+        raw_pts.data(), n, cmd.line_width);
+
+    if (strip.size() < 4) return;  // 至少 2 个顶点
+
+    // ---- 上传到 VBO 并绘制 ----
     glUseProgram(polyline2d_prog_);
 
     // uniform: 窗口大小（像素）
@@ -261,38 +364,21 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
                 static_cast<float>(fbo_width_),
                 static_cast<float>(fbo_height_));
 
-    // uniform: NDC 线宽
-    float lw_ndc = 2.0f * cmd.line_width / static_cast<float>(fbo_height_);
-    glUniform1f(glGetUniformLocation(polyline2d_prog_, "uLineWidthNDC"),
-                lw_ndc);
-
     // uniform: 颜色
     glUniform4f(glGetUniformLocation(polyline2d_prog_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
-    // ---- 展开为线段对 ----
-    size_t n = cmd.vertices.size();
-    size_t seg_count = n - 1;
-    std::vector<float> flat;
-    flat.reserve(seg_count * 4);
-
-    for (size_t i = 0; i < seg_count; ++i) {
-        flat.push_back(cmd.vertices[i].x());
-        flat.push_back(cmd.vertices[i].y());
-        flat.push_back(cmd.vertices[i + 1].x());
-        flat.push_back(cmd.vertices[i + 1].y());
-    }
-
     // orphan + subdata
+    size_t upload_bytes = strip.size() * sizeof(float);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    size_t upload_bytes = flat.size() * sizeof(float);
     glBufferData(GL_ARRAY_BUFFER, upload_bytes, nullptr, GL_DYNAMIC_DRAW);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, upload_bytes, flat.data());
+    glBufferSubData(GL_ARRAY_BUFFER, 0, upload_bytes, strip.data());
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
 
-    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(flat.size() / 2));
+    // 用 GL_TRIANGLE_STRIP 绘制
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, static_cast<GLsizei>(strip.size() / 2));
 
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
