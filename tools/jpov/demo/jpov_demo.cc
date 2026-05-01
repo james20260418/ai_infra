@@ -23,18 +23,49 @@ public:
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)input;
         (void)winfo;
 
-        // Lissajous 曲线参数（每帧变化）
-        double t = static_cast<double>(frame_count) * 0.02;  // 时间
-        double a = 5.0 + 1.0 * std::sin(t * 0.3);            // x 频率
-        double b = 4.0 + 1.0 * std::cos(t * 0.2);            // y 频率
-        double delta = t * 0.5;                                // 相位差
-        double scale = 200.0;                                  // 缩放（像素）
-        double cx = 640.0, cy = 360.0;                         // 中心
+        // ---- 键盘事件打印（保留原有调试能力） ----
+        auto print_key = [&input](jpov::KeyCode code, const char* name) {
+            const auto& k = input.GetKey(code);
+            if (k.IsClick()) {
+                std::printf("Key %s Click\n", name);
+            } else if (k.IsHold()) {
+                std::printf("Key %s Hold\n", name);
+            }
+        };
+        print_key(jpov::KeyCode::Escape, "Esc");
+        print_key(jpov::KeyCode::Space, "Space");
 
-        // 生成顶点（~1000 个点，每帧全部重建）
+        // ---- 鼠标事件打印 ----
+        auto print_events = [](const char* prefix,
+                               const jpov::MouseState& state,
+                               const jpov::ClickEvent* clicks,
+                               float mx, float my) {
+            if (state.IsClick()) {
+                for (int i = 0; i < state.click_count(); ++i) {
+                    std::printf("%sClick[%d] (%.0f, %.0f)\n", prefix, i, clicks[i].x, clicks[i].y);
+                }
+            } else if (state.IsHold()) {
+                std::printf("%sHold (%.0f, %.0f)\n", prefix, mx, my);
+            } else if (state.IsDrag()) {
+                std::printf("%sDrag (%.0f, %.0f)\n", prefix, mx, my);
+            }
+        };
+        print_events("",   input.left,   input.left_clicks,   input.mouse_x, input.mouse_y);
+
+        std::fflush(stdout);
+
+        // ---- Lissajous 曲线（大小和宽度放大 3 倍） ----
+        double t = static_cast<double>(frame_count) * 0.02;
+        double a = 5.0 + 1.0 * std::sin(t * 0.3);
+        double b = 4.0 + 1.0 * std::cos(t * 0.2);
+        double delta = t * 0.5;
+
+        // 放大 3 倍：scale 200 → 600
+        double scale = 600.0;
+        double cx = 640.0, cy = 360.0;
+
         const int kNumPoints = 1000;
         std::vector<jpov::Vec2f> vertices;
         vertices.reserve(kNumPoints);
@@ -46,10 +77,9 @@ public:
             vertices.emplace_back(static_cast<float>(x), static_cast<float>(y));
         }
 
-        // 线宽随帧变化：3 ~ 15 像素
-        float line_width = 3.0f + 12.0f * (0.5f + 0.5f * std::sin(t * 0.5f));
+        // 线宽放大 3 倍：3 ~ 15 → 9 ~ 45 像素
+        float line_width = 9.0f + 36.0f * (0.5f + 0.5f * std::sin(t * 0.5f));
 
-        // 颜色也渐变
         jpov::Color color;
         color.r = 0.5f + 0.5f * std::sin(t * 0.7f);
         color.g = 0.5f + 0.5f * std::sin(t * 0.5f + 2.1f);
