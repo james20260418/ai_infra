@@ -1,8 +1,15 @@
-// JPOV 示例：空窗口应用
+// JPOV 示例：带宽度的动态 Lissajous 曲线
 //
-// 编译：
+// 演示 Renderer 的 polyline2D 绘制能力：
+//   - 每帧生成大量顶点（~1000 个点）
+//   - 曲线形状和线宽每帧变化
+//   - 通过 geometry shader 展开为带厚度的四边形
+//   - 所有顶点通过流式 VBO（orphan + subdata）上传
+//
+// 编译运行：
 //   bazel run //tools/jpov:jpov_demo
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -11,59 +18,53 @@
 class DemoApp : public JPOV {
 public:
     using JPOV::JPOV;
+
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
+        (void)input;
         (void)winfo;
-        (void)cmds;
 
-        // ---- 鼠标事件打印（在 5fps 下观察 Click/Hold/Drag 判定） ----
-        // 统一输出前缀：没有 R/M 前缀 = 左键
+        // Lissajous 曲线参数（每帧变化）
+        double t = static_cast<double>(frame_count) * 0.02;  // 时间
+        double a = 5.0 + 1.0 * std::sin(t * 0.3);            // x 频率
+        double b = 4.0 + 1.0 * std::cos(t * 0.2);            // y 频率
+        double delta = t * 0.5;                                // 相位差
+        double scale = 200.0;                                  // 缩放（像素）
+        double cx = 640.0, cy = 360.0;                         // 中心
 
-        auto print_events = [](const char* prefix,
-                               const jpov::MouseState& state,
-                               const jpov::ClickEvent* clicks,
-                               float mx, float my) {
-            if (state.IsClick()) {
-                for (int i = 0; i < state.click_count(); ++i) {
-                    std::printf("%sClick[%d] (%.0f, %.0f)\n", prefix, i, clicks[i].x, clicks[i].y);
-                }
-            } else if (state.IsHold()) {
-                std::printf("%sHold (%.0f, %.0f)\n", prefix, mx, my);
-            } else if (state.IsDrag()) {
-                std::printf("%sDrag (%.0f, %.0f)\n", prefix, mx, my);
-            }
-        };
+        // 生成顶点（~1000 个点，每帧全部重建）
+        const int kNumPoints = 1000;
+        std::vector<jpov::Vec2f> vertices;
+        vertices.reserve(kNumPoints);
 
-        print_events("",   input.left,   input.left_clicks,   input.mouse_x, input.mouse_y);
-        print_events("R-", input.right,  input.right_clicks,  input.mouse_x, input.mouse_y);
-        print_events("M-", input.middle, input.middle_clicks, input.mouse_x, input.mouse_y);
+        for (int i = 0; i < kNumPoints; ++i) {
+            double theta = 2.0 * M_PI * i / (kNumPoints - 1);
+            double x = cx + scale * std::cos(a * theta + delta) * std::cos(theta);
+            double y = cy + scale * std::sin(b * theta) * std::sin(theta);
+            vertices.emplace_back(static_cast<float>(x), static_cast<float>(y));
+        }
 
-        // ---- 键盘事件打印 ----
-        // GLFW keycode → 显示字符
-        auto print_key = [&input](jpov::KeyCode code, const char* name) {
-            const auto& k = input.GetKey(code);
-            if (k.IsClick()) {
-                std::printf("Key %s Click\n", name);
-            } else if (k.IsHold()) {
-                std::printf("Key %s Hold\n", name);
-            }
-        };
+        // 线宽随帧变化：3 ~ 15 像素
+        float line_width = 3.0f + 12.0f * (0.5f + 0.5f * std::sin(t * 0.5f));
 
-        print_key(jpov::KeyCode::A, "A");
-        print_key(jpov::KeyCode::S, "S");
-        print_key(jpov::KeyCode::D, "D");
-        print_key(jpov::KeyCode::W, "W");
-        print_key(jpov::KeyCode::Escape, "Esc");
-        print_key(jpov::KeyCode::Space, "Space");
+        // 颜色也渐变
+        jpov::Color color;
+        color.r = 0.5f + 0.5f * std::sin(t * 0.7f);
+        color.g = 0.5f + 0.5f * std::sin(t * 0.5f + 2.1f);
+        color.b = 0.5f + 0.5f * std::sin(t * 0.3f + 4.2f);
+        color.a = 1.0f;
 
-        std::fflush(stdout);
+        cmds->DrawPolyline(vertices, color, line_width);
     }
 };
 
 int main() {
     JPOV::Config cfg;
+    cfg.title    = "JPOV — Polyline2D with Width (Lissajous)";
+    cfg.width    = 1280;
+    cfg.height   = 720;
     cfg.target_fps = 30;
     DemoApp app(cfg);
     app.Run();

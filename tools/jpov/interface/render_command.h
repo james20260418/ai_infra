@@ -166,45 +166,85 @@ struct RenderCommandList {
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
 
-    // 清空本帧所有指令（框架在每帧开始时调用）
-    void Clear();
+    // ---- 绘制辅助方法（inline 实现） ----
 
-    // ---- 2D 绘制辅助方法（屏幕空间，像素坐标） ----
+    // 清空本帧所有指令
+    void Clear() {
+        polyline2d.clear();
+        rect2d.clear();
+        circle2d.clear();
+        text2d.clear();
+        line3d.clear();
+        triangle3d.clear();
+        text3d.clear();
+        order.clear();
+    }
 
     // 2D 折线（方角端点）
-    // vertices: 折线的顶点序列
-    // color: 整条线统一颜色
-    // Pre-condition: line_width > 0
+    // Pre-condition: line_width > 0 && vertices.size() >= 2
     void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color,
-                      float line_width = 1.0f);
+                      float line_width = 1.0f) {
+        CHECK_GT(line_width, 0.0f);
+        int idx = static_cast<int>(polyline2d.size());
+        polyline2d.push_back({vertices, color, line_width});
+        order.emplace_back(DrawCommandType::kPolyline2D, idx);
+    }
 
     // 2D 实心矩形
-    void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color);
+    void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color) {
+        int idx = static_cast<int>(rect2d.size());
+        rect2d.push_back({pos, size, color});
+        order.emplace_back(DrawCommandType::kRect2D, idx);
+    }
 
     // 2D 实心圆
     // Pre-condition: radius > 0
-    void DrawCircle(const Vec2f& center, float radius, const Color& color);
+    void DrawCircle(const Vec2f& center, float radius, const Color& color) {
+        CHECK_GT(radius, 0.0f);
+        int idx = static_cast<int>(circle2d.size());
+        circle2d.push_back({center, radius, color});
+        order.emplace_back(DrawCommandType::kCircle2D, idx);
+    }
 
     // 2D 文本
     // Pre-condition: font_size > 0
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
-                  const Color& color);
+                  const Color& color) {
+        CHECK_GT(font_size, 0.0f);
+        int idx = static_cast<int>(text2d.size());
+        text2d.push_back({text, pos, font_size, color});
+        order.emplace_back(DrawCommandType::kText2D, idx);
+    }
 
     // ---- 3D 绘制辅助方法（世界空间，右手系） ----
 
     // 3D 线段
     // Pre-condition: width > 0
     void DrawLine3D(const Vec3f& p1, const Vec3f& p2, const Color& color,
-                    float width = 1.0f);
+                    float width = 1.0f) {
+        CHECK_GT(width, 0.0f);
+        int idx = static_cast<int>(line3d.size());
+        line3d.push_back({p1, p2, color, width});
+        order.emplace_back(DrawCommandType::kLine3D, idx);
+    }
 
     // 3D 实心三角形（参与深度测试）
     void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
-                        const Color& color);
+                        const Color& color) {
+        int idx = static_cast<int>(triangle3d.size());
+        triangle3d.push_back({p1, p2, p3, color});
+        order.emplace_back(DrawCommandType::kTriangle3D, idx);
+    }
 
     // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0
     void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
-                    const Color& color);
+                    const Color& color) {
+        CHECK_GT(font_size, 0.0f);
+        int idx = static_cast<int>(text3d.size());
+        text3d.push_back({text, pos, font_size, color});
+        order.emplace_back(DrawCommandType::kText3D, idx);
+    }
 };
 
 }  // namespace jpov
