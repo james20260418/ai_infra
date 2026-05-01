@@ -48,11 +48,13 @@ struct Renderer {
     void BeginFrame();
 
     // 消费渲染指令列表，绘制到当前 FBO
+    // 2D 坐标以窗口像素为单位（winfo.width/height），shader 内部转换为 NDC
     void Render(const RenderCommandList& cmds, const Camera& camera,
                 const WindowInfo& winfo);
 
-    // 将 FBO 内容 blit 到默认 framebuffer（窗口显示）
-    void Present(GLFWwindow* window);
+    // 将 FBO 中窗口大小区域 blit 到默认 framebuffer（窗口显示）
+    // 不做缩放——FBO 尺寸 ≥ 窗口尺寸时，只取窗口大小的左上角区域
+    void Present(GLFWwindow* window, int window_width, int window_height);
 
     // 从 FBO 读取像素到 CPU 内存
     // out_pixels: 大小为 width * height * 4 (RGBA, uint8_t)
@@ -73,7 +75,8 @@ private:
     void CreateFBO(int width, int height);
     void CompileShaders();
     void CreateStreamVBO();
-    void DrawPolyline2D(const Polyline2DCommand& cmd);
+    void DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo);
+    void DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo);
 };
 
 }  // namespace jpov

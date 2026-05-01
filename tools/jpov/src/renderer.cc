@@ -212,10 +212,21 @@ static std::vector<float> BuildThickPolyline(
 }  // anonymous namespace
 
 // ============================================================
-// jpov::Renderer
+// jpov::Color 常量定义
 // ============================================================
 
 namespace jpov {
+
+const Color kColorRed         = {1.0f, 0.0f, 0.0f, 1.0f};
+const Color kColorGreen       = {0.0f, 1.0f, 0.0f, 1.0f};
+const Color kColorBlue        = {0.0f, 0.0f, 1.0f, 1.0f};
+const Color kColorWhite       = {1.0f, 1.0f, 1.0f, 1.0f};
+const Color kColorBlack       = {0.0f, 0.0f, 0.0f, 1.0f};
+const Color kColorTransparent = {0.0f, 0.0f, 0.0f, 0.0f};
+
+// ============================================================
+// jpov::Renderer
+// ============================================================
 
 Renderer::Renderer() = default;
 
@@ -294,7 +305,6 @@ void Renderer::BeginFrame() {
 void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                        const WindowInfo& winfo) {
     (void)camera;
-    (void)winfo;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -304,7 +314,13 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
             case DrawCommandType::kPolyline2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.polyline2d.size()));
-                DrawPolyline2D(cmds.polyline2d[idx]);
+                DrawPolyline2D(cmds.polyline2d[idx], winfo);
+                break;
+            }
+            case DrawCommandType::kRect2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.rect2d.size()));
+                DrawRect2D(cmds.rect2d[idx], winfo);
                 break;
             }
             default:
@@ -313,13 +329,18 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
     }
 }
 
-void Renderer::Present(GLFWwindow* window) {
+void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {
     int fb_w, fb_h;
     glfwGetFramebufferSize(window, &fb_w, &fb_h);
 
+    // 从 FBO 中取窗口大小区域（左上角），blit 到默认 framebuffer
+    // 不缩放——shader 已按窗口尺寸映射坐标，FBO 左上角窗口区域存放正确画面
+    int src_w = std::min(window_width, fbo_width_);
+    int src_h = std::min(window_height, fbo_height_);
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, fbo_width_, fbo_height_,
+    glBlitFramebuffer(0, 0, src_w, src_h,
                       0, 0, fb_w, fb_h,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -336,13 +357,10 @@ void Renderer::CapturePixels(uint8_t* out_pixels /*output*/,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
+void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
     if (cmd.vertices.size() < 2) return;
 
     // ---- CPU 端展开带宽度的 polyline（miter join） ----
-    // 输入：cmd.vertices（Vec2f 数组）
-    // 输出：flat TS 顶点数组（float array, 每两个 float 一个顶点）
-
     size_t n = cmd.vertices.size();
     std::vector<float> raw_pts;
     raw_pts.reserve(n * 2);
@@ -359,10 +377,9 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
     // ---- 上传到 VBO 并绘制 ----
     glUseProgram(polyline2d_prog_);
 
-    // uniform: 窗口大小（像素）
+    // uniform: 窗口像素尺寸（2D 坐标以窗口像素为单位）
     glUniform2f(glGetUniformLocation(polyline2d_prog_, "uWindowSize"),
-                static_cast<float>(fbo_width_),
-                static_cast<float>(fbo_height_));
+                winfo.width, winfo.height);
 
     // uniform: 颜色
     glUniform4f(glGetUniformLocation(polyline2d_prog_, "uColor"),
@@ -379,6 +396,44 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
 
     // 用 GL_TRIANGLE_STRIP 绘制
     glDrawArrays(GL_TRIANGLE_STRIP, 0, static_cast<GLsizei>(strip.size() / 2));
+
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {
+    // 四个角：pos, pos+{w,0}, pos+{w,h}, pos+{0,h}
+    // GL_TRIANGLE_FAN: 左上 → 右上 → 右下 → 左下
+    float verts[8];
+    float x0 = cmd.pos.x();
+    float y0 = cmd.pos.y();
+    float x1 = x0 + cmd.size.x();
+    float y1 = y0 + cmd.size.y();
+    verts[0] = x0; verts[1] = y0;  // 左上
+    verts[2] = x1; verts[3] = y0;  // 右上
+    verts[4] = x1; verts[5] = y1;  // 右下
+    verts[6] = x0; verts[7] = y1;  // 左下
+
+    glUseProgram(polyline2d_prog_);
+
+    // uniform: 窗口像素尺寸
+    glUniform2f(glGetUniformLocation(polyline2d_prog_, "uWindowSize"),
+                winfo.width, winfo.height);
+
+    // uniform: 颜色
+    glUniform4f(glGetUniformLocation(polyline2d_prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    // 上传顶点
+    size_t upload_bytes = sizeof(verts);
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, upload_bytes, nullptr, GL_DYNAMIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, upload_bytes, verts);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);

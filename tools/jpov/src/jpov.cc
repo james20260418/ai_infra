@@ -121,7 +121,7 @@ void JPOV::Run() {
         renderer_->Render(cmds, camera_, winfo);
 
         // 6. FBO → 窗口显示
-        renderer_->Present(window_);
+        renderer_->Present(window_, fb_w, fb_h);
 
         glfwSwapBuffers(window_);
         glfwPollEvents();

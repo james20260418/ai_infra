@@ -46,7 +46,7 @@ cc_library(
 )
 
 # ============================================================================
-# 用户示例：空窗口应用
+# 用户示例：Lissajous polyline demo
 # ============================================================================
 cc_library(
     name = "jpov_demo_lib",
@@ -59,4 +59,20 @@ cc_library(
 cc_binary(
     name = "jpov_demo",
     deps = [":jpov_demo_lib"],
+)
+
+# ============================================================================
+# Rect demo（窗口坐标 → FBO 映射验证）
+# ============================================================================
+cc_library(
+    name = "jpov_demo_rect_lib",
+    srcs = ["demo/jpov_demo_rect.cc"],
+    hdrs = [],
+    deps = [":jpov"],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_demo_rect",
+    deps = [":jpov_demo_rect_lib"],
 )
