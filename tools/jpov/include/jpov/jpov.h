@@ -2,6 +2,7 @@
 #define JPOV_JPOV_H_
 
 #include <cstdint>
+#include <memory>
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/camera.h"
@@ -9,6 +10,10 @@
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
 
+// Renderer 前向声明
+namespace jpov {
+class Renderer;
+}
 // ============================================================================
 // JPOV — 轻型渲染窗口框架
 //
@@ -114,6 +119,12 @@ private:
     double frame_start_time_ = 0.0;  // 当前帧开始时刻（glfwGetTime）
     Config config_;
     GLFWwindow* window_ = nullptr;
+
+    // Renderer（GL 复杂度消化器）
+    std::unique_ptr<jpov::Renderer> renderer_;
+
+    // 透视相机
+    jpov::Camera camera_;
 
     // ---- GLFW 回调（静态转发） ----
     static void OnMouseButton(GLFWwindow* window, int button, int action, int mods);

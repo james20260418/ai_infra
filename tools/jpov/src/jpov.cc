@@ -2,10 +2,13 @@
 //
 // Run() 主循环：
 //   1. 创建 GLFW 窗口
-//   2. 每帧：CaptureInput() → OneIteration() → RenderCommands()
-//   3. 窗口关闭后清理退出
+//   2. 初始化 Renderer（FBO + shader + VBO）
+//   3. 每帧：BeginFrame() → CaptureInput() → OneIteration() → Render() → Present()
+//   4. 窗口关闭后清理退出
 
 #include "tools/jpov/include/jpov/jpov.h"
+
+#include "tools/jpov/src/renderer.h"
 
 #include <glog/logging.h>
 
@@ -83,6 +86,18 @@ void JPOV::Run() {
     glfwSetScrollCallback(window_, OnScroll);
     glfwSetKeyCallback(window_, OnKey);
 
+    // ---- 初始化 Renderer（FBO + shader + VBO） ----
+    renderer_ = std::make_unique<jpov::Renderer>();
+    renderer_->Init();
+
+    // ---- 设置默认相机（3D 预留） ----
+    camera_.position = {0.0f, 0.0f, 10.0f};
+    camera_.target   = {0.0f, 0.0f, 0.0f};
+    camera_.up       = {0.0f, 1.0f, 0.0f};
+    camera_.fov      = 60.0f;
+    camera_.near     = 0.1f;
+    camera_.far      = 1000.0f;
+
     // 目标帧间隔（秒），用于帧率控制
     double frame_interval = FrameInterval();
 
@@ -96,33 +111,37 @@ void JPOV::Run() {
             break;
         }
 
-        // 1. 采集输入
-        jpov::InputSnapshot input{};
-        CaptureInput(&input);
-
-        // 2. 窗口信息
+        // 1. 窗口信息
         int fb_w, fb_h;
         glfwGetFramebufferSize(window_, &fb_w, &fb_h);
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(fb_w);
         winfo.height = static_cast<float>(fb_h);
 
-        // 3. 用户渲染逻辑
+        // 2. 绑定 FBO，清屏
+        renderer_->BeginFrame();
+
+        // 3. 采集输入
+        jpov::InputSnapshot input{};
+        CaptureInput(&input);
+
+        // 4. 用户渲染逻辑（产出渲染指令列表）
         jpov::RenderCommandList cmds;
         OneIteration(frame, input, winfo, &cmds);
 
-        // 4. 消费渲染指令
-        RenderCommands(cmds);
+        // 5. 消费渲染指令（绘制到 FBO）
+        renderer_->Render(cmds, camera_, winfo);
 
-        // 5. 交换缓冲并轮询事件
+        // 6. FBO 窗口区域 → 默认 framebuffer（无缩放）
+        renderer_->Present(window_, fb_w, fb_h);
+
         glfwSwapBuffers(window_);
         glfwPollEvents();
 
-        // 6. 帧率控制：如果本帧提前完成，sleep 到目标帧间隔
+        // 7. 帧率控制
         double elapsed = glfwGetTime() - frame_start_time_;
         double remaining = frame_interval - elapsed;
         if (remaining > 0.0) {
-            // remaining < 1，所以 tv_sec 恒为 0，直接 sleep 微秒
             long us = static_cast<long>(remaining * 1e6);
             struct timespec ts = {0, us * 1000};
             nanosleep(&ts, nullptr);
@@ -131,6 +150,8 @@ void JPOV::Run() {
         ++frame;
     }
 
+    // 清理
+    renderer_.reset();
     glfwDestroyWindow(window_);
     glfwTerminate();
     window_ = nullptr;
@@ -172,9 +193,6 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     input->scroll_delta = static_cast<float>(scroll_delta_);
 
     // ---- 更新本帧开始时间 ----
-    // 用于 ClickEvent time_ratio 计算。在 CaptureInput 开头设而非帧末设，
-    // 这样 HandleMouseButton 回调（由 glfwPollEvents 触发）拿到的
-    // frame_start_time_ 是本帧的开始时刻。
     frame_start_time_ = glfwGetTime();
 
     // ---- 鼠标三键状态结算 ----
@@ -198,7 +216,6 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     right_btn_.released_this_frame  = false;
     middle_btn_.released_this_frame = false;
 
-    // 重置键盘帧内状态（点击计数和 release 标记）
     for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
         keys_[i].click_count = 0;
         keys_[i].released_this_frame = false;
@@ -206,14 +223,13 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
 }
 
 void JPOV::RenderCommands(const jpov::RenderCommandList& cmds) {
-    // 暂未实现：遍历 cmds，调用 OpenGL 绘制
+    // 不再使用：由 Renderer::Render() 代替
     (void)cmds;
 }
 
 // ========== 事件处理（私有方法） ==========
 
 void JPOV::HandleMouseButton(int button, int action, double now) {
-    // 将 GLFW button 映射为 (状态, click计数, click详情池)
     struct ButtonSlot {
         MouseButtonState* state;
         int*             click_count;
@@ -238,15 +254,11 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
     if (action == GLFW_PRESS) {
         slot.state->press_time = now;
         slot.state->is_down = true;
-        // 新一次按下，清除移动标记
         slot.state->moved_since_press = false;
     } else if (action == GLFW_RELEASE) {
         slot.state->released_this_frame = true;
 
-        // 判 Click：仅按下期间没有移动才算 Click（无论时长）
-        // 有移动 → 不算 Click，也不 Drag（释放了，帧末 is_down=false，由 CaptureInput 判 None）
         bool should_click = !slot.state->moved_since_press;
-
         if (should_click && *slot.click_count < jpov::kMaxClicksPerFrame) {
             int idx = *slot.click_count;
             slot.click_pool[idx].x = static_cast<float>(mouse_x_);
@@ -263,12 +275,9 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
 }
 
 void JPOV::HandleMouseMove(double xpos, double ypos) {
-    // 检测鼠标实际位置变化，排除 GLFW 虚假的重复回调
     if (xpos != mouse_x_ || ypos != mouse_y_) {
         mouse_x_ = xpos;
         mouse_y_ = ypos;
-
-        // 如果任意键处于按下状态，标记为已移动
         if (left_btn_.is_down)   left_btn_.moved_since_press = true;
         if (right_btn_.is_down)  right_btn_.moved_since_press = true;
         if (middle_btn_.is_down) middle_btn_.moved_since_press = true;
@@ -290,7 +299,6 @@ void JPOV::HandleKey(int key, int /*scancode*/, int action, int /*mods*/) {
     KeyButtonState& k = keys_[key];
 
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
-        // GLFW_REPEAT (长按连续触发) 视同已按住，不做特殊处理
         if (!k.is_down) {
             k.is_down = true;
         }
@@ -302,7 +310,6 @@ void JPOV::HandleKey(int key, int /*scancode*/, int action, int /*mods*/) {
 }
 
 void JPOV::FlushKeyboard(jpov::InputSnapshot* input /*output*/) {
-    // 键盘：Click = 本帧有 release，Hold = is_down && 无 release，None = 其它
     for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
         const KeyButtonState& k = keys_[i];
         int8_t raw;

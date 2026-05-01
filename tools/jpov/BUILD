@@ -1,6 +1,25 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 # ============================================================================
+# JPOV Renderer 内部库（GL 复杂度消化器）
+# ============================================================================
+cc_library(
+    name = "renderer",
+    srcs = ["src/renderer.cc"],
+    hdrs = ["src/renderer.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:window_info",
+        "@glfw_static//:glfw",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# ============================================================================
 # JPOV 主库
 # ============================================================================
 cc_library(
@@ -9,6 +28,7 @@ cc_library(
     hdrs = ["include/jpov/jpov.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":renderer",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:input_snapshot",
         "//tools/jpov/interface:render_command",
@@ -26,7 +46,7 @@ cc_library(
 )
 
 # ============================================================================
-# 用户示例：空窗口应用
+# Rect Demo
 # ============================================================================
 cc_binary(
     name = "jpov_demo",

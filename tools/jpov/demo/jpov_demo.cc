@@ -1,6 +1,10 @@
-// JPOV 示例：空窗口应用
+// JPOV Rect Demo — 验证 FBO 空间坐标 + Present 裁剪
 //
-// 编译：
+// 所有 2D 坐标在 FBO 空间（4096×4096）中。
+// 矩形位置居中在 4096×4096 中，窗口 1280×720 只显示左上角区域。
+// 调整矩形坐标到窗口可见区域才能看到它。
+//
+// 编译运行：
 //   bazel run //tools/jpov:jpov_demo
 
 #include <cstdint>
@@ -11,16 +15,22 @@
 class DemoApp : public JPOV {
 public:
     using JPOV::JPOV;
+
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)winfo;
-        (void)cmds;
+        (void)frame_count;
+        (void)input;
 
-        // ---- 鼠标事件打印（在 5fps 下观察 Click/Hold/Drag 判定） ----
-        // 统一输出前缀：没有 R/M 前缀 = 左键
+        // 窗口 1280×720，在 FBO 空间（4096×4096）中，左上角 1280×720 区域是可见的
+        // 画一个蓝色矩形在窗口可见区域的中央
+        float rx = (1280.0f - 300.0f) * 0.5f;  // 490
+        float ry = (720.0f - 200.0f) * 0.5f;   // 260
 
+        cmds->DrawRect({rx, ry}, {300.0f, 200.0f}, jpov::kColorBlue);
+
+        // ---- 鼠标事件打印 ----
         auto print_events = [](const char* prefix,
                                const jpov::MouseState& state,
                                const jpov::ClickEvent* clicks,
@@ -40,30 +50,15 @@ public:
         print_events("R-", input.right,  input.right_clicks,  input.mouse_x, input.mouse_y);
         print_events("M-", input.middle, input.middle_clicks, input.mouse_x, input.mouse_y);
 
-        // ---- 键盘事件打印 ----
-        // GLFW keycode → 显示字符
-        auto print_key = [&input](jpov::KeyCode code, const char* name) {
-            const auto& k = input.GetKey(code);
-            if (k.IsClick()) {
-                std::printf("Key %s Click\n", name);
-            } else if (k.IsHold()) {
-                std::printf("Key %s Hold\n", name);
-            }
-        };
-
-        print_key(jpov::KeyCode::A, "A");
-        print_key(jpov::KeyCode::S, "S");
-        print_key(jpov::KeyCode::D, "D");
-        print_key(jpov::KeyCode::W, "W");
-        print_key(jpov::KeyCode::Escape, "Esc");
-        print_key(jpov::KeyCode::Space, "Space");
-
         std::fflush(stdout);
     }
 };
 
 int main() {
     JPOV::Config cfg;
+    cfg.title    = "JPOV — Rect Demo (FBO 坐标)";
+    cfg.width    = 1280;
+    cfg.height   = 720;
     cfg.target_fps = 30;
     DemoApp app(cfg);
     app.Run();
