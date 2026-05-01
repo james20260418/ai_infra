@@ -44,8 +44,8 @@ struct Renderer {
     // 初始化所有 GL 资源。Pre-condition: GL context 已创建且当前
     void Init(int window_width, int window_height);
 
-    // 开始一帧：绑定 FBO，清除颜色缓冲
-    void BeginFrame();
+    // 开始一帧：绑定 FBO，设置视口为窗口尺寸，清除颜色缓冲
+    void BeginFrame(int window_width, int window_height);
 
     // 消费渲染指令列表，绘制到当前 FBO
     // 2D 坐标以窗口像素为单位（winfo.width/height），shader 内部转换为 NDC

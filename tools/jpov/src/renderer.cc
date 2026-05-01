@@ -295,9 +295,10 @@ void Renderer::Init(int window_width, int window_height) {
     CreateStreamVBO();
 }
 
-void Renderer::BeginFrame() {
+void Renderer::BeginFrame(int window_width, int window_height) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-    glViewport(0, 0, fbo_width_, fbo_height_);
+    // 视口设为窗口尺寸（不是 FBO 尺寸），使 2D 窗口坐标正确映射到 FBO 左上角
+    glViewport(0, 0, window_width, window_height);
     glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 }

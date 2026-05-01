@@ -110,8 +110,8 @@ void JPOV::Run() {
         winfo.width  = static_cast<float>(fb_w);
         winfo.height = static_cast<float>(fb_h);
 
-        // 3. 开始帧（绑定 FBO，清屏）
-        renderer_->BeginFrame();
+        // 3. 开始帧（绑定 FBO，视口设为窗口尺寸，清屏）
+        renderer_->BeginFrame(fb_w, fb_h);
 
         // 4. 用户渲染逻辑
         jpov::RenderCommandList cmds;
