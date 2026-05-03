@@ -166,6 +166,14 @@ struct RenderCommandList {
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
 
+    // 渲染分辨率（像素），用户在每帧绘制前设定。
+    // 决定了 FBO 的尺寸和坐标空间范围。
+    // 分辨率变更时 Renderer 自动重建 FBO。
+    // 默认 (0,0) 表示与窗口尺寸一致。
+    // Pre-condition: width > 0 && height > 0（Clear 不清零）
+    int render_width  = 0;
+    int render_height = 0;
+
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();
 
