@@ -1,22 +1,14 @@
-// JPOV Polyline Demo — Lissajous 曲线单帧截图
+// JPOV Polyline Demo — 动态 Lissajous 曲线
 //
-// 使用 RunOnce 接口：headless 模式，无窗口，仅输出 PNG。
-//
-// 绘制内容：
-//   1. Lissajous 曲线（窗坐标，1000 点）
-//   2. 渐变色，8px 线宽
-//
-// 输出：ai_infra/output/jpov_polyline_demo/frame_0000.png (1280x720)
-//
-// 编译运行：
-//   bazel run //tools/jpov:jpov_polyline_demo
+// 使用 Run() 连续播放，30fps。
+// 窗口 640x360（与渲染分辨率一致，无拉伸）。
+// 曲线参数每帧变化，产生动态效果。
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
-#include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/common/utils.h"
 
 class PolylineDemo : public JPOV {
 public:
@@ -26,25 +18,21 @@ public:
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)frame_count;
         (void)input;
+        (void)winfo;
 
-        // 声明渲染分辨率 640x360
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        // 渲染分辨率 640x360，与窗口尺寸一致
+        cmds->render_width  = 640;
+        cmds->render_height = 360;
 
-        // ---- Lissajous 曲线（窗坐标） ----
-        // 参数取 frame_count=0 时的值
-        double t = 0.0;
+        // ---- Lissajous 曲线 ----
+        double t = static_cast<double>(frame_count) * 0.02;
         double a = 5.0 + 1.0 * std::sin(t * 0.3);
         double b = 4.0 + 1.0 * std::cos(t * 0.2);
         double delta = t * 0.5;
 
-        double scale = 300.0;
-        double cx = winfo.width * 0.5;
-        double cy = winfo.height * 0.5;
+        double scale = 150.0;
+        double cx = 320.0, cy = 180.0;
 
         const int kNumPoints = 1000;
         std::vector<jpov::Vec2f> vertices;
@@ -57,32 +45,28 @@ public:
             vertices.emplace_back(static_cast<float>(x), static_cast<float>(y));
         }
 
-        jpov::Color color = {0.0f, 0.8f, 1.0f, 1.0f};  // 浅蓝色
-        cmds->DrawPolyline(vertices, color, 8.0f);
+        // 颜色和线宽也随时间变化
+        float line_width = 9.0f + 36.0f * (0.5f + 0.5f * std::sin(t * 0.5f));
+        jpov::Color color;
+        color.r = 0.5f + 0.5f * std::sin(t * 0.7f);
+        color.g = 0.5f + 0.5f * std::sin(t * 0.5f + 2.1f);
+        color.b = 0.5f + 0.5f * std::sin(t * 0.3f + 4.2f);
+        color.a = 1.0f;
+
+        cmds->DrawPolyline(vertices, color, line_width);
     }
 };
 
 int main() {
-    std::string outdir = jpov::GetOutputDir() + "jpov_polyline_demo/";
-    std::string outpath = outdir + "frame_0000.png";
-
-    // 模拟窗口尺寸 1280x720
-    jpov::WindowInfo winfo;
-    winfo.width  = 1280.0f;
-    winfo.height = 720.0f;
-
-    // 模拟空输入
-    jpov::InputSnapshot input{};
-
-    // 初始化（headless 模式）
     JPOV::Config cfg;
-    cfg.title = "JPOV Polyline Demo";
-    cfg.headless = true;
+    cfg.title     = "JPOV — Lissajous Polyline2D";
+    cfg.width     = 640;
+    cfg.height    = 360;
+    cfg.headless  = false;
+    cfg.target_fps = 30;
     PolylineDemo app(cfg);
     app.Init();
-    app.RunOnce(input, winfo, outpath.c_str());
+    app.Run();
     app.Finalize();
-
-    LOG(INFO) << "Done: " << outpath;
     return 0;
 }
