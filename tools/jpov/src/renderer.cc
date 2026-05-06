@@ -198,6 +198,12 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                 DrawRect2D(cmds.rect2d[idx], winfo);
                 break;
             }
+            case DrawCommandType::kPolyline2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.polyline2d.size()));
+                DrawPolyline2D(cmds.polyline2d[idx], winfo);
+                break;
+            }
             default:
                 break;
         }
@@ -297,6 +303,99 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     cv::Mat flipped;
     cv::flip(raw, flipped, 0);
     std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
+}
+
+void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
+    // Pre-condition:
+    //   - vertices 至少 2 个点
+    //   - edge_count (vertices.size()-1) ≤ kMaxPolylineEdges
+    //   - line_width > 0（像素单位）
+    int n = static_cast<int>(cmd.vertices.size());
+    CHECK_GE(n, 2);
+    int edge_count = n - 1;
+    CHECK_LE(edge_count, kMaxPolylineEdges);
+    CHECK_GT(cmd.line_width, 0.0f);
+
+    // 每个 quad 6 顶点 + 每个 bridge 6 顶点（2 三角形）
+    // 顶点格式：x, y, x, y, ...
+    int total_verts = edge_count * 6 + (edge_count - 1) * 6;
+    std::vector<float> verts;
+    verts.reserve(static_cast<size_t>(total_verts) * 2);
+
+    float half_w = cmd.line_width * 0.5f;
+
+    for (int i = 0; i < edge_count; ++i) {
+        const Vec2f& p0 = cmd.vertices[i];
+        const Vec2f& p1 = cmd.vertices[i + 1];
+
+        // 边向量
+        Vec2f dir = p1 - p0;
+        float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
+
+        // 垂直方向（归一化），len 过短时水平偏移
+        Vec2f perp;
+        static constexpr float kEpsilon = 1e-6f;
+        if (len < kEpsilon) {
+            perp = {1.0f, 0.0f};
+        } else {
+            perp = {-dir.y() / len, dir.x() / len};
+        }
+
+        // 四个角点
+        Vec2f n0 = p0 + perp * half_w;
+        Vec2f n1 = p0 - perp * half_w;
+        Vec2f n2 = p1 + perp * half_w;
+        Vec2f n3 = p1 - perp * half_w;
+
+        // 两个三角形：n0-n1-n2, n2-n1-n3 (CW)
+        // T1
+        verts.push_back(n0.x()); verts.push_back(n0.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n2.x()); verts.push_back(n2.y());
+        // T2
+        verts.push_back(n2.x()); verts.push_back(n2.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n3.x()); verts.push_back(n3.y());
+        // 每个连接处在 V 形间隙外侧补一个三角形
+        if (i + 1 < edge_count) {
+            const Vec2f& p2 = cmd.vertices[i + 2];
+            Vec2f dn = p2 - p1;
+            float ln = std::sqrt(dn.x()*dn.x()+dn.y()*dn.y());
+            Vec2f perp_n;
+            if (ln < kEpsilon) { perp_n = {1.0f, 0.0f}; }
+            else { perp_n = {-dn.y()/ln, dn.x()/ln}; }
+
+            // 用顶点和两段矩形外侧角点构成填充三角形
+            // 内侧三角形 (p1, n3, n3_next) 和 (p1, n2_next, n2) 填充间隙
+            verts.push_back(p1.x()); verts.push_back(p1.y());
+            verts.push_back(n3.x()); verts.push_back(n3.y());
+            verts.push_back((p1 - perp_n * half_w).x());
+            verts.push_back((p1 - perp_n * half_w).y());
+
+            verts.push_back(p1.x()); verts.push_back(p1.y());
+            verts.push_back((p1 + perp_n * half_w).x());
+            verts.push_back((p1 + perp_n * half_w).y());
+            verts.push_back(n2.x()); verts.push_back(n2.y());
+        }
+    }
+
+    CHECK_LE(total_verts, kMaxStreamVertices);
+
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                winfo.width, winfo.height);
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, total_verts);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {

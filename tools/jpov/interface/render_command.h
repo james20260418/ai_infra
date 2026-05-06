@@ -67,8 +67,10 @@ enum class DrawCommandType : uint8_t {
 // 2D 折线（渲染分辨率空间，像素坐标，非闭合，方角端点）
 // vertices: 折线的顶点序列（像素坐标，原点在渲染分辨率左上角）
 // color: 整条线统一颜色
-// line_width: 线宽（像素单位）
-// 
+// line_width: 线宽（像素单位，>0）
+// Pre-condition: vertices.size() >= 2
+// Pre-condition: vertices.size() - 1 <= Renderer::kMaxPolylineEdges
+//
 // 坐标空间同 render_width/render_height
 struct Polyline2DCommand {
     std::vector<Vec2f> vertices;
@@ -194,7 +196,10 @@ struct RenderCommandList {
     // 2D 折线（方角端点）
     // vertices: 折线的顶点序列
     // color: 整条线统一颜色
-    // Pre-condition: line_width > 0
+    // Pre-conditions:
+    //   - vertices.size() >= 2
+    //   - vertices.size() - 1 <= Renderer::kMaxPolylineEdges
+    //   - line_width > 0
     void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color,
                       float line_width = 1.0f);
 

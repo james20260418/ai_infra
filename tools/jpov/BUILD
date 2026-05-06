@@ -66,3 +66,24 @@ cc_binary(
         "//tools/common:utils",
     ],
 )
+
+# ============================================================================
+# 示例：Polyline Demo — 绘制折线后保存 PNG 截图
+# ============================================================================
+cc_binary(
+    name = "jpov_polyline_demo",
+    srcs = ["demo/jpov_polyline_demo.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+)
+
+cc_binary(
+    name = "jpov_polyline_verify",
+    srcs = ["demo/jpov_polyline_verify.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+)
