@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/camera.h"
@@ -13,6 +14,16 @@
 
 // ============================================================================
 // JPOV — 轻型渲染窗口框架
+//
+// 生命周期：
+//   1. Init(config)  — 创建 GL context + Renderer
+//   2. Run()         — 事件循环（多帧）
+//    或
+//      RunOnce()    — 单帧 → 截图输出
+//   3. Finalize()    — 销毁所有资源
+//
+//  Run() 内部每帧调用 RunOnceInternal()，与 RunOnce() 共享相同的渲染核心，
+//  确保在线与离线输出一致。
 //
 // 用法:
 //   class MyApp : public JPOV {
@@ -25,8 +36,10 @@
 //   };
 //
 //   int main() {
-//       MyApp app;
+//       MyApp app(cfg);
+//       app.Init();
 //       app.Run();
+//       app.Finalize();
 //   }
 // ============================================================================
 class JPOV {
@@ -39,6 +52,10 @@ public:
         bool        fullscreen   = false;
         bool        show_console = false;  // Windows 下是否显示命令行窗口
 
+        // headless = true: 无可见窗口（适用于 CI / 后台截图）
+        // headless = false: 正常窗口（Run() 进入事件循环）
+        bool        headless     = false;
+
         // OneIteration 调用帧率（Hz），默认 60。
         // Run() 按此帧率调度 OneIteration，实际帧率受 vsync 限制。
         // 设为 0 表示不限制（尽可能快）。
@@ -47,6 +64,43 @@ public:
 
     explicit JPOV(Config cfg);
     virtual ~JPOV();
+
+    // ---- 生命周期 ----
+
+    // Init: 创建 GL context + Renderer。
+    // headless=false 时创建可见窗口并注册 GLFW 回调。
+    // headless=true  时创建隐藏窗口（仅用于 GL context）。
+    // Pre-condition: 未调用过 Init() 或已调用 Finalize()
+    void Init();
+
+    // Finalize: 销毁 Renderer + GL context + 窗口。
+    // 调用后可以再次 Init()。
+    void Finalize();
+
+    // ---- 运行模式 ----
+
+    // Run: 窗口事件循环（阻塞）。
+    // 每帧：PollEvents → CaptureInput → RunOnceInternal → Present → SwapBuffers。
+    // Pre-condition: Init() 已调用且 window_ 非空
+    void Run();
+
+    // RunOnce: 单帧执行 + 截图输出
+    //
+    // 模拟一帧的完整流程：OneIteration → RunOnceInternal → SaveScreenshot
+    // 输出图片为窗口尺寸（win_w × win_h），模拟 Present 到窗口后的视觉效果。
+    //
+    // input       — input: 模拟的输入快照
+    // winfo       — input: 模拟的窗口信息（宽度/高度决定截图尺寸）
+    // out_png_path — output: 截图保存路径
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: winfo.width > 0 && winfo.height > 0
+    // Pre-condition: out_png_path 非空
+    void RunOnce(const jpov::InputSnapshot& input,
+                 const jpov::WindowInfo& winfo,
+                 const char* out_png_path);
+
+    // ---- 用户需实现的纯虚函数 ----
 
     // 用户实现的每帧渲染逻辑
     //
@@ -62,62 +116,39 @@ public:
                               const jpov::WindowInfo& winfo,
                               jpov::RenderCommandList* cmds /*output*/) = 0;
 
-    // 创建窗口并进入事件循环，阻塞到退出
-    void Run();
-
-    // RunOnce: 单帧执行 + 截图输出
-    //
-    // 模拟一帧的完整流程：OneIteration → BeginFrame → Render → SaveScreenshot
-    // 输出图片为窗口尺寸（win_w × win_h），模拟 Present 到窗口后的视觉效果。
-    //
-    // input  — input: 模拟的输入快照
-    // winfo  — input: 模拟的窗口信息（宽度/高度决定截图尺寸）
-    // out_png_path — output: 截图保存路径
-    //
-    // Pre-condition: GL context 当前
-    // Pre-condition: winfo.width > 0 && winfo.height > 0
-    // Pre-condition: out_png_path 非空
-    void RunOnce(const jpov::InputSnapshot& input,
-                 const jpov::WindowInfo& winfo,
-                 const char* out_png_path);
-
 private:
-    // ---- 鼠标按键跨帧状态 ----
+    // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
+    //
+    // 1. 调用 OneIteration → cmds
+    // 2. BeginFrame(render_resolution)
+    // 3. Render(cmds)  → 绘制到 FBO
+    //
+    // Pre-condition: renderer_ 已初始化
+    void RunOnceInternal(int64_t frame_count,
+                         const jpov::InputSnapshot& input,
+                         const jpov::WindowInfo& winfo);
+
+    // ---- GLFW 输入状态 ----
     struct MouseButtonState {
-        // 鼠标当前是否处于按下状态
         bool is_down = false;
-
-        // 本帧内是否收到过 GLFW_RELEASE
         bool released_this_frame = false;
-
-        // 最近一次 GLFW_PRESS 的时刻（glfwGetTime 值，秒）
         double press_time = 0.0;
-
-        // 自最近一次按下以来鼠标是否有移动
         bool moved_since_press = false;
     };
-
-    // ---- 键盘按键跨帧状态 ----
     struct KeyButtonState {
         bool is_down = false;
         bool released_this_frame = false;
         int  click_count = 0;
     };
-
-    // ---- 帧内累计事件（CaptureInput 每帧末结算） ----
     struct FrameEvents {
         int left_clicks   = 0;
         int right_clicks  = 0;
         int middle_clicks = 0;
-
-        // ClickEvent 暂存区：HandleMouseButton 释放时填入
-        // CaptureInput 结算时写入 InputSnapshot 对应数组
         jpov::ClickEvent left_clicks_detail[jpov::kMaxClicksPerFrame];
         jpov::ClickEvent right_clicks_detail[jpov::kMaxClicksPerFrame];
         jpov::ClickEvent middle_clicks_detail[jpov::kMaxClicksPerFrame];
     };
 
-    // ---- 鼠标跟踪 ----
     double mouse_x_       = 0.0;
     double mouse_y_       = 0.0;
     double mouse_last_x_  = 0.0;
@@ -129,12 +160,11 @@ private:
     MouseButtonState middle_btn_;
     KeyButtonState keys_[jpov::kMaxKeyCode];
     FrameEvents frame_;
-    double frame_start_time_ = 0.0;  // 当前帧开始时刻（glfwGetTime）
+    double frame_start_time_ = 0.0;
     Config config_;
     GLFWwindow* window_ = nullptr;
-
-    // Renderer（GL 复杂度消化器）
     std::unique_ptr<jpov::Renderer> renderer_;
+    bool initialized_ = false;
 
     // ---- GLFW 回调（静态转发） ----
     static void OnMouseButton(GLFWwindow* window, int button, int action, int mods);
@@ -142,39 +172,23 @@ private:
     static void OnScroll(GLFWwindow* window, double xoffset, double yoffset);
     static void OnKey(GLFWwindow* window, int key, int scancode, int action, int mods);
 
-    // 回调内部转发目标（通过 glfwGetWindowUserPointer 获取 this）
     void HandleMouseButton(int button, int action, double now);
     void HandleMouseMove(double xpos, double ypos);
     void HandleScroll(double yoffset);
     void HandleKey(int key, int scancode, int action, int mods);
 
-    // ---- 帧循环子步骤 ----
-
-    // 采集本帧输入（鼠标/键盘/窗口事件），填充 InputSnapshot
-    // Pre-condition: window_ 非空有效
-    // Post-condition: input 已由 GLFW 回调数据填充
     void CaptureInput(jpov::InputSnapshot* input /*output*/);
-
-    // 消费渲染指令列表，提交绘制到当前帧
-    // Pre-condition: cmds 已由 OneIteration 填充
     void RenderCommands(const jpov::RenderCommandList& cmds /*input*/);
-
-    // 帧间隔（秒）：target_fps > 0 则返回 1/target_fps，否则返回 1/60
     double FrameInterval() const;
 
-    // 将一个鼠标键的帧内事件结算到 InputSnapshot
     static void FlushMouseButton(const MouseButtonState& btn /*input*/,
                                  int click_count /*input*/,
                                  const jpov::ClickEvent* click_detail /*input*/,
                                  jpov::MouseState* out /*output*/,
                                  jpov::ClickEvent* out_clicks /*output*/);
-
-    // 将键盘帧内事件结算到 InputSnapshot
     void FlushKeyboard(jpov::InputSnapshot* input /*output*/);
 
-    // Click 超时阈值（秒）：按下有移动但释放快于 kClickDelta 仍算 Click
     static constexpr double kClickDelta = 0.3;
-
 };
 
 #endif  // JPOV_JPOV_H_

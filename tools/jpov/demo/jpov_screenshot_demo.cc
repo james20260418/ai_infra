@@ -1,6 +1,6 @@
 // JPOV Screenshot Demo — 单帧绘制后保存 PNG 截图
 //
-// 使用 RunOnce 接口：无窗口环境（如 CI）下直接输出 PNG。
+// 使用 RunOnce 接口：headless 模式，无窗口，仅输出 PNG。
 //
 // 绘制内容：
 //   1. 蓝色矩形（不透明），居中，大小为分辨率的 1/2
@@ -62,9 +62,14 @@ int main() {
     // 模拟空输入
     jpov::InputSnapshot input{};
 
-    // 单帧绘制 + 截图输出（无需窗口）
-    ScreenshotDemo app(JPOV::Config{});
+    // 初始化（headless 模式）
+    JPOV::Config cfg;
+    cfg.title = "JPOV Screenshot Demo";
+    cfg.headless = true;
+    ScreenshotDemo app(cfg);
+    app.Init();
     app.RunOnce(input, winfo, outpath.c_str());
+    app.Finalize();
 
     LOG(INFO) << "Done: " << outpath;
     return 0;
