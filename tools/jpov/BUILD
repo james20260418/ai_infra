@@ -1,7 +1,26 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 # ============================================================================
-# JPOV 主库
+# Renderer — GL FBO + 动态分辨率渲染核心
+# ============================================================================
+cc_library(
+    name = "renderer",
+    srcs = ["src/renderer.cc"],
+    hdrs = ["src/renderer.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:window_info",
+        "@glfw_static//:glfw",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# ============================================================================
+# JPOV 主框架库 — GLFW 窗口 + 输入 + Renderer
 # ============================================================================
 cc_library(
     name = "jpov",
@@ -9,6 +28,7 @@ cc_library(
     hdrs = ["include/jpov/jpov.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":renderer",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:input_snapshot",
         "//tools/jpov/interface:render_command",
@@ -26,7 +46,7 @@ cc_library(
 )
 
 # ============================================================================
-# 用户示例：空窗口应用
+# 示例：Rect Demo — 演示渲染分辨率与窗口尺寸的区分
 # ============================================================================
 cc_binary(
     name = "jpov_demo",

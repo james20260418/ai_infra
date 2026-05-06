@@ -64,20 +64,33 @@ enum class DrawCommandType : uint8_t {
 
 // ==================== 各类绘制命令结构体 ====================
 
-// 2D 折线（屏幕空间）—— 非闭合，方角端点
-// vertices: 折线的顶点序列
+// 2D 折线（渲染分辨率空间，像素坐标，非闭合，方角端点）
+// vertices: 折线的顶点序列（像素坐标，原点在渲染分辨率左上角）
 // color: 整条线统一颜色
 // line_width: 线宽（像素单位）
+// 
+// 坐标空间同 render_width/render_height
 struct Polyline2DCommand {
     std::vector<Vec2f> vertices;
     Color color;
     float line_width;
 };
 
-// 2D 实心矩形（屏幕空间）
-// pos: 矩形左上角
-// size: 矩形宽高
-// color: 填充颜色
+// 2D 实心矩形（渲染分辨率空间，像素坐标）
+//
+// pos:  矩形左上角位置（像素坐标，原点在渲染分辨率左上角，x→右，y→下）
+// size: 矩形的宽度和高度（像素单位，>0）
+// color: 填充颜色（RGBA，分量范围 [0,1]，alpha < 1 时 blend）
+//
+// 坐标空间说明：
+//   用户先通过 render_width / render_height 声明渲染分辨率，
+//   此后所有 DrawRect 的 pos/size 以该分辨率为空间。
+//   渲染分辨率 ≠ 窗口尺寸——当两者不同时，最终输出会被拉伸贴合窗口。
+//
+//   例如 render_width=640, render_height=360：
+//     矩形 (0,0, 320,180) 占据左上 1/4 区域
+//     矩形 (160,90, 320,180) 居中
+// Pre-condition: size.x > 0 && size.y > 0
 struct Rect2DCommand {
     Vec2f pos;
     Vec2f size;
@@ -166,6 +179,13 @@ struct RenderCommandList {
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
 
+    // 渲染分辨率（像素），用户在每帧绘制前设定。
+    // 决定了 FBO 的尺寸和坐标空间范围。
+    // 分辨率变更时 Renderer 自动重建 FBO。
+    // 必须设 >0（Clear 不清零），框架在 Render 时 CHECK_GT。
+    int render_width  = 0;
+    int render_height = 0;
+
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();
 
@@ -178,7 +198,17 @@ struct RenderCommandList {
     void DrawPolyline(const std::vector<Vec2f>& vertices, const Color& color,
                       float line_width = 1.0f);
 
-    // 2D 实心矩形
+    // 2D 实心矩形（渲染分辨率空间，像素坐标）
+    //
+    // pos:  矩形左上角位置（像素坐标，原点在渲染分辨率左上角，x→右，y→下）
+    // size: 矩形的宽度和高度（像素单位，>0）
+    // color: 填充颜色（RGBA，分量范围 [0,1]）
+    //
+    // 坐标空间与矩形声明分辨率的 render_width/render_height 一致。
+    // 例：render_width=640, render_height=360 时，
+    //     DrawRect({160,90},{320,180},blue) 画一个居中矩形。
+    // Pre-condition: pos_x >= 0, pos_y >= 0
+    // Pre-condition: size.x > 0, size.y > 0
     void DrawRect(const Vec2f& pos, const Vec2f& size, const Color& color);
 
     // 2D 实心圆
