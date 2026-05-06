@@ -6,13 +6,10 @@
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/camera.h"
-
-namespace jpov {
-class Renderer;
-}
 #include "tools/jpov/interface/input_snapshot.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
+#include "tools/jpov/src/renderer.h"
 
 // ============================================================================
 // JPOV — 轻型渲染窗口框架

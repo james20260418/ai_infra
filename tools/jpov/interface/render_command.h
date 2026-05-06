@@ -169,8 +169,7 @@ struct RenderCommandList {
     // 渲染分辨率（像素），用户在每帧绘制前设定。
     // 决定了 FBO 的尺寸和坐标空间范围。
     // 分辨率变更时 Renderer 自动重建 FBO。
-    // 默认 (0,0) 表示与窗口尺寸一致。
-    // Pre-condition: width > 0 && height > 0（Clear 不清零）
+    // 必须设 >0（Clear 不清零），框架在 Render 时 CHECK_GT。
     int render_width  = 0;
     int render_height = 0;
 

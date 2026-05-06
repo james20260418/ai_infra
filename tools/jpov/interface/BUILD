@@ -13,6 +13,7 @@ cc_library(
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
+    srcs = ["render_command.cc"],
     hdrs = ["render_command.h"],
     visibility = ["//visibility:public"],
     deps = [

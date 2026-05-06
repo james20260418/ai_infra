@@ -11,33 +11,44 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 
-#include "tools/jpov/src/renderer.h"
-
+#include <algorithm>
 #include <glog/logging.h>
 
 // ========== GLFW 静态回调 ==========
 
 void JPOV::OnMouseButton(GLFWwindow* window, int button, int action, int mods) {
     (void)mods;
-    auto* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
-    if (self) self->HandleMouseButton(button, action, glfwGetTime());
+    CHECK(window != nullptr);
+    JPOV* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
+    if (self) {
+        self->HandleMouseButton(button, action, glfwGetTime());
+    }
 }
 
 void JPOV::OnMouseMove(GLFWwindow* window, double xpos, double ypos) {
-    auto* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
-    if (self) self->HandleMouseMove(xpos, ypos);
+    CHECK(window != nullptr);
+    JPOV* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
+    if (self) {
+        self->HandleMouseMove(xpos, ypos);
+    }
 }
 
 void JPOV::OnScroll(GLFWwindow* window, double /*xoffset*/, double yoffset) {
-    auto* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
-    if (self) self->HandleScroll(yoffset);
+    CHECK(window != nullptr);
+    JPOV* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
+    if (self) {
+        self->HandleScroll(yoffset);
+    }
 }
 
 void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods) {
     (void)mods;
     (void)scancode;
-    auto* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
-    if (self) self->HandleKey(key, scancode, action, mods);
+    CHECK(window != nullptr);
+    JPOV* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
+    if (self) {
+        self->HandleKey(key, scancode, action, mods);
+    }
 }
 
 // ========== 实例方法 ==========
@@ -49,11 +60,16 @@ JPOV::~JPOV() = default;
 void JPOV::Run() {
     LOG(INFO) << "JPOV::Run() — starting";
 
-    if (!glfwInit()) LOG(FATAL) << "glfwInit() failed";
+    if (!glfwInit()) {
+        LOG(FATAL) << "glfwInit() failed";
+    }
 
     window_ = glfwCreateWindow(config_.width, config_.height,
                                config_.title, nullptr, nullptr);
-    if (!window_) { glfwTerminate(); LOG(FATAL) << "glfwCreateWindow() failed"; }
+    if (!window_) {
+        glfwTerminate();
+        LOG(FATAL) << "glfwCreateWindow() failed";
+    }
 
     glfwMakeContextCurrent(window_);
     glfwSetWindowUserPointer(window_, this);
@@ -71,7 +87,9 @@ void JPOV::Run() {
     int64_t frame = 0;
 
     while (true) {
-        if (glfwWindowShouldClose(window_)) break;
+        if (glfwWindowShouldClose(window_)) {
+            break;
+        }
 
         // 1. 采集输入（鼠标/键盘状态）
         jpov::InputSnapshot input{};
@@ -88,23 +106,19 @@ void JPOV::Run() {
         jpov::RenderCommandList cmds;
         OneIteration(frame, input, winfo, &cmds);
 
-        // 4. 使用用户声明的分辨率（fallback 到窗口尺寸）
-        int rw = cmds.render_width  > 0 ? cmds.render_width  : fb_w;
-        int rh = cmds.render_height > 0 ? cmds.render_height : fb_h;
+        // 4. 绑定/创建 FBO（使用用户声明的分辨率）
+        renderer_->BeginFrame(cmds.render_width, cmds.render_height);
 
-        // 5. 绑定/创建 FBO（检测分辨率变化）
-        renderer_->BeginFrame(rw, rh);
-
-        // 6. 消费渲染指令（绘制到 FBO）
+        // 5. 消费渲染指令（绘制到 FBO）
         renderer_->Render(cmds, jpov::Camera{}, winfo);
 
-        // 7. FBO 窗口区域 → 默认 framebuffer（无缩放）
+        // 6. FBO 窗口区域 → 默认 framebuffer（无缩放）
         renderer_->Present(window_, fb_w, fb_h);
 
         glfwSwapBuffers(window_);
         glfwPollEvents();
 
-        // 8. 帧率控制
+        // 7. 帧率控制
         double elapsed = glfwGetTime() - frame_start_time_;
         double remaining = frame_interval - elapsed;
         if (remaining > 0.0) {
@@ -130,8 +144,9 @@ void JPOV::FlushMouseButton(const MouseButtonState& btn,
     int8_t raw;
     if (click_count > 0) {
         raw = static_cast<int8_t>(click_count);
-        for (int i = 0; i < click_count && i < jpov::kMaxClicksPerFrame; ++i)
+        for (int i = 0; i < click_count && i < jpov::kMaxClicksPerFrame; ++i) {
             out_clicks[i] = click_detail[i];
+        }
     } else if (btn.is_down) {
         raw = btn.moved_since_press ? -1 : -2;
     } else {
@@ -159,9 +174,14 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
                      &input->middle, input->middle_clicks);
     FlushKeyboard(input);
 
-    frame_.left_clicks = frame_.right_clicks = frame_.middle_clicks = 0;
+    frame_.left_clicks = 0;
+    frame_.right_clicks = 0;
+    frame_.middle_clicks = 0;
     scroll_delta_ = 0.0;
-    left_btn_.released_this_frame = right_btn_.released_this_frame = middle_btn_.released_this_frame = false;
+    left_btn_.released_this_frame = false;
+    right_btn_.released_this_frame = false;
+    middle_btn_.released_this_frame = false;
+
     for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
         keys_[i].click_count = 0;
         keys_[i].released_this_frame = false;
@@ -171,16 +191,29 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
 void JPOV::RenderCommands(const jpov::RenderCommandList&) {}
 
 void JPOV::HandleMouseButton(int button, int action, double now) {
-    struct Slot { MouseButtonState* s; int* cc; jpov::ClickEvent* pool; };
+    struct Slot {
+        MouseButtonState* s;
+        int* cc;
+        jpov::ClickEvent* pool;
+    };
     Slot slot;
     switch (button) {
-        case GLFW_MOUSE_BUTTON_LEFT:   slot = {&left_btn_, &frame_.left_clicks, frame_.left_clicks_detail}; break;
-        case GLFW_MOUSE_BUTTON_RIGHT:  slot = {&right_btn_, &frame_.right_clicks, frame_.right_clicks_detail}; break;
-        case GLFW_MOUSE_BUTTON_MIDDLE: slot = {&middle_btn_, &frame_.middle_clicks, frame_.middle_clicks_detail}; break;
-        default: return;
+        case GLFW_MOUSE_BUTTON_LEFT:
+            slot = {&left_btn_, &frame_.left_clicks, frame_.left_clicks_detail};
+            break;
+        case GLFW_MOUSE_BUTTON_RIGHT:
+            slot = {&right_btn_, &frame_.right_clicks, frame_.right_clicks_detail};
+            break;
+        case GLFW_MOUSE_BUTTON_MIDDLE:
+            slot = {&middle_btn_, &frame_.middle_clicks, frame_.middle_clicks_detail};
+            break;
+        default:
+            return;
     }
     if (action == GLFW_PRESS) {
-        slot.s->press_time = now; slot.s->is_down = true; slot.s->moved_since_press = false;
+        slot.s->press_time = now;
+        slot.s->is_down = true;
+        slot.s->moved_since_press = false;
     } else if (action == GLFW_RELEASE) {
         slot.s->released_this_frame = true;
         bool should_click = !slot.s->moved_since_press;
@@ -199,33 +232,60 @@ void JPOV::HandleMouseButton(int button, int action, double now) {
 
 void JPOV::HandleMouseMove(double xpos, double ypos) {
     if (xpos != mouse_x_ || ypos != mouse_y_) {
-        mouse_x_ = xpos; mouse_y_ = ypos;
-        if (left_btn_.is_down)   left_btn_.moved_since_press = true;
-        if (right_btn_.is_down)  right_btn_.moved_since_press = true;
-        if (middle_btn_.is_down) middle_btn_.moved_since_press = true;
+        mouse_x_ = xpos;
+        mouse_y_ = ypos;
+        if (left_btn_.is_down) {
+            left_btn_.moved_since_press = true;
+        }
+        if (right_btn_.is_down) {
+            right_btn_.moved_since_press = true;
+        }
+        if (middle_btn_.is_down) {
+            middle_btn_.moved_since_press = true;
+        }
     }
 }
 
-void JPOV::HandleScroll(double yoffset) { scroll_delta_ += yoffset; }
+void JPOV::HandleScroll(double yoffset) {
+    scroll_delta_ += yoffset;
+}
 
 double JPOV::FrameInterval() const {
-    return (config_.target_fps > 0) ? (1.0 / config_.target_fps) : (1.0 / 60.0);
+    if (config_.target_fps > 0) {
+        return 1.0 / config_.target_fps;
+    }
+    return 1.0 / 60.0;
 }
 
 void JPOV::HandleKey(int key, int, int action, int) {
-    if (key < 0 || key >= jpov::kMaxKeyCode) return;
-    auto& k = keys_[key];
-    if (action == GLFW_PRESS || action == GLFW_REPEAT) { if (!k.is_down) k.is_down = true; }
-    else if (action == GLFW_RELEASE) { k.released_this_frame = true; ++k.click_count; k.is_down = false; }
+    if (key < 0 || key >= jpov::kMaxKeyCode) {
+        return;
+    }
+    KeyButtonState& k = keys_[key];
+    if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+        if (!k.is_down) {
+            k.is_down = true;
+        }
+    } else if (action == GLFW_RELEASE) {
+        k.released_this_frame = true;
+        ++k.click_count;
+        k.is_down = false;
+    }
 }
 
 void JPOV::FlushKeyboard(jpov::InputSnapshot* input) {
     for (int i = 1; i < jpov::kMaxKeyCode; ++i) {
-        const auto& k = keys_[i];
+        const KeyButtonState& k = keys_[i];
         int8_t raw;
-        if (k.click_count > 0) raw = static_cast<int8_t>(std::min(k.click_count, jpov::kMaxClicksPerFrame));
-        else if (k.is_down) raw = -2;
-        else raw = 0;
+        if (k.click_count > 0) {
+            // Ensure click_count is within valid range for int8_t
+            int count = std::min(k.click_count, jpov::kMaxClicksPerFrame);
+            raw = static_cast<int8_t>(count);
+        } else if (k.is_down) {
+            raw = -2;
+        } else {
+            raw = 0;
+        }
         input->keys[i].raw = raw;
     }
 }
