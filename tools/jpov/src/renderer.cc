@@ -306,15 +306,21 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
 }
 
 void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
+    // Pre-condition:
+    //   - vertices 至少 2 个点
+    //   - edge_count (vertices.size()-1) ≤ kMaxPolylineEdges
+    //   - line_width > 0（像素单位）
     int n = static_cast<int>(cmd.vertices.size());
     CHECK_GE(n, 2);
     int edge_count = n - 1;
     CHECK_LE(edge_count, kMaxPolylineEdges);
+    CHECK_GT(cmd.line_width, 0.0f);
 
-    // 每条边 6 个顶点（2 个三角形组成 quad）
+    // 每个 quad 6 顶点 + 每个 bridge 6 顶点（2 三角形）
     // 顶点格式：x, y, x, y, ...
+    int total_verts = edge_count * 6 + (edge_count - 1) * 6;
     std::vector<float> verts;
-    verts.reserve(static_cast<size_t>(edge_count) * 6 * 2);
+    verts.reserve(static_cast<size_t>(total_verts) * 2);
 
     float half_w = cmd.line_width * 0.5f;
 
@@ -373,7 +379,6 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
         }
     }
 
-    int total_verts = edge_count * 6 + (edge_count - 1) * 6;
     CHECK_LE(total_verts, kMaxStreamVertices);
 
     glUseProgram(prog_);

@@ -24,7 +24,7 @@ namespace jpov {
 struct Renderer {
     static constexpr int kMaxFboDim = 4096;
     static constexpr int kMaxPolylineEdges = 10000;
-    static constexpr int kMaxStreamVertices = 66000;
+    static constexpr int kMaxStreamVertices = 120000;
 
     Renderer();
     ~Renderer();
