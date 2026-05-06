@@ -44,8 +44,8 @@ public:
         cmds->DrawRect({rect1_x, rect1_y}, {rect1_w, rect1_h}, jpov::kColorBlue);
 
         // ---- 矩形2：红色 50% alpha，从窗口左上角 (0,0) 开始，覆盖蓝色矩形
-        float rect2_w = rect1_w * 0.5f;
-        float rect2_h = rect1_h * 0.5f;
+        float rect2_w = rect1_w;
+        float rect2_h = rect1_h;
         jpov::Color red_alpha = {1.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect({0.0f, 0.0f}, {rect2_w, rect2_h}, red_alpha);
 
