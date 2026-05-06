@@ -1,8 +1,14 @@
-// JPOV Rect Demo — 演示渲染分辨率与窗口尺寸的区分
+// JPOV Rect Demo — 演示渲染分辨率、blend、窗口相对坐标
 //
-// 渲染分辨率 < 窗口尺寸 → 输出被拉伸贴合窗口。
-// 2D 绘制以窗口坐标系为参照（像素坐标），
-// 实际显示效果由 Present 时的拉伸决定。
+// 设计：
+//   渲染分辨率 640x360 < 窗口 1280x720 → Present 拉伸贴合
+//   2D 坐标以渲染分辨率的空间为参照（像素坐标）
+//   所有尺寸和位置按分辨率比例计算，不 hard code
+//
+// 绘制内容：
+//   1. 蓝色矩形（不透明），居中，大小为分辨率的 1/2
+//   2. 红色矩形（50% alpha），覆盖蓝色矩形的左上 1/4
+//      验证 blend 效果：重叠区域应显示红蓝混合色
 //
 // 编译运行：
 //   bazel run //tools/jpov:jpov_demo
@@ -24,19 +30,28 @@ public:
         (void)input;
         (void)winfo;
 
-        // 声明渲染分辨率（像素）：640x360 — 小于窗口尺寸 1280x720
-        // Present 时会将 640x360 的内容拉伸到窗口大小显示。
-        // 2D 坐标以 640x360 为空间（左上角原点）：
-        //   x ∈ [0, 640)，y ∈ [0, 360)
-        // 矩形在渲染分辨率空间居中：100x100
-        cmds->render_width  = 640;
-        cmds->render_height = 360;
+        // 声明渲染分辨率 640x360（小于窗口 1280x720）
+        const float kResW = 640.0f;
+        const float kResH = 360.0f;
+        cmds->render_width  = static_cast<int>(kResW);
+        cmds->render_height = static_cast<int>(kResH);
 
-        float rx = (640.0f - 100.0f) * 0.5f;
-        float ry = (360.0f - 100.0f) * 0.5f;
-        cmds->DrawRect({rx, ry}, {100.0f, 100.0f}, jpov::kColorBlue);
+        // ---- 矩形1：蓝色，居中，大小为分辨率的 1/2 ----
+        float rect1_w = kResW * 0.5f;
+        float rect1_h = kResH * 0.5f;
+        float rect1_x = (kResW - rect1_w) * 0.5f;
+        float rect1_y = (kResH - rect1_h) * 0.5f;
+        cmds->DrawRect({rect1_x, rect1_y}, {rect1_w, rect1_h}, jpov::kColorBlue);
 
-        // 鼠标事件打印
+        // ---- 矩形2：红色 50% alpha，覆盖蓝色矩形的左上 1/4 ----
+        float rect2_w = rect1_w * 0.5f;
+        float rect2_h = rect1_h * 0.5f;
+        float rect2_x = rect1_x;
+        float rect2_y = rect1_y;
+        jpov::Color red_alpha = {1.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect({rect2_x, rect2_y}, {rect2_w, rect2_h}, red_alpha);
+
+        // ---- 鼠标事件打印 ----
         auto print = [](const char* pre, const jpov::MouseState& s,
                         const jpov::ClickEvent* cl, float mx, float my) {
             if (s.IsClick()) {

@@ -195,7 +195,7 @@ void Renderer::Present(GLFWwindow* window, int window_width, int window_height) 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glBlitFramebuffer(0, 0, src_w, src_h,
                       0, 0, fb_w, fb_h,
-                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -205,10 +205,14 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     float y0 = cmd.pos.y();
     float x1 = x0 + cmd.size.x();
     float y1 = y0 + cmd.size.y();
-    verts[0] = x0; verts[1] = y0;
-    verts[2] = x1; verts[3] = y0;
-    verts[4] = x1; verts[5] = y1;
-    verts[6] = x0; verts[7] = y1;
+    verts[0] = x0;
+    verts[1] = y0;
+    verts[2] = x1;
+    verts[3] = y0;
+    verts[4] = x1;
+    verts[5] = y1;
+    verts[6] = x0;
+    verts[7] = y1;
 
     glUseProgram(prog_);
     glUniform2f(glGetUniformLocation(prog_, "uResolution"),
