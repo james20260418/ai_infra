@@ -188,6 +188,60 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
     }
 }
 
+void JPOV::RunOnce(const jpov::InputSnapshot& input,
+                    const jpov::WindowInfo& winfo,
+                    const char* out_png_path) {
+    CHECK_GT(winfo.width, 0);
+    CHECK_GT(winfo.height, 0);
+    CHECK(out_png_path != nullptr);
+
+    // 确保 GL context 存在（隐藏窗口）
+    bool need_gl = !window_;
+    if (need_gl) {
+        if (!glfwInit()) {
+            LOG(FATAL) << "glfwInit() failed";
+        }
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        window_ = glfwCreateWindow(static_cast<int>(winfo.width),
+                                   static_cast<int>(winfo.height),
+                                   "JPOV_RunOnce", nullptr, nullptr);
+        if (!window_) {
+            glfwTerminate();
+            LOG(FATAL) << "glfwCreateWindow() failed";
+        }
+        glfwMakeContextCurrent(window_);
+    }
+
+    // 确保 Renderer 已初始化
+    if (!renderer_) {
+        renderer_ = std::make_unique<jpov::Renderer>();
+        renderer_->Init();
+    }
+
+    // 1. 用户渲染逻辑：产出分辨率 + 绘制指令
+    jpov::RenderCommandList cmds;
+    OneIteration(0, input, winfo, &cmds);
+
+    // 2. 绑定/创建 FBO（使用用户声明的分辨率）
+    renderer_->BeginFrame(cmds.render_width, cmds.render_height);
+
+    // 3. 消费渲染指令（绘制到 FBO）
+    renderer_->Render(cmds, jpov::Camera{}, winfo);
+
+    // 4. 以窗口尺寸保存截图（模拟 Present 到窗口的效果）
+    int win_w = static_cast<int>(winfo.width);
+    int win_h = static_cast<int>(winfo.height);
+    renderer_->SaveScreenshot(win_w, win_h, out_png_path);
+
+    // 5. 清理临时 GL 资源
+    if (need_gl) {
+        renderer_.reset();
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+        glfwTerminate();
+    }
+}
+
 void JPOV::RenderCommands(const jpov::RenderCommandList&) {}
 
 void JPOV::HandleMouseButton(int button, int action, double now) {

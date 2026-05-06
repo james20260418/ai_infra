@@ -14,6 +14,7 @@ cc_library(
         "//tools/jpov/interface:window_info",
         "@glfw_static//:glfw",
         "@glog_static//:glog",
+        "@opencv_static//:opencv",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
@@ -52,4 +53,16 @@ cc_binary(
     name = "jpov_demo",
     srcs = ["demo/jpov_demo.cc"],
     deps = [":jpov"],
+)
+
+# ============================================================================
+# 示例：Screenshot Demo — 绘制后保存 PNG 截图
+# ============================================================================
+cc_binary(
+    name = "jpov_screenshot_demo",
+    srcs = ["demo/jpov_screenshot_demo.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
 )

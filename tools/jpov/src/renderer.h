@@ -10,6 +10,8 @@
 #define JPOV_RENDERER_H_
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
@@ -39,8 +41,21 @@ struct Renderer {
     void Render(const RenderCommandList& cmds, const Camera& camera,
                 const WindowInfo& winfo);
 
-    // Present: FBO[0,0,win_w,win_h] → framebuffer（无缩放，GL_NEAREST）
+    // Present: FBO[0,0,win_w,win_h] → framebuffer（无缩放，GL_LINEAR）
     void Present(GLFWwindow* window, int window_width, int window_height);
+
+    // SaveScreenshot: 截取窗口尺寸画面，保存为 PNG 文件
+    //
+    // 内部维护一个窗口尺寸的 output FBO，将渲染 FBO 拉伸到 output FBO 后读取，
+    // 模拟 Present 到窗口后截图的视觉效果。
+    //
+    // Pre-condition: win_w > 0 && win_h > 0
+    // Pre-condition: 已调用过 BeginFrame 且渲染 FBO 已初始化
+    void SaveScreenshot(int win_w, int win_h, const char* path);
+
+    // SaveScreenshotToBuffer: 同上，但以 RGBA uint8 数组输出
+    void SaveScreenshotToBuffer(int win_w, int win_h,
+                                std::vector<uint8_t>* out_pixels /*output*/);
 
 private:
     unsigned int fbo_ = 0;
@@ -50,8 +65,16 @@ private:
     int fbo_w_ = 0;
     int fbo_h_ = 0;
 
+    // Output FBO：窗口尺寸，用于截图时拉伸渲染 FBO 并读取像素
+    unsigned int out_fbo_ = 0;
+    unsigned int out_color_tex_ = 0;
+    int out_w_ = 0;
+    int out_h_ = 0;
+
     void EnsureFBO(int width, int height);
+    void EnsureOutputFBO(int win_w, int win_h);
     void DestroyFBO();
+    void DestroyOutputFBO();
     void CompileShaders();
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd);

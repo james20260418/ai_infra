@@ -65,6 +65,22 @@ public:
     // 创建窗口并进入事件循环，阻塞到退出
     void Run();
 
+    // RunOnce: 单帧执行 + 截图输出
+    //
+    // 模拟一帧的完整流程：OneIteration → BeginFrame → Render → SaveScreenshot
+    // 输出图片为窗口尺寸（win_w × win_h），模拟 Present 到窗口后的视觉效果。
+    //
+    // input  — input: 模拟的输入快照
+    // winfo  — input: 模拟的窗口信息（宽度/高度决定截图尺寸）
+    // out_png_path — output: 截图保存路径
+    //
+    // Pre-condition: GL context 当前
+    // Pre-condition: winfo.width > 0 && winfo.height > 0
+    // Pre-condition: out_png_path 非空
+    void RunOnce(const jpov::InputSnapshot& input,
+                 const jpov::WindowInfo& winfo,
+                 const char* out_png_path);
+
 private:
     // ---- 鼠标按键跨帧状态 ----
     struct MouseButtonState {
