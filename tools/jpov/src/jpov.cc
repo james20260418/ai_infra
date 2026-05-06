@@ -1,10 +1,13 @@
 // JPOV — 轻型渲染窗口框架 实现
 //
-// Run() 主循环：
-//   1. 创建 GLFW 窗口
-//   2. 初始化 Renderer（shader + VBO）
-//   3. 每帧：BeginFrame() → CaptureInput() → OneIteration() → Render() → Present()
-//   4. 窗口关闭后清理退出
+// Run() 主循环（单次 OneIteration）：
+//   1. 窗口信息 + 采集输入
+//   2. OneIteration(input, winfo, &cmds) — 用户产出分辨率 + 绘制指令
+//   3. BeginFrame(cmds.render_width/height) — 绑定/重建 FBO
+//   4. Render(cmds) — 绘制到 FBO
+//   5. Present() — FBO → 窗口
+//
+// 每帧只调用一次 OneIteration，用户在其中同时声明分辨率与绘制内容。
 
 #include "tools/jpov/include/jpov/jpov.h"
 
@@ -70,44 +73,38 @@ void JPOV::Run() {
     while (true) {
         if (glfwWindowShouldClose(window_)) break;
 
-        // 1. 窗口信息
+        // 1. 采集输入（鼠标/键盘状态）
+        jpov::InputSnapshot input{};
+        CaptureInput(&input);
+
+        // 2. 窗口信息
         int fb_w, fb_h;
         glfwGetFramebufferSize(window_, &fb_w, &fb_h);
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(fb_w);
         winfo.height = static_cast<float>(fb_h);
 
-        // 2. 用户渲染逻辑（填充 RenderCommandList，含 render_resolution）
+        // 3. 用户渲染逻辑：一次调用产出分辨率 + 绘制指令
         jpov::RenderCommandList cmds;
-        OneIteration(frame, jpov::InputSnapshot{}, winfo, &cmds);
+        OneIteration(frame, input, winfo, &cmds);
 
-        // 3. 使用用户声明的分辨率（fallback 到窗口尺寸）
+        // 4. 使用用户声明的分辨率（fallback 到窗口尺寸）
         int rw = cmds.render_width  > 0 ? cmds.render_width  : fb_w;
         int rh = cmds.render_height > 0 ? cmds.render_height : fb_h;
 
-        // 4. 绑定 FBO（检测分辨率变化，不变就复用）
+        // 5. 绑定/创建 FBO（检测分辨率变化）
         renderer_->BeginFrame(rw, rh);
 
-        // 5. 采集输入
-        jpov::InputSnapshot input{};
-        CaptureInput(&input);
-
-        // 6. 重新执行 OneIteration（这次带真实 input）
-        cmds.Clear();
-        OneIteration(frame, input, winfo, &cmds);
-
-        // 7. 消费渲染指令
-        rw = cmds.render_width  > 0 ? cmds.render_width  : fb_w;
-        rh = cmds.render_height > 0 ? cmds.render_height : fb_h;
+        // 6. 消费渲染指令（绘制到 FBO）
         renderer_->Render(cmds, jpov::Camera{}, winfo);
 
-        // 8. FBO → 窗口
+        // 7. FBO 窗口区域 → 默认 framebuffer（无缩放）
         renderer_->Present(window_, fb_w, fb_h);
 
         glfwSwapBuffers(window_);
         glfwPollEvents();
 
-        // 帧率控制
+        // 8. 帧率控制
         double elapsed = glfwGetTime() - frame_start_time_;
         double remaining = frame_interval - elapsed;
         if (remaining > 0.0) {
