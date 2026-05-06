@@ -350,18 +350,26 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
         verts.push_back(n2.x()); verts.push_back(n2.y());
         verts.push_back(n1.x()); verts.push_back(n1.y());
         verts.push_back(n3.x()); verts.push_back(n3.y());
-        // 顶点圆盘：在 p1 处以 half_w 为半径画圆（12 个三角形），覆盖所有方向间隙
+        // 每个连接处在 V 形间隙外侧补一个三角形
         if (i + 1 < edge_count) {
-            constexpr int kFanVerts = 12;
-            for (int fi = 0; fi < kFanVerts; ++fi) {
-                float a0 = 2.0f * 3.14159265f * fi / kFanVerts;
-                float a1 = 2.0f * 3.14159265f * (fi + 1) / kFanVerts;
-                verts.push_back(p1.x()); verts.push_back(p1.y());
-                verts.push_back(p1.x() + half_w * std::cos(a0));
-                verts.push_back(p1.y() + half_w * std::sin(a0));
-                verts.push_back(p1.x() + half_w * std::cos(a1));
-                verts.push_back(p1.y() + half_w * std::sin(a1));
-            }
+            const Vec2f& p2 = cmd.vertices[i + 2];
+            Vec2f dn = p2 - p1;
+            float ln = std::sqrt(dn.x()*dn.x()+dn.y()*dn.y());
+            Vec2f perp_n;
+            if (ln < kEpsilon) { perp_n = {1.0f, 0.0f}; }
+            else { perp_n = {-dn.y()/ln, dn.x()/ln}; }
+
+            // 用顶点和两段矩形外侧角点构成填充三角形
+            // 内侧三角形 (p1, n3, n3_next) 和 (p1, n2_next, n2) 填充间隙
+            verts.push_back(p1.x()); verts.push_back(p1.y());
+            verts.push_back(n3.x()); verts.push_back(n3.y());
+            verts.push_back((p1 - perp_n * half_w).x());
+            verts.push_back((p1 - perp_n * half_w).y());
+
+            verts.push_back(p1.x()); verts.push_back(p1.y());
+            verts.push_back((p1 + perp_n * half_w).x());
+            verts.push_back((p1 + perp_n * half_w).y());
+            verts.push_back(n2.x()); verts.push_back(n2.y());
         }
     }
 
