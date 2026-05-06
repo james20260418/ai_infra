@@ -16,7 +16,10 @@
 #include "tools/jpov/include/jpov/jpov.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <glog/logging.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 // ========== GLFW 静态回调 ==========
 
@@ -70,7 +73,26 @@ void JPOV::Init() {
     CHECK(!initialized_) << "JPOV already initialized. Call Finalize() first.";
 
     if (!glfwInit()) {
-        LOG(FATAL) << "glfwInit() failed";
+        if (!config_.headless) {
+            LOG(FATAL) << "glfwInit() failed";
+        }
+        LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
+        int pid = fork();
+        if (pid == 0) {
+            // 子进程：启动 Xvfb
+            execlp("Xvfb", "Xvfb", ":99", "-ac", "-screen", "0", "1280x720x24",
+                   "-noreset", "+extension", "GLX", "+iglx", nullptr);
+            _exit(1);
+        }
+        CHECK_GT(pid, 0) << "fork() failed";
+        xvfb_pid_ = pid;
+        // 设置 DISPLAY 环境变量，让 glfwInit 连到这个 display
+        setenv("DISPLAY", ":99", 1);
+        sleep(1);
+        if (!glfwInit()) {
+            LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
+        }
+        started_xvfb_ = true;
     }
 
     int win_w = config_.width;
@@ -116,6 +138,15 @@ void JPOV::Finalize() {
     }
 
     glfwTerminate();
+
+    if (started_xvfb_ && xvfb_pid_ > 0) {
+        kill(xvfb_pid_, SIGTERM);
+        waitpid(xvfb_pid_, nullptr, 0);
+        xvfb_pid_ = 0;
+        started_xvfb_ = false;
+        LOG(INFO) << "JPOV: Xvfb terminated";
+    }
+
     initialized_ = false;
     LOG(INFO) << "JPOV::Finalize()";
 }

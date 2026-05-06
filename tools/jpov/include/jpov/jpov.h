@@ -1,8 +1,10 @@
 #ifndef JPOV_JPOV_H_
 #define JPOV_JPOV_H_
 
+#include <csignal>
 #include <cstdint>
 #include <memory>
+#include <sys/types.h>
 
 #include <GLFW/glfw3.h>
 
@@ -164,7 +166,9 @@ private:
     Config config_;
     GLFWwindow* window_ = nullptr;
     std::unique_ptr<jpov::Renderer> renderer_;
-    bool initialized_ = false;
+    pid_t xvfb_pid_    = 0;
+    bool  started_xvfb_ = false;
+    bool  initialized_  = false;
 
     // ---- GLFW 回调（静态转发） ----
     static void OnMouseButton(GLFWwindow* window, int button, int action, int mods);

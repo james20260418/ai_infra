@@ -77,7 +77,7 @@ private:
     void DestroyOutputFBO();
     void CompileShaders();
     void CreateStreamVBO();
-    void DrawRect2D(const Rect2DCommand& cmd);
+    void DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo);
 };
 
 }  // namespace jpov

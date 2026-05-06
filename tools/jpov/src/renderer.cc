@@ -1,5 +1,5 @@
 // JPOV Renderer 实现
-// FBO 动态调整，坐标以渲染分辨率为空间。
+// FBO 动态调整，坐标以窗口坐标为空间。
 
 #define GL_GLEXT_PROTOTYPES
 
@@ -21,13 +21,16 @@
 
 namespace {
 
+// 窗口坐标 → NDC 标准化设备坐标
+// 原点在窗口左上角，x→右，y→下
+// 2D 坐标使用窗口尺寸做 NDC 变换（坐标超出 FBO 范围即裁剪）
 const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec2 aPos;
-uniform vec2 uResolution;
+uniform vec2 uFboSize;
 
 void main() {
-    vec2 ndc = (aPos / uResolution) * 2.0 - 1.0;
+    vec2 ndc = (aPos / uFboSize) * 2.0 - 1.0;
     ndc.y = -ndc.y;
     gl_Position = vec4(ndc, 0.0, 1.0);
 }
@@ -192,7 +195,7 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
             case DrawCommandType::kRect2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.rect2d.size()));
-                DrawRect2D(cmds.rect2d[idx]);
+                DrawRect2D(cmds.rect2d[idx], winfo);
                 break;
             }
             default:
@@ -296,7 +299,7 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
 }
 
-void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
+void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {
     float verts[8];
     float x0 = cmd.pos.x();
     float y0 = cmd.pos.y();
@@ -312,9 +315,10 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     verts[7] = y1;
 
     glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uResolution"),
-                static_cast<float>(fbo_w_),
-                static_cast<float>(fbo_h_));
+    // uFboSize = NDC 变换参照。窗口坐标用窗口尺寸，
+    // viewport 用 FBO 尺寸，超出 FBO 部分自动裁剪。
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                winfo.width, winfo.height);
     glUniform4f(glGetUniformLocation(prog_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
