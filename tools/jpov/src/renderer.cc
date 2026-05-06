@@ -198,6 +198,12 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                 DrawRect2D(cmds.rect2d[idx], winfo);
                 break;
             }
+            case DrawCommandType::kPolyline2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.polyline2d.size()));
+                DrawPolyline2D(cmds.polyline2d[idx], winfo);
+                break;
+            }
             default:
                 break;
         }
@@ -297,6 +303,68 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     cv::Mat flipped;
     cv::flip(raw, flipped, 0);
     std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
+}
+
+void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
+    int n = static_cast<int>(cmd.vertices.size());
+    CHECK_GE(n, 2);
+    int edge_count = n - 1;
+    CHECK_LE(edge_count, kMaxPolylineEdges);
+
+    // 每条边 6 个顶点（2 个三角形组成 quad）
+    // 顶点格式：x, y, x, y, ...
+    std::vector<float> verts;
+    verts.reserve(static_cast<size_t>(edge_count) * 6 * 2);
+
+    float half_w = cmd.line_width * 0.5f;
+
+    for (int i = 0; i < edge_count; ++i) {
+        const Vec2f& p0 = cmd.vertices[i];
+        const Vec2f& p1 = cmd.vertices[i + 1];
+
+        // 边向量
+        Vec2f dir = p1 - p0;
+        float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
+        CHECK_GT(len, 0.0f);
+
+        // 垂直方向（归一化）
+        Vec2f perp = {-dir.y() / len, dir.x() / len};
+
+        // 四个角点
+        Vec2f n0 = p0 + perp * half_w;
+        Vec2f n1 = p0 - perp * half_w;
+        Vec2f n2 = p1 + perp * half_w;
+        Vec2f n3 = p1 - perp * half_w;
+
+        // 两个三角形：n0-n1-n2, n2-n1-n3 (CW)
+        // T1
+        verts.push_back(n0.x()); verts.push_back(n0.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n2.x()); verts.push_back(n2.y());
+        // T2
+        verts.push_back(n2.x()); verts.push_back(n2.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n3.x()); verts.push_back(n3.y());
+    }
+
+    int total_verts = edge_count * 6;
+    CHECK_LE(total_verts, kMaxStreamVertices);
+
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                winfo.width, winfo.height);
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, total_verts);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {

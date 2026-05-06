@@ -23,7 +23,8 @@ namespace jpov {
 
 struct Renderer {
     static constexpr int kMaxFboDim = 4096;
-    static constexpr int kMaxStreamVertices = 1000;
+    static constexpr int kMaxPolylineEdges = 10000;
+    static constexpr int kMaxStreamVertices = 66000;
 
     Renderer();
     ~Renderer();
@@ -78,6 +79,7 @@ private:
     void CompileShaders();
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo);
+    void DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo);
 };
 
 }  // namespace jpov
