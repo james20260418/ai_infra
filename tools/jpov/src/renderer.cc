@@ -15,6 +15,10 @@
 
 #include <glog/logging.h>
 
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+
 namespace {
 
 const char* kVs = R"glsl(
@@ -88,6 +92,7 @@ Renderer::Renderer() = default;
 
 Renderer::~Renderer() {
     DestroyFBO();
+    DestroyOutputFBO();
     if (prog_)       glDeleteProgram(prog_);
     if (stream_vbo_) glDeleteBuffers(1, &stream_vbo_);
 }
@@ -101,6 +106,17 @@ void Renderer::DestroyFBO() {
     }
     fbo_w_ = 0;
     fbo_h_ = 0;
+}
+
+void Renderer::DestroyOutputFBO() {
+    if (out_fbo_) {
+        glDeleteFramebuffers(1, &out_fbo_);
+        glDeleteTextures(1, &out_color_tex_);
+        out_fbo_ = 0;
+        out_color_tex_ = 0;
+    }
+    out_w_ = 0;
+    out_h_ = 0;
 }
 
 void Renderer::EnsureFBO(int width, int height) {
@@ -197,6 +213,87 @@ void Renderer::Present(GLFWwindow* window, int window_width, int window_height) 
                       0, 0, fb_w, fb_h,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::EnsureOutputFBO(int win_w, int win_h) {
+    if (out_w_ == win_w && out_h_ == win_h && out_fbo_) return;
+
+    CHECK_GT(win_w, 0);
+    CHECK_GT(win_h, 0);
+
+    DestroyOutputFBO();
+
+    glGenTextures(1, &out_color_tex_);
+    glBindTexture(GL_TEXTURE_2D, out_color_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, win_w, win_h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glGenFramebuffers(1, &out_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, out_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, out_color_tex_, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "Output FBO failed, status=" << status;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    out_w_ = win_w;
+    out_h_ = win_h;
+    LOG(INFO) << "Renderer: Output FBO " << win_w << "x" << win_h;
+}
+
+void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
+    std::vector<uint8_t> pixels;
+    SaveScreenshotToBuffer(win_w, win_h, &pixels);
+
+    CHECK(cv::imwrite(path,
+          cv::Mat(win_h, win_w, CV_8UC4, pixels.data())))
+        << "Failed to write PNG: " << path;
+    LOG(INFO) << "Screenshot saved: " << path
+              << " (" << win_w << "x" << win_h << ")";
+}
+
+void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
+                                        std::vector<uint8_t>* out_pixels) {
+    CHECK_GT(win_w, 0);
+    CHECK_GT(win_h, 0);
+    CHECK_NE(fbo_, 0u);
+    CHECK_NOTNULL(out_pixels);
+
+    // 1. 拉伸到 output FBO 模拟 Present 到窗口的效果
+    EnsureOutputFBO(win_w, win_h);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, out_fbo_);
+    glViewport(0, 0, win_w, win_h);
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    int src_w = std::min(win_w, fbo_w_);
+    int src_h = std::min(win_h, fbo_h_);
+    glBlitFramebuffer(0, 0, src_w, src_h,
+                      0, 0, win_w, win_h,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 2. 从 output FBO 读回像素
+    out_pixels->resize(static_cast<size_t>(win_w) * win_h * 4);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, out_fbo_);
+    glReadPixels(0, 0, win_w, win_h, GL_RGBA, GL_UNSIGNED_BYTE, out_pixels->data());
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+    // 3. RGBA → BGRA（OpenCV 用 BGRA）
+    for (size_t i = 0; i < out_pixels->size(); i += 4) {
+        std::swap((*out_pixels)[i], (*out_pixels)[i + 2]);
+    }
+
+    // 4. OpenGL 左下角 → PNG 左上角（翻转 Y）
+    cv::Mat raw(win_h, win_w, CV_8UC4, out_pixels->data());
+    cv::Mat flipped;
+    cv::flip(raw, flipped, 0);
+    std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
 }
 
 void Renderer::DrawRect2D(const Rect2DCommand& cmd) {

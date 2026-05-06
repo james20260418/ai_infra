@@ -1,13 +1,17 @@
 // JPOV — 轻型渲染窗口框架 实现
 //
-// Run() 主循环（单次 OneIteration）：
-//   1. 窗口信息 + 采集输入
-//   2. OneIteration(input, winfo, &cmds) — 用户产出分辨率 + 绘制指令
-//   3. BeginFrame(cmds.render_width/height) — 绑定/重建 FBO
-//   4. Render(cmds) — 绘制到 FBO
-//   5. Present() — FBO → 窗口
+// 生命周期：
+//   Init() → Run() 或 RunOnce() → Finalize()
 //
-// 每帧只调用一次 OneIteration，用户在其中同时声明分辨率与绘制内容。
+// Run() 主循环（每帧）：
+//   1. PollEvents + CaptureInput
+//   2. RunOnceInternal(frame, input, winfo)
+//   3. Present(window)
+//   4. SwapBuffers
+//
+// RunOnce()：
+//   1. RunOnceInternal(0, input, winfo)
+//   2. SaveScreenshot(path)
 
 #include "tools/jpov/include/jpov/jpov.h"
 
@@ -51,36 +55,92 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
     }
 }
 
-// ========== 实例方法 ==========
+// ========== 生命周期 ==========
 
-JPOV::JPOV(Config cfg) : config_(cfg), window_(nullptr) {}
+JPOV::JPOV(Config cfg)
+    : config_(cfg), window_(nullptr), initialized_(false) {}
 
-JPOV::~JPOV() = default;
+JPOV::~JPOV() {
+    if (initialized_) {
+        Finalize();
+    }
+}
 
-void JPOV::Run() {
-    LOG(INFO) << "JPOV::Run() — starting";
+void JPOV::Init() {
+    CHECK(!initialized_) << "JPOV already initialized. Call Finalize() first.";
 
     if (!glfwInit()) {
         LOG(FATAL) << "glfwInit() failed";
     }
 
-    window_ = glfwCreateWindow(config_.width, config_.height,
-                               config_.title, nullptr, nullptr);
+    int win_w = config_.width;
+    int win_h = config_.height;
+
+    if (config_.headless) {
+        // 隐藏窗口：仅用于 GL context
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    }
+
+    window_ = glfwCreateWindow(win_w, win_h, config_.title, nullptr, nullptr);
     if (!window_) {
         glfwTerminate();
         LOG(FATAL) << "glfwCreateWindow() failed";
     }
 
     glfwMakeContextCurrent(window_);
-    glfwSetWindowUserPointer(window_, this);
-    glfwSetMouseButtonCallback(window_, OnMouseButton);
-    glfwSetCursorPosCallback(window_, OnMouseMove);
-    glfwSetScrollCallback(window_, OnScroll);
-    glfwSetKeyCallback(window_, OnKey);
 
-    // 初始化 Renderer（shader + VBO，FBO 在 BeginFrame 时按需创建）
+    if (!config_.headless) {
+        glfwSetWindowUserPointer(window_, this);
+        glfwSetMouseButtonCallback(window_, OnMouseButton);
+        glfwSetCursorPosCallback(window_, OnMouseMove);
+        glfwSetScrollCallback(window_, OnScroll);
+        glfwSetKeyCallback(window_, OnKey);
+    }
+
     renderer_ = std::make_unique<jpov::Renderer>();
     renderer_->Init();
+
+    initialized_ = true;
+    LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
+              << " " << win_w << "x" << win_h;
+}
+
+void JPOV::Finalize() {
+    CHECK(initialized_) << "JPOV not initialized.";
+
+    renderer_.reset();
+
+    if (window_) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+    }
+
+    glfwTerminate();
+    initialized_ = false;
+    LOG(INFO) << "JPOV::Finalize()";
+}
+
+// ========== 核心渲染步骤 ==========
+
+void JPOV::RunOnceInternal(int64_t frame_count,
+                            const jpov::InputSnapshot& input,
+                            const jpov::WindowInfo& winfo) {
+    CHECK(initialized_);
+
+    jpov::RenderCommandList cmds;
+    OneIteration(frame_count, input, winfo, &cmds);
+
+    renderer_->BeginFrame(cmds.render_width, cmds.render_height);
+    renderer_->Render(cmds, jpov::Camera{}, winfo);
+}
+
+// ========== 运行模式 ==========
+
+void JPOV::Run() {
+    CHECK(initialized_);
+    CHECK(!config_.headless) << "Run() requires a visible window. "
+                                "Use headless=false or call RunOnce() instead.";
+    CHECK(window_ != nullptr);
 
     double frame_interval = FrameInterval();
     frame_start_time_ = glfwGetTime();
@@ -91,34 +151,26 @@ void JPOV::Run() {
             break;
         }
 
-        // 1. 采集输入（鼠标/键盘状态）
+        // 1. 采集输入 + 窗口信息
         jpov::InputSnapshot input{};
         CaptureInput(&input);
 
-        // 2. 窗口信息
         int fb_w, fb_h;
         glfwGetFramebufferSize(window_, &fb_w, &fb_h);
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(fb_w);
         winfo.height = static_cast<float>(fb_h);
 
-        // 3. 用户渲染逻辑：一次调用产出分辨率 + 绘制指令
-        jpov::RenderCommandList cmds;
-        OneIteration(frame, input, winfo, &cmds);
+        // 2. 核心渲染（OneIteration + BeginFrame + Render）
+        RunOnceInternal(frame, input, winfo);
 
-        // 4. 绑定/创建 FBO（使用用户声明的分辨率）
-        renderer_->BeginFrame(cmds.render_width, cmds.render_height);
-
-        // 5. 消费渲染指令（绘制到 FBO）
-        renderer_->Render(cmds, jpov::Camera{}, winfo);
-
-        // 6. FBO 窗口区域 → 默认 framebuffer（无缩放）
+        // 3. Present 到窗口
         renderer_->Present(window_, fb_w, fb_h);
 
         glfwSwapBuffers(window_);
         glfwPollEvents();
 
-        // 7. 帧率控制
+        // 4. 帧率控制
         double elapsed = glfwGetTime() - frame_start_time_;
         double remaining = frame_interval - elapsed;
         if (remaining > 0.0) {
@@ -129,12 +181,27 @@ void JPOV::Run() {
         ++frame;
     }
 
-    renderer_.reset();
-    glfwDestroyWindow(window_);
-    glfwTerminate();
-    window_ = nullptr;
     LOG(INFO) << "JPOV::Run() — exiting (" << frame << " frames)";
 }
+
+void JPOV::RunOnce(const jpov::InputSnapshot& input,
+                    const jpov::WindowInfo& winfo,
+                    const char* out_png_path) {
+    CHECK(initialized_);
+    CHECK_GT(winfo.width, 0);
+    CHECK_GT(winfo.height, 0);
+    CHECK(out_png_path != nullptr);
+
+    // 1. 核心渲染（与 Run() 完全一致）
+    RunOnceInternal(0, input, winfo);
+
+    // 2. 保存窗口尺寸截图
+    int win_w = static_cast<int>(winfo.width);
+    int win_h = static_cast<int>(winfo.height);
+    renderer_->SaveScreenshot(win_w, win_h, out_png_path);
+}
+
+// ========== 输入采集 ==========
 
 void JPOV::FlushMouseButton(const MouseButtonState& btn,
                               int click_count,
@@ -189,6 +256,8 @@ void JPOV::CaptureInput(jpov::InputSnapshot* input) {
 }
 
 void JPOV::RenderCommands(const jpov::RenderCommandList&) {}
+
+// ========== GLFW 事件处理 ==========
 
 void JPOV::HandleMouseButton(int button, int action, double now) {
     struct Slot {
@@ -278,7 +347,6 @@ void JPOV::FlushKeyboard(jpov::InputSnapshot* input) {
         const KeyButtonState& k = keys_[i];
         int8_t raw;
         if (k.click_count > 0) {
-            // Ensure click_count is within valid range for int8_t
             int count = std::min(k.click_count, jpov::kMaxClicksPerFrame);
             raw = static_cast<int8_t>(count);
         } else if (k.is_down) {

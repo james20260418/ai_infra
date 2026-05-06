@@ -74,6 +74,8 @@ int main() {
     cfg.height = 720;
     cfg.target_fps = 30;
     DemoApp app(cfg);
+    app.Init();
     app.Run();
+    app.Finalize();
     return 0;
 }
