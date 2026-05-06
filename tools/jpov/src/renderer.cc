@@ -350,9 +350,22 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
         verts.push_back(n2.x()); verts.push_back(n2.y());
         verts.push_back(n1.x()); verts.push_back(n1.y());
         verts.push_back(n3.x()); verts.push_back(n3.y());
+        // 顶点圆盘：在 p1 处以 half_w 为半径画圆（12 个三角形），覆盖所有方向间隙
+        if (i + 1 < edge_count) {
+            constexpr int kFanVerts = 12;
+            for (int fi = 0; fi < kFanVerts; ++fi) {
+                float a0 = 2.0f * 3.14159265f * fi / kFanVerts;
+                float a1 = 2.0f * 3.14159265f * (fi + 1) / kFanVerts;
+                verts.push_back(p1.x()); verts.push_back(p1.y());
+                verts.push_back(p1.x() + half_w * std::cos(a0));
+                verts.push_back(p1.y() + half_w * std::sin(a0));
+                verts.push_back(p1.x() + half_w * std::cos(a1));
+                verts.push_back(p1.y() + half_w * std::sin(a1));
+            }
+        }
     }
 
-    int total_verts = edge_count * 6;
+    int total_verts = edge_count * 6 + (edge_count - 1) * 6;
     CHECK_LE(total_verts, kMaxStreamVertices);
 
     glUseProgram(prog_);

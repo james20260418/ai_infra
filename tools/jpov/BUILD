@@ -78,3 +78,12 @@ cc_binary(
         "//tools/common:utils",
     ],
 )
+
+cc_binary(
+    name = "jpov_polyline_verify",
+    srcs = ["demo/jpov_polyline_verify.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+)
