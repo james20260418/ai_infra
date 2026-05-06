@@ -1,17 +1,17 @@
-// JPOV Polyline Demo — 单帧绘制折线后保存 PNG 截图
+// JPOV Polyline Demo — Lissajous 曲线单帧截图
 //
 // 使用 RunOnce 接口：headless 模式，无窗口，仅输出 PNG。
 //
 // 绘制内容：
-//   1. 白色正三角形边框（窗口坐标）
-//      - 三角形顶点在窗口内均匀分布
-//      - 线宽 4px
+//   1. Lissajous 曲线（窗坐标，1000 点）
+//   2. 渐变色，8px 线宽
 //
 // 输出：ai_infra/output/jpov_polyline_demo/frame_0000.png (1280x720)
 //
 // 编译运行：
 //   bazel run //tools/jpov:jpov_polyline_demo
 
+#include <cmath>
 #include <cstdio>
 #include <glog/logging.h>
 
@@ -35,24 +35,30 @@ public:
         cmds->render_width  = static_cast<int>(kResW);
         cmds->render_height = static_cast<int>(kResH);
 
-        // ---- 正三角形边框（窗口坐标） ----
-        // 三角形顶点在窗口坐标系中均匀分布
-        // 窗口 1280x720 → 三角形外接圆半径取 300px
-        float cx = winfo.width * 0.5f;
-        float cy = winfo.height * 0.5f;
-        float r = 300.0f;
+        // ---- Lissajous 曲线（窗坐标） ----
+        // 参数取 frame_count=0 时的值
+        double t = 0.0;
+        double a = 5.0 + 1.0 * std::sin(t * 0.3);
+        double b = 4.0 + 1.0 * std::cos(t * 0.2);
+        double delta = t * 0.5;
 
-        std::vector<jpov::Vec2f> triangle;
-        for (int i = 0; i < 3; ++i) {
-            float angle = static_cast<float>(i) * 2.0f * 3.14159265f / 3.0f - 3.14159265f / 2.0f;
-            float x = cx + r * std::cos(angle);
-            float y = cy + r * std::sin(angle);
-            triangle.emplace_back(x, y);
+        double scale = 300.0;
+        double cx = winfo.width * 0.5;
+        double cy = winfo.height * 0.5;
+
+        const int kNumPoints = 1000;
+        std::vector<jpov::Vec2f> vertices;
+        vertices.reserve(kNumPoints);
+
+        for (int i = 0; i < kNumPoints; ++i) {
+            double theta = 2.0 * M_PI * i / (kNumPoints - 1);
+            double x = cx + scale * std::cos(a * theta + delta) * std::cos(theta);
+            double y = cy + scale * std::sin(b * theta) * std::sin(theta);
+            vertices.emplace_back(static_cast<float>(x), static_cast<float>(y));
         }
-        // 闭合三角形：首尾相连
-        triangle.push_back(triangle[0]);
 
-        cmds->DrawPolyline(triangle, jpov::kColorWhite, 4.0f);
+        jpov::Color color = {0.0f, 0.8f, 1.0f, 1.0f};  // 浅蓝色
+        cmds->DrawPolyline(vertices, color, 8.0f);
     }
 };
 

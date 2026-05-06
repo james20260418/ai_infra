@@ -325,10 +325,15 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
         // 边向量
         Vec2f dir = p1 - p0;
         float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
-        CHECK_GT(len, 0.0f);
 
-        // 垂直方向（归一化）
-        Vec2f perp = {-dir.y() / len, dir.x() / len};
+        // 垂直方向（归一化），len 过短时水平偏移
+        Vec2f perp;
+        static constexpr float kEpsilon = 1e-6f;
+        if (len < kEpsilon) {
+            perp = {1.0f, 0.0f};
+        } else {
+            perp = {-dir.y() / len, dir.x() / len};
+        }
 
         // 四个角点
         Vec2f n0 = p0 + perp * half_w;
