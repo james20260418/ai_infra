@@ -74,6 +74,14 @@ cc_binary(
     copts = ["-std=c++20"],
 )
 
+# 字体渲染方向测试 demo（需要 GL 环境）
+cc_binary(
+    name = "main_font_demo",
+    srcs = ["main_font_demo.cc"],
+    deps = ["//tools/jpov:jpov"],
+    copts = ["-std=c++20"],
+)
+
 # 食物生成和吃食物增长验收测试
 cc_test(
     name = "food_acceptance_test",
