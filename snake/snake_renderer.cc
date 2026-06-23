@@ -118,7 +118,10 @@ void GameRenderer::DrawChar(char ch, float x, float y, float cell_size,
         for (int row = 0; row < 7; ++row) {
             if (bits & (1 << row)) {
                 float px = x + col * cell_size;
-                float py = y + (6 - row) * cell_size;  // 行0=底，行6=顶
+                // JPOV 为 Y-down 坐标系：原点左上角，Y 增大向下
+                // 经隔离测试确认：字体数据实际为 bit0=最上一行(最小Y)，bit6=最下一行(最大Y)
+                // 因此 bit0(row=0) → Y 最小位置(顶)，bit6(row=6) → Y 最大位置(底)
+                float py = y + row * cell_size;
                 cmds->DrawRect({px, py}, {cell_size, cell_size}, color);
             }
         }
