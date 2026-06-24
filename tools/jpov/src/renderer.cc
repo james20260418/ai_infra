@@ -9,11 +9,17 @@
 #include <cstdio>
 #include <vector>
 
+#include "geom/common/common.h"
+
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
 
 #include <glog/logging.h>
+
+// stb_image_write — 轻量级 PNG 编码，跨平台，无外部依赖
+// 实现由 //third_party/stb:stb_image_write 的 BUILD copts 提供
+#include "stb_image_write.h"
 
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
@@ -53,12 +59,6 @@
 #define glEnableVertexAttribArray  gl_EnableVertexAttribArray
 #define glDisableVertexAttribArray gl_DisableVertexAttribArray
 #define glVertexAttribPointer    gl_VertexAttribPointer
-#endif
-
-#ifndef JPOV_NO_OPENCV
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
 #endif
 
 namespace {
@@ -299,22 +299,20 @@ void Renderer::EnsureOutputFBO(int win_w, int win_h) {
     LOG(INFO) << "Renderer: Output FBO " << win_w << "x" << win_h;
 }
 
-#ifndef JPOV_NO_OPENCV
 void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
+    geom::EnsurePathForFilename(path);
+
     std::vector<uint8_t> pixels;
     SaveScreenshotToBuffer(win_w, win_h, &pixels);
 
-    CHECK(cv::imwrite(path,
-          cv::Mat(win_h, win_w, CV_8UC4, pixels.data())))
-        << "Failed to write PNG: " << path;
+    // stb_image_write takes RGBA pixels with stride = 4*width
+    // stbi_flip_vertically_on_write handles OpenGL's bottom-left origin
+    stbi_flip_vertically_on_write(1);
+    int ok = stbi_write_png(path, win_w, win_h, 4, pixels.data(), win_w * 4);
+    CHECK_NE(ok, 0) << "Failed to write PNG: " << path;
     LOG(INFO) << "Screenshot saved: " << path
               << " (" << win_w << "x" << win_h << ")";
 }
-#else
-void Renderer::SaveScreenshot(int, int, const char*) {
-    LOG(FATAL) << "SaveScreenshot not available without OpenCV";
-}
-#endif
 
 void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
                                         std::vector<uint8_t>* out_pixels) {
@@ -344,33 +342,10 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     glReadPixels(0, 0, win_w, win_h, GL_RGBA, GL_UNSIGNED_BYTE, out_pixels->data());
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
-#ifndef JPOV_NO_OPENCV
-    // 3. RGBA → BGRA（OpenCV 用 BGRA）
-    for (size_t i = 0; i < out_pixels->size(); i += 4) {
-        std::swap((*out_pixels)[i], (*out_pixels)[i + 2]);
-    }
-
-    // 4. OpenGL 左下角 → PNG 左上角（翻转 Y）
-    cv::Mat raw(win_h, win_w, CV_8UC4, out_pixels->data());
-    cv::Mat flipped;
-    cv::flip(raw, flipped, 0);
-    std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
-#else
-    // RGBA 转 BGRA 不用 OpenCV，直接手动翻转 Y
-    for (size_t i = 0; i < out_pixels->size(); i += 4) {
-        std::swap((*out_pixels)[i], (*out_pixels)[i + 2]);
-    }
-    // 翻转 Y
-    size_t row_size = static_cast<size_t>(win_w) * 4;
-    std::vector<uint8_t> row_buf(row_size);
-    for (int y = 0; y < win_h / 2; ++y) {
-        uint8_t* top = out_pixels->data() + y * row_size;
-        uint8_t* bot = out_pixels->data() + (win_h - 1 - y) * row_size;
-        std::memcpy(row_buf.data(), top, row_size);
-        std::memcpy(top, bot, row_size);
-        std::memcpy(bot, row_buf.data(), row_size);
-    }
-#endif
+    // 3. RGBA → BGRA（stb_image_write 期望 RGBA，不需要转换）
+    // stb_image_write 接受 RGBA 数据，和 OpenGL 读出的 RGBA 一致。
+    // Y 翻转由 stbi_flip_vertically_on_write(1) 在 SaveScreenshot 中处理。
+    // 这里不做翻转，让调用者决定。
 }
 
 void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {

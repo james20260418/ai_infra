@@ -8,23 +8,21 @@ cc_library(
     srcs = ["src/renderer.cc"],
     hdrs = ["src/renderer.h"],
     visibility = ["//visibility:private"],
-    defines = select({
-        "@platforms//os:windows": ["JPOV_NO_OPENCV"],
-        "//conditions:default": [],
-    }),
     deps = [
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
+        "//geom/common:common",
         "@glog_static//:glog",
+        "//third_party/stb:stb_image_write",
     ] + select({
         "@platforms//os:windows": [
             "@glfw_mingw//:glfw",
             "//third_party/gl_loader-mingw:gl_loader",
         ],
-        "//conditions:default": ["@glfw_static//:glfw", "@opencv_static//:opencv"],
+        "//conditions:default": ["@glfw_static//:glfw"],
     }),
-    copts = ["-std=c++20"],
+    copts = ["-std=c++20", "-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
     linkstatic = 1,
 )
 
