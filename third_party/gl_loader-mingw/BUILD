@@ -13,4 +13,8 @@ cc_library(
     linkstatic = 1,
     linkopts = ["-lopengl32", "-lgdi32"],
     copts = ["-std=c99"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
 )
