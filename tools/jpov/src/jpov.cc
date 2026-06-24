@@ -18,8 +18,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <glog/logging.h>
+
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 // ========== GLFW 静态回调 ==========
 
@@ -76,6 +79,7 @@ void JPOV::Init() {
         if (!config_.headless) {
             LOG(FATAL) << "glfwInit() failed";
         }
+#ifndef _WIN32
         LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
         int pid = fork();
         if (pid == 0) {
@@ -93,6 +97,9 @@ void JPOV::Init() {
             LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
         }
         started_xvfb_ = true;
+#else
+        LOG(FATAL) << "glfwInit() failed — headless mode not supported on Windows without DISPLAY";
+#endif
     }
 
     int win_w = config_.width;
@@ -139,6 +146,7 @@ void JPOV::Finalize() {
 
     glfwTerminate();
 
+#ifndef _WIN32
     if (started_xvfb_ && xvfb_pid_ > 0) {
         kill(xvfb_pid_, SIGTERM);
         waitpid(xvfb_pid_, nullptr, 0);
@@ -146,6 +154,7 @@ void JPOV::Finalize() {
         started_xvfb_ = false;
         LOG(INFO) << "JPOV: Xvfb terminated";
     }
+#endif
 
     initialized_ = false;
     LOG(INFO) << "JPOV::Finalize()";

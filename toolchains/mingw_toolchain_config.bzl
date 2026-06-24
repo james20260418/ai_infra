@@ -30,17 +30,37 @@ def _impl(ctx):
         tool_path(name = "strip", path = "/usr/bin/x86_64-w64-mingw32-strip"),
     ]
 
-    # Default compile flags
-    default_compile_flags_feature = feature(
-        name = "default_compile_flags",
+    # C compile flags — use -x c so g++ compiles .c files as C, not C++
+    c_compile_flags_feature = feature(
+        name = "c_compile_flags",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = [action_names.c_compile],
+                flag_groups = [flag_group(flags = [
+                    "-x",
+                    "c",
+                    "-Wall",
+                    "-Wextra",
+                    "-Wno-stringop-overflow",
+                    "-Wno-implicit-fallthrough",
+                    "-Wno-array-bounds",
+                    "-Wno-maybe-uninitialized",
+                    "-Wno-unused-parameter",
+                    "-Wno-sign-compare",
+                    "-Wno-deprecated-declarations",
+                ])],
+            ),
+        ],
+    )
+
+    # C++ compile flags — includes -std=c++20
+    cpp_compile_flags_feature = feature(
+        name = "cpp_compile_flags",
         enabled = True,
         flag_sets = [
             flag_set(
                 actions = [
-                    action_names.assemble,
-                    action_names.preprocess_assemble,
-                    action_names.linkstamp_compile,
-                    action_names.c_compile,
                     action_names.cpp_compile,
                     action_names.cpp_header_parsing,
                     action_names.cpp_module_compile,
@@ -68,6 +88,25 @@ def _impl(ctx):
                         ],
                     ),
                 ],
+            ),
+        ],
+    )
+
+    # Assemble + linkstamp compile flags
+    asm_flags_feature = feature(
+        name = "asm_flags",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = [
+                    action_names.assemble,
+                    action_names.preprocess_assemble,
+                    action_names.linkstamp_compile,
+                ],
+                flag_groups = [flag_group(flags = [
+                    "-Wall",
+                    "-Wextra",
+                ])],
             ),
         ],
     )
@@ -144,7 +183,9 @@ def _impl(ctx):
     )
 
     features = [
-        default_compile_flags_feature,
+        c_compile_flags_feature,
+        cpp_compile_flags_feature,
+        asm_flags_feature,
         default_link_flags_feature,
         user_compile_flags_feature,
         user_link_flags_feature,

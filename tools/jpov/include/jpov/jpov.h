@@ -1,10 +1,13 @@
 #ifndef JPOV_JPOV_H_
 #define JPOV_JPOV_H_
 
-#include <csignal>
 #include <cstdint>
 #include <memory>
+
+#ifndef _WIN32
+#include <csignal>
 #include <sys/types.h>
+#endif
 
 #include <GLFW/glfw3.h>
 

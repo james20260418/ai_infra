@@ -5,15 +5,32 @@
 #ifndef TOOLS_COMMON_UTILS_H_
 #define TOOLS_COMMON_UTILS_H_
 
+#include <cstdlib>
 #include <string>
 
 namespace jpov {
 
-// 返回项目统一的输出目录绝对路径。
+// 返回项目统一的输出目录绝对路径，格式为 "<工程根目录>/output/"。
+//
+// 路径来源优先级：
+//   1. BUILD_WORKSPACE_DIRECTORY（bazel run 自动设置）
+//   2. PROJECT_ROOT 环境变量
+//   3. 当前工作目录
+//
 // 所有生成文件（截图、日志等）应写入此目录下的子目录。
-// 当前实现硬编码为 /james/ai_infra/output/
 inline std::string GetOutputDir() {
-    return "/james/ai_infra/output/";
+    const char* env = std::getenv("BUILD_WORKSPACE_DIRECTORY");
+    if (!env) {
+        env = std::getenv("PROJECT_ROOT");
+    }
+    if (!env) {
+        env = ".";
+    }
+    std::string root(env);
+    if (!root.empty() && root.back() != '/') {
+        root.push_back('/');
+    }
+    return root + "output/";
 }
 
 }  // namespace jpov
