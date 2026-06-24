@@ -15,9 +15,51 @@
 
 #include <glog/logging.h>
 
+// Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
+// Linux/Mesa: use standard GL symbols (exported directly by libGL)
+#ifdef _WIN32
+#include "third_party/gl_loader-mingw/gl_loader.h"
+#define glGenBuffers             gl_GenBuffers
+#define glDeleteBuffers          gl_DeleteBuffers
+#define glBindBuffer             gl_BindBuffer
+#define glBufferData             gl_BufferData
+#define glCreateShader           gl_CreateShader
+#define glShaderSource           gl_ShaderSource
+#define glCompileShader          gl_CompileShader
+#define glGetShaderiv            gl_GetShaderiv
+#define glGetShaderInfoLog       gl_GetShaderInfoLog
+#define glCreateProgram          gl_CreateProgram
+#define glAttachShader           gl_AttachShader
+#define glLinkProgram            gl_LinkProgram
+#define glGetProgramiv           gl_GetProgramiv
+#define glGetProgramInfoLog      gl_GetProgramInfoLog
+#define glDeleteShader           gl_DeleteShader
+#define glDeleteProgram          gl_DeleteProgram
+#define glUseProgram             gl_UseProgram
+#define glGetUniformLocation     gl_GetUniformLocation
+#define glUniform2f              gl_Uniform2f
+#define glUniform4f              gl_Uniform4f
+#define glGenFramebuffers        gl_GenFramebuffers
+#define glDeleteFramebuffers     gl_DeleteFramebuffers
+#define glBindFramebuffer        gl_BindFramebuffer
+#define glFramebufferTexture2D   gl_FramebufferTexture2D
+#define glCheckFramebufferStatus gl_CheckFramebufferStatus
+#define glGenTextures            gl_GenTextures
+#define glDeleteTextures         gl_DeleteTextures
+#define glBindTexture            gl_BindTexture
+#define glTexImage2D             gl_TexImage2D
+#define glTexParameteri          gl_TexParameteri
+#define glBlitFramebuffer        gl_BlitFramebuffer
+#define glEnableVertexAttribArray  gl_EnableVertexAttribArray
+#define glDisableVertexAttribArray gl_DisableVertexAttribArray
+#define glVertexAttribPointer    gl_VertexAttribPointer
+#endif
+
+#ifndef JPOV_NO_OPENCV
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#endif
 
 namespace {
 
@@ -170,6 +212,9 @@ void Renderer::CreateStreamVBO() {
 }
 
 void Renderer::Init() {
+#ifdef _WIN32
+    CHECK_EQ(gl_loader_init(), 0) << "Failed to load OpenGL 3.x functions";
+#endif
     CompileShaders();
     CreateStreamVBO();
 }
@@ -254,6 +299,7 @@ void Renderer::EnsureOutputFBO(int win_w, int win_h) {
     LOG(INFO) << "Renderer: Output FBO " << win_w << "x" << win_h;
 }
 
+#ifndef JPOV_NO_OPENCV
 void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
     std::vector<uint8_t> pixels;
     SaveScreenshotToBuffer(win_w, win_h, &pixels);
@@ -264,6 +310,11 @@ void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
     LOG(INFO) << "Screenshot saved: " << path
               << " (" << win_w << "x" << win_h << ")";
 }
+#else
+void Renderer::SaveScreenshot(int, int, const char*) {
+    LOG(FATAL) << "SaveScreenshot not available without OpenCV";
+}
+#endif
 
 void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
                                         std::vector<uint8_t>* out_pixels) {
@@ -293,6 +344,7 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     glReadPixels(0, 0, win_w, win_h, GL_RGBA, GL_UNSIGNED_BYTE, out_pixels->data());
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
+#ifndef JPOV_NO_OPENCV
     // 3. RGBA → BGRA（OpenCV 用 BGRA）
     for (size_t i = 0; i < out_pixels->size(); i += 4) {
         std::swap((*out_pixels)[i], (*out_pixels)[i + 2]);
@@ -303,6 +355,22 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     cv::Mat flipped;
     cv::flip(raw, flipped, 0);
     std::memcpy(out_pixels->data(), (flipped).data, out_pixels->size());
+#else
+    // RGBA 转 BGRA 不用 OpenCV，直接手动翻转 Y
+    for (size_t i = 0; i < out_pixels->size(); i += 4) {
+        std::swap((*out_pixels)[i], (*out_pixels)[i + 2]);
+    }
+    // 翻转 Y
+    size_t row_size = static_cast<size_t>(win_w) * 4;
+    std::vector<uint8_t> row_buf(row_size);
+    for (int y = 0; y < win_h / 2; ++y) {
+        uint8_t* top = out_pixels->data() + y * row_size;
+        uint8_t* bot = out_pixels->data() + (win_h - 1 - y) * row_size;
+        std::memcpy(row_buf.data(), top, row_size);
+        std::memcpy(top, bot, row_size);
+        std::memcpy(bot, row_buf.data(), row_size);
+    }
+#endif
 }
 
 void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
