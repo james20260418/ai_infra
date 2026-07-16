@@ -169,6 +169,38 @@ cc_test(
 )
 
 # ============================================================================
+# Gold Image — polyline gold image 生成器 + 测试
+# ============================================================================
+cc_binary(
+    name = "jpov_polyline_gold_generator",
+    srcs = ["test/jpov_polyline_gold_generator.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_polyline_gold_test",
+    srcs = ["test/jpov_polyline_gold_test.cc"],
+    data = ["test/polyline_zigzag_red_640x360.png"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # Gold Image — circle 渲染验证单元测试
 # ============================================================================
 cc_test(
