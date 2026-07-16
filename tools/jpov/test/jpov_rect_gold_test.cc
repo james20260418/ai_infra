@@ -176,8 +176,9 @@ public:
 
 int main() {
     // 1. 加载 gold image（从 base64 txt）
+    // gold image base64 文件与单测源码放在一起，用 git 管理
     std::string gold_txt_path =
-        jpov::GetOutputDir() + "rect_centered_blue_640x360.b64.txt";
+        jpov::GetProjectRoot() + "tools/jpov/test/rect_centered_blue_640x360.b64.txt";
     int gold_w = 0, gold_h = 0;
     std::vector<uint8_t> gold_rgba;
     if (!LoadGoldImageFromTxt(gold_txt_path.c_str(), &gold_w, &gold_h, &gold_rgba)) {
