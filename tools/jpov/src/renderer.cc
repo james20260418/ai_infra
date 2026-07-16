@@ -240,13 +240,13 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
             case DrawCommandType::kRect2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.rect2d.size()));
-                DrawRect2D(cmds.rect2d[idx], winfo);
+                DrawRect2D(cmds.rect2d[idx]);
                 break;
             }
             case DrawCommandType::kPolyline2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.polyline2d.size()));
-                DrawPolyline2D(cmds.polyline2d[idx], winfo);
+                DrawPolyline2D(cmds.polyline2d[idx]);
                 break;
             }
             default:
@@ -348,7 +348,7 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     // 这里不做翻转，让调用者决定。
 }
 
-void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo) {
+void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
     // Pre-condition:
     //   - vertices 至少 2 个点
     //   - edge_count (vertices.size()-1) ≤ kMaxPolylineEdges
@@ -426,7 +426,7 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
 
     glUseProgram(prog_);
     glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
-                winfo.width, winfo.height);
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
     glUniform4f(glGetUniformLocation(prog_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
@@ -441,7 +441,7 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& wi
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {
+void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     float verts[8];
     float x0 = cmd.pos.x();
     float y0 = cmd.pos.y();
@@ -457,10 +457,10 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo) {
     verts[7] = y1;
 
     glUseProgram(prog_);
-    // uFboSize = NDC 变换参照。窗口坐标用窗口尺寸，
-    // viewport 用 FBO 尺寸，超出 FBO 部分自动裁剪。
+    // uFboSize = NDC 变换参照。必须用 FBO 尺寸（渲染分辨率），
+    // 使 NDC 坐标空间与 glViewport 一致，避免 rect 偏移。
     glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
-                winfo.width, winfo.height);
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
     glUniform4f(glGetUniformLocation(prog_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 

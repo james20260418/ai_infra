@@ -78,8 +78,8 @@ private:
     void DestroyOutputFBO();
     void CompileShaders();
     void CreateStreamVBO();
-    void DrawRect2D(const Rect2DCommand& cmd, const WindowInfo& winfo);
-    void DrawPolyline2D(const Polyline2DCommand& cmd, const WindowInfo& winfo);
+    void DrawRect2D(const Rect2DCommand& cmd);
+    void DrawPolyline2D(const Polyline2DCommand& cmd);
 };
 
 }  // namespace jpov
