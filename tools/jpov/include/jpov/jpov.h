@@ -133,8 +133,6 @@ private:
                          const jpov::InputSnapshot& input,
                          const jpov::WindowInfo& winfo);
 
-
-
     // ---- GLFW 输入状态 ----
     struct MouseButtonState {
         bool is_down = false;
