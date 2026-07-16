@@ -142,12 +142,12 @@ cc_binary(
 cc_test(
     name = "jpov_rect_gold_test",
     srcs = ["test/jpov_rect_gold_test.cc"],
+    data = ["test/rect_centered_blue_640x360.png"],
     deps = [
         ":jpov",
         "//tools/common:utils",
-        "//third_party/stb:stb_image",
     ],
-    copts = ["-std=c++20", "-DSTB_IMAGE_IMPLEMENTATION"],
+    copts = ["-std=c++20"],
     linkstatic = 1,
     target_compatible_with = [
         "@platforms//os:linux",
