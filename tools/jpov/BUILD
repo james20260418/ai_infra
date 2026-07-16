@@ -136,6 +136,19 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "jpov_circle_gold_generator",
+    srcs = ["test/jpov_circle_gold_generator.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # Gold Image — rect 渲染验证单元测试
 # ============================================================================
@@ -143,6 +156,25 @@ cc_test(
     name = "jpov_rect_gold_test",
     srcs = ["test/jpov_rect_gold_test.cc"],
     data = ["test/rect_centered_blue_640x360.png"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — circle 渲染验证单元测试
+# ============================================================================
+cc_test(
+    name = "jpov_circle_gold_test",
+    srcs = ["test/jpov_circle_gold_test.cc"],
+    data = ["test/circle_centered_green_640x360.png"],
     deps = [
         ":jpov",
         "//tools/common:utils",
