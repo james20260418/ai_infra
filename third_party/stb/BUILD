@@ -9,3 +9,11 @@ cc_library(
     linkstatic = 1,
     copts = ["-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
 )
+
+cc_library(
+    name = "stb_image",
+    hdrs = ["stb_image.h"],
+    includes = ["."],
+    linkstatic = 1,
+    copts = ["-DSTB_IMAGE_IMPLEMENTATION"],
+)

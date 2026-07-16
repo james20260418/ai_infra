@@ -119,3 +119,38 @@ cc_binary(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# Gold Image Generator — 生成 rect 测试的参考图片
+# ============================================================================
+cc_binary(
+    name = "jpov_gold_generator",
+    srcs = ["test/jpov_gold_generator.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — rect 渲染验证单元测试
+# ============================================================================
+cc_test(
+    name = "jpov_rect_gold_test",
+    srcs = ["test/jpov_rect_gold_test.cc", "test/rect_centered_blue_640x360.h"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+    ],
+    copts = ["-std=c++20", "-DSTB_IMAGE_IMPLEMENTATION"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
