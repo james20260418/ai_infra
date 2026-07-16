@@ -80,6 +80,7 @@ private:
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd);
     void DrawPolyline2D(const Polyline2DCommand& cmd);
+    void DrawCircle2D(const Circle2DCommand& cmd);
 };
 
 }  // namespace jpov

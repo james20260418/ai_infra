@@ -6,6 +6,7 @@
 #include "tools/jpov/src/renderer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -249,6 +250,12 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                 DrawPolyline2D(cmds.polyline2d[idx]);
                 break;
             }
+            case DrawCommandType::kCircle2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.circle2d.size()));
+                DrawCircle2D(cmds.circle2d[idx]);
+                break;
+            }
             default:
                 break;
         }
@@ -469,6 +476,40 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
+    static constexpr int kSegments = 64;
+    float verts[(kSegments + 2) * 2];  // fan center + kSegments perimeter points
+    float cx = cmd.center.x();
+    float cy = cmd.center.y();
+    float r = cmd.radius;
+
+    // Center of fan
+    verts[0] = cx;
+    verts[1] = cy;
+
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i <= kSegments; ++i) {
+        double angle = 2.0 * kPi * static_cast<double>(i) /
+                       static_cast<double>(kSegments);
+        verts[(i + 1) * 2 + 0] = cx + r * static_cast<float>(cos(angle));
+        verts[(i + 1) * 2 + 1] = cy + r * static_cast<float>(sin(angle));
+    }
+
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, kSegments + 2);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
