@@ -141,7 +141,7 @@ cc_binary(
 # ============================================================================
 cc_test(
     name = "jpov_rect_gold_test",
-    srcs = ["test/jpov_rect_gold_test.cc", "test/rect_centered_blue_640x360.h"],
+    srcs = ["test/jpov_rect_gold_test.cc"],
     deps = [
         ":jpov",
         "//tools/common:utils",

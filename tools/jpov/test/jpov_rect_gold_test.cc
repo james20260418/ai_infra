@@ -2,37 +2,89 @@
 //
 // 用 gold image 方法验证 rect 渲染坐标正确：
 //   1. 渲染一个已知位置的蓝色矩形（居中，640x360 的一半）
-//   2. 保存为 PNG
-//   3. 加载 gold image 并逐像素比较（rgb tolerance = 2/255）
+//   2. 保存为 PNG 到 output/jpov_rect_gold_test/rendered.png
+//   3. 从 data/rect_centered_blue_640x360.b64.txt 加载 gold image
+//      并逐像素比较（rgb tolerance = 2/255）
 //
-// gold image 由 jpov_gold_generator 生成，通过 xxd 转为 C 头文件。
 // 测试通过条件：全部像素 RGB 偏差 ≤ 2。
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include <glog/logging.h>
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/test/rect_centered_blue_640x360.h"
 #include "tools/common/utils.h"
 
 // ============ 辅助函数 ============
 
-// 用 stb_image 解码内嵌的 gold image PNG 数据
-static bool LoadGoldImage(int* out_w, int* out_h,
-                          std::vector<uint8_t>* out_rgba) {
+// 从 base64 文本文件读取 gold image（编码后的 PNG）
+//
+// gold image 用 base64 编码的 PNG 存储，运行时解码为 raw RGBA。
+// 文件位于工程 data/ 目录下，不纳入 git 也不作为 cc_library src。
+static bool LoadGoldImageFromTxt(const char* path, int* out_w, int* out_h,
+                                 std::vector<uint8_t>* out_rgba) {
+    // 读取 base64 文本
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        LOG(ERROR) << "Failed to open gold image txt: " << path;
+        return false;
+    }
+    std::string b64((std::istreambuf_iterator<char>(ifs)),
+                    std::istreambuf_iterator<char>());
+    ifs.close();
+
+    // 去掉空白字符
+    std::string clean;
+    clean.reserve(b64.size());
+    for (char c : b64) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            clean.push_back(c);
+        }
+    }
+
+    // 简单 base64 解码
+    static const int kRev[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    };
+
+    std::vector<uint8_t> raw;
+    raw.reserve(clean.size() / 4 * 3);
+    for (size_t i = 0; i < clean.size(); i += 4) {
+        if (i + 3 >= clean.size()) break;
+        int a = kRev[static_cast<unsigned char>(clean[i])];
+        int b = kRev[static_cast<unsigned char>(clean[i + 1])];
+        int c = kRev[static_cast<unsigned char>(clean[i + 2])];
+        int d = kRev[static_cast<unsigned char>(clean[i + 3])];
+        if (a < 0 || b < 0) break;
+        raw.push_back(static_cast<uint8_t>((a << 2) | (b >> 4)));
+        if (c >= 0) {
+            raw.push_back(static_cast<uint8_t>(((b & 0x0f) << 4) | (c >> 2)));
+        }
+        if (d >= 0) {
+            raw.push_back(static_cast<uint8_t>(((c & 0x03) << 6) | d));
+        }
+    }
+
+    // 用 stb_image 解码
     int w = 0, h = 0, channels = 0;
     unsigned char* pixels = stbi_load_from_memory(
-        tools_jpov_test_rect_centered_blue_640x360_png,
-        tools_jpov_test_rect_centered_blue_640x360_png_len,
-        &w, &h, &channels, 4);  // 强制 RGBA
+        raw.data(), static_cast<int>(raw.size()),
+        &w, &h, &channels, 4);
     if (!pixels) {
         LOG(ERROR) << "Failed to decode gold image: " << stbi_failure_reason();
         return false;
@@ -123,15 +175,17 @@ public:
 // ============ 测试入口 ============
 
 int main() {
-    // 1. 加载 gold image
+    // 1. 加载 gold image（从 base64 txt）
+    std::string gold_txt_path =
+        jpov::GetOutputDir() + "rect_centered_blue_640x360.b64.txt";
     int gold_w = 0, gold_h = 0;
     std::vector<uint8_t> gold_rgba;
-    if (!LoadGoldImage(&gold_w, &gold_h, &gold_rgba)) {
+    if (!LoadGoldImageFromTxt(gold_txt_path.c_str(), &gold_w, &gold_h, &gold_rgba)) {
         LOG(FATAL) << "Gold image loading failed";
     }
     LOG(INFO) << "Gold image loaded: " << gold_w << "x" << gold_h;
 
-    // 2. 渲染并保存为 PNG
+    // 2. 渲染并保存为 PNG 到 output/ 目录
     std::string outdir = jpov::GetOutputDir() + "jpov_rect_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
