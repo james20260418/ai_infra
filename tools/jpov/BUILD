@@ -7,6 +7,7 @@ cc_library(
     name = "renderer",
     srcs = ["src/renderer.cc"],
     hdrs = ["src/renderer.h"],
+    data = ["fonts/DejaVuSans.ttf"],
     visibility = ["//visibility:private"],
     deps = [
         "//tools/jpov/interface:camera",
@@ -15,6 +16,7 @@ cc_library(
         "//geom/common:common",
         "@glog_static//:glog",
         "//third_party/stb:stb_image_write",
+        "//third_party/stb:stb_truetype",
     ] + select({
         "@platforms//os:windows": [
             "@glfw_mingw//:glfw",
@@ -110,6 +112,22 @@ cc_binary(
 cc_binary(
     name = "jpov_polyline_verify",
     srcs = ["demo/jpov_polyline_verify.cc"],
+    deps = [
+        ":jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# 示例：Text Demo — 验证 Text2D 渲染
+# ============================================================================
+cc_binary(
+    name = "jpov_text_demo",
+    srcs = ["demo/jpov_text_demo.cc"],
     deps = [
         ":jpov",
         "//tools/common:utils",

@@ -9,6 +9,7 @@
 #ifndef JPOV_RENDERER_H_
 #define JPOV_RENDERER_H_
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "tools/jpov/interface/window_info.h"
 
 struct GLFWwindow;
+struct stbtt_fontinfo;
 
 namespace jpov {
 
@@ -81,6 +83,30 @@ private:
     void DrawRect2D(const Rect2DCommand& cmd);
     void DrawPolyline2D(const Polyline2DCommand& cmd);
     void DrawCircle2D(const Circle2DCommand& cmd);
+    void DrawText2D(const Text2DCommand& cmd);
+
+    void LoadFont();
+    void DestroyFont();
+
+    struct GlyphBitmap {
+        unsigned char* pixels = nullptr;
+        int w = 0;
+        int h = 0;
+        float advance = 0.0f;
+        float xoff = 0.0f;
+        float yoff = 0.0f;
+    };
+    std::array<GlyphBitmap, 128> font_glyphs_;  // ASCII 0-127
+    stbtt_fontinfo* font_info_ = nullptr;
+    unsigned char* font_ttf_data_ = nullptr;
+    unsigned int font_atlas_tex_ = 0;
+    int font_atlas_w_ = 0;
+    int font_atlas_h_ = 0;
+    unsigned int tex_prog_ = 0;
+    bool font_loaded_ = false;
+    float font_ascent_ = 0.0f;
+    float font_descent_ = 0.0f;
+    float font_linegap_ = 0.0f;
 };
 
 }  // namespace jpov
