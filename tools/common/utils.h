@@ -10,15 +10,13 @@
 
 namespace jpov {
 
-// 返回项目统一的输出目录绝对路径，格式为 "<工程根目录>/output/"。
+// 返回工程根目录绝对路径（末尾带 '/'）。
 //
 // 路径来源优先级：
 //   1. BUILD_WORKSPACE_DIRECTORY（bazel run 自动设置）
 //   2. PROJECT_ROOT 环境变量
 //   3. 当前工作目录
-//
-// 所有生成文件（截图、日志等）应写入此目录下的子目录。
-inline std::string GetOutputDir() {
+inline std::string GetProjectRoot() {
     const char* env = std::getenv("BUILD_WORKSPACE_DIRECTORY");
     if (!env) {
         env = std::getenv("PROJECT_ROOT");
@@ -30,7 +28,14 @@ inline std::string GetOutputDir() {
     if (!root.empty() && root.back() != '/') {
         root.push_back('/');
     }
-    return root + "output/";
+    return root;
+}
+
+// 返回项目统一的输出目录绝对路径，格式为 "<工程根目录>/output/"。
+//
+// 所有生成文件（截图、日志等）应写入此目录下的子目录。
+inline std::string GetOutputDir() {
+    return GetProjectRoot() + "output/";
 }
 
 }  // namespace jpov
