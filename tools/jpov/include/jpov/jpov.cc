@@ -13,7 +13,7 @@
 //   1. RunOnceInternal(0, input, winfo)
 //   2. SaveScreenshot(path)
 
-#include "tools/jpov/include/jpov/jpov.h"
+#include "jpov.h"
 
 #include <algorithm>
 #include <cstdlib>

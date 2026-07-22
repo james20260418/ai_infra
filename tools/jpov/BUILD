@@ -33,7 +33,7 @@ cc_library(
 # ============================================================================
 cc_library(
     name = "jpov",
-    srcs = ["src/jpov.cc"],
+    srcs = ["include/jpov/jpov.cc"],
     hdrs = ["include/jpov/jpov.h"],
     visibility = ["//visibility:public"],
     deps = [
