@@ -80,23 +80,36 @@ void JPOV::Init() {
             LOG(FATAL) << "glfwInit() failed";
         }
 #ifndef _WIN32
-        LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
-        int pid = fork();
-        if (pid == 0) {
-            // 子进程：启动 Xvfb
-            execlp("Xvfb", "Xvfb", ":99", "-ac", "-screen", "0", "1280x720x24",
-                   "-noreset", "+extension", "GLX", "+iglx", nullptr);
-            _exit(1);
+        const char* existing_display = getenv("DISPLAY");
+        if (existing_display && existing_display[0] != '\0') {
+            // DISPLAY 已设置（例如 CI 提前启动了 Xvfb），重试 glfwInit
+            LOG(WARNING) << "glfwInit() failed but DISPLAY=" << existing_display
+                         << " is set — retrying after short delay";
+            sleep(1);
+            if (!glfwInit()) {
+                LOG(FATAL) << "glfwInit() still failed even with DISPLAY="
+                           << existing_display;
+            }
+            started_xvfb_ = false;
+        } else {
+            LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
+            int pid = fork();
+            if (pid == 0) {
+                // 子进程：启动 Xvfb
+                execlp("Xvfb", "Xvfb", ":99", "-ac", "-screen", "0", "1280x720x24",
+                       "-noreset", "+extension", "GLX", "+iglx", nullptr);
+                _exit(1);
+            }
+            CHECK_GT(pid, 0) << "fork() failed";
+            xvfb_pid_ = pid;
+            // 设置 DISPLAY 环境变量，让 glfwInit 连到这个 display
+            setenv("DISPLAY", ":99", 1);
+            sleep(1);
+            if (!glfwInit()) {
+                LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
+            }
+            started_xvfb_ = true;
         }
-        CHECK_GT(pid, 0) << "fork() failed";
-        xvfb_pid_ = pid;
-        // 设置 DISPLAY 环境变量，让 glfwInit 连到这个 display
-        setenv("DISPLAY", ":99", 1);
-        sleep(1);
-        if (!glfwInit()) {
-            LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
-        }
-        started_xvfb_ = true;
 #else
         LOG(FATAL) << "glfwInit() failed — headless mode not supported on Windows without DISPLAY";
 #endif
