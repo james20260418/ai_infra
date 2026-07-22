@@ -64,6 +64,8 @@
 #define glEnableVertexAttribArray  gl_EnableVertexAttribArray
 #define glDisableVertexAttribArray gl_DisableVertexAttribArray
 #define glVertexAttribPointer    gl_VertexAttribPointer
+#define glUniform1i              gl_Uniform1i
+#define glActiveTexture          gl_ActiveTexture
 #endif
 
 namespace {

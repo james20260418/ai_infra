@@ -69,6 +69,8 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_EnableVertexAttribArray, "glEnableVertexAttribArray");
     LOAD_FUNC(gl_DisableVertexAttribArray, "glDisableVertexAttribArray");
     LOAD_FUNC(gl_VertexAttribPointer,    "glVertexAttribPointer");
+    LOAD_FUNC(gl_Uniform1i,              "glUniform1i");
+    LOAD_FUNC(gl_ActiveTexture,          "glActiveTexture");
     return 0;
 }
 
@@ -108,3 +110,5 @@ DEFINE_PTR(GL_BlitFramebuffer,        gl_BlitFramebuffer);
 DEFINE_PTR(GL_EnableVertexAttribArray, gl_EnableVertexAttribArray);
 DEFINE_PTR(GL_DisableVertexAttribArray, gl_DisableVertexAttribArray);
 DEFINE_PTR(GL_VertexAttribPointer,    gl_VertexAttribPointer);
+DEFINE_PTR(GL_Uniform1i,              gl_Uniform1i);
+DEFINE_PTR(GL_ActiveTexture,          gl_ActiveTexture);

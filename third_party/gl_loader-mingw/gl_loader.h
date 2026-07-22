@@ -42,6 +42,8 @@ typedef void (*GL_BlitFramebuffer)(int, int, int, int, int, int, int, int, unsig
 typedef void (*GL_EnableVertexAttribArray)(unsigned int);
 typedef void (*GL_DisableVertexAttribArray)(unsigned int);
 typedef void (*GL_VertexAttribPointer)(unsigned int, int, unsigned int, unsigned char, int, const void*);
+typedef void (*GL_Uniform1i)(int, int);
+typedef void (*GL_ActiveTexture)(unsigned int);
 
 // Loaded function pointers
 extern GL_GenBuffers             gl_GenBuffers;
@@ -78,6 +80,8 @@ extern GL_BlitFramebuffer        gl_BlitFramebuffer;
 extern GL_EnableVertexAttribArray gl_EnableVertexAttribArray;
 extern GL_DisableVertexAttribArray gl_DisableVertexAttribArray;
 extern GL_VertexAttribPointer    gl_VertexAttribPointer;
+extern GL_Uniform1i              gl_Uniform1i;
+extern GL_ActiveTexture          gl_ActiveTexture;
 
 // Load all function pointers. Call once after GL context creation.
 int gl_loader_init(void);
