@@ -1,58 +1,14 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
-# ============================================================================
-# Renderer — GL FBO + 动态分辨率渲染核心
-# ============================================================================
-cc_library(
-    name = "renderer",
-    srcs = ["src/renderer.cc"],
-    hdrs = ["src/renderer.h"],
-    data = ["fonts/DejaVuSans.ttf"],
-    visibility = ["//visibility:private"],
-    deps = [
-        "//tools/jpov/interface:camera",
-        "//tools/jpov/interface:render_command",
-        "//tools/jpov/interface:window_info",
-        "//geom/common:common",
-        "@glog_static//:glog",
-        "//third_party/stb:stb_image_write",
-        "//third_party/stb:stb_truetype",
-    ] + select({
-        "@platforms//os:windows": [
-            "@glfw_mingw//:glfw",
-            "//third_party/gl_loader-mingw:gl_loader",
-        ],
-        "//conditions:default": ["@glfw_static//:glfw"],
-    }),
-    copts = ["-std=c++20", "-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
-    linkstatic = 1,
-)
-
-# ============================================================================
-# JPOV 主框架库 — GLFW 窗口 + 输入 + Renderer
-# ============================================================================
-cc_library(
-    name = "jpov",
-    srcs = ["include/jpov/jpov.cc"],
-    hdrs = ["include/jpov/jpov.h"],
+exports_files(
+    ["fonts/DejaVuSans.ttf"],
     visibility = ["//visibility:public"],
-    deps = [
-        ":renderer",
-        "//tools/jpov/interface:camera",
-        "//tools/jpov/interface:input_snapshot",
-        "//tools/jpov/interface:render_command",
-        "//tools/jpov/interface:window_info",
-    ] + select({
-        "@platforms//os:windows": ["@glfw_mingw//:glfw"],
-        "//conditions:default": ["@glfw_static//:glfw"],
-    }),
-    copts = ["-std=c++20"],
-    linkopts = select({
-        "@platforms//os:windows": ["-lopengl32"],
-        "//conditions:default": ["-lGL"],
-    }),
-    linkstatic = 1,
 )
+
+# ============================================================================
+# 根 BUILD — 仅定义 cc_binary / cc_test target
+# cc_library 均下沉到各自源路径下的独立 BUILD 文件
+# ============================================================================
 
 # ============================================================================
 # 示例：Rect Demo — 演示窗口坐标与渲染分辨率裁剪
@@ -60,7 +16,7 @@ cc_library(
 cc_binary(
     name = "jpov_demo",
     srcs = ["demo/jpov_demo.cc"],
-    deps = [":jpov"],
+    deps = ["//tools/jpov/include/jpov:jpov"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
@@ -70,7 +26,7 @@ cc_binary(
 cc_binary(
     name = "jpov_demo.exe",
     srcs = ["demo/jpov_demo.cc"],
-    deps = [":jpov"],
+    deps = ["//tools/jpov/include/jpov:jpov"],
     target_compatible_with = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
@@ -84,7 +40,7 @@ cc_binary(
     name = "jpov_screenshot_demo",
     srcs = ["demo/jpov_screenshot_demo.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -100,7 +56,7 @@ cc_binary(
     name = "jpov_polyline_demo",
     srcs = ["demo/jpov_polyline_demo.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -113,7 +69,7 @@ cc_binary(
     name = "jpov_polyline_verify",
     srcs = ["demo/jpov_polyline_verify.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -129,7 +85,7 @@ cc_binary(
     name = "jpov_text_demo",
     srcs = ["demo/jpov_text_demo.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -145,7 +101,7 @@ cc_binary(
     name = "jpov_gold_generator",
     srcs = ["test/jpov_gold_generator.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -158,7 +114,7 @@ cc_binary(
     name = "jpov_circle_gold_generator",
     srcs = ["test/jpov_circle_gold_generator.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -175,7 +131,7 @@ cc_test(
     srcs = ["test/jpov_rect_gold_test.cc"],
     data = ["test/rect_centered_blue_640x360.png"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     copts = ["-std=c++20"],
@@ -193,7 +149,7 @@ cc_binary(
     name = "jpov_polyline_gold_generator",
     srcs = ["test/jpov_polyline_gold_generator.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -207,7 +163,7 @@ cc_test(
     srcs = ["test/jpov_polyline_gold_test.cc"],
     data = ["test/polyline_zigzag_red_640x360.png"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     copts = ["-std=c++20"],
@@ -226,7 +182,7 @@ cc_test(
     srcs = ["test/jpov_circle_gold_test.cc"],
     data = ["test/circle_centered_green_640x360.png"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     copts = ["-std=c++20"],
@@ -244,7 +200,7 @@ cc_binary(
     name = "jpov_text_gold_generator",
     srcs = ["test/jpov_text_gold_generator.cc"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     target_compatible_with = [
@@ -258,7 +214,7 @@ cc_test(
     srcs = ["test/jpov_text_gold_test.cc"],
     data = ["test/hello_jpov_48_640x360.png"],
     deps = [
-        ":jpov",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
     ],
     copts = ["-std=c++20"],
