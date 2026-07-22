@@ -18,4 +18,11 @@ cc_library(
     copts = ["-DSTB_TRUETYPE_IMPLEMENTATION"],
 )
 
+cc_library(
+    name = "stb_image",
+    hdrs = ["stb_image.h"],
+    includes = ["."],
+    linkstatic = 1,
+)
+
 

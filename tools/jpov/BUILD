@@ -165,6 +165,7 @@ cc_test(
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
+        "//third_party/stb:stb_image",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,

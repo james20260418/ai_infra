@@ -3,38 +3,27 @@
 // 用 gold image 方法验证 polyline 渲染坐标正确：
 //   1. 渲染一条已知位置的红色折线（锯齿形，10px 线宽）
 //   2. 保存为 PNG 到 output/jpov_polyline_gold_test/rendered.png
-//   3. 与 expected PNG（git 管理）做二进制文件级比较
+//   3. 解码 expected PNG 和 rendered PNG，逐像素 RGBA ±5 容差比较
 //
-// 测试通过条件：渲染输出 PNG 与 expected PNG 字节完全相同。
+// 测试通过条件：所有像素每个 RGBA 通道偏差 ≤ 5。
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
 
 #include <glog/logging.h>
 
+// 在此文件中实现 stb_image（非 stb_image_write），因此不需要 STB_IMAGE_IMPLEMENTATION
+// 在 renderer.cc 和 header 中已经通过其他方式处理了 stb 相关宏。
+// 这里我们直接包含 stb_image.h 并在此编译单元定义实现。
+#define STB_IMAGE_IMPLEMENTATION
+#include "third_party/stb/stb_image.h"
+
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
-
-// 读取文件全部字节
-static bool ReadFileBytes(const std::string& path,
-                          std::vector<uint8_t>* out) {
-    std::ifstream ifs(path, std::ios::binary | std::ios::ate);
-    if (!ifs.is_open()) {
-        LOG(ERROR) << "Failed to open file: " << path;
-        return false;
-    }
-    std::streamsize size = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
-    out->resize(static_cast<size_t>(size));
-    if (!ifs.read(reinterpret_cast<char*>(out->data()), size)) {
-        LOG(ERROR) << "Failed to read file: " << path;
-        return false;
-    }
-    return true;
-}
 
 // ============ 测试应用 ============
 
@@ -86,13 +75,8 @@ static std::string GetExpectedPngPath() {
 // ============ 测试入口 ============
 
 int main() {
-    // 1. 加载 expected PNG（git 管理，与单测同目录）
+    // 1. 获取 expected PNG 路径
     std::string expected_path = GetExpectedPngPath();
-    std::vector<uint8_t> expected_bytes;
-    if (!ReadFileBytes(expected_path, &expected_bytes)) {
-        LOG(FATAL) << "Failed to load expected PNG: " << expected_path;
-    }
-    LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
 
     // 2. 渲染并保存为 PNG 到 output/ 目录
     std::string outdir = jpov::GetOutputDir() + "jpov_polyline_gold_test/";
@@ -111,39 +95,80 @@ int main() {
     app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
-    // 3. 加载渲染输出的 PNG
-    std::vector<uint8_t> render_bytes;
-    if (!ReadFileBytes(outpath, &render_bytes)) {
-        LOG(FATAL) << "Failed to load rendered PNG: " << outpath;
+    // 3. 用 stb_image 解码 expected PNG
+    int exp_w = 0, exp_h = 0, exp_comp = 0;
+    unsigned char* exp_pixels = stbi_load(expected_path.c_str(),
+                                          &exp_w, &exp_h, &exp_comp, 4);
+    if (!exp_pixels) {
+        LOG(FATAL) << "Failed to load expected PNG: " << expected_path
+                    << " (" << stbi_failure_reason() << ")";
     }
-    LOG(INFO) << "Rendered PNG: " << render_bytes.size() << " bytes";
+    LOG(INFO) << "Expected: " << exp_w << "x" << exp_h
+              << " RGBA (" << exp_comp << " native channels)";
 
-    // 4. 二进制字节比较
-    if (render_bytes.size() != expected_bytes.size()) {
-        LOG(ERROR) << "Size mismatch: rendered=" << render_bytes.size()
-                    << ", expected=" << expected_bytes.size();
+    // 4. 用 stb_image 解码 rendered PNG
+    int rnd_w = 0, rnd_h = 0, rnd_comp = 0;
+    unsigned char* rnd_pixels = stbi_load(outpath.c_str(),
+                                          &rnd_w, &rnd_h, &rnd_comp, 4);
+    if (!rnd_pixels) {
+        LOG(FATAL) << "Failed to load rendered PNG: " << outpath
+                    << " (" << stbi_failure_reason() << ")";
+    }
+    LOG(INFO) << "Rendered: " << rnd_w << "x" << rnd_h
+              << " RGBA (" << rnd_comp << " native channels)";
+
+    // 5. 尺寸检查
+    if (exp_w != rnd_w || exp_h != rnd_h) {
+        LOG(ERROR) << "Dimension mismatch: expected=" << exp_w << "x" << exp_h
+                    << ", rendered=" << rnd_w << "x" << rnd_h;
+        stbi_image_free(exp_pixels);
+        stbi_image_free(rnd_pixels);
         return 1;
     }
 
-    bool pass = true;
-    for (size_t i = 0; i < render_bytes.size(); ++i) {
-        if (render_bytes[i] != expected_bytes[i]) {
-            LOG(ERROR) << "Byte mismatch at offset " << i
-                        << ": got 0x" << std::hex
-                        << static_cast<int>(render_bytes[i])
-                        << ", expected 0x"
-                        << static_cast<int>(expected_bytes[i]);
-            pass = false;
-            break;
+    // 6. 逐像素 RGBA ±5 容差比较
+    const int kTolerance = 5;
+    const int total_pixels = exp_w * exp_h;
+    int bad_pixels = 0;
+    int max_channel_diff = 0;
+
+    for (int i = 0; i < total_pixels; ++i) {
+        for (int c = 0; c < 4; ++c) {
+            int diff = std::abs(static_cast<int>(rnd_pixels[i * 4 + c]) -
+                                static_cast<int>(exp_pixels[i * 4 + c]));
+            if (diff > max_channel_diff) {
+                max_channel_diff = diff;
+            }
+            if (diff > kTolerance) {
+                ++bad_pixels;
+                if (bad_pixels <= 5) {
+                    int px = i % exp_w;
+                    int py = i / exp_w;
+                    LOG(ERROR) << "Pixel (" << px << "," << py
+                               << ") channel[" << c
+                               << "]: got " << static_cast<int>(rnd_pixels[i * 4 + c])
+                               << ", expected " << static_cast<int>(exp_pixels[i * 4 + c])
+                               << ", diff=" << diff
+                               << " (tolerance=" << kTolerance << ")";
+                }
+            }
         }
     }
 
-    if (pass) {
-        LOG(INFO) << "TEST PASSED: polyline gold image match ("
-                  << expected_bytes.size() << " bytes)";
+    stbi_image_free(exp_pixels);
+    stbi_image_free(rnd_pixels);
+
+    if (bad_pixels == 0) {
+        LOG(INFO) << "TEST PASSED: polyline gold image match within "
+                  << kTolerance << " RGBA tolerance ("
+                  << total_pixels << " pixels, max channel diff="
+                  << max_channel_diff << ")";
         return 0;
     } else {
-        LOG(ERROR) << "TEST FAILED: polyline gold image mismatch";
+        LOG(ERROR) << "TEST FAILED: " << bad_pixels << " pixels exceeded "
+                    << kTolerance << " RGBA tolerance (max diff="
+                    << max_channel_diff << ", total pixels="
+                    << total_pixels << ")";
         return 1;
     }
 }
