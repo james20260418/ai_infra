@@ -1,7 +1,10 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
 exports_files(
-    ["fonts/DejaVuSans.ttf"],
+    [
+        "fonts/DejaVuSans.ttf",
+        "fonts/NotoSansCJK-Regular.ttc",
+    ],
     visibility = ["//visibility:public"],
 )
 

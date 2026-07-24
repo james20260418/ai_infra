@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
@@ -87,6 +88,7 @@ private:
 
     void LoadFont();
     void DestroyFont();
+    void UploadAtlas();
 
     struct GlyphBitmap {
         unsigned char* pixels = nullptr;
@@ -95,8 +97,10 @@ private:
         float advance = 0.0f;
         float xoff = 0.0f;
         float yoff = 0.0f;
+        int atlas_x = 0;  // packed x position in atlas (pixel)
+        int atlas_y = 0;  // packed y position in atlas (pixel)
     };
-    std::array<GlyphBitmap, 128> font_glyphs_;  // ASCII 0-127
+    std::unordered_map<uint32_t, GlyphBitmap> font_glyphs_;  // codepoint → glyph
     stbtt_fontinfo* font_info_ = nullptr;
     unsigned char* font_ttf_data_ = nullptr;
     unsigned int font_atlas_tex_ = 0;
@@ -107,6 +111,27 @@ private:
     float font_ascent_ = 0.0f;
     float font_descent_ = 0.0f;
     float font_linegap_ = 0.0f;
+
+    // Dynamic glyph atlas: 4096x4096, row-by-row packing
+    static constexpr int kAtlasSize = 4096;
+    static constexpr int kGlyphPadding = 2;  // pixels between glyphs (avoids bleeding)
+    static constexpr float kBaseFontSize = 16.0f;
+    static constexpr int kBaseAtlasGlyphW = 64;   // max glyph width at base size
+    static constexpr int kBaseAtlasGlyphH = 64;   // max glyph height at base size
+
+    // Host-side atlas bitmap (grayscale)
+    std::vector<unsigned char> atlas_pixels_;
+    int atlas_cursor_x_ = 0;   // next free x position in current row
+    int atlas_cursor_y_ = 0;   // current row start y
+    int atlas_row_h_ = 0;      // height of current row
+    bool atlas_dirty_ = false; // true if glyphs were added after last GL upload
+
+    // Get or rasterize a glyph for the given Unicode codepoint.
+    // Returns pointer to glyph entry (inserted if new).
+    GlyphBitmap* GetOrRasterizeGlyph(uint32_t cp);
+
+    // UTF-8 decode helper: returns codepoint and advances pointer
+    static uint32_t UTF8Decode(const char*& p);
 };
 
 }  // namespace jpov
