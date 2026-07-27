@@ -1,5 +1,18 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
+cc_binary(
+    name = "color_align_test",
+    srcs = ["color_align_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # Gold Image Generator — 生成 test 参考图片
 # ============================================================================
