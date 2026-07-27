@@ -112,12 +112,23 @@ private:
     float font_descent_ = 0.0f;
     float font_linegap_ = 0.0f;
 
+    // ---- UTF-8 编码常量 ----
+    static constexpr uint8_t kUTF8ContByte = 0x80;    // 10xxxxxx - continuation byte marker
+    static constexpr uint8_t kUTF8ContMask = 0x3F;    // continuation data: 6 low bits
+    static constexpr uint8_t kUTF8Lead2Byte = 0xC0;   // 110xxxxx - 2-byte start
+    static constexpr uint8_t kUTF8Lead2Mask = 0x1F;   // 2-byte data: 5 low bits
+    static constexpr uint8_t kUTF8Lead3Byte = 0xE0;   // 1110xxxx - 3-byte start
+    static constexpr uint8_t kUTF8Lead3Mask = 0x0F;   // 3-byte data: 4 low bits
+    static constexpr uint8_t kUTF8Lead4Byte = 0xF0;   // 11110xxx - 4-byte start
+    static constexpr uint8_t kUTF8Lead4Mask = 0x07;   // 4-byte data: 3 low bits
+    static constexpr uint32_t kUTF8Replacement = 0xFFFD;  // U+FFFD replacement character
+
     // Dynamic glyph atlas: 4096x4096, row-by-row packing
     static constexpr int kAtlasSize = 4096;
     static constexpr int kGlyphPadding = 2;  // pixels between glyphs (avoids bleeding)
     static constexpr float kBaseFontSize = 16.0f;
-    static constexpr int kBaseAtlasGlyphW = 64;   // max glyph width at base size
-    static constexpr int kBaseAtlasGlyphH = 64;   // max glyph height at base size
+    static constexpr int kAtlasUploadLogInterval = 5;  // LOG_EVERY_N interval for atlas uploads
+    static constexpr int kFontNotLoadedLogInterval = 60;  // LOG_EVERY_N interval for missing font warnings
 
     // Host-side atlas bitmap (grayscale)
     std::vector<unsigned char> atlas_pixels_;

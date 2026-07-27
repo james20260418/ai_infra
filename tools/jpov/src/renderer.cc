@@ -290,38 +290,39 @@ void Renderer::DestroyFont() {
 
 uint32_t Renderer::UTF8Decode(const char*& p) {
     uint8_t c = static_cast<uint8_t>(*p);
-    if (c < 0x80) {
+    if (c < kUTF8ContByte) {
+        // 0xxxxxxx — single byte (ASCII)
         ++p;
         return c;
-    } else if (c < 0xC0) {
+    } else if (c < kUTF8Lead2Byte) {
         // continuation byte without leading byte — illegal, skip
         ++p;
-        return 0xFFFDu; // replacement character
-    } else if (c < 0xE0) {
-        // 2-byte sequence
-        uint32_t cp = c & 0x1F;
-        if ((static_cast<uint8_t>(p[1]) & 0xC0) != 0x80) { ++p; return 0xFFFD; }
-        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & 0x3F);
+        return kUTF8Replacement;
+    } else if (c < kUTF8Lead3Byte) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead2Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
         p += 2;
         return cp;
-    } else if (c < 0xF0) {
-        // 3-byte sequence
-        uint32_t cp = c & 0x0F;
-        if ((static_cast<uint8_t>(p[1]) & 0xC0) != 0x80) { ++p; return 0xFFFD; }
-        if ((static_cast<uint8_t>(p[2]) & 0xC0) != 0x80) { p += 2; return 0xFFFD; }
-        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & 0x3F);
-        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & 0x3F);
+    } else if (c < kUTF8Lead4Byte) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead3Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[2]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 2; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & kUTF8ContMask);
         p += 3;
         return cp;
     } else {
-        // 4-byte sequence
-        uint32_t cp = c & 0x07;
-        if ((static_cast<uint8_t>(p[1]) & 0xC0) != 0x80) { ++p; return 0xFFFD; }
-        if ((static_cast<uint8_t>(p[2]) & 0xC0) != 0x80) { p += 2; return 0xFFFD; }
-        if ((static_cast<uint8_t>(p[3]) & 0xC0) != 0x80) { p += 3; return 0xFFFD; }
-        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & 0x3F);
-        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & 0x3F);
-        cp = (cp << 6) | (static_cast<uint8_t>(p[3]) & 0x3F);
+        // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead4Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[2]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 2; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[3]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 3; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[3]) & kUTF8ContMask);
         p += 4;
         return cp;
     }
@@ -557,12 +558,12 @@ void Renderer::UploadAtlas() {
                     GL_RED, GL_UNSIGNED_BYTE, atlas_pixels_.data());
     glBindTexture(GL_TEXTURE_2D, 0);
     atlas_dirty_ = false;
-    LOG_EVERY_N(INFO, 5) << "UploadAtlas: uploaded " << kAtlasSize << "x" << kAtlasSize;
+    LOG_EVERY_N(INFO, kAtlasUploadLogInterval) << "UploadAtlas: uploaded " << kAtlasSize << "x" << kAtlasSize;
 }
 
 void Renderer::DrawText2D(const Text2DCommand& cmd) {
     if (!font_loaded_) {
-        LOG_EVERY_N(WARNING, 60) << "Text2D: font not loaded, skipping";
+        LOG_EVERY_N(WARNING, kFontNotLoadedLogInterval) << "Text2D: font not loaded, skipping";
         return;
     }
 
