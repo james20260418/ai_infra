@@ -107,6 +107,19 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "jpov_strip3d_gold_generator",
+    srcs = ["jpov_strip3d_gold_generator.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # Gold Image — rect 渲染验证单元测试
 # ============================================================================
@@ -220,6 +233,22 @@ cc_test(
     name = "jpov_cube3d_gold_test",
     srcs = ["jpov_cube3d_gold_test.cc"],
     data = [":cube3d_6faces_640x360.png"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_strip3d_gold_test",
+    srcs = ["jpov_strip3d_gold_test.cc"],
+    data = [":strip3d_ring_640x360.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
