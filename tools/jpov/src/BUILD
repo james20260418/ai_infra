@@ -5,7 +5,10 @@ cc_library(
     name = "renderer",
     srcs = ["renderer.cc"],
     hdrs = ["renderer.h"],
-    data = ["//tools/jpov:fonts/DejaVuSans.ttf"],
+    data = [
+        "//tools/jpov:fonts/NotoSansCJK-Regular.ttc",
+        "//tools/jpov:fonts/DejaVuSans.ttf",
+    ],
     # data 使用完整 target 引用（根 BUILD 声明 exports_files），见 tools/jpov/BUILD
     visibility = ["//visibility:public"],
     deps = [

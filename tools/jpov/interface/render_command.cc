@@ -43,10 +43,11 @@ void RenderCommandList::DrawCircle(const Vec2f& center, float radius,
 }
 
 void RenderCommandList::DrawText(const std::string& text, const Vec2f& pos,
-                                  float font_size, const Color& color) {
+                                  float font_size, const Color& color,
+                                  TextAlignment alignment) {
     CHECK_GT(font_size, 0.0f);
     int idx = static_cast<int>(text2d.size());
-    text2d.push_back({text, pos, font_size, color});
+    text2d.push_back({text, pos, font_size, color, alignment});
     order.emplace_back(DrawCommandType::kText2D, idx);
 }
 

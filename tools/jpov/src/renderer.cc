@@ -270,7 +270,8 @@ void Renderer::DestroyFont() {
         glDeleteTextures(1, &font_atlas_tex_);
         font_atlas_tex_ = 0;
     }
-    for (auto& g : font_glyphs_) {
+    for (auto& kv : font_glyphs_) {
+        GlyphBitmap& g = kv.second;
         if (g.pixels) {
             STBTT_free(g.pixels, nullptr);
             g.pixels = nullptr;
@@ -287,9 +288,51 @@ void Renderer::DestroyFont() {
     font_loaded_ = false;
 }
 
+uint32_t Renderer::UTF8Decode(const char*& p) {
+    uint8_t c = static_cast<uint8_t>(*p);
+    if (c < kUTF8ContByte) {
+        // 0xxxxxxx — single byte (ASCII)
+        ++p;
+        return c;
+    } else if (c < kUTF8Lead2Byte) {
+        // continuation byte without leading byte — illegal, skip
+        ++p;
+        return kUTF8Replacement;
+    } else if (c < kUTF8Lead3Byte) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead2Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
+        p += 2;
+        return cp;
+    } else if (c < kUTF8Lead4Byte) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead3Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[2]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 2; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & kUTF8ContMask);
+        p += 3;
+        return cp;
+    } else {
+        // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+        uint32_t cp = c & kUTF8Lead4Mask;
+        if ((static_cast<uint8_t>(p[1]) & ~kUTF8ContMask) != kUTF8ContByte) { ++p; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[2]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 2; return kUTF8Replacement; }
+        if ((static_cast<uint8_t>(p[3]) & ~kUTF8ContMask) != kUTF8ContByte) { p += 3; return kUTF8Replacement; }
+        cp = (cp << 6) | (static_cast<uint8_t>(p[1]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[2]) & kUTF8ContMask);
+        cp = (cp << 6) | (static_cast<uint8_t>(p[3]) & kUTF8ContMask);
+        p += 4;
+        return cp;
+    }
+}
+
 void Renderer::LoadFont() {
     // 先尝试 bazel run 的相对路径，再试 bazel test 的 runfiles
+    // CJK 字体优先（TTC, font_index=0 = Simplified Chinese），fallback 到 DejaVuSans
     const char* kFontPathCandidates[] = {
+        "tools/jpov/fonts/NotoSansCJK-Regular.ttc",
         "tools/jpov/fonts/DejaVuSans.ttf",
     };
 
@@ -307,10 +350,19 @@ void Renderer::LoadFont() {
         // Try TEST_SRCDIR for bazel test sandbox
         const char* srcdir = std::getenv("TEST_SRCDIR");
         if (srcdir) {
-            std::string p = srcdir;
+            std::string p;
+            // Try CJK font first in srcdir
+            p = srcdir;
             if (!p.empty() && p.back() != '/') p.push_back('/');
-            p += "__main__/tools/jpov/fonts/DejaVuSans.ttf";
+            p += "__main__/tools/jpov/fonts/NotoSansCJK-Regular.ttc";
             FILE* fp = std::fopen(p.c_str(), "rb");
+            if (!fp) {
+                // fallback to DejaVuSans in srcdir
+                p = srcdir;
+                if (!p.empty() && p.back() != '/') p.push_back('/');
+                p += "__main__/tools/jpov/fonts/DejaVuSans.ttf";
+                fp = std::fopen(p.c_str(), "rb");
+            }
             if (fp) {
                 font_path = "__srcdir__";
                 std::fclose(fp);
@@ -359,7 +411,12 @@ void Renderer::LoadFont() {
 
 parse_font:
     font_info_ = static_cast<stbtt_fontinfo*>(STBTT_malloc(sizeof(stbtt_fontinfo), nullptr));
-    if (!stbtt_InitFont(font_info_, font_ttf_data_, 0)) {
+    // 检测 TTC (TrueType Collection) 文件，取 font_index=0 (Simplified Chinese)
+    int font_offset = 0;
+    if (stbtt_GetNumberOfFonts(font_ttf_data_) > 1) {
+        font_offset = stbtt_GetFontOffsetForIndex(font_ttf_data_, 0);
+    }
+    if (!stbtt_InitFont(font_info_, font_ttf_data_, font_offset)) {
         STBTT_free(font_info_, nullptr);
         font_info_ = nullptr;
         STBTT_free(font_ttf_data_, nullptr);
@@ -368,156 +425,272 @@ parse_font:
         return;
     }
 
-    // 获取度量信息
-    float scale = stbtt_ScaleForPixelHeight(font_info_, 16.0f);  // 16px 基本字号
+    // 获取度量信息（基于基本字号 16px）
+    float scale = stbtt_ScaleForPixelHeight(font_info_, kBaseFontSize);
     int ascent, descent, linegap;
     stbtt_GetFontVMetrics(font_info_, &ascent, &descent, &linegap);
     font_ascent_ = static_cast<float>(ascent) * scale;
     font_descent_ = static_cast<float>(descent) * scale;
     font_linegap_ = static_cast<float>(linegap) * scale;
 
-    // 生成字符图集（ASCII 32~126 可打印字符）
-    // 每个字符独立 rasterize，布局到一个大的纹理图集中
-    static constexpr int kFirstChar = 32;
-    static constexpr int kLastChar = 126;
-    static constexpr int kCharCount = kLastChar - kFirstChar + 1;  // 95 chars
+    // 初始化动态 atlas：4096x4096 空灰度图
+    atlas_pixels_.resize(static_cast<size_t>(kAtlasSize) * kAtlasSize, 0);
+    atlas_cursor_x_ = 0;
+    atlas_cursor_y_ = 0;
+    atlas_row_h_ = 0;
+    atlas_dirty_ = false;
 
-    // 估算图集尺寸：假设每个字符最多 64x64，排成一行
-    // 实际使用更紧凑的 8 行布局
-    static constexpr int kAtlasCols = 16;
-    static constexpr int kAtlasRows = 6;  // 16*6=96 >= 95
-    static constexpr int kGlyphMaxW = 64;
-    static constexpr int kGlyphMaxH = 64;
-    static constexpr int kAtlasW = kAtlasCols * kGlyphMaxW;
-    static constexpr int kAtlasH = kAtlasRows * kGlyphMaxH;
-
-    // 临时图集 bitmap（灰度，1 byte/pixel）
-    std::vector<unsigned char> atlas(kAtlasW * kAtlasH, 0);
-
-    for (int i = 0; i < kCharCount; ++i) {
-        int c = kFirstChar + i;
-        int col = i % kAtlasCols;
-        int row = i / kAtlasCols;
-        int origin_x = col * kGlyphMaxW;
-        int origin_y = row * kGlyphMaxH;
-
-        GlyphBitmap& g = font_glyphs_[c];
-        int pw, ph, xoff, yoff;
-        g.pixels = stbtt_GetCodepointBitmap(font_info_,
-                                             0, scale,
-                                             c, &pw, &ph,
-                                             &xoff, &yoff);
-        g.w = pw;
-        g.h = ph;
-        g.xoff = static_cast<float>(xoff);
-        g.yoff = static_cast<float>(yoff);
-
-        int advance_width;
-        stbtt_GetCodepointHMetrics(font_info_, c, &advance_width, nullptr);
-        g.advance = static_cast<float>(advance_width) * scale;
-
-        // 拷贝到纹理图集
-        if (pw > 0 && ph > 0 && g.pixels) {
-            int copy_w = std::min(pw, kGlyphMaxW);
-            int copy_h = std::min(ph, kGlyphMaxH);
-            for (int gy = 0; gy < copy_h; ++gy) {
-                unsigned char* src = g.pixels + gy * pw;
-                unsigned char* dst = atlas.data() + (origin_y + gy) * kAtlasW + origin_x;
-                std::memcpy(dst, src, copy_w);
-            }
-        }
-    }
-
-    // 创建纹理
+    // 创建 GL 纹理（初始全黑）
     glGenTextures(1, &font_atlas_tex_);
     glBindTexture(GL_TEXTURE_2D, font_atlas_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kAtlasW, kAtlasH, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, atlas.data());
+    // 用 GL_R8 单通道纹理，shader 中 .r 读取为 alpha
+    // 先传全黑数据占位
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kAtlasSize, kAtlasSize, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, atlas_pixels_.data());
+    // 调试检查：用 glGetTexImage 验证上传
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        LOG(WARNING) << "GL error after tex image: " << error;
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    font_atlas_w_ = kAtlasW;
-    font_atlas_h_ = kAtlasH;
+    font_atlas_w_ = kAtlasSize;
+    font_atlas_h_ = kAtlasSize;
     font_loaded_ = true;
-    LOG(INFO) << "Font loaded: DejaVuSans.ttf, atlas " << kAtlasW << "x" << kAtlasH;
+    LOG(INFO) << "Font loaded: " << (font_path ? font_path : "<srcdir>") << ", dynamic atlas " << kAtlasSize << "x" << kAtlasSize;
+}
+
+Renderer::GlyphBitmap* Renderer::GetOrRasterizeGlyph(uint32_t cp) {
+    // 已存在 → 返回
+    auto it = font_glyphs_.find(cp);
+    if (it != font_glyphs_.end()) {
+        return &it->second;
+    }
+
+    if (!font_info_ || !font_loaded_) return nullptr;
+
+    // 光栅化 codepoint（基于基本字号 16px）
+    float scale = stbtt_ScaleForPixelHeight(font_info_, kBaseFontSize);
+    GlyphBitmap g;
+    int pw, ph, xoff, yoff;
+    g.pixels = stbtt_GetCodepointBitmap(font_info_, 0, scale, static_cast<int>(cp),
+                                        &pw, &ph, &xoff, &yoff);
+
+    int advance_width;
+    stbtt_GetCodepointHMetrics(font_info_, static_cast<int>(cp), &advance_width, nullptr);
+    g.advance = static_cast<float>(advance_width) * scale;
+
+    if (!g.pixels) {
+        // 空白字符（空格等），advance 已有，跳过 packing
+        g.w = 0;
+        g.h = 0;
+        g.xoff = 0.0f;
+        g.yoff = 0.0f;
+        g.atlas_x = 0;
+        g.atlas_y = 0;
+        auto result = font_glyphs_.emplace(cp, std::move(g));
+        return &result.first->second;
+    }
+
+    g.w = pw;
+    g.h = ph;
+    g.xoff = static_cast<float>(xoff);
+    g.yoff = static_cast<float>(yoff);
+
+    // 行式 packing：如果当前行放不下，换行
+    int glyph_w = pw + kGlyphPadding * 2;
+    int glyph_h = ph + kGlyphPadding * 2;
+
+    if (atlas_cursor_x_ + glyph_w > kAtlasSize) {
+        // 换行
+        atlas_cursor_x_ = 0;
+        atlas_cursor_y_ += atlas_row_h_;
+        atlas_row_h_ = 0;
+    }
+
+    // 如果超出 atlas 高度，报 warning 并跳过 packing
+    if (atlas_cursor_y_ + glyph_h > kAtlasSize) {
+        LOG(WARNING) << "Glyph atlas full, codepoint=" << cp << " not packed";
+        g.atlas_x = 0;
+        g.atlas_y = 0;
+        auto result = font_glyphs_.emplace(cp, std::move(g));
+        return &result.first->second;
+    }
+
+    // packing 位置（padding 后的内部原点）
+    int pack_x = atlas_cursor_x_ + kGlyphPadding;
+    int pack_y = atlas_cursor_y_ + kGlyphPadding;
+    g.atlas_x = pack_x;
+    g.atlas_y = pack_y;
+
+    // 拷贝像素到 atlas
+    for (int gy = 0; gy < ph; ++gy) {
+        unsigned char* src = g.pixels + static_cast<size_t>(gy) * pw;
+        unsigned char* dst = atlas_pixels_.data() +
+            static_cast<size_t>(pack_y + gy) * kAtlasSize + pack_x;
+        std::memcpy(dst, src, static_cast<size_t>(pw));
+    }
+
+    // 更新 cursor
+    atlas_cursor_x_ += glyph_w;
+    atlas_row_h_ = std::max(atlas_row_h_, glyph_h);
+    atlas_dirty_ = true;
+
+    // 释放光栅化像素（已拷贝到 atlas）
+    STBTT_free(g.pixels, nullptr);
+    g.pixels = nullptr;
+
+    auto result = font_glyphs_.emplace(cp, g);
+
+    return &result.first->second;
+}
+
+void Renderer::UploadAtlas() {
+    if (!atlas_dirty_ || !font_atlas_tex_) return;
+    // 全量更新 GL 纹理（4096x4096 不太大，全量上传即可）
+    glBindTexture(GL_TEXTURE_2D, font_atlas_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    kAtlasSize, kAtlasSize,
+                    GL_RED, GL_UNSIGNED_BYTE, atlas_pixels_.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    atlas_dirty_ = false;
+    LOG_EVERY_N(INFO, kAtlasUploadLogInterval) << "UploadAtlas: uploaded " << kAtlasSize << "x" << kAtlasSize;
 }
 
 void Renderer::DrawText2D(const Text2DCommand& cmd) {
     if (!font_loaded_) {
-        LOG_EVERY_N(WARNING, 60) << "Text2D: font not loaded, skipping";
+        LOG_EVERY_N(WARNING, kFontNotLoadedLogInterval) << "Text2D: font not loaded, skipping";
         return;
     }
 
     CHECK_GT(cmd.font_size, 0.0f);
 
     // 计算缩放比例：目标字号 / 图集基本字号 (16px)
-    float scale = cmd.font_size / 16.0f;
+    float scale = cmd.font_size / kBaseFontSize;
 
-    // 收集所有可见字符的顶点数据
-    // 每字符：4 顶点（位置+纹理坐标）× 2 三角形 = 6 组 (x, y, tx, ty)
-    // interleaved vertex format: pos2f + tex2f = 4 floats/vertex
+    // ---- Pass 1: 计算文本包围盒（用于对齐补偿） ----
+    // 注意：字形度量在 scale 下以 kBaseFontSize 图集为准，但 xoff/yoff 是图集字符的像素偏移量
+    float min_x = 0.0f, max_x = 0.0f;
+    float min_y = 0.0f, max_y = 0.0f;
+    float cur_x = 0.0f, cur_y = 0.0f;
+    bool first_glyph = true;
+    const char* p = cmd.text.c_str();
+
+    while (*p) {
+        uint32_t cp = UTF8Decode(p);
+
+        if (cp == '\n') {
+            cur_x = 0.0f;
+            cur_y += (font_ascent_ - font_descent_ + font_linegap_) * scale;
+            continue;
+        }
+
+        GlyphBitmap* g = GetOrRasterizeGlyph(cp);
+        if (!g) continue;
+
+        float gx = cur_x + g->xoff * scale;
+        float gy = cur_y + g->yoff * scale;
+        float gw = static_cast<float>(g->w) * scale;
+        float gh = static_cast<float>(g->h) * scale;
+
+        if (first_glyph) {
+            min_x = gx;
+            max_x = gx + gw;
+            min_y = gy;
+            max_y = gy + gh;
+            first_glyph = false;
+        } else {
+            if (gx < min_x) min_x = gx;
+            if (gx + gw > max_x) max_x = gx + gw;
+            if (gy < min_y) min_y = gy;
+            if (gy + gh > max_y) max_y = gy + gh;
+        }
+
+        cur_x += g->advance * scale;
+    }
+
+    // 计算对齐偏移
+    float offset_x = cmd.pos.x();
+    float offset_y = cmd.pos.y();
+    if (!first_glyph) {
+        float bb_w = max_x - min_x;
+        float bb_h = max_y - min_y;
+        switch (cmd.alignment) {
+            case TextAlignment::kTopLeft:
+                // pos 为包围盒左上角，无需偏移
+                break;
+            case TextAlignment::kTopRight:
+                offset_x = cmd.pos.x() - max_x;
+                break;
+            case TextAlignment::kCenter:
+                offset_x = cmd.pos.x() - min_x - bb_w * 0.5f;
+                offset_y = cmd.pos.y() - min_y - bb_h * 0.5f;
+                break;
+            case TextAlignment::kBottomLeft:
+                offset_y = cmd.pos.y() - max_y;
+                break;
+            case TextAlignment::kBottomRight:
+                offset_x = cmd.pos.x() - max_x;
+                offset_y = cmd.pos.y() - max_y;
+                break;
+        }
+    }
+
+    // ---- Pass 2: 收集顶点数据（带对齐偏移） ----
     struct TextVert { float x, y, tx, ty; };
     static constexpr int kMaxTextChars = 1024;
     TextVert verts_buf[kMaxTextChars * 6];
     int vert_count = 0;
 
-    float cur_x = cmd.pos.x();
-    float cur_y = cmd.pos.y();
+    // 确保第一批字符的 glyph atlas 已上传到 GPU
+    UploadAtlas();
 
-    static constexpr int kFirstChar = 32;
-    static constexpr int kLastChar = 126;
-    static constexpr int kAtlasCols = 16;
-    static constexpr int kGlyphMaxW = 64;
-    static constexpr int kGlyphMaxH = 64;
+    cur_x = 0.0f;
+    cur_y = 0.0f;
+    p = cmd.text.c_str();
 
-    for (char ch : cmd.text) {
-        int c = static_cast<unsigned char>(ch);
-        if (c < kFirstChar || c > kLastChar) {
-            if (c == '\n') {
-                cur_x = cmd.pos.x();
-                cur_y += (font_ascent_ - font_descent_ + font_linegap_) * scale;
-            } else if (c == ' ') {
-                cur_x += font_glyphs_[' '].advance * scale;
-            }
+    while (*p && vert_count + 6 <= kMaxTextChars * 6) {
+        uint32_t cp = UTF8Decode(p);
+
+        if (cp == '\n') {
+            cur_x = 0.0f;
+            cur_y += (font_ascent_ - font_descent_ + font_linegap_) * scale;
             continue;
         }
 
-        const GlyphBitmap& g = font_glyphs_[c];
-        if (vert_count + 6 > kMaxTextChars * 6) break;
+        GlyphBitmap* g = GetOrRasterizeGlyph(cp);
+        if (!g) continue;
 
-        int col = (c - kFirstChar) % kAtlasCols;
-        int row = (c - kFirstChar) / kAtlasCols;
+        // 新光栅化的字符可能 dirty，重新上传 atlas 片段
+        UploadAtlas();
 
-        float gx = cur_x + g.xoff * scale;
-        float gy = cur_y + g.yoff * scale;
-        float gw = static_cast<float>(g.w) * scale;
-        float gh = static_cast<float>(g.h) * scale;
+        float gx = offset_x + cur_x + g->xoff * scale;
+        float gy = offset_y + cur_y + g->yoff * scale;
+        float gw = static_cast<float>(g->w) * scale;
+        float gh = static_cast<float>(g->h) * scale;
 
-        // 纹理坐标 (图集空间)
-        float tx0 = static_cast<float>(col * kGlyphMaxW) / static_cast<float>(font_atlas_w_);
-        float ty0 = static_cast<float>(row * kGlyphMaxH) / static_cast<float>(font_atlas_h_);
-        float tx1 = static_cast<float>(col * kGlyphMaxW + kGlyphMaxW) / static_cast<float>(font_atlas_w_);
-        float ty1 = static_cast<float>(row * kGlyphMaxH + kGlyphMaxH) / static_cast<float>(font_atlas_h_);
-        // 实际字符在图集中的像素范围
-        float tx_adv = static_cast<float>(g.w) / static_cast<float>(kGlyphMaxW) * (tx1 - tx0);
-        float ty_adv = static_cast<float>(g.h) / static_cast<float>(kGlyphMaxH) * (ty1 - ty0);
+        // 纹理坐标（动态 atlas UV）
+        float inv_atlas = 1.0f / static_cast<float>(kAtlasSize);
+        float tx0 = static_cast<float>(g->atlas_x) * inv_atlas;
+        float ty0 = static_cast<float>(g->atlas_y) * inv_atlas;
+        float tx1 = static_cast<float>(g->atlas_x + g->w) * inv_atlas;
+        float ty1 = static_cast<float>(g->atlas_y + g->h) * inv_atlas;
 
-        // 两个三角形 (TRIANGLE_FAN 次序或两个独立三角形)
-        // T1: (gx,gy)---(gx+gw,gy)---(gx+gw,gy+gh)
-        // T2: (gx,gy)---(gx+gw,gy+gh)---(gx,gy+gh)
+        // 两个三角形
         TextVert* v = &verts_buf[vert_count];
         v[0] = {gx,      gy,      tx0, ty0};
-        v[1] = {gx+gw,   gy,      tx0 + tx_adv, ty0};
-        v[2] = {gx+gw,   gy+gh,   tx0 + tx_adv, ty0 + ty_adv};
+        v[1] = {gx+gw,   gy,      tx1, ty0};
+        v[2] = {gx+gw,   gy+gh,   tx1, ty1};
         v[3] = {gx,      gy,      tx0, ty0};
-        v[4] = {gx+gw,   gy+gh,   tx0 + tx_adv, ty0 + ty_adv};
-        v[5] = {gx,      gy+gh,   tx0, ty0 + ty_adv};
+        v[4] = {gx+gw,   gy+gh,   tx1, ty1};
+        v[5] = {gx,      gy+gh,   tx0, ty1};
         vert_count += 6;
 
-        cur_x += g.advance * scale;
+        cur_x += g->advance * scale;
     }
 
     if (vert_count == 0) return;
@@ -546,6 +719,10 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(TextVert), (void*)(sizeof(float) * 2));
 
     glDrawArrays(GL_TRIANGLES, 0, vert_count);
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG(WARNING) << "GL error after DrawText2D glDrawArrays: " << draw_err;
+    }
 
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(0);

@@ -109,16 +109,34 @@ struct Circle2DCommand {
     Color color;
 };
 
+// 文本对齐方式（2D 文本）
+//
+// 对齐点参考的是文本的包围盒边界，不是基线。
+// - kTopLeft:     pos 为包围盒左上角（缺省值，保持向后兼容）
+// - kTopRight:    pos 为包围盒右上角
+// - kCenter:      pos 为包围盒水平垂直中心
+// - kBottomLeft:  pos 为包围盒左下角
+// - kBottomRight: pos 为包围盒右下角
+enum class TextAlignment : uint8_t {
+    kTopLeft = 0,
+    kTopRight = 1,
+    kCenter = 2,
+    kBottomLeft = 3,
+    kBottomRight = 4,
+};
+
 // 2D 文本（屏幕空间）
 // text: 文本内容
-// pos: 文本左下角基线坐标（像素）
+// pos: 文本位置（含义取决于 alignment）
 // font_size: 字号（像素单位）
 // color: 文本颜色
+// alignment: 文本对齐方式
 struct Text2DCommand {
     std::string text;
     Vec2f pos;
     float font_size;
     Color color;
+    TextAlignment alignment = TextAlignment::kTopLeft;
 };
 
 // 3D 线段（世界空间）
@@ -222,8 +240,10 @@ struct RenderCommandList {
 
     // 2D 文本
     // Pre-condition: font_size > 0
+    // alignment: 文本对齐方式（缺省 kTopLeft，保持向后兼容）
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
-                  const Color& color);
+                  const Color& color,
+                  TextAlignment alignment = TextAlignment::kTopLeft);
 
     // ---- 3D 绘制辅助方法（世界空间，右手系） ----
 
