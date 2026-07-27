@@ -11,7 +11,7 @@
 // 坐标系统一约定：
 //   - 2D：屏幕像素坐标，原点在窗口左上角（x→右，y→下）
 //   - 3D：世界空间，右手系（x→右，y→上，z→后）
-//   - 2D 文本：基线对齐，位置即文本左下角坐标
+//   - 2D 文本：包围盒角点对齐（见 TextAlignment 枚举），位置含义取决于对齐方式
 
 #ifndef JPOV_RENDER_COMMAND_H_
 #define JPOV_RENDER_COMMAND_H_

@@ -445,6 +445,8 @@ static void ComputeAlignmentOffset(float pos_x, float pos_y,
             *out_off_x = pos_x - min_x - bw * 0.5f;
             *out_off_y = pos_y - max_y;
             break;
+        default:
+            LOG(FATAL) << "Unknown TextAlignment: " << alignment;
     }
 }
 
