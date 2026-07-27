@@ -3,11 +3,12 @@
 // FontManager 唯一对应一种字体。它维护三层 atlas（16/32/48px），
 // 每层独立的 CPU 图集 + 行式 packing。
 //
-// 绘制时自动选择最合适的层级（缩放比最小的那层），
-// atlas 填满时按 48→32→16 顺序 fallback，全满才跳过。
+// 架构：
+//   FindGlyph(cp)  → 只读查找，返回已有 Glyph 或 nullptr
+//   BuildGlyph(cp) → 一次性建立三层 Glyph（全建 or nothing）
+//   GenerateTextVertices → 只读消费 Glyph，不做任何光栅化
 //
-// FontManager 不持有 OpenGL 纹理资源（atlas 纹理由 Renderer 持有）。
-// 通过静态工厂方法 FontManager::Create() 构造。
+// FontManager 不持有 OpenGL 纹理资源。
 
 #ifndef JPOV_FONT_MANAGER_H_
 #define JPOV_FONT_MANAGER_H_
@@ -29,71 +30,49 @@ namespace jpov {
 
 // ==================== FontManagerConfig ====================
 
-// 字体管理器的配置（不含 GPU 资源句柄）。
 struct FontManagerConfig {
-    // 字体名称（仅用于日志和调试）
     std::string font_name;
-
-    // 字体文件路径（相对于 cwd 或绝对路径）
     std::string font_path;
-
-    // 预渲染字符集（如常用汉字和 ASCII）。
-    // 在 Create 时一次性光栅化这些字符到所有层级的图集。
-    // 为空则仅按需加载。
     std::vector<uint32_t> preraster_charset;
-
-    // TTC 字体索引（TrueType Collection 的子字体序号）。
-    // 对普通 ttf/otf 文件忽略此字段。
     int ttc_font_index = 0;
 };
 
 // ==================== GlyphLayer ====================
 
-// 一个字形的单层图集信息。
-// valid=true 表示该层成功 pack 到图集中。
 struct GlyphLayer {
-    int w = 0;              // 字形宽度（像素）
-    int h = 0;              // 字形高度（像素）
-    float advance = 0.0f;   // 水平步进宽度（像素，针对该层的 base_size）
-    float xoff = 0.0f;      // 左侧偏移（bearing X，像素）
-    float yoff = 0.0f;      // 顶部偏移（bearing Y，像素）
-    int atlas_x = 0;        // 图集中左下角 x（像素）
-    int atlas_y = 0;        // 图集中左下角 y（像素）
-    float base_size = 0.0f; // 该层的光栅化基础字号（16/32/48）
-    bool valid = false;     // 是否真正 pack 到图集（空格等无像素字符也为 true）
+    int w = 0;
+    int h = 0;
+    float advance = 0.0f;
+    float xoff = 0.0f;
+    float yoff = 0.0f;
+    int atlas_x = 0;
+    int atlas_y = 0;
+    float base_size = 0.0f;
+    bool valid = false;
 };
 
 // ==================== Glyph ====================
 
-// 一个字形的三层 atlas 信息。[0]=16px, [1]=32px, [2]=48px。
-// GenerateTextVertices 遍历三层找最佳匹配。
 struct Glyph {
-    GlyphLayer layers[3];
+    GlyphLayer layers[3];  // [0]=16px, [1]=32px, [2]=48px
 
-    // 是否至少有一层有像素（非空格）
     bool has_pixels() const {
-        for (const auto& layer : layers) {
-            if (layer.valid && layer.w > 0) return true;
+        for (const auto& l : layers) {
+            if (l.valid && l.w > 0) return true;
         }
         return false;
-    }
-
-    // 取某一层的缩放因子（目标字号 / 该层 base_size）
-    float layer_scale(int level) const {
-        return layers[level].base_size;
     }
 };
 
 // ==================== AtlasLevel ====================
 
-// 图集的某一层（16/32/48px），独立 CPU 像素 + cursor
 struct AtlasLevel {
     float base_size = 0.0f;
     std::vector<uint8_t> pixels;
     int cursor_x = 0;
     int cursor_y = 0;
     int row_h = 0;
-    bool dirty = false;     // 本层有新字形加入，需要 GL 上传
+    bool dirty = false;
 };
 
 // ==================== FontManager ====================
@@ -101,56 +80,35 @@ struct AtlasLevel {
 class FontManager {
 public:
     static constexpr int kAtlasDim = 4096;
-
-    // 层级索引常量
     static constexpr int kLevel16 = 0;
     static constexpr int kLevel32 = 1;
     static constexpr int kLevel48 = 2;
     static constexpr int kNumLevels = 3;
-
-    // 各层级的基础字号
     static constexpr float kAtlasLevelBaseSizes[3] = {16.0f, 32.0f, 48.0f};
-
-    // 字形间间隔像素（避免渲染时相邻字符颜色渗出）
     static constexpr int kGlyphPadding = 2;
-
-    // 全局日志频率控制
     static constexpr int kUploadLogInterval = 5;
     static constexpr int kNotLoadedLogInterval = 60;
 
-    // 工厂：加载字体，初始化三层 atlas，光栅化预渲染字符集。
-    // 返回 std::nullopt 表示加载失败。
     static std::optional<FontManager> Create(const FontManagerConfig& config);
 
     ~FontManager();
 
-    // Move
     FontManager(FontManager&& other) noexcept;
     FontManager& operator=(FontManager&& other) noexcept;
     FontManager(const FontManager&) = delete;
     FontManager& operator=(const FontManager&) = delete;
 
     // ---- 只读属性 ----
-
     bool loaded() const { return loaded_; }
-
-    // 字体度量（16px base 的像素值）
     float ascent() const { return ascent_; }
     float descent() const { return descent_; }
     float linegap() const { return linegap_; }
 
-    // 某一层图集的 CPU 像素（只读，灰度，R8 格式）
     const std::vector<uint8_t>& atlas_pixels(int level) const {
         return levels_[level].pixels;
     }
-
-    // 某一层是否需要 GL 上传
     bool atlas_dirty(int level) const { return levels_[level].dirty; }
-
-    // 标记某层已上传
     void mark_atlas_clean(int level) { levels_[level].dirty = false; }
-
-    // 全局是否有任何层 dirty
     bool any_atlas_dirty() const {
         for (int i = 0; i < kNumLevels; ++i) {
             if (levels_[i].dirty) return true;
@@ -160,20 +118,22 @@ public:
 
     // ---- 核心操作 ----
 
-    // UTF-8 解码
     static uint32_t DecodeUtf8(const char*& p);
 
-    // 获取或光栅化一个字形。
-    // 先在所有已有层中查找最佳匹配，找不到则尝试从最佳层开始光栅化+packing。
-    // 返回 nullptr 表示码点无字形数据。
-    //
-    // preferred_level — hint：优先用哪一层（-1 表示自动选择）
-    const Glyph* GetOrRasterizeGlyph(uint32_t codepoint,
-                                     int preferred_level = -1);
+    // 只读查找：返回已有 Glyph 指针，不存在则返回 nullptr。
+    // 不触发任何光栅化。
+    const Glyph* FindGlyph(uint32_t codepoint) const;
+
+    // 构建一个字符的三层 Glyph（一次性全建）。
+    // 已有则直接返回；不存在则三层全部光栅化 + packing。
+    // 某一层 atlas 满了，该层 valid=false，其他层不受影响。
+    // 返回 nullptr 表示所有三层都无效（字体未加载或全满）。
+    const Glyph* BuildGlyph(uint32_t codepoint);
 
     // 为 DrawText2D 生成顶点数据。
+    // 调用方需先对所有 codepoint 调用 BuildGlyph，后者只做只读。
     //
-    // selected_level — output: 实际使用的 atlas 层级（用于选择 GL 纹理）
+    // selected_level — output: 实际使用的 atlas 层级
     bool GenerateTextVertices(std::string_view text,
                               float font_size,
                               float pos_x, float pos_y,
@@ -190,49 +150,34 @@ private:
     void InitAtlas();
     void PrerasterCharset();
 
-    // 为特定层级光栅化并 pack 一个字形
-    // 返回 true 表示成功 pack（或字符为空格）
-    bool RasterizeToLevel(uint32_t codepoint, int level, Glyph* out_glyph);
+    // 光栅化一个字到指定层级（不查缓存，不修改 glyphs_）。
+    // 成功则填充 layer 并返回 true；atlas 满或无字形则返回 false。
+    bool RasterizeToLevel(uint32_t codepoint, int level,
+                          GlyphLayer* layer /*output*/);
 
-    // 根据目标字号选择最佳层级
     int SelectBestLevel(float font_size) const;
-
-    // 在指定层级生成顶点。
-    // 如果任何字形需要 fallback，*selected_level 设为那个更低的层级，
-    // out_verts 清空，调用者应降级重试。
-    bool GenerateVerticesAtLevel(std::string_view text,
-                                  float font_size, int level,
-                                  float pos_x, float pos_y,
-                                  int alignment,
-                                  int* selected_level /*output*/,
-                                  std::vector<float>* out_verts /*output*/);
 
     // font file data
     unsigned char* ttf_data_ = nullptr;
     long ttf_data_size_ = 0;
-
-    // stb_truetype state
     stbtt_fontinfo* font_info_ = nullptr;
 
-    // configured properties
+    // configured
     std::string font_name_;
     std::string font_path_;
     std::vector<uint32_t> preraster_charset_;
     int ttc_font_index_ = 0;
 
-    // runtime state
+    // runtime
     bool loaded_ = false;
-    float ascent_ = 0.0f;    // 16px 度量值（实际绘制时按 scale 换算）
+    float ascent_ = 0.0f;
     float descent_ = 0.0f;
     float linegap_ = 0.0f;
 
-    // 三层 atlas
     AtlasLevel levels_[kNumLevels];
-
-    // 字形缓存：codepoint → 三层信息
     std::unordered_map<uint32_t, Glyph> glyphs_;
 
-    // ---- UTF-8 常量 ----
+    // UTF-8 constants
     static constexpr uint8_t kUtf8Cont  = 0x80;
     static constexpr uint8_t kUtf8Mask6 = 0x3F;
     static constexpr uint8_t kUtf8Lead2 = 0xC0;
