@@ -139,6 +139,12 @@ private:
     // 注册顺序（用于空 alias 回退到第一个）
     std::vector<std::string> font_order_;
 
+    // Strip3D 专用 VBO（3000 顶点缓存，初始化时分配）
+    unsigned int strip_vbo_ = 0;
+    static constexpr int kMaxStripVertices = 3000;
+
+    void DrawStrip3D(const Strip3DCommand& cmd);
+
     unsigned int tex_prog_ = 0;
     unsigned int prog_3d_ = 0;  // 3D solid color shader
     unsigned int tex_prog_3d_ = 0;  // 3D textured shader
