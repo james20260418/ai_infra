@@ -1,6 +1,5 @@
 // JPOV Renderer 实现
-// FBO 动态调整，坐标以渲染分辨率为空间。
-// 字体管理委托给 FontManager。
+// FBO 动态调整，坐标以窗口坐标为空间。
 
 #define GL_GLEXT_PROTOTYPES
 
@@ -69,7 +68,7 @@ namespace {
 
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
-// 2D 坐标使用 FBO 尺寸做 NDC 变换（坐标超出 FBO 范围即裁剪）
+// 2D 坐标使用窗口尺寸做 NDC 变换（坐标超出 FBO 范围即裁剪）
 const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -93,6 +92,7 @@ void main() {
 )glsl";
 
 // 纹理+颜色混合 Fragment Shader
+// 纹理采样（alpha 通道作为透明度）× uniform 颜色
 const char* kTexVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -153,12 +153,14 @@ unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
     return prog;
 }
 
-// 创建 GL atlas 纹理并上传 CPU 像素
+// 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 unsigned int CreateGlAtlasTexture(int atlas_dim,
                                   const std::vector<uint8_t>& pixels) {
     unsigned int tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
+    // 用 GL_R8 单通道纹理，shader 中 .r 读取为 alpha
+    // 先传全黑数据占位
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, atlas_dim, atlas_dim, 0,
                  GL_RED, GL_UNSIGNED_BYTE, pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -255,6 +257,7 @@ void Renderer::CompileShaders() {
     prog_ = LinkProgram(vs, fs);
     CHECK_NE(prog_, 0u);
 
+    // 纹理 shader
     unsigned int tvs = CompileShader(GL_VERTEX_SHADER, kTexVs);
     unsigned int tfs = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
     tex_prog_ = LinkProgram(tvs, tfs);
@@ -275,14 +278,41 @@ void Renderer::Init() {
 #endif
     CompileShaders();
     CreateStreamVBO();
-    LoadFonts();
+    InitFonts();
 }
+
 
 // ==================== 字体初始化 ====================
 
-void Renderer::LoadFonts() {
-    // 路径查找逻辑（与旧版 LoadFont 相同）
-    // CJK 候选：优先 CJK TTC（中日韩全集），其次 SC-only OTF（更轻量）
+// 路径查找：先试 bazel run 的相对路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
+static std::string ResolveFontPath(const char* const* candidates, int n) {
+    for (int i = 0; i < n; ++i) {
+        FILE* fp = std::fopen(candidates[i], "rb");
+        if (fp) {
+            std::fclose(fp);
+            return candidates[i];
+        }
+    }
+    // Try TEST_SRCDIR for bazel test sandbox
+    const char* srcdir = std::getenv("TEST_SRCDIR");
+    if (srcdir) {
+        for (int i = 0; i < n; ++i) {
+            std::string p = srcdir;
+            if (!p.empty() && p.back() != '/') p.push_back('/');
+            p += "__main__/";
+            p += candidates[i];
+            FILE* fp = std::fopen(p.c_str(), "rb");
+            if (fp) {
+                std::fclose(fp);
+                return p;
+            }
+        }
+    }
+    return "";
+}
+
+void Renderer::InitFonts() {
+    // CJK 字体优先（TTC, font_index=0 = Simplified Chinese），fallback 到 SC-only OTF
     const char* kCjkCandidates[] = {
         "tools/jpov/fonts/NotoSansCJK-Regular.ttc",
         "tools/jpov/fonts/NotoSansSC-Regular.otf",
@@ -291,47 +321,21 @@ void Renderer::LoadFonts() {
         "tools/jpov/fonts/DejaVuSans.ttf",
     };
 
-    auto resolve_path = [](const char* const* candidates, int n) -> std::string {
-        for (int i = 0; i < n; ++i) {
-            FILE* fp = std::fopen(candidates[i], "rb");
-            if (fp) {
-                std::fclose(fp);
-                return candidates[i];
-            }
-        }
-        // Try TEST_SRCDIR
-        const char* srcdir = std::getenv("TEST_SRCDIR");
-        if (srcdir) {
-            for (int i = 0; i < n; ++i) {
-                std::string p = srcdir;
-                if (!p.empty() && p.back() != '/') p.push_back('/');
-                p += "__main__/";
-                p += candidates[i];
-                FILE* fp = std::fopen(p.c_str(), "rb");
-                if (fp) {
-                    std::fclose(fp);
-                    return p;
-                }
-            }
-        }
-        return "";
-    };
-
     constexpr int kCjkCount = sizeof(kCjkCandidates) / sizeof(kCjkCandidates[0]);
     constexpr int kLatinCount = sizeof(kLatinCandidates) / sizeof(kLatinCandidates[0]);
 
-    // ===== CJK 字体 (TTC, font_index=0 = Simplified Chinese) =====
+    // ===== CJK 字体 =====
     {
-        std::string cjk_path = resolve_path(kCjkCandidates, kCjkCount);
+        std::string cjk_path = ResolveFontPath(kCjkCandidates, kCjkCount);
         if (!cjk_path.empty()) {
             FontManagerConfig cfg;
             cfg.font_name = "CJK";
             cfg.font_path = cjk_path;
-            cfg.base_font_size = 16.0f;
             cfg.ttc_font_index = 0;
 
-            font_cjk_.manager.reset(FontManager::Create(cfg));
-            if (font_cjk_.manager) {
+            std::optional<FontManager> mgr = FontManager::Create(cfg);
+            if (mgr.has_value()) {
+                font_cjk_.manager = std::move(mgr.value());
                 font_cjk_.atlas_tex = CreateGlAtlasTexture(
                     FontManager::kAtlasDim,
                     font_cjk_.manager->atlas_pixels());
@@ -341,15 +345,15 @@ void Renderer::LoadFonts() {
 
     // ===== Latin fallback 字体 =====
     {
-        std::string latin_path = resolve_path(kLatinCandidates, kLatinCount);
+        std::string latin_path = ResolveFontPath(kLatinCandidates, kLatinCount);
         if (!latin_path.empty()) {
             FontManagerConfig cfg;
             cfg.font_name = "Latin";
             cfg.font_path = latin_path;
-            cfg.base_font_size = 16.0f;
 
-            font_latin_.manager.reset(FontManager::Create(cfg));
-            if (font_latin_.manager) {
+            std::optional<FontManager> mgr = FontManager::Create(cfg);
+            if (mgr.has_value()) {
+                font_latin_.manager = std::move(mgr.value());
                 font_latin_.atlas_tex = CreateGlAtlasTexture(
                     FontManager::kAtlasDim,
                     font_latin_.manager->atlas_pixels());
@@ -358,42 +362,43 @@ void Renderer::LoadFonts() {
     }
 }
 
-void Renderer::UploadAtlas(const FontRes& font) {
-    if (!font.manager || !font.manager->atlas_dirty() || !font.atlas_tex) {
+void Renderer::UploadAtlas(FontSlot& slot) {
+    if (!slot.manager.has_value() || !slot.manager->loaded() || !slot.manager->atlas_dirty() || !slot.atlas_tex) {
         return;
     }
-    glBindTexture(GL_TEXTURE_2D, font.atlas_tex);
+    // 全量更新 GL 纹理（4096x4096 不太大，全量上传即可）
+    glBindTexture(GL_TEXTURE_2D, slot.atlas_tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
                     FontManager::kAtlasDim, FontManager::kAtlasDim,
                     GL_RED, GL_UNSIGNED_BYTE,
-                    font.manager->atlas_pixels().data());
+                    slot.manager->atlas_pixels().data());
     glBindTexture(GL_TEXTURE_2D, 0);
-    font.manager->mark_atlas_clean();
-    LOG_EVERY_N(INFO, FontManager::kUploadLogInterval) << "UploadAtlas["
-        << FontManager::kAtlasDim << "x" << FontManager::kAtlasDim << "]";
+    slot.manager->mark_atlas_clean();
+    LOG_EVERY_N(INFO, FontManager::kUploadLogInterval) << "UploadAtlas: uploaded "
+        << FontManager::kAtlasDim << "x" << FontManager::kAtlasDim;
 }
 
 // ==================== DrawText2D ====================
 
 void Renderer::DrawText2D(const Text2DCommand& cmd) {
     // 字体选择：优先 CJK（支持中文字符），其次 Latin fallback
-    FontRes* font = nullptr;
-    if (font_cjk_.manager && font_cjk_.manager->loaded()) {
-        font = &font_cjk_;
-    } else if (font_latin_.manager && font_latin_.manager->loaded()) {
-        font = &font_latin_;
+    FontSlot* slot = nullptr;
+    if (font_cjk_.manager.has_value() && font_cjk_.manager->loaded()) {
+        slot = &font_cjk_;
+    } else if (font_latin_.manager.has_value() && font_latin_.manager->loaded()) {
+        slot = &font_latin_;
     } else {
         LOG_EVERY_N(WARNING, FontManager::kNotLoadedLogInterval)
-            << "Text2D: no font loaded";
+            << "Text2D: font not loaded, skipping";
         return;
     }
 
-    FontManager* mgr = font->manager.get();
+    CHECK_GT(cmd.font_size, 0.0f);
 
     // GenerateTextVertices 内部执行 Pass 1（包围盒计算+字形光栅化）和
     // Pass 2（顶点生成），字形按需加载到图集。
     std::vector<float> verts;
-    bool ok = mgr->GenerateTextVertices(
+    bool ok = slot->manager->GenerateTextVertices(
         cmd.text, cmd.font_size,
         cmd.pos.x(), cmd.pos.y(),
         static_cast<int>(cmd.alignment),
@@ -405,9 +410,9 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
     }
 
     // 上传新光栅化的字形到 GL atlas
-    UploadAtlas(*font);
+    UploadAtlas(*slot);
 
-    // GL draw
+    // 上传顶点数据到 VBO
     glUseProgram(tex_prog_);
     glUniform2f(glGetUniformLocation(tex_prog_, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
@@ -415,15 +420,18 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
     glUniform1i(glGetUniformLocation(tex_prog_, "uTexture"), 0);
 
+    // 绑定纹理
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, font->atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, slot->atlas_tex);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
     glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
                  verts.data(), GL_DYNAMIC_DRAW);
 
-    constexpr int kStride = 4 * sizeof(float);  // x,y,u,v
+    // 位置 (location 0)  | 纹理坐标 (location 1)
+    // x,y,u,v interleaved, stride = 4 floats
+    constexpr int kStride = 4 * static_cast<int>(sizeof(float));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, kStride, (void*)0);
     glEnableVertexAttribArray(1);
@@ -542,6 +550,8 @@ void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
     std::vector<uint8_t> pixels;
     SaveScreenshotToBuffer(win_w, win_h, &pixels);
 
+    // stb_image_write takes RGBA pixels with stride = 4*width
+    // stbi_flip_vertically_on_write handles OpenGL's bottom-left origin
     stbi_flip_vertically_on_write(1);
     int ok = stbi_write_png(path, win_w, win_h, 4, pixels.data(), win_w * 4);
     CHECK_NE(ok, 0) << "Failed to write PNG: " << path;
@@ -556,6 +566,7 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     CHECK_NE(fbo_, 0u);
     CHECK_NOTNULL(out_pixels);
 
+    // 1. 拉伸到 output FBO 模拟 Present 到窗口的效果
     EnsureOutputFBO(win_w, win_h);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
@@ -570,19 +581,31 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // 2. 从 output FBO 读回像素
     out_pixels->resize(static_cast<size_t>(win_w) * win_h * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, out_fbo_);
     glReadPixels(0, 0, win_w, win_h, GL_RGBA, GL_UNSIGNED_BYTE, out_pixels->data());
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+    // 3. RGBA → BGRA（stb_image_write 期望 RGBA，不需要转换）
+    // stb_image_write 接受 RGBA 数据，和 OpenGL 读出的 RGBA 一致。
+    // Y 翻转由 stbi_flip_vertically_on_write(1) 在 SaveScreenshot 中处理。
+    // 这里不做翻转，让调用者决定。
 }
 
 void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
+    // Pre-condition:
+    //   - vertices 至少 2 个点
+    //   - edge_count (vertices.size()-1) ≤ kMaxPolylineEdges
+    //   - line_width > 0（像素单位）
     int n = static_cast<int>(cmd.vertices.size());
     CHECK_GE(n, 2);
     int edge_count = n - 1;
     CHECK_LE(edge_count, kMaxPolylineEdges);
     CHECK_GT(cmd.line_width, 0.0f);
 
+    // 每个 quad 6 顶点 + 每个 bridge 6 顶点（2 三角形）
+    // 顶点格式：x, y, x, y, ...
     int total_verts = edge_count * 6 + (edge_count - 1) * 6;
     std::vector<float> verts;
     verts.reserve(static_cast<size_t>(total_verts) * 2);
@@ -593,9 +616,11 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
         const Vec2f& p0 = cmd.vertices[i];
         const Vec2f& p1 = cmd.vertices[i + 1];
 
+        // 边向量
         Vec2f dir = p1 - p0;
         float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
 
+        // 垂直方向（归一化），len 过短时水平偏移
         Vec2f perp;
         static constexpr float kEpsilon = 1e-6f;
         if (len < kEpsilon) {
@@ -604,50 +629,41 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
             perp = {-dir.y() / len, dir.x() / len};
         }
 
+        // 四个角点
         Vec2f n0 = p0 + perp * half_w;
         Vec2f n1 = p0 - perp * half_w;
         Vec2f n2 = p1 + perp * half_w;
         Vec2f n3 = p1 - perp * half_w;
 
+        // 两个三角形：n0-n1-n2, n2-n1-n3 (CW)
         // T1
-        verts.push_back(n0.x());
-        verts.push_back(n0.y());
-        verts.push_back(n1.x());
-        verts.push_back(n1.y());
-        verts.push_back(n2.x());
-        verts.push_back(n2.y());
+        verts.push_back(n0.x()); verts.push_back(n0.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n2.x()); verts.push_back(n2.y());
         // T2
-        verts.push_back(n2.x());
-        verts.push_back(n2.y());
-        verts.push_back(n1.x());
-        verts.push_back(n1.y());
-        verts.push_back(n3.x());
-        verts.push_back(n3.y());
-
+        verts.push_back(n2.x()); verts.push_back(n2.y());
+        verts.push_back(n1.x()); verts.push_back(n1.y());
+        verts.push_back(n3.x()); verts.push_back(n3.y());
+        // 每个连接处在 V 形间隙外侧补一个三角形
         if (i + 1 < edge_count) {
             const Vec2f& p2 = cmd.vertices[i + 2];
             Vec2f dn = p2 - p1;
-            float ln = std::sqrt(dn.x() * dn.x() + dn.y() * dn.y());
+            float ln = std::sqrt(dn.x()*dn.x()+dn.y()*dn.y());
             Vec2f perp_n;
-            if (ln < kEpsilon) {
-                perp_n = {1.0f, 0.0f};
-            } else {
-                perp_n = {-dn.y() / ln, dn.x() / ln};
-            }
+            if (ln < kEpsilon) { perp_n = {1.0f, 0.0f}; }
+            else { perp_n = {-dn.y()/ln, dn.x()/ln}; }
 
-            verts.push_back(p1.x());
-            verts.push_back(p1.y());
-            verts.push_back(n3.x());
-            verts.push_back(n3.y());
+            // 用顶点和两段矩形外侧角点构成填充三角形
+            // 内侧三角形 (p1, n3, n3_next) 和 (p1, n2_next, n2) 填充间隙
+            verts.push_back(p1.x()); verts.push_back(p1.y());
+            verts.push_back(n3.x()); verts.push_back(n3.y());
             verts.push_back((p1 - perp_n * half_w).x());
             verts.push_back((p1 - perp_n * half_w).y());
 
-            verts.push_back(p1.x());
-            verts.push_back(p1.y());
+            verts.push_back(p1.x()); verts.push_back(p1.y());
             verts.push_back((p1 + perp_n * half_w).x());
             verts.push_back((p1 + perp_n * half_w).y());
-            verts.push_back(n2.x());
-            verts.push_back(n2.y());
+            verts.push_back(n2.x()); verts.push_back(n2.y());
         }
     }
 
@@ -686,6 +702,8 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     verts[7] = y1;
 
     glUseProgram(prog_);
+    // uFboSize = NDC 变换参照。必须用 FBO 尺寸（渲染分辨率），
+    // 使 NDC 坐标空间与 glViewport 一致，避免 rect 偏移。
     glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
     glUniform4f(glGetUniformLocation(prog_, "uColor"),
@@ -702,11 +720,12 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
 
 void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
     static constexpr int kSegments = 64;
-    float verts[(kSegments + 2) * 2];
+    float verts[(kSegments + 2) * 2];  // fan center + kSegments perimeter points
     float cx = cmd.center.x();
     float cy = cmd.center.y();
     float r = cmd.radius;
 
+    // Center of fan
     verts[0] = cx;
     verts[1] = cy;
 

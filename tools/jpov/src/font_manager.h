@@ -8,9 +8,8 @@
 //   - 为 DrawText2D 生成顶点数据
 //
 // FontManager 不持有 OpenGL 纹理资源（atlas 纹理由 Renderer 持有）。
-// 构造时告知 Manager 图集的 GPU 纹理 ID 和尺寸（Manager 只管 CPU 像素）。
 //
-// Renderer 通过 FontManager::Create() 工厂方法构建，传入 FontManagerConfig。
+// 通过静态工厂方法 FontManager::Create() 构造，传入 FontManagerConfig。
 // 图集纹理由 Renderer 创建和销毁，FontManager::atlas_pixels() 获取 CPU 像素面，
 // Renderer 负责上传到 GL。
 
@@ -18,6 +17,7 @@
 #define JPOV_FONT_MANAGER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -37,7 +37,7 @@ namespace jpov {
 // GPU 纹理 ID 和 atlas 尺寸在 FontManager 构造后由 Renderer 设置。
 struct FontManagerConfig {
     // 基本字号（像素单位），一切字形光栅化基于此字号
-    float base_font_size = 16.0f;
+    float base_font_size = 64.0f;
 
     // 字体名称（仅用于日志和调试）
     std::string font_name;
@@ -46,7 +46,7 @@ struct FontManagerConfig {
     std::string font_path;
 
     // 预渲染字符集（如常用汉字和 ASCII）。
-    // 在 Load 时一次性光栅化这些字符到图集，后续 DrawText 时无需逐字加载。
+    // 在 Create 时一次性光栅化这些字符到图集，后续 DrawText 时无需逐字加载。
     // 为空则仅按需加载。
     std::vector<uint32_t> preraster_charset;
 
@@ -83,15 +83,15 @@ public:
     static constexpr int kNotLoadedLogInterval = 60;
 
     // 工厂：加载字体，光栅化预渲染字符集，初始化 CPU 图集。
-    // 返回 nullptr 表示加载失败（config.font_path 不存在或解析错误）。
+    // 返回 std::nullopt 表示加载失败（config.font_path 不存在或解析错误）。
     // 调用者需创建 GL 纹理并上传 atlas_pixels()。
-    //
-    // config — 字体配置（路径、字号、预渲染字符集等）
-    // 返回 FontManager 指针（调用者负责 delete）
-    static FontManager* Create(const FontManagerConfig& config);
+    static std::optional<FontManager> Create(const FontManagerConfig& config);
 
     ~FontManager();
 
+    // Move: 转移 raw pointer 所有权，源对象置空
+    FontManager(FontManager&& other) noexcept;
+    FontManager& operator=(FontManager&& other) noexcept;
     FontManager(const FontManager&) = delete;
     FontManager& operator=(const FontManager&) = delete;
 
@@ -138,7 +138,7 @@ public:
     // font_size   — input: 目标字号（像素单位）
     // pos_x, pos_y — input: 文本定位点
     // alignment   — input: 对齐方式
-    // fbo_w, fbo_h — input: FBO 尺寸（用于 y 翻转等坐标变换，reserved）
+    // fbo_w, fbo_h — input: FBO 尺寸（reserved）
     // out_verts   — output: 顶点数据，每 6 个顶点一个字形四边形
     //                       交错格式: {x,y,tx,ty} 重复
     //
@@ -151,7 +151,7 @@ public:
                               std::vector<float>* out_verts /*output*/);
 
 private:
-    FontManager();
+    FontManager() = default;
 
     bool LoadFontFile();
     bool ParseFont();
@@ -166,7 +166,7 @@ private:
     stbtt_fontinfo* font_info_ = nullptr;
 
     // configured properties
-    float base_font_size_ = 16.0f;
+    float base_font_size_ = 64.0f;
     std::string font_name_;
     std::string font_path_;
     std::vector<uint32_t> preraster_charset_;

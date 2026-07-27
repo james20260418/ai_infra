@@ -5,16 +5,14 @@
 //
 // 所有 2D 坐标以渲染分辨率为空间（非窗口坐标），
 // Present 时从 FBO 裁剪窗口大小区域 → framebuffer（无缩放）。
-//
-// 字体管理委托给 FontManager：Renderer 持有 FontManager 实例和对应的
-// GL atlas 纹理，DrawText2D 只做顶点上传和 draw call。
 
 #ifndef JPOV_RENDERER_H_
 #define JPOV_RENDERER_H_
 
+#include <array>
 #include <cstdint>
-#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
@@ -88,24 +86,26 @@ private:
     void DrawCircle2D(const Circle2DCommand& cmd);
     void DrawText2D(const Text2DCommand& cmd);
 
-    // ---- 字体管理 (delegated to FontManager) ----
+    // ---- 字体管理 ----
 
-    // 每种字体资源 (manager + GL atlas texture)
-    struct FontRes {
-        std::unique_ptr<FontManager> manager;
+    // 每种字体资源：FontManager + GL atlas 纹理。
+    // FontManager 不持有 GL 资源，图集纹理由 Renderer 创建和管理。
+    //
+    // 目前两种字体：CJK（中日韩，TTC font_index=0）和 Latin fallback（DejaVuSans）。
+    // 每种字体有独立的 atlas + glyph cache，按需光栅化。
+    struct FontSlot {
+        std::optional<FontManager> manager;
         unsigned int atlas_tex = 0;
     };
 
-    // 初始化所有字体管理器（LoadFont 拆分为多个独立的 FontManager::Create 调用）
-    void LoadFonts();
+    // 构造两个 FontSlot（CJK + Latin fallback），创建对应的 GL atlas 纹理
+    void InitFonts();
 
-    // 上传指定字体的 CPU 图集到 GL（仅在 atlas_dirty 时）
-    void UploadAtlas(const FontRes& font);
+    // 上传 atlas 到 GL（仅在 FontManager::atlas_dirty() 时操作）
+    void UploadAtlas(FontSlot& slot);
 
-    // 两种字体（含独立的 FontManager）
-    FontRes font_cjk_;
-    FontRes font_latin_;
-
+    FontSlot font_cjk_;
+    FontSlot font_latin_;
     unsigned int tex_prog_ = 0;
 };
 

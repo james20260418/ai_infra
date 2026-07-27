@@ -21,8 +21,6 @@ namespace jpov {
 
 // ==================== 构造 / 析构 ====================
 
-FontManager::FontManager() = default;
-
 FontManager::~FontManager() {
     if (font_info_) {
         STBTT_free(font_info_, nullptr);
@@ -34,34 +32,88 @@ FontManager::~FontManager() {
     }
 }
 
+FontManager::FontManager(FontManager&& other) noexcept
+    : ttf_data_(other.ttf_data_),
+      ttf_data_size_(other.ttf_data_size_),
+      font_info_(other.font_info_),
+      base_font_size_(other.base_font_size_),
+      font_name_(std::move(other.font_name_)),
+      font_path_(std::move(other.font_path_)),
+      preraster_charset_(std::move(other.preraster_charset_)),
+      ttc_font_index_(other.ttc_font_index_),
+      loaded_(other.loaded_),
+      atlas_dirty_(other.atlas_dirty_),
+      ascent_(other.ascent_),
+      descent_(other.descent_),
+      linegap_(other.linegap_),
+      atlas_pixels_(std::move(other.atlas_pixels_)),
+      atlas_cursor_x_(other.atlas_cursor_x_),
+      atlas_cursor_y_(other.atlas_cursor_y_),
+      atlas_row_h_(other.atlas_row_h_),
+      glyphs_(std::move(other.glyphs_)) {
+    // 转移 raw pointer 所有权，源对象置空避免 double-free
+    other.ttf_data_ = nullptr;
+    other.font_info_ = nullptr;
+    other.loaded_ = false;
+}
+
+FontManager& FontManager::operator=(FontManager&& other) noexcept {
+    if (this != &other) {
+        // 先清理自己的资源
+        if (font_info_) { STBTT_free(font_info_, nullptr); }
+        if (ttf_data_) { STBTT_free(ttf_data_, nullptr); }
+
+        ttf_data_ = other.ttf_data_;
+        ttf_data_size_ = other.ttf_data_size_;
+        font_info_ = other.font_info_;
+        base_font_size_ = other.base_font_size_;
+        font_name_ = std::move(other.font_name_);
+        font_path_ = std::move(other.font_path_);
+        preraster_charset_ = std::move(other.preraster_charset_);
+        ttc_font_index_ = other.ttc_font_index_;
+        loaded_ = other.loaded_;
+        atlas_dirty_ = other.atlas_dirty_;
+        ascent_ = other.ascent_;
+        descent_ = other.descent_;
+        linegap_ = other.linegap_;
+        atlas_pixels_ = std::move(other.atlas_pixels_);
+        atlas_cursor_x_ = other.atlas_cursor_x_;
+        atlas_cursor_y_ = other.atlas_cursor_y_;
+        atlas_row_h_ = other.atlas_row_h_;
+        glyphs_ = std::move(other.glyphs_);
+
+        other.ttf_data_ = nullptr;
+        other.font_info_ = nullptr;
+        other.loaded_ = false;
+    }
+    return *this;
+}
+
 // ==================== 工厂方法 ====================
 
-FontManager* FontManager::Create(const FontManagerConfig& config) {
-    FontManager* mgr = new FontManager();
-    mgr->font_name_ = config.font_name;
-    mgr->font_path_ = config.font_path;
-    mgr->base_font_size_ = config.base_font_size;
-    mgr->preraster_charset_ = config.preraster_charset;
-    mgr->ttc_font_index_ = config.ttc_font_index;
+std::optional<FontManager> FontManager::Create(const FontManagerConfig& config) {
+    FontManager mgr;
+    mgr.font_name_ = config.font_name;
+    mgr.font_path_ = config.font_path;
+    mgr.base_font_size_ = config.base_font_size;
+    mgr.preraster_charset_ = config.preraster_charset;
+    mgr.ttc_font_index_ = config.ttc_font_index;
 
-    if (!mgr->LoadFontFile()) {
-        delete mgr;
-        return nullptr;
+    if (!mgr.LoadFontFile()) {
+        return std::nullopt;
     }
-    if (!mgr->ParseFont()) {
-        delete mgr;
-        return nullptr;
+    if (!mgr.ParseFont()) {
+        return std::nullopt;
     }
-    if (!mgr->InitAtlas()) {
-        delete mgr;
-        return nullptr;
+    if (!mgr.InitAtlas()) {
+        return std::nullopt;
     }
 
-    mgr->loaded_ = true;
-    mgr->PrerasterCharset();
+    mgr.loaded_ = true;
+    mgr.PrerasterCharset();
 
-    LOG(INFO) << "FontManager[" << mgr->font_name_ << "]: loaded, base_size="
-              << mgr->base_font_size_ << ", atlas=" << kAtlasDim << "x" << kAtlasDim;
+    LOG(INFO) << "FontManager[" << mgr.font_name_ << "]: loaded, base_size="
+              << mgr.base_font_size_ << ", atlas=" << kAtlasDim << "x" << kAtlasDim;
     return mgr;
 }
 
@@ -96,7 +148,7 @@ bool FontManager::ParseFont() {
     font_info_ = static_cast<stbtt_fontinfo*>(
         STBTT_malloc(sizeof(stbtt_fontinfo), nullptr));
 
-    // 检测 TTC
+    // 检测 TTC (TrueType Collection) 文件，取指定 font_index
     int font_offset = 0;
     if (stbtt_GetNumberOfFonts(ttf_data_) > 1) {
         font_offset = stbtt_GetFontOffsetForIndex(ttf_data_, ttc_font_index_);
@@ -122,6 +174,7 @@ bool FontManager::ParseFont() {
 }
 
 bool FontManager::InitAtlas() {
+    // 初始化动态 atlas：全部为 0 的空灰度图
     atlas_pixels_.resize(
         static_cast<size_t>(kAtlasDim) * static_cast<size_t>(kAtlasDim), 0);
     atlas_cursor_x_ = 0;
@@ -148,14 +201,17 @@ void FontManager::PrerasterCharset() {
 uint32_t FontManager::DecodeUtf8(const char*& p) {
     uint8_t c = static_cast<uint8_t>(*p);
     if (c < kUtf8Cont) {
+        // 0xxxxxxx — single byte (ASCII)
         ++p;
         return c;
     }
     if (c < kUtf8Lead2) {
+        // continuation byte without leading byte — illegal, skip
         ++p;
         return kReplacementChar;
     }
     if (c < kUtf8Lead3) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
         uint32_t cp = c & kMask5;
         if ((static_cast<uint8_t>(p[1]) & ~kUtf8Mask6) != kUtf8Cont) {
             ++p;
@@ -166,6 +222,7 @@ uint32_t FontManager::DecodeUtf8(const char*& p) {
         return cp;
     }
     if (c < kUtf8Lead4) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
         uint32_t cp = c & kMask4;
         if ((static_cast<uint8_t>(p[1]) & ~kUtf8Mask6) != kUtf8Cont) {
             ++p;
@@ -180,7 +237,7 @@ uint32_t FontManager::DecodeUtf8(const char*& p) {
         p += 3;
         return cp;
     }
-    // 4-byte sequence
+    // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
     uint32_t cp = c & kMask3;
     if ((static_cast<uint8_t>(p[1]) & ~kUtf8Mask6) != kUtf8Cont) {
         ++p;
@@ -204,6 +261,7 @@ uint32_t FontManager::DecodeUtf8(const char*& p) {
 // ==================== 字形光栅化 + 图集 packing ====================
 
 const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
+    // 已存在 → 返回
     auto it = glyphs_.find(codepoint);
     if (it != glyphs_.end()) {
         return &it->second;
@@ -213,10 +271,10 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
         return nullptr;
     }
 
+    // 光栅化 codepoint（基于 base_font_size）
     float scale = stbtt_ScaleForPixelHeight(font_info_, base_font_size_);
     GlyphMetadata g;
 
-    // 光栅化
     int pw, ph, xoff, yoff;
     unsigned char* pixels = stbtt_GetCodepointBitmap(
         font_info_, 0, scale, static_cast<int>(codepoint),
@@ -228,7 +286,7 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
     g.advance = static_cast<float>(advance_width) * scale;
 
     if (!pixels) {
-        // 空格等无像素字符：advance 已设，图集坐标留 0
+        // 空白字符（空格等），advance 已有，跳过 packing
         g.w = 0;
         g.h = 0;
         g.xoff = 0.0f;
@@ -244,16 +302,18 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
     g.xoff = static_cast<float>(xoff);
     g.yoff = static_cast<float>(yoff);
 
-    // 行式 packing
+    // 行式 packing：如果当前行放不下，换行
     int padded_w = pw + kGlyphPadding * 2;
     int padded_h = ph + kGlyphPadding * 2;
 
     if (atlas_cursor_x_ + padded_w > kAtlasDim) {
+        // 换行
         atlas_cursor_x_ = 0;
         atlas_cursor_y_ += atlas_row_h_;
         atlas_row_h_ = 0;
     }
 
+    // 如果超出 atlas 高度，报 warning 并跳过 packing
     if (atlas_cursor_y_ + padded_h > kAtlasDim) {
         LOG(WARNING) << "FontManager[" << font_name_
                      << "]: atlas full, codepoint=" << codepoint
@@ -264,12 +324,13 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
         return &result.first->second;
     }
 
+    // packing 位置（padding 后的内部原点）
     int pack_x = atlas_cursor_x_ + kGlyphPadding;
     int pack_y = atlas_cursor_y_ + kGlyphPadding;
     g.atlas_x = pack_x;
     g.atlas_y = pack_y;
 
-    // 拷贝像素到 CPU 图集
+    // 拷贝像素到 atlas
     for (int gy = 0; gy < ph; ++gy) {
         unsigned char* src = pixels + static_cast<size_t>(gy) * pw;
         unsigned char* dst = atlas_pixels_.data()
@@ -277,10 +338,12 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
         std::memcpy(dst, src, static_cast<size_t>(pw));
     }
 
+    // 更新 cursor
     atlas_cursor_x_ += padded_w;
     atlas_row_h_ = std::max(atlas_row_h_, padded_h);
     atlas_dirty_ = true;
 
+    // 释放光栅化像素（已拷贝到 atlas）
     STBTT_free(pixels, nullptr);
 
     auto result = glyphs_.emplace(codepoint, g);
@@ -304,9 +367,11 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         return false;
     }
 
+    // 计算缩放比例：目标字号 / 图集基本字号
     float scale = font_size / base_font_size_;
 
-    // ---- Pass 1: 计算包围盒（对齐补偿） ----
+    // ---- Pass 1: 计算文本包围盒（用于对齐补偿） ----
+    // 注意：字形度量在 scale 下以 base_font_size 图集为准，但 xoff/yoff 是图集字符的像素偏移量
     float min_x = 0.0f;
     float max_x = 0.0f;
     float min_y = 0.0f;
@@ -379,7 +444,7 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         }
     }
 
-    // ---- Pass 2: 生成顶点 ----
+    // ---- Pass 2: 生成顶点数据（带对齐偏移） ----
     static constexpr int kMaxTextChars = 1024;
     // 每个字符 6 个顶点，每顶点 4 个 float (x,y,u,v)
     out_verts->reserve(kMaxTextChars * 6 * 4);
@@ -418,16 +483,16 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         float tx1 = static_cast<float>(g->atlas_x + g->w) * inv_a;
         float ty1 = static_cast<float>(g->atlas_y + g->h) * inv_a;
 
-        // two triangles, 6 vertices
+        // 两个三角形
         // v0: top-left
         out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
         // v1: top-right
         out_verts->insert(out_verts->end(), {gx + gw, gy,      tx1, ty0});
         // v2: bottom-right
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
-        // v3: top-left (dupe)
+        // v3: top-left
         out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
-        // v4: bottom-right (dupe)
+        // v4: bottom-right
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
         // v5: bottom-left
         out_verts->insert(out_verts->end(), {gx,      gy + gh, tx0, ty1});
