@@ -54,10 +54,10 @@ public:
                        jpov::kFontBuiltinCJK);
 
         // 行 3: 字号 48 (48px atlas, scale=1)
-        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (48px atlas)");
+        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 楷体! (48px atlas, Kai)");
         cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       jpov::kFontBuiltinCJK);
+                       "Kai");
     }
 };
 
@@ -67,6 +67,11 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Chinese Text Gold Image Generator";
     cfg.headless = true;
+    cfg.fonts = {{
+        "tools/jpov/fonts/LxgwWenKai-Regular.ttf",
+        0,
+        "Kai",
+    }};
     GoldChineseDemo app(cfg);
     app.Init();
 

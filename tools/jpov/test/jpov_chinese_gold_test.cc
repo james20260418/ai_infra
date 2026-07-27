@@ -72,10 +72,10 @@ public:
                        jpov::kColorWhite, jpov::TextAlignment::kCenter,
                        jpov::kFontBuiltinCJK);
 
-        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (48px atlas)");
+        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 楷体! (48px atlas, Kai)");
         cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       jpov::kFontBuiltinCJK);
+                       "Kai");
     }
 };
 
@@ -111,6 +111,11 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Chinese Text Gold Test";
     cfg.headless = true;
+    cfg.fonts = {{
+        "tools/jpov/fonts/LxgwWenKai-Regular.ttf",
+        0,
+        "Kai",
+    }};
     ChineseGoldTestApp app(cfg);
     app.Init();
 
