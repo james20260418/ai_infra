@@ -5,22 +5,24 @@
 //
 // 所有 2D 坐标以渲染分辨率为空间（非窗口坐标），
 // Present 时从 FBO 裁剪窗口大小区域 → framebuffer（无缩放）。
+//
+// 字体管理委托给 FontManager：Renderer 持有 FontManager 实例和对应的
+// GL atlas 纹理，DrawText2D 只做顶点上传和 draw call。
 
 #ifndef JPOV_RENDERER_H_
 #define JPOV_RENDERER_H_
 
-#include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/window_info.h"
+#include "tools/jpov/src/font_manager.h"
 
 struct GLFWwindow;
-struct stbtt_fontinfo;
 
 namespace jpov {
 
@@ -86,63 +88,25 @@ private:
     void DrawCircle2D(const Circle2DCommand& cmd);
     void DrawText2D(const Text2DCommand& cmd);
 
-    void LoadFont();
-    void DestroyFont();
-    void UploadAtlas();
+    // ---- 字体管理 (delegated to FontManager) ----
 
-    struct GlyphBitmap {
-        unsigned char* pixels = nullptr;
-        int w = 0;
-        int h = 0;
-        float advance = 0.0f;
-        float xoff = 0.0f;
-        float yoff = 0.0f;
-        int atlas_x = 0;  // packed x position in atlas (pixel)
-        int atlas_y = 0;  // packed y position in atlas (pixel)
+    // 每种字体资源 (manager + GL atlas texture)
+    struct FontRes {
+        std::unique_ptr<FontManager> manager;
+        unsigned int atlas_tex = 0;
     };
-    std::unordered_map<uint32_t, GlyphBitmap> font_glyphs_;  // codepoint → glyph
-    stbtt_fontinfo* font_info_ = nullptr;
-    unsigned char* font_ttf_data_ = nullptr;
-    unsigned int font_atlas_tex_ = 0;
-    int font_atlas_w_ = 0;
-    int font_atlas_h_ = 0;
+
+    // 初始化所有字体管理器（LoadFont 拆分为多个独立的 FontManager::Create 调用）
+    void LoadFonts();
+
+    // 上传指定字体的 CPU 图集到 GL（仅在 atlas_dirty 时）
+    void UploadAtlas(const FontRes& font);
+
+    // 两种字体（含独立的 FontManager）
+    FontRes font_cjk_;
+    FontRes font_latin_;
+
     unsigned int tex_prog_ = 0;
-    bool font_loaded_ = false;
-    float font_ascent_ = 0.0f;
-    float font_descent_ = 0.0f;
-    float font_linegap_ = 0.0f;
-
-    // ---- UTF-8 编码常量 ----
-    static constexpr uint8_t kUTF8ContByte = 0x80;    // 10xxxxxx - continuation byte marker
-    static constexpr uint8_t kUTF8ContMask = 0x3F;    // continuation data: 6 low bits
-    static constexpr uint8_t kUTF8Lead2Byte = 0xC0;   // 110xxxxx - 2-byte start
-    static constexpr uint8_t kUTF8Lead2Mask = 0x1F;   // 2-byte data: 5 low bits
-    static constexpr uint8_t kUTF8Lead3Byte = 0xE0;   // 1110xxxx - 3-byte start
-    static constexpr uint8_t kUTF8Lead3Mask = 0x0F;   // 3-byte data: 4 low bits
-    static constexpr uint8_t kUTF8Lead4Byte = 0xF0;   // 11110xxx - 4-byte start
-    static constexpr uint8_t kUTF8Lead4Mask = 0x07;   // 4-byte data: 3 low bits
-    static constexpr uint32_t kUTF8Replacement = 0xFFFD;  // U+FFFD replacement character
-
-    // Dynamic glyph atlas: 4096x4096, row-by-row packing
-    static constexpr int kAtlasSize = 4096;
-    static constexpr int kGlyphPadding = 2;  // pixels between glyphs (avoids bleeding)
-    static constexpr float kBaseFontSize = 16.0f;
-    static constexpr int kAtlasUploadLogInterval = 5;  // LOG_EVERY_N interval for atlas uploads
-    static constexpr int kFontNotLoadedLogInterval = 60;  // LOG_EVERY_N interval for missing font warnings
-
-    // Host-side atlas bitmap (grayscale)
-    std::vector<unsigned char> atlas_pixels_;
-    int atlas_cursor_x_ = 0;   // next free x position in current row
-    int atlas_cursor_y_ = 0;   // current row start y
-    int atlas_row_h_ = 0;      // height of current row
-    bool atlas_dirty_ = false; // true if glyphs were added after last GL upload
-
-    // Get or rasterize a glyph for the given Unicode codepoint.
-    // Returns pointer to glyph entry (inserted if new).
-    GlyphBitmap* GetOrRasterizeGlyph(uint32_t cp);
-
-    // UTF-8 decode helper: returns codepoint and advances pointer
-    static uint32_t UTF8Decode(const char*& p);
 };
 
 }  // namespace jpov
