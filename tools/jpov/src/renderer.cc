@@ -250,7 +250,6 @@ void Renderer::EnsureFBO(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     fbo_w_ = width;
     fbo_h_ = height;
-    LOG(INFO) << "Renderer: FBO " << width << "x" << height;
 }
 
 void Renderer::CompileShaders() {
@@ -450,7 +449,7 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
 
     GLenum draw_err = glGetError();
     if (draw_err != GL_NO_ERROR) {
-        LOG(WARNING) << "GL error after DrawText2D glDrawArrays: " << draw_err;
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawText2D: " << draw_err;
     }
 
     glDisableVertexAttribArray(1);
@@ -548,7 +547,6 @@ void Renderer::EnsureOutputFBO(int win_w, int win_h) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     out_w_ = win_w;
     out_h_ = win_h;
-    LOG(INFO) << "Renderer: Output FBO " << win_w << "x" << win_h;
 }
 
 void Renderer::SaveScreenshot(int win_w, int win_h, const char* path) {
