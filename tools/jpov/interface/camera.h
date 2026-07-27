@@ -1,18 +1,24 @@
 // JPOV Camera — 透视相机配置
 //
-// Camera 由外部设置，在 OneIteration::Step() 中传入。
-// OneIteration 消费 Camera 来决定 3D 世界空间到屏幕空间的投影。
+// Camera 现在属于 RenderCommandList：用户在 OneIteration 中设置 cmds->camera，
+// 框架在 Render() 时自动使用该 Camera 计算 MVP 矩阵。
 //
-// MVP 阶段只支持单个固定透视相机。不支持正交相机或多相机。
-// 用户不直接接触投影/视图矩阵——OneIteration 内部使用 Camera 构建这些矩阵。
+// 一个 RenderCommandList 有且仅有一个 Camera。不要在同一帧内修改或替换它。
+// 不支持正交相机或多相机。
 
 #ifndef JPOV_CAMERA_H_
 #define JPOV_CAMERA_H_
 
 #include "geom/common/vec.h"
-#include "tools/jpov/interface/render_command.h"
 
 namespace jpov {
+
+// ==================== 类型别名 ====================
+
+// 复用 geom 库的向量类型
+using Vec3f = geom::Vec3<float>;
+
+// ==================== Camera 结构体 ====================
 
 // 透视相机
 //
@@ -23,9 +29,9 @@ namespace jpov {
 // near     — 近裁剪面距离，默认 0.1
 // far      — 远裁剪面距离，默认 1000.0
 //
-// viewport — 3D 世界渲染在窗口内的矩形区域（窗口坐标）
-//            x,y: 矩形左上角在窗口中的位置
-//            width, height: 矩形宽高
+// viewport — 3D 世界渲染在窗口内的矩形区域
+//            x, y: 矩形左上角在窗口中的位置（像素单位）
+//            width, height: 矩形宽高（像素单位）
 //            默认值：x=y=0, width=height=0（表示全窗口）
 //            2D 绘制不受 viewport 影响，始终绘制在全窗口范围。
 //
@@ -42,12 +48,12 @@ struct Camera {
     float near     = 0.1f;
     float far      = 1000.0f;
 
-    // 3D 视口矩形（窗口坐标，左上角为原点）
-    // 用 0 宽高表示"全窗口"，OneIteration 或渲染后端自动填入实际窗口尺寸
-    float viewport_x = 0.0f;
-    float viewport_y = 0.0f;
-    float viewport_width = 0.0f;
-    float viewport_height = 0.0f;
+    // 3D 视口矩形（窗口坐标，左上角为原点，所有值均为像素单位）
+    // 0 宽高表示"全窗口"，框架会在渲染前自动填入实际窗口尺寸。
+    float viewport_x = 0.0f;       // 视口左上角 x（像素）
+    float viewport_y = 0.0f;       // 视口左上角 y（像素）
+    float viewport_width = 0.0f;   // 视口宽度（像素）
+    float viewport_height = 0.0f;  // 视口高度（像素）
 };
 
 }  // namespace jpov

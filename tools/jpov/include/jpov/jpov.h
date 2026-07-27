@@ -11,7 +11,6 @@
 
 #include <GLFW/glfw3.h>
 
-#include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/input_snapshot.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
