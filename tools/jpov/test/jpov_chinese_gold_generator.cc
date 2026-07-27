@@ -58,6 +58,18 @@ public:
         cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter,
                        "Kai");
+
+        // 行 4: 刀隶体（阿里妈妈刀隶体）
+        const char* line4 = reinterpret_cast<const char*>(u8"刀隶体: 你好 刀隶! (48px, DaoLi)");
+        cmds->DrawText(line4, {center_x, 60.0f}, kFontSizeLarge,
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
+                       "DaoLi");
+
+        // 行 5: 麦圆体（荆南麦圆体）
+        const char* line5 = reinterpret_cast<const char*>(u8"麦圆体: 你好 麦圆! (48px, MaiYuan)");
+        cmds->DrawText(line5, {center_x, 680.0f}, kFontSizeLarge,
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
+                       "MaiYuan");
     }
 };
 
@@ -67,11 +79,11 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Chinese Text Gold Image Generator";
     cfg.headless = true;
-    cfg.fonts = {{
-        "tools/jpov/fonts/LxgwWenKai-Regular.ttf",
-        0,
-        "Kai",
-    }};
+    cfg.fonts = {
+        {"tools/jpov/fonts/LxgwWenKai-Regular.ttf", 0, "Kai"},
+        {"tools/jpov/fonts/AlimamaDaoLiTi.ttf",      0, "DaoLi"},
+        {"tools/jpov/fonts/KNMaiyuan-Regular.ttf",   0, "MaiYuan"},
+    };
     GoldChineseDemo app(cfg);
     app.Init();
 
