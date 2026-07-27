@@ -1,7 +1,7 @@
 // JPOV Text Color & Alignment Test
 //
-// 1280x720 视窗中央为原点，用半透明红/黄/绿，
-// 在四个角渲染 40px 中文文本，验证颜色 blending + 四种对齐方式。
+// 1280x720 视窗中央为原点，用 9 种对齐 + 不同半透明颜色
+// 在中央重叠渲染 "你好 JPOV"，验证对齐 + 颜色 blending。
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -27,38 +27,25 @@ public:
         cmds->render_width  = static_cast<int>(kResW);
         cmds->render_height = static_cast<int>(kResH);
 
-        // 深色背景
+        // 深色背景 + 辅助十字
         cmds->DrawRect({0, 0}, {kResW, kResH}, {0.08f, 0.08f, 0.08f, 1.0f});
-
         float cx = kResW * 0.5f;
         float cy = kResH * 0.5f;
+        cmds->DrawPolyline({{0.0f, cy}, {kResW, cy}}, {0.3f, 0.3f, 0.3f, 0.5f}, 1.0f);
+        cmds->DrawPolyline({{cx, 0.0f}, {cx, kResH}}, {0.3f, 0.3f, 0.3f, 0.5f}, 1.0f);
+        cmds->DrawCircle({cx, cy}, 3.0f, {0.5f, 0.5f, 0.5f, 1.0f});
 
-        // 辅助十字线 — 标记中心 (cx, cy)
-        std::vector<jpov::Vec2f> hline = {{0.0f, cy}, {kResW, cy}};
-        std::vector<jpov::Vec2f> vline = {{cx, 0.0f}, {cx, kResH}};
-        cmds->DrawPolyline(hline, {0.5f, 0.5f, 0.5f, 0.5f}, 1.0f);
-        cmds->DrawPolyline(vline, {0.5f, 0.5f, 0.5f, 0.5f}, 1.0f);
-        cmds->DrawCircle({cx, cy}, 3.0f, {1.0f, 1.0f, 1.0f, 1.0f});
-
-        jpov::Color kRed   = {1.0f, 0.2f, 0.2f, 0.7f};
-        jpov::Color kYellow = {1.0f, 0.9f, 0.1f, 0.7f};
-        jpov::Color kGreen  = {0.2f, 1.0f, 0.3f, 0.7f};
-
-        // 左上角：黄色，kTopLeft（pos 为包围盒左上角）
-        cmds->DrawText("左上", {cx, cy}, 40.0f, kYellow,
-                       jpov::TextAlignment::kTopLeft);
-
-        // 右上角：红色，kTopRight（pos 为包围盒右上角）
-        cmds->DrawText("右上", {cx, cy}, 40.0f, kRed,
-                       jpov::TextAlignment::kTopRight);
-
-        // 左下角：绿色，kBottomLeft（pos 为包围盒左下角）
-        cmds->DrawText("左下", {cx, cy}, 40.0f, kGreen,
-                       jpov::TextAlignment::kBottomLeft);
-
-        // 右下角：白色，kBottomRight（pos 为包围盒右下角）
-        cmds->DrawText("右下", {cx, cy}, 40.0f, jpov::kColorWhite,
-                       jpov::TextAlignment::kBottomRight);
+        // 9 种对齐模式，每行用不同颜色，都以 (cx, cy) 为对齐点
+        // 注意：所有调用都使用同一文本和同一位置，靠 alignment 区分锚点
+        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.2f, 0.2f, 0.5f}, jpov::TextAlignment::kTopLeft);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.9f, 0.1f, 0.5f}, jpov::TextAlignment::kTopRight);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {0.2f, 1.0f, 0.3f, 0.5f}, jpov::TextAlignment::kCenter);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {0.2f, 0.4f, 1.0f, 0.5f}, jpov::TextAlignment::kBottomLeft);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.5f, 0.8f, 0.5f}, jpov::TextAlignment::kBottomRight);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {0.5f, 0.8f, 1.0f, 0.5f}, jpov::TextAlignment::kMidLeft);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.6f, 0.0f, 0.5f}, jpov::TextAlignment::kMidRight);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {0.9f, 0.4f, 0.9f, 0.5f}, jpov::TextAlignment::kMidTop);
+        cmds->DrawText("你", {cx, cy}, 30.0f, {0.4f, 0.9f, 0.4f, 0.5f}, jpov::TextAlignment::kMidBottom);
     }
 };
 

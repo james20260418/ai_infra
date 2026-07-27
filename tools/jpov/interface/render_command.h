@@ -117,12 +117,20 @@ struct Circle2DCommand {
 // - kCenter:      pos 为包围盒水平垂直中心
 // - kBottomLeft:  pos 为包围盒左下角
 // - kBottomRight: pos 为包围盒右下角
+// - kMidLeft:     pos 为包围盒左边中点
+// - kMidRight:    pos 为包围盒右边中点
+// - kMidTop:      pos 为包围盒上边中点
+// - kMidBottom:   pos 为包围盒下边中点
 enum class TextAlignment : uint8_t {
     kTopLeft = 0,
     kTopRight = 1,
     kCenter = 2,
     kBottomLeft = 3,
     kBottomRight = 4,
+    kMidLeft = 5,
+    kMidRight = 6,
+    kMidTop = 7,
+    kMidBottom = 8,
 };
 
 // 2D 文本（屏幕空间）

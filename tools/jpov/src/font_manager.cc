@@ -429,6 +429,22 @@ static void ComputeAlignmentOffset(float pos_x, float pos_y,
             *out_off_x = pos_x - max_x;
             *out_off_y = pos_y - max_y;
             break;
+        case TextAlignment::kMidLeft:
+            *out_off_x = pos_x - min_x;
+            *out_off_y = pos_y - min_y - bh * 0.5f;
+            break;
+        case TextAlignment::kMidRight:
+            *out_off_x = pos_x - max_x;
+            *out_off_y = pos_y - min_y - bh * 0.5f;
+            break;
+        case TextAlignment::kMidTop:
+            *out_off_x = pos_x - min_x - bw * 0.5f;
+            *out_off_y = pos_y - min_y;
+            break;
+        case TextAlignment::kMidBottom:
+            *out_off_x = pos_x - min_x - bw * 0.5f;
+            *out_off_y = pos_y - max_y;
+            break;
     }
 }
 
