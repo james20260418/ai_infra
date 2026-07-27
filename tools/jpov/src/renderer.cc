@@ -613,17 +613,30 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
     }
 
     // 计算对齐偏移
-    float offset_x = 0.0f;
-    float offset_y = 0.0f;
-    if (cmd.alignment == TextAlignment::kCenter && !first_glyph) {
+    float offset_x = cmd.pos.x();
+    float offset_y = cmd.pos.y();
+    if (!first_glyph) {
         float bb_w = max_x - min_x;
         float bb_h = max_y - min_y;
-        // kCenter: pos 是包围盒中心 → 需要把 pos 偏移到左上方
-        offset_x = cmd.pos.x() - min_x - bb_w * 0.5f;
-        offset_y = cmd.pos.y() - min_y - bb_h * 0.5f;
-    } else {
-        offset_x = cmd.pos.x();
-        offset_y = cmd.pos.y();
+        switch (cmd.alignment) {
+            case TextAlignment::kTopLeft:
+                // pos 为包围盒左上角，无需偏移
+                break;
+            case TextAlignment::kTopRight:
+                offset_x = cmd.pos.x() - max_x;
+                break;
+            case TextAlignment::kCenter:
+                offset_x = cmd.pos.x() - min_x - bb_w * 0.5f;
+                offset_y = cmd.pos.y() - min_y - bb_h * 0.5f;
+                break;
+            case TextAlignment::kBottomLeft:
+                offset_y = cmd.pos.y() - max_y;
+                break;
+            case TextAlignment::kBottomRight:
+                offset_x = cmd.pos.x() - max_x;
+                offset_y = cmd.pos.y() - max_y;
+                break;
+        }
     }
 
     // ---- Pass 2: 收集顶点数据（带对齐偏移） ----
