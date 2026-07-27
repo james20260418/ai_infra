@@ -147,15 +147,16 @@ void JPOV::Init() {
         font_tuples.emplace_back(fe.path, fe.ttc_index, fe.alias);
     }
 
-    // 内置默认字体路径（当用户未提供 fonts 时尝试加载）
-    const std::vector<const char*> kDefaultFontPaths = {
-        "tools/jpov/fonts/NotoSansCJK-Regular.ttc",
-        "tools/jpov/fonts/NotoSansSC-Regular.otf",
-        "tools/jpov/fonts/DejaVuSans.ttf",
+    // 内置默认字体（path, ttc_index, alias）
+    // 与用户 fonts 共享别名空间，同名 alias 会 crash
+    const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, "CJK"},
+        {"tools/jpov/fonts/NotoSansSC-Regular.otf",   0, "SC"},
+        {"tools/jpov/fonts/DejaVuSans.ttf",            0, "Latin"},
     };
 
     renderer_ = std::make_unique<jpov::Renderer>();
-    renderer_->Init(font_tuples, kDefaultFontPaths);
+    renderer_->Init(font_tuples, kDefaultFonts);
 
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")

@@ -278,13 +278,13 @@ void Renderer::CreateStreamVBO() {
 
 void Renderer::Init(
     const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-    const std::vector<const char*>& default_font_paths) {
+    const std::vector<std::tuple<const char*, int, const char*>>& default_fonts) {
 #ifdef _WIN32
     CHECK_EQ(gl_loader_init(), 0) << "Failed to load OpenGL 3.x functions";
 #endif
     CompileShaders();
     CreateStreamVBO();
-    InitFonts(font_entries, default_font_paths);
+    InitFonts(font_entries, default_fonts);
 }
 
 
@@ -384,7 +384,7 @@ void Renderer::RegisterFont(const char* path,
 
 void Renderer::InitFonts(
     const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-    const std::vector<const char*>& default_font_paths) {
+    const std::vector<std::tuple<const char*, int, const char*>>& default_fonts) {
     // 用户字体最多 10 种
     CHECK_LE(static_cast<int>(font_entries.size()), 10)
         << "Too many fonts: " << font_entries.size()
@@ -409,12 +409,12 @@ void Renderer::InitFonts(
     }
 
     // === 第二步：注册内置默认字体（共享别名空间） ===
-    for (const char* path : default_font_paths) {
-        // 内置字体用文件名（不含路径）做别名
-        const char* alias = strrchr(path, '/');
-        alias = alias ? alias + 1 : path;
-
-        RegisterFont(path, 0, alias, "builtin", &font_slots_, &font_order_);
+    for (const auto& de : default_fonts) {
+        RegisterFont(std::get<0>(de),
+                      std::get<1>(de),
+                      std::get<2>(de),
+                      "builtin",
+                      &font_slots_, &font_order_);
     }
 
     // 至少一种字体可用

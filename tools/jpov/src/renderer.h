@@ -37,11 +37,11 @@ struct Renderer {
     Renderer& operator=(const Renderer&) = delete;
 
     // Init: 初始化 shader + VBO + 字体。Pre-condition: GL context 当前
-    // font_entries: 用户配置的字体（可空，空则尝试 default_font_paths）
-    // default_font_paths: 内置默认字体路径列表（font_entries 非空时忽略）
-    // FontEntry triple: path, ttc_index, alias
+    // font_entries: 用户配置的字体列表（(path, ttc_index, alias)）
+    // default_fonts:  内置默认字体列表（(path, ttc_index, alias)）
+    // 用户与内置共享别名空间，初始化时 alias 查重
     void Init(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-              const std::vector<const char*>& default_font_paths);
+              const std::vector<std::tuple<const char*, int, const char*>>& default_fonts);
 
     // BeginFrame: 绑定 FBO。如果 render_resolution 与当前 FBO 不一致则重建
     void BeginFrame(int render_w, int render_h);
@@ -100,11 +100,11 @@ private:
         unsigned int atlas_tex[3] = {0, 0, 0};  // [0]=16px, [1]=32px, [2]=48px
     };
 
-    // 根据字体条目初始化字体。
+    // 初始化所有字体（用户 + 内置）。
     // 每个条目：(path, ttc_index, alias)。
-    // 失败或别名重复 → LOG(FATAL) crash。
+    // 用户与内置共享别名空间，失败或别名重复 → LOG(FATAL) crash。
     void InitFonts(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-                   const std::vector<const char*>& default_font_paths);
+                   const std::vector<std::tuple<const char*, int, const char*>>& default_fonts);
 
     // 上传指定层级 atlas 到 GL（仅在 atlas_dirty 时）
     void UploadAtlas(FontSlot& slot, int level);
