@@ -88,21 +88,23 @@ private:
 
     // ---- 字体管理 ----
 
-    // 每种字体资源：FontManager + GL atlas 纹理。
+    // 每种字体资源：FontManager + 三层 GL atlas 纹理（16/32/48px）。
     // FontManager 不持有 GL 资源，图集纹理由 Renderer 创建和管理。
     //
     // 目前两种字体：CJK（中日韩，TTC font_index=0）和 Latin fallback（DejaVuSans）。
-    // 每种字体有独立的 atlas + glyph cache，按需光栅化。
     struct FontSlot {
         std::optional<FontManager> manager;
-        unsigned int atlas_tex = 0;
+        unsigned int atlas_tex[3] = {0, 0, 0};  // [0]=16px, [1]=32px, [2]=48px
     };
 
-    // 构造两个 FontSlot（CJK + Latin fallback），创建对应的 GL atlas 纹理
+    // 构造两个 FontSlot（CJK + Latin fallback），创建三层 GL atlas 纹理
     void InitFonts();
 
-    // 上传 atlas 到 GL（仅在 FontManager::atlas_dirty() 时操作）
-    void UploadAtlas(FontSlot& slot);
+    // 上传指定层级 atlas 到 GL（仅在 atlas_dirty 时）
+    void UploadAtlas(FontSlot& slot, int level);
+
+    // 上传所有脏层级
+    void UploadAllDirty(FontSlot& slot);
 
     FontSlot font_cjk_;
     FontSlot font_latin_;

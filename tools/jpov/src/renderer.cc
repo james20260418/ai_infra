@@ -192,9 +192,11 @@ Renderer::~Renderer() {
     if (prog_)       glDeleteProgram(prog_);
     if (stream_vbo_) glDeleteBuffers(1, &stream_vbo_);
     if (tex_prog_)   glDeleteProgram(tex_prog_);
-    // Font GL textures
-    if (font_cjk_.atlas_tex)  glDeleteTextures(1, &font_cjk_.atlas_tex);
-    if (font_latin_.atlas_tex) glDeleteTextures(1, &font_latin_.atlas_tex);
+    // Font GL textures (三层)
+    for (int lv = 0; lv < 3; ++lv) {
+        if (font_cjk_.atlas_tex[lv])  glDeleteTextures(1, &font_cjk_.atlas_tex[lv]);
+        if (font_latin_.atlas_tex[lv]) glDeleteTextures(1, &font_latin_.atlas_tex[lv]);
+    }
 }
 
 void Renderer::DestroyFBO() {
@@ -324,22 +326,30 @@ void Renderer::InitFonts() {
     constexpr int kCjkCount = sizeof(kCjkCandidates) / sizeof(kCjkCandidates[0]);
     constexpr int kLatinCount = sizeof(kLatinCandidates) / sizeof(kLatinCandidates[0]);
 
+    // 为每种字体创建三层 atlas 纹理（16/32/48px）
+    auto init_slot = [](FontSlot& slot, const std::string& path,
+                        const char* name, int ttc_index) {
+        FontManagerConfig cfg;
+        cfg.font_name = name;
+        cfg.font_path = path;
+        cfg.ttc_font_index = ttc_index;
+
+        std::optional<FontManager> mgr = FontManager::Create(cfg);
+        if (mgr.has_value()) {
+            slot.manager = std::move(mgr.value());
+            for (int lv = 0; lv < 3; ++lv) {
+                slot.atlas_tex[lv] = CreateGlAtlasTexture(
+                    FontManager::kAtlasDim,
+                    slot.manager->atlas_pixels(lv));
+            }
+        }
+    };
+
     // ===== CJK 字体 =====
     {
         std::string cjk_path = ResolveFontPath(kCjkCandidates, kCjkCount);
         if (!cjk_path.empty()) {
-            FontManagerConfig cfg;
-            cfg.font_name = "CJK";
-            cfg.font_path = cjk_path;
-            cfg.ttc_font_index = 0;
-
-            std::optional<FontManager> mgr = FontManager::Create(cfg);
-            if (mgr.has_value()) {
-                font_cjk_.manager = std::move(mgr.value());
-                font_cjk_.atlas_tex = CreateGlAtlasTexture(
-                    FontManager::kAtlasDim,
-                    font_cjk_.manager->atlas_pixels());
-            }
+            init_slot(font_cjk_, cjk_path, "CJK", 0);
         }
     }
 
@@ -347,35 +357,31 @@ void Renderer::InitFonts() {
     {
         std::string latin_path = ResolveFontPath(kLatinCandidates, kLatinCount);
         if (!latin_path.empty()) {
-            FontManagerConfig cfg;
-            cfg.font_name = "Latin";
-            cfg.font_path = latin_path;
-
-            std::optional<FontManager> mgr = FontManager::Create(cfg);
-            if (mgr.has_value()) {
-                font_latin_.manager = std::move(mgr.value());
-                font_latin_.atlas_tex = CreateGlAtlasTexture(
-                    FontManager::kAtlasDim,
-                    font_latin_.manager->atlas_pixels());
-            }
+            init_slot(font_latin_, latin_path, "Latin", 0);
         }
     }
 }
 
-void Renderer::UploadAtlas(FontSlot& slot) {
-    if (!slot.manager.has_value() || !slot.manager->loaded() || !slot.manager->atlas_dirty() || !slot.atlas_tex) {
-        return;
-    }
+void Renderer::UploadAtlas(FontSlot& slot, int level) {
+    if (!slot.manager.has_value() || !slot.manager->loaded()) return;
+    if (!slot.manager->atlas_dirty(level) || !slot.atlas_tex[level]) return;
     // 全量更新 GL 纹理（4096x4096 不太大，全量上传即可）
-    glBindTexture(GL_TEXTURE_2D, slot.atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, slot.atlas_tex[level]);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
                     FontManager::kAtlasDim, FontManager::kAtlasDim,
                     GL_RED, GL_UNSIGNED_BYTE,
-                    slot.manager->atlas_pixels().data());
+                    slot.manager->atlas_pixels(level).data());
     glBindTexture(GL_TEXTURE_2D, 0);
-    slot.manager->mark_atlas_clean();
-    LOG_EVERY_N(INFO, FontManager::kUploadLogInterval) << "UploadAtlas: uploaded "
+    slot.manager->mark_atlas_clean(level);
+    LOG_EVERY_N(INFO, FontManager::kUploadLogInterval) << "UploadAtlas[" << level << "]: uploaded "
         << FontManager::kAtlasDim << "x" << FontManager::kAtlasDim;
+}
+
+void Renderer::UploadAllDirty(FontSlot& slot) {
+    if (!slot.manager.has_value()) return;
+    for (int lv = 0; lv < FontManager::kNumLevels; ++lv) {
+        UploadAtlas(slot, lv);
+    }
 }
 
 // ==================== DrawText2D ====================
@@ -395,22 +401,23 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
 
     CHECK_GT(cmd.font_size, 0.0f);
 
-    // GenerateTextVertices 内部执行 Pass 1（包围盒计算+字形光栅化）和
-    // Pass 2（顶点生成），字形按需加载到图集。
+    // GenerateTextVertices 内部执行多级 atlas 选择 + 包围盒计算 + 顶点生成
+    int selected_level = 0;
     std::vector<float> verts;
     bool ok = slot->manager->GenerateTextVertices(
         cmd.text, cmd.font_size,
         cmd.pos.x(), cmd.pos.y(),
         static_cast<int>(cmd.alignment),
         fbo_w_, fbo_h_,
+        &selected_level,
         &verts);
 
     if (!ok || verts.empty()) {
         return;
     }
 
-    // 上传新光栅化的字形到 GL atlas
-    UploadAtlas(*slot);
+    // 上传新光栅化的字形到 GL atlas（所有脏层）
+    UploadAllDirty(*slot);
 
     // 上传顶点数据到 VBO
     glUseProgram(tex_prog_);
@@ -420,9 +427,9 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
     glUniform1i(glGetUniformLocation(tex_prog_, "uTexture"), 0);
 
-    // 绑定纹理
+    // 绑定对应层级的纹理
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, slot->atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, slot->atlas_tex[selected_level]);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
     glBufferData(GL_ARRAY_BUFFER,

@@ -1,9 +1,6 @@
 // JPOV FontManager 实现
 //
-// 字体文件加载 → stb_truetype 初始化 → 字形光栅化 → 图集 packing
-// → UTF-8 解码 → DrawText2D 顶点生成。
-//
-// 不持有 GL 纹理对象；CPU 图集像素暴露给 Renderer 上传。
+// 三层 atlas (16/32/48px)，自动层级选择，atlas 满时 fallback。
 
 #include "tools/jpov/src/font_manager.h"
 
@@ -19,7 +16,10 @@
 
 namespace jpov {
 
-// ==================== 构造 / 析构 ====================
+// AtlasLevel 的 base_size 常量
+constexpr float AtlasLevel::kBaseSizes[3];
+
+// ==================== 构造 / 析构 / Move ====================
 
 FontManager::~FontManager() {
     if (font_info_) {
@@ -36,22 +36,18 @@ FontManager::FontManager(FontManager&& other) noexcept
     : ttf_data_(other.ttf_data_),
       ttf_data_size_(other.ttf_data_size_),
       font_info_(other.font_info_),
-      base_font_size_(other.base_font_size_),
       font_name_(std::move(other.font_name_)),
       font_path_(std::move(other.font_path_)),
       preraster_charset_(std::move(other.preraster_charset_)),
       ttc_font_index_(other.ttc_font_index_),
       loaded_(other.loaded_),
-      atlas_dirty_(other.atlas_dirty_),
       ascent_(other.ascent_),
       descent_(other.descent_),
       linegap_(other.linegap_),
-      atlas_pixels_(std::move(other.atlas_pixels_)),
-      atlas_cursor_x_(other.atlas_cursor_x_),
-      atlas_cursor_y_(other.atlas_cursor_y_),
-      atlas_row_h_(other.atlas_row_h_),
       glyphs_(std::move(other.glyphs_)) {
-    // 转移 raw pointer 所有权，源对象置空避免 double-free
+    for (int i = 0; i < kNumLevels; ++i) {
+        levels_[i] = std::move(other.levels_[i]);
+    }
     other.ttf_data_ = nullptr;
     other.font_info_ = nullptr;
     other.loaded_ = false;
@@ -59,28 +55,24 @@ FontManager::FontManager(FontManager&& other) noexcept
 
 FontManager& FontManager::operator=(FontManager&& other) noexcept {
     if (this != &other) {
-        // 先清理自己的资源
         if (font_info_) { STBTT_free(font_info_, nullptr); }
         if (ttf_data_) { STBTT_free(ttf_data_, nullptr); }
 
         ttf_data_ = other.ttf_data_;
         ttf_data_size_ = other.ttf_data_size_;
         font_info_ = other.font_info_;
-        base_font_size_ = other.base_font_size_;
         font_name_ = std::move(other.font_name_);
         font_path_ = std::move(other.font_path_);
         preraster_charset_ = std::move(other.preraster_charset_);
         ttc_font_index_ = other.ttc_font_index_;
         loaded_ = other.loaded_;
-        atlas_dirty_ = other.atlas_dirty_;
         ascent_ = other.ascent_;
         descent_ = other.descent_;
         linegap_ = other.linegap_;
-        atlas_pixels_ = std::move(other.atlas_pixels_);
-        atlas_cursor_x_ = other.atlas_cursor_x_;
-        atlas_cursor_y_ = other.atlas_cursor_y_;
-        atlas_row_h_ = other.atlas_row_h_;
         glyphs_ = std::move(other.glyphs_);
+        for (int i = 0; i < kNumLevels; ++i) {
+            levels_[i] = std::move(other.levels_[i]);
+        }
 
         other.ttf_data_ = nullptr;
         other.font_info_ = nullptr;
@@ -95,7 +87,6 @@ std::optional<FontManager> FontManager::Create(const FontManagerConfig& config) 
     FontManager mgr;
     mgr.font_name_ = config.font_name;
     mgr.font_path_ = config.font_path;
-    mgr.base_font_size_ = config.base_font_size;
     mgr.preraster_charset_ = config.preraster_charset;
     mgr.ttc_font_index_ = config.ttc_font_index;
 
@@ -105,15 +96,13 @@ std::optional<FontManager> FontManager::Create(const FontManagerConfig& config) 
     if (!mgr.ParseFont()) {
         return std::nullopt;
     }
-    if (!mgr.InitAtlas()) {
-        return std::nullopt;
-    }
+    mgr.InitAtlas();
 
     mgr.loaded_ = true;
     mgr.PrerasterCharset();
 
-    LOG(INFO) << "FontManager[" << mgr.font_name_ << "]: loaded, base_size="
-              << mgr.base_font_size_ << ", atlas=" << kAtlasDim << "x" << kAtlasDim;
+    LOG(INFO) << "FontManager[" << mgr.font_name_
+              << "]: loaded, 3-level atlas (16/32/48) " << kAtlasDim << "x" << kAtlasDim;
     return mgr;
 }
 
@@ -148,7 +137,7 @@ bool FontManager::ParseFont() {
     font_info_ = static_cast<stbtt_fontinfo*>(
         STBTT_malloc(sizeof(stbtt_fontinfo), nullptr));
 
-    // 检测 TTC (TrueType Collection) 文件，取指定 font_index
+    // 检测 TTC (TrueType Collection)
     int font_offset = 0;
     if (stbtt_GetNumberOfFonts(ttf_data_) > 1) {
         font_offset = stbtt_GetFontOffsetForIndex(ttf_data_, ttc_font_index_);
@@ -163,25 +152,27 @@ bool FontManager::ParseFont() {
         return false;
     }
 
-    // 获取度量信息（基于 base_font_size）
-    float scale = stbtt_ScaleForPixelHeight(font_info_, base_font_size_);
-    int ascent, descent, linegap;
-    stbtt_GetFontVMetrics(font_info_, &ascent, &descent, &linegap);
-    ascent_ = static_cast<float>(ascent) * scale;
-    descent_ = static_cast<float>(descent) * scale;
-    linegap_ = static_cast<float>(linegap) * scale;
+    // 获取度量信息（16px 基准）
+    float scale = stbtt_ScaleForPixelHeight(font_info_, 16.0f);
+    int asc, desc, lg;
+    stbtt_GetFontVMetrics(font_info_, &asc, &desc, &lg);
+    ascent_ = static_cast<float>(asc) * scale;
+    descent_ = static_cast<float>(desc) * scale;
+    linegap_ = static_cast<float>(lg) * scale;
     return true;
 }
 
-bool FontManager::InitAtlas() {
-    // 初始化动态 atlas：全部为 0 的空灰度图
-    atlas_pixels_.resize(
-        static_cast<size_t>(kAtlasDim) * static_cast<size_t>(kAtlasDim), 0);
-    atlas_cursor_x_ = 0;
-    atlas_cursor_y_ = 0;
-    atlas_row_h_ = 0;
-    atlas_dirty_ = false;
-    return true;
+void FontManager::InitAtlas() {
+    // 初始化动态 atlas：三层独立的 4096x4096 空灰度图
+    for (int i = 0; i < kNumLevels; ++i) {
+        levels_[i].base_size = AtlasLevel::kBaseSizes[i];
+        levels_[i].pixels.resize(
+            static_cast<size_t>(kAtlasDim) * static_cast<size_t>(kAtlasDim), 0);
+        levels_[i].cursor_x = 0;
+        levels_[i].cursor_y = 0;
+        levels_[i].row_h = 0;
+        levels_[i].dirty = false;
+    }
 }
 
 void FontManager::PrerasterCharset() {
@@ -189,11 +180,15 @@ void FontManager::PrerasterCharset() {
         return;
     }
     for (uint32_t cp : preraster_charset_) {
-        GetOrRasterizeGlyph(cp);
+        // 预渲染到所有三层
+        Glyph g;
+        for (int level = 0; level < kNumLevels; ++level) {
+            RasterizeToLevel(cp, level, &g);
+        }
+        glyphs_.emplace(cp, std::move(g));
     }
     LOG(INFO) << "FontManager[" << font_name_ << "]: prerastered "
-              << preraster_charset_.size() << " codepoints, "
-              << glyphs_.size() << " glyphs packed";
+              << preraster_charset_.size() << " codepoints across 3 levels";
 }
 
 // ==================== UTF-8 解码 ====================
@@ -258,23 +253,38 @@ uint32_t FontManager::DecodeUtf8(const char*& p) {
     return cp;
 }
 
+// ==================== 层级选择 ====================
+
+int FontManager::SelectBestLevel(float font_size) const {
+    // 选缩放比最接近 1.0 的层级（abs(log(scale)) 最小）
+    float best_ratio = 999.0f;
+    int best_level = kLevel16;
+    for (int i = 0; i < kNumLevels; ++i) {
+        float scale = font_size / levels_[i].base_size;
+        // 优先选 scale >= 0.5 的层（防止太小的字形过度缩小）
+        if (scale < 0.4f) continue;
+        float penalty = std::abs(std::log2(scale));
+        if (penalty < best_ratio) {
+            best_ratio = penalty;
+            best_level = i;
+        }
+    }
+    return best_level;
+}
+
 // ==================== 字形光栅化 + 图集 packing ====================
 
-const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
-    // 已存在 → 返回
-    auto it = glyphs_.find(codepoint);
-    if (it != glyphs_.end()) {
-        return &it->second;
-    }
+bool FontManager::RasterizeToLevel(uint32_t codepoint, int level,
+                                    Glyph* out_glyph) {
+    GlyphLayer& layer = out_glyph->layers[level];
+    float base = levels_[level].base_size;
 
     if (!font_info_ || !loaded_) {
-        return nullptr;
+        return false;
     }
 
-    // 光栅化 codepoint（基于 base_font_size）
-    float scale = stbtt_ScaleForPixelHeight(font_info_, base_font_size_);
-    GlyphMetadata g;
-
+    // 光栅化 codepoint
+    float scale = stbtt_ScaleForPixelHeight(font_info_, base);
     int pw, ph, xoff, yoff;
     unsigned char* pixels = stbtt_GetCodepointBitmap(
         font_info_, 0, scale, static_cast<int>(codepoint),
@@ -283,71 +293,116 @@ const GlyphMetadata* FontManager::GetOrRasterizeGlyph(uint32_t codepoint) {
     int advance_width;
     stbtt_GetCodepointHMetrics(font_info_, static_cast<int>(codepoint),
                                &advance_width, nullptr);
-    g.advance = static_cast<float>(advance_width) * scale;
+    layer.advance = static_cast<float>(advance_width) * scale;
+    layer.base_size = base;
 
     if (!pixels) {
-        // 空白字符（空格等），advance 已有，跳过 packing
-        g.w = 0;
-        g.h = 0;
-        g.xoff = 0.0f;
-        g.yoff = 0.0f;
-        g.atlas_x = 0;
-        g.atlas_y = 0;
-        auto result = glyphs_.emplace(codepoint, g);
-        return &result.first->second;
+        // 空白字符（空格等），advance 已有
+        layer.w = 0;
+        layer.h = 0;
+        layer.xoff = 0.0f;
+        layer.yoff = 0.0f;
+        layer.atlas_x = 0;
+        layer.atlas_y = 0;
+        layer.valid = true;  // 空格也算 valid
+        return true;
     }
 
-    g.w = pw;
-    g.h = ph;
-    g.xoff = static_cast<float>(xoff);
-    g.yoff = static_cast<float>(yoff);
+    layer.w = pw;
+    layer.h = ph;
+    layer.xoff = static_cast<float>(xoff);
+    layer.yoff = static_cast<float>(yoff);
 
-    // 行式 packing：如果当前行放不下，换行
+    // 行式 packing
+    AtlasLevel& al = levels_[level];
     int padded_w = pw + kGlyphPadding * 2;
     int padded_h = ph + kGlyphPadding * 2;
 
-    if (atlas_cursor_x_ + padded_w > kAtlasDim) {
+    if (al.cursor_x + padded_w > kAtlasDim) {
         // 换行
-        atlas_cursor_x_ = 0;
-        atlas_cursor_y_ += atlas_row_h_;
-        atlas_row_h_ = 0;
+        al.cursor_x = 0;
+        al.cursor_y += al.row_h;
+        al.row_h = 0;
     }
 
-    // 如果超出 atlas 高度，报 warning 并跳过 packing
-    if (atlas_cursor_y_ + padded_h > kAtlasDim) {
-        LOG(WARNING) << "FontManager[" << font_name_
-                     << "]: atlas full, codepoint=" << codepoint
-                     << " not packed";
-        g.atlas_x = 0;
-        g.atlas_y = 0;
-        auto result = glyphs_.emplace(codepoint, g);
-        return &result.first->second;
+    if (al.cursor_y + padded_h > kAtlasDim) {
+        // 本层 atlas 满了
+        STBTT_free(pixels, nullptr);
+        LOG_FIRST_N(WARNING, 1) << "FontManager[" << font_name_
+                                << "]: atlas level " << level << " ("
+                                << base << "px) full";
+        return false;
     }
 
     // packing 位置（padding 后的内部原点）
-    int pack_x = atlas_cursor_x_ + kGlyphPadding;
-    int pack_y = atlas_cursor_y_ + kGlyphPadding;
-    g.atlas_x = pack_x;
-    g.atlas_y = pack_y;
+    int pack_x = al.cursor_x + kGlyphPadding;
+    int pack_y = al.cursor_y + kGlyphPadding;
+    layer.atlas_x = pack_x;
+    layer.atlas_y = pack_y;
 
     // 拷贝像素到 atlas
     for (int gy = 0; gy < ph; ++gy) {
         unsigned char* src = pixels + static_cast<size_t>(gy) * pw;
-        unsigned char* dst = atlas_pixels_.data()
+        unsigned char* dst = al.pixels.data()
             + static_cast<size_t>(pack_y + gy) * kAtlasDim + pack_x;
         std::memcpy(dst, src, static_cast<size_t>(pw));
     }
 
     // 更新 cursor
-    atlas_cursor_x_ += padded_w;
-    atlas_row_h_ = std::max(atlas_row_h_, padded_h);
-    atlas_dirty_ = true;
+    al.cursor_x += padded_w;
+    al.row_h = std::max(al.row_h, padded_h);
+    al.dirty = true;
 
     // 释放光栅化像素（已拷贝到 atlas）
     STBTT_free(pixels, nullptr);
+    layer.valid = true;
+    return true;
+}
 
+const Glyph* FontManager::GetOrRasterizeGlyph(uint32_t codepoint,
+                                                int preferred_level) {
+    // 已存在
+    auto it = glyphs_.find(codepoint);
+    if (it != glyphs_.end()) {
+        const Glyph& g = it->second;
+        // 检查 preferred_level 是否有有效数据，有则直接返回
+        if (preferred_level >= 0 && g.layers[preferred_level].valid) {
+            return &g;
+        }
+        // 否则找最近的有效层
+        for (int i = 0; i < kNumLevels; ++i) {
+            if (g.layers[i].valid) return &g;
+        }
+        return nullptr;
+    }
+
+    if (!font_info_ || !loaded_) {
+        return nullptr;
+    }
+
+    // 新字形：新插入
+    Glyph g;
     auto result = glyphs_.emplace(codepoint, g);
-    return &result.first->second;
+    Glyph* gptr = &result.first->second;
+
+    if (preferred_level < 0) {
+        preferred_level = kLevel16;  // 默认从小开始
+    }
+
+    // 尝试从 preferred_level 开始 pack，不行则 fallback 到更小层级
+    int level = preferred_level;
+    while (level >= 0) {
+        if (RasterizeToLevel(codepoint, level, gptr)) {
+            return gptr;
+        }
+        --level;
+    }
+
+    // 全层都满了，但可能空格已经被写入
+    if (gptr->layers[0].valid) {
+        return gptr;
+    }
+    return nullptr;
 }
 
 // ==================== DrawText2D 顶点生成 ====================
@@ -357,8 +412,10 @@ bool FontManager::GenerateTextVertices(std::string_view text,
                                         float pos_x, float pos_y,
                                         int alignment,
                                         int /*fbo_w*/, int /*fbo_h*/,
+                                        int* selected_level,
                                         std::vector<float>* out_verts) {
     CHECK_GT(font_size, 0.0f);
+    CHECK_NOTNULL(selected_level);
     CHECK_NOTNULL(out_verts);
 
     if (!loaded_) {
@@ -367,11 +424,12 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         return false;
     }
 
-    // 计算缩放比例：目标字号 / 图集基本字号
-    float scale = font_size / base_font_size_;
+    int best_level = SelectBestLevel(font_size);
+    *selected_level = best_level;
+    float base = levels_[best_level].base_size;
+    float scale = font_size / base;
 
-    // ---- Pass 1: 计算文本包围盒（用于对齐补偿） ----
-    // 注意：字形度量在 scale 下以 base_font_size 图集为准，但 xoff/yoff 是图集字符的像素偏移量
+    // ---- Pass 1: 计算文本包围盒 + 确保字形光栅化 ----
     float min_x = 0.0f;
     float max_x = 0.0f;
     float min_y = 0.0f;
@@ -391,15 +449,31 @@ bool FontManager::GenerateTextVertices(std::string_view text,
                 continue;
             }
 
-            const GlyphMetadata* g = GetOrRasterizeGlyph(cp);
-            if (!g) {
-                continue;
+            const Glyph* g = GetOrRasterizeGlyph(cp, best_level);
+            if (!g) continue;
+
+            // 找最佳有效层
+            const GlyphLayer* layer = nullptr;
+            if (g->layers[best_level].valid) {
+                layer = &g->layers[best_level];
+            } else {
+                // fallback: 尝试更小层级
+                for (int lv = best_level - 1; lv >= 0; --lv) {
+                    if (g->layers[lv].valid) {
+                        layer = &g->layers[lv];
+                        break;
+                    }
+                }
+                if (!layer) continue;
             }
 
-            float gx = cur_x + g->xoff * scale;
-            float gy = cur_y + g->yoff * scale;
-            float gw = static_cast<float>(g->w) * scale;
-            float gh = static_cast<float>(g->h) * scale;
+            // 字形度量需要按实际使用的 layer 的 base_size 换算
+            float layer_scale = font_size / layer->base_size;
+
+            float gx = cur_x + layer->xoff * layer_scale;
+            float gy = cur_y + layer->yoff * layer_scale;
+            float gw = static_cast<float>(layer->w) * layer_scale;
+            float gh = static_cast<float>(layer->h) * layer_scale;
 
             if (first_glyph) {
                 min_x = gx;
@@ -414,7 +488,7 @@ bool FontManager::GenerateTextVertices(std::string_view text,
                 max_y = std::max(max_y, gy + gh);
             }
 
-            cur_x += g->advance * scale;
+            cur_x += layer->advance * layer_scale;
         }
     }
 
@@ -446,7 +520,6 @@ bool FontManager::GenerateTextVertices(std::string_view text,
 
     // ---- Pass 2: 生成顶点数据（带对齐偏移） ----
     static constexpr int kMaxTextChars = 1024;
-    // 每个字符 6 个顶点，每顶点 4 个 float (x,y,u,v)
     out_verts->reserve(kMaxTextChars * 6 * 4);
     out_verts->clear();
 
@@ -465,39 +538,57 @@ bool FontManager::GenerateTextVertices(std::string_view text,
             continue;
         }
 
-        const GlyphMetadata* g = GetOrRasterizeGlyph(cp);
-        if (!g || g->w == 0) {
-            cur_x += (g ? g->advance : 0.0f) * scale;
+        const Glyph* g = GetOrRasterizeGlyph(cp, best_level);
+        if (!g) {
             char_count++;
             continue;
         }
 
-        float gx = offset_x + cur_x + g->xoff * scale;
-        float gy = offset_y + cur_y + g->yoff * scale;
-        float gw = static_cast<float>(g->w) * scale;
-        float gh = static_cast<float>(g->h) * scale;
+        // 找最佳有效层
+        const GlyphLayer* layer = nullptr;
+        if (g->layers[best_level].valid) {
+            layer = &g->layers[best_level];
+        } else {
+            for (int lv = best_level - 1; lv >= 0; --lv) {
+                if (g->layers[lv].valid) {
+                    layer = &g->layers[lv];
+                    break;
+                }
+            }
+            if (!layer) {
+                char_count++;
+                continue;
+            }
+        }
+
+        if (layer->w == 0) {
+            // 空格
+            cur_x += layer->advance * (font_size / layer->base_size);
+            char_count++;
+            continue;
+        }
+
+        float layer_scale = font_size / layer->base_size;
+        float gx = offset_x + cur_x + layer->xoff * layer_scale;
+        float gy = offset_y + cur_y + layer->yoff * layer_scale;
+        float gw = static_cast<float>(layer->w) * layer_scale;
+        float gh = static_cast<float>(layer->h) * layer_scale;
 
         float inv_a = 1.0f / static_cast<float>(kAtlasDim);
-        float tx0 = static_cast<float>(g->atlas_x) * inv_a;
-        float ty0 = static_cast<float>(g->atlas_y) * inv_a;
-        float tx1 = static_cast<float>(g->atlas_x + g->w) * inv_a;
-        float ty1 = static_cast<float>(g->atlas_y + g->h) * inv_a;
+        float tx0 = static_cast<float>(layer->atlas_x) * inv_a;
+        float ty0 = static_cast<float>(layer->atlas_y) * inv_a;
+        float tx1 = static_cast<float>(layer->atlas_x + layer->w) * inv_a;
+        float ty1 = static_cast<float>(layer->atlas_y + layer->h) * inv_a;
 
         // 两个三角形
-        // v0: top-left
         out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
-        // v1: top-right
         out_verts->insert(out_verts->end(), {gx + gw, gy,      tx1, ty0});
-        // v2: bottom-right
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
-        // v3: top-left
         out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
-        // v4: bottom-right
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
-        // v5: bottom-left
         out_verts->insert(out_verts->end(), {gx,      gy + gh, tx0, ty1});
 
-        cur_x += g->advance * scale;
+        cur_x += layer->advance * layer_scale;
         char_count++;
     }
 

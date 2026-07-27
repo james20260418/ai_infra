@@ -1,6 +1,35 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
 # ============================================================================
+# Font Scale Test — 测试不同缩放倍率下的渲染质量
+# ============================================================================
+cc_binary(
+    name = "font_scale_test",
+    srcs = ["font_scale_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "pixel_test",
+    srcs = ["pixel_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # Gold Image Generator — 生成 test 参考图片
 # ============================================================================
 cc_binary(
