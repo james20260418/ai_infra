@@ -14,9 +14,9 @@
 #include "tools/common/utils.h"
 
 // 字号常量 (只读)
-static constexpr float kFontSizeSmall = 16.0f;   // 匹配 kBaseFontSize, scale=1 不模糊
-static constexpr float kFontSizeMedium = 48.0f;  // 中等字号
-static constexpr float kFontSizeLarge = 96.0f;   // 大字号
+static constexpr float kFontSizeSmall = 16.0f;   // 选 16px atlas, scale=1
+static constexpr float kFontSizeMedium = 32.0f;  // 选 32px atlas, scale=1
+static constexpr float kFontSizeLarge = 48.0f;   // 选 48px atlas, scale=1
 
 // 渲染分辨率
 static constexpr float kResW = 1280.0f;
@@ -41,18 +41,18 @@ public:
         // 文字水平居中
         float center_x = kResW * 0.5f;
 
-        // 行 1: 字号 16 (scale=1, 不拉伸)
-        const char* line1 = reinterpret_cast<const char*>(u8"16px: 你好 JPOV! (原始尺寸, 不糊)");
+        // 行 1: 字号 16 (16px atlas, scale=1)
+        const char* line1 = reinterpret_cast<const char*>(u8"16px: 你好 JPOV! (16px atlas)");
         cmds->DrawText(line1, {center_x, 120.0f}, kFontSizeSmall,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter);
 
-        // 行 2: 字号 48
-        const char* line2 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (中等字号)");
+        // 行 2: 字号 32 (32px atlas, scale=1)
+        const char* line2 = reinterpret_cast<const char*>(u8"32px: 你好 JPOV! (32px atlas)");
         cmds->DrawText(line2, {center_x, 360.0f}, kFontSizeMedium,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter);
 
-        // 行 3: 字号 96
-        const char* line3 = reinterpret_cast<const char*>(u8"96px: 你好 JPOV! (大字号)");
+        // 行 3: 字号 48 (48px atlas, scale=1)
+        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (48px atlas)");
         cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
                        jpov::kColorWhite, jpov::TextAlignment::kCenter);
     }
