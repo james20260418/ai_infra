@@ -11,7 +11,7 @@
 // 坐标系统一约定：
 //   - 2D：屏幕像素坐标，原点在窗口左上角（x→右，y→下）
 //   - 3D：世界空间，右手系（x→右，y→上，z→后）
-//   - 2D 文本：基线对齐，位置即文本左下角坐标
+//   - 2D 文本：包围盒角点对齐（见 TextAlignment 枚举），位置含义取决于对齐方式
 
 #ifndef JPOV_RENDER_COMMAND_H_
 #define JPOV_RENDER_COMMAND_H_
@@ -117,17 +117,25 @@ struct Circle2DCommand {
 // - kCenter:      pos 为包围盒水平垂直中心
 // - kBottomLeft:  pos 为包围盒左下角
 // - kBottomRight: pos 为包围盒右下角
+// - kMidLeft:     pos 为包围盒左边中点
+// - kMidRight:    pos 为包围盒右边中点
+// - kMidTop:      pos 为包围盒上边中点
+// - kMidBottom:   pos 为包围盒下边中点
 enum class TextAlignment : uint8_t {
     kTopLeft = 0,
     kTopRight = 1,
     kCenter = 2,
     kBottomLeft = 3,
     kBottomRight = 4,
+    kMidLeft = 5,
+    kMidRight = 6,
+    kMidTop = 7,
+    kMidBottom = 8,
 };
 
 // 2D 文本（屏幕空间）
 // text: 文本内容
-// pos: 文本位置（含义取决于 alignment）
+// pos: 文本位置（像素单位，含义取决于 alignment）
 // font_size: 字号（像素单位）
 // color: 文本颜色
 // alignment: 文本对齐方式
@@ -240,6 +248,7 @@ struct RenderCommandList {
 
     // 2D 文本
     // Pre-condition: font_size > 0
+    // pos: 文本位置（像素单位，含义取决于 alignment）
     // alignment: 文本对齐方式（缺省 kTopLeft，保持向后兼容）
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
                   const Color& color,

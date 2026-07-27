@@ -313,6 +313,147 @@ static const GlyphLayer* PickBestLayer(const Glyph& g, int preferred) {
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// 内部辅助: 构建所有字形 + 降级选层
+// ---------------------------------------------------------------------------
+
+static bool EnsureGlyphsBuilt(FontManager& fm, std::string_view text) {
+    const char* p = text.data();
+    const char* end = text.data() + text.size();
+    while (p < end) {
+        uint32_t cp = FontManager::DecodeUtf8(p);
+        if (cp != '\n' && !fm.BuildGlyph(cp)) return false;
+    }
+    return true;
+}
+
+static int SelectDrawLevel(const FontManager& fm, std::string_view text,
+                            int best_level) {
+    for (int lv = best_level; lv >= 0; --lv) {
+        bool all_ok = true;
+        const char* p = text.data();
+        const char* end = text.data() + text.size();
+        while (p < end) {
+            uint32_t cp = FontManager::DecodeUtf8(p);
+            if (cp == '\n') continue;
+            const Glyph* g = fm.FindGlyph(cp);
+            if (!g || !PickBestLayer(*g, lv)) { all_ok = false; break; }
+        }
+        if (all_ok) return lv;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// 内部辅助: 计算包围盒
+// ---------------------------------------------------------------------------
+
+static bool ComputeTextBounds(const FontManager& fm, std::string_view text,
+                               int use_level, float font_size,
+                               float scale,
+                               float* out_min_x, float* out_max_x,
+                               float* out_min_y, float* out_max_y) {
+    float min_x = 0.0f, max_x = 0.0f, min_y = 0.0f, max_y = 0.0f;
+    float cur_x = 0.0f, cur_y = 0.0f;
+    bool first = true;
+
+    const char* p = text.data();
+    const char* end = text.data() + text.size();
+    while (p < end) {
+        uint32_t cp = FontManager::DecodeUtf8(p);
+        if (cp == '\n') {
+            cur_x = 0.0f;
+            cur_y += (fm.ascent() - fm.descent() + fm.linegap()) * scale;
+            continue;
+        }
+        const Glyph* g = fm.FindGlyph(cp);
+        if (!g) continue;
+        const GlyphLayer* layer = PickBestLayer(*g, use_level);
+        if (!layer) continue;
+
+        float ls = font_size / layer->base_size;
+        float gx = cur_x + layer->xoff * ls;
+        float gy = cur_y + layer->yoff * ls;
+        float gw = static_cast<float>(layer->w) * ls;
+        float gh = static_cast<float>(layer->h) * ls;
+        if (first) {
+            min_x = gx; max_x = gx + gw;
+            min_y = gy; max_y = gy + gh;
+            first = false;
+        } else {
+            min_x = std::min(min_x, gx);
+            max_x = std::max(max_x, gx + gw);
+            min_y = std::min(min_y, gy);
+            max_y = std::max(max_y, gy + gh);
+        }
+        cur_x += layer->advance * ls;
+    }
+    if (first) return false;
+
+    *out_min_x = min_x;
+    *out_max_x = max_x;
+    *out_min_y = min_y;
+    *out_max_y = max_y;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 内部辅助: 将对齐点转换为逐字起始偏移（以使 pos 成为包围盒的对应角）
+// ---------------------------------------------------------------------------
+
+static void ComputeAlignmentOffset(float pos_x, float pos_y,
+                                    float min_x, float max_x,
+                                    float min_y, float max_y,
+                                    int alignment,
+                                    float* out_off_x, float* out_off_y) {
+    float bw = max_x - min_x;
+    float bh = max_y - min_y;
+    switch (static_cast<TextAlignment>(alignment)) {
+        case TextAlignment::kTopLeft:
+            *out_off_x = pos_x - min_x;
+            *out_off_y = pos_y - min_y;
+            break;
+        case TextAlignment::kTopRight:
+            *out_off_x = pos_x - max_x;
+            *out_off_y = pos_y - min_y;
+            break;
+        case TextAlignment::kCenter:
+            *out_off_x = pos_x - min_x - bw * 0.5f;
+            *out_off_y = pos_y - min_y - bh * 0.5f;
+            break;
+        case TextAlignment::kBottomLeft:
+            *out_off_x = pos_x - min_x;
+            *out_off_y = pos_y - max_y;
+            break;
+        case TextAlignment::kBottomRight:
+            *out_off_x = pos_x - max_x;
+            *out_off_y = pos_y - max_y;
+            break;
+        case TextAlignment::kMidLeft:
+            *out_off_x = pos_x - min_x;
+            *out_off_y = pos_y - min_y - bh * 0.5f;
+            break;
+        case TextAlignment::kMidRight:
+            *out_off_x = pos_x - max_x;
+            *out_off_y = pos_y - min_y - bh * 0.5f;
+            break;
+        case TextAlignment::kMidTop:
+            *out_off_x = pos_x - min_x - bw * 0.5f;
+            *out_off_y = pos_y - min_y;
+            break;
+        case TextAlignment::kMidBottom:
+            *out_off_x = pos_x - min_x - bw * 0.5f;
+            *out_off_y = pos_y - max_y;
+            break;
+        default:
+            LOG(FATAL) << "Unknown TextAlignment: " << alignment;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FontManager::GenerateTextVertices
+// ---------------------------------------------------------------------------
+
 bool FontManager::GenerateTextVertices(std::string_view text,
                                         float font_size,
                                         float pos_x, float pos_y,
@@ -325,104 +466,33 @@ bool FontManager::GenerateTextVertices(std::string_view text,
     CHECK_NOTNULL(out_verts);
     if (!loaded_) return false;
 
-    // 先构建所有字形（全建，三层一起）
-    {
-        const char* p = text.data();
-        const char* end = text.data() + text.size();
-        while (p < end) {
-            uint32_t cp = DecodeUtf8(p);
-            if (cp != '\n') BuildGlyph(cp);
-        }
-    }
+    // 步骤 0: 确保所有字形已构建
+    if (!EnsureGlyphsBuilt(*this, text)) return false;
 
     int best_level = SelectBestLevel(font_size);
+    int use_level = SelectDrawLevel(*this, text, best_level);
+    if (use_level < 0) return false;
 
-    // 降级选层：从 best_level 往下找，直到所有字形在该层都有数据
-    int use_level = best_level;
-    for (int lv = best_level; lv >= 0; --lv) {
-        bool all_ok = true;
-        const char* p = text.data();
-        const char* end = text.data() + text.size();
-        while (p < end) {
-            uint32_t cp = DecodeUtf8(p);
-            if (cp == '\n') continue;
-            const Glyph* g = FindGlyph(cp);
-            if (!g || !PickBestLayer(*g, lv)) { all_ok = false; break; }
-        }
-        if (all_ok) { use_level = lv; break; }
-        if (lv == 0) return false;
-    }
+    float scale = font_size / kAtlasLevelBaseSizes[best_level];
 
-    float bp = kAtlasLevelBaseSizes[best_level];
-    float scale = font_size / bp;
-
-    // Pass 1: 包围盒
+    // 步骤 1: 计算包围盒
     float min_x = 0.0f, max_x = 0.0f, min_y = 0.0f, max_y = 0.0f;
-    float cur_x = 0.0f, cur_y = 0.0f;
-    bool first = true;
-    {
-        const char* p = text.data();
-        const char* end = text.data() + text.size();
-        while (p < end) {
-            uint32_t cp = DecodeUtf8(p);
-            if (cp == '\n') {
-                cur_x = 0.0f;
-                cur_y += (ascent_ - descent_ + linegap_) * scale;
-                continue;
-            }
-            const Glyph* g = FindGlyph(cp);
-            if (!g) continue;
-            const GlyphLayer* layer = PickBestLayer(*g, use_level);
-            if (!layer) continue;
-
-            float ls = font_size / layer->base_size;
-            float gx = cur_x + layer->xoff * ls;
-            float gy = cur_y + layer->yoff * ls;
-            float gw = static_cast<float>(layer->w) * ls;
-            float gh = static_cast<float>(layer->h) * ls;
-            if (first) {
-                min_x = gx; max_x = gx + gw;
-                min_y = gy; max_y = gy + gh;
-                first = false;
-            } else {
-                min_x = std::min(min_x, gx);
-                max_x = std::max(max_x, gx + gw);
-                min_y = std::min(min_y, gy);
-                max_y = std::max(max_y, gy + gh);
-            }
-            cur_x += layer->advance * ls;
-        }
+    if (!ComputeTextBounds(*this, text, use_level, font_size, scale,
+                            &min_x, &max_x, &min_y, &max_y)) {
+        return false;
     }
-    if (first) return false;
 
-    // 对齐偏移
+    // 步骤 2: 对齐偏移
     float off_x = pos_x, off_y = pos_y;
-    {
-        float bw = max_x - min_x, bh = max_y - min_y;
-        switch (static_cast<TextAlignment>(alignment)) {
-            case TextAlignment::kTopLeft: break;
-            case TextAlignment::kTopRight:
-                off_x = pos_x - max_x;
-                break;
-            case TextAlignment::kCenter:
-                off_x = pos_x - min_x - bw * 0.5f;
-                off_y = pos_y - min_y - bh * 0.5f;
-                break;
-            case TextAlignment::kBottomLeft:
-                off_y = pos_y - max_y;
-                break;
-            case TextAlignment::kBottomRight:
-                off_x = pos_x - max_x;
-                off_y = pos_y - max_y;
-                break;
-        }
-    }
+    ComputeAlignmentOffset(pos_x, pos_y,
+                            min_x, max_x, min_y, max_y,
+                            alignment, &off_x, &off_y);
 
-    // Pass 2: 顶点
+    // 步骤 3: 逐字生成顶点
     static constexpr int kMaxChars = 1024;
     out_verts->clear();
     out_verts->reserve(kMaxChars * 6 * 4);
-    cur_x = 0.0f; cur_y = 0.0f;
+    float cur_x = 0.0f, cur_y = 0.0f;
     {
         const char* p = text.data();
         const char* end = text.data() + text.size();
