@@ -33,6 +33,15 @@ namespace jpov {
 using Vec2f = geom::Vec2<float>;
 using Vec3f = geom::Vec3<float>;
 
+// ==================== 内置字体别名 ====================
+
+// JPOV 内置默认字体的别名常量。
+// 用户可在此查看内置字体名称，或在 DrawText 中引用。
+// 如果用户通过 JPOV::Config::fonts 注册了同名 alias，初始化时会 crash。
+inline constexpr const char* kFontBuiltinCJK   = "CJK";   // NotoSansCJK-Regular.ttc (TTC index=0)
+inline constexpr const char* kFontBuiltinSC    = "SC";    // NotoSansSC-Regular.otf
+inline constexpr const char* kFontBuiltinLatin = "Latin"; // DejaVuSans.ttf
+
 // ==================== 颜色 ====================
 
 // RGBA 颜色，分量 [0, 1]
