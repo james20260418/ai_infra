@@ -16,8 +16,7 @@
 
 namespace jpov {
 
-// AtlasLevel 的 base_size 常量
-constexpr float AtlasLevel::kBaseSizes[3];
+constexpr float FontManager::kAtlasLevelBaseSizes[3];
 
 // ==================== 构造 / 析构 / Move ====================
 
@@ -165,7 +164,7 @@ bool FontManager::ParseFont() {
 void FontManager::InitAtlas() {
     // 初始化动态 atlas：三层独立的 4096x4096 空灰度图
     for (int i = 0; i < kNumLevels; ++i) {
-        levels_[i].base_size = AtlasLevel::kBaseSizes[i];
+        levels_[i].base_size = kAtlasLevelBaseSizes[i];
         levels_[i].pixels.resize(
             static_cast<size_t>(kAtlasDim) * static_cast<size_t>(kAtlasDim), 0);
         levels_[i].cursor_x = 0;
@@ -407,29 +406,15 @@ const Glyph* FontManager::GetOrRasterizeGlyph(uint32_t codepoint,
 
 // ==================== DrawText2D 顶点生成 ====================
 
-bool FontManager::GenerateTextVertices(std::string_view text,
-                                        float font_size,
-                                        float pos_x, float pos_y,
-                                        int alignment,
-                                        int /*fbo_w*/, int /*fbo_h*/,
-                                        int* selected_level,
-                                        std::vector<float>* out_verts) {
-    CHECK_GT(font_size, 0.0f);
-    CHECK_NOTNULL(selected_level);
-    CHECK_NOTNULL(out_verts);
-
-    if (!loaded_) {
-        LOG_EVERY_N(WARNING, kNotLoadedLogInterval)
-            << "FontManager[" << font_name_ << "]: not loaded";
-        return false;
-    }
-
-    int best_level = SelectBestLevel(font_size);
-    *selected_level = best_level;
-    float base = levels_[best_level].base_size;
+bool FontManager::GenerateVerticesAtLevel(std::string_view text,
+                                            float font_size, int level,
+                                            float pos_x, float pos_y,
+                                            int alignment,
+                                            int* selected_level,
+                                            std::vector<float>* out_verts) {
+    float base = kAtlasLevelBaseSizes[level];
     float scale = font_size / base;
 
-    // ---- Pass 1: 计算文本包围盒 + 确保字形光栅化 ----
     float min_x = 0.0f;
     float max_x = 0.0f;
     float min_y = 0.0f;
@@ -437,7 +422,9 @@ bool FontManager::GenerateTextVertices(std::string_view text,
     float cur_x = 0.0f;
     float cur_y = 0.0f;
     bool first_glyph = true;
+    int lowest_in_pass = level;
 
+    // Pass 1: 包围盒 + 确保字形光栅化
     {
         const char* p = text.data();
         const char* end = text.data() + text.size();
@@ -449,31 +436,31 @@ bool FontManager::GenerateTextVertices(std::string_view text,
                 continue;
             }
 
-            const Glyph* g = GetOrRasterizeGlyph(cp, best_level);
+            const Glyph* g = GetOrRasterizeGlyph(cp, level);
             if (!g) continue;
 
-            // 找最佳有效层
+            // 找可用层，记录最低层级
+            int use_lv = level;
             const GlyphLayer* layer = nullptr;
-            if (g->layers[best_level].valid) {
-                layer = &g->layers[best_level];
+            if (g->layers[level].valid) {
+                layer = &g->layers[level];
             } else {
-                // fallback: 尝试更小层级
-                for (int lv = best_level - 1; lv >= 0; --lv) {
+                for (int lv = level - 1; lv >= 0; --lv) {
                     if (g->layers[lv].valid) {
                         layer = &g->layers[lv];
+                        use_lv = lv;
                         break;
                     }
                 }
                 if (!layer) continue;
             }
+            lowest_in_pass = std::min(lowest_in_pass, use_lv);
 
-            // 字形度量需要按实际使用的 layer 的 base_size 换算
-            float layer_scale = font_size / layer->base_size;
-
-            float gx = cur_x + layer->xoff * layer_scale;
-            float gy = cur_y + layer->yoff * layer_scale;
-            float gw = static_cast<float>(layer->w) * layer_scale;
-            float gh = static_cast<float>(layer->h) * layer_scale;
+            float ls = font_size / layer->base_size;
+            float gx = cur_x + layer->xoff * ls;
+            float gy = cur_y + layer->yoff * ls;
+            float gw = static_cast<float>(layer->w) * ls;
+            float gh = static_cast<float>(layer->h) * ls;
 
             if (first_glyph) {
                 min_x = gx;
@@ -487,20 +474,26 @@ bool FontManager::GenerateTextVertices(std::string_view text,
                 min_y = std::min(min_y, gy);
                 max_y = std::max(max_y, gy + gh);
             }
-
-            cur_x += layer->advance * layer_scale;
+            cur_x += layer->advance * ls;
         }
     }
 
-    // 计算对齐偏移
+    // 有字形需要 fallback → 返回 false，让调用者降级
+    if (lowest_in_pass < level) {
+        *selected_level = lowest_in_pass;
+        return false;
+    }
+
+    if (first_glyph) return false;
+
+    // 对齐偏移
     float offset_x = pos_x;
     float offset_y = pos_y;
-    if (!first_glyph) {
+    {
         float bb_w = max_x - min_x;
         float bb_h = max_y - min_y;
         switch (static_cast<TextAlignment>(alignment)) {
-            case TextAlignment::kTopLeft:
-                break;
+            case TextAlignment::kTopLeft: break;
             case TextAlignment::kTopRight:
                 offset_x = pos_x - max_x;
                 break;
@@ -518,14 +511,13 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         }
     }
 
-    // ---- Pass 2: 生成顶点数据（带对齐偏移） ----
+    // Pass 2: 顶点生成
     static constexpr int kMaxTextChars = 1024;
-    out_verts->reserve(kMaxTextChars * 6 * 4);
     out_verts->clear();
+    out_verts->reserve(kMaxTextChars * 6 * 4);
 
     cur_x = 0.0f;
     cur_y = 0.0f;
-
     const char* p = text.data();
     const char* send = text.data() + text.size();
     int char_count = 0;
@@ -538,41 +530,33 @@ bool FontManager::GenerateTextVertices(std::string_view text,
             continue;
         }
 
-        const Glyph* g = GetOrRasterizeGlyph(cp, best_level);
-        if (!g) {
-            char_count++;
-            continue;
-        }
+        const Glyph* g = GetOrRasterizeGlyph(cp, level);
+        if (!g) { char_count++; continue; }
 
-        // 找最佳有效层
         const GlyphLayer* layer = nullptr;
-        if (g->layers[best_level].valid) {
-            layer = &g->layers[best_level];
+        if (g->layers[level].valid) {
+            layer = &g->layers[level];
         } else {
-            for (int lv = best_level - 1; lv >= 0; --lv) {
+            for (int lv = level - 1; lv >= 0; --lv) {
                 if (g->layers[lv].valid) {
                     layer = &g->layers[lv];
                     break;
                 }
             }
-            if (!layer) {
-                char_count++;
-                continue;
-            }
+            if (!layer) { char_count++; continue; }
         }
 
         if (layer->w == 0) {
-            // 空格
             cur_x += layer->advance * (font_size / layer->base_size);
             char_count++;
             continue;
         }
 
-        float layer_scale = font_size / layer->base_size;
-        float gx = offset_x + cur_x + layer->xoff * layer_scale;
-        float gy = offset_y + cur_y + layer->yoff * layer_scale;
-        float gw = static_cast<float>(layer->w) * layer_scale;
-        float gh = static_cast<float>(layer->h) * layer_scale;
+        float ls = font_size / layer->base_size;
+        float gx = offset_x + cur_x + layer->xoff * ls;
+        float gy = offset_y + cur_y + layer->yoff * ls;
+        float gw = static_cast<float>(layer->w) * ls;
+        float gh = static_cast<float>(layer->h) * ls;
 
         float inv_a = 1.0f / static_cast<float>(kAtlasDim);
         float tx0 = static_cast<float>(layer->atlas_x) * inv_a;
@@ -580,7 +564,6 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         float tx1 = static_cast<float>(layer->atlas_x + layer->w) * inv_a;
         float ty1 = static_cast<float>(layer->atlas_y + layer->h) * inv_a;
 
-        // 两个三角形
         out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
         out_verts->insert(out_verts->end(), {gx + gw, gy,      tx1, ty0});
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
@@ -588,11 +571,41 @@ bool FontManager::GenerateTextVertices(std::string_view text,
         out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
         out_verts->insert(out_verts->end(), {gx,      gy + gh, tx0, ty1});
 
-        cur_x += layer->advance * layer_scale;
+        cur_x += layer->advance * ls;
         char_count++;
     }
 
+    *selected_level = level;
     return !out_verts->empty();
 }
 
+bool FontManager::GenerateTextVertices(std::string_view text,
+                                        float font_size,
+                                        float pos_x, float pos_y,
+                                        int alignment,
+                                        int fbo_w, int fbo_h,
+                                        int* selected_level,
+                                        std::vector<float>* out_verts) {
+    CHECK_GT(font_size, 0.0f);
+    CHECK_NOTNULL(selected_level);
+    CHECK_NOTNULL(out_verts);
+
+    if (!loaded_) {
+        LOG_EVERY_N(WARNING, kNotLoadedLogInterval)
+            << "FontManager[" << font_name_ << "]: not loaded";
+        return false;
+    }
+
+    int try_level = SelectBestLevel(font_size);
+
+    // 降级尝试：从最佳层级开始，如果任何字形需要 fallback 到更小层级，
+    // 就用那个更小层级重试，确保所有字形使用同一张 atlas 纹理。
+    for (int lv = try_level; lv >= 0; --lv) {
+        bool ok = GenerateVerticesAtLevel(text, font_size, lv,
+                                           pos_x, pos_y, alignment,
+                                           selected_level, out_verts);
+        if (ok) return true;
+    }
+    return false;
+}
 }  // namespace jpov

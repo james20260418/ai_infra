@@ -88,8 +88,6 @@ struct Glyph {
 
 // 图集的某一层（16/32/48px），独立 CPU 像素 + cursor
 struct AtlasLevel {
-    static constexpr float kBaseSizes[3] = {16.0f, 32.0f, 48.0f};
-
     float base_size = 0.0f;
     std::vector<uint8_t> pixels;
     int cursor_x = 0;
@@ -109,6 +107,9 @@ public:
     static constexpr int kLevel32 = 1;
     static constexpr int kLevel48 = 2;
     static constexpr int kNumLevels = 3;
+
+    // 各层级的基础字号
+    static constexpr float kAtlasLevelBaseSizes[3] = {16.0f, 32.0f, 48.0f};
 
     // 字形间间隔像素（避免渲染时相邻字符颜色渗出）
     static constexpr int kGlyphPadding = 2;
@@ -195,6 +196,16 @@ private:
 
     // 根据目标字号选择最佳层级
     int SelectBestLevel(float font_size) const;
+
+    // 在指定层级生成顶点。
+    // 如果任何字形需要 fallback，*selected_level 设为那个更低的层级，
+    // out_verts 清空，调用者应降级重试。
+    bool GenerateVerticesAtLevel(std::string_view text,
+                                  float font_size, int level,
+                                  float pos_x, float pos_y,
+                                  int alignment,
+                                  int* selected_level /*output*/,
+                                  std::vector<float>* out_verts /*output*/);
 
     // font file data
     unsigned char* ttf_data_ = nullptr;
