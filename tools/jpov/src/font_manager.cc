@@ -424,7 +424,7 @@ bool FontManager::GenerateVerticesAtLevel(std::string_view text,
     bool first_glyph = true;
     int lowest_in_pass = level;
 
-    // Pass 1: 包围盒 + 确保字形光栅化
+    // ---- Pass 1: 包围盒 + 确保字形光栅化 ----
     {
         const char* p = text.data();
         const char* end = text.data() + text.size();
@@ -456,6 +456,7 @@ bool FontManager::GenerateVerticesAtLevel(std::string_view text,
             }
             lowest_in_pass = std::min(lowest_in_pass, use_lv);
 
+            CHECK_GT(layer->base_size, 0.0f) << "GlyphLayer base_size is 0";
             float ls = font_size / layer->base_size;
             float gx = cur_x + layer->xoff * ls;
             float gy = cur_y + layer->yoff * ls;
@@ -478,7 +479,7 @@ bool FontManager::GenerateVerticesAtLevel(std::string_view text,
         }
     }
 
-    // 有字形需要 fallback → 返回 false，让调用者降级
+    // 有字形需要 fallback → 让调用者降级重试
     if (lowest_in_pass < level) {
         *selected_level = lowest_in_pass;
         return false;
@@ -511,7 +512,9 @@ bool FontManager::GenerateVerticesAtLevel(std::string_view text,
         }
     }
 
-    // Pass 2: 顶点生成
+    // ---- Pass 2: 顶点生成 ----
+    // Pass 2 不走 fallback：只用 level 层的数据。如果该层没有数据，
+    // 说明 Pass 1 已经检测到 lowest_in_pass < level 并返回 false 了。
     static constexpr int kMaxTextChars = 1024;
     out_verts->clear();
     out_verts->reserve(kMaxTextChars * 6 * 4);
@@ -531,53 +534,66 @@ bool FontManager::GenerateVerticesAtLevel(std::string_view text,
         }
 
         const Glyph* g = GetOrRasterizeGlyph(cp, level);
-        if (!g) { char_count++; continue; }
-
-        const GlyphLayer* layer = nullptr;
-        if (g->layers[level].valid) {
-            layer = &g->layers[level];
-        } else {
-            for (int lv = level - 1; lv >= 0; --lv) {
-                if (g->layers[lv].valid) {
-                    layer = &g->layers[lv];
-                    break;
-                }
-            }
-            if (!layer) { char_count++; continue; }
-        }
-
-        if (layer->w == 0) {
-            cur_x += layer->advance * (font_size / layer->base_size);
+        if (!g || !g->layers[level].valid) {
             char_count++;
             continue;
         }
 
-        float ls = font_size / layer->base_size;
-        float gx = offset_x + cur_x + layer->xoff * ls;
-        float gy = offset_y + cur_y + layer->yoff * ls;
-        float gw = static_cast<float>(layer->w) * ls;
-        float gh = static_cast<float>(layer->h) * ls;
+        const GlyphLayer& layer = g->layers[level];
+
+        if (layer.w == 0) {
+            // 空格
+            cur_x += layer.advance * scale;
+            char_count++;
+            continue;
+        }
+
+        float ls = font_size / layer.base_size;
+        float gx = offset_x + cur_x + layer.xoff * ls;
+        float gy = offset_y + cur_y + layer.yoff * ls;
+        float gw = static_cast<float>(layer.w) * ls;
+        float gh = static_cast<float>(layer.h) * ls;
 
         float inv_a = 1.0f / static_cast<float>(kAtlasDim);
-        float tx0 = static_cast<float>(layer->atlas_x) * inv_a;
-        float ty0 = static_cast<float>(layer->atlas_y) * inv_a;
-        float tx1 = static_cast<float>(layer->atlas_x + layer->w) * inv_a;
-        float ty1 = static_cast<float>(layer->atlas_y + layer->h) * inv_a;
+        float tx0 = static_cast<float>(layer.atlas_x) * inv_a;
+        float ty0 = static_cast<float>(layer.atlas_y) * inv_a;
+        float tx1 = static_cast<float>(layer.atlas_x + layer.w) * inv_a;
+        float ty1 = static_cast<float>(layer.atlas_y + layer.h) * inv_a;
 
-        out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
-        out_verts->insert(out_verts->end(), {gx + gw, gy,      tx1, ty0});
-        out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
-        out_verts->insert(out_verts->end(), {gx,      gy,      tx0, ty0});
-        out_verts->insert(out_verts->end(), {gx + gw, gy + gh, tx1, ty1});
-        out_verts->insert(out_verts->end(), {gx,      gy + gh, tx0, ty1});
+        out_verts->push_back(gx);
+        out_verts->push_back(gy);
+        out_verts->push_back(tx0);
+        out_verts->push_back(ty0);
+        out_verts->push_back(gx + gw);
+        out_verts->push_back(gy);
+        out_verts->push_back(tx1);
+        out_verts->push_back(ty0);
+        out_verts->push_back(gx + gw);
+        out_verts->push_back(gy + gh);
+        out_verts->push_back(tx1);
+        out_verts->push_back(ty1);
+        out_verts->push_back(gx);
+        out_verts->push_back(gy);
+        out_verts->push_back(tx0);
+        out_verts->push_back(ty0);
+        out_verts->push_back(gx + gw);
+        out_verts->push_back(gy + gh);
+        out_verts->push_back(tx1);
+        out_verts->push_back(ty1);
+        out_verts->push_back(gx);
+        out_verts->push_back(gy + gh);
+        out_verts->push_back(tx0);
+        out_verts->push_back(ty1);
 
-        cur_x += layer->advance * ls;
+        cur_x += layer.advance * ls;
         char_count++;
     }
 
     *selected_level = level;
     return !out_verts->empty();
 }
+
+
 
 bool FontManager::GenerateTextVertices(std::string_view text,
                                         float font_size,
