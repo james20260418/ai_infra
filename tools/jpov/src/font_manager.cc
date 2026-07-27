@@ -366,11 +366,18 @@ const Glyph* FontManager::GetOrRasterizeGlyph(uint32_t codepoint,
         const Glyph& g = it->second;
         // 检查 preferred_level 是否有有效数据，有则直接返回
         if (preferred_level >= 0 && g.layers[preferred_level].valid) {
-            return &g;
+            return const_cast<Glyph*>(&g);
         }
-        // 否则找最近的有效层
+        // 如果有指定 level 但该层无效，尝试光栅化到这个 level
+        if (preferred_level >= 0 && !g.layers[preferred_level].valid) {
+            Glyph* gptr = const_cast<Glyph*>(&g);
+            if (RasterizeToLevel(codepoint, preferred_level, gptr)) {
+                return gptr;
+            }
+        }
+        // 找最近的有效层
         for (int i = 0; i < kNumLevels; ++i) {
-            if (g.layers[i].valid) return &g;
+            if (g.layers[i].valid) return const_cast<Glyph*>(&g);
         }
         return nullptr;
     }
