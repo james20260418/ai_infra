@@ -33,30 +33,31 @@ public:
         float cx = kResW * 0.5f;
         float cy = kResH * 0.5f;
 
-        const char* text = reinterpret_cast<const char*>(u8"你好 JPOV");
+        // 辅助十字线 — 标记中心 (cx, cy)
+        std::vector<jpov::Vec2f> hline = {{0.0f, cy}, {kResW, cy}};
+        std::vector<jpov::Vec2f> vline = {{cx, 0.0f}, {cx, kResH}};
+        cmds->DrawPolyline(hline, {0.5f, 0.5f, 0.5f, 0.5f}, 1.0f);
+        cmds->DrawPolyline(vline, {0.5f, 0.5f, 0.5f, 0.5f}, 1.0f);
+        cmds->DrawCircle({cx, cy}, 3.0f, {1.0f, 1.0f, 1.0f, 1.0f});
 
         jpov::Color kRed   = {1.0f, 0.2f, 0.2f, 0.7f};
         jpov::Color kYellow = {1.0f, 0.9f, 0.1f, 0.7f};
         jpov::Color kGreen  = {0.2f, 1.0f, 0.3f, 0.7f};
 
         // 左上角：黄色，kTopLeft（pos 为包围盒左上角）
-        const char* t1 = reinterpret_cast<const char*>(u8"左上");
-        cmds->DrawText(t1, {cx, cy}, 40.0f, kYellow,
+        cmds->DrawText("左上", {cx, cy}, 40.0f, kYellow,
                        jpov::TextAlignment::kTopLeft);
 
         // 右上角：红色，kTopRight（pos 为包围盒右上角）
-        const char* t2 = reinterpret_cast<const char*>(u8"右上");
-        cmds->DrawText(t2, {cx, cy}, 40.0f, kRed,
+        cmds->DrawText("右上", {cx, cy}, 40.0f, kRed,
                        jpov::TextAlignment::kTopRight);
 
         // 左下角：绿色，kBottomLeft（pos 为包围盒左下角）
-        const char* t3 = reinterpret_cast<const char*>(u8"左下");
-        cmds->DrawText(t3, {cx, cy}, 40.0f, kGreen,
+        cmds->DrawText("左下", {cx, cy}, 40.0f, kGreen,
                        jpov::TextAlignment::kBottomLeft);
 
         // 右下角：白色，kBottomRight（pos 为包围盒右下角）
-        const char* t4 = reinterpret_cast<const char*>(u8"右下");
-        cmds->DrawText(t4, {cx, cy}, 40.0f, jpov::kColorWhite,
+        cmds->DrawText("右下", {cx, cy}, 40.0f, jpov::kColorWhite,
                        jpov::TextAlignment::kBottomRight);
     }
 };

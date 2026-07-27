@@ -127,7 +127,7 @@ enum class TextAlignment : uint8_t {
 
 // 2D 文本（屏幕空间）
 // text: 文本内容
-// pos: 文本位置（含义取决于 alignment）
+// pos: 文本位置（像素单位，含义取决于 alignment）
 // font_size: 字号（像素单位）
 // color: 文本颜色
 // alignment: 文本对齐方式
@@ -240,6 +240,7 @@ struct RenderCommandList {
 
     // 2D 文本
     // Pre-condition: font_size > 0
+    // pos: 文本位置（像素单位，含义取决于 alignment）
     // alignment: 文本对齐方式（缺省 kTopLeft，保持向后兼容）
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
                   const Color& color,
