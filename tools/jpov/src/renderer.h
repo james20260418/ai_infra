@@ -47,8 +47,8 @@ struct Renderer {
     void BeginFrame(int render_w, int render_h);
 
     // Render: 消费指令列表绘制到 FBO
-    void Render(const RenderCommandList& cmds, const Camera& camera,
-                const WindowInfo& winfo);
+    // Camera 从 cmds.camera 读取
+    void Render(const RenderCommandList& cmds, const WindowInfo& winfo);
 
     // Present: FBO[0,0,win_w,win_h] → framebuffer（无缩放，GL_LINEAR）
     void Present(GLFWwindow* window, int window_width, int window_height);
@@ -90,6 +90,11 @@ private:
     void DrawPolyline2D(const Polyline2DCommand& cmd);
     void DrawCircle2D(const Circle2DCommand& cmd);
     void DrawText2D(const Text2DCommand& cmd);
+    // 3D 方法：MVP 矩阵通过成员 mvp_ 传递（由 Render/Draw3DCommands 设置）
+    void DrawTriangle3D(const Triangle3DCommand& cmd);
+    void DrawLine3D(const Line3DCommand& cmd, const float mvp[16]);
+    void DrawText3D(const Text3DCommand& cmd);
+    void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
     // ---- 字体管理 ----
 
@@ -135,6 +140,9 @@ private:
     std::vector<std::string> font_order_;
 
     unsigned int tex_prog_ = 0;
+    unsigned int prog_3d_ = 0;  // 3D solid color shader
+    unsigned int tex_prog_3d_ = 0;  // 3D textured shader
+    float mvp_[16];  // 当前帧的 MVP 矩阵缓存
 };
 
 }  // namespace jpov

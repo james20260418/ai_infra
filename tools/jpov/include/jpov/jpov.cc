@@ -201,7 +201,7 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     OneIteration(frame_count, input, winfo, &cmds);
 
     renderer_->BeginFrame(cmds.render_width, cmds.render_height);
-    renderer_->Render(cmds, jpov::Camera{}, winfo);
+    renderer_->Render(cmds, winfo);
 }
 
 // ========== 运行模式 ==========

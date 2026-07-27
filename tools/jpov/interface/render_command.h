@@ -24,6 +24,8 @@
 #include <glog/logging.h>
 #include "geom/common/vec.h"
 
+#include "tools/jpov/interface/camera.h"
+
 namespace jpov {
 
 // ==================== 类型别名 ====================
@@ -228,6 +230,12 @@ struct RenderCommandList {
     // 必须设 >0（Clear 不清零），框架在 Render 时 CHECK_GT。
     int render_width  = 0;
     int render_height = 0;
+
+    // 3D 透视相机
+    // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
+    // 框架在 Render() 时自动使用该 Camera 计算 MVP 变换。
+    // 若无需 3D 渲染可保持默认值（此时 3D 绘制结果未定义）。
+    Camera camera;
 
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();

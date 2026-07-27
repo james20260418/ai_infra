@@ -67,6 +67,8 @@
 
 namespace {
 
+using jpov::Vec3f;
+
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
 // 2D 坐标使用窗口尺寸做 NDC 变换（坐标超出 FBO 范围即裁剪）
@@ -91,6 +93,116 @@ void main() {
     FragColor = uColor;
 }
 )glsl";
+
+// ==================== 3D Shaders ====================
+
+// 3D 顶点 shader：接受 vec3 世界坐标，通过 MVP 矩阵变换到 NDC
+const char* kVs3d = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 3D Fragment Shader（纯色）
+const char* kFs3d = R"glsl(
+#version 330 core
+out vec4 FragColor;
+uniform vec4 uColor;
+
+void main() {
+    FragColor = uColor;
+}
+)glsl";
+
+// 3D 纹理顶点 shader（用于 Text3D）
+const char* kTexVs3d = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aTexCoord;
+uniform mat4 uMVP;
+out vec2 vTexCoord;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vTexCoord = aTexCoord;
+}
+)glsl";
+
+// ==================== MVP 矩阵构建 ====================
+
+// 4x4 矩阵乘法：out = a * b（列主序）
+// 仅用于组合 GL 矩阵栈读回的 proj × modelview
+static void Mat4Mul(const float a[16], const float b[16], float out[16]) {
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            out[col * 4 + row] = sum;
+        }
+    }
+}
+
+// 从 Camera 构建 MVP 矩阵
+// 使用 GL 矩阵栈 API（glMatrixMode / glFrustum / glLoadMatrixf），
+// 不自造轮子。最后通过 glGetFloatv 读出组合为 shader uniform。
+static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16]) {
+    // === 投影矩阵：用 glFrustum（GL 现成 API）===
+    float aspect = static_cast<float>(fbo_w) / static_cast<float>(fbo_h);
+    float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
+    float top = cam.near * std::tan(fov_rad * 0.5f);
+    float bottom = -top;
+    float right = top * aspect;
+    float left = -right;
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(left, right, bottom, top, cam.near, cam.far);
+
+    // === 视图矩阵：用 glLoadMatrixf 加载 lookAt（GL 现成 API）===
+    // 计算 lookAt 矩阵的坐标基
+    Vec3f fwd = cam.target - cam.position;
+    float f_len = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
+    if (f_len < 1e-8f) { fwd = {0.0f, 0.0f, -1.0f}; }
+    else { fwd = {fwd.x()/f_len, fwd.y()/f_len, fwd.z()/f_len}; }
+
+    Vec3f side = {fwd.y()*cam.up.z() - fwd.z()*cam.up.y(),
+                  fwd.z()*cam.up.x() - fwd.x()*cam.up.z(),
+                  fwd.x()*cam.up.y() - fwd.y()*cam.up.x()};
+    float s_len = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
+    if (s_len < 1e-8f) { side = {1.0f, 0.0f, 0.0f}; }
+    else { side = {side.x()/s_len, side.y()/s_len, side.z()/s_len}; }
+
+    Vec3f upv = {side.y()*fwd.z() - side.z()*fwd.y(),
+                 side.z()*fwd.x() - side.x()*fwd.z(),
+                 side.x()*fwd.y() - side.y()*fwd.x()};
+
+    // 列主序 lookAt 矩阵
+    float view[16] = {
+        side.x(), upv.x(), -fwd.x(), 0.0f,
+        side.y(), upv.y(), -fwd.y(), 0.0f,
+        side.z(), upv.z(), -fwd.z(), 0.0f,
+        -(side.x()*cam.position.x() + side.y()*cam.position.y() + side.z()*cam.position.z()),
+        -(upv.x()*cam.position.x() + upv.y()*cam.position.y() + upv.z()*cam.position.z()),
+         (fwd.x()*cam.position.x() + fwd.y()*cam.position.y() + fwd.z()*cam.position.z()),
+         1.0f
+    };
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glLoadMatrixf(view);
+
+    // 读回 GL 矩阵栈，组合 MVP = Proj * ModelView
+    float proj[16], modelview[16];
+    glGetFloatv(GL_PROJECTION_MATRIX, proj);
+    glGetFloatv(GL_MODELVIEW_MATRIX, modelview);
+    Mat4Mul(proj, modelview, mvp);
+}
 
 // 纹理+颜色混合 Fragment Shader
 // 纹理采样（alpha 通道作为透明度）× uniform 颜色
@@ -190,9 +302,11 @@ Renderer::Renderer() = default;
 Renderer::~Renderer() {
     DestroyFBO();
     DestroyOutputFBO();
-    if (prog_)       glDeleteProgram(prog_);
-    if (stream_vbo_) glDeleteBuffers(1, &stream_vbo_);
-    if (tex_prog_)   glDeleteProgram(tex_prog_);
+    if (prog_)         glDeleteProgram(prog_);
+    if (prog_3d_)      glDeleteProgram(prog_3d_);
+    if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
+    if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
+    if (tex_prog_)     glDeleteProgram(tex_prog_);
     // Font GL textures (所有注册字体的三层 atlas)
     for (auto& [alias, slot] : font_slots_) {
         (void)alias;
@@ -266,6 +380,18 @@ void Renderer::CompileShaders() {
     unsigned int tfs = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
     tex_prog_ = LinkProgram(tvs, tfs);
     CHECK_NE(tex_prog_, 0u);
+
+    // 3D 纯色 shader
+    unsigned int vs3d = CompileShader(GL_VERTEX_SHADER, kVs3d);
+    unsigned int fs3d = CompileShader(GL_FRAGMENT_SHADER, kFs3d);
+    prog_3d_ = LinkProgram(vs3d, fs3d);
+    CHECK_NE(prog_3d_, 0u);
+
+    // 3D 纹理 shader（用于 Text3D）
+    unsigned int tvs3d = CompileShader(GL_VERTEX_SHADER, kTexVs3d);
+    unsigned int tfs3d = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
+    tex_prog_3d_ = LinkProgram(tvs3d, tfs3d);
+    CHECK_NE(tex_prog_3d_, 0u);
 }
 
 void Renderer::CreateStreamVBO() {
@@ -549,13 +675,26 @@ void Renderer::BeginFrame(int render_w, int render_h) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
-void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
+void Renderer::Render(const RenderCommandList& cmds,
                        const WindowInfo& winfo) {
-    (void)camera;
     (void)winfo;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // ---- 第一步：绘制所有 3D 指令（开启深度测试）----
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    // 计算 MVP 矩阵
+    float mvp[16];
+    BuildMVP(cmds.camera, fbo_w_, fbo_h_, mvp);
+    Draw3DCommands(cmds, fbo_w_, fbo_h_);
+
+    // ---- 第二步：关闭深度测试，绘制所有 2D 指令 ----
+    glDisable(GL_DEPTH_TEST);
 
     for (const auto& [type, idx] : cmds.order) {
         switch (type) {
@@ -587,6 +726,92 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                 break;
         }
     }
+}
+
+void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+    // 先用当前 Camera 计算 MVP
+    BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
+
+    // 遍历 order，绘制 3D 指令
+    for (const auto& [type, idx] : cmds.order) {
+        switch (type) {
+            case DrawCommandType::kTriangle3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.triangle3d.size()));
+                DrawTriangle3D(cmds.triangle3d[idx]);
+                break;
+            }
+            case DrawCommandType::kLine3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.line3d.size()));
+                DrawLine3D(cmds.line3d[idx], mvp_);
+                break;
+            }
+            case DrawCommandType::kText3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.text3d.size()));
+                DrawText3D(cmds.text3d[idx]);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+// ==================== 3D 绘制方法 ====================
+
+void Renderer::DrawTriangle3D(const Triangle3DCommand& cmd) {
+    // 3 个顶点 × xyz = 9 floats
+    float verts[9] = {
+        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
+        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
+        cmd.p3.x(), cmd.p3.y(), cmd.p3.z(),
+    };
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp_);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawLine3D(const Line3DCommand& cmd,
+                           const float mvp[16]) {
+    (void)cmd;
+    (void)mvp;
+    // 简单的线框支持：绘制 3D 线段
+    float verts[6] = {
+        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
+        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
+    };
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_LINES, 0, 2);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawText3D(const Text3DCommand& cmd) {
+    (void)cmd;
+    // Text3D 尚未实现，跳过
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {
