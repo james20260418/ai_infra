@@ -1,7 +1,7 @@
 // JPOV Chinese Text Gold Image Unit Test
 //
 // 验证中文文本渲染正确：
-//   1. 渲染字符串 "你好 JPOV!"（字号 48，居中）
+//   1. 渲染分辨率 1280x720，三行中文（字号 16/48/96）
 //   2. 保存为 PNG 到 output/jpov_chinese_gold_test/rendered.png
 //   3. 与 expected PNG（git 管理）做二进制文件级比较
 
@@ -15,6 +15,15 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+
+// 字号常量（与 generator 一致）
+static constexpr float kFontSizeSmall = 16.0f;
+static constexpr float kFontSizeMedium = 48.0f;
+static constexpr float kFontSizeLarge = 96.0f;
+
+// 渲染分辨率
+static constexpr float kResW = 1280.0f;
+static constexpr float kResH = 720.0f;
 
 // 读取文件全部字节
 static bool ReadFileBytes(const std::string& path,
@@ -48,17 +57,22 @@ public:
         (void)input;
         (void)winfo;
 
-        // 渲染分辨率 640x360 — 与 gold image 生成时一致
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
         cmds->render_width  = static_cast<int>(kResW);
         cmds->render_height = static_cast<int>(kResH);
 
-        // ---- 中文文字：白色 "你好 JPOV!"，字号 48，居中 ----
-        const char* text = reinterpret_cast<const char*>(u8"你好 JPOV!");
-        cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 48.0f,
-                       jpov::kColorWhite,
-                       jpov::TextAlignment::kCenter);
+        float center_x = kResW * 0.5f;
+
+        const char* line1 = reinterpret_cast<const char*>(u8"16px: 你好 JPOV! (原始尺寸, 不糊)");
+        cmds->DrawText(line1, {center_x, 120.0f}, kFontSizeSmall,
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
+
+        const char* line2 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (中等字号)");
+        cmds->DrawText(line2, {center_x, 360.0f}, kFontSizeMedium,
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
+
+        const char* line3 = reinterpret_cast<const char*>(u8"96px: 你好 JPOV! (大字号)");
+        cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
     }
 };
 
@@ -69,11 +83,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/hello_chinese_jpov_48_640x360.png";
+        p += "__main__/tools/jpov/test/hello_chinese_jpov_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/hello_chinese_jpov_48_640x360.png";
+           "tools/jpov/test/hello_chinese_jpov_1280x720.png";
 }
 
 // ============ 测试入口 ============
@@ -98,8 +112,8 @@ int main() {
     app.Init();
 
     jpov::WindowInfo winfo;
-    winfo.width  = 640.0f;
-    winfo.height = 360.0f;
+    winfo.width  = kResW;
+    winfo.height = kResH;
     jpov::InputSnapshot input{};
     app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();

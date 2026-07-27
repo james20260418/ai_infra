@@ -177,7 +177,7 @@ cc_test(
 cc_test(
     name = "jpov_chinese_gold_test",
     srcs = ["jpov_chinese_gold_test.cc"],
-    data = [":hello_chinese_jpov_48_640x360.png"],
+    data = [":hello_chinese_jpov_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
