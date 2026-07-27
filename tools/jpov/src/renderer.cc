@@ -345,70 +345,76 @@ void Renderer::InitOneFontSlot(const char* alias,
               << " ttc_index=" << ttc_index;
 }
 
-void Renderer::InitFonts(
-    const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-    const std::vector<const char*>& default_font_paths) {
-    bool has_user_fonts = !font_entries.empty();
+// ==================== RegisterFont ====================
 
-    // 用户提供了 fonts → 只加载用户指定的字体
-    if (has_user_fonts) {
-        CHECK_LE(static_cast<int>(font_entries.size()), 10)
-            << "Too many fonts: " << font_entries.size()
-            << " (max 10)";
+void Renderer::RegisterFont(const char* path,
+                              int ttc_index,
+                              const char* alias,
+                              const char* source,
+                              std::unordered_map<std::string, FontSlot>* font_slots,
+                              std::vector<std::string>* font_order) {
+    CHECK(path != nullptr && path[0] != '\0')
+        << "FontEntry path is null or empty (alias=" << alias << ")";
+    CHECK(alias != nullptr && alias[0] != '\0')
+        << "Font alias is null or empty (path=" << path << ")";
 
-        // 检查别名唯一性
-        for (size_t i = 0; i < font_entries.size(); ++i) {
-            for (size_t j = i + 1; j < font_entries.size(); ++j) {
-                CHECK(strcmp(std::get<2>(font_entries[i]),
-                             std::get<2>(font_entries[j])) != 0)
-                    << "Duplicate font alias: " << std::get<2>(font_entries[i]);
-            }
+    std::string resolved = ResolveFontPath(path);
+    if (resolved.empty()) {
+        if (strcmp(source, "user") == 0) {
+            LOG(FATAL) << "Font file not found: " << path
+                       << " (alias=" << alias << ")";
         }
-
-        for (const auto& fe : font_entries) {
-            const char* path   = std::get<0>(fe);
-            int         ttc_idx = std::get<1>(fe);
-            const char* alias  = std::get<2>(fe);
-
-            CHECK(path != nullptr && path[0] != '\0')
-                << "FontEntry path is null or empty";
-            CHECK(alias != nullptr && alias[0] != '\0')
-                << "FontEntry alias is null or empty";
-
-            std::string resolved = ResolveFontPath(path);
-            CHECK(!resolved.empty())
-                << "Font file not found: " << path
-                << " (alias=" << alias << ")";
-
-            Renderer::FontSlot slot;
-            InitOneFontSlot(alias, resolved, ttc_idx, &slot);
-
-            auto result = font_slots_.emplace(alias, std::move(slot));
-            CHECK(result.second)
-                << "Duplicate font alias (internal): " << alias;
-            font_order_.push_back(alias);
-        }
+        // builtin 字体找不到就静默跳过
+        LOG(INFO) << "Builtin font not found, skipping: " << path;
         return;
     }
 
-    // 用户没提供字体 → 尝试加载内置默认字体
-    // 内置字体失败只报 WARNING，不 crash（因为没有用户明确的配置意图）
-    for (const char* path : default_font_paths) {
-        std::string resolved = ResolveFontPath(path);
-        if (resolved.empty()) {
-            LOG(WARNING) << "Default font not found: " << path << " — skipping";
-            continue;
+    // 检查 alias 是否已注册
+    CHECK(font_slots->find(alias) == font_slots->end())
+        << "Duplicate font alias: \"" << alias << "\" from source=" << source
+        << " path=" << path;
+
+    FontSlot slot;
+    InitOneFontSlot(alias, resolved, ttc_index, &slot);
+
+    auto result = font_slots->emplace(alias, std::move(slot));
+    CHECK(result.second) << "Duplicate font alias (internal): " << alias;
+    font_order->push_back(alias);
+}
+
+void Renderer::InitFonts(
+    const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
+    const std::vector<const char*>& default_font_paths) {
+    // 用户字体最多 10 种
+    CHECK_LE(static_cast<int>(font_entries.size()), 10)
+        << "Too many fonts: " << font_entries.size()
+        << " (max 10)";
+
+    // 用户字体内部别名查重
+    for (size_t i = 0; i < font_entries.size(); ++i) {
+        for (size_t j = i + 1; j < font_entries.size(); ++j) {
+            CHECK(strcmp(std::get<2>(font_entries[i]),
+                         std::get<2>(font_entries[j])) != 0)
+                << "Duplicate font alias: " << std::get<2>(font_entries[i]);
         }
-        // 用文件名（不含路径）做别名
+    }
+
+    // === 第一步：注册用户字体 ===
+    for (const auto& fe : font_entries) {
+        RegisterFont(std::get<0>(fe),
+                      std::get<1>(fe),
+                      std::get<2>(fe),
+                      "user",
+                      &font_slots_, &font_order_);
+    }
+
+    // === 第二步：注册内置默认字体（共享别名空间） ===
+    for (const char* path : default_font_paths) {
+        // 内置字体用文件名（不含路径）做别名
         const char* alias = strrchr(path, '/');
         alias = alias ? alias + 1 : path;
 
-        Renderer::FontSlot slot;
-        InitOneFontSlot(alias, resolved, 0, &slot);
-
-        auto result = font_slots_.emplace(alias, std::move(slot));
-        CHECK(result.second) << "Duplicate default font alias: " << alias;
-        font_order_.push_back(alias);
+        RegisterFont(path, 0, alias, "builtin", &font_slots_, &font_order_);
     }
 
     // 至少一种字体可用

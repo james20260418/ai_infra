@@ -121,6 +121,14 @@ private:
                                  int ttc_index,
                                  FontSlot* slot);
 
+    // 注册一个字体到 font_slots_（含查重/路径检测等逻辑）
+    static void RegisterFont(const char* path,
+                              int ttc_index,
+                              const char* alias,
+                              const char* source,
+                              std::unordered_map<std::string, FontSlot>* font_slots,
+                              std::vector<std::string>* font_order);
+
     // alias → FontSlot 映射
     std::unordered_map<std::string, FontSlot> font_slots_;
     // 注册顺序（用于空 alias 回退到第一个）
