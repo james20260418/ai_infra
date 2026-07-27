@@ -71,6 +71,7 @@ enum class DrawCommandType : uint8_t {
     kText2D,            // 2D 文本（屏幕空间）
     kLine3D,            // 3D 线段（世界空间）
     kTriangle3D,        // 3D 三角形（世界空间）
+    kStrip3D,           // 3D 条带（世界空间，多个三角形按条带化排列，VBO 加速）
     kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
@@ -184,6 +185,23 @@ struct Triangle3DCommand {
     Color color;
 };
 
+// 3D 条带（世界空间，VBO 加速）
+//
+// 用顶点序列定义三维条带：vertices = [p0, p1, p2, p3, ...]
+// 生成三角形：p0-p1-p2, p1-p2-p3, p2-p3-p4, ...
+// 要求 vertices.size() >= 3，否则不绘制。
+//
+// 使用 GL VBO 存储顶点数据，每次绘制时更新 GPU 缓存中的顶点位置。
+// VBO 在渲染器初始化时分配，跨帧共享（cache 语义）。
+//
+// 顶点缓存上限为 3000 个顶点（1000 个三角形）。
+// 若 vertices.size() > 3000，条带被截断，仅前 3000 个顶点参与绘制。
+// 此限制在注释中说明，调用方应避免超限以保证行为可预期。
+struct Strip3DCommand {
+    std::vector<Vec3f> vertices;
+    Color color;
+};
+
 // 3D 文本（世界空间，面向摄像机）
 //
 // 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
@@ -217,6 +235,7 @@ struct RenderCommandList {
     std::vector<Text2DCommand> text2d;
     std::vector<Line3DCommand> line3d;
     std::vector<Triangle3DCommand> triangle3d;
+    std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
 
     // 绘制顺序队列：(类型, 索引)
@@ -289,6 +308,12 @@ struct RenderCommandList {
     // 3D 实心三角形（参与深度测试）
     void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
                         const Color& color);
+
+    // 3D 条带（VBO 加速）
+    // 顶点由条带化规则生成三角形 (p0p1p2, p1p2p3, ...)
+    // Pre-condition: vertices.size() >= 3，否则忽略
+    void DrawStrip3D(const std::vector<Vec3f>& vertices,
+                     const Color& color);
 
     // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0

@@ -306,6 +306,7 @@ Renderer::~Renderer() {
     if (prog_3d_)      glDeleteProgram(prog_3d_);
     if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
+    if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
     if (tex_prog_)     glDeleteProgram(tex_prog_);
     // Font GL textures (所有注册字体的三层 atlas)
     for (auto& [alias, slot] : font_slots_) {
@@ -399,6 +400,13 @@ void Renderer::CreateStreamVBO() {
     glGenBuffers(1, &stream_vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
     glBufferData(GL_ARRAY_BUFFER, buf, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // Strip3D 专用 VBO：3000 顶点 × 3 floats × sizeof(float)
+    size_t strip_buf = static_cast<size_t>(kMaxStripVertices) * 3 * sizeof(float);
+    glGenBuffers(1, &strip_vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, strip_buf, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -741,6 +749,12 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 DrawTriangle3D(cmds.triangle3d[idx]);
                 break;
             }
+            case DrawCommandType::kStrip3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.strip3d.size()));
+                DrawStrip3D(cmds.strip3d[idx]);
+                break;
+            }
             case DrawCommandType::kLine3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.line3d.size()));
@@ -780,6 +794,52 @@ void Renderer::DrawTriangle3D(const Triangle3DCommand& cmd) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
+    int n = static_cast<int>(cmd.vertices.size());
+    if (n < 3) return;
+
+    // 截断到 3000 顶点上限
+    int capped_n = (n > kMaxStripVertices) ? kMaxStripVertices : n;
+
+    // 条带化三角形数 = capped_n - 2
+    int tri_count = capped_n - 2;
+    // 每个三角形 3 个顶点，共 tri_count * 3 个顶点 × 3 floats
+    // 先把所有须绘制的顶点平铺展开到 local buffer
+    //（因为条带化共享顶点，直接用 GPU 的 GL_TRIANGLE_STRIP 更简单！）
+
+    // 用 GL_TRIANGLES 模式展开条带化顶点
+    // strip 顶点布局：[p0,p1,p2,  p1,p2,p3,  p2,p3,p4, ...]
+    // 用 local buffer 写入后一次性上传 VBO
+    int total_floats = tri_count * 3 * 3;  // tri_count 个三角形 × 3 顶点 × 3 分量
+    std::vector<float> verts;
+    verts.reserve(total_floats);
+    for (int i = 0; i < tri_count; ++i) {
+        const Vec3f& v0 = cmd.vertices[i];
+        const Vec3f& v1 = cmd.vertices[i + 1];
+        const Vec3f& v2 = cmd.vertices[i + 2];
+        verts.push_back(v0.x()); verts.push_back(v0.y()); verts.push_back(v0.z());
+        verts.push_back(v1.x()); verts.push_back(v1.y()); verts.push_back(v1.z());
+        verts.push_back(v2.x()); verts.push_back(v2.y()); verts.push_back(v2.z());
+    }
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp_);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    // 上传到专用 VBO（3000 顶点缓存，跨帧共享）
+    glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(total_floats * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, tri_count * 3);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
