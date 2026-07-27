@@ -1,16 +1,9 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
-exports_files(
-    [
-        "fonts/DejaVuSans.ttf",
-        "fonts/NotoSansCJK-Regular.ttc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # ============================================================================
 # 根 BUILD — 仅定义 cc_binary / cc_test target
 # cc_library 均下沉到各自源路径下的独立 BUILD 文件
+# 字体文件: 见 //tools/jpov/fonts:all_fonts
 # ============================================================================
 
 # ============================================================================
