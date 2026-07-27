@@ -37,7 +37,8 @@ namespace jpov {
 // GPU 纹理 ID 和 atlas 尺寸在 FontManager 构造后由 Renderer 设置。
 struct FontManagerConfig {
     // 基本字号（像素单位），一切字形光栅化基于此字号
-    float base_font_size = 64.0f;
+    // 设为 16px：直接光栅化尺寸最清晰，放大用 GL_LINEAR 足够
+    float base_font_size = 16.0f;
 
     // 字体名称（仅用于日志和调试）
     std::string font_name;
@@ -166,7 +167,7 @@ private:
     stbtt_fontinfo* font_info_ = nullptr;
 
     // configured properties
-    float base_font_size_ = 64.0f;
+    float base_font_size_ = 16.0f;
     std::string font_name_;
     std::string font_path_;
     std::vector<uint32_t> preraster_charset_;
