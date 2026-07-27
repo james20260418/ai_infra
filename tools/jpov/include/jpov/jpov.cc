@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <tuple>
 #include <glog/logging.h>
 
 #ifndef _WIN32
@@ -139,8 +140,22 @@ void JPOV::Init() {
         glfwSetKeyCallback(window_, OnKey);
     }
 
+    // 将 Config::fonts（FontEntry 列表）转换为 (path, ttc_index, alias) 三元组
+    std::vector<std::tuple<const char*, int, const char*>> font_tuples;
+    font_tuples.reserve(config_.fonts.size());
+    for (const auto& fe : config_.fonts) {
+        font_tuples.emplace_back(fe.path, fe.ttc_index, fe.alias);
+    }
+
+    // 内置默认字体路径（当用户未提供 fonts 时尝试加载）
+    const std::vector<const char*> kDefaultFontPaths = {
+        "tools/jpov/fonts/NotoSansCJK-Regular.ttc",
+        "tools/jpov/fonts/NotoSansSC-Regular.otf",
+        "tools/jpov/fonts/DejaVuSans.ttf",
+    };
+
     renderer_ = std::make_unique<jpov::Renderer>();
-    renderer_->Init();
+    renderer_->Init(font_tuples, kDefaultFontPaths);
 
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")

@@ -49,6 +49,15 @@
 // ============================================================================
 class JPOV {
 public:
+    struct FontEntry {
+        const char* path;         // TTF/TTC 文件路径，UTF-8
+        int         ttc_index   = 0;  // TTC font index（单 TTF 忽略）
+        const char* alias;            // 字体别名，DrawText 通过它引用
+        // 最多允许注册 kMaxFonts 种字体
+    };
+
+    static constexpr int kMaxFonts = 10;
+
     struct Config {
         const char* title        = "JPOV";
         int         width        = 1280;
@@ -56,6 +65,12 @@ public:
         bool        resizable    = true;
         bool        fullscreen   = false;
         bool        show_console = false;  // Windows 下是否显示命令行窗口
+
+        // font_entries: 用户注册的字体列表（最多 kMaxFonts 项）
+        // 每个 FontEntry 包含字体文件路径、TTC index、用户指定的别名。
+        // 加载失败或别名重复时 Init() 会 LOG(FATAL) crash。
+        // 空列表时 JPOV 尝试加载内置默认字体。
+        std::vector<FontEntry> fonts;
 
         // headless = true: 无可见窗口（适用于 CI / 后台截图）
         // headless = false: 正常窗口（Run() 进入事件循环）

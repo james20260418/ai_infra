@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <tuple>
 #include <vector>
 
 #include "geom/common/common.h"
@@ -192,10 +193,12 @@ Renderer::~Renderer() {
     if (prog_)       glDeleteProgram(prog_);
     if (stream_vbo_) glDeleteBuffers(1, &stream_vbo_);
     if (tex_prog_)   glDeleteProgram(tex_prog_);
-    // Font GL textures (三层)
-    for (int lv = 0; lv < 3; ++lv) {
-        if (font_cjk_.atlas_tex[lv])  glDeleteTextures(1, &font_cjk_.atlas_tex[lv]);
-        if (font_latin_.atlas_tex[lv]) glDeleteTextures(1, &font_latin_.atlas_tex[lv]);
+    // Font GL textures (所有注册字体的三层 atlas)
+    for (auto& [alias, slot] : font_slots_) {
+        (void)alias;
+        for (int lv = 0; lv < 3; ++lv) {
+            if (slot.atlas_tex[lv]) glDeleteTextures(1, &slot.atlas_tex[lv]);
+        }
     }
 }
 
@@ -273,93 +276,171 @@ void Renderer::CreateStreamVBO() {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-void Renderer::Init() {
+void Renderer::Init(
+    const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
+    const std::vector<const char*>& default_font_paths) {
 #ifdef _WIN32
     CHECK_EQ(gl_loader_init(), 0) << "Failed to load OpenGL 3.x functions";
 #endif
     CompileShaders();
     CreateStreamVBO();
-    InitFonts();
+    InitFonts(font_entries, default_font_paths);
 }
 
 
 // ==================== 字体初始化 ====================
 
-// 路径查找：先试 bazel run 的相对路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
-static std::string ResolveFontPath(const char* const* candidates, int n) {
-    for (int i = 0; i < n; ++i) {
-        FILE* fp = std::fopen(candidates[i], "rb");
-        if (fp) {
-            std::fclose(fp);
-            return candidates[i];
-        }
+// 路径查找：先试原始路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
+static std::string ResolveFontPath(const char* raw_path) {
+    FILE* fp = std::fopen(raw_path, "rb");
+    if (fp) {
+        std::fclose(fp);
+        return raw_path;
     }
     // Try TEST_SRCDIR for bazel test sandbox
     const char* srcdir = std::getenv("TEST_SRCDIR");
     if (srcdir) {
-        for (int i = 0; i < n; ++i) {
-            std::string p = srcdir;
-            if (!p.empty() && p.back() != '/') p.push_back('/');
-            p += "__main__/";
-            p += candidates[i];
-            FILE* fp = std::fopen(p.c_str(), "rb");
-            if (fp) {
-                std::fclose(fp);
-                return p;
-            }
+        std::string p = srcdir;
+        if (!p.empty() && p.back() != '/') p.push_back('/');
+        p += "__main__/";
+        p += raw_path;
+        FILE* fp2 = std::fopen(p.c_str(), "rb");
+        if (fp2) {
+            std::fclose(fp2);
+            return p;
         }
     }
     return "";
 }
 
-void Renderer::InitFonts() {
-    // CJK 字体优先（TTC, font_index=0 = Simplified Chinese），fallback 到 SC-only OTF
-    const char* kCjkCandidates[] = {
-        "tools/jpov/fonts/NotoSansCJK-Regular.ttc",
-        "tools/jpov/fonts/NotoSansSC-Regular.otf",
-    };
-    const char* kLatinCandidates[] = {
-        "tools/jpov/fonts/DejaVuSans.ttf",
-    };
+// ==================== InitOneFontSlot ====================
 
-    constexpr int kCjkCount = sizeof(kCjkCandidates) / sizeof(kCjkCandidates[0]);
-    constexpr int kLatinCount = sizeof(kLatinCandidates) / sizeof(kLatinCandidates[0]);
+void Renderer::InitOneFontSlot(const char* alias,
+                                const std::string& resolved_path,
+                                int ttc_index,
+                                FontSlot* slot /*output*/) {
+    CHECK(slot != nullptr);
+    CHECK(!slot->manager.has_value()) << "FontSlot already initialized for alias=" << alias;
 
-    // 为每种字体创建三层 atlas 纹理（16/32/48px）
-    auto init_slot = [](FontSlot& slot, const std::string& path,
-                        const char* name, int ttc_index) {
-        FontManagerConfig cfg;
-        cfg.font_name = name;
-        cfg.font_path = path;
-        cfg.ttc_font_index = ttc_index;
+    FontManagerConfig cfg;
+    cfg.font_name = alias;
+    cfg.font_path = resolved_path;
+    cfg.ttc_font_index = ttc_index;
 
-        std::optional<FontManager> mgr = FontManager::Create(cfg);
-        if (mgr.has_value()) {
-            slot.manager = std::move(mgr.value());
-            for (int lv = 0; lv < 3; ++lv) {
-                slot.atlas_tex[lv] = CreateGlAtlasTexture(
-                    FontManager::kAtlasDim,
-                    slot.manager->atlas_pixels(lv));
+    std::optional<FontManager> mgr = FontManager::Create(cfg);
+    CHECK(mgr.has_value())
+        << "Failed to load font: alias=" << alias
+        << " path=" << resolved_path
+        << " ttc_index=" << ttc_index;
+
+    slot->manager = std::move(mgr.value());
+    for (int lv = 0; lv < 3; ++lv) {
+        slot->atlas_tex[lv] = CreateGlAtlasTexture(
+            FontManager::kAtlasDim,
+            slot->manager->atlas_pixels(lv));
+    }
+
+    LOG(INFO) << "Font registered: alias=" << alias
+              << " path=" << resolved_path
+              << " ttc_index=" << ttc_index;
+}
+
+void Renderer::InitFonts(
+    const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
+    const std::vector<const char*>& default_font_paths) {
+    bool has_user_fonts = !font_entries.empty();
+
+    // 用户提供了 fonts → 只加载用户指定的字体
+    if (has_user_fonts) {
+        CHECK_LE(static_cast<int>(font_entries.size()), 10)
+            << "Too many fonts: " << font_entries.size()
+            << " (max 10)";
+
+        // 检查别名唯一性
+        for (size_t i = 0; i < font_entries.size(); ++i) {
+            for (size_t j = i + 1; j < font_entries.size(); ++j) {
+                CHECK(strcmp(std::get<2>(font_entries[i]),
+                             std::get<2>(font_entries[j])) != 0)
+                    << "Duplicate font alias: " << std::get<2>(font_entries[i]);
             }
         }
-    };
 
-    // ===== CJK 字体 =====
-    {
-        std::string cjk_path = ResolveFontPath(kCjkCandidates, kCjkCount);
-        if (!cjk_path.empty()) {
-            init_slot(font_cjk_, cjk_path, "CJK", 0);
+        for (const auto& fe : font_entries) {
+            const char* path   = std::get<0>(fe);
+            int         ttc_idx = std::get<1>(fe);
+            const char* alias  = std::get<2>(fe);
+
+            CHECK(path != nullptr && path[0] != '\0')
+                << "FontEntry path is null or empty";
+            CHECK(alias != nullptr && alias[0] != '\0')
+                << "FontEntry alias is null or empty";
+
+            std::string resolved = ResolveFontPath(path);
+            CHECK(!resolved.empty())
+                << "Font file not found: " << path
+                << " (alias=" << alias << ")";
+
+            Renderer::FontSlot slot;
+            InitOneFontSlot(alias, resolved, ttc_idx, &slot);
+
+            auto result = font_slots_.emplace(alias, std::move(slot));
+            CHECK(result.second)
+                << "Duplicate font alias (internal): " << alias;
+            font_order_.push_back(alias);
         }
+        return;
     }
 
-    // ===== Latin fallback 字体 =====
-    {
-        std::string latin_path = ResolveFontPath(kLatinCandidates, kLatinCount);
-        if (!latin_path.empty()) {
-            init_slot(font_latin_, latin_path, "Latin", 0);
+    // 用户没提供字体 → 尝试加载内置默认字体
+    // 内置字体失败只报 WARNING，不 crash（因为没有用户明确的配置意图）
+    for (const char* path : default_font_paths) {
+        std::string resolved = ResolveFontPath(path);
+        if (resolved.empty()) {
+            LOG(WARNING) << "Default font not found: " << path << " — skipping";
+            continue;
         }
+        // 用文件名（不含路径）做别名
+        const char* alias = strrchr(path, '/');
+        alias = alias ? alias + 1 : path;
+
+        Renderer::FontSlot slot;
+        InitOneFontSlot(alias, resolved, 0, &slot);
+
+        auto result = font_slots_.emplace(alias, std::move(slot));
+        CHECK(result.second) << "Duplicate default font alias: " << alias;
+        font_order_.push_back(alias);
     }
+
+    // 至少一种字体可用
+    CHECK(!font_slots_.empty())
+        << "No fonts loaded (user nor built-in). "
+        << "Provide at least one font via JPOV::Config::fonts.";
 }
+
+// ==================== FontSlot 查找 ====================
+
+Renderer::FontSlot* Renderer::FindFontSlot(const std::string& alias) {
+    if (!alias.empty()) {
+        auto it = font_slots_.find(alias);
+        if (it != font_slots_.end()) {
+            return &it->second;
+        }
+        // 别名不存在 → crash（用户指定了不存在的字体别名）
+        std::string registered;
+        for (const auto& a : font_order_) {
+            if (!registered.empty()) registered += ", ";
+            registered += a;
+        }
+        LOG(FATAL) << "Unknown font alias: \"" << alias
+                   << "\". Registered aliases: "
+                   << (font_order_.empty() ? "(none)" : registered);
+    }
+    // 空别名 → 返回第一个
+    if (font_order_.empty()) return nullptr;
+    return &font_slots_.at(font_order_[0]);
+}
+
+// ==================== Atlas 上传 ====================
 
 void Renderer::UploadAtlas(FontSlot& slot, int level) {
     if (!slot.manager.has_value() || !slot.manager->loaded()) return;
@@ -386,15 +467,11 @@ void Renderer::UploadAllDirty(FontSlot& slot) {
 // ==================== DrawText2D ====================
 
 void Renderer::DrawText2D(const Text2DCommand& cmd) {
-    // 字体选择：优先 CJK（支持中文字符），其次 Latin fallback
-    FontSlot* slot = nullptr;
-    if (font_cjk_.manager.has_value() && font_cjk_.manager->loaded()) {
-        slot = &font_cjk_;
-    } else if (font_latin_.manager.has_value() && font_latin_.manager->loaded()) {
-        slot = &font_latin_;
-    } else {
+    // 按别名查找字体
+    FontSlot* slot = FindFontSlot(cmd.font_alias);
+    if (!slot || !slot->manager.has_value() || !slot->manager->loaded()) {
         LOG_EVERY_N(WARNING, FontManager::kNotLoadedLogInterval)
-            << "Text2D: font not loaded, skipping";
+            << "Text2D: font not loaded for alias=\"" << cmd.font_alias << "\", skipping";
         return;
     }
 

@@ -139,12 +139,15 @@ enum class TextAlignment : uint8_t {
 // font_size: 字号（像素单位）
 // color: 文本颜色
 // alignment: 文本对齐方式
+// font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应）
+//             空字符串（默认）使用第一个注册字体
 struct Text2DCommand {
     std::string text;
     Vec2f pos;
     float font_size;
     Color color;
     TextAlignment alignment = TextAlignment::kTopLeft;
+    std::string font_alias;
 };
 
 // 3D 线段（世界空间）
@@ -175,11 +178,13 @@ struct Triangle3DCommand {
 // 参与深度测试，被 3D 物体遮挡时自动隐藏。
 //
 // font_size: 世界空间中的文本大小（不是像素，是 3D 坐标单位）
+// font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应）
 struct Text3DCommand {
     std::string text;
     Vec3f pos;
     float font_size;
     Color color;
+    std::string font_alias;
 };
 
 // ==================== 渲染指令列表 ====================
@@ -250,9 +255,12 @@ struct RenderCommandList {
     // Pre-condition: font_size > 0
     // pos: 文本位置（像素单位，含义取决于 alignment）
     // alignment: 文本对齐方式（缺省 kTopLeft，保持向后兼容）
+    // font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应）
+    //             空字符串（默认）使用第一个注册字体
     void DrawText(const std::string& text, const Vec2f& pos, float font_size,
                   const Color& color,
-                  TextAlignment alignment = TextAlignment::kTopLeft);
+                  TextAlignment alignment = TextAlignment::kTopLeft,
+                  const std::string& font_alias = "");
 
     // ---- 3D 绘制辅助方法（世界空间，右手系） ----
 
@@ -267,8 +275,11 @@ struct RenderCommandList {
 
     // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0
+    // font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应）
+    //             空字符串（默认）使用第一个注册字体
     void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
-                    const Color& color);
+                    const Color& color,
+                    const std::string& font_alias = "");
 };
 
 }  // namespace jpov

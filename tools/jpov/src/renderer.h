@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -35,8 +36,12 @@ struct Renderer {
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    // Init: 初始化 shader + VBO。Pre-condition: GL context 当前
-    void Init();
+    // Init: 初始化 shader + VBO + 字体。Pre-condition: GL context 当前
+    // font_entries: 用户配置的字体（可空，空则尝试 default_font_paths）
+    // default_font_paths: 内置默认字体路径列表（font_entries 非空时忽略）
+    // FontEntry triple: path, ttc_index, alias
+    void Init(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
+              const std::vector<const char*>& default_font_paths);
 
     // BeginFrame: 绑定 FBO。如果 render_resolution 与当前 FBO 不一致则重建
     void BeginFrame(int render_w, int render_h);
@@ -90,15 +95,16 @@ private:
 
     // 每种字体资源：FontManager + 三层 GL atlas 纹理（16/32/48px）。
     // FontManager 不持有 GL 资源，图集纹理由 Renderer 创建和管理。
-    //
-    // 目前两种字体：CJK（中日韩，TTC font_index=0）和 Latin fallback（DejaVuSans）。
     struct FontSlot {
         std::optional<FontManager> manager;
         unsigned int atlas_tex[3] = {0, 0, 0};  // [0]=16px, [1]=32px, [2]=48px
     };
 
-    // 构造两个 FontSlot（CJK + Latin fallback），创建三层 GL atlas 纹理
-    void InitFonts();
+    // 根据字体条目初始化字体。
+    // 每个条目：(path, ttc_index, alias)。
+    // 失败或别名重复 → LOG(FATAL) crash。
+    void InitFonts(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
+                   const std::vector<const char*>& default_font_paths);
 
     // 上传指定层级 atlas 到 GL（仅在 atlas_dirty 时）
     void UploadAtlas(FontSlot& slot, int level);
@@ -106,8 +112,20 @@ private:
     // 上传所有脏层级
     void UploadAllDirty(FontSlot& slot);
 
-    FontSlot font_cjk_;
-    FontSlot font_latin_;
+    // 按别名查找字体 slot（空别名或未命中 → 返回第一个）
+    FontSlot* FindFontSlot(const std::string& alias);
+
+    // 初始化单个 FontSlot（静态方法，供 InitFonts 调用）
+    static void InitOneFontSlot(const char* alias,
+                                 const std::string& resolved_path,
+                                 int ttc_index,
+                                 FontSlot* slot);
+
+    // alias → FontSlot 映射
+    std::unordered_map<std::string, FontSlot> font_slots_;
+    // 注册顺序（用于空 alias 回退到第一个）
+    std::vector<std::string> font_order_;
+
     unsigned int tex_prog_ = 0;
 };
 
