@@ -545,25 +545,6 @@ Renderer::GlyphBitmap* Renderer::GetOrRasterizeGlyph(uint32_t cp) {
 
     auto result = font_glyphs_.emplace(cp, g);
 
-    // 调试：保存 atlas 快照
-    static bool atlas_saved = false;
-    if (!atlas_saved) {
-        atlas_saved = true;
-        // 将 atlas 一行缩小保存
-        const char* out = "/james_pm/ai_infra/output/atlas_debug.png";
-        // atlas_pixels_ is grayscale, need to expand to RGBA for stb_image_write
-        std::vector<unsigned char> rgba(kAtlasSize * kAtlasSize * 4);
-        for (int i = 0; i < kAtlasSize * kAtlasSize; ++i) {
-            unsigned char v = atlas_pixels_[i];
-            rgba[i*4+0] = v;
-            rgba[i*4+1] = v;
-            rgba[i*4+2] = v;
-            rgba[i*4+3] = v;
-        }
-        stbi_write_png(out, kAtlasSize, kAtlasSize, 4, rgba.data(), kAtlasSize * 4);
-        LOG(INFO) << "Atlas debug saved: " << out;
-    }
-
     return &result.first->second;
 }
 
@@ -733,25 +714,6 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
-
-    // DEBUG: check FBO at first char (H) position
-    if (cmd.color.r > 0.9f && cmd.color.g > 0.9f && cmd.color.b > 0.9f) {
-        // H rendered at screen coords (66,162) to (78,180), bottom-up y ~ 360-180=180 to 360-162=198
-        int gl_y = fbo_h_ - 170;  // middle of H, bottom-up
-        std::vector<unsigned char> px(4);
-        glReadPixels(70, gl_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-        LOG(INFO) << "FBO direct at (70," << gl_y << " bu): RGBA=("
-                  << (int)px[0] << "," << (int)px[1] << "," << (int)px[2] << "," << (int)px[3] << ")";
-        // Now blit to out_fbo and read from there
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, out_fbo_);
-        glBlitFramebuffer(0, 0, fbo_w_, fbo_h_, 0, 0, fbo_w_, fbo_h_, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, out_fbo_);
-        glReadPixels(70, gl_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-        LOG(INFO) << "OutFBO direct at (70," << gl_y << " bu): RGBA=("
-                  << (int)px[0] << "," << (int)px[1] << "," << (int)px[2] << "," << (int)px[3] << ")";
-    }
 }
 
 void Renderer::BeginFrame(int render_w, int render_h) {
