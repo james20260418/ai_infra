@@ -36,15 +36,21 @@ public:
         // 文本基线位置 (在渲染分辨率空间中)
         float text_x = kResW * 0.1f;
         float text_y = kResH * 0.5f;
-        cmds->DrawText("Hello JPOV!", {text_x, text_y}, 32.0f, jpov::kColorWhite);
+        cmds->DrawText("Hello JPOV!", {text_x, text_y}, 32.0f, jpov::kColorWhite,
+                       jpov::TextAlignment::kTopLeft,
+                       jpov::kFontBuiltinLatin);
 
         // ---- 稍小的文本 "Text2D Test" ----
         cmds->DrawText("Text2D Test", {kResW * 0.1f, kResH * 0.7f},
-                       24.0f, jpov::kColorGreen);
+                       24.0f, jpov::kColorGreen,
+                       jpov::TextAlignment::kTopLeft,
+                       jpov::kFontBuiltinLatin);
 
         // ---- 顶部大标题 "jpov" ----
         cmds->DrawText("JPOV", {kResW * 0.3f, kResH * 0.15f},
-                       48.0f, jpov::kColorRed);
+                       48.0f, jpov::kColorRed,
+                       jpov::TextAlignment::kTopLeft,
+                       jpov::kFontBuiltinLatin);
     }
 };
 

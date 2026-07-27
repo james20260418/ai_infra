@@ -34,7 +34,8 @@ public:
         const char* text = reinterpret_cast<const char*>(u8"你好 世界！Hello World!");
         cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 36.0f,
                        jpov::kColorWhite,
-                       jpov::TextAlignment::kCenter);
+                       jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinCJK);
     }
 };
 

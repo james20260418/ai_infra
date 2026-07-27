@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <tuple>
 #include <glog/logging.h>
 
 #ifndef _WIN32
@@ -139,8 +140,24 @@ void JPOV::Init() {
         glfwSetKeyCallback(window_, OnKey);
     }
 
+    // 将 Config::fonts（FontEntry 列表）转换为 (path, ttc_index, alias) 三元组
+    std::vector<std::tuple<const char*, int, const char*>> font_tuples;
+    font_tuples.reserve(config_.fonts.size());
+    for (const auto& fe : config_.fonts) {
+        font_tuples.emplace_back(fe.path, fe.ttc_index, fe.alias);
+    }
+
+    // 内置默认字体（path, ttc_index, alias）
+    // 与用户 fonts 共享别名空间，同名 alias 会 crash
+    // 注意：stb_truetype 对 CFF (PostScript outline) 格式支持不稳定，
+    // 仅加载 TrueType outline (.ttf/.ttc) 字体。
+    const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, "CJK"},
+        {"tools/jpov/fonts/DejaVuSans.ttf",            0, "Latin"},
+    };
+
     renderer_ = std::make_unique<jpov::Renderer>();
-    renderer_->Init();
+    renderer_->Init(font_tuples, kDefaultFonts);
 
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")

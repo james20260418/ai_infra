@@ -44,10 +44,11 @@ void RenderCommandList::DrawCircle(const Vec2f& center, float radius,
 
 void RenderCommandList::DrawText(const std::string& text, const Vec2f& pos,
                                   float font_size, const Color& color,
-                                  TextAlignment alignment) {
+                                  TextAlignment alignment,
+                                  const std::string& font_alias) {
     CHECK_GT(font_size, 0.0f);
     int idx = static_cast<int>(text2d.size());
-    text2d.push_back({text, pos, font_size, color, alignment});
+    text2d.push_back({text, pos, font_size, color, alignment, font_alias});
     order.emplace_back(DrawCommandType::kText2D, idx);
 }
 
@@ -67,10 +68,11 @@ void RenderCommandList::DrawTriangle3D(const Vec3f& p1, const Vec3f& p2,
 }
 
 void RenderCommandList::DrawText3D(const std::string& text, const Vec3f& pos,
-                                    float font_size, const Color& color) {
+                                    float font_size, const Color& color,
+                                    const std::string& font_alias) {
     CHECK_GT(font_size, 0.0f);
     int idx = static_cast<int>(text3d.size());
-    text3d.push_back({text, pos, font_size, color});
+    text3d.push_back({text, pos, font_size, color, font_alias});
     order.emplace_back(DrawCommandType::kText3D, idx);
 }
 

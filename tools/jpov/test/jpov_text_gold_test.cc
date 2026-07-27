@@ -59,7 +59,9 @@ public:
         // ---- 文字：白色 "Hello JPOV!"，字号 48，居中 ----
         const char* text = "Hello JPOV!";
         cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 48.0f,
-                       jpov::kColorWhite);
+                       jpov::kColorWhite,
+                       jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinLatin);
     }
 };
 
