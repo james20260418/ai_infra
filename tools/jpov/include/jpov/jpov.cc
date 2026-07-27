@@ -149,9 +149,10 @@ void JPOV::Init() {
 
     // 内置默认字体（path, ttc_index, alias）
     // 与用户 fonts 共享别名空间，同名 alias 会 crash
+    // 注意：stb_truetype 对 CFF (PostScript outline) 格式支持不稳定，
+    // 仅加载 TrueType outline (.ttf/.ttc) 字体。
     const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {
         {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, "CJK"},
-        {"tools/jpov/fonts/NotoSansSC-Regular.otf",   0, "SC"},
         {"tools/jpov/fonts/DejaVuSans.ttf",            0, "Latin"},
     };
 

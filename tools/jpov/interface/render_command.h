@@ -38,8 +38,9 @@ using Vec3f = geom::Vec3<float>;
 // JPOV 内置默认字体的别名常量。
 // 用户可在此查看内置字体名称，或在 DrawText 中引用。
 // 如果用户通过 JPOV::Config::fonts 注册了同名 alias，初始化时会 crash。
+// 注意：stb_truetype 对 CFF (PostScript outline) 格式支持不稳定，
+//       仅 TrueType outline (.ttf/.ttc) 字体可用。
 inline constexpr const char* kFontBuiltinCJK   = "CJK";   // NotoSansCJK-Regular.ttc (TTC index=0)
-inline constexpr const char* kFontBuiltinSC    = "SC";    // NotoSansSC-Regular.otf
 inline constexpr const char* kFontBuiltinLatin = "Latin"; // DejaVuSans.ttf
 
 // ==================== 颜色 ====================
