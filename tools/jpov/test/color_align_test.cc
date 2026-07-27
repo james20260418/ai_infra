@@ -37,15 +37,15 @@ public:
 
         // 9 种对齐模式，每行用不同颜色，都以 (cx, cy) 为对齐点
         // 注意：所有调用都使用同一文本和同一位置，靠 alignment 区分锚点
-        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.2f, 0.2f, 0.5f}, jpov::TextAlignment::kTopLeft);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.9f, 0.1f, 0.5f}, jpov::TextAlignment::kTopRight);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {0.2f, 1.0f, 0.3f, 0.5f}, jpov::TextAlignment::kCenter);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {0.2f, 0.4f, 1.0f, 0.5f}, jpov::TextAlignment::kBottomLeft);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.5f, 0.8f, 0.5f}, jpov::TextAlignment::kBottomRight);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {0.5f, 0.8f, 1.0f, 0.5f}, jpov::TextAlignment::kMidLeft);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {1.0f, 0.6f, 0.0f, 0.5f}, jpov::TextAlignment::kMidRight);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {0.9f, 0.4f, 0.9f, 0.5f}, jpov::TextAlignment::kMidTop);
-        cmds->DrawText("你", {cx, cy}, 30.0f, {0.4f, 0.9f, 0.4f, 0.5f}, jpov::TextAlignment::kMidBottom);
+        cmds->DrawText("左上", {cx, cy}, 50.0f, {1.0f, 0.2f, 0.2f, 0.5f}, jpov::TextAlignment::kTopLeft);
+        cmds->DrawText("右上", {cx, cy}, 50.0f, {1.0f, 0.9f, 0.1f, 0.5f}, jpov::TextAlignment::kTopRight);
+        cmds->DrawText("左下", {cx, cy}, 50.0f, {0.2f, 0.4f, 1.0f, 0.5f}, jpov::TextAlignment::kBottomLeft);
+        cmds->DrawText("右下", {cx, cy}, 50.0f, {1.0f, 0.5f, 0.8f, 0.5f}, jpov::TextAlignment::kBottomRight);
+        cmds->DrawText("中心", {cx, cy}, 50.0f, {0.2f, 1.0f, 0.3f, 0.5f}, jpov::TextAlignment::kCenter);
+        cmds->DrawText("左中", {cx, cy}, 50.0f, {0.5f, 0.8f, 1.0f, 0.5f}, jpov::TextAlignment::kMidLeft);
+        cmds->DrawText("右中", {cx, cy}, 50.0f, {1.0f, 0.6f, 0.0f, 0.5f}, jpov::TextAlignment::kMidRight);
+        cmds->DrawText("上中", {cx, cy}, 50.0f, {0.9f, 0.4f, 0.9f, 0.5f}, jpov::TextAlignment::kMidTop);
+        cmds->DrawText("下中", {cx, cy}, 50.0f, {0.4f, 0.9f, 0.4f, 0.5f}, jpov::TextAlignment::kMidBottom);
     }
 };
 
