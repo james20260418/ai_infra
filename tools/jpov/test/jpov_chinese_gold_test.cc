@@ -64,15 +64,18 @@ public:
 
         const char* line1 = reinterpret_cast<const char*>(u8"16px: 你好 JPOV! (16px atlas)");
         cmds->DrawText(line1, {center_x, 120.0f}, kFontSizeSmall,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinCJK);
 
         const char* line2 = reinterpret_cast<const char*>(u8"32px: 你好 JPOV! (32px atlas)");
         cmds->DrawText(line2, {center_x, 360.0f}, kFontSizeMedium,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinCJK);
 
         const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 JPOV! (48px atlas)");
         cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter);
+                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinCJK);
     }
 };
 
