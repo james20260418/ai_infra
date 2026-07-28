@@ -979,6 +979,12 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawRoundRect2D(cmds.roundrect2d[idx]);
                 break;
             }
+            case DrawCommandType::kFillRect2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.fillrect2d.size()));
+                DrawFillRect2D(cmds.fillrect2d[idx]);
+                break;
+            }
             default:
                 break;
         }
@@ -1274,6 +1280,327 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glDrawArrays(GL_TRIANGLES, 0, total_verts);
     glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
+    // FillRect2D 的实现策略：
+    // 1. 填充部分：直接复用 DrawRoundRect2D 的三角化逻辑（用 fill_color）
+    // 2. 边框部分：将圆角矩形边框环三角化为 GL_TRIANGLES（用 border_color）
+    //
+    // 边框环的几何定义：
+    //   外圆角矩形 = (pos, size, radius)
+    //   内圆角矩形 = (pos + border_width, size - 2*border_width, inner_radius)
+    //   其中 inner_radius = max(0, radius - border_width)
+    //
+    // 边框环三角化：
+    //   每个角区域：内外圆弧之间的扇形环
+    //   每条边区域：内外矩形边之间的矩形带
+
+    static constexpr int kCornerSegs = 12;  // 每个圆角的扇形分段数（同 RoundRect）
+    static constexpr int kMaxFillVerts = 4 * (kCornerSegs + 1) * 2  // 4 corners
+                                        + 4 * 6                      // 4 edge rects
+                                        + 6;                         // center rect
+    static constexpr int kMaxBorderVerts = 4 * kCornerSegs * 6       // 4 corner rings, 2 tris/seg
+                                          + 4 * 6;                   // 4 edge strips
+
+    float x0 = cmd.pos.x();
+    float y0 = cmd.pos.y();
+    float x1 = x0 + cmd.size.x();
+    float y1 = y0 + cmd.size.y();
+    float r = cmd.radius;
+    float bw = cmd.border_width;
+
+    // ===== 第一步：填充部分 =====
+    // 复用 DrawRoundRect2D 逻辑
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.fill_color.r, cmd.fill_color.g,
+                cmd.fill_color.b, cmd.fill_color.a);
+
+    if (r <= 0.0f) {
+        float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glDisableVertexAttribArray(0);
+    } else {
+        float cx_inner = x0 + r;
+        float cy_inner = y0 + r;
+        float cx_outer = x1 - r;
+        float cy_outer = y1 - r;
+
+        std::vector<float> verts;
+        verts.reserve(kMaxFillVerts);
+
+        // 中心矩形
+        float center_x0 = cx_inner;
+        float center_y0 = cy_inner;
+        float center_x1 = cx_outer;
+        float center_y1 = cy_outer;
+        if (center_x1 > center_x0 && center_y1 > center_y0) {
+            verts.push_back(center_x0); verts.push_back(center_y0);
+            verts.push_back(center_x1); verts.push_back(center_y0);
+            verts.push_back(center_x1); verts.push_back(center_y1);
+            verts.push_back(center_x1); verts.push_back(center_y1);
+            verts.push_back(center_x0); verts.push_back(center_y1);
+            verts.push_back(center_x0); verts.push_back(center_y0);
+        }
+        // 上边
+        if (x1 - r > x0 + r) {
+            verts.push_back(cx_inner);  verts.push_back(y0);
+            verts.push_back(cx_outer);  verts.push_back(y0);
+            verts.push_back(cx_outer);  verts.push_back(cy_inner);
+            verts.push_back(cx_outer);  verts.push_back(cy_inner);
+            verts.push_back(cx_inner);  verts.push_back(cy_inner);
+            verts.push_back(cx_inner);  verts.push_back(y0);
+        }
+        // 下边
+        if (x1 - r > x0 + r) {
+            verts.push_back(cx_inner);  verts.push_back(cy_outer);
+            verts.push_back(cx_outer);  verts.push_back(cy_outer);
+            verts.push_back(cx_outer);  verts.push_back(y1);
+            verts.push_back(cx_outer);  verts.push_back(y1);
+            verts.push_back(cx_inner);  verts.push_back(y1);
+            verts.push_back(cx_inner);  verts.push_back(cy_outer);
+        }
+        // 左边
+        if (y1 - r > y0 + r) {
+            verts.push_back(x0);       verts.push_back(cy_inner);
+            verts.push_back(cx_inner); verts.push_back(cy_inner);
+            verts.push_back(cx_inner); verts.push_back(cy_outer);
+            verts.push_back(cx_inner); verts.push_back(cy_outer);
+            verts.push_back(x0);       verts.push_back(cy_outer);
+            verts.push_back(x0);       verts.push_back(cy_inner);
+        }
+        // 右边
+        if (y1 - r > y0 + r) {
+            verts.push_back(cx_outer); verts.push_back(cy_inner);
+            verts.push_back(x1);       verts.push_back(cy_inner);
+            verts.push_back(x1);       verts.push_back(cy_outer);
+            verts.push_back(x1);       verts.push_back(cy_outer);
+            verts.push_back(cx_outer); verts.push_back(cy_outer);
+            verts.push_back(cx_outer); verts.push_back(cy_inner);
+        }
+        // 4 个圆角扇形
+        // 左上角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            double a0 = 3.14159265358979323846 * (180.0 + 90.0 * seg / kCornerSegs) / 180.0;
+            double a1 = 3.14159265358979323846 * (180.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+            float px0 = cx_inner + r * std::cos(a0);
+            float py0 = cy_inner + r * std::sin(a0);
+            float px1 = cx_inner + r * std::cos(a1);
+            float py1 = cy_inner + r * std::sin(a1);
+            verts.push_back(cx_inner); verts.push_back(cy_inner);
+            verts.push_back(px0);      verts.push_back(py0);
+            verts.push_back(px1);      verts.push_back(py1);
+        }
+        // 右上角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            double a0 = 3.14159265358979323846 * (270.0 + 90.0 * seg / kCornerSegs) / 180.0;
+            double a1 = 3.14159265358979323846 * (270.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+            float px0 = cx_outer + r * std::cos(a0);
+            float py0 = cy_inner + r * std::sin(a0);
+            float px1 = cx_outer + r * std::cos(a1);
+            float py1 = cy_inner + r * std::sin(a1);
+            verts.push_back(cx_outer); verts.push_back(cy_inner);
+            verts.push_back(px0);      verts.push_back(py0);
+            verts.push_back(px1);      verts.push_back(py1);
+        }
+        // 右下角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            double a0 = 3.14159265358979323846 * (90.0 * seg / kCornerSegs) / 180.0;
+            double a1 = 3.14159265358979323846 * (90.0 * (seg + 1) / kCornerSegs) / 180.0;
+            float px0 = cx_outer + r * std::cos(a0);
+            float py0 = cy_outer + r * std::sin(a0);
+            float px1 = cx_outer + r * std::cos(a1);
+            float py1 = cy_outer + r * std::sin(a1);
+            verts.push_back(cx_outer); verts.push_back(cy_outer);
+            verts.push_back(px0);      verts.push_back(py0);
+            verts.push_back(px1);      verts.push_back(py1);
+        }
+        // 左下角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            double a0 = 3.14159265358979323846 * (90.0 + 90.0 * seg / kCornerSegs) / 180.0;
+            double a1 = 3.14159265358979323846 * (90.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+            float px0 = cx_inner + r * std::cos(a0);
+            float py0 = cy_outer + r * std::sin(a0);
+            float px1 = cx_inner + r * std::cos(a1);
+            float py1 = cy_outer + r * std::sin(a1);
+            verts.push_back(cx_inner); verts.push_back(cy_outer);
+            verts.push_back(px0);      verts.push_back(py0);
+            verts.push_back(px1);      verts.push_back(py1);
+        }
+
+        int total_verts = static_cast<int>(verts.size()) / 2;
+        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLES, 0, total_verts);
+        glDisableVertexAttribArray(0);
+    }
+
+    // ===== 第二步：边框环三角化 =====
+    if (bw <= 0.0f) {
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return;
+    }
+
+    float in_bw = std::min(bw, std::min(cmd.size.x(), cmd.size.y()) * 0.5f);
+    float inner_r = std::max(0.0f, r - in_bw);
+
+    float ix0 = x0 + in_bw;
+    float iy0 = y0 + in_bw;
+    float ix1 = x1 - in_bw;
+    float iy1 = y1 - in_bw;
+
+    // 外圆角边界辅助点
+    float cx_inner = x0 + r;
+    float cy_inner = y0 + r;
+    float cx_outer = x1 - r;
+    float cy_outer = y1 - r;
+
+    // 内圆角边界辅助点
+    float icx_inner = ix0 + inner_r;
+    float icy_inner = iy0 + inner_r;
+    float icx_outer = ix1 - inner_r;
+    float icy_outer = iy1 - inner_r;
+
+    std::vector<float> border_verts;
+    border_verts.reserve(kMaxBorderVerts);
+
+    // ===== 边框边区域（矩形带） =====
+    // 上边：外 (x0+r, y0) ~ (x1-r, y0) vs 内 (ix0+inner_r, iy0) ~ (ix1-inner_r, iy0)
+    float outer_top_left = x0 + r;
+    float outer_top_right = x1 - r;
+    float inner_top_left = ix0 + inner_r;
+    float inner_top_right = ix1 - inner_r;
+    if (outer_top_right > outer_top_left && inner_top_right > inner_top_left) {
+        border_verts.push_back(outer_top_left);  border_verts.push_back(y0);
+        border_verts.push_back(outer_top_right); border_verts.push_back(y0);
+        border_verts.push_back(inner_top_right); border_verts.push_back(iy0);
+        border_verts.push_back(inner_top_right); border_verts.push_back(iy0);
+        border_verts.push_back(inner_top_left);  border_verts.push_back(iy0);
+        border_verts.push_back(outer_top_left);  border_verts.push_back(y0);
+    }
+    // 下边
+    float outer_bot_left = x0 + r;
+    float outer_bot_right = x1 - r;
+    float inner_bot_left = ix0 + inner_r;
+    float inner_bot_right = ix1 - inner_r;
+    if (outer_bot_right > outer_bot_left && inner_bot_right > inner_bot_left) {
+        border_verts.push_back(outer_bot_left);  border_verts.push_back(y1);
+        border_verts.push_back(inner_bot_left);  border_verts.push_back(iy1);
+        border_verts.push_back(inner_bot_right); border_verts.push_back(iy1);
+        border_verts.push_back(inner_bot_right); border_verts.push_back(iy1);
+        border_verts.push_back(outer_bot_right); border_verts.push_back(y1);
+        border_verts.push_back(outer_bot_left);  border_verts.push_back(y1);
+    }
+    // 左边
+    float outer_left_top = y0 + r;
+    float outer_left_bot = y1 - r;
+    float inner_left_top = iy0 + inner_r;
+    float inner_left_bot = iy1 - inner_r;
+    if (outer_left_bot > outer_left_top && inner_left_bot > inner_left_top) {
+        border_verts.push_back(x0);       border_verts.push_back(outer_left_top);
+        border_verts.push_back(ix0);      border_verts.push_back(inner_left_top);
+        border_verts.push_back(ix0);      border_verts.push_back(inner_left_bot);
+        border_verts.push_back(ix0);      border_verts.push_back(inner_left_bot);
+        border_verts.push_back(x0);       border_verts.push_back(outer_left_bot);
+        border_verts.push_back(x0);       border_verts.push_back(outer_left_top);
+    }
+    // 右边
+    float outer_right_top = y0 + r;
+    float outer_right_bot = y1 - r;
+    float inner_right_top = iy0 + inner_r;
+    float inner_right_bot = iy1 - inner_r;
+    if (outer_right_bot > outer_right_top && inner_right_bot > inner_right_top) {
+        border_verts.push_back(x1);       border_verts.push_back(outer_right_top);
+        border_verts.push_back(x1);       border_verts.push_back(outer_right_bot);
+        border_verts.push_back(ix1);      border_verts.push_back(inner_right_bot);
+        border_verts.push_back(ix1);      border_verts.push_back(inner_right_bot);
+        border_verts.push_back(ix1);      border_verts.push_back(inner_right_top);
+        border_verts.push_back(x1);       border_verts.push_back(outer_right_top);
+    }
+
+    // ===== 边框圆角区域（扇形环） =====
+    auto add_ring_segment = [&](float ocx, float ocy, float icx, float icy,
+                                double start_deg, double end_deg) {
+        double a0 = 3.14159265358979323846 * start_deg / 180.0;
+        double a1 = 3.14159265358979323846 * end_deg / 180.0;
+        float ox0 = ocx + r * std::cos(a0);
+        float oy0 = ocy + r * std::sin(a0);
+        float ox1 = ocx + r * std::cos(a1);
+        float oy1 = ocy + r * std::sin(a1);
+        float ix0_ = icx + inner_r * std::cos(a0);
+        float iy0_ = icy + inner_r * std::sin(a0);
+        float ix1_ = icx + inner_r * std::cos(a1);
+        float iy1_ = icy + inner_r * std::sin(a1);
+        border_verts.push_back(ox0);  border_verts.push_back(oy0);
+        border_verts.push_back(ox1);  border_verts.push_back(oy1);
+        border_verts.push_back(ix0_); border_verts.push_back(iy0_);
+        border_verts.push_back(ix0_); border_verts.push_back(iy0_);
+        border_verts.push_back(ox1);  border_verts.push_back(oy1);
+        border_verts.push_back(ix1_); border_verts.push_back(iy1_);
+    };
+
+    if (inner_r > 0.0f) {
+        // 左上角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            add_ring_segment(
+                cx_inner, cy_inner, icx_inner, icy_inner,
+                180.0 + 90.0 * seg / kCornerSegs,
+                180.0 + 90.0 * (seg + 1) / kCornerSegs);
+        }
+        // 右上角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            add_ring_segment(
+                cx_outer, cy_inner, icx_outer, icy_inner,
+                270.0 + 90.0 * seg / kCornerSegs,
+                270.0 + 90.0 * (seg + 1) / kCornerSegs);
+        }
+        // 右下角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            add_ring_segment(
+                cx_outer, cy_outer, icx_outer, icy_outer,
+                90.0 * seg / kCornerSegs,
+                90.0 * (seg + 1) / kCornerSegs);
+        }
+        // 左下角
+        for (int seg = 0; seg < kCornerSegs; ++seg) {
+            add_ring_segment(
+                cx_inner, cy_outer, icx_inner, icy_outer,
+                90.0 + 90.0 * seg / kCornerSegs,
+                90.0 + 90.0 * (seg + 1) / kCornerSegs);
+        }
+    }
+
+    // Render border
+    if (!border_verts.empty()) {
+        int total_border = static_cast<int>(border_verts.size()) / 2;
+        glUseProgram(prog_);
+        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                    cmd.border_color.r, cmd.border_color.g,
+                    cmd.border_color.b, cmd.border_color.a);
+        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(border_verts.size() * sizeof(float)),
+                     border_verts.data(), GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLES, 0, total_border);
+        glDisableVertexAttribArray(0);
+    }
+
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 

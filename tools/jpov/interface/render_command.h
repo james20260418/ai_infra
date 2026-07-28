@@ -79,6 +79,9 @@ enum class DrawCommandType : uint8_t {
                         //      直接画到主 FBO）
     kRoundRect2D,       // 2D 圆角矩形（屏幕空间，像素坐标，
                         //      带圆角半径参数，CPU 三角化）
+    kFillRect2D,        // 2D 复合矩形（屏幕空间，像素坐标，
+                        //      带填充色、边框颜色/宽度、圆角半径，
+                        //      利用 RoundRect2D + Strip2D 组合实现）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -260,6 +263,26 @@ struct RoundRect2DCommand {
     Color color;
 };
 
+// 2D 复合矩形（渲染分辨率空间，像素坐标）
+//
+// 带填充色、边框颜色/宽度、圆角半径的复合矩形。
+// 利用 RoundRect + Strip2D 组合实现：
+//   - 填充部分：复写 RoundRect2DCommand 渲染逻辑
+//   - 边框部分：将边框环三角化后通过 Strip2D 渲染
+//
+// Pre-condition: size.x > 0 && size.y > 0
+// Pre-condition: radius >= 0
+// Pre-condition: radius <= min(size.x, size.y) / 2
+// Pre-condition: border_width >= 0
+struct FillRect2DCommand {
+    Vec2f pos;
+    Vec2f size;
+    Color fill_color;
+    Color border_color;
+    float border_width;
+    float radius;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -281,6 +304,7 @@ struct RenderCommandList {
     std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
     std::vector<RoundRect2DCommand> roundrect2d;
+    std::vector<FillRect2DCommand> fillrect2d;
     std::vector<Strip2DCommand> strip2d;
 
     // 绘制顺序队列：(类型, 索引)
@@ -377,6 +401,20 @@ struct RenderCommandList {
     // Pre-condition: radius <= min(size.x, size.y) / 2
     void DrawRoundRect(const Vec2f& pos, const Vec2f& size,
                        float radius, const Color& color);
+
+    // 2D 复合矩形（渲染分辨率空间，像素坐标）
+    //
+    // 带填充色、边框颜色/宽度、圆角半径的复合矩形。
+    // 边框宽度为 0 时仅绘制填充部分。
+    // 利用 RoundRect2D + Strip2D 组合实现。
+    // Pre-condition: size.x > 0 && size.y > 0
+    // Pre-condition: radius >= 0
+    // Pre-condition: radius <= min(size.x, size.y) / 2
+    // Pre-condition: border_width >= 0
+    void DrawFillRect(const Vec2f& pos, const Vec2f& size,
+                      const Color& fill_color,
+                      const Color& border_color,
+                      float border_width, float radius);
 };
 
 }  // namespace jpov

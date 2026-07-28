@@ -153,6 +153,19 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "jpov_fillrect_gold_generator",
+    srcs = ["jpov_fillrect_gold_generator.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # Gold Image — rect 渲染验证单元测试
 # ============================================================================
@@ -317,6 +330,23 @@ cc_test(
     name = "jpov_roundrect_gold_test",
     srcs = ["jpov_roundrect_gold_test.cc"],
     data = [":roundrect_640x360.png"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_fillrect_gold_test",
+    srcs = ["jpov_fillrect_gold_test.cc"],
+    data = [":fillrect_640x360.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",

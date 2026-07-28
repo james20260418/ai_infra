@@ -169,6 +169,7 @@ private:
     static constexpr int kMaxStrip2DVertices = 3000;
     void DrawStrip2D(const Strip2DCommand& cmd);
     void DrawRoundRect2D(const RoundRect2DCommand& cmd);
+    void DrawFillRect2D(const FillRect2DCommand& cmd);
 
     unsigned int tex_prog_ = 0;
     unsigned int prog_3d_ = 0;  // 3D solid color shader

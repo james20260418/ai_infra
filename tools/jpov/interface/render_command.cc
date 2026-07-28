@@ -18,6 +18,7 @@ void RenderCommandList::Clear() {
     text3d.clear();
     strip2d.clear();
     roundrect2d.clear();
+    fillrect2d.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -113,6 +114,23 @@ void RenderCommandList::DrawRoundRect(const Vec2f& pos, const Vec2f& size,
     int idx = static_cast<int>(roundrect2d.size());
     roundrect2d.push_back({pos, size, radius, color});
     order.emplace_back(DrawCommandType::kRoundRect2D, idx);
+}
+
+void RenderCommandList::DrawFillRect(const Vec2f& pos, const Vec2f& size,
+                                       const Color& fill_color,
+                                       const Color& border_color,
+                                       float border_width, float radius) {
+    CHECK_GT(size.x(), 0.0f);
+    CHECK_GT(size.y(), 0.0f);
+    CHECK_GE(radius, 0.0f);
+    float half_min = std::min(size.x(), size.y()) * 0.5f;
+    CHECK_LE(radius, half_min)
+        << "FillRect radius " << radius << " exceeds half of min side " << half_min;
+    CHECK_GE(border_width, 0.0f);
+
+    int idx = static_cast<int>(fillrect2d.size());
+    fillrect2d.push_back({pos, size, fill_color, border_color, border_width, radius});
+    order.emplace_back(DrawCommandType::kFillRect2D, idx);
 }
 
 }  // namespace jpov
