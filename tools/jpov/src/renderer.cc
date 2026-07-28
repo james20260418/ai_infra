@@ -25,6 +25,9 @@
 
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
+//
+// MSAA 相关函数（glTexImage2DMultisample 等）在 gl_loader 中无声明，
+// 在 Windows 下也直接使用原生 GL 符号（libGL/wglGetProcAddress 均可加载）。
 #ifdef _WIN32
 #include "third_party/gl_loader-mingw/gl_loader.h"
 #define glGenBuffers             gl_GenBuffers
@@ -58,12 +61,8 @@
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
 #define glBlitFramebuffer        gl_BlitFramebuffer
-#define glTexImage2DMultisample  gl_TexImage2DMultisample
-#define glGenRenderbuffers       gl_GenRenderbuffers
-#define glDeleteRenderbuffers    gl_DeleteRenderbuffers
-#define glBindRenderbuffer       gl_BindRenderbuffer
-#define glRenderbufferStorageMultisample gl_RenderbufferStorageMultisample
-#define glFramebufferRenderbuffer gl_FramebufferRenderbuffer
+// gl_loader 未声明的函数：直接使用原生 GL 符号
+// （glTexImage2DMultisample / renderbuffer / framebufferrenderbuffer 等）
 #define glEnableVertexAttribArray  gl_EnableVertexAttribArray
 #define glDisableVertexAttribArray gl_DisableVertexAttribArray
 #define glVertexAttribPointer    gl_VertexAttribPointer
