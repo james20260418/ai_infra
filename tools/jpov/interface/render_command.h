@@ -73,6 +73,9 @@ enum class DrawCommandType : uint8_t {
     kTriangle3D,        // 3D 三角形（世界空间）
     kStrip3D,           // 3D 条带（世界空间，多个三角形按条带化排列，VBO 加速）
     kText3D,            // 3D 文本（世界空间，面向摄像机）
+    kStrip2D,           // 2D 条带（屏幕空间，像素坐标，
+                        //      多个三角形按条带化排列，
+                        //      直接画到主 FBO）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -217,6 +220,24 @@ struct Text3DCommand {
     std::string font_alias;
 };
 
+// 2D 条带（屏幕空间，像素坐标）
+//
+// 用顶点序列定义二维三角形条带：vertices = [p0, p1, p2, p3, ...]
+// 生成三角形：p0-p1-p2, p1-p2-p3, p2-p3-p4, ...
+// 要求 vertices.size() >= 3，否则不绘制。
+//
+// 顶点坐标为像素坐标，原点在渲染分辨率左上角（x→右，y→下）。
+// 绘制目标直接为主 FBO（无 3D MVP 变换）。
+//
+// 使用 GL_TRIANGLE_STRIP 渲染，stream VBO 每帧动态上传。
+//
+// 顶点缓存上限为 3000 个顶点（1000 个三角形）。
+// 若 vertices.size() > 3000，条带被截断，仅前 3000 个顶点参与绘制。
+struct Strip2DCommand {
+    std::vector<Vec2f> vertices;
+    Color color;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -237,6 +258,7 @@ struct RenderCommandList {
     std::vector<Triangle3DCommand> triangle3d;
     std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
+    std::vector<Strip2DCommand> strip2d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -314,6 +336,14 @@ struct RenderCommandList {
     void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
                     const Color& color,
                     const std::string& font_alias);
+
+    // ---- 2D 条带辅助方法 ----
+
+    // 2D 条带（屏幕空间，像素坐标，GL_TRIANGLE_STRIP）
+    // 顶点由条带化规则生成三角形 (p0p1p2, p1p2p3, ...)
+    // Pre-condition: vertices.size() >= 3，否则忽略
+    void DrawStrip2D(const std::vector<Vec2f>& vertices,
+                     const Color& color);
 };
 
 }  // namespace jpov

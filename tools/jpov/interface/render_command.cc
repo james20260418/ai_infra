@@ -16,6 +16,7 @@ void RenderCommandList::Clear() {
     triangle3d.clear();
     strip3d.clear();
     text3d.clear();
+    strip2d.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -86,6 +87,17 @@ void RenderCommandList::DrawText3D(const std::string& text, const Vec3f& pos,
     int idx = static_cast<int>(text3d.size());
     text3d.push_back({text, pos, font_size, color, font_alias});
     order.emplace_back(DrawCommandType::kText3D, idx);
+}
+
+void RenderCommandList::DrawStrip2D(const std::vector<Vec2f>& vertices,
+                                     const Color& color) {
+    if (vertices.size() < 3) {
+        LOG_EVERY_N(WARNING, 100) << "DrawStrip2D: less than 3 vertices, skipping";
+        return;
+    }
+    int idx = static_cast<int>(strip2d.size());
+    strip2d.push_back({vertices, color});
+    order.emplace_back(DrawCommandType::kStrip2D, idx);
 }
 
 }  // namespace jpov

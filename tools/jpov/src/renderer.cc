@@ -967,6 +967,12 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawText2D(cmds.text2d[idx]);
                 break;
             }
+            case DrawCommandType::kStrip2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.strip2d.size()));
+                DrawStrip2D(cmds.strip2d[idx]);
+                break;
+            }
             default:
                 break;
         }
@@ -1063,6 +1069,30 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
                  cmd.vertices.data(), GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawStrip2D(const Strip2DCommand& cmd) {
+    int n = static_cast<int>(cmd.vertices.size());
+    if (n < 3) return;
+
+    int capped_n = (n > kMaxStrip2DVertices) ? kMaxStrip2DVertices : n;
+    int total_floats = capped_n * 2;  // Vec2f = 2 floats per vertex
+
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(total_floats * sizeof(float)),
+                 cmd.vertices.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);

@@ -165,6 +165,10 @@ private:
 
     void DrawStrip3D(const Strip3DCommand& cmd);
 
+    // 2D 条带（屏幕空间，像素坐标，GL_TRIANGLE_STRIP）
+    static constexpr int kMaxStrip2DVertices = 3000;
+    void DrawStrip2D(const Strip2DCommand& cmd);
+
     unsigned int tex_prog_ = 0;
     unsigned int prog_3d_ = 0;  // 3D solid color shader
     unsigned int tex_prog_3d_ = 0;  // 3D textured shader
