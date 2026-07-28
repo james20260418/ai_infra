@@ -89,12 +89,20 @@ private:
     int fbo_3d_w_ = 0;
     int fbo_3d_h_ = 0;
 
+    // 中间 non-MSAA resolve FBO：同 MSAA FBO 尺寸，
+    // 用于 MSAA resolve 后再缩放 blit 到主 FBO
+    unsigned int resolve_fbo_3d_ = 0;
+    unsigned int resolve_tex_3d_ = 0;
+    int resolve_fbo_3d_w_ = 0;
+    int resolve_fbo_3d_h_ = 0;
+
     void EnsureFBO(int width, int height);
     void EnsureOutputFBO(int win_w, int win_h);
     void Ensure3DFBO(int width, int height);
     void DestroyFBO();
     void DestroyOutputFBO();
     void Destroy3DFBO();
+    void Destroy3DResolveFBO();
     void CompileShaders();
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd);

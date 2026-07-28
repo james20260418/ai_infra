@@ -309,6 +309,7 @@ Renderer::~Renderer() {
     DestroyFBO();
     DestroyOutputFBO();
     Destroy3DFBO();
+    Destroy3DResolveFBO();
     if (prog_)         glDeleteProgram(prog_);
     if (prog_3d_)      glDeleteProgram(prog_3d_);
     if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
@@ -361,6 +362,17 @@ void Renderer::Destroy3DFBO() {
     fbo_3d_h_ = 0;
 }
 
+void Renderer::Destroy3DResolveFBO() {
+    if (resolve_fbo_3d_) {
+        glDeleteFramebuffers(1, &resolve_fbo_3d_);
+        glDeleteTextures(1, &resolve_tex_3d_);
+        resolve_fbo_3d_ = 0;
+        resolve_tex_3d_ = 0;
+    }
+    resolve_fbo_3d_w_ = 0;
+    resolve_fbo_3d_h_ = 0;
+}
+
 void Renderer::EnsureFBO(int width, int height) {
     if (fbo_w_ == width && fbo_h_ == height && fbo_) return;
 
@@ -401,6 +413,7 @@ void Renderer::Ensure3DFBO(int width, int height) {
     CHECK_LE(height, kMaxFboDim);
 
     Destroy3DFBO();
+    Destroy3DResolveFBO();
 
     // === 4x MSAA 颜色纹理 ===
     glGenTextures(1, &color_tex_3d_);
@@ -430,9 +443,31 @@ void Renderer::Ensure3DFBO(int width, int height) {
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
         << "3D MSAA FBO failed, status=" << status;
 
+    // === 中间 non-MSAA resolve FBO（同尺寸，用于 resolve + 缩放 blit） ===
+    glGenTextures(1, &resolve_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, resolve_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &resolve_fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, resolve_tex_3d_, 0);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D resolve FBO failed, status=" << status;
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     fbo_3d_w_ = width;
     fbo_3d_h_ = height;
+    resolve_fbo_3d_w_ = width;
+    resolve_fbo_3d_h_ = height;
 }
 
 void Renderer::CompileShaders() {
@@ -803,14 +838,22 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 第二步：MSAA resolve → blit 到主 FBO（按 viewport）----
+        // ---- 第二步：MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
         glBlitFramebuffer(
             0, 0, fbo_3d_w, fbo_3d_h,
+            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+        // ---- 第三步：从中间 FBO 缩放 blit 到主 FBO（按 viewport）----
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBlitFramebuffer(
+            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
             static_cast<int>(cam.viewport_x),
             static_cast<int>(cam.viewport_y),
             static_cast<int>(cam.viewport_x + cam.viewport_width),
@@ -818,7 +861,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
 
-    // ---- 第三步：绑定主 FBO，绘制所有 2D 指令 ----
+    // ---- 第四步：绑定主 FBO，绘制所有 2D 指令 ----
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, fbo_w_, fbo_h_);
 
