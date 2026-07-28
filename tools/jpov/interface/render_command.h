@@ -16,6 +16,7 @@
 #ifndef JPOV_RENDER_COMMAND_H_
 #define JPOV_RENDER_COMMAND_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -76,6 +77,8 @@ enum class DrawCommandType : uint8_t {
     kStrip2D,           // 2D 条带（屏幕空间，像素坐标，
                         //      多个三角形按条带化排列，
                         //      直接画到主 FBO）
+    kRoundRect2D,       // 2D 圆角矩形（屏幕空间，像素坐标，
+                        //      带圆角半径参数，CPU 三角化）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -238,6 +241,25 @@ struct Strip2DCommand {
     Color color;
 };
 
+// 2D 圆角矩形（渲染分辨率空间，像素坐标）
+//
+// pos:    矩形左上角位置（像素坐标，原点在左上角）
+// size:   矩形的宽度和高度（像素单位，>0）
+// radius: 圆角半径（像素单位，>=0，不能超过短边一半）
+// color:  填充颜色
+//
+// 坐标空间与 DrawRect 一致。
+// CPU 端三角化后以三角形列表形式渲染。
+// Pre-condition: size.x > 0 && size.y > 0
+// Pre-condition: radius >= 0
+// Pre-condition: radius <= min(size.x, size.y) / 2
+struct RoundRect2DCommand {
+    Vec2f pos;
+    Vec2f size;
+    float radius;
+    Color color;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -258,6 +280,7 @@ struct RenderCommandList {
     std::vector<Triangle3DCommand> triangle3d;
     std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
+    std::vector<RoundRect2DCommand> roundrect2d;
     std::vector<Strip2DCommand> strip2d;
 
     // 绘制顺序队列：(类型, 索引)
@@ -344,6 +367,16 @@ struct RenderCommandList {
     // Pre-condition: vertices.size() >= 3，否则忽略
     void DrawStrip2D(const std::vector<Vec2f>& vertices,
                      const Color& color);
+
+    // 2D 圆角矩形（渲染分辨率空间，像素坐标）
+    //
+    // 利用 CPU 端圆角三角化产生顶点数据后渲染。
+    // 圆角半径不能超过矩形短边的一半。
+    // Pre-condition: size.x > 0 && size.y > 0
+    // Pre-condition: radius >= 0
+    // Pre-condition: radius <= min(size.x, size.y) / 2
+    void DrawRoundRect(const Vec2f& pos, const Vec2f& size,
+                       float radius, const Color& color);
 };
 
 }  // namespace jpov
