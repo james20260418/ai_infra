@@ -55,10 +55,10 @@ public:
         (void)input;
         (void)winfo;
 
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        const float kResW = 1280.0f;
+        const float kResH = 720.0f;
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // Camera (1,1,1) 看向原点
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
@@ -93,11 +93,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/strip3d_ring_640x360.png";
+        p += "__main__/tools/jpov/test/strip3d_ring_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/strip3d_ring_640x360.png";
+           "tools/jpov/test/strip3d_ring_1280x720.png";
 }
 
 // ============ 测试入口 ============
