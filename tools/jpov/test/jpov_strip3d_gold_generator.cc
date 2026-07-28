@@ -4,9 +4,9 @@
 //   - Camera (1,1,1) 看向原点
 //   - Strip3DCommand 构造的环状条带，半径 0.5，宽度 0.2，中心原点，不封口
 //   - 纯色渲染，无光照
-//   - 渲染分辨率 640x360
+//   - 渲染分辨率 1280x720（主 FBO 的 2x，MSAA 抗锯齿）
 //
-// 输出: tools/jpov/test/strip3d_ring_640x360.png
+// 输出: tools/jpov/test/strip3d_ring_1280x720.png
 
 #include <cmath>
 #include <cstdio>
@@ -33,10 +33,10 @@ public:
         (void)input;
         (void)winfo;
 
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        const float kResW = 1280.0f;
+        const float kResH = 720.0f;
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- 设置 Camera ----
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
@@ -71,7 +71,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/strip3d_ring_640x360.png";
+    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/strip3d_ring_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "3D Strip Ring Gold Generator";

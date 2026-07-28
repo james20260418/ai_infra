@@ -4,9 +4,9 @@
 //   - Camera (1,1,1) 看向原点
 //   - 边长 0.5 的正方体，6 面颜色不同
 //   - 纯色渲染，无光照
-//   - 渲染分辨率 640x360
+//   - 渲染分辨率 1280x720（主 FBO 的 2x，MSAA 抗锯齿）
 //
-// 输出: tools/jpov/test/cube3d_6faces_640x360.png
+// 输出: tools/jpov/test/cube3d_6faces_1280x720.png
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -53,10 +53,10 @@ public:
         (void)input;
         (void)winfo;
 
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        const float kResW = 1280.0f;
+        const float kResH = 720.0f;
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- 设置 Camera ----
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
@@ -66,7 +66,7 @@ public:
         // 前面 (z=0.25): Red
         AddQuad(cmds, 0, 1, 2, 3, jpov::kColorRed);
         // 后面 (z=-0.25): Green (CCW from back view)
-        AddQuad(cmds, 5, 4, 7, 6, jpov::kColorGreen);
+        AddQuad(cmds, 4, 5, 6, 7, jpov::kColorGreen);
         // 右面 (x=0.25): Blue
         AddQuad(cmds, 1, 5, 6, 2, jpov::kColorBlue);
         // 左面 (x=-0.25): Yellow (= Red+Green)
@@ -79,7 +79,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/cube3d_6faces_640x360.png";
+    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/cube3d_6faces_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "3D Cube Gold Generator";

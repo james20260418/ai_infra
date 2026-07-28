@@ -232,7 +232,7 @@ cc_test(
 cc_test(
     name = "jpov_cube3d_gold_test",
     srcs = ["jpov_cube3d_gold_test.cc"],
-    data = [":cube3d_6faces_640x360.png"],
+    data = [":cube3d_6faces_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
@@ -248,7 +248,7 @@ cc_test(
 cc_test(
     name = "jpov_strip3d_gold_test",
     srcs = ["jpov_strip3d_gold_test.cc"],
-    data = [":strip3d_ring_640x360.png"],
+    data = [":strip3d_ring_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",

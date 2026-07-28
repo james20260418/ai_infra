@@ -69,10 +69,10 @@ public:
         (void)input;
         (void)winfo;
 
-        const float kResW = 640.0f;
-        const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        const float kResW = 1280.0f;
+        const float kResH = 720.0f;
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // Camera (1,1,1) 看向原点
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
@@ -80,7 +80,7 @@ public:
 
         // 6 面
         AddQuad(cmds, 0, 1, 2, 3, jpov::kColorRed);         // 前
-        AddQuad(cmds, 5, 4, 7, 6, jpov::kColorGreen);        // 后
+        AddQuad(cmds, 4, 5, 6, 7, jpov::kColorGreen);        // 后
         AddQuad(cmds, 1, 5, 6, 2, jpov::kColorBlue);         // 右
         AddQuad(cmds, 4, 0, 3, 7, {1.0f, 1.0f, 0.0f, 1.0f}); // 左(黄)
         AddQuad(cmds, 3, 2, 6, 7, {0.0f, 1.0f, 1.0f, 1.0f}); // 上(青)
@@ -94,11 +94,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/cube3d_6faces_640x360.png";
+        p += "__main__/tools/jpov/test/cube3d_6faces_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/cube3d_6faces_640x360.png";
+           "tools/jpov/test/cube3d_6faces_1280x720.png";
 }
 
 // ============ 测试入口 ============
@@ -124,7 +124,7 @@ int main() {
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;
-    winfo.height = 360.0f;
+    winfo.height = 360.0f;  // 主 FBO 保持 640x360
     jpov::InputSnapshot input{};
     app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
