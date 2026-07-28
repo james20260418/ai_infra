@@ -85,7 +85,8 @@ private:
     // 渲染完成后通过 glBlitFramebuffer blit 到主 FBO
     unsigned int fbo_3d_ = 0;
     unsigned int color_tex_3d_ = 0;
-    unsigned int depth_rb_3d_ = 0;     // 深度 renderbuffer（MSAA 兼容）
+    unsigned int depth_rb_3d_ = 0;     // 深度 renderbuffer（MSAA 路径）
+    unsigned int depth_tex_3d_ = 0;    // 深度纹理（非 MSAA 路径）
     int fbo_3d_w_ = 0;
     int fbo_3d_h_ = 0;
 

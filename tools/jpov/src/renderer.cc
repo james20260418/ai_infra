@@ -26,9 +26,10 @@
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
 //
-// MSAA 相关函数（glTexImage2DMultisample 等）在 gl_loader 中无声明，
-// 在 Windows 下也直接使用原生 GL 符号（libGL/wglGetProcAddress 均可加载）。
+// 注意：MinGW 的 GL 库不导出 renderbuffer / MSAA 的 GL 3.x 核心函数，
+// 因此 Windows 下 3D FBO 不使用 MSAA（带 #define JPOV_WITHOUT_MSAA）。
 #ifdef _WIN32
+#define JPOV_WITHOUT_MSAA
 #include "third_party/gl_loader-mingw/gl_loader.h"
 #define glGenBuffers             gl_GenBuffers
 #define glDeleteBuffers          gl_DeleteBuffers
@@ -61,8 +62,6 @@
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
 #define glBlitFramebuffer        gl_BlitFramebuffer
-// gl_loader 未声明的函数：直接使用原生 GL 符号
-// （glTexImage2DMultisample / renderbuffer / framebufferrenderbuffer 等）
 #define glEnableVertexAttribArray  gl_EnableVertexAttribArray
 #define glDisableVertexAttribArray gl_DisableVertexAttribArray
 #define glVertexAttribPointer    gl_VertexAttribPointer
@@ -351,12 +350,19 @@ void Renderer::Destroy3DFBO() {
     if (fbo_3d_) {
         glDeleteFramebuffers(1, &fbo_3d_);
         glDeleteTextures(1, &color_tex_3d_);
+#ifndef JPOV_WITHOUT_MSAA
         if (depth_rb_3d_) {
             glDeleteRenderbuffers(1, &depth_rb_3d_);
         }
+#else
+        if (depth_tex_3d_) {
+            glDeleteTextures(1, &depth_tex_3d_);
+        }
+#endif
         fbo_3d_ = 0;
         color_tex_3d_ = 0;
         depth_rb_3d_ = 0;
+        depth_tex_3d_ = 0;
     }
     fbo_3d_w_ = 0;
     fbo_3d_h_ = 0;
@@ -415,6 +421,47 @@ void Renderer::Ensure3DFBO(int width, int height) {
     Destroy3DFBO();
     Destroy3DResolveFBO();
 
+#ifdef JPOV_WITHOUT_MSAA
+    // 非 MSAA 路径（Windows/MinGW 下 GL 不导出 MSAA 函数）
+    // 直接用普通 2D 纹理 + 深度纹理
+    glGenTextures(1, &color_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, color_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenTextures(1, &depth_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, depth_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, color_tex_3d_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depth_tex_3d_, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D FBO (non-MSAA) failed, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 非 MSAA 路径不需要 separate resolve FBO（直接用 fbo_3d_ blit）
+    resolve_fbo_3d_ = 0;
+    resolve_tex_3d_ = 0;
+    resolve_fbo_3d_w_ = 0;
+    resolve_fbo_3d_h_ = 0;
+#else
     // === 4x MSAA 颜色纹理 ===
     glGenTextures(1, &color_tex_3d_);
     glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_);
@@ -464,10 +511,12 @@ void Renderer::Ensure3DFBO(int width, int height) {
         << "3D resolve FBO failed, status=" << status;
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    fbo_3d_w_ = width;
-    fbo_3d_h_ = height;
     resolve_fbo_3d_w_ = width;
     resolve_fbo_3d_h_ = height;
+#endif
+
+    fbo_3d_w_ = width;
+    fbo_3d_h_ = height;
 }
 
 void Renderer::CompileShaders() {
@@ -847,10 +896,23 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 第二步：MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）----
+        // ---- 第二步：MSAA resolve 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
 
+#ifdef JPOV_WITHOUT_MSAA
+        // 非 MSAA 路径：从 3D FBO 直接 blit 到主 FBO
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBlitFramebuffer(
+            0, 0, fbo_3d_w, fbo_3d_h,
+            static_cast<int>(cam.viewport_x),
+            static_cast<int>(cam.viewport_y),
+            static_cast<int>(cam.viewport_x + cam.viewport_width),
+            static_cast<int>(cam.viewport_y + cam.viewport_height),
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#else
+        // 先 MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
         glBlitFramebuffer(
@@ -858,7 +920,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
-        // ---- 第三步：从中间 FBO 缩放 blit 到主 FBO（按 viewport）----
+        // 再从中间 FBO 缩放 blit 到主 FBO（按 viewport）
         glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
         glBlitFramebuffer(
@@ -868,6 +930,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             static_cast<int>(cam.viewport_x + cam.viewport_width),
             static_cast<int>(cam.viewport_y + cam.viewport_height),
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#endif
 
         // ---- 恢复 GL 状态（回到 2D 绘制前的状态）----
         glPopAttrib();
