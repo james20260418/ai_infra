@@ -47,8 +47,8 @@ struct Renderer {
     void BeginFrame(int render_w, int render_h);
 
     // Render: 消费指令列表绘制到 FBO
-    void Render(const RenderCommandList& cmds, const Camera& camera,
-                const WindowInfo& winfo);
+    // Camera 从 cmds.camera 读取
+    void Render(const RenderCommandList& cmds, const WindowInfo& winfo);
 
     // Present: FBO[0,0,win_w,win_h] → framebuffer（无缩放，GL_LINEAR）
     void Present(GLFWwindow* window, int window_width, int window_height);
@@ -80,16 +80,41 @@ private:
     int out_w_ = 0;
     int out_h_ = 0;
 
+    // 3D 离屏 MSAA FBO：用于 3D 命令的渲染
+    // 使用 GL_RGBA8 + 4x MSAA，按 Camera 的三维分辨率分配
+    // 渲染完成后通过 glBlitFramebuffer blit 到主 FBO
+    unsigned int fbo_3d_ = 0;
+    unsigned int color_tex_3d_ = 0;
+    unsigned int depth_rb_3d_ = 0;     // 深度 renderbuffer（MSAA 路径）
+    unsigned int depth_tex_3d_ = 0;    // 深度纹理（非 MSAA 路径）
+    int fbo_3d_w_ = 0;
+    int fbo_3d_h_ = 0;
+
+    // 中间 non-MSAA resolve FBO：同 MSAA FBO 尺寸，
+    // 用于 MSAA resolve 后再缩放 blit 到主 FBO
+    unsigned int resolve_fbo_3d_ = 0;
+    unsigned int resolve_tex_3d_ = 0;
+    int resolve_fbo_3d_w_ = 0;
+    int resolve_fbo_3d_h_ = 0;
+
     void EnsureFBO(int width, int height);
     void EnsureOutputFBO(int win_w, int win_h);
+    void Ensure3DFBO(int width, int height);
     void DestroyFBO();
     void DestroyOutputFBO();
+    void Destroy3DFBO();
+    void Destroy3DResolveFBO();
     void CompileShaders();
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd);
     void DrawPolyline2D(const Polyline2DCommand& cmd);
     void DrawCircle2D(const Circle2DCommand& cmd);
     void DrawText2D(const Text2DCommand& cmd);
+    // 3D 方法：MVP 矩阵通过成员 mvp_ 传递（由 Render/Draw3DCommands 设置）
+    void DrawTriangle3D(const Triangle3DCommand& cmd);
+    void DrawLine3D(const Line3DCommand& cmd);
+    void DrawText3D(const Text3DCommand& cmd);
+    void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
     // ---- 字体管理 ----
 
@@ -134,7 +159,16 @@ private:
     // 注册顺序（用于空 alias 回退到第一个）
     std::vector<std::string> font_order_;
 
+    // Strip3D 专用 VBO（3000 顶点缓存，初始化时分配）
+    unsigned int strip_vbo_ = 0;
+    static constexpr int kMaxStripVertices = 3000;
+
+    void DrawStrip3D(const Strip3DCommand& cmd);
+
     unsigned int tex_prog_ = 0;
+    unsigned int prog_3d_ = 0;  // 3D solid color shader
+    unsigned int tex_prog_3d_ = 0;  // 3D textured shader
+    float mvp_[16];  // 当前帧的 MVP 矩阵缓存
 };
 
 }  // namespace jpov

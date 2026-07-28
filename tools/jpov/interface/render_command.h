@@ -24,6 +24,8 @@
 #include <glog/logging.h>
 #include "geom/common/vec.h"
 
+#include "tools/jpov/interface/camera.h"
+
 namespace jpov {
 
 // ==================== 类型别名 ====================
@@ -69,6 +71,7 @@ enum class DrawCommandType : uint8_t {
     kText2D,            // 2D 文本（屏幕空间）
     kLine3D,            // 3D 线段（世界空间）
     kTriangle3D,        // 3D 三角形（世界空间）
+    kStrip3D,           // 3D 条带（世界空间，多个三角形按条带化排列，VBO 加速）
     kText3D,            // 3D 文本（世界空间，面向摄像机）
 };
 
@@ -81,7 +84,7 @@ enum class DrawCommandType : uint8_t {
 // Pre-condition: vertices.size() >= 2
 // Pre-condition: vertices.size() - 1 <= Renderer::kMaxPolylineEdges
 //
-// 坐标空间同 render_width/render_height
+// 坐标空间同 camera.fbo_3d_width_/height_
 struct Polyline2DCommand {
     std::vector<Vec2f> vertices;
     Color color;
@@ -95,11 +98,11 @@ struct Polyline2DCommand {
 // color: 填充颜色（RGBA，分量范围 [0,1]，alpha < 1 时 blend）
 //
 // 坐标空间说明：
-//   用户先通过 render_width / render_height 声明渲染分辨率，
+//   用户先通过 camera.fbo_3d_width_/height_ 声明渲染分辨率，
 //   此后所有 DrawRect 的 pos/size 以该分辨率为空间。
 //   渲染分辨率 ≠ 窗口尺寸——当两者不同时，最终输出会被拉伸贴合窗口。
 //
-//   例如 render_width=640, render_height=360：
+//   例如 fbo_3d_width_=640, fbo_3d_height_=360：
 //     矩形 (0,0, 320,180) 占据左上 1/4 区域
 //     矩形 (160,90, 320,180) 居中
 // Pre-condition: size.x > 0 && size.y > 0
@@ -182,6 +185,23 @@ struct Triangle3DCommand {
     Color color;
 };
 
+// 3D 条带（世界空间，VBO 加速）
+//
+// 用顶点序列定义三维条带：vertices = [p0, p1, p2, p3, ...]
+// 生成三角形：p0-p1-p2, p1-p2-p3, p2-p3-p4, ...
+// 要求 vertices.size() >= 3，否则不绘制。
+//
+// 使用 GL VBO 存储顶点数据，每次绘制时更新 GPU 缓存中的顶点位置。
+// VBO 在渲染器初始化时分配，跨帧共享（cache 语义）。
+//
+// 顶点缓存上限为 3000 个顶点（1000 个三角形）。
+// 若 vertices.size() > 3000，条带被截断，仅前 3000 个顶点参与绘制。
+// 此限制在注释中说明，调用方应避免超限以保证行为可预期。
+struct Strip3DCommand {
+    std::vector<Vec3f> vertices;
+    Color color;
+};
+
 // 3D 文本（世界空间，面向摄像机）
 //
 // 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
@@ -215,6 +235,7 @@ struct RenderCommandList {
     std::vector<Text2DCommand> text2d;
     std::vector<Line3DCommand> line3d;
     std::vector<Triangle3DCommand> triangle3d;
+    std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
 
     // 绘制顺序队列：(类型, 索引)
@@ -222,12 +243,11 @@ struct RenderCommandList {
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
 
-    // 渲染分辨率（像素），用户在每帧绘制前设定。
-    // 决定了 FBO 的尺寸和坐标空间范围。
-    // 分辨率变更时 Renderer 自动重建 FBO。
-    // 必须设 >0（Clear 不清零），框架在 Render 时 CHECK_GT。
-    int render_width  = 0;
-    int render_height = 0;
+    // 3D 透视相机
+    // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
+    // 框架在 Render() 时自动使用该 Camera 计算 MVP 变换。
+    // 若无需 3D 渲染可保持默认值（此时 3D 绘制结果未定义）。
+    Camera camera;
 
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();
@@ -250,8 +270,8 @@ struct RenderCommandList {
     // size: 矩形的宽度和高度（像素单位，>0）
     // color: 填充颜色（RGBA，分量范围 [0,1]）
     //
-    // 坐标空间与矩形声明分辨率的 render_width/render_height 一致。
-    // 例：render_width=640, render_height=360 时，
+    // 坐标空间与 camera.fbo_3d_width_/height_ 一致。
+    // 例：fbo_3d_width_=640, fbo_3d_height_=360 时，
     //     DrawRect({160,90},{320,180},blue) 画一个居中矩形。
     // Pre-condition: pos_x >= 0, pos_y >= 0
     // Pre-condition: size.x > 0, size.y > 0
@@ -281,6 +301,12 @@ struct RenderCommandList {
     // 3D 实心三角形（参与深度测试）
     void DrawTriangle3D(const Vec3f& p1, const Vec3f& p2, const Vec3f& p3,
                         const Color& color);
+
+    // 3D 条带（VBO 加速）
+    // 顶点由条带化规则生成三角形 (p0p1p2, p1p2p3, ...)
+    // Pre-condition: vertices.size() >= 3，否则忽略
+    void DrawStrip3D(const std::vector<Vec3f>& vertices,
+                     const Color& color);
 
     // 3D 文本（面向摄像机标签，参与深度测试）
     // Pre-condition: font_size > 0

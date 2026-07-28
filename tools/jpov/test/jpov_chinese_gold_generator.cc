@@ -34,8 +34,8 @@ public:
         (void)input;
         (void)winfo;
 
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // 三行文字，行间距 yoff = 2x font_size（手工布局，简化）
         // 文字水平居中

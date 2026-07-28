@@ -14,9 +14,10 @@ void RenderCommandList::Clear() {
     text2d.clear();
     line3d.clear();
     triangle3d.clear();
+    strip3d.clear();
     text3d.clear();
     order.clear();
-    // render_width/render_height 不清零
+    // 注意：camera.fbo_3d_width_/height_ 不清零
 }
 
 void RenderCommandList::DrawPolyline(const std::vector<Vec2f>& vertices,
@@ -65,6 +66,17 @@ void RenderCommandList::DrawTriangle3D(const Vec3f& p1, const Vec3f& p2,
     int idx = static_cast<int>(triangle3d.size());
     triangle3d.push_back({p1, p2, p3, color});
     order.emplace_back(DrawCommandType::kTriangle3D, idx);
+}
+
+void RenderCommandList::DrawStrip3D(const std::vector<Vec3f>& vertices,
+                                     const Color& color) {
+    if (vertices.size() < 3) {
+        LOG_EVERY_N(WARNING, 100) << "DrawStrip3D: less than 3 vertices, skipping";
+        return;
+    }
+    int idx = static_cast<int>(strip3d.size());
+    strip3d.push_back({vertices, color});
+    order.emplace_back(DrawCommandType::kStrip3D, idx);
 }
 
 void RenderCommandList::DrawText3D(const std::string& text, const Vec3f& pos,

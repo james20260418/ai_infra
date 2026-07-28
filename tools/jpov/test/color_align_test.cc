@@ -24,8 +24,8 @@ public:
         (void)input;
         (void)winfo;
 
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // 深色背景 + 辅助十字
         cmds->DrawRect({0, 0}, {kResW, kResH}, {0.08f, 0.08f, 0.08f, 1.0f});

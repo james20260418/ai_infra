@@ -42,8 +42,8 @@ public:
         // 渲染分辨率 640x360 — 与 gold image 生成时一致
         const float kResW = 640.0f;
         const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- 折线：红色，10px 线宽，锯齿形 ----
         float line_width = 10.0f;

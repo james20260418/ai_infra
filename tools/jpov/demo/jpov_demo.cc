@@ -33,8 +33,8 @@ public:
         // 声明渲染分辨率 640x360（小于窗口 1280x720）
         const float kResW = 640.0f;
         const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- 矩形1：蓝色，居中，大小为分辨率的 1/2 ----
         float rect1_w = kResW * 0.5f;

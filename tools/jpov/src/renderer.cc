@@ -25,7 +25,11 @@
 
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
+//
+// 注意：MinGW 的 GL 库不导出 renderbuffer / MSAA 的 GL 3.x 核心函数，
+// 因此 Windows 下 3D FBO 不使用 MSAA（带 #define JPOV_WITHOUT_MSAA）。
 #ifdef _WIN32
+#define JPOV_WITHOUT_MSAA
 #include "third_party/gl_loader-mingw/gl_loader.h"
 #define glGenBuffers             gl_GenBuffers
 #define glDeleteBuffers          gl_DeleteBuffers
@@ -63,9 +67,12 @@
 #define glVertexAttribPointer    gl_VertexAttribPointer
 #define glUniform1i              gl_Uniform1i
 #define glActiveTexture          gl_ActiveTexture
+#define glUniformMatrix4fv       gl_UniformMatrix4fv
 #endif
 
 namespace {
+
+using jpov::Vec3f;
 
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
@@ -91,6 +98,117 @@ void main() {
     FragColor = uColor;
 }
 )glsl";
+
+// ==================== 3D Shaders ====================
+
+// 3D 顶点 shader：接受 vec3 世界坐标，通过 MVP 矩阵变换到 NDC
+const char* kVs3d = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 3D Fragment Shader（纯色）
+const char* kFs3d = R"glsl(
+#version 330 core
+out vec4 FragColor;
+uniform vec4 uColor;
+
+void main() {
+    FragColor = uColor;
+}
+)glsl";
+
+// 3D 纹理顶点 shader（用于 Text3D）
+const char* kTexVs3d = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aTexCoord;
+uniform mat4 uMVP;
+out vec2 vTexCoord;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vTexCoord = aTexCoord;
+}
+)glsl";
+
+// ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
+
+// 4x4 矩阵乘法：out = a * b（列主序）
+static void Mat4Mul(const float a[16], const float b[16], float out[16]) {
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            out[col * 4 + row] = sum;
+        }
+    }
+}
+
+// 列主序透视投影矩阵（对应 GLM::perspective / glFrustum 语义）
+// 构建右手系透视投影：fov_y, aspect, near, far
+static void BuildPerspProj(float fov_y, float aspect, float near, float far,
+                            float out[16]) {
+    float f = 1.0f / std::tan(fov_y * 0.5f);
+    float range_inv = 1.0f / (near - far);
+    // 列主序
+    out[0]  = f / aspect;  out[4]  = 0.0f; out[8]  = 0.0f;                 out[12] = 0.0f;
+    out[1]  = 0.0f;        out[5]  = f;     out[9]  = 0.0f;                 out[13] = 0.0f;
+    out[2]  = 0.0f;        out[6]  = 0.0f;  out[10] = (near + far) * range_inv; out[14] = 2.0f * near * far * range_inv;
+    out[3]  = 0.0f;        out[7]  = 0.0f;  out[11] = -1.0f;                out[15] = 0.0f;
+}
+
+// 从 Camera 构建 MVP 矩阵（纯 CPU，不碰 GL 矩阵栈，不读回 GL 状态）
+// MVP = Projection * View
+// Projection: 透视投影（列主序）
+// View: lookAt 矩阵（列主序）
+static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16]) {
+    float aspect = static_cast<float>(fbo_w) / static_cast<float>(fbo_h);
+    float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
+
+    // === 投影矩阵 ===
+    float proj[16];
+    BuildPerspProj(fov_rad, aspect, cam.near, cam.far, proj);
+
+    // === lookAt 视图矩阵 ===
+    // 计算坐标基
+    Vec3f fwd = cam.target - cam.position;
+    float f_len = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
+    if (f_len < 1e-8f) { fwd = {0.0f, 0.0f, -1.0f}; }
+    else { fwd = {fwd.x()/f_len, fwd.y()/f_len, fwd.z()/f_len}; }
+
+    Vec3f side = {fwd.y()*cam.up.z() - fwd.z()*cam.up.y(),
+                  fwd.z()*cam.up.x() - fwd.x()*cam.up.z(),
+                  fwd.x()*cam.up.y() - fwd.y()*cam.up.x()};
+    float s_len = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
+    if (s_len < 1e-8f) { side = {1.0f, 0.0f, 0.0f}; }
+    else { side = {side.x()/s_len, side.y()/s_len, side.z()/s_len}; }
+
+    Vec3f upv = {side.y()*fwd.z() - side.z()*fwd.y(),
+                 side.z()*fwd.x() - side.x()*fwd.z(),
+                 side.x()*fwd.y() - side.y()*fwd.x()};
+
+    // 列主序 lookAt 矩阵 (OpenGL 右手系)
+    float view[16] = {
+        side.x(), upv.x(), -fwd.x(), 0.0f,
+        side.y(), upv.y(), -fwd.y(), 0.0f,
+        side.z(), upv.z(), -fwd.z(), 0.0f,
+        -(side.x()*cam.position.x() + side.y()*cam.position.y() + side.z()*cam.position.z()),
+        -(upv.x()*cam.position.x() + upv.y()*cam.position.y() + upv.z()*cam.position.z()),
+         (fwd.x()*cam.position.x() + fwd.y()*cam.position.y() + fwd.z()*cam.position.z()),
+         1.0f
+    };
+
+    // MVP = Proj * View
+    Mat4Mul(proj, view, mvp);
+}
 
 // 纹理+颜色混合 Fragment Shader
 // 纹理采样（alpha 通道作为透明度）× uniform 颜色
@@ -190,9 +308,14 @@ Renderer::Renderer() = default;
 Renderer::~Renderer() {
     DestroyFBO();
     DestroyOutputFBO();
-    if (prog_)       glDeleteProgram(prog_);
-    if (stream_vbo_) glDeleteBuffers(1, &stream_vbo_);
-    if (tex_prog_)   glDeleteProgram(tex_prog_);
+    Destroy3DFBO();
+    Destroy3DResolveFBO();
+    if (prog_)         glDeleteProgram(prog_);
+    if (prog_3d_)      glDeleteProgram(prog_3d_);
+    if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
+    if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
+    if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
+    if (tex_prog_)     glDeleteProgram(tex_prog_);
     // Font GL textures (所有注册字体的三层 atlas)
     for (auto& [alias, slot] : font_slots_) {
         (void)alias;
@@ -222,6 +345,39 @@ void Renderer::DestroyOutputFBO() {
     }
     out_w_ = 0;
     out_h_ = 0;
+}
+
+void Renderer::Destroy3DFBO() {
+    if (fbo_3d_) {
+        glDeleteFramebuffers(1, &fbo_3d_);
+        glDeleteTextures(1, &color_tex_3d_);
+#ifndef JPOV_WITHOUT_MSAA
+        if (depth_rb_3d_) {
+            glDeleteRenderbuffers(1, &depth_rb_3d_);
+        }
+#else
+        if (depth_tex_3d_) {
+            glDeleteTextures(1, &depth_tex_3d_);
+        }
+#endif
+        fbo_3d_ = 0;
+        color_tex_3d_ = 0;
+        depth_rb_3d_ = 0;
+        depth_tex_3d_ = 0;
+    }
+    fbo_3d_w_ = 0;
+    fbo_3d_h_ = 0;
+}
+
+void Renderer::Destroy3DResolveFBO() {
+    if (resolve_fbo_3d_) {
+        glDeleteFramebuffers(1, &resolve_fbo_3d_);
+        glDeleteTextures(1, &resolve_tex_3d_);
+        resolve_fbo_3d_ = 0;
+        resolve_tex_3d_ = 0;
+    }
+    resolve_fbo_3d_w_ = 0;
+    resolve_fbo_3d_h_ = 0;
 }
 
 void Renderer::EnsureFBO(int width, int height) {
@@ -255,6 +411,115 @@ void Renderer::EnsureFBO(int width, int height) {
     fbo_h_ = height;
 }
 
+void Renderer::Ensure3DFBO(int width, int height) {
+    if (fbo_3d_w_ == width && fbo_3d_h_ == height && fbo_3d_) return;
+
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_LE(width, kMaxFboDim);
+    CHECK_LE(height, kMaxFboDim);
+
+    Destroy3DFBO();
+    Destroy3DResolveFBO();
+
+#ifdef JPOV_WITHOUT_MSAA
+    // 非 MSAA 路径（Windows/MinGW 下 GL 不导出 MSAA 函数）
+    // 直接用普通 2D 纹理 + 深度纹理
+    glGenTextures(1, &color_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, color_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenTextures(1, &depth_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, depth_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, color_tex_3d_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depth_tex_3d_, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D FBO (non-MSAA) failed, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 非 MSAA 路径不需要 separate resolve FBO（直接用 fbo_3d_ blit）
+    resolve_fbo_3d_ = 0;
+    resolve_tex_3d_ = 0;
+    resolve_fbo_3d_w_ = 0;
+    resolve_fbo_3d_h_ = 0;
+#else
+    // === 4x MSAA 颜色纹理 ===
+    glGenTextures(1, &color_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
+                            width, height, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+
+    // === 深度 renderbuffer（MSAA 需要） ===
+    glGenRenderbuffers(1, &depth_rb_3d_);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_3d_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24,
+                                     width, height);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    // === FBO 对象 ===
+    glGenFramebuffers(1, &fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, depth_rb_3d_);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D MSAA FBO failed, status=" << status;
+
+    // === 中间 non-MSAA resolve FBO（同尺寸，用于 resolve + 缩放 blit） ===
+    glGenTextures(1, &resolve_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D, resolve_tex_3d_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &resolve_fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, resolve_tex_3d_, 0);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D resolve FBO failed, status=" << status;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    resolve_fbo_3d_w_ = width;
+    resolve_fbo_3d_h_ = height;
+#endif
+
+    fbo_3d_w_ = width;
+    fbo_3d_h_ = height;
+}
+
 void Renderer::CompileShaders() {
     unsigned int vs = CompileShader(GL_VERTEX_SHADER, kVs);
     unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, kFs);
@@ -266,6 +531,18 @@ void Renderer::CompileShaders() {
     unsigned int tfs = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
     tex_prog_ = LinkProgram(tvs, tfs);
     CHECK_NE(tex_prog_, 0u);
+
+    // 3D 纯色 shader
+    unsigned int vs3d = CompileShader(GL_VERTEX_SHADER, kVs3d);
+    unsigned int fs3d = CompileShader(GL_FRAGMENT_SHADER, kFs3d);
+    prog_3d_ = LinkProgram(vs3d, fs3d);
+    CHECK_NE(prog_3d_, 0u);
+
+    // 3D 纹理 shader（用于 Text3D）
+    unsigned int tvs3d = CompileShader(GL_VERTEX_SHADER, kTexVs3d);
+    unsigned int tfs3d = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
+    tex_prog_3d_ = LinkProgram(tvs3d, tfs3d);
+    CHECK_NE(tex_prog_3d_, 0u);
 }
 
 void Renderer::CreateStreamVBO() {
@@ -273,6 +550,13 @@ void Renderer::CreateStreamVBO() {
     glGenBuffers(1, &stream_vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
     glBufferData(GL_ARRAY_BUFFER, buf, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // Strip3D 专用 VBO：3000 顶点 × 3 floats × sizeof(float)
+    size_t strip_buf = static_cast<size_t>(kMaxStripVertices) * 3 * sizeof(float);
+    glGenBuffers(1, &strip_vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, strip_buf, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -549,13 +833,113 @@ void Renderer::BeginFrame(int render_w, int render_h) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
-void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
+void Renderer::Render(const RenderCommandList& cmds,
                        const WindowInfo& winfo) {
-    (void)camera;
-    (void)winfo;
-
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // ---- 补全 viewport 和 3D FBO 尺寸 ----
+    // 如果 viewport 全 0，用窗口尺寸补全为全屏
+    Camera cam = cmds.camera;
+    if (cam.viewport_width == 0.0f && cam.viewport_height == 0.0f) {
+        cam.viewport_x = 0.0f;
+        cam.viewport_y = 0.0f;
+        cam.viewport_width = winfo.width;
+        cam.viewport_height = winfo.height;
+    }
+    // 如果 3D FBO 尺寸未设置，用主 FBO 尺寸
+    int fbo_3d_w = static_cast<int>(cam.fbo_3d_width_);
+    int fbo_3d_h = static_cast<int>(cam.fbo_3d_height_);
+    if (fbo_3d_w <= 0 || fbo_3d_h <= 0) {
+        fbo_3d_w = fbo_w_;
+        fbo_3d_h = fbo_h_;
+    }
+
+    // ---- 检查是否有 3D 指令 ----
+    bool has_3d = false;
+    for (const auto& [type, idx] : cmds.order) {
+        (void)idx;
+        if (type == DrawCommandType::kTriangle3D ||
+            type == DrawCommandType::kStrip3D ||
+            type == DrawCommandType::kLine3D ||
+            type == DrawCommandType::kText3D) {
+            has_3d = true;
+            break;
+        }
+    }
+
+    if (has_3d) {
+        // ---- 保存并设置 3D 所需 GL 状态 ----
+        // 用 glPushAttrib 批保存所有受影响的 GL 状态位。
+        // GL_ENABLE_BIT:   GL_DEPTH_TEST, GL_CULL_FACE
+        // GL_VIEWPORT_BIT:  glViewport
+        // GL_SCISSOR_BIT:   视口相关
+        // GL_CURRENT_BIT:   glMatrixMode 等（其实 3D 改的是 shader uniform，
+        //                   不再改矩阵栈了，但保留 push/pop 习惯）
+        glPushAttrib(GL_ENABLE_BIT | GL_VIEWPORT_BIT);
+
+        // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
+        Ensure3DFBO(fbo_3d_w, fbo_3d_h);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+        glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDepthFunc(GL_LESS);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+
+        // Clear 3D FBO（颜色 + 深度）
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // 用 3D FBO 尺寸计算 MVP
+        Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // ---- 第二步：MSAA resolve 或直接 blit 到主 FBO ----
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+
+#ifdef JPOV_WITHOUT_MSAA
+        // 非 MSAA 路径：从 3D FBO 直接 blit 到主 FBO
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBlitFramebuffer(
+            0, 0, fbo_3d_w, fbo_3d_h,
+            static_cast<int>(cam.viewport_x),
+            static_cast<int>(cam.viewport_y),
+            static_cast<int>(cam.viewport_x + cam.viewport_width),
+            static_cast<int>(cam.viewport_y + cam.viewport_height),
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#else
+        // 先 MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
+        glBlitFramebuffer(
+            0, 0, fbo_3d_w, fbo_3d_h,
+            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+        // 再从中间 FBO 缩放 blit 到主 FBO（按 viewport）
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBlitFramebuffer(
+            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
+            static_cast<int>(cam.viewport_x),
+            static_cast<int>(cam.viewport_y),
+            static_cast<int>(cam.viewport_x + cam.viewport_width),
+            static_cast<int>(cam.viewport_y + cam.viewport_height),
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#endif
+
+        // ---- 恢复 GL 状态（回到 2D 绘制前的状态）----
+        glPopAttrib();
+    }
+
+    // ---- 第四步：绑定主 FBO，绘制所有 2D 指令 ----
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, fbo_w_, fbo_h_);
 
     for (const auto& [type, idx] : cmds.order) {
         switch (type) {
@@ -587,6 +971,127 @@ void Renderer::Render(const RenderCommandList& cmds, const Camera& camera,
                 break;
         }
     }
+}
+
+void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+    // 先用当前 Camera 计算 MVP
+    BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
+
+    // 遍历 order，绘制 3D 指令
+    for (const auto& [type, idx] : cmds.order) {
+        switch (type) {
+            case DrawCommandType::kTriangle3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.triangle3d.size()));
+                DrawTriangle3D(cmds.triangle3d[idx]);
+                break;
+            }
+            case DrawCommandType::kStrip3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.strip3d.size()));
+                DrawStrip3D(cmds.strip3d[idx]);
+                break;
+            }
+            case DrawCommandType::kLine3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.line3d.size()));
+                DrawLine3D(cmds.line3d[idx]);
+                break;
+            }
+            case DrawCommandType::kText3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.text3d.size()));
+                DrawText3D(cmds.text3d[idx]);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+// ==================== 3D 绘制方法 ====================
+
+void Renderer::DrawTriangle3D(const Triangle3DCommand& cmd) {
+    // 3 个顶点 × xyz = 9 floats
+    float verts[9] = {
+        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
+        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
+        cmd.p3.x(), cmd.p3.y(), cmd.p3.z(),
+    };
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp_);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
+    int n = static_cast<int>(cmd.vertices.size());
+    if (n < 3) return;
+
+    // 截断到 3000 顶点上限
+    int capped_n = (n > kMaxStripVertices) ? kMaxStripVertices : n;
+
+    // 使用真正的 GL_TRIANGLE_STRIP，直接上传原始顶点序列。
+    // GL_TRIANGLE_STRIP 的卷绕顺序为：三角形 i 由顶点 (i, i+1, i+2) 构成，
+    // 每个三角形的卷绕方向取决于顶点索引的奇偶性——奇数三角形保持 CCW，
+    // 偶数三角形自动反转卷绕以维持面朝向的一致性。
+    // 因此无需 save/restore CULL_FACE。
+
+    int total_floats = capped_n * 3;  // capped_n 个顶点 × 3 floats
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp_);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    // 上传到专用 VBO
+    glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(total_floats * sizeof(float)),
+                 cmd.vertices.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawLine3D(const Line3DCommand& cmd) {
+    float verts[6] = {
+        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
+        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
+    };
+
+    glUseProgram(prog_3d_);
+    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+                       1, GL_FALSE, mvp_);
+    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glDrawArrays(GL_LINES, 0, 2);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawText3D(const Text3DCommand& cmd) {
+    (void)cmd;
+    LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {
