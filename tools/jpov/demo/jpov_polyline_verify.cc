@@ -20,8 +20,8 @@ public:
         (void)input;
         (void)winfo;
 
-        cmds->render_width  = 640;
-        cmds->render_height = 360;
+        cmds->camera.fbo_3d_width_  = 640.0f;
+        cmds->camera.fbo_3d_height_ = 360.0f;
 
         double t = static_cast<double>(frame_count) * 0.02;
         double a = 5.0 + 1.0 * std::sin(t * 0.3);

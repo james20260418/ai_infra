@@ -84,7 +84,7 @@ enum class DrawCommandType : uint8_t {
 // Pre-condition: vertices.size() >= 2
 // Pre-condition: vertices.size() - 1 <= Renderer::kMaxPolylineEdges
 //
-// 坐标空间同 render_width/render_height
+// 坐标空间同 camera.fbo_3d_width_/height_
 struct Polyline2DCommand {
     std::vector<Vec2f> vertices;
     Color color;
@@ -98,11 +98,11 @@ struct Polyline2DCommand {
 // color: 填充颜色（RGBA，分量范围 [0,1]，alpha < 1 时 blend）
 //
 // 坐标空间说明：
-//   用户先通过 render_width / render_height 声明渲染分辨率，
+//   用户先通过 camera.fbo_3d_width_/height_ 声明渲染分辨率，
 //   此后所有 DrawRect 的 pos/size 以该分辨率为空间。
 //   渲染分辨率 ≠ 窗口尺寸——当两者不同时，最终输出会被拉伸贴合窗口。
 //
-//   例如 render_width=640, render_height=360：
+//   例如 fbo_3d_width_=640, fbo_3d_height_=360：
 //     矩形 (0,0, 320,180) 占据左上 1/4 区域
 //     矩形 (160,90, 320,180) 居中
 // Pre-condition: size.x > 0 && size.y > 0
@@ -243,13 +243,6 @@ struct RenderCommandList {
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
 
-    // 渲染分辨率（像素），用户在每帧绘制前设定。
-    // 决定了 FBO 的尺寸和坐标空间范围。
-    // 分辨率变更时 Renderer 自动重建 FBO。
-    // 必须设 >0（Clear 不清零），框架在 Render 时 CHECK_GT。
-    int render_width  = 0;
-    int render_height = 0;
-
     // 3D 透视相机
     // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
     // 框架在 Render() 时自动使用该 Camera 计算 MVP 变换。
@@ -277,8 +270,8 @@ struct RenderCommandList {
     // size: 矩形的宽度和高度（像素单位，>0）
     // color: 填充颜色（RGBA，分量范围 [0,1]）
     //
-    // 坐标空间与矩形声明分辨率的 render_width/render_height 一致。
-    // 例：render_width=640, render_height=360 时，
+    // 坐标空间与 camera.fbo_3d_width_/height_ 一致。
+    // 例：fbo_3d_width_=640, fbo_3d_height_=360 时，
     //     DrawRect({160,90},{320,180},blue) 画一个居中矩形。
     // Pre-condition: pos_x >= 0, pos_y >= 0
     // Pre-condition: size.x > 0, size.y > 0

@@ -48,6 +48,20 @@ struct Camera {
     float near     = 0.1f;
     float far      = 1000.0f;
 
+    // 3D 离屏 FBO 尺寸（像素单位）
+    //
+    // 决定 BuildMVP 时投影矩阵的宽高比和视野范围。
+    // 所有 3D 命令（Triangle3D/Strip3D/Line3D/Text3D）先渲染到这个离屏 FBO，
+    // 然后整个结果按 viewport 描述的屏幕位置 blit 到主 FBO。
+    //
+    // 与 viewport 的关系：
+    //   fbo_3d_width_/height_ 决定 3D 场景的渲染分辨率（用于 MVP 计算），
+    //   viewport_x/y/width/height 决定渲染结果在主 FBO 上的屏幕位置。
+    //
+    // 默认 0 表示与主 FBO 同尺寸，框架会在渲染前自动填入。
+    float fbo_3d_width_ = 0.0f;   // 3D 离屏 FBO 宽度（像素）
+    float fbo_3d_height_ = 0.0f;  // 3D 离屏 FBO 高度（像素）
+
     // 3D 视口矩形（窗口坐标，左上角为原点，所有值均为像素单位）
     // 0 宽高表示"全窗口"，框架会在渲染前自动填入实际窗口尺寸。
     float viewport_x = 0.0f;       // 视口左上角 x（像素）

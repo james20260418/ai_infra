@@ -200,7 +200,9 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     jpov::RenderCommandList cmds;
     OneIteration(frame_count, input, winfo, &cmds);
 
-    renderer_->BeginFrame(cmds.render_width, cmds.render_height);
+    renderer_->BeginFrame(
+        static_cast<int>(winfo.width),
+        static_cast<int>(winfo.height));
     renderer_->Render(cmds, winfo);
 }
 

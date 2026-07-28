@@ -80,10 +80,21 @@ private:
     int out_w_ = 0;
     int out_h_ = 0;
 
+    // 3D 离屏 MSAA FBO：用于 3D 命令的渲染
+    // 使用 GL_RGBA8 + 4x MSAA，按 Camera 的三维分辨率分配
+    // 渲染完成后通过 glBlitFramebuffer blit 到主 FBO
+    unsigned int fbo_3d_ = 0;
+    unsigned int color_tex_3d_ = 0;
+    unsigned int depth_rb_3d_ = 0;     // 深度 renderbuffer（MSAA 兼容）
+    int fbo_3d_w_ = 0;
+    int fbo_3d_h_ = 0;
+
     void EnsureFBO(int width, int height);
     void EnsureOutputFBO(int win_w, int win_h);
+    void Ensure3DFBO(int width, int height);
     void DestroyFBO();
     void DestroyOutputFBO();
+    void Destroy3DFBO();
     void CompileShaders();
     void CreateStreamVBO();
     void DrawRect2D(const Rect2DCommand& cmd);

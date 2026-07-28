@@ -58,6 +58,12 @@
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
 #define glBlitFramebuffer        gl_BlitFramebuffer
+#define glTexImage2DMultisample  gl_TexImage2DMultisample
+#define glGenRenderbuffers       gl_GenRenderbuffers
+#define glDeleteRenderbuffers    gl_DeleteRenderbuffers
+#define glBindRenderbuffer       gl_BindRenderbuffer
+#define glRenderbufferStorageMultisample gl_RenderbufferStorageMultisample
+#define glFramebufferRenderbuffer gl_FramebufferRenderbuffer
 #define glEnableVertexAttribArray  gl_EnableVertexAttribArray
 #define glDisableVertexAttribArray gl_DisableVertexAttribArray
 #define glVertexAttribPointer    gl_VertexAttribPointer
@@ -302,6 +308,7 @@ Renderer::Renderer() = default;
 Renderer::~Renderer() {
     DestroyFBO();
     DestroyOutputFBO();
+    Destroy3DFBO();
     if (prog_)         glDeleteProgram(prog_);
     if (prog_3d_)      glDeleteProgram(prog_3d_);
     if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
@@ -339,6 +346,21 @@ void Renderer::DestroyOutputFBO() {
     out_h_ = 0;
 }
 
+void Renderer::Destroy3DFBO() {
+    if (fbo_3d_) {
+        glDeleteFramebuffers(1, &fbo_3d_);
+        glDeleteTextures(1, &color_tex_3d_);
+        if (depth_rb_3d_) {
+            glDeleteRenderbuffers(1, &depth_rb_3d_);
+        }
+        fbo_3d_ = 0;
+        color_tex_3d_ = 0;
+        depth_rb_3d_ = 0;
+    }
+    fbo_3d_w_ = 0;
+    fbo_3d_h_ = 0;
+}
+
 void Renderer::EnsureFBO(int width, int height) {
     if (fbo_w_ == width && fbo_h_ == height && fbo_) return;
 
@@ -368,6 +390,49 @@ void Renderer::EnsureFBO(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     fbo_w_ = width;
     fbo_h_ = height;
+}
+
+void Renderer::Ensure3DFBO(int width, int height) {
+    if (fbo_3d_w_ == width && fbo_3d_h_ == height && fbo_3d_) return;
+
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_LE(width, kMaxFboDim);
+    CHECK_LE(height, kMaxFboDim);
+
+    Destroy3DFBO();
+
+    // === 4x MSAA 颜色纹理 ===
+    glGenTextures(1, &color_tex_3d_);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
+                            width, height, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+
+    // === 深度 renderbuffer（MSAA 需要） ===
+    glGenRenderbuffers(1, &depth_rb_3d_);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_3d_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24,
+                                     width, height);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    // === FBO 对象 ===
+    glGenFramebuffers(1, &fbo_3d_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, depth_rb_3d_);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "3D MSAA FBO failed, status=" << status;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    fbo_3d_w_ = width;
+    fbo_3d_h_ = height;
 }
 
 void Renderer::CompileShaders() {
@@ -685,24 +750,77 @@ void Renderer::BeginFrame(int render_w, int render_h) {
 
 void Renderer::Render(const RenderCommandList& cmds,
                        const WindowInfo& winfo) {
-    (void)winfo;
-
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // ---- 第一步：绘制所有 3D 指令（开启深度测试）----
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
-    glClear(GL_DEPTH_BUFFER_BIT);
+    // ---- 补全 viewport 和 3D FBO 尺寸 ----
+    // 如果 viewport 全 0，用窗口尺寸补全为全屏
+    Camera cam = cmds.camera;
+    if (cam.viewport_width == 0.0f && cam.viewport_height == 0.0f) {
+        cam.viewport_x = 0.0f;
+        cam.viewport_y = 0.0f;
+        cam.viewport_width = winfo.width;
+        cam.viewport_height = winfo.height;
+    }
+    // 如果 3D FBO 尺寸未设置，用主 FBO 尺寸
+    int fbo_3d_w = static_cast<int>(cam.fbo_3d_width_);
+    int fbo_3d_h = static_cast<int>(cam.fbo_3d_height_);
+    if (fbo_3d_w <= 0 || fbo_3d_h <= 0) {
+        fbo_3d_w = fbo_w_;
+        fbo_3d_h = fbo_h_;
+    }
 
-    // 计算 MVP 矩阵
-    float mvp[16];
-    BuildMVP(cmds.camera, fbo_w_, fbo_h_, mvp);
-    Draw3DCommands(cmds, fbo_w_, fbo_h_);
+    // ---- 检查是否有 3D 指令 ----
+    bool has_3d = false;
+    for (const auto& [type, idx] : cmds.order) {
+        (void)idx;
+        if (type == DrawCommandType::kTriangle3D ||
+            type == DrawCommandType::kStrip3D ||
+            type == DrawCommandType::kLine3D ||
+            type == DrawCommandType::kText3D) {
+            has_3d = true;
+            break;
+        }
+    }
 
-    // ---- 第二步：关闭深度测试，绘制所有 2D 指令 ----
-    glDisable(GL_DEPTH_TEST);
+    if (has_3d) {
+        // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
+        Ensure3DFBO(fbo_3d_w, fbo_3d_h);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+        glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDepthFunc(GL_LESS);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+
+        // Clear 3D FBO（颜色 + 深度）
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // 用 3D FBO 尺寸计算 MVP
+        Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // ---- 第二步：MSAA resolve → blit 到主 FBO（按 viewport）----
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+        glBlitFramebuffer(
+            0, 0, fbo_3d_w, fbo_3d_h,
+            static_cast<int>(cam.viewport_x),
+            static_cast<int>(cam.viewport_y),
+            static_cast<int>(cam.viewport_x + cam.viewport_width),
+            static_cast<int>(cam.viewport_y + cam.viewport_height),
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+
+    // ---- 第三步：绑定主 FBO，绘制所有 2D 指令 ----
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, fbo_w_, fbo_h_);
 
     for (const auto& [type, idx] : cmds.order) {
         switch (type) {
