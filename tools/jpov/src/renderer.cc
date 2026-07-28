@@ -985,6 +985,12 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawFillRect2D(cmds.fillrect2d[idx]);
                 break;
             }
+            case DrawCommandType::kArc2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.arc2d.size()));
+                DrawArc2D(cmds.arc2d[idx]);
+                break;
+            }
             default:
                 break;
         }
@@ -1601,6 +1607,106 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
         glDisableVertexAttribArray(0);
     }
 
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawArc2D(const Arc2DCommand& cmd) {
+    // CPU 端三角化圆弧/扇形：
+    // 扇形近似：圆心 + 圆弧上 N 个扇形三角形（GL_TRIANGLES）。
+    // 跨度角度绝对值 >= 360 时绘制完整圆形。
+    // 角度为负时绘制顺时针方向。
+
+    static constexpr int kArcSegs = 48;  // 完整圆的三角形数
+
+    // 计算实际跨度（归一化到 360 度内，支持多圈）
+    float abs_span = std::fabs(cmd.span_angle);
+    if (abs_span < 1e-6f) return;  // 零跨度，不绘制
+
+    // 如果是完整圆或超过 360 度，绘制完整圆
+    if (abs_span >= 360.0f - 1e-6f) {
+        // 完整圆：圆形 + N 个三角形
+        int tri_count = kArcSegs;
+        std::vector<float> verts;
+        verts.reserve(static_cast<size_t>(tri_count) * 3 * 2);
+
+        float cx = cmd.center.x();
+        float cy = cmd.center.y();
+        float r = cmd.radius;
+
+        double start_rad = 0.0;
+        double step = 2.0 * 3.14159265358979323846 / kArcSegs;
+        for (int i = 0; i < kArcSegs; ++i) {
+            double a0 = start_rad + i * step;
+            double a1 = start_rad + (i + 1) * step;
+            float px0 = cx + r * std::cos(a0);
+            float py0 = cy + r * std::sin(a0);
+            float px1 = cx + r * std::cos(a1);
+            float py1 = cy + r * std::sin(a1);
+            verts.push_back(cx);  verts.push_back(cy);
+            verts.push_back(px0); verts.push_back(py0);
+            verts.push_back(px1); verts.push_back(py1);
+        }
+
+        int total_verts = static_cast<int>(verts.size()) / 2;
+        glUseProgram(prog_);
+        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLES, 0, total_verts);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return;
+    }
+
+    // 非完整圆：扇形近似
+    // 三角形数 = ceil(abs_span / 360 * kArcSegs)，至少 3
+    float ratio = abs_span / 360.0f;
+    int tri_count = std::max(3, static_cast<int>(kArcSegs * ratio + 0.5f));
+
+    float cx = cmd.center.x();
+    float cy = cmd.center.y();
+    float r = cmd.radius;
+
+    double start_rad = 3.14159265358979323846 * cmd.start_angle / 180.0;
+    double span_rad = 3.14159265358979323846 * cmd.span_angle / 180.0;
+    double step = span_rad / tri_count;
+
+    std::vector<float> verts;
+    verts.reserve(static_cast<size_t>(tri_count) * 3 * 2);
+
+    for (int i = 0; i < tri_count; ++i) {
+        double a0 = start_rad + i * step;
+        double a1 = start_rad + (i + 1) * step;
+        float px0 = cx + r * std::cos(a0);
+        float py0 = cy + r * std::sin(a0);
+        float px1 = cx + r * std::cos(a1);
+        float py1 = cy + r * std::sin(a1);
+        verts.push_back(cx);  verts.push_back(cy);
+        verts.push_back(px0); verts.push_back(py0);
+        verts.push_back(px1); verts.push_back(py1);
+    }
+
+    int total_verts = static_cast<int>(verts.size()) / 2;
+    glUseProgram(prog_);
+    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glDrawArrays(GL_TRIANGLES, 0, total_verts);
+    glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 

@@ -82,6 +82,9 @@ enum class DrawCommandType : uint8_t {
     kFillRect2D,        // 2D 复合矩形（屏幕空间，像素坐标，
                         //      带填充色、边框颜色/宽度、圆角半径，
                         //      利用 RoundRect2D + Strip2D 组合实现）
+    kArc2D,             // 2D 圆弧/扇形（屏幕空间，像素坐标，
+                        //      圆心+半径+起始角度+跨度角度，
+                        //      CPU 三角化后以三角形列表渲染）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -283,6 +286,25 @@ struct FillRect2DCommand {
     float radius;
 };
 
+// 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
+//
+// center:       圆心位置（像素坐标，原点在左上角）
+// radius:       半径（像素单位，>0）
+// start_angle:  起始角度（度，0=3点钟方向，逆时针为正）
+// span_angle:   跨度角度（度，正数=逆时针，负数=顺时针）
+// color:        填充颜色
+//
+// CPU 端三角化后以三角形列表（扇形）渲染。
+// 跨度角度绝对值 >= 360 度时绘制完整圆形。
+// Pre-condition: radius > 0
+struct Arc2DCommand {
+    Vec2f center;
+    float radius;
+    float start_angle;   // 起始角度（度）
+    float span_angle;    // 跨度角度（度）
+    Color color;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -306,6 +328,7 @@ struct RenderCommandList {
     std::vector<RoundRect2DCommand> roundrect2d;
     std::vector<FillRect2DCommand> fillrect2d;
     std::vector<Strip2DCommand> strip2d;
+    std::vector<Arc2DCommand> arc2d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -415,6 +438,16 @@ struct RenderCommandList {
                       const Color& fill_color,
                       const Color& border_color,
                       float border_width, float radius);
+
+    // 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
+    //
+    // 利用 CPU 端三角化产生三角形列表后渲染。
+    // 跨度角度绝对值 >= 360 度时绘制完整圆形。
+    // Pre-condition: radius > 0
+    // Pre-condition: start_angle, span_angle 不受限（支持跨多圈）
+    void DrawArc2D(const Vec2f& center, float radius,
+                   float start_angle, float span_angle,
+                   const Color& color);
 };
 
 }  // namespace jpov

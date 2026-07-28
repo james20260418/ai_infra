@@ -19,6 +19,7 @@ void RenderCommandList::Clear() {
     strip2d.clear();
     roundrect2d.clear();
     fillrect2d.clear();
+    arc2d.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -114,6 +115,15 @@ void RenderCommandList::DrawRoundRect(const Vec2f& pos, const Vec2f& size,
     int idx = static_cast<int>(roundrect2d.size());
     roundrect2d.push_back({pos, size, radius, color});
     order.emplace_back(DrawCommandType::kRoundRect2D, idx);
+}
+
+void RenderCommandList::DrawArc2D(const Vec2f& center, float radius,
+                                     float start_angle, float span_angle,
+                                     const Color& color) {
+    CHECK_GT(radius, 0.0f);
+    int idx = static_cast<int>(arc2d.size());
+    arc2d.push_back({center, radius, start_angle, span_angle, color});
+    order.emplace_back(DrawCommandType::kArc2D, idx);
 }
 
 void RenderCommandList::DrawFillRect(const Vec2f& pos, const Vec2f& size,
