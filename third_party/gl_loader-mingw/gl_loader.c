@@ -112,3 +112,4 @@ DEFINE_PTR(GL_DisableVertexAttribArray, gl_DisableVertexAttribArray);
 DEFINE_PTR(GL_VertexAttribPointer,    gl_VertexAttribPointer);
 DEFINE_PTR(GL_Uniform1i,              gl_Uniform1i);
 DEFINE_PTR(GL_ActiveTexture,          gl_ActiveTexture);
+DEFINE_PTR(GL_UniformMatrix4fv,       gl_UniformMatrix4fv);

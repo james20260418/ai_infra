@@ -67,6 +67,7 @@
 #define glVertexAttribPointer    gl_VertexAttribPointer
 #define glUniform1i              gl_Uniform1i
 #define glActiveTexture          gl_ActiveTexture
+#define glUniformMatrix4fv       gl_UniformMatrix4fv
 #endif
 
 namespace {
