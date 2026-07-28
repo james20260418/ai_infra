@@ -83,6 +83,10 @@ public:
             verts.push_back({cx * kOuterRadius, 0.0f, cz * kOuterRadius});
         }
 
+        // 闭合环：首部重复前 2 个顶点
+        verts.push_back(verts[0]);
+        verts.push_back(verts[1]);
+
         cmds->DrawStrip3D(verts, {0.0f, 0.6f, 1.0f, 1.0f});  // 浅蓝色
     }
 };

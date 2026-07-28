@@ -969,13 +969,13 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
     // 条带化三角形数 = capped_n - 2
     int tri_count = capped_n - 2;
     // 每个三角形 3 个顶点，共 tri_count * 3 个顶点 × 3 floats
-    // 先把所有须绘制的顶点平铺展开到 local buffer
-    //（因为条带化共享顶点，直接用 GPU 的 GL_TRIANGLE_STRIP 更简单！）
 
     // 用 GL_TRIANGLES 模式展开条带化顶点
     // strip 顶点布局：[p0,p1,p2,  p1,p2,p3,  p2,p3,p4, ...]
-    // 用 local buffer 写入后一次性上传 VBO
-    int total_floats = tri_count * 3 * 3;  // tri_count 个三角形 × 3 顶点 × 3 分量
+    // 由 GL_TRIANGLE_STRIP 的固有特性，相邻三角形的卷绕方向交替（CW/CCW）。
+    // 当全局开启了 GL_CULL_FACE(GL_BACK) 时，卷绕为 CW 的三角形会被裁掉，
+    // 因此这里临时关闭 CULL_FACE，避免 strip 中一半三角形被裁。
+    int total_floats = tri_count * 3 * 3;
     std::vector<float> verts;
     verts.reserve(total_floats);
     for (int i = 0; i < tri_count; ++i) {
@@ -985,6 +985,12 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
         verts.push_back(v0.x()); verts.push_back(v0.y()); verts.push_back(v0.z());
         verts.push_back(v1.x()); verts.push_back(v1.y()); verts.push_back(v1.z());
         verts.push_back(v2.x()); verts.push_back(v2.y()); verts.push_back(v2.z());
+    }
+
+    // 保存并临时关闭 CULL_FACE（strip 三角形的卷绕交替，有一半会被 CULL_BACK 裁掉）
+    GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    if (cull_was_enabled) {
+        glDisable(GL_CULL_FACE);
     }
 
     glUseProgram(prog_3d_);
@@ -1003,6 +1009,11 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
     glDrawArrays(GL_TRIANGLES, 0, tri_count * 3);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // 恢复 CULL_FACE 状态
+    if (cull_was_enabled) {
+        glEnable(GL_CULL_FACE);
+    }
 }
 
 void Renderer::DrawLine3D(const Line3DCommand& cmd,
