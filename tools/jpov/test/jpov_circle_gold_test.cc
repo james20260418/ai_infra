@@ -53,8 +53,8 @@ public:
         // 渲染分辨率 640x360 — 与 gold image 生成时一致
         const float kResW = 640.0f;
         const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- 圆形：绿色，居中，半径 100 ----
         jpov::Vec2f center(kResW * 0.5f, kResH * 0.5f);

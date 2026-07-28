@@ -27,8 +27,8 @@ public:
 
         const float kResW = 640.0f;
         const float kResH = 360.0f;
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         // ---- CJK 文字：白色 "你好 世界！Hello World!"，字号 36，居中 ----
         const char* text = reinterpret_cast<const char*>(u8"你好 世界！Hello World!");

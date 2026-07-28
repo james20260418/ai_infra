@@ -17,7 +17,7 @@ void RenderCommandList::Clear() {
     strip3d.clear();
     text3d.clear();
     order.clear();
-    // render_width/render_height 不清零
+    // 注意：camera.fbo_3d_width_/height_ 不清零
 }
 
 void RenderCommandList::DrawPolyline(const std::vector<Vec2f>& vertices,

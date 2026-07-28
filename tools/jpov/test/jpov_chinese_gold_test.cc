@@ -57,8 +57,8 @@ public:
         (void)input;
         (void)winfo;
 
-        cmds->render_width  = static_cast<int>(kResW);
-        cmds->render_height = static_cast<int>(kResH);
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
         float center_x = kResW * 0.5f;
 

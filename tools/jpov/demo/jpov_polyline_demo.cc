@@ -22,8 +22,8 @@ public:
         (void)winfo;
 
         // 渲染分辨率 640x360，与窗口尺寸一致
-        cmds->render_width  = 640;
-        cmds->render_height = 360;
+        cmds->camera.fbo_3d_width_  = 640.0f;
+        cmds->camera.fbo_3d_height_ = 360.0f;
 
         // ---- Lissajous 曲线 ----
         double t = static_cast<double>(frame_count) * 0.02;
