@@ -1,5 +1,12 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
+cc_library(
+    name = "test_utils",
+    hdrs = ["test_utils.h"],
+    visibility = ["//tools/jpov:__subpackages__"],
+    deps = ["@glog_static//:glog"],
+)
+
 cc_binary(
     name = "color_align_test",
     srcs = ["color_align_test.cc"],
@@ -236,6 +243,7 @@ cc_test(
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
+        ":test_utils",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
@@ -252,6 +260,7 @@ cc_test(
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
+        ":test_utils",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,

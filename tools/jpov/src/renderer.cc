@@ -138,10 +138,9 @@ void main() {
 }
 )glsl";
 
-// ==================== MVP 矩阵构建 ====================
+// ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
 // 4x4 矩阵乘法：out = a * b（列主序）
-// 仅用于组合 GL 矩阵栈读回的 proj × modelview
 static void Mat4Mul(const float a[16], const float b[16], float out[16]) {
     for (int col = 0; col < 4; ++col) {
         for (int row = 0; row < 4; ++row) {
@@ -154,24 +153,33 @@ static void Mat4Mul(const float a[16], const float b[16], float out[16]) {
     }
 }
 
-// 从 Camera 构建 MVP 矩阵
-// 使用 GL 矩阵栈 API（glMatrixMode / glFrustum / glLoadMatrixf），
-// 不自造轮子。最后通过 glGetFloatv 读出组合为 shader uniform。
+// 列主序透视投影矩阵（对应 GLM::perspective / glFrustum 语义）
+// 构建右手系透视投影：fov_y, aspect, near, far
+static void BuildPerspProj(float fov_y, float aspect, float near, float far,
+                            float out[16]) {
+    float f = 1.0f / std::tan(fov_y * 0.5f);
+    float range_inv = 1.0f / (near - far);
+    // 列主序
+    out[0]  = f / aspect;  out[4]  = 0.0f; out[8]  = 0.0f;                 out[12] = 0.0f;
+    out[1]  = 0.0f;        out[5]  = f;     out[9]  = 0.0f;                 out[13] = 0.0f;
+    out[2]  = 0.0f;        out[6]  = 0.0f;  out[10] = (near + far) * range_inv; out[14] = 2.0f * near * far * range_inv;
+    out[3]  = 0.0f;        out[7]  = 0.0f;  out[11] = -1.0f;                out[15] = 0.0f;
+}
+
+// 从 Camera 构建 MVP 矩阵（纯 CPU，不碰 GL 矩阵栈，不读回 GL 状态）
+// MVP = Projection * View
+// Projection: 透视投影（列主序）
+// View: lookAt 矩阵（列主序）
 static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16]) {
-    // === 投影矩阵：用 glFrustum（GL 现成 API）===
     float aspect = static_cast<float>(fbo_w) / static_cast<float>(fbo_h);
     float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
-    float top = cam.near * std::tan(fov_rad * 0.5f);
-    float bottom = -top;
-    float right = top * aspect;
-    float left = -right;
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glFrustum(left, right, bottom, top, cam.near, cam.far);
+    // === 投影矩阵 ===
+    float proj[16];
+    BuildPerspProj(fov_rad, aspect, cam.near, cam.far, proj);
 
-    // === 视图矩阵：用 glLoadMatrixf 加载 lookAt（GL 现成 API）===
-    // 计算 lookAt 矩阵的坐标基
+    // === lookAt 视图矩阵 ===
+    // 计算坐标基
     Vec3f fwd = cam.target - cam.position;
     float f_len = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
     if (f_len < 1e-8f) { fwd = {0.0f, 0.0f, -1.0f}; }
@@ -188,7 +196,7 @@ static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16
                  side.z()*fwd.x() - side.x()*fwd.z(),
                  side.x()*fwd.y() - side.y()*fwd.x()};
 
-    // 列主序 lookAt 矩阵
+    // 列主序 lookAt 矩阵 (OpenGL 右手系)
     float view[16] = {
         side.x(), upv.x(), -fwd.x(), 0.0f,
         side.y(), upv.y(), -fwd.y(), 0.0f,
@@ -199,15 +207,8 @@ static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16
          1.0f
     };
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glLoadMatrixf(view);
-
-    // 读回 GL 矩阵栈，组合 MVP = Proj * ModelView
-    float proj[16], modelview[16];
-    glGetFloatv(GL_PROJECTION_MATRIX, proj);
-    glGetFloatv(GL_MODELVIEW_MATRIX, modelview);
-    Mat4Mul(proj, modelview, mvp);
+    // MVP = Proj * View
+    Mat4Mul(proj, view, mvp);
 }
 
 // 纹理+颜色混合 Fragment Shader
@@ -819,6 +820,15 @@ void Renderer::Render(const RenderCommandList& cmds,
     }
 
     if (has_3d) {
+        // ---- 保存并设置 3D 所需 GL 状态 ----
+        // 用 glPushAttrib 批保存所有受影响的 GL 状态位。
+        // GL_ENABLE_BIT:   GL_DEPTH_TEST, GL_CULL_FACE
+        // GL_VIEWPORT_BIT:  glViewport
+        // GL_SCISSOR_BIT:   视口相关
+        // GL_CURRENT_BIT:   glMatrixMode 等（其实 3D 改的是 shader uniform，
+        //                   不再改矩阵栈了，但保留 push/pop 习惯）
+        glPushAttrib(GL_ENABLE_BIT | GL_VIEWPORT_BIT);
+
         // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
         Ensure3DFBO(fbo_3d_w, fbo_3d_h);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
@@ -859,6 +869,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             static_cast<int>(cam.viewport_x + cam.viewport_width),
             static_cast<int>(cam.viewport_y + cam.viewport_height),
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+        // ---- 恢复 GL 状态（回到 2D 绘制前的状态）----
+        glPopAttrib();
     }
 
     // ---- 第四步：绑定主 FBO，绘制所有 2D 指令 ----
@@ -919,7 +932,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kLine3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.line3d.size()));
-                DrawLine3D(cmds.line3d[idx], mvp_);
+                DrawLine3D(cmds.line3d[idx]);
                 break;
             }
             case DrawCommandType::kText3D: {
@@ -966,32 +979,13 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
     // 截断到 3000 顶点上限
     int capped_n = (n > kMaxStripVertices) ? kMaxStripVertices : n;
 
-    // 条带化三角形数 = capped_n - 2
-    int tri_count = capped_n - 2;
-    // 每个三角形 3 个顶点，共 tri_count * 3 个顶点 × 3 floats
+    // 使用真正的 GL_TRIANGLE_STRIP，直接上传原始顶点序列。
+    // GL_TRIANGLE_STRIP 的卷绕顺序为：三角形 i 由顶点 (i, i+1, i+2) 构成，
+    // 每个三角形的卷绕方向取决于顶点索引的奇偶性——奇数三角形保持 CCW，
+    // 偶数三角形自动反转卷绕以维持面朝向的一致性。
+    // 因此无需 save/restore CULL_FACE。
 
-    // 用 GL_TRIANGLES 模式展开条带化顶点
-    // strip 顶点布局：[p0,p1,p2,  p1,p2,p3,  p2,p3,p4, ...]
-    // 由 GL_TRIANGLE_STRIP 的固有特性，相邻三角形的卷绕方向交替（CW/CCW）。
-    // 当全局开启了 GL_CULL_FACE(GL_BACK) 时，卷绕为 CW 的三角形会被裁掉，
-    // 因此这里临时关闭 CULL_FACE，避免 strip 中一半三角形被裁。
-    int total_floats = tri_count * 3 * 3;
-    std::vector<float> verts;
-    verts.reserve(total_floats);
-    for (int i = 0; i < tri_count; ++i) {
-        const Vec3f& v0 = cmd.vertices[i];
-        const Vec3f& v1 = cmd.vertices[i + 1];
-        const Vec3f& v2 = cmd.vertices[i + 2];
-        verts.push_back(v0.x()); verts.push_back(v0.y()); verts.push_back(v0.z());
-        verts.push_back(v1.x()); verts.push_back(v1.y()); verts.push_back(v1.z());
-        verts.push_back(v2.x()); verts.push_back(v2.y()); verts.push_back(v2.z());
-    }
-
-    // 保存并临时关闭 CULL_FACE（strip 三角形的卷绕交替，有一半会被 CULL_BACK 裁掉）
-    GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
-    if (cull_was_enabled) {
-        glDisable(GL_CULL_FACE);
-    }
+    int total_floats = capped_n * 3;  // capped_n 个顶点 × 3 floats
 
     glUseProgram(prog_3d_);
     glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
@@ -999,28 +993,19 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
     glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
-    // 上传到专用 VBO（3000 顶点缓存，跨帧共享）
+    // 上传到专用 VBO
     glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
     glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(total_floats * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
+                 cmd.vertices.data(), GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLES, 0, tri_count * 3);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    // 恢复 CULL_FACE 状态
-    if (cull_was_enabled) {
-        glEnable(GL_CULL_FACE);
-    }
 }
 
-void Renderer::DrawLine3D(const Line3DCommand& cmd,
-                           const float mvp[16]) {
-    (void)cmd;
-    (void)mvp;
-    // 简单的线框支持：绘制 3D 线段
+void Renderer::DrawLine3D(const Line3DCommand& cmd) {
     float verts[6] = {
         cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
         cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
@@ -1028,7 +1013,7 @@ void Renderer::DrawLine3D(const Line3DCommand& cmd,
 
     glUseProgram(prog_3d_);
     glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
-                       1, GL_FALSE, mvp);
+                       1, GL_FALSE, mvp_);
     glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
@@ -1043,7 +1028,7 @@ void Renderer::DrawLine3D(const Line3DCommand& cmd,
 
 void Renderer::DrawText3D(const Text3DCommand& cmd) {
     (void)cmd;
-    // Text3D 尚未实现，跳过
+    LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {

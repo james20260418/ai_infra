@@ -111,7 +111,7 @@ private:
     void DrawText2D(const Text2DCommand& cmd);
     // 3D 方法：MVP 矩阵通过成员 mvp_ 传递（由 Render/Draw3DCommands 设置）
     void DrawTriangle3D(const Triangle3DCommand& cmd);
-    void DrawLine3D(const Line3DCommand& cmd, const float mvp[16]);
+    void DrawLine3D(const Line3DCommand& cmd);
     void DrawText3D(const Text3DCommand& cmd);
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 

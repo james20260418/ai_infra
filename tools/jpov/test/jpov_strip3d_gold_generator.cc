@@ -59,10 +59,10 @@ public:
             float cx = std::cos(angle);
             float cz = std::sin(angle);  // z-axis, 环面在 xz 平面
 
+            // 外点（先外后内，使条带三角形法线朝上，配合 GL_CULL_FACE(GL_BACK) + CCW）
+            verts.push_back({cx * kOuterRadius, 0.0f, cz * kOuterRadius});
             // 内点
             verts.push_back({cx * kInnerRadius, 0.0f, cz * kInnerRadius});
-            // 外点
-            verts.push_back({cx * kOuterRadius, 0.0f, cz * kOuterRadius});
         }
 
         // 闭合环：首部重复前 2 个顶点，使末段与首段连接

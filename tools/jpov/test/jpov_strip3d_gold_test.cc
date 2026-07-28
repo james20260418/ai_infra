@@ -9,8 +9,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -18,28 +16,11 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-// 读取文件全部字节
-static bool ReadFileBytes(const std::string& path,
-                          std::vector<uint8_t>* out) {
-    std::ifstream ifs(path, std::ios::binary | std::ios::ate);
-    if (!ifs.is_open()) {
-        LOG(ERROR) << "Failed to open file: " << path;
-        return false;
-    }
-    std::streamsize size = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
-    out->resize(static_cast<size_t>(size));
-    if (!ifs.read(reinterpret_cast<char*>(out->data()), size)) {
-        LOG(ERROR) << "Failed to read file: " << path;
-        return false;
-    }
-    return true;
-}
 
 // ============ 测试应用 ============
 
@@ -79,8 +60,9 @@ public:
             float cx = std::cos(angle);
             float cz = std::sin(angle);
 
-            verts.push_back({cx * kInnerRadius, 0.0f, cz * kInnerRadius});
+            // 先外后内，使条带三角形法线朝上
             verts.push_back({cx * kOuterRadius, 0.0f, cz * kOuterRadius});
+            verts.push_back({cx * kInnerRadius, 0.0f, cz * kInnerRadius});
         }
 
         // 闭合环：首部重复前 2 个顶点
@@ -110,7 +92,7 @@ int main() {
     // 1. 加载 expected PNG
     std::string expected_path = GetExpectedPngPath();
     std::vector<uint8_t> expected_bytes;
-    if (!ReadFileBytes(expected_path, &expected_bytes)) {
+    if (!jpov::ReadFileBytes(expected_path, &expected_bytes)) {
         LOG(FATAL) << "Failed to load expected PNG: " << expected_path;
     }
     LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
@@ -134,7 +116,7 @@ int main() {
 
     // 3. 加载渲染输出的 PNG
     std::vector<uint8_t> render_bytes;
-    if (!ReadFileBytes(outpath, &render_bytes)) {
+    if (!jpov::ReadFileBytes(outpath, &render_bytes)) {
         LOG(FATAL) << "Failed to load rendered PNG: " << outpath;
     }
     LOG(INFO) << "Rendered PNG: " << render_bytes.size() << " bytes";
