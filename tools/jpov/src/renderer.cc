@@ -254,38 +254,6 @@ void main() {
 }
 )glsl";
 
-unsigned int CompileShader(GLenum type, const char* source) {
-    unsigned int shader = glCreateShader(type);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-    GLint ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        const char* tn = (type == GL_VERTEX_SHADER) ? "VS" : "FS";
-        LOG(FATAL) << "Shader compile error [" << tn << "]: " << log;
-    }
-    return shader;
-}
-
-unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
-    unsigned int prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    GLint ok = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        LOG(FATAL) << "Program link error: " << log;
-    }
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    return prog;
-}
-
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 unsigned int CreateGlAtlasTexture(int atlas_dim,
                                   const std::vector<uint8_t>& pixels) {
@@ -324,13 +292,9 @@ Renderer::~Renderer() {
     DestroyOutputFBO();
     Destroy3DFBO();
     Destroy3DResolveFBO();
-    if (prog_)         glDeleteProgram(prog_);
-    if (prog_3d_)      glDeleteProgram(prog_3d_);
-    if (tex_prog_3d_)  glDeleteProgram(tex_prog_3d_);
+    // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
-    if (tex_prog_)     glDeleteProgram(tex_prog_);
-    if (image_prog_)   glDeleteProgram(image_prog_);
     // Font GL textures (所有注册字体的三层 atlas)
     for (auto& [alias, slot] : font_slots_) {
         (void)alias;
@@ -535,35 +499,39 @@ void Renderer::Ensure3DFBO(int width, int height) {
     fbo_3d_h_ = height;
 }
 
+// ---- Shader program 访问器 ----
+// 通过 ShaderManager 按名字获取。GetOrCreate 幂等：首次调用编译+缓存，
+// 后续直接返回缓存的 program，因此可在 Init 和每次 draw 时安全调用。
+
+unsigned int Renderer::SolidProg() {
+    return shader_mgr_.GetOrCreate("solid", {kVs, kFs});
+}
+
+unsigned int Renderer::TextProg() {
+    return shader_mgr_.GetOrCreate("text", {kTexVs, kTexFs});
+}
+
+unsigned int Renderer::ImageProg() {
+    return shader_mgr_.GetOrCreate("image", {kTexVs, kImageFs});
+}
+
+unsigned int Renderer::Solid3DProg() {
+    return shader_mgr_.GetOrCreate("solid3d", {kVs3d, kFs3d});
+}
+
+unsigned int Renderer::Text3DProg() {
+    return shader_mgr_.GetOrCreate("text3d", {kTexVs3d, kTexFs});
+}
+
+// 编译/注册全部 shader program。
+// 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
-    unsigned int vs = CompileShader(GL_VERTEX_SHADER, kVs);
-    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, kFs);
-    prog_ = LinkProgram(vs, fs);
-    CHECK_NE(prog_, 0u);
-
-    // 纹理 shader（字体）
-    unsigned int tvs = CompileShader(GL_VERTEX_SHADER, kTexVs);
-    unsigned int tfs = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
-    tex_prog_ = LinkProgram(tvs, tfs);
-    CHECK_NE(tex_prog_, 0u);
-
-    // 图片 shader（RGBA 全彩纹理）
-    unsigned int ivs = CompileShader(GL_VERTEX_SHADER, kTexVs);
-    unsigned int ifs = CompileShader(GL_FRAGMENT_SHADER, kImageFs);
-    image_prog_ = LinkProgram(ivs, ifs);
-    CHECK_NE(image_prog_, 0u);
-
-    // 3D 纯色 shader
-    unsigned int vs3d = CompileShader(GL_VERTEX_SHADER, kVs3d);
-    unsigned int fs3d = CompileShader(GL_FRAGMENT_SHADER, kFs3d);
-    prog_3d_ = LinkProgram(vs3d, fs3d);
-    CHECK_NE(prog_3d_, 0u);
-
-    // 3D 纹理 shader（用于 Text3D）
-    unsigned int tvs3d = CompileShader(GL_VERTEX_SHADER, kTexVs3d);
-    unsigned int tfs3d = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
-    tex_prog_3d_ = LinkProgram(tvs3d, tfs3d);
-    CHECK_NE(tex_prog_3d_, 0u);
+    // 首次调用即触发编译+缓存；重复调用幂等。
+    SolidProg();
+    TextProg();
+    ImageProg();
+    Solid3DProg();
+    Text3DProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -807,12 +775,13 @@ void Renderer::DrawText2D(const Text2DCommand& cmd) {
     UploadAllDirty(*slot);
 
     // 上传顶点数据到 VBO
-    glUseProgram(tex_prog_);
-    glUniform2f(glGetUniformLocation(tex_prog_, "uFboSize"),
+    unsigned int prog = TextProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(tex_prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-    glUniform1i(glGetUniformLocation(tex_prog_, "uTexture"), 0);
+    glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
 
     // 绑定对应层级的纹理
     glActiveTexture(GL_TEXTURE0);
@@ -1071,10 +1040,11 @@ void Renderer::DrawTriangle3D(const Triangle3DCommand& cmd) {
         cmd.p3.x(), cmd.p3.y(), cmd.p3.z(),
     };
 
-    glUseProgram(prog_3d_);
-    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+    unsigned int prog = Solid3DProg();
+    glUseProgram(prog);
+    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                        1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1101,10 +1071,11 @@ void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
 
     int total_floats = capped_n * 3;  // capped_n 个顶点 × 3 floats
 
-    glUseProgram(prog_3d_);
-    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+    unsigned int prog = Solid3DProg();
+    glUseProgram(prog);
+    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                        1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     // 上传到专用 VBO
@@ -1126,10 +1097,11 @@ void Renderer::DrawStrip2D(const Strip2DCommand& cmd) {
     int capped_n = (n > kMaxStrip2DVertices) ? kMaxStrip2DVertices : n;
     int total_floats = capped_n * 2;  // Vec2f = 2 floats per vertex
 
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1295,10 +1267,11 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
         float x1 = x0 + cmd.size.x();
         float y1 = y0 + cmd.size.y();
         float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
-        glUseProgram(prog_);
-        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+        unsigned int prog = SolidProg();
+        glUseProgram(prog);
+        glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                     static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+        glUniform4f(glGetUniformLocation(prog, "uColor"),
                     cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
         glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
@@ -1315,10 +1288,11 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
 
     // Render
     int total_verts = static_cast<int>(verts.size()) / 2;
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1358,10 +1332,11 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
 
     // ===== 第一步：填充部分 =====
     // 复用 TriangulateRoundRectFill() 产生三角形顶点
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.fill_color.r, cmd.fill_color.g,
                 cmd.fill_color.b, cmd.fill_color.a);
 
@@ -1525,10 +1500,11 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
     // Render border
     if (!border_verts.empty()) {
         int total_border = static_cast<int>(border_verts.size()) / 2;
-        glUseProgram(prog_);
-        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+        unsigned int bprog = SolidProg();
+        glUseProgram(bprog);
+        glUniform2f(glGetUniformLocation(bprog, "uFboSize"),
                     static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+        glUniform4f(glGetUniformLocation(bprog, "uColor"),
                     cmd.border_color.r, cmd.border_color.g,
                     cmd.border_color.b, cmd.border_color.a);
         glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1582,10 +1558,11 @@ void Renderer::DrawArc2D(const Arc2DCommand& cmd) {
         }
 
         int total_verts = static_cast<int>(verts.size()) / 2;
-        glUseProgram(prog_);
-        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+        unsigned int prog = SolidProg();
+        glUseProgram(prog);
+        glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                     static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+        glUniform4f(glGetUniformLocation(prog, "uColor"),
                     cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
         glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
         glBufferData(GL_ARRAY_BUFFER,
@@ -1628,10 +1605,11 @@ void Renderer::DrawArc2D(const Arc2DCommand& cmd) {
     }
 
     int total_verts = static_cast<int>(verts.size()) / 2;
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
     glBufferData(GL_ARRAY_BUFFER,
@@ -1650,10 +1628,11 @@ void Renderer::DrawLine3D(const Line3DCommand& cmd) {
         cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
     };
 
-    glUseProgram(prog_3d_);
-    glUniformMatrix4fv(glGetUniformLocation(prog_3d_, "uMVP"),
+    unsigned int prog = Solid3DProg();
+    glUseProgram(prog);
+    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                        1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog_3d_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1838,10 +1817,11 @@ void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
 
     CHECK_LE(total_verts, kMaxStreamVertices);
 
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1870,12 +1850,13 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
     verts[6] = x0;
     verts[7] = y1;
 
-    glUseProgram(prog_);
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
     // uFboSize = NDC 变换参照。必须用 FBO 尺寸（渲染分辨率），
     // 使 NDC 坐标空间与 glViewport 一致，避免 rect 偏移。
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1906,10 +1887,11 @@ void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
         verts[(i + 1) * 2 + 1] = cy + r * static_cast<float>(sin(angle));
     }
 
-    glUseProgram(prog_);
-    glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+    unsigned int prog = SolidProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog_, "uColor"),
+    glUniform4f(glGetUniformLocation(prog, "uColor"),
                 cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
@@ -1957,12 +1939,13 @@ void Renderer::DrawImage2D(const Image2DCommand& cmd) {
         x0, y1, 0.0f, 1.0f,  // T2: bottom-left
     };
 
-    glUseProgram(image_prog_);
-    glUniform2f(glGetUniformLocation(image_prog_, "uFboSize"),
+    unsigned int prog = ImageProg();
+    glUseProgram(prog);
+    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(image_prog_, "uTint"),
+    glUniform4f(glGetUniformLocation(prog, "uTint"),
                 cmd.tint.r, cmd.tint.g, cmd.tint.b, cmd.tint.a);
-    glUniform1i(glGetUniformLocation(image_prog_, "uTexture"), 0);
+    glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, gl_tex);

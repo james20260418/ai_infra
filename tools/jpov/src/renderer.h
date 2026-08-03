@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font_manager.h"
+#include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
 
 struct GLFWwindow;
@@ -74,7 +75,6 @@ private:
     unsigned int fbo_ = 0;
     unsigned int color_tex_ = 0;
     unsigned int stream_vbo_ = 0;
-    unsigned int prog_ = 0;
     int fbo_w_ = 0;
     int fbo_h_ = 0;
 
@@ -193,11 +193,20 @@ private:
     static std::vector<float> TriangulateRoundRectFill(
         const Vec2f& pos, const Vec2f& size, float radius);
 
-    unsigned int tex_prog_ = 0;
-    unsigned int image_prog_ = 0;  // RGBA 全彩纹理 shader（Image2D）
-    unsigned int prog_3d_ = 0;  // 3D solid color shader
-    unsigned int tex_prog_3d_ = 0;  // 3D textured shader
     float mvp_[16];  // 当前帧的 MVP 矩阵缓存
+
+    // Shader 管理器（所有 GLSL program 的注册 / 编译 / 缓存）
+    ShaderManager shader_mgr_;
+
+    // ---- Shader program 访问器 ----
+    // 通过 ShaderManager 按名字获取，首次调用时用对应 GLSL 源码注册。
+    // GetOrCreate 幂等：重复调用返回缓存的 program。
+    // 新增 shader 时在此加一个访问器即可，无需改 Renderer 成员变量。
+    unsigned int SolidProg();     // 2D 纯色（kVs/kFs）
+    unsigned int TextProg();      // 2D 文字/字体（kTexVs/kTexFs）
+    unsigned int ImageProg();     // 2D 图片 RGBA（kTexVs/kImageFs）
+    unsigned int Solid3DProg();   // 3D 纯色（kVs3d/kFs3d）
+    unsigned int Text3DProg();    // 3D 纹理（kTexVs3d/kTexFs，为 Text3D 预留）
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;
