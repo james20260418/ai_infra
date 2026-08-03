@@ -59,6 +59,7 @@
 #define glGenTextures            gl_GenTextures
 #define glDeleteTextures         gl_DeleteTextures
 #define glBindTexture            gl_BindTexture
+#define glBindVertexArray        gl_BindVertexArray
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
 #define glBlitFramebuffer        gl_BlitFramebuffer
@@ -137,6 +138,39 @@ void main() {
 }
 )glsl";
 
+// ==================== 3D 静态模型 Shaders（用于 Object3D）====================
+
+// 3D 静态模型顶点 shader：接受局部空间位置 + UV，
+// 通过 MVP（含 Model 变换）映射到 NDC。
+// 属性 location 与 MeshManager 的 VBO 布局一致：
+//   0 = position，1 = normal，2 = uv
+const char* kMeshVs3d = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 2) in vec2 aTexCoord;
+uniform mat4 uMVP;
+out vec2 vTexCoord;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vTexCoord = aTexCoord;
+}
+)glsl";
+
+// 3D 静态模型纹理 Fragment Shader：纹理×tint 混合（RGB 采样）
+const char* kMeshTexFs = R"glsl(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform vec4 uTint;
+
+void main() {
+    vec4 tex_color = texture(uTexture, vTexCoord);
+    FragColor = tex_color * uTint;
+}
+)glsl";
+
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
 // 4x4 矩阵乘法：out = a * b（列主序）
@@ -208,6 +242,44 @@ static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16
 
     // MVP = Proj * View
     Mat4Mul(proj, view, mvp);
+}
+
+// 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）
+//
+// 把局部空间（mesh 定义坐标）映射到世界空间：
+//   - 局部 +Y → 世界 up
+//   - 局部 +Z → 世界 front
+//   - 局部 +X → normalize(cross(up, front))（保证右手系）
+// 再平移 center。无缩放。
+//
+// Model = T(center) * R(right, up, front)
+// Pre-condition: up、front 均非零且不平行（调用方 DrawObject3D 已校验）
+static void BuildModelMatrix(const jpov::Vec3f& center,
+                             const jpov::Vec3f& up,
+                             const jpov::Vec3f& front,
+                             float model[16]) {
+    // 归一化 up 与 front
+    float u_len = std::sqrt(up.x()*up.x() + up.y()*up.y() + up.z()*up.z());
+    float f_len = std::sqrt(front.x()*front.x() + front.y()*front.y() + front.z()*front.z());
+    jpov::Vec3f upn = {up.x()/u_len, up.y()/u_len, up.z()/u_len};
+    jpov::Vec3f frn = {front.x()/f_len, front.y()/f_len, front.z()/f_len};
+
+    // right = normalize(cross(up, front))——保证模型右手系
+    jpov::Vec3f right = {upn.y()*frn.z() - upn.z()*frn.y(),
+                         upn.z()*frn.x() - upn.x()*frn.z(),
+                         upn.x()*frn.y() - upn.y()*frn.x()};
+    float r_len = std::sqrt(right.x()*right.x() + right.y()*right.y() + right.z()*right.z());
+    right = {right.x()/r_len, right.y()/r_len, right.z()/r_len};
+
+    // 列主序旋转部分：
+    //   model[0..2] = right 列（世界 X 轴方向）
+    //   model[4..6] = upn   列（世界 Y 轴方向）
+    //   model[8..10]= frn   列（世界 Z 轴方向）
+    // 平移在最后一列（12..14）
+    model[0] = right.x(); model[4] = upn.x(); model[8]  = frn.x(); model[12] = center.x();
+    model[1] = right.y(); model[5] = upn.y(); model[9]  = frn.y(); model[13] = center.y();
+    model[2] = right.z(); model[6] = upn.z(); model[10] = frn.z(); model[14] = center.z();
+    model[3] = 0.0f;      model[7] = 0.0f;    model[11] = 0.0f;    model[15] = 1.0f;
 }
 
 // 纹理+颜色混合 Fragment Shader
@@ -523,6 +595,10 @@ unsigned int Renderer::Text3DProg() {
     return shader_mgr_.GetOrCreate("text3d", {kTexVs3d, kTexFs});
 }
 
+unsigned int Renderer::TexturedMesh3DProg() {
+    return shader_mgr_.GetOrCreate("mesh3d_textured", {kMeshVs3d, kMeshTexFs});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -532,6 +608,7 @@ void Renderer::CompileShaders() {
     ImageProg();
     Solid3DProg();
     Text3DProg();
+    TexturedMesh3DProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -852,7 +929,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         if (type == DrawCommandType::kTriangle3D ||
             type == DrawCommandType::kStrip3D ||
             type == DrawCommandType::kLine3D ||
-            type == DrawCommandType::kText3D) {
+            type == DrawCommandType::kText3D ||
+            type == DrawCommandType::kObject3D) {
             has_3d = true;
             break;
         }
@@ -1022,6 +1100,12 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.text3d.size()));
                 DrawText3D(cmds.text3d[idx]);
+                break;
+            }
+            case DrawCommandType::kObject3D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
+                DrawObject3D(cmds.object3d[idx]);
                 break;
             }
             default:
@@ -1647,6 +1731,66 @@ void Renderer::DrawLine3D(const Line3DCommand& cmd) {
 void Renderer::DrawText3D(const Text3DCommand& cmd) {
     (void)cmd;
     LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
+}
+
+void Renderer::DrawObject3D(const Object3DCommand& cmd) {
+    // 1. 从 mesh 管理器取 GPU mesh 句柄（VAO/VBO/EBO 已在注册时绑定好属性）
+    const GPUMesh* mesh = mesh_mgr_.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawObject3D: mesh_id " << cmd.mesh_id
+                           << " 未注册（DrawObject3D 前需先 RegisterMesh）";
+    CHECK_GT(mesh->vao, 0u);
+
+    // 2. 校验 up/front 非零且不平行（模型基向量需要）
+    const float up_len =
+        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
+    const float fr_len =
+        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
+    CHECK_GT(up_len, 1e-8f) << "DrawObject3D: up 向量不能为零";
+    CHECK_GT(fr_len, 1e-8f) << "DrawObject3D: front 向量不能为零";
+
+    // 3. 构建 Model 矩阵，并合成 MVP = mvp_(Proj*View) * Model
+    float model[16], mvp[16];
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
+    Mat4Mul(mvp_, model, mvp);
+
+    // 4. 纹理 or 纯色着色
+    const bool textured = (cmd.texture_id != 0);
+    if (textured) {
+        // 纹理模式：mesh 必须含 UV 属性
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+            << "DrawObject3D: texture_id 非 0 但 mesh 无 kUV 属性，无法纹理采样";
+        unsigned int gl_tex = texture_mgr_.GetGLTexture(cmd.texture_id);
+        CHECK_NE(gl_tex, 0u)
+            << "DrawObject3D: texture_id " << cmd.texture_id << " 未注册";
+
+        unsigned int prog = TexturedMesh3DProg();
+        glUseProgram(prog);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
+                           1, GL_FALSE, mvp);
+        glUniform4f(glGetUniformLocation(prog, "uTint"),
+                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
+    } else {
+        unsigned int prog = Solid3DProg();
+        glUseProgram(prog);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
+                           1, GL_FALSE, mvp);
+        glUniform4f(glGetUniformLocation(prog, "uColor"),
+                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+    }
+
+    // 5. 发起绘制（indexed 用 EBO，否则按顶点序）
+    // 绑定 mesh VAO：属性指针已固化在 VAO 中，无需再设 attrib。
+    glBindVertexArray(mesh->vao);
+    if (mesh->index_count > 0) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                       GL_UNSIGNED_INT, nullptr);
+    } else {
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+    }
+    glBindVertexArray(0);
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {

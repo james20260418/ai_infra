@@ -122,6 +122,7 @@ private:
     void DrawTriangle3D(const Triangle3DCommand& cmd);
     void DrawLine3D(const Line3DCommand& cmd);
     void DrawText3D(const Text3DCommand& cmd);
+    void DrawObject3D(const Object3DCommand& cmd);
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
     // ---- 字体管理 ----
@@ -211,6 +212,7 @@ private:
     unsigned int ImageProg();     // 2D 图片 RGBA（kTexVs/kImageFs）
     unsigned int Solid3DProg();   // 3D 纯色（kVs3d/kFs3d）
     unsigned int Text3DProg();    // 3D 纹理（kTexVs3d/kTexFs，为 Text3D 预留）
+    unsigned int TexturedMesh3DProg();  // 3D 静态模型纹理（kMeshVs3d/kMeshTexFs）
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;
