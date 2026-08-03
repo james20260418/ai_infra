@@ -215,6 +215,30 @@ void JPOV::ReleaseTexture(uint32_t texture_id) {
     renderer_->GetTextureManager().Release(texture_id);
 }
 
+// ========== 网格管理 ==========
+
+uint32_t JPOV::RegisterMesh(const jpov::MeshData& data) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    data.Validate();
+    return renderer_->GetMeshManager().RegisterMesh(data);
+}
+
+void JPOV::UpdateMesh(uint32_t mesh_id, const jpov::MeshData& new_data) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK_GT(mesh_id, 0u);
+    CHECK(renderer_ != nullptr);
+    new_data.Validate();
+    renderer_->GetMeshManager().UpdateMesh(mesh_id, new_data);
+}
+
+void JPOV::ReleaseMesh(uint32_t mesh_id) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK_GT(mesh_id, 0u);
+    CHECK(renderer_ != nullptr);
+    renderer_->GetMeshManager().ReleaseMesh(mesh_id);
+}
+
 // ========== 核心渲染步骤 ==========
 
 void JPOV::RunOnceInternal(int64_t frame_count,

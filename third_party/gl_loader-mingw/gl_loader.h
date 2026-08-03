@@ -42,9 +42,13 @@ typedef void (*GL_BlitFramebuffer)(int, int, int, int, int, int, int, int, unsig
 typedef void (*GL_EnableVertexAttribArray)(unsigned int);
 typedef void (*GL_DisableVertexAttribArray)(unsigned int);
 typedef void (*GL_VertexAttribPointer)(unsigned int, int, unsigned int, unsigned char, int, const void*);
+typedef void (*GL_VertexAttribIPointer)(unsigned int, int, unsigned int, int, const void*);
 typedef void (*GL_Uniform1i)(int, int);
 typedef void (*GL_ActiveTexture)(unsigned int);
 typedef void (*GL_UniformMatrix4fv)(int, int, unsigned char, const float*);
+typedef void (*GL_GenVertexArrays)(int, unsigned int*);
+typedef void (*GL_DeleteVertexArrays)(int, const unsigned int*);
+typedef void (*GL_BindVertexArray)(unsigned int);
 
 // Loaded function pointers
 extern GL_GenBuffers             gl_GenBuffers;
@@ -81,9 +85,13 @@ extern GL_BlitFramebuffer        gl_BlitFramebuffer;
 extern GL_EnableVertexAttribArray gl_EnableVertexAttribArray;
 extern GL_DisableVertexAttribArray gl_DisableVertexAttribArray;
 extern GL_VertexAttribPointer    gl_VertexAttribPointer;
+extern GL_VertexAttribIPointer   gl_VertexAttribIPointer;
 extern GL_Uniform1i              gl_Uniform1i;
 extern GL_ActiveTexture          gl_ActiveTexture;
 extern GL_UniformMatrix4fv       gl_UniformMatrix4fv;
+extern GL_GenVertexArrays        gl_GenVertexArrays;
+extern GL_DeleteVertexArrays     gl_DeleteVertexArrays;
+extern GL_BindVertexArray        gl_BindVertexArray;
 
 // Load all function pointers. Call once after GL context creation.
 int gl_loader_init(void);

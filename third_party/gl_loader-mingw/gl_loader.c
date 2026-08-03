@@ -69,8 +69,12 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_EnableVertexAttribArray, "glEnableVertexAttribArray");
     LOAD_FUNC(gl_DisableVertexAttribArray, "glDisableVertexAttribArray");
     LOAD_FUNC(gl_VertexAttribPointer,    "glVertexAttribPointer");
+    LOAD_FUNC(gl_VertexAttribIPointer,   "glVertexAttribIPointer");
     LOAD_FUNC(gl_Uniform1i,              "glUniform1i");
     LOAD_FUNC(gl_ActiveTexture,          "glActiveTexture");
+    LOAD_FUNC(gl_GenVertexArrays,        "glGenVertexArrays");
+    LOAD_FUNC(gl_DeleteVertexArrays,     "glDeleteVertexArrays");
+    LOAD_FUNC(gl_BindVertexArray,        "glBindVertexArray");
     return 0;
 }
 
@@ -110,6 +114,10 @@ DEFINE_PTR(GL_BlitFramebuffer,        gl_BlitFramebuffer);
 DEFINE_PTR(GL_EnableVertexAttribArray, gl_EnableVertexAttribArray);
 DEFINE_PTR(GL_DisableVertexAttribArray, gl_DisableVertexAttribArray);
 DEFINE_PTR(GL_VertexAttribPointer,    gl_VertexAttribPointer);
+DEFINE_PTR(GL_VertexAttribIPointer,   gl_VertexAttribIPointer);
 DEFINE_PTR(GL_Uniform1i,              gl_Uniform1i);
 DEFINE_PTR(GL_ActiveTexture,          gl_ActiveTexture);
 DEFINE_PTR(GL_UniformMatrix4fv,       gl_UniformMatrix4fv);
+DEFINE_PTR(GL_GenVertexArrays,        gl_GenVertexArrays);
+DEFINE_PTR(GL_DeleteVertexArrays,     gl_DeleteVertexArrays);
+DEFINE_PTR(GL_BindVertexArray,        gl_BindVertexArray);
