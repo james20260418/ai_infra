@@ -1,5 +1,24 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
+cc_library(
+    name = "texture_manager",
+    srcs = ["texture_manager.cc"],
+    hdrs = ["texture_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # FontManager — 字体加载 / 光栅化 / 图集管理 / 顶点生成
 cc_library(
     name = "font_manager",
@@ -24,6 +43,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":font_manager",
+        ":texture_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",

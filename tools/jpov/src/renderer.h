@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font_manager.h"
+#include "tools/jpov/src/texture_manager.h"
 
 struct GLFWwindow;
 
@@ -65,6 +66,9 @@ struct Renderer {
     // SaveScreenshotToBuffer: 同上，但以 RGBA uint8 数组输出
     void SaveScreenshotToBuffer(int win_w, int win_h,
                                 std::vector<uint8_t>* out_pixels /*output*/);
+
+    // 纹理管理器（暴露给 JPOV 用于 RegisterTexture 等）
+    TextureManager& GetTextureManager() { return texture_mgr_; }
 
 private:
     unsigned int fbo_ = 0;
@@ -190,9 +194,16 @@ private:
         const Vec2f& pos, const Vec2f& size, float radius);
 
     unsigned int tex_prog_ = 0;
+    unsigned int image_prog_ = 0;  // RGBA 全彩纹理 shader（Image2D）
     unsigned int prog_3d_ = 0;  // 3D solid color shader
     unsigned int tex_prog_3d_ = 0;  // 3D textured shader
     float mvp_[16];  // 当前帧的 MVP 矩阵缓存
+
+    // 纹理管理器（字体 atlas 之外的用户纹理）
+    TextureManager texture_mgr_;
+
+    // 2D 图片渲染
+    void DrawImage2D(const Image2DCommand& cmd);
 };
 
 }  // namespace jpov

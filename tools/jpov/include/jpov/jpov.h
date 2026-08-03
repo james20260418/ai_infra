@@ -135,6 +135,33 @@ public:
                               const jpov::WindowInfo& winfo,
                               jpov::RenderCommandList* cmds /*output*/) = 0;
 
+    // ---- 纹理管理 ----
+
+    // RegisterTexture: 从 PNG 文件加载纹理到 GPU。
+    //
+    // 返回纹理 ID 用于 DrawImage。
+    // 同一文件路径仅加载一次，重复调用返回相同 ID。
+    // 加载失败 → LOG(FATAL) crash。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: filepath 非空
+    uint32_t RegisterTexture(const std::string& filepath);
+
+    // RegisterTexture: 注册已有 GL 纹理对象。
+    //
+    // 调用者自行管理 GL 纹理生命周期。
+    // JPOV 仅在 ReleaseTexture 时移除记录，不 delete 外部 GL 纹理。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: gl_texture_id != 0, width > 0, height > 0
+    uint32_t RegisterTexture(uint32_t gl_texture_id, int width, int height);
+
+    // ReleaseTexture: 释放纹理。
+    //
+    // 纹理 ID 不存在 → 静默忽略。
+    // Pre-condition: Init() 已调用
+    void ReleaseTexture(uint32_t texture_id);
+
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //

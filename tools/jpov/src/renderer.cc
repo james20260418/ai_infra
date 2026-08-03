@@ -240,6 +240,20 @@ void main() {
 }
 )glsl";
 
+// RGBA 纹理 Fragment Shader（用于 Image2D 全彩纹理）
+const char* kImageFs = R"glsl(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform vec4 uTint;
+
+void main() {
+    vec4 tex_color = texture(uTexture, vTexCoord);
+    FragColor = tex_color * uTint;
+}
+)glsl";
+
 unsigned int CompileShader(GLenum type, const char* source) {
     unsigned int shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -316,6 +330,7 @@ Renderer::~Renderer() {
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
     if (tex_prog_)     glDeleteProgram(tex_prog_);
+    if (image_prog_)   glDeleteProgram(image_prog_);
     // Font GL textures (所有注册字体的三层 atlas)
     for (auto& [alias, slot] : font_slots_) {
         (void)alias;
@@ -526,11 +541,17 @@ void Renderer::CompileShaders() {
     prog_ = LinkProgram(vs, fs);
     CHECK_NE(prog_, 0u);
 
-    // 纹理 shader
+    // 纹理 shader（字体）
     unsigned int tvs = CompileShader(GL_VERTEX_SHADER, kTexVs);
     unsigned int tfs = CompileShader(GL_FRAGMENT_SHADER, kTexFs);
     tex_prog_ = LinkProgram(tvs, tfs);
     CHECK_NE(tex_prog_, 0u);
+
+    // 图片 shader（RGBA 全彩纹理）
+    unsigned int ivs = CompileShader(GL_VERTEX_SHADER, kTexVs);
+    unsigned int ifs = CompileShader(GL_FRAGMENT_SHADER, kImageFs);
+    image_prog_ = LinkProgram(ivs, ifs);
+    CHECK_NE(image_prog_, 0u);
 
     // 3D 纯色 shader
     unsigned int vs3d = CompileShader(GL_VERTEX_SHADER, kVs3d);
@@ -989,6 +1010,12 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.arc2d.size()));
                 DrawArc2D(cmds.arc2d[idx]);
+                break;
+            }
+            case DrawCommandType::kImage2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.image2d.size()));
+                DrawImage2D(cmds.image2d[idx]);
                 break;
             }
             default:
@@ -1892,6 +1919,75 @@ void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
     glDrawArrays(GL_TRIANGLE_FAN, 0, kSegments + 2);
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::DrawImage2D(const Image2DCommand& cmd) {
+    // 查找纹理
+    int tex_w = 0;
+    int tex_h = 0;
+    bool found = texture_mgr_.GetSize(cmd.texture_id, &tex_w, &tex_h);
+    CHECK(found) << "DrawImage2D: texture_id=" << cmd.texture_id
+                 << " not registered";
+    CHECK_GT(tex_w, 0);
+    CHECK_GT(tex_h, 0);
+
+    uint32_t gl_tex = texture_mgr_.GetGLTexture(cmd.texture_id);
+    CHECK_NE(gl_tex, 0u) << "DrawImage2D: texture_id=" << cmd.texture_id
+                          << " has no GL texture";
+
+    // 构建矩形面片：pos → pos+size，UV (0,0)→(1,1)
+    // 顶点格式：[x, y, u, v] interleaved，6 顶点（2 三角形）
+    float x0 = cmd.pos.x();
+    float y0 = cmd.pos.y();
+    float x1 = x0 + cmd.size.x();
+    float y1 = y0 + cmd.size.y();
+
+    // T1: (x0,y0)-(x1,y0)-(x1,y1), T2: (x0,y0)-(x1,y1)-(x0,y1)
+    // 屏幕坐标 y0=上 y1=下。shader 设 ndc.y = -ndc.y 使 y0→NDC 上方。
+    // stb_image 像素第一行=图片顶部, glTexImage2D 把它放在 v=0 (GL 纹理底部),
+    // 因此图片顶部对应 v=0, 图片底部对应 v=1。
+    // 要把图片顶部映射到屏幕上方 (y0), 底部映射到屏幕下方 (y1):
+    //   y0 → v=0, y1 → v=1
+    float verts[24] = {
+        x0, y0, 0.0f, 0.0f,  // T1: top-left
+        x1, y0, 1.0f, 0.0f,  // T1: top-right
+        x1, y1, 1.0f, 1.0f,  // T1: bottom-right
+        x0, y0, 0.0f, 0.0f,  // T2: top-left
+        x1, y1, 1.0f, 1.0f,  // T2: bottom-right
+        x0, y1, 0.0f, 1.0f,  // T2: bottom-left
+    };
+
+    glUseProgram(image_prog_);
+    glUniform2f(glGetUniformLocation(image_prog_, "uFboSize"),
+                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+    glUniform4f(glGetUniformLocation(image_prog_, "uTint"),
+                cmd.tint.r, cmd.tint.g, cmd.tint.b, cmd.tint.a);
+    glUniform1i(glGetUniformLocation(image_prog_, "uTexture"), 0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gl_tex);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+
+    constexpr int kStride = 4 * static_cast<int>(sizeof(float));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, kStride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, kStride,
+                          (void*)(2 * sizeof(float)));
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawImage2D: " << draw_err;
+    }
+
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 }  // namespace jpov

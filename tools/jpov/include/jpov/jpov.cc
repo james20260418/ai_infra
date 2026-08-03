@@ -190,6 +190,31 @@ void JPOV::Finalize() {
     LOG(INFO) << "JPOV::Finalize()";
 }
 
+// ========== 纹理管理 ==========
+
+uint32_t JPOV::RegisterTexture(const std::string& filepath) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(!filepath.empty()) << "RegisterTexture: filepath is empty";
+    CHECK(renderer_ != nullptr);
+    return renderer_->GetTextureManager().LoadFromFile(filepath);
+}
+
+uint32_t JPOV::RegisterTexture(uint32_t gl_texture_id, int width, int height) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK_NE(gl_texture_id, 0u);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK(renderer_ != nullptr);
+    return renderer_->GetTextureManager().Register(gl_texture_id, width, height);
+}
+
+void JPOV::ReleaseTexture(uint32_t texture_id) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK_GT(texture_id, 0u);
+    CHECK(renderer_ != nullptr);
+    renderer_->GetTextureManager().Release(texture_id);
+}
+
 // ========== 核心渲染步骤 ==========
 
 void JPOV::RunOnceInternal(int64_t frame_count,

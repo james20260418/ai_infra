@@ -16,10 +16,6 @@
 
 #include <glog/logging.h>
 
-// 在此文件中实现 stb_image（非 stb_image_write），因此不需要 STB_IMAGE_IMPLEMENTATION
-// 在 renderer.cc 和 header 中已经通过其他方式处理了 stb 相关宏。
-// 这里我们直接包含 stb_image.h 并在此编译单元定义实现。
-#define STB_IMAGE_IMPLEMENTATION
 #include "third_party/stb/stb_image.h"
 
 #include "tools/jpov/include/jpov/jpov.h"
