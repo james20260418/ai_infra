@@ -85,6 +85,8 @@ enum class DrawCommandType : uint8_t {
     kArc2D,             // 2D 圆弧/扇形（屏幕空间，像素坐标，
                         //      圆心+半径+起始角度+跨度角度，
                         //      CPU 三角化后以三角形列表渲染）
+    kImage2D,           // 2D 图片（屏幕空间，像素坐标，
+                        //      GPU 纹理采样 + 矩形面片）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -305,6 +307,28 @@ struct Arc2DCommand {
     Color color;
 };
 
+// 2D 图片（渲染分辨率空间，像素坐标）
+//
+// 通过 GPU 纹理采样将已注册的纹理绘制到指定矩形区域。
+// 纹理由 JPOV::RegisterTexture 预先注册，获取 texture_id。
+//
+// texture_id:  纹理句柄（由 RegisterTexture 返回）
+// pos:         绘制区域的左上角位置（像素坐标）
+// size:        绘制区域的宽度和高度（像素单位，>0）
+// tint:        色调乘数（默认白色=不染色，可用 alpha 控制透明度）
+//
+// 绘制时纹理会被 UV 映射到 [pos, pos+size] 矩形区域。
+// 纹理原始宽高比与 size 不一致时会产生拉伸。
+//
+// Pre-condition: texture_id 已注册且未释放
+// Pre-condition: size.x > 0 && size.y > 0
+struct Image2DCommand {
+    uint32_t texture_id;
+    Vec2f pos;
+    Vec2f size;
+    Color tint;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -329,6 +353,7 @@ struct RenderCommandList {
     std::vector<FillRect2DCommand> fillrect2d;
     std::vector<Strip2DCommand> strip2d;
     std::vector<Arc2DCommand> arc2d;
+    std::vector<Image2DCommand> image2d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -448,6 +473,15 @@ struct RenderCommandList {
     void DrawArc2D(const Vec2f& center, float radius,
                    float start_angle, float span_angle,
                    const Color& color);
+
+    // 2D 图片（渲染分辨率空间，像素坐标）
+    //
+    // 将已注册的纹理绘制到指定矩形区域。
+    // Pre-condition: texture_id 已注册且未释放
+    // Pre-condition: size.x > 0 && size.y > 0
+    void DrawImage(uint32_t texture_id, const Vec2f& pos,
+                   const Vec2f& size,
+                   const Color& tint = kColorWhite);
 };
 
 }  // namespace jpov

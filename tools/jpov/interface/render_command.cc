@@ -20,6 +20,7 @@ void RenderCommandList::Clear() {
     roundrect2d.clear();
     fillrect2d.clear();
     arc2d.clear();
+    image2d.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -141,6 +142,16 @@ void RenderCommandList::DrawFillRect(const Vec2f& pos, const Vec2f& size,
     int idx = static_cast<int>(fillrect2d.size());
     fillrect2d.push_back({pos, size, fill_color, border_color, border_width, radius});
     order.emplace_back(DrawCommandType::kFillRect2D, idx);
+}
+
+void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
+                                   const Vec2f& size, const Color& tint) {
+    CHECK_GT(texture_id, 0u);
+    CHECK_GT(size.x(), 0.0f);
+    CHECK_GT(size.y(), 0.0f);
+    int idx = static_cast<int>(image2d.size());
+    image2d.push_back({texture_id, pos, size, tint});
+    order.emplace_back(DrawCommandType::kImage2D, idx);
 }
 
 }  // namespace jpov

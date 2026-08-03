@@ -20,6 +20,7 @@ cc_library(
 
 cc_library(
     name = "stb_image",
+    srcs = ["stb_image_impl.c"],
     hdrs = ["stb_image.h"],
     includes = ["."],
     linkstatic = 1,
