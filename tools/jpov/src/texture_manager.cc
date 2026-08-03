@@ -4,19 +4,26 @@
 
 #include "tools/jpov/src/texture_manager.h"
 
-#include "third_party/stb/stb_image.h"
-
-#include <GL/gl.h>
-#include <glog/logging.h>
-
 #ifdef _WIN32
+// MinGW: windows.h 定义 ERROR 宏与 glog 冲突，必须在 glog 之前 suppress
+#ifndef GLOG_NO_ABBREVIATED_SEVERITIES
+#define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
 #define glGenTextures    gl_GenTextures
 #define glDeleteTextures gl_DeleteTextures
 #define glBindTexture    gl_BindTexture
 #define glTexImage2D     gl_TexImage2D
 #define glTexParameteri  gl_TexParameteri
+// MinGW 的 GL/gl.h 没有 GL_CLAMP_TO_EDGE（旧版 OpenGL），手动定义
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
 #endif
+#endif
+
+#include "third_party/stb/stb_image.h"
+#include <GL/gl.h>
+#include <glog/logging.h>
 
 namespace jpov {
 
