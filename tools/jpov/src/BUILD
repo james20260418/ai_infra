@@ -1,5 +1,23 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# ShaderManager — GLSL shader program 注册/编译/缓存管理
+cc_library(
+    name = "shader_manager",
+    srcs = ["shader_manager.cc"],
+    hdrs = ["shader_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
 cc_library(
     name = "texture_manager",
@@ -43,6 +61,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":font_manager",
+        ":shader_manager",
         ":texture_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
