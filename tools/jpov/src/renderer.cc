@@ -1116,46 +1116,27 @@ void Renderer::DrawStrip2D(const Strip2DCommand& cmd) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
-    // CPU 端三角化圆角矩形：
-    // 将圆角矩形分成 9 个区域（4 个角 + 4 个边 + 1 个中心矩形），
-    // 每个圆角用扇形三角形逼近。
-    //
-    // 三角化拓扑（半径 r）：
-    //   圆角区域：以圆角内切矩形边界为锚点，计算圆弧上的点
-    //   边/中心区域：直接用矩形对三角形
-
-    static constexpr int kCornerSegs = 12;  // 每个圆角的三角形数
-    static constexpr int kMaxVerts = 4 * (kCornerSegs + 1) * 2  // 4 corners
-                                   + 4 * 6  // 4 edge rects (2 tris each)
-                                   + 6;     // center rect (2 tris)
-
-    float x0 = cmd.pos.x();
-    float y0 = cmd.pos.y();
-    float x1 = x0 + cmd.size.x();
-    float y1 = y0 + cmd.size.y();
-    float r = cmd.radius;
-
-    // 如果 radius=0，降级为普通矩形
-    if (r <= 0.0f) {
-        float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
-        glUseProgram(prog_);
-        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
-                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog_, "uColor"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glDisableVertexAttribArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        return;
+// ==================== 圆角矩形填充三角化（共享方法） ====================
+//
+// 将圆角矩形分成 9 个区域（4 个角 + 4 个边 + 1 个中心矩形），
+// 每个 90° 圆角用 kRoundCornerSegments 个扇形三角形逼近。
+// 返回的顶点数据用于 GL_TRIANGLES（非 fan）。
+// radius=0 时退化返回空（调用方用 GL_TRIANGLE_FAN 处理）。
+//
+// 三角化拓扑（半径 r）：
+//   圆角区域：以圆角内切矩形边界为锚点，计算圆弧上的点
+//   边/中心区域：直接用矩形对三角形
+std::vector<float> Renderer::TriangulateRoundRectFill(
+    const Vec2f& pos, const Vec2f& size, float radius) {
+    if (radius <= 0.0f) {
+        return {};
     }
 
-    std::vector<float> verts;
-    verts.reserve(kMaxVerts);
+    float x0 = pos.x();
+    float y0 = pos.y();
+    float x1 = x0 + size.x();
+    float y1 = y0 + size.y();
+    float r = radius;
 
     // 圆角边界辅助点（内切边界坐标）
     // 左上角: (x0+r, y0+r) 右上角: (x1-r, y0+r)
@@ -1165,14 +1146,18 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
     float cx_outer = x1 - r;
     float cy_outer = y1 - r;
 
+    int max_verts = 4 * (kRoundCornerSegments + 1) * 2  // 4 corners
+                  + 4 * 6                                 // 4 edge rects (2 tris each)
+                  + 6;                                    // center rect (2 tris)
+    std::vector<float> verts;
+    verts.reserve(max_verts);
+
     // ===== 中心矩形 (x0+r, y0+r) ~ (x1-r, y1-r) =====
-    // 仅当中心矩形有正面积时绘制
     float center_x0 = cx_inner;
     float center_y0 = cy_inner;
     float center_x1 = cx_outer;
     float center_y1 = cy_outer;
     if (center_x1 > center_x0 && center_y1 > center_y0) {
-        // 2 个三角形: (x0,y0)-(x1,y0)-(x1,y1), (x1,y1)-(x0,y1)-(x0,y0)
         verts.push_back(center_x0); verts.push_back(center_y0);
         verts.push_back(center_x1); verts.push_back(center_y0);
         verts.push_back(center_x1); verts.push_back(center_y1);
@@ -1220,11 +1205,10 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
     }
 
     // ===== 4 个圆角区域（扇形三角形） =====
-    // 每个圆角以圆角内边界为起始，沿圆弧展开
     // 左上角：圆心 (x0+r, y0+r)，从 180° 到 270°
-    for (int seg = 0; seg < kCornerSegs; ++seg) {
-        double a0 = 3.14159265358979323846 * (180.0 + 90.0 * seg / kCornerSegs) / 180.0;
-        double a1 = 3.14159265358979323846 * (180.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
+        double a0 = 3.14159265358979323846 * (180.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
+        double a1 = 3.14159265358979323846 * (180.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
         float px0 = cx_inner + r * std::cos(a0);
         float py0 = cy_inner + r * std::sin(a0);
         float px1 = cx_inner + r * std::cos(a1);
@@ -1234,9 +1218,9 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
         verts.push_back(px1);      verts.push_back(py1);
     }
     // 右上角：圆心 (x1-r, y0+r)，从 270° 到 360°
-    for (int seg = 0; seg < kCornerSegs; ++seg) {
-        double a0 = 3.14159265358979323846 * (270.0 + 90.0 * seg / kCornerSegs) / 180.0;
-        double a1 = 3.14159265358979323846 * (270.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
+        double a0 = 3.14159265358979323846 * (270.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
+        double a1 = 3.14159265358979323846 * (270.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
         float px0 = cx_outer + r * std::cos(a0);
         float py0 = cy_inner + r * std::sin(a0);
         float px1 = cx_outer + r * std::cos(a1);
@@ -1246,9 +1230,9 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
         verts.push_back(px1);      verts.push_back(py1);
     }
     // 右下角：圆心 (x1-r, y1-r)，从 0° 到 90°
-    for (int seg = 0; seg < kCornerSegs; ++seg) {
-        double a0 = 3.14159265358979323846 * (90.0 * seg / kCornerSegs) / 180.0;
-        double a1 = 3.14159265358979323846 * (90.0 * (seg + 1) / kCornerSegs) / 180.0;
+    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
+        double a0 = 3.14159265358979323846 * (90.0 * seg / kRoundCornerSegments) / 180.0;
+        double a1 = 3.14159265358979323846 * (90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
         float px0 = cx_outer + r * std::cos(a0);
         float py0 = cy_outer + r * std::sin(a0);
         float px1 = cx_outer + r * std::cos(a1);
@@ -1258,9 +1242,9 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
         verts.push_back(px1);      verts.push_back(py1);
     }
     // 左下角：圆心 (x0+r, y1-r)，从 90° 到 180°
-    for (int seg = 0; seg < kCornerSegs; ++seg) {
-        double a0 = 3.14159265358979323846 * (90.0 + 90.0 * seg / kCornerSegs) / 180.0;
-        double a1 = 3.14159265358979323846 * (90.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
+    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
+        double a0 = 3.14159265358979323846 * (90.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
+        double a1 = 3.14159265358979323846 * (90.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
         float px0 = cx_inner + r * std::cos(a0);
         float py0 = cy_outer + r * std::sin(a0);
         float px1 = cx_inner + r * std::cos(a1);
@@ -1269,6 +1253,38 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
         verts.push_back(px0);      verts.push_back(py0);
         verts.push_back(px1);      verts.push_back(py1);
     }
+
+    return verts;
+}
+
+void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
+    // Render a round-topped rectangle using shared CPU-side triangulation
+    // via TriangulateRoundRectFill().
+
+    if (cmd.radius <= 0.0f) {
+        // Degenerate to plain rectangle via GL_TRIANGLE_FAN
+        float x0 = cmd.pos.x();
+        float y0 = cmd.pos.y();
+        float x1 = x0 + cmd.size.x();
+        float y1 = y0 + cmd.size.y();
+        float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        glUseProgram(prog_);
+        glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
+                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
+        glUniform4f(glGetUniformLocation(prog_, "uColor"),
+                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return;
+    }
+
+    std::vector<float> verts = TriangulateRoundRectFill(
+        cmd.pos, cmd.size, cmd.radius);
 
     // Render
     int total_verts = static_cast<int>(verts.size()) / 2;
@@ -1291,7 +1307,7 @@ void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
 
 void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
     // FillRect2D 的实现策略：
-    // 1. 填充部分：直接复用 DrawRoundRect2D 的三角化逻辑（用 fill_color）
+    // 1. 填充部分：直接复用 TriangulateRoundRectFill() 三角化逻辑（用 fill_color）
     // 2. 边框部分：将圆角矩形边框环三角化为 GL_TRIANGLES（用 border_color）
     //
     // 边框环的几何定义：
@@ -1303,12 +1319,8 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
     //   每个角区域：内外圆弧之间的扇形环
     //   每条边区域：内外矩形边之间的矩形带
 
-    static constexpr int kCornerSegs = 12;  // 每个圆角的扇形分段数（同 RoundRect）
-    static constexpr int kMaxFillVerts = 4 * (kCornerSegs + 1) * 2  // 4 corners
-                                        + 4 * 6                      // 4 edge rects
-                                        + 6;                         // center rect
-    static constexpr int kMaxBorderVerts = 4 * kCornerSegs * 6       // 4 corner rings, 2 tris/seg
-                                          + 4 * 6;                   // 4 edge strips
+    static constexpr int kMaxBorderVerts = 4 * kRoundCornerSegments * 6  // 4 corner rings, 2 tris/seg
+                                          + 4 * 6;                      // 4 edge strips
 
     float x0 = cmd.pos.x();
     float y0 = cmd.pos.y();
@@ -1318,7 +1330,7 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
     float bw = cmd.border_width;
 
     // ===== 第一步：填充部分 =====
-    // 复用 DrawRoundRect2D 逻辑
+    // 复用 TriangulateRoundRectFill() 产生三角形顶点
     glUseProgram(prog_);
     glUniform2f(glGetUniformLocation(prog_, "uFboSize"),
                 static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
@@ -1335,118 +1347,13 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         glDisableVertexAttribArray(0);
     } else {
-        float cx_inner = x0 + r;
-        float cy_inner = y0 + r;
-        float cx_outer = x1 - r;
-        float cy_outer = y1 - r;
-
-        std::vector<float> verts;
-        verts.reserve(kMaxFillVerts);
-
-        // 中心矩形
-        float center_x0 = cx_inner;
-        float center_y0 = cy_inner;
-        float center_x1 = cx_outer;
-        float center_y1 = cy_outer;
-        if (center_x1 > center_x0 && center_y1 > center_y0) {
-            verts.push_back(center_x0); verts.push_back(center_y0);
-            verts.push_back(center_x1); verts.push_back(center_y0);
-            verts.push_back(center_x1); verts.push_back(center_y1);
-            verts.push_back(center_x1); verts.push_back(center_y1);
-            verts.push_back(center_x0); verts.push_back(center_y1);
-            verts.push_back(center_x0); verts.push_back(center_y0);
-        }
-        // 上边
-        if (x1 - r > x0 + r) {
-            verts.push_back(cx_inner);  verts.push_back(y0);
-            verts.push_back(cx_outer);  verts.push_back(y0);
-            verts.push_back(cx_outer);  verts.push_back(cy_inner);
-            verts.push_back(cx_outer);  verts.push_back(cy_inner);
-            verts.push_back(cx_inner);  verts.push_back(cy_inner);
-            verts.push_back(cx_inner);  verts.push_back(y0);
-        }
-        // 下边
-        if (x1 - r > x0 + r) {
-            verts.push_back(cx_inner);  verts.push_back(cy_outer);
-            verts.push_back(cx_outer);  verts.push_back(cy_outer);
-            verts.push_back(cx_outer);  verts.push_back(y1);
-            verts.push_back(cx_outer);  verts.push_back(y1);
-            verts.push_back(cx_inner);  verts.push_back(y1);
-            verts.push_back(cx_inner);  verts.push_back(cy_outer);
-        }
-        // 左边
-        if (y1 - r > y0 + r) {
-            verts.push_back(x0);       verts.push_back(cy_inner);
-            verts.push_back(cx_inner); verts.push_back(cy_inner);
-            verts.push_back(cx_inner); verts.push_back(cy_outer);
-            verts.push_back(cx_inner); verts.push_back(cy_outer);
-            verts.push_back(x0);       verts.push_back(cy_outer);
-            verts.push_back(x0);       verts.push_back(cy_inner);
-        }
-        // 右边
-        if (y1 - r > y0 + r) {
-            verts.push_back(cx_outer); verts.push_back(cy_inner);
-            verts.push_back(x1);       verts.push_back(cy_inner);
-            verts.push_back(x1);       verts.push_back(cy_outer);
-            verts.push_back(x1);       verts.push_back(cy_outer);
-            verts.push_back(cx_outer); verts.push_back(cy_outer);
-            verts.push_back(cx_outer); verts.push_back(cy_inner);
-        }
-        // 4 个圆角扇形
-        // 左上角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
-            double a0 = 3.14159265358979323846 * (180.0 + 90.0 * seg / kCornerSegs) / 180.0;
-            double a1 = 3.14159265358979323846 * (180.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
-            float px0 = cx_inner + r * std::cos(a0);
-            float py0 = cy_inner + r * std::sin(a0);
-            float px1 = cx_inner + r * std::cos(a1);
-            float py1 = cy_inner + r * std::sin(a1);
-            verts.push_back(cx_inner); verts.push_back(cy_inner);
-            verts.push_back(px0);      verts.push_back(py0);
-            verts.push_back(px1);      verts.push_back(py1);
-        }
-        // 右上角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
-            double a0 = 3.14159265358979323846 * (270.0 + 90.0 * seg / kCornerSegs) / 180.0;
-            double a1 = 3.14159265358979323846 * (270.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
-            float px0 = cx_outer + r * std::cos(a0);
-            float py0 = cy_inner + r * std::sin(a0);
-            float px1 = cx_outer + r * std::cos(a1);
-            float py1 = cy_inner + r * std::sin(a1);
-            verts.push_back(cx_outer); verts.push_back(cy_inner);
-            verts.push_back(px0);      verts.push_back(py0);
-            verts.push_back(px1);      verts.push_back(py1);
-        }
-        // 右下角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
-            double a0 = 3.14159265358979323846 * (90.0 * seg / kCornerSegs) / 180.0;
-            double a1 = 3.14159265358979323846 * (90.0 * (seg + 1) / kCornerSegs) / 180.0;
-            float px0 = cx_outer + r * std::cos(a0);
-            float py0 = cy_outer + r * std::sin(a0);
-            float px1 = cx_outer + r * std::cos(a1);
-            float py1 = cy_outer + r * std::sin(a1);
-            verts.push_back(cx_outer); verts.push_back(cy_outer);
-            verts.push_back(px0);      verts.push_back(py0);
-            verts.push_back(px1);      verts.push_back(py1);
-        }
-        // 左下角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
-            double a0 = 3.14159265358979323846 * (90.0 + 90.0 * seg / kCornerSegs) / 180.0;
-            double a1 = 3.14159265358979323846 * (90.0 + 90.0 * (seg + 1) / kCornerSegs) / 180.0;
-            float px0 = cx_inner + r * std::cos(a0);
-            float py0 = cy_outer + r * std::sin(a0);
-            float px1 = cx_inner + r * std::cos(a1);
-            float py1 = cy_outer + r * std::sin(a1);
-            verts.push_back(cx_inner); verts.push_back(cy_outer);
-            verts.push_back(px0);      verts.push_back(py0);
-            verts.push_back(px1);      verts.push_back(py1);
-        }
-
-        int total_verts = static_cast<int>(verts.size()) / 2;
+        std::vector<float> fill_verts = TriangulateRoundRectFill(
+            cmd.pos, cmd.size, cmd.radius);
+        int total_verts = static_cast<int>(fill_verts.size()) / 2;
         glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
         glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                     verts.data(), GL_DYNAMIC_DRAW);
+                     static_cast<GLsizeiptr>(fill_verts.size() * sizeof(float)),
+                     fill_verts.data(), GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
         glDrawArrays(GL_TRIANGLES, 0, total_verts);
@@ -1559,32 +1466,32 @@ void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
 
     if (inner_r > 0.0f) {
         // 左上角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
+        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
             add_ring_segment(
                 cx_inner, cy_inner, icx_inner, icy_inner,
-                180.0 + 90.0 * seg / kCornerSegs,
-                180.0 + 90.0 * (seg + 1) / kCornerSegs);
+                180.0 + 90.0 * seg / kRoundCornerSegments,
+                180.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
         }
         // 右上角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
+        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
             add_ring_segment(
                 cx_outer, cy_inner, icx_outer, icy_inner,
-                270.0 + 90.0 * seg / kCornerSegs,
-                270.0 + 90.0 * (seg + 1) / kCornerSegs);
+                270.0 + 90.0 * seg / kRoundCornerSegments,
+                270.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
         }
         // 右下角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
+        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
             add_ring_segment(
                 cx_outer, cy_outer, icx_outer, icy_outer,
-                90.0 * seg / kCornerSegs,
-                90.0 * (seg + 1) / kCornerSegs);
+                90.0 * seg / kRoundCornerSegments,
+                90.0 * (seg + 1) / kRoundCornerSegments);
         }
         // 左下角
-        for (int seg = 0; seg < kCornerSegs; ++seg) {
+        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
             add_ring_segment(
                 cx_inner, cy_outer, icx_inner, icy_outer,
-                90.0 + 90.0 * seg / kCornerSegs,
-                90.0 + 90.0 * (seg + 1) / kCornerSegs);
+                90.0 + 90.0 * seg / kRoundCornerSegments,
+                90.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
         }
     }
 
@@ -1616,7 +1523,7 @@ void Renderer::DrawArc2D(const Arc2DCommand& cmd) {
     // 跨度角度绝对值 >= 360 时绘制完整圆形。
     // 角度为负时绘制顺时针方向。
 
-    static constexpr int kArcSegs = 48;  // 完整圆的三角形数
+    static constexpr int kArcSegs = kArcFullCircleSegments;  // 完整圆的三角形数
 
     // 计算实际跨度（归一化到 360 度内，支持多圈）
     float abs_span = std::fabs(cmd.span_angle);
@@ -1954,7 +1861,7 @@ void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
 }
 
 void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
-    static constexpr int kSegments = 64;
+    static constexpr int kSegments = kCircleFanSegments;
     float verts[(kSegments + 2) * 2];  // fan center + kSegments perimeter points
     float cx = cmd.center.x();
     float cy = cmd.center.y();
