@@ -10,19 +10,26 @@
 #define GLOG_NO_ABBREVIATED_SEVERITIES
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
+
+// 宏别名：代码中用 glBindTexture 等，展开为 gl_loader 的函数指针调用
 #define glGenTextures    gl_GenTextures
 #define glDeleteTextures gl_DeleteTextures
 #define glBindTexture    gl_BindTexture
 #define glTexImage2D     gl_TexImage2D
 #define glTexParameteri  gl_TexParameteri
-// MinGW 的 GL/gl.h 没有 GL_CLAMP_TO_EDGE（旧版 OpenGL），手动定义
+
+// MinGW 的 gl_loader.h 应已提供 GL 类型和常量。
+// 如果缺少 GL_CLAMP_TO_EDGE（旧版 OpenGL 1.1），手动定义。
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
+
+#else
+// Linux: 直接使用系统 GL
+#include <GL/gl.h>
 #endif
 
 #include "third_party/stb/stb_image.h"
-#include <GL/gl.h>
 #include <glog/logging.h>
 
 namespace jpov {
