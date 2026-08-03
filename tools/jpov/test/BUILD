@@ -426,3 +426,27 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# OBJ 加载器单元测试 — 纯 CPU 解析（不渲染）
+# ============================================================================
+cc_test(
+    name = "jpov_obj_loader_test",
+    srcs = ["jpov_obj_loader_test.cc"],
+    data = [
+        ":beetle.obj",
+        ":cube_hand.obj",
+        ":suzanne.obj",
+    ],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/src:obj_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

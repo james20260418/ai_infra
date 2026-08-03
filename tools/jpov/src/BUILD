@@ -57,6 +57,20 @@ cc_library(
     linkstatic = 1,
 )
 
+# OBJLoader — Wavefront .obj 文本 → CPU MeshData 解析
+cc_library(
+    name = "obj_loader",
+    srcs = ["obj_loader.cc"],
+    hdrs = ["obj_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # FontManager — 字体加载 / 光栅化 / 图集管理 / 顶点生成
 cc_library(
     name = "font_manager",
