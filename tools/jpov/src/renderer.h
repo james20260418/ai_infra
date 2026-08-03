@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font_manager.h"
+#include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
 
@@ -70,6 +71,9 @@ struct Renderer {
 
     // 纹理管理器（暴露给 JPOV 用于 RegisterTexture 等）
     TextureManager& GetTextureManager() { return texture_mgr_; }
+
+    // 网格管理器（暴露给 JPOV 用于 RegisterMesh / UpdateMesh / ReleaseMesh）
+    MeshManager& GetMeshManager() { return mesh_mgr_; }
 
 private:
     unsigned int fbo_ = 0;
@@ -210,6 +214,9 @@ private:
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;
+
+    // 网格管理器（CPU MeshData → GPU VAO/VBO/EBO 的上传/更新/释放）
+    MeshManager mesh_mgr_;
 
     // 2D 图片渲染
     void DrawImage2D(const Image2DCommand& cmd);

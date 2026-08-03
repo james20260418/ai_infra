@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/input_snapshot.h"
+#include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/renderer.h"
@@ -161,6 +162,34 @@ public:
     // 纹理 ID 不存在 → 静默忽略。
     // Pre-condition: Init() 已调用
     void ReleaseTexture(uint32_t texture_id);
+
+    // ---- 网格管理 ----
+
+    // RegisterMesh: 将 CPU MeshData 上传为 GPU mesh，返回 mesh_id。
+    //
+    // 用户自行构造 MeshData（positions/normals/uvs/...），本方法负责
+    // 校验数据、创建 VAO + 按属性分离的 VBO + EBO，返回可被 DrawObject3D
+    // 引用的 mesh_id。
+    // 数据不合规（数组长度不一致 / flags 与数据不符）→ LOG(FATAL) crash。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: data.Validate() 通过（数组对齐、flags 与数据一致）
+    uint32_t RegisterMesh(const jpov::MeshData& data);
+
+    // UpdateMesh: 更新已有 mesh 的顶点数据。
+    //
+    // new_data.flags 必须与注册时一致（VBO 布局不能变）。
+    // 实现策略：删除旧 GL 资源 → 按新数据重建。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: mesh_id 已注册
+    void UpdateMesh(uint32_t mesh_id, const jpov::MeshData& new_data);
+
+    // ReleaseMesh: 释放 mesh 的 GL 资源。
+    //
+    // mesh_id 不存在 → 静默忽略。
+    // Pre-condition: Init() 已调用
+    void ReleaseMesh(uint32_t mesh_id);
 
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----

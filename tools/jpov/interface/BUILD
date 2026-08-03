@@ -55,6 +55,17 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# GPUMesh — CPU MeshData 上传到 GPU 后的句柄（VAO + 分离 VBO + EBO）
+cc_library(
+    name = "gpumesh",
+    hdrs = ["gpumesh.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # jpov_interface — 聚合所有接口（方便用户一次性引用）
 cc_library(
     name = "jpov_interface",
@@ -63,11 +74,13 @@ cc_library(
         "input_snapshot.h",
         "render_command.h",
         "mesh.h",
+        "gpumesh.h",
         "window_info.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
+        ":gpumesh",
         ":input_snapshot",
         ":mesh",
         ":render_command",
