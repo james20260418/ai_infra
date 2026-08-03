@@ -43,6 +43,18 @@ cc_library(
     ],
 )
 
+# MeshData — CPU 侧网格数据定义（顶点属性位掩码 + 逐属性数组 + 校验）
+cc_library(
+    name = "mesh",
+    hdrs = ["mesh.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # jpov_interface — 聚合所有接口（方便用户一次性引用）
 cc_library(
     name = "jpov_interface",
@@ -50,12 +62,14 @@ cc_library(
         "camera.h",
         "input_snapshot.h",
         "render_command.h",
+        "mesh.h",
         "window_info.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
         ":input_snapshot",
+        ":mesh",
         ":render_command",
         ":window_info",
     ],
