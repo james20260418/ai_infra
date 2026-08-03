@@ -4,6 +4,15 @@
 
 #include "tools/jpov/src/texture_manager.h"
 
+// GL 头文件必须最先 include（在 MinGW #define 宏替换之前），
+// 否则 GL 常量（GL_TEXTURE_2D 等）在 MinGW 路径下不可见。
+// 顺序：GL 常量声明 → 再 #define 函数名映射
+#ifdef _WIN32
+#include <GL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
+
 #ifdef _WIN32
 // MinGW: windows.h 定义 ERROR 宏与 glog 冲突，必须在 glog 之前 suppress
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
@@ -11,22 +20,19 @@
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
 
-// 宏别名：代码中用 glBindTexture 等，展开为 gl_loader 的函数指针调用
+// 宏别名：替换代码中的 GL 函数名为 gl_loader 函数指针
+// 注意：#define 必须在 #include <GL/gl.h> 之后，
+// 否则会影响 gl.h 中的函数声明。
 #define glGenTextures    gl_GenTextures
 #define glDeleteTextures gl_DeleteTextures
 #define glBindTexture    gl_BindTexture
 #define glTexImage2D     gl_TexImage2D
 #define glTexParameteri  gl_TexParameteri
 
-// MinGW 的 gl_loader.h 应已提供 GL 类型和常量。
-// 如果缺少 GL_CLAMP_TO_EDGE（旧版 OpenGL 1.1），手动定义。
+// MinGW 的 GL/gl.h 可能缺少 GL_CLAMP_TO_EDGE（旧版 OpenGL 1.1）
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
-
-#else
-// Linux: 直接使用系统 GL
-#include <GL/gl.h>
 #endif
 
 #include "third_party/stb/stb_image.h"
