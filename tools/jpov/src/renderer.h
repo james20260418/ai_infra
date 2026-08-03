@@ -165,6 +165,30 @@ private:
 
     void DrawStrip3D(const Strip3DCommand& cmd);
 
+    // ---- 2D 图元常量 ----
+    // 圆角三角化分段数（每个 90° 圆角细分成 kRoundCornerSegments 个扇形三角形）
+    static constexpr int kRoundCornerSegments = 12;
+    // 完整圆的扇形三角形分段数
+    static constexpr int kCircleFanSegments = 64;
+    // 圆弧近似分段数（用于 DrawCircle2D 和 DrawArc2D 的完整圆路径）
+    static constexpr int kArcFullCircleSegments = 48;
+
+    // 2D 条带（屏幕空间，像素坐标，GL_TRIANGLE_STRIP）
+    static constexpr int kMaxStrip2DVertices = 3000;
+    void DrawStrip2D(const Strip2DCommand& cmd);
+    void DrawRoundRect2D(const RoundRect2DCommand& cmd);
+    void DrawFillRect2D(const FillRect2DCommand& cmd);
+    void DrawArc2D(const Arc2DCommand& cmd);
+
+    // ---- 圆角矩形填充三角化（共享方法） ----
+    // 将圆角矩形（pos, size, radius）三角化为 GL_TRIANGLES 顶点列表。
+    // 返回：每个顶点 2 个 float (x, y)，按 9 区域拓扑排列。
+    // radius=0 时退化为普通矩形（4 顶点 GL_TRIANGLE_FAN）。
+    // Pre-condition: size.x > 0 && size.y > 0
+    // Pre-condition: radius >= 0
+    static std::vector<float> TriangulateRoundRectFill(
+        const Vec2f& pos, const Vec2f& size, float radius);
+
     unsigned int tex_prog_ = 0;
     unsigned int prog_3d_ = 0;  // 3D solid color shader
     unsigned int tex_prog_3d_ = 0;  // 3D textured shader

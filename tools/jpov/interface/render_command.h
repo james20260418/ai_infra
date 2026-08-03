@@ -16,6 +16,7 @@
 #ifndef JPOV_RENDER_COMMAND_H_
 #define JPOV_RENDER_COMMAND_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -73,6 +74,17 @@ enum class DrawCommandType : uint8_t {
     kTriangle3D,        // 3D 三角形（世界空间）
     kStrip3D,           // 3D 条带（世界空间，多个三角形按条带化排列，VBO 加速）
     kText3D,            // 3D 文本（世界空间，面向摄像机）
+    kStrip2D,           // 2D 条带（屏幕空间，像素坐标，
+                        //      多个三角形按条带化排列，
+                        //      直接画到主 FBO）
+    kRoundRect2D,       // 2D 圆角矩形（屏幕空间，像素坐标，
+                        //      带圆角半径参数，CPU 三角化）
+    kFillRect2D,        // 2D 复合矩形（屏幕空间，像素坐标，
+                        //      带填充色、边框颜色/宽度、圆角半径，
+                        //      利用 RoundRect2D + Strip2D 组合实现）
+    kArc2D,             // 2D 圆弧/扇形（屏幕空间，像素坐标，
+                        //      圆心+半径+起始角度+跨度角度，
+                        //      CPU 三角化后以三角形列表渲染）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -217,6 +229,82 @@ struct Text3DCommand {
     std::string font_alias;
 };
 
+// 2D 条带（屏幕空间，像素坐标）
+//
+// 用顶点序列定义二维三角形条带：vertices = [p0, p1, p2, p3, ...]
+// 生成三角形：p0-p1-p2, p1-p2-p3, p2-p3-p4, ...
+// 要求 vertices.size() >= 3，否则不绘制。
+//
+// 顶点坐标为像素坐标，原点在渲染分辨率左上角（x→右，y→下）。
+// 绘制目标直接为主 FBO（无 3D MVP 变换）。
+//
+// 使用 GL_TRIANGLE_STRIP 渲染，stream VBO 每帧动态上传。
+//
+// 顶点缓存上限为 3000 个顶点（1000 个三角形）。
+// 若 vertices.size() > 3000，条带被截断，仅前 3000 个顶点参与绘制。
+struct Strip2DCommand {
+    std::vector<Vec2f> vertices;
+    Color color;
+};
+
+// 2D 圆角矩形（渲染分辨率空间，像素坐标）
+//
+// pos:    矩形左上角位置（像素坐标，原点在左上角）
+// size:   矩形的宽度和高度（像素单位，>0）
+// radius: 圆角半径（像素单位，>=0，不能超过短边一半）
+// color:  填充颜色
+//
+// 坐标空间与 DrawRect 一致。
+// CPU 端三角化后以三角形列表形式渲染。
+// Pre-condition: size.x > 0 && size.y > 0
+// Pre-condition: radius >= 0
+// Pre-condition: radius <= min(size.x, size.y) / 2
+struct RoundRect2DCommand {
+    Vec2f pos;
+    Vec2f size;
+    float radius;
+    Color color;
+};
+
+// 2D 复合矩形（渲染分辨率空间，像素坐标）
+//
+// 带填充色、边框颜色/宽度、圆角半径的复合矩形。
+// 利用 RoundRect + Strip2D 组合实现：
+//   - 填充部分：复写 RoundRect2DCommand 渲染逻辑
+//   - 边框部分：将边框环三角化后通过 Strip2D 渲染
+//
+// Pre-condition: size.x > 0 && size.y > 0
+// Pre-condition: radius >= 0
+// Pre-condition: radius <= min(size.x, size.y) / 2
+// Pre-condition: border_width >= 0
+struct FillRect2DCommand {
+    Vec2f pos;
+    Vec2f size;
+    Color fill_color;
+    Color border_color;
+    float border_width;
+    float radius;
+};
+
+// 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
+//
+// center:       圆心位置（像素坐标，原点在左上角）
+// radius:       半径（像素单位，>0）
+// start_angle:  起始角度（度，0=3点钟方向，逆时针为正）
+// span_angle:   跨度角度（度，正数=逆时针，负数=顺时针）
+// color:        填充颜色
+//
+// CPU 端三角化后以三角形列表（扇形）渲染。
+// 跨度角度绝对值 >= 360 度时绘制完整圆形。
+// Pre-condition: radius > 0
+struct Arc2DCommand {
+    Vec2f center;
+    float radius;
+    float start_angle;   // 起始角度（度）
+    float span_angle;    // 跨度角度（度）
+    Color color;
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -237,6 +325,10 @@ struct RenderCommandList {
     std::vector<Triangle3DCommand> triangle3d;
     std::vector<Strip3DCommand> strip3d;
     std::vector<Text3DCommand> text3d;
+    std::vector<RoundRect2DCommand> roundrect2d;
+    std::vector<FillRect2DCommand> fillrect2d;
+    std::vector<Strip2DCommand> strip2d;
+    std::vector<Arc2DCommand> arc2d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -314,6 +406,48 @@ struct RenderCommandList {
     void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
                     const Color& color,
                     const std::string& font_alias);
+
+    // ---- 2D 条带辅助方法 ----
+
+    // 2D 条带（屏幕空间，像素坐标，GL_TRIANGLE_STRIP）
+    // 顶点由条带化规则生成三角形 (p0p1p2, p1p2p3, ...)
+    // Pre-condition: vertices.size() >= 3，否则忽略
+    void DrawStrip2D(const std::vector<Vec2f>& vertices,
+                     const Color& color);
+
+    // 2D 圆角矩形（渲染分辨率空间，像素坐标）
+    //
+    // 利用 CPU 端圆角三角化产生顶点数据后渲染。
+    // 圆角半径不能超过矩形短边的一半。
+    // Pre-condition: size.x > 0 && size.y > 0
+    // Pre-condition: radius >= 0
+    // Pre-condition: radius <= min(size.x, size.y) / 2
+    void DrawRoundRect(const Vec2f& pos, const Vec2f& size,
+                       float radius, const Color& color);
+
+    // 2D 复合矩形（渲染分辨率空间，像素坐标）
+    //
+    // 带填充色、边框颜色/宽度、圆角半径的复合矩形。
+    // 边框宽度为 0 时仅绘制填充部分。
+    // 利用 RoundRect2D + Strip2D 组合实现。
+    // Pre-condition: size.x > 0 && size.y > 0
+    // Pre-condition: radius >= 0
+    // Pre-condition: radius <= min(size.x, size.y) / 2
+    // Pre-condition: border_width >= 0
+    void DrawFillRect(const Vec2f& pos, const Vec2f& size,
+                      const Color& fill_color,
+                      const Color& border_color,
+                      float border_width, float radius);
+
+    // 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
+    //
+    // 利用 CPU 端三角化产生三角形列表后渲染。
+    // 跨度角度绝对值 >= 360 度时绘制完整圆形。
+    // Pre-condition: radius > 0
+    // Pre-condition: start_angle, span_angle 不受限（支持跨多圈）
+    void DrawArc2D(const Vec2f& center, float radius,
+                   float start_angle, float span_angle,
+                   const Color& color);
 };
 
 }  // namespace jpov

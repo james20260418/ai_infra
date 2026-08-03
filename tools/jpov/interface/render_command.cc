@@ -16,6 +16,10 @@ void RenderCommandList::Clear() {
     triangle3d.clear();
     strip3d.clear();
     text3d.clear();
+    strip2d.clear();
+    roundrect2d.clear();
+    fillrect2d.clear();
+    arc2d.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -86,6 +90,57 @@ void RenderCommandList::DrawText3D(const std::string& text, const Vec3f& pos,
     int idx = static_cast<int>(text3d.size());
     text3d.push_back({text, pos, font_size, color, font_alias});
     order.emplace_back(DrawCommandType::kText3D, idx);
+}
+
+void RenderCommandList::DrawStrip2D(const std::vector<Vec2f>& vertices,
+                                     const Color& color) {
+    if (vertices.size() < 3) {
+        LOG_EVERY_N(WARNING, 100) << "DrawStrip2D: less than 3 vertices, skipping";
+        return;
+    }
+    int idx = static_cast<int>(strip2d.size());
+    strip2d.push_back({vertices, color});
+    order.emplace_back(DrawCommandType::kStrip2D, idx);
+}
+
+void RenderCommandList::DrawRoundRect(const Vec2f& pos, const Vec2f& size,
+                                       float radius, const Color& color) {
+    CHECK_GT(size.x(), 0.0f);
+    CHECK_GT(size.y(), 0.0f);
+    CHECK_GE(radius, 0.0f);
+    float half_min = std::min(size.x(), size.y()) * 0.5f;
+    CHECK_LE(radius, half_min)
+        << "RoundRect radius " << radius << " exceeds half of min side " << half_min;
+
+    int idx = static_cast<int>(roundrect2d.size());
+    roundrect2d.push_back({pos, size, radius, color});
+    order.emplace_back(DrawCommandType::kRoundRect2D, idx);
+}
+
+void RenderCommandList::DrawArc2D(const Vec2f& center, float radius,
+                                     float start_angle, float span_angle,
+                                     const Color& color) {
+    CHECK_GT(radius, 0.0f);
+    int idx = static_cast<int>(arc2d.size());
+    arc2d.push_back({center, radius, start_angle, span_angle, color});
+    order.emplace_back(DrawCommandType::kArc2D, idx);
+}
+
+void RenderCommandList::DrawFillRect(const Vec2f& pos, const Vec2f& size,
+                                       const Color& fill_color,
+                                       const Color& border_color,
+                                       float border_width, float radius) {
+    CHECK_GT(size.x(), 0.0f);
+    CHECK_GT(size.y(), 0.0f);
+    CHECK_GE(radius, 0.0f);
+    float half_min = std::min(size.x(), size.y()) * 0.5f;
+    CHECK_LE(radius, half_min)
+        << "FillRect radius " << radius << " exceeds half of min side " << half_min;
+    CHECK_GE(border_width, 0.0f);
+
+    int idx = static_cast<int>(fillrect2d.size());
+    fillrect2d.push_back({pos, size, fill_color, border_color, border_width, radius});
+    order.emplace_back(DrawCommandType::kFillRect2D, idx);
 }
 
 }  // namespace jpov
