@@ -31,44 +31,7 @@
 #ifdef _WIN32
 #define JPOV_WITHOUT_MSAA
 #include "third_party/gl_loader-mingw/gl_loader.h"
-#define glGenBuffers             gl_GenBuffers
-#define glDeleteBuffers          gl_DeleteBuffers
-#define glBindBuffer             gl_BindBuffer
-#define glBufferData             gl_BufferData
-#define glCreateShader           gl_CreateShader
-#define glShaderSource           gl_ShaderSource
-#define glCompileShader          gl_CompileShader
-#define glGetShaderiv            gl_GetShaderiv
-#define glGetShaderInfoLog       gl_GetShaderInfoLog
-#define glCreateProgram          gl_CreateProgram
-#define glAttachShader           gl_AttachShader
-#define glLinkProgram            gl_LinkProgram
-#define glGetProgramiv           gl_GetProgramiv
-#define glGetProgramInfoLog      gl_GetProgramInfoLog
-#define glDeleteShader           gl_DeleteShader
-#define glDeleteProgram          gl_DeleteProgram
-#define glUseProgram             gl_UseProgram
-#define glGetUniformLocation     gl_GetUniformLocation
-#define glUniform2f              gl_Uniform2f
-#define glUniform4f              gl_Uniform4f
-#define glGenFramebuffers        gl_GenFramebuffers
-#define glDeleteFramebuffers     gl_DeleteFramebuffers
-#define glBindFramebuffer        gl_BindFramebuffer
-#define glFramebufferTexture2D   gl_FramebufferTexture2D
-#define glCheckFramebufferStatus gl_CheckFramebufferStatus
-#define glGenTextures            gl_GenTextures
-#define glDeleteTextures         gl_DeleteTextures
-#define glBindTexture            gl_BindTexture
-#define glBindVertexArray        gl_BindVertexArray
-#define glTexImage2D             gl_TexImage2D
-#define glTexParameteri          gl_TexParameteri
-#define glBlitFramebuffer        gl_BlitFramebuffer
-#define glEnableVertexAttribArray  gl_EnableVertexAttribArray
-#define glDisableVertexAttribArray gl_DisableVertexAttribArray
-#define glVertexAttribPointer    gl_VertexAttribPointer
-#define glUniform1i              gl_Uniform1i
-#define glActiveTexture          gl_ActiveTexture
-#define glUniformMatrix4fv       gl_UniformMatrix4fv
+// glXxx→gl_Xxx 别名宏已集成在 gl_loader.h 中，本文件不再重复定义。
 #endif
 
 namespace {
@@ -1791,6 +1754,11 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd) {
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
     }
     glBindVertexArray(0);
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawObject3D: " << draw_err;
+    }
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {

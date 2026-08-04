@@ -15,18 +15,7 @@
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
 
-// 宏别名：替换代码中的 GL 函数名为 gl_loader 函数指针
-// 注意：#define 必须在 #include <GL/gl.h> 之后，否则会影响 gl.h 中的函数声明。
-#define glGenVertexArrays      gl_GenVertexArrays
-#define glDeleteVertexArrays   gl_DeleteVertexArrays
-#define glBindVertexArray      gl_BindVertexArray
-#define glGenBuffers           gl_GenBuffers
-#define glDeleteBuffers        gl_DeleteBuffers
-#define glBindBuffer           gl_BindBuffer
-#define glBufferData           gl_BufferData
-#define glVertexAttribPointer  gl_VertexAttribPointer
-#define glVertexAttribIPointer gl_VertexAttribIPointer
-#define glEnableVertexAttribArray gl_EnableVertexAttribArray
+// glXxx→gl_Xxx 别名宏已集成在 gl_loader.h 中（#ifdef _WIN32），本文件不再重复定义。
 
 // MinGW 的 GL/gl.h 是 OpenGL 1.1 头，缺少 VAO/缓冲相关常量，手动补齐标准值。
 #ifndef GL_ARRAY_BUFFER
@@ -231,7 +220,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete
-    unsigned int buffers[6];
+    // GPUMesh 至多 5 个属性 VBO + 1 个 EBO = 6 个 GL 缓冲对象
+    static constexpr int kMaxBuffers = 6;
+    unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
         buffers[n++] = mesh->vbo_positions;
