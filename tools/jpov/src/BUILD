@@ -1,5 +1,23 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# ShaderManager — GLSL shader program 注册/编译/缓存管理
+cc_library(
+    name = "shader_manager",
+    srcs = ["shader_manager.cc"],
+    hdrs = ["shader_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
 cc_library(
     name = "texture_manager",
@@ -15,6 +33,40 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# MeshManager — CPU MeshData → GPU（VAO + 分离 VBO + EBO）上传/更新/释放
+cc_library(
+    name = "mesh_manager",
+    srcs = ["mesh_manager.cc"],
+    hdrs = ["mesh_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:gpumesh",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# OBJLoader — Wavefront .obj 文本 → CPU MeshData 解析
+cc_library(
+    name = "obj_loader",
+    srcs = ["obj_loader.cc"],
+    hdrs = ["obj_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
@@ -43,6 +95,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":font_manager",
+        ":mesh_manager",
+        ":shader_manager",
         ":texture_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",

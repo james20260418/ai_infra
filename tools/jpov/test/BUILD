@@ -426,3 +426,66 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# OBJ 加载器单元测试 — 纯 CPU 解析（不渲染）
+# ============================================================================
+cc_test(
+    name = "jpov_obj_loader_test",
+    srcs = ["jpov_obj_loader_test.cc"],
+    data = [
+        ":beetle.obj",
+        ":cube_hand.obj",
+        ":suzanne.obj",
+    ],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/src:obj_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — Object3D (RegisterMesh→DrawObject3D 链路) 渲染验证
+# ============================================================================
+cc_binary(
+    name = "jpov_object3d_gold_generator",
+    srcs = ["jpov_object3d_gold_generator.cc"],
+    data = [":beetle.obj"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_object3d_gold_test",
+    srcs = ["jpov_object3d_gold_test.cc"],
+    data = [
+        ":object3d_beetle_1280x720.png",
+        ":beetle.obj",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

@@ -87,6 +87,8 @@ enum class DrawCommandType : uint8_t {
                         //      CPU 三角化后以三角形列表渲染）
     kImage2D,           // 2D 图片（屏幕空间，像素坐标，
                         //      GPU 纹理采样 + 矩形面片）
+    kObject3D,          // 3D 静态模型（世界空间）
+                        //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -329,6 +331,30 @@ struct Image2DCommand {
     Color tint;
 };
 
+// 3D 静态模型（世界空间，参与深度测试）
+//
+// 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
+// 支持纯色（texture_id=0）或纹理（texture_id 非 0）着色。
+// mesh_id / texture_id 均为运行期由 RegisterMesh / RegisterTexture 分配的句柄。
+//
+// 变换约定：模型在局部空间定义，通过 center（平移）+ up/front（旋转）放置。
+//   - 局部 +Y → 世界 up；局部 +Z → 世界 front；局部 +X = normalize(cross(up, front))
+//   - 无缩放、不含逐物体透视；MVP = Proj * View * Model
+//
+// texture_id 非 0 时要求 mesh 的 flags 含 kUV；否则着色结果未定义。
+//
+// Pre-condition: mesh_id 已注册且未释放
+// Pre-condition: texture_id == 0，或已注册且 mesh 含 kUV 属性
+// Pre-condition: up、front 均非零且不平行
+struct Object3DCommand {
+    uint32_t mesh_id;      // 已注册的 GPU mesh 句柄
+    uint32_t texture_id;   // 纹理句柄（0 = 纯色渲染）
+    Color color;           // 纯色颜色；纹理模式下为 tint 乘数
+    Vec3f center;          // 模型中心世界坐标（平移）
+    Vec3f up;              // 局部 +Y 指向的世界方向（归一化处理）
+    Vec3f front;           // 局部 +Z 指向的世界方向（归一化处理）
+};
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -354,6 +380,7 @@ struct RenderCommandList {
     std::vector<Strip2DCommand> strip2d;
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
+    std::vector<Object3DCommand> object3d;
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -482,6 +509,32 @@ struct RenderCommandList {
     void DrawImage(uint32_t texture_id, const Vec2f& pos,
                    const Vec2f& size,
                    const Color& tint = kColorWhite);
+
+    // ---- 3D 静态模型 ----------------
+
+    // 3D 静态模型（世界空间，参与深度测试）
+    //
+    // 渲染一个已注册的 GPU mesh，支持纯色或纹理着色。
+    // 模型在局部空间定义（如 OBJ 坐标），通过 center（平移）与
+    // up/front（旋转）放置到世界空间：
+    //   - 模型的局部 +Y 轴 → 世界空间 up 方向
+    //   - 模型的局部 +Z 轴 → 世界空间 front 方向
+    //   - 局部 +X 轴由 up/front 叉积确定（保证右手系）
+    //
+    // texture_id: 纹理句柄（0 = 纯色渲染，不带纹理）；
+    //             非 0 时使用纹理着色（mesh 需含 kUV 属性）
+    // color:      纯色模式下的颜色；纹理模式下作为 tint 乘数
+    // center:     模型中心的世界坐标（平移）
+    // up:         模型局部 +Y 指向的世界方向（需非零，会被归一化）
+    // front:      模型局部 +Z 指向的世界方向（需非零，会被归一化）
+    //
+    // Pre-condition: mesh_id 已通过 RegisterMesh 注册且未释放
+    // Pre-condition: texture_id 为 0，或已注册且 mesh 含 kUV 属性
+    // Pre-condition: up 与 front 均非零向量，且不平行
+    void DrawObject3D(uint32_t mesh_id, uint32_t texture_id,
+                      const Color& color,
+                      const Vec3f& center,
+                      const Vec3f& up, const Vec3f& front);
 };
 
 }  // namespace jpov

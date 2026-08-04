@@ -9,6 +9,7 @@ cc_library(
     deps = [
         "//tools/jpov/src:renderer",
         "//tools/jpov/interface:input_snapshot",
+        "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
     ] + select({
