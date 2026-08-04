@@ -100,4 +100,62 @@ int gl_loader_init(void);
 }
 #endif
 
+// ==================== MinGW GL 函数名别名 ====================
+//
+// 注意：这些 #define 必须在每个 .cc 文件 include <GL/gl.h> *之后*
+// include 本头文件时才生效。头文件自身不 include GL/gl.h，
+// 由调用方控制 include 顺序：
+//
+//   #include <GL/gl.h>               // 1. GL 常量声明
+//   #include "gl_loader.h"           // 2. 函数指针 + 别名宏
+//
+// 含义：glXxx 函数名 → gl_Xxx 运行时加载的函数指针。
+// 这组宏以往分散在 mesh_manager.cc / renderer.cc / shader_manager.cc，
+// 现集中到 gl_loader.h，一处定义、多处可用。
+#ifdef _WIN32
+
+#define glActiveTexture          gl_ActiveTexture
+#define glAttachShader           gl_AttachShader
+#define glBindBuffer             gl_BindBuffer
+#define glBindFramebuffer        gl_BindFramebuffer
+#define glBindTexture            gl_BindTexture
+#define glBindVertexArray        gl_BindVertexArray
+#define glBlitFramebuffer        gl_BlitFramebuffer
+#define glBufferData             gl_BufferData
+#define glCheckFramebufferStatus gl_CheckFramebufferStatus
+#define glCompileShader          gl_CompileShader
+#define glCreateProgram          gl_CreateProgram
+#define glCreateShader           gl_CreateShader
+#define glDeleteBuffers          gl_DeleteBuffers
+#define glDeleteFramebuffers     gl_DeleteFramebuffers
+#define glDeleteProgram          gl_DeleteProgram
+#define glDeleteShader           gl_DeleteShader
+#define glDeleteTextures         gl_DeleteTextures
+#define glDeleteVertexArrays     gl_DeleteVertexArrays
+#define glDisableVertexAttribArray gl_DisableVertexAttribArray
+#define glEnableVertexAttribArray  gl_EnableVertexAttribArray
+#define glFramebufferTexture2D   gl_FramebufferTexture2D
+#define glGenBuffers             gl_GenBuffers
+#define glGenFramebuffers        gl_GenFramebuffers
+#define glGenTextures            gl_GenTextures
+#define glGenVertexArrays        gl_GenVertexArrays
+#define glGetProgramInfoLog      gl_GetProgramInfoLog
+#define glGetProgramiv           gl_GetProgramiv
+#define glGetShaderInfoLog       gl_GetShaderInfoLog
+#define glGetShaderiv            gl_GetShaderiv
+#define glGetUniformLocation     gl_GetUniformLocation
+#define glLinkProgram            gl_LinkProgram
+#define glShaderSource           gl_ShaderSource
+#define glTexImage2D             gl_TexImage2D
+#define glTexParameteri          gl_TexParameteri
+#define glUniform1i              gl_Uniform1i
+#define glUniform2f              gl_Uniform2f
+#define glUniform4f              gl_Uniform4f
+#define glUniformMatrix4fv       gl_UniformMatrix4fv
+#define glUseProgram             gl_UseProgram
+#define glVertexAttribIPointer   gl_VertexAttribIPointer
+#define glVertexAttribPointer    gl_VertexAttribPointer
+
+#endif  // _WIN32
+
 #endif // GL_LOADER_H_

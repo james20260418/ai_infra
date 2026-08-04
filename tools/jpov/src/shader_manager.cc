@@ -20,6 +20,8 @@
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
 
+// glXxx→gl_Xxx 别名宏已集成在 gl_loader.h 中，本文件不再重复定义。
+
 // MinGW 的 GL/gl.h 是 OpenGL 1.1 头，缺少 shader 相关常量，手动补齐。
 // 数值与 GL/glext.h 一致。
 #ifndef GL_VERTEX_SHADER
@@ -34,23 +36,6 @@
 #ifndef GL_LINK_STATUS
 #define GL_LINK_STATUS 0x8B82
 #endif
-
-// 宏别名：替换代码中的 GL 函数名为 gl_loader 函数指针
-// 注意：#define 必须在 #include <GL/gl.h> 之后，
-// 否则会影响 gl.h 中的函数声明。
-#define glCreateShader        gl_CreateShader
-#define glShaderSource        gl_ShaderSource
-#define glCompileShader       gl_CompileShader
-#define glGetShaderiv         gl_GetShaderiv
-#define glGetShaderInfoLog    gl_GetShaderInfoLog
-#define glCreateProgram       gl_CreateProgram
-#define glAttachShader        gl_AttachShader
-#define glLinkProgram         gl_LinkProgram
-#define glGetProgramiv        gl_GetProgramiv
-#define glGetProgramInfoLog   gl_GetProgramInfoLog
-#define glDeleteShader        gl_DeleteShader
-#define glDeleteProgram       gl_DeleteProgram
-#define glGetUniformLocation  gl_GetUniformLocation
 #endif
 
 #include <glog/logging.h>
