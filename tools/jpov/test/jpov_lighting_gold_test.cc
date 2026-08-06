@@ -1,10 +1,11 @@
-// JPOV 3D Object3D Gold Image Unit Test
+// JPOV 3D 点光源光照 Gold Image Unit Test
 //
-// 用 gold image 方法验证 RegisterMesh→DrawObject3D 渲染链路：
+// 用 gold image 方法验证 Blinn-Phong 光照渲染链路：
 //   1. 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
-//   2. DrawObject3D 纯色渲染（texture_id=0，淡蓝色）
-//   3. 保存为 PNG 到 output/jpov_object3d_gold_test/rendered.png
-//   4. 与 expected PNG（git 管理）做二进制文件级比较
+//   2. 3 个点光源（红/绿/蓝）从不同方向照射
+//   3. Blinn-Phong 着色（diffuse + specular + ambient），object_use_default_color=false
+//   4. 保存为 PNG 到 output/jpov_lighting_gold_test/rendered.png
+//   5. 与 expected PNG（git 管理）做二进制文件级比较
 //
 // 测试通过条件：渲染输出 PNG 与 expected PNG 字节完全相同。
 
@@ -21,7 +22,7 @@
 
 // ============ 测试应用 ============
 
-class Object3DGoldTestApp : public JPOV {
+class LightingGoldTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -42,6 +43,23 @@ public:
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
+        // 点光源（与 gold generator 完全一致）
+        cmds->point_lights.push_back({
+            {0.0f, 2.0f, 0.0f},
+            {1.0f, 0.3f, 0.2f, 1.0f},
+            3.0f
+        });
+        cmds->point_lights.push_back({
+            {-1.5f, 0.5f, 0.8f},
+            {0.2f, 0.9f, 0.3f, 1.0f},
+            2.5f
+        });
+        cmds->point_lights.push_back({
+            {1.2f, 0.3f, -0.5f},
+            {0.2f, 0.4f, 1.0f, 1.0f},
+            2.5f
+        });
+
         // 加载 beetle 模型
         std::string obj_path = jpov::GetProjectRoot() +
                                "tools/jpov/test/beetle.obj";
@@ -49,14 +67,12 @@ public:
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
-        uint32_t texture_id = 0;  // 纯色渲染
+        uint32_t texture_id = 0;
 
-        // 渲染（淡蓝色，中心在原点，自然朝向）
-        // 使用 object_use_default_color=true 走老纯色路径
-        cmds->object_use_default_color = true;
+        // 渲染（默认 object_use_default_color=false，走光照着色）
         cmds->DrawObject3D(
             mesh_id, texture_id,
-            {0.2f, 0.6f, 1.0f, 1.0f},
+            {0.8f, 0.8f, 0.8f, 1.0f},
             {0.0f, 0.0f, 0.0f},
             {0.0f, 1.0f, 0.0f},
             {0.0f, 0.0f, 1.0f});
@@ -69,11 +85,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d_beetle_1280x720.png";
+        p += "__main__/tools/jpov/test/lighting_beetle_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/object3d_beetle_1280x720.png";
+           "tools/jpov/test/lighting_beetle_1280x720.png";
 }
 
 // ============ 测试入口 ============
@@ -88,13 +104,13 @@ int main() {
     LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
 
     // 2. 渲染并保存为 PNG
-    std::string outdir = jpov::GetOutputDir() + "jpov_object3d_gold_test/";
+    std::string outdir = jpov::GetOutputDir() + "jpov_lighting_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "3D Object3D Gold Test";
+    cfg.title = "3D Lighting Gold Test";
     cfg.headless = true;
-    Object3DGoldTestApp app(cfg);
+    LightingGoldTestApp app(cfg);
     app.Init();
 
     jpov::WindowInfo winfo;
@@ -132,11 +148,11 @@ int main() {
     }
 
     if (pass) {
-        LOG(INFO) << "TEST PASSED: object3d gold image match ("
+        LOG(INFO) << "TEST PASSED: lighting gold image match ("
                   << expected_bytes.size() << " bytes)";
         return 0;
     } else {
-        LOG(ERROR) << "TEST FAILED: object3d gold image mismatch";
+        LOG(ERROR) << "TEST FAILED: lighting gold image mismatch";
         return 1;
     }
 }

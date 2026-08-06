@@ -331,6 +331,24 @@ struct Image2DCommand {
     Color tint;
 };
 
+// 点光源（世界空间）
+//
+// 光照计算采用 Blinn-Phong 模型（diffuse + specular + ambient）。
+// 衰减为线性：强度随距离从 1.0（pos 处）衰减到 0.0（linear_radius 处），
+// 超出 linear_radius 的光源对像素贡献为 0。
+//
+// Pre-condition: linear_radius > 0
+struct PointLight {
+    Vec3f position;
+    Color color;
+    float linear_radius;  // 线性衰减的最大有效距离
+
+    // 有效半径（供 culling 等使用）。
+    // 当前线性衰减模式下直接返回 linear_radius；
+    // 后续支持其他衰减函数时可通过此接口区分。
+    float effective_range() const { return linear_radius; }
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
@@ -341,7 +359,12 @@ struct Image2DCommand {
 //   - 局部 +Y → 世界 up；局部 +Z → 世界 front；局部 +X = normalize(cross(up, front))
 //   - 无缩放、不含逐物体透视；MVP = Proj * View * Model
 //
-// texture_id 非 0 时要求 mesh 的 flags 含 kUV；否则着色结果未定义。
+// 光照：当 RenderCommandList::object_use_default_color 为 false（默认）时，
+// 模型使用 Blinn-Phong 光照着色（需 mesh 含 kNormal 属性）。
+// default_color 仅在以下情况使用：
+//   (a) object_use_default_color == true（全局开关）
+//   (b) 纹理模式（texture_id != 0）下作为 tint 乘数
+//   (c) 纹理模式失效时作为回退颜色
 //
 // Pre-condition: mesh_id 已注册且未释放
 // Pre-condition: texture_id == 0，或已注册且 mesh 含 kUV 属性
@@ -349,7 +372,8 @@ struct Image2DCommand {
 struct Object3DCommand {
     uint32_t mesh_id;      // 已注册的 GPU mesh 句柄
     uint32_t texture_id;   // 纹理句柄（0 = 纯色渲染）
-    Color color;           // 纯色颜色；纹理模式下为 tint 乘数
+    Color default_color;   // 回退纯色（仅 object_use_default_color=true 或纹理失效时使用）
+                           // 光照模式下无用
     Vec3f center;          // 模型中心世界坐标（平移）
     Vec3f up;              // 局部 +Y 指向的世界方向（归一化处理）
     Vec3f front;           // 局部 +Z 指向的世界方向（归一化处理）
@@ -386,6 +410,17 @@ struct RenderCommandList {
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
     // order[1] = {kText2D, 2} 表示再绘制 text2d 中的第 2 条
     std::vector<std::pair<DrawCommandType, int>> order;
+
+    // 点光源列表（世界空间）。
+    // 每帧可设置 0~N 个点光源，渲染时按 Blinn-Phong 模型计算光照。
+    // 空列表时无光照效果（物体呈纯黑，仅 ambient 项可见）。
+    // 注意：渲染复杂度为 O(num_fragments * num_lights)，用户应控制光源数量。
+    std::vector<PointLight> point_lights;
+
+    // Object3D 纯色开关（默认 false）。
+    // 为 true 时所有 Object3D 走旧的纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal。
+    // 为 false 时使用 Blinn-Phong 光照着色（需 mesh 含 kNormal）。
+    bool object_use_default_color = false;
 
     // 3D 透视相机
     // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
@@ -521,9 +556,14 @@ struct RenderCommandList {
     //   - 模型的局部 +Z 轴 → 世界空间 front 方向
     //   - 局部 +X 轴由 up/front 叉积确定（保证右手系）
     //
+    // 着色行为取决于 RenderCommandList::object_use_default_color：
+    //   - false（默认）：使用 Blinn-Phong 光照着色（需 mesh 含 kNormal）
+    //   - true：使用旧的纯色渲染路径，default_color 作为物体颜色
+    //
     // texture_id: 纹理句柄（0 = 纯色渲染，不带纹理）；
     //             非 0 时使用纹理着色（mesh 需含 kUV 属性）
-    // color:      纯色模式下的颜色；纹理模式下作为 tint 乘数
+    // default_color: 纯色模式下的颜色；纹理模式下作为 tint 乘数；
+    //                光照模式下通常不使用（仅 object_use_default_color=true 时生效）
     // center:     模型中心的世界坐标（平移）
     // up:         模型局部 +Y 指向的世界方向（需非零，会被归一化）
     // front:      模型局部 +Z 指向的世界方向（需非零，会被归一化）
@@ -532,7 +572,7 @@ struct RenderCommandList {
     // Pre-condition: texture_id 为 0，或已注册且 mesh 含 kUV 属性
     // Pre-condition: up 与 front 均非零向量，且不平行
     void DrawObject3D(uint32_t mesh_id, uint32_t texture_id,
-                      const Color& color,
+                      const Color& default_color,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front);
 };

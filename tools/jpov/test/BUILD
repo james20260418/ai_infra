@@ -489,3 +489,42 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# Gold Image — 3D 点光源光照 (Blinn-Phong) 渲染验证
+# ============================================================================
+cc_binary(
+    name = "jpov_lighting_gold_generator",
+    srcs = ["jpov_lighting_gold_generator.cc"],
+    data = [":beetle.obj"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_lighting_gold_test",
+    srcs = ["jpov_lighting_gold_test.cc"],
+    data = [
+        ":lighting_beetle_1280x720.png",
+        ":beetle.obj",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

@@ -134,6 +134,92 @@ void main() {
 }
 )glsl";
 
+// ==================== 3D 光照 Shaders（Blinn-Phong）====================
+
+// 3D 静态模型光照顶点 shader：
+// 接受局部空间 position + normal，输出 world-space position + normal + gl_Position
+// 属性 location 与 MeshManager 的 VBO 布局一致：
+//   0 = position，1 = normal
+const char* kMeshVs3dLighting = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+
+void main() {
+    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
+    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 光照 fragment shader：Blinn-Phong 模型（diffuse + specular + ambient）
+// 光源上限：MAX_NUM_LIGHTS = 3（土法 MVP，后续升级为 tile culling + UBO）
+// 衰减：线性，distance >= light.radius 时强度为 0
+const char* kMeshFs3dLighting = R"glsl(
+#version 330 core
+
+#define MAX_NUM_LIGHTS 3
+
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+out vec4 FragColor;
+
+// 点光源
+struct Light {
+    vec3 position;
+    vec3 color;
+    float radius;
+};
+
+uniform Light uLights[MAX_NUM_LIGHTS];
+uniform int uNumLights;
+uniform vec3 uCameraPos;
+uniform vec3 uModelColor;    // 物体基础色（相当于材质 diffuse color）
+uniform float uShininess;    // 高光光滑度
+
+// 环境光常量（全局最低亮度，防止暗面全黑）
+const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
+const float AMBIENT_STRENGTH = 0.3;
+
+void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+
+    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
+    vec3 total_diffuse = vec3(0.0);
+    vec3 total_specular = vec3(0.0);
+
+    for (int i = 0; i < uNumLights && i < MAX_NUM_LIGHTS; i++) {
+        vec3 L = uLights[i].position - vWorldPos;
+        float dist = length(L);
+        if (dist >= uLights[i].radius) continue;
+
+        vec3 light_dir = L / dist;
+
+        // 线性衰减：1.0 at dist=0 → 0.0 at dist=radius
+        float attenuation = 1.0 - (dist / uLights[i].radius);
+
+        // Diffuse (Lambert)
+        float NdotL = max(dot(N, light_dir), 0.0);
+        total_diffuse += uLights[i].color * NdotL * attenuation;
+
+        // Specular (Blinn-Phong)
+        vec3 H = normalize(light_dir + V);  // half-vector
+        float NdotH = max(dot(N, H), 0.0);
+        total_specular += uLights[i].color * pow(NdotH, uShininess) * attenuation;
+    }
+
+    vec3 result = uModelColor * (ambient + total_diffuse) + total_specular;
+    FragColor = vec4(result, 1.0);
+}
+)glsl";
+
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
 // 4x4 矩阵乘法：out = a * b（列主序）
@@ -562,6 +648,10 @@ unsigned int Renderer::TexturedMesh3DProg() {
     return shader_mgr_.GetOrCreate("mesh3d_textured", {kMeshVs3d, kMeshTexFs});
 }
 
+unsigned int Renderer::MeshLighting3DProg() {
+    return shader_mgr_.GetOrCreate("mesh3d_lighting", {kMeshVs3dLighting, kMeshFs3dLighting});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -572,6 +662,7 @@ void Renderer::CompileShaders() {
     Solid3DProg();
     Text3DProg();
     TexturedMesh3DProg();
+    MeshLighting3DProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -1035,7 +1126,7 @@ void Renderer::Render(const RenderCommandList& cmds,
 }
 
 void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
-    // 先用当前 Camera 计算 MVP
+    // 先用当前 Camera 计算 MVP（View * Proj，不含 Model）
     BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
 
     // 遍历 order，绘制 3D 指令
@@ -1068,7 +1159,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kObject3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
-                DrawObject3D(cmds.object3d[idx]);
+                DrawObject3D(cmds.object3d[idx], cmds);
                 break;
             }
             default:
@@ -1696,7 +1787,8 @@ void Renderer::DrawText3D(const Text3DCommand& cmd) {
     LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
 }
 
-void Renderer::DrawObject3D(const Object3DCommand& cmd) {
+void Renderer::DrawObject3D(const Object3DCommand& cmd,
+                              const RenderCommandList& cmds) {
     // 1. 从 mesh 管理器取 GPU mesh 句柄（VAO/VBO/EBO 已在注册时绑定好属性）
     const GPUMesh* mesh = mesh_mgr_.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawObject3D: mesh_id " << cmd.mesh_id
@@ -1718,7 +1810,60 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd) {
 
     // 4. 纹理 or 纯色着色
     const bool textured = (cmd.texture_id != 0);
-    if (textured) {
+
+    // 决定着色路径：
+    //   纹理模式 → 纹理 shader（不受 object_use_default_color 影响）
+    //   纯色 + object_use_default_color → 旧纯色 shader（兼容现有 gold test）
+    //   纯色 + !object_use_default_color → 光照 shader（Blinn-Phong）
+    const bool use_lighting = !textured && !cmds.object_use_default_color;
+
+    if (use_lighting) {
+        // 光照模式：需要 normal 属性
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+            << "DrawObject3D: 光照模式需要 kNormal 属性，"
+            << "但 mesh_id=" << cmd.mesh_id << " 不含 normal；"
+            << "可设置 object_use_default_color=true 使用纯色渲染";
+
+        unsigned int prog = MeshLighting3DProg();
+        glUseProgram(prog);
+
+        // MVP（含 Model）
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
+                           1, GL_FALSE, mvp);
+        // Model 矩阵（单独传入，供 world-space position 计算）
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
+                           1, GL_FALSE, model);
+        // 模型颜色
+        glUniform3f(glGetUniformLocation(prog, "uModelColor"),
+                    cmd.default_color.r, cmd.default_color.g, cmd.default_color.b);
+        // 相机位置（specular 需要）
+        glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
+                    cmds.camera.position.x(), cmds.camera.position.y(),
+                    cmds.camera.position.z());
+        // 高光光滑度
+        glUniform1f(glGetUniformLocation(prog, "uShininess"), 64.0f);
+
+        // 光源数据（最多 MAX_NUM_LIGHTS 个）
+        int num_lights = static_cast<int>(cmds.point_lights.size());
+        glUniform1i(glGetUniformLocation(prog, "uNumLights"), num_lights);
+
+        for (int i = 0; i < num_lights && i < 3; ++i) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "uLights[%d].position", i);
+            glUniform3f(glGetUniformLocation(prog, buf),
+                        cmds.point_lights[i].position.x(),
+                        cmds.point_lights[i].position.y(),
+                        cmds.point_lights[i].position.z());
+            snprintf(buf, sizeof(buf), "uLights[%d].color", i);
+            glUniform3f(glGetUniformLocation(prog, buf),
+                        cmds.point_lights[i].color.r,
+                        cmds.point_lights[i].color.g,
+                        cmds.point_lights[i].color.b);
+            snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
+            glUniform1f(glGetUniformLocation(prog, buf),
+                        cmds.point_lights[i].linear_radius);
+        }
+    } else if (textured) {
         // 纹理模式：mesh 必须含 UV 属性
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
             << "DrawObject3D: texture_id 非 0 但 mesh 无 kUV 属性，无法纹理采样";
@@ -1731,17 +1876,20 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd) {
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uTint"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+                    cmd.default_color.r, cmd.default_color.g,
+                    cmd.default_color.b, cmd.default_color.a);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
     } else {
+        // 旧纯色模式（object_use_default_color=true 时走此路径）
         unsigned int prog = Solid3DProg();
         glUseProgram(prog);
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+                    cmd.default_color.r, cmd.default_color.g,
+                    cmd.default_color.b, cmd.default_color.a);
     }
 
     // 5. 发起绘制（indexed 用 EBO，否则按顶点序）

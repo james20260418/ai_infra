@@ -22,6 +22,8 @@ void RenderCommandList::Clear() {
     arc2d.clear();
     image2d.clear();
     object3d.clear();
+    point_lights.clear();
+    object_use_default_color = false;
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -156,13 +158,13 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
 }
 
 void RenderCommandList::DrawObject3D(uint32_t mesh_id, uint32_t texture_id,
-                                      const Color& color,
+                                      const Color& default_color,
                                       const Vec3f& center,
                                       const Vec3f& up, const Vec3f& front) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
-    object3d.push_back({mesh_id, texture_id, color, center, up, front});
+    object3d.push_back({mesh_id, texture_id, default_color, center, up, front});
     order.emplace_back(DrawCommandType::kObject3D, idx);
 }
 
