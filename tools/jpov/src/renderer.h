@@ -82,6 +82,34 @@ private:
     int fbo_w_ = 0;
     int fbo_h_ = 0;
 
+    // ---- Tiled Forward 光照：tile 光源 index 纹理 ----
+    // 每帧 CPU 端做 culling，把影响每个 tile（16×16 像素）的 ≤16 个光源 index
+    // 写入 tile_index_tex，供 fragment shader 按 gl_FragCoord 查表。
+    // tile 网格与 3D FBO 同尺寸，随 Ensure3DFBO 一起重建。
+    static constexpr int kTileSize16_ = 16;
+    static constexpr int kMaxLightsPerTile_ = 16;
+    // 每 tile 用 4 个 texel，每 texel RGBA 各存 1 个 uint8 index（4×4=16）
+    static constexpr int kTexelsPerTile_ = kMaxLightsPerTile_ / 4;
+    // 光源 index 用 uint8 编码，最多 255 个光源。
+    // 哨兵 255 = 无光源（与 shader 的 LIGHT_INDEX_SENTINEL 一致），有效 index 0-254。
+    static constexpr int kMaxTotalLights_ = 255;
+    static constexpr uint8_t kLightIndexSentinel_ = 255;
+
+    unsigned int tile_index_tex_ = 0;  // GL_RGBA8, 宽 = grid_cols*4, 高 = grid_rows
+    int tile_grid_w_ = 0;              // tile 网格列数
+    int tile_grid_h_ = 0;              // tile 网格行数
+
+    // 销毁 tile 纹理（在 Destroy3DFBO 配合调用）
+    void DestroyTileLighting();
+    // 分配/重建 tile 纹理（在 Ensure3DFBO 里调用）
+    void EnsureTileLighting(int fbo_w_3d, int fbo_h_3d);
+    // CPU 端 culling：遍历 point_lights，把影响每个 tile 的 ≤16 个光源 index
+    // 写入 tile_index_tex_。在绘制任何 3D Object 前调用。
+    void BuildTileLightIndices(const RenderCommandList& cmds, int fbo_w_3d, int fbo_h_3d);
+    // 上传全部光源数据到 lighting shader 的 flat uniform 数组
+    //（在 BuildTileLightIndices 之后调用，用 MeshLighting3DProg() 作目标 program）
+    void UploadLightData(const RenderCommandList& cmds);
+
     // Output FBO：窗口尺寸，用于截图时拉伸渲染 FBO 并读取像素
     unsigned int out_fbo_ = 0;
     unsigned int out_color_tex_ = 0;
@@ -122,7 +150,7 @@ private:
     void DrawTriangle3D(const Triangle3DCommand& cmd);
     void DrawLine3D(const Line3DCommand& cmd);
     void DrawText3D(const Text3DCommand& cmd);
-    void DrawObject3D(const Object3DCommand& cmd);
+    void DrawObject3D(const Object3DCommand& cmd, const RenderCommandList& cmds);
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
     // ---- 字体管理 ----
@@ -213,6 +241,7 @@ private:
     unsigned int Solid3DProg();   // 3D 纯色（kVs3d/kFs3d）
     unsigned int Text3DProg();    // 3D 纹理（kTexVs3d/kTexFs，为 Text3D 预留）
     unsigned int TexturedMesh3DProg();  // 3D 静态模型纹理（kMeshVs3d/kMeshTexFs）
+    unsigned int MeshLighting3DProg();  // 3D 静态模型光照（kMeshVs3dLighting/kMeshFs3dLighting）
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;

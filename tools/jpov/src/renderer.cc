@@ -32,6 +32,11 @@
 #define JPOV_WITHOUT_MSAA
 #include "third_party/gl_loader-mingw/gl_loader.h"
 // glXxx→gl_Xxx 别名宏已集成在 gl_loader.h 中，本文件不再重复定义。
+
+// MinGW 的 GL/gl.h 可能不定义 GL_CLAMP_TO_EDGE
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 #endif
 
 namespace {
@@ -133,6 +138,163 @@ void main() {
     FragColor = tex_color * uTint;
 }
 )glsl";
+
+// ==================== 3D 光照 Shaders（Tiled Forward Blinn-Phong）====================
+
+// 3D 静态模型光照顶点 shader：
+// 接受局部空间 position + normal，输出 world-space position + normal + gl_Position
+// 属性 location 与 MeshManager 的 VBO 布局一致：
+//   0 = position，1 = normal
+const char* kMeshVs3dLighting = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+
+void main() {
+    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
+    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// Tiled Forward 光照 fragment shader
+//
+// 数据流：
+//   CPU 端：每个点光源投影到 NDC → screen rect → 覆盖的 tile(s) 写入 light index
+//   GPU 端：fragment 根据 gl_FragCoord 查 tile 纹理获取 ≤16 个光源 index，
+//          遍历这些光源做 Blinn-Phong 计算（动态索引 uLights 数组）
+//
+// tile 纹理：普通 GL_RGBA8（避开 integer 纹理的兼容坑），每 texel 的 RGBA 通道
+//           各存一个 uint8 光源 index（255 = 无光源哨兵），
+//           一个 tile 16 个 index = 4 个相邻 texel（水平排列）。
+// tile 网格：ceil(fbo_w/16) × ceil(fbo_h/16)，纹理宽 = grid_cols*4
+//
+// 光源数据本身通过 flat uniform 数组传递（上限 MAX_TOTAL_LIGHTS）。
+// tile 纹理里的 index 是光源在 point_lights / uLights 数组中的下标，
+// fragment 用它做动态索引，只计算本 tile 命中的光源。
+const char* kMeshFs3dTiledLighting = R"glsl(
+#version 330 core
+
+#define TILE_SIZE 16
+#define MAX_LIGHTS_PER_TILE 16
+#define MAX_TOTAL_LIGHTS 255
+#define LIGHT_INDEX_SENTINEL 255u
+
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+out vec4 FragColor;
+
+// 点光源
+struct Light {
+    vec3 position;
+    vec3 color;
+    float radius;
+};
+
+uniform Light uLights[MAX_TOTAL_LIGHTS];
+uniform int uTotalLights;
+uniform vec3 uCameraPos;
+uniform vec3 uModelColor;
+uniform float uShininess;
+
+// Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
+// （255 = 无光源）。fragment shader 用 texelFetch 精准定位。
+uniform sampler2D uTileLightIndices;
+
+// 环境光常量
+const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
+const float AMBIENT_STRENGTH = 0.3;
+
+// 从 tile 纹理读取当前 tile 的光源 index 列表
+// tile_col/row: 当前像素所在的 tile 坐标
+// out_indices: 输出的 16 个光源 index（未使用的填 0xFFFF）
+// returns: 实际有效光源数
+int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
+    int count = 0;
+    // 每 tile 存 4 个 texel（水平排列），每 texel 的 RGBA 各存 1 个 index
+    for (int t = 0; t < 4; t++) {
+        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * 4 + t, tile_row), 0);
+        // 编码：通道值 255 表示该通道无光源；其余 0-254 为光源 index
+        //（uint8 → uint，再 & 0xFF 防浮点取整误差）
+        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
+        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
+        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
+        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
+        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = r;
+            count++;
+        }
+        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = g;
+            count++;
+        }
+        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = b;
+            count++;
+        }
+        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = a;
+            count++;
+        }
+    }
+    return count;
+}
+
+void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+
+    // 计算当前像素所在的 tile
+    int tile_col = int(gl_FragCoord.x) / TILE_SIZE;
+    int tile_row = int(gl_FragCoord.y) / TILE_SIZE;
+
+    // 从 tile 纹理读取本 tile 的光源列表
+    uint light_indices[MAX_LIGHTS_PER_TILE];
+    int num_lights = readTileLights(tile_col, tile_row, light_indices);
+
+    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
+    vec3 total_diffuse = vec3(0.0);
+    vec3 total_specular = vec3(0.0);
+
+    for (int i = 0; i < num_lights; i++) {
+        uint li = light_indices[i];
+        vec3 L = uLights[li].position - vWorldPos;
+        float dist = length(L);
+        if (dist >= uLights[li].radius) continue;
+
+        vec3 light_dir = L / dist;
+
+        // 线性衰减：1.0 at dist=0 → 0.0 at dist=radius
+        float attenuation = 1.0 - (dist / uLights[li].radius);
+
+        // Diffuse (Lambert)
+        float NdotL = max(dot(N, light_dir), 0.0);
+        total_diffuse += uLights[li].color * NdotL * attenuation;
+
+        // Specular (Blinn-Phong)
+        vec3 H = normalize(light_dir + V);
+        float NdotH = max(dot(N, H), 0.0);
+        total_specular += uLights[li].color * pow(NdotH, uShininess) * attenuation;
+    }
+
+    vec3 result = uModelColor * (ambient + total_diffuse) + total_specular;
+    FragColor = vec4(result, 1.0);
+}
+)glsl";
+
+// 常量：tile 网格参数
+constexpr int kTileSize = 16;
+constexpr int kMaxLightsPerTile = 16;
+constexpr int kTexelsPerTile = kMaxLightsPerTile / 2;  // 8 texels，每 texel 2 个 index
+constexpr int kMaxTotalLights = 256;
+// 哨兵值：未填充的光源 slot，fragment shader 遇到后停止遍历
+constexpr uint16_t kLightIndexSentinel = 0xFFFF;
 
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
@@ -327,6 +489,7 @@ Renderer::~Renderer() {
     DestroyOutputFBO();
     Destroy3DFBO();
     Destroy3DResolveFBO();
+    DestroyTileLighting();
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
@@ -394,6 +557,45 @@ void Renderer::Destroy3DResolveFBO() {
     resolve_fbo_3d_h_ = 0;
 }
 
+void Renderer::DestroyTileLighting() {
+    if (tile_index_tex_) {
+        glDeleteTextures(1, &tile_index_tex_);
+        tile_index_tex_ = 0;
+    }
+    tile_grid_w_ = 0;
+    tile_grid_h_ = 0;
+}
+
+void Renderer::EnsureTileLighting(int fbo_w_3d, int fbo_h_3d) {
+    // 计算 tile 网格尺寸
+    int grid_cols = (fbo_w_3d + kTileSize16_ - 1) / kTileSize16_;
+    int grid_rows = (fbo_h_3d + kTileSize16_ - 1) / kTileSize16_;
+
+    // 纹理宽度 = grid_cols * 8（每个 tile 水平排 8 个 uvec2 texel）
+    int tex_w = grid_cols * kTexelsPerTile_;
+    int tex_h = grid_rows;
+
+    bool need_create =
+        tile_index_tex_ == 0 || tile_grid_w_ != grid_cols || tile_grid_h_ != grid_rows;
+
+    if (need_create) {
+        if (tile_index_tex_) {
+            glDeleteTextures(1, &tile_index_tex_);
+        }
+        glGenTextures(1, &tile_index_tex_);
+        glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        tile_grid_w_ = grid_cols;
+        tile_grid_h_ = grid_rows;
+    }
+}
+
 void Renderer::EnsureFBO(int width, int height) {
     if (fbo_w_ == width && fbo_h_ == height && fbo_) return;
 
@@ -435,6 +637,7 @@ void Renderer::Ensure3DFBO(int width, int height) {
 
     Destroy3DFBO();
     Destroy3DResolveFBO();
+    DestroyTileLighting();
 
 #ifdef JPOV_WITHOUT_MSAA
     // 非 MSAA 路径（Windows/MinGW 下 GL 不导出 MSAA 函数）
@@ -562,6 +765,11 @@ unsigned int Renderer::TexturedMesh3DProg() {
     return shader_mgr_.GetOrCreate("mesh3d_textured", {kMeshVs3d, kMeshTexFs});
 }
 
+unsigned int Renderer::MeshLighting3DProg() {
+    return shader_mgr_.GetOrCreate("mesh3d_tiled_lighting",
+                                  {kMeshVs3dLighting, kMeshFs3dTiledLighting});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -572,6 +780,7 @@ void Renderer::CompileShaders() {
     Solid3DProg();
     Text3DProg();
     TexturedMesh3DProg();
+    MeshLighting3DProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -925,6 +1134,19 @@ void Renderer::Render(const RenderCommandList& cmds,
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // 先用当前 Camera 计算 MVP（Proj * View，不含 Model）。
+        // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
+        BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
+
+        // ---- Tile Forward 光照准备 ----
+        // 若有 Object3D 需光照（!object_use_default_color），
+        // 上传光源 uniform + CPU 端做 tile culling（写入 tile index 纹理）。
+        if (!cmds.object_use_default_color && !cmds.object3d.empty()) {
+            EnsureTileLighting(fbo_3d_w, fbo_3d_h);
+            UploadLightData(cmds);
+            BuildTileLightIndices(cmds, fbo_3d_w, fbo_3d_h);
+        }
+
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
@@ -1035,7 +1257,7 @@ void Renderer::Render(const RenderCommandList& cmds,
 }
 
 void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
-    // 先用当前 Camera 计算 MVP
+    // 先用当前 Camera 计算 MVP（View * Proj，不含 Model）
     BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
 
     // 遍历 order，绘制 3D 指令
@@ -1068,7 +1290,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kObject3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
-                DrawObject3D(cmds.object3d[idx]);
+                DrawObject3D(cmds.object3d[idx], cmds);
                 break;
             }
             default:
@@ -1696,7 +1918,197 @@ void Renderer::DrawText3D(const Text3DCommand& cmd) {
     LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
 }
 
-void Renderer::DrawObject3D(const Object3DCommand& cmd) {
+// 上传全部点光源数据到 lighting shader 的 flat uniform 数组。
+//
+// 每帧在 BuildTileLightIndices 之前调用一次（非逐 object 热路径，可接受
+// 每光源 3 次 snprintf + glGetUniformLocation）。ShaderManager 会缓存
+// uniform location，避免重复字符串查找。
+//
+// Pre-condition: MeshLighting3DProg() 已注册（首次调用会触发编译）。
+void Renderer::UploadLightData(const RenderCommandList& cmds) {
+    unsigned int prog = MeshLighting3DProg();
+    glUseProgram(prog);
+
+    const int total = static_cast<int>(cmds.point_lights.size());
+    const int clamped = std::min(total, kMaxTotalLights_);
+
+    char buf[64];
+    for (int i = 0; i < clamped; ++i) {
+        const PointLight& l = cmds.point_lights[i];
+        snprintf(buf, sizeof(buf), "uLights[%d].position", i);
+        glUniform3f(shader_mgr_.GetUniform(prog, buf),
+                    l.position.x(), l.position.y(), l.position.z());
+        snprintf(buf, sizeof(buf), "uLights[%d].color", i);
+        glUniform3f(shader_mgr_.GetUniform(prog, buf),
+                    l.color.r, l.color.g, l.color.b);
+        snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
+        glUniform1f(shader_mgr_.GetUniform(prog, buf), l.linear_radius);
+    }
+
+    // 告诉 shader 当前有效光源数（fragment 用 tile index 与其做边界钳制）
+    glUniform1i(shader_mgr_.GetUniform(prog, "uTotalLights"), clamped);
+}
+
+// CPU 端 tile culling：
+//   遍历 cmds.point_lights（用户已按优先级排好序），把每个光源投影到
+//   NDC → 屏幕空间覆盖矩形 → 转换成 tile 坐标范围 → 向每个覆盖 tile 写入
+//   light index（先到先得，每 tile 最多 kMaxLightsPerTile_ 个）。
+//
+// 输出到 tile_index_tex_（GL_RG32UI），fragment shader 按 gl_FragCoord 查表。
+//
+// 覆盖范围采用保守近似：投影光源球心，并用光源半径在世界空间的轴向投影
+// 估算屏幕空间半宽/半高，保证光源实际影响区域被覆盖（宁可过度覆盖）。
+void Renderer::BuildTileLightIndices(const RenderCommandList& cmds,
+                                     int fbo_w_3d, int fbo_h_3d) {
+    if (tile_index_tex_ == 0) return;
+    if (tile_grid_w_ <= 0 || tile_grid_h_ <= 0) return;
+
+    const int num_lights = static_cast<int>(cmds.point_lights.size());
+    if (num_lights == 0) return;
+
+    // 1. 初始化 tile 纹理为全哨兵（0xFFFF = 无光源）
+    const int tex_w = tile_grid_w_ * kTexelsPerTile_;
+    const int tex_h = tile_grid_h_;
+
+    // 每个 tile 当前已放入的光源计数（index = row * tile_grid_w_ + col）
+    const int total_tiles = tile_grid_w_ * tile_grid_h_;
+    std::vector<uint32_t> tile_counts(static_cast<size_t>(total_tiles), 0);
+    // 每个 tile 的光源 index 列表（先到先得，uint8：0-254 有效，255=无光源）
+    struct Cell {
+        uint8_t idx[kMaxLightsPerTile_];
+    };
+    std::vector<Cell> tiles(static_cast<size_t>(total_tiles));
+    for (auto& c : tiles) {
+        for (auto& v : c.idx) v = kLightIndexSentinel_;
+    }
+
+    // 2. 遍历光源（用户已按优先级排好序，先到先得）
+    const int clamped = std::min(num_lights, kMaxTotalLights_);
+    for (int li = 0; li < clamped; ++li) {
+        const PointLight& l = cmds.point_lights[li];
+        const Vec3f cx = {l.position.x(), l.position.y(), l.position.z()};
+        const float radius = l.linear_radius;
+        if (radius <= 0.0f) continue;
+
+        // 投影球心到 clip 坐标
+        float c[4];
+        c[0] = mvp_[0]*cx.x() + mvp_[4]*cx.y() + mvp_[8]*cx.z()  + mvp_[12];
+        c[1] = mvp_[1]*cx.x() + mvp_[5]*cx.y() + mvp_[9]*cx.z()  + mvp_[13];
+        c[2] = mvp_[2]*cx.x() + mvp_[6]*cx.y() + mvp_[10]*cx.z() + mvp_[14];
+        c[3] = mvp_[3]*cx.x() + mvp_[7]*cx.y() + mvp_[11]*cx.z() + mvp_[15];
+
+        if (c[3] <= 0.0f) continue;  // 球心在相机后方，跳过（保守：可能漏近光源，但避免全屏误覆盖）
+
+        const float inv_w = 1.0f / c[3];
+        const float ndc_x = c[0] * inv_w;
+        const float ndc_y = c[1] * inv_w;
+
+        // 球心投影到屏幕像素（OpenGL gl_FragCoord 约定：原点左下角，y 向上）：
+        //   px = (ndc_x*0.5+0.5) * fbo_w，py = (ndc_y*0.5+0.5) * fbo_h
+        // 注意：fragment shader 里 gl_FragCoord 也是同一约定（左下原点，y 向上），
+        // 因此 tile_row = int(gl_FragCoord.y)/16 与这里的 py 一致。
+        const float px = (ndc_x * 0.5f + 0.5f) * static_cast<float>(fbo_w_3d);
+        const float py = (ndc_y * 0.5f + 0.5f) * static_cast<float>(fbo_h_3d);
+
+        // 屏幕空间覆盖范围：把光源球（中心 cx，半径 radius）的 6 个轴向
+        // 边界点（±X/±Y/±Z）都投影到屏幕像素，取 x/y 的 min/max。
+        // 这样覆盖真正保守（球被轴对齐包围盒完全包住），不会漏掉
+        // 屏幕空间覆盖范围：把光源球（中心 cx，半径 radius）的 6 个轴向
+        // 边界点（±X/±Y/±Z）都投影到屏幕像素，取 x/y 的 min/max。
+        // 这样覆盖真正保守（球被轴对齐包围盒完全包住），不会漏掉
+        // 实际受光源影响的像素（宁可多覆盖，不可少覆盖）。
+        //
+        // 若光源半径过大导致球体跨越相机（任一轴向边界点落在相机后方），
+        // 投影会失真，此时保守地让该光源覆盖整个屏幕，确保不漏光。
+        float pmin_x = px, pmax_x = px;
+        float pmin_y = py, pmax_y = py;
+        bool crosses_camera = false;
+        // 6 轴向边界点
+        const Vec3f dirs[6] = {
+            { 1,0,0}, {-1,0,0}, {0, 1,0}, {0,-1,0}, {0,0, 1}, {0,0,-1},
+        };
+        for (int d = 0; d < 6; ++d) {
+            const Vec3f bp = {
+                cx.x() + dirs[d].x() * radius,
+                cx.y() + dirs[d].y() * radius,
+                cx.z() + dirs[d].z() * radius,
+            };
+            float bc[4];
+            bc[0] = mvp_[0]*bp.x() + mvp_[4]*bp.y() + mvp_[8]*bp.z()  + mvp_[12];
+            bc[1] = mvp_[1]*bp.x() + mvp_[5]*bp.y() + mvp_[9]*bp.z()  + mvp_[13];
+            bc[2] = mvp_[2]*bp.x() + mvp_[6]*bp.y() + mvp_[10]*bp.z() + mvp_[14];
+            bc[3] = mvp_[3]*bp.x() + mvp_[7]*bp.y() + mvp_[11]*bp.z() + mvp_[15];
+            if (bc[3] <= 0.0f) {
+                crosses_camera = true;
+                continue;
+            }
+            const float biw = 1.0f / bc[3];
+            const float bpx = (bc[0]*biw*0.5f + 0.5f) * static_cast<float>(fbo_w_3d);
+            const float bpy = (bc[1]*biw*0.5f + 0.5f) * static_cast<float>(fbo_h_3d);
+            pmin_x = std::min(pmin_x, bpx);
+            pmax_x = std::max(pmax_x, bpx);
+            pmin_y = std::min(pmin_y, bpy);
+            pmax_y = std::max(pmax_y, bpy);
+        }
+
+        int min_px_x, max_px_x, min_px_y, max_px_y;
+        if (crosses_camera) {
+            // 球跨越相机：保守覆盖整个屏幕
+            min_px_x = 0; max_px_x = fbo_w_3d;
+            min_px_y = 0; max_px_y = fbo_h_3d;
+        } else {
+            min_px_x = static_cast<int>(std::floor(pmin_x)) - 1;
+            max_px_x = static_cast<int>(std::ceil(pmax_x)) + 1;
+            min_px_y = static_cast<int>(std::floor(pmin_y)) - 1;
+            max_px_y = static_cast<int>(std::ceil(pmax_y)) + 1;
+        }
+
+        // 3. 转换成 tile 范围
+        const int min_tc = std::max(0, min_px_x / kTileSize16_);
+        const int max_tc = std::min(tile_grid_w_ - 1, max_px_x / kTileSize16_);
+        const int min_tr = std::max(0, min_px_y / kTileSize16_);
+        const int max_tr = std::min(tile_grid_h_ - 1, max_px_y / kTileSize16_);
+        if (min_tc > max_tc || min_tr > max_tr) continue;
+
+        // 4. 向覆盖的每个 tile 写入 light index（先到先得）
+        for (int tr = min_tr; tr <= max_tr; ++tr) {
+            for (int tc = min_tc; tc <= max_tc; ++tc) {
+                const int t = tr * tile_grid_w_ + tc;
+                uint32_t& count = tile_counts[t];
+                if (count >= kMaxLightsPerTile_) continue;  // 满了，丢弃（后到视为低优先级）
+                tiles[t].idx[count] = static_cast<uint8_t>(li);
+                ++count;
+            }
+        }
+    }
+
+    // 5. 打包写入 tile 纹理（每 tile 4 个 texel，每 texel RGBA 各 1 个 uint8 index）
+    std::vector<uint8_t> packed(static_cast<size_t>(tex_w) * tex_h * 4,
+                                kLightIndexSentinel_);
+    for (int tr = 0; tr < tile_grid_h_; ++tr) {
+        for (int tc = 0; tc < tile_grid_w_; ++tc) {
+            const int t = tr * tile_grid_w_ + tc;
+            const Cell& cell = tiles[t];
+            for (int k = 0; k < kTexelsPerTile_; ++k) {
+                const int gx = tc * kTexelsPerTile_ + k;
+                uint8_t* px = &packed[(static_cast<size_t>(tr) * tex_w + gx) * 4];
+                px[0] = cell.idx[k * 4 + 0];
+                px[1] = cell.idx[k * 4 + 1];
+                px[2] = cell.idx[k * 4 + 2];
+                px[3] = cell.idx[k * 4 + 3];
+            }
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
+    // 全量上传（packed 已含全部哨兵填充，避免先清后写的双重上传）
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, packed.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Renderer::DrawObject3D(const Object3DCommand& cmd,
+                              const RenderCommandList& cmds) {
     // 1. 从 mesh 管理器取 GPU mesh 句柄（VAO/VBO/EBO 已在注册时绑定好属性）
     const GPUMesh* mesh = mesh_mgr_.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawObject3D: mesh_id " << cmd.mesh_id
@@ -1718,7 +2130,46 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd) {
 
     // 4. 纹理 or 纯色着色
     const bool textured = (cmd.texture_id != 0);
-    if (textured) {
+
+    // 决定着色路径：
+    //   纹理模式 → 纹理 shader（不受 object_use_default_color 影响）
+    //   纯色 + object_use_default_color → 旧纯色 shader（兼容现有 gold test）
+    //   纯色 + !object_use_default_color → 光照 shader（Blinn-Phong）
+    const bool use_lighting = !textured && !cmds.object_use_default_color;
+
+    if (use_lighting) {
+        // 光照模式：需要 normal 属性
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+            << "DrawObject3D: 光照模式需要 kNormal 属性，"
+            << "但 mesh_id=" << cmd.mesh_id << " 不含 normal；"
+            << "可设置 object_use_default_color=true 使用纯色渲染";
+
+        unsigned int prog = MeshLighting3DProg();
+        glUseProgram(prog);
+
+        // MVP（含 Model）
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
+                           1, GL_FALSE, mvp);
+        // Model 矩阵（单独传入，供 world-space position 计算）
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
+                           1, GL_FALSE, model);
+        // 模型颜色
+        glUniform3f(glGetUniformLocation(prog, "uModelColor"),
+                    cmd.default_color.r, cmd.default_color.g, cmd.default_color.b);
+        // 相机位置（specular 需要）
+        glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
+                    cmds.camera.position.x(), cmds.camera.position.y(),
+                    cmds.camera.position.z());
+        // 高光光滑度
+        glUniform1f(glGetUniformLocation(prog, "uShininess"), 64.0f);
+
+        // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
+        // 这里只需绑定 tile index 纹理（fragment shader 按像素查表获取
+        // 本 tile 命中的光源 index 列表）。
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
+        glUniform1i(glGetUniformLocation(prog, "uTileLightIndices"), 0);
+    } else if (textured) {
         // 纹理模式：mesh 必须含 UV 属性
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
             << "DrawObject3D: texture_id 非 0 但 mesh 无 kUV 属性，无法纹理采样";
@@ -1731,17 +2182,20 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd) {
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uTint"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+                    cmd.default_color.r, cmd.default_color.g,
+                    cmd.default_color.b, cmd.default_color.a);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
     } else {
+        // 旧纯色模式（object_use_default_color=true 时走此路径）
         unsigned int prog = Solid3DProg();
         glUseProgram(prog);
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+                    cmd.default_color.r, cmd.default_color.g,
+                    cmd.default_color.b, cmd.default_color.a);
     }
 
     // 5. 发起绘制（indexed 用 EBO，否则按顶点序）

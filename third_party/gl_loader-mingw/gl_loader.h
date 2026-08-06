@@ -44,6 +44,8 @@ typedef void (*GL_DisableVertexAttribArray)(unsigned int);
 typedef void (*GL_VertexAttribPointer)(unsigned int, int, unsigned int, unsigned char, int, const void*);
 typedef void (*GL_VertexAttribIPointer)(unsigned int, int, unsigned int, int, const void*);
 typedef void (*GL_Uniform1i)(int, int);
+typedef void (*GL_Uniform1f)(int, float);
+typedef void (*GL_Uniform3f)(int, float, float, float);
 typedef void (*GL_ActiveTexture)(unsigned int);
 typedef void (*GL_UniformMatrix4fv)(int, int, unsigned char, const float*);
 typedef void (*GL_GenVertexArrays)(int, unsigned int*);
@@ -87,6 +89,8 @@ extern GL_DisableVertexAttribArray gl_DisableVertexAttribArray;
 extern GL_VertexAttribPointer    gl_VertexAttribPointer;
 extern GL_VertexAttribIPointer   gl_VertexAttribIPointer;
 extern GL_Uniform1i              gl_Uniform1i;
+extern GL_Uniform1f              gl_Uniform1f;
+extern GL_Uniform3f              gl_Uniform3f;
 extern GL_ActiveTexture          gl_ActiveTexture;
 extern GL_UniformMatrix4fv       gl_UniformMatrix4fv;
 extern GL_GenVertexArrays        gl_GenVertexArrays;
@@ -149,6 +153,8 @@ int gl_loader_init(void);
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
 #define glUniform1i              gl_Uniform1i
+#define glUniform1f              gl_Uniform1f
+#define glUniform3f              gl_Uniform3f
 #define glUniform2f              gl_Uniform2f
 #define glUniform4f              gl_Uniform4f
 #define glUniformMatrix4fv       gl_UniformMatrix4fv
