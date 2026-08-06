@@ -414,7 +414,19 @@ struct RenderCommandList {
     // 点光源列表（世界空间）。
     // 每帧可设置 0~N 个点光源，渲染时按 Blinn-Phong 模型计算光照。
     // 空列表时无光照效果（物体呈纯黑，仅 ambient 项可见）。
-    // 注意：渲染复杂度为 O(num_fragments * num_lights)，用户应控制光源数量。
+    //
+    // 光源数量上限：255 个（仅前 255 个生效，超出部分静默忽略，
+    // 渲染器会 LOG 一条 warning）。这是 tile 纹理 uint8 编码的硬限制。
+    //
+    // 渲染采用 CPU 端 tile culling（16×16 像素 tile，每个 tile 最多结算
+    // 16 个影响最大的光源，先到先得按本列表顺序）；每个 fragment 只遍历
+    // 本 tile 命中的光源，而非全部光源。因此请按重要性（从高到低）排列
+    // 本列表，靠前的光源优先被选中。
+    //
+    // culling 是保守近似而非精确裁剪：光源 linear_radius 覆盖的球体被
+    // 投影到屏幕做 tile 标记；当光源球跨越相机或在临界位置时，会保守地
+    // 让该光源覆盖更大范围（甚至全屏）以保证不漏光。因此“某 light 影响
+    // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
     // Object3D 纯色开关（默认 false）。

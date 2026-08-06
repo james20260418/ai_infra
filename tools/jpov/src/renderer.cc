@@ -178,6 +178,13 @@ void main() {
 // 光源数据本身通过 flat uniform 数组传递（上限 MAX_TOTAL_LIGHTS）。
 // tile 纹理里的 index 是光源在 point_lights / uLights 数组中的下标，
 // fragment 用它做动态索引，只计算本 tile 命中的光源。
+//
+// !!! 这些 #define 必须与 renderer.h 的 C++ 常量保持一致：
+//     TILE_SIZE        ↔ kTileSize16_       (=16)
+//     MAX_LIGHTS_PER_TILE ↔ kMaxLightsPerTile_ (=16)
+//     MAX_TOTAL_LIGHTS ↔ kMaxTotalLights_   (=255)
+//     LIGHT_INDEX_SENTINEL ↔ kLightIndexSentinel_ (=255)
+//  改任一处必须同时改另一处，否则 tile 编码/解码错位。
 const char* kMeshFs3dTiledLighting = R"glsl(
 #version 330 core
 
@@ -213,13 +220,14 @@ const float AMBIENT_STRENGTH = 0.3;
 
 // 从 tile 纹理读取当前 tile 的光源 index 列表
 // tile_col/row: 当前像素所在的 tile 坐标
-// out_indices: 输出的 16 个光源 index（未使用的填 0xFFFF）
+// out_indices: 输出的 16 个光源 index（未使用的填 LIGHT_INDEX_SENTINEL=255）
 // returns: 实际有效光源数
 int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
     int count = 0;
-    // 每 tile 存 4 个 texel（水平排列），每 texel 的 RGBA 各存 1 个 index
-    for (int t = 0; t < 4; t++) {
-        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * 4 + t, tile_row), 0);
+    // 每 tile 存 (MAX_LIGHTS_PER_TILE/4) 个 texel（水平排列），
+    // 每 texel 的 RGBA 各存 1 个 index；4 = RGBA 颜色通道数
+    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
+        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
         // 编码：通道值 255 表示该通道无光源；其余 0-254 为光源 index
         //（uint8 → uint，再 & 0xFF 防浮点取整误差）
         uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
@@ -250,9 +258,13 @@ void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
-    // 计算当前像素所在的 tile
-    int tile_col = int(gl_FragCoord.x) / TILE_SIZE;
-    int tile_row = int(gl_FragCoord.y) / TILE_SIZE;
+    // 计算当前像素所在的 tile，并 clamp 到合法范围（防御边缘/亚像素越界）：
+    //   grid_cols = textureWidth / kTexelsPerTile(=4)，grid_rows = textureHeight
+    ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
+    int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
+    int grid_rows = grid.y;
+    int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
+    int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
 
     // 从 tile 纹理读取本 tile 的光源列表
     uint light_indices[MAX_LIGHTS_PER_TILE];
@@ -287,14 +299,6 @@ void main() {
     FragColor = vec4(result, 1.0);
 }
 )glsl";
-
-// 常量：tile 网格参数
-constexpr int kTileSize = 16;
-constexpr int kMaxLightsPerTile = 16;
-constexpr int kTexelsPerTile = kMaxLightsPerTile / 2;  // 8 texels，每 texel 2 个 index
-constexpr int kMaxTotalLights = 256;
-// 哨兵值：未填充的光源 slot，fragment shader 遇到后停止遍历
-constexpr uint16_t kLightIndexSentinel = 0xFFFF;
 
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
@@ -571,7 +575,8 @@ void Renderer::EnsureTileLighting(int fbo_w_3d, int fbo_h_3d) {
     int grid_cols = (fbo_w_3d + kTileSize16_ - 1) / kTileSize16_;
     int grid_rows = (fbo_h_3d + kTileSize16_ - 1) / kTileSize16_;
 
-    // 纹理宽度 = grid_cols * 8（每个 tile 水平排 8 个 uvec2 texel）
+    // 纹理宽度 = grid_cols * 4（每个 tile 水平排 4 个 RGBA texel，每 texel 的
+    // RGBA 通道各存 1 个 uint8 index，4 texel = 16 个 index）
     int tex_w = grid_cols * kTexelsPerTile_;
     int tex_h = grid_rows;
 
@@ -1924,6 +1929,9 @@ void Renderer::DrawText3D(const Text3DCommand& cmd) {
 // 每光源 3 次 snprintf + glGetUniformLocation）。ShaderManager 会缓存
 // uniform location，避免重复字符串查找。
 //
+// 只上传前 kMaxTotalLights_ 个光源；超限提示由 BuildTileLightIndices 负责
+//（这是唯一 warning 触发点）。
+//
 // Pre-condition: MeshLighting3DProg() 已注册（首次调用会触发编译）。
 void Renderer::UploadLightData(const RenderCommandList& cmds) {
     unsigned int prog = MeshLighting3DProg();
@@ -1952,12 +1960,13 @@ void Renderer::UploadLightData(const RenderCommandList& cmds) {
 // CPU 端 tile culling：
 //   遍历 cmds.point_lights（用户已按优先级排好序），把每个光源投影到
 //   NDC → 屏幕空间覆盖矩形 → 转换成 tile 坐标范围 → 向每个覆盖 tile 写入
-//   light index（先到先得，每 tile 最多 kMaxLightsPerTile_ 个）。
+//   light index（先到先得，每 tile 最多 kMaxLightsPerTile_ 个，后到的丢弃）。
 //
-// 输出到 tile_index_tex_（GL_RG32UI），fragment shader 按 gl_FragCoord 查表。
+// 输出到 tile_index_tex_（GL_RGBA8），fragment shader 按 gl_FragCoord 查表。
 //
-// 覆盖范围采用保守近似：投影光源球心，并用光源半径在世界空间的轴向投影
-// 估算屏幕空间半宽/半高，保证光源实际影响区域被覆盖（宁可过度覆盖）。
+// 覆盖是保守近似：投影光源球的 6 个轴向边界点取屏幕 x/y 的 min/max，保证
+// 装下球体；光源 radius（线性衰减边界）跨越相机时投影会失真，此时让该光源
+// 覆盖整个屏幕，确保不漏光（宁多勿少）。这是近似而非精确锥体裁剪。
 void Renderer::BuildTileLightIndices(const RenderCommandList& cmds,
                                      int fbo_w_3d, int fbo_h_3d) {
     if (tile_index_tex_ == 0) return;
@@ -1966,14 +1975,23 @@ void Renderer::BuildTileLightIndices(const RenderCommandList& cmds,
     const int num_lights = static_cast<int>(cmds.point_lights.size());
     if (num_lights == 0) return;
 
-    // 1. 初始化 tile 纹理为全哨兵（0xFFFF = 无光源）
+    // 光源数超上限：只处理前 kMaxTotalLights_ 个，其余忽略（先到先得）。
+    // 只 LOG 一次，避免每帧刷屏。
+    if (num_lights > kMaxTotalLights_) {
+        LOG_FIRST_N(WARNING, 1)
+            << "point_lights 数量 " << num_lights << " 超过上限 "
+            << kMaxTotalLights_
+            << "，仅前 " << kMaxTotalLights_ << " 个光源生效";
+    }
+
+    // 1. 准备 tile 网格的 CPU 侧缓冲
     const int tex_w = tile_grid_w_ * kTexelsPerTile_;
     const int tex_h = tile_grid_h_;
 
     // 每个 tile 当前已放入的光源计数（index = row * tile_grid_w_ + col）
     const int total_tiles = tile_grid_w_ * tile_grid_h_;
     std::vector<uint32_t> tile_counts(static_cast<size_t>(total_tiles), 0);
-    // 每个 tile 的光源 index 列表（先到先得，uint8：0-254 有效，255=无光源）
+    // 每个 tile 的光源 index 列表（先到先得，uint8：0-254 有效，255=无光源哨兵）
     struct Cell {
         uint8_t idx[kMaxLightsPerTile_];
     };
@@ -2101,7 +2119,9 @@ void Renderer::BuildTileLightIndices(const RenderCommandList& cmds,
     }
 
     glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
-    // 全量上传（packed 已含全部哨兵填充，避免先清后写的双重上传）
+    // 全量上传（packed 已含全部哨兵填充，避免先清后写的双重上传）。
+    // 每帧一次：tile 纹理很小（1280×720 → 320×45 ≈ 57KB），
+    // 全量 glTexImage2D 开销可忽略，且实现简单直接（不做增量 glTexSubImage2D）。
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, packed.data());
     glBindTexture(GL_TEXTURE_2D, 0);

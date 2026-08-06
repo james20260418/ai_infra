@@ -86,6 +86,13 @@ private:
     // 每帧 CPU 端做 culling，把影响每个 tile（16×16 像素）的 ≤16 个光源 index
     // 写入 tile_index_tex，供 fragment shader 按 gl_FragCoord 查表。
     // tile 网格与 3D FBO 同尺寸，随 Ensure3DFBO 一起重建。
+    //
+    // 下面的常量与 renderer.cc 的 kMeshFs3dTiledLighting GLSL #define 一一对应：
+    //   kTileSize16_       ↔ TILE_SIZE
+    //   kMaxLightsPerTile_ ↔ MAX_LIGHTS_PER_TILE
+    //   kMaxTotalLights_   ↔ MAX_TOTAL_LIGHTS
+    //   kLightIndexSentinel_ ↔ LIGHT_INDEX_SENTINEL
+    // 改任一处必须同时改另一处，否则 tile 编码/解码错位。
     static constexpr int kTileSize16_ = 16;
     static constexpr int kMaxLightsPerTile_ = 16;
     // 每 tile 用 4 个 texel，每 texel RGBA 各存 1 个 uint8 index（4×4=16）
