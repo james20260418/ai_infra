@@ -2203,13 +2203,13 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
     Mat4Mul(mvp_, model, mvp);
 
-    // 4. 纹理 or 纯色着色
-    const bool textured = (cmd.texture_id != 0);
+    // 4. 纹理 or 纯色着色（由 PBRMaterial 决定）
+    const bool textured = (cmd.material.base_color_tex != 0);
 
     // 决定着色路径：
-    //   纹理模式 → 纹理 shader（不受 object_use_default_color 影响）
+    //   baseColor 纹理模式 → 纹理 shader（不受 object_use_default_color 影响）
     //   纯色 + object_use_default_color → 旧纯色 shader（兼容现有 gold test）
-    //   纯色 + !object_use_default_color → 光照 shader（Blinn-Phong）
+    //   纯色 + !object_use_default_color → GGX PBR 光照 shader
     const bool use_lighting = !textured && !cmds.object_use_default_color;
 
     if (use_lighting) {
@@ -2228,15 +2228,16 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         // Model 矩阵（单独传入，供 world-space position 计算）
         glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
                            1, GL_FALSE, model);
-        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive 替代
-        // 旧 uModelColor/uShininess）。本阶段 Object3DCommand 尚无 material 字段
-        //（后续任务#6 引入），先以 default_color 作为 baseColor、其余取 PBRMaterial
-        // 默认值（metallic=0 / roughness=1 / emissive=黑）。
+        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive）。
+        // 光照路径先走材质常值；metallic/roughness/emissive 纹理采样由后续任务接入。
         glUniform3f(glGetUniformLocation(prog, "uBaseColor"),
-                    cmd.default_color.r, cmd.default_color.g, cmd.default_color.b);
-        glUniform1f(glGetUniformLocation(prog, "uMetallic"), 0.0f);
-        glUniform1f(glGetUniformLocation(prog, "uRoughness"), 1.0f);
-        glUniform3f(glGetUniformLocation(prog, "uEmissive"), 0.0f, 0.0f, 0.0f);
+                    cmd.material.base_color.r, cmd.material.base_color.g,
+                    cmd.material.base_color.b);
+        glUniform1f(glGetUniformLocation(prog, "uMetallic"), cmd.material.metallic);
+        glUniform1f(glGetUniformLocation(prog, "uRoughness"), cmd.material.roughness);
+        glUniform3f(glGetUniformLocation(prog, "uEmissive"),
+                    cmd.material.emissive.r, cmd.material.emissive.g,
+                    cmd.material.emissive.b);
         // 相机位置（specular 需要）
         glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
                     cmds.camera.position.x(), cmds.camera.position.y(),
@@ -2251,18 +2252,19 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     } else if (textured) {
         // 纹理模式：mesh 必须含 UV 属性
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-            << "DrawObject3D: texture_id 非 0 但 mesh 无 kUV 属性，无法纹理采样";
-        unsigned int gl_tex = texture_mgr_.GetGLTexture(cmd.texture_id);
+            << "DrawObject3D: base_color_tex 非 0 但 mesh 无 kUV 属性，无法纹理采样";
+        unsigned int gl_tex = texture_mgr_.GetGLTexture(cmd.material.base_color_tex);
         CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: texture_id " << cmd.texture_id << " 未注册";
+            << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
+            << " 未注册";
 
         unsigned int prog = TexturedMesh3DProg();
         glUseProgram(prog);
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uTint"),
-                    cmd.default_color.r, cmd.default_color.g,
-                    cmd.default_color.b, cmd.default_color.a);
+                    cmd.material.base_color.r, cmd.material.base_color.g,
+                    cmd.material.base_color.b, cmd.material.base_color.a);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
@@ -2273,8 +2275,8 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
                            1, GL_FALSE, mvp);
         glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.default_color.r, cmd.default_color.g,
-                    cmd.default_color.b, cmd.default_color.a);
+                    cmd.material.base_color.r, cmd.material.base_color.g,
+                    cmd.material.base_color.b, cmd.material.base_color.a);
     }
 
     // 5. 发起绘制（indexed 用 EBO，否则按顶点序）
