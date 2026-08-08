@@ -64,12 +64,13 @@ public:
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
-        uint32_t texture_id = 0;  // 纯色 + 光照渲染
 
-        // ---- 渲染模型（中心在原点，自然朝向，默认走光照着色）----
+        // ---- 渲染模型（中心在原点，自然朝向，默认走 GGX 光照着色）----
+        // PBR 材质：baseColor 偏白，metallic=0 / roughness=1（默认）
+        jpov::PBRMaterial mat;
+        mat.base_color = {0.8f, 0.8f, 0.8f, 1.0f};  // 漫反射基础色，偏白
         cmds->DrawObject3D(
-            mesh_id, texture_id,
-            {0.8f, 0.8f, 0.8f, 1.0f},  // default_color (漫反射基础色，偏白)
+            mesh_id, mat,
             {0.0f, 0.0f, 0.0f},          // center = 原点
             {0.0f, 1.0f, 0.0f},          // up = +Y
             {0.0f, 0.0f, 1.0f});         // front = +Z
