@@ -491,6 +491,24 @@ cc_test(
 )
 
 # ============================================================================
+# PBRMaterial 单元测试 — 纯 CPU 数据结构语义（构建 + fallback，不进 gold）
+# ============================================================================
+cc_test(
+    name = "jpov_pbr_material_test",
+    srcs = ["jpov_pbr_material_test.cc"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # Gold Image — 3D 点光源光照 (Blinn-Phong) 渲染验证
 # ============================================================================
 cc_binary(
