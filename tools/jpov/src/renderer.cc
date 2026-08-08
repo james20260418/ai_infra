@@ -139,7 +139,7 @@ void main() {
 }
 )glsl";
 
-// ==================== 3D 光照 Shaders（Tiled Forward Blinn-Phong）====================
+// ==================== 3D 光照 Shaders（Tiled Forward GGX PBR）====================
 
 // 3D 静态模型光照顶点 shader：
 // 接受局部空间 position + normal，输出 world-space position + normal + gl_Position
@@ -163,12 +163,12 @@ void main() {
 }
 )glsl";
 
-// Tiled Forward 光照 fragment shader
+// Tiled Forward 光照 fragment shader（GGX PBR）
 //
 // 数据流：
 //   CPU 端：每个点光源投影到 NDC → screen rect → 覆盖的 tile(s) 写入 light index
 //   GPU 端：fragment 根据 gl_FragCoord 查 tile 纹理获取 ≤16 个光源 index，
-//          遍历这些光源做 Blinn-Phong 计算（动态索引 uLights 数组）
+//          遍历这些光源做 GGX PBR 计算（动态索引 uLights 数组）
 //
 // tile 纹理：普通 GL_RGBA8（避开 integer 纹理的兼容坑），每 texel 的 RGBA 通道
 //           各存一个 uint8 光源 index（255 = 无光源哨兵），
@@ -207,8 +207,12 @@ struct Light {
 uniform Light uLights[MAX_TOTAL_LIGHTS];
 uniform int uTotalLights;
 uniform vec3 uCameraPos;
-uniform vec3 uModelColor;
-uniform float uShininess;
+
+// ---- PBR 材质常量参数（本阶段仅走 constant，纹理通道留后续阶段）----
+uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
+uniform float uMetallic;    // 金属度（0=电介质，1=金属）
+uniform float uRoughness;   // 粗糙度（0=光滑，1=粗糙）
+uniform vec3  uEmissive;    // 自发光
 
 // Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
 // （255 = 无光源）。fragment shader 用 texelFetch 精准定位。
@@ -217,6 +221,41 @@ uniform sampler2D uTileLightIndices;
 // 环境光常量
 const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
 const float AMBIENT_STRENGTH = 0.3;
+
+// ---- GGX PBR BRDF 函数 ----
+
+// Fresnel-Schlick 近似：F = F0 + (1-F0) * (1 - cosTheta)^5
+// F0 = mix(0.04, baseColor, metallic)：电介质固定 0.04，金属用 baseColor
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// GGX / Trowbridge-Reitz 法线分布（NDF）：
+//   D = a^2 / (pi * ((NdotH)^2 * (a^2 - 1) + 1)^2)，其中 a = roughness^2
+float distributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = 3.14159265 * denom * denom;
+    return a2 / max(denom, 1e-7);
+}
+
+// 几何遮蔽（Geometry）单项：Smith 的 Schlick-GGX 形式
+//   G1(x) = x / (x * (1 - k) + k)，k = (roughness + 1)^2 / 8（direct lighting）
+float geometrySchlickGGX(float NdotX, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+// 完整几何项：G = G1(NdotL) * G1(NdotV)
+float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
+}
 
 // 从 tile 纹理读取当前 tile 的光源 index 列表
 // tile_col/row: 当前像素所在的 tile 坐标
@@ -285,17 +324,33 @@ void main() {
         // 线性衰减：1.0 at dist=0 → 0.0 at dist=radius
         float attenuation = 1.0 - (dist / uLights[li].radius);
 
-        // Diffuse (Lambert)
         float NdotL = max(dot(N, light_dir), 0.0);
-        total_diffuse += uLights[li].color * NdotL * attenuation;
+        if (NdotL > 0.0) {
+            // ---- GGX PBR：每光源 Cook-Torrance 贡献 ----
+            vec3 H = normalize(light_dir + V);
+            float NdotV = max(dot(N, V), 0.0);
 
-        // Specular (Blinn-Phong)
-        vec3 H = normalize(light_dir + V);
-        float NdotH = max(dot(N, H), 0.0);
-        total_specular += uLights[li].color * pow(NdotH, uShininess) * attenuation;
+            // F0：金属度混合 baseColor，电介质固定 0.04
+            vec3 F0 = mix(vec3(0.04), uBaseColor, uMetallic);
+            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+            float D = distributionGGX(N, H, uRoughness);
+            float G = geometrySmith(N, V, light_dir, uRoughness);
+
+            // Cook-Torrance specular BRDF：f_s = (F * D * G) / (4 * NdotL * NdotV)
+            vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
+
+            // 漫反射：电介质 baseColor/π，金属无漫反射；(1-F) 近似能量守恒
+            vec3 kD = (vec3(1.0) - F) * (1.0 - uMetallic);
+            vec3 diffuse = kD * uBaseColor / 3.14159265;
+
+            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
+            total_specular += uLights[li].color * specular * NdotL * attenuation;
+        }
     }
 
-    vec3 result = uModelColor * (ambient + total_diffuse) + total_specular;
+    // PBR：ambient + diffuse + specular + emissive
+    vec3 result = ambient * uBaseColor + total_diffuse + total_specular + uEmissive;
     FragColor = vec4(result, 1.0);
 }
 )glsl";
@@ -2173,15 +2228,19 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         // Model 矩阵（单独传入，供 world-space position 计算）
         glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
                            1, GL_FALSE, model);
-        // 模型颜色
-        glUniform3f(glGetUniformLocation(prog, "uModelColor"),
+        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive 替代
+        // 旧 uModelColor/uShininess）。本阶段 Object3DCommand 尚无 material 字段
+        //（后续任务#6 引入），先以 default_color 作为 baseColor、其余取 PBRMaterial
+        // 默认值（metallic=0 / roughness=1 / emissive=黑）。
+        glUniform3f(glGetUniformLocation(prog, "uBaseColor"),
                     cmd.default_color.r, cmd.default_color.g, cmd.default_color.b);
+        glUniform1f(glGetUniformLocation(prog, "uMetallic"), 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "uRoughness"), 1.0f);
+        glUniform3f(glGetUniformLocation(prog, "uEmissive"), 0.0f, 0.0f, 0.0f);
         // 相机位置（specular 需要）
         glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
                     cmds.camera.position.x(), cmds.camera.position.y(),
                     cmds.camera.position.z());
-        // 高光光滑度
-        glUniform1f(glGetUniformLocation(prog, "uShininess"), 64.0f);
 
         // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
         // 这里只需绑定 tile index 纹理（fragment shader 按像素查表获取
