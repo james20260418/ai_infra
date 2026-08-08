@@ -349,6 +349,43 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
+// PBR 材质参数（世界空间 3D 物体着色用）
+//
+// 描述一个 3D 物体的 PBR 材质。每个通道要么用常值（fallback），
+// 要么用纹理（逐像素材质参数场，采样后进 BRDF）。
+// 通道与对应是否有纹理的关系由各字段表达：
+//   - base_color / emissive / ao 为颜色，分别配套 *_tex（0 = 无纹理）
+//   - metallic / roughness 为标量，分别配套 has_*_tex + *_tex
+//   - normal_scale 缩放法线贴图扰动强度
+//
+// 约定：纹理句柄 0 表示无纹理，此时使用对应的常值 fallback。
+//       *_tex 非 0 时采样该纹理作为逐像素材质参数，忽略对应常值。
+struct PBRMaterial {
+    // baseColor: 值 或 纹理（has_*_tex 语义下用纹理）
+    Color base_color;            // fallback 值
+    uint32_t base_color_tex = 0; // 0 = 无纹理
+
+    // metallic / roughness: scalar or texture
+    float metallic = 0.0f;
+    bool has_metallic_tex = false;
+    uint32_t metallic_tex = 0;
+    float roughness = 1.0f;
+    bool has_roughness_tex = false;
+    uint32_t roughness_tex = 0;
+
+    // 法线贴图（扰动法线，采样的 TBN 变换）
+    float normal_scale = 1.0f;
+    uint32_t normal_tex = 0;     // 法线贴图
+
+    // emissive: color or texture
+    Color emissive;
+    uint32_t emissive_tex = 0;
+
+    // 烘焙 AO（先留槽）: color or texture
+    Color ao;
+    uint32_t ao_tex = 0;
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
