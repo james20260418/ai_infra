@@ -333,8 +333,7 @@ struct Image2DCommand {
 
 // 点光源（世界空间）
 //
-// 光照计算采用 GGX PBR BRDF（Cook-Torrance：NDF + Fresnel + Geometry），
-// 结果 = ambient * AO + diffuse + specular + emissive。
+// 光照计算采用 Blinn-Phong 模型（diffuse + specular + ambient）。
 // 衰减为线性：强度随距离从 1.0（pos 处）衰减到 0.0（linear_radius 处），
 // 超出 linear_radius 的光源对像素贡献为 0。
 //
@@ -350,68 +349,31 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
-// PBR 材质参数（世界空间 3D 物体着色用）
-//
-// 描述一个 3D 物体的 PBR 材质。每个通道要么用常值（fallback），
-// 要么用纹理（逐像素材质参数场，采样后进 BRDF）。
-// 通道与对应是否有纹理的关系由各字段表达：
-//   - base_color / emissive / ao 为颜色，分别配套 *_tex（0 = 无纹理）
-//   - metallic / roughness 为标量，分别配套 has_*_tex + *_tex
-//   - normal_scale 缩放法线贴图扰动强度
-//
-// 约定：纹理句柄 0 表示无纹理，此时使用对应的常值 fallback。
-//       *_tex 非 0 时采样该纹理作为逐像素材质参数，忽略对应常值。
-struct PBRMaterial {
-    // baseColor: 值 或 纹理（has_*_tex 语义下用纹理）
-    Color base_color;            // fallback 值
-    uint32_t base_color_tex = 0; // 0 = 无纹理
-
-    // metallic / roughness: scalar or texture
-    float metallic = 0.0f;
-    bool has_metallic_tex = false;
-    uint32_t metallic_tex = 0;
-    float roughness = 1.0f;
-    bool has_roughness_tex = false;
-    uint32_t roughness_tex = 0;
-
-    // 法线贴图（扰动法线，采样的 TBN 变换）
-    float normal_scale = 1.0f;
-    uint32_t normal_tex = 0;     // 法线贴图
-
-    // emissive: color or texture
-    Color emissive{0.0f, 0.0f, 0.0f, 1.0f};   // 默认无自发光
-    uint32_t emissive_tex = 0;
-
-    // 烘焙 AO（先留槽）: color or texture
-    // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽，不影响环境光。
-    Color ao{1.0f, 1.0f, 1.0f, 1.0f};
-    uint32_t ao_tex = 0;
-};
-
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
-// 用 PBRMaterial 定义材质。base_color_tex != 0 时 baseColor 走逐像素纹理采样
-//（mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色），
-// 否则用 base_color 常值 fallback。
-// mesh_id 为运行期由 RegisterMesh 分配的句柄。
+// 支持纯色（texture_id=0）或纹理（texture_id 非 0）着色。
+// mesh_id / texture_id 均为运行期由 RegisterMesh / RegisterTexture 分配的句柄。
 //
 // 变换约定：模型在局部空间定义，通过 center（平移）+ up/front（旋转）放置。
 //   - 局部 +Y → 世界 up；局部 +Z → 世界 front；局部 +X = normalize(cross(up, front))
 //   - 无缩放、不含逐物体透视；MVP = Proj * View * Model
 //
 // 光照：当 RenderCommandList::object_use_default_color 为 false（默认）时，
-// 模型使用 GGX PBR 光照着色（需 mesh 含 kNormal 属性）。材质来自 material：
-// baseColor 支持纹理（base_color_tex != 0，需 kUV）或常值；
-// metallic/roughness/emissive 取常值（纹理由后续阶段接入，见对应 *_tex 标志）。
-// 当 object_use_default_color == true 时走纯色路径，颜色取 material.base_color。
+// 模型使用 Blinn-Phong 光照着色（需 mesh 含 kNormal 属性）。
+// default_color 仅在以下情况使用：
+//   (a) object_use_default_color == true（全局开关）
+//   (b) 纹理模式（texture_id != 0）下作为 tint 乘数
+//   (c) 纹理模式失效时作为回退颜色
 //
 // Pre-condition: mesh_id 已注册且未释放
-// Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性
+// Pre-condition: texture_id == 0，或已注册且 mesh 含 kUV 属性
 // Pre-condition: up、front 均非零且不平行
 struct Object3DCommand {
     uint32_t mesh_id;      // 已注册的 GPU mesh 句柄
-    PBRMaterial material;  // PBR 材质（常值 or 纹理通道）
+    uint32_t texture_id;   // 纹理句柄（0 = 纯色渲染）
+    Color default_color;   // 回退纯色（仅 object_use_default_color=true 或纹理失效时使用）
+                           // 光照模式下无用
     Vec3f center;          // 模型中心世界坐标（平移）
     Vec3f up;              // 局部 +Y 指向的世界方向（归一化处理）
     Vec3f front;           // 局部 +Z 指向的世界方向（归一化处理）
@@ -450,7 +412,7 @@ struct RenderCommandList {
     std::vector<std::pair<DrawCommandType, int>> order;
 
     // 点光源列表（世界空间）。
-    // 每帧可设置 0~N 个点光源，渲染时按 GGX PBR 模型计算光照。
+    // 每帧可设置 0~N 个点光源，渲染时按 Blinn-Phong 模型计算光照。
     // 空列表时无光照效果（物体呈纯黑，仅 ambient 项可见）。
     //
     // 光源数量上限：255 个（仅前 255 个生效，超出部分静默忽略，
@@ -468,9 +430,8 @@ struct RenderCommandList {
     std::vector<PointLight> point_lights;
 
     // Object3D 纯色开关（默认 false）。
-    // 为 true 时所有 Object3D 走纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal，
-    // 颜色取 material.base_color（用于渲染无 kNormal 属性的网格）。
-    // 为 false 时使用 GGX PBR 光照着色（需 mesh 含 kNormal）。
+    // 为 true 时所有 Object3D 走旧的纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal。
+    // 为 false 时使用 Blinn-Phong 光照着色（需 mesh 含 kNormal）。
     bool object_use_default_color = false;
 
     // 3D 透视相机
@@ -608,24 +569,22 @@ struct RenderCommandList {
     //   - 局部 +X 轴由 up/front 叉积确定（保证右手系）
     //
     // 着色行为取决于 RenderCommandList::object_use_default_color：
-    //   - false（默认）：使用 GGX PBR 光照着色（需 mesh 含 kNormal）
-    //   - true：使用旧的纯色渲染路径，material.base_color 作为物体颜色
+    //   - false（默认）：使用 Blinn-Phong 光照着色（需 mesh 含 kNormal）
+    //   - true：使用旧的纯色渲染路径，default_color 作为物体颜色
     //
-    // 以 PBRMaterial 材质绘制一个 3D 静态模型（mesh 需已注册）。
-    //
-    // mat: PBR 材质。base_color_tex != 0 时 baseColor 走逐像素纹理采样
-    //      （mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色）；
-    //      否则各通道取 mat 的常值 fallback（含光照模式下的
-    //      metallic / roughness / emissive 恒走常值）。
-    //
-    // center: 模型中心的世界坐标（平移）
-    // up:     模型局部 +Y 指向的世界方向（需非零，会被归一化）
-    // front:  模型局部 +Z 指向的世界方向（需非零，会被归一化）
+    // texture_id: 纹理句柄（0 = 纯色渲染，不带纹理）；
+    //             非 0 时使用纹理着色（mesh 需含 kUV 属性）
+    // default_color: 纯色模式下的颜色；纹理模式下作为 tint 乘数；
+    //                光照模式下通常不使用（仅 object_use_default_color=true 时生效）
+    // center:     模型中心的世界坐标（平移）
+    // up:         模型局部 +Y 指向的世界方向（需非零，会被归一化）
+    // front:      模型局部 +Z 指向的世界方向（需非零，会被归一化）
     //
     // Pre-condition: mesh_id 已通过 RegisterMesh 注册且未释放
-    // Pre-condition: base_color_tex 为 0，或已注册且 mesh 含 kUV 属性
+    // Pre-condition: texture_id 为 0，或已注册且 mesh 含 kUV 属性
     // Pre-condition: up 与 front 均非零向量，且不平行
-    void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
+    void DrawObject3D(uint32_t mesh_id, uint32_t texture_id,
+                      const Color& default_color,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front);
 };

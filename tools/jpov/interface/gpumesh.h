@@ -36,7 +36,6 @@ struct GPUMesh {
     unsigned int vbo_uvs = 0;       // 0 = 无 UV 属性
     unsigned int vbo_joints = 0;    // 0 = 无骨骼关节属性（预留）
     unsigned int vbo_weights = 0;   // 0 = 无骨骼权重属性（预留）
-    unsigned int vbo_tangents = 0;  // 0 = 无切线属性（法线映射 TBN）
     unsigned int ebo = 0;           // 0 = 无索引（non-indexed mesh）
     uint32_t vertex_count = 0;      // positions 顶点数
     uint32_t index_count = 0;       // indices 数量（0 = non-indexed）
