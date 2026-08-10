@@ -455,6 +455,21 @@ cc_test(
 # Gold Image — Object3D (RegisterMesh→DrawObject3D 链路) 渲染验证
 # ============================================================================
 cc_binary(
+    name = "jpov_repro_purecolor_cube",
+    srcs = ["jpov_repro_purecolor_cube.cc"],
+    data = [":cube_hand.obj"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
     name = "jpov_object3d_gold_generator",
     srcs = ["jpov_object3d_gold_generator.cc"],
     data = [":beetle.obj"],
