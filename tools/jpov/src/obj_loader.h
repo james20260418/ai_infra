@@ -40,8 +40,10 @@ namespace jpov {
 // 从 OBJ 文件解析网格数据到 out（CPU 侧 MeshData）。
 //
 // 成功: 返回 true。out->flags 依据文件内容设为
-//   kPosition 必有，另含 kNormal（存在 vn）/ kUV（存在 vt）;
-//   positions/normals/uvs/indices 已正确填充且对齐。
+//   kPosition 必有，另含 kNormal（存在 vn）/ kUV（存在 vt）；
+//   当 mesh 同时含 kNormal + kUV 时，额外从三角形几何 + UV 推导逐顶点
+//   tangent，并置 kTangent 标志（法线映射 TBN 用）。
+//   positions/normals/uvs/tangents/indices 已正确填充且对齐。
 // 失败: 返回 false 并 LOG(ERROR)（文件打不开 / 语法非法 / 面引用越界等），
 //   out 保持未定义（调用方不得在失败后使用）。
 bool LoadObj(const std::string& path, MeshData* out);

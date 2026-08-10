@@ -193,7 +193,31 @@ void main() {
 }
 )glsl";
 
-// Tiled Forward 光照 fragment shader（GGX PBR）
+const char* kMeshVs3dLightingUVTangent = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 5) in vec3 aTangent;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+out vec3 vWorldTangent;
+
+void main() {
+    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
+    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    // tangent 同样经 normal matrix 变换到世界空间（旋转部分即足够）
+    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
+    vTexCoord = aTexCoord;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
 //
 // 数据流：
 //   CPU 端：每个点光源投影到 NDC → screen rect → 覆盖的 tile(s) 写入 light index
@@ -423,6 +447,213 @@ void main() {
     FragColor = vec4(result, 1.0);
 }
 )glsl";
+
+// Tiled Forward 光照 fragment shader（GGX PBR + 法线映射 TBN）
+//
+// 在 kMeshFs3dTiledLighting 基础上增加法线贴图支持：
+//   - 额外输入 vWorldTangent（来自 kMeshVs3dLightingUVTangent 顶点 shader）
+//   - uHasNormalTex==1 时采样 uNormalTex（RGBA8 法线贴图，[0,1]→[-1,1]），
+//     用 Gram-Schmidt 正交化 tangent 构建 TBN，uNormalScale 缩放扰动强度；
+//     否则退化为几何法线（vWorldNormal），与普通光照完全一致
+//
+// 本 shader 必须与 kMeshVs3dLightingUVTangent 配对链接（fragment 的
+// vWorldTangent 输入需顶点 shader 声明）。法线贴图需要 mesh 含 kNormal+kUV+kTangent。
+const char* kMeshFs3dTiledLightingNormal = R"glsl(
+#version 330 core
+
+#define TILE_SIZE 16
+#define MAX_LIGHTS_PER_TILE 16
+#define MAX_TOTAL_LIGHTS 255
+#define LIGHT_INDEX_SENTINEL 255u
+
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+in vec2 vTexCoord;
+in vec3 vWorldTangent;
+out vec4 FragColor;
+
+// 点光源
+struct Light {
+    vec3 position;
+    vec3 color;
+    float radius;
+};
+
+uniform Light uLights[MAX_TOTAL_LIGHTS];
+uniform int uTotalLights;
+uniform vec3 uCameraPos;
+
+// ---- PBR 材质参数 ----
+uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
+uniform sampler2D uBaseColorTex;  // baseColor 纹理（可选用）
+uniform int   uHasBaseColorTex;   // 1 = 采样 baseColor 纹理，0 = 用常值
+uniform float uMetallic;    // 金属度常值（0=电介质，1=金属）
+uniform sampler2D uMetallicTex;   // metallic 纹理（标量存 .r 通道）
+uniform int   uHasMetallicTex;    // 1 = 采样 metallic 纹理，0 = 用常值
+uniform float uRoughness;   // 粗糙度常值（0=光滑，1=粗糙）
+uniform sampler2D uRoughnessTex;  // roughness 纹理（标量存 .r 通道）
+uniform int   uHasRoughnessTex;   // 1 = 采样 roughness 纹理，0 = 用常值
+uniform vec3  uEmissive;    // 自发光常值
+uniform sampler2D uEmissiveTex;   // emissive 纹理（RGB = 自发光色）
+uniform int   uHasEmissiveTex;    // 1 = 采样 emissive 纹理，0 = 用常值
+uniform float uAO;                // AO 常值
+uniform sampler2D uAoTex;         // AO 纹理（标量存 .r 通道）
+uniform int   uHasAoTex;          // 1 = 采样 AO 纹理，0 = 用常值
+// 法线贴图：uHasNormalTex==1 时采样 uNormalTex 做逐像素法线扰动（TBN 变换），
+// uNormalScale 缩放扰动强度（1.0 = 原强度）。法线贴图中 blue 通道朝外。
+uniform sampler2D uNormalTex;     // 法线贴图（RGBA8，[0,1] 编码的切线空间法线）
+uniform int   uHasNormalTex;      // 1 = 采样法线贴图，0 = 用几何法线
+uniform float uNormalScale;       // 法线扰动强度（>0）
+
+// Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
+uniform sampler2D uTileLightIndices;
+
+// 环境光常量
+const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
+const float AMBIENT_STRENGTH = 0.3;
+
+// ---- GGX PBR BRDF 函数 ----
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+float distributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = 3.14159265 * denom * denom;
+    return a2 / max(denom, 1e-7);
+}
+
+float geometrySchlickGGX(float NdotX, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
+}
+
+// 从 tile 纹理读取当前 tile 的光源 index 列表
+int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
+    int count = 0;
+    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
+        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
+        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
+        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
+        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
+        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
+        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = r;
+            count++;
+        }
+        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = g;
+            count++;
+        }
+        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = b;
+            count++;
+        }
+        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = a;
+            count++;
+        }
+    }
+    return count;
+}
+
+void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+
+    // 法线映射：uHasNormalTex==1 时采样切线空间法线，构建 TBN 变换到世界空间
+    if (uHasNormalTex == 1) {
+        vec3 tex_normal = texture(uNormalTex, vTexCoord).rgb * 2.0 - 1.0;
+        tex_normal = normalize(tex_normal);
+        // 蓝通道（+Z）沿切线空间法线方向；uNormalScale 缩放 XY 分量增强/减弱扰动
+        tex_normal.xy *= uNormalScale;
+        tex_normal = normalize(tex_normal);
+
+        // TBN：T 经 Gram-Schmidt 正交化（对齐 N），B = cross(N, T)，右手系
+        vec3 T = normalize(vWorldTangent - dot(vWorldTangent, N) * N);
+        vec3 B = normalize(cross(N, T));
+        mat3 TBN = mat3(T, B, N);
+
+        // 扰动后的世界空间法线
+        N = normalize(TBN * tex_normal);
+    }
+
+    // baseColor：uHasBaseColorTex==1 时逐像素采样纹理，否则用常值 fallback
+    vec3 base_color = (uHasBaseColorTex == 1)
+        ? texture(uBaseColorTex, vTexCoord).rgb
+        : uBaseColor;
+
+    float metallic = (uHasMetallicTex == 1)
+        ? texture(uMetallicTex, vTexCoord).r
+        : uMetallic;
+    float roughness = (uHasRoughnessTex == 1)
+        ? texture(uRoughnessTex, vTexCoord).r
+        : uRoughness;
+    vec3 emissive = (uHasEmissiveTex == 1)
+        ? texture(uEmissiveTex, vTexCoord).rgb
+        : uEmissive;
+    float ao = (uHasAoTex == 1)
+        ? texture(uAoTex, vTexCoord).r
+        : uAO;
+    ao = clamp(ao, 0.0, 1.0);
+
+    ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
+    int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
+    int grid_rows = grid.y;
+    int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
+    int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
+
+    uint light_indices[MAX_LIGHTS_PER_TILE];
+    int num_lights = readTileLights(tile_col, tile_row, light_indices);
+
+    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
+    vec3 total_diffuse = vec3(0.0);
+    vec3 total_specular = vec3(0.0);
+
+    for (int i = 0; i < num_lights; i++) {
+        uint li = light_indices[i];
+        vec3 L = uLights[li].position - vWorldPos;
+        float dist = length(L);
+        if (dist >= uLights[li].radius) continue;
+
+        vec3 light_dir = L / dist;
+        float attenuation = 1.0 - (dist / uLights[li].radius);
+
+        float NdotL = max(dot(N, light_dir), 0.0);
+        if (NdotL > 0.0) {
+            vec3 H = normalize(light_dir + V);
+            float NdotV = max(dot(N, V), 0.0);
+
+            vec3 F0 = mix(vec3(0.04), base_color, metallic);
+            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+            float D = distributionGGX(N, H, roughness);
+            float G = geometrySmith(N, V, light_dir, roughness);
+
+            vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
+            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+            vec3 diffuse = kD * base_color / 3.14159265;
+
+            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
+            total_specular += uLights[li].color * specular * NdotL * attenuation;
+        }
+    }
+
+    vec3 result = ambient * base_color * ao + total_diffuse + total_specular + emissive;
+    FragColor = vec4(result, 1.0);
+}
+)glsl";
+
 
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
 
@@ -907,6 +1138,15 @@ unsigned int Renderer::MeshLighting3DTexturedProg() {
                                   {kMeshVs3dLightingUV, kMeshFs3dTiledLighting});
 }
 
+// 光照 + 法线映射变体：vertex shader 用 UV+tangent 版（接受 location 2/5），
+// fragment shader 用含 TBN 的版本。仅当 mesh 含 kNormal+kUV+kTangent 且
+// normal_tex != 0 时使用；否则退化为 MeshLighting3DTexturedProg / MeshLighting3DProg。
+unsigned int Renderer::MeshLighting3DNormalTexProg() {
+    return shader_mgr_.GetOrCreate(
+        "mesh3d_tiled_lighting_normal",
+        {kMeshVs3dLightingUVTangent, kMeshFs3dTiledLightingNormal});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -919,6 +1159,7 @@ void Renderer::CompileShaders() {
     TexturedMesh3DProg();
     MeshLighting3DProg();
     MeshLighting3DTexturedProg();
+    MeshLighting3DNormalTexProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -2068,10 +2309,11 @@ void Renderer::DrawText3D(const Text3DCommand& cmd) {
 // Pre-condition: MeshLighting3DProg() 已注册（首次调用会触发编译）。
 void Renderer::UploadLightData(const RenderCommandList& cmds) {
     // 光源 uniform 需同时上传到所有光照 program（普通光照 + baseColor 纹理
-    //  变体），因为 program 切换时 uniform 是 per-program 状态，DrawObject3D
-    //  会根据材质动态选择哪一个。
+    //  变体 + 法线映射），因为 program 切换时 uniform 是 per-program 状态，
+    //  DrawObject3D 会根据材质动态选择哪一个。
     const unsigned int programs[] = {MeshLighting3DProg(),
-                                     MeshLighting3DTexturedProg()};
+                                     MeshLighting3DTexturedProg(),
+                                     MeshLighting3DNormalTexProg()};
 
     const int total = static_cast<int>(cmds.point_lights.size());
     const int clamped = std::min(total, kMaxTotalLights_);
@@ -2287,14 +2529,17 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     Mat4Mul(mvp_, model, mvp);
 
     // 4. 纹理 or 纯色着色（由 PBRMaterial 决定）
-    // 任一材质通道（baseColor/metallic/roughness/emissive/AO）带纹理即需 UV
+    // 任一材质通道（baseColor/metallic/roughness/emissive/AO/normal）带纹理即需 UV
     // 属性 + UV 变体 shader；否则全部走常值 fallback。
     const bool any_tex =
         (cmd.material.base_color_tex != 0) ||
         (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
         (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
         (cmd.material.emissive_tex != 0) ||
-        (cmd.material.ao_tex != 0);
+        (cmd.material.ao_tex != 0) ||
+        (cmd.material.normal_tex != 0);
+    // 是否启用法线映射（采样法线贴图做 TBN）。法线贴图需要 mesh 含 kTangent。
+    const bool use_normal_map = (cmd.material.normal_tex != 0);
 
     // 决定着色路径：
     //   !object_use_default_color → GGX PBR 光照 shader（任一通道带纹理时
@@ -2312,8 +2557,14 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         // 任一通道带纹理时用 UV 变体 program（接受 location 2 的 UV），
         // 各通道在这些采样纹理的引导下逐像素采样；否则用普通光照 shader
         // （不声明 UV attrib，避免无 UV mesh 声明未启用 attrib 的兼容问题）。
-        unsigned int prog = any_tex ? MeshLighting3DTexturedProg()
-                                     : MeshLighting3DProg();
+        // 法线映射（normal_tex 非 0）时额外需要 kTangent，用 UV+tangent 变体。
+        unsigned int prog;
+        if (use_normal_map) {
+            prog = MeshLighting3DNormalTexProg();
+        } else {
+            prog = any_tex ? MeshLighting3DTexturedProg()
+                           : MeshLighting3DProg();
+        }
         glUseProgram(prog);
 
         // MVP（含 Model）
@@ -2342,11 +2593,17 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
 
         // 需要 UV：任一材质通道带纹理（any_tex）时，mesh 必须含 kUV，否则无法
         // 逐像素采样。各通道纹理按固定纹理单元绑定：
-        //   1=baseColor 2=metallic 3=roughness 4=emissive 5=AO；
+        //   1=baseColor 2=metallic 3=roughness 4=emissive 5=AO 6=normal；
         // 未带纹理的通道置 uHas*Tex=0，shader 走常值 fallback 不采样。
         if (any_tex) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
                 << "DrawObject3D: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
+        }
+        // 法线映射：需要 kTangent（烘焙切线）才能构建 TBN。
+        if (use_normal_map) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
+                << "DrawObject3D: normal_tex 非 0 但 mesh 无 kTangent 属性，"
+                << "无法构建 TBN（OBJ 加载器已自动推导 tangent）";
         }
 
         // ---- baseColor 纹理（TEXTURE1）----
@@ -2422,6 +2679,25 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
             glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 1);
         } else {
             glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 0);
+        }
+
+        // ---- normal 纹理（TEXTURE6，法线映射 TBN）----
+        // 启用时需 mesh 含 kTangent（上方已 CHECK）；normal_scale 缩放扰动强度。
+        if (cmd.material.normal_tex != 0) {
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.normal_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: normal_tex " << cmd.material.normal_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uNormalTex"), 6);
+            glUniform1i(glGetUniformLocation(prog, "uHasNormalTex"), 1);
+            glUniform1f(glGetUniformLocation(prog, "uNormalScale"),
+                        cmd.material.normal_scale);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasNormalTex"), 0);
+            glUniform1f(glGetUniformLocation(prog, "uNormalScale"), 1.0f);
         }
 
         // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
