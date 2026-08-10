@@ -83,24 +83,24 @@ public:
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 单点光源：前上方暖色主光，让法线扰动产生清晰明暗
-        // 法线贴图展示灯（grazing key + 正面 fill，凸显凹凸细节）
-        // key: 右上方主光，产生 grazing 高光
+        // // 法线贴图展示灯（侧光 + fill，避免正面过曝的同时凸显凹凸）
+        // key: 右上侧光，grazing angle 产生凹凸高光
         cmds->point_lights.push_back({
-            {2.0f, 1.8f, 0.5f},
-            {35.0f, 32.0f, 28.0f, 1.0f},
-            8.0f
-        });
-        // fill: 正面稍低，降低对比度
-        cmds->point_lights.push_back({
-            {0.0f, 0.0f, 1.5f},
-            {12.0f, 14.0f, 22.0f, 1.0f},
+            {1.5f, 2.0f, 0.3f},
+            {18.0f, 17.0f, 15.0f, 1.0f},
             6.0f
         });
-        // rim: 左侧 grazing，产生边缘高光
+        // fill: 左下弱补光，压低对比度
         cmds->point_lights.push_back({
-            {-1.8f, 0.5f, 0.2f},
-            {20.0f, 20.0f, 20.0f, 1.0f},
-            8.0f
+            {-0.8f, -0.5f, 0.8f},
+            {8.0f, 9.0f, 14.0f, 1.0f},
+            5.0f
+        });
+        // rim: 后方边缘光
+        cmds->point_lights.push_back({
+            {0.0f, 0.5f, -1.5f},
+            {12.0f, 12.0f, 12.0f, 1.0f},
+            6.0f
         });        // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(GetCubeObjPath(), &mesh))
@@ -116,7 +116,7 @@ public:
         mat.base_color_tex = tex_base_color_;
         mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};   // fallback（纹理优先）
         mat.metallic = 0.0f;
-        mat.roughness = 0.15f;
+        mat.roughness = 0.35f;
         mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
