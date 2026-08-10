@@ -378,11 +378,12 @@ struct PBRMaterial {
     uint32_t normal_tex = 0;     // 法线贴图
 
     // emissive: color or texture
-    Color emissive;
+    Color emissive{0.0f, 0.0f, 0.0f, 1.0f};   // 默认无自发光
     uint32_t emissive_tex = 0;
 
     // 烘焙 AO（先留槽）: color or texture
-    Color ao;
+    // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽，不影响环境光。
+    Color ao{1.0f, 1.0f, 1.0f, 1.0f};
     uint32_t ao_tex = 0;
 };
 

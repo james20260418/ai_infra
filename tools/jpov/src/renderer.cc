@@ -245,9 +245,19 @@ uniform vec3 uCameraPos;
 uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
 uniform sampler2D uBaseColorTex;  // baseColor 纹理（可选用）
 uniform int   uHasBaseColorTex;   // 1 = 采样 baseColor 纹理，0 = 用常值
-uniform float uMetallic;    // 金属度（0=电介质，1=金属）
-uniform float uRoughness;   // 粗糙度（0=光滑，1=粗糙）
-uniform vec3  uEmissive;    // 自发光
+uniform float uMetallic;    // 金属度常值（0=电介质，1=金属）
+uniform sampler2D uMetallicTex;   // metallic 纹理（标量存 .r 通道）
+uniform int   uHasMetallicTex;    // 1 = 采样 metallic 纹理，0 = 用常值
+uniform float uRoughness;   // 粗糙度常值（0=光滑，1=粗糙）
+uniform sampler2D uRoughnessTex;  // roughness 纹理（标量存 .r 通道）
+uniform int   uHasRoughnessTex;   // 1 = 采样 roughness 纹理，0 = 用常值
+uniform vec3  uEmissive;    // 自发光常值
+uniform sampler2D uEmissiveTex;   // emissive 纹理（RGB = 自发光色）
+uniform int   uHasEmissiveTex;    // 1 = 采样 emissive 纹理，0 = 用常值
+// AO：烘焙环境光遮蔽（0=全暗，1=无遮蔽）。常值取 uAO（Color 的强度用 .r）。
+uniform float uAO;                // AO 常值
+uniform sampler2D uAoTex;         // AO 纹理（标量存 .r 通道）
+uniform int   uHasAoTex;          // 1 = 采样 AO 纹理，0 = 用常值
 
 // Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
 // （255 = 无光源）。fragment shader 用 texelFetch 精准定位。
@@ -337,6 +347,24 @@ void main() {
         ? texture(uBaseColorTex, vTexCoord).rgb
         : uBaseColor;
 
+    // metallic / roughness / emissive / AO：每个通道按 uHas*Tex 标志决定
+    // 采样纹理还是用常值 fallback。metallic/roughness/AO 为标量，取纹理 .r 通道；
+    // emissive 为颜色，取 .rgb。注意：纹理采样时 mesh 必须含 kUV（否则走非
+    // UV 变体，这些通道恒为常值，不会触发采样）。
+    float metallic = (uHasMetallicTex == 1)
+        ? texture(uMetallicTex, vTexCoord).r
+        : uMetallic;
+    float roughness = (uHasRoughnessTex == 1)
+        ? texture(uRoughnessTex, vTexCoord).r
+        : uRoughness;
+    vec3 emissive = (uHasEmissiveTex == 1)
+        ? texture(uEmissiveTex, vTexCoord).rgb
+        : uEmissive;
+    float ao = (uHasAoTex == 1)
+        ? texture(uAoTex, vTexCoord).r
+        : uAO;
+    ao = clamp(ao, 0.0, 1.0);
+
     // 计算当前像素所在的 tile，并 clamp 到合法范围（防御边缘/亚像素越界）：
     //   grid_cols = textureWidth / kTexelsPerTile(=4)，grid_rows = textureHeight
     ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
@@ -371,17 +399,17 @@ void main() {
             float NdotV = max(dot(N, V), 0.0);
 
             // F0：金属度混合 baseColor，电介质固定 0.04
-            vec3 F0 = mix(vec3(0.04), base_color, uMetallic);
+            vec3 F0 = mix(vec3(0.04), base_color, metallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
-            float D = distributionGGX(N, H, uRoughness);
-            float G = geometrySmith(N, V, light_dir, uRoughness);
+            float D = distributionGGX(N, H, roughness);
+            float G = geometrySmith(N, V, light_dir, roughness);
 
             // Cook-Torrance specular BRDF：f_s = (F * D * G) / (4 * NdotL * NdotV)
             vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
 
             // 漫反射：电介质 baseColor/π，金属无漫反射；(1-F) 近似能量守恒
-            vec3 kD = (vec3(1.0) - F) * (1.0 - uMetallic);
+            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
             vec3 diffuse = kD * base_color / 3.14159265;
 
             total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
@@ -389,9 +417,9 @@ void main() {
         }
     }
 
-    // PBR：ambient + diffuse + specular + emissive
-    //（base_color 已在上面按 uHasBaseColorTex 决定是常值还是纹理采样结果）
-    vec3 result = ambient * base_color + total_diffuse + total_specular + uEmissive;
+    // PBR：ambient * AO + diffuse + specular + emissive
+    //（base_color/metallic/roughness/emissive/ao 已按各 uHas*Tex 标志决定是常值还是采样）
+    vec3 result = ambient * base_color * ao + total_diffuse + total_specular + emissive;
     FragColor = vec4(result, 1.0);
 }
 )glsl";
@@ -2259,24 +2287,32 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     Mat4Mul(mvp_, model, mvp);
 
     // 4. 纹理 or 纯色着色（由 PBRMaterial 决定）
-    const bool textured = (cmd.material.base_color_tex != 0);
+    // 任一材质通道（baseColor/metallic/roughness/emissive/AO）带纹理即需 UV
+    // 属性 + UV 变体 shader；否则全部走常值 fallback。
+    const bool any_tex =
+        (cmd.material.base_color_tex != 0) ||
+        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
+        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
+        (cmd.material.emissive_tex != 0) ||
+        (cmd.material.ao_tex != 0);
 
     // 决定着色路径：
-    //   !object_use_default_color → GGX PBR 光照 shader（base_color_tex != 0 时
-    //     额外采样 baseColor 纹理作为 base 色，否则用常值 fallback）
+    //   !object_use_default_color → GGX PBR 光照 shader（任一通道带纹理时
+    //     额外采样对应纹理作为逐像素材质参数，否则用常值 fallback）
     //   object_use_default_color   → 旧纯色 shader（兼容现有 gold test）
     const bool use_lighting = !cmds.object_use_default_color;
 
     if (use_lighting) {
-        // 光照模式：需要 normal 属性；有 baseColor 纹理时还需 UV 属性
+        // 光照模式：需要 normal 属性；任一通道带纹理时还需 UV 属性
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
             << "DrawObject3D: 光照模式需要 kNormal 属性，"
             << "但 mesh_id=" << cmd.mesh_id << " 不含 normal；"
             << "可设置 object_use_default_color=true 使用纯色渲染";
 
-        // 有 baseColor 纹理时用 UV 变体 program（接受 location 2 的 UV），
-        // 避免无 UV mesh 声明未启用 attrib 的兼容问题；否则用普通光照 shader。
-        unsigned int prog = textured ? MeshLighting3DTexturedProg()
+        // 任一通道带纹理时用 UV 变体 program（接受 location 2 的 UV），
+        // 各通道在这些采样纹理的引导下逐像素采样；否则用普通光照 shader
+        // （不声明 UV attrib，避免无 UV mesh 声明未启用 attrib 的兼容问题）。
+        unsigned int prog = any_tex ? MeshLighting3DTexturedProg()
                                      : MeshLighting3DProg();
         glUseProgram(prog);
 
@@ -2286,9 +2322,9 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         // Model 矩阵（单独传入，供 world-space position 计算）
         glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
                            1, GL_FALSE, model);
-        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive）。
-        // baseColor 支持纹理采样（见下）；metallic/roughness/emissive
-        // 纹理采样由后续任务接入，本阶段恒走常值。
+        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive/uAO）。
+        // 各通道支持纹理采样（见下）；带纹理的通道置 uHas*Tex=1 并绑定纹理，
+        // 否则置 0 走常值 fallback。
         glUniform3f(glGetUniformLocation(prog, "uBaseColor"),
                     cmd.material.base_color.r, cmd.material.base_color.g,
                     cmd.material.base_color.b);
@@ -2297,17 +2333,24 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         glUniform3f(glGetUniformLocation(prog, "uEmissive"),
                     cmd.material.emissive.r, cmd.material.emissive.g,
                     cmd.material.emissive.b);
+        // AO 常值：ao 为 Color，取 .r 作为标量强度（烘焙 AO 通常为灰度）。
+        glUniform1f(glGetUniformLocation(prog, "uAO"), cmd.material.ao.r);
         // 相机位置（specular 需要）
         glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
                     cmds.camera.position.x(), cmds.camera.position.y(),
                     cmds.camera.position.z());
 
-        // baseColor 纹理采样：base_color_tex != 0 时绑定纹理到 TEXTURE1
-        // 并置 uHasBaseColorTex=1（需 mesh 含 kUV，走 UV 变体 shader）；
-        // 否则置 0 走常值 fallback。
-        if (textured) {
+        // 需要 UV：任一材质通道带纹理（any_tex）时，mesh 必须含 kUV，否则无法
+        // 逐像素采样。各通道纹理按固定纹理单元绑定：
+        //   1=baseColor 2=metallic 3=roughness 4=emissive 5=AO；
+        // 未带纹理的通道置 uHas*Tex=0，shader 走常值 fallback 不采样。
+        if (any_tex) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawObject3D: base_color_tex 非 0 但 mesh 无 kUV 属性，无法纹理采样";
+                << "DrawObject3D: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
+        }
+
+        // ---- baseColor 纹理（TEXTURE1）----
+        if (cmd.material.base_color_tex != 0) {
             unsigned int gl_tex =
                 texture_mgr_.GetGLTexture(cmd.material.base_color_tex);
             CHECK_NE(gl_tex, 0u)
@@ -2319,6 +2362,66 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
             glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 1);
         } else {
             glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 0);
+        }
+
+        // ---- metallic 纹理（TEXTURE2）----
+        if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.metallic_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: metallic_tex " << cmd.material.metallic_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uMetallicTex"), 2);
+            glUniform1i(glGetUniformLocation(prog, "uHasMetallicTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasMetallicTex"), 0);
+        }
+
+        // ---- roughness 纹理（TEXTURE3）----
+        if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.roughness_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: roughness_tex " << cmd.material.roughness_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uRoughnessTex"), 3);
+            glUniform1i(glGetUniformLocation(prog, "uHasRoughnessTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasRoughnessTex"), 0);
+        }
+
+        // ---- emissive 纹理（TEXTURE4）----
+        if (cmd.material.emissive_tex != 0) {
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.emissive_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: emissive_tex " << cmd.material.emissive_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uEmissiveTex"), 4);
+            glUniform1i(glGetUniformLocation(prog, "uHasEmissiveTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasEmissiveTex"), 0);
+        }
+
+        // ---- AO 纹理（TEXTURE5）----
+        if (cmd.material.ao_tex != 0) {
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.ao_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: ao_tex " << cmd.material.ao_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uAoTex"), 5);
+            glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 0);
         }
 
         // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
