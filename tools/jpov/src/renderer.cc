@@ -1141,6 +1141,9 @@ unsigned int Renderer::MeshLighting3DTexturedProg() {
 // 光照 + 法线映射变体：vertex shader 用 UV+tangent 版（接受 location 2/5），
 // fragment shader 用含 TBN 的版本。仅当 mesh 含 kNormal+kUV+kTangent 且
 // normal_tex != 0 时使用；否则退化为 MeshLighting3DTexturedProg / MeshLighting3DProg。
+// 光照 + 法线映射变体：vertex shader 用 UV+tangent 版（接受 location 2/5），
+// fragment shader 用含 TBN 的版本。仅当 mesh 含 kNormal+kUV+kTangent 且
+// normal_tex != 0 时使用；否则退化为 MeshLighting3DTexturedProg / MeshLighting3DProg。
 unsigned int Renderer::MeshLighting3DNormalTexProg() {
     return shader_mgr_.GetOrCreate(
         "mesh3d_tiled_lighting_normal",

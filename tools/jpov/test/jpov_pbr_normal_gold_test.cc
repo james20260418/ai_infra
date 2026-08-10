@@ -83,27 +83,25 @@ public:
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 单点光源：前上方暖色主光，让法线扰动产生清晰明暗
-        // 三点布光（key + fill + rim）用于 PBR 材质展示
-        // key: 主光，右上方暖白
+        // 法线贴图展示灯（grazing key + 正面 fill，凸显凹凸细节）
+        // key: 右上方主光，产生 grazing 高光
         cmds->point_lights.push_back({
-            {1.5f, 1.5f, 0.8f},
-            {25.0f, 23.0f, 20.0f, 1.0f},  // 暖白
-            6.0f
-        });
-        // fill: 补光，左下方冷蓝，降低对比度
-        cmds->point_lights.push_back({
-            {-1.2f, -0.3f, -0.5f},
-            {8.0f, 10.0f, 18.0f, 1.0f},   // 冷蓝
-            5.0f
-        });
-        // rim: 背光，后方，勾勒边缘
-        cmds->point_lights.push_back({
-            {0.0f, 0.0f, -1.5f},
-            {15.0f, 15.0f, 15.0f, 1.0f},  // 中性白
+            {2.0f, 1.8f, 0.5f},
+            {35.0f, 32.0f, 28.0f, 1.0f},
             8.0f
         });
-
-        // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）
+        // fill: 正面稍低，降低对比度
+        cmds->point_lights.push_back({
+            {0.0f, 0.0f, 1.5f},
+            {12.0f, 14.0f, 22.0f, 1.0f},
+            6.0f
+        });
+        // rim: 左侧 grazing，产生边缘高光
+        cmds->point_lights.push_back({
+            {-1.8f, 0.5f, 0.2f},
+            {20.0f, 20.0f, 20.0f, 1.0f},
+            8.0f
+        });        // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(GetCubeObjPath(), &mesh))
             << "Failed to load cube_hand.obj";
@@ -118,14 +116,14 @@ public:
         mat.base_color_tex = tex_base_color_;
         mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};   // fallback（纹理优先）
         mat.metallic = 0.0f;
-        mat.roughness = 1.0f;
+        mat.roughness = 0.15f;
         mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
-        mat.normal_scale = 1.0f;
+        mat.normal_scale = 2.0f;
         cmds->DrawObject3D(
             mesh_id, mat,
-            {0.5f, 0.5f, 0.5f},           // center = 立方体中心
+            {0.0f, 0.0f, 0.0f},           // center = 原点 = 立方体中心
             {0.0f, 1.0f, 0.0f},           // up = +Y
             {0.0f, 0.0f, 1.0f});          // front = +Z
     }
