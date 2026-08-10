@@ -153,12 +153,42 @@ uniform mat4 uMVP;
 uniform mat4 uModel;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
+out vec2 vTexCoord;
 
 void main() {
     vec4 world_pos = uModel * vec4(aPos, 1.0);
     vWorldPos = world_pos.xyz;
     // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
     vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    // 本变体无 UV 输入（不声明 location 2），vTexCoord 固定 0，
+    // 供 fragment 的 baseColor 纹理分支链接；uHasBaseColorTex=0 时不采样。
+    vTexCoord = vec2(0.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 3D 静态模型光照顶点 shader（UV 变体）：用于 baseColor 等纹理采样。
+// 在 kMeshVs3dLighting 基础上额外接受 UV（location 2），输出 vTexCoord。
+// 仅当 mesh 含 kUV 属性且着色需纹理采样时使用（避免无 UV 的 mesh 因
+// 声明了未启用的 attrib 2 导致部分 GL 实现下渲染异常）。
+// 属性 location 与 MeshManager 的 VBO 布局一致：0=position，1=normal，2=uv
+const char* kMeshVs3dLightingUV = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+
+void main() {
+    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
+    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vTexCoord = aTexCoord;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )glsl";
@@ -195,6 +225,7 @@ const char* kMeshFs3dTiledLighting = R"glsl(
 
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
+in vec2 vTexCoord;
 out vec4 FragColor;
 
 // 点光源
@@ -208,8 +239,12 @@ uniform Light uLights[MAX_TOTAL_LIGHTS];
 uniform int uTotalLights;
 uniform vec3 uCameraPos;
 
-// ---- PBR 材质常量参数（本阶段仅走 constant，纹理通道留后续阶段）----
+// ---- PBR 材质参数 ----
+// baseColor 支持常值或逐像素纹理采样：uHasBaseColorTex==1 时采样
+// uBaseColorTex（vTexCoord 来自 UV 顶点 shader），否则用 uBaseColor 常值。
 uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
+uniform sampler2D uBaseColorTex;  // baseColor 纹理（可选用）
+uniform int   uHasBaseColorTex;   // 1 = 采样 baseColor 纹理，0 = 用常值
 uniform float uMetallic;    // 金属度（0=电介质，1=金属）
 uniform float uRoughness;   // 粗糙度（0=光滑，1=粗糙）
 uniform vec3  uEmissive;    // 自发光
@@ -297,6 +332,11 @@ void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
+    // baseColor：uHasBaseColorTex==1 时逐像素采样纹理，否则用常值 fallback
+    vec3 base_color = (uHasBaseColorTex == 1)
+        ? texture(uBaseColorTex, vTexCoord).rgb
+        : uBaseColor;
+
     // 计算当前像素所在的 tile，并 clamp 到合法范围（防御边缘/亚像素越界）：
     //   grid_cols = textureWidth / kTexelsPerTile(=4)，grid_rows = textureHeight
     ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
@@ -331,7 +371,7 @@ void main() {
             float NdotV = max(dot(N, V), 0.0);
 
             // F0：金属度混合 baseColor，电介质固定 0.04
-            vec3 F0 = mix(vec3(0.04), uBaseColor, uMetallic);
+            vec3 F0 = mix(vec3(0.04), base_color, uMetallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
 
             float D = distributionGGX(N, H, uRoughness);
@@ -342,7 +382,7 @@ void main() {
 
             // 漫反射：电介质 baseColor/π，金属无漫反射；(1-F) 近似能量守恒
             vec3 kD = (vec3(1.0) - F) * (1.0 - uMetallic);
-            vec3 diffuse = kD * uBaseColor / 3.14159265;
+            vec3 diffuse = kD * base_color / 3.14159265;
 
             total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
             total_specular += uLights[li].color * specular * NdotL * attenuation;
@@ -350,7 +390,8 @@ void main() {
     }
 
     // PBR：ambient + diffuse + specular + emissive
-    vec3 result = ambient * uBaseColor + total_diffuse + total_specular + uEmissive;
+    //（base_color 已在上面按 uHasBaseColorTex 决定是常值还是纹理采样结果）
+    vec3 result = ambient * base_color + total_diffuse + total_specular + uEmissive;
     FragColor = vec4(result, 1.0);
 }
 )glsl";
@@ -830,6 +871,14 @@ unsigned int Renderer::MeshLighting3DProg() {
                                   {kMeshVs3dLighting, kMeshFs3dTiledLighting});
 }
 
+// 光照 + baseColor 纹理变体：vertex shader 用 UV 版（接受 location 2）。
+// 仅当 mesh 含 kUV 属性且 base_color_tex != 0 时使用；无 UV 的 mesh
+// 统一走 MeshLighting3DProg（避免声明未启用 attrib 导致的兼容问题）。
+unsigned int Renderer::MeshLighting3DTexturedProg() {
+    return shader_mgr_.GetOrCreate("mesh3d_tiled_lighting_tex",
+                                  {kMeshVs3dLightingUV, kMeshFs3dTiledLighting});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -841,6 +890,7 @@ void Renderer::CompileShaders() {
     Text3DProg();
     TexturedMesh3DProg();
     MeshLighting3DProg();
+    MeshLighting3DTexturedProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -1989,27 +2039,32 @@ void Renderer::DrawText3D(const Text3DCommand& cmd) {
 //
 // Pre-condition: MeshLighting3DProg() 已注册（首次调用会触发编译）。
 void Renderer::UploadLightData(const RenderCommandList& cmds) {
-    unsigned int prog = MeshLighting3DProg();
-    glUseProgram(prog);
+    // 光源 uniform 需同时上传到所有光照 program（普通光照 + baseColor 纹理
+    //  变体），因为 program 切换时 uniform 是 per-program 状态，DrawObject3D
+    //  会根据材质动态选择哪一个。
+    const unsigned int programs[] = {MeshLighting3DProg(),
+                                     MeshLighting3DTexturedProg()};
 
     const int total = static_cast<int>(cmds.point_lights.size());
     const int clamped = std::min(total, kMaxTotalLights_);
 
     char buf[64];
-    for (int i = 0; i < clamped; ++i) {
-        const PointLight& l = cmds.point_lights[i];
-        snprintf(buf, sizeof(buf), "uLights[%d].position", i);
-        glUniform3f(shader_mgr_.GetUniform(prog, buf),
-                    l.position.x(), l.position.y(), l.position.z());
-        snprintf(buf, sizeof(buf), "uLights[%d].color", i);
-        glUniform3f(shader_mgr_.GetUniform(prog, buf),
-                    l.color.r, l.color.g, l.color.b);
-        snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
-        glUniform1f(shader_mgr_.GetUniform(prog, buf), l.linear_radius);
+    for (unsigned int prog : programs) {
+        glUseProgram(prog);
+        for (int i = 0; i < clamped; ++i) {
+            const PointLight& l = cmds.point_lights[i];
+            snprintf(buf, sizeof(buf), "uLights[%d].position", i);
+            glUniform3f(shader_mgr_.GetUniform(prog, buf),
+                        l.position.x(), l.position.y(), l.position.z());
+            snprintf(buf, sizeof(buf), "uLights[%d].color", i);
+            glUniform3f(shader_mgr_.GetUniform(prog, buf),
+                        l.color.r, l.color.g, l.color.b);
+            snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
+            glUniform1f(shader_mgr_.GetUniform(prog, buf), l.linear_radius);
+        }
+        // 告诉 shader 当前有效光源数（fragment 用 tile index 与其做边界钳制）
+        glUniform1i(shader_mgr_.GetUniform(prog, "uTotalLights"), clamped);
     }
-
-    // 告诉 shader 当前有效光源数（fragment 用 tile index 与其做边界钳制）
-    glUniform1i(shader_mgr_.GetUniform(prog, "uTotalLights"), clamped);
 }
 
 // CPU 端 tile culling：
@@ -2207,19 +2262,22 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     const bool textured = (cmd.material.base_color_tex != 0);
 
     // 决定着色路径：
-    //   baseColor 纹理模式 → 纹理 shader（不受 object_use_default_color 影响）
-    //   纯色 + object_use_default_color → 旧纯色 shader（兼容现有 gold test）
-    //   纯色 + !object_use_default_color → GGX PBR 光照 shader
-    const bool use_lighting = !textured && !cmds.object_use_default_color;
+    //   !object_use_default_color → GGX PBR 光照 shader（base_color_tex != 0 时
+    //     额外采样 baseColor 纹理作为 base 色，否则用常值 fallback）
+    //   object_use_default_color   → 旧纯色 shader（兼容现有 gold test）
+    const bool use_lighting = !cmds.object_use_default_color;
 
     if (use_lighting) {
-        // 光照模式：需要 normal 属性
+        // 光照模式：需要 normal 属性；有 baseColor 纹理时还需 UV 属性
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
             << "DrawObject3D: 光照模式需要 kNormal 属性，"
             << "但 mesh_id=" << cmd.mesh_id << " 不含 normal；"
             << "可设置 object_use_default_color=true 使用纯色渲染";
 
-        unsigned int prog = MeshLighting3DProg();
+        // 有 baseColor 纹理时用 UV 变体 program（接受 location 2 的 UV），
+        // 避免无 UV mesh 声明未启用 attrib 的兼容问题；否则用普通光照 shader。
+        unsigned int prog = textured ? MeshLighting3DTexturedProg()
+                                     : MeshLighting3DProg();
         glUseProgram(prog);
 
         // MVP（含 Model）
@@ -2229,7 +2287,8 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
                            1, GL_FALSE, model);
         // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive）。
-        // 光照路径先走材质常值；metallic/roughness/emissive 纹理采样由后续任务接入。
+        // baseColor 支持纹理采样（见下）；metallic/roughness/emissive
+        // 纹理采样由后续任务接入，本阶段恒走常值。
         glUniform3f(glGetUniformLocation(prog, "uBaseColor"),
                     cmd.material.base_color.r, cmd.material.base_color.g,
                     cmd.material.base_color.b);
@@ -2243,31 +2302,31 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
                     cmds.camera.position.x(), cmds.camera.position.y(),
                     cmds.camera.position.z());
 
+        // baseColor 纹理采样：base_color_tex != 0 时绑定纹理到 TEXTURE1
+        // 并置 uHasBaseColorTex=1（需 mesh 含 kUV，走 UV 变体 shader）；
+        // 否则置 0 走常值 fallback。
+        if (textured) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawObject3D: base_color_tex 非 0 但 mesh 无 kUV 属性，无法纹理采样";
+            unsigned int gl_tex =
+                texture_mgr_.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
+                << " 未注册";
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(prog, "uBaseColorTex"), 1);
+            glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 0);
+        }
+
         // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
         // 这里只需绑定 tile index 纹理（fragment shader 按像素查表获取
-        // 本 tile 命中的光源 index 列表）。
+        // 本 tile 命中的光源 index 列表），绑定在 TEXTURE0。
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
         glUniform1i(glGetUniformLocation(prog, "uTileLightIndices"), 0);
-    } else if (textured) {
-        // 纹理模式：mesh 必须含 UV 属性
-        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-            << "DrawObject3D: base_color_tex 非 0 但 mesh 无 kUV 属性，无法纹理采样";
-        unsigned int gl_tex = texture_mgr_.GetGLTexture(cmd.material.base_color_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
-            << " 未注册";
-
-        unsigned int prog = TexturedMesh3DProg();
-        glUseProgram(prog);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                           1, GL_FALSE, mvp);
-        glUniform4f(glGetUniformLocation(prog, "uTint"),
-                    cmd.material.base_color.r, cmd.material.base_color.g,
-                    cmd.material.base_color.b, cmd.material.base_color.a);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
     } else {
         // 旧纯色模式（object_use_default_color=true 时走此路径）
         unsigned int prog = Solid3DProg();
