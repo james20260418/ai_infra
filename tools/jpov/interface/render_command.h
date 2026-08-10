@@ -333,7 +333,8 @@ struct Image2DCommand {
 
 // 点光源（世界空间）
 //
-// 光照计算采用 Blinn-Phong 模型（diffuse + specular + ambient）。
+// 光照计算采用 GGX PBR BRDF（Cook-Torrance：NDF + Fresnel + Geometry），
+// 结果 = ambient * AO + diffuse + specular + emissive。
 // 衰减为线性：强度随距离从 1.0（pos 处）衰减到 0.0（linear_radius 处），
 // 超出 linear_radius 的光源对像素贡献为 0。
 //
@@ -449,7 +450,7 @@ struct RenderCommandList {
     std::vector<std::pair<DrawCommandType, int>> order;
 
     // 点光源列表（世界空间）。
-    // 每帧可设置 0~N 个点光源，渲染时按 Blinn-Phong 模型计算光照。
+    // 每帧可设置 0~N 个点光源，渲染时按 GGX PBR 模型计算光照。
     // 空列表时无光照效果（物体呈纯黑，仅 ambient 项可见）。
     //
     // 光源数量上限：255 个（仅前 255 个生效，超出部分静默忽略，
@@ -467,8 +468,9 @@ struct RenderCommandList {
     std::vector<PointLight> point_lights;
 
     // Object3D 纯色开关（默认 false）。
-    // 为 true 时所有 Object3D 走旧的纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal。
-    // 为 false 时使用 Blinn-Phong 光照着色（需 mesh 含 kNormal）。
+    // 为 true 时所有 Object3D 走纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal，
+    // 颜色取 material.base_color（用于渲染无 kNormal 属性的网格）。
+    // 为 false 时使用 GGX PBR 光照着色（需 mesh 含 kNormal）。
     bool object_use_default_color = false;
 
     // 3D 透视相机
