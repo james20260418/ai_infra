@@ -3,7 +3,7 @@
 // 生成 lighting gold test 的参考图片：
 //   - 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
 //   - 3 个点光源（红/绿/蓝）从不同方向照射
-//   - GGX PBR 光照（ambient + diffuse + specular）
+//   - Blinn-Phong 光照（diffuse + specular + ambient）
 //   - Camera (1, 1, 1) 看向原点，透视投影
 //   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
 //
@@ -64,13 +64,12 @@ public:
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
+        uint32_t texture_id = 0;  // 纯色 + 光照渲染
 
-        // ---- 渲染模型（中心在原点，自然朝向，默认走 GGX 光照着色）----
-        // PBR 材质：baseColor 偏白，metallic=0 / roughness=1（默认）
-        jpov::PBRMaterial mat;
-        mat.base_color = {0.8f, 0.8f, 0.8f, 1.0f};  // 漫反射基础色，偏白
+        // ---- 渲染模型（中心在原点，自然朝向，默认走光照着色）----
         cmds->DrawObject3D(
-            mesh_id, mat,
+            mesh_id, texture_id,
+            {0.8f, 0.8f, 0.8f, 1.0f},  // default_color (漫反射基础色，偏白)
             {0.0f, 0.0f, 0.0f},          // center = 原点
             {0.0f, 1.0f, 0.0f},          // up = +Y
             {0.0f, 0.0f, 1.0f});         // front = +Z

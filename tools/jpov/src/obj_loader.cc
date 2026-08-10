@@ -21,7 +21,6 @@
 #include "tools/jpov/src/obj_loader.h"
 
 #include <cstdio>
-#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -97,89 +96,7 @@ bool ParseCorner(const std::string& token, int v_count, int vt_count,
     return true;
 }
 
-// 从一个三角形的几何 + UV 推导切向量（标准 MikkTSpace 简化的 triangle-list 版本）。
-//
-// 算法：对三角形三个顶点 (p0, p1, p2) 及其 UV (uv0, uv1, uv2)：
-//   edge1 = p1 - p0,  edge2 = p2 - p0
-//   dUV1  = uv1 - uv0, dUV2 = uv2 - uv0
-//   r = 1.0 / (dUV1.x * dUV2.y - dUV2.x * dUV1.y)   （UV 雅可比行列式，0 时退化）
-//   tangent = normalize(r * (dUV2.y * edge1 - dUV1.y * edge2))
-//
-// 每个三角形产出局部 tangent，累加到三个顶点上（累加后整体归一化），
-// 以在共享顶点的相邻三角形间平滑 tangent。退化 UV（行列式 ≈ 0，如零面积
-// UV 三角形）的三角形跳过，不影响其它面。
-//
-// Pre-condition: out 已通过 Validate()，含 kNormal + kUV，且有 indices（triangle list）。
-// Post-condition: 成功时 out->tangents 填充（长度 == positions.size()），返回 true；
-//                 因缺 indices / 全部三角形退化而无法推导时返回 false（tangents 为空）。
-bool ComputeTangents(MeshData* out) {
-    const size_t vcount = out->positions.size();
-    if (out->indices.empty() || vcount == 0) {
-        return false;
-    }
-
-    std::vector<Vec3f> accum(vcount, Vec3f(0, 0, 0));
-    const uint32_t num_tris = static_cast<uint32_t>(out->indices.size() / 3);
-    for (uint32_t t = 0; t < num_tris; ++t) {
-        const uint32_t i0 = out->indices[t * 3 + 0];
-        const uint32_t i1 = out->indices[t * 3 + 1];
-        const uint32_t i2 = out->indices[t * 3 + 2];
-        CHECK_LT(i0, vcount);
-        CHECK_LT(i1, vcount);
-        CHECK_LT(i2, vcount);
-
-        const Vec3f p0 = out->positions[i0];
-        const Vec3f p1 = out->positions[i1];
-        const Vec3f p2 = out->positions[i2];
-        const Vec2f uv0 = out->uvs[i0];
-        const Vec2f uv1 = out->uvs[i1];
-        const Vec2f uv2 = out->uvs[i2];
-
-        const Vec3f edge1 = {p1.x() - p0.x(), p1.y() - p0.y(), p1.z() - p0.z()};
-        const Vec3f edge2 = {p2.x() - p0.x(), p2.y() - p0.y(), p2.z() - p0.z()};
-        const float duv1x = uv1.x() - uv0.x();
-        const float duv1y = uv1.y() - uv0.y();
-        const float duv2x = uv2.x() - uv0.x();
-        const float duv2y = uv2.y() - uv0.y();
-
-        // UV 雅可比行列式过小（退化 UV / 零面积）则跳过本三角形
-        const float det = duv1x * duv2y - duv2x * duv1y;
-        if (std::fabs(det) < 1e-8f) {
-            continue;
-        }
-        const float r = 1.0f / det;
-        // 切线沿 UV-u 方向：t = r * (dUV2.y * e1 - dUV1.y * e2)
-        Vec3f tang = {r * (duv2y * edge1.x() - duv1y * edge2.x()),
-                      r * (duv2y * edge1.y() - duv1y * edge2.y()),
-                      r * (duv2y * edge1.z() - duv1y * edge2.z())};
-        const float len = std::sqrt(tang.x() * tang.x() +
-                                    tang.y() * tang.y() +
-                                    tang.z() * tang.z());
-        if (len < 1e-8f) {
-            continue;
-        }
-        const Vec3f tn = {tang.x() / len, tang.y() / len, tang.z() / len};
-        accum[i0] = {accum[i0].x() + tn.x(), accum[i0].y() + tn.y(), accum[i0].z() + tn.z()};
-        accum[i1] = {accum[i1].x() + tn.x(), accum[i1].y() + tn.y(), accum[i1].z() + tn.z()};
-        accum[i2] = {accum[i2].x() + tn.x(), accum[i2].y() + tn.y(), accum[i2].z() + tn.z()};
-    }
-
-    // 归一化每个顶点的累加切线；全零（无有效三角形）则放弃推导
-    out->tangents.resize(vcount);
-    bool any_valid = false;
-    for (size_t i = 0; i < vcount; ++i) {
-        const Vec3f& a = accum[i];
-        const float len = std::sqrt(a.x() * a.x() + a.y() * a.y() + a.z() * a.z());
-        if (len < 1e-8f) {
-            out->tangents[i] = Vec3f(0, 0, 0);
-        } else {
-            out->tangents[i] = {a.x() / len, a.y() / len, a.z() / len};
-            any_valid = true;
-        }
-    }
-    return any_valid;
-}
-
+// 把一个面（已解析的 corner 列表）三角化追加进 MeshData。
 //
 // corner_map_: "(v,vt,vn)" → 已生成 GPU 顶点索引（跨面共享，去重）。
 // 返回 false 表示数据规模非法（如无 position 可用）。
@@ -324,19 +241,6 @@ bool LoadObj(const std::string& path, MeshData* out) {
     }
 
     // 数据已对齐（见 AppendFace 补齐逻辑），显式验证保证后续使用安全
-    out->Validate();
-
-    // 若同时具有 normal + UV（法线映射前提），从三角形几何 + UV 推导逐顶点
-    // tangent（TBN 切线空间用）。推导见 ComputeTangents 注释。
-    if (MeshHasFlag(out->flags, MeshVertexFlags::kNormal) &&
-        MeshHasFlag(out->flags, MeshVertexFlags::kUV)) {
-        const bool derived = ComputeTangents(out);
-        if (derived) {
-            out->flags = static_cast<MeshVertexFlags>(
-                static_cast<uint8_t>(out->flags) |
-                static_cast<uint8_t>(MeshVertexFlags::kTangent));
-        }
-    }
     out->Validate();
     return true;
 }

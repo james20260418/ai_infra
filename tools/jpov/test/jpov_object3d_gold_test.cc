@@ -49,14 +49,14 @@ public:
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
+        uint32_t texture_id = 0;  // 纯色渲染
 
         // 渲染（淡蓝色，中心在原点，自然朝向）
-        // 使用 object_use_default_color=true 走旧纯色路径，材质用常值 baseColor 表达
-        jpov::PBRMaterial mat;
-        mat.base_color = {0.2f, 0.6f, 1.0f, 1.0f};  // 淡蓝色
+        // 使用 object_use_default_color=true 走老纯色路径
         cmds->object_use_default_color = true;
         cmds->DrawObject3D(
-            mesh_id, mat,
+            mesh_id, texture_id,
+            {0.2f, 0.6f, 1.0f, 1.0f},
             {0.0f, 0.0f, 0.0f},
             {0.0f, 1.0f, 0.0f},
             {0.0f, 0.0f, 1.0f});
