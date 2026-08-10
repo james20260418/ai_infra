@@ -74,20 +74,20 @@ public:
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // Camera 从右前上方观察立方体中心，能同时看到三个面（纹理可见）
-        cmds->camera.position = {1.9f, 1.3f, 1.9f};
-        cmds->camera.target   = {0.5f, 0.5f, 0.5f};
+        // Camera (1,1,1) 看向原点（与 cube3d gold test 一致）
+        cmds->camera.position = {1.0f, 1.0f, 1.0f};
+        cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 点光源：一个暖色主光 + 一个冷色补光
         cmds->point_lights.push_back({
             {0.5f, 2.4f, 0.5f},          // position（立方体上方偏前）
             {1.0f, 0.95f, 0.85f, 1.0f},   // color（暖白）
-            3.5f                          // linear_radius
+            5.0f                          // linear_radius
         });
         cmds->point_lights.push_back({
             {-0.3f, 0.5f, -0.6f},        // position（左前下方）
             {0.55f, 0.6f, 1.0f, 1.0f},   // color（冷蓝）
-            3.0f                          // linear_radius
+            5.0f                          // linear_radius
         });
 
         // 加载带 UV + normal 的立方体
@@ -105,7 +105,7 @@ public:
         mat.roughness = 1.0f;
         cmds->DrawObject3D(
             mesh_id, mat,
-            {0.5f, 0.5f, 0.5f},           // center = 立方体中心
+            {0.0f, 0.0f, 0.0f},           // center (cube centered at origin) = 立方体中心
             {0.0f, 1.0f, 0.0f},           // up = +Y
             {0.0f, 0.0f, 1.0f});          // front = +Z
     }

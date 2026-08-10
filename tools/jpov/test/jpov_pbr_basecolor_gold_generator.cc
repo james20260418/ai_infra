@@ -4,7 +4,7 @@
 //   - 从 OBJ 加载带 UV+normal 的立方体（cube_hand.obj）
 //   - RegisterTexture 注册四象限彩色纹理（cube_tex_256x256.png）
 //   - PBRMaterial.base_color_tex 指向纹理，走 GGX PBR 光照 + 逐像素纹理采样
-//   - Camera (2.2, 1.6, 2.2) 看向立方体中心
+//   - Camera (1,1,1) 看向原点
 //   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
 //
 // 输出: tools/jpov/test/pbr_basecolor_cube_1280x720.png
@@ -33,20 +33,20 @@ public:
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // Camera 从右前上方观察立方体中心（同 test 保持一致）
-        cmds->camera.position = {1.9f, 1.3f, 1.9f};
-        cmds->camera.target   = {0.5f, 0.5f, 0.5f};
+        // Camera (1,1,1) 看向原点（与 cube3d gold test 一致）
+        cmds->camera.position = {1.0f, 1.0f, 1.0f};
+        cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 点光源：暖色主光（上方偏前，近且强）+ 冷色补光
         cmds->point_lights.push_back({
             {0.5f, 2.4f, 0.5f},          // position（立方体正上方稍近）
-            {1.0f, 0.95f, 0.85f, 1.0f},  // color（暖白）
-            3.5f                          // linear_radius
+            {10.0f, 9.5f, 8.5f, 1.0f},  // color（暖白）
+            5.0f                          // linear_radius
         });
         cmds->point_lights.push_back({
             {-0.3f, 0.5f, -0.6f},        // position（左前下方）
-            {0.55f, 0.6f, 1.0f, 1.0f},   // color（冷蓝，稍强）
-            3.0f                          // linear_radius
+            {4.0f, 4.5f, 7.0f, 1.0f},   // color（冷蓝）
+            5.0f                          // linear_radius
         });
 
         // 加载带 UV + normal 的立方体
@@ -65,7 +65,7 @@ public:
         mat.roughness = 1.0f;
         cmds->DrawObject3D(
             mesh_id, mat,
-            {0.5f, 0.5f, 0.5f},           // center
+            {0.0f, 0.0f, 0.0f},           // center (cube centered at origin)
             {0.0f, 1.0f, 0.0f},           // up = +Y
             {0.0f, 0.0f, 1.0f});          // front = +Z
     }

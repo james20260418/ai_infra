@@ -288,8 +288,8 @@ uniform int   uHasAoTex;          // 1 = 采样 AO 纹理，0 = 用常值
 uniform sampler2D uTileLightIndices;
 
 // 环境光常量
-const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
-const float AMBIENT_STRENGTH = 0.3;
+const vec3 AMBIENT_COLOR = vec3(1.5, 1.5, 1.5);
+const float AMBIENT_STRENGTH = 0.4;
 
 // ---- GGX PBR BRDF 函数 ----
 
@@ -509,8 +509,8 @@ uniform float uNormalScale;       // 法线扰动强度（>0）
 uniform sampler2D uTileLightIndices;
 
 // 环境光常量
-const vec3 AMBIENT_COLOR = vec3(0.05, 0.05, 0.08);
-const float AMBIENT_STRENGTH = 0.3;
+const vec3 AMBIENT_COLOR = vec3(1.5, 1.5, 1.5);
+const float AMBIENT_STRENGTH = 0.4;
 
 // ---- GGX PBR BRDF 函数 ----
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
