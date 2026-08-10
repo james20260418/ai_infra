@@ -546,3 +546,46 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# Gold Image — PBR baseColor 纹理采样渲染验证
+# ============================================================================
+cc_binary(
+    name = "jpov_pbr_basecolor_gold_generator",
+    srcs = ["jpov_pbr_basecolor_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_basecolor_gold_test",
+    srcs = ["jpov_pbr_basecolor_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

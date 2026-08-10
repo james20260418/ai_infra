@@ -389,8 +389,9 @@ struct PBRMaterial {
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
-// 用 PBRMaterial 定义材质。base_color_tex != 0 时走 baseColor 纹理采样
-//（mesh 需含 kUV 属性），否则走材质常值 fallback。
+// 用 PBRMaterial 定义材质。base_color_tex != 0 时 baseColor 走逐像素纹理采样
+//（mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色），
+// 否则用 base_color 常值 fallback。
 // mesh_id 为运行期由 RegisterMesh 分配的句柄。
 //
 // 变换约定：模型在局部空间定义，通过 center（平移）+ up/front（旋转）放置。
@@ -398,8 +399,9 @@ struct PBRMaterial {
 //   - 无缩放、不含逐物体透视；MVP = Proj * View * Model
 //
 // 光照：当 RenderCommandList::object_use_default_color 为 false（默认）时，
-// 模型使用 GGX PBR 光照着色（需 mesh 含 kNormal 属性），材质来自 material
-//（metallic/roughness/emissive 取常值或纹理，由对应 *_tex 标志决定）。
+// 模型使用 GGX PBR 光照着色（需 mesh 含 kNormal 属性）。材质来自 material：
+// baseColor 支持纹理（base_color_tex != 0，需 kUV）或常值；
+// metallic/roughness/emissive 取常值（纹理由后续阶段接入，见对应 *_tex 标志）。
 // 当 object_use_default_color == true 时走纯色路径，颜色取 material.base_color。
 //
 // Pre-condition: mesh_id 已注册且未释放
@@ -608,9 +610,10 @@ struct RenderCommandList {
     //
     // 以 PBRMaterial 材质绘制一个 3D 静态模型（mesh 需已注册）。
     //
-    // mat: PBR 材质。base_color_tex != 0 时走 baseColor 纹理采样（mesh 需含 kUV
-    //      属性）；否则各通道取 mat 的常值 fallback（含光照模式下的
-    //      metallic / roughness / emissive）。
+    // mat: PBR 材质。base_color_tex != 0 时 baseColor 走逐像素纹理采样
+    //      （mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色）；
+    //      否则各通道取 mat 的常值 fallback（含光照模式下的
+    //      metallic / roughness / emissive 恒走常值）。
     //
     // center: 模型中心的世界坐标（平移）
     // up:     模型局部 +Y 指向的世界方向（需非零，会被归一化）
