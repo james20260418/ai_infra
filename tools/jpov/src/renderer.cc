@@ -2217,17 +2217,16 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     const bool use_normal_map = (cmd.material.normal_tex != 0);
 
     // 决定着色路径：
-    //   !object_use_default_color → GGX PBR 光照 shader（任一通道带纹理时
-    //     额外采样对应纹理作为逐像素材质参数，否则用常值 fallback）
-    //   object_use_default_color   → 旧纯色 shader（兼容现有 gold test）
+    // DrawObject3D 统一走 GGX PBR 着色（需 mesh 含 kNormal）。
+    // object_use_default_color 仅在 Render() 中控制是否跳过点光源 tile lighting。
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-;
+        << "DrawObject3D: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
 
-                // 完整版支持纹理采样和 TBN 法线映射（需 mesh 含 kUV+kTangent）。
-        // 两版共用同一个 fragment shader（用 uHas*Tex uniform flag 控制分支）。
-        unsigned int prog;
-        prog = any_tex ? DrawObject3DProgFull() : DrawObject3DProg();
-        glUseProgram(prog);
+    // 选择 shader：有 UV/tangent → 完整版，否则 → 无 UV 版。
+    // 两版共用同一个 fragment shader（用 uHas*Tex uniform flag 控制分支）。
+    unsigned int prog;
+    prog = any_tex ? DrawObject3DProgFull() : DrawObject3DProg();
+    glUseProgram(prog);
 
         // MVP（含 Model）
         glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),

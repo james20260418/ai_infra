@@ -249,7 +249,6 @@ private:
     unsigned int Text3DProg();    // 3D 纹理（kTexVs3d/kTexFs，为 Text3D 预留）
     unsigned int DrawObject3DProg();      // DrawObject3D PBR（无 UV，常值材质）
     unsigned int DrawObject3DProgFull();  // DrawObject3D PBR（有 UV+tangent，纹理+法线）
-    //（kMeshVs3dLightingUVTangent/kMeshFs3dTiledLightingNormal，mesh 需含 kUV+kTangent）
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;

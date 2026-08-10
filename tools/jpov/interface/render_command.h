@@ -389,8 +389,8 @@ struct PBRMaterial {
     Color emissive{0.0f, 0.0f, 0.0f, 1.0f};   // 默认无自发光
     uint32_t emissive_tex = 0;
 
-    // 烘焙 AO（先留槽）: color or texture
-    // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽，不影响环境光。
+    // AO（环境光遮蔽）: color or texture
+    // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽。
     Color ao{1.0f, 1.0f, 1.0f, 1.0f};
     uint32_t ao_tex = 0;
 };
@@ -407,11 +407,10 @@ struct PBRMaterial {
 //   - 局部 +Y → 世界 up；局部 +Z → 世界 front；局部 +X = normalize(cross(up, front))
 //   - 无缩放、不含逐物体透视；MVP = Proj * View * Model
 //
-// 光照：当 RenderCommandList::object_use_default_color 为 false（默认）时，
-// 模型使用 GGX PBR 光照着色（需 mesh 含 kNormal 属性）。材质来自 material：
+// 光照：使用 GGX PBR 着色（需 mesh 含 kNormal 属性）。材质来自 material：
 // baseColor 支持纹理（base_color_tex != 0，需 kUV）或常值；
-// metallic/roughness/emissive 取常值（纹理由后续阶段接入，见对应 *_tex 标志）。
-// 当 object_use_default_color == true 时走纯色路径，颜色取 material.base_color。
+// metallic/roughness/emissive/AO 各通道支持常值或纹理（见对应 *_tex 标志）。
+// object_use_default_color == true 时跳过点光源（ambient-only，等价原纯色行为）。
 //
 // Pre-condition: mesh_id 已注册且未释放
 // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性
@@ -474,10 +473,9 @@ struct RenderCommandList {
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
-    // Object3D 纯色开关（默认 false）。
-    // 为 true 时所有 Object3D 走纯色渲染路径（kVs3d/kFs3d），忽略光照和 normal，
-    // 颜色取 material.base_color（用于渲染无 kNormal 属性的网格）。
-    // 为 false 时使用 GGX PBR 光照着色（需 mesh 含 kNormal）。
+    // Object3D 跳过点光源（默认 false）。
+    // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；
+    // 为 false 时使用完整 GGX PBR 光照（需 mesh 含 kNormal）。
     bool object_use_default_color = false;
 
     // 3D 透视相机
@@ -614,9 +612,9 @@ struct RenderCommandList {
     //   - 模型的局部 +Z 轴 → 世界空间 front 方向
     //   - 局部 +X 轴由 up/front 叉积确定（保证右手系）
     //
-    // 着色行为取决于 RenderCommandList::object_use_default_color：
-    //   - false（默认）：使用 GGX PBR 光照着色（需 mesh 含 kNormal）
-    //   - true：使用旧的纯色渲染路径，material.base_color 作为物体颜色
+    // 着色行为：DrawObject3D 统一使用 GGX PBR 着色（需 mesh 含 kNormal）。
+    // object_use_default_color 仅在 Render() 中控制是否跳过点光源 tile lighting，
+    // 设为 true 时 ambient-only（无直接光照，等价于原纯色路径）。
     //
     // 以 PBRMaterial 材质绘制一个 3D 静态模型（mesh 需已注册）。
     //
