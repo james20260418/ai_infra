@@ -157,14 +157,13 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
     order.emplace_back(DrawCommandType::kImage2D, idx);
 }
 
-void RenderCommandList::DrawObject3D(uint32_t mesh_id, uint32_t texture_id,
-                                      const Color& default_color,
+void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       const Vec3f& center,
                                       const Vec3f& up, const Vec3f& front) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
-    object3d.push_back({mesh_id, texture_id, default_color, center, up, front});
+    object3d.push_back({mesh_id, mat, center, up, front});
     order.emplace_back(DrawCommandType::kObject3D, idx);
 }
 

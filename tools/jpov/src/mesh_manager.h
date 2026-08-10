@@ -15,6 +15,7 @@
 //   location 2 = uv        (vec2 float)   ← vbo_uvs，    flags 含 kUV 才有
 //   location 3 = joints    (ivec4 int32)  ← vbo_joints， flags 含 kJoints 才有
 //   location 4 = weights   (vec4 float)   ← vbo_weights，flags 含 kJoints 才有
+//   location 5 = tangent   (vec3 float)   ← vbo_tangents，flags 含 kTangent 才有
 //
 // 固定 attribute location 为后续骨骼 shader（mesh3d_skinned）预留「口子」：
 // 新增 shader 只需声明相同的 layout(location=N)，无需改动本类。

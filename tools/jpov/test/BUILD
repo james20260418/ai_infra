@@ -455,6 +455,21 @@ cc_test(
 # Gold Image — Object3D (RegisterMesh→DrawObject3D 链路) 渲染验证
 # ============================================================================
 cc_binary(
+    name = "jpov_repro_purecolor_cube",
+    srcs = ["jpov_repro_purecolor_cube.cc"],
+    data = [":cube_hand.obj"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
     name = "jpov_object3d_gold_generator",
     srcs = ["jpov_object3d_gold_generator.cc"],
     data = [":beetle.obj"],
@@ -490,8 +505,10 @@ cc_test(
     ],
 )
 
+
+
 # ============================================================================
-# Gold Image — 3D 点光源光照 (Blinn-Phong) 渲染验证
+# Gold Image — 3D 点光源 GGX PBR 光照渲染验证
 # ============================================================================
 cc_binary(
     name = "jpov_lighting_gold_generator",
@@ -528,3 +545,203 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# Gold Image — PBR baseColor 纹理采样渲染验证
+# ============================================================================
+cc_binary(
+    name = "jpov_pbr_basecolor_gold_generator",
+    srcs = ["jpov_pbr_basecolor_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_basecolor_gold_test",
+    srcs = ["jpov_pbr_basecolor_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — PBR 多通道纹理采样渲染验证
+# （baseColor/metallic/roughness/emissive/AO 逐个 sampler+开关进 BRDF）
+# ============================================================================
+
+
+
+
+# ============================================================================
+# Gold Image — PBR 法线映射（normal map TBN）渲染验证
+# 验证 DrawObject3D 法线贴图链路：OBJ 推导 tangent → 采样法线贴图 → TBN 变换
+# ============================================================================
+cc_binary(
+    name = "jpov_pbr_normal_gold_generator",
+    srcs = ["jpov_pbr_normal_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_normal_gold_test",
+    srcs = ["jpov_pbr_normal_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — PBR Emissive 自发光贴图验证
+# ============================================================================
+cc_binary(
+    name = "jpov_pbr_ao_gold_generator",
+    srcs = ["jpov_pbr_ao_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_emissive_256x256.png",
+        ":pbr_ao_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_pbr_emissive_gold_generator",
+    srcs = ["jpov_pbr_emissive_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_emissive_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_ao_gold_test",
+    srcs = ["jpov_pbr_ao_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_emissive_256x256.png",
+        ":pbr_ao_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_emissive_gold_test",
+    srcs = ["jpov_pbr_emissive_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_emissive_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Gold Image — PBR 综合全通道材质渲染验证
+# （baseColor/metallic/roughness/emissive/AO/normal 六通道同时启用 + TBN）
+# ============================================================================
+
+
+
+
+

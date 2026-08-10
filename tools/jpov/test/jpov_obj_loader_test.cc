@@ -33,7 +33,7 @@ void TestHandwrittenCube() {
     Check(jpov::LoadObj(std::string(kDataRoot) + "cube_hand.obj", &mesh),
           "cube_hand.obj 应成功加载");
 
-    // 8 位置 × 各被 3 面引用配不同 vt/vn → 24 个唯一 (v,vt,vn) GPU 顶点
+    // 6 面 × 4 独立顶点 = 24 个 GPU 顶点（每面独立，不共享 corner）
     Check(mesh.VertexCount() == 24, "cube_hand GPU 顶点数应为 24");
     Check(mesh.indices.size() == 36, "cube_hand indices 应为 36 (6面×2三角形×3)");
 
@@ -50,17 +50,19 @@ void TestHandwrittenCube() {
     // 数组对齐（Validate 内部已强制，显式再调用确认不 crash）
     mesh.Validate();
 
-    // 抽样: 第一个位置 (0,0,0)，出现在底面(法线1)、前面(法线3)、左面(法线5)
-    // 拆分后应为 3 个 GPU 顶点，位置值与原始一致
-    Check(mesh.positions[0] == jpov::Vec3f(0, 0, 0),
-          "pos[0] 应为 (0,0,0)");
-    // 该位置 3 个拆分顶点都保留 (0,0,0)
-    int origin_count = 0;
+    // 抽样: 各面顶点独立，不共享 corner（每面 4 个独立顶点）
+    // 因此每个 cube 角点出现 3 次（被相邻 3 个面引用），
+    // 但位置值相同 ≠ 同一个 GPU 顶点（不同 vt/vn 导致不同 key）。
+    // Cube 中心在原点，范围 [-0.5, 0.5]。
+    //   - 角点 (-0.5,-0.5,0.5) 被前/下/左三个面引用 → 3 个 GPU 顶点
+    //   - 角点 (0.5,0.5,-0.5)  被后/上/右三个面引用 → 3 个 GPU 顶点
+    // 验证：角点出现次数（同 position 不同 vt/vn 的 GPU 顶点数）
+    int corner_count = 0;
     for (const auto& p : mesh.positions) {
-        if (p == jpov::Vec3f(0, 0, 0)) ++origin_count;
+        if (p == jpov::Vec3f(-0.5f, -0.5f, 0.5f)) ++corner_count;
     }
-    Check(origin_count == 3,
-          "位置 (0,0,0) 应被拆为 3 个 GPU 顶点（corner-splitting）");
+    Check(corner_count == 3,
+          "角点 (-0.5,-0.5,0.5) 应被 3 个面引用");
 
     // indices 全落在合法范围 [0, VertexCount)
     for (uint32_t idx : mesh.indices) {
