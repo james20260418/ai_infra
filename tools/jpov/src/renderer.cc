@@ -106,46 +106,15 @@ void main() {
 }
 )glsl";
 
-// ==================== 3D 静态模型 Shaders（用于 Object3D）====================
+// ==================== 3D 物体 PBR Shaders（DrawObject3D）====================
 
-// 3D 静态模型顶点 shader：接受局部空间位置 + UV，
-// 通过 MVP（含 Model 变换）映射到 NDC。
-// 属性 location 与 MeshManager 的 VBO 布局一致：
-//   0 = position，1 = normal，2 = uv
-const char* kMeshVs3d = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 2) in vec2 aTexCoord;
-uniform mat4 uMVP;
-out vec2 vTexCoord;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vTexCoord = aTexCoord;
-}
-)glsl";
-
-// 3D 静态模型纹理 Fragment Shader：纹理×tint 混合（RGB 采样）
-const char* kMeshTexFs = R"glsl(
-#version 330 core
-in vec2 vTexCoord;
-out vec4 FragColor;
-uniform sampler2D uTexture;
-uniform vec4 uTint;
-
-void main() {
-    vec4 tex_color = texture(uTexture, vTexCoord);
-    FragColor = tex_color * uTint;
-}
-)glsl";
-
-// ==================== 3D 光照 Shaders（Tiled Forward GGX PBR）====================
-
-// 3D 静态模型光照顶点 shader：
-// 接受局部空间 position + normal，输出 world-space position + normal + gl_Position
-// 属性 location 与 MeshManager 的 VBO 布局一致：
-//   0 = position，1 = normal
-const char* kMeshVs3dLighting = R"glsl(
+// Vertex shader — 无 UV 版本（mesh 不含 kUV 时使用）。
+// 接受 position + normal，输出 world-space pos/normal。
+// vTexCoord 固定 (0,0)，fragment shader 中 uHas*Tex 全为 0，
+// 所有材质通道取常值 fallback（不触发纹理采样）。
+// vWorldTangent 固定 (0,0,0)，uHasNormalTex=0 时不使用 TBN。
+// 属性 location：0=position，1=normal
+const char* kMeshVs3dPBR = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -154,46 +123,22 @@ uniform mat4 uModel;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
+out vec3 vWorldTangent;
 
 void main() {
     vec4 world_pos = uModel * vec4(aPos, 1.0);
     vWorldPos = world_pos.xyz;
-    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
     vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    // 本变体无 UV 输入（不声明 location 2），vTexCoord 固定 0，
-    // 供 fragment 的 baseColor 纹理分支链接；uHasBaseColorTex=0 时不采样。
     vTexCoord = vec2(0.0);
+    vWorldTangent = vec3(0.0);
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )glsl";
 
-// 3D 静态模型光照顶点 shader（UV 变体）：用于 baseColor 等纹理采样。
-// 在 kMeshVs3dLighting 基础上额外接受 UV（location 2），输出 vTexCoord。
-// 仅当 mesh 含 kUV 属性且着色需纹理采样时使用（避免无 UV 的 mesh 因
-// 声明了未启用的 attrib 2 导致部分 GL 实现下渲染异常）。
-// 属性 location 与 MeshManager 的 VBO 布局一致：0=position，1=normal，2=uv
-const char* kMeshVs3dLightingUV = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-out vec2 vTexCoord;
-
-void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
-    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vTexCoord = aTexCoord;
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-const char* kMeshVs3dLightingUVTangent = R"glsl(
+// Vertex shader — 完整版（mesh 含 kUV+kTangent 时使用）。
+// 在 kMeshVs3dPBR 基础上额外接受 UV（location 2）和 tangent（location 5），
+// 输出 vTexCoord 和 vWorldTangent 供 fragment shader 纹理采样和 TBN 法线映射。
+const char* kMeshVs3dPBRFull = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -209,256 +154,18 @@ out vec3 vWorldTangent;
 void main() {
     vec4 world_pos = uModel * vec4(aPos, 1.0);
     vWorldPos = world_pos.xyz;
-    // normal matrix = inverse(transpose(mat3(uModel)))，支持非均匀缩放
     vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    // tangent 同样经 normal matrix 变换到世界空间（旋转部分即足够）
     vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )glsl";
 
-//
-// 数据流：
-//   CPU 端：每个点光源投影到 NDC → screen rect → 覆盖的 tile(s) 写入 light index
-//   GPU 端：fragment 根据 gl_FragCoord 查 tile 纹理获取 ≤16 个光源 index，
-//          遍历这些光源做 GGX PBR 计算（动态索引 uLights 数组）
-//
-// tile 纹理：普通 GL_RGBA8（避开 integer 纹理的兼容坑），每 texel 的 RGBA 通道
-//           各存一个 uint8 光源 index（255 = 无光源哨兵），
-//           一个 tile 16 个 index = 4 个相邻 texel（水平排列）。
-// tile 网格：ceil(fbo_w/16) × ceil(fbo_h/16)，纹理宽 = grid_cols*4
-//
-// 光源数据本身通过 flat uniform 数组传递（上限 MAX_TOTAL_LIGHTS）。
-// tile 纹理里的 index 是光源在 point_lights / uLights 数组中的下标，
-// fragment 用它做动态索引，只计算本 tile 命中的光源。
-//
-// !!! 这些 #define 必须与 renderer.h 的 C++ 常量保持一致：
-//     TILE_SIZE        ↔ kTileSize16_       (=16)
-//     MAX_LIGHTS_PER_TILE ↔ kMaxLightsPerTile_ (=16)
-//     MAX_TOTAL_LIGHTS ↔ kMaxTotalLights_   (=255)
-//     LIGHT_INDEX_SENTINEL ↔ kLightIndexSentinel_ (=255)
-//  改任一处必须同时改另一处，否则 tile 编码/解码错位。
-const char* kMeshFs3dTiledLighting = R"glsl(
-#version 330 core
-
-#define TILE_SIZE 16
-#define MAX_LIGHTS_PER_TILE 16
-#define MAX_TOTAL_LIGHTS 255
-#define LIGHT_INDEX_SENTINEL 255u
-
-in vec3 vWorldPos;
-in vec3 vWorldNormal;
-in vec2 vTexCoord;
-out vec4 FragColor;
-
-// 点光源
-struct Light {
-    vec3 position;
-    vec3 color;
-    float radius;
-};
-
-uniform Light uLights[MAX_TOTAL_LIGHTS];
-uniform int uTotalLights;
-uniform vec3 uCameraPos;
-
-// ---- PBR 材质参数 ----
-// baseColor 支持常值或逐像素纹理采样：uHasBaseColorTex==1 时采样
-// uBaseColorTex（vTexCoord 来自 UV 顶点 shader），否则用 uBaseColor 常值。
-uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
-uniform sampler2D uBaseColorTex;  // baseColor 纹理（可选用）
-uniform int   uHasBaseColorTex;   // 1 = 采样 baseColor 纹理，0 = 用常值
-uniform float uMetallic;    // 金属度常值（0=电介质，1=金属）
-uniform sampler2D uMetallicTex;   // metallic 纹理（标量存 .r 通道）
-uniform int   uHasMetallicTex;    // 1 = 采样 metallic 纹理，0 = 用常值
-uniform float uRoughness;   // 粗糙度常值（0=光滑，1=粗糙）
-uniform sampler2D uRoughnessTex;  // roughness 纹理（标量存 .r 通道）
-uniform int   uHasRoughnessTex;   // 1 = 采样 roughness 纹理，0 = 用常值
-uniform vec3  uEmissive;    // 自发光常值
-uniform sampler2D uEmissiveTex;   // emissive 纹理（RGB = 自发光色）
-uniform int   uHasEmissiveTex;    // 1 = 采样 emissive 纹理，0 = 用常值
-// AO：烘焙环境光遮蔽（0=全暗，1=无遮蔽）。常值取 uAO（Color 的强度用 .r）。
-uniform float uAO;                // AO 常值
-uniform sampler2D uAoTex;         // AO 纹理（标量存 .r 通道）
-uniform int   uHasAoTex;          // 1 = 采样 AO 纹理，0 = 用常值
-
-// Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
-// （255 = 无光源）。fragment shader 用 texelFetch 精准定位。
-uniform sampler2D uTileLightIndices;
-
-// 环境光常量
-const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
-const float AMBIENT_STRENGTH = 0.4;
-
-// ---- GGX PBR BRDF 函数 ----
-
-// Fresnel-Schlick 近似：F = F0 + (1-F0) * (1 - cosTheta)^5
-// F0 = mix(0.04, baseColor, metallic)：电介质固定 0.04，金属用 baseColor
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-// GGX / Trowbridge-Reitz 法线分布（NDF）：
-//   D = a^2 / (pi * ((NdotH)^2 * (a^2 - 1) + 1)^2)，其中 a = roughness^2
-float distributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float denom = NdotH2 * (a2 - 1.0) + 1.0;
-    denom = 3.14159265 * denom * denom;
-    return a2 / max(denom, 1e-7);
-}
-
-// 几何遮蔽（Geometry）单项：Smith 的 Schlick-GGX 形式
-//   G1(x) = x / (x * (1 - k) + k)，k = (roughness + 1)^2 / 8（direct lighting）
-float geometrySchlickGGX(float NdotX, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    return NdotX / (NdotX * (1.0 - k) + k);
-}
-
-// 完整几何项：G = G1(NdotL) * G1(NdotV)
-float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
-}
-
-// 从 tile 纹理读取当前 tile 的光源 index 列表
-// tile_col/row: 当前像素所在的 tile 坐标
-// out_indices: 输出的 16 个光源 index（未使用的填 LIGHT_INDEX_SENTINEL=255）
-// returns: 实际有效光源数
-int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
-    int count = 0;
-    // 每 tile 存 (MAX_LIGHTS_PER_TILE/4) 个 texel（水平排列），
-    // 每 texel 的 RGBA 各存 1 个 index；4 = RGBA 颜色通道数
-    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
-        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
-        // 编码：通道值 255 表示该通道无光源；其余 0-254 为光源 index
-        //（uint8 → uint，再 & 0xFF 防浮点取整误差）
-        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
-        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
-        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
-        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
-        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = r;
-            count++;
-        }
-        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = g;
-            count++;
-        }
-        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = b;
-            count++;
-        }
-        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = a;
-            count++;
-        }
-    }
-    return count;
-}
-
-void main() {
-    vec3 N = normalize(vWorldNormal);
-    vec3 V = normalize(uCameraPos - vWorldPos);
-
-    // baseColor：uHasBaseColorTex==1 时逐像素采样纹理，否则用常值 fallback
-    vec3 base_color = (uHasBaseColorTex == 1)
-        ? texture(uBaseColorTex, vTexCoord).rgb
-        : uBaseColor;
-
-    // metallic / roughness / emissive / AO：每个通道按 uHas*Tex 标志决定
-    // 采样纹理还是用常值 fallback。metallic/roughness/AO 为标量，取纹理 .r 通道；
-    // emissive 为颜色，取 .rgb。注意：纹理采样时 mesh 必须含 kUV（否则走非
-    // UV 变体，这些通道恒为常值，不会触发采样）。
-    float metallic = (uHasMetallicTex == 1)
-        ? texture(uMetallicTex, vTexCoord).r
-        : uMetallic;
-    float roughness = (uHasRoughnessTex == 1)
-        ? texture(uRoughnessTex, vTexCoord).r
-        : uRoughness;
-    vec3 emissive = (uHasEmissiveTex == 1)
-        ? texture(uEmissiveTex, vTexCoord).rgb
-        : uEmissive;
-    float ao = (uHasAoTex == 1)
-        ? texture(uAoTex, vTexCoord).r
-        : uAO;
-    ao = clamp(ao, 0.0, 1.0);
-
-    // 计算当前像素所在的 tile，并 clamp 到合法范围（防御边缘/亚像素越界）：
-    //   grid_cols = textureWidth / kTexelsPerTile(=4)，grid_rows = textureHeight
-    ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
-    int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
-    int grid_rows = grid.y;
-    int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
-    int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
-
-    // 从 tile 纹理读取本 tile 的光源列表
-    uint light_indices[MAX_LIGHTS_PER_TILE];
-    int num_lights = readTileLights(tile_col, tile_row, light_indices);
-
-    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
-    vec3 total_diffuse = vec3(0.0);
-    vec3 total_specular = vec3(0.0);
-
-    for (int i = 0; i < num_lights; i++) {
-        uint li = light_indices[i];
-        vec3 L = uLights[li].position - vWorldPos;
-        float dist = length(L);
-        if (dist >= uLights[li].radius) continue;
-
-        vec3 light_dir = L / dist;
-
-        // 线性衰减：1.0 at dist=0 → 0.0 at dist=radius
-        float attenuation = 1.0 - (dist / uLights[li].radius);
-
-        float NdotL = max(dot(N, light_dir), 0.0);
-        if (NdotL > 0.0) {
-            // ---- GGX PBR：每光源 Cook-Torrance 贡献 ----
-            vec3 H = normalize(light_dir + V);
-            float NdotV = max(dot(N, V), 0.0);
-
-            // F0：金属度混合 baseColor，电介质固定 0.04
-            vec3 F0 = mix(vec3(0.04), base_color, metallic);
-            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-
-            float D = distributionGGX(N, H, roughness);
-            float G = geometrySmith(N, V, light_dir, roughness);
-
-            // Cook-Torrance specular BRDF：f_s = (F * D * G) / (4 * NdotL * NdotV)
-            vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
-
-            // 漫反射：电介质 baseColor/π，金属无漫反射；(1-F) 近似能量守恒
-            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-            vec3 diffuse = kD * base_color / 3.14159265;
-
-            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
-            total_specular += uLights[li].color * specular * NdotL * attenuation;
-        }
-    }
-
-    // PBR：ambient * AO + diffuse + specular + emissive
-    //（base_color/metallic/roughness/emissive/ao 已按各 uHas*Tex 标志决定是常值还是采样）
-    vec3 result = ambient * base_color * ao + total_diffuse + total_specular + emissive;
-    FragColor = vec4(result, 1.0);
-}
-)glsl";
-
-// Tiled Forward 光照 fragment shader（GGX PBR + 法线映射 TBN）
-//
-// 在 kMeshFs3dTiledLighting 基础上增加法线贴图支持：
-//   - 额外输入 vWorldTangent（来自 kMeshVs3dLightingUVTangent 顶点 shader）
-//   - uHasNormalTex==1 时采样 uNormalTex（RGBA8 法线贴图，[0,1]→[-1,1]），
-//     用 Gram-Schmidt 正交化 tangent 构建 TBN，uNormalScale 缩放扰动强度；
-//     否则退化为几何法线（vWorldNormal），与普通光照完全一致
-//
-// 本 shader 必须与 kMeshVs3dLightingUVTangent 配对链接（fragment 的
-// vWorldTangent 输入需顶点 shader 声明）。法线贴图需要 mesh 含 kNormal+kUV+kTangent。
-const char* kMeshFs3dTiledLightingNormal = R"glsl(
+// Fragment shader — 统一 GGX PBR（Tiled Forward）。
+// 合并原 kMeshFs3dTiledLighting + kMeshFs3dTiledLightingNormal。
+// uHas*Tex 标志控制各通道走纹理采样还是常值 fallback。
+// uHasNormalTex=0 时直接用几何法线，=1 时经 TBN 采样法线贴图。
+const char* kMeshFs3dPBR = R"glsl(
 #version 330 core
 
 #define TILE_SIZE 16
@@ -472,7 +179,6 @@ in vec2 vTexCoord;
 in vec3 vWorldTangent;
 out vec4 FragColor;
 
-// 点光源
 struct Light {
     vec3 position;
     vec3 color;
@@ -484,35 +190,31 @@ uniform int uTotalLights;
 uniform vec3 uCameraPos;
 
 // ---- PBR 材质参数 ----
-uniform vec3  uBaseColor;   // baseColor 常值（无 base_color_tex 时的 fallback）
-uniform sampler2D uBaseColorTex;  // baseColor 纹理（可选用）
-uniform int   uHasBaseColorTex;   // 1 = 采样 baseColor 纹理，0 = 用常值
-uniform float uMetallic;    // 金属度常值（0=电介质，1=金属）
-uniform sampler2D uMetallicTex;   // metallic 纹理（标量存 .r 通道）
-uniform int   uHasMetallicTex;    // 1 = 采样 metallic 纹理，0 = 用常值
-uniform float uRoughness;   // 粗糙度常值（0=光滑，1=粗糙）
-uniform sampler2D uRoughnessTex;  // roughness 纹理（标量存 .r 通道）
-uniform int   uHasRoughnessTex;   // 1 = 采样 roughness 纹理，0 = 用常值
-uniform vec3  uEmissive;    // 自发光常值
-uniform sampler2D uEmissiveTex;   // emissive 纹理（RGB = 自发光色）
-uniform int   uHasEmissiveTex;    // 1 = 采样 emissive 纹理，0 = 用常值
-uniform float uAO;                // AO 常值
-uniform sampler2D uAoTex;         // AO 纹理（标量存 .r 通道）
-uniform int   uHasAoTex;          // 1 = 采样 AO 纹理，0 = 用常值
-// 法线贴图：uHasNormalTex==1 时采样 uNormalTex 做逐像素法线扰动（TBN 变换），
-// uNormalScale 缩放扰动强度（1.0 = 原强度）。法线贴图中 blue 通道朝外。
-uniform sampler2D uNormalTex;     // 法线贴图（RGBA8，[0,1] 编码的切线空间法线）
-uniform int   uHasNormalTex;      // 1 = 采样法线贴图，0 = 用几何法线
-uniform float uNormalScale;       // 法线扰动强度（>0）
+uniform vec3  uBaseColor;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+uniform float uMetallic;
+uniform sampler2D uMetallicTex;
+uniform int   uHasMetallicTex;
+uniform float uRoughness;
+uniform sampler2D uRoughnessTex;
+uniform int   uHasRoughnessTex;
+uniform vec3  uEmissive;
+uniform sampler2D uEmissiveTex;
+uniform int   uHasEmissiveTex;
+uniform float uAO;
+uniform sampler2D uAoTex;
+uniform int   uHasAoTex;
+uniform sampler2D uNormalTex;
+uniform int   uHasNormalTex;
+uniform float uNormalScale;
 
-// Tile culling 纹理：GL_RGBA8，每 texel 的 4 通道各存一个 uint8 光源 index
 uniform sampler2D uTileLightIndices;
 
-// 环境光常量
 const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
 const float AMBIENT_STRENGTH = 0.4;
 
-// ---- GGX PBR BRDF 函数 ----
+// ---- GGX PBR BRDF ----
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
@@ -539,7 +241,6 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
 }
 
-// 从 tile 纹理读取当前 tile 的光源 index 列表
 int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
     int count = 0;
     for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
@@ -549,20 +250,16 @@ int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_P
         uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
         uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
         if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = r;
-            count++;
+            out_indices[count] = r; count++;
         }
         if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = g;
-            count++;
+            out_indices[count] = g; count++;
         }
         if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = b;
-            count++;
+            out_indices[count] = b; count++;
         }
         if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = a;
-            count++;
+            out_indices[count] = a; count++;
         }
     }
     return count;
@@ -572,24 +269,18 @@ void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
-    // 法线映射：uHasNormalTex==1 时采样切线空间法线，构建 TBN 变换到世界空间
+    // 法线映射（uHasNormalTex==1 时 TBN 变换）
     if (uHasNormalTex == 1) {
         vec3 tex_normal = texture(uNormalTex, vTexCoord).rgb * 2.0 - 1.0;
         tex_normal = normalize(tex_normal);
-        // 蓝通道（+Z）沿切线空间法线方向；uNormalScale 缩放 XY 分量增强/减弱扰动
         tex_normal.xy *= uNormalScale;
         tex_normal = normalize(tex_normal);
-
-        // TBN：T 经 Gram-Schmidt 正交化（对齐 N），B = cross(N, T)，右手系
         vec3 T = normalize(vWorldTangent - dot(vWorldTangent, N) * N);
         vec3 B = normalize(cross(N, T));
         mat3 TBN = mat3(T, B, N);
-
-        // 扰动后的世界空间法线
         N = normalize(TBN * tex_normal);
     }
 
-    // baseColor：uHasBaseColorTex==1 时逐像素采样纹理，否则用常值 fallback
     vec3 base_color = (uHasBaseColorTex == 1)
         ? texture(uBaseColorTex, vTexCoord).rgb
         : uBaseColor;
@@ -629,21 +320,17 @@ void main() {
 
         vec3 light_dir = L / dist;
         float attenuation = 1.0 - (dist / uLights[li].radius);
-
         float NdotL = max(dot(N, light_dir), 0.0);
         if (NdotL > 0.0) {
             vec3 H = normalize(light_dir + V);
             float NdotV = max(dot(N, V), 0.0);
-
             vec3 F0 = mix(vec3(0.04), base_color, metallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
             float D = distributionGGX(N, H, roughness);
             float G = geometrySmith(N, V, light_dir, roughness);
-
             vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
             vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
             vec3 diffuse = kD * base_color / 3.14159265;
-
             total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
             total_specular += uLights[li].color * specular * NdotL * attenuation;
         }
@@ -653,6 +340,7 @@ void main() {
     FragColor = vec4(result, 1.0);
 }
 )glsl";
+
 
 
 // ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
@@ -1121,33 +809,20 @@ unsigned int Renderer::Text3DProg() {
     return shader_mgr_.GetOrCreate("text3d", {kTexVs3d, kTexFs});
 }
 
-unsigned int Renderer::TexturedMesh3DProg() {
-    return shader_mgr_.GetOrCreate("mesh3d_textured", {kMeshVs3d, kMeshTexFs});
+// DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
+// vertex shader 只声明 location 0/1（aPos/aNormal），避免 VAO 中未绑定的
+// location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
+unsigned int Renderer::DrawObject3DProg() {
+    return shader_mgr_.GetOrCreate("draw_object3d_pbr",
+                                  {kMeshVs3dPBR, kMeshFs3dPBR});
 }
 
-unsigned int Renderer::MeshLighting3DProg() {
-    return shader_mgr_.GetOrCreate("mesh3d_tiled_lighting",
-                                  {kMeshVs3dLighting, kMeshFs3dTiledLighting});
-}
-
-// 光照 + baseColor 纹理变体：vertex shader 用 UV 版（接受 location 2）。
-// 仅当 mesh 含 kUV 属性且 base_color_tex != 0 时使用；无 UV 的 mesh
-// 统一走 MeshLighting3DProg（避免声明未启用 attrib 导致的兼容问题）。
-unsigned int Renderer::MeshLighting3DTexturedProg() {
-    return shader_mgr_.GetOrCreate("mesh3d_tiled_lighting_tex",
-                                  {kMeshVs3dLightingUV, kMeshFs3dTiledLighting});
-}
-
-// 光照 + 法线映射变体：vertex shader 用 UV+tangent 版（接受 location 2/5），
-// fragment shader 用含 TBN 的版本。仅当 mesh 含 kNormal+kUV+kTangent 且
-// normal_tex != 0 时使用；否则退化为 MeshLighting3DTexturedProg / MeshLighting3DProg。
-// 光照 + 法线映射变体：vertex shader 用 UV+tangent 版（接受 location 2/5），
-// fragment shader 用含 TBN 的版本。仅当 mesh 含 kNormal+kUV+kTangent 且
-// normal_tex != 0 时使用；否则退化为 MeshLighting3DTexturedProg / MeshLighting3DProg。
-unsigned int Renderer::MeshLighting3DNormalTexProg() {
-    return shader_mgr_.GetOrCreate(
-        "mesh3d_tiled_lighting_normal",
-        {kMeshVs3dLightingUVTangent, kMeshFs3dTiledLightingNormal});
+// DrawObject3D PBR shader — 完整版（mesh 含 kUV+kTangent 时使用）。
+// vertex shader 声明 location 0/1/2/5（aPos/aNormal/aTexCoord/aTangent），
+// 支持纹理采样（baseColor/metallic/roughness/emissive/AO）和 TBN 法线映射。
+unsigned int Renderer::DrawObject3DProgFull() {
+    return shader_mgr_.GetOrCreate("draw_object3d_pbr_full",
+                                  {kMeshVs3dPBRFull, kMeshFs3dPBR});
 }
 
 // 编译/注册全部 shader program。
@@ -1159,10 +834,8 @@ void Renderer::CompileShaders() {
     ImageProg();
     Solid3DProg();
     Text3DProg();
-    TexturedMesh3DProg();
-    MeshLighting3DProg();
-    MeshLighting3DTexturedProg();
-    MeshLighting3DNormalTexProg();
+    DrawObject3DProg();
+    DrawObject3DProgFull();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -2314,9 +1987,8 @@ void Renderer::UploadLightData(const RenderCommandList& cmds) {
     // 光源 uniform 需同时上传到所有光照 program（普通光照 + baseColor 纹理
     //  变体 + 法线映射），因为 program 切换时 uniform 是 per-program 状态，
     //  DrawObject3D 会根据材质动态选择哪一个。
-    const unsigned int programs[] = {MeshLighting3DProg(),
-                                     MeshLighting3DTexturedProg(),
-                                     MeshLighting3DNormalTexProg()};
+    const unsigned int programs[] = {DrawObject3DProg(),
+                                     DrawObject3DProgFull()};
 
     const int total = static_cast<int>(cmds.point_lights.size());
     const int clamped = std::min(total, kMaxTotalLights_);
@@ -2548,26 +2220,13 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
     //   !object_use_default_color → GGX PBR 光照 shader（任一通道带纹理时
     //     额外采样对应纹理作为逐像素材质参数，否则用常值 fallback）
     //   object_use_default_color   → 旧纯色 shader（兼容现有 gold test）
-    const bool use_lighting = !cmds.object_use_default_color;
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+;
 
-    if (use_lighting) {
-        // 光照模式：需要 normal 属性；任一通道带纹理时还需 UV 属性
-        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-            << "DrawObject3D: 光照模式需要 kNormal 属性，"
-            << "但 mesh_id=" << cmd.mesh_id << " 不含 normal；"
-            << "可设置 object_use_default_color=true 使用纯色渲染";
-
-        // 任一通道带纹理时用 UV 变体 program（接受 location 2 的 UV），
-        // 各通道在这些采样纹理的引导下逐像素采样；否则用普通光照 shader
-        // （不声明 UV attrib，避免无 UV mesh 声明未启用 attrib 的兼容问题）。
-        // 法线映射（normal_tex 非 0）时额外需要 kTangent，用 UV+tangent 变体。
+                // 完整版支持纹理采样和 TBN 法线映射（需 mesh 含 kUV+kTangent）。
+        // 两版共用同一个 fragment shader（用 uHas*Tex uniform flag 控制分支）。
         unsigned int prog;
-        if (use_normal_map) {
-            prog = MeshLighting3DNormalTexProg();
-        } else {
-            prog = any_tex ? MeshLighting3DTexturedProg()
-                           : MeshLighting3DProg();
-        }
+        prog = any_tex ? DrawObject3DProgFull() : DrawObject3DProg();
         glUseProgram(prog);
 
         // MVP（含 Model）
@@ -2709,16 +2368,7 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
         glUniform1i(glGetUniformLocation(prog, "uTileLightIndices"), 0);
-    } else {
-        // 旧纯色模式（object_use_default_color=true 时走此路径）
-        unsigned int prog = Solid3DProg();
-        glUseProgram(prog);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                           1, GL_FALSE, mvp);
-        glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.material.base_color.r, cmd.material.base_color.g,
-                    cmd.material.base_color.b, cmd.material.base_color.a);
-    }
+
 
     // 5. 发起绘制（indexed 用 EBO，否则按顶点序）
     // 绑定 mesh VAO：属性指针已固化在 VAO 中，无需再设 attrib。

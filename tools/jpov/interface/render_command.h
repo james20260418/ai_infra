@@ -362,9 +362,16 @@ struct PointLight {
 // 约定：纹理句柄 0 表示无纹理，此时使用对应的常值 fallback。
 //       *_tex 非 0 时采样该纹理作为逐像素材质参数，忽略对应常值。
 struct PBRMaterial {
-    // baseColor: 值 或 纹理（has_*_tex 语义下用纹理）
-    Color base_color;            // fallback 值
-    uint32_t base_color_tex = 0; // 0 = 无纹理
+    // 便利构造：纯色材质（metallic=0, roughness=1，无纹理/法线/emissive/AO）
+    static PBRMaterial SolidColor(const Color& c) {
+        PBRMaterial m;
+        m.base_color = c;
+        return m;
+    }
+
+    // baseColor: 常值 fallback（base_color_tex ≠ 0 时走纹理采样）
+    Color base_color;
+    uint32_t base_color_tex = 0;
 
     // metallic / roughness: scalar or texture
     float metallic = 0.0f;
