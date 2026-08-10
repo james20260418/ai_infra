@@ -122,7 +122,7 @@ public:
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
         mat.normal_scale = 2.0f;
-        mat.emissive_tex = tex_ao_;
+        mat.ao_tex = tex_ao_;
         cmds->DrawObject3D(
             mesh_id, mat,
             {0.0f, 0.0f, 0.0f},           // center = 原点 = 立方体中心
