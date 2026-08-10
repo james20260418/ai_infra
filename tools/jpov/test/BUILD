@@ -641,3 +641,51 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# Gold Image — PBR 法线映射（normal map TBN）渲染验证
+# 验证 DrawObject3D 法线贴图链路：OBJ 推导 tangent → 采样法线贴图 → TBN 变换
+# ============================================================================
+cc_binary(
+    name = "jpov_pbr_normal_gold_generator",
+    srcs = ["jpov_pbr_normal_gold_generator.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "jpov_pbr_normal_gold_test",
+    srcs = ["jpov_pbr_normal_gold_test.cc"],
+    data = [
+        ":cube_hand.obj",
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:obj_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        ":test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+

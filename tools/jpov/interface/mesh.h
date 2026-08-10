@@ -53,6 +53,7 @@ enum class MeshVertexFlags : uint8_t {
     kNormal   = 1 << 1,
     kUV       = 1 << 2,
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
+    kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
@@ -81,6 +82,7 @@ struct MeshData {
     std::vector<Vec3f> positions;
     std::vector<Vec3f> normals;
     std::vector<Vec2f> uvs;
+    std::vector<Vec3f> tangents;   // 切向量（逐顶点，法线映射 TBN 用；kTangent 时非空）
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -126,6 +128,10 @@ inline void MeshData::Validate() const {
         CHECK_EQ(uvs.size(), vcount)
             << "MeshData::Validate: uvs.size() != positions.size()";
     }
+    if (!tangents.empty()) {
+        CHECK_EQ(tangents.size(), vcount)
+            << "MeshData::Validate: tangents.size() != positions.size()";
+    }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)
             << "MeshData::Validate: joint_indices.size() != positions.size()";
@@ -150,6 +156,19 @@ inline void MeshData::Validate() const {
     } else {
         CHECK(uvs.empty())
             << "MeshData::Validate: 未声明 kUV 但 uvs 非空";
+    }
+
+    if (MeshHasFlag(flags, MeshVertexFlags::kTangent)) {
+        CHECK_EQ(tangents.size(), vcount)
+            << "MeshData::Validate: flags 声明 kTangent 但 tangents 长度不一致或缺数据";
+        // TBN 需要 normal + uv 才能从纹理推导切线空间
+        CHECK(MeshHasFlag(flags, MeshVertexFlags::kNormal))
+            << "MeshData::Validate: flags 声明 kTangent 但未声明 kNormal";
+        CHECK(MeshHasFlag(flags, MeshVertexFlags::kUV))
+            << "MeshData::Validate: flags 声明 kTangent 但未声明 kUV";
+    } else {
+        CHECK(tangents.empty())
+            << "MeshData::Validate: 未声明 kTangent 但 tangents 非空";
     }
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
