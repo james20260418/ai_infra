@@ -249,6 +249,10 @@ private:
     unsigned int Text3DProg();    // 3D 纹理（kTexVs3d/kTexFs，为 Text3D 预留）
     unsigned int TexturedMesh3DProg();  // 3D 静态模型纹理（kMeshVs3d/kMeshTexFs）
     unsigned int MeshLighting3DProg();  // 3D 静态模型光照（kMeshVs3dLighting/kMeshFs3dLighting）
+    unsigned int MeshLighting3DTexturedProg();  // 3D 光照 + baseColor 纹理
+    //（kMeshVs3dLightingUV/kMeshFs3dTiledLighting，mesh 需含 kUV）
+    unsigned int MeshLighting3DNormalTexProg();  // 3D 光照 + 法线映射 TBN
+    //（kMeshVs3dLightingUVTangent/kMeshFs3dTiledLightingNormal，mesh 需含 kUV+kTangent）
 
     // 纹理管理器（字体 atlas 之外的用户纹理）
     TextureManager texture_mgr_;

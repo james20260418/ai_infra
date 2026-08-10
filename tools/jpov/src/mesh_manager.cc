@@ -194,6 +194,19 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               reinterpret_cast<const void*>(0));
     }
 
+    // ---- tangent（可选，location 5，法线映射 TBN）----
+    if (MeshHasFlag(data.flags, MeshVertexFlags::kTangent)) {
+        glGenBuffers(1, &mesh.vbo_tangents);
+        CHECK_NE(mesh.vbo_tangents, 0u);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_tangents);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(data.tangents.size() * sizeof(Vec3f)),
+                     data.tangents.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE,
+                              sizeof(Vec3f), reinterpret_cast<const void*>(0));
+    }
+
     // ---- indices（可选，EBO）----
     if (!data.indices.empty()) {
         glGenBuffers(1, &mesh.ebo);
@@ -220,8 +233,8 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete
-    // GPUMesh 至多 5 个属性 VBO + 1 个 EBO = 6 个 GL 缓冲对象
-    static constexpr int kMaxBuffers = 6;
+    // GPUMesh 至多 6 个属性 VBO + 1 个 EBO = 7 个 GL 缓冲对象
+    static constexpr int kMaxBuffers = 7;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -238,6 +251,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     }
     if (mesh->vbo_weights) {
         buffers[n++] = mesh->vbo_weights;
+    }
+    if (mesh->vbo_tangents) {
+        buffers[n++] = mesh->vbo_tangents;
     }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;

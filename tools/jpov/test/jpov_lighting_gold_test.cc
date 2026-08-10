@@ -1,9 +1,9 @@
 // JPOV 3D 点光源光照 Gold Image Unit Test
 //
-// 用 gold image 方法验证 Blinn-Phong 光照渲染链路：
+// 用 gold image 方法验证 GGX PBR 光照渲染链路：
 //   1. 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
 //   2. 3 个点光源（红/绿/蓝）从不同方向照射
-//   3. Blinn-Phong 着色（diffuse + specular + ambient），object_use_default_color=false
+//   3. GGX PBR 着色（ambient + diffuse + specular + emissive），object_use_default_color=false
 //   4. 保存为 PNG 到 output/jpov_lighting_gold_test/rendered.png
 //   5. 与 expected PNG（git 管理）做二进制文件级比较
 //
@@ -67,12 +67,13 @@ public:
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
-        uint32_t texture_id = 0;
 
-        // 渲染（默认 object_use_default_color=false，走光照着色）
+        // 渲染（默认 object_use_default_color=false，走 GGX 光照着色）
+        // PBR 材质：baseColor 偏白，metallic=0 / roughness=1（默认）恒光介
+        jpov::PBRMaterial mat;
+        mat.base_color = {0.8f, 0.8f, 0.8f, 1.0f};  // 漫反射基础色，偏白
         cmds->DrawObject3D(
-            mesh_id, texture_id,
-            {0.8f, 0.8f, 0.8f, 1.0f},
+            mesh_id, mat,
             {0.0f, 0.0f, 0.0f},
             {0.0f, 1.0f, 0.0f},
             {0.0f, 0.0f, 1.0f});
