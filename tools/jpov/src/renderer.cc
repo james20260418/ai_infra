@@ -2719,11 +2719,8 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
 
     // 5. 发起绘制（indexed 用 EBO，否则按顶点序）
     // 绑定 mesh VAO：属性指针已固化在 VAO 中，无需再设 attrib。
-    // 关闭背面剔除：外部 OBJ 模型绕序不一致（见 winding_probe 诊断，
-    // beetle/cube_hand 均有反转面），GL_CULL_FACE(GL_BACK)+GL_CCW 会把这些
-    // 面判为背面剔除 → 产生缺面/破洞。对已注册 mesh 关闭 culling，靠深度测试
-    // 遮挡内部面即可，保证纯色/材质渲染面完整。
-    glDisable(GL_CULL_FACE);
+    // GL_CULL_FACE + GL_CCW 在 Render() 中统一开启，
+    // 所有 mesh 面必须保持 CCW 绕序（OBJ loader 保证不改绕序）。
     glBindVertexArray(mesh->vao);
     if (mesh->index_count > 0) {
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
@@ -2732,8 +2729,6 @@ void Renderer::DrawObject3D(const Object3DCommand& cmd,
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
     }
     glBindVertexArray(0);
-    // 恢复背面剔除（若 3D 管线开启）
-    glEnable(GL_CULL_FACE);
 
     GLenum draw_err = glGetError();
     if (draw_err != GL_NO_ERROR) {

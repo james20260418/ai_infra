@@ -50,17 +50,16 @@ void TestHandwrittenCube() {
     // 数组对齐（Validate 内部已强制，显式再调用确认不 crash）
     mesh.Validate();
 
-    // 抽样: 第一个位置 (0,0,0)，出现在底面(法线1)、前面(法线3)、左面(法线5)
-    // 拆分后应为 3 个 GPU 顶点，位置值与原始一致
-    Check(mesh.positions[0] == jpov::Vec3f(0, 0, 0),
-          "pos[0] 应为 (0,0,0)");
-    // 该位置 3 个拆分顶点都保留 (0,0,0)
+    // 抽样: 位置 (0,0,0)，出现在底面(法线1)、前面(法线3)、左面(法线5)
+    // 拆分后应为 3 个 GPU 顶点，位置值与原始一致。
+    // 注意: OBJ 面的遍历顺序决定了 corner map 中第一个键的次序，
+    // 不依赖 positions[0] 的具体值，只检查拆分后的顶点数。
     int origin_count = 0;
     for (const auto& p : mesh.positions) {
         if (p == jpov::Vec3f(0, 0, 0)) ++origin_count;
     }
     Check(origin_count == 3,
-          "位置 (0,0,0) 应被拆为 3 个 GPU 顶点（corner-splitting）");
+          "位置 (0,0,0) 应被拆为 3 个 GPU 顶点（corner-splitting），实际=" + std::to_string(origin_count));
 
     // indices 全落在合法范围 [0, VertexCount)
     for (uint32_t idx : mesh.indices) {
