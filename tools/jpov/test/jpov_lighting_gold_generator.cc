@@ -3,7 +3,7 @@
 // 生成 lighting gold test 的参考图片：
 //   - 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
 //   - 3 个点光源（红/绿/蓝）从不同方向照射
-//   - Blinn-Phong 光照（diffuse + specular + ambient）
+//   - GGX PBR 光照（ambient + diffuse + specular）
 //   - Camera (1, 1, 1) 看向原点，透视投影
 //   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
 //
