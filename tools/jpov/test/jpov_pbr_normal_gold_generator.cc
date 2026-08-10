@@ -37,14 +37,28 @@ public:
         cmds->camera.fbo_3d_height_ = kResH;
 
         // Camera 从右前上方观察立方体中心（同其它 PBR test 保持一致）
-        cmds->camera.position = {1.9f, 1.3f, 1.9f};
-        cmds->camera.target   = {0.5f, 0.5f, 0.5f};
+        cmds->camera.position = {1.0f, 1.0f, 1.0f};
+        cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 单点光源：前上方暖色主光，让法线扰动产生清晰明暗
+        // 三点布光（key + fill + rim）用于 PBR 材质展示
+        // key: 主光，右上方暖白
         cmds->point_lights.push_back({
-            {0.5f, 2.4f, 0.5f},          // position（立方体上方偏前）
-            {1.0f, 0.95f, 0.85f, 1.0f},  // color（暖白）
-            3.5f                          // linear_radius
+            {1.5f, 1.5f, 0.8f},
+            {25.0f, 23.0f, 20.0f, 1.0f},  // 暖白
+            6.0f
+        });
+        // fill: 补光，左下方冷蓝，降低对比度
+        cmds->point_lights.push_back({
+            {-1.2f, -0.3f, -0.5f},
+            {8.0f, 10.0f, 18.0f, 1.0f},   // 冷蓝
+            5.0f
+        });
+        // rim: 背光，后方，勾勒边缘
+        cmds->point_lights.push_back({
+            {0.0f, 0.0f, -1.5f},
+            {15.0f, 15.0f, 15.0f, 1.0f},  // 中性白
+            8.0f
         });
 
         // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）

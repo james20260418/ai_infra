@@ -38,15 +38,24 @@ public:
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
         // 点光源：暖色主光（上方偏前，近且强）+ 冷色补光
+        // 三点布光（key + fill + rim）用于 PBR 材质展示
+        // key: 主光，右上方暖白
         cmds->point_lights.push_back({
-            {0.5f, 2.4f, 0.5f},          // position（立方体正上方稍近）
-            {10.0f, 9.5f, 8.5f, 1.0f},  // color（暖白）
-            5.0f                          // linear_radius
+            {1.5f, 1.5f, 0.8f},
+            {25.0f, 23.0f, 20.0f, 1.0f},  // 暖白
+            6.0f
         });
+        // fill: 补光，左下方冷蓝，降低对比度
         cmds->point_lights.push_back({
-            {-0.3f, 0.5f, -0.6f},        // position（左前下方）
-            {4.0f, 4.5f, 7.0f, 1.0f},   // color（冷蓝）
-            5.0f                          // linear_radius
+            {-1.2f, -0.3f, -0.5f},
+            {8.0f, 10.0f, 18.0f, 1.0f},   // 冷蓝
+            5.0f
+        });
+        // rim: 背光，后方，勾勒边缘
+        cmds->point_lights.push_back({
+            {0.0f, 0.0f, -1.5f},
+            {15.0f, 15.0f, 15.0f, 1.0f},  // 中性白
+            8.0f
         });
 
         // 加载带 UV + normal 的立方体
