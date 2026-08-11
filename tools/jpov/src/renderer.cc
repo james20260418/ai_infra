@@ -68,392 +68,6 @@ void main() {
 }
 )glsl";
 
-// ==================== 3D Shaders ====================
-
-// 3D 顶点 shader：接受 vec3 世界坐标，通过 MVP 矩阵变换到 NDC
-const char* kVs3d = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-uniform mat4 uMVP;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-// 3D Fragment Shader（纯色）
-const char* kFs3d = R"glsl(
-#version 330 core
-out vec4 FragColor;
-uniform vec4 uColor;
-
-void main() {
-    FragColor = uColor;
-}
-)glsl";
-
-// 3D 纹理顶点 shader（用于 Text3D）
-const char* kTexVs3d = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
-uniform mat4 uMVP;
-out vec2 vTexCoord;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vTexCoord = aTexCoord;
-}
-)glsl";
-
-// ==================== 3D 物体 PBR Shaders（DrawObject3D）====================
-
-// Vertex shader — 无 UV 版本（mesh 不含 kUV 时使用）。
-// 接受 position + normal，输出 world-space pos/normal。
-// vTexCoord 固定 (0,0)，fragment shader 中 uHas*Tex 全为 0，
-// 所有材质通道取常值 fallback（不触发纹理采样）。
-// vWorldTangent 固定 (0,0,0)，uHasNormalTex=0 时不使用 TBN。
-// 属性 location：0=position，1=normal
-const char* kMeshVs3dPBR = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-out vec2 vTexCoord;
-out vec3 vWorldTangent;
-
-void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vTexCoord = vec2(0.0);
-    vWorldTangent = vec3(0.0);
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-// Vertex shader — 完整版（mesh 含 kUV+kTangent 时使用）。
-// 在 kMeshVs3dPBR 基础上额外接受 UV（location 2）和 tangent（location 5），
-// 输出 vTexCoord 和 vWorldTangent 供 fragment shader 纹理采样和 TBN 法线映射。
-const char* kMeshVs3dPBRFull = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-layout(location = 5) in vec3 aTangent;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-out vec2 vTexCoord;
-out vec3 vWorldTangent;
-
-void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
-    vTexCoord = aTexCoord;
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-// Fragment shader — 统一 GGX PBR（Tiled Forward）。
-// 合并原 kMeshFs3dTiledLighting + kMeshFs3dTiledLightingNormal。
-// uHas*Tex 标志控制各通道走纹理采样还是常值 fallback。
-// uHasNormalTex=0 时直接用几何法线，=1 时经 TBN 采样法线贴图。
-const char* kMeshFs3dPBR = R"glsl(
-#version 330 core
-
-#define TILE_SIZE 16
-#define MAX_LIGHTS_PER_TILE 16
-#define MAX_TOTAL_LIGHTS 255
-#define LIGHT_INDEX_SENTINEL 255u
-
-in vec3 vWorldPos;
-in vec3 vWorldNormal;
-in vec2 vTexCoord;
-in vec3 vWorldTangent;
-out vec4 FragColor;
-
-struct Light {
-    vec3 position;
-    vec3 color;
-    float radius;
-};
-
-uniform Light uLights[MAX_TOTAL_LIGHTS];
-uniform int uTotalLights;
-uniform vec3 uCameraPos;
-
-// ---- PBR 材质参数 ----
-uniform vec3  uBaseColor;
-uniform sampler2D uBaseColorTex;
-uniform int   uHasBaseColorTex;
-uniform float uMetallic;
-uniform sampler2D uMetallicTex;
-uniform int   uHasMetallicTex;
-uniform float uRoughness;
-uniform sampler2D uRoughnessTex;
-uniform int   uHasRoughnessTex;
-uniform vec3  uEmissive;
-uniform sampler2D uEmissiveTex;
-uniform int   uHasEmissiveTex;
-uniform float uAO;
-uniform sampler2D uAoTex;
-uniform int   uHasAoTex;
-uniform sampler2D uNormalTex;
-uniform int   uHasNormalTex;
-uniform float uNormalScale;
-
-uniform sampler2D uTileLightIndices;
-
-const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
-const float AMBIENT_STRENGTH = 0.4;
-
-// ---- GGX PBR BRDF ----
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-float distributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float denom = NdotH2 * (a2 - 1.0) + 1.0;
-    denom = 3.14159265 * denom * denom;
-    return a2 / max(denom, 1e-7);
-}
-
-float geometrySchlickGGX(float NdotX, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    return NdotX / (NdotX * (1.0 - k) + k);
-}
-
-float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
-}
-
-int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
-    int count = 0;
-    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
-        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
-        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
-        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
-        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
-        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
-        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = r; count++;
-        }
-        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = g; count++;
-        }
-        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = b; count++;
-        }
-        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = a; count++;
-        }
-    }
-    return count;
-}
-
-void main() {
-    vec3 N = normalize(vWorldNormal);
-    vec3 V = normalize(uCameraPos - vWorldPos);
-
-    // 法线映射（uHasNormalTex==1 时 TBN 变换）
-    if (uHasNormalTex == 1) {
-        vec3 tex_normal = texture(uNormalTex, vTexCoord).rgb * 2.0 - 1.0;
-        tex_normal = normalize(tex_normal);
-        tex_normal.xy *= uNormalScale;
-        tex_normal = normalize(tex_normal);
-        vec3 T = normalize(vWorldTangent - dot(vWorldTangent, N) * N);
-        vec3 B = normalize(cross(N, T));
-        mat3 TBN = mat3(T, B, N);
-        N = normalize(TBN * tex_normal);
-    }
-
-    vec3 base_color = (uHasBaseColorTex == 1)
-        ? texture(uBaseColorTex, vTexCoord).rgb
-        : uBaseColor;
-
-    float metallic = (uHasMetallicTex == 1)
-        ? texture(uMetallicTex, vTexCoord).r
-        : uMetallic;
-    float roughness = (uHasRoughnessTex == 1)
-        ? texture(uRoughnessTex, vTexCoord).r
-        : uRoughness;
-    vec3 emissive = (uHasEmissiveTex == 1)
-        ? texture(uEmissiveTex, vTexCoord).rgb
-        : uEmissive;
-    float ao = (uHasAoTex == 1)
-        ? texture(uAoTex, vTexCoord).r
-        : uAO;
-    ao = clamp(ao, 0.0, 1.0);
-
-    ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
-    int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
-    int grid_rows = grid.y;
-    int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
-    int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
-
-    uint light_indices[MAX_LIGHTS_PER_TILE];
-    int num_lights = readTileLights(tile_col, tile_row, light_indices);
-
-    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
-    vec3 total_diffuse = vec3(0.0);
-    vec3 total_specular = vec3(0.0);
-
-    for (int i = 0; i < num_lights; i++) {
-        uint li = light_indices[i];
-        vec3 L = uLights[li].position - vWorldPos;
-        float dist = length(L);
-        if (dist >= uLights[li].radius) continue;
-
-        vec3 light_dir = L / dist;
-        float attenuation = 1.0 - (dist / uLights[li].radius);
-        float NdotL = max(dot(N, light_dir), 0.0);
-        if (NdotL > 0.0) {
-            vec3 H = normalize(light_dir + V);
-            float NdotV = max(dot(N, V), 0.0);
-            vec3 F0 = mix(vec3(0.04), base_color, metallic);
-            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-            float D = distributionGGX(N, H, roughness);
-            float G = geometrySmith(N, V, light_dir, roughness);
-            vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
-            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-            vec3 diffuse = kD * base_color / 3.14159265;
-            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
-            total_specular += uLights[li].color * specular * NdotL * attenuation;
-        }
-    }
-
-    vec3 result = ambient * base_color * ao + total_diffuse + total_specular + emissive;
-    FragColor = vec4(result, 1.0);
-}
-)glsl";
-
-
-
-// ==================== MVP 矩阵构建（纯 CPU，不碰 GL 矩阵栈）====================
-
-// 4x4 矩阵乘法：out = a * b（列主序）
-static void Mat4Mul(const float a[16], const float b[16], float out[16]) {
-    for (int col = 0; col < 4; ++col) {
-        for (int row = 0; row < 4; ++row) {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k) {
-                sum += a[k * 4 + row] * b[col * 4 + k];
-            }
-            out[col * 4 + row] = sum;
-        }
-    }
-}
-
-// 列主序透视投影矩阵（对应 GLM::perspective / glFrustum 语义）
-// 构建右手系透视投影：fov_y, aspect, near, far
-static void BuildPerspProj(float fov_y, float aspect, float near, float far,
-                            float out[16]) {
-    float f = 1.0f / std::tan(fov_y * 0.5f);
-    float range_inv = 1.0f / (near - far);
-    // 列主序
-    out[0]  = f / aspect;  out[4]  = 0.0f; out[8]  = 0.0f;                 out[12] = 0.0f;
-    out[1]  = 0.0f;        out[5]  = f;     out[9]  = 0.0f;                 out[13] = 0.0f;
-    out[2]  = 0.0f;        out[6]  = 0.0f;  out[10] = (near + far) * range_inv; out[14] = 2.0f * near * far * range_inv;
-    out[3]  = 0.0f;        out[7]  = 0.0f;  out[11] = -1.0f;                out[15] = 0.0f;
-}
-
-// 从 Camera 构建 MVP 矩阵（纯 CPU，不碰 GL 矩阵栈，不读回 GL 状态）
-// MVP = Projection * View
-// Projection: 透视投影（列主序）
-// View: lookAt 矩阵（列主序）
-static void BuildMVP(const jpov::Camera& cam, int fbo_w, int fbo_h, float mvp[16]) {
-    float aspect = static_cast<float>(fbo_w) / static_cast<float>(fbo_h);
-    float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
-
-    // === 投影矩阵 ===
-    float proj[16];
-    BuildPerspProj(fov_rad, aspect, cam.near, cam.far, proj);
-
-    // === lookAt 视图矩阵 ===
-    // 计算坐标基
-    Vec3f fwd = cam.target - cam.position;
-    float f_len = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
-    if (f_len < 1e-8f) { fwd = {0.0f, 0.0f, -1.0f}; }
-    else { fwd = {fwd.x()/f_len, fwd.y()/f_len, fwd.z()/f_len}; }
-
-    Vec3f side = {fwd.y()*cam.up.z() - fwd.z()*cam.up.y(),
-                  fwd.z()*cam.up.x() - fwd.x()*cam.up.z(),
-                  fwd.x()*cam.up.y() - fwd.y()*cam.up.x()};
-    float s_len = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
-    if (s_len < 1e-8f) { side = {1.0f, 0.0f, 0.0f}; }
-    else { side = {side.x()/s_len, side.y()/s_len, side.z()/s_len}; }
-
-    Vec3f upv = {side.y()*fwd.z() - side.z()*fwd.y(),
-                 side.z()*fwd.x() - side.x()*fwd.z(),
-                 side.x()*fwd.y() - side.y()*fwd.x()};
-
-    // 列主序 lookAt 矩阵 (OpenGL 右手系)
-    float view[16] = {
-        side.x(), upv.x(), -fwd.x(), 0.0f,
-        side.y(), upv.y(), -fwd.y(), 0.0f,
-        side.z(), upv.z(), -fwd.z(), 0.0f,
-        -(side.x()*cam.position.x() + side.y()*cam.position.y() + side.z()*cam.position.z()),
-        -(upv.x()*cam.position.x() + upv.y()*cam.position.y() + upv.z()*cam.position.z()),
-         (fwd.x()*cam.position.x() + fwd.y()*cam.position.y() + fwd.z()*cam.position.z()),
-         1.0f
-    };
-
-    // MVP = Proj * View
-    Mat4Mul(proj, view, mvp);
-}
-
-// 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）
-//
-// 把局部空间（mesh 定义坐标）映射到世界空间：
-//   - 局部 +Y → 世界 up
-//   - 局部 +Z → 世界 front
-//   - 局部 +X → normalize(cross(up, front))（保证右手系）
-// 再平移 center。无缩放。
-//
-// Model = T(center) * R(right, up, front)
-// Pre-condition: up、front 均非零且不平行（调用方 DrawObject3D 已校验）
-static void BuildModelMatrix(const jpov::Vec3f& center,
-                             const jpov::Vec3f& up,
-                             const jpov::Vec3f& front,
-                             float model[16]) {
-    // 归一化 up 与 front
-    float u_len = std::sqrt(up.x()*up.x() + up.y()*up.y() + up.z()*up.z());
-    float f_len = std::sqrt(front.x()*front.x() + front.y()*front.y() + front.z()*front.z());
-    jpov::Vec3f upn = {up.x()/u_len, up.y()/u_len, up.z()/u_len};
-    jpov::Vec3f frn = {front.x()/f_len, front.y()/f_len, front.z()/f_len};
-
-    // right = normalize(cross(up, front))——保证模型右手系
-    jpov::Vec3f right = {upn.y()*frn.z() - upn.z()*frn.y(),
-                         upn.z()*frn.x() - upn.x()*frn.z(),
-                         upn.x()*frn.y() - upn.y()*frn.x()};
-    float r_len = std::sqrt(right.x()*right.x() + right.y()*right.y() + right.z()*right.z());
-    right = {right.x()/r_len, right.y()/r_len, right.z()/r_len};
-
-    // 列主序旋转部分：
-    //   model[0..2] = right 列（世界 X 轴方向）
-    //   model[4..6] = upn   列（世界 Y 轴方向）
-    //   model[8..10]= frn   列（世界 Z 轴方向）
-    // 平移在最后一列（12..14）
-    model[0] = right.x(); model[4] = upn.x(); model[8]  = frn.x(); model[12] = center.x();
-    model[1] = right.y(); model[5] = upn.y(); model[9]  = frn.y(); model[13] = center.y();
-    model[2] = right.z(); model[6] = upn.z(); model[10] = frn.z(); model[14] = center.z();
-    model[3] = 0.0f;      model[7] = 0.0f;    model[11] = 0.0f;    model[15] = 1.0f;
-}
-
 // 纹理+颜色混合 Fragment Shader
 // 纹理采样（alpha 通道作为透明度）× uniform 颜色
 const char* kTexVs = R"glsl(
@@ -499,22 +113,6 @@ void main() {
 )glsl";
 
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
-unsigned int CreateGlAtlasTexture(int atlas_dim,
-                                  const std::vector<uint8_t>& pixels) {
-    unsigned int tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    // 用 GL_R8 单通道纹理，shader 中 .r 读取为 alpha
-    // 先传全黑数据占位
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, atlas_dim, atlas_dim, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return tex;
-}
 
 }  // anonymous namespace
 
@@ -536,17 +134,11 @@ Renderer::~Renderer() {
     DestroyOutputFBO();
     Destroy3DFBO();
     Destroy3DResolveFBO();
-    DestroyTileLighting();
+    if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
-    // Font GL textures (所有注册字体的三层 atlas)
-    for (auto& [alias, slot] : font_slots_) {
-        (void)alias;
-        for (int lv = 0; lv < 3; ++lv) {
-            if (slot.atlas_tex[lv]) glDeleteTextures(1, &slot.atlas_tex[lv]);
-        }
-    }
+    // font atlas 纹理由 FontRenderer 析构管理
 }
 
 void Renderer::DestroyFBO() {
@@ -604,45 +196,6 @@ void Renderer::Destroy3DResolveFBO() {
     resolve_fbo_3d_h_ = 0;
 }
 
-void Renderer::DestroyTileLighting() {
-    if (tile_index_tex_) {
-        glDeleteTextures(1, &tile_index_tex_);
-        tile_index_tex_ = 0;
-    }
-    tile_grid_w_ = 0;
-    tile_grid_h_ = 0;
-}
-
-void Renderer::EnsureTileLighting(int fbo_w_3d, int fbo_h_3d) {
-    // 计算 tile 网格尺寸
-    int grid_cols = (fbo_w_3d + kTileSize16_ - 1) / kTileSize16_;
-    int grid_rows = (fbo_h_3d + kTileSize16_ - 1) / kTileSize16_;
-
-    // 纹理宽度 = grid_cols * 4（每个 tile 水平排 4 个 RGBA texel，每 texel 的
-    // RGBA 通道各存 1 个 uint8 index，4 texel = 16 个 index）
-    int tex_w = grid_cols * kTexelsPerTile_;
-    int tex_h = grid_rows;
-
-    bool need_create =
-        tile_index_tex_ == 0 || tile_grid_w_ != grid_cols || tile_grid_h_ != grid_rows;
-
-    if (need_create) {
-        if (tile_index_tex_) {
-            glDeleteTextures(1, &tile_index_tex_);
-        }
-        glGenTextures(1, &tile_index_tex_);
-        glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        tile_grid_w_ = grid_cols;
-        tile_grid_h_ = grid_rows;
-    }
-}
 
 void Renderer::EnsureFBO(int width, int height) {
     if (fbo_w_ == width && fbo_h_ == height && fbo_) return;
@@ -685,7 +238,7 @@ void Renderer::Ensure3DFBO(int width, int height) {
 
     Destroy3DFBO();
     Destroy3DResolveFBO();
-    DestroyTileLighting();
+    if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
 
 #ifdef JPOV_WITHOUT_MSAA
     // 非 MSAA 路径（Windows/MinGW 下 GL 不导出 MSAA 函数）
@@ -794,7 +347,8 @@ unsigned int Renderer::SolidProg() {
 }
 
 unsigned int Renderer::TextProg() {
-    return shader_mgr_.GetOrCreate("text", {kTexVs, kTexFs});
+    return shader_mgr_.GetOrCreate("text",
+        {FontRenderer::kTextVs, FontRenderer::kTextFs});
 }
 
 unsigned int Renderer::ImageProg() {
@@ -802,11 +356,11 @@ unsigned int Renderer::ImageProg() {
 }
 
 unsigned int Renderer::Solid3DProg() {
-    return shader_mgr_.GetOrCreate("solid3d", {kVs3d, kFs3d});
+    return shader_mgr_.GetOrCreate("solid3d", {Primitives3DRenderer::kVs3d, Primitives3DRenderer::kFs3d});
 }
 
 unsigned int Renderer::Text3DProg() {
-    return shader_mgr_.GetOrCreate("text3d", {kTexVs3d, kTexFs});
+    return shader_mgr_.GetOrCreate("text3d", {Primitives3DRenderer::kTexVs3d, kTexFs});
 }
 
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
@@ -814,7 +368,7 @@ unsigned int Renderer::Text3DProg() {
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
 unsigned int Renderer::DrawObject3DProg() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr",
-                                  {kMeshVs3dPBR, kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR});
 }
 
 // DrawObject3D PBR shader — 完整版（mesh 含 kUV+kTangent 时使用）。
@@ -822,7 +376,7 @@ unsigned int Renderer::DrawObject3DProg() {
 // 支持纹理采样（baseColor/metallic/roughness/emissive/AO）和 TBN 法线映射。
 unsigned int Renderer::DrawObject3DProgFull() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr_full",
-                                  {kMeshVs3dPBRFull, kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
 }
 
 // 编译/注册全部 shader program。
@@ -846,7 +400,7 @@ void Renderer::CreateStreamVBO() {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     // Strip3D 专用 VBO：3000 顶点 × 3 floats × sizeof(float)
-    size_t strip_buf = static_cast<size_t>(kMaxStripVertices) * 3 * sizeof(float);
+    size_t strip_buf = static_cast<size_t>(3000) * 3 * sizeof(float);  // Strip3D 上限
     glGenBuffers(1, &strip_vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
     glBufferData(GL_ARRAY_BUFFER, strip_buf, nullptr, GL_DYNAMIC_DRAW);
@@ -861,263 +415,9 @@ void Renderer::Init(
 #endif
     CompileShaders();
     CreateStreamVBO();
-    InitFonts(font_entries, default_fonts);
+    font_renderer_.Init(font_entries, default_fonts);
 }
 
-
-// ==================== 字体初始化 ====================
-
-// 路径查找：先试原始路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
-static std::string ResolveFontPath(const char* raw_path) {
-    FILE* fp = std::fopen(raw_path, "rb");
-    if (fp) {
-        std::fclose(fp);
-        return raw_path;
-    }
-    // Try TEST_SRCDIR for bazel test sandbox
-    const char* srcdir = std::getenv("TEST_SRCDIR");
-    if (srcdir) {
-        std::string p = srcdir;
-        if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/";
-        p += raw_path;
-        FILE* fp2 = std::fopen(p.c_str(), "rb");
-        if (fp2) {
-            std::fclose(fp2);
-            return p;
-        }
-    }
-    return "";
-}
-
-// ==================== InitOneFontSlot ====================
-
-void Renderer::InitOneFontSlot(const char* alias,
-                                const std::string& resolved_path,
-                                int ttc_index,
-                                FontSlot* slot /*output*/) {
-    CHECK(slot != nullptr);
-    CHECK(!slot->manager.has_value()) << "FontSlot already initialized for alias=" << alias;
-
-    FontManagerConfig cfg;
-    cfg.font_name = alias;
-    cfg.font_path = resolved_path;
-    cfg.ttc_font_index = ttc_index;
-
-    std::optional<FontManager> mgr = FontManager::Create(cfg);
-    CHECK(mgr.has_value())
-        << "Failed to load font: alias=" << alias
-        << " path=" << resolved_path
-        << " ttc_index=" << ttc_index;
-
-    slot->manager = std::move(mgr.value());
-    for (int lv = 0; lv < 3; ++lv) {
-        slot->atlas_tex[lv] = CreateGlAtlasTexture(
-            FontManager::kAtlasDim,
-            slot->manager->atlas_pixels(lv));
-    }
-
-    LOG(INFO) << "Font registered: alias=" << alias
-              << " path=" << resolved_path
-              << " ttc_index=" << ttc_index;
-}
-
-// ==================== RegisterFont ====================
-
-void Renderer::RegisterFont(const char* path,
-                              int ttc_index,
-                              const char* alias,
-                              const char* source,
-                              std::unordered_map<std::string, FontSlot>* font_slots,
-                              std::vector<std::string>* font_order) {
-    CHECK(path != nullptr && path[0] != '\0')
-        << "FontEntry path is null or empty (alias=" << alias << ")";
-    CHECK(alias != nullptr && alias[0] != '\0')
-        << "Font alias is null or empty (path=" << path << ")";
-
-    std::string resolved = ResolveFontPath(path);
-    if (resolved.empty()) {
-        if (strcmp(source, "user") == 0) {
-            LOG(FATAL) << "Font file not found: " << path
-                       << " (alias=" << alias << ")";
-        }
-        // builtin 字体找不到就静默跳过
-        LOG(INFO) << "Builtin font not found, skipping: " << path;
-        return;
-    }
-
-    // 检查 alias 是否已注册
-    CHECK(font_slots->find(alias) == font_slots->end())
-        << "Duplicate font alias: \"" << alias << "\" from source=" << source
-        << " path=" << path;
-
-    FontSlot slot;
-    InitOneFontSlot(alias, resolved, ttc_index, &slot);
-
-    auto result = font_slots->emplace(alias, std::move(slot));
-    CHECK(result.second) << "Duplicate font alias (internal): " << alias;
-    font_order->push_back(alias);
-}
-
-void Renderer::InitFonts(
-    const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-    const std::vector<std::tuple<const char*, int, const char*>>& default_fonts) {
-    // 用户字体最多 10 种
-    CHECK_LE(static_cast<int>(font_entries.size()), 10)
-        << "Too many fonts: " << font_entries.size()
-        << " (max 10)";
-
-    // 用户字体内部别名查重
-    for (size_t i = 0; i < font_entries.size(); ++i) {
-        for (size_t j = i + 1; j < font_entries.size(); ++j) {
-            CHECK(strcmp(std::get<2>(font_entries[i]),
-                         std::get<2>(font_entries[j])) != 0)
-                << "Duplicate font alias: " << std::get<2>(font_entries[i]);
-        }
-    }
-
-    // === 第一步：注册用户字体 ===
-    for (const auto& fe : font_entries) {
-        RegisterFont(std::get<0>(fe),
-                      std::get<1>(fe),
-                      std::get<2>(fe),
-                      "user",
-                      &font_slots_, &font_order_);
-    }
-
-    // === 第二步：注册内置默认字体（共享别名空间） ===
-    for (const auto& de : default_fonts) {
-        RegisterFont(std::get<0>(de),
-                      std::get<1>(de),
-                      std::get<2>(de),
-                      "builtin",
-                      &font_slots_, &font_order_);
-    }
-
-    // 至少一种字体可用
-    CHECK(!font_slots_.empty())
-        << "No fonts loaded (user nor built-in). "
-        << "Provide at least one font via JPOV::Config::fonts.";
-}
-
-// ==================== FontSlot 查找 ====================
-
-Renderer::FontSlot* Renderer::FindFontSlot(const std::string& alias) {
-    if (!alias.empty()) {
-        auto it = font_slots_.find(alias);
-        if (it != font_slots_.end()) {
-            return &it->second;
-        }
-        // 别名不存在 → crash（用户指定了不存在的字体别名）
-        std::string registered;
-        for (const auto& a : font_order_) {
-            if (!registered.empty()) registered += ", ";
-            registered += a;
-        }
-        LOG(FATAL) << "Unknown font alias: \"" << alias
-                   << "\". Registered aliases: "
-                   << (font_order_.empty() ? "(none)" : registered);
-    }
-    // 空别名 → 返回第一个
-    if (font_order_.empty()) return nullptr;
-    return &font_slots_.at(font_order_[0]);
-}
-
-// ==================== Atlas 上传 ====================
-
-void Renderer::UploadAtlas(FontSlot& slot, int level) {
-    if (!slot.manager.has_value() || !slot.manager->loaded()) return;
-    if (!slot.manager->atlas_dirty(level) || !slot.atlas_tex[level]) return;
-    // 全量更新 GL 纹理（4096x4096 不太大，全量上传即可）
-    glBindTexture(GL_TEXTURE_2D, slot.atlas_tex[level]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                    FontManager::kAtlasDim, FontManager::kAtlasDim,
-                    GL_RED, GL_UNSIGNED_BYTE,
-                    slot.manager->atlas_pixels(level).data());
-    glBindTexture(GL_TEXTURE_2D, 0);
-    slot.manager->mark_atlas_clean(level);
-    LOG_EVERY_N(INFO, FontManager::kUploadLogInterval) << "UploadAtlas[" << level << "]: uploaded "
-        << FontManager::kAtlasDim << "x" << FontManager::kAtlasDim;
-}
-
-void Renderer::UploadAllDirty(FontSlot& slot) {
-    if (!slot.manager.has_value()) return;
-    for (int lv = 0; lv < FontManager::kNumLevels; ++lv) {
-        UploadAtlas(slot, lv);
-    }
-}
-
-// ==================== DrawText2D ====================
-
-void Renderer::DrawText2D(const Text2DCommand& cmd) {
-    // 按别名查找字体
-    FontSlot* slot = FindFontSlot(cmd.font_alias);
-    if (!slot || !slot->manager.has_value() || !slot->manager->loaded()) {
-        LOG_EVERY_N(WARNING, FontManager::kNotLoadedLogInterval)
-            << "Text2D: font not loaded for alias=\"" << cmd.font_alias << "\", skipping";
-        return;
-    }
-
-    CHECK_GT(cmd.font_size, 0.0f);
-
-    // GenerateTextVertices 内部执行多级 atlas 选择 + 包围盒计算 + 顶点生成
-    int selected_level = 0;
-    std::vector<float> verts;
-    bool ok = slot->manager->GenerateTextVertices(
-        cmd.text, cmd.font_size,
-        cmd.pos.x(), cmd.pos.y(),
-        static_cast<int>(cmd.alignment),
-        fbo_w_, fbo_h_,
-        &selected_level,
-        &verts);
-
-    if (!ok || verts.empty()) {
-        return;
-    }
-
-    // 上传新光栅化的字形到 GL atlas（所有脏层）
-    UploadAllDirty(*slot);
-
-    // 上传顶点数据到 VBO
-    unsigned int prog = TextProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-    glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
-
-    // 绑定对应层级的纹理
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, slot->atlas_tex[selected_level]);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-
-    // 位置 (location 0)  | 纹理坐标 (location 1)
-    // x,y,u,v interleaved, stride = 4 floats
-    constexpr int kStride = 4 * static_cast<int>(sizeof(float));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, kStride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, kStride,
-                          (void*)(2 * sizeof(float)));
-
-    int vert_count = static_cast<int>(verts.size()) / 4;
-    glDrawArrays(GL_TRIANGLES, 0, vert_count);
-
-    GLenum draw_err = glGetError();
-    if (draw_err != GL_NO_ERROR) {
-        LOG_FIRST_N(WARNING, 1) << "GL error after DrawText2D: " << draw_err;
-    }
-
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
 
 void Renderer::BeginFrame(int render_w, int render_h) {
     EnsureFBO(render_w, render_h);
@@ -1191,15 +491,20 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 先用当前 Camera 计算 MVP（Proj * View，不含 Model）。
         // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
-        BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
+        Primitives3DRenderer::BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
 
         // ---- Tile Forward 光照准备 ----
         // 若有 Object3D 需光照（!object_use_default_color），
         // 上传光源 uniform + CPU 端做 tile culling（写入 tile index 纹理）。
         if (!cmds.object_use_default_color && !cmds.object3d.empty()) {
-            EnsureTileLighting(fbo_3d_w, fbo_3d_h);
-            UploadLightData(cmds);
-            BuildTileLightIndices(cmds, fbo_3d_w, fbo_3d_h);
+            Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
+                &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
+                &tile_tex_w_, &tile_tex_h_);
+            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+                DrawObject3DProg(), DrawObject3DProgFull());
+            Object3DRenderer::BuildTileLightIndices(cmds,
+                fbo_3d_w, fbo_3d_h, tile_index_tex_,
+                tile_grid_w_, tile_grid_h_, tile_tex_w_, tile_tex_h_, mvp_);
         }
 
         // 用 3D FBO 尺寸计算 MVP
@@ -1254,55 +559,57 @@ void Renderer::Render(const RenderCommandList& cmds,
             case DrawCommandType::kRect2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.rect2d.size()));
-                DrawRect2D(cmds.rect2d[idx]);
+                Primitives2DRenderer::DrawRect2D(cmds.rect2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kPolyline2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.polyline2d.size()));
-                DrawPolyline2D(cmds.polyline2d[idx]);
+                Primitives2DRenderer::DrawPolyline2D(cmds.polyline2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kCircle2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.circle2d.size()));
-                DrawCircle2D(cmds.circle2d[idx]);
+                Primitives2DRenderer::DrawCircle2D(cmds.circle2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kText2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.text2d.size()));
-                DrawText2D(cmds.text2d[idx]);
+                font_renderer_.DrawText2D(cmds.text2d[idx],
+                                          stream_vbo_, fbo_w_, fbo_h_,
+                                          TextProg());
                 break;
             }
             case DrawCommandType::kStrip2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.strip2d.size()));
-                DrawStrip2D(cmds.strip2d[idx]);
+                Primitives2DRenderer::DrawStrip2D(cmds.strip2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kRoundRect2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.roundrect2d.size()));
-                DrawRoundRect2D(cmds.roundrect2d[idx]);
+                Primitives2DRenderer::DrawRoundRect2D(cmds.roundrect2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kFillRect2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.fillrect2d.size()));
-                DrawFillRect2D(cmds.fillrect2d[idx]);
+                Primitives2DRenderer::DrawFillRect2D(cmds.fillrect2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kArc2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.arc2d.size()));
-                DrawArc2D(cmds.arc2d[idx]);
+                Primitives2DRenderer::DrawArc2D(cmds.arc2d[idx], stream_vbo_, SolidProg(), fbo_w_, fbo_h_);
                 break;
             }
             case DrawCommandType::kImage2D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.image2d.size()));
-                DrawImage2D(cmds.image2d[idx]);
+                Primitives2DRenderer::DrawImage2D(cmds.image2d[idx], stream_vbo_, ImageProg(), texture_mgr_, fbo_w_, fbo_h_);
                 break;
             }
             default:
@@ -1313,7 +620,7 @@ void Renderer::Render(const RenderCommandList& cmds,
 
 void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
     // 先用当前 Camera 计算 MVP（View * Proj，不含 Model）
-    BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
+    Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
 
     // 遍历 order，绘制 3D 指令
     for (const auto& [type, idx] : cmds.order) {
@@ -1321,1070 +628,44 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kTriangle3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.triangle3d.size()));
-                DrawTriangle3D(cmds.triangle3d[idx]);
+                Primitives3DRenderer::DrawTriangle3D(
+                    cmds.triangle3d[idx], stream_vbo_, Solid3DProg(), mvp_);
                 break;
             }
             case DrawCommandType::kStrip3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.strip3d.size()));
-                DrawStrip3D(cmds.strip3d[idx]);
+                Primitives3DRenderer::DrawStrip3D(
+                    cmds.strip3d[idx], strip_vbo_, Solid3DProg(), mvp_);
                 break;
             }
             case DrawCommandType::kLine3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.line3d.size()));
-                DrawLine3D(cmds.line3d[idx]);
+                Primitives3DRenderer::DrawLine3D(
+                    cmds.line3d[idx], stream_vbo_, Solid3DProg(), mvp_);
                 break;
             }
             case DrawCommandType::kText3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.text3d.size()));
-                DrawText3D(cmds.text3d[idx]);
+                Primitives3DRenderer::DrawText3D(
+                    cmds.text3d[idx], stream_vbo_, Text3DProg(), mvp_,
+                    fbo_w, fbo_h);
                 break;
             }
             case DrawCommandType::kObject3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
-                DrawObject3D(cmds.object3d[idx], cmds);
+                Object3DRenderer::DrawObject3D(cmds.object3d[idx], cmds,
+                    mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
+                    DrawObject3DProg(), DrawObject3DProgFull(),
+                    tile_index_tex_);
                 break;
             }
             default:
                 break;
         }
-    }
-}
-
-// ==================== 3D 绘制方法 ====================
-
-void Renderer::DrawTriangle3D(const Triangle3DCommand& cmd) {
-    // 3 个顶点 × xyz = 9 floats
-    float verts[9] = {
-        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
-        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
-        cmd.p3.x(), cmd.p3.y(), cmd.p3.z(),
-    };
-
-    unsigned int prog = Solid3DProg();
-    glUseProgram(prog);
-    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                       1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawStrip3D(const Strip3DCommand& cmd) {
-    int n = static_cast<int>(cmd.vertices.size());
-    if (n < 3) return;
-
-    // 截断到 3000 顶点上限
-    int capped_n = (n > kMaxStripVertices) ? kMaxStripVertices : n;
-
-    // 使用真正的 GL_TRIANGLE_STRIP，直接上传原始顶点序列。
-    // GL_TRIANGLE_STRIP 的卷绕顺序为：三角形 i 由顶点 (i, i+1, i+2) 构成，
-    // 每个三角形的卷绕方向取决于顶点索引的奇偶性——奇数三角形保持 CCW，
-    // 偶数三角形自动反转卷绕以维持面朝向的一致性。
-    // 因此无需 save/restore CULL_FACE。
-
-    int total_floats = capped_n * 3;  // capped_n 个顶点 × 3 floats
-
-    unsigned int prog = Solid3DProg();
-    glUseProgram(prog);
-    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                       1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    // 上传到专用 VBO
-    glBindBuffer(GL_ARRAY_BUFFER, strip_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(total_floats * sizeof(float)),
-                 cmd.vertices.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawStrip2D(const Strip2DCommand& cmd) {
-    int n = static_cast<int>(cmd.vertices.size());
-    if (n < 3) return;
-
-    int capped_n = (n > kMaxStrip2DVertices) ? kMaxStrip2DVertices : n;
-    int total_floats = capped_n * 2;  // Vec2f = 2 floats per vertex
-
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(total_floats * sizeof(float)),
-                 cmd.vertices.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, capped_n);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-// ==================== 圆角矩形填充三角化（共享方法） ====================
-//
-// 将圆角矩形分成 9 个区域（4 个角 + 4 个边 + 1 个中心矩形），
-// 每个 90° 圆角用 kRoundCornerSegments 个扇形三角形逼近。
-// 返回的顶点数据用于 GL_TRIANGLES（非 fan）。
-// radius=0 时退化返回空（调用方用 GL_TRIANGLE_FAN 处理）。
-//
-// 三角化拓扑（半径 r）：
-//   圆角区域：以圆角内切矩形边界为锚点，计算圆弧上的点
-//   边/中心区域：直接用矩形对三角形
-std::vector<float> Renderer::TriangulateRoundRectFill(
-    const Vec2f& pos, const Vec2f& size, float radius) {
-    if (radius <= 0.0f) {
-        return {};
-    }
-
-    float x0 = pos.x();
-    float y0 = pos.y();
-    float x1 = x0 + size.x();
-    float y1 = y0 + size.y();
-    float r = radius;
-
-    // 圆角边界辅助点（内切边界坐标）
-    // 左上角: (x0+r, y0+r) 右上角: (x1-r, y0+r)
-    // 左下角: (x0+r, y1-r) 右下角: (x1-r, y1-r)
-    float cx_inner = x0 + r;
-    float cy_inner = y0 + r;
-    float cx_outer = x1 - r;
-    float cy_outer = y1 - r;
-
-    int max_verts = 4 * (kRoundCornerSegments + 1) * 2  // 4 corners
-                  + 4 * 6                                 // 4 edge rects (2 tris each)
-                  + 6;                                    // center rect (2 tris)
-    std::vector<float> verts;
-    verts.reserve(max_verts);
-
-    // ===== 中心矩形 (x0+r, y0+r) ~ (x1-r, y1-r) =====
-    float center_x0 = cx_inner;
-    float center_y0 = cy_inner;
-    float center_x1 = cx_outer;
-    float center_y1 = cy_outer;
-    if (center_x1 > center_x0 && center_y1 > center_y0) {
-        verts.push_back(center_x0); verts.push_back(center_y0);
-        verts.push_back(center_x1); verts.push_back(center_y0);
-        verts.push_back(center_x1); verts.push_back(center_y1);
-        verts.push_back(center_x1); verts.push_back(center_y1);
-        verts.push_back(center_x0); verts.push_back(center_y1);
-        verts.push_back(center_x0); verts.push_back(center_y0);
-    }
-
-    // ===== 4 个边矩形（上、下、左、右） =====
-    // 上边: (x0+r, y0) ~ (x1-r, y0+r)
-    if (x1 - r > x0 + r) {
-        verts.push_back(cx_inner);  verts.push_back(y0);
-        verts.push_back(cx_outer);  verts.push_back(y0);
-        verts.push_back(cx_outer);  verts.push_back(cy_inner);
-        verts.push_back(cx_outer);  verts.push_back(cy_inner);
-        verts.push_back(cx_inner);  verts.push_back(cy_inner);
-        verts.push_back(cx_inner);  verts.push_back(y0);
-    }
-    // 下边: (x0+r, y1-r) ~ (x1-r, y1)
-    if (x1 - r > x0 + r) {
-        verts.push_back(cx_inner);  verts.push_back(cy_outer);
-        verts.push_back(cx_outer);  verts.push_back(cy_outer);
-        verts.push_back(cx_outer);  verts.push_back(y1);
-        verts.push_back(cx_outer);  verts.push_back(y1);
-        verts.push_back(cx_inner);  verts.push_back(y1);
-        verts.push_back(cx_inner);  verts.push_back(cy_outer);
-    }
-    // 左边: (x0, y0+r) ~ (x0+r, y1-r)
-    if (y1 - r > y0 + r) {
-        verts.push_back(x0);       verts.push_back(cy_inner);
-        verts.push_back(cx_inner); verts.push_back(cy_inner);
-        verts.push_back(cx_inner); verts.push_back(cy_outer);
-        verts.push_back(cx_inner); verts.push_back(cy_outer);
-        verts.push_back(x0);       verts.push_back(cy_outer);
-        verts.push_back(x0);       verts.push_back(cy_inner);
-    }
-    // 右边: (x1-r, y0+r) ~ (x1, y1-r)
-    if (y1 - r > y0 + r) {
-        verts.push_back(cx_outer); verts.push_back(cy_inner);
-        verts.push_back(x1);       verts.push_back(cy_inner);
-        verts.push_back(x1);       verts.push_back(cy_outer);
-        verts.push_back(x1);       verts.push_back(cy_outer);
-        verts.push_back(cx_outer); verts.push_back(cy_outer);
-        verts.push_back(cx_outer); verts.push_back(cy_inner);
-    }
-
-    // ===== 4 个圆角区域（扇形三角形） =====
-    // 左上角：圆心 (x0+r, y0+r)，从 180° 到 270°
-    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-        double a0 = 3.14159265358979323846 * (180.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
-        double a1 = 3.14159265358979323846 * (180.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
-        float px0 = cx_inner + r * std::cos(a0);
-        float py0 = cy_inner + r * std::sin(a0);
-        float px1 = cx_inner + r * std::cos(a1);
-        float py1 = cy_inner + r * std::sin(a1);
-        verts.push_back(cx_inner); verts.push_back(cy_inner);
-        verts.push_back(px0);      verts.push_back(py0);
-        verts.push_back(px1);      verts.push_back(py1);
-    }
-    // 右上角：圆心 (x1-r, y0+r)，从 270° 到 360°
-    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-        double a0 = 3.14159265358979323846 * (270.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
-        double a1 = 3.14159265358979323846 * (270.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
-        float px0 = cx_outer + r * std::cos(a0);
-        float py0 = cy_inner + r * std::sin(a0);
-        float px1 = cx_outer + r * std::cos(a1);
-        float py1 = cy_inner + r * std::sin(a1);
-        verts.push_back(cx_outer); verts.push_back(cy_inner);
-        verts.push_back(px0);      verts.push_back(py0);
-        verts.push_back(px1);      verts.push_back(py1);
-    }
-    // 右下角：圆心 (x1-r, y1-r)，从 0° 到 90°
-    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-        double a0 = 3.14159265358979323846 * (90.0 * seg / kRoundCornerSegments) / 180.0;
-        double a1 = 3.14159265358979323846 * (90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
-        float px0 = cx_outer + r * std::cos(a0);
-        float py0 = cy_outer + r * std::sin(a0);
-        float px1 = cx_outer + r * std::cos(a1);
-        float py1 = cy_outer + r * std::sin(a1);
-        verts.push_back(cx_outer); verts.push_back(cy_outer);
-        verts.push_back(px0);      verts.push_back(py0);
-        verts.push_back(px1);      verts.push_back(py1);
-    }
-    // 左下角：圆心 (x0+r, y1-r)，从 90° 到 180°
-    for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-        double a0 = 3.14159265358979323846 * (90.0 + 90.0 * seg / kRoundCornerSegments) / 180.0;
-        double a1 = 3.14159265358979323846 * (90.0 + 90.0 * (seg + 1) / kRoundCornerSegments) / 180.0;
-        float px0 = cx_inner + r * std::cos(a0);
-        float py0 = cy_outer + r * std::sin(a0);
-        float px1 = cx_inner + r * std::cos(a1);
-        float py1 = cy_outer + r * std::sin(a1);
-        verts.push_back(cx_inner); verts.push_back(cy_outer);
-        verts.push_back(px0);      verts.push_back(py0);
-        verts.push_back(px1);      verts.push_back(py1);
-    }
-
-    return verts;
-}
-
-void Renderer::DrawRoundRect2D(const RoundRect2DCommand& cmd) {
-    // Render a round-topped rectangle using shared CPU-side triangulation
-    // via TriangulateRoundRectFill().
-
-    if (cmd.radius <= 0.0f) {
-        // Degenerate to plain rectangle via GL_TRIANGLE_FAN
-        float x0 = cmd.pos.x();
-        float y0 = cmd.pos.y();
-        float x1 = x0 + cmd.size.x();
-        float y1 = y0 + cmd.size.y();
-        float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
-        unsigned int prog = SolidProg();
-        glUseProgram(prog);
-        glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glDisableVertexAttribArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        return;
-    }
-
-    std::vector<float> verts = TriangulateRoundRectFill(
-        cmd.pos, cmd.size, cmd.radius);
-
-    // Render
-    int total_verts = static_cast<int>(verts.size()) / 2;
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLES, 0, total_verts);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawFillRect2D(const FillRect2DCommand& cmd) {
-    // FillRect2D 的实现策略：
-    // 1. 填充部分：直接复用 TriangulateRoundRectFill() 三角化逻辑（用 fill_color）
-    // 2. 边框部分：将圆角矩形边框环三角化为 GL_TRIANGLES（用 border_color）
-    //
-    // 边框环的几何定义：
-    //   外圆角矩形 = (pos, size, radius)
-    //   内圆角矩形 = (pos + border_width, size - 2*border_width, inner_radius)
-    //   其中 inner_radius = max(0, radius - border_width)
-    //
-    // 边框环三角化：
-    //   每个角区域：内外圆弧之间的扇形环
-    //   每条边区域：内外矩形边之间的矩形带
-
-    static constexpr int kMaxBorderVerts = 4 * kRoundCornerSegments * 6  // 4 corner rings, 2 tris/seg
-                                          + 4 * 6;                      // 4 edge strips
-
-    float x0 = cmd.pos.x();
-    float y0 = cmd.pos.y();
-    float x1 = x0 + cmd.size.x();
-    float y1 = y0 + cmd.size.y();
-    float r = cmd.radius;
-    float bw = cmd.border_width;
-
-    // ===== 第一步：填充部分 =====
-    // 复用 TriangulateRoundRectFill() 产生三角形顶点
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.fill_color.r, cmd.fill_color.g,
-                cmd.fill_color.b, cmd.fill_color.a);
-
-    if (r <= 0.0f) {
-        float verts[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-        glDisableVertexAttribArray(0);
-    } else {
-        std::vector<float> fill_verts = TriangulateRoundRectFill(
-            cmd.pos, cmd.size, cmd.radius);
-        int total_verts = static_cast<int>(fill_verts.size()) / 2;
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(fill_verts.size() * sizeof(float)),
-                     fill_verts.data(), GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLES, 0, total_verts);
-        glDisableVertexAttribArray(0);
-    }
-
-    // ===== 第二步：边框环三角化 =====
-    if (bw <= 0.0f) {
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        return;
-    }
-
-    float in_bw = std::min(bw, std::min(cmd.size.x(), cmd.size.y()) * 0.5f);
-    float inner_r = std::max(0.0f, r - in_bw);
-
-    float ix0 = x0 + in_bw;
-    float iy0 = y0 + in_bw;
-    float ix1 = x1 - in_bw;
-    float iy1 = y1 - in_bw;
-
-    // 外圆角边界辅助点
-    float cx_inner = x0 + r;
-    float cy_inner = y0 + r;
-    float cx_outer = x1 - r;
-    float cy_outer = y1 - r;
-
-    // 内圆角边界辅助点
-    float icx_inner = ix0 + inner_r;
-    float icy_inner = iy0 + inner_r;
-    float icx_outer = ix1 - inner_r;
-    float icy_outer = iy1 - inner_r;
-
-    std::vector<float> border_verts;
-    border_verts.reserve(kMaxBorderVerts);
-
-    // ===== 边框边区域（矩形带） =====
-    // 上边：外 (x0+r, y0) ~ (x1-r, y0) vs 内 (ix0+inner_r, iy0) ~ (ix1-inner_r, iy0)
-    float outer_top_left = x0 + r;
-    float outer_top_right = x1 - r;
-    float inner_top_left = ix0 + inner_r;
-    float inner_top_right = ix1 - inner_r;
-    if (outer_top_right > outer_top_left && inner_top_right > inner_top_left) {
-        border_verts.push_back(outer_top_left);  border_verts.push_back(y0);
-        border_verts.push_back(outer_top_right); border_verts.push_back(y0);
-        border_verts.push_back(inner_top_right); border_verts.push_back(iy0);
-        border_verts.push_back(inner_top_right); border_verts.push_back(iy0);
-        border_verts.push_back(inner_top_left);  border_verts.push_back(iy0);
-        border_verts.push_back(outer_top_left);  border_verts.push_back(y0);
-    }
-    // 下边
-    float outer_bot_left = x0 + r;
-    float outer_bot_right = x1 - r;
-    float inner_bot_left = ix0 + inner_r;
-    float inner_bot_right = ix1 - inner_r;
-    if (outer_bot_right > outer_bot_left && inner_bot_right > inner_bot_left) {
-        border_verts.push_back(outer_bot_left);  border_verts.push_back(y1);
-        border_verts.push_back(inner_bot_left);  border_verts.push_back(iy1);
-        border_verts.push_back(inner_bot_right); border_verts.push_back(iy1);
-        border_verts.push_back(inner_bot_right); border_verts.push_back(iy1);
-        border_verts.push_back(outer_bot_right); border_verts.push_back(y1);
-        border_verts.push_back(outer_bot_left);  border_verts.push_back(y1);
-    }
-    // 左边
-    float outer_left_top = y0 + r;
-    float outer_left_bot = y1 - r;
-    float inner_left_top = iy0 + inner_r;
-    float inner_left_bot = iy1 - inner_r;
-    if (outer_left_bot > outer_left_top && inner_left_bot > inner_left_top) {
-        border_verts.push_back(x0);       border_verts.push_back(outer_left_top);
-        border_verts.push_back(ix0);      border_verts.push_back(inner_left_top);
-        border_verts.push_back(ix0);      border_verts.push_back(inner_left_bot);
-        border_verts.push_back(ix0);      border_verts.push_back(inner_left_bot);
-        border_verts.push_back(x0);       border_verts.push_back(outer_left_bot);
-        border_verts.push_back(x0);       border_verts.push_back(outer_left_top);
-    }
-    // 右边
-    float outer_right_top = y0 + r;
-    float outer_right_bot = y1 - r;
-    float inner_right_top = iy0 + inner_r;
-    float inner_right_bot = iy1 - inner_r;
-    if (outer_right_bot > outer_right_top && inner_right_bot > inner_right_top) {
-        border_verts.push_back(x1);       border_verts.push_back(outer_right_top);
-        border_verts.push_back(x1);       border_verts.push_back(outer_right_bot);
-        border_verts.push_back(ix1);      border_verts.push_back(inner_right_bot);
-        border_verts.push_back(ix1);      border_verts.push_back(inner_right_bot);
-        border_verts.push_back(ix1);      border_verts.push_back(inner_right_top);
-        border_verts.push_back(x1);       border_verts.push_back(outer_right_top);
-    }
-
-    // ===== 边框圆角区域（扇形环） =====
-    auto add_ring_segment = [&](float ocx, float ocy, float icx, float icy,
-                                double start_deg, double end_deg) {
-        double a0 = 3.14159265358979323846 * start_deg / 180.0;
-        double a1 = 3.14159265358979323846 * end_deg / 180.0;
-        float ox0 = ocx + r * std::cos(a0);
-        float oy0 = ocy + r * std::sin(a0);
-        float ox1 = ocx + r * std::cos(a1);
-        float oy1 = ocy + r * std::sin(a1);
-        float ix0_ = icx + inner_r * std::cos(a0);
-        float iy0_ = icy + inner_r * std::sin(a0);
-        float ix1_ = icx + inner_r * std::cos(a1);
-        float iy1_ = icy + inner_r * std::sin(a1);
-        border_verts.push_back(ox0);  border_verts.push_back(oy0);
-        border_verts.push_back(ox1);  border_verts.push_back(oy1);
-        border_verts.push_back(ix0_); border_verts.push_back(iy0_);
-        border_verts.push_back(ix0_); border_verts.push_back(iy0_);
-        border_verts.push_back(ox1);  border_verts.push_back(oy1);
-        border_verts.push_back(ix1_); border_verts.push_back(iy1_);
-    };
-
-    if (inner_r > 0.0f) {
-        // 左上角
-        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-            add_ring_segment(
-                cx_inner, cy_inner, icx_inner, icy_inner,
-                180.0 + 90.0 * seg / kRoundCornerSegments,
-                180.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
-        }
-        // 右上角
-        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-            add_ring_segment(
-                cx_outer, cy_inner, icx_outer, icy_inner,
-                270.0 + 90.0 * seg / kRoundCornerSegments,
-                270.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
-        }
-        // 右下角
-        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-            add_ring_segment(
-                cx_outer, cy_outer, icx_outer, icy_outer,
-                90.0 * seg / kRoundCornerSegments,
-                90.0 * (seg + 1) / kRoundCornerSegments);
-        }
-        // 左下角
-        for (int seg = 0; seg < kRoundCornerSegments; ++seg) {
-            add_ring_segment(
-                cx_inner, cy_outer, icx_inner, icy_outer,
-                90.0 + 90.0 * seg / kRoundCornerSegments,
-                90.0 + 90.0 * (seg + 1) / kRoundCornerSegments);
-        }
-    }
-
-    // Render border
-    if (!border_verts.empty()) {
-        int total_border = static_cast<int>(border_verts.size()) / 2;
-        unsigned int bprog = SolidProg();
-        glUseProgram(bprog);
-        glUniform2f(glGetUniformLocation(bprog, "uFboSize"),
-                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(bprog, "uColor"),
-                    cmd.border_color.r, cmd.border_color.g,
-                    cmd.border_color.b, cmd.border_color.a);
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(border_verts.size() * sizeof(float)),
-                     border_verts.data(), GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLES, 0, total_border);
-        glDisableVertexAttribArray(0);
-    }
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawArc2D(const Arc2DCommand& cmd) {
-    // CPU 端三角化圆弧/扇形：
-    // 扇形近似：圆心 + 圆弧上 N 个扇形三角形（GL_TRIANGLES）。
-    // 跨度角度绝对值 >= 360 时绘制完整圆形。
-    // 角度为负时绘制顺时针方向。
-
-    static constexpr int kArcSegs = kArcFullCircleSegments;  // 完整圆的三角形数
-
-    // 计算实际跨度（归一化到 360 度内，支持多圈）
-    float abs_span = std::fabs(cmd.span_angle);
-    if (abs_span < 1e-6f) return;  // 零跨度，不绘制
-
-    // 如果是完整圆或超过 360 度，绘制完整圆
-    if (abs_span >= 360.0f - 1e-6f) {
-        // 完整圆：圆形 + N 个三角形
-        int tri_count = kArcSegs;
-        std::vector<float> verts;
-        verts.reserve(static_cast<size_t>(tri_count) * 3 * 2);
-
-        float cx = cmd.center.x();
-        float cy = cmd.center.y();
-        float r = cmd.radius;
-
-        double start_rad = 0.0;
-        double step = 2.0 * 3.14159265358979323846 / kArcSegs;
-        for (int i = 0; i < kArcSegs; ++i) {
-            double a0 = start_rad + i * step;
-            double a1 = start_rad + (i + 1) * step;
-            float px0 = cx + r * std::cos(a0);
-            float py0 = cy + r * std::sin(a0);
-            float px1 = cx + r * std::cos(a1);
-            float py1 = cy + r * std::sin(a1);
-            verts.push_back(cx);  verts.push_back(cy);
-            verts.push_back(px0); verts.push_back(py0);
-            verts.push_back(px1); verts.push_back(py1);
-        }
-
-        int total_verts = static_cast<int>(verts.size()) / 2;
-        unsigned int prog = SolidProg();
-        glUseProgram(prog);
-        glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                    static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-        glUniform4f(glGetUniformLocation(prog, "uColor"),
-                    cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-        glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                     verts.data(), GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-        glDrawArrays(GL_TRIANGLES, 0, total_verts);
-        glDisableVertexAttribArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        return;
-    }
-
-    // 非完整圆：扇形近似
-    // 三角形数 = ceil(abs_span / 360 * kArcSegs)，至少 3
-    float ratio = abs_span / 360.0f;
-    int tri_count = std::max(3, static_cast<int>(kArcSegs * ratio + 0.5f));
-
-    float cx = cmd.center.x();
-    float cy = cmd.center.y();
-    float r = cmd.radius;
-
-    double start_rad = 3.14159265358979323846 * cmd.start_angle / 180.0;
-    double span_rad = 3.14159265358979323846 * cmd.span_angle / 180.0;
-    double step = span_rad / tri_count;
-
-    std::vector<float> verts;
-    verts.reserve(static_cast<size_t>(tri_count) * 3 * 2);
-
-    for (int i = 0; i < tri_count; ++i) {
-        double a0 = start_rad + i * step;
-        double a1 = start_rad + (i + 1) * step;
-        float px0 = cx + r * std::cos(a0);
-        float py0 = cy + r * std::sin(a0);
-        float px1 = cx + r * std::cos(a1);
-        float py1 = cy + r * std::sin(a1);
-        verts.push_back(cx);  verts.push_back(cy);
-        verts.push_back(px0); verts.push_back(py0);
-        verts.push_back(px1); verts.push_back(py1);
-    }
-
-    int total_verts = static_cast<int>(verts.size()) / 2;
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLES, 0, total_verts);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawLine3D(const Line3DCommand& cmd) {
-    float verts[6] = {
-        cmd.p1.x(), cmd.p1.y(), cmd.p1.z(),
-        cmd.p2.x(), cmd.p2.y(), cmd.p2.z(),
-    };
-
-    unsigned int prog = Solid3DProg();
-    glUseProgram(prog);
-    glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                       1, GL_FALSE, mvp_);
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glDrawArrays(GL_LINES, 0, 2);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawText3D(const Text3DCommand& cmd) {
-    (void)cmd;
-    LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
-}
-
-// 上传全部点光源数据到 lighting shader 的 flat uniform 数组。
-//
-// 每帧在 BuildTileLightIndices 之前调用一次（非逐 object 热路径，可接受
-// 每光源 3 次 snprintf + glGetUniformLocation）。ShaderManager 会缓存
-// uniform location，避免重复字符串查找。
-//
-// 只上传前 kMaxTotalLights_ 个光源；超限提示由 BuildTileLightIndices 负责
-//（这是唯一 warning 触发点）。
-//
-// Pre-condition: MeshLighting3DProg() 已注册（首次调用会触发编译）。
-void Renderer::UploadLightData(const RenderCommandList& cmds) {
-    // 光源 uniform 需同时上传到所有光照 program（普通光照 + baseColor 纹理
-    //  变体 + 法线映射），因为 program 切换时 uniform 是 per-program 状态，
-    //  DrawObject3D 会根据材质动态选择哪一个。
-    const unsigned int programs[] = {DrawObject3DProg(),
-                                     DrawObject3DProgFull()};
-
-    const int total = static_cast<int>(cmds.point_lights.size());
-    const int clamped = std::min(total, kMaxTotalLights_);
-
-    char buf[64];
-    for (unsigned int prog : programs) {
-        glUseProgram(prog);
-        for (int i = 0; i < clamped; ++i) {
-            const PointLight& l = cmds.point_lights[i];
-            snprintf(buf, sizeof(buf), "uLights[%d].position", i);
-            glUniform3f(shader_mgr_.GetUniform(prog, buf),
-                        l.position.x(), l.position.y(), l.position.z());
-            snprintf(buf, sizeof(buf), "uLights[%d].color", i);
-            glUniform3f(shader_mgr_.GetUniform(prog, buf),
-                        l.color.r, l.color.g, l.color.b);
-            snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
-            glUniform1f(shader_mgr_.GetUniform(prog, buf), l.linear_radius);
-        }
-        // 告诉 shader 当前有效光源数（fragment 用 tile index 与其做边界钳制）
-        glUniform1i(shader_mgr_.GetUniform(prog, "uTotalLights"), clamped);
-    }
-}
-
-// CPU 端 tile culling：
-//   遍历 cmds.point_lights（用户已按优先级排好序），把每个光源投影到
-//   NDC → 屏幕空间覆盖矩形 → 转换成 tile 坐标范围 → 向每个覆盖 tile 写入
-//   light index（先到先得，每 tile 最多 kMaxLightsPerTile_ 个，后到的丢弃）。
-//
-// 输出到 tile_index_tex_（GL_RGBA8），fragment shader 按 gl_FragCoord 查表。
-//
-// 覆盖是保守近似：投影光源球的 6 个轴向边界点取屏幕 x/y 的 min/max，保证
-// 装下球体；光源 radius（线性衰减边界）跨越相机时投影会失真，此时让该光源
-// 覆盖整个屏幕，确保不漏光（宁多勿少）。这是近似而非精确锥体裁剪。
-void Renderer::BuildTileLightIndices(const RenderCommandList& cmds,
-                                     int fbo_w_3d, int fbo_h_3d) {
-    if (tile_index_tex_ == 0) return;
-    if (tile_grid_w_ <= 0 || tile_grid_h_ <= 0) return;
-
-    const int num_lights = static_cast<int>(cmds.point_lights.size());
-    if (num_lights == 0) return;
-
-    // 光源数超上限：只处理前 kMaxTotalLights_ 个，其余忽略（先到先得）。
-    // 只 LOG 一次，避免每帧刷屏。
-    if (num_lights > kMaxTotalLights_) {
-        LOG_FIRST_N(WARNING, 1)
-            << "point_lights 数量 " << num_lights << " 超过上限 "
-            << kMaxTotalLights_
-            << "，仅前 " << kMaxTotalLights_ << " 个光源生效";
-    }
-
-    // 1. 准备 tile 网格的 CPU 侧缓冲
-    const int tex_w = tile_grid_w_ * kTexelsPerTile_;
-    const int tex_h = tile_grid_h_;
-
-    // 每个 tile 当前已放入的光源计数（index = row * tile_grid_w_ + col）
-    const int total_tiles = tile_grid_w_ * tile_grid_h_;
-    std::vector<uint32_t> tile_counts(static_cast<size_t>(total_tiles), 0);
-    // 每个 tile 的光源 index 列表（先到先得，uint8：0-254 有效，255=无光源哨兵）
-    struct Cell {
-        uint8_t idx[kMaxLightsPerTile_];
-    };
-    std::vector<Cell> tiles(static_cast<size_t>(total_tiles));
-    for (auto& c : tiles) {
-        for (auto& v : c.idx) v = kLightIndexSentinel_;
-    }
-
-    // 2. 遍历光源（用户已按优先级排好序，先到先得）
-    const int clamped = std::min(num_lights, kMaxTotalLights_);
-    for (int li = 0; li < clamped; ++li) {
-        const PointLight& l = cmds.point_lights[li];
-        const Vec3f cx = {l.position.x(), l.position.y(), l.position.z()};
-        const float radius = l.linear_radius;
-        if (radius <= 0.0f) continue;
-
-        // 投影球心到 clip 坐标
-        float c[4];
-        c[0] = mvp_[0]*cx.x() + mvp_[4]*cx.y() + mvp_[8]*cx.z()  + mvp_[12];
-        c[1] = mvp_[1]*cx.x() + mvp_[5]*cx.y() + mvp_[9]*cx.z()  + mvp_[13];
-        c[2] = mvp_[2]*cx.x() + mvp_[6]*cx.y() + mvp_[10]*cx.z() + mvp_[14];
-        c[3] = mvp_[3]*cx.x() + mvp_[7]*cx.y() + mvp_[11]*cx.z() + mvp_[15];
-
-        if (c[3] <= 0.0f) continue;  // 球心在相机后方，跳过（保守：可能漏近光源，但避免全屏误覆盖）
-
-        const float inv_w = 1.0f / c[3];
-        const float ndc_x = c[0] * inv_w;
-        const float ndc_y = c[1] * inv_w;
-
-        // 球心投影到屏幕像素（OpenGL gl_FragCoord 约定：原点左下角，y 向上）：
-        //   px = (ndc_x*0.5+0.5) * fbo_w，py = (ndc_y*0.5+0.5) * fbo_h
-        // 注意：fragment shader 里 gl_FragCoord 也是同一约定（左下原点，y 向上），
-        // 因此 tile_row = int(gl_FragCoord.y)/16 与这里的 py 一致。
-        const float px = (ndc_x * 0.5f + 0.5f) * static_cast<float>(fbo_w_3d);
-        const float py = (ndc_y * 0.5f + 0.5f) * static_cast<float>(fbo_h_3d);
-
-        // 屏幕空间覆盖范围：把光源球（中心 cx，半径 radius）的 6 个轴向
-        // 边界点（±X/±Y/±Z）都投影到屏幕像素，取 x/y 的 min/max。
-        // 这样覆盖真正保守（球被轴对齐包围盒完全包住），不会漏掉
-        // 屏幕空间覆盖范围：把光源球（中心 cx，半径 radius）的 6 个轴向
-        // 边界点（±X/±Y/±Z）都投影到屏幕像素，取 x/y 的 min/max。
-        // 这样覆盖真正保守（球被轴对齐包围盒完全包住），不会漏掉
-        // 实际受光源影响的像素（宁可多覆盖，不可少覆盖）。
-        //
-        // 若光源半径过大导致球体跨越相机（任一轴向边界点落在相机后方），
-        // 投影会失真，此时保守地让该光源覆盖整个屏幕，确保不漏光。
-        float pmin_x = px, pmax_x = px;
-        float pmin_y = py, pmax_y = py;
-        bool crosses_camera = false;
-        // 6 轴向边界点
-        const Vec3f dirs[6] = {
-            { 1,0,0}, {-1,0,0}, {0, 1,0}, {0,-1,0}, {0,0, 1}, {0,0,-1},
-        };
-        for (int d = 0; d < 6; ++d) {
-            const Vec3f bp = {
-                cx.x() + dirs[d].x() * radius,
-                cx.y() + dirs[d].y() * radius,
-                cx.z() + dirs[d].z() * radius,
-            };
-            float bc[4];
-            bc[0] = mvp_[0]*bp.x() + mvp_[4]*bp.y() + mvp_[8]*bp.z()  + mvp_[12];
-            bc[1] = mvp_[1]*bp.x() + mvp_[5]*bp.y() + mvp_[9]*bp.z()  + mvp_[13];
-            bc[2] = mvp_[2]*bp.x() + mvp_[6]*bp.y() + mvp_[10]*bp.z() + mvp_[14];
-            bc[3] = mvp_[3]*bp.x() + mvp_[7]*bp.y() + mvp_[11]*bp.z() + mvp_[15];
-            if (bc[3] <= 0.0f) {
-                crosses_camera = true;
-                continue;
-            }
-            const float biw = 1.0f / bc[3];
-            const float bpx = (bc[0]*biw*0.5f + 0.5f) * static_cast<float>(fbo_w_3d);
-            const float bpy = (bc[1]*biw*0.5f + 0.5f) * static_cast<float>(fbo_h_3d);
-            pmin_x = std::min(pmin_x, bpx);
-            pmax_x = std::max(pmax_x, bpx);
-            pmin_y = std::min(pmin_y, bpy);
-            pmax_y = std::max(pmax_y, bpy);
-        }
-
-        int min_px_x, max_px_x, min_px_y, max_px_y;
-        if (crosses_camera) {
-            // 球跨越相机：保守覆盖整个屏幕
-            min_px_x = 0; max_px_x = fbo_w_3d;
-            min_px_y = 0; max_px_y = fbo_h_3d;
-        } else {
-            min_px_x = static_cast<int>(std::floor(pmin_x)) - 1;
-            max_px_x = static_cast<int>(std::ceil(pmax_x)) + 1;
-            min_px_y = static_cast<int>(std::floor(pmin_y)) - 1;
-            max_px_y = static_cast<int>(std::ceil(pmax_y)) + 1;
-        }
-
-        // 3. 转换成 tile 范围
-        const int min_tc = std::max(0, min_px_x / kTileSize16_);
-        const int max_tc = std::min(tile_grid_w_ - 1, max_px_x / kTileSize16_);
-        const int min_tr = std::max(0, min_px_y / kTileSize16_);
-        const int max_tr = std::min(tile_grid_h_ - 1, max_px_y / kTileSize16_);
-        if (min_tc > max_tc || min_tr > max_tr) continue;
-
-        // 4. 向覆盖的每个 tile 写入 light index（先到先得）
-        for (int tr = min_tr; tr <= max_tr; ++tr) {
-            for (int tc = min_tc; tc <= max_tc; ++tc) {
-                const int t = tr * tile_grid_w_ + tc;
-                uint32_t& count = tile_counts[t];
-                if (count >= kMaxLightsPerTile_) continue;  // 满了，丢弃（后到视为低优先级）
-                tiles[t].idx[count] = static_cast<uint8_t>(li);
-                ++count;
-            }
-        }
-    }
-
-    // 5. 打包写入 tile 纹理（每 tile 4 个 texel，每 texel RGBA 各 1 个 uint8 index）
-    std::vector<uint8_t> packed(static_cast<size_t>(tex_w) * tex_h * 4,
-                                kLightIndexSentinel_);
-    for (int tr = 0; tr < tile_grid_h_; ++tr) {
-        for (int tc = 0; tc < tile_grid_w_; ++tc) {
-            const int t = tr * tile_grid_w_ + tc;
-            const Cell& cell = tiles[t];
-            for (int k = 0; k < kTexelsPerTile_; ++k) {
-                const int gx = tc * kTexelsPerTile_ + k;
-                uint8_t* px = &packed[(static_cast<size_t>(tr) * tex_w + gx) * 4];
-                px[0] = cell.idx[k * 4 + 0];
-                px[1] = cell.idx[k * 4 + 1];
-                px[2] = cell.idx[k * 4 + 2];
-                px[3] = cell.idx[k * 4 + 3];
-            }
-        }
-    }
-
-    glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
-    // 全量上传（packed 已含全部哨兵填充，避免先清后写的双重上传）。
-    // 每帧一次：tile 纹理很小（1280×720 → 320×45 ≈ 57KB），
-    // 全量 glTexImage2D 开销可忽略，且实现简单直接（不做增量 glTexSubImage2D）。
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex_w, tex_h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, packed.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
-
-void Renderer::DrawObject3D(const Object3DCommand& cmd,
-                              const RenderCommandList& cmds) {
-    // 1. 从 mesh 管理器取 GPU mesh 句柄（VAO/VBO/EBO 已在注册时绑定好属性）
-    const GPUMesh* mesh = mesh_mgr_.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawObject3D: mesh_id " << cmd.mesh_id
-                           << " 未注册（DrawObject3D 前需先 RegisterMesh）";
-    CHECK_GT(mesh->vao, 0u);
-
-    // 2. 校验 up/front 非零且不平行（模型基向量需要）
-    const float up_len =
-        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
-    const float fr_len =
-        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
-    CHECK_GT(up_len, 1e-8f) << "DrawObject3D: up 向量不能为零";
-    CHECK_GT(fr_len, 1e-8f) << "DrawObject3D: front 向量不能为零";
-
-    // 3. 构建 Model 矩阵，并合成 MVP = mvp_(Proj*View) * Model
-    float model[16], mvp[16];
-    BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
-    Mat4Mul(mvp_, model, mvp);
-
-    // 4. 纹理 or 纯色着色（由 PBRMaterial 决定）
-    // 任一材质通道（baseColor/metallic/roughness/emissive/AO/normal）带纹理即需 UV
-    // 属性 + UV 变体 shader；否则全部走常值 fallback。
-    const bool any_tex =
-        (cmd.material.base_color_tex != 0) ||
-        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
-        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
-        (cmd.material.emissive_tex != 0) ||
-        (cmd.material.ao_tex != 0) ||
-        (cmd.material.normal_tex != 0);
-    // 是否启用法线映射（采样法线贴图做 TBN）。法线贴图需要 mesh 含 kTangent。
-    const bool use_normal_map = (cmd.material.normal_tex != 0);
-
-    // 决定着色路径：
-    // DrawObject3D 统一走 GGX PBR 着色（需 mesh 含 kNormal）。
-    // object_use_default_color 仅在 Render() 中控制是否跳过点光源 tile lighting。
-    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-        << "DrawObject3D: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
-
-    // 选择 shader：有 UV/tangent → 完整版，否则 → 无 UV 版。
-    // 两版共用同一个 fragment shader（用 uHas*Tex uniform flag 控制分支）。
-    unsigned int prog;
-    prog = any_tex ? DrawObject3DProgFull() : DrawObject3DProg();
-    glUseProgram(prog);
-
-        // MVP（含 Model）
-        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"),
-                           1, GL_FALSE, mvp);
-        // Model 矩阵（单独传入，供 world-space position 计算）
-        glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"),
-                           1, GL_FALSE, model);
-        // 模型 PBR 材质常量（uBaseColor/uMetallic/uRoughness/uEmissive/uAO）。
-        // 各通道支持纹理采样（见下）；带纹理的通道置 uHas*Tex=1 并绑定纹理，
-        // 否则置 0 走常值 fallback。
-        glUniform3f(glGetUniformLocation(prog, "uBaseColor"),
-                    cmd.material.base_color.r, cmd.material.base_color.g,
-                    cmd.material.base_color.b);
-        glUniform1f(glGetUniformLocation(prog, "uMetallic"), cmd.material.metallic);
-        glUniform1f(glGetUniformLocation(prog, "uRoughness"), cmd.material.roughness);
-        glUniform3f(glGetUniformLocation(prog, "uEmissive"),
-                    cmd.material.emissive.r, cmd.material.emissive.g,
-                    cmd.material.emissive.b);
-        // AO 常值：ao 为 Color，取 .r 作为标量强度（烘焙 AO 通常为灰度）。
-        glUniform1f(glGetUniformLocation(prog, "uAO"), cmd.material.ao.r);
-        // 相机位置（specular 需要）
-        glUniform3f(glGetUniformLocation(prog, "uCameraPos"),
-                    cmds.camera.position.x(), cmds.camera.position.y(),
-                    cmds.camera.position.z());
-
-        // 需要 UV：任一材质通道带纹理（any_tex）时，mesh 必须含 kUV，否则无法
-        // 逐像素采样。各通道纹理按固定纹理单元绑定：
-        //   1=baseColor 2=metallic 3=roughness 4=emissive 5=AO 6=normal；
-        // 未带纹理的通道置 uHas*Tex=0，shader 走常值 fallback 不采样。
-        if (any_tex) {
-            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawObject3D: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
-        }
-        // 法线映射：需要 kTangent（烘焙切线）才能构建 TBN。
-        if (use_normal_map) {
-            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
-                << "DrawObject3D: normal_tex 非 0 但 mesh 无 kTangent 属性，"
-                << "无法构建 TBN（OBJ 加载器已自动推导 tangent）";
-        }
-
-        // ---- baseColor 纹理（TEXTURE1）----
-        if (cmd.material.base_color_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uBaseColorTex"), 1);
-            glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 1);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasBaseColorTex"), 0);
-        }
-
-        // ---- metallic 纹理（TEXTURE2）----
-        if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.metallic_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: metallic_tex " << cmd.material.metallic_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uMetallicTex"), 2);
-            glUniform1i(glGetUniformLocation(prog, "uHasMetallicTex"), 1);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasMetallicTex"), 0);
-        }
-
-        // ---- roughness 纹理（TEXTURE3）----
-        if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.roughness_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: roughness_tex " << cmd.material.roughness_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE3);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uRoughnessTex"), 3);
-            glUniform1i(glGetUniformLocation(prog, "uHasRoughnessTex"), 1);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasRoughnessTex"), 0);
-        }
-
-        // ---- emissive 纹理（TEXTURE4）----
-        if (cmd.material.emissive_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.emissive_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: emissive_tex " << cmd.material.emissive_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE4);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uEmissiveTex"), 4);
-            glUniform1i(glGetUniformLocation(prog, "uHasEmissiveTex"), 1);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasEmissiveTex"), 0);
-        }
-
-        // ---- AO 纹理（TEXTURE5）----
-        if (cmd.material.ao_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.ao_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: ao_tex " << cmd.material.ao_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uAoTex"), 5);
-            glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 1);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasAoTex"), 0);
-        }
-
-        // ---- normal 纹理（TEXTURE6，法线映射 TBN）----
-        // 启用时需 mesh 含 kTangent（上方已 CHECK）；normal_scale 缩放扰动强度。
-        if (cmd.material.normal_tex != 0) {
-            unsigned int gl_tex =
-                texture_mgr_.GetGLTexture(cmd.material.normal_tex);
-            CHECK_NE(gl_tex, 0u)
-                << "DrawObject3D: normal_tex " << cmd.material.normal_tex
-                << " 未注册";
-            glActiveTexture(GL_TEXTURE6);
-            glBindTexture(GL_TEXTURE_2D, gl_tex);
-            glUniform1i(glGetUniformLocation(prog, "uNormalTex"), 6);
-            glUniform1i(glGetUniformLocation(prog, "uHasNormalTex"), 1);
-            glUniform1f(glGetUniformLocation(prog, "uNormalScale"),
-                        cmd.material.normal_scale);
-        } else {
-            glUniform1i(glGetUniformLocation(prog, "uHasNormalTex"), 0);
-            glUniform1f(glGetUniformLocation(prog, "uNormalScale"), 1.0f);
-        }
-
-        // 光源数据与 uTotalLights 已在 UploadLightData（每帧一次）上传。
-        // 这里只需绑定 tile index 纹理（fragment shader 按像素查表获取
-        // 本 tile 命中的光源 index 列表），绑定在 TEXTURE0。
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tile_index_tex_);
-        glUniform1i(glGetUniformLocation(prog, "uTileLightIndices"), 0);
-
-
-    // 5. 发起绘制（indexed 用 EBO，否则按顶点序）
-    // 绑定 mesh VAO：属性指针已固化在 VAO 中，无需再设 attrib。
-    // GL_CULL_FACE + GL_CCW 在 Render() 中统一开启，
-    // 所有 mesh 面必须保持 CCW 绕序（OBJ loader 保证不改绕序）。
-    glBindVertexArray(mesh->vao);
-    if (mesh->index_count > 0) {
-        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
-                       GL_UNSIGNED_INT, nullptr);
-    } else {
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
-    }
-    glBindVertexArray(0);
-
-    GLenum draw_err = glGetError();
-    if (draw_err != GL_NO_ERROR) {
-        LOG_FIRST_N(WARNING, 1) << "GL error after DrawObject3D: " << draw_err;
     }
 }
 
@@ -2478,238 +759,6 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     // stb_image_write 接受 RGBA 数据，和 OpenGL 读出的 RGBA 一致。
     // Y 翻转由 stbi_flip_vertically_on_write(1) 在 SaveScreenshot 中处理。
     // 这里不做翻转，让调用者决定。
-}
-
-void Renderer::DrawPolyline2D(const Polyline2DCommand& cmd) {
-    // Pre-condition:
-    //   - vertices 至少 2 个点
-    //   - edge_count (vertices.size()-1) ≤ kMaxPolylineEdges
-    //   - line_width > 0（像素单位）
-    int n = static_cast<int>(cmd.vertices.size());
-    CHECK_GE(n, 2);
-    int edge_count = n - 1;
-    CHECK_LE(edge_count, kMaxPolylineEdges);
-    CHECK_GT(cmd.line_width, 0.0f);
-
-    // 每个 quad 6 顶点 + 每个 bridge 6 顶点（2 三角形）
-    // 顶点格式：x, y, x, y, ...
-    int total_verts = edge_count * 6 + (edge_count - 1) * 6;
-    std::vector<float> verts;
-    verts.reserve(static_cast<size_t>(total_verts) * 2);
-
-    float half_w = cmd.line_width * 0.5f;
-
-    for (int i = 0; i < edge_count; ++i) {
-        const Vec2f& p0 = cmd.vertices[i];
-        const Vec2f& p1 = cmd.vertices[i + 1];
-
-        // 边向量
-        Vec2f dir = p1 - p0;
-        float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y());
-
-        // 垂直方向（归一化），len 过短时水平偏移
-        Vec2f perp;
-        static constexpr float kEpsilon = 1e-6f;
-        if (len < kEpsilon) {
-            perp = {1.0f, 0.0f};
-        } else {
-            perp = {-dir.y() / len, dir.x() / len};
-        }
-
-        // 四个角点
-        Vec2f n0 = p0 + perp * half_w;
-        Vec2f n1 = p0 - perp * half_w;
-        Vec2f n2 = p1 + perp * half_w;
-        Vec2f n3 = p1 - perp * half_w;
-
-        // 两个三角形：n0-n1-n2, n2-n1-n3 (CW)
-        // T1
-        verts.push_back(n0.x()); verts.push_back(n0.y());
-        verts.push_back(n1.x()); verts.push_back(n1.y());
-        verts.push_back(n2.x()); verts.push_back(n2.y());
-        // T2
-        verts.push_back(n2.x()); verts.push_back(n2.y());
-        verts.push_back(n1.x()); verts.push_back(n1.y());
-        verts.push_back(n3.x()); verts.push_back(n3.y());
-        // 每个连接处在 V 形间隙外侧补一个三角形
-        if (i + 1 < edge_count) {
-            const Vec2f& p2 = cmd.vertices[i + 2];
-            Vec2f dn = p2 - p1;
-            float ln = std::sqrt(dn.x()*dn.x()+dn.y()*dn.y());
-            Vec2f perp_n;
-            if (ln < kEpsilon) { perp_n = {1.0f, 0.0f}; }
-            else { perp_n = {-dn.y()/ln, dn.x()/ln}; }
-
-            // 用顶点和两段矩形外侧角点构成填充三角形
-            // 内侧三角形 (p1, n3, n3_next) 和 (p1, n2_next, n2) 填充间隙
-            verts.push_back(p1.x()); verts.push_back(p1.y());
-            verts.push_back(n3.x()); verts.push_back(n3.y());
-            verts.push_back((p1 - perp_n * half_w).x());
-            verts.push_back((p1 - perp_n * half_w).y());
-
-            verts.push_back(p1.x()); verts.push_back(p1.y());
-            verts.push_back((p1 + perp_n * half_w).x());
-            verts.push_back((p1 + perp_n * half_w).y());
-            verts.push_back(n2.x()); verts.push_back(n2.y());
-        }
-    }
-
-    CHECK_LE(total_verts, kMaxStreamVertices);
-
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLES, 0, total_verts);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawRect2D(const Rect2DCommand& cmd) {
-    float verts[8];
-    float x0 = cmd.pos.x();
-    float y0 = cmd.pos.y();
-    float x1 = x0 + cmd.size.x();
-    float y1 = y0 + cmd.size.y();
-    verts[0] = x0;
-    verts[1] = y0;
-    verts[2] = x1;
-    verts[3] = y0;
-    verts[4] = x1;
-    verts[5] = y1;
-    verts[6] = x0;
-    verts[7] = y1;
-
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    // uFboSize = NDC 变换参照。必须用 FBO 尺寸（渲染分辨率），
-    // 使 NDC 坐标空间与 glViewport 一致，避免 rect 偏移。
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawCircle2D(const Circle2DCommand& cmd) {
-    static constexpr int kSegments = kCircleFanSegments;
-    float verts[(kSegments + 2) * 2];  // fan center + kSegments perimeter points
-    float cx = cmd.center.x();
-    float cy = cmd.center.y();
-    float r = cmd.radius;
-
-    // Center of fan
-    verts[0] = cx;
-    verts[1] = cy;
-
-    constexpr double kPi = 3.14159265358979323846;
-    for (int i = 0; i <= kSegments; ++i) {
-        double angle = 2.0 * kPi * static_cast<double>(i) /
-                       static_cast<double>(kSegments);
-        verts[(i + 1) * 2 + 0] = cx + r * static_cast<float>(cos(angle));
-        verts[(i + 1) * 2 + 1] = cy + r * static_cast<float>(sin(angle));
-    }
-
-    unsigned int prog = SolidProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uColor"),
-                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, kSegments + 2);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void Renderer::DrawImage2D(const Image2DCommand& cmd) {
-    // 查找纹理
-    int tex_w = 0;
-    int tex_h = 0;
-    bool found = texture_mgr_.GetSize(cmd.texture_id, &tex_w, &tex_h);
-    CHECK(found) << "DrawImage2D: texture_id=" << cmd.texture_id
-                 << " not registered";
-    CHECK_GT(tex_w, 0);
-    CHECK_GT(tex_h, 0);
-
-    uint32_t gl_tex = texture_mgr_.GetGLTexture(cmd.texture_id);
-    CHECK_NE(gl_tex, 0u) << "DrawImage2D: texture_id=" << cmd.texture_id
-                          << " has no GL texture";
-
-    // 构建矩形面片：pos → pos+size，UV (0,0)→(1,1)
-    // 顶点格式：[x, y, u, v] interleaved，6 顶点（2 三角形）
-    float x0 = cmd.pos.x();
-    float y0 = cmd.pos.y();
-    float x1 = x0 + cmd.size.x();
-    float y1 = y0 + cmd.size.y();
-
-    // T1: (x0,y0)-(x1,y0)-(x1,y1), T2: (x0,y0)-(x1,y1)-(x0,y1)
-    // 屏幕坐标 y0=上 y1=下。shader 设 ndc.y = -ndc.y 使 y0→NDC 上方。
-    // stb_image 像素第一行=图片顶部, glTexImage2D 把它放在 v=0 (GL 纹理底部),
-    // 因此图片顶部对应 v=0, 图片底部对应 v=1。
-    // 要把图片顶部映射到屏幕上方 (y0), 底部映射到屏幕下方 (y1):
-    //   y0 → v=0, y1 → v=1
-    float verts[24] = {
-        x0, y0, 0.0f, 0.0f,  // T1: top-left
-        x1, y0, 1.0f, 0.0f,  // T1: top-right
-        x1, y1, 1.0f, 1.0f,  // T1: bottom-right
-        x0, y0, 0.0f, 0.0f,  // T2: top-left
-        x1, y1, 1.0f, 1.0f,  // T2: bottom-right
-        x0, y1, 0.0f, 1.0f,  // T2: bottom-left
-    };
-
-    unsigned int prog = ImageProg();
-    glUseProgram(prog);
-    glUniform2f(glGetUniformLocation(prog, "uFboSize"),
-                static_cast<float>(fbo_w_), static_cast<float>(fbo_h_));
-    glUniform4f(glGetUniformLocation(prog, "uTint"),
-                cmd.tint.r, cmd.tint.g, cmd.tint.b, cmd.tint.a);
-    glUniform1i(glGetUniformLocation(prog, "uTexture"), 0);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gl_tex);
-
-    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-
-    constexpr int kStride = 4 * static_cast<int>(sizeof(float));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, kStride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, kStride,
-                          (void*)(2 * sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    GLenum draw_err = glGetError();
-    if (draw_err != GL_NO_ERROR) {
-        LOG_FIRST_N(WARNING, 1) << "GL error after DrawImage2D: " << draw_err;
-    }
-
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 }  // namespace jpov
