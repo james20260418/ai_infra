@@ -1,9 +1,10 @@
-// JPOV Strip2D Gold Image Unit Test
+// JPOV 3D Object3D Gold Image Unit Test
 //
-// 用 gold image 方法验证 Strip2DCommand 2D 条带渲染正确：
-//   1. 画一个覆盖已知区域的 Z 字形 2D 三角形条带（像素坐标）
-//   2. 保存为 PNG 到 output/jpov_strip2d_gold_test/rendered.png
-//   3. 与 expected PNG（git 管理）做二进制文件级比较
+// 用 gold image 方法验证 RegisterMesh→DrawObject3D 渲染链路：
+//   1. 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
+//   2. DrawObject3D 纯色渲染（texture_id=0，淡蓝色）
+//   3. 保存为 PNG 到 output/jpov_object3d_gold_test/rendered.png
+//   4. 与 expected PNG（git 管理）做二进制文件级比较
 //
 // 测试通过条件：渲染输出 PNG 与 expected PNG 字节完全相同。
 
@@ -14,12 +15,13 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/src/obj_loader.h"
 #include "tools/common/utils.h"
 #include "tools/jpov/test/test_utils.h"
 
 // ============ 测试应用 ============
 
-class Strip2dGoldTestApp : public JPOV {
+class Object3DGoldTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -31,17 +33,33 @@ public:
         (void)input;
         (void)winfo;
 
-        // ---- 构造 2D 三角形条带（与 generator 完全一致） ----
-        std::vector<jpov::Vec2f> verts = {
-            { 80.0f,  40.0f},
-            {160.0f, 200.0f},
-            {240.0f,  40.0f},
-            {320.0f, 200.0f},
-            {400.0f,  40.0f},
-            {480.0f, 200.0f},
-        };
+        const float kResW = 1280.0f;
+        const float kResH = 720.0f;
+        cmds->camera.fbo_3d_width_  = kResW;
+        cmds->camera.fbo_3d_height_ = kResH;
 
-        cmds->DrawStrip2D(verts, {1.0f, 0.2f, 0.2f, 1.0f});  // 红色
+        // Camera (1,1,1) 看向原点
+        cmds->camera.position = {1.0f, 1.0f, 1.0f};
+        cmds->camera.target   = {0.0f, 0.0f, 0.0f};
+
+        // 加载 beetle 模型
+        std::string obj_path = jpov::GetProjectRoot() +
+                               "tools/jpov/test/object3d/beetle.obj";
+        jpov::MeshData mesh;
+        CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
+
+        uint32_t mesh_id = RegisterMesh(mesh);
+
+        // 渲染（淡蓝色，中心在原点，自然朝向）
+        // 使用 object_use_default_color=true 走旧纯色路径，材质用常值 baseColor 表达
+        jpov::PBRMaterial mat;
+        mat.base_color = {0.2f, 0.6f, 1.0f, 1.0f};  // 淡蓝色
+        cmds->object_use_default_color = true;
+        cmds->DrawObject3D(
+            mesh_id, mat,
+            {0.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f});
     }
 };
 
@@ -51,11 +69,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/strip2d_diagonal_640x360.png";
+        p += "__main__/tools/jpov/test/object3d/object3d_beetle_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/strip2d_diagonal_640x360.png";
+           "tools/jpov/test/object3d/object3d_beetle_1280x720.png";
 }
 
 // ============ 测试入口 ============
@@ -70,13 +88,13 @@ int main() {
     LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
 
     // 2. 渲染并保存为 PNG
-    std::string outdir = jpov::GetOutputDir() + "jpov_strip2d_gold_test/";
+    std::string outdir = jpov::GetOutputDir() + "jpov_object3d_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "Strip2D Gold Test";
+    cfg.title = "3D Object3D Gold Test";
     cfg.headless = true;
-    Strip2dGoldTestApp app(cfg);
+    Object3DGoldTestApp app(cfg);
     app.Init();
 
     jpov::WindowInfo winfo;
@@ -114,11 +132,11 @@ int main() {
     }
 
     if (pass) {
-        LOG(INFO) << "TEST PASSED: strip2d gold image match ("
+        LOG(INFO) << "TEST PASSED: object3d gold image match ("
                   << expected_bytes.size() << " bytes)";
         return 0;
     } else {
-        LOG(ERROR) << "TEST FAILED: strip2d gold image mismatch";
+        LOG(ERROR) << "TEST FAILED: object3d gold image mismatch";
         return 1;
     }
 }
