@@ -1,9 +1,11 @@
-// JPOV Chinese Text Gold Image Unit Test
+// JPOV Text Gold Image Unit Test
 //
-// 验证中文文本渲染正确：
-//   1. 渲染分辨率 1280x720，三行中文（字号 16/48/96）
-//   2. 保存为 PNG 到 output/jpov_chinese_gold_test/rendered.png
+// 用 gold image 方法验证 text 渲染正确：
+//   1. 渲染字符串 "Hello JPOV!"（字号 48，居中）
+//   2. 保存为 PNG 到 output/jpov_text_gold_test/rendered.png
 //   3. 与 expected PNG（git 管理）做二进制文件级比较
+//
+// 测试通过条件：渲染输出 PNG 与 expected PNG 字节完全相同。
 
 #include <cstdint>
 #include <cstdio>
@@ -15,15 +17,6 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
-
-// 字号常量（与 generator 一致）
-static constexpr float kFontSizeSmall = 16.0f;
-static constexpr float kFontSizeMedium = 32.0f;
-static constexpr float kFontSizeLarge = 48.0f;
-
-// 渲染分辨率
-static constexpr float kResW = 1280.0f;
-static constexpr float kResH = 720.0f;
 
 // 读取文件全部字节
 static bool ReadFileBytes(const std::string& path,
@@ -45,7 +38,7 @@ static bool ReadFileBytes(const std::string& path,
 
 // ============ 测试应用 ============
 
-class ChineseGoldTestApp : public JPOV {
+class TextGoldTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -57,37 +50,18 @@ public:
         (void)input;
         (void)winfo;
 
+        // 渲染分辨率 640x360 — 与 gold image 生成时一致
+        const float kResW = 640.0f;
+        const float kResH = 360.0f;
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        float center_x = kResW * 0.5f;
-
-        const char* line1 = reinterpret_cast<const char*>(u8"16px: 你好 JPOV! (16px atlas)");
-        cmds->DrawText(line1, {center_x, 120.0f}, kFontSizeSmall,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       jpov::kFontBuiltinCJK);
-
-        const char* line2 = reinterpret_cast<const char*>(u8"32px: 你好 JPOV! (32px atlas)");
-        cmds->DrawText(line2, {center_x, 360.0f}, kFontSizeMedium,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       jpov::kFontBuiltinCJK);
-
-        const char* line3 = reinterpret_cast<const char*>(u8"48px: 你好 楷体! (48px atlas, Kai)");
-        cmds->DrawText(line3, {center_x, 600.0f}, kFontSizeLarge,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       "Kai");
-
-        // 行 4: 刀隶体（阿里妈妈刀隶体）
-        const char* line4 = reinterpret_cast<const char*>(u8"刀隶体: 你好 刀隶! (48px, DaoLi)");
-        cmds->DrawText(line4, {center_x, 60.0f}, kFontSizeLarge,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       "DaoLi");
-
-        // 行 5: 麦圆体（荆南麦圆体）
-        const char* line5 = reinterpret_cast<const char*>(u8"麦圆体: 你好 麦圆! (48px, MaiYuan)");
-        cmds->DrawText(line5, {center_x, 680.0f}, kFontSizeLarge,
-                       jpov::kColorWhite, jpov::TextAlignment::kCenter,
-                       "MaiYuan");
+        // ---- 文字：白色 "Hello JPOV!"，字号 48，居中 ----
+        const char* text = "Hello JPOV!";
+        cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 48.0f,
+                       jpov::kColorWhite,
+                       jpov::TextAlignment::kCenter,
+                       jpov::kFontBuiltinLatin);
     }
 };
 
@@ -98,11 +72,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/hello_chinese_jpov_1280x720.png";
+        p += "__main__/tools/jpov/test/font2d/hello_jpov_48_640x360.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/hello_chinese_jpov_1280x720.png";
+           "tools/jpov/test/font2d/hello_jpov_48_640x360.png";
 }
 
 // ============ 测试入口 ============
@@ -117,23 +91,18 @@ int main() {
     LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
 
     // 2. 渲染并保存为 PNG 到 output/ 目录
-    std::string outdir = jpov::GetOutputDir() + "jpov_chinese_gold_test/";
+    std::string outdir = jpov::GetOutputDir() + "jpov_text_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "Chinese Text Gold Test";
+    cfg.title = "Text Gold Test";
     cfg.headless = true;
-    cfg.fonts = {
-        {"tools/jpov/fonts/LxgwWenKai-Regular.ttf", 0, "Kai"},
-        {"tools/jpov/fonts/AlimamaDaoLiTi.ttf",      0, "DaoLi"},
-        {"tools/jpov/fonts/KNMaiyuan-Regular.ttf",   0, "MaiYuan"},
-    };
-    ChineseGoldTestApp app(cfg);
+    TextGoldTestApp app(cfg);
     app.Init();
 
     jpov::WindowInfo winfo;
-    winfo.width  = kResW;
-    winfo.height = kResH;
+    winfo.width  = 640.0f;
+    winfo.height = 360.0f;
     jpov::InputSnapshot input{};
     app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
@@ -166,11 +135,11 @@ int main() {
     }
 
     if (pass) {
-        LOG(INFO) << "TEST PASSED: Chinese text gold image match ("
+        LOG(INFO) << "TEST PASSED: text gold image match ("
                   << expected_bytes.size() << " bytes)";
         return 0;
     } else {
-        LOG(ERROR) << "TEST FAILED: Chinese text gold image mismatch";
+        LOG(ERROR) << "TEST FAILED: text gold image mismatch";
         return 1;
     }
 }

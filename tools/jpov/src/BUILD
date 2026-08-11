@@ -94,8 +94,9 @@ cc_library(
     data = ["//tools/jpov/fonts:all_fonts"],
     visibility = ["//visibility:public"],
     deps = [
-        ":font_manager",
+        ":font_renderer",
         ":mesh_manager",
+        ":object3d_renderer",
         ":shader_manager",
         ":texture_manager",
         "//tools/jpov/interface:camera",
@@ -112,5 +113,48 @@ cc_library(
         "//conditions:default": ["@glfw_static//:glfw"],
     }),
     copts = ["-std=c++20", "-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
+    linkstatic = 1,
+)
+
+# FontRenderer — 字体 2D 渲染（注册/atlas/DrawText2D）
+cc_library(
+    name = "font_renderer",
+    srcs = ["font2d/font_renderer.cc"],
+    hdrs = ["font2d/font_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":font_manager",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# Object3DRenderer — PBR DrawObject3D + Tile Forward 光照
+cc_library(
+    name = "object3d_renderer",
+    srcs = ["object3d/object3d_renderer.cc"],
+    hdrs = ["object3d/object3d_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh_manager",
+        ":shader_manager",
+        ":texture_manager",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
     linkstatic = 1,
 )

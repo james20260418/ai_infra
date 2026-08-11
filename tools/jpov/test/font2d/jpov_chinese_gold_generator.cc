@@ -5,7 +5,7 @@
 //   - 显示中文 "你好 JPOV!" 三行，字号分别是 16/32/48
 //   - 字号 16 匹配 kBaseFontSize (16px)，scale=1 不拉伸不模糊
 //
-// 输出: /james_pm/ai_infra/tools/jpov/test/hello_chinese_jpov_1280x720.png
+// 输出: /james_pm/ai_infra/tools/jpov/test/font2d/hello_chinese_jpov_1280x720.png
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -74,7 +74,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/hello_chinese_jpov_1280x720.png";
+    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/font2d/hello_chinese_jpov_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "Chinese Text Gold Image Generator";

@@ -1,11 +1,11 @@
-// JPOV Text Gold Image Generator — 生成 text 测试的 gold image
+// JPOV CJK Text Gold Image Generator
 //
-// 生成 text 测试的 gold image：
+// 生成包含 CJK 字符的 gold image，验证 CJK 文本渲染正确：
 //   - 渲染分辨率 640x360
-//   - 窗口分辨率 640x360（无拉伸，便于像素精确比较）
-//   - 白色文字 "Hello JPOV!"，字号 48，居中显示
+//   - 显示中文 "你好 世界！" 和英文 "Hello World!" 混合排版
+//   - 字号 36
 //
-// 输出: /james_pm/ai_infra/tools/jpov/test/hello_jpov_48_640x360.png
+// 输出: /james_pm/ai_infra/tools/jpov/test/font2d/hello_cjk_36_640x360.png
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -13,7 +13,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
 
-class GoldTextDemo : public JPOV {
+class GoldCjkTextDemo : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -25,28 +25,27 @@ public:
         (void)input;
         (void)winfo;
 
-        // 渲染分辨率 640x360
         const float kResW = 640.0f;
         const float kResH = 360.0f;
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // ---- 文字：白色 "Hello JPOV!"，字号 48，居中 ----
-        const char* text = "Hello JPOV!";
-        cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 48.0f,
+        // ---- CJK 文字：白色 "你好 世界！Hello World!"，字号 36，居中 ----
+        const char* text = reinterpret_cast<const char*>(u8"你好 世界！Hello World!");
+        cmds->DrawText(text, {kResW * 0.5f, kResH * 0.5f}, 36.0f,
                        jpov::kColorWhite,
                        jpov::TextAlignment::kCenter,
-                       jpov::kFontBuiltinLatin);
+                       jpov::kFontBuiltinCJK);
     }
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/hello_jpov_48_640x360.png";
+    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/font2d/hello_cjk_36_640x360.png";
 
     JPOV::Config cfg;
-    cfg.title = "Text Gold Image Generator";
+    cfg.title = "CJK Text Gold Image Generator";
     cfg.headless = true;
-    GoldTextDemo app(cfg);
+    GoldCjkTextDemo app(cfg);
     app.Init();
 
     jpov::WindowInfo winfo;
@@ -57,6 +56,6 @@ int main() {
     app.RunOnce(input, winfo, outpath);
     app.Finalize();
 
-    LOG(INFO) << "Gold image generated: " << outpath;
+    LOG(INFO) << "CJK gold image generated: " << outpath;
     return 0;
 }

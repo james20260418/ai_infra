@@ -69,11 +69,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/hello_cjk_36_640x360.png";
+        p += "__main__/tools/jpov/test/font2d/hello_cjk_36_640x360.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/hello_cjk_36_640x360.png";
+           "tools/jpov/test/font2d/hello_cjk_36_640x360.png";
 }
 
 // ============ 测试入口 ============
