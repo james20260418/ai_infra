@@ -15,7 +15,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
-#include "tools/jpov/test/test_utils.h"
+#include "tools/jpov/test/primitives3d/test_utils.h"
 
 // 正方体顶点（边长 0.5，中心在原点）
 static const jpov::Vec3f kVerts[8] = {
@@ -75,11 +75,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/cube3d_6faces_1280x720.png";
+        p += "__main__/tools/jpov/test/primitives3d/cube3d_6faces_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/cube3d_6faces_1280x720.png";
+           "tools/jpov/test/primitives3d/cube3d_6faces_1280x720.png";
 }
 
 // ============ 测试入口 ============

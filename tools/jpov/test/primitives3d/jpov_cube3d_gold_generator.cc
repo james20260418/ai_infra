@@ -6,7 +6,7 @@
 //   - 纯色渲染，无光照
 //   - 渲染分辨率 1280x720（主 FBO 的 2x，MSAA 抗锯齿）
 //
-// 输出: tools/jpov/test/cube3d_6faces_1280x720.png
+// 输出: tools/jpov/test/primitives3d/cube3d_6faces_1280x720.png
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -79,7 +79,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/cube3d_6faces_1280x720.png";
+    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/primitives3d/cube3d_6faces_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "3D Cube Gold Generator";

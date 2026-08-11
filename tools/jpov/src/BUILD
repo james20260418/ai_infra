@@ -95,8 +95,10 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":font_renderer",
+        ":primitives2d_renderer",
         ":mesh_manager",
         ":object3d_renderer",
+        ":primitives3d_renderer",
         ":shader_manager",
         ":texture_manager",
         "//tools/jpov/interface:camera",
@@ -148,6 +150,46 @@ cc_library(
         ":texture_manager",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# Primitives3DRenderer — 3D 图元渲染（三角形/条带/线段/文本）+ MVP 矩阵构建
+cc_library(
+    name = "primitives3d_renderer",
+    srcs = ["primitives3d/primitives3d_renderer.cc"],
+    hdrs = ["primitives3d/primitives3d_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# Primitives2DRenderer — 2D 图元绘制（Rect/Circle/Polyline/RoundRect/FillRect/Arc/Strip2D/Image2D）
+cc_library(
+    name = "primitives2d_renderer",
+    srcs = ["primitives2d/primitives2d_renderer.cc"],
+    hdrs = ["primitives2d/primitives2d_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":texture_manager",
+        "//tools/jpov/interface:render_command",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

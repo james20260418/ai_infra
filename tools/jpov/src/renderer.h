@@ -15,6 +15,8 @@
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
+#include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
+#include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
 
@@ -24,7 +26,6 @@ namespace jpov {
 
 struct Renderer {
     static constexpr int kMaxFboDim = 4096;
-    static constexpr int kMaxPolylineEdges = 10000;
     static constexpr int kMaxStreamVertices = 120000;
 
     Renderer();
@@ -68,30 +69,9 @@ private:
     void Destroy3DResolveFBO();
     void CompileShaders();
     void CreateStreamVBO();
-    void DrawRect2D(const Rect2DCommand& cmd);
-    void DrawPolyline2D(const Polyline2DCommand& cmd);
-    void DrawCircle2D(const Circle2DCommand& cmd);
-    void DrawTriangle3D(const Triangle3DCommand& cmd);
-    void DrawLine3D(const Line3DCommand& cmd);
-    void DrawText3D(const Text3DCommand& cmd);
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
     unsigned int strip_vbo_ = 0;
-    static constexpr int kMaxStripVertices = 3000;
-    void DrawStrip3D(const Strip3DCommand& cmd);
-
-    static constexpr int kRoundCornerSegments = 12;
-    static constexpr int kCircleFanSegments = 64;
-    static constexpr int kArcFullCircleSegments = 48;
-    static constexpr int kMaxStrip2DVertices = 3000;
-
-    void DrawStrip2D(const Strip2DCommand& cmd);
-    void DrawRoundRect2D(const RoundRect2DCommand& cmd);
-    void DrawFillRect2D(const FillRect2DCommand& cmd);
-    void DrawArc2D(const Arc2DCommand& cmd);
-    void DrawImage2D(const Image2DCommand& cmd);
-
-    static std::vector<float> TriangulateRoundRectFill(const Vec2f& pos, const Vec2f& size, float radius);
 
     float mvp_[16];
     ShaderManager shader_mgr_;

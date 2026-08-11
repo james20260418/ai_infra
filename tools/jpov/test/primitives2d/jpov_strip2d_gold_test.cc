@@ -1,13 +1,12 @@
-// JPOV 3D Strip Ring Gold Image Unit Test
+// JPOV Strip2D Gold Image Unit Test
 //
-// 用 gold image 方法验证 Strip3DCommand 环状条带渲染正确：
-//   1. 使用 Camera(1,1,1) 看向原点，渲染半径 0.5、宽度 0.2 的环状条带
-//   2. 保存为 PNG 到 output/jpov_strip3d_gold_test/rendered.png
+// 用 gold image 方法验证 Strip2DCommand 2D 条带渲染正确：
+//   1. 画一个覆盖已知区域的 Z 字形 2D 三角形条带（像素坐标）
+//   2. 保存为 PNG 到 output/jpov_strip2d_gold_test/rendered.png
 //   3. 与 expected PNG（git 管理）做二进制文件级比较
 //
 // 测试通过条件：渲染输出 PNG 与 expected PNG 字节完全相同。
 
-#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,15 +15,11 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
-#include "tools/jpov/test/test_utils.h"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "tools/jpov/test/primitives2d/test_utils.h"
 
 // ============ 测试应用 ============
 
-class Strip3dGoldTestApp : public JPOV {
+class Strip2dGoldTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -36,40 +31,17 @@ public:
         (void)input;
         (void)winfo;
 
-        const float kResW = 1280.0f;
-        const float kResH = 720.0f;
-        cmds->camera.fbo_3d_width_  = kResW;
-        cmds->camera.fbo_3d_height_ = kResH;
+        // ---- 构造 2D 三角形条带（与 generator 完全一致） ----
+        std::vector<jpov::Vec2f> verts = {
+            { 80.0f,  40.0f},
+            {160.0f, 200.0f},
+            {240.0f,  40.0f},
+            {320.0f, 200.0f},
+            {400.0f,  40.0f},
+            {480.0f, 200.0f},
+        };
 
-        // Camera (1,1,1) 看向原点
-        cmds->camera.position = {1.0f, 1.0f, 1.0f};
-        cmds->camera.target   = {0.0f, 0.0f, 0.0f};
-
-        // ---- 构造环状条带 ----
-        const float kRingRadius = 0.5f;
-        const float kRingWidth  = 0.2f;
-        const float kInnerRadius = kRingRadius - kRingWidth * 0.5f;  // 0.4
-        const float kOuterRadius = kRingRadius + kRingWidth * 0.5f;  // 0.6
-        const int kSegments = 60;
-
-        std::vector<jpov::Vec3f> verts;
-        verts.reserve(kSegments * 2);
-
-        for (int i = 0; i < kSegments; ++i) {
-            float angle = 2.0f * static_cast<float>(M_PI) * i / kSegments;
-            float cx = std::cos(angle);
-            float cz = std::sin(angle);
-
-            // 先外后内，使条带三角形法线朝上
-            verts.push_back({cx * kOuterRadius, 0.0f, cz * kOuterRadius});
-            verts.push_back({cx * kInnerRadius, 0.0f, cz * kInnerRadius});
-        }
-
-        // 闭合环：首部重复前 2 个顶点
-        verts.push_back(verts[0]);
-        verts.push_back(verts[1]);
-
-        cmds->DrawStrip3D(verts, {0.0f, 0.6f, 1.0f, 1.0f});  // 浅蓝色
+        cmds->DrawStrip2D(verts, {1.0f, 0.2f, 0.2f, 1.0f});  // 红色
     }
 };
 
@@ -79,11 +51,11 @@ static std::string GetExpectedPngPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/strip3d_ring_1280x720.png";
+        p += "__main__/tools/jpov/test/primitives2d/strip2d_diagonal_640x360.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/strip3d_ring_1280x720.png";
+           "tools/jpov/test/primitives2d/strip2d_diagonal_640x360.png";
 }
 
 // ============ 测试入口 ============
@@ -98,13 +70,13 @@ int main() {
     LOG(INFO) << "Expected PNG loaded: " << expected_bytes.size() << " bytes";
 
     // 2. 渲染并保存为 PNG
-    std::string outdir = jpov::GetOutputDir() + "jpov_strip3d_gold_test/";
+    std::string outdir = jpov::GetOutputDir() + "jpov_strip2d_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "3D Strip Ring Gold Test";
+    cfg.title = "Strip2D Gold Test";
     cfg.headless = true;
-    Strip3dGoldTestApp app(cfg);
+    Strip2dGoldTestApp app(cfg);
     app.Init();
 
     jpov::WindowInfo winfo;
@@ -142,11 +114,11 @@ int main() {
     }
 
     if (pass) {
-        LOG(INFO) << "TEST PASSED: strip3d ring gold image match ("
+        LOG(INFO) << "TEST PASSED: strip2d gold image match ("
                   << expected_bytes.size() << " bytes)";
         return 0;
     } else {
-        LOG(ERROR) << "TEST FAILED: strip3d ring gold image mismatch";
+        LOG(ERROR) << "TEST FAILED: strip2d gold image mismatch";
         return 1;
     }
 }
