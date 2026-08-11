@@ -9,7 +9,7 @@
 //   - Camera (1.9, 1.3, 1.9) 看向立方体中心
 //   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
 //
-// 输出: tools/jpov/test/pbr_emissive_cube_1280x720.png
+// 输出: tools/jpov/test/object3d/pbr_emissive_cube_1280x720.png
 // 用途: 自发光 TBN 链路验证 + 供 leader 肉眼判断材质观感。
 
 #include <cstdio>
@@ -61,7 +61,7 @@ public:
             8.0f
         });        // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）
         std::string obj_path = jpov::GetProjectRoot() +
-                               "tools/jpov/test/cube_hand.obj";
+                               "tools/jpov/test/object3d/cube_hand.obj";
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load cube_hand.obj";
         // 确认 OBJ loader 已推导 kTangent（自发光 TBN 前提）
@@ -102,7 +102,7 @@ private:
 
 int main() {
     const char* outpath =
-        "/james_pm/ai_infra/tools/jpov/test/pbr_emissive_cube_1280x720.png";
+        "/james_pm/ai_infra/tools/jpov/test/object3d/pbr_emissive_cube_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "PBR Emissive Gold Generator";
@@ -111,7 +111,7 @@ int main() {
     app.Init();
 
     // 注册 baseColor + 自发光贴图
-    std::string root = jpov::GetProjectRoot() + "tools/jpov/test/";
+    std::string root = jpov::GetProjectRoot() + "tools/jpov/test/object3d/";
     uint32_t base   = app.RegisterTexture(root + "cube_tex_256x256.png");
     uint32_t normal = app.RegisterTexture(root + "pbr_normal_256x256.png");
     uint32_t emissive = app.RegisterTexture(root + "pbr_emissive_256x256.png");

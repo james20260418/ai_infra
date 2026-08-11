@@ -1,20 +1,20 @@
-// JPOV PBR 自发光 Gold Image Unit Test
+// JPOV PBR baseColor 纹理 Gold Image Unit Test
 //
-// 用 gold image 方法验证 DrawObject3D 的自发光 TBN 链路：
-//   1. 从 OBJ 加载带 UV+normal 的立方体模型（cube_hand.obj），
-//      OBJ 加载器自动推导逐顶点 tangent（kTangent 标志）
-//   2. 注册 baseColor 纹理 + 自发光贴图（4 个凸起半球，pbr_emissive_256x256.png）
-//   3. PBRMaterial.normal_tex 指向自发光贴图，normal_scale 控制扰动强度，
-//      走 GGX PBR 光照 + 切线空间法线经 TBN 变换后做逐像素着色
+// 用 gold image 方法验证 DrawObject3D 的 baseColor 纹理采样链路：
+//   1. 从 OBJ 加载带 UV+normal 的立方体模型（cube_hand.obj）
+//   2. RegisterTexture 注册四象限彩色纹理（cube_tex_256x256.png）
+//   3. PBRMaterial.base_color_tex 指向纹理，走 GGX PBR 光照 + 逐像素
+//      纹理采样（其余通道取常值：metallic=0 / roughness=1）
 //   4. 点光源照亮，object_use_default_color=false
-//   5. 保存为 PNG → 该效果图供 leader 肉眼判断自发光正确性
+//   5. 保存为 PNG → 该效果图供 leader 肉眼判断材质正确性
 //
 // 测试通过条件：渲染实现跑通并输出材质效果图（供 leader 肉眼判断）。
 // 说明：GGX 点光源光照在 Xvfb/Mesa llvmpipe 软渲染器下非确定（同一场景
 // 多次渲染会落在「正确着色 / 偏暗 / 退化绿块」三种离散状态之一，帧间最大
 // 差达 255），固定基准图+固定容差无法稳定绿。按 leader(#16) 决策：
-// 本测试跳过颜色校验，只验证渲染链路跑通并产生非平凡输出图；自发光的
-// 效果正确与否由 leader 肉眼查看生成的效果图判断。
+// 本测试跳过颜色校验，只验证渲染链路跑通并产生非平凡输出图；材质效果的
+// 正确与否由 leader 肉眼查看生成的效果图判断。
+// 纹理为四象限（红/绿/蓝/黄）+ 中心白点，用于验证 UV 象限映射与朝向。
 
 #include <cstdint>
 #include <string>
@@ -34,37 +34,32 @@ std::string GetCubeObjPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/cube_hand.obj";
+        p += "__main__/tools/jpov/test/object3d/cube_hand.obj";
         return p;
     }
-    return jpov::GetProjectRoot() + "tools/jpov/test/cube_hand.obj";
+    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/cube_hand.obj";
 }
 
-std::string GetTexPath(const char* fname) {
+std::string GetTexturePath() {
     const char* test_srcdir = std::getenv("TEST_SRCDIR");
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/";
-        p += fname;
+        p += "__main__/tools/jpov/test/object3d/cube_tex_256x256.png";
         return p;
     }
-    return jpov::GetProjectRoot() + "tools/jpov/test/" + fname;
+    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/cube_tex_256x256.png";
 }
 
 }  // namespace
 
 // ============ 测试应用 ============
 
-class PbrEmissiveGoldTestApp : public JPOV {
+class PbrBaseColorGoldTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
-    void SetTextureIds(uint32_t base, uint32_t normal, uint32_t emissive) {
-        tex_base_color_ = base;
-        tex_normal_ = normal;
-        tex_emissive_ = emissive;
-    }
+    void SetTextureId(uint32_t id) { tex_id_ = id; }
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -79,82 +74,74 @@ public:
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // Camera 从右前上方观察立方体中心，能同时看到三个面
+        // Camera (1,1,1) 看向原点（与 cube3d gold test 一致）
         cmds->camera.position = {1.0f, 1.0f, 1.0f};
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
 
-        // 单点光源：前上方暖色主光，让法线扰动产生清晰明暗
-        // 自发光贴图展示灯（grazing key + 正面 fill，凸显凹凸细节）
-        // key: 右上方主光，产生 grazing 高光
+        // 点光源：一个暖色主光 + 一个冷色补光
+        // 三点布光（key + fill + rim）用于 PBR 材质展示
+        // key: 主光，右上方暖白
         cmds->point_lights.push_back({
-            {2.0f, 1.8f, 0.5f},
-            {35.0f, 32.0f, 28.0f, 1.0f},
-            8.0f
-        });
-        // fill: 正面稍低，降低对比度
-        cmds->point_lights.push_back({
-            {0.0f, 0.0f, 1.5f},
-            {12.0f, 14.0f, 22.0f, 1.0f},
+            {1.5f, 1.5f, 0.8f},
+            {25.0f, 23.0f, 20.0f, 1.0f},  // 暖白
             6.0f
         });
-        // rim: 左侧 grazing，产生边缘高光
+        // fill: 补光，左下方冷蓝，降低对比度
         cmds->point_lights.push_back({
-            {-1.8f, 0.5f, 0.2f},
-            {20.0f, 20.0f, 20.0f, 1.0f},
+            {-1.2f, -0.3f, -0.5f},
+            {8.0f, 10.0f, 18.0f, 1.0f},   // 冷蓝
+            5.0f
+        });
+        // rim: 背光，后方，勾勒边缘
+        cmds->point_lights.push_back({
+            {0.0f, 0.0f, -1.5f},
+            {15.0f, 15.0f, 15.0f, 1.0f},  // 中性白
             8.0f
-        });        // 加载带 UV + normal 的立方体（OBJ loader 自动推导 tangent）
+        });
+
+        // 加载带 UV + normal 的立方体
+        std::string obj_path = GetCubeObjPath();
         jpov::MeshData mesh;
-        CHECK(jpov::LoadObj(GetCubeObjPath(), &mesh))
-            << "Failed to load cube_hand.obj";
-        // 确认 OBJ loader 已推导 kTangent（自发光 TBN 前提）
-        CHECK(jpov::MeshHasFlag(mesh.flags, jpov::MeshVertexFlags::kTangent))
-            << "LoadObj 未推导 kTangent（自发光需要 tangent）";
+        CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load cube_hand.obj";
 
         uint32_t mesh_id = RegisterMesh(mesh);
 
-        // PBR 材质：baseColor 走纹理，叠加自发光贴图扰动
+        // PBR 材质：baseColor 走纹理采样；metallic/roughness 用常值默认
         jpov::PBRMaterial mat;
-        mat.base_color_tex = tex_base_color_;
-        mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};   // fallback（纹理优先）
+        mat.base_color_tex = tex_id_;      // 纹理优先
+        mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};  // fallback（应为白色，纹理优先）
         mat.metallic = 0.0f;
-        mat.roughness = 0.5f;  // moderate roughness, emissive should be visible
-        mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
-        mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
-        mat.normal_tex = tex_normal_;
-        mat.normal_scale = 2.0f;
-        mat.emissive_tex = tex_emissive_;
+        mat.roughness = 1.0f;
         cmds->DrawObject3D(
             mesh_id, mat,
-            {0.0f, 0.0f, 0.0f},           // center = 原点 = 立方体中心
+            {0.0f, 0.0f, 0.0f},           // center (cube centered at origin) = 立方体中心
             {0.0f, 1.0f, 0.0f},           // up = +Y
             {0.0f, 0.0f, 1.0f});          // front = +Z
     }
 
 private:
-    uint32_t tex_base_color_ = 0;
-    uint32_t tex_normal_ = 0;
-    uint32_t tex_emissive_ = 0;
+    uint32_t tex_id_ = 0;
 };
 
 // ============ 测试入口 ============
 
 int main() {
     // 1. 渲染并保存材质效果图（供 leader 肉眼判断）
-    std::string outdir = jpov::GetOutputDir() + "jpov_pbr_normal_gold_test/";
+    std::string outdir = jpov::GetOutputDir() + "jpov_pbr_basecolor_gold_test/";
     std::string outpath = outdir + "rendered.png";
 
     JPOV::Config cfg;
-    cfg.title = "PBR Emissive Gold Test";
+    cfg.title = "PBR baseColor Gold Test";
     cfg.headless = true;
-    PbrEmissiveGoldTestApp app(cfg);
+    PbrBaseColorGoldTestApp app(cfg);
     app.Init();
 
-    // 注册 baseColor + 自发光贴图
-    uint32_t base   = app.RegisterTexture(GetTexPath("cube_tex_256x256.png"));
-    uint32_t normal = app.RegisterTexture(GetTexPath("pbr_normal_256x256.png"));
-    uint32_t emissive = app.RegisterTexture(GetTexPath("pbr_emissive_256x256.png"));
-    LOG(INFO) << "textures registered: base=" << base << " normal=" << normal;
-    app.SetTextureIds(base, normal, emissive);
+    // 注册纹理
+    std::string tex_path = GetTexturePath();
+    uint32_t tex_id = app.RegisterTexture(tex_path);
+    LOG(INFO) << "baseColor texture registered: " << tex_path
+              << " → id=" << tex_id;
+    app.SetTextureId(tex_id);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;
@@ -164,7 +151,7 @@ int main() {
     app.Finalize();
 
     // 2. 跳过颜色校验（leader #16 决策）：仅做渲染链路 smoke check ——
-    //    确认输出的效果图存在、尺寸合理且非全空。自发光效果的正确性
+    //    确认输出的效果图存在、尺寸合理且非全空。材质效果的正确性
     //    由 leader 肉眼查看生成的效果图判断，不做固定基准图颜色比对
     //    （llvmpipe 光照三稳态非确定，见文件头注释）。
     int rnd_w = 0, rnd_h = 0, rnd_comp = 0;
@@ -177,6 +164,7 @@ int main() {
     LOG(INFO) << "Rendered effect image: " << rnd_w << "x" << rnd_h
               << " RGBA (" << rnd_comp << " native channels)";
 
+    // 尺寸合理（非退化）
     if (rnd_w <= 0 || rnd_h <= 0) {
         LOG(ERROR) << "Rendered image has invalid dimensions: "
                    << rnd_w << "x" << rnd_h;
@@ -206,8 +194,7 @@ int main() {
     }
 
     // 渲染链路跑通 + 输出非平凡效果图：通过。颜色正确性由 leader 肉眼判断。
-    LOG(INFO) << "TEST PASSED: PBR emissive map (TBN) render pipeline ran "
-              << "and produced a non-trivial effect image (color check skipped "
-              << "per leader #16)";
+    LOG(INFO) << "TEST PASSED: PBR baseColor render pipeline ran and produced "
+              << "a non-trivial effect image (color check skipped per leader #16)";
     return 0;
 }

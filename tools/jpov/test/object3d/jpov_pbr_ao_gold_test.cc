@@ -34,10 +34,10 @@ std::string GetCubeObjPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/cube_hand.obj";
+        p += "__main__/tools/jpov/test/object3d/cube_hand.obj";
         return p;
     }
-    return jpov::GetProjectRoot() + "tools/jpov/test/cube_hand.obj";
+    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/cube_hand.obj";
 }
 
 std::string GetTexPath(const char* fname) {
@@ -45,11 +45,11 @@ std::string GetTexPath(const char* fname) {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/";
+        p += "__main__/tools/jpov/test/object3d/";
         p += fname;
         return p;
     }
-    return jpov::GetProjectRoot() + "tools/jpov/test/" + fname;
+    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/" + fname;
 }
 
 }  // namespace

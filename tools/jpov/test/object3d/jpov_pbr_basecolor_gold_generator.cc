@@ -7,7 +7,7 @@
 //   - Camera (1,1,1) 看向原点
 //   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
 //
-// 输出: tools/jpov/test/pbr_basecolor_cube_1280x720.png
+// 输出: tools/jpov/test/object3d/pbr_basecolor_cube_1280x720.png
 
 #include <cstdio>
 #include <glog/logging.h>
@@ -60,7 +60,7 @@ public:
 
         // 加载带 UV + normal 的立方体
         std::string obj_path = jpov::GetProjectRoot() +
-                               "tools/jpov/test/cube_hand.obj";
+                               "tools/jpov/test/object3d/cube_hand.obj";
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load cube_hand.obj";
 
@@ -87,7 +87,7 @@ private:
 
 int main() {
     const char* outpath =
-        "/james_pm/ai_infra/tools/jpov/test/pbr_basecolor_cube_1280x720.png";
+        "/james_pm/ai_infra/tools/jpov/test/object3d/pbr_basecolor_cube_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "PBR baseColor Gold Generator";
@@ -97,7 +97,7 @@ int main() {
 
     // 注册纹理
     std::string tex_path = jpov::GetProjectRoot() +
-                           "tools/jpov/test/cube_tex_256x256.png";
+                           "tools/jpov/test/object3d/cube_tex_256x256.png";
     uint32_t tex_id = app.RegisterTexture(tex_path);
     LOG(INFO) << "baseColor texture registered: " << tex_path << " → id=" << tex_id;
     app.SetTextureId(tex_id);
