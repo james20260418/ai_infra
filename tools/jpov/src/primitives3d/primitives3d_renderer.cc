@@ -21,6 +21,13 @@
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
 #define GLOG_NO_ABBREVIATED_SEVERITIES
 #endif
+
+// MinGW 的 windows.h 定义了 near/far 宏，与 C++ 关键字 / 变量名冲突
+#ifdef _WIN32
+#undef near
+#undef far
+#endif
+
 #include "third_party/gl_loader-mingw/gl_loader.h"
 
 #ifndef GL_CLAMP_TO_EDGE

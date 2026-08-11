@@ -77,6 +77,11 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_GenVertexArrays,        "glGenVertexArrays");
     LOAD_FUNC(gl_DeleteVertexArrays,     "glDeleteVertexArrays");
     LOAD_FUNC(gl_BindVertexArray,        "glBindVertexArray");
+    LOAD_FUNC(gl_DrawArrays,            "glDrawArrays");
+    LOAD_FUNC(gl_TexSubImage2D,         "glTexSubImage2D");
+    LOAD_FUNC(gl_GetError,              "glGetError");
+    LOAD_FUNC(gl_PushAttrib,            "glPushAttrib");
+    LOAD_FUNC(gl_PopAttrib,             "glPopAttrib");
     return 0;
 }
 
@@ -125,3 +130,8 @@ DEFINE_PTR(GL_UniformMatrix4fv,       gl_UniformMatrix4fv);
 DEFINE_PTR(GL_GenVertexArrays,        gl_GenVertexArrays);
 DEFINE_PTR(GL_DeleteVertexArrays,     gl_DeleteVertexArrays);
 DEFINE_PTR(GL_BindVertexArray,        gl_BindVertexArray);
+DEFINE_PTR(GL_DrawArrays,            gl_DrawArrays);
+DEFINE_PTR(GL_TexSubImage2D,         gl_TexSubImage2D);
+DEFINE_PTR(GL_GetError,              gl_GetError);
+DEFINE_PTR(GL_PushAttrib,            gl_PushAttrib);
+DEFINE_PTR(GL_PopAttrib,             gl_PopAttrib);

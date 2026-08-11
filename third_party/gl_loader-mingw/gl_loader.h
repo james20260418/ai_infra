@@ -51,6 +51,11 @@ typedef void (*GL_UniformMatrix4fv)(int, int, unsigned char, const float*);
 typedef void (*GL_GenVertexArrays)(int, unsigned int*);
 typedef void (*GL_DeleteVertexArrays)(int, const unsigned int*);
 typedef void (*GL_BindVertexArray)(unsigned int);
+typedef void (*GL_DrawArrays)(unsigned int, int, int);
+typedef void (*GL_TexSubImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+typedef unsigned int (*GL_GetError)(void);
+typedef void (*GL_PushAttrib)(unsigned int);
+typedef void (*GL_PopAttrib)(void);
 
 // Loaded function pointers
 extern GL_GenBuffers             gl_GenBuffers;
@@ -96,6 +101,11 @@ extern GL_UniformMatrix4fv       gl_UniformMatrix4fv;
 extern GL_GenVertexArrays        gl_GenVertexArrays;
 extern GL_DeleteVertexArrays     gl_DeleteVertexArrays;
 extern GL_BindVertexArray        gl_BindVertexArray;
+extern GL_DrawArrays            gl_DrawArrays;
+extern GL_TexSubImage2D         gl_TexSubImage2D;
+extern GL_GetError              gl_GetError;
+extern GL_PushAttrib            gl_PushAttrib;
+extern GL_PopAttrib             gl_PopAttrib;
 
 // Load all function pointers. Call once after GL context creation.
 int gl_loader_init(void);
@@ -124,6 +134,11 @@ int gl_loader_init(void);
 #define glBindFramebuffer        gl_BindFramebuffer
 #define glBindTexture            gl_BindTexture
 #define glBindVertexArray        gl_BindVertexArray
+#define glDrawArrays             gl_DrawArrays
+#define glTexSubImage2D          gl_TexSubImage2D
+#define glGetError               gl_GetError
+#define glPushAttrib             gl_PushAttrib
+#define glPopAttrib              gl_PopAttrib
 #define glBlitFramebuffer        gl_BlitFramebuffer
 #define glBufferData             gl_BufferData
 #define glCheckFramebufferStatus gl_CheckFramebufferStatus
@@ -161,6 +176,55 @@ int gl_loader_init(void);
 #define glUseProgram             gl_UseProgram
 #define glVertexAttribIPointer   gl_VertexAttribIPointer
 #define glVertexAttribPointer    gl_VertexAttribPointer
+
+// ==================== 缺失 GL 常量 ====================
+// MinGW 的 <GL/gl.h> 可能缺少以下 GL 1.1+ 常量（视具体 MinGW 版本而定）。
+// 这些 define 仅在常量未定义时补值，避免与系统头文件冲突。
+#ifndef GL_R8
+#define GL_R8 0x8229
+#endif
+#ifndef GL_RED
+#define GL_RED 0x1903
+#endif
+#ifndef GL_RGBA8
+#define GL_RGBA8 0x8058
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#define GL_DEPTH_COMPONENT24 0x81A6
+#endif
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_DYNAMIC_DRAW
+#define GL_DYNAMIC_DRAW 0x88E8
+#endif
+#ifndef GL_COLOR_BUFFER_BIT
+#define GL_COLOR_BUFFER_BIT 0x00004000
+#endif
+#ifndef GLsizeiptr
+#define GLsizeiptr ptrdiff_t
+#endif
+#ifndef GL_TEXTURE0
+#define GL_TEXTURE0 0x84C0
+#endif
+#ifndef GL_TEXTURE1
+#define GL_TEXTURE1 0x84C1
+#endif
+#ifndef GL_TEXTURE2
+#define GL_TEXTURE2 0x84C2
+#endif
+#ifndef GL_TEXTURE3
+#define GL_TEXTURE3 0x84C3
+#endif
+#ifndef GL_TEXTURE4
+#define GL_TEXTURE4 0x84C4
+#endif
+#ifndef GL_TEXTURE5
+#define GL_TEXTURE5 0x84C5
+#endif
+#ifndef GL_TEXTURE6
+#define GL_TEXTURE6 0x84C6
+#endif
 
 #endif  // _WIN32
 
