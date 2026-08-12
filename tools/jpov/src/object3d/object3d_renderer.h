@@ -118,7 +118,8 @@ out vec4 FragColor;
 struct Light {
     vec3 position;
     vec3 color;
-    float radius;
+    float radius;           // 衰减半径
+    float physicalRadius;   // 光源球体物理半径（0 = 点光源）
 };
 
 uniform Light uLights[MAX_TOTAL_LIGHTS];
@@ -253,19 +254,45 @@ void main() {
 
         vec3 light_dir = L / dist;
         float attenuation = 1.0 - (dist / uLights[li].radius);
+
+        // ── Representative Point (Karis 2013) ──
+        // 把点光源当作球面光源，用反射方向上离球最近的点
+        // 作为 specular 的有效入射方向。
+        // 光源物理半径越大 → 球面积越大 → 更多 micro-facet
+        // 能从不同区域命中镜面 lobe → 金属面不会全黑。
+        // physicalRadius = 0 时退化为原始点光源行为。
+        float sourceRadius = uLights[li].physicalRadius;
+        vec3 spec_dir = light_dir;  // default: same as point light
+        if (sourceRadius > 0.0) {
+            vec3 Rf = reflect(-V, N);
+            vec3 centerToRay = dot(L, Rf) * Rf - L;
+            vec3 closestPt = L + centerToRay *
+                clamp(sourceRadius / max(length(centerToRay), 1e-4), 0.0, 1.0);
+            spec_dir = normalize(closestPt);
+        }
+
+        // ── diffuse：原始 light_dir ──
         float NdotL = max(dot(N, light_dir), 0.0);
         if (NdotL > 0.0) {
-            vec3 H = normalize(light_dir + V);
+            vec3 Hd = normalize(light_dir + V);
+            vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
+                         mix(vec3(0.04), base_color, metallic));
+            vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
+            vec3 diffuse = kD * base_color / 3.14159265;
+            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
+        }
+
+        // ── specular：representative point 方向 ──
+        float NdotL_s = max(dot(N, spec_dir), 0.0);
+        if (NdotL_s > 0.0) {
+            vec3 H = normalize(spec_dir + V);
             float NdotV = max(dot(N, V), 0.0);
             vec3 F0 = mix(vec3(0.04), base_color, metallic);
             vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
             float D = distributionGGX(N, H, roughness);
-            float G = geometrySmith(N, V, light_dir, roughness);
-            vec3 specular = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
-            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-            vec3 diffuse = kD * base_color / 3.14159265;
-            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
-            total_specular += uLights[li].color * specular * NdotL * attenuation;
+            float G = geometrySmith(N, V, spec_dir, roughness);
+            vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
+            total_specular += uLights[li].color * spec * NdotL_s * attenuation;
         }
     }
 

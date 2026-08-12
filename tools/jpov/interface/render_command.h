@@ -344,7 +344,14 @@ struct PointLight {
     Color color;
     float linear_radius;  // 线性衰减的最大有效距离
 
-    // 有效半径（供 culling 等使用）。
+    // 光源球体的物理半径（米）。
+    // 默认 0 = 退化到点光源；非零时 specular 走 Representative Point
+    //（Karis 2013），把光源当作球面，让粗糙/金属表面也能从球的
+    // 不同区域命中 specular lobe，避免金属面在点光源下"全黑"。
+    // 典型值：灯泡 ~0.02–0.05，方块大小 ~0.5。
+    float physical_radius = 0.0f;
+
+    // 有效范围（供 culling 等使用）。
     // 当前线性衰减模式下直接返回 linear_radius；
     // 后续支持其他衰减函数时可通过此接口区分。
     float effective_range() const { return linear_radius; }
