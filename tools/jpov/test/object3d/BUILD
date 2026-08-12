@@ -125,3 +125,29 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+filegroup(
+    name = "pliers_gltf_data",
+    srcs = glob(["pliers_gltf/*"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
+# ============================================================================
+# Gold Image — glTF Pliers PBR 渲染验证
+# ============================================================================
+cc_test(
+    name = "jpov_gltf_pliers_gold_test",
+    srcs = ["jpov_gltf_pliers_gold_test.cc"],
+    data = [":pliers_gltf_data"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:orm_unpack",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
