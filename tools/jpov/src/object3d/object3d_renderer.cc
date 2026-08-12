@@ -136,6 +136,8 @@ void Object3DRenderer::UploadLightData(const RenderCommandList& cmds,
                         l.color.r, l.color.g, l.color.b);
             snprintf(buf, sizeof(buf), "uLights[%d].radius", i);
             glUniform1f(shader_mgr.GetUniform(p, buf), l.linear_radius);
+            snprintf(buf, sizeof(buf), "uLights[%d].physicalRadius", i);
+            glUniform1f(shader_mgr.GetUniform(p, buf), l.physical_radius);
         }
         glUniform1i(shader_mgr.GetUniform(p, "uTotalLights"), clamped);
     }
