@@ -291,6 +291,14 @@ void Renderer::Ensure3DFBO(int width, int height) {
     // === 4x MSAA 颜色纹理 ===
     glGenTextures(1, &color_tex_3d_);
     glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_);
+    // 已知问题（2026-08-14 定位）: 在 llvmpipe（Mesa 软渲染，headless/Xvfb）下，
+    // glTexImage2DMultisample 会产生一个非致命 GL_INVALID_OPERATION (1280)。
+    // 它不破坏渲染（后续 resolve blit 仍能正确出图，gold 测试逐字节匹配通过），
+    // 但因 glGetError 返回“第一个未清错误”，会一直残留到 DrawObject3D 后的
+    // 检查才被捕获，表现为看似来自 draw 的 1280 警告。已用打桩验证：此错误
+    // 精确源于本调用（深度 MSAA renderbuffer 探针干净），与 draw 无关。
+    // 因 llvmpipe 不支持 MSAA 且当前 gold 图均基于 MSAA 路径生成，
+    // 暂不改动（改非 MSAA 会改变输出字节）。详见 PR #50。
     glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
                             width, height, GL_TRUE);
     glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -871,12 +879,19 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
 
         PBRMaterial& mat = prim.material;
 
-        // baseColor
+        // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor
         if (!mi.base_color_tex.empty()) {
             mat.base_color_tex =
                 self->texture_mgr_.LoadFromFile(mi.base_color_tex);
             mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
+        } else {
+            mat.base_color = {mi.base_color[0], mi.base_color[1],
+                              mi.base_color[2], mi.base_color[3]};
         }
+
+        // emissive: 常值自发光色
+        mat.emissive = {mi.emissive_factor[0], mi.emissive_factor[1],
+                        mi.emissive_factor[2], 1.0f};
         // normal
         if (!mi.normal_tex.empty()) {
             mat.normal_tex =

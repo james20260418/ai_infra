@@ -161,3 +161,71 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# 第三方 glTF/GLB 资源（场景 gold test 用）
+# ============================================================================
+filegroup(
+    name = "scene_assets",
+    srcs = glob(["scene_assets/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# 第三方 glTF/GLB 加载 smoke test（纯 CPU 解析，不渲染）
+cc_test(
+    name = "jpov_scene_assets_load_test",
+    srcs = ["jpov_scene_assets_load_test.cc"],
+    data = [":scene_assets"],
+    deps = [
+        "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# 场景 gold test（点光源版）：第三方 glTF + 程序化地面 + 桌/凳/盆栽/墙
+# generator 写仓库 gold image (scene_1280x720.png)，test 渲染 + smoke check。
+# 共用 jpov_scene_common.h 保证场景一致。
+
+cc_binary(
+    name = "jpov_scene_gold_generator",
+    srcs = [
+        "jpov_scene_gold_generator.cc",
+        "jpov_scene_common.h",
+    ],
+    data = [":scene_assets"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_scene_gold_test",
+    srcs = [
+        "jpov_scene_gold_test.cc",
+        "jpov_scene_common.h",
+    ],
+    data = [
+        ":scene_assets",
+        ":scene_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+

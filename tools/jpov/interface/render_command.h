@@ -330,16 +330,25 @@ struct Image2DCommand {
 // 衰减为线性：强度随距离从 1.0（pos 处）衰减到 0.0（linear_radius 处），
 // 超出 linear_radius 的光源对像素贡献为 0。
 //
+// 四个字段（构造时按此顺序 push_back 聚合初始化）：
+//   { position, color, linear_radius, physical_radius }
+// 例: { {3,0,0}, {3,3,3,1}, 6.0f, 0.5f }
+//     = 位于 (3,0,0)，白光强度 3，有效距离 6 米，光源球物理半径 0.5 米。
+//
 // Pre-condition: linear_radius > 0
 struct PointLight {
     Vec3f position;
     Color color;
-    float linear_radius;  // 线性衰减的最大有效距离
+    float linear_radius;  // 线性衰减的最大有效距离（米）
 
     // 光源球体的物理半径（米）。
-    // 默认 0 = 退化到点光源；非零时 specular 走 Representative Point
-    //（Karis 2013），把光源当作球面，让粗糙/金属表面也能从球的
-    // 不同区域命中 specular lobe，避免金属面在点光源下"全黑"。
+    //
+    // Representative Point（Karis 2013, 'Real Shading in Unreal Engine 4')：
+    // 默认 0 = 退化到纯点光源；非零时把光源当作一个有体积的球面，
+    // 从光源球上选一个"代表点"（沿反射方向）来打 specular，
+    // 让粗糙/金属表面也能从球的不同区域命中 specular lobe，
+    // 避免金属面在纯点光源下"全黑"。这是光源变亮(面积大)时
+    // 高光会柔化/扩大的原理。
     // 典型值：灯泡 ~0.02–0.05，方块大小 ~0.5。
     float physical_radius = 0.0f;
 

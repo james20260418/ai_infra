@@ -402,10 +402,124 @@ bool ParsePrimitive(const tinygltf::Model& model,
             mat.pbrMetallicRoughness.metallicFactor);
         out_mat->roughness_factor = static_cast<float>(
             mat.pbrMetallicRoughness.roughnessFactor);
+
+        // baseColorFactor: 常值 base 色（纯色材质用）
+        if (mat.pbrMetallicRoughness.baseColorFactor.size() >= 4) {
+            for (int i = 0; i < 4; ++i) {
+                out_mat->base_color[i] = static_cast<float>(
+                    mat.pbrMetallicRoughness.baseColorFactor[i]);
+            }
+        }
+
+        // emissiveFactor: 常值自发光色
+        if (mat.emissiveFactor.size() >= 3) {
+            for (int i = 0; i < 3; ++i) {
+                out_mat->emissive_factor[i] = static_cast<float>(
+                    mat.emissiveFactor[i]);
+            }
+        }
     }
 
     out_mesh->Validate();
     return true;
+}
+
+// ==================== 节点变换（场景图 TRS）====================
+
+// 从场景图构建 mesh_index → 世界变换矩阵（三维线性部分，无平移；
+// 平移会破坏"模型局部空间"语义，DrawObject3D 用 center 定位）。
+//
+// glTF 场景图: Node 可含 mesh + TRS (translation/rotation/scale)，
+// 也可嵌套子节点。模型顶点在 mesh 局部空间，需经引用它的 node 的
+// 累积变换(含父节点)才到场景空间。很多第三方模型靠 node scale 放大
+// 微小顶点(如 poly.pizza scale=100)。
+//
+// 本 loader 只应用"旋转 + 缩放"（线性部分），不做平移：
+// 平移让调用方 DrawGltfObject(center) 重新定位更自然。
+struct Mat3 {
+    float m[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // 行主序
+};
+
+void Mat3MulVec(const Mat3& mat, const std::vector<float>& in,
+                std::vector<float>* out) {
+    out->resize(in.size());
+    for (size_t i = 0; i + 2 < in.size(); i += 3) {
+        const float* m = mat.m;
+        const float x = in[i], y = in[i + 1], z = in[i + 2];
+        (*out)[i]     = m[0] * x + m[1] * y + m[2] * z;
+        (*out)[i + 1] = m[3] * x + m[4] * y + m[5] * z;
+        (*out)[i + 2] = m[6] * x + m[7] * y + m[8] * z;
+    }
+}
+
+void Mat3MulMat3(const Mat3& a, const Mat3& b, Mat3& c) {
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            c.m[i * 3 + j] = 0;
+            for (int k = 0; k < 3; ++k)
+                c.m[i * 3 + j] += a.m[i * 3 + k] * b.m[k * 3 + j];
+        }
+}
+
+// 把 node 的 TRS 转成 3x3 矩阵（旋转部分 × 缩放）。
+void NodeTRS2Mat3(const tinygltf::Node& node, Mat3& m) {
+    for (int i = 0; i < 9; ++i) m.m[i] = 0;
+    m.m[0] = m.m[4] = m.m[8] = 1.0f;
+
+    float sx = 1.0f, sy = 1.0f, sz = 1.0f;
+    if (node.scale.size() >= 3) { sx = node.scale[0]; sy = node.scale[1]; sz = node.scale[2]; }
+
+    // 旋转 (quaternion) → 3x3
+    Mat3 rot; for (int i = 0; i < 9; ++i) rot.m[i] = 0;
+    rot.m[0] = rot.m[4] = rot.m[8] = 1.0f;
+    if (node.rotation.size() >= 4) {
+        const float qx = node.rotation[0], qy = node.rotation[1],
+                    qz = node.rotation[2], qw = node.rotation[3];
+        rot.m[0] = 1 - 2 * (qy * qy + qz * qz);
+        rot.m[1] = 2 * (qx * qy - qz * qw);
+        rot.m[2] = 2 * (qx * qz + qy * qw);
+        rot.m[3] = 2 * (qx * qy + qz * qw);
+        rot.m[4] = 1 - 2 * (qx * qx + qz * qz);
+        rot.m[5] = 2 * (qy * qz - qx * qw);
+        rot.m[6] = 2 * (qx * qz - qy * qw);
+        rot.m[7] = 2 * (qy * qz + qx * qw);
+        rot.m[8] = 1 - 2 * (qx * qx + qy * qy);
+    }
+
+    // M = S · R  (先旋转再缩放: 顶点 v → S * R * v)
+    // 缩放是对角的: diag(sx, sy, sz) · R
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            const float s = (i == 0) ? sx : ((i == 1) ? sy : sz);
+            m.m[i * 3 + j] = rot.m[i * 3 + j] * s;
+        }
+}
+
+// 构建 mesh_index → 线性变换矩阵。parent_map 记录 node→parent node。
+void BuildMeshTransforms(const tinygltf::Model& model,
+                         std::vector<Mat3>* out_trans) {
+    out_trans->assign(model.meshes.size(), Mat3{});
+
+    // node_index → parent node index
+    std::vector<int> parent(model.nodes.size(), -1);
+    for (size_t n = 0; n < model.nodes.size(); ++n)
+        for (int ch : model.nodes[n].children)
+            if (ch >= 0 && ch < static_cast<int>(model.nodes.size()))
+                parent[ch] = static_cast<int>(n);
+
+    for (size_t n = 0; n < model.nodes.size(); ++n) {
+        Mat3 acc{};
+        int cur = static_cast<int>(n);
+        std::vector<Mat3> chain;
+        while (cur >= 0) { Mat3 m; NodeTRS2Mat3(model.nodes[cur], m); chain.push_back(m); cur = parent[cur]; }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            Mat3 t; Mat3MulMat3(acc, *it, t); acc = t;
+        }
+        const int mesh_id = model.nodes[n].mesh;
+        if (mesh_id >= 0 && mesh_id < static_cast<int>(model.meshes.size())) {
+            (*out_trans)[mesh_id] = acc;
+        }
+    }
 }
 
 // 解析 glTF 文件 → 场景中所有 primitive，通过 cb 逐条交付。
@@ -446,9 +560,15 @@ bool LoadGltfImpl(const std::string& path,
         }
     }
 
-    // ---- 2. 遍历所有 mesh → 所有 primitive ----
+    // ---- 2. 构建场景图节点变换（mesh → 线性变换）----
+    // 先于 primitive 遍历构建，供下面应用到顶点。
+    std::vector<Mat3> mesh_trans;
+    BuildMeshTransforms(model, &mesh_trans);
+
+    // ---- 3. 遍历所有 mesh → 所有 primitive ----
     bool delivered_any = false;
-    for (const tinygltf::Mesh& mesh : model.meshes) {
+    for (size_t mi = 0; mi < model.meshes.size(); ++mi) {
+        const tinygltf::Mesh& mesh = model.meshes[mi];
         for (const tinygltf::Primitive& prim : mesh.primitives) {
             GltfMeshEntry entry;
             if (!ParsePrimitive(model, prim, base_dir,
@@ -456,6 +576,40 @@ bool LoadGltfImpl(const std::string& path,
                 LOG(ERROR) << "LoadGltf: 解析 primitive 失败 (mesh='"
                            << mesh.name << "')";
                 return false;
+            }
+            // 应用 mesh 的节点变换（旋转+缩放，无平移）到 position/normal
+            if (mi < mesh_trans.size()) {
+                const Mat3& t = mesh_trans[mi];
+                std::vector<float> pos_flat, nrm_flat;
+                // positions: Vec3f → 数组 → 变换 → 写回
+                pos_flat.resize(entry.mesh.positions.size() * 3);
+                for (size_t i = 0; i < entry.mesh.positions.size(); ++i) {
+                    pos_flat[i*3+0] = entry.mesh.positions[i].x();
+                    pos_flat[i*3+1] = entry.mesh.positions[i].y();
+                    pos_flat[i*3+2] = entry.mesh.positions[i].z();
+                }
+                std::vector<float> pos_out;
+                Mat3MulVec(t, pos_flat, &pos_out);
+                for (size_t i = 0; i < entry.mesh.positions.size(); ++i) {
+                    entry.mesh.positions[i] = Vec3f(pos_out[i*3+0], pos_out[i*3+1], pos_out[i*3+2]);
+                }
+                // normals: 应用线性变换后归一化（忽略非均匀缩放的正确逆转置，够用）
+                if (!entry.mesh.normals.empty()) {
+                    nrm_flat.resize(entry.mesh.normals.size() * 3);
+                    for (size_t i = 0; i < entry.mesh.normals.size(); ++i) {
+                        nrm_flat[i*3+0] = entry.mesh.normals[i].x();
+                        nrm_flat[i*3+1] = entry.mesh.normals[i].y();
+                        nrm_flat[i*3+2] = entry.mesh.normals[i].z();
+                    }
+                    std::vector<float> nrm_out;
+                    Mat3MulVec(t, nrm_flat, &nrm_out);
+                    for (size_t i = 0; i < entry.mesh.normals.size(); ++i) {
+                        Vec3f n(nrm_out[i*3+0], nrm_out[i*3+1], nrm_out[i*3+2]);
+                        const float len = std::sqrt(n.x()*n.x()+n.y()*n.y()+n.z()*n.z());
+                        if (len > 1e-8f) n = Vec3f(n.x()/len, n.y()/len, n.z()/len);
+                        entry.mesh.normals[i] = n;
+                    }
+                }
             }
             if (cb) {
                 cb(&entry, user_data);
