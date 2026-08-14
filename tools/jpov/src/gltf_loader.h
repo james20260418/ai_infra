@@ -65,6 +65,15 @@ struct GltfMaterialInfo {
     float metallic_factor = 1.0f;
     float roughness_factor = 1.0f;
     float normal_scale = 1.0f;
+
+    // baseColorFactor: 常值 base 色 (RGBA, [0,1])。
+    // 仅当无 baseColorTexture 时用（纯色材质，如 poly.pizza 家具）。
+    // 默认白色；有纹理时忽略。
+    float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    // emissiveFactor: 常值自发光色 (RGB, [0,1])。
+    // 默认黑色（无自发光）。
+    float emissive_factor[3] = {0.0f, 0.0f, 0.0f};
 };
 
 // 加载 glTF 2.0 (.gltf 或 .glb) 文件中的第一个 mesh/primitve。

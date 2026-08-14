@@ -879,12 +879,19 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
 
         PBRMaterial& mat = prim.material;
 
-        // baseColor
+        // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor
         if (!mi.base_color_tex.empty()) {
             mat.base_color_tex =
                 self->texture_mgr_.LoadFromFile(mi.base_color_tex);
             mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
+        } else {
+            mat.base_color = {mi.base_color[0], mi.base_color[1],
+                              mi.base_color[2], mi.base_color[3]};
         }
+
+        // emissive: 常值自发光色
+        mat.emissive = {mi.emissive_factor[0], mi.emissive_factor[1],
+                        mi.emissive_factor[2], 1.0f};
         // normal
         if (!mi.normal_tex.empty()) {
             mat.normal_tex =
