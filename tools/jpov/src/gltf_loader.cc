@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
@@ -234,55 +235,30 @@ bool ComputeTangentsGltf(MeshData* out) {
 
 // ==================== LoadGltf 实现 ====================
 
-bool LoadGltf(const std::string& path,
-              MeshData* out_mesh,
-              GltfMaterialInfo* out_mat) {
-    CHECK(!path.empty());
-
-    // ---- 1. 解析 glTF 文件 ----
-    tinygltf::TinyGLTF loader;
-    tinygltf::Model model;
-    std::string err, warn;
-
-    bool ok = false;
-    // 根据扩展名选择 ASCII (.gltf) 还是 Binary (.glb)
-    if (path.size() >= 4 &&
-        path.compare(path.size() - 4, 4, ".glb") == 0) {
-        ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
-    } else {
-        ok = loader.LoadASCIIFromFile(&model, &err, &warn, path);
-    }
-
-    if (!warn.empty()) {
-        LOG(WARNING) << "LoadGltf: " << path << " — " << warn;
-    }
-    if (!ok) {
-        LOG(ERROR) << "LoadGltf: 无法加载 " << path << " — " << err;
-        return false;
-    }
-
-    // ---- 2. 定位第一个 mesh 的第一个 primitive ----
-    if (model.meshes.empty()) {
-        LOG(ERROR) << "LoadGltf: 没有 mesh 数据: " << path;
-        return false;
-    }
-    const tinygltf::Mesh& mesh = model.meshes[0];
-    if (mesh.primitives.empty()) {
-        LOG(ERROR) << "LoadGltf: mesh 没有 primitive: " << path;
-        return false;
-    }
-    const tinygltf::Primitive& prim = mesh.primitives[0];
-
+// 解析单个 primitive → CPU MeshData + 材质贴图路径。
+//
+// 内部共享逻辑：LoadGltf（取第一个）与 LoadGltfScene（取全部）共用。
+// 解析流程（纯 CPU，无 GL）：
+//   1. 提取 POSITION / NORMAL / TEXCOORD_0 accessor
+//   2. 索引缓冲展开
+//   3. Y-up → Z-up 坐标变换
+//   4. 推导 tangent
+//   5. 提取材质贴图路径（相对于 glTF 文件目录）
+bool ParsePrimitive(const tinygltf::Model& model,
+                    const tinygltf::Primitive& prim,
+                    const std::string& base_dir,
+                    MeshData* out_mesh,
+                    GltfMaterialInfo* out_mat) {
     // ---- 3. 提取顶点属性 ----
     // POSITION（必有）
     auto pos_it = prim.attributes.find("POSITION");
     if (pos_it == prim.attributes.end()) {
-        LOG(ERROR) << "LoadGltf: primitive 没有 POSITION 属性: " << path;
+        LOG(ERROR) << "LoadGltf: primitive 没有 POSITION 属性";
         return false;
     }
     std::vector<float> pos_flat;
     if (!ReadFloatAccessor(model, pos_it->second, &pos_flat)) {
-        LOG(ERROR) << "LoadGltf: 无法读取 POSITION accessor: " << path;
+        LOG(ERROR) << "LoadGltf: 无法读取 POSITION accessor";
         return false;
     }
     const size_t vcount = pos_flat.size() / 3;
@@ -327,10 +303,15 @@ bool LoadGltf(const std::string& path,
             uv_flat.size() / 2 == vcount) {
             out_mesh->uvs.resize(vcount);
             for (size_t i = 0; i < vcount; ++i) {
-                // glTF UV: V 轴翻转（0 = bottom → 1 = top for OpenGL）
+                // glTF 规范: TEXCOORD_0 的 UV 原点 (0,0) 对应图片左上角
+                // （upper-left, V=0 = top），与 JPOV 的纹理采样约定一致
+                // （stbi_load 不翻转上传，V=0 采样图片顶部，V 向下增大）。
+                // 因此 glTF UV 直接透传，无需翻转。
+                // （对照: OBJ vt 是 V=0=bottom，所以 OBJ 路径实际需要翻转，
+                //   但那是既存行为，本 PR 不改。此处仅对齐 glTF 规范。）
                 out_mesh->uvs[i] = Vec2f(
                     uv_flat[i * 2 + 0],
-                    1.0f - uv_flat[i * 2 + 1]);
+                    uv_flat[i * 2 + 1]);
             }
             out_mesh->flags = static_cast<MeshVertexFlags>(
                 static_cast<uint8_t>(out_mesh->flags) |
@@ -341,7 +322,7 @@ bool LoadGltf(const std::string& path,
     // ---- 4. 展开索引 ----
     if (prim.indices >= 0) {
         if (!ReadIndexAccessor(model, prim.indices, &out_mesh->indices)) {
-            LOG(ERROR) << "LoadGltf: 无法读取 indices accessor: " << path;
+            LOG(ERROR) << "LoadGltf: 无法读取 indices accessor";
             return false;
         }
     }
@@ -361,15 +342,6 @@ bool LoadGltf(const std::string& path,
     }
 
     // ---- 6. 提取材质贴图路径 ----
-    // 解析 glTF 文件所在目录（用于构造相对路径）
-    std::string base_dir;
-    {
-        const size_t last_slash = path.find_last_of("/\\");
-        if (last_slash != std::string::npos) {
-            base_dir = path.substr(0, last_slash + 1);
-        }
-    }
-
     if (prim.material >= 0 &&
         prim.material < static_cast<int>(model.materials.size())) {
         const tinygltf::Material& mat = model.materials[prim.material];
@@ -433,6 +405,103 @@ bool LoadGltf(const std::string& path,
     }
 
     out_mesh->Validate();
+    return true;
+}
+
+// 解析 glTF 文件 → 场景中所有 primitive，通过 cb 逐条交付。
+// 返回 false 表示文件无法加载或解析失败。
+bool LoadGltfImpl(const std::string& path,
+                  GltfMeshEntryCallback cb,
+                  void* user_data) {
+    CHECK(!path.empty());
+
+    // ---- 1. 解析 glTF 文件 ----
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err, warn;
+
+    bool ok = false;
+    // 根据扩展名选择 ASCII (.gltf) 还是 Binary (.glb)
+    if (path.size() >= 4 &&
+        path.compare(path.size() - 4, 4, ".glb") == 0) {
+        ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
+    } else {
+        ok = loader.LoadASCIIFromFile(&model, &err, &warn, path);
+    }
+
+    if (!warn.empty()) {
+        LOG(WARNING) << "LoadGltf: " << path << " — " << warn;
+    }
+    if (!ok) {
+        LOG(ERROR) << "LoadGltf: 无法加载 " << path << " — " << err;
+        return false;
+    }
+
+    // 解析 glTF 文件所在目录（用于构造相对路径）
+    std::string base_dir;
+    {
+        const size_t last_slash = path.find_last_of("/\\");
+        if (last_slash != std::string::npos) {
+            base_dir = path.substr(0, last_slash + 1);
+        }
+    }
+
+    // ---- 2. 遍历所有 mesh → 所有 primitive ----
+    bool delivered_any = false;
+    for (const tinygltf::Mesh& mesh : model.meshes) {
+        for (const tinygltf::Primitive& prim : mesh.primitives) {
+            GltfMeshEntry entry;
+            if (!ParsePrimitive(model, prim, base_dir,
+                                &entry.mesh, &entry.material)) {
+                LOG(ERROR) << "LoadGltf: 解析 primitive 失败 (mesh='"
+                           << mesh.name << "')";
+                return false;
+            }
+            if (cb) {
+                cb(&entry, user_data);
+            }
+            delivered_any = true;
+        }
+    }
+
+    if (!delivered_any) {
+        LOG(ERROR) << "LoadGltf: 场景没有任何可解析的 primitive: " << path;
+        return false;
+    }
+    return true;
+}
+
+bool LoadGltfScene(const std::string& path,
+                   GltfMeshEntryCallback cb,
+                   void* user_data) {
+    CHECK(cb != nullptr);
+    return LoadGltfImpl(path, cb, user_data);
+}
+
+bool LoadGltf(const std::string& path,
+              MeshData* out_mesh,
+              GltfMaterialInfo* out_mat) {
+    CHECK(out_mesh != nullptr);
+    CHECK(out_mat != nullptr);
+
+    // 兼容行为：LoadGltf 只取第一个 primitive。用 user_data 记录是否已取。
+    struct Captured {
+        MeshData* mesh;
+        GltfMaterialInfo* mat;
+        bool got = false;
+    } cap{out_mesh, out_mat};
+
+    auto first_cb = [](const GltfMeshEntry* entry, void* data) {
+        Captured* c = static_cast<Captured*>(data);
+        if (!c->got) {
+            c->got = true;
+            *c->mesh = std::move(entry->mesh);
+            *c->mat = entry->material;
+        }
+    };
+    if (!LoadGltfImpl(path, first_cb, &cap) || !cap.got) {
+        return false;
+    }
     return true;
 }
 

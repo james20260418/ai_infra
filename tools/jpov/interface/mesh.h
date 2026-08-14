@@ -26,6 +26,7 @@
 #ifndef JPOV_MESH_H_
 #define JPOV_MESH_H_
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -86,8 +87,10 @@ struct MeshData {
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
-    std::vector<int32_t[4]> joint_indices;   // 每个顶点 4 个 joint 索引
-    std::vector<float[4]>   joint_weights;   // 每个顶点 4 个 joint 权重
+    // 用 std::array 而非原始 C 数组：std::vector 容纳可拷贝元素，
+    // 使 MeshData 可整体拷贝/移动（否则 vector<C数组> 不可拷贝）。
+    std::vector<std::array<int32_t, 4>> joint_indices;  // 每顶点 4 个 joint 索引
+    std::vector<std::array<float, 4>>   joint_weights;  // 每顶点 4 个 joint 权重
 
     // 顶点数（positions 长度）。
     // Pre-condition: 已调用 Validate()（或至少 positions 已填充）

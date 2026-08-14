@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/input_snapshot.h"
+#include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
@@ -190,6 +191,25 @@ public:
     // mesh_id 不存在 → 静默忽略。
     // Pre-condition: Init() 已调用
     void ReleaseMesh(uint32_t mesh_id);
+
+    // ---- glTF 模型加载 ----
+
+    // LoadGltf: 从 .gltf/.glb 文件加载整个模型并上传 GPU 资源。
+    //
+    // 内部走纯净 loader（无 GL），再用本框架的 MeshManager / TextureManager
+    // 上传几何与贴图（自动去重 + ORM 拆包）。返回的 GltfObject 资源独占。
+    //
+    // 渲染: 在 OneIteration 里用 cmds->DrawGltfObject(obj, ...) 绘制。
+    // 释放: 调 ReleaseGltf(obj)。
+    //
+    // Pre-condition: Init() 已调用
+    // 失败返回空 GltfObject（empty()）。
+    jpov::GltfObject LoadGltf(const std::string& path);
+
+    // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
+    //
+    // Pre-condition: Init() 已调用
+    void ReleaseGltf(const jpov::GltfObject& gltf);
 
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----

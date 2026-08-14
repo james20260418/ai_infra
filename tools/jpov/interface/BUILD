@@ -10,6 +10,14 @@ cc_library(
     ],
 )
 
+# PBRMaterial — 叶子材质类型（被 render_command / gltf_object 共用）
+cc_library(
+    name = "pbr_material",
+    hdrs = ["pbr_material.h"],
+    visibility = ["//visibility:public"],
+    deps = [],
+)
+
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
@@ -18,6 +26,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
+        ":gltf_object",
+        ":pbr_material",
         "//geom/common:vec",
         "@glog_static//:glog",
     ],
@@ -68,6 +78,13 @@ cc_library(
 
 # jpov_interface — 聚合所有接口（方便用户一次性引用）
 cc_library(
+    name = "gltf_object",
+    hdrs = ["gltf_object.h"],
+    visibility = ["//visibility:public"],
+    deps = [":pbr_material"],
+)
+
+cc_library(
     name = "jpov_interface",
     hdrs = [
         "camera.h",
@@ -76,13 +93,17 @@ cc_library(
         "mesh.h",
         "gpumesh.h",
         "window_info.h",
+        "gltf_object.h",
+        "pbr_material.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
+        ":gltf_object",
         ":gpumesh",
         ":input_snapshot",
         ":mesh",
+        ":pbr_material",
         ":render_command",
         ":window_info",
     ],

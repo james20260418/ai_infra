@@ -26,8 +26,13 @@
 #include "geom/common/vec.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/pbr_material.h"
 
 namespace jpov {
+
+// 前置声明：glTF 加载结果（完整定义在 gltf_object.h，避免 include 循环）。
+// DrawGltfObject 只接受按值 const 引用，无需完整类型。
+struct GltfObject;
 
 // ==================== 类型别名 ====================
 
@@ -47,19 +52,6 @@ inline constexpr const char* kFontBuiltinCJK   = "CJK";   // NotoSansCJK-Regular
 inline constexpr const char* kFontBuiltinLatin = "Latin"; // DejaVuSans.ttf
 
 // ==================== 颜色 ====================
-
-// RGBA 颜色，分量 [0, 1]
-struct Color {
-    float r, g, b, a;
-};
-
-// 常用颜色常量
-extern const Color kColorRed;
-extern const Color kColorGreen;
-extern const Color kColorBlue;
-extern const Color kColorWhite;
-extern const Color kColorBlack;
-extern const Color kColorTransparent;
 
 // ==================== 渲染指令类型 ====================
 
@@ -357,51 +349,6 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
-// PBR 材质参数（世界空间 3D 物体着色用）
-//
-// 描述一个 3D 物体的 PBR 材质。每个通道要么用常值（fallback），
-// 要么用纹理（逐像素材质参数场，采样后进 BRDF）。
-// 通道与对应是否有纹理的关系由各字段表达：
-//   - base_color / emissive / ao 为颜色，分别配套 *_tex（0 = 无纹理）
-//   - metallic / roughness 为标量，分别配套 has_*_tex + *_tex
-//   - normal_scale 缩放法线贴图扰动强度
-//
-// 约定：纹理句柄 0 表示无纹理，此时使用对应的常值 fallback。
-//       *_tex 非 0 时采样该纹理作为逐像素材质参数，忽略对应常值。
-struct PBRMaterial {
-    // 便利构造：纯色材质（metallic=0, roughness=1，无纹理/法线/emissive/AO）
-    static PBRMaterial SolidColor(const Color& c) {
-        PBRMaterial m;
-        m.base_color = c;
-        return m;
-    }
-
-    // baseColor: 常值 fallback（base_color_tex ≠ 0 时走纹理采样）
-    Color base_color;
-    uint32_t base_color_tex = 0;
-
-    // metallic / roughness: scalar or texture
-    float metallic = 0.0f;
-    bool has_metallic_tex = false;
-    uint32_t metallic_tex = 0;
-    float roughness = 1.0f;
-    bool has_roughness_tex = false;
-    uint32_t roughness_tex = 0;
-
-    // 法线贴图（扰动法线，采样的 TBN 变换）
-    float normal_scale = 1.0f;
-    uint32_t normal_tex = 0;     // 法线贴图
-
-    // emissive: color or texture
-    Color emissive{0.0f, 0.0f, 0.0f, 1.0f};   // 默认无自发光
-    uint32_t emissive_tex = 0;
-
-    // AO（环境光遮蔽）: color or texture
-    // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽。
-    Color ao{1.0f, 1.0f, 1.0f, 1.0f};
-    uint32_t ao_tex = 0;
-};
-
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
@@ -640,6 +587,18 @@ struct RenderCommandList {
     void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front);
+
+    // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
+    //
+    // 对 obj.primitives 中每个 primitive 展开为一个 DrawObject3DCommand，
+    // 用同一个 center/up/front 放置（整个 glTF 场景作为一个整体摆放）。
+    // 不引入新的渲染命令体 —— 内部就是多个 Object3DCommand。
+    //
+    // 注意: 不检查/释放 obj 的 GPU 资源；释放用 Renderer::ReleaseGltf。
+    // Pre-condition: obj 由 Renderer::LoadGltf 生成，且尚未释放
+    void DrawGltfObject(const GltfObject& obj,
+                        const Vec3f& center,
+                        const Vec3f& up, const Vec3f& front);
 };
 
 }  // namespace jpov

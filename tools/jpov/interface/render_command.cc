@@ -5,6 +5,8 @@
 
 #include "tools/jpov/interface/render_command.h"
 
+#include "tools/jpov/interface/gltf_object.h"
+
 namespace jpov {
 
 void RenderCommandList::Clear() {
@@ -165,6 +167,15 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
     int idx = static_cast<int>(object3d.size());
     object3d.push_back({mesh_id, mat, center, up, front});
     order.emplace_back(DrawCommandType::kObject3D, idx);
+}
+
+void RenderCommandList::DrawGltfObject(const GltfObject& obj,
+                                       const Vec3f& center,
+                                       const Vec3f& up, const Vec3f& front) {
+    // 内部就是多个 Object3DCommand，无新命令体。
+    for (const GltfPrimitive& prim : obj.primitives) {
+        DrawObject3D(prim.mesh_id, prim.material, center, up, front);
+    }
 }
 
 }  // namespace jpov

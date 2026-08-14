@@ -131,11 +131,15 @@ cc_library(
         ":primitives3d_renderer",
         ":shader_manager",
         ":texture_manager",
+        ":gltf_loader",
+        ":orm_unpack",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
+        "//tools/jpov/interface:gltf_object",
         "//geom/common:common",
         "@glog_static//:glog",
+        "//third_party/stb:stb_image",
         "//third_party/stb:stb_image_write",
     ] + select({
         "@platforms//os:windows": [

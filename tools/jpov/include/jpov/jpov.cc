@@ -239,6 +239,21 @@ void JPOV::ReleaseMesh(uint32_t mesh_id) {
     renderer_->GetMeshManager().ReleaseMesh(mesh_id);
 }
 
+// ========== glTF 模型加载 ==========
+
+jpov::GltfObject JPOV::LoadGltf(const std::string& path) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(!path.empty());
+    CHECK(renderer_ != nullptr);
+    return renderer_->LoadGltf(path);
+}
+
+void JPOV::ReleaseGltf(const jpov::GltfObject& gltf) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    renderer_->ReleaseGltf(gltf);
+}
+
 // ========== 核心渲染步骤 ==========
 
 void JPOV::RunOnceInternal(int64_t frame_count,
