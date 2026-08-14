@@ -30,3 +30,17 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# glTF loader smoke test (CPU-only parse check)
+cc_test(
+    name = "jpov_gltf_loader_test",
+    srcs = ["jpov_gltf_loader_test.cc"],
+    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    deps = [
+        "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

@@ -71,6 +71,36 @@ cc_library(
     linkstatic = 1,
 )
 
+# GltfLoader — glTF 2.0 → MeshData + 材质贴图
+cc_library(
+    name = "gltf_loader",
+    srcs = ["gltf_loader.cc"],
+    hdrs = ["gltf_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "//third_party/tinygltf",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# OrmUnpack — ORM 三通道拆包为独立灰度 PNG
+cc_library(
+    name = "orm_unpack",
+    srcs = ["orm_unpack.cc"],
+    hdrs = ["orm_unpack.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//third_party/stb:stb_image_write",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # FontManager — 字体加载 / 光栅化 / 图集管理 / 顶点生成
 cc_library(
     name = "font_manager",
@@ -101,11 +131,15 @@ cc_library(
         ":primitives3d_renderer",
         ":shader_manager",
         ":texture_manager",
+        ":gltf_loader",
+        ":orm_unpack",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
+        "//tools/jpov/interface:gltf_object",
         "//geom/common:common",
         "@glog_static//:glog",
+        "//third_party/stb:stb_image",
         "//third_party/stb:stb_image_write",
     ] + select({
         "@platforms//os:windows": [

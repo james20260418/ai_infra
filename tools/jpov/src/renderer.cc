@@ -10,9 +10,14 @@
 #include <cstdio>
 #include <cstring>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "geom/common/common.h"
+
+#include "tools/jpov/interface/gltf_object.h"
+#include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/orm_unpack.h"
 
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
@@ -22,6 +27,8 @@
 
 // stb_image_write — 轻量级 PNG 编码
 #include "stb_image_write.h"
+// stb_image — PNG/JPEG 解码（RenderGltf 拆 ORM 用）
+#include "stb_image.h"
 
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
@@ -759,6 +766,200 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
     // stb_image_write 接受 RGBA 数据，和 OpenGL 读出的 RGBA 一致。
     // Y 翻转由 stbi_flip_vertically_on_write(1) 在 SaveScreenshot 中处理。
     // 这里不做翻转，让调用者决定。
+}
+
+// ==================== glTF 模型加载 ====================
+
+namespace {
+
+// 把 ORM（metallicRoughnessTexture，R=AO/G=Roughness/B=Metallic）拆成
+// 3 张独立灰度 PNG 写入临时文件，并逐个加载为 GPU 纹理。
+//
+// 返回 {ao_id, roughness_id, metallic_id}。任何一步失败返回全 0。
+// 临时文件写到 <orm_path 所在目录>/<basename>_ao.png 等，保证
+// TextureManager 按绝对路径去重（同一 ORM 只拆/传一次）。
+struct OrmTextureIds {
+    uint32_t ao = 0;
+    uint32_t roughness = 0;
+    uint32_t metallic = 0;
+    bool ok = false;
+};
+
+OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
+                              const std::string& orm_path) {
+    OrmTextureIds out;
+
+    int ow = 0, oh = 0, oc = 0;
+    unsigned char* orm_pixels = stbi_load(orm_path.c_str(), &ow, &oh, &oc, 4);
+    if (!orm_pixels) {
+        LOG(ERROR) << "LoadGltf: 无法加载 ORM 贴图 " << orm_path
+                   << " (" << stbi_failure_reason() << ")";
+        return out;
+    }
+
+    // 临时 ORM 文件写到统一 scratch 目录，避免污染资源目录/仓库。
+    // 路径按 ORM 源 basename 稳定生成，保证 TextureManager 按绝对路径
+    // 去重（同一 ORM 只拆/传一次）。
+    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
+    std::system(("mkdir -p " + scratch_dir).c_str());
+    const size_t last_slash = orm_path.find_last_of("/\\");
+    const std::string base_name = (last_slash == std::string::npos)
+        ? orm_path : orm_path.substr(last_slash + 1);
+    const size_t dot = base_name.find_last_of('.');
+    const std::string stem = (dot == std::string::npos)
+        ? base_name : base_name.substr(0, dot);
+
+    const struct { int channel; const char* suffix; } kChannels[] = {
+        {0, "_ao.png"},      // R = AO
+        {1, "_rough.png"},   // G = Roughness
+        {2, "_metal.png"},   // B = Metallic
+    };
+    uint32_t ids[3] = {0, 0, 0};
+    for (int i = 0; i < 3; ++i) {
+        std::vector<unsigned char> png =
+            ExtractChannelToPng(orm_pixels, ow, oh, kChannels[i].channel);
+        if (png.empty()) {
+            LOG(ERROR) << "LoadGltf: ORM 通道 " << i << " 拆包失败";
+            stbi_image_free(orm_pixels);
+            return out;
+        }
+        const std::string tmp = scratch_dir + stem + kChannels[i].suffix;
+        FILE* f = std::fopen(tmp.c_str(), "wb");
+        if (!f) {
+            LOG(ERROR) << "LoadGltf: 无法写临时 ORM 文件 " << tmp;
+            stbi_image_free(orm_pixels);
+            return out;
+        }
+        std::fwrite(png.data(), 1, png.size(), f);
+        std::fclose(f);
+        ids[i] = tex_mgr.LoadFromFile(tmp);
+    }
+    stbi_image_free(orm_pixels);
+
+    out.ao = ids[0];
+    out.roughness = ids[1];
+    out.metallic = ids[2];
+    out.ok = true;
+    return out;
+}
+
+}  // namespace
+
+GltfObject Renderer::LoadGltf(const std::string& path) {
+    GltfObject obj;
+
+    // ORM 贴图按源路径去重缓存（多 primitive 共享同一 arm 图时只拆一次）
+    std::unordered_map<std::string, OrmTextureIds> orm_cache;
+
+    // 逐 primitive 交付：注册 mesh/贴图，填充 GltfObject。
+    struct CollectCtx {
+        Renderer* self;
+        GltfObject* obj;
+        std::unordered_map<std::string, OrmTextureIds>* orm_cache;
+    };
+
+    auto collect = [](const GltfMeshEntry* entry, void* data) {
+        CollectCtx* ctx = static_cast<CollectCtx*>(data);
+        Renderer* self = ctx->self;
+        GltfObject* obj = ctx->obj;
+        std::unordered_map<std::string, OrmTextureIds>* orm_cache =
+            ctx->orm_cache;
+
+        const GltfMaterialInfo& mi = entry->material;
+        GltfPrimitive prim;
+        prim.mesh_id = self->mesh_mgr_.RegisterMesh(entry->mesh);
+
+        PBRMaterial& mat = prim.material;
+
+        // baseColor
+        if (!mi.base_color_tex.empty()) {
+            mat.base_color_tex =
+                self->texture_mgr_.LoadFromFile(mi.base_color_tex);
+            mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
+        }
+        // normal
+        if (!mi.normal_tex.empty()) {
+            mat.normal_tex =
+                self->texture_mgr_.LoadFromFile(mi.normal_tex);
+            mat.normal_scale = mi.normal_scale;
+        }
+        // ORM → metallic / roughness / ao
+        if (!mi.metallic_roughness_tex.empty()) {
+            const std::string& orm = mi.metallic_roughness_tex;
+            OrmTextureIds oid;
+            auto it = orm_cache->find(orm);
+            if (it != orm_cache->end()) {
+                oid = it->second;
+            } else {
+                oid = LoadOrmTextures(self->texture_mgr_, orm);
+                (*orm_cache)[orm] = oid;
+            }
+            if (oid.ok) {
+                mat.metallic = mi.metallic_factor;
+                mat.has_metallic_tex = true;
+                mat.metallic_tex = oid.metallic;
+                mat.roughness = mi.roughness_factor;
+                mat.has_roughness_tex = true;
+                mat.roughness_tex = oid.roughness;
+                mat.ao_tex = oid.ao;
+            } else {
+                LOG(ERROR) << "LoadGltf: ORM 拆包失败，退回常值材质";
+                mat.metallic = mi.metallic_factor;
+                mat.roughness = mi.roughness_factor;
+            }
+        } else {
+            mat.metallic = mi.metallic_factor;
+            mat.roughness = mi.roughness_factor;
+        }
+
+        obj->primitives.push_back(std::move(prim));
+    };
+
+    CollectCtx ctx{this, &obj, &orm_cache};
+    if (!jpov::LoadGltfScene(path, collect, &ctx) || obj.primitives.empty()) {
+        // 失败或空：释放已注册的资源
+        ReleaseGltf(obj);
+        LOG(ERROR) << "Renderer::LoadGltf: 加载失败 " << path;
+        return {};
+    }
+
+    LOG(INFO) << "Renderer::LoadGltf: " << path << " → "
+              << obj.primitives.size() << " primitives";
+    return obj;
+}
+
+void Renderer::ReleaseGltf(const GltfObject& gltf) {
+    // 收集本 gltf 的所有 mesh / texture id，去重后释放。
+    std::vector<uint32_t> mesh_ids;
+    std::vector<uint32_t> tex_ids;
+
+    auto push_tex = [&tex_ids](uint32_t id) {
+        if (id == 0) return;
+        if (std::find(tex_ids.begin(), tex_ids.end(), id) == tex_ids.end()) {
+            tex_ids.push_back(id);
+        }
+    };
+
+    for (const GltfPrimitive& prim : gltf.primitives) {
+        if (prim.mesh_id != 0) {
+            mesh_ids.push_back(prim.mesh_id);
+        }
+        const PBRMaterial& m = prim.material;
+        push_tex(m.base_color_tex);
+        push_tex(m.normal_tex);
+        push_tex(m.metallic_tex);
+        push_tex(m.roughness_tex);
+        push_tex(m.ao_tex);
+        push_tex(m.emissive_tex);
+    }
+
+    // mesh_id 去重释放（一个 mesh 只属于一个 primitive）
+    for (uint32_t id : mesh_ids) {
+        mesh_mgr_.ReleaseMesh(id);
+    }
+    for (uint32_t id : tex_ids) {
+        texture_mgr_.Release(id);
+    }
 }
 
 }  // namespace jpov

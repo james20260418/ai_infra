@@ -11,6 +11,7 @@
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/mesh_manager.h"
@@ -43,6 +44,29 @@ struct Renderer {
 
     TextureManager& GetTextureManager() { return texture_mgr_; }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
+
+    // ========== glTF 模型加载（用户可见入口） ==========
+    //
+    // LoadGltf: 从 .gltf/.glb 文件加载整个模型并上传 GPU 资源。
+    //   - 内部调用纯净 loader（tinygltf → MeshData/材质路径，无 GL）
+    //   - 用 MeshManager 上传几何、TextureManager 上传贴图
+    //   - 多 mesh / 共享贴图自动去重
+    //   - ORM (metallicRoughnessTexture) 自动拆分为 AO/Roughness/Metallic
+    //   - 返回 GltfObject（资源独占，见 gltf_object.h）
+    //
+    // 返回的 GltfObject 用 RenderCommandList::DrawGltfObject() 渲染，
+    // 用 ReleaseGltf() 释放。
+    //
+    // Pre-condition: GL context 已激活（Init 之后）
+    // 失败: 返回空 GltfObject（empty()）。
+    GltfObject LoadGltf(const std::string& path);
+
+    // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
+    //
+    // 仅释放本 gltf 加载时创建的资源（独享约定，见 gltf_object.h）。
+    // 同一 gltf 重复调用安全（Manager Release 幂等）。
+    // Pre-condition: GL context 已激活（或正在析构）
+    void ReleaseGltf(const GltfObject& gltf);
 
 private:
     unsigned int fbo_ = 0, color_tex_ = 0, stream_vbo_ = 0;
