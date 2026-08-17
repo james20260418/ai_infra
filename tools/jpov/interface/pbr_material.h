@@ -37,10 +37,24 @@ extern const Color kColorBlack;
 extern const Color kColorTransparent;
 
 struct PBRMaterial {
-    // 便利构造：纯色材质（metallic=0, roughness=1，无纹理/法线/emissive/AO）
+    // 便利构造：纯色材质（无纹理/法线/emissive/AO）。
+    // metallic / roughness 给一组居中默认值（塑料感）：
+    //   metallic = 0.0（非金属）、roughness = 0.5（半光滑）。
     static PBRMaterial SolidColor(const Color& c) {
         PBRMaterial m;
         m.base_color = c;
+        m.metallic = 0.0f;
+        m.roughness = 0.5f;
+        return m;
+    }
+
+    // 便利构造：纯色材质 + 显式 metalic/roughness（其余同 SolidColor）。
+    // 调用方想自定义金属度/粗糙度时用此接口。
+    static PBRMaterial SolidColorMR(const Color& c, float metallic,
+                                    float roughness) {
+        PBRMaterial m = SolidColor(c);
+        m.metallic = metallic;
+        m.roughness = roughness;
         return m;
     }
 

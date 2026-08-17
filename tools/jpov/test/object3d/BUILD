@@ -228,4 +228,41 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# box gold test（MeshData::MakeBox + PBRMaterial 纯色构造验证）
+# 共享 jpov_box_gold_common.h 的场景构建，纯程序化 mesh（无 glTF 资源）。
+# generator 写仓库 gold image (box_1280x720.png)。
 
+cc_binary(
+    name = "jpov_box_gold_generator",
+    srcs = [
+        "jpov_box_gold_generator.cc",
+        "jpov_box_gold_common.h",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_box_gold_test",
+    srcs = [
+        "jpov_box_gold_test.cc",
+        "jpov_box_gold_common.h",
+    ],
+    data = [
+        ":box_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
