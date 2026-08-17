@@ -488,4 +488,86 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     glPopAttrib();
 }
 
+// ==================== DrawObject3DShadow ====================
+
+void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
+                                          MeshManager& mesh_mgr,
+                                          ShaderManager& shader_mgr,
+                                          const float shadow_vp[16],
+                                          unsigned int shadow_prog) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawObject3DShadow: mesh_id " << cmd.mesh_id
+                           << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+
+    const float up_len =
+        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
+    const float fr_len =
+        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
+    CHECK_GT(up_len, 1e-8f) << "DrawObject3DShadow: up 向量不能为零";
+    CHECK_GT(fr_len, 1e-8f) << "DrawObject3DShadow: front 向量不能为零";
+
+    float model[16];
+    float shadow_mvp[16];
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
+    Mat4Mul(shadow_vp, model, shadow_mvp);
+
+    glUseProgram(shadow_prog);
+    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowMVP"),
+                       1, GL_FALSE, shadow_mvp);
+
+    glBindVertexArray(mesh->vao);
+    if (mesh->index_count > 0) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                       GL_UNSIGNED_INT, nullptr);
+    } else {
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+    }
+    glBindVertexArray(0);
+}
+
+// ==================== UploadSunData ====================
+
+void Object3DRenderer::UploadSunData(
+    const RenderCommandList& cmds,
+    ShaderManager& shader_mgr,
+    unsigned int prog,
+    unsigned int prog_full,
+    unsigned int shadow_depth_tex,
+    const float* shadow_vp,
+    int shadow_size) {
+    const bool has_sun = cmds.sun.has_value();
+
+    const unsigned int progs[2] = {prog, prog_full};
+    for (int pidx = 0; pidx < 2; ++pidx) {
+        unsigned int p = progs[pidx];
+        glUseProgram(p);
+        glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), has_sun ? 1 : 0);
+        if (!has_sun) {
+            continue;
+        }
+        const DirectionalLight& sun = *cmds.sun;
+        glUniform3f(shader_mgr.GetUniform(p, "uSunDir"),
+                    sun.direction.x(), sun.direction.y(), sun.direction.z());
+        glUniform3f(shader_mgr.GetUniform(p, "uSunColor"),
+                    sun.color.r, sun.color.g, sun.color.b);
+        glUniform1f(shader_mgr.GetUniform(p, "uSunIntensity"), sun.intensity);
+
+        if (shadow_depth_tex != 0 && shadow_vp != nullptr && shadow_size > 0) {
+            glActiveTexture(GL_TEXTURE7);
+            glBindTexture(GL_TEXTURE_2D, shadow_depth_tex);
+            glUniform1i(shader_mgr.GetUniform(p, "uShadowMap"), 7);
+            glUniformMatrix4fv(shader_mgr.GetUniform(p, "uShadowVP"),
+                               1, GL_FALSE, shadow_vp);
+            glUniform1f(shader_mgr.GetUniform(p, "uShadowTexel"),
+                        1.0f / static_cast<float>(shadow_size));
+            glUniform1f(shader_mgr.GetUniform(p, "uShadowBias"), 0.004f);
+        } else {
+            // 无阴影贴图：把 uHasSun 置 0，强制走无太阳路径（防御，不应发生）。
+            glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+    }
+}
+
 }  // namespace jpov

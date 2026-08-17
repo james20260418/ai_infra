@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include <utility>
@@ -358,6 +359,20 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
+// 全局平行光（太阳 Directional Light）。
+//
+// 与点光源不同：无位置、无衰减、影响所有片元，因此不走 tile culling，
+// 作为全局单一光源独立上传。平行光用正交 shadow map 产生影子
+//（见 RenderCommandList.sun + Renderer 的 shadow pass）。
+//
+// direction 是光**传播方向**（从光源指向场景的单位向量，y-up 世界，
+// 如正午太阳直射向下约 (0,-1,0)）。"朝上"（+y）的表面接收最强光照。
+struct DirectionalLight {
+    Vec3f direction;      // 光传播方向（从光源指向目标，建议归一化）
+    Color color;          // 光颜色（太阳白光或暖色夕阳光）
+    float intensity = 1.0f;  // 整体亮度标量
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
@@ -435,6 +450,11 @@ struct RenderCommandList {
     // 让该光源覆盖更大范围（甚至全屏）以保证不漏光。因此“某 light 影响
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
+
+    // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
+    // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
+    // 并对直射光施加阴影因子。
+    std::optional<DirectionalLight> sun;
 
     // Object3D 跳过点光源（默认 false）。
     // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；

@@ -92,6 +92,33 @@ void main() {
 }
 )glsl";
 
+    // kShadowVs: 阴影 pass 专用 vertex shader。
+    //   输入: vec3 aPos(loc=0)，uniform: mat4 uShadowMVP（光空间 ViewProj × Model）
+    // 把顶点变换到太阳正交相机裁剪空间，输出光空间 ndc.z（[-1,1]）供写入阴影纹理。
+    static constexpr const char* kShadowVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uShadowMVP;
+out float vShadowDepth;
+void main() {
+    vec4 clip = uShadowMVP * vec4(aPos, 1.0);
+    gl_Position = clip;
+    vShadowDepth = clip.z / clip.w;   // ndc 深度 [-1,1]
+}
+)glsl";
+
+    // kShadowFs: 阴影 pass fragment shader。把光空间深度写入颜色通道 .r。
+    // 用 RGBA32F 颜色纹理存深度（而非 GL 深度缓冲），避开 headless/软渲染下
+    // depth 纹理采样精度/格式不一致的问题（见 renderer.cc EnsureShadowFBO）。
+    static constexpr const char* kShadowFs = R"glsl(
+#version 330 core
+in float vShadowDepth;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vShadowDepth, 0.0, 0.0, 1.0);
+}
+)glsl";
+
     // kMeshFs3dPBR: 统一 GGX PBR fragment shader（Tiled Forward）
     //   两版 vertex shader 共用此 frag。
     //   内置 tile culling（readTileLights → 只算本 tile 命中的光源）。
@@ -147,8 +174,45 @@ uniform float uNormalScale;
 
 uniform sampler2D uTileLightIndices;
 
+// 太阳平行光（DirectionalLight）+ 阴影。
+// uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并采样 uShadowMap 做 PCF 阴影。
+uniform int   uHasSun;
+uniform vec3  uSunDir;       // 光传播方向（归一化），从光源指向场景
+uniform vec3  uSunColor;     // 光颜色
+uniform float uSunIntensity;
+uniform sampler2D uShadowMap;   // 太阳正交空间的深度贴图（TEXTURE7，.r = ndc.z）
+uniform mat4  uShadowVP;        // 光空间 ViewProj（把世界坐标变换到光空间裁剪坐标）
+uniform float uShadowTexel;     // 1.0 / shadow map 尺寸（PCF 纹素步长）
+uniform float uShadowBias;      // 深度偏移，抗自阴影 acne
+
 const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
 const float AMBIENT_STRENGTH = 0.4;
+
+const float PI = 3.14159265;
+
+// 阴影因子：对世界坐标在太阳正交光空间里采样深度贴图，做 3×3 PCF。
+// 返回 [0,1]，1=完全受照，0=完全在影子里。
+// shadow map 存的是光空间 ndc.z（[-1,1]，正交投影下与线性能深对应）。
+// 用 slope-scaled bias 抗自阴影 acne：掠射角越大（dot(N,L) 越小）偏置越大。
+float shadowFactor(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;       // xy [-1,1] -> [0,1]
+    // 超出光锥（视锥外）视为受照，避免场景边缘一片黑。
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;
+    }
+    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float cur = ndc.z - slopeBias;
+    float shadow = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float d = texture(uShadowMap, uv + vec2(float(dx), float(dy)) * uShadowTexel).r;
+            shadow += (cur <= d) ? 1.0 : 0.0;
+        }
+    }
+    return shadow / 9.0;
+}
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
@@ -160,7 +224,7 @@ float distributionGGX(vec3 N, vec3 H, float roughness) {
     float NdotH = max(dot(N, H), 0.0);
     float NdotH2 = NdotH * NdotH;
     float denom = NdotH2 * (a2 - 1.0) + 1.0;
-    denom = 3.14159265 * denom * denom;
+    denom = PI * denom * denom;
     return a2 / max(denom, 1e-7);
 }
 
@@ -246,6 +310,34 @@ void main() {
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 
+    // ── 太阳平行光（直射 GGX diffuse + specular，× 阴影因子）──
+    // 平行光无衰减、方向全局，独立于 tile culling 的点光源循环。
+    if (uHasSun == 1) {
+        vec3 L = normalize(-uSunDir);       // 从片元指向光源
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL > 0.0) {
+            float shadow = shadowFactor(vWorldPos, N, L);
+            vec3 light_col = uSunColor * uSunIntensity * shadow;
+
+            // diffuse（Lambert + 菲涅尔去金属部分）
+            vec3 Hd = normalize(L + V);
+            vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
+                         mix(vec3(0.04), base_color, metallic));
+            vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
+            total_diffuse += light_col * (kD * base_color / PI) * NdotL;
+
+            // specular（GGX Cook-Torrance）
+            vec3 H = normalize(L + V);
+            float NdotV = max(dot(N, V), 0.0);
+            vec3 F0 = mix(vec3(0.04), base_color, metallic);
+            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+            float D = distributionGGX(N, H, roughness);
+            float G = geometrySmith(N, V, L, roughness);
+            vec3 spec = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
+            total_specular += light_col * spec * NdotL;
+        }
+    }
+
     for (int i = 0; i < num_lights; i++) {
         uint li = light_indices[i];
         vec3 L = uLights[li].position - vWorldPos;
@@ -278,7 +370,7 @@ void main() {
             vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
                          mix(vec3(0.04), base_color, metallic));
             vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
-            vec3 diffuse = kD * base_color / 3.14159265;
+            vec3 diffuse = kD * base_color / PI;
             total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
         }
 
@@ -398,6 +490,27 @@ void main() {
                              unsigned int prog,
                              unsigned int prog_full,
                              unsigned int tile_index_tex);
+
+    // ---- DrawObject3DShadow ----
+    // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D
+    // 从太阳正交光空间视角画进阴影纹理（只写光空间 ndc.z 到颜色 .r，不光照）。
+    static void DrawObject3DShadow(const Object3DCommand& cmd,
+                                   MeshManager& mesh_mgr,
+                                   ShaderManager& shader_mgr,
+                                   const float shadow_vp[16],
+                                   unsigned int shadow_prog);
+
+    // ---- UploadSunData ----
+    // 把 cmds.sun（DirectionalLight）与阴影贴图参数上传到 PBR shader。
+    // 无 sun 时仅把 uHasSun 置 0。两个 shader program 都上传。
+    static void UploadSunData(
+        const RenderCommandList& cmds,
+        ShaderManager& shader_mgr,
+        unsigned int prog,
+        unsigned int prog_full,
+        unsigned int shadow_depth_tex,
+        const float* shadow_vp,
+        int shadow_size);
 };
 
 }  // namespace jpov

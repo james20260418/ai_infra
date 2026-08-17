@@ -33,6 +33,11 @@ typedef void (*GL_DeleteFramebuffers)(int, const unsigned int*);
 typedef void (*GL_BindFramebuffer)(unsigned int, unsigned int);
 typedef void (*GL_FramebufferTexture2D)(unsigned int, unsigned int, unsigned int, unsigned int, int);
 typedef unsigned int (*GL_CheckFramebufferStatus)(unsigned int);
+typedef void (*GL_GenRenderbuffers)(int, unsigned int*);
+typedef void (*GL_DeleteRenderbuffers)(int, const unsigned int*);
+typedef void (*GL_BindRenderbuffer)(unsigned int, unsigned int);
+typedef void (*GL_RenderbufferStorage)(unsigned int, unsigned int, int, int);
+typedef void (*GL_FramebufferRenderbuffer)(unsigned int, unsigned int, unsigned int, unsigned int);
 typedef void (*GL_GenTextures)(int, unsigned int*);
 typedef void (*GL_DeleteTextures)(int, const unsigned int*);
 typedef void (*GL_BindTexture)(unsigned int, unsigned int);
@@ -83,6 +88,11 @@ extern GL_DeleteFramebuffers     gl_DeleteFramebuffers;
 extern GL_BindFramebuffer        gl_BindFramebuffer;
 extern GL_FramebufferTexture2D   gl_FramebufferTexture2D;
 extern GL_CheckFramebufferStatus gl_CheckFramebufferStatus;
+extern GL_GenRenderbuffers        gl_GenRenderbuffers;
+extern GL_DeleteRenderbuffers     gl_DeleteRenderbuffers;
+extern GL_BindRenderbuffer        gl_BindRenderbuffer;
+extern GL_RenderbufferStorage     gl_RenderbufferStorage;
+extern GL_FramebufferRenderbuffer gl_FramebufferRenderbuffer;
 extern GL_GenTextures            gl_GenTextures;
 extern GL_DeleteTextures         gl_DeleteTextures;
 extern GL_BindTexture            gl_BindTexture;
@@ -142,6 +152,11 @@ int gl_loader_init(void);
 #define glBlitFramebuffer        gl_BlitFramebuffer
 #define glBufferData             gl_BufferData
 #define glCheckFramebufferStatus gl_CheckFramebufferStatus
+#define glGenRenderbuffers        gl_GenRenderbuffers
+#define glDeleteRenderbuffers     gl_DeleteRenderbuffers
+#define glBindRenderbuffer        gl_BindRenderbuffer
+#define glRenderbufferStorage     gl_RenderbufferStorage
+#define glFramebufferRenderbuffer gl_FramebufferRenderbuffer
 #define glCompileShader          gl_CompileShader
 #define glCreateProgram          gl_CreateProgram
 #define glCreateShader           gl_CreateShader
@@ -224,6 +239,9 @@ int gl_loader_init(void);
 #endif
 #ifndef GL_TEXTURE6
 #define GL_TEXTURE6 0x84C6
+#endif
+#ifndef GL_TEXTURE7
+#define GL_TEXTURE7 0x84C7
 #endif
 
 #endif  // _WIN32

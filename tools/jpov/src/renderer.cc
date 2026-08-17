@@ -121,6 +121,65 @@ void main() {
 
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 
+// 构建正交投影矩阵（列主序，OpenGL 右手系）。阴影 pass 用：太阳是平行光，视锥是正交盒。
+void BuildOrthoProj(float left, float right, float bottom, float top,
+                    float near_, float far_, float out[16]) {
+    for (int i = 0; i < 16; ++i) out[i] = 0.0f;
+    out[0]  = 2.0f / (right - left);
+    out[5]  = 2.0f / (top - bottom);
+    out[10] = -2.0f / (far_ - near_);
+    out[12] = -(right + left) / (right - left);
+    out[13] = -(top + bottom) / (top - bottom);
+    out[14] = -(far_ + near_) / (far_ - near_);
+    out[15] = 1.0f;
+}
+
+// 构建 lookAt 视图矩阵。
+//
+// ⚠️ 必须与 Primitives3DRenderer::BuildMVP 里的 lookAt 布局完全一致：那处是
+// 「行主序书写、列主序存储」的转置写法（view[0..3] 装 side/upv/-fwd 的 x 分量），
+// 而非教科书 column-major。此处 copy 成同一种转置布局，否则阴影相机的 view 会
+// 整体转置 → 影子 x/y 对调、depth 映射到错误轴（2026-08-17 踩坑实录）。
+void BuildLookAt(const Vec3f& eye, const Vec3f& center, const Vec3f& up,
+                 float out[16]) {
+    Vec3f fwd = center - eye;
+    float f_len = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
+    if (f_len < 1e-8f) { fwd = Vec3f(0.0f, 0.0f, -1.0f); }
+    else { fwd = Vec3f(fwd.x()/f_len, fwd.y()/f_len, fwd.z()/f_len); }
+
+    Vec3f side = Vec3f(fwd.y()*up.z() - fwd.z()*up.y(),
+                       fwd.z()*up.x() - fwd.x()*up.z(),
+                       fwd.x()*up.y() - fwd.y()*up.x());
+    float s_len = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
+    if (s_len < 1e-8f) { side = Vec3f(1.0f, 0.0f, 0.0f); }
+    else { side = Vec3f(side.x()/s_len, side.y()/s_len, side.z()/s_len); }
+
+    Vec3f upv = Vec3f(side.y()*fwd.z() - side.z()*fwd.y(),
+                      side.z()*fwd.x() - side.x()*fwd.z(),
+                      side.x()*fwd.y() - side.y()*fwd.x());
+
+    out[0] = side.x(); out[1] = upv.x(); out[2]  = -fwd.x(); out[3] = 0.0f;
+    out[4] = side.y(); out[5] = upv.y(); out[6]  = -fwd.y(); out[7] = 0.0f;
+    out[8] = side.z(); out[9] = upv.z(); out[10] = -fwd.z(); out[11] = 0.0f;
+    out[12] = -(side.x()*eye.x() + side.y()*eye.y() + side.z()*eye.z());
+    out[13] = -(upv.x()*eye.x() + upv.y()*eye.y() + upv.z()*eye.z());
+    out[14] =  (fwd.x()*eye.x() + fwd.y()*eye.y() + fwd.z()*eye.z());
+    out[15] = 1.0f;
+}
+
+// 手动矩阵乘（列主序），out = a * b。与 Object3DRenderer 匿名空间的 Mat4Mul 等价。
+void RendererMat4Mul(const float a[16], const float b[16], float out[16]) {
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += a[k*4 + r] * b[c*4 + k];
+            }
+            out[c*4 + r] = sum;
+        }
+    }
+}
+
 }  // anonymous namespace
 
 namespace jpov {
@@ -141,6 +200,7 @@ Renderer::~Renderer() {
     DestroyOutputFBO();
     Destroy3DFBO();
     Destroy3DResolveFBO();
+    DestroyShadowFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
@@ -201,6 +261,62 @@ void Renderer::Destroy3DResolveFBO() {
     }
     resolve_fbo_3d_w_ = 0;
     resolve_fbo_3d_h_ = 0;
+}
+
+void Renderer::DestroyShadowFBO() {
+    if (shadow_fbo_) {
+        glDeleteFramebuffers(1, &shadow_fbo_);
+        glDeleteTextures(1, &shadow_depth_tex_);
+        glDeleteRenderbuffers(1, &shadow_rb_);
+        shadow_fbo_ = 0;
+        shadow_depth_tex_ = 0;
+        shadow_rb_ = 0;
+    }
+    shadow_size_ = 0;
+}
+
+void Renderer::EnsureShadowFBO(int size) {
+    if (shadow_size_ == size && shadow_fbo_ && shadow_depth_tex_) return;
+
+    CHECK_GT(size, 0);
+    CHECK_LE(size, kMaxFboDim);
+
+    DestroyShadowFBO();
+
+    // 阴影贴图用 RGBA32F 颜色纹理存光空间 ndc.z（而非 GL 深度缓冲）。
+    // 原因（2026-08-17 踩坑）：llvmpipe（headless/Xvfb 软渲染）下 depth 纹理
+    // 采样精度/格式不可靠 —— glReadPixels 读 FBO depth 正确，但 shader 里
+    // texture(depthTex).r 采样同一张 depth texture 却得到错值。硬件 GPU 无此问题，
+    // 但软渲染会。故改用手动写 ndc.z 到浮点颜色纹理的 .r 通道，采样即可靠。
+    glGenTextures(1, &shadow_depth_tex_);
+    glBindTexture(GL_TEXTURE_2D, shadow_depth_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &shadow_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, shadow_depth_tex_, 0);
+
+    // 配套 depth renderbuffer：仅遮挡测试用（保证只写最近遮挡物深度），
+    // 阴影深度数据本身写入颜色纹理的 .r 通道（见 kShadowFs）。
+    glGenRenderbuffers(1, &shadow_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, shadow_rb_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size, size);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, shadow_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "Shadow FBO failed, status=" << status;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    shadow_size_ = size;
 }
 
 
@@ -394,6 +510,12 @@ unsigned int Renderer::DrawObject3DProgFull() {
         {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
 }
 
+// 太阳阴影 pass 专用 shader（深度专用，见 kShadowVs/kShadowFs）。
+unsigned int Renderer::ShadowProg() {
+    return shader_mgr_.GetOrCreate("shadow",
+        {Object3DRenderer::kShadowVs, Object3DRenderer::kShadowFs});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -405,6 +527,7 @@ void Renderer::CompileShaders() {
     Text3DProg();
     DrawObject3DProg();
     DrawObject3DProgFull();
+    ShadowProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -488,6 +611,14 @@ void Renderer::Render(const RenderCommandList& cmds,
         //                   不再改矩阵栈了，但保留 push/pop 习惯）
         glPushAttrib(GL_ENABLE_BIT | GL_VIEWPORT_BIT);
 
+        // ---- 第 0 步：太阳阴影 pass（有 sun 时）----
+        // 先渲染场景深度到阴影纹理，主 pass 的 PBR shader 才能采样做影子。
+        // DrawShadowPass 内部会绑定 shadow FBO 并改变 GL 状态，放在 Ensure3DFBO
+        // 之前：后续 Ensure3DFBO + bind + clear 会恢复正常 3D 状态。
+        if (cmds.sun.has_value()) {
+            DrawShadowPass(cmds);
+        }
+
         // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
         Ensure3DFBO(fbo_3d_w, fbo_3d_h);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
@@ -520,6 +651,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::BuildTileLightIndices(cmds,
                 fbo_3d_w, fbo_3d_h, tile_index_tex_,
                 tile_grid_w_, tile_grid_h_, tile_tex_w_, tile_tex_h_, mvp_);
+        }
+
+        // 太阳平行光 + 阴影贴图 uniform（有 sun 时）。
+        // 绑 shadow 深度纹理到 PBR shader，供直射光的 PCF 阴影采样。
+        if (cmds.sun.has_value()) {
+            Object3DRenderer::UploadSunData(cmds, shader_mgr_,
+                DrawObject3DProg(), DrawObject3DProgFull(),
+                shadow_depth_tex_, shadow_vp_, shadow_size_);
         }
 
         // 用 3D FBO 尺寸计算 MVP
@@ -682,6 +821,80 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 break;
         }
     }
+}
+
+// ---- DrawShadowPass ----
+// 太阳阴影 pass：当 cmds.sun 有值时，把场景里所有 Object3D 从太阳正交视角
+// 渲染进阴影纹理（只写光空间 ndc.z），供主 pass 的 PBR shader 采样做 PCF 阴影。
+//
+// world_up 固定为 y 轴正向 (0,1,0)；若用户给的太阳方向近乎正上方（direction 与
+// -y 几乎平行），lookAt 会退化，故把方向偏置到非正上方（世界 x 方向略偏）。
+void Renderer::DrawShadowPass(const RenderCommandList& cmds) {
+    const int kShadowSize = 1024;
+
+    // 场景质心（每个 object center 平均；空场景退回原点）。
+    Vec3f centroid(0.0f, 0.0f, 0.0f);
+    if (!cmds.object3d.empty()) {
+        float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+        for (const auto& o : cmds.object3d) {
+            cx += o.center.x(); cy += o.center.y(); cz += o.center.z();
+        }
+        const float inv = 1.0f / static_cast<float>(cmds.object3d.size());
+        centroid = Vec3f(cx * inv, cy * inv, cz * inv);
+    }
+
+    // 光源位置：沿 direction 反向退一定距离（正交投影下成像只由方向决定）。
+    const DirectionalLight& sun = *cmds.sun;
+    const float kLightDist = 40.0f;
+    const float kHalf = 20.0f;
+    const float kNear = kLightDist - kHalf;
+    const float kFar  = kLightDist + kHalf;
+
+    // 光传播方向归一化；若近乎正上方（direction 平行 -y 到接近 1），偏置到非正上方，
+    // 避免 lookAt 的 cross(fwd, world_up) 退化（fwd 与 up 平行 → side=0）。
+    Vec3f dir(sun.direction.x(), sun.direction.y(), sun.direction.z());
+    float dlen = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
+    if (dlen < 1e-8f) { dir = Vec3f(0.0f, -1.0f, 0.0f); dlen = 1.0f; }
+    dir = Vec3f(dir.x()/dlen, dir.y()/dlen, dir.z()/dlen);
+    if (std::fabs(dir.y()) > 0.98f) {
+        // 近乎正上方：沿 x 略偏，避免与 world_up=(0,1,0) 平行。
+        dir = Vec3f(0.1f, (dir.y() < 0.0f ? -1.0f : 1.0f), dir.z());
+        float nd = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
+        dir = Vec3f(dir.x()/nd, dir.y()/nd, dir.z()/nd);
+    }
+
+    Vec3f eye = centroid - Vec3f(dir.x(), dir.y(), dir.z()) * kLightDist;
+    const Vec3f world_up(0.0f, 1.0f, 0.0f);  // y-up 世界
+
+    float view[16], proj[16], vp[16];
+    BuildLookAt(eye, centroid, world_up, view);
+    BuildOrthoProj(-kHalf, kHalf, -kHalf, kHalf, kNear, kFar, proj);
+    RendererMat4Mul(proj, view, vp);
+    for (int i = 0; i < 16; ++i) shadow_vp_[i] = vp[i];
+
+    EnsureShadowFBO(kShadowSize);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo_);
+    glViewport(0, 0, kShadowSize, kShadowSize);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    // 清颜色为 1.0（ndc.z=1.0 = 最远 = 无遮挡），深度清为最远。
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    const unsigned int shadow_prog = ShadowProg();
+    for (const auto& o : cmds.object3d) {
+        Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, shader_mgr_,
+                                             shadow_vp_, shadow_prog);
+    }
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {
