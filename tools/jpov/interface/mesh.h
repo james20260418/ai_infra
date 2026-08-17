@@ -96,6 +96,23 @@ struct MeshData {
     // Pre-condition: 已调用 Validate()（或至少 positions 已填充）
     size_t VertexCount() const { return positions.size(); }
 
+    // MakeBox: 构造一个局部坐标轴对齐盒（box），中心在局部原点。
+    //
+    // 只需三个尺寸（沿局部坐标轴的半宽），摆放位置/朝向交给渲染时的
+    // DrawObject3D 的 center / up / front 决定（见 render_command.h）：
+    //   - 局部 +Z 轴 = Draw 的 front 方向 → front_half_width
+    //   - 局部 +Y 轴 = Draw 的 up 方向 → up_half_width
+    //   - 局部 +X 轴 = Draw 的 left 方向（= cross(up, front)）→ left_half_width
+    //
+    // 生成的盒体：8 角点 = (±left_half_width, ±up_half_width, ±front_half_width)，
+    // 6 个面、每面独立 4 顶点（共 24 顶点）+ 独立法线，12 个三角形（36 index）。
+    // 顶点属性含 kPosition + kNormal。
+    //
+    // Pre-condition: 三个 half_width 均 > 0。
+    static MeshData MakeBox(float front_half_width,
+                            float up_half_width,
+                            float left_half_width);
+
     // 校验各数组长度与 positions 一致、flag 声明与数据匹配。
     // 非法输入（长度不一致 / 缺 position / 骨骼 flag 但数据缺失）→ LOG(FATAL) crash。
     //
@@ -187,6 +204,82 @@ inline void MeshData::Validate() const {
         CHECK(joint_weights.empty())
             << "MeshData::Validate: 未声明 kJoints 但 joint_weights 非空";
     }
+}
+
+inline MeshData MeshData::MakeBox(float front_half_width,
+                                  float up_half_width,
+                                  float left_half_width) {
+    CHECK_GT(front_half_width, 0.0f) << "MakeBox: front_half_width 必须 > 0";
+    CHECK_GT(up_half_width, 0.0f) << "MakeBox: up_half_width 必须 > 0";
+    CHECK_GT(left_half_width, 0.0f) << "MakeBox: left_half_width 必须 > 0";
+
+    const float fw = front_half_width;
+    const float uw = up_half_width;
+    const float lw = left_half_width;
+
+    // 8 角点（局部轴对齐，中心原点）。局部坐标轴：+X=left, +Y=up, +Z=front。
+    // idx 0..7 = (±l, ±u, ±f) 组合（sl/su/sf 分别是 ±1 缩放 lw/uw/fw 半宽）。
+    auto corner = [&](int sl, int su, int sf) {
+        return Vec3f(sl * lw, su * uw, sf * fw);
+    };
+    const Vec3f corners[8] = {
+        corner(+1, +1, +1),  // 0: +l +u +f
+        corner(-1, +1, +1),  // 1: -l +u +f
+        corner(+1, -1, +1),  // 2: +l -u +f
+        corner(-1, -1, +1),  // 3: -l -u +f
+        corner(+1, +1, -1),  // 4: +l +u -f
+        corner(-1, +1, -1),  // 5: -l +u -f
+        corner(+1, -1, -1),  // 6: +l -u -f
+        corner(-1, -1, -1),  // 7: -l -u -f
+    };
+
+    MeshData mesh;
+    mesh.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(MeshVertexFlags::kPosition) |
+        static_cast<uint8_t>(MeshVertexFlags::kNormal));
+
+    // 每个面独立 4 顶点（共 24）+ 独立法线 + 2 三角形（共 12）。
+    auto addFace = [&mesh](const Vec3f& p0, const Vec3f& p1,
+                          const Vec3f& p2, const Vec3f& p3,
+                          const Vec3f& n) {
+        const uint32_t base = static_cast<uint32_t>(mesh.positions.size());
+        mesh.positions.push_back(p0);
+        mesh.positions.push_back(p1);
+        mesh.positions.push_back(p2);
+        mesh.positions.push_back(p3);
+        for (int i = 0; i < 4; ++i) {
+            mesh.normals.push_back(n);
+        }
+        mesh.indices.push_back(base + 0);
+        mesh.indices.push_back(base + 1);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 0);
+        mesh.indices.push_back(base + 2);
+        mesh.indices.push_back(base + 3);
+    };
+
+    const Vec3f pos_x( 1.0f,  0.0f,  0.0f);  // +l（+X）
+    const Vec3f neg_x(-1.0f,  0.0f,  0.0f);  // -l（-X）
+    const Vec3f pos_y( 0.0f,  1.0f,  0.0f);  // +u（+Y）
+    const Vec3f neg_y( 0.0f, -1.0f,  0.0f);  // -u（-Y）
+    const Vec3f pos_z( 0.0f,  0.0f,  1.0f);  // +f（+Z）
+    const Vec3f neg_z( 0.0f,  0.0f, -1.0f);  // -f（-Z）
+
+    // 6 个面（绕序 CCW，从面外侧看）。
+    // +f 面（法线 +Z）
+    addFace(corners[0], corners[1], corners[3], corners[2], pos_z);
+    // -f 面（法线 -Z）
+    addFace(corners[4], corners[6], corners[7], corners[5], neg_z);
+    // +u 面（法线 +Y）
+    addFace(corners[0], corners[4], corners[5], corners[1], pos_y);
+    // -u 面（法线 -Y）
+    addFace(corners[2], corners[3], corners[7], corners[6], neg_y);
+    // +l 面（法线 +X）
+    addFace(corners[0], corners[2], corners[6], corners[4], pos_x);
+    // -l 面（法线 -X）
+    addFace(corners[1], corners[5], corners[7], corners[3], neg_x);
+
+    return mesh;
 }
 
 }  // namespace jpov

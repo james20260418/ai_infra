@@ -96,6 +96,21 @@ void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
                  side.x()*fwd.y() - side.y()*fwd.x()};
 
     // 列主序 lookAt 矩阵 (OpenGL 右手系)
+    //
+    // ⚠️ 重要坑（2026-08-17 影子方向排查实录）：下面这个数组是「行主序书写、
+    // 列主序存储」的转置写法 —— 第一"列"（view[0..3]）装的是 side/upv/-fwd
+    // 的 x 分量，而不是 side 向量本身。
+    //
+    // 教科书式 column-major 写法是：
+    //     view[0]=side.x  view[4]=upv.x  view[8]=-fwd.x   // 第一列 = side 向量
+    //     view[1]=side.y  view[5]=upv.y  view[9]=-fwd.y
+    // 两者差一个转置！本代码库统一用下面这种（转置）约定，它配合
+    //     glUniformMatrix4fv(column-major) + GLSL 的「mat4 * vec4」
+    // 恰好得到正确结果。
+    //
+    // 若你新写/复制一个 lookAt（例如 shadow pass 的 DrawShadowPass 里），
+    // 务必和这里保持同一套布局，否则 view 会整体转置 → 影子/投影的 x/y
+    // 对调、depth 映射到错误轴（ndc.z 变成只由 x 决定）。
     float view[16] = {
         side.x(), upv.x(), -fwd.x(), 0.0f,
         side.y(), upv.y(), -fwd.y(), 0.0f,
@@ -121,6 +136,13 @@ void Primitives3DRenderer::BuildModelMatrix(const Vec3f& center,
     Vec3f frn = {front.x()/f_len, front.y()/f_len, front.z()/f_len};
 
     // right = normalize(cross(up, front))——保证模型右手系
+    //
+    // ⚠️ 命名坑（2026-08-17）：这里叫 right，但 MeshData::MakeBox 及 Danis 的
+    // 接口定义里同一个向量 cross(up, front) 被称作「left」（左方向）。
+    // 两者是同一个向量（数学表达式 identical，都是 up × front），只是命名
+    // 相反。标准右手系 up=(0,1,0)、front=(0,0,1) 下，cross(up,front)=(1,0,0)
+    // 即 +X。写/读涉及此方向的代码时别被 left/right 字面迷惑，认准表达式
+    // cross(up, front) 即可。
     Vec3f right = {upn.y()*frn.z() - upn.z()*frn.y(),
                    upn.z()*frn.x() - upn.x()*frn.z(),
                    upn.x()*frn.y() - upn.y()*frn.x()};
