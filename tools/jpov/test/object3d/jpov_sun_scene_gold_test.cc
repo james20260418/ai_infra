@@ -1,14 +1,14 @@
-// JPOV 场景 gold test —— 3 点光源版（旧 baseline）
+// JPOV 太阳场景 gold test —— 太阳平行光 + 阴影 + 天光版
 //
-// 渲染 3 点光源场景（石头墙 + 5×5 地面 + 桌/凳/盆栽），验证:
-//   1. 第三方 glTF/GLB 适配（poly.pizza 家具 + 程序化地面/墙）
-//   2. tileable 地面纹理 + 程序化法线贴图
-//   3. 3 点光源（无 sun/sky，作太阳版的对比基线）+ camera (3,3,3)
+// 渲染太阳场景（石头墙 + 5×5 地面 + 桌/凳/盆栽，LightMode::kSun），验证:
+//   1. DirectionalLight（太阳平行光）：直射 GGX diffuse + specular 高光
+//   2. 正交 shadow map + PCF 软阴影（物体在地面上投射的清晰影子）
+//   3. 天光 ambient 与太阳并存（顶面亮、侧/影区暗）
 //
 // 测试通过条件：渲染链路跑通 + 输出非平凡效果图。注意：PBR 光照在
 // llvmpipe 下三稳态非确定（leader #16 决策），故不做逐像素颜色比对；
-// 效果正确性由 leader/Danis 肉眼查看 generator 产出的 gold image
-// （scene_1280x720.png）判断。本 test 额外校验 gold image 存在（防回归时
+// 影子效果正确性由 leader/Danis 肉眼查看 generator 产出的 gold image
+// （sun_scene_1280x720.png）判断。本 test 额外校验 gold image 存在（防回归时
 // 误把 gold 删掉/忘生成）。
 
 #include <cstdio>
@@ -24,7 +24,7 @@
 namespace {
 
 std::string GetOutputDir() {
-    return jpov::GetOutputDir() + "jpov_scene_test/";
+    return jpov::GetOutputDir() + "jpov_sun_scene_test/";
 }
 
 // 仓库内 gold image 路径（generator 写入，供肉眼/比对参考）。
@@ -33,11 +33,11 @@ std::string GetGoldPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d/scene_1280x720.png";
+        p += "__main__/tools/jpov/test/object3d/sun_scene_1280x720.png";
         return p;
     }
     return jpov::GetProjectRoot() +
-        "tools/jpov/test/object3d/scene_1280x720.png";
+        "tools/jpov/test/object3d/sun_scene_1280x720.png";
 }
 
 }  // namespace
@@ -52,17 +52,18 @@ int main() {
         const std::string gold = GetGoldPath();
         FILE* f = std::fopen(gold.c_str(), "rb");
         CHECK(f != nullptr) << "gold image 缺失，请先跑 "
-            "jpov_scene_gold_generator: " << gold;
+            "jpov_sun_scene_gold_generator: " << gold;
         std::fclose(f);
         LOG(INFO) << "gold image 存在: " << gold;
     }
 
     JPOV::Config cfg;
-    cfg.title = "JPOV Scene Test (3 point lights)";
+    cfg.title = "JPOV Sun Scene Test (sun + shadow)";
     cfg.headless = true;
     jpov_scene::SceneApp app(cfg);
     app.Init();
     jpov_scene::BuildScene(&app);
+    app.SetLightMode(jpov_scene::LightMode::kSun);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;
@@ -85,7 +86,7 @@ int main() {
     LOG(INFO) << "coverage=" << (cov * 100.0f) << "%";
     CHECK_GT(nz, 0) << "空场景";
 
-    LOG(INFO) << "TEST PASSED: 场景渲染链路跑通 (3 点光源版, gold 见 "
-        "scene_1280x720.png)";
+    LOG(INFO) << "TEST PASSED: 太阳场景渲染链路跑通 (sun + shadow, gold 见 "
+        "sun_scene_1280x720.png)";
     return 0;
 }

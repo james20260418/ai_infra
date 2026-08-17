@@ -84,16 +84,24 @@ private:
     unsigned int resolve_fbo_3d_ = 0, resolve_tex_3d_ = 0;
     int resolve_fbo_3d_w_ = 0, resolve_fbo_3d_h_ = 0;
 
+    // 太阳正交阴影 pass 的 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
+    unsigned int shadow_fbo_ = 0, shadow_depth_tex_ = 0;
+    int shadow_size_ = 0;
+    float shadow_vp_[16];   // 光空间 ViewProj（阴影 pass 生成，供 PBR 采样）
+
     void EnsureFBO(int w, int h);
     void EnsureOutputFBO(int w, int h);
     void Ensure3DFBO(int w, int h);
+    void EnsureShadowFBO(int size);
     void DestroyFBO();
     void DestroyOutputFBO();
     void Destroy3DFBO();
     void Destroy3DResolveFBO();
+    void DestroyShadowFBO();
     void CompileShaders();
     void CreateStreamVBO();
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+    void DrawShadowPass(const RenderCommandList& cmds);
 
     unsigned int strip_vbo_ = 0;
 
@@ -107,6 +115,7 @@ private:
     unsigned int Text3DProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
+    unsigned int ShadowProg();
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;

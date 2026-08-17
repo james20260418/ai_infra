@@ -228,4 +228,47 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 太阳场景 gold test（DirectionalLight + Shadow）：与旧点光源版共用
+# jpov_scene_common.h 的几何，光照模式切到 LightMode::kSun（太阳+阴影+天光）。
+# generator 写仓库 gold image (sun_scene_1280x720.png)
+
+cc_binary(
+    name = "jpov_sun_scene_gold_generator",
+    srcs = [
+        "jpov_sun_scene_gold_generator.cc",
+        "jpov_scene_common.h",
+    ],
+    data = [":scene_assets"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_sun_scene_gold_test",
+    srcs = [
+        "jpov_sun_scene_gold_test.cc",
+        "jpov_scene_common.h",
+    ],
+    data = [
+        ":scene_assets",
+        ":sun_scene_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 

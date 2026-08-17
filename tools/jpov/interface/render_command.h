@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include <utility>
@@ -358,6 +359,41 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
+// 梯度半球天光（Hemispheric Sky Light）。
+//
+// 一个极廉价的"天光"近似：把天空切成上/下两个半球，各给一个颜色，
+// 按片元法线朝上程度线性插值，让"顶面亮、底面/侧面暗"分得出来，
+// 摆脱纯点光源下"平死白背景"。
+//
+//   factor = clamp(N.y * 0.5 + 0.5, 0.0, 1.0)   // 法线朝上→1，朝下→0
+//   ambient = mix(ground_color, sky_color, factor) * intensity
+//
+// 季节/黑白天由调用方切换三参数实现（天光只混色，不含时间模型）：
+//   春: sky=(0.45,0.79,1.0) 绿意地    |   夏: sky=(0.55,0.82,1.0) 饱和
+//   秋: sky=(0.60,0.72,0.90) 橙褐地   |   冬: sky=(0.75,0.85,0.90) 雪白地
+//   白昼: intensity≈1.0 / 黄昏≈0.3 / 夜晚≈0.05
+//
+// 成本：一次 mix，0 额外纹理采样 / 0 额外 draw call。
+struct SkyLight {
+    Color sky_color;      // 天顶方向颜色（随季节/早晚变）
+    Color ground_color;   // 地面反射颜色（随季节变）
+    float intensity = 0.4f;  // 整体亮度标量（黑白天：夜 0.05 / 昼 1.0）
+};
+
+// 全局平行光（太阳 Directional Light）。
+//
+// 与点光源不同：无位置、无 attenuation、影响所有片元，因此**不进 tile culling**，
+// 作为全局单一光源独立上传（类似 SkyLight）。方向光用真正的 orthogonal shadow map
+// 产生硬/半影影子（见 sun 字段 + Renderer 的 shadow pass）。
+//
+// direction 是光**传播方向**（从光源指向场景的单位向量，如正午太阳日光直射向下约
+// (0,-1,0)）。"朝上"的表面接收最强光照，与天空半球天光方向一致。
+struct DirectionalLight {
+    Vec3f direction;      // 光传播方向（从光源指向目标的归一化向量）
+    Color color;          // 光颜色（太阳白光或暖色夕阳光）
+    float intensity = 1.0f;  // 整体亮度标量
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
@@ -435,6 +471,16 @@ struct RenderCommandList {
     // 让该光源覆盖更大范围（甚至全屏）以保证不漏光。因此“某 light 影响
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
+
+    // 全局天光（当前为梯度半球近似）。
+    // 未设置时 PBR 退回旧常量 ambient（AMBIENT_COLOR=白, AMBIENT_STRENGTH=0.4），
+    // 以保持既有 point light gold test 不回归；有值时做半球插值。
+    std::optional<SkyLight> sky_light;
+
+    // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
+    // 有值时 Renderer 额外做一次 shadow pass（orthogonal 深度），
+    // PBR shader 采样阴影贴图并对直射光施加 shadow factor。
+    std::optional<DirectionalLight> sun;
 
     // Object3D 跳过点光源（默认 false）。
     // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；

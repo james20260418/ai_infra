@@ -1,9 +1,10 @@
-// JPOV 场景 gold image generator —— 点光源版
+// JPOV 场景 gold image generator —— 3 点光源版（旧 baseline）
 //
-// 渲染点光源场景并写仓库内的 gold image（供 leader/Danis 肉眼查看效果）：
+// 渲染 3 点光源场景并写仓库内的 gold image（供 leader/Danis 肉眼查看效果）：
 //   tools/jpov/test/object3d/scene_1280x720.png
 //
-// 与 jpov_scene_gold_test 共用 jpov_scene_common.h 的场景构建，保证一致。
+// 与 jpov_sun_scene_gold_test（太阳+阴影版）共用 jpov_scene_common.h 的场景
+// 几何，仅光照模式不同（默认 LightMode::kPointLights = 旧基线）。
 // 输出: 640x360（同其它 gold 惯例，文件名 1280x720 仅为分辨率标记）。
 #include <cstdio>
 #include <string>
@@ -18,7 +19,7 @@ int main() {
         "/james_pm/ai_infra/tools/jpov/test/object3d/scene_1280x720.png";
 
     JPOV::Config cfg;
-    cfg.title = "JPOV Scene Gold Generator (point lights)";
+    cfg.title = "JPOV Scene Gold Generator (3 point lights)";
     cfg.headless = true;
     jpov_scene::SceneApp app(cfg);
     app.Init();
