@@ -347,43 +347,6 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
-# ============================================================================
-# Gold Image Test — 平放 wall 石材 + 单点光源（逐步过渡到草地的基线）
-# 场景：平放 wall（大面朝上）+ 点光 (0,3,0)，tile culling 开，太阳关。
-# generator 写仓库 gold image (repeated_wall_1280x720.png)，test 渲染 + smoke check。
-# ============================================================================
-cc_binary(
-    name = "jpov_repeated_wall_gold_generator",
-    srcs = ["jpov_repeated_wall_gold_generator.cc"],
-    data = [":scene_assets"],
-    deps = [
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:gltf_object",
-        "//tools/common:utils",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
-    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-)
-
-cc_test(
-    name = "jpov_repeated_wall_gold_test",
-    srcs = ["jpov_repeated_wall_gold_test.cc"],
-    data = [
-        ":scene_assets",
-        ":repeated_wall_1280x720.png",
-    ],
-    deps = [
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:gltf_object",
-        "//tools/common:utils",
-        "//third_party/stb:stb_image",
-        "//tools/jpov/test:test_utils",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
-    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-)
 
 # ============================================================================
 # Gold Image Test — 平放 quad + pbr_cube_normal_mr 金属材质（法线凸起观察）

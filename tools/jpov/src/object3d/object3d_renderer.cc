@@ -221,10 +221,15 @@ void Object3DRenderer::BuildTileLightIndices(const RenderCommandList& cmds,
         float pmax_y = py;
         bool crosses_camera = false;
 
-        const Vec3f dirs[6] = {
-            { 1,0,0}, {-1,0,0}, {0, 1,0}, {0,-1,0}, {0,0, 1}, {0,0,-1},
+        // 保守包围：投影光源影响球的世界空间 AABB 的 8 个角点（±radius 各方向）。
+        // （之前只投 6 个轴向点会 undershoot：球投影是椭圆，off-axis 时 6 个
+        //  轴向点的 bbox 漏掉真实轮廓 → 边缘 tile 无 light index → 漏光暗带。
+        //  AABB ⊇ 球，故其 8 角投影 bbox 必 ⊇ 球投影，保证不漏 tile。）
+        const Vec3f dirs[8] = {
+            { 1, 1, 1}, { 1, 1,-1}, { 1,-1, 1}, { 1,-1,-1},
+            {-1, 1, 1}, {-1, 1,-1}, {-1,-1, 1}, {-1,-1,-1},
         };
-        for (int d = 0; d < 6; ++d) {
+        for (int d = 0; d < 8; ++d) {
             const Vec3f bp = {
                 cx.x() + dirs[d].x() * radius,
                 cx.y() + dirs[d].y() * radius,
