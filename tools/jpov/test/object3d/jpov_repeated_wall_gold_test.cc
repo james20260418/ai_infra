@@ -76,9 +76,9 @@ public:
         cmds->camera.target   = {0.0f, 0.1f, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
 
-        // 单点光源顶光 (0,3,0)。tile culling 默认 true；不设 sun（太阳关）。
+        // 单点光源 (0,3,0)：亮度在 color RGB(6)，linear_radius=有效距离10，physical_radius=高光铺开。
         cmds->point_lights.push_back({
-            {0.0f, 3.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 12.0f, 0.5f});
+            {0.0f, 3.0f, 0.0f}, {6.0f, 6.0f, 6.0f, 1.0f}, 10.0f, 0.5f});
 
         // 平放 wall：恒等朝向（glTF loader 已 z-up→y-up，大面在局部 XZ 平面）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.1f, 0.0f},

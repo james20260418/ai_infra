@@ -67,11 +67,13 @@ public:
         cmds->camera.target   = {0.0f, 0.1f, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
 
-        // 单点光源从正上方 (0,3,0)，让朝上的大面法线细节受光清晰
+        // 单点光源 (0,3,0)：亮度写在 color 的 RGB（如 {6,6,6,1}），
+        // linear_radius 是有效距离（给足避免近板时衰减，如 10），
+        // physical_radius 控制 Representative Point 高光铺开。
         cmds->point_lights.push_back({
-            {0.0f, 3.0f, 0.0f},          // position
-            {1.0f, 1.0f, 1.0f, 1.0f},   // color
-            12.0f,                       // intensity
+            {0.0f, 3.0f, 0.0f},          // position (0,3,0) 正上方
+            {6.0f, 6.0f, 6.0f, 1.0f},   // color = RGB 亮度（6.0）
+            10.0f,                       // linear_radius = 有效距离
             0.5f                         // physical_radius
         });
 
