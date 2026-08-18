@@ -1,7 +1,11 @@
-// JPOV 场景 gold 测试 —— 共享场景构建
+// JPOV 场景 gold 测试 —— 共享场景构建（阳光版）
 //
-// 点光源版场景：石头墙 + 5×5 地面（左砖右土）+ 中央桌 + 桌边凳 + 桌上盆栽，
-// 3 点光源 (3,0,0)/(0,0,3)/(0,3,0)，camera 中心 (3,3,3)。
+// 从 jpov_scene_common.h 复制：石头墙 + 5×5 地面（左砖右土）+ 中央桌 +
+// 桌边凳 + 桌上盆栽，场景几何/材质完全一致。
+//
+// 与点光源版唯一区别在光照（"只改光照"）：去掉 3 个点光源，改用太阳平行光
+//  `cmds->sun`，方向 (0,-1,-1)（从斜上方照向场景），走 DirectionalLight +
+// 级联阴影（CSM, ShadowConfig::Default()）。用于整体查看太阳光+阴影效果。
 //
 // 本头文件被 generator（写仓库 gold image）和 test（渲染+smoke check）共用，
 // 保证两边场景完全一致，避免重复维护。
@@ -10,8 +14,8 @@
 // 文件头注释，leader #16 决策），故本 test 不做逐像素颜色比对，只做 smoke
 // check + 校验 gold image 存在供肉眼参考。
 
-#ifndef JPOV_TEST_OBJECT3D_JPOV_SCENE_COMMON_H_
-#define JPOV_TEST_OBJECT3D_JPOV_SCENE_COMMON_H_
+#ifndef JPOV_TEST_OBJECT3D_JPOV_SCENE_IN_SUN_COMMON_H_
+#define JPOV_TEST_OBJECT3D_JPOV_SCENE_IN_SUN_COMMON_H_
 
 #include <cstdint>
 #include <string>
@@ -21,7 +25,7 @@
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/common/utils.h"
 
-namespace jpov_scene {
+namespace jpov_scene_in_sun {
 
 // 需要在 scene_assets/ 下的子路径（build 时经 runfiles / GetProjectRoot 解析）
 inline std::string AssetPath(const std::string& rel) {
@@ -36,7 +40,7 @@ inline std::string AssetPath(const std::string& rel) {
 }
 
 // 渲染应用：持有一组 GltfObject，OneIteration 里绘制整个布景。
-class SceneApp : public JPOV {
+class SceneSunApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -64,20 +68,20 @@ public:
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // camera: 中心拉远到 (3,3,3)，3/4 高角望向场景中心
+        // camera: 中心拉远到 (3,3,3)，3/4 高角望向场景中心（同点光源版）
         const jpov::Vec3f scene_center = {0.0f, 0.6f, 0.0f};
         cmds->camera.position = {3.0f, 3.0f, 3.0f};
         cmds->camera.target   = scene_center;
         cmds->camera.near     = 0.05f;
 
-        // 3 点光源：位置 (3,0,0)/(0,0,3)/(0,3,0)，physical 半径 0.5m，
-        // 强度与原 gold test 一致（白光 3,3,3,1, radius 6.0）
-        cmds->point_lights.push_back({
-            {3.0f, 0.0f, 0.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
-        cmds->point_lights.push_back({
-            {0.0f, 0.0f, 3.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
-        cmds->point_lights.push_back({
-            {0.0f, 3.0f, 0.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
+        // ── 光照：只改光照 ──
+        // 去掉点光源版 3 点光源，改用太阳平行光（DirectionalLight）。
+        // direction=(0,-1,-1)：光从斜上方（+y 略偏 +z）照向场景，产生清晰影子。
+        cmds->sun = jpov::DirectionalLight{
+            /*direction*/ {0.0f, -1.0f, -1.0f},
+            /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
+            /*intensity*/ 3.0f,
+        };
 
         for (const Slot& s : slots_) {
             cmds->DrawGltfObject(s.obj, s.center, s.up, s.front);
@@ -86,8 +90,8 @@ public:
 };
 
 // 加载并摆放整个布景（与 test 共用，保证场景一致）。
-// app 需已 Init()。
-inline void BuildScene(SceneApp* app) {
+// app 需已 Init()。场景几何/材质与点光源版完全一致。
+inline void BuildScene(SceneSunApp* app) {
     // poly.pizza 家具 baseColor 极暗（木≈0.1/黑≈0.03），为可读性统一提亮。
     auto brighten = [](jpov::GltfObject* o, float k) {
         for (auto& p : o->primitives) {
@@ -149,6 +153,6 @@ inline void BuildScene(SceneApp* app) {
     app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {1,0,0}, {0,1,0});
 }
 
-}  // namespace jpov_scene
+}  // namespace jpov_scene_in_sun
 
-#endif  // JPOV_TEST_OBJECT3D_JPOV_SCENE_COMMON_H_
+#endif  // JPOV_TEST_OBJECT3D_JPOV_SCENE_IN_SUN_COMMON_H_

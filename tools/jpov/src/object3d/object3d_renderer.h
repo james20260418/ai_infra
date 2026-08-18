@@ -174,44 +174,114 @@ uniform float uNormalScale;
 
 uniform sampler2D uTileLightIndices;
 
-// 太阳平行光（DirectionalLight）+ 阴影。
-// uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并采样 uShadowMap 做 PCF 阴影。
+// 太阳平行光（DirectionalLight）+ 级联阴影（CSM）。
+// uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并按片元距相机距离选级联，
+// 采样对应 uShadowMap[c] 做 PCF 阴影；最后按距相机距离淡出影子强度。
 uniform int   uHasSun;
 uniform vec3  uSunDir;       // 光传播方向（归一化），从光源指向场景
 uniform vec3  uSunColor;     // 光颜色
 uniform float uSunIntensity;
-uniform sampler2D uShadowMap;   // 太阳正交空间的深度贴图（TEXTURE7，.r = ndc.z）
-uniform mat4  uShadowVP;        // 光空间 ViewProj（把世界坐标变换到光空间裁剪坐标）
-uniform float uShadowTexel;     // 1.0 / shadow map 尺寸（PCF 纹素步长）
-uniform float uShadowBias;      // 深度偏移，抗自阴影 acne
+uniform int   uCascadeCount;          // 级联段数
+uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
+uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = ndc.z）
+uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj
+uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
+uniform float uShadowBias;            // 深度偏移，抗自阴影 acne
+uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
+uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
 const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
 const float AMBIENT_STRENGTH = 0.4;
 
 const float PI = 3.14159265;
 
-// 阴影因子：对世界坐标在太阳正交光空间里采样深度贴图，做 3×3 PCF。
+// 阴影因子：对世界坐标在指定级联的光空间里采样深度贴图，做 3×3 PCF。
 // 返回 [0,1]，1=完全受照，0=完全在影子里。
 // shadow map 存的是光空间 ndc.z（[-1,1]，正交投影下与线性能深对应）。
 // 用 slope-scaled bias 抗自阴影 acne：掠射角越大（dot(N,L) 越小）偏置越大。
-float shadowFactor(vec3 world_pos, vec3 N, vec3 L) {
-    vec4 lsp = uShadowVP * vec4(world_pos, 1.0);
+// ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
+// 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
+// uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
+float shadowFactorC0(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP[0] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;       // xy [-1,1] -> [0,1]
-    // 超出光锥（视锥外）视为受照，避免场景边缘一片黑。
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return 1.0;
-    }
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
     float slopeBias = uShadowBias * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            float d = texture(uShadowMap, uv + vec2(float(dx), float(dy)) * uShadowTexel).r;
-            shadow += (cur <= d) ? 1.0 : 0.0;
-        }
-    }
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+        shadow += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
     return shadow / 9.0;
+}
+float shadowFactorC1(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP[1] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float cur = ndc.z - slopeBias;
+    float shadow = 0.0;
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+        shadow += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
+    return shadow / 9.0;
+}
+float shadowFactorC2(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP[2] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float cur = ndc.z - slopeBias;
+    float shadow = 0.0;
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+        shadow += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
+    return shadow / 9.0;
+}
+float shadowFactorC3(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP[3] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float cur = ndc.z - slopeBias;
+    float shadow = 0.0;
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+        shadow += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
+    return shadow / 9.0;
+}
+float shadowFactorC4(vec3 world_pos, vec3 N, vec3 L) {
+    vec4 lsp = uShadowVP[4] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float cur = ndc.z - slopeBias;
+    float shadow = 0.0;
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+        shadow += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
+    return shadow / 9.0;
+}
+
+// 按片元到相机的距离选级联（0 起），并对影子做线性淡出。
+// 返回最终阴影因子 [0,1]（1=完全受照无影，0=全影）。
+// 选段用 if/else 链（cascade 索引是编译期常量，避开 sampler 数组动态索引限制）。
+float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
+    if (uCascadeCount <= 0 || uHasSun == 0) return 1.0;
+    if (frag_dist >= uShadowFadeEnd) return 1.0;   // 淡出结束：无影子
+    int c = 0;
+    for (int i = 0; i < uCascadeCount; i++)
+        if (frag_dist <= uCascadeRanges[i]) { c = i; break; }
+    float shadow;
+    if (c == 0) shadow = shadowFactorC0(world_pos, N, L);
+    else if (c == 1) shadow = shadowFactorC1(world_pos, N, L);
+    else if (c == 2) shadow = shadowFactorC2(world_pos, N, L);
+    else if (c == 3) shadow = shadowFactorC3(world_pos, N, L);
+    else shadow = shadowFactorC4(world_pos, N, L);
+    // 淡出：fade 从 1（frag_dist<=fade_start）线性降到 0（frag_dist>=fade_end）。
+    // shadow = mix(1.0, shadow, fade)：fade=0 时 shadow=1.0（无影子，亮度变大）。
+    float fade = 1.0 - clamp((frag_dist - uShadowFadeStart) / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
+    return mix(1.0, shadow, fade);
 }
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
@@ -310,13 +380,14 @@ void main() {
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 
-    // ── 太阳平行光（直射 GGX diffuse + specular，× 阴影因子）──
+    // ── 太阳平行光（直射 GGX diffuse + specular，× 级联阴影因子）──
     // 平行光无衰减、方向全局，独立于 tile culling 的点光源循环。
     if (uHasSun == 1) {
         vec3 L = normalize(-uSunDir);       // 从片元指向光源
         float NdotL = max(dot(N, L), 0.0);
         if (NdotL > 0.0) {
-            float shadow = shadowFactor(vWorldPos, N, L);
+            float frag_dist = length(uCameraPos - vWorldPos);
+            float shadow = computeSunShadow(vWorldPos, N, L, frag_dist);
             vec3 light_col = uSunColor * uSunIntensity * shadow;
 
             // diffuse（Lambert + 菲涅尔去金属部分）
@@ -501,16 +572,19 @@ void main() {
                                    unsigned int shadow_prog);
 
     // ---- UploadSunData ----
-    // 把 cmds.sun（DirectionalLight）与阴影贴图参数上传到 PBR shader。
+    // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。
     // 无 sun 时仅把 uHasSun 置 0。两个 shader program 都上传。
+    // shadow_fbos: 各级联 shadow FBO（取 .tex 绑到 TEXTURE7+i），
+    //              长度须 == cfg.cascade_count。
+    // shadow_vp:   各级联光空间 ViewProj，[kMaxCascades][16]。
     static void UploadSunData(
         const RenderCommandList& cmds,
         ShaderManager& shader_mgr,
         unsigned int prog,
         unsigned int prog_full,
-        unsigned int shadow_depth_tex,
-        const float* shadow_vp,
-        int shadow_size);
+        const std::vector<CascadeFBO>& shadow_fbos,
+        const float shadow_vp[][16],
+        const ShadowConfig& cfg);
 };
 
 }  // namespace jpov

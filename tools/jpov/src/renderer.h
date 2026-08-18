@@ -35,7 +35,8 @@ struct Renderer {
     Renderer& operator=(const Renderer&) = delete;
 
     void Init(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
-              const std::vector<std::tuple<const char*, int, const char*>>& default_fonts);
+              const std::vector<std::tuple<const char*, int, const char*>>& default_fonts,
+              const ShadowConfig& shadow_cfg);
     void BeginFrame(int render_w, int render_h);
     void Render(const RenderCommandList& cmds, const WindowInfo& winfo);
     void Present(GLFWwindow* window, int window_width, int window_height);
@@ -84,17 +85,18 @@ private:
     unsigned int resolve_fbo_3d_ = 0, resolve_tex_3d_ = 0;
     int resolve_fbo_3d_w_ = 0, resolve_fbo_3d_h_ = 0;
 
-    // 太阳正交阴影 pass 的 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
-    // shadow_depth_tex_ 实为 RGBA32F 颜色纹理（存光空间 ndc.z），
-    // shadow_rb_ 为配套 depth renderbuffer（仅遮挡测试用）。
-    unsigned int shadow_fbo_ = 0, shadow_depth_tex_ = 0, shadow_rb_ = 0;
-    int shadow_size_ = 0;
-    float shadow_vp_[16];   // 光空间 ViewProj（阴影 pass 生成，供 PBR 采样）
+    // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
+    // 每一级联独立 FBO/深度纹理/尺寸，数量 = ShadowConfig::cascade_count。
+    // tex 实为 RGBA32F 颜色纹理（存光空间 ndc.z），rb 为配套 depth renderbuffer
+    //（仅遮挡测试用，见 EnsureShadowFBO）。
+    std::vector<CascadeFBO> shadow_fbos_;   // 长度 = cascade_count（每帧按配置重建）
+    float shadow_vp_[ShadowConfig::kMaxCascades][16]; // 各级联光空间 ViewProj
+    ShadowConfig shadow_cfg_;               // 当前生效的阴影配置（Init 传入）
 
     void EnsureFBO(int w, int h);
     void EnsureOutputFBO(int w, int h);
     void Ensure3DFBO(int w, int h);
-    void EnsureShadowFBO(int size);
+    void EnsureShadowFBO(const ShadowConfig& cfg);
     void DestroyFBO();
     void DestroyOutputFBO();
     void Destroy3DFBO();

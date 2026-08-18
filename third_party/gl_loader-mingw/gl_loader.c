@@ -55,6 +55,7 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_GetUniformLocation,     "glGetUniformLocation");
     LOAD_FUNC(gl_Uniform2f,              "glUniform2f");
     LOAD_FUNC(gl_Uniform1f,              "glUniform1f");
+    LOAD_FUNC(gl_Uniform1fv,             "glUniform1fv");
     LOAD_FUNC(gl_Uniform3f,              "glUniform3f");
     LOAD_FUNC(gl_Uniform4f,              "glUniform4f");
     LOAD_FUNC(gl_GenFramebuffers,        "glGenFramebuffers");
@@ -112,6 +113,7 @@ DEFINE_PTR(GL_UseProgram,             gl_UseProgram);
 DEFINE_PTR(GL_GetUniformLocation,     gl_GetUniformLocation);
 DEFINE_PTR(GL_Uniform2f,              gl_Uniform2f);
 DEFINE_PTR(GL_Uniform1f,              gl_Uniform1f);
+DEFINE_PTR(GL_Uniform1fv,             gl_Uniform1fv);
 DEFINE_PTR(GL_Uniform3f,              gl_Uniform3f);
 DEFINE_PTR(GL_Uniform4f,              gl_Uniform4f);
 DEFINE_PTR(GL_GenFramebuffers,        gl_GenFramebuffers);

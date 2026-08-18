@@ -81,6 +81,10 @@ public:
         // Run() 按此帧率调度 OneIteration，实际帧率受 vsync 限制。
         // 设为 0 表示不限制（尽可能快）。
         int target_fps = 60;
+
+        // 全局阴影配置（CSM）。默认 = ShadowConfig::Default()（开放世界通用）。
+        // 无 sun 时该配置不生效；有 sun 时按此切分级联、每段渲染独立 shadow map。
+        jpov::ShadowConfig shadow;
     };
 
     explicit JPOV(Config cfg);

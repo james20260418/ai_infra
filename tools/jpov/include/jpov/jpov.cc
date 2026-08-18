@@ -157,7 +157,7 @@ void JPOV::Init() {
     };
 
     renderer_ = std::make_unique<jpov::Renderer>();
-    renderer_->Init(font_tuples, kDefaultFonts);
+    renderer_->Init(font_tuples, kDefaultFonts, config_.shadow);
 
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
