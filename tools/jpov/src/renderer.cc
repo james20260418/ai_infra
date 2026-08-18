@@ -682,6 +682,27 @@ void Renderer::Render(const RenderCommandList& cmds,
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // ---- 第 0.5 步：天光背景（有 sky 指令时）----
+        // 先画程序化天光垫底（不写深度、不参与深度测试），3D 物体随后用深度覆盖。
+        // 独立 shader program（sky），一帧一次 draw，与 object3d PBR 完全分开。
+        // 纯 Preetham 程序化天空 + 日月圆盘，不依赖 HDRI/纹理。
+        if (cmds.sky.has_value()) {
+            // 天空垫底：关深度测试（背景永远最远），关面剔除（全屏三角形）
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+
+            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+                                 shader_mgr_);
+
+            // 恢复 3D 物体所需的深度状态
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);
+        }
+
         // 先用当前 Camera 计算 MVP（Proj * View，不含 Model）。
         // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
         Primitives3DRenderer::BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);

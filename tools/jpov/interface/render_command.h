@@ -23,6 +23,11 @@
 #include <vector>
 #include <utility>
 
+// SunDir() 用 std::cos/sin。需在首次 include <cmath> 前定义 _USE_MATH_DEFINES，
+// 否则 MinGW 下后续 geom/math_util.h 的 M_PI 未定义（_USE_MATH_DEFINES 生效太晚）。
+#define _USE_MATH_DEFINES
+#include <cmath>
+
 #include <glog/logging.h>
 #include "geom/common/vec.h"
 
@@ -419,6 +424,72 @@ struct CascadeFBO {
     int size = 0;
 };
 
+// 天光（Sky）指令 —— 程序化 Preetham 天空 + 太阳/月亮圆盘
+//
+// 用解析式大气模型（Preetham-Shirley-Smits 1999，见 box3d preetham.glsl）
+// 计算纯色天空：太阳位置(时间) + turbidity(天气) + season(季节色温) 就能
+// 得到真实蓝天/晚霞/霾景的**方向非对称**颜色（太阳方向红橙、对面蓝黑）。
+// 非 HDRI——纯程序化、参数少、连续可动画。
+//
+// 一帧一次，独立 sky shader program，先画（垫 3D FBO 背景）再画 3D 物体。
+// 太阳/月亮在程序化天空上画一个**发光圆盘**（高斯衰减），可切日月。
+// 地平线以下（pitch<0 的下半球）画纯色 ground_color（避免天空倒影感）。
+//
+// ⚠️ 与 DirectionalLight(cmds.sun) 的关系（后续重构点）：
+//   SkyCommand 里的 sun_elevation/sun_azimuth 定义了“太阳在天空的位置”。
+//   它应能推导出与 DirectionalLight 相同的太阳方向（见 sunDirection 注释），
+//   但目前**不动 DirectionalLight pipeline**（本 command 只管天球背景）。
+//   sun_pos 单位向量 = (cosθ·sinφ, sinθ, cosθ·cosφ)，θ=仰角, φ=方位(0=+z)。
+//   平行光传播方向 = -sun_pos（光从太阳射向场景）。
+struct SkyCommand {
+    // ── 太阳位置（时间）──
+    // sun_elevation: 太阳仰角（度，0=地平线，90=天顶）。
+    //   正值=白天；负值=太阳在地平线下（天光只剩暮色/夜空）。
+    // sun_azimuth:   太阳方位角（度，绕 Y 轴，0=指向 +z，逆时针为正）。
+    // 参考：正午≈仰角高(太阳高度角)；日出/日落≈仰角 0 附近。
+    float sun_elevation = 45.0f;
+    float sun_azimuth   = 0.0f;
+
+    // ── 天气 ──
+    // turbidity（浊度）：大气浑浊度，2.0=极清澈（高原/晴空），
+    //   3~6=典型晴天，>6=霾/阴天（天空发白、太阳周围白晕）。
+    //   参考值：2.0 清澈蓝天 / 4.0 正常晴天 / 8.0 阴霾 / 12.0 重霾。
+    float turbidity = 2.0f;
+
+    // ── 季节（色温倾向）──
+    // season：季节色温乘子，作用于整个天光（含天空+太阳圆盘）。
+    //   冬天冷调（偏青/白、低饱和）：如 (0.75, 0.85, 1.0)
+    //   夏/秋暖调（偏金黄）：如 (1.0, 0.97, 0.90)
+    //   春天常清新微暖；默认 (1,1,1)=中性（不人为偏色）。
+    Color season = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    // ── 光照强度 ──
+    float intensity = 1.0f;            // 天光整体亮度标量
+
+    // ── 地平线以下地色 ──
+    // 下半球（pitch<0）画这个颜色，避免“地面下透出天空倒影”。
+    Color ground_color = {0.05f, 0.06f, 0.08f, 1.0f};  // 默认深灰蓝
+
+    // ── 太阳/月亮圆盘 ──
+    bool  is_moon = false;             // true=画月亮（用 body_color 且更小）
+    Color body_color = {1.0f, 1.0f, 0.95f, 1.0f};  // 太阳=暖白；月亮=浅灰
+    float body_radius = 0.05f;         // 圆盘角半径（弧度），太阳约 0.0046(0.26°)
+                                       // 但视觉上要可见需更大，参考 0.02~0.06
+    float body_glow = 0.0f;            // 光晕模糊度（0=硬边圆盘，越大约糊），参考 0~0.5
+
+    // 由 sun_elevation/sun_azimuth 计算太阳位置单位向量（y-up，世界空间）。
+    // 仅供需要与 DirectionalLight 对齐的代码使用（后续重构）。
+    // 返回 (cosθ·sinφ, sinθ, cosθ·cosφ)，θ=仰角, φ=方位角（弧度）。
+    jpov::Vec3f SunDir() const {
+        const float p = 3.14159265358979323846f / 180.0f;
+        const float th = sun_elevation * p;
+        const float ph = sun_azimuth * p;
+        return jpov::Vec3f(std::cos(th) * std::sin(ph),
+                           std::sin(th),
+                           std::cos(th) * std::cos(ph));
+    }
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
@@ -501,6 +572,10 @@ struct RenderCommandList {
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
     // 并对直射光施加阴影因子。
     std::optional<DirectionalLight> sun;
+
+    // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
+    // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
+    std::optional<SkyCommand> sky;
 
     // Object3D 跳过点光源（默认 false）。
     // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；
