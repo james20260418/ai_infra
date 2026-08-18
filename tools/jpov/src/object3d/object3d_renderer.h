@@ -173,6 +173,9 @@ uniform int   uHasNormalTex;
 uniform float uNormalScale;
 
 uniform sampler2D uTileLightIndices;
+// uTileCulling=1（默认）：片元经 tile 索引纹理只算本 tile 命中的光源（16×16 tile culling）。
+// uTileCulling=0：关闭 tile culling，片元遍历全部点光源（经典前向光照，无 tile 分界线伪影）。
+uniform int uTileCulling;
 
 // 太阳平行光（DirectionalLight）+ 级联阴影（CSM）。
 // uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并按片元距相机距离选级联，
@@ -334,6 +337,55 @@ int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_P
     return count;
 }
 
+// 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
+// li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
+// 需传入 base_color / metallic / roughness（片元已解析的材质参数）。
+// 通过 inout total_diffuse / total_specular 累加。
+void accumulateOneLight(int li, vec3 N, vec3 V, vec3 vWorldPos_str, vec3 base_color, float metallic, float roughness,
+                         inout vec3 total_diffuse, inout vec3 total_specular) {
+    vec3 L = uLights[li].position - vWorldPos_str;
+    float dist = length(L);
+    if (dist >= uLights[li].radius) return;
+
+    vec3 light_dir = L / dist;
+    float attenuation = 1.0 - (dist / uLights[li].radius);
+
+    // ── Representative Point (Karis 2013) ──
+    float sourceRadius = uLights[li].physicalRadius;
+    vec3 spec_dir = light_dir;  // default: same as point light
+    if (sourceRadius > 0.0) {
+        vec3 Rf = reflect(-V, N);
+        vec3 centerToRay = dot(L, Rf) * Rf - L;
+        vec3 closestPt = L + centerToRay *
+            clamp(sourceRadius / max(length(centerToRay), 1e-4), 0.0, 1.0);
+        spec_dir = normalize(closestPt);
+    }
+
+    // ── diffuse：原始 light_dir ──
+    float NdotL = max(dot(N, light_dir), 0.0);
+    if (NdotL > 0.0) {
+        vec3 Hd = normalize(light_dir + V);
+        vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
+                     mix(vec3(0.04), base_color, metallic));
+        vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
+        vec3 diffuse = kD * base_color / PI;
+        total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
+    }
+
+    // ── specular：representative point 方向 ──
+    float NdotL_s = max(dot(N, spec_dir), 0.0);
+    if (NdotL_s > 0.0) {
+        vec3 H = normalize(spec_dir + V);
+        float NdotV = max(dot(N, V), 0.0);
+        vec3 F0 = mix(vec3(0.04), base_color, metallic);
+        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+        float D = distributionGGX(N, H, roughness);
+        float G = geometrySmith(N, V, spec_dir, roughness);
+        vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
+        total_specular += uLights[li].color * spec * NdotL_s * attenuation;
+    }
+}
+
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -367,14 +419,20 @@ void main() {
         : uAO;
     ao = clamp(ao, 0.0, 1.0);
 
-    ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
-    int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
-    int grid_rows = grid.y;
-    int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
-    int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
-
+    // uTileCulling=0：跳过 tile 查询，直接遍历全部点光源（经典前向光照）。
+    // uTileCulling=1：16×16 tile culling，只结算本 tile 命中的光源，
+    // 高效但有 tile 边界分界线伪影（相邻 tile 光源取舍不同 → 亮暗跳变）。
     uint light_indices[MAX_LIGHTS_PER_TILE];
-    int num_lights = readTileLights(tile_col, tile_row, light_indices);
+    int num_lights = 0;
+    bool use_tile = (uTileCulling == 1);
+    if (use_tile) {
+        ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
+        int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
+        int grid_rows = grid.y;
+        int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
+        int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
+        num_lights = readTileLights(tile_col, tile_row, light_indices);
+    }
 
     vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
     vec3 total_diffuse = vec3(0.0);
@@ -409,53 +467,20 @@ void main() {
         }
     }
 
-    for (int i = 0; i < num_lights; i++) {
-        uint li = light_indices[i];
-        vec3 L = uLights[li].position - vWorldPos;
-        float dist = length(L);
-        if (dist >= uLights[li].radius) continue;
-
-        vec3 light_dir = L / dist;
-        float attenuation = 1.0 - (dist / uLights[li].radius);
-
-        // ── Representative Point (Karis 2013) ──
-        // 把点光源当作球面光源，用反射方向上离球最近的点
-        // 作为 specular 的有效入射方向。
-        // 光源物理半径越大 → 球面积越大 → 更多 micro-facet
-        // 能从不同区域命中镜面 lobe → 金属面不会全黑。
-        // physicalRadius = 0 时退化为原始点光源行为。
-        float sourceRadius = uLights[li].physicalRadius;
-        vec3 spec_dir = light_dir;  // default: same as point light
-        if (sourceRadius > 0.0) {
-            vec3 Rf = reflect(-V, N);
-            vec3 centerToRay = dot(L, Rf) * Rf - L;
-            vec3 closestPt = L + centerToRay *
-                clamp(sourceRadius / max(length(centerToRay), 1e-4), 0.0, 1.0);
-            spec_dir = normalize(closestPt);
+    // 点光源：按 tile_culling 开关分流。
+    //   uTileCulling=1：只结算本 tile 命中的光源（num_lights 已由 readTileLights 填充）。
+    //   uTileCulling=0：遍历全部 uTotalLights（经典前向光照，无分界线）。
+    if (use_tile) {
+        for (int i = 0; i < num_lights; i++) {
+            accumulateOneLight(int(light_indices[i]), N, V, vWorldPos,
+                               base_color, metallic, roughness,
+                               total_diffuse, total_specular);
         }
-
-        // ── diffuse：原始 light_dir ──
-        float NdotL = max(dot(N, light_dir), 0.0);
-        if (NdotL > 0.0) {
-            vec3 Hd = normalize(light_dir + V);
-            vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
-                         mix(vec3(0.04), base_color, metallic));
-            vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
-            vec3 diffuse = kD * base_color / PI;
-            total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
-        }
-
-        // ── specular：representative point 方向 ──
-        float NdotL_s = max(dot(N, spec_dir), 0.0);
-        if (NdotL_s > 0.0) {
-            vec3 H = normalize(spec_dir + V);
-            float NdotV = max(dot(N, V), 0.0);
-            vec3 F0 = mix(vec3(0.04), base_color, metallic);
-            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-            float D = distributionGGX(N, H, roughness);
-            float G = geometrySmith(N, V, spec_dir, roughness);
-            vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
-            total_specular += uLights[li].color * spec * NdotL_s * attenuation;
+    } else {
+        for (int i = 0; i < uTotalLights; i++) {
+            accumulateOneLight(i, N, V, vWorldPos,
+                               base_color, metallic, roughness,
+                               total_diffuse, total_specular);
         }
     }
 

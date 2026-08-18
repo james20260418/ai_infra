@@ -141,6 +141,9 @@ void Object3DRenderer::UploadLightData(const RenderCommandList& cmds,
             glUniform1f(shader_mgr.GetUniform(p, buf), l.physical_radius);
         }
         glUniform1i(shader_mgr.GetUniform(p, "uTotalLights"), clamped);
+        // uTileCulling=1（默认）：片元走 tile 索引纹理；=0：遍历全部光源。
+        glUniform1i(shader_mgr.GetUniform(p, "uTileCulling"),
+                    cmds.tile_culling ? 1 : 0);
     }
 }
 
