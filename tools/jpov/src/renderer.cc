@@ -687,17 +687,21 @@ void Renderer::Render(const RenderCommandList& cmds,
         Primitives3DRenderer::BuildMVP(cmds.camera, fbo_3d_w, fbo_3d_h, mvp_);
 
         // ---- Tile Forward 光照准备 ----
-        // 若有 Object3D 需光照（!object_use_default_color），
-        // 上传光源 uniform + CPU 端做 tile culling（写入 tile index 纹理）。
+        // 若有 Object3D 需光照（!object_use_default_color）：
+        //   - 总是上传光源 uniform + uTileCulling 开关（uLights[]/uTotalLights）
+        //   - 仅当 tile_culling=true 才做 CPU 端 tile 索引构建（写入 tile 纹理）；
+        //     tile_culling=false 时跳过，shader 走全光源遍历（无分界线）。
         if (!cmds.object_use_default_color && !cmds.object3d.empty()) {
-            Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
-                &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
-                &tile_tex_w_, &tile_tex_h_);
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull());
-            Object3DRenderer::BuildTileLightIndices(cmds,
-                fbo_3d_w, fbo_3d_h, tile_index_tex_,
-                tile_grid_w_, tile_grid_h_, tile_tex_w_, tile_tex_h_, mvp_);
+            if (cmds.tile_culling) {
+                Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
+                    &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
+                    &tile_tex_w_, &tile_tex_h_);
+                Object3DRenderer::BuildTileLightIndices(cmds,
+                    fbo_3d_w, fbo_3d_h, tile_index_tex_,
+                    tile_grid_w_, tile_grid_h_, tile_tex_w_, tile_tex_h_, mvp_);
+            }
         }
 
         // 太阳平行光 + 级联阴影贴图 uniform（有 sun 时）。

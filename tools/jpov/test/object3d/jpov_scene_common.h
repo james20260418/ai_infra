@@ -48,6 +48,10 @@ public:
     };
     std::vector<Slot> slots_;
 
+    // 点光源 tile culling 开关（默认 true = 开启）。
+    // test 可设为 false 以覆盖“关 tile culling → 经典前向光照”路径。
+    bool tile_culling = true;
+
     void AddSlot(jpov::GltfObject obj, jpov::Vec3f cen,
                  jpov::Vec3f up, jpov::Vec3f front) {
         slots_.push_back({std::move(obj), cen, up, front});
@@ -58,6 +62,8 @@ public:
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
         (void)frame_count; (void)input; (void)winfo;
+
+        cmds->tile_culling = tile_culling;
 
         const float kResW = 1280.0f;
         const float kResH = 720.0f;

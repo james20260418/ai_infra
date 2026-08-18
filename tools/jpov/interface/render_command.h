@@ -507,6 +507,13 @@ struct RenderCommandList {
     // 为 false 时使用完整 GGX PBR 光照（需 mesh 含 kNormal）。
     bool object_use_default_color = false;
 
+    // Object3D 点光源 tile culling 开关（默认 true = 开启）。
+    //   true ：CPU 端构建 16×16 tile 索引纹理，片元只结算本 tile 命中的光源
+    //          （高效，但 tile 边界处光源取舍不同会产生分界线伪影）。
+    //   false：跳过 tile 构建，片元遍历全部点光源（经典前向光照，
+    //          无分界线，适合光源少或调试）。
+    bool tile_culling = true;
+
     // 3D 透视相机
     // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
     // 框架在 Render() 时自动使用该 Camera 计算 MVP 变换。
