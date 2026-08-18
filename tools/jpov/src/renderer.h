@@ -19,6 +19,7 @@
 #include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
 #include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
 #include "tools/jpov/src/shader_manager.h"
+#include "tools/jpov/src/skydome/sky_renderer.h"
 #include "tools/jpov/src/texture_manager.h"
 
 struct GLFWwindow;

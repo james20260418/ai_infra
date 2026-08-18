@@ -116,6 +116,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# SkyRenderer — 程序化天光背景（独立轻量 shader，一帧一次）
+cc_library(
+    name = "sky_renderer",
+    srcs = ["skydome/sky_renderer.cc"],
+    hdrs = ["skydome/sky_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # Renderer — GL FBO + 动态分辨率渲染核心
 cc_library(
     name = "renderer",
@@ -130,6 +151,7 @@ cc_library(
         ":object3d_renderer",
         ":primitives3d_renderer",
         ":shader_manager",
+        ":sky_renderer",
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",
