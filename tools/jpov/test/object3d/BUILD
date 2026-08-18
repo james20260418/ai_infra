@@ -394,10 +394,8 @@ cc_binary(
     name = "jpov_repeated_mrquad_gold_generator",
     srcs = ["jpov_repeated_mrquad_gold_generator.cc"],
     data = [
-        ":cube_tex_256x256.png",
-        ":pbr_normal_256x256.png",
-        ":pbr_metallic_256x256.png",
-        ":pbr_roughness_256x256.png",
+        ":brick_seamless_512x512.png",
+        ":brick_normal_512x512.png",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
@@ -413,10 +411,8 @@ cc_test(
     name = "jpov_repeated_mrquad_gold_test",
     srcs = ["jpov_repeated_mrquad_gold_test.cc"],
     data = [
-        ":cube_tex_256x256.png",
-        ":pbr_normal_256x256.png",
-        ":pbr_metallic_256x256.png",
-        ":pbr_roughness_256x256.png",
+        ":brick_seamless_512x512.png",
+        ":brick_normal_512x512.png",
         ":repeated_mrquad_1280x720.png",
     ],
     deps = [

@@ -23,6 +23,16 @@
 
 namespace jpov {
 
+// TextureManager 纹理采样选项（默认全关 = 保持既有行为）。
+//   mipmap: true → 生成 mipmap 链 + MIN_FILTER=GL_LINEAR_MIPMAP_LINEAR
+//                   （三线性），大透视平铺面（如地面）防摩尔纹/闪烁。
+//   repeat: true → WRAP_S/T=GL_REPEAT，纹理平铺（UV 超 [0,1] 周期重复）；
+//                   false → GL_CLAMP_TO_EDGE（默认，UV>1 拉边缘色）。
+struct TextureOptions {
+    bool mipmap = false;
+    bool repeat = false;
+};
+
 class TextureManager {
 public:
     TextureManager() = default;
@@ -34,12 +44,14 @@ public:
     // LoadFromFile: 从 PNG 文件加载纹理到 GPU。
     //
     // 使用 stb_image 解码为 RGBA 后调用 glTexImage2D 上传。
-    // 同一绝对路径只加载一次，后续调用返回相同 ID（去重）。
+    // 同一「路径 + 选项」组合只加载一次，后续调用返回相同 ID（去重）；
+    // 同一路径以不同选项加载 → 视为不同纹理。
     // 加载失败（文件不存在 / 解码失败）→ LOG(FATAL) crash。
     //
     // Pre-condition: GL context 已激活
     // Pre-condition: path 非空
-    uint32_t LoadFromFile(const std::string& path);
+    uint32_t LoadFromFile(const std::string& path,
+                          const TextureOptions& opts = {});
 
     // Register: 直接注册已有 GL 纹理。
     //
@@ -76,6 +88,7 @@ private:
         int width;
         int height;
         bool owned;  // true = TextureManager 负责 glDeleteTextures
+        TextureOptions opts;  // 加载时的采样选项（mipmap / repeat）
     };
 
     // id counter（递增分配）
@@ -84,11 +97,15 @@ private:
     // id → Entry
     std::unordered_map<uint32_t, Entry> entries_;
 
-    // 文件路径 → id（LoadFromFile 去重）
+    // 文件路径+选项 → id（LoadFromFile 去重；同路径不同选项=不同纹理）
     std::unordered_map<std::string, uint32_t> path_to_id_;
 
     // gl_tex → id（Register 去重）
     std::unordered_map<uint32_t, uint32_t> gl_tex_to_id_;
+
+    // 由路径+选项生成去重 key（追加 mip/repeat 位）。
+    static std::string MakePathKey(const std::string& path,
+                                   const TextureOptions& opts);
 };
 
 }  // namespace jpov

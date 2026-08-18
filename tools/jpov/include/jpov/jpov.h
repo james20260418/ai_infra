@@ -153,6 +153,18 @@ public:
     // Pre-condition: filepath 非空
     uint32_t RegisterTexture(const std::string& filepath);
 
+    // RegisterTexture: 带采样选项加载 PNG 纹理到 GPU。
+    //
+    // opts.mipmap: true → 生成 mipmap（三线性），大透视平铺面防摩尔纹。
+    // opts.repeat: true → GL_REPEAT（UV>1 周期重复平铺）。
+    // 默认皆 false（等价无选项版 RegisterTexture）。
+    // 同一路径以不同选项加载 → 各自独立纹理（去重 key 含选项位）。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: filepath 非空
+    uint32_t RegisterTexture(const std::string& filepath,
+                             const jpov::TextureOptions& opts);
+
     // RegisterTexture: 注册已有 GL 纹理对象。
     //
     // 调用者自行管理 GL 纹理生命周期。

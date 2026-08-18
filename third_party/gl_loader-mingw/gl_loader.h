@@ -43,6 +43,7 @@ typedef void (*GL_DeleteTextures)(int, const unsigned int*);
 typedef void (*GL_BindTexture)(unsigned int, unsigned int);
 typedef void (*GL_TexImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
 typedef void (*GL_TexParameteri)(unsigned int, unsigned int, int);
+typedef void (*GL_GenerateMipmap)(unsigned int);
 typedef void (*GL_BlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
 typedef void (*GL_EnableVertexAttribArray)(unsigned int);
 typedef void (*GL_DisableVertexAttribArray)(unsigned int);
@@ -99,6 +100,7 @@ extern GL_DeleteTextures         gl_DeleteTextures;
 extern GL_BindTexture            gl_BindTexture;
 extern GL_TexImage2D             gl_TexImage2D;
 extern GL_TexParameteri          gl_TexParameteri;
+extern GL_GenerateMipmap         gl_GenerateMipmap;
 extern GL_BlitFramebuffer        gl_BlitFramebuffer;
 extern GL_EnableVertexAttribArray gl_EnableVertexAttribArray;
 extern GL_DisableVertexAttribArray gl_DisableVertexAttribArray;
@@ -184,6 +186,7 @@ int gl_loader_init(void);
 #define glShaderSource           gl_ShaderSource
 #define glTexImage2D             gl_TexImage2D
 #define glTexParameteri          gl_TexParameteri
+#define glGenerateMipmap         gl_GenerateMipmap
 #define glUniform1i              gl_Uniform1i
 #define glUniform1f              gl_Uniform1f
 #define glUniform1fv             gl_Uniform1fv

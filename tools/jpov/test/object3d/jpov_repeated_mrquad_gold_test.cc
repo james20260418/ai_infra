@@ -56,10 +56,8 @@ class RepeatedMRQuadTestApp : public JPOV {
 public:
     using JPOV::JPOV;
 
-    void SetTextureIds(uint32_t base, uint32_t normal,
-                       uint32_t metallic, uint32_t roughness) {
+    void SetTextureIds(uint32_t base, uint32_t normal) {
         tex_base_color_ = base; tex_normal_ = normal;
-        tex_metallic_ = metallic; tex_roughness_ = roughness;
     }
 
     void OneIteration(int64_t frame_count,
@@ -72,16 +70,16 @@ public:
         const float kResH = 720.0f;
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
-        cmds->camera.position = {4.0f, 1.8f, 4.0f};
+        cmds->camera.position = {5.5f, 4.0f, 5.5f};
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
 
-        // 低角度掠射光（raking light）凸显平放面法线凹凸 + 顶光补充明度
-        cmds->point_lights.push_back({{4.0f, 1.2f, 0.0f}, {2.2f,2.2f,2.2f,1}, 10.0f, 0.5f});
-        cmds->point_lights.push_back({{-3.0f, 1.2f, -3.0f}, {1.5f,1.5f,1.5f,1}, 10.0f, 0.5f});
-        cmds->point_lights.push_back({{0.0f, 4.0f, 0.0f}, {1.2f,1.2f,1.2f,1}, 12.0f, 0.5f});
+        // 光照与 pbr_cube_normal_mr 完全一致：三光源对称 +X/+Y/+Z
+        cmds->point_lights.push_back({{2.0f, 0.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        cmds->point_lights.push_back({{0.0f, 0.0f, 2.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
 
-        // 平放 quad 10×10，UV 0~1
+        // 平放 quad 10×10，UV 0~5（重复 5 次 → 每次周期覆盖 2m）
         jpov::MeshData mesh;
         mesh.flags = static_cast<jpov::MeshVertexFlags>(
             static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
@@ -91,10 +89,11 @@ public:
         const jpov::Vec3f N(0.0f, 1.0f, 0.0f);
         const jpov::Vec3f T(1.0f, 0.0f, 0.0f);
         const float xp = 5.0f, xm = -5.0f, zp = 5.0f, zm = -5.0f;
+        const float rep = 5.0f;
         struct Vtx { jpov::Vec3f pos, n; jpov::Vec2f uv; jpov::Vec3f t; };
         const Vtx v[4] = {
-            {{ xp,0,zp}, N, {1,0}, T}, {{ xm,0,zp}, N, {0,0}, T},
-            {{ xm,0,zm}, N, {0,1}, T}, {{ xp,0,zm}, N, {1,1}, T},
+            {{ xp,0,zp}, N, {rep,0}, T}, {{ xm,0,zp}, N, {0,0}, T},
+            {{ xm,0,zm}, N, {0,rep}, T}, {{ xp,0,zm}, N, {rep,rep}, T},
         };
         for (auto& q : v) {
             mesh.positions.push_back(q.pos); mesh.normals.push_back(q.n);
@@ -104,20 +103,16 @@ public:
         mesh.Validate();
         uint32_t mesh_id = RegisterMesh(mesh);
 
-        // 材质 = pbr_cube_normal_mr 同款
+        // 材质 = 砖墙 baseColor + sobel 法线；砖为无非金属、偏糙（matte）
         jpov::PBRMaterial mat;
         mat.base_color_tex = tex_base_color_;
         mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.metallic = 0.0f;
-        mat.roughness = 0.35f;
+        mat.roughness = 0.9f;
         mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
         mat.normal_scale = 2.0f;
-        mat.has_metallic_tex = true;
-        mat.metallic_tex = tex_metallic_;
-        mat.has_roughness_tex = true;
-        mat.roughness_tex = tex_roughness_;
 
         cmds->DrawObject3D(mesh_id, mat,
                            {0.0f, 0.0f, 0.0f},
@@ -127,7 +122,6 @@ public:
 
 private:
     uint32_t tex_base_color_ = 0, tex_normal_ = 0;
-    uint32_t tex_metallic_ = 0, tex_roughness_ = 0;
 };
 
 // ============ 测试入口 ============
@@ -153,11 +147,13 @@ int main() {
     app.Init();
 
     std::string root = jpov::GetProjectRoot() + "tools/jpov/test/object3d/";
-    uint32_t base = app.RegisterTexture(root + "cube_tex_256x256.png");
-    uint32_t normal = app.RegisterTexture(root + "pbr_normal_256x256.png");
-    uint32_t metallic = app.RegisterTexture(root + "pbr_metallic_256x256.png");
-    uint32_t roughness = app.RegisterTexture(root + "pbr_roughness_256x256.png");
-    app.SetTextureIds(base, normal, metallic, roughness);
+    // 砖墙 baseColor（seamless）+ sobel 法线；砖为 matte 非金属
+    jpov::TextureOptions tex_opt;
+    tex_opt.repeat = true;
+    tex_opt.mipmap = true;
+    uint32_t base   = app.RegisterTexture(root + "brick_seamless_512x512.png", tex_opt);
+    uint32_t normal = app.RegisterTexture(root + "brick_normal_512x512.png", tex_opt);
+    app.SetTextureIds(base, normal);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;

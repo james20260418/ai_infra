@@ -79,10 +79,8 @@ class RepeatedMRQuadGenerator : public JPOV {
 public:
     using JPOV::JPOV;
 
-    void SetTextureIds(uint32_t base, uint32_t normal,
-                       uint32_t metallic, uint32_t roughness) {
+    void SetTextureIds(uint32_t base, uint32_t normal) {
         tex_base_color_ = base; tex_normal_ = normal;
-        tex_metallic_ = metallic; tex_roughness_ = roughness;
     }
 
     void OneIteration(int64_t frame_count,
@@ -96,36 +94,31 @@ public:
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
 
-        // 相机：较低角度（更平视）观察平放 quad，法线扰动在斜视角下更易显现
-        cmds->camera.position = {4.0f, 1.8f, 4.0f};
+        // 相机：同 pbr_cube_normal_mr 风格，3/4 视角看平放 quad
+        cmds->camera.position = {5.5f, 4.0f, 5.5f};
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
 
-        // 低角度掠射光（raking light）凸显平放面法线凹凸：
-        // 光方向接近贴表面掠射，法线微扰引起的明暗/投影最明显。
-        // 强度适中（color 3）避免过曝冲刷纹理。
-        cmds->point_lights.push_back({{4.0f, 1.2f, 0.0f}, {2.2f,2.2f,2.2f,1}, 10.0f, 0.5f});
-        cmds->point_lights.push_back({{-3.0f, 1.2f, -3.0f}, {1.5f,1.5f,1.5f,1}, 10.0f, 0.5f});
-        cmds->point_lights.push_back({{0.0f, 4.0f, 0.0f}, {1.2f,1.2f,1.2f,1}, 12.0f, 0.5f});
+        // 光照与 pbr_cube_normal_mr 完全一致：三光源对称 +X/+Y/+Z
+        // （位置 2,0,0 / 0,2,0 / 0,0,2，线性半径 6.0，color 3，physical 0.5）
+        cmds->point_lights.push_back({{2.0f, 0.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        cmds->point_lights.push_back({{0.0f, 0.0f, 2.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
 
-        // 平放 quad 10×10，UV 0~1（采贴图第一段，同 cube_hand.obj）
-        jpov::MeshData mesh = BuildGroundQuad(5.0f, 5.0f, 1.0f);
+        // 平放 quad 10×10，UV 0~5（重复 5 次 → 每次周期覆盖 2m）
+        jpov::MeshData mesh = BuildGroundQuad(5.0f, 5.0f, 5.0f);
         uint32_t mesh_id = RegisterMesh(mesh);
 
-        // 材质 = pbr_cube_normal_mr 同款
+        // 材质 = 砖墙 baseColor + sobel 法线；砖为无非金属、偏糙（matte）
         jpov::PBRMaterial mat;
         mat.base_color_tex = tex_base_color_;
         mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.metallic = 0.0f;
-        mat.roughness = 0.35f;
+        mat.roughness = 0.9f;
         mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
         mat.normal_scale = 2.0f;
-        mat.has_metallic_tex = true;
-        mat.metallic_tex = tex_metallic_;
-        mat.has_roughness_tex = true;
-        mat.roughness_tex = tex_roughness_;
 
         cmds->DrawObject3D(mesh_id, mat,
                            {0.0f, 0.0f, 0.0f},
@@ -135,7 +128,6 @@ public:
 
 private:
     uint32_t tex_base_color_ = 0, tex_normal_ = 0;
-    uint32_t tex_metallic_ = 0, tex_roughness_ = 0;
 };
 
 int main() {
@@ -149,14 +141,16 @@ int main() {
     app.Init();
 
     std::string root = jpov::GetProjectRoot() + "tools/jpov/test/object3d/";
-    // 用正常的 RegisterTexture（贴图为 768 宽 3-in-1，quad UV 0~1 采第一段）
-    uint32_t base = app.RegisterTexture(root + "cube_tex_256x256.png");
-    uint32_t normal = app.RegisterTexture(root + "pbr_normal_256x256.png");
-    uint32_t metallic = app.RegisterTexture(root + "pbr_metallic_256x256.png");
-    uint32_t roughness = app.RegisterTexture(root + "pbr_roughness_256x256.png");
-    LOG(INFO) << "textures: base=" << base << " normal=" << normal
-              << " metallic=" << metallic << " roughness=" << roughness;
-    app.SetTextureIds(base, normal, metallic, roughness);
+    // 砖墙 baseColor（seamless 周期化）+ sobel 法线；砖为 matte 非金属，MR 用纯参数。
+    // repeat=true：GL_REPEAT 平铺（UV 0~5 → 重复 5 次，否则 CLAMP 拉边缘彩带）。
+    // mipmap=true：三线性，大透视平铺面防摩尔纹。
+    jpov::TextureOptions tex_opt;
+    tex_opt.repeat = true;
+    tex_opt.mipmap = true;
+    uint32_t base   = app.RegisterTexture(root + "brick_seamless_512x512.png", tex_opt);
+    uint32_t normal = app.RegisterTexture(root + "brick_normal_512x512.png", tex_opt);
+    LOG(INFO) << "textures: base=" << base << " normal=" << normal;
+    app.SetTextureIds(base, normal);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;

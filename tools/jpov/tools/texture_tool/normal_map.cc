@@ -9,6 +9,7 @@
 //
 //   gx = SobelX（水平梯度） = (tr + 2*r + br) - (tl + 2*l + bl)
 //   gy = SobelY（垂直梯度） = (bl + 2*b + br) - (tl + 2*t + tr)
+//   gx/=1020, gy/=1020（归一化到 [-1,1]，防止高对比边缘如砖缝饱和压平法线）
 //   normal = normalize(-gx*scale, -gy*scale, 1)
 //   写入 RGB: normal = (n + 1) / 2  →  把 [-1,1] 映射到 [0,1]
 //
@@ -122,14 +123,19 @@ int main(int argc, char** argv) {
             const unsigned char t  = at(x, ym1);
             const unsigned char b  = at(x, yp1);
 
-            const float gx = static_cast<float>(SobelGx(l, r, tl, tr, bl, br));
-            const float gy = static_cast<float>(SobelGy(t, b, tl, tr, bl, br));
+            // Sobel 梯度归一化：3×3 sobel 对 8-bit 灰度最大 ±1020
+            // （(1+2+1)*255 单侧极值）。若不归一化，高对比边缘（如砖缝）
+            // 使 nx/ny 远超 1、nz→0、法线被压平（B 掉到 128）。
+            // 除以最大可能值 1020 → gx,gy∈[-1,1]；scale 直接表达“梯度占比”。
+            constexpr float kSobelNorm = 1020.0f;
+            const float gx_n = static_cast<float>(SobelGx(l, r, tl, tr, bl, br)) / kSobelNorm;
+            const float gy_n = static_cast<float>(SobelGy(t, b, tl, tr, bl, br)) / kSobelNorm;
 
             // 切线空间法线: (-gx*scale, -gy*scale, 1) 归一化。
             // 负号：高度场梯度指向下坡方向，法线应指向上坡，
             // 故取负号使凹凸与高度吻合（与常规 sobel normal 一致）。
-            float nx = -gx * scale;
-            float ny = -gy * scale;
+            float nx = -gx_n * scale;
+            float ny = -gy_n * scale;
             float nz = 1.0f;
             const float inv_len = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
             nx *= inv_len;
