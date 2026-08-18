@@ -199,6 +199,14 @@ uint32_t JPOV::RegisterTexture(const std::string& filepath) {
     return renderer_->GetTextureManager().LoadFromFile(filepath);
 }
 
+uint32_t JPOV::RegisterTexture(const std::string& filepath,
+                               const jpov::TextureOptions& opts) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(!filepath.empty()) << "RegisterTexture: filepath is empty";
+    CHECK(renderer_ != nullptr);
+    return renderer_->GetTextureManager().LoadFromFile(filepath, opts);
+}
+
 uint32_t JPOV::RegisterTexture(uint32_t gl_texture_id, int width, int height) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK_NE(gl_texture_id, 0u);

@@ -73,6 +73,7 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_BindTexture,            "glBindTexture");
     LOAD_FUNC(gl_TexImage2D,             "glTexImage2D");
     LOAD_FUNC(gl_TexParameteri,          "glTexParameteri");
+    LOAD_FUNC(gl_GenerateMipmap,         "glGenerateMipmap");
     LOAD_FUNC(gl_BlitFramebuffer,        "glBlitFramebuffer");
     LOAD_FUNC(gl_EnableVertexAttribArray, "glEnableVertexAttribArray");
     LOAD_FUNC(gl_DisableVertexAttribArray, "glDisableVertexAttribArray");
@@ -131,6 +132,7 @@ DEFINE_PTR(GL_DeleteTextures,         gl_DeleteTextures);
 DEFINE_PTR(GL_BindTexture,            gl_BindTexture);
 DEFINE_PTR(GL_TexImage2D,             gl_TexImage2D);
 DEFINE_PTR(GL_TexParameteri,          gl_TexParameteri);
+DEFINE_PTR(GL_GenerateMipmap,         gl_GenerateMipmap);
 DEFINE_PTR(GL_BlitFramebuffer,        gl_BlitFramebuffer);
 DEFINE_PTR(GL_EnableVertexAttribArray, gl_EnableVertexAttribArray);
 DEFINE_PTR(GL_DisableVertexAttribArray, gl_DisableVertexAttribArray);
