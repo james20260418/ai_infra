@@ -384,3 +384,49 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# Gold Image Test — 平放 quad + pbr_cube_normal_mr 金属材质（法线凸起观察）
+# 手写平放 quad + 树皮/石头法线/MR 4 贴图 + 三光源，复刻 pbr cube 材质。
+# generator 写 gold (repeated_mrquad_1280x720.png)，test 渲染 + smoke check。
+# ============================================================================
+cc_binary(
+    name = "jpov_repeated_mrquad_gold_generator",
+    srcs = ["jpov_repeated_mrquad_gold_generator.cc"],
+    data = [
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_metallic_256x256.png",
+        ":pbr_roughness_256x256.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_repeated_mrquad_gold_test",
+    srcs = ["jpov_repeated_mrquad_gold_test.cc"],
+    data = [
+        ":cube_tex_256x256.png",
+        ":pbr_normal_256x256.png",
+        ":pbr_metallic_256x256.png",
+        ":pbr_roughness_256x256.png",
+        ":repeated_mrquad_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
