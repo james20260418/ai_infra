@@ -228,6 +228,49 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 场景 gold test（阳光版）：同一布景，光照改用太阳平行光 direction=(0,-1,-1)
+# + 级联阴影（CSM）。从点光源版复制，仅光照不同（去掉 3 点光源 → cmds->sun）。
+# generator 写仓库 gold image (scene_in_sun_1280x720.png)。
+
+cc_binary(
+    name = "jpov_scene_in_sun_gold_generator",
+    srcs = [
+        "jpov_scene_in_sun_gold_generator.cc",
+        "jpov_scene_in_sun_common.h",
+    ],
+    data = [":scene_assets"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_scene_in_sun_gold_test",
+    srcs = [
+        "jpov_scene_in_sun_gold_test.cc",
+        "jpov_scene_in_sun_common.h",
+    ],
+    data = [
+        ":scene_assets",
+        ":scene_in_sun_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # box gold test（MeshData::MakeBox + PBRMaterial 纯色构造验证）
 # 共享 jpov_box_gold_common.h 的场景构建，纯程序化 mesh（无 glTF 资源）。
 # generator 写仓库 gold image (box_1280x720.png)。

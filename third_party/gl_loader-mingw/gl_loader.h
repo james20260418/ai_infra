@@ -50,6 +50,7 @@ typedef void (*GL_VertexAttribPointer)(unsigned int, int, unsigned int, unsigned
 typedef void (*GL_VertexAttribIPointer)(unsigned int, int, unsigned int, int, const void*);
 typedef void (*GL_Uniform1i)(int, int);
 typedef void (*GL_Uniform1f)(int, float);
+typedef void (*GL_Uniform1fv)(int, int, const float*);
 typedef void (*GL_Uniform3f)(int, float, float, float);
 typedef void (*GL_ActiveTexture)(unsigned int);
 typedef void (*GL_UniformMatrix4fv)(int, int, unsigned char, const float*);
@@ -105,6 +106,7 @@ extern GL_VertexAttribPointer    gl_VertexAttribPointer;
 extern GL_VertexAttribIPointer   gl_VertexAttribIPointer;
 extern GL_Uniform1i              gl_Uniform1i;
 extern GL_Uniform1f              gl_Uniform1f;
+extern GL_Uniform1fv             gl_Uniform1fv;
 extern GL_Uniform3f              gl_Uniform3f;
 extern GL_ActiveTexture          gl_ActiveTexture;
 extern GL_UniformMatrix4fv       gl_UniformMatrix4fv;
@@ -184,6 +186,7 @@ int gl_loader_init(void);
 #define glTexParameteri          gl_TexParameteri
 #define glUniform1i              gl_Uniform1i
 #define glUniform1f              gl_Uniform1f
+#define glUniform1fv             gl_Uniform1fv
 #define glUniform3f              gl_Uniform3f
 #define glUniform2f              gl_Uniform2f
 #define glUniform4f              gl_Uniform4f
@@ -242,6 +245,21 @@ int gl_loader_init(void);
 #endif
 #ifndef GL_TEXTURE7
 #define GL_TEXTURE7 0x84C7
+#endif
+#ifndef GL_TEXTURE8
+#define GL_TEXTURE8 0x84C8
+#endif
+#ifndef GL_TEXTURE9
+#define GL_TEXTURE9 0x84C9
+#endif
+#ifndef GL_TEXTURE10
+#define GL_TEXTURE10 0x84CA
+#endif
+#ifndef GL_TEXTURE11
+#define GL_TEXTURE11 0x84CB
+#endif
+#ifndef GL_TEXTURE12
+#define GL_TEXTURE12 0x84CC
 #endif
 
 #endif  // _WIN32

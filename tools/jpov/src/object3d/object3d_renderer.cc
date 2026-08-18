@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
@@ -533,16 +534,18 @@ void Object3DRenderer::UploadSunData(
     ShaderManager& shader_mgr,
     unsigned int prog,
     unsigned int prog_full,
-    unsigned int shadow_depth_tex,
-    const float* shadow_vp,
-    int shadow_size) {
+    const std::vector<CascadeFBO>& shadow_fbos,
+    const float shadow_vp[][16],
+    const ShadowConfig& cfg) {
     const bool has_sun = cmds.sun.has_value();
+    const int cascade_count = has_sun ? cfg.cascade_count : 0;
 
     const unsigned int progs[2] = {prog, prog_full};
     for (int pidx = 0; pidx < 2; ++pidx) {
         unsigned int p = progs[pidx];
         glUseProgram(p);
         glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), has_sun ? 1 : 0);
+        glUniform1i(shader_mgr.GetUniform(p, "uCascadeCount"), cascade_count);
         if (!has_sun) {
             continue;
         }
@@ -553,18 +556,30 @@ void Object3DRenderer::UploadSunData(
                     sun.color.r, sun.color.g, sun.color.b);
         glUniform1f(shader_mgr.GetUniform(p, "uSunIntensity"), sun.intensity);
 
-        if (shadow_depth_tex != 0 && shadow_vp != nullptr && shadow_size > 0) {
-            glActiveTexture(GL_TEXTURE7);
-            glBindTexture(GL_TEXTURE_2D, shadow_depth_tex);
-            glUniform1i(shader_mgr.GetUniform(p, "uShadowMap"), 7);
-            glUniformMatrix4fv(shader_mgr.GetUniform(p, "uShadowVP"),
-                               1, GL_FALSE, shadow_vp);
-            glUniform1f(shader_mgr.GetUniform(p, "uShadowTexel"),
-                        1.0f / static_cast<float>(shadow_size));
-            glUniform1f(shader_mgr.GetUniform(p, "uShadowBias"), 0.004f);
-        } else {
-            // 无阴影贴图：把 uHasSun 置 0，强制走无太阳路径（防御，不应发生）。
-            glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), 0);
+        // 各级联 far 距离 + 阴影淡出范围。
+        CHECK_LE(cascade_count, ShadowConfig::kMaxCascades);
+        glUniform1fv(shader_mgr.GetUniform(p, "uCascadeRanges"),
+                     cascade_count, cfg.cascade_ranges);
+        glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeStart"), cfg.fade_start);
+        glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeEnd"), cfg.fade_end);
+
+        // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
+        CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))
+            << "UploadSunData: shadow_fbos.size() 与 cascade_count 不一致";
+        glUniform1f(shader_mgr.GetUniform(p, "uShadowBias"), 0.004f);
+        for (int c = 0; c < cascade_count; ++c) {
+            const unsigned int unit = 7u + static_cast<unsigned int>(c);
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, shadow_fbos[c].tex);
+            // 纹理单元名 uShadowMap[i]（数组 sampler uniform）。
+            std::string uni = "uShadowMap[" + std::to_string(c) + "]";
+            glUniform1i(shader_mgr.GetUniform(p, uni.c_str()), static_cast<int>(unit));
+            uni = "uShadowVP[" + std::to_string(c) + "]";
+            glUniformMatrix4fv(shader_mgr.GetUniform(p, uni.c_str()),
+                               1, GL_FALSE, shadow_vp[c]);
+            uni = "uShadowTexel[" + std::to_string(c) + "]";
+            glUniform1f(shader_mgr.GetUniform(p, uni.c_str()),
+                        1.0f / static_cast<float>(shadow_fbos[c].size));
         }
         glActiveTexture(GL_TEXTURE0);
     }

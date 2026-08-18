@@ -373,6 +373,52 @@ struct DirectionalLight {
     float intensity = 1.0f;  // 整体亮度标量
 };
 
+// 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
+//
+// 与 DirectionalLight（光学参数：方向/颜色/强度，每帧在
+// RenderCommandList::sun 里设）分开：阴影的切分/分辨率/淡出是场景级调参，
+// 生命周期内不变，挂在 JPOV::Config::shadow 上，避免每帧重建 FBO。
+//
+// 段切分：
+//   共 cascade_count 段。cascade_ranges[k] 是第 k 段的 far 距离，
+//   第 0 段覆盖 [near(=相机near), ranges[0]]，第 k 段覆盖 [ranges[k-1], ranges[k]]。
+//   cascade_ranges 必须严格递增，最后一段的 far 即总阴影距离。
+//   每段有独立的 shadow map 分辨率 cascade_sizes[k]（可不同：近段大、远段小）。
+//
+// 淡出：
+//   fade_start/fade_end 定义距相机距离区间，在此区间内影子强度线性衰减到 0
+//   （fade_end 之后无影子）。淡出的是"影子强度"，独立于太阳光 intensity。
+//
+// ShadowConfig::Default() 提供一份面向开放世界场景的通用配置（3 段）。
+// 小场景用默认值即可：近段覆盖全场景，效果等价单张 shadow map。
+//
+// Pre-condition: 由 JPOV::Init() → Renderer::Init 时校验（ValidateShadowConfig），
+// 非法参数 LOG(FATAL) crash。
+struct ShadowConfig {
+    static constexpr int kMaxCascades = 5;   // shader uniform 数组长度上限
+
+    // 默认成员值 = 开放世界通用配置（等同 Default()）。因此
+    // `ShadowConfig shadow;` / `ShadowConfig{}` 即为合法可用状态，
+    // 无需用户显式调 Default()。未用到的数组位（i >= cascade_count）填 0。
+    int   cascade_count = 3;                            // 级联段数 [1, kMaxCascades]
+    float cascade_ranges[kMaxCascades] = {25.0f, 75.0f, 180.0f, 0.0f, 0.0f};
+    int   cascade_sizes[kMaxCascades]  = {2048, 1024, 512, 0, 0};
+    float fade_start = 120.0f;                // 阴影淡出起点（距相机）
+    float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
+
+    // 默认开放世界配置：近处高分辨率、远处低分辨率并自然淡出。
+    // 距离基于典型开放世界量级（相机半径数十米、可视距离上百米）。
+    static ShadowConfig Default() { return ShadowConfig{}; }
+};
+
+// 单个级联的 shadow FBO + 深度纹理（Renderer 内部持有，UploadSunData 读取 .tex）。
+// shadow 深度实为 RGBA32F 颜色纹理（存光空间 ndc.z），rb 为配套 depth renderbuffer
+//（仅遮挡测试用）。纹理单元从 TEXTURE7 起绑定到 PBR shader 的 uShadowMap[i]。
+struct CascadeFBO {
+    unsigned int fbo = 0, tex = 0, rb = 0;
+    int size = 0;
+};
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
