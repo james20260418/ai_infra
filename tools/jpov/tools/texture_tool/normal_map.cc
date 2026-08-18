@@ -4,13 +4,15 @@
 //   jpov_texture_normal <input.png> <output.png> [normal_scale]
 //
 // 从输入的原始漫反射/高度图生成一张「法线贴图」。
-// 输入按灰度高度场处理，使用 Sobel 算子估计每个像素的梯度，
+// 输入按灰度高度场处理，使用 3×3 Sobel 算子估计每个像素的梯度，
 // 再由梯度构造切线空间法线：
 //
-//   gx = (left - right) 的水平梯度
-//   gy = (top - bottom) 的垂直梯度
+//   gx = SobelX（水平梯度） = (tr + 2*r + br) - (tl + 2*l + bl)
+//   gy = SobelY（垂直梯度） = (bl + 2*b + br) - (tl + 2*t + tr)
 //   normal = normalize(-gx*scale, -gy*scale, 1)
 //   写入 RGB: normal = (n + 1) / 2  →  把 [-1,1] 映射到 [0,1]
+//
+//（其中 t/b 为上下邻、l/r 为左右邻、tl/tr/bl/br 为四角邻居。）
 //
 // normal_scale 控制法线扰动的强度（类似 PBR 的 normal_scale）：
 //   - 越大 → 法线越陡、光影越强
@@ -34,7 +36,7 @@
 namespace {
 
 const char* kUsage =
-    "Usage: jpov_texture_normal <input.png> <output.png> [normal_scale] [out_name]\n"
+    "Usage: jpov_texture_normal <input.png> <output.png> [normal_scale]\n"
     "\n"
     "Generate a normal map from a height/color image.\n"
     "\n"
@@ -48,11 +50,9 @@ const char* kUsage =
 //         [-1  0  1]              [ 1  2  1]
 // 采用左右/上下采样顺序，使负号与法线朝向自洽（测试时统一约定）。
 int SobelGx(int left, int right, int tl, int tr, int bl, int br) {
-    // standard sobel x
     return (tr + 2 * right + br) - (tl + 2 * left + bl);
 }
 int SobelGy(int top, int bottom, int tl, int tr, int bl, int br) {
-    // standard sobel y
     return (bl + 2 * bottom + br) - (tl + 2 * top + tr);
 }
 

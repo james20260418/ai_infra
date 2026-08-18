@@ -63,6 +63,10 @@ int main() {
     jpov_scene::SceneApp app(cfg);
     app.Init();
     jpov_scene::BuildScene(&app);
+    // 本 test 覆盖“关 tile culling → 经典前向光照（无分界线）”路径。
+    // generator 保持默认（tile culling 开）→ gold 代表 on 路径；
+    // 因本 test 只做 smoke check（leader #16，不做像素比对），on/off 都通过。
+    app.tile_culling = false;
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;

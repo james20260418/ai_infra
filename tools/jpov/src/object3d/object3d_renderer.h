@@ -339,11 +339,12 @@ int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_P
 
 // 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
 // li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
-// 需传入 base_color / metallic / roughness（片元已解析的材质参数）。
+// 需传入 base_color / metallic / roughness（片元已解析的材质参数）；
 // 通过 inout total_diffuse / total_specular 累加。
-void accumulateOneLight(int li, vec3 N, vec3 V, vec3 vWorldPos_str, vec3 base_color, float metallic, float roughness,
+void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
+                         vec3 base_color, float metallic, float roughness,
                          inout vec3 total_diffuse, inout vec3 total_specular) {
-    vec3 L = uLights[li].position - vWorldPos_str;
+    vec3 L = uLights[li].position - world_pos;
     float dist = length(L);
     if (dist >= uLights[li].radius) return;
 
@@ -351,6 +352,10 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 vWorldPos_str, vec3 base_co
     float attenuation = 1.0 - (dist / uLights[li].radius);
 
     // ── Representative Point (Karis 2013) ──
+    // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
+    // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
+    // 能从不同区域命中镜面 lobe → 金属面不会全黑。
+    // physicalRadius = 0 时退化为原始点光源行为。
     float sourceRadius = uLights[li].physicalRadius;
     vec3 spec_dir = light_dir;  // default: same as point light
     if (sourceRadius > 0.0) {
