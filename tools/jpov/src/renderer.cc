@@ -743,8 +743,10 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 全局环境光 uniform（总是上传，未设置则用默认值）。
         // 环境光无方向、无影子，与 sun/点光源并列，照亮物体背阳面。
         if (!cmds.object3d.empty()) {
+            // 未显式配 ambient 时，用默认值（中性灰白 × 0.4，= 旧的硬编码 AMBIENT）。
+            const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
             Object3DRenderer::UploadAmbient(shader_mgr_,
-                DrawObject3DProg(), DrawObject3DProgFull(), *eff_ambient);
+                DrawObject3DProg(), DrawObject3DProgFull(), ambient);
         }
 
         // 用 3D FBO 尺寸计算 MVP
