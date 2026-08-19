@@ -13,8 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # apt 网络抖动防护：Ubuntu 软件源（archive.ubuntu.com 等）近期间歇不稳定
+      # （8/17-8/19 持续 warning/down），apt-get 无超时会长期挂起阻塞 CI。
+      # 分两步：update 只下小索引（紧超时，快速探路/失败重试）；install 装包
+      # （松超时，防大文件被误杀）。历史实测成功 run 的 install 最慢 ~97s
+      # （test 小包）/ ~96s（MinGW），故 update=30s、install=120s 留足余量。
+      # http::Timeout 是"单个连接卡死"超时，传输推进中不计时，不影响慢下载。
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgl-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxrender-dev
+        run: |
+          sudo apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=120 -o Acquire::https::Timeout=120 libgl-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxrender-dev
 
       - name: Install Bazelisk
         run: |
@@ -27,7 +35,7 @@ jobs:
 
       - name: Setup Xvfb
         run: |
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 xvfb
           Xvfb :99 -screen 0 1280x720x24 &
           sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -50,7 +58,9 @@ jobs:
           sudo mv bazelisk-linux-amd64 /usr/local/bin/bazel
 
       - name: Install MinGW cross-compiler
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+        run: |
+          sudo apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=180 -o Acquire::https::Timeout=180 g++-mingw-w64-x86-64
 
       - name: Build (Windows cross-compile)
         run: |
