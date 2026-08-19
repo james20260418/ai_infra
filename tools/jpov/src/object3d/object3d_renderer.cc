@@ -147,6 +147,22 @@ void Object3DRenderer::UploadLightData(const RenderCommandList& cmds,
     }
 }
 
+// ==================== UploadAmbient ====================
+
+void Object3DRenderer::UploadAmbient(ShaderManager& shader_mgr,
+                                     unsigned int prog,
+                                     unsigned int prog_full,
+                                     const AmbientLight& ambient) {
+    const unsigned int programs[] = {prog, prog_full};
+    for (unsigned int p : programs) {
+        glUseProgram(p);
+        glUniform3f(shader_mgr.GetUniform(p, "uAmbientColor"),
+                    ambient.color.r, ambient.color.g, ambient.color.b);
+        glUniform1f(shader_mgr.GetUniform(p, "uAmbientStrength"),
+                    std::max(ambient.strength, 0.0f));  // 负值 clamp 到 0
+    }
+}
+
 // ==================== BuildTileLightIndices ====================
 
 void Object3DRenderer::BuildTileLightIndices(const RenderCommandList& cmds,
@@ -538,31 +554,30 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
 // ==================== UploadSunData ====================
 
 void Object3DRenderer::UploadSunData(
-    const RenderCommandList& cmds,
     ShaderManager& shader_mgr,
     unsigned int prog,
     unsigned int prog_full,
     const std::vector<CascadeFBO>& shadow_fbos,
     const float shadow_vp[][16],
-    const ShadowConfig& cfg) {
-    const bool has_sun = cmds.sun.has_value();
-    const int cascade_count = has_sun ? cfg.cascade_count : 0;
+    const ShadowConfig& cfg,
+    const std::optional<DirectionalLight>& sun) {
+    const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
 
     const unsigned int progs[2] = {prog, prog_full};
     for (int pidx = 0; pidx < 2; ++pidx) {
         unsigned int p = progs[pidx];
         glUseProgram(p);
-        glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), has_sun ? 1 : 0);
+        glUniform1i(shader_mgr.GetUniform(p, "uHasSun"), sun.has_value() ? 1 : 0);
         glUniform1i(shader_mgr.GetUniform(p, "uCascadeCount"), cascade_count);
-        if (!has_sun) {
+        if (!sun.has_value()) {
+            // 无太阳：仅置 uHasSun=0 / uCascadeCount=0（防止上一帧残留直射光）。
             continue;
         }
-        const DirectionalLight& sun = *cmds.sun;
         glUniform3f(shader_mgr.GetUniform(p, "uSunDir"),
-                    sun.direction.x(), sun.direction.y(), sun.direction.z());
+                    sun->direction.x(), sun->direction.y(), sun->direction.z());
         glUniform3f(shader_mgr.GetUniform(p, "uSunColor"),
-                    sun.color.r, sun.color.g, sun.color.b);
-        glUniform1f(shader_mgr.GetUniform(p, "uSunIntensity"), sun.intensity);
+                    sun->color.r, sun->color.g, sun->color.b);
+        glUniform1f(shader_mgr.GetUniform(p, "uSunIntensity"), sun->intensity);
 
         // 各级联 far 距离 + 阴影淡出范围。
         CHECK_LE(cascade_count, ShadowConfig::kMaxCascades);

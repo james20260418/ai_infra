@@ -111,7 +111,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 
 namespace jpov {
 
-void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
+void SkyRenderer::DrawSky(const DaySkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
                           ShaderManager& shader_mgr) {
     // ---- 构建 相机 逆(Proj*View) ----
@@ -131,7 +131,7 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     CHECK(Mat4Invert(vp, inv_vp))
         << "DrawSky: 相机矩阵不可逆（近/远裁剪面非法或退化）";
 
-    // 太阳位置（SkyCommand::SunDir 已按 elevation/azimuth 算好 y-up 单位向量）
+    // 太阳位置（sun_dir 是 y-up 单位向量，直接上传）
 
     // ---- 渲染（全屏三角形，画当前绑定 FBO 的整张背景）----
     unsigned int prog = shader_mgr.GetOrCreate("sky", {kSkyVs, kSkyFs});
@@ -142,18 +142,13 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 static_cast<float>(fbo_w), static_cast<float>(fbo_h));
     glUniform3f(shader_mgr.GetUniform(prog, "uCamPos"), eye[0], eye[1], eye[2]);
     glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"),
-                sky_cmd.SunDir().x(), sky_cmd.SunDir().y(), sky_cmd.SunDir().z());
+                sky_cmd.sun_dir.x(), sky_cmd.sun_dir.y(), sky_cmd.sun_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uTurbidity"), sky_cmd.turbidity);
     glUniform3f(shader_mgr.GetUniform(prog, "uSeason"),
                 sky_cmd.season.r, sky_cmd.season.g, sky_cmd.season.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uIntensity"), sky_cmd.intensity);
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
-    glUniform1i(shader_mgr.GetUniform(prog, "uIsMoon"), sky_cmd.is_moon ? 1 : 0);
-    glUniform3f(shader_mgr.GetUniform(prog, "uBodyColor"),
-                sky_cmd.body_color.r, sky_cmd.body_color.g, sky_cmd.body_color.b);
-    glUniform1f(shader_mgr.GetUniform(prog, "uBodyRadius"), sky_cmd.body_radius);
-    glUniform1f(shader_mgr.GetUniform(prog, "uBodyGlow"), sky_cmd.body_glow);
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);

@@ -657,13 +657,20 @@ void Renderer::Render(const RenderCommandList& cmds,
         //                   不再改矩阵栈了，但保留 push/pop 习惯）
         glPushAttrib(GL_ENABLE_BIT | GL_VIEWPORT_BIT);
 
+        // ---- 太阳平行光与环境光：直接取用户手配值，不从 DaySkyCommand 推导 -------
+        // （2026-08-19 回归最小可行：DaySkyCommand 只定义“天色”，不再 Derive 方向光/
+        // 环境光。eff_sun=用户配的 cmds.sun（可为空）；eff_ambient=用户配的
+        // cmds.ambient，未配则用默认值）
+        const std::optional<DirectionalLight> eff_sun = cmds.sun;
+        std::optional<AmbientLight> eff_ambient = cmds.ambient;
+
         // ---- 第 0 步：太阳阴影 pass（有 sun 时）----
         // 先渲染场景深度到阴影纹理，主 pass 的 PBR shader 才能采样做影子。
         // DrawShadowPass 内部会绑定 shadow FBO 并改变 GL 状态，放在 Ensure3DFBO
         // 之前：后续 Ensure3DFBO + bind + clear 会恢复正常 3D 状态。
-        if (cmds.sun.has_value()) {
+        if (eff_sun.has_value()) {
             EnsureShadowFBO(shadow_cfg_);
-            DrawShadowPass(cmds);
+            DrawShadowPass(cmds, *eff_sun);
         }
 
         // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
@@ -725,12 +732,21 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
         }
 
-        // 太阳平行光 + 级联阴影贴图 uniform（有 sun 时）。
+        // 太阳平行光 + 级联阴影贴图 uniform（总是上传，无 sun 时置 uHasSun=0）。
         // 绑各级联 shadow 深度纹理到 PBR shader，供直射光的 PCF 阴影采样。
-        if (cmds.sun.has_value()) {
-            Object3DRenderer::UploadSunData(cmds, shader_mgr_,
+        if (!cmds.object3d.empty()) {
+            Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
-                shadow_fbos_, shadow_vp_, shadow_cfg_);
+                shadow_fbos_, shadow_vp_, shadow_cfg_, eff_sun);
+        }
+
+        // 全局环境光 uniform（总是上传，未设置则用默认值）。
+        // 环境光无方向、无影子，与 sun/点光源并列，照亮物体背阳面。
+        if (!cmds.object3d.empty()) {
+            // 未显式配 ambient 时，用默认值（中性灰白 × 0.4，= 旧的硬编码 AMBIENT）。
+            const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
+            Object3DRenderer::UploadAmbient(shader_mgr_,
+                DrawObject3DProg(), DrawObject3DProgFull(), ambient);
         }
 
         // 用 3D FBO 尺寸计算 MVP
@@ -905,14 +921,12 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 //
 // world_up 固定为 y 轴正向 (0,1,0)；若用户给的太阳方向近乎正上方（direction 与
 // -y 几乎平行），lookAt 会退化，故把方向偏置到非正上方（世界 x 方向略偏）。
-void Renderer::DrawShadowPass(const RenderCommandList& cmds) {
+void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun) {
     if (cmds.object3d.empty()) return;
 
     const int cascade_count = shadow_cfg_.cascade_count;
     CHECK_GT(cascade_count, 0);
     CHECK_EQ(shadow_fbos_.size(), static_cast<size_t>(cascade_count));
-
-    const DirectionalLight& sun = *cmds.sun;
 
     // 光传播方向归一化；若近乎正上方（direction 平行 -y 到接近 1），偏置到非正上方，
     // 避免 lookAt 的 cross(fwd, world_up) 退化（fwd 与 up 平行 → side=0）。
