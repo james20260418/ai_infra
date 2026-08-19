@@ -18,21 +18,10 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/test/compare_light.h"
 #include "tools/common/utils.h"
 
 namespace {
-
-std::string GetTexPath(const char* fname) {
-    const char* test_srcdir = std::getenv("TEST_SRCDIR");
-    if (test_srcdir) {
-        std::string p = test_srcdir;
-        if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d/";
-        p += fname;
-        return p;
-    }
-    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/" + fname;
-}
 
 std::string GetOutputDir() { return jpov::GetOutputDir() + "jpov_repeated_mrquad_test/"; }
 
@@ -181,6 +170,22 @@ int main() {
     float cov = static_cast<float>(nz) / total_pixels;
     LOG(INFO) << "coverage=" << (cov * 100.0f) << "%, max RGB=(" << mr << "," << mg << "," << mb << ")";
     CHECK_GT(nz, 0) << "empty render (quad not drawn)";
+
+    // ---- 光照平均颜色对比（Danis 方向）：自动平铺 ROI，块内平均色对比，
+    //      输出最大的 RGB 通道差异。当前为信息性 log（gold 与 fresh 之间
+    //      llvmpipe 状态可能导致合法的大均值差），不做硬性失败。----
+    const std::string gold_path = GetGoldPath();
+    if (FILE* f = std::fopen(gold_path.c_str(), "rb")) {
+        std::fclose(f);
+        // 8×8 平铺 64 块 ROI，每块对不透明像素求 RGB 均值，输出最大通道差。
+        const double max_diff =
+            jpov::CompareLightMeanRoiPng(gold_path, outpath, 8, 8);
+        LOG(INFO) << "LIGHT COMPARE: repeated_mrquad gold vs rendered "
+                  << "max-channel-mean-diff (tile 8x8) = " << max_diff;
+    } else {
+        LOG(WARNING) << "gold image not found; skipped light compare: "
+                     << gold_path;
+    }
 
     LOG(INFO) << "TEST PASSED: repeated MR-quad (flat) render pipeline ran "
               << "and produced a non-trivial effect image "

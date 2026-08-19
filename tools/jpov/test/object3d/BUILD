@@ -384,6 +384,7 @@ cc_test(
         "//tools/common:utils",
         "//third_party/stb:stb_image",
         "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
