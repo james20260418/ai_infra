@@ -18,21 +18,10 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/test/compare_light.h"
 #include "tools/common/utils.h"
 
 namespace {
-
-std::string GetTexPath(const char* fname) {
-    const char* test_srcdir = std::getenv("TEST_SRCDIR");
-    if (test_srcdir) {
-        std::string p = test_srcdir;
-        if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d/";
-        p += fname;
-        return p;
-    }
-    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/" + fname;
-}
 
 std::string GetOutputDir() { return jpov::GetOutputDir() + "jpov_repeated_mrquad_test/"; }
 
@@ -182,8 +171,39 @@ int main() {
     LOG(INFO) << "coverage=" << (cov * 100.0f) << "%, max RGB=(" << mr << "," << mg << "," << mb << ")";
     CHECK_GT(nz, 0) << "empty render (quad not drawn)";
 
+    // ---- 光照平均颜色对比（Danis 决策）：自动平铺 ROI，块内平均色对比，
+    //      输出最大的 RGB 通道差异，作为光照 gold 的硬性门禁。
+    //      基线：本地与 CI 流水线 8×8 平铺均稳定测到 max-channel-mean-diff
+    //      = 17.68（跨环境可复现）。设阈值 25（留有 ~7 余量），超过即判回归。
+    const double kLightThreshold = 25.0;
+    const std::string gold_path = GetGoldPath();
+    if (FILE* f = std::fopen(gold_path.c_str(), "rb")) {
+        std::fclose(f);
+        // 8×8 平铺 64 块 ROI，每块对不透明像素求 RGB 均值，输出最大通道差。
+        const double max_diff =
+            jpov::CompareLightMeanRoiPng(gold_path, outpath, 8, 8);
+        LOG(INFO) << "LIGHT COMPARE: repeated_mrquad gold vs rendered "
+                  << "max-channel-mean-diff (tile 8x8) = " << max_diff
+                  << " (threshold=" << kLightThreshold << ")";
+        if (max_diff < 0) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED: 无法比对（gold 或 rendered "
+                          "读取/尺寸错误）";
+            return 1;
+        }
+        if (max_diff > kLightThreshold) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED: max-channel-mean-diff="
+                       << max_diff << " > threshold=" << kLightThreshold
+                       << " → 光照回归！";
+            return 1;
+        }
+        LOG(INFO) << "LIGHT COMPARE PASSED: max-channel-mean-diff="
+                  << max_diff << " <= threshold=" << kLightThreshold;
+    } else {
+        LOG(WARNING) << "gold image not found; skipped light compare: "
+                     << gold_path;
+    }
+
     LOG(INFO) << "TEST PASSED: repeated MR-quad (flat) render pipeline ran "
-              << "and produced a non-trivial effect image "
-              << "(color check skipped per leader #16)";
+              << "and produced a non-trivial effect image";
     return 0;
 }

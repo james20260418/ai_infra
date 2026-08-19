@@ -7,6 +7,18 @@ cc_library(
     deps = ["@glog_static//:glog"],
 )
 
+# 光照 gold image 比对工具：自动平铺 ROI + 块内平均颜色对比，输出最大 RGB 通道差。
+# header-only，无自定义实现，仅依赖 stb_image（调用方需已 link）与 glog。
+cc_library(
+    name = "compare_light",
+    hdrs = ["compare_light.h"],
+    visibility = ["//tools/jpov:__subpackages__"],
+    deps = [
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+)
+
 # ============================================================================
 # OBJ 加载器单元测试 — 纯 CPU 解析（不渲染）
 # ============================================================================
