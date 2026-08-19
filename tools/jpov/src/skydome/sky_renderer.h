@@ -1,14 +1,15 @@
-// JPOV SkyRenderer — 程序化天光（Preetham 天空 + 日月圆盘）背景渲染
+// JPOV SkyRenderer — 程序化白天天光（Preetham）背景渲染
 //
-// 用解析式大气模型（Preetham-Shirley-Smits 1999）计算纯色天空背景，
-// 与 3D 相机视角一致（相机逆 VP 重建视线方向）。非 HDRI：纯程序化、
-// 参数少、连续可动画，支持时间(太阳位置)/天气(turbidity)/季节(season)。
+// 用解析式大气模型（Preetham-Shirley-Smits 1999）计算白天天空背景，
+// 与 3D 相机视角一致（相机逆 VP 重建视线方向）。纯程序化、参数少、连续可动画，
+// 支持太阳位置/天气(turbidity)/季节(season)/亮度(intensity)。
 //
 // 设计要点：
 //   - 独立轻量 sky shader（含 Preetham 函数），一帧一次 draw，不掺 object3d。
 //   - 先画天球（垫 3D FBO 背景）→ 再画 3D 物体（深度测试覆盖）。
 //   - 地平线以下（pitch<0）画纯色 ground_color（避免天空倒影）。
-//   - 太阳/月亮：程序化天空上叠一个高斯发光圆盘（可切日月）。
+//   - HDR：输出原始亮度（可 >1.0），不做 tone map，由后处理统一压缩。
+//   - 不画日月盘/星星/夜空（DaySkyCommand 仅白天；夜空由独立 layer 处理）。
 //
 // 曲线来源：Preetham 模型实现基于 Erin Catto (box3d, MIT) 的 preetham.glsl，
 // 论文 "A Practical Analytic Model for Daylight" (Preetham, Shirley, Smits 1999)。
@@ -67,14 +68,9 @@ uniform float uTurbidity;     // 浊度（天气）：2 清澈…8 霾
 uniform vec3  uSeason;        // 季节色温乘子（冬冷/夏暖）
 uniform float uIntensity;     // 天光亮度标量
 uniform vec3  uGroundColor;   // 地平线以下地色
-uniform int   uIsMoon;        // 0=太阳 1=月亮
-uniform vec3  uBodyColor;     // 日月颜色
-uniform float uBodyRadius;    // 日月角半径（弧度）
-uniform float uBodyGlow;      // 光晕模糊度（0=硬边）
 
 const float PI = 3.14159265358979323846;
-// Preetham 输出天顶亮度 ~几十到几百 kcd/m²。用亮度缩放把值压回可显示区间；
-// 调小让天空稍暗，太阳圆盘才能在对比下清晰浮现（0.05：天顶→~0.2 天蓝）。
+// Preetham 输出天顶亮度 ~几十到几百 kcd/m²。用亮度缩放把值压回可显示区间。
 const float SKY_LUMINANCE_SCALE = 0.04;
 
 // ===== Preetham 大气模型（基于 box3d preetham.glsl，MIT）=====
@@ -150,55 +146,33 @@ void main() {
     vec4 wp = uInvVP * vec4(ndc_xy, 1.0, 1.0);
     vec3 dir = normalize(wp.xyz / wp.w - uCamPos);
 
+    float sun_y = normalize(uSunDir).y;
+    // 昼夜过渡：0=夜 1=日（太阳仰角连续）。
+    float daylight = clamp((sun_y - 0.03) / 0.10, 0.0, 1.0);
+
     vec3 sky;
     if (dir.y < 0.0) {
-        // 地平线以下：纯色地色（避免天空倒影感），不采样大气模型
+        // ── 地平线以下：纯色地色（避免天空倒影感），不采样大气模型 ──
         sky = uGroundColor;
     } else {
-        // 上半球：Preetham 大气模型算天空色（含晚霞方向非对称），乘亮度缩放
+        // ── 上半球：Preetham 大气模型算天空色 ──
         sky = preethamSky(dir, normalize(uSunDir), uTurbidity) * SKY_LUMINANCE_SCALE;
+
+        // ── 昼夜过渡：太阳低于地平线时，日光淡出直到接近黑（(0,0,0)） ──
+        // 不提供夜空色（DaySkyCommand 无 night_color）：太阳落山后 sky 向黑逼近，
+        // 夜空内容（月光散射/辉光/星星）由独立 night sky layer blend 叠加。
+        // （原本 mix(uNightColor, ...) 的夜空底色已移除，2026-08-19 决定。）
+        sky = mix(vec3(0.0), sky, daylight);
+
+        // （DaySkyCommand 仅白天：不画日月盘/星星/夜空。太阳落山后天空向黑，
+        //  夜空内容（月球光/辉光/星星）交由独立 night sky layer 处理，2026-08-19。）
     }
 
-    // ── 昼夜过渡：太阳低于地平线时，Preetham 本就发散的日光要淡出到夜空 ──
-    // 用太阳仰角(sunDir.y)做衰减：太阳越低，日光贡献越弱；完全落山→夜空底色。
-    // 夜空底色：深蓝黑渐变（天顶略蓝、地平线深）——手动程序色，避免 Preetham
-    // 在 sun<0 时残留的黄色霞带。恒星在天空暗时浮现（见下）。
-    float sun_y = normalize(uSunDir).y;
-    // 夜空底色：纯深蓝黑，不含暖调
-    vec3 night_base = vec3(0.015, 0.02, 0.05);          // 深蓝夜空
-    // 日光强度：sun_y=1 时全天光；sun_y<=0.03 时日光衰减到接近 0（衔接夜空）。
-    float daylight = clamp((sun_y - 0.03) / 0.10, 0.0, 1.0);  // 0=夜 1=日
-    sky = mix(night_base, sky, daylight);
-
-    // 恒星：仅天空暗（夜空）时可见；用视线方向哈希做伪随机星点。
-    // 亮度随 daylight 减弱（夜晚才有星）。
-    float star = 0.0;
-    if (daylight < 0.5) {
-        vec2 sp = vec2(dir.x, dir.z) * 60.0;             // 星场尺度
-        vec2 cell = floor(sp);
-        vec2 f = fract(sp) - 0.5;
-        // 每格一个伪随机星（cell 哈希），亮度/半径抖动
-        float h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
-        float st = smoothstep(0.7, 1.0, h);              // 少数格有星
-        st *= clamp(1.0 - length(f) / 0.08, 0.0, 1.0);   // 星点小核
-        star = st * (0.15 + 0.85 * fract(h * 77.0));     // 亮度抖动
-    }
-    sky += vec3(star) * (1.0 - daylight);
-
-    // 太阳/月亮发光圆盘：视线方向与太阳方向夹角越小越亮。
-    // 用高斯衰减画盘；bodyRadius 控盘大小（角半径弧度），bodyGlow 控制盘边缘
-    // 弥散（0=清晰圆，越大越模糊散开）。亮度取 1.2（避免过曝成一团白）。
-    float cos_angle = dot(normalize(dir), normalize(uSunDir));
-    float angle = acos(clamp(cos_angle, -1.0, 1.0));
-    float uv = angle / max(uBodyRadius, 1e-5);
-    // 距离归一化：uv=1 在盘缘，uv=0 盘心。盘心亮度 1，盘缘快速衰减。
-    // 分母 1+bodyGlow*40：bodyGlow 越大衰减越缓（弥散大），0 时高斯很陡(清晰盘)。
-    float glow = exp(-uv * uv * (1.0 + uBodyGlow * 40.0));
-    sky += uBodyColor * glow * (uIsMoon == 1 ? 0.3 : 1.2);
-
-    // 季节色温 + 亮度；图像输出需 tone map（天空亮度可达 O(1)~O(10)，压缩防过曝）
+    // 季节色温 + 亮度。
+    // 注意：这里**不做 tone map**（不再 sky/(1+sky)）——为了后续统一后处理管线，
+    // 天空输出保持 HDR 原始亮度（可 >1.0），由最终的后处理 pass 统一压缩到 [0,1]。
+    // （2026-08-19：为引入统一后处理，去掉天空 shader 里的前置 Reinhard。）
     sky *= uSeason * uIntensity;
-    sky = sky / (1.0 + sky);   // Reinhard tone map 到 [0,1]
 
     FragColor = vec4(sky, 1.0);
 }
@@ -208,7 +182,7 @@ void main() {
     // 在**当前绑定 FBO** 上画全屏程序化天光（背景垫底）。
     //
     // 参数：
-    //   sky_cmd:  SkyCommand（程序化参数）。
+    //   sky_cmd:  DaySkyCommand（程序化参数）。
     //   cam:      当前 Camera（取 position/target/up/fov/近远/fbo 尺寸算逆 VP）。
     //   fbo_w/h:  当前 3D FBO 尺寸。
     //   shader_mgr: 共享资源。
@@ -217,7 +191,7 @@ void main() {
     //   - 目标 FBO 已绑定（天光垫底的 3D FBO），viewport 已设置
     //   - 深度测试已禁用（天空永远垫底，不写深度）
     // Pre-condition: cam.up 非零、target != position
-    static void DrawSky(const SkyCommand& sky_cmd,
+    static void DrawSky(const DaySkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr);
 };

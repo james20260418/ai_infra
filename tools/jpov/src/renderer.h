@@ -106,7 +106,7 @@ private:
     void CompileShaders();
     void CreateStreamVBO();
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
-    void DrawShadowPass(const RenderCommandList& cmds);
+    void DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun);
 
     unsigned int strip_vbo_ = 0;
 

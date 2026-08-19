@@ -5,9 +5,9 @@
 // 桌/凳/盆栽），只改天光参数与相机姿态。
 //
 // 生成 6 张 gold（时刻 × 机位）：
-//   白天   day    : sun_elev≈45, turb≈2（清澈晴天，太阳圆盘）
-//   晚霞   sunset : sun_elev≈8,  turb≈4（低太阳，红橙霞 + 长影）
-//   夜间   night  : sun_elev=-5, is_moon（月亮圆盘，冷蓝夜空）
+//   白天   day    : sun 高（仰角~45°）, turb≈2（清澈晴天，太阳圆盘）
+//   晚霞   sunset : sun 低（仰角~8°）, turb≈4（低太阳，红橙霞 + 长影）
+//   夜间   night  : sun 在地平线下（仰角-5°）, 月亮圆盘（冷蓝夜空）
 //
 // 机位：
 //   kCamFromBody: 从日月位置（沿太阳/月亮方向远处）望向场景中心 —— 看场景被
@@ -20,6 +20,7 @@
 #ifndef JPOV_TEST_OBJECT3D_SKYDOME_JPOV_SKYDOME_COMMON_H_
 #define JPOV_TEST_OBJECT3D_SKYDOME_JPOV_SKYDOME_COMMON_H_
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -84,44 +85,44 @@ public:
         slots_.push_back({std::move(obj), cen, up, front});
     }
 
-    // 按时刻得到天光参数
-    static jpov::SkyCommand SkyFor(TimePreset t) {
+    // 由仰角/方位角（度）计算太阳方向单位向量（y-up）。
+    // 与旧 DaySkyCommand::SunDir 同公式：(cosθ·sinφ, sinθ, cosθ·cosφ)，φ=0 指向 +z。
+    static jpov::Vec3f SunDirFromAngles(float elev_deg, float azim_deg) {
+        const float p = 3.14159265358979323846f / 180.0f;
+        const float th = elev_deg * p;
+        const float ph = azim_deg * p;
+        return jpov::Vec3f(std::cos(th) * std::sin(ph),
+                           std::sin(th),
+                           std::cos(th) * std::cos(ph));
+    }
+
+    // 按时刻得到天光参数（最小可行：只定义天色，无日月盘/方向光）
+    static jpov::DaySkyCommand SkyFor(TimePreset t) {
         switch (t) {
             case TimePreset::kDay:
                 return {
-                    /*elev*/ 45.0f, /*azim*/ 0.0f, /*turb*/ 2.0f,
-                    /*season*/ {1,1,1,1}, /*intensity*/ 1.0f,
+                    /*sun_dir*/ SunDirFromAngles(30.0f, 0.0f),
+                    /*turb*/ 2.0f,
+                    /*season*/ {1,0.8,0.8,1}, /*intensity*/ 1.0f,
                     /*ground*/ {0.08f,0.09f,0.11f,1.0f},
-                    /*is_moon*/ false, /*body*/ {1.0f,1.0f,0.95f,1.0f},
-                    /*radius*/ 0.04f, /*glow*/ 0.05f,
                 };
             case TimePreset::kSunset:
                 return {
-                    /*elev*/ 8.0f, /*azim*/ 0.0f, /*turb*/ 4.0f,
-                    /*season*/ {1.0f,0.92f,0.85f,1.0f}, /*intensity*/ 1.0f,
+                    /*sun_dir*/ SunDirFromAngles(8.0f, 0.0f),
+                    /*turb*/ 6.0f,
+                    /*season*/ {1.0f,0.6f,0.6f,1.0f}, /*intensity*/ 1.0f,
                     /*ground*/ {0.05f,0.05f,0.07f,1.0f},
-                    /*is_moon*/ false, /*body*/ {1.0f,0.7f,0.35f,1.0f},
-                    /*radius*/ 0.045f, /*glow*/ 0.1f,
                 };
             case TimePreset::kNight:
                 return {
-                    /*elev*/ -5.0f, /*azim*/ 0.0f, /*turb*/ 2.0f,
+                    /*sun_dir*/ SunDirFromAngles(-5.0f, 0.0f),
+                    /*turb*/ 6.0f,
                     /*season*/ {0.7f,0.8f,1.0f,1.0f}, /*intensity*/ 1.0f,
-                    /*ground*/ {0.02f,0.02f,0.04f,1.0f},
-                    /*is_moon*/ true,  /*body*/ {0.9f,0.92f,1.0f,1.0f},
-                    /*radius*/ 0.035f, /*glow*/ 0.05f,
+                    /*ground*/ {0.015f,0.015f,0.03f,1.0f},
                 };
         }
         return {};
     }
-
-    // 太阳位置（方向向量，用于相机"从日月看"机位）
-    static jpov::Vec3f SunDirFor(TimePreset t) {
-        return SkyFor(t).SunDir();
-    }
-
-    // 场景中心（地面场景的视觉重心）
-    static const jpov::Vec3f SceneCenter() { return {0.0f, 0.8f, 0.0f}; }
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -135,32 +136,19 @@ public:
         cmds->camera.fbo_3d_height_ = kResH;
         cmds->camera.near = 0.05f;
 
-        jpov::SkyCommand sky = SkyFor(time_);
-        const jpov::Vec3f sun_dir = sky.SunDir();
-        const jpov::Vec3f center = SceneCenter();
+        jpov::DaySkyCommand sky = SkyFor(time_);
 
         // ── 机位 ──
         if (cam_ == CamPreset::kToBody) {
-            // 从场景中心望向日月：从高处看向太阳/月亮方向，避免被地面几何
-            // 遮挡天体圆盘（视线向上、远处物体都在下方），天体圆盘居中可见。
-            cmds->camera.position = {0.0f, 5.0f, -6.0f};
-            cmds->camera.target   = cmds->camera.position + sun_dir * 15.0f;
+            cmds->camera.position = {-5.0f, 1.0f, -5.0f};
+            cmds->camera.target   = {0, 4, 20};
         } else {
-            // 从日月望向场景：相机在太阳/月亮方向的中等高度处，看向远处地平线
-            //（近水平），让画面同时呈现：天空圆顶（上部）+ 场景（下部地平线前）。
-            cmds->camera.position = center + sun_dir * 7.0f;
-            cmds->camera.target   = {0.0f, 0.4f, -14.0f};
+            cmds->camera.position = {5,3,5};
+            cmds->camera.target   = {0,1,0};
         }
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
 
-        // ── 光照：太阳平行光（与天光太阳位置对齐，方向=-SunDir）──
-        cmds->sun = jpov::DirectionalLight{
-            /*direction*/ {-sun_dir.x(), -sun_dir.y(), -sun_dir.z()},
-            /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
-            /*intensity*/ 3.0f,
-        };
-
-        // ── 天光 ──
+        // ── 天光（只定义天色；无方向光、无环境光 derive） ──
         cmds->sky = sky;
 
         for (const Slot& s : slots_) {
@@ -215,15 +203,15 @@ inline void BuildScene(SkydomeSceneApp* app) {
     // 桌子 / 凳子 / 盆栽
     jpov::GltfObject table = load("table.glb");
     brighten(&table, 3.0f);
-    app->AddSlot(std::move(table), {0.0f, 0.71f, 0.2f}, {-1,0,0}, {0,1,0});
+    app->AddSlot(std::move(table), {0.0f, 0.0f, 0.2f}, {-1,0,0}, {0,1,0});
 
     jpov::GltfObject stool = load("stool.glb");
     brighten(&stool, 3.0f);
-    app->AddSlot(std::move(stool), {0.7f, 0.27f, 0.9f}, {0,0,1}, {0,1,0});
+    app->AddSlot(std::move(stool), {0.7f, 0.0f, 0.9f}, {0,0,1}, {0,1,0});
 
     jpov::GltfObject plant = load("houseplant.glb");
     brighten(&plant, 4.0f);
-    app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {1,0,0}, {0,1,0});
+    app->AddSlot(std::move(plant), {0.3f, 1.3f, 0.3f}, {1,0,0}, {0,1,0});
 }
 
 }  // namespace jpov_skydome
