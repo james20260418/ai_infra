@@ -193,8 +193,9 @@ uniform float uShadowBias;            // 深度偏移，抗自阴影 acne
 uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
-const vec3 AMBIENT_COLOR = vec3(1.0, 1.0, 1.0);
-const float AMBIENT_STRENGTH = 0.4;
+// 全局环境光（AmbientLight）：无方向、无影子，照亮背阳面。
+uniform vec3  uAmbientColor;    // 环境光颜色（RGB）
+uniform float uAmbientStrength; // 环境光强度（标量，乘 color）
 
 const float PI = 3.14159265;
 
@@ -439,7 +440,7 @@ void main() {
         num_lights = readTileLights(tile_col, tile_row, light_indices);
     }
 
-    vec3 ambient = AMBIENT_COLOR * AMBIENT_STRENGTH;
+    vec3 ambient = uAmbientColor * uAmbientStrength;
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 
@@ -608,13 +609,22 @@ void main() {
     //              长度须 == cfg.cascade_count。
     // shadow_vp:   各级联光空间 ViewProj，[kMaxCascades][16]。
     static void UploadSunData(
-        const RenderCommandList& cmds,
         ShaderManager& shader_mgr,
         unsigned int prog,
         unsigned int prog_full,
         const std::vector<CascadeFBO>& shadow_fbos,
         const float shadow_vp[][16],
-        const ShadowConfig& cfg);
+        const ShadowConfig& cfg,
+        const std::optional<DirectionalLight>& sun);
+
+    // ---- UploadAmbient ----
+    // 把入参 ambient（AmbientLight）上传到 PBR shader 的 uAmbientColor /
+    // uAmbientStrength。每帧在 Draw3DCommands 前调用一次（与 sun/点光源并列），
+    // 两个 shader program 都上传。
+    static void UploadAmbient(ShaderManager& shader_mgr,
+                              unsigned int prog,
+                              unsigned int prog_full,
+                              const AmbientLight& ambient);
 };
 
 }  // namespace jpov
