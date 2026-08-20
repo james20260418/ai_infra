@@ -68,9 +68,23 @@ uniform float uTurbidity;     // 浊度（天气）：2 清澈…8 霾
 uniform vec3  uSeason;        // 季节色温乘子（冬冷/夏暖）
 uniform float uIntensity;     // 天光亮度标量
 uniform vec3  uGroundColor;   // 地平线以下地色
+uniform float uSunRadius;     // 太阳盘角半径（弧度，~0.0047~0.015；≤0 不画）
+uniform float uSunBrightness; // 太阳盘自发光亮度基数（HDR，~1e6；≤0 不画）
+uniform float uSunGlow;       // 太阳盘光晕强度（艺术参数，0=无光晕，~1 默认）
 
 const float PI = 3.14159265358979323846;
-// Preetham 输出天顶亮度 ~几十到几百 kcd/m²。用亮度缩放把值压回可显示区间。
+// 天光亮度归一化系数：把 Preetham 输出的物理天顶亮度（~几千 cd/m²，即几 kcd/m²）
+// 压到 JPOV 的 HDR 亮度标尺，使 `DaySkyCommand::intensity = 1.0` 时正好对应
+// **正午晴天**的蓝天背景。
+//
+// 定值依据（2026-08-19 定，Danis 确认）：在本系数 + intensity=1.0 + ACES tone
+// mapping 下，standard_sunny_day 场景天空呈现正常蓝天渐变（顶部深蓝 → 地平线
+// 浅蓝发白），与太阳直射/阴影/环境光（sun=3, ambient=0.3，见 LIGHT_INTENSITY.md
+// 晴天基准值）同一 HDR 标尺、协调一致。
+//
+// 注：此系数与 Preetham 实现的“绝对 radiance”量级相关，但非独立物理常数——
+// 它必须与 JPOV 的 HDR 归一化 + ACES tone map 白点配套，方能坐 `intensity=1.0
+// = 正午晴天` 这一锚点。不得与其它引擎的 Preetham 乘数直接对标。
 const float SKY_LUMINANCE_SCALE = 0.04;
 
 // ===== Preetham 大气模型（基于 box3d preetham.glsl，MIT）=====
@@ -138,6 +152,27 @@ vec3 preethamSky(vec3 view_dir, vec3 sun_dir, float turbidity) {
     return max(rgb, vec3(0.0));
 }
 
+// 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
+// 白平衡到 ~5600K 中性，再归一化）。用于太阳盘自发光颜色：
+//   2000K（日出日落）→ 橙红；5600K（正午）→ 接近中性白。
+vec3 colorTempToLinear(float kelvin) {
+    float t = clamp(kelvin, 1000.0, 40000.0) / 100.0;
+    vec3 c;
+    // 红通道
+    if (t <= 66.0) c.r = 1.0;
+    else c.r = clamp(1.29293618606 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
+    // 绿通道
+    if (t <= 66.0)
+        c.g = clamp(0.3900815787697696 * log(t) - 0.6318414437886277, 0.0, 1.0);
+    else
+        c.g = clamp(1.1298908608951798 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
+    // 蓝通道
+    if (t >= 66.0) c.b = 1.0;
+    else if (t <= 19.0) c.b = 0.0;
+    else c.b = clamp(0.543206789110196 * log(t - 10.0) - 1.19625408914, 0.0, 1.0);
+    return c;
+}
+
 void main() {
     // gl_FragCoord → NDC：frag 坐标在 [0,w]×[0,h]，NDC 在 [-1,1]。
     //（不用 VS 的 vNDC varying —— 无 VAO 全屏三角形上插值不可靠）
@@ -150,13 +185,59 @@ void main() {
     // 昼夜过渡：0=夜 1=日（太阳仰角连续）。
     float daylight = clamp((sun_y - 0.03) / 0.10, 0.0, 1.0);
 
+    // ── 太阳盘（自发光天体）：角盘 + 色温推导色 + Beer-Lambert 衰减 ──
+    // 参数：uSunRadius（角半径）+ uSunBrightness（亮度基数）+ uSunGlow（光晕）由用户给；
+    // 颜色色温（2000K 日出→5600K 正午）与随仰角衰减（Beer-Lambert）在此推导。
+    // uSunRadius ≤ 0 或 uSunBrightness ≤ 0 时不画太阳盘。
+    vec3 sun_dir = normalize(uSunDir);
+    float sun_elev = asin(clamp(sun_dir.y, -1.0, 1.0));   // 仰角（弧度）
+
+    // 太阳盘色温（开尔文）：仰角越高色温越高（正午白~5600K，日出日落红~2000K）。
+    float sun_temp = mix(2000.0, 5600.0, clamp(sun_elev / 0.3, 0.0, 1.0));
+    vec3 sun_body_color = colorTempToLinear(sun_temp);   // 黑体色，线性 RGB
+
+    // Beer-Lambert 大气衰减：AM ≈ 1/sin(仰角)（低角度穿更多大气）。
+    // tau 从浊度近似（Preetham 光学厚度，简化用 turbidity 线性映射）。
+    float sin_elev = max(sin(sun_elev), 0.05);
+    float AM = 1.0 / sin_elev;
+    float tau = 0.1 + 0.1 * uTurbidity;   // 简化光学厚度
+    float attenuation = exp(-tau * AM);
+    // HDR 亮度：sun_brightness × 衰减（只有太阳在地平线上时才画）。
+    float sun_brightness = uSunBrightness * attenuation;
+
+    // 太阳盘 mask：在**角度空间**做 smoothstep（而非 cos 空间）。
+    // 经典写法 smoothstep(cosSA, 1.0, cos_theta) 在 cosSA 接近 1（小太阳盘）时失效：
+    // cos 在 θ→0 处斜率→0，cos 空间分辨率极不均匀，导致过渡被挤成 1 像素的硬边。
+    // 正确：先算角距离 ang=acos(cos_ang)，再在角度空间 smoothstep，过渡覆盖整个盘半径。
+    float cos_ang = dot(dir, sun_dir);
+    float ang = acos(clamp(cos_ang, -1.0, 1.0));   // 到太阳中心的角距离（弧度）
+    float disk = 1.0 - smoothstep(0.0, uSunRadius, ang);
+
+    // sun_brightness ≤ 0 时不画（disk 为 0）；否则叠加自发光盘。
+    float sun_enable = (uSunBrightness > 0.0 && uSunRadius > 0.0) ? 1.0 : 0.0;
+    vec3 sun_contrib = sun_body_color * (sun_brightness * disk * sun_enable);
+
+    // ── 太阳光晕（艺术参数，独立于盘，用于盖锯齿 + 大气辉光感）──
+    // 标准高斯辉光：glow = uSunGlow × exp(−d²/2σ²)，σ ∝ sun_radius。
+    // 关键：光晕是大气散射，物理强度远低于盘（~盘的 1e-4~1e-5），故**独立强度**
+    // uSunGlow 直接作为光晕的 HDR 亮度（量级 ~几，非盘的 1e5），不与盘亮度同源。
+    // 之前误写成 sun_brightness×glow，导致盘外几像素仍被 1e3 基数顶到 ACES 饱和。
+    float glow = 0.0;
+    if (uSunGlow > 0.0 && sun_enable > 0.0) {
+        float glow_sigma = uSunRadius * 2.0;                 // 光晕宽度 ∝ 盘大小
+        float d = max(ang - uSunRadius, 0.0);                // 距盘边缘的角距离
+        glow = uSunGlow * exp(-(d * d) / (2.0 * glow_sigma * glow_sigma));
+    }
+    vec3 glow_contrib = sun_body_color * (glow * sun_enable);
+
+
     vec3 sky;
     if (dir.y < 0.0) {
         // ── 地平线以下：纯色地色（避免天空倒影感），不采样大气模型 ──
         sky = uGroundColor;
     } else {
         // ── 上半球：Preetham 大气模型算天空色 ──
-        sky = preethamSky(dir, normalize(uSunDir), uTurbidity) * SKY_LUMINANCE_SCALE;
+        sky = preethamSky(dir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
 
         // ── 昼夜过渡：太阳低于地平线时，日光淡出直到接近黑（(0,0,0)） ──
         // 不提供夜空色（DaySkyCommand 无 night_color）：太阳落山后 sky 向黑逼近，
@@ -164,8 +245,10 @@ void main() {
         // （原本 mix(uNightColor, ...) 的夜空底色已移除，2026-08-19 决定。）
         sky = mix(vec3(0.0), sky, daylight);
 
-        // （DaySkyCommand 仅白天：不画日月盘/星星/夜空。太阳落山后天空向黑，
-        //  夜空内容（月球光/辉光/星星）交由独立 night sky layer 处理，2026-08-19。）
+        // ── 叠太阳盘（加法，和天空散射色在同一 HDR 域）──
+        // 太阳盘是自发光天体，与天空散射色加法叠加，不受 season 染色（见下）。
+        sky += sun_contrib;
+        sky += glow_contrib;
     }
 
     // 季节色温 + 亮度。

@@ -139,6 +139,8 @@ void Object3DRenderer::UploadLightData(const RenderCommandList& cmds,
             glUniform1f(shader_mgr.GetUniform(p, buf), l.linear_radius);
             snprintf(buf, sizeof(buf), "uLights[%d].physicalRadius", i);
             glUniform1f(shader_mgr.GetUniform(p, buf), l.physical_radius);
+            snprintf(buf, sizeof(buf), "uLights[%d].intensity", i);
+            glUniform1f(shader_mgr.GetUniform(p, buf), l.intensity);
         }
         glUniform1i(shader_mgr.GetUniform(p, "uTotalLights"), clamped);
         // uTileCulling=1（默认）：片元走 tile 索引纹理；=0：遍历全部光源。
@@ -158,8 +160,8 @@ void Object3DRenderer::UploadAmbient(ShaderManager& shader_mgr,
         glUseProgram(p);
         glUniform3f(shader_mgr.GetUniform(p, "uAmbientColor"),
                     ambient.color.r, ambient.color.g, ambient.color.b);
-        glUniform1f(shader_mgr.GetUniform(p, "uAmbientStrength"),
-                    std::max(ambient.strength, 0.0f));  // 负值 clamp 到 0
+        glUniform1f(shader_mgr.GetUniform(p, "uAmbientIntensity"),
+                    std::max(ambient.intensity, 0.0f));  // 负值 clamp 到 0
     }
 }
 

@@ -119,6 +119,63 @@ void main() {
 }
 )glsl";
 
+// 统一后处理 tone map：全屏三角形 vertex shader（覆盖 NDC）。
+// 消费 HDR FBO 的浮点纹理，做 ACES filmic tone map 压缩到 LDR。
+const char* kTonemapVs = R"glsl(
+#version 330 core
+out vec2 vTexCoord;
+void main() {
+    vec2 pos;
+    if (gl_VertexID == 0) pos = vec2(-1.0, -1.0);
+    else if (gl_VertexID == 1) pos = vec2( 3.0, -1.0);
+    else pos = vec2(-1.0,  3.0);
+    vTexCoord = pos * 0.5 + 0.5;
+    gl_Position = vec4(pos, 0.0, 1.0);
+}
+)glsl";
+
+// ACES filmic tone map（Narkowicz 拟合）—— luminance-only（色度保持）版本。
+//
+// 背景：完整版 ACES（含 ACES_IN/ACES_OUT 色彩矩阵）会把颜色往广色域走再映射回来，
+// 这一来一回是“有损近似”，会在暗部/低饱和区引入系统性色偏（尤其暗部发绿）。
+// JPOV 要的是“只压缩亮度、不偏移色调”的鲁棒 tone map，故采用 luminance-only：
+//   1. 先求线性亮度 lum = dot(color, Rec.709 权重)；
+//   2. 只对 lum 套 ACES filmic 曲线（RRTAndODTFit）→ 高光柔和滚落；
+//   3. 颜色按 (tone/lum) 比例缩回 —— 色向/饱和度 100% 保持，只改明暗。
+// 这样 night 的极暗部不会被翻成绿色，sunset 的红霞物体也不会被染色。
+const char* kTonemapFs = R"glsl(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D uHdrTexture;
+
+// ACES filmic 曲线（Narkowicz / Stephen Hill RRTAndODTFit 拟合）。
+// 对标量亮度工作，输出 [0,1] 附近，高光有柔和 S 型肩。
+float aces_curve(float x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 aces_tonemap(vec3 color) {
+    // 线性亮度（Rec.709 绿色权重 > 蓝），用于只压亮度不动色相。
+    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float tone = aces_curve(lum);
+    // 按比例缩回：色相/饱和度不变，仅整体明暗被 ACES 曲线压缩。
+    // lum≈0 时避免除零（直接返回黑）。
+    return color * (tone / max(lum, 1e-5));
+}
+
+void main() {
+    vec3 hdr = texture(uHdrTexture, vTexCoord).rgb;
+    vec3 ldr = aces_tonemap(hdr);
+    FragColor = vec4(ldr, 1.0);
+}
+)glsl";
+
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 
 // 构建正交投影矩阵（列主序，OpenGL 右手系）。阴影 pass 用：太阳是平行光，视锥是正交盒。
@@ -229,6 +286,8 @@ Renderer::~Renderer() {
     DestroyOutputFBO();
     Destroy3DFBO();
     Destroy3DResolveFBO();
+    DestroyHDRFBO();
+    DestroyHDRResolveFBO();
     DestroyShadowFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
@@ -290,6 +349,39 @@ void Renderer::Destroy3DResolveFBO() {
     }
     resolve_fbo_3d_w_ = 0;
     resolve_fbo_3d_h_ = 0;
+}
+
+void Renderer::DestroyHDRFBO() {
+    if (fbo_hdr_) {
+        glDeleteFramebuffers(1, &fbo_hdr_);
+        glDeleteTextures(1, &color_tex_hdr_);
+#ifndef JPOV_WITHOUT_MSAA
+        if (depth_rb_hdr_) {
+            glDeleteRenderbuffers(1, &depth_rb_hdr_);
+        }
+#else
+        if (depth_tex_hdr_) {
+            glDeleteTextures(1, &depth_tex_hdr_);
+        }
+#endif
+        fbo_hdr_ = 0;
+        color_tex_hdr_ = 0;
+        depth_rb_hdr_ = 0;
+        depth_tex_hdr_ = 0;
+    }
+    fbo_hdr_w_ = 0;
+    fbo_hdr_h_ = 0;
+}
+
+void Renderer::DestroyHDRResolveFBO() {
+    if (resolve_fbo_hdr_) {
+        glDeleteFramebuffers(1, &resolve_fbo_hdr_);
+        glDeleteTextures(1, &resolve_tex_hdr_);
+        resolve_fbo_hdr_ = 0;
+        resolve_tex_hdr_ = 0;
+    }
+    resolve_fbo_hdr_w_ = 0;
+    resolve_fbo_hdr_h_ = 0;
 }
 
 void Renderer::DestroyShadowFBO() {
@@ -512,6 +604,118 @@ void Renderer::Ensure3DFBO(int width, int height) {
     fbo_3d_h_ = height;
 }
 
+// HDR 3D FBO（RGBA16F 颜色 + depth）：3D 内容（天空 + object3d + primitives3d）的
+// 统一渲染目标。与 RGBA8 LDR FBO 分开 —— RGBA8 阶段不承载 HDR（>1 会 clamp），
+// 而 HDR FBO 用 16F 浮点颜色存下 >1 的亮度，交给后处理 tone map pass 压缩。
+// 深度在本 FBO 内置（与 LDR FBO 的“共享一张深度”语义预留：后续 primitives3d 转
+// LDR 时，可把本 FBO 用完的 depth 直接 attach 给 LDR FBO 复用，见规划）。
+void Renderer::EnsureHDRFBO(int width, int height) {
+    if (fbo_hdr_w_ == width && fbo_hdr_h_ == height && fbo_hdr_) return;
+
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_LE(width, kMaxFboDim);
+    CHECK_LE(height, kMaxFboDim);
+
+    DestroyHDRFBO();
+    DestroyHDRResolveFBO();
+
+#ifdef JPOV_WITHOUT_MSAA
+    // 非 MSAA 路径（Windows/MinGW）：普通 2D 浮点纹理 + 深度纹理
+    glGenTextures(1, &color_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D, color_tex_hdr_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenTextures(1, &depth_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D, depth_tex_hdr_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &fbo_hdr_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, color_tex_hdr_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depth_tex_hdr_, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "HDR FBO (non-MSAA) failed, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    resolve_fbo_hdr_ = 0;
+    resolve_tex_hdr_ = 0;
+    resolve_fbo_hdr_w_ = 0;
+    resolve_fbo_hdr_h_ = 0;
+#else
+    // === 4x MSAA 浮点颜色纹理（RGBA16F） ===
+    // 注意：浮点 MSAA renderbuffer 在某些软渲染（llvmpipe）下可能不支持；
+    // 若 gold 测试在 headless 下 resolve 异常，需回退非 MSAA 路径（见 PR 讨论）。
+    glGenTextures(1, &color_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA16F,
+                            width, height, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+
+    glGenRenderbuffers(1, &depth_rb_hdr_);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_hdr_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24,
+                                     width, height);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glGenFramebuffers(1, &fbo_hdr_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, depth_rb_hdr_);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "HDR MSAA FBO failed, status=" << status;
+
+    // === 中间 non-MSAA resolve FBO（RGBA16F，同尺寸） ===
+    glGenTextures(1, &resolve_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D, resolve_tex_hdr_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &resolve_fbo_hdr_);
+    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_hdr_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, resolve_tex_hdr_, 0);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+        << "HDR resolve FBO failed, status=" << status;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    resolve_fbo_hdr_w_ = width;
+    resolve_fbo_hdr_h_ = height;
+#endif
+
+    fbo_hdr_w_ = width;
+    fbo_hdr_h_ = height;
+}
+
 // ---- Shader program 访问器 ----
 // 通过 ShaderManager 按名字获取。GetOrCreate 幂等：首次调用编译+缓存，
 // 后续直接返回缓存的 program，因此可在 Init 和每次 draw 时安全调用。
@@ -559,6 +763,11 @@ unsigned int Renderer::ShadowProg() {
         {Object3DRenderer::kShadowVs, Object3DRenderer::kShadowFs});
 }
 
+// 统一后处理 tone map shader（ACES filmic，见 kTonemapVs/kTonemapFs）。
+unsigned int Renderer::TonemapProg() {
+    return shader_mgr_.GetOrCreate("tonemap", {kTonemapVs, kTonemapFs});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -571,6 +780,7 @@ void Renderer::CompileShaders() {
     DrawObject3DProg();
     DrawObject3DProgFull();
     ShadowProg();
+    TonemapProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -666,16 +876,27 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // ---- 第 0 步：太阳阴影 pass（有 sun 时）----
         // 先渲染场景深度到阴影纹理，主 pass 的 PBR shader 才能采样做影子。
-        // DrawShadowPass 内部会绑定 shadow FBO 并改变 GL 状态，放在 Ensure3DFBO
-        // 之前：后续 Ensure3DFBO + bind + clear 会恢复正常 3D 状态。
+        // DrawShadowPass 内部会绑定 shadow FBO 并改变 GL 状态，放在 Ensure3DFBO/
+        // EnsureHDRFBO 之前：后续 Ensure+FBO + bind + clear 会恢复正常 3D 状态。
         if (eff_sun.has_value()) {
             EnsureShadowFBO(shadow_cfg_);
             DrawShadowPass(cmds, *eff_sun);
         }
 
-        // ---- 第一步：在离屏 MSAA FBO 上绘制所有 3D 指令 ----
-        Ensure3DFBO(fbo_3d_w, fbo_3d_h);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
+        // ---- 第一步：选渲染目标 FBO 并绘制所有 3D 指令 ----
+        // tone_mapping=false：走原 RGBA8 3D FBO（旧行为，字节兼容，零回归）。
+        // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
+        //                     后续由统一 tone map pass 压缩到 LDR。
+        const bool use_hdr = cmds.tone_mapping;
+        unsigned int fbo_3d_target = 0;
+        if (use_hdr) {
+            EnsureHDRFBO(fbo_3d_w, fbo_3d_h);
+            fbo_3d_target = fbo_hdr_;
+        } else {
+            Ensure3DFBO(fbo_3d_w, fbo_3d_h);
+            fbo_3d_target = fbo_3d_;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
         glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
         glEnable(GL_DEPTH_TEST);
@@ -752,41 +973,78 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 第二步：MSAA resolve 或直接 blit 到主 FBO ----
+        // ---- 第二步：MSAA resolve + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
 
+        if (use_hdr) {
+            // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
+            //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
 #ifdef JPOV_WITHOUT_MSAA
-        // 非 MSAA 路径：从 3D FBO 直接 blit 到主 FBO
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
-        glBlitFramebuffer(
-            0, 0, fbo_3d_w, fbo_3d_h,
-            static_cast<int>(cam.viewport_x),
-            static_cast<int>(cam.viewport_y),
-            static_cast<int>(cam.viewport_x + cam.viewport_width),
-            static_cast<int>(cam.viewport_y + cam.viewport_height),
-            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            unsigned int hdr_input_tex = color_tex_hdr_;
 #else
-        // 先 MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
-        glBlitFramebuffer(
-            0, 0, fbo_3d_w, fbo_3d_h,
-            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
-            GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-        // 再从中间 FBO 缩放 blit 到主 FBO（按 viewport）
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
-        glBlitFramebuffer(
-            0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
-            static_cast<int>(cam.viewport_x),
-            static_cast<int>(cam.viewport_y),
-            static_cast<int>(cam.viewport_x + cam.viewport_width),
-            static_cast<int>(cam.viewport_y + cam.viewport_height),
-            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            unsigned int hdr_input_tex = resolve_tex_hdr_;
 #endif
+
+            // ---- 统一 tone map pass：ACES filmic 把 HDR 压缩到 LDR 主 FBO ----
+            unsigned int prog = TonemapProg();
+            glUseProgram(prog);
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, hdr_input_tex);
+            glUniform1i(shader_mgr_.GetUniform(prog, "uHdrTexture"), 0);
+
+            glViewport(
+                static_cast<int>(cam.viewport_x),
+                static_cast<int>(cam.viewport_y),
+                static_cast<int>(cam.viewport_width),
+                static_cast<int>(cam.viewport_height));
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+
+            // 全屏三角形（无 VAO/VBO，用 gl_VertexID）
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glUseProgram(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            // ---- LDR 路径（旧行为，字节兼容） ----
+#ifdef JPOV_WITHOUT_MSAA
+            // 非 MSAA 路径：从 3D FBO 直接 blit 到主 FBO
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                static_cast<int>(cam.viewport_x),
+                static_cast<int>(cam.viewport_y),
+                static_cast<int>(cam.viewport_x + cam.viewport_width),
+                static_cast<int>(cam.viewport_y + cam.viewport_height),
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#else
+            // 先 MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+            // 再从中间 FBO 缩放 blit 到主 FBO（按 viewport）
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
+            glBlitFramebuffer(
+                0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
+                static_cast<int>(cam.viewport_x),
+                static_cast<int>(cam.viewport_y),
+                static_cast<int>(cam.viewport_x + cam.viewport_width),
+                static_cast<int>(cam.viewport_y + cam.viewport_height),
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#endif
+        }
 
         // ---- 恢复 GL 状态（回到 2D 绘制前的状态）----
         glPopAttrib();

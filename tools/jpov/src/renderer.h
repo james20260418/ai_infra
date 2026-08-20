@@ -86,6 +86,14 @@ private:
     unsigned int resolve_fbo_3d_ = 0, resolve_tex_3d_ = 0;
     int resolve_fbo_3d_w_ = 0, resolve_fbo_3d_h_ = 0;
 
+    // HDR 3D FBO（RGBA16F 颜色 + depth）：3D 内容（天空 + object3d + primitives3d）
+    // 统一渲染目标，可存 >1.0 的 HDR 亮度。渲染完成后由统一后处理 pass
+    // （tone map）压缩到 LDR。MSAA 路径下保留 separate resolve FBO（16F）。
+    unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_rb_hdr_ = 0, depth_tex_hdr_ = 0;
+    int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
+    unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
+    int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
+
     // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
     // 每一级联独立 FBO/深度纹理/尺寸，数量 = ShadowConfig::cascade_count。
     // tex 实为 RGBA32F 颜色纹理（存光空间 ndc.z），rb 为配套 depth renderbuffer
@@ -97,11 +105,14 @@ private:
     void EnsureFBO(int w, int h);
     void EnsureOutputFBO(int w, int h);
     void Ensure3DFBO(int w, int h);
+    void EnsureHDRFBO(int w, int h);
     void EnsureShadowFBO(const ShadowConfig& cfg);
     void DestroyFBO();
     void DestroyOutputFBO();
     void Destroy3DFBO();
     void Destroy3DResolveFBO();
+    void DestroyHDRFBO();
+    void DestroyHDRResolveFBO();
     void DestroyShadowFBO();
     void CompileShaders();
     void CreateStreamVBO();
@@ -121,6 +132,7 @@ private:
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();
+    unsigned int TonemapProg();
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
