@@ -63,10 +63,8 @@ public:
         cmds->camera.target   = {0.0f, 0.0f, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
 
-        // 光照与 pbr_cube_normal_mr 完全一致：三光源对称 +X/+Y/+Z
-        cmds->point_lights.push_back({{2.0f, 0.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
-        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
-        cmds->point_lights.push_back({{0.0f, 0.0f, 2.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        // 光照与 generator 一致：单光源 +Y（intensity 3.0，HDR 定标）。
+        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {1.0f,1.0f,1.0f,1}, 6.0f, 0.5f, 3.0f});
 
         // 平放 quad 10×10，UV 0~5（重复 5 次 → 每次周期覆盖 2m）
         jpov::MeshData mesh;
@@ -97,11 +95,19 @@ public:
         mat.base_color_tex = tex_base_color_;
         mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.metallic = 0.0f;
-        mat.roughness = 0.9f;
+        mat.roughness = 0.35f;
         mat.emissive = {0.0f, 0.0f, 0.0f, 1.0f};
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
         mat.normal_scale = 2.0f;
+
+        cmds->tile_culling = true;  // 默认开（与 generator 一致）
+
+        // Ambient: 亮（与 generator 一致）
+        cmds->ambient = jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.1f
+        };
 
         cmds->DrawObject3D(mesh_id, mat,
                            {0.0f, 0.0f, 0.0f},

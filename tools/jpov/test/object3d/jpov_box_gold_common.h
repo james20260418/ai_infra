@@ -48,8 +48,19 @@ public:
         cmds->camera.near     = 0.05f;
 
         // 点光源 (0,4,0)，照亮整个场景。
-        cmds->point_lights.push_back({
-            {-5.0f, 4.0f, 0.0f}, {5.0f, 5.0f, 5.0f, 1.0f}, 8.0f, 0.0f});
+        cmds->point_lights.push_back(
+            jpov::PointLight{
+            .position = {-5.0f, 4.0f, 0.0f},
+            .color= {1.0f, 1.0f, 1.0f, 1.0f},
+            .linear_radius= 8.0f, 
+            .physical_radius = .0f, 
+            .intensity = 1.0f});
+        
+        // Ambient: 亮
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.25f
+        };
 
         // 地面：扁 box（白色）。MakeBox 只给尺寸（局部 +Z=front, +Y=up, +X=left），
         // 摆放靠 Draw 的 center/up/front。center 下移 0.1 使顶面贴 y=0。

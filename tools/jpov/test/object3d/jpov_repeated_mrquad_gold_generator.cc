@@ -101,9 +101,9 @@ public:
 
         // 光照与 pbr_cube_normal_mr 完全一致：三光源对称 +X/+Y/+Z
         // （位置 2,0,0 / 0,2,0 / 0,0,2，线性半径 6.0，color 3，physical 0.5）
-        //cmds->point_lights.push_back({{2.0f, 0.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
-        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
-        //cmds->point_lights.push_back({{0.0f, 0.0f, 2.0f}, {3.0f,3.0f,3.0f,1}, 6.0f, 0.5f});
+        //cmds->point_lights.push_back({{2.0f, 0.0f, 0.0f}, {1.0f,1.0f,1.0f,1}, 6.0f, 0.5f});
+        cmds->point_lights.push_back({{0.0f, 2.0f, 0.0f}, {1.0f,1.0f,1.0f,1}, 6.0f, 0.5f, 3.0f});
+        //cmds->point_lights.push_back({{0.0f, 1.0f, 2.0f}, {1.0f,0.0f,1.0f,1}, 6.0f, 0.5f, 1.0});
 
         // 平放 quad 10×10，UV 0~5（重复 5 次 → 每次周期覆盖 2m）
         jpov::MeshData mesh = BuildGroundQuad(5.0f, 5.0f, 5.0f);
@@ -121,6 +121,13 @@ public:
         mat.normal_scale = 2.0f;
 
         cmds->tile_culling = true;  // 默认开（已验证 culling 修复）
+        
+        // Ambient: 亮
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.1f
+        };
+
 
         cmds->DrawObject3D(mesh_id, mat,
                            {0.0f, 0.0f, 0.0f},
@@ -134,7 +141,7 @@ private:
 
 int main() {
     const std::string outpath =
-        "/james_pm/ai_infra_2/tools/jpov/test/object3d/repeated_mrquad_1280x720.png";
+        "/james_pm/ai_infra/tools/jpov/test/object3d/repeated_mrquad_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "Repeated MR-Quad (flat, pbr_cube_normal_mr material) Generator";

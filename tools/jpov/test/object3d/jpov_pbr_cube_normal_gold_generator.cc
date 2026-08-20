@@ -43,21 +43,24 @@ public:
         // 三光源对称：+X, +Y, +Z 各一个，等强度
         cmds->point_lights.push_back({
             {2.0f, 0.0f, 0.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
-            0.5f
+            0.5f,
+            2.0f,
         });
         cmds->point_lights.push_back({
             {0.0f, 2.0f, 0.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
-            0.5f
+            0.5f,
+            2.0f,
         });
         cmds->point_lights.push_back({
             {0.0f, 0.0f, 2.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
-            0.5f
+            0.5f,
+            2.0f,
         });
         std::string obj_path = jpov::GetProjectRoot() +
                                "tools/jpov/test/object3d/cube_hand.obj";
@@ -79,6 +82,12 @@ public:
         mat.ao = {1.0f, 1.0f, 1.0f, 1.0f};
         mat.normal_tex = tex_normal_;
         mat.normal_scale = 2.0f;
+
+        // Ambient: 适中
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.5f
+        };
 
         // metallic / roughness 纹理
         cmds->DrawObject3D(

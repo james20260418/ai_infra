@@ -47,6 +47,14 @@ public:
             /*intensity*/ 3.0f,
         };
 
+        // Ambient: 暗
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.3f
+        };
+
+        cmds->tone_mapping = true;
+
         // 平板：扁 box，白色。center=(0,-0.1,0) 使顶面贴 y=0。
         cmds->DrawObject3D(
             ground_mesh_,

@@ -88,19 +88,19 @@ public:
         // 三光源对称：+X, +Y, +Z
         cmds->point_lights.push_back({
             {2.0f, 0.0f, 0.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
             0.5f
         });
         cmds->point_lights.push_back({
             {0.0f, 2.0f, 0.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
             0.5f
         });
         cmds->point_lights.push_back({
             {0.0f, 0.0f, 2.0f},
-            {3.0f, 3.0f, 3.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
             6.0f,
             0.5f
         });

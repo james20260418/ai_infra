@@ -45,11 +45,17 @@ int main() {
         for (int ci = 0; ci < 2; ++ci) {
             app.time_ = time_v[ti];
             app.cam_  = cam_v[ci];
-            std::string outpath = std::string(
-                "/james_pm/ai_infra/tools/jpov/test/object3d/skydome/")
-                + "skydome_" + times[ti] + "_" + cams[ci] + ".png";
-            app.RunOnce(input, winfo, outpath.c_str());
-            LOG(INFO) << "skydome gold: " << outpath;
+            // before（不 tone map）与 after（ACES tone map）各生成一张，
+            // 文件名加 _tm 后缀区分。
+            for (int tm = 0; tm < 2; ++tm) {
+                app.tone_mapping_ = (tm == 1);
+                std::string outpath = std::string(
+                    "/james_pm/ai_infra/tools/jpov/test/object3d/skydome/")
+                    + "skydome_" + times[ti] + "_" + cams[ci]
+                    + (tm == 1 ? "_tm" : "") + ".png";
+                app.RunOnce(input, winfo, outpath.c_str());
+                LOG(INFO) << "skydome gold: " << outpath;
+            }
         }
     }
 
