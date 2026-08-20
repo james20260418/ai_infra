@@ -149,6 +149,9 @@ void SkyRenderer::DrawSky(const DaySkyCommand& sky_cmd,
     glUniform1f(shader_mgr.GetUniform(prog, "uIntensity"), sky_cmd.intensity);
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSunRadius"), sky_cmd.sun_radius);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSunBrightness"), sky_cmd.sun_brightness);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSunGlow"), sky_cmd.sun_glow);
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);

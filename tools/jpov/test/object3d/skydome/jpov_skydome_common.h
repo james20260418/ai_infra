@@ -72,6 +72,10 @@ public:
     TimePreset time_ = TimePreset::kDay;
     CamPreset  cam_  = CamPreset::kToBody;
 
+    // 统一后处理 tone mapping 开关（写入 cmds->tone_mapping）。
+    // false=旧行为（直 blit），true=ACES tone map。供生成 before/after 对比图。
+    bool tone_mapping_ = false;
+
     struct Slot {
         jpov::GltfObject obj;
         jpov::Vec3f center;
@@ -150,6 +154,9 @@ public:
 
         // ── 天光（只定义天色；无方向光、无环境光 derive） ──
         cmds->sky = sky;
+
+        // 统一后处理 tone mapping 开关（供 before/after 对比）
+        cmds->tone_mapping = tone_mapping_;
 
         for (const Slot& s : slots_) {
             cmds->DrawGltfObject(s.obj, s.center, s.up, s.front);

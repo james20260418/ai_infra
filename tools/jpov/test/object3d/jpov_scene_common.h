@@ -79,11 +79,17 @@ public:
         // 3 点光源：位置 (3,0,0)/(0,0,3)/(0,3,0)，physical 半径 0.5m，
         // 强度与原 gold test 一致（白光 3,3,3,1, radius 6.0）
         cmds->point_lights.push_back({
-            {3.0f, 0.0f, 0.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
+            {3.0f, 0.0f, 0.0f},  {1.0f, 1.0f, 1.0f, 1.0f}, 6.0f, 0.5f,1.0});
         cmds->point_lights.push_back({
-            {0.0f, 0.0f, 3.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
+            {0.0f, 0.0f, 3.0f},  {1.0f, 1.0f, 1.0f, 1.0f}, 6.0f, 0.5f,1.0});
         cmds->point_lights.push_back({
-            {0.0f, 3.0f, 0.0f},  {3.0f, 3.0f, 3.0f, 1.0f}, 6.0f, 0.5f});
+            {0.0f, 3.0f, 0.0f},  {1.0f, 1.0f, 1.0f, 1.0f}, 6.0f, 0.5f,1.0});
+
+        // Ambient: 暗
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.3f
+        };
 
         for (const Slot& s : slots_) {
             cmds->DrawGltfObject(s.obj, s.center, s.up, s.front);

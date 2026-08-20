@@ -336,16 +336,18 @@ struct Image2DCommand {
 // 衰减为线性：强度随距离从 1.0（pos 处）衰减到 0.0（linear_radius 处），
 // 超出 linear_radius 的光源对像素贡献为 0。
 //
-// 四个字段（构造时按此顺序 push_back 聚合初始化）：
-//   { position, color, linear_radius, physical_radius }
-// 例: { {3,0,0}, {3,3,3,1}, 6.0f, 0.5f }
-//     = 位于 (3,0,0)，白光强度 3，有效距离 6 米，光源球物理半径 0.5 米。
+// 五个字段（构造时按此顺序 push_back 聚合初始化）：
+//   { position, color, linear_radius, physical_radius, intensity }
+// 例: { {3,0,0}, {1,1,1,1}, 6.0f, 0.5f, 1.0f }
+//     = 位于 (3,0,0)，色调白、亮度 1.0（≈100W 灯泡）、有效距离 6 米、
+//       光源球物理半径 0.5 米。
+// 见 LIGHT_INTENSITY.md：color 只表达色调，亮度量级由 intensity 承载。
 //
 // Pre-condition: linear_radius > 0
 struct PointLight {
     Vec3f position;
-    Color color;
-    float linear_radius;  // 线性衰减的最大有效距离（米）
+    Color color;              // 光源**色调/色温**（暖白/火光/霓虹等），区间 [0,1]
+    float linear_radius;      // 线性衰减的最大有效距离（米）
 
     // 光源球体的物理半径（米）。
     //
@@ -357,6 +359,11 @@ struct PointLight {
     // 高光会柔化/扩大的原理。
     // 典型值：灯泡 ~0.02–0.05，方块大小 ~0.5。
     float physical_radius = 0.0f;
+
+    // intensity：点光源亮度标量（乘到 color 上）。
+    //   intensity=1.0 ≈ 一只 100 W 白炽灯泡（≈1600 流明）。
+    //   点光源的几何/距离衰减由 linear_radius 独立处理，intensity 只锚定发光总量。
+    float intensity = 1.0f;
 
     // 有效范围（供 culling 等使用）。
     // 当前线性衰减模式下直接返回 linear_radius；
@@ -374,8 +381,9 @@ struct PointLight {
 // 如正午太阳直射向下约 (0,-1,0)）。“朝上”（+y）的表面接收最强光照。
 struct DirectionalLight {
     Vec3f direction;      // 光传播方向（从光源指向目标，建议归一化）
-    Color color;          // 光颜色（太阳白光或暖色夕阳光）
-    float intensity = 1.0f;  // 整体亮度标量
+    Color color;          // 光**色温/色调**（太阳白光或暖色夕阳光），区间 [0,1]
+                          // 见 LIGHT_INTENSITY.md：color 只表达色调，不承载亮度量级。
+    float intensity = 1.0f;  // 亮度标量。intensity=1.0 ≈ 正午直射太阳 100,000 lux。
 };
 
 // 全局环境光（Ambient Light）—— 从四面八方均匀照亮物体的间接光。
@@ -388,19 +396,19 @@ struct DirectionalLight {
 // 室内漫反射等。用户可直接手配；不配时使用默认值（后续可由 DaySkyCommand
 // 依 sun_dir 自动推导一个兜底值）。
 struct AmbientLight {
-    // color：环境光颜色（RGB，乘到材质 base_color 上）。
-    //   - 中性灰白 (1,1,1) = 无色偏，仅提亮暗部；
+    // color：环境光**色调**（RGB，乘到材质 base_color 上）。
+    //   - 中性灰白 (1,1,1) = 无色偏；
     //   - 天空日间可偏蓝，洞穴岩浆湖可偏橙红，夜空偏深蓝；
-    //   - 分量范围通常 [0,1]；>1 表示 HDR 强环境光（靠 tone map 兜底）。
+    //   - 见 LIGHT_INTENSITY.md：color 只表达色调，区间 [0,1]，不承载亮度量级。
     Color color = {1.0f, 1.0f, 1.0f, 1.0f};
 
-    // strength：环境光强度标量（乘到 color 上，再乘 AO）。
+    // intensity：环境光亮度标量（乘到 color 上，再乘 AO）。
+    //   - intensity=1.0 ≈ 正午晴空亭子阴影的环境光 ≈ 20,000 lux。
     //   - 0 = 无环境光（物体背阳面纯黑，只剩直射光/emissive）；
-    //   - 典型日间 0.3~0.5（补足太阳直射照不到的暗部）；
-    //   - 夜晚应远小于日间（如 0.05~0.1），否则“夜里物体太亮”；
-    //   - 可 >1 做整体提亮/曝光补偿；
-    //   - 负值在 shader 里 clamp 到 0（未定义行为按 0 处理）。
-    float strength = 0.4f;
+    //   - 夜晚应远小于日间（如 ~0.01），否则“夜里物体太亮”；
+    //   - 可 >1 做整体提亮；
+    //   - 负值在 shader 里 clamp 到 0。
+    float intensity = 1.0f;
 };
 
 // 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
@@ -511,6 +519,33 @@ struct DaySkyCommand {
     //   - 作用：避免地面以下透出“天空倒影”的违和感，纯视觉底色，不参与物体光照。
     //   - 建议：深灰蓝/深棕（接近地面），如 (0.05, 0.06, 0.08, 1.0)。
     Color ground_color = {0.05f, 0.06f, 0.08f, 1.0f};
+
+    // ── 太阳盘（自发光天体，需单独给的两个参数） ──
+    //
+    // 太阳盘是自发光天体（5778K 黑体辐射），散射模型（Preetham）不含它，
+    // 故“盘相对天空的亮度倍数”和“盘的大小”这两个量必须用户单独给，
+    // 其余（颜色色温 / 随仰角衰减 / 光晕宽窄）由 sun_dir + turbidity 自动推导。
+    //
+    // sun_radius：太阳盘**角半径**（弧度）。物理真实 ~0.27°≈0.0047 rad，
+    //   与仰角/天气无关，是显示选择。默认取物理 2 倍（~0.54°≈0.0094 rad）
+    //   使盘在低分辨率下更醒目。0 或负 = 不画太阳盘。
+    float sun_radius = 0.0094f;
+
+    // sun_brightness：太阳盘**自发光亮度基数**（HDR 值）。
+    //   物理依据（RP Photonics / thecalcu，2026-08-19 查证）：
+    //     太阳盘亮度 ≈ 1.6×10⁹ cd/m²，晴天天空亮度 ≈ 8000 cd/m²，
+    //     亮度比 ≈ 2×10⁵（两者同为 radiance/luminance 单位 cd/m²，可直接比）。
+    //   故 sun_brightness 默认 = 2.0e5，表示“太阳盘比天空背景亮 ~2×10⁵ 倍”。
+    //   实际盘亮度 = sun_brightness × exp(−τ·AM(仰角,浊度))（Beer-Lambert，
+    //   在 shader 内推导）；颜色随仰角从 2000K(日出) 到 5600K(正午)推导。
+    //   0 或负 = 不画太阳盘。
+    float sun_brightness = 2.0e5f;
+
+    // sun_glow：太阳盘**光晕强度**（艺术参数，独立于盘，用于盖锯齿 + 大气辉光感）。
+    //   光晕是大气散射，物理强度远低于盘（~盘的 1e-4~1e-5），故这是**独立的绝对
+    //   HDR 强度**（量级 ~几），非与盘亮度同源。光晕用标准高斯 glow ∝ exp(−d²/2σ²)，
+    //   σ≈2×sun_radius（盘外 ~2~3 倍区域）。0 = 无光晕；默认 ~1.0 经验值。
+    float sun_glow = 1.0f;
 };
 
 // 3D 静态模型（世界空间，参与深度测试）
@@ -615,6 +650,15 @@ struct RenderCommandList {
     //   false：跳过 tile 构建，片元遍历全部点光源（经典前向光照，
     //          无分界线，适合光源少或调试）。
     bool tile_culling = true;
+
+    // 统一后处理 tone mapping 开关（默认 true = 开启）。
+    //   3D 内容（天空 + object3d + primitives3d）先渲染进 HDR FBO（RGBA16F，
+    //   可存 >1.0 的 HDR 亮度）。渲染完成后由统一的全屏后处理 pass 消费：
+    //   - true ：走 ACES filmic tone map，把 HDR 亮度压缩到 [0,1] 后写入 LDR。
+    //            （默认，HDR 架构的正确链路，见 LIGHT_INTENSITY.md 晴天基准值）
+    //   - false：不走 tone map，直接 blit 到 LDR（HDR 值被 RGBA8 clamp，
+    //            仅作调试/ before-after 对比用）。
+    bool tone_mapping = true;
 
     // 3D 透视相机
     // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。

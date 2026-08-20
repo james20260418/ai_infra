@@ -83,6 +83,14 @@ public:
             /*intensity*/ 3.0f,
         };
 
+        // Ambient: 暗
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.3f
+        };
+        
+        cmds->tone_mapping = true;
+
         for (const Slot& s : slots_) {
             cmds->DrawGltfObject(s.obj, s.center, s.up, s.front);
         }

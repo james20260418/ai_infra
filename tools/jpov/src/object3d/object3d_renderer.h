@@ -147,6 +147,7 @@ struct Light {
     vec3 color;
     float radius;           // 衰减半径
     float physicalRadius;   // 光源球体物理半径（0 = 点光源）
+    float intensity;        // 亮度标量（乘 color，见 LIGHT_INTENSITY.md）
 };
 
 uniform Light uLights[MAX_TOTAL_LIGHTS];
@@ -194,8 +195,8 @@ uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
 // 全局环境光（AmbientLight）：无方向、无影子，照亮背阳面。
-uniform vec3  uAmbientColor;    // 环境光颜色（RGB）
-uniform float uAmbientStrength; // 环境光强度（标量，乘 color）
+uniform vec3  uAmbientColor;      // 环境光色调（RGB）
+uniform float uAmbientIntensity;  // 环境光亮度标量（乘 color）
 
 const float PI = 3.14159265;
 
@@ -375,7 +376,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
                      mix(vec3(0.04), base_color, metallic));
         vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
         vec3 diffuse = kD * base_color / PI;
-        total_diffuse += uLights[li].color * diffuse * NdotL * attenuation;
+        total_diffuse += uLights[li].color * uLights[li].intensity * diffuse * NdotL * attenuation;
     }
 
     // ── specular：representative point 方向 ──
@@ -388,7 +389,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         float D = distributionGGX(N, H, roughness);
         float G = geometrySmith(N, V, spec_dir, roughness);
         vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
-        total_specular += uLights[li].color * spec * NdotL_s * attenuation;
+        total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
     }
 }
 
@@ -440,7 +441,7 @@ void main() {
         num_lights = readTileLights(tile_col, tile_row, light_indices);
     }
 
-    vec3 ambient = uAmbientColor * uAmbientStrength;
+    vec3 ambient = uAmbientColor * uAmbientIntensity;
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 
@@ -490,7 +491,7 @@ void main() {
         }
     }
 
-    vec3 result = ambient * base_color * ao + total_diffuse + total_specular + emissive;
+    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
     FragColor = vec4(result, 1.0);
 }
 )glsl";
@@ -619,7 +620,7 @@ void main() {
 
     // ---- UploadAmbient ----
     // 把入参 ambient（AmbientLight）上传到 PBR shader 的 uAmbientColor /
-    // uAmbientStrength。每帧在 Draw3DCommands 前调用一次（与 sun/点光源并列），
+    // uAmbientIntensity。每帧在 Draw3DCommands 前调用一次（与 sun/点光源并列），
     // 两个 shader program 都上传。
     static void UploadAmbient(ShaderManager& shader_mgr,
                               unsigned int prog,

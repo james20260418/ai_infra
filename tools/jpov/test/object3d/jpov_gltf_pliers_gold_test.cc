@@ -75,11 +75,11 @@ public:
 
         // 三光源对称照明（同 cube_normal test）
         cmds->point_lights.push_back({
-            {0.15f, 0.0f, 0.0f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.15f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f});
         cmds->point_lights.push_back({
-            {0.0f, 0.15f, 0.0f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.0f, 0.15f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f});
         cmds->point_lights.push_back({
-            {0.0f, 0.0f, 0.15f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.0f, 0.0f, 0.15f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f});
 
         // 绘制整个 glTF 对象（3 个 mesh，内部展开为多个 DrawObject3D）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},

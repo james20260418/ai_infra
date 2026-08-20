@@ -54,11 +54,17 @@ public:
 
         // 三光源对称照明（同其它 PBR gold test）
         cmds->point_lights.push_back({
-            {0.15f, 0.0f, 0.0f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.15f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f, 1.0f});
         cmds->point_lights.push_back({
-            {0.0f, 0.15f, 0.0f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.0f, 0.15f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f, 1.0f});
         cmds->point_lights.push_back({
-            {0.0f, 0.0f, 0.15f}, {2.0f, 2.0f, 2.0f, 1.0f}, 0.5f, 0.01f});
+            {0.0f, 0.0f, 0.15f}, {1.0f, 1.0f, 1.0f, 1.0f}, 0.5f, 0.01f, 1.0f});
+          
+        // Ambient: 适中
+        cmds->ambient= jpov::AmbientLight{
+            .color = {1,1,1,1},
+            .intensity = 0.5f
+        };
 
         // 绘制整个 glTF 对象（内部展开为多个 DrawObject3D，无新命令体）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
