@@ -22,6 +22,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/gltf_object.h"
+#include "tools/jpov/test/test_utils.h"
 
 class GltfPliersGoldGenerator : public JPOV {
 public:
@@ -76,8 +77,8 @@ private:
 };
 
 int main() {
-    const char* outpath =
-        "/james_pm/ai_infra/tools/jpov/test/object3d/pliers_1280x720.png";
+    std::string outpath =
+        jpov::GetTestDataDir() + "/object3d/pliers_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "glTF Pliers PBR Gold Generator";
@@ -87,7 +88,7 @@ int main() {
 
     // 加载 pliers 场景（内部上传 mesh + 贴图，含 ORM 拆包）
     jpov::GltfObject gltf = app.LoadGltf(
-        "/james_pm/ai_infra/tools/jpov/test/object3d/pliers_gltf/pliers.gltf");
+        jpov::GetTestDataDir() + "/object3d/pliers_gltf/pliers.gltf");
     CHECK(!gltf.empty()) << "LoadGltf failed / empty";
     LOG(INFO) << "Loaded " << gltf.size() << " glTF primitives";
     app.SetGltfObject(std::move(gltf));
@@ -96,7 +97,7 @@ int main() {
     winfo.width  = 640.0f;
     winfo.height = 360.0f;
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "glTF pliers gold image generated: " << outpath;

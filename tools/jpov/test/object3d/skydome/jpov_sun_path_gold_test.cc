@@ -14,6 +14,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/test/object3d/skydome/jpov_sun_path_common.h"
+#include "tools/jpov/test/compare_light.h"
 
 namespace {
 
@@ -82,6 +83,28 @@ int main() {
         CHECK_GT(nz, 0) << "空场景 (index=" << i << ")";
         LOG(INFO) << "sun path [" << i << "]: rendered " << w << "x" << h
                   << ", coverage=" << (static_cast<float>(nz) / (w * h) * 100.0f) << "%";
+
+        // ---- 光照平均颜色对比（Danis 决策）：8×8 平铺 ROI 块内平均色对比，
+        //      输出最大的 RGB 通道差异，作为该时段光照 gold 的硬性门禁。
+        const double kLightThreshold = 25.0;
+        const double max_diff = jpov::CompareLightMeanRoiPng(gold, outpath, 8, 8);
+        LOG(INFO) << "LIGHT COMPARE [" << i << "]: gold vs rendered "
+                  << "max-channel-mean-diff (tile 8x8) = " << max_diff
+                  << " (threshold=" << kLightThreshold << ")";
+        if (max_diff < 0) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED [" << i
+                       << "]: 无法比对（gold 或 rendered 读取/尺寸错误）";
+            return 1;
+        }
+        if (max_diff > kLightThreshold) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED [" << i
+                       << "]: max-channel-mean-diff=" << max_diff
+                       << " > threshold=" << kLightThreshold
+                       << " → 光照回归！";
+            return 1;
+        }
+        LOG(INFO) << "LIGHT COMPARE PASSED [" << i << "]: max-channel-mean-diff="
+                  << max_diff << " <= threshold=" << kLightThreshold;
     }
 
     app.Finalize();

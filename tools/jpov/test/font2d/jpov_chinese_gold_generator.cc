@@ -5,13 +5,14 @@
 //   - 显示中文 "你好 JPOV!" 三行，字号分别是 16/32/48
 //   - 字号 16 匹配 kBaseFontSize (16px)，scale=1 不拉伸不模糊
 //
-// 输出: /james_pm/ai_infra/tools/jpov/test/font2d/hello_chinese_jpov_1280x720.png
+// 输出: <test_data>/font2d/hello_chinese_jpov_1280x720.png
 
 #include <cstdio>
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 // 字号常量 (只读)
 static constexpr float kFontSizeSmall = 16.0f;   // 选 16px atlas, scale=1
@@ -74,7 +75,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/font2d/hello_chinese_jpov_1280x720.png";
+    std::string outpath = jpov::GetTestDataDir() + "/font2d/hello_chinese_jpov_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "Chinese Text Gold Image Generator";
@@ -92,7 +93,7 @@ int main() {
     winfo.height = kResH;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "Chinese gold image generated: " << outpath;

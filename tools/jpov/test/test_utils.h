@@ -1,7 +1,6 @@
-// JPOV Test Utilities — 共享的测试辅助函数
+// JPOV Test Utilities — shared test helper functions
 //
-// 同目录原则：作为 BUILD 同目录下的 header-only 工具，
-// gold test 通过 cc_test deps 直接引用此头文件。
+// Header-only; gold tests include this directly or via BUILD deps.
 
 #ifndef JPOV_TEST_TEST_UTILS_H_
 #define JPOV_TEST_TEST_UTILS_H_
@@ -14,10 +13,28 @@
 
 #include <glog/logging.h>
 
+#include "tools/common/utils.h"
+
 namespace jpov {
 
-// 读取文件全部字节到 vector
-// Returns false on failure (log error internally).
+// Returns test data directory prefix (no trailing slash):
+//   bazel test sandbox: $TEST_SRCDIR/__main__/tools/jpov/test
+//   bazel run / local: <project_root>/tools/jpov/test
+// All generator and gold test resource paths should be constructed via
+// this function, ensuring tests run after moving the repo.
+inline std::string GetTestDataDir() {
+    const char* test_srcdir = std::getenv("TEST_SRCDIR");
+    if (test_srcdir) {
+        std::string p = test_srcdir;
+        if (!p.empty() && p.back() != '/') p.push_back('/');
+        p += "__main__/tools/jpov/test";
+        return p;
+    }
+    return GetProjectRoot() + "tools/jpov/test";
+}
+
+// Read entire file into vector.
+// Returns false on failure (logs error internally).
 inline bool ReadFileBytes(const std::string& path,
                           std::vector<uint8_t>* out) {
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);

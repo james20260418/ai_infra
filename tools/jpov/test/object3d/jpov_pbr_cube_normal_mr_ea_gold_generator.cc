@@ -18,6 +18,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/src/obj_loader.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 class PbrCubeNormalMREAGenerator : public JPOV {
 public:
@@ -124,8 +125,8 @@ private:
 };
 
 int main() {
-    const char* outpath =
-        "/james_pm/ai_infra/tools/jpov/test/object3d/pbr_cube_normal_mr_ea_1280x720.png";
+    std::string outpath =
+        jpov::GetTestDataDir() + "/object3d/pbr_cube_normal_mr_ea_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "PBR Cube Normal + MR + EA Gold Generator";
@@ -149,7 +150,7 @@ int main() {
     winfo.height = 360.0f;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "PBR normal gold image generated: " << outpath;

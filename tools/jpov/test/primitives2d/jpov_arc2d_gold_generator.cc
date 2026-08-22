@@ -14,6 +14,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 class Arc2dGoldGenerator : public JPOV {
 public:
@@ -60,7 +61,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/primitives2d/arc2d_640x360.png";
+    std::string outpath = jpov::GetTestDataDir() + "/primitives2d/arc2d_640x360.png";
 
     JPOV::Config cfg;
     cfg.title = "Arc2D Gold Generator";
@@ -73,7 +74,7 @@ int main() {
     winfo.height = 360.0f;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "Gold image generated: " << outpath;
