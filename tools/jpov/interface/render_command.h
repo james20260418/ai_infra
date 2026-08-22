@@ -30,6 +30,7 @@
 
 #include <glog/logging.h>
 #include "geom/common/vec.h"
+#include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"
@@ -546,6 +547,148 @@ struct DaySkyCommand {
     //   HDR 强度**（量级 ~几），非与盘亮度同源。光晕用标准高斯 glow ∝ exp(−d²/2σ²)，
     //   σ≈2×sun_radius（盘外 ~2~3 倍区域）。0 = 无光晕；默认 ~1.0 经验值。
     float sun_glow = 1.0f;
+
+    // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
+    // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
+    // colorTempToLinear() 逐字一致，保证 C++ 侧推导的直射光颜色与 shader 侧
+    // 太阳盘颜色出自同一色温曲线。
+    static Color ColorTempToLinear(float kelvin) {
+        const float t = std::clamp(kelvin, 1000.0f, 40000.0f) / 100.0f;
+        Color c;
+        // 红通道
+        if (t <= 66.0f) c.r = 1.0f;
+        else c.r = std::clamp(1.29293618606f * std::pow(t - 60.0f, -0.1332047592f), 0.0f, 1.0f);
+        // 绿通道
+        if (t <= 66.0f)
+            c.g = std::clamp(0.3900815787697696f * std::log(t) - 0.6318414437886277f, 0.0f, 1.0f);
+        else
+            c.g = std::clamp(1.1298908608951798f * std::pow(t - 60.0f, -0.0755148492f), 0.0f, 1.0f);
+        // 蓝通道
+        if (t >= 66.0f) c.b = 1.0f;
+        else if (t <= 19.0f) c.b = 0.0f;
+        else c.b = std::clamp(0.543206789110196f * std::log(t - 10.0f) - 1.19625408914f, 0.0f, 1.0f);
+        c.a = 1.0f;
+        return c;
+    }
+
+    // 太阳直射光颜色（DirectionalLight::color）。由 sun_dir 的太阳仰角推导色温
+    //（正午 ~5600K 中性白 → 日出日落 ~2000K 橙红），与 sky shader 里太阳盘颜色
+    // 用同一套色温曲线，保证天色与 DirectionalLight 颜色协调一致。
+    //
+    // 用法：让 sun（DirectionalLight）的颜色跟随 sun_dir 自动变化，而不是手配：
+    //   DirectionalLight light;
+    //   light.direction = <光传播方向（= -sky.sun_dir）>;
+    //   light.color = sky.DirectionalColor();
+    //   light.intensity = ...（强度仍独立配，本方法只管色调）
+    Color DirectionalColor() const {
+        // 太阳在天球上的仰角（弧度）。sun_dir 长度不必归一，取 y 前先 normalize。
+        const Vec3f d = sun_dir.Unit();
+        const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
+        // 色温（开尔文）：仰角越高色温越高。与 shader 同阈值（0.3 rad ≈ 17°）。
+        const float kelvin = 2000.0f + (5600.0f - 2000.0f) *
+            std::clamp(elev / 0.3f, 0.0f, 1.0f);
+        return ColorTempToLinear(kelvin);
+    }
+
+    // 太阳直射光强度（DirectionalLight::intensity）。由 sun_dir 仰角查注向直射
+    // 辐照度（DNI）衰减表，用 PiecewiseLinearFunction 做分段线性插值。
+    //
+    // 物理：平行光强度代表太阳盘辉度/法向直射辐照度（DNI），非地面照度。
+    // 地面照度随仰角下降已由 shader 的 N·L=cos(仰角) 自动完成，方向光本身
+    // 只额外衰减“穿透大气的辐射损失”——即 DNI 的大气透过率。
+    // 太阳光辉度在 20°~90° 很平缓，仅 <10° 贴地时快速趋零，
+    // 这正是“平行光黄昏基本不衰减、只有贴地才消失”的原因。
+    //
+    // DNI 锚点（太阳仰角° → 相对正午系数），Bouguer-Lambert-Beer 光学：
+    //   exp(−tau·AM)，tau≈0.39 晴空，AM 用 Kasten-Young 空气质量：
+    //   0°→0  3°→0.004  5°→0.027  7°→0.073  10°→0.167  12°→0.235
+    //   15°→0.334  20°→0.476  30°→0.679  45°→0.851  60°→0.942  90°→1.00
+    // 正午（90°）系数=1.0，故 intensity = midday_intensity × 系数。
+    // turbidity 暂时忽略（不影响方向光强度，只影响天色/太阳盘）。
+    // 仰角低于 0° 时 PWL 夹断到 0（贴地趋零）；高于 90° 夹断到 1.0。
+    //
+    // 用法：让 sun（DirectionalLight）的强度跟随 sun_dir 自动变化，而不是固定 3.0：
+    //   DirectionalLight light;
+    //   light.direction = <光传播方向（= -sky.sun_dir）>;
+    //   light.color = sky.DirectionalColor();
+    //   light.intensity = sky.DirectionalIntensity();   // 正午=3.0，低仰角自动变暗
+    float DirectionalIntensity(float midday_intensity = 3.0f) const {
+        static const geom::math::PiecewiseLinearFunction<double> kSunIntensityCurve(
+            // 太阳仰角(°) → 相对正午系数。基于法向直射辐照度 DNI 的
+            // 大气透过率（Bouguer-Lambert-Beer：exp(−tau·AM)，tau≈0.39 晴空，
+            // Kasten-Young 空气质量）。反映“太阳光辉度穿大气”的损失：
+            // 20°~90° 相当平缓，只在 <10° 贴地时快速趋零。单位无需 0 点即可。
+            std::vector<double>{0.0, 3.0, 5.0, 7.0, 10.0, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0},
+            std::vector<double>{0.0, 0.004, 0.0265, 0.0725, 0.1672, 0.2353, 0.3338, 0.4760, 0.6785, 0.8513, 0.9416, 1.0});
+        const Vec3f d = sun_dir.Unit();
+        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+                               (180.0f / static_cast<float>(M_PI));
+        return midday_intensity * static_cast<float>(kSunIntensityCurve(elev_deg));
+    }
+
+    // 环境光强度（AmbientLight::intensity）。由 sun_dir 仰角查天光衰减表，
+    // 用 PiecewiseLinearFunction 分段线性插值。
+    //
+    // 物理：ambient 是天光散射（大气把太阳光散射到整个天空）的环境补光，
+    // 物理来源与方向光（DNI 直射）不同——散射光随太阳降低而变弱，但比直射
+    // 衰减**缓和得多**，且在太阳落山（仰角<0）后仍有余晖（民用暮光），
+    // 直到 -18°（天文暮光起）才接近全黑。故本表**不归零到 0°**，而是延伸到
+    // 负仰角。
+    //
+    // 锚点（太阳仰角° → 相对正午系数）：
+    //   90→1.00  60→0.92  45→0.84  30→0.70  20→0.55  15→0.44  12→0.38
+    //   10→0.32  7→0.24  5→0.18  3→0.12  0→0.06  -3→0.03  -6→0.012
+    //   -12→0.004  -18→0.001
+    // 正午（90°）系数=1.0，故 intensity = noon_intensity × 系数。
+    // 仰角 >90° 夹断到 1.0；< -18° 夹断到 ~0.001（夜天空底色，不归纯黑）。
+    //
+    // 用法：ambient 的亮度跟随天光自动变化：
+    //   AmbientLight light;
+    //   light.color = sky.AmbientColor();
+    //   light.intensity = sky.AmbientIntensity();   // 正午=1.0，黄昏/夜晚自动变暗
+    float AmbientIntensity(float noon_intensity = 1.0f) const {
+        static const geom::math::PiecewiseLinearFunction<double> kSkyIntensityCurve(
+            std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 3.0, 5.0, 7.0, 10.0, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0},
+            std::vector<double>{0.001, 0.004, 0.012, 0.03, 0.06, 0.12, 0.18, 0.24, 0.32, 0.38, 0.44, 0.55, 0.70, 0.84, 0.92, 1.0});
+        const Vec3f d = sun_dir.Unit();
+        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+                               (180.0f / static_cast<float>(M_PI));
+        return noon_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg));
+    }
+
+    // 环境光颜色（AmbientLight::color）——天光平均色。
+    // 正午晴天天空偏蓝（高色温 ~15000K）；黄昏太阳低，散射光转橙（低色温）；
+    // 太阳落山后继续转深橙（暮光）。与 DirectionalColor 用同一套色温曲线
+    // （ColorTempToLinear），但色温映射区间不同（天光比太阳盘冷/蓝）。
+    //
+    // 色温锚点（太阳仰角° → 天光色温 K）：
+    //   90→15000  60→11167  45→9250  30→7333  20→6056  12→5033
+    //   5→4140  0→3500  -3→3275  -6→3050  -12→2600  -18→2150
+    // 仰角 >90° 夹断到 15000K；< -18° 夹断到 2150K。
+    //
+    // turbidity 影响：浊度大（霾/烟雾）→ 大气散射更强 → 蓝天发白、饱和度下降，
+    // 故把天光色往中性灰白插值。雾度系数 clamp((turb-2)/6)∈[0,1]（turb=2 晴→0，
+    // turb=8 重霾→1），插值限幅 0.6（不完全变白，保留底色）。
+    Color AmbientColor() const {
+        static const geom::math::PiecewiseLinearFunction<double> kSkyTempCurve(
+            std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 5.0, 12.0, 20.0, 30.0, 45.0, 60.0, 90.0},
+            std::vector<double>{2150.0, 2600.0, 3050.0, 3275.0, 3500.0, 4139.0, 5033.0, 6056.0, 7333.0, 9250.0, 11167.0, 15000.0});
+        const Vec3f d = sun_dir.Unit();
+        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+                               (180.0f / static_cast<float>(M_PI));
+        const float temp = static_cast<float>(kSkyTempCurve(elev_deg));
+        const Color tint = ColorTempToLinear(temp);
+        // 浊度 → 雾度系数：turb=2 晴无雾，turb=8 重霾趋向发白。
+        const float haze = std::clamp((turbidity - 2.0f) / 6.0f, 0.0f, 1.0f) * 0.6f;
+        const Color white = {0.9f, 0.9f, 0.9f, 1.0f};
+        const Color c{
+            tint.r * (1.0f - haze) + white.r * haze,
+            tint.g * (1.0f - haze) + white.g * haze,
+            tint.b * (1.0f - haze) + white.b * haze,
+            1.0f,
+        };
+        return c;
+    }
 };
 
 // 3D 静态模型（世界空间，参与深度测试）

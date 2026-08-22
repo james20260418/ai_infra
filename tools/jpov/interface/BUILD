@@ -29,6 +29,7 @@ cc_library(
         ":gltf_object",
         ":pbr_material",
         "//geom/common:vec",
+        "//geom/math:piecewise_linear_function",
         "@glog_static//:glog",
     ],
 )
