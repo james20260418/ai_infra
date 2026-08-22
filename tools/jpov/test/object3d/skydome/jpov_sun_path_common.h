@@ -77,41 +77,72 @@ public:
     }
 };
 
-// 默认配置序列：先放一个 standard（正午晴天）配置，vector 尺寸 = 1。
-// 后续往这里加 SkyDirectionAmbient 即可扩展太阳轨迹时段。
+// 默认配置序列：一条太阳从早到晚的轨迹。当前两个时段：
+//   0 = 正午晴天（仰角 45° 斜照，基准）
+//   1 = 低仰角黄昏（仰角 ~12°，天色橙黄、方向光强度由经验照度表 PiecewiseLinearFunction 衰减变暗）
+// 后续往这里加 SkyDirectionAmbient 即可扩展更多太阳轨迹时段。
 inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
     std::vector<SkyDirectionAmbient> path;
 
-    SkyDirectionAmbient noon;  // 正午晴天（与 standard_sunny_day 完全一致）
+    {
+        // 正午晴天：太阳方向光从斜上方 +y 偏 +z 照向场景（光传播方向）。
+        const jpov::Vec3f sun_light_dir = {0.0f, -1.0f, -0.0f};
+        jpov::DaySkyCommand sky{
+                /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
+                                        -sun_light_dir.z()),
+                /*turbidity*/ 2.0f,
+                /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
+                /*intensity*/ 1.0f,
+                /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
+                /*sun_radius*/ 0.02,
+                /*sun_brightness*/ 1e3,
+                /*sun_glow*/ 0.0,
+            };
+        path.push_back(SkyDirectionAmbient{
+            .sky = sky,
+            .sun =  jpov::DirectionalLight{
+                /*direction*/ sun_light_dir,
+                /*color*/ sky.DirectionalColor(),
+                /*intensity*/ sky.DirectionalIntensity(4),
+            },
+            .ambient = jpov::AmbientLight{
+                .color = sky.AmbientColor(),
+                .intensity = sky.AmbientIntensity(),
+            },
+        });
+    }
 
-    // 太阳方向光：光从斜上方 +y 偏 +z 照向场景（光传播方向）。
-    const jpov::Vec3f sun_light_dir = {0.0f, -1.0f, -1.0f};
-    noon.sun = jpov::DirectionalLight{
-        /*direction*/ sun_light_dir,
-        /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
-        /*intensity*/ 3.0f,
-    };
-
-    // 环境光（正午阴影基准，见 LIGHT_INTENSITY.md 三·五）。
-    noon.ambient = jpov::AmbientLight{
-        .color = {1.0f, 1.0f, 1.0f, 1.0f},
-        .intensity = 0.3f,
-    };
-
-    // 天光背景（Preetham）：sun_dir 与方向光对齐（太阳在天球上 = 光传播反方向）。
-    noon.sky = jpov::DaySkyCommand{
-        /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
-                                -sun_light_dir.z()),
-        /*turbidity*/ 2.0f,
-        /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
-        /*intensity*/ 1.0f,
-        /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
-        /*sun_radius*/ 0.02,
-        /*sun_brightness*/ 1e3,
-        /*sun_glow*/ 1.0,
-    };
-
-    path.push_back(std::move(noon));
+    // 低仰角黄昏：太阳接近地平线（仰角 ~12°），方向光强度由经验照度表
+    // PiecewiseLinearFunction 插值衰减到 ~0.39（正午 90° 为 3.0），天色橙黄。——
+    // 验证 DirectionalIntensity() 随仰角变暗。
+    {
+        const jpov::Vec3f sun_light_dir = {1.0f, -.4f, 1.0f};
+        jpov::DaySkyCommand sky{
+                /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
+                                        -sun_light_dir.z()),
+                /*turbidity*/ 6.0f,
+                /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
+                /*intensity*/ 1.0f,
+                /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
+                /*sun_radius*/ 0.02,
+                /*sun_brightness*/ 1e3,
+                /*sun_glow*/ 0.0,
+            };
+        path.push_back(SkyDirectionAmbient{
+            .sky = sky,
+            .sun =  jpov::DirectionalLight{
+                /*direction*/ sun_light_dir,
+                /*color*/ sky.DirectionalColor(),
+                /*intensity*/ sky.DirectionalIntensity(4),
+            },
+            .ambient = jpov::AmbientLight{
+                .color = sky.AmbientColor(),
+                .intensity = sky.AmbientIntensity(),
+            },
+        });
+    }
+    
+    
     return path;
 }
 

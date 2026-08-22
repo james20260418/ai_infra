@@ -41,9 +41,19 @@
   - 正午 ≈ 中性白（约 5600K）；
   - 日出/日落 ≈ 暖橙红（约 2000~3000K）。
 - `intensity = 1.0` ≈ **正午晴空直射太阳 ≈ 100,000 lux**。
-- 低角度太阳的强度衰减由**大气衰减 Beer-Lambert**决定：
-  `intensity = intensity_base × exp(−τ · AM)`，`AM ≈ 1/sin(elevation)`，
-  `τ` 由 turbidity 决定（不在本结构体里推导，由上层/用户给定）。
+- 低角度太阳的强度衰减由**经验照度表**决定（不再用 Beer-Lambert 解析拟合，见下）。
+- **自动推导 `DaySkyCommand::DirectionalIntensity()`（2026-08-22 改）**：从 `sun_dir` 仰角
+  查经验照度表，用 `geom::math::PiecewiseLinearFunction` 分段线性插值：
+  `intensity = midday_intensity × 衰减系数(仰角)`，`midday_intensity` 默认 3.0。
+  经验锤点（晴天直射 + 天光，单位：太阳仰角° → 相对正午照度系数）：
+    `0°→0.01  5°→0.04  10°→0.10  20°→0.25  30°→0.40  60°→0.80  90°→1.00`
+  仰角 <0° / >90° 时 PWL 夹断到端点系数（0.01 / 1.00），不随越界外推。
+  turbidity **暂时忽略**（不影响方向光强度，只影响天色/太阳盘）。
+  - 背景：早期用 Beer-Lambert `exp(−τ·AM)`（`AM=1/sin(elev)`）解析拟合，但该式在低仰角
+    会因 AM 发散（大气球壳 d2 有上界，并不无限增长），散射主导时纯吸收模型失真，
+    衰减趋势也偏离实际照度，故改为直接查经验照度锚点插值。
+  - 用法：`light.intensity = sky.DirectionalIntensity()`（颜色仍用 `DirectionalColor()`，
+    两者配套，见 `DaySkyCommand` 注释）。
 - 月光方向光：物理上月光 ≈ 阳光的 1/400,000，即 `intensity ≈ 2.5e-6`
   （满月地面照度 ≈ 0.3 lux / 100,000 lux）。配合冷色（约 4100K）。
 
