@@ -79,6 +79,20 @@ cc_library(
 
 # jpov_interface — 聚合所有接口（方便用户一次性引用）
 cc_library(
+    name = "ui",
+    hdrs = ["ui.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":input_snapshot",
+        ":pbr_material",
+        ":render_command",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
     name = "gltf_object",
     hdrs = ["gltf_object.h"],
     visibility = ["//visibility:public"],
@@ -96,6 +110,7 @@ cc_library(
         "window_info.h",
         "gltf_object.h",
         "pbr_material.h",
+        "ui.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -107,5 +122,6 @@ cc_library(
         ":pbr_material",
         ":render_command",
         ":window_info",
+        ":ui",
     ],
 )
