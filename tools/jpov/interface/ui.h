@@ -76,6 +76,10 @@
 
 namespace jpov {
 
+// S0 骨架自证测试类（本仓库 tools/jpov/test/ui/，jpov 命名空间）前向声明，
+// 供 Ui 的 friend 访问私有原语验证指令缓冲。
+class UiS0Test;
+
 // ==================== 主题 ====================
 
 // UI 主题：视觉参数唯一入口。纯色系。
@@ -186,6 +190,10 @@ public:
 
     // 判定 box 是否完全落在视口外（越界剔除用）。
     bool OutsideViewport(const UiRect& r) const;
+
+    // S0 骨架自证测试（本仓库 test/ui/，jpov 命名空间）需直接验证内部
+    // 指令缓冲的收集→追加行为，故向该测试类开放私有原语访问。
+    friend class UiS0Test;
 
 private:
     // 内容感知行高：文本 + 内边距推算控件高度。
