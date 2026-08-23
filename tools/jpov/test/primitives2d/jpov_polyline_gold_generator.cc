@@ -5,13 +5,14 @@
 //   - 窗口分辨率 640x360（无拉伸，便于像素精确比较）
 //   - 红色折线，10px 线宽，在多个方向画出折线
 //
-// 输出: /james_pm/ai_infra/tools/jpov/test/primitives2d/polyline_zigzag_red_640x360.png
+// 输出: <test_data>/primitives2d/polyline_zigzag_red_640x360.png
 
 #include <cstdio>
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 class GoldPolylineDemo : public JPOV {
 public:
@@ -51,8 +52,8 @@ public:
 };
 
 int main() {
-    const char* outpath =
-        "/james_pm/ai_infra/tools/jpov/test/primitives2d/polyline_zigzag_red_640x360.png";
+    std::string outpath =
+        jpov::GetTestDataDir() + "/primitives2d/polyline_zigzag_red_640x360.png";
 
     JPOV::Config cfg;
     cfg.title = "Polyline Gold Image Generator";
@@ -65,7 +66,7 @@ int main() {
     winfo.height = 360.0f;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "Polyline gold image generated: " << outpath;

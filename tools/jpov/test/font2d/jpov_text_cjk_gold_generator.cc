@@ -5,13 +5,14 @@
 //   - 显示中文 "你好 世界！" 和英文 "Hello World!" 混合排版
 //   - 字号 36
 //
-// 输出: /james_pm/ai_infra/tools/jpov/test/font2d/hello_cjk_36_640x360.png
+// 输出: <test_data>/font2d/hello_cjk_36_640x360.png
 
 #include <cstdio>
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 class GoldCjkTextDemo : public JPOV {
 public:
@@ -40,7 +41,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/font2d/hello_cjk_36_640x360.png";
+    std::string outpath = jpov::GetTestDataDir() + "/font2d/hello_cjk_36_640x360.png";
 
     JPOV::Config cfg;
     cfg.title = "CJK Text Gold Image Generator";
@@ -53,7 +54,7 @@ int main() {
     winfo.height = 360.0f;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "CJK gold image generated: " << outpath;

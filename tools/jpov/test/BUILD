@@ -4,7 +4,10 @@ cc_library(
     name = "test_utils",
     hdrs = ["test_utils.h"],
     visibility = ["//tools/jpov:__subpackages__"],
-    deps = ["@glog_static//:glog"],
+    deps = [
+        "//tools/common:utils",
+        "@glog_static//:glog",
+    ],
 )
 
 # 光照 gold image 比对工具：自动平铺 ROI + 块内平均颜色对比，输出最大 RGB 通道差。
