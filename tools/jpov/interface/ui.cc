@@ -8,9 +8,9 @@
 //   - Emit 一次性把内部缓冲追加到外部 RenderCommandList，然后清空缓冲。
 //
 // 本文件当前实现【S0 基础设施】骨架：Begin/End/Emit + 指令缓冲 +
-// SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default。
-// 具体控件（Text/Button/Checkbox/SliderFloat/InputText/Combo/ColorSwatch）
-// 由后续子步骤（S1~S6）逐项实现。
+// SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default；
+// S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）。
+// 其余控件（Checkbox/SliderFloat/InputText/Combo）由后续子步骤（S3~S6）逐项实现。
 
 #include "tools/jpov/interface/ui.h"
 
@@ -124,7 +124,52 @@ void Ui::ColorSwatch(const char* /*label*/, const Color& color, const UiRect& bo
     PushFillRect(square, color, theme_.border, theme_.corner_radius_px);
 }
 
+bool Ui::Button(const char* label, const UiRect& box, Stretch /*stretch*/) {
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+
+    // 命中测试：Ui root 面板默认位于窗口原点 (0,0)（ui.h 约定：若面板位移，
+    // 由调用方自行做一次盒偏移）。hovered 决定是否进入悬停态（S2.3）。
+    const InputSnapshot& in = *input_;
+    const bool hovered = Hit(b, 0.0f, 0.0f, in);
+
+    // 背景：悬停变色。accent 为按钮主色，悬停用 hover 填充色。
+    const Color fill = hovered ? theme_.hover : theme_.accent;
+    PushFillRect(b, fill, theme_.border, theme_.corner_radius_px);
+    // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
+    Text(label, b);
+
+    // 点击返回 true（S2.4）：本帧左键有 Click 事件，且释放位置落在按钮 box 内
+    // → 一次性事件（仅当帧返回 true，不存在跨帧记忆）。
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // ==================== 容错辅助 ====================
+
+bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {
+    const UiRect b = SanitizeBox(r);
+    if (b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 零尺寸矩形不参与命中。
+    }
+    // (x, y) = Ui root 面板左上角在窗口中的位置（默认 0,0）；in.mouse 为窗口
+    // 绝对坐标。先转成面板局部坐标，再判点是否落在 box 内（边界含入）。
+    const float lx = in.mouse_x - x;
+    const float ly = in.mouse_y - y;
+    return (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+           (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+}
 
 UiRect Ui::SanitizeBox(const UiRect& r) {
     UiRect out = r;

@@ -27,3 +27,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# S2 按钮 Button + 命中 Hit 自证测试。
+# 纯 CPU 指令层比对 + 返回值验证，无窗口。
+cc_test(
+    name = "jpov_ui_s2_test",
+    srcs = ["jpov_ui_s2_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
