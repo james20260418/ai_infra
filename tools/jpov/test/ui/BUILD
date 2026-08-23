@@ -69,3 +69,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# S5 文本输入框 InputText（底框+光标+占位符，焦点+键盘写回/限容量/水平滚动）自证测试。
+# 纯 CPU 指令层比对 + buffer 写回验证，无窗口。
+cc_test(
+    name = "jpov_ui_s5_test",
+    srcs = ["jpov_ui_s5_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

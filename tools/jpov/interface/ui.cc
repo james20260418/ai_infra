@@ -11,8 +11,9 @@
 // SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default；
 // S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）；
 // S3 Checkbox（方框+勾、点击翻转外置 bool）；
-// S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）。
-// 其余控件（InputText/Combo）由后续子步骤（S5~S6）逐项实现。
+// S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）；
+// S5 InputText（底框+光标+占位符，点击聚焦+键盘写回 char*、限容量+超长水平滚动）。
+// 其余控件（Combo）由后续子步骤（S6）实现。
 
 #include "tools/jpov/interface/ui.h"
 
@@ -349,6 +350,189 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         texts_.push_back(c);
     }
     return changed;
+}
+
+// S5 键盘字符映射：KeyCode → 可编辑字符（与 ui.h 声明一致）。
+char UiInputCharForKey(KeyCode key) {
+    // 字母表 a-z（InputSnapshot 无 Shift 修饰，一律小写）。
+    if (key >= KeyCode::A && key <= KeyCode::Z) {
+        return static_cast<char>('a' + (static_cast<int>(key) - static_cast<int>(KeyCode::A)));
+    }
+    // 数字 0-9。
+    if (key >= KeyCode::_0 && key <= KeyCode::_9) {
+        return static_cast<char>('0' + (static_cast<int>(key) - static_cast<int>(KeyCode::_0)));
+    }
+    switch (key) {
+        case KeyCode::Space:
+            return ' ';
+        default:
+            return '\0';  // 修饰键/控制键/方向键等：不可编辑字符，调用方忽略。
+    }
+}
+
+bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
+                   const UiRect& box, Stretch /*stretch*/) {
+    // buffer 必须非空且至少留 1 字节存 '\0'（容量下限 2：1 字符 + 终止符）。
+    CHECK(buffer != nullptr) << "InputText buffer must not be null";
+    CHECK_GE(buffer_size, 2u) << "InputText requires buffer_size >= 2 "
+                              << "(1 char + null terminator), got " << buffer_size;
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不聚焦、不写值。
+    }
+
+    // 确保 buffer 以 '\0' 收尾（防调用方传入非终止字符串污染长度计算）。
+    // buffer 至少 buffer_size 字节，下标 buffer_size-1 必然合法。
+    buffer[buffer_size - 1] = '\0';
+    const size_t text_len = strnlen(buffer, buffer_size - 1);
+
+    // ---- 焦点管理（S5.2）：状态跨帧，点击 box 内获得焦点 ----
+    // 即时模式：focus 是本对象跨帧状态。本帧绘制时，若本 box 与上次聚焦 box
+    // 位置+尺寸一致 → 视为已聚焦（框移动/临时对象时自动失焦，重新点击才聚焦）。
+    const InputSnapshot& in = *input_;
+    const bool is_focused =
+        input_focused_ && input_focus_box_.pos == b.pos &&
+        input_focus_box_.size == b.size;
+
+    // 本帧点击落在 box 内 → 聚焦本框。
+    bool clicked_inside = false;
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                clicked_inside = true;
+                break;
+            }
+        }
+    }
+    // 聚焦状态结算（先做，供下方键入判断使用）：
+    //  - 点本框 → 聚焦；点别处 → 若聚焦正是本框则失焦。
+    if (clicked_inside) {
+        input_focused_ = true;
+        input_focus_box_ = b;
+        input_scroll_px_ = 0.0f;  // 聚焦时滚动归零（从头显示）。
+    } else if (in.left.IsClick() && is_focused) {
+        input_focused_ = false;  // 本帧 Click 落在 box 外 → 本框失焦。
+    }
+
+    // ---- 键盘写回 char*（S5.2）：仅聚焦框消费键入 ----
+    // 用本轮聚焦判定后的 is_focused 快照决定是否消费按键，避免同帧内
+    // 焦点迁移（点框外导致失焦）后仍把字符打进刚失焦的 buffer。
+    // 可编辑长度用可变变量跟踪（追加/删除会改变它）。
+    size_t len = text_len;
+    const size_t cap = buffer_size - 1;  // 可容纳的最大字符数（留 '\0'）。
+    if (is_focused) {
+        // 控制键：Enter / Escape → 失焦（提交/取消，都不改变 buffer）。
+        const KeyState& enter = in.GetKey(KeyCode::Enter);
+        const KeyState& esc = in.GetKey(KeyCode::Escape);
+        if (enter.IsClick() || esc.IsClick()) {
+            input_focused_ = false;
+        } else {
+            // Backspace：删除最后一个字符（删除发生在追加前）。
+            const KeyState& bs = in.GetKey(KeyCode::Backspace);
+            if (bs.IsClick()) {
+                const size_t n =
+                    std::min(static_cast<size_t>(bs.click_count()), len);
+                for (size_t i = 0; i < n; ++i) {
+                    buffer[len - i - 1] = '\0';
+                }
+                len -= n;
+                buffer[len] = '\0';
+            }
+            // 可编辑字符：从 KeyCode 读，逐字符追加，遇容量上限截断（S5.2）。
+            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。多余连击（
+            // 低帧率同帧多次按下）按次追加，容量满则丢弃余量（截断）。
+            for (int code = static_cast<int>(KeyCode::Space);
+                 code <= static_cast<int>(KeyCode::Z); ++code) {
+                const KeyState& ks = in.GetKey(static_cast<KeyCode>(code));
+                if (!ks.IsClick()) {
+                    continue;
+                }
+                const char ch = UiInputCharForKey(static_cast<KeyCode>(code));
+                if (ch == '\0') {
+                    continue;  // 不可编辑字符跳过。
+                }
+                const size_t n = std::min(static_cast<size_t>(ks.click_count()),
+                                          cap - len);
+                for (size_t i = 0; i < n; ++i) {
+                    buffer[len + i] = ch;
+                }
+                len += n;
+                buffer[len] = '\0';
+            }
+        }
+    }
+
+    // 绘制/返回用的“当前聚焦”判定：必须在本帧全部输入处理（含 Enter/Escape
+    // 失焦）之后结算，才能正确反映本帧点击聚焦/框外失焦/回车失焦的最终状态。
+    // 键盘写回用的是上面的 is_focused 快照，二者语义不同：
+    //   键入：用“帧首是否已聚焦”决定是否消费（点击聚焦那一刻不消费，下帧才打字）；
+    //   绘制/返回：用“帧末最终聚焦”决定画不画光标、返回值。
+    const bool focused_eff =
+        input_focused_ && input_focus_box_.pos == b.pos &&
+        input_focus_box_.size == b.size;
+
+    // ---- 绘制（S5.1）：底框 + 占位符/内容文本 + 光标 ----
+    // 底框：background 底 + border 边框（与其它控件一致的圆角/边框语义）。
+    PushFillRect(b, theme_.background, theme_.border, theme_.corner_radius_px);
+
+    // 文本内容区（左侧留 padding 内边距，垂直居中）。
+    const float pad = theme_.padding_px;
+    const float text_left = b.pos.x() + pad;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心（文本与光标共用）
+
+    if (len > 0) {
+        // 内容文本：foreground 色、左对齐、垂直居中（kMidLeft，pos=左缘中点）。
+        // 手动压一条 Text2DCommand（与 S4 滑条数值文本一致），而非 PushText
+        //（PushText 仅 kTopLeft，无法垂直居中，与光标不对齐）。
+        Text2DCommand c;
+        c.text = buffer;
+        c.pos = {text_left, cy};
+        c.font_size = theme_.font_size;
+        c.color = theme_.foreground;
+        c.alignment = TextAlignment::kMidLeft;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    } else if (label != nullptr && label[0] != '\0') {
+        // 空 buffer → 画占位符（提示输入内容），disabled 色以示与正文区分。
+        Text2DCommand c;
+        c.text = label;
+        c.pos = {text_left, cy};
+        c.font_size = theme_.font_size;
+        c.color = theme_.disabled;
+        c.alignment = TextAlignment::kMidLeft;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    }
+
+    // 光标（S5.1/S5.3）：聚焦时在文本末尾画一条竖线（静态，不闪烁保 gold 可测）。
+    // 水平滚动：文本末位估计宽度超过 box 右缘（去 padding）→ 推进内部滚动，
+    // 保证光标不越出右缘（S5.3 内部 scroll、不溢出）。无字体度量 API，字符宽
+    // 用等宽近似（字号 * 0.6）参与定位与滚动判断；实际字形仍按完整串交渲染层。
+    if (focused_eff) {
+        const float caret_w = std::max(1.0f, theme_.border_width_px);
+        const float char_w = theme_.font_size * 0.6f;
+        const float caret_right = b.pos.x() + b.size.x() - pad;
+        // 光标相对内容左缘的原始位置 = 文本总估计宽度 - 当前滚动偏移。
+        const float caret_x =
+            text_left + static_cast<float>(len) * char_w - input_scroll_px_;
+        if (caret_x > caret_right) {
+            // 越过右缘：滚动多出的量，使光标保持恰在右缘内侧。
+            input_scroll_px_ += caret_x - caret_right;
+        }
+        // 最终光标 X：贴右缘内侧，绝不越界。
+        const float cx =
+            std::min(text_left + static_cast<float>(len) * char_w, caret_right);
+        const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
+        PushFillRect(UiRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
+                     theme_.accent, theme_.accent, 0.0f);
+    }
+
+    // 返回本帧聚焦结果（反映本帧点击/失焦处理后的最终状态，供调用方在
+    // 回车/取消时感知失焦事件；键入本身通过写回 buffer 反映，无需关心）。
+    return focused_eff;
 }
 
 bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {

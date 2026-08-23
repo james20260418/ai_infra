@@ -218,7 +218,25 @@ private:
     std::vector<FillRect2DCommand> fill_rects_;
     std::vector<Text2DCommand> texts_;
     std::vector<Polyline2DCommand> polylines_;
+
+    // ---- 跨帧状态（仅 InputText 焦点/水平滚动需要；其余控件一律无状态）----
+    // 焦点文本框 box 的 Ui 面板局部坐标。跨帧记忆当前哪个文本框聚焦
+    // （焦点/光标可见属于显式状态语义，需跨帧保持；光标本身绘制为静态不闪烁，
+    // 以便单帧自证 gold 指令可确定性比对）。用 box 位置+尺寸识别同一文本框；
+    // 本帧绘制时若 box 与之相等则视为聚焦。
+    bool input_focused_ = false;
+    UiRect input_focus_box_{};  // 聚焦文本框的 box（input_focused_ 为 true 时有效）
+    // 水平滚动偏移（像素）：文本超出 box 宽时，光标跟随内部滚动，保证
+    // 光标不越出 box 右缘（S5.3 内部 scroll，不溢出）。跨帧保持以免重绘闪烁。
+    float input_scroll_px_ = 0.0f;
 };
+
+// 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试
+// 合成按键时复用同一套映射，避免测试与实现分叉。
+// 返回该 key 在本帧应写入 buffer 的字符；无法映射为可编辑字符（修饰键/
+// 控制键）返回 '\0'，调用方忽略。大小写：InputSnapshot 未携带 Shift 修饰，
+// 一律输出小写（可编辑字符全集：a-z / 0-9 / 空格）。
+char UiInputCharForKey(KeyCode key);
 
 }  // namespace jpov
 
