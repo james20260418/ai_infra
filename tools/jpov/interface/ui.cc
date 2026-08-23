@@ -10,12 +10,14 @@
 // 本文件当前实现【S0 基础设施】骨架：Begin/End/Emit + 指令缓冲 +
 // SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default；
 // S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）；
-// S3 Checkbox（方框+勾、点击翻转外置 bool）。
-// 其余控件（SliderFloat/InputText/Combo）由后续子步骤（S4~S6）逐项实现。
+// S3 Checkbox（方框+勾、点击翻转外置 bool）；
+// S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）。
+// 其余控件（InputText/Combo）由后续子步骤（S5~S6）逐项实现。
 
 #include "tools/jpov/interface/ui.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include <glog/logging.h>
 
@@ -224,7 +226,130 @@ bool Ui::Checkbox(const char* label, bool* value, const UiRect& box,
     return clicked;
 }
 
-// ==================== 容错辅助 ====================
+bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
+                     float min, float max, Stretch /*stretch*/) {
+    // min < max 是前置条件；不满足则无法定义归一化映射，直接 crash 暴露问题
+    // （不做 fallback 隐藏配置错误，遵循仓库 crash-early 原则）。
+    CHECK(value != nullptr) << "SliderFloat value pointer must not be null";
+    CHECK_LT(min, max) << "SliderFloat requires min < max, got (" << min
+                       << ", " << max << ")";
+    const float range = max - min;
+
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+
+    // ---- 值域处理：外置 value 先夹到 [min,max]（防调用方越界污染）----
+    // 立即把夹断后的值写回 *value，保证显示与状态一致（每次绘制后
+    // *value 都落在 [min,max]，不存在显示 100 而状态 999 的分歧）。
+    const float clamped = std::clamp(*value, min, max);
+    *value = clamped;
+
+    // ---- 布局：轨道 + 句柄 ----
+    // 轨道：横向铺满 box（左右留一个句柄半径的边距，避免句柄溢出 box 边缘），
+    // 垂直居中、厚度固定取 box 高的 30%（至少 4px）。
+    // 句柄直径：clamp ≥ min_diameter（容错 #2，默认 8px），且不超出 box 宽
+    // （窄 box 句柄取 min(8, 宽)，保证不缩 0、不溢出 box）。
+    // 注意：不能直接用 std::clamp(b.size.y(), 8, b.size.x())——矮而窄的 box
+    // 会出现 lo>hi 的未定义行为，故先 max 抬底再 min 封顶。
+    constexpr float kMinHandle = 8.0f;
+    const float thickness = std::max(4.0f, b.size.y() * 0.30f);
+    const float handle_d =
+        std::min(std::max(b.size.y(), kMinHandle), b.size.x());
+    // 句柄中心可移动的水平范围（轨道去两端句柄半宽）。
+    const float half = handle_d * 0.5f;
+    const float track_left = b.pos.x() + half;
+    const float track_right = b.pos.x() + b.size.x() - half;
+    // 轨道长度：极窄 box（句柄已几乎占满）时仍保证轨道有最小正宽度，
+    // 满足容错“box 过窄轨道照画、不消失”（避免 track 退化为 0 面积被剔除）。
+    const float track_len = std::max(1.0f, track_right - track_left);
+    // 归一化位置 [0,1]：value 映射到轨道长度。
+    const float t = (track_len > 0.0f) ? (clamped - min) / range : 0.0f;
+    const float hx = track_left + t * track_len;   // 句柄中心 X
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心
+
+    // 轨道矩形（垂直居中，厚 thickness）。
+    const UiRect track_rect{
+        {track_left, cy - thickness * 0.5f},
+        {track_len, thickness},
+    };
+    // 句柄矩形（方形，边长 handle_d，垂直居中）。
+    const UiRect handle_rect{
+        {hx - half, cy - half},
+        {handle_d, handle_d},
+    };
+
+    // ---- 交互（S4.2 拖动）：命中 → 横坐标比例映射 [min,max] 写回 ----
+    // 即时模式、不跨帧记忆：本帧若有左键按下且鼠标在滑条 box 内，就持续把
+    // 当前鼠标横坐标映射到值。这样 Click（点轨道跳转）与 Drag（拖句柄跟手）
+    // 都能实时反映；返回 true = 本帧值被改变（一次性事件）。
+    const InputSnapshot& in = *input_;
+    const float lx = in.mouse_x - 0.0f;   // root 面板位于窗口原点 (0,0)（ui.h 约定）。
+    const bool mouse_over =
+        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x());
+    const bool left_active = in.left.IsDrag() || in.left.IsHold();
+
+    bool changed = false;
+    if (mouse_over && left_active) {
+        // 拖动/按住期间，跟随鼠标横坐标（点击即跳到该处）。
+        const float nx =
+            (track_len > 0.0f) ? (lx - track_left) / track_len : 0.0f;
+        const float new_val =
+            min + std::clamp(nx, 0.0f, 1.0f) * range;
+        if (new_val != clamped) {
+            *value = new_val;
+            changed = true;
+        }
+    } else if (in.left.IsClick()) {
+        // 单击：仅当释放位置落在滑条 box 内才写值（一次性事件，同 Button）。
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy2 = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y()) {
+                const float nx =
+                    (track_len > 0.0f) ? (cx - track_left) / track_len : 0.0f;
+                *value = min + std::clamp(nx, 0.0f, 1.0f) * range;
+                changed = true;
+                break;  // 只取首个落在 box 内的 click。
+            }
+        }
+    }
+
+    // ---- 绘制（S4.1）：轨道 + 句柄 + 数值 ----
+    // 轨道底(背景) + 选中行程(accent，min→句柄) + 句柄 + 数值文本。
+    PushFillRect(track_rect, theme_.background, theme_.border,
+                 theme_.corner_radius_px);
+    // 选中行程：min→句柄 用 accent 高亮（宽度 = 句柄中心 - 轨道左端）。
+    const float fill_len = std::max(0.0f, hx - track_left);
+    if (fill_len > 0.0f) {
+        PushFillRect(UiRect{{track_left, cy - thickness * 0.5f},
+                            {fill_len, thickness}},
+                     theme_.accent, theme_.accent, theme_.corner_radius_px);
+    }
+    // 句柄：实心方框（accent 前景色）+ 边框，独立于轨道可见。
+    PushFillRect(handle_rect, theme_.foreground, theme_.border,
+                 theme_.corner_radius_px);
+
+    // 数值文本：显示 label 与当前整数化取值（如 “speed: 50”）。
+    // 复用 Text 的居中/原字号语义（画在轨道之上 box 中心）。
+    if (label != nullptr && label[0] != '\0') {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s: %.0f", label, *value);
+        std::string text(buf);
+        // 直接构造一个居中文本指令（Text 原字号、box 中心，复用其语义）。
+        Text2DCommand c;
+        c.text = text;
+        c.pos = b.pos + b.size * 0.5f;
+        c.font_size = theme_.font_size;
+        c.color = theme_.foreground;
+        c.alignment = TextAlignment::kCenter;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    }
+    return changed;
+}
 
 bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {
     const UiRect b = SanitizeBox(r);
