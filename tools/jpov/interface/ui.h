@@ -209,6 +209,10 @@ private:
     // 2D 折线（勾选标记等），首帧折线缓冲，Emit 时追加到外部列表。
     void PushPolyline(const std::vector<Vec2f>& vertices, Color color,
                       float line_width);
+    // 左对齐、垂直居中的文本（pos=左缘中点，kMidLeft），用于需要精确左对齐
+    // 垂直居中的控件（滑条数值/输入框正文/Combo 当前项与选项行）。
+    // 相比 PushText（仅 kTopLeft）能正确对齐垂直中心；跳过空串/越界/零尺寸。
+    void PushLabelText(const char* s, float left, float cy, Color color);
 
     const InputSnapshot* input_ = nullptr;  // 本帧输入（Begin 设置）
     UiTheme theme_;         // 本帧主题拷贝
@@ -229,6 +233,14 @@ private:
     // 水平滚动偏移（像素）：文本超出 box 宽时，光标跟随内部滚动，保证
     // 光标不越出 box 右缘（S5.3 内部 scroll，不溢出）。跨帧保持以免重绘闪烁。
     float input_scroll_px_ = 0.0f;
+
+    // ---- 跨帧状态（仅 Combo 下拉展开需要；其余控件一律无状态）----
+    // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）。下拉的展开/收起
+    // 属于显式状态语义（需跨帧保持可见），故用与 InputText 焦点相同的模式：
+    // 跨帧记忆展开中的 Combo，用 box 位置+尺寸识别同一 Combo；本帧绘制时若
+    // box 与之相等则视为展开态。
+    bool combo_open_ = false;
+    UiRect combo_open_box_{};  // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）
 };
 
 // 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试

@@ -12,8 +12,9 @@
 // S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）；
 // S3 Checkbox（方框+勾、点击翻转外置 bool）；
 // S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）；
-// S5 InputText（底框+光标+占位符，点击聚焦+键盘写回 char*、限容量+超长水平滚动）。
-// 其余控件（Combo）由后续子步骤（S6）实现。
+// S5 InputText（底框+光标+占位符，点击聚焦+键盘写回 char*、限容量+超长水平滚动）；
+// S6 Combo（当前项+下箭头、点击展开列表选择写回/点外部关闭、跨帧展开态）。
+// 其余控件（集成 demo 等）由后续子步骤（S7+）实现。
 
 #include "tools/jpov/interface/ui.h"
 
@@ -535,6 +536,139 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     return focused_eff;
 }
 
+bool Ui::Combo(const char* label, int* selected,
+               const std::vector<const char*>& items, const UiRect& box,
+               Stretch /*stretch*/) {
+    // selected 为 in/out，合法范围 [0, items.size()-1]（任务验收备注）。
+    CHECK(selected != nullptr) << "Combo selected pointer must not be null";
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不展开、不改值。
+    }
+
+    // ---- 值域处理：选中的 index 先夹到 [0, size-1]（防调用方越界污染）----
+    // 立即把夹断后的值写回 *selected，保证显示与状态一致。
+    const int size = static_cast<int>(items.size());
+    if (size == 0) {
+        *selected = -1;  // 无选项 → 无选中（显示占位符）。
+    } else {
+        *selected = std::clamp(*selected, 0, size - 1);
+    }
+
+    // ---- 跨帧展开状态（同 InputText 焦点模式）：用 box 位置+尺寸识别同一
+    // Combo；本帧绘制时若 box 与之相等则视为已展开。----
+    const InputSnapshot& in = *input_;
+    const bool was_open =
+        combo_open_ && combo_open_box_.pos == b.pos &&
+        combo_open_box_.size == b.size;
+
+    // ---- 布局：组合框 + 下拉列表 + 下箭头（仅在框内画，下拉列表不画箭头）----
+    const float row_h = RowHeight();
+    const float pad = theme_.padding_px;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 框垂直中心（文本对齐用）
+
+    // 下箭头（▾）：右侧、垂直居中。用 3 顶点朝下三角形折线绘制，纯几何
+    // 不依赖字形，gold 自证可确定性比对。尺寸取 box 高的一半（clamp 到合法
+    // 范围），右侧留 padding 边距。
+    const float arrow_h = std::max(2.0f, std::min(b.size.y() * 0.5f, 12.0f));
+    const float arrow_w = arrow_h;  // 三角形底宽 = 高（等边倾向）
+    const float ar = b.pos.x() + b.size.x() - pad - arrow_w;  // 箭头右上 x
+    const float ay = cy - arrow_h * 0.5f;
+
+    // 下拉列表：组合框正下方，宽度=框宽，行数=选项数。
+    const float list_top = b.pos.y() + b.size.y();
+    const float list_h = static_cast<float>(size) * row_h;
+
+    // ---- 交互（S6.2）：展开/收起 + 选值 + 点外部关闭 ----
+    bool changed = false;   // 本帧是否发生了选项切换（返回值）。
+    bool open_now = was_open;  // 本帧绘制/返回用的最终展开态。
+    if (in.left.IsClick()) {
+        const float cx = in.left_clicks[0].x;  // 只取首个 click 位置决定展开行为。
+        const float cy2 = in.left_clicks[0].y;
+        const bool in_box =
+            cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+            cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y();
+
+        if (in_box) {
+            // 点击组合框本身：开→关、关→开（点框内不产生选值，仅切换展开态）。
+            open_now = !was_open;
+        } else if (was_open && size > 0) {
+            // 已展开且点框外：检查是否命中某个选项行 → 选中并关闭；
+            // 否则（点空白/别处）→ 关闭不选值（S6.2 点外部关闭）。
+            for (int i = 0; i < size; ++i) {
+                const float row_y = list_top + static_cast<float>(i) * row_h;
+                if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                    cy2 >= row_y && cy2 <= row_y + row_h) {
+                    *selected = i;  // 选中写回（唯一改变 *selected 的路径）。
+                    changed = true;
+                    break;
+                }
+            }
+            open_now = false;  // 无论命中选项还是点外部空白，点击都关闭下拉。
+        }
+        // was_open == false 且点框外：保持关闭，不改值。
+    }
+
+    // 结算跨帧展开状态（供下一帧 was_open 判定）。
+    combo_open_ = open_now;
+    combo_open_box_ = b;
+
+    // ---- 绘制（S6.1：当前项 + 下箭头 / 展开时 + 下拉列表）----
+    // 组合框底：accent 高亮（展开时）否则 background，统一 border 边框。
+    const Color box_fill = open_now ? theme_.hover : theme_.background;
+    PushFillRect(b, box_fill, theme_.border, theme_.corner_radius_px);
+
+    // 当前项文本：左对齐垂直居中（左侧留 padding）。选中时显示当前项；
+    // 无选项（空 items）→ 显示 label 作占位符（disabled 色）。
+    const char* current = nullptr;
+    if (size > 0 && *selected >= 0 && *selected < size) {
+        current = items[*selected];
+    }
+    if (current != nullptr && current[0] != '\0') {
+        PushLabelText(current, b.pos.x() + pad, cy, theme_.foreground);
+    } else if (label != nullptr && label[0] != '\0') {
+        PushLabelText(label, b.pos.x() + pad, cy, theme_.disabled);
+    }
+
+    // 下箭头：仅收起态画（展开时被下拉列表盖住，语义上无需再提示）。
+    // 用 3 顶点朝下三角形折线（不依赖字体字形，gold 可确定性比对）。
+    if (!open_now && size > 0) {
+        const std::vector<Vec2f> tri = {
+            {ar, ay},
+            {ar + arrow_w, ay},
+            {ar + arrow_w * 0.5f, ay + arrow_h},
+        };
+        PushPolyline(tri, theme_.foreground, std::max(1.0f, theme_.border_width_px));
+    }
+
+    // 下拉列表（仅展开态）：背景 + 每行选项文本（当前项高亮）。
+    if (open_now && size > 0) {
+        PushFillRect(UiRect{{b.pos.x(), list_top}, {b.size.x(), list_h}},
+                     theme_.background, theme_.border, theme_.corner_radius_px);
+        for (int i = 0; i < size; ++i) {
+            const float row_y = list_top + static_cast<float>(i) * row_h;
+            const UiRect row{{b.pos.x(), row_y}, {b.size.x(), row_h}};
+            if (OutsideViewport(row) || row.size.y() <= 0.0f) {
+                continue;  // 行完全越出视口则跳过（底部超出部分 GPU 兜底）。
+            }
+            if (i == *selected) {
+                // 当前项：accent 高亮底色 + foreground 文本。
+                PushFillRect(row, theme_.accent, theme_.border,
+                             theme_.corner_radius_px);
+            }
+            const char* text = items[i];
+            if (text != nullptr && text[0] != '\0') {
+                const float row_cy = row_y + row_h * 0.5f;
+                // 当前项底色已用 accent 高亮，文本统一用 foreground 即可区分。
+                PushLabelText(text, b.pos.x() + pad, row_cy, theme_.foreground);
+            }
+        }
+    }
+
+    // 返回本帧是否发生了选项切换（展开/收起本身不计为选值）。
+    return changed;
+}
+
 bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {
     const UiRect b = SanitizeBox(r);
     if (b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
@@ -634,6 +768,22 @@ void Ui::PushPolyline(const std::vector<Vec2f>& vertices, Color color,
     c.color = color;
     c.line_width = std::max(0.0f, line_width);
     polylines_.push_back(c);
+}
+
+void Ui::PushLabelText(const char* s, float left, float cy, Color color) {
+    if (s == nullptr || s[0] == '\0') {
+        return;  // 空串不画。
+    }
+    Text2DCommand c;
+    c.text = s;
+    // 左对齐 + 垂直居中：pos = 左缘中点（TextAlignment::kMidLeft）。
+    // 不在此做越界/零尺寸判定（文本无盒概念，交由渲染层兜底）。
+    c.pos = {left, cy};
+    c.font_size = theme_.font_size;
+    c.color = color;
+    c.alignment = TextAlignment::kMidLeft;
+    c.font_alias.clear();
+    texts_.push_back(c);
 }
 
 }  // namespace jpov

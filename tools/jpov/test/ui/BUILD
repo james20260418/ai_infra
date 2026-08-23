@@ -83,3 +83,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# S6 下拉 Combo（当前项+箭头绘制；点击展开列表选择写回/点外部关闭）自证测试。
+# 纯 CPU 指令层比对 + selected 写回验证，无窗口。
+cc_test(
+    name = "jpov_ui_s6_test",
+    srcs = ["jpov_ui_s6_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
