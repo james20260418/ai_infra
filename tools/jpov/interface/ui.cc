@@ -9,8 +9,9 @@
 //
 // 本文件当前实现【S0 基础设施】骨架：Begin/End/Emit + 指令缓冲 +
 // SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default；
-// S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）。
-// 其余控件（Checkbox/SliderFloat/InputText/Combo）由后续子步骤（S3~S6）逐项实现。
+// S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）；
+// S3 Checkbox（方框+勾、点击翻转外置 bool）。
+// 其余控件（SliderFloat/InputText/Combo）由后续子步骤（S4~S6）逐项实现。
 
 #include "tools/jpov/interface/ui.h"
 
@@ -55,6 +56,7 @@ void Ui::Begin(const InputSnapshot& input, const UiTheme& theme,
     // 每帧从零构建：清空上一帧收集的指令。
     fill_rects_.clear();
     texts_.clear();
+    polylines_.clear();
 }
 
 void Ui::End() {
@@ -73,9 +75,13 @@ void Ui::Emit(RenderCommandList* cmd /*output*/) {
         cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment,
                       t.font_alias);
     }
+    for (const Polyline2DCommand& p : polylines_) {
+        cmd->DrawPolyline(p.vertices, p.color, p.line_width);
+    }
     // 追加完成后清空内部缓冲，本帧结束。
     fill_rects_.clear();
     texts_.clear();
+    polylines_.clear();
 }
 
 // ==================== 基础控件（S1：Text / ColorSwatch） ====================
@@ -154,6 +160,68 @@ bool Ui::Button(const char* label, const UiRect& box, Stretch /*stretch*/) {
         }
     }
     return false;
+}
+
+bool Ui::Checkbox(const char* label, bool* value, const UiRect& box,
+                 Stretch /*stretch*/) {
+    // 状态外置：value 必须由调用方提供（本接口不跨帧记忆）。
+    CHECK(value != nullptr) << "Checkbox value pointer must not be null";
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+
+    // 点击翻转（一次性事件，同 Button）：本帧左键 Click + 释放位置落在
+    // box 内 → 翻转 *value 并返回 true（不跨帧记忆，下一帧从零读 *value）。
+    const InputSnapshot& in = *input_;
+    bool clicked = false;
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                *value = !*value;  // 点击 → 翻转外置状态。
+                clicked = true;
+                break;
+            }
+        }
+    }
+
+    // 真方形框（容错 #3）：box 不足正方形时按 min(宽,高) 取正方形、居中。
+    const float side = std::min(b.size.x(), b.size.y());
+    if (side <= 0.0f) {
+        return clicked;  // 零尺寸不画（但也已处理上面的点击翻转）。
+    }
+    const UiRect square{
+        {b.pos.x() + (b.size.x() - side) * 0.5f,
+         b.pos.y() + (b.size.y() - side) * 0.5f},
+        {side, side},
+    };
+    // 方框底：选中=accent 高亮，未选=面板底。边框统一 border。
+    const Color fill = (*value) ? theme_.accent : theme_.background;
+    PushFillRect(square, fill, theme_.border, theme_.corner_radius_px);
+
+    // 勾选标记（仅选中态）：在方形内画一个 2 段折线 “✓”。
+    // 折线顶点取方形内缩 padding 的“左中→右下→右上”三点，形成对勾。
+    if (*value) {
+        const float pad = std::min(theme_.padding_px, side * 0.25f);
+        const float x0 = square.pos.x() + pad;
+        const float y0 = square.pos.y() + pad;
+        const float w = square.size.x() - 2.0f * pad;
+        const float h = square.size.y() - 2.0f * pad;
+        std::vector<Vec2f> verts = {
+            {x0, y0 + h * 0.62f},
+            {x0 + w * 0.36f, y0 + h * 0.90f},
+            {x0 + w, y0 + h * 0.18f},
+        };
+        const float lw = std::max(1.0f, side * 0.12f);
+        PushPolyline(verts, theme_.foreground, lw);
+    }
+
+    // 标签文本：原字号、box 中心（复用 Text 语义，画在方框之后上方）。
+    Text(label, b);
+    return clicked;
 }
 
 // ==================== 容错辅助 ====================
@@ -245,6 +313,18 @@ void Ui::PushText(const char* s, const UiRect& box) {
     c.alignment = TextAlignment::kTopLeft;
     c.font_alias.clear();
     texts_.push_back(c);
+}
+
+void Ui::PushPolyline(const std::vector<Vec2f>& vertices, Color color,
+                      float line_width) {
+    if (vertices.size() < 2) {
+        return;  // 折线至少需要 2 个顶点。
+    }
+    Polyline2DCommand c;
+    c.vertices = vertices;
+    c.color = color;
+    c.line_width = std::max(0.0f, line_width);
+    polylines_.push_back(c);
 }
 
 }  // namespace jpov

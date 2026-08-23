@@ -158,7 +158,10 @@ public:
     bool Button(const char* label, const UiRect& box,
                 Stretch stretch = Stretch_NEWS);
 
-    // 复选框。value 为 in/out；返回 true = 本帧被点击（值已翻转）。
+    // 复选框。value 为 in/out（状态外置，本接口不跨帧记忆）；
+    // 返回 true = 本帧被点击（此时 *value 已翻转）。
+    // 绘制：box 内取真方形（min(宽,高) 居中）画方框；勾选态底色=accent
+    // 且内画勾（2 段折线）；未勾选底色=background。标签文本在 box 中心。
     bool Checkbox(const char* label, bool* value /*inout*/, const UiRect& box,
                   Stretch stretch = Stretch_NEWS);
 
@@ -203,6 +206,9 @@ private:
     // 控件绘制入内部指令缓冲（不是直接写 RenderCommandList）。
     void PushFillRect(const UiRect& r, Color fill, Color border, float radius);
     void PushText(const char* s, const UiRect& box);
+    // 2D 折线（勾选标记等），首帧折线缓冲，Emit 时追加到外部列表。
+    void PushPolyline(const std::vector<Vec2f>& vertices, Color color,
+                      float line_width);
 
     const InputSnapshot* input_ = nullptr;  // 本帧输入（Begin 设置）
     UiTheme theme_;         // 本帧主题拷贝
@@ -211,6 +217,7 @@ private:
     // 本帧指令暂存（Begin 起收集，Emit 追加到外部 RenderCommandList）
     std::vector<FillRect2DCommand> fill_rects_;
     std::vector<Text2DCommand> texts_;
+    std::vector<Polyline2DCommand> polylines_;
 };
 
 }  // namespace jpov

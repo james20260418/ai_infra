@@ -41,3 +41,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# S3 复选框 Checkbox（状态外置）自证测试。
+# 纯 CPU 指令层比对 + 外置 bool 翻转验证，无窗口。
+cc_test(
+    name = "jpov_ui_s3_test",
+    srcs = ["jpov_ui_s3_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
