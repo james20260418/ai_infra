@@ -78,6 +78,52 @@ void Ui::Emit(RenderCommandList* cmd /*output*/) {
     texts_.clear();
 }
 
+// ==================== 基础控件（S1：Text / ColorSwatch） ====================
+
+void Ui::Text(const char* label, const UiRect& box, Stretch /*stretch*/) {
+    if (label == nullptr || label[0] == '\0') {
+        return;  // 空标签不画。
+    }
+    // 规格化 box（负尺寸 clamp 0），越界/零尺寸则跳过。
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return;
+    }
+    Text2DCommand c;
+    c.text = label;
+    // 容错 #1：字形保持原尺寸（theme_.font_size），绝不缩小。
+    // 用 kCenter 对齐把字形的实际包围盒中心放到 box 中心 →
+    // 原尺寸文字在 box 内垂直（与水平）居中；box 过小时文字仍原尺寸，
+    // 超出 box 的部分由渲染层/视口兜底（本接口不做 scissor）。
+    c.pos = b.pos + b.size * 0.5f;
+    c.font_size = theme_.font_size;
+    c.color = theme_.foreground;
+    c.alignment = TextAlignment::kCenter;
+    c.font_alias.clear();
+    texts_.push_back(c);
+}
+
+void Ui::ColorSwatch(const char* /*label*/, const Color& color, const UiRect& box,
+                     Stretch /*stretch*/) {
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return;  // 越界/零尺寸跳过。
+    }
+    // 容错 #3：真方形控件。box 不足正方形时按 min(宽,高) 取正方形，
+    // 在 box 内居中（box 本身正方形时 side=min=box 边长，即铺满 box）。
+    const float side = std::min(b.size.x(), b.size.y());
+    if (side <= 0.0f) {
+        return;
+    }
+    const UiRect square{
+        {b.pos.x() + (b.size.x() - side) * 0.5f,
+         b.pos.y() + (b.size.y() - side) * 0.5f},
+        {side, side},
+    };
+    // PushFillRect 内部会做越界剔除、零面积跳过、圆角 clamp。
+    PushFillRect(square, color, theme_.border, theme_.corner_radius_px);
+}
+
 // ==================== 容错辅助 ====================
 
 UiRect Ui::SanitizeBox(const UiRect& r) {
