@@ -97,3 +97,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# S7 集成 demo 自证测试：一次 Emit gold 全貌比对（纯 CPU 指令层，无窗口）。
+# 复用 demo/ui_demo_panel.h 的 DrawUiDemoPanel（与交互 demo 同一布局源）。
+cc_test(
+    name = "jpov_ui_s7_test",
+    srcs = ["jpov_ui_s7_test.cc"],
+    deps = [
+        "//tools/jpov:ui_demo_panel",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
