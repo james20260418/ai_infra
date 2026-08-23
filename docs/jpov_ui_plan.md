@@ -23,17 +23,16 @@
    - 复用靠 **函数包装 + for 循环 + 每帧传不同 state** 获得；
    - 换来：免去布局树数据结构 / 偏移绑定 / 生命周期管理的全部复杂度。
 2. **一个 Ui 对象 = 一个 root 面板**，用户跨帧持有 Ui。
-3. **布局 = 像素 box 显式定位**：每个控件必须给 `UiRect`，布局真相内聚于一个 struct，
-   一眼可读。box 内默认 **NEWS 全面覆盖**（控件填满 box，母变宽子跟着变宽），
-   可传 `Stretch` 掩码覆盖某方向拉伸实现对齐。
+3. **布局 = 像素 box 显式定位**：每个控件必须给 `UiRect`，布局真相内聚于一个 struct。
+   box 内默认 **NEWS 全面覆盖**，可传 `Stretch` 掩码覆盖某方向拉伸实现对齐。
 4. **控件状态外置**：用户提供参数指针（`float*`/`bool*`/`char*`/`int*`），交互写回。
-   每帧从零构建，无状态渲染，符合 JPOV 自测理念。
-5. **容错原则**（细节后续再议，本纲领定精神）：
-   - box 过小时尽量 fallback 保全基本功能，**字号绝不缩小**（原尺寸 + 裁切）；
-   - 圆角/内边距/句柄直径等先 clamp 到合法范围，绝无负尺寸/NaN；
+   每帧从零构建，无状态渲染。
+5. **容错原则**（已写入 ui.h 注释，实现时遵守）：
+   - box 过小 fallback 保全功能，**字号绝不缩小**（原尺寸 + 裁切）；
+   - 圆角/内边距/句柄直径 clamp 到合法范围，绝无负尺寸/NaN；
    - 越界剔除：与视口 AABB 不相交则跳过；部分相交照画（GPU 兜底）。
 
-### 接口形态（已定稿，见 `tools/jpov/interface/ui.h`）
+### 接口形态（定稿，见 `tools/jpov/interface/ui.h`——**细节一切以 ui.h 注释为准**）
 ```cpp
 class Ui {
   void Begin(const InputSnapshot&, const UiTheme&, float width, float height);
@@ -51,66 +50,95 @@ class Ui {
   bool OutsideViewport(const UiRect&) const;
 };
 ```
-- `UiRect{pos{vec2f}, size{vec2f}}`（像素，原点左上）
-- `UiTheme`：颜色组 + 像素系数量（padding/spacing/corner_radius/border）
+- `UiRect{pos{vec2f}, size{vec2f}}`：**Ui 面板局部坐标、像素单位**（非窗口绝对坐标）
+- `UiTheme`：颜色组 + 像素系数量（padding/spacing/corner/border）
 - `Stretch`：位掩码 `W/E/N/S`，默认 `NEWS` 全铺满
 
 ---
 
-## 2. 子步骤拆解（每个组件独立测试 main，交互式验收）
+## 2. 子步骤拆解
 
-> 验收前置：每个子步骤都含一个可运行的独立 demo/test main，
-> 产出可在窗口交互操作（鼠标命中、滑动、点击），或用 gold 图比对像素。
+> **两种验收形态（贯穿每个子步骤）：**
+> - **交互式 demo main**：可运行窗口，鼠标可操作，实时可见反馈（点/拉/选/打字）。
+> - **单帧渲染自证测试（jpov 特有链路）**：不经窗口，直接 `Ui.Begin→控件→Emit`
+>   拿到 `RenderCommandList`，与**黄金指令（gold）比对**，验证像素级输出正确。
+>   每张 gold 图/指令集都是"单帧自证"，确保无回归。
+> - 每个子步骤**先写单帧自证测试**（快、稳、可被 CI），**再补交互 demo**（给人看）。
 
-### S0. 基础设施（先于一切）
-- [ ] 在 `interface/BUILD` 新增 `ui` 库（`ui.h` + 待建 `ui.cc`），挂入 `jpov_interface`
-- [ ] `ui.cc` 骨架：`Begin/End/Emit` 三基础方法 + 指令缓冲收集 + 视口剔除调用
-- [ ] **验收**：空面板 emit 出 0 条指令；带一个矩形 emit 出 1 条 `FillRect2D`；gold 图空屏
+### S0. 基础设施（Ui 骨架）
+- [ ] S0.1 `interface/BUILD` 新增 `ui` 库（`ui.h` + 待建 `ui.cc`），挂入 `jpov_interface`
+- [ ] S0.2 `ui.cc`：`Begin/End/Emit` 三方法 + 指令缓冲收集
+- [ ] S0.3 视口宽高记录 + 空面板行为
+- [ ] **验收**：
+  - 自证：空面板 `Emit` → 0 条指令；单矩形 → 1 条 `FillRect2D`；gold 指令比对
+  - demo（可选）：空屏窗口，无控件不崩溃
 
-### S1. 基础文本与矩形（Text + ColorSwatch + 背景）
-- [ ] `Text` 绘制：字形原尺寸居中，box 过小裁切不缩字号、不溢出
-- [ ] `ColorSwatch`：真方形控件，box 不足取 min(w,h) 正方形居中
-- [ ] `SanitizeBox`：负尺寸 clamp 到 0；圆角 clamp ≤ min(宽,高)/2
-- [ ] `OutsideViewport`：AABB 判交
-- [ ] **验收**：demo main 摆若干 Text/Swatch，gold 图验证位置字号；鼠标悬停高亮
+### S1. 文本 Text + 色块 ColorSwatch + 规格化
+- [ ] S1.1 `Text` 绘制：字形原尺寸垂直居中；box 过小裁切不缩字号、不溢出
+- [ ] S1.2 `ColorSwatch`：真方形，box 不足取 min(w,h) 居中
+- [ ] S1.3 `SanitizeBox`：负尺寸 clamp 0；圆角 clamp ≤ min(宽,高)/2
+- [ ] S1.4 `OutsideViewport`：AABB 判交
+- [ ] **验收**：
+  - 自证：几个不同 box 的 Text/Swatch → gold 指令；负尺寸 box → 规格化后无 NaN；
+    越界 box → 被剔除（指令 0 条）
+  - demo：摆若干文本/色块，悬停/展示
 
-### S2. 按钮（Button + 命中 + 点击反馈）
-- [ ] `Button` 绘制（底色/圆角/悬停态）；`Hit` 命中测试
-- [ ] 点击返回 true（一次性事件）；悬停变色
-- [ ] **验收**：demo main，鼠标点按验证返回值；可连点计数；gold 图普通态/悬停态
+### S2. 按钮 Button + 命中 Hit
+- [ ] S2.1 `Button` 绘制（底色/圆角/文本）
+- [ ] S2.2 `Hit` 命中测试（点在 box 内）
+- [ ] S2.3 悬停态（鼠标进入变色）
+- [ ] S2.4 点击返回 true（一次性事件）
+- [ ] **验收**：
+  - 自证：模拟点击 → 返回 true 且仅当帧；gold 指令普通态/悬停态
+  - demo：连点计数显示，点按实时反馈
 
-### S3. 复选框（Checkbox，状态外置）
-- [ ] `Checkbox` 绘制（方框+勾）；点击翻转 `*value` 并返回 true
-- [ ] **验收**：demo main，点击验证 `bool*` 翻转；gold 图勾选/未勾选
+### S3. 复选框 Checkbox（状态外置）
+- [ ] S3.1 `Checkbox` 绘制（方框 + 勾）
+- [ ] S3.2 点击翻转 `*bool` 并返回 true
+- [ ] **验收**：
+  - 自证：点击后 `*value` 翻转；gold 勾选/未勾选两态
+  - demo：点击勾选，旁边文本同步显示 ON/OFF
 
-### S4. 水平滑条（SliderFloat，核心交互控件）
-- [ ] `SliderFloat` 绘制（轨道+手柄+数值显示）
-- [ ] 拖动：命中手柄/轨道 → 按横坐标比例映射到 `[min,max]` 写回 `*value`
-- [ ] 容错：手柄直径 clamp 到最小像素（≥8px）；box 过窄轨道照画、手柄不缩到 0
-- [ ] **验收**：demo main，拖动验证 `float*` 连续变化与边界；gold 图多档位
+### S4. 滑条 SliderFloat（核心交互）
+- [ ] S4.1 绘制（轨道 + 句柄 + 数值）
+- [ ] S4.2 拖动：命中 → 横坐标比例映射 `[min,max]` 写回 `*float`
+- [ ] S4.3 容错：句柄直径 clamp ≥ 8px；box 过窄轨道照画、句柄不缩 0
+- [ ] **验收**：
+  - 自证：多档位拖动 → `*value` 正确映射；边界（min/max）；gold 多档位指令
+  - demo：拖动滑条，旁边数值实时跟变
 
-### S5. 文本输入框（InputText）
-- [ ] `InputText` 绘制（底框+光标+占位符）
-- [ ] 焦点：点击获得焦点；键盘输入写回 `char*` buffer（限容量）
-- [ ] 超长水平滚动（内部 scroll 偏移），不溢出
-- [ ] **验收**：demo main，点击聚焦→键盘打字→验证 buffer；越界不打
+### S5. 文本输入框 InputText
+- [ ] S5.1 绘制（底框 + 光标 + 占位符）
+- [ ] S5.2 焦点：点击获得；键盘输入写回 `char*`（限容量）
+- [ ] S5.3 超长水平滚动（内部 scroll），不溢出
+- [ ] **验收**：
+  - 自证：模拟按键 → buffer 内容正确、超容量截断；gold 光标/文本态
+  - demo：点击聚焦 → 打字 → 实时显示 buffer 内容
 
-### S6. 下拉选择（Combo）
-- [ ] `Combo` 绘制（当前项 + 下拉箭头）；点击展开选项列表
-- [ ] 选择切换 `*selected` 并返回 true；点击外部关闭
-- [ ] **验收**：demo main，展开/选择验证；gold 图展开态/收起态
+### S6. 下拉 Combo
+- [ ] S6.1 绘制（当前项 + 下拉箭头）
+- [ ] S6.2 点击展开选项列表；选择写回 `*int` 返回 true；点外部关闭
+- [ ] **验收**：
+  - 自证：选项切换 → `*selected` 正确；gold 展开/收起两态
+  - demo：展开 → 选择 → 当前项实时更新
 
-### S7. 集成 demo（端到端，复杂面板）
-- [ ] `jpov_ui_demo`：一个 1280×720 窗口，综合上述全部控件组成调试台
-  - 标题、多行标签+输入框排列、滑条组、勾选、下拉、按钮行、色块
+### S7. 集成 demo（端到端，完整调试台）
+> ⚠️ 集成 demo 要求：**包含全部控件** + **一个实时 text 输出框**反馈"发生了什么"。
+- [ ] S7.1 `jpov_ui_demo`：1280×720 窗口，综合全部控件组成调试台：
+  - 标题、多行标签/输入、滑条组、勾选、下拉、按钮行、色块
   - 用 `Stretch` 掩码演示"贴左不铺满"等对齐
-- [ ] gold 图全貌 + 交互验证（鼠标点、拉、选、打字）
-- [ ] **验收**：Danis 交互式验收（窗口可操作），gold 图入库
+- [ ] S7.2 **实时 Log 输出框**：一个专用 Text/textbox 区域，把所有交互事件
+  （按钮按下、滑条变更、勾选翻转、下拉切换、输入变化）以时间戳文本实时追加显示，
+  供验收者确认每次操作都被正确捕获。
+- [ ] S7.3 函数包装复用演示：for 循环画 2~3 份同一子面板（如多电机），各自独立 state
+- [ ] **验收**：
+  - 自证：整台一次 Emit → gold 指令全貌比对
+  - demo（**Danis 交互式验收**）：窗口可操作，每个动作在 log 框实时反映，直观确认
 
-### S8. 文档 & 收尾
-- [ ] `interface/ui.h` 顶部使用示例同步最终签名
-- [ ] `README` / 计划书归档到 `docs/`（如适用）
-- [ ] 全量回归：现有 jpov test 全绿，无破坏
+### S8. 回归 & 文档
+- [ ] S8.1 `ui.h` 使用示例与最终签名完全同步（已含复用伪代码）
+- [ ] S8.2 全量 jpov 现有 test 全绿，无回归
+- [ ] S8.3 需要时把本纲领归档到 docs/
 
 ---
 
@@ -118,26 +146,26 @@ class Ui {
 
 | 文件 | 动作 | 说明 |
 |---|---|---|
-| `tools/jpov/interface/ui.h` | 已新增（本 PR） | 接口定稿 |
+| `tools/jpov/interface/ui.h` | 已新增（本 PR） | 接口定稿 + 全部细节注释 |
 | `tools/jpov/interface/ui.cc` | 待建 | 实现 |
-| `tools/jpov/interface/BUILD` | 修改 | 加 `ui` 库并挂入 `jpov_interface` |
-| `tools/jpov/test/ui/` | 待建 | 各组件独立测试/demo main + gold 图 |
-| `docs/jpov_ui_plan.md` 或归档 | 待定 | 本纲领（若做） |
+| `tools/jpov/interface/BUILD` | 修改 | 加 `ui` 库并挂入 `jpov_interface`（已完成） |
+| `tools/jpov/test/ui/` | 待建 | 各组件单帧自证测试 + demo main + gold 指令 |
+| `docs/jpov_ui_plan.md` | 本文件 | 计划纲领 |
 
 ---
 
 ## 4. 验收标准（总体）
 
-1. 每个子步骤有**独立可运行的 demo/test main**，可交互式验收（鼠标操作产出可见反馈）。
-2. 每个绘制型组件有一张 **gold 图**做像素级比对（符合 JPOV 自测理念）。
-3. 交互型组件（按钮/滑条/输入/下拉）通过**返回值 + state 外置指针**可被程序验证。
-4. 全量 jpov 现有 test 全绿，无回归。
-5. 容错规则落地：字号永不缩小；无负尺寸/NaN；越界剔除生效。
+1. 每个子步骤有**单帧自证测试**（gold 指令比对）+ **交互式 demo main** 两种验收。
+2. 绘制组件有 gold 指令比对；交互组件通过**返回值 + state 外置指针**可程序验证。
+3. 集成 demo **包含全部控件** + **实时 log 输出框**，可交互验收。
+4. 容错落地：字号永不缩小；无负尺寸/NaN；越界剔除生效。
+5. 全量 jpov 现有 test 全绿，无回归。
 
 ---
 
 ## 5. PR 计划
 
-- 本 PR：#（待开），仅合入**计划纲领 + ui.h 接口定稿 + BUILD 里 ui.h 占位**。
+- 本 PR：#63（待合入），含**计划纲领 + ui.h 接口定稿 + BUILD 挂载**。
 - 目的：锁定接口，让 bulletin worker 可并行按 S0→S8 推进开发与验收。
-- 后续：S0~S8 由 bulletin worker（任务书模式）逐项执行，每项可交互验收。
+- 后续：S0~S8 由 bulletin worker 逐项执行，每项可交互验收 + gold 自证。
