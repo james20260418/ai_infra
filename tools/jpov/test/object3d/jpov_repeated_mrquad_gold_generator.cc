@@ -25,6 +25,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 namespace {
 
@@ -141,7 +142,7 @@ private:
 
 int main() {
     const std::string outpath =
-        "/james_pm/ai_infra/tools/jpov/test/object3d/repeated_mrquad_1280x720.png";
+        jpov::GetTestDataDir() + "/object3d/repeated_mrquad_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "Repeated MR-Quad (flat, pbr_cube_normal_mr material) Generator";

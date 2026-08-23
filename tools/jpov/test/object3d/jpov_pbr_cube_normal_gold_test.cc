@@ -26,6 +26,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/src/obj_loader.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/compare_light.h"
 
 namespace {
 
@@ -50,6 +51,19 @@ std::string GetTexPath(const char* fname) {
         return p;
     }
     return jpov::GetProjectRoot() + "tools/jpov/test/object3d/" + fname;
+}
+
+// 光照对比用的 gold 图（generator 输出，供光照平均色比对）。
+std::string GetGoldPath() {
+    const char* test_srcdir = std::getenv("TEST_SRCDIR");
+    if (test_srcdir) {
+        std::string p = test_srcdir;
+        if (!p.empty() && p.back() != '/') p.push_back('/');
+        p += "__main__/tools/jpov/test/object3d/pbr_cube_normal_1280x720.png";
+        return p;
+    }
+    return jpov::GetProjectRoot() +
+        "tools/jpov/test/object3d/pbr_cube_normal_1280x720.png";
 }
 
 }  // namespace
@@ -209,6 +223,31 @@ int main() {
     }
 
     // 渲染链路跑通 + 输出非平凡效果图：通过。颜色正确性由 leader 肉眼判断。
+
+    // ---- 光照平均颜色对比（Danis 决策）：8×8 平铺 ROI 块内平均色对比，
+    //      输出最大的 RGB 通道差异，作为光照 gold 的硬性门禁。
+    const double kLightThreshold = 25.0;
+    const std::string gold_path = GetGoldPath();  // reuse existing GetGoldPath()
+    if (FILE* f = std::fopen(gold_path.c_str(), "rb")) {
+        std::fclose(f);
+        const double max_diff = jpov::CompareLightMeanRoiPng(gold_path, outpath, 8, 8);
+        LOG(INFO) << "LIGHT COMPARE: gold vs rendered "
+                  << "max-channel-mean-diff (tile 8x8) = " << max_diff
+                  << " (threshold=" << kLightThreshold << ")";
+        if (max_diff < 0) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED: 无法比对（gold 或 rendered 读取/尺寸错误）";
+            return 1;
+        }
+        if (max_diff > kLightThreshold) {
+            LOG(ERROR) << "LIGHT COMPARE FAILED: max-channel-mean-diff="
+                       << max_diff << " > threshold=" << kLightThreshold
+                       << " → 光照回归！";
+            return 1;
+        }
+        LOG(INFO) << "LIGHT COMPARE PASSED: max-channel-mean-diff="
+                  << max_diff << " <= threshold=" << kLightThreshold;
+    }
+
     LOG(INFO) << "TEST PASSED: PBR normal map (TBN) render pipeline ran "
               << "and produced a non-trivial effect image (color check skipped "
               << "per leader #16)";

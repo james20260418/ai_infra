@@ -12,10 +12,11 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/test/object3d/jpov_scene_common.h"
+#include "tools/jpov/test/test_utils.h"
 
 int main() {
     const std::string outpath =
-        "/james_pm/ai_infra/tools/jpov/test/object3d/scene_1280x720.png";
+        jpov::GetTestDataDir() + "/object3d/scene_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "JPOV Scene Gold Generator (point lights)";

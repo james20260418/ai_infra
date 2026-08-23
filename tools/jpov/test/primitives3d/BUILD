@@ -17,6 +17,7 @@ cc_binary(
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
     ],
     target_compatible_with = [
         "@platforms//os:linux",
@@ -51,6 +52,7 @@ cc_binary(
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
     ],
     target_compatible_with = [
         "@platforms//os:linux",

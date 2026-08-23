@@ -4,6 +4,8 @@
 // 在中央重叠渲染 "你好 JPOV"，验证对齐 + 颜色 blending。
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
@@ -50,7 +52,10 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/color_align_test.png";
+    // 输出到项目统一输出目录，而不是硬编码的绝对路径（换仓可移植）。
+    std::string outdir = jpov::GetOutputDir();
+    std::system(("mkdir -p " + outdir).c_str());
+    std::string outpath = outdir + "color_align_test.png";
 
     JPOV::Config cfg;
     cfg.title = "Color & Alignment Test";
@@ -63,7 +68,7 @@ int main() {
     winfo.height = kResH;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "Color/align test: " << outpath;

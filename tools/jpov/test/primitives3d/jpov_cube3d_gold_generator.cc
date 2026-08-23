@@ -13,6 +13,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/common/utils.h"
+#include "tools/jpov/test/test_utils.h"
 
 // 正方体顶点（边长 0.5，中心在原点）
 // 8 个顶点，右手系：x→右，y→上，z→后
@@ -79,7 +80,7 @@ public:
 };
 
 int main() {
-    const char* outpath = "/james_pm/ai_infra/tools/jpov/test/primitives3d/cube3d_6faces_1280x720.png";
+    std::string outpath = jpov::GetTestDataDir() + "/primitives3d/cube3d_6faces_1280x720.png";
 
     JPOV::Config cfg;
     cfg.title = "3D Cube Gold Generator";
@@ -92,7 +93,7 @@ int main() {
     winfo.height = 360.0f;
 
     jpov::InputSnapshot input{};
-    app.RunOnce(input, winfo, outpath);
+    app.RunOnce(input, winfo, outpath.c_str());
     app.Finalize();
 
     LOG(INFO) << "Gold image generated: " << outpath;
