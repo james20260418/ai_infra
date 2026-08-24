@@ -288,8 +288,12 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
     // 都能实时反映；返回 true = 本帧值被改变（一次性事件）。
     const InputSnapshot& in = *input_;
     const float lx = in.mouse_x - 0.0f;   // root 面板位于窗口原点 (0,0)（ui.h 约定）。
+    const float ly = in.mouse_y - 0.0f;   // 同上，鼠标 Y（也需在 box 竖直范围内）。
+    // 命中需同时满足横向 + 纵向都在 box 内：仅判 X 会导致“鼠标在很远
+    // 的竖直位置拖动也响应滑条”（danis 验收 bug #14）。
     const bool mouse_over =
-        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x());
+        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
     const bool left_active = in.left.IsDrag() || in.left.IsHold();
 
     bool changed = false;

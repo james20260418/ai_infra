@@ -5,8 +5,9 @@
 //      直径 clamp ≥ 8px）+ 选中行程(accent) + 数值文本。
 //   2. 点击跳转：本帧左键 Click 且释放位置在 box 内 → 横坐标比例映射
 //      [min,max] 写回 *value，返回 true。一次性事件。
-//   3. 拖动连续写回：左键 Drag/Hold 且鼠标在 box 内 → 每帧跟随鼠标横坐标
-//      映射写回（多档位验证 *value 随鼠标位置正确变化）。
+//   3. 拖动连续写回：左键 Drag/Hold 且鼠标同时在 box 横向+竖向范围内 →
+//      每帧跟随鼠标横坐标映射写回（多档位验证 *value 随鼠标位置正确变化）。
+//      竖向范围外拖动不响应（danis bug#14 回归）。
 //   4. 边界：拖/点到最左→min，最右→max；越界值夹到 [min,max]。
 //   5. 容错：句柄直径 < 8px 的矮 box → 句柄不缩到 0（clamp 8px）；
 //      过窄 box 轨道照画、句柄不缩 0；越界/零尺寸 → 0 指令、不写值。
@@ -216,6 +217,51 @@ public:
         LOG(INFO) << "[PASS] SliderFloat 点击跳转（框内写/框外忽略）";
     }
 
+    // 拖动竖直范围校验：鼠标 y 在 box 竖直范围外时拖动不应写值（danis bug#14）。
+    // box={{50,100},{200,20}} → y 有效范围 [100,120]；x 在横向范围内但 y 远离。
+    static void TestDragOutsideYNoChange() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
+        // 鼠标 x 在轨道 50% 处（横向命中），但 y=300 远在 box 下方 → 不应响应拖动。
+        const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.50f;
+        {
+            Ui ui;
+            float value = 0.0f;
+            ui.Begin(MakeDragInput(x, 300.0f), theme, 640.0f, 360.0f);
+            const bool changed =
+                ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+            ui.End();
+            CHECK(!changed) << "y 在 box 竖直范围外拖动不应返回 true";
+            CHECK((value < 0.01f))
+                << "y 在 box 竖直范围外拖动不应改变 *value, got " << value;
+        }
+        // 对称：鼠标 y 在 box 正上方远处（y=-100）同样不应响应。
+        {
+            Ui ui;
+            float value = 60.0f;
+            ui.Begin(MakeDragInput(x, -100.0f), theme, 640.0f, 360.0f);
+            const bool changed =
+                ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+            ui.End();
+            CHECK(!changed) << "y 在 box 上方远处拖动不应返回 true";
+            CHECK((value > 59.99f))
+                << "y 在 box 上方远处拖动不应改变 *value, got " << value;
+        }
+        // 反证：鼠标 y 回到 box 竖直范围内（y=110）→ 应正常响应。
+        {
+            Ui ui;
+            float value = 0.0f;
+            ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
+            const bool changed =
+                ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+            ui.End();
+            CHECK(changed) << "y 在 box 竖直范围内拖动应返回 true";
+            CHECK((value > 48.0f && value < 52.0f))
+                << "应映射到 50%, got " << value;
+        }
+        LOG(INFO) << "[PASS] SliderFloat 竖直范围外拖动不响应（danis bug#14）";
+    }
+
     // gold 指令：多档位（含句柄位置随 value 变化）指令比对。
     // 轨道 + 选中行程 + 句柄 3 条 FillRect；标签非空时另有数值文本。
     static void TestGoldCommands() {
@@ -329,6 +375,7 @@ public:
         TestDragMapsMultipleStops();
         TestBoundaryMinMax();
         TestClickJumps();
+        TestDragOutsideYNoChange();
         TestGoldCommands();
         TestThinBoxHandleClamp();
         TestNarrowBoxTrackStillDrawn();
