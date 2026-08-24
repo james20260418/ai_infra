@@ -7,7 +7,10 @@
 //      [min,max] 写回 *value，返回 true。一次性事件。
 //   3. 拖动连续写回：左键 Drag/Hold 且鼠标同时在 box 横向+竖向范围内 →
 //      每帧跟随鼠标横坐标映射写回（多档位验证 *value 随鼠标位置正确变化）。
-//      竖向范围外拖动不响应（danis bug#14 回归）。
+//      竖向范围外拖动不响应（danis bug#14 回归：若从未在 box 内开始过 drag）。
+//   3b. 一次 drag 语义（danis bug#4 回归）：左键在 box 内按下开始 drag 后，
+//      后续帧左键仍按住时即使鼠标飘出 box 竖直范围也持续映射写值，直到
+//      左键释放才结束（一般 UI 行为：drag 一旦开始，判定区不再作数）。
 //   4. 边界：拖/点到最左→min，最右→max；越界值夹到 [min,max]。
 //   5. 容错：句柄直径 < 8px 的矮 box → 句柄不缩到 0（clamp 8px）；
 //      过窄 box 轨道照画、句柄不缩 0；越界/零尺寸 → 0 指令、不写值。
@@ -262,6 +265,114 @@ public:
         LOG(INFO) << "[PASS] SliderFloat 竖直范围外拖动不响应（danis bug#14）";
     }
 
+    // 一次 drag 语义（danis bug#4 回归）：左键在 box 内按下开始 drag 后，
+    // 后续帧左键仍按住时，即使鼠标飘出 box 竖直范围也持续映射写值，直到
+    // 左键释放才结束。跨帧用 box 识别同一滑条（同一个 Ui 跨帧持有）。
+    static void TestDragContinuesOutsideBox() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        // 200px 宽 box：handle_d=min(20,200)=20 → half=10；
+        // track_left=60, track_right=240, track_len=180。有效 y 范围 [100,120]。
+        const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
+        Ui ui;               // 跨帧持有同一 Ui（drag 状态在其中）。
+        float value = 0.0f;
+        // 轨道 25% 处鼠标 x = 60 + 180*0.25 = 105。
+        const float x = 105.0f;
+
+        // 帧 1：左键在 box 内（y=110）按下开始 drag → 写 25%。
+        ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
+        ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK_NEAR(value, 25.0f, 2.0f);
+
+        // 帧 2：继续按住，鼠标仍飘到 box 竖直范围外（y=300，远在下方）→
+        // drag 不中断，仍持续写值（映射到 50%）。
+        ui.Begin(MakeDragInput(x + 180.0f * 0.25f, 300.0f), theme,
+                 640.0f, 360.0f);
+        const bool ch2 =
+            ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK(ch2) << "drag 开始后鼠标飘出竖直范围仍应返回 true";
+        CHECK_NEAR(value, 50.0f, 2.0f);
+
+        // 帧 3：鼠标飘到 box 下方更远（y=500），仍按住 → 继续写（75%）。
+        ui.Begin(MakeDragInput(x + 180.0f * 0.50f, 500.0f), theme,
+                 640.0f, 360.0f);
+        ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK_NEAR(value, 75.0f, 2.0f);
+
+        // 帧 4：左键释放（None）→ drag 结束，不再写值。
+        ui.Begin(MakeInput(x + 180.0f * 0.75f, 500.0f), theme,
+                 640.0f, 360.0f);
+        const bool ch4 =
+            ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK(!ch4) << "左键释放后不应再返回 true";
+        CHECK_NEAR(value, 75.0f, 2.0f);
+
+        // 帧 5：左键释放后、未再按下，鼠标在 box 内移动也不应写值。
+        ui.Begin(MakeInput(x, 110.0f), theme, 640.0f, 360.0f);
+        const bool ch5 =
+            ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK(!ch5) << "释放后未按住，鼠标在 box 内也不应写值";
+        CHECK_NEAR(value, 75.0f, 2.0f);
+
+        // 帧 6：重新在 box 内按下（新的 drag）→ 恢复响应，写 25%。
+        ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
+        ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
+        ui.End();
+        CHECK_NEAR(value, 25.0f, 2.0f);
+
+        LOG(INFO) << "[PASS] SliderFloat 二次 drag 持续漂移写值（danis bug#4）";
+    }
+
+    // 跨滑条 drag 归属：A 正在 drag 且鼠标飘到 B 的竖直范围，B 不应抢走 drag
+    // （无其它滑条持有 drag 时 B 才能新起始；A 释放后 B 可正常接管）。
+    static void TestDragOwnershipNotStolen() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        // 两个竖直堆叠的滑条：A 在上 (y 100-120)，B 在下 (y 200-220)。
+        const UiRect boxA{{50.0f, 100.0f}, {200.0f, 20.0f}};
+        const UiRect boxB{{50.0f, 200.0f}, {200.0f, 20.0f}};
+        Ui ui;
+        float va = 0.0f, vb = 0.0f;
+        const float x = 105.0f;  // 轨道 25%
+
+        // 帧 1：在 A 内按下开始 drag。
+        ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
+        ui.SliderFloat("a", &va, boxA, 0.0f, 100.0f);
+        ui.End();
+        CHECK_NEAR(va, 25.0f, 2.0f);
+        // 帧 2：仍按住，鼠标飘到 B 的竖直范围内（y=210）→ A 应继续 drag
+        // （写 50%），B 不应被误判新按下而抢走 drag（vb 不被写）。
+        ui.Begin(MakeDragInput(x + 180.0f * 0.25f, 210.0f), theme,
+                 640.0f, 360.0f);
+        const bool chA =
+            ui.SliderFloat("a", &va, boxA, 0.0f, 100.0f);
+        const bool chB =
+            ui.SliderFloat("b", &vb, boxB, 0.0f, 100.0f);
+        ui.End();
+        CHECK(chA) << "A 仍在 drag，应继续写值";
+        CHECK_NEAR(va, 50.0f, 2.0f);
+        CHECK(!chB) << "B 不应在本帧抢走 drag（无新按下）";
+        CHECK_NEAR(vb, 0.0f, 0.01f);
+
+        // 帧 3：左键释放 → A drag 结束。
+        ui.Begin(MakeInput(x, 110.0f), theme, 640.0f, 360.0f);
+        ui.SliderFloat("a", &va, boxA, 0.0f, 100.0f);
+        ui.SliderFloat("b", &vb, boxB, 0.0f, 100.0f);
+        ui.End();
+        // 帧 4：重新在 B 内按下 → B 可正常开始 drag（此时无其它滑条持有）。
+        ui.Begin(MakeDragInput(x, 210.0f), theme, 640.0f, 360.0f);
+        const bool chB4 =
+            ui.SliderFloat("b", &vb, boxB, 0.0f, 100.0f);
+        ui.End();
+        CHECK(chB4) << "无其它滑条持有 drag 时 B 可新起始";
+        CHECK_NEAR(vb, 25.0f, 2.0f);
+
+        LOG(INFO) << "[PASS] SliderFloat 跨滑条 drag 归属不互抢（bug#4 衍生）";
+    }
+
     // gold 指令：多档位（含句柄位置随 value 变化）指令比对。
     // 轨道 + 选中行程 + 句柄 3 条 FillRect；标签非空时另有数值文本。
     static void TestGoldCommands() {
@@ -376,6 +487,8 @@ public:
         TestBoundaryMinMax();
         TestClickJumps();
         TestDragOutsideYNoChange();
+        TestDragContinuesOutsideBox();
+        TestDragOwnershipNotStolen();
         TestGoldCommands();
         TestThinBoxHandleClamp();
         TestNarrowBoxTrackStillDrawn();

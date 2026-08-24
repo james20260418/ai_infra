@@ -241,6 +241,15 @@ private:
     // box 与之相等则视为展开态。
     bool combo_open_ = false;
     UiRect combo_open_box_{};  // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）
+
+    // ---- 跨帧状态（仅 SliderFloat 拖动需要；其余控件一律无状态）----
+    // 正在被拖动的滑条框 box（slider_drag_active_ 为 true 时有效）。滑条
+    // 拖动属于显式状态语义：左键在 box 内按下开始 drag 后，只要左键仍按住
+    // 就持续写值，即使鼠标飘出 box 竖直范围也不再校验（符合一般 UI：drag
+    // 一旦开始，判定区不作数，直到左键释放才结束）。跨帧用 box 位置+尺寸
+    // 识别同一滑条（与 InputText 焦点 / Combo 展开同一模式）。
+    bool slider_drag_active_ = false;
+    UiRect slider_drag_box_{};  // 正在拖动的滑条框 box（active 时有效）
 };
 
 // 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试

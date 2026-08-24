@@ -284,23 +284,48 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         {handle_d, handle_d},
     };
 
-    // ---- 交互（S4.2 拖动）：命中 → 横坐标比例映射 [min,max] 写回 ----
-    // 即时模式、不跨帧记忆：本帧若有左键按下且鼠标在滑条 box 内，就持续把
-    // 当前鼠标横坐标映射到值。这样 Click（点轨道跳转）与 Drag（拖句柄跟手）
-    // 都能实时反映；返回 true = 本帧值被改变（一次性事件）。
+    // ---- 交互（S4.2 拖动 + 验收 bug#4 一次性 drag 语义）----
+    // 即时模式 + 跨帧 drag 状态：左键在滑条 box 内按下开始 drag 后，只要
+    // 左键仍按住（Drag/Hold）就持续跟随鼠标横坐标写值——即使鼠标飘出 box
+    // 竖直范围也不再校验（符合一般 UI：drag 一旦开始，判定区不作数，直到
+    // 左键释放才结束）。
+    //   - drag 起始：左键按住 且 鼠标在 box 内 且 当前无任何滑条正在 drag。
+    //   - drag 持续：本滑条正在 drag 且左键仍按住（鼠标可在 box 外）。
+    //   - drag 结束：左键已松开（不再是 Drag/Hold）→ 本滑条让出 drag 状态。
+    // 跨帧用 slider_drag_box_（position+size）识别同一滑条（与 InputText
+    // 焦点 / Combo 展开同一模式）。
+    // 注意起始条件里“当前无任何滑条正在 drag”：避免被拖的滑条 A 鼠标飘越
+    // 另一滑条 B 时 B 误以为新按下而在 A 还在拖时抢走 drag（B 只可起始新
+    // drag，若已有一条持有则让它独占直至释放）。
     const InputSnapshot& in = *input_;
     const float lx = in.mouse_x - 0.0f;   // root 面板位于窗口原点 (0,0)（ui.h 约定）。
-    const float ly = in.mouse_y - 0.0f;   // 同上，鼠标 Y（也需在 box 竖直范围内）。
+    const float ly = in.mouse_y - 0.0f;   // 同上，鼠标 Y。
     // 命中需同时满足横向 + 纵向都在 box 内：仅判 X 会导致“鼠标在很远
-    // 的竖直位置拖动也响应滑条”（danis 验收 bug #14）。
+    // 的竖直位置拖动也响应滑条”（danis 验收 bug #14，起始判据仍是它）。
     const bool mouse_over =
         (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
         (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
-    const bool left_active = in.left.IsDrag() || in.left.IsHold();
+    const bool left_down = in.left.IsDrag() || in.left.IsHold();
+    // 本滑条是否已持有一次正在进行的 drag（跨帧识别同一滑条）。
+    const bool was_dragging =
+        slider_drag_active_ && slider_drag_box_.pos == b.pos &&
+        slider_drag_box_.size == b.size;
+    // 本帧是否处于 drag 态：本滑条已持有（飘远也持续）或 起始新 drag。
+    const bool drag_now =
+        left_down && (was_dragging || (!slider_drag_active_ && mouse_over));
+    if (drag_now) {
+        // 起始/持续：记录为正在拖动的滑条（供后续帧识别一次 drag）。
+        slider_drag_active_ = true;
+        slider_drag_box_ = b;
+    } else if (was_dragging) {
+        // 左键已松开：drag 结束，清状态让其他控件可接管。
+        slider_drag_active_ = false;
+    }
 
     bool changed = false;
-    if (mouse_over && left_active) {
+    if (drag_now) {
         // 拖动/按住期间，跟随鼠标横坐标（点击即跳到该处）。
+        // 鼠标飘出 box 竖直范围后仍按当前横坐标映射（不中断 drag，bug#4）。
         const float nx =
             (track_len > 0.0f) ? (lx - track_left) / track_len : 0.0f;
         const float new_val =
@@ -311,6 +336,7 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         }
     } else if (in.left.IsClick()) {
         // 单击：仅当释放位置落在滑条 box 内才写值（一次性事件，同 Button）。
+        // （Click 帧左键已释放、left_down=false，不会误与 drag 分支冲突。）
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
             const float cy2 = in.left_clicks[i].y;
