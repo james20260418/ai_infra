@@ -438,6 +438,16 @@ char UiInputCharForKey(KeyCode key) {
     }
 }
 
+// 本帧某键应触发的“按键动作次数”（键盘 hold 重复用）：
+//   - Click 帧：值为本帧点击次数（低帧率同帧多击）。
+//   - Hold 帧：值为 1（按住不放期间每帧再触发 1 次，与逐次键入等价，
+//     使按住 Backspace/字符能连续删除/输入，验收 bug#8）。
+//   - None：0（无动作）。
+// 供 InputText 写回 char* 时统一消费，避免 Click 与 Hold 语义分叉。
+int KeyActions(const KeyState& ks) {
+    return ks.IsClick() ? ks.click_count() : (ks.IsHold() ? 1 : 0);
+}
+
 bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
                    const UiRect& box, Stretch /*stretch*/) {
     // buffer 必须非空且至少留 1 字节存 '\0'（容量下限 2：1 字符 + 终止符）。
@@ -499,10 +509,13 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
             input_focused_ = false;
         } else {
             // Backspace：删除最后一个字符（删除发生在追加前）。
+            // 支持键盘 hold 重复（按住连续删除）：
+            //   - Click 帧：按 click_count 次删除（低帧率同帧多击）。
+            //   - Hold 帧：本帧再删 1 次（与逐次键入等价，见 KeyActions）。
             const KeyState& bs = in.GetKey(KeyCode::Backspace);
-            if (bs.IsClick()) {
+            {
                 const size_t n =
-                    std::min(static_cast<size_t>(bs.click_count()), len);
+                    std::min(static_cast<size_t>(KeyActions(bs)), len);
                 for (size_t i = 0; i < n; ++i) {
                     buffer[len - i - 1] = '\0';
                 }
@@ -510,19 +523,21 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
                 buffer[len] = '\0';
             }
             // 可编辑字符：从 KeyCode 读，逐字符追加，遇容量上限截断（S5.2）。
-            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。多余连击（
-            // 低帧率同帧多次按下）按次追加，容量满则丢弃余量（截断）。
+            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。支持键盘
+            // hold 重复（按住连续输入，见 KeyActions）：Click 帧按次追加，
+            // Hold 帧追加 1 次。容量满则丢弃余量（截断）。
             for (int code = static_cast<int>(KeyCode::Space);
                  code <= static_cast<int>(KeyCode::Z); ++code) {
                 const KeyState& ks = in.GetKey(static_cast<KeyCode>(code));
-                if (!ks.IsClick()) {
+                const int actions = KeyActions(ks);
+                if (actions == 0) {
                     continue;
                 }
                 const char ch = UiInputCharForKey(static_cast<KeyCode>(code));
                 if (ch == '\0') {
                     continue;  // 不可编辑字符跳过。
                 }
-                const size_t n = std::min(static_cast<size_t>(ks.click_count()),
+                const size_t n = std::min(static_cast<size_t>(actions),
                                           cap - len);
                 for (size_t i = 0; i < n; ++i) {
                     buffer[len + i] = ch;

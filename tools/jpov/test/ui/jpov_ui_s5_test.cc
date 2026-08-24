@@ -59,6 +59,12 @@ void PressKey(InputSnapshot* in, KeyCode key, int n = 1) {
         static_cast<int8_t>(std::min(n, jpov::kMaxClicksPerFrame));
 }
 
+// 在输入上注册某键处于“按住不放”（Hold）状态，供键盘 hold 重复测试用。
+// KeyState raw = -2 表示 Hold（帧末按下且本帧无 release）。
+void HoldKey(InputSnapshot* in, KeyCode key) {
+    in->keys[static_cast<int>(key)].raw = -2;
+}
+
 // ASCII 可编辑字符（小写字母/数字）→ KeyCode，用于逐帧打字模拟。
 KeyCode KeyCodeForAscii(char ch) {
     if (ch >= 'a' && ch <= 'z') {
@@ -526,6 +532,69 @@ public:
         LOG(INFO) << "[PASS] InputText 光标用文本测量回调精确定位(验收 bug#7)";
     }
 
+    // 键盘 hold 重复（验收 bug#8 根因修复）：按住不放应连续触发，非仅单次。
+    //   1. 首帧 Click：写入 1 次；随后连续 Hold 帧：每帧再写入 1 次（
+    //      与“逐次键入等价”）。
+    //   2. 按住 Backspace：Click 删 1 个，Hold 帧每帧再删 1 个，与逐次删除等价。
+    //   3. 释放（None）后不再触发。
+    static void TestKeyboardHoldRepeat() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        Ui ui;
+        char buf[64] = "";
+        // 聚焦输入框。
+        ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", buf, sizeof(buf), box);
+        ui.End();
+
+        // 1. 按住字符 'a'：首帧 Click 写 1 个，随后 3 个 Hold 帧各写 1 个 → "aaaa"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::A);  // 首帧 Click。
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            CHECK_STREQ(buf, "a") << "Click 帧写 1 个字符";
+        }
+        for (int i = 0; i < 3; ++i) {
+            InputSnapshot in = MakePlainInput();
+            HoldKey(&in, KeyCode::A);  // Hold 帧：每帧再写 1 个。
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "aaaa") << "Hold 帧连续追加，与逐次键入等价";
+
+        // 2. 按住 Backspace：首帧 Click 删 1 个(→"aaa")，随后 2 个 Hold 帧
+        //    各删 1 个(→"aa"→"a")，与逐次删除等价。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Backspace);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            CHECK_STREQ(buf, "aaa") << "Backspace Click 删 1 个";
+        }
+        for (int i = 0; i < 2; ++i) {
+            InputSnapshot in = MakePlainInput();
+            HoldKey(&in, KeyCode::Backspace);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "a") << "Backspace Hold 帧连续删除，与逐次删除等价";
+
+        // 3. 释放（None）：不再触发，buffer 不变。
+        {
+            InputSnapshot in = MakePlainInput();  // 无任何按键。
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            CHECK_STREQ(buf, "a") << "释放后不再触发，buffer 保持";
+        }
+        LOG(INFO) << "[PASS] InputText 键盘 hold 重复(连续输入/删除，验收 bug#8)";
+    }
+
     static void RunAll() {
         TestInitNotFocused();
         TestClickFocusToggle();
@@ -538,6 +607,7 @@ public:
         TestGoldCommands();
         TestOffscreenInputText();
         TestCaretUsesTextMeasure();
+        TestKeyboardHoldRepeat();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };
