@@ -23,11 +23,12 @@
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/demo/ui_demo_panel.h"
 
-// 本 demo 用内置 Latin 字体渲染文本（JPOV 默认加载，alias="Latin"）。
+// 本 demo 用内置 CJK 字体渲染文本（JPOV 默认加载，alias="CJK"=
+// NotoSansCJK），以正确显示中文（标题/全局参数/电机卡等含中文）。
 // Ui 发出的文本指令 font_alias 为空（纯 CPU 指令层 golden 不关心字体，
 // 见 ui.h / ui.cc）；交互渲染层需要真实可用的字体别名，这里在 Emit 后
-// 把空别名统一替换为内置 Latin 字体，使窗口能实际画出文字。
-static const char* const kDemoFontAlias = jpov::kFontBuiltinLatin;
+// 把空别名统一替换为内置 CJK 字体，使窗口能实际画出文字（含中文）。
+static const char* const kDemoFontAlias = jpov::kFontBuiltinCJK;
 
 class UiDemoApp : public JPOV {
 public:
@@ -56,7 +57,7 @@ public:
         ui_.End();
         ui_.Emit(cmds);
 
-        // 把空字体别名替换为内置 Latin（仅在窗口渲染层需要；gold 测试走纯
+        // 把空字体别名替换为内置 CJK（仅在窗口渲染层需要；gold 测试走纯
         // CPU 指令比对不依赖字体）。只改本帧已 emit 的文本命令。
         for (jpov::Text2DCommand& t : cmds->text2d) {
             if (t.font_alias.empty()) {
@@ -76,7 +77,7 @@ int main() {
     cfg.width = static_cast<int>(jpov::kUiDemoWidth);
     cfg.height = static_cast<int>(jpov::kUiDemoHeight);
     cfg.target_fps = 30;
-    // fonts 留空 → 加载内置默认字体（Latin），见 kDemoFontAlias。
+    // fonts 留空 → 加载内置默认字体（Latin+CJK），见 kDemoFontAlias（用 CJK 显中文）。
     UiDemoApp app(cfg);
     app.Init();
     app.Run();
