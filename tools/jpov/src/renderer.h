@@ -47,6 +47,9 @@ struct Renderer {
     TextureManager& GetTextureManager() { return texture_mgr_; }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
 
+    // 上一次拾取查询的结果（方法甲：渲染时填入 last_pick_，下帧读取）。
+    const PickResult& last_pick() const { return last_pick_; }
+
     // 测量文本以指定字号的绘制宽度（像素），语义与 DrawText2D 的布局推进
     // 完全一致（pen 水平终点 = 光标 X）。alias 空串 → 首个注册字体；
     // 未知别名 → crash（与 DrawText2D 的字体查找一致）。
@@ -100,6 +103,10 @@ private:
     // （tone map）压缩到 LDR。MSAA 路径下保留 separate resolve FBO（16F）。
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_rb_hdr_ = 0, depth_tex_hdr_ = 0;
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
+    // 高亮（方法 B stencil）用的 stencil renderbuffer。
+    // 非 MSAA 路径：独立 stencil renderbuffer + depth 纹理共存（GL_STENCIL_ATTACHMENT）；
+    // MSAA 路径：4x MSAA stencil renderbuffer 与 depth 并列。
+    unsigned int stencil_rb_hdr_ = 0;
     unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
     int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
 
@@ -128,10 +135,48 @@ private:
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
     void DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun);
 
+    // 拾取：color-ID pass。cmds.pick.enabled 时，把 picking_id>0 的物体用
+    // 纯色 ID shader 画进离屏 pick FBO，glReadPixels 解码光标像素 → last_pick_。
+    // fbo_w/fbo_h 为 3D FBO 尺寸；vp_x/y/w/h 为当前生效的 viewport（窗口坐标）。
+    void DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                         float vp_x, float vp_y, float vp_w, float vp_h);
+
+    // MSAA 路径的高亮：在单采样 hl FBO 上做方法 B stencil 描边。
+    // color+depth 已从 MSAA HDR resolve/blit 到 hl FBO；这里写 stencil=1
+    // 再用放大的纯色副本仅在 stencil≠1 区域着色。
+    void DrawHighlightResolvedPass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+    void EnsureHighlightFBO(int w, int h);
+    void DestroyHighlightFBO();
+
+    // 高亮：给一个已用 PBR shader 画过（stencil=1）的物体，画顶点外扩的
+    // 纯色边框，仅在 stencil≠1 区域着色（方法 B）。描边进主 HDR FBO。
+    static void DrawHighlightOutline(const Object3DCommand& cmd,
+                                     const RenderCommandList& cmds,
+                                     const HighlightStyle& style,
+                                     MeshManager& mesh_mgr,
+                                     ShaderManager& shader_mgr,
+                                     const float mvp[16],
+                                     unsigned int outline_prog);
+
     unsigned int strip_vbo_ = 0;
 
     float mvp_[16];
     ShaderManager shader_mgr_;
+
+    // 拾取查询结果（上一次 DrawPickingPass 的 outcome）。
+    // 每帧在 DrawPickingPass 中覆盖；未发起查询时保持 hit=false。
+    PickResult last_pick_;
+
+    // 拾取离屏 FBO（RGBA8 颜色 + depth renderbuffer），尺寸 = 3D FBO。
+    unsigned int pick_fbo_ = 0, pick_tex_ = 0, pick_depth_rb_ = 0;
+    int pick_fbo_w_ = 0, pick_fbo_h_ = 0;
+
+    // MSAA 路径的高亮 FBO：单采样 RGBA16F 颜色 + depth + stencil。
+    // 从 MSAA HDR FBO resolve color+depth 到此处后，在此做单采样 stencil 高亮
+    //（MSAA FBO 本身不含 stencil —— llvmpipe 不支持 MSAA stencil renderbuffer）。
+    // 完成后其颜色纹理作为 tone map 的输入。
+    unsigned int hl_fbo_ = 0, hl_color_tex_ = 0, hl_depth_stencil_rb_ = 0;
+    int hl_fbo_w_ = 0, hl_fbo_h_ = 0;
 
     unsigned int SolidProg();
     unsigned int TextProg();
@@ -142,6 +187,8 @@ private:
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();
     unsigned int TonemapProg();
+    unsigned int PickProg();
+    unsigned int OutlineProg();
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;

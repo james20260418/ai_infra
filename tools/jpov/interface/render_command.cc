@@ -161,20 +161,26 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
 
 void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       const Vec3f& center,
-                                      const Vec3f& up, const Vec3f& front) {
+                                      const Vec3f& up, const Vec3f& front,
+                                      uint32_t picking_id,
+                                      bool highlight) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
-    object3d.push_back({mesh_id, mat, center, up, front});
+    object3d.push_back({mesh_id, mat, center, up, front, picking_id, highlight});
     order.emplace_back(DrawCommandType::kObject3D, idx);
 }
 
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,
                                        const Vec3f& center,
-                                       const Vec3f& up, const Vec3f& front) {
+                                       const Vec3f& up, const Vec3f& front,
+                                       uint32_t picking_id,
+                                       bool highlight) {
     // 内部就是多个 Object3DCommand，无新命令体。
+    // picking_id/highlight 透传给每个 primitive（整模型统一拾取/高亮）。
     for (const GltfPrimitive& prim : obj.primitives) {
-        DrawObject3D(prim.mesh_id, prim.material, center, up, front);
+        DrawObject3D(prim.mesh_id, prim.material, center, up, front,
+                     picking_id, highlight);
     }
 }
 

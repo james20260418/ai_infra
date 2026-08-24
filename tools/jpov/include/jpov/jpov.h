@@ -235,6 +235,16 @@ public:
     // Pre-condition: Init() 已调用
     void ReleaseGltf(const jpov::GltfObject& gltf);
 
+    // 上一次拾取查询的结果（方法甲：渲染时填入，供下帧 OneIteration 读取）。
+    //
+    // 用户在 OneIteration 里发起拾取查询（设 cmds->pick.enabled=true + 屏幕坐标），
+    // 本帧 Render() 内部跑 color-ID pass 并填好结果；下一帧 OneIteration 调本方法
+    // 读到命中内容（hit + picking_id）。因查询结果要等渲染完成才能得出，故有
+    // 一帧延迟——需求方按下帧读即可。
+    //
+    // 未发起过 pick 查询时返回初始状态（hit=false, picking_id=0）。
+    const jpov::PickResult& last_pick() const { return renderer_->last_pick(); }
+
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //
