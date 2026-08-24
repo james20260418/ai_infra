@@ -103,7 +103,8 @@ public:
     // *value 应随时间位置正确映射，且返回 true。
     static void TestDragMapsMultipleStops() {
         const UiTheme theme = UiTheme::Default(16.0f);
-        // 200px 宽 box，handle_d=min(高=20,宽)=20，half=10。
+        // 200px 宽 box，黄金比句柄：handle_h=20, handle_w=20/φ=12.36, half=6.18；
+        // track_left=56.18, track_len=187.64。
         const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
         const float min_ = 0.0f, max_ = 100.0f;
 
@@ -111,7 +112,7 @@ public:
         {
             Ui ui;
             float value = 0.0f;
-            const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.25f;
+            const float x = 56.18f + 187.64f * 0.25f;
             ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
             const bool changed = ui.SliderFloat("speed", &value, box, min_, max_);
             ui.End();
@@ -122,7 +123,7 @@ public:
         {
             Ui ui;
             float value = 0.0f;
-            const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.50f;
+            const float x = 56.18f + 187.64f * 0.50f;
             ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
             ui.SliderFloat("speed", &value, box, min_, max_);
             ui.End();
@@ -132,7 +133,7 @@ public:
         {
             Ui ui;
             float value = 0.0f;
-            const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.75f;
+            const float x = 56.18f + 187.64f * 0.75f;
             ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
             ui.SliderFloat("speed", &value, box, min_, max_);
             ui.End();
@@ -142,7 +143,7 @@ public:
         {
             Ui ui;
             float value = 30.0f;
-            const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.40f;
+            const float x = 56.18f + 187.64f * 0.40f;
             ui.Begin(MakeHoldInput(x, 110.0f), theme, 640.0f, 360.0f);
             ui.SliderFloat("speed", &value, box, min_, max_);
             ui.End();
@@ -159,7 +160,7 @@ public:
         {
             Ui ui;
             float value = 50.0f;
-            const float x = 50.0f + 10.0f;  // track_left
+            const float x = 56.18f;  // track_left
             ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
             ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
             ui.End();
@@ -195,7 +196,7 @@ public:
             Ui ui;
             float value = 0.0f;
             // 点击位置在轨道 50% 处。
-            const float cx = 50.0f + 10.0f + (200.0f - 20.0f) * 0.50f;
+            const float cx = 56.18f + 187.64f * 0.50f;
             ui.Begin(MakeClickInput(cx, 110.0f, cx, 110.0f), theme,
                      640.0f, 360.0f);
             const bool changed =
@@ -226,7 +227,7 @@ public:
         const UiTheme theme = UiTheme::Default(16.0f);
         const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
         // 鼠标 x 在轨道 50% 处（横向命中），但 y=300 远在 box 下方 → 不应响应拖动。
-        const float x = 50.0f + 10.0f + (200.0f - 20.0f) * 0.50f;
+        const float x = 56.18f + 187.64f * 0.50f;
         {
             Ui ui;
             float value = 0.0f;
@@ -270,13 +271,13 @@ public:
     // 左键释放才结束。跨帧用 box 识别同一滑条（同一个 Ui 跨帧持有）。
     static void TestDragContinuesOutsideBox() {
         const UiTheme theme = UiTheme::Default(16.0f);
-        // 200px 宽 box：handle_d=min(20,200)=20 → half=10；
-        // track_left=60, track_right=240, track_len=180。有效 y 范围 [100,120]。
+        // 200px 宽 box：黄金比句柄 handle_h=20, handle_w=12.36, half=6.18；
+        // track_left=56.18, track_right=243.82, track_len=187.64。有效 y 范围 [100,120]。
         const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
         Ui ui;               // 跨帧持有同一 Ui（drag 状态在其中）。
         float value = 0.0f;
-        // 轨道 25% 处鼠标 x = 60 + 180*0.25 = 105。
-        const float x = 105.0f;
+        // 轨道 25% 处鼠标 x = 56.18 + 187.64*0.25 = 103.09。
+        const float x = 103.09f;
 
         // 帧 1：左键在 box 内（y=110）按下开始 drag → 写 25%。
         ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
@@ -286,7 +287,7 @@ public:
 
         // 帧 2：继续按住，鼠标仍飘到 box 竖直范围外（y=300，远在下方）→
         // drag 不中断，仍持续写值（映射到 50%）。
-        ui.Begin(MakeDragInput(x + 180.0f * 0.25f, 300.0f), theme,
+        ui.Begin(MakeDragInput(x + 187.64f * 0.25f, 300.0f), theme,
                  640.0f, 360.0f);
         const bool ch2 =
             ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
@@ -295,14 +296,14 @@ public:
         CHECK_NEAR(value, 50.0f, 2.0f);
 
         // 帧 3：鼠标飘到 box 下方更远（y=500），仍按住 → 继续写（75%）。
-        ui.Begin(MakeDragInput(x + 180.0f * 0.50f, 500.0f), theme,
+        ui.Begin(MakeDragInput(x + 187.64f * 0.50f, 500.0f), theme,
                  640.0f, 360.0f);
         ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
         ui.End();
         CHECK_NEAR(value, 75.0f, 2.0f);
 
         // 帧 4：左键释放（None）→ drag 结束，不再写值。
-        ui.Begin(MakeInput(x + 180.0f * 0.75f, 500.0f), theme,
+        ui.Begin(MakeInput(x + 187.64f * 0.75f, 500.0f), theme,
                  640.0f, 360.0f);
         const bool ch4 =
             ui.SliderFloat("s", &value, box, 0.0f, 100.0f);
@@ -336,7 +337,7 @@ public:
         const UiRect boxB{{50.0f, 200.0f}, {200.0f, 20.0f}};
         Ui ui;
         float va = 0.0f, vb = 0.0f;
-        const float x = 105.0f;  // 轨道 25%
+        const float x = 103.09f;  // 轨道 25%
 
         // 帧 1：在 A 内按下开始 drag。
         ui.Begin(MakeDragInput(x, 110.0f), theme, 640.0f, 360.0f);
@@ -345,7 +346,7 @@ public:
         CHECK_NEAR(va, 25.0f, 2.0f);
         // 帧 2：仍按住，鼠标飘到 B 的竖直范围内（y=210）→ A 应继续 drag
         // （写 50%），B 不应被误判新按下而抢走 drag（vb 不被写）。
-        ui.Begin(MakeDragInput(x + 180.0f * 0.25f, 210.0f), theme,
+        ui.Begin(MakeDragInput(x + 187.64f * 0.25f, 210.0f), theme,
                  640.0f, 360.0f);
         const bool chA =
             ui.SliderFloat("a", &va, boxA, 0.0f, 100.0f);
@@ -378,7 +379,7 @@ public:
     static void TestGoldCommands() {
         const UiTheme theme = UiTheme::Default(16.0f);
         const UiRect box{{50.0f, 100.0f}, {200.0f, 20.0f}};
-        // handle_d=min(20,200)=20 → half=10；track_left=60, track_right=240。
+        // handle_h=20, handle_w=12.36, half=6.18 → track_left=56.18, track_len=187.64。
         // value=25 → 句柄中心 x = 60 + 0.25*180 = 105。
         {
             Ui ui;
@@ -389,18 +390,24 @@ public:
             ui.End();
             ui.Emit(&cmd);
 
-            // 3 条 FillRect：轨道(背景)、选中行程(accent, 宽=105-60=45)、句柄。
+            // 3 条 FillRect：轨道(背景)、选中行程(accent, 宽=hx-track_left)、句柄。
             CHECK_EQ(cmd.fillrect2d.size(), 3u)
                 << "未交互帧应产轨道+行程+句柄 3 条 FillRect";
-            // 轨道：x=60, y=100+(20-6)/2=107, 宽=180, 厚=6。
-            CheckFill(cmd.fillrect2d[0], 60.0f, 107.0f, 180.0f, 6.0f,
+            // 黄金比句柄：handle_h=20, handle_w=20/φ=12.36, half=6.18；
+            // track_left=50+6.18=56.18, track_right=250-6.18=243.82, track_len=187.64,
+            // thickness=max(4,6)=6 → 轨道 y=100+(20-6)/2=107。
+            // 轨道：x=56.18, y=107, 宽=187.64, 厚=6。
+            CheckFill(cmd.fillrect2d[0], 56.18f, 107.0f, 187.64f, 6.0f,
                       theme.background);
-            // 选中行程：x=60, 宽=45, accent。
-            CheckFill(cmd.fillrect2d[1], 60.0f, 107.0f, 45.0f, 6.0f,
+            // 选中行程：x=56.18, 宽=hx-56.18；value=25 → hx=56.18+0.25*187.64=103.09 → 宽=46.91。
+            CheckFill(cmd.fillrect2d[1], 56.18f, 107.0f, 46.91f, 6.0f,
                       theme.accent);
-            // 句柄：中心(105,110)，方形 20×20 → x=95, y=100。
-            CheckFill(cmd.fillrect2d[2], 95.0f, 100.0f, 20.0f, 20.0f,
-                      theme.foreground);
+            // 句柄：黄金比矩形，中心(103.09,110)，高=20（参考尺寸），x 窄 → 宽=12.36。
+            // x = 103.09-6.18 = 96.91, y = 100, w = 12.36, h = 20。
+            // danis bug#9：句柄用深色 hover（不再用浅色 foreground，与文本/轨道难辨）。
+            // danis bug#10：由方形改黄金比矩形——宽:高=1:φ≈0.618，x 窄 y 高。
+            CheckFill(cmd.fillrect2d[2], 96.91f, 100.0f, 12.36f, 20.0f,
+                      theme.hover);
             // 数值文本：含 "speed: " 前缀。
             CHECK(HasTextPrefix(cmd, "speed: ")) << "应产出数值文本";
         }
@@ -422,10 +429,11 @@ public:
             ui.Emit(&cmd);
 
             CHECK_EQ(cmd.fillrect2d.size(), 3u) << "矮 box 也应照画 3 条 FillRect";
-            // 句柄为最后一条：直径 8px（不缩 0）。
+            // 句柄为最后一条：高 8px（不缩 0），宽为该高的黄金比（x 窄）。
             const FillRect2DCommand& handle = cmd.fillrect2d[2];
-            CHECK_NEAR(handle.size.x(), 8.0f, 0.01f);  // 句柄宽 clamp 到 8px
             CHECK_NEAR(handle.size.y(), 8.0f, 0.01f);  // 句柄高 clamp 到 8px
+            // 句柄宽 = 高/φ ≈ 8/1.618 = 4.94（黄金比矩形，x 轴窄）。
+            CHECK_NEAR(handle.size.x(), 4.94f, 0.01f);
         }
         LOG(INFO) << "[PASS] SliderFloat 矮 box 句柄 clamp ≥ 8px、不缩 0";
     }

@@ -293,11 +293,17 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
     // 注意：不能直接用 std::clamp(b.size.y(), 8, b.size.x())——矮而窄的 box
     // 会出现 lo>hi 的未定义行为，故先 max 抬底再 min 封顶。
     constexpr float kMinHandle = 8.0f;
+    // 黄金比 φ ≈ 1.618；句柄由方形改为黄金比矩形，x 轴方向窄（Danis 验收 bug#10）：
+    // 宽 : 高 = 1 : φ，即宽度 = 高 / φ ≈ 0.618·高（x 窄 y 高，非方形）。
+    constexpr float kGoldenRatio = 1.618033988749895f;
     const float thickness = std::max(4.0f, b.size.y() * 0.30f);
-    const float handle_d =
+    // 句柄参考尺寸：取 box 高 clamp（≥ min 8px、不超 box 宽）作为句柄高度。
+    const float handle_h =
         std::min(std::max(b.size.y(), kMinHandle), b.size.x());
+    // 句柄宽度：黄金比矩形，x 窄 → 宽 = 高 / φ（小于高，横向收窄）。
+    const float handle_w = handle_h / kGoldenRatio;
     // 句柄中心可移动的水平范围（轨道去两端句柄半宽）。
-    const float half = handle_d * 0.5f;
+    const float half = handle_w * 0.5f;
     const float track_left = b.pos.x() + half;
     const float track_right = b.pos.x() + b.size.x() - half;
     // 轨道长度：极窄 box（句柄已几乎占满）时仍保证轨道有最小正宽度，
@@ -313,10 +319,10 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         {track_left, cy - thickness * 0.5f},
         {track_len, thickness},
     };
-    // 句柄矩形（方形，边长 handle_d，垂直居中）。
+    // 句柄矩形（黄金比矩形：宽 handle_w、高 handle_h，垂直居中，x 轴窄）。
     const UiRect handle_rect{
-        {hx - half, cy - half},
-        {handle_d, handle_d},
+        {hx - half, cy - handle_h * 0.5f},
+        {handle_w, handle_h},
     };
 
     // ---- 交互（S4.2 拖动 + 验收 bug#4 一次性 drag 语义）----
@@ -397,8 +403,12 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
                             {fill_len, thickness}},
                      theme_.accent, theme_.accent, theme_.corner_radius_px);
     }
-    // 句柄：实心方框（accent 前景色）+ 边框，独立于轨道可见。
-    PushFillRect(handle_rect, theme_.foreground, theme_.border,
+    // 句柄：实心深色黄金比矩形 + 边框，独立于轨道可见。
+    // danis 验收 bug#9：原用 theme.foreground（浅色 0.92）与文本同色，
+    // 滑块与文本/轨道难辨。改用主题深色 hover，与浅色文本、accent 选中行程
+    // 均形成清楚对比（边框用 border 进一步勾勒，避免右侧与深色轨道粘连）。
+    // danis 验收 bug#10：由方形改黄金比矩形（宽:高=1:φ，x 窄 y 高）。
+    PushFillRect(handle_rect, theme_.hover, theme_.border,
                  theme_.corner_radius_px);
 
     // 数值文本：显示 label 与当前整数化取值（如 “speed: 50”）。

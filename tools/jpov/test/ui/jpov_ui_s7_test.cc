@@ -113,11 +113,16 @@ public:
         }
 
         // ---- 2b. 增益滑条（轨道/选中/句柄）----
-        // GlobalRow(0)={16,84,544,26}; thickness=7.8; handle_d=26; half=13;
-        // track={29,93.1,518,7.8}; t=0.5 → selected={29,93.1,259,7.8}; handle={275,84,26,26}.
-        CheckFill(cmd.fillrect2d[4], 29.0f, 93.1f, 518.0f, 7.8f, bg);
-        CheckFill(cmd.fillrect2d[5], 29.0f, 93.1f, 259.0f, 7.8f, accent);
-        CheckFill(cmd.fillrect2d[6], 275.0f, 84.0f, 26.0f, 26.0f, fg);
+        // GlobalRow(0)={16,84,544,26}; thickness=7.8; handle_h=26; handle_w=26/φ=16.07; half=8.04;
+        // track_left=16+8.04=24.04, track_right=560-8.04=551.96, track_len=527.92;
+        // t=0.5 → hx=24.04+0.5*527.92=288;
+        // 轨道={24.04,93.1,527.92,7.8}; 选中={24.04,93.1,263.96,7.8};
+        // handle 中心(288,110) → rect={288-8.04=279.96≈280,84,16.07,26}。
+        CheckFill(cmd.fillrect2d[4], 24.03f, 93.1f, 527.93f, 7.8f, bg);
+        CheckFill(cmd.fillrect2d[5], 24.03f, 93.1f, 263.97f, 7.8f, accent);
+        // 增益滑条句柄：danis bug#9 句柄改用深色 hover（不再与浅色文本同色）；
+        // bug#10 方形改黄金比矩形（宽:高=1:φ≈0.618，x 窄 y 高）。
+        CheckFill(cmd.fillrect2d[6], 279.97f, 84.0f, 16.07f, 26.0f, hover);
         CHECK(HasTextSubstr(cmd, "增益: 5")) << "增益滑条应显示值 5";
 
         // ---- 2c. 使能复选框（enable=true → accent 方框 + ✓ 折线）----
@@ -152,14 +157,16 @@ public:
         CHECK(HasTextSubstr(cmd, "speed: 0")) << "每份电机滑条应显示 speed: 0";
         // 每张卡片内：1 滑条轨道 + 1 句柄 + 1 复选框框 = 3 条 FillRect（cards 从 idx 13 起）。
         // 卡片 i 的速度滑条轨道：box={x+16,320+34,cardW-32,26}，
-        //   thickness=7.8, handle_d=min(max(26,8),cardW-32); cardW≈173→ 内宽141.
+        //   thickness=7.8, handle_h=min(max(26,8),cardW-32); cardW≈173→ 内宽141.
+        const float kGoldenRatio = 1.618033988749895f;
         const size_t card_base = 13u;
         for (int i = 0; i < UiDemoState::kMotorCount; ++i) {
             const float x = kUiDemoPad + static_cast<float>(i) * step;
             const float x_in = x + kUiDemoPad;
             const float w_in = kUiDemoMotorCardW - 2.0f * kUiDemoPad;  // ≈141
-            const float handle_d = std::min(std::max(26.0f, 8.0f), w_in);  // =26
-            const float half = handle_d * 0.5f;
+            // 黄金比句柄（bug#10）：高=handle_h=26，宽=高/φ≈16.07，half=8.03。
+            const float handle_h = std::min(std::max(26.0f, 8.0f), w_in);  // =26
+            const float half = handle_h / kGoldenRatio * 0.5f;
             const float track_left = x_in + half;
             const float track_right = x_in + w_in - half;
             const float track_len = std::max(1.0f, track_right - track_left);
