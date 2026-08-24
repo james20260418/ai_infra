@@ -22,6 +22,65 @@ cc_library(
 )
 
 # ============================================================================
+# glTF 交互查看器 — 共享视角配置（header-only）：ViewConfig + ApplyInput +
+# MakeNoonLighting + MakeGroundQuad。demo 主程序与单测共用，保证交互与拍照
+# 视角/光照 zero 分叉（架构文档 docs/jpov_gltf_viewer_arch.md）。
+# ============================================================================
+cc_library(
+    name = "view_config",
+    hdrs = ["demo/view_config.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_gltf_viewer",
+    srcs = ["demo/jpov_gltf_viewer.cc"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "view_config_test",
+    srcs = ["demo/view_config_test.cc"],
+    deps = [
+        "//tools/jpov:view_config",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# Headless 冒烟渲染（开发自检）：无窗口 RunOnce 渲染默认视角场景，
+# 用于验证 task#3 验收（地平面+glTF+正午光照）而无需交互窗口。
+cc_binary(
+    name = "jpov_gltf_viewer_smoke",
+    srcs = ["demo/jpov_gltf_viewer_smoke.cc"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # 示例：Rect Demo — 演示窗口坐标与渲染分辨率裁剪
 # ============================================================================
 cc_binary(
