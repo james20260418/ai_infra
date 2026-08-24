@@ -37,6 +37,7 @@ UiTheme UiTheme::Default(float font_size) {
     t.foreground = {0.92f, 0.93f, 0.95f, 1.0f};  // 文本/图标默认色
     t.accent     = {0.25f, 0.60f, 0.95f, 1.0f};  // 高亮（按钮主色/选中）
     t.hover      = {0.22f, 0.26f, 0.32f, 1.0f};  // 悬停态填充
+    t.pressed    = {0.16f, 0.19f, 0.24f, 1.0f};  // 按下态填充（比 hover 更深的反馈色）
     t.border     = {0.35f, 0.37f, 0.42f, 1.0f};  // 边框
     t.disabled   = {0.45f, 0.46f, 0.50f, 1.0f};  // 禁用态文字/图标
 
@@ -145,10 +146,44 @@ bool Ui::Button(const char* label, const UiRect& box, Stretch /*stretch*/) {
     const InputSnapshot& in = *input_;
     const bool hovered = Hit(b, 0.0f, 0.0f, in);
 
-    // 背景：悬停变色。accent 为亮色高亮（按钮主色），hover 为深色填充。
-    // danis 验收 bug #15：原 fill=hovered?hover:accent 深/浅恰好反了——悬停应
-    // 用亮色(accent)提示，默认(非悬停)用深色(hover)。故改 hovered?accent:hover。
-    const Color fill = hovered ? theme_.accent : theme_.hover;
+    // ---- 按下态（danis 验收 bug#5，一次性 hold 语义）----
+    // 与 SliderFloat 一次 drag 同模式：左键在按钮 box 内按下（Drag/Hold）
+    // 开始后，只要左键仍按住就持续保持按下色——即使鼠标飘出 box 也不再校验
+    // （符合一般 UI：hold 一旦开始判定区不作数，直到左键释放才恢复）。
+    //   - 按下起始：左键按住（Drag/Hold） 且 鼠标在 box 内 且 当前无任何按钮
+    //     正在按下。
+    //   - 按下持续：本按钮正在按下且左键仍按住（鼠标可在 box 外）。
+    //   - 按下结束：左键已松开（不再是 Drag/Hold）→ 本按钮让出按下态，恢复默认/
+    //     悬停色。
+    // 跨帧用 button_pressed_box_（position+size）识别同一按钮。
+    // 注意起始条件里“当前无任何按钮正在按下”：避免被按的按钮 A 鼠标飘越
+    // 另一按钮 B 时 B 误以为新按下而在 A 还在按时抢走按下态（B 只可起始新
+    // 按下，若已有按钮持有则让它独占直至释放）。
+    const float lx = in.mouse_x;
+    const float ly = in.mouse_y;
+    const bool mouse_over =
+        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+    const bool left_down = in.left.IsDrag() || in.left.IsHold();
+    const bool was_pressed =
+        button_pressed_active_ && button_pressed_box_.pos == b.pos &&
+        button_pressed_box_.size == b.size;
+    const bool pressed_now =
+        left_down && (was_pressed || (!button_pressed_active_ && mouse_over));
+    if (pressed_now) {
+        button_pressed_active_ = true;
+        button_pressed_box_ = b;
+    } else if (was_pressed) {
+        // 左键已松开：按下结束，清状态让其他控件可接管。
+        button_pressed_active_ = false;
+    }
+
+    // 背景三态：按下色（左键按住）> 悬停亮色 > 默认深色。
+    //   - 按下态：theme_.pressed（比 hover 更深的反馈色，Bug#5）。
+    //   - 悬停态：theme_.accent（亮色高亮，danis 验收 bug#15 修正）。
+    //   - 默认态：theme_.hover（深色填充）。
+    const Color fill =
+        pressed_now ? theme_.pressed : (hovered ? theme_.accent : theme_.hover);
     PushFillRect(b, fill, theme_.border, theme_.corner_radius_px);
     // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
     Text(label, b);

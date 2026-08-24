@@ -92,6 +92,7 @@ struct UiTheme {
     Color foreground;  // 文本/图标默认色
     Color accent;      // 高亮（选中、活动状态、按钮主色）
     Color hover;       // 悬停态填充
+    Color pressed;     // 按下态填充（左键按住不放时，比 hover 更深的反馈色）
     Color border;      // 边框
     Color disabled;    // 禁用态文字/图标
 
@@ -250,6 +251,17 @@ private:
     // 识别同一滑条（与 InputText 焦点 / Combo 展开同一模式）。
     bool slider_drag_active_ = false;
     UiRect slider_drag_box_{};  // 正在拖动的滑条框 box（active 时有效）
+
+    // ---- 跨帧状态（仅 Button 按下态需要；其余控件一律无状态）----
+    // 正处于按下态的按钮框 box（button_pressed_active_ 为 true 时有效）。
+    // 按钮按下属于显式状态语义：左键在 box 内按下（Drag/Hold）开始后，只要
+    // 左键仍按住就持续保持按下色，即使鼠标飘出 box 也不再校验（符合一般 UI，
+    // hold 一旦开始判定区不作数，直到左键释放才恢复）；起始判据仍保留（box 内
+    // 才可开始）。跨帧用 box 位置+尺寸识别同一按钮（与 InputText 焦点 / Combo
+    // 展开 / SliderFloat 拖动同一模式）；被按的按钮不被其他按钮抢走按下态（A
+    // 飘越 B 时 B 不误抢）。
+    bool button_pressed_active_ = false;
+    UiRect button_pressed_box_{};  // 按下中的按钮框 box（active 时有效）
 };
 
 // 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试
