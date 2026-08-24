@@ -121,6 +121,19 @@ void main() {
     // stream_vbo 容量要求（顶点数上限）
     static constexpr int kMaxStreamVertices = 120000;
 
+    // ---- MeasureTextWidth ----
+    //
+    // 测量文本以指定字号绘制时的宽度（像素）。
+    // 委托 font_slots_ 内按 alias 找到的字体的 FontManager::MeasureTextWidth，
+    // 语义与 DrawText2D 的布局推进完全一致（pen 水平终点 = 光标 X）。
+    //
+    // alias: 与 DrawText2D 的 cmd.font_alias 同规则——空串 → 首个注册字体；
+    //       未知别名 → crash（与 DrawText2D 的 FindFontSlot 一致）。
+    //
+    // Pre-condition: font_size > 0
+    float MeasureTextWidth(const std::string& alias,
+                           std::string_view text, float font_size);
+
 private:
     struct FontSlot {
         std::optional<FontManager> manager;

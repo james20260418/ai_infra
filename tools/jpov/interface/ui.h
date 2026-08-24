@@ -188,6 +188,29 @@ public:
     // ---- 查询 ----
     static bool Hit(const UiRect& r, float x, float y, const InputSnapshot& in);
 
+    // ---- 文本宽度测量回调（可选） ----
+    //
+    // InputText 光标需要用与渲染层完全一致的文本宽度来定位。渲染层有真实
+    // 字体度量（各字形 advance），而本 UI 类是纯 CPU 指令层、无字体句柄。
+    // 故通过注入一个测量回调让调用方（通常是无窗口渲染层/演示程序）提供
+    // 真实文本宽度：
+    //   - 设置后：InputText 光标用回调返回的宽度（pen 水平终点）定位，
+    //     混合 Latin/CJK 也能精确贴合文本末尾（视觉上不再漂到 1.5~2x）。
+    //   - 未设置：回退到脚本内 0.6*font_size/字符 的等宽估计（仅用于
+    //     无字体的 CPU gold 测试，保持确定性）。
+    //
+    // text：要测量的文本；font_size：字号（像素）；
+    // font_alias：字体别名（可为空 = 首个字体）；返回宽度（像素，>
+    // 文本绘制后 pen 落到的最右 X，从文本左缘算起）。
+    // userdata：透传给回调（Ui 不解读）。
+    // Pre-condition: fn != nullptr（未设回调时保持 nullptr）
+    void SetTextMeasure(float (*fn)(const char* text, float font_size,
+                                    const char* font_alias, void* userdata),
+                        void* userdata = nullptr) {
+        measure_text_ = fn;
+        measure_userdata_ = userdata;
+    }
+
     // ---- 容错辅助 ----
     // 规格化 box：宽/高负值 clamp 到 0；圆角半径 clamp 到 ≤ min(宽,高)/2。
     static UiRect SanitizeBox(const UiRect& r);
@@ -215,10 +238,20 @@ private:
     // 相比 PushText（仅 kTopLeft）能正确对齐垂直中心；跳过空串/越界/零尺寸。
     void PushLabelText(const char* s, float left, float cy, Color color);
 
+    // 文本宽度测量：优先用调用方注入的回调（真实字体进宽，光标贴合文本末尾）；
+    // 未注入时回退到 0.6*font_size/字符 的等宽估计（供无字体的 CPU gold 测试）。
+    // return：文本绘制后 pen 落到的水平终点（像素，相对文本左缘）。
+    float MeasureTextWidth(const char* text, float font_size) const;
+
     const InputSnapshot* input_ = nullptr;  // 本帧输入（Begin 设置）
     UiTheme theme_;         // 本帧主题拷贝
     float width_ = 0;       // 视口宽（Begin 设置，越界剔除用）
     float height_ = 0;      // 视口高（Begin 设置，越界剔除用）
+
+    // 文本宽度测量回调（可选，SetTextMeasure 注入）。
+    // 非空时 InputText 光标用真实字体进宽定位；为空回退 0.6em 等宽估计。
+    float (*measure_text_)(const char*, float, const char*, void*) = nullptr;
+    void* measure_userdata_ = nullptr;
     // 本帧指令暂存（Begin 起收集，Emit 追加到外部 RenderCommandList）
     std::vector<FillRect2DCommand> fill_rects_;
     std::vector<Text2DCommand> texts_;

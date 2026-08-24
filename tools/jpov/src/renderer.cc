@@ -296,6 +296,13 @@ Renderer::~Renderer() {
     // font atlas 纹理由 FontRenderer 析构管理
 }
 
+float Renderer::MeasureTextWidth(const std::string& alias,
+                                  const std::string& text,
+                                  float font_size) {
+    // 委托 FontRenderer：按 alias 查找字体并测量（空别名 → 首个字体）。
+    return font_renderer_.MeasureTextWidth(alias, text, font_size);
+}
+
 void Renderer::DestroyFBO() {
     if (fbo_) {
         glDeleteFramebuffers(1, &fbo_);

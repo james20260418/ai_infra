@@ -348,4 +348,17 @@ void FontRenderer::DrawText2D(const Text2DCommand& cmd,
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+// ==================== FontRenderer::MeasureTextWidth ====================
+
+float FontRenderer::MeasureTextWidth(const std::string& alias,
+                                      std::string_view text,
+                                      float font_size) {
+    CHECK_GT(font_size, 0.0f);
+    FontSlot* slot = FindFontSlot(alias);  // 空别名 → 首个字体；未知 → crash
+    if (!slot || !slot->manager.has_value() || !slot->manager->loaded()) {
+        return 0.0f;
+    }
+    return slot->manager->MeasureTextWidth(text, font_size);
+}
+
 }  // namespace jpov

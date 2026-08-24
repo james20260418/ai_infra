@@ -455,6 +455,77 @@ public:
         LOG(INFO) << "[PASS] InputText 越界/零尺寸 → 0 指令、不聚焦、不改 buffer";
     }
 
+    // 文本宽度测量回调（验收 bug#7 根因修复）：设置回调后，光标用回调返回的
+    // 真实字体进宽定位，精确贴合文本末尾，而不是脚本内 0.6*font_size/字符 的
+    // 等宽估计（对混合 Latin/CJK 会偏宽 1.5~2x，光标漂到文本长度 1.5~2 倍）。
+    // 验证：
+    //   1. 未设回调 → 光标 X = text_left + len*0.6*font_size（原估计，确定性）。
+    //   2. 设回调（返回已知宽度 W）→ 光标 X = text_left + W（真实进宽），
+    //      不再是 0.6 估计。
+    //   3. 空 buffer（len=0）→ 即使设回调光标也贴文本左缘（无文本不偏移）。
+    static void TestCaretUsesTextMeasure() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        char buf[64] = "hello";  // len=5。
+        const float text_left = box.pos.x() + theme.padding_px;  // 16
+
+        // 1. 未设回调 → 0.6 估计（len*9.6）。
+        {
+            Ui ui;
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            ui.Emit(&cmd);
+            const FillRect2DCommand& caret = cmd.fillrect2d.back();
+            CHECK_NEAR(caret.pos.x(), text_left + 5.0f * 9.6f, 0.01f);
+            // 无回调应回退 0.6*font_size/字符 等宽估计。
+        }
+
+        // 2. 设回调（返回已知真实宽度 W=40）→ 光标 = text_left + 40。
+        {
+            // 静态回调：参数按 Ui 注入的签名，返回固定宽度（模拟真实字体进宽）。
+            struct Local {
+                static float measure(const char* /*text*/, float /*font_size*/,
+                                     const char* /*font_alias*/, void* /*ud*/) {
+                    return 40.0f;  // 固定真实宽度（“hello”等 ASCII 在 CJK 的字宽）。
+                }
+            };
+            Ui ui;
+            ui.SetTextMeasure(&Local::measure);
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            ui.Emit(&cmd);
+            const FillRect2DCommand& caret = cmd.fillrect2d.back();
+            CHECK_NEAR(caret.pos.x(), text_left + 40.0f, 0.01f);
+            // 设回调后光标用真实进宽(text_left + 40)，非 0.6 估计。
+        }
+
+        // 3. 空 buffer（len=0）+ 设回调 → 光标仍贴文本左缘（无文本不偏移）。
+        {
+            char empty[8] = "";
+            struct Local {
+                static float measure(const char* /*text*/, float /*font_size*/,
+                                     const char* /*font_alias*/, void* /*ud*/) {
+                    return 999.0f;  // 若误用会明显偏移，但 len=0 不应触发测量。
+                }
+            };
+            Ui ui;
+            ui.SetTextMeasure(&Local::measure);
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.InputText("n", empty, sizeof(empty), box);
+            ui.End();
+            ui.Emit(&cmd);
+            const FillRect2DCommand& caret = cmd.fillrect2d.back();
+            CHECK_NEAR(caret.pos.x(), text_left, 0.01f);
+            // 空 buffer 光标贴文本左缘（不因回调偏移）。
+        }
+        LOG(INFO) << "[PASS] InputText 光标用文本测量回调精确定位(验收 bug#7)";
+    }
+
     static void RunAll() {
         TestInitNotFocused();
         TestClickFocusToggle();
@@ -466,6 +537,7 @@ public:
         TestLongTextScrollDoesNotOverflow();
         TestGoldCommands();
         TestOffscreenInputText();
+        TestCaretUsesTextMeasure();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };

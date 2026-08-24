@@ -577,22 +577,25 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
 
     // 光标（S5.1/S5.3）：聚焦时在文本末尾画一条竖线（静态，不闪烁保 gold 可测）。
     // 水平滚动：文本末位估计宽度超过 box 右缘（去 padding）→ 推进内部滚动，
-    // 保证光标不越出右缘（S5.3 内部 scroll、不溢出）。无字体度量 API，字符宽
-    // 用等宽近似（字号 * 0.6）参与定位与滚动判断；实际字形仍按完整串交渲染层。
+    // 保证光标不越出右缘（S5.3 内部 scroll、不溢出）。
+    // 文本宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽
+    // 估计（0.6*font_size/字符）——真实字体混合 Latin/CJK 时 0.6em 对 Latin
+    // 偏宽约 1.5~2x，导致光标漂到文本长度 1.5~2 倍（danis 验收 bug#7），
+    // 有回调后光标精确贴合文本末尾（见 MeasureTextWidth）。
     if (focused_eff) {
         const float caret_w = std::max(1.0f, theme_.border_width_px);
-        const float char_w = theme_.font_size * 0.6f;
         const float caret_right = b.pos.x() + b.size.x() - pad;
-        // 光标相对内容左缘的原始位置 = 文本总估计宽度 - 当前滚动偏移。
-        const float caret_x =
-            text_left + static_cast<float>(len) * char_w - input_scroll_px_;
+        // 光标相对内容左缘的原始位置 = 文本总宽度（真实度量或等宽估计）
+        // - 当前滚动偏移。
+        const float text_w =
+            (len > 0) ? MeasureTextWidth(buffer, theme_.font_size) : 0.0f;
+        const float caret_x = text_left + text_w - input_scroll_px_;
         if (caret_x > caret_right) {
             // 越过右缘：滚动多出的量，使光标保持恰在右缘内侧。
             input_scroll_px_ += caret_x - caret_right;
         }
         // 最终光标 X：贴右缘内侧，绝不越界。
-        const float cx =
-            std::min(text_left + static_cast<float>(len) * char_w, caret_right);
+        const float cx = std::min(text_left + text_w, caret_right);
         const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
         PushFillRect(UiRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
                      theme_.accent, theme_.accent, 0.0f);
@@ -780,6 +783,22 @@ float Ui::RowHeight() const {
     // 内容感知行高：字形像素高度 + 上下内边距。
     // 首版固定近似（glyph 平均高度 + 内边距），后续接入字体度量 API。
     return theme_.font_size + 2.0f * theme_.padding_px;
+}
+
+float Ui::MeasureTextWidth(const char* text, float font_size) const {
+    if (measure_text_ != nullptr) {
+        // 调用方注入的真实字体度量：文本左缘起 pen 水平终点（像素），
+        // 与渲染层排出完全一致（InputText 光标用它才能贴合文本末尾）。
+        return measure_text_(text, font_size,
+                             /*font_alias=*/nullptr, measure_userdata_);
+    }
+    // 回退：等宽估计（0.6*font_size/字符）。仅无字体回调时用——CPU gold
+    // 测试无渲染层，据此保持确定性（不依赖真实字体度量）。
+    float w = 0.0f;
+    for (const char* p = text; *p; ++p) {
+        w += font_size * 0.6f;
+    }
+    return w;
 }
 
 // ==================== 内部绘制原语 ====================

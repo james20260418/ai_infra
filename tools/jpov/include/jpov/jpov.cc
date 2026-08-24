@@ -262,6 +262,15 @@ void JPOV::ReleaseGltf(const jpov::GltfObject& gltf) {
     renderer_->ReleaseGltf(gltf);
 }
 
+// ========== 文本宽度测量（UI 光标等需要与渲染层一致宽度） ==========
+
+float JPOV::MeasureTextWidth(const std::string& alias, const std::string& text,
+                             float font_size) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    return renderer_->MeasureTextWidth(alias, text, font_size);
+}
+
 // ========== 核心渲染步骤 ==========
 
 void JPOV::RunOnceInternal(int64_t frame_count,

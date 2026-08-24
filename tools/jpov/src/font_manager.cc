@@ -547,4 +547,39 @@ bool FontManager::GenerateTextVertices(std::string_view text,
     return !out_verts->empty();
 }
 
+// ==================== FontManager::MeasureTextWidth ====================
+
+float FontManager::MeasureTextWidth(std::string_view text,
+                                     float font_size) const {
+    CHECK_GT(font_size, 0.0f);
+    if (!loaded_ || font_info_ == nullptr) return 0.0f;
+
+    // 直接用 stbtt 字体度量累加每个字形的 advance，得到渲染层把文本逐个
+    // 排布后 pen 的水平终点（= 光标 X）。与 RasterizeToLevel / 渲染推进的
+    // advance 完全一致：advance_px = stbtt_GetCodepointHMetrics() *
+    // stbtt_ScaleForPixelHeight(font, font_size)（ScaleForPixelHeight 线性，
+    // 与 atlas 层级无关）。因此无需依赖字形是否已光栅化（FindGlyph 只在
+    // BuildGlyph 后才有值），首次测量（渲染前）结果也正确，且与渲染完全吻合。
+    // 缺字形（codepoint 超出字体范围）→ 该字符计 0 宽（与渲染层跳 0 宽一致）。
+    const float scale = stbtt_ScaleForPixelHeight(font_info_, font_size);
+    float width = 0.0f;
+    const char* p = text.data();
+    const char* end = text.data() + text.size();
+    while (p < end) {
+        uint32_t cp = DecodeUtf8(p);
+        if (cp == '\n') {
+            // 换行：水平归零、垂直换行（光标宽度按当前行水平终点计，
+            // 单行输入不会走到这）。
+            width = 0.0f;
+            continue;
+        }
+        int advance_width = 0;
+        int left_side_bearing = 0;  // 未使用，占位。
+        stbtt_GetCodepointHMetrics(font_info_, static_cast<int>(cp),
+                                   &advance_width, &left_side_bearing);
+        width += static_cast<float>(advance_width) * scale;
+    }
+    return width;
+}
+
 }  // namespace jpov

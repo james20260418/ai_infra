@@ -34,6 +34,23 @@ class UiDemoApp : public JPOV {
 public:
     using JPOV::JPOV;
 
+    // 把 Ui 的文本测量回调接到本应用的 JPOV::MeasureTextWidth（真实字体进宽），
+    // 使 InputText 光标精确贴合文本末尾，不再用 0.6em 等宽估计（那会使混合
+    // Latin/CJK 时光标漂到 1.5~2x 文本长度——验收 bug#7）。
+    // userdata = UiDemoApp*，转发到 JPOV::MeasureTextWidth（alias 空串 =
+    // 首个注册字体，与 demo 文本渲染用的第一个内置字体一致）。
+    static float DemoTextWidth(const char* text, float font_size,
+                               const char* /*font_alias*/, void* userdata) {
+        UiDemoApp* app = static_cast<UiDemoApp*>(userdata);
+        return app->MeasureTextWidth(/*alias=*/std::string(),
+                                     /*text=*/text ? text : "", font_size);
+    }
+
+    // 供 main 在 Init() 后安装文本测量回调（ui_ 私有，经此公开入口设置）。
+    void InstallTextMeasure() {
+        ui_.SetTextMeasure(&UiDemoApp::DemoTextWidth, this);
+    }
+
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
@@ -80,6 +97,8 @@ int main() {
     // fonts 留空 → 加载内置默认字体（Latin+CJK），见 kDemoFontAlias（用 CJK 显中文）。
     UiDemoApp app(cfg);
     app.Init();
+    // 注入真实字体文本宽度测量 → InputText 光标贴合文本末尾（修复验收 bug#7）。
+    app.InstallTextMeasure();
     app.Run();
     app.Finalize();
     return 0;
