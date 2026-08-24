@@ -270,16 +270,23 @@ public:
             ui.Combo("label", &sel, items, box);
             ui.End();
             ui.Emit(&cmd);
-            // 框底(hover) + 列表背景 + 当前行高亮 = 3 条 FillRect。
-            CHECK_EQ(cmd.fillrect2d.size(), 3u) << "展开态 3 条 FillRect";
+            // 框底(hover) + 列表容器(background) + 每行实心底(3行) = 5 条
+            // FillRect（修复 Bug6：下拉每行实心底覆盖后方内容，不再透明）。
+            CHECK_EQ(cmd.fillrect2d.size(), 5u) << "展开态 5 条 FillRect";
             CheckFill(cmd.fillrect2d[0], 10.0f, 10.0f, 200.0f, 24.0f,
                       theme.hover);  // 展开态框底用 hover 高亮。
-            // 列表背景：list_top=34, list_h=3*28=84。
+            // 列表容器：list_top=34, list_h=3*28=84, background 实心底。
             CheckFill(cmd.fillrect2d[1], 10.0f, 34.0f, 200.0f, 84.0f,
                       theme.background);
-            // 当前行(i=1)高亮：y=34+28=62。
-            CheckFill(cmd.fillrect2d[2], 10.0f, 62.0f, 200.0f, 28.0f,
+            // 每行独立实心底（新增，Bug6 修复）：行 0/1/2 均 background。
+            CheckFill(cmd.fillrect2d[2], 10.0f, 34.0f, 200.0f, 28.0f,
+                      theme.background);  // 行 0（未选中）。
+            // 当前行(i=1)高亮：y=34+28=62, accent。
+            CheckFill(cmd.fillrect2d[3], 10.0f, 62.0f, 200.0f, 28.0f,
                       theme.accent);
+            // 行 2（未选中）：y=34+56=90。
+            CheckFill(cmd.fillrect2d[4], 10.0f, 90.0f, 200.0f, 28.0f,
+                      theme.background);
             // 文本：框内当前项 + 3 个选项 = 4 条。
             CHECK_EQ(cmd.text2d.size(), 4u) << "展开态 4 条文本(当前项+3选项)";
             CHECK(HasTextSubstr(cmd, "banana"));  // 当前项。

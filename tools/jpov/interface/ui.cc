@@ -708,8 +708,13 @@ bool Ui::Combo(const char* label, int* selected,
         PushPolyline(tri, theme_.foreground, std::max(1.0f, theme_.border_width_px));
     }
 
-    // 下拉列表（仅展开态）：背景 + 每行选项文本（当前项高亮）。
+    // 下拉列表（仅展开态）：每行实心背景 + 每行选项文本（当前项高亮）。
+    // 经典下拉实现：每一行都用实心底色覆盖后方内容，而非依赖单个容器矩形
+    // 透出面板底色（修复验收 bug#6：下拉菜单背景透明）。未选中行=background、
+    // 当前选中行=accent 高亮，行内补丁均为实心色，覆盖后方内容不再透明。
     if (open_now && size > 0) {
+        // 容器描边：组合框下缘贴齐的整块下拉区域，用 background 实心底盖住
+        // 后方内容 + border 边框（行内填充与容器色一致，视觉无缝）。
         PushFillRect(UiRect{{b.pos.x(), list_top}, {b.size.x(), list_h}},
                      theme_.background, theme_.border, theme_.corner_radius_px);
         for (int i = 0; i < size; ++i) {
@@ -718,11 +723,10 @@ bool Ui::Combo(const char* label, int* selected,
             if (OutsideViewport(row) || row.size.y() <= 0.0f) {
                 continue;  // 行完全越出视口则跳过（底部超出部分 GPU 兜底）。
             }
-            if (i == *selected) {
-                // 当前项：accent 高亮底色 + foreground 文本。
-                PushFillRect(row, theme_.accent, theme_.border,
-                             theme_.corner_radius_px);
-            }
+            // 每行独立实心底色：当前项用 accent 高亮、其余行用 background，
+            // 确保选项区任意位置都是不透明实心色（经典下拉，覆盖后方内容）。
+            PushFillRect(row, i == *selected ? theme_.accent : theme_.background,
+                         theme_.border, theme_.corner_radius_px);
             const char* text = items[i];
             if (text != nullptr && text[0] != '\0') {
                 const float row_cy = row_y + row_h * 0.5f;
