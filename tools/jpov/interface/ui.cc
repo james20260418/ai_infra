@@ -1,0 +1,1139 @@
+// JPOV UI — 即时模式控件实现
+//
+// 本文件实现 ui.h 中声明的 Ui 类与 UiTheme。
+//
+// 状态机：每帧 Begin → 若干控件 → End（可选）→ Emit。
+//   - Begin 记录本帧输入/主题/视口分辨率，并清空内部指令缓冲（从零构建）；
+//   - 控件把绘制命令暂存到 fill_rects_ / texts_（Begin 收集）；
+//   - Emit 一次性把内部缓冲追加到外部 RenderCommandList，然后清空缓冲。
+//
+// 本文件当前实现【S0 基础设施】骨架：Begin/End/Emit + 指令缓冲 +
+// SanitizeBox/OutsideViewport/RowHeight + UiTheme::Default；
+// S1 Text / ColorSwatch；S2 Button + Hit（命中/悬停/一次性点击）；
+// S3 Checkbox（方框+勾、点击翻转外置 bool）；
+// S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）；
+// S5 InputText（底框+光标+占位符，点击聚焦+键盘写回 char*、限容量+超长水平滚动）；
+// S6 Combo（当前项+下箭头、点击展开列表选择写回/点外部关闭、跨帧展开态）。
+// 其余控件（集成 demo 等）由后续子步骤（S7+）实现。
+
+#include "tools/jpov/interface/ui.h"
+
+#include <algorithm>
+#include <cstdio>
+
+#include <glog/logging.h>
+
+namespace jpov {
+
+// ==================== UiTheme ====================
+
+UiTheme UiTheme::Default(float font_size) {
+    CHECK_GT(font_size, 0.0f) << "UiTheme font_size must be > 0";
+    UiTheme t;
+    t.font_size = font_size;
+
+    // 现代扁平主题：深色面板底，浅色前景，青蓝色高亮。
+    t.background = {0.13f, 0.14f, 0.16f, 1.0f};  // 面板底
+    t.foreground = {0.92f, 0.93f, 0.95f, 1.0f};  // 文本/图标默认色
+    t.accent     = {0.25f, 0.60f, 0.95f, 1.0f};  // 高亮（悬停项/按钮主色）
+    t.selected   = {0.12f, 0.36f, 0.62f, 1.0f};  // 已选中/按下（沉稳深蓝，区别于 accent）
+    t.hover      = {0.22f, 0.26f, 0.32f, 1.0f};  // 悬停态深底填充
+    t.border     = {0.35f, 0.37f, 0.42f, 1.0f};  // 边框
+    t.disabled   = {0.45f, 0.46f, 0.50f, 1.0f};  // 禁用态文字/图标
+
+    t.padding_px       = 6.0f;
+    t.spacing_px       = 4.0f;
+    t.corner_radius_px = 4.0f;
+    t.border_width_px  = 1.0f;
+    return t;
+}
+
+// ==================== Ui 生命周期 ====================
+
+void Ui::Begin(const InputSnapshot& input, const UiTheme& theme,
+               float width, float height, float frame_dt_ms) {
+    CHECK_GE(width, 0.0f) << "Ui viewport width must be >= 0";
+    CHECK_GE(height, 0.0f) << "Ui viewport height must be >= 0";
+    CHECK_GE(frame_dt_ms, 0.0f) << "Ui frame_dt_ms must be >= 0";
+    input_ = &input;
+    theme_ = theme;
+    width_ = width;
+    height_ = height;
+    frame_dt_ms_ = frame_dt_ms;
+    // 每帧从零构建：清空上一帧收集的指令（含弹出层）。
+    fill_rects_.clear();
+    texts_.clear();
+    polylines_.clear();
+    strips_.clear();
+    popup_fill_rects_.clear();
+    popup_texts_.clear();
+}
+
+void Ui::End() {
+    // 本帧控件收集到此为止。Emit 会隐式结束本帧，此处是显式结束的钩子。
+    // S0 阶段无跨帧状态需要结算，保留为空实现以对称 Begin/End 生命周期。
+}
+
+void Ui::Emit(RenderCommandList* cmd /*output*/) {
+    CHECK(cmd != nullptr);
+    // 把本帧内部缓冲一次性追加到外部 RenderCommandList（不清空外部已有内容）。
+    for (const FillRect2DCommand& r : fill_rects_) {
+        cmd->DrawFillRect(r.pos, r.size, r.fill_color, r.border_color,
+                          r.border_width, r.radius);
+    }
+    for (const Text2DCommand& t : texts_) {
+        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment,
+                      t.font_alias);
+    }
+    for (const Polyline2DCommand& p : polylines_) {
+        cmd->DrawPolyline(p.vertices, p.color, p.line_width);
+    }
+    for (const Strip2DCommand& s : strips_) {
+        cmd->DrawStrip2D(s.vertices, s.color);
+    }
+    // 弹出层（Combo 下拉等）：在全部普通指令之后追加 → 永远画在最上层，
+    // 盖住任何位置的其它控件（修复：下拉不再被更晚的控件文本/矩形遮挡）。
+    for (const FillRect2DCommand& r : popup_fill_rects_) {
+        cmd->DrawFillRect(r.pos, r.size, r.fill_color, r.border_color,
+                          r.border_width, r.radius);
+    }
+    for (const Text2DCommand& t : popup_texts_) {
+        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment,
+                      t.font_alias);
+    }
+    // 追加完成后清空内部缓冲（含弹出层），本帧结束。
+    fill_rects_.clear();
+    texts_.clear();
+    polylines_.clear();
+    strips_.clear();
+    popup_fill_rects_.clear();
+    popup_texts_.clear();
+}
+
+// ==================== 基础控件（S1：Text / ColorSwatch） ====================
+
+void Ui::Text(const char* label, const UiRect& box, bool stretch_w,
+              bool stretch_h) {
+    if (label == nullptr || label[0] == '\0') {
+        return;  // 空标签不画。
+    }
+    // 规格化 box（负尺寸 clamp 0），越界/零尺寸则跳过。
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return;
+    }
+    // 布局（C1）：非拉伸方向用文本理想尺寸（度量宽度 / 行高）并在 box 内居中。
+    const float ideal_w = MeasureTextWidth(label, theme_.font_size);
+    const float ideal_h = RowHeight();
+    const UiRect b = ResolveBox(raw, ideal_w, ideal_h, stretch_w, stretch_h);
+    if (OutsideViewport(b)) {
+        return;
+    }
+    Text2DCommand c;
+    c.text = label;
+    // 容错 #1：字形保持原尺寸（theme_.font_size），绝不缩小。
+    // 用 kCenter 对齐把字形的实际包围盒中心放到 box 中心 →
+    // 原尺寸文字在 box 内垂直（与水平）居中；box 过小时文字仍原尺寸，
+    // 超出 box 的部分由渲染层/视口兜底（本接口不做 scissor）。
+    c.pos = b.pos + b.size * 0.5f;
+    c.font_size = theme_.font_size;
+    c.color = theme_.foreground;
+    c.alignment = TextAlignment::kCenter;
+    c.font_alias.clear();
+    texts_.push_back(c);
+}
+
+void Ui::ColorSwatch(const char* /*label*/, const Color& color,
+                     const UiRect& box, bool stretch_w, bool stretch_h) {
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return;  // 越界/零尺寸跳过。
+    }
+    // 布局（C1）：色块理想尺寸 = 真方形（min 方向）。默认铺满 → 行为不变。
+    const float ideal_side = std::min(raw.size.x(), raw.size.y());
+    const UiRect b = ResolveBox(raw, ideal_side, ideal_side, stretch_w,
+                                stretch_h);
+    if (OutsideViewport(b)) {
+        return;
+    }
+    // 容错 #3：真方形控件。box 不足正方形时按 min(宽,高) 取正方形，
+    // 在 box 内居中（box 本身正方形时 side=min=box 边长，即铺满 box）。
+    const float side = std::min(b.size.x(), b.size.y());
+    if (side <= 0.0f) {
+        return;
+    }
+    const UiRect square{
+        {b.pos.x() + (b.size.x() - side) * 0.5f,
+         b.pos.y() + (b.size.y() - side) * 0.5f},
+        {side, side},
+    };
+    // PushFillRect 内部会做越界剔除、零面积跳过、圆角 clamp。
+    PushFillRect(square, color, theme_.border, theme_.corner_radius_px);
+}
+
+bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
+                bool stretch_h) {
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+    // 布局（C1）：非拉伸方向用按钮理想尺寸（label 度量宽 + 左右内边距 / 行高）。
+    const float label_w =
+        (label != nullptr && label[0] != '\0')
+            ? MeasureTextWidth(label, theme_.font_size)
+            : 0.0f;
+    const float ideal_w = label_w + 2.0f * theme_.padding_px;
+    const float ideal_h = RowHeight();
+    const UiRect b = ResolveBox(raw, ideal_w, ideal_h, stretch_w, stretch_h);
+    if (OutsideViewport(b)) {
+        return false;
+    }
+
+    // 命中测试：Ui root 面板默认位于窗口原点 (0,0)（ui.h 约定：若面板位移，
+    // 由调用方自行做一次盒偏移）。hovered 决定是否进入悬停态（S2.3）。
+    const InputSnapshot& in = *input_;
+    const bool hovered = Hit(b, 0.0f, 0.0f, in);
+
+    // ---- 按下态（danis 验收 bug#5，一次性 hold 语义）----
+    // 与 SliderFloat 一次 drag 同模式：左键在按钮 box 内按下（Drag/Hold）
+    // 开始后，只要左键仍按住就持续保持按下色——即使鼠标飘出 box 也不再校验
+    // （符合一般 UI：hold 一旦开始判定区不作数，直到左键释放才恢复）。
+    //   - 按下起始：左键按住（Drag/Hold） 且 鼠标在 box 内 且 当前无任何按钮
+    //     正在按下。
+    //   - 按下持续：本按钮正在按下且左键仍按住（鼠标可在 box 外）。
+    //   - 按下结束：左键已松开（不再是 Drag/Hold）→ 本按钮让出按下态，恢复默认/
+    //     悬停色。
+    // 跨帧用 button_pressed_box_（position+size）识别同一按钮。
+    // 注意起始条件里“当前无任何按钮正在按下”：避免被按的按钮 A 鼠标飘越
+    // 另一按钮 B 时 B 误以为新按下而在 A 还在按时抢走按下态（B 只可起始新
+    // 按下，若已有按钮持有则让它独占直至释放）。
+    const float lx = in.mouse_x;
+    const float ly = in.mouse_y;
+    const bool mouse_over =
+        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+    const bool left_down = in.left.IsDrag() || in.left.IsHold();
+    const bool was_pressed =
+        button_pressed_active_ && button_pressed_box_.pos == b.pos &&
+        button_pressed_box_.size == b.size;
+    const bool pressed_now =
+        left_down && (was_pressed || (!button_pressed_active_ && mouse_over));
+    if (pressed_now) {
+        button_pressed_active_ = true;
+        button_pressed_box_ = b;
+    } else if (was_pressed) {
+        // 左键已松开：按下结束，清状态让其他控件可接管。
+        button_pressed_active_ = false;
+    }
+
+    // 背景三态：按下色（左键按住）> 悬停亮色 > 默认深色。
+    //   - 按下态：theme_.selected（深蓝，danis 增强——按下用沉稳深色）。
+    //   - 悬停态：theme_.accent（亮色高亮，danis 验收 bug#15 修正）。
+    //   - 默认态：theme_.hover（深色填充）。
+    const Color fill =
+        pressed_now ? theme_.selected
+                    : (hovered ? theme_.accent : theme_.hover);
+    PushFillRect(b, fill, theme_.border, theme_.corner_radius_px);
+    // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
+    Text(label, b);
+
+    // 点击返回 true（S2.4）：本帧左键有 Click 事件，且释放位置落在按钮 box 内
+    // → 一次性事件（仅当帧返回 true，不存在跨帧记忆）。
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool Ui::Checkbox(const char* label, bool* value, const UiRect& box,
+                 bool stretch_w, bool stretch_h) {
+    // 状态外置：value 必须由调用方提供（本接口不跨帧记忆）。
+    CHECK(value != nullptr) << "Checkbox value pointer must not be null";
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+    // 布局（C1）：理想尺寸 = 方形边长（min 方向）→ 正方形；
+    // 高度非拉伸取方形边，宽度非拉伸取方形边 + label 度量宽 + 内边距。
+    const float side_ideal = std::min(raw.size.x(), raw.size.y());
+    const float label_w =
+        (label != nullptr && label[0] != '\0')
+            ? MeasureTextWidth(label, theme_.font_size)
+            : 0.0f;
+    const float ideal_w = side_ideal + label_w + theme_.padding_px;
+    const float ideal_h = side_ideal;
+    const UiRect b = ResolveBox(raw, ideal_w, ideal_h, stretch_w, stretch_h);
+    if (OutsideViewport(b)) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+
+    // 点击翻转（一次性事件，同 Button）：本帧左键 Click + 释放位置落在
+    // box 内 → 翻转 *value 并返回 true（不跨帧记忆，下一帧从零读 *value）。
+    const InputSnapshot& in = *input_;
+    bool clicked = false;
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                *value = !*value;  // 点击 → 翻转外置状态。
+                clicked = true;
+                break;
+            }
+        }
+    }
+
+    // 真方形框（容错 #3）：box 不足正方形时按 min(宽,高) 取正方形、居中。
+    const float side = std::min(b.size.x(), b.size.y());
+    if (side <= 0.0f) {
+        return clicked;  // 零尺寸不画（但也已处理上面的点击翻转）。
+    }
+    const UiRect square{
+        {b.pos.x() + (b.size.x() - side) * 0.5f,
+         b.pos.y() + (b.size.y() - side) * 0.5f},
+        {side, side},
+    };
+    // 方框底：选中=accent 高亮，未选=面板底。边框统一 border。
+    const Color fill = (*value) ? theme_.accent : theme_.background;
+    PushFillRect(square, fill, theme_.border, theme_.corner_radius_px);
+
+    // 勾选标记（仅选中态）：在方形内画一个 2 段折线 “✓”。
+    // 折线顶点取方形内缩 padding 的“左中→右下→右上”三点，形成对勾。
+    if (*value) {
+        const float pad = std::min(theme_.padding_px, side * 0.25f);
+        const float x0 = square.pos.x() + pad;
+        const float y0 = square.pos.y() + pad;
+        const float w = square.size.x() - 2.0f * pad;
+        const float h = square.size.y() - 2.0f * pad;
+        std::vector<Vec2f> verts = {
+            {x0, y0 + h * 0.62f},
+            {x0 + w * 0.36f, y0 + h * 0.90f},
+            {x0 + w, y0 + h * 0.18f},
+        };
+        const float lw = std::max(1.0f, side * 0.12f);
+        PushPolyline(verts, theme_.foreground, lw);
+    }
+
+    // 标签文本：放在方框右侧，垂直居中，左对齐（经典 checkbox 布局；
+    // 修复验收 bug#12——label 不再居中而是统一置于方框右侧）。
+    // 标签区域 = 方框右缘到 box 右缘，垂直取 box 中线；Text2DCommand 用
+    // kMidLeft 对齐使其在标签区左侧垂直居中，贴合方框右侧起始。
+    if (label != nullptr && label[0] != '\0') {
+        const UiRect label_box{
+            {square.pos.x() + square.size.x(), b.pos.y()},
+            {std::max(0.0f, b.pos.x() + b.size.x() -
+                          (square.pos.x() + square.size.x())),
+             b.size.y()},
+        };
+        if (label_box.size.x() > 0.0f && label_box.size.y() > 0.0f &&
+            !OutsideViewport(label_box)) {
+            Text2DCommand c;
+            c.text = label;
+            c.pos = {label_box.pos.x(),
+                     label_box.pos.y() + label_box.size.y() * 0.5f};
+            c.font_size = theme_.font_size;
+            c.color = theme_.foreground;
+            c.alignment = TextAlignment::kMidLeft;
+            c.font_alias.clear();
+            texts_.push_back(c);
+        }
+    }
+    return clicked;
+}
+
+bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
+                     float min, float max, int decimal_places,
+                     bool stretch_w, bool stretch_h) {
+    // min < max 是前置条件；不满足则无法定义归一化映射，直接 crash 暴露问题
+    // （不做 fallback 隐藏配置错误，遵循仓库 crash-early 原则）。
+    CHECK(value != nullptr) << "SliderFloat value pointer must not be null";
+    CHECK_LT(min, max) << "SliderFloat requires min < max, got (" << min
+                       << ", " << max << ")";
+    CHECK_GE(decimal_places, 0) << "SliderFloat decimal_places must be >= 0, got "
+                                << decimal_places;
+    // 小数位数上限（防御）：超限会拼出巨长的数值文本，UI 面板无意义。
+    // 上限 10 足够覆盖任意浮点精度的可视化，超出即截断为 10。
+    const int decimals = std::min(decimal_places, 10);
+    const float range = max - min;
+
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不命中。
+    }
+    // 布局（C1）：滑条是轨道控件，无内容感知宽度，非拉伸时取行高；
+    // 宽度非拉伸用 box 宽（轨道需横向空间，理想宽=box 宽）。
+    const float ideal_h = RowHeight();
+    const UiRect b = ResolveBox(raw, raw.size.x(), ideal_h, stretch_w,
+                                stretch_h);
+    if (OutsideViewport(b)) {
+        return false;
+    }
+
+    // ---- 值域处理：外置 value 先夹到 [min,max]（防调用方越界污染）----
+    // 立即把夹断后的值写回 *value，保证显示与状态一致（每次绘制后
+    // *value 都落在 [min,max]，不存在显示 100 而状态 999 的分歧）。
+    const float clamped = std::clamp(*value, min, max);
+    *value = clamped;
+
+    // ---- 布局：轨道 + 句柄 ----
+    // 轨道：横向铺满 box（左右留一个句柄半径的边距，避免句柄溢出 box 边缘），
+    // 垂直居中、厚度固定取 box 高的 30%（至少 4px）。
+    // 句柄直径：clamp ≥ min_diameter（容错 #2，默认 8px），且不超出 box 宽
+    // （窄 box 句柄取 min(8, 宽)，保证不缩 0、不溢出 box）。
+    // 注意：不能直接用 std::clamp(b.size.y(), 8, b.size.x())——矮而窄的 box
+    // 会出现 lo>hi 的未定义行为，故先 max 抬底再 min 封顶。
+    constexpr float kMinHandle = 8.0f;
+    // 黄金比 φ ≈ 1.618；句柄由方形改为黄金比矩形，x 轴方向窄（Danis 验收 bug#10）：
+    // 宽 : 高 = 1 : φ，即宽度 = 高 / φ ≈ 0.618·高（x 窄 y 高，非方形）。
+    constexpr float kGoldenRatio = 1.618033988749895f;
+    const float thickness = std::max(4.0f, b.size.y() * 0.30f);
+    // 句柄参考尺寸：取 box 高 clamp（≥ min 8px、不超 box 宽）作为句柄高度。
+    const float handle_h =
+        std::min(std::max(b.size.y(), kMinHandle), b.size.x());
+    // 句柄宽度：黄金比矩形，x 窄 → 宽 = 高 / φ（小于高，横向收窄）。
+    const float handle_w = handle_h / kGoldenRatio;
+    // 句柄中心可移动的水平范围（轨道去两端句柄半宽）。
+    const float half = handle_w * 0.5f;
+    const float track_left = b.pos.x() + half;
+    const float track_right = b.pos.x() + b.size.x() - half;
+    // 轨道长度：极窄 box（句柄已几乎占满）时仍保证轨道有最小正宽度，
+    // 满足容错“box 过窄轨道照画、不消失”（避免 track 退化为 0 面积被剔除）。
+    const float track_len = std::max(1.0f, track_right - track_left);
+    // 归一化位置 [0,1]：value 映射到轨道长度。
+    const float t = (track_len > 0.0f) ? (clamped - min) / range : 0.0f;
+    const float hx = track_left + t * track_len;   // 句柄中心 X
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心
+
+    // 轨道矩形（垂直居中，厚 thickness）。
+    const UiRect track_rect{
+        {track_left, cy - thickness * 0.5f},
+        {track_len, thickness},
+    };
+    // 句柄矩形（黄金比矩形：宽 handle_w、高 handle_h，垂直居中，x 轴窄）。
+    const UiRect handle_rect{
+        {hx - half, cy - handle_h * 0.5f},
+        {handle_w, handle_h},
+    };
+
+    // ---- 交互（S4.2 拖动 + 验收 bug#4 一次性 drag 语义）----
+    // 即时模式 + 跨帧 drag 状态：左键在滑条 box 内按下开始 drag 后，只要
+    // 左键仍按住（Drag/Hold）就持续跟随鼠标横坐标写值——即使鼠标飘出 box
+    // 竖直范围也不再校验（符合一般 UI：drag 一旦开始，判定区不作数，直到
+    // 左键释放才结束）。
+    //   - drag 起始：左键按住 且 鼠标在 box 内 且 当前无任何滑条正在 drag。
+    //   - drag 持续：本滑条正在 drag 且左键仍按住（鼠标可在 box 外）。
+    //   - drag 结束：左键已松开（不再是 Drag/Hold）→ 本滑条让出 drag 状态。
+    // 跨帧用 slider_drag_box_（position+size）识别同一滑条（与 InputText
+    // 焦点 / Combo 展开同一模式）。
+    // 注意起始条件里“当前无任何滑条正在 drag”：避免被拖的滑条 A 鼠标飘越
+    // 另一滑条 B 时 B 误以为新按下而在 A 还在拖时抢走 drag（B 只可起始新
+    // drag，若已有一条持有则让它独占直至释放）。
+    const InputSnapshot& in = *input_;
+    const float lx = in.mouse_x - 0.0f;   // root 面板位于窗口原点 (0,0)（ui.h 约定）。
+    const float ly = in.mouse_y - 0.0f;   // 同上，鼠标 Y。
+    // 命中需同时满足横向 + 纵向都在 box 内：仅判 X 会导致“鼠标在很远
+    // 的竖直位置拖动也响应滑条”（danis 验收 bug #14，起始判据仍是它）。
+    const bool mouse_over =
+        (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+    const bool left_down = in.left.IsDrag() || in.left.IsHold();
+    // 本滑条是否已持有一次正在进行的 drag（跨帧识别同一滑条）。
+    const bool was_dragging =
+        slider_drag_active_ && slider_drag_box_.pos == b.pos &&
+        slider_drag_box_.size == b.size;
+    // 本帧是否处于 drag 态：本滑条已持有（飘远也持续）或 起始新 drag。
+    const bool drag_now =
+        left_down && (was_dragging || (!slider_drag_active_ && mouse_over));
+    if (drag_now) {
+        // 起始/持续：记录为正在拖动的滑条（供后续帧识别一次 drag）。
+        slider_drag_active_ = true;
+        slider_drag_box_ = b;
+    } else if (was_dragging) {
+        // 左键已松开：drag 结束，清状态让其他控件可接管。
+        slider_drag_active_ = false;
+    }
+
+    bool changed = false;
+    if (drag_now) {
+        // 拖动/按住期间，跟随鼠标横坐标（点击即跳到该处）。
+        // 鼠标飘出 box 竖直范围后仍按当前横坐标映射（不中断 drag，bug#4）。
+        const float nx =
+            (track_len > 0.0f) ? (lx - track_left) / track_len : 0.0f;
+        const float new_val =
+            min + std::clamp(nx, 0.0f, 1.0f) * range;
+        if (new_val != clamped) {
+            *value = new_val;
+            changed = true;
+        }
+    } else if (in.left.IsClick()) {
+        // 单击：仅当释放位置落在滑条 box 内才写值（一次性事件，同 Button）。
+        // （Click 帧左键已释放、left_down=false，不会误与 drag 分支冲突。）
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy2 = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y()) {
+                const float nx =
+                    (track_len > 0.0f) ? (cx - track_left) / track_len : 0.0f;
+                *value = min + std::clamp(nx, 0.0f, 1.0f) * range;
+                changed = true;
+                break;  // 只取首个落在 box 内的 click。
+            }
+        }
+    }
+
+    // ---- 绘制（S4.1）：轨道 + 句柄 + 数值 ----
+    // 轨道底(背景) + 选中行程(accent，min→句柄) + 句柄 + 数值文本。
+    PushFillRect(track_rect, theme_.background, theme_.border,
+                 theme_.corner_radius_px);
+    // 选中行程：min→句柄 用 accent 高亮（宽度 = 句柄中心 - 轨道左端）。
+    const float fill_len = std::max(0.0f, hx - track_left);
+    if (fill_len > 0.0f) {
+        PushFillRect(UiRect{{track_left, cy - thickness * 0.5f},
+                            {fill_len, thickness}},
+                     theme_.accent, theme_.accent, theme_.corner_radius_px);
+    }
+    // 句柄：实心深色黄金比矩形 + 边框，独立于轨道可见。
+    // danis 验收 bug#9：原用 theme.foreground（浅色 0.92）与文本同色，
+    // 滑块与文本/轨道难辨。改用主题深色 hover，与浅色文本、accent 选中行程
+    // 均形成清楚对比（边框用 border 进一步勾勒，避免右侧与深色轨道粘连）。
+    // danis 验收 bug#10：由方形改黄金比矩形（宽:高=1:φ，x 窄 y 高）。
+    PushFillRect(handle_rect, theme_.hover, theme_.border,
+                 theme_.corner_radius_px);
+
+    // 数值文本：显示 label 与当前值（小数位数由 decimal_places 决定）。
+    // 复用 Text 的居中/原字号语义（画在轨道之上 box 中心）。
+    if (label != nullptr && label[0] != '\0') {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s: %.*f", label, decimals, *value);
+        std::string text(buf);
+        // 直接构造一个居中文本指令（Text 原字号、box 中心，复用其语义）。
+        Text2DCommand c;
+        c.text = text;
+        c.pos = b.pos + b.size * 0.5f;
+        c.font_size = theme_.font_size;
+        c.color = theme_.foreground;
+        c.alignment = TextAlignment::kCenter;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    }
+    return changed;
+}
+
+// S5 键盘字符映射：KeyCode → 可编辑字符（与 ui.h 声明一致）。
+char UiInputCharForKey(KeyCode key) {
+    // 字母表 a-z（InputSnapshot 无 Shift 修饰，一律小写）。
+    if (key >= KeyCode::A && key <= KeyCode::Z) {
+        return static_cast<char>('a' + (static_cast<int>(key) - static_cast<int>(KeyCode::A)));
+    }
+    // 数字 0-9。
+    if (key >= KeyCode::_0 && key <= KeyCode::_9) {
+        return static_cast<char>('0' + (static_cast<int>(key) - static_cast<int>(KeyCode::_0)));
+    }
+    switch (key) {
+        case KeyCode::Space:
+            return ' ';
+        default:
+            return '\0';  // 修饰键/控制键/方向键等：不可编辑字符，调用方忽略。
+    }
+}
+
+// 本帧某键应触发的“按键重复动作次数”（键盘 hold 150ms 阈值两态，验收 bug#11）：
+//   - Click 帧：重复次数恒为 0（首次输入由调用方按 click_count 立即写入，
+//     那是“单击/短按”，不属于 hold 重复）。
+//   - Hold 帧：跨帧累计按住时长，累计 > kKeyHoldRepeatDelayMs(150ms) 后视为
+//     连续按下，每满 kKeyHoldRepeatIntervalMs(150ms) 触发 1 次。
+//     hold 时间 < 150ms（含短按后释放）不产生重复（可能是一次短click）。
+//   - None：无动作，清零累计。
+// 仅在调用方传入 frame_dt_ms>0（有真实时钟）时才有意义；frame_dt_ms<=0
+// 时无时间信息，恒返回 0（不产生 hold 重复，行为保守）。
+// 供 InputText 写回 char* 时统一消费，避免 Click 与 Hold 语义分叉。
+int Ui::AdvanceKeyHold(KeyCode key) {
+    const int idx = static_cast<int>(key);
+    const KeyState& ks = input_->GetKey(key);
+    if (!ks.IsHold()) {
+        // 非 Hold（None/Click，即已释放或本帧只是单击）：清零跨帧累计，无重复。
+        hold_ms_[idx] = 0.0f;
+        hold_emitted_repeats_[idx] = 0;
+        return 0;
+    }
+    // key 仍被按住（Hold）：累计本帧时长。
+    if (frame_dt_ms_ <= 0.0f) {
+        return 0;  // 无时钟：不做阈值判断。
+    }
+    hold_ms_[idx] += frame_dt_ms_;
+    // 应发出的累计重复次数：hold 时间 > 150ms 后，每 150ms 计 1 次。
+    int target = 0;
+    if (hold_ms_[idx] > kKeyHoldRepeatDelayMs) {
+        target = static_cast<int>(
+            (hold_ms_[idx] - kKeyHoldRepeatDelayMs) / kKeyHoldRepeatIntervalMs);
+        target = std::max(target, 0);
+    }
+    // 本帧新增重复次数 = 目标累计 - 已发出（跨帧不重发）。
+    const int delta = target - hold_emitted_repeats_[idx];
+    hold_emitted_repeats_[idx] = target;
+    return std::max(delta, 0);
+}
+
+bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
+                   const UiRect& box, bool stretch_w, bool stretch_h) {
+    // buffer 必须非空且至少留 1 字节存 '\0'（容量下限 2：1 字符 + 终止符）。
+    CHECK(buffer != nullptr) << "InputText buffer must not be null";
+    CHECK_GE(buffer_size, 2u) << "InputText requires buffer_size >= 2 "
+                              << "(1 char + null terminator), got " << buffer_size;
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不聚焦、不写值。
+    }
+    // 布局（C1）：输入框理想尺寸 = box 宽（文本字段需横向空间）/ 行高。
+    const float ideal_h = RowHeight();
+    const UiRect b = ResolveBox(raw, raw.size.x(), ideal_h, stretch_w,
+                                stretch_h);
+    if (OutsideViewport(b)) {
+        return false;
+    }
+
+    // 确保 buffer 以 '\0' 收尾（防调用方传入非终止字符串污染长度计算）。
+    // buffer 至少 buffer_size 字节，下标 buffer_size-1 必然合法。
+    buffer[buffer_size - 1] = '\0';
+    const size_t text_len = strnlen(buffer, buffer_size - 1);
+
+    // ---- 焦点管理（S5.2）：状态跨帧，点击 box 内获得焦点 ----
+    // 即时模式：focus 是本对象跨帧状态。本帧绘制时，若本 box 与上次聚焦 box
+    // 位置+尺寸一致 → 视为已聚焦（框移动/临时对象时自动失焦，重新点击才聚焦）。
+    const InputSnapshot& in = *input_;
+    const bool is_focused =
+        input_focused_ && input_focus_box_.pos == b.pos &&
+        input_focus_box_.size == b.size;
+
+    // 本帧点击落在 box 内 → 聚焦本框。
+    bool clicked_inside = false;
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                clicked_inside = true;
+                break;
+            }
+        }
+    }
+    // 聚焦状态结算（先做，供下方键入判断使用）：
+    //  - 点本框 → 聚焦；点别处 → 若聚焦正是本框则失焦。
+    if (clicked_inside) {
+        input_focused_ = true;
+        input_focus_box_ = b;
+        input_scroll_px_ = 0.0f;  // 聚焦时滚动归零（从头显示）。
+    } else if (in.left.IsClick() && is_focused) {
+        input_focused_ = false;  // 本帧 Click 落在 box 外 → 本框失焦。
+    }
+
+    // ---- 键盘写回 char*（S5.2）：仅聚焦框消费键入 ----
+    // 用本轮聚焦判定后的 is_focused 快照决定是否消费按键，避免同帧内
+    // 焦点迁移（点框外导致失焦）后仍把字符打进刚失焦的 buffer。
+    // 可编辑长度用可变变量跟踪（追加/删除会改变它）。
+    size_t len = text_len;
+    const size_t cap = buffer_size - 1;  // 可容纳的最大字符数（留 '\0'）。
+    if (is_focused) {
+        // 控制键：Enter / Escape → 失焦（提交/取消，都不改变 buffer）。
+        const KeyState& enter = in.GetKey(KeyCode::Enter);
+        const KeyState& esc = in.GetKey(KeyCode::Escape);
+        if (enter.IsClick() || esc.IsClick()) {
+            input_focused_ = false;
+        } else {
+            // Backspace：删除最后一个字符（删除发生在追加前）。
+            // 键盘 hold 150ms 阈值两态（验收 bug#11）：
+            //   - Click 帧：按 click_count 次删除（短按一次删 1 个）。
+            //   - Hold 帧：AdvanceKeyHold 累计按住时长，>150ms 后每 150ms 删 1 次；
+            //     <150ms 的短按（已被 Click 消费）不再重复删除。
+            const KeyState& bs = in.GetKey(KeyCode::Backspace);
+            {
+                const int repeats =
+                    bs.IsClick() ? bs.click_count() : AdvanceKeyHold(KeyCode::Backspace);
+                const size_t n =
+                    std::min(static_cast<size_t>(std::max(repeats, 0)), len);
+                for (size_t i = 0; i < n; ++i) {
+                    buffer[len - i - 1] = '\0';
+                }
+                len -= n;
+                buffer[len] = '\0';
+            }
+            // 可编辑字符：从 KeyCode 读，逐字符追加，遇容量上限截断（S5.2）。
+            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。键盘 hold
+            // 150ms 阈值两态（验收 bug#11）：Click 帧按次追加（单击立即输入）；
+            // Hold 帧由 AdvanceKeyHold 每 150ms 追加 1 次。容量满则丢弃余量（截断）。
+            for (int code = static_cast<int>(KeyCode::Space);
+                 code <= static_cast<int>(KeyCode::Z); ++code) {
+                const KeyState& ks = in.GetKey(static_cast<KeyCode>(code));
+                const int actions = ks.IsClick()
+                                        ? ks.click_count()
+                                        : AdvanceKeyHold(static_cast<KeyCode>(code));
+                if (actions <= 0) {
+                    continue;
+                }
+                const char ch = UiInputCharForKey(static_cast<KeyCode>(code));
+                if (ch == '\0') {
+                    continue;  // 不可编辑字符跳过。
+                }
+                const size_t n = std::min(static_cast<size_t>(actions),
+                                          cap - len);
+                for (size_t i = 0; i < n; ++i) {
+                    buffer[len + i] = ch;
+                }
+                len += n;
+                buffer[len] = '\0';
+            }
+        }
+    }
+
+    // 绘制/返回用的“当前聚焦”判定：必须在本帧全部输入处理（含 Enter/Escape
+    // 失焦）之后结算，才能正确反映本帧点击聚焦/框外失焦/回车失焦的最终状态。
+    // 键盘写回用的是上面的 is_focused 快照，二者语义不同：
+    //   键入：用“帧首是否已聚焦”决定是否消费（点击聚焦那一刻不消费，下帧才打字）；
+    //   绘制/返回：用“帧末最终聚焦”决定画不画光标、返回值。
+    const bool focused_eff =
+        input_focused_ && input_focus_box_.pos == b.pos &&
+        input_focus_box_.size == b.size;
+
+    // ---- 绘制（S5.1）：底框 + 占位符/内容文本 + 光标 ----
+    // 底框：background 底 + border 边框（与其它控件一致的圆角/边框语义）。
+    PushFillRect(b, theme_.background, theme_.border, theme_.corner_radius_px);
+
+    // 文本内容区（左侧留 padding 内边距，垂直居中）。
+    const float pad = theme_.padding_px;
+    const float text_left = b.pos.x() + pad;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 垂直中心（文本与光标共用）
+
+    if (len > 0) {
+        // 内容文本：foreground 色、左对齐、垂直居中（kMidLeft，pos=左缘中点）。
+        // 手动压一条 Text2DCommand（与 S4 滑条数值文本一致），而非 PushText
+        //（PushText 仅 kTopLeft，无法垂直居中，与光标不对齐）。
+        Text2DCommand c;
+        c.text = buffer;
+        c.pos = {text_left, cy};
+        c.font_size = theme_.font_size;
+        c.color = theme_.foreground;
+        c.alignment = TextAlignment::kMidLeft;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    } else if (label != nullptr && label[0] != '\0') {
+        // 空 buffer → 画占位符（提示输入内容），disabled 色以示与正文区分。
+        Text2DCommand c;
+        c.text = label;
+        c.pos = {text_left, cy};
+        c.font_size = theme_.font_size;
+        c.color = theme_.disabled;
+        c.alignment = TextAlignment::kMidLeft;
+        c.font_alias.clear();
+        texts_.push_back(c);
+    }
+
+    // 光标（S5.1/S5.3）：聚焦时在文本末尾画一条竖线（静态，不闪烁保 gold 可测）。
+    // 水平滚动：文本末位估计宽度超过 box 右缘（去 padding）→ 推进内部滚动，
+    // 保证光标不越出右缘（S5.3 内部 scroll、不溢出）。
+    // 文本宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽
+    // 估计（0.6*font_size/字符）——真实字体混合 Latin/CJK 时 0.6em 对 Latin
+    // 偏宽约 1.5~2x，导致光标漂到文本长度 1.5~2 倍（danis 验收 bug#7），
+    // 有回调后光标精确贴合文本末尾（见 MeasureTextWidth）。
+    if (focused_eff) {
+        const float caret_w = std::max(1.0f, theme_.border_width_px);
+        const float caret_right = b.pos.x() + b.size.x() - pad;
+        // 光标相对内容左缘的原始位置 = 文本总宽度（真实度量或等宽估计）
+        // - 当前滚动偏移。
+        const float text_w =
+            (len > 0) ? MeasureTextWidth(buffer, theme_.font_size) : 0.0f;
+        const float caret_x = text_left + text_w - input_scroll_px_;
+        if (caret_x > caret_right) {
+            // 越过右缘：滚动多出的量，使光标保持恰在右缘内侧。
+            input_scroll_px_ += caret_x - caret_right;
+        }
+        // 最终光标 X：贴右缘内侧，绝不越界。
+        const float cx = std::min(text_left + text_w, caret_right);
+        const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
+        PushFillRect(UiRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
+                     theme_.accent, theme_.accent, 0.0f);
+    }
+
+    // 返回本帧聚焦结果（反映本帧点击/失焦处理后的最终状态，供调用方在
+    // 回车/取消时感知失焦事件；键入本身通过写回 buffer 反映，无需关心）。
+    return focused_eff;
+}
+
+bool Ui::Combo(const char* label, int* selected,
+               const std::vector<const char*>& items, const UiRect& box,
+               bool stretch_w, bool stretch_h) {
+    // selected 为 in/out，合法范围 [0, items.size()-1]（任务验收备注）。
+    CHECK(selected != nullptr) << "Combo selected pointer must not be null";
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return false;  // 越界/零尺寸：不画、不展开、不改值。
+    }
+    // 布局（C1）：下拉是宽度控件，理想尺寸 = box 宽 / 行高。
+    const float ideal_h = RowHeight();
+    const UiRect b = ResolveBox(raw, raw.size.x(), ideal_h, stretch_w,
+                                stretch_h);
+    if (OutsideViewport(b)) {
+        return false;
+    }
+
+    // ---- 值域处理：选中的 index 先夹到 [0, size-1]（防调用方越界污染）----
+    // 立即把夹断后的值写回 *selected，保证显示与状态一致。
+    const int size = static_cast<int>(items.size());
+    if (size == 0) {
+        *selected = -1;  // 无选项 → 无选中（显示占位符）。
+    } else {
+        *selected = std::clamp(*selected, 0, size - 1);
+    }
+
+    // ---- 跨帧展开状态（同 InputText 焦点模式）：用 box 位置+尺寸识别同一
+    // Combo；本帧绘制时若 box 与之相等则视为已展开。----
+    const InputSnapshot& in = *input_;
+    const bool was_open =
+        combo_open_ && combo_open_box_.pos == b.pos &&
+        combo_open_box_.size == b.size;
+
+    // ---- 布局：组合框 + 下拉列表 + 下箭头（仅在框内画，下拉列表不画箭头）----
+    const float row_h = RowHeight();
+    const float pad = theme_.padding_px;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;  // 框垂直中心（文本对齐用）
+
+    // 下箭头（▾）：右侧、垂直居中。用 3 顶点朝下三角形折线绘制，纯几何
+    // 不依赖字形，gold 自证可确定性比对。尺寸取 box 高的一半（clamp 到合法
+    // 范围），右侧留 padding 边距。
+    const float arrow_h = std::max(2.0f, std::min(b.size.y() * 0.5f, 12.0f));
+    const float arrow_w = arrow_h;  // 三角形底宽 = 高（等边倾向）
+    const float ar = b.pos.x() + b.size.x() - pad - arrow_w;  // 箭头右上 x
+    const float ay = cy - arrow_h * 0.5f;
+
+    // 下拉列表：组合框正下方，宽度=框宽，行数=选项数。
+    const float list_top = b.pos.y() + b.size.y();
+    const float list_h = static_cast<float>(size) * row_h;
+
+    // ---- 交互（S6.2）：展开/收起 + 选值 + 点外部关闭 ----
+    bool changed = false;   // 本帧是否发生了选项切换（返回值）。
+    bool open_now = was_open;  // 本帧绘制/返回用的最终展开态。
+    if (in.left.IsClick()) {
+        const float cx = in.left_clicks[0].x;  // 只取首个 click 位置决定展开行为。
+        const float cy2 = in.left_clicks[0].y;
+        const bool in_box =
+            cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+            cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y();
+
+        if (in_box) {
+            // 点击组合框本身：开→关、关→开（点框内不产生选值，仅切换展开态）。
+            open_now = !was_open;
+        } else if (was_open && size > 0) {
+            // 已展开且点框外：检查是否命中某个选项行 → 选中并关闭；
+            // 否则（点空白/别处）→ 关闭不选值（S6.2 点外部关闭）。
+            for (int i = 0; i < size; ++i) {
+                const float row_y = list_top + static_cast<float>(i) * row_h;
+                if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                    cy2 >= row_y && cy2 <= row_y + row_h) {
+                    *selected = i;  // 选中写回（唯一改变 *selected 的路径）。
+                    changed = true;
+                    break;
+                }
+            }
+            open_now = false;  // 无论命中选项还是点外部空白，点击都关闭下拉。
+        }
+        // was_open == false 且点框外：保持关闭，不改值。
+    }
+
+    // 结算跨帧展开状态（供下一帧 was_open 判定）。
+    combo_open_ = open_now;
+    combo_open_box_ = b;
+
+    // ---- 绘制（S6.1：当前项 + 下箭头 / 展开时 + 下拉列表）----
+    // 组合框底：accent 高亮（展开时）否则 background，统一 border 边框。
+    const Color box_fill = open_now ? theme_.hover : theme_.background;
+    PushFillRect(b, box_fill, theme_.border, theme_.corner_radius_px);
+
+    // 当前项文本：左对齐垂直居中（左侧留 padding）。选中时显示当前项；
+    // 无选项（空 items）→ 显示 label 作占位符（disabled 色）。
+    const char* current = nullptr;
+    if (size > 0 && *selected >= 0 && *selected < size) {
+        current = items[*selected];
+    }
+    if (current != nullptr && current[0] != '\0') {
+        PushLabelText(current, b.pos.x() + pad, cy, theme_.foreground);
+    } else if (label != nullptr && label[0] != '\0') {
+        PushLabelText(label, b.pos.x() + pad, cy, theme_.disabled);
+    }
+
+    // 下箭头：仅收起态画（展开时被下拉列表盖住，语义上无需再提示）。
+    // 实心三角：用 4 顶点三角形条带、右侧(此处为顶点)重合的退化 strip
+    // 画实心三角形（不依赖字体字形，gold 可确定性比对）。
+    // 顶点：p0=左上, p1=右上, p2=底中；strip 多加一个 p2 使第三条退化为 0 面积。
+    if (!open_now && size > 0) {
+        const std::vector<Vec2f> tri = {
+            {ar, ay},
+            {ar + arrow_w, ay},
+            {ar + arrow_w * 0.5f, ay + arrow_h},
+            {ar + arrow_w * 0.5f, ay + arrow_h},  // 与 p2 重合 → 退化闭合 strip
+        };
+        PushStrip(tri, theme_.foreground);
+    }
+
+    // 下拉列表（仅展开态）：全体选项共享【一个大的圆角矩形】做底，
+    // 悬停项用 accent（亮蓝）跟随鼠标、选中项用 selected（深蓝）标定；
+    // 二者不同行时同时高亮，同行时悬停优先（radius=0 平直，不叠加圆角）。
+    // 经典下拉观感：整体一个圆角面板 + 悬停/选中行高亮。
+    // 下拉属于弹出层：Emit 在所有普通指令之后追加 → 永远画在最上层，
+    // 不被下方/更晚的控件遮挡（修复验收 concern#3）。
+    if (open_now && size > 0) {
+        // 唯一的大圆角矩形：整块下拉区域，background 实心底 + border 边框。
+        // 圆角仅出现在下拉整体四角（不逐行加圆角 → 不会出现叠成一串圆角条）。
+        PushPopupFillRect(UiRect{{b.pos.x(), list_top}, {b.size.x(), list_h}},
+                          theme_.background, theme_.border,
+                          theme_.corner_radius_px);
+        // 悬停行：鼠标落在下拉区域内某行 → 该行高亮（浅 accent 蓝跟随鼠标）。
+        // 选中行：用 selected 深蓝表示"已选中"（区别于悬停的浅蓝）。
+        // 语义：飘到哪个就亮哪个；当前选中项始终深蓝标定。二者若同一行，
+        // 以悬停优先显 accent（用户正指向它，反馈更即时）。
+        const int sel = *selected;
+        int hover_row = -1;
+        if (in.mouse_y >= list_top && in.mouse_y < list_top + list_h &&
+            in.mouse_x >= b.pos.x() &&
+            in.mouse_x <= b.pos.x() + b.size.x()) {
+            hover_row = static_cast<int>((in.mouse_y - list_top) / row_h);
+            hover_row = std::clamp(hover_row, 0, size - 1);
+        }
+        // 先画选中行（深蓝），再画悬停行（浅蓝）盖其上——悬停总在最前。
+        if (sel >= 0 && sel < size && sel != hover_row) {
+            const float row_y = list_top + static_cast<float>(sel) * row_h;
+            const UiRect row{{b.pos.x(), row_y}, {b.size.x(), row_h}};
+            if (!OutsideViewport(row) && row.size.y() > 0.0f) {
+                PushPopupFillRect(row, theme_.selected, theme_.selected, 0.0f);
+            }
+        }
+        if (hover_row >= 0) {
+            const float row_y =
+                list_top + static_cast<float>(hover_row) * row_h;
+            const UiRect row{{b.pos.x(), row_y}, {b.size.x(), row_h}};
+            if (!OutsideViewport(row) && row.size.y() > 0.0f) {
+                PushPopupFillRect(row, theme_.accent, theme_.accent, 0.0f);
+            }
+        }
+        // 每行选项文本（统一 foreground；选中/悬停底色都足够深，浅字可读）。
+        for (int i = 0; i < size; ++i) {
+            const char* text = items[i];
+            if (text == nullptr || text[0] == '\0') {
+                continue;
+            }
+            const float row_cy =
+                list_top + static_cast<float>(i) * row_h + row_h * 0.5f;
+            PushPopupLabelText(text, b.pos.x() + pad, row_cy,
+                               theme_.foreground);
+        }
+    }
+
+    // 返回本帧是否发生了选项切换（展开/收起本身不计为选值）。
+    return changed;
+}
+
+bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {
+    const UiRect b = SanitizeBox(r);
+    if (b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return false;  // 零尺寸矩形不参与命中。
+    }
+    // (x, y) = Ui root 面板左上角在窗口中的位置（默认 0,0）；in.mouse 为窗口
+    // 绝对坐标。先转成面板局部坐标，再判点是否落在 box 内（边界含入）。
+    const float lx = in.mouse_x - x;
+    const float ly = in.mouse_y - y;
+    return (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
+           (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+}
+
+UiRect Ui::SanitizeBox(const UiRect& r) {
+    UiRect out = r;
+    // Vec2f::x()/y() 返回引用，可直接赋值（clamp 负尺寸到 0）。
+    out.size.x() = std::max(0.0f, out.size.x());
+    out.size.y() = std::max(0.0f, out.size.y());
+    return out;
+}
+
+bool Ui::OutsideViewport(const UiRect& r) const {
+    // 空尺寸矩形（宽或高为 0）视为不占据面积 → 判定为"在视口外"跳过，
+    // 避免零面积矩形参与相交测试产生歧义。
+    if (r.size.x() <= 0.0f || r.size.y() <= 0.0f) {
+        return true;
+    }
+    // AABB 不相交测试：矩形完全落在视口 (0,0,width,height) 之外即为越界。
+    const float left   = r.pos.x();
+    const float top    = r.pos.y();
+    const float right  = left + r.size.x();
+    const float bottom = top + r.size.y();
+    return (right <= 0.0f) || (bottom <= 0.0f) ||
+           (left >= width_) || (top >= height_);
+}
+
+float Ui::RowHeight() const {
+    // 内容感知行高：字形像素高度 + 上下内边距。
+    // 首版固定近似（glyph 平均高度 + 内边距），后续接入字体度量 API。
+    return theme_.font_size + 2.0f * theme_.padding_px;
+}
+
+float Ui::MeasureTextWidth(const char* text, float font_size) const {
+    if (measure_text_ != nullptr) {
+        // 调用方注入的真实字体度量：文本左缘起 pen 水平终点（像素），
+        // 与渲染层排出完全一致（InputText 光标用它才能贴合文本末尾）。
+        return measure_text_(text, font_size,
+                             /*font_alias=*/nullptr, measure_userdata_);
+    }
+    // 回退：等宽估计（0.6*font_size/字符）。仅无字体回调时用——CPU gold
+    // 测试无渲染层，据此保持确定性（不依赖真实字体度量）。
+    float w = 0.0f;
+    for (const char* p = text; *p; ++p) {
+        w += font_size * 0.6f;
+    }
+    return w;
+}
+
+UiRect Ui::ResolveBox(const UiRect& box, float ideal_w, float ideal_h,
+                      bool stretch_w, bool stretch_h) {
+    UiRect out = SanitizeBox(box);
+    // 拉伸方向：铺满 box。非拉伸方向：用理想尺寸、在 box 内收缩（不超 box）。
+    // ideal 负值视为“不可收缩”（该方向始终取 box 尺寸），防御异常入参。
+    out.size.x() =
+        (stretch_w || ideal_w < 0.0f) ? out.size.x()
+                                      : std::min(ideal_w, out.size.x());
+    out.size.y() =
+        (stretch_h || ideal_h < 0.0f) ? out.size.y()
+                                      : std::min(ideal_h, out.size.y());
+    // 非拉伸方向在 box 内居中（水平 + 垂直）。绝不为负（Sanitize 已 clamp）。
+    out.pos.x() = out.pos.x() + (box.size.x() - out.size.x()) * 0.5f;
+    out.pos.y() = out.pos.y() + (box.size.y() - out.size.y()) * 0.5f;
+    return out;
+}
+
+// ==================== 弹出层绘制原语 ====================
+
+void Ui::PushPopupFillRect(const UiRect& r, Color fill, Color border,
+                           float radius) {
+    const UiRect box = SanitizeBox(r);
+    if (OutsideViewport(box) || box.size.x() <= 0.0f || box.size.y() <= 0.0f) {
+        return;  // 越界/零面积不画。
+    }
+    const float half_min = std::min(box.size.x(), box.size.y()) * 0.5f;
+    const float safe_radius = std::clamp(radius, 0.0f, half_min);
+    const float safe_border = std::max(0.0f, theme_.border_width_px);
+    FillRect2DCommand c;
+    c.pos = box.pos;
+    c.size = box.size;
+    c.fill_color = fill;
+    c.border_color = border;
+    c.border_width = safe_border;
+    c.radius = safe_radius;
+    popup_fill_rects_.push_back(c);
+}
+
+void Ui::PushPopupLabelText(const char* s, float left, float cy, Color color) {
+    if (s == nullptr || s[0] == '\0') {
+        return;  // 空串不画。
+    }
+    Text2DCommand c;
+    c.text = s;
+    // 左对齐 + 垂直居中：pos = 左缘中点（kMidLeft）。文本无盒概念，交给渲染层。
+    c.pos = {left, cy};
+    c.font_size = theme_.font_size;
+    c.color = color;
+    c.alignment = TextAlignment::kMidLeft;
+    c.font_alias.clear();
+    popup_texts_.push_back(c);
+}
+
+// ==================== 内部绘制原语 ====================
+
+void Ui::PushFillRect(const UiRect& r, Color fill, Color border, float radius) {
+    // 规格化 box（负尺寸 clamp 0），圆角 clamp 到合法上限。
+    const UiRect box = SanitizeBox(r);
+    if (OutsideViewport(box)) {
+        return;  // 越界剔除：完全不与视口相交则跳过。
+    }
+    if (box.size.x() <= 0.0f || box.size.y() <= 0.0f) {
+        return;  // 零面积矩形不画。
+    }
+    const float half_min = std::min(box.size.x(), box.size.y()) * 0.5f;
+    const float safe_radius = std::clamp(radius, 0.0f, half_min);
+    const float safe_border = std::max(0.0f, theme_.border_width_px);
+
+    FillRect2DCommand c;
+    c.pos = box.pos;
+    c.size = box.size;
+    c.fill_color = fill;
+    c.border_color = border;
+    c.border_width = safe_border;
+    c.radius = safe_radius;
+    fill_rects_.push_back(c);
+}
+
+void Ui::PushText(const char* s, const UiRect& box) {
+    if (s == nullptr) {
+        return;
+    }
+    // 规格化 box：负尺寸 clamp 0；零尺寸文本不画。
+    const UiRect b = SanitizeBox(box);
+    if (OutsideViewport(b) || b.size.x() <= 0.0f || b.size.y() <= 0.0f) {
+        return;
+    }
+    Text2DCommand c;
+    c.text = s;
+    // 首版：按包围盒左上角对齐（TextAlignment::kTopLeft）。
+    // 具体字形度量 / 垂直居中 / 裁切（S1 文本绘制）留待后续子步骤完善，
+    // 此处先把 box 左上角写入，保证缓冲链路完整。
+    c.pos = b.pos;
+    c.font_size = theme_.font_size;
+    c.color = theme_.foreground;
+    c.alignment = TextAlignment::kTopLeft;
+    c.font_alias.clear();
+    texts_.push_back(c);
+}
+
+void Ui::PushPolyline(const std::vector<Vec2f>& vertices, Color color,
+                      float line_width) {
+    if (vertices.size() < 2) {
+        return;  // 折线至少需要 2 个顶点。
+    }
+    Polyline2DCommand c;
+    c.vertices = vertices;
+    c.color = color;
+    c.line_width = std::max(0.0f, line_width);
+    polylines_.push_back(c);
+}
+
+void Ui::PushStrip(const std::vector<Vec2f>& vertices, Color color) {
+    if (vertices.size() < 3) {
+        return;  // 三角形条带至少需要 3 个顶点。
+    }
+    Strip2DCommand c;
+    c.vertices = vertices;
+    c.color = color;
+    strips_.push_back(c);
+}
+
+void Ui::PushLabelText(const char* s, float left, float cy, Color color) {
+    if (s == nullptr || s[0] == '\0') {
+        return;  // 空串不画。
+    }
+    Text2DCommand c;
+    c.text = s;
+    // 左对齐 + 垂直居中：pos = 左缘中点（TextAlignment::kMidLeft）。
+    // 不在此做越界/零尺寸判定（文本无盒概念，交由渲染层兜底）。
+    c.pos = {left, cy};
+    c.font_size = theme_.font_size;
+    c.color = color;
+    c.alignment = TextAlignment::kMidLeft;
+    c.font_alias.clear();
+    texts_.push_back(c);
+}
+
+}  // namespace jpov

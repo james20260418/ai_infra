@@ -80,6 +80,7 @@ cc_library(
 # jpov_interface — 聚合所有接口（方便用户一次性引用）
 cc_library(
     name = "ui",
+    srcs = ["ui.cc"],
     hdrs = ["ui.h"],
     visibility = ["//visibility:public"],
     deps = [

@@ -47,6 +47,15 @@ struct Renderer {
     TextureManager& GetTextureManager() { return texture_mgr_; }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
 
+    // 测量文本以指定字号的绘制宽度（像素），语义与 DrawText2D 的布局推进
+    // 完全一致（pen 水平终点 = 光标 X）。alias 空串 → 首个注册字体；
+    // 未知别名 → crash（与 DrawText2D 的字体查找一致）。
+    // 供交互层（如 UI 输入框光标）用真实字体进宽定位，避免单一字符常数
+    // 对混合 Latin/CJK 文本失效（Latin≈0.4em / CJK≈0.69em，0.6em 偏宽）。
+    // Pre-condition: font_size > 0
+    float MeasureTextWidth(const std::string& alias, const std::string& text,
+                           float font_size);
+
     // ========== glTF 模型加载（用户可见入口） ==========
     //
     // LoadGltf: 从 .gltf/.glb 文件加载整个模型并上传 GPU 资源。

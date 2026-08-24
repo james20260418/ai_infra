@@ -125,6 +125,14 @@ public:
                  const jpov::WindowInfo& winfo,
                  const char* out_png_path);
 
+    // 测量文本以指定字号的绘制宽度（像素），语义与 DrawText2D 的布局推进
+    // 完全一致（pen 水平终点 = 光标 X）。委托 Renderer/FontRenderer，用真实
+    // 字体进宽定位——适用于 UI 输入框光标等需要与渲染层一致宽度的场景。
+    //   alias: 字体别名；空串 → 首个注册字体；未知别名 → crash。
+    // Pre-condition: Init() 已调用；font_size > 0
+    float MeasureTextWidth(const std::string& alias, const std::string& text,
+                           float font_size);
+
     // ---- 用户需实现的纯虚函数 ----
 
     // 用户实现的每帧渲染逻辑

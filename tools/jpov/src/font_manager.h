@@ -142,6 +142,21 @@ public:
                               int* selected_level /*output*/,
                               std::vector<float>* out_verts /*output*/);
 
+    // 测量文本的绘制宽度（像素，font_size 字号）。
+    //
+    // 返回字体 pen 沿水平推进的总距离——即把 text 单个字符依次排布后
+    // 最后一个字符右侧的 pen 位置（= 光标应处的 X，从文本左缘算起）。
+    // 只累加每个字形的 advance（与 GenerateTextVertices 的推进完全一致），
+    // 不含 xoff/hinting 偏移（光标应落在 pen 处，而非含 xoff 的包围盒角）。
+    //
+    // 用途：UI 层（如 InputText 光标）需要与渲染层完全一致的文本宽度，
+    // 不能用单一字符进宽常数（混合 Latin/CJK 时任何常数都不准：Latin
+    // 约 0.4em、CJK 约 0.69em，0.6em 会对 Latin 偏宽导致光标漂到 1.5~2x
+    // 文本长度）。未构建的字形按 0 宽跳过（BuildGlyph 前调用可能低估）。
+    //
+    // Pre-condition: font_size > 0
+    float MeasureTextWidth(std::string_view text, float font_size) const;
+
 private:
     FontManager() = default;
 
