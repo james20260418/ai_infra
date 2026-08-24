@@ -3,8 +3,8 @@
 // 验证 S2 按钮 Button + 命中 Hit：
 //   1. Hit：纯点-in-box 判定。点在 box 内(含边界)、box 外、面板位移偏移、
 //      零尺寸 box。
-//   2. Button 绘制：底色(accent 主色/圆角/边框) + 文本 居中；
-//      悬停态鼠标进入 → fill 变 theme_.hover。
+//   2. Button 绘制：底色(hover 深色主色/圆角/边框) + 文本 居中；
+//      悬停态鼠标进入 → fill 变 theme_.accent（亮色高亮，danis bug#15 修正）。
 //   3. 点击返回 true 且仅为一次性事件：本帧左键 Click + 释放位置在按钮内
 //      → 返回 true；下一帧(无 Click) → false。
 //   4. 容错：越界/零尺寸按钮 → 0 指令且不命中。
@@ -108,7 +108,7 @@ public:
         LOG(INFO) << "[PASS] Hit 面板位移偏移判点";
     }
 
-    // Button 普通态：鼠标在外，fill=accent 主色 + 边框，文本居中，返回 false。
+    // Button 普通态：鼠标在外，fill=hover 深色 + 边框，文本居中，返回 false。
     static void TestButtonNormalDraw() {
         Ui ui;
         RenderCommandList cmd;
@@ -123,7 +123,7 @@ public:
         CHECK(!clicked) << "鼠标在外不应触发点击";
         CHECK_EQ(cmd.fillrect2d.size(), 1u) << "按钮应产出一条背景 FillRect2D";
         CheckFill(cmd.fillrect2d[0], box.pos.x(), box.pos.y(), box.size.x(),
-                  box.size.y(), theme.accent);
+                  box.size.y(), theme.hover);
         // 文本原字号、居中（同 Text 语义，pos=box 中心）。
         CHECK_EQ(cmd.text2d.size(), 1u) << "按钮应产出标签 Text2D";
         CHECK_EQ(cmd.text2d[0].text, "GO");
@@ -131,10 +131,10 @@ public:
                  box.pos.x() + box.size.x() * 0.5f);
         CHECK_EQ(cmd.text2d[0].pos.y(),
                  box.pos.y() + box.size.y() * 0.5f);
-        LOG(INFO) << "[PASS] Button 普通态：accent 底色 + 居中文本 + 不点击";
+        LOG(INFO) << "[PASS] Button 普通态：hover 深色底色 + 居中文本 + 不点击";
     }
 
-    // Button 悬停态：鼠标进入 box → fill 变 theme_.hover。
+    // Button 悬停态：鼠标进入 box → fill 变 theme_.accent（亮色高亮）。
     static void TestButtonHover() {
         Ui ui;
         RenderCommandList cmd;
@@ -152,8 +152,8 @@ public:
         CHECK(!clicked) << "仅悬停(无 Click)不应触发点击";
         CHECK_EQ(cmd.fillrect2d.size(), 1u) << "悬停态应产出背景 FillRect2D";
         CheckFill(cmd.fillrect2d[0], box.pos.x(), box.pos.y(), box.size.x(),
-                  box.size.y(), theme.hover);
-        LOG(INFO) << "[PASS] Button 悬停态：fill=hover 变色";
+                  box.size.y(), theme.accent);
+        LOG(INFO) << "[PASS] Button 悬停态：fill=accent 亮色变色";
     }
 
     // 点击：本帧左键 Click + 释放位置在按钮内 → 返回 true（一次性）。

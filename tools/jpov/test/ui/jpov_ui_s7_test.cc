@@ -97,6 +97,7 @@ public:
         const Color bg = theme.background;
         const Color accent = theme.accent;
         const Color fg = theme.foreground;
+        const Color hover = theme.hover;
         const Color log_bg{0.09f, 0.10f, 0.12f, 1.0f};
         const Color card_bg{0.16f, 0.18f, 0.21f, 1.0f};
 
@@ -137,9 +138,9 @@ public:
                   Color{0.25f, 0.60f, 0.95f, 1.0f});
         CHECK(HasTextSubstr(cmd, "色样"));
 
-        // ---- 2g. 按钮行（reset / apply，底色 accent）----
-        CheckFill(cmd.fillrect2d[11], 16.0f, 274.0f, 120.0f, 30.0f, accent);
-        CheckFill(cmd.fillrect2d[12], 152.0f, 274.0f, 120.0f, 30.0f, accent);
+        // ---- 2g. 按钮行（reset / apply，底色 hover 深色——非悬停态默认）----
+        CheckFill(cmd.fillrect2d[11], 16.0f, 274.0f, 120.0f, 30.0f, hover);
+        CheckFill(cmd.fillrect2d[12], 152.0f, 274.0f, 120.0f, 30.0f, hover);
         CHECK(HasTextSubstr(cmd, "重置"));
         CHECK(HasTextSubstr(cmd, "应用"));
 

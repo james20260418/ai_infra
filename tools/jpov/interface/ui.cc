@@ -145,8 +145,10 @@ bool Ui::Button(const char* label, const UiRect& box, Stretch /*stretch*/) {
     const InputSnapshot& in = *input_;
     const bool hovered = Hit(b, 0.0f, 0.0f, in);
 
-    // 背景：悬停变色。accent 为按钮主色，悬停用 hover 填充色。
-    const Color fill = hovered ? theme_.hover : theme_.accent;
+    // 背景：悬停变色。accent 为亮色高亮（按钮主色），hover 为深色填充。
+    // danis 验收 bug #15：原 fill=hovered?hover:accent 深/浅恰好反了——悬停应
+    // 用亮色(accent)提示，默认(非悬停)用深色(hover)。故改 hovered?accent:hover。
+    const Color fill = hovered ? theme_.accent : theme_.hover;
     PushFillRect(b, fill, theme_.border, theme_.corner_radius_px);
     // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
     Text(label, b);
