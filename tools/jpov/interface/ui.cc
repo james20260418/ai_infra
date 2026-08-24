@@ -51,13 +51,15 @@ UiTheme UiTheme::Default(float font_size) {
 // ==================== Ui 生命周期 ====================
 
 void Ui::Begin(const InputSnapshot& input, const UiTheme& theme,
-               float width, float height) {
+               float width, float height, float frame_dt_ms) {
     CHECK_GE(width, 0.0f) << "Ui viewport width must be >= 0";
     CHECK_GE(height, 0.0f) << "Ui viewport height must be >= 0";
+    CHECK_GE(frame_dt_ms, 0.0f) << "Ui frame_dt_ms must be >= 0";
     input_ = &input;
     theme_ = theme;
     width_ = width;
     height_ = height;
+    frame_dt_ms_ = frame_dt_ms;
     // 每帧从零构建：清空上一帧收集的指令。
     fill_rects_.clear();
     texts_.clear();
@@ -448,14 +450,41 @@ char UiInputCharForKey(KeyCode key) {
     }
 }
 
-// 本帧某键应触发的“按键动作次数”（键盘 hold 重复用）：
-//   - Click 帧：值为本帧点击次数（低帧率同帧多击）。
-//   - Hold 帧：值为 1（按住不放期间每帧再触发 1 次，与逐次键入等价，
-//     使按住 Backspace/字符能连续删除/输入，验收 bug#8）。
-//   - None：0（无动作）。
+// 本帧某键应触发的“按键重复动作次数”（键盘 hold 150ms 阈值两态，验收 bug#11）：
+//   - Click 帧：重复次数恒为 0（首次输入由调用方按 click_count 立即写入，
+//     那是“单击/短按”，不属于 hold 重复）。
+//   - Hold 帧：跨帧累计按住时长，累计 > kKeyHoldRepeatDelayMs(150ms) 后视为
+//     连续按下，每满 kKeyHoldRepeatIntervalMs(150ms) 触发 1 次。
+//     hold 时间 < 150ms（含短按后释放）不产生重复（可能是一次短click）。
+//   - None：无动作，清零累计。
+// 仅在调用方传入 frame_dt_ms>0（有真实时钟）时才有意义；frame_dt_ms<=0
+// 时无时间信息，恒返回 0（不产生 hold 重复，行为保守）。
 // 供 InputText 写回 char* 时统一消费，避免 Click 与 Hold 语义分叉。
-int KeyActions(const KeyState& ks) {
-    return ks.IsClick() ? ks.click_count() : (ks.IsHold() ? 1 : 0);
+int Ui::AdvanceKeyHold(KeyCode key) {
+    const int idx = static_cast<int>(key);
+    const KeyState& ks = input_->GetKey(key);
+    if (!ks.IsHold()) {
+        // 非 Hold（None/Click，即已释放或本帧只是单击）：清零跨帧累计，无重复。
+        hold_ms_[idx] = 0.0f;
+        hold_emitted_repeats_[idx] = 0;
+        return 0;
+    }
+    // key 仍被按住（Hold）：累计本帧时长。
+    if (frame_dt_ms_ <= 0.0f) {
+        return 0;  // 无时钟：不做阈值判断。
+    }
+    hold_ms_[idx] += frame_dt_ms_;
+    // 应发出的累计重复次数：hold 时间 > 150ms 后，每 150ms 计 1 次。
+    int target = 0;
+    if (hold_ms_[idx] > kKeyHoldRepeatDelayMs) {
+        target = static_cast<int>(
+            (hold_ms_[idx] - kKeyHoldRepeatDelayMs) / kKeyHoldRepeatIntervalMs);
+        target = std::max(target, 0);
+    }
+    // 本帧新增重复次数 = 目标累计 - 已发出（跨帧不重发）。
+    const int delta = target - hold_emitted_repeats_[idx];
+    hold_emitted_repeats_[idx] = target;
+    return std::max(delta, 0);
 }
 
 bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
@@ -519,13 +548,16 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
             input_focused_ = false;
         } else {
             // Backspace：删除最后一个字符（删除发生在追加前）。
-            // 支持键盘 hold 重复（按住连续删除）：
-            //   - Click 帧：按 click_count 次删除（低帧率同帧多击）。
-            //   - Hold 帧：本帧再删 1 次（与逐次键入等价，见 KeyActions）。
+            // 键盘 hold 150ms 阈值两态（验收 bug#11）：
+            //   - Click 帧：按 click_count 次删除（短按一次删 1 个）。
+            //   - Hold 帧：AdvanceKeyHold 累计按住时长，>150ms 后每 150ms 删 1 次；
+            //     <150ms 的短按（已被 Click 消费）不再重复删除。
             const KeyState& bs = in.GetKey(KeyCode::Backspace);
             {
+                const int repeats =
+                    bs.IsClick() ? bs.click_count() : AdvanceKeyHold(KeyCode::Backspace);
                 const size_t n =
-                    std::min(static_cast<size_t>(KeyActions(bs)), len);
+                    std::min(static_cast<size_t>(std::max(repeats, 0)), len);
                 for (size_t i = 0; i < n; ++i) {
                     buffer[len - i - 1] = '\0';
                 }
@@ -533,14 +565,16 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
                 buffer[len] = '\0';
             }
             // 可编辑字符：从 KeyCode 读，逐字符追加，遇容量上限截断（S5.2）。
-            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。支持键盘
-            // hold 重复（按住连续输入，见 KeyActions）：Click 帧按次追加，
-            // Hold 帧追加 1 次。容量满则丢弃余量（截断）。
+            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。键盘 hold
+            // 150ms 阈值两态（验收 bug#11）：Click 帧按次追加（单击立即输入）；
+            // Hold 帧由 AdvanceKeyHold 每 150ms 追加 1 次。容量满则丢弃余量（截断）。
             for (int code = static_cast<int>(KeyCode::Space);
                  code <= static_cast<int>(KeyCode::Z); ++code) {
                 const KeyState& ks = in.GetKey(static_cast<KeyCode>(code));
-                const int actions = KeyActions(ks);
-                if (actions == 0) {
+                const int actions = ks.IsClick()
+                                        ? ks.click_count()
+                                        : AdvanceKeyHold(static_cast<KeyCode>(code));
+                if (actions <= 0) {
                     continue;
                 }
                 const char ch = UiInputCharForKey(static_cast<KeyCode>(code));

@@ -532,67 +532,151 @@ public:
         LOG(INFO) << "[PASS] InputText 光标用文本测量回调精确定位(验收 bug#7)";
     }
 
-    // 键盘 hold 重复（验收 bug#8 根因修复）：按住不放应连续触发，非仅单次。
-    //   1. 首帧 Click：写入 1 次；随后连续 Hold 帧：每帧再写入 1 次（
-    //      与“逐次键入等价”）。
-    //   2. 按住 Backspace：Click 删 1 个，Hold 帧每帧再删 1 个，与逐次删除等价。
-    //   3. 释放（None）后不再触发。
-    static void TestKeyboardHoldRepeat() {
+    // 键盘 hold 150ms 阈值两态（验收 bug#11）：按住>150ms视为连续按下每150ms
+    // 计1字符；<150ms 的 hold（短按）不产生重复（可能是一次短click，仅 Click
+    // 帧的首次写入生效）。
+    // 用显式 frame_dt_ms 模拟时间：
+    //   - 阈值延迟 kKeyHoldRepeatDelayMs=150ms，重复间隔 kKeyHoldRepeatIntervalMs=150ms。
+    //   每 Hold 帧累计 frame_dt_ms；累计>150ms 后开始计，每 150ms 触发 1 次。
+    //   本测试用 frame_dt_ms=200ms：帧1 累计200(触发0次)、帧2 累计400(目标1)、
+    //   帧3 累计600(目标3)、帧4 累计800(目标4)；新增=目标差值。
+    static void TestKeyboardHoldThreshold150ms() {
         const UiTheme theme = UiTheme::Default(16.0f);
         const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
-        Ui ui;
-        char buf[64] = "";
-        // 聚焦输入框。
-        ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
-        ui.InputText("n", buf, sizeof(buf), box);
-        ui.End();
-
-        // 1. 按住字符 'a'：首帧 Click 写 1 个，随后 3 个 Hold 帧各写 1 个 → "aaaa"。
+        const float dt_short = 50.0f;   // 短帧：2 帧累计 100ms < 150ms。
+        const float dt_long = 200.0f;   // 长帧：每帧 200ms，可跨过 150ms 阈值。
         {
-            InputSnapshot in = MakePlainInput();
-            PressKey(&in, KeyCode::A);  // 首帧 Click。
-            ui.Begin(in, theme, 640.0f, 360.0f);
+            // A. 短 hold（<150ms）：Click 立即写 1 个；随后 2 个 Hold 帧共 100ms
+            //    <150ms → 不产生重复。buffer 保持 1 个字符。
+            Ui ui;
+            char buf[64] = "";
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();  // 聚焦。
+            {
+                InputSnapshot in = MakePlainInput();
+                PressKey(&in, KeyCode::A);  // 单击：立即写 1 个。
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_short);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "a") << "单击(short)写 1 个字符";
+            }
+            for (int i = 0; i < 2; ++i) {           // 累计 50+50=100ms <150ms。
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::A);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_short);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+            }
+            CHECK_STREQ(buf, "a") << "短 hold(<150ms) 不产生重复";
+            // 释放：不再触发。
+            ui.Begin(MakePlainInput(), theme, 640.0f, 360.0f, dt_short);
             ui.InputText("n", buf, sizeof(buf), box);
             ui.End();
-            CHECK_STREQ(buf, "a") << "Click 帧写 1 个字符";
+            CHECK_STREQ(buf, "a") << "释放后不再触发";
         }
-        for (int i = 0; i < 3; ++i) {
-            InputSnapshot in = MakePlainInput();
-            HoldKey(&in, KeyCode::A);  // Hold 帧：每帧再写 1 个。
-            ui.Begin(in, theme, 640.0f, 360.0f);
-            ui.InputText("n", buf, sizeof(buf), box);
-            ui.End();
-        }
-        CHECK_STREQ(buf, "aaaa") << "Hold 帧连续追加，与逐次键入等价";
-
-        // 2. 按住 Backspace：首帧 Click 删 1 个(→"aaa")，随后 2 个 Hold 帧
-        //    各删 1 个(→"aa"→"a")，与逐次删除等价。
         {
-            InputSnapshot in = MakePlainInput();
-            PressKey(&in, KeyCode::Backspace);
-            ui.Begin(in, theme, 640.0f, 360.0f);
+            // B. 长 hold（>150ms）：Click 写 1 个；随后 Hold 帧每帧 200ms 累计，
+            //    跨过 150ms 阈值后按 150ms 间隔重复。
+            Ui ui;
+            char buf[64] = "";
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();  // 聚焦。
+            {
+                InputSnapshot in = MakePlainInput();
+                PressKey(&in, KeyCode::A);  // 单击写 1 个。
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "a") << "长 hold 首帧(Click)写 1 个";
+            }
+            // 帧1 Hold：累计 200ms>150ms，但(200-150)/150=0 → 仍 0 重复。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::A);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "a") << "累计 200ms 尚未够一个 150ms 间隔，无重复";
+            }
+            // 帧2 Hold：累计 400ms，(400-150)/150=1 → 新增 1 重复。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::A);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "aa") << "累计 400ms 触发 1 次重复";
+            }
+            // 帧3 Hold：累计 600ms，(600-150)/150=3 → 新增 2 重复。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::A);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "aaaa") << "累计 600ms 累计 3 次重复";
+            }
+            // 帧4 Hold：累计 800ms，(800-150)/150=4 → 新增 1 重复。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::A);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "aaaaa") << "累计 800ms 累计 4 次重复";
+            }
+            // 释放：清累计，不再触发。
+            ui.Begin(MakePlainInput(), theme, 640.0f, 360.0f, dt_long);
             ui.InputText("n", buf, sizeof(buf), box);
             ui.End();
-            CHECK_STREQ(buf, "aaa") << "Backspace Click 删 1 个";
+            CHECK_STREQ(buf, "aaaaa") << "释放后不再触发";
         }
-        for (int i = 0; i < 2; ++i) {
-            InputSnapshot in = MakePlainInput();
-            HoldKey(&in, KeyCode::Backspace);
-            ui.Begin(in, theme, 640.0f, 360.0f);
-            ui.InputText("n", buf, sizeof(buf), box);
-            ui.End();
-        }
-        CHECK_STREQ(buf, "a") << "Backspace Hold 帧连续删除，与逐次删除等价";
-
-        // 3. 释放（None）：不再触发，buffer 不变。
         {
-            InputSnapshot in = MakePlainInput();  // 无任何按键。
-            ui.Begin(in, theme, 640.0f, 360.0f);
+            // C. Backspace 长 hold（>150ms）：单击删 1，long-hold 按阈值重复删。
+            Ui ui;
+            char buf[64] = "abcdef";
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
             ui.InputText("n", buf, sizeof(buf), box);
-            ui.End();
-            CHECK_STREQ(buf, "a") << "释放后不再触发，buffer 保持";
+            ui.End();  // 聚焦。
+            {
+                InputSnapshot in = MakePlainInput();
+                PressKey(&in, KeyCode::Backspace);  // 单击删 1 个。
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "abcde") << "Backspace 单击删 1 个";
+            }
+            // 帧1：累计 200ms 无重复。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::Backspace);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "abcde") << "Backspace 累计 200ms 无重复";
+            }
+            // 帧2：累计 400ms → 目标 1 次重复删除。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::Backspace);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "abcd") << "Backspace 累计 400ms 重复删 1 个";
+            }
+            // 帧3：累计 600ms → 目标 3 次，新增 2 次删除。
+            {
+                InputSnapshot in = MakePlainInput();
+                HoldKey(&in, KeyCode::Backspace);
+                ui.Begin(in, theme, 640.0f, 360.0f, dt_long);
+                ui.InputText("n", buf, sizeof(buf), box);
+                ui.End();
+                CHECK_STREQ(buf, "ab") << "Backspace 累计 600ms 再删 2 个";
+            }
         }
-        LOG(INFO) << "[PASS] InputText 键盘 hold 重复(连续输入/删除，验收 bug#8)";
+        LOG(INFO) << "[PASS] InputText 键盘 hold 150ms 阈值两态(验收 bug#11)";
     }
 
     static void RunAll() {
@@ -607,7 +691,7 @@ public:
         TestGoldCommands();
         TestOffscreenInputText();
         TestCaretUsesTextMeasure();
-        TestKeyboardHoldRepeat();
+        TestKeyboardHoldThreshold150ms();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };

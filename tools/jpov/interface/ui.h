@@ -139,10 +139,15 @@ public:
     // 每帧开始。input 为窗口层帧级输入；theme 为本帧主题；
     // width/height 为渲染分辨率（像素），用于越界剔除
     // （与本视口不相交的控件跳过，不画不命中）。
+    // frame_dt_ms：本帧时长（毫秒），供键盘 hold 重复的 150ms 阈值计时用。
+    //   传真实帧时长时：按键被持续按住累计超过 kKeyHoldRepeatDelayMs 才会
+    //   开始重复，之后每累计 kKeyHoldRepeatIntervalMs 再触发一次（验收bug#11）。
+    //   传 0（缺省，如无时钟的 CPU gold 测试）：hold 不产生额外重复字符
+    //   （无时间信息则无法做阈值判断，仅单次 Click 立即输入，行为保守）。
     // 本帧控件会先记录，Emit 时一次性追加到 RenderCommandList。
     // 每帧只允许一次 Begin。
     void Begin(const InputSnapshot& input, const UiTheme& theme,
-               float width, float height);
+               float width, float height, float frame_dt_ms = 0.0f);
 
     // 每帧结束（可选）。Emit 会隐式结束。
     void End();
@@ -243,6 +248,16 @@ private:
     // return：文本绘制后 pen 落到的水平终点（像素，相对文本左缘）。
     float MeasureTextWidth(const char* text, float font_size) const;
 
+    // 键盘 hold 重复的累计计时（150ms 阈值两态，验收 bug#11）。
+    // 输入框消费按键时调用：更新某 key 的跨帧 hold 时长累计，
+    // 返回本帧应触发的“重复”动作次数（不包含 Click 帧的首次输入）：
+    //   - key 处于 Hold：hold_ms_[key] += frame_dt_ms_；
+    //     累计 > kKeyHoldRepeatDelayMs 后，每满 kKeyHoldRepeatIntervalMs
+    //     触发 1 次（返回本帧新增长的部分，跨帧不重复发）。
+    //   - key 非 Hold（本帧 None/Click，即已释放）：清零 hold_ms_[key]，返回 0。
+    // 返回值为>=0 的整数动作次数；frame_dt_ms_<=0 时（无时钟）恒返回 0。
+    int AdvanceKeyHold(KeyCode key);
+
     const InputSnapshot* input_ = nullptr;  // 本帧输入（Begin 设置）
     UiTheme theme_;         // 本帧主题拷贝
     float width_ = 0;       // 视口宽（Begin 设置，越界剔除用）
@@ -268,6 +283,17 @@ private:
     // 光标不越出 box 右缘（S5.3 内部 scroll，不溢出）。跨帧保持以免重绘闪烁。
     float input_scroll_px_ = 0.0f;
 
+    // 本帧时长（毫秒），Begin 设置；<=0 表示无时钟（不产生 hold 重复）。
+    float frame_dt_ms_ = 0.0f;
+    // 键盘 hold 重复跨帧累积：按键被持续按住的总时长（毫秒）。
+    // 每帧 AdvanceKeyHold 更新，key 释放（None/Click）时清零。
+    // 下标 = KeyCode 数值，与 InputSnapshot::keys 对齐。
+    // 已发出的重复次数也由 hold_emitted_repeats_ 记录，避免跨帧重发。
+    // 用空括号列表初始化（C++11 默认成员初始化），保证 Ui 对象构造时
+    // 数组清零（本类无显式构造函数，跨帧持久状态不能被垃圾值污染）。
+    float hold_ms_[kMaxKeyCode] = {};
+    int hold_emitted_repeats_[kMaxKeyCode] = {};
+
     // ---- 跨帧状态（仅 Combo 下拉展开需要；其余控件一律无状态）----
     // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）。下拉的展开/收起
     // 属于显式状态语义（需跨帧保持可见），故用与 InputText 焦点相同的模式：
@@ -275,6 +301,13 @@ private:
     // box 与之相等则视为展开态。
     bool combo_open_ = false;
     UiRect combo_open_box_{};  // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）
+
+    // ---- 跨帧状态（仅 InputText 键盘 hold 重复需要；其余控件一律无状态）----
+    // 键盘 hold 重复阈值（毫秒，验收 bug#11 两态）：
+    //   累计 hold 时间 > kKeyHoldRepeatDelayMs 视为连续按下，开始重复；
+    //   之后每累计 kKeyHoldRepeatIntervalMs 触发 1 次。
+    static constexpr float kKeyHoldRepeatDelayMs = 150.0f;
+    static constexpr float kKeyHoldRepeatIntervalMs = 150.0f;
 
     // ---- 跨帧状态（仅 SliderFloat 拖动需要；其余控件一律无状态）----
     // 正在被拖动的滑条框 box（slider_drag_active_ 为 true 时有效）。滑条

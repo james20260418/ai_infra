@@ -64,12 +64,15 @@ public:
         // 主题（16px flat 深色）。
         const jpov::UiTheme theme = jpov::UiTheme::Default(jpov::kUiDemoFontSize);
 
-        // 帧时钟（log 时间戳源）：固定 30fps 帧周期（与 target_fps 一致）。
+        // 帧时钟（log 时间戳源 + 键盘 hold 150ms 阈值计时）：固定 30fps 帧周期
+        // （与 target_fps 一致）。frame_dt_ms 传给 Ui::Begin 供 hold 重复计时。
         st_.frame = static_cast<int>(frame_count);
         st_.time_s = static_cast<double>(frame_count) * (1.0 / 30.0);
+        const float frame_dt_ms = 1000.0f / 30.0f;  // ≈33.33ms/帧
 
         // 即时模式：每帧 Begin → 画整台 → End → Emit。
-        ui_.Begin(input, theme, jpov::kUiDemoWidth, jpov::kUiDemoHeight);
+        ui_.Begin(input, theme, jpov::kUiDemoWidth, jpov::kUiDemoHeight,
+                  frame_dt_ms);
         jpov::DrawUiDemoPanel(ui_, cmds, st_);
         ui_.End();
         ui_.Emit(cmds);
