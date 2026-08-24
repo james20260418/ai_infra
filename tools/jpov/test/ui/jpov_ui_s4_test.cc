@@ -490,6 +490,49 @@ public:
         LOG(INFO) << "[PASS] SliderFloat 越界/零尺寸 → 0 指令、不写值";
     }
 
+    // 小数位（增强1）：decimal_places 控制数值文本显示精度，默认 0=整数。
+    static void TestDecimalPlaces() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 20.0f}};
+        {
+            // decimal_places=2 → 显示 0.25（保留两位）。
+            Ui ui;
+            RenderCommandList cmd;
+            float value = 0.25f;
+            ui.Begin(MakeInput(100.0f, 100.0f), theme, 640.0f, 360.0f);
+            ui.SliderFloat("speed", &value, box, 0.0f, 1.0f,
+                           /*decimal_places=*/2);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextPrefix(cmd, "speed: 0.25"))
+                << "decimal_places=2 应显示 speed: 0.25";
+        }
+        {
+            // 默认 decimal_places=0 → 显示整数 0（% .0f 四舍五入）。
+            Ui ui;
+            RenderCommandList cmd;
+            float value = 0.25f;
+            ui.Begin(MakeInput(100.0f, 100.0f), theme, 640.0f, 360.0f);
+            ui.SliderFloat("speed", &value, box, 0.0f, 1.0f);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextPrefix(cmd, "speed: 0"));
+        }
+        {
+            // decimal_places=1 → 0.26 四舍五入显示 0.3（一位小数）。
+            Ui ui;
+            RenderCommandList cmd;
+            float value = 0.26f;
+            ui.Begin(MakeInput(100.0f, 100.0f), theme, 640.0f, 360.0f);
+            ui.SliderFloat("speed", &value, box, 0.0f, 1.0f,
+                           /*decimal_places=*/1);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextPrefix(cmd, "speed: 0.3"));
+        }
+        LOG(INFO) << "[PASS] SliderFloat decimal_places 控制小数显示";
+    }
+
     static void RunAll() {
         TestDragMapsMultipleStops();
         TestBoundaryMinMax();
@@ -501,6 +544,7 @@ public:
         TestThinBoxHandleClamp();
         TestNarrowBoxTrackStillDrawn();
         TestOffscreenSlider();
+        TestDecimalPlaces();
         LOG(INFO) << "===== UI S4 (SliderFloat) 自证全部通过 =====";
     }
 };

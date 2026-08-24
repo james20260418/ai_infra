@@ -246,8 +246,8 @@ public:
         LOG(INFO) << "[PASS] Button 越界/零尺寸 → 0 指令、不命中";
     }
 
-    // 按下态：左键在按钮内按住（Hold）→ fill 变 theme_.pressed（Bug#5）。
-    // gold 校验：按下帧产出 pressed 填充色；返回 false（仅按住不触发 Click）。
+    // 按下态：左键在按钮内按住（Hold）→ fill 变 theme_.selected（danis 增强：按下用沉稳深色）（Bug#5）。
+    // gold 校验：按下帧产出 selected 深蓝；返回 false（仅按住不触发 Click）。
     static void TestButtonPressed() {
         Ui ui;
         RenderCommandList cmd;
@@ -265,8 +265,8 @@ public:
         CHECK(!clicked) << "按住(无 Click)不应触发点击";
         CHECK_EQ(cmd.fillrect2d.size(), 1u) << "按下态应产出背景 FillRect2D";
         CheckFill(cmd.fillrect2d[0], box.pos.x(), box.pos.y(), box.size.x(),
-                  box.size.y(), theme.pressed);
-        LOG(INFO) << "[PASS] Button 按下态：hold → fill=pressed 变色";
+                  box.size.y(), theme.selected);
+        LOG(INFO) << "[PASS] Button 按下态：hold → fill=selected 变色";
     }
 
     // 按下态持续：左键在按钮内按下开始后，鼠标飘出按钮（Drag）仍保持按下色，
@@ -279,7 +279,7 @@ public:
         const float my = box.pos.y() + box.size.y() * 0.5f;
         Ui ui;  // 跨帧持有同一 Ui（按下状态在其中）。
 
-        // 帧 1：按钮内按下（Hold）→ pressed。
+        // 帧 1：按钮内按下（Hold）→ selected。
         {
             RenderCommandList cmd;
             ui.Begin(MakeHoldInput(mx, my), theme, 640.0f, 360.0f);
@@ -287,9 +287,9 @@ public:
             ui.End();
             ui.Emit(&cmd);
             CheckFill(cmd.fillrect2d[0], box.pos.x(), box.pos.y(), box.size.x(),
-                      box.size.y(), theme.pressed);
+                      box.size.y(), theme.selected);
         }
-        // 帧 2：鼠标飘出按钮（Drag，左键仍按住）→ 仍 pressed。
+        // 帧 2：鼠标飘出按钮（Drag，左键仍按住）→ 仍 selected。
         {
             RenderCommandList cmd;
             ui.Begin(MakeDragInput(500.0f, 300.0f), theme, 640.0f, 360.0f);
@@ -297,12 +297,12 @@ public:
             ui.End();
             ui.Emit(&cmd);
             CheckFill(cmd.fillrect2d[0], box.pos.x(), box.pos.y(), box.size.x(),
-                      box.size.y(), theme.pressed);
+                      box.size.y(), theme.selected);
         }
         LOG(INFO) << "[PASS] Button 按下态：鼠标飘出 box 仍保持，直到释放";
     }
 
-    // 按下态释放：左键松开后恢复默认/hover 色（不再 pressed）。
+    // 按下态释放：左键松开后恢复默认/hover 色（不再 selected）。
     // 帧 1 按下（Hold）→ 帧 2 左键松开（None，鼠标仍悬停）→ hover 亮色。
     static void TestPressedReleasesOnMouseUp() {
         const UiTheme theme = UiTheme::Default(16.0f);
@@ -311,14 +311,14 @@ public:
         const float my = box.pos.y() + box.size.y() * 0.5f;
         Ui ui;  // 跨帧持有同一 Ui。
 
-        // 帧 1：按下（Hold）→ pressed。
+        // 帧 1：按下（Hold）→ selected。
         {
             RenderCommandList cmd;
             ui.Begin(MakeHoldInput(mx, my), theme, 640.0f, 360.0f);
             ui.Button("GO", box);
             ui.End();
             ui.Emit(&cmd);
-            CHECK_EQ(cmd.fillrect2d[0].fill_color.r, theme.pressed.r)
+            CHECK_EQ(cmd.fillrect2d[0].fill_color.r, theme.selected.r)
                 << "帧1 未按下？";
         }
         // 帧 2：左键已松开（None），鼠标仍悬停在按钮内 → 恢复 hover 亮色。
@@ -335,14 +335,14 @@ public:
     }
 
     // 按下态所有权：A 按钮被按住时鼠标飘越另一个按钮 B，B 不误抢按下态
-    // （被按的 A 保持 pressed，B 保持 hover/default；与 Slider drag 不互抢一致）。
+    // （被按的 A 保持 selected，B 保持 hover/default；与 Slider drag 不互抢一致）。
     static void TestPressedOwnershipNotStolen() {
         const UiTheme theme = UiTheme::Default(16.0f);
         const UiRect boxA{{20.0f, 30.0f}, {140.0f, 36.0f}};
         const UiRect boxB{{200.0f, 30.0f}, {140.0f, 36.0f}};
         Ui ui;  // 跨帧持有同一 Ui。
 
-        // 帧 1：A 内按下（Hold）→ A pressed、B 默认深色。
+        // 帧 1：A 内按下（Hold）→ A selected、B 默认深色。
         {
             RenderCommandList cmd;
             ui.Begin(MakeHoldInput(60.0f, 48.0f), theme, 640.0f, 360.0f);
@@ -350,12 +350,12 @@ public:
             ui.Button("B", boxB);
             ui.End();
             ui.Emit(&cmd);
-            CHECK_EQ(cmd.fillrect2d[0].fill_color.r, theme.pressed.r)
+            CHECK_EQ(cmd.fillrect2d[0].fill_color.r, theme.selected.r)
                 << "帧1 A 应按下";
             CHECK_EQ(cmd.fillrect2d[1].fill_color.r, theme.hover.r)
                 << "帧1 B 未被按，应为默认深色";
         }
-        // 帧 2：鼠标飘到 B 上方（Drag，左键仍按住）→ A 仍 pressed，B 不抢。
+        // 帧 2：鼠标飘到 B 上方（Drag，左键仍按住）→ A 仍 selected，B 不抢。
         {
             RenderCommandList cmd;
             ui.Begin(MakeDragInput(250.0f, 48.0f), theme, 640.0f, 360.0f);
@@ -365,7 +365,7 @@ public:
             ui.Emit(&cmd);
             // 指令顺序与控件调用顺序一致：A 在前、B 在后。
             CheckFill(cmd.fillrect2d[0], boxA.pos.x(), boxA.pos.y(),
-                      boxA.size.x(), boxA.size.y(), theme.pressed);
+                      boxA.size.x(), boxA.size.y(), theme.selected);
             CheckFill(cmd.fillrect2d[1], boxB.pos.x(), boxB.pos.y(),
                       boxB.size.x(), boxB.size.y(), theme.accent);
         }

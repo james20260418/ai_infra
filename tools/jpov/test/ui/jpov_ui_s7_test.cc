@@ -85,14 +85,17 @@ public:
         // → 22 FillRect。
         // Text 20 条：标题/全局参数/增益: 5/使能/Combo项/输入占位/色样/重置/应用/
         //   电机组标题/电机×3(标题+speed+反转=9)/实时日志。
-        // → Polyline 2 条：使能勾选 ✓ + Combo 收起下箭头。
+        // → Polyline 1 条：使能勾选 ✓；Strip 1 条：Combo 收起实心下箭头。
         CHECK_EQ(cmd.fillrect2d.size(), 22u)
             << "全貌 FillRect 数量不符，实际=" << cmd.fillrect2d.size();
         CHECK_EQ(cmd.text2d.size(), 20u)
             << "全貌 Text 数量不符，实际=" << cmd.text2d.size();
-        CHECK_EQ(cmd.polyline2d.size(), 2u)
-            << "全貌 Polyline 数量不符（期望 使能✓ + combo箭头），实际="
+        CHECK_EQ(cmd.polyline2d.size(), 1u)
+            << "全貌 Polyline 数量不符（期望 使能✓），实际="
             << cmd.polyline2d.size();
+        CHECK_EQ(cmd.strip2d.size(), 1u)
+            << "全貌 Strip 数量不符（期望 combo实心箭头），实际="
+            << cmd.strip2d.size();
 
         const Color bg = theme.background;
         const Color accent = theme.accent;
@@ -184,27 +187,31 @@ public:
         // ---- 2i. 实时日志 ----
         CHECK(HasTextSubstr(cmd, "实时日志"));
 
-        // ---- 3. 折线：使能勾选 ✓（首条）+ Combo 收起下箭头（次条）----
-        // 绘制顺序：使能复选框在前、Combo 在后 → polyline2d[0]=✓, [1]=箭头。
-        CHECK_EQ(cmd.polyline2d.size(), 2u);
+        // ---- 3. 折线/条带：使能勾选 ✓（polyline）+ Combo 收起实心箭头（strip）----
         // 使能勾选 ✓：3 顶点折线（非平坦底边，中间点下沉再上挑）。
+        CHECK_EQ(cmd.polyline2d.size(), 1u);
         CHECK_EQ(cmd.polyline2d[0].vertices.size(), 3u)
             << "使能勾选应为 3 顶点折线";
-        // Combo 下箭头：3 顶点三角形，底边两端 y 相等（水平），顶点朝下居中。
+        // Combo 实心下箭头：4 顶点三角形条带（顶点重合闭合），底边两端
+        // y 相等（水平），顶点朝下居中。
         {
-            const Polyline2DCommand& a = cmd.polyline2d[1];
-            CHECK_EQ(a.vertices.size(), 3u) << "Combo 下箭头应为 3 顶点三角形";
+            const Strip2DCommand& a = cmd.strip2d[0];
+            CHECK_EQ(a.vertices.size(), 4u) << "Combo 实心箭头应为 4 顶点条带";
             CHECK_NEAR(a.vertices[1].y(), a.vertices[0].y(), 0.01f);
             CHECK_GT(a.vertices[2].y(), a.vertices[0].y()) << "顶点应朝下";
             const float mid_x = a.vertices[0].x() +
                 (a.vertices[1].x() - a.vertices[0].x()) * 0.5f;
             CHECK_NEAR(a.vertices[2].x(), mid_x, 0.01f);
+            // 闭合顶点与 p2 重合。
+            CHECK_NEAR(a.vertices[3].x(), a.vertices[2].x(), 0.01f);
+            CHECK_NEAR(a.vertices[3].y(), a.vertices[2].y(), 0.01f);
         }
 
         LOG(INFO) << "[PASS] S7 集成 demo 一次 Emit gold 全貌比对通过"
                   << " (fill=" << cmd.fillrect2d.size()
                   << ", text=" << cmd.text2d.size()
-                  << ", poly=" << cmd.polyline2d.size() << ")";
+                  << ", poly=" << cmd.polyline2d.size()
+                  << ", strip=" << cmd.strip2d.size() << ")";
     }
 
     // 验证实时 Log 输出框：追加 log 后，面板会把最新条目以 Text 指令体现。

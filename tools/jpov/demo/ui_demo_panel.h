@@ -257,8 +257,9 @@ inline void DrawUiDemoPanel(Ui& ui, RenderCommandList* cmd, UiDemoState& st) {
     ui.Text("全局参数",
             UiRect{{kUiDemoPad, kUiDemoGlobalHeaderY}, {200.0f, kUiDemoSectionH}});
 
-    // 增益滑条 [0,10]。
-    if (ui.SliderFloat("增益", &st.gain, GlobalRow(0), 0.0f, 10.0f)) {
+    // 增益滑条 [0,10]（decimal_places=1 展示小数位显示）。
+    if (ui.SliderFloat("增益", &st.gain, GlobalRow(0), 0.0f, 10.0f,
+                       /*decimal_places=*/1)) {
         st.log.Append(st.time_s, "增益调整为 %.1f", st.gain);
     }
 

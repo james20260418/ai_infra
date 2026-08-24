@@ -1,63 +1,75 @@
 // JPOV UI — 即时模式控件（Immediate-Mode UI）
 //
-// 定位：面向"Agent 与设计者共同操作的运行期调试面板/参数台"。
+// 定位：面向"Agent 与设计者共同操作"的运行期调试面板/参数台。
 //
-// 架构选择（与需求方反复讨论后最终定稿）：
-// - 不做自动布局（无行列容器/无布局引擎）。每个控件必须显式给出
-//   像素级 UiRect（box），布局真相内聚在一个 struct，一眼可读，
-//   理解成本远低于行列嵌套/布局引擎。
-// - box 内默认 NEWS 全面覆盖（控件自动填满所在 box，母控件变宽则子跟着变宽），
-//   可手动覆盖某个方向的拉伸，实现常用对齐。
-// - 控件状态外置：用户提供参数指针（float*、bool*...），交互结果写回。
-//   不跨帧记忆状态 → 每帧从零构建，符合"无状态渲染"。
-// - 一个 Ui 对象对应一个 root 面板，用户跨帧持有。
-// - 可自测：控件产出纯 2D 指令（可被 gold 图比对），不直接接触渲染器。
+// ============================= 怎么用（3 步） =============================
+//   一个 Ui 对象对应一块面板，跨帧持有。每帧：
 //
-// 坐标系统一约定（沿用 JPOV 2D）：
-// - 屏幕像素坐标，原点在渲染分辨率左上角（x→右，y→下）。
-// - 所有 UiRect 均为【Ui 面板的局部坐标】。Ui 的 root 面板左上角即原点 (0,0)；
-//   控件 box 坐标是相对 root 面板的偏移，不是窗口绝对坐标。
-//   若面板不在窗口 (0,0)，需自行做一次位移（本接口不负责面板定位）。
-// - 长度均以【像素】为单位（UiRect.size 的 x/y、UiTheme 的 padding/corner 等）。
-//   em（字号倍数）不用于布局；font_size 仅作为文本行高与内容感知尺寸的参照。
+//   jpov::Ui ui;                                  // 跨帧持有（面板级）
+//   ui.Begin(input, theme, 1280, 720);            // 每帧开始：注入输入/主题/视口
+//   ui.SliderFloat("速度", &st.speed, UiRect{{20,0},{388,24}}, 0, 100);
+//   if (ui.Button("重置", UiRect{{20,468},{120,32}})) { DoReset(); }
+//   ui.End();                                     // 可选
+//   RenderCommandList cmd;
+//   ui.Emit(&cmd);                                // 本帧全部 2D 指令追加到 cmd
 //
-// 容错原则（box 过小 / 越界时的处理，实现时遵守）：
-// 1. 控件绘制时"缩放贴紧 box"，但绝不缩小字号——字形保持原尺寸，
-//    在 box 内垂直居中，超出 box 的字被裁切（不画、不溢出）。
-// 2. 任何圆角/内边距/句柄直径等，先 clamp 到【合法范围】再参与计算，
-//    保证绝不产生负尺寸或 NaN：
-//    - 圆角半径 clamp 到 ≤ min(box.宽, box.高)/2；
-//    - 滑条句柄直径 clamp 到 ≥ 最小像素（≥8px）；
-//    - box 宽/高为负 → SanitizeBox 先 clamp 到 0。
-// 3. 真方形控件（Checkbox/ColorSwatch）box 不足时，按 min(宽,高) 取正方形，
-//    在 box 内居中。
-// 4. 越界剔除：绘制前与视口 (0,0,width,height) 做 AABB 不相交测试，
-//    完全在视口外的控件【不画、不命中】；部分相交则照画（GPU 兜底）。
-// 5. 不做 root 面板范围裁剪（不引入 scissor），越界交用户自行负责。
-//
-// sizing 语义：控件尺寸 = box 内按 Stretch 位掩码布局。
-// - 默认 Stretch_NEWS → 控件填满整个 box（母控件变宽则子跟着变宽）。
-// - 去掉某方向位 → 控件在该方向上用内容感知的理想尺寸、在 box 内对齐：
-//   - 水平（W 或 E）：只留 W=贴左、只留 E=贴右、都不留=居中。
-//   - 垂直（N 或 S）：只留 N=贴上、只留 S=贴下、都不留=居中。
-// - 文本的"内容理想尺寸" = 度量后的文字宽高；其他控件见各自实现。
-//
-// 使用方式（即时模式 + 函数包装实现复用）：
-//   // —— 子面板 = 函数 + for 循环 + 每帧传不同 state（复用）——
+//   复用一组子面板 = 写一个函数 + for 循环，每帧传不同状态：
 //   void DrawMotor(Ui& ui, MotorParam& st) {
-//       ui.Text("速度", UiRect{{20,  0},{64,24}});
-//       ui.SliderFloat("", &st.speed, UiRect{{92,0},{388,24}}, 0, 100);
+//       ui.SliderFloat("速度", &st.speed, UiRect{{92,0},{388,24}}, 0, 100);
 //       ui.Checkbox("反转", &st.inverted, UiRect{{20,32},{96,24}});
 //   }
-//   // —— 帧循环：一个 Ui 严格对应一个 root 面板，跨帧持有 ——
-//   jpov::Ui ui;                                // 跨帧持有
-//   ui.Begin(input, theme, 1280, 720);          // 视口剔除需要分辨率
-//   DrawMotor(ui, console.motor_a);             // 复用点 1
-//   DrawMotor(ui, console.motor_b);             // 复用点 2
-//   if (ui.Button("重置", UiRect{{20,468},{120,32}})) { DoReset(); }
-//   ui.End();
-//   RenderCommandList cmd;
-//   ui.Emit(&cmd);
+//       DrawMotor(ui, console.motor_a);   // 复用 1
+//       DrawMotor(ui, console.motor_b);   // 复用 2
+//
+// =============== 坐标系：UiRect 是【面板局部坐标】，不是屏幕坐标 ===============
+//   - 所有 UiRect 的 pos 都是相对【本面板左上角 (0,0)】的偏移（像素）。
+//   - 面板本身可放在窗口任意位置（面板位移由调用方负责，本接口不做）。
+//   - 控件 box 只描述面板内部布局；面板整体平移【不会】改变控件 box 值。
+//   - 长度均为像素。font_size 仅作文本行高/内容感知尺寸参照，不用于布局。
+//
+// ============ 跨帧状态会因【控件 box 值变化】而重置（重要） ============
+//   即时模式不跨帧保存控件状态；只有少数显式状态需跨帧保持
+//   （InputText 焦点 / Combo 展开 / 滑条拖动 / 按钮按下）。
+//   这些状态的同一性判定，用控件当前的 UiRect（pos+size，精确等于）识别。
+//   → 若某控件的 box 值在两帧间变化（你 resize / 重排布局），
+//     该控件会被当作"新控件"，其跨帧状态被重置：
+//     - InputText 立即失焦（光标消失、停止接收键入）
+//     - Combo 下拉立即收起
+//     - 正在拖动的滑条中断
+//     - 按下的按钮弹回
+//   [设计决策，非 bug] 面板整体【平移】（所有控件 box 都不变）不影响任何状态；
+//   只有"控件相对面板的 box 改变"（重排/resize 单个控件）才触发重置。
+//   想保状态就别在交互进行中改该控件的 box。
+//
+// ===================== 布局：stretch_w / stretch_h =====================
+//   每个控件给一个 box（可用区域）外加两个拉伸开关：
+//     - stretch_w = true  → 控件宽度铺满 box 宽；
+//                      false → 用"内容理想宽度"，在 box 内水平对齐。
+//     - stretch_h = true  → 控件高度铺满 box 高；
+//                      false → 用"内容理想高度"，在 box 内垂直对齐。
+//   非拉伸时：用理想尺寸并在 box 内居中（水平 + 垂直）。
+//   当前实现不提供贴左/贴右 anchor（如需贴边，调用方在 box 里预留位置即可）。
+//   "理想尺寸"由每个控件按自身内容计算：
+//     - 文本/按钮/复选框/色块：内容感知（文本宽、方形边长等），会收缩。
+//     - 滑条/输入框/下拉：无"内容宽度"，宽度始终取 box 宽（不收缩），
+//       非拉伸仅影响高度（收缩到行高）。存宽度型控件要横向空间，属设计取舍。
+//   默认两个都 true = 控件铺满给定 box，行为与无布局引擎的裸 box 一致。
+//
+// ===================== 容错（box 过小 / 越界时） =====================
+//   1. 绝不缩小字号：字形保持原尺寸、在 box 内居中，超出部分裁切（不画/不溢出）。
+//   2. 圆角/内边距/句柄直径等先 clamp 到合法范围，绝不产生负尺寸或 NaN。
+//   3. 真方形控件（Checkbox/ColorSwatch）按 min(宽,高) 取正方形、box 内居中。
+//   4. 越界剔除：与视口 (0,0,width,height) 不相交的控件不画、不命中。
+//   5. 不做面板范围裁剪（无 scissor），越界交用户负责。
+//
+// ===================== 弹出层（重叠控件时谁在上） =====================
+//   有"必须浮在其它控件之上"的内容（如 Combo 下拉列表）时，
+//   它们会单独放在弹出层，Emit 在全部普通控件之后追加 → 永远画在最上层。
+//   普通控件之间按调用顺序后画覆盖先画（画家算法）。
+//
+//   状态外置：控件状态（滑条值/勾选/选中项/文本）由调用方持有并传指针
+//   写回；每个控件不跨帧记忆"值"本身（只记忆少数字面跨帧态如焦点/展开）。
+//   可自测：控件产出纯 2D 指令，不直接接触渲染器，可做 gold 比对。
 
 #ifndef JPOV_UI_H_
 #define JPOV_UI_H_
@@ -90,9 +102,9 @@ struct UiTheme {
     // ---- 颜色 ----
     Color background;  // 面板底色
     Color foreground;  // 文本/图标默认色
-    Color accent;      // 高亮（选中、活动状态、按钮主色）
-    Color hover;       // 悬停态填充
-    Color pressed;     // 按下态填充（左键按住不放时，比 hover 更深的反馈色）
+    Color accent;      // 高亮（选中、活动状态、按钮主色、下拉悬停项）
+    Color selected;    // "已选中/按下"的沉稳深色（下拉选中项、按钮按下态）
+    Color hover;       // 悬停态填充（浅高亮，跟随鼠标）
     Color border;      // 边框
     Color disabled;    // 禁用态文字/图标
 
@@ -115,25 +127,14 @@ struct UiRect {
     Vec2f size;  // 宽高（像素）
 };
 
-// 拉伸方向位掩码（默认 NEWS = 全面覆盖，控件自动填满 box）。
-// box 内控件默认"铺满"；给某个方向置 0 则只在 box 内对齐（不拉伸）。
-enum Stretch : uint8_t {
-    Stretch_None  = 0,
-    Stretch_W     = 1 << 0,  // 贴左
-    Stretch_E     = 1 << 1,  // 贴右（与 W 同置 = 水平铺满）
-    Stretch_N     = 1 << 2,  // 贴上
-    Stretch_S     = 1 << 3,  // 贴下（与 N 同置 = 垂直铺满）
-    Stretch_NEWS  = Stretch_W | Stretch_E | Stretch_N | Stretch_S,  // 默认全面覆盖
-};
-
 // ==================== 控件 ====================
 
 // 即时模式 UI 主入口。
 // 生命周期：每帧 Begin → 若干控件 → End → Emit。
 // 不跨界持有控件状态（从零构建）；Ui 对象本身可跨帧持有。
 //
-// 布局：无自动布局。每个控件必须给 UiRect（像素 box），默认 NEWS 铺满 box，
-// 可传 Stretch 掩码覆盖某方向的拉伸（实现 box 内对齐/非铺满）。
+// 布局：无自动布局。每个控件必须给 UiRect（像素 box），加上
+// stretch_w / stretch_h 两个开关控制是否铺满 box（见文件顶注释）。
 class Ui {
 public:
     // 每帧开始。input 为窗口层帧级输入；theme 为本帧主题；
@@ -155,40 +156,44 @@ public:
     // 每帧结束。把本帧所有 2D 指令追加到 cmd（不清空已有内容）。
     void Emit(RenderCommandList* cmd /*output*/);
 
-    // ---- 基础控件（默认 box 内 NEWS 铺满）----
+    // ---- 基础控件（默认铺满给定 box）----
     // 文本显示。
     void Text(const char* label, const UiRect& box,
-              Stretch stretch = Stretch_NEWS);
+              bool stretch_w = true, bool stretch_h = true);
 
     // 按钮。返回 true = 本帧被点击（一次性事件）。
     bool Button(const char* label, const UiRect& box,
-                Stretch stretch = Stretch_NEWS);
+                bool stretch_w = true, bool stretch_h = true);
 
     // 复选框。value 为 in/out（状态外置，本接口不跨帧记忆）；
     // 返回 true = 本帧被点击（此时 *value 已翻转）。
     // 绘制：box 内取真方形（min(宽,高) 居中）画方框；勾选态底色=accent
-    // 且内画勾（2 段折线）；未勾选底色=background。标签文本在 box 中心。
+    // 且内画勾（2 段折线）；未勾选底色=background。标签文本在方框右侧。
     bool Checkbox(const char* label, bool* value /*inout*/, const UiRect& box,
-                  Stretch stretch = Stretch_NEWS);
+                  bool stretch_w = true, bool stretch_h = true);
 
     // 水平滑条。value 为 in/out，范围 [min, max]（要求 min < max）。
+    // decimal_places：数值文本显示的小数位数（0=整数，1=一位小数，…）。
+    //   默认 0：显示为整数（兼容旧行为）。仅影响显示，不影响拖到的浮点值。
     bool SliderFloat(const char* label, float* value /*inout*/,
                      const UiRect& box, float min, float max,
-                     Stretch stretch = Stretch_NEWS);
+                     int decimal_places = 0, bool stretch_w = true,
+                     bool stretch_h = true);
 
     // 文本输入框。buffer 为 in/out（C 字符串 + 容量上限 buffer_size）。
     bool InputText(const char* label, char* buffer /*inout*/,
                    size_t buffer_size, const UiRect& box,
-                   Stretch stretch = Stretch_NEWS);
+                   bool stretch_w = true, bool stretch_h = true);
 
     // 下拉选择。selected 为 in/out，合法范围 [0, items.size()-1]。
+    // （下拉列表属弹出层，Emit 后画，盖住下方其它控件。）
     bool Combo(const char* label, int* selected /*inout*/,
                const std::vector<const char*>& items, const UiRect& box,
-               Stretch stretch = Stretch_NEWS);
+               bool stretch_w = true, bool stretch_h = true);
 
     // 颜色显示块：仅展示色值（不可编辑）。
     void ColorSwatch(const char* label, const Color& color, const UiRect& box,
-                     Stretch stretch = Stretch_NEWS);
+                     bool stretch_w = true, bool stretch_h = true);
 
     // ---- 查询 ----
     static bool Hit(const UiRect& r, float x, float y, const InputSnapshot& in);
@@ -238,6 +243,10 @@ private:
     // 2D 折线（勾选标记等），首帧折线缓冲，Emit 时追加到外部列表。
     void PushPolyline(const std::vector<Vec2f>& vertices, Color color,
                       float line_width);
+    // 2D 实心三角形条带（如 Combo 实心下箭头）：4 顶点、某侧顶点重合的
+    // 退化 strip 画实心三角（不依赖字体字形，gold 可确定性比对）。
+    // 与 PushPolyline 一样入普通层缓冲，Emit 时追加。
+    void PushStrip(const std::vector<Vec2f>& vertices, Color color);
     // 左对齐、垂直居中的文本（pos=左缘中点，kMidLeft），用于需要精确左对齐
     // 垂直居中的控件（滑条数值/输入框正文/Combo 当前项与选项行）。
     // 相比 PushText（仅 kTopLeft）能正确对齐垂直中心；跳过空串/越界/零尺寸。
@@ -247,6 +256,20 @@ private:
     // 未注入时回退到 0.6*font_size/字符 的等宽估计（供无字体的 CPU gold 测试）。
     // return：文本绘制后 pen 落到的水平终点（像素，相对文本左缘）。
     float MeasureTextWidth(const char* text, float font_size) const;
+
+    // 布局解析（C1）：根据 stretch 开关把给定 box 解析成控件实际占用的矩形。
+    //   - stretch 方向非拉伸时，用 ideal（控件理想尺寸）在该方向收缩。
+    //     ideal.w/h 为负表示该方向不可收缩（始终保持 box 尺寸）。
+    //   - 非拉伸方向在 box 内居中（水平 + 垂直）；不提供贴左/贴右 anchor。
+    // return：控件实际绘制的 UiRect（已 clamp 到 box 内）。
+    static UiRect ResolveBox(const UiRect& box, float ideal_w, float ideal_h,
+                             bool stretch_w, bool stretch_h);
+
+    // 把文本压进“弹出层”缓冲（Combo 下拉等需浮在其它控件之上的内容）。
+    // 弹出层在 Emit 时于全部普通指令之后追加 → 永远画在最上层。
+    void PushPopupFillRect(const UiRect& r, Color fill, Color border,
+                           float radius);
+    void PushPopupLabelText(const char* s, float left, float cy, Color color);
 
     // 键盘 hold 重复的累计计时（150ms 阈值两态，验收 bug#11）。
     // 输入框消费按键时调用：更新某 key 的跨帧 hold 时长累计，
@@ -271,6 +294,13 @@ private:
     std::vector<FillRect2DCommand> fill_rects_;
     std::vector<Text2DCommand> texts_;
     std::vector<Polyline2DCommand> polylines_;
+    std::vector<Strip2DCommand> strips_;
+
+    // 弹出层指令暂存（Combo 下拉等）。Emit 在普通指令全部追加后，
+    // 再把本层追加到外部 RenderCommandList（含 order），保证画在最上层。
+    // 见文件顶“弹出层”注释。
+    std::vector<FillRect2DCommand> popup_fill_rects_;
+    std::vector<Text2DCommand> popup_texts_;
 
     // ---- 跨帧状态（仅 InputText 焦点/水平滚动需要；其余控件一律无状态）----
     // 焦点文本框 box 的 Ui 面板局部坐标。跨帧记忆当前哪个文本框聚焦
