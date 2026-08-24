@@ -88,12 +88,13 @@ public:
         const float side = 36.0f;
         CheckFill(cmd.fillrect2d[0], 62.0f, 30.0f, side, side, theme.background);
         CHECK_EQ(cmd.polyline2d.size(), 0u) << "未勾选态不应画勾选折线";
-        // 标签文本在 box 中心。
+        // 标签文本在方框右侧：方框 x 62..98，标签区起点 x=98，垂直居中 y=48。
         CHECK_EQ(cmd.text2d.size(), 1u) << "应产出标签 Text2D";
         CHECK_EQ(cmd.text2d[0].text, "on");
-        CHECK_EQ(cmd.text2d[0].pos.x(), box.pos.x() + box.size.x() * 0.5f);
+        CHECK_EQ(cmd.text2d[0].pos.x(), 62.0f + side);  // 方框右缘=98。
         CHECK_EQ(cmd.text2d[0].pos.y(), box.pos.y() + box.size.y() * 0.5f);
-        LOG(INFO) << "[PASS] Checkbox 未勾选态：background 方框 + 无勾 + 居中文本";
+        CHECK(cmd.text2d[0].alignment == TextAlignment::kMidLeft);
+        LOG(INFO) << "[PASS] Checkbox 未勾选态：background 方框 + 无勾 + 右侧文本";
     }
 
     // 勾选态：value=true → 方框底=accent + 一条折线勾(3 顶点) + 文本。
@@ -124,7 +125,13 @@ public:
             CHECK_LE(v.y(), bottom);
         }
         CHECK_GT(p.line_width, 0.0f) << "勾线宽应 > 0";
-        LOG(INFO) << "[PASS] Checkbox 勾选态：accent 方框 + 3 顶点勾线 + 文本";
+        // 标签文本在方框右侧（与未勾选态一致的位置/对齐）。
+        CHECK_EQ(cmd.text2d.size(), 1u) << "应产出标签 Text2D";
+        CHECK_EQ(cmd.text2d[0].text, "on");
+        CHECK_EQ(cmd.text2d[0].pos.x(), 62.0f + 36.0f);  // 方框右缘=98。
+        CHECK_EQ(cmd.text2d[0].pos.y(), box.pos.y() + box.size.y() * 0.5f);
+        CHECK(cmd.text2d[0].alignment == TextAlignment::kMidLeft);
+        LOG(INFO) << "[PASS] Checkbox 勾选态：accent 方框 + 3 顶点勾线 + 右侧文本";
     }
 
     // 点击翻转：value false→true 返回 true；同一 value 再点 true→false。

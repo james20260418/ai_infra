@@ -262,8 +262,30 @@ bool Ui::Checkbox(const char* label, bool* value, const UiRect& box,
         PushPolyline(verts, theme_.foreground, lw);
     }
 
-    // 标签文本：原字号、box 中心（复用 Text 语义，画在方框之后上方）。
-    Text(label, b);
+    // 标签文本：放在方框右侧，垂直居中，左对齐（经典 checkbox 布局；
+    // 修复验收 bug#12——label 不再居中而是统一置于方框右侧）。
+    // 标签区域 = 方框右缘到 box 右缘，垂直取 box 中线；Text2DCommand 用
+    // kMidLeft 对齐使其在标签区左侧垂直居中，贴合方框右侧起始。
+    if (label != nullptr && label[0] != '\0') {
+        const UiRect label_box{
+            {square.pos.x() + square.size.x(), b.pos.y()},
+            {std::max(0.0f, b.pos.x() + b.size.x() -
+                          (square.pos.x() + square.size.x())),
+             b.size.y()},
+        };
+        if (label_box.size.x() > 0.0f && label_box.size.y() > 0.0f &&
+            !OutsideViewport(label_box)) {
+            Text2DCommand c;
+            c.text = label;
+            c.pos = {label_box.pos.x(),
+                     label_box.pos.y() + label_box.size.y() * 0.5f};
+            c.font_size = theme_.font_size;
+            c.color = theme_.foreground;
+            c.alignment = TextAlignment::kMidLeft;
+            c.font_alias.clear();
+            texts_.push_back(c);
+        }
+    }
     return clicked;
 }
 
