@@ -1707,7 +1707,12 @@ void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
     glViewport(0, 0, fbo_w, fbo_h);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);   // 深度已 resolve，只读不重写
-    glDepthFunc(GL_LEQUAL);
+    // 第 1 步写 stencil 用 GL_ALWAYS 标记物体全部几何像素（不依赖深度比较）。
+    // ⚠️ 不能用 GL_LEQUAL 与已 resolve 深度比 —— MSAA resolve 后的场景深度与
+    // 重画原样物体的深度存在浮点精度差，导致本应可见的凳面/贴墙下边 fragment
+    // 深度测试失败 → 未写 stencil=1 → 放大副本把整面/漏边染黄（bug：凳面整块黄、
+    // 墙缺下边）。遮挡/深度对比交给第 2 步描边（GL_LEQUAL）处理。
+    glDepthFunc(GL_ALWAYS);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
