@@ -4,7 +4,10 @@
 //   - Position()：默认视角精确复现 (1,1,1)→(0,1,0)
 //   - ApplyInput：像素→角度映射（1280=360°、720=180°）、φ clamp ±90°、
 //                 R clamp [0.1,300]、滚轮 √2 缩放
-//   - MakeNoonLighting：正午日照三元组非空、ambient 强度为定标值 0.3
+//   - MakeNoonLighting：正午日照三元组非空、平行光与 ambient 均"由 SkyCommand
+//     推导"（color 用 DirectionalColor/AmbientColor，intensity 用
+//     DirectionalIntensity/AmbientIntensity，绝对强度锚定 LIGHT_INTENSITY.md
+//     三·五 晴天基准 sun=3.0 : ambient=0.3，5:1）
 //
 // 纯函数测试，无需 JPOV::Init（不创建 GL context）。
 
@@ -125,10 +128,12 @@ void TestMakeNoonLighting() {
                static_cast<double>(nl.sky.DirectionalIntensity()),
                1e-6, "sun.intensity 应由 sky.DirectionalIntensity() 推导");
 
-    // ambient 强度=0.3（PR #60 正午阴影基准，勿 0.5）。注意：这里定 0.3 是
-    // 显示设的（LIGHT_INTENSITY.md 白天阴影基准），非 sky.AmbientIntensity()
-    //（那个正午=1.0，量纲要与 sun 的 3.0 匹配需缩放，见 arch 文档 §6）。
-    ExpectNear(nl.ambient.intensity, 0.3f, 1e-6f, "正午 ambient=0.3");
+    // ambient 强度应“由 SkyCommand 推导”，且锚定到 LIGHT_INTENSITY.md 三·五
+    // 晴天正午基准 0.3（PR #60 定标，勿 0.5）。task#3 要求『Ambient 由推导得到』，
+    // 故用 sky.AmbientIntensity(0.3) 作为一致性判据（同上方 sun 的推导即校验方式，
+    // 不手写死预期值，防提交时被写死）。
+    const float expect_amb = nl.sky.AmbientIntensity(0.3f);
+    ExpectNear(nl.ambient.intensity, expect_amb, 1e-6f, "ambient.intensity 应由 sky.AmbientIntensity(0.3) 推导");
     LOG(INFO) << "OK TestMakeNoonLighting";
 }
 

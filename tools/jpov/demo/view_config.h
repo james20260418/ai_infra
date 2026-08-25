@@ -109,7 +109,11 @@ inline ViewConfig DefaultView() {
 //
 // 需求：光照用 DaySkyCommand 正午配置，同 sun_path 测试同款方式
 // （由 SkyCommand 推导平行光、推导全局 Ambient）。太阳方向默认 (0,-1,-1)。
-// ambient 强度定 0.3（LIGHT_INTENSITY.md 正午阴影基准，不是 0.5 —— PR #60 教训）。
+// 平行光与 ambient 的 color/intensity 均由 sky 推导：color 用 DirectionalColor()/
+// AmbientColor()（色调随太阳仰角变），intensity 用 DirectionalIntensity()/
+// AmbientIntensity()（相对衰减随太阳仰角变），但绝对强度锚定在
+// LIGHT_INTENSITY.md 三·五 晴天正午基准（sun=3.0 : ambient=0.3，5:1，PR#60 教训
+// —— 绝不是 0.5 或裸 AmbientIntensity()=1.0，否则影子会被 ACES 压没）。
 struct NoonLighting {
     jpov::DaySkyCommand  sky;
     jpov::DirectionalLight sun;
@@ -137,9 +141,14 @@ inline NoonLighting MakeNoonLighting() {
         /*color*/ sky.DirectionalColor(),
         /*intensity*/ sky.DirectionalIntensity(),
     };
+    // ambient 强度也由 SkyCommand 推导（同 sun_path/太阳同款方式），但把绝对强度
+    // 锚定到 LIGHT_INTENSITY.md 三·五 的晴天正午基准（sun=3.0 : ambient=0.3，5:1，
+    // ACES 线性区防影子被压缩消失）。AmbientIntensity(0.3) = 0.3 × 相对天光衰减曲线
+    // (sun_dir)，正午据此自动变暗/变亮——既满足 task#3『Ambient 由推导得到』，
+    // 又守住 PR #60 定标的 0.3 基准（勿改成 0.5 或裸 AmbientIntensity()=1.0）。
     nl.ambient = jpov::AmbientLight{
         .color = sky.AmbientColor(),
-        .intensity = 0.3f,  // 正午阴影基准（PR #60 定标，勿改 0.5）
+        .intensity = sky.AmbientIntensity(0.3f),
     };
     return nl;
 }

@@ -102,8 +102,11 @@ position.z = R * cos(phi) * cos(theta)
 ## 5. 正午光照（MakeNoonLighting）
 
 太阳光传播方向 `{0,-1,-1}`；DaySkyCommand：turbidity=2、season 中性、intensity=1.0、
-sun_dir=+`{0,1,1}`（取反）；由 sky 推导平行光 color/intensity（正午 DNI≈3.0）与 ambient
-color；ambient **intensity=0.3**（PR #60 定标，勿 0.5）；`tone_mapping=true`。
+sun_dir=+`{0,1,1}`（取反）；平行光与 ambient 均**由 sky 推导**（task#3 验收）——
+color 用 `DirectionalColor()/AmbientColor()`（色调随太阳仰角变），intensity 用
+`DirectionalIntensity()/AmbientIntensity()`（相对衰减随太阳仰角变），但绝对强度锚定
+LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准 0.3（PR #60 定标，
+勿 0.5，勿裸 `AmbientIntensity()=1.0`，否则影子被 ACES 压没）；`tone_mapping=true`。
 `near=0.05, far=1000, fov=60°`。
 
 ---
@@ -131,7 +134,7 @@ BUILD 新增：`view_config`(cc_library header) + `jpov_gltf_viewer`(cc_binary) 
 - [ ] `ViewConfig` / `ApplyInput` / `MakeNoonLighting` / `MakeGroundQuad` 复用（审视后原样或微调）
 - [ ] `.cc` 主程序走单渲染入口；`--four_views` 仅改 view_ + headless_shot_
 - [ ] 目标点：交互看 (0,1,0)，拍照看 (0,0,0)（headless_shot_ 区分）
-- [ ] ambient=0.3 定稿；near/far/fov 对齐 §5
+- [x] ~~ambient=0.3~~ 由 sky.AmbientIntensity(0.3) 推导（锚定 PR#60 基准）；near/far/fov 对齐 §5
 - [ ] 单测通过（view_config_test）
 - [ ] sh 脚本产出 output/jpov_gltf_viewer/ 可执行
 - [ ] 用仓里现有 gltf（test/object3d/scene_assets 的 pliers/stool 等）实跑 four_views 出图验证
