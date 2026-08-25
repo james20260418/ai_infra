@@ -84,12 +84,13 @@ void main() {
     //      ttc_index:  .ttc 集合内索引（单 .ttf 填 0）
     //      alias:      别名，DrawText2D 通过 cmd.font_alias 匹配。为空 → crash。
     //                  最多 10 种用户字体，别名互不重复。
-    //   default_fonts: 内置回退字体列表，格式同上。
-    //      找不到文件 → 静默跳过；别名与用户字体冲突 → 跳过（用户优先）。
+    //   default_fonts: 内置默认字体壳（JPOV 传递，当前恒为空）。为兼容性保留参数；
+    //      JPOV 不提供隐式默认字体，内置默认字体由 JPOV::Config::fonts 显式声明。
     //
     // Pre-condition: GL context 已激活（需要 glGenTextures 创建 atlas）
     // Pre-condition: font_entries.size() ≤ 10
-    // Post-condition: 至少一种字体加载成功（否则 LOG(FATAL)）
+    // Post-condition: 允许零字体（不画文本的纯图形 app）；
+    //    若 DrawText2D 被调用且无字体，会降级跳过并告警。
     void Init(const std::vector<std::tuple<const char*, int, const char*>>& font_entries,
               const std::vector<std::tuple<const char*, int, const char*>>& default_fonts);
 

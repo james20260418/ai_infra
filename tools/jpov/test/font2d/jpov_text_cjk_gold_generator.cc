@@ -46,6 +46,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "CJK Text Gold Image Generator";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+    };
     GoldCjkTextDemo app(cfg);
     app.Init();
 

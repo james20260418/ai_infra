@@ -81,6 +81,7 @@ int main() {
     cfg.title = "Chinese Text Gold Image Generator";
     cfg.headless = true;
     cfg.fonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"tools/jpov/fonts/LxgwWenKai-Regular.ttf", 0, "Kai"},
         {"tools/jpov/fonts/AlimamaDaoLiTi.ttf",      0, "DaoLi"},
         {"tools/jpov/fonts/KNMaiyuan-Regular.ttf",   0, "MaiYuan"},

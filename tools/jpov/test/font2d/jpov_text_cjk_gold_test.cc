@@ -94,6 +94,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "CJK Text Gold Test";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+    };
     CjkTextGoldTestApp app(cfg);
     app.Init();
 

@@ -82,8 +82,11 @@ void Ui::Emit(RenderCommandList* cmd /*output*/) {
                           r.border_width, r.radius);
     }
     for (const Text2DCommand& t : texts_) {
-        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment,
-                      t.font_alias);
+        // 控件级未指定字体（alias 为空）→ 用主题默认字体，避免每个控件重复填。
+        const char* alias = (!t.font_alias.empty())
+                                ? t.font_alias.c_str()
+                                : (theme_.font_alias ? theme_.font_alias : "");
+        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment, alias);
     }
     for (const Polyline2DCommand& p : polylines_) {
         cmd->DrawPolyline(p.vertices, p.color, p.line_width);
@@ -98,8 +101,10 @@ void Ui::Emit(RenderCommandList* cmd /*output*/) {
                           r.border_width, r.radius);
     }
     for (const Text2DCommand& t : popup_texts_) {
-        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment,
-                      t.font_alias);
+        const char* alias = (!t.font_alias.empty())
+                                ? t.font_alias.c_str()
+                                : (theme_.font_alias ? theme_.font_alias : "");
+        cmd->DrawText(t.text, t.pos, t.font_size, t.color, t.alignment, alias);
     }
     // 追加完成后清空内部缓冲（含弹出层），本帧结束。
     fill_rects_.clear();
