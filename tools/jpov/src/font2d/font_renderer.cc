@@ -8,8 +8,18 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <tuple>
 #include <vector>
+
+// 分发态资源定位（exe 旁边 fonts/）所需的平台 API：
+// - Linux: readlink(/proc/self/exe)
+// - Windows: GetModuleFileNameA
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
 #ifdef _WIN32
@@ -40,14 +50,68 @@ namespace jpov {
 
 namespace {
 
-// 路径查找：先试原始路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
+// 返回当前可执行文件的所在目录（绝对路径，末尾不带 '/'）。
+// 分发态资源定位用：字体放在 exe 旁边的 fonts/ 目录。
+// - Linux: 读 /proc/self/exe 符号链接
+// - Windows: GetModuleFileName(NULL, ...)
+// 获取失败返回空串（表示非分发态，回退到开发态路径查找）。
+std::string GetExeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return "";
+    std::string p(buf, n);
+    size_t slash = p.find_last_of("\\/");
+    return (slash == std::string::npos) ? "" : p.substr(0, slash);
+#else
+    char buf[4096];
+    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    return (slash == std::string::npos) ? "" : p.substr(0, slash);
+#endif
+}
+
+// 提取路径的文件名部分（"tools/jpov/fonts/DejaVuSans.ttf" → "DejaVuSans.ttf"）。
+std::string Basename(const std::string& path) {
+    size_t slash = path.find_last_of("\\/");
+    return (slash == std::string::npos) ? path : path.substr(slash + 1);
+}
+
+// 尝试打开并返回该路径的绝对/可读字符串；打不开返回空串。
+std::string TryOpen(const std::string& path) {
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return "";
+    std::fclose(fp);
+    return path;
+}
+
+// 路径查找优先级（跨平台，分发态优先、开发态兜底）：
+//   1. 可执行文件旁边的 fonts/<filename> —— 分发态（output/<demo>/fonts/）
+//      Linux: /proc/self/exe → exe 目录；Windows: GetModuleFileName → exe 目录
+//   2. 原始路径（相对当前工作目录）—— 开发态（bazel run，cwd=工程根）
+//   3. bazel test 的 runfiles（TEST_SRCDIR）—— 测试沙箱
 std::string ResolveFontPath(const char* raw_path) {
-    FILE* fp = std::fopen(raw_path, "rb");
-    if (fp) {
-        std::fclose(fp);
-        return raw_path;
+    if (raw_path == nullptr || raw_path[0] == '\0') return "";
+
+    // 1. 分发态：exe 旁边的 fonts/ 目录。
+    //    用文件名（不考虑原始目录层级），因为产物目录把字体平铺进 fonts/。
+    const std::string exe_dir = GetExeDir();
+    if (!exe_dir.empty()) {
+        const std::string dist = exe_dir + "/fonts/" + Basename(raw_path);
+        const std::string hit = TryOpen(dist);
+        if (!hit.empty()) return hit;
     }
-    // Try TEST_SRCDIR for bazel test sandbox
+
+    // 2. 开发态：原始路径（相对 cwd＝工程根）。
+    {
+        const std::string hit = TryOpen(raw_path);
+        if (!hit.empty()) return raw_path;
+    }
+
+    // 3. bazel test 沙箱：TEST_SRCDIR。
     const char* srcdir = std::getenv("TEST_SRCDIR");
     if (srcdir) {
         std::string p = srcdir;
@@ -56,11 +120,8 @@ std::string ResolveFontPath(const char* raw_path) {
         }
         p += "__main__/";
         p += raw_path;
-        FILE* fp2 = std::fopen(p.c_str(), "rb");
-        if (fp2) {
-            std::fclose(fp2);
-            return p;
-        }
+        const std::string hit = TryOpen(p);
+        if (!hit.empty()) return p;
     }
     return "";
 }
