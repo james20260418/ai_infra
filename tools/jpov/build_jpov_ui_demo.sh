@@ -41,14 +41,14 @@ echo "==> 3. 拷贝产物到 output/jpov_ui_demo/"
 cp -v "$BAZEL_BIN/jpov_ui_demo"     "$OUTPUT_DIR/jpov_ui_demo"
 cp -v "$BAZEL_BIN/jpov_ui_demo.exe" "$OUTPUT_DIR/jpov_ui_demo.exe"
 
-# 拷贝分发态字体到 exe 旁 tools/jpov/fonts/（与源码声明路径一致，供
+# 拷贝分发态字体到 exe 旁 fonts/（与 demo cfg.fonts 声明的相对路径一致，
 # ResolveFontPath 按 exe 相对路径命中）。UI demo 用 CJK 显中文，DejaVu 做拉丁，
 # 两者都拷（与 demo 的 cfg.fonts 声明一一对应）。
-echo "==> 4. 拷贝字体资源到 output/jpov_ui_demo/tools/jpov/fonts/"
-mkdir -p "$OUTPUT_DIR/tools/jpov/fonts"
-cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"       "$OUTPUT_DIR/tools/jpov/fonts/"
-cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/tools/jpov/fonts/"
-ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/tools/jpov/fonts/"
+echo "==> 4. 拷贝字体资源到 output/jpov_ui_demo/fonts/"
+mkdir -p "$OUTPUT_DIR/fonts"
+cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"       "$OUTPUT_DIR/fonts/"
+cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
+ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/"
 
 echo ""
 echo "============================================"
@@ -58,7 +58,7 @@ echo ""
 echo "📂 产物位置："
 echo "   $OUTPUT_DIR/jpov_ui_demo       (Linux ELF)"
 echo "   $OUTPUT_DIR/jpov_ui_demo.exe   (Windows PE)"
-echo "   $OUTPUT_DIR/tools/jpov/fonts/ (字体资源，与声明路径同构放置)"
+echo "   $OUTPUT_DIR/fonts/            (字体资源，与声明路径同构放置)"
 echo ""
 echo "🧪 用法："
 echo "   1. Linux 版 → 在 WSL2 中运行（需要 DISPLAY/WSLg）："

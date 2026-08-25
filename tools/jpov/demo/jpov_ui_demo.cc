@@ -91,9 +91,11 @@ int main() {
     cfg.target_fps = 30;
     // 显式声明字体：CJK 显中文，Latin 做拉丁回退（两者都注册，别名见渲染命令）。
     // JPOV 不提供隐式默认字体，必须在此声明 path/alias。
+    // 路径为相对 exe 的字体目录（ui_demo 是窗口程序，从 output/ 目录运行，
+    // 不走 bazel run，故用简短 fonts/ 前缀，由 build_jpov_ui_demo.sh 同构拷贝）。
     cfg.fonts = {
-        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
-        {"tools/jpov/fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
     };
     UiDemoApp app(cfg);
     app.Init();
