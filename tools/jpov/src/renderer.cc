@@ -1721,6 +1721,9 @@ void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
 
     // 第 1 步：把被高亮物体按原样（深度匹配已 resolve 的场景）写 stencil=1。
     // 用普通 MVP，深度测试 LEQUAL 让画面里可见的部分写入。
+    // ⚠️ 写 stencil 时必须禁用颜色写：本阶段用纯色 outline shader、uColor 未设
+    //（默认黑），若同时写颜色会把高亮物体内部整片覆盖成黑色（破坏本体 PBR 色）。
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     float mvp[16];
     Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
     const unsigned int outline_prog = OutlineProg();
@@ -1744,6 +1747,7 @@ void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
     }
 
     // 第 2 步：画绕中心放大的纯色副本，仅在 stencil≠1 区域着色 → 边缘一圈框。
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     glStencilMask(0x00);

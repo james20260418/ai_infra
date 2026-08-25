@@ -137,6 +137,35 @@ int main() {
             << "未检测到足够金色边框像素，高亮描边未渲染";
     }
 
+    // ---- 回归：高亮不破坏本体颜色 ----
+    // 高亮只应加边框，被高亮物体内部应保持原 PBR 本体色（不能变纯黑）。
+    // 往：MSAA 路径 DrawHighlightResolvedPass 第 1 步写 stencil 时未关颜色写，
+    // 用未初始化的 outline shader uColor（默认黑）把高亮物体内部整片覆盖成黑。
+    // 修复：第 1 步 glColorMask(GL_FALSE...) 只写 stencil，第 2 步描边前恢复。
+    // 断言：高亮后中心柱内圈（中心 ±25px，避开 1.08 倍外扩边框）应存在非黑像素。
+    {
+        const std::string p = outdir + "highlight_center.png";
+        int w = 0, h = 0, c = 0;
+        unsigned char* px = stbi_load(p.c_str(), &w, &h, &c, 4);
+        CHECK(px != nullptr) << "Failed to load " << p;
+        int nonblack = 0;
+        const int cx = w / 2, cy = h / 2;
+        const int r = 25;
+        for (int y = cy - r; y <= cy + r; ++y) {
+            for (int x = cx - r; x <= cx + r; ++x) {
+                if (x < 0 || x >= w || y < 0 || y >= h) continue;
+                const unsigned char* q = &px[(y * w + x) * 4];
+                if (q[0] > 0 || q[1] > 0 || q[2] > 0) ++nonblack;
+            }
+        }
+        stbi_image_free(px);
+        LOG(INFO) << "highlight center 内圈非黑像素 = " << nonblack
+                  << "（预期 > 0，高亮不破坏本体色）";
+        CHECK_GT(nonblack, 0)
+            << "高亮物体内部被染成纯黑（本体色被破坏）。检查 "
+               "DrawHighlightResolvedPass 第 1 步是否禁用颜色写（glColorMask）。";
+    }
+
     // ---- 冒烟：整体输出非空 ----
     {
         const std::string p = outdir + "highlight_center.png";
