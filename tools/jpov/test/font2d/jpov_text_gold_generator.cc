@@ -47,6 +47,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Text Gold Image Generator";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
     GoldTextDemo app(cfg);
     app.Init();
 

@@ -97,6 +97,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Text Gold Test";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
     TextGoldTestApp app(cfg);
     app.Init();
 

@@ -48,11 +48,11 @@ struct GltfObject;
 using Vec2f = geom::Vec2<float>;
 using Vec3f = geom::Vec3<float>;
 
-// ==================== 内置字体别名 ====================
+// ==================== 字体别名常量 ====================
 
-// JPOV 内置默认字体的别名常量。
-// 用户可在此查看内置字体名称，或在 DrawText 中引用。
-// 如果用户通过 JPOV::Config::fonts 注册了同名 alias，初始化时会 crash。
+// 推荐字体别名常量（“CJK”/“Latin” 纯文本，非自动注册）。
+// JPOV 不提供隐式默认字体：用户必须在 JPOV::Config::fonts 显式注册字体，
+// 并可用这些常量作为 alias，然后在 DrawText / UiTheme::font_alias 中引用。
 // 注意：stb_truetype 对 CFF (PostScript outline) 格式支持不稳定，
 //       仅 TrueType outline (.ttf/.ttc) 字体可用。
 inline constexpr const char* kFontBuiltinCJK   = "CJK";   // NotoSansCJK-Regular.ttc (TTC index=0)

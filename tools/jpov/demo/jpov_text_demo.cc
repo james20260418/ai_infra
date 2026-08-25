@@ -67,6 +67,10 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "JPOV Text Demo";
     cfg.headless = true;
+    // 显式声明字体（JPOV 不提供隐式默认字体）。
+    cfg.fonts = {
+        {"tools/jpov/fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
 
     TextDemo app(cfg);
     app.Init();
