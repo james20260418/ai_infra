@@ -122,6 +122,26 @@ int main() {
         LOG(INFO) << "highlight warm (gold border) pixel count = " << warm;
         CHECK_GE(warm, 500) << "未检测到金色边框像素，高亮未渲染";
 
+        // 防回归：木桌右侧近墙缘（不该高亮的桌面）不应有高亮金框伪影。
+        // （修复过：MSAA 路径第2步放大副本用 GL_ALWAYS 无视深度，wall 的
+        // 放大副本溢出到桌面上，给桌面右缘染金框。修复：改用 GL_LEQUAL 深度参与。
+        // 区域 x[345,405] y[210,275] 经/至/图对比校准：修复前误染 1254、修复后 0。）
+        {
+            int table_gold = 0;
+            for (int y = 210; y < 275; ++y) {
+                for (int x = 345; x < 405; ++x) {
+                    const unsigned char* q = &px[(y * w + x) * 4];
+                    // 高亮金特征（亮黄 r≳g 高、b 低）；木桌本体暗棕不会触发
+                    if (q[0] > 180 && q[1] > 140 && q[2] < 120) ++table_gold;
+                }
+            }
+            LOG(INFO) << "木桌右缘(345-405,210-275) 高亮伪影像素 = " << table_gold
+                      << "（预期 0：木桌不该被高亮边框波及）";
+            CHECK_EQ(table_gold, 0)
+                << "木桌被高亮边框误染！检查 DrawHighlightResolvedPass 第2步是否 "
+                   "用 GL_LEQUAL 深度参与（放大副本被前景遮挡处不应画框）。";
+        }
+
         // 高亮不破坏本体色：stool 中心附近（内圈避边框）应存在非黑像素。
         // （修复过：MSAA 路径高亮曾把内部覆盖成黑，见 PR67 自查。）
         auto count_nonblack = [&](int cx, int cy, int r) {

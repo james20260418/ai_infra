@@ -1753,7 +1753,11 @@ void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
     glStencilMask(0x00);
     glEnable(GL_BLEND);
     glDepthMask(GL_FALSE);
-    glDepthFunc(GL_ALWAYS);
+    // 深度测试参与：放大副本只画在“未被更近物体遮挡”的像素。
+    // ⚠️ 不能用 GL_ALWAYS —— 否则 wall 的放大副本会溢出到它前面
+    //（桌子）的 stencil=0 像素上，给不该高亮的物体染金框（bug：桌面边缘金框）。
+    // 用 LEQUAL：副本深度 ≤ 场景深度（已 resolve）才画，被前景遮挡处不画。
+    glDepthFunc(GL_LEQUAL);
     for (const auto& o : cmds.object3d) {
         if (!o.highlight) continue;
         DrawHighlightOutline(o, cmds, *cmds.highlight_style,
