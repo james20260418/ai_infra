@@ -148,7 +148,7 @@ void JPOV::Init() {
     }
 
     // 内置默认字体壳（保留参数/机制，内容为空——JPOV 不提供隐式默认字体，
-    // 用户必须通过 JPOV::Config::fonts 显式声明每个字体的 path/alias/ttc_index。
+    // 用户必须通过 JPOV::Config::fonts 显式声明每个字体的 path/alias/ttc_index）。
     // 注意：stb_truetype 对 CFF (PostScript outline) 格式支持不稳定，
     // 仅加载 TrueType outline (.ttf/.ttc) 字体。
     const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {};
