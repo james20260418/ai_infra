@@ -103,10 +103,6 @@ private:
     // （tone map）压缩到 LDR。MSAA 路径下保留 separate resolve FBO（16F）。
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_rb_hdr_ = 0, depth_tex_hdr_ = 0;
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
-    // 高亮（方法 B stencil）用的 stencil renderbuffer。
-    // 非 MSAA 路径：独立 stencil renderbuffer + depth 纹理共存（GL_STENCIL_ATTACHMENT）；
-    // MSAA 路径：4x MSAA stencil renderbuffer 与 depth 并列。
-    unsigned int stencil_rb_hdr_ = 0;
     unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
     int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
 
@@ -141,10 +137,15 @@ private:
     void DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                          float vp_x, float vp_y, float vp_w, float vp_h);
 
-    // MSAA 路径的高亮：在单采样 hl FBO 上做方法 B stencil 描边。
-    // color+depth 已从 MSAA HDR resolve/blit 到 hl FBO；这里写 stencil=1
-    // 再用放大的纯色副本仅在 stencil≠1 区域着色。
-    void DrawHighlightResolvedPass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+    // 高亮 pass（方法 B stencil）：3D 内容全部画完后统一执行的一个独立子步骤
+    // （与 shadow pass / tone map pass 并列）。
+    // 从 fbo_hdr_（MSAA 时自动 resolve）blit color+depth 到单采样 hl FBO，
+    // 在其上写 stencil=1 标记全部高亮物体，再画顶点外扩的纯色副本仅在
+    // stencil≠1 区域着色（物体轮廓外侧一圈边框，深度 LEQUAL 防被前景遮挡处漏画）。
+    // 返回叠加了高亮的颜色纹理（hl_color_tex_），供 tone map pass 作为输入。
+    // 调用前提：use_hdr=true（HDR 3D FBO 已存在），且 cmds.highlight_style 有值。
+    unsigned int DrawHighlightPass(const RenderCommandList& cmds,
+                                   int fbo_w, int fbo_h);
     void EnsureHighlightFBO(int w, int h);
     void DestroyHighlightFBO();
 

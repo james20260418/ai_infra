@@ -138,7 +138,7 @@ int main() {
             LOG(INFO) << "木桌右缘(345-405,210-275) 高亮伪影像素 = " << table_gold
                       << "（预期 0：木桌不该被高亮边框波及）";
             CHECK_EQ(table_gold, 0)
-                << "木桌被高亮边框误染！检查 DrawHighlightResolvedPass 第2步是否 "
+                << "木桌被高亮边框误染！检查 DrawHighlightPass 第2步是否 "
                    "用 GL_LEQUAL 深度参与（放大副本被前景遮挡处不应画框）。";
         }
 

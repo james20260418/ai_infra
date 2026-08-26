@@ -420,9 +420,6 @@ void Renderer::DestroyHDRFBO() {
     if (fbo_hdr_) {
         glDeleteFramebuffers(1, &fbo_hdr_);
         glDeleteTextures(1, &color_tex_hdr_);
-        if (stencil_rb_hdr_) {
-            glDeleteRenderbuffers(1, &stencil_rb_hdr_);
-        }
 #ifndef JPOV_WITHOUT_MSAA
         if (depth_rb_hdr_) {
             glDeleteRenderbuffers(1, &depth_rb_hdr_);
@@ -436,7 +433,6 @@ void Renderer::DestroyHDRFBO() {
         color_tex_hdr_ = 0;
         depth_rb_hdr_ = 0;
         depth_tex_hdr_ = 0;
-        stencil_rb_hdr_ = 0;
     }
     fbo_hdr_w_ = 0;
     fbo_hdr_h_ = 0;
@@ -718,15 +714,9 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, depth_tex_hdr_, 0);
 
-    // 高亮（方法 B stencil）用：独立 stencil renderbuffer（无 MSAA）。
-    // 与 depth 纹理共存：GL_STENCIL_ATTACHMENT 用 renderbuffer，depth 用纹理，
-    // 是合法的组合（GL_DEPTH_STENCIL 分开绑定）。
-    glGenRenderbuffers(1, &stencil_rb_hdr_);
-    glBindRenderbuffer(GL_RENDERBUFFER, stencil_rb_hdr_);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, width, height);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
-                              GL_RENDERBUFFER, stencil_rb_hdr_);
+    // 注意：HDR FBO 不再带 stencil。高亮（方法 B）由独立的 DrawHighlightPass
+    // 在单采样 hl FBO（含组合 depth+stencil）上统一执行（见 DrawHighlightPass），
+    // 因此这里不再为 fbo_hdr_ 附加 stencil renderbuffer。
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
@@ -764,7 +754,7 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     // 注意：不在 MSAA HDR FBO 上附加 stencil —— MSAA stencil renderbuffer 在
     //   llvmpipe（headless 软渲染）下导致 FBO 不完整（GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。
     //   高亮描边在 MSAA 路径走另一条路：resolve 到非 MSAA resolve FBO 后，
-    //   在 resolve FBO 上做单采样 stencil（见 DrawHighlightResolvedPass）。
+    //   在 resolve FBO 上做单采样 stencil（见 DrawHighlightPass）。
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
@@ -1094,8 +1084,10 @@ void Renderer::Render(const RenderCommandList& cmds,
             // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
             //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
 #ifdef JPOV_WITHOUT_MSAA
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
             unsigned int hdr_input_tex = color_tex_hdr_;
 #else
+            // MSAA 路径：先把 MSAA HDR FBO resolve 到单采样浮点纹理。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
             glBlitFramebuffer(
@@ -1104,24 +1096,18 @@ void Renderer::Render(const RenderCommandList& cmds,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
             unsigned int hdr_input_tex = resolve_tex_hdr_;
-
-            // ── MSAA 路径的高亮（方法 B stencil）──
-            // MSAA HDR FBO 不含 stencil（llvmpipe 不支持 MSAA stencil RB），
-            // 故把 color+depth resolve 到单采样 hl FBO 后在其上做 stencil 描边。
-            if (cmds.highlight_style.has_value()) {
-                EnsureHighlightFBO(fbo_3d_w, fbo_3d_h);
-                // color+depth 都 blit 到 hl FBO（depth 供 stencil 轮廓深度匹配）。
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hl_fbo_);
-                glBlitFramebuffer(
-                    0, 0, fbo_3d_w, fbo_3d_h,
-                    0, 0, hl_fbo_w_, hl_fbo_h_,
-                    GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-                DrawHighlightResolvedPass(cmds, fbo_3d_w, fbo_3d_h);
-                // 高亮叠加进 hl 颜色纹理，作为最终 tone map 的输入。
-                hdr_input_tex = hl_color_tex_;
-            }
 #endif
+
+            // ── 高亮 pass（方法 B stencil）—— 3D 内容全部画完后统一叠加。
+            // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：
+            // 无论 MSAA 有无，都从 fbo_hdr_（MSAA 时自动 resolve）blit color+depth
+            // 到单采样 hl FBO，在其上做“写 stencil=1 → 放大副本描边”两步式，
+            // 输出叠加了高亮的颜色纹理，作为 tone map 的唯一输入。
+            // 有高亮 → 用 hl_color_tex_；无高亮 → 用 resolve/color 原始纹理（零开销）。
+            if (cmds.highlight_style.has_value()) {
+                hdr_input_tex = DrawHighlightPass(cmds,
+                                                  fbo_3d_w, fbo_3d_h);
+            }
 
             // ---- 统一 tone map pass：ACES filmic 把 HDR 压缩到 LDR 主 FBO ----
             unsigned int prog = TonemapProg();
@@ -1290,43 +1276,13 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
                 const Object3DCommand& obj = cmds.object3d[idx];
 
-#ifdef JPOV_WITHOUT_MSAA
-                // ── 高亮（方法 B stencil）—— 仅非 MSAA 路径内联 ──
-                // 非 MSAA HDR FBO 带单采样 stencil（EnsureHDRFBO 已补齐），
-                // 可直接在画物体时写 stencil=1，再画放大副本仅在 stencil≠1 着色。
-                const bool do_highlight =
-                    obj.highlight && cmds.highlight_style.has_value();
-                if (do_highlight) {
-                    glEnable(GL_STENCIL_TEST);
-                    glClear(GL_STENCIL_BUFFER_BIT);
-                    glStencilFunc(GL_ALWAYS, 1, 0xFF);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                    glStencilMask(0xFF);
-                    glDepthMask(GL_TRUE);
-                }
-#endif
-
+                // 3D 内容绘制保持纯净：高亮（方法 B stencil）由独立的
+                // DrawHighlightPass 在 3D 内容全部画完后统一叠加（见 Render()）。
+                // 此处不掺任何 stencil 状态，DrawObject3D 只负责本体着色。
                 Object3DRenderer::DrawObject3D(obj, cmds,
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawObject3DProg(), DrawObject3DProgFull(),
                     tile_index_tex_);
-
-#ifdef JPOV_WITHOUT_MSAA
-                if (do_highlight) {
-                    // 描边：只在 stencil≠1（物体轮廓外）着色，关深度写避免自遮挡。
-                    glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-                    glStencilMask(0x00);
-                    glDepthMask(GL_FALSE);
-                    DrawHighlightOutline(obj, cmds, *cmds.highlight_style,
-                        mesh_mgr_, shader_mgr_, mvp_, OutlineProg());
-                    // 恢复：下一次循环/后续物体不受影响。
-                    glDepthMask(GL_TRUE);
-                    glStencilFunc(GL_ALWAYS, 0, 0xFF);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-                    glStencilMask(0x00);
-                }
-#endif
                 break;
             }
             default:
@@ -1696,12 +1652,25 @@ void Renderer::EnsureHighlightFBO(int w, int h) {
     hl_fbo_w_ = w; hl_fbo_h_ = h;
 }
 
-// MSAA 路径的高亮（方法 B）：在单采样 hl FBO 上做 stencil 描边。
-// 入参 fbo_w/fbo_h 为 3D FBO 尺寸；color+depth 已由调用方 blit 到 hl FBO。
-void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
+// 高亮 pass（方法 B stencil）：3D 内容全部画完后执行的一个独立子步骤。
+// 入参 fbo_w/fbo_h 为 3D FBO 尺寸；从 fbo_hdr_（MSAA 时自动 resolve）blit
+// color+depth 到单采样 hl FBO 后，在其上做“写 stencil=1 → 放大副本描边”两步式，
+// 输出叠加了高亮的颜色纹理，返回给 tone map pass 作输入。
+unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
                                          int fbo_w, int fbo_h) {
-    if (!cmds.highlight_style.has_value()) return;
+    if (!cmds.highlight_style.has_value()) return 0;
     EnsureHighlightFBO(fbo_w, fbo_h);
+
+    // 把 3D 内容 color+depth 从 HDR FBO blit 到单采样 hl FBO。
+    // - 非 MSAA：fbo_hdr_ 为单采样，直接精确拷入；
+    // - MSAA：fbo_hdr_ 为 MSAA，blit 同时完成 resolve。
+    // depth 供第 2 步描边深度匹配（避免放大副本溢出到前景被遮挡处）。
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hl_fbo_);
+    glBlitFramebuffer(
+        0, 0, fbo_w, fbo_h,
+        0, 0, hl_fbo_w_, hl_fbo_h_,
+        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
     glBindFramebuffer(GL_FRAMEBUFFER, hl_fbo_);
     glViewport(0, 0, fbo_w, fbo_h);
@@ -1773,6 +1742,9 @@ void Renderer::DrawHighlightResolvedPass(const RenderCommandList& cmds,
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
+
+    // 返回叠加了高亮的颜色纹理，作为 tone map 的输入。
+    return hl_color_tex_;
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {

@@ -163,7 +163,7 @@ int main() {
                   << "（预期 > 0，高亮不破坏本体色）";
         CHECK_GT(nonblack, 0)
             << "高亮物体内部被染成纯黑（本体色被破坏）。检查 "
-               "DrawHighlightResolvedPass 第 1 步是否禁用颜色写（glColorMask）。";
+               "DrawHighlightPass 第 1 步是否禁用颜色写（glColorMask）。";
     }
 
     // ---- 冒烟：整体输出非空 ----
