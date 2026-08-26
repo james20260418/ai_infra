@@ -70,7 +70,7 @@ public:
         // font_entries: 用户注册的字体列表（最多 kMaxFonts 项）
         // 每个 FontEntry 包含字体文件路径、TTC index、用户指定的别名。
         // 加载失败或别名重复时 Init() 会 LOG(FATAL) crash。
-        // 空列表时 JPOV 尝试加载内置默认字体。
+        // JPOV 不提供隐式默认字体：请在此显式声明每个字体（path/ttc_index/alias）。
         std::vector<FontEntry> fonts;
 
         // headless = true: 无可见窗口（适用于 CI / 后台截图）

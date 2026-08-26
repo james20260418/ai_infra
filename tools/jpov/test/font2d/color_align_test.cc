@@ -60,6 +60,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Color & Alignment Test";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+    };
     ColorAlignTest app(cfg);
     app.Init();
 

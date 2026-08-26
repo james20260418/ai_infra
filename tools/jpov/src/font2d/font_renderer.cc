@@ -8,8 +8,18 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <tuple>
 #include <vector>
+
+// 分发态资源定位（exe 旁边 fonts/）所需的平台 API：
+// - Linux: readlink(/proc/self/exe)
+// - Windows: GetModuleFileNameA
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
 #ifdef _WIN32
@@ -40,14 +50,66 @@ namespace jpov {
 
 namespace {
 
-// 路径查找：先试原始路径，再试 bazel test 的 runfiles（TEST_SRCDIR）
+// 返回当前可执行文件的所在目录（绝对路径，末尾不带 '/'）。
+// 分发态资源定位用：字体相对路径相对于 exe 所在目录解析。
+// - Linux: 读 /proc/self/exe 符号链接
+// - Windows: GetModuleFileName(NULL, ...)
+// 获取失败返回空串（表示非分发态，回退到开发态路径查找）。
+std::string GetExeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return "";
+    std::string p(buf, n);
+    size_t slash = p.find_last_of("\\/");
+    return (slash == std::string::npos) ? "" : p.substr(0, slash);
+#else
+    char buf[4096];
+    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    return (slash == std::string::npos) ? "" : p.substr(0, slash);
+#endif
+}
+
+// 尝试打开并返回该路径的绝对/可读字符串；打不开返回空串。
+std::string TryOpen(const std::string& path) {
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return "";
+    std::fclose(fp);
+    return path;
+}
+
+// 路径查找优先级（跨平台，无任何硬编码目录约定）：
+//   1. exe/ELF 产物所在目录 + 原始相对路径 —— 分发态（output/<demo>/<raw_path>
+//      与源码目录结构一致摆放即可命中）。
+//      Linux: /proc/self/exe → exe 目录；Windows: GetModuleFileName → exe 目录
+//   2. 原始路径——绝对路径按原样、相对路径按当前工作目录解析
+//      （开发态 bazel run cwd=工程根；单测 cwd）
+//   3. bazel test 的 runfiles（TEST_SRCDIR）—— 测试沙箱
+// 用户声明的字体路径始终原样参与解析：代码不做 basename 平铺、不插入 fonts/ 目录。
 std::string ResolveFontPath(const char* raw_path) {
-    FILE* fp = std::fopen(raw_path, "rb");
-    if (fp) {
-        std::fclose(fp);
-        return raw_path;
+    if (raw_path == nullptr || raw_path[0] == '\0') return "";
+
+    // 1. 分发态：exe 旁边相对路径（仅相对路径适用，绝对路径拼 exe 目录无意义）。
+    if (raw_path[0] != '/' && raw_path[0] != '\\') {
+        const std::string exe_dir = GetExeDir();
+        if (!exe_dir.empty()) {
+            const std::string dist = exe_dir + "/" + raw_path;
+            const std::string hit = TryOpen(dist);
+            if (!hit.empty()) return hit;
+        }
     }
-    // Try TEST_SRCDIR for bazel test sandbox
+
+    // 2. 开发态：绝对路径按原样，相对路径按当前工作目录（单测 cwd / bazel run cwd）。
+    {
+        const std::string hit = TryOpen(raw_path);
+        if (!hit.empty()) return raw_path;
+    }
+
+    // 3. bazel test 沙箱：TEST_SRCDIR。
     const char* srcdir = std::getenv("TEST_SRCDIR");
     if (srcdir) {
         std::string p = srcdir;
@@ -56,11 +118,8 @@ std::string ResolveFontPath(const char* raw_path) {
         }
         p += "__main__/";
         p += raw_path;
-        FILE* fp2 = std::fopen(p.c_str(), "rb");
-        if (fp2) {
-            std::fclose(fp2);
-            return p;
-        }
+        const std::string hit = TryOpen(p);
+        if (!hit.empty()) return p;
     }
     return "";
 }
@@ -134,10 +193,13 @@ void FontRenderer::Init(
                       &font_slots_, &font_order_);
     }
 
-    // 至少一种字体可用
-    CHECK(!font_slots_.empty())
-        << "No fonts loaded (user nor built-in). "
-        << "Provide at least one font via JPOV::Config::fonts.";
+    // 无字体不视为错误：JPOV 是通用渲染器，可能完全不画文本。
+    // 若后续 DrawText 在零字体下被调用，FontRenderer::DrawText2D 会降级跳过并告警。
+    if (font_slots_.empty()) {
+        LOG(INFO) << "FontRenderer: no fonts registered (user fonts empty). "
+                     "DrawText2D will skip text until fonts are provided "
+                     "via JPOV::Config::fonts.";
+    }
 }
 
 // ==================== 静态方法：InitOneFontSlot ====================

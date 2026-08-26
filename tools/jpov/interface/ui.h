@@ -99,6 +99,11 @@ class UiS0Test;
 struct UiTheme {
     float font_size;  // 字体像素高度。文本行高参照。
 
+    // 字体别名：Ui 发出的全部文本指令的默认字体。
+    // 控件级未指定具体字体时（font_alias 为空），Emit 会用此值自动填充。
+    // 空串 = 使用首个已注册字体（与 Renderer 空别名语义一致）。
+    const char* font_alias = nullptr;
+
     // ---- 颜色 ----
     Color background;  // 面板底色
     Color foreground;  // 文本/图标默认色
