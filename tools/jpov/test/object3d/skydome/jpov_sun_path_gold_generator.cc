@@ -15,6 +15,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/test/object3d/skydome/jpov_sun_path_common.h"
+#include "tools/jpov/test/test_utils.h"
 
 int main() {
     JPOV::Config cfg;
@@ -35,9 +36,8 @@ int main() {
 
     for (int i = 0; i < static_cast<int>(app.configs_.size()); ++i) {
         app.active_index_ = i;
-        std::string outpath = std::string(
-            "/james_pm/ai_infra/tools/jpov/test/object3d/skydome/")
-            + "sun_path_" + std::to_string(i) + ".png";
+        std::string outpath = jpov::GetTestDataDir()
+            + "/object3d/skydome/sun_path_" + std::to_string(i) + ".png";
         app.RunOnce(input, winfo, outpath.c_str());
         LOG(INFO) << "sun path gold [" << i << "]: " << outpath;
     }
