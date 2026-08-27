@@ -190,7 +190,7 @@ uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；�
 uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = ndc.z）
 uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj
 uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
-uniform float uShadowBias;            // 深度偏移，抗自阴影 acne
+uniform float uShadowBiasCascade[5];    // 每级联深度偏移（ndc 单位，外部可配）
 uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
@@ -212,7 +212,7 @@ float shadowFactorC0(vec3 world_pos, vec3 N, vec3 L) {
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float slopeBias = uShadowBiasCascade[0] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
@@ -224,7 +224,7 @@ float shadowFactorC1(vec3 world_pos, vec3 N, vec3 L) {
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float slopeBias = uShadowBiasCascade[1] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
@@ -236,7 +236,7 @@ float shadowFactorC2(vec3 world_pos, vec3 N, vec3 L) {
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float slopeBias = uShadowBiasCascade[2] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
@@ -248,7 +248,7 @@ float shadowFactorC3(vec3 world_pos, vec3 N, vec3 L) {
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float slopeBias = uShadowBiasCascade[3] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
@@ -260,7 +260,7 @@ float shadowFactorC4(vec3 world_pos, vec3 N, vec3 L) {
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    float slopeBias = uShadowBiasCascade[4] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
     float shadow = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)

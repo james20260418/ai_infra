@@ -445,6 +445,15 @@ struct ShadowConfig {
     float fade_start = 120.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
 
+    // 每级联 1 个深度偏置（ndc 深度单位），抗自阴影 acne。
+    // 与级联一一对应：cascade_bias[c] 只作用于第 c 段。外部可逐级联覆盖，
+    // 默认每个都取原硬编码 0.004（行为零回归，保持原来的 slope-scaled 结构）。
+    // 设计依据（2026-08-28）：CSM 每级联覆盖范围/分辨率不同 → 1 个 texel 的
+    // 世界尺寸不同 → 所需的 acne 偏置也不同。让偏置跟级联绑定，而非全局一个值，
+    // 才能同时压住各级联的 acne 又不误伤真影。
+    // 未用到的数组位（i >= cascade_count）填 0，UploadSunData 只上传 cascade_count 个。
+    float cascade_bias[kMaxCascades] = {0.004f, 0.004f, 0.004f, 0.004f, 0.004f};
+
     // 默认开放世界配置：近处高分辨率、远处低分辨率并自然淡出。
     // 距离基于典型开放世界量级（相机半径数十米、可视距离上百米）。
     static ShadowConfig Default() { return ShadowConfig{}; }

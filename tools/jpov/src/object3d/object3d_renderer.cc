@@ -591,7 +591,13 @@ void Object3DRenderer::UploadSunData(
         // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
         CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))
             << "UploadSunData: shadow_fbos.size() 与 cascade_count 不一致";
-        glUniform1f(shader_mgr.GetUniform(p, "uShadowBias"), 0.004f);
+        // 每级联独立深度偏置（ndc 单位，来自 ShadowConfig::cascade_bias）。
+        // 上传全部 kMaxCascades 位（未用位取 0 或默认，shader 只索引实际级联）。
+        static constexpr int kMaxC = jpov::ShadowConfig::kMaxCascades;
+        float bias[kMaxC] = {0.004f, 0.004f, 0.004f, 0.004f, 0.004f};
+        for (int c = 0; c < kMaxC; ++c) bias[c] = cfg.cascade_bias[c];
+        glUniform1fv(shader_mgr.GetUniform(p, "uShadowBiasCascade"),
+                     kMaxC, bias);
         for (int c = 0; c < cascade_count; ++c) {
             const unsigned int unit = 7u + static_cast<unsigned int>(c);
             glActiveTexture(GL_TEXTURE0 + unit);
