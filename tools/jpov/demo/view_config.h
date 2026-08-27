@@ -21,13 +21,13 @@
 
 namespace jpov_viewer {
 
-// 相机绕目标点 (0,1,0) 环绕的球面角配置（y-up）。
+// 相机绕目标点 (0,0,0) 环绕的球面角配置（y-up）。
 //
 // 相机位置由公式推导：
 //   position.x = R * cos(phi) * sin(theta)
-//   position.y = 1 + R * sin(phi)
+//   position.y = R * sin(phi)
 //   position.z = R * cos(phi) * cos(theta)
-//   target     = {0, 1, 0}
+//   target     = {0, 0, 0}
 //
 // 量纲约定：phi/theta 统一用弧度存储（避免“这个接口收度还是收弧度”的歧义）。
 // 交互映射用“度”表达更直观，在 ApplyInput 边界处换算；拍照固定角度直接用度。
@@ -40,8 +40,8 @@ struct ViewConfig {
     static constexpr double kRMin = 0.1;
     static constexpr double kRMax = 300.0;
 
-    // 目标点：恒定 (0,1,0)。
-    static jpov::Vec3f Target() { return {0.0f, 1.0f, 0.0f}; }
+    // 目标点：恒定 (0,0,0)。
+    static jpov::Vec3f Target() { return {0.0f, 0.0f, 0.0f}; }
 
     // 由 phi/theta/R 推导相机位置（y-up）。
     jpov::Vec3f Position() const {
@@ -50,7 +50,43 @@ struct ViewConfig {
         const float sint = static_cast<float>(std::sin(theta));
         const float cost = static_cast<float>(std::cos(theta));
         const float r    = static_cast<float>(R);
-        return {r * cosp * sint, 1.0f + r * sinp, r * cosp * cost};
+        return {r * cosp * sint, r * sinp, r * cosp * cost};
+    }
+
+    // 由模型包围盒计算“能看清全貌”的初始相机距离 R（模型自适应）。
+    //
+    // 目标点假设对准包围盒中心（查看器把模型画在原点、相机 lookAt 原点，
+    // 故两者一致）。为使最远顶点落在垂直视锥的 half-fov 内，需
+    //   R ≥ d_max / tan(fov_deg/2)
+    // 其中 d_max = 包围盒 8 个顶点到目标点（原点）的最大距离（即相对原点的
+    // 最远包围球半径）。再乘 1.3 的保险因子，避免模型贴边/角部被切。
+    //
+    // 返回 clamp 到 [kRMin, kRMax] 的值，可直接赋给 ViewConfig::R。
+    // fov_deg 为垂直视野（度），>0 且 <180。bounds 用 GltfObject::bounds_*。
+    static double FitRadius(const float bounds_min[3], const float bounds_max[3],
+                            double fov_deg) {
+        constexpr double kMargin = 1.3;
+        const double half_fov = 0.5 * fov_deg * 3.14159265358979323846 / 180.0;
+        CHECK(half_fov > 0.0 && half_fov < 3.14159265358979323846 / 2.0)
+            << "FitRadius: fov_deg 必须在 (0,180) 内, got " << fov_deg;
+
+        // d_max = 包围盒 8 顶点到原点（目标点）的最大距离。
+        double d2_max = 0.0;
+        for (int ix = 0; ix <= 1; ++ix) {
+            const double x = (ix == 0) ? bounds_min[0] : bounds_max[0];
+            for (int iy = 0; iy <= 1; ++iy) {
+                const double y = (iy == 0) ? bounds_min[1] : bounds_max[1];
+                for (int iz = 0; iz <= 1; ++iz) {
+                    const double z = (iz == 0) ? bounds_min[2] : bounds_max[2];
+                    d2_max = std::max(d2_max, x * x + y * y + z * z);
+                }
+            }
+        }
+        const double d_max = std::sqrt(d2_max);
+        if (d_max <= 0.0) return kRMin;  // 退化（点/空），取最小距离。
+
+        const double r = (d_max / std::tan(half_fov)) * kMargin;
+        return std::clamp(r, kRMin, kRMax);
     }
 };
 
@@ -94,8 +130,11 @@ inline void ApplyInput(ViewConfig* v /*inout*/, float dx, float dy,
     v->R   = std::clamp(v->R, ViewConfig::kRMin, ViewConfig::kRMax);
 }
 
-// 默认初始视角：精确复现 (1,1,1)→(0,1,0)。
-// 推导见 arch 文档 §7：R=√2, theta=π/4, phi=0。
+// 默认初始视角：目标点 (0,0,0)，方位 45°，仰角 0°，R=√2（单位尺度模型）。
+// 初始相机位置 = (1, 0, 1)（r=√2, theta=π/4, phi=0 → {cos·sin·R, 0, cos·cos·R}）。
+//
+// 注意：加载真实模型后，main 会按模型包围盒用 ViewConfig::FitRadius 覆盖
+// 这里的固定 R（模型大小自适应）；DefaultView 的 R 仅作为无模型/退化时的兜底。
 inline ViewConfig DefaultView() {
     constexpr double kPi = 3.14159265358979323846;
     ViewConfig v;
@@ -153,19 +192,22 @@ inline NoonLighting MakeNoonLighting() {
     return nl;
 }
 
-// 构造 300×300 米高粗糙灰色地平面的 CPU 网格数据（单平铺 quad，y=0，法线 +Y）。
+// 构造 300×300 米高粗糙灰色地平面的 CPU 网格数据（单平铺 quad，y=-3，法线 +Y）。
+// 地平面降到 y=-3：让加载在原点附近的模型（尤其底面在原点的）不受地板穿插影响；
+// 需求定稿（2026-08-27）——地平面从 y=0 降到 y=-3。
 inline jpov::MeshData MakeGroundQuad() {
     const float half = 150.0f;  // 300m 半宽
+    const float y = -3.0f;      // 地板高度（降到 y=-3，给模型/其它物体留出上方空间）
     jpov::MeshData mesh;
     mesh.flags = static_cast<jpov::MeshVertexFlags>(
         static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
         static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
-    // 4 角点（y=0），CCW 从上方看（法线 +Y 向上）。
+    // 4 角点（y=-3），CCW 从上方看（法线 +Y 向上）。
     mesh.positions = {
-        {-half, 0.0f,  half},  // 0
-        { half, 0.0f,  half},  // 1
-        { half, 0.0f, -half},  // 2
-        {-half, 0.0f, -half},  // 3
+        {-half, y,  half},  // 0
+        { half, y,  half},  // 1
+        { half, y, -half},  // 2
+        {-half, y, -half},  // 3
     };
     mesh.normals = {
         {0.0f, 1.0f, 0.0f},

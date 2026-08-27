@@ -83,7 +83,8 @@ int main(int argc, char** argv) {
     app.view_ = jpov_viewer::DefaultView();
 
     // 可选视角覆盖（调试/自检用）：JPOV_SMOKE_R / _PHI_DEG / _THETA_DEG。
-    // 缺省用 DefaultView（(1,1,1)→(0,1,0)）。
+    // 缺省用 DefaultView（目标 (0,0,0)，R=√2；真实查看器会按模型 bbox 自适应，
+    // smoke 供调试保持默认以便肉眼比对）。
     if (const char* r = std::getenv("JPOV_SMOKE_R")) {
         app.view_.R = std::atof(r);
     }

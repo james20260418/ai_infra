@@ -1940,6 +1940,25 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         GltfPrimitive prim;
         prim.mesh_id = self->mesh_mgr_.RegisterMesh(entry->mesh);
 
+        // 合并本 primitive 顶点到位包围盒（loader 输出坐标 = 渲染时模型局部坐标）。
+        // 注意：RegisterMesh 把几何上传 GPU 后 CPU positions 不再保留，
+        // 因此必须在收集阶段（entry->mesh 还在）顺手算好 bbox。
+        for (const Vec3f& p : entry->mesh.positions) {
+            if (!obj->bounds_valid) {
+                obj->bounds_min[0] = obj->bounds_max[0] = p.x();
+                obj->bounds_min[1] = obj->bounds_max[1] = p.y();
+                obj->bounds_min[2] = obj->bounds_max[2] = p.z();
+                obj->bounds_valid = true;
+            } else {
+                obj->bounds_min[0] = std::min(obj->bounds_min[0], p.x());
+                obj->bounds_min[1] = std::min(obj->bounds_min[1], p.y());
+                obj->bounds_min[2] = std::min(obj->bounds_min[2], p.z());
+                obj->bounds_max[0] = std::max(obj->bounds_max[0], p.x());
+                obj->bounds_max[1] = std::max(obj->bounds_max[1], p.y());
+                obj->bounds_max[2] = std::max(obj->bounds_max[2], p.z());
+            }
+        }
+
         PBRMaterial& mat = prim.material;
 
         // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor

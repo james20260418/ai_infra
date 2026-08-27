@@ -41,9 +41,13 @@ void ExpectNear(T val, T expected, double eps, const char* msg) {
 }
 
 void TestDefaultViewPosition() {
-    // 默认视角 (1,1,1)→(0,1,0) 的 ViewConfig 是 {phi=0, theta=π/4, R=√2}。
+    // 默认视角（目标 (0,0,0)）的 ViewConfig 是 {phi=0, theta=π/4, R=√2}，
+    // 相机位置 = {R·cos0·sin(π/4), R·sin0, R·cos0·cos(π/4)} = (1, 0, 1)。
     const jpov_viewer::ViewConfig v = jpov_viewer::DefaultView();
-    ExpectVecNear(v.Position(), /*pos*/ {1.0f, 1.0f, 1.0f}, 1e-4f);
+    ExpectVecNear(v.Position(), /*pos*/ {1.0f, 0.0f, 1.0f}, 1e-4f);
+    // 目标点恒为原点 (0,0,0)。
+    const jpov::Vec3f t = jpov_viewer::ViewConfig::Target();
+    ExpectVecNear(t, {0.0f, 0.0f, 0.0f}, 1e-6f);
     LOG(INFO) << "OK TestDefaultViewPosition";
 }
 
@@ -109,6 +113,39 @@ void TestRClampAndZoom() {
     LOG(INFO) << "OK TestRClampAndZoom";
 }
 
+void TestFitRadius() {
+    // 模型自适应：R 应让包围盒最远顶点落在垂直 half-fov 内，并加 1.3 保险。
+    // fov=90° → half_fov=45° → tan=1 → R = d_max × 1.3。
+    // 单位立方体：[0,0,0]~[1,1,1]，d_max = √3 ≈ 1.732。
+    const float box_min[3] = {0.0f, 0.0f, 0.0f};
+    const float box_max[3] = {1.0f, 1.0f, 1.0f};
+    const double r = jpov_viewer::ViewConfig::FitRadius(box_min, box_max, 90.0);
+    ExpectNear(r, std::sqrt(3.0) * 1.3, 1e-9, "90°fov 单位立方体 R 应 = √3×1.3");
+
+    // 60° fov（查看器默认）：half_fov=30°，tan=1/√3，R = d_max / (1/√3) × 1.3
+    //   = d_max × √3 × 1.3。单位立方体 d_max=√3 → R = √3·√3·1.3 = 3.9。
+    const double r60 = jpov_viewer::ViewConfig::FitRadius(box_min, box_max, 60.0);
+    ExpectNear(r60, 3.0 * 1.3, 1e-9, "60°fov 单位立方体 R 应 = 3×1.3");
+
+    // 对称于原点的矩形：[-2,2]³，d_max = √(3·4)=√12≈3.464，90°fov → ×1.3。
+    const float bmin2[3] = {-2.0f, -2.0f, -2.0f};
+    const float bmax2[3] = {2.0f, 2.0f, 2.0f};
+    const double r2 = jpov_viewer::ViewConfig::FitRadius(bmin2, bmax2, 90.0);
+    ExpectNear(r2, std::sqrt(12.0) * 1.3, 1e-9, "[-2,2]³ 90°fov R 应 = √12×1.3");
+
+    // 退化的零体积包围盒（单点/原点）：d_max≈0 → 返回最小距离 kRMin。
+    const float zp[3] = {0.0f, 0.0f, 0.0f};
+    const double r0 = jpov_viewer::ViewConfig::FitRadius(zp, zp, 90.0);
+    ExpectNear(r0, jpov_viewer::ViewConfig::kRMin, 1e-9, "退化单点应返回 kRMin");
+
+    // 超大包围盒 → clamp 到 kRMax。
+    const float big_min[3] = {-10000.0f, -10000.0f, -10000.0f};
+    const float big_max[3] = {10000.0f, 10000.0f, 10000.0f};
+    const double rbig = jpov_viewer::ViewConfig::FitRadius(big_min, big_max, 60.0);
+    ExpectNear(rbig, jpov_viewer::ViewConfig::kRMax, 1e-9, "超大包围盒应 clamp 到 kRMax");
+    LOG(INFO) << "OK TestFitRadius";
+}
+
 void TestMakeNoonLighting() {
     const jpov_viewer::NoonLighting nl = jpov_viewer::MakeNoonLighting();
     // 太阳光传播方向 (0,-1,-1)。
@@ -141,9 +178,9 @@ void TestGroundQuad() {
     const jpov::MeshData mesh = jpov_viewer::MakeGroundQuad();
     CHECK_EQ(mesh.positions.size(), 4u);
     CHECK_EQ(mesh.indices.size(), 6u);
-    // y=0 且顶点跨度 ±150。
+    // y=-3 且顶点跨度 ±150（地平面降到 y=-3，需求 2026-08-27）。
     for (const auto& p : mesh.positions) {
-        ExpectNear(p.y(), 0.0f, 1e-6f, "地平面应在 y=0");
+        ExpectNear(p.y(), -3.0f, 1e-6f, "地平面应在 y=-3");
         CHECK_LE(std::abs(p.x()), 150.0f + 1e-6f);
         CHECK_LE(std::abs(p.z()), 150.0f + 1e-6f);
     }
@@ -157,6 +194,7 @@ int main() {
     TestThetaMapping();
     TestPhiMappingAndClamp();
     TestRClampAndZoom();
+    TestFitRadius();
     TestMakeNoonLighting();
     TestGroundQuad();
     LOG(INFO) << "全部 ViewConfig 单测通过";

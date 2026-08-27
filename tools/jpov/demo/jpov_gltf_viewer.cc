@@ -4,7 +4,8 @@
 // 地平面 300×300 米高粗糙灰色 quad，光照用 DaySkyCommand 正午配置
 // （同 sun_path 测试：由 sky 推导平行光 + 全局 Ambient，太阳方向 (0,-1,-1)）。
 //
-// 相机默认 (1,1,1)→(0,1,0)。右键 drag 转视角，滚轮 zoom（R 缩放）。
+// 相机默认目标 (0,0,0)，初始距离 R 按模型包围盒自适应（加载后 FitRadius 计算）。
+// 右键 drag 转视角，滚轮 zoom（R 缩放）。
 // 产物 ELF 的第一个参数为被加载的 glTF 路径（相对/绝对均可，fallback 到
 // 项目内 pliers.gltf 便于快速演示）。
 //
@@ -51,11 +52,8 @@ public:
     jpov_viewer::NoonLighting noon_;   // 正午光照（sky/sun/ambient 一次构造）
 
     // --four_views 拍照专用标志（arch §4 note #1 认可的 headless 区分手段）。
-    // 交互模式看向经典目标点 (0,1,0)；而拍照要“看到模型”，模型画在原点 (0,0,0)
-    // （贴地）。若拍照也看向 (0,1,0)，phi=0 的 front/left 会从 y=1 平视、
-    // 从小模型头顶看过去，模型落在视锥下缘之外拍不到（实测 bug，task#7 修复）。
-    // 因此拍照模式把相机目标点改到模型原点，让 4 张图都能框住模型。
-    bool headless_shot_ = false;
+    // 交互与拍照共用同一目标点 (0,0,0)（相机 lookAt 原点），无分叉，
+    // 因此 headless 专用标志不再需要（早期曾因交互看向 (0,1,0) 而需要区分）。
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -83,9 +81,7 @@ public:
 
         // ── 相机：由 ViewConfig 推导 ──
         cmds->camera.position = view_.Position();
-        cmds->camera.target   = headless_shot_
-                                    ? jpov::Vec3f{0.0f, 0.0f, 0.0f}  // 拍照看模型
-                                    : jpov_viewer::ViewConfig::Target();  // 交互看 (0,1,0)
+        cmds->camera.target   = jpov_viewer::ViewConfig::Target();  // (0,0,0)
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
@@ -148,11 +144,6 @@ constexpr FourView kFourViews[] = {
 void RunFourViews(GltfViewerApp* app, const std::string& gltf_path) {
     CHECK_NOTNULL(app);
 
-    // 拍照模式：相机目标点改到模型原点，让 4 个角度都能框住模型
-    // （交互默认目标 (0,1,0) 在 phi=0 时从 y=1 平视，小模型落在视锥下缘外，
-    //   front/left 会拍不到——见架构 §4 note#1 与 task#7 自测 bug）。
-    app->headless_shot_ = true;
-
     // 目标目录 = glTF 所在目录；输出文件名 = <模型basename>_<view>.png。
     // （不含扩展名的模型名，如 pliers → pliers_front.png）
     const size_t slash = gltf_path.find_last_of("/\\");
@@ -170,9 +161,10 @@ void RunFourViews(GltfViewerApp* app, const std::string& gltf_path) {
 
     for (const FourView& fv : kFourViews) {
         // 赋固定角度（量纲约定：ViewConfig 存弧度）。
+        // R 保持 main 里按模型包围盒算好的初始距离（模型自适应），不在此重置：
+        // 4 个角度都应沿用同一“看清全貌”的取景距离，才能框住模型。
         app->view_.phi   = fv.phi_deg * kDegToRad;
         app->view_.theta = fv.theta_deg * kDegToRad;
-        app->view_.R     = jpov_viewer::DefaultView().R;  // 与交互默认同距
 
         const std::string out = dir + "/" + base + "_" + fv.name + ".png";
         jpov::InputSnapshot input{};   // 无交互输入（固定角度拍照）
@@ -216,7 +208,19 @@ int main(int argc, char** argv) {
     app.ground_mat_ = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
     app.noon_ = jpov_viewer::MakeNoonLighting();
-    app.view_ = jpov_viewer::DefaultView();  // (1,1,1)→(0,1,0)
+
+    // 初始视角：目标点 (0,0,0)；R 按模型包围盒自适应（模型大小变化 → 初始
+    // 距离随之变化，总能一眼框住全貌）。退化（包围盒不可用）时用 DefaultView 默认。
+    app.view_ = jpov_viewer::DefaultView();
+    if (app.gltf_.bounds_valid) {
+        app.view_.R = jpov_viewer::ViewConfig::FitRadius(
+            app.gltf_.bounds_min, app.gltf_.bounds_max, /*fov_deg*/ 60.0);
+        LOG(INFO) << "模型包围盒 [" << app.gltf_.bounds_min[0] << ","
+                  << app.gltf_.bounds_min[1] << "," << app.gltf_.bounds_min[2]
+                  << "] ~ [" << app.gltf_.bounds_max[0] << ","
+                  << app.gltf_.bounds_max[1] << "," << app.gltf_.bounds_max[2]
+                  << "]，初始 R=" << app.view_.R;
+    }
 
     if (four_views) {
         // AI 自查模式：headless 渲染 4 个角度，输出到模型同级目录后退出。
