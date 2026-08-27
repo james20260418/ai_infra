@@ -409,3 +409,39 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# Gold Image + Test — GPU color-ID 拾取 + 方法 B 高亮边框
+# ============================================================================
+cc_binary(
+    name = "jpov_pick_highlight_gold_generator",
+    srcs = [
+        "jpov_pick_highlight_gold_generator.cc",
+        "jpov_pick_highlight_gold_common.h",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_pick_highlight_gold_test",
+    srcs = [
+        "jpov_pick_highlight_gold_test.cc",
+        "jpov_pick_highlight_gold_common.h",
+    ],
+    data = [":pick_highlight_1280x720.png"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+        "//third_party/stb:stb_image",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

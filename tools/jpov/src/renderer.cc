@@ -176,6 +176,57 @@ void main() {
 }
 )glsl";
 
+// 拾取（color-ID）pass 的 vertex shader：与 Object3D PBR 的顶点语义一致
+//（aPos loc=0 + aNormal loc=1），只需把物体摆到正确世界位置（MVP×Model）。
+const char* kPickVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 拾取（color-ID）pass 的 fragment shader：把 picking_id 编码成 RGB 三字节。
+//   r = id & 0xFF；g = (id>>8) & 0xFF；b = (id>>16) & 0xFF
+// fragment 写回 RGBA8，由 CPU glReadPixels 解码回整数 id。
+// 深度测试在拾取 pass 照常开启，resolve 最前面的物体（前景优先）。
+const char* kPickFs = R"glsl(
+#version 330 core
+out vec4 FragColor;
+uniform int uPickingId;
+void main() {
+    int id = uPickingId;
+    int r = id & 0xFF;
+    int g = (id >> 8) & 0xFF;
+    int b = (id >> 16) & 0xFF;
+    FragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
+}
+)glsl";
+
+// 高亮（方法 B）描边 vertex shader：接受含 Model 的 uMVP，把顶点变换到 NDC。
+// 用于画“顶点外扩的大一圈”版本（外扩在 Model 里完成，见 DrawHighlightOutline）。
+const char* kOutlineVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 高亮（方法 B）描边 fragment shader：输出纯色边框颜色。
+// 仅在 stencil 测试通过（stencil≠1）的像素画，即物体边缘露出的那一圈。
+const char* kOutlineFs = R"glsl(
+#version 330 core
+out vec4 FragColor;
+uniform vec4 uColor;
+void main() {
+    FragColor = uColor;
+}
+)glsl";
+
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 
 // 构建正交投影矩阵（列主序，OpenGL 右手系）。阴影 pass 用：太阳是平行光，视锥是正交盒。
@@ -289,7 +340,14 @@ Renderer::~Renderer() {
     DestroyHDRFBO();
     DestroyHDRResolveFBO();
     DestroyShadowFBO();
+    DestroyHighlightFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
+    if (pick_fbo_) {
+        glDeleteFramebuffers(1, &pick_fbo_);
+        glDeleteTextures(1, &pick_tex_);
+        glDeleteRenderbuffers(1, &pick_depth_rb_);
+        pick_fbo_ = 0; pick_tex_ = 0; pick_depth_rb_ = 0;
+    }
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (strip_vbo_)    glDeleteBuffers(1, &strip_vbo_);
@@ -656,6 +714,10 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, depth_tex_hdr_, 0);
 
+    // 注意：HDR FBO 不再带 stencil。高亮（方法 B）由独立的 DrawHighlightPass
+    // 在单采样 hl FBO（含组合 depth+stencil）上统一执行（见 DrawHighlightPass），
+    // 因此这里不再为 fbo_hdr_ 附加 stencil renderbuffer。
+
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
         << "HDR FBO (non-MSAA) failed, status=" << status;
@@ -689,6 +751,10 @@ void Renderer::EnsureHDRFBO(int width, int height) {
                            GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_RENDERBUFFER, depth_rb_hdr_);
+    // 注意：不在 MSAA HDR FBO 上附加 stencil —— MSAA stencil renderbuffer 在
+    //   llvmpipe（headless 软渲染）下导致 FBO 不完整（GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。
+    //   高亮描边在 MSAA 路径走另一条路：resolve 到非 MSAA resolve FBO 后，
+    //   在 resolve FBO 上做单采样 stencil（见 DrawHighlightPass）。
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
@@ -775,6 +841,16 @@ unsigned int Renderer::TonemapProg() {
     return shader_mgr_.GetOrCreate("tonemap", {kTonemapVs, kTonemapFs});
 }
 
+// 拾取（color-ID）pass shader（见 kPickVs/kPickFs）。
+unsigned int Renderer::PickProg() {
+    return shader_mgr_.GetOrCreate("pick", {kPickVs, kPickFs});
+}
+
+// 高亮（方法 B）描边 shader（见 kOutlineVs/kOutlineFs）。
+unsigned int Renderer::OutlineProg() {
+    return shader_mgr_.GetOrCreate("outline", {kOutlineVs, kOutlineFs});
+}
+
 // 编译/注册全部 shader program。
 // 通过 ShaderManager 统一管理（编译失败 → LOG(FATAL) crash）。
 void Renderer::CompileShaders() {
@@ -788,6 +864,8 @@ void Renderer::CompileShaders() {
     DrawObject3DProgFull();
     ShadowProg();
     TonemapProg();
+    PickProg();
+    OutlineProg();
 }
 
 void Renderer::CreateStreamVBO() {
@@ -977,6 +1055,24 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
         }
 
+        // 拾取（color-ID）pass：仅在用户发起了 pick 查询时才跑。
+        // 会切换到自己 FBO；跑完必须恢复主 3D FBO + 深度/剔除状态供 Draw3DCommands。
+        if (cmds.pick.enabled) {
+            // 传生效的 viewport（cam 已被 Render() 回退为全窗口）。
+            DrawPickingPass(cmds, fbo_3d_w, fbo_3d_h,
+                            cam.viewport_x, cam.viewport_y,
+                            cam.viewport_width, cam.viewport_height);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);
+            glEnable(GL_BLEND);
+        }
+
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
@@ -988,16 +1084,30 @@ void Renderer::Render(const RenderCommandList& cmds,
             // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
             //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
 #ifdef JPOV_WITHOUT_MSAA
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
             unsigned int hdr_input_tex = color_tex_hdr_;
 #else
+            // MSAA 路径：先把 MSAA HDR FBO resolve 到单采样浮点纹理。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
             unsigned int hdr_input_tex = resolve_tex_hdr_;
 #endif
+
+            // ── 高亮 pass（方法 B stencil）—— 3D 内容全部画完后统一叠加。
+            // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：
+            // 无论 MSAA 有无，都从 fbo_hdr_（MSAA 时自动 resolve）blit color+depth
+            // 到单采样 hl FBO，在其上做“写 stencil=1 → 放大副本描边”两步式，
+            // 输出叠加了高亮的颜色纹理，作为 tone map 的唯一输入。
+            // 有高亮 → 用 hl_color_tex_；无高亮 → 用 resolve/color 原始纹理（零开销）。
+            if (cmds.highlight_style.has_value()) {
+                hdr_input_tex = DrawHighlightPass(cmds,
+                                                  fbo_3d_w, fbo_3d_h);
+            }
 
             // ---- 统一 tone map pass：ACES filmic 把 HDR 压缩到 LDR 主 FBO ----
             unsigned int prog = TonemapProg();
@@ -1164,7 +1274,12 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kObject3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
-                Object3DRenderer::DrawObject3D(cmds.object3d[idx], cmds,
+                const Object3DCommand& obj = cmds.object3d[idx];
+
+                // 3D 内容绘制保持纯净：高亮（方法 B stencil）由独立的
+                // DrawHighlightPass 在 3D 内容全部画完后统一叠加（见 Render()）。
+                // 此处不掺任何 stencil 状态，DrawObject3D 只负责本体着色。
+                Object3DRenderer::DrawObject3D(obj, cmds,
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawObject3DProg(), DrawObject3DProgFull(),
                     tile_index_tex_);
@@ -1333,6 +1448,303 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
 
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
+}
+
+// 拾取（color-ID）pass。cmds.pick.enabled 时调用：把所有 picking_id>0 的物体
+// 用纯色 ID shader 画进一个自管理的小 RGBA8 FBO（带 depth，resolve 前景），
+// 读回光标像素解码成 picking_id → last_pick_。
+void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                               float vp_x, float vp_y, float vp_w, float vp_h) {
+    // 没有任何可拾取物体 → 直接判未命中，不建 FBO 不画（零成本）。
+    bool has_pickable = false;
+    for (const auto& o : cmds.object3d) {
+        if (o.picking_id > 0) { has_pickable = true; break; }
+    }
+    if (!has_pickable) {
+        last_pick_.hit = false;
+        last_pick_.picking_id = 0;
+        return;
+    }
+
+    // ---- 自管理 pick FBO（RGBA8 颜色 + depth renderbuffer），尺寸 = 3D FBO ----
+    if (pick_fbo_w_ != fbo_w || pick_fbo_h_ != fbo_h || pick_fbo_ == 0) {
+        if (pick_fbo_) {
+            glDeleteFramebuffers(1, &pick_fbo_);
+            glDeleteTextures(1, &pick_tex_);
+            glDeleteRenderbuffers(1, &pick_depth_rb_);
+        }
+        glGenTextures(1, &pick_tex_);
+        glBindTexture(GL_TEXTURE_2D, pick_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fbo_w, fbo_h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glGenRenderbuffers(1, &pick_depth_rb_);
+        glBindRenderbuffer(GL_RENDERBUFFER, pick_depth_rb_);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fbo_w, fbo_h);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        glGenFramebuffers(1, &pick_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, pick_fbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, pick_tex_, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, pick_depth_rb_);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE) << "pick FBO failed, status=" << status;
+        pick_fbo_w_ = fbo_w;
+        pick_fbo_h_ = fbo_h;
+    }
+
+    // ---- 画 color-ID pass ----
+    glBindFramebuffer(GL_FRAMEBUFFER, pick_fbo_);
+    glViewport(0, 0, fbo_w, fbo_h);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glDisable(GL_BLEND);
+
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // 黑 = id 0 = 背景/未命中
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    float mvp[16];
+    Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
+    const unsigned int pick_prog = PickProg();
+    glUseProgram(pick_prog);
+
+    for (const auto& o : cmds.object3d) {
+        if (o.picking_id == 0) continue;   // 不可拾取物体不参与
+        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
+        CHECK(mesh != nullptr) << "DrawPickingPass: mesh_id " << o.mesh_id << " 未注册";
+        CHECK_GT(mesh->vao, 0u);
+
+        float model[16], final_mvp[16];
+        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model);
+        Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
+
+        glUniformMatrix4fv(glGetUniformLocation(pick_prog, "uMVP"),
+                           1, GL_FALSE, final_mvp);
+        glUniform1i(glGetUniformLocation(pick_prog, "uPickingId"),
+                    static_cast<int>(o.picking_id));
+
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0)
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                           GL_UNSIGNED_INT, nullptr);
+        else
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+        glBindVertexArray(0);
+    }
+
+    // ---- 窗口像素坐标 → 3D FBO 像素（GL 左下原点）----
+    // 语义：screen_x/y 是窗口像素（左上原点，与 InputSnapshot 一致，由调用方
+    // 传入生效的 viewport（vp_x/y/w/h，含“viewport 全 0 时默认全窗口”的回退）。
+    // 先把窗口坐标投影到 viewport，再映射到 3D FBO 分辨率。
+    const float u = (vp_w > 0.0f) ? (cmds.pick.screen_x - vp_x) / vp_w : 0.0f;
+    const float v = (vp_h > 0.0f) ? (cmds.pick.screen_y - vp_y) / vp_h : 0.0f;
+    // clamp 到 [0,1]，越界命中背景
+    int px = static_cast<int>(std::clamp(u, 0.0f, 1.0f) * static_cast<float>(fbo_w));
+    int py_top = static_cast<int>(std::clamp(v, 0.0f, 1.0f) * static_cast<float>(fbo_h));
+    px = std::clamp(px, 0, fbo_w - 1);
+    py_top = std::clamp(py_top, 0, fbo_h - 1);
+    const int py = fbo_h - 1 - py_top;   // 翻转到 GL 左下原点
+
+    unsigned char pix[4] = {0, 0, 0, 0};
+    glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pix);
+
+    const unsigned int id =
+        static_cast<unsigned int>(pix[0]) |
+        (static_cast<unsigned int>(pix[1]) << 8) |
+        (static_cast<unsigned int>(pix[2]) << 16);
+
+    last_pick_.hit = (id != 0);
+    last_pick_.picking_id = id;
+
+    // 恢复 GL 状态
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+}
+
+// 高亮（方法 B）描边：给一个已用 PBR shader 画过（stencil=1）的物体，
+// 画绕中心放大 (1+outline_width) 倍的纯色副本，仅在 stencil≠1 区域着色，
+// 从而露出边缘一圈边框。描边写进主（HDR）FBO，随统一 tone map。
+void Renderer::DrawHighlightOutline(const Object3DCommand& cmd,
+                                    const RenderCommandList& cmds,
+                                    const HighlightStyle& style,
+                                    MeshManager& mesh_mgr,
+                                    ShaderManager& shader_mgr,
+                                    const float mvp[16],
+                                    unsigned int outline_prog) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawHighlightOutline: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+
+    // Model = 正常放置（T(center)*R），再把线性部分乘 scale ⇒ 绕 center 均匀放大。
+    float model[16], final_mvp[16];
+    Primitives3DRenderer::BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
+    const float s = 1.0f + style.outline_width;
+    model[0] *= s; model[1] *= s; model[2] *= s;
+    model[4] *= s; model[5] *= s; model[6] *= s;
+    model[8] *= s; model[9] *= s; model[10] *= s;
+    Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
+
+    glUseProgram(outline_prog);
+    glUniformMatrix4fv(glGetUniformLocation(outline_prog, "uMVP"),
+                       1, GL_FALSE, final_mvp);
+    glUniform4f(glGetUniformLocation(outline_prog, "uColor"),
+                style.color.r, style.color.g, style.color.b, style.color.a);
+
+    glBindVertexArray(mesh->vao);
+    if (mesh->index_count > 0)
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                       GL_UNSIGNED_INT, nullptr);
+    else
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+    glBindVertexArray(0);
+}
+
+void Renderer::DestroyHighlightFBO() {
+    if (hl_fbo_) {
+        glDeleteFramebuffers(1, &hl_fbo_);
+        glDeleteTextures(1, &hl_color_tex_);
+        glDeleteRenderbuffers(1, &hl_depth_stencil_rb_);
+        hl_fbo_ = 0; hl_color_tex_ = 0; hl_depth_stencil_rb_ = 0;
+    }
+    hl_fbo_w_ = 0; hl_fbo_h_ = 0;
+}
+
+// MSAA 路径的高亮单采样 FBO：RGBA16F 颜色 + 组合 depth+stencil renderbuffer（无 MSAA）。
+void Renderer::EnsureHighlightFBO(int w, int h) {
+    if (hl_fbo_w_ == w && hl_fbo_h_ == h && hl_fbo_) return;
+    if (w <= 0 || h <= 0 || w > kMaxFboDim || h > kMaxFboDim) return;
+    DestroyHighlightFBO();
+
+    glGenTextures(1, &hl_color_tex_);
+    glBindTexture(GL_TEXTURE_2D, hl_color_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // 组合 depth+stencil（GL_DEPTH24_STENCIL8）：部分实现（llvmpipe）要求
+    // depth 与 stencil 共存于同一 renderbuffer，用 GL_DEPTH_STENCIL_ATTACHMENT，
+    // 分离的两个 renderbuffer 会 FBO 不完整（status=0x8CD7）。
+    glGenRenderbuffers(1, &hl_depth_stencil_rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, hl_depth_stencil_rb_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glGenFramebuffers(1, &hl_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, hl_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, hl_color_tex_, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                              GL_RENDERBUFFER, hl_depth_stencil_rb_);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE) << "highlight FBO failed, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    hl_fbo_w_ = w; hl_fbo_h_ = h;
+}
+
+// 高亮 pass（方法 B stencil）：3D 内容全部画完后执行的一个独立子步骤。
+// 入参 fbo_w/fbo_h 为 3D FBO 尺寸；从 fbo_hdr_（MSAA 时自动 resolve）blit
+// color+depth 到单采样 hl FBO 后，在其上做“写 stencil=1 → 放大副本描边”两步式，
+// 输出叠加了高亮的颜色纹理，返回给 tone map pass 作输入。
+unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
+                                         int fbo_w, int fbo_h) {
+    if (!cmds.highlight_style.has_value()) return 0;
+    EnsureHighlightFBO(fbo_w, fbo_h);
+
+    // 把 3D 内容 color+depth 从 HDR FBO blit 到单采样 hl FBO。
+    // - 非 MSAA：fbo_hdr_ 为单采样，直接精确拷入；
+    // - MSAA：fbo_hdr_ 为 MSAA，blit 同时完成 resolve。
+    // depth 供第 2 步描边深度匹配（避免放大副本溢出到前景被遮挡处）。
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hl_fbo_);
+    glBlitFramebuffer(
+        0, 0, fbo_w, fbo_h,
+        0, 0, hl_fbo_w_, hl_fbo_h_,
+        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, hl_fbo_);
+    glViewport(0, 0, fbo_w, fbo_h);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);   // 深度已 resolve，只读不重写
+    // 第 1 步写 stencil 用 GL_ALWAYS 标记物体全部几何像素（不依赖深度比较）。
+    // ⚠️ 不能用 GL_LEQUAL 与已 resolve 深度比 —— MSAA resolve 后的场景深度与
+    // 重画原样物体的深度存在浮点精度差，导致本应可见的凳面/贴墙下边 fragment
+    // 深度测试失败 → 未写 stencil=1 → 放大副本把整面/漏边染黄（bug：凳面整块黄、
+    // 墙缺下边）。遮挡/深度对比交给第 2 步描边（GL_LEQUAL）处理。
+    glDepthFunc(GL_ALWAYS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glDisable(GL_BLEND);
+
+    glEnable(GL_STENCIL_TEST);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    glStencilMask(0xFF);
+
+    // 第 1 步：把被高亮物体按原样（深度匹配已 resolve 的场景）写 stencil=1。
+    // 用普通 MVP，深度测试 LEQUAL 让画面里可见的部分写入。
+    // ⚠️ 写 stencil 时必须禁用颜色写：本阶段用纯色 outline shader、uColor 未设
+    //（默认黑），若同时写颜色会把高亮物体内部整片覆盖成黑色（破坏本体 PBR 色）。
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    float mvp[16];
+    Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
+    const unsigned int outline_prog = OutlineProg();
+    glUseProgram(outline_prog);
+    for (const auto& o : cmds.object3d) {
+        if (!o.highlight) continue;
+        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
+        if (!mesh || mesh->vao == 0) continue;
+        float model[16], final_mvp[16];
+        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model);
+        Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
+        glUniformMatrix4fv(glGetUniformLocation(outline_prog, "uMVP"),
+                           1, GL_FALSE, final_mvp);
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0)
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                           GL_UNSIGNED_INT, nullptr);
+        else
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+        glBindVertexArray(0);
+    }
+
+    // 第 2 步：画绕中心放大的纯色副本，仅在 stencil≠1 区域着色 → 边缘一圈框。
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glStencilMask(0x00);
+    glEnable(GL_BLEND);
+    glDepthMask(GL_FALSE);
+    // 深度测试参与：放大副本只画在“未被更近物体遮挡”的像素。
+    // ⚠️ 不能用 GL_ALWAYS —— 否则 wall 的放大副本会溢出到它前面
+    //（桌子）的 stencil=0 像素上，给不该高亮的物体染金框（bug：桌面边缘金框）。
+    // 用 LEQUAL：副本深度 ≤ 场景深度（已 resolve）才画，被前景遮挡处不画。
+    glDepthFunc(GL_LEQUAL);
+    for (const auto& o : cmds.object3d) {
+        if (!o.highlight) continue;
+        DrawHighlightOutline(o, cmds, *cmds.highlight_style,
+                             mesh_mgr_, shader_mgr_, mvp, outline_prog);
+    }
+
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+
+    // 返回叠加了高亮的颜色纹理，作为 tone map 的输入。
+    return hl_color_tex_;
 }
 
 void Renderer::Present(GLFWwindow* window, int window_width, int window_height) {

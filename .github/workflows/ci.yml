@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:    # 手动触发（force-push 后 CI 未自动触发时使用）
 
 jobs:
   test:

@@ -717,6 +717,67 @@ struct Object3DCommand {
     Vec3f center;          // 模型中心世界坐标（平移）
     Vec3f up;              // 局部 +Y 指向的世界方向（归一化处理）
     Vec3f front;           // 局部 +Z 指向的世界方向（归一化处理）
+
+    // picking_id：该物体在 GPU color-ID 拾取中对外暴露的句柄。
+    //   = 0    ：本物体**不可拾取**（不参与 picking pass，也不会被命中）。
+    //   > 0    ：本物体可被拾取；拾取命中该物体时，JPOV::last_pick().picking_id
+    //            回传此值。用户自行保证其唯一性（同一帧推两个相同 id 的物体，
+    //            命中无法区分）。
+    // 仅当 RenderCommandList::PickQuery::enabled 时才跑 picking pass；
+    // 未发起查询时 picking_id 完全不产生渲染开销。
+    uint32_t picking_id = 0;
+
+    // highlight：是否为本物体绘制高亮纯色边框（方法 B：stencil + 顶点外扩）。
+    //   边框颜色/线宽取全局 RenderCommandList::highlight_style（无该值时忽略）。
+    //   仅当 highlight_style 有值且本物体 highlight==true 时才多画一个描边 pass；
+    //   未开启高亮时零额外开销。
+    bool highlight = false;
+};
+
+// 高亮纯色边框的全局样式（全场景统一）。
+// 方法 B（stencil + 顶点外扩）：先给被高亮物体的像素写 stencil=1，
+// 再画一个绕中心放大的纯色大一圈版本，仅在 stencil≠1 区域着色，
+// 从而只留下边缘一圈边框。
+struct HighlightStyle {
+    Color color = {1.0f, 0.85f, 0.3f, 1.0f};  // 边框颜色（金黄，经统一 tone map）
+
+    // 边框宽度：模型相对其中心的**均匀缩放系数**（外扩比例，无单位）。
+    //   实现：把被高亮物体画成一个绕中心放大 (1 + outline_width) 倍的副本，
+    //   再叠加在自身前面 —— 放大版露出的边缘即边框。
+    //   例：outline_width = 0.05 → 放大 1.05 倍。
+    // 注意：这是相对缩放，不是绝对世界单位 —— 大物体边框比小物体宽；
+    // 且世界空间外扩为“近大远小”（近处像素宽、远处窄）。
+    // 需屏幕恒定像素线宽请用裁剪空间外扩（未来扩展）。
+    // Pre-condition: outline_width > 0
+    float outline_width = 0.05f;
+};
+
+// 拾取查询：用户在下帧声明“我想拾取渲染分辨率上的这个屏幕点”。
+// 当 enabled=true 时，Renderer 在 Render() 内对**所有 picking_id>0** 的物体
+// 跑一个 color-ID pass + 读回，结果写入 JPOV::last_pick()（供下帧 OneIteration 读取）。
+// enabled=false（默认）时不跑任何额外 pass，零开销。
+struct PickQuery {
+    // 是否发起本次拾取查询。false = 不跑 picking pass（零成本）。
+    bool enabled = false;
+
+    // screen_x, screen_y：被拾取的屏幕像素坐标。
+    // ⚠️ 语义为 **窗口（Window）像素坐标**，原点在窗口左上角（x→右，y→下），
+    //    与 InputSnapshot::mouse_x/mouse_y 同一坐标系，便于鼠标投影直接传入。
+    //    渲染分辨率与窗口尺寸不同时，由 Renderer 内部映射到 3D FBO 的像素。
+    float screen_x = 0.0f;
+    float screen_y = 0.0f;
+};
+
+// 一次拾取查询的结果（渲染时经 color-ID pass + glReadPixels 得到，
+// 落在 JPOV::last_pick()，供用户下帧 OneIteration 读取）。
+struct PickResult {
+    // 是否命中任何物体（落到某个 picking_id>0 的物体表面上）。
+    // false = 命中背景/空（该屏幕点没有可拾取物体）。
+    bool hit = false;
+
+    // 命中物体的 picking_id（与触发该物体的 Object3DCommand::picking_id 一致）。
+    // hit==false 时此值为 0（背景）。
+    uint32_t picking_id = 0;
 };
 
 // ==================== 渲染指令列表 ====================
@@ -802,6 +863,16 @@ struct RenderCommandList {
     //   - false：不走 tone map，直接 blit 到 LDR（HDR 值被 RGBA8 clamp，
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
+
+    // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
+    // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
+    // 无值（默认）时不绘制任何高亮，零额外开销。
+    std::optional<HighlightStyle> highlight_style;
+
+    // 拾取查询。enabled==false（默认）时不跑 picking pass，零开销；
+    // enabled==true 时对 picking_id>0 的物体跑一次 color-ID pass，
+    // 结果落在 JPOV::last_pick() 供下帧读取。
+    PickQuery pick;
 
     // 3D 透视相机
     // 每帧有且仅有一个 Camera，用户在 OneIteration 中设置此字段。
@@ -957,7 +1028,9 @@ struct RenderCommandList {
     // Pre-condition: up 与 front 均非零向量，且不平行
     void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                       const Vec3f& center,
-                      const Vec3f& up, const Vec3f& front);
+                      const Vec3f& up, const Vec3f& front,
+                      uint32_t picking_id = 0,
+                      bool highlight = false);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //
@@ -969,7 +1042,9 @@ struct RenderCommandList {
     // Pre-condition: obj 由 Renderer::LoadGltf 生成，且尚未释放
     void DrawGltfObject(const GltfObject& obj,
                         const Vec3f& center,
-                        const Vec3f& up, const Vec3f& front);
+                        const Vec3f& up, const Vec3f& front,
+                        uint32_t picking_id = 0,
+                        bool highlight = false);
 };
 
 }  // namespace jpov
