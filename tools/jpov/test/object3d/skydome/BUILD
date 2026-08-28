@@ -104,6 +104,7 @@ cc_binary(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
         "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
