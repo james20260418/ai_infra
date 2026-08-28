@@ -80,7 +80,7 @@ public:
         // 高亮全局样式（统一颜色 + 线宽）。
         cmds->highlight_style = jpov::HighlightStyle{
             .color = {1.0f, 0.85f, 0.3f, 1.0f},   // 金黄色的框
-            .outline_width = 0.08f,               // 放大 1.08 倍
+            .outline_px = 2,                      // 屏幕空间恒定 2 像素宽
         };
 
         // 地面：扁 box，不可拾取（picking_id 默认 0）。

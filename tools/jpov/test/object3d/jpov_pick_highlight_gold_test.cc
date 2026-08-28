@@ -1,10 +1,11 @@
-// JPOV picking + highlight gold test —— 验证 GPU color-ID 拾取 + 方法 B 高亮边框
+// JPOV picking + highlight gold test —— 验证 GPU color-ID 拾取 + CPU 屏幕空间
+// 回填高亮边框。
 //
 // 验证内容：
 //   1. GPU color-ID 拾取：相机正对场景，发起 pick 查询命中指定屏幕坐标上的物体，
 //      JPOV::last_pick() 返回正确的 picking_id；落在背景上返回 hit=false。
-//   2. 高亮纯色边框：给某物体设 highlight + highlight_style，渲染后画面出现
-//      纯色边框（中心柱区域含暖黄像素，区别于未高亮）。
+//   2. 高亮边框：给某物体设 highlight + highlight_style，渲染后画面出现
+//      恒定像素宽的纯色边框（中心柱区域含暖黄像素，区别于未高亮）。
 //
 // 通过条件：
 //   - 拾取结果精确（id 正确、背景 miss）
@@ -139,10 +140,9 @@ int main() {
 
     // ---- 回归：高亮不破坏本体颜色 ----
     // 高亮只应加边框，被高亮物体内部应保持原 PBR 本体色（不能变纯黑）。
-    // 往：MSAA 路径 DrawHighlightResolvedPass 第 1 步写 stencil 时未关颜色写，
-    // 用未初始化的 outline shader uColor（默认黑）把高亮物体内部整片覆盖成黑。
-    // 修复：第 1 步 glColorMask(GL_FALSE...) 只写 stencil，第 2 步描边前恢复。
-    // 断言：高亮后中心柱内圈（中心 ±25px，避开 1.08 倍外扩边框）应存在非黑像素。
+    // 当前方案：场景底色由 blit 拷贝（含 PBR 本体色），只叠加边框像素，
+    // 本体天然保留。断言：高亮后中心柱内圈（中心 ±25px，避开边框）应存在
+    // 非黑像素。
     {
         const std::string p = outdir + "highlight_center.png";
         int w = 0, h = 0, c = 0;

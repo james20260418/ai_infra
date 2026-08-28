@@ -123,11 +123,11 @@ public:
 
         cmds->tone_mapping = true;
 
-        // 全局高亮样式（统一金黄边框，外扩 5%）。draw_highlight=false 时不设，零开销。
+        // 全局高亮样式（统一金黄边框，屏幕恒定像素宽）。draw_highlight=false 时不设，零开销。
         if (draw_highlight) {
             cmds->highlight_style = jpov::HighlightStyle{
                 .color = {1.0f, 0.85f, 0.3f, 1.0f},
-                .outline_width = 0.05f,
+                .outline_px = 2,
             };
         }
 
