@@ -396,6 +396,8 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     glUniform3f(glGetUniformLocation(selected_prog, "uCameraPos"),
                 cmds.camera.position.x(), cmds.camera.position.y(),
                 cmds.camera.position.z());
+    glUniform1f(glGetUniformLocation(selected_prog, "uCameraNear"),
+                cmds.camera.near);
 
     if (any_tex) {
         CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))

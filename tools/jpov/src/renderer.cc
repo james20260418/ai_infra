@@ -6,6 +6,7 @@
 #include "tools/jpov/src/renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1346,6 +1347,55 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     const float fov_rad = cmds.camera.fov * 3.14159265358979323846f / 180.0f;
 
     float prev_far = cmds.camera.near;
+
+    // 预计算每个 Object3D 的光空间 AABB（用其 CPU 包围盒 bounds_min/max + 摆放变换）。
+    // 目标：让每级联 shadow 覆盖能包含“可能往该区域投影”的所有物体，即使其相机
+    // 视锥之外 —— 否则物体在视锥外就不产生阴影（原实现的致命缺陷）。
+    // 结构：[min_x,max_x,min_y,max_y,min_z,max_z] 光空间 AABB。
+    std::vector<std::array<float, 6>> obj_light_aabb;
+    obj_light_aabb.reserve(cmds.object3d.size());
+    for (const auto& o : cmds.object3d) {
+        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
+        if (!mesh) continue;
+        // 本物体世界 AABB：把局部 bounds_min/max 8 角点经（center,up,front）变换到世界。
+        const Vec3f center{o.center.x(), o.center.y(), o.center.z()};
+        const Vec3f up{o.up.x(), o.up.y(), o.up.z()};
+        const Vec3f fr{o.front.x(), o.front.y(), o.front.z()};
+        float u_len = std::sqrt(up.x()*up.x()+up.y()*up.y()+up.z()*up.z());
+        float f_len = std::sqrt(fr.x()*fr.x()+fr.y()*fr.y()+fr.z()*fr.z());
+        if (u_len < 1e-8f || f_len < 1e-8f) continue;
+        const Vec3f un = up * (1.0f/u_len);
+        const Vec3f fn = fr * (1.0f/f_len);
+        // 局部坐标轴：+X=left=cross(up,front)，+Y=up，+Z=front（与 BuildModelMatrix 一致）。
+        Vec3f left{un.y()*fn.z()-un.z()*fn.y(), un.z()*fn.x()-un.x()*fn.z(),
+                   un.x()*fn.y()-un.y()*fn.x()};
+        float l_len = std::sqrt(left.x()*left.x()+left.y()*left.y()+left.z()*left.z());
+        if (l_len < 1e-8f) continue;
+        left = left * (1.0f/l_len);
+        // 局部 AABB 8 角点 → 光空间，累计本物体光空间 AABB。
+        std::array<float,6> b{1e30f,-1e30f,1e30f,-1e30f,1e30f,-1e30f};
+        for (int ix=0; ix<=1; ++ix) {
+          const float lx = (ix==0) ? mesh->bounds_min[0] : mesh->bounds_max[0];
+          for (int iy=0; iy<=1; ++iy) {
+            const float ly = (iy==0) ? mesh->bounds_min[1] : mesh->bounds_max[1];
+            for (int iz=0; iz<=1; ++iz) {
+              const float lz = (iz==0) ? mesh->bounds_min[2] : mesh->bounds_max[2];
+              // 局部 → 世界（center + 轴缩放）：world = center + left*lx + up*ly + fn*lz
+              const Vec3f wp = center + left*lx + un*ly + fn*lz;
+              const float lx2 = view[0]*wp.x()+view[4]*wp.y()+view[8]*wp.z()+view[12];
+              const float ly2 = view[1]*wp.x()+view[5]*wp.y()+view[9]*wp.z()+view[13];
+              const float lz2 = view[2]*wp.x()+view[6]*wp.y()+view[10]*wp.z()+view[14];
+              b[0]=std::min(b[0],lx2); b[1]=std::max(b[1],lx2);
+              b[2]=std::min(b[2],ly2); b[3]=std::max(b[3],ly2);
+              b[4]=std::min(b[4],lz2); b[5]=std::max(b[5],lz2);
+            }
+          }
+        }
+        if (b[1] > -1e30f) {  // 有效（有顶点）
+            obj_light_aabb.push_back(b);
+        }
+    }
+
     for (int c = 0; c < cascade_count; ++c) {
         const float near_i = prev_far;
         const float far_i = shadow_cfg_.cascade_ranges[c];
@@ -1389,16 +1439,39 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         };
 
         // 变换到光源 view 空间，求 AABB（光空间 x/y/z 范围）。
+        // 并把场景所有物体的光空间 AABB 并入 —— 保证该级联 shadow map 一定包含
+        // 所有可能投到该区域的物体（即使其在相机视锥外）。这是“相机不对着墙也有
+        // 墙影”的关键修复（原实现只 fit 相机视锥切片，视锥外物体被正交裁剪出不了影）。
         float min_x = 1e30f, max_x = -1e30f;
         float min_y = 1e30f, max_y = -1e30f;
         float min_z = 1e30f, max_z = -1e30f;
+        const auto acc = [&](float x, float y, float z) {
+            min_x = std::min(min_x, x); max_x = std::max(max_x, x);
+            min_y = std::min(min_y, y); max_y = std::max(max_y, y);
+            min_z = std::min(min_z, z); max_z = std::max(max_z, z);
+        };
         for (const Vec3f& p : corners) {
             const float lx = view[0]*p.x() + view[4]*p.y() + view[8]*p.z()  + view[12];
             const float ly = view[1]*p.x() + view[5]*p.y() + view[9]*p.z()  + view[13];
             const float lz = view[2]*p.x() + view[6]*p.y() + view[10]*p.z() + view[14];
-            min_x = std::min(min_x, lx); max_x = std::max(max_x, lx);
-            min_y = std::min(min_y, ly); max_y = std::max(max_y, ly);
-            min_z = std::min(min_z, lz); max_z = std::max(max_z, lz);
+            acc(lx, ly, lz);
+        }
+        // 并入“光程与该级联相机切片有重叠”的物体（按光空间 z 筛选）。
+        // 只并入重叠物体：远处物体不撑大近级联覆盖，保持近密远疏的精度分布。
+        // 重叠容差 = 该级联切片 z 跨度的一半（把光路径上的投影体都纳入）；
+        // 物体若与切片 z 有交集（或落在容差内）都可能投影到这片区域 → 并入。
+        if (obj_light_aabb.size() > 0u) {
+            const float slice_max_z = max_z;
+            const float slice_min_z = min_z;
+            const float z_tol = 0.5f * (slice_max_z - slice_min_z) + 10.0f;
+            for (int k = 0; k < (int)obj_light_aabb.size(); ++k) {
+                const auto& b = obj_light_aabb[k];
+                // 物体光空间 z [b[4],b[5]] 与切片 [min_tol,max_tol] 若有重叠则并入。
+                if (b[5] >= slice_min_z - z_tol && b[4] <= slice_max_z + z_tol) {
+                    acc(b[0], b[2], b[4]);
+                    acc(b[1], b[3], b[5]);
+                }
+            }
         }
 
         // 正交投影：光照沿 -z（光 view 空间），xy 覆盖 AABB；z 覆盖 AABB。

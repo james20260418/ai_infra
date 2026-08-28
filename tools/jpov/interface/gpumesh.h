@@ -41,6 +41,13 @@ struct GPUMesh {
     uint32_t vertex_count = 0;      // positions 顶点数
     uint32_t index_count = 0;       // indices 数量（0 = non-indexed）
     MeshVertexFlags flags = MeshVertexFlags::kPosition;  // 与上传时 MeshData.flags 一致
+
+    // CPU 侧模型局部坐标的轴对齐包围盒（RegisterMesh 时从 positions 计算缓存）。
+    // 供阴影 pass 计算物体的世界包围盒（结合 Draw 的 center/up/front 变换），
+    // 从而让级联 shadow 覆盖能包含“往该区域投影的物体”，即使其相机视锥之外。
+    // 仅在 flags 含 kPosition 且 position.
+    float bounds_min[3] = {0.0f, 0.0f, 0.0f};
+    float bounds_max[3] = {0.0f, 0.0f, 0.0f};
 };
 
 }  // namespace jpov

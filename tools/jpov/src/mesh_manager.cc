@@ -1,5 +1,7 @@
 // JPOV MeshManager 实现 — CPU MeshData → GPU (VAO/VBO/EBO) 上传/更新/释放
 
+#include <algorithm>
+
 #include "tools/jpov/src/mesh_manager.h"
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前），否则 GL 常量
@@ -125,6 +127,21 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
     mesh.flags = data.flags;
     mesh.vertex_count = static_cast<uint32_t>(data.positions.size());
     mesh.index_count = static_cast<uint32_t>(data.indices.size());
+
+    // 缓存模型局部 AABB（阴影 pass 用它算物体世界包围盒，扩展级联覆盖）。
+    if (!data.positions.empty()) {
+        mesh.bounds_min[0] = mesh.bounds_max[0] = data.positions[0].x();
+        mesh.bounds_min[1] = mesh.bounds_max[1] = data.positions[0].y();
+        mesh.bounds_min[2] = mesh.bounds_max[2] = data.positions[0].z();
+        for (const Vec3f& p : data.positions) {
+            mesh.bounds_min[0] = std::min(mesh.bounds_min[0], p.x());
+            mesh.bounds_min[1] = std::min(mesh.bounds_min[1], p.y());
+            mesh.bounds_min[2] = std::min(mesh.bounds_min[2], p.z());
+            mesh.bounds_max[0] = std::max(mesh.bounds_max[0], p.x());
+            mesh.bounds_max[1] = std::max(mesh.bounds_max[1], p.y());
+            mesh.bounds_max[2] = std::max(mesh.bounds_max[2], p.z());
+        }
+    }
 
     glGenVertexArrays(1, &mesh.vao);
     CHECK_NE(mesh.vao, 0u) << "MeshManager: glGenVertexArrays failed";
