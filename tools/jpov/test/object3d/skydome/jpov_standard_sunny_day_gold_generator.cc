@@ -15,10 +15,11 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/test/object3d/skydome/jpov_standard_sunny_day_common.h"
+#include "tools/jpov/test/test_utils.h"
 
 int main() {
     const std::string outpath =
-        "/james_pm/ai_infra/tools/jpov/test/object3d/skydome/"
+        jpov::GetTestDataDir() + "/object3d/skydome/"
         "standard_sunny_day_1280x720.png";
 
     JPOV::Config cfg;

@@ -153,6 +153,7 @@ struct Light {
 uniform Light uLights[MAX_TOTAL_LIGHTS];
 uniform int uTotalLights;
 uniform vec3 uCameraPos;
+uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级联过渡权重用）
 
 uniform vec3  uBaseColor;
 uniform sampler2D uBaseColorTex;
@@ -190,7 +191,7 @@ uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；�
 uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = ndc.z）
 uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj
 uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
-uniform float uShadowBias;            // 深度偏移，抗自阴影 acne
+uniform float uShadowBiasCascade[5];    // 每级联深度偏移（ndc 单位，外部可配）
 uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
@@ -207,84 +208,136 @@ const float PI = 3.14159265;
 // ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
 // 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
 // uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
-float shadowFactorC0(vec3 world_pos, vec3 N, vec3 L) {
+// 阴影因子（单级联 C0）：3×3 PCF，输出 {shadow, covered}。
+// covered=1 表示世界坐标落在该级联 shadow map 的 uv 覆盖内（有效采样）；
+// covered=0 表示不在（uv 越界）—— 此时不贡献 shadow，由 computeSunShadow
+// 用其他覆盖该片元的级联做 blend，避免“shadow map 边缘被硬裁成无影”。
+void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[0] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    float slopeBias = uShadowBiasCascade[0] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
-    float shadow = 0.0;
+    float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
-        shadow += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
-    return shadow / 9.0;
+        s += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
+    shadow = s / 9.0;
+    covered = 1.0;
 }
-float shadowFactorC1(vec3 world_pos, vec3 N, vec3 L) {
+void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[1] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    float slopeBias = uShadowBiasCascade[1] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
-    float shadow = 0.0;
+    float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
-        shadow += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
-    return shadow / 9.0;
+        s += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
+    shadow = s / 9.0;
+    covered = 1.0;
 }
-float shadowFactorC2(vec3 world_pos, vec3 N, vec3 L) {
+void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[2] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    float slopeBias = uShadowBiasCascade[2] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
-    float shadow = 0.0;
+    float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
-        shadow += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
-    return shadow / 9.0;
+        s += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
+    shadow = s / 9.0;
+    covered = 1.0;
 }
-float shadowFactorC3(vec3 world_pos, vec3 N, vec3 L) {
+void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[3] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    float slopeBias = uShadowBiasCascade[3] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
-    float shadow = 0.0;
+    float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
-        shadow += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
-    return shadow / 9.0;
+        s += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
+    shadow = s / 9.0;
+    covered = 1.0;
 }
-float shadowFactorC4(vec3 world_pos, vec3 N, vec3 L) {
+void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[4] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    float slopeBias = uShadowBias * (1.0 - dot(N, L));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    float slopeBias = uShadowBiasCascade[4] * (1.0 - dot(N, L));
     float cur = ndc.z - slopeBias;
-    float shadow = 0.0;
+    float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
-        shadow += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
-    return shadow / 9.0;
+        s += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
+    shadow = s / 9.0;
+    covered = 1.0;
 }
 
-// 按片元到相机的距离选级联（0 起），并对影子做线性淡出。
+// 按片元到相机的距离，对**所有级联**加权混合阴影（级联间交叉 fade）。
 // 返回最终阴影因子 [0,1]（1=完全受照无影，0=全影）。
-// 选段用 if/else 链（cascade 索引是编译期常量，避开 sampler 数组动态索引限制）。
+// 按片元到相机的距离，对“主分级联 + 相邻级联”加权混合阴影（级联间交叉 fade）。
+// 返回最终阴影因子 [0,1]（1=完全受照无影，0=全影）。
+//
+// 级联间 blend：在级联边界附近，相邻级联的权重互补——前级联在远端平滑降、
+// 后级联在近端平滑升（smoothstep 边界重叠区），两者权重和恒≈1，消除不同级联
+// 分辨率造成的硬分界/亮度跳变。片元深度在其主级联区间内，故主级联权重不会归零，
+// 边界处不会出现“影子消失的细缝”。uv 越界（covered=0）的级联不贡献，由覆盖
+// 它的其他级联供影（避免 shadow map 边缘被硬裁成无影）。
 float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
     if (uCascadeCount <= 0 || uHasSun == 0) return 1.0;
-    if (frag_dist >= uShadowFadeEnd) return 1.0;   // 淡出结束：无影子
-    int c = 0;
-    for (int i = 0; i < uCascadeCount; i++)
-        if (frag_dist <= uCascadeRanges[i]) { c = i; break; }
-    float shadow;
-    if (c == 0) shadow = shadowFactorC0(world_pos, N, L);
-    else if (c == 1) shadow = shadowFactorC1(world_pos, N, L);
-    else if (c == 2) shadow = shadowFactorC2(world_pos, N, L);
-    else if (c == 3) shadow = shadowFactorC3(world_pos, N, L);
-    else shadow = shadowFactorC4(world_pos, N, L);
-    // 淡出：fade 从 1（frag_dist<=fade_start）线性降到 0（frag_dist>=fade_end）。
-    // shadow = mix(1.0, shadow, fade)：fade=0 时 shadow=1.0（无影子，亮度变大）。
+    if (frag_dist >= uShadowFadeEnd) return 1.0;   // 淡出结束无影子
+
+    float cNear[5]; cNear[0] = uCameraNear;
+    for (int i = 1; i < 5; ++i) cNear[i] = (i <= uCascadeCount) ? uCascadeRanges[i-1] : cNear[i-1];
+
+    float s; float cv;
+    float wsum = 0.0;
+    float wshadow = 0.0;
+
+    // 每个实际声明的级联：近端升 × 远端降的平滑权重（与相邻级联互补）。
+    // blend 宽度 = 该级联跨度的 15%。级联0 近端 / 末级联远端无邻居 → 恒 1。
+    if (uCascadeCount >= 1) {
+        float n = uCameraNear, f = uCascadeRanges[0]; float b = 0.15*(f-n);
+        float wlo = (uCascadeCount>=2) ? smoothstep(n - b, n + b, frag_dist) : 1.0;
+        float whi = (uCascadeCount>=2) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        shadowFactorC0(world_pos, N, L, s, cv);
+        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+    }
+    if (uCascadeCount >= 2) {
+        float n = uCascadeRanges[0], f = uCascadeRanges[1]; float b = 0.15*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=3) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        shadowFactorC1(world_pos, N, L, s, cv);
+        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+    }
+    if (uCascadeCount >= 3) {
+        float n = uCascadeRanges[1], f = uCascadeRanges[2]; float b = 0.15*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=4) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        shadowFactorC2(world_pos, N, L, s, cv);
+        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+    }
+    if (uCascadeCount >= 4) {
+        float n = uCascadeRanges[2], f = uCascadeRanges[3]; float b = 0.15*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=5) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        shadowFactorC3(world_pos, N, L, s, cv);
+        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+    }
+    if (uCascadeCount >= 5) {
+        float n = uCascadeRanges[3], f = uCascadeRanges[4]; float b = 0.15*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = 1.0;
+        shadowFactorC4(world_pos, N, L, s, cv);
+        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+    }
+
+    float shadow = (wsum > 1e-5) ? (wshadow / wsum) : 1.0;
     float fade = 1.0 - clamp((frag_dist - uShadowFadeStart) / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
     return mix(1.0, shadow, fade);
 }

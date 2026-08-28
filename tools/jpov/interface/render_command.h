@@ -439,14 +439,26 @@ struct ShadowConfig {
     // 默认成员值 = 开放世界通用配置（等同 Default()）。因此
     // `ShadowConfig shadow;` / `ShadowConfig{}` 即为合法可用状态，
     // 无需用户显式调 Default()。未用到的数组位（i >= cascade_count）填 0。
-    int   cascade_count = 3;                            // 级联段数 [1, kMaxCascades]
-    float cascade_ranges[kMaxCascades] = {25.0f, 75.0f, 180.0f, 0.0f, 0.0f};
-    int   cascade_sizes[kMaxCascades]  = {2048, 1024, 512, 0, 0};
+    int   cascade_count = 5;                            // 级联段数 [1, kMaxCascades]
+    float cascade_ranges[kMaxCascades] = {7.2f, 28.8f, 64.8f, 115.2f, 180.0f};
+    int   cascade_sizes[kMaxCascades]  = {2048, 1024, 1024, 512, 512};
     float fade_start = 120.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
 
-    // 默认开放世界配置：近处高分辨率、远处低分辨率并自然淡出。
-    // 距离基于典型开放世界量级（相机半径数十米、可视距离上百米）。
+    // 每级联 1 个深度偏置（ndc 深度单位），抗自阴影 acne。
+    // 与级联一一对应：cascade_bias[c] 只作用于第 c 段。外部可逐级联覆盖。
+    // 默认值由“每级联 texel 世界尺寸”反算（2026-08-28）：
+    //   texel 世界尺寸 ≈ 级联覆盖跨度 / 分辨率 → 近级联小、远级联大；
+    //   其对应的 ndc 深度偏置（×2/(far−near) 换算）即各段的 acne 偏置。
+    // 取偏保守的 2×，既压住各级联 acne 又不误伤真影。远级联覆盖/texel 大 →
+    // 需要更大 bias，故 bias 随级联递增（0.002 → 0.008）。
+    // 未用到的数组位（i >= cascade_count）填 0。
+    float cascade_bias[kMaxCascades] = {0.002f, 0.004f, 0.004f, 0.008f, 0.008f};
+
+    // 默认配置：5 级联、近处高分辨率远处低分辨率、指数分布（近密远疏）、自然淡出。
+    // 级联边界用指数公式 边界(i) = 总距离×(i/N)²（UE 常用）：
+    //   7.2 / 28.8 / 64.8 / 115.2 / 180.0 米。第一级较细（0~7.2m），
+    // 覆盖玩家近处的精细阴影；总阴影距离 180m，超出后淡出。
     static ShadowConfig Default() { return ShadowConfig{}; }
 };
 
