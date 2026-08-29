@@ -897,6 +897,14 @@ struct RenderCommandList {
     float final_contrast   = 1.0f;
     float final_brightness = 0.0f;
 
+    // 曝光（photometric exposure，固定 EV）。作用于 tone map **之前**的 HDR
+    // 线性值：exposed_hdr = hdr * exposure，决定“把多大范围 HDR 亮度映射到
+    // tone map 的工作区间”。
+    //   exposure = 2^EV；EV=0 → 1.0（无曝光，物理锚点基准）；>1 提亮，<1 压暗。
+    // 这是 fixed/manual EV（非自动曝光），不破坏物理光照锚点（LIGHT_INTENSITY.md）。
+    // 默认 1.0（EV=0）：零回归，等同于当前物理标定亮度。
+    float exposure = 1.0f;
+
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
