@@ -876,6 +876,18 @@ struct RenderCommandList {
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
 
+    // 后处理输出 sRGB 编码开关（默认 true = 开启）。
+    //   - true ：tone map 输出的线性 LDR 值在写屏前做 sRGB 编码
+    //            （IEC 61966-2-1，分段 lin→srgb 映射），预补偿显示器的
+    //            非线性伽马，让屏幕上看到的亮度和线性空间真值一致。
+    //            正确 HDR→显示链路：tone map→lin→sRGB encode→屏。
+    //   - false：直接写线性 LDR 值（被 RGBA8 clamp 且被屏伽马压暗，
+    //            仅作调试/ before-after 对比用）。
+    // 注意：此开关只影响统一 tone map pass 的输出路径；LDR 旧路径（
+    // tone_mapping=false）与后叠加的 2D/UI 内容不经过此编码（UI 颜色是
+    // 设计时的 sRGB 人眼值，不应被二次变换）。
+    bool srgb_encode = true;
+
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
