@@ -111,6 +111,28 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 
 ---
 
+## 5a. 光照调节滑条（交互版，2026-08-30 新增）
+
+交互窗口底部居中新增 3 个半屏宽滑条（`MakeLighting(theta, sun_base, ambient_base)`，
+仅交互模式绘制；`--four_views` 拍照仍走固定 `MakeNoonLighting()`，截图不带面板，零回归）：
+
+| # | 滑条 | 范围 | 默认 | 作用 |
+|---|------|------|------|------|
+| 1 | 太阳角度 θ | [0, π] 弧度 | 0 | 太阳光传播方向 = `{−sinθ, −cosθ, 0}`；θ=0 天顶直射（最亮），θ=π 从正下方 |
+| 2 | 平行光强度 | [1, 10] | 3.0 | `DirectionalIntensity` 的 midday_intensity（同 LIGHT_INTENSITY.md 的 3.0） |
+| 3 | 环境光强度 | [0.1, 1.0] | 0.3 | `AmbientIntensity` 的 noon_intensity（同当前的 0.3） |
+
+设计要点：
+- 仍全由 sky 推导——传给 sky 的 `sun_dir` = `−sun_light_dir = {sinθ, cosθ, 0}`，用其 y=cosθ
+  驱动 `DirectionalColor()/AmbientColor()/DirectionalIntensity()/AmbientIntensity()`；只有基准强度
+  （sun/ambient 两个滑条）由滑条给定，sky 其余参数（turbidity/season/intensity/ground_color/
+  sun_radius/sun_brightness/sun_glow）不变。
+- 交互与拍照共用 `OneIteration`，靠 `app.interactive_` 区分是否 `ui_.Emit`（同 arch §4 的 headless 区分思路）。
+- 滑条用轻量级即时模式 UI（`//tools/jpov/interface:ui`），文本默认字体 CJK（滑条标签显中文）；
+  分发产物 exe 旁需 `fonts/`（DejaVu + NotoSansCJK，build 脚本同构拷贝，PR #68 优先 exe 旁路径）。
+
+---
+
 ## 6. 文件组织
 
 ```

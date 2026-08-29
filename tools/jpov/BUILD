@@ -45,6 +45,7 @@ cc_binary(
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
     ],
     target_compatible_with = [
         "@platforms//os:linux",

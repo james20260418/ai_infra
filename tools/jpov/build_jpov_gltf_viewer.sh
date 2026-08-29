@@ -38,6 +38,16 @@ echo "==> 2. 拷贝产物到 output/jpov_gltf_viewer/"
 cp -v "$BAZEL_BIN/jpov_gltf_viewer" "$OUTPUT_DIR/jpov_gltf_viewer"
 ls -lh "$OUTPUT_DIR/"
 
+# 拷贝分发态字体到 exe 旁 fonts/（与 demo cfg.fonts 声明的相对路径一致，
+# ResolveFontPath 按 exe 相对路径命中；PR #68 强调 exe 旁 fonts/ 优先）。
+# UI 滑条用 CJK 显中文，DejaVu 做拉丁，两者都拷。
+echo ""
+echo "==> 3. 拷贝字体资源到 output/jpov_gltf_viewer/fonts/"
+mkdir -p "$OUTPUT_DIR/fonts"
+cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts/"
+cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
+ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/"
+
 echo ""
 echo "============================================"
 echo "  编译完成！"
@@ -56,5 +66,9 @@ echo "       $OUTPUT_DIR/jpov_gltf_viewer --four_views /absolute/path/to/model.g
 echo "       → <模型名>_front/up/left/perspective.png"
 echo ""
 echo "   验收：1280x720 不可 resize 窗口，显示 300×300 灰色地平面 + 被加载的"
-echo "   glTF 模型，正午日照（太阳/(0,-1,-1) 阴影 + 环境光）。右键 drag 转视角、"
-echo "   滚轮 zoom。"
+echo "   glTF 模型，正午日照（太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"
+echo "   窗口底部居中 3 个半屏宽滑条（实时调节光照）："
+echo "     ① 太阳角度 θ [0,π]（太阳方向 (−sinθ,−cosθ,0)，θ=0 天顶直射）"
+echo "     ② 平行光正午强度 [1,10]（默认 3.0）"
+echo "     ③ 环境光正午强度 [0.1,1.0]（默认 0.3）"
+echo "   光照颜色（ambient/directional）仍由天空自动推导，sky 其余参数不变。"
