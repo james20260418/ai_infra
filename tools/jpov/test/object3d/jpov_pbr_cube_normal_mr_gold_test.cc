@@ -231,7 +231,9 @@ int main() {
 
     // ---- 光照平均颜色对比（Danis 决策）：8×8 平铺 ROI 块内平均色对比，
     //      输出最大的 RGB 通道差异，作为光照 gold 的硬性门禁。
-    const double kLightThreshold = 30.0;  // metallic PBR in llvmpipe has ~26 diff on stable ROIs
+    // metallic PBR in llvmpipe 非确定抖动：无 sRGB 时 ~26；sRGB 编码（幂
+    // 曲线）把同量级抖动放大 ~13%→~30（见 srgb_encode 默认开）。35 容纳。
+    const double kLightThreshold = 35.0;
     const std::string gold_path = GetGoldPath();  // reuse existing GetGoldPath()
     if (FILE* f = std::fopen(gold_path.c_str(), "rb")) {
         std::fclose(f);
