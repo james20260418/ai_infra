@@ -154,6 +154,11 @@ uniform sampler2D uHdrTexture;
 //        预补偿显示器伽马，屏上亮度与线性真值一致；
 // false：直接写线性值（仅调试/ before-after 对比）。
 uniform bool uSrgbEncode;
+// 最终亮度/对比度微调（post-tonemap 观感调整，作用于最终 LDR sRGB 值）：
+//   adjusted = (v - 0.5) * contrast + 0.5 + brightness
+// contrast 围绕中灰 0.5 缩放；brightness 整体偏移。默认 1.0/0.0 无调整。
+uniform float uFinalContrast;
+uniform float uFinalBrightness;
 
 // ACES filmic 曲线（Narkowicz / Stephen Hill RRTAndODTFit 拟合）。
 // 对标量亮度工作，输出 [0,1] 附近，高光有柔和 S 型肩。
@@ -196,7 +201,10 @@ void main() {
     vec3 ldr = aces_tonemap(hdr);
     // uSrgbEncode=true 时编码成 sRGB，否则直写线性值。
     vec3 out_color = uSrgbEncode ? srgb_encode(clamp(ldr, 0.0, 1.0)) : ldr;
-    FragColor = vec4(out_color, 1.0);
+    // 最终亮度/对比度微调：围绕中灰 0.5 缩放对比 + 整体亮度偏移。
+    // 对 [0,1] 的最终值操作，输出再 clamp 回 [0,1]（RGBA8 会截断）。
+    vec3 tuned = (out_color - 0.5) * uFinalContrast + 0.5 + uFinalBrightness;
+    FragColor = vec4(clamp(tuned, 0.0, 1.0), 1.0);
 }
 )glsl";
 
@@ -1139,6 +1147,11 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 输出 sRGB 编码开关：默认开（true），false 时直写线性值供对比。
             glUniform1i(shader_mgr_.GetUniform(prog, "uSrgbEncode"),
                         cmds.srgb_encode ? 1 : 0);
+            // 最终亮度/对比度微调：默认 1.0/0.0（无调整）。
+            glUniform1f(shader_mgr_.GetUniform(prog, "uFinalContrast"),
+                        cmds.final_contrast);
+            glUniform1f(shader_mgr_.GetUniform(prog, "uFinalBrightness"),
+                        cmds.final_brightness);
 
             glViewport(
                 static_cast<int>(cam.viewport_x),

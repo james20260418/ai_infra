@@ -888,6 +888,15 @@ struct RenderCommandList {
     // 设计时的 sRGB 人眼值，不应被二次变换）。
     bool srgb_encode = true;
 
+    // 最终亮度/对比度微调（作用于 tone map + sRGB 编码之后的最终 LDR 值）。
+    // 这是 post-tonemap 的观感调整，输入/输出均为 [0,1] sRGB 值：
+    //   adjusted = (v - 0.5) * contrast + 0.5 + brightness
+    //   contrast 围绕中灰 0.5 缩放：1.0 不变，>1 增大对比，<1 减小对比
+    //   brightness 整体偏移：0.0 不变，>0 提亮，<0 压暗
+    // 默认 contrast=1.0 / brightness=0.0（无调整，全链路等效不加此步）。
+    float final_contrast   = 1.0f;
+    float final_brightness = 0.0f;
+
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
