@@ -84,6 +84,11 @@ struct Renderer {
 
 private:
     unsigned int fbo_ = 0, color_tex_ = 0, stream_vbo_ = 0;
+    // Strip3D 专用 VBO（见 CreateStreamVBO）。
+    unsigned int strip_vbo_ = 0;
+    // 流式绘制 VAO（GL_POINTS 高亮回填等）：core profile 下顶点属性需绑定 VAO
+    // 才合法。与 stream_vbo_ 一起 CreateStreamVBO 生成、Finalize 销毁。
+    unsigned int stream_vao_ = 0;
     int fbo_w_ = 0, fbo_h_ = 0;
 
     unsigned int tile_index_tex_ = 0;
@@ -137,29 +142,20 @@ private:
     void DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                          float vp_x, float vp_y, float vp_w, float vp_h);
 
-    // 高亮 pass（方法 B stencil）：3D 内容全部画完后统一执行的一个独立子步骤
+    // 高亮 pass（CPU 屏幕空间回填）：3D 内容全部画完后统一执行的一个独立子步骤
     // （与 shadow pass / tone map pass 并列）。
-    // 从 fbo_hdr_（MSAA 时自动 resolve）blit color+depth 到单采样 hl FBO，
-    // 在其上写 stencil=1 标记全部高亮物体，再画顶点外扩的纯色副本仅在
-    // stencil≠1 区域着色（物体轮廓外侧一圈边框，深度 LEQUAL 防被前景遮挡处漏画）。
+    // 从 fbo_hdr_（MSAA 时自动 resolve）blit color 到 color-only 单采样 hl FBO，
+    // 再把被高亮物体画进独立 mask 纹理（不扩张的单色剪影），CPU 读回 mask、
+    // 做 outline_px 次像素膨胀，膨胀图与原剪影相减得恒定像素宽的边缘环，
+    // 最后用 GL_POINTS 把边框色回填叠加到场景颜色上（hl_color_tex_）。
     // 返回叠加了高亮的颜色纹理（hl_color_tex_），供 tone map pass 作为输入。
     // 调用前提：use_hdr=true（HDR 3D FBO 已存在），且 cmds.highlight_style 有值。
     unsigned int DrawHighlightPass(const RenderCommandList& cmds,
                                    int fbo_w, int fbo_h);
     void EnsureHighlightFBO(int w, int h);
     void DestroyHighlightFBO();
-
-    // 高亮：给一个已用 PBR shader 画过（stencil=1）的物体，画顶点外扩的
-    // 纯色边框，仅在 stencil≠1 区域着色（方法 B）。描边进主 HDR FBO。
-    static void DrawHighlightOutline(const Object3DCommand& cmd,
-                                     const RenderCommandList& cmds,
-                                     const HighlightStyle& style,
-                                     MeshManager& mesh_mgr,
-                                     ShaderManager& shader_mgr,
-                                     const float mvp[16],
-                                     unsigned int outline_prog);
-
-    unsigned int strip_vbo_ = 0;
+    void EnsureHighlightMaskFBO(int w, int h);
+    void DestroyHighlightMaskFBO();
 
     float mvp_[16];
     ShaderManager shader_mgr_;
@@ -172,12 +168,16 @@ private:
     unsigned int pick_fbo_ = 0, pick_tex_ = 0, pick_depth_rb_ = 0;
     int pick_fbo_w_ = 0, pick_fbo_h_ = 0;
 
-    // MSAA 路径的高亮 FBO：单采样 RGBA16F 颜色 + depth + stencil。
-    // 从 MSAA HDR FBO resolve color+depth 到此处后，在此做单采样 stencil 高亮
-    //（MSAA FBO 本身不含 stencil —— llvmpipe 不支持 MSAA stencil renderbuffer）。
+    // 高亮叠加 FBO：color-only 单采样（RGBA16F）。blit 场景 color 到此处后，
+    // 在此叠加恒定像素宽边框（CPU 剪影膨胀求边缘环）。
     // 完成后其颜色纹理作为 tone map 的输入。
-    unsigned int hl_fbo_ = 0, hl_color_tex_ = 0, hl_depth_stencil_rb_ = 0;
+    unsigned int hl_fbo_ = 0, hl_color_tex_ = 0;
     int hl_fbo_w_ = 0, hl_fbo_h_ = 0;
+
+    // 高亮剪影 mask：单色（R8）纹理 + 独立 FBO（color-only），存被高亮物体的
+    // 不扩张剪影（白=物体，黑=背景）。CPU 读回它做像素膨胀求恒定像素宽边缘环。
+    unsigned int hl_mask_tex_ = 0, hl_mask_fbo_ = 0;
+    int hl_mask_w_ = 0, hl_mask_h_ = 0;
 
     unsigned int SolidProg();
     unsigned int TextProg();
@@ -189,7 +189,6 @@ private:
     unsigned int ShadowProg();
     unsigned int TonemapProg();
     unsigned int PickProg();
-    unsigned int OutlineProg();
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
