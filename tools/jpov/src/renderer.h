@@ -157,6 +157,19 @@ private:
     void EnsureHighlightMaskFBO(int w, int h);
     void DestroyHighlightMaskFBO();
 
+    // Bloom（辉光）pass：HDR 高亮提取→多级半分辨率降采样模糊→上采样叠加
+    // →加回 HDR 原图。确定性后处理，在 tone map **之前**工作。
+    // 输入 hdr_input_tex（单采样浮点 HDR 纹理），返回加回辉光后的 HDR 纹理
+    //（同输入尺寸的 bloom_work_tex_，供 tone map pass 采样）。
+    // 调用前提：use_hdr=true，且 cmds.bloom 有值且 enabled。
+    // 无 bloom 时返回原 hdr_input_tex（零开销零回归）。
+    unsigned int DrawBloomPass(const RenderCommandList& cmds,
+                               const BloomConfig& cfg,
+                               unsigned int hdr_input_tex,
+                               int hdr_w, int hdr_h);
+    void EnsureBloomChain(int full_w, int full_h, int levels);
+    void DestroyBloomChain();
+
     float mvp_[16];
     ShaderManager shader_mgr_;
 
@@ -179,6 +192,24 @@ private:
     unsigned int hl_mask_tex_ = 0, hl_mask_fbo_ = 0;
     int hl_mask_w_ = 0, hl_mask_h_ = 0;
 
+    // Bloom（辉光）链：levels 级半分辨率 FBO + 纹理（大小 1/2, 1/4, 1/8, ...）。
+    //   bloom_texs_[0] = 半分辨率：prefilter 高亮提取 + 上采样累加终点。
+    //   bloom_texs_[1..] = 逐级减半的降采样/模糊级。
+    //   bloom_work_tex_ = 与 HDR 同尺寸的临时纹理，存放加回辉光后的结果，
+    //                    作为 tone map 的输入。
+    // 生命周期随渲染尺寸变化（EnsureBloomChain 按需重建）。
+    std::vector<unsigned int> bloom_texs_;
+    std::vector<unsigned int> bloom_fbos_;
+    std::vector<int> bloom_level_w_;
+    std::vector<int> bloom_level_h_;
+    unsigned int bloom_work_fbo_ = 0, bloom_work_tex_ = 0;
+    int bloom_work_w_ = 0, bloom_work_h_ = 0;
+    // 上采样累加后，最终辉光所在的 acc 纹理（L0 分辨率），供 composite 采样。
+    unsigned int bloom_final_tex_ = 0;
+    // 上采样累加用的乒乓缓冲（acc_a/acc_b 各半分辨率，随链一起分配）。
+    unsigned int bloom_acc_a_ = 0, bloom_acc_b_ = 0;
+    unsigned int bloom_acc_fbo_a_ = 0, bloom_acc_fbo_b_ = 0;
+
     unsigned int SolidProg();
     unsigned int TextProg();
     unsigned int ImageProg();
@@ -189,6 +220,10 @@ private:
     unsigned int ShadowProg();
     unsigned int TonemapProg();
     unsigned int PickProg();
+    unsigned int BloomPrefilterProg();
+    unsigned int BloomDownsampleProg();
+    unsigned int BloomUpsampleProg();
+    unsigned int BloomCompositeProg();
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;

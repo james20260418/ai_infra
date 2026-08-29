@@ -434,6 +434,49 @@ struct ColorGrade {
     bool enabled = false;
 };
 
+// 辉光（Bloom）后处理参数——HDR 高亮部分提取→模糊→加回原图的机制。
+//
+// 背景与插入链路（见 src/renderer.cc Render()）：
+//   3D 内容先渲进 HDR FBO（RGBA16F，可存 >1.0 亮度）→ resolve 到单采样
+//   浮点纹理（resolve_tex_hdr_）→ [本 pass：bloom] → 统一 tone map pass。
+//   bloom 在 tone map **之前**工作：从 HDR 里把超过 threshold 的高亮区域
+//   抠出来，用多级半分辨率降采样 + 上采样叠加成一张"辉光图"，再按
+//   intensity 加回 HDR 原图，之后才进 ACES tone map。这样高亮的"光晕"
+//   才不会被 tone map 错误压缩丢失。
+//
+// 算法：仿 UE/Karis 标准流程——
+//   1) 阈值提取（prefilter）：bright = max(hdr - threshold, 0)，只保留超阈部分。
+//   2) 多级降采样（downsample）：每级分辨率减半（1/2, 1/4, 1/8, ...），
+//      相邻级间既是缩小又自带一次模糊；从 level=1 取到 levels 级。
+//   3) 上采样叠加（upsample accumulate）：从最小一级逐级放大回全分辨率，
+//      每级和下一大的那一级做加法累加，得到多尺度辉光图。
+//   4) 加回：hdr += bloom * intensity，再进 tone map。
+//
+// 这是一个确定性后处理（同输入必同输出），不像 PBR 光照那样有 llvmpipe
+// 三稳态漂移，因此可以做逐像素 gold 验证。
+struct BloomConfig {
+    // 是否启用辉光。false（默认）时整个 pass 跳过，零开销、零回归。
+    bool enabled = false;
+
+    // 整体强度（线性缩放辉光颜色）。0 = 无辉光（等同关闭）；
+    // 0.5~1.0 常见；>1 过曝。
+    float intensity = 0.6f;
+
+    // 亮度门槛（作用于 tone map 前的 HDR 线性值）。
+    //   hdr 的亮度 luminance <= threshold 的区域不参与辉光；
+    //   只有亮度 > threshold 的高亮部分被提取、模糊、加回。
+    //   默认 1.0（HDR 线性亮度 >1 即视为高亮，晴天基准：太阳盘 1e3、
+    //   直射光 3.0 都远超此值，普通漫反射面 <1 不辉）。
+    float threshold = 1.0f;
+
+    // 降采样级数（从 1/2 开始连续减半：level1=1/2, level2=1/4, ...）。
+    // 每多一级，辉光的"光晕半径"约翻倍、效果更柔和。
+    //   2~3 级：紧凑小幅辉光（适合黄金测试快速验证）。
+    //   5~6 级：UE 风格的很宽光晕（性能更贵）。
+    // 默认 3：给 sun_path 让太阳盘周围有一圈看得清的柔和光晕。
+    int levels = 3;
+};
+
 // 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
 //
 // 与 DirectionalLight（光学参数：方向/颜色/强度，每帧在
@@ -934,6 +977,11 @@ struct RenderCommandList {
     // 三个分量分别作用于 R/G/B，可实现分通道调色（如 split-tone：暗部偏青/亮部偏橙）。
     // enabled=false（默认）时不做任何分级，恒等零回归。
     ColorGrade grade;
+
+    // 辉光参数。有值且 bloom.enabled==true 时，在 tone map **之前**把 HDR
+    // 高亮区域提取、模糊、加回原图（见 BloomConfig 注释）。
+    // 默认无值（等同关闭），零额外开销、零回归。
+    std::optional<BloomConfig> bloom;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
