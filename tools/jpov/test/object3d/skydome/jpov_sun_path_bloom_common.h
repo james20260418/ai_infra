@@ -53,12 +53,13 @@ public:
 };
 
 // 黄昏（sun_path index=1）的 bloom 默认参数：太阳盘 brightness=1e3、天空暗，
-// threshold 取 1.0（>1 才算高亮），intensity 适中，levels 给 3 级让光晕看得清。
+// threshold 取 1.0（>1 才算高亮），intensity 适中。levels 给 5 级让光晕更宽
+//（1/2→1/4→1/8→1/16→1/32 多级降采样），方便对比光晕范围。
 inline jpov::BloomConfig DefaultBloom() {
     jpov::BloomConfig cfg;
     cfg.intensity = 0.8f;
     cfg.threshold = 1.0f;
-    cfg.levels = 3;
+    cfg.levels = 5;
     return cfg;
 }
 
