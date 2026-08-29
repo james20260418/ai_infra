@@ -48,6 +48,9 @@ public:
         exposure_   = p.exposure;
     }
 
+    // 设置色彩分级（ASC-CDL，作用于 tone map 前的 HDR，per-channel）。
+    void SetGrade(const jpov::ColorGrade& g) { grade_ = g; }
+
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
@@ -89,6 +92,7 @@ public:
         cmds->final_contrast   = contrast_;
         cmds->final_brightness = brightness_;
         cmds->exposure         = exposure_;
+        cmds->grade            = grade_;
 
         // 绘制整个 glTF 对象（pliers，内部展开为多个 DrawObject3D）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
@@ -116,6 +120,7 @@ private:
     float contrast_ = 1.0f;
     float brightness_ = 0.0f;
     float exposure_ = 1.0f;
+    jpov::ColorGrade grade_;
 };
 
 // 渲染单帧到 outpath（设置指定最终微调参数）。App 需已 Init + 已 SetGltfObject。
