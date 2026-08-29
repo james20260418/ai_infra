@@ -149,6 +149,16 @@ const char* kTonemapFs = R"glsl(
 in vec2 vTexCoord;
 out vec4 FragColor;
 uniform sampler2D uHdrTexture;
+// 输出 sRGB 编码开关（uniform，由 uSrgbEncode 传入，避免编译两份 shader）。
+// true：tone map 输出的线性 LDR 值先做 sRGB 编码（IEC 61966-2-1）再写屏，
+//        预补偿显示器伽马，屏上亮度与线性真值一致；
+// false：直接写线性值（仅调试/ before-after 对比）。
+uniform bool uSrgbEncode;
+// 最终亮度/对比度微调（post-tonemap 观感调整，作用于最终 LDR sRGB 值）：
+//   adjusted = (v - 0.5) * contrast + 0.5 + brightness
+// contrast 围绕中灰 0.5 缩放；brightness 整体偏移。默认 1.0/0.0 无调整。
+uniform float uFinalContrast;
+uniform float uFinalBrightness;
 
 // ACES filmic 曲线（Narkowicz / Stephen Hill RRTAndODTFit 拟合）。
 // 对标量亮度工作，输出 [0,1] 附近，高光有柔和 S 型肩。
@@ -170,10 +180,31 @@ vec3 aces_tonemap(vec3 color) {
     return color * (tone / max(lum, 1e-5));
 }
 
+// sRGB 编码（linear→sRGB，IEC 61966-2-1 分段函数）。
+// 输入为 [0,1] 线性值，输出为 sRGB 空间值（预补偿显示器伽马）。
+// 边界条件与指数 2.4 是标准定义，跨平台/跨 API 恒定。
+float srgb_encode_channel(float c) {
+    if (c <= 0.0031308) {
+        return 12.92 * c;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+vec3 srgb_encode(vec3 color) {
+    return vec3(srgb_encode_channel(color.r),
+                srgb_encode_channel(color.g),
+                srgb_encode_channel(color.b));
+}
+
 void main() {
     vec3 hdr = texture(uHdrTexture, vTexCoord).rgb;
     vec3 ldr = aces_tonemap(hdr);
-    FragColor = vec4(ldr, 1.0);
+    // uSrgbEncode=true 时编码成 sRGB，否则直写线性值。
+    vec3 out_color = uSrgbEncode ? srgb_encode(clamp(ldr, 0.0, 1.0)) : ldr;
+    // 最终亮度/对比度微调：围绕中灰 0.5 缩放对比 + 整体亮度偏移。
+    // 对 [0,1] 的最终值操作，输出再 clamp 回 [0,1]（RGBA8 会截断）。
+    vec3 tuned = (out_color - 0.5) * uFinalContrast + 0.5 + uFinalBrightness;
+    FragColor = vec4(clamp(tuned, 0.0, 1.0), 1.0);
 }
 )glsl";
 
@@ -294,6 +325,18 @@ void ValidateShadowConfig(const jpov::ShadowConfig& s) {
     CHECK_GT(s.fade_end, s.fade_start)
         << "fade_end 必须 > fade_start，当前 fade_start=" << s.fade_start
         << " fade_end=" << s.fade_end;
+}
+
+// sRGB→线性 解码（IEC 61966-2-1 逆变换）。
+// 输入为 [0,1] 的 sRGB 编码值，输出为线性空间值。
+// 用于高亮等“设计时以 sRGB 屏显为语义”的颜色：画进 HDR 线性 buffer 前先
+// 解码，经统一 tone map + sRGB 编码后屏上能还原设计者的原色观感；否则
+// 编码端会把高亮色错误压暗/变色（见 srgb_encode 配套）。
+float SrgbToLinear(float c) {
+    if (c <= 0.04045f) {
+        return c / 12.92f;
+    }
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
 }  // anonymous namespace
@@ -1101,6 +1144,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, hdr_input_tex);
             glUniform1i(shader_mgr_.GetUniform(prog, "uHdrTexture"), 0);
+            // 输出 sRGB 编码开关：默认开（true），false 时直写线性值供对比。
+            glUniform1i(shader_mgr_.GetUniform(prog, "uSrgbEncode"),
+                        cmds.srgb_encode ? 1 : 0);
+            // 最终亮度/对比度微调：默认 1.0/0.0（无调整）。
+            glUniform1f(shader_mgr_.GetUniform(prog, "uFinalContrast"),
+                        cmds.final_contrast);
+            glUniform1f(shader_mgr_.GetUniform(prog, "uFinalBrightness"),
+                        cmds.final_brightness);
 
             glViewport(
                 static_cast<int>(cam.viewport_x),
@@ -1848,8 +1899,18 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         glUniformMatrix4fv(glGetUniformLocation(solid3d, "uMVP"),
                            1, GL_FALSE, identity);
         const jpov::Color& c = cmds.highlight_style->color;
+        // 高亮色以“sRGB 屏显目标”为语义（设计者在屏幕上看到的金色）。
+        // 画进 HDR 线性 buffer 前，若输出端开了 sRGB 编码（srgb_encode），
+        // 需先解码为线性值，否则经编码后颜色会被错误压暗/变色。
+        // srgb_encode=false（调试/旧路径）时保持直传，字节兼容。
+        float cr = c.r, cg = c.g, cb = c.b;
+        if (cmds.srgb_encode) {
+            cr = SrgbToLinear(c.r);
+            cg = SrgbToLinear(c.g);
+            cb = SrgbToLinear(c.b);
+        }
         glUniform4f(glGetUniformLocation(solid3d, "uColor"),
-                    c.r, c.g, c.b, c.a);
+                    cr, cg, cb, c.a);
 
         // 上传点序列到 stream VBO（3 floats/vertex：x,y,z）后，绑定流式 VAO
         //（attribute 0 = vec3，已在 CreateStreamVBO 配好）直接画点。
