@@ -15,6 +15,7 @@ cc_library(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
         "//tools/common:utils",
+        "//third_party/stb:stb_image",
     ],
 )
 
@@ -103,6 +104,70 @@ cc_test(
         ":final_adjust_lowcontrast.png",
         "//tools/jpov/test/object3d:pliers_gltf_data",
     ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# Test 4 — 曝光（fixed EV）接口 gold test（以 pliers 基底，三档曝光对比）
+# EV=0(-1/+1) 三档 mean 断言：EV=+1 > EV=0 > EV=-1，验证曝光方向与量级。
+# ============================================================================
+cc_test(
+    name = "exposure_gold_test",
+    srcs = ["exposure_gold_test.cc"],
+    deps = [
+        ":final_adjust_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/test:test_utils",
+    ],
+    data = [
+        "//tools/jpov/test/object3d:pliers_gltf_data",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# 色彩分级（ASC-CDL）gold generator — 3 种影视风格效果图（肉眼验收）
+# ============================================================================
+cc_binary(
+    name = "grade_gold_generator",
+    srcs = ["grade_gold_generator.cc"],
+    deps = [
+        ":final_adjust_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/test:test_utils",
+    ],
+    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
+# 色彩分级（ASC-CDL）gold test — 3 种风格的真实像素检查
+# 用当前渲染重渲 4 图(neutral+3风格)，mask 排背景，断言色调方向：
+#   autumn 更暖、spring 更亮更冷、teal 暗部偏青。负向验证过。
+# ============================================================================
+cc_test(
+    name = "grade_gold_test",
+    srcs = ["grade_gold_test.cc"],
+    deps = [
+        ":final_adjust_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
     copts = ["-std=c++20"],
     linkstatic = 1,
     target_compatible_with = [

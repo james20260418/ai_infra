@@ -412,6 +412,28 @@ struct AmbientLight {
     float intensity = 1.0f;
 };
 
+// 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
+// 这是“光影塑造”环节（scene-referred）：
+//   out = pow(max(v * slope + offset, 0), power)
+//   slope（=Gain，亮部斜率）、offset（=Lift，暗部偏移）、power（=Gamma，幂指数）
+// 三个分量分别作用于 R/G/B，实现分通道调色（split-tone：暗部偏青/亮部偏橙）。
+// 默认全 1/0/1 + enabled=false：恒等，零回归。
+struct ColorGrade {
+    // 亮部斜率（Gain）。>1 提亮亮部，<1 压暗亮部。默认 1（无增益）。
+    Vec3f slope  = {1.0f, 1.0f, 1.0f};
+
+    // 暗部偏移（Lift）。>0 抬升暗部（褪色感），<0 压死暗部。默认 0。
+    Vec3f offset = {0.0f, 0.0f, 0.0f};
+
+    // 中间调幂指数（Gamma）。
+    //   power=1：恒等；>1 压暗中间调（提对比）；<1 提亮中间调（降对比）。
+    // 默认 1（无指数调整）。
+    Vec3f power = {1.0f, 1.0f, 1.0f};
+
+    // 是否启用分级。false（默认）时整体恒等，零回归；true 时应用以上参数。
+    bool enabled = false;
+};
+
 // 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
 //
 // 与 DirectionalLight（光学参数：方向/颜色/强度，每帧在
@@ -896,6 +918,22 @@ struct RenderCommandList {
     // 默认 contrast=1.0 / brightness=0.0（无调整，全链路等效不加此步）。
     float final_contrast   = 1.0f;
     float final_brightness = 0.0f;
+
+    // 曝光（photometric exposure，固定 EV）。作用于 tone map **之前**的 HDR
+    // 线性值：exposed_hdr = hdr * exposure，决定“把多大范围 HDR 亮度映射到
+    // tone map 的工作区间”。
+    //   exposure = 2^EV；EV=0 → 1.0（无曝光，物理锚点基准）；>1 提亮，<1 压暗。
+    // 这是 fixed/manual EV（非自动曝光），不破坏物理光照锚点（LIGHT_INTENSITY.md）。
+    // 默认 1.0（EV=0）：零回归，等同于当前物理标定亮度。
+    float exposure = 1.0f;
+
+    // 色彩分级（ASC-CDL 风格，作用于 tone map **之前**的 HDR 值，per-channel）。
+    // 这是“光影塑造”环节，在摄影域（scene-referred）调整明暗与对比：
+    //   out = pow(max(v * slope + offset, 0), power)
+    //   slope（=Gain，亮部斜率）、offset（=Lift，暗部偏移）、power（=Gamma，幂指数）
+    // 三个分量分别作用于 R/G/B，可实现分通道调色（如 split-tone：暗部偏青/亮部偏橙）。
+    // enabled=false（默认）时不做任何分级，恒等零回归。
+    ColorGrade grade;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。

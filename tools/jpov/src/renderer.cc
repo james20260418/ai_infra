@@ -159,6 +159,16 @@ uniform bool uSrgbEncode;
 // contrast 围绕中灰 0.5 缩放；brightness 整体偏移。默认 1.0/0.0 无调整。
 uniform float uFinalContrast;
 uniform float uFinalBrightness;
+// 曝光（fixed EV，作用于 tone map 前的 HDR 值）：exposed = hdr * uExposure。
+// uExposure=1.0（默认 EV=0）无曝光；>1 提亮，<1 压暗。
+uniform float uExposure;
+// 色彩分级（ASC-CDL，作用于 tone map 前的 HDR 值，per-channel）：
+//   grade = pow(max(v * slope + offset, 0), power)
+// slope≈Gain、offset≈Lift、power≈Gamma。uGradeEnabled=false 时恒等。
+uniform bool uGradeEnabled;
+uniform vec3 uGradeSlope;
+uniform vec3 uGradeOffset;
+uniform vec3 uGradePower;
 
 // ACES filmic 曲线（Narkowicz / Stephen Hill RRTAndODTFit 拟合）。
 // 对标量亮度工作，输出 [0,1] 附近，高光有柔和 S 型肩。
@@ -198,7 +208,16 @@ vec3 srgb_encode(vec3 color) {
 
 void main() {
     vec3 hdr = texture(uHdrTexture, vTexCoord).rgb;
-    vec3 ldr = aces_tonemap(hdr);
+    // 曝光：tone map 前对 HDR 线性值做固定 EV 缩放（决定映射到 LDR 的起点）。
+    // uExposure=1.0（默认 EV=0）时无感，零回归。
+    vec3 exposed = hdr * uExposure;
+    // 色彩分级（ASC-CDL）：幂曲线塑造明暗/对比（scene-referred）。
+    // enabled=false 时恒等（slope乘1 + offset加0 + power的1次幂）。
+    if (uGradeEnabled) {
+        exposed = pow(max(exposed * uGradeSlope + uGradeOffset, vec3(0.0)),
+                     uGradePower);
+    }
+    vec3 ldr = aces_tonemap(exposed);
     // uSrgbEncode=true 时编码成 sRGB，否则直写线性值。
     vec3 out_color = uSrgbEncode ? srgb_encode(clamp(ldr, 0.0, 1.0)) : ldr;
     // 最终亮度/对比度微调：围绕中灰 0.5 缩放对比 + 整体亮度偏移。
@@ -1152,6 +1171,19 @@ void Renderer::Render(const RenderCommandList& cmds,
                         cmds.final_contrast);
             glUniform1f(shader_mgr_.GetUniform(prog, "uFinalBrightness"),
                         cmds.final_brightness);
+            // 曝光：默认 1.0（EV=0，无曝光，零回归）。
+            glUniform1f(shader_mgr_.GetUniform(prog, "uExposure"),
+                        cmds.exposure);
+            // 色彩分级（ASC-CDL）：默认 disabled（恒等，零回归）。
+            const jpov::ColorGrade& g = cmds.grade;
+            glUniform1i(shader_mgr_.GetUniform(prog, "uGradeEnabled"),
+                        g.enabled ? 1 : 0);
+            glUniform3f(shader_mgr_.GetUniform(prog, "uGradeSlope"),
+                        g.slope.x(), g.slope.y(), g.slope.z());
+            glUniform3f(shader_mgr_.GetUniform(prog, "uGradeOffset"),
+                        g.offset.x(), g.offset.y(), g.offset.z());
+            glUniform3f(shader_mgr_.GetUniform(prog, "uGradePower"),
+                        g.power.x(), g.power.y(), g.power.z());
 
             glViewport(
                 static_cast<int>(cam.viewport_x),
