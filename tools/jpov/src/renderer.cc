@@ -1665,7 +1665,8 @@ void Renderer::EnsureHighlightMaskFBO(int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // mask 需要 depth 做遮挡剔除（画剪影时只画高亮物体可见部分）。
+    // mask 的 depth 仅用于随附在 FBO 上保持完整性（不影响剪影：画剪影时
+    // 深度测试已关闭，见 DrawHighlightPass，遮挡部分也写 1）。
     glGenRenderbuffers(1, &hl_mask_depth_rb_);
     glBindRenderbuffer(GL_RENDERBUFFER, hl_mask_depth_rb_);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
@@ -1723,7 +1724,9 @@ void Renderer::EnsureHighlightFBO(int w, int h) {
 // 入参 fbo_w/fbo_h 为 3D FBO 尺寸。流程：
 //   1) blit 场景 color 从 fbo_hdr_（MSAA 时自动 resolve）到单采样 hl FBO
 //      —— 得到含 PBR 本色的场景底色；
-//   2) 把被高亮物体画成不扩张的单色剪影到独立 mask 纹理（hl_mask_tex_）；
+//   2) 把被高亮物体画成不扩张的单色剪影到独立 mask 纹理（hl_mask_tex_）。
+//      mask = 所有高亮物体的总并集（union）：关闭深度测试与背面裁剪，
+//      被遮挡/背面部分也写 1 → 后续膨胀得到整体外包络，且轮廓透过遮挡；
 //   3) CPU 读回 mask，做 outline_px 次像素膨胀，膨胀图与原剪影相减得
 //      恒定像素宽的边缘环；
 //   4) 用 GL_POINTS 把边缘环屏幕像素以边框色回填叠加到 hl_color_tex_；
@@ -1761,16 +1764,19 @@ static void ComputeHighlightEdgeNdc(const std::vector<uint8_t>& mask,
         }
         dil.swap(next);
     }
-    // 边缘环 = 膨胀后 && !原剪影。收集其 NDC 坐标（y 翻转到 GL 左下原点）。
+    // 边缘环 = 膨胀后 && !原剪影。收集其 NDC 坐标。
+    // ⚠️ mask 是 glReadPixels 从 GL FBO 直接读回的原始像素（GL 左下原点，
+    // y=0 是最底行），与 NDC 同方向（NDC -1=底，+1=顶），因此**不翻转**。
+    // 若此处做 1-… 翻转会与存储序不一致，导致线框上下颠倒（bug 已修）。
     const float inv_hw = 2.0f / static_cast<float>(w);
     const float inv_hh = 2.0f / static_cast<float>(h);
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const int i = y * w + x;
             if (dil[i] && !obj[i]) {
-                // 像素中心 (x+0.5, y+0.5) 映射到 NDC；像素系左上原点 → GL 左下原点。
+                // 像素中心 (x+0.5, y+0.5) 映射到 NDC：GL 底部(y=0)→NDC -1。
                 const float ndc_x = (x + 0.5f) * inv_hw - 1.0f;
-                const float ndc_y = 1.0f - (y + 0.5f) * inv_hh;
+                const float ndc_y = (y + 0.5f) * inv_hh - 1.0f;
                 out_ndc->push_back(ndc_x);
                 out_ndc->push_back(ndc_y);
                 out_ndc->push_back(0.0f);
@@ -1795,26 +1801,16 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
     // 2) 把被高亮物体画成单色剪影到独立 mask 纹理。
-    //    先把场景 depth 从 HDR FBO resolve/blit 到 mask FBO 的 depth，
-    //    再画剪影用 LEQUAL depth test：仅高亮物体可见（未被遮挡）部分写 1
-    //    —— 被前景遮挡处不写，边框不会透过遮挡露出。
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hl_mask_fbo_);
-    glBlitFramebuffer(
-        0, 0, fbo_w, fbo_h,
-        0, 0, hl_mask_w_, hl_mask_h_,
-        GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-
+    //    目标：所有高亮物体的总剪影（union），供后续膨胀求“整体外包络”。
+    //    因此：关门深度测试（被任何物体遮挡的部分也照样写 1，轮廓透过遮挡），
+    //    并关闭背面裁剪（覆盖开放网格/背面朝向的像素，保证完全包络）。
     glBindFramebuffer(GL_FRAMEBUFFER, hl_mask_fbo_);
     glViewport(0, 0, fbo_w, fbo_h);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // 背景=黑=非物体
-    glClear(GL_COLOR_BUFFER_BIT);   // 只清颜色，depth 已被 blit 填充
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_FALSE);   // 深度已 resolve，只读不重写
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);   // 不参与遮挡：所有高亮部分都进 mask
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);    // 正反面都画，覆盖开口网格
     glDisable(GL_BLEND);
     glDisable(GL_STENCIL_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
