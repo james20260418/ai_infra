@@ -128,7 +128,8 @@ void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
 void Primitives3DRenderer::BuildModelMatrix(const Vec3f& center,
                                             const Vec3f& up,
                                             const Vec3f& front,
-                                            float model[16]) {
+                                            float model[16],
+                                            float scale) {
     // 归一化 up 与 front
     float u_len = std::sqrt(up.x()*up.x() + up.y()*up.y() + up.z()*up.z());
     float f_len = std::sqrt(front.x()*front.x() + front.y()*front.y() + front.z()*front.z());
@@ -148,6 +149,13 @@ void Primitives3DRenderer::BuildModelMatrix(const Vec3f& center,
                    upn.x()*frn.y() - upn.y()*frn.x()};
     float r_len = std::sqrt(right.x()*right.x() + right.y()*right.y() + right.z()*right.z());
     right = {right.x()/r_len, right.y()/r_len, right.z()/r_len};
+
+    CHECK_GT(scale, 0.0f) << "BuildModelMatrix: scale 必须 > 0，当前=" << scale;
+    if (scale != 1.0f) {
+        right = {right.x()*scale, right.y()*scale, right.z()*scale};
+        upn   = {upn.x()*scale,   upn.y()*scale,   upn.z()*scale};
+        frn   = {frn.x()*scale,   frn.y()*scale,   frn.z()*scale};
+    }
 
     // 列主序旋转部分：
     //   model[0..2] = right 列（世界 X 轴方向）

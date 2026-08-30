@@ -117,6 +117,11 @@ private:
     //（仅遮挡测试用，见 EnsureShadowFBO）。
     std::vector<CascadeFBO> shadow_fbos_;   // 长度 = cascade_count（每帧按配置重建）
     float shadow_vp_[ShadowConfig::kMaxCascades][16]; // 各级联光空间 ViewProj
+    // 各级联光空间“线性深度矩阵”（DepthProj*view）：DepthProj = diag(1,1,-1,1)+z平移(+d_center)
+    // 使 (DepthProj*view*worldPos).z = fwd·(pos-target) = 沿光轴以主视锥中心为 0 的线性深度（米），
+    // “越大=越深（远离光）”。depth 0 点在主视锥中心；depth pass 存这个 z，主 pass 用同一 z 比较，
+    // 两端一致且不经 near/far 归一化。
+    float shadow_depth_vp_[ShadowConfig::kMaxCascades][16];
     ShadowConfig shadow_cfg_;               // 当前生效的阴影配置（Init 传入）
 
     void EnsureFBO(int w, int h);
