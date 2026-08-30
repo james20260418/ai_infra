@@ -93,21 +93,26 @@ void main() {
 )glsl";
 
     // kShadowVs: 阴影 pass 专用 vertex shader。
-    //   输入: vec3 aPos(loc=0)，uniform: mat4 uShadowMVP（光空间 ViewProj × Model）
-    // 把顶点变换到太阳正交相机裁剪空间，输出光空间 ndc.z（[-1,1]）供写入阴影纹理。
+    //   输入: vec3 aPos(loc=0)。
+    //   uShadowMVP      = proj*view*model（光空间裁剪，用于 gl_Position 近远裁剪）
+    //   uShadowDepthMVP = DepthProj*view*model。vShadowDepth 输出其 z 分量：
+    //                     即"相对主视锥中心的原始线性深度"（DepthProj 保证 w=1，
+    //                     经 .z 直接得线深，不经 near/far 归一化，depth 0 点在主视锥中心）。
     static constexpr const char* kShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 uniform mat4 uShadowMVP;
+uniform mat4 uShadowDepthMVP;
 out float vShadowDepth;
 void main() {
     vec4 clip = uShadowMVP * vec4(aPos, 1.0);
     gl_Position = clip;
-    vShadowDepth = clip.z / clip.w;   // ndc 深度 [-1,1]
+    vec4 dpos = uShadowDepthMVP * vec4(aPos, 1.0);
+    vShadowDepth = dpos.z / dpos.w;   // 线性深度（DepthProj 下 w=1）
 }
 )glsl";
 
-    // kShadowFs: 阴影 pass fragment shader。把光空间深度写入颜色通道 .r。
+    // kShadowFs: 阴影 pass fragment shader。把线性深度写入颜色通道 .r。
     // 用 RGBA32F 颜色纹理存深度（而非 GL 深度缓冲），避开 headless/软渲染下
     // depth 纹理采样精度/格式不一致的问题（见 renderer.cc EnsureShadowFBO）。
     static constexpr const char* kShadowFs = R"glsl(
@@ -188,10 +193,11 @@ uniform vec3  uSunColor;     // 光颜色
 uniform float uSunIntensity;
 uniform int   uCascadeCount;          // 级联段数
 uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
-uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = ndc.z）
-uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj
+uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = 线性深度，相对主视锥中心）
+uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj（用于把 world_pos 投影到 shadow map uv)
+uniform mat4  uShadowDepthVP[5];      // 各级联光空间线性深度矩阵（DepthProj*view，.z = 相对主视锥中心的线深）
 uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
-uniform float uShadowBiasCascade[5];    // 每级联深度偏移（ndc 单位，外部可配）
+uniform float uShadowBiasCascade[5];    // 每级联 depth-bias 的 bias_base（米，外部可配；搭配 minBias=0.01）
 uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
@@ -201,14 +207,19 @@ uniform float uAmbientIntensity;  // 环境光亮度标量（乘 color）
 
 const float PI = 3.14159265;
 
-// 阴影因子：对世界坐标在指定级联的光空间里采样深度贴图，做 3×3 PCF。
-// 返回 [0,1]，1=完全受照，0=完全在影子里。
-// shadow map 存的是光空间 ndc.z（[-1,1]，正交投影下与线性能深对应）。
-// 用 slope-scaled bias 抗自阴影 acne：掠射角越大（dot(N,L) 越小）偏置越大。
+// 阴影因子：对世界坐标在指定级联里采样深度贴图，返回 [0,1]，1=完全受照，0=完全在影子里。
+// shadow map 存的是**相对主视锥中心的原始线性深度**（米，见 kShadowVs）；
+// 主 pass 用 uShadowDepthVP[c]（DepthProj*view）把 world_pos 重投到同一线性深度，
+// 两端同源一致、不经 near/far 归一化。
+// ⚠️ mile3：固定 3×3 PCF（平均 soft shadow）；depth bias = max(minBias, bias_base*(1-NdotL))：
+//     minBias 全局 0.01（米，兜底垂直光 NdotL→1 使 slope 归零）；
+//     bias_base = uShadowBiasCascade[c]（米，复用挡墙 cascade_bias 配置），
+//     按“≥ 该级联单 texel 世界覆盖大小”原则设定，slope 项管中等倾角。
+//     （PCF 系数=固定 3×3，对外部隐藏，不暴露新参数。）
 // ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
 // 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
 // uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
-// 阴影因子（单级联 C0）：3×3 PCF，输出 {shadow, covered}。
+// 阴影因子（单级联 C0）：输出 {shadow, covered}。
 // covered=1 表示世界坐标落在该级联 shadow map 的 uv 覆盖内（有效采样）；
 // covered=0 表示不在（uv 越界）—— 此时不贡献 shadow，由 computeSunShadow
 // 用其他覆盖该片元的级联做 blend，避免“shadow map 边缘被硬裁成无影”。
@@ -217,9 +228,11 @@ void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[0] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
     float slopeBias = uShadowBiasCascade[0] * (1.0 - dot(N, L));
-    float cur = ndc.z - slopeBias;
-    float s = 0.0;
+    cur -= max(0.01, slopeBias);   // minBias 0.01 全局 + slope 项（bias_base=米）
+    float s = 0.0;   // 固定 3×3 PCF
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
     shadow = s / 9.0;
@@ -230,8 +243,10 @@ void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[1] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
     float slopeBias = uShadowBiasCascade[1] * (1.0 - dot(N, L));
-    float cur = ndc.z - slopeBias;
+    cur -= max(0.01, slopeBias);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
@@ -243,8 +258,10 @@ void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[2] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
     float slopeBias = uShadowBiasCascade[2] * (1.0 - dot(N, L));
-    float cur = ndc.z - slopeBias;
+    cur -= max(0.01, slopeBias);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
@@ -256,8 +273,10 @@ void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[3] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
     float slopeBias = uShadowBiasCascade[3] * (1.0 - dot(N, L));
-    float cur = ndc.z - slopeBias;
+    cur -= max(0.01, slopeBias);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
@@ -269,8 +288,10 @@ void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     vec3 ndc = lsp.xyz / lsp.w;
     vec2 uv = ndc.xy * 0.5 + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[4] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
     float slopeBias = uShadowBiasCascade[4] * (1.0 - dot(N, L));
-    float cur = ndc.z - slopeBias;
+    cur -= max(0.01, slopeBias);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
@@ -649,11 +670,14 @@ void main() {
 
     // ---- DrawObject3DShadow ----
     // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D
-    // 从太阳正交光空间视角画进阴影纹理（只写光空间 ndc.z 到颜色 .r，不光照）。
+    // 从太阳正交光空间视角画进阴影纹理（只写相对主视锥中心的线性深度到颜色 .r，不光照）。
+    // shadow_vp: uShadowMVP = proj*view*model（裁剪）；
+    // depth_vp:  uShadowDepthMVP = DepthProj*view*model（输出线性深度）。
     static void DrawObject3DShadow(const Object3DCommand& cmd,
                                    MeshManager& mesh_mgr,
                                    ShaderManager& shader_mgr,
                                    const float shadow_vp[16],
+                                   const float depth_vp[16],
                                    unsigned int shadow_prog);
 
     // ---- UploadSunData ----
@@ -662,12 +686,14 @@ void main() {
     // shadow_fbos: 各级联 shadow FBO（取 .tex 绑到 TEXTURE7+i），
     //              长度须 == cfg.cascade_count。
     // shadow_vp:   各级联光空间 ViewProj，[kMaxCascades][16]。
+    // shadow_depth_vp: 各级联光空间线性深度矩阵（DepthProj*view），[kMaxCascades][16]。
     static void UploadSunData(
         ShaderManager& shader_mgr,
         unsigned int prog,
         unsigned int prog_full,
         const std::vector<CascadeFBO>& shadow_fbos,
         const float shadow_vp[][16],
+        const float shadow_depth_vp[][16],
         const ShadowConfig& cfg,
         const std::optional<DirectionalLight>& sun);
 

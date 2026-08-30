@@ -73,9 +73,11 @@ void main() {
     // MVP = Projection * View
     static void BuildMVP(const Camera& cam, int fbo_w, int fbo_h, float mvp[16]);
 
-    // 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）
+    // 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）。
+    // scale 为整体缩放（先缩放顶点，再 up/front 旋转 + center 平移，见 BuildModelMatrix 实现）。
     static void BuildModelMatrix(const Vec3f& center, const Vec3f& up,
-                                 const Vec3f& front, float model[16]);
+                                 const Vec3f& front, float model[16],
+                                 float scale = 1.0f);
 
     // ---- 3D 图元绘制 ----
     //

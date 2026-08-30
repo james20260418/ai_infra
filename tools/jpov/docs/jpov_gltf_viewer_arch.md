@@ -111,25 +111,33 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 
 ---
 
-## 5a. 光照调节滑条（交互版，2026-08-30 新增）
+## 5a. 光照/场景调节滑条（交互版，2026-08-30 新增）
 
-交互窗口底部居中新增 3 个半屏宽滑条（`MakeLighting(theta, sun_base, ambient_base)`，
-仅交互模式绘制；`--four_views` 拍照仍走固定 `MakeNoonLighting()`，截图不带面板，零回归）：
+交互窗口底部居中新增 5 个半屏宽滑条（仅交互模式绘制；`--four_views` 拍照仍走固定
+`MakeNoonLighting()`，截图不带面板，零回归）：
 
 | # | 滑条 | 范围 | 默认 | 作用 |
 |---|------|------|------|------|
 | 1 | 太阳角度 θ | [0, π] 弧度 | 0 | 太阳光传播方向 = `{−sinθ, −cosθ, 0}`；θ=0 天顶直射（最亮），θ=π 从正下方 |
 | 2 | 平行光强度 | [1, 10] | 3.0 | `DirectionalIntensity` 的 midday_intensity（同 LIGHT_INTENSITY.md 的 3.0） |
 | 3 | 环境光强度 | [0.1, 1.0] | 0.3 | `AmbientIntensity` 的 noon_intensity（同当前的 0.3） |
+| 4 | 地面高度 y | [-3, +3] 米 | -3 | 实时重建地面 quad（UpdateMesh），看物体落地面/阴影落地面 |
+| 5 | 模型缩放 | [0.1, 20] | 1.0 | 整体缩放（先缩放再旋转平移，见 Object3DCommand::scale），验证小物体阴影 |
 
-设计要点：
+光照类滑条（1~3）：
 - 仍全由 sky 推导——传给 sky 的 `sun_dir` = `−sun_light_dir = {sinθ, cosθ, 0}`，用其 y=cosθ
   驱动 `DirectionalColor()/AmbientColor()/DirectionalIntensity()/AmbientIntensity()`；只有基准强度
   （sun/ambient 两个滑条）由滑条给定，sky 其余参数（turbidity/season/intensity/ground_color/
   sun_radius/sun_brightness/sun_glow）不变。
 - 交互与拍照共用 `OneIteration`，靠 `app.interactive_` 区分是否 `ui_.Emit`（同 arch §4 的 headless 区分思路）。
-- 滑条用轻量级即时模式 UI（`//tools/jpov/interface:ui`），文本默认字体 CJK（滑条标签显中文）；
-  分发产物 exe 旁需 `fonts/`（DejaVu + NotoSansCJK，build 脚本同构拷贝，PR #68 优先 exe 旁路径）。
+
+地面高度（4）：`MakeGroundQuad(float y=-3)` 参数化；交互时 `ground_y_` 变化则 `UpdateMesh`
+（VBO 布局不变，原地更新）。
+模型缩放（5）：`DrawObject3D/DrawGltfObject` 新增 `float scale=1.0`（签名最末，先缩放后旋转平移）；
+  拾取/高亮 pass 同步使用（`Primitives3DRenderer::BuildModelMatrix` 同加 scale 参数）。
+
+滑条用轻量级即时模式 UI（`//tools/jpov/interface:ui`），文本默认字体 CJK（滑条标签显中文）；
+分发产物 exe 旁需 `fonts/`（DejaVu + NotoSansCJK，build 脚本同构拷贝，PR #68 优先 exe 旁路径）。
 
 ---
 

@@ -54,10 +54,16 @@ void Mat4Mul(const float a[16], const float b[16], float out[16]) {
     }
 }
 
-// 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）
+// 构建局部→世界 model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈；顶点右乘：model*pos 先缩放后旋转再平移）。
+// scale 为整体缩放（作用于局部坐标，先放大/缩小再走 up/front 旋转平移）。
+// ⚠️ 主序：本仓库模型矩阵用“列行主序书写、列主序存储”的转置布局
+//   （第 4 列装 center 平移），与业界列主序 MVF 一致（clip = proj*view*model*pos）；
+//   但 BuildModelMatrix 内部以“行主序书写、列主序存储”写出（与 BuildLookAt 同款），
+//   调用方用同一套 Mat4Mul 相乘即可，勿与教科书 column-major 混写。
 void BuildModelMatrix(const Vec3f& center,
                       const Vec3f& up,
                       const Vec3f& front,
+                      float scale,
                       float model[16]) {
     float u_len = std::sqrt(up.x()*up.x() + up.y()*up.y() + up.z()*up.z());
     float f_len = std::sqrt(front.x()*front.x() + front.y()*front.y() + front.z()*front.z());
@@ -69,6 +75,13 @@ void BuildModelMatrix(const Vec3f& center,
                    upn.x()*frn.y() - upn.y()*frn.x()};
     float r_len = std::sqrt(right.x()*right.x() + right.y()*right.y() + right.z()*right.z());
     right = {right.x()/r_len, right.y()/r_len, right.z()/r_len};
+
+    CHECK_GT(scale, 0.0f) << "BuildModelMatrix: scale 必须 > 0，当前=" << scale;
+    if (scale != 1.0f) {
+        right = {right.x()*scale, right.y()*scale, right.z()*scale};
+        upn   = {upn.x()*scale,   upn.y()*scale,   upn.z()*scale};
+        frn   = {frn.x()*scale,   frn.y()*scale,   frn.z()*scale};
+    }
 
     model[0] = right.x(); model[4] = upn.x(); model[8]  = frn.x(); model[12] = center.x();
     model[1] = right.y(); model[5] = upn.y(); model[9]  = frn.y(); model[13] = center.y();
@@ -362,7 +375,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
 
     float model[16];
     float mvp_final[16];
-    BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
     Mat4Mul(mvp, model, mvp_final);
 
     const bool any_tex =
@@ -526,6 +539,7 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
                                           MeshManager& mesh_mgr,
                                           ShaderManager& shader_mgr,
                                           const float shadow_vp[16],
+                                          const float depth_vp[16],
                                           unsigned int shadow_prog) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawObject3DShadow: mesh_id " << cmd.mesh_id
@@ -541,12 +555,16 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
 
     float model[16];
     float shadow_mvp[16];
-    BuildModelMatrix(cmd.center, cmd.up, cmd.front, model);
+    float depth_mvp[16];
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
     Mat4Mul(shadow_vp, model, shadow_mvp);
+    Mat4Mul(depth_vp, model, depth_mvp);
 
     glUseProgram(shadow_prog);
     glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowMVP"),
                        1, GL_FALSE, shadow_mvp);
+    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthMVP"),
+                       1, GL_FALSE, depth_mvp);
 
     glBindVertexArray(mesh->vao);
     if (mesh->index_count > 0) {
@@ -566,6 +584,7 @@ void Object3DRenderer::UploadSunData(
     unsigned int prog_full,
     const std::vector<CascadeFBO>& shadow_fbos,
     const float shadow_vp[][16],
+    const float shadow_depth_vp[][16],
     const ShadowConfig& cfg,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
@@ -613,6 +632,9 @@ void Object3DRenderer::UploadSunData(
             uni = "uShadowVP[" + std::to_string(c) + "]";
             glUniformMatrix4fv(shader_mgr.GetUniform(p, uni.c_str()),
                                1, GL_FALSE, shadow_vp[c]);
+            uni = "uShadowDepthVP[" + std::to_string(c) + "]";
+            glUniformMatrix4fv(shader_mgr.GetUniform(p, uni.c_str()),
+                               1, GL_FALSE, shadow_depth_vp[c]);
             uni = "uShadowTexel[" + std::to_string(c) + "]";
             glUniform1f(shader_mgr.GetUniform(p, uni.c_str()),
                         1.0f / static_cast<float>(shadow_fbos[c].size));

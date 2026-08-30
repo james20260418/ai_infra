@@ -510,15 +510,15 @@ struct ShadowConfig {
     float fade_start = 120.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
 
-    // 每级联 1 个深度偏置（ndc 深度单位），抗自阴影 acne。
+    // 每级联 1 个 depth-bias 的 bias_base，**单位为米（世界单位）**，用于 slope 项：
+    //   depthBias = max(0.01, cascade_bias[c] * (1-NdotL))
+    //   （minBias=0.01 全局兜底垂直光 NdotL→1 使 slope 归零；slope 项管中等倾角。）
     // 与级联一一对应：cascade_bias[c] 只作用于第 c 段。外部可逐级联覆盖。
-    // 默认值由“每级联 texel 世界尺寸”反算（2026-08-28）：
-    //   texel 世界尺寸 ≈ 级联覆盖跨度 / 分辨率 → 近级联小、远级联大；
-    //   其对应的 ndc 深度偏置（×2/(far−near) 换算）即各段的 acne 偏置。
-    // 取偏保守的 2×，既压住各级联 acne 又不误伤真影。远级联覆盖/texel 大 →
-    // 需要更大 bias，故 bias 随级联递增（0.002 → 0.008）。
-    // 未用到的数组位（i >= cascade_count）填 0。
-    float cascade_bias[kMaxCascades] = {0.002f, 0.004f, 0.004f, 0.008f, 0.008f};
+    // 默认值按“≥ 该级联单 texel 世界覆盖大小”原则设定（2026-08-30）：
+    //   texel_world ≈ 级联覆盖跨度 / 分辨率；以 fov=60° 估 覆盖跨度≈1.155×far。
+    //   近级联小、远级联大（因远级联分辨率低、far 大），故 bias_base 随级联递增。
+    //   ⚠️ 注意：这是米单位（因 depth 已是米），远非旧版 NDC 的 0.002~0.008。
+    float cascade_bias[kMaxCascades] = {0.005f, 0.033f, 0.073f, 0.260f, 0.406f};
 
     // 默认配置：5 级联、近处高分辨率远处低分辨率、指数分布（近密远疏）、自然淡出。
     // 级联边界用指数公式 边界(i) = 总距离×(i/N)²（UE 常用）：
@@ -794,6 +794,7 @@ struct Object3DCommand {
     Vec3f center;          // 模型中心世界坐标（平移）
     Vec3f up;              // 局部 +Y 指向的世界方向（归一化处理）
     Vec3f front;           // 局部 +Z 指向的世界方向（归一化处理）
+    float  scale = 1.0f;   // 整体缩放（先缩放顶点，再 up/front 旋转 + center 平移）
 
     // picking_id：该物体在 GPU color-ID 拾取中对外暴露的句柄。
     //   = 0    ：本物体**不可拾取**（不参与 picking pass，也不会被命中）。
@@ -1149,12 +1150,14 @@ struct RenderCommandList {
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front,
                       uint32_t picking_id = 0,
-                      bool highlight = false);
+                      bool highlight = false,
+                      float scale = 1.0f);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //
     // 对 obj.primitives 中每个 primitive 展开为一个 DrawObject3DCommand，
     // 用同一个 center/up/front 放置（整个 glTF 场景作为一个整体摆放）。
+    // scale：整体缩放（先缩放顶点，再 up/front 旋转 + center 平移），透传给每个 primitive。
     // 不引入新的渲染命令体 —— 内部就是多个 Object3DCommand。
     //
     // 注意: 不检查/释放 obj 的 GPU 资源；释放用 Renderer::ReleaseGltf。
@@ -1163,7 +1166,8 @@ struct RenderCommandList {
                         const Vec3f& center,
                         const Vec3f& up, const Vec3f& front,
                         uint32_t picking_id = 0,
-                        bool highlight = false);
+                        bool highlight = false,
+                        float scale = 1.0f);
 };
 
 }  // namespace jpov

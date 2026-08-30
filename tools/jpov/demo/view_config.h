@@ -192,7 +192,7 @@ inline NoonLighting MakeNoonLighting() {
     return nl;
 }
 
-// 参数化光照 —— 交互滑条版（窗口下方 3 个滑条共用）。
+// 参数化光照 —— 交互滑条版（窗口下方 5 个滑条共用）。
 //
 // 与 MakeNoonLighting()（固定正午 (0,-1,-1)/3.0/0.3）保持同一套 sky 推导规则，
 // 只把 3 个量从常量改成参数，供窗口下方滑条实时调节：
@@ -243,12 +243,11 @@ inline NoonLighting MakeLighting(float theta, float sun_base, float ambient_base
     return nl;
 }
 
-// 构造 300×300 米高粗糙灰色地平面的 CPU 网格数据（单平铺 quad，y=-3，法线 +Y）。
-// 地平面降到 y=-3：让加载在原点附近的模型（尤其底面在原点的）不受地板穿插影响；
-// 需求定稿（2026-08-27）——地平面从 y=0 降到 y=-3。
-inline jpov::MeshData MakeGroundQuad() {
+// 构造 300×300 米高粗糙灰色地平面的 CPU 网格数据（单平铺 quad，法线 +Y）。
+// y 可调（默认 -3）：让加载在原点附近的模型（尤其底面在原点的）不受地板穿插影响；
+// 需求初定为 y=-3，后由查看器“地面高度”滑条 [-3,+3] 实时调节（看物体落地产影）。
+inline jpov::MeshData MakeGroundQuad(float y = -3.0f) {
     const float half = 150.0f;  // 300m 半宽
-    const float y = -3.0f;      // 地板高度（降到 y=-3，给模型/其它物体留出上方空间）
     jpov::MeshData mesh;
     mesh.flags = static_cast<jpov::MeshVertexFlags>(
         static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |

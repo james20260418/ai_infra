@@ -2,7 +2,8 @@
 //
 // 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up 风格，
 // 地平面 300×300 米高粗糙灰色 quad。光照用 DaySkyCommand（由 sky 推导平行光
-// + 全局 Ambient），交互窗口底部居中 3 个滑条实时调节阳光角度与强度。
+// + 全局 Ambient），交互窗口底部居中 5 个滑条实时调节：太阳角度、平行光/环境
+// 光基准强度、地面高度、模型缩放。
 //
 // 相机默认目标 (0,0,0)，初始距离 R 按模型包围盒自适应（加载后 FitRadius 计算）。
 // 右键 drag 转视角，滚轮 zoom（R 缩放）。
@@ -56,12 +57,15 @@ public:
     jpov::PBRMaterial ground_mat_;     // 高粗糙灰色地面材质
     jpov_viewer::ViewConfig view_;     // 当前视角（交互由 ApplyInput 改；four_views 赋固定角）
 
-    // 光照滑条状态（跨帧持有，窗口下方 3 个滑条实时调节）。
+    // 光照滑条状态（跨帧持有，窗口下方 5 个滑条实时调节）。
     // 初始值 = 正午基准（θ=0 天顶直射 / sun 3.0 / ambient 0.3），与 MakeNoonLighting
     // 的固定正午语义一致（只是这里把太阳方向也纳入调节，θ=0 ⇒ 正午最亮）。
     float theta_  = 0.0f;              // 太阳方向参数 θ（弧度，[0, π]）
     float sun_base_  = 3.0f;           // 平行光正午基准强度（同 LIGHT_INTENSITY.md 的 3.0）
     float ambient_base_ = 0.3f;        // 环境光正午基准强度（同当前 0.3）
+    float ground_y_ = -3.0f;           // 地面高度（滑条 [-3,+3]，实时调节看物体落地产影）
+    float ground_y_prev_ = -3.0f;      // 上一帧地面高度（检测变化才 UpdateMesh）
+    float model_scale_ = 1.0f;         // 模型整体缩放（滑条 [0.1, 20]，先缩放再旋转平移）
     jpov::Ui ui_;                      // 跨帧持有（滑条拖动态内部记忆）
 
     // 运行模式与帧率（main 设置）：
@@ -120,7 +124,7 @@ public:
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;  // 场景 R 最大 300，far 足够
 
-        // ── 光照：由 3 个滑条实时调节（sky 推导平行光 + 全局 Ambient）──
+        // ── 光照：由 5 个滑条实时调节（sky 推导平行光 + 全局 Ambient）──
         const jpov_viewer::NoonLighting light =
             jpov_viewer::MakeLighting(theta_, sun_base_, ambient_base_);
         cmds->sky = light.sky;
@@ -129,15 +133,24 @@ public:
         cmds->tone_mapping = true;
 
         // ── 场景：地面 + 被加载的 glTF ──
+        // 地面高度可调：ground_y_ 变化时原地重建 quad（UpdateMesh，VBO 布局不变）
+        // 让“物体落在地面上、影子投到地面上”随滑条实时变化（仅交互;
+        // four_views 不动 ground_y_，保持默认 -3）。
+        if (ground_y_ != ground_y_prev_) {
+            UpdateMesh(ground_mesh_, jpov_viewer::MakeGroundQuad(ground_y_));
+            ground_y_prev_ = ground_y_;
+        }
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            /*center*/ {0.0f, 0.0f, 0.0f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(gltf_, /*center*/ {0.0f, 0.0f, 0.0f},
                              /*up*/ {0.0f, 1.0f, 0.0f},
-                             /*front*/ {0.0f, 0.0f, 1.0f});
+                             /*front*/ {0.0f, 0.0f, 1.0f},
+                             /*picking_id*/ 0, /*highlight*/ false,
+                             /*scale*/ model_scale_);
 
-        // ── 光照调节面板：窗口底部居中，3 个滑条（各约半屏宽）──
+        // ── 光照调节面板：窗口底部居中，5 个滑条（各约半屏宽）──
         // 仅交互窗口模式绘制；--four_views 拍照是给 AI 自查用的 headless 截图，
         // 不带 UI 面板（保持截图即纯 3D 场景，与原有行为一致）。
         if (interactive_) {
@@ -149,10 +162,12 @@ public:
 
 private:
     // 光照调节面板布局与绘制（即时模式）。
-    // 3 个滑条竖排，位于窗口底部居中：
+    // 5 个滑条竖排，位于窗口底部居中：
     //   1) 太阳角度 θ（弧度，[0, π]，太阳方向 (−sinθ, −cosθ, 0)）
     //   2) 平行光正午基准强度（[1, 10]，默认 3.0）
     //   3) 环境光正午基准强度（[0.1, 1.0]，默认 0.3）
+    //   4) 地面高度 y（[-3, +3]，默认 -3，实时更新地面 quad）
+    //   5) 模型整体缩放（[0.1, 20]，默认 1.0，先缩放再旋转平移）
     // 每个滑条宽度 = 半屏宽（kSliderWidth），水平居中；`label: value` 文本
     // 由 SliderFloat 画在滑条 box 中央（复用 Text 居中语义，见 ui.cc）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
@@ -168,7 +183,7 @@ private:
         const float kSpacing = 12.0f;
         const float kBottom  = 20.0f;
         const float left     = (w - kSliderWidth) * 0.5f;
-        const float top      = h - kBottom - (3.0f * kRowH + 2.0f * kSpacing);
+        const float top      = h - kBottom - (5.0f * kRowH + 4.0f * kSpacing);
 
         // θ 用 2 位小数（弧度，直接影响太阳方向，精度值得看）。
         ui_.SliderFloat("太阳角度 θ", &theta_,
@@ -182,6 +197,16 @@ private:
                         jpov::UiRect{{left, top + 2.0f * (kRowH + kSpacing)},
                                      {kSliderWidth, kRowH}},
                         0.1f, 1.0f, /*decimal_places*/2);
+        // 地面高度（米）：[-3,+3]，实时看物体落地面/阴影落地面。
+        ui_.SliderFloat("地面高度 y", &ground_y_,
+                        jpov::UiRect{{left, top + 3.0f * (kRowH + kSpacing)},
+                                     {kSliderWidth, kRowH}},
+                        -3.0f, 3.0f, /*decimal_places*/2);
+        // 模型整体缩放（[0.1,20] 默认 1.0，先缩放再旋转平移；验证小物体阴影/轮廓是否尺寸所致）。
+        ui_.SliderFloat("模型缩放", &model_scale_,
+                        jpov::UiRect{{left, top + 4.0f * (kRowH + kSpacing)},
+                                     {kSliderWidth, kRowH}},
+                        0.1f, 20.0f, /*decimal_places*/1);
     }
 
     // 滑条字号（px）。
@@ -302,8 +327,8 @@ int main(int argc, char** argv) {
         << "（请确认路径存在且为合法 .gltf/.glb）";
 
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
-    // 光照不在此预建：交互版由 OneIteration 里的 3 个滑条实时构造
-    // MakeLighting(theta, sun_base, ambient_base)（见 DrawLightPanel）。
+    // 光照不在此预建：交互版由 OneIteration 里的 5 个滑条实时构造
+    // （θ/平行光/环境光基准强度 + 地面高度 + 模型缩放），见 DrawLightPanel。
     app.ground_mat_ = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
 

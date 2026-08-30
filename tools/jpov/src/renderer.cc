@@ -1205,7 +1205,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         if (!cmds.object3d.empty()) {
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
-                shadow_fbos_, shadow_vp_, shadow_cfg_, eff_sun);
+                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                shadow_cfg_, eff_sun);
         }
 
         // 全局环境光 uniform（总是上传，未设置则用默认值）。
@@ -1524,6 +1525,24 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     float view[16];
     BuildLookAt(eye, camera_pos, world_up, view);
 
+    // 线性深度矩阵：DepthProj * view。DepthProj 使 (DepthProj*view*pos).z = fwd·(pos-target)
+    //   = 沿光轴、以主视锥中心为 0 的线性深度（米），“越大=越深（远离光）”。
+    // 推导：view.z = fwd·(eye-pos)（光空间 view 的 z），d_center = view.z(target)；
+    //   DepthProj = diag(1,1,-1,1) + z 平移 +d_center ⇒ 输出 z = -(view.z)+d_center = fwd·(pos-target)。
+    // depth 0 点=相机 target；两端（depth pass 存、主 pass 比）同一矩阵、不经 near/far 归一化。
+    // 所有级联共用（view 与 d_center 相同）。
+    const Vec3f focus = { cmds.camera.target.x(), cmds.camera.target.y(), cmds.camera.target.z() };
+    const float d_center = view[2]*focus.x() + view[6]*focus.y()
+                         + view[10]*focus.z() + view[14];
+    {   // DepthProj（列主序）：z 取反(-1) + 平移(+d_center) → 输出 z = d_center - view.z
+        float depth_proj[16] = {1,0,0,0, 0,1,0,0, 0,0,-1,0, 0,0,d_center,1};
+        float dvp[16];
+        RendererMat4Mul(depth_proj, view, dvp);
+        for (int cc = 0; cc < ShadowConfig::kMaxCascades; ++cc) {
+            for (int k = 0; k < 16; ++k) shadow_depth_vp_[cc][k] = dvp[k];
+        }
+    }
+
     const unsigned int shadow_prog = ShadowProg();
 
     // 相机透视投影参数：fov + aspect（用于展开视锥角点）、near（首段）、
@@ -1570,8 +1589,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             const float ly = (iy==0) ? mesh->bounds_min[1] : mesh->bounds_max[1];
             for (int iz=0; iz<=1; ++iz) {
               const float lz = (iz==0) ? mesh->bounds_min[2] : mesh->bounds_max[2];
-              // 局部 → 世界（center + 轴缩放）：world = center + left*lx + up*ly + fn*lz
-              const Vec3f wp = center + left*lx + un*ly + fn*lz;
+              // 局部 → 世界（center + 轴缩放×对象整体缩放）：world = center + (left*lx + up*ly + fn*lz)*scale
+              // （与 BuildModelMatrix 的 先缩放→旋转→平移 一致，保证 AABB 覆盖与渲染几何吻合。）
+              const Vec3f wp = center + (left*lx + un*ly + fn*lz) * o.scale;
               const float lx2 = view[0]*wp.x()+view[4]*wp.y()+view[8]*wp.z()+view[12];
               const float ly2 = view[1]*wp.x()+view[5]*wp.y()+view[9]*wp.z()+view[13];
               const float lz2 = view[2]*wp.x()+view[6]*wp.y()+view[10]*wp.z()+view[14];
@@ -1697,13 +1717,16 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // 清颜色为 1.0（ndc.z=1.0 = 最远 = 无遮挡），深度清为最远。
-        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        // 清颜色为“最深”哨兵：线性深度越大=越深（远离光）。无遮挡格清新深，
+        // 使任何可见 cur<=clear → 判受照。用 1e16（远超 180m 场景纵深、且是有限值，
+        // 规避 llvmpipe 对 +inf 深度的比较/插值不一致与 NaN 风险）。
+        glClearColor(1e16f, 1e16f, 1e16f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         for (const auto& o : cmds.object3d) {
             Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, shader_mgr_,
-                                                 shadow_vp_[c], shadow_prog);
+                                                 shadow_vp_[c], shadow_depth_vp_[c],
+                                                 shadow_prog);
         }
 
         prev_far = far_i;
@@ -1787,7 +1810,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
         CHECK_GT(mesh->vao, 0u);
 
         float model[16], final_mvp[16];
-        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model);
+        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model, o.scale);
         Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
 
         glUniformMatrix4fv(glGetUniformLocation(pick_prog, "uMVP"),
@@ -2015,7 +2038,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
         if (!mesh || mesh->vao == 0) continue;
         float model[16], final_mvp[16];
-        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model);
+        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model, o.scale);
         Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
         glUniformMatrix4fv(glGetUniformLocation(pick_prog, "uMVP"),
                            1, GL_FALSE, final_mvp);
