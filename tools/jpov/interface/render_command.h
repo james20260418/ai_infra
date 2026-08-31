@@ -625,6 +625,26 @@ struct DaySkyCommand {
     //   σ≈2×sun_radius（盘外 ~2~3 倍区域）。0 = 无光晕；默认 ~1.0 经验值。
     float sun_glow = 1.0f;
 
+    // sun_set_start_angle：日盘俯仰角重映射的起始阈值（**度**，建议 [0,60]）。
+    //   只影响**日盘的位置**（盘中心俯仰角），不影响天空散射/昼夜过渡/色温/衰减
+    //   （那些仍由真实 sun_dir 驱动）。当太阳真仰角低于此值时，盘中心俯仰角按
+    //   sun_set_angle_ratio 更快地压向/压过地平线，使盘在低仰角提前“没入地平线”，
+    //   避免高仰角（尤其 90° 正午正上方）被全局偏置拉偏。≥ 此值时盘俯仰 = 真实仰角。
+    //   默认 10°：太阳真仰角 < 10° 才开始压盘；≥ 10° 盘就在真实位置。
+    float sun_set_start_angle = 10.0f;
+
+    // sun_set_angle_ratio：太阳真仰角 < sun_set_start_angle 时，盘俯仰角的压速比。
+    //   盘俯仰角(°) = sun_set_start_angle
+    //                + sun_set_angle_ratio × (真实仰角° − sun_set_start_angle)
+    //   即真实仰角每降 1°，盘俯仰降 sun_set_angle_ratio 度（>1 = 盘降得更快）。
+    //   联合默认（start=10, ratio=1.4）：
+    //     真实 10°  → 盘 10°（边界连续，无突变）
+    //     真实  3°  → 盘 10 + 1.4×(3−10) = 0.2° ≈ 盘中心落在地平线（肉眼标定：3° 处
+    //                 日盘应正好位于中心 0° 位置，被地平线淹没）
+    //     真实  0°  → 盘 10 + 1.4×(0−10) = −4°（盘中心已沉到地平线下，半拉盘不再露出）
+    //   默认 1.4。
+    float sun_set_angle_ratio = 1.4f;
+
     // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
     // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
     // colorTempToLinear() 逐字一致，保证 C++ 侧推导的直射光颜色与 shader 侧
@@ -664,7 +684,21 @@ struct DaySkyCommand {
         // 色温（开尔文）：仰角越高色温越高。与 shader 同阈值（0.3 rad ≈ 17°）。
         const float kelvin = 2000.0f + (5600.0f - 2000.0f) *
             std::clamp(elev / 0.3f, 0.0f, 1.0f);
-        return ColorTempToLinear(kelvin);
+        const Color base = ColorTempToLinear(kelvin);
+        // 季节色温偏置：乘归一化后的纯色调 season（只偏色、不改亮度，见 SeasonTint()）。
+        return Color{base.r * season.r * SeasonTintScale(),
+                     base.g * season.g * SeasonTintScale(),
+                     base.b * season.b * SeasonTintScale(),
+                     1.0f};
+    }
+
+    // 归一化 season 为“纯色温偏置”的缩放因数：把三通道同乘 1/avg(season)，
+    // 使乘积不变总亮度（avg(rgb)=1），只改变 RGB 的**相对**比例 → 只偏色温、不增减光强。
+    // 用法：color × season × SeasonTintScale()。season=(1,1,1) 中性 → scale=1 → 零改变。
+    // assert 防 season 全零 / 负值导致 scale 非正。
+    float SeasonTintScale() const {
+        const float avg = (season.r + season.g + season.b) / 3.0f;
+        return (avg > 0.0f) ? (1.0f / avg) : 1.0f;
     }
 
     // 太阳直射光强度（DirectionalLight::intensity）。由 sun_dir 仰角查注向直射
@@ -689,18 +723,21 @@ struct DaySkyCommand {
     //   light.direction = <光传播方向（= -sky.sun_dir）>;
     //   light.color = sky.DirectionalColor();
     //   light.intensity = sky.DirectionalIntensity();   // 正午=3.0，低仰角自动变暗
-    float DirectionalIntensity(float midday_intensity = 3.0f) const {
+    float DirectionalIntensity(float midday_intensity = 2.2f) const {
         static const geom::math::PiecewiseLinearFunction<double> kSunIntensityCurve(
             // 太阳仰角(°) → 相对正午系数。基于法向直射辐照度 DNI 的
             // 大气透过率（Bouguer-Lambert-Beer：exp(−tau·AM)，tau≈0.39 晴空，
             // Kasten-Young 空气质量）。反映“太阳光辉度穿大气”的损失：
             // 20°~90° 相当平缓，只在 <10° 贴地时快速趋零。单位无需 0 点即可。
-            std::vector<double>{0.0, 3.0, 5.0, 7.0, 10.0, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0},
-            std::vector<double>{0.0, 0.004, 0.0265, 0.0725, 0.1672, 0.2353, 0.3338, 0.4760, 0.6785, 0.8513, 0.9416, 1.0});
+            std::vector<double>{1,  2,  5,  10,  30, 45,  90},
+            std::vector<double>{0,  0.23,0.77,0.77, 0.91,  1.0, 1.0});
         const Vec3f d = sun_dir.Unit();
         const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
                                (180.0f / static_cast<float>(M_PI));
-        return midday_intensity * static_cast<float>(kSunIntensityCurve(elev_deg));
+        // 基准晴空（turb=2）曲线 × 浊度衰减（turb=2 时 Loss=1.0，不改变晴空锚点）——
+        // 高浊度（阴/霾）时太阳直射 DNI 大幅衰减，尤其低仰角。
+        return midday_intensity * static_cast<float>(kSunIntensityCurve(elev_deg)) *
+               TurbSunLoss(turbidity);
     }
 
     // 环境光强度（AmbientLight::intensity）。由 sun_dir 仰角查天光衰减表，
@@ -725,12 +762,48 @@ struct DaySkyCommand {
     //   light.intensity = sky.AmbientIntensity();   // 正午=1.0，黄昏/夜晚自动变暗
     float AmbientIntensity(float noon_intensity = 1.0f) const {
         static const geom::math::PiecewiseLinearFunction<double> kSkyIntensityCurve(
-            std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 3.0, 5.0, 7.0, 10.0, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0},
-            std::vector<double>{0.001, 0.004, 0.012, 0.03, 0.06, 0.12, 0.18, 0.24, 0.32, 0.38, 0.44, 0.55, 0.70, 0.84, 0.92, 1.0});
+            std::vector<double>{1,  2,   5,   10,  30, 45,  90},
+            std::vector<double>{0.1,0.15,0.25,0.25,0.3,0.38,0.4});
         const Vec3f d = sun_dir.Unit();
         const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
                                (180.0f / static_cast<float>(M_PI));
-        return noon_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg));
+        // 基准晴空（turb=2）曲线 × 浊度衰减（turb=2 时 Loss=1.0）——环境光是散射光
+        // （DHI），随浊度衰减**远比直射光缓和**：薄云时漫射甚至略升（更多直射被
+        // 散射成漫射），仅重霾才明显下降。故用独立的平缓曲线，不与 TurbSunLoss 同用。
+        return noon_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg)) *
+               TurbAmbLoss(turbidity);
+    }
+
+    // 太阳直射光随浊度（turbidity）的整体衰减系数，以 turb=2 大晴天为基准 = 1.0。
+    // 物理：太阳直射（DNI）走单一路径穿大气，衰减近似指数吸收 exp(−τ·AM)，
+    // 随浊度增大强衰减（尤其低仰角）。但 JPOV 走 ACES tone map，基准落在 ACES
+    // 线性区（surface radiance≈0.5），若衰减到 0.02 会进 ACES 被非线性压成死黑
+    // （aces(3.0×0.02)≈贴地）。故这里用“物理趋势 + ACES 观感下限”的折中：阴天
+    // 直射给到 aces 后仍能辨物的下限（turb=8 → 0.06，aces(3.0×0.06)≈0.25）。
+    // turb<2 夹断到 1.0（更通透的天不增亮）；turb>8 夹断到 0.06。
+    //
+    // 锚点（turb → 相对 turb=2 大晴的直射衰减，ACES 观感折中）：
+    //   2→1.00(基准)  3→0.80  4→0.60(薄云)  5→0.40  6→0.22  8→0.06(阴天)
+    float TurbSunLoss(float turb) const {
+        static const geom::math::PiecewiseLinearFunction<double> kTurbSun(
+            std::vector<double>{2.0, 3.0, 4.0, 5.0, 6.0, 8.0},
+            std::vector<double>{1.00, 0.80, 0.60, 0.40, 0.3, 0.2});
+        return static_cast<float>(kTurbSun(turb));
+    }
+
+    // 环境光随浊度（turbidity）的整体衰减系数，以 turb=2 大晴天为基准 = 1.0。
+    // 物理：环境光是天光漫射（DHI），非单一路径，故随浊度衰减远比直射缓和，
+    // 且趋势不同——薄到中云时更多直射被散射成漫射，DHI 不降反微升（>1.0）；
+    // 到重霾/厚云时总量才明显下降。故这条曲线平缓，不与 TurbSunLoss 同用。
+    // turb<2 夹断到 1.0；turb>8 夹断到 0.5。
+    //
+    // 锚点（turb → 相对 turb=2 大晴的环境光衰减）：
+    //   2→1.00(基准)  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50(阴天)
+    float TurbAmbLoss(float turb) const {
+        static const geom::math::PiecewiseLinearFunction<double> kTurbAmb(
+            std::vector<double>{2.0, 3.0, 4.0, 5.0, 6.0, 8.0},
+            std::vector<double>{1.00, 1.08, 1.05, 0.90, 0.70, 0.50});
+        return static_cast<float>(kTurbAmb(turb));
     }
 
     // 环境光颜色（AmbientLight::color）——天光平均色。
@@ -764,7 +837,12 @@ struct DaySkyCommand {
             tint.b * (1.0f - haze) + white.b * haze,
             1.0f,
         };
-        return c;
+        // 季节色温偏置：乘归一化后的纯色调 season（只偏色、不改亮度），
+        // 与 DirectionalColor 用同一 SeasonTintScale()，保证天空与物体受光色调一致。
+        return Color{c.r * season.r * SeasonTintScale(),
+                     c.g * season.g * SeasonTintScale(),
+                     c.b * season.b * SeasonTintScale(),
+                     1.0f};
     }
 };
 

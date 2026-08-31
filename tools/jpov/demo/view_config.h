@@ -192,36 +192,45 @@ inline NoonLighting MakeNoonLighting() {
     return nl;
 }
 
-// 参数化光照 —— 交互滑条版（窗口下方 5 个滑条共用）。
+// 参数化光照 —— 交互滑条版（窗口下方滑条共用）。
 //
-// 与 MakeNoonLighting()（固定正午 (0,-1,-1)/3.0/0.3）保持同一套 sky 推导规则，
-// 只把 3 个量从常量改成参数，供窗口下方滑条实时调节：
+// 与 MakeNoonLighting()（固定正午 (0,-1,-1)/3.0/0.3）保持同一套 sky 推导规则（color
+// 仍由 sky 自动推导，色调随太阳仰角变），但把 key 调整成“细调太阳光照”需要的语义：
+// 太阳角度直接用【仰角】表达，intensity/ambient 直接赋【实际强度】（不再乘 PWL
+// 相对衰减曲线）。这是 gltf viewer 作为标定调试工具的预期行为——滑条所见即所得，
+// 方便对照 LIGHT_INTENSITY.md / sun_path 的锚点反推要重标的两个 PWL 表。
 //
-//   theta        — 太阳方向参数（弧度，[0, π]）。太阳光传播方向（sun.direction）
-//                  取 {−sinθ, −cosθ, 0}（y-up，与 MakeNoonLighting 里 direction 同为
-//                  “从光源指向场景”的传播方向）。θ=0 → (0,−1,0) 天顶直射（正午最亮）；
-//                  θ=π/2 → (−1,0,0) 水平掠射；θ=π → (0,1,0) 从正下方（夜晚）。
-//                  传给 sky 的 sun_dir 取反 = {sinθ, cosθ, 0}，用 y=cosθ 驱动
-//                  DirectionalColor()/DirectionalIntensity()/AmbientColor()/AmbientIntensity()。
-//   sun_base     — 平行光正午基准强度（DirectionalIntensity 的 midday_intensity，
-//                  即 LIGHT_INTENSITY.md 的 3.0 那个量），建议 [1,10]。
-//   ambient_base — 环境光正午基准强度（AmbientIntensity 的 noon_intensity，
-//                  即当前 0.3 那个量），建议 [0.1, 1.0]。
+//   elev_deg         — 太阳仰角（度，[0, 90]）。0°=贴地/日出日落，90°=天顶/正午。
+//                      太阳光传播方向（sun.direction）取 {−cosx, −sinelev, 0} 这种
+//                      y 分量随仰角抬升（仰角越高 y 越负，光从越高处照向场景）；
+//                      传给 sky 的 sun_dir 取反，y = sin(elev_deg)，正好驱动
+//                      DirectionalColor()/AmbientColor() 的仰角色调曲线。
+//                      （注意：滑条直接给仰角，不再像旧版 theta 那样 0=正午、
+//                      越大越贴地，左到右 0°→90° 就是日出→正午，完整覆盖标定工况。）
+//   turbidity        — 大气浊度 [2,8]。同时影响 (a) 天空画色（shader 霾化/日盘）
+//                      + (b) sun/ambient 的 turb 衰减乘子（TurbSunLoss/TurbAmbLoss）。
+//                      滑条用它肉眼标定“高浊度下 sun/ambient 强度分别该衰减成多少”。
+//   season_r         — 季节色温 R 通道乘子 [0.5, 2.0]，默认 1.0 中性（见 SeasonTintScale
+//                      归一化，只偏色不改亮度），联动 sky 天空背景 + sun/ambient 色温。
 //
-// color/intensity 仍全部由 sky 自动推导（task#3 验收不变）：color 用
-// DirectionalColor()/AmbientColor()（色调随太阳仰角变），intensity 用
-// DirectionalIntensity()/AmbientIntensity()（相对衰减随仰角变），只是这次的
-// 基准强度由调用方（滑条）给定，而非写死的 3.0/0.3。sky 其余参数（turbidity/
-// season/intensity/ground_color/sun_radius/sun_brightness/sun_glow）不动。
-inline NoonLighting MakeLighting(float theta, float sun_base, float ambient_base) {
-    // 太阳光传播方向（y-up）：θ=0 天顶直射向下，θ=π 正下方向上。
-    const float st = std::sin(theta);
-    const float ct = std::cos(theta);
-    const jpov::Vec3f sun_light_dir = {-st, -ct, 0.0f};
+// 注：sun/ambient 的 intensity 这里**不再由调用方给定**，全部走 sky 自动推导
+// （sky.DirectionalIntensity()/sky.AmbientIntensity()，含 Turb*Loss 乘子 + 仰角曲线），
+// 因此不再需要 sun_intensity/ambient_intensity 两个参数（gltf viewer 已移除对应滑条）。
+// season 这里由 season_r（R 通道）给定（G/B=1.0）；sky 其余参数（intensity/ground_color/
+// sun_radius/sun_brightness/sun_glow）由本函数固定。
+inline NoonLighting MakeLighting(float elev_deg, float turbidity,
+                                 float season_r = 1.0f) {
+    // 太阳仰角（度）→ 弧度。sun_dir（指向太阳）y 分量 = sin(仰角)：
+    // 仰角 0° → y=0（贴地），仰角 90° → y=1（天顶）。
+    const float elev_rad = elev_deg * (static_cast<float>(M_PI) / 180.0f);
+    const float sy = std::sin(elev_rad);
+    const float sx = std::cos(elev_rad);   // 水平分量（固定 +x 方向）
+    const jpov::Vec3f sun_dir = {sx, sy, 0.0f};          // 指向太阳
+    const jpov::Vec3f sun_light_dir = {-sx, -sy, 0.0f};  // = −sun_dir（传播方向）
     jpov::DaySkyCommand sky{
-        /*sun_dir*/ jpov::Vec3f(st, ct, 0.0f),  // = −sun_light_dir
-        /*turbidity*/ 2.0f,
-        /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
+        /*sun_dir*/ sun_dir,
+        /*turbidity*/ turbidity,   // 影响天空画色（霾化/日盘）+ Turb*Loss 乘子
+        /*season*/ {season_r, 1.0f, 1.0f, 1.0f},  // 只调 R 通道（滑条季节色温）
         /*intensity*/ 1.0f,
         /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
         /*sun_radius*/ 0.02,
@@ -230,15 +239,17 @@ inline NoonLighting MakeLighting(float theta, float sun_base, float ambient_base
     };
     NoonLighting nl;
     nl.sky = sky;
+    // 基准强度（滑条所见即所得）× 浊度衰减（turb=2 时 Loss=1.0，不改变基准）。
+    // 高浊度下 sun 掉得快（直射 DNI 强衰减），ambient 掉得慢（散射缓和），
+    // 两者各自标定。
     nl.sun = jpov::DirectionalLight{
         /*direction*/ sun_light_dir,
         /*color*/ sky.DirectionalColor(),
-        /*intensity*/ sky.DirectionalIntensity(sun_base),
+        /*intensity*/ sky.DirectionalIntensity(),
     };
-    // ambient 基准由滑条给（ambient_base），同 MakeNoonLighting 的 0.3 语义。
     nl.ambient = jpov::AmbientLight{
         .color = sky.AmbientColor(),
-        .intensity = sky.AmbientIntensity(ambient_base),
+        .intensity = sky.AmbientIntensity(),
     };
     return nl;
 }
