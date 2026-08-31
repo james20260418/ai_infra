@@ -2,8 +2,8 @@
 //
 // 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up 风格，
 // 地平面 300×300 米高粗糙灰色 quad。光照用 DaySkyCommand（由 sky 推导平行光
-// + 全局 Ambient），交互窗口底部居中 5 个滑条实时调节：太阳角度、平行光/环境
-// 光基准强度、地面高度、模型缩放。
+// + 全局 Ambient），交互窗口底部居中 5 个滑条实时调节：太阳仰角、浊度 turb、季节色温、
+// 地面高度、模型缩放。光照（color+intensity）全由 sky 自动推导。
 //
 // 相机默认目标 (0,0,0)，初始距离 R 按模型包围盒自适应（加载后 FitRadius 计算）。
 // 右键 drag 转视角，滚轮 zoom（R 缩放）。
@@ -58,11 +58,12 @@ public:
     jpov_viewer::ViewConfig view_;     // 当前视角（交互由 ApplyInput 改；four_views 赋固定角）
 
     // 光照滑条状态（跨帧持有，窗口下方 5 个滑条实时调节）。
-    // 初始值 = 正午基准（θ=0 天顶直射 / sun 3.0 / ambient 0.3），与 MakeNoonLighting
-    // 的固定正午语义一致（只是这里把太阳方向也纳入调节，θ=0 ⇒ 正午最亮）。
-    float theta_  = 0.0f;              // 太阳方向参数 θ（弧度，[0, π]）
-    float sun_base_  = 3.0f;           // 平行光正午基准强度（同 LIGHT_INTENSITY.md 的 3.0）
-    float ambient_base_ = 0.3f;        // 环境光正午基准强度（同当前 0.3）
+    // 光照的 color+intensity 全由 sky 自动推导（含 Turb*Loss 衰减 + 季节色温偏置），
+    // 滑条只调：太阳仰角、浊度 turb、季节 R 色温乘子。
+    float elev_deg_ = 90.0f;          // 太阳仰角（度，[0,90]），0°=贴地 90°=天顶正午
+    float turbidity_ = 2.0f;          // 大气浊度 [2,8]，2=大晴（基准），8=阴/重霾
+    float season_r_ = 1.0f;           // 季节色温 R 通道乘子 [0.5,2.0]，1.0=中性；
+                                      // 联动 skydome 的天空背景 + sun/ambient 色温（归一化，不改亮度）
     float ground_y_ = -3.0f;           // 地面高度（滑条 [-3,+3]，实时调节看物体落地产影）
     float ground_y_prev_ = -3.0f;      // 上一帧地面高度（检测变化才 UpdateMesh）
     float model_scale_ = 1.0f;         // 模型整体缩放（滑条 [0.1, 20]，先缩放再旋转平移）
@@ -124,9 +125,9 @@ public:
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;  // 场景 R 最大 300，far 足够
 
-        // ── 光照：由 5 个滑条实时调节（sky 推导平行光 + 全局 Ambient）──
+        // ── 光照：由滑条实时调节（sky 自动推导 color+intensity，含 Turb*Loss/季节色温）──
         const jpov_viewer::NoonLighting light =
-            jpov_viewer::MakeLighting(theta_, sun_base_, ambient_base_);
+            jpov_viewer::MakeLighting(elev_deg_, turbidity_, season_r_);
         cmds->sky = light.sky;
         cmds->sun = light.sun;
         cmds->ambient = light.ambient;
@@ -162,10 +163,10 @@ public:
 
 private:
     // 光照调节面板布局与绘制（即时模式）。
-    // 5 个滑条竖排，位于窗口底部居中：
-    //   1) 太阳角度 θ（弧度，[0, π]，太阳方向 (−sinθ, −cosθ, 0)）
-    //   2) 平行光正午基准强度（[1, 10]，默认 3.0）
-    //   3) 环境光正午基准强度（[0.1, 1.0]，默认 0.3）
+    // 竖排，位于窗口底部居中：
+    //   1) 太阳仰角（度，[0, 90]，左=贴地日出日落 → 右=天顶正午）
+    //   2) 大气浊度 turb（[2, 8]，默认 2=大晴；调它看高浊度下 sky/强度衰减）
+    //   3) 季节 R 色温乘子（[0.5, 2.0]，默认 1.0 中性；只偏色不改亮度，联动天空+sun/ambient）
     //   4) 地面高度 y（[-3, +3]，默认 -3，实时更新地面 quad）
     //   5) 模型整体缩放（[0.1, 20]，默认 1.0，先缩放再旋转平移）
     // 每个滑条宽度 = 半屏宽（kSliderWidth），水平居中；`label: value` 文本
@@ -185,18 +186,22 @@ private:
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom - (5.0f * kRowH + 4.0f * kSpacing);
 
-        // θ 用 2 位小数（弧度，直接影响太阳方向，精度值得看）。
-        ui_.SliderFloat("太阳角度 θ", &theta_,
+        // 太阳仰角直接用度（0~90° 覆盖日出→正午全部标定工况），0 位小数即可。
+        ui_.SliderFloat("太阳仰角 °", &elev_deg_,
                         jpov::UiRect{{left, top}, {kSliderWidth, kRowH}},
-                        0.0f, static_cast<float>(M_PI), /*decimal_places*/2);
-        ui_.SliderFloat("平行光强度", &sun_base_,
+                        0.0f, 90.0f, /*decimal_places*/0);
+        // 大气浊度：[2,8]。调它同时看 (a) 天空画色霾化/日盘 + (b) sun/ambient 的
+        // Turb*Loss 乘子衰减效果（sky 自动推导的强度已含 Turb*Loss）。
+        ui_.SliderFloat("浊度 turb", &turbidity_,
                         jpov::UiRect{{left, top + (kRowH + kSpacing)},
                                      {kSliderWidth, kRowH}},
-                        1.0f, 10.0f, /*decimal_places*/1);
-        ui_.SliderFloat("环境光强度", &ambient_base_,
+                        2.0f, 8.0f, /*decimal_places*/1);
+        // 季节 R 色温乘子：[0.5,2.0]。归一化后只偏红/青（不改亮度），联动
+        // skydome 天空背景 + sun/ambient 色温，拖它看连续渐变。
+        ui_.SliderFloat("季节 R", &season_r_,
                         jpov::UiRect{{left, top + 2.0f * (kRowH + kSpacing)},
                                      {kSliderWidth, kRowH}},
-                        0.1f, 1.0f, /*decimal_places*/2);
+                        0.5f, 2.0f, /*decimal_places*/2);
         // 地面高度（米）：[-3,+3]，实时看物体落地面/阴影落地面。
         ui_.SliderFloat("地面高度 y", &ground_y_,
                         jpov::UiRect{{left, top + 3.0f * (kRowH + kSpacing)},
@@ -328,7 +333,7 @@ int main(int argc, char** argv) {
 
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
     // 光照不在此预建：交互版由 OneIteration 里的 5 个滑条实时构造
-    // （θ/平行光/环境光基准强度 + 地面高度 + 模型缩放），见 DrawLightPanel。
+    // （仰角/浊度/季节色温 + 地面高度 + 模型缩放），见 DrawLightPanel。
     app.ground_mat_ = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
 

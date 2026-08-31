@@ -71,6 +71,11 @@ uniform vec3  uGroundColor;   // 地平线以下地色
 uniform float uSunRadius;     // 太阳盘角半径（弧度，~0.0047~0.015；≤0 不画）
 uniform float uSunBrightness; // 太阳盘自发光亮度基数（HDR，~1e6；≤0 不画）
 uniform float uSunGlow;       // 太阳盘光晕强度（艺术参数，0=无光晕，~1 默认）
+// 日盘俯仰角重映射（只改日盘位置，不碰天空散射/昼夜/色温/衰减）：
+// 真实仰角 < uSunSetStartAngle 时，盘俯仰角 = uSunSetStartAngle
+//   + uSunSetAngleRatio × (真实仰角 − uSunSetStartAngle)（盘比太阳降得更快）。
+uniform float uSunSetStartAngle; // 重映射起始阈值（度），建议 [0,60]，默认 10
+uniform float uSunSetAngleRatio;  // 阈值以下盘压速比，默认 1.4
 
 const float PI = 3.14159265358979323846;
 // 天光亮度归一化系数：把 Preetham 输出的物理天顶亮度（~几千 cd/m²，即几 kcd/m²）
@@ -192,6 +197,37 @@ void main() {
     vec3 sun_dir = normalize(uSunDir);
     float sun_elev = asin(clamp(sun_dir.y, -1.0, 1.0));   // 仰角（弧度）
 
+    // ── 日盘俯仰角重映射（只改日盘位置，不碰天空散射/昼夜/色温/衰减）──
+    // 真实仰角 < uSunSetStartAngle 时压盘：盘俯仰角(°) = uSunSetStartAngle +
+    // uSunSetAngleRatio × (真实仰角° − uSunSetStartAngle)。盘比太阳降得快，
+    // 使低仰角时盘提前没入地平线（0° 时半拉盘不再露出），高仰角（尤为正午 90°）
+    // 盘仍钉在真实位置（≥ 阈值处连续，无突变）。仅用于盘的角距余弦；其它推导
+    // （散射/色温/Beer-Lambert 衰减）仍用真实 sun_dir/sun_elev。
+    vec3 sun_disc_dir = sun_dir;   // 只被日盘/光晕的角距用
+    {
+        const float rad2deg = 180.0 / PI;
+        const float deg2rad = PI / 180.0;
+        float elev_deg = sun_elev * rad2deg;
+        if (elev_deg < uSunSetStartAngle) {
+            elev_deg = uSunSetStartAngle
+                     + uSunSetAngleRatio * (elev_deg - uSunSetStartAngle);
+        }
+        float disc_elev = elev_deg * deg2rad;
+        float sy = sin(disc_elev);
+        float sh = sqrt(max(1.0 - sy * sy, 0.0));  // 水平分量长度
+        // 保持原水平方位（x,z）方向不变，只改俯仰（y）：
+        // 水平单位向量 = (x0,z0)/|水平|，乘 sh 得新的水平分量。
+        float horiz_len = length(sun_dir.xz);
+        if (horiz_len > 1.0e-6) {
+            sun_disc_dir = vec3(sun_dir.x / horiz_len * sh,
+                                sy,
+                                sun_dir.z / horiz_len * sh);
+        } else {
+            // 原方向几乎垂直向上（无水平分量）：退化为只留 y。
+            sun_disc_dir = vec3(0.0, sy, 0.0);
+        }
+    }
+
     // 太阳盘色温（开尔文）：仰角越高色温越高（正午白~5600K，日出日落红~2000K）。
     float sun_temp = mix(2000.0, 5600.0, clamp(sun_elev / 0.3, 0.0, 1.0));
     vec3 sun_body_color = colorTempToLinear(sun_temp);   // 黑体色，线性 RGB
@@ -209,7 +245,7 @@ void main() {
     // 经典写法 smoothstep(cosSA, 1.0, cos_theta) 在 cosSA 接近 1（小太阳盘）时失效：
     // cos 在 θ→0 处斜率→0，cos 空间分辨率极不均匀，导致过渡被挤成 1 像素的硬边。
     // 正确：先算角距离 ang=acos(cos_ang)，再在角度空间 smoothstep，过渡覆盖整个盘半径。
-    float cos_ang = dot(dir, sun_dir);
+    float cos_ang = dot(dir, sun_disc_dir);   // 用重映射后的日盘方向
     float ang = acos(clamp(cos_ang, -1.0, 1.0));   // 到太阳中心的角距离（弧度）
     float disk = 1.0 - smoothstep(0.0, uSunRadius, ang);
 
