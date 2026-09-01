@@ -79,6 +79,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/src:orm_unpack",
         "//third_party/tinygltf",
         "//third_party/stb:stb_image",
         "@glog_static//:glog",
@@ -97,7 +98,7 @@ cc_library(
         "//third_party/stb:stb_image_write",
         "@glog_static//:glog",
     ],
-    copts = ["-std=c++20"],
+    copts = ["-std=c++20", "-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
     linkstatic = 1,
 )
 
@@ -170,7 +171,7 @@ cc_library(
         ],
         "//conditions:default": ["@glfw_static//:glfw"],
     }),
-    copts = ["-std=c++20", "-DSTB_IMAGE_WRITE_IMPLEMENTATION"],
+    copts = ["-std=c++20"],
     linkstatic = 1,
 )
 

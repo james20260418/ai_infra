@@ -1,4 +1,4 @@
-// JPOV glTF 交互查看器 — 主程序
+// JPOV JPOV 模型查看器 — 主程序
 //
 // 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up 风格，
 // 地平面 300×300 米高粗糙灰色 quad。光照用 DaySkyCommand（由 sky 推导平行光
@@ -10,16 +10,16 @@
 // 产物 ELF 的第一个参数为被加载的 glTF 路径（相对/绝对均可，fallback 到
 // 项目内 pliers.gltf 便于快速演示）。
 //
-// 架构（task #2 文档 jpov_gltf_viewer_arch.md）：
+// 架构（task #2 文档 jpov_model_viewer_arch.md）：
 //   交互与 --four_views 拍照共用同一个 GltfViewerApp::OneIteration 渲染体，
 //   只由 ViewConfig 的驱动方式不同；光照方面交互用滑条版 MakeLighting()，
 //   拍照用固定 MakeNoonLighting()（headless 截图不带 UI 面板）。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
-//   bazel run //tools/jpov:jpov_gltf_viewer -- /path/to/model.gltf
+//   bazel run //tools/jpov:jpov_model_viewer -- /path/to/model.gltf
 //   或 sh 脚本：
-//   ./tools/jpov/build_jpov_gltf_viewer.sh
-//   → output/jpov_gltf_viewer/jpov_gltf_viewer <gltf 路径>
+//   ./tools/jpov/build_jpov_model_viewer.sh
+//   → output/jpov_model_viewer/jpov_model_viewer <gltf 路径>
 
 #include <cstdio>
 #include <string>
@@ -302,15 +302,15 @@ int main(int argc, char** argv) {
     // ── 配置：1280×720、不可 resize、60fps。──
     // four_views 拍照模式 → headless（无可见窗口，AI 自查不弹窗）。
     JPOV::Config cfg;
-    cfg.title = "JPOV — glTF 交互查看器";
+    cfg.title = "JPOV — JPOV 模型查看器";
     cfg.width  = kViewerWidth;
     cfg.height = kViewerHeight;
     cfg.resizable = false;          // 需求：窗口不可 resize
     cfg.target_fps = 60;            // 需求：60 帧
     cfg.headless  = four_views;     // 需求：--four_views 走 headless，不弹窗
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（同 jpov_ui_demo）。
-    // 路径为相对 exe 的字体目录（从 output/jpov_gltf_viewer/ 运行，由
-    // build_jpov_gltf_viewer.sh 同构拷贝 fonts/）。
+    // 路径为相对 exe 的字体目录（从 output/jpov_model_viewer/ 运行，由
+    // build_jpov_model_viewer.sh 同构拷贝 fonts/）。
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},

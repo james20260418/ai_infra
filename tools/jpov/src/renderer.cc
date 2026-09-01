@@ -2474,14 +2474,16 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
 
 namespace {
 
-// 把 ORM（metallicRoughnessTexture，R=AO/G=Roughness/B=Metallic）拆成
-// 3 张独立灰度 PNG 写入临时文件，并逐个加载为 GPU 纹理。
+// 把 ORM（metallicRoughnessTexture，R=Occlusion/G=Roughness/B=Metallic）拆成
+// roughness / metallic 两张独立灰度 PNG 写入临时文件，并逐个加载为 GPU 纹理。
 //
-// 返回 {ao_id, roughness_id, metallic_id}。任何一步失败返回全 0。
-// 临时文件写到 <orm_path 所在目录>/<basename>_ao.png 等，保证
+// 返回 {roughness_id, metallic_id}。任何一步失败返回全 0。
+// 临时文件写到 <orm_path 所在目录>/<basename>_rough.png / _metal.png，保证
 // TextureManager 按绝对路径去重（同一 ORM 只拆/传一次）。
+//
+// 注意：ORM 的 R（Occlusion）在本 loader 中不作为 AO —— 按 glTF 规范，
+// occlusion 仅在 occlusionTexture 显式引用时有效（见 LoadGltfOcclusion）。
 struct OrmTextureIds {
-    uint32_t ao = 0;
     uint32_t roughness = 0;
     uint32_t metallic = 0;
     bool ok = false;
@@ -2511,13 +2513,14 @@ OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
     const std::string stem = (dot == std::string::npos)
         ? base_name : base_name.substr(0, dot);
 
+    // 只拆 roughness(G)/metallic(B) 两通道；ORM 的 R(Occlusion) 不作为 AO
+    // （见 OrmTextureIds 注释）。
     const struct { int channel; const char* suffix; } kChannels[] = {
-        {0, "_ao.png"},      // R = AO
         {1, "_rough.png"},   // G = Roughness
         {2, "_metal.png"},   // B = Metallic
     };
-    uint32_t ids[3] = {0, 0, 0};
-    for (int i = 0; i < 3; ++i) {
+    uint32_t ids[2] = {0, 0};
+    for (int i = 0; i < 2; ++i) {
         std::vector<unsigned char> png =
             ExtractChannelToPng(orm_pixels, ow, oh, kChannels[i].channel);
         if (png.empty()) {
@@ -2538,11 +2541,61 @@ OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
     }
     stbi_image_free(orm_pixels);
 
-    out.ao = ids[0];
-    out.roughness = ids[1];
-    out.metallic = ids[2];
+    out.roughness = ids[0];  // kChannels[0] = G = roughness
+    out.metallic = ids[1];   // kChannels[1] = B = metallic
     out.ok = true;
     return out;
+}
+
+// 从独立的 occlusionTexture 提取 AO（R 通道），并按 occlusionStrength 烘焙：
+// ao' = mix(1, R, S) = 1-S + R*S。返回 TextureManager 的贴图 id（0=失败）。
+// 临时文件写到 /tmp/jpov_gltf_orm/（同 ORM 拆包），按源 basename 稳定命名。
+uint32_t LoadGltfOcclusion(TextureManager& tex_mgr,
+                           const std::string& occ_path,
+                           float ao_strength) {
+    int ow = 0, oh = 0, oc = 0;
+    unsigned char* px = stbi_load(occ_path.c_str(), &ow, &oh, &oc, 4);
+    if (!px) {
+        LOG(ERROR) << "LoadGltf: 无法加载 occlusion 贴图 " << occ_path
+                   << " (" << stbi_failure_reason() << ")";
+        return 0;
+    }
+
+    // 按 strength 重算 R 通道：mix(1, R, S)。S=0→全 255(无遮蔽)，S=1→原 R。
+    std::vector<unsigned char> mixed(static_cast<size_t>(ow) * oh * 4);
+    for (int p = 0; p < ow * oh; ++p) {
+        const int idx = p * 4;
+        for (int c = 0; c < 4; ++c) mixed[idx + c] = px[idx + c];
+        const float r = px[idx] / 255.0f;
+        const float aom = (1.0f - ao_strength) + r * ao_strength;
+        mixed[idx] = static_cast<unsigned char>(aom * 255.0f + 0.5f);
+    }
+    stbi_image_free(px);
+
+    std::vector<unsigned char> png =
+        ExtractChannelToPng(mixed.data(), ow, oh, 0);  // R 通道 = AO
+    if (png.empty()) {
+        LOG(ERROR) << "LoadGltf: occlusion R 通道拆包失败 " << occ_path;
+        return 0;
+    }
+
+    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
+    std::system(("mkdir -p " + scratch_dir).c_str());
+    const size_t last_slash = occ_path.find_last_of("/\\");
+    const std::string base_name = (last_slash == std::string::npos)
+        ? occ_path : occ_path.substr(last_slash + 1);
+    const size_t dot = base_name.find_last_of('.');
+    const std::string stem = (dot == std::string::npos)
+        ? base_name : base_name.substr(0, dot);
+    const std::string tmp = scratch_dir + stem + "_ao.png";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) {
+        LOG(ERROR) << "LoadGltf: 无法写 occlusion 临时文件 " << tmp;
+        return 0;
+    }
+    std::fwrite(png.data(), 1, png.size(), f);
+    std::fclose(f);
+    return tex_mgr.LoadFromFile(tmp);
 }
 
 }  // namespace
@@ -2602,9 +2655,14 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
                               mi.base_color[2], mi.base_color[3]};
         }
 
-        // emissive: 常值自发光色
+        // emissive: 常值自发光色；有 emissiveTexture 时加载贴图（shader 用贴图，
+        // 避免本应暗的 emissive 因常值 factor 过高而把模型冲到发白）。
         mat.emissive = {mi.emissive_factor[0], mi.emissive_factor[1],
                         mi.emissive_factor[2], 1.0f};
+        if (!mi.emissive_tex.empty()) {
+            mat.emissive_tex =
+                self->texture_mgr_.LoadFromFile(mi.emissive_tex);
+        }
         // normal
         if (!mi.normal_tex.empty()) {
             mat.normal_tex =
@@ -2629,7 +2687,8 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
                 mat.roughness = mi.roughness_factor;
                 mat.has_roughness_tex = true;
                 mat.roughness_tex = oid.roughness;
-                mat.ao_tex = oid.ao;
+                // 注意：AO 不从这里取（ORM.R 在规范里不是 AO）。
+                // 独立 occlusionTexture 单独处理，见下方。
             } else {
                 LOG(ERROR) << "LoadGltf: ORM 拆包失败，退回常值材质";
                 mat.metallic = mi.metallic_factor;
@@ -2638,6 +2697,15 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         } else {
             mat.metallic = mi.metallic_factor;
             mat.roughness = mi.roughness_factor;
+        }
+
+        // AO：仅当有独立 occlusionTexture 时加载（glTF 规范：occlusion 只在
+        // occlusionTexture 显式引用时有意义；无独立 occlusion 则 ao=1 无遮蔽）。
+        // ao_tex 保持 0（默认 → shader 用常值 ao=1）即无遮蔽。
+        if (!mi.occlusion_tex.empty()) {
+            mat.ao_tex = LoadGltfOcclusion(
+                self->texture_mgr_, mi.occlusion_tex,
+                mi.occlusion_strength);
         }
 
         obj->primitives.push_back(std::move(prim));
