@@ -1,6 +1,14 @@
 # AI Infrastructure Project
 
-A Bazel-based C++ project for learning and practicing AI infrastructure development.
+> ⚠️ **各 agent 请先读这里（项目真实主导内容是 JPOV）**,下方 `a_plus_b` 是早期教学示例，已被 JPOV 取代，非当前主方向。
+>
+> - 本仓库当前主力代码是 **`tools/jpov/`**（Bazel 渲染沙盒，面向 AI 自测），已有大量 PR 迭代。改动 / 使用它之前**务必先读** `tools/jpov/` 相关文档，避免重复踩已收敛的架构结论。
+> - ★ 用 JPOV 搭类似 Minecraft 体量的独立游戏、把 JPOV 当「0 级引擎」静态链接集成时的必读：**`tools/jpov/docs/jpov_engine_integration.md`**（定位边界、GL 单线程铁律、static meshing 可行、局部更新/分层明确不做）。
+> - JPOV 其他文档：`tools/jpov/README.md`、`tools/jpov/DESIGN.md`（注：DESIGN 部分 API 描述与代码现状不一致，以代码为准）、`tools/jpov/interface/README.md`。
+
+---
+
+*A Bazel-based C++ project (历史教学起点，见下)。*
 
 ## Project Structure
 
