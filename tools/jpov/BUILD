@@ -22,7 +22,7 @@ cc_library(
 )
 
 # ============================================================================
-# JPOV glTF 交互查看器（小工具）— 架构文档 docs/jpov_gltf_viewer_arch.md
+# JPOV 模型查看器（小工具）— 架构文档 docs/jpov_model_viewer_arch.md
 # 交互视角与 --four_views 拍照共用 ViewConfig / MakeNoonLighting（zero 分叉）。
 # ============================================================================
 
@@ -40,8 +40,8 @@ cc_library(
 )
 
 cc_binary(
-    name = "jpov_gltf_viewer",
-    srcs = ["demo/jpov_gltf_viewer.cc"],
+    name = "jpov_model_viewer",
+    srcs = ["demo/jpov_model_viewer.cc"],
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
@@ -71,8 +71,8 @@ cc_test(
 # Headless 冒烟渲染（开发自检）：无窗口 RunOnce 渲染默认视角场景，
 # 用于验证 task#3 验收（地平面+glTF+正午光照）而无需交互窗口。
 cc_binary(
-    name = "jpov_gltf_viewer_smoke",
-    srcs = ["demo/jpov_gltf_viewer_smoke.cc"],
+    name = "jpov_model_viewer_smoke",
+    srcs = ["demo/jpov_model_viewer_smoke.cc"],
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",

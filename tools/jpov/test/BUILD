@@ -59,3 +59,19 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# glTF loader — 内嵌 bufferView 贴图 GLB 加载验证（CPU-only）
+# 确保单文件 GLB（贴图内嵌、无外部 uri）能正确导出贴图并填入 *_tex。
+cc_test(
+    name = "jpov_gltf_embedded_loader_test",
+    srcs = ["jpov_gltf_embedded_loader_test.cc"],
+    data = ["//tools/jpov/test/object3d:catapult_glb_data"],
+    deps = [
+        "//tools/jpov/src:gltf_loader",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

@@ -139,6 +139,56 @@ filegroup(
     visibility = ["//tools/jpov:__subpackages__"],
 )
 
+# 内嵌 bufferView 贴图 GLB（Tripo 生成投石车，单文件自包含）
+# 用于验证 loader 支持内嵌贴图（无外部 uri）。
+filegroup(
+    name = "catapult_glb_data",
+    srcs = glob(["catapult_glb/*"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
+# 内嵌贴图 GLB（Khronos 官方 Lantern，单文件，PBR 全通道：baseColor/normal/
+# metallicRoughness(ORM)/emissive，无独立 occlusion）。用于验证内嵌贴图 GLB
+# 的完整加载 + AO/emissive 规范语义修复。
+filegroup(
+    name = "lantern_glb_data",
+    srcs = glob(["lantern_glb/*"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
+# ============================================================================
+# Gold Image — glTF Lantern (内嵌贴图 GLB) PBR 渲染验证
+# ============================================================================
+cc_binary(
+    name = "jpov_gltf_lantern_gold_generator",
+    srcs = ["jpov_gltf_lantern_gold_generator.cc"],
+    data = [":lantern_glb_data"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_gltf_lantern_gold_test",
+    srcs = ["jpov_gltf_lantern_gold_test.cc"],
+    data = [":lantern_glb_data", ":lantern_1280x720.png"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # ============================================================================
 # Gold Image — glTF Pliers PBR 渲染验证
 # ============================================================================

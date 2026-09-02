@@ -68,4 +68,32 @@ std::vector<unsigned char> ExtractChannelToPng(
     return png_data;
 }
 
+std::vector<unsigned char> RgbaToPng(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int comps) {
+    CHECK(pixels != nullptr);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    if (comps < 1 || comps > 4) comps = 4;
+
+    // 写入 PNG 到 vector。stride = width * comps（每行字节数）。
+    std::vector<unsigned char> png_data;
+    VecWriter ctx;
+    ctx.data = &png_data;
+
+    const int ok = stbi_write_png_to_func(
+        VecWriteFunc, &ctx,
+        width, height,
+        comps,
+        pixels,
+        width * comps);
+    if (ok == 0) {
+        LOG(ERROR) << "RgbaToPng: stbi_write_png_to_func failed";
+        return {};
+    }
+    return png_data;
+}
+
 }  // namespace jpov

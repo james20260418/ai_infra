@@ -1,4 +1,4 @@
-# JPOV glTF 交互查看器 — 架构笔记
+# JPOV JPOV 模型查看器 — 架构笔记
 
 > 本文件是 task #1 的架构产物。任务背景（leader #8 批示）：复用仓库已有
 > `feature/20260824-gltf-viewer` 分支的实现，但**不得照抄，用前仔细审视**。
@@ -12,7 +12,7 @@
 
 | 需求 | 要求 | 复用分支现状 | 审视结论 |
 |------|------|--------------|----------|
-| 形态 | JPOV 附带小工具，sh 脚本包裹编译 | `build_jpov_gltf_viewer.sh` 已实现 | ✅ 结构合理，复用 |
+| 形态 | JPOV 附带小工具，sh 脚本包裹编译 | `build_jpov_model_viewer.sh` 已实现 | ✅ 结构合理，复用 |
 | 窗口 | 默认 1280×720，渲染同分辨率，不可 resize | `Config` + `fbo_3d_width_/height_` | ✅ 符合 |
 | 坐标 | y-up，相机默认 (1,1,1)→(0,1,0) | `DefaultView()={phi=0,theta=π/4,R=√2}` | ✅ 推导正确（arch §7 已证） |
 | 场景 | 300×300 高粗糙灰 ground quad + glTF | `MakeGroundQuad()` half=150 + `GroundMaterial()` | ✅ 符合；法线 +Y、y=0 |
@@ -43,7 +43,7 @@
 5. **滚轮符号约定需仔细核对**：实现里 `scroll>0` 是缩小（R ×1/√2）、`scroll<0` 是放大
    （R ×√2）。需求表述"每滚一格 R 变 √2 或 0.5√2"方向语义依赖 GLFW 的 scroll 正负约定。
    **落地时以单测为准**（view_config_test 已覆盖 ±），并确认与交互手感一致。
-6. **`jpov_gltf_viewer_smoke.cc`** 是开发自检用的 headless 冒烟渲染，非 leader 需求产物，
+6. **`jpov_model_viewer_smoke.cc`** 是开发自检用的 headless 冒烟渲染，非 leader 需求产物，
    但利于验证，保留作自检工具（不进交付说明也行，视需要）。
 
 ---
@@ -141,16 +141,16 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 
 ```
 tools/jpov/
-  demo/jpov_gltf_viewer.cc        # 主程序: main + GltfViewerApp + RunFourViews
+  demo/jpov_model_viewer.cc        # 主程序: main + GltfViewerApp + RunFourViews
   demo/view_config.h              # ViewConfig + ApplyInput + MakeNoonLighting + 地面（header-only）
   demo/view_config_test.cc        # 纯函数单测（Position/ApplyInput/clamp/光照）
-  demo/jpov_gltf_viewer_smoke.cc  # headless 冒烟自检（可选）
-  build_jpov_gltf_viewer.sh       # sh 包裹编译 → output/jpov_gltf_viewer/
-  docs/jpov_gltf_viewer_arch.md   # 本文档
+  demo/jpov_model_viewer_smoke.cc  # headless 冒烟自检（可选）
+  build_jpov_model_viewer.sh       # sh 包裹编译 → output/jpov_model_viewer/
+  docs/jpov_model_viewer_arch.md   # 本文档
 ```
 
-BUILD 新增：`view_config`(cc_library header) + `jpov_gltf_viewer`(cc_binary) +
-`view_config_test`(cc_test) + `jpov_gltf_viewer_smoke`(cc_binary)。限制 linux_x86_64。
+BUILD 新增：`view_config`(cc_library header) + `jpov_model_viewer`(cc_binary) +
+`view_config_test`(cc_test) + `jpov_model_viewer_smoke`(cc_binary)。限制 linux_x86_64。
 
 ---
 
@@ -162,5 +162,5 @@ BUILD 新增：`view_config`(cc_library header) + `jpov_gltf_viewer`(cc_binary) 
 - [ ] 目标点：交互看 (0,1,0)，拍照看 (0,0,0)（headless_shot_ 区分）
 - [x] ~~ambient=0.3~~ 由 sky.AmbientIntensity(0.3) 推导（锚定 PR#60 基准）；near/far/fov 对齐 §5
 - [ ] 单测通过（view_config_test）
-- [ ] sh 脚本产出 output/jpov_gltf_viewer/ 可执行
+- [ ] sh 脚本产出 output/jpov_model_viewer/ 可执行
 - [ ] 用仓里现有 gltf（test/object3d/scene_assets 的 pliers/stool 等）实跑 four_views 出图验证

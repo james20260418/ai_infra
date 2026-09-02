@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +33,7 @@
 #include <glog/logging.h>
 
 #include "third_party/tinygltf/tiny_gltf.h"
+#include "tools/jpov/src/orm_unpack.h"
 
 namespace jpov {
 
@@ -235,6 +238,84 @@ bool ComputeTangentsGltf(MeshData* out) {
 
 // ==================== LoadGltf 实现 ====================
 
+// 把 glTF image 解析为一个可加载的图片路径（供 TextureManager::LoadFromFile）。
+//
+// 两种来源：
+//   - 外部图片（image.uri 非空）：返回 base_dir + uri（沿用既有约定，
+//     uri 为相对于 glTF 文件所在目录的路径）。
+//   - 内嵌图片（image.bufferView >= 0，uri 为空）：字节存在 image.image
+//     （如 GBK 单文件 GLB 内嵌 bufferView 贴图）。把它导出到
+//     /tmp/jpov_gltf_embed/ 临时目录，返回临时文件绝对路径。
+//
+// 返回空串表示无法解析（不产出可用贴图）。临时文件按 image.name/stem +
+// mimeType 扩展名 稳定命名，保证 TextureManager 按绝对路径去重
+// （同一内嵌图只导出/上传一次）。
+std::string ResolveImagePath(const tinygltf::Model& model, int image_index,
+                             const std::string& base_dir) {
+    if (image_index < 0 ||
+        image_index >= static_cast<int>(model.images.size())) {
+        return std::string();
+    }
+    const tinygltf::Image& img = model.images[image_index];
+
+    // 外部图片：直接用 uri 相对路径。
+    if (!img.uri.empty()) {
+        return base_dir + img.uri;
+    }
+
+    // 内嵌图片（bufferView）。tinygltf 默认 LoadImageData 已把图片解码为
+    // 像素存入 image.image（w*h*component 字节，组件序 R,G,B[,A]），而非
+    // 原始压缩字节。故不能当 JPEG 拷贝，需重新编码为 PNG 临时文件
+    // （复用 orm_unpack 的 RgbaToPng，避免 gltf_loader 自己接管 stb 实现）。
+    if (img.bufferView >= 0 && !img.image.empty()) {
+        std::string stem = img.name;
+        if (stem.empty()) {
+            stem = "img" + std::to_string(image_index);
+        }
+        // 去掉 name 里可能带的分隔符（只是安全化文件名）。
+        for (char& c : stem) {
+            if (c == '/' || c == '\\' || c == ':') c = '_';
+        }
+
+        if (img.width <= 0 || img.height <= 0) {
+            LOG(ERROR) << "LoadGltf: 内嵌图片 image[" << image_index
+                       << "] 尺寸无效 " << img.width << "x" << img.height;
+            return std::string();
+        }
+
+        // 每像素通道数以实际解码结果为准（1..4），缺省按 4。
+        const int comps = (img.component >= 1 && img.component <= 4)
+                              ? img.component
+                              : 4;
+
+        // 用 orm_unpack 编码为 PNG 字节流，再落盘临时文件。
+        const std::vector<unsigned char> png =
+            jpov::RgbaToPng(img.image.data(), img.width, img.height, comps);
+        if (png.empty()) {
+            LOG(ERROR) << "LoadGltf: RgbaToPng 失败 image[" << image_index
+                       << "]";
+            return std::string();
+        }
+
+        const std::string scratch_dir = "/tmp/jpov_gltf_embed/";
+        std::system(("mkdir -p " + scratch_dir).c_str());
+        const std::string tmp = scratch_dir + stem + ".png";
+        std::ofstream out(tmp, std::ofstream::binary);
+        if (!out) {
+            LOG(ERROR) << "LoadGltf: 无法写内嵌贴图临时文件 " << tmp;
+            return std::string();
+        }
+        out.write(reinterpret_cast<const char*>(png.data()),
+                  static_cast<std::streamsize>(png.size()));
+        out.close();
+        return tmp;
+    } else {
+        LOG(WARNING) << "LoadGltf: image[" << image_index
+                     << "] 既无 uri 也无 bufferView 数据，跳过贴图";
+    }
+    return std::string();
+}
+
 // 解析单个 primitive → CPU MeshData + 材质贴图路径。
 //
 // 内部共享逻辑：LoadGltf（取第一个）与 LoadGltfScene（取全部）共用。
@@ -243,7 +324,7 @@ bool ComputeTangentsGltf(MeshData* out) {
 //   2. 索引缓冲展开
 //   3. Y-up → Z-up 坐标变换
 //   4. 推导 tangent
-//   5. 提取材质贴图路径（相对于 glTF 文件目录）
+//   5. 提取材质贴图路径（相对于 glTF 文件目录 或 内嵌临时文件）
 bool ParsePrimitive(const tinygltf::Model& model,
                     const tinygltf::Primitive& prim,
                     const std::string& base_dir,
@@ -351,8 +432,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
             const tinygltf::Texture& tex =
                 model.textures[mat.pbrMetallicRoughness.baseColorTexture.index];
             if (tex.source >= 0) {
-                out_mat->base_color_tex = base_dir +
-                    model.images[tex.source].uri;
+                out_mat->base_color_tex =
+                    ResolveImagePath(model, tex.source, base_dir);
             }
         }
 
@@ -361,8 +442,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
             const tinygltf::Texture& tex =
                 model.textures[mat.normalTexture.index];
             if (tex.source >= 0) {
-                out_mat->normal_tex = base_dir +
-                    model.images[tex.source].uri;
+                out_mat->normal_tex =
+                    ResolveImagePath(model, tex.source, base_dir);
                 out_mat->normal_scale = mat.normalTexture.scale;
             }
         }
@@ -372,8 +453,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
             const tinygltf::Texture& tex =
                 model.textures[mat.pbrMetallicRoughness.metallicRoughnessTexture.index];
             if (tex.source >= 0) {
-                out_mat->metallic_roughness_tex = base_dir +
-                    model.images[tex.source].uri;
+                out_mat->metallic_roughness_tex =
+                    ResolveImagePath(model, tex.source, base_dir);
             }
         }
 
@@ -382,9 +463,14 @@ bool ParsePrimitive(const tinygltf::Model& model,
             const tinygltf::Texture& tex =
                 model.textures[mat.occlusionTexture.index];
             if (tex.source >= 0) {
-                out_mat->occlusion_tex = base_dir +
-                    model.images[tex.source].uri;
+                out_mat->occlusion_tex =
+                    ResolveImagePath(model, tex.source, base_dir);
             }
+            // glTF 规范: ao = mix(1.0, R, occlusionStrength)。
+            // strength 在渲染前烘焙进 AO 像素（renderer.cc LoadOrmTextures），
+            // 渲染管线/PRBMaterial 保持不动。默认 1.0（全强度）。
+            out_mat->occlusion_strength =
+                static_cast<float>(mat.occlusionTexture.strength);
         }
 
         // emissiveTexture
@@ -392,8 +478,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
             const tinygltf::Texture& tex =
                 model.textures[mat.emissiveTexture.index];
             if (tex.source >= 0) {
-                out_mat->emissive_tex = base_dir +
-                    model.images[tex.source].uri;
+                out_mat->emissive_tex =
+                    ResolveImagePath(model, tex.source, base_dir);
             }
         }
 

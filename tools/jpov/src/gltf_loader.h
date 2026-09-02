@@ -11,6 +11,9 @@
 //   - 多 mesh / 多 primitive：LoadGltfScene 遍历整个场景
 //   - PBR 材质贴图路径提取: baseColor / normal / metallicRoughness(ORM) /
 //     occlusion / emissive
+//   - 贴图来源: 外部文件（image.uri 相对路径）与内嵌 bufferView
+//     （GLB 单文件内嵌 PNG/JPEG）均支持。内嵌图导出到 /tmp/jpov_gltf_embed/
+//     临时文件后由下游 TextureManager 加载，下游接口保持不变。
 //
 // 明确不支持（超出本轮范围）：
 //   - 骨骼动画: skins / joints / weights（tinygltf 可读，本 loader 跳过）
@@ -65,6 +68,11 @@ struct GltfMaterialInfo {
     float metallic_factor = 1.0f;
     float roughness_factor = 1.0f;
     float normal_scale = 1.0f;
+
+    // occlusionStrength: glTF occlusionTexture 的强度，ao = mix(1, R, strength)。
+    // 由加载端读取，并在 ORM/AO 拆包时烘焙进像素（渲染管线不额外处理，
+    // PRBMaterial 不新增字段）。默认 1.0 = 全强度（规范的默认语义）。
+    float occlusion_strength = 1.0f;
 
     // baseColorFactor: 常值 base 色 (RGBA, [0,1])。
     // 仅当无 baseColorTexture 时用（纯色材质，如 poly.pizza 家具）。

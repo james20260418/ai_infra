@@ -48,6 +48,25 @@ std::vector<unsigned char> ExtractChannelToPng(
     int height,
     int channel);
 
+// 把【任意通道数】的像素数据编码为 PNG 字节流（整图，非单通道）。
+//
+// 用于把解码后的图像数据重新编码为 PNG（如内嵌 bufferView 贴图经过
+// stb 解码成 RGBA 像素后需再编码为磁盘文件给 TextureManager 加载）。
+//
+// 参数：
+//   pixels: 像素数据（width * height * components 字节）
+//   width, height: 尺寸（≥1）
+//   comps: 每像素通道数（1..4；超出按 4 处理）
+//
+// 返回：PNG 字节流；失败返回空 vector。
+//
+// Pre-condition: pixels 非空，width > 0，height > 0，comps 1..4
+std::vector<unsigned char> RgbaToPng(
+    const unsigned char* pixels,
+    int width,
+    int height,
+    int comps);
+
 }  // namespace jpov
 
 #endif  // JPOV_ORM_UNPACK_H_

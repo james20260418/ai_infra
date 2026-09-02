@@ -4,7 +4,7 @@
 // 验证 task #3 验收（地平面 + glTF 模型 + 正午光照正确显示）而无需交互窗口。
 //
 // 用法：
-//   xvfb-run -a ./bazel-bin/tools/jpov/jpov_gltf_viewer_smoke <gltf> <out.png>
+//   xvfb-run -a ./bazel-bin/tools/jpov/jpov_model_viewer_smoke <gltf> <out.png>
 //
 // 与交互程序共用 view_config.h（ViewConfig/正午光照/地面），保证 self-check
 // 视图即交互所见（架构 doc：交互与拍照共用 OneIteration + MakeNoonLighting）。
@@ -64,7 +64,7 @@ public:
 }  // namespace
 
 int main(int argc, char** argv) {
-    CHECK_GE(argc, 3) << "用法: jpov_gltf_viewer_smoke <gltf路径> <输出.png>";
+    CHECK_GE(argc, 3) << "用法: jpov_model_viewer_smoke <gltf路径> <输出.png>";
     const std::string gltf_path = argv[1];
     const std::string out_png   = argv[2];
 

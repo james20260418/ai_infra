@@ -1,6 +1,6 @@
-// JPOV glTF 交互查看器 — 共享视角配置与正午光照（header-only）
+// JPOV JPOV 模型查看器 — 共享视角配置与正午光照（header-only）
 //
-// 架构文档：tools/jpov/docs/jpov_gltf_viewer_arch.md（task #2）
+// 架构文档：tools/jpov/docs/jpov_model_viewer_arch.md（task #2）
 //
 // 核心抽象：ViewConfig —— 一条独占地决定相机姿态的元数据。
 // 交互模式与 --four_views 拍照模式都只是“持有并消费一个 ViewConfig”：
