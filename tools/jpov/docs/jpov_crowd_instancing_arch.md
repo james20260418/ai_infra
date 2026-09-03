@@ -22,8 +22,19 @@
   而是换「一个廉价索引/tint」去 select 共享区的大块数据**（材质 / 贴图 / 骨架矩阵 / rest-mesh 变体）。
 - **肢体拆分门槛（属 S0 打底结构）**：至少能区分「小臂 / 大臂 / 头部」这一档（不是简约整身，
   也不是精细到手指），part_pool 按此分部位可拼。
-- **S0 边界**：S0 只聚焦「把千人 instancing + selector + 到臂/头部位的 rest-mesh 蒙皮通路跑起来」。
-  **风动物理与颜色微调列为 TODO / 后续里程碑（见 §7），不进 S0。**
+- **人群动画走「骨骼动画纹理」（骨骼烘焙蒙皮），作为 JPOV 官方渲染原语**：把角色的骨骼矩阵（非顶点）按
+  clip→帧烘焙进一张纹理，instance 只送「当前帧号/相位」，VS 查表 + 保留 4-bone 蒙皮。CPU 每角色求 pose + 每帧传调色板
+  **两个开销从 CPU 消失**，CPU 每帧只每人传一个小 instance(相位)。显存只随**骨数×帧**涨、**不随顶点数涨**。
+  这一档（非纯 VAT）保住骨骼蒙皮语义，因此与 charactor-part / 换装部位兼容（§4）。
+- **纯 Vertex-VAT（顶点×帧位置烘焙）不做为人群主线**，只做为**更远距离 LOD**可选档：它连 4-bone 蒙皮都省、
+  CPU 最省，但丢骨骼语义且显存随**顶点数×帧**涨，不适合要「换装部位骨架」的人群主体（见 §2.2）。
+- **真·运行时蒙皮（实时骨骼）只留给近端少数主角**，不用于人群主体（CPU 逐角色求值与逐实例调色板
+  无法支撑千人 instancing）。三分档详见 §6.2。
+- **LOD 归用户、与 instancing/蒙皮解耦**：高模/低模各自一档 instanced draw、喂不同几何；谁切 LOD、每 instance
+  归哪档全由用户可见性系统决定，JPOV 只消费「一批同档 instance + 一份 mesh」批量画掉（§5）。
+- **S0 边界**：S0 =「1000 个**全低模**（考究做到人均 <1000 三角形 / 按独立 VS 顶点算更紧）人的 instancing +
+  selector + 部位到臂/头 + **骨骼动画纹理蒙皮** + 外观差异跑通，相机保持街道/俯拍不带贴脸」；身体高模与
+  距离 LOD 切换列 S1+。**风动物理与颜色微调列为 TODO（§7），不进 S0。**
 
 ---
 
@@ -43,11 +54,12 @@
 
 ### 1.3 与「单人高质量」的分工（取舍，不背锅延后项）
 
-下列**明确不是本首屏目标**，延后（避免把首屏做太重、方向被画质牵走）：
-- 单个角色的高模级几何精细度；
-- 真实布料 / 裙摆 / 披风的逐 instance 物理解算（独立动态形变，见 §6 坑1 的便宜档 vs 贵档）；
-- 精细到手指的 rig、复杂动作状态机、真人级动作混合；
-- bindless 纹理 / compute skinning / GPU 驱动逐 instance 独立动画（「每个 instance 自己动自己的动作」那台更大的机器，见 §6 坑2 的取舍说明）。
+下列**明确不是本首屏（S0）目标**，延后（避免首屏做太重、方向被画质/实时骨骼牵走）：
+- 单个角色的高模级几何精细度、贴脸近景（想看清脸的镜头体验延后到高模/LOD 里程碑）；
+- **真·运行时蒙皮（实时骨骼、IK/状态机/表情）逐 instance 铺到人群** → 只留近端少数主角，人群主体用骨骼动画纹理(§6.2)；
+- bindless 纹理 / compute skinning / GPU 驱动逐 instance 独立实时动画（更大的机器，见 §6.2）；
+- 真实布料 / 裙摆逐 instance 物理解算（§6.4 便宜档延后）；
+- 纯 Vertex-VAT 不做人群主体，只留给更远 LOD，详见 §6.2。
 
 ---
 
@@ -69,7 +81,7 @@ instance[i] (很薄, select 共享区):
   transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)
   body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int）
   cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」
-  cheap_body_scale   —— 几档全局/轴向 scale 标量（身高胖瘦微差，见 §6 坑3）
+  cheap_body_scale   —— 几档全局/轴向 scale 标量（身高胖瘦微差，见 §6.1）
   face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引
   tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）
   seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现）
@@ -81,16 +93,22 @@ instance[i] (很薄, select 共享区):
 几何与蒙皮矩阵**全共享**。千人 = 反复 select 共享 part + 一次蒙皮共享骨架，
 刷屏仍是受限次数的 instanced/batch draw —— **draw-call 卡脖子当场解除**。
 
-### 2.2 两个分岔要在实现层写死（不是 S0 就要解，但文档先把门分清）
+### 2.2 人群主体的动画形态：骨骼动画纹理（关键分岔，本文档已定调到 §6.2）
 
-1. **动作推演放 CPU（共享区）而非逐 instance 上 GPU**：
-   千人若共享骨架 / 共享动作(clip)，正确做是 **CPU 跑一个 clip 采样器，算出那套共享骨架的
-   每帧关节矩阵，上传一次**，然后所有同骨架 instance 共享这份矩阵去蒙皮。
-   **不要在 shader 里让每个 instance 自采样动画**（那要把整份动画采样状态逐 instance 上传，很贵）。
-   → 语义上 instance state 里的「动作」往往只是一根指向『已求值好的共享骨架矩阵 / 相位』的信号。
-2. **蒙皮在「共享骨架矩阵」上做**，不是每个 instance 一套骨骼。这才保证衣服肉体都可复用同一份。
-   （若日后真要做「每个 instance 独立动自己的动作 / 独立绑骨」，那是「GPU 角色实例化 / compute skinning」
-   这台更大的机器，明确延后，见 §6。）
+> 早期版本此处写「CPU 跑一个 clip 采样器、算出共享骨架矩阵上传一次」，经调研后已**弃用**；
+
+人群「上千人有差异 + 能换装部位」不能靠：
+- ❌ **逐 instance 在 shader 自采样实时骨骼**——CPU 逐角色求 pose(50~200µs/个，线性随人数涨) + 逐实例矩阵调色板
+  （成百上千 mat4/实例无法塞 instancing per-instance attribute）双开销，千人群 CPU 先死 GPU 没醒。
+- ❌ **纯 Vertex-VAT(顶点位置帧烘焙)** 作人群主体——丢骨骼蒙皮语义，顶不掉你要的换装/部位骨架设计；且显存
+  随**顶点数×帧**涨(高模爆炸)。
+
+✅ 正确主干 = **骨骼动画纹理（texture-palette skinning）**：把角色的**骨骼矩阵**（非顶点）按 clip→帧烘焙进
+一张纹理，instance 只送当前帧号/相位，VS 查表得到各关节矩阵后仍做标准 4-bone 加权蒙皮。它同时：
+  - 把 CPU 「逐角色求 pose + 逐帧传调色板」两大开销从运行期拿走（矩阵常驻纹理、GPU 自取）；
+  - 保住 4-bone 蒙皮语义 → 与 charactor-part 部位选择 / 服装绑定共存（§4）；
+  - 显存只随**骨数×帧**涨（骨骼数 ≪ 顶点数），与顶点数解耦。
+帧号 CPU 直传 per-instance，配合 instancing 千人批量。三分档（实蒙皮/骨骼纹理/纯VAT）与取舍见 §6.2。
 
 ---
 
@@ -144,21 +162,27 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 
 ## 5. JPOV / 用户的边界（沿用 engine-integration 收敛）
 
+> 注：本节边界在「人群通过骨骼动画纹理(§6.2-B)驱动」的主线下重新表述——「动画资产成帧烘焙」与「可见性/LOD 决策」
+> 归用户/资产，JPOV 拥有的是**烘焙结果的 GPU 形态 + 4-bone 蒙皮 shader + 批量 instance 绘制**。
+
 | 层 | 归属 | 说明 |
 |----|------|------|
 | rest 网格上传（`MeshData`/`GPUMesh`/`RegisterMesh`） | **JPOV** | 现有 rest-mesh 顶点管线已就位（含预埋骨骼权重 slot loc 3/4，见 `mesh.h`/`gpumesh.h`）|
-| 材质 / 贴图变体（`PBRMaterial` + texture-array）| **JPOV** | 肤色 tint、衣物颜色 = 现有材质可表达，不另造 |
-| 蒙皮 shader（VS 按共享骨架矩阵 skin 位置/法线/切线）| **JPOV** | 复用 rest 上传 + 共享矩阵；下游（光照/阴影/picking/tone）走现有链 |
-| **共享骨架矩阵的每帧求值**（clip 采样 → 一套关节矩阵）| **用户 / 骨架系统** | 跟「世界演化归用户」同归一类；JPOV 消费它 |
-| **part 资源组织的资产侧**（哪些 part 存在/人物长啥样）| **用户侧资产/装配** | selector 由用户的「人物装配」给出 |
-| batch / instancing 的**组织**（谁把 N 个 instance 合成一次 draw）| **JPOV**（render 关心） | 见 §8 |
+| 部位 / 变体 mesh 池与材质贴图变体（`PBRMaterial` + texture-array） | **JPOV** | 肤色 tint、衣物颜色、部位变体 = 现有材质/mesh 体系可表达 |
+| **骨骼动画纹理资源**（烘焙出的 bone 矩阵×clip→帧 纹理）| **JPOV** | 作为 JPOV 官方渲染资源类型（与 mesh/材质/texture 平级）持有、管理生命周期 |
+| **消费该纹理的蒙皮 shader（VS 查表 + 4-bone 蒙皮）** | **JPOV** | 复用 rest 上传；shade/shadow/picking 各 pass 用同一查表蒙皮保证 4-pass 一致（防“手动/拾取错位”）|
+| **把一堆 instance(相位+selector+transform…) batch 成 instanced draw** | **JPOV** | render 关心：接收“同 mesh+同 anim 一批 instance + 帧号”，一次批量画 |
+| **动画资产是否/怎么烘焙**（clip 从何而来、传几帧进内纹）| **资产/用户** | 跟「素材归用户」同归一类；JPOV 消费烘焙好的纹理 |
+| **每 instance 处在哪段动画 / 哪个相位 / 谁是哪个人**（世界状态）| **用户 / 骨架系统** | 同“世界演化归用户” |
+| **LOD：切不切、每 instance 归哪档、高模/低模各自一档 draw 喂不同几何** | **用户（可见性系统）** | JPOV 不必知道“几个 LOD 档”；JPOV 只需“给一批同档 instance + 这份 mesh 批量画”。**与 instancing 蒙皮彻底解耦** 见 §6.3 |
 
-边界一句话：**「画什么」的差异（assembled part + transform + tint/seed + 已求值的骨架矩阵）
-由用户给，JPOV 只负责把它高效地 batch 起来蒙皮画出来——和 engine-integration doc 的 cmds 缝同构。**
+边界一句话：**“画面差异”（装配的部位 + transform/tint/seed +每 instance 相位）与“可见性/LOD/动画来源”由用户给；
+JPOV 拥有“烘焙动画纹理资源 + 4-bone 蒙皮 shader + 把同档同动画一批 instance batch 画掉、且四 pass 一致”的渲染职责。**
+和 engine-integration doc 的 cmds 缝同构。
 
----
+---  
 
-## 6. 两个已知取舍 / 明确不开的门（防返工）
+## 6. 已知取舍 / 明确不开的门（防返工）
 
 ### 6.1 「衣物绑定共享骨架 vs 按体型微调」的冲突（第一坑，最容易咬人）
 
@@ -170,59 +194,99 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 2. 衣物 bake 成身体变体（每变体一套衣）——复杂，延后。
 3. 接受「衣带骨、体可微调但衣物按标人」的近似——文档标注取舍，若需要再开。
 
-### 6.2 「风动物理」与「逐 instance 独立动画」的便宜分档（第二坑）
+### 6.2 人群角色的动画：三档谱系（本文档核心取舍，决定人群主体形态）
 
-- 风：**便宜档** ✅(TODO) = per-instance 标量（风速/风向 seed），shader 对「衣物蒙皮后顶点」做廉价
-  正弦/摆动偏移（不等于真实布料，无独立物理）；**贵档** = 真实布料/裙摆逐 instance 解算 → 撞
-  「instance 不得 carry 独立形变」边界，**延后**。
-- 独立动画：千人共享 skeleton/clip → CPU 求值共享矩阵，廉价。真正「每个 instance 自己动自己的
-  clip / 独立绑骨」→ **GPU 角色实例化 / compute skinning**（尤其配合逐 instance 独立体型时），
-  明确是更大的机器，**延后**，不做进首屏。
+Danis 拍板方向：以**「骨骼动画纹理」（骨骼烘焙蒙皮）**为人群主体。完整谱系如下，供实现时选档（结构化实现细节不在此列）：
 
-### 6.3 肤色/衣服颜色、4 副面孔 → 全部走「index/tint select 共享区」，见 §3 表。
+| 档 | 运行时怎么动 | CPU/帧×角色 | 换装部位/骨骼语义 | 能千人 instancing | 显存（最相关） | 定位 |
+|----|------|------|------|------|------|------|
+| **C. 真·运行时蒙皮（实时骨骼）** | CPU 每角色求骨骼 pose + 矩阵调色板，VS 蒙皮 | ~50–200µs/人，线性涨 | ✅ 完整（blend/IK/表情自由） | ❌（调色板 per-角色，无法批量） | 随 clip 长，不随顶点 | **只留近端少数主角**（要反应/IK/表情），不做人群主体 |
+| **B. 骨骼动画纹理（texture-palette skinning，人群主体 ✅）** | 骨骼矩阵按 clip→帧烘焙进纹理；instance 只送帧号；VS 查表得关节矩阵 + 标准 4-bone 蒙皮 | ≈0（只传 per-instance 相位）| ✅ 保留 4-bone 蒙皮 → 与 charactor-part 部位/换装兼容 | ✅ | **骨×帧**（骨数≪顶点数，不随顶点张） | 人群主体；保住换装骨架语义 + CPU 开销压掉 + 千人批量 |
+| **A. 纯 Vertex-VAT（顶点位置 x 帧烘焙）** | 顶点每帧位置打纹理；instance 送帧号；VS 查表直接 lerp 出顶点，无蒙皮权重 | ≈0（最省） | ❌ 丢骨骼语义（顶点直接给位置） | ✅ | **顶点×帧**（高模/长动作爆显存） | **不作人群主体**；作为**更远距离的降级 LOD** 可选档（远景低模无所谓，丢骨骼没关系） |
+
+**为什么 B（骨骼动画纹理）是人群主体而非 A/C**：
+- 对 A（纯 VAT）：你要的「小臂/大臂/头分部位 + 服装绑共享骨架」全部建立在**骨骼蒙皮语义**上，纯 VAT 把顶点直接烘焙成位置会丢这套换装地基；且 A 显存随**顶点数×帧**，高模/多 clip 会顶 8K 纹理/大显存。
+- 对 C（实时蒙皮）：CPU 逐角色求 pose + 逐实例调色板，千人时 CPU 线性爆（50–200µs/人 → 千人 ≈ 几十~百 ms/帧），且调色板无法 instancing——正是人群要甩掉的两样。
+
+**A/B/C 之间的转换**：B、C 共享「骨骼 → 蒙皮」语义，只在「pose 从哪来」（GPU 查烘焙纹理 vs CPU 实时算）不同；
+因此 C→B 只需把动画烘焙成药帧纹理、网格/权重/换装/蒙皮 shader 全部复用。A 与 B/C 不共享骨架语义（A 是静态网格+查位置），是真正另一条通路。
+
+**接受的门**：本谱系把「每个 instance 自己动自己的实时骨骼动画」（C 的任意 blend/IK 用在 1000 人身上）明确留为
+**更大的机器**（需 compute skinning / GPU 角色实例化，近端少数可用 C；不把它铺到全体人群），接受换密度、牺牲自由实时组合。
+
+**已知坑（实现时必看）**：B/A 的姿势来自「GPU 查烘焙纹理」，故**阴影/picking/高亮各 pass 若需要对蒙皮后几何做正确判定，
+必须让这些 pass 的 VS 也用同样方式查表**（否则身体动、影子/拾取对不上 → 幽灵 bug）。这正是 JPOV 统一做这些原语而非
+泄给用户 shader 的理由（见 §5）。
+
+### 6.3 LOD 归用户、与 instancing/蒙皮解耦（Danis 拍板）
+
+**LOD 的本质是「这一档用哪份几何」，与「怎么 instance / 怎么蒙皮」无关。** 正确做法:
+- **按 draw call 分档**：高模一档 instanced draw、低模另一档 instanced draw，各自喂不同 mesh；每档内部仍对
+  该档 instance 批量。所谓“几个 LOD 档”只是几次 draw（非 CPU 卡死），每档仍一次 batch。
+- **归属**：要不要切 LOD、每个 instance 归哪档、切档策略 → **用户可见性系统**（相机距离/重要性，本质归
+  “世界/相机管理”，与动画归用户同辙）。**JPOV 不必知道共有几个档**，只需“给一批同档 instance + 这份 mesh
+  一次 batch 画掉”。
+- 实例数量档：真正引擎还会 cull 视锥外/被遮 instance、极远景用 impostor（一张翻转 2D 图）当一次 sprite，
+  根本不占 3D VS 预算——属用户可见性层可选优化，不进 JPOV 渲染语义。
+
+因此 **LOD 决策不放进 JPOV**；JPOV 把「一批同档同动画 instance → 一次蒙皮 batch draw」当原子能力，用户爱切几档切几档。
+（业界同构：NVIDIA 2007 即是“每 LOD 组 → 每 submesh → 一条 instanced draw”。）
+
+### 6.4 风物 / 颜色微调（统一短记）
+
+- 风：**便宜档** ✅(TODO) = per-instance 标量（风速/风向 seed），shader 对蒙皮后顶点做廉价正弦摆动（非真布料）；
+  **贵档** = 真实布料/裙摆逐 instance 解算 → 延后。
+- 颜色 / 4 副面孔 / 衣物 → 全走「index/tint select 共享区」，见 §3 表。
 
 ---
 
 ## 7. 里程碑阶梯（S0 → S8，可独立验证、可拼合）
 
 > 沿用 JPOV UI 计划/engine-integration 的「每步单帧渲染自证 gold + 交互 demo」方法论，
-> 每步是**能独立落地的里程碑**，不是模糊的想法。
+> 每步是能独立落地的里程碑。**结构化实现细节（结构体/接口）不在此列，另开实现级文档。**
 
-- **S0 — 千人 instancing + selector 跑通**（本首屏核心）：
-  共享骨架；部位拆分到 **小臂/大臂/头部** 档；肉体+衣物的 part_pool 以 rest-mesh 上传；
-  N 个 instance(part_idx×几 + transform + seed) → 一次 instanced/batch draw；
-  **确定性 gold**（同 seed 同画）。
-- **S1 — 人物装配 / 差异**：seed → 派生肤色/长相/衣物；texture-array / 材质变体 + tint；4 副面孔(baked head 变体)。
-- **S2+（本项目 TODO / 后续）**：
-  - **颜色微调**（肤色/衣物部分 mesh 色）正式化 → per-part tint / 变体（§6 分档）。
-  - **风动物理廉价档**（shader 标量摆动）（§6.2 便宜档）。
-  - （更远）独立动作实例化 / bindless / compute skinning / 真实布料 —— §6 已列为**明确不开的门**或大机器。
+- **S0 — 人群首屏：全低模 + instancing + selector + 骨骼动画纹理跑通**（本首屏核心）：
+  - 部位拆分到 **小臂/大臂/头部** 档；肉体/衣物 part_pool 以 rest-mesh 上传，全部 bind 共享骨架。
+  - **人群主体驱动 = 骨骼动画纹理（§6.2-B）**：把数段 clip（walk/idle 起步）按骨架烘焙成 anim 纹理；
+    N 个 instance(part_idx×几 + 相位 + transform + seed) → 一次 instanced/batch draw。
+  - **镜头保持街道/俯拍，不带贴脸近景**（屏幕不需要高模怼脸）。
+  - **S0 锚点：1000 位**，全部用**考究低模**（非 placeholder）：人均独立 VS 顶点预算按**有效三角形 <1000 /
+    独立顶点量级 ≤2.5k** 严格控制（低模质量决定 silhouette 不露馅，是 S0 的艺术重点而非后补件）。
+  - **确定性 gold**（同 seed 同画）。
+- **S1 — 人物装配差异 + LOD 门**：seed → 派生肤色/长相/衣物；texture-array/材质变体 + tint；4 幅面孔(baked head 变体)；
+   **LOD 解耦落地**：高/低模各一档 instanced draw、由用户可见性系统按距离/重要性切换（近端才上高模与真蒙皮 C 档）。
+- **S2+（TODO/后续）**：颜色微调（per-part tint，§6.4）、风动物理便宜档（§6.4）、更远距离 VAT/Impostor LOD、
+  bindless / compute skinning / 真实布料（§6.2 明确不开的门/大机器，延后）。
 
-（本首屏 =「千人 instancing + selector」真正落地 + rest-mesh 蒙皮通路 + 部位分区到臂/头；
-「风和色」明确 TODO，不进 S0。）
+（本首屏 =「1000 全低模人 instancing + selector + 部位到臂/头 + 骨骼动画纹理驱动 + 外观差异」跑通；
+相机不贴脸；风/色/高模/距离 LOD 切换/实蒙皮主角 明确 S1+ 或更后。）
 
 ---
 
 ## 8. 落地时 JPOV 侧要新增的 render 能力（给后续实现 agent 的指路）
 
 现状缺口照前几轮核查（已确认，非猜测）：
-1. **实例化 draw**：现 `Object3DCommand` 每个物体独立 `glDraw*`，四 pass 逐 object for 全扫 → 需给
-   instanced/batch 语义（新命令或新 pass 组织），且 **shadow/picking/highlight 都要一致处理蒙皮后的
-   instance 几何**（避免「身体对、影子/picking 对不上」的幽灵 bug）。
-2. **共享骨架矩阵 uniform/UBO**：现无「每帧喂一套关节矩阵」路径 → 需新增（进现有 shader，rest=单位阵时零回归）。
-3. **蒙皮 shader**：现 VS 没读 mesh 预埋的 loc3/4（joint/weight）→ 加官方蒙皮 VS；蒙皮后法线/切线形变跟上。
-4. **texture-array / 材质变体 / per-part tint** 的组织。
-5. 复用现有 rest-mesh 上传（MeshData/GPUMesh 骨骼权重已预埋），不重造顶点管线。
+1. **实例化/batch draw**：现 `Object3DCommand` 每个物体独立 `glDraw*`，四 pass 逐 object for 全扫 → 需给
+   instanced/batch 语义（新命令或新 pass 组织），**shadow/picking/highlight 都对“同档同动画一批 instance”一致处理**
+   （避免“身体对，影子/拾取错位”幽灵 bug）。
+2. **骨骼动画纹理资源（§6.2-B）**：JPOV 新增“烘焙骨骼动画纹理”资源类型（mesh×clip→帧的矩阵纹理），
+   管上传/生命周期/采样坐标。读它的 VS 做 4-bone 蒙皮。rest 姿态/单位阵时应退化为现有静态不带蒙皮的 VS
+   （零回归门）。
+3. **官方蒙皮 shader（查 anim 纹理 + 4-bone）**：现 VS 没读 mesh 预埋 loc 3/4（joint/weight）与 anim 纹理 →
+   加官方蒙皮 VS；蒙皮后法线/切线形变跟上；**阴影/picking pass 用同一查表保证蒙皮后几何一致**。
+4. **texture-array / 材质变体 / per-part tint / seed-派生 selectors** 的组织（供外观差异用）。
+5. rest-mesh 上传（`MeshData`/`GPUMesh`）已含骨骼权重预埋，不重造顶点管线；关节矩阵由 anim 纹理（非 UBO）驱动。
 
-（具体到每一条的 S 阶梯归属、验收 gold 怎么写，留待实现 PR 时按本文档排。）
+（具体到每条 S 阶梯归属、gold 验收怎么写，留待实现 PR 按本文档排。结构体/接口细节不在此列。）
 
 ---
 
 ## 9. 一句话给下个 agent
 
-> 这类 Cities 人群不是「给 1000 个高精角色各自跑复杂动画」，而是
-> **「一份共享骨架 + 一张肉体/衣物统一 charactor-part 的 rest-mesh 池 + 上千个(part selector×几 +
-> transform + seed/标量)的薄 instance」，靠 instancing 一次批掉 draw-call；肤色/长相/衣物/体型全走
-> select-共享区 的廉价索引机制；风与颜色微调是 TODO（分便宜档/贵档，便宜档起步）。**
-> 肢体至少分到 小臂/大臂/头部；日本首屏 S0 聚焦「千人 instancing + selector + rest-mesh 蒙皮
-> 通路」跑通，风/色/精细 rig/独立布料/GPU 独立角色动画 全部明确延后。
+> 这类 Cities 人群不是「给 1000 个高精角色各自跑复杂（实时骨骼）动画」，而是
+> **「一份共享骨架 + 一张肉体/衣物统一 charactor-part 的 rest-mesh 池 + 上千个(part selector×几 + 相位 +
+> transform + seed/标量)的薄 instance；动画走骨骼动画纹理(矩阵×clip→帧烘焙，instance 只送帧号)保住 4-bone 蒙皮语义，
+> 一次 batch draw 掉 draw-call；肤色/长相/衣物/体型全走 select-共享区 的廉价索引；LOD 归用户、与蒙皮解耦（高/低模各一档
+> draw）；纯 VAT 只留给更远 LOD；真·实时蒙皮只留近端主角」**。
+> 肢体至少分到 小臂/大臂/头部；首屏 S0 = 1000 全低模（人均有效三角形<1000 / 独立顶点≤2.5k）、镜头不贴脸、
+> instancing + selector + 骨骼动画纹理驱动跑通为锚；风/色/高模/距离 LOD/实蒙皮主角 明确后置。
