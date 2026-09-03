@@ -2,6 +2,12 @@
 
 JPOV 是一个面向 AI 自测输出的、支持流式绘制 + 简单交互的轻量可视化沙盒。详见 [DESIGN.md](DESIGN.md)。
 
+> ⚠️ **改 / 用 JPOV 之前先读这些（防止踩已有结论的坑）**
+>
+> - **[docs/jpov_engine_integration.md](docs/jpov_engine_integration.md)** — ★必读。用 JPOV 搭游戏引擎 / 当「0 级引擎」时的定位、线程模型（GL 单线程铁律）、static meshing 可行、局部更新/分层**明确不做**。任何想把 JPOV 当游戏引擎基石的 agent，先读它。
+> - **[DESIGN.md](DESIGN.md)** — 设计文档（注意其中早期 API 描述部分与代码现状不一致，以代码为准，见集成文档 §8）。
+> - **[interface/README.md](interface/README.md)** — 渲染接口层说明。
+
 ## 快速开始
 
 ### 一键构建（双平台）
