@@ -23,6 +23,11 @@
 
 #include <cstdio>
 #include <string>
+#include <cerrno>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>  // _mkdir
+#endif
 
 #include <glog/logging.h>
 
@@ -218,21 +223,42 @@ private:
     static constexpr float kSliderFontSize = 16.0f;
 };
 
-// 是否有 --four_views 标志（AI 自查拍照模式）。
-bool HasFourViewsFlag(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--four_views") return true;
-    }
-    return false;
-}
+// 命令行解析结果。
+//   four_views : --four_views 拍照模式（headless，AI 自查出图）
+//   output_dir : --output_dir <dir> 指定出图目录（可选；缺省时后退到 glTF 同级目录）
+//   gltf_path  : 第一个非 -- 前缀参数（相对/绝对均可）
+struct CliOptions {
+    bool four_views = false;
+    std::string output_dir;   // 空 = 未指定
+    std::string gltf_path;
+};
 
-// 从命令行取 glTF 路径：第一个非 -- 前缀的参数（相对/绝对均可）。
-// 与 --four_views 标志互不干扰（该标志排在任意位置均可）。
-std::string FirstNonFlagArg(int argc, char** argv) {
+// 解析 --four_views / --output_dir <dir> 等带值/纯标志参数，并取 glTF 路径
+// （第一个非 -- 前缀参数）。--output_dir 会吞掉紧跟其后的值（该值本身以 --
+// 前缀开头时认为是非法用法，报 warning 并跳过），因此 glTF 路径取剩下的
+// 第一个非标志参数，不会把输出目录误当模型路径。
+// 纯标志（--four_views）与带值标志（--output_dir）可出现在任意位置、任意顺序。
+CliOptions ParseCliOptions(int argc, char** argv) {
+    CliOptions opt;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]).rfind("--", 0) != 0) return argv[i];
+        const std::string arg = argv[i];
+        if (arg == "--four_views") {
+            opt.four_views = true;
+        } else if (arg == "--output_dir") {
+            if (i + 1 < argc) {
+                opt.output_dir = argv[++i];
+            } else {
+                LOG(WARNING) << "--output_dir 缺少目录参数，忽略";
+            }
+        } else if (arg.rfind("--", 0) == 0) {
+            LOG(WARNING) << "未知参数: " << arg << "; 已忽略";
+        } else if (opt.gltf_path.empty()) {
+            opt.gltf_path = arg;
+        } else {
+            LOG(WARNING) << "多余位置参数: " << arg << "; 已忽略";
+        }
     }
-    return "";
+    return opt;
 }
 
 // 度数 → 弧度（ViewConfig 以弧度存储）。
@@ -251,28 +277,49 @@ constexpr FourView kFourViews[] = {
     {"perspective",45.0,  45.0},   // (φ,θ)=(45,45)
 };
 
-// --four_views 拍照模式：headless 渲染 4 个角度，各输出一张 PNG 到
-// glTF 所在目录，文件名 `<gltf_basename>_<view>.png`。不弹窗。
-// 交互模式与拍照模式走同一条 OneIteration + 同一份 MakeNoonLighting()
+// --four_views 拍照模式：headless 渲染 4 个角度，各输出一张 PNG。
+// 输出目录 = --output_dir（非空时用它，并在本函数内自动建目录）；
+// 未指定则 fallback 到 glTF 所在目录。文件名 `<gltf_basename>_<view>.png`。
+// 不弹窗。交互模式与拍照模式走同一条 OneIteration + 同一份 MakeNoonLighting()
 // （zero 分叉，架构 doc），因此这里只需要逐个设置 view_ 后 RunOnce 截图。
-void RunFourViews(GltfViewerApp* app, const std::string& gltf_path) {
+// 结束后在 stdout 打印每张图的路径，方便用户/脚本直取。
+void RunFourViews(GltfViewerApp* app,
+                  const std::string& gltf_path,
+                  const std::string& explicit_output_dir) {
     CHECK_NOTNULL(app);
 
-    // 目标目录 = glTF 所在目录；输出文件名 = <模型basename>_<view>.png。
-    // （不含扩展名的模型名，如 pliers → pliers_front.png）
+    // 输出目录：优先 --output_dir，否则 glTF 所在目录。
+    // base（模型 basename）始终取自 glTF 文件名，与输出目录无关。
     const size_t slash = gltf_path.find_last_of("/\\");
-    const std::string dir     = (slash == std::string::npos)
-                                    ? "." : gltf_path.substr(0, slash);
+    const std::string dir     = !explicit_output_dir.empty()
+                                    ? explicit_output_dir
+                                    : (slash == std::string::npos)
+                                        ? "." : gltf_path.substr(0, slash);
     const std::string full    = (slash == std::string::npos)
                                     ? gltf_path : gltf_path.substr(slash + 1);
     const size_t dot          = full.find_last_of('.');
     const std::string base    = (dot == std::string::npos)
                                     ? full : full.substr(0, dot);
 
+    // --output_dir 需自动建目录（gen3d 链路可能指向尚未创建的新目录）。
+    // 跨平台：POSIX 用 mkdir(path,mode)；MSVC/MinGW 用 _mkdir(path)。
+    if (!explicit_output_dir.empty()) {
+#ifdef _WIN32
+        const int rc = _mkdir(explicit_output_dir.c_str());
+#else
+        const int rc = mkdir(explicit_output_dir.c_str(), 0755);
+#endif
+        if (rc != 0 && errno != EEXIST) {
+            LOG(FATAL) << "无法创建输出目录: " << explicit_output_dir
+                       << " (errno=" << errno << ")";
+        }
+    }
+
     jpov::WindowInfo winfo;
     winfo.width  = kViewerWidth;
     winfo.height = kViewerHeight;
 
+    LOG(INFO) << "--four_views 输出目录: " << dir;
     for (const FourView& fv : kFourViews) {
         // 赋固定角度（量纲约定：ViewConfig 存弧度）。
         // R 保持 main 里按模型包围盒算好的初始距离（模型自适应），不在此重置：
@@ -283,6 +330,8 @@ void RunFourViews(GltfViewerApp* app, const std::string& gltf_path) {
         const std::string out = dir + "/" + base + "_" + fv.name + ".png";
         jpov::InputSnapshot input{};   // 无交互输入（固定角度拍照）
         app->RunOnce(input, winfo, out.c_str());
+        // 明确打印每张输出图完整路径（防用户/脚本对产物落盘位置 confuse）。
+        std::printf("%s\n", out.c_str());
         LOG(INFO) << "--four_views 已渲染: " << out;
     }
 }
@@ -290,10 +339,11 @@ void RunFourViews(GltfViewerApp* app, const std::string& gltf_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const bool four_views = HasFourViewsFlag(argc, argv);
+    const CliOptions opt = ParseCliOptions(argc, argv);
+    const bool four_views = opt.four_views;
 
     // glTF 路径 = 第一个非 -- 前缀参数（相对/绝对均可）。
-    std::string gltf_path = FirstNonFlagArg(argc, argv);
+    std::string gltf_path = opt.gltf_path;
     if (gltf_path.empty()) {
         gltf_path = DefaultGltfPath();
         LOG(WARNING) << "未提供 glTF 路径，使用演示模型: " << gltf_path;
@@ -351,8 +401,9 @@ int main(int argc, char** argv) {
     }
 
     if (four_views) {
-        // AI 自查模式：headless 渲染 4 个角度，输出到模型同级目录后退出。
-        RunFourViews(&app, gltf_path);
+        // AI 自查模式：headless 渲染 4 个角度，输出到 --output_dir（缺省=模型同级
+        // 目录）后退出。产物路径由 RunFourViews 逐张打印到 stdout。
+        RunFourViews(&app, gltf_path, opt.output_dir);
     } else {
         // 交互窗口事件循环（阻塞）。
         app.Run();
