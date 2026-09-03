@@ -290,3 +290,44 @@ Danis 拍板方向：以**「骨骼动画纹理」（骨骼烘焙蒙皮）**为�
 > draw）；纯 VAT 只留给更远 LOD；真·实时蒙皮只留近端主角」**。
 > 肢体至少分到 小臂/大臂/头部；首屏 S0 = 1000 全低模（人均有效三角形<1000 / 独立顶点≤2.5k）、镜头不贴脸、
 > instancing + selector + 骨骼动画纹理驱动跑通为锚；风/色/高模/距离 LOD/实蒙皮主角 明确后置。
+
+---
+
+## A. 参考文献（本结论的业界来源；如需深挖或验证按此查阅）
+
+> 以下为 2026-09-03 与 Danis 架构推演时实际调研到的权威出处，按用途分组。供后续 agent 在实现 / 下钻时
+> 直接引用，避免把已参考的结论当“新发现”重推一遍。
+
+### 人群 / Instancing（“CPU 是瓶颈、骨骼 mesh 不为百人以上设计”的直接依据）
+- **Epic 官方（City Sample 人群方案）**: 只 ~几个近处 full actor(简化骨架)，其余全 Mass/static mesh + 顶点动画动态过渡。
+  （见 Epic 论坛 metahuman 回复，2026 — “骨骼 Mesh 不是为 100+ components 规模设计的”)；性能技巧节(VAT crowd / AnimToTexture)。
+  - https://dev.epicgames.com/community/learning/knowledge-base/xBZp/unreal-engine-performance-tips-tricks-animation
+  - https://forums.unrealengine.com/t/metahuman-skin-cache-retains-lod0-entries-for-every-npc-regardless-of-camera-distance/2728166
+- **NVIDIA GPU Gems 3（skinned instancing / texture-based 骨骼蒙皮）**: 2007 的硬件 9500+ 独立动画角色/34fps；
+  “每 LOD 组→每 submesh→一条 instanced draw”，材质变化用贴图 alpha tint + texture array —— 我们 §6.2-B 与 §6.3 的直接出处。
+  - https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-2-animated-crowd-rendering
+
+### VAT / 骨骼动画纹理（三分档技术细节与成本对比的直接依据）
+- **Mighty Professional Tutorials「Vertex Animation Textures」**: 最详尽的 VAT 机制（烘焙、纹理格式、与骨骼 CPU 成本 50–200µs/人
+  对比、三档 CPU/内存/draw 差异表、并引 Epic City Sample ~10,000 人几十 draw）。本文档 §6.2 CPU/显存论点主要来源。
+  - https://mightyprofessionalgaming.com/tutorials/vertex-animation-textures.html
+- **OpenVAT**: Blender 原生的 VAT 工具链（烘焙/offset 编码/顶点采样/mesh merge），用 WPO(per-vertex world offset) 更稳。
+  - https://openvat.org/
+- **Houdini Labs「Vertex Animation Textures」**: VAT 的 Houdini 烘焙/导出、soft/rigid 模式、CPU 负担更轻、局限（无动画碰撞等）。
+  - https://www.sidefx.com/docs/houdini/nodes/out/labs--vertex_animation_textures-3.0.html
+- **Epic AnimToTexture**: 官方烘焙顶点动画插件（City Sample 用）。
+  - https://dev.epicgames.com/community/learning/tutorials/daE9/unreal-engine-baking-out-vertex-animation-in-editor-with-animtotexture
+- **GPU Instancer CrowdAnimations(GurBu)**: Unity 侧烘焙骨骼、compute/间接 instancing + GPU culling 的结合范例（Mecanim 拖后腿 vs 直接用 clip）。
+  - https://wiki.gurbu.com/index.php?title=GPU_Instancer:CrowdAnimations
+- **chenjd Render-Crowd-Of-Animated-Characters（Unity,1.7k★）**: 动画烘焙成图+GPU instancing，10000 士兵 20 多个 draw。
+  - https://github.com/chenjd/Render-Crowd-Of-Animated-Characters
+
+### 工程基础（CPU/GPU skinning 成本、骨骼 mesh 上限的推算）
+- **radiac/game-mechanics-optimizations §53 GPU Skinning**: CPU skinning 百个 5k-vertex ×50-bone 的数学（vs 1.5B transforms/帧 → 60ms 超预算）；
+  Doom2016/Horizon/Spider-Man/AC:Unity 等的 GPU skinning 数字。
+  - https://github.com/raduacg/game-mechanics-optimizations/blob/main/53_gpu_skinning.md
+- **Unity 论坛/资料（SkinnedMeshRenderer 可变形 mesh: 骨骼+blend shape+cloth；CPU 动画在某规模最贵）**:
+  - https://gameoptim.com/blog/post/GPUSkinning
+  - https://docs.unity3d.com/Manual/class-SkinnedMeshRenderer.html
+- **Khronos CPU/GPU skinning 讨论**: matrix-in-texture 只送 time 的可行性与限制（帧烘焙/在纹理查骨）。
+  - https://community.khronos.org/t/skinning-on-the-gpu-vs-the-cpu/73169
