@@ -28,10 +28,23 @@ cc_library(
         ":camera",
         ":gltf_object",
         ":pbr_material",
+        ":skeleton_types",
         "//geom/common:vec",
         "//geom/math:piecewise_linear_function",
         "@glog_static//:glog",
     ],
+)
+
+# SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonTemplate/SkeletonClip/SkinnedInstanceState）
+# 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
+cc_library(
+    name = "skeleton_types",
+    hdrs = ["skeleton_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
 )
 
 # Camera — 透视相机配置
@@ -112,6 +125,7 @@ cc_library(
         "gltf_object.h",
         "pbr_material.h",
         "ui.h",
+        "skeleton_types.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -124,5 +138,6 @@ cc_library(
         ":render_command",
         ":window_info",
         ":ui",
+        ":skeleton_types",
     ],
 )

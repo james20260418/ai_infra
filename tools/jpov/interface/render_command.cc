@@ -5,6 +5,8 @@
 
 #include "tools/jpov/interface/render_command.h"
 
+#include <utility>
+
 #include "tools/jpov/interface/gltf_object.h"
 
 namespace jpov {
@@ -24,6 +26,7 @@ void RenderCommandList::Clear() {
     arc2d.clear();
     image2d.clear();
     object3d.clear();
+    skinned_mesh.clear();
     point_lights.clear();
     object_use_default_color = false;
     order.clear();
@@ -193,6 +196,22 @@ void RenderCommandList::DrawGltfObject(const GltfObject& obj,
         DrawObject3D(prim.mesh_id, prim.material, center, up, front,
                      picking_id, highlight, scale);
     }
+}
+
+void RenderCommandList::DrawMeshWithSkeleton(
+    uint32_t mesh_id, uint32_t skeleton_id,
+    std::vector<SkinnedInstanceState> instances) {
+    CHECK_GT(mesh_id, 0u) << "DrawMeshWithSkeleton: mesh_id 必须 > 0";
+    CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
+        << "（先经 SkeletonManager::RegisterSkeleton 登记）";
+    CHECK(!instances.empty()) << "DrawMeshWithSkeleton: instances 不能为空";
+    int idx = static_cast<int>(skinned_mesh.size());
+    SkinnedMeshCommand cmd;
+    cmd.mesh_id = mesh_id;
+    cmd.skeleton_id = skeleton_id;
+    cmd.instances = std::move(instances);  // 每实例自己的 clip/phase 在 instances 里(见 skeleton_types.h)
+    skinned_mesh.push_back(cmd);
+    order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
 }
 
 }  // namespace jpov

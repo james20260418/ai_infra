@@ -34,6 +34,8 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"
+// 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
+#include "tools/jpov/interface/skeleton_types.h"
 
 namespace jpov {
 
@@ -88,6 +90,9 @@ enum class DrawCommandType : uint8_t {
                         //      GPU 纹理采样 + 矩形面片）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
+    kSkinnedMesh,       // 3D 骨架蒙皮模型（世界空间，instancing）
+                        //      同 mesh+skeleton+clip 的一批实例 = 一次 instanced draw
+                        //      见 SkinnedMeshCommand / DrawMeshWithSkeleton
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -890,6 +895,35 @@ struct Object3DCommand {
     bool highlight = false;
 };
 
+// 3D 骨架蒙皮模型（世界空间，instancing 批）
+//
+// 一批「同 rest mesh + 同骨架模板」的实例，共用一份蒙皮几何 —— 对应架构文档
+// docs/jpov_crowd_instancing_arch.md §6.2-B 骨骼动画纹理：把每根骨头 JointMatrix 按
+// clip→帧烘焙进一张 RGBA 纹理，instance 只送帧号/相位，蒙皮 VS 查表 + 保留 4-bone
+// （顶点 4-bone 权重来自 VBO loc3/4，见 gpumesh.h）。一命令 = 一次 instanced draw
+// （千人压 draw-call，是本子系统的核心诉求）。
+//
+// 资源边界：CPU 侧描述在 interface/skeleton_types.h（SkeletonTemplate / SkeletonClip /
+// SkinnedInstanceState）；把片断注册 GPU + 烘焙动画纹理由 src/skeleton/skeleton_manager.h
+// 的 SkeletonManager 持有。渲染时 shadow/picking/highlight 对该批用与主 pass 同一套蒙皮
+// 查表，保证“身体动、影/拾取对得上”（避免幽灵错位）。
+//
+// ⚠️ 同批需共享同一 mesh_id：OpenGL 顶点几何绑定在 VAO 全体共享，不能在一个 instanced
+// draw 里 per-instance 换几何。换“部位网格 / 装备”= 另发一个 SkinnedMeshCommand（同
+// skeleton，别的 mesh_id）；肉体高/低模 = 各自一次 SkinnedMeshCommand（仍都是 batch）。
+//
+// S0：蒙皮到骨架 rest / 静态姿态（每实例 clip 用 0）；动画 clip→帧骨骼动画纹理的查表与
+// instanced divisor 上传是 S0 之后的一个里程碑（见 skeleton_types.h / SkeletonManager 的
+// TODO）。
+// Pre-condition: mesh_id / skeleton_id 均已注册且未释放；instances 大小 >= 1（空＝不画）。
+struct SkinnedMeshCommand {
+    uint32_t mesh_id;        // rest mesh（reuse GPUMesh：loc0=pos, loc3=joints, loc4=weights）
+    uint32_t skeleton_id;    // 登记过的骨架模板（含逆绑定 constant），由 SkeletonManager 分配；
+                             // 0 = 未登记（实现应 LOG(FATAL)/忽略）。
+    std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例自己的动画(clip_id/相位)在
+                             // SkinnedInstanceState(见 skeleton_types.h)，S0 全用 clip=0=rest。
+};
+
 // 高亮纯色边框的全局样式（全场景统一）。
 // 当前实现（CPU 屏幕空间回填）：GPU 把被高亮物体画成不扩张的剪影（单色 mask），
 // CPU 读回 mask 做 outline_px 次像素膨胀，膨胀图与原 mask 相减得到边缘环，
@@ -962,6 +996,12 @@ struct RenderCommandList {
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
+    // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
+    // instanced draw。每命令引用的 skeleton_id 由用户经 SkeletonManager 登记（含逆绑定/动画烘焙）。
+    std::vector<SkinnedMeshCommand> skinned_mesh;
+    // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
+    //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
+    //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -1246,6 +1286,29 @@ struct RenderCommandList {
                         uint32_t picking_id = 0,
                         bool highlight = false,
                         float scale = 1.0f);
+
+    // 3D 骨架蒙皮批量（instancing）—— 「这些人用这套骨架在某个动作/相位,每个人都摆在这里」。
+    //
+    // 语义：画“同一 rest mesh(mesh_id) 被同一个骨架模板(skeleton_id)蒙皮”的一批
+    // 实例(instances)。每个实例的摆放 + 动画相位在 SkinnedInstanceState 里(见
+    // skeleton_types.h)，因此 CPU/帧 每实例只传一个很薄的 per-instance state ——
+    // 人群主体 S0 即靠它把上千个 instance 塞进几次 instanced draw。
+    // S0 = 静态/rest 蒙皮（每实例 SkinnedInstanceState::clip_id = 0，四 pass 与主 pass 用同一套
+    //   蒙皮查表保证几何一致）；动画 clip→帧骨骼动画纹理查表为 S0 之后的一个里程碑
+    //   （见命令体注释 / TODO）。
+    //
+    // 用同一份 skeleton_id + mesh 但想体现“换部位网格”(肉体/小臂/头…)/装备 → 那是另一批
+    // 各自不同 mesh_id 的 SkinnedMeshCommand；层/重要性/LOD 归用户。S0 目标“肉体高低模各
+    // 一批”就是两次 DrawMeshWithSkeleton 各带不同 mesh_id。
+    //
+    // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
+    // TODO(2026-09-06): 首个实现建议 = 静态蒙皮(S0 零动画退化门)：clip_id=0 时不查
+    //   动画纹理、用逆绑定 constant 把 rest 顶点蒙皮到骨架 rest 姿态,即现有“不带蒙皮 VS”的
+    //   自然扩展(每实例只在 transform/相位上批量)。动画烘焙查表 + instanced divisor 上传
+    //   随骨架动画纹理 pass 落地。
+    void DrawMeshWithSkeleton(uint32_t mesh_id,
+                              uint32_t skeleton_id,
+                              std::vector<SkinnedInstanceState> instances);
 };
 
 }  // namespace jpov
