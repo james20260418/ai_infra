@@ -12,7 +12,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:skeleton_types",
-        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,

@@ -203,7 +203,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     std::vector<SkinnedInstanceState> instances) {
     CHECK_GT(mesh_id, 0u) << "DrawMeshWithSkeleton: mesh_id 必须 > 0";
     CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
-        << "（先经 SkeletonManager::RegisterSkeleton 登记）";
+        << "（先经 JPOV::RegisterSkeleton(SkeletonType, poses) 创建骨架拿到 id）";
     CHECK(!instances.empty()) << "DrawMeshWithSkeleton: instances 不能为空";
     int idx = static_cast<int>(skinned_mesh.size());
     SkinnedMeshCommand cmd;

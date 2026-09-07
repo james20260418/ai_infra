@@ -3,7 +3,7 @@
 // 本文件是「骨架批量蒙皮 / instancing」（架构文档 docs/jpov_crowd_instancing_arch.md
 // §6.2-B 骨骼动画纹理）子系统的 CPU/interface 数据层。
 //
-// 核心概念（v2，2026-09-07 与 Danis 收敛）：只有 **Pose**，没有 Clock/动画的概念流。
+// 核心概念（v3，2026-09-07 与 Danis 收敛）：只有 **Pose**，没有 Clock/动画的概念流。
 //   - 骨骼动画纹理 = 一块「散装 Pose 关键帧」(pose atlas)：把若干**静态姿态关键帧**解算成
 //     每骨架每关节 JointMatrix 后平铺进一张 RGBA 纹理。纹理的“行/列”只表达存放布局，
 //     不表达时间语义 —— 它不要求 pose 相邻、不区分哪段动作，就是一仓库的单帧位姿。
@@ -22,7 +22,7 @@
 //
 // 职责边界（沿用 interface/(CPU/用户类型) vs src/(GL/manager) 分离，同 mesh.h/gpumesh.h、
 // interface/render_command.h vs src/object3d/object3d_renderer.h）：
-//   - 本文件只声明 CPU 侧、GL-free 的骨架模板 / pose 关键帧 / 运行时实例状态；
+//   - 本文件只声明 CPU 侧、GL-free 的骨架定义 / pose 关键帧 / 运行时实例状态；
 //   - GPU 资源上传(逆绑定矩阵 constant、pose 烘焙成骨骼纹理、instancing)全部在
 //     src/skeleton/skeleton_manager.h。
 //   - rest-mesh 上传复用现有 MeshManager/GPUMesh（VAO 已按属性分 VBO；joint loc3 /
@@ -59,18 +59,19 @@ struct SkeletonJoint {
     //   朝向)给每关节加 rest 旋转，待真实 rig 进来自主扩展，勿现在铺。
 };
 
-// ==================== 骨架模板 ====================
+// ==================== 骨架定义（SkeletonType） ====================
 
-// 一份有根骨架(人形/马形…)的 CPU 描述，是"骨架资源"的可配置模板。—— 谁用它谁喂一份。
-//   SkeletonManager 把任意 template 上传成可渲染资源（逆绑定 constant、pose 烘焙）。
-//   人/马只是各自一份 template → SkeletonManager 多实例；骨架与物种无关是关键(见顶部注释
-//   "多骨架=多实例/多 manager"，见 src/skeleton/skeleton_manager.h)。
-struct SkeletonTemplate {
+// 一份有根骨架(人形/马形…)的 CPU 描述，定义“一种骨架”。它是骨架资源在 CPU 侧的类型：
+// SkeletonManager 构造时绑定一个 SkeletonType + 一整套 pose，上传成可渲染资源
+// （逆绑定 constant、骨骼动画纹理）。
+// 人/马是各自的 SkeletonType → 各自的 SkeletonManager；骨架与物种无关是关键（见顶部注释，
+// 以及 src/skeleton/skeleton_manager.h）。
+struct SkeletonType {
     std::vector<SkeletonJoint> joints;   // 0 号应为根；需满足拓扑序(每个 non-root 的 parent<自身)
 
     // 每关节相对"角色局部原点"的逆绑定矩阵(inverse bind)：rest 静止时的逆，随骨架 constant。
     //   蒙皮 = JointMatrix(bone, 该实例最终插值出的 pose) · inverse_bind(bone) 作用 rest 顶点。
-    //   空 = SkeletonManager 按 template 链式 rest 自算；否则用显式值。
+    //   空 = SkeletonManager 按 SkeletonType 链式 rest 自算；否则用显式值。
     //
     // ⚠️ 代码库无 Mat4 类型，矩阵以 float[16] 列主序传（同 Object3D float[16] 约定）。
     //   每关节一个阵。TODO(2026-09-06): 用 std::array<float,16> 还是手写 4x4 小结构待定；
@@ -87,20 +88,22 @@ struct SkeletonTemplate {
     void Validate() const;
 };
 
-// 说明（mesh 绑定位置）：骨架模板本身上不挂 rest mesh。蒙皮的 rest 几何由调用方以
+// 说明（mesh 绑定位置）：骨架定义（SkeletonType）本身上不挂 rest mesh。蒙皮的 rest 几何由调用方以
 // mesh_id 直接引用现有 GPUMesh（DrawMeshWithSkeleton / SkinnedMeshCommand），非本层
 // 责任 —— 复用 MeshManager 上传即可，不在这里另起 part-pool/mesh 池。
 
 // ==================== 骨骼姿态关键帧（单个 Pose） ====================
 
 // 一份骨架的**单个静态位姿关键帧**（pose）：对骨架每根骨的一个姿态。本类型是“关键帧”的
-// 最小原子 —— 用户把若干 pose 平铺上传成骨骼动画纹理（每个 pose 一个 id），一段“动作”
-// 仅是用户自己选的一组 pose 的数组（见文件头），JPOV 不在此表达“哪几帧连成一个动作”。
+// 最小原子 —— 用户在构造 SkeletonManager 时把【一整套】pose 一并传入（见 skeleton_manager.h），
+// SkeletonManager 据此把每 pose 解算、烘焙成骨骼动画纹理的一行（pose 在 vector 的下标即它的
+// atlas 行 / 运行时 pose_a/pose_b 引用）。一段“动作”仅是用户自选的一组 pose 的数组（见文件头），
+// JPOV 不在此表达“哪几帧连成一个动作”。
 //
 // ⚠️ 渲染端插值/蒙皮的只是“同一种骨架”内两个 pose 的 JointMatrix（见文件头铁律）。
-//   pose 与骨架**强绑定**：一个 pose 严格属于某一种骨架（骨数量/树拓扑一致），否则无法
-//   解算也不能插值 —— 故 pose 始终相对“某一种 SkeletonTemplate”登记（pose_id 在那一份
-//   骨架内部计数），天然不跨骨架。归属与登记见 skeleton_manager.h。
+//   pose 与骨架**强绑定**：一个 pose 严格属于某一种骨架（骨数量/树拓扑一致），否则无法解算
+//   也不能插值。因此 pose 从不单独注册/分发：它只作为构造时整包的一部分落在那一份
+//   SkeletonManager 里，天然不跨骨架。归属见 skeleton_manager.h。
 //
 // 数据表示取舍（2026-09-07 待点选，point4）：SkeletonPose 是**用户资产层**（要可读、可手写、
 // 可 retarget），理应收**每关节旋转**（四元素/欧拉，相对父链，而非整份矩阵）—— 由 CPU 烘焙端
@@ -108,7 +111,7 @@ struct SkeletonTemplate {
 //   尚未定，framework 阶段不把它锁死，等实现 PR 连四元素工具一起给完整容器。
 //   本成员仅立 meta；真正每关节姿态数据容器见下方 TODO。
 struct SkeletonPose {
-    int bone_count = 0;   // 应 == 所用 SkeletonTemplate::bone_count（同一种骨架）。
+    int bone_count = 0;   // 应 == 所用 SkeletonType::bone_count（同一种骨架）。
     //
     // TODO(2026-09-07): 每关节位姿数据容器（旋转 + 根位移），用户层可读、烘焙端转 mat4；
     //   见 struct 注释数据表示取舍。框架阶段不锁格式，待实现 PR（配四元素/欧拉→mat4 工具）。
@@ -132,13 +135,14 @@ struct SkinnedInstanceState {
     // ratio==0 → 完全 pose_a；==1 → 完全 pose_b；中间=两者平滑过渡。
     // 连续动画 = 用户在相邻姿态对之间推进该三元组(自己记数组/自己走时间)——JPOV 不做播放：
     //   例：走＝把 12 个 pose 排成 a0,a1…a11，逐帧发 (a_{k},a_{k+1},t) 推进 k/t。
-    // 无 0 哨兵：pose_a/pose_b 都是**有效 id(≥1)**，要“静态摆姿势”就让 pose_a==pose_b==那个姿态。
-    int    pose_a = 0;       // 插值起点 pose（≥1，经 SkeletonManager 登记）。
-    int    pose_b = 0;       // 插值终点 pose（≥1）；==pose_a 时无插值(=pose_a 静态)。
+    // pose_a/pose_b 是【构造该骨架的 SkeletonManager 时传入的 pose 数组下标】(0-based)。
+    //   要“静态”就让 pose_a==pose_b==那一姿态。索引越界 → 实现应 LOG(FATAL)/批次剔除。
+    int    pose_a = 0;       // 插值起点：SkeletonManager pose 数组下标（0-based）。
+    int    pose_b = 0;       // 插值终点：同上；==pose_a 时无插值(=pose_a 静态)。
     float  ratio = 0.0f;     // [0,1] pose_a→pose_b 的权重。
     //
-    // 约束：pose_a / pose_b 必须属于**同一个 SkeletonManager**(同一种骨架)；不同骨架严禁
-    //   放同实例混插 —— 语义无意义且要读两张骨骼纹理。见 skeleton_types.h 文件头铁律。
+    // 约束：pose_a / pose_b 是同一个 SkeletonManager(同一种骨架) 的 pose 下标；不同骨架(
+    //   不同 SkeletonManager)严禁放同实例混插 —— 语义无意义且要读两张骨骼纹理。见本文件顶铁律。
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。
@@ -148,7 +152,7 @@ struct SkinnedInstanceState {
 
 // ==================== Validate 声明 ====================
 
-inline void SkeletonTemplate::Validate() const {
+inline void SkeletonType::Validate() const {
     // 见 struct 注释；TODO(2026-09-06): 实现阶段补完整校验(log(FATAL) on illegal)，
     // 参照 mesh.h MeshData::Validate() 风格 crash——绝不 fallback 隐藏非法输入。
 }

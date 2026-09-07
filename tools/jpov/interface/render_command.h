@@ -897,13 +897,13 @@ struct Object3DCommand {
 
 // 3D 骨架蒙皮模型（世界空间，instancing 批）
 //
-// 一批「同 rest mesh + 同骨架模板」的实例，共用一份蒙皮几何 —— 对应架构文档
+// 一批「同一种骨架 + 同 rest mesh」的实例，共用一份蒙皮几何 —— 对应架构文档
 // docs/jpov_crowd_instancing_arch.md §6.2-B 骨骼动画纹理：把若干 pose(单帧静态位姿)解算成
 // 每骨架每关节 JointMatrix 后平铺进一张 RGBA **pose atlas**，实例送 {pose_a, pose_b, ratio}，
 // 蒙皮 VS 查这两个 pose 逐骨插值 + 保留 4-bone 蒙皮（顶点 4-bone 权重来自 VBO loc3/4，见
 // gpumesh.h）。一命令 = 一次 instanced draw（千人压 draw-call，是本子系统的核心诉求）。
 //
-// 资源边界：CPU 侧描述在 interface/skeleton_types.h（SkeletonTemplate / SkeletonPose /
+// 资源边界：CPU 侧描述在 interface/skeleton_types.h（SkeletonType / SkeletonPose /
 // SkinnedInstanceState）；pose 平铺上 GPU 的骨骼动画纹理由 src/skeleton/skeleton_manager.h
 // 的 SkeletonManager 持有。渲染时 shadow/picking/highlight 对该批用与主 pass 同一套蒙皮
 // 查表，保证“身体动、影/拾取对得上”（避免幽灵错位）。
@@ -918,8 +918,8 @@ struct Object3DCommand {
 // Pre-condition: mesh_id / skeleton_id 均已注册且未释放；instances 大小 >= 1（空＝不画）。
 struct SkinnedMeshCommand {
     uint32_t mesh_id;        // rest mesh（reuse GPUMesh：loc0=pos, loc3=joints, loc4=weights）
-    uint32_t skeleton_id;    // 登记过的骨架模板（含逆绑定 constant），由 SkeletonManager 分配；
-                             // 0 = 未登记（实现应 LOG(FATAL)/忽略）。
+    uint32_t skeleton_id;    // 该骨架(一种 SkeletonType）在 renderer 的句柄（含逆绑定+pose atlas），
+                             // 由 renderer 经 IdAllocator 分配；0 = 无效（实现应 LOG(FATAL)/忽略）。
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
 };
@@ -997,7 +997,8 @@ struct RenderCommandList {
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
-    // instanced draw。每命令引用的 skeleton_id 由用户经 SkeletonManager 登记（含逆绑定/pose atlas）。
+    // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
+    // SkeletonManager）时经 IdAllocator 分配。
     std::vector<SkinnedMeshCommand> skinned_mesh;
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
