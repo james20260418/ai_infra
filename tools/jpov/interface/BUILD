@@ -1,4 +1,30 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# IdAllocator — 可复用/避回绕的 uint32 句柄分配器（freelist / LIFO + live 集）。
+# 作为【新增】skeleton renderer 侧 id 管理；将来修 MeshManager/TextureManager 的裸递增回绕
+# bug 时同款（见 id_allocator.h 文件头）。
+cc_library(
+    name = "id_allocator",
+    srcs = ["id_allocator.cc"],
+    hdrs = ["id_allocator.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "id_allocator_test",
+    srcs = ["id_allocator_test.cc"],
+    deps = [
+        ":id_allocator",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
 
 # InputSnapshot — 帧级输入抽象
 cc_library(
@@ -28,10 +54,23 @@ cc_library(
         ":camera",
         ":gltf_object",
         ":pbr_material",
+        ":skeleton_types",
         "//geom/common:vec",
         "//geom/math:piecewise_linear_function",
         "@glog_static//:glog",
     ],
+)
+
+# SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonType/SkeletonPose/SkinnedInstanceState）
+# 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
+cc_library(
+    name = "skeleton_types",
+    hdrs = ["skeleton_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
 )
 
 # Camera — 透视相机配置
@@ -112,6 +151,7 @@ cc_library(
         "gltf_object.h",
         "pbr_material.h",
         "ui.h",
+        "skeleton_types.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -124,5 +164,6 @@ cc_library(
         ":render_command",
         ":window_info",
         ":ui",
+        ":skeleton_types",
     ],
 )

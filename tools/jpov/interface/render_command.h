@@ -34,6 +34,8 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"
+// 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
+#include "tools/jpov/interface/skeleton_types.h"
 
 namespace jpov {
 
@@ -88,6 +90,9 @@ enum class DrawCommandType : uint8_t {
                         //      GPU 纹理采样 + 矩形面片）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
+    kSkinnedMesh,       // 3D 骨架蒙皮模型（世界空间，instancing）
+                        //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
+                        //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -890,6 +895,35 @@ struct Object3DCommand {
     bool highlight = false;
 };
 
+// 3D 骨架蒙皮模型（世界空间，instancing 批）
+//
+// 一批「同一种骨架 + 同 rest mesh」的实例，共用一份蒙皮几何 —— 对应架构文档
+// docs/jpov_crowd_instancing_arch.md §6.2-B 骨骼动画纹理：把若干 pose(单帧静态位姿)解算成
+// 每骨架每关节 JointMatrix 后平铺进一张 RGBA **pose atlas**，实例送 {pose_a, pose_b, ratio}，
+// 蒙皮 VS 查这两个 pose 逐骨插值 + 保留 4-bone 蒙皮（顶点 4-bone 权重来自 VBO loc3/4，见
+// gpumesh.h）。一命令 = 一次 instanced draw（千人压 draw-call，是本子系统的核心诉求）。
+//
+// 资源边界：CPU 侧描述在 interface/skeleton_types.h（SkeletonType / SkeletonPose /
+// SkinnedInstanceState）；pose 平铺上 GPU 的骨骼动画纹理由 src/skeleton/skeleton_manager.h
+// 的 SkeletonManager 持有。渲染时 shadow/picking/highlight 对该批用与主 pass 同一套蒙皮
+// 查表，保证“身体动、影/拾取对得上”（避免幽灵错位）。
+//
+// ⚠️ 同批需共享同一 mesh_id：OpenGL 顶点几何绑定在 VAO 全体共享，不能在一个 instanced
+// draw 里 per-instance 换几何。换“部位网格 / 装备”= 另发一个 SkinnedMeshCommand（同
+// skeleton，别的 mesh_id）；肉体高/低模 = 各自一次 SkinnedMeshCommand（仍都是 batch）。
+//
+// S0：每个实例在两 pose 间插值（或 pose_a==pose_b 纯静态）。pose_atlas 平铺上传 + instanced
+// divisor 查表蒙皮 = S0 的一个实现里程碑（见 skeleton_types.h / SkeletonManager 的 TODO）。
+// “播放/推进 pose 对”由用户维护，JPOV 不管时间轴（见 SkinnedInstanceState）。
+// Pre-condition: mesh_id / skeleton_id 均已注册且未释放；instances 大小 >= 1（空＝不画）。
+struct SkinnedMeshCommand {
+    uint32_t mesh_id;        // rest mesh（reuse GPUMesh：loc0=pos, loc3=joints, loc4=weights）
+    uint32_t skeleton_id;    // 该骨架(一种 SkeletonType）在 renderer 的句柄（含逆绑定+pose atlas），
+                             // 由 renderer 经 IdAllocator 分配；0 = 无效（实现应 LOG(FATAL)/忽略）。
+    std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
+                             // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
+};
+
 // 高亮纯色边框的全局样式（全场景统一）。
 // 当前实现（CPU 屏幕空间回填）：GPU 把被高亮物体画成不扩张的剪影（单色 mask），
 // CPU 读回 mask 做 outline_px 次像素膨胀，膨胀图与原 mask 相减得到边缘环，
@@ -962,6 +996,13 @@ struct RenderCommandList {
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
+    // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
+    // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
+    // SkeletonManager）时经 IdAllocator 分配。
+    std::vector<SkinnedMeshCommand> skinned_mesh;
+    // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
+    //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
+    //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
 
     // 绘制顺序队列：(类型, 索引)
     // 例如 order[0] = {kPolyline2D, 0} 表示先绘制 polyline2d 中的第 0 条
@@ -1246,6 +1287,29 @@ struct RenderCommandList {
                         uint32_t picking_id = 0,
                         bool highlight = false,
                         float scale = 1.0f);
+
+    // 3D 骨架蒙皮批量（instancing）—— 「这批人用这套骨架(skeleton_id)，每个人拿该骨架
+    // 某两个 pose 之间插值摆出一个姿态」。
+    //
+    // 语义：画“同一 rest mesh(mesh_id) 被同一个骨架模板(skeleton_id)蒙皮”的一批
+    // 实例(instances)。每个实例的摆放 + 插值姿态(pose_a/pose_b/ratio)在
+    // SkinnedInstanceState 里(见 skeleton_types.h)，因此 CPU/帧 每实例只传一个很薄的
+    // per-instance state —— 人群主体 S0 即靠它把上千个 instance 塞进几次 instanced draw。
+    // S0 = 每实例在两 pose 间插值（或 pose_a==pose_b 纯静态；四 pass 与主 pass 用同一套
+    //   蒙皮查表保证几何一致）。pose atlas 平铺上传 + instanced divisor 查表蒙皮为本子系统
+    //   实现里程碑（见命令体注释 / skeleton_manager.h TODO）。
+    //
+    // 用同一份 skeleton_id + mesh 但想体现“换部位网格”(肉体/小臂/头…)/装备 → 那是另一批
+    // 各自不同 mesh_id 的 SkinnedMeshCommand；层/重要性/LOD 归用户。S0 目标“肉体高低模各
+    // 一批”就是两次 DrawMeshWithSkeleton 各带不同 mesh_id。
+    //
+    // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
+    // TODO(2026-09-06): 首个实现 = 静态蒙皮(S0 零动画退化门)：某实例 pose_a==pose_b 时等价于
+    //   只查一个 pose（不插值）把 rest 顶点蒙过去,是现有“不带蒙皮 VS”的自然扩展。真正的
+    //   pose atlas 查表逐骨插值 + instanced divisor 上传随骨骼动画纹理 pass 一并落地。
+    void DrawMeshWithSkeleton(uint32_t mesh_id,
+                              uint32_t skeleton_id,
+                              std::vector<SkinnedInstanceState> instances);
 };
 
 }  // namespace jpov
