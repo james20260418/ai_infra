@@ -2,13 +2,28 @@
 //
 // 本文件是「骨架批量蒙皮 / instancing」（架构文档 docs/jpov_crowd_instancing_arch.md
 // §6.2-B 骨骼动画纹理）子系统的 CPU/interface 数据层。
-// 物理链路：CPU 把每根骨头 JointMatrix 按 clip→帧烘焙成一张 RGBA 纹理（骨骼动画纹理）；
-// 运行时 instance 只送帧号/相位，蒙皮 VS 查表 + 保留 4-bone 蒙皮。（详见 src/skeleton/）
+//
+// 核心概念（v2，2026-09-07 与 Danis 收敛）：只有 **Pose**，没有 Clock/动画的概念流。
+//   - 骨骼动画纹理 = 一块「散装 Pose 关键帧」(pose atlas)：把若干**静态姿态关键帧**解算成
+//     每骨架每关节 JointMatrix 后平铺进一张 RGBA 纹理。纹理的“行/列”只表达存放布局，
+//     不表达时间语义 —— 它不要求 pose 相邻、不区分哪段动作，就是一仓库的单帧位姿。
+//   - “动画”/“一段动作” = 用户自选的一组 pose 的**顺序＋推进**：走就是一个 12 帧的数组、
+//     跳是另一个 60 帧的数组…… 这些是**用户自己维护的列表**，JPOV 不管播放、不管时间轴。
+//   - 渲染端实例只做一件事：**在骨骼纹理里取两个 pose 的 JointMatrix，两者之间逐骨插值**，
+//     拿插值结果蒙皮。state 唯一接口 = {pose_a, pose_b, ratio}（见 SkinnedInstanceState）。
+//
+// 物理链路：CPU 把每个 pose 沿骨架树拓扑解算出每关节相对角色根的 JointMatrix →
+// 按 pose 平铺成骨骼动画纹理；运行时实例送 {pose_a, pose_b, ratio}，蒙皮 VS 查这两个
+// pose 的 mat4、逐骨 lerp 后套 4-bone 蒙皮。（详见 src/skeleton/）
+//
+// 约束（铁律）：**同一份骨架的 pose 之间才能插值**。pose 强绑骨架：不同骨架 = 不同
+// 骨骼纹理/骨数量/拓扑，跨骨架插值 = 读两张 GL 纹理、语义也无从谈起 —— 因此插值永远
+// 发生在“同一种骨架”的 atlas 内。一个实例的 pose_a/pose_b 必须同属一种骨架。
 //
 // 职责边界（沿用 interface/(CPU/用户类型) vs src/(GL/manager) 分离，同 mesh.h/gpumesh.h、
 // interface/render_command.h vs src/object3d/object3d_renderer.h）：
-//   - 本文件只声明 CPU 侧、GL-free 的骨架模板 / 动画 clip / 运行时实例状态；
-//   - GPU 资源上传(逆绑定矩阵 constant、动画烘焙成骨骼纹理、instancing)全部在
+//   - 本文件只声明 CPU 侧、GL-free 的骨架模板 / pose 关键帧 / 运行时实例状态；
+//   - GPU 资源上传(逆绑定矩阵 constant、pose 烘焙成骨骼纹理、instancing)全部在
 //     src/skeleton/skeleton_manager.h。
 //   - rest-mesh 上传复用现有 MeshManager/GPUMesh（VAO 已按属性分 VBO；joint loc3 /
 //     weight loc4 预留为 skinned 每顶点权重输入，见 gpumesh.h/mesh_manager.h），
@@ -47,14 +62,14 @@ struct SkeletonJoint {
 // ==================== 骨架模板 ====================
 
 // 一份有根骨架(人形/马形…)的 CPU 描述，是"骨架资源"的可配置模板。—— 谁用它谁喂一份。
-//   SkeletonManager 把任意 template 上传成可渲染资源（逆绑定 constant、动画烘焙）。
+//   SkeletonManager 把任意 template 上传成可渲染资源（逆绑定 constant、pose 烘焙）。
 //   人/马只是各自一份 template → SkeletonManager 多实例；骨架与物种无关是关键(见顶部注释
 //   "多骨架=多实例/多 manager"，见 src/skeleton/skeleton_manager.h)。
 struct SkeletonTemplate {
     std::vector<SkeletonJoint> joints;   // 0 号应为根；需满足拓扑序(每个 non-root 的 parent<自身)
 
     // 每关节相对"角色局部原点"的逆绑定矩阵(inverse bind)：rest 静止时的逆，随骨架 constant。
-    //   蒙皮 = JointMatrix(bone, frame动画) · inverse_bind(bone) 作用 rest 顶点。
+    //   蒙皮 = JointMatrix(bone, 该实例最终插值出的 pose) · inverse_bind(bone) 作用 rest 顶点。
     //   空 = SkeletonManager 按 template 链式 rest 自算；否则用显式值。
     //
     // ⚠️ 代码库无 Mat4 类型，矩阵以 float[16] 列主序传（同 Object3D float[16] 约定）。
@@ -76,23 +91,27 @@ struct SkeletonTemplate {
 // mesh_id 直接引用现有 GPUMesh（DrawMeshWithSkeleton / SkinnedMeshCommand），非本层
 // 责任 —— 复用 MeshManager 上传即可，不在这里另起 part-pool/mesh 池。
 
-// ==================== 骨骼动画 clip（CPU 动画源，供烘焙） ====================
+// ==================== 骨骼姿态关键帧（单个 Pose） ====================
 
-// 一段可被烘焙成"骨骼动画纹理"的动作 clip 的 CPU 描述。
-//   人群动画走离线/烘焙：CPU 一次性把每帧解成每骨头 JointMatrix，写入骨骼纹理；
-//   运行期实例只送相位/所在 clip（GPU 查纹理）。S0 CPU 端不做逐角色实时解算 pose。
-//   clip 与物种解耦 —— 只描述"某段时间动作怎么让人/马摆"，绑 SkeletonTemplate 一起烘焙。
+// 一份骨架的**单个静态位姿关键帧**（pose）：对骨架每根骨的一个姿态。本类型是“关键帧”的
+// 最小原子 —— 用户把若干 pose 平铺上传成骨骼动画纹理（每个 pose 一个 id），一段“动作”
+// 仅是用户自己选的一组 pose 的数组（见文件头），JPOV 不在此表达“哪几帧连成一个动作”。
 //
-// TODO(2026-09-06): clip 的 CPU 存法先不定义死，先给帧元数据：
-//   (a) 逐帧已解算 JointMatrix(每帧 bone_count×16 float)；还是
-//   (b) 原始每关节旋转(四元素)+ CPU 烘焙端边走树边解。
-//   人群 S0 用"离线 bake→GPU 查纹理"，偏好 (a)：烘焙端直接给 mat4 场。
-//   真正数据容器(给整份 clip 的内存家)归属动画源/骨架侧，本类型只放帧元数据占位，
-//   免得把 CPU 动画源布局在骨架 framework 写死。
-struct SkeletonClip {
-    float duration_seconds = 0.0f;  // 动画时长(秒)，须 >0
-    int   frame_count = 0;          // 烘焙帧数(= 骨骼纹理高度)，须 >0
-    int   bone_count = 0;           // 应与所用 SkeletonTemplate.bone_count 一致
+// ⚠️ 渲染端插值/蒙皮的只是“同一种骨架”内两个 pose 的 JointMatrix（见文件头铁律）。
+//   pose 与骨架**强绑定**：一个 pose 严格属于某一种骨架（骨数量/树拓扑一致），否则无法
+//   解算也不能插值 —— 故 pose 始终相对“某一种 SkeletonTemplate”登记（pose_id 在那一份
+//   骨架内部计数），天然不跨骨架。归属与登记见 skeleton_manager.h。
+//
+// 数据表示取舍（2026-09-07 待点选，point4）：SkeletonPose 是**用户资产层**（要可读、可手写、
+// 可 retarget），理应收**每关节旋转**（四元素/欧拉，相对父链，而非整份矩阵）—— 由 CPU 烘焙端
+//   沿骨架树解算出相对根 JointMatrix 后落 atlas。但精确字节布局（四元素 vs 欧拉、有无根位移）
+//   尚未定，framework 阶段不把它锁死，等实现 PR 连四元素工具一起给完整容器。
+//   本成员仅立 meta；真正每关节姿态数据容器见下方 TODO。
+struct SkeletonPose {
+    int bone_count = 0;   // 应 == 所用 SkeletonTemplate::bone_count（同一种骨架）。
+    //
+    // TODO(2026-09-07): 每关节位姿数据容器（旋转 + 根位移），用户层可读、烘焙端转 mat4；
+    //   见 struct 注释数据表示取舍。框架阶段不锁格式，待实现 PR（配四元素/欧拉→mat4 工具）。
 };
 
 // ==================== 运行时实例状态 ====================
@@ -107,13 +126,19 @@ struct SkinnedInstanceState {
     Vec3f front{0.0f, 0.0f, 1.0f};     // 局部 +Z → 世界 front(会被归一化)
     float scale = 1.0f;     // 整体缩放(先缩顶点再转+平移)，S0 只做全局/轴向 scale(§6.1)
 
-    // 运动信息：本实例用哪个 clip 的哪个相位。
-    //   clip_id：骨骼动画 clip 的 id（由 SkeletonManager 登记；视实现：0 = rest/静态）。
-    //   phase  ：clip 内相位 [0,1]。VS 由 phase 得到前后两动画帧，查骨骼纹理并对两帧
-    //            JointMatrix lerp(插值单位是矩阵不是角度,便宜且两帧接近时误差可忽略)。
-    //   TODO(2026-09-06): 跨 clip 动作混合(S1: clipA/clipB + blend_t)在此不落结构，等 S1。
-    int    clip_id = 0;
-    float  phase = 0.0f;
+    // ---- 运动：一份骨架内两个 pose 之间的插值（唯一接口）----
+    // 唯一表达动画顶点的字段就是这个三元组：VS 取 pose_a/pose_b 两套 JointMatrix，
+    //   按 ratio ∈ [0,1] 逐骨 lerp，得本实例这一帧的最终骨骼姿态后蒙皮。
+    // ratio==0 → 完全 pose_a；==1 → 完全 pose_b；中间=两者平滑过渡。
+    // 连续动画 = 用户在相邻姿态对之间推进该三元组(自己记数组/自己走时间)——JPOV 不做播放：
+    //   例：走＝把 12 个 pose 排成 a0,a1…a11，逐帧发 (a_{k},a_{k+1},t) 推进 k/t。
+    // 无 0 哨兵：pose_a/pose_b 都是**有效 id(≥1)**，要“静态摆姿势”就让 pose_a==pose_b==那个姿态。
+    int    pose_a = 0;       // 插值起点 pose（≥1，经 SkeletonManager 登记）。
+    int    pose_b = 0;       // 插值终点 pose（≥1）；==pose_a 时无插值(=pose_a 静态)。
+    float  ratio = 0.0f;     // [0,1] pose_a→pose_b 的权重。
+    //
+    // 约束：pose_a / pose_b 必须属于**同一个 SkeletonManager**(同一种骨架)；不同骨架严禁
+    //   放同实例混插 —— 语义无意义且要读两张骨骼纹理。见 skeleton_types.h 文件头铁律。
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。

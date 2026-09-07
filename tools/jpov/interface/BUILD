@@ -35,7 +35,7 @@ cc_library(
     ],
 )
 
-# SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonTemplate/SkeletonClip/SkinnedInstanceState）
+# SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonTemplate/SkeletonPose/SkinnedInstanceState）
 # 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
 cc_library(
     name = "skeleton_types",

@@ -209,7 +209,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     SkinnedMeshCommand cmd;
     cmd.mesh_id = mesh_id;
     cmd.skeleton_id = skeleton_id;
-    cmd.instances = std::move(instances);  // 每实例自己的 clip/phase 在 instances 里(见 skeleton_types.h)
+    cmd.instances = std::move(instances);  // 每实例自己的插值 pose(pose_a/pose_b/ratio)在 instances 里(见 skeleton_types.h)
     skinned_mesh.push_back(cmd);
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
 }
