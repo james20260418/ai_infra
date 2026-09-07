@@ -26,6 +26,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//third_party/stb:stb_image",
+        "//tools/jpov/interface:id_allocator",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [
@@ -45,6 +46,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:gpumesh",
+        "//tools/jpov/interface:id_allocator",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
     ] + select({
