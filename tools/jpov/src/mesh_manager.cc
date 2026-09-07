@@ -72,7 +72,7 @@ uint32_t MeshManager::RegisterMesh(const MeshData& data) {
     data.Validate();
 
     GPUMesh mesh = CreateGLMesh(data);
-    uint32_t id = next_id_++;
+    uint32_t id = id_alloc_.Acquire();  // 复用释放的 mesh_id 或开新号（避回绕，见 id_allocator.h）
     meshes_[id] = mesh;
 
     LOG(INFO) << "MeshManager: registered mesh id=" << id
@@ -110,6 +110,7 @@ void MeshManager::ReleaseMesh(uint32_t mesh_id) {
     }
     DestroyGLMesh(&it->second);
     meshes_.erase(it);
+    id_alloc_.Release(mesh_id);  // 空号回池，供后续 RegisterMesh 立即复用。
 }
 
 const GPUMesh* MeshManager::GetMesh(uint32_t mesh_id) const {

@@ -21,6 +21,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "tools/jpov/interface/id_allocator.h"
+
 namespace jpov {
 
 // TextureManager 纹理采样选项（默认全关 = 保持既有行为）。
@@ -91,8 +93,9 @@ private:
         TextureOptions opts;  // 加载时的采样选项（mipmap / repeat）
     };
 
-    // id counter（递增分配）
-    uint32_t next_id_ = 1;
+    // 纹理 ID 分配：IdAllocator（freelist/LIFO 复用 + live 集防回绕踩踏）。0 = 无效 id。
+    //   原裸 uint32 next_id_++ 不回填空号、回绕会踩 live —— 换复用分配器;已释放 id 立即回到池。
+    IdAllocator id_alloc_;
 
     // id → Entry
     std::unordered_map<uint32_t, Entry> entries_;

@@ -115,7 +115,7 @@ uint32_t TextureManager::LoadFromFile(const std::string& path,
     CHECK_EQ(err, GL_NO_ERROR)
         << "TextureManager::LoadFromFile: GL error after upload, code=" << err;
 
-    uint32_t id = next_id_++;
+    uint32_t id = id_alloc_.Acquire();  // 复用释放的纹理 id 或开新号（避回绕，见 id_allocator.h）
     entries_[id] = {gl_tex, width, height, /*owned=*/true, opts};
     path_to_id_[key] = id;
 
@@ -139,7 +139,7 @@ uint32_t TextureManager::Register(uint32_t gl_tex, int width, int height) {
         return it->second;
     }
 
-    uint32_t id = next_id_++;
+    uint32_t id = id_alloc_.Acquire();  // 复用释放的纹理 id 或开新号（见 id_allocator.h）
     entries_[id] = {gl_tex, width, height, /*owned=*/false, /*opts=*/{}};
     gl_tex_to_id_[gl_tex] = id;
 
@@ -193,6 +193,7 @@ void TextureManager::Release(uint32_t id) {
     }
 
     entries_.erase(it);
+    id_alloc_.Release(id);  // 纹理 ID 空号回池，供后续 load/register 立即复用。
 }
 
 std::string TextureManager::MakePathKey(const std::string& path,
