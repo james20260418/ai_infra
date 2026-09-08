@@ -59,10 +59,14 @@ CMD="$PROJECT_DIR/bazel-bin/tools/jpov/gen3d/skeleton/gen3d_skeleton_cmd"
 
 echo ""
 echo "==> 1. tripo3d 生成带骨骼模型 (name=$NAME)..."
+# 不重定向 stderr(诊断/glog 打 task_id 与下载 URL，失败时据此手动抢救，如 GET /tasks/{id}
+# 或直接 curl 签名 model_url)。stdout 仅一行：产物 .glb 绝对路径（main 的 printf）。
 GLB_PATH="$("$CMD" generate \
-    --name "$NAME" --output_dir "$OUTPUT_DIR" "$@" 2>/dev/null | tail -1)"
+    --name "$NAME" --output_dir "$OUTPUT_DIR" "$@" || true )"
+GLB_PATH="$(printf '%s' "$GLB_PATH" | tail -1)"
 if [ -z "$GLB_PATH" ] || [ ! -f "$GLB_PATH" ]; then
-    echo "错误: gen3d_skeleton_cmd 未产出带骨骼 GLB（见上面日志）" >&2
+    echo "错误: gen3d_skeleton_cmd 未产出带骨骼 GLB" >&2
+    echo "      若任务其实成功，可从上方的 task_id/下载 URL 手动抢救。" >&2
     exit 1
 fi
 

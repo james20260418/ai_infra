@@ -314,7 +314,8 @@ RigResult TripoRigClient::GenerateRigged(const RigConfig& config,
             result.error = "text-to-model task 解析失败: " + tt_err;
             return result;
         }
-        LOG(INFO) << "静态模型 task 已提交: " << stat_task;
+        LOG(INFO) << "静态模型 task 已提交: " << stat_task
+                  << "  (查询: GET " << base_url_ << "/tasks/" << stat_task << ")";
         // (b) 轮询 text-to-model 完成。Auto Rig 的 input 用这个 text-to-model 的
         // task_id，不必下载静态版（我们只要确定它成功、task 可被 rig）。
         std::string tt_poll_err;
@@ -361,6 +362,8 @@ RigResult TripoRigClient::GenerateRigged(const RigConfig& config,
     LOG(INFO) << "Auto Rig task 已提交: " << rig_task
               << " (input=" << describe_for_log << ", spec=" << spec
               << ", rig_type=" << rig_type << ", model=" << model << ")";
+    // 打印 task 查询 URL(供失败时手动重查抢救)
+    LOG(INFO) << "  查询task: GET " << base_url_ << "/tasks/" << rig_task;
 
     // ---- 轮询 Auto Rig → model_url ----
     std::string rig_url_out, rig_poll_err;
@@ -371,6 +374,8 @@ RigResult TripoRigClient::GenerateRigged(const RigConfig& config,
         result.error = "Auto Rig 任务未成功: " + rig_poll_err;
         return result;
     }
+    // 打印下载 URL(签名, 5 分钟过期)——失败时可用它手动 curl 抢救。
+    LOG(INFO) << "带骨骼 GLB 签名下载 URL: " << rig_url_out;
 
     // ---- 下载带骨骼 GLB ----
     const std::string glb_path = JoinGlbPath(output_dir, name);
