@@ -89,3 +89,24 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# glTF loader — 骨骼（JOINTS_0/WEIGHTS_0 顶点侧 + LoadGltfSkeleton 关节树/逆绑定）验证（CPU-only）
+# 真实资材 mixamo_male.glb（Tripo Auto Rig spec=mixamo, 23 关节带蒙皮）。
+cc_test(
+    name = "jpov_gltf_skeleton_loader_test",
+    srcs = ["jpov_gltf_skeleton_loader_test.cc"],
+    data = ["//tools/jpov/test/object3d:mixamo_male_glb_data"],
+    deps = [
+        "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

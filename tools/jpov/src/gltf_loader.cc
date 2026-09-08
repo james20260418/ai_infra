@@ -22,6 +22,7 @@
 #include "tools/jpov/src/gltf_loader.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -109,6 +110,65 @@ bool ReadFloatAccessor(const tinygltf::Model& model,
                     return false;
             }
             (*out)[i * num_comp + j] = val;
+        }
+    }
+    return true;
+}
+
+// 从 tinygltf accessor 读取 JOINTS_0 关节索引（每顶点 4 个 int, 4-bone 蒙皮）到
+// MeshData.joint_indices。
+//
+// JOINTS_0 按 glTF 规范只允许 UNSIGNED_BYTE / UNSIGNED_SHORT / UNSIGNED_INT
+// （每分量存“该骨在 skin 关节列表中的序号”，范围取决于 componentType 位数）。
+// 这里把它剥成每顶点 4 个 int32（与 MeshData.joint_indices[4] / GPUMesh loc3
+// 的 glVertexAttribIPointer(GL_INT) 对齐）。支持非联合紧凑布局(byteStride)。
+// 返回 false 表示格式不支持/数据不可读；此时调用方应跳过骨骼(不置 kJoints)。
+bool ReadJointsAccessor(const tinygltf::Model& model, int accessor_index,
+                        std::vector<std::array<int32_t, 4>>* out) {
+    if (accessor_index < 0 ||
+        accessor_index >= static_cast<int>(model.accessors.size())) {
+        return false;
+    }
+    const tinygltf::Accessor& acc = model.accessors[accessor_index];
+    if (acc.bufferView < 0 ||
+        acc.bufferView >= static_cast<int>(model.bufferViews.size())) {
+        return false;
+    }
+    if (tinygltf::GetNumComponentsInType(acc.type) != 4) {
+        return false;  // 必须是 VEC4
+    }
+    const tinygltf::BufferView& view = model.bufferViews[acc.bufferView];
+    if (view.buffer < 0 ||
+        view.buffer >= static_cast<int>(model.buffers.size())) {
+        return false;
+    }
+    const tinygltf::Buffer& buf = model.buffers[view.buffer];
+    const size_t count = acc.count;
+    out->resize(count);
+    const size_t comp_bytes = tinygltf::GetComponentSizeInBytes(acc.componentType);
+    const size_t byte_stride = view.byteStride > 0 ? view.byteStride : comp_bytes * 4;
+    const unsigned char* src =
+        buf.data.data() + view.byteOffset + acc.byteOffset;
+
+    for (size_t i = 0; i < count; ++i) {
+        const void* elem = src + i * byte_stride;
+        for (int j = 0; j < 4; ++j) {
+            int32_t v = 0;
+            switch (acc.componentType) {
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+                    v = reinterpret_cast<const unsigned char*>(elem)[j];
+                    break;
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+                    v = reinterpret_cast<const unsigned short*>(elem)[j];
+                    break;
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+                    v = static_cast<int32_t>(
+                        reinterpret_cast<const uint32_t*>(elem)[j]);
+                    break;
+                default:
+                    return false;
+            }
+            (*out)[i][j] = v;
         }
     }
     return true;
@@ -374,6 +434,43 @@ bool ParsePrimitive(const tinygltf::Model& model,
             out_mesh->flags = static_cast<MeshVertexFlags>(
                 static_cast<uint8_t>(out_mesh->flags) |
                 static_cast<uint8_t>(MeshVertexFlags::kNormal));
+        }
+    }
+
+    // JOINTS_0 / WEIGHTS_0（骨骼蒙皮, 4-bone：每顶点 4 关节索引 + 4 权重）
+    // glTF 规范: JOINTS_0 只允许 UNSIGNED_BYTE/SHORT/INT（每分量 = 关节在 skin
+    //   关节列表里的序号）；WEIGHTS_0 为 FLOAT VEC4。二者成对出现才有效；有其一无其
+    //   另一视为数据异常（记警告并跳过，不置 kJoints——不崩，保留“数据缺失=不蒙皮
+    //   静态 rest”语义）。注意读出的分量是【相对该 mesh 所用 skin 的关节序号】，
+    //   不是 node 全局索引；本 loader 阶段原样填进 MeshData.joint_indices，真正把
+    //   skin 关节列表与 SkeletonType 对齐由加载皮肤的调用方（LoadGltfSkeleton）负责。
+    {
+        auto joint_it = prim.attributes.find("JOINTS_0");
+        auto weight_it = prim.attributes.find("WEIGHTS_0");
+        if (joint_it != prim.attributes.end() &&
+            weight_it != prim.attributes.end()) {
+            std::vector<std::array<int32_t, 4>> joints;
+            std::vector<float> weights_flat;
+            if (ReadJointsAccessor(model, joint_it->second, &joints) &&
+                joints.size() == vcount &&
+                ReadFloatAccessor(model, weight_it->second, &weights_flat) &&
+                weights_flat.size() / 4 == vcount) {
+                out_mesh->joint_indices = std::move(joints);
+                out_mesh->joint_weights.resize(vcount);
+                for (size_t i = 0; i < vcount; ++i) {
+                    for (int j = 0; j < 4; ++j) {
+                        out_mesh->joint_weights[i][j] =
+                            weights_flat[i * 4 + j];
+                    }
+                }
+                out_mesh->flags = static_cast<MeshVertexFlags>(
+                    static_cast<uint8_t>(out_mesh->flags) |
+                    static_cast<uint8_t>(MeshVertexFlags::kJoints));
+            } else {
+                LOG(WARNING)
+                    << "LoadGltf: primitive 有 JOINTS_0/WEIGHTS_0 但解析失败或"
+                       "长度不齐, 跳过骨骼(按静态 rest 渲)";
+            }
         }
     }
 
@@ -664,8 +761,13 @@ bool LoadGltfImpl(const std::string& path,
                            << mesh.name << "')";
                 return false;
             }
-            // 应用 mesh 的节点变换（旋转+缩放，无平移）到 position/normal
-            if (mi < mesh_trans.size()) {
+            // 应用 mesh 的节点变换（旋转+缩放，无平移）到 position/normal。
+            // ⚠️ 跳过带骨骼(kJoints)的 mesh：蒙皮网格的顶点应留在 mesh 局部空间,
+            //    由 skin 的关节矩阵×逆绑定驱动(见 gltf_loader.h 骨骼注释),  此处若再
+            //    套 mesh 所在 node 父链的旋缩会对 bind-pose 双重变换、破坏蒙皮对位。
+            //    非蒙皮静态 mesh 维持既有行为(mesh_trans 已含父链累积旋缩)。
+            if (!MeshHasFlag(entry.mesh.flags, MeshVertexFlags::kJoints) &&
+                mi < mesh_trans.size()) {
                 const Mat3& t = mesh_trans[mi];
                 std::vector<float> pos_flat, nrm_flat;
                 // positions: Vec3f → 数组 → 变换 → 写回
@@ -742,6 +844,127 @@ bool LoadGltf(const std::string& path,
     };
     if (!LoadGltfImpl(path, first_cb, &cap) || !cap.got) {
         return false;
+    }
+    return true;
+}
+
+// ==================== 骨骼（skin）→ SkeletonType ====================
+
+// 读取 glTF 场景的所有 skin 转成 SkeletonType。实现见 gltf_loader.h 顶部注释。
+//
+// 内部：加载模型（同 LoadGltfImpl 的 glb/ascii 分支）→ 遍历 skins，每个 skin：
+//   joints 顺序 = skin.joints(node 数组)；建 node→{编号，其直接父 node}；对每个关节
+//   沿 node 链向上找第一个也在此 skin 的关节 = 它的骨架父；IBM accessor 逐关节拖 16
+//   float（MAT4）→ inverse_bind；node translation → rest_offset；node name → name。
+//
+// 骨架的“joints 顺序”与 JOINTS_0 的分量序一致(skin.joints 即关节表)。多 skin 全读出。
+bool LoadGltfSkeleton(const std::string& path,
+                      std::vector<SkeletonType>* out_skins) {
+    CHECK(path.empty() == false);
+    CHECK(out_skins != nullptr);
+
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err, warn;
+    bool ok = false;
+    if (path.size() >= 4 &&
+        path.compare(path.size() - 4, 4, ".glb") == 0) {
+        ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
+    } else {
+        ok = loader.LoadASCIIFromFile(&model, &err, &warn, path);
+    }
+    if (!warn.empty()) {
+        LOG(WARNING) << "LoadGltfSkeleton: " << path << " — " << warn;
+    }
+    if (!ok) {
+        LOG(ERROR) << "LoadGltfSkeleton: 无法加载 " << path << " — " << err;
+        return false;
+    }
+
+    const int n_nodes = static_cast<int>(model.nodes.size());
+
+    // -- 1. node → 其在某 skin joint 列表里的下标(每 skin 各建) + node 的父链 --
+    // node 的直接父(node idx): 先建 child→parent 表
+    std::vector<int> node_parent(n_nodes, -1);
+    for (int ni = 0; ni < n_nodes; ++ni) {
+        for (int ch : model.nodes[ni].children) {
+            if (ch >= 0 && ch < n_nodes) node_parent[ch] = ni;
+        }
+    }
+
+    for (size_t sk = 0; sk < model.skins.size(); ++sk) {
+        const tinygltf::Skin& skin = model.skins[sk];
+        SkeletonType skel;
+
+        // node idx → 在本 skin 的 joint 表下标；不是本 skin 关节 = -1
+        std::vector<int> node_to_skin_joint(n_nodes, -1);
+        for (int sj = 0; sj < static_cast<int>(skin.joints.size()); ++sj) {
+            const int nd = skin.joints[sj];
+            if (nd >= 0 && nd < n_nodes) node_to_skin_joint[nd] = sj;
+        }
+
+        // 预读 IBM(可有可无): MAT4 accessor → 每关节 16 float
+        std::vector<float> ibm_flat;
+        bool has_ibm = false;
+        if (skin.inverseBindMatrices >= 0) {
+            has_ibm = ReadFloatAccessor(model, skin.inverseBindMatrices,
+                                        &ibm_flat);
+            if (!has_ibm) {
+                LOG(WARNING) << "LoadGltfSkeleton: skin " << sk
+                             << " 声明了 inverseBindMatrices 但读取失败, "
+                                "该骨架 inverse_bind 留空(调用方自算)";
+            }
+        }
+
+        const int n_joints = static_cast<int>(skin.joints.size());
+        skel.joints.resize(n_joints);
+        if (has_ibm) skel.inverse_bind.resize(n_joints);
+
+        for (int sj = 0; sj < n_joints; ++sj) {
+            const int nd = skin.joints[sj];
+            if (nd < 0 || nd >= n_nodes) {
+                LOG(ERROR) << "LoadGltfSkeleton: skin " << sk
+                           << " joints[" << sj << "]=" << nd
+                           << " 越界 node 表";
+                return false;
+            }
+            const tinygltf::Node& node = model.nodes[nd];
+
+            SkeletonJoint& jt = skel.joints[sj];
+            jt.name = node.name;
+
+            // rest_offset：node.translation（相对父平移）。缺省 0。
+            jt.rest_offset = Vec3f(0.0f, 0.0f, 0.0f);
+            if (node.translation.size() >= 3) {
+                jt.rest_offset = Vec3f(
+                    static_cast<float>(node.translation[0]),
+                    static_cast<float>(node.translation[1]),
+                    static_cast<float>(node.translation[2]));
+            }
+
+            // parent：沿 node 链向上找第一个同为“本 skin 关节”者（在 skin 表的下标）
+            jt.parent = kSkeletonNoParent;
+            int cur = node_parent[nd];
+            while (cur >= 0) {
+                if (node_to_skin_joint[cur] >= 0) {
+                    jt.parent = node_to_skin_joint[cur];
+                    break;
+                }
+                cur = node_parent[cur];
+            }
+
+            // inverse_bind：MAT4 → std::array<float,16>（列主序原样）
+            if (has_ibm) {
+                const size_t base = static_cast<size_t>(sj) * 16;
+                if (base + 16 <= ibm_flat.size()) {
+                    for (int k = 0; k < 16; ++k) {
+                        skel.inverse_bind[sj][k] = ibm_flat[base + k];
+                    }
+                }
+            }
+        }
+
+        out_skins->push_back(std::move(skel));
     }
     return true;
 }

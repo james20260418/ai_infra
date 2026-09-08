@@ -81,6 +81,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/src:orm_unpack",
         "//third_party/tinygltf",
         "//third_party/stb:stb_image",
