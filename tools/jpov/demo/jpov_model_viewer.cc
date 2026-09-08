@@ -14,6 +14,8 @@
 //   交互与 --four_views 拍照共用同一个 GltfViewerApp::OneIteration 渲染体，
 //   只由 ViewConfig 的驱动方式不同；光照方面交互用滑条版 MakeLighting()，
 //   拍照用固定 MakeNoonLighting()（headless 截图不带 UI 面板）。
+//   --round_video 同理：同为 headless，只把 theta 扫 180°（0→+π）逐帧
+//   RunOnce 出 PNG，再在进程内 fork ffmpeg 合成 mp4（不经任何 sh）。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov:jpov_model_viewer -- /path/to/model.gltf
@@ -22,9 +24,17 @@
 //   → output/jpov_model_viewer/jpov_model_viewer <gltf 路径>
 
 #include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include <string>
 #include <cerrno>
+#include <vector>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <unistd.h>    // fork / execvp
+#include <sys/wait.h>  // waitpid
+#include <dirent.h>    // 临时帧目录清理 (opendir/readdir)
+#endif
 #ifdef _WIN32
 #include <direct.h>  // _mkdir
 #endif
@@ -224,16 +234,24 @@ private:
 };
 
 // 命令行解析结果。
-//   four_views : --four_views 拍照模式（headless，AI 自查出图）
-//   output_dir : --output_dir <dir> 指定出图目录（可选；缺省时后退到 glTF 同级目录）
-//   gltf_path  : 第一个非 -- 前缀参数（相对/绝对均可）
+//   four_views  : --four_views 拍照模式（headless，AI 自查出图）
+//   round_video : --round_video 环绕视频模式（headless，绕 y 轴旋转渲染帧 → ffmpeg 合成 mp4）
+//   phi_deg     : --round_video 的相机仰角（度，默认 45=俯视 45°）；仅 round_video 用
+//   frames      : --round_video 的总帧数（默认 60）
+//   fps         : --round_video 的视频帧率（默认 60）
+//   output_dir  : --output_dir <dir> 指定出图目录（可选；缺省时后退到 glTF 同级目录）
+//   gltf_path   : 第一个非 -- 前缀参数（相对/绝对均可）
 struct CliOptions {
     bool four_views = false;
+    bool round_video = false;
+    double phi_deg = 45.0;    // 相机仰角（度）：round_video 默认俯视 45°
+    int frames = 60;          // round_video 总渲染帧数
+    int fps = 60;             // round_video 视频帧率
     std::string output_dir;   // 空 = 未指定
     std::string gltf_path;
 };
 
-// 解析 --four_views / --output_dir <dir> 等带值/纯标志参数，并取 glTF 路径
+// 解析 --four_views / --round_video / --output_dir <dir> 等带值/纯标志参数，并取 glTF 路径
 // （第一个非 -- 前缀参数）。--output_dir 会吞掉紧跟其后的值（该值本身以 --
 // 前缀开头时认为是非法用法，报 warning 并跳过），因此 glTF 路径取剩下的
 // 第一个非标志参数，不会把输出目录误当模型路径。
@@ -244,6 +262,17 @@ CliOptions ParseCliOptions(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "--four_views") {
             opt.four_views = true;
+        } else if (arg == "--round_video") {
+            opt.round_video = true;
+        } else if (arg == "--phi_deg") {
+            if (i + 1 < argc) { opt.phi_deg = std::atof(argv[++i]); }
+            else { LOG(WARNING) << "--phi_deg 缺少数值，忽略"; }
+        } else if (arg == "--frames") {
+            if (i + 1 < argc) { opt.frames = std::atoi(argv[++i]); }
+            else { LOG(WARNING) << "--frames 缺少数值，忽略"; }
+        } else if (arg == "--fps") {
+            if (i + 1 < argc) { opt.fps = std::atoi(argv[++i]); }
+            else { LOG(WARNING) << "--fps 缺少数值，忽略"; }
         } else if (arg == "--output_dir") {
             if (i + 1 < argc) {
                 opt.output_dir = argv[++i];
@@ -336,11 +365,213 @@ void RunFourViews(GltfViewerApp* app,
     }
 }
 
+// 递归删除目录（用于 round_video 渲染完帧 PNG 后清理临时帧目录）。
+// POSIX 下 opendir/readdir 遍历 + unlink 文件 + rmdir 子目录；Windows 分支占位
+// （round_video 目前面向 Linux/CI，Windows 走 `#error` 由未使用路径规避）。
+void RemoveDirRecursive(const std::string& dir) {
+#ifndef _WIN32
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return;  // 目录不存在 = 无需清理
+    for (dirent* e = readdir(d); e; e = readdir(d)) {
+        const std::string name = e->d_name;
+        if (name == "." || name == "..") continue;
+        const std::string child = dir + "/" + name;
+        if (e->d_type == DT_DIR) {
+            RemoveDirRecursive(child);
+        } else {
+            unlink(child.c_str());
+        }
+    }
+    closedir(d);
+    rmdir(dir.c_str());
+#else
+    (void)dir;
+#endif
+}
+
+// 调 ffmpeg 把一批编号 PNG 帧合成 mp4（fork/execvp，POSIX）。
+//   frame_pattern : 如 "/path/to/dir/frame_%04d.png"（ffmpeg -i 图像序列通配）
+//   out_mp4       : 视频输出路径
+//   fps           : 视频帧率
+// 成功返回 true；失败（fork 失败 / ffmpeg 非零退出）返回 false 并打印 stderr 缓冲。
+bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4, int fps) {
+#ifndef _WIN32
+    const int pipefd = fileno(stderr);
+    (void)pipefd;  // 保持 ffmpeg stderr 透传到父进程（进度/错误可见）
+
+    const std::string fps_str = std::to_string(fps);
+    const std::string crf     = "18";
+    // ffmpeg 完整参数（注意 -y 覆盖、yuv420p 保证播放器兼容、libx264 编码）。
+    // argv[0] 需与 execvp 查找的可执行名一致（execvp 会用 PATH 查找）。
+    const char** argv = static_cast<const char**>(
+        calloc(16, sizeof(const char*)));
+    int n = 0;
+    argv[n++] = "ffmpeg";
+    argv[n++] = "-y";
+    argv[n++] = "-framerate";
+    argv[n++] = fps_str.c_str();
+    argv[n++] = "-i";
+    argv[n++] = frame_pattern.c_str();
+    argv[n++] = "-c:v";
+    argv[n++] = "libx264";
+    argv[n++] = "-pix_fmt";
+    argv[n++] = "yuv420p";
+    argv[n++] = "-crf";
+    argv[n++] = crf.c_str();
+    argv[n++] = "-preset";
+    argv[n++] = "medium";
+    argv[n++] = out_mp4.c_str();
+    argv[n] = nullptr;
+
+    const int pid = fork();
+    if (pid == 0) {
+        execvp("ffmpeg", const_cast<char* const*>(argv));
+        // exec 失败才到这（PATH 找不到 ffmpeg）：stderr 报错，子进程退出非 0。
+        fprintf(stderr, "execvp ffmpeg 失败（未安装 ffmpeg？）: %s\n",
+                strerror(errno));
+        _exit(127);
+    }
+    if (pid < 0) {
+        free(argv);
+        LOG(ERROR) << "fork() 启动 ffmpeg 失败";
+        return false;
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    // argv 指向的字符串(std::string::c_str() 栈上成员) 与 calloc 都需释放；
+    // 仅释放 calloc 出的 argv 数组本身（其中 c_str() 由原 string 持有）。
+    free(argv);
+    if (!ok) {
+        LOG(ERROR) << "ffmpeg 合成视频失败, exit="
+                   << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
+                   << ", 输出=" << out_mp4;
+    }
+    return ok;
+#else
+    (void)frame_pattern; (void)out_mp4; (void)fps;
+    LOG(ERROR) << "RoundVideo 暂不支持 Windows（需 _spawn 封装 ffmpeg）";
+    return false;
+#endif
+}
+
+// --round_video 环绕视频模式：相机绕模型 y 轴旋转合成 mp4。
+// headless 渲染 frames 张 PNG（theta 从 0 扫到 180°，phi 固定为 phi_deg 仰角
+// = 绕 y 轴转半圈、视角与竖直方向夹角不变），临时 PNG 放进 output_dir 的子目录
+// 做 buffer，全部渲染成功后调 ffmpeg 合成 <base>_round.mp4，最后清理临时帧目录。
+// 与 --four_views / 交互共用同一 OneIteration 渲染体（zero 分叉）：只改 view_
+// 的 theta，逐帧 RunOnce 出 PNG——与 four_views 唯一区别是 theta 是一个连续
+// 序列而非 4 个固定角。
+// 结束打印视频完整路径到 stdout。
+void RunRoundVideo(GltfViewerApp* app,
+                   const std::string& gltf_path,
+                   const std::string& explicit_output_dir,
+                   double phi_deg,
+                   int num_frames,
+                   int fps) {
+    CHECK_NOTNULL(app);
+    CHECK_GT(num_frames, 0) << "--frames 必须 > 0";
+    CHECK_GT(fps, 0) << "--fps 必须 > 0";
+
+    // 输出目录 / 模型 basename：与 RunFourViews 同口径（优先 --output_dir）。
+    const size_t slash = gltf_path.find_last_of("/\\");
+    const std::string dir = !explicit_output_dir.empty()
+                                ? explicit_output_dir
+                                : (slash == std::string::npos)
+                                    ? "." : gltf_path.substr(0, slash);
+    const std::string full = (slash == std::string::npos)
+                                 ? gltf_path : gltf_path.substr(slash + 1);
+    const size_t dot       = full.find_last_of('.');
+    const std::string base = (dot == std::string::npos)
+                                 ? full : full.substr(0, dot);
+
+    // --output_dir 需自动建目录（round_video 同 four_views，链路可能指向新目录）。
+    if (!explicit_output_dir.empty()) {
+#ifdef _WIN32
+        const int rc = _mkdir(explicit_output_dir.c_str());
+#else
+        const int rc = mkdir(explicit_output_dir.c_str(), 0755);
+#endif
+        if (rc != 0 && errno != EEXIST) {
+            LOG(FATAL) << "无法创建输出目录: " << explicit_output_dir
+                       << " (errno=" << errno << ")";
+        }
+    }
+
+    // 临时帧 buffer 子目录（输出目录下），渲染完 ffmpeg 后递归删除。
+    const std::string frames_dir = dir + "/" + base + "_round_frames";
+#ifdef _WIN32
+    const int rc2 = _mkdir(frames_dir.c_str());
+#else
+    const int rc2 = mkdir(frames_dir.c_str(), 0755);
+#endif
+    if (rc2 != 0 && errno != EEXIST) {
+        LOG(FATAL) << "无法创建临时帧目录: " << frames_dir
+                   << " (errno=" << errno << ")";
+    }
+
+    // 相机仰角（phi）固定 = phi_deg；clamp 到 ViewConfig 合法范围 [-90°,90°]。
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kPiHalf = kPi / 2.0;
+    app->view_.phi = std::clamp(phi_deg * kDegToRad, -kPiHalf, kPiHalf);
+    // theta 从 0（正面）线性扫到 π（背面 180°）。R 保持 main 里按模型包围盒算
+    // 好的自适应距离（见 main 注释），保证半周都能框住模型。
+    app->view_.theta = 0.0;
+    app->view_.R = std::clamp(app->view_.R, jpov_viewer::ViewConfig::kRMin,
+                              jpov_viewer::ViewConfig::kRMax);  // 防御（已有但显式化）
+
+    const jpov::InputSnapshot input{};  // round_video = headless，无交互输入
+
+    LOG(INFO) << "--round_video: frames=" << num_frames
+              << ", theta 0°→180°, phi=" << phi_deg
+              << "°, tmp=" << frames_dir;
+    for (int i = 0; i < num_frames; ++i) {
+        // theta = i/(frames-1) * π：末帧到 π（180° 背面）。仅 1 帧时 theta=0。
+        const double t = (num_frames == 1) ? 0.0
+                                           : static_cast<double>(i) /
+                                                 (num_frames - 1);
+        app->view_.theta = t * kPi;
+
+        char name[64];
+        std::snprintf(name, sizeof(name), "frame_%04d.png",
+                      static_cast<int>(i));
+        const std::string out = frames_dir + "/" + name;
+        jpov::WindowInfo winfo;
+        winfo.width  = kViewerWidth;
+        winfo.height = kViewerHeight;
+        app->RunOnce(input, winfo, out.c_str());
+        if ((i % 10) == 0 || i == num_frames - 1) {
+            LOG(INFO) << "  [" << (i + 1) << "/" << num_frames
+                      << "] theta=" << app->view_.theta * 180.0 / kPi << "°";
+        }
+    }
+
+    // 全部渲染成功后才调 ffmpeg（失败则下面走 FATAL，不残留半成品 mp4）。
+    const std::string out_mp4 = dir + "/" + base + "_round.mp4";
+    const std::string pattern = frames_dir + "/frame_%04d.png";
+    bool ok = false;
+    if (!out_mp4.empty() && frames_dir.size() > 0u) {
+        ok = RunFfmpeg(pattern, out_mp4, fps);
+    }
+    if (!ok) {
+        LOG(FATAL) << "ffmpeg 合成失败，未产生 " << out_mp4;
+    }
+
+    // 视频已合成，清理临时帧 PNG（buffer 用完即删，不留中间文件垃圾）。
+    RemoveDirRecursive(frames_dir);
+    std::printf("%s\n", out_mp4.c_str());
+    LOG(INFO) << "--round_video 已合成: " << out_mp4;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const CliOptions opt = ParseCliOptions(argc, argv);
     const bool four_views = opt.four_views;
+    const bool round_video = opt.round_video;
+    // four_views 与 round_video 互斥（同为 headless 出图，参数语义不同）。
+    const bool headless = four_views || round_video;
 
     // glTF 路径 = 第一个非 -- 前缀参数（相对/绝对均可）。
     std::string gltf_path = opt.gltf_path;
@@ -350,14 +581,14 @@ int main(int argc, char** argv) {
     }
 
     // ── 配置：1280×720、不可 resize、60fps。──
-    // four_views 拍照模式 → headless（无可见窗口，AI 自查不弹窗）。
+    // four_views / round_video → headless（无可见窗口，AI/CI 自查不弹窗）。
     JPOV::Config cfg;
     cfg.title = "JPOV — JPOV 模型查看器";
     cfg.width  = kViewerWidth;
     cfg.height = kViewerHeight;
     cfg.resizable = false;          // 需求：窗口不可 resize
     cfg.target_fps = 60;            // 需求：60 帧
-    cfg.headless  = four_views;     // 需求：--four_views 走 headless，不弹窗
+    cfg.headless  = headless;       // 需求：headless 出图不弹窗
     // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（同 jpov_ui_demo）。
     // 路径为相对 exe 的字体目录（从 output/jpov_model_viewer/ 运行，由
     // build_jpov_model_viewer.sh 同构拷贝 fonts/）。
@@ -367,8 +598,8 @@ int main(int argc, char** argv) {
     };
 
     GltfViewerApp app(cfg);
-    // 交互/拍照模式标志：拍照（headless 截图）不带 UI 面板。
-    app.interactive_ = !four_views;
+    // headless（four_views/round_video）拍照模式不带 UI 面板。
+    app.interactive_ = !headless;
     // 帧率计时（滑条键盘 hold 用）：取 cfg.target_fps。
     app.cfg_target_fps_ = cfg.target_fps;
     app.Init();
@@ -404,6 +635,11 @@ int main(int argc, char** argv) {
         // AI 自查模式：headless 渲染 4 个角度，输出到 --output_dir（缺省=模型同级
         // 目录）后退出。产物路径由 RunFourViews 逐张打印到 stdout。
         RunFourViews(&app, gltf_path, opt.output_dir);
+    } else if (round_video) {
+        // 环绕视频模式：headless 渲染 60 帧（theta 0→180°）+ ffmpeg 合成 mp4。
+        // 起始正面 theta=0；phi=--phi_deg 仰角（默认 45°俯视）。
+        RunRoundVideo(&app, gltf_path, opt.output_dir, opt.phi_deg,
+                      opt.frames, opt.fps);
     } else {
         // 交互窗口事件循环（阻塞）。
         app.Run();
