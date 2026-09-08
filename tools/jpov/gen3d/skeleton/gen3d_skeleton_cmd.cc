@@ -15,6 +15,7 @@
 //   --rig_type    默认 biped（人形）；可选 quadruped/hexapod/octopod/avian/serpentine/aquatic。
 // API key 走环境变量 TRIPO_API_KEY（严禁硬编码/入仓库）。
 // 成功后 stdout 打印一行带骨骼 GLB 绝对路径；失败非零退出。
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -116,10 +117,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    // spec（默认 mixamo）
+    // spec（默认 mixamo），大小写不敏感
     std::string spec_str;
     GetFlagValue(argc, argv, "spec", &spec_str);
     if (!spec_str.empty()) {
+        for (auto& c : spec_str) c = static_cast<char>(::tolower(c));
         if (spec_str == "mixamo") config.spec = RigSpec::kMixamo;
         else if (spec_str == "tripo") config.spec = RigSpec::kTripo;
         else { LOG(ERROR) << "未知 --spec: " << spec_str << "（tripo|mixamo）"; return 1; }

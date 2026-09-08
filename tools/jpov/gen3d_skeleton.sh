@@ -65,8 +65,9 @@ GLB_PATH="$("$CMD" generate \
     --name "$NAME" --output_dir "$OUTPUT_DIR" "$@" || true )"
 GLB_PATH="$(printf '%s' "$GLB_PATH" | tail -1)"
 if [ -z "$GLB_PATH" ] || [ ! -f "$GLB_PATH" ]; then
-    echo "错误: gen3d_skeleton_cmd 未产出带骨骼 GLB" >&2
-    echo "      若任务其实成功，可从上方的 task_id/下载 URL 手动抢救。" >&2
+    echo "错误: gen3d_skeleton_cmd 未产出带骨骼 GLB（见上方日志）" >&2
+    echo "      若是 API/网络失败, 上方的 task_id/签名下载 URL 可用来手动抢救;" >&2
+    echo "      若是参数错误, 参考 cmd 打印的用法。" >&2
     exit 1
 fi
 
