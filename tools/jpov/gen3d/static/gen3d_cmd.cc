@@ -21,8 +21,8 @@
 
 #include <glog/logging.h>
 
-#include "tools/jpov/gen3d/gen3d_config.h"
-#include "tools/jpov/gen3d/tripo_client.h"
+#include "tools/jpov/gen3d/static/gen3d_config.h"
+#include "tools/jpov/gen3d/static/tripo_client.h"
 
 namespace {
 

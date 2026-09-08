@@ -1,5 +1,13 @@
 # JPOV gen3d — 自动生成静态 3D 模型工具（设计）
 
+> 📌 **历史归档 + 现状更正（2026-09-08）**：本文是 PR #77 当时从零搭建**静态 PBR 生熟链路**的
+> 功能设计文档，保留其历史设计意图。**当前代码已迁移**：静态生熟代码从扁平的
+> `tools/jpov/gen3d/` 迁到 **`tools/jpov/gen3d/static/`**（bazel target
+> `//tools/jpov/gen3d/static:gen3d_cmd`），编排脚本从 `gen3d.sh` 改名 **`gen3d_static.sh`**
+> （均在仓库根 `tools/jpov/` 下）。带骨骼的生熟（mixamorig rig）走新的 sibling 目录
+> `tools/jpov/gen3d/skeleton/`（脚本 `gen3d_skeleton.sh`），本文不覆盖。下文的
+> "gen3d 目录 / gen3d.sh / //tools/jpov:gen3d_cmd" 指代当时布局，实际已如上迁移。
+
 > 目的：让 JPOV 具备「文本 prompt → 生成静态 PBR GLB → headless 渲染验证」的自闭链路。
 > 对应 2026-08-24 调研 + PR #77 落下的 gen3d_config.h 骨架。本文是本次 PR 的功能设计。
 

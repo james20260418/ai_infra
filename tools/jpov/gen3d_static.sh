@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# gen3d.sh — JPOV 自动生成静态 3D 模型全链路（编译 + tripo3d 生成 + JPOV 渲染验证）
+# gen3d_static.sh — JPOV 自动生成静态 3D 模型全链路（编译 + tripo3d 生成 + JPOV 渲染验证）
+#
+# 本脚本对应 gen3d/static/ 的静态 PBR 模型工具；带骨骼的生成见 sibling gen3d_skeleton.sh。
 #
 # 编排职责（本脚本不发 HTTP，只调各 elf）：
 #   步骤0: bazel 编译 gen3d_cmd（调 tripo3d API 生成 GLB）+ jpov_model_viewer
@@ -9,9 +11,9 @@
 #   收尾:  打印产物清单（glb + 4 张 png 的绝对路径），防用户对落盘位置 confuse
 #
 # 用法（output_dir 是第一直觉入口）：
-#   ./tools/jpov/gen3d.sh <output_dir> <name> --prompt "..." [更多 gen3d_option]
+#   ./tools/jpov/gen3d_static.sh <output_dir> <name> --prompt "..." [更多 gen3d_option]
 #   例:
-#     ./tools/jpov/gen3d.sh output/gen3d chair --prompt "一把中世纪木椅"
+#     ./tools/jpov/gen3d_static.sh output/gen3d chair --prompt "一把中世纪木椅"
 #   - <output_dir> 不存在会自动创建
 #   - 除 output_dir / name 外，其余参数原样透传给 gen3d_cmd（--prompt/--triangles
 #     [--high_poly] 等）。缺省走 tripo P1 低模 4000 面。
@@ -27,6 +29,7 @@ OUTPUT_ROOT="$PROJECT_DIR/output"
 if [ $# -lt 2 ]; then
     echo "用法: $0 <output_dir> <name> --prompt \"...\" [gen3d 参数...]" >&2
     echo "例:   $0 output/gen3d chair --prompt \"一把中世纪木椅\"" >&2
+    echo "      (gen3d_static.sh 生成静态模型; 带骨骼走 gen3d_skeleton.sh)" >&2
     exit 1
 fi
 OUTPUT_DIR="$1"; shift
@@ -50,13 +53,13 @@ echo ""
 echo "==> 0. 编译 gen3d_cmd + jpov_model_viewer"
 cd "$PROJECT_DIR"
 # 静默成功，出错时输出日志尾部
-if ! bazel build //tools/jpov/gen3d:gen3d_cmd \
+if ! bazel build //tools/jpov/gen3d/static:gen3d_cmd \
     //tools/jpov:jpov_model_viewer 2>/tmp/gen3d_bazel_err.log; then
     echo "bazel 编译失败，日志尾部:" >&2
     tail -30 /tmp/gen3d_bazel_err.log >&2
     exit 1
 fi
-GEN3D_CMD="$PROJECT_DIR/bazel-bin/tools/jpov/gen3d/gen3d_cmd"
+GEN3D_CMD="$PROJECT_DIR/bazel-bin/tools/jpov/gen3d/static/gen3d_cmd"
 VIEWER="$PROJECT_DIR/bazel-bin/tools/jpov/jpov_model_viewer"
 
 # ---- 步骤1: gen3d_cmd 生成 GLB（额外传 --output_dir/--name）+ 捕获产物路径 ----

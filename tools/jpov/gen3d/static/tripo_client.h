@@ -23,7 +23,7 @@
 
 #include <string>
 
-#include "tools/jpov/gen3d/gen3d_config.h"
+#include "tools/jpov/gen3d/static/gen3d_config.h"
 
 namespace jpov {
 namespace gen3d {
