@@ -6,6 +6,9 @@
 > 配套总架构见 `jpov_crowd_instancing_arch.md`。
 
 成立日期: 2026-09-08(Danis 逐一敲定,勿当论文,照此编码)
+> 修订 22:55 方案甲定稿: inverse_bind 不进 GPU 独立存储, 改 CPU 烘焙折入 pose atlas
+>   (行业共识: GPU Gems 3 Ch.2 / VAT 教程 — palette.skinningMatrix[j]=globalPose[j]×inverseBind[j]
+>    CPU 先乘好, 纹理只存“最终肤矩阵”, shader 每骨一次点采样). 见下方 §3' 方案甲。
 
 ---
 
@@ -41,7 +44,7 @@
 - **单个 pose 的尺寸**:每节一个 4×4 矩阵 = 4 个 RGBA texel 排成一列;一行放完某骨架
   全部 bone → pose 宽 = `bone_count × 4` texel。(biped 23 骨 → 92 texel 宽。)
 - **每行放几个 pose**:`pose_per_row = floor(2048 / (4 * bone_count))`
-  (23 骨 → 44 pose/行)。行尾 2048 − pose_per_row×4×bone_count 的 padding **不使用**。
+  (23 骨 → 22 pose/行)。行尾 2048 − pose_per_row×4×bone_count 的 padding **不使用**。
 - **对齐铁律**:pose 宽 `4×bone_count` 恒能整除行宽排布 → **每个 pose 整段落在同一行,
   绝不跨行**(行宽是 pose 宽的整数倍,行尾直接留白),无 fragment 拆分。
 - **容量**:单张 atlas `≈ floor(2048²/(4×bone_count))`(23 骨 ≈ 45,590 pose),远超业务
@@ -51,27 +54,46 @@
 
 ---
 
-## 3. 数据分工(谁在骨架级共享 / 谁 per-instance)
+## 3. 数据分工 —— 方案甲定稿(2026-09-08 22:55)
 
-蒙皮所需的每帧骨骼态由两块拼成,**分工不同**:
+原 §3 初版曾写 "pose 存相对根的 JointMatrix × SSBO 里的 inverse_bind"(即 inverse_bind 独立
+constant)。但查工程 GL 层后发现 **SSBO/UBO 在本 Project 不可移植**(MinGW gl_loader 无
+`glBindBufferBase`/任何 SSBO 别名;Linux 也是裸 `<GL/gl.h>`+glibc 原型, 无 glew/glad;现成只有
+glBindBuffer/glBufferData 当 VBO/EBO、glTextureData、glTexSubImage2D、glUniformMatrix4fv)。
+故走**方案甲 = 业界把 inverse_bind 折进 pose bake 的主流做法**:
+
+### 方案甲 — inverse_bind 由 CPU 在烘焙期折入 pose atlas,不进 GPU 独立存储
+- **蒙皮所需的“最终肤矩阵”** baked 成 atlas 每 pose 每骨:
+  `mappedMatrix(bone, pose) = jointWorld(bone, pose) × inverseBind(bone)`
+  (CPU 沿骨架树解出每骨相对角色根的 jointWorld 后, 乘上骨架级逆绑定, 再落 atlas 行)。
+- GPU 只持有**一张 pose atlas 纹理**(RGBA32F 2048²), 无独立 inverse_bind 资源。蒙皮 VS 每骨
+  只要**一次点采样** atlas 得该 (pose, bone) 的最终矩阵, 直接 Σ weight·M·v; 无需再读
+  inverse_bind(已被 CPU 乘进去)。
+- 这正是 GPU Gems 3 Ch.2 / 各 VAT 教程的 `palette.skinningMatrix[j]=globalPose[j]×inverseBind[j]`。
+- inverse_bind 作为**骨架级 CPU 持有**(构造时传入 / LoadGltfSkeleton 读出), 只用于烘焙。
+- 若某骨架未带 inverse_bind(手写/单位), 烘焙时按需用单位阵或沿树自算 rest 逆 —— 现状
+  保留可选覆盖(见 skeleton_types.h SkeletonType.invserse_bind 为空语义)。
 
 | 数据 | 归属 | 载体 | 说明 |
 |---|---|---|---|
-| **inverse_bind**(逆绑定,rest 下每关节相对角色原点逆阵) | **骨架级,全 instance 共享,一次上传** | **SSBO/UBO(constant,非 per-instance)** | 骨架固有不变。绝不让每个 instance 各自背一份(23 骨=1.4KB,若 per-instance×1000 人=1.4MB 纯浪费)。 |
-| **pose 的 JointMatrix**(绑定后每帧/每姿态驱动角色根的矩阵) | 骨架级烘焙成 **pose atlas 纹理** | RGBA32F 2D atlas(§2) | 骨架级一次烘焙,instance 只以"行号"引用。 |
-| 该 instance 用哪个 pose / 插值 | **per-instance** | per-instance attribute | 传 pose 的**(row, col)行列 offset** + ratio,不给矩阵。 |
+| **inverse_bind** | 骨架级 CPU 持有 | 不单独上 GPU | 只作烘焙乘数, 折入 atlas 后 render 不见它 |
+| **映射后的最终肤矩阵**(= jointWorld×inverseBind) | 骨架级烘焙成 **pose atlas** | RGBA32F 2D atlas(§2) | CPU 先乘好 inverse_bind; instance 以行号引用 |
+| 该 instance 用哪个 pose / 插值 | **per-instance** | per-instance attribute | 传 pose (row,col) offset + ratio, 不给矩阵 |
 
-**蒙皮链**:per-instance 行号 → atlas 查该 bone 的 pose JointMatrix
-× SSBO 里的 inverse_bind × rest 顶点 → Σ weight·(...)。
+**蒙皮链(方案甲)**:per-instance 行号 → atlas 点采样得 (pose,bone) 最终肤矩阵 M →
+Σ weight·(M×v)。VS 不需另一处取 inverse_bind(y CPU 已折入)。
+
+⚠️ 注:运行时若要在两个 pose **之间**插值(prace ratio),先各自从 atlas 取 pose_a/pose_b 的
+矩阵、shader 里逐骨 lerp 两矩阵后再蒙皮 —— 语义与 09-07 双 pose 插值一致(都是对肤矩阵 lerp)。
 
 ### 关键优化(成本定论,已消的担忧)
 - **行列 offset 是 per-instance,不是每顶点**:1000 个 instance 只有 1000 组 pose 引用,
-  故把 `pose_idx→(row,col)` 的 divmod 在 **CPU 端每 instance 一次**算好、作为 per-instance
-  整数行列传进 VS;**VS 全程零除法**,蒙皮 body(取 4 bone×4 texel + mat·vec)两布局一致。
-- **VS 本来只读"该顶点被影响的 ≤4 骨"**(loc3 的 joints 已带 bone 索引),不是全 23 骨遍历;
-  每顶点最多 16 次 RGBA32F texelFetch,这是最小集合,layout 无关,不可再砍。
-- 故 2D tile vs 窄行:多付出的仅每 instance 一次 CPU divmod(≈0)+ 更高的 2D cache 命中,
- 换来不撞高度上限 + 大容量,净赚 —— **定 2D tile(§2 布局)**。
+  故把 `pose_idx―(row,col)` 的 divmod 在 **CPU 端每 instance 一次**算好、作为 per-instance
+  整数行列传进 VS;**VS 全程零除法**。
+- **VS 只读该顶点被影响的 ≤4 骨**(loc3 joints 带 bone 索引),非全 23 遍历;每顶点最多
+  16 次 RGBA32F texelFetch,layout 无关,不可再砍。
+- 2D tile 多付出的仅每 instance 一次 CPU divmod(≈0)+ 更高 2D cache 命中, 换来不撞高度
+  上限+大容量, 净赚 —— 定 2D tile(§2)。
 
 ---
 
@@ -79,6 +101,8 @@
 
 > 骨骼动画纹理(SkeletonManager 所有) = 固定 **2048×2048 RGBA32F** pose atlas:
 > 行宽容纳 `floor(2048/(4*bone_count))` 个 pose,每个 pose 宽 `4*bone_count` texel
-> (每骨一个 4×4 矩阵 = 4 texel),**整 pose 不跨行**,行尾 padding 不使用。inverse_bind
-> 走 **骨架级 SSBO/UBO(constant)** 而非 per-instance;instance 的每个 pose 用 CPU 端
-> 预算好的 **(row,col) 行列 offset** 作 per-instance attribute 传入,VS 零除法。
+> (每骨一个 4×4 矩阵 = 4 texel),**整 pose 不跨行**,行尾 padding 不使用。atlas 里每
+> (pose,bone) 存的是 **最终肤矩阵 jointWorld(pose,bone)×inverseBind(bone)**(CPU 在烘焙期
+> 已把骨架级 inverse_bind 折入, GPU 无独立逆绑定资源);蒙皮 VS 每骨一次点采样即得, 直接
+> Σ weight·M·v。instance 的每个 pose 用 CPU 端预算好的 **(row,col) 行列 offset** 作
+> per-instance attribute 传入,VS 零除法。(方案甲,不采 SSBO —— 工程 GL 层不可移植。)

@@ -6,21 +6,22 @@
 //
 // SkeletonManager 职责（对照架构文档 docs/jpov_crowd_instancing_arch.md §6.2-B / §8 #2，
 // 布局/分工契约定稿见 docs/jpov_skeleton_manager_design.md）：
-//   - 构造即绑定一种骨架（SkeletonType）+ 一整套 pose。GPU 资源两块（分工见 §3 设计文档）：
-//     ① **inverse_bind 逆绑定矩阵** → 骨架级 SSBO/UBO（constant 上传，全体 instance 共享——
-//        绝不放 per-instance，23 骨=1.4KB，若 ×1000 人每人背一份=1.4MB 纯浪费）。
-//     ② **骨骼动画纹理（pose atlas）** → RGBA32F 固定 2048×2048 2D 纹理：每个 pose 宽
+//   - 构造即绑定一种骨架（SkeletonType）+ 一整套 pose。GPU 资源只有**一张**骨骼动画纹理
+//     （pose atlas），逆绑定不进 GPU 独立存储 —— 方案甲：CPU 在烘焙期沿骨架树把每 pose 的
+//     jointWorld(相对根) × 骨架级 inverseBind 乘好成“最终肤矩阵”再落 atlas 行，蒙皮 VS
+//     每骨一次点采样即得（业界 palette.skinningMatrix[j]=globalPose[j]×inverseBind[j]，
+//     见 docs/jpov_skeleton_manager_design.md §3 方案甲）。
+//     **骨骼动画纹理（pose atlas）** → RGBA32F 固定 2048×2048 2D 纹理：每个 pose 宽
 //        bone_count×4 texel（每骨一个 4×4 矩阵=4 texel，23 骨=92），每行 floor(2048/(4*bone))
-//        → 个 pose（23 骨=44 pose/行），**整 pose 不跨行**（行宽=pose 宽整数倍，行尾 padding
+//        → 个 pose（23 骨=22 pose/行），**整 pose 不跨行**（行宽=pose 宽整数倍，行尾 padding
 //        不用）；capacity≈floor(2048²/(4*bone))（23 骨≈45,590 pose，远超业务 ~1800）。
 //        2D 平铺而非"一行一 pose 高窄条"，故高度不撞保守上限、海量 pose 无压力。
 //   - 析构释放全部 GL。**无 Register/Release/自增 id** —— 资源在构造/析构锁死。
-//   - 每个 pose 沿骨架树解算成相对角色根的 JointMatrix 落 atlas；运行时实例只在
-//     {pose_a, pose_b, ratio} 间插值（pose_a/b 引用 atlas 中某 pose 的行列，见
+//   - 运行时实例只在 {pose_a, pose_b, ratio} 间插值（pose_a/b 引用 atlas 中某 pose 的行列，见
 //     SkinnedInstanceState）：**per-instance 传 CPU 预算好的 (row,col) 行列 offset**（divmod
 //     在 CPU 每 instance 一次算，VS 全程零除法），蒙皮 VS 查这两行 mat4、逐骨 lerp 后套 4-bone
 //     蒙皮。VS 只读该顶点被影响的 ≤4 骨，每顶点最多 16 次 RGBA32F texelFetch。
-//   - 蒙皮链 = Atlas_pose_bone(JointMatrix) × SSBO_inverse_bind × rest 顶点 → Σ weight·(...)。
+//   - 蒙皮链（方案甲）= Σ weight·(Atlas 里 (pose,bone) 最终肤矩阵 × rest 顶点)。
 //
 // —— 所有权 / 可见性（v3，2026-09-07 与 Danis 收敛）——
 //   - SkeletonManager 是 renderer/内部(GPU)私有的资源对象：**对 JPOV 用户不可见**。
@@ -33,9 +34,9 @@
 //   pose 与骨架强绑；不同骨架 = 不同骨数量/拓扑/骨骼纹理，跨骨架插值语义无意义且要读两张纹理，
 //   故实例的 pose_a/pose_b 只能在同一种骨架（同一个 SkeletonManager）内。见 skeleton_types.h 铁律。
 //
-// ⚠️ 实现状态（2026-09-08 准备 PR）：头文件契约与 GpuHandles 已定稿；GL 上传 / pose 烘焙 /
-//   逆绑定 SSBO 在 skeleton_manager.cc 落地；instanced 蒙皮 draw 交给下个 PR（renderer 消费
-//   kSkinnedMesh / 蒙皮 VS）。本文件只负责资源层的 GPU 持有 + 句柄出口。
+// ⚠️ 实现状态（2026-09-08 准备 PR）：头文件契约与 GpuHandles 已定稿；pose atlas 烘焙/上传
+//   （方案甲折入 inverse_bind）在 skeleton_manager.cc 落地；instanced 蒙皮 draw 交给下个
+//   PR（renderer 消费 kSkinnedMesh / 蒙皮 VS）。本文件只负责资源层的 GPU 持有 + 句柄出口。
 
 #ifndef JPOV_SRC_SKELETON_SKELETON_MANAGER_H_
 #define JPOV_SRC_SKELETON_SKELETON_MANAGER_H_
@@ -60,34 +61,34 @@ inline constexpr int kPoseAtlasDim = 2048;
 class SkeletonManager {
 public:
     // renderer 批量蒙皮时要 bind 到 shader 的句柄集合：**本类不自己 load 自己**，
-    // 只老实暴露底层 GPU 资源句柄，由 renderer 在 DrawMeshWithSkeleton 里取用并 bind。
-    //   pose_atlas_tex : RGBA32F 2048×2048 的骨骼动画纹理（持有一整包 pose），
-    //                    inverse_bind 在单独 constant（见 inverse_bind_ssbo）。
-    //   inverse_bind_ssbo : 骨架级逆绑定矩阵 constant（SSBO），全骨架 instance 共享。
-    //   bone_count  : 该骨架关节数（= type.bone_count = pose 宽 /4 = 每 pose texel 行像素 /4）。
+    // 只老实暴露底层 GL 资源句柄，由 renderer 在 DrawMeshWithSkeleton 里取用并 bind。
+    // 方案甲：GPU 只有**一张** pose atlas 纹理（inverse_bind 已被 CPU 在烘焙期折入每 pose
+    // 行的“最终肤矩阵”，无独立逆绑定 GPU 资源 —— 工程 GL 层无 SSBO/UBO range 可用）。
+    //   pose_atlas_tex : RGBA32F 2048×2048 atlas。atlas 每 (pose 行, bone 列 4×4) 存的是最终
+    //                    肤矩阵 jointWorld(pose,bone)×inverseBind(bone)（CPU 已折入），
+    //                    蒙皮 VS 每骨一次点采样即得，直接 Σ weight·M·v。
+    //   bone_count  : 该骨架骨数（= type.bone_count = 每 pose 宽 /4 = 一行 4×4 矩阵个数）。
     //   pose_per_row: 一行容纳的 pose 数 = floor(2048 / (4*bone_count))。CPU 端用它把
     //                 pose_idx divmod 成 (row, col) 行列 offset 作 per-instance 传入。
     //   由 renderer 在批量 draw 时从 SkeletonManager 取 GpuHandles 并 bind；本结构体本身
     //   GL-free（只存 GLuint），不提供资源生命周期（生命周期归 SkeletonManager）。
     struct GpuHandles {
-        unsigned int pose_atlas_tex = 0;    // RGBA32F 2D pose atlas 纹理 GLuint
-        unsigned int inverse_bind_ssbo = 0; // 骨架级逆绑定 SSBO GLuint
-        int bone_count = 0;                 // 该骨架骨数
-        int pose_per_row = 0;               // 每行 pose 数 = floor(2048/(4*bone_count))
+        unsigned int pose_atlas_tex = 0;  // RGBA32F 2D pose atlas（含折入 inverse_bind 的最终肤矩阵）
+        int bone_count = 0;    // 该骨架骨数
+        int pose_per_row = 0;  // 每行 pose 数 = floor(2048/(4*bone_count))
     };
 
-    // 构造：绑定一种骨架的【定义 + 全套 pose】，上传逆绑定 SSBO + 烘焙骨骼动画纹理。
+    // 构造：绑定一种骨架的【定义 + 全套 pose】，烘焙并上传骨骼动画纹理（pose atlas）。
     //   type : SkeletonType（内部即调 Validate()，joints 拓扑序合法、inverse_bind 尺寸对齐）。
-    //   poses: 该骨架的全部静态位姿关键帧。构造即把骨骼动画纹理烘焙并上传（atlas 里
-    //          每 pose 占一行内 bone_count×4 texel，行排按 pose_per_row 摊入 2048×2048）。
+    //   poses: 该骨架的全部静态位姿关键帧。构造即把每个 pose 沿骨架树解算成每骨 jointWorld
+    //          （相对角色根）× 骨架级 inverseBind → 折成“最终肤矩阵”烘焙上传（atlas 每 pose
+    //          占一行内 bone_count×4 texel，行排按 pose_per_row 摊入 2048×2048）。
     //   Pre-condition: GL context 已激活；type.Validate() 通过。
     //   ⚠️ 每个 pose 的 bone_count 应与 type.bone_count 一致（同一种骨架）。poses 总容量
-    //      不得超过 kPoseAtlasCapacity(type)（超→LOG(FATAL)，不 fallback）。
-    //   TODO(2026-09-08实现): GL 上传逆绑定 SSBO + 每 pose 沿骨架树解算 JointMatrix →
-    //     逐行烘焙成 2048×2048 atlas 上传；atlas 行排 + pose 行号→(row,col) 用 CpU divmod。
+    //      不得超过 kPoseAtlasCapacity()（超→LOG(FATAL)，不 fallback）。
     SkeletonManager(const SkeletonType& type, std::vector<SkeletonPose> poses);
 
-    // 析构：释放本 manager 持有的全部 GL 资源（逆绑定 SSBO、骨骼动画纹理）。
+    // 析构：释放本 manager 持有的 GL 资源（骨骼动画纹理）。
     ~SkeletonManager();
 
     SkeletonManager(const SkeletonManager&) = delete;

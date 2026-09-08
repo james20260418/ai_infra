@@ -71,6 +71,7 @@ cc_library(
     deps = [
         "//geom/common:quaternion",
         "//geom/common:vec",
+        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
 )
