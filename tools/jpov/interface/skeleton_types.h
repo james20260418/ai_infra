@@ -34,8 +34,10 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
+#include "geom/common/quaternion.h"
 #include "geom/common/vec.h"
 
 namespace jpov {
@@ -53,6 +55,9 @@ inline constexpr int kSkeletonNoParent = -1;
 struct SkeletonJoint {
     int   parent = kSkeletonNoParent;  // 父关节索引（= joints 中某 id）。根 = kSkeletonNoParent。
     Vec3f rest_offset;                 // rest(bind) 姿态下相对父关节的**局部平移**，描述骨架树形状。
+    // 关节名（如 "mixamorig:LeftArm"）。用于把外部来源（FBX loader / Mixamo 动画）与
+    // 本骨架做骨名对位 / sanity 对比（是否同一种骨架、骨对不对得上）。可为空（程序化骨架）。
+    std::string name;
     //
     // TODO(2026-09-06): rest 目前只建模平移，未含每关节 rest 朝向(SO(3)/四元素)。S0 人形
     //   通常只需把"每部位 mesh 绑到根/直链主轴"即可；要表达更真实骨骼(肩髋球窝、每骨头 rest
@@ -105,16 +110,22 @@ struct SkeletonType {
 //   也不能插值。因此 pose 从不单独注册/分发：它只作为构造时整包的一部分落在那一份
 //   SkeletonManager 里，天然不跨骨架。归属见 skeleton_manager.h。
 //
-// 数据表示取舍（2026-09-07 待点选，point4）：SkeletonPose 是**用户资产层**（要可读、可手写、
-// 可 retarget），理应收**每关节旋转**（四元素/欧拉，相对父链，而非整份矩阵）—— 由 CPU 烘焙端
-//   沿骨架树解算出相对根 JointMatrix 后落 atlas。但精确字节布局（四元素 vs 欧拉、有无根位移）
-//   尚未定，framework 阶段不把它锁死，等实现 PR 连四元素工具一起给完整容器。
-//   本成员仅立 meta；真正每关节姿态数据容器见下方 TODO。
+// 数据表示取舍（定稿 2026-09-08）：SkeletonPose 是**用户资产层**（要可读、可手写、可 retarget），
+//   因此收**每关节旋转（四元素，相对父）**，由 CPU 烘焙端沿骨架树解算出相对根 JointMatrix 后
+//   落 atlas（skeleton_manager.h 负责烘焙，本文件只定义资产格式）。一个 pose 严格从属某一份骨架
+//   （joint_rotation.size() == 该骨架 bone_count），每个顶点的 rest 平移由 joints tree 提供，
+//   pose 只驱动【旋转】；若动画/root-motion 带整体位移则由 root_offset 承载（纯原地动作默认为 0）。
 struct SkeletonPose {
     int bone_count = 0;   // 应 == 所用 SkeletonType::bone_count（同一种骨架）。
-    //
-    // TODO(2026-09-07): 每关节位姿数据容器（旋转 + 根位移），用户层可读、烘焙端转 mat4；
-    //   见 struct 注释数据表示取舍。框架阶段不锁格式，待实现 PR（配四元素/欧拉→mat4 工具）。
+
+    // 每关节相对其父关节的**旋转**（四元数，需整单位。索引与 SkeletonType::joints 对齐）。
+    // joint_rotation[i] = 从父关节系转到本关节系的 local 旋转(相对父)。
+    // 应为 size == bone_count（若含根且根无旋转可用 identity）。为空=走 rest(隐式全单位)。
+    // 非空但 size != bone_count 视为非法（烘焙端 LOG(FATAL)）。
+    std::vector<geom::Quaternion<float>> joint_rotation;
+
+    // 根(0 号关节)相对“角色原点”的位移 / root motion（通常 0）。纯原地动作/静态 pose 保持默认。
+    Vec3f root_offset{0.0f, 0.0f, 0.0f};
 };
 
 // ==================== 运行时实例状态 ====================
