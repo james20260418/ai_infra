@@ -74,3 +74,25 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+# Quaternion / 旋转工具（骨架 pose 用）。详见 quaternion.h 头部设计取舍。
+cc_library(
+    name = "quaternion",
+    hdrs = ["quaternion.h"],
+    deps = [
+        ":vec",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# Quaternion tests
+cc_test(
+    name = "quaternion_test",
+    srcs = ["quaternion_test.cc"],
+    deps = [
+        ":quaternion",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
