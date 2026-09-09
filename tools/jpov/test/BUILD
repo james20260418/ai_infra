@@ -104,9 +104,3 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
-        "@glog_static//:glog",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
-    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-)
