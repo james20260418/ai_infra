@@ -90,6 +90,21 @@ cc_library(
     linkstatic = 1,
 )
 
+# FbxLoader — FBX 骨骼动画源 → FBXClip（CPU 加载, 不碰 GL）
+cc_library(
+    name = "fbx_loader",
+    srcs = ["fbx_loader.cc"],
+    hdrs = ["fbx_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:animation_clip",
+        "//third_party/ufbx-static:ufbx",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # OrmUnpack — ORM 三通道拆包为独立灰度 PNG
 cc_library(
     name = "orm_unpack",
