@@ -53,7 +53,7 @@ renderer: RegisterSkeleton(SkeletonType, poses)→skeleton_id；DrawMeshWithSkel
 
 ## 4. 蒙皮 VS（本 PR 的 shader 部分）
 
-`src/skinning/skinned_mesh_renderer.h` → `kSkinnedVs`。
+`src/skeleton/skinning_shader.h` → `kSkinnedVs`。
 
 - 输入沿用 object3d PBR 完整版：`aPos(0)/aNormal(1)/aTexCoord(2)/aTangent(5)`；
   另读 `aJoint(3, ivec4)`、`aWeight(4, vec4)`（mesh_manager VBO 已备好 loc3/4）。
@@ -81,7 +81,7 @@ renderer: RegisterSkeleton(SkeletonType, poses)→skeleton_id；DrawMeshWithSkel
 
 ## 5. bind pose cover（T-rest 模板）
 
-`src/skinning/mixamo_bind_pose.h` → `MakeMixamoBindPose()`。
+`src/skeleton/skinning_bind_pose.h` → `MakeMixamoBindPose()`。
 
 - 返回 `SkeletonPose`（bone_count=23，`joint_rotation[i]` = 每骨 local 旋转四元数 xyzw）。
   数值从 mixamo_male.glb 每关节 node.local.rotation 原样摘出（含 `Root` 轴修正 -90°X）。

@@ -24,8 +24,8 @@
 // M1 只做「单 pose 静态」（可退化成同 pose 或仅一个实例），不铺 instancing ——
 // instancing 与两 pose 插值交给后续。每步独立可测、崩溃面小。
 
-#ifndef JPOV_SRC_SKINNING_SKINNED_MESH_RENDERER_H_
-#define JPOV_SRC_SKINNING_SKINNED_MESH_RENDERER_H_
+#ifndef JPOV_SRC_SKELETON_SKINNING_SHADER_H_
+#define JPOV_SRC_SKELETON_SKINNING_SHADER_H_
 
 namespace jpov {
 
@@ -116,4 +116,4 @@ void main() {
 
 }  // namespace jpov
 
-#endif  // JPOV_SRC_SKINNING_SKINNED_MESH_RENDERER_H_
+#endif  // JPOV_SRC_SKELETON_SKINNING_SHADER_H_

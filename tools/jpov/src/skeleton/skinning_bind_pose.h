@@ -17,8 +17,8 @@
 //
 // 后续健全时：改为从 skin node local 干净提取（去掉本临时表），并以 FBX 动画覆盖单测。
 // 合入前先核对本表与 mixamo_male.glb 实测一致（见本文件末尾数据源注释）。
-#ifndef JPOV_SRC_SKINNING_MIXAMO_BIND_POSE_H_
-#define JPOV_SRC_SKINNING_MIXAMO_BIND_POSE_H_
+#ifndef JPOV_SRC_SKELETON_SKINNING_BIND_POSE_H_
+#define JPOV_SRC_SKELETON_SKINNING_BIND_POSE_H_
 
 #include <vector>
 
@@ -71,7 +71,7 @@ inline SkeletonPose MakeMixamoBindPose() {
 
 }  // namespace jpov
 
-#endif  // JPOV_SRC_SKINNING_MIXAMO_BIND_POSE_H_
+#endif  // JPOV_SRC_SKELETON_SKINNING_BIND_POSE_H_
 
 // 数据源：mixamo_male.glb（assets/test/object3d/mixamo_male）。实测每关节 node rotation(xyzw)
 // 即上表（2026-09-09 用 ufbx/校验脚本抓取）。骨架树父链含 Root(0)→Hips(1)→...，
