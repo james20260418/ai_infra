@@ -23,9 +23,11 @@
 //   - 顶点颜色: COLOR_0
 //   - sparse accessor: tinygltf 内部已展开，本 loader 无需额外处理
 //
-// 坐标系：
-//   glTF 用 Y-up，JPOV 用 Z-up（OBJ loader 同）。本 loader 在顶点阶段
-//   将 Y-up → Z-up 变换: 交换 y/z 分量，无缩放。
+// 坐标系（JPOV 模型局部为 y-up：局部 +Y→世界 up，见 render_command.h 变换约定）：
+//   glTF 规范本身 Y-up。本 loader 在顶点阶段做的映射 (x,-z,y) 把 glTF 的 Y 装进局部 Z ——
+//   对“纯正 glTF y-up 内容”意味着它的上会躺到局部 Z（前），故此处仅是一段有历史包袱的
+//   顶点映射，**不宜称为 “JPOV 用 Z-up”**；轴对齐/渲染方向留给放置层(up/front)与后续
+//   glTF-orientation 处理统一，勿据此断言 JPOV 坐标是 Z-up。
 //
 // UV 约定：
 //   glTF 规范: TEXCOORD_0 原点 (0,0) = 图片左上角，V 向下增大，

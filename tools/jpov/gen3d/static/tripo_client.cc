@@ -1,5 +1,5 @@
 // JPOV gen3d — Tripo3D REST 客户端实现（见 tripo_client.h 协议说明）
-#include "tools/jpov/gen3d/tripo_client.h"
+#include "tools/jpov/gen3d/static/tripo_client.h"
 
 #include <cerrno>
 #include <chrono>  // NOLINT(build/c++11) 轮询计时

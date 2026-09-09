@@ -44,17 +44,17 @@ struct GltfPrimitive {
 struct GltfObject {
     std::vector<GltfPrimitive> primitives;
 
-    // 模型在 loader 输出坐标系（Z-up，同渲染时 DrawGltfObject 的模型局部坐标）
-    // 下的轴对齐包围盒。由 Renderer::LoadGltf 在加载时遍历所有 primitive 的
-    // 顶点计算合并，供上层（如查看器）做相机自适应、剔除等用，无需再碰 CPU 几何。
+    // 模型在 loader 产出的**网格局部坐标**下的轴对齐包围盒（即 DrawGltfObject 施加上 up/front
+    // 旋转前的局部框架，坐标轴方向取决于进货源内容，勿以“Z-up/Y-up”概括 —— JPOV 约定
+    // 局部 +Y→世界 up，见 render_command.h）。由 Renderer::LoadGltf 在加载时遍历所有
+    // primitive 顶点计算合并，供上层（查看器）做相机自适应/剔除等用，无需再碰 CPU 几何。
     //
     // 约定：
     //   - 模型非空时，本包围盒覆盖全部顶点（min/max 各分量取所有顶点极值）。
     //   - 模型为空（无 primitive）时不可用：bounds_valid == false，min/max 未定义。
     //
-    // 坐标为 loader 输出的模型局部坐标（Y-up→Z-up 已变换），与
-    // DrawGltfObject(obj, center, up, front) 的模型空间一致：若以恒等
-    // 摆放（center=0, up=+Y, front=+Z），则包围盒即模型在世界坐标的范围。
+    // 坐标为 loader 产出的网格局部坐标；若以恒等摆放（center=0, up=+Y, front=+Z）
+    // 经 DrawGltfObject 放置，本包围盒即该局部框架在世界坐标里的范围。
     float bounds_min[3] = {0.0f, 0.0f, 0.0f};
     float bounds_max[3] = {0.0f, 0.0f, 0.0f};
     bool  bounds_valid = false;

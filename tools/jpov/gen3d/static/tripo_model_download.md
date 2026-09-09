@@ -1,6 +1,6 @@
-# Tripo 模型下载说明（gen3d 的一部分）
+# Tripo 模型下载说明（gen3d/static 的一部分）
 
-> 用途：这是 `gen3d` 工具里「生成静态 3D 模型 GLB」这一段的**实战说明**，
+> 用途：这是 `gen3d/static` 工具里「生成静态 3D 模型 GLB」这一段的**实战说明**，
 > 记录 Tripo API 从提交任务到下载模型文件的正确姿势 + 踩过的坑。
 > 它不是独立 skill——强烈依赖本仓库 gen3d_cmd / tripo_client / jpov 渲染链，
 > 离开代码仓无法单独使用。跟走代码，看文档前先读 `gen3d_config.h` 顶部
@@ -9,7 +9,7 @@
 ## 一、整条链路顺序（谁调谁）
 
 ```
-gen3d.sh <output_dir> <name> --prompt "..."
+gen3d_static.sh <output_dir> <name> --prompt "..."
   │── bazel build gen3d_cmd + jpov_model_viewer
   │── gen3d_cmd generate          ← 提交 → 轮询 → 下载 GLB（本说明重点）
   │       （Tripo REST, 见下节）
@@ -80,12 +80,12 @@ gen3d.sh <output_dir> <name> --prompt "..."
 
 ```bash
 # 直接调 gen3d_cmd（只生成+下载，不出图）
-./bazel-bin/tools/jpov/gen3d/gen3d_cmd generate \
+./bazel-bin/tools/jpov/gen3d/static/gen3d_cmd generate \
     --name indoor_column --output_dir output/gen3d \
     --prompt "浅白大理石圆立柱配方形基座" --triangles 3000 --real_size
 
 # 全链一次跑（生成+下载+JPOV 渲染 4 视图+打印产物清单）
-bash tools/jpov/gen3d.sh output/gen3d indoor_column --prompt "……"
+bash tools/jpov/gen3d_static.sh output/gen3d indoor_column --prompt "……"
 
 # 手动验证下载/刷新生效（不重生成，用旧 task_id）
 TASK=某task_id

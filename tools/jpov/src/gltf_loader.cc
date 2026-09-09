@@ -9,7 +9,7 @@
 //   2. 定位第一个 mesh → 第一个 primitive
 //   3. 提取 POSITION / NORMAL / TEXCOORD_0 accessor → 顶点数组
 //   4. 展开索引缓冲（若有 indices accessor）
-//   5. 坐标系变换：glTF Y-up → JPOV Z-up（交换 y/z）
+//   5. 顶点坐标映射（见 ParsePrimitive 注；别写 “JPOV Z-up”）
 //   6. 推导 tangent（复用 OBJ loader 的 ComputeTangents）
 //   7. 提取材质贴图路径（相对于 glTF 文件目录）
 
@@ -322,7 +322,7 @@ std::string ResolveImagePath(const tinygltf::Model& model, int image_index,
 // 解析流程（纯 CPU，无 GL）：
 //   1. 提取 POSITION / NORMAL / TEXCOORD_0 accessor
 //   2. 索引缓冲展开
-//   3. Y-up → Z-up 坐标变换
+//   3. 顶点坐标映射（glTF → loader 局部）
 //   4. 推导 tangent
 //   5. 提取材质贴图路径（相对于 glTF 文件目录 或 内嵌临时文件）
 bool ParsePrimitive(const tinygltf::Model& model,
@@ -344,7 +344,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
     }
     const size_t vcount = pos_flat.size() / 3;
 
-    // 转为 Vec3f 并做坐标系变换：glTF Y-up → JPOV Z-up（交换 y, z）
+    // 转为 Vec3f 顶点：历史映射 (x,-z,y) 把 glTF 的 Y 装进 loader 局部 Z —— 仅一段顶点映射，
+    // **勿称 “JPOV Z-up”**（JPOV 模型局部 up=+Y，见 render_command.h 与 gltf_loader.h 坐标契约）
     out_mesh->positions.resize(vcount);
     for (size_t i = 0; i < vcount; ++i) {
         const float gx = pos_flat[i * 3 + 0];

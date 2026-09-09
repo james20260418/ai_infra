@@ -156,6 +156,16 @@ filegroup(
     visibility = ["//tools/jpov:__subpackages__"],
 )
 
+# 带骨骼(Tripo Auto Rig spec=mixamo)人形 GLB——gen3d/skeleton 真调资材。
+# mixamorig 23 关节 + JOINTS_0/WEIGHTS_0 蒙皮权重; 无预烘焙动画帧。
+# 用途: loader 接 skins 的权威资材 + SkeletonType::Mixamo 模板 dump 基准
+# (渲染相关 test 在后续 PR 挂接, 本 filegroup 先就位供引用)。
+filegroup(
+    name = "mixamo_male_glb_data",
+    srcs = glob(["mixamo_male/*"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
 # ============================================================================
 # Gold Image — glTF Lantern (内嵌贴图 GLB) PBR 渲染验证
 # ============================================================================

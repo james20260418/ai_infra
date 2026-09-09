@@ -1,4 +1,10 @@
-# gen3d — 文本 prompt → 静态 PBR GLB → JPOV 渲染验证（自动生成 3D 模型工具链）
+# gen3d/static — 文本 prompt → 静态 PBR GLB → JPOV 渲染验证（自动生成静态 3D 模型工具链）
+#
+# gen3d 顶层目录拆两层：static/（本目录，静态 PBR 模型）与 skeleton/（带骨骼，见 sibling）。
+# 本目录是迁移自旧 tools/jpov/gen3d/ 的内容，bazel target 路径从
+#   //tools/jpov/gen3d:gen3d  /  :gen3d_cmd
+# 变为
+#   //tools/jpov/gen3d/static:gen3d  /  :gen3d_cmd
 #
 # 库结构（延续 gen3d_config.h 的供应商无关设计）：
 #   gen3d_config.h — Gen3dConfig（已有，纯语义，不绑供应商）

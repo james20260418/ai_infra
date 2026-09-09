@@ -27,6 +27,7 @@
 #include <unordered_map>
 
 #include "tools/jpov/interface/gpumesh.h"
+#include "tools/jpov/interface/id_allocator.h"
 #include "tools/jpov/interface/mesh.h"
 
 namespace jpov {
@@ -78,8 +79,9 @@ private:
     // 释放单个 GPUMesh 的全部 GL 资源（VAO + 所有非 0 VBO + EBO）。
     static void DestroyGLMesh(GPUMesh* mesh /*inout*/);
 
-    // id counter（递增分配，0 保留为「无效 mesh_id」）
-    uint32_t next_id_ = 1;
+    // mesh_id 分配：IdAllocator（freelist/LIFO 复用 + live 集防回绕踩踏）。0 = 无效 mesh_id。
+    //   原裸 uint32 next_id_++ 不回填空号、回绕会踩 live —— 换复用分配器;已释放 id 立即回到池。
+    IdAllocator id_alloc_;
 
     // mesh_id → GPUMesh
     std::unordered_map<uint32_t, GPUMesh> meshes_;

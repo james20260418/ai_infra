@@ -26,6 +26,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//third_party/stb:stb_image",
+        "//tools/jpov/interface:id_allocator",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [
@@ -45,6 +46,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:gpumesh",
+        "//tools/jpov/interface:id_allocator",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
     ] + select({
@@ -82,6 +84,21 @@ cc_library(
         "//tools/jpov/src:orm_unpack",
         "//third_party/tinygltf",
         "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# FbxLoader — FBX 骨骼动画源 → FBXClip（CPU 加载, 不碰 GL）
+cc_library(
+    name = "fbx_loader",
+    srcs = ["fbx_loader.cc"],
+    hdrs = ["fbx_loader.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:animation_clip",
+        "//third_party/ufbx-static:ufbx",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
