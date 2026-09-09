@@ -533,6 +533,169 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     glPopAttrib();
 }
 
+
+// ==================== DrawObject3DInstancedWithSkeleton ====================
+// 带骨渲染（Object3DRenderer 升级）：抄 DrawObject3D 本体，改成用蒙皮 program 画，
+// 并加骨纹理(pose atlas) + per-instance pose/uniform。材质纹理绑定 / tile / 光照 /
+// glPushPopAttrib 与 DrawObject3D 完全一致 —— 那套已被验证（右边静态人亮）。
+// 差异就三处：① 用 skinned_prog(不含 prog/prog_full 的 any_tex 选择)；
+//             ② 绑 pose_atlas(TEXTURE12) + uBoneCount；
+//             ③ 逐 instance 设 uMVP(=proj*view*model, 见 DrawObject3D)/uModel/uPoseRow/uPoseCol 再 draw；
+//               （材质纹理绑定放实例循环外，material 同命令内所有实例一致）
+void Object3DRenderer::DrawObject3DInstancedWithSkeleton(
+    const SkinnedMeshCommand& cmd,
+    const RenderCommandList& cmds,
+    MeshManager& mesh_mgr,
+    TextureManager& texture_mgr,
+    ShaderManager& shader_mgr,
+    const float mvp[16],
+    unsigned int skinned_prog,
+    const SkeletonManager::GpuHandles& gh,
+    unsigned int tile_index_tex) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawObject3DInstancedWithSkeleton: mesh_id "
+                           << cmd.mesh_id << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+        << "DrawObject3DInstancedWithSkeleton: mesh_id=" << cmd.mesh_id
+        << " 需要 kNormal 属性";
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kJoints))
+        << "DrawObject3DInstancedWithSkeleton: mesh_id=" << cmd.mesh_id
+        << " 需要 kJoints 属性（蒙皮网格）";
+    CHECK(!cmd.instances.empty()) << "SkinnedMesh instance 数组不能为空";
+
+    const bool any_tex =
+        (cmd.material.base_color_tex != 0) ||
+        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
+        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
+        (cmd.material.emissive_tex != 0) ||
+        (cmd.material.ao_tex != 0) ||
+        (cmd.material.normal_tex != 0);
+    const bool use_normal_map = (cmd.material.normal_tex != 0);
+
+    glPushAttrib(GL_ENABLE_BIT);
+    glUseProgram(skinned_prog);
+    unsigned int sp = skinned_prog;
+
+    // 统一 baseColor / 法线等材质 uniform（与 DrawObject3D 一致）。
+    glUniform3f(glGetUniformLocation(sp, "uBaseColor"),
+                cmd.material.base_color.r, cmd.material.base_color.g,
+                cmd.material.base_color.b);
+    glUniform1f(glGetUniformLocation(sp, "uMetallic"), cmd.material.metallic);
+    glUniform1f(glGetUniformLocation(sp, "uRoughness"), cmd.material.roughness);
+    glUniform3f(glGetUniformLocation(sp, "uEmissive"),
+                cmd.material.emissive.r, cmd.material.emissive.g,
+                cmd.material.emissive.b);
+    glUniform1f(glGetUniformLocation(sp, "uAO"), cmd.material.ao.r);
+    glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+    glUniform1i(glGetUniformLocation(sp, "uHasMetallicTex"), 0);
+    glUniform1i(glGetUniformLocation(sp, "uHasRoughnessTex"), 0);
+    glUniform1i(glGetUniformLocation(sp, "uHasEmissiveTex"), 0);
+    glUniform1i(glGetUniformLocation(sp, "uHasAoTex"), 0);
+    glUniform1i(glGetUniformLocation(sp, "uHasNormalTex"), 0);
+    glUniform1f(glGetUniformLocation(sp, "uNormalScale"), 1.0f);
+    glUniform3f(glGetUniformLocation(sp, "uCameraPos"),
+                cmds.camera.position.x(), cmds.camera.position.y(),
+                cmds.camera.position.z());
+    glUniform1f(glGetUniformLocation(sp, "uCameraNear"), cmds.camera.near);
+
+    if (any_tex) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+            << "蒙皮材质带纹理但 mesh 无 kUV，无法采样";
+    }
+    if (use_normal_map) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
+            << "蒙皮 normal_tex 非 0 但 mesh 无 kTangent";
+    }
+
+    // ---- 材质纹理绑定（同 DrawObject3D：baseColor1/metallic2/roughness3/emissive4/ao5/normal6）----
+    if (cmd.material.base_color_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+        CHECK_NE(gl_tex, 0u) << "蒙皮 base_color_tex 未注册";
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), 1);
+        glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+    }
+    if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.metallic_tex);
+        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uMetallicTex"), 2);
+        glUniform1i(glGetUniformLocation(sp, "uHasMetallicTex"), 1);
+    }
+    if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.roughness_tex);
+        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uRoughnessTex"), 3);
+        glUniform1i(glGetUniformLocation(sp, "uHasRoughnessTex"), 1);
+    }
+    if (cmd.material.emissive_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.emissive_tex);
+        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uEmissiveTex"), 4);
+        glUniform1i(glGetUniformLocation(sp, "uHasEmissiveTex"), 1);
+    }
+    if (cmd.material.ao_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.ao_tex);
+        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uAoTex"), 5);
+        glUniform1i(glGetUniformLocation(sp, "uHasAoTex"), 1);
+    }
+    if (cmd.material.normal_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.normal_tex);
+        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uNormalTex"), 6);
+        glUniform1i(glGetUniformLocation(sp, "uHasNormalTex"), 1);
+        glUniform1f(glGetUniformLocation(sp, "uNormalScale"), cmd.material.normal_scale);
+    }
+
+    // ---- 骨纹理 pose atlas（TEXTURE12；避开 0=tile/1-6=材质/7-11=shadow 5 级联）----
+    glActiveTexture(GL_TEXTURE12);
+    glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPoseAtlas"), 12);
+    glUniform1i(glGetUniformLocation(sp, "uBoneCount"), gh.bone_count);
+
+    // tile index（同 DrawObject3D：TEXTURE0）
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tile_index_tex);
+    glUniform1i(glGetUniformLocation(sp, "uTileLightIndices"), 0);
+
+    // ---- 逐实例：uMVP(=proj*view*model)/uModel/uPose 后 draw ----
+    for (const SkinnedInstanceState& inst : cmd.instances) {
+        float model[16], mvp_final[16];
+        BuildModelMatrix(inst.center, inst.up, inst.front, inst.scale, model);
+        Mat4Mul(mvp, model, mvp_final);
+        glUniformMatrix4fv(glGetUniformLocation(sp, "uMVP"), 1, GL_FALSE, mvp_final);
+        glUniformMatrix4fv(glGetUniformLocation(sp, "uModel"), 1, GL_FALSE, model);
+
+        // M1 单 pose 静态(pose_a==pose_b)：取 pose_a 行/列。动态(pose_a/pose_b+ratio)后续。
+        const int ppi = gh.pose_per_row;
+        const int pa = inst.pose_a;
+        glUniform1i(glGetUniformLocation(sp, "uPoseRow"), pa / ppi);
+        glUniform1i(glGetUniformLocation(sp, "uPoseCol"), pa % ppi);
+
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                           GL_UNSIGNED_INT, nullptr);
+        } else {
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+        }
+        glBindVertexArray(0);
+    }
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawObject3DInstancedWithSkeleton: "
+                                << draw_err;
+    }
+    glPopAttrib();
+}
+
 // ==================== DrawObject3DShadow ====================
 
 void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,

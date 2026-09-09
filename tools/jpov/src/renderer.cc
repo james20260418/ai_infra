@@ -965,6 +965,161 @@ unsigned int Renderer::DrawObject3DProgFull() {
         {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
 }
 
+// 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
+unsigned int Renderer::SkinnedMeshProg() {
+    return shader_mgr_.GetOrCreate("skinned_mesh",
+        {kSkinnedVs, Object3DRenderer::kMeshFs3dPBR});
+}
+
+// 蒙皮阴影 program：蒙皮阴影 VS(kSkinnedShadowVs) + 复用对象3D片元(kShadowFs，只写线性深度)。
+unsigned int Renderer::SkinnedShadowProg() {
+    return shader_mgr_.GetOrCreate("skinned_shadow",
+        {kSkinnedShadowVs, Object3DRenderer::kShadowFs});
+}
+
+// 注册一种骨架（SkeletonType + 一整包 pose）→ skeleton_id（非 0，= vector 下标 + 1）。
+// SkeletonManager 构造即把 pose 烘焙成 pose atlas 上传 GL（需 GL context，Init 后）。
+// id 从 1 起：DrawMeshWithSkeleton 要求 skeleton_id > 0（0 = 无效，见 render_command.cc）。
+uint32_t Renderer::RegisterSkeleton(const SkeletonType& type,
+                                    std::vector<SkeletonPose> poses) {
+    auto mgr = std::make_unique<SkeletonManager>(type, std::move(poses));
+    const uint32_t id = static_cast<uint32_t>(skeleton_managers_.size()) + 1;
+    skeleton_managers_.push_back(std::move(mgr));
+    return id;
+}
+
+SkeletonManager* Renderer::GetSkeleton(uint32_t skeleton_id) {
+    if (skeleton_id == 0 || skeleton_id > skeleton_managers_.size()) return nullptr;
+    return skeleton_managers_[skeleton_id - 1].get();
+}
+
+// ---- 内部：局部→世界模型矩阵（列主序，先缩放后旋转再平移；与 object3d 一致）----
+namespace {
+// 向量归一化（组件式；Vec3f 用 Norm()/无 scalar /，避免 API 歧义）
+Vec3f Norm3(Vec3f v) {
+    const float n = std::sqrt(v.x()*v.x() + v.y()*v.y() + v.z()*v.z());
+    if (n > 1e-8f) {
+        return Vec3f(v.x()/n, v.y()/n, v.z()/n);
+    }
+    return v;
+}
+void BuildModelMat(const Vec3f& center, Vec3f up, Vec3f front, float scale,
+                   float model[16]) {
+    up = Norm3(up);
+    front = Norm3(front);
+    // right = up × front（右手系）
+    Vec3f right(up.y()*front.z() - up.z()*front.y(),
+                up.z()*front.x() - up.x()*front.z(),
+                up.x()*front.y() - up.y()*front.x());
+    right = Norm3(right);
+    // 列主序：right/up/front 为基向量列，scale 缩放，center 平移
+    model[0] = right.x()*scale; model[4] = up.x()*scale; model[8]  = front.x()*scale; model[12] = center.x();
+    model[1] = right.y()*scale; model[5] = up.y()*scale; model[9]  = front.y()*scale; model[13] = center.y();
+    model[2] = right.z()*scale; model[6] = up.z()*scale; model[10] = front.z()*scale; model[14] = center.z();
+    model[3] = 0.0f; model[7] = 0.0f; model[11] = 0.0f; model[15] = 1.0f;
+}
+
+// 把 mesh 的局部 AABB 8 角点经 (center,up,front,scale) 摆到世界，再经光空间 view
+// 变换，累计成一个光空间 AABB 追加到 out（[min_x,max_x,min_y,max_y,min_z,max_z]）。
+// 逻辑与 DrawShadowPass 里 object3d 的 AABB 一致；skinned 用 mesh(rest) 的 bounds 近似
+// （M1 单 pose 静态，蒙皮后顶点≈bind 顶点，用 rest bounds 够）。
+void AppendLightAabb(const GPUMesh* mesh, const Vec3f& center, Vec3f up,
+                     Vec3f front, float scale, const float view[16],
+                     std::vector<std::array<float, 6>>* out) {
+    if (mesh == nullptr) return;
+    up = Norm3(up); front = Norm3(front);
+    Vec3f left(up.y()*front.z() - up.z()*front.y(),
+               up.z()*front.x() - up.x()*front.z(),
+               up.x()*front.y() - up.y()*front.x());
+    left = Norm3(left);
+    std::array<float, 6> b{1e30f, -1e30f, 1e30f, -1e30f, 1e30f, -1e30f};
+    for (int ix = 0; ix <= 1; ++ix) {
+        const float lx = (ix == 0) ? mesh->bounds_min[0] : mesh->bounds_max[0];
+        for (int iy = 0; iy <= 1; ++iy) {
+            const float ly = (iy == 0) ? mesh->bounds_min[1] : mesh->bounds_max[1];
+            for (int iz = 0; iz <= 1; ++iz) {
+                const float lz = (iz == 0) ? mesh->bounds_min[2] : mesh->bounds_max[2];
+                const Vec3f wp = center + (left*lx + up*ly + front*lz) * scale;
+                const float lx2 = view[0]*wp.x() + view[4]*wp.y() + view[8]*wp.z() + view[12];
+                const float ly2 = view[1]*wp.x() + view[5]*wp.y() + view[9]*wp.z() + view[13];
+                const float lz2 = view[2]*wp.x() + view[6]*wp.y() + view[10]*wp.z() + view[14];
+                b[0]=std::min(b[0],lx2); b[1]=std::max(b[1],lx2);
+                b[2]=std::min(b[2],ly2); b[3]=std::max(b[3],ly2);
+                b[4]=std::min(b[4],lz2); b[5]=std::max(b[5],lz2);
+            }
+        }
+    }
+    if (b[1] > -1e30f) out->push_back(b);
+}
+}  // namespace
+void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
+                                      const RenderCommandList& cmds,
+                                      int fbo_w, int fbo_h) {
+    // 委托给 Object3DRenderer::DrawObject3DInstancedWithSkeleton（抄 DrawObject3D 本体 + 带骨：
+    // 光照/tile/材质纹理绑定/Object3d 校验一致，避免 renderer 手写一套导致渲染不对）。
+    SkeletonManager* skel = GetSkeleton(cmd.skeleton_id);
+    CHECK(skel != nullptr) << "DrawSkinnedMeshCommand: skeleton_id "
+                           << cmd.skeleton_id << " 未注册（需先 RegisterSkeleton）";
+    Object3DRenderer::DrawObject3DInstancedWithSkeleton(
+        cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
+        SkinnedMeshProg(), skel->gpu_handles(), tile_index_tex_);
+}
+
+// 阴影 pass：把一条蒙皮指令从光空间画深度（对标 DrawObject3DShadow）。
+// 蒙皮在 mesh 局部空间做，然后乘 光VP*model(CPU 算好), 只在 VS 顶点位置用；
+// 法线/材质不看（阴影只写线性深度）。
+void Renderer::DrawSkinnedMeshShadow(const SkinnedMeshCommand& cmd,
+                                     MeshManager& mesh_mgr,
+                                     ShaderManager& shader_mgr,
+                                     const float shadow_vp[16],
+                                     const float depth_vp[16],
+                                     unsigned int shadow_prog) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawSkinnedMeshShadow: mesh_id " << cmd.mesh_id
+                           << " 未注册";
+    SkeletonManager* skel = GetSkeleton(cmd.skeleton_id);
+    CHECK(skel != nullptr) << "DrawSkinnedMeshShadow: skeleton_id "
+                           << cmd.skeleton_id << " 未注册";
+    CHECK(!cmd.instances.empty());
+
+    const SkeletonManager::GpuHandles gh = skel->gpu_handles();
+    const int pose_per_row = gh.pose_per_row;
+
+    glUseProgram(shadow_prog);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseAtlas"), 7);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uBoneCount"), gh.bone_count);
+
+    for (const SkinnedInstanceState& inst : cmd.instances) {
+        float model[16];
+        BuildModelMat(inst.center, inst.up, inst.front, inst.scale, model);
+        // 光空间 MVP = 光VP(视口投影合成在 shadow_vp) × model。
+        float sm[16], dm[16];
+        RendererMat4Mul(shadow_vp, model, sm);
+        RendererMat4Mul(depth_vp, model, dm);
+        glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowMVP"),
+                           1, GL_FALSE, sm);
+        glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthMVP"),
+                           1, GL_FALSE, dm);
+
+        const int row = inst.pose_a / pose_per_row;
+        const int col = inst.pose_a % pose_per_row;
+        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), row);
+        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseCol"), col);
+
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                           GL_UNSIGNED_INT, nullptr);
+        } else {
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+        }
+        glBindVertexArray(0);
+    }
+}
+
+
 // 太阳阴影 pass 专用 shader（深度专用，见 kShadowVs/kShadowFs）。
 unsigned int Renderer::ShadowProg() {
     return shader_mgr_.GetOrCreate("shadow",
@@ -1098,7 +1253,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kStrip3D ||
             type == DrawCommandType::kLine3D ||
             type == DrawCommandType::kText3D ||
-            type == DrawCommandType::kObject3D) {
+            type == DrawCommandType::kObject3D ||
+            type == DrawCommandType::kSkinnedMesh) {
             has_3d = true;
             break;
         }
@@ -1202,11 +1358,19 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 太阳平行光 + 级联阴影贴图 uniform（总是上传，无 sun 时置 uHasSun=0）。
         // 绑各级联 shadow 深度纹理到 PBR shader，供直射光的 PCF 阴影采样。
-        if (!cmds.object3d.empty()) {
+        if (!cmds.object3d.empty() || !cmds.skinned_mesh.empty()) {
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_cfg_, eff_sun);
+            // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
+            // Object3DRenderer::DrawObject3DInstancedWithSkeleton，其本身不上传光照。
+            if (!cmds.skinned_mesh.empty()) {
+                Object3DRenderer::UploadSunData(shader_mgr_,
+                    SkinnedMeshProg(), SkinnedMeshProg(),
+                    shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                    shadow_cfg_, eff_sun);
+            }
         }
 
         // 全局环境光 uniform（总是上传，未设置则用默认值）。
@@ -1216,6 +1380,11 @@ void Renderer::Render(const RenderCommandList& cmds,
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
+        }
+        if (!cmds.skinned_mesh.empty()) {
+            const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
+            Object3DRenderer::UploadAmbient(shader_mgr_,
+                SkinnedMeshProg(), SkinnedMeshProg(), ambient);
         }
 
         // 拾取（color-ID）pass：仅在用户发起了 pick 查询时才跑。
@@ -1477,6 +1646,13 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     tile_index_tex_);
                 break;
             }
+            case DrawCommandType::kSkinnedMesh: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.skinned_mesh.size()));
+                const SkinnedMeshCommand& sm = cmds.skinned_mesh[idx];
+                DrawSkinnedMeshCommand(sm, cmds, fbo_w, fbo_h);
+                break;
+            }
             default:
                 break;
         }
@@ -1606,6 +1782,18 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         }
     }
 
+    // 蒙皮实例也应可能投影出阴影：对每条 skinned_mesh 的每个实例，用其 rest mesh 的
+    // AABB + (center,up,front,scale) 摆到世界累加进 obj_light_aabb（M1 单 pose，蒙皮后
+    // 顶点≈bind 顶点，用 rest 包围盒近似足够；真正逐骨变形阴影 AABB 留后续）。
+    for (const auto& s : cmds.skinned_mesh) {
+        const GPUMesh* mesh = mesh_mgr_.GetMesh(s.mesh_id);
+        if (!mesh) continue;
+        for (const SkinnedInstanceState& inst : s.instances) {
+            AppendLightAabb(mesh, inst.center, inst.up, inst.front, inst.scale,
+                            view, &obj_light_aabb);
+        }
+    }
+
     for (int c = 0; c < cascade_count; ++c) {
         const float near_i = prev_far;
         const float far_i = shadow_cfg_.cascade_ranges[c];
@@ -1727,6 +1915,12 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog);
+        }
+        // 蒙皮实例同样从光空间画深度（skinned shadow program）。
+        for (const auto& s : cmds.skinned_mesh) {
+            DrawSkinnedMeshShadow(s, mesh_mgr_, shader_mgr_,
+                                  shadow_vp_[c], shadow_depth_vp_[c],
+                                  SkinnedShadowProg());
         }
 
         prev_far = far_i;

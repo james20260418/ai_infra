@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -20,6 +21,8 @@
 #include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/skydome/sky_renderer.h"
+#include "tools/jpov/src/skeleton/skeleton_manager.h"
+#include "tools/jpov/src/skeleton/skinning_shader.h"
 #include "tools/jpov/src/texture_manager.h"
 
 struct GLFWwindow;
@@ -229,10 +232,39 @@ private:
     unsigned int BloomDownsampleProg();
     unsigned int BloomUpsampleProg();
     unsigned int BloomCompositeProg();
+    // 蒙皮渲染 program（kSkinnedVs + kMeshFs3dPBR 复用 object3d 片元）。
+    unsigned int SkinnedMeshProg();
+
+public:
+    // ---- 骨架（SkeletonManager）注册 / 取用 ----
+    // 注册一种骨架（SkeletonType + 一套 pose）→ skeleton_id。
+    // 内部持 skeleton_id → SkeletonManager（唯一针，资源在注册时构造/上传 GL）。
+    // Pre-condition: Init() 已调用（GL context 激活）；type.Validate() 通过；poses 非空。
+    uint32_t RegisterSkeleton(const SkeletonType& type,
+                              std::vector<SkeletonPose> poses);
+    // 取 skeleton_id 对应的 SkeletonManager（无则 nullptr）。
+    SkeletonManager* GetSkeleton(uint32_t skeleton_id);
+
+    // 主 pass 执行一条蒙皮指令（Draw3DCommands 的 kSkinnedMesh case 调用）。
+    void DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
+                                const RenderCommandList& cmds,
+                                int fbo_w, int fbo_h);
+
+    // 蒙皮阴影 program（kSkinnedShadowVs + kShadowFs，CSS 深度专用）。
+    unsigned int SkinnedShadowProg();
+    // 阴影 pass 把一条蒙皮指令从光空间画深度（mirror Object3DRenderer::DrawObject3DShadow）。
+    void DrawSkinnedMeshShadow(const SkinnedMeshCommand& cmd,
+                               MeshManager& mesh_mgr,
+                               ShaderManager& shader_mgr,
+                               const float shadow_vp[16],
+                               const float depth_vp[16],
+                               unsigned int shadow_prog);
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
     MeshManager mesh_mgr_;
+    // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
+    std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };
 
 }  // namespace jpov
