@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include <glog/logging.h>
 #include "geom/common/quaternion.h"
 #include "geom/common/vec.h"
 
@@ -164,8 +165,32 @@ struct SkinnedInstanceState {
 // ==================== Validate 声明 ====================
 
 inline void SkeletonType::Validate() const {
-    // 见 struct 注释；TODO(2026-09-06): 实现阶段补完整校验(log(FATAL) on illegal)，
-    // 参照 mesh.h MeshData::Validate() 风格 crash——绝不 fallback 隐藏非法输入。
+    // 校验：joints 非空、parent 索引合法(不在自身/越界)、每个关节父早于自身(拓扑序);
+    // inverse_bind 若非空必须尺寸 == joints.size()。非法 LOG(FATAL)，绝不 fallback。
+    CHECK(!joints.empty())
+        << "SkeletonType::Validate: joints 不能为空（缺一种骨架定义）";
+    const size_t n = joints.size();
+    for (size_t i = 0; i < n; ++i) {
+        const int p = joints[i].parent;
+        if (p != kSkeletonNoParent) {
+            CHECK_GE(p, 0) << "SkeletonType::Validate: joint[" << i << "].parent="
+                           << p << " 非法(parent<0 只能用 kSkeletonNoParent)";
+            CHECK_LT(p, static_cast<int>(n))
+                << "SkeletonType::Validate: joint[" << i
+                << "].parent 越界=" << p;
+            CHECK_NE(p, static_cast<int>(i))
+                << "SkeletonType::Validate: joint[" << i
+                << "] 不能是自己的父";
+            CHECK_LT(p, static_cast<int>(i))
+                << "SkeletonType::Validate: joint[" << i << "].parent=" << p
+                << " 不满足拓扑序(须 < " << i << ", 否则树在容器里乱序)";
+        }
+    }
+    if (!inverse_bind.empty()) {
+        CHECK_EQ(inverse_bind.size(), n)
+            << "SkeletonType::Validate: inverse_bind 尺寸 " << inverse_bind.size()
+            << " 应 == joints " << n;
+    }
 }
 
 }  // namespace jpov
