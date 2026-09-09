@@ -133,7 +133,8 @@ public:
 
         for (const Slot& s : slots_) {
             cmds->DrawGltfObject(s.obj, s.center, s.up, s.front,
-                                 s.picking_id, s.highlight);
+                                 /*scale*/ 1.0f, /*highlight*/ s.highlight,
+                                 /*picking_id*/ s.picking_id);
         }
 
         // 拾取查询（enabled 默认 false，零开销）。

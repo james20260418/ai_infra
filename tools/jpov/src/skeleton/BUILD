@@ -21,7 +21,12 @@ cc_library(
         "//tools/jpov/interface:skeleton_types",
         "//geom/common:quaternion",
         "@glog_static//:glog",
-    ],
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
