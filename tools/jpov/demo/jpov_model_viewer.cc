@@ -1,21 +1,17 @@
-// JPOV JPOV 模型查看器 — 主程序
+// JPOV JPOV 模型查看器 — 主程序（装配 + 模式分发）
 //
-// 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up 风格，
-// 地平面 300×300 米高粗糙灰色 quad。光照用 DaySkyCommand（由 sky 推导平行光
-// + 全局 Ambient），交互窗口底部居中 5 个滑条实时调节：太阳仰角、浊度 turb、季节色温、
-// 地面高度、模型缩放。光照（color+intensity）全由 sky 自动推导。
+// 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up，地平面 300×300 米
+// 高粗糙灰色 quad，光照用 DaySkyCommand（由 sky 推导平行光 + 全局 Ambient），
+// 窗口底部居中 5 个滑条实时调节（仰角 / 浊度 / 季节色温 / 地面高度 / 模型缩放）。
 //
-// 相机默认目标 (0,0,0)，初始距离 R 按模型包围盒自适应（加载后 FitRadius 计算）。
-// 右键 drag 转视角，滚轮 zoom（R 缩放）。
-// 产物 ELF 的第一个参数为被加载的 glTF 路径（相对/绝对均可，fallback 到
-// 项目内 pliers.gltf 便于快速演示）。
-//
-// 架构（task #2 文档 jpov_model_viewer_arch.md）：
-//   交互与 --four_views 拍照共用同一个 GltfViewerApp::OneIteration 渲染体，
-//   只由 ViewConfig 的驱动方式不同；光照方面交互用滑条版 MakeLighting()，
-//   拍照用固定 MakeNoonLighting()（headless 截图不带 UI 面板）。
-//   --round_video 同理：同为 headless，只把 theta 扫 180°（0→+π）逐帧
-//   RunOnce 出 PNG，再在进程内 fork ffmpeg 合成 mp4（不经任何 sh）。
+// 架构（重构后，docs/jpov_model_viewer_arch.md）：本主程序只做三件事——
+//   1. 解析 CLI → 类型化 RunMode（见下），不解释模式内部结构；
+//   2. 装配 ViewerApp（场景 + 字体 + 相机自适应），见 viewer_app.h；
+//   3. 按模式分发：
+//        interactive → app.Run()（事件循环）
+//        four_views / round_video → 构造 CaptureSpec 交给 viewer_capture.h 统一 driver。
+//   渲染核心、UI、拍摄编排、纯文件工具分别归属 viewer_app.h / viewer_capture.h /
+//   viewer_output.h，本文件不再膨胀成承载多种身份的“大杂烩”。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov:jpov_model_viewer -- /path/to/model.gltf
@@ -23,33 +19,22 @@
 //   ./tools/jpov/build_jpov_model_viewer.sh
 //   → output/jpov_model_viewer/jpov_model_viewer <gltf 路径>
 
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
+#include <cstdlib>  // atof / atoi
 #include <string>
-#include <cerrno>
-#include <vector>
-#include <sys/stat.h>
-#ifndef _WIN32
-#include <unistd.h>    // fork / execvp
-#include <sys/wait.h>  // waitpid
-#include <dirent.h>    // 临时帧目录清理 (opendir/readdir)
-#endif
-#ifdef _WIN32
-#include <direct.h>  // _mkdir
-#endif
 
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/interface/ui.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/demo/viewer_app.h"
+#include "tools/jpov/demo/viewer_capture.h"
 
 namespace {
 
-// 渲染/窗口分辨率（需求定稿：1280×720，不可 resize）。
-constexpr int kViewerWidth  = 1280;
-constexpr int kViewerHeight = 720;
+// 运行模式（类型化，取代历史两姊妹裸 bool four_views/round_video 的手工互斥。
+// 未来加新 headless 子命令（round_gif / sun_path…）只需扩枚举 + 一个分支，不会
+// 让 main 的 if-else 布尔丛林失控）。
+enum class RunMode { kInteractive, kFourViews, kRoundVideo, kInvalid };
 
 // 项目内可用的演示 glTF（若命令行未指定路径时的 fallback，便于快速跑通）。
 std::string DefaultGltfPath() {
@@ -57,562 +42,101 @@ std::string DefaultGltfPath() {
     return "tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
 }
 
-// UI 文本默认字体 = CJK（滑条标签显中文）。拉丁字母回退由渲染层自动处理。
-// 与 jpov_ui_demo 同款：JPOV 不提供隐式默认字体，cfg.fonts 显式声明，
-// UiTheme::font_alias 指定 UI 文本用 CJK。
-static const char* const kFontAlias = jpov::kFontBuiltinCJK;
-
-class GltfViewerApp : public JPOV {
-public:
-    using JPOV::JPOV;
-
-    // 场景资源（Init() 后填充一次，OneIteration 里只读，不重复构造/上传）。
-    jpov::GltfObject gltf_;            // 被查看的模型
-    uint32_t ground_mesh_ = 0;         // 300×300 地面 quad 的 GPU handle
-    jpov::PBRMaterial ground_mat_;     // 高粗糙灰色地面材质
-    jpov_viewer::ViewConfig view_;     // 当前视角（交互由 ApplyInput 改；four_views 赋固定角）
-
-    // 光照滑条状态（跨帧持有，窗口下方 5 个滑条实时调节）。
-    // 光照的 color+intensity 全由 sky 自动推导（含 Turb*Loss 衰减 + 季节色温偏置），
-    // 滑条只调：太阳仰角、浊度 turb、季节 R 色温乘子。
-    float elev_deg_ = 90.0f;          // 太阳仰角（度，[0,90]），0°=贴地 90°=天顶正午
-    float turbidity_ = 2.0f;          // 大气浊度 [2,8]，2=大晴（基准），8=阴/重霾
-    float season_r_ = 1.0f;           // 季节色温 R 通道乘子 [0.5,2.0]，1.0=中性；
-                                      // 联动 skydome 的天空背景 + sun/ambient 色温（归一化，不改亮度）
-    float ground_y_ = -3.0f;           // 地面高度（滑条 [-3,+3]，实时调节看物体落地产影）
-    float ground_y_prev_ = -3.0f;      // 上一帧地面高度（检测变化才 UpdateMesh）
-    float model_scale_ = 1.0f;         // 模型整体缩放（滑条 [0.1, 20]，先缩放再旋转平移）
-    jpov::Ui ui_;                      // 跨帧持有（滑条拖动态内部记忆）
-
-    // 运行模式与帧率（main 设置）：
-    bool interactive_ = true;          // 交互窗口模式（true）或 --four_views 拍照（false）
-    int cfg_target_fps_ = 60;          // 帧率（Ui::Begin 的 frame_dt_ms 计时用）
-
-    // 供 main 在 Init() 后安装文本测量回调（ui_ 私有，经此公开入口设置）。
-    void InstallTextMeasure() {
-        ui_.SetTextMeasure(&GltfViewerApp::ViewerTextWidth, this);
-    }
-
-    // 把 Ui 的文本测量回调接到本应用的 JPOV::MeasureTextWidth（真实字体进宽），
-    // 使滑条数值文本绘制用真实字体宽度（UI 内部用行高/居中，不依赖此宽度，
-    // 但保持与 jpov_ui_demo 同款接线以避免后续 InputText 类控件的宽度分叉）。
-    // alias 空串 = 首个注册字体，与 demo 第一个注册字体一致。
-    static float ViewerTextWidth(const char* text, float font_size,
-                                 const char* /*font_alias*/, void* userdata) {
-        GltfViewerApp* app = static_cast<GltfViewerApp*>(userdata);
-        return app->MeasureTextWidth(/*alias=*/std::string(),
-                                     /*text=*/text ? text : "", font_size);
-    }
-
-    // --four_views 拍照专用标志（arch §4 note #1 认可的 headless 区分手段）。
-    // 交互与拍照共用同一目标点 (0,0,0)（相机 lookAt 原点），无分叉，
-    // 因此 headless 专用标志不再需要（早期曾因交互看向 (0,1,0) 而需要区分）。
-
-    void OneIteration(int64_t frame_count,
-                      const jpov::InputSnapshot& input,
-                      const jpov::WindowInfo& winfo,
-                      jpov::RenderCommandList* cmds) override {
-        (void)frame_count;
-
-        // 渲染分辨率 = 窗口分辨率 1280×720。
-        cmds->camera.fbo_3d_width_  = kViewerWidth;
-        cmds->camera.fbo_3d_height_ = kViewerHeight;
-
-        // 交互输入 → 更新视角（右键 drag 转视角 + 滚轮 zoom）。
-        // four_views 拍照模式不走到这里（由外部赋固定 view_）。
-        float dx = 0.0f, dy = 0.0f, scroll = 0.0f;
-        if (input.right.IsDrag()) {
-            dx = input.mouse_dx;
-            dy = input.mouse_dy;
-        }
-        if (input.scroll_delta != 0.0f) {
-            scroll = input.scroll_delta;
-        }
-        jpov_viewer::ApplyInput(&view_, dx, dy, scroll,
-                                static_cast<int>(winfo.width),
-                                static_cast<int>(winfo.height));
-
-        // ── 相机：由 ViewConfig 推导 ──
-        cmds->camera.position = view_.Position();
-        cmds->camera.target   = jpov_viewer::ViewConfig::Target();  // (0,0,0)
-        cmds->camera.up       = {0.0f, 1.0f, 0.0f};
-        cmds->camera.fov      = 60.0f;
-        cmds->camera.near     = 0.05f;
-        cmds->camera.far      = 1000.0f;  // 场景 R 最大 300，far 足够
-
-        // ── 光照：由滑条实时调节（sky 自动推导 color+intensity，含 Turb*Loss/季节色温）──
-        const jpov_viewer::NoonLighting light =
-            jpov_viewer::MakeLighting(elev_deg_, turbidity_, season_r_);
-        cmds->sky = light.sky;
-        cmds->sun = light.sun;
-        cmds->ambient = light.ambient;
-        cmds->tone_mapping = true;
-
-        // ── 场景：地面 + 被加载的 glTF ──
-        // 地面高度可调：ground_y_ 变化时原地重建 quad（UpdateMesh，VBO 布局不变）
-        // 让“物体落在地面上、影子投到地面上”随滑条实时变化（仅交互;
-        // four_views 不动 ground_y_，保持默认 -3）。
-        if (ground_y_ != ground_y_prev_) {
-            UpdateMesh(ground_mesh_, jpov_viewer::MakeGroundQuad(ground_y_));
-            ground_y_prev_ = ground_y_;
-        }
-        cmds->DrawObject3D(ground_mesh_, ground_mat_,
-                           /*center*/ {0.0f, 0.0f, 0.0f},
-                           /*up*/     {0.0f, 1.0f, 0.0f},
-                           /*front*/  {0.0f, 0.0f, 1.0f});
-        cmds->DrawGltfObject(gltf_, /*center*/ {0.0f, 0.0f, 0.0f},
-                             /*up*/ {0.0f, 1.0f, 0.0f},
-                             /*front*/ {0.0f, 0.0f, 1.0f},
-                             /*picking_id*/ 0, /*highlight*/ false,
-                             /*scale*/ model_scale_);
-
-        // ── 光照调节面板：窗口底部居中，5 个滑条（各约半屏宽）──
-        // 仅交互窗口模式绘制；--four_views 拍照是给 AI 自查用的 headless 截图，
-        // 不带 UI 面板（保持截图即纯 3D 场景，与原有行为一致）。
-        if (interactive_) {
-            DrawLightPanel(input);
-            ui_.End();
-            ui_.Emit(cmds);
-        }
-    }
-
-private:
-    // 光照调节面板布局与绘制（即时模式）。
-    // 竖排，位于窗口底部居中：
-    //   1) 太阳仰角（度，[0, 90]，左=贴地日出日落 → 右=天顶正午）
-    //   2) 大气浊度 turb（[2, 8]，默认 2=大晴；调它看高浊度下 sky/强度衰减）
-    //   3) 季节 R 色温乘子（[0.5, 2.0]，默认 1.0 中性；只偏色不改亮度，联动天空+sun/ambient）
-    //   4) 地面高度 y（[-3, +3]，默认 -3，实时更新地面 quad）
-    //   5) 模型整体缩放（[0.1, 20]，默认 1.0，先缩放再旋转平移）
-    // 每个滑条宽度 = 半屏宽（kSliderWidth），水平居中；`label: value` 文本
-    // 由 SliderFloat 画在滑条 box 中央（复用 Text 居中语义，见 ui.cc）。
-    void DrawLightPanel(const jpov::InputSnapshot& input) {
-        const float w = static_cast<float>(kViewerWidth);
-        const float h = static_cast<float>(kViewerHeight);
-        jpov::UiTheme theme = jpov::UiTheme::Default(kSliderFontSize);
-        theme.font_alias = kFontAlias;
-        const float frame_dt_ms = 1000.0f / static_cast<float>(cfg_target_fps_);
-        ui_.Begin(input, theme, w, h, frame_dt_ms);
-
-        const float kSliderWidth = 0.5f * w;   // 半屏宽
-        const float kRowH    = 30.0f;
-        const float kSpacing = 12.0f;
-        const float kBottom  = 20.0f;
-        const float left     = (w - kSliderWidth) * 0.5f;
-        const float top      = h - kBottom - (5.0f * kRowH + 4.0f * kSpacing);
-
-        // 太阳仰角直接用度（0~90° 覆盖日出→正午全部标定工况），0 位小数即可。
-        ui_.SliderFloat("太阳仰角 °", &elev_deg_,
-                        jpov::UiRect{{left, top}, {kSliderWidth, kRowH}},
-                        0.0f, 90.0f, /*decimal_places*/0);
-        // 大气浊度：[2,8]。调它同时看 (a) 天空画色霾化/日盘 + (b) sun/ambient 的
-        // Turb*Loss 乘子衰减效果（sky 自动推导的强度已含 Turb*Loss）。
-        ui_.SliderFloat("浊度 turb", &turbidity_,
-                        jpov::UiRect{{left, top + (kRowH + kSpacing)},
-                                     {kSliderWidth, kRowH}},
-                        2.0f, 8.0f, /*decimal_places*/1);
-        // 季节 R 色温乘子：[0.5,2.0]。归一化后只偏红/青（不改亮度），联动
-        // skydome 天空背景 + sun/ambient 色温，拖它看连续渐变。
-        ui_.SliderFloat("季节 R", &season_r_,
-                        jpov::UiRect{{left, top + 2.0f * (kRowH + kSpacing)},
-                                     {kSliderWidth, kRowH}},
-                        0.5f, 2.0f, /*decimal_places*/2);
-        // 地面高度（米）：[-3,+3]，实时看物体落地面/阴影落地面。
-        ui_.SliderFloat("地面高度 y", &ground_y_,
-                        jpov::UiRect{{left, top + 3.0f * (kRowH + kSpacing)},
-                                     {kSliderWidth, kRowH}},
-                        -3.0f, 3.0f, /*decimal_places*/2);
-        // 模型整体缩放（[0.1,20] 默认 1.0，先缩放再旋转平移；验证小物体阴影/轮廓是否尺寸所致）。
-        ui_.SliderFloat("模型缩放", &model_scale_,
-                        jpov::UiRect{{left, top + 4.0f * (kRowH + kSpacing)},
-                                     {kSliderWidth, kRowH}},
-                        0.1f, 20.0f, /*decimal_places*/1);
-    }
-
-    // 滑条字号（px）。
-    static constexpr float kSliderFontSize = 16.0f;
-};
-
-// 命令行解析结果。
-//   four_views  : --four_views 拍照模式（headless，AI 自查出图）
-//   round_video : --round_video 环绕视频模式（headless，绕 y 轴旋转渲染帧 → ffmpeg 合成 mp4）
-//   phi_deg     : --round_video 的相机仰角（度，默认 45=俯视 45°）；仅 round_video 用
-//   frames      : --round_video 的总帧数（默认 60）
-//   fps         : --round_video 的视频帧率（默认 10：60 帧 ≈ 6 秒）
-//   output_dir  : --output_dir <dir> 指定出图目录（可选；缺省时后退到 glTF 同级目录）
-//   gltf_path   : 第一个非 -- 前缀参数（相对/绝对均可）
-struct CliOptions {
-    bool four_views = false;
-    bool round_video = false;
-    double phi_deg = 45.0;    // 相机仰角（度）：round_video 默认俯视 45°
-    int frames = 60;          // round_video 总渲染帧数
-    int fps = 10;             // round_video 视频帧率（默认 10：60 帧 = 6 秒）
-    std::string output_dir;   // 空 = 未指定
+// 命令行解析结果。产出=解析 + 返回 (run_mode, spec-or-null, gltf_path)。
+// 交互模式 spec 无意义（kInteractive 时仅 gltf_path 有效）。
+struct CliParsed {
+    RunMode mode = RunMode::kInteractive;
+    // 仅拍摄模式填充（仍统一传 gltf/output_dir；四视图与 round 具体参数字段分开，
+    // 避免一个 struct 塞满两套无用参数——子字段按 kind 有意义）。
+    struct {
+        std::string output_dir;
+        double phi_deg = 45.0;   // round: 相机仰角（俯视 45°）
+        int    frames  = 60;     // round: 总帧数
+        int    fps     = 10;     // round: 视频帧率（60 帧@10fps = 6s）
+    } capture;
     std::string gltf_path;
 };
 
-// 解析 --four_views / --round_video / --output_dir <dir> 等带值/纯标志参数，并取 glTF 路径
-// （第一个非 -- 前缀参数）。--output_dir 会吞掉紧跟其后的值（该值本身以 --
-// 前缀开头时认为是非法用法，报 warning 并跳过），因此 glTF 路径取剩下的
-// 第一个非标志参数，不会把输出目录误当模型路径。
-// 纯标志（--four_views）与带值标志（--output_dir）可出现在任意位置、任意顺序。
-CliOptions ParseCliOptions(int argc, char** argv) {
-    CliOptions opt;
+// 解析 CLI。遍历 argv[1..]：纯标志（--four_views / --round_video）与带值标志
+// （--output_dir / --phi_deg / --frames / --fps）可任意位置/顺序；第一个非 "--"
+// 前缀参数 = glTF 路径（--output_dir 会吞掉紧跟值，故模型路径取剩余首个非标志参）。
+// 未知标志 → WARNING 忽略（不崩溃）。互斥模式同时给 → 后者优先（kInvalid 不用）。
+CliParsed ParseCli(int argc, char** argv) {
+    CliParsed p;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--four_views") {
-            opt.four_views = true;
+            p.mode = RunMode::kFourViews;
         } else if (arg == "--round_video") {
-            opt.round_video = true;
-        } else if (arg == "--phi_deg") {
-            if (i + 1 < argc) { opt.phi_deg = std::atof(argv[++i]); }
-            else { LOG(WARNING) << "--phi_deg 缺少数值，忽略"; }
-        } else if (arg == "--frames") {
-            if (i + 1 < argc) { opt.frames = std::atoi(argv[++i]); }
-            else { LOG(WARNING) << "--frames 缺少数值，忽略"; }
-        } else if (arg == "--fps") {
-            if (i + 1 < argc) { opt.fps = std::atoi(argv[++i]); }
-            else { LOG(WARNING) << "--fps 缺少数值，忽略"; }
+            p.mode = RunMode::kRoundVideo;
         } else if (arg == "--output_dir") {
-            if (i + 1 < argc) {
-                opt.output_dir = argv[++i];
-            } else {
-                LOG(WARNING) << "--output_dir 缺少目录参数，忽略";
-            }
+            if (i + 1 < argc) p.capture.output_dir = argv[++i];
+            else LOG(WARNING) << "--output_dir 缺少目录参数，忽略";
+        } else if (arg == "--phi_deg") {
+            if (i + 1 < argc) p.capture.phi_deg = std::atof(argv[++i]);
+            else LOG(WARNING) << "--phi_deg 缺少数值，忽略";
+        } else if (arg == "--frames") {
+            if (i + 1 < argc) p.capture.frames = std::atoi(argv[++i]);
+            else LOG(WARNING) << "--frames 缺少数值，忽略";
+        } else if (arg == "--fps") {
+            if (i + 1 < argc) p.capture.fps = std::atoi(argv[++i]);
+            else LOG(WARNING) << "--fps 缺少数值，忽略";
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "; 已忽略";
-        } else if (opt.gltf_path.empty()) {
-            opt.gltf_path = arg;
+        } else if (p.gltf_path.empty()) {
+            p.gltf_path = arg;
         } else {
             LOG(WARNING) << "多余位置参数: " << arg << "; 已忽略";
         }
     }
-    return opt;
-}
-
-// 度数 → 弧度（ViewConfig 以弧度存储）。
-constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-
-// --four_views 的 4 个固定拍照角度 (phi, theta)，单位度（需求定稿）。
-struct FourView {
-    const char* name;   // 输出后缀（front/up/left/perspective）
-    double phi_deg;
-    double theta_deg;
-};
-constexpr FourView kFourViews[] = {
-    {"front",       0.0,   0.0},   // (φ,θ)=(0,0)
-    {"up",         90.0,   0.0},   // (φ,θ)=(90,0)
-    {"left",        0.0,  90.0},   // (φ,θ)=(0,90)
-    {"perspective",45.0,  45.0},   // (φ,θ)=(45,45)
-};
-
-// --four_views 拍照模式：headless 渲染 4 个角度，各输出一张 PNG。
-// 输出目录 = --output_dir（非空时用它，并在本函数内自动建目录）；
-// 未指定则 fallback 到 glTF 所在目录。文件名 `<gltf_basename>_<view>.png`。
-// 不弹窗。交互模式与拍照模式走同一条 OneIteration + 同一份 MakeNoonLighting()
-// （zero 分叉，架构 doc），因此这里只需要逐个设置 view_ 后 RunOnce 截图。
-// 结束后在 stdout 打印每张图的路径，方便用户/脚本直取。
-void RunFourViews(GltfViewerApp* app,
-                  const std::string& gltf_path,
-                  const std::string& explicit_output_dir) {
-    CHECK_NOTNULL(app);
-
-    // 输出目录：优先 --output_dir，否则 glTF 所在目录。
-    // base（模型 basename）始终取自 glTF 文件名，与输出目录无关。
-    const size_t slash = gltf_path.find_last_of("/\\");
-    const std::string dir     = !explicit_output_dir.empty()
-                                    ? explicit_output_dir
-                                    : (slash == std::string::npos)
-                                        ? "." : gltf_path.substr(0, slash);
-    const std::string full    = (slash == std::string::npos)
-                                    ? gltf_path : gltf_path.substr(slash + 1);
-    const size_t dot          = full.find_last_of('.');
-    const std::string base    = (dot == std::string::npos)
-                                    ? full : full.substr(0, dot);
-
-    // --output_dir 需自动建目录（gen3d 链路可能指向尚未创建的新目录）。
-    // 跨平台：POSIX 用 mkdir(path,mode)；MSVC/MinGW 用 _mkdir(path)。
-    if (!explicit_output_dir.empty()) {
-#ifdef _WIN32
-        const int rc = _mkdir(explicit_output_dir.c_str());
-#else
-        const int rc = mkdir(explicit_output_dir.c_str(), 0755);
-#endif
-        if (rc != 0 && errno != EEXIST) {
-            LOG(FATAL) << "无法创建输出目录: " << explicit_output_dir
-                       << " (errno=" << errno << ")";
-        }
-    }
-
-    jpov::WindowInfo winfo;
-    winfo.width  = kViewerWidth;
-    winfo.height = kViewerHeight;
-
-    LOG(INFO) << "--four_views 输出目录: " << dir;
-    for (const FourView& fv : kFourViews) {
-        // 赋固定角度（量纲约定：ViewConfig 存弧度）。
-        // R 保持 main 里按模型包围盒算好的初始距离（模型自适应），不在此重置：
-        // 4 个角度都应沿用同一“看清全貌”的取景距离，才能框住模型。
-        app->view_.phi   = fv.phi_deg * kDegToRad;
-        app->view_.theta = fv.theta_deg * kDegToRad;
-
-        const std::string out = dir + "/" + base + "_" + fv.name + ".png";
-        jpov::InputSnapshot input{};   // 无交互输入（固定角度拍照）
-        app->RunOnce(input, winfo, out.c_str());
-        // 明确打印每张输出图完整路径（防用户/脚本对产物落盘位置 confuse）。
-        std::printf("%s\n", out.c_str());
-        LOG(INFO) << "--four_views 已渲染: " << out;
-    }
-}
-
-// 递归删除目录（用于 round_video 渲染完帧 PNG 后清理临时帧目录）。
-// POSIX 下 opendir/readdir 遍历 + unlink 文件 + rmdir 子目录；Windows 为空实现
-// （round_video 目标平台为 Linux/CI，Windows 路径目前不提供清理）。
-void RemoveDirRecursive(const std::string& dir) {
-#ifndef _WIN32
-    DIR* d = opendir(dir.c_str());
-    if (d == nullptr) return;  // 目录不存在 = 无需清理
-    for (dirent* e = readdir(d); e; e = readdir(d)) {
-        const std::string name = e->d_name;
-        if (name == "." || name == "..") continue;
-        const std::string child = dir + "/" + name;
-        if (e->d_type == DT_DIR) {
-            RemoveDirRecursive(child);
-        } else {
-            unlink(child.c_str());
-        }
-    }
-    closedir(d);
-    rmdir(dir.c_str());
-#else
-    (void)dir;
-#endif
-}
-
-// 调 ffmpeg 把一批编号 PNG 帧合成 mp4（fork/execvp，POSIX）。
-//   frame_pattern : 如 "/path/to/dir/frame_%04d.png"（ffmpeg -i 图像序列通配）
-//   out_mp4       : 视频输出路径
-//   fps           : 视频帧率
-// 成功返回 true；失败（fork 失败 / ffmpeg 非零退出）返回 false 并打印 stderr 缓冲。
-bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4, int fps) {
-#ifndef _WIN32
-    // execvp 需要末尾 nullptr 的 argv 数组。用 std::vector 自管理内存（免手动
-    // calloc/free），各元素 .c_str() 指向的 std::string 在 waitpid 前都存活。
-    std::vector<const char*> argv;
-    argv.reserve(16);
-    const std::string fps_str = std::to_string(fps);
-    const std::string crf     = "18";
-    // ffmpeg 完整参数（-y 覆盖、yuv420p 保证播放器兼容、libx264 编码、crf=18 高质量）。
-    argv.push_back("ffmpeg");
-    argv.push_back("-y");
-    argv.push_back("-framerate");
-    argv.push_back(fps_str.c_str());
-    argv.push_back("-i");
-    argv.push_back(frame_pattern.c_str());
-    argv.push_back("-c:v");
-    argv.push_back("libx264");
-    argv.push_back("-pix_fmt");
-    argv.push_back("yuv420p");
-    argv.push_back("-crf");
-    argv.push_back(crf.c_str());
-    argv.push_back("-preset");
-    argv.push_back("medium");
-    argv.push_back(out_mp4.c_str());
-    argv.push_back(nullptr);  // execvp argv 必须以 nullptr 结尾
-
-    const int pid = fork();
-    if (pid == 0) {
-        // 子进程 exec ffmpeg；execvp 会用 PATH 找可执行文件。exec 成功则不复返；
-        // 失败（如未安装 ffmpeg）才到这，stderr 报错后以非 0 退出。
-        execvp("ffmpeg", const_cast<char* const*>(argv.data()));
-        fprintf(stderr, "execvp ffmpeg 失败（未安装 ffmpeg？）: %s\n",
-                strerror(errno));
-        _exit(127);
-    }
-    if (pid < 0) {
-        LOG(ERROR) << "fork() 启动 ffmpeg 失败";
-        return false;
-    }
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-    const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    if (!ok) {
-        LOG(ERROR) << "ffmpeg 合成视频失败, exit="
-                   << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
-                   << ", 输出=" << out_mp4;
-    }
-    return ok;
-#else
-    (void)frame_pattern; (void)out_mp4; (void)fps;
-    LOG(ERROR) << "RoundVideo 暂不支持 Windows（需 _spawn 封装 ffmpeg）";
-    return false;
-#endif
-}
-
-// --round_video 环绕视频模式：相机绕模型 y 轴旋转合成 mp4。
-// headless 渲染 frames 张 PNG（theta 从 0 扫到 180°，phi 固定为 phi_deg 仰角
-// = 绕 y 轴转半圈、视角与竖直方向夹角不变），临时 PNG 放进 output_dir 的子目录
-// 做 buffer，全部渲染成功后调 ffmpeg 合成 <base>_round.mp4，最后清理临时帧目录。
-// 与 --four_views / 交互共用同一 OneIteration 渲染体（zero 分叉）：只改 view_
-// 的 theta，逐帧 RunOnce 出 PNG——与 four_views 唯一区别是 theta 是一个连续
-// 序列而非 4 个固定角。
-// 结束打印视频完整路径到 stdout。
-void RunRoundVideo(GltfViewerApp* app,
-                   const std::string& gltf_path,
-                   const std::string& explicit_output_dir,
-                   double phi_deg,
-                   int num_frames,
-                   int fps) {
-    CHECK_NOTNULL(app);
-    CHECK_GT(num_frames, 0) << "--frames 必须 > 0";
-    CHECK_GT(fps, 0) << "--fps 必须 > 0";
-
-    // 输出目录 / 模型 basename：与 RunFourViews 同口径（优先 --output_dir）。
-    const size_t slash = gltf_path.find_last_of("/\\");
-    const std::string dir = !explicit_output_dir.empty()
-                                ? explicit_output_dir
-                                : (slash == std::string::npos)
-                                    ? "." : gltf_path.substr(0, slash);
-    const std::string full = (slash == std::string::npos)
-                                 ? gltf_path : gltf_path.substr(slash + 1);
-    const size_t dot       = full.find_last_of('.');
-    const std::string base = (dot == std::string::npos)
-                                 ? full : full.substr(0, dot);
-
-    // --output_dir 需自动建目录（round_video 同 four_views，链路可能指向新目录）。
-    if (!explicit_output_dir.empty()) {
-#ifdef _WIN32
-        const int rc = _mkdir(explicit_output_dir.c_str());
-#else
-        const int rc = mkdir(explicit_output_dir.c_str(), 0755);
-#endif
-        if (rc != 0 && errno != EEXIST) {
-            LOG(FATAL) << "无法创建输出目录: " << explicit_output_dir
-                       << " (errno=" << errno << ")";
-        }
-    }
-
-    // 临时帧 buffer 子目录（输出目录下），渲染完 ffmpeg 后递归删除。
-    const std::string frames_dir = dir + "/" + base + "_round_frames";
-#ifdef _WIN32
-    const int rc2 = _mkdir(frames_dir.c_str());
-#else
-    const int rc2 = mkdir(frames_dir.c_str(), 0755);
-#endif
-    if (rc2 != 0 && errno != EEXIST) {
-        LOG(FATAL) << "无法创建临时帧目录: " << frames_dir
-                   << " (errno=" << errno << ")";
-    }
-
-    // 相机仰角（phi）固定 = phi_deg；clamp 到 ViewConfig 合法范围 [-90°,90°]。
-    constexpr double kPi = 3.14159265358979323846;
-    constexpr double kPiHalf = kPi / 2.0;
-    app->view_.phi = std::clamp(phi_deg * kDegToRad, -kPiHalf, kPiHalf);
-    // theta 从 0（正面）线性扫到 π（背面 180°）。R 保持 main 里按模型包围盒算
-    // 好的自适应距离（见 main 注释），保证半周都能框住模型。
-    app->view_.theta = 0.0;
-    app->view_.R = std::clamp(app->view_.R, jpov_viewer::ViewConfig::kRMin,
-                              jpov_viewer::ViewConfig::kRMax);  // 防御（已有但显式化）
-
-    const jpov::InputSnapshot input{};  // round_video = headless，无交互输入
-
-    LOG(INFO) << "--round_video: frames=" << num_frames
-              << ", theta 0°→180°, phi=" << phi_deg
-              << "°, tmp=" << frames_dir;
-    for (int i = 0; i < num_frames; ++i) {
-        // theta = i/(frames-1) * π：末帧到 π（180° 背面）。仅 1 帧时 theta=0。
-        const double t = (num_frames == 1) ? 0.0
-                                           : static_cast<double>(i) /
-                                                 (num_frames - 1);
-        app->view_.theta = t * kPi;
-
-        char name[64];
-        std::snprintf(name, sizeof(name), "frame_%04d.png",
-                      static_cast<int>(i));
-        const std::string out = frames_dir + "/" + name;
-        jpov::WindowInfo winfo;
-        winfo.width  = kViewerWidth;
-        winfo.height = kViewerHeight;
-        app->RunOnce(input, winfo, out.c_str());
-        if ((i % 10) == 0 || i == num_frames - 1) {
-            LOG(INFO) << "  [" << (i + 1) << "/" << num_frames
-                      << "] theta=" << app->view_.theta * 180.0 / kPi << "°";
-        }
-    }
-
-    // 全部渲染成功后才调 ffmpeg；无论成功失败，临时帧目录都清理（不留文件系统
-    // 垃圾）。ffmpeg 失败会带完整 argv/错误 LOG，无需靠残留 PNG 排查。
-    const std::string out_mp4 = dir + "/" + base + "_round.mp4";
-    const std::string pattern = frames_dir + "/frame_%04d.png";
-    const bool ok = RunFfmpeg(pattern, out_mp4, fps);
-
-    // 视频已合成（或失败），临时帧 PNG buffer 用完即删。
-    RemoveDirRecursive(frames_dir);
-    if (!ok) {
-        LOG(FATAL) << "ffmpeg 合成失败，未产生 " << out_mp4;
-    }
-
-    std::printf("%s\n", out_mp4.c_str());
-    LOG(INFO) << "--round_video 已合成: " << out_mp4;
+    return p;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const CliOptions opt = ParseCliOptions(argc, argv);
-    const bool four_views = opt.four_views;
-    const bool round_video = opt.round_video;
-    // four_views 与 round_video 互斥（同为 headless 出图，参数语义不同）。
-    const bool headless = four_views || round_video;
+    const CliParsed p = ParseCli(argc, argv);
+    const bool capture = (p.mode == RunMode::kFourViews ||
+                          p.mode == RunMode::kRoundVideo);
 
-    // glTF 路径 = 第一个非 -- 前缀参数（相对/绝对均可）。
-    std::string gltf_path = opt.gltf_path;
+    // glTF 路径 = 第一个非 "--" 前缀参数；缺省退回演示模型。
+    std::string gltf_path = p.gltf_path;
     if (gltf_path.empty()) {
         gltf_path = DefaultGltfPath();
         LOG(WARNING) << "未提供 glTF 路径，使用演示模型: " << gltf_path;
     }
 
-    // ── 配置：1280×720、不可 resize、60fps。──
-    // four_views / round_video → headless（无可见窗口，AI/CI 自查不弹窗）。
+    // ── 配置：1280×720 不可 resize、60fps。拍摄模式 headless（无可见窗口）。──
     JPOV::Config cfg;
     cfg.title = "JPOV — JPOV 模型查看器";
-    cfg.width  = kViewerWidth;
-    cfg.height = kViewerHeight;
-    cfg.resizable = false;          // 需求：窗口不可 resize
-    cfg.target_fps = 60;            // 需求：60 帧
-    cfg.headless  = headless;       // 需求：headless 出图不弹窗
-    // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（同 jpov_ui_demo）。
-    // 路径为相对 exe 的字体目录（从 output/jpov_model_viewer/ 运行，由
-    // build_jpov_model_viewer.sh 同构拷贝 fonts/）。
+    cfg.width  = jpov_viewer::kViewerWidth;
+    cfg.height = jpov_viewer::kViewerHeight;
+    cfg.resizable = false;             // 需求：窗口不可 resize
+    cfg.target_fps = static_cast<int>(jpov_viewer::kViewerFps);
+    cfg.headless   = capture;          // 拍摄 headless 出图不弹窗
+    // 显式声明字体：CJK 显中文滑条标签，Latin 做拉丁回退（路径相对 exe 的 fonts/，
+    // build_jpov_model_viewer.sh 同构拷贝）。
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
     };
 
-    GltfViewerApp app(cfg);
-    // headless（four_views/round_video）拍照模式不带 UI 面板。
-    app.interactive_ = !headless;
-    // 帧率计时（滑条键盘 hold 用）：取 cfg.target_fps。
-    app.cfg_target_fps_ = cfg.target_fps;
+    jpov_viewer::ViewerApp app(cfg);
+    app.SetShowPanel(!capture);        // 交互画面板；headless 拍摄不画（纯 3D 截图）
     app.Init();
-    // 注入真实字体文本宽度测量（供 UI 内部用，与 jpov_ui_demo 同款接线）。
-    app.InstallTextMeasure();
+    app.InstallTextMeasure();          // 交互 UI + UI 文本测量（拍摄装了无副作用）
 
-    // 加载 glTF 到中心；失败（empty）→ LOG(FATAL) 带清晰信息，不静默。
+    // 加载 glTF 到中心；失败 → LOG(FATAL) 带清晰信息，不静默。
     app.gltf_ = app.LoadGltf(gltf_path);
     CHECK(!app.gltf_.empty())
         << "LoadGltf 失败或模型为空: " << gltf_path
         << "（请确认路径存在且为合法 .gltf/.glb）";
 
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
-    // 光照不在此预建：交互版由 OneIteration 里的 5 个滑条实时构造
-    // （仰角/浊度/季节色温 + 地面高度 + 模型缩放），见 DrawLightPanel。
-    app.ground_mat_ = jpov_viewer::GroundMaterial();
+    app.ground_mat_  = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
 
-    // 初始视角：目标点 (0,0,0)；R 按模型包围盒自适应（模型大小变化 → 初始
-    // 距离随之变化，总能一眼框住全貌）。退化（包围盒不可用）时用 DefaultView 默认。
+    // 初始视角：目标原点、R 按模型包围盒自适应（退化时退回 DefaultView）。
     app.view_ = jpov_viewer::DefaultView();
     if (app.gltf_.bounds_valid) {
         app.view_.R = jpov_viewer::ViewConfig::FitRadius(
@@ -624,19 +148,26 @@ int main(int argc, char** argv) {
                   << "]，初始 R=" << app.view_.R;
     }
 
-    if (four_views) {
-        // AI 自查模式：headless 渲染 4 个角度，输出到 --output_dir（缺省=模型同级
-        // 目录）后退出。产物路径由 RunFourViews 逐张打印到 stdout。
-        RunFourViews(&app, gltf_path, opt.output_dir);
-    } else if (round_video) {
-        // 环绕视频模式：headless 渲染 60 帧（theta 0→180°）+ ffmpeg 合成 mp4。
-        // 起始正面 theta=0；phi=--phi_deg 仰角（默认 45°俯视）。
-        RunRoundVideo(&app, gltf_path, opt.output_dir, opt.phi_deg,
-                      opt.frames, opt.fps);
+    // ── 模式分发 ──
+    if (p.mode == RunMode::kFourViews || p.mode == RunMode::kRoundVideo) {
+        // 把 CLI 拍平成一张 CaptureSpec 交给统一 driver（viewer_capture.h）。
+        jpov_viewer::CaptureSpec spec;
+        spec.kind        = (p.mode == RunMode::kFourViews)
+                               ? jpov_viewer::CaptureKind::kFourViews
+                               : jpov_viewer::CaptureKind::kRoundVideo;
+        spec.gltf_path   = gltf_path;
+        spec.output_dir  = p.capture.output_dir;
+        spec.phi_deg     = p.capture.phi_deg;
+        spec.num_frames  = p.capture.frames;
+        spec.fps         = p.capture.fps;
+        if (!jpov_viewer::RunCapture(&app, spec)) {
+            LOG(FATAL) << "拍摄失败（详见上方 ERROR 日志）";
+        }
     } else {
         // 交互窗口事件循环（阻塞）。
         app.Run();
     }
+
     app.Finalize();
     return 0;
 }
