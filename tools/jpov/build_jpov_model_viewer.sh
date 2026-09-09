@@ -13,6 +13,11 @@
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_model_viewer/jpov_model_viewer <gltf 路径>
 #   gltf 路径为相对/绝对路径，未指定时 fallback 到项目内 pliers.gltf 演示。
+#
+# headless 出图（不弹窗，可在 CI 用）：
+#   --four_views  → 4 个固定角各一张 PNG
+#   --round_video → 相机绕 y 轴扫 180° 合成 mp4
+#   详细参数见底部🧪 用法提示。
 # =============================================================================
 
 set -euo pipefail
@@ -65,6 +70,14 @@ echo "   2. AI 自查拍照（headless，不弹窗，输出 4 张图到 glTF 同
 echo "       $OUTPUT_DIR/jpov_model_viewer --four_views /absolute/path/to/model.gltf"
 echo "       → <模型名>_front/up/left/perspective.png"
 echo ""
+echo "   3. 环绕视频（headless，相机绕模型 y 轴扫 180° 合成 mp4，无需额外命令）："
+echo "       $OUTPUT_DIR/jpov_model_viewer --round_video /absolute/path/to/model.gltf"
+echo "       → <模型名>_round.mp4（6 秒 / 60 帧 / 环视 180°）"
+echo "         可用参数："
+echo "           --phi_deg <度>    相机仰角，默认 45（=俯视 45°，视方向与竖直方向夹角不变）"
+echo "           --frames <n>      总帧数，默认 60（0→180° 均匀扫）"
+echo "           --fps <n>         视频帧率，默认 10（60 帧@10fps = 6s；想要更慢更长→调低）"
+
 echo "   验收：1280x720 不可 resize 窗口，显示 300×300 灰色地平面 + 被加载的"
 echo "   glTF 模型，正午日照（太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"
 echo "   窗口底部居中 5 个半屏宽滑条（实时调节光照/场景）："
