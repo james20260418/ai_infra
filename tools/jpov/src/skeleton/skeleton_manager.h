@@ -47,11 +47,6 @@
 
 namespace jpov {
 
-// ==================== Pose Atlas 布局常量（契约，勿改） ====================
-
-// 骨骼动画纹理（pose atlas）固定 2048×2048 RGBA32F 2D。见 docs/jpov_skeleton_manager_design.md §2。
-inline constexpr int kPoseAtlasDim = 2048;
-
 // ==================== SkeletonManager ====================
 
 // 一种骨架（一个 SkeletonType + 一整包 pose）的 GPU 资源持有者。构造分配资源、析构释放，
@@ -60,6 +55,10 @@ inline constexpr int kPoseAtlasDim = 2048;
 // unique_ptr 持有。
 class SkeletonManager {
 public:
+    // Poses atlas 边长（布局契约，勿改）：固定 2048×2048 RGBA32F 2D。
+    // 见 docs/jpov_skeleton_manager_design.md §2。放类内以免污染 namespace。
+    static constexpr int kPoseAtlasDim = 2048;
+
     // renderer 批量蒙皮时要 bind 到 shader 的句柄集合：**本类不自己 load 自己**，
     // 只老实暴露底层 GL 资源句柄，由 renderer 在 DrawMeshWithSkeleton 里取用并 bind。
     // 方案甲：GPU 只有**一张** pose atlas 纹理（inverse_bind 已被 CPU 在烘焙期折入每 pose
@@ -85,7 +84,7 @@ public:
     //          占一行内 bone_count×4 texel，行排按 pose_per_row 摊入 2048×2048）。
     //   Pre-condition: GL context 已激活；type.Validate() 通过。
     //   ⚠️ 每个 pose 的 bone_count 应与 type.bone_count 一致（同一种骨架）。poses 总容量
-    //      不得超过 kPoseAtlasCapacity()（超→LOG(FATAL)，不 fallback）。
+    //      不得超过 pose_capacity()（超→LOG(FATAL)，不 fallback）。
     SkeletonManager(const SkeletonType& type, std::vector<SkeletonPose> poses);
 
     // 析构：释放本 manager 持有的 GL 资源（骨骼动画纹理）。
@@ -104,7 +103,7 @@ public:
     int pose_count() const { return pose_count_; }
     // 该 atlas 最多能容纳的 pose 数（= floor(kPoseAtlasDim²/(4*bone_count))）。
     //   Pre-condition: bone_count 已由 ctor 定（>0）。超出即 LOG(FATAL)。
-    int kPoseAtlasCapacity() const { return capacity_; }
+    int pose_capacity() const { return capacity_; }
 
     // ---- renderer 内部 GL 句柄入口（不让本类"自己 load 自己"，改由 renderer 来 bind）----
     // 这里**老实暴露**底层 GPU 资源的句柄，renderer 据此把骨骼动画纹理/逆绑定 bind 到蒙皮

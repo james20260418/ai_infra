@@ -439,38 +439,47 @@ bool ParsePrimitive(const tinygltf::Model& model,
 
     // JOINTS_0 / WEIGHTS_0（骨骼蒙皮, 4-bone：每顶点 4 关节索引 + 4 权重）
     // glTF 规范: JOINTS_0 只允许 UNSIGNED_BYTE/SHORT/INT（每分量 = 关节在 skin
-    //   关节列表里的序号）；WEIGHTS_0 为 FLOAT VEC4。二者成对出现才有效；有其一无其
-    //   另一视为数据异常（记警告并跳过，不置 kJoints——不崩，保留“数据缺失=不蒙皮
-    //   静态 rest”语义）。注意读出的分量是【相对该 mesh 所用 skin 的关节序号】，
-    //   不是 node 全局索引；本 loader 阶段原样填进 MeshData.joint_indices，真正把
-    //   skin 关节列表与 SkeletonType 对齐由加载皮肤的调用方（LoadGltfSkeleton）负责。
+    //   关节列表里的序号）；WEIGHTS_0 为 FLOAT VEC4。二者成对出现才有效。
+    // 铁律（Danis 2026-09-09）：本 primitive 但凡声明了骨骼通道（JOINTS_0 / WEIGHTS_0
+    //   任一存在），就**必须**成功读出成对的 JOINTS+WEIGHTS；否则是数据异常/corrupt，
+    //   **LOG(FATAL) 直接崩，绝不警告后跳过** —— 静默丢骨骼＝渲染时看不出但结果错的
+    //   小坑，最难查。只有一块完整声明都没有时，才是真正不打蒙皮的静态 mesh。
     {
         auto joint_it = prim.attributes.find("JOINTS_0");
         auto weight_it = prim.attributes.find("WEIGHTS_0");
-        if (joint_it != prim.attributes.end() &&
-            weight_it != prim.attributes.end()) {
+        const bool declared_joints = joint_it != prim.attributes.end();
+        const bool declared_weights = weight_it != prim.attributes.end();
+        if (declared_joints || declared_weights) {
+            CHECK(declared_joints && declared_weights)
+                << "LoadGltf: primitive 声明了骨骼通道但 JOINTS_0/WEIGHTS_0 只有其一"
+                   "(corrupt?): JOINTS_0=" << declared_joints
+                << " WEIGHTS_0=" << declared_weights
+                << " —— 声明了骨骼就必须成对载入，拒绝静默跳过";
             std::vector<std::array<int32_t, 4>> joints;
             std::vector<float> weights_flat;
-            if (ReadJointsAccessor(model, joint_it->second, &joints) &&
-                joints.size() == vcount &&
+            const bool ok_joints = ReadJointsAccessor(model, joint_it->second,
+                                                      &joints) &&
+                                   joints.size() == vcount;
+            const bool ok_weights =
                 ReadFloatAccessor(model, weight_it->second, &weights_flat) &&
-                weights_flat.size() / 4 == vcount) {
-                out_mesh->joint_indices = std::move(joints);
-                out_mesh->joint_weights.resize(vcount);
-                for (size_t i = 0; i < vcount; ++i) {
-                    for (int j = 0; j < 4; ++j) {
-                        out_mesh->joint_weights[i][j] =
-                            weights_flat[i * 4 + j];
-                    }
+                weights_flat.size() / 4 == vcount;
+            CHECK(ok_joints && ok_weights)
+                << "LoadGltf: primitive 骨骼通道校验失败 —— JOINTS 可读/长度="
+                << ok_joints << " (=" << joints.size() << " vs vcount "
+                << vcount << "), WEIGHTS 可读/长度=" << ok_weights
+                << " (=" << weights_flat.size() / 4 << " vs vcount "
+                << vcount << ")" << " —— 声明了骨骼就必须成功载入，拒绝藏坑";
+            out_mesh->joint_indices = std::move(joints);
+            out_mesh->joint_weights.resize(vcount);
+            for (size_t i = 0; i < vcount; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    out_mesh->joint_weights[i][j] =
+                        weights_flat[i * 4 + j];
                 }
-                out_mesh->flags = static_cast<MeshVertexFlags>(
-                    static_cast<uint8_t>(out_mesh->flags) |
-                    static_cast<uint8_t>(MeshVertexFlags::kJoints));
-            } else {
-                LOG(WARNING)
-                    << "LoadGltf: primitive 有 JOINTS_0/WEIGHTS_0 但解析失败或"
-                       "长度不齐, 跳过骨骼(按静态 rest 渲)";
             }
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kJoints));
         }
     }
 
