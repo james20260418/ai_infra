@@ -10,10 +10,16 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 cc_library(
     name = "skeleton",
     srcs = ["skeleton_manager.cc"],
-    hdrs = ["skeleton_manager.h"],
+    hdrs = [
+        "skeleton_manager.h",
+        # 蒙皮渲染的 shader / bind-pose cover（与 skeleton_manager 平级，前缀 skinning_）
+        "skinning_shader.h",
+        "skinning_bind_pose.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:skeleton_types",
+        "//geom/common:quaternion",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
