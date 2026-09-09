@@ -63,12 +63,27 @@ cc_library(
 
 # SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonType/SkeletonPose/SkinnedInstanceState）
 # 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
+# 头里用到 geom::Quaternion（SkeletonPose.joint_rotation），故须公开依赖 quaternion。
 cc_library(
     name = "skeleton_types",
     hdrs = ["skeleton_types.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//geom/common:quaternion",
         "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# AnimationClip — CPU 侧外部动画素材容器（FBXClip：源骨架 + 帧频 + 原始全帧）
+# 承载 src/fbx_loader 的产出；供上层 debug/retarget/resample 二次开发用，不碰 GPU。
+# （src/skeleton 的 GPU pose atlas 使用另见 src/skeleton。）
+cc_library(
+    name = "animation_clip",
+    hdrs = ["animation_clip.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":skeleton_types",
     ],
     copts = ["-std=c++20"],
 )
@@ -152,6 +167,7 @@ cc_library(
         "pbr_material.h",
         "ui.h",
         "skeleton_types.h",
+        "animation_clip.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -165,5 +181,6 @@ cc_library(
         ":window_info",
         ":ui",
         ":skeleton_types",
+        ":animation_clip",
     ],
 )

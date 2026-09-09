@@ -75,3 +75,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# FBX (Mixamo 动画) 骨骼动画源 → FBXClip 加载验证（CPU-only, 真实 dance.fbx 资材自洽性）
+cc_test(
+    name = "jpov_fbx_loader_test",
+    srcs = ["jpov_fbx_loader_test.cc"],
+    data = ["//tools/jpov/test/animations:hip_hop_dance_fbx_data"],
+    deps = [
+        "//tools/jpov/src:fbx_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
