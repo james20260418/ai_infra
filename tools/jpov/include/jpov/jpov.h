@@ -201,6 +201,17 @@ public:
     // Pre-condition: data.Validate() 通过（数组对齐、flags 与数据一致）
     uint32_t RegisterMesh(const jpov::MeshData& data);
 
+    // RegisterSkeleton: 将一种骨架（SkeletonType + 一整包 pose）注册为可蒙皮渲染的
+    // 骨架资源（SkeletonManager），返回 skeleton_id（非 0）。
+    //
+    // type  : 骨架定义（joints 树 + rest_offset + inverse_bind，见 LoadGltfSkeleton 产出）。
+    // poses : 该骨架的全部静态位姿关键帧（烘焙成 pose atlas）。M1 传一个 bind pose。
+    // 返回 skeleton_id 供 cmds->DrawMeshWithSkeleton(mesh_id, skeleton_id, instances) 引用。
+    //
+    // Pre-condition: Init() 已调用；type.Validate() 通过；poses 非空。
+    uint32_t RegisterSkeleton(const jpov::SkeletonType& type,
+                              std::vector<jpov::SkeletonPose> poses);
+
     // UpdateMesh: 更新已有 mesh 的顶点数据。
     //
     // new_data.flags 必须与注册时一致（VBO 布局不能变）。
