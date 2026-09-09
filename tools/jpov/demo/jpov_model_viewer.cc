@@ -366,8 +366,8 @@ void RunFourViews(GltfViewerApp* app,
 }
 
 // 递归删除目录（用于 round_video 渲染完帧 PNG 后清理临时帧目录）。
-// POSIX 下 opendir/readdir 遍历 + unlink 文件 + rmdir 子目录；Windows 分支占位
-// （round_video 目前面向 Linux/CI，Windows 走 `#error` 由未使用路径规避）。
+// POSIX 下 opendir/readdir 遍历 + unlink 文件 + rmdir 子目录；Windows 为空实现
+// （round_video 目标平台为 Linux/CI，Windows 路径目前不提供清理）。
 void RemoveDirRecursive(const std::string& dir) {
 #ifndef _WIN32
     DIR* d = opendir(dir.c_str());
@@ -396,43 +396,40 @@ void RemoveDirRecursive(const std::string& dir) {
 // 成功返回 true；失败（fork 失败 / ffmpeg 非零退出）返回 false 并打印 stderr 缓冲。
 bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4, int fps) {
 #ifndef _WIN32
-    const int pipefd = fileno(stderr);
-    (void)pipefd;  // 保持 ffmpeg stderr 透传到父进程（进度/错误可见）
-
+    // execvp 需要末尾 nullptr 的 argv 数组。用 std::vector 自管理内存（免手动
+    // calloc/free），各元素 .c_str() 指向的 std::string 在 waitpid 前都存活。
+    std::vector<const char*> argv;
+    argv.reserve(16);
     const std::string fps_str = std::to_string(fps);
     const std::string crf     = "18";
-    // ffmpeg 完整参数（注意 -y 覆盖、yuv420p 保证播放器兼容、libx264 编码）。
-    // argv[0] 需与 execvp 查找的可执行名一致（execvp 会用 PATH 查找）。
-    const char** argv = static_cast<const char**>(
-        calloc(16, sizeof(const char*)));
-    int n = 0;
-    argv[n++] = "ffmpeg";
-    argv[n++] = "-y";
-    argv[n++] = "-framerate";
-    argv[n++] = fps_str.c_str();
-    argv[n++] = "-i";
-    argv[n++] = frame_pattern.c_str();
-    argv[n++] = "-c:v";
-    argv[n++] = "libx264";
-    argv[n++] = "-pix_fmt";
-    argv[n++] = "yuv420p";
-    argv[n++] = "-crf";
-    argv[n++] = crf.c_str();
-    argv[n++] = "-preset";
-    argv[n++] = "medium";
-    argv[n++] = out_mp4.c_str();
-    argv[n] = nullptr;
+    // ffmpeg 完整参数（-y 覆盖、yuv420p 保证播放器兼容、libx264 编码、crf=18 高质量）。
+    argv.push_back("ffmpeg");
+    argv.push_back("-y");
+    argv.push_back("-framerate");
+    argv.push_back(fps_str.c_str());
+    argv.push_back("-i");
+    argv.push_back(frame_pattern.c_str());
+    argv.push_back("-c:v");
+    argv.push_back("libx264");
+    argv.push_back("-pix_fmt");
+    argv.push_back("yuv420p");
+    argv.push_back("-crf");
+    argv.push_back(crf.c_str());
+    argv.push_back("-preset");
+    argv.push_back("medium");
+    argv.push_back(out_mp4.c_str());
+    argv.push_back(nullptr);  // execvp argv 必须以 nullptr 结尾
 
     const int pid = fork();
     if (pid == 0) {
-        execvp("ffmpeg", const_cast<char* const*>(argv));
-        // exec 失败才到这（PATH 找不到 ffmpeg）：stderr 报错，子进程退出非 0。
+        // 子进程 exec ffmpeg；execvp 会用 PATH 找可执行文件。exec 成功则不复返；
+        // 失败（如未安装 ffmpeg）才到这，stderr 报错后以非 0 退出。
+        execvp("ffmpeg", const_cast<char* const*>(argv.data()));
         fprintf(stderr, "execvp ffmpeg 失败（未安装 ffmpeg？）: %s\n",
                 strerror(errno));
         _exit(127);
     }
     if (pid < 0) {
-        free(argv);
         LOG(ERROR) << "fork() 启动 ffmpeg 失败";
         return false;
     }
@@ -440,9 +437,6 @@ bool RunFfmpeg(const std::string& frame_pattern, const std::string& out_mp4, int
     int status = 0;
     waitpid(pid, &status, 0);
     const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    // argv 指向的字符串(std::string::c_str() 栈上成员) 与 calloc 都需释放；
-    // 仅释放 calloc 出的 argv 数组本身（其中 c_str() 由原 string 持有）。
-    free(argv);
     if (!ok) {
         LOG(ERROR) << "ffmpeg 合成视频失败, exit="
                    << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
@@ -547,19 +541,18 @@ void RunRoundVideo(GltfViewerApp* app,
         }
     }
 
-    // 全部渲染成功后才调 ffmpeg（失败则下面走 FATAL，不残留半成品 mp4）。
+    // 全部渲染成功后才调 ffmpeg；无论成功失败，临时帧目录都清理（不留文件系统
+    // 垃圾）。ffmpeg 失败会带完整 argv/错误 LOG，无需靠残留 PNG 排查。
     const std::string out_mp4 = dir + "/" + base + "_round.mp4";
     const std::string pattern = frames_dir + "/frame_%04d.png";
-    bool ok = false;
-    if (!out_mp4.empty() && frames_dir.size() > 0u) {
-        ok = RunFfmpeg(pattern, out_mp4, fps);
-    }
+    const bool ok = RunFfmpeg(pattern, out_mp4, fps);
+
+    // 视频已合成（或失败），临时帧 PNG buffer 用完即删。
+    RemoveDirRecursive(frames_dir);
     if (!ok) {
         LOG(FATAL) << "ffmpeg 合成失败，未产生 " << out_mp4;
     }
 
-    // 视频已合成，清理临时帧 PNG（buffer 用完即删，不留中间文件垃圾）。
-    RemoveDirRecursive(frames_dir);
     std::printf("%s\n", out_mp4.c_str());
     LOG(INFO) << "--round_video 已合成: " << out_mp4;
 }
