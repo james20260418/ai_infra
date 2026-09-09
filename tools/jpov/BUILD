@@ -39,14 +39,72 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-cc_binary(
-    name = "jpov_model_viewer",
-    srcs = ["demo/jpov_model_viewer.cc"],
+# 模型查看器 —— 章节化（重构，docs/jpov_model_viewer_arch.md）：把历史"god demo"
+# demo/jpov_model_viewer.cc 拆成三类库，各自可单独构建/被引用：
+#   viewer_output  : 出图/合成产出工具（路径推导 + mkdir + 临时目录 + ffmpeg），纯文件逻辑、可单测
+#   viewer_app     : 渲染核心 App（场景 + 交互面板宿主）
+#   viewer_capture : headless 拍摄 driver（four_views / round_video 统一编排）
+# 主程序 demo/jpov_model_viewer.cc 只做装配 + 模式分发，不再自己内联渲染/编排。
+cc_library(
+    name = "viewer_output",
+    srcs = ["demo/viewer_output.cc"],
+    hdrs = ["demo/viewer_output.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@glog_static//:glog"],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
+    name = "viewer_app",
+    hdrs = ["demo/viewer_app.h"],
+    visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:ui",
     ],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
+    name = "viewer_capture",
+    hdrs = ["demo/viewer_capture.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:viewer_app",
+        "//tools/jpov:viewer_output",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_model_viewer",
+    srcs = ["demo/jpov_model_viewer.cc"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov:viewer_capture",
+        "//tools/jpov:viewer_output",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "viewer_output_test",
+    srcs = ["demo/viewer_output_test.cc"],
+    deps = [
+        "//tools/jpov:viewer_output",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
