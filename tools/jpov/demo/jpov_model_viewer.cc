@@ -238,7 +238,7 @@ private:
 //   round_video : --round_video 环绕视频模式（headless，绕 y 轴旋转渲染帧 → ffmpeg 合成 mp4）
 //   phi_deg     : --round_video 的相机仰角（度，默认 45=俯视 45°）；仅 round_video 用
 //   frames      : --round_video 的总帧数（默认 60）
-//   fps         : --round_video 的视频帧率（默认 60）
+//   fps         : --round_video 的视频帧率（默认 10：60 帧 ≈ 6 秒）
 //   output_dir  : --output_dir <dir> 指定出图目录（可选；缺省时后退到 glTF 同级目录）
 //   gltf_path   : 第一个非 -- 前缀参数（相对/绝对均可）
 struct CliOptions {
@@ -246,7 +246,7 @@ struct CliOptions {
     bool round_video = false;
     double phi_deg = 45.0;    // 相机仰角（度）：round_video 默认俯视 45°
     int frames = 60;          // round_video 总渲染帧数
-    int fps = 60;             // round_video 视频帧率
+    int fps = 10;             // round_video 视频帧率（默认 10：60 帧 = 6 秒）
     std::string output_dir;   // 空 = 未指定
     std::string gltf_path;
 };
