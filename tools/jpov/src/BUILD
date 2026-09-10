@@ -225,7 +225,6 @@ cc_library(
         ":mesh_manager",
         ":shader_manager",
         ":texture_manager",
-        "//tools/jpov/src/skeleton:skeleton",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",

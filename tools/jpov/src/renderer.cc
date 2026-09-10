@@ -1293,7 +1293,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_cfg_, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
-            // SkeletonRenderer::DrawObject3DInstancedWithSkeleton，其本身不上传光照。
+            // SkeletonRenderer::DrawSkinnedMesh，其本身不上传光照。
             if (!cmds.skinned_mesh.empty()) {
                 SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProg(),
