@@ -30,3 +30,29 @@ cc_library(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# SkeletonRenderer — 蒙皮带骨物体渲染（独立子渲染器，与 Object3DRenderer 在 renderer
+# 层面平级、互不依赖）。Phase 1：整份 Object3DRenderer 复制过来先跑通 gold（渲染效果零
+# 变化，仅把类名/调用方换成 SkeletonRenderer），后续逐步做减法剥离。
+cc_library(
+    name = "skeleton_renderer",
+    srcs = ["skeleton_renderer.cc"],
+    hdrs = ["skeleton_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/src:mesh_manager",
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src:texture_manager",
+        "//tools/jpov/src/skeleton:skeleton",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

@@ -169,6 +169,7 @@ cc_library(
         ":mesh_manager",
         ":object3d_renderer",
         ":primitives3d_renderer",
+        "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
         ":sky_renderer",
         ":texture_manager",

@@ -19,6 +19,7 @@
 #include "tools/jpov/src/object3d/object3d_renderer.h"
 #include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
 #include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
+#include "tools/jpov/src/skeleton/skeleton_renderer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/skydome/sky_renderer.h"
 #include "tools/jpov/src/skeleton/skeleton_manager.h"
@@ -234,6 +235,10 @@ private:
     unsigned int BloomCompositeProg();
     // 蒙皮渲染 program（kSkinnedVs + kMeshFs3dPBR 复用 object3d 片元）。
     unsigned int SkinnedMeshProg();
+
+    // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
+    // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
+    SkeletonRenderer skeleton_renderer_;
 
 public:
     // ---- 骨架（SkeletonManager）注册 / 取用 ----

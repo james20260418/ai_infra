@@ -968,13 +968,13 @@ unsigned int Renderer::DrawObject3DProgFull() {
 // 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
 unsigned int Renderer::SkinnedMeshProg() {
     return shader_mgr_.GetOrCreate("skinned_mesh",
-        {kSkinnedVs, Object3DRenderer::kMeshFs3dPBR});
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR});
 }
 
 // 蒙皮阴影 program：蒙皮阴影 VS(kSkinnedShadowVs) + 复用对象3D片元(kShadowFs，只写线性深度)。
 unsigned int Renderer::SkinnedShadowProg() {
     return shader_mgr_.GetOrCreate("skinned_shadow",
-        {kSkinnedShadowVs, Object3DRenderer::kShadowFs});
+        {kSkinnedShadowVs, SkeletonRenderer::kShadowFs});
 }
 
 // 注册一种骨架（SkeletonType + 一整包 pose）→ skeleton_id（非 0，= vector 下标 + 1）。
@@ -1055,12 +1055,12 @@ void AppendLightAabb(const GPUMesh* mesh, const Vec3f& center, Vec3f up,
 void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                                       const RenderCommandList& cmds,
                                       int fbo_w, int fbo_h) {
-    // 委托给 Object3DRenderer::DrawObject3DInstancedWithSkeleton（抄 DrawObject3D 本体 + 带骨：
+    // 委托给 SkeletonRenderer::DrawObject3DInstancedWithSkeleton（抄 DrawObject3D 本体 + 带骨：
     // 光照/tile/材质纹理绑定/Object3d 校验一致，避免 renderer 手写一套导致渲染不对）。
     SkeletonManager* skel = GetSkeleton(cmd.skeleton_id);
     CHECK(skel != nullptr) << "DrawSkinnedMeshCommand: skeleton_id "
                            << cmd.skeleton_id << " 未注册（需先 RegisterSkeleton）";
-    Object3DRenderer::DrawObject3DInstancedWithSkeleton(
+    skeleton_renderer_.DrawObject3DInstancedWithSkeleton(
         cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
         SkinnedMeshProg(), skel->gpu_handles(), tile_index_tex_);
 }
@@ -1364,9 +1364,9 @@ void Renderer::Render(const RenderCommandList& cmds,
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_cfg_, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
-            // Object3DRenderer::DrawObject3DInstancedWithSkeleton，其本身不上传光照。
+            // SkeletonRenderer::DrawObject3DInstancedWithSkeleton，其本身不上传光照。
             if (!cmds.skinned_mesh.empty()) {
-                Object3DRenderer::UploadSunData(shader_mgr_,
+                SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProg(), SkinnedMeshProg(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                     shadow_cfg_, eff_sun);
@@ -1383,7 +1383,7 @@ void Renderer::Render(const RenderCommandList& cmds,
         }
         if (!cmds.skinned_mesh.empty()) {
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
-            Object3DRenderer::UploadAmbient(shader_mgr_,
+            SkeletonRenderer::UploadAmbient(shader_mgr_,
                 SkinnedMeshProg(), SkinnedMeshProg(), ambient);
         }
 
