@@ -1,18 +1,23 @@
 // JPOV SkeletonRenderer — 蒙皮带骨物体渲染 + Tile Forward 光照（Phase 1：整份 Object3DRenderer 复制，待做减法）
 //
-// 管理 DrawObject3DInstancedWithSkeleton 的蒙皮 shader、材质纹理绑定、点光源数据上传、
-// 以及 CPU 端 tile culling。作为 Renderer 的内部组件，生命周期与 Renderer
+// 管理蒙皮带骨渲染的 shader、材质纹理绑定、骨骼 pose atlas 查表、逐实例 draw，
+// 以及蒙皮阴影 pass 的光空间深度绘制。作为 Renderer 的内部组件，生命周期与 Renderer
 // 相同。
 //
-// MeshManager 和 TextureManager 由 Renderer 共享传入（不持有所有权）。
+// 与 Object3DRenderer 的分工（两者互不依赖）：
+//   Object3DRenderer  —— 静态 Object3D 的 PBR + 点光源 tile culling + 拾取/高亮。
+//   SkeletonRenderer  —— 蒙皮带骨实例的 PBR（太阳直射 + 环境光，无点光源）+ 蒙皮阴影。
+// 蒙皮网格的 PBR 片元与 Object3D 同光照模型，但排版为独立的 kMeshFs3dPBR 常量
+// （见头文件顶部「一片 shader 字符串不可单测，就不要分开管理」的约定）。
+//
+// MeshManager / TextureManager / ShaderManager 由 Renderer 共享传入（不持有所有权）。
 //
 // 用例：
-//   SkeletonRenderer o3d;
-//   o3d.EnsureTileLighting(fbo_w, fbo_h, &tile_index_tex, ...);
-//   o3d.UploadLightData(cmds, shader_mgr);
-//   o3d.BuildTileLightIndices(cmds, fbo_w, fbo_h, tile_index_tex, ..., mvp);
-//   o3d.DrawObject3D(cmd, cmds, mesh_mgr, texture_mgr, shader_mgr, mvp,
-//                    tile_index_tex);
+//   SkeletonRenderer skel;
+//   skel.UploadSunData(shader_mgr, prog, shadow_fbos, vp, dvp, cfg, sun);
+//   skel.UploadAmbient(shader_mgr, prog, ambient);
+//   skel.DrawSkinnedMesh(cmd, cmds, mesh_mgr, texture_mgr, shader_mgr, mvp, prog, gh);
+//   skel.DrawSkinnedMeshShadow(cmd, mesh_mgr, shader_mgr, gh, shadow_vp, depth_vp, sp);
 
 #ifndef JPOV_SKELETON_RENDERER_H_
 #define JPOV_SKELETON_RENDERER_H_
@@ -36,84 +41,7 @@ public:
     SkeletonRenderer(const SkeletonRenderer&) = delete;
     SkeletonRenderer& operator=(const SkeletonRenderer&) = delete;
 
-    // ---- PBR 渲染所需的 GLSL shader 源码 ----
-    //
-    // 调用方用 ShaderManager 编译：
-    //   shader_mgr.GetOrCreate("draw_object3d_pbr",
-    //       {kMeshVs3dPBR, kMeshFs3dPBR})
-    //   shader_mgr.GetOrCreate("draw_object3d_pbr_full",
-    //       {kMeshVs3dPBRFull, kMeshFs3dPBR})
-    //
-    // kMeshVs3dPBR: 无 UV 版 vertex shader（mesh 不含 kUV 时使用）
-    //   输入: vec3 aPos(loc=0), vec3 aNormal(loc=1)
-    //   uniform: mat4 uMVP, mat4 uModel
-    //   输出: vWorldPos, vWorldNormal, vTexCoord(0,0), vWorldTangent(0,0,0)
-    static constexpr const char* kMeshVs3dPBR = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-out vec2 vTexCoord;
-out vec3 vWorldTangent;
-void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vTexCoord = vec2(0.0);
-    vWorldTangent = vec3(0.0);
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-    // kMeshVs3dPBRFull: 完整版 vertex shader（含 UV + tangent）
-    //   输入: vec3 aPos(loc=0), vec3 aNormal(loc=1),
-    //         vec2 aTexCoord(loc=2), vec3 aTangent(loc=5)
-    static constexpr const char* kMeshVs3dPBRFull = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-layout(location = 5) in vec3 aTangent;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vWorldNormal;
-out vec2 vTexCoord;
-out vec3 vWorldTangent;
-void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
-    vTexCoord = aTexCoord;
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)glsl";
-
-    // kShadowVs: 阴影 pass 专用 vertex shader。
-    //   输入: vec3 aPos(loc=0)。
-    //   uShadowMVP      = proj*view*model（光空间裁剪，用于 gl_Position 近远裁剪）
-    //   uShadowDepthMVP = DepthProj*view*model。vShadowDepth 输出其 z 分量：
-    //                     即"相对主视锥中心的原始线性深度"（DepthProj 保证 w=1，
-    //                     经 .z 直接得线深，不经 near/far 归一化，depth 0 点在主视锥中心）。
-    static constexpr const char* kShadowVs = R"glsl(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-uniform mat4 uShadowMVP;
-uniform mat4 uShadowDepthMVP;
-out float vShadowDepth;
-void main() {
-    vec4 clip = uShadowMVP * vec4(aPos, 1.0);
-    gl_Position = clip;
-    vec4 dpos = uShadowDepthMVP * vec4(aPos, 1.0);
-    vShadowDepth = dpos.z / dpos.w;   // 线性深度（DepthProj 下 w=1）
-}
-)glsl";
-
-    // kShadowFs: 阴影 pass fragment shader。把线性深度写入颜色通道 .r。
+    // kShadowFs: 蒙皮阴影 pass 的 fragment shader。把蒙皮 VS 输出的线性深度写入颜色 .r。
     // 用 RGBA32F 颜色纹理存深度（而非 GL 深度缓冲），避开 headless/软渲染下
     // depth 纹理采样精度/格式不一致的问题（见 renderer.cc EnsureShadowFBO）。
     static constexpr const char* kShadowFs = R"glsl(
@@ -125,22 +53,12 @@ void main() {
 }
 )glsl";
 
-    // kMeshFs3dPBR: 统一 GGX PBR fragment shader（Tiled Forward）
-    //   两版 vertex shader 共用此 frag。
-    //   内置 tile culling（readTileLights → 只算本 tile 命中的光源）。
+    // kMeshFs3dPBR: 蒙皮带骨物体的 GGX PBR fragment shader（太阳直射 + 天光 + 自发光）。
+    //   仅服务蒙皮 program（kSkinnedVs + 本 FS），故无点光源/tile culling 分支：
+    //   光照 = 太阳平行光（含 CSM 阴影）+ 全局环境光，两者均为无衰减的全局量。
     //   uHas*Tex 标志控制各通道走纹理采样还是常值 fallback。
-    //   需要绑定 uTileLightIndices sampler（TEXTURE0）。
-    //
-    //   下面的 #define 常量与 SkeletonRenderer 的 kTileSize16_/
-    //   kMaxLightsPerTile_/kMaxTotalLights_/kLightIndexSentinel_ 一一对应：
-    //   改任一处必须同时改另一处，否则 tile 编码/解码错位。
     static constexpr const char* kMeshFs3dPBR = R"glsl(
 #version 330 core
-
-#define TILE_SIZE 16
-#define MAX_LIGHTS_PER_TILE 16
-#define MAX_TOTAL_LIGHTS 255
-#define LIGHT_INDEX_SENTINEL 255u
 
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
@@ -148,16 +66,6 @@ in vec2 vTexCoord;
 in vec3 vWorldTangent;
 out vec4 FragColor;
 
-struct Light {
-    vec3 position;
-    vec3 color;
-    float radius;           // 衰减半径
-    float physicalRadius;   // 光源球体物理半径（0 = 点光源）
-    float intensity;        // 亮度标量（乘 color，见 LIGHT_INTENSITY.md）
-};
-
-uniform Light uLights[MAX_TOTAL_LIGHTS];
-uniform int uTotalLights;
 uniform vec3 uCameraPos;
 uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级联过渡权重用）
 
@@ -179,11 +87,6 @@ uniform int   uHasAoTex;
 uniform sampler2D uNormalTex;
 uniform int   uHasNormalTex;
 uniform float uNormalScale;
-
-uniform sampler2D uTileLightIndices;
-// uTileCulling=1（默认）：片元经 tile 索引纹理只算本 tile 命中的光源（16×16 tile culling）。
-// uTileCulling=0：关闭 tile culling，片元遍历全部点光源（经典前向光照，无 tile 分界线伪影）。
-uniform int uTileCulling;
 
 // 太阳平行光（DirectionalLight）+ 级联阴影（CSM）。
 // uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并按片元距相机距离选级联，
@@ -390,84 +293,6 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
 }
 
-int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
-    int count = 0;
-    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
-        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
-        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
-        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
-        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
-        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
-        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = r; count++;
-        }
-        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = g; count++;
-        }
-        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = b; count++;
-        }
-        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
-            out_indices[count] = a; count++;
-        }
-    }
-    return count;
-}
-
-// 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
-// li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
-// 需传入 base_color / metallic / roughness（片元已解析的材质参数）；
-// 通过 inout total_diffuse / total_specular 累加。
-void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
-                         vec3 base_color, float metallic, float roughness,
-                         inout vec3 total_diffuse, inout vec3 total_specular) {
-    vec3 L = uLights[li].position - world_pos;
-    float dist = length(L);
-    if (dist >= uLights[li].radius) return;
-
-    vec3 light_dir = L / dist;
-    float attenuation = 1.0 - (dist / uLights[li].radius);
-
-    // ── Representative Point (Karis 2013) ──
-    // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
-    // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
-    // 能从不同区域命中镜面 lobe → 金属面不会全黑。
-    // physicalRadius = 0 时退化为原始点光源行为。
-    float sourceRadius = uLights[li].physicalRadius;
-    vec3 spec_dir = light_dir;  // default: same as point light
-    if (sourceRadius > 0.0) {
-        vec3 Rf = reflect(-V, N);
-        vec3 centerToRay = dot(L, Rf) * Rf - L;
-        vec3 closestPt = L + centerToRay *
-            clamp(sourceRadius / max(length(centerToRay), 1e-4), 0.0, 1.0);
-        spec_dir = normalize(closestPt);
-    }
-
-    // ── diffuse：原始 light_dir ──
-    float NdotL = max(dot(N, light_dir), 0.0);
-    if (NdotL > 0.0) {
-        vec3 Hd = normalize(light_dir + V);
-        vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
-                     mix(vec3(0.04), base_color, metallic));
-        vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
-        vec3 diffuse = kD * base_color / PI;
-        total_diffuse += uLights[li].color * uLights[li].intensity * diffuse * NdotL * attenuation;
-    }
-
-    // ── specular：representative point 方向 ──
-    float NdotL_s = max(dot(N, spec_dir), 0.0);
-    if (NdotL_s > 0.0) {
-        vec3 H = normalize(spec_dir + V);
-        float NdotV = max(dot(N, V), 0.0);
-        vec3 F0 = mix(vec3(0.04), base_color, metallic);
-        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-        float D = distributionGGX(N, H, roughness);
-        float G = geometrySmith(N, V, spec_dir, roughness);
-        vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
-        total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
-    }
-}
-
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -500,21 +325,6 @@ void main() {
         ? texture(uAoTex, vTexCoord).r
         : uAO;
     ao = clamp(ao, 0.0, 1.0);
-
-    // uTileCulling=0：跳过 tile 查询，直接遍历全部点光源（经典前向光照）。
-    // uTileCulling=1：16×16 tile culling，只结算本 tile 命中的光源，
-    // 高效但有 tile 边界分界线伪影（相邻 tile 光源取舍不同 → 亮暗跳变）。
-    uint light_indices[MAX_LIGHTS_PER_TILE];
-    int num_lights = 0;
-    bool use_tile = (uTileCulling == 1);
-    if (use_tile) {
-        ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
-        int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
-        int grid_rows = grid.y;
-        int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
-        int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
-        num_lights = readTileLights(tile_col, tile_row, light_indices);
-    }
 
     vec3 ambient = uAmbientColor * uAmbientIntensity;
     vec3 total_diffuse = vec3(0.0);
@@ -549,139 +359,23 @@ void main() {
         }
     }
 
-    // 点光源：按 tile_culling 开关分流。
-    //   uTileCulling=1：只结算本 tile 命中的光源（num_lights 已由 readTileLights 填充）。
-    //   uTileCulling=0：遍历全部 uTotalLights（经典前向光照，无分界线）。
-    if (use_tile) {
-        for (int i = 0; i < num_lights; i++) {
-            accumulateOneLight(int(light_indices[i]), N, V, vWorldPos,
-                               base_color, metallic, roughness,
-                               total_diffuse, total_specular);
-        }
-    } else {
-        for (int i = 0; i < uTotalLights; i++) {
-            accumulateOneLight(i, N, V, vWorldPos,
-                               base_color, metallic, roughness,
-                               total_diffuse, total_specular);
-        }
-    }
-
     vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
     FragColor = vec4(result, 1.0);
 }
 )glsl";
 
-    // ---- Tile culling 常量 ----
-    // 与上面 kMeshFs3dPBR 的 GLSL #define 一一对应，改任一处必须同时改另一处。
-    static constexpr int kTileSize16 = 16;
-    static constexpr int kMaxLightsPerTile = 16;
-    static constexpr int kTexelsPerTile = kMaxLightsPerTile / 4;
-    static constexpr int kMaxTotalLights = 255;
-    static constexpr uint8_t kLightIndexSentinel = 255;
-
-    // ---- EnsureTileLighting ----
-    //
-    // 分配/重建 tile index 纹理（GL_RGBA8），分辨率 = grid_cols×4 × grid_rows。
-    // tile 网格与 3D FBO 同尺寸，随 fbo_w/fbo_h 变化时重建。
-    //
-    // 参数：
-    //   fbo_w, fbo_h:   3D FBO 像素尺寸（≥ 1）。
-    //   tile_index_tex: tile 纹理 GLuint，分配/重建到此（output，调用方持有所有权）。
-    //   grid_w, grid_h: tile 网格列/行数（output）。
-    //   tex_w, tex_h:   tile 纹理像素尺寸（output，grid_w×4 × grid_h）。
-    //
-    // Pre-condition: GL context 已激活
-    static void EnsureTileLighting(int fbo_w, int fbo_h,
-                                   unsigned int* tile_index_tex /*output*/,
-                                   int* grid_w /*output*/, int* grid_h /*output*/,
-                                   int* tex_w /*output*/, int* tex_h /*output*/);
-
-    // ---- UploadLightData ----
-    //
-    // 将 cmds.point_lights（至多 kMaxTotalLights 个）上传到 PBR shader 的
-    // uLights[] uniform 数组 + uTotalLights。两个 shader program 都上传
-    //（DrawObject3DProg + DrawObject3DProgFull），因为 DrawObject3D 按材质动态切换。
-    //
-    // 参数：
-    //   cmds:          RenderCommandList，取其 point_lights。
-    //   shader_mgr:    ShaderManager 引用，用于 glUniform*（通过 GetUniform）。
-    //   prog:          DrawObject3DProg() 返回值。
-    //   prog_full:     DrawObject3DProgFull() 返回值。
-    //
-    // 每帧在 BuildTileLightIndices 之前调用一次（非逐 object 热路径）。
-    static void UploadLightData(const RenderCommandList& cmds,
-                                ShaderManager& shader_mgr,
-                                unsigned int prog,
-                                unsigned int prog_full);
-
-    // ---- BuildTileLightIndices ----
-    //
-    // CPU 端 tile culling：遍历 point_lights，把每个光源投影到屏幕空间 → 覆盖
-    // tile 范围 → 向每个覆盖 tile 写入光源 index（先到先得，每 tile ≤16 个）。
-    // 覆盖是保守近似（6 轴向边界点投影取 min/max）；光源跨越相机时全屏覆盖。
-    //
-    // 参数：
-    //   cmds:            RenderCommandList，取其 point_lights。
-    //   fbo_w, fbo_h:    3D FBO 像素尺寸。
-    //   tile_index_tex:  EnsureTileLighting 分配的 tile 纹理。
-    //   grid_w, grid_h:  EnsureTileLighting 输出的网格尺寸。
-    //   tex_w, tex_h:    EnsureTileLighting 输出的纹理像素尺寸。
-    //   mvp:             MVP 矩阵（Proj×View），16 floats 列主序。
-    //
-    // Pre-condition: EnsureTileLighting 已调用，tile_index_tex ≠ 0
-    // Pre-condition: mvp 是当前相机参数下的合法投影矩阵
-    static void BuildTileLightIndices(const RenderCommandList& cmds,
-                                      int fbo_w, int fbo_h,
-                                      unsigned int tile_index_tex,
-                                      int grid_w, int grid_h,
-                                      int tex_w, int tex_h,
-                                      const float mvp[16]);
-
-    // ---- DrawObject3D ----
-    //
-    // 渲染单个 Object3DCommand：构建 Model 矩阵，选择 shader，绑定材质纹理，
-    // 绑定 tile index 纹理，发起 draw call。
-    //
-    // 参数：
-    //   cmd:            Object3DCommand（mesh_id + center/up/front + material）。
-    //   cmds:           RenderCommandList（取 camera.position）。
-    //   mesh_mgr:       MeshManager，取 GPU mesh（vao/vbo/ebo）。
-    //   texture_mgr:    TextureManager，取材质纹理 GL 对象。
-    //   shader_mgr:     ShaderManager，取 program（prog/prog_full）。
-    //   mvp:            MVP 矩阵（Proj×View），16 floats 列主序。
-    //   prog:           DrawObject3DProg()（无 UV 版本）。
-    //   prog_full:      DrawObject3DProgFull()（完整版，含 UV+tangent）。
-    //   tile_index_tex: tile culling 纹理（绑定到 TEXTURE0）。
-    //
-    // GL 状态前置要求（调用方负责）：
-    //   - 3D MSAA FBO 已绑定，viewport 已设置
-    //   - glEnable(GL_DEPTH_TEST) + GL_CULL_FACE 已设置
-    //   - 若有光照：UploadLightData + BuildTileLightIndices 已调用
-    //
-    // 内部通过 glPushAttrib/glPopAttrib 恢复修改的 GL 状态。
-    static void DrawObject3D(const Object3DCommand& cmd,
-                             const RenderCommandList& cmds,
-                             MeshManager& mesh_mgr,
-                             TextureManager& texture_mgr,
-                             ShaderManager& shader_mgr,
-                             const float mvp[16],
-                             unsigned int prog,
-                             unsigned int prog_full,
-                             unsigned int tile_index_tex);
-
-    // ---- DrawObject3DInstancedWithSkeleton ----
-    // 带骨的 Object3D 渲染（SkeletonRenderer 升级，骨骼只是“变体”）：
-    //   0) 用【蒙皮 program】(kSkinnedVs + kMeshFs3dPBR, 含骨槽) 而非 prog/prog_full 选择；
+    // ---- DrawSkinnedMesh ----
+    // 渲染一批带骨实例（蒙皮主体渲染入口）：
+    //   0) 用【蒙皮 program】(kSkinnedVs + kMeshFs3dPBR, 含骨槽) —— 无 prog/prog_full 选择；
     //   1) take SkeletonManager.gpu_handles() → 把【骨纹理 pose atlas】绑到空闲槽(TEXTURE12)
     //      + uBoneCount, 并设 per-instance 的 uPoseRow/uPoseCol（pose 从 cmd.instances[k] 取）;
-    //   2) 其余与 DrawObject3D 完全一样（光照 UploadSunData/UploadAmbient 由调用方在 Render()
-    //      主流程传到 prog/对应, 此处绑材质纹理 + tile + mesh VAO + 逐实例 draw, 同 DrawObject3D 的
-    //      GL 前置要求与 glPushPopAttrib 恢复）。
-    // 参数对齐 DrawObject3D, 额外：
+    //   2) 绑材质纹理 + mesh VAO + 逐实例 draw（光照由调用方在 Render() 主流程经
+    //      UploadSunData / UploadAmbient 预置好，此处不上传光照）。
+    // 参数：
     //   skinned_prog: 蒙皮 program（调用方经 ShaderManager 建 {kSkinnedVs, kMeshFs3dPBR} 传入）。
     //   gh: SkeletonManager::GpuHandles（pose_atlas_tex/bone_count/pose_per_row）。
     //   cmd: SkinnedMeshCommand（mesh_id + material + instances[center/up/front/scale/pose_a]）。
-    static void DrawObject3DInstancedWithSkeleton(
+    static void DrawSkinnedMesh(
         const SkinnedMeshCommand& cmd,
         const RenderCommandList& cmds,
         MeshManager& mesh_mgr,
@@ -689,24 +383,25 @@ void main() {
         ShaderManager& shader_mgr,
         const float mvp[16],
         unsigned int skinned_prog,
-        const SkeletonManager::GpuHandles& gh,
-        unsigned int tile_index_tex);
+        const SkeletonManager::GpuHandles& gh);
 
-    // ---- DrawObject3DShadow ----
-    // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D
-    // 从太阳正交光空间视角画进阴影纹理（只写相对主视锥中心的线性深度到颜色 .r，不光照）。
-    // shadow_vp: uShadowMVP = proj*view*model（裁剪）；
-    // depth_vp:  uShadowDepthMVP = DepthProj*view*model（输出线性深度）。
-    static void DrawObject3DShadow(const Object3DCommand& cmd,
-                                   MeshManager& mesh_mgr,
-                                   ShaderManager& shader_mgr,
-                                   const float shadow_vp[16],
-                                   const float depth_vp[16],
-                                   unsigned int shadow_prog);
+    // ---- DrawSkinnedMeshShadow ----
+    // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
+    // 线性深度到颜色 .r，不光照）。蒙皮在 mesh 局部空间做，再乘光空间 VP*model。
+    // shadow_vp:  uShadowMVP = proj*view*model（裁剪）；
+    // depth_vp:   uShadowDepthMVP = DepthProj*view*model（输出线性深度）。
+    static void DrawSkinnedMeshShadow(
+        const SkinnedMeshCommand& cmd,
+        MeshManager& mesh_mgr,
+        ShaderManager& shader_mgr,
+        const SkeletonManager::GpuHandles& gh,
+        const float shadow_vp[16],
+        const float depth_vp[16],
+        unsigned int shadow_prog);
 
     // ---- UploadSunData ----
-    // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。
-    // 无 sun 时仅把 uHasSun 置 0。两个 shader program 都上传。
+    // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到蒙皮 PBR shader。
+    // 无 sun 时仅把 uHasSun 置 0（防止上一帧残留直射光）。
     // shadow_fbos: 各级联 shadow FBO（取 .tex 绑到 TEXTURE7+i），
     //              长度须 == cfg.cascade_count。
     // shadow_vp:   各级联光空间 ViewProj，[kMaxCascades][16]。
@@ -714,7 +409,6 @@ void main() {
     static void UploadSunData(
         ShaderManager& shader_mgr,
         unsigned int prog,
-        unsigned int prog_full,
         const std::vector<CascadeFBO>& shadow_fbos,
         const float shadow_vp[][16],
         const float shadow_depth_vp[][16],
@@ -722,12 +416,10 @@ void main() {
         const std::optional<DirectionalLight>& sun);
 
     // ---- UploadAmbient ----
-    // 把入参 ambient（AmbientLight）上传到 PBR shader 的 uAmbientColor /
-    // uAmbientIntensity。每帧在 Draw3DCommands 前调用一次（与 sun/点光源并列），
-    // 两个 shader program 都上传。
+    // 把入参 ambient（AmbientLight）上传到蒙皮 PBR shader 的 uAmbientColor /
+    // uAmbientIntensity。每帧在 Draw3DCommands 前调用一次。
     static void UploadAmbient(ShaderManager& shader_mgr,
                               unsigned int prog,
-                              unsigned int prog_full,
                               const AmbientLight& ambient);
 };
 

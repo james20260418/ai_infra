@@ -233,8 +233,10 @@ private:
     unsigned int BloomDownsampleProg();
     unsigned int BloomUpsampleProg();
     unsigned int BloomCompositeProg();
-    // 蒙皮渲染 program（kSkinnedVs + kMeshFs3dPBR 复用 object3d 片元）。
+    // 蒙皮渲染 program（kSkinnedVs + SkeletonRenderer::kMeshFs3dPBR）。
     unsigned int SkinnedMeshProg();
+    // 蒙皮阴影 program（kSkinnedShadowVs + SkeletonRenderer::kShadowFs，深度专用）。
+    unsigned int SkinnedShadowProg();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
@@ -254,16 +256,6 @@ public:
     void DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                                 const RenderCommandList& cmds,
                                 int fbo_w, int fbo_h);
-
-    // 蒙皮阴影 program（kSkinnedShadowVs + kShadowFs，CSS 深度专用）。
-    unsigned int SkinnedShadowProg();
-    // 阴影 pass 把一条蒙皮指令从光空间画深度（mirror Object3DRenderer::DrawObject3DShadow）。
-    void DrawSkinnedMeshShadow(const SkinnedMeshCommand& cmd,
-                               MeshManager& mesh_mgr,
-                               ShaderManager& shader_mgr,
-                               const float shadow_vp[16],
-                               const float depth_vp[16],
-                               unsigned int shadow_prog);
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
