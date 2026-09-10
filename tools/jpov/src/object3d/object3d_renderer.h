@@ -23,6 +23,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
+#include "tools/jpov/src/skeleton/skeleton_manager.h"
 #include "tools/jpov/src/texture_manager.h"
 
 namespace jpov {
@@ -667,6 +668,29 @@ void main() {
                              unsigned int prog,
                              unsigned int prog_full,
                              unsigned int tile_index_tex);
+
+    // ---- DrawObject3DInstancedWithSkeleton ----
+    // 带骨的 Object3D 渲染（Object3DRenderer 升级，骨骼只是“变体”）：
+    //   0) 用【蒙皮 program】(kSkinnedVs + kMeshFs3dPBR, 含骨槽) 而非 prog/prog_full 选择；
+    //   1) take SkeletonManager.gpu_handles() → 把【骨纹理 pose atlas】绑到空闲槽(TEXTURE12)
+    //      + uBoneCount, 并设 per-instance 的 uPoseRow/uPoseCol（pose 从 cmd.instances[k] 取）;
+    //   2) 其余与 DrawObject3D 完全一样（光照 UploadSunData/UploadAmbient 由调用方在 Render()
+    //      主流程传到 prog/对应, 此处绑材质纹理 + tile + mesh VAO + 逐实例 draw, 同 DrawObject3D 的
+    //      GL 前置要求与 glPushPopAttrib 恢复）。
+    // 参数对齐 DrawObject3D, 额外：
+    //   skinned_prog: 蒙皮 program（调用方经 ShaderManager 建 {kSkinnedVs, kMeshFs3dPBR} 传入）。
+    //   gh: SkeletonManager::GpuHandles（pose_atlas_tex/bone_count/pose_per_row）。
+    //   cmd: SkinnedMeshCommand（mesh_id + material + instances[center/up/front/scale/pose_a]）。
+    static void DrawObject3DInstancedWithSkeleton(
+        const SkinnedMeshCommand& cmd,
+        const RenderCommandList& cmds,
+        MeshManager& mesh_mgr,
+        TextureManager& texture_mgr,
+        ShaderManager& shader_mgr,
+        const float mvp[16],
+        unsigned int skinned_prog,
+        const SkeletonManager::GpuHandles& gh,
+        unsigned int tile_index_tex);
 
     // ---- DrawObject3DShadow ----
     // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D

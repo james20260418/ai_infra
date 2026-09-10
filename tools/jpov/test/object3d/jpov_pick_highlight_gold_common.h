@@ -94,24 +94,27 @@ public:
             center_mesh_,
             jpov::PBRMaterial::SolidColor(jpov::kColorRed),
             {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
-            /*picking_id=*/kIdCenter,
-            /*highlight=*/(highlight_id == kIdCenter));
+            /*scale=*/1.0f,
+            /*highlight=*/(highlight_id == kIdCenter),
+            /*picking_id=*/kIdCenter);
 
         // 左柱：左侧蓝色 box，picking_id = kIdLeft。
         cmds->DrawObject3D(
             left_mesh_,
             jpov::PBRMaterial::SolidColor(jpov::kColorBlue),
             {-2.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
-            /*picking_id=*/kIdLeft,
-            /*highlight=*/(highlight_id == kIdLeft));
+            /*scale=*/1.0f,
+            /*highlight=*/(highlight_id == kIdLeft),
+            /*picking_id=*/kIdLeft);
 
         // 右柱：右侧绿色 box，picking_id = kIdRight。
         cmds->DrawObject3D(
             right_mesh_,
             jpov::PBRMaterial::SolidColor(jpov::kColorGreen),
             {2.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
-            /*picking_id=*/kIdRight,
-            /*highlight=*/(highlight_id == kIdRight));
+            /*scale=*/1.0f,
+            /*highlight=*/(highlight_id == kIdRight),
+            /*picking_id=*/kIdRight);
 
         // 拾取查询（enabled 由测试控制）。
         cmds->pick.enabled   = pick_enabled;

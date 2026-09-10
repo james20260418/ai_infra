@@ -20,13 +20,19 @@
 //   属于「真正接 render/gold 验证」的下一个 PR 范畴；本 PR 只保证 CPU 烘焙链路自洽可单测、
 //   atlas 上传正确。坐标/双 pose 插值等后续 PR。
 
+// geom/math_util.h(经 skeleton_types→quaternion→vec)使用 M_PI/M_PI_2，须在首次 include
+// <cmath> 前定义 _USE_MATH_DEFINES，否则 MinGW 下未定义(生效太晚)。与 render_command.h 同款保护。
+#define _USE_MATH_DEFINES
+#include <cmath>
+
 #define GL_GLEXT_PROTOTYPES
 
 #include "tools/jpov/src/skeleton/skeleton_manager.h"
 
 // GL 头须在 MinGW 宏替换 #define 之前(常量声明优先)。次序与 renderer.cc / texture_manager.cc 一致：
-// GL 常量声明 → 再 gl_loader 宏别名。
+// GL 常量声明 → 再 gl_loader 宏别名。glext.h 提供 GL_RGBA32F 等(renderer.cc 同引)。
 #include <GL/gl.h>
+#include <GL/glext.h>
 
 #include <cstring>
 #include <vector>
@@ -34,6 +40,10 @@
 #include <glog/logging.h>
 #ifdef _WIN32
 #include "third_party/gl_loader-mingw/gl_loader.h"
+// MinGW 的 GL/gl.h / gl_loader.h 可能不定义 GL_CLAMP_TO_EDGE(renderer.cc 兜底同款)。
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 #endif
 
 namespace jpov {

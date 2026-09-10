@@ -229,6 +229,13 @@ uint32_t JPOV::RegisterMesh(const jpov::MeshData& data) {
     return renderer_->GetMeshManager().RegisterMesh(data);
 }
 
+uint32_t JPOV::RegisterSkeleton(const jpov::SkeletonType& type,
+                                std::vector<jpov::SkeletonPose> poses) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    return renderer_->RegisterSkeleton(type, std::move(poses));
+}
+
 void JPOV::UpdateMesh(uint32_t mesh_id, const jpov::MeshData& new_data) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK_GT(mesh_id, 0u);

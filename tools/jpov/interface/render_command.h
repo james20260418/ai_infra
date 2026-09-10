@@ -922,6 +922,8 @@ struct SkinnedMeshCommand {
                              // 由 renderer 经 IdAllocator 分配；0 = 无效（实现应 LOG(FATAL)/忽略）。
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
+    PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
+                             // 带 baseColor 纹理等的贴图蒙皮渲染）。
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
@@ -1265,12 +1267,14 @@ struct RenderCommandList {
     // Pre-condition: mesh_id 已通过 RegisterMesh 注册且未释放
     // Pre-condition: base_color_tex 为 0，或已注册且 mesh 含 kUV 属性
     // Pre-condition: up 与 front 均非零向量，且不平行
+    // 参数顺序刻意：把常用/先设的放前（scale 在 highlight/picking_id 前），
+    // 最不常用的 picking_id 放最后。调用处按 cpp-dev-rules 约定加 /*形参名=*/ 注释避免错传。
     void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front,
-                      uint32_t picking_id = 0,
+                      float scale = 1.0f,
                       bool highlight = false,
-                      float scale = 1.0f);
+                      uint32_t picking_id = 0);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //
@@ -1284,9 +1288,9 @@ struct RenderCommandList {
     void DrawGltfObject(const GltfObject& obj,
                         const Vec3f& center,
                         const Vec3f& up, const Vec3f& front,
-                        uint32_t picking_id = 0,
+                        float scale = 1.0f,
                         bool highlight = false,
-                        float scale = 1.0f);
+                        uint32_t picking_id = 0);
 
     // 3D 骨架蒙皮批量（instancing）—— 「这批人用这套骨架(skeleton_id)，每个人拿该骨架
     // 某两个 pose 之间插值摆出一个姿态」。
@@ -1303,12 +1307,16 @@ struct RenderCommandList {
     // 各自不同 mesh_id 的 SkinnedMeshCommand；层/重要性/LOD 归用户。S0 目标“肉体高低模各
     // 一批”就是两次 DrawMeshWithSkeleton 各带不同 mesh_id。
     //
+    // 语义：一个【带骨的 Object3D】—— 同一 rest mesh(mesh_id) 被同一种骨架(skeleton_id)
+    // 蒙皮的一组实例；material 为该蒙皮网格的 PBR 材质（同 Object3DCommand.material）。
+    //
     // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
     // TODO(2026-09-06): 首个实现 = 静态蒙皮(S0 零动画退化门)：某实例 pose_a==pose_b 时等价于
     //   只查一个 pose（不插值）把 rest 顶点蒙过去,是现有“不带蒙皮 VS”的自然扩展。真正的
     //   pose atlas 查表逐骨插值 + instanced divisor 上传随骨骼动画纹理 pass 一并落地。
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
+                              const jpov::PBRMaterial& material,
                               std::vector<SkinnedInstanceState> instances);
 };
 

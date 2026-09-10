@@ -133,8 +133,8 @@ public:
                              /*center*/ {0.0f, 0.0f, 0.0f},
                              /*up*/     {0.0f, 1.0f, 0.0f},
                              /*front*/  {0.0f, 0.0f, 1.0f},
-                             /*picking_id*/ 0, /*highlight*/ false,
-                             /*scale*/ model_scale_);
+                             /*scale*/ model_scale_, /*highlight*/ false,
+                             /*picking_id*/ 0);
 
         // ── 光照调节面板（仅交互窗口绘制；headless 拍摄是纯 3D 截图）──
         if (show_panel_) {

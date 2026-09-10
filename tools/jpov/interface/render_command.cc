@@ -165,9 +165,9 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
 void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       const Vec3f& center,
                                       const Vec3f& up, const Vec3f& front,
-                                      uint32_t picking_id,
+                                      float scale,
                                       bool highlight,
-                                      float scale) {
+                                      uint32_t picking_id) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
@@ -187,19 +187,21 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,
                                        const Vec3f& center,
                                        const Vec3f& up, const Vec3f& front,
-                                       uint32_t picking_id,
+                                       float scale,
                                        bool highlight,
-                                       float scale) {
+                                       uint32_t picking_id) {
     // 内部就是多个 Object3DCommand，无新命令体。
     // picking_id/highlight/scale 透传给每个 primitive（整模型统一拾取/高亮/缩放）。
     for (const GltfPrimitive& prim : obj.primitives) {
         DrawObject3D(prim.mesh_id, prim.material, center, up, front,
-                     picking_id, highlight, scale);
+                     /*scale=*/scale, /*highlight=*/highlight,
+                     /*picking_id=*/picking_id);
     }
 }
 
 void RenderCommandList::DrawMeshWithSkeleton(
     uint32_t mesh_id, uint32_t skeleton_id,
+    const jpov::PBRMaterial& material,
     std::vector<SkinnedInstanceState> instances) {
     CHECK_GT(mesh_id, 0u) << "DrawMeshWithSkeleton: mesh_id 必须 > 0";
     CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
@@ -209,6 +211,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     SkinnedMeshCommand cmd;
     cmd.mesh_id = mesh_id;
     cmd.skeleton_id = skeleton_id;
+    cmd.material = material;                 // 蒙皮网格材质（同 Object3DCommand.material）
     cmd.instances = std::move(instances);  // 每实例自己的插值 pose(pose_a/pose_b/ratio)在 instances 里(见 skeleton_types.h)
     skinned_mesh.push_back(cmd);
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
