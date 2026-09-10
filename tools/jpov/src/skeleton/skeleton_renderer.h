@@ -1,4 +1,4 @@
-// JPOV SkeletonRenderer — 蒙皮带骨物体渲染 + Tile Forward 光照（Phase 1：整份 Object3DRenderer 复制，待做减法）
+// JPOV SkeletonRenderer — 蒙皮带骨物体渲染 + 蒙皮阴影（独立子渲染器，与 Object3DRenderer 平级）
 //
 // 管理蒙皮带骨渲染的 shader、材质纹理绑定、骨骼 pose atlas 查表、逐实例 draw，
 // 以及蒙皮阴影 pass 的光空间深度绘制。作为 Renderer 的内部组件，生命周期与 Renderer

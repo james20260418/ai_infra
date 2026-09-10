@@ -1,6 +1,6 @@
 // JPOV SkeletonRenderer 实现
 //
-// PBR DrawObject3D + Tile Forward 光照（tile culling CPU 端 + 光源上传）。
+// 蒙皮带骨实例的 PBR 渲染（pose atlas 查表 + 逐实例 draw）+ 蒙皮阴影深度绘制。
 
 #define GL_GLEXT_PROTOTYPES
 
