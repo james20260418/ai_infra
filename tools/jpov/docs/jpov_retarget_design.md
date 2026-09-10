@@ -184,6 +184,16 @@ Danis 原话：「提供腿长、三维之类的输入参数（人体常见参�
 1. **人工校准工具的对齐参照**（§5）—— 有它才能肉眼判断 mesh 是否贴骨
 2. **调通 FBX 预览的载体**（§6）—— 先用火柴人验证动作对不对，再上真皮
 
+### 4.5 `inverse_bind` 走**自算**（程序化生成的典型场景）
+
+火柴人是**我们自己按 rest 造的**（没有外部导出）：
+
+- mesh 顶点按 §4.2 规则生成 → 顶点姿态 == `SkeletonType` 的 rest
+- 因此 `inverse_bind = JW_bind⁻¹` **自算必然正确**（两边同源，天然配套）
+
+→ 火柴人是 §5.5「程序化生成走自算」那条路的**第一个实践者**，也是最干净的验证载体。
+（对比：Tripo glb 等外部资产必须用**自带的** `inverse_bind`。）
+
 ---
 
 ## 5. 功能 3：glb 简易编辑器（人工校准）
@@ -227,14 +237,59 @@ Danis 原以为「glb 里的人物相对原父系有 scale、整体旋转、平�
 > **把 mesh 贴合到"标准骨架布局"** —— 即调整 `rest_offset`（骨长）与同步重算 `inverse_bind`，
 > 使网格能正确蒙在骨架上。
 
-### 5.5 ⚠️ 关键实现约束
+### 5.5 ⚠️ 关键实现约束：`inverse_bind` 的归属（本次修正）
 
-**改 `rest_offset` 后必须重算 `inverse_bind`**（否则网格会炸）。
+**先澄清一个易犯错的认识**：`inverse_bind[i] = JW_bind[i]⁻¹`，而 `JW_bind` 完全由
+`SkeletonType`（骨长）+ bind pose（rest 朝向）决定 —— 所以它**看起来**是个可自算的派生量。
 
-> `inverse_bind[i] = JW_bind[i]⁻¹`，而 `JW_bind[i]` 依赖整条链的 `T(rest_offset)·R(rest_rot)`。
-> 任一骨长变化 → 该骨及其所有子骨的 `JW_bind` 变化 → `inverse_bind` 全部要重算。
+**但对外部资产，它必须用模型自带的，不能自算。** 原因是蒙皮公式里的**配对关系**：
 
-**这不是纯 metadata 修改，是重新绑定。**
+```
+v_posed = JW_pose[i] · inverseBind[i] · v_rest
+                        └──────┬──────┘
+                    必须与 v_rest 配套
+```
+
+`v_rest` 是 mesh 文件里的 `POSITION`，在**导出那一刻的具体姿态**下写出。
+`inverseBind` 的唯一职责 = **撤销 `v_rest` 所处的那个姿态**。
+
+> **谁产生的 `v_rest`，就用谁配套的 `inverseBind`。**
+
+自算的 `inverseBind` 只知道 `SkeletonType` 的 rest，**不知道 mesh 顶点实际用的什么姿态**。
+两者一旦不一致，顶点就被搬错。
+
+#### 规则（按 `v_rest` 来源分流）
+
+| 场景 | `inverse_bind` 来源 |
+|---|---|
+| **外部资产**（Tripo glb / Mixamo FBX） | **用模型自带的**；规范化时**共轭**过去 |
+| **程序化生成**（§4 火柴人 / §3 参数化骨架） | **自算**（`= JW_bind⁻¹`），天然正确 |
+
+#### 规范化时的处理：**共轭**，不是重算
+
+改 `rest_offset`（骨长）时，`inverse_bind` 应：
+
+```
+新 IBM = (骨架坐标变换) · 原 IBM · (骨架坐标变换)⁻¹      ← 共轭
+```
+
+> **即：把原 IBM 共轭到新的骨架坐标系**，而不是从骨架重算。
+> 这样「顶点 ↔ inverseBind」的**配套关系被保持**。
+
+#### 实测印证（`mixamo_male.glb`）
+
+`glb 的 IBM` vs `自算 JW_bind⁻¹`：全部 23 骨最大差 **1.46e-05**（浮点噪声级）。
+本资产 `M = I`（`Armature` 无 TRS），两者等价 → **无法区分**。
+
+⚠️ **待验证**：需要一个 `M ≠ I` 的真实资产，确认 glTF 的
+`globalTransformOfJointNode` 在含祖先变换时相对哪个参照点（骨架 or 场景根）。
+本设计**按「相对骨架原点」实现**（与 JPOV 自算同一参照系）。
+
+#### 代码现状
+
+`skeleton_manager.cc:161` 已预留自算路径（`has_ibm` 判断），`skeleton_types.h` 注释也写明
+「空 = SkeletonManager 按 SkeletonType 链式 rest 自算；否则用显式值」
+→ 设计早就认了「两条路都行」，本设计只是**明确何时走哪条**。
 
 ### 5.6 待明确
 
@@ -317,6 +372,9 @@ Danis：
 3. **§5.4 目标修正**：glb 的 `M` 已经是 `I`，所以 §5 的目标改为"改 `rest_offset` + 重算 `inverse_bind`"，确认？
 4. **§5.6 保存策略**：写回原文件 or 新文件？编辑粒度（整体变换 or 逐骨长度）？
 5. **§5** glb 编辑器是否需要**写 glb**（二进制 glTF 序列化）能力？仓库目前只有 **读**（tinygltf），写需要新增能力（tinygltf 支持写，但需验证）。
+6. **§5.5 验证项**：能否提供一个 **`M ≠ I`** 的真实资产（骨架 0 号关节之上带变换的祖先）？
+   用于确认 glTF 的 `globalTransformOfJointNode` 在含祖先变换时的参照点，
+   以及验证“外部资产用自带 IBM”这条规则在非退化情形下的行为。
 
 ---
 
