@@ -99,6 +99,7 @@ cc_test(
     deps = [
         ":mixamo23_skeleton",
         ":skeleton_types",
+        "//geom/common:math_util",
         "//geom/math:mat4",
         "@glog_static//:glog",
         "@gtest//:gtest_main",

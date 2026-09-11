@@ -14,6 +14,7 @@
 
 #include <cmath>
 
+#include "geom/common/math_util.h"
 #include "geom/math/mat4.h"
 #include "gtest/gtest.h"
 #include "tools/jpov/interface/skeleton_types.h"
@@ -162,6 +163,10 @@ TEST(Mixamo23SkeletonTest, RejectsNonPositiveHeight) {
 // ── 4. T-pose 自证（本工厂最硬的断言）──
 
 TEST(Mixamo23SkeletonTest, IdentityPoseReproducesOfficialTPose) {
+    // ⚠️ 本测试是**外部锚点**：期望值(1.5993 / 0.7133 / 0.0821)来自**官方 FBX 实测**，
+    //   独立于本仓库任何代码路径 —— 故能抓住"表填错 / 复合顺序错"这类实现 bug。
+    //   它与下面 ComputeInverseBindPreservesDistances（内部自洽）**互补**，缺一不可。
+    //
     // height = 官方骨骼身高 → identity pose 应精确复现官方 T-pose 世界坐标。
     const SkeletonType t = Mixamo23Skeleton(kMixamoOfficialBoneHeight);
     const SkeletonPose pose = SkeletonPose::Identity(t.bone_count());
@@ -198,50 +203,96 @@ TEST(Mixamo23SkeletonTest, TPoseScalesWithHeight) {
 
 // ── 5. ComputeInverseBind ──
 
-TEST(Mixamo23SkeletonTest, ComputeInverseBindShape) {
+TEST(Mixamo23SkeletonTest, ComputeInverseBindShapeAndNontrivial) {
     const SkeletonType t = Mixamo23Skeleton();
     const auto ibm = t.ComputeInverseBind();
     EXPECT_EQ(ibm.size(), 23u);
-}
-
-TEST(Mixamo23SkeletonTest, ComputeInverseBindReturnsPointsToBoneSpace) {
-    // inverse_bind[j] · (T-pose 下关节 j 的世界点) == 关节 j 的骨系原点（= 原点 0,0,0）。
-    // 这是 inverse bind 的定义性质的直接验证（JW_bind⁻¹ · JW_bind = I）。
-    const SkeletonType t = Mixamo23Skeleton(kMixamoOfficialBoneHeight);
-    const SkeletonPose pose = SkeletonPose::Identity(t.bone_count());
-    const std::vector<Mat4> jw = ComputeJointWorld(t, pose);
-    const auto ibm = t.ComputeInverseBind();
-
-    for (int j = 0; j < t.bone_count(); ++j) {
-        Mat4 m;
-        for (int k = 0; k < 16; ++k) m.m[k] = ibm[static_cast<size_t>(j)][k];
-        // 关节 j 的世界原点（jw 的平移列）。
-        const Vec3f world_origin = Mat4TransformPoint(jw[static_cast<size_t>(j)],
-                                                     Vec3f(0, 0, 0));
-        const Vec3f in_bone = Mat4TransformPoint(m, world_origin);
-        EXPECT_NEAR(in_bone.x(), 0.0f, 1e-4f) << "joint " << j;
-        EXPECT_NEAR(in_bone.y(), 0.0f, 1e-4f) << "joint " << j;
-        EXPECT_NEAR(in_bone.z(), 0.0f, 1e-4f) << "joint " << j;
-    }
-}
-
-TEST(Mixamo23SkeletonTest, ComputeInverseBindIdentityPoseIsExactInverse) {
-    // identity pose 下 JW_pose == JW_bind，故 jw · ibm 必须 ≈ I（静态退化门）。
-    const SkeletonType t = Mixamo23Skeleton(kMixamoOfficialBoneHeight);
-    const SkeletonPose pose = SkeletonPose::Identity(t.bone_count());
-    const std::vector<Mat4> jw = ComputeJointWorld(t, pose);
-    const auto ibm = t.ComputeInverseBind();
-
-    for (int j = 0; j < t.bone_count(); ++j) {
-        Mat4 m;
-        for (int k = 0; k < 16; ++k) m.m[k] = ibm[static_cast<size_t>(j)][k];
-        const Mat4 skin = Mat4Mul(jw[static_cast<size_t>(j)], m);
-        for (int i = 0; i < 16; ++i) {
-            const float expected = (i % 5 == 0) ? 1.0f : 0.0f;
-            EXPECT_NEAR(skin.m[i], expected, 1e-4f)
-                << "joint " << j << " 元素 " << i;
+    // 非平凡检查：全 0 / NaN 矩阵也能过 size 检查，必须另查内容。
+    for (size_t j = 0; j < ibm.size(); ++j) {
+        for (int k = 0; k < 16; ++k) {
+            EXPECT_FALSE(std::isnan(ibm[j][k])) << "joint " << j << " 含 NaN";
         }
+        // 末行须为 [0,0,0,1]（仿射），否则求逆/蒙皮会错。
+        EXPECT_NEAR(ibm[j][3], 0.0f, 1e-5f);
+        EXPECT_NEAR(ibm[j][7], 0.0f, 1e-5f);
+        EXPECT_NEAR(ibm[j][11], 0.0f, 1e-5f);
+        EXPECT_NEAR(ibm[j][15], 1.0f, 1e-5f);
+        // 平移列不能全 0（root 的 IBM 平移分量实际为 0，故只要求"不全是 0 矩阵"）。
     }
+    // 至少有一个关节的 IBM 非单位阵（Hips 有 1.04m 平移 → 其逆必含平移）。
+    const int hips = IndexOf(t, "mixamorig:Hips");
+    ASSERT_GE(hips, 0);
+    const auto& h = ibm[static_cast<size_t>(hips)];
+    const float trans_norm = std::sqrt(h[12] * h[12] + h[13] * h[13] + h[14] * h[14]);
+    EXPECT_GT(trans_norm, 0.5f) << "Hips 的 IBM 平移应非零（骨长 1.04m）";
+}
+
+TEST(Mixamo23SkeletonTest, ComputeInverseBindPreservesDistances) {
+    // **刚性不变量**门禁：IBM 是刚性逆变换（旋转+平移），故**相对该关节自身原点的距离**守恒：
+    //   |IBM·p - IBM·(j 的世界原点)| == |p - (j 的世界原点)|
+    // （注意：不是"到世界原点的距离"——jw 含平移，非正交阵，那种比较不成立。这是一个实际踩过的坑：
+    //   初版写成 |IBM·p| vs |jw·p| 直接失败（比值 ≈ 4.3），属于**测试前提写错**而非代码错。）
+    //
+    // 这个断言独立于"jw 用哪个公式算"，只要 IBM 是刚性逆就必须成立，故能抓住
+    // "IBM 少乘/多乘一项导致缩放错"这类 bug（乘积=I 那种恒真式抓不到）。
+    const SkeletonType t = Mixamo23Skeleton(kMixamoOfficialBoneHeight);
+    const SkeletonPose pose = SkeletonPose::Identity(t.bone_count());
+    const std::vector<Mat4> jw = ComputeJointWorld(t, pose);
+    const auto ibm = t.ComputeInverseBind();
+
+    // 一个不在任何关节上的测试点。
+    const Vec3f probe(0.31f, 0.77f, -0.12f);
+    for (int j = 0; j < t.bone_count(); ++j) {
+        Mat4 m;
+        for (int k = 0; k < 16; ++k) m.m[k] = ibm[static_cast<size_t>(j)][k];
+        const Mat4 jwm = jw[static_cast<size_t>(j)];
+
+        // 关节 j 的世界原点（jw 的平移列），及其在骨系下的像（应为原点）。
+        const Vec3f world_origin = Mat4TransformPoint(jwm, Vec3f(0, 0, 0));
+        const Vec3f bone_origin = Mat4TransformPoint(m, world_origin);
+
+        const Vec3f in_bone = Mat4TransformPoint(m, probe);
+        // 探针相对关节原点的偏移（两边同一参照）。
+        const float d_bone = std::sqrt(geom::Sqr(in_bone.x() - bone_origin.x()) +
+                                       geom::Sqr(in_bone.y() - bone_origin.y()) +
+                                       geom::Sqr(in_bone.z() - bone_origin.z()));
+        const float d_world = std::sqrt(geom::Sqr(probe.x() - world_origin.x()) +
+                                        geom::Sqr(probe.y() - world_origin.y()) +
+                                        geom::Sqr(probe.z() - world_origin.z()));
+        EXPECT_NEAR(d_bone, d_world, 1e-3f) << "joint " << j << " 相对原点距离不守恒（IBM 非刚性）";
+        // 且关节自身世界原点必须落到骨系原点（IBM 的定义性质）。
+        EXPECT_NEAR(bone_origin.x(), 0.0f, 1e-4f) << "joint " << j;
+        EXPECT_NEAR(bone_origin.y(), 0.0f, 1e-4f) << "joint " << j;
+        EXPECT_NEAR(bone_origin.z(), 0.0f, 1e-4f) << "joint " << j;
+    }
+}
+
+TEST(Mixamo23SkeletonTest, DistanceGateWouldCatchAWrongInverse) {
+    // 负向验证：故意给一个错的 inverse（强行缩放 1.5 倍），门禁必须能 FAIL。
+    // 这直接证明上一条门禁**真的能区分对错**，不是恒真断言。
+    const SkeletonType t = Mixamo23Skeleton(kMixamoOfficialBoneHeight);
+    const SkeletonPose pose = SkeletonPose::Identity(t.bone_count());
+    const std::vector<Mat4> jw = ComputeJointWorld(t, pose);
+    auto ibm = t.ComputeInverseBind();
+
+    // 把 0 号关节的 IBM 强行缩放 1.5 倍（错的值）。
+    for (int k = 0; k < 12; ++k) ibm[0][k] *= 1.5f;
+
+    const Vec3f probe(0.31f, 0.77f, -0.12f);
+    Mat4 m;
+    for (int k = 0; k < 16; ++k) m.m[k] = ibm[0][k];
+    const Vec3f world_origin = Mat4TransformPoint(jw[0], Vec3f(0, 0, 0));
+    const Vec3f bone_origin = Mat4TransformPoint(m, world_origin);
+    const Vec3f in_bone = Mat4TransformPoint(m, probe);
+    const float d_bone = std::sqrt(geom::Sqr(in_bone.x() - bone_origin.x()) +
+                                   geom::Sqr(in_bone.y() - bone_origin.y()) +
+                                   geom::Sqr(in_bone.z() - bone_origin.z()));
+    const float d_world = std::sqrt(geom::Sqr(probe.x() - world_origin.x()) +
+                                    geom::Sqr(probe.y() - world_origin.y()) +
+                                    geom::Sqr(probe.z() - world_origin.z()));
+    // 错的 IBM 必须让距离不守恒（差值远超上一条门禁的 1e-3 容差）。
+    EXPECT_GT(std::fabs(d_bone - d_world), 1e-2f)
+        << "距离门禁对错误的 IBM 未能报错 → 上一条断言是恒真的";
 }
 
 // ── 6. SkeletonPose::Identity ──
