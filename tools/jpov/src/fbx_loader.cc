@@ -113,6 +113,7 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
     FBXClip clip;
     SkeletonType& skel = clip.skeleton;
     skel.joints.resize(static_cast<size_t>(bone_count));
+    skel.bind_rotation.resize(static_cast<size_t>(bone_count));
     // 骨 index → 沿树父链里第一个同为 bone 的节点(SkeletonType.joints 索引)。
     // 遍历序即拓扑序: 父骨必在其子树骨之前已入 nodes(DFS 先父后子)。
     for (int i = 0; i < bone_count; ++i) {
@@ -123,6 +124,18 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
         const ufbx_vec3& t = b->local_transform.translation;
         j.rest_offset = Vec3f(static_cast<float>(t.x), static_cast<float>(t.y),
                               static_cast<float>(t.z));
+        // bind 朝向 = 该骨静止姿态下相对父的旋转(local_transform.rotation)。
+        // 这是骨架的"bind 朝向"(FBX 的 FBX 官方 Mixamo 骨长轴 +Y/朝 +X 就在这)。
+        // 它与单位无关（纯旋转），故 FBX 的 cm 不需换算直接收。
+        {
+            const ufbx_quat& q = b->local_transform.rotation;
+            geom::Quaternion<float> bind(static_cast<float>(q.x),
+                                         static_cast<float>(q.y),
+                                         static_cast<float>(q.z),
+                                         static_cast<float>(q.w));
+            bind.NormalizeInPlace();  // 防御：ufbx 已归一
+            skel.bind_rotation[i] = bind;
+        }
         // 名字原样(debug 比对凭据); 空安全。
         if (b->name.data != nullptr && b->name.length > 0) {
             j.name.assign(b->name.data, b->name.length);

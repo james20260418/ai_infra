@@ -40,6 +40,7 @@
 #include <glog/logging.h>
 #include "geom/common/quaternion.h"
 #include "geom/common/vec.h"
+#include "geom/math/mat4.h"
 
 namespace jpov {
 
@@ -52,17 +53,17 @@ inline constexpr int kSkeletonNoParent = -1;
 // ==================== 骨架关节（一棵有根树的节点） ====================
 
 // 骨架中一个关节（一根骨/树的节点）。每个关节一个父（根的父为 kSkeletonNoParent），
-// 组成骨架树。S0 建模为"链式根树 + rest 平移"，够覆盖人群低模/直链走姿的立正/侧摆。
+// 组成骨架树。建模为"链式根树 + rest 平移 + bind 朝向"，覆盖人群低模/直链走姿与标准人形 rig。
 struct SkeletonJoint {
     int   parent = kSkeletonNoParent;  // 父关节索引（= joints 中某 id）。根 = kSkeletonNoParent。
-    Vec3f rest_offset;                 // rest(bind) 姿态下相对父关节的**局部平移**，描述骨架树形状。
+    Vec3f rest_offset;                 // bind 姿态下相对父关节的**局部平移**，描述骨架树形状。
     // 关节名（如 "mixamorig:LeftArm"）。用于把外部来源（FBX loader / Mixamo 动画）与
     // 本骨架做骨名对位 / sanity 对比（是否同一种骨架、骨对不对得上）。可为空（程序化骨架）。
     std::string name;
     //
-    // TODO(2026-09-06): rest 目前只建模平移，未含每关节 rest 朝向(SO(3)/四元素)。S0 人形
-    //   通常只需把"每部位 mesh 绑到根/直链主轴"即可；要表达更真实骨骼(肩髋球窝、每骨头 rest
-    //   朝向)给每关节加 rest 旋转，待真实 rig 进来自主扩展，勿现在铺。
+    // 注：本骨的 **bind 朝向** 不在这里，而在 SkeletonType::bind_rotation（按关节 index 平行
+    //   一份）。理由："朝向"是骨架级数据（要有 bind_rotation 齐备才能说是骨架）；把两个字段
+    //   平行放同一容器，便于一起校验尺寸、一起遍历，也便于将来单独替换其一。
 };
 
 // ==================== 骨架定义（SkeletonType） ====================
@@ -72,26 +73,43 @@ struct SkeletonJoint {
 // （逆绑定 constant、骨骼动画纹理）。
 // 人/马是各自的 SkeletonType → 各自的 SkeletonManager；骨架与物种无关是关键（见顶部注释，
 // 以及 src/skeleton/skeleton_manager.h）。
+//
+// 骨架的完整定义 = **树 + 骨长(rest_offset) + bind 朝向(bind_rotation)**，三者齐备即"健全"：
+//   - joints[].parent / rest_offset  → 骨架树的形状与各骨长度
+//   - bind_rotation[]               → 各骨在 bind 姿态下"朝哪长"（相对父的旋转）
+//   pose 全恒等时，沿树复合 T(rest_offset)·R(bind_rotation) 得到的即该骨架的标准 T-pose。
+//
+// ⚠️ **inverse_bind 不是字段**（2026-09-11 定，Danis）：它是「joints + bind_rotation」的**派生量**
+//   （`inverse_bind[j] = JW_bind[j]⁻¹`），输入定了它就定了。留作字段会出现"输入 + 输入的导出物"
+//   两份数据打架，违反 Minimal Surprise。需要时用 ComputeInverseBind() 现算（可选带缓存）。
+//
+// ⚠️ 对外部资产（Tripo glb / Mixamo FBX）有一条 IMPORTANT：`bind_rotation` 应取**资产自带的**
+//   node/joint rest 旋转（它和资产网格的 `POSITION` 是配套长出来的），**不要用别处推的值覆盖**。
+//   程序化骨架（如 Mixamo23Skeleton）则天然自洽，直接用工厂给的表。
 struct SkeletonType {
     std::vector<SkeletonJoint> joints;   // 0 号应为根；需满足拓扑序(每个 non-root 的 parent<自身)
 
-    // 每关节相对"角色局部原点"的逆绑定矩阵(inverse bind)：rest 静止时的逆，随骨架 constant。
-    //   蒙皮 = JointMatrix(bone, 该实例最终插值出的 pose) · inverse_bind(bone) 作用 rest 顶点。
-    //   空 = SkeletonManager 按 SkeletonType 链式 rest 自算；否则用显式值。
-    //
-    // ⚠️ 代码库无 Mat4 类型，矩阵以 float[16] 列主序传（同 Object3D float[16] 约定）。
-    //   每关节一个阵。TODO(2026-09-06): 用 std::array<float,16> 还是手写 4x4 小结构待定；
-    //   与 mesh.h 用 std::array 保证可拷贝一致，先按 flat float[16] 占位，实现时配 4x4 工具。
-    // TODO(2026-09-06): 首个实现若人形确实是"直链 rest"(每关节只沿某轴偏)，可由树自动推
-    //   inverse_bind 而不必让用户喂满阵，此字段保留为可选显式覆盖。
-    std::vector<std::array<float, 16>> inverse_bind;  // 需 <array>
+    // 每关节的 **bind 朝向**（相对父关节的旋转，四元数）。索引与 joints 对齐。
+    // 语义：jointLocal(j) = T(rest_offset[j]) · R(bind_rotation[j]) · R(pose.joint_rotation[j])。
+    //   pose 恒等 → jointLocal = T(rest_offset)·R(bind_rotation) = 该骨在 T-pose 下的局部变换。
+    // ⚠️ bind_rotation 通常**不是恒等**：正是它把骨长轴从局部 +Y 掰到"实际朝向"（如手臂掰水平）。
+    // 空 = 全恒等（"骨长即朝向"的极简直链骨架；也兼容老数据）。非空须 size == joints.size()。
+    std::vector<geom::Quaternion<float>> bind_rotation;
 
     int bone_count() const { return static_cast<int>(joints.size()); }
 
     // 校验：joints 非空、0 为根、每 parent 索引合法且在拓扑序早于自身；
-    // 若 inverse_bind 非空须尺寸==joints.size()。非法 LOG(FATAL)。
-    // TODO(2026-09-06): 实现阶段按 mesh.h MeshData::Validate() 风格补全。
+    // bind_rotation 若非空须尺寸 == joints.size()。非法 LOG(FATAL)，不 fallback。
     void Validate() const;
+
+    // 派生：算每关节的 inverse bind（相对"骨架空间"原点的逆绑定矩阵）。
+    //   JW_bind[j] = JW_bind[parent] · T(rest_offset[j]) · R(bind_rotation[j])   （pose 恒等）
+    //   inverse_bind[j] = JW_bind[j]⁻¹                                          （仿射求逆）
+    // 返回：joints.size() 个列主序 float[16]（与 GLSL mat4 内存布局一致；与骨骼纹理烘焙配套）。
+    // 用途：SkeletonManager 烘焙 pose atlas 时把 inverse_bind 折入（方案甲）。
+    //   **外部资产**应优先用资产自带 IBM（经共轭），本函数用于**程序化骨架**（自算天然正确）；
+    //   详见 docs/jpov_retarget_design.md §5.5。
+    std::vector<std::array<float, 16>> ComputeInverseBind() const;
 };
 
 // 说明（mesh 绑定位置）：骨架定义（SkeletonType）本身上不挂 rest mesh。蒙皮的 rest 几何由调用方以
@@ -127,6 +145,12 @@ struct SkeletonPose {
 
     // 根(0 号关节)相对“角色原点”的位移 / root motion（通常 0）。纯原地动作/静态 pose 保持默认。
     Vec3f root_offset{0.0f, 0.0f, 0.0f};
+
+    // 全恒等 pose（每关节旋转 = identity，root_offset = 0）。
+    // 语义（配合骨架）：当 SkeletonType 的 bind_rotation 是标准人形 bind 朝向时，
+    //   本 pose 驱动出的姿态 = 该骨架的 **T-pose**（因为 bind 朝向已烘进骨架，pose 不再叠旋转）。
+    // 用途：Mixamo23Skeleton 的配套静态姿势（T-pose）；也是蒙皮"静态退化门"的基准 pose。
+    static SkeletonPose Identity(int bone_count);
 };
 
 // ==================== 运行时实例状态 ====================
@@ -162,11 +186,11 @@ struct SkinnedInstanceState {
     uint32_t appearance_index = 0;
 };
 
-// ==================== Validate 声明 ====================
+// ==================== Validate / 派生量 定义 ====================
 
 inline void SkeletonType::Validate() const {
     // 校验：joints 非空、parent 索引合法(不在自身/越界)、每个关节父早于自身(拓扑序);
-    // inverse_bind 若非空必须尺寸 == joints.size()。非法 LOG(FATAL)，绝不 fallback。
+    // bind_rotation 若非空必须尺寸 == joints.size()。非法 LOG(FATAL)，绝不 fallback。
     CHECK(!joints.empty())
         << "SkeletonType::Validate: joints 不能为空（缺一种骨架定义）";
     const size_t n = joints.size();
@@ -186,11 +210,56 @@ inline void SkeletonType::Validate() const {
                 << " 不满足拓扑序(须 < " << i << ", 否则树在容器里乱序)";
         }
     }
-    if (!inverse_bind.empty()) {
-        CHECK_EQ(inverse_bind.size(), n)
-            << "SkeletonType::Validate: inverse_bind 尺寸 " << inverse_bind.size()
+    if (!bind_rotation.empty()) {
+        CHECK_EQ(bind_rotation.size(), n)
+            << "SkeletonType::Validate: bind_rotation 尺寸 " << bind_rotation.size()
             << " 应 == joints " << n;
     }
+}
+
+inline SkeletonPose SkeletonPose::Identity(int bone_count) {
+    CHECK_GT(bone_count, 0) << "SkeletonPose::Identity: bone_count 必须 >0";
+    SkeletonPose pose;
+    pose.bone_count = bone_count;
+    // 显式给满 bone_count 个恒等旋转（而非留空走隐式 rest）—— 语义更明确、尺寸可校验。
+    pose.joint_rotation.assign(static_cast<size_t>(bone_count),
+                               geom::Quaternion<float>::Identity());
+    return pose;
+}
+
+inline std::vector<std::array<float, 16>> SkeletonType::ComputeInverseBind() const {
+    using geom::math::Mat4;
+    Validate();
+    const size_t n = joints.size();
+
+    // 1) 沿拓扑序复合出 bind 姿态（pose 恒等）下每关节的 jointWorld（相对骨架空间原点）。
+    //    JW_bind[j] = JW_bind[parent] · T(rest_offset[j]) · R(bind_rotation[j])；根则无父。
+    std::vector<Mat4> jw(n);
+    for (size_t j = 0; j < n; ++j) {
+        const geom::Quaternion<float> bind =
+            bind_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                  : bind_rotation[j];
+        const geom::math::Mat4 local =
+            geom::math::JointLocalRest(joints[j].rest_offset, bind);
+        const int p = joints[j].parent;
+        if (p == kSkeletonNoParent) {
+            jw[j] = local;
+        } else {
+            // Validate() 已保证拓扑序（parent < j），此处只需再确认一次下界（防御）。
+            CHECK_GE(p, 0);
+            jw[j] = geom::math::Mat4Mul(jw[static_cast<size_t>(p)], local);
+        }
+    }
+
+    // 2) inverse_bind[j] = JW_bind[j]⁻¹（仿射求逆；含缩放也支持）。
+    std::vector<std::array<float, 16>> out(n);
+    for (size_t j = 0; j < n; ++j) {
+        const geom::math::Mat4 inv = geom::math::Mat4InverseAffine(jw[j]);
+        for (int k = 0; k < 16; ++k) {
+            out[j][k] = inv.m[k];
+        }
+    }
+    return out;
 }
 
 }  // namespace jpov

@@ -78,10 +78,10 @@ public:
     };
 
     // 构造：绑定一种骨架的【定义 + 全套 pose】，烘焙并上传骨骼动画纹理（pose atlas）。
-    //   type : SkeletonType（内部即调 Validate()，joints 拓扑序合法、inverse_bind 尺寸对齐）。
+    //   type : SkeletonType（内部即调 Validate()；joints 拓扑序合法、bind_rotation 尺寸对齐）。
     //   poses: 该骨架的全部静态位姿关键帧。构造即把每个 pose 沿骨架树解算成每骨 jointWorld
-    //          （相对角色根）× 骨架级 inverseBind → 折成“最终肤矩阵”烘焙上传（atlas 每 pose
-    //          占一行内 bone_count×4 texel，行排按 pose_per_row 摊入 2048×2048）。
+    //          （相对骨架空间原点）× 骨架级 inverseBind（由 ComputeInverseBind() 现算）→
+    //          折成“最终肤矩阵”烘焙上传（atlas 每 pose 占一行内 bone_count×4 texel。）
     //   Pre-condition: GL context 已激活；type.Validate() 通过。
     //   ⚠️ 每个 pose 的 bone_count 应与 type.bone_count 一致（同一种骨架）。poses 总容量
     //      不得超过 pose_capacity()（超→LOG(FATAL)，不 fallback）。

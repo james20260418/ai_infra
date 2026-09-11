@@ -912,22 +912,9 @@ bool LoadGltfSkeleton(const std::string& path,
             if (nd >= 0 && nd < n_nodes) node_to_skin_joint[nd] = sj;
         }
 
-        // 预读 IBM(可有可无): MAT4 accessor → 每关节 16 float
-        std::vector<float> ibm_flat;
-        bool has_ibm = false;
-        if (skin.inverseBindMatrices >= 0) {
-            has_ibm = ReadFloatAccessor(model, skin.inverseBindMatrices,
-                                        &ibm_flat);
-            if (!has_ibm) {
-                LOG(WARNING) << "LoadGltfSkeleton: skin " << sk
-                             << " 声明了 inverseBindMatrices 但读取失败, "
-                                "该骨架 inverse_bind 留空(调用方自算)";
-            }
-        }
-
         const int n_joints = static_cast<int>(skin.joints.size());
         skel.joints.resize(n_joints);
-        if (has_ibm) skel.inverse_bind.resize(n_joints);
+        skel.bind_rotation.resize(n_joints);
 
         for (int sj = 0; sj < n_joints; ++sj) {
             const int nd = skin.joints[sj];
@@ -962,15 +949,29 @@ bool LoadGltfSkeleton(const std::string& path,
                 cur = node_parent[cur];
             }
 
-            // inverse_bind：MAT4 → std::array<float,16>（列主序原样）
-            if (has_ibm) {
-                const size_t base = static_cast<size_t>(sj) * 16;
-                if (base + 16 <= ibm_flat.size()) {
-                    for (int k = 0; k < 16; ++k) {
-                        skel.inverse_bind[sj][k] = ibm_flat[base + k];
-                    }
-                }
+            // bind_rotation：node.rotation（相对父的 rest 朝向，四元数 xyzw）。
+            // 这是骨架的"bind 朝向"——glTF 的动画 channel 都是相对 bind 的增量，所以
+            // node.rotation 就是骨骼静止姿态下每骨相对父的朝向。缺省 = 恒等。
+            // 注：2026-09-11 起不再读 skin.inverseBindMatrices —— inverse_bind 已是派生量
+            //   （SkeletonType::ComputeInverseBind）；保留"读资产自带 IBM"的能力留给将来
+            //   "外部资产规范化时共轭"那一步（见 docs/jpov_retarget_design.md §5.5）。
+            geom::Quaternion<float> bind(0.0f, 0.0f, 0.0f, 1.0f);
+            if (node.rotation.size() >= 4) {
+                bind = geom::Quaternion<float>(
+                    static_cast<float>(node.rotation[0]),
+                    static_cast<float>(node.rotation[1]),
+                    static_cast<float>(node.rotation[2]),
+                    static_cast<float>(node.rotation[3]));
+                bind.NormalizeInPlace();  // 防御：资产旋转理论上已归一
             }
+            skel.bind_rotation[sj] = bind;
+        }
+
+        // 不再消费 skin.inverseBindMatrices（见上）。若资产自带了，日志里提一句，便于排查。
+        if (skin.inverseBindMatrices >= 0) {
+            VLOG(1) << "LoadGltfSkeleton: skin " << sk
+                    << " 自带 inverseBindMatrices，已忽略（inverse_bind 现为派生量，"
+                       "由 joints+bind_rotation 自算）";
         }
 
         out_skins->push_back(std::move(skel));

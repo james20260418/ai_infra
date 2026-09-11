@@ -15,7 +15,6 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/src/gltf_loader.h"
-#include "tools/jpov/src/skeleton/skinning_bind_pose.h"
 
 namespace jpov_skeleton_gold {
 
@@ -102,8 +101,11 @@ inline void BuildScene(SkeletonGoldApp* app, const std::string& scene_assets_dir
     std::vector<jpov::SkeletonType> skels;
     CHECK(jpov::LoadGltfSkeleton(male_glb, &skels));
     CHECK(!skels.empty()) << "LoadGltfSkeleton 失败";
+    // 静态退化门：bind 姿态 = 全恒等 pose。
+    // （2026-09-11 起 bind 朝向已存在骨架的 bind_rotation 里，不再需要硬编码 bind pose 表；
+    //   identity pose 下 jointWorld == JW_bind，×自算 inverse_bind = I。）
     std::vector<jpov::SkeletonPose> poses;
-    poses.push_back(jpov::MakeMixamoBindPose());
+    poses.push_back(jpov::SkeletonPose::Identity(skels[0].bone_count()));
     app->skel_id_ = app->RegisterSkeleton(skels[0], poses);
     app->mesh_id_ = male.primitives[0].mesh_id;
     app->mat_ = male.primitives[0].material;
