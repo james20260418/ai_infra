@@ -63,7 +63,8 @@ cc_library(
 
 # SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonType/SkeletonPose/SkinnedInstanceState）
 # 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
-# 头里用到 geom::Quaternion（SkeletonPose.joint_rotation），故须公开依赖 quaternion。
+# 头里用到 geom::Quaternion（SkeletonPose.joint_rotation）、geom::math::Mat4（ComputeInverseBind）
+# 与 Vec，故须公开依赖 quaternion / vec / mat4。
 cc_library(
     name = "skeleton_types",
     hdrs = ["skeleton_types.h"],
@@ -71,7 +72,36 @@ cc_library(
     deps = [
         "//geom/common:quaternion",
         "//geom/common:vec",
+        "//geom/math:mat4",
         "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# Mixamo23Skeleton — Mixamo 官方 23 骨骨架工厂（程序化生成，无资产）。
+# 数据从官方 FBX 实测反推（见 header 头注）。纯 CPU/GL-free。
+cc_library(
+    name = "mixamo23_skeleton",
+    hdrs = ["mixamo23_skeleton.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "mixamo23_skeleton_test",
+    srcs = ["mixamo23_skeleton_test.cc"],
+    deps = [
+        ":mixamo23_skeleton",
+        ":skeleton_types",
+        "//geom/math:mat4",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],
 )

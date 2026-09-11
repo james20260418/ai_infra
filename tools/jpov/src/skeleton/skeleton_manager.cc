@@ -50,80 +50,19 @@ namespace jpov {
 
 namespace {
 
-// ==================== 极简列主序 mat4 ====================
-// float[16]，**列主序**（与 object3d / primitives3d 的 float[16] + GLSL mat4 约定一致）：
-//   m[col*4+row]。用于烘焙时把 jointLocal/world 复合、乘 inverse_bind。
-// 静止态矩阵缩放/translation 均在此自校验，不引入其它 mat 库。内部列主序；
-// 落 atlas 时转成**行序** 4×vec4（每 texel 一个矩阵行，见 PutMat4ToRow）。
+// 烘焙用的 4x4 矩阵与基础运算统一来自 geom/math/mat4.h（列主序 float[16]，与 object3d /
+// primitives3d 的 float[16] + GLSL mat4 约定一致）。此处只留一个本地别名 + atlas 行布局辅助。
+using Mat4 = geom::math::Mat4;
+using geom::math::JointLocal;
+using geom::math::Mat4Identity;
+using geom::math::Mat4Mul;
 
-struct Mat4 {
-    float m[16];
-};
-
-Mat4 IdentityMat4() {
-    Mat4 r;
-    std::memset(r.m, 0, sizeof(r.m));
-    r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
-    return r;
-}
-
-// 平移矩阵（列主序）。
-Mat4 TranslationMat4(float x, float y, float z) {
-    Mat4 r = IdentityMat4();
-    r.m[12] = x;  // col3 row0
-    r.m[13] = y;  // col3 row1
-    r.m[14] = z;  // col3 row2
-    return r;
-}
-
-// 由单位四元数 q 构造旋转矩阵（列主序）。pre: q 已归一（调用方保证，或先归一）。
-Mat4 RotationMat4(const geom::Quaternion<float>& q) {
-    geom::Quaternion<float> n = q;
-    n.NormalizeInPlace();
-    const float x = n.x, y = n.y, z = n.z, w = n.w;
-    Mat4 r = IdentityMat4();
-    // 标准 row-major m00.. 再转列主序；直接按列写最省事。
-    // col0
-    r.m[0] = 1 - 2 * (y * y + z * z);
-    r.m[1] = 2 * (x * y + z * w);
-    r.m[2] = 2 * (x * z - y * w);
-    // col1
-    r.m[4] = 2 * (x * y - z * w);
-    r.m[5] = 1 - 2 * (x * x + z * z);
-    r.m[6] = 2 * (y * z + x * w);
-    // col2
-    r.m[8]  = 2 * (x * z + y * w);
-    r.m[9]  = 2 * (y * z - x * w);
-    r.m[10] = 1 - 2 * (x * x + y * y);
-    return r;
-}
-
-// 矩阵乘法 c = a × b（列主序）。矩阵按列主序，c = a*b 即「先 b 再 a」对列向量。
-Mat4 MulMat4(const Mat4& a, const Mat4& b) {
-    Mat4 c;
-    for (int col = 0; col < 4; ++col) {
-        for (int row = 0; row < 4; ++row) {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k) {
-                sum += a.m[k * 4 + row] * b.m[col * 4 + k];
-            }
-            c.m[col * 4 + row] = sum;
-        }
-    }
-    return c;
-}
-
-// 把列主序 Mat4 写入 RGBA32F texel 行缓冲：第 j 行（矩阵行）一个 vec4（RGBA）。
-//   out_row 为宽度 >= (bone*4) 的 float 缓冲（每 texel 4 float)。写入坐标：
-//   base_texel = x0 + bone_idx*4 + row(0..3)，每个 texel 是矩阵一行的 4 分量。
-// 布局匹配 atlas: 每 (pose) 占 bone_count×4 texel（横排同一 scanline），每骨 4 texel = 4 行。
+// 把列主序 Mat4 写入 RGBA32F texel 行缓冲：binary 骨占 4 个连续 texel，每个 texel（RGBA=4 float）
+//   存矩阵的**一行**（行 r 的分量 = m[col*4+r] for col 0..3）。
+// 布局匹配 atlas: 每 (pose) 占 bone_count×4 texel（横排同一 scanline）。
 void PutMat4Row(const Mat4& mat, int bone_x0, std::vector<float>* out_row) {
-    // mat 列主序;texel 存矩阵**行**。行 r 的分量 = m[col*4 + r] for col 0..3。
     for (int r = 0; r < 4; ++r) {
-        const int texel = bone_x0 + r;  // 每 bone 用 4 个连续 texel，texel t 存矩阵第 t 行? no——
-        // 上面注释：bone 占 4 texel，每 texel 是矩阵**一行**（一个 vec4 4 分量）。
-        // 因一个 texel(RGBA) = 4 float = 恰矩阵一行;所以 bone 需 4 个 texel 存 4 行,
-        // 即 bone_x0..bone_x0+3 这 4 个 texel 各存矩阵的一行。
+        const int texel = bone_x0 + r;  // bone_x0..bone_x0+3 这 4 个 texel 各存矩阵的一行
         float* out = out_row->data();
         out[(texel) * 4 + 0] = mat.m[r];        // col0 row r
         out[(texel) * 4 + 1] = mat.m[4 + r];    // col1 row r
@@ -156,17 +95,20 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
         << "SkeletonManager: pose " << pose_count_ << " 超 atlas 容量 " << capacity_
         << "(bone=" << bone << ")。换更小骨架或拆多份 SkeletonManager";
 
-    // 骨架级 inverse_bind（可选；缺省=单位阵，烘焙时以单位代替）。
+    // 骨架级 inverse_bind：**派生量**，由 joints(骨长) + bind_rotation(bind 朝向) 现算
+    // （inverse_bind[j] = JW_bind[j]⁻¹；见 SkeletonType::ComputeInverseBind）。
+    // 2026-09-11 起 inverse_bind 不再是 SkeletonType 的字段（避免"输入 + 输入的导出物"两份数据打架）。
+    // 外部资产若要精确还原其自带绑定关系，应在构造 SkeletonType 时把资产 IBM 共轭到本骨架
+    // 坐标系后再进来（见 docs/jpov_retarget_design.md §5.5）；此处只认骨架自身的 bind 形态。
     std::vector<Mat4> inv(bone);
-    const bool has_ibm = type.inverse_bind.size() == static_cast<size_t>(bone);
-    for (int j = 0; j < bone; ++j) {
-        if (has_ibm) {
-            // SkeletonType.inverse_bind 存的是 float[16]，列主序（ctor 注释约定）。原样搬。
+    {
+        const std::vector<std::array<float, 16>> ibm = type.ComputeInverseBind();
+        CHECK_EQ(ibm.size(), static_cast<size_t>(bone))
+            << "SkeletonManager: ComputeInverseBind 尺寸异常";
+        for (int j = 0; j < bone; ++j) {
             for (int k = 0; k < 16; ++k) {
-                inv[j].m[k] = type.inverse_bind[j][k];
+                inv[j].m[k] = ibm[static_cast<size_t>(j)][k];
             }
-        } else {
-            inv[j] = IdentityMat4();
         }
     }
 
@@ -205,24 +147,30 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
                     << pose.bone_count << " 应 == 骨架 " << bone;
             }
             const int x0 = (p % pose_per_row_) * pose_tex_w;  // 本 pose 横向起始 texel
-            // 骨的世界矩阵: 用局部(rest 平移 × pose 旋转) 沿树复合
-            // jointWorld[j] = (j==根? I4 : jointWorld[parent]) · T(rest[j]) · R(rot[j])
+            // 骨的世界矩阵：局部 = T(rest 平移) × R(bind 朝向) × R(pose 旋转)，沿树复合。
+            //   jointWorld[j] = (j==根? I4 : jointWorld[parent]) · local(j)
+            // bind_rotation 为空时按恒等处理（兼容"骨长即朝向"的极简骨架）。
             std::vector<Mat4> jw(bone);
             for (int j = 0; j < bone; ++j) {
                 const Vec3f& off = type.joints[j].rest_offset;
-                Mat4 local = MulMat4(TranslationMat4(off.x(), off.y(), off.z()),
-                                     (pose.joint_rotation.size() > static_cast<size_t>(j)
-                                          ? RotationMat4(pose.joint_rotation[j])
-                                          : IdentityMat4()));
+                const geom::Quaternion<float> bind =
+                    type.bind_rotation.empty()
+                        ? geom::Quaternion<float>::Identity()
+                        : type.bind_rotation[j];
+                const geom::Quaternion<float> pose_rot =
+                    pose.joint_rotation.size() > static_cast<size_t>(j)
+                        ? pose.joint_rotation[j]
+                        : geom::Quaternion<float>::Identity();
+                Mat4 local = geom::math::JointLocal(off, bind, pose_rot);
                 if (type.joints[j].parent == kSkeletonNoParent) {
                     jw[j] = local;
                 } else {
                     const int pr = type.joints[j].parent;
                     CHECK(pr >= 0 && pr < j) << "parent 拓扑序乱(应在 Validate 抓)";
-                    jw[j] = MulMat4(jw[pr], local);
+                    jw[j] = geom::math::Mat4Mul(jw[pr], local);
                 }
                 // final = jointWorld[j] × inverse_bind[j] (方案甲折入)
-                Mat4 final_m = MulMat4(jw[j], inv[j]);
+                Mat4 final_m = geom::math::Mat4Mul(jw[j], inv[j]);
                 const int bone_x0 = x0 + j * 4;
                 PutMat4Row(final_m, bone_x0, &line);
             }

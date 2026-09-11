@@ -22,3 +22,26 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+# Mat4 — 4x4 变换矩阵（列主序）+ 仿射求逆（骨架 rest/inverse-bind 用；header-only）
+cc_library(
+    name = "mat4",
+    hdrs = ["mat4.h"],
+    deps = [
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# Mat4 tests
+cc_test(
+    name = "mat4_test",
+    srcs = ["mat4_test.cc"],
+    deps = [
+        ":mat4",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)

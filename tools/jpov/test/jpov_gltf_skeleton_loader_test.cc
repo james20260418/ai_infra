@@ -6,7 +6,8 @@
 //   1. LoadGltfScene/LoadGltf: 顶点 JOINTS_0/WEIGHTS_0 被读进 MeshData (joint_indices/
 //      joint_weights + kJoints flag), 供 mesh_manager 上 GPU loc3/4（上传在 mesh_manager 测）。
 //   2. LoadGltfSkeleton: 读 skins[0] 转成 SkeletonType —— 23 关节、每骨 name 带
-//      "mixamorig:"、inverse_bind 23 个 MAT4、joints 树 parent 拓扑合法。
+//      "mixamorig:"、bind_rotation 23 个(来自 node.rotation)、joints 树 parent 拓扑合法；
+//      且 ComputeInverseBind() 能由骨架自算出 23 个逆绑定矩阵。
 //
 // 纯 CPU 测试, 不涉及 GPU。验证"把文件里的骨骼忠实读出来", 不做坐标旋装(gold/渲染留后续)。
 
@@ -83,10 +84,15 @@ int main(int argc, char** argv) {
     const std::string& first_name = skel.joints[0].name;
     LOG(INFO) << "joint[0] name='" << first_name << "'";
 
-    // inverse_bind 应有 23 个(该资产自带 IBM accessor MAT4)
-    CHECK_EQ(skel.inverse_bind.size(),
+    // bind_rotation 应有 23 个（2026-09-11 起由 node.rotation 填；inverse_bind 已改派生）。
+    CHECK_EQ(skel.bind_rotation.size(),
              static_cast<size_t>(skel.bone_count()))
-        << "male_rig skin 应带完整 inverseBindMatrices";
+        << "male_rig skin 应带完整 bind_rotation（每关节 node rest 旋转）";
+
+    // 派生量：由 joints + bind_rotation 自算 inverse_bind，尺寸应与骨数一致。
+    const std::vector<std::array<float, 16>> ibm = skel.ComputeInverseBind();
+    CHECK_EQ(ibm.size(), static_cast<size_t>(skel.bone_count()))
+        << "ComputeInverseBind 应产出与骨数等量的逆绑定矩阵";
 
     LOG(INFO) << "gltf skeleton loader OK: " << skel.bone_count()
               << " bones from " << first_name;
