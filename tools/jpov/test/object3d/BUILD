@@ -507,26 +507,66 @@ cc_test(
 )
 
 # ============================================================================
-# 3D 文本 — 深度测试 + alpha 混合验证 demo（中文字嵌在地板里，人工看图用）
-# 复用 repeated_mrquad 的地板/相机/光照，三行中文按不同 alignment 锚在地板平面。
-# 输出 output/object3d/text3d_depth_alpha_1280x720.png
+# 3D 文本 — 深度测试 + alpha 混合 GOLD（中文字嵌地板）
+#
+# 场景：repeated_mrquad 的 brick 地板 + 三行中文（统一 anchor/face/up，
+# 唯一变量是 alignment）。face=+X → 文字平面 = x=0 竖平面，与 y=0 地板相交，
+# kCenter 行墨迹跨地板面 → 下半被遮挡。
+#
+# generator 写 gold；test 除字节比对以外，还做**深度遮挡结构断言**
+# （有字帧 vs 纯地板帧逐像素求差，断言可见下沿止于地板线）——
+# 单靠 gold 抓不到"深度测试失效"。
 # ============================================================================
-cc_binary(
-    name = "text3d_depth_alpha_demo",
-    srcs = ["text3d_depth_alpha_demo.cc"],
-    data = [
-        ":brick_seamless_512x512.png",
-        ":brick_normal_512x512.png",
-    ],
+
+cc_library(
+    name = "text3d_depth_alpha_common",
+    hdrs = ["text3d_depth_alpha_common.h"],
+    visibility = ["//tools/jpov:__subpackages__"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",
+        "//tools/common:utils",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "text3d_depth_alpha_gold_generator",
+    srcs = ["text3d_depth_alpha_gold_generator.cc"],
+    data = [
+        ":brick_seamless_512x512.png",
+        ":brick_normal_512x512.png",
+        "//tools/jpov/fonts:all_fonts",
+    ],
+    deps = [
+        ":text3d_depth_alpha_common",
+        "//tools/jpov/include/jpov:jpov",
         "//tools/common:utils",
         "//tools/jpov/test:test_utils",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-    visibility = ["//tools/jpov:__subpackages__"],
 )
 
+cc_test(
+    name = "jpov_text3d_depth_alpha_gold_test",
+    srcs = ["jpov_text3d_depth_alpha_gold_test.cc"],
+    data = [
+        ":brick_seamless_512x512.png",
+        ":brick_normal_512x512.png",
+        ":text3d_depth_alpha_1280x720.png",
+        "//tools/jpov/fonts:all_fonts",
+    ],
+    deps = [
+        ":text3d_depth_alpha_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test/primitives3d:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
