@@ -53,3 +53,63 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# 火柴人（bone mesh）gold —— 标准晴天布景 + identity 位姿红火柴人
+#
+# 验证 BuildBoneMeshInBoneSpace 生成的骨架空间火柴人能在标准世界里正确渲染
+# （docs/jpov_retarget_design.md §4）。generator 写仓库 gold PNG；test 渲染 +
+# 红像素可见性门禁 + ROI 平均色对比。
+# ============================================================================
+
+cc_binary(
+    name = "jpov_bone_mesh_gold_generator",
+    srcs = [
+        "jpov_bone_mesh_gold_generator.cc",
+        "jpov_bone_mesh_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/object3d:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/interface:mixamo23_skeleton",
+        "//tools/jpov/interface:skeleton_mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_bone_mesh_gold_test",
+    srcs = [
+        "jpov_bone_mesh_gold_test.cc",
+        "jpov_bone_mesh_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/object3d:scene_assets",
+        ":bone_mesh_stickman_1280x720.png",
+        ":bone_mesh_stickman_1280x720_nobone.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/interface:mixamo23_skeleton",
+        "//tools/jpov/interface:skeleton_mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
