@@ -505,3 +505,28 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# 3D 文本 — 深度测试 + alpha 混合验证 demo（中文字嵌在地板里，人工看图用）
+# 复用 repeated_mrquad 的地板/相机/光照，三行中文按不同 alignment 锚在地板平面。
+# 输出 output/object3d/text3d_depth_alpha_1280x720.png
+# ============================================================================
+cc_binary(
+    name = "text3d_depth_alpha_demo",
+    srcs = ["text3d_depth_alpha_demo.cc"],
+    data = [
+        ":brick_seamless_512x512.png",
+        ":brick_normal_512x512.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
