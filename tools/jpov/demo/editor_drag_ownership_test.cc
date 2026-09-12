@@ -36,6 +36,15 @@ private:
         if (!cond) LOG(FATAL) << msg;
     }
 
+    // 朝向是否与给定基准一致（判定"有没有被旋转动过"）。
+    static bool OriChanged(const jpov_viewer::ModelPlacement& p,
+                           const jpov::Vec3f& up0, const jpov::Vec3f& fr0) {
+        auto d = [](const jpov::Vec3f& a, const jpov::Vec3f& b) {
+            return std::abs(a.x()-b.x()) + std::abs(a.y()-b.y()) + std::abs(a.z()-b.z());
+        };
+        return d(p.up, up0) > 1e-6f || d(p.front, fr0) > 1e-6f;
+    }
+
     // 面板几何：**调用 EditorApp 自己的函数**，不得在此重算
     // （重算 = 两份几何分叉 = 本 bug 的温床）。
     static float Left() { return EditorApp::PanelLeft(); }
@@ -84,8 +93,8 @@ private:
         // --- 路径 A：按在面板上（平移X 滑条位置）横向拖 → 旋转必须纹丝不动 ---
         {
             EditorApp app(JPOV::Config{});
-            const float rx0 = app.placement_.rx_deg;
-            const float ry0 = app.placement_.ry_deg;
+            const jpov::Vec3f up0 = app.placement_.up;
+            const jpov::Vec3f fr0 = app.placement_.front;
             jpov::InputSnapshot in{};
             in.left.raw = -1;  // Drag
             in.mouse_x = Left() + Sw() * 0.5f;
@@ -99,16 +108,15 @@ private:
             in2.mouse_dx = 120.0f;               // 横向拖 120px
             app.UpdateRotateFromDrag(in2);
             app.UpdateRotateFromDrag(in2);
-            ExpectTrue(std::abs(app.placement_.rx_deg - rx0) < 1e-6f,
-                       "🔴 按在面板上拖动不得改变 RX（本次修复的核心）");
-            ExpectTrue(std::abs(app.placement_.ry_deg - ry0) < 1e-6f,
-                       "🔴 按在面板上拖动不得改变 RY");
+            ExpectTrue(!OriChanged(app.placement_, up0, fr0),
+                       "🔴 按在面板上拖动不得改变朝向（本次修复的核心）");
         }
 
         // --- 路径 B：按在 3D 视口里横向拖 → rx 必须变化（防修复阉掉功能）---
         {
             EditorApp app(JPOV::Config{});
-            const float rx0 = app.placement_.rx_deg;
+            const jpov::Vec3f up0 = app.placement_.up;
+            const jpov::Vec3f fr0 = app.placement_.front;
             jpov::InputSnapshot in{};
             in.left.raw = -1;
             in.mouse_x = kEditorWidth * 0.5f;
@@ -122,14 +130,15 @@ private:
             in2.mouse_dx = 160.0f;
             app.UpdateRotateFromDrag(in2);
             app.UpdateRotateFromDrag(in2);
-            ExpectTrue(std::abs(app.placement_.rx_deg - rx0) > 1.0f,
-                       "视口内横向拖必须改变 RX（否则修复把功能一起阉了）");
+            ExpectTrue(OriChanged(app.placement_, up0, fr0),
+                       "视口内横向拖必须改变朝向（否则修复把功能一起阉了）");
         }
 
         // --- 路径 C：归属在起点冻结（起点面板内，之后拖到视口区，仍不旋转）---
         {
             EditorApp app(JPOV::Config{});
-            const float rx0 = app.placement_.rx_deg;
+            const jpov::Vec3f up0 = app.placement_.up;
+            const jpov::Vec3f fr0 = app.placement_.front;
             jpov::InputSnapshot in{};
             in.left.raw = -1;
             in.mouse_x = Left() + Sw() * 0.5f;
@@ -142,7 +151,7 @@ private:
             in2.mouse_y = kEditorHeight * 0.25f;
             in2.mouse_dx = 200.0f;
             app.UpdateRotateFromDrag(in2);
-            ExpectTrue(std::abs(app.placement_.rx_deg - rx0) < 1e-6f,
+            ExpectTrue(!OriChanged(app.placement_, up0, fr0),
                        "归属应在 drag 起点冻结：起点在面板上则整段按住都不旋转");
         }
 
@@ -151,7 +160,8 @@ private:
         // 那时鼠标已在视口区，会把起于面板的拖动误判为起于视口。
         {
             EditorApp app(JPOV::Config{});
-            const float rx0 = app.placement_.rx_deg;
+            const jpov::Vec3f up0 = app.placement_.up;
+            const jpov::Vec3f fr0 = app.placement_.front;
             jpov::InputSnapshot hold{};
             hold.left.raw = -2;                  // Hold（按下未动）
             hold.mouse_x = Left() + Sw() * 0.5f; // 按下点：面板内
@@ -165,14 +175,15 @@ private:
             drag.mouse_dx = 150.0f;
             app.UpdateRotateFromDrag(drag);
             app.UpdateRotateFromDrag(drag);
-            ExpectTrue(std::abs(app.placement_.rx_deg - rx0) < 1e-6f,
+            ExpectTrue(!OriChanged(app.placement_, up0, fr0),
                        "Hold 后拖走：归属应取按下点（面板内）→ 不得旋转");
         }
 
         // --- 路径 E：反向 —— 在视口区 Hold，再移到面板上拖动 → 仍应旋转 ---
         {
             EditorApp app(JPOV::Config{});
-            const float rx0 = app.placement_.rx_deg;
+            const jpov::Vec3f up0 = app.placement_.up;
+            const jpov::Vec3f fr0 = app.placement_.front;
             jpov::InputSnapshot hold{};
             hold.left.raw = -2;                  // Hold，按下点在视口区
             hold.mouse_x = kEditorWidth * 0.5f;
@@ -184,7 +195,7 @@ private:
             drag.mouse_y = Top() + 15.0f;
             drag.mouse_dx = 150.0f;
             app.UpdateRotateFromDrag(drag);
-            ExpectTrue(std::abs(app.placement_.rx_deg - rx0) > 1.0f,
+            ExpectTrue(OriChanged(app.placement_, up0, fr0),
                        "视口区 Hold 后拖到面板：归属取按下点（视口）→ 应旋转");
         }
         LOG(INFO) << "OK TestDragOriginDecidesRotate";

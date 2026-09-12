@@ -3,14 +3,15 @@
 // 覆盖内容（全部为纯函数，无需 JPOV::Init / GL context）：
 //   1. 恒等放置 → up=(0,1,0), front=(0,0,1), center=0, scale=1
 //      （即"坐标系等价"条件：模型系 ≡ 世界系）；
-//   2. 单轴旋转的 up/front 精确值（绕世界 X / Y 各 ±90°）；
-//   3. 组合旋转 R = Ry·Rx 的顺序正确性（Rx 与 Ry 不可交换——用 90°/90° 的
-//      一个非对称结果锁死顺序，防止日后误改成 Rx·Ry）；
-//   4. up/front 恒为单位向量且互相垂直（旋转保长宽、BuildModelMatrix 的
-//      归一化是恒等操作）；
-//   5. clamp：缩放/平移/旋转超界被夹断；
-//   6. ApplyRotateDrag 的"右滑逆时针"符号 + Ctrl 选轴 + 纵向分量无关 +
-//      像素→角度映射（拖满一屏 = 360°）；负向验证：故意用错符号必须不通过。
+//   2. 单轴增量旋转的 up/front 精确值（绕世界 X / Y 各 ±90°）；
+//   3. **任意顺序的世界轴累积**（本设计的核心动机）：绕 Y 转完再绕 X 转，
+//      结果必须等于"两次世界轴旋转的实际复合"—— 这正是两个 float 欧拉角
+//      做不到、而矢量状态做得到的（用固定轴序 Rx·Ry 参数化的实现会 FAIL）；
+//   4. 正交归一不变量（up/front 永远单位长且垂直 —— 保证 BuildModelMatrix
+//      内部归一化是恒等操作）；
+//   5. clamp：缩放/平移超界被夹断；
+//   6. ApplyRotateDrag 的"右滑逆时针"符号 + Ctrl 选轴 + 零位移无副作用 +
+//      像素→角度映射（拖满一屏 = 360°）。
 //
 // ⚠️ 断言写法纪律（见 skills/zero-run-code-reading-check）：每个断言都必须
 // 存在"能让它失败"的合法实现改动，禁止"定义上恒真"的检查。
@@ -58,104 +59,92 @@ void TestIdentity() {
     LOG(INFO) << "OK TestIdentity";
 }
 
-// 2a. 绕世界 X 轴 rx=+90°： +Y→+Z, +Z→−Y（右手系，从 +X 看逆时针）。
+// 2a. 绕世界 X 轴增量 +90°： +Y→+Z（up）, +Z→−Y（front）。
 void TestPitchPlus90() {
     ModelPlacement p;
-    p.rx_deg = 90.0f;
-    const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
-    ExpectVecNear(d.up,    {0.0f, 0.0f, 1.0f},  1e-5f, "Rx(+90): up 应由 +Y 转到 +Z");
-    ExpectVecNear(d.front, {0.0f, -1.0f, 0.0f}, 1e-5f, "Rx(+90): front 应由 +Z 转到 −Y");
+    jpov_viewer::ApplyPitchDelta(&p, 90.0f);
+    ExpectVecNear(p.up,    {0.0f, 0.0f, 1.0f},  1e-5f, "pitch(+90): up 应由 +Y 转到 +Z");
+    ExpectVecNear(p.front, {0.0f, -1.0f, 0.0f}, 1e-5f, "pitch(+90): front 应由 +Z 转到 −Y");
     LOG(INFO) << "OK TestPitchPlus90";
 }
 
-// 2b. 绕世界 Y 轴 ry=+90°： +Z→+X, +X→−Z（右手系，从 +Y 看逆时针）。
+// 2b. 绕世界 Y 轴增量 +90°： up 不动（在 Y 轴上），front: +Z→+X。
 void TestYawPlus90() {
     ModelPlacement p;
-    p.ry_deg = 90.0f;
-    const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
-    ExpectVecNear(d.up,    {0.0f, 1.0f, 0.0f},  1e-5f, "Ry(+90): up 应保持 +Y");
-    ExpectVecNear(d.front, {1.0f, 0.0f, 0.0f},  1e-5f, "Ry(+90): front 应由 +Z 转到 +X");
+    jpov_viewer::ApplyYawDelta(&p, 90.0f);
+    ExpectVecNear(p.up,    {0.0f, 1.0f, 0.0f}, 1e-5f, "yaw(+90): up 应保持 +Y");
+    ExpectVecNear(p.front, {1.0f, 0.0f, 0.0f}, 1e-5f, "yaw(+90): front 应由 +Z 转到 +X");
     LOG(INFO) << "OK TestYawPlus90";
 }
 
-// 3. 组合顺序 R = Ry·Rx（不可交换性自证）：
-//    rx=90, ry=90 时
-//      Ry(90)·Rx(90)·(0,0,1) = Ry(90)·(0,−1,0) = (0,−1,0)   ← 本实现的期望
-//      若误写成 Rx(90)·Ry(90)·(0,0,1) = Rx(90)·(1,0,0) = (1,0,0)  ← 另一结果
-//      同理 up：(0,1,0) → Ry·Rx 得 (1,0,0)，Rx·Ry 得 (0,0,1) —— 两轴同时可区分。
-//    两者不同 ⇒ 本断言能真正锁死顺序（不是恒真检查）。
-void TestComposeOrderNotCommutative() {
+// 3. ⭐ 任意顺序的世界轴累积（本设计的核心动机）：
+//    先绕世界 Y 转 90°，再绕世界 X 转 90°。
+//
+//    矢量状态的做法（本实现）：每步都作用在【当前】矢量上 →
+//      步1 yaw+90:  up=(0,1,0) front=(1,0,0)
+//      步2 pitch+90: up 绕X 90 → (0,0,1)；front 绕X 90 → (1,0,0) 的 X 分量不变 → (1,0,0)
+//    得 up=(0,0,1), front=(1,0,0)。
+//
+//    若用"两个 float 欧拉角 + 固定轴序 R=Ry(ry)·Rx(rx)"参数化（旧实现），
+//    存的是 ry=90/rx=90，重算得 R·(0,1,0) = Ry(90)·Rx(90)·(0,1,0) = Ry(90)·(0,0,1)
+//    = (1,0,0) —— 与矢量累积的 (0,0,1) **不同**。
+//    本断言锁死"必须是矢量累积语义"，不是欧拉角参数化语义。
+void TestWorldAxisAccumulationAnyOrder() {
     ModelPlacement p;
-    p.rx_deg = 90.0f;
-    p.ry_deg = 90.0f;
-    const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
-    ExpectVecNear(d.front, {0.0f, -1.0f, 0.0f}, 1e-5f,
-                  "R=Ry·Rx 时 front 应为 (0,−1,0)（若得 (1,0,0) 说明写成了 Rx·Ry）");
-    // up 手算：Rx(90)·(0,1,0)=(0,0,1) → Ry(90)·(0,0,1)=(1,0,0)。
-    // 若误写成 Rx·Ry：Ry(90)·(0,1,0)=(0,1,0) → Rx(90)·(0,1,0)=(0,0,1) —— 两者可区分。
-    ExpectVecNear(d.up,    {1.0f, 0.0f, 0.0f},  1e-5f,
-                  "R=Ry·Rx 时 up 应为 (1,0,0)（若得 (0,0,1) 说明写成了 Rx·Ry）");
-    LOG(INFO) << "OK TestComposeOrderNotCommutative";
+    jpov_viewer::ApplyYawDelta(&p, 90.0f);    // 先绕世界 Y
+    jpov_viewer::ApplyPitchDelta(&p, 90.0f);  // 再绕世界 X
+    ExpectVecNear(p.up, {0.0f, 0.0f, 1.0f}, 1e-5f,
+                  "Y 转 90° 再 X 转 90°：up 应为 (0,0,1)（欧拉角参数化会得 (1,0,0)）");
+    ExpectVecNear(p.front, {1.0f, 0.0f, 0.0f}, 1e-5f,
+                  "Y 转 90° 再 X 转 90°：front 应为 (1,0,0)");
+
+    // 反向顺序必须给出不同结果 → 证明顺序真的被累积（非交换）。
+    ModelPlacement q;
+    jpov_viewer::ApplyPitchDelta(&q, 90.0f);  // 先绕世界 X
+    jpov_viewer::ApplyYawDelta(&q, 90.0f);    // 再绕世界 Y
+    // up: 步1 pitch+90 → (0,0,1)；步2 yaw+90 作用 XZ 分量 → (1,0,0)
+    ExpectVecNear(q.up, {1.0f, 0.0f, 0.0f}, 1e-5f,
+                  "X 转 90° 再 Y 转 90°：up 应为 (1,0,0)（与反向顺序的 (0,0,1) 不同）");
+    // front: 步1 pitch+90 → (0,−1,0)；步2 yaw 不动 Y 分量 → (0,−1,0)
+    ExpectVecNear(q.front, {0.0f, -1.0f, 0.0f}, 1e-5f,
+                  "X 转 90° 再 Y 转 90°：front 应为 (0,−1,0)）");
+    LOG(INFO) << "OK TestWorldAxisAccumulationAnyOrder";
 }
 
-// 4. 组合旋转的正确性 —— 用【独立推导的对照实现】而非三角函数恒等式。
+// 4. 正交归一不变量：任意增量序列后，up/front 仍是单位矢量且垂直。
 //
-// ⚠️ 为什么不用"长度为 1 / 点积为 0"来测：RotateWorldX/Y 都是由单个角的
-// cos/sin 构成，c²+s²≡1 使单位长度**恒真**，且 u·f≡0 由构造直接保证——
-// 这两个断言即使把 rx/ry 写反、符号写错也照样通过（典型的无用断言，
-// 见 skills/zero-run-code-reading-check）。故改为与一份独立实现比对。
-//
-// 对照实现：用完整 3x3 矩阵乘（先算 Rx、再乘 Ry、再乘向量），公式与
-// RotateWorldX/Y 的展开式写法不同（矩阵组装 vs 逐行展开），故能真正抓出
-// 实现里的轴用错 / 符号写反 / 顺序写反。
-void TestAgainstIndependentMatrixReference() {
-    const float angles[] = {0.0f, 30.0f, -45.0f, 90.0f, 137.0f, -180.0f};
-    const double kDeg = 3.14159265358979323846 / 180.0;
-    for (float rx : angles) {
-        for (float ry : angles) {
-            ModelPlacement p;
-            p.rx_deg = rx;
-            p.ry_deg = ry;
-            const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
-
-            // 独立推导：先把 Rx 写成 3x3（行主序），再写 Ry，再算 Ry·Rx·v。
-            const double ax = rx * kDeg, ay = ry * kDeg;
-            const double cx = std::cos(ax), sx = std::sin(ax);
-            const double cy = std::cos(ay), sy = std::sin(ay);
-            // Rx（行主序）
-            const double Rxm[9] = {1, 0, 0, 0, cx, -sx, 0, sx, cx};
-            // Ry（行主序）
-            const double Rym[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
-            // M = Ry · Rx（行主序矩阵乘）。
-            double M[9];
-            for (int i = 0; i < 3; ++i) {
-                for (int j = 0; j < 3; ++j) {
-                    M[i * 3 + j] = Rym[i * 3 + 0] * Rxm[0 * 3 + j] +
-                                   Rym[i * 3 + 1] * Rxm[1 * 3 + j] +
-                                   Rym[i * 3 + 2] * Rxm[2 * 3 + j];
-                }
-            }
-            auto Mul = [&](double x, double y, double z) -> Vec3f {
-                return {static_cast<float>(M[0] * x + M[1] * y + M[2] * z),
-                        static_cast<float>(M[3] * x + M[4] * y + M[5] * z),
-                        static_cast<float>(M[6] * x + M[7] * y + M[8] * z)};
-            };
-            ExpectVecNear(d.up, Mul(0, 1, 0), 1e-5f,
-                          "up 应与独立矩阵对照实现一致");
-            ExpectVecNear(d.front, Mul(0, 0, 1), 1e-5f,
-                          "front 应与独立矩阵对照实现一致");
-        }
+//    ⚠️ 单次旋转下"单位长/垂直"是恒真的（cos²+sin²≡1），故这里**必须跑一段
+//    多步、多轴、非平凡的累积序列**才有区分力：如果实现里对 up/front 用了
+//    不同的旋转、或漏转了一个矢量，垂直性会立刻破（这才可能失败）。
+void TestOrthonormalUnderAccumulation() {
+    ModelPlacement p;
+    // 非平凡序列：多轴交替、角度都不同、含负角与整圈。
+    const struct { float deg; bool yaw; } kSeq[] = {
+        {37.0f, true}, {-128.0f, false}, {90.0f, true},
+        {360.0f, false}, {13.5f, true}, {-77.0f, false},
+    };
+    for (const auto& s : kSeq) {
+        if (s.yaw) jpov_viewer::ApplyYawDelta(&p, s.deg);
+        else       jpov_viewer::ApplyPitchDelta(&p, s.deg);
+        const float lu = std::sqrt(p.up.x()*p.up.x() + p.up.y()*p.up.y() + p.up.z()*p.up.z());
+        const float lf = std::sqrt(p.front.x()*p.front.x() + p.front.y()*p.front.y() +
+                                   p.front.z()*p.front.z());
+        ExpectNear(lu, 1.0f, 1e-5f, "累积中 up 必须保持单位长");
+        ExpectNear(lf, 1.0f, 1e-5f, "累积中 front 必须保持单位长");
+        const float dot = p.up.x()*p.front.x() + p.up.y()*p.front.y() + p.up.z()*p.front.z();
+        ExpectNear(dot, 0.0f, 1e-5f, "累积中 up 与 front 必须保持垂直");
     }
-    LOG(INFO) << "OK TestAgainstIndependentMatrixReference";
+    LOG(INFO) << "OK TestOrthonormalUnderAccumulation";
 }
 
-// 5a. 缩放/平移 clamp（超界被夹断，且平移直接进 center）。
+// 5a. 缩放/平移 clamp（超界被夹断，且平移直接进 center）；朝向不受影响。
 void TestClampScaleAndTranslate() {
     ModelPlacement p;
     p.scale = 100.0f;
     p.tx = 99.0f;
     p.ty = -99.0f;
     p.tz = 0.5f;
+    jpov_viewer::ApplyYawDelta(&p, 30.0f);   // 先转一下，验证 clamp 不动朝向
     const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
     ExpectNear(d.scale, ModelPlacement::kScaleMax, 1e-6f, "scale 超上界应夹到 10");
     ExpectVecNear(d.center, {ModelPlacement::kTransMax, ModelPlacement::kTransMin,
@@ -169,86 +158,83 @@ void TestClampScaleAndTranslate() {
     LOG(INFO) << "OK TestClampScaleAndTranslate";
 }
 
-// 5b. 旋转角度【折叠】（不是 clamp）：超出一圈的值归到等价主值。
-//     这是刻意与缩放/平移的 clamp 区分开的行为：角度是周期量。
-void TestWrapRotation() {
+// 5b. ToDrawParams 原样透传朝向（不做任何重新参数化 → 无精度损失/顺序歧义）。
+void TestToDrawParamsPassesOrientationThrough() {
     ModelPlacement p;
-    p.rx_deg = 370.0f;    // ≡ 10°
-    p.ry_deg = -190.0f;   // ≡ 170°
-    const ModelPlacement c = p.Clamped();
-    ExpectNear(c.rx_deg, 10.0f, 1e-4f, "370° 应折叠为 10°");
-    ExpectNear(c.ry_deg, 170.0f, 1e-4f, "−190° 应折叠为 170°");
-
-    // 边界语义：+180 折到 −180（半开区间 [-180,180)），−180 保持 −180。
-    ModelPlacement q;
-    q.rx_deg = 180.0f;
-    ExpectNear(q.Clamped().rx_deg, -180.0f, 1e-4f, "+180 应折为 −180（半开区间）");
-    ModelPlacement r;
-    r.rx_deg = -180.0f;
-    ExpectNear(r.Clamped().rx_deg, -180.0f, 1e-4f, "−180 应保持 −180");
-    LOG(INFO) << "OK TestWrapRotation";
+    jpov_viewer::ApplyYawDelta(&p, 41.0f);
+    jpov_viewer::ApplyPitchDelta(&p, -23.0f);
+    const jpov_viewer::DrawPlacement d = jpov_viewer::ToDrawParams(p);
+    ExpectVecNear(d.up, p.up, 1e-7f, "up 应原样透传（不经欧拉角重算）");
+    ExpectVecNear(d.front, p.front, 1e-7f, "front 应原样透传");
+    LOG(INFO) << "OK TestToDrawParamsPassesOrientationThrough";
 }
 
-// 6a. 不带 Ctrl：横向右拖（dx>0）→ 绕世界 X，右滑逆时针 → rx 增加。
-//     拖满一屏宽 = 360°。
+// 6a. 不带 Ctrl：横向右拖（dx>0）→ 绕世界 X，右滑逆时针 → pitch 增角。
 void TestDragRotateXPitch() {
-    ModelPlacement p;
-    const bool changed = jpov_viewer::ApplyRotateDrag(&p, /*dx*/ 1280.0f,
-                                                      /*ctrl*/ false, /*w*/ 1280);
-    ExpectTrue(changed, "dx≠0 时应报告已改变");
-    ExpectNear(p.rx_deg, 0.0f, 1e-4f, "拖满一屏(360°)后 rx 应折叠回 0°");
-    ExpectNear(p.ry_deg, 0.0f, 1e-6f, "未按 Ctrl 不应动 ry");
-
-    // 拖 1/4 屏 → 90°；右滑为正（逆时针）。
+    // 拖 1/4 屏 → 90°；右滑为正（逆时针）→ up 由 +Y 转 +Z。
     ModelPlacement q;
     jpov_viewer::ApplyRotateDrag(&q, /*dx*/ 320.0f, false, 1280);
-    ExpectNear(q.rx_deg, 90.0f, 1e-3f, "右拖 1/4 屏应 rx=+90（右滑逆时针）");
+    ExpectVecNear(q.up, {0.0f, 0.0f, 1.0f}, 1e-4f,
+                  "右拖 1/4 屏应绕世界 X 转 +90（右滑逆时针）");
+    ExpectVecNear(q.front, {0.0f, -1.0f, 0.0f}, 1e-4f, "同时 front 应转到 −Y");
 
-    // 负向验证：左拖必须得到负角（若符号写反，这里会失败）。
+    // 负向验证：左拖必须反向（若符号写反，这里会失败）。
     ModelPlacement r;
     jpov_viewer::ApplyRotateDrag(&r, /*dx*/ -320.0f, false, 1280);
-    ExpectNear(r.rx_deg, -90.0f, 1e-3f, "左拖 1/4 屏应 rx=−90");
+    ExpectVecNear(r.up, {0.0f, 0.0f, -1.0f}, 1e-4f, "左拖 1/4 屏应绕世界 X 转 −90");
     LOG(INFO) << "OK TestDragRotateXPitch";
 }
 
-// 6b. 按住 Ctrl：横向右拖 → 绕世界 Y，"右滑逆时针" ⇒ ry 减少（见头文件符号推导）。
+// 6b. 按住 Ctrl：横向右拖 → 绕世界 Y，"右滑逆时针" ⇒ yaw 取负（见头文件推导）。
 void TestDragRotateYYaw() {
     ModelPlacement p;
     jpov_viewer::ApplyRotateDrag(&p, /*dx*/ 320.0f, /*ctrl*/ true, 1280);
-    ExpectNear(p.ry_deg, -90.0f, 1e-3f,
-               "Ctrl+右拖 1/4 屏应 ry=−90（+Y 看逆时针 = XZ 面内 +Z→+X）");
-    ExpectNear(p.rx_deg, 0.0f, 1e-6f, "按住 Ctrl 不应动 rx");
+    ExpectVecNear(p.up, {0.0f, 1.0f, 0.0f}, 1e-4f, "绕 Y 旋转时 up 应保持 +Y");
+    // yaw = −90° → front 由 +Z 转到 −X。
+    ExpectVecNear(p.front, {-1.0f, 0.0f, 0.0f}, 1e-4f,
+                  "Ctrl+右拖 1/4 屏应绕世界 Y 转 −90（+Y 看逆时针 = XZ 面内 +Z→+X）");
 
     ModelPlacement q;
     jpov_viewer::ApplyRotateDrag(&q, /*dx*/ -320.0f, true, 1280);
-    ExpectNear(q.ry_deg, 90.0f, 1e-3f, "Ctrl+左拖 1/4 屏应 ry=+90");
+    ExpectVecNear(q.front, {1.0f, 0.0f, 0.0f}, 1e-4f, "Ctrl+左拖 1/4 屏应绕世界 Y 转 +90");
     LOG(INFO) << "OK TestDragRotateYYaw";
 }
 
 // 6c. 零位移不改变任何东西（纵向分量在本层根本不存在——调用方只传横向 dx）。
 void TestDragZeroIsNoop() {
     ModelPlacement p;
-    p.rx_deg = 37.0f;
-    p.ry_deg = -12.0f;
+    jpov_viewer::ApplyYawDelta(&p, 37.0f);
+    const Vec3f up0 = p.up, fr0 = p.front;
     const bool changed = jpov_viewer::ApplyRotateDrag(&p, 0.0f, false, 1280);
     ExpectTrue(!changed, "dx=0 应报告未改变（避免无谓重绘/日志）");
-    ExpectNear(p.rx_deg, 37.0f, 1e-6f, "dx=0 不应改 rx");
-    ExpectNear(p.ry_deg, -12.0f, 1e-6f, "dx=0 不应改 ry");
+    ExpectVecNear(p.up, up0, 1e-7f, "dx=0 不应改 up");
+    ExpectVecNear(p.front, fr0, 1e-7f, "dx=0 不应改 front");
     LOG(INFO) << "OK TestDragZeroIsNoop";
 }
 
-// 6d. 连续拖动的等价性：分两次各 160px == 一次 320px（线性映射自证）。
-// 为什么这条值得留：本层每次调用后会做一次**折叠**（WrapDegToHalfOpen），
-// 折叠不是线性的——若日后有人把折叠换成 clamp、或在每次 drag 里加"饱和"
-// 保护，这条就会失败。它守的是"累积语义不被单次截断破坏"。
+// 6d. 连续拖动的等价性：分两次各 160px == 一次 320px（同类旋转可线性叠加）。
+//     守的是"累积语义不被单次截断破坏"——若日后有人给每步加饱和/让步保护会 FAIL。
 void TestDragLinearity() {
     ModelPlacement a;
     jpov_viewer::ApplyRotateDrag(&a, 160.0f, true, 1280);
     jpov_viewer::ApplyRotateDrag(&a, 160.0f, true, 1280);
     ModelPlacement b;
     jpov_viewer::ApplyRotateDrag(&b, 320.0f, true, 1280);
-    ExpectNear(a.ry_deg, b.ry_deg, 1e-3f, "分两步拖应等价于一次拖（线性映射）");
+    ExpectVecNear(a.front, b.front, 1e-4f, "分两步拖应等价于一次拖（同类旋转线性叠加）");
+    ExpectVecNear(a.up, b.up, 1e-4f, "同上，up 也应一致");
     LOG(INFO) << "OK TestDragLinearity";
+}
+
+// 6e. 绕世界轴累积：整圈 360° 必须回到原位（world-axis 旋转的周期自证）。
+void TestFullTurnIdentity() {
+    ModelPlacement p;
+    jpov_viewer::ApplyRotateDrag(&p, /*dx*/ 1280.0f, /*ctrl*/ false, 1280);  // 绕X整圈
+    ExpectVecNear(p.up, {0.0f, 1.0f, 0.0f}, 1e-4f, "绕世界 X 转整圈应回到 +Y");
+    ExpectVecNear(p.front, {0.0f, 0.0f, 1.0f}, 1e-4f, "绕世界 X 转整圈应回到 +Z");
+    jpov_viewer::ApplyRotateDrag(&p, 1280.0f, /*ctrl*/ true, 1280);           // 绕Y整圈
+    ExpectVecNear(p.up, {0.0f, 1.0f, 0.0f}, 1e-4f, "绕世界 Y 转整圈应回到 +Y");
+    ExpectVecNear(p.front, {0.0f, 0.0f, 1.0f}, 1e-4f, "绕世界 Y 转整圈应回到 +Z");
+    LOG(INFO) << "OK TestFullTurnIdentity";
 }
 
 }  // namespace
@@ -258,14 +244,15 @@ int main(int /*argc*/, char** argv) {
     TestIdentity();
     TestPitchPlus90();
     TestYawPlus90();
-    TestComposeOrderNotCommutative();
-    TestAgainstIndependentMatrixReference();
+    TestWorldAxisAccumulationAnyOrder();
+    TestOrthonormalUnderAccumulation();
     TestClampScaleAndTranslate();
-    TestWrapRotation();
+    TestToDrawParamsPassesOrientationThrough();
     TestDragRotateXPitch();
     TestDragRotateYYaw();
     TestDragZeroIsNoop();
     TestDragLinearity();
+    TestFullTurnIdentity();
     LOG(INFO) << "model_placement_test: ALL PASS";
     return 0;
 }

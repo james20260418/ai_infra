@@ -122,15 +122,16 @@ int main(int argc, char** argv) {
     //    （~0.18m）取位移才有可见效果——这正是下面这条冒烟要验证的。
     { ModelPlacement p; p.tx = 0.05f;
       RenderState(&app, p, out_dir + "/smoke_02_tx.png"); }
-    // 4) 仅绕 X 旋转 +45°。
-    { ModelPlacement p; p.rx_deg = 45.0f;
+    // 4) 仅绕世界 X 转 +45°（增量旋转作用在矢量状态上）。
+    { ModelPlacement p; jpov_viewer::ApplyPitchDelta(&p, 45.0f);
       RenderState(&app, p, out_dir + "/smoke_03_rx45.png"); }
-    // 5) 仅绕 Y 旋转 +45°。
-    { ModelPlacement p; p.ry_deg = 45.0f;
+    // 5) 仅绕世界 Y 转 +45°。
+    { ModelPlacement p; jpov_viewer::ApplyYawDelta(&p, 45.0f);
       RenderState(&app, p, out_dir + "/smoke_04_ry45.png"); }
-    // 6) 组合：缩放 2 + 平移 (0.05,0.03,0) + rx 30 + ry -60。
+    // 6) 组合：缩放 2 + 平移 (0.05,0.03,0) + 绕 Y 30° 再绕 X −60°（顺序累积）。
     { ModelPlacement p; p.scale = 2.0f; p.tx = 0.05f; p.ty = 0.03f;
-      p.rx_deg = 30.0f; p.ry_deg = -60.0f;
+      jpov_viewer::ApplyYawDelta(&p, 30.0f);
+      jpov_viewer::ApplyPitchDelta(&p, -60.0f);
       RenderState(&app, p, out_dir + "/smoke_05_combo.png"); }
 
     app.Finalize();

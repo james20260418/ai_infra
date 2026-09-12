@@ -75,6 +75,7 @@ public:
     ViewConfig view_;
 
     // ── 模型放置状态（缩放/平移/旋转；唯一真相，见 model_placement.h）──
+    // 朝向状态在 placement_.up / placement_.front 两个矢量里（不是角度）。
     ModelPlacement placement_;
 
     // ── 地面高度（[-3,0]，需求定档）──
@@ -220,7 +221,7 @@ private:
     static constexpr float kPanelRowH    = 30.0f;   // 行高
     static constexpr float kPanelSpacing = 10.0f;   // 行间距
     static constexpr float kPanelBottom  = 18.0f;   // 屏底留白
-    static constexpr int   kPanelRows    = 8;       // 缩放1+平移3+旋转2+地面1+提示1
+    static constexpr int   kPanelRows    = 6;       // 缩放1+平移3+地面1+提示1
 
     // 面板首行左缘 x（水平居中、半屏宽；与查看器面板同款）。
     static float PanelLeft() {
@@ -290,19 +291,17 @@ private:
         ui_.SliderFloat("平移 Z", &placement_.tz, row(3),
                         ModelPlacement::kTransMin, ModelPlacement::kTransMax, 2);
 
-        // ── 旋转（角度；左键横向 drag 的等价滑条，便于精确回读/复现）──
-        ui_.SliderFloat("旋转 RX °", &placement_.rx_deg, row(4),
-                        ModelPlacement::kRotMin, ModelPlacement::kRotMax, 1);
-        ui_.SliderFloat("旋转 RY °", &placement_.ry_deg, row(5),
-                        ModelPlacement::kRotMin, ModelPlacement::kRotMax, 1);
+        // 注：**旋转没有滑条**。朝向的状态量是 (up, front) 两个矢量，不是角度
+        // （见 model_placement.h 顶部：两个 float 角度自由度不够，无法表达
+        //  "沿世界 Y 转完再沿世界 X 转" 的任意累积）。左键横向拖动即旋转。
 
         // ── 地面高度 [-3, 0] ──
-        ui_.SliderFloat("地面高度 y", &ground_y_, row(6),
+        ui_.SliderFloat("地面高度 y", &ground_y_, row(4),
                         kEditorGroundMin, kEditorGroundMax, 2);
 
         // ── 操作提示（无交互，纯文本）──
-        ui_.Text("左键横拖=绕X旋转 / Ctrl+左键横拖=绕Y旋转 · 右键拖=视角 · 滚轮=缩放视角",
-                 row(7));
+        ui_.Text("左键横拖=绕世界X旋转 · Ctrl+左键横拖=绕世界Y旋转 · 右键拖=视角 · 滚轮=缩放视角",
+                 row(5));
     }
 
     bool show_panel_ = true;
