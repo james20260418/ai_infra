@@ -57,12 +57,14 @@ int main(int argc, char** argv) {
         LOG(WARNING) << "未提供 glTF 路径，使用演示模型: " << gltf_path;
     }
 
-    // ── 配置：1280×720 不可 resize、60fps、交互窗口（本 PR 无 headless 模式）──
+    // ── 配置：默认 1280×720、60fps、交互窗口（本 PR 无 headless 模式）──
+    // resizable = true：布局已改为随窗口尺寸自适应（面板贴左下、说明贴左上），
+    // 放大窗口后滑条/文字会跟着重新贴边，不会飘。
     JPOV::Config cfg;
     cfg.title = "JPOV — 模型编辑器（放置微调）";
-    cfg.width  = jpov_viewer::kEditorWidth;
-    cfg.height = jpov_viewer::kEditorHeight;
-    cfg.resizable = false;
+    cfg.width  = jpov_viewer::kEditorDefaultWidth;
+    cfg.height = jpov_viewer::kEditorDefaultHeight;
+    cfg.resizable = true;
     cfg.target_fps = static_cast<int>(jpov_viewer::kEditorFps);
     cfg.headless = false;
     // 显式声明字体（CJK 显中文标签，Latin 回退；路径相对 exe 的 fonts/，
