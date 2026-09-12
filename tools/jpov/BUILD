@@ -147,7 +147,6 @@ cc_test(
     srcs = ["demo/editor_drag_ownership_test.cc"],
     deps = [
         "//tools/jpov:editor_app",
-        "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",
     ],

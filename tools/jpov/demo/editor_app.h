@@ -1,8 +1,8 @@
-// JPOV 模型编辑器 — 渲染核心 App（PlacementApp）
+// JPOV 模型编辑器 — 渲染核心 App（EditorApp）
 //
 // 与 viewer_app.h 的 ViewerApp 是**姊妹**关系：同一套场景（sunny day 光照 +
-// 可调地面 + 相机右键环绕），但底部面板换成"模型放置"三组控件
-// （缩放 / 平移 XYZ / 旋转 RX·RY），并额外消费【左键横向 drag】做旋转。
+// 可调地面 + 相机右键环绕），但底部面板换成“模型放置”控件
+// （缩放 / 平移 XYZ / 地面高度），并额外消费【左键横向 drag】做旋转。
 //
 // 为什么另起一个 App 而不是给 ViewerApp 加开关（SOUL：不要 demo 分叉温床）：
 //   - 两个工具的手感与面板语义本就不同（viewer 调"光照标定"，editor 调"模型
@@ -18,6 +18,12 @@
 //   - 光照固定 sunny day 同款配置（MakeLighting，滑条不暴露光照）；
 //   - 地面 0 ~ -3 米可调（MakeGroundQuad，需求"地面依然是0~-3米可调"）；
 //   - 交互/出图共用同一条 OneIteration（zero 分叉）。
+
+// ⚠️ 关于布局的两个硬约束（改布局时必读）：
+//   1. 滑条 box 与由 PanelRow() 算出，且 PointInPanel 用同一份几何判定左键归属；
+//      两处必须同源，否则“能画的滑条拖不动”或“能拖的区域没有控件”。
+//   2. 左上角说明文字区也计入面板（见 PointInPanel），避免它成为旋转的
+//      隐形触发区。文字区不得与底部滑条区重叠（有测试守卫）。
 
 #ifndef JPOV_DEMO_EDITOR_APP_H_
 #define JPOV_DEMO_EDITOR_APP_H_
@@ -221,14 +227,20 @@ private:
     static constexpr float kPanelRowH    = 30.0f;   // 行高
     static constexpr float kPanelSpacing = 10.0f;   // 行间距
     static constexpr float kPanelBottom  = 18.0f;   // 屏底留白
-    static constexpr int   kPanelRows    = 6;       // 缩放1+平移3+地面1+提示1
+    static constexpr int   kPanelRows    = 5;       // 缩放1+平移3+地面1
+    static constexpr float kPanelMarginLeft = 24.0f; // 滑条靠左的左边距
 
-    // 面板首行左缘 x（水平居中、半屏宽；与查看器面板同款）。
-    static float PanelLeft() {
-        const float w = static_cast<float>(kEditorWidth);
-        const float sw = 0.5f * w;
-        return (w - sw) * 0.5f;
-    }
+    // 左上角操作说明字样（需求：把左键使用说明打印在工具左上角）。
+    // 纯文本展示，不参与交互（但计入 PointInPanel，避免成为旋转的隐形触发区）。
+    static constexpr float kHelpLeft   = 20.0f;
+    static constexpr float kHelpTop    = 16.0f;
+    static constexpr float kHelpWidth  = 560.0f;    // 足够容纳最长一行
+    static constexpr float kHelpLines  = 4.0f;      // 文案行数（与 kHelpLinesText 同长）
+    static constexpr float kHelpLineH  = 22.0f;     // 单行行高（= 字号 16 + 行距 6）
+    static constexpr float kHelpHeight = kHelpLines * kHelpLineH;
+
+    // 滑条左缘 x（面板靠左侧，宽度 = 半屏宽不变；需求：原来居中 → 改到左侧）。
+    static float PanelLeft() { return kPanelMarginLeft; }
     // 面板首行上缘 y。
     static float PanelTop() {
         const float h = static_cast<float>(kEditorHeight);
@@ -236,37 +248,49 @@ private:
                             (kPanelRows - 1) * kPanelSpacing;
         return h - kPanelBottom - block;
     }
-    // 第 i 行（0 起）的 box。
+    // 第 i 行（0 起）的 box。宽度恒为半屏（需求：宽度不变），只改左缘贴左。
     static jpov::UiRect PanelRow(int i) {
-        const float w = static_cast<float>(kEditorWidth);
         return jpov::UiRect{
             {PanelLeft(), PanelTop() + i * (kPanelRowH + kPanelSpacing)},
-            {0.5f * w, kPanelRowH}};
+            {0.5f * static_cast<float>(kEditorWidth), kPanelRowH}};
     }
 
     // 点 (x,y)（窗口像素坐标）是否落在底部面板的矩形内。
-    // 面板几何由 DrawPlacementPanel 的布局常量决定，故抽成本函数共用一份，
-    // 避免"判定用的矩形"与"实际画的矩形"两处分叉（那是这类 bug 的经典温床）。
+    // 面板几何由上面 PanelLeft/PanelTop/PanelRow 决定，故共一份，避免
+    // "判定用的矩形"与"实际画的矩形"两处分叉。
     //
-    // 面板在窗口内水平居中、半屏宽；顶部 = 最后一行下缘 + 底部留白。
-    // 这里只关心“鼠标是否在面板上”（用于左键归属判定），故取一个把全部行
-    // 都包住的保守矩形：水平± 半屏宽之外再放一点余量，纵向从首行上缘到屏底。
+    // 除底部滑条区外，**左上角的操作说明文字也计入面板**：它是纯文本无交互，
+    // 在它上面按下左键也不应触发模型旋转（用户可能想拖它当“空白区”，但更
+    // 重要的是不要让文字区域成为旋转的隐形触发区——保持"无控件处才算视口"
+    // 的一致心智）。
     bool PointInPanel(float x, float y) const {
-        const float w = static_cast<float>(kEditorWidth);
         const float h = static_cast<float>(kEditorHeight);
-        const float sw = 0.5f * w;
-        const float left = (w - sw) * 0.5f;
-        const float top = PanelTop();
-        // 横向放宽一个行高（句柄/文本可能超出 box 少许），纵向到屏幕底。
-        return x >= left - kPanelRowH && x <= left + sw + kPanelRowH &&
-               y >= top - kPanelRowH && y <= h;
+        const float sw = 0.5f * static_cast<float>(kEditorWidth);
+        // ① 底部滑条区：横向放宽一个行高（句柄/文本可能溢出 box 少许），
+        //    纵向从首行上缘（上留一个行高余量）到屏幕底。
+        const bool in_sliders =
+            x >= PanelLeft() - kPanelRowH && x <= PanelLeft() + sw + kPanelRowH &&
+            y >= PanelTop() - kPanelRowH && y <= h;
+        // ② 左上角说明文字区（见 HelpRect）。
+        const jpov::UiRect help = HelpRect();
+        const bool in_help = x >= help.pos.x() &&
+                             x <= help.pos.x() + help.size.x() &&
+                             y >= help.pos.y() &&
+                             y <= help.pos.y() + help.size.y();
+        return in_sliders || in_help;
     }
 
-    // 模型放置面板：三组控件（缩放 / 平移 / 旋转）+ 地面高度。
+    // 左上角操作说明文字的矩形（像素）。文字为多行左键/右键说明，左上角起。
+    // 供 Draw 与 PointInPanel 共用（单一真相）。
+    static jpov::UiRect HelpRect() {
+        return jpov::UiRect{{kHelpLeft, kHelpTop}, {kHelpWidth, kHelpHeight}};
+    }
+
+    // 模型放置面板：缩放 / 平移 XYZ / 地面高度。
     // 全部滑条数值由 placement_ / ground_y_ 外置持有。
     //
-    // 🔑 布局常量集中在类级（kPanelRowH 等）前定义的辅助函数里，使"画控件用的
-    // box"与"判定左键归属用的面板矩形"（PointInPanel）**共用同一份几何**——
+    // 🔑 布局常量集中在类级（kPanelRowH 等），使"画控件用的 box"与
+    // "判定左键归属用的面板矩形"（PointInPanel）**共用同一份几何**——
     // 两处各写一份是这类"拖滑条误触旋转"bug 的经典温床。
     void DrawPlacementPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kEditorWidth);
@@ -275,7 +299,7 @@ private:
         theme.font_alias = kEditorFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / kEditorFps);
 
-        // 行盒辅助（布局几何见文件底部 PanelRow()）。
+        // 行盒辅助（布局几何见 PanelRow()）。
         auto row = [&](int i) { return PanelRow(i); };
 
         // ── 缩放 [0.1,10]，默认 1.0 ──
@@ -299,9 +323,39 @@ private:
         ui_.SliderFloat("地面高度 y", &ground_y_, row(4),
                         kEditorGroundMin, kEditorGroundMax, 2);
 
-        // ── 操作提示（无交互，纯文本）──
-        ui_.Text("左键横拖=绕世界X旋转 · Ctrl+左键横拖=绕世界Y旋转 · 右键拖=视角 · 滚轮=缩放视角",
-                 row(5));
+        // ── 左上角操作说明（需求：把左键使用说明打印在工具左上角）──
+        // 多行左对齐：逐行给一个“内容宽度估算”的窄 box，使 Text（默认居中）
+        // 的左缘落在固定 x 上，形成左对齐效果（与 ui_demo 的 log 行同款手法）。
+        DrawHelpText();
+    }
+
+    // 左上角操作说明（纯展示，不参与交互）。
+    // 逐行绘制；box 宽按字符数估算（CJK 按 1 个字号宽、ASCII 按 0.6），使
+    // Text（默认居中）的左缘恰好落在 kHelpLeft，形成左对齐（与 ui_demo 的 log
+    // 行同款手法）。行数/行高与 kHelpLines/kHelpLineH 单一真相一致。
+    void DrawHelpText() {
+        // 文案（需求：工具左上角打印左键使用说明）。改行数须同步 kHelpLines。
+        static const char* const kText[] = {
+            "左键横向拖动 = 模型绕世界 X 轴旋转（右滑逆时针）",
+            "Ctrl + 左键横向拖动 = 模型绕世界 Y 轴旋转（右滑逆时针）",
+            "右键拖动 = 旋转视角 · 滚轮 = 缩放视角",
+            "底下滑条 = 缩放 / 平移 / 地面高度",
+        };
+        static_assert(sizeof(kText) / sizeof(kText[0]) ==
+                          static_cast<int>(kHelpLines),
+                      "说明文字行数与 kHelpLines 不一致（改文案须同步）");
+        for (int i = 0; i < static_cast<int>(kHelpLines); ++i) {
+            const char* s = kText[i];
+            // 粗略估宽：CJK 按字号宽、ASCII 按 0.6 字号宽（仅用于左对齐定位）。
+            float text_w = 0.0f;
+            for (const char* c = s; *c != '\0'; ++c) {
+                text_w += (static_cast<unsigned char>(*c) >= 0x80)
+                              ? kEditorFontSize
+                              : kEditorFontSize * 0.6f;
+            }
+            ui_.Text(s, jpov::UiRect{{kHelpLeft, kHelpTop + i * kHelpLineH},
+                                     {text_w, kHelpLineH}});
+        }
     }
 
     bool show_panel_ = true;

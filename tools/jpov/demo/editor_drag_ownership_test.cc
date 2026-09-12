@@ -28,6 +28,7 @@ public:
     static void Run() {
         TestPointInPanel();
         TestGeometryCoversAllRows();
+        TestHelpRegionIsPanel();
         TestDragOriginDecidesRotate();
     }
 
@@ -85,7 +86,28 @@ private:
                                         r.pos.y() + r.size.y()),
                        "每行右下角必须判为在面板内");
         }
+        // 滑条靠左：首行左缘应贴左边距（需求：居中 → 改到左侧）。
+        const float expected_left = EditorApp::kPanelMarginLeft;
+        ExpectTrue(std::abs(EditorApp::PanelRow(0).pos.x() - expected_left) < 1e-3f,
+                   "滑条应靠左（左缘 = 左边距）");
+        // 宽度保持半屏（需求：宽度不变）。
+        const float expect_w = 0.5f * kEditorWidth;
+        ExpectTrue(std::abs(EditorApp::PanelRow(0).size.x() - expect_w) < 1e-3f,
+                   "滑条宽度应保持半屏不变");
         LOG(INFO) << "OK TestGeometryCoversAllRows";
+    }
+
+    // 2b. 左上角说明文字区计入面板（在它上面按下不应触发旋转 —— 避免"无控件处
+    //     才算视口"的心智被打破），且它不再与底部滑条区重叠。
+    static void TestHelpRegionIsPanel() {
+        EditorApp app(JPOV::Config{});
+        const jpov::UiRect help = EditorApp::HelpRect();
+        ExpectTrue(app.PointInPanel(help.pos.x() + 4.0f, help.pos.y() + 4.0f),
+                   "左上角说明文字区必须计入面板（否则拖文字会意外旋转模型）");
+        // help 区必须在滑条首行上方（不重叠）。
+        ExpectTrue(help.pos.y() + help.size.y() < EditorApp::PanelTop(),
+                   "说明文字区不应与底部滑条区重叠");
+        LOG(INFO) << "OK TestHelpRegionIsPanel";
     }
 
     // 3. 组合语义：直接驱动私有 UpdateRotateFromDrag 模拟两条 drag 路径。

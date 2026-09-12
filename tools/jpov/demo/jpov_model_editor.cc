@@ -14,7 +14,6 @@
 //   ./tools/jpov/build_jpov_model_editor.sh
 //   → output/jpov_model_editor/jpov_model_editor <gltf/glb 路径>
 
-#include <cstdlib>
 #include <string>
 
 #include <glog/logging.h>
@@ -25,44 +24,34 @@
 
 namespace {
 
-// 运行模式（类型化，与查看器同款——未来加 headless 子命令只需扩枚举 + 分支）。
-enum class RunMode { kInteractive, kInvalid };
-
 // 项目内可用的演示 glTF（命令行未指定路径时的 fallback，便于快速跑通）。
 // 复用查看器同款演示资产（plier 小工具），保证 editor 开箱即可看到东西。
 std::string DefaultGltfPath() {
     return "tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
 }
 
-// 命令行解析结果：模式 + 模型路径。
-struct CliParsed {
-    RunMode mode = RunMode::kInteractive;
-    std::string gltf_path;
-};
-
-// 解析 CLI：纯标志与带值标志可任意位置；第一个非 "--" 前缀参数 = glTF 路径；
-// 未知标志 → WARNING 忽略（不崩溃）。
-CliParsed ParseCli(int argc, char** argv) {
-    CliParsed p;
+// 取模型路径：遍历 argv[1..] 的第一个非 "--" 前缀参数（与查看器同款约定）。
+// 本工具目前只有交互模式（无 headless 子命令），故不需要模式枚举；
+// 未来加拍摄/批处理模式下再引入 RunMode（YAGNI，不过早抽象）。
+std::string ParseGltfPath(int argc, char** argv) {
+    std::string path;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "; 已忽略";
-        } else if (p.gltf_path.empty()) {
-            p.gltf_path = arg;
+        } else if (path.empty()) {
+            path = arg;
         } else {
             LOG(WARNING) << "多余位置参数: " << arg << "; 已忽略";
         }
     }
-    return p;
+    return path;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const CliParsed p = ParseCli(argc, argv);
-
-    std::string gltf_path = p.gltf_path;
+    std::string gltf_path = ParseGltfPath(argc, argv);
     if (gltf_path.empty()) {
         gltf_path = DefaultGltfPath();
         LOG(WARNING) << "未提供 glTF 路径，使用演示模型: " << gltf_path;
