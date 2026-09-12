@@ -50,6 +50,11 @@ inline std::string GetNoBoneRelPath() {
 inline constexpr float kStickmanHeight = 1.75f;
 // 骨杆半宽（米）—— 骨的"大致直径" ≈ 2·radius。
 inline constexpr float kBoneRadius = 0.02f;
+
+// 屏幕空间坐标轴提示标签："z"左下 / "x"右下 / "y"上方居中。
+// 目的：看图时一眼确认坐标架方向（避免忘记 x/y/z 朝哪）。
+// 用最简单的 Latin 字体（DejaVuSans）+ 红色，字号相对输出帧高（360）足够醒目。
+inline constexpr float kAxisLabelFontSize = 28.0f;
 // 地面板半厚（米）：板中心下沉该值，使**顶面精确落在 y=0**
 //（骨架空间原点 = 根关节 = 脚底，正好踩在地面上）。
 inline constexpr float kGroundHalfThickness = 0.05f;
@@ -69,7 +74,7 @@ public:
     bool draw_stickman_ = true;
 
     void OneIteration(int64_t, const jpov::InputSnapshot&,
-                      const jpov::WindowInfo&, jpov::RenderCommandList* cmds) override {
+                      const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) override {
         constexpr float kResW = 1280.0f, kResH = 720.0f;
         cmds->camera.fbo_3d_width_  = kResW;
         cmds->camera.fbo_3d_height_ = kResH;
@@ -113,6 +118,23 @@ public:
                                /*highlight*/ false,
                                /*picking_id*/ 0);
         }
+
+        // ── 屏幕空间坐标轴标签（2D，不参与 3D 变换）──
+        // 在屏幕三处角落标 x/y/z，看 gold 图即可确认坐标架方向。
+        // ⚠️ pos 是**输出帧**（winfo）像素坐标，不是 3D FBO 分辨率 —— 两者在本
+        //    gold 里不同（3D=1280×720，输出=640×360），用错会画到画面外。
+        const float out_w = winfo.width;
+        const float out_h = winfo.height;
+        const jpov::Vec2f kMargin{6.0f, 6.0f};
+        cmds->DrawText("z", /*pos*/ {kMargin.x(), out_h - kMargin.y()},
+                       kAxisLabelFontSize, jpov::kColorRed,
+                       jpov::TextAlignment::kBottomLeft, jpov::kFontBuiltinLatin);
+        cmds->DrawText("x", /*pos*/ {out_w - kMargin.x(), out_h - kMargin.y()},
+                       kAxisLabelFontSize, jpov::kColorRed,
+                       jpov::TextAlignment::kBottomRight, jpov::kFontBuiltinLatin);
+        cmds->DrawText("y", /*pos*/ {out_w * 0.5f, kMargin.y()},
+                       kAxisLabelFontSize, jpov::kColorRed,
+                       jpov::TextAlignment::kMidTop, jpov::kFontBuiltinLatin);
     }
 };
 

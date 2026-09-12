@@ -70,6 +70,9 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "JPOV Bone Mesh Gold Test";
     cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
     jpov_bone_mesh_gold::BoneMeshGoldApp app(cfg);
     app.Init();
     jpov_bone_mesh_gold::BuildScene(&app);
