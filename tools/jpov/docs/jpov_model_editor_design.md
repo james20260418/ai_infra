@@ -107,20 +107,44 @@ void ApplyPitchDelta(ModelPlacement* p, float deg);  // 绕世界 X（up/front �
 **因此没有旋转滑条**：滑条的状态是一个 float，与 "朝向 = 两个矢量" 的语义
 不匹配（存不下任意朝向）。旋转**只能**通过左键横向拖动完成。
 
-### 3.3 UI 布局
+### 3.3 UI 布局（**随窗口尺寸自适应**）
 
-| 元素 | 位置 |
-|---|---|
-| 操作说明（4 行左键/右键说明） | **左上角**（`kHelpLeft/kHelpTop` = 20/16） |
-| 滑条（5 条：缩放 / 平移XYZ / 地面高度） | **底部靠左**（左缘 = 左边距 24px） |
+| 元素 | 位置 | 样式 |
+|---|---|---|
+| 操作说明（4 行） | **左上角** | **黑色文字、真左对齐** |
+| 滑条（5 条：缩放 / 平移XYZ / 地面高度） | **左下角** | 宽度 = 半屏（比例固定） |
 
-滑条宽度保持**半屏**（1280/2 = 640px）不变，只把左缘从"居中"改为"贴左"
-（需求：`原来居中 → 改到左侧，宽度不变`）。
+**关键：布局全部从「本帧窗口尺寸」推算，不用编译期常量。**
 
-两处几何都是**单一真相**且被 `editor_drag_ownership_test` 守卫：
-- `PanelRow(i)` 同时供绘制和 `PointInPanel`（防"能画的滑条拖不动"）；
-- `HelpRect()` 同时供绘制和 `PointInPanel`（说明文字区也计入面板，
-  避免它成为模型旋转的**隐形触发区**）；测试还断言它与滑条区不重叠。
+2D 指令的坐标空间是**每帧渲染分辨率**（= 当帧窗口尺寸，见
+`render_command.h` 对 `Rect2D` 的说明），所以：
+
+```cpp
+// OneIteration：
+const float fw = winfo.width, fh = winfo.height;   // 每帧随窗口变
+cmds->camera.fbo_3d_width_  = (int)fw;             // 渲染分辨率跟着窗口
+cmds->camera.fbo_3d_height_ = (int)fh;
+
+PanelLayout L = MakeLayout(fw, fh);                // 布局也跟着窗口
+```
+
+`PanelLayout::Row(i)` / `Help()` 的几何即由此算出：滑条左缘贴边距、最后一行
+底缘贴屏底（左下角），说明贴左上角。**尺寸固定、位置随窗口平移** —— 即
+"尺寸可固定，但位置整体贴左下角"。
+
+> ⚠️ 踩过的坑：早期版本用常量 `kEditorHeight=720` 算布局，窗口放大后滑条
+> 飘在中间偏上。常量现已改名 `kEditorDefaultWidth/Height` 并注明**仅表示
+> 开窗默认尺寸，不是布局常量**。`TestLayoutScalesWithWindow` 锁死这一点。
+
+**说明文字为何不走 `Ui::Text`**：`Ui::Text` 内部写死 `kCenter` 对齐 +
+写死 `theme_.foreground`（浅色），无法满足"左对齐 + 黑字"。故直接向
+`cmds` 发 `DrawText(..., kTopLeft, alias)`。上一版用"估字符宽 + 居中"凑
+左对齐，估宽不准就参差不齐（"排版怪"的根因）。
+
+两处几何仍是**单一真相**且被 `editor_drag_ownership_test` 守卫：
+- `PanelLayout::Row(i)` 同时供绘制和 `PointInPanel`（防"能画的滑条拖不动"）；
+- `PanelLayout::Help()` 同时供绘制和 `PointInPanel`（说明区也计入面板，
+  避免它成为模型旋转的**隐形触发区**）；测试断言它与滑条区不重叠。
 
 ### 3.4 缩放/平移用 clamp，朝向不 clamp
 
@@ -162,6 +186,8 @@ bazel test //tools/jpov/demo/editor:all
 2. **相机 R 只按未缩放的包围盒自适应一次**（初始化时）。把缩放拉到 2 以上可能
    让模型出框——用滚轮 zoom 即可，本 PR 不做"跟随缩放自动重新取景"。
 3. **不做资产保存**（显式非目标）。摆放结果目前仅供人眼配准与后续 PR 反推。
+4. **窗口可缩放**（`cfg.resizable = true`，与查看器的不可缩放不同）：布局已能
+   随窗口自适应（见 §3.3），放大后滑条/说明会重新贴边。
 
 ## 6. 左键 drag 归属（面板 vs 视口）—— 曾出过 bug，已修
 
@@ -192,7 +218,9 @@ bazel test //tools/jpov/demo/editor:all
 - `model_placement_test`：**12 用例全绿**（含世界轴任意顺序累积、多轴正交归一、
   整圈回位）；**3 项负向验证**均正确 FAIL（退回欧拉角参数化 / pitch 漏转 up /
   yaw 符号写反）。其中"退回欧拉角参数化"直接证明 §3.2 的设计动机成立。
-- `editor_drag_ownership_test`：面板/视口归属 5 条路径 + 3 项负向验证全过。
+- `editor_drag_ownership_test`：面板/视口归属 5 条路径 + 布局自洽 4 组 + 负向
+  验证全过。含 `TestLayoutScalesWithWindow`（窗口放大到 1920×1080 后底缘仍贴
+  新屏底、宽为新半屏、说明仍贴左上、归属判定仍正确）。
 - 交互工具不提供 headless 冒烟程序（开发期曾有，验收时删除：editor 本身是
   交互工具，看效果直接开窗口，出图脚本对该工具无交付价值）。
   - ⚠️ 首轮冒烟曾出现"组合图与平移图字节相同"的假象，根因是**平移量按人尺度
