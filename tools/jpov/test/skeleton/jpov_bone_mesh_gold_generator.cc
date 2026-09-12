@@ -19,10 +19,6 @@ static std::string TestDataDir() {
     return jpov::GetTestDataDir();
 }
 
-static std::string Assets() {
-    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/scene_assets/";
-}
-
 int main() {
     const std::string outpath =
         TestDataDir() + jpov_bone_mesh_gold::GetGoldRelPath();
@@ -34,9 +30,7 @@ int main() {
     cfg.headless = true;
     jpov_bone_mesh_gold::BoneMeshGoldApp app(cfg);
     app.Init();
-    jpov_bone_mesh_gold::BuildScene(&app,
-                                    Assets() + "ground/ground_brick.gltf",
-                                    Assets() + "ground/ground_dirt.gltf");
+    jpov_bone_mesh_gold::BuildScene(&app);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;

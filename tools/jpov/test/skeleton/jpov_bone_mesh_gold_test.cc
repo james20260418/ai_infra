@@ -37,10 +37,6 @@ std::string GoldPath() {
            jpov_bone_mesh_gold::GetGoldRelPath();
 }
 
-std::string Assets() {
-    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/scene_assets/";
-}
-
 // “无火柴人”基线图路径（generator 产出）。
 std::string NoBonePath() {
     const char* e = std::getenv("TEST_SRCDIR");
@@ -76,9 +72,7 @@ int main() {
     cfg.headless = true;
     jpov_bone_mesh_gold::BoneMeshGoldApp app(cfg);
     app.Init();
-    jpov_bone_mesh_gold::BuildScene(&app,
-                                    Assets() + "ground/ground_brick.gltf",
-                                    Assets() + "ground/ground_dirt.gltf");
+    jpov_bone_mesh_gold::BuildScene(&app);
 
     jpov::WindowInfo winfo;
     winfo.width  = 640.0f;
