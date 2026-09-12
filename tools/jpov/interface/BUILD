@@ -107,6 +107,37 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# SkeletonMesh — 骨架可视化（火柴人 mesh）CPU 几何生成（GL-free）
+# 由 SkeletonType + Pose 造出可直接 RegisterMesh 的带骨杆 mesh（见 docs/jpov_retarget_design.md §4）。
+cc_library(
+    name = "skeleton_mesh",
+    hdrs = ["skeleton_mesh.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "//geom/math:mat4",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "skeleton_mesh_test",
+    srcs = ["skeleton_mesh_test.cc"],
+    deps = [
+        ":mixamo23_skeleton",
+        ":skeleton_mesh",
+        ":skeleton_types",
+        "//geom/math:mat4",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # AnimationClip — CPU 侧外部动画素材容器（FBXClip：源骨架 + 帧频 + 原始全帧）
 # 承载 src/fbx_loader 的产出；供上层 debug/retarget/resample 二次开发用，不碰 GPU。
 # （src/skeleton 的 GPU pose atlas 使用另见 src/skeleton。）

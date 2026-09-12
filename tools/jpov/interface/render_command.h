@@ -1328,6 +1328,17 @@ struct RenderCommandList {
     //   - 模型的局部 +Z 轴 → 世界空间 front 方向
     //   - 局部 +X 轴由 up/front 叉积确定（保证右手系）
     //
+    // 顶点变换：v_world = center + R(up, front) · (scale · v_local)。
+    // 故 local 原点 (0,0,0) 恒映射到 center —— center=(0,0,0) 只意味着
+    // “模型系原点 = 世界原点”，并不蕴含两系重合（朝向/尺度仍可不同）。
+    //
+    // 模型系 ≡ 世界系（局部坐标直接就是世界坐标，model 矩阵为单位阵）的充要条件：
+    //   1) center = (0, 0, 0)          —— 原点对齐
+    //   2) up = (0, 1, 0), front = (0, 0, 1) —— 轴向对齐（此时 cross(up,front) = +X）
+    //   3) scale = 1                   —— 尺度一致
+    // 三条需同时满足；缺任一条都只是部分对齐（如 center=0 但 up/front 带旋转 =
+    // 原点重合而朝向不一致；center=0/轴对齐但 scale≠1 = 原点与朝向一致而尺度不同）。
+    //
     // 着色行为：DrawObject3D 统一使用 GGX PBR 着色（需 mesh 含 kNormal）。
     // object_use_default_color 仅在 Render() 中控制是否跳过点光源 tile lighting，
     // 设为 true 时 ambient-only（无直接光照，等价于原纯色路径）。

@@ -113,6 +113,30 @@ struct MeshData {
                             float up_half_width,
                             float left_half_width);
 
+    // MakeOrientedBox: 构造一个**已带旋转与平移**的盒（中心在 origin 造好后整体变换）。
+    //
+    // 与 MakeBox 的唯一区别：MakeBox 只造局部轴对齐盒、朝向留给渲染时的
+    // DrawObject3D(up/front)；本函数把朝向**烘进顶点**，因此可在一个 MeshData 里
+    // 拼装多根不同朝向的几何（如骨架火柴人的每根骨——一个 Draw 只能给一个朝向，
+    // 装不下十几根朝向各异的骨）。
+    //
+    // up / front 语义与 DrawObject3D 完全一致（见 render_command.h 的 DrawObject3D 注释），
+    // 对应模型坐标系：
+    //   - local +Y 轴 → up 方向
+    //   - local +Z 轴 → front 方向
+    //   - local +X 轴 → left 方向（= normalize(cross(up, front))，保证右手系）
+    // 即三半宽与模型的对应关系同 MakeBox：front→+Z、up→+Y、left→+X。
+    //
+    // 变换顺序：顶点 = translation + R(up,front)·v_local；法线 = R(up,front)·n_local
+    //   （法线只转不平移；R 为纯旋转 det=+1，故法线无需额外翻向）。
+    //
+    // Pre-condition: 三个 half_width 均 > 0；up / front 均非零且不平行（保证 cross 非退化）。
+    static MeshData MakeOrientedBox(float front_half_width,
+                                    float up_half_width,
+                                    float left_half_width,
+                                    const Vec3f& up, const Vec3f& front,
+                                    const Vec3f& translation);
+
     // 校验各数组长度与 positions 一致、flag 声明与数据匹配。
     // 非法输入（长度不一致 / 缺 position / 骨骼 flag 但数据缺失）→ LOG(FATAL) crash。
     //
@@ -278,6 +302,64 @@ inline MeshData MeshData::MakeBox(float front_half_width,
     addFace(corners[0], corners[2], corners[6], corners[4], pos_x);
     // -l 面（法线 -X）
     addFace(corners[1], corners[5], corners[7], corners[3], neg_x);
+
+    return mesh;
+}
+
+inline MeshData MeshData::MakeOrientedBox(float front_half_width,
+                                          float up_half_width,
+                                          float left_half_width,
+                                          const Vec3f& up,
+                                          const Vec3f& front,
+                                          const Vec3f& translation) {
+    const float u_len = std::sqrt(up.x()*up.x() + up.y()*up.y() + up.z()*up.z());
+    const float f_len = std::sqrt(front.x()*front.x() + front.y()*front.y() +
+                                  front.z()*front.z());
+    CHECK_GT(u_len, 1e-8f) << "MakeOrientedBox: up 向量不能为零";
+    CHECK_GT(f_len, 1e-8f) << "MakeOrientedBox: front 向量不能为零";
+
+    const Vec3f upn(up.x()/u_len, up.y()/u_len, up.z()/u_len);
+    const Vec3f frn(front.x()/f_len, front.y()/f_len, front.z()/f_len);
+
+    // left = normalize(cross(up, front))，与 MakeBox / DrawObject3D 的局部 +X 一致。
+    Vec3f left(upn.y()*frn.z() - upn.z()*frn.y(),
+               upn.z()*frn.x() - upn.x()*frn.z(),
+               upn.x()*frn.y() - upn.y()*frn.x());
+    const float l_len = std::sqrt(left.x()*left.x() + left.y()*left.y() +
+                                  left.z()*left.z());
+    CHECK_GT(l_len, 1e-8f)
+        << "MakeOrientedBox: up 与 front 平行（cross 退化），无法确定朝向";
+    left = Vec3f(left.x()/l_len, left.y()/l_len, left.z()/l_len);
+
+    // frn 正交化：减去在 upn 上的投影，使 (left, upn, frn) 成标准正交基。
+    // 否则 up/front 略不垂直时会在盒上引入剪切（MakeBox 里同样的隐患）。
+    const float proj = frn.x()*upn.x() + frn.y()*upn.y() + frn.z()*upn.z();
+    Vec3f f_orth(frn.x() - proj*upn.x(), frn.y() - proj*upn.y(),
+                 frn.z() - proj*upn.z());
+    const float fo_len = std::sqrt(f_orth.x()*f_orth.x() + f_orth.y()*f_orth.y() +
+                                   f_orth.z()*f_orth.z());
+    CHECK_GT(fo_len, 1e-8f)
+        << "MakeOrientedBox: up 与 front 近乎平行，正交化后退化";
+    f_orth = Vec3f(f_orth.x()/fo_len, f_orth.y()/fo_len, f_orth.z()/fo_len);
+
+    // 先造局部轴对齐盒，再逐个顶点/法线施加旋转 R = [left | upn | f_orth] 与平移。
+    MeshData mesh = MakeBox(front_half_width, up_half_width, left_half_width);
+    for (Vec3f& p : mesh.positions) {
+        const Vec3f v(p.x(), p.y(), p.z());
+        // R·v：局部坐标在 (left, upn, f_orth) 三轴上的分量线性组合。
+        const Vec3f rotated(left.x()*v.x() + upn.x()*v.y() + f_orth.x()*v.z(),
+                            left.y()*v.x() + upn.y()*v.y() + f_orth.y()*v.z(),
+                            left.z()*v.x() + upn.z()*v.y() + f_orth.z()*v.z());
+        p = Vec3f(rotated.x() + translation.x(),
+                  rotated.y() + translation.y(),
+                  rotated.z() + translation.z());
+    }
+    for (Vec3f& n : mesh.normals) {
+        const Vec3f v(n.x(), n.y(), n.z());
+        n = Vec3f(left.x()*v.x() + upn.x()*v.y() + f_orth.x()*v.z(),
+                  left.y()*v.x() + upn.y()*v.y() + f_orth.y()*v.z(),
+                  left.z()*v.x() + upn.z()*v.y() + f_orth.z()*v.z());
+    }
 
     return mesh;
 }

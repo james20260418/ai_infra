@@ -1,0 +1,45 @@
+// JPOV 火柴人 gold generator —— 写仓库 gold image
+//
+// 与 test(jpov_bone_mesh_gold_test) 共用 jpov_bone_mesh_gold_common.h 场景，
+// 渲同一帧到仓库 gold PNG：标准晴天布景（地面 + 天光天色）+ identity 位姿红火柴人。
+#include <cstdio>
+#include <string>
+
+#include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/test/skeleton/jpov_bone_mesh_gold_common.h"
+#include "tools/jpov/test/test_utils.h"
+
+static std::string TestDataDir() {
+    const char* e = std::getenv("TEST_SRCDIR");
+    if (e) {
+        std::string s = e;
+        if (!s.empty() && s.back() != '/') s.push_back('/');
+        return s + "__main__/tools/jpov/test";
+    }
+    return jpov::GetTestDataDir();
+}
+
+int main() {
+    const std::string outpath =
+        TestDataDir() + jpov_bone_mesh_gold::GetGoldRelPath();
+
+    JPOV::Config cfg;
+    cfg.title = "JPOV Bone Mesh Gold (stickman)";
+    cfg.headless = true;
+    cfg.fonts = {
+        {"tools/jpov/fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
+    jpov_bone_mesh_gold::BoneMeshGoldApp app(cfg);
+    app.Init();
+    jpov_bone_mesh_gold::BuildScene(&app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = 640.0f;
+    winfo.height = 360.0f;
+    jpov::InputSnapshot input{};
+    app.RunOnce(input, winfo, outpath.c_str());
+    LOG(INFO) << "bone mesh gold generated: " << outpath;
+
+    app.Finalize();
+    return 0;
+}
