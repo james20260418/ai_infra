@@ -6,6 +6,11 @@
 
 #include "tools/jpov/src/font2d/font_renderer.h"
 
+#include <algorithm>   // std::max / std::min（Text3D 光栅化精度夹断）
+
+// 3D 文本几何映射（BuildText3DWorldVerts）：纯 CPU 工具函数，无 GL 依赖。
+#include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -406,6 +411,124 @@ void FontRenderer::DrawText2D(const Text2DCommand& cmd,
 
     // 恢复 GL 状态
     glPopAttrib();
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// ==================== FontRenderer::DrawText3D ====================
+
+void FontRenderer::DrawText3D(const Text3DCommand& cmd,
+                              float pixels_per_meter,
+                              unsigned int stream_vbo,
+                              unsigned int text3d_prog,
+                              const float mvp[16]) {
+    CHECK_GT(cmd.font_height_world, 0.0f);
+    CHECK_GT(pixels_per_meter, 0.0f)
+        << "DrawText3D: pixels_per_meter 必须 > 0"
+           "（用 text3d_util.h 的 PixelsPerMeterAt() 算）";
+
+    FontSlot* slot = FindFontSlot(cmd.font_alias);
+    if (!slot || !slot->manager.has_value() || !slot->manager->loaded()) {
+        LOG_EVERY_N(WARNING, FontManager::kNotLoadedLogInterval)
+            << "Text3D: font not loaded for alias=\"" << cmd.font_alias
+            << "\", skipping";
+        return;
+    }
+
+    // ---- 字形光栅化基准（像素）：自适应选一档 ----
+    // 文字在屏上的目标像素高 = 世界高 × 像素/米。字形按这个像素高质量光栅化，
+    // 再用 BuildText3DWorldVerts 缩回世界高度 —— 两者一致，纹理不被拉伸。
+    //
+    // 夹到 [16, 256]：
+    //   - 4 个 atlas 层级（16/32/48px）的 SelectBestLevel 会在这个区间内选出最合适
+    //     的一层（log2 惩罚最小），并向上回退到已有字形层（SelectDrawLevel）；
+    //   - 下限 16 避免极小字选到最细层后仍糊（再小也没意义）；
+    //   - 上限 256 避开超大文字撑爆 atlas（一档字形 > 256px 占位过多）。
+    // 注意：这是**精度选择**，与最终屏幕上大小无关（大小由 world 高度定）。
+    float target_px = cmd.font_height_world * pixels_per_meter;
+    target_px = std::max(16.0f, std::min(target_px, 256.0f));
+
+    // 复用 2D 的排版：产出每顶点 4 floats（x,y,u,v）——x/y 是文本平面局部像素
+    // 坐标（已含 alignment 偏移），u/v 是 atlas UV。
+    // pos 传 (0,0)：三维文本不需要屏幕像素原点，**只想让 anchor 成为对齐基点**，
+    // 而 (0,0) + alignment 偏移恰好使「对齐后的包围盒角点」落在局部原点，
+    // 之后 BuildText3DWorldVerts 把这个局部原点放到世界 anchor 上。
+    int selected_level = 0;
+    std::vector<float> verts;
+    bool ok = slot->manager->GenerateTextVertices(
+        cmd.text, target_px,
+        /*pos_x=*/0.0f, /*pos_y=*/0.0f,
+        static_cast<int>(cmd.alignment),
+        /*fbo_w=*/0, /*fbo_h=*/0,
+        &selected_level, &verts);
+    if (!ok || verts.empty()) {
+        return;
+    }
+
+    // 像素 → 世界米映射（就地转换 4 floats/顶点 → 5 floats/顶点）。
+    // 这里的 scale = font_height_world / target_px，正好把光栅化基准拉回世界高度。
+    float scale = 0.0f;
+    Primitives3DRenderer::BuildText3DWorldVerts(cmd, target_px,
+                                                 &verts, &scale);
+
+    // 上传新光栅化的字形到 GL atlas（所有脏层）。
+    UploadAllDirty(*slot);
+
+    glPushAttrib(GL_ENABLE_BIT);
+    // 3D 文本要参与深度测试（被物体遮挡时隐藏）+ 混合（字形边缘抗锯齿）。
+    glEnable(GL_DEPTH_TEST);
+    // 文字不写深度：自身透明像素不遮挡后面的内容。
+    // ⚠️ glDepthMask 不受 glPushAttrib(GL_ENABLE_BIT) 保护（属 GL_PIXEL_MODE_BIT）。
+    //    用 glPushAttrib(GL_PIXEL_MODE_BIT) 单独保存/恢复它 —— 这比硬编码
+    //    GL_TRUE 安全（不踩掉调用方的设置），也避开 glGetBooleanv
+    //    （MinGW 的 gl_loader 未导出该查询函数）。
+    glPushAttrib(GL_PIXEL_MODE_BIT);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // ⚠️ 必须关背面剔除：字形三角形的绕序（左上→右上→右下，在纹理平面 y 向下
+    //    的约定下）映射到世界后从正面看是**顺时针**，会被 3D 主 pass 的
+    //    glCullFace(GL_BACK) + glFrontFace(CCW) 整片剔除 → 一个字都画不出来。
+    //    文字是"贴在平面上的贴片"，两面对称，本就不该做背面剔除。
+    //    （本行在 GL_ENABLE_BIT 范围内，glPopAttrib 会自动恢复。）
+    glDisable(GL_CULL_FACE);
+
+    glUseProgram(text3d_prog);
+    glUniformMatrix4fv(glGetUniformLocation(text3d_prog, "uMVP"),
+                       1, GL_FALSE, mvp);
+    glUniform4f(glGetUniformLocation(text3d_prog, "uColor"),
+                cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
+    glUniform1i(glGetUniformLocation(text3d_prog, "uTexture"), 0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, slot->atlas_tex[selected_level]);
+
+    glBindBuffer(GL_ARRAY_BUFFER, stream_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+
+    // 位置 (location 0) = vec3 世界坐标 | UV (location 1) = vec2
+    // 每顶点 5 floats，stride = 5 floats。
+    constexpr int kStride = 5 * static_cast<int>(sizeof(float));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, kStride,
+                          (void*)(3 * sizeof(float)));
+
+    const int vert_count = static_cast<int>(verts.size()) / 5;
+    glDrawArrays(GL_TRIANGLES, 0, vert_count);
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawText3D: " << draw_err;
+    }
+
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glPopAttrib();              // GL_ENABLE_BIT（depth test / blend / cull）
+    glPopAttrib();              // GL_PIXEL_MODE_BIT（depth mask）
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
 }

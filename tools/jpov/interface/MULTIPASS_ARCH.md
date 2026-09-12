@@ -114,7 +114,16 @@ JPOV 的 3D 渲染不是「一次 draw 走到底」，而是**一串按顺序执
 | 1..6 | `SkeletonRenderer`（主 pass） | 同上 6 通道 | `DrawSkinnedMesh` 内逐通道 |
 | 12 | `SkeletonRenderer`（主 pass） | pose atlas | `DrawSkinnedMesh`（`skeleton_renderer.cc:222`） |
 | 7 | `SkeletonRenderer`（**阴影 pass**） | pose atlas | `DrawSkinnedMeshShadow`（`:341`） |
+| 0 | `FontRenderer`（**3D 文本**） | 字形 atlas | `FontRenderer::DrawText3D`（主 pass 内） |
 | 0 | 各 2D 子渲染器 | image / text atlas | draw 内 |
+
+> 💡 **3D 文本（`kText3D`）完全落在主 pass 内，且只占槽 0**（字形 atlas）。
+> 它复用 2D 的字体 atlas / 排版 / 对齐，所以不引入新槽位语义；
+> 对 §5 规则 R1 无影响。但它有一条**额外的 GL 状态约束**：必须在 draw 前
+> `glDisable(GL_CULL_FACE)` —— 字形三角形在「纹理平面 y 向下」约定下映射到
+> 世界后从正面看是**顺时针**，会被主 pass 的 `glCullFace(GL_BACK)` 整片剔除。
+> 详见 `primitives3d_renderer.h` 的 `kText3dFs` 与 `font_renderer.cc` 的
+> `DrawText3D` 注释。
 
 > 💡 **注意 7 与 12 的"双重语义"是合法的**：7 在 obj3d 语境是 cascade-0，在
 > skeleton 阴影 pass 语境是 pose atlas。二者**不同时活跃**（§3.2 会解释为什么这仍要小心）。
@@ -284,7 +293,7 @@ draw 级   : 只做 per-object uniform（uMVP / uModel / 材质常值），不�
 |---|---|---|---|
 | `Object3DRenderer` | **2** | `draw_object3d_pbr`（无 UV 版 VS）/ `draw_object3d_pbr_full`（含 UV+Tangent 版 VS） | **共用同一个 FS** `kMeshFs3dPBR`；按 mesh 是否含 kUV/kTangent 二选一 |
 | `SkeletonRenderer` | 1（主）+ 1（阴影） | `skinned_mesh` / `skinned_shadow` | 主 pass 与阴影 pass 各一个 |
-| `Primitives3DRenderer` | 2 | `solid3d` / `text3d` | （`text3d` 目前是 stub，见 `DrawText3D` 的 `not yet implemented`） |
+| `Primitives3DRenderer` | 2 | `solid3d` / `text3d` | `text3d` 走 `kTexVs3d` + `kText3dFs`；槽 0 绑字形 atlas |
 | `SkyRenderer` | 1 | `sky` | **完全不绑定任何纹理**（uInvVP + 标量 uniform 全屏三角形） |
 | `FontRenderer` | 1 | `text` | 槽 0 绑字形 atlas |
 | `Primitives2DRenderer` | 2 | `solid`（复用）/ `image` | `solid` 与纯色 2D 图元共用；`image` 用槽 0 |

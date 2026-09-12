@@ -222,18 +222,77 @@ struct Strip3DCommand {
     Color color;
 };
 
-// 3D 文本（世界空间，面向摄像机）
+// 3D 文本（世界空间，贴在空间 quad 上，无光照纯色）
 //
-// 实现方式：在 3D 空间建立矩形 mesh，渲染时应用文本纹理。
+// 实现方式：CPU 端用 (anchor, face_direction, up_direction) 建一个正交基，
+// 把文字按 font_height_world 的世界高度排布到一个空间 quad 上，quad 上采样
+// 字形 atlas（与 2D 文本同一套 atlas / 同一种 UV 生成），纯色输出（无 PBR 光照）。
 // 参与深度测试，被 3D 物体遮挡时自动隐藏。
 //
-// font_size: 世界空间中的文本大小（不是像素，是 3D 坐标单位）
-// font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应）
+// 与 Text2DCommand 的关系：字形排版 / 对齐语义（TextAlignment）/ 字体查找
+// 完全复用同一套实现，区别只在「坐标空间」——2D 是屏幕像素，本命令是世界米。
+//
+// ---- 坐标系 ----
+//   anchor        文字在世界空间的锚点。含义取决于 alignment（见下）。
+//   face_direction 文字所在 quad 的**正面朝向**（= quad 法线）。
+//   up_direction  文字的**上方向**。
+//
+// ⚠️ face_direction 与 up_direction **不要求严格垂直**：内部按 Gram-Schmidt
+//   正交化，**face_direction 为权威方向**，up_direction 只用来定滚动（roll），
+//   其垂直于 face 的分量被保留、平行于 face 的分量被剔除。
+//   （与 DrawObject3D 的 up/front 处理同一套思路。）
+//
+//   正交化后的三轴（右手系，与 Object3D 的 left=cross(up,front) 约定一致）：
+//     n = normalize(face_direction)                    // quad 法线（指向正面）
+//     u = normalize(up_direction - dot(up_direction,n)*n)  // 文字上方向
+//     r = cross(u, n)      // 文字右方向（从正面看，u→右→n 构成右手系）
+//   文字从锚点沿 +r 排布、沿 +u 向上排布，quad 位于垂直于 n 的平面内。
+//
+//   退化处理：若 up_direction 与 face_direction 共线（垂直分量长度 < 1e-8），
+//   无法定义滚动 → LOG(FATAL) crash（不静默猜一个 up，违背 minimal surprise）。
+//
+// ---- 尺寸 ----
+//   font_height_world 文字的**世界高度**（米），指字形 em 框（ascent 顶到
+//   descent 底）的世界高度，是一行文字的「字号」在 3D 空间的对应量。
+//
+//   若想按【像素】配置字号，先用 PixelsPerMeterAt() 换算（见下）。
+//
+// ---- 像素/米 换算 ----
+//   见 `interface/text3d_util.h` 的 PixelsPerMeterAt()：给定 anchor 与相机，
+//   返回该处「1 米 = 多少像素」的换算比（透视投影下的解析解）。
+//   用户可按熟悉的像素字号反算世界高度：
+//     float ppm = PixelsPerMeterAt(anchor, camera, fbo_h);
+//     float h   = user_font_px / ppm;
 struct Text3DCommand {
     std::string text;
-    Vec3f pos;
-    float font_size;
+
+    // 世界空间锚点。锚的是文本**包围盒**的哪个位置由 alignment 决定，
+    // 语义与 Text2DCommand 完全一致（把 2D 的「像素」换成「米」）。
+    Vec3f anchor;
+
+    // quad 正面朝向（法线）与文字上方向。二者不必垂直（自动正交化，见上）。
+    // Pre-condition: 二者均非零，且**不共线**（否则无法定义滚动 → crash）。
+    Vec3f face_direction;
+    Vec3f up_direction;
+
+    // 包围盒对齐方式（9 种，复用 TextAlignment）。
+    //   kTopLeft（默认）: anchor 落在文本包围盒左上角
+    //   kCenter          : anchor 落在包围盒中心
+    //   ...其余见 TextAlignment 枚举
+    // 注意：这里的「左/右/上/下」是**文字自身坐标系**的（沿 r / u 轴），
+    // 不是世界坐标轴，也不是屏幕方向。
+    TextAlignment alignment = TextAlignment::kTopLeft;
+
+    // 文字的**世界高度**（米）：em 框（ascent 顶到 descent 底）的世界高度。
+    // 即一行文字的「字号」在 3D 空间的对应量。
+    // Pre-condition: font_height_world > 0
+    float font_height_world;
+
+    // 纯色（无光照）。alpha < 1 时按 SRC_ALPHA 混合；alpha==1 时完全实心。
     Color color;
+
+    // 字体别名（与 JPOV::Config::FontEntry::alias 对应）。
+    // 空串 → 首个注册字体；未知别名 → crash（与 DrawText 同规则）。
     std::string font_alias;
 };
 
@@ -1180,12 +1239,32 @@ struct RenderCommandList {
     void DrawStrip3D(const std::vector<Vec3f>& vertices,
                      const Color& color);
 
-    // 3D 文本（面向摄像机标签，参与深度测试）
-    // Pre-condition: font_size > 0
-    // font_alias: 字体别名（与 JPOV::Config::FontEntry::alias 对应），必填
-    void DrawText3D(const std::string& text, const Vec3f& pos, float font_size,
+    // 3D 文本（世界空间，贴在空间 quad 上，无光照纯色，参与深度测试）
+    //
+    // anchor:                世界空间锚点（含义取决于 alignment）
+    // face_direction:        文字 quad 的正面朝向（法线）
+    // up_direction:          文字的向上方向（与 face 不共线即可，自动正交化）
+    // font_height_world:     文字的**世界高度**（米，em 框 ascent 顶→descent 底）
+    // color:                 纯色（无光照）
+    // font_alias:            字体别名（空串 → 首个注册字体）
+    // alignment:             包围盒对齐（9 种，默认为 kTopLeft）
+    //
+    // 想按【像素】配字号：先用 text3d_util.h 的 PixelsPerMeterAt() 算换算比，
+    // 再 h_world = px / ppm 反算。
+    //
+    // Pre-condition: font_height_world > 0
+    // Pre-condition: face_direction / up_direction 均非零且**不共线**
+    //
+    // 参数顺序：按调用频率从高到低（anchor/face/up/高度/颜色 常用，
+    // alignment/alias 靠后）。
+    void DrawText3D(const std::string& text,
+                    const Vec3f& anchor,
+                    const Vec3f& face_direction,
+                    const Vec3f& up_direction,
+                    float font_height_world,
                     const Color& color,
-                    const std::string& font_alias);
+                    const std::string& font_alias,
+                    TextAlignment alignment = TextAlignment::kTopLeft);
 
     // ---- 2D 条带辅助方法 ----
 

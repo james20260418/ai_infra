@@ -130,6 +130,19 @@ cc_library(
     ],
 )
 
+# Text3DUtil — 3D 文本的像素/米 换算（纯函数，GL-free，可单测）
+# 见 text3d_util.h：PixelsPerMeterAt(anchor, camera, fbo_h)。
+cc_library(
+    name = "text3d_util",
+    hdrs = ["text3d_util.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":camera",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # WindowInfo — 帧级窗口信息
 cc_library(
     name = "window_info",
@@ -200,6 +213,7 @@ cc_library(
         "ui.h",
         "skeleton_types.h",
         "animation_clip.h",
+        "text3d_util.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -214,5 +228,6 @@ cc_library(
         ":ui",
         ":skeleton_types",
         ":animation_clip",
+        ":text3d_util",
     ],
 )

@@ -254,18 +254,84 @@ void Primitives3DRenderer::DrawLine3D(const Line3DCommand& cmd,
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-void Primitives3DRenderer::DrawText3D(const Text3DCommand& cmd,
-                                      unsigned int stream_vbo,
-                                      unsigned int prog,
-                                      const float mvp[16], int fbo_w,
-                                      int fbo_h) {
-    (void)stream_vbo;
-    (void)prog;
-    (void)mvp;
-    (void)fbo_w;
-    (void)fbo_h;
-    (void)cmd;
-    LOG_FIRST_N(WARNING, 1) << "DrawText3D: not yet implemented, skipping";
+// ==================== 3D 文本几何生成 ====================
+//
+// 正交基构建与 Object3DRenderer::BuildModelMatrix 同源（face 为权威方向，
+// up 做 Gram-Schmidt；right = cross(up, front)）。这里把同一套逻辑用在
+// 「文字平面」上，产出的是 5 floats/顶点（x,y,z,u,v）。
+void Primitives3DRenderer::BuildText3DWorldVerts(
+    const Text3DCommand& cmd,
+    float font_height_px,
+    std::vector<float>* glyph_verts,
+    float* scale_out) {
+    CHECK_NOTNULL(glyph_verts);
+    CHECK_NOTNULL(scale_out);
+    CHECK_GT(font_height_px, 0.0f);
+    CHECK_GT(cmd.font_height_world, 0.0f);
+
+    // ---- 1) 构建正交基（face 优先） ----
+    // 注：拆成分量变量而非 Vec3f 成员访问，避免与 geom::Vec 的 .x()/.y()/.z()
+    //     成员函数在表达式里歧义（n.x 会被解析成"未调用的成员函数"）。
+    const float fnx = cmd.face_direction.x();
+    const float fny = cmd.face_direction.y();
+    const float fnz = cmd.face_direction.z();
+    const float fl = std::sqrt(fnx*fnx + fny*fny + fnz*fnz);
+    CHECK_GT(fl, 1e-8f) << "BuildText3DWorldVerts: face_direction 为零向量";
+    // n = quad 法线（单位化）
+    const float n0 = fnx / fl, n1 = fny / fl, n2 = fnz / fl;
+
+    const float ux0 = cmd.up_direction.x();
+    const float uy0 = cmd.up_direction.y();
+    const float uz0 = cmd.up_direction.z();
+    const float ul = std::sqrt(ux0*ux0 + uy0*uy0 + uz0*uz0);
+    CHECK_GT(ul, 1e-8f) << "BuildText3DWorldVerts: up_direction 为零向量";
+
+    // Gram-Schmidt：剔除 up 中平行于 n 的分量（face 权威）。
+    const float dot_un = (ux0*n0 + uy0*n1 + uz0*n2) / ul;
+    float u0 = ux0/ul - dot_un*n0;
+    float u1 = uy0/ul - dot_un*n1;
+    float u2 = uz0/ul - dot_un*n2;
+    const float u_len = std::sqrt(u0*u0 + u1*u1 + u2*u2);
+    CHECK_GT(u_len, 1e-8f)
+        << "BuildText3DWorldVerts: up_direction 与 face_direction 共线，"
+           "无法定义文字滚动（请给一个不平行于 face 的 up）";
+    u0 /= u_len; u1 /= u_len; u2 /= u_len;
+
+    // right = cross(u, n)：从正面看 u→右→n 构成右手系。
+    //   与 Object3D 的 cross(up, front) 同一表达式（那边命名 left/right 不一，
+    //   数学式完全相同，见 primitives3d_renderer.cc BuildModelMatrix 的命名坑注释）。
+    const float r0 = u1*n2 - u2*n1;
+    const float r1 = u2*n0 - u0*n2;
+    const float r2 = u0*n1 - u1*n0;
+
+    // ---- 2) 像素 → 米 的统一缩放 ----
+    //   glyph 顶点来自 FontManager，其 y 以 font_height_px 为 em 高度排布；
+    //   缩放到目标世界高度，scale = height_world / 像素高度。
+    const float scale = cmd.font_height_world / font_height_px;
+
+    // ---- 3) 逐顶点变换（每顶点 4 floats: x,y,u,v → 5 floats: x,y,z,u,v）----
+    const size_t n_verts = glyph_verts->size() / 4;
+    std::vector<float> out;
+    out.resize(n_verts * 5);
+    for (size_t i = 0; i < n_verts; ++i) {
+        const float lx = (*glyph_verts)[i * 4 + 0];   // 文本平面局部 x（向右，像素）
+        const float ly = (*glyph_verts)[i * 4 + 1];   // 文本平面局部 y（向下，像素）
+        const float tu = (*glyph_verts)[i * 4 + 2];
+        const float tv = (*glyph_verts)[i * 4 + 3];
+
+        // 局部像素 → 世界米：
+        //   world = anchor + r*(lx*scale) + u*(-ly*scale)
+        // ly 取负：文本平面 y 向下（与 2D 屏幕同向），而 u 是「文字上」。
+        const float sx = lx * scale;
+        const float sy = -ly * scale;
+        out[i * 5 + 0] = cmd.anchor.x() + r0*sx + u0*sy;
+        out[i * 5 + 1] = cmd.anchor.y() + r1*sx + u1*sy;
+        out[i * 5 + 2] = cmd.anchor.z() + r2*sx + u2*sy;
+        out[i * 5 + 3] = tu;
+        out[i * 5 + 4] = tv;
+    }
+    glyph_verts->swap(out);
+    *scale_out = scale;
 }
 
 }  // namespace jpov

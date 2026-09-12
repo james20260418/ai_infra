@@ -17,6 +17,8 @@
 #include "geom/common/common.h"
 
 #include "tools/jpov/interface/gltf_object.h"
+// 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
+#include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/orm_unpack.h"
 
@@ -945,8 +947,11 @@ unsigned int Renderer::Solid3DProg() {
     return shader_mgr_.GetOrCreate("solid3d", {Primitives3DRenderer::kVs3d, Primitives3DRenderer::kFs3d});
 }
 
+// 3D 文本 program：世界空间 quad 顶点(kTexVs3d) + 无光照纯色片元(kText3dFs)。
+// 片元与 2D 文本同构（字形 alpha × 颜色），故单独命名以便按 3D 语义管理。
 unsigned int Renderer::Text3DProg() {
-    return shader_mgr_.GetOrCreate("text3d", {Primitives3DRenderer::kTexVs3d, kTexFs});
+    return shader_mgr_.GetOrCreate("text3d",
+        {Primitives3DRenderer::kTexVs3d, Primitives3DRenderer::kText3dFs});
 }
 
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
@@ -1556,9 +1561,19 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
             case DrawCommandType::kText3D: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.text3d.size()));
-                Primitives3DRenderer::DrawText3D(
-                    cmds.text3d[idx], stream_vbo_, Text3DProg(), mvp_,
-                    fbo_w, fbo_h);
+                // 3D 文本：世界空间 quad + 字形 atlas（无光照纯色，参与深度测试）。
+                //
+                // 像素/米 换算：用 anchor 处的换算比（与用户用 PixelsPerMeterAt()
+                // 自行换算时同一个公式），用于**选字形光栅化精度**——字在屏上
+                // 该多大，就按多大的像素高质量光栅化。
+                // 注意：若 anchor 在相机前方不成立（在相机平面/后方），
+                // PixelsPerMeterAt 会 crash；但那种位置根本不可见，crash 是
+                // 正向的信号（不静默猜一个值）。
+                const Text3DCommand& t3 = cmds.text3d[idx];
+                const float ppm = jpov::PixelsPerMeterAt(
+                    t3.anchor, cmds.camera, fbo_h);
+                font_renderer_.DrawText3D(t3, ppm, stream_vbo_,
+                                          Text3DProg(), mvp_);
                 break;
             }
             case DrawCommandType::kObject3D: {
