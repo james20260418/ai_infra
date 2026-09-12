@@ -31,6 +31,10 @@
 
 namespace jpov_viewer {
 
+// 前向声明：本测试类需要访问 EditorApp 的私有归属判定/旋转消费逻辑（白盒回归）。
+// 仅用于单测，不属公共 API（与 interface/ui.h 的 UiS0Test friend 同模式）。
+class EditorDragOwnershipTest;
+
 // 编辑器窗口/渲染分辨率（与查看器同规格；单点定义）。
 inline constexpr int kEditorWidth  = 1280;
 inline constexpr int kEditorHeight = 720;
@@ -58,6 +62,10 @@ class EditorApp : public JPOV {
 public:
     using JPOV::JPOV;
 
+    // 单测 friend（白盒回归，见 demo/editor_drag_ownership_test.cc）。
+    // 本类不暴露几何/输入的公共 API，测试通过 friend 直接验私有逻辑。
+    friend class EditorDragOwnershipTest;
+
     // ── 场景状态（main 在 Init() 后一次性装配）──
     jpov::GltfObject gltf_;          // 被编辑的模型
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
@@ -72,10 +80,16 @@ public:
     // ── 地面高度（[-3,0]，需求定档）──
     float ground_y_ = kEditorGroundDefault;
 
-    // ── 左键旋转的按键边沿检测（跨帧；Ctrl 按下瞬间记一次，避免"先拖后按 Ctrl"
-    // 中途切换旋转轴导致手心不一致）。true = 本帧左 drag 的"轴选择"已被冻结。──
-    bool rotate_mode_latched_ = false;  // 冻结的轴：true=绕 Y，false=绕 X
-    bool rotate_drag_prev_ = false;    // 上一帧左键是否处于 drag 态
+    // 左键旋转 drag 的按键边沿检测（跨帧）。
+    //   rotate_mode_latched_ — 冻结的轴：true=绕 Y，false=绕 X
+    //   rotate_drag_prev_    — 上一帧左键是否已处于（被本组件接管的）drag 态
+    //   rotate_active_       — 本次左键按住期间，drag 是否由【3D 视口】发起
+    //                          （false = 发起在面板上 → 交给 Ui 滑条，本组件不插手）
+    //   left_down_prev_      — 上一帧左键是否已按下（Drag|Hold），用于取"按下上升沿"
+    bool rotate_mode_latched_ = false;
+    bool rotate_drag_prev_ = false;
+    bool rotate_active_ = false;
+    bool left_down_prev_ = false;
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&EditorApp::EditorTextWidth, this);
@@ -158,30 +172,101 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 左键横向 drag → 旋转。细节：
+    // 左键横向 drag → 模型旋转。细节：
     //   - 只在左键处于 Drag 态时消费；不用 click/hold（"横向拖动"语义）；
-    //   - Ctrl 按下时绕世界 Y，否则绕世界 X；轴在【本次 drag 开始时】冻结
-    //     （按下 Ctrl 的瞬间即定轴，drag 中途改 Ctrl 不换轴，避免手心打滑）；
+    //   - 🔴 **只在 3D 视口发起的 drag 才旋转**：若左键是在底部面板（滑条等）上
+    //     按下的，本次按住期间一律不旋转 —— 否则拖"平移 X"滑条时同一个
+    //     mouse_dx 会被旋转逻辑再吃一次，表现为"拖 X 平移，RX 跟着动"。
+    //     判定用【按下位置】：按下那一刻鼠标落在面板矩形内 → 本次 drag 归面板；
+    //     否则归 3D 视口。drag 全程沿用该判定（中途拖出/拖入面板不改归属，
+    //     与 Ui 滑条"drag 一旦开始判定区不作数"的语义对称）。
+    //   - ⚠️ 归属必须在【左键按下的那一帧】就记下，不能等 IsDrag() 变真才判：
+    //     按下后先 Hold（原地不动）再移动时，IsDrag 转真的那一帧鼠标已经在别处，
+    //     用那时坐标定归属会把"起于面板"误判成"起于视口"。故下面用 left_down
+    //     （Drag|Hold）的上升沿做起点，那时坐标还是按下点。
+    //   - Ctrl 按下时绕世界 Y，否则绕世界 X；轴与归属都在 drag 起点冻结
+    //     （中途切换 Ctrl 不换轴，避免手心打滑）；
     //   - 纵向分量丢弃（不参与任何计算）。
     void UpdateRotateFromDrag(const jpov::InputSnapshot& input) {
-        const bool dragging = input.left.IsDrag();
-        if (dragging && !rotate_drag_prev_) {
-            // drag 起点：按此刻 Ctrl 状态冻结旋转轴。
+        // 起点 = 左键按下的上升沿（Drag 或 Hold 都算，那时坐标=按下点）。
+        const bool left_down = input.left.IsDrag() || input.left.IsHold();
+        if (left_down && !left_down_prev_) {
+            // 按下起点：先记归属（在面板上？），再按此刻 Ctrl 状态冻结旋转轴。
+            rotate_active_ = !PointInPanel(input.mouse_x, input.mouse_y);
             rotate_mode_latched_ =
                 input.GetKey(jpov::KeyCode::LeftCtrl).IsHold() ||
                 input.GetKey(jpov::KeyCode::RightCtrl).IsHold();
         }
+        if (!left_down) {
+            left_down_prev_ = false;
+            rotate_drag_prev_ = false;
+            rotate_active_ = false;
+            return;
+        }
+        left_down_prev_ = true;
+        // 只有真正处于 Drag 态才写值（Hold = 按着没动 → 不旋转，符合"拖动"语义）。
+        const bool dragging = input.left.IsDrag();
         if (!dragging) {
             rotate_drag_prev_ = false;
             return;
         }
         rotate_drag_prev_ = true;
+        if (!rotate_active_) return;   // 本次按住始于面板 → 不旋转（交给 Ui 滑条）
         ApplyRotateDrag(&placement_, input.mouse_dx, rotate_mode_latched_,
                         static_cast<int>(kEditorWidth));
     }
 
+    // ---- 面板布局几何（唯一真相：DrawPlacementPanel 与 PointInPanel 共用）----
+    static constexpr float kPanelRowH    = 30.0f;   // 行高
+    static constexpr float kPanelSpacing = 10.0f;   // 行间距
+    static constexpr float kPanelBottom  = 18.0f;   // 屏底留白
+    static constexpr int   kPanelRows    = 8;       // 缩放1+平移3+旋转2+地面1+提示1
+
+    // 面板首行左缘 x（水平居中、半屏宽；与查看器面板同款）。
+    static float PanelLeft() {
+        const float w = static_cast<float>(kEditorWidth);
+        const float sw = 0.5f * w;
+        return (w - sw) * 0.5f;
+    }
+    // 面板首行上缘 y。
+    static float PanelTop() {
+        const float h = static_cast<float>(kEditorHeight);
+        const float block = kPanelRows * kPanelRowH +
+                            (kPanelRows - 1) * kPanelSpacing;
+        return h - kPanelBottom - block;
+    }
+    // 第 i 行（0 起）的 box。
+    static jpov::UiRect PanelRow(int i) {
+        const float w = static_cast<float>(kEditorWidth);
+        return jpov::UiRect{
+            {PanelLeft(), PanelTop() + i * (kPanelRowH + kPanelSpacing)},
+            {0.5f * w, kPanelRowH}};
+    }
+
+    // 点 (x,y)（窗口像素坐标）是否落在底部面板的矩形内。
+    // 面板几何由 DrawPlacementPanel 的布局常量决定，故抽成本函数共用一份，
+    // 避免"判定用的矩形"与"实际画的矩形"两处分叉（那是这类 bug 的经典温床）。
+    //
+    // 面板在窗口内水平居中、半屏宽；顶部 = 最后一行下缘 + 底部留白。
+    // 这里只关心“鼠标是否在面板上”（用于左键归属判定），故取一个把全部行
+    // 都包住的保守矩形：水平± 半屏宽之外再放一点余量，纵向从首行上缘到屏底。
+    bool PointInPanel(float x, float y) const {
+        const float w = static_cast<float>(kEditorWidth);
+        const float h = static_cast<float>(kEditorHeight);
+        const float sw = 0.5f * w;
+        const float left = (w - sw) * 0.5f;
+        const float top = PanelTop();
+        // 横向放宽一个行高（句柄/文本可能超出 box 少许），纵向到屏幕底。
+        return x >= left - kPanelRowH && x <= left + sw + kPanelRowH &&
+               y >= top - kPanelRowH && y <= h;
+    }
+
     // 模型放置面板：三组控件（缩放 / 平移 / 旋转）+ 地面高度。
     // 全部滑条数值由 placement_ / ground_y_ 外置持有。
+    //
+    // 🔑 布局常量集中在类级（kPanelRowH 等）前定义的辅助函数里，使"画控件用的
+    // box"与"判定左键归属用的面板矩形"（PointInPanel）**共用同一份几何**——
+    // 两处各写一份是这类"拖滑条误触旋转"bug 的经典温床。
     void DrawPlacementPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kEditorWidth);
         const float h = static_cast<float>(kEditorHeight);
@@ -189,19 +274,8 @@ private:
         theme.font_alias = kEditorFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / kEditorFps);
 
-        const float kSliderWidth = 0.5f * w;   // 半屏宽（与查看器面板同款）
-        const float kRowH    = 30.0f;
-        const float kSpacing = 10.0f;
-        const float kBottom  = 18.0f;
-        const float rows     = 8.0f;           // 缩放1 + 平移3 + 旋转2 + 地面1 + 提示1
-        const float left     = (w - kSliderWidth) * 0.5f;
-        const float top      = h - kBottom - (rows * kRowH + (rows - 1.0f) * kSpacing);
-
-        // 行盒辅助（避免手写 8 次 "top + i*(row+spacing)"）。
-        auto row = [&](int i) {
-            return jpov::UiRect{{left, top + static_cast<float>(i) * (kRowH + kSpacing)},
-                                {kSliderWidth, kRowH}};
-        };
+        // 行盒辅助（布局几何见文件底部 PanelRow()）。
+        auto row = [&](int i) { return PanelRow(i); };
 
         // ── 缩放 [0.1,10]，默认 1.0 ──
         ui_.SliderFloat("缩放", &placement_.scale, row(0),

@@ -140,6 +140,25 @@ cc_test(
     ],
 )
 
+# 左键 drag 归属回归（白盒 friend EditorApp）：锁死「拖滑条误触旋转」
+# （Danis 实测报的 bug：拖 平移X 时 RX 跟着动）。
+cc_test(
+    name = "editor_drag_ownership_test",
+    srcs = ["demo/editor_drag_ownership_test.cc"],
+    deps = [
+        "//tools/jpov:editor_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # Headless 冒烟渲染（开发自检，同 jpov_model_viewer_smoke）：无窗口渲一组
 # 放置状态对比图，验证"放置数学 → DrawGltfObject → 画面"链路真的生效。
 cc_binary(
