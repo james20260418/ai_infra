@@ -46,6 +46,22 @@ cc_test(
     ],
 )
 
+# 子渲染器隔离性守卫 —— program 名空间去重（纯 CPU / 不碰 GL）。
+# 对应 docs/jpov_renderer_isolation.md §2.2：各子渲染器各自的 program 注册名
+# 必须全局唯一，否则 ShaderManager 按 name 幂等缓存会静默串用。
+cc_test(
+    name = "renderer_isolation_test",
+    srcs = ["renderer_isolation_test.cc"],
+    deps = [
+        "//tools/jpov/src:shader_manager",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # glTF loader smoke test (CPU-only parse check)
 cc_test(
     name = "jpov_gltf_loader_test",
