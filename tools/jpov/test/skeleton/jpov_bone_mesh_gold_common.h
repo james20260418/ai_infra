@@ -41,13 +41,6 @@ inline std::string GetGoldRelPath() {
     return "/skeleton/bone_mesh_stickman_1280x720.png";
 }
 
-// "无火柴人"基线图相对路径：同场景但不画火柴人。
-// 供 test 做**火柴人可见性门禁**（两图相减，差异只可能来自火柴人）——
-// 单纯"红色像素占比"会被地面的暖色淹没，见 test 内注释。
-inline std::string GetNoBoneRelPath() {
-    return "/skeleton/bone_mesh_stickman_1280x720_nobone.png";
-}
-
 // 火柴人身高（米）。
 inline constexpr float kStickmanHeight = 1.75f;
 // 骨杆半宽（米）—— 骨的"大致直径" ≈ 2·radius。
@@ -70,10 +63,6 @@ public:
 
     uint32_t ground_mesh_ = 0;     // 浅灰纯色地面板
     uint32_t stickman_mesh_ = 0;   // 火柴人 mesh（BuildBoneMeshInBoneSpace 产物）
-
-    // draw_stickman=false 时输出"无火柴人"基线帧（其余完全一致），
-    // 供 test 与正常帧相减做可见性门禁。
-    bool draw_stickman_ = true;
 
     void OneIteration(int64_t, const jpov::InputSnapshot&,
                       const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) override {
@@ -111,7 +100,7 @@ public:
 
         // 火柴人：identity 位姿（center=0 / up=+Y / front=+Z / scale=1）
         // ⇒ 模型系 == 世界系，火柴人直接立在骨架空间原点（根关节在 (0,0,0)，脚踩 y=0）。
-        if (draw_stickman_ && stickman_mesh_ != 0) {
+        if (stickman_mesh_ != 0) {
             cmds->DrawObject3D(stickman_mesh_, jpov::PBRMaterial::SolidColor(jpov::kColorRed),
                                /*center*/ {0, 0, 0},
                                /*up*/     {0, 1, 0},

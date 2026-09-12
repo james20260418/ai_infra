@@ -22,8 +22,6 @@ static std::string TestDataDir() {
 int main() {
     const std::string outpath =
         TestDataDir() + jpov_bone_mesh_gold::GetGoldRelPath();
-    const std::string nobone_path =
-        TestDataDir() + jpov_bone_mesh_gold::GetNoBoneRelPath();
 
     JPOV::Config cfg;
     cfg.title = "JPOV Bone Mesh Gold (stickman)";
@@ -39,16 +37,8 @@ int main() {
     winfo.width  = 640.0f;
     winfo.height = 360.0f;
     jpov::InputSnapshot input{};
-
-    // 1) 正常帧（含火柴人）
-    app.draw_stickman_ = true;
     app.RunOnce(input, winfo, outpath.c_str());
     LOG(INFO) << "bone mesh gold generated: " << outpath;
-
-    // 2) “无火柴人”基线帧（同场景，只是不画火柴人）——供 test 做可见性门禁
-    app.draw_stickman_ = false;
-    app.RunOnce(input, winfo, nobone_path.c_str());
-    LOG(INFO) << "bone mesh no-bone baseline generated: " << nobone_path;
 
     app.Finalize();
     return 0;

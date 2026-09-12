@@ -4,9 +4,9 @@
 // （bone_mesh_stickman_1280x720.png）做 ROI 平均色对比（同 jpov_skeleton_gold_test）。
 // PBR/llvmpipe 三稳态非确定 → 不做逐像素，用 8×8 平铺 ROI 块内平均通道最大差作为硬门禁。
 //
-// 额外门禁：把本帧与“同一场景但不画火柴人”的基线帧（_nobone.png）相减，
-// 差异像素只可能来自火柴人 —— 若 mesh 生成失败/被剔除/渲染路径断，差异会塌向 0。
-// （不用“红色像素占比”：地面颜色会把判据淹没，实测无效。）
+// 额外门禁：在火柴人包围盒 ROI 内统计“强红”像素，确认火柴人真的渲染出来了 ——
+// 若 mesh 生成失败/被剔除/渲染路径断，该计数会塌向 0。
+// （不用全图红色占比：会被地面/天空淹没；也不用基线帧相减：那要多存一张图。）
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -35,19 +35,6 @@ std::string GoldPath() {
     }
     return jpov::GetProjectRoot() + "tools/jpov/test" +
            jpov_bone_mesh_gold::GetGoldRelPath();
-}
-
-// “无火柴人”基线图路径（generator 产出）。
-std::string NoBonePath() {
-    const char* e = std::getenv("TEST_SRCDIR");
-    if (e) {
-        std::string s = e;
-        if (!s.empty() && s.back() != '/') s.push_back('/');
-        return s + "__main__/tools/jpov/test" +
-               jpov_bone_mesh_gold::GetNoBoneRelPath();
-    }
-    return jpov::GetProjectRoot() + "tools/jpov/test" +
-           jpov_bone_mesh_gold::GetNoBoneRelPath();
 }
 
 }  // namespace
@@ -98,50 +85,39 @@ int main() {
     CHECK_GT(nz, 0) << "空场景";
     LOG(INFO) << "Rendered: " << w << "x" << h;
 
-    // ---- 火柴人可见性门禁：与“无火柴人”基线图比对 ----
+    // ---- 火柴人可见性门禁：火柴人包围盒内统计“强红”像素 ----
     //
-    // 为何不用“红色像素占比”：地面颜色会把判据淹没 ——
-    // 实测（旧砖土场景）去掉火柴人后红色像素仅从 11.22% 降到 10.92%，占比阈值形同虚设。
+    // 为何限定 ROI：整图数红像素会被地面/天空的颜色淹没（实测判据近乎恒真）；
+    // 而屏幕角落的 x/y/z 轴标签也是红色，不排除就会污染计数。
+    // 所以只在火柴人所在的矩形区域内统计，且用较严的“强红”判据
+    //（火柴人是纯红纯色材质，光照后仍远高于其它物体）。
     //
-    // 正确做法：把本帧与“同一场景但不画火柴人”的基线帧相减，只对差异像素计数。
-    // 差异像素只可能来自火柴人（场景其余部分完全相同），对“没画出来”高度敏感。
-    // 基线图由 generator 同时产出（bone_mesh_stickman_1280x720_nobone.png）。
+    // 实测：火柴人 ROI 内强红 = 463 像素；不画火柴人时同 ROI = 0 像素。
+    // 阈值取 100 —— 远高于噪声，又能在火柴人消失时可靠失败。
     {
-        const std::string nobone = NoBonePath();
-        int wb = 0, hb = 0, cb = 0;
-        unsigned char* pb = stbi_load(nobone.c_str(), &wb, &hb, &cb, 4);
-        CHECK(pb != nullptr)
-            << "无火柴人基线图缺失，请先跑 jpov_bone_mesh_gold_generator: "
-            << nobone;
-        CHECK_EQ(wb, w) << "基线图与渲染图宽度不符";
-        CHECK_EQ(hb, h) << "基线图与渲染图高度不符";
+        const int kRoiX0 = 294, kRoiY0 = 139, kRoiX1 = 410, kRoiY1 = 232;
+        CHECK_LT(kRoiX1, w) << "火柴人 ROI 超出图像宽度，请同步更新 ROI 常量";
+        CHECK_LT(kRoiY1, h) << "火柴人 ROI 超出图像高度，请同步更新 ROI 常量";
 
-        // 逐像素最大通道差 > 25 计为“有差异”（避开 llvmpipe 微抖）。
-        int diff_px = 0;
-        int max_ch = 0;
-        for (int i = 0; i < w * h; ++i) {
-            const int dr = std::abs(static_cast<int>(px[i * 4 + 0]) - pb[i * 4 + 0]);
-            const int dg = std::abs(static_cast<int>(px[i * 4 + 1]) - pb[i * 4 + 1]);
-            const int db = std::abs(static_cast<int>(px[i * 4 + 2]) - pb[i * 4 + 2]);
-            const int d = std::max(dr, std::max(dg, db));
-            if (d > 25) {
-                ++diff_px;
+        int red_px = 0;
+        for (int y = kRoiY0; y < kRoiY1; ++y) {
+            for (int x = kRoiX0; x < kRoiX1; ++x) {
+                const int i = (y * w + x) * 4;
+                const int r = px[i + 0];
+                const int g = px[i + 1];
+                const int b = px[i + 2];
+                if (r > 120 && g < 90 && b < 90) {
+                    ++red_px;
+                }
             }
-            max_ch = std::max(max_ch, d);
         }
-        stbi_image_free(pb);
         stbi_image_free(px);
         px = nullptr;
 
-        LOG(INFO) << "火柴人可见性: diff_px=" << diff_px
-                  << " (" << (100.0 * diff_px / (w * h)) << "%), max_ch=" << max_ch;
-        // 实测：火柴人贡献 ~1977 差异像素（0.86%），max_ch≈172。
-        // 阈值取 500 像素 —— 既远高于噪点，又能在火柴人消失（diff→0）时可靠失败。
-        CHECK_GT(diff_px, 500)
-            << "与无火柴人基线几乎无差异（diff_px=" << diff_px
+        LOG(INFO) << "火柴人可见性: ROI 强红像素 = " << red_px;
+        CHECK_GT(red_px, 100)
+            << "火柴人 ROI 内强红像素过少（" << red_px
             << "），火柴人可能未渲染出来";
-        CHECK_GT(max_ch, 60)
-            << "最大通道差异过小（" << max_ch << "），火柴人可能未渲染出来";
     }
 
     // ---- 光照平均色 ROI 对比（同 jpov_skeleton_gold_test 门禁）----

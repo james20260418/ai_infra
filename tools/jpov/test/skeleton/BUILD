@@ -59,7 +59,7 @@ cc_test(
 #
 # 验证 BuildBoneMeshInBoneSpace 生成的骨架空间火柴人能在标准世界里正确渲染
 # （docs/jpov_retarget_design.md §4）。generator 写仓库 gold PNG；test 渲染 +
-# 可见性门禁（与“无火柴人”基线帧相减）+ ROI 平均色对比。
+# 可见性门禁（火柴人 ROI 内强红像素计数）+ ROI 平均色对比。
 # ============================================================================
 
 cc_binary(
@@ -89,7 +89,6 @@ cc_test(
     ],
     data = [
         ":bone_mesh_stickman_1280x720.png",
-        ":bone_mesh_stickman_1280x720_nobone.png",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
