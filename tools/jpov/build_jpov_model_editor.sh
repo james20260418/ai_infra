@@ -6,7 +6,7 @@
 #   ./tools/jpov/build_jpov_model_editor.sh
 #
 # 效果：
-#   1. bazel build //tools/jpov:jpov_model_editor（Linux ELF）
+#   1. bazel build //tools/jpov/demo/editor:jpov_model_editor（Linux ELF）
 #   2. 产物 + 字体拷贝到工程 output/jpov_model_editor/ 下
 #   3. 打印交互操作说明
 #
@@ -29,7 +29,7 @@ mkdir -p "$OUTPUT_DIR"
 echo ""
 echo "==> 1. 编译 Linux 版 jpov_model_editor"
 cd "$PROJECT_DIR"
-bazel build //tools/jpov:jpov_model_editor 2>&1
+bazel build //tools/jpov/demo/editor:jpov_model_editor 2>&1
 echo ""
 echo "OK: Linux 编译完成"
 

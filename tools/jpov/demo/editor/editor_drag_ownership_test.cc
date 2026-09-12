@@ -17,7 +17,7 @@
 
 #include <glog/logging.h>
 
-#include "tools/jpov/demo/editor_app.h"
+#include "tools/jpov/demo/editor/editor_app.h"
 
 namespace jpov_viewer {
 

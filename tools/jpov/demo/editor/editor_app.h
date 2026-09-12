@@ -31,7 +31,7 @@
 #include <string>
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/demo/model_placement.h"
+#include "tools/jpov/demo/editor/model_placement.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/interface/ui.h"
 

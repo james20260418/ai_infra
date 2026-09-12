@@ -19,7 +19,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/demo/editor_app.h"
+#include "tools/jpov/demo/editor/editor_app.h"
 #include "tools/jpov/demo/view_config.h"
 
 namespace {

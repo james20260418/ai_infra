@@ -22,7 +22,7 @@
 合并的代价是面板布局 + 输入消费全绕 `show_editor_` 分支（SOUL 忌讳的 demo 分叉
 温床）。真正**必须**共享的是：
 
-- `demo/model_placement.h` —— 放置数学（本工具新增，可单测）
+- `demo/editor/model_placement.h` —— 放置数学（本工具专属，可单测）
 - `demo/view_config.h` —— 场景构造（光照/地面/相机，两边共用，未改动）
 
 判据（Danis 定调）：**"一片代码不能单测，就不要为共享而共享"**——放置数学已抽到
@@ -130,14 +130,20 @@ void ApplyPitchDelta(ModelPlacement* p, float deg);  // 绕世界 X（up/front �
 
 ## 4. 文件与构建
 
+**全部代码/测试自洽在 `tools/jpov/demo/editor/`（独立 Bazel 包）下**，不散落到上层：
+
 | 文件 | 职责 |
 |------|------|
-| `demo/model_placement.h` | ★ 放置数学（纯函数、header-only、可单测、与渲染零耦合） |
-| `demo/editor_app.h` | 渲染核心 App（场景 + 放置面板 + 左键旋转消费） |
-| `demo/jpov_model_editor.cc` | 主程序（装配 + 交互事件循环） |
-| `demo/jpov_model_editor_smoke.cc` | headless 冒烟渲染（开发自检，非交付产物） |
-| `demo/model_placement_test.cc` | 放置数学单测（11 个用例） |
-| `build_jpov_model_editor.sh` | sh 包裹编译 → `output/jpov_model_editor/`（含字体拷贝） |
+| `demo/editor/model_placement.h` | ★ 放置数学（纯函数、header-only、可单测、与渲染零耦合） |
+| `demo/editor/editor_app.h` | 渲染核心 App（场景 + 放置面板 + 左键旋转消费） |
+| `demo/editor/jpov_model_editor.cc` | 主程序（装配 + 交互事件循环） |
+| `demo/editor/model_placement_test.cc` | 放置数学单测（12 个用例） |
+| `demo/editor/editor_drag_ownership_test.cc` | 左键 drag 归属回归（见 §6） |
+| `demo/editor/BUILD` | 本工具的独立 Bazel 包 |
+| `build_jpov_model_editor.sh` | sh 包裹编译 → `output/jpov_model_editor/`（留在上层与其他 build_*.sh 一致） |
+
+仅与查看器共用 `demo/view_config.h`（场景构造，未改动）与
+`//tools/jpov:view_config` 库。
 
 ```bash
 # 编译
@@ -145,7 +151,7 @@ void ApplyPitchDelta(ModelPlacement* p, float deg);  // 绕世界 X（up/front �
 # 运行
 output/jpov_model_editor/jpov_model_editor /absolute/path/to/model.glb
 # 单测
-bazel test //tools/jpov:model_placement_test
+bazel test //tools/jpov/demo/editor:all
 ```
 
 ## 5. 已知边界（非缺陷，是设计取舍）
@@ -153,7 +159,6 @@ bazel test //tools/jpov:model_placement_test
 1. **平移滑条范围 ±3m 是"人尺度"假设**。若资产本身只有 ~18cm（如仓库内
    `pliers.gltf`），±3m 位移相当于把它甩到相机视锥之外。这是**正确行为**
    （位移就是位移），但用小手模型时请配合"缩放"滑条或滚轮拉远相机。
-   冒烟程序 `jpov_model_editor_smoke` 里对此有注释说明。
 2. **相机 R 只按未缩放的包围盒自适应一次**（初始化时）。把缩放拉到 2 以上可能
    让模型出框——用滚轮 zoom 即可，本 PR 不做"跟随缩放自动重新取景"。
 3. **不做资产保存**（显式非目标）。摆放结果目前仅供人眼配准与后续 PR 反推。
@@ -188,10 +193,8 @@ bazel test //tools/jpov:model_placement_test
   整圈回位）；**3 项负向验证**均正确 FAIL（退回欧拉角参数化 / pitch 漏转 up /
   yaw 符号写反）。其中"退回欧拉角参数化"直接证明 §3.2 的设计动机成立。
 - `editor_drag_ownership_test`：面板/视口归属 5 条路径 + 3 项负向验证全过。
-- `jpov_model_editor_smoke`：渲染 6 张对比图（恒等 / 缩放2 / 平移X / 绕X45 /
-  绕Y45 / 绕Y30再绕X-60 组合），人工核对确认各项能力均**可见生效**，六图 MD5
-  互不相同。（单轴旋转图与旧欧拉角版 MD5 相同 —— 单轴下两种语义本就一致，
-  差异只在**顺序复合**，这正是 §3.2 的核心。）
+- 交互工具不提供 headless 冒烟程序（开发期曾有，验收时删除：editor 本身是
+  交互工具，看效果直接开窗口，出图脚本对该工具无交付价值）。
   - ⚠️ 首轮冒烟曾出现"组合图与平移图字节相同"的假象，根因是**平移量按人尺度
     假设给了 1.5m，而该资产只有 18cm** → 模型整体出框成空场景（两张图都只剩
     背景，故相同）。这暴露出滑条量纲与资产量纲不匹配的可用性问题，

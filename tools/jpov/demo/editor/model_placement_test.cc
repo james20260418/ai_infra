@@ -20,7 +20,7 @@
 
 #include <glog/logging.h>
 
-#include "tools/jpov/demo/model_placement.h"
+#include "tools/jpov/demo/editor/model_placement.h"
 
 namespace {
 
