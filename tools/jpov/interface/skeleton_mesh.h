@@ -47,7 +47,8 @@ inline constexpr float kDefaultBoneRadius = 0.04f;
 //   - joint_weights 每顶点填 {1,0,0,0}（权重全给该骨）；
 //   - 源 mesh 的 indices 统一加当前 dst 顶点数基址后 append（索引重映射）。
 //
-// Pre-condition: src 已带 kPosition + kNormal；joint ∈ [0, dst 所属骨架 bone_count)。
+// Pre-condition: src 已带 kPosition + kNormal，且 src.indices 中每个值 < src 顶点数；
+//   joint ∈ [0, dst 所属骨架 bone_count)。
 //   调用方负责保证 dst 的 flags 已含 kPosition|kNormal|kJoints（不一致会被 Validate() 拦下）。
 inline void AppendBoneBox(MeshData* dst, const MeshData& src, int32_t joint) {
     CHECK(dst != nullptr) << "AppendBoneBox: dst 不能为空";
@@ -58,6 +59,7 @@ inline void AppendBoneBox(MeshData* dst, const MeshData& src, int32_t joint) {
         << "AppendBoneBox: src 必须含 kNormal（火柴人法线用于光照）";
 
     const uint32_t base = static_cast<uint32_t>(dst->positions.size());
+    const uint32_t src_vcount = static_cast<uint32_t>(src.positions.size());
 
     for (const Vec3f& p : src.positions) {
         dst->positions.push_back(p);
@@ -71,6 +73,9 @@ inline void AppendBoneBox(MeshData* dst, const MeshData& src, int32_t joint) {
         dst->joint_weights.push_back(std::array<float, 4>{1.0f, 0.0f, 0.0f, 0.0f});
     }
     for (uint32_t idx : src.indices) {
+        // 防住手工构造的坏 mesh：越界索引重映射后会指向 dst 里其它骨的顶点（静默错位）。
+        CHECK_LT(idx, src_vcount)
+            << "AppendBoneBox: src.indices 越界（" << idx << " >= " << src_vcount << "）";
         dst->indices.push_back(base + idx);
     }
 }

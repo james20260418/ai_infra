@@ -10,6 +10,8 @@
 //   把"骨架空间下的 T-pose 火柴人"放进标准世界里显示，作为 retarget 人工配准的**对齐参照**：
 //   资产 mesh（glb）与 skeleton 都按 identity 摆放，肉眼即可判断 mesh 是否贴骨。
 //
+// 屏幕左下/右下/上方居中另有红字 z/x/y，看图即可确认坐标架方向。
+//
 // 生成链路：SkeletonType(Mixamo23Skeleton) → BuildBoneMeshInBoneSpace(identity pose)
 //   → RegisterMesh → DrawObject3D(mesh_id, kColorRed) —— 火柴人是**静态带骨 mesh**，
 //   本 PR 走 object3d 直画路径（蒙皮让 mesh 与骨架重合，见 §4.5：顶点姿态==rest，
@@ -41,7 +43,7 @@ inline std::string GetGoldRelPath() {
 
 // "无火柴人"基线图相对路径：同场景但不画火柴人。
 // 供 test 做**火柴人可见性门禁**（两图相减，差异只可能来自火柴人）——
-// 单纯"红色像素占比"会被地面/家具的暖色淹没，见 test 内注释。
+// 单纯"红色像素占比"会被地面的暖色淹没，见 test 内注释。
 inline std::string GetNoBoneRelPath() {
     return "/skeleton/bone_mesh_stickman_1280x720_nobone.png";
 }

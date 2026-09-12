@@ -59,7 +59,7 @@ cc_test(
 #
 # 验证 BuildBoneMeshInBoneSpace 生成的骨架空间火柴人能在标准世界里正确渲染
 # （docs/jpov_retarget_design.md §4）。generator 写仓库 gold PNG；test 渲染 +
-# 红像素可见性门禁 + ROI 平均色对比。
+# 可见性门禁（与“无火柴人”基线帧相减）+ ROI 平均色对比。
 # ============================================================================
 
 cc_binary(
