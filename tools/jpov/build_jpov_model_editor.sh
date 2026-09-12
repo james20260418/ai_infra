@@ -19,7 +19,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BAZEL_BIN="$PROJECT_DIR/bazel-bin/tools/jpov"
+# ⚠️ 二进制路径必须与上面的 bazel target 一致（曾经因为这里写旧路径
+#    bazel-bin/tools/jpov/ 而把旧产物拷进 output/，导致"编译了但跑的是老程序"）。
+BAZEL_BIN="$PROJECT_DIR/bazel-bin/tools/jpov/demo/editor"
 OUTPUT_DIR="$PROJECT_DIR/output/jpov_model_editor"
 
 echo "==> 0. 确保输出目录存在"
