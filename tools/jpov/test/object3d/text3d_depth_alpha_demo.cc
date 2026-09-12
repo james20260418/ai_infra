@@ -25,7 +25,6 @@
 //
 // 输出: tools/jpov/test/object3d/text3d_depth_alpha_1280x720.png
 
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>

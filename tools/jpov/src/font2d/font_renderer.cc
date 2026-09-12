@@ -7,15 +7,14 @@
 #include "tools/jpov/src/font2d/font_renderer.h"
 
 #include <algorithm>   // std::max / std::min（Text3D 光栅化精度夹断）
-
-// 3D 文本几何映射（BuildText3DWorldVerts）：纯 CPU 工具函数，无 GL 依赖。
-#include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
-
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <tuple>
 #include <vector>
+
+// 3D 文本几何映射（BuildText3DWorldVerts）：纯 CPU 工具函数，无 GL 依赖。
+#include "tools/jpov/src/primitives3d/primitives3d_renderer.h"
 
 // 分发态资源定位（exe 旁边 fonts/）所需的平台 API：
 // - Linux: readlink(/proc/self/exe)
