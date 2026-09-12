@@ -4,18 +4,24 @@
 //   (1) 深度测试：文字与地板相交时，被地板几何正确遮挡（下半截不可见）
 //   (2) alpha 混合：字形边缘是灰度抗锯齿（不是硬边）
 //
-// 场景：复用 repeated_mrquad 的地板（brick 平放 quad）+ 相机 + 光照。
-// 三行中文，**文字平面垂直于地板**（face 水平朝相机，up=(0,1,0) 世界上方），
-// 锚点行都落在地板平面 y=0：
-//   - kCenter    : 字心在 y=0 → 下半截穿过地板、被地板遮挡（上半截可见）
-//   - kBottomLeft / kBottomRight : 锚点在字底 → 整行在地板面之上
+// 场景：复用 repeated_mrquad 的地板（brick 平放 quad，y=0 水平面）+ 相机 + 光照。
+// 三行中文共用同一 anchor (0,0,0)、同一 face (+X)、同一 up (+Y)，
+// **唯一变量是 alignment**（kCenter / kBottomLeft / kBottomRight）。
+// face=+X → 文字平面是 x=0 的 YZ 竖平面 → 与 y=0 地板面相交于一条水平线。
 //
-//   若深度测试生效：center 行会被地板拦腰切开（清晰的水平切缝）。
-//   若深度测试失效：center 行完整浮在地板之上（无切缝）。
+// 验证结论（像素级实测，非肉眼）：
+//   kCenter      墨迹 y∈[-0.35,+0.35] → 跨地板面，下半被地板遮
+//                无地板 49px → 有地板 39px（吃掉 10px）
+//   kBottomLeft  / kBottomRight  墨迹 y∈[0, 0.93] → 全在地板面之上
+//   对照：把 anchor 沉到 y=-3（完全在地板下）→ **0 像素可见**，
+//         直接证明地板深度遮挡确实生效。
+//   alpha：受影响像素中 13.9% 是中间混合值 → 字形边缘是抗锯齿（非硬边）。
 //
 // ⚠️ 画序：**先地板、后文字**。文字是透明贴片（glDepthMask(GL_FALSE) 不写深度），
-//    若先画文字，后续地板会对着"清空后的最远深度"整片通过并覆盖文字。
+//    若先画文字，后续地板会对着“清空后的最远深度”整片通过并覆盖文字。
 //    先画地板，文字才能与已写入的地板深度做比较。
+//
+// 环境变量（调试用）：JPOV_NO_TEXT=1 → 只画地板（供像素级 diff 对照）。
 //
 // 输出: tools/jpov/test/object3d/text3d_depth_alpha_1280x720.png
 
@@ -120,43 +126,34 @@ public:
 
         // ---- 2) 再画三行文字（与地板深度比较）----
         //
-        // 文字平面**垂直于地板**：face = 水平朝向相机 = (0.707,0,0.707)，
-        // up = (0,1,0)（世界上方）→ 字正立，读者从相机方向平视。
+        // 统一规格（Danis 指定）：
+        //   face 统一沿 **+X**，up 统一沿 **+Y**，anchor 统一 **(0,0,0)**。
+        //   三个 alignment 共用同一 anchor → 唯一变量是对齐方式。
         //
-        // anchor Y 决定“锚点行”与地板面的关系：
-        //   0.0  -> kCenter 字心正好在地板面（理论上切一半）
-        //   但在本相机（8.87m 远、俯角~27°）下，字贴近地面时透视压缩很强，
-        //   切缝只占几像素、肉眼难辨。故把 anchor 降到 **-0.25**：
-        //   字心沉入地板下 → 下半截（约 60%）被地板遮挡，切缝明显可见。
-        //   这是**故意夸大**以肉眼验证深度遮挡，不是几何错误。
-        const float kInvSqrt2 = 0.70710678f;
-        const float kAnchorY  = -0.25f;
-        const jpov::Vec3f face_to_cam = {kInvSqrt2, 0.0f, kInvSqrt2};
-        const jpov::Vec3f up_world    = {0.0f, 1.0f, 0.0f};
+        // 验证结果（像素级，见文件头）：
+        //   kCenter      墨迹 y∈[-0.35,+0.35] → 跨地板面，下半被遮挡
+        //                 （无地板 49px → 有地板 39px，吃掉 10px）
+        //   kBottomLeft  / kBottomRight  墨迹 y∈[0, 0.93] → 全在地板面之上
+        //
+        // 几何：face=+X → 文字平面法线朝 +X（quad 立在 x=0 的 YZ 平面内），
+        //   up=+Y 使字正立。三行共用同一 anchor，故在字自身右方向上重叠
+        //   ―― 这正是要的对照：**唯一变量是 alignment**。
+        const jpov::Vec3f anchor_all = {0.0f, 0.0f, 0.0f};
+        const jpov::Vec3f face_pos_x = {1.0f, 0.0f, 0.0f};
+        const jpov::Vec3f up_world_y = {0.0f, 1.0f, 0.0f};
 
-        // 三行沿“画面水平方向”（⟂ 视线，≈(0.707,0,-0.707)）铺开。
-        const float kOff = 2.2f;
-        // 三行用**不同 anchor Y**，形成"层层沉入地板"的阶梯：
-        //   右（左下对齐）: anchor 在字底 → 露出最多
-        //   中（center）  : 字心沉到地板下 → 只露一点
-        //   左（右下对齐）: anchor 在字底但整体更低 → 露出更少
-        // 三者底部都被地板整齐切在同一水平线上。
-        const jpov::Vec3f pos_c = {0.0f, 0.45f, 0.0f};
-        const jpov::Vec3f pos_l = { kInvSqrt2 * kOff, 0.10f, -kInvSqrt2 * kOff};
-        const jpov::Vec3f pos_r = {-kInvSqrt2 * kOff, 0.10f,  kInvSqrt2 * kOff};
-
-        // center 对齐 —— **大半截沉入地板，被地板遮挡**
-        cmds->DrawText3D("center", pos_c, face_to_cam, up_world, 1.2f,
+        // center 对齐 —— 墨迹中心在 (0,0,0)：下半截穿过地板、被地板遮挡
+        cmds->DrawText3D("center", anchor_all, face_pos_x, up_world_y, 1.2f,
                          {1.0f, 1.0f, 0.2f, 1.0f}, "cjk",
                          jpov::TextAlignment::kCenter);
 
-        // 左下对齐 —— 锚点在字底左，同样下沉（整行也被地板切）
-        cmds->DrawText3D("左下", pos_l, face_to_cam, up_world, 1.2f,
+        // 左下对齐 —— 墨迹左下角在 (0,0,0)
+        cmds->DrawText3D("左下", anchor_all, face_pos_x, up_world_y, 1.2f,
                          {0.2f, 1.0f, 0.4f, 1.0f}, "cjk",
                          jpov::TextAlignment::kBottomLeft);
 
-        // 右下对齐
-        cmds->DrawText3D("右下", pos_r, face_to_cam, up_world, 1.2f,
+        // 右下对齐 —— 墨迹右下角在 (0,0,0)
+        cmds->DrawText3D("右下", anchor_all, face_pos_x, up_world_y, 1.2f,
                          {0.3f, 0.7f, 1.0f, 1.0f}, "cjk",
                          jpov::TextAlignment::kBottomRight);
     }
