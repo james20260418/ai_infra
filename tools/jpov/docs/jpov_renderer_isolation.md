@@ -6,6 +6,10 @@
 > 触发问题（Danis）：
 > 「一个子 renderer 一定不要去依赖其它 renderer 的代码、or 数据结构、or 通道使用上的
 > assumption。总 renderer 自己在切换不同子 renderer 时，不需要担心状态的『残留』。」
+>
+> 📎 **配套阅读**：`interface/MULTIPASS_ARCH.md`（多 pass 结构设计 / 槽位生命周期契约）。
+> 本文件是**静态审查**（现状与缺口）；MULTIPASS_ARCH 是**设计契约**（应该长什么样）。
+> 本文 §2.1/§2.2 的缺口在 MULTIPASS_ARCH §3/§4/§5 给出了契约化收敛。
 
 ---
 
@@ -74,9 +78,10 @@ bloom_prefilter, bloom_downsample, bloom_upsample, bloom_composite
 
 ## 2. 三处成文契约缺口
 
-### 2.1 🔴 TEXTURE12：真实通道冲突（**未修的隐患**）
+### 2.1 🔴 TEXTURE12：**契约缺失**（不是「当下会炸的 bug」）
 
-事实：
+> ⚠️ **措辞修正（2026-09-12，与 Danis 讨论后）**：本节初稿把它写成「真实通道冲突」，
+> **夸大了严重性**。准确说法是**契约缺失**，不是运行期冲突。理由见下。
 
 * `SkeletonRenderer::DrawSkinnedMesh` 把 pose atlas 绑到 **`GL_TEXTURE12`**（`skeleton_renderer.cc:222`）。
 * `Object3DRenderer` 的既有约定槽位表是 **`0=tile` / `1..6=材质` / `7..11=阴影 5 级联`**。
@@ -85,11 +90,28 @@ bloom_prefilter, bloom_downsample, bloom_upsample, bloom_composite
 这就是 Danis 说的「通道使用上的 assumption」：槽位表**只存在于注释里**，没有任何集中分配点，
 也没有任何机制阻止两个子渲染器在各自不知情的情况下用同一个槽。
 
+**为什么它当下不炸**：texture unit 编号本身**不是被独占的资源** —— 它只是「当前绑了什么」
+这个全局状态的下标。两个子渲染器都用 12 号槽**完全合法**，只要它们**各自 draw 前
+把要用的纹理重新 bind 一遍**。JPOV 两侧都这么做了，所以现状正确。
+
+**真实风险是两个「不可见性」**：
+
+1. **语义不可见**：下一个子渲染器作者看到 0/1-6/7-11 有人用了，自然去挑一个「空号」，
+   他不可能知道 12 已被占 —— 因为 12 的占用只写在 skeleton 的一行注释里。
+2. **重绑依赖不可见**：12 号槽的正确性依赖「skeleton 主 pass 每次 draw 前重绑」这个习惯动作。
+   若某次重构把这个重绑挪走**而不炸 gold 图**，没人会发现。
+
+**契约化收敛**：见 `interface/MULTIPASS_ARCH.md` §3（独占槽 vs 共享槽）——
+12 属**独占槽**，本就不需要进任何中央表；真正需要成文的是「同 pass 内不得有两个语义
+指向同一槽」（规则 R1）。
+
 **附注（同类隐患）**：skeleton 的**阴影 pass** 把 pose atlas 绑到 **`GL_TEXTURE7`**
 （`skeleton_renderer.cc:341`），而 TEXTURE7 在 obj3d 的语义是 **cascade-0 阴影贴图槽**。
 不出问题的唯一原因是：skeleton 阴影 pass 与 obj3d 主 pass **不会同时活跃**（main pass 的
 skeleton 在 T12，shadow pass 的 skeleton 在 T7，obj3d 的 cascade 在主 pass 用 T7+i）。
-这是「槽位语义按 pass 局部重新定义」，与 2.1 是同一类问题。
+这是「槽位语义按 pass 局部重新定义」——**在槽位生命周期模型下这是合法的**
+（见 MULTIPASS_ARCH 规则 R1：不同 pass 不重叠活跃）。
+真正的风险只剩「有人误以为 7 号槽全帧有效」。
 
 ### 2.2 🟡 program 命名无守卫
 
@@ -123,6 +145,11 @@ skeleton 在 T12，shadow pass 的 skeleton 在 T7，obj3d 的 cascade 在主 pa
 
 ### 建议 A：中央 Texture Unit 契约（对应 2.1）
 
+> ⚠️ **本节已被 `interface/MULTIPASS_ARCH.md` §3/§4 取代**：当时写的「把所有槽位塞进
+> 一张表」是个过于保守的模型。正确的区分是 **独占槽**（自绑自用，**不进表**）vs
+> **共享槽**（pass 入口绑一次，进表）。12 属独占槽，**不需要进表**。
+> 保留本节作为讨论过程记录；实质内容见 MULTIPASS_ARCH。
+
 在 `src/` 下新增一份**唯一的槽位表**（建议 `renderer_texture_units.h`，纯常量 + 注释）：
 
 ```cpp
@@ -152,6 +179,20 @@ namespace jpov::tex_unit {
 在 `Renderer::Render` 的 3D 段入口加一个**幂等的状态基线**（把当前隐式约定显式化），
 例如「每帧进入 3D 前对所有已知 program 的 `uHas*Tex` 置零」。代价是一帧几次 `glUniform1i`，
 收益是「新增子渲染器忘了置零」不再需要靠人肉 review 兜住。
+
+---
+
+## 3.5 与 MULTIPASS_ARCH 的对应关系
+
+| 本文缺口 | MULTIPASS_ARCH 收敛 |
+|---|---|
+| §2.1 TEXTURE12 语义不可见 | §3 独占槽 vs 共享槽；§5 规则 R1 |
+| §2.1 附注（T7 双重语义） | §5 规则 R1（不同 pass 不重叠活跃即合法） |
+| §2.2 program 命名无守卫 | （保持本文 §3 建议 C 的可执行守卫；MULTIPASS 不管 program 名） |
+| §2.3 缺帧级复位 | §9 表格 #4 |
+| —（新发现） | §4 CSM 级联占**高编号段**（运行期可变层数） |
+| —（新发现） | §6 成本模型：贵的是 program/uniform，不是 texture bind |
+| —（核对） | §7 各子渲染器 program 数（Object3D 有 VS 双版本） |
 
 ### 建议 C：program 名去重守卫（对应 2.2，**本 PR 已实现**）
 
