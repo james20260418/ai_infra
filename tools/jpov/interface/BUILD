@@ -138,6 +138,38 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# MeshTransform — 把绘制时的放置参数 (center/up/front/scale) 烘进 CPU 资产（MeshData /
+# SkeletonType）。GL-free 纯函数层；模型编辑器保存 glb 时用它把"摆好的姿态"固化进几何与骨架
+# （含"顶点烘 U ⟺ 骨架共轭 U"的一致性，见 mesh_transform.h 文件头）。
+cc_library(
+    name = "mesh_transform",
+    hdrs = ["mesh_transform.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "mesh_transform_test",
+    srcs = ["mesh_transform_test.cc"],
+    deps = [
+        ":mesh",
+        ":mesh_transform",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/math:mat4",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # AnimationClip — CPU 侧外部动画素材容器（FBXClip：源骨架 + 帧频 + 原始全帧）
 # 承载 src/fbx_loader 的产出；供上层 debug/retarget/resample 二次开发用，不碰 GPU。
 # （src/skeleton 的 GPU pose atlas 使用另见 src/skeleton。）
@@ -247,3 +279,5 @@ cc_library(
         ":animation_clip",
     ],
 )
+
+

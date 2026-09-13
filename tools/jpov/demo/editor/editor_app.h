@@ -29,8 +29,10 @@
 #define JPOV_DEMO_EDITOR_APP_H_
 
 #include <string>
+#include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/editor/editor_save.h"
 #include "tools/jpov/demo/editor/model_placement.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/interface/ui.h"
@@ -107,8 +109,8 @@ public:
         static constexpr float kSpacing    = 10.0f;   // 行间距
         static constexpr float kBottom     = 18.0f;   // 到屏底留白
         static constexpr float kMarginLeft = 24.0f;   // 到屏左留白
-        static constexpr int   kPanelRows  = 5;       // 缩放1+平移3+地面1
-        static constexpr float kHelpLines  = 4.0f;    // 说明行数（与文案数组同长）
+        static constexpr int   kPanelRows  = 6;       // 缩放1+平移3+地面1+保存按钮1
+        static constexpr float kHelpLines  = 5.0f;    // 说明行数（与文案数组同长）
         static constexpr float kHelpLineH  = 24.0f;   // 单行行高（行距放宽，防拥挤）
         static constexpr float kHelpW      = 640.0f;  // 说明区宽（单行内容宽上限）
     };
@@ -143,6 +145,11 @@ public:
 
     // ── 地面高度（[-3,0]，需求定档）──
     float ground_y_ = kEditorGroundDefault;
+
+    // ── 保存（后台线程 + 状态机；见 editor_save.h）──
+    // assets_ 是启动时用纯 loader 读的 CPU 快照（GL-free），worker 线程只读它。
+    SaveController save_;
+    std::string source_gltf_path_;   // 被编辑的原始路径（保存文件名同目录）
 
     // 左键旋转 drag 的按键边沿检测（跨帧）。
     //   rotate_mode_latched_ — 冻结的轴：true=绕 Y，false=绕 X
@@ -194,6 +201,10 @@ public:
             // 2) 左键横向 drag → 模型旋转（纵向分量丢弃；Ctrl 选轴，按下时冻结）。
             UpdateRotateFromDrag(input, fw, fh);
         }
+
+        // 3) 保存线程完成检查（与是否可见窗口无关：headless 也能收尾，
+        //    保证析构前线程能 join）。
+        save_.Tick();
 
         // ── 相机：由 view_ 推导（目标点恒为原点，与查看器一致）──
         cmds->camera.position = view_.Position();
@@ -364,10 +375,37 @@ private:
         ui_.SliderFloat("地面高度 y", &ground_y_, row(4),
                         kEditorGroundMin, kEditorGroundMax, 2);
 
+        // ── 保存按钮（面板最后一行）──
+        DrawSaveRow(L);
+
         // ── 左上角说明文字（需求：黑色文字 + 真左对齐；不走 Ui 控件）──
         // 注意：该函数直接向 cmds 写 DrawText，而非经 ui_.Text —— 因为
         // Ui::Text 写死居中 + 写死 theme.foreground，无法满足"左对齐 + 黑字"。
         DrawHelpText(cmds, L);
+    }
+
+    // 保存按钮（面板最后一行）。
+    //
+    // 需求：按下后自开线程写 GLB；线程运行时按钮文字变 "保存中..."；完成后左上角
+    //   说明追加一条 "保存至 ..."；保存中按钮不可重复触发。
+    //
+    // 设计取舍（与 plan §4.3 贴图方案不同，说明理由）：
+    //   - 按钮文字**直接切 label 字符串**（"保存" ↔ "保存中..."）。plan 的“文字渲染进
+    //     纹理再回读”是为“变灰禁用”准备的，而真实需求只是“文字变 + 不可重复触发”，
+    //     切 label 即达成，且不用把 GL 纹理操作塞进保存路径（更简单、更不易错）。
+    //   - “不可重复触发”：kSaving 期间**不消费点击**（仍画按钮作状态指示，但不判
+    //     命中、不调 Start）—— 与 UI 其他控件“按下去不响应”一致。
+    void DrawSaveRow(const PanelLayout& L) {
+        const bool saving = (save_.state() == SaveState::kSaving);
+        const char* label = saving ? "保存中..." : "保存";
+        const jpov::UiRect box = L.Row(PanelLayout::kPanelRows - 1);
+        // kSaving 时只画不判命中（按钮外观仍在，但点击不生效 → 不可重复触发）。
+        const bool clicked = ui_.Button(label, box);
+        // kSaving 期间不消费点击（按钮仅作状态指示）→ 不可重复触发。
+        if (clicked && !saving && save_.has_asset()) {
+            // 传**按下当帧**的放置参数副本（之后拖滑条不影响本次保存）。
+            save_.Start(source_gltf_path_, placement_);
+        }
     }
 
     // 左上角操作说明（纯展示，不参与交互）。
@@ -379,19 +417,29 @@ private:
     //   - **黑色文字**：不用 UiThreshold 的 theme_.foreground（Ui::Text 写死用
     //     它，无法控色），这里显式给黑。（Danis 定：黑字不加底版。）
     void DrawHelpText(jpov::RenderCommandList* cmds, const PanelLayout& L) {
-        // 文案（需求：工具左上角打印左键使用说明）。改行数须同步 kHelpLines。
+        // 文案（需求：工具左上角打印左键使用说明）。末行为**保存状态**：未保存过
+        // 为空（不画），否则为 "保存至 ..." / "保存失败：..."。
+        // 改行数须同步 kHelpLines（下方 static_assert 编译期拦住）。
         static const char* const kText[] = {
             "左键横向拖动 = 模型绕世界 X 轴旋转（右滑逆时针）",
             "Ctrl + 左键横向拖动 = 模型绕世界 Y 轴旋转（右滑逆时针）",
             "右键拖动 = 旋转视角 · 滚轮 = 缩放视角",
-            "底下滑条 = 缩放 / 平移 / 地面高度",
+            "底下滑条 = 缩放 / 平移 / 地面高度 · 保存 = 导出编辑后的 glb",
+            "",   // 末行占位：运行时替换为 save_.message()
         };
         static_assert(sizeof(kText) / sizeof(kText[0]) ==
                           static_cast<int>(PanelLayout::kHelpLines),
                       "说明文字行数与 kHelpLines 不一致（改文案须同步）");
         const jpov::Color kBlack{0.0f, 0.0f, 0.0f, 1.0f};
-        for (int i = 0; i < static_cast<int>(PanelLayout::kHelpLines); ++i) {
-            cmds->DrawText(kText[i],
+        const int n = static_cast<int>(PanelLayout::kHelpLines);
+        for (int i = 0; i < n; ++i) {
+            // 末行取保存状态文本（kDone="保存至 ..." / kFailed="保存失败：..."）。
+            const std::string& dyn = save_.message();
+            const char* line = (i == n - 1) ? dyn.c_str() : kText[i];
+            if (line == nullptr || line[0] == '\0') {
+                continue;   // 空串不画（未保存过时末行本就不存在）
+            }
+            cmds->DrawText(line,
                            {L.help_left,
                             L.help_top + i * PanelLayout::kHelpLineH},
                            kEditorFontSize, kBlack,
