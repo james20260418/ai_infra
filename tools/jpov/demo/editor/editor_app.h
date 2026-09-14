@@ -28,11 +28,16 @@
 #ifndef JPOV_DEMO_EDITOR_APP_H_
 #define JPOV_DEMO_EDITOR_APP_H_
 
+#include <array>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/editor/editor_save.h"
 #include "tools/jpov/demo/editor/model_placement.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/axis_gizmo.h"
 #include "tools/jpov/interface/ui.h"
 
 namespace jpov_viewer {
@@ -107,8 +112,8 @@ public:
         static constexpr float kSpacing    = 10.0f;   // 行间距
         static constexpr float kBottom     = 18.0f;   // 到屏底留白
         static constexpr float kMarginLeft = 24.0f;   // 到屏左留白
-        static constexpr int   kPanelRows  = 5;       // 缩放1+平移3+地面1
-        static constexpr float kHelpLines  = 4.0f;    // 说明行数（与文案数组同长）
+        static constexpr int   kPanelRows  = 6;       // 缩放1+平移3+地面1+保存按钮1
+        static constexpr float kHelpLines  = 6.0f;    // 说明行数（与文案数组同长）
         static constexpr float kHelpLineH  = 24.0f;   // 单行行高（行距放宽，防拥挤）
         static constexpr float kHelpW      = 640.0f;  // 说明区宽（单行内容宽上限）
     };
@@ -128,11 +133,31 @@ public:
                                      float fh) {
         UpdateRotateFromDrag(in, fw, fh);
     }
+    // 坐标架：带 alpha 覆盖地画（测试缝；nullopt = 生产默认 0.2）。
+    // 注意：**绕过 show_axis_gizmo_ 开关**（测试要显式控制画不画）。
+    void DrawAxisGizmoForTest(jpov::RenderCommandList* cmds,
+                              std::optional<float> alpha_override) {
+        const bool saved = show_axis_gizmo_;
+        show_axis_gizmo_ = true;
+        DrawAxisGizmo(cmds, alpha_override);
+        show_axis_gizmo_ = saved;
+    }
 
     // ── 场景状态（main 在 Init() 后一次性装配）──
     jpov::GltfObject gltf_;          // 被编辑的模型
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
     jpov::PBRMaterial ground_mat_;   // 高粗糙灰色地面材质
+
+    // ── 世界坐标架（辅助用户对位，见 interface/axis_gizmo.h）──
+    // 三根 1m 条带（X 红 / Y 绿 / Z 蓝，alpha 0.2 近乎透明），原点在**模型处**
+    // 且跟随模型平移（见 DrawAxisGizmo 注释与 design doc §7.1b）。
+    // ⚠️ 用 **3D 条带**（DrawStrip3D）而不是 Object3D 网格：条带的 FS 是
+    //    `FragColor = uColor`，alpha 天然生效 —— **不需要动 Object3D 的着色通路**
+    //（Danis 定调 2026-09-14：减少影响面）。代价是无厚度，对方向指示够用。
+    //
+    // 开关（默认开）：图形完全由 placement_ 推导，无需预注册资源。
+    // 关掉后可对比"有无坐标架"（也供 headless 单测避免多画三条带）。
+    bool show_axis_gizmo_ = true;
 
     // ── 相机（右键环绕 + 滚轮 zoom；与查看器同一套 ViewConfig）──
     ViewConfig view_;
@@ -143,6 +168,11 @@ public:
 
     // ── 地面高度（[-3,0]，需求定档）──
     float ground_y_ = kEditorGroundDefault;
+
+    // ── 保存（后台线程 + 状态机；见 editor_save.h）──
+    // assets_ 是启动时用纯 loader 读的 CPU 快照（GL-free），worker 线程只读它。
+    SaveController save_;
+    std::string source_gltf_path_;   // 被编辑的原始路径（保存文件名同目录）
 
     // 左键旋转 drag 的按键边沿检测（跨帧）。
     //   rotate_mode_latched_ — 冻结的轴：true=绕 Y，false=绕 X
@@ -195,6 +225,10 @@ public:
             UpdateRotateFromDrag(input, fw, fh);
         }
 
+        // 3) 保存线程完成检查（与是否可见窗口无关：headless 也能收尾，
+        //    保证析构前线程能 join）。
+        save_.Tick();
+
         // ── 相机：由 view_ 推导（目标点恒为原点，与查看器一致）──
         cmds->camera.position = view_.Position();
         cmds->camera.target   = ViewConfig::Target();
@@ -222,6 +256,10 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f},
                            /*scale*/  1.0f);
 
+        // 世界坐标架：三根 1m 条带（红绿蓝 alpha 0.2），摆在**模型处**并跟随
+        // 模型平移 —— 用户据此目测模型朝向与尺度是否合理。位置见 DrawAxisGizmo。
+        DrawAxisGizmo(cmds);
+
         // 模型：放置状态 → (center,up,front,scale) → 原样喂给既有绘制指令。
         // 本 PR 的**全部**编辑能力都落在这四行——后端渲染器零改动。
         const DrawPlacement dp = ToDrawParams(placement_);
@@ -236,6 +274,54 @@ public:
     }
 
 private:
+    // 画世界坐标架（三根 1m 条带，红绿蓝 alpha 0.2）。
+    //
+    // 🔑 **原点在模型处、且跟随模型平移**（Danis 确认 2026-09-14）：坐标架的用途
+    //    是给用户目测"模型朝向与尺度"，故必须与模型同处。只取平移、**不取
+    //    旋转/缩放** —— 坐标架表达"世界坐标系"，始终轴对齐在世界轴上。
+    //
+    //    历史（为什么不是 `ground_y_`）：需求原文写"在地面的 quad 同等高度上"，
+    //    首版按字面放在 `(0, ground_y_, 0)` = `(0, -3, 0)`。但地面默认在 -3m 而
+    //    模型在原点 → 坐标架跑到**模型下方 3m、默认视角完全看不见**
+    //（实测红带 margin 仅 3/255，等于没画）。字面正确但用途失效。
+    //
+    // 每帧重建顶点（开销可忽略：3 条带 × 4 顶点 × 2 次）。
+    //
+    // 🔑 **每条带正、反各画一次**（Danis 定档 2026-09-14）：条带是无厚度的单面
+    //    几何，而 `Draw3DCommands` 入口开着 GL_CULL_FACE —— 法线背对相机的
+    //    那一面会被剔除，用户从背面看时带会**整条消失**。把顶点顺序反过来再发
+    //    一条 DrawStrip3D，就得到一条"双面"条带：**任意方向看都可见**。
+    //    代价：draw 次数 ×2。对 3 条细带可忽略。
+    //
+    // alpha_override：**仅测试缝**（nullopt = 用生产常量 0.2）。
+    void DrawAxisGizmo(jpov::RenderCommandList* cmds,
+                       std::optional<float> alpha_override = std::nullopt) {
+        if (!show_axis_gizmo_) return;
+        const DrawPlacement p = ToDrawParams(placement_);
+        const jpov::AxisGizmoStrips s = jpov::MakeAxisGizmoStrips(
+            {p.center.x(), p.center.y(), p.center.z()});
+        // 正反各画一次 → 单面条带变"双面可见"（见上方注释）。
+        const std::array<jpov::Vec3f, 4>* strips[3] = {&s.x, &s.y, &s.z};
+        for (int i = 0; i < 3; ++i) {
+            const std::array<jpov::Vec3f, 4>& v = *strips[i];
+            const jpov::Color c = AxisGizmoColor(i, alpha_override);
+            cmds->DrawStrip3D({v[0], v[1], v[2], v[3]}, c);   // 正向
+            cmds->DrawStrip3D({v[1], v[0], v[3], v[2]}, c);   // 反向
+        }
+    }
+
+    // 轴带颜色（唯一一处取色）。
+    //
+    // `alpha_override` 是**测试缝**：渲染自证需要"同场景不透明 vs 半透明"两张图
+    // 做逐像素对照（证明 alpha 真的生效）。`std::nullopt` = 用常量里的生产值（0.2）。
+    // 用**可选值**而非"负值哨兵"表达"不覆盖"，避免隐式魔法值。
+    static jpov::Color AxisGizmoColor(int i,
+                                      std::optional<float> alpha_override) {
+        jpov::Color c = jpov::AxisGizmoColor(i);
+        if (alpha_override.has_value()) c.a = *alpha_override;
+        return c;
+    }
+
     // 文本测量接线（与查看器同款；UI 内部布局/居中不依赖，但保持一致性）。
     static float EditorTextWidth(const char* text, float font_size,
                                  const char* /*font_alias*/, void* userdata) {
@@ -364,10 +450,37 @@ private:
         ui_.SliderFloat("地面高度 y", &ground_y_, row(4),
                         kEditorGroundMin, kEditorGroundMax, 2);
 
+        // ── 保存按钮（面板最后一行）──
+        DrawSaveRow(L);
+
         // ── 左上角说明文字（需求：黑色文字 + 真左对齐；不走 Ui 控件）──
         // 注意：该函数直接向 cmds 写 DrawText，而非经 ui_.Text —— 因为
         // Ui::Text 写死居中 + 写死 theme.foreground，无法满足"左对齐 + 黑字"。
         DrawHelpText(cmds, L);
+    }
+
+    // 保存按钮（面板最后一行）。
+    //
+    // 需求：按下后自开线程写 GLB；线程运行时按钮文字变 "保存中..."；完成后左上角
+    //   说明追加一条 "保存至 ..."；保存中按钮不可重复触发。
+    //
+    // 设计取舍（与 plan §4.3 贴图方案不同，说明理由）：
+    //   - 按钮文字**直接切 label 字符串**（"保存" ↔ "保存中..."）。plan 的“文字渲染进
+    //     纹理再回读”是为“变灰禁用”准备的，而真实需求只是“文字变 + 不可重复触发”，
+    //     切 label 即达成，且不用把 GL 纹理操作塞进保存路径（更简单、更不易错）。
+    //   - “不可重复触发”：kSaving 期间**不消费点击**（仍画按钮作状态指示，但不判
+    //     命中、不调 Start）—— 与 UI 其他控件“按下去不响应”一致。
+    void DrawSaveRow(const PanelLayout& L) {
+        const bool saving = (save_.state() == SaveState::kSaving);
+        const char* label = saving ? "保存中..." : "保存";
+        const jpov::UiRect box = L.Row(PanelLayout::kPanelRows - 1);
+        // kSaving 时只画不判命中（按钮外观仍在，但点击不生效 → 不可重复触发）。
+        const bool clicked = ui_.Button(label, box);
+        // kSaving 期间不消费点击（按钮仅作状态指示）→ 不可重复触发。
+        if (clicked && !saving && save_.has_asset()) {
+            // 传**按下当帧**的放置参数副本（之后拖滑条不影响本次保存）。
+            save_.Start(source_gltf_path_, placement_);
+        }
     }
 
     // 左上角操作说明（纯展示，不参与交互）。
@@ -379,19 +492,30 @@ private:
     //   - **黑色文字**：不用 UiThreshold 的 theme_.foreground（Ui::Text 写死用
     //     它，无法控色），这里显式给黑。（Danis 定：黑字不加底版。）
     void DrawHelpText(jpov::RenderCommandList* cmds, const PanelLayout& L) {
-        // 文案（需求：工具左上角打印左键使用说明）。改行数须同步 kHelpLines。
+        // 文案（需求：工具左上角打印左键使用说明）。末行为**保存状态**：未保存过
+        // 为空（不画），否则为 "保存至 ..." / "保存失败：..."。
+        // 改行数须同步 kHelpLines（下方 static_assert 编译期拦住）。
         static const char* const kText[] = {
             "左键横向拖动 = 模型绕世界 X 轴旋转（右滑逆时针）",
             "Ctrl + 左键横向拖动 = 模型绕世界 Y 轴旋转（右滑逆时针）",
             "右键拖动 = 旋转视角 · 滚轮 = 缩放视角",
-            "底下滑条 = 缩放 / 平移 / 地面高度",
+            "底下滑条 = 缩放 / 平移 / 地面高度 · 保存 = 导出编辑后的 glb",
+            "三色坐标架（随模型）：红 = X 轴 · 绿 = Y 轴 · 蓝 = Z 轴（各 1m）",
+            "",   // 末行占位：运行时替换为 save_.message()
         };
         static_assert(sizeof(kText) / sizeof(kText[0]) ==
                           static_cast<int>(PanelLayout::kHelpLines),
                       "说明文字行数与 kHelpLines 不一致（改文案须同步）");
         const jpov::Color kBlack{0.0f, 0.0f, 0.0f, 1.0f};
-        for (int i = 0; i < static_cast<int>(PanelLayout::kHelpLines); ++i) {
-            cmds->DrawText(kText[i],
+        const int n = static_cast<int>(PanelLayout::kHelpLines);
+        for (int i = 0; i < n; ++i) {
+            // 末行取保存状态文本（kDone="保存至 ..." / kFailed="保存失败：..."）。
+            const std::string& dyn = save_.message();
+            const char* line = (i == n - 1) ? dyn.c_str() : kText[i];
+            if (line == nullptr || line[0] == '\0') {
+                continue;   // 空串不画（未保存过时末行本就不存在）
+            }
+            cmds->DrawText(line,
                            {L.help_left,
                             L.help_top + i * PanelLayout::kHelpLineH},
                            kEditorFontSize, kBlack,

@@ -156,6 +156,23 @@ cc_library(
     linkstatic = 1,
 )
 
+# GltfSaver — CPU 资产（MeshData + 材质 + 可选骨架）→ 自洽 .glb（GL-free）
+cc_library(
+    name = "gltf_saver",
+    srcs = ["gltf_saver.cc"],
+    hdrs = ["gltf_saver.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":gltf_loader",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//third_party/nlohmann-json:json",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # Renderer — GL FBO + 动态分辨率渲染核心
 cc_library(
     name = "renderer",

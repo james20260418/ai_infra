@@ -179,7 +179,6 @@ bazel test //tools/jpov/demo/editor:all
 ```
 
 ## 5. 已知边界（非缺陷，是设计取舍）
-
 1. **平移滑条范围 ±3m 是"人尺度"假设**。若资产本身只有 ~18cm（如仓库内
    `pliers.gltf`），±3m 位移相当于把它甩到相机视锥之外。这是**正确行为**
    （位移就是位移），但用小手模型时请配合"缩放"滑条或滚轮拉远相机。
@@ -213,7 +212,107 @@ bazel test //tools/jpov/demo/editor:all
 2. **面板几何必须单一真相**：`PanelLeft/PanelTop/PanelRow` 同时供"画控件的 box"
    与"判定归属的面板矩形"使用，杜绝两处各写一份几何。
 
-## 7. 自检记录（开发时实测）
+## 7. 世界坐标架（2026-09-14 追加）
+
+编辑器场景里摆一个 **1m × 1m × 1m 的世界坐标架**，供用户目测模型朝向与尺度：
+
+| 项 | 值 |
+|---|---|
+| 三条带 | 分别沿世界 **+X / +Y / +Z** 正方向 |
+| 长度 | **1m**（需求定档） |
+| 宽度 | **5cm**（半宽 2.5cm），**无厚度**（单面条带） |
+| 颜色 | **X=红 / Y=绿 / Z=蓝**（图形学通行约定） |
+| 透明度 | **alpha 0.2**（"几乎透明"，不遮挡被编辑的模型） |
+| 位置 | **世界原点 `(0,0,0)` 且跟随模型平移**（见 §7.1b） |
+| 法线 | X 带朝 **+Z**；Y 带朝 **+X**；Z 带朝 **+X** |
+| 可见性 | 每条带**正反各画一次** → 双面可见（见 §7.2） |
+
+### 7.1 用 3D 条带，不动 Object3D 着色通路（Danis 定调）
+
+需求原文说"用 make box 做直棱柱"。首版照做（`MeshData::MakeOrientedBox` +
+每轴一个 mesh + `DrawObject3D`）—— 但 `DrawObject3D` 的片元 shader 此前
+**写死 `FragColor.a = 1.0`**、没有任何 alpha 混合路径，为了画三根半透明辅助线
+就得去动 **Object3D 的着色通路**（加 uniform、加混合状态、改深度写入…）。
+
+Danis 定调：**不为辅助线动 Object3D 的 alpha 通路，减少影响面**。改用既有的
+**3D 条带**（`RenderCommandList::DrawStrip3D`）：
+
+- 它的 FS 是 `FragColor = uColor`（`primitives3d_renderer.h: kFs3d`）→
+  **alpha 天然生效**，渲染后端**一行都不用改**（本 PR 现在对
+  `src/object3d/`、`src/renderer.*`、`src/skeleton/` 零改动）；
+- 无光照、无 PBR —— 正是辅助线要的"恒定鲜艳色"；
+- 代价：无厚度、单面。对 1m 长的方向指示完全够用（用户只看朝向）。
+
+编辑器侧：`EditorApp::DrawAxisGizmo()` 每帧造顶点直接发 3 条带 × 2 次
+（正反各一）`DrawStrip3D`（条带是 stream 数据，无需注册 GPU mesh；开销可忽略）。
+位置见 §7.1b。说明文字里也加了一行
+`三色坐标架（随模型）：红 = X 轴 · 绿 = Y 轴 · 蓝 = Z 轴（各 1m）`。
+
+### 7.2 🔑 绕序（winding）是**功能性**的，不是审美
+
+条带是单面几何，而 `Draw3DCommands` 入口开着 `GL_CULL_FACE` + CCW → **法线背对
+相机的那一面会被剔除、整条消失**。实测踩过：三带统一用一种绕序时，X 带恰好
+法线朝相机（可见），而 **Y / Z 带被剔除、画面上完全看不到**。
+
+`MakeAxisStripVertices` 因此提供两个等价绕序（`normal_toward_side`），按
+"法线 = side × axis" 推导逐带选择：
+
+| 带 | axis | side | side × axis | 需要的法线 | 绕序 |
+|---|---|---|---|---|---|
+| X | +X | +Z | **+Y** | +Y | winding A |
+| Y | +Y | +Z | **−X** | +X | 需翻 → winding B |
+| Z | +Z | +X | **−Y** | +Y | 需翻 → winding B |
+
+单测 `AxisGizmoStrips.NormalsMatchRequirementSigned` **断言带符号法线**
+（不是 `fabs`）——因为"法线朝哪一侧"直接决定这条带可见还是消失。
+
+### 7.3 历史教训（首版棱柱方案，已弃）
+
+1. **长轴必须喂 `up`（局部 +Y），不是 `front`。** 喂错了 box 仍是一根长条，
+   但躺在错误的轴上（肉眼像"转了 90°"）。
+2. **半透明 + 纯漫反射会让颜色"看不见"。** 首版只给 `base_color`（纯色漫反射）：
+   杆被太阳照时六面明暗不一，背光面只剩 `ambient(≈0.3) × base_color`，乘
+   alpha 0.2 混到浅灰地面后**色差仅 3/255** —— 画面上是根"灰杆"，看不出红绿蓝。
+   当时靠加 `emissive` 解决；改用条带后**问题自然消失**（条带 FS 无光照，
+   颜色恒定）—— 这也是"少一条复杂通路就少一类坑"的又一例。
+
+### 7.4 自检
+
+- `interface/axis_gizmo_test`（**13 用例**）：轴向 / 起点贴原点 / 宽度 5cm /
+  零厚度 / **带符号法线（三带朝向约定）** / **反转绕序必须反向法线** /
+  顶点构成合法四边形（面积 = 长×宽）/ 颜色常量 / `AxisGizmoName`。
+  **负向验证**均正确 FAIL（X 带绕序写反 / Z 带用旧宽度方向 / 反转绕序未生效 /
+  带宽改 10 倍）。
+- `demo/editor/axis_gizmo_render_test`（headless 像素自证）：
+  ① 三带在地面区域各能找到"该色调占优"像素（margin 55/50/51，阈值 6）；
+  ② 非主通道之和 ≥ 60（半透明生效；不依赖主通道绝对值）；
+  ③ 三带最强像素"分离"仅作**警告**（同点发散的三条带在某些合理机位下会相邻，
+     硬断言会把"换个机位"误判成回归；真正锁住不串位的是 ①②④）；
+  ④ **直接对照**：同场景再渲一张 alpha=1.0，半透明必须更靠近背景色
+  （实测 1881 vs 64178 / 1824 vs 65198 / 1894 vs 65198）；
+  ⑤ **对面视角**三带仍可见（双面自证，实测两边都是 55/50/51）。
+  地平线由图像自身检测（`DetectHorizonY`），**不写死行号** —— 写死的行号会随
+  相机/分辨率改动**静默失效**。
+  **负向验证**：alpha 常量改 1.0 → 正确 FAIL；**只画单面（去掉反向那次）**
+  → 对面视角三带全消失、正确 FAIL。
+- 全量回归：`bazel test //... --jobs=1` → **74/74 通过**（216 cases），
+  所有 gold 图 `max-channel-mean-diff = 0`。
+  Windows 交叉编译（`--config=windows`）通过（顺手修了 `editor_save.cc` 的
+  MinGW `_USE_MATH_DEFINES` 顺序坑 —— 属保存 commit 的既有问题，见 §8）。
+
+### 7.5 已知边界（非缺陷，P8 review 时核实）
+
+1. **单面无厚度**：从背面看本会被裁剪，已用"正反各画一次"解决（见 §7.2b）
+   —— 不关剔除（减少影响面），代价是 draw ×2。
+2. **半透明物体投不透明阴影**：`DrawStrip3D` 不参与阴影 pass（那个 pass 只遍历
+   `cmds.object3d` / `cmds.skinned_mesh`）→ 坐标架**根本不投影**，无此问题。
+3. **顺序问题**：条带走全局 `GL_BLEND`（`Render()` 入口开启），经典
+   `SRC_ALPHA/ONE_MINUS_SRC_ALPHA` 非交换。三带从同一点发散、几乎不重叠，
+   当前视觉无差别；将来如需真正的顺序无关，那是渲染管线级改动（独立议题）。
+4. **颜色不做 sRGB 解码**：条带色直传 `uColor`。实测在编辑器浅灰地面上三色清晰，
+   故不加。
+
+## 8. 自检记录（开发时实测）
 
 - `model_placement_test`：**12 用例全绿**（含世界轴任意顺序累积、多轴正交归一、
   整圈回位）；**3 项负向验证**均正确 FAIL（退回欧拉角参数化 / pitch 漏转 up /
@@ -227,5 +326,20 @@ bazel test //tools/jpov/demo/editor:all
     假设给了 1.5m，而该资产只有 18cm** → 模型整体出框成空场景（两张图都只剩
     背景，故相同）。这暴露出滑条量纲与资产量纲不匹配的可用性问题，
     已在 §5.1 记录，并把冒烟位移改为按资产尺度取 0.05m。
-- 全量回归：`bazel test //... --jobs=1` → **67/67 通过**（含新增的 drag 归属测试），
-  gold 图零回归（`tools/jpov` 侧未触碰任何既有 gold 或渲染路径）。
+- 全量回归：`bazel test //... --jobs=1` → **74/74 通过（216 cases）**（含新增的
+  drag 归属测试 + 坐标架两项测试），gold 图 `max-channel-mean-diff = 0`
+  （`src/object3d` / `src/renderer.*` / `src/skeleton` 本次**零改动**，
+  见 §7.1 —— 这是"改用条带"换来的最大收益）。
+
+### 8.x MinGW `_USE_MATH_DEFINES` 顺序坑（本次顺手修）
+
+`editor_save.cc` 在 Windows 交叉编译下报 `M_PI` / `M_PI_2` 未声明。
+根因是老坑（PR #90 踩过）：**`_USE_MATH_DEFINES` 必须在首次 include `<cmath>`
+之前定义**才在 MinGW 生效，而该文件经 `mesh_transform.h → geom/math_util.h`
+用到 `M_PI`，系统头先把 `<cmath>` 拉进来了。
+
+修法（与 `render_command.h` / `skeleton_manager.cc` 同款）：在 include 项目头之前
+加 `#ifdef _WIN32 / #define _USE_MATH_DEFINES / #include <cmath> / #endif`。
+
+注：这是**保存 commit 的既有问题**（不是我这次坐标架改动引入的），
+但它让 `--config=windows` 建 `editor_app` 失败，所以在本次一并修掉。

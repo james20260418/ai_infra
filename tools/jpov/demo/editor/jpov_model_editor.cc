@@ -14,13 +14,20 @@
 //   ./tools/jpov/build_jpov_model_editor.sh
 //   → output/jpov_model_editor/jpov_model_editor <gltf/glb 路径>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/editor/editor_app.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/axis_gizmo.h"
+#include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/gltf_saver.h"
 
 namespace {
 
@@ -46,6 +53,48 @@ std::string ParseGltfPath(int argc, char** argv) {
         }
     }
     return path;
+}
+
+// 用纯 loader 加载一份 **CPU 快照**（几何 + 材质贴图路径 + 可选骨架），供保存线程使用。
+//
+// 为什么另读一份：Renderer::LoadGltf 上传 GPU 后不保留 CPU 几何（见 mesh_manager.h），
+// 而保存需要 CPU 顶点。用纯 loader 读一份是最干净的做法（GL-free、与渲染零耦合）。
+// 失败不致命（编辑器仍可交互），但会禁掉保存（save.has_asset() == false）。
+void LoadCpuSnapshot(const std::string& path,
+                     jpov_viewer::SaveController* save) {
+    std::vector<jpov::GltfSaveMesh> meshes;
+    struct Ctx {
+        std::vector<jpov::GltfSaveMesh>* out;
+    } ctx{&meshes};
+    auto cb = [](const jpov::GltfMeshEntry* e, void* user) {
+        Ctx* c = static_cast<Ctx*>(user);
+        jpov::GltfSaveMesh sm;
+        sm.mesh = e->mesh;
+        sm.material = e->material;
+        c->out->push_back(std::move(sm));
+    };
+    if (!jpov::LoadGltfScene(path, cb, &ctx) || meshes.empty()) {
+        LOG(ERROR) << "CPU 快照加载失败（保存将不可用）: " << path;
+        return;
+    }
+
+    std::optional<jpov::SkeletonType> skin;
+    std::vector<jpov::SkeletonType> skins;
+    if (jpov::LoadGltfSkeleton(path, &skins) && !skins.empty()) {
+        skin = skins.front();   // 单骨架假设（与 viewer/editor 一致）
+        LOG(INFO) << "CPU 快照：带骨 " << skin->bone_count() << " 关节";
+    }
+
+    // 取 basename 作资产名（glTF 无“模型名”字段时的稳定默认）。
+    const size_t slash = path.find_last_of("/\\");
+    std::string stem = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    const size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) {
+        stem = stem.substr(0, dot);
+    }
+
+    save->SetAsset(std::move(meshes), std::move(skin), stem);
+    LOG(INFO) << "CPU 快照就绪：" << save->primitive_count() << " 个 primitive";
 }
 
 }  // namespace
@@ -88,6 +137,19 @@ int main(int argc, char** argv) {
     app.ground_mat_  = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad(
         jpov_viewer::kEditorGroundDefault));
+
+    // 世界坐标架：三根 1m 条带（X 红 / Y 绿 / Z 蓝，alpha 0.2），摆在模型处
+    // 并跟随模型平移，供用户目测模型的朝向与尺度。
+    // ⚠️ 用 3D 条带（DrawStrip3D）而非 Object3D 网格 —— 条带 FS 是
+    //    `FragColor = uColor`，alpha 天然生效，**不动 Object3D 着色通路**
+    //（Danis 定调：减少影响面）。几何每帧由 placement_ 推导，无需预注册资源。
+    LOG(INFO) << "坐标架：" << jpov::kAxisGizmoLength << "m 条带 × 3，宽 "
+              << jpov::kAxisGizmoWidth << "m，alpha="
+              << jpov::kAxisGizmoColorX.a;
+
+    // 保存用 CPU 快照 + 原始路径（保存时输出到同目录）。
+    app.source_gltf_path_ = gltf_path;
+    LoadCpuSnapshot(gltf_path, &app.save_);
 
     // 初始视角：目标原点、R 按模型包围盒自适应（退化时退回 DefaultView）。
     app.view_ = jpov_viewer::DefaultView();
