@@ -1,14 +1,18 @@
 // JPOV — FBX 动画/骨架加载器实现（见 fbx_loader.h）。CPU、GL-free，经 ufbx 读文件。
 //
-// 实现只做一件事：把 FBX 的「骨架 + 动画原始全帧 + 帧频」原样抓进 interface/FBXClip。
-// 本步不做重定向 / 重采样 / 播放；那属于基于 FBXClip 的二次开发。
+// 本文件提供两个入口（共用同一套 bone 节点收集/骨架构建）：
+//   - LoadFbxSkeleton   : 只要骨架（rest_offset 归一为米），供跨源对比/渲染/重定向用。
+//   - LoadFbxAnimation  : 「骨架 + 动画原始全帧 + 帧频」→ FBXClip（单位原样透传）。
+// 均不做重定向 / 重采样 / 播放；那属于基于 FBXClip 的二次开发。
 //
-// 具体步骤:
+// 具体步骤（LoadFbxAnimation）:
 //   1. 戴 ufbx load opts（跳过几何大件，只留 node/bone/anim），读文件。
 //   2. 沿 node 树深度优先收集『带 bone 属性』的节点（Skeleton node）当骨架 → 按遍历序给
 //      索引发 SkeletonType: name / parent(沿树向上最近 bone) / rest_offset(local 平移)。
 //   3. 逐帧（k=0..N-1，t=begin+k/fps）对每骨取 ufbx_evaluate_transform(anim,node,t) 的
-//      local 旋转四元数 → 填 SkeletonPose.joint_rotation；根骨平移填 root_offset。
+//      local 旋转，**减去 bind 后**填 SkeletonPose.joint_rotation（相对 bind 的增量，
+//      2026-09-14 修复：此前直接存全量 local 旋转，会与烘焙式的 R(bind) 双倍施加）；
+//      根骨平移填 root_offset。
 //
 // 坐标系/单位（与 JPOV 数据模型对齐, 见 fbx_loader.h「坐标系 / 单位」一段）:
 //   SkeletonPose 存的是相对父的旋转 + 根位移 —— 姿态内容与全局轴无关（角色最终朝哪由放置
@@ -16,9 +20,13 @@
 //   源 FBX 轴/单位原样进 clip（对齐 glTF loader 透传原生单位的惯例）。Mixamo 人形源默认
 //   y-up + cm, 传过即已是 y-up。成功 LOG 里带出源 scene 的 axes.up 与 unit_meters 供 debug。
 
+// <cmath> 前定义 _USE_MATH_DEFINES，否则 MinGW 下 M_PI 未定义(生效太晚)。
+// 与 render_command.h / skeleton_manager.cc 同款保护（本文件被 windows 交叉编译时必需）。
+#define _USE_MATH_DEFINES
+#include <cmath>
+
 #include "tools/jpov/src/fbx_loader.h"
 
-#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -72,6 +80,66 @@ void CollectBoneNodes(const ufbx_node* n, std::vector<const ufbx_node*>* out) {
     }
 }
 
+// 由 bone 节点列表构建 SkeletonType（LoadFbxSkeleton / LoadFbxAnimation 共用）。
+//
+//   unit_scale: rest_offset 的单位换算系数（1.0 = 源单位原样透传；传 unit_meters 则归一为米）。
+//
+// 语义（两处调用共守，2026-09-14 定；与 glTF 侧 LoadGltfSkeleton 同构）：
+//   - joints[i].rest_offset   = 该骨 bind(静止) 的 local 平移 × unit_scale；
+//   - joints[i].bind_rotation = 该骨 bind(静止) 的 local 旋转（Mixamo 源即 PreRotation 的合成）；
+//   - 该骨架在 identity pose 下的形态 ≡ 源文件在「Lcl Rotation 全 0」时求出的姿态。
+void BuildSkeletonFromBoneNodes(const std::vector<const ufbx_node*>& nodes,
+                                float unit_scale,
+                                SkeletonType* out_skel) {
+    CHECK(out_skel != nullptr) << "BuildSkeletonFromBoneNodes: out_skel 不能为空";
+    CHECK_GT(unit_scale, 0.0f)
+        << "BuildSkeletonFromBoneNodes: unit_scale 必须 >0，收到 " << unit_scale;
+
+    const int bone_count = static_cast<int>(nodes.size());
+    out_skel->joints.resize(static_cast<size_t>(bone_count));
+    out_skel->bind_rotation.resize(static_cast<size_t>(bone_count));
+    // 骨 index → 沿树父链里第一个同为 bone 的节点(SkeletonType.joints 索引)。
+    // 遍历序即拓扑序: 父骨必在其子树骨之前已入 nodes(DFS 先父后子)。
+    for (int i = 0; i < bone_count; ++i) {
+        const ufbx_node* b = nodes[i];
+        SkeletonJoint& j = out_skel->joints[i];
+        j.parent = kSkeletonNoParent;
+        // b->local_transform.translation = 相对父的静止(bind)平移 —— 骨长/朝向骨架。
+        const ufbx_vec3& t = b->local_transform.translation;
+        j.rest_offset = Vec3f(static_cast<float>(t.x) * unit_scale,
+                              static_cast<float>(t.y) * unit_scale,
+                              static_cast<float>(t.z) * unit_scale);
+        // bind 朝向 = 该骨静止姿态下相对父的旋转(local_transform.rotation)。
+        // 这是骨架的"bind 朝向"（Mixamo 官方骨架的骨长轴 +Y/手臂朝 ±X 就在这，
+        // 源自 PreRotation 的合成）。它与单位无关（纯旋转），不需换算直接收。
+        {
+            const ufbx_quat& q = b->local_transform.rotation;
+            geom::Quaternion<float> bind(static_cast<float>(q.x),
+                                         static_cast<float>(q.y),
+                                         static_cast<float>(q.z),
+                                         static_cast<float>(q.w));
+            bind.NormalizeInPlace();  // 防御：ufbx 已归一
+            out_skel->bind_rotation[i] = bind;
+        }
+        // 名字原样(debug 比对凭据); 空安全。
+        if (b->name.data != nullptr && b->name.length > 0) {
+            j.name.assign(b->name.data, b->name.length);
+        }
+        // 沿父链找最近的 bone 祖先作为骨架里的 parent。
+        for (const ufbx_node* p = b->parent; p != nullptr; p = p->parent) {
+            if (p->bone == nullptr) continue;  // 跳过非 bone 的空/轴节点
+            // p 必已在本 nodes(收集阶段 DFS 先父后子) → 线性扫(骨少) 找其 index。
+            for (int k = 0; k < i; ++k) {
+                if (nodes[k] == p) {
+                    j.parent = k;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+}
+
 }  // namespace
 
 bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
@@ -100,7 +168,7 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
         return false;
     }
 
-    // ---- 骨架: 收 bone 子树 ----
+    // ---- 骨架: 收 bone 子树（单位原样透传：unit_scale = 1.0）----
     std::vector<const ufbx_node*> nodes;
     CollectBoneNodes(scene->root_node, &nodes);
     if (nodes.empty()) {
@@ -111,48 +179,7 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
 
     const int bone_count = static_cast<int>(nodes.size());
     FBXClip clip;
-    SkeletonType& skel = clip.skeleton;
-    skel.joints.resize(static_cast<size_t>(bone_count));
-    skel.bind_rotation.resize(static_cast<size_t>(bone_count));
-    // 骨 index → 沿树父链里第一个同为 bone 的节点(SkeletonType.joints 索引)。
-    // 遍历序即拓扑序: 父骨必在其子树骨之前已入 nodes(DFS 先父后子)。
-    for (int i = 0; i < bone_count; ++i) {
-        const ufbx_node* b = nodes[i];
-        SkeletonJoint& j = skel.joints[i];
-        j.parent = kSkeletonNoParent;
-        // b->local_transform.translation = 相对父的静止(bind)平移 —— 骨长/朝向骨架。
-        const ufbx_vec3& t = b->local_transform.translation;
-        j.rest_offset = Vec3f(static_cast<float>(t.x), static_cast<float>(t.y),
-                              static_cast<float>(t.z));
-        // bind 朝向 = 该骨静止姿态下相对父的旋转(local_transform.rotation)。
-        // 这是骨架的"bind 朝向"(FBX 的 FBX 官方 Mixamo 骨长轴 +Y/朝 +X 就在这)。
-        // 它与单位无关（纯旋转），故 FBX 的 cm 不需换算直接收。
-        {
-            const ufbx_quat& q = b->local_transform.rotation;
-            geom::Quaternion<float> bind(static_cast<float>(q.x),
-                                         static_cast<float>(q.y),
-                                         static_cast<float>(q.z),
-                                         static_cast<float>(q.w));
-            bind.NormalizeInPlace();  // 防御：ufbx 已归一
-            skel.bind_rotation[i] = bind;
-        }
-        // 名字原样(debug 比对凭据); 空安全。
-        if (b->name.data != nullptr && b->name.length > 0) {
-            j.name.assign(b->name.data, b->name.length);
-        }
-        // 沿父链找最近的 bone 祖先作为骨架里的 parent。
-        for (const ufbx_node* p = b->parent; p != nullptr; p = p->parent) {
-            if (p->bone == nullptr) continue;  // 跳过非 bone 的空/轴节点
-            // p 必已在本 nodes(收集阶段 DFS 先父后子) → 线性扫(骨少) 找其 index。
-            for (int k = 0; k < i; ++k) {
-                if (nodes[k] == p) {
-                    j.parent = k;
-                    break;
-                }
-            }
-            break;
-        }
-    }
+    BuildSkeletonFromBoneNodes(nodes, /*unit_scale=*/1.0f, &clip.skeleton);
 
     // ---- 帧序时基: 数 = floor((end-begin)*fps)+1, t_k = begin + k/fps ----
     const double t_begin = anim->time_begin;
@@ -175,14 +202,23 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
         pose.joint_rotation.resize(static_cast<size_t>(bone_count));
         for (int i = 0; i < bone_count; ++i) {
             const ufbx_node* b = nodes[i];
-            // local 变换(相对父): 每骨该时刻旋转; 根骨平移 → root_offset。
+            // local 变换(相对父): 每骨该时刻的【全量】local 旋转; 根骨平移 → root_offset。
             const ufbx_transform tf = ufbx_evaluate_transform(anim, b, t);
-            geom::Quaternion<float> q(static_cast<float>(tf.rotation.x),
-                                      static_cast<float>(tf.rotation.y),
-                                      static_cast<float>(tf.rotation.z),
-                                      static_cast<float>(tf.rotation.w));
-            q.NormalizeInPlace();  // 保单位(loader 守恒, 防御性)
-            pose.joint_rotation[i] = q;
+            geom::Quaternion<float> full(static_cast<float>(tf.rotation.x),
+                                         static_cast<float>(tf.rotation.y),
+                                         static_cast<float>(tf.rotation.z),
+                                         static_cast<float>(tf.rotation.w));
+            full.NormalizeInPlace();  // 保单位(loader 守恒, 防御性)
+            // pose 语义 = 相对 bind 的【增量】（2026-09-14 修复）：ufbx 的 evaluate
+            // 给的是含静态 bind 朝向的**全量** local 旋转；而 JPOV 烘焙式
+            //   jointLocal = T(rest_offset) · R(bind_rotation) · R(pose)
+            // 要求 pose 为 bind 之上的增量（identity pose ⇒ 源 Lcl Rotation=0 的形态）。
+            // 故取 delta = R(bind)⁻¹ ⊗ R_full —— 结果即"源每帧 Lcl Rotation"的语义。
+            // （旧行为直接存 full → 静态朝向被双倍施加，如肩 115° 级 → 姿态明显歪。）
+            const geom::Quaternion<float>& bind = clip.skeleton.bind_rotation[i];
+            geom::Quaternion<float> delta = bind.Conjugate() * full;
+            delta.NormalizeInPlace();  // 防御：两单位四元数乘积的浮点微偏
+            pose.joint_rotation[i] = delta;
             if (i == 0) {
                 // 根骨(角色骨盆/原点)的动画位移 = root motion; 静止动作恒≈bind 位置。
                 pose.root_offset = Vec3f(static_cast<float>(tf.translation.x),
@@ -201,6 +237,47 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
               << " front=" << AxName(scene->settings.axes.front)
               << " unit_meters=" << scene->settings.unit_meters;
     if (out != nullptr) *out = std::move(clip);
+    ufbx_free_scene(scene);
+    return true;
+}
+
+bool LoadFbxSkeleton(const std::string& path, SkeletonType* out) {
+    CHECK(out != nullptr) << "LoadFbxSkeleton: out 不能为空";
+
+    ufbx_load_opts opts = MakeLoadOpts();
+    ufbx_error err;
+    std::memset(&err, 0, sizeof(err));
+    ufbx_scene* scene = ufbx_load_file(path.c_str(), &opts, &err);
+    if (scene == nullptr) {
+        LOG(ERROR) << "LoadFbxSkeleton: 无法加载 " << path << " — "
+                   << UfbxErrorMessage(&err);
+        return false;
+    }
+
+    std::vector<const ufbx_node*> nodes;
+    CollectBoneNodes(scene->root_node, &nodes);
+    if (nodes.empty()) {
+        LOG(ERROR) << "LoadFbxSkeleton: " << path << " 无 bone(Skeleton) 节点";
+        ufbx_free_scene(scene);
+        return false;
+    }
+
+    // 单位归一：rest_offset × unit_meters → 米（Mixamo cm 源 → ×0.01）。
+    // 归一化是本函数与 LoadFbxAnimation 的刻意差异（后者面向动画素材忠实抓取、原样透传单位）：
+    // 骨架直接使用/跨源对比（对 glb 骨架、Mixamo23 模板等米制骨架）需要统一尺度。
+    const double unit = scene->settings.unit_meters;
+    CHECK_GT(unit, 0.0)
+        << "LoadFbxSkeleton: " << path << " unit_meters 非法: " << unit;
+
+    SkeletonType skel;
+    BuildSkeletonFromBoneNodes(nodes, static_cast<float>(unit), &skel);
+
+    LOG(INFO) << "LoadFbxSkeleton ok: " << path << " bones=" << nodes.size()
+              << " | src axes: right=" << AxName(scene->settings.axes.right)
+              << " up=" << AxName(scene->settings.axes.up)
+              << " front=" << AxName(scene->settings.axes.front)
+              << " unit_meters=" << unit << "（rest_offset 已归一为米）";
+    *out = std::move(skel);
     ufbx_free_scene(scene);
     return true;
 }
