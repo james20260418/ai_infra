@@ -124,6 +124,40 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# AxisGizmo — 世界坐标轴辅助几何（1m X/Y/Z 三色条带，宽 5cm，alpha 0.2）。
+# 纯几何构造（3D 条带顶点，零 GL、零编辑器状态），与 skeleton_mesh 同层：
+# 任何工具想做"画个坐标架"都能复用，不绑在某个 demo 上。
+#
+# ⚠️ 用 **3D 条带（DrawStrip3D）** 而非 Object3D 网格：条带的 FS 是
+#    `FragColor = uColor`，alpha 天然生效 —— 这是刻意选择，为的是
+#    **完全不动 Object3D 的着色通路**（Danis 定调 2026-09-14：减少影响面）。
+# 依赖 render_command 是为了用 Strip3DCommand 的顶点类型（Vec3f）。
+cc_library(
+    name = "axis_gizmo",
+    hdrs = ["axis_gizmo.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pbr_material",
+        ":render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "axis_gizmo_test",
+    srcs = ["axis_gizmo_test.cc"],
+    deps = [
+        ":axis_gizmo",
+        ":pbr_material",
+        ":render_command",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 cc_test(
     name = "skeleton_mesh_test",
     srcs = ["skeleton_mesh_test.cc"],

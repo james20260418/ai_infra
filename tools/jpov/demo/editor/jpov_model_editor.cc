@@ -23,6 +23,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/editor/editor_app.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/axis_gizmo.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/src/gltf_loader.h"
@@ -136,6 +137,15 @@ int main(int argc, char** argv) {
     app.ground_mat_  = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad(
         jpov_viewer::kEditorGroundDefault));
+
+    // 世界坐标架：三根 1m 条带（X 红 / Y 绿 / Z 蓝，alpha 0.2），摆在模型处
+    // 并跟随模型平移，供用户目测模型的朝向与尺度。
+    // ⚠️ 用 3D 条带（DrawStrip3D）而非 Object3D 网格 —— 条带 FS 是
+    //    `FragColor = uColor`，alpha 天然生效，**不动 Object3D 着色通路**
+    //（Danis 定调：减少影响面）。几何每帧由 placement_ 推导，无需预注册资源。
+    LOG(INFO) << "坐标架：" << jpov::kAxisGizmoLength << "m 条带 × 3，宽 "
+              << jpov::kAxisGizmoWidth << "m，alpha="
+              << jpov::kAxisGizmoColorX.a;
 
     // 保存用 CPU 快照 + 原始路径（保存时输出到同目录）。
     app.source_gltf_path_ = gltf_path;

@@ -54,6 +54,7 @@ cc_library(
         ":model_placement",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
         "//tools/jpov/interface:ui",
     ],
     copts = ["-std=c++20"],
@@ -68,6 +69,7 @@ cc_binary(
         ":model_placement",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/src:gltf_loader",
@@ -132,6 +134,29 @@ cc_test(
     ],
 )
 
+# 坐标架渲染自证（headless，需 DISPLAY/Xvfb）：真的画出了三根 1m 杆、
+# 红绿蓝分明、alpha 0.2 半透明（像素不是纯色）。
+# 用像素判定而非看图：看图抓不出"alpha 被写死 1.0"与"三杆颜色串位"。
+cc_test(
+    name = "axis_gizmo_render_test",
+    srcs = ["axis_gizmo_render_test.cc"],
+    deps = [
+        ":editor_app",
+        "//tools/common:utils",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # 端到端验收（headless，需 DISPLAY/Xvfb）：把施加了放置的模型走"保存→重开"链路，
 # 与"原模型带放置渲染"做像素比对（旋转保留的严格判定）。
 # 真资材 pliers.gltf（无骨）；带骨链路由 mesh_transform_test 的共轭一致性覆盖。
@@ -157,3 +182,4 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+

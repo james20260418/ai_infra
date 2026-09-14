@@ -3,6 +3,17 @@
 // 见 editor_save.h 的设计说明。本文件只做：拼路径、起线程、烘放置变换、写 glb、
 // 回填状态。全程 GL-free（不碰渲染器）。
 
+// ⚠️ MinGW(Windows) 下 M_PI/M_PI_2 须在**首次 include <cmath> 前**定义
+// _USE_MATH_DEFINES 才生效：下面经 mesh_transform.h → geom/math_util.h 用到 M_PI，
+// 若被系统头先把 <cmath> 拉进来就晚了。与 render_command.h / skeleton_manager.cc
+// 同款保护（PR #90 踩过同一个坑）。
+#ifdef _WIN32
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES
+#endif
+#include <cmath>
+#endif
+
 #include "tools/jpov/demo/editor/editor_save.h"
 
 #include <string>

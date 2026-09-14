@@ -28,6 +28,8 @@
 #ifndef JPOV_DEMO_EDITOR_APP_H_
 #define JPOV_DEMO_EDITOR_APP_H_
 
+#include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,7 @@
 #include "tools/jpov/demo/editor/editor_save.h"
 #include "tools/jpov/demo/editor/model_placement.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/axis_gizmo.h"
 #include "tools/jpov/interface/ui.h"
 
 namespace jpov_viewer {
@@ -110,7 +113,7 @@ public:
         static constexpr float kBottom     = 18.0f;   // 到屏底留白
         static constexpr float kMarginLeft = 24.0f;   // 到屏左留白
         static constexpr int   kPanelRows  = 6;       // 缩放1+平移3+地面1+保存按钮1
-        static constexpr float kHelpLines  = 5.0f;    // 说明行数（与文案数组同长）
+        static constexpr float kHelpLines  = 6.0f;    // 说明行数（与文案数组同长）
         static constexpr float kHelpLineH  = 24.0f;   // 单行行高（行距放宽，防拥挤）
         static constexpr float kHelpW      = 640.0f;  // 说明区宽（单行内容宽上限）
     };
@@ -130,11 +133,31 @@ public:
                                      float fh) {
         UpdateRotateFromDrag(in, fw, fh);
     }
+    // 坐标架：带 alpha 覆盖地画（测试缝；nullopt = 生产默认 0.2）。
+    // 注意：**绕过 show_axis_gizmo_ 开关**（测试要显式控制画不画）。
+    void DrawAxisGizmoForTest(jpov::RenderCommandList* cmds,
+                              std::optional<float> alpha_override) {
+        const bool saved = show_axis_gizmo_;
+        show_axis_gizmo_ = true;
+        DrawAxisGizmo(cmds, alpha_override);
+        show_axis_gizmo_ = saved;
+    }
 
     // ── 场景状态（main 在 Init() 后一次性装配）──
     jpov::GltfObject gltf_;          // 被编辑的模型
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
     jpov::PBRMaterial ground_mat_;   // 高粗糙灰色地面材质
+
+    // ── 世界坐标架（辅助用户对位，见 interface/axis_gizmo.h）──
+    // 三根 1m 条带（X 红 / Y 绿 / Z 蓝，alpha 0.2 近乎透明），原点在**模型处**
+    // 且跟随模型平移（见 DrawAxisGizmo 注释与 design doc §7.1b）。
+    // ⚠️ 用 **3D 条带**（DrawStrip3D）而不是 Object3D 网格：条带的 FS 是
+    //    `FragColor = uColor`，alpha 天然生效 —— **不需要动 Object3D 的着色通路**
+    //（Danis 定调 2026-09-14：减少影响面）。代价是无厚度，对方向指示够用。
+    //
+    // 开关（默认开）：图形完全由 placement_ 推导，无需预注册资源。
+    // 关掉后可对比"有无坐标架"（也供 headless 单测避免多画三条带）。
+    bool show_axis_gizmo_ = true;
 
     // ── 相机（右键环绕 + 滚轮 zoom；与查看器同一套 ViewConfig）──
     ViewConfig view_;
@@ -233,6 +256,10 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f},
                            /*scale*/  1.0f);
 
+        // 世界坐标架：三根 1m 条带（红绿蓝 alpha 0.2），摆在**模型处**并跟随
+        // 模型平移 —— 用户据此目测模型朝向与尺度是否合理。位置见 DrawAxisGizmo。
+        DrawAxisGizmo(cmds);
+
         // 模型：放置状态 → (center,up,front,scale) → 原样喂给既有绘制指令。
         // 本 PR 的**全部**编辑能力都落在这四行——后端渲染器零改动。
         const DrawPlacement dp = ToDrawParams(placement_);
@@ -247,6 +274,54 @@ public:
     }
 
 private:
+    // 画世界坐标架（三根 1m 条带，红绿蓝 alpha 0.2）。
+    //
+    // 🔑 **原点在模型处、且跟随模型平移**（Danis 确认 2026-09-14）：坐标架的用途
+    //    是给用户目测"模型朝向与尺度"，故必须与模型同处。只取平移、**不取
+    //    旋转/缩放** —— 坐标架表达"世界坐标系"，始终轴对齐在世界轴上。
+    //
+    //    历史（为什么不是 `ground_y_`）：需求原文写"在地面的 quad 同等高度上"，
+    //    首版按字面放在 `(0, ground_y_, 0)` = `(0, -3, 0)`。但地面默认在 -3m 而
+    //    模型在原点 → 坐标架跑到**模型下方 3m、默认视角完全看不见**
+    //（实测红带 margin 仅 3/255，等于没画）。字面正确但用途失效。
+    //
+    // 每帧重建顶点（开销可忽略：3 条带 × 4 顶点 × 2 次）。
+    //
+    // 🔑 **每条带正、反各画一次**（Danis 定档 2026-09-14）：条带是无厚度的单面
+    //    几何，而 `Draw3DCommands` 入口开着 GL_CULL_FACE —— 法线背对相机的
+    //    那一面会被剔除，用户从背面看时带会**整条消失**。把顶点顺序反过来再发
+    //    一条 DrawStrip3D，就得到一条"双面"条带：**任意方向看都可见**。
+    //    代价：draw 次数 ×2。对 3 条细带可忽略。
+    //
+    // alpha_override：**仅测试缝**（nullopt = 用生产常量 0.2）。
+    void DrawAxisGizmo(jpov::RenderCommandList* cmds,
+                       std::optional<float> alpha_override = std::nullopt) {
+        if (!show_axis_gizmo_) return;
+        const DrawPlacement p = ToDrawParams(placement_);
+        const jpov::AxisGizmoStrips s = jpov::MakeAxisGizmoStrips(
+            {p.center.x(), p.center.y(), p.center.z()});
+        // 正反各画一次 → 单面条带变"双面可见"（见上方注释）。
+        const std::array<jpov::Vec3f, 4>* strips[3] = {&s.x, &s.y, &s.z};
+        for (int i = 0; i < 3; ++i) {
+            const std::array<jpov::Vec3f, 4>& v = *strips[i];
+            const jpov::Color c = AxisGizmoColor(i, alpha_override);
+            cmds->DrawStrip3D({v[0], v[1], v[2], v[3]}, c);   // 正向
+            cmds->DrawStrip3D({v[1], v[0], v[3], v[2]}, c);   // 反向
+        }
+    }
+
+    // 轴带颜色（唯一一处取色）。
+    //
+    // `alpha_override` 是**测试缝**：渲染自证需要"同场景不透明 vs 半透明"两张图
+    // 做逐像素对照（证明 alpha 真的生效）。`std::nullopt` = 用常量里的生产值（0.2）。
+    // 用**可选值**而非"负值哨兵"表达"不覆盖"，避免隐式魔法值。
+    static jpov::Color AxisGizmoColor(int i,
+                                      std::optional<float> alpha_override) {
+        jpov::Color c = jpov::AxisGizmoColor(i);
+        if (alpha_override.has_value()) c.a = *alpha_override;
+        return c;
+    }
+
     // 文本测量接线（与查看器同款；UI 内部布局/居中不依赖，但保持一致性）。
     static float EditorTextWidth(const char* text, float font_size,
                                  const char* /*font_alias*/, void* userdata) {
@@ -425,6 +500,7 @@ private:
             "Ctrl + 左键横向拖动 = 模型绕世界 Y 轴旋转（右滑逆时针）",
             "右键拖动 = 旋转视角 · 滚轮 = 缩放视角",
             "底下滑条 = 缩放 / 平移 / 地面高度 · 保存 = 导出编辑后的 glb",
+            "三色坐标架（随模型）：红 = X 轴 · 绿 = Y 轴 · 蓝 = Z 轴（各 1m）",
             "",   // 末行占位：运行时替换为 save_.message()
         };
         static_assert(sizeof(kText) / sizeof(kText[0]) ==
