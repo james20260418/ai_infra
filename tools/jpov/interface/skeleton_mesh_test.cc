@@ -21,6 +21,9 @@
 #include "tools/jpov/interface/mixamo23_skeleton.h"
 #include "tools/jpov/interface/skeleton_mesh.h"
 #include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/src/fbx_loader.h"
+#include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/test/test_utils.h"
 
 namespace {
 
@@ -57,7 +60,7 @@ std::vector<geom::math::Mat4> ComputeJointWorldBind(const SkeletonType& type) {
 int CountDrawableBones(const SkeletonType& type) {
     int cnt = 0;
     for (const auto& j : type.joints) {
-        if (j.rest_offset.Norm() > 1e-8f) {
+        if (j.rest_offset.Norm() >= jpov::kDegenerateRodLength) {
             ++cnt;
         }
     }
@@ -138,7 +141,7 @@ TEST(SkeletonMesh, RodEndpointsMatchJointPositions) {
     size_t rod_index = 0;
     for (size_t j = 0; j < type.joints.size(); ++j) {
         const Vec3f& off = type.joints[j].rest_offset;
-        if (off.Norm() <= 1e-8f) {
+        if (off.Norm() < jpov::kDegenerateRodLength) {
             continue;  // 零长骨无杆
         }
 
@@ -311,6 +314,163 @@ TEST(SkeletonMesh, RootRodThinnerThanOthers) {
         << "根杆半宽应为 radius/3（直径 = 其它骨的 1/3）";
     EXPECT_NEAR(child_max, std::sqrt(2.0f) * kR, 1e-4f)
         << "非根杆半宽应保持 radius";
+}
+
+// 顶层零长包装 Root（如 glTF Tripo / 本仓库 Mixamo23）时，「根位置矢量杆收窄 1/3」
+// 必须仍然生效 —— 收窄的是**沿根链的第一根可画杆**，不是"parent=无"那个关节本身。
+//
+// 背景（2026-09-14 Danis 报的 bug）：Mixamo23Skeleton / mixamo_male.glb 的 idx 0 是
+// 零长包装 Root（offset=0，本身不画杆），真正从骨架原点指向骨盆的杆是它的子关节 Hips。
+// 旧实现按 `parent == kSkeletonNoParent` 判根杆 → 对这类资产**静默失效**，
+// Hips 杆按普通骨画（观察器里蓝骨"root 没有变细"就是这么来的）。
+TEST(SkeletonMesh, RootRodThinEvenWithZeroLengthWrapperRoot) {
+    // 三骨：Root(包装, offset=0) → Hips(沿 +Y 0.5) → Spine(沿 +Y 0.4)。
+    SkeletonType type;
+    type.joints.resize(3);
+    type.joints[0].parent = jpov::kSkeletonNoParent;
+    type.joints[0].rest_offset = Vec3f(0.0f, 0.0f, 0.0f);  // 零长包装层
+    type.joints[0].name = "";
+    type.joints[1].parent = 0;
+    type.joints[1].rest_offset = Vec3f(0.0f, 0.5f, 0.0f);  // 根位置矢量
+    type.joints[1].name = "mixamorig:Hips";
+    type.joints[2].parent = 1;
+    type.joints[2].rest_offset = Vec3f(0.0f, 0.4f, 0.0f);  // 真骨骼
+    type.joints[2].name = "mixamorig:Spine";
+    type.bind_rotation.clear();
+    type.Validate();
+
+    constexpr float kR = 0.06f;
+    const MeshData mesh =
+        jpov::BuildBoneMeshInBoneSpace(type, SkeletonPose::Identity(3), kR);
+    // 零长包装 Root 不画杆 → 只有 Hips / Spine 两杆。
+    ASSERT_EQ(mesh.positions.size(), 48u);
+
+    const auto max_perp_from_y_axis = [&mesh](size_t base) {
+        float m = 0.0f;
+        for (size_t k = 0; k < 24; ++k) {
+            const Vec3f& v = mesh.positions[base + k];
+            m = std::max(m, std::sqrt(v.x() * v.x() + v.z() * v.z()));
+        }
+        return m;
+    };
+    // 期望值用**规格硬编码**（1/3），不引用 kRootRodRadiusScale（防恒真断言）。
+    EXPECT_NEAR(max_perp_from_y_axis(0), std::sqrt(2.0f) * kR * kRootRodRadiusScaleSpec,
+                1e-4f)
+        << "🔴 零长包装 Root 之下那根（Hips = 根位置矢量）也应收窄为 radius/3";
+    EXPECT_NEAR(max_perp_from_y_axis(24), std::sqrt(2.0f) * kR, 1e-4f)
+        << "再下一根（Spine = 真骨）应保持 radius";
+}
+
+// ⚠️ 真实 bug 的准确形状（2026-09-14 Danis 报）：glb 顶层 Root 不是"零长"，而是
+// **4.5mm 的导出残差**（mixamo_male.glb 实测 0.00452629m）。这种"非零但退化"的杆
+// 会抢走根位置矢量的身份 → 变细的是这根看不见的小残杆，真正的 Hips 杆仍是普通粗细。
+// 故退化阈值（kDegenerateRodLength=1cm）必须同时用于"跳不跳过"与"谁是根杆"。
+TEST(SkeletonMesh, RootRodThinWithTinyStubRoot) {
+    // 结构同 mixamo_male.glb：Root(4.5mm 残差) → Hips(0.5) → Spine(0.4)。
+    SkeletonType type;
+    type.joints.resize(3);
+    type.joints[0].parent = jpov::kSkeletonNoParent;
+    type.joints[0].rest_offset = Vec3f(0.0f, 0.0045263f, 0.0f);  // 退化残差
+    type.joints[0].name = "Root";
+    type.joints[1].parent = 0;
+    type.joints[1].rest_offset = Vec3f(0.0f, 0.5f, 0.0f);
+    type.joints[1].name = "mixamorig:Hips";
+    type.joints[2].parent = 1;
+    type.joints[2].rest_offset = Vec3f(0.0f, 0.4f, 0.0f);
+    type.joints[2].name = "mixamorig:Spine";
+    type.bind_rotation.clear();
+    type.Validate();
+
+    constexpr float kR = 0.06f;
+    const MeshData mesh =
+        jpov::BuildBoneMeshInBoneSpace(type, SkeletonPose::Identity(3), kR);
+    ASSERT_EQ(mesh.positions.size(), 48u)
+        << "退化残差杆不应生成几何 → 只剩 Hips/Spine 两杆";
+
+    const auto max_perp_from_y_axis = [&mesh](size_t base) {
+        float m = 0.0f;
+        for (size_t k = 0; k < 24; ++k) {
+            const Vec3f& v = mesh.positions[base + k];
+            m = std::max(m, std::sqrt(v.x() * v.x() + v.z() * v.z()));
+        }
+        return m;
+    };
+    EXPECT_NEAR(max_perp_from_y_axis(0), std::sqrt(2.0f) * kR * kRootRodRadiusScaleSpec,
+                1e-4f)
+        << "🔴 Hips（真正的根位置矢量）应收窄为 radius/3 —— 不能被 4.5mm 残差抢走身份";
+    EXPECT_NEAR(max_perp_from_y_axis(24), std::sqrt(2.0f) * kR, 1e-4f)
+        << "Spine（真骨）应保持 radius";
+}
+
+// 一根杆的"截面半宽" = 顶点到**该杆自身轴线**的最大垂直距离（正确实现 = √2·杆半宽）。
+// 轴线 = 父关节位置 → 本关节位置（由 bind JW 算）。对任意骨朝向都成立 ——
+// ⚠️ 不能像合成用例那样"量到 Y 轴的距离"：glb 的 Hips 杆被 Root 的 bind 旋转掰了角度，
+//    量到 Y 轴会把轴向长度也算进去（实测 0.0270 vs 真值 0.0236，误判为"没收窄"）。
+float RodHalfDiagonal(const SkeletonType& type,
+                      const std::vector<geom::math::Mat4>& jw,
+                      const MeshData& mesh, size_t joint, size_t base) {
+    const int par = type.joints[joint].parent;
+    const Vec3f a = (par == jpov::kSkeletonNoParent)
+                        ? Vec3f(0.0f, 0.0f, 0.0f)
+                        : Vec3f(jw[static_cast<size_t>(par)].m[12],
+                                jw[static_cast<size_t>(par)].m[13],
+                                jw[static_cast<size_t>(par)].m[14]);
+    const Vec3f b(jw[joint].m[12], jw[joint].m[13], jw[joint].m[14]);
+    const Vec3f axis = (b - a).Unit();
+    float m = 0.0f;
+    for (size_t k = 0; k < 24; ++k) {
+        const Vec3f d = mesh.positions[base + k] - a;
+        const Vec3f perp = d - axis * d.Dot(axis);
+        m = std::max(m, perp.Norm());
+    }
+    return m;
+}
+
+// 真实资产核对（Danis 报的原始场景：蓝骨 root 不变细）：
+// **可见的根位置矢量杆 = mixamorig:Hips 的杆**（fbx/glb/Mixamo23 三套资产都是它），
+// 它必须收窄为 radius/3。这条按**骨名**锁定（而不是"第一根杆"—— 那样会被 glb 的
+// 4.5mm Root 残差骗过：残差自己也"是根杆且细"，但用户看到的是 Hips 那根）。
+TEST(SkeletonMesh, HipsRodThinOnRealSkeletons) {
+    constexpr float kR = 0.05f;
+    const auto check_hips = [kR](const char* tag, const SkeletonType& type) {
+        const MeshData mesh = jpov::BuildBoneMeshInBoneSpace(
+            type, SkeletonPose::Identity(type.bone_count()), kR);
+        int hips = -1;
+        for (size_t j = 0; j < type.joints.size(); ++j) {
+            if (type.joints[j].name == "mixamorig:Hips") {
+                hips = static_cast<int>(j);
+                break;
+            }
+        }
+        ASSERT_GE(hips, 0) << tag << " 应含 mixamorig:Hips";
+        // Hips 杆在 mesh 里的顶点基址 = 24 ×（下标在它之前、**已被画出来**的杆数）。
+        size_t drawn_before = 0;
+        for (int j = 0; j < hips; ++j) {
+            if (type.joints[static_cast<size_t>(j)].rest_offset.Norm() >=
+                jpov::kDegenerateRodLength) {
+                ++drawn_before;
+            }
+        }
+        const std::vector<geom::math::Mat4> jw = ComputeJointWorldBind(type);
+        EXPECT_NEAR(RodHalfDiagonal(type, jw, mesh, static_cast<size_t>(hips),
+                                    24u * drawn_before),
+                    std::sqrt(2.0f) * kR * kRootRodRadiusScaleSpec, 1e-4f)
+            << "🔴 " << tag
+            << " 的 mixamorig:Hips（可见的根位置矢量杆）应收窄为 radius/3";
+    };
+
+    check_hips("Mixamo23Skeleton", jpov::Mixamo23Skeleton(1.75f));
+
+    std::vector<SkeletonType> skins;
+    ASSERT_TRUE(jpov::LoadGltfSkeleton(
+        jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb", &skins));
+    ASSERT_FALSE(skins.empty());
+    check_hips("mixamo_male.glb", skins[0]);
+
+    SkeletonType fbx;
+    ASSERT_TRUE(jpov::LoadFbxSkeleton(
+        jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx", &fbx));
+    check_hips("hip_hop_dance.fbx", fbx);
 }
 
 // 第二个骨架（程序化直线骨链）验证通用性：非 Mixamo 骨架也成立。

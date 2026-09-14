@@ -161,11 +161,19 @@ cc_test(
 cc_test(
     name = "skeleton_mesh_test",
     srcs = ["skeleton_mesh_test.cc"],
+    # 真实资产回归：mixamo_male.glb（顶层 Root 是 4.5mm 导出残差 → 讨要"根杆收窄"）。
+    data = [
+        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
     deps = [
         ":mixamo23_skeleton",
         ":skeleton_mesh",
         ":skeleton_types",
         "//geom/math:mat4",
+        "//tools/jpov/src:fbx_loader",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/test:test_utils",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],
@@ -213,6 +221,35 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":skeleton_types",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# AnimationSampler — 动画素材的【时间采样】（某时刻 → 一个 SkeletonPose）
+# FBXClip 的取帧原语：帧网格归属 + 逐骨球面插值 + 循环回绕。供 FBX 观察器逐帧取姿、
+# 后续 retarget 按时间取源姿态同款（纯 CPU / GL-free，见 animation_sampler.h 头注）。
+cc_library(
+    name = "animation_sampler",
+    hdrs = ["animation_sampler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":animation_clip",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "animation_sampler_test",
+    srcs = ["animation_sampler_test.cc"],
+    deps = [
+        ":animation_sampler",
+        "//geom/common:quaternion",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],
 )
@@ -310,6 +347,7 @@ cc_library(
         "ui.h",
         "skeleton_types.h",
         "animation_clip.h",
+        "animation_sampler.h",
         "text3d_util.h",
     ],
     visibility = ["//visibility:public"],
@@ -325,6 +363,7 @@ cc_library(
         ":ui",
         ":skeleton_types",
         ":animation_clip",
+        ":animation_sampler",
         ":text3d_util",
     ],
 )
