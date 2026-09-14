@@ -6,9 +6,13 @@
 //      否则两帧会渲成同一张图）；
 //   ③ rest 模式（identity 位姿）→ 必须与 ① 不同（证明 rest 复选框真的换了位姿来源）。
 //
-// 另外一道可见性门禁：场景里唯一的红色物体就是火柴人，故全图"强红"像素数若塌向 0，
-// 说明火柴人没渲出来（mesh 生成失败/被剔除/链路断）。用整图计数而非 ROI：
-// headless 出图不画面板与文字，没有任何其它红色来源（轴标签之类都在面板/交互路径里）。
+// 另外两道门禁（本 PR 新增的 glb 对照组）：
+//   ④ 传 glb → 「两者并列」渲一帧 → 与第二张 gold 比对；并统计**强蓝像素**：
+//      无蓝物体的基线图必须 ~0、含蓝骨人的图必须明显 >0（蓝骨真渲出来了）。
+// 可见性门禁（基础）：场景里唯一的红色物体就是火柴人，故全图"强红"像素数若塌向 0，
+// 说明火柴人没渲出来（headless 出图不画面板与文字，没有任何其它红色来源）。
+// ⚠️ 蓝色不能用同款"全图计数"判：天空本身就是蓝的 —— 故用**严格蓝**判据
+//    (b>150 && r<120 && g<140)，实测天空最蓝像素 r=148 被排掉、蓝骨像素 ≈(21,20,199)。
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -41,6 +45,20 @@ std::string GoldPath() {
            jpov_fbx_pose_gold::GetGoldRelPath();
 }
 
+std::string GlbGoldPath() {
+    const char* e = std::getenv("TEST_SRCDIR");
+    if (e) {
+        std::string s = e;
+        if (!s.empty() && s.back() != '/') {
+            s.push_back('/');
+        }
+        return s + "__main__/tools/jpov/test" +
+               jpov_fbx_pose_gold::GetGlbNaiveGoldRelPath();
+    }
+    return jpov::GetProjectRoot() + "tools/jpov/test" +
+           jpov_fbx_pose_gold::GetGlbNaiveGoldRelPath();
+}
+
 // 整图"强红"像素数（火柴人是纯红材质，光照后仍远高于其它物体）。
 long long CountStrongRedPixels(const std::string& png) {
     int w = 0;
@@ -54,6 +72,26 @@ long long CountStrongRedPixels(const std::string& png) {
         const int g = px[i * 4 + 1];
         const int b = px[i * 4 + 2];
         if (r > 120 && g < 90 && b < 90) {
+            ++n;
+        }
+    }
+    stbi_image_free(px);
+    return n;
+}
+
+// 整图"严格蓝"像素数（火柴人蓝骨人；判据需排除天空 —— 见文件头注释）。
+long long CountStrongBluePixels(const std::string& png) {
+    int w = 0;
+    int h = 0;
+    int c = 0;
+    unsigned char* px = stbi_load(png.c_str(), &w, &h, &c, 4);
+    CHECK(px != nullptr) << "无法读取 PNG: " << png;
+    long long n = 0;
+    for (int i = 0; i < w * h; ++i) {
+        const int r = px[i * 4 + 0];
+        const int g = px[i * 4 + 1];
+        const int b = px[i * 4 + 2];
+        if (b > 150 && r < 120 && g < 140) {
             ++n;
         }
     }
@@ -120,19 +158,32 @@ int main() {
     const std::string out_gold_frame = outdir + "frame_gold_time.png";
     const std::string out_other_frame = outdir + "frame_other_time.png";
     const std::string out_rest_pose = outdir + "rest_pose.png";
+    const std::string out_glb_both = outdir + "glb_both.png";
 
-    // ── 三帧都由观察器本体渲出（同一 Config / 同一 OneIteration）──
+    // ── 四帧都由观察器本体渲出（走共用的 MakeApp，与 generator 零分叉）──
+    //   ⚠️ 分两个 App："无 glb"与"有 glb"是**两种机位**（LoadGltf 会按并列重算初始机位），
+    //   基础 gold 必须与 generator 的①同构（无 glb），否则会被相机差异误报为回归。
     {
-        JPOV::Config cfg = jpov_fbx_pose_gold::MakeConfig("JPOV FBX Pose Gold Test");
-        jpov_fbx_viewer::FbxViewerApp app(cfg);
-        jpov_fbx_pose_gold::SetupApp(&app, jpov_fbx_pose_gold::kGoldTimeSeconds,
-                                     /*rest_pose*/ false);
-        jpov_fbx_pose_gold::RenderFrame(&app, out_gold_frame.c_str());
-        app.anim_time_seconds_ = jpov_fbx_pose_gold::kOtherTimeSeconds;
-        jpov_fbx_pose_gold::RenderFrame(&app, out_other_frame.c_str());
-        app.rest_pose_mode_ = true;
-        jpov_fbx_pose_gold::RenderFrame(&app, out_rest_pose.c_str());
-        app.Finalize();
+        std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+            jpov_fbx_pose_gold::MakeApp("JPOV FBX Pose Gold Test",
+                                        jpov_fbx_pose_gold::kGoldTimeSeconds,
+                                        /*rest_pose*/ false, /*glb_path*/ "",
+                                        jpov_fbx_viewer::kFbxOnly);
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_gold_frame.c_str());
+        app->anim_time_seconds_ = jpov_fbx_pose_gold::kOtherTimeSeconds;
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_other_frame.c_str());
+        app->rest_pose_mode_ = true;
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_rest_pose.c_str());
+    }
+    {
+        // ④ 对照组：含 glb（两者并列）同帧 → 蓝骨人（glb rest 被同一份 pose 直驱）。
+        std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+            jpov_fbx_pose_gold::MakeApp("JPOV FBX Pose Gold Test",
+                                        jpov_fbx_pose_gold::kGoldTimeSeconds,
+                                        /*rest_pose*/ false,
+                                        jpov_fbx_pose_gold::GlbPath(),
+                                        jpov_fbx_viewer::kBoth);
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_glb_both.c_str());
     }
 
     // ── 可见性门禁：火柴人必须渲出来了 ──
@@ -166,6 +217,36 @@ int main() {
                   << " 差>30 像素数=" << moved_px;
         CHECK_GT(max_abs, 60) << "勾选 rest 后画面没变（位姿来源没切？）";
         CHECK_GT(moved_px, 100) << "rest 与动画帧变化像素过少: " << moved_px;
+    }
+
+    // ── glb 对照组第四帧：gold 比对 + 蓝骨可见性门禁 ──
+    {
+        const std::string glb_gold_path = GlbGoldPath();
+        {
+            FILE* f = std::fopen(glb_gold_path.c_str(), "rb");
+            CHECK(f != nullptr) << "glb 对照组 gold 缺失，请先跑 generator: "
+                                << glb_gold_path;
+            std::fclose(f);
+        }
+        // 蓝骨可见性：无蓝物体的基线图应 ~0，含蓝骨人的图应明显 >0。
+        const long long blue_baseline = CountStrongBluePixels(out_gold_frame);
+        const long long blue_both = CountStrongBluePixels(out_glb_both);
+        LOG(INFO) << "蓝骨可见性: 基线(仅红)= " << blue_baseline
+                  << "，两者并列= " << blue_both;
+        CHECK_LT(blue_baseline, 10)
+            << "基线图（没传蓝骨人）不应有严格蓝像素，实测 " << blue_baseline;
+        CHECK_GT(blue_both, 15)
+            << "🔴 蓝骨人未渲出（严格蓝像素仅 " << blue_both << "）";
+
+        constexpr double kGlbGoldThreshold = 25.0;
+        const double glb_diff =
+            jpov::CompareLightMeanRoiPng(glb_gold_path, out_glb_both, 8, 8);
+        LOG(INFO) << "GLB GOLD COMPARE: max-channel-mean-diff = " << glb_diff
+                  << " (threshold=" << kGlbGoldThreshold << ")";
+        if (glb_diff < 0 || glb_diff > kGlbGoldThreshold) {
+            LOG(ERROR) << "GLB GOLD COMPARE FAILED: " << glb_diff;
+            return 1;
+        }
     }
 
     // ── gold 平均色 ROI 对比（同其它 gold 门禁）──

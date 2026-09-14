@@ -12,7 +12,10 @@ cc_binary(
         "jpov_fbx_pose_gold_generator.cc",
         "jpov_fbx_pose_gold_common.h",
     ],
-    data = ["//tools/jpov/test/animations:hip_hop_dance_fbx_data"],
+    data = [
+        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
     deps = [
         "//tools/jpov/demo/fbx_viewer:fbx_viewer_app",
         "//tools/jpov/include/jpov:jpov",
@@ -32,7 +35,9 @@ cc_test(
     ],
     data = [
         "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
         ":fbx_dance_frame_1280x720.png",
+        ":fbx_pose_glb_naive_1280x720.png",
     ],
     deps = [
         "//tools/jpov/demo/fbx_viewer:fbx_viewer_app",

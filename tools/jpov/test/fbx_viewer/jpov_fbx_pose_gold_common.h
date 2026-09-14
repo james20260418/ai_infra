@@ -12,6 +12,7 @@
 #ifndef JPOV_TEST_FBX_VIEWER_JPOV_FBX_POSE_GOLD_COMMON_H_
 #define JPOV_TEST_FBX_VIEWER_JPOV_FBX_POSE_GOLD_COMMON_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,12 @@ namespace jpov_fbx_pose_gold {
 // gold image 仓库相对路径（generator 写入、test 读取比对）。
 inline std::string GetGoldRelPath() {
     return "/fbx_viewer/fbx_dance_frame_1280x720.png";
+}
+
+// 第二张 gold：传了 glb 的「对照组」（两者并列，红左/蓝右）——蓝 = glb rest 骨架
+// 被同一份 fbx pose **数值直搬**（无重定向）驱动。
+inline std::string GetGlbNaiveGoldRelPath() {
+    return "/fbx_viewer/fbx_pose_glb_naive_1280x720.png";
 }
 
 // 出图尺寸（winfo，单位像素）。与其它 gold 同规格：3D FBO 恒为 1280×720，
@@ -45,6 +52,11 @@ inline std::string FbxPath() {
     return jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx";
 }
 
+// 可选目标骨架 glb（Tripo 23 骨；同上经 Bazel data 提供）。
+inline std::string GlbPath() {
+    return jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb";
+}
+
 // 出图用配置：headless（不弹窗）、1280×720、60fps、只注册出图需要的拉丁字体
 // （headless 不画面板，用不到 CJK）。
 // 说明：JPOV 不提供隐式默认字体，未注册字体则 Init 失败 —— 故这里显式给一条。
@@ -62,16 +74,26 @@ inline JPOV::Config MakeConfig(const char* title) {
     return cfg;
 }
 
-// 装配出图场景（须 app 已用 MakeConfig 构造）：Init + 读 FBX + 定时刻 + 关面板。
-// Pre-condition: app != nullptr；FBX 路径可读且带动画。
-inline void SetupApp(jpov_fbx_viewer::FbxViewerApp* app /*inout*/,
-                     double time_seconds, bool rest_pose) {
-    CHECK(app != nullptr) << "SetupApp: app 不能为空";
+// 造并装配一个出图用 App（generator 与 test **共用本入口**，防分叉）。
+//   glb_path 非空 → 同时装目标骨架（蓝）并选定 mesh_source；
+//   注意：LoadGltf 会按“两者并列”重算初始机位，故“含 glb”与“不含 glb”是两种不同机位。
+// Pre-condition: FBX 路径可读且带动画；glb_path 非空时可读且有 skin。
+inline std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> MakeApp(
+    const char* title, double time_seconds, bool rest_pose,
+    const std::string& glb_path, int mesh_source) {
+    JPOV::Config cfg = MakeConfig(title);
+    std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app(
+        new jpov_fbx_viewer::FbxViewerApp(cfg));
     app->SetShowPanel(false);  // 出图是纯 3D 截图，不画面板、不消费输入
     app->Init();
     CHECK(app->LoadFbx(FbxPath())) << "装配 FBX 失败: " << FbxPath();
+    if (!glb_path.empty()) {
+        CHECK(app->LoadGltf(glb_path)) << "装配目标骨架 glb 失败: " << glb_path;
+        app->mesh_source_ = mesh_source;  // 覆盖 LoadGltf 的默认（kBoth）
+    }
     app->anim_time_seconds_ = time_seconds;
     app->rest_pose_mode_    = rest_pose;
+    return app;  // 析构时 JPOV::~JPOV 会 Finalize()
 }
 
 // 渲一帧到 out_png（走观察器自己的 OneIteration，零分叉）。

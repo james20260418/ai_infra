@@ -17,7 +17,10 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 cc_library(
     name = "fbx_viewer_app",
-    hdrs = ["fbx_viewer_app.h"],
+    hdrs = [
+        "fbx_viewer_app.h",
+        "skeleton_pose_transfer.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:view_config",
@@ -28,6 +31,7 @@ cc_library(
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:fbx_loader",
+        "//tools/jpov/src:gltf_loader",
     ],
     copts = ["-std=c++20"],
 )
@@ -40,6 +44,32 @@ cc_binary(
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",
     ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 目标骨架 pose 直搬（无重定向对照组）单测：骨名匹配 / 未命中保持 identity /
+# 命中骨数值**原样**（不含任何重定向校正）—— 纯 CPU。
+cc_test(
+    name = "skeleton_pose_transfer_test",
+    srcs = ["skeleton_pose_transfer_test.cc"],
+    data = [
+        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
+    deps = [
+        ":fbx_viewer_app",
+        "//geom/common:quaternion",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:fbx_loader",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/test:test_utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",

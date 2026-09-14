@@ -31,15 +31,16 @@ retarget（M4）之前有一步「**先别上真皮**」：把 FBX 动作套到*
 
 | 项 | 值 |
 |---|---|
-| 输入 | 一个**带动画**的 `.fbx` 路径（命令行参数） |
+| 输入 | 一个**带动画**的 `.fbx` 路径（命令行参数）；**可选**第二个位置参数 = 一个 `.glb`（目标骨架，见 §4） |
 | 场景 | 标准晴天（`MakeLighting(90°, turb=2)` 天光 + 太阳 + 环境光）+ 浅灰地面板（顶面 y=0，脚踩地） |
 | 相机 | 右键 drag 环绕、滚轮 zoom（与模型查看器同一套 `ViewConfig`/`ApplyInput`），初始距离按火柴人包围盒自适应 |
 | 渲染内容 | **当前帧的骨人（火柴人）**：每根骨一根细红杆，根杆收窄 1/3（区分 root） |
 | 播放 | 按**源 FBX 的 fps** 播放：60fps 渲染下每帧推进 1/60 秒，帧间逐骨 **Slerp** 插值；**循环**（末帧回绕首帧） |
 | 暂停 | 底部**按钮**：按下后**主频的时间停止更新**（画面定格在当前帧），按钮变「继续播放」 |
 | 模式 | 底部**复选框**「固定 rest 位姿(identity)」：勾上 = 不看动画，固定 `pose = identity` 渲骨架 rest（T-pose）形态；此时时间同样不推进，取消勾选后从停住的时刻继续 |
-| 状态行 | 帧号 / 总帧数 / 源帧频 / 动画时刻 / 播放 or 已暂停 |
-| headless 出图 | `--shot <png> [--time <秒>｜--frame <帧号>] [--rest]`：指定时刻的单帧截图（AI 自查/留证；与交互共用同一条 `OneIteration`，零分叉） |
+| 状态行 | 帧号 / 总帧数 / 源帧频 / 动画时刻 / 播放态（+ 传了 glb 时蓝骨对照信息与骨名命中数） |
+| 对照模式（§4） | 传了 glb 后多一个「mesh 来源」下拉：看红（fbx 源）/ 蓝（glb rest 无重定向）/ 两者并列 |
+| headless 出图 | `--shot <png> [--time <秒>｜--frame <帧号>] [--mesh 0|1|2] [--rest]`：与交互共用同一条 `OneIteration`（零分叉） |
 
 ---
 
@@ -110,12 +111,13 @@ MeshData --(UpdateMesh)--> DrawObject3D`。
 ```
 tools/jpov/demo/fbx_viewer/
   fbx_viewer_app.h            # 渲染核心 App（场景 + 位姿采样 + 播放面板 + 时间推进）
+  skeleton_pose_transfer.h(+_test.cc)  # 目标骨架 pose 直搬（无重定向对照组，纯 CPU）
   jpov_fbx_viewer.cc          # 主程序（CLI 解析 + 装配 + 交互/出图分发）
   fbx_viewer_playback_test.cc # 播放控制白盒回归（纯 CPU：暂停/rest 冻结时间、位姿来源）
   BUILD
 tools/jpov/interface/animation_sampler.h(+_test.cc)   # 取帧原语（GL-free、可单测）
 tools/jpov/test/jpov_animation_sampler_test.cc        # 真资产 + ufbx 交叉验证
-tools/jpov/test/fbx_viewer/                           # 固定帧渲染 gold（generator/test/PNG）
+tools/jpov/test/fbx_viewer/                           # 固定帧渲染 gold（两份：fbx / +glb 对照）
 tools/jpov/build_jpov_fbx_viewer.sh                   # 编译 + 拷字体 + 打印用法
 ```
 
@@ -127,7 +129,67 @@ tools/jpov/build_jpov_fbx_viewer.sh                   # 编译 + 拷字体 + 打
 
 ---
 
-## 4. 已知取舍 / 边界
+## 4. 可选「对照组」：传一个 glb 后看"不做重定向"到底错在哪（2026-09-14 Danis 需求）
+
+**需求原话**：用户可以额外指定 glb 路径（optional）；指定后从 glb 加载 rest skeleton（**蓝**），
+加一个多选项「mesh 来源：1. fbx rest skl 的 mesh，2. glb rest skl 的 mesh，3. …」；
+目的：**验证「不加重定向时，把 fbx 的 lcl rotation pose 直接上到 glb rest 骨架上会不对」**。
+
+### 4.1 做法：消融实验，不是重定向
+
+| 骨人 | 骨架（rest 形状） | 驱动它的 pose | 颜色 |
+|---|---|---|---|
+| 源 | `LoadFbxSkeleton`（fbx，65 骨） | fbx 自己的动画（`SampleClipPose`） | 红 |
+| 目标（对照） | `LoadGltfSkeleton`（glb，23 骨） | **同一份 pose 按骨名数值直搬**（`TransferPoseByNameNoRetarget`） | 蓝 |
+
+面板「mesh 来源」下拉：`fbx rest（红，源）` / `glb rest（蓝，无重定向）` / `两者并列（红左/蓝右，默认）`。
+两根骨人都只被 **旋转（pose）** 驱动、各自用自己的 rest 形状 ⇒ 把"动作对不对"与
+"mesh 蒙皮对不对"解耦，正是 retarget 设计文档 §6.4「先上骨人」的用法。
+
+`TransferPoseByNameNoRetarget` 的语义（**刻意直搬**，函数名即警示）：按骨名匹配；
+命中则**数值原样**写入（不转轴、不共轭）；未命中 / 源走 rest 的骨保持 identity；
+`root_offset` 不搬（跨骨架单位/比例无意义、火柴人也不用它）。
+
+### 4.2 为什么这个"错"是可预期的（实测数据）
+
+pose 存在**每个关节自己的局部坐标系**里，而两个 rig 的局部帧差很大：
+
+| 量（glb 23 骨 vs fbx 65 骨，按骨名映射 22/23） | 实测（最差几根） |
+|---|---|
+| 局部帧差（bind 朝向差） | LeftArm **179.6°**、LeftShoulder **176.9°**、Hips 113.4°、Spine 86.0°、UpLeg 85.9° |
+| 世界 rest 朝向差（沿各自树累积） | LeftShoulder 177.8°、RightForeArm 110.7°、LeftFoot 109°、脊柱链 ~89.9° |
+| 骨**方向**差（父→子段的世界指向） | 手臂链 74~110°、脊柱链 5~13°、小腿/脚 1~8° |
+
+⇒ 同一个"抬 30°"的数字，两边绕的是**物理上不同的轴**；"两边静止时都≈T-pose"救不了这件事
+（T-pose 相似说的是**静止时的骨方向**，不是 pose 写在哪套轴上）。这正是设计文档 §0.1 记的
+M1「姿态全乱」根因。
+
+把"错"做成可执行断言：`skeleton_pose_transfer_test` 拿真实资产跑一次直搬，量
+"骨段方向 vs 源"的偏差 —— 实测 **最大 102.3°（RightArm）、10 根骨 >30°**，断言它必须很大
+（若将来有人把重定向塞进这个函数，该用例会失败并提醒改错地方：正式重定向属 M4 的另一个函数）。
+
+### 4.3 渲染验证
+
+- 视觉：`test/fbx_viewer/fbx_pose_glb_naive_1280x720.png`（两者并列）—— 肉眼可看：
+  identity 位姿下红蓝**都是规范 T-pose**（证明坏的不是 glb 的 rest），一旦上 pose，蓝骨
+  的四肢扭向错处（手臂收到胸前/腿打叉），而红骨是正常舞姿。
+- 机器门禁（`jpov_fbx_pose_gold_test`）：
+  · 新 gold 比对 diff=0；
+  · **严格蓝像素**门禁（判据 `b>150 && r<120 && g<140`；天空最蓝像素 r=148 被排掉）：
+    基线（无蓝骨人）= 0，含蓝骨人 = 30 → 阈值 15（负向验证：把蓝骨人画掉 → 该门禁 FAIL）；
+  · 旧的三道门禁（红可见性 / 换时刻换画面 / rest 换画面）**数值与改前完全一致**
+    （基座 gold diff=0）—— 新功能对本路径零回归。
+
+### 4.4 边界
+
+- 这里的 "mesh" = **该骨架的骨人（火柴人）mesh**，不是 glb 的真皮 mesh；把 glb 的真网格
+  蒙上去（`DrawMeshWithSkeleton` + 自带 IBM）属 M6。
+- 两骨人各自按自己的 rest 尺寸画（fbx ~1.75m / glb ~1m），故"两者并列"时蓝骨看起来偏小。
+- glb 带多个 skin 时取第一个（`skins[0]`）。
+
+---
+
+## 5. 已知取舍 / 边界
 
 - **播放时钟按渲染帧步进**：每帧推进 `1 / kViewerFps`（= 1/60 秒），即“按 fbx 的 fps 播放”
   是在渲染循环保持 60fps 的前提下成立。软渲染（llvmpipe，无 GPU）下若实际帧率低于 60，

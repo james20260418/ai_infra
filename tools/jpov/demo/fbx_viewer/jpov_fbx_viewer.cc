@@ -1,14 +1,19 @@
 // JPOV FBX 观察器 — 主程序（装配 + 模式分发）
 //
 // 用法：
-//   jpov_fbx_viewer <fbx 路径>                      交互窗口（需 DISPLAY/WSLg）
-//   jpov_fbx_viewer <fbx 路径> --shot out.png        headless 单帧出图（AI 自查/留证）
+//   jpov_fbx_viewer <fbx 路径> [glb 路径]            交互窗口（需 DISPLAY/WSLg）
+//   jpov_fbx_viewer <fbx 路径> [glb 路径] --shot out.png   headless 单帧出图
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
 //             --rest       固定 pose = identity（rest/T-pose）出图
+//             --mesh <n>   指定「mesh 来源」出图（0=仅 fbx 红 / 1=仅 glb 蓝 / 2=两者并列，
+//                          默认：传了 glb 就 2，否则 0）——与面板 combo 同一套语义。
+//   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「对照组」——蓝骨 = 从该 glb
+//     读出的 rest 骨架，用同一份 fbx pose **数值直搬**（不做重定向）驱动，用来肉眼验证
+//     “不加重定向直接搬 lcl rotation 会不对”（见 fbx_viewer_app.h 头注 / 设计文档）。
 //
 // 交互操作：右键 drag 转视角、滚轮 zoom（与模型查看器同款）；底部面板两行 ——
-//   一行两个控件（暂停/继续 按钮 + 固定 rest 位姿 复选框），一行状态文本（帧号/帧频/时刻）。
+//   控件行（mesh 来源 combo / 暂停按钮 / rest 复选框）+ 状态行。
 //
 // 架构：本主程序只做三件事 —— 解析 CLI、装配 FbxViewerApp、按模式分发
 // （交互 Run / headless RunOnce）。渲染与播放逻辑全在 fbx_viewer_app.h，交互与出图
@@ -27,15 +32,18 @@ namespace {
 // 命令行解析结果。
 struct CliParsed {
     std::string fbx_path;      // 被观察的 FBX（第一个非 "--" 参数）
+    std::string glb_path;      // 可选的目标骨架 glb（第二个非 "--" 参数；空 = 不启用对照组）
     std::string shot_path;     // 非空 = headless 单帧出图到该路径
     bool has_time = false;     // --time 是否给出
     double time_seconds = 0.0; // --time 的值（动画时刻，秒）
     bool has_frame = false;    // --frame 是否给出
     int frame_index = 0;       // --frame 的值（源帧号，按 fps 换算时刻）
+    bool has_mesh_source = false;  // --mesh 是否给出
+    int mesh_source = 0;           // --mesh 的值（0=仅 fbx / 1=仅 glb / 2=两者并列）
     bool rest = false;         // --rest：固定 pose = identity
 };
 
-// 解析 CLI：标志可任意顺序，第一个非 "--" 参数为 FBX 路径；未知标志 WARNING 忽略。
+// 解析 CLI：标志可任意顺序，位置参数按序 = fbx / [glb]；未知标志 WARNING 忽略。
 CliParsed ParseCli(int argc, char** argv) {
     CliParsed p;
     for (int i = 1; i < argc; ++i) {
@@ -60,12 +68,21 @@ CliParsed ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--frame 缺少数值，忽略";
             }
+        } else if (arg == "--mesh") {
+            if (i + 1 < argc) {
+                p.mesh_source = std::atoi(argv[++i]);
+                p.has_mesh_source = true;
+            } else {
+                LOG(WARNING) << "--mesh 缺少数值，忽略";
+            }
         } else if (arg == "--rest") {
             p.rest = true;
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "；已忽略";
         } else if (p.fbx_path.empty()) {
             p.fbx_path = arg;
+        } else if (p.glb_path.empty()) {
+            p.glb_path = arg;   // 第二个位置参数 = 可选的目标骨架 glb
         } else {
             LOG(WARNING) << "多余位置参数: " << arg << "；已忽略";
         }
@@ -78,8 +95,8 @@ CliParsed ParseCli(int argc, char** argv) {
 int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
-        << "用法: jpov_fbx_viewer <fbx 路径> [--shot out.png] [--time 秒|--frame 帧号] "
-           "[--rest]";
+        << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
+           "[--time 秒|--frame 帧号] [--rest]";
     const bool capture = !p.shot_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";
@@ -105,6 +122,10 @@ int main(int argc, char** argv) {
     app.InstallTextMeasure();
 
     CHECK(app.LoadFbx(p.fbx_path)) << "装配失败: " << p.fbx_path;
+    if (!p.glb_path.empty()) {
+        // 可选对照组：glb 的 rest 骨架（蓝）+ 同一份 fbx pose 数值直搬（无重定向）。
+        CHECK(app.LoadGltf(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
+    }
 
     if (capture) {
         // headless 单帧：先把时间/模式设好，再 RunOnce（OneIteration 画的是"推进前"
@@ -116,6 +137,14 @@ int main(int argc, char** argv) {
                                      app.clip_.frames_per_second;
         }
         app.rest_pose_mode_ = p.rest;
+        if (p.has_mesh_source) {
+            CHECK_GE(p.mesh_source, 0);
+            CHECK_LE(p.mesh_source, jpov_fbx_viewer::kMeshSourceItemCount - 1)
+                << "--mesh 取值应为 0.." << (jpov_fbx_viewer::kMeshSourceItemCount - 1);
+            CHECK(p.mesh_source == jpov_fbx_viewer::kFbxOnly || app.has_glb_)
+                << "--mesh 选了 glb（1/2）但未给 glb 路径";
+            app.mesh_source_ = p.mesh_source;
+        }
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(jpov_fbx_viewer::kViewerWidth);
         winfo.height = static_cast<float>(jpov_fbx_viewer::kViewerHeight);
