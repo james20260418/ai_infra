@@ -30,6 +30,11 @@ using jpov::SkeletonPose;
 using jpov::SkeletonType;
 using jpov::Vec3f;
 
+// 规格：根杆半宽 = radius/3（2026-09-14 Danis 定）。
+// ⚠️ 测试里硬编码该值、**不用 jpov::kRootRodRadiusScale** —— 否则实现常量一改、
+// 期望值同变 → 断言恒真（本测试的负向验证抓过这个坑，勿重蹈）。
+constexpr float kRootRodRadiusScaleSpec = 1.0f / 3.0f;
+
 // 沿拓扑序算每关节在骨架空间下的 bind 变换（pose 恒等）。
 std::vector<geom::math::Mat4> ComputeJointWorldBind(const SkeletonType& type) {
     const size_t n = type.joints.size();
@@ -234,7 +239,12 @@ TEST(SkeletonMesh, RodAxisFollowsRestOffsetDirection) {
             .Unit();
     const Vec3f center(0.1f, 0.1f, 0.0f);
 
-    // 1) 每个顶点到中心的偏移，垂直分量 <= √2·r。
+    // 1) 每个顶点到中心的偏移，垂直分量 <= √2·半宽。
+    //    ⚠️ 本骨是根关节（parent=无）→ 杆半宽收窄为 kR/3（规格值，见 kRootRodRadiusScaleSpec）；
+    //    上限取 √2·(kR/3)。方向装错时垂直泄漏 ≈ 0.1 量级，远大于该上限 → 必被抓住；
+    //    若根杆未按规格收窄（半宽=kR），顶点垂直偏移 √2·kR 也会超上限 → 同样被抓住。
+    const float perp_limit =
+        std::sqrt(2.0f) * kR * kRootRodRadiusScaleSpec + 1e-4f;
     for (size_t k = 0; k < 24; ++k) {
         const Vec3f d(mesh.positions[k].x() - center.x(),
                       mesh.positions[k].y() - center.y(),
@@ -242,8 +252,8 @@ TEST(SkeletonMesh, RodAxisFollowsRestOffsetDirection) {
         const float along = d.x() * axis.x() + d.y() * axis.y() + d.z() * axis.z();
         const Vec3f perp(d.x() - along * axis.x(), d.y() - along * axis.y(),
                          d.z() - along * axis.z());
-        EXPECT_LE(perp.Norm(), std::sqrt(2.0f) * kR + 1e-4f)
-            << "顶点 " << k << " 偏离骨轴 (1,1,0)/√2 过多";
+        EXPECT_LE(perp.Norm(), perp_limit)
+            << "顶点 " << k << " 偏离骨轴过多（杆朝向错误，或根杆未按规格收窄为 radius/3）";
     }
 
     // 2) 正向断言：杆沿骨轴确实伸到了 (parent, child) 两端
@@ -259,6 +269,48 @@ TEST(SkeletonMesh, RodAxisFollowsRestOffsetDirection) {
     }
     // |rest_offset| = 0.2√2 ≈ 0.2828，半长 ≈ 0.1414。
     EXPECT_NEAR(max_along, 0.2f * std::sqrt(2.0f) * 0.5f, 1e-4f);
+}
+
+// ==================== 3.5 根杆收窄（区分 root）====================
+
+// 根关节的杆半宽 = radius/3（直径 = 其它骨的 1/3）：量测每根杆顶点到骨轴的最大垂直偏移
+// （方盒角点处 = √2·半宽）—— 根杆应 ≈ √2·(r/3)、非根杆应 ≈ √2·r。
+// 若实现漏掉收窄（根也用 r）或误伤普通杆（都用 r/3），两端会各自被抓住。
+TEST(SkeletonMesh, RootRodThinnerThanOthers) {
+    // 两骨直链：根（沿 +Y 长 0.5）→ 子（沿 +Y 长 0.4）。两杆轴都平行 +Y。
+    SkeletonType type;
+    type.joints.resize(2);
+    type.joints[0].parent = jpov::kSkeletonNoParent;
+    type.joints[0].rest_offset = Vec3f(0.0f, 0.5f, 0.0f);
+    type.joints[0].name = "root";
+    type.joints[1].parent = 0;
+    type.joints[1].rest_offset = Vec3f(0.0f, 0.4f, 0.0f);
+    type.joints[1].name = "child";
+    type.bind_rotation.clear();
+    type.Validate();
+
+    constexpr float kR = 0.06f;
+    const SkeletonPose pose = SkeletonPose::Identity(type.bone_count());
+    const MeshData mesh = jpov::BuildBoneMeshInBoneSpace(type, pose, kR);
+    ASSERT_EQ(mesh.positions.size(), 48u);  // 2 杆 × 24 顶点
+
+    // 每杆顶点到骨轴（两杆均过原点的 +Y 轴）的最大垂直距离 = 方盒角点 = √2·半宽。
+    const auto max_perp_from_y_axis = [&mesh](size_t base) {
+        float m = 0.0f;
+        for (size_t k = 0; k < 24; ++k) {
+            const Vec3f& v = mesh.positions[base + k];
+            m = std::max(m, std::sqrt(v.x() * v.x() + v.z() * v.z()));
+        }
+        return m;
+    };
+    const float root_max = max_perp_from_y_axis(0);
+    const float child_max = max_perp_from_y_axis(24);
+
+    // 根杆：半宽 = kR/3；普通杆：半宽 = kR。期望值用规格硬编码（见 kRootRodRadiusScaleSpec）。
+    EXPECT_NEAR(root_max, std::sqrt(2.0f) * kR * kRootRodRadiusScaleSpec, 1e-4f)
+        << "根杆半宽应为 radius/3（直径 = 其它骨的 1/3）";
+    EXPECT_NEAR(child_max, std::sqrt(2.0f) * kR, 1e-4f)
+        << "非根杆半宽应保持 radius";
 }
 
 // 第二个骨架（程序化直线骨链）验证通用性：非 Mixamo 骨架也成立。
