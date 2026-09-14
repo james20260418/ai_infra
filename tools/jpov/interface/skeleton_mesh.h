@@ -39,9 +39,21 @@ namespace jpov {
 // 0.04 半宽 ⇒ 直径 8cm 的杆，在 1.75m 身高下肉眼可辨（见 Danis 定调）。
 inline constexpr float kDefaultBoneRadius = 0.04f;
 
-// 根关节杆的半宽缩放：根杆直径 = 其它骨的 1/3（视觉区分 root，2026-09-14 Danis 定）。
-// 根杆几何上表示"根关节的位置矢量"（如 Mixamo 的 Hips：从原点到骨盆、近米级长），
-// 并非真骨骼段；收窄后与真骨骼杆一眼可分。
+// 退化杆长度阈值（米）：短于此的杆视为**零长包装层的数值残差**，不画（也不参与"谁是根杆"判定）。
+//
+// 依据（2026-09-14 实测）：`mixamo_male.glb` 顶层 `Root` 的 rest_offset 只有 **4.5mm**
+//（Tripo 导出残差），若照画，它会抢走"根位置矢量"的身份 —— 变细的是这根看不见的小残杆，
+// 而真正从骨架原点指向骨盆的 `Hips` 杆（0.53m）仍是普通粗细（Danis 报的"蓝骨 root 没变细"）。
+// 取值依据：本仓库人形资产的最小**真骨** = **21mm**（fbx 手指）> 10mm > **4.5mm**（glb Root 残差），
+// 两侧余量都 >2×。假设骨架为**米制人形尺度（≥1m）**；亚 1cm 真骨的微型资产需调小此值。
+inline constexpr float kDegenerateRodLength = 0.01f;
+
+// 根关节杆（= "根位置矢量"，不是真骨骼段）的半宽缩放：直径 = 其它骨的 1/3
+//（视觉区分 root，2026-09-14 Danis 定）。
+// ⚠️ 适用对象是**沿根链的第一根可画杆**，不是"parent=无"那个关节本身 ——
+//    很多资产（glTF Tripo、本仓库 Mixamo23）在顶层套了一层**零长包装 Root**
+//（offset=0、本身不画杆），真正"从骨架原点到骨盆"的那根杆是它的子关节（Hips）。
+//    详见 BuildBoneMeshInBoneSpace 里 is_root_rod 的说明。
 inline constexpr float kRootRodRadiusScale = 1.0f / 3.0f;
 
 // 把一个"已带骨索引语义"的杆盒 mesh 追加进目标 MeshData。
@@ -94,7 +106,8 @@ inline void AppendBoneBox(MeshData* dst, const MeshData& src, int32_t joint) {
 //       · 横截面 = radius × radius（两个垂直方向各取 radius 作半宽 ⇒ 直径 ≈ 2·radius）
 //   - 杆在**父关节局部坐标系**里造（长轴沿该骨的骨长朝向），再沿骨架树复合变换到骨架空间。
 //   - 根关节位于 (0,0,0)（骨架空间原点）。
-//   - **根关节的杆**半宽收窄为 radius/3（直径 = 其它骨的 1/3）——视觉上区分 root；
+//   - **根位置矢量杆**（沿根链的第一根可画杆；见 kRootRodRadiusScale 的说明）半宽收窄为
+//     radius/3（直径 = 其它骨的 1/3）——视觉上区分 root；
 //     其余骨一律 radius。
 //
 // 骨长轴朝向：以该骨 bind 姿态下的**世界朝向**为准（即 JW_bind 的旋转部分作用于局部 +Y）。
@@ -156,6 +169,32 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
     //    起点 = 父关节局部原点（根的父系 = 骨架空间原点），长轴 = 父系下的 rest_offset 方向。
     //    ⚠️ 用**父系**而非本关节系：rest_offset 的定义就是"相对父关节的局部平移"，
     //    沿它方向造杆、再整体搬进骨架空间，杆两端自然落在父关节与子关节上。
+
+    // 预先标出"根位置矢量杆"：沿父链向上直到根，若**没有任何一根可画的杆**（长度 > 0），
+    // 则本杆就是根位置矢量。
+    // ⚠️ 判据不能用 `parent == kSkeletonNoParent`：那要求根关节**自己带长度**；而
+    //    glTF Tripo / 本仓库 Mixamo23 的顶层是**零长包装 Root**（offset=0，不画杆），
+    //    真正从骨架原点指向骨盆的杆是它的子关节 Hips → 旧判据会让这根杆按普通骨画，
+    //    "root 杆收窄 1/3"对这类资产静默失效（2026-09-14 Danis 报的 bug）。
+    std::vector<bool> is_root_rod(n, false);
+    for (size_t j = 0; j < n; ++j) {
+        if (type.joints[j].rest_offset.Norm() < kDegenerateRodLength) {
+            continue;  // 自身是退化杆（不画）
+        }
+        bool first_drawable = true;
+        for (int p = type.joints[j].parent; p != kSkeletonNoParent;
+             p = type.joints[static_cast<size_t>(p)].parent) {
+            CHECK_GE(p, 0);
+            CHECK_LT(p, static_cast<int>(j))  // 拓扑序（Validate 已保证，此处防御）
+                << "BuildBoneMeshInBoneSpace: joint[" << j << "] 的父链非拓扑序";
+            if (type.joints[static_cast<size_t>(p)].rest_offset.Norm() >=
+                kDegenerateRodLength) {
+                first_drawable = false;  // 父链上已有可画的杆 → 本杆不是根位置矢量
+                break;
+            }
+        }
+        is_root_rod[j] = first_drawable;
+    }
     MeshData out;
     out.flags = static_cast<MeshVertexFlags>(
         static_cast<uint8_t>(MeshVertexFlags::kPosition) |
@@ -165,9 +204,9 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
     for (size_t j = 0; j < n; ++j) {
         const Vec3f& off = type.joints[j].rest_offset;
         const float len = off.Norm();
-        // 零长骨（如包装层 Root、rest_offset 为 0）：没有"杆"可画，跳过。
-        // 不是错误 —— Root 这种恒等包装层本就不占几何。
-        if (len <= 1e-8f) {
+        // 退化骨（零长包装层 Root，或 glb 那种 4.5mm 的导出残差）：没有"杆"可画，跳过。
+        // 不是错误 —— 包装层本就不占几何（阈值见 kDegenerateRodLength）。
+        if (len < kDegenerateRodLength) {
             continue;
         }
 
@@ -179,10 +218,9 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
             parent_xform = jw[static_cast<size_t>(p)];
         }
 
-        // 根杆（父=无，即根关节自己的杆）半宽收窄为 radius/3（直径 = 其它骨的 1/3，
-        // 见 kRootRodRadiusScale）：根杆表示的是"根位置矢量"而非真骨，收窄便于区分。
+        // 根位置矢量杆（父链上无任何可画杆 → 见上方 is_root_rod）半宽收窄为 radius/3。
         const float rod_radius =
-            (p == kSkeletonNoParent) ? radius * kRootRodRadiusScale : radius;
+            is_root_rod[j] ? radius * kRootRodRadiusScale : radius;
 
         // 杆的朝向（父系下的局部轴）：长轴 = rest_offset 单位化。
         // 参考轴（决定杆的横截面哪个朝向是"前"）：取局部 +Z（骨 up 惯例，见 §2.1）。

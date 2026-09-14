@@ -172,7 +172,7 @@ public:
     //   kBoth（传了 glb 就是想对比），初始机位重新按两者并列的包围盒适配。
     bool LoadGltf(const std::string& path);
 
-    // 渲染/交互是否绘制底部面板。
+    // 渲染/交互是否绘制顶部面板。
     //   true  = 交互窗口（OneIteration 末尾画面板）
     //   false = headless 单帧出图：截图是纯 3D（不画面板、不消费输入）
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -342,7 +342,9 @@ private:
         blue_drawn_ = {true, rest_pose_mode_, anim_time_seconds_};
     }
 
-    // 底部面板：一行控件（mesh 来源 combo + 暂停按钮 + rest 复选框）+ 一行状态文本。
+        // 顶部面板：一行控件（mesh 来源 combo + 暂停按钮 + rest 复选框）+ 一行状态文本。
+    // ⚠️ 面板贴**顶部**而非底部（2026-09-14 Danis 定）：`Ui::Combo` 的下拉列表是**向下**
+    //    画的（list_top = 框底、高 = 项数×行高），贴底时 3 个选项会伸出屏幕外。
     // ⚠️ 布局用**本帧渲染分辨率（winfo）**而非编译期常量：2D 指令的坐标空间就是当帧
     //    渲染分辨率（editor_app.h 记过这条坑 —— 写死尺寸会在窗口/出图尺寸变化后飘位）。
     void DrawPanel(const jpov::InputSnapshot& input,
@@ -358,18 +360,19 @@ private:
         const float kCheckW  = 300.0f;
         const float kComboW  = 320.0f;
         const float kGap     = 16.0f;
-        const float kBottom  = 24.0f;
+        const float kTop     = 16.0f;  // 到屏顶留白
+        const float kTextGap = 8.0f;   // 控件行与状态行之间
         const float kTextRow = 26.0f;
 
-        // 两行整体底部居中：控件行在下、状态文本行在它上面。
+        // 两行整体贴顶居中：控件行在最顶（下拉展开才有地方），状态文本行紧随其下。
         // 没传 glb 时不画 combo（没有目标骨架可选，多余的控件只会误导）。
         float ctrl_w = kButtonW + kGap + kCheckW;
         if (has_glb_) {
             ctrl_w += kGap + kComboW;
         }
         const float ctrl_left = (w - ctrl_w) * 0.5f;
-        const float ctrl_top = h - kBottom - kRowH;
-        const float text_top = ctrl_top - 8.0f - kTextRow;
+        const float ctrl_top = kTop;
+        const float text_top = ctrl_top + kRowH + kTextGap;
 
         float x = ctrl_left;
         if (has_glb_) {
