@@ -27,14 +27,34 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 保存编排：路径命名 + 后台线程 + 状态机（GL-free；worker 只跑纯 CPU 烘焙 + 写文件）。
+cc_library(
+    name = "editor_save",
+    srcs = ["editor_save.cc"],
+    hdrs = ["editor_save.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":model_placement",
+        "//tools/common:utils",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:mesh_transform",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_saver",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "editor_app",
     hdrs = ["editor_app.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":editor_save",
         ":model_placement",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
         "//tools/jpov/interface:ui",
     ],
     copts = ["-std=c++20"],
@@ -45,9 +65,15 @@ cc_binary(
     srcs = ["jpov_model_editor.cc"],
     deps = [
         ":editor_app",
+        ":editor_save",
         ":model_placement",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
     ],
     target_compatible_with = [
         "@platforms//os:linux",
@@ -88,3 +114,72 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# 保存编排回归（白盒/黑盒混合）：路径命名 + 状态机 + 不可重复触发 + 失败路径。
+# 真的起线程、真的写文件（保存的价值就在落盘），过 /tmp 收发。
+cc_test(
+    name = "editor_save_test",
+    srcs = ["editor_save_test.cc"],
+    deps = [
+        ":editor_save",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 坐标架渲染自证（headless，需 DISPLAY/Xvfb）：真的画出了三根 1m 杆、
+# 红绿蓝分明、alpha 0.2 半透明（像素不是纯色）。
+# 用像素判定而非看图：看图抓不出"alpha 被写死 1.0"与"三杆颜色串位"。
+cc_test(
+    name = "axis_gizmo_render_test",
+    srcs = ["axis_gizmo_render_test.cc"],
+    deps = [
+        ":editor_app",
+        "//tools/common:utils",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:axis_gizmo",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 端到端验收（headless，需 DISPLAY/Xvfb）：把施加了放置的模型走"保存→重开"链路，
+# 与"原模型带放置渲染"做像素比对（旋转保留的严格判定）。
+# 真资材 pliers.gltf（无骨）；带骨链路由 mesh_transform_test 的共轭一致性覆盖。
+cc_test(
+    name = "editor_save_e2e_test",
+    srcs = ["editor_save_e2e_test.cc"],
+    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    deps = [
+        ":model_placement",
+        "//tools/common:utils",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/interface:mesh_transform",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+

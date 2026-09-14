@@ -120,3 +120,23 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# glTF saver — 写出的 .glb 能被生产 loader 读回（无骨 / 多 primitive / 带骨）闭环（CPU-only）
+cc_test(
+    name = "jpov_gltf_saver_test",
+    srcs = ["jpov_gltf_saver_test.cc"],
+    data = ["//tools/jpov/test/object3d:mixamo_male_glb_data"],
+    deps = [
+        "//tools/common:utils",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:mesh_transform",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
