@@ -122,6 +122,34 @@ void main() {
     // stream_vbo 容量要求（顶点数上限）
     static constexpr int kMaxStreamVertices = 120000;
 
+    // ---- DrawText3D ----
+    //
+    // 把 Text3DCommand 渲染到当前绑定的 3D FBO（世界空间 quad + 字形 atlas）。
+    //
+    // 与 DrawText2D 的关系：字形光栅化 / 包围盒 / 对齐 / atlas 上传**完全同一套**
+    // （都走 FontManager::GenerateTextVertices），区别只在坐标映射——
+    //   2D：像素坐标直接给 VS；
+    //   3D：像素坐标经 BuildText3DWorldVerts 映射到世界空间再走 MVP。
+    //
+    // 参数：
+    //   cmd:               文字 + 世界 anchor/face/up + alignment + 世界高度 + 颜色。
+    //   pixels_per_meter:  该文本所处位置的「1 米 = 多少屏幕像素」（换算比）。
+    //                      用来决定字形**光栅化精度**：由 cmd.font_height_world ×
+    //                      pixels_per_meter 得屏幕上的目标像素高，再选一个合适的
+    //                      atlas 层级排版（见 Rig RasterPx）。
+    //                      调用方可用 text3d_util.h 的 PixelsPerMeterAt() 算得。
+    //   mvp:               当前相机 MVP。
+    //   text3d_prog:       由 Primitives3DRenderer::kTexVs3d + kText3dFs 编译的 program。
+    //
+    // GL 状态前置要求（调用方负责）：
+    //   - 3D FBO 已绑定 + glViewport 已设
+    //   - 深度测试已开启（3D 文本参与遮挡）
+    void DrawText3D(const Text3DCommand& cmd,
+                    float pixels_per_meter,
+                    unsigned int stream_vbo,
+                    unsigned int text3d_prog,
+                    const float mvp[16]);
+
     // ---- MeasureTextWidth ----
     //
     // 测量文本以指定字号绘制时的宽度（像素）。

@@ -197,6 +197,7 @@ cc_library(
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:window_info",
         "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/interface:text3d_util",
         "//geom/common:common",
         "@glog_static//:glog",
         "//third_party/stb:stb_image",
@@ -220,6 +221,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":font_manager",
+        ":primitives3d_renderer",
         "//tools/jpov/interface:render_command",
         "@glog_static//:glog",
     ] + select({

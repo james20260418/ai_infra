@@ -39,6 +39,11 @@ namespace jpov {
 // 0.04 半宽 ⇒ 直径 8cm 的杆，在 1.75m 身高下肉眼可辨（见 Danis 定调）。
 inline constexpr float kDefaultBoneRadius = 0.04f;
 
+// 根关节杆的半宽缩放：根杆直径 = 其它骨的 1/3（视觉区分 root，2026-09-14 Danis 定）。
+// 根杆几何上表示"根关节的位置矢量"（如 Mixamo 的 Hips：从原点到骨盆、近米级长），
+// 并非真骨骼段；收窄后与真骨骼杆一眼可分。
+inline constexpr float kRootRodRadiusScale = 1.0f / 3.0f;
+
 // 把一个"已带骨索引语义"的杆盒 mesh 追加进目标 MeshData。
 //
 // 用于把逐骨生成的杆拼成一个整体 mesh —— 这是**骨语义的拼接**，不是通用的 mesh 合并：
@@ -89,6 +94,8 @@ inline void AppendBoneBox(MeshData* dst, const MeshData& src, int32_t joint) {
 //       · 横截面 = radius × radius（两个垂直方向各取 radius 作半宽 ⇒ 直径 ≈ 2·radius）
 //   - 杆在**父关节局部坐标系**里造（长轴沿该骨的骨长朝向），再沿骨架树复合变换到骨架空间。
 //   - 根关节位于 (0,0,0)（骨架空间原点）。
+//   - **根关节的杆**半宽收窄为 radius/3（直径 = 其它骨的 1/3）——视觉上区分 root；
+//     其余骨一律 radius。
 //
 // 骨长轴朝向：以该骨 bind 姿态下的**世界朝向**为准（即 JW_bind 的旋转部分作用于局部 +Y）。
 //   骨长轴之外的另一轴（垂直于杆的"左/前"）取同一旋转作用于局部 +Z，
@@ -172,6 +179,11 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
             parent_xform = jw[static_cast<size_t>(p)];
         }
 
+        // 根杆（父=无，即根关节自己的杆）半宽收窄为 radius/3（直径 = 其它骨的 1/3，
+        // 见 kRootRodRadiusScale）：根杆表示的是"根位置矢量"而非真骨，收窄便于区分。
+        const float rod_radius =
+            (p == kSkeletonNoParent) ? radius * kRootRodRadiusScale : radius;
+
         // 杆的朝向（父系下的局部轴）：长轴 = rest_offset 单位化。
         // 参考轴（决定杆的横截面哪个朝向是"前"）：取局部 +Z（骨 up 惯例，见 §2.1）。
         // ⚠️ 若骨长轴本身近乎平行于 +Z（如沿 ±Z 长的骨），则 up/front 平行 → cross 退化。
@@ -186,11 +198,11 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
         // 杆中心（父系下）= rest_offset 中点。
         const Vec3f center_local(off.x()*0.5f, off.y()*0.5f, off.z()*0.5f);
 
-        // 先在父系造杆（中心在 center_local、长轴沿 bone_dir、半长 = len/2、截面半径 = radius），
+        // 先在父系造杆（中心在 center_local、长轴沿 bone_dir、半长 = len/2、截面半宽 = rod_radius），
         // 再用父关节变换把它搬进骨架空间。
         MeshData rod = MeshData::MakeOrientedBox(
-            /*front_half_width*/ radius, /*up_half_width*/ len * 0.5f,
-            /*left_half_width*/ radius, /*up*/ bone_dir, /*front*/ ref_up,
+            /*front_half_width*/ rod_radius, /*up_half_width*/ len * 0.5f,
+            /*left_half_width*/ rod_radius, /*up*/ bone_dir, /*front*/ ref_up,
             /*translation*/ center_local);
 
         // rod 的顶点此刻在父系；施加父关节变换 → 骨架空间。

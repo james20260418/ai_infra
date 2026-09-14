@@ -10,6 +10,8 @@
 #ifndef JPOV_PRIMITIVES3D_RENDERER_H_
 #define JPOV_PRIMITIVES3D_RENDERER_H_
 
+#include <vector>
+
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
 
@@ -59,6 +61,24 @@ void main() {
 }
 )glsl";
 
+    // kText3dFs: 3D 文本 fragment shader（无光照纯色）。
+    //
+    // 与 2D 的 kTextFs 同构：从单通道（GL_R8）字形 atlas 读 alpha，乘 uniform 颜色。
+    // 区别只在顶点侧（kTexVs3d 走 MVP 世界→NDC，而非 2D 的像素→NDC），
+    // 所以这里能**直接复用** 2D 的 fragment 逻辑——3D 文本「无光照纯色」的语义
+    // 就是「不参与 PBR，直接把字形 alpha 当覆盖率输出颜色」。
+    static constexpr const char* kText3dFs = R"glsl(
+#version 330 core
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform vec4 uColor;
+void main() {
+    float alpha = texture(uTexture, vTexCoord).r;
+    FragColor = vec4(uColor.rgb, uColor.a * alpha);
+}
+)glsl";
+
     // ---- MVP / Model 矩阵构建（纯 CPU，不碰 GL 矩阵栈）----
 
     // 4x4 矩阵乘法：out = a * b（列主序）
@@ -95,9 +115,39 @@ void main() {
     static void DrawLine3D(const Line3DCommand& cmd,
                            unsigned int stream_vbo, unsigned int prog,
                            const float mvp[16]);
-    static void DrawText3D(const Text3DCommand& cmd,
-                           unsigned int stream_vbo, unsigned int prog,
-                           const float mvp[16], int fbo_w, int fbo_h);
+
+    // ---- 3D 文本几何生成（纯 CPU，GL-free，可单测）----
+    //
+    // 把一段文本按 (anchor, face_direction, up_direction) 摆放到世界空间的
+    // 一个平面 quad 上。字形排版 / 包围盒 / 对齐偏移完全复用 FontManager 的
+    // GenerateTextVertices()（与 2D 同源），本函数只负责把「文本平面局部坐标」
+    // 映射到世界坐标。
+    //
+    // 参数：
+    //   cmd:            命令（含 anchor / face / up / alignment）
+    //   font_height_px: 本次排版的目标**像素高度**（= FontManager 语义的 font_size）。
+    //                   由调用方从 cmd.font_height_world 换算而来（见 scale_out）。
+    //   glyph_verts:    in/out — FontManager 产出的字形顶点（每顶点 4 floats：
+    //                   x,y,u,v，x/y 是文本平面局部像素坐标，原点在不施对齐的
+    //                   左上演进阶起点），会被就地转换成世界坐标。
+    //
+    // 副作用：
+    //   - 把 glyph_verts 就地转化成世界坐标（x,y → 世界 xyz；u,v 不变）。
+    //     转换后元素布局变为每顶点 5 floats：x,y,z,u,v。
+    //   - scale_out: 排版像素 → 世界米的统一缩放因子（= height_world / 像素高）。
+    //
+    // 实现（与 Object3D 的 up/front 处理同一套正交化）：
+    //   n = normalize(face)                            // quad 法线
+    //   u = normalize(up - dot(up,n)*n)                // 文字上（Gram-Schmidt）
+    //   r = cross(u, n)                                // 文字右
+    //   world = anchor + r*(lx*scale) - u*(ly*scale)
+    //     注意 ly 取负：文本平面 y 轴向下（与 2D 屏幕同向），而 u 向上。
+    //
+    // Pre-condition: cmd.face_direction / cmd.up_direction 非零且不共线
+    static void BuildText3DWorldVerts(const Text3DCommand& cmd,
+                                      float font_height_px,
+                                      std::vector<float>* glyph_verts,
+                                      float* scale_out);
 };
 
 }  // namespace jpov

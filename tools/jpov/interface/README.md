@@ -2,6 +2,13 @@
 
 JPOV 的纯头文件接口定义，每个接口对应一个独立的 cc_library，方便按需引用。
 
+## 设计文档
+
+| 文档 | 内容 |
+|------|------|
+| `MULTIPASS_ARCH.md` | **多 Pass 结构设计 / Texture 槽位生命周期契约**（独占槽 vs 共享槽、CSM 高编号段、成本模型） |
+| `LIGHT_INTENSITY.md` | 光照强度物理锚点定标（晴天基准） |
+
 ## 文件与库
 
 | cc_library | 文件 | 说明 |

@@ -14,6 +14,8 @@
 //   - 动画 **取源原始所有帧 + 必需时序**，不重采样、不裁剪、不插值。源文件以 fps 等间隔
 //     落 key（如 Mixamo 30fps，key 逐个在帧网格上），本 loader 逐帧在帧时间是点上取每骨
 //     local 旋转即得原始帧（关键帧恰落网格 → 无插值）。resample 留给基于 clip 的二次开发。
+//   - pose 语义（2026-09-14 修复）：帧里存的是**相对 bind 的增量旋转**（= 源每帧 Lcl
+//     Rotation 的语义），不是全量 local 旋转 —— 详见 LoadFbxAnimation 注释。
 //
 // 坐标系 / 单位（与 JPOV 数据模型对齐，2026-09-09 敲定）：
 //   JPOV 是 y-up（+Y 上）。但在本 loader 产出的数据层，姿态存的是**每骨相对父的旋转**
@@ -24,6 +26,8 @@
 //   具体：源 FBX 的 axes / 单位 **原样透传**进 clip（与 glTF loader 透传原生单位一致，不做隐式
 //   缩放）；常见的 Mixamo 人形源默认 y-up + cm → 传过即已 y-up，无需任何旋转/缩放。
 //   成功 LOG 会带出源 scene.axes.up 与 unit_meters，便于 debug 手头这份是不是 y-up。
+//   ⚠️ 单位归一只发生在 LoadFbxSkeleton（它面向骨架直接使用/跨源对比，刻意归一为米）；
+//   LoadFbxAnimation 保持"原样透传"——两入口刻意分工，见各自注释。
 //   （若未来某源是 z-up 等非 y-up 且要“立起来渲染”，在其放置/retarget 层按源轴语义对齐即
 //   可 —— 那层有角色朝向，不在本 loader。）
 //   ⚠️ 若读到 gltf_loader 头注释把输出写成 “Z-up”，那是另一条链的术语问题，与本层无冲突；
@@ -54,8 +58,12 @@ namespace jpov {
 //       .rest_offset = 该骨 bind/静止 的 local translation（相对父，源 FBX 原生单位，如 Mixamo
 //       cm）—— 用 node 的 local_transform，让骨架能按真实骨长/朝向展开，供 debug 观察层级形状。
 //   - 每个 SkeletonPose（= 一帧）:
-//       .joint_rotation[i] = 该骨在该帧时间点的 **local 旋转(相对父)四元数**（取 ufbx 以
-//         Euler 序转好的四元数，即 geom::Quaternion 单位四元数）。
+//       .joint_rotation[i] = 该骨在该帧、**相对 bind 的增量旋转**四元数（单位）。
+//         实现：q_delta = R(bind_rotation[i])⁻¹ ⊗ q_full（q_full = ufbx evaluate 的该时刻
+//         全量 local 旋转）。即"源每帧 Lcl Rotation"的语义：identity pose ⇒ 源在
+//         Lcl Rotation=0 时的静止形态（Mixamo 源为 T-pose）。
+//         ⚠️ 2026-09-14 修复前直接存 q_full（含静态 bind 朝向）→ 与烘焙式
+//         jointLocal = T(rest_offset)·R(bind_rotation)·R(pose) 里的 R(bind) 双倍施加。
 //       .root_offset    = 根骨(Hips)在该帧的 local translation（源动作里角色整体位移 /
 //         root-motion；静止动作恒 0 附近）。根骨之外每骨平移若也被源动画驱动（少见），
 //         现阶段只取旋转（rest 平移由 skeleton 静止形状给）——超出 debug 范围。
@@ -63,6 +71,25 @@ namespace jpov {
 //     （0 起点，如 17.2333s@30fps → 518 帧：k=0..517，t_k=k/30）。
 //   - 不做重定向/重采样/播放控制 —— 那是上层与本 loader 无关的后续演变。
 bool LoadFbxAnimation(const std::string& path, FBXClip* out);
+
+// 从 FBX 文件只加载其内建骨架（不读动画帧）。
+//
+//   path  : .fbx 文件路径。
+//   out   : 非空（CHECK 保护）；成功时填充骨架。
+//   返回 false 表示加载/解析失败（路径不存在 / ufbx 读不了 / 无 bone 节点），此时 out 不清。
+//
+// 定义（与"从 glb 读骨架" LoadGltfSkeleton 同构，本函数是 FBX 侧的对应物）：
+//   - joints[i].rest_offset   = 该骨 bind(静止) local 平移 × unit_meters → **米**。
+//     （本函数刻意做单位归一：与 glb 侧（glTF 原生米）、Mixamo23 模板同尺度，
+//       保证"两个资产骨人"能同场对比 / 后续重定向单位一致。）
+//   - joints[i].bind_rotation = 该骨 bind(静止) local 旋转（Mixamo 源 = PreRotation 的合成；
+//       FBX 的 Lcl Rotation 是动画通道、默认≈0，静止朝向存在 PreRotation 里）。
+//   - 该骨架在 **identity pose** 下的完整形态 ≡ 源文件在「**Lcl Rotation = 0**（无动画）」时
+//     求出的姿态（Mixamo 官方源为 T-pose）。
+//
+// 范围/约束：收集全部带 bone 属性的节点（Mixamo 全身含手指 → 65 骨），不做 Validate、
+//   不做骨名 sanity、不自加包装 Root（文件里啥就装啥，懒校验留给消费方）。
+bool LoadFbxSkeleton(const std::string& path, SkeletonType* out /*output*/);
 
 }  // namespace jpov
 

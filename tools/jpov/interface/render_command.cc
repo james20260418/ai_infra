@@ -92,12 +92,41 @@ void RenderCommandList::DrawStrip3D(const std::vector<Vec3f>& vertices,
     order.emplace_back(DrawCommandType::kStrip3D, idx);
 }
 
-void RenderCommandList::DrawText3D(const std::string& text, const Vec3f& pos,
-                                    float font_size, const Color& color,
-                                    const std::string& font_alias) {
-    CHECK_GT(font_size, 0.0f);
+void RenderCommandList::DrawText3D(const std::string& text,
+                                    const Vec3f& anchor,
+                                    const Vec3f& face_direction,
+                                    const Vec3f& up_direction,
+                                    float font_height_world,
+                                    const Color& color,
+                                    const std::string& font_alias,
+                                    TextAlignment alignment) {
+    CHECK_GT(font_height_world, 0.0f)
+        << "DrawText3D: font_height_world 必须 > 0（世界米；想按像素配字号请先用 "
+           "PixelsPerMeterAt() 换算）";
+
+    // 零向量检查：非零才能在渲染期正交化（共线检查在渲染期做，因为那里需要
+    // 同时看两个向量）。
+    const float f_len = std::sqrt(face_direction.x()*face_direction.x() +
+                                  face_direction.y()*face_direction.y() +
+                                  face_direction.z()*face_direction.z());
+    const float u_len = std::sqrt(up_direction.x()*up_direction.x() +
+                                  up_direction.y()*up_direction.y() +
+                                  up_direction.z()*up_direction.z());
+    CHECK_GT(f_len, 1e-8f) << "DrawText3D: face_direction 不能为零向量";
+    CHECK_GT(u_len, 1e-8f) << "DrawText3D: up_direction 不能为零向量";
+
+    Text3DCommand cmd;
+    cmd.text = text;
+    cmd.anchor = anchor;
+    cmd.face_direction = face_direction;
+    cmd.up_direction = up_direction;
+    cmd.alignment = alignment;
+    cmd.font_height_world = font_height_world;
+    cmd.color = color;
+    cmd.font_alias = font_alias;
+
     int idx = static_cast<int>(text3d.size());
-    text3d.push_back({text, pos, font_size, color, font_alias});
+    text3d.push_back(std::move(cmd));
     order.emplace_back(DrawCommandType::kText3D, idx);
 }
 

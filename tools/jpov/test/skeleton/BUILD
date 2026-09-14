@@ -104,3 +104,62 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# 资产骨架 gold —— skeleton from glb + skeleton from fbx
+#
+# 覆盖两个读取链路（LoadGltfSkeleton / LoadFbxSkeleton）：把"从资产读出的"两根骨人
+# 按无旋转/无缩放/无位移画进同一张图（glb 红 / fbx 蓝，原点重叠），供肉眼对比。
+# generator 写仓库 gold PNG；test 渲染 + 双色可见性门禁 + ROI 平均色对比。
+# ============================================================================
+
+cc_binary(
+    name = "jpov_asset_skeleton_gold_generator",
+    srcs = [
+        "jpov_asset_skeleton_gold_generator.cc",
+        "jpov_asset_skeleton_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:fbx_loader",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_asset_skeleton_gold_test",
+    srcs = [
+        "jpov_asset_skeleton_gold_test.cc",
+        "jpov_asset_skeleton_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        ":skeleton_from_glb_fbx_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:fbx_loader",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
