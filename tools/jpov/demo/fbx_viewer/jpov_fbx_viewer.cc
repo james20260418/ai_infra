@@ -71,7 +71,7 @@ CliParsed ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--mesh") {
             if (i + 1 < argc) {
-                p.mesh_source = std::atoi(argv[++i]);
+                p.mesh_source = std::atoi(argv[++i]);  // 与 MeshSource 枚举值同序
                 p.has_mesh_source = true;
             } else {
                 LOG(WARNING) << "--mesh 缺少数值，忽略";
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     CHECK(app.LoadFbx(p.fbx_path)) << "装配失败: " << p.fbx_path;
     if (!p.glb_path.empty()) {
         // 可选对照组：glb 的 rest 骨架（蓝）+ 同一份 fbx pose 数值直搬（无重定向）。
-        CHECK(app.LoadGltf(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
+        CHECK(app.LoadGlbSkeleton(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
     }
 
     if (capture) {
@@ -140,11 +140,13 @@ int main(int argc, char** argv) {
         app.rest_pose_mode_ = p.rest;
         if (p.has_mesh_source) {
             CHECK_GE(p.mesh_source, 0);
-            CHECK_LE(p.mesh_source, jpov_fbx_viewer::kMeshSourceItemCount - 1)
+            CHECK_LT(p.mesh_source, jpov_fbx_viewer::kMeshSourceItemCount)
                 << "--mesh 取值应为 0.." << (jpov_fbx_viewer::kMeshSourceItemCount - 1);
-            CHECK(p.mesh_source == jpov_fbx_viewer::kFbxOnly || app.has_glb_)
+            CHECK(p.mesh_source == static_cast<int>(jpov_fbx_viewer::MeshSource::kFbxOnly) ||
+                  app.has_glb_)
                 << "--mesh 选了 glb（1/2）但未给 glb 路径";
-            app.mesh_source_ = p.mesh_source;
+            app.mesh_source_ =
+                static_cast<jpov_fbx_viewer::MeshSource>(p.mesh_source);
         }
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(jpov_fbx_viewer::kViewerWidth);

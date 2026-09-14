@@ -32,6 +32,7 @@ cc_library(
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:fbx_loader",
         "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
 )

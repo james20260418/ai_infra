@@ -80,7 +80,7 @@ inline JPOV::Config MakeConfig(const char* title) {
 // Pre-condition: FBX 路径可读且带动画；glb_path 非空时可读且有 skin。
 inline std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> MakeApp(
     const char* title, double time_seconds, bool rest_pose,
-    const std::string& glb_path, int mesh_source) {
+    const std::string& glb_path, jpov_fbx_viewer::MeshSource mesh_source) {
     JPOV::Config cfg = MakeConfig(title);
     std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app(
         new jpov_fbx_viewer::FbxViewerApp(cfg));
@@ -88,8 +88,9 @@ inline std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> MakeApp(
     app->Init();
     CHECK(app->LoadFbx(FbxPath())) << "装配 FBX 失败: " << FbxPath();
     if (!glb_path.empty()) {
-        CHECK(app->LoadGltf(glb_path)) << "装配目标骨架 glb 失败: " << glb_path;
-        app->mesh_source_ = mesh_source;  // 覆盖 LoadGltf 的默认（kBoth）
+        CHECK(app->LoadGlbSkeleton(glb_path))
+            << "装配目标骨架 glb 失败: " << glb_path;
+        app->mesh_source_ = mesh_source;  // 覆盖 LoadGlbSkeleton 的默认（kBoth）
     }
     app->anim_time_seconds_ = time_seconds;
     app->rest_pose_mode_    = rest_pose;

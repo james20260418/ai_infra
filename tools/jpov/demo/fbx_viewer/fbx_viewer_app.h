@@ -44,6 +44,8 @@
 #include <string>
 #include <vector>
 
+#include <glog/logging.h>
+
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/fbx_viewer/skeleton_pose_transfer.h"
 #include "tools/jpov/demo/view_config.h"
@@ -108,27 +110,31 @@ inline Bounds ComputeMeshBounds(const jpov::MeshData& mesh) {
     return b;
 }
 
-// 「mesh 来源」选项（面板 combo 的下标即本枚举值，顺序须一致）。
+// 「mesh 来源」选项：看哪个骨架的骨人被这段 pose 驱动（面板 combo 的下标 = 本枚举值）。
 //   kFbxOnly —— 只看源（红）：fbx rest 骨架 + fbx 自己的动画（正确参照）；
 //   kGlbOnly —— 只看目标（蓝）：glb rest 骨架 + 同一份 pose 数值直搬（无重定向）；
 //   kBoth    —— 两者并列同屏（红左蓝右，方便一眼对比）。
-enum MeshSource {
+enum class MeshSource : int {
     kFbxOnly = 0,
     kGlbOnly = 1,
     kBoth    = 2,
 };
-// combo 下拉项文本（顺序 == 上面的枚举）。
+
+// combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
 inline const char* const kMeshSourceItems[] = {
     "fbx rest（红，源）",
     "glb rest（蓝，无重定向）",
     "两者并列（红左/蓝右）",
 };
-inline constexpr int kMeshSourceItemCount = 3;
+// 项数**由数组推导**（不再手写 3 —— 两份真值会漂）。
+inline constexpr int kMeshSourceItemCount =
+    static_cast<int>(sizeof(kMeshSourceItems) / sizeof(kMeshSourceItems[0]));
 
-// combo 项列表（Ui::Combo 要 vector<const char*>）。
-inline std::vector<const char*> MeshSourceItems() {
-    return std::vector<const char*>(kMeshSourceItems,
-                                    kMeshSourceItems + kMeshSourceItemCount);
+// combo 项列表（Ui::Combo 要 vector<const char*>）。静态持有，避免每帧构造容器。
+inline const std::vector<const char*>& MeshSourceItems() {
+    static const std::vector<const char*> kItems(
+        kMeshSourceItems, kMeshSourceItems + kMeshSourceItemCount);
+    return kItems;
 }
 
 // 「两者并列」时两骨人的横向间距（米）：取各自 rest 包围盒宽 + 该间隙，
@@ -154,7 +160,7 @@ public:
     bool has_glb_ = false;
     uint32_t glb_bone_mesh_ = 0;
     int glb_mapped_bones_ = 0;      // 源/目标骨名命中数（面板显示；未命中骨保持 rest）
-    int mesh_source_ = kFbxOnly;    // 本帧看哪个（/哪些）骨架，见 MeshSource
+    MeshSource mesh_source_ = MeshSource::kFbxOnly;  // 本帧看哪个（/哪些）骨架
 
     // ── 播放状态 ──
     double anim_time_seconds_ = 0.0;  // 动画时间（秒）；循环语义由 SampleClipPose 承担
@@ -167,10 +173,12 @@ public:
     bool LoadFbx(const std::string& path);
 
     // 可选装配：读 glb 的 rest 骨架当**目标骨架**（蓝，无重定向对照组）。
+    //   ⚠️ 命名刻意区别于 JPOV::LoadGltf（那个是"加载整份 glTF 模型"，本方法只取骨架，
+    //   底层走 jpov::LoadGltfSkeleton，.gltf/.glb 都能读）。
     //   返回 false = 读不了 / 无 skin，失败原因已 LOG(ERROR)。
     //   须在 LoadFbx 之后调（骨名命中数依赖源骨架）；调用后 mesh_source_ 默认切到
     //   kBoth（传了 glb 就是想对比），初始机位重新按两者并列的包围盒适配。
-    bool LoadGltf(const std::string& path);
+    bool LoadGlbSkeleton(const std::string& path);
 
     // 渲染/交互是否绘制顶部面板。
     //   true  = 交互窗口（OneIteration 末尾画面板）
@@ -241,10 +249,11 @@ public:
 
         // 摆放：单看时各自在原点；“两者并列”时以 x=0 对称分开（相机环绕中心在原点，
         // 对称才不偏）；横向位置再各自减去自身包围盒中心的 x（使两根骨人不重叠）。
-        const bool show_fbx = (mesh_source_ == kFbxOnly || mesh_source_ == kBoth);
-        const bool show_glb =
-            (has_glb_ && (mesh_source_ == kGlbOnly || mesh_source_ == kBoth));
-        const bool side_by_side = (mesh_source_ == kBoth);
+        const bool show_fbx = (mesh_source_ == MeshSource::kFbxOnly ||
+                               mesh_source_ == MeshSource::kBoth);
+        const bool show_glb = (has_glb_ && (mesh_source_ == MeshSource::kGlbOnly ||
+                                            mesh_source_ == MeshSource::kBoth));
+        const bool side_by_side = (mesh_source_ == MeshSource::kBoth);
         const float red_x = side_by_side ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
         const float blue_x = side_by_side ? (0.5f * pair_sep_m_ - glb_center_x_) : 0.0f;
         if (show_fbx) {
@@ -327,7 +336,7 @@ private:
     // skeleton_pose_transfer.h）后重建。没 glb / 本帧不看蓝 → 标 key 失效
     // （本帧没算蓝位姿，下次切回蓝模式必须重建）。
     void UpdateGlbBoneMeshIfNeeded() {
-        if (!has_glb_ || mesh_source_ == kFbxOnly) {
+        if (!has_glb_ || mesh_source_ == MeshSource::kFbxOnly) {
             blue_drawn_.valid = false;
             return;
         }
@@ -342,7 +351,7 @@ private:
         blue_drawn_ = {true, rest_pose_mode_, anim_time_seconds_};
     }
 
-        // 顶部面板：一行控件（mesh 来源 combo + 暂停按钮 + rest 复选框）+ 一行状态文本。
+    // 顶部面板：一行控件（mesh 来源 combo + 暂停按钮 + rest 复选框）+ 一行状态文本。
     // ⚠️ 面板贴**顶部**而非底部（2026-09-14 Danis 定）：`Ui::Combo` 的下拉列表是**向下**
     //    画的（list_top = 框底、高 = 项数×行高），贴底时 3 个选项会伸出屏幕外。
     // ⚠️ 布局用**本帧渲染分辨率（winfo）**而非编译期常量：2D 指令的坐标空间就是当帧
@@ -377,8 +386,11 @@ private:
         float x = ctrl_left;
         if (has_glb_) {
             // mesh 来源：看源（红）/ 目标（蓝）/ 两者并列（见 MeshSource 注释）。
-            ui_.Combo("mesh 来源", &mesh_source_, MeshSourceItems(),
+            // Ui::Combo 的选中值是 int（下标），这里在边界处与枚举互转。
+            int selected = static_cast<int>(mesh_source_);
+            ui_.Combo("mesh 来源", &selected, MeshSourceItems(),
                       jpov::UiRect{{x, ctrl_top}, {kComboW, kRowH}});
+            mesh_source_ = static_cast<MeshSource>(selected);
             x += kComboW + kGap;
         }
         // 暂停按钮：按下切换暂停态（文案随状态变，一眼看出当前是停是放）。
@@ -409,9 +421,9 @@ private:
         // glb 对照信息（仅传了 glb 时）：说清蓝骨是什么、“无重定向”这件事、命中多少骨。
         char mode_tag[160] = "";
         if (has_glb_) {
-            if (mesh_source_ == kFbxOnly) {
+            if (mesh_source_ == MeshSource::kFbxOnly) {
                 std::snprintf(mode_tag, sizeof(mode_tag), "  | 蓝：关（只看红）");
-            } else if (mesh_source_ == kGlbOnly) {
+            } else if (mesh_source_ == MeshSource::kGlbOnly) {
                 std::snprintf(mode_tag, sizeof(mode_tag),
                               "  | 蓝=glb rest 直驱（无重定向，命中 %d/%d）",
                               glb_mapped_bones_, glb_skeleton_.bone_count());
@@ -466,7 +478,7 @@ private:
 
     // 初始机位：按**当前场景全部骨人**（含并列的蓝）的包围盒自适应距离
     // （同查看器用 FitRadius 的做法），注视高度取包围盒中高（约胸口）。
-    // ⚠️ 一律按“最宽”（两者并列）适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
+    // ⚠️ 一律按「最宽」（两者并列）适配：切 mesh 来源时相机**不跳**，且任何模式都不裁切。
     void FitInitialView() {
         const float red_x =
             has_glb_ ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
@@ -546,14 +558,14 @@ inline bool FbxViewerApp::LoadFbx(const std::string& path) {
     return true;
 }
 
-inline bool FbxViewerApp::LoadGltf(const std::string& path) {
+inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
     CHECK(!skeleton_.joints.empty())
-        << "LoadGltf: 请先调 LoadFbx（目标骨架的骨名命中数依赖源骨架）";
+        << "LoadGlbSkeleton: 请先调 LoadFbx（目标骨架的骨名命中数依赖源骨架）";
 
     // glb 可能带多个 skin：取第一个（单骨架资产是常态；需要挑时另开参数）。
     std::vector<jpov::SkeletonType> skins;
     if (!jpov::LoadGltfSkeleton(path, &skins) || skins.empty()) {
-        LOG(ERROR) << "LoadGltf: 读骨架失败或无 skin: " << path;
+        LOG(ERROR) << "LoadGlbSkeleton: 读骨架失败或无 skin: " << path;
         return false;
     }
     glb_skeleton_ = skins[0];
@@ -564,7 +576,7 @@ inline bool FbxViewerApp::LoadGltf(const std::string& path) {
         glb_skeleton_,
         jpov::SkeletonPose::Identity(glb_skeleton_.bone_count()), kBoneRadius);
     CHECK(!rest_mesh.positions.empty())
-        << "LoadGltf: glb 火柴人 mesh 为空（骨架所有骨长均为 0？）";
+        << "LoadGlbSkeleton: glb 火柴人 mesh 为空（骨架所有骨长均为 0？）";
     glb_bone_mesh_ = RegisterMesh(rest_mesh);
     glb_bounds_ = ComputeMeshBounds(rest_mesh);
     glb_center_x_ = glb_bounds_.CenterX();
@@ -579,7 +591,7 @@ inline bool FbxViewerApp::LoadGltf(const std::string& path) {
     has_glb_ = true;
     pair_sep_m_ =
         0.5f * (fbx_bounds_.SizeX() + glb_bounds_.SizeX()) + kPairGapMeters;
-    mesh_source_ = kBoth;
+    mesh_source_ = MeshSource::kBoth;
     FitInitialView();
 
     LOG(INFO) << "glb 目标骨架装配完成: " << path
