@@ -106,6 +106,30 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# JPOV FBX 动画采样（SampleClipPose）真实资产自洽 + 权威交叉验证（纯 CPU，不碰 GL）
+#
+# 覆盖 FBX 观察器的取帧链路：LoadFbxSkeleton（米制骨架）+ LoadFbxAnimation（帧频/全帧）
+# 两入口的一致性、帧精确采样、全时间轴合法性、动作非静止、循环归一，
+# 并与 ufbx 自己的求值（ufbx_evaluate_scene）逐骨交叉验证。
+cc_test(
+    name = "jpov_animation_sampler_test",
+    srcs = ["jpov_animation_sampler_test.cc"],
+    data = ["//tools/jpov/test/animations:hip_hop_dance_fbx_data"],
+    deps = [
+        "//tools/jpov/interface:animation_sampler",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:fbx_loader",
+        "//third_party/ufbx-static:ufbx",
+        "//geom/common:quaternion",
+        "//geom/math:mat4",
+        "//tools/jpov/test:test_utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # glTF loader — 骨骼（JOINTS_0/WEIGHTS_0 顶点侧 + LoadGltfSkeleton 关节树/逆绑定）验证（CPU-only）
 # 真实资材 mixamo_male.glb（Tripo Auto Rig spec=mixamo, 23 关节带蒙皮）。
 cc_test(

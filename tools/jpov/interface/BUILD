@@ -151,6 +151,35 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# AnimationSampler — 动画素材的【时间采样】（某时刻 → 一个 SkeletonPose）
+# FBXClip 的取帧原语：帧网格归属 + 逐骨球面插值 + 循环回绕。供 FBX 观察器逐帧取姿、
+# 后续 retarget 按时间取源姿态同款（纯 CPU / GL-free，见 animation_sampler.h 头注）。
+cc_library(
+    name = "animation_sampler",
+    hdrs = ["animation_sampler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":animation_clip",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "animation_sampler_test",
+    srcs = ["animation_sampler_test.cc"],
+    deps = [
+        ":animation_sampler",
+        "//geom/common:quaternion",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # Camera — 透视相机配置
 cc_library(
     name = "camera",
@@ -244,6 +273,7 @@ cc_library(
         "ui.h",
         "skeleton_types.h",
         "animation_clip.h",
+        "animation_sampler.h",
         "text3d_util.h",
     ],
     visibility = ["//visibility:public"],
@@ -259,6 +289,7 @@ cc_library(
         ":ui",
         ":skeleton_types",
         ":animation_clip",
+        ":animation_sampler",
         ":text3d_util",
     ],
 )
