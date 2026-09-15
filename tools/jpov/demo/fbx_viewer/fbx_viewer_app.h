@@ -27,9 +27,9 @@
 //       kNoRetarget —— **对照组**：pose 数值**原样直搬**（骨名匹配，见
 //                      skeleton_pose_transfer.h，函数名即警示：NoRetarget）
 //                      → 预期"四肢绕错轴"；
-//       kQRetarget  —— **★ 正式重定向**：搬"相对**自己 bind** 的增量旋转"
-//                      （Q 桥接量，见 interface/skeleton_retarget.h）
-//                      → 预期"角度上与红同步，但保留自己的 bind 朝向"。
+//       kBodyRetarget —— **★ 正式重定向**：搬「关节相对自己 bind 的额外旋转」在
+//                      人体随动系下不变的量（见 interface/skeleton_retarget.h 的
+//                      BodyRetarget 一节）→ 预期"与红骨同步"，且几何一致时零误差。
 //   · 面板：「mesh 来源」combo 选看哪个（/两者并列，红左蓝右）；
 //           「蓝骨驱动」combo 切直搬/重定向。
 // 蓝骨与红骨是**两套骨架各自的 rest 形状**，都只被 pose（旋转）驱动：于是"动作对不对"
@@ -153,20 +153,21 @@ inline const std::vector<const char*>& MeshSourceItems() {
 }
 
 // 「蓝骨驱动」选项：glb 骨架（蓝）的位姿从源（红）怎么来。
-//   kNoRetarget —— **对照组**：局部旋转数值**原样搬**（不校正局部帧朝向）。
-//                 两侧 rig 的局部帧差很大（实测 LeftArm 179.6°）⇒ 预期四肢绕错轴。
-//   kQRetarget  —— **★ 正式重定向**：搬"相对自己 bind 的增量旋转"（用 Q 桥接量把
-//                 源父系里的表达换成目标父系里的表达）。
-//                 ⇒ 蓝骨"角度上与红同步"，但**保留自己的 bind 朝向**（资产间不变量）。
+//   kNoRetarget  —— **对照组**：局部旋转数值**原样搬**（不校正局部帧朝向）。
+//                  两侧 rig 的局部帧差很大 ⇒ 预期四肢绕错轴。
+//   kBodyRetarget —— **★ 正式重定向**（2026-09-15 Danis 定）：搬
+//                  “关节相对自己 bind 的额外旋转”在**人体随动系**下不变的量，
+//                  即 Δ_t = Q_body·Δ_s·Q_body⁻¹（Q_body = M_t·M_s⁻¹）。
+//                  ⇒ 几何一致的两骨人零误差；几何真不同也能正确对应。
 enum class BlueDrive : int {
-    kNoRetarget = 0,
-    kQRetarget  = 1,
+    kNoRetarget   = 0,
+    kBodyRetarget = 1,
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
 inline const char* const kBlueDriveItems[] = {
     "无重定向（数值直搬·对照）",
-    "QRetarget（相对 bind 增量）",
+    "BodyRetarget（人体随动系）",
 };
 inline constexpr int kBlueDriveItemCount =
     static_cast<int>(sizeof(kBlueDriveItems) / sizeof(kBlueDriveItems[0]));
@@ -201,7 +202,7 @@ public:
     uint32_t glb_bone_mesh_ = 0;
     int glb_mapped_bones_ = 0;      // 源/目标骨名命中数（面板显示；未命中骨保持 rest）
     MeshSource mesh_source_ = MeshSource::kFbxOnly;  // 本帧看哪个（/哪些）骨架
-    BlueDrive blue_drive_ = BlueDrive::kQRetarget;   // 蓝骨位姿怎么来（见 BlueDrive）
+    BlueDrive blue_drive_ = BlueDrive::kBodyRetarget;  // 蓝骨位姿怎么来（见 BlueDrive）
 
     // ── 播放状态 ──
     double anim_time_seconds_ = 0.0;  // 动画时间（秒）；循环语义由 SampleClipPose 承担
@@ -334,12 +335,14 @@ public:
     int frame_index_for_test() const { return frame_index_; }
     // 蓝骨驱动（重定向模式）白盒入口，见 fbx_viewer_playback_test.cc 的 TestBlueDrive*。
     const jpov::SkeletonPose& glb_pose_for_test() const { return glb_pose_; }
-    const jpov::BindResult& retarget_bind_for_test() const { return retarget_bind_; }
+    const jpov::BodyRetargetPlan& retarget_plan_for_test() const { return retarget_plan_; }
     jpov::SkeletonType& glb_skeleton_for_test() { return glb_skeleton_; }
     jpov::SkeletonType& skeleton_for_test() { return skeleton_; }
     void SetBlueDriveForTest(BlueDrive d) { blue_drive_ = d; }
     BlueDrive blue_drive_for_test() const { return blue_drive_; }
-    void RebuildBindForTest() { retarget_bind_ = jpov::BuildBind(glb_skeleton_, skeleton_); }
+    void RebuildBindForTest() {
+        retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
+    }
     bool has_glb_for_test() const { return has_glb_; }
     void SetFramePoseForTest(const jpov::SkeletonPose& p) { frame_pose_ = p; }
     // 直接跑"算蓝骨位姿"那一步（不碰 GL；UpdateGlbBoneMeshIfNeeded 里的纯 CPU 部分）。
@@ -349,8 +352,8 @@ public:
                 TransferPoseByNameNoRetarget(skeleton_, frame_pose_, glb_skeleton_,
                                              &glb_pose_);
                 break;
-            case BlueDrive::kQRetarget:
-                jpov::RetargetPose(retarget_bind_, frame_pose_, &glb_pose_);
+            case BlueDrive::kBodyRetarget:
+                jpov::BodyRetargetPose(retarget_plan_, frame_pose_, &glb_pose_);
                 break;
         }
     }
@@ -397,7 +400,7 @@ private:
 
     // 目标（蓝）mesh：按 blue_drive_ 把源位姿搬到 glb 骨架后重建。
     //   kNoRetarget —— 数值直搬（对照组，预期四肢绕错轴）；
-    //   kQRetarget  —— Q 桥接量重定向（见 interface/skeleton_retarget.h）。
+    //   kBodyRetarget —— 人体随动系重定向（见 interface/skeleton_retarget.h）。
     // 没 glb / 本帧不看蓝 → 标 key 失效（本帧没算蓝位姿，下次切回蓝模式必须重建）。
     void UpdateGlbBoneMeshIfNeeded() {
         if (!has_glb_ || mesh_source_ == MeshSource::kFbxOnly) {
@@ -409,9 +412,9 @@ private:
                 TransferPoseByNameNoRetarget(skeleton_, frame_pose_, glb_skeleton_,
                                              &glb_pose_);
                 break;
-            case BlueDrive::kQRetarget:
-                // 整段动画复用同一份 bind（对位表 + Q 表只算一次）。
-                jpov::RetargetPose(retarget_bind_, frame_pose_, &glb_pose_);
+            case BlueDrive::kBodyRetarget:
+                // 整段动画复用同一份 plan（对位表 + 人体随动系 + Q_body 只算一次）。
+                jpov::BodyRetargetPose(retarget_plan_, frame_pose_, &glb_pose_);
                 break;
         }
         // 键里含驱动模式：切 combo 必须重建（否则会留着上一个模式的 mesh）。
@@ -501,7 +504,7 @@ private:
         char mode_tag[288] = "";
         if (has_glb_) {
             const char* drive_name =
-                (blue_drive_ == BlueDrive::kQRetarget) ? "QRetarget" : "无重定向";
+                (blue_drive_ == BlueDrive::kBodyRetarget) ? "BodyRetarget" : "无重定向";
             if (mesh_source_ == MeshSource::kFbxOnly) {
                 std::snprintf(mode_tag, sizeof(mode_tag), "  | 蓝：关（只看红）");
             } else if (mesh_source_ == MeshSource::kGlbOnly) {
@@ -513,13 +516,12 @@ private:
                               "  | 红=fbx 源，蓝=glb %s（命中 %d/%d）", drive_name,
                               glb_mapped_bones_, glb_skeleton_.bone_count());
             }
-            // QRetarget 下额外报“蓝骨朝向差（保留）”：Q(0) 让蓝骨保持自己的 bind 朝向。
-            if (blue_drive_ == BlueDrive::kQRetarget && retarget_bind_.rest_alignment.valid &&
+            // BodyRetarget 下额外报“蓝骨朝向差（保留）”：Q_body 让蓝骨保持自己的 bind 朝向。
+            if (blue_drive_ == BlueDrive::kBodyRetarget &&
                 mesh_source_ != MeshSource::kFbxOnly) {
                 std::snprintf(mode_tag + std::strlen(mode_tag),
                               sizeof(mode_tag) - std::strlen(mode_tag),
-                              "  朝向差 %.0f°（保留）",
-                              retarget_bind_.rest_alignment.angle_deg);
+                              "  Q_body %.0f°", retarget_plan_.q_body_angle_deg);
             }
         }
         const std::string line = std::string(head) + mode_tag;
@@ -545,7 +547,7 @@ private:
         bool valid = false;  // 是否已建过
         bool rest  = false;  // 建时的 rest 模式
         double time = 0.0;   // 建时的动画时刻
-        BlueDrive drive = BlueDrive::kQRetarget;  // 建时的蓝骨驱动（红骨不用，恒为默认）
+        BlueDrive drive = BlueDrive::kBodyRetarget;  // 建时的蓝骨驱动（红骨不用，恒为默认）
         bool Matches(bool rest_mode, double t) const {
             return valid && rest == rest_mode && time == t;
         }
@@ -557,9 +559,9 @@ private:
     bool show_panel_ = true;          // 是否画面板/消费输入（headless 出图为 false）
     jpov::SkeletonPose frame_pose_;    // 本帧源位姿（UpdateFramePose 写入）
     jpov::SkeletonPose glb_pose_;      // 目标位姿（按 blue_drive_ 算，UpdateGlbBoneMeshIfNeeded 写入）
-    // QRetarget 用的 bind（对位表 + Q 表 + 两侧 rest 世界朝向）：装配 glb 时建一次，
-    // 之后**每帧复用**（不重复做骨名哈希与 Q 表计算）。
-    jpov::BindResult retarget_bind_;
+    // BodyRetarget 的 plan（对位表 + 两侧人体随动系 + Q_body + Rb 表）：装配 glb 时建一次，
+    // 之后**每帧复用**（不重复做骨名哈希与人体随动系估计）。
+    jpov::BodyRetargetPlan retarget_plan_;
     int frame_index_ = kRestFrameIndex;  // 本帧采样到的源帧下标
     float camera_target_height_ = 0.0f;  // 相机注视高度（按骨架包围盒算，见 FitInitialView）
     // rest 火柴人 mesh 的包围盒（装配时算）：初始机位适配 + 「两者并列」摆位用。
@@ -678,19 +680,14 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
     glb_bounds_ = ComputeMeshBounds(rest_mesh);
     glb_center_x_ = glb_bounds_.CenterX();
 
-    // 骨名命中数（面板显示）：用**重定向的对位表**（与 QRetarget 路径同一真相，不另算）。
-    // ⚠️ 以前这里跑一次直搬拿统计 —— 现在改读 retarget_bind_，因为面板要显示的
-    //    "命中 x/y" 与 QRetarget 实际用的对位必须一致（否则面板会骗人）。
-    retarget_bind_ = jpov::BuildBind(glb_skeleton_, skeleton_);
-    glb_mapped_bones_ = retarget_bind_.matched_bone_count;
-    LOG(INFO) << "QRetarget bind: 骨名命中=" << retarget_bind_.matched_bone_count << "/"
-              << retarget_bind_.target_bone_count << "  Q 与恒等平均夹角="
-              << retarget_bind_.q_mean_angle_deg << "° max="
-              << retarget_bind_.q_max_angle_deg << "°"
-              << (retarget_bind_.rest_alignment.valid
-                      ? ("  两侧整体 rest 朝向差=" +
-                         std::to_string(retarget_bind_.rest_alignment.angle_deg) + "°")
-                      : std::string("  （无法估计整体朝向差）"));
+    // 骨名命中数（面板显示）：用**重定向 plan 的对位表**（与 BodyRetarget 同一真相，不另算）。
+    retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
+    glb_mapped_bones_ = retarget_plan_.matched_bone_count;
+    LOG(INFO) << "BodyRetarget plan: 骨名命中=" << retarget_plan_.matched_bone_count << "/"
+              << retarget_plan_.target_bone_count << "  Q_body="
+              << retarget_plan_.q_body_angle_deg << "°"
+              << "  源人体系 yaw=" << retarget_plan_.source_frame.yaw_deg << "°"
+              << "  目标人体系 yaw=" << retarget_plan_.target_frame.yaw_deg << "°";
 
     // 传了 glb 就是想对比：默认「两者并列」，并把间距按两骨人宽度算好（对称于 x=0）。
     has_glb_ = true;

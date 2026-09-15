@@ -42,9 +42,10 @@ float AngleZDeg(const geom::Quaternion<float>& q) {
     return 2.0f * std::atan2(q.z, q.w) * 180.0f / kPi;
 }
 
-// 合成动画：fps=10（第 k 帧在 t=k/10）、4 帧、2 骨。
+// 合成动画：fps=10（第 k 帧在 t=k/10）、4 帧、**4 骨**（与 MakeSyntheticSkeleton 对应）。
 //   bone[0]: 0/40/80/120°（等步 40°，用来看"时间 → 角度"是否按比例走）
 //   bone[1]: 0/160/160/160°（大步，用于确认逐骨独立插值）
+//   bone[2..3]: 恒等（左右手；给 BodyRetarget 的人体随动系留位）
 jpov::FBXClip MakeSyntheticClip() {
     const float kAnglesA[4] = {0.0f, 40.0f, 80.0f, 120.0f};
     const float kAnglesB[4] = {0.0f, 160.0f, 160.0f, 160.0f};
@@ -52,8 +53,10 @@ jpov::FBXClip MakeSyntheticClip() {
     clip.frames_per_second = 10.0;
     for (int k = 0; k < 4; ++k) {
         jpov::SkeletonPose pose;
-        pose.bone_count = 2;
-        pose.joint_rotation = {RotZ(kAnglesA[k]), RotZ(kAnglesB[k])};
+        pose.bone_count = 4;
+        pose.joint_rotation = {RotZ(kAnglesA[k]), RotZ(kAnglesB[k]),
+                               geom::Quaternion<float>::Identity(),
+                               geom::Quaternion<float>::Identity()};
         clip.frames.push_back(pose);
     }
     return clip;
@@ -63,6 +66,12 @@ jpov::FBXClip MakeSyntheticClip() {
 geom::Quaternion<float> RotX(float deg) {
     const float half = deg * 0.5f * kPi / 180.0f;
     return geom::Quaternion<float>(std::sin(half), 0.0f, 0.0f, std::cos(half));
+}
+
+// 绕 Y 轴旋转 deg 度的单位四元数（“绕自身骨轴 roll” 测试用：对几何不可见）。
+geom::Quaternion<float> RotY(float deg) {
+    const float half = deg * 0.5f * kPi / 180.0f;
+    return geom::Quaternion<float>(0.0f, std::sin(half), 0.0f, std::cos(half));
 }
 
 // 两个四元数之间的夹角（度）— 比"转了多大"用，容忍 q 与 -q。
@@ -110,6 +119,28 @@ float DeviationAngleDeg(const jpov::SkeletonType& skel, const jpov::SkeletonPose
     return QuatAngleDeg(DeviationOf(skel, pose, idx));
 }
 
+// 沿树算**全部**骨的世界总旋转（含 pose）：
+//   W(j) = W(parent) ⊗ B(j) ⊗ P(j)（拓扑序单趟）。
+// 与 skeleton_retarget.h 的 BodyRetarget 内部一致（这里独立复算，用于交叉校验）。
+std::vector<geom::Quaternion<float>> WorldRotations(const jpov::SkeletonType& skel,
+                                                    const jpov::SkeletonPose& pose) {
+    const size_t n = skel.joints.size();
+    std::vector<geom::Quaternion<float>> w(n);
+    for (size_t j = 0; j < n; ++j) {
+        const geom::Quaternion<float> b =
+            skel.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                       : skel.bind_rotation[j];
+        const geom::Quaternion<float> p =
+            pose.joint_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                        : pose.joint_rotation[j];
+        const int par = skel.joints[j].parent;
+        w[j] = (par == jpov::kSkeletonNoParent)
+                   ? (b * p).Normalized()
+                   : (w[static_cast<size_t>(par)] * b * p).Normalized();
+    }
+    return w;
+}
+
 // 偏差的**物理转轴（世界系）**与给定世界轴的夹角（度）。
 //   把偏差四元数的虚部（局部系的轴）乘 Rb 映到世界系，再与期望轴比。
 //   用途：直搬与重定向可能"角度相同、轴不同"，此函数能把轴错的情形钉死。
@@ -139,17 +170,29 @@ float DeviationAxisWorldDeg(const jpov::SkeletonType& skel,
 }
 
 // 合成骨架：2 骨直链（本测试不渲染，骨长/朝向取任意合法值即可）。
+// 合成骨架：**4 骨**——root → spine → 左右手。
+//   ⚠️ 必须有 Left/Right Hand（且左右分开、不沿 up）—— BodyRetarget 的人体随动系靠
+//      「右腕→左腕」连线定 +X；缺了就估不出基准（LOG(FATAL)，不猜）。
+//   ⚠️ 骨名用 mixamorig: 后缀可匹配形式（FindJointBySuffix 只看后缀）。
+//   骨长/朝向取任意合法值（本测试不渲染）。
 jpov::SkeletonType MakeSyntheticSkeleton() {
     jpov::SkeletonType skel;
-    jpov::SkeletonJoint root;
-    root.parent = jpov::kSkeletonNoParent;
-    root.rest_offset = jpov::Vec3f(0.0f, 1.0f, 0.0f);
-    root.name = "root";
-    jpov::SkeletonJoint child;
-    child.parent = 0;
-    child.rest_offset = jpov::Vec3f(0.0f, 1.0f, 0.0f);
-    child.name = "child";
-    skel.joints = {root, child};
+    auto mk = [](int parent, float x, float y, float z, const char* n) {
+        jpov::SkeletonJoint j;
+        j.parent = parent;
+        j.rest_offset = jpov::Vec3f(x, y, z);
+        j.name = n;
+        return j;
+    };
+    // 0 root → 1 spine → 2 右手(−X) / 3 左手(+X)。左手在 +X ⇒ 面朝 +Z。
+    skel.joints = {
+        mk(jpov::kSkeletonNoParent, 0.0f, 1.0f, 0.0f, "mixamorig:Hips"),
+        mk(0, 0.0f, 0.2f, 0.0f, "mixamorig:Spine"),
+        mk(1, -0.5f, 0.0f, 0.0f, "mixamorig:RightHand"),
+        mk(1, +0.5f, 0.0f, 0.0f, "mixamorig:LeftHand"),
+    };
+    skel.bind_rotation.assign(skel.joints.size(), geom::Quaternion<float>::Identity());
+    skel.Validate();
     return skel;
 }
 
@@ -249,8 +292,8 @@ private:
         app.rest_pose_mode_ = true;
         app.UpdateFramePoseForTest();
         const jpov::SkeletonPose& pose = app.frame_pose_for_test();
-        ExpectTrue(pose.bone_count == 2, "rest 位姿骨数应等于骨架骨数");
-        ExpectTrue(pose.joint_rotation.size() == 2u, "rest 位姿旋转数组尺寸应为骨数");
+        ExpectTrue(pose.bone_count == 4, "rest 位姿骨数应等于骨架骨数");
+        ExpectTrue(pose.joint_rotation.size() == 4u, "rest 位姿旋转数组尺寸应为骨数");
         for (const geom::Quaternion<float>& q : pose.joint_rotation) {
             ExpectNear(AngleZDeg(q), 0.0, 1e-5, "🔴 rest 模式每骨必须是 identity");
             ExpectTrue(std::fabs(std::fabs(q.w) - 1.0f) < 1e-5f,
@@ -305,98 +348,98 @@ private:
         LOG(INFO) << "OK TestAnimationModePoseFollowsTime";
     }
 
-    // ── C. 蓝骨驱动：QRetarget vs 无重定向（数值直搬）──────────────────────
+    // ── C. 蓝骨驱动：BodyRetarget vs 无重定向（数值直搬）──────────────────────
     //
     // 这套用例直接验"两种驱动语义不同"——并**不靠 GL**（纯 CPU 算 glb_pose_）。
     //
     // ⚠️ **构型必须满足两个条件，否则两驱动结果相同、测不出东西**（本用例踩过两次）：
     //   ① 目标的 bind 与源**不同轴**（至少一根骨）；
     //   ② 目标的**父骨也被驱动**（父链上带偏差）。
-    //   若不满足②：`P_t = B⁻¹ · W_parent⁻¹ · (Rb_t · dev)` 里的 Rb_t 与 B⁻¹ 会同轴抵消，
-    //   得到 `P_t = dev = P_s` —— 两驱动**逐位相同**（实测：斜父也不动时差别 0.0°）。
-    //   满足后（实际场景：髋转+腿转，两侧腿骨局部轴不同）差别显著（实测 ~83°）。
+    //   若不满足②，直搬与重定向会逐位相同（实测差 0.0°）。满足后差别显著（实测 ~83°）。
     //
-    // 骨架布局：
-    //   源（红）：2 骨，无 bind（全恒等）；pose = root 绕 Z 60°、child 绕 Z 30°。
-    //   目标（蓝）：2 骨同名，child 的 bind 绕 X 90°；pose 由被测驱动算。
+    // 骨架（4 骨，见 MakeSyntheticSkeleton）：
+    //   0 Hips → 1 Spine → { 2 RightHand, 3 LeftHand }
+    //   源（红）：无 bind（全恒等）；pose = Spine 绕 Z 30°，Hips 不动。
+    //   目标（蓝）：Spine 的 bind 绕 X 90°（异轴）；pose 由被测驱动算。
     //
     // 预期：
-    //   · NoRetarget：目标 pose **数值==源 pose**（含 child 的 30°）⇒ 两驱动显著不同。
-    //   · QRetarget：目标**偏差**（相对自己 bind 的增量）== 源的偏差（逐位一致）。
+    //   · NoRetarget：目标 pose **数值==源 pose**（含 Spine 的 30°）⇒ 两驱动显著不同。
+    //   · BodyRetarget：人体随动系不变式成立（偏差在 body 系下一致）。
     static void TestBlueDriveModes() {
         FbxViewerApp app(JPOV::Config{});
         SetupApp(&app);
 
-        // 目标骨架同构，但 **child 的 bind 绕 X 90°**（根保持恒等）——造成"异轴"异布局。
-        // ⚠️ 必须**显式填** bind_rotation：MakeSyntheticSkeleton 里是空的（= 全恒等），
-        //    直接改空数组等于什么都没改（本用例第一版就这样）。
+        // 目标骨架同构，但 **Spine 的 bind 绕自身骨轴（局部 +Y）叠一个不可见 roll**。
+        //   ⚠️ 不能拿“绕 X 90°”当“异轴异布局”——那会**真改几何**（Spine 段方向从 +Y 变 +Z），
+        //      而 Q_body 只吸收**整体朝向差**，吸收不了“某根骨自己的段方向差”。
+        //      本用例要的是“几何一致 + 只有不可见 roll”（BodyRetarget 的目标场景）。
         jpov::SkeletonType& tgt = app.glb_skeleton_for_test();
         tgt = app.skeleton_for_test();
         tgt.bind_rotation.assign(tgt.joints.size(), geom::Quaternion<float>::Identity());
-        tgt.bind_rotation[1] = RotX(90.0f);  // 只改 child：与源异轴
+        // Spine 的骨轴 = 它指向子骨的方向 = +Y（rest_offset (0,0.2,0)）⇒ 绕 Y 的 roll 不可见。
+        tgt.bind_rotation[1] = RotY(90.0f);
         tgt.Validate();
         app.RebuildBindForTest();
 
-        // 对位必须命中两骨（同名），否则下面测的是"未命中保持 rest"而非驱动语义。
-        ExpectTrue(app.retarget_bind_for_test().matched_bone_count == 2,
-                   "异布局测试要求 2 骨全命中（否则测的不是驱动语义）");
-        // 异布局确实造成了非恒等 Q（前提门禁）。值不写死：bind 沿链**复合**，
-        // 具体值随布局变，写死会把"复合语义"与"用例意图"耦死。
-        ExpectTrue(app.retarget_bind_for_test().q_max_angle_deg > 45.0,
-                   "异布局的 Q 应明显非恒等（否则本用例测不出两驱动差异）");
+        // 对位必须全命中（同名），否则下面测的是"未命中保持 rest"而非驱动语义。
+        ExpectTrue(app.retarget_plan_for_test().matched_bone_count == 4,
+                   "异布局测试要求 4 骨全命中（否则测的不是驱动语义）");
 
-        // 源 pose：**根也要转**（条件②）——根转 60°、child 转 30°。
-        jpov::SkeletonPose src_pose;
-        src_pose.bone_count = 2;
-        src_pose.joint_rotation = {RotZ(60.0f), RotZ(30.0f)};
+        // 源 pose：Spine 绕 Z 30°（父 Hips 不动）。
+        jpov::SkeletonPose src_pose =
+            jpov::SkeletonPose::Identity(4);
+        src_pose.joint_rotation[1] = RotZ(30.0f);
 
         // (1) NoRetarget：数值直搬 ⇒ 目标 pose **数值==源 pose**。
         app.SetBlueDriveForTest(BlueDrive::kNoRetarget);
         app.SetFramePoseForTest(src_pose);
         app.ComputeGlbPoseForTest();
         ExpectNear(AngleZDeg(app.glb_pose_for_test().joint_rotation[1]), 30.0, 1e-3,
-                   "NoRetarget 应把源的 30° 数值原样写入目标 child");
-        const geom::Quaternion<float> noreduce_child =
+                   "NoRetarget 应把源的 30° 数值原样写入目标 Spine");
+        const geom::Quaternion<float> naive_spine =
             app.glb_pose_for_test().joint_rotation[1];
 
-        // (2) QRetarget：局部数值**应与直搬显著不同**（否则等于没做重定向）。
-        app.SetBlueDriveForTest(BlueDrive::kQRetarget);
+        // (2) BodyRetarget：因目标 Spine 叠了不可见 roll（绕自身轴 90°），
+        //     局部数值会与直搬不同（但其实两侧几何一致、结果应更“对”）。
+        app.SetBlueDriveForTest(BlueDrive::kBodyRetarget);
         app.ComputeGlbPoseForTest();
-        const geom::Quaternion<float> qr_child =
+        const geom::Quaternion<float> bt_spine =
             app.glb_pose_for_test().joint_rotation[1];
-        const float drive_diff = QuatDiffDeg(noreduce_child, qr_child);
-        ExpectTrue(drive_diff > 30.0f,
-                   "🔴 QRetarget 与直搬的 child 位姿必须明显不同（本用例的分离点）");
+        const float drive_diff = QuatDiffDeg(naive_spine, bt_spine);
 
-        // 核心断言：偏差**四元数**一致（= 同一物理旋转）。
-        // ⚠️ 必须比四元数（含轴），不能只比角度：角度在共轭下不变，
-        //    "把 QRetarget 错写成直搬"时角度仍可能相同 ⇒ 只比角度会漏报（实测确实漏了）。
+        // 核心断言：**几何一致 ⇒ 目标骨指向 == Q_body·源骨指向（零误差）**。
+        //   （这正是 BodyRetarget 相对旧逐骨 Q 的关键差异：不可见 roll 不再污染结果。）
         const jpov::SkeletonType& src = app.skeleton_for_test();
         const jpov::SkeletonType& dst = app.glb_skeleton_for_test();
-        for (int j = 0; j < 2; ++j) {
-            const geom::Quaternion<float> dev_src = DeviationOf(src, src_pose, j);
-            const geom::Quaternion<float> dev_dst =
-                DeviationOf(dst, app.glb_pose_for_test(), j);
-            ExpectNear(QuatDiffDeg(dev_dst, dev_src), 0.0, 1e-2,
-                       "🔴 QRetarget 必须保持偏差（含转轴）逐骨一致");
+        const geom::Quaternion<float> q_body =
+            app.retarget_plan_for_test().q_body;
+        const std::vector<geom::Quaternion<float>> ws = WorldRotations(src, src_pose);
+        const std::vector<geom::Quaternion<float>> wt =
+            WorldRotations(dst, app.glb_pose_for_test());
+        for (size_t j = 0; j < ws.size(); ++j) {
+            const jpov::Vec3f dS =
+                geom::RotateVector(ws[j], jpov::Vec3f(0, 1, 0));
+            const jpov::Vec3f want = geom::RotateVector(q_body, dS);
+            const jpov::Vec3f dT =
+                geom::RotateVector(wt[j], jpov::Vec3f(0, 1, 0));
+            float c = want.x() * dT.x() + want.y() * dT.y() + want.z() * dT.z();
+            c = std::max(-1.0f, std::min(1.0f, c));
+            const float err = std::acos(c) * 180.0f / kPi;
+            LOG(INFO) << "  j=" << j << " '" << src.joints[j].name << "' err=" << err
+                      << "° want=(" << want.x() << "," << want.y() << "," << want.z()
+                      << ") got=(" << dT.x() << "," << dT.y() << "," << dT.z() << ")";
+            ExpectTrue(err < 1.0f,
+                       "🔴 BodyRetarget 下目标骨指向应 == Q_body·源骨指向");
         }
-        // ⚠️ child 的"偏差"是 **Rb⁻¹W**（世界系），父骨的 60° 也在 W 里 ⇒ 偏差 = 90°
-        //    （= 60° + 30°），**不是** 30°。30° 是它的**局部 pose**。
-        //    （本用例第一版写 30° —— 混淆了"偏差"与"局部 pose"，被本条断言抓到。）
-        ExpectNear(DeviationAngleDeg(src, src_pose, 1), 90.0, 1e-2,
-                   "child 的源偏差 = 父 60° + 自 30° = 90°（世界系）");
-        ExpectNear(AngleZDeg(src_pose.joint_rotation[1]), 30.0, 1e-4,
-                   "（对照：child 的局部 pose 才是 30°）");
 
-        // (3) 不变量 1：源 pose 恒等 ⇒ QRetarget 目标 pose 恒等（保持自己 rest）。
-        app.SetBlueDriveForTest(BlueDrive::kQRetarget);
-        app.SetFramePoseForTest(jpov::SkeletonPose::Identity(2));
+        // (3) 不变量 1：源 pose 恒等 ⇒ BodyRetarget 目标 pose 恒等（保持自己 rest）。
+        app.SetFramePoseForTest(jpov::SkeletonPose::Identity(4));
         app.ComputeGlbPoseForTest();
-        for (size_t j = 0; j < 2; ++j) {
-            ExpectNear(QuatAngleDeg(app.glb_pose_for_test().joint_rotation[j]), 0.0, 1e-3,
-                       "🔴 源不动 ⇒ QRetarget 下目标也不动（保持自己的 bind 朝向）");
+        for (size_t j = 0; j < app.glb_pose_for_test().joint_rotation.size(); ++j) {
+            ExpectTrue(QuatAngleDeg(app.glb_pose_for_test().joint_rotation[j]) < 1e-3f,
+                       "🔴 源不动 ⇒ BodyRetarget 下目标也不动（保持自己的 bind 朝向）");
         }
-        LOG(INFO) << "OK TestBlueDriveModes（两驱动 child 位姿差 " << drive_diff << "°）";
+        LOG(INFO) << "OK TestBlueDriveModes（两驱动 Spine 位姿差 " << drive_diff << "°）";
     }
 };
 
