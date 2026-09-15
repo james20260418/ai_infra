@@ -107,6 +107,37 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# SkeletonRetarget — 骨架动作重定向（Q 桥接量）：源 pose → 目标 pose（CPU、GL-free）
+# 从两个 SkeletonType 建 Q（骨名对齐 + Q 表），再逐帧把源 pose 搬到目标骨架。
+# 见 docs/jpov_retarget_design.md §1.2 / §6 / §7-M4。
+cc_library(
+    name = "skeleton_retarget",
+    hdrs = ["skeleton_retarget.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "skeleton_retarget_test",
+    srcs = ["skeleton_retarget_test.cc"],
+    deps = [
+        ":mixamo23_skeleton",
+        ":skeleton_retarget",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # SkeletonMesh — 骨架可视化（火柴人 mesh）CPU 几何生成（GL-free）
 # 由 SkeletonType + Pose 造出可直接 RegisterMesh 的带骨杆 mesh（见 docs/jpov_retarget_design.md §4）。
 cc_library(
