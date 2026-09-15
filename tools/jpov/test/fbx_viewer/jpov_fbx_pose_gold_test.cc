@@ -168,7 +168,7 @@ int main() {
             jpov_fbx_pose_gold::MakeApp("JPOV FBX Pose Gold Test",
                                         jpov_fbx_pose_gold::kGoldTimeSeconds,
                                         /*rest_pose*/ false, /*glb_path*/ "",
-                                        jpov_fbx_viewer::MeshSource::kFbxOnly);
+                                        jpov_fbx_viewer::ViewMode::kFbxOnly);
         jpov_fbx_pose_gold::RenderFrame(app.get(), out_gold_frame.c_str());
         app->anim_time_seconds_ = jpov_fbx_pose_gold::kOtherTimeSeconds;
         jpov_fbx_pose_gold::RenderFrame(app.get(), out_other_frame.c_str());
@@ -176,13 +176,14 @@ int main() {
         jpov_fbx_pose_gold::RenderFrame(app.get(), out_rest_pose.c_str());
     }
     {
-        // ④ 对照组：含 glb（两者并列）同帧 → 蓝骨人（glb rest 被同一份 pose 直驱）。
+        // ④ 对照组：含 glb（两者并列）同帧→ 蓝骨人（glb rest 被同一份 pose **数值直搬**）。
+        //    ⚠️ 必须与 generator 的②同模式（kBothNoRetarget）——它比对的就是这张 gold。
         std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
             jpov_fbx_pose_gold::MakeApp("JPOV FBX Pose Gold Test",
                                         jpov_fbx_pose_gold::kGoldTimeSeconds,
                                         /*rest_pose*/ false,
                                         jpov_fbx_pose_gold::GlbPath(),
-                                        jpov_fbx_viewer::MeshSource::kBoth);
+                                        jpov_fbx_viewer::ViewMode::kBothNoRetarget);
         jpov_fbx_pose_gold::RenderFrame(app.get(), out_glb_both.c_str());
     }
 

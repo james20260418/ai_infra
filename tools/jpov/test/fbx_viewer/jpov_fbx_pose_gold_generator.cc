@@ -15,10 +15,10 @@ namespace {
 
 // 渲一张 gold（走共用的 MakeApp，保证与 test 零分叉）。
 void Generate(const std::string& outpath, const std::string& glb_path,
-              jpov_fbx_viewer::MeshSource mesh_source, const char* title) {
+              jpov_fbx_viewer::ViewMode view_mode, const char* title) {
     std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
         jpov_fbx_pose_gold::MakeApp(title, jpov_fbx_pose_gold::kGoldTimeSeconds,
-                                    /*rest_pose*/ false, glb_path, mesh_source);
+                                    /*rest_pose*/ false, glb_path, view_mode);
     jpov_fbx_pose_gold::RenderFrame(app.get(), outpath.c_str());
     LOG(INFO) << "gold generated: " << outpath;
 }
@@ -31,11 +31,11 @@ int main(int argc, char** argv) {
 
     // ① 基础 gold（仅 fbx 源骨人）
     Generate(dir + jpov_fbx_pose_gold::GetGoldRelPath(), /*glb_path*/ "",
-             jpov_fbx_viewer::MeshSource::kFbxOnly, "JPOV FBX Pose Gold");
+             jpov_fbx_viewer::ViewMode::kFbxOnly, "JPOV FBX Pose Gold");
 
-    // ② 对照组 gold（fbx + glb 并列，蓝骨 = 无重定向直驱）
+    // ② 对照组 gold（fbx + glb 并列，蓝骨 = 数值直搬的“无重定向”对照）
     Generate(dir + jpov_fbx_pose_gold::GetGlbNaiveGoldRelPath(),
-             jpov_fbx_pose_gold::GlbPath(), jpov_fbx_viewer::MeshSource::kBoth,
+             jpov_fbx_pose_gold::GlbPath(), jpov_fbx_viewer::ViewMode::kBothNoRetarget,
              "JPOV FBX Pose + glb naive Gold");
     return 0;
 }
