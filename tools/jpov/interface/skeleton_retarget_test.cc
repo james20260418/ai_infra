@@ -641,6 +641,276 @@ TEST(SkeletonRetargetTest, BodyFrameOfOfficialMixamo23) {
     ExpectColumnsAreAxes(f);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  12. BodyRetarget（人体随动系版）—— @Danis 点名的核心不变量
+// ════════════════════════════════════════════════════════════════════════════
+
+// 造一套“几何与源一致”的骨架：给定可任意摆弄的 bind/rest_offset，但**骨指向**要向
+// 源看齐（再整体叠一个 root yaw）。做法：先造几何标准的 T-pose，再逐骨乘一个任意
+// 的“绕自身骨轴 roll”——它对骨指向/位置（几乎）无影响，但会让 bind 值大不相同。
+//
+// 结构：0 Hips(根) → 1 Spine → 2 LShoulder → 3 LArm → 4 LForeArm → 5 LHand
+//                └→ 6 RShoulder → ... （简化为一条右侧臂链，足以覆盖多级父链）
+struct GeoChain {
+    SkeletonType type;
+};
+
+// 造一条人形臂链：**先在 world 里摆好几何**（面朝 +Z、左 = +X、手臂水平张开），
+// 再由几何反推每骨的 `rest_offset`（相对父的平移）与 `bind_rotation`（相对父的旋转，
+// 可能再叠一个任意“绕自身骨轴”的不可见 roll），并整体叠一个 root yaw。
+//
+//   这样做保证了：① `rest_offset` 真在**父系**里（之前版本误把 world 偏移当父系偏移）；
+//   ② “叠 roll” 真的是绕自身骨轴（对骨指向/位置无影响）。
+//
+// 几何（world）：胯(0,1,0) → 脊(0,1.2,0) →{ 左肩(0.18,1.2,0) → 左臂(0.36,1.2,0)
+//                                                 → 左前臂(0.54,1.2,0) → 左手(0.72,1.2,0)
+//                                              右肩(-0.18,1.2,0) → ... 右腕(-0.72,1.2,0) }
+// 每骨的“骨指向”= 它指向**子骨**的方向（叶子骨沿用父的段方向）。
+GeoChain MakeGeoArmChain(float root_yaw_deg = 0.0f,
+                         const std::vector<float>& rolls = {}) {
+    const char* names[] = {"mixamorig:Hips", "mixamorig:Spine",
+                           "mixamorig:LeftShoulder", "mixamorig:LeftArm",
+                           "mixamorig:LeftForeArm", "mixamorig:LeftHand",
+                           "mixamorig:RightShoulder", "mixamorig:RightArm",
+                           "mixamorig:RightForeArm", "mixamorig:RightHand"};
+    const int n = 10;
+    // world 下的关节位置（面朝 +Z）与父索引。
+    struct Spec { int parent; float x, y, z; };
+    const Spec specs[] = {
+        {kSkeletonNoParent, 0.00f, 1.00f, 0.0f},  // 0 Hips
+        {0,                 0.00f, 1.20f, 0.0f},  // 1 Spine
+        {1,                 0.18f, 1.20f, 0.0f},  // 2 LShoulder
+        {2,                 0.36f, 1.20f, 0.0f},  // 3 LArm
+        {3,                 0.54f, 1.20f, 0.0f},  // 4 LForeArm
+        {4,                 0.72f, 1.20f, 0.0f},  // 5 LHand
+        {1,                -0.18f, 1.20f, 0.0f},  // 6 RShoulder
+        {6,                -0.36f, 1.20f, 0.0f},  // 7 RArm
+        {7,                -0.54f, 1.20f, 0.0f},  // 8 RForeArm
+        {8,                -0.72f, 1.20f, 0.0f},  // 9 RHand
+    };
+    // 每骨的“指向子骨”方向（叶子骨用“父→自己”的段方向）——即几何上的骨轴。
+    Vec3f dir[n];
+    for (int i = 0; i < n; ++i) {
+        // 找 i 的第一个子；没子就用 父→i 的段方向。
+        int child = -1;
+        for (int k = 0; k < n; ++k) {
+            if (specs[k].parent == i) { child = k; break; }
+        }
+        const int ref = (child >= 0) ? child : i;
+        const int base = (child >= 0) ? i : specs[i].parent;
+        dir[i] = Vec3f(specs[ref].x - specs[base].x, specs[ref].y - specs[base].y,
+                       specs[ref].z - specs[base].z).Unit();
+    }
+    // 造旋转：让该骨局部 +Y 指向 dir[i]。逐骨求解“使 R·ŷ = dir”的最小旋转。
+    auto rot_from_y = [](const Vec3f& d) {
+        const Vec3f from(0.0f, 1.0f, 0.0f);
+        const float c = std::max(-1.0f, std::min(1.0f, from.y() * d.y()));
+        // 通用（from 恒为 +Y，可简化）：轴 = ŷ × d，角 = acos(d.y())。
+        const Vec3f ax(1.0f * d.z() - 0.0f * d.y(), 0.0f * d.x() - 0.0f * d.z(),
+                       0.0f * d.y() - 1.0f * d.x());
+        const float s = ax.Norm();
+        if (s < 1e-9f) {
+            if (c > 0.0f) return geom::Quaternion<float>::Identity();
+            return geom::Quaternion<float>(1.0f, 0.0f, 0.0f, 0.0f);  // 180° 绕 X
+        }
+        const geom::Quaternion<float> q(ax.x() / s, ax.y() / s, ax.z() / s,
+                                        std::cos(std::acos(c) * 0.5f));
+        const float half = std::acos(c) * 0.5f;
+        return geom::Quaternion<float>(ax.x() / s * std::sin(half),
+                                       ax.y() / s * std::sin(half),
+                                       ax.z() / s * std::sin(half), std::cos(half))
+            .Normalized();
+    };
+
+    // 整体 yaw 作用的 world 位置与方向。
+    const geom::Quaternion<float> qyaw = RotYDeg(root_yaw_deg);
+    Vec3f pos[n];
+    for (int i = 0; i < n; ++i) {
+        pos[i] = geom::RotateVector(qyaw, Vec3f(specs[i].x, specs[i].y, specs[i].z));
+    }
+    Vec3f wdir[n];
+    for (int i = 0; i < n; ++i) {
+        wdir[i] = geom::RotateVector(qyaw, dir[i]);
+    }
+
+    GeoChain g;
+    g.type.joints.resize(n);
+    g.type.bind_rotation.assign(n, geom::Quaternion<float>::Identity());
+    // 逐层算：rest 世界旋转 Rw(i) = Rw(父) · bind(i)；要求 Rw(i)·ŷ = wdir[i]。
+    // ⇒ bind(i) = Rw(父)⁻¹ · (使 ŷ → wdir[i] 的旋转)，再叠不可见 roll。
+    std::vector<geom::Quaternion<float>> rw(n, geom::Quaternion<float>::Identity());
+    for (int i = 0; i < n; ++i) {
+        const int p = specs[i].parent;
+        const geom::Quaternion<float> rw_parent =
+            (p == kSkeletonNoParent) ? geom::Quaternion<float>::Identity() : rw[p];
+        // 本骨局部系里“指向子骨”的方向 = Rw(父)⁻¹·wdir[i]（因为 bind 后要对齐 wdir）。
+        const Vec3f d_local = geom::RotateVector(rw_parent.Conjugate(), wdir[i]);
+        geom::Quaternion<float> bind = rot_from_y(d_local);
+        // 叠不可见 roll（绕自身骨轴 = 局部 +Y —— 不影响 Rw·ŷ）。
+        float roll_deg = 0.0f;
+        if (i < static_cast<int>(rolls.size())) roll_deg = rolls[static_cast<size_t>(i)];
+        bind = (bind * RotYDeg(roll_deg)).Normalized();
+        g.type.bind_rotation[i] = bind;
+        rw[i] = (rw_parent * bind).Normalized();
+        // rest_offset：父系里的位移 = Rw(父)⁻¹ · (pos[i] − pos[父])。
+        if (p == kSkeletonNoParent) {
+            g.type.joints[i].rest_offset = pos[i];  // 根：在骨架空间
+        } else {
+            const Vec3f delta(pos[i].x() - pos[p].x(), pos[i].y() - pos[p].y(),
+                              pos[i].z() - pos[p].z());
+            g.type.joints[i].rest_offset = geom::RotateVector(rw_parent.Conjugate(), delta);
+        }
+        g.type.joints[i].parent = p;
+        g.type.joints[i].name = names[i];
+    }
+    g.type.Validate();
+    return g;
+}
+
+// 把骨架绕 Y 转 yaw（几何整体旋转）：改 root 的 bind + 把所有 rest_offset 跟着转。
+void YawSkeletonInPlace(SkeletonType* s, float yaw_deg) {
+    const geom::Quaternion<float> q = RotYDeg(yaw_deg);
+    for (auto& j : s->joints) {
+        j.rest_offset = geom::RotateVector(q, j.rest_offset);
+    }
+    s->bind_rotation[0] = (q * s->bind_rotation[0]).Normalized();
+    s->Validate();
+}
+
+// ⭐ 核心不变量（Danis 定）：几何一致的两个骨人（不管 bind/rest_offset 自由度怎么变）
+//    ⇒ 重定向 **零误差**；再加一个 root 整体旋转也仍然零误差。
+TEST(SkeletonRetargetTest, BodyRetargetZeroErrorForIdenticalGeometry) {
+    // 源：几何标准、无不可见 roll。
+    const GeoChain src = MakeGeoArmChain();
+
+    // 目标：**几何一致**，但故意叠一堆不可见的 roll（包括 180° 这个分支点）。
+    //   再叠一个 root 整体 yaw（= 资产朝向不同）。
+    for (const float yaw : {0.0f, 37.0f, 90.0f, 180.0f}) {
+        GeoChain tgt = MakeGeoArmChain(yaw,
+                                       {0.0f, 0.0f, 180.0f, 175.0f, -120.0f, 90.0f,
+                                        0.0f, 180.0f, 70.0f, -15.0f});
+        const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt.type, src.type);
+        EXPECT_EQ(plan.matched_bone_count, 10) << "yaw=" << yaw;
+
+        // 源给一段动作（每骨绕世界某轴转）。
+        SkeletonPose sp = SkeletonPose::Identity(10);
+        sp.joint_rotation[1] = geom::Quaternion<float>::FromAxisAngle(Vec3f(0, 0, 1), 0.3f);
+        sp.joint_rotation[3] = geom::Quaternion<float>::FromAxisAngle(Vec3f(1, 0, 0), 0.4f);
+        sp.joint_rotation[4] = geom::Quaternion<float>::FromAxisAngle(Vec3f(0, 1, 0), -0.5f);
+
+        const SkeletonPose out = BodyRetargetOnePose(tgt.type, src.type, sp);
+
+        // 期望：目标的**世界骨指向** = Q_body 作用于源的世界骨指向。
+        //   （几何一致 + 目标自己带 yaw ⇒ 只差 Q_body 这一个整体旋转；误差必须为 0。）
+        //   ⚠️ 不能直接比“源指向 vs 目标指向”：目标带 yaw 时两者本来就差那个 yaw；
+        //      要先把源的指向用 Q_body 搬过去再比（Q_body 就是两侧人体系的整体差）。
+        const std::vector<Quatf> ws = WorldRotations(src.type, sp);
+        const std::vector<Quatf> wt = WorldRotations(tgt.type, out);
+        for (size_t j = 0; j < ws.size(); ++j) {
+            const Vec3f dS = geom::RotateVector(ws[j], Vec3f(0, 1, 0));
+            const Vec3f want = geom::RotateVector(plan.q_body, dS);
+            const Vec3f dT = geom::RotateVector(wt[j], Vec3f(0, 1, 0));
+            float c = want.x() * dT.x() + want.y() * dT.y() + want.z() * dT.z();
+            c = std::max(-1.0f, std::min(1.0f, c));
+            EXPECT_NEAR(std::acos(c) * 180.0f / kPi, 0.0f, 0.5f)
+                << "yaw=" << yaw << " joint=" << j << " '"
+                << src.type.joints[j].name << "' 骨指向应 = Q_body·源指向（零误差）";
+        }
+        LOG(INFO) << "BodyRetarget 几何一致 yaw=" << yaw << "°: Q_body="
+                  << plan.q_body_angle_deg << "° 全部骨指向零误差";
+    }
+}
+
+// 跨朝向能力：源面朝 +Z、目标面朝 +X（几何真不同，非 roll）⇒ 动作仍应正确对应。
+TEST(SkeletonRetargetTest, BodyRetargetHandlesRealOrientationDifference) {
+    const GeoChain src = MakeGeoArmChain(/*yaw=*/0.0f);
+    GeoChain tgt = MakeGeoArmChain(/*yaw=*/90.0f);  // 真差 90°
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt.type, src.type);
+    // Q_body 应 ≈ 90°（就是那两侧整体朝向差）。
+    EXPECT_NEAR(plan.q_body_angle_deg, 90.0f, 1.0f);
+
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.joint_rotation[3] = geom::Quaternion<float>::FromAxisAngle(Vec3f(0, 0, 1), 0.5f);
+    const SkeletonPose out = BodyRetargetOnePose(tgt.type, src.type, sp);
+
+    // 目标骨指向 应 = Q_body 作用于源骨指向（几何一致的旋转对应）。
+    const std::vector<Quatf> ws = WorldRotations(src.type, sp);
+    const std::vector<Quatf> wt = WorldRotations(tgt.type, out);
+    for (size_t j = 0; j < ws.size(); ++j) {
+        const Vec3f dS = geom::RotateVector(ws[j], Vec3f(0, 1, 0));
+        const Vec3f want = geom::RotateVector(plan.q_body, dS);
+        const Vec3f dT = geom::RotateVector(wt[j], Vec3f(0, 1, 0));
+        float c = want.x() * dT.x() + want.y() * dT.y() + want.z() * dT.z();
+        c = std::max(-1.0f, std::min(1.0f, c));
+        EXPECT_NEAR(std::acos(c) * 180.0f / kPi, 0.0f, 0.5f)
+            << "joint=" << j << " 应 = Q_body·源指向";
+    }
+}
+
+// 不变量 1：源 pose 恒等 ⇒ 目标 pose 恒等（保持自己的 rest）。
+TEST(SkeletonRetargetTest, BodyRetargetIdentitySourceGivesIdentityTarget) {
+    const GeoChain src = MakeGeoArmChain();
+    const GeoChain tgt = MakeGeoArmChain(45.0f, {0, 0, 180.0f, 0, 0, 0, 0, 0, 0, 0});
+    const SkeletonPose out =
+        BodyRetargetOnePose(tgt.type, src.type, SkeletonPose::Identity(10));
+    for (size_t j = 0; j < out.joint_rotation.size(); ++j) {
+        EXPECT_NEAR(QuatAngleDeg(out.joint_rotation[j], geom::Quaternion<float>::Identity()),
+                    0.0f, 1e-3f)
+            << "joint " << j << " 源不动 ⇒ 目标保持自己 rest";
+    }
+}
+
+// 未命中的目标骨保持 rest；命中统计正确。
+TEST(SkeletonRetargetTest, BodyRetargetUnmatchedStaysAtRest) {
+    SkeletonType src = MakeGeoArmChain().type;
+    SkeletonType tgt = MakeGeoArmChain(0.0f, {0, 0, 180.0f, 0, 0, 0, 0, 0, 0, 0}).type;
+    // 把目标两根**不影响人体随动系**的骨改名（=> 未命中）。
+    //   人体随动系只看 Left/Right Hand（优先）或 ForeArm ⇒ 改臂/肩不影响它。
+    tgt.joints[3].name = "mixamorig:UnknownArm";
+    tgt.joints[4].name = "mixamorig:UnknownForeArm";
+    tgt.Validate();
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt, src);
+    EXPECT_TRUE(plan.target_frame.valid) << "改名不影响人体随动系（靠 Hand）";
+    EXPECT_EQ(plan.matched_bone_count, 8);
+    EXPECT_EQ(plan.unmapped_target_bones.size(), 2u);
+    EXPECT_EQ(plan.source_of_target[3], -1);
+
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.joint_rotation[4] = geom::Quaternion<float>::FromAxisAngle(Vec3f(0, 1, 0), 0.7f);
+    const SkeletonPose out = BodyRetargetOnePose(tgt, src, sp);
+    EXPECT_NEAR(QuatAngleDeg(out.joint_rotation[3], geom::Quaternion<float>::Identity()),
+                0.0f, 1e-4f)
+        << "未命中的目标骨必须保持自身 rest";
+    EXPECT_NEAR(QuatAngleDeg(out.joint_rotation[4], geom::Quaternion<float>::Identity()),
+                0.0f, 1e-4f)
+        << "未命中的目标骨必须保持自身 rest";
+}
+
+// 两套骨架几何一致且都没有 roll 时，BodyRetarget 应与旧版（逐骨 Q）结果一致。
+// （两者只在 roll 上分峔；无 roll ⇒ 应该一样——这是“新版是旧版的推广”的自证。）
+TEST(SkeletonRetargetTest, BodyRetargetAgreesWithOldWhenNoRollDifference) {
+    const GeoChain src = MakeGeoArmChain();
+    const GeoChain tgt = MakeGeoArmChain();
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.joint_rotation[3] = geom::Quaternion<float>::FromAxisAngle(Vec3f(0, 0, 1), 0.35f);
+    const SkeletonPose a = BodyRetargetOnePose(tgt.type, src.type, sp);
+    const SkeletonPose b = RetargetOnePose(tgt.type, src.type, sp);
+    for (size_t j = 0; j < a.joint_rotation.size(); ++j) {
+        EXPECT_NEAR(QuatAngleDeg(a.joint_rotation[j], b.joint_rotation[j]), 0.0f, 1e-3f)
+            << "joint " << j;
+    }
+}
+
+// 估不出人体随动系 ⇒ FATAL（不静默用错基准）。
+TEST(SkeletonRetargetTest, BodyRetargetPlanDiesWithoutBodyFrame) {
+    const SkeletonType src = MakeGeoArmChain().type;
+    SkeletonType tgt = MakeGeoArmChain().type;
+    for (auto& j : tgt.joints) {
+        j.name = "" ;  // 没有任何可对位骨名 ⇒ 也估不出人体随动系
+    }
+    EXPECT_DEATH(BuildBodyRetargetPlan(tgt, src), "人体随动系");
+}
+
 TEST(SkeletonRetargetTest, WrongSourcePoseSizeDies) {
     MiniSkeleton tgt = MakeMini(geom::Quaternion<float>::Identity(),
                                 geom::Quaternion<float>::Identity());

@@ -557,6 +557,215 @@ inline SkeletonPose RetargetOnePose(const SkeletonType& target,
     return dst;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  人体随动系版重定向（BodyRetarget）—— 2026-09-15 与 Danis 定的正确式
+// ════════════════════════════════════════════════════════════════════════════
+//
+// ⚠️ 上面那套 `BuildBind`/`RetargetPose`（逐骨 Q = Rb_T·Rb_S⁻¹）**在不可见的 roll
+//    自由度上不成立**：两块骨人几何一致（T-pose 逐骨指向相同）但 bind 约定差一个
+//    “绕自身骨轴的 roll”时，它会把这个几何看不见的差异当成真差异共轭进动作——
+//    roll 差 180° 时动作被**镜像**（源往左摆、目标往右摆）。已用最小用例复现。
+//    二者保留作对照/过渡，**新代码请用本节**。
+//
+// ── 不变量（Danis 定，本节全部推导的出发点）──────────────────────────────
+//
+//   “关节相对 bind 的额外旋转”（世界系表达）=  Δ_sk(j) ≜ W_sk(j) · Rb_sk(j)⁻¹
+//   它在**人体随动系**下的数值跨资产相同：
+//
+//        M_s⁻¹ · Δ_s(j) · M_s   ==   M_t⁻¹ · Δ_t(j) · M_t          （⟨★⟩ 不变式）
+//
+//   前提：M 必须由**几何**（人体随动系）确定，**不能**用逐骨 bind 帧（后者含不可见 roll）。
+//   ⚠️ M_s 的**前提**：rest ≈ T-pose + 资产统一 y-up（见 EstimateBodyFrame）。
+//
+// ── 由 ⟨★⟩ 推出的两条式子（Danis 逐行验过）──────────────────────────────
+//
+//   ⟨1⟩ 目标该骨应有的世界总旋转：
+//
+//        W_t(j) = Q_body · W_s(j) · Rb_s(j)⁻¹ · Q_body⁻¹ · Rb_t(j)
+//
+//        其中 Q_body ≜ M_t · M_s⁻¹   （一个常量，整段动画只算一次）
+//
+//   ⟨2⟩ 反解目标的 local rotation（= SkeletonPose.joint_rotation[j] = 相对 bind 的增量）：
+//
+//        P_t(j) = b_t(j)⁻¹ · W_t(parent_T(j))⁻¹ · W_t(j)
+//
+//        b_t(j) = **目标骨架自己的** bind_rotation(j)（不搬源的 bind）。
+//        按**拓扑序**逐骨算（父先于子）；根节点 W_t(parent) 视作**恒等**。
+//
+// ── 与“数值直搬/逐骨 Q”的差别（一句话）────────────────────────────────
+//
+//   · 几何一致的两骨人（任意 bind/rest_offset 自由度）⇒ Q_body = I、目标应**零误差**复现源；
+//   · 几何朝向真不同（臂 +X vs −Z）⇒ Q_body 捎它过去，动作仍正确对应。
+
+// 一次人体随动系重定向的**输入快照**：骨名对位 + 两侧骨架 + 两侧人体随动系 + Q_body。
+// 整段动画建一次，之后每帧复用（不重复做骨名哈希）。
+struct BodyRetargetPlan {
+    // ── 两侧骨架（快照；自包含，不持外部引用）──
+    SkeletonType target;  // 目标骨架（被驱动方）
+    SkeletonType source;  // 源骨架（动作提供方）
+
+    // ── 骨名对齐 ──
+    std::vector<BoneMatch> matches;                  // 逐目标骨一条（含未命中）
+    std::vector<int> source_of_target;               // 目标 index → 源 index；-1 = 未命中
+    int matched_bone_count = 0;                      // 命中骨数
+    int target_bone_count = 0;                       // 目标骨总数（“命中 x/y”的 y）
+    std::vector<std::string> unmapped_target_bones;  // 未命中的目标骨名（无名骨不进表）
+
+    // ── 两侧人体随动系（由几何定，见 EstimateBodyFrame）──
+    BodyFrame source_frame;
+    BodyFrame target_frame;
+
+    // ── ★ 桥接量：Q_body = M_t · M_s⁻¹（唯一新增的量，一个整体旋转）──
+    //   语义：∃  p_body = M⁻¹·p_world；Q_body 把“源的人体系”旋到“目标的人体系”。
+    //   几何一致的两骨人 ⇒ Q_body = 恒等（→ 目标零误差复现源）。
+    Quatf q_body = Quatf::Identity();
+    float q_body_angle_deg = 0.0f;  // Q_body 的旋转角（诊断；= 两侧整体朝向差量级）
+
+    // ── 两侧 rest 世界朝向（Rb，与 joints 平行；算 P_t 与诊断用）──
+    std::vector<Quatf> target_rest_world;
+    std::vector<Quatf> source_rest_world;
+};
+
+// 建 plan：骨名对位 + 两侧人体随动系 + Q_body。整段动画建一次。
+//
+// Pre-condition（违反 → LOG(FATAL)，不 fallback）：
+//   两侧骨架非空、满足 SkeletonType::Validate()；
+//   两侧人体随动系都能估出（否则**拒绝**而不是给个错的结果——没 M 就没几何基准）。
+inline BodyRetargetPlan BuildBodyRetargetPlan(const SkeletonType& target,
+                                              const SkeletonType& source) {
+    target.Validate();
+    source.Validate();
+
+    BodyRetargetPlan p;
+    p.target = target;
+    p.source = source;
+    p.target_rest_world = RestWorldRotations(p.target);
+    p.source_rest_world = RestWorldRotations(p.source);
+
+    // 骨名对位（复用既有实现：同一份对位规则，不另起一套）。
+    NameAlignment al = AlignBonesByName(p.target, p.source);
+    p.matches = std::move(al.matches);
+    p.source_of_target = std::move(al.source_of_target);
+    p.matched_bone_count = al.matched;
+    p.target_bone_count = p.target.bone_count();
+    p.unmapped_target_bones = std::move(al.unmapped_target_bones);
+
+    // 两侧人体随动系（几何基准）；估不出就 FATAL——静默用一个错的基准会产出错动作。
+    p.source_frame = EstimateBodyFrame(p.source);
+    p.target_frame = EstimateBodyFrame(p.target);
+    LOG_IF(FATAL, !p.source_frame.valid)
+        << "BuildBodyRetargetPlan: 源骨架估不出人体随动系（缺 Left/Right Hand 与 ForeArm，"
+           "或腕连线退化沿 up）—— 重定向需要几何基准，不猜。";
+    LOG_IF(FATAL, !p.target_frame.valid)
+        << "BuildBodyRetargetPlan: 目标骨架估不出人体随动系（同上）。";
+
+    // Q_body = M_t · M_s⁻¹（M 为纯旋转 ⇒ 逆 = 共轭）。
+    p.q_body = (p.target_frame.rotation * p.source_frame.rotation.Conjugate()).Normalized();
+    p.q_body_angle_deg = QuatAngleDeg(p.q_body, Quatf::Identity());
+    return p;
+}
+
+// 把源的一帧位姿，按人体随动系不变式重定向到目标骨架（覆盖写 out）。
+//
+//   plan        : BuildBodyRetargetPlan 的结果（对位表 + 两侧骨架 + M + Q_body）。
+//   source_pose : 源位姿（joint_rotation = 相对源 bind 的增量；为空 = 全恒等）。
+//   out         : 输出位姿。bone_count/joint_rotation 尺寸 = 目标骨数；
+//                 每骨为单位四元数、即 `P_t(j)`（相对**目标** bind 的增量，直接可喂烘焙）；
+//                 root_offset 恒 0（不搬 root-motion，与既有实现一致）。
+//
+// 逐帧代价：一次拓扑序扫（源 W）+ 一次拓扑序扫（目标 W_t 与 P_t），纯四元数乘。
+//
+// Pre-condition: out != nullptr；source_pose 尺寸与源骨数一致（违反 → LOG(FATAL)）。
+inline void BodyRetargetPose(const BodyRetargetPlan& plan, const SkeletonPose& source_pose,
+                             SkeletonPose* out /*output*/) {
+    CHECK(out != nullptr) << "BodyRetargetPose: out 不能为空";
+    const bool src_has_rot = !source_pose.joint_rotation.empty();
+    if (src_has_rot) {
+        CHECK_EQ(source_pose.joint_rotation.size(), plan.source.joints.size())
+            << "BodyRetargetPose: source_pose 尺寸 " << source_pose.joint_rotation.size()
+            << " 应 == 源骨架骨数 " << plan.source.joints.size();
+    }
+
+    const size_t n_src = plan.source.joints.size();
+    const size_t n_dst = plan.target.joints.size();
+    const Quatf& q_body = plan.q_body;
+    const Quatf q_body_inv = q_body.Conjugate();  // 纯旋转 ⇒ 逆 = 共轭
+
+    // ── 1) 源：世界总旋转 W_s(j) = W_s(parent) ⊗ b_s(j) ⊗ P_s(j)（拓扑序单趟）──
+    std::vector<Quatf> src_world(n_src);
+    for (size_t j = 0; j < n_src; ++j) {
+        const Quatf b = plan.source.bind_rotation.empty() ? Quatf::Identity()
+                                                          : plan.source.bind_rotation[j];
+        const Quatf pose = src_has_rot ? source_pose.joint_rotation[j] : Quatf::Identity();
+        const Quatf local = (b * pose).Normalized();
+        const int par = plan.source.joints[j].parent;
+        src_world[j] = (par == kSkeletonNoParent)
+                           ? local
+                           : (src_world[static_cast<size_t>(par)] * local).Normalized();
+    }
+
+    // ── 2) 目标：按 ⟨1⟩ 得 W_t(j)，再按 ⟨2⟩ 反解 P_t(j)。全程拓扑序。──
+    out->bone_count = static_cast<int>(n_dst);
+    out->joint_rotation.resize(n_dst);
+    out->root_offset = Vec3f(0.0f, 0.0f, 0.0f);
+
+    std::vector<Quatf> dst_world(n_dst);
+    for (size_t j = 0; j < n_dst; ++j) {
+        const Quatf b = plan.target.bind_rotation.empty() ? Quatf::Identity()
+                                                          : plan.target.bind_rotation[j];
+        const int par = plan.target.joints[j].parent;
+        CHECK(par == kSkeletonNoParent || par < static_cast<int>(j))
+            << "BodyRetargetPose: 目标骨架非拓扑序 joint[" << j << "] parent=" << par;
+        const Quatf parent_world =
+            (par == kSkeletonNoParent) ? Quatf::Identity()
+                                       : dst_world[static_cast<size_t>(par)];
+
+        const int s = plan.source_of_target[j];
+        if (s < 0) {
+            // 未命中 → 保持自身 rest（P = 恒等，W = 父世界 ⊗ b）。
+            out->joint_rotation[j] = Quatf::Identity();
+            dst_world[j] = (parent_world * b).Normalized();
+            continue;
+        }
+
+        const size_t si = static_cast<size_t>(s);
+        // ⟨1⟩ W_t(j) = Q_body · W_s(j) · Rb_s(j)⁻¹ · Q_body⁻¹ · Rb_t(j)
+        const Quatf w_t = (q_body * src_world[si] *
+                           plan.source_rest_world[si].Conjugate() * q_body_inv *
+                           plan.target_rest_world[j])
+                              .Normalized();
+        // ⟨2⟩ P_t(j) = b_t(j)⁻¹ · W_t(parent)⁻¹ · W_t(j)
+        out->joint_rotation[j] =
+            (b.Conjugate() * parent_world.Conjugate() * w_t).Normalized();
+        dst_world[j] = w_t;
+    }
+}
+
+// 便利入口：整段源位姿一次性重定向（= 建 plan 一次 + 逐帧 BodyRetargetPose）。
+inline std::vector<SkeletonPose> BodyRetargetPoses(
+    const SkeletonType& target, const SkeletonType& source,
+    const std::vector<SkeletonPose>& source_poses) {
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(target, source);
+    std::vector<SkeletonPose> out;
+    out.reserve(source_poses.size());
+    for (const SkeletonPose& src : source_poses) {
+        SkeletonPose dst;
+        BodyRetargetPose(plan, src, &dst);
+        out.push_back(std::move(dst));
+    }
+    return out;
+}
+
+// 便利入口：建 plan + 重定向一帧（要复用 plan 请直接用上面两个）。
+inline SkeletonPose BodyRetargetOnePose(const SkeletonType& target,
+                                       const SkeletonType& source,
+                                       const SkeletonPose& source_pose) {
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(target, source);
+    SkeletonPose dst;
+    BodyRetargetPose(plan, source_pose, &dst);
+    return dst;
+}
+
 }  // namespace jpov
 
 #endif  // JPOV_INTERFACE_SKELETON_RETARGET_H_
