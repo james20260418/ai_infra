@@ -9,6 +9,7 @@
 //
 // 面板内容（1280x720 全屏调试台）：
 //   - 标题 + 全局控件区：滑条(gain)、复选框(enable)、Combo(profile)、
+//     Combo(view_mode，与 profile 同排并排 = 同屏两个下拉)、
 //     输入框(name)、色块(color swatch)、按钮行(重置/应用)
 //   - 函数包装复用区：for 循环画 2~3 份同一电机子面板（多电机），各自独立 state
 //   - 实时 Log 输出框：把每次交互事件（按钮/滑条/勾选/下拉/输入）以时间戳
@@ -115,6 +116,7 @@ struct UiDemoState {
     float gain = 5.0f;         // 增益滑条 [0, 10]
     bool enable = true;        // 使能复选框
     int profile = 1;           // 运行模式 Combo 选中 index
+    int view_mode = 0;         // 显示模式 Combo 选中 index（第二个下拉，同屏）
     char name[32] = "";        // 电机命名输入框
     // ---- 多电机（函数包装复用）----
     static constexpr int kMotorCount = 3;  // 2~3 份同一子面板（S7.3）
@@ -178,6 +180,18 @@ inline UiRect GlobalRow(int row, float width = kUiDemoLeftW) {
     return UiRect{{kUiDemoPad,
                    kUiDemoGlobalY + static_cast<float>(row) * 34.0f},
                   {width, kUiDemoControlH}};
+}
+
+// 面板内两个下拉（Combo）的 box（面板局部坐标）。
+// 【对外导出】：绘制与自证测试合成点击位置共用同一份布局，杜绝分叉
+// （否则测试自造坐标会与面板实际位置漂移，断言形式上一旦错就形同虚设）。
+// 两者同一排并排 → 同屏两个下拉（多下拉互相干扰的复现/回归场景）。
+inline UiRect UiDemoProfileComboBox() {
+    return GlobalRow(2, 240.0f);  // 「运行模式」左
+}
+inline UiRect UiDemoViewModeComboBox() {
+    return UiRect{{kUiDemoPad + 256.0f, kUiDemoGlobalY + 2.0f * 34.0f},
+                  {240.0f, kUiDemoControlH}};  // 「显示模式」右（同排）
 }
 
 // ============================================================================
@@ -272,10 +286,23 @@ inline void DrawUiDemoPanel(Ui& ui, RenderCommandList* cmd, UiDemoState& st) {
     {
         static const std::vector<const char*> kProfiles = {"标准", "高速", "节能"};
         const int before = st.profile;
-        UiRect box = GlobalRow(2, 240.0f);
+        UiRect box = UiDemoProfileComboBox();
         if (ui.Combo("运行模式", &st.profile, kProfiles, box) &&
             before != st.profile) {
             st.log.Append(st.time_s, "运行模式→%s", kProfiles[st.profile]);
+        }
+    }
+
+    // 显示模式 Combo：第二个下拉，与「运行模式」同排并排（同屏两个下拉）。
+    // 独立 state（view_mode），用于复现/验收"同屏多个下拉互相干扰"的问题。
+    {
+        static const std::vector<const char*> kViewModes = {"实体", "线框",
+                                                           "法线"};
+        const int before = st.view_mode;
+        if (ui.Combo("显示模式", &st.view_mode, kViewModes,
+                     UiDemoViewModeComboBox()) &&
+            before != st.view_mode) {
+            st.log.Append(st.time_s, "显示模式→%s", kViewModes[st.view_mode]);
         }
     }
 
