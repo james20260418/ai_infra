@@ -329,31 +329,42 @@ private:
     // 一个控件持有（用 box 精确相等识别同一控件）。写槽位只有 Acquire /
     // Release 两条合法路径，其余控件只读——从类型上封死"无条件写回"
     // 导致的互相踩状态（同屏多控件场景）。
+    //
+    // 边界（本次未扩大范围，行为与历史一致）：槽位是"唯一持有者"，不是
+    // "自动回收"——持有者不再被绘制（控件被删 / 其 box 变了）时槽位不会
+    // 自己释放（只在 Acquire/Release 时变）。对焦点/下拉无实际影响（它们
+    // 本就靠 Acquire 顶替）；但以 IsFree() 作起始门槛的滑条/按钮，会因此
+    // 暂时开不了新的拖动/按下（面板重建即恢复）。
     struct StateSlot {
         // 本控件（box 判定）是否持有该状态。
-        bool HeldBy(const UiRect& box) const {
-            return active && held_box.pos == box.pos &&
+        bool IsHeldBy(const UiRect& box) const {
+            return is_held && held_box.pos == box.pos &&
                    held_box.size == box.size;
         }
         // 槽位空闲（无人持有）→ 允许本控件发起一个新状态。
-        bool Idle() const { return !active; }
+        bool IsFree() const { return !is_held; }
         // 取得所有权（本帧成为发起者时调用）。会顶掉原持有者 = 状态转移
         // （如：点另一个输入框 → 焦点从旧框转给新框）。
         void Acquire(const UiRect& box) {
-            active = true;
+            is_held = true;
             held_box = box;
         }
         // 释放所有权：仅当本控件正是持有者时生效；否则【无操作】
         // （绝不踩别人的槽位——隔离的关键）。
         void Release(const UiRect& box) {
-            if (HeldBy(box)) {
-                active = false;
+            if (IsHeldBy(box)) {
+                is_held = false;
                 held_box = UiRect{};
             }
         }
 
-        bool active = false;  // 槽位是否有人持有
-        UiRect held_box{};    // 持有者 box（active 为 true 时有效）
+    private:
+        // 字段私有：只有 Ui 的成员函数能改，外部无法绕过 Acquire/Release
+        // 直接写槽位 → 不会重新引入"互相踩状态"的写法（隔离由类型保证）。
+        friend class Ui;
+
+        bool is_held = false;  // 槽位是否有人持有
+        UiRect held_box{};     // 持有者 box（is_held 为 true 时有效）
     };
 
     // ---- 跨帧状态（InputText 焦点 + 水平滚动）----
@@ -398,7 +409,7 @@ private:
     //（Drag/Hold）开始后，只要左键仍按住就持续保持按下色，即使鼠标飘出
     // box 也不再校验（符合一般 UI，hold 一旦开始判定区不作数，直到左键
     // 释放才恢复）；起始判据仍保留（box 内才可开始）。被按的按钮不被其他
-    // 按钮抢走按下态（A 飘越 B 时 B 不误抢，因起始需槽位 Idle()）。
+    // 按钮抢走按下态（A 飘越 B 时 B 不误抢，因起始需槽位空闲）。
     StateSlot button_press_;
 };
 

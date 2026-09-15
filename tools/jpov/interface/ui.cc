@@ -219,9 +219,9 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
         (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
         (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
-    const bool was_pressed = button_press_.HeldBy(b);
+    const bool was_pressed = button_press_.IsHeldBy(b);
     const bool pressed_now =
-        left_down && (was_pressed || (button_press_.Idle() && mouse_over));
+        left_down && (was_pressed || (button_press_.IsFree() && mouse_over));
     if (pressed_now) {
         button_press_.Acquire(b);
     } else if (was_pressed) {
@@ -449,10 +449,10 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
     // 本滑条是否已持有一次正在进行的 drag（跨帧识别同一滑条）。
-    const bool was_dragging = slider_drag_.HeldBy(b);
+    const bool was_dragging = slider_drag_.IsHeldBy(b);
     // 本帧是否处于 drag 态：本滑条已持有（飘远也持续）或 起始新 drag。
     const bool drag_now =
-        left_down && (was_dragging || (slider_drag_.Idle() && mouse_over));
+        left_down && (was_dragging || (slider_drag_.IsFree() && mouse_over));
     if (drag_now) {
         // 起始/持续：记录为正在拖动的滑条（供后续帧识别一次 drag）。
         slider_drag_.Acquire(b);
@@ -612,7 +612,7 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     // 新点击才聚焦）。写槽位只走 Acquire（点本框）/ Release（点框外、回车），
     // 不持有则不碰槽位——同屏多个输入框互不干扰。
     const InputSnapshot& in = *input_;
-    const bool is_focused = text_focus_.HeldBy(b);
+    const bool is_focused = text_focus_.IsHeldBy(b);
 
     // 本帧点击落在 box 内 → 聚焦本框。
     bool clicked_inside = false;
@@ -699,7 +699,7 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     // 键盘写回用的是上面的 is_focused 快照，二者语义不同：
     //   键入：用“帧首是否已聚焦”决定是否消费（点击聚焦那一刻不消费，下帧才打字）；
     //   绘制/返回：用“帧末最终聚焦”决定画不画光标、返回值。
-    const bool focused_eff = text_focus_.HeldBy(b);
+    const bool focused_eff = text_focus_.IsHeldBy(b);
 
     // ---- 绘制（S5.1）：底框 + 占位符/内容文本 + 光标 ----
     // 底框：background 底 + border 边框（与其它控件一致的圆角/边框语义）。
@@ -794,7 +794,7 @@ bool Ui::Combo(const char* label, int* selected,
     // ---- 跨帧展开状态（combo_open_ 槽位）：用 box 位置+尺寸识别同一
     // Combo；本帧绘制时若 box 与之相等则视为已展开。----
     const InputSnapshot& in = *input_;
-    const bool was_open = combo_open_.HeldBy(b);
+    const bool was_open = combo_open_.IsHeldBy(b);
 
     // ---- 布局：组合框 + 下拉列表 + 下箭头（仅在框内画，下拉列表不画箭头）----
     const float row_h = RowHeight();

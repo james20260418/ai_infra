@@ -55,13 +55,13 @@ bool HasTextSubstr(const jpov::RenderCommandList& cmd, const char* substr) {
     return false;
 }
 
-// 查找左上角坐标命中的首个 FillRect（面板局部坐标精确匹配）；无则 nullptr。
+// 查找左上角坐标（面板局部坐标）命中的首个 FillRect；无则 nullptr。
 // 用于断言"某个下拉框当前是展开态(hover)还是收起态(background)"。
 const jpov::FillRect2DCommand* FindFillAt(const jpov::RenderCommandList& cmd,
-                                          const jpov::Vec2f& pos) {
+                                          float x, float y) {
     for (const jpov::FillRect2DCommand& r : cmd.fillrect2d) {
-        if (std::abs(r.pos.x() - pos.x()) < 0.01f &&
-            std::abs(r.pos.y() - pos.y()) < 0.01f) {
+        if (std::abs(r.pos.x() - x) < 0.01f &&
+            std::abs(r.pos.y() - y) < 0.01f) {
             return &r;
         }
     }
@@ -170,11 +170,14 @@ public:
         CHECK(HasTextSubstr(cmd, "使能 Enable"));
 
         // ---- 2d. Combo ×2（closed 框底 background；当前项="高速"/"实体"）----
-        // 运行模式 Combo：GlobalRow(2,240)={16,152,240,26}。
-        CheckFill(cmd.fillrect2d[8], 16.0f, 152.0f, 240.0f, 26.0f, bg);
+        // 两个 Combo 的 box 取自面板导出的访问器（与绘制同一份布局，不手抄数字）。
+        const UiRect combo_profile = UiDemoProfileComboBox();
+        const UiRect combo_view = UiDemoViewModeComboBox();
+        CheckFill(cmd.fillrect2d[8], combo_profile.pos.x(), combo_profile.pos.y(),
+                  combo_profile.size.x(), combo_profile.size.y(), bg);
         CHECK(HasTextSubstr(cmd, "高速")) << "Combo 当前项应为默认 profile=1";
-        // 显示模式 Combo（同屏第二个下拉）：同排右移 256 → {272,152,240,26}。
-        CheckFill(cmd.fillrect2d[9], 272.0f, 152.0f, 240.0f, 26.0f, bg);
+        CheckFill(cmd.fillrect2d[9], combo_view.pos.x(), combo_view.pos.y(),
+                  combo_view.size.x(), combo_view.size.y(), bg);
         CHECK(HasTextSubstr(cmd, "实体")) << "第二个 Combo 当前项应为默认 view_mode=0";
 
         // ---- 2e. 输入框（buffer 空 → 占位符；底框 background）----
@@ -313,8 +316,8 @@ public:
             CHECK(HasTextSubstr(cmd, "节能")) << "点左下拉应展开（列表可见）";
             CHECK(!HasTextSubstr(cmd, "法线")) << "右下拉不应被牵连展开";
             // 左展开(hover) / 右收起(background)。
-            const FillRect2DCommand* lf = FindFillAt(cmd, box_profile.pos);
-            const FillRect2DCommand* rf = FindFillAt(cmd, box_view.pos);
+            const FillRect2DCommand* lf = FindFillAt(cmd, box_profile.pos.x(), box_profile.pos.y());
+            const FillRect2DCommand* rf = FindFillAt(cmd, box_view.pos.x(), box_view.pos.y());
             CHECK(lf != nullptr && rf != nullptr);
             CHECK_EQ(lf->fill_color.r, theme.hover.r) << "左下拉应为展开态";
             CHECK_EQ(rf->fill_color.r, theme.background.r)
@@ -336,8 +339,8 @@ public:
             draw(MakeClickInput(v_cx, v_cy), &cmd);
             CHECK(!HasTextSubstr(cmd, "节能")) << "点右下拉后左应收起";
             CHECK(HasTextSubstr(cmd, "法线")) << "点右下拉后右应展开";
-            const FillRect2DCommand* lf = FindFillAt(cmd, box_profile.pos);
-            const FillRect2DCommand* rf = FindFillAt(cmd, box_view.pos);
+            const FillRect2DCommand* lf = FindFillAt(cmd, box_profile.pos.x(), box_profile.pos.y());
+            const FillRect2DCommand* rf = FindFillAt(cmd, box_view.pos.x(), box_view.pos.y());
             CHECK(lf != nullptr && rf != nullptr);
             CHECK_EQ(lf->fill_color.r, theme.background.r) << "左已收起";
             CHECK_EQ(rf->fill_color.r, theme.hover.r) << "右展开态";

@@ -190,7 +190,10 @@ inline UiRect UiDemoProfileComboBox() {
     return GlobalRow(2, 240.0f);  // 「运行模式」左
 }
 inline UiRect UiDemoViewModeComboBox() {
-    return UiRect{{kUiDemoPad + 256.0f, kUiDemoGlobalY + 2.0f * 34.0f},
+    // 与其同排并排：右移「一框宽 + 16px 间距」（=272）——不写魔法数 256，
+    // 改 profile 框宽时这里自动跟随。
+    const UiRect profile = UiDemoProfileComboBox();
+    return UiRect{{profile.pos.x() + profile.size.x() + 16.0f, profile.pos.y()},
                   {240.0f, kUiDemoControlH}};  // 「显示模式」右（同排）
 }
 
