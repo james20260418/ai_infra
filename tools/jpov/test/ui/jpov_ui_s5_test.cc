@@ -8,6 +8,8 @@
 //      Backspace 删除末字符；Enter/Escape 失焦；修饰键/方向键忽略。
 //   4. 超长水平滚动：文本宽度超过 box 时不越出右缘，内部滚动推进。
 //   5. 容错：越界/零尺寸 → 0 指令、不聚焦、不改 buffer。
+//   6. 同屏两个输入框：焦点互不干扰（跨帧状态隔离回归，2026-09-15）——
+//      框 A 聚焦后，每帧绘制框 B 也不得清掉 A 的焦点。
 //
 // 本测试是纯 CPU 的指令层比对（gold 指令），不渲染、无窗口（headless）。
 // 按键通过 InputSnapshot.keys[] 的 KeyState(raw=Click 次数) 模拟。
@@ -679,6 +681,83 @@ public:
         LOG(INFO) << "[PASS] InputText 键盘 hold 150ms 阈值两态(验收 bug#11)";
     }
 
+    // 同屏两个输入框：焦点互不干扰（跨帧状态隔离回归，2026-09-15）。
+    // 同一类 bug 在 Combo 上是真实存在的（同屏第二个控件无条件写回单槽
+    // → 第一个"点开即收"）；这里把 InputText 侧的同一不变量也钉佳，
+    // 防止将来在焦点/拖动/按下任一状态上重现同样的写法。
+    static void TestTwoInputTextsIsolation() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box_a{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        const UiRect box_b{{240.0f, 10.0f}, {200.0f, 24.0f}};
+        char a[64] = "aa";
+        char b[64] = "bb";
+        Ui ui;
+
+        // 帧1：点 A 框内 → A 聚焦（A 底框+光标、B 底框 = 3 条 fill）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            const bool fa = ui.InputText("n", a, sizeof(a), box_a);
+            const bool fb = ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(fa) << "点 A 应聚焦 A";
+            CHECK(!fb) << "B 不应被聚焦";
+            CHECK_EQ(cmd.fillrect2d.size(), 3u)
+                << "A(底框+光标) + B(底框) = 3 条 FillRect";
+            // 光标（宽 = border_width = 1）应落在 A 的 box 内。
+            const FillRect2DCommand& caret = cmd.fillrect2d[1];
+            CHECK(caret.size.x() > 0.5f && caret.size.x() < 1.5f)
+                << "光标应为 1px 竖线，实际宽=" << caret.size.x();
+            CHECK_GE(caret.pos.x(), box_a.pos.x());
+            CHECK_LE(caret.pos.x(), box_a.pos.x() + box_a.size.x())
+                << "光标应在 A 框内";
+        }
+
+        // 帧2（回归关键）：无点击（B 后于 A 绘制）→ A 必须仍然聚焦。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakePlainInput(), theme, 640.0f, 360.0f);
+            const bool fa = ui.InputText("n", a, sizeof(a), box_a);
+            const bool fb = ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(fa) << "【回归】无点击时 A 应保持聚焦（不得被 B 清掉）";
+            CHECK(!fb) << "B 仍不应被聚焦";
+            CHECK_EQ(cmd.fillrect2d.size(), 3u) << "A 仍应画光标";
+        }
+
+        // 帧3：点键盘写入 → 字符应进 A 的 buffer（证明焦点真在 A）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCodeForAscii('x'));
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aax") << "键入应写入聚焦的 A";
+            CHECK_STREQ(b, "bb") << "B 不应收到字符";
+        }
+
+        // 帧4：点 B 框内 → 焦点转移（光标只出现在 B 内；A 失焦）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(300.0f, 20.0f), theme, 640.0f, 360.0f);
+            const bool fa = ui.InputText("n", a, sizeof(a), box_a);
+            const bool fb = ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(!fa) << "点 B 后 A 应失焦";
+            CHECK(fb) << "点 B 应聚焦 B";
+            CHECK_EQ(cmd.fillrect2d.size(), 3u) << "此时只 B 画光标";
+            const FillRect2DCommand& caret = cmd.fillrect2d[2];
+            CHECK(caret.size.x() > 0.5f && caret.size.x() < 1.5f)
+                << "光标应为 1px 竖线，实际宽=" << caret.size.x();
+            CHECK_GE(caret.pos.x(), box_b.pos.x()) << "光标应落在 B 框内";
+        }
+        LOG(INFO) << "[PASS] InputText 同屏两个输入框：焦点互不干扰（隔离回归）";
+    }
+
     static void RunAll() {
         TestInitNotFocused();
         TestClickFocusToggle();
@@ -692,6 +771,7 @@ public:
         TestOffscreenInputText();
         TestCaretUsesTextMeasure();
         TestKeyboardHoldThreshold150ms();
+        TestTwoInputTextsIsolation();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };

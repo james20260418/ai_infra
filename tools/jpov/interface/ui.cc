@@ -208,7 +208,8 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
     //   - 按下持续：本按钮正在按下且左键仍按住（鼠标可在 box 外）。
     //   - 按下结束：左键已松开（不再是 Drag/Hold）→ 本按钮让出按下态，恢复默认/
     //     悬停色。
-    // 跨帧用 button_pressed_box_（position+size）识别同一按钮。
+    // 跨帧用 button_press_ 槽位（position+size）识别同一按钮；写槽位只走
+    // Acquire（起始按下）/ Release（松开），不持有则不碰槽位（隔离）。
     // 注意起始条件里“当前无任何按钮正在按下”：避免被按的按钮 A 鼠标飘越
     // 另一按钮 B 时 B 误以为新按下而在 A 还在按时抢走按下态（B 只可起始新
     // 按下，若已有按钮持有则让它独占直至释放）。
@@ -218,17 +219,14 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
         (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
         (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
-    const bool was_pressed =
-        button_pressed_active_ && button_pressed_box_.pos == b.pos &&
-        button_pressed_box_.size == b.size;
+    const bool was_pressed = button_press_.IsHeldBy(b);
     const bool pressed_now =
-        left_down && (was_pressed || (!button_pressed_active_ && mouse_over));
+        left_down && (was_pressed || (button_press_.IsFree() && mouse_over));
     if (pressed_now) {
-        button_pressed_active_ = true;
-        button_pressed_box_ = b;
+        button_press_.Acquire(b);
     } else if (was_pressed) {
-        // 左键已松开：按下结束，清状态让其他控件可接管。
-        button_pressed_active_ = false;
+        // 左键已松开：按下结束，释放槽位让其他控件可接管。
+        button_press_.Release(b);
     }
 
     // 背景三态：按下色（左键按住）> 悬停亮色 > 默认深色。
@@ -436,8 +434,8 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
     //   - drag 起始：左键按住 且 鼠标在 box 内 且 当前无任何滑条正在 drag。
     //   - drag 持续：本滑条正在 drag 且左键仍按住（鼠标可在 box 外）。
     //   - drag 结束：左键已松开（不再是 Drag/Hold）→ 本滑条让出 drag 状态。
-    // 跨帧用 slider_drag_box_（position+size）识别同一滑条（与 InputText
-    // 焦点 / Combo 展开同一模式）。
+    // 跨帧用 slider_drag_ 槽位（position+size）识别同一滑条；写槽位只走
+    // Acquire（起始拖动）/ Release（松开），不持有则不碰槽位（隔离）。
     // 注意起始条件里“当前无任何滑条正在 drag”：避免被拖的滑条 A 鼠标飘越
     // 另一滑条 B 时 B 误以为新按下而在 A 还在拖时抢走 drag（B 只可起始新
     // drag，若已有一条持有则让它独占直至释放）。
@@ -451,19 +449,16 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
     // 本滑条是否已持有一次正在进行的 drag（跨帧识别同一滑条）。
-    const bool was_dragging =
-        slider_drag_active_ && slider_drag_box_.pos == b.pos &&
-        slider_drag_box_.size == b.size;
+    const bool was_dragging = slider_drag_.IsHeldBy(b);
     // 本帧是否处于 drag 态：本滑条已持有（飘远也持续）或 起始新 drag。
     const bool drag_now =
-        left_down && (was_dragging || (!slider_drag_active_ && mouse_over));
+        left_down && (was_dragging || (slider_drag_.IsFree() && mouse_over));
     if (drag_now) {
         // 起始/持续：记录为正在拖动的滑条（供后续帧识别一次 drag）。
-        slider_drag_active_ = true;
-        slider_drag_box_ = b;
+        slider_drag_.Acquire(b);
     } else if (was_dragging) {
-        // 左键已松开：drag 结束，清状态让其他控件可接管。
-        slider_drag_active_ = false;
+        // 左键已松开：drag 结束，释放槽位让其他控件可接管。
+        slider_drag_.Release(b);
     }
 
     bool changed = false;
@@ -611,13 +606,13 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     buffer[buffer_size - 1] = '\0';
     const size_t text_len = strnlen(buffer, buffer_size - 1);
 
-    // ---- 焦点管理（S5.2）：状态跨帧，点击 box 内获得焦点 ----
-    // 即时模式：focus 是本对象跨帧状态。本帧绘制时，若本 box 与上次聚焦 box
-    // 位置+尺寸一致 → 视为已聚焦（框移动/临时对象时自动失焦，重新点击才聚焦）。
+    // ---- 焦点管理（S5.2）：状态跨帧（text_focus_ 槽位），点击 box 内获得焦点 ----
+    // 即时模式：focus 是本对象跨帧状态。本帧绘制时，若本 box 与槽位记录的
+    // 聚焦 box 位置+尺寸一致 → 视为已聚焦（框移动/临时对象时自动失焦，重
+    // 新点击才聚焦）。写槽位只走 Acquire（点本框）/ Release（点框外、回车），
+    // 不持有则不碰槽位——同屏多个输入框互不干扰。
     const InputSnapshot& in = *input_;
-    const bool is_focused =
-        input_focused_ && input_focus_box_.pos == b.pos &&
-        input_focus_box_.size == b.size;
+    const bool is_focused = text_focus_.IsHeldBy(b);
 
     // 本帧点击落在 box 内 → 聚焦本框。
     bool clicked_inside = false;
@@ -633,13 +628,12 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
         }
     }
     // 聚焦状态结算（先做，供下方键入判断使用）：
-    //  - 点本框 → 聚焦；点别处 → 若聚焦正是本框则失焦。
+    //  - 点本框 → 聚焦（Acquire）；点别处 → 本框失焦（Release，仅当自己是持有者）。
     if (clicked_inside) {
-        input_focused_ = true;
-        input_focus_box_ = b;
+        text_focus_.Acquire(b);
         input_scroll_px_ = 0.0f;  // 聚焦时滚动归零（从头显示）。
-    } else if (in.left.IsClick() && is_focused) {
-        input_focused_ = false;  // 本帧 Click 落在 box 外 → 本框失焦。
+    } else if (in.left.IsClick()) {
+        text_focus_.Release(b);  // 仅当本框正是聚焦者时释放；否则无操作。
     }
 
     // ---- 键盘写回 char*（S5.2）：仅聚焦框消费键入 ----
@@ -653,7 +647,7 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
         const KeyState& enter = in.GetKey(KeyCode::Enter);
         const KeyState& esc = in.GetKey(KeyCode::Escape);
         if (enter.IsClick() || esc.IsClick()) {
-            input_focused_ = false;
+            text_focus_.Release(b);  // 回车/取消 → 失焦（本框为持有者）。
         } else {
             // Backspace：删除最后一个字符（删除发生在追加前）。
             // 键盘 hold 150ms 阈值两态（验收 bug#11）：
@@ -705,9 +699,7 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     // 键盘写回用的是上面的 is_focused 快照，二者语义不同：
     //   键入：用“帧首是否已聚焦”决定是否消费（点击聚焦那一刻不消费，下帧才打字）；
     //   绘制/返回：用“帧末最终聚焦”决定画不画光标、返回值。
-    const bool focused_eff =
-        input_focused_ && input_focus_box_.pos == b.pos &&
-        input_focus_box_.size == b.size;
+    const bool focused_eff = text_focus_.IsHeldBy(b);
 
     // ---- 绘制（S5.1）：底框 + 占位符/内容文本 + 光标 ----
     // 底框：background 底 + border 边框（与其它控件一致的圆角/边框语义）。
@@ -799,12 +791,10 @@ bool Ui::Combo(const char* label, int* selected,
         *selected = std::clamp(*selected, 0, size - 1);
     }
 
-    // ---- 跨帧展开状态（同 InputText 焦点模式）：用 box 位置+尺寸识别同一
+    // ---- 跨帧展开状态（combo_open_ 槽位）：用 box 位置+尺寸识别同一
     // Combo；本帧绘制时若 box 与之相等则视为已展开。----
     const InputSnapshot& in = *input_;
-    const bool was_open =
-        combo_open_ && combo_open_box_.pos == b.pos &&
-        combo_open_box_.size == b.size;
+    const bool was_open = combo_open_.IsHeldBy(b);
 
     // ---- 布局：组合框 + 下拉列表 + 下箭头（仅在框内画，下拉列表不画箭头）----
     const float row_h = RowHeight();
@@ -853,9 +843,16 @@ bool Ui::Combo(const char* label, int* selected,
         // was_open == false 且点框外：保持关闭，不改值。
     }
 
-    // 结算跨帧展开状态（供下一帧 was_open 判定）。
-    combo_open_ = open_now;
-    combo_open_box_ = b;
+    // 结算跨帧展开状态（供下一帧 was_open 判定）：写槽位只走 Acquire（本帧
+    // 展开）/ Release（本帧收起），**本帧不持有且不展开时绝不碰槽位**。
+    // 这是"同屏两个下拉互相干扰"的根因所在：旧实现无条件写回
+    // combo_open_box_ = b，同屏第二个 Combo 每帧都把第一个的展开态抹掉，
+    // 于是第一个下拉"一点就收"（点开的那帧可见，下一帧即被判定为收起）。
+    if (open_now) {
+        combo_open_.Acquire(b);
+    } else {
+        combo_open_.Release(b);  // 仅当本框正是展开者时释放；否则无操作。
+    }
 
     // ---- 绘制（S6.1：当前项 + 下箭头 / 展开时 + 下拉列表）----
     // 组合框底：accent 高亮（展开时）否则 background，统一 border 边框。
