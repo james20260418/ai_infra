@@ -115,6 +115,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
@@ -213,6 +214,136 @@ inline float QuatAngleDeg(const Quatf& a, const Quatf& b) {
     const float d = an.x * bn.x + an.y * bn.y + an.z * bn.z + an.w * bn.w;
     const float c = std::min(1.0f, std::abs(d));
     return 2.0f * std::acos(c) * 180.0f / static_cast<float>(M_PI);
+}
+
+// ==================== 骨架几何辅助（人体随动系要用） ====================
+
+// 找骨名以 suffix **结尾**（大小写敏感）的关节；找不到返回 -1。
+// 例：suffix="LeftHand" 可匹配 "mixamorig:LeftHand"（兼容前缀差异）。
+inline int FindJointBySuffix(const SkeletonType& skeleton, const std::string& suffix) {
+    for (size_t i = 0; i < skeleton.joints.size(); ++i) {
+        const std::string& n = skeleton.joints[i].name;
+        if (n.size() >= suffix.size() &&
+            n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// rest 姿态下每关节在**骨架空间**下的世界位置：
+//   pos(j) = pos(parent) + R(parent 的 rest 世界朝向) · rest_offset(j)
+//   根：pos(root) = rest_offset(root)（根的 rest_offset 本就在骨架空间里）。
+// 只算**位置**（不碰 pose）；与重定向无关，供几何判定用（人体随动系等）。
+// Pre-condition: skeleton 已 Validate()（拓扑序 ⇒ 单趟复合即可）。
+inline std::vector<Vec3f> RestWorldPositions(const SkeletonType& skeleton) {
+    const std::vector<Quatf> world = RestWorldRotations(skeleton);
+    const size_t n = skeleton.joints.size();
+    std::vector<Vec3f> pos(n);
+    for (size_t j = 0; j < n; ++j) {
+        const int p = skeleton.joints[j].parent;
+        if (p == kSkeletonNoParent) {
+            pos[j] = skeleton.joints[j].rest_offset;
+        } else {
+            pos[j] = pos[static_cast<size_t>(p)] +
+                     geom::RotateVector(world[static_cast<size_t>(p)],
+                                        skeleton.joints[j].rest_offset);
+        }
+    }
+    return pos;
+}
+
+// ==================== 人体随动系（body-following frame） ====================
+//
+// ── M 的定义（务必先读；2026-09-15 Danis 要求写清）────────────────────────
+//
+//   M 是一个**纯旋转**（旋转阵，用四元数承载；**不含平移**）。
+//
+//   语义 = 把「人体随动系(body)」的坐标换算到「骨架空间(world)」：
+//
+//         p_world = M · p_body
+//
+//   等价写法：  p_body = M⁻¹ · p_world = Mᵀ · p_world（M 是旋转 ⇒ 转置即逆）。
+//   ⚠️ 若习惯写成「p_body = M·p_world」，那个 M 就是本函数 M 的**转置**（两者只差转置）。
+//      本实现取 `p_world = M·p_body`，因为**构造时 M 的三列就是我们在 world 里算出的三根轴**：
+//          M 第 0 列 = X_body（左）在 world 下的表达
+//          M 第 1 列 = Y_body（上）在 world 下的表达
+//          M 第 2 列 = Z_body（前）在 world 下的表达
+//      即可验：RotateVector(M, (1,0,0)) == axis_left（同理 y/z；单测覆盖）。
+//
+// ── 三轴构造（Danis 2026-09-15 定；前提：rest ≈ T-pose + 资产统一 y-up）──
+//
+//   Y_body = world 的 +Y            （上；本函数**直接取固定 +Y**，不从骨算）
+//   X_body = normalize( 去掉 Y 分量后的 (右腕 → 左腕) )   （左 = +X；命名已区分左右）
+//   Z_body = X_body × Y_body        （前 = +Z；右手系下 left×up = forward）
+//
+//   ⇒ 因 Y_body ≡ world +Y，M 实际是一个**绕 Y 的 yaw**。
+//     （若将来上方向要改成从骨算（Hips→Head），这里换成「三正交轴 → 四元数」的一般式即可，
+//       本函数的返回结构与调用方都不用改。）
+//
+// ── 骨名与退化 ──────────────────────────────────────────────────────────
+//   手腕优先（LeftHand/RightHand），缺则退到紧邻关节（LeftForeArm/RightForeArm）；
+//   两侧都找不到、或连线**去 Y 后近零**（退化为沿 up 的线）⇒ `valid=false`（**不猜、不 fallback**）。
+
+// 人体随动系的估计结果（含诊断字段，便于日志/面板显示）。
+struct BodyFrame {
+    bool valid = false;                                    // 估计失败（缺骨/退化）
+    Quatf rotation = Quatf::Identity();                    // M：p_world = M · p_body
+    std::string left_bone;                                 // 实际用于定 +X 的左骨名（诊断）
+    std::string right_bone;                                // 右骨名
+    Vec3f axis_left{1.0f, 0.0f, 0.0f};                     // world 下的三轴（诊断/可验）
+    Vec3f axis_up{0.0f, 1.0f, 0.0f};
+    Vec3f axis_forward{0.0f, 0.0f, 1.0f};
+    float yaw_deg = 0.0f;                                  // M 绕 +Y 的转角（诊断）
+};
+
+// 退化阈值（米）：去 Y 后的腕连线短于此 ⇒ 视为退化（无法定左右向），返回 invalid。
+// 取值依据：人形两腕间距 ≫ 0.1m；此值只用于挡「连线 ∥ up」的构造错误。
+inline constexpr float kBodyFrameMinSpan = 1e-4f;
+
+// 估计人体随动系（见上「M 的定义」）。
+// Pre-condition: skeleton 非空且满足 SkeletonType::Validate()（违反 → LOG(FATAL)）。
+inline BodyFrame EstimateBodyFrame(const SkeletonType& skeleton) {
+    skeleton.Validate();
+    BodyFrame f;
+    const std::vector<Vec3f> pos = RestWorldPositions(skeleton);
+
+    // 候选骨对：手腕优先，退到紧邻关节（前臂）。顺序即优先级。
+    const std::pair<const char*, const char*> kPairs[] = {
+        {"LeftHand", "RightHand"},
+        {"LeftForeArm", "RightForeArm"},
+    };
+    for (const auto& pr : kPairs) {
+        const int li = FindJointBySuffix(skeleton, pr.first);
+        const int ri = FindJointBySuffix(skeleton, pr.second);
+        if (li < 0 || ri < 0) {
+            continue;  // 这一档缺骨，试下一档
+        }
+        // ⚠️ 方向铁律：「右腕 → 左腕」= `pos[左] − pos[右]`（A→B 的定义是 B−A）。
+        //    这里曾写反（写成 右−左），被单测直接抓出（整个 M 白 180°）。
+        const Vec3f d0 = pos[static_cast<size_t>(li)] - pos[static_cast<size_t>(ri)];
+        const Vec3f d(d0.x(), 0.0f, d0.z());  // 去掉 Y 分量（正交化到 up = +Y）
+        const float len = d.Norm();
+        if (len < kBodyFrameMinSpan) {
+            return f;  // 退化：连线沿 up，定不了左右向 ⇒ 不猜
+        }
+        f.axis_left = Vec3f(d.x() / len, 0.0f, d.z() / len);
+        f.axis_up = Vec3f(0.0f, 1.0f, 0.0f);  // 固定 +Y（Danis 定）
+        // Z = X × Y（右手系；left × up = forward）。
+        f.axis_forward = Vec3f(f.axis_left.y() * f.axis_up.z() - f.axis_left.z() * f.axis_up.y(),
+                               f.axis_left.z() * f.axis_up.x() - f.axis_left.x() * f.axis_up.z(),
+                               f.axis_left.x() * f.axis_up.y() - f.axis_left.y() * f.axis_up.x());
+        // M = 绕 +Y 的 yaw：X_body 已被归一化且 y==0 ⇒ θ = atan2(-z, x)。
+        const float theta =
+            std::atan2(-f.axis_left.z(), f.axis_left.x());
+        f.yaw_deg = theta * 180.0f / static_cast<float>(M_PI);
+        f.rotation = Quatf::FromAxisAngle(Vec3f(0.0f, 1.0f, 0.0f), theta).Normalized();
+        f.left_bone = skeleton.joints[static_cast<size_t>(li)].name;
+        f.right_bone = skeleton.joints[static_cast<size_t>(ri)].name;
+        f.valid = true;
+        return f;
+    }
+    return f;  // 两档骨名都缺 ⇒ invalid（不猜）
 }
 
 // 按**骨名**做两侧对齐（精确同名；空名不参与对位）。

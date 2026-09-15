@@ -505,6 +505,142 @@ TEST(SkeletonRetargetTest, Mixamo23SelfRetargetIsExact) {
 //  10. Pre-condition 崩溃
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════
+//  11. 人体随动系 EstimateBodyFrame
+// ════════════════════════════════════════════════════════════════════════
+
+// 造一个"双手沿 ±X（左 = +X）"的 T-pose 骨架，root 可带 yaw。
+// 结构: 0 Hips(root) → 1 Right<..>(−span) / 2 Left<..>(+span)
+SkeletonType MakeTposeHands(const std::string& left_name, const std::string& right_name,
+                            float span = 0.5f,
+                            const geom::Quaternion<float>& root_bind =
+                                geom::Quaternion<float>::Identity()) {
+    SkeletonType s;
+    s.joints.push_back(MakeJoint(kSkeletonNoParent, 0.0f, 1.0f, 0.0f, "mixamorig:Hips"));
+    s.joints.push_back(MakeJoint(0, -span, 0.0f, 0.0f, right_name));  // 右 = −X
+    s.joints.push_back(MakeJoint(0, +span, 0.0f, 0.0f, left_name));   // 左 = +X
+    s.bind_rotation.assign(3, geom::Quaternion<float>::Identity());
+    s.bind_rotation[0] = root_bind;
+    s.Validate();
+    return s;
+}
+
+geom::Quaternion<float> RotYDeg(float deg) {
+    return geom::Quaternion<float>::FromAxisAngle(Vec3f(0.0f, 1.0f, 0.0f),
+                                                  deg * kPi / 180.0f);
+}
+
+// M 的定义：M 的**三列** = 人体随动系三轴在 world 下的表达 ⇒
+//   RotateVector(M, 单位轴) 应 == 对应 axis_*。这条把"定义"钉在代码上。
+void ExpectColumnsAreAxes(const BodyFrame& f) {
+    EXPECT_NEAR((geom::RotateVector(f.rotation, Vec3f(1, 0, 0)) - f.axis_left).Norm(),
+                0.0f, 1e-4f) << "M 第 0 列应为 X_body(左)";
+    EXPECT_NEAR((geom::RotateVector(f.rotation, Vec3f(0, 1, 0)) - f.axis_up).Norm(),
+                0.0f, 1e-4f) << "M 第 1 列应为 Y_body(上)";
+    EXPECT_NEAR((geom::RotateVector(f.rotation, Vec3f(0, 0, 1)) - f.axis_forward).Norm(),
+                0.0f, 1e-4f) << "M 第 2 列应为 Z_body(前)";
+}
+
+// T-pose 面朝 +Z（左手 +X、右手 −X）⇒ M = 恒等，三轴 = (X, Y, Z)。
+TEST(SkeletonRetargetTest, BodyFrameTposeFacingZIsIdentity) {
+    const SkeletonType s = MakeTposeHands("mixamorig:LeftHand", "mixamorig:RightHand");
+    const BodyFrame f = EstimateBodyFrame(s);
+    ASSERT_TRUE(f.valid);
+    EXPECT_NEAR(f.yaw_deg, 0.0f, 1e-3f);
+    EXPECT_NEAR(QuatAngleDeg(f.rotation, geom::Quaternion<float>::Identity()), 0.0f, 1e-3f);
+    EXPECT_NEAR((f.axis_left - Vec3f(1, 0, 0)).Norm(), 0.0f, 1e-4f);
+    EXPECT_NEAR((f.axis_up - Vec3f(0, 1, 0)).Norm(), 0.0f, 1e-4f);
+    EXPECT_NEAR((f.axis_forward - Vec3f(0, 0, 1)).Norm(), 0.0f, 1e-4f);
+    EXPECT_EQ(f.left_bone, "mixamorig:LeftHand");
+    EXPECT_EQ(f.right_bone, "mixamorig:RightHand");
+    ExpectColumnsAreAxes(f);
+}
+
+// 整具骨架绕 Y 转 θ ⇒ M 应 = 同角度 yaw（含 ±90°、180°、负角）。
+TEST(SkeletonRetargetTest, BodyFrameFollowsRootYaw) {
+    for (const float deg : {30.0f, 90.0f, 180.0f, -90.0f, -150.0f}) {
+        const geom::Quaternion<float> q = RotYDeg(deg);
+        const SkeletonType s =
+            MakeTposeHands("mixamorig:LeftHand", "mixamorig:RightHand", 0.5f, q);
+        const BodyFrame f = EstimateBodyFrame(s);
+        ASSERT_TRUE(f.valid) << "deg=" << deg;
+        EXPECT_NEAR(QuatAngleDeg(f.rotation, q), 0.0f, 1e-2f) << "deg=" << deg;
+        ExpectColumnsAreAxes(f);
+        // Z = X × Y 必须成立（右手系）
+        const Vec3f cross(f.axis_left.y() * f.axis_up.z() - f.axis_left.z() * f.axis_up.y(),
+                          f.axis_left.z() * f.axis_up.x() - f.axis_left.x() * f.axis_up.z(),
+                          f.axis_left.x() * f.axis_up.y() - f.axis_left.y() * f.axis_up.x());
+        EXPECT_NEAR((cross - f.axis_forward).Norm(), 0.0f, 1e-4f) << "deg=" << deg;
+    }
+}
+
+// 180° 是轴角/四元数表示的**分支点**：这里必须稳（不能劈开/翻错）。
+TEST(SkeletonRetargetTest, BodyFrameHalfTurnIsStable) {
+    const SkeletonType s =
+        MakeTposeHands("mixamorig:LeftHand", "mixamorig:RightHand", 0.5f, RotYDeg(180.0f));
+    const BodyFrame f = EstimateBodyFrame(s);
+    ASSERT_TRUE(f.valid);
+    EXPECT_NEAR((f.axis_left - Vec3f(-1, 0, 0)).Norm(), 0.0f, 1e-4f);
+    EXPECT_NEAR((f.axis_forward - Vec3f(0, 0, -1)).Norm(), 0.0f, 1e-4f);
+    EXPECT_NEAR(std::fabs(f.yaw_deg), 180.0f, 1e-2f);
+    ExpectColumnsAreAxes(f);
+}
+
+// 手腕缺 → 退到紧邻关节（前臂），并报出实际用的骨名。
+TEST(SkeletonRetargetTest, BodyFrameFallsBackToForeArm) {
+    const SkeletonType s =
+        MakeTposeHands("mixamorig:LeftForeArm", "mixamorig:RightForeArm");
+    const BodyFrame f = EstimateBodyFrame(s);
+    ASSERT_TRUE(f.valid);
+    EXPECT_EQ(f.left_bone, "mixamorig:LeftForeArm");
+    EXPECT_EQ(f.right_bone, "mixamorig:RightForeArm");
+    EXPECT_NEAR(f.yaw_deg, 0.0f, 1e-3f);
+}
+
+// 两档骨名都缺 ⇒ invalid（不猜、不 fallback）。
+TEST(SkeletonRetargetTest, BodyFrameInvalidWhenBonesMissing) {
+    const SkeletonType s = MakeTposeHands("mixamorig:LeftWristX", "mixamorig:RightWristX");
+    EXPECT_FALSE(EstimateBodyFrame(s).valid);
+}
+
+// 连线退化为沿 up（去 Y 后近零）⇒ invalid（不是"凑一个"）。
+TEST(SkeletonRetargetTest, BodyFrameInvalidWhenSpanParallelToUp) {
+    SkeletonType s;
+    s.joints.push_back(MakeJoint(kSkeletonNoParent, 0.0f, 0.0f, 0.0f, "mixamorig:Hips"));
+    s.joints.push_back(MakeJoint(0, 0.0f, 0.3f, 0.0f, "mixamorig:RightHand"));
+    s.joints.push_back(MakeJoint(0, 0.0f, 0.6f, 0.0f, "mixamorig:LeftHand"));
+    s.bind_rotation.assign(3, geom::Quaternion<float>::Identity());
+    s.Validate();
+    EXPECT_FALSE(EstimateBodyFrame(s).valid);
+}
+
+// 骨名按**后缀**匹配：不带 mixamorig: 前缀也能用。
+TEST(SkeletonRetargetTest, BodyFrameMatchesBySuffixRegardlessOfPrefix) {
+    const SkeletonType s = MakeTposeHands("LeftHand", "RightHand");
+    const BodyFrame f = EstimateBodyFrame(s);
+    ASSERT_TRUE(f.valid);
+    EXPECT_NEAR(f.yaw_deg, 0.0f, 1e-3f);
+}
+
+// 真实规模：官方 Mixamo23 骨架（源自 Hip Hop Dancing.fbx）应面朝 +Z、左 = +X。
+TEST(SkeletonRetargetTest, BodyFrameOfOfficialMixamo23) {
+    const SkeletonType s = Mixamo23Skeleton(1.60f);
+    const BodyFrame f = EstimateBodyFrame(s);
+    ASSERT_TRUE(f.valid);
+    EXPECT_EQ(f.left_bone, "mixamorig:LeftHand");
+    EXPECT_EQ(f.right_bone, "mixamorig:RightHand");
+    EXPECT_NEAR((f.axis_up - Vec3f(0, 1, 0)).Norm(), 0.0f, 1e-6f);
+    // 官方 T-pose 手水平张开 ⇒ 左右轴应几乎正好是 +X（左手在 +X）⇒ yaw ≈ 0（面朝 +Z）
+    EXPECT_NEAR(f.axis_left.x(), 1.0f, 0.05f) << "轴 = ("
+        << f.axis_left.x() << "," << f.axis_left.y() << "," << f.axis_left.z() << ")";
+    EXPECT_NEAR(f.yaw_deg, 0.0f, 3.0f) << "官方 Mixamo 骨架应面朝 +Z（左 = +X）";
+    LOG(INFO) << "Mixamo23 人体随动系: yaw=" << f.yaw_deg << "° axis_left=("
+              << f.axis_left.x() << "," << f.axis_left.y() << "," << f.axis_left.z()
+              << ") axis_forward=(" << f.axis_forward.x() << "," << f.axis_forward.y()
+              << "," << f.axis_forward.z() << ")";
+    ExpectColumnsAreAxes(f);
+}
+
 TEST(SkeletonRetargetTest, WrongSourcePoseSizeDies) {
     MiniSkeleton tgt = MakeMini(geom::Quaternion<float>::Identity(),
                                 geom::Quaternion<float>::Identity());
