@@ -28,6 +28,7 @@ cc_library(
         "//tools/jpov/interface:animation_sampler",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:skeleton_mesh",
+        "//tools/jpov/interface:skeleton_retarget",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:fbx_loader",
