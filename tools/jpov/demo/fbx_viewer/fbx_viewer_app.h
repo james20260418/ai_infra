@@ -23,23 +23,27 @@
 // 会不对"这一个判断。之后 2026-09-15 追加：把**正式重定向**也做成可切换的一种驱动，
 // 以便同屏对比"直搬 vs 重定向"。做法：
 //   · 源（红）= fbx rest 骨架 + fbx 自己的动画  → 正确答案的参照；
-//   · 目标（蓝）= glb rest 骨架 + 按 blue_drive_ 选的方式驱动：
-//       kNoRetarget —— **对照组**：pose 数值**原样直搬**（骨名匹配，见
-//                      skeleton_pose_transfer.h，函数名即警示：NoRetarget）
-//                      → 预期"四肢绕错轴"；
-//       kBodyRetarget —— **★ 正式重定向**：搬「关节相对自己 bind 的额外旋转」在
+//   · 目标（蓝）= glb rest 骨架 + 按 ViewMode 的驱动方式：
+//       NoRetarget —— **对照组**：pose 数值**原样直搬**（骨名匹配，见
+//                     skeleton_pose_transfer.h，函数名即警示：NoRetarget）
+//                     → 预期"四肢绕错轴"；
+//       BodyRetarget —— **★ 正式重定向**：搬「关节相对自己 bind 的额外旋转」在
 //                      人体随动系下不变的量（见 interface/skeleton_retarget.h 的
 //                      BodyRetarget 一节）→ 预期"与红骨同步"，且几何一致时零误差。
-//   · 面板：「mesh 来源」combo 选看哪个（/两者并列，红左蓝右）；
-//           「蓝骨驱动」combo 切直搬/重定向。
+//   · 面板：**一个** combo「显示/驱动」（ViewMode）同时选"看谁（红/蓝/并列）"
+//           与"蓝骨怎么驱动（BodyRetarget / 无重定向对照）"。
+//     ⚠️ 为何合并成一个：`Ui::Combo` 的展开态是**单例**（combo_open_ 只有一份），
+//        同屏放两个 combo 时点第一个会展开，紧接着第二个 combo 走“已展开且点框外
+//        ⇒ 关闭”分支把它立即关掉 → 表现为“下拉一闪即收”。UI 侧真修（per-box 状态）
+//        **下个 PR 做**；本 PR 先合并成一个 combo 绕开。
 // 蓝骨与红骨是**两套骨架各自的 rest 形状**，都只被 pose（旋转）驱动：于是"动作对不对"
 // 与"mesh 蒙皮对不对"解耦，正是 retarget 设计文档 §6.4「先上骨人」的用法。
 //
-// ⚠️ QRetarget 下"朝向差仍在"是**正确行为**，不是 bug：重定向传递的不变量是
-//   "相对于自己 bind 转了多少"，基线是**目标自己的 rest**（`W_T = Rb_T · 偏差_源`）⇒
-//   蓝骨保持自己的 bind 朝向（实测 glb 与 fbx 差 ~90°），面板会把这个角度显式报出来。
-//   要让两侧"面朝同一边"，得**另外**把 `BindResult::rest_alignment`（= Q(0)）用在
-//   放置层 —— 那是资产对齐参数的事，不烘进 pose（同 fbx_loader.h 的朝向约定）。
+// ⚠️ BodyRetarget 下"整体朝向差仍在"是**正确行为**，不是 bug：重定向传递的不变量是
+//   "相对于自己 bind 的额外旋转（在人体随动系下）"，基线是**目标自己的 rest** ⇒
+//   蓝骨保持自己的 bind 朝向（实测 glb 与 fbx 差 ~90°，即面板报的 Q_body）。
+//   要让两侧"面朝同一边"，得**另外**把 Q_body 用在放置层 —— 那是资产对齐参数的事，
+//   不烘进 pose（同 fbx_loader.h 的朝向约定）。
 //
 // ⚠️ 骨架与动画**分两个 loader 入口取**（都是既有能力，本 PR 不新增读取路径）：
 //   - skeleton_ 走 jpov::LoadFbxSkeleton —— rest_offset 已归一到**米**；
@@ -125,32 +129,9 @@ inline Bounds ComputeMeshBounds(const jpov::MeshData& mesh) {
     return b;
 }
 
-// 「mesh 来源」选项：看哪个骨架的骨人被这段 pose 驱动（面板 combo 的下标 = 本枚举值）。
-//   kFbxOnly —— 只看源（红）：fbx rest 骨架 + fbx 自己的动画（正确参照）；
-//   kGlbOnly —— 只看目标（蓝）：glb rest 骨架 + 同一份 pose 数值直搬（无重定向）；
-//   kBoth    —— 两者并列同屏（红左蓝右，方便一眼对比）。
-enum class MeshSource : int {
-    kFbxOnly = 0,
-    kGlbOnly = 1,
-    kBoth    = 2,
-};
-
-// combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
-inline const char* const kMeshSourceItems[] = {
-    "fbx rest（红，源）",
-    "glb rest（蓝，无重定向）",
-    "两者并列（红左/蓝右）",
-};
-// 项数**由数组推导**（不再手写 3 —— 两份真值会漂）。
-inline constexpr int kMeshSourceItemCount =
-    static_cast<int>(sizeof(kMeshSourceItems) / sizeof(kMeshSourceItems[0]));
-
-// combo 项列表（Ui::Combo 要 vector<const char*>）。静态持有，避免每帧构造容器。
-inline const std::vector<const char*>& MeshSourceItems() {
-    static const std::vector<const char*> kItems(
-        kMeshSourceItems, kMeshSourceItems + kMeshSourceItemCount);
-    return kItems;
-}
+// 「显示/驱动」选项（**合并成一个 combo**）—— 见 ViewMode 注释。
+//   （原 MeshSource 枚举已并入 ViewMode：以前是两个 combo，因 Ui::Combo 展开态是单例
+//     会“一闪即收”，故合并成一个。UI 侧真修见下个 PR。）
 
 // 「蓝骨驱动」选项：glb 骨架（蓝）的位姿从源（红）怎么来。
 //   kNoRetarget  —— **对照组**：局部旋转数值**原样搬**（不校正局部帧朝向）。
@@ -164,18 +145,60 @@ enum class BlueDrive : int {
     kBodyRetarget = 1,
 };
 
-// combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
-inline const char* const kBlueDriveItems[] = {
-    "无重定向（数值直搬·对照）",
-    "BodyRetarget（人体随动系）",
+// 「显示/驱动」选项（**合并成一个 combo**）——看哪个骨架 + 蓝骨由什么驱动。
+//
+// ⚠️ 为什么合并（2026-09-15 Danis 定）：`Ui::Combo` 的展开态是**单例**
+//   （`combo_open_`/`combo_open_box_` 只有一份），同屏放**两个** combo 时，
+//   点第一个框内会把它展开，紧接着第二个 combo 走“已展开且点框外 ⇒ 关闭”
+//   分支，把刚展开的那个**立即关掉** → 表现为“下拉一闪即收”。
+//   → UI 侧的真缺陷（应改成 per-box 状态）**下个 PR 修**；本 PR 先合并成一个 combo 绕开。
+//
+// 语义：前两项只看一个骨架（红或蓝），后两项两者并列；蓝骨驱动只在“看得到蓝”时有意义。
+enum class ViewMode : int {
+    kFbxOnly        = 0,  // 只看源（红）：fbx rest 骨架 + fbx 自己的动画
+    kGlbRetarget    = 1,  // 只看目标（蓝）：glb 骨架 + BodyRetarget 驱动（正式重定向）
+    kBothRetarget   = 2,  // 两者并列：蓝用 BodyRetarget（推荐对比）
+    kGlbNoRetarget  = 3,  // 只看目标（蓝）：数值直搬（消融对照，预期绕错轴）
+    kBothNoRetarget = 4,  // 两者并列：蓝用无重定向直搬（消融对照）
 };
-inline constexpr int kBlueDriveItemCount =
-    static_cast<int>(sizeof(kBlueDriveItems) / sizeof(kBlueDriveItems[0]));
 
-inline const std::vector<const char*>& BlueDriveItems() {
+// combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
+inline const char* const kViewModeItems[] = {
+    "只看源（红）",
+    "只看目标（蓝，BodyRetarget）",
+    "两者并列（蓝 = BodyRetarget）",
+    "只看目标（蓝，无重定向对照）",
+    "两者并列（蓝 = 无重定向对照）",
+};
+inline constexpr int kViewModeItemCount =
+    static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
+
+inline const std::vector<const char*>& ViewModeItems() {
     static const std::vector<const char*> kItems(
-        kBlueDriveItems, kBlueDriveItems + kBlueDriveItemCount);
+        kViewModeItems, kViewModeItems + kViewModeItemCount);
     return kItems;
+}
+
+// ── ViewMode 的便捷拆解（把“一个 combo”还原成“看谁 + 怎么驱动”两个正交事实）──
+
+// 本模式是否显示源（红）骨架。
+inline bool ViewShowsFbx(ViewMode m) {
+    return m == ViewMode::kFbxOnly || m == ViewMode::kBothRetarget ||
+           m == ViewMode::kBothNoRetarget;
+}
+// 本模式是否显示目标（蓝）骨架。
+inline bool ViewShowsGlb(ViewMode m) {
+    return m != ViewMode::kFbxOnly;
+}
+// 本模式是否两者并列（决定摆放间距 / 相机适配）。
+inline bool ViewIsSideBySide(ViewMode m) {
+    return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget;
+}
+// 蓝骨驱动方式（仅 ViewShowsGlb 时有意义）。
+inline BlueDrive ViewBlueDrive(ViewMode m) {
+    return (m == ViewMode::kGlbNoRetarget || m == ViewMode::kBothNoRetarget)
+               ? BlueDrive::kNoRetarget
+               : BlueDrive::kBodyRetarget;
 }
 
 // 「两者并列」时两骨人的横向间距（米）：取各自 rest 包围盒宽 + 该间隙，
@@ -201,8 +224,8 @@ public:
     bool has_glb_ = false;
     uint32_t glb_bone_mesh_ = 0;
     int glb_mapped_bones_ = 0;      // 源/目标骨名命中数（面板显示；未命中骨保持 rest）
-    MeshSource mesh_source_ = MeshSource::kFbxOnly;  // 本帧看哪个（/哪些）骨架
-    BlueDrive blue_drive_ = BlueDrive::kBodyRetarget;  // 蓝骨位姿怎么来（见 BlueDrive）
+    // ── 显示/驱动（**一个 combo** 选的模式，见 ViewMode 注释里为何合并）──
+    ViewMode view_mode_ = ViewMode::kFbxOnly;  // 本帧看哪个骨架 + 蓝骨怎么驱动
 
     // ── 播放状态 ──
     double anim_time_seconds_ = 0.0;  // 动画时间（秒）；循环语义由 SampleClipPose 承担
@@ -218,7 +241,7 @@ public:
     //   ⚠️ 命名刻意区别于 JPOV::LoadGltf（那个是"加载整份 glTF 模型"，本方法只取骨架，
     //   底层走 jpov::LoadGltfSkeleton，.gltf/.glb 都能读）。
     //   返回 false = 读不了 / 无 skin，失败原因已 LOG(ERROR)。
-    //   须在 LoadFbx 之后调（骨名命中数依赖源骨架）；调用后 mesh_source_ 默认切到
+    //   须在 LoadFbx 之后调（骨名命中数依赖源骨架）；调用后 view_mode_ 默认切到
     //   kBoth（传了 glb 就是想对比），初始机位重新按两者并列的包围盒适配。
     bool LoadGlbSkeleton(const std::string& path);
 
@@ -291,11 +314,10 @@ public:
 
         // 摆放：单看时各自在原点；“两者并列”时以 x=0 对称分开（相机环绕中心在原点，
         // 对称才不偏）；横向位置再各自减去自身包围盒中心的 x（使两根骨人不重叠）。
-        const bool show_fbx = (mesh_source_ == MeshSource::kFbxOnly ||
-                               mesh_source_ == MeshSource::kBoth);
-        const bool show_glb = (has_glb_ && (mesh_source_ == MeshSource::kGlbOnly ||
-                                            mesh_source_ == MeshSource::kBoth));
-        const bool side_by_side = (mesh_source_ == MeshSource::kBoth);
+        const bool show_fbx = (has_glb_ ? ViewShowsFbx(view_mode_)
+                                        : true);  // 无 glb 时只能看源，忽略模式
+        const bool show_glb = (has_glb_ && ViewShowsGlb(view_mode_));
+        const bool side_by_side = (has_glb_ && ViewIsSideBySide(view_mode_));
         const float red_x = side_by_side ? (-0.5f * pair_sep_m_ - fbx_center_x_) : 0.0f;
         const float blue_x = side_by_side ? (0.5f * pair_sep_m_ - glb_center_x_) : 0.0f;
         if (show_fbx) {
@@ -338,8 +360,16 @@ public:
     const jpov::BodyRetargetPlan& retarget_plan_for_test() const { return retarget_plan_; }
     jpov::SkeletonType& glb_skeleton_for_test() { return glb_skeleton_; }
     jpov::SkeletonType& skeleton_for_test() { return skeleton_; }
-    void SetBlueDriveForTest(BlueDrive d) { blue_drive_ = d; }
-    BlueDrive blue_drive_for_test() const { return blue_drive_; }
+    void SetBlueDriveForTest(BlueDrive d) {
+        // 测试用：保持“看谁”不变，只把驱动换成 d。
+        const bool side_by_side = ViewIsSideBySide(view_mode_);
+        if (d == BlueDrive::kNoRetarget) {
+            view_mode_ = side_by_side ? ViewMode::kBothNoRetarget : ViewMode::kGlbNoRetarget;
+        } else {
+            view_mode_ = side_by_side ? ViewMode::kBothRetarget : ViewMode::kGlbRetarget;
+        }
+    }
+    BlueDrive blue_drive_for_test() const { return ViewBlueDrive(view_mode_); }
     void RebuildBindForTest() {
         retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
     }
@@ -347,7 +377,7 @@ public:
     void SetFramePoseForTest(const jpov::SkeletonPose& p) { frame_pose_ = p; }
     // 直接跑"算蓝骨位姿"那一步（不碰 GL；UpdateGlbBoneMeshIfNeeded 里的纯 CPU 部分）。
     void ComputeGlbPoseForTest() {
-        switch (blue_drive_) {
+        switch (ViewBlueDrive(view_mode_)) {
             case BlueDrive::kNoRetarget:
                 TransferPoseByNameNoRetarget(skeleton_, frame_pose_, glb_skeleton_,
                                              &glb_pose_);
@@ -403,11 +433,12 @@ private:
     //   kBodyRetarget —— 人体随动系重定向（见 interface/skeleton_retarget.h）。
     // 没 glb / 本帧不看蓝 → 标 key 失效（本帧没算蓝位姿，下次切回蓝模式必须重建）。
     void UpdateGlbBoneMeshIfNeeded() {
-        if (!has_glb_ || mesh_source_ == MeshSource::kFbxOnly) {
+        if (!has_glb_ || !ViewShowsGlb(view_mode_)) {
             blue_drawn_.valid = false;
             return;
         }
-        switch (blue_drive_) {
+        const BlueDrive drive = ViewBlueDrive(view_mode_);
+        switch (drive) {
             case BlueDrive::kNoRetarget:
                 TransferPoseByNameNoRetarget(skeleton_, frame_pose_, glb_skeleton_,
                                              &glb_pose_);
@@ -418,13 +449,14 @@ private:
                 break;
         }
         // 键里含驱动模式：切 combo 必须重建（否则会留着上一个模式的 mesh）。
-        if (blue_drawn_.Matches(rest_pose_mode_, anim_time_seconds_, blue_drive_)) {
+        // 键里含驱动模式：切 combo 必须重建（否则会留着上一个模式的 mesh）。
+        if (blue_drawn_.Matches(rest_pose_mode_, anim_time_seconds_, drive)) {
             return;
         }
         UpdateMesh(glb_bone_mesh_,
                    jpov::BuildBoneMeshInBoneSpace(glb_skeleton_, glb_pose_,
                                                   kBoneRadius));
-        blue_drawn_ = {true, rest_pose_mode_, anim_time_seconds_, blue_drive_};
+        blue_drawn_ = {true, rest_pose_mode_, anim_time_seconds_, drive};
     }
 
     // 顶部面板：一行控件（mesh 来源 combo + 暂停按钮 + rest 复选框）+ 一行状态文本。
@@ -451,9 +483,12 @@ private:
 
         // 两行整体贴顶居中：控件行在最顶（下拉展开才有地方），状态文本行紧随其下。
         // 没传 glb 时不画 combo（没有目标骨架可选，多余的控件只会误导）。
+        // ⚠️ 只放**一个** combo：`Ui::Combo` 的展开态是单例，同屏两个会互相
+        //    干扰（点第一个展开、第二个立即把它关掉 → “一闪即收”）。
+        //    故把“看谁 + 怎么驱动”合并成 ViewMode 一个 combo（见 ViewMode 注释）。
         float ctrl_w = kButtonW + kGap + kCheckW;
         if (has_glb_) {
-            ctrl_w += 2.0f * (kGap + kComboW);  // mesh 来源 + 蓝骨驱动
+            ctrl_w += kGap + kComboW;  // 显示/驱动（单个）
         }
         const float ctrl_left = (w - ctrl_w) * 0.5f;
         const float ctrl_top = kTop;
@@ -461,18 +496,13 @@ private:
 
         float x = ctrl_left;
         if (has_glb_) {
-            // mesh 来源：看源（红）/ 目标（蓝）/ 两者并列（见 MeshSource 注释）。
-            // Ui::Combo 的选中值是 int（下标），这里在边界处与枚举互转。
-            int selected = static_cast<int>(mesh_source_);
-            ui_.Combo("mesh 来源", &selected, MeshSourceItems(),
+            // 显示/驱动：看源（红）/ 看目标（蓝）/ 两者并列 × 蓝骨 BodyRetarget / 无重定向
+            //（合并成一个 combo，见 ViewMode 注释）。Ui::Combo 的选中值是 int（下标），
+            // 这里在边界处与枚举互转。
+            int mode = static_cast<int>(view_mode_);
+            ui_.Combo("显示/驱动", &mode, ViewModeItems(),
                       jpov::UiRect{{x, ctrl_top}, {kComboW, kRowH}});
-            mesh_source_ = static_cast<MeshSource>(selected);
-            x += kComboW + kGap;
-            // 蓝骨驱动：无重定向（对照） vs QRetarget（正式重定向）—— 见 BlueDrive 注释。
-            int drive = static_cast<int>(blue_drive_);
-            ui_.Combo("蓝骨驱动", &drive, BlueDriveItems(),
-                      jpov::UiRect{{x, ctrl_top}, {kComboW, kRowH}});
-            blue_drive_ = static_cast<BlueDrive>(drive);
+            view_mode_ = static_cast<ViewMode>(mode);
             x += kComboW + kGap;
         }
         // 暂停按钮：按下切换暂停态（文案随状态变，一眼看出当前是停是放）。
@@ -504,10 +534,11 @@ private:
         char mode_tag[288] = "";
         if (has_glb_) {
             const char* drive_name =
-                (blue_drive_ == BlueDrive::kBodyRetarget) ? "BodyRetarget" : "无重定向";
-            if (mesh_source_ == MeshSource::kFbxOnly) {
+                (ViewBlueDrive(view_mode_) == BlueDrive::kBodyRetarget) ? "BodyRetarget"
+                                                                       : "无重定向";
+            if (!ViewShowsGlb(view_mode_)) {
                 std::snprintf(mode_tag, sizeof(mode_tag), "  | 蓝：关（只看红）");
-            } else if (mesh_source_ == MeshSource::kGlbOnly) {
+            } else if (!ViewIsSideBySide(view_mode_)) {
                 std::snprintf(mode_tag, sizeof(mode_tag),
                               "  | 蓝=%s（命中 %d/%d）", drive_name, glb_mapped_bones_,
                               glb_skeleton_.bone_count());
@@ -517,8 +548,7 @@ private:
                               glb_mapped_bones_, glb_skeleton_.bone_count());
             }
             // BodyRetarget 下额外报“蓝骨朝向差（保留）”：Q_body 让蓝骨保持自己的 bind 朝向。
-            if (blue_drive_ == BlueDrive::kBodyRetarget &&
-                mesh_source_ != MeshSource::kFbxOnly) {
+            if (ViewBlueDrive(view_mode_) == BlueDrive::kBodyRetarget && ViewShowsGlb(view_mode_)) {
                 std::snprintf(mode_tag + std::strlen(mode_tag),
                               sizeof(mode_tag) - std::strlen(mode_tag),
                               "  Q_body %.0f°", retarget_plan_.q_body_angle_deg);
@@ -558,7 +588,7 @@ private:
 
     bool show_panel_ = true;          // 是否画面板/消费输入（headless 出图为 false）
     jpov::SkeletonPose frame_pose_;    // 本帧源位姿（UpdateFramePose 写入）
-    jpov::SkeletonPose glb_pose_;      // 目标位姿（按 blue_drive_ 算，UpdateGlbBoneMeshIfNeeded 写入）
+    jpov::SkeletonPose glb_pose_;      // 目标位姿（按 view_mode_ 的驱动算，UpdateGlbBoneMeshIfNeeded 写入）
     // BodyRetarget 的 plan（对位表 + 两侧人体随动系 + Q_body + Rb 表）：装配 glb 时建一次，
     // 之后**每帧复用**（不重复做骨名哈希与人体随动系估计）。
     jpov::BodyRetargetPlan retarget_plan_;
@@ -693,7 +723,7 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
     has_glb_ = true;
     pair_sep_m_ =
         0.5f * (fbx_bounds_.SizeX() + glb_bounds_.SizeX()) + kPairGapMeters;
-    mesh_source_ = MeshSource::kBoth;
+    view_mode_ = ViewMode::kBothRetarget;
     FitInitialView();
 
     LOG(INFO) << "glb 目标骨架装配完成: " << path

@@ -5,8 +5,8 @@
 //   jpov_fbx_viewer <fbx 路径> [glb 路径] --shot out.png   headless 单帧出图
 //
 // 可选开关（详细说明见 fbx_viewer_app.h 的 MeshSource / BlueDrive）：
-//   --mesh 0|1|2   看源（红）/ 目标（蓝）/ 两者并列
-//   --drive 0|1    蓝骨驱动：0=无重定向（数值直搬，对照）/ 1=QRetarget（正式重定向）
+//   --view 0|1|2|3|4  显示/驱动：0 只看红 / 1 只看蓝(BodyRetarget) / 2 并列(BodyRetarget)
+//                                / 3 只看蓝(无重定向对照) / 4 并列(无重定向对照)
 //   --time 秒 | --frame 帧号 | --rest
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
@@ -44,10 +44,8 @@ struct CliParsed {
     double time_seconds = 0.0; // --time 的值（动画时刻，秒）
     bool has_frame = false;    // --frame 是否给出
     int frame_index = 0;       // --frame 的值（源帧号，按 fps 换算时刻）
-    bool has_mesh_source = false;  // --mesh 是否给出
-    int mesh_source = 0;           // --mesh 的值（0=仅 fbx / 1=仅 glb / 2=两者并列）
-    bool has_blue_drive = false;   // --drive 是否给出
-    int blue_drive = 0;            // --drive 的值（0=无重定向直搬 / 1=QRetarget）
+    bool has_view = false;         // --view 是否给出
+    int view_mode = 0;             // --view 的值（ViewMode 下标：0 只看红 / 1 只看蓝 / 2 并列 / 3 蓝直搬 / 4 并列直搬）
     bool rest = false;         // --rest：固定 pose = identity
 };
 
@@ -76,19 +74,12 @@ CliParsed ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--frame 缺少数值，忽略";
             }
-        } else if (arg == "--mesh") {
+        } else if (arg == "--view") {
             if (i + 1 < argc) {
-                p.mesh_source = std::atoi(argv[++i]);  // 与 MeshSource 枚举值同序
-                p.has_mesh_source = true;
+                p.view_mode = std::atoi(argv[++i]);  // 与 ViewMode 枚举值同序
+                p.has_view = true;
             } else {
-                LOG(WARNING) << "--mesh 缺少数值，忽略";
-            }
-        } else if (arg == "--drive") {
-            if (i + 1 < argc) {
-                p.blue_drive = std::atoi(argv[++i]);  // 与 BlueDrive 枚举值同序
-                p.has_blue_drive = true;
-            } else {
-                LOG(WARNING) << "--drive 缺少数值，忽略";
+                LOG(WARNING) << "--view 缺少数值，忽略";
             }
         } else if (arg == "--rest") {
             p.rest = true;
@@ -111,7 +102,7 @@ int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
-           "[--time 秒|--frame 帧号] [--rest] [--mesh 0|1|2] [--drive 0|1]";
+           "[--time 秒|--frame 帧号] [--rest] [--view 0..4]";
     const bool capture = !p.shot_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";
@@ -152,23 +143,14 @@ int main(int argc, char** argv) {
                                      app.clip_.frames_per_second;
         }
         app.rest_pose_mode_ = p.rest;
-        if (p.has_mesh_source) {
-            CHECK_GE(p.mesh_source, 0);
-            CHECK_LT(p.mesh_source, jpov_fbx_viewer::kMeshSourceItemCount)
-                << "--mesh 取值应为 0.." << (jpov_fbx_viewer::kMeshSourceItemCount - 1);
-            CHECK(p.mesh_source == static_cast<int>(jpov_fbx_viewer::MeshSource::kFbxOnly) ||
+        if (p.has_view) {
+            CHECK_GE(p.view_mode, 0);
+            CHECK_LT(p.view_mode, jpov_fbx_viewer::kViewModeItemCount)
+                << "--view 取值应为 0.." << (jpov_fbx_viewer::kViewModeItemCount - 1);
+            CHECK(p.view_mode == static_cast<int>(jpov_fbx_viewer::ViewMode::kFbxOnly) ||
                   app.has_glb_)
-                << "--mesh 选了 glb（1/2）但未给 glb 路径";
-            app.mesh_source_ =
-                static_cast<jpov_fbx_viewer::MeshSource>(p.mesh_source);
-        }
-        if (p.has_blue_drive) {
-            CHECK_GE(p.blue_drive, 0);
-            CHECK_LT(p.blue_drive, jpov_fbx_viewer::kBlueDriveItemCount)
-                << "--drive 取值应为 0.." << (jpov_fbx_viewer::kBlueDriveItemCount - 1);
-            CHECK(app.has_glb_) << "--drive 需要 glb 目标骨架（第二位置参数）";
-            app.blue_drive_ =
-                static_cast<jpov_fbx_viewer::BlueDrive>(p.blue_drive);
+                << "--view 选了含蓝骨的模式但未给 glb 路径（第二位置参数）";
+            app.view_mode_ = static_cast<jpov_fbx_viewer::ViewMode>(p.view_mode);
         }
         jpov::WindowInfo winfo;
         winfo.width  = static_cast<float>(jpov_fbx_viewer::kViewerWidth);
