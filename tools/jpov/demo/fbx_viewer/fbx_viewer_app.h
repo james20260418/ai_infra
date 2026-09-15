@@ -428,7 +428,7 @@ private:
         red_drawn_ = {true, rest_pose_mode_, anim_time_seconds_};
     }
 
-    // 目标（蓝）mesh：按 blue_drive_ 把源位姿搬到 glb 骨架后重建。
+    // 目标（蓝）mesh：按 view_mode_ 的驱动方式把源位姿搬到 glb 骨架后重建。
     //   kNoRetarget —— 数值直搬（对照组，预期四肢绕错轴）；
     //   kBodyRetarget —— 人体随动系重定向（见 interface/skeleton_retarget.h）。
     // 没 glb / 本帧不看蓝 → 标 key 失效（本帧没算蓝位姿，下次切回蓝模式必须重建）。
@@ -572,7 +572,7 @@ private:
 
     // 「已按哪个位姿建过 mesh」的键（位姿只由 (rest 模式, 动画时刻) 决定）。
     // 红/蓝两个 mesh 各持一份：各自记"我按哪个键建过"。
-    // ⚠️ 蓝的键还要含 **驱动模式**（blue_drive_）：切 combo 必须重建（否则留着旧模式的 mesh）。
+    // ⚠️ 蓝的键还要含 **驱动模式**（ViewBlueDrive）：切 combo 必须重建（否则留着旧模式的 mesh）。
     struct DrawnPoseKey {
         bool valid = false;  // 是否已建过
         bool rest  = false;  // 建时的 rest 模式

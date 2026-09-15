@@ -4,21 +4,22 @@
 //   jpov_fbx_viewer <fbx 路径> [glb 路径]            交互窗口（需 DISPLAY/WSLg）
 //   jpov_fbx_viewer <fbx 路径> [glb 路径] --shot out.png   headless 单帧出图
 //
-// 可选开关（详细说明见 fbx_viewer_app.h 的 MeshSource / BlueDrive）：
+// 可选开关（详细说明见 fbx_viewer_app.h 的 ViewMode）：
 //   --view 0|1|2|3|4  显示/驱动：0 只看红 / 1 只看蓝(BodyRetarget) / 2 并列(BodyRetarget)
 //                                / 3 只看蓝(无重定向对照) / 4 并列(无重定向对照)
 //   --time 秒 | --frame 帧号 | --rest
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
 //             --rest       固定 pose = identity（rest/T-pose）出图
-//             --mesh <n>   指定「mesh 来源」出图（0=仅 fbx 红 / 1=仅 glb 蓝 / 2=两者并列，
-//                          默认：传了 glb 就 2，否则 0）——与面板 combo 同一套语义。
-//   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「对照组」——蓝骨 = 从该 glb
-//     读出的 rest 骨架，用同一份 fbx pose **数值直搬**（不做重定向）驱动，用来肉眼验证
-//     “不加重定向直接搬 lcl rotation 会不对”（见 fbx_viewer_app.h 头注 / 设计文档）。
+//             --view <n>   指定「显示/驱动」出图（0..4，见 fbx_viewer_app.h 的 ViewMode）
+//                          ——与面板 combo 同一套语义。
+//   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「目标骨架（蓝）」——蓝骨 = 从该
+//     glb 读出的 rest 骨架，驱动方式由 `--view`（或面板 combo）选：
+//     **BodyRetarget**（正式重定向）或**数值直搬**（无重定向对照，用来肉眼验证
+//     “不加重定向直接搬 lcl rotation 会不对”）。见 fbx_viewer_app.h 头注 / 设计文档。
 //
 // 交互操作：右键 drag 转视角、滚轮 zoom（与模型查看器同款）；**顶部**面板两行 ——
-//   控件行（mesh 来源 combo / 暂停按钮 / rest 复选框）+ 状态行。
+//   控件行（显示/驱动 combo / 暂停按钮 / rest 复选框）+ 状态行。
 //   （面板贴顶而非贴底：下拉展开列表向下画，贴底时选项会伸出屏幕外。）
 //
 // 架构：本主程序只做三件事 —— 解析 CLI、装配 FbxViewerApp、按模式分发
@@ -129,7 +130,7 @@ int main(int argc, char** argv) {
 
     CHECK(app.LoadFbx(p.fbx_path)) << "装配失败: " << p.fbx_path;
     if (!p.glb_path.empty()) {
-        // 可选对照组：glb 的 rest 骨架（蓝）+ 同一份 fbx pose 数值直搬（无重定向）。
+        // 可选目标骨架：glb 的 rest 骨架（蓝），驱动方式由 view_mode_ 决定。
         CHECK(app.LoadGlbSkeleton(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
     }
 
