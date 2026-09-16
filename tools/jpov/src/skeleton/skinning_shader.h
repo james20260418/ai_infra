@@ -47,7 +47,8 @@ uniform mat4 uModel;      // 局部→世界（center/up/front/scale）
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas）
 uniform int   uBoneCount;      // 该骨架骨数
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
-uniform int   uPoseCol;        // 本实例 pose 在 atlas 的列起点（x / (bone*4)）
+uniform int   uPoseCol;        // 本实例 pose 的**平坦** texel 起点（= pose_idx * pose_width）
+uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -55,25 +56,32 @@ out vec2 vTexCoord;
 out vec3 vWorldTangent;
 
 // 从 atlas 取第 bone 的 4×4 行主序矩阵，转成 GLSL mat4（列主序）。
-// x0 = uPoseCol*uBoneCount*4 + bone*4；每个 texel=矩阵一行（row-major），行序 r=t+0..
+// pose texel 起点：uPoseCol 给【本 pose 在 atlas 里的平坦 texel 下标】
+//   （= pose_idx * pose_width，pose_width = bone_count*4，CPU 端算好）。**不再乘
+//   uBoneCount*4**：那样把「每 pose 宽 = bone_count*4」写死进 shader，且与 CPU 的
+//   行优先布局假设分叉（历史 bug：两侧对“一行放几个 pose”理解不同 → 取到未上传的黑行）。
+// atlas 是行优先平铺的一整块 texel：flat → (flat % W, flat / W)。一个 pose 的
+//   4*bone_count 个 texel **可能跨行**（23 骨下必然跨），故逐 texel 各自回绕，
+//   与 CPU 烘焙逐 texel 对齐（一行放几个 pose 与取址无关）。
+// x0 = 本 pose 平坦起点 + bone*4；每个 texel=矩阵一行（row-major），行序 r=t+0..
 mat4 LoadBoneMatrix(int bone) {
-    int x0 = uPoseCol * uBoneCount * 4 + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).a;
+    int x0 = uPoseCol + bone * 4;
+    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
+    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
+    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
+    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
+    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
+    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
+    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
+    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
+    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
+    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
+    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
+    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
+    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
+    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
+    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
+    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
     // texel[t] 存矩阵【第 t 行】：m_{row,col}。GLSL mat4 以列主序存储/构造 →
     // 我们把「行主序元素」填到对应列/行位置：
     //   col0 = (m00, m10, m20, m30)
@@ -131,27 +139,28 @@ uniform mat4 uShadowDepthMVP;   // 光空间 线性深度(含 model)
 uniform sampler2D uPoseAtlas;
 uniform int   uBoneCount;
 uniform int   uPoseRow;
-uniform int   uPoseCol;
+uniform int   uPoseCol;        // 本实例 pose 的**平坦** texel 起点（= pose_idx * pose_width）
+uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 out float vShadowDepth;
 
 mat4 LoadBoneMatrix(int bone) {
-    int x0 = uPoseCol * uBoneCount * 4 + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).a;
+    int x0 = uPoseCol + bone * 4;
+    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
+    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
+    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
+    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
+    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
+    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
+    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
+    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
+    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
+    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
+    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
+    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
+    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
+    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
+    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
+    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
     return mat4(m00,m10,m20,m30, m01,m11,m21,m31, m02,m12,m22,m32, m03,m13,m23,m33);
 }
 

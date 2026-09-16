@@ -55,6 +55,42 @@ cc_test(
 )
 
 # ============================================================================
+# 蒙皮多帧一致性 —— GPU 蒙皮必须与「CPU 真值蒙皮」逐像素同形（25 帧，覆盖 atlas 多行）
+#
+# 背景：既有 gold 只渲**单个 identity pose**，而 bind 姿态下肤矩阵恒为 I ⇒ 对 atlas 取址
+# **完全免疫**（取哪一格都是单位阵，画面一样）。历史上真出过两类 atlas/蒙皮缺陷都躲在
+# 这个盲区里：① 烘焙与 shader 对 atlas 2D 布局理解不一致；② 蒙皮用的顶点与骨架不在同一
+# 坐标系（2026-09-16 已随「loader 不再改方向」修掉，见 PR #103）。
+# 本测试对每一帧同时渲「GPU 蒙皮」与「CPU 按同公式算好的真值蒙皮」，比对左半屏人像的
+# 几何掩码与像素差 ⇒ 上面两类缺陷都会当场失败（pose 0 必然 0 差异，其余帧暴露问题）。
+# ============================================================================
+
+cc_test(
+    name = "jpov_skinned_multipose_test",
+    srcs = [
+        "jpov_skinned_multipose_test.cc",
+        "jpov_skeleton_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/test/object3d:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src/skeleton:skeleton",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# ============================================================================
 # 火柴人（bone mesh）gold —— 标准晴天布景 + identity 位姿红火柴人
 #
 # 验证 BuildBoneMeshInBoneSpace 生成的骨架空间火柴人能在标准世界里正确渲染
