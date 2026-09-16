@@ -47,7 +47,10 @@ uniform mat4 uModel;      // 局部→世界（center/up/front/scale）
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas）
 uniform int   uBoneCount;      // 该骨架骨数
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
-uniform int   uPoseCol;        // 本实例 pose 在 atlas 的列起点（x / (bone*4)）
+uniform int   uPoseCol;        // 本实例 pose 的**平坦** texel 起点（= pose_idx * pose_width）
+uniform int   uPoseColB;       // 本实例 pose_b 的**平坦** texel 起点（==uPoseCol 即静态不插值）
+uniform float uRatio;          // pose_a→pose_b 的插值权重，[0,1]；静态时为 0（短路，不读 pose_b）
+uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -55,25 +58,32 @@ out vec2 vTexCoord;
 out vec3 vWorldTangent;
 
 // 从 atlas 取第 bone 的 4×4 行主序矩阵，转成 GLSL mat4（列主序）。
-// x0 = uPoseCol*uBoneCount*4 + bone*4；每个 texel=矩阵一行（row-major），行序 r=t+0..
-mat4 LoadBoneMatrix(int bone) {
-    int x0 = uPoseCol * uBoneCount * 4 + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).a;
+// pose texel 起点：uPoseCol 给【本 pose 在 atlas 里的平坦 texel 下标】
+//   （= pose_idx * pose_width，pose_width = bone_count*4，CPU 端算好）。**不再乘
+//   uBoneCount*4**：那样把「每 pose 宽 = bone_count*4」写死进 shader，且与 CPU 的
+//   行优先布局假设分叉（历史 bug：两侧对“一行放几个 pose”理解不同 → 取到未上传的黑行）。
+// atlas 是行优先平铺的一整块 texel：flat → (flat % W, flat / W)。一个 pose 的
+//   4*bone_count 个 texel **可能跨行**（23 骨下必然跨），故逐 texel 各自回绕，
+//   与 CPU 烘焙逐 texel 对齐（一行放几个 pose 与取址无关）。
+// x0 = 本 pose 平坦起点 + bone*4；每个 texel=矩阵一行（row-major），行序 r=t+0..
+mat4 LoadBoneMatrixAt(int pose_col, int bone) {
+    int x0 = pose_col + bone * 4;
+    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
+    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
+    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
+    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
+    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
+    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
+    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
+    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
+    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
+    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
+    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
+    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
+    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
+    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
+    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
+    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
     // texel[t] 存矩阵【第 t 行】：m_{row,col}。GLSL mat4 以列主序存储/构造 →
     // 我们把「行主序元素」填到对应列/行位置：
     //   col0 = (m00, m10, m20, m30)
@@ -85,6 +95,27 @@ mat4 LoadBoneMatrix(int bone) {
         m03, m13, m23, m33);  // column 3
 }
 
+// 本实例这一帧的骨骼矩阵：在 pose_a / pose_b 两套 JointMatrix 之间**逐骨插值**。
+//
+// 插值对象（关键，2026-09-16）：插的是 atlas 里的**最终肤矩阵** jointWorld(pose)·inverseBind。
+//   理由：方案甲已把 inverseBind 折进 atlas 行，且本工程 IBM 是**自算派生量**
+//   （joints + bind_rotation），两侧同源一致。矩阵空间 lerp 的语义 = "两帧姿态的线性混合"，
+//   对相邻帧稠密动画足够。若要物理正确的插值，应改在**关节旋转四元数**上 slerp 后重算矩阵
+//   （需 atlas 另存旋转、或 CPU 侧插值后重烘焙）—— 不在本 PR 范围。
+//
+// ratio <= 0 时**短路**只取 pose_a：静态/单帧场景（既有 gold 全走这条）取址与插值实现前
+//   完全一致（零回归）。
+mat4 LoadBoneMatrix(int bone) {
+    mat4 ma = LoadBoneMatrixAt(uPoseCol, bone);
+    if (uRatio <= 0.0) {
+        return ma;
+    }
+    mat4 mb = LoadBoneMatrixAt(uPoseColB, bone);
+    return mat4(mix(ma[0], mb[0], uRatio),
+                mix(ma[1], mb[1], uRatio),
+                mix(ma[2], mb[2], uRatio),
+                mix(ma[3], mb[3], uRatio));
+}
 void main() {
     // 4-bone 蒙皮：mesh 局部空间内 pos/normal/tangent = Σ w_i · M_i · (顶点)。
     vec3 sp = vec3(0.0);
@@ -131,28 +162,44 @@ uniform mat4 uShadowDepthMVP;   // 光空间 线性深度(含 model)
 uniform sampler2D uPoseAtlas;
 uniform int   uBoneCount;
 uniform int   uPoseRow;
-uniform int   uPoseCol;
+uniform int   uPoseCol;        // 本实例 pose_a 的**平坦** texel 起点（= pose_idx * pose_width）
+uniform int   uPoseColB;       // 本实例 pose_b 的**平坦** texel 起点（==uPoseCol 即静态不插值）
+uniform float uRatio;          // pose_a→pose_b 的插值权重，[0,1]；静态时为 0（短路）
+uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 out float vShadowDepth;
 
-mat4 LoadBoneMatrix(int bone) {
-    int x0 = uPoseCol * uBoneCount * 4 + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2(x0 + 0, uPoseRow), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2(x0 + 1, uPoseRow), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2(x0 + 2, uPoseRow), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2(x0 + 3, uPoseRow), 0).a;
+mat4 LoadBoneMatrixAt(int pose_col, int bone) {
+    int x0 = pose_col + bone * 4;
+    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
+    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
+    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
+    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
+    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
+    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
+    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
+    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
+    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
+    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
+    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
+    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
+    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
+    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
+    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
+    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
     return mat4(m00,m10,m20,m30, m01,m11,m21,m31, m02,m12,m22,m32, m03,m13,m23,m33);
+}
+
+// 与主 pass **完全一致**的逐骨插值（否则影子与身体错位）。ratio<=0 短路取 pose_a。
+mat4 LoadBoneMatrix(int bone) {
+    mat4 ma = LoadBoneMatrixAt(uPoseCol, bone);
+    if (uRatio <= 0.0) {
+        return ma;
+    }
+    mat4 mb = LoadBoneMatrixAt(uPoseColB, bone);
+    return mat4(mix(ma[0], mb[0], uRatio),
+                mix(ma[1], mb[1], uRatio),
+                mix(ma[2], mb[2], uRatio),
+                mix(ma[3], mb[3], uRatio));
 }
 
 void main() {

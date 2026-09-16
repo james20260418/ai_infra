@@ -374,6 +374,8 @@ void main() {
     // 参数：
     //   skinned_prog: 蒙皮 program（调用方经 ShaderManager 建 {kSkinnedVs, kMeshFs3dPBR} 传入）。
     //   gh: SkeletonManager::GpuHandles（pose_atlas_tex/bone_count/pose_per_row）。
+    //   pose_count: 该骨架已烘焙的 pose 总数（SkeletonManager::pose_count()）—— 用于校验
+    //               instances 的 pose_a/pose_b 不越界（GpuHandles 是纯 GL 句柄、不含此值）。
     //   cmd: SkinnedMeshCommand（mesh_id + material + instances[center/up/front/scale/pose_a]）。
     static void DrawSkinnedMesh(
         const SkinnedMeshCommand& cmd,
@@ -383,7 +385,8 @@ void main() {
         ShaderManager& shader_mgr,
         const float mvp[16],
         unsigned int skinned_prog,
-        const SkeletonManager::GpuHandles& gh);
+        const SkeletonManager::GpuHandles& gh,
+        int pose_count);
 
     // ---- DrawSkinnedMeshShadow ----
     // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
@@ -395,6 +398,7 @@ void main() {
         MeshManager& mesh_mgr,
         ShaderManager& shader_mgr,
         const SkeletonManager::GpuHandles& gh,
+        int pose_count,
         const float shadow_vp[16],
         const float depth_vp[16],
         unsigned int shadow_prog);
