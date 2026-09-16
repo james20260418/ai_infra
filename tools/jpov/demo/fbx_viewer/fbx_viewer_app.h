@@ -153,13 +153,15 @@ enum class BlueDrive : int {
 //   分支，把刚展开的那个**立即关掉** → 表现为“下拉一闪即收”。
 //   → UI 侧的真缺陷（应改成 per-box 状态）**下个 PR 修**；本 PR 先合并成一个 combo 绕开。
 //
-// 语义：前两项只看一个骨架（红或蓝），后两项两者并列；蓝骨驱动只在“看得到蓝”时有意义。
+// 语义：kFbxOnly 只看红、kGlbRetarget/kGlbNoRetarget 只看蓝、其余三项两者并列；
+//   蓝骨驱动只在“看得到蓝”时有意义（kBothSkinned 另走带皮网格，不看蓝骨人）。
 enum class ViewMode : int {
     kFbxOnly        = 0,  // 只看源（红）：fbx rest 骨架 + fbx 自己的动画
     kGlbRetarget    = 1,  // 只看目标（蓝）：glb 骨架 + BodyRetarget 驱动（正式重定向）
     kBothRetarget   = 2,  // 两者并列：蓝用 BodyRetarget（推荐对比）
     kGlbNoRetarget  = 3,  // 只看目标（蓝）：数值直搬（消融对照，预期绕错轴）
     kBothNoRetarget = 4,  // 两者并列：蓝用无重定向直搬（消融对照）
+    kBothSkinned    = 5,  // 并列：红骨人 + **蓝带皮网格**（glb 真皮，BodyRetarget 驱动）
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
@@ -169,6 +171,7 @@ inline const char* const kViewModeItems[] = {
     "两者并列（蓝 = BodyRetarget）",
     "只看目标（蓝，无重定向对照）",
     "两者并列（蓝 = 无重定向对照）",
+    "并列（红骨人 + 蓝带皮动画）",
 };
 inline constexpr int kViewModeItemCount =
     static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
@@ -184,15 +187,20 @@ inline const std::vector<const char*>& ViewModeItems() {
 // 本模式是否显示源（红）骨架。
 inline bool ViewShowsFbx(ViewMode m) {
     return m == ViewMode::kFbxOnly || m == ViewMode::kBothRetarget ||
-           m == ViewMode::kBothNoRetarget;
+           m == ViewMode::kBothNoRetarget || m == ViewMode::kBothSkinned;
 }
-// 本模式是否显示目标（蓝）骨架。
+// 本模式是否显示目标（蓝）。
 inline bool ViewShowsGlb(ViewMode m) {
     return m != ViewMode::kFbxOnly;
 }
 // 本模式是否两者并列（决定摆放间距 / 相机适配）。
 inline bool ViewIsSideBySide(ViewMode m) {
-    return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget;
+    return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget ||
+           m == ViewMode::kBothSkinned;
+}
+// 本模式的蓝侧是否画**带皮网格**（而非火柴人）。只有 kBothSkinned 用真皮。
+inline bool ViewGlbIsSkinned(ViewMode m) {
+    return m == ViewMode::kBothSkinned;
 }
 // 蓝骨驱动方式（仅 ViewShowsGlb 时有意义）。
 inline BlueDrive ViewBlueDrive(ViewMode m) {
@@ -224,6 +232,21 @@ public:
     bool has_glb_ = false;
     uint32_t glb_bone_mesh_ = 0;
     int glb_mapped_bones_ = 0;      // 源/目标骨名命中数（面板显示；未命中骨保持 rest）
+
+    // ── 蓝侧「带皮网格」（kBothSkinned 模式；glb 的真皮 mesh + 材质 + SkeletonManager）──
+    // 装配时把 FBX 动画**逐帧重定向**成 glb 骨架的 pose 序列，一次性注册进 SkeletonManager；
+    // 播放时用 {pose_a=k, pose_b=k+1, ratio=t} 让 VS 做双帧插值（见 skinning_shader.h）。
+    // 只有 kBothSkinned 会用到；其它模式不装配/不绘制。
+    uint32_t glb_skin_mesh_id_ = 0;            // glb 真皮网格（带 joints/weights）GPU 句柄
+    uint32_t glb_skin_skel_id_ = 0;            // 上述 pose 序列的 SkeletonManager 句柄
+    jpov::PBRMaterial glb_skin_mat_;           // glb 真皮材质（baseColor 贴图等）
+    std::vector<jpov::SkeletonPose> glb_skin_poses_;  // 逐帧重定向后的 pose（下标 = 帧号）
+    bool glb_skin_ready_ = false;
+    Bounds glb_skin_bounds_{};                 // 真皮网格的 rest 包围盒（摄像机适配用）
+    int glb_skin_frame_count_ = 0;             // 源动画帧数（不含末尾 identity 槽）
+    // 末尾 identity 槽在 pose 序列里的下标（= glb_skin_frame_count_）。rest 模式专用。
+    int glb_skin_rest_pose_index_ = 0;
+
     // ── 显示/驱动（**一个 combo** 选的模式，见 ViewMode 注释里为何合并）──
     ViewMode view_mode_ = ViewMode::kFbxOnly;  // 本帧看哪个骨架 + 蓝骨怎么驱动
 
@@ -295,7 +318,6 @@ public:
         cmds->sun     = light.sun;
         cmds->ambient = light.ambient;
         cmds->tone_mapping = true;
-
         // 地面板：中心下沉半厚 → 顶面 y=0，脚踩地。
         cmds->DrawObject3D(ground_mesh_, jpov_viewer::GroundMaterial(),
                            /*center*/ {0.0f, -kGroundHalfThickness, 0.0f},
@@ -329,7 +351,49 @@ public:
                                /*highlight*/ false,
                                /*picking_id*/ 0);
         }
-        if (show_glb) {
+        // 「带皮」模式要求真皮网格装配成功（有没有 joints/weights 看资产）。
+        //   装配失败时**回落画蓝火柴人**：不静默留白（留白 = 用户以为坏了又查不出原因），
+        //   装配期已 LOG(ERROR) 说明原因，这里只补一条「本帧回落」提示。
+        const bool want_skinned = show_glb && ViewGlbIsSkinned(view_mode_);
+        if (want_skinned && !glb_skin_ready_) {
+            LOG_FIRST_N(WARNING, 1)
+                << "kBothSkinned 但真皮网格未装配成功 —— 本帧回落画蓝火柴人";
+        }
+        if (want_skinned && glb_skin_ready_) {
+            // 蓝侧 = glb 真皮网格，走 GPU 蒙皮管线（DrawMeshWithSkeleton）。
+            // 双帧插值：{pose_a = floor(frame), pose_b = 下一帧, ratio = 帧内小数}，
+            //   由 shader 逐骨 lerp（见 skinning_shader.h）—— 动画因此是连续的。
+            {
+                const int n = glb_skin_frame_count_;
+                CHECK_GT(n, 0) << "glb_skin_ready_ 但 pose 序列为空";
+                // 源帧下标 → 目标 pose 下标（逐帧一一对应，越界回绕 = 循环动画）。
+                //   ⚠️ rest 模式必须走**独立的 identity 槽**（见注册处注释），
+                //   不能拿 frame_index_=-1 去回绕成第 n-1 帧（那会画成"最后一帧动作"）。
+                int fi = 0;
+                int fj = 0;
+                float ratio = 0.0f;
+                if (rest_pose_mode_) {
+                    fi = glb_skin_rest_pose_index_;
+                    fj = glb_skin_rest_pose_index_;  // 静止：pose_a == pose_b, ratio=0
+                } else {
+                    fi = ((frame_index_ % n) + n) % n;
+                    fj = (fi + 1) % n;
+                    ratio = static_cast<float>(inter_frame_ratio_);
+                }
+                jpov::SkinnedInstanceState inst;
+                inst.center = {blue_x, 0.0f, 0.0f};
+                inst.up     = {0.0f, 1.0f, 0.0f};
+                inst.front  = {0.0f, 0.0f, 1.0f};
+                inst.scale  = 1.0f;
+                inst.pose_a = fi;
+                inst.pose_b = fj;
+                inst.ratio  = ratio;
+                std::vector<jpov::SkinnedInstanceState> instances{inst};
+                cmds->DrawMeshWithSkeleton(glb_skin_mesh_id_, glb_skin_skel_id_,
+                                           glb_skin_mat_, std::move(instances));
+            }
+        } else if (show_glb) {
+            // 蓝火柴人：常规蓝骨模式，以及「要带皮但网格没装配成功」的回落。
             cmds->DrawObject3D(glb_bone_mesh_,
                                jpov::PBRMaterial::SolidColor(jpov::kColorBlue),
                                /*center*/ {blue_x, 0.0f, 0.0f},
@@ -399,9 +463,19 @@ private:
         if (rest_pose_mode_) {
             frame_pose_ = jpov::SkeletonPose::Identity(skeleton_.bone_count());
             frame_index_ = kRestFrameIndex;
+            inter_frame_ratio_ = 0.0;
             return;
         }
+        // 源（红）侧是 CPU 采样 + CPU 插值（火柴人每帧重建几何，没有 GPU 插值的余地）。
         frame_index_ = jpov::SampleClipPose(clip_, anim_time_seconds_, &frame_pose_);
+        // 帧内小数：**给蓝带皮侧的 GPU 双帧插值用**（见 OneIteration 的 kBothSkinned 分支）。
+        //   同一时刻的红（CPU 插值）与蓝（GPU 插值）因此落在同一相位上 —— 两边可比。
+        //   这里刻意再调 LocateClipFrame 而非自己算：帧网格定位只应有一份真相。
+        int fi = 0;
+        float frac = 0.0f;
+        jpov::LocateClipFrame(clip_, anim_time_seconds_, &fi, &frac);
+        CHECK_EQ(fi, frame_index_) << "UpdateFramePose: 两个取帧入口的帧号不一致";
+        inter_frame_ratio_ = static_cast<double>(frac);
     }
 
     // 推进动画时间（"主频"步进 = 1/kViewerFps 秒）。
@@ -593,6 +667,9 @@ private:
     // 之后**每帧复用**（不重复做骨名哈希与人体随动系估计）。
     jpov::BodyRetargetPlan retarget_plan_;
     int frame_index_ = kRestFrameIndex;  // 本帧采样到的源帧下标
+    // 帧内小数 [0,1)：本帧时刻落在 frame_index_ 与下一帧之间的位置。蓝带皮侧用它做
+    //   GPU 双帧插值的 ratio（pose_a = frame_index_, pose_b = frame_index_+1）。
+    double inter_frame_ratio_ = 0.0;
     float camera_target_height_ = 0.0f;  // 相机注视高度（按骨架包围盒算，见 FitInitialView）
     // rest 火柴人 mesh 的包围盒（装配时算）：初始机位适配 + 「两者并列」摆位用。
     Bounds fbx_bounds_{};
@@ -618,12 +695,16 @@ private:
         float bmax[3] = {fbx_bounds_.max.x() + red_x, fbx_bounds_.max.y(),
                          fbx_bounds_.max.z()};
         if (has_glb_) {
-            bmin[0] = std::min(bmin[0], glb_bounds_.min.x() + blue_x);
-            bmin[1] = std::min(bmin[1], glb_bounds_.min.y());
-            bmin[2] = std::min(bmin[2], glb_bounds_.min.z());
-            bmax[0] = std::max(bmax[0], glb_bounds_.max.x() + blue_x);
-            bmax[1] = std::max(bmax[1], glb_bounds_.max.y());
-            bmax[2] = std::max(bmax[2], glb_bounds_.max.z());
+            // 蓝侧可能画火柴人（骨杆）或真皮网格（kBothSkinned）—— 两者包围盒不同，
+            //   取 `glb_bounds_`（火柴人）与 `glb_skin_bounds_`（真皮，若已装配）的并集，
+            //   这样切模式时相机**不跳**，且两种蓝侧形态都不裁切。
+            const Bounds& gb = glb_skin_ready_ ? glb_skin_bounds_ : glb_bounds_;
+            bmin[0] = std::min(bmin[0], gb.min.x() + blue_x);
+            bmin[1] = std::min(bmin[1], gb.min.y());
+            bmin[2] = std::min(bmin[2], gb.min.z());
+            bmax[0] = std::max(bmax[0], gb.max.x() + blue_x);
+            bmax[1] = std::max(bmax[1], gb.max.y());
+            bmax[2] = std::max(bmax[2], gb.max.z());
         }
         view_ = jpov_viewer::DefaultView();
         view_.R = jpov_viewer::ViewConfig::FitRadius(bmin, bmax, /*fov_deg*/ 60.0);
@@ -718,6 +799,69 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
               << retarget_plan_.q_body_angle_deg << "°"
               << "  源人体系 yaw=" << retarget_plan_.source_frame.yaw_deg << "°"
               << "  目标人体系 yaw=" << retarget_plan_.target_frame.yaw_deg << "°";
+
+    // ── 蓝侧带皮网格：真皮 mesh + 材质 + 逐帧重定向后的 pose 序列（SkeletonManager）──
+    // 一次装配全部搞定，播放期零 CPU 蒙皮（GPU 端查 atlas 双帧插值）。
+    {
+        // 1) 真皮网格 + 材质（走 JPOV::LoadGltf，直接拿到 mesh_id + PBRMaterial）。
+        jpov::GltfObject skin_obj = LoadGltf(path);
+        if (!skin_obj.empty()) {
+            CHECK(!skin_obj.primitives.empty());
+            glb_skin_mesh_id_ = skin_obj.primitives[0].mesh_id;
+            glb_skin_mat_ = skin_obj.primitives[0].material;
+            CHECK_NE(glb_skin_mesh_id_, 0u)
+                << "LoadGlbSkeleton: glb 真皮网格句柄为 0（加载失败）";
+            // ⚠️ LoadGltf 的 mesh 必须带 joints/weights，否则画出来是静止的 rest 网格
+            //   （蒙皮 VS 读 loc3/4；无骨骼通道时那两路是常量 0 → 顶点全塌到原点）。
+            //   这里用 CPU 侧再读一遍原始网格：既做骨骼通道断言，也顺便量真皮包围盒
+            //   （GPU 侧不保留 CPU 几何，见 mesh_manager.h）。
+            {
+                jpov::MeshData probe;
+                jpov::GltfMaterialInfo probe_mat;
+                CHECK(jpov::LoadGltf(path, &probe, &probe_mat))
+                    << "LoadGlbSkeleton: 无法读取原始网格做骨骼通道断言: " << path;
+                CHECK(jpov::MeshHasFlag(probe.flags, jpov::MeshVertexFlags::kJoints))
+                    << "LoadGlbSkeleton: " << path
+                    << " 的第一个 primitive 不带骨骼蒙皮通道（JOINTS/WEIGHTS）——"
+                       "无法走 GPU 蒙皮管线";
+                glb_skin_bounds_ = ComputeMeshBounds(probe);
+            }
+
+            // 2) 逐帧把 FBX 动画重定向到 glb 骨架，凑成 pose 序列。
+            //    ⚠️ 这里**用帧精确**采样（LocateClipFrame 只定位、不插值），因为插值由
+            //    蒙皮 VS 承担（见 animation_sampler.h 的 LocateClipFrame 注释）—— 若在
+            //    CPU 先插一遍再上传，GPU 会再插一次 = 双重插值，运动被压平。
+            //    ⚠️ 直接遍历 clip_.frames（帧数组本身）,**不要**用 k/fps 反推时刻再采样 ——
+            //    k/fps 有浮点误差（实测 123/30 = 122.99999999999999 → floor 得 122），
+            //    会造成「我以为是第 k 帧，采样器却给了第 k-1 帧」的静默错位（血泪）。
+            //    这里逐帧裸拷 joint_rotation（帧精确），重定向后直接入 atlas。
+            const int nframes = static_cast<int>(clip_.frames.size());
+            CHECK_GT(nframes, 0) << "LoadGlbSkeleton: 源动画没有帧";
+            glb_skin_poses_.clear();
+            glb_skin_poses_.reserve(static_cast<size_t>(nframes) + 1);
+            for (int k = 0; k < nframes; ++k) {
+                const jpov::SkeletonPose& src_pose = clip_.frames[static_cast<size_t>(k)];
+                jpov::SkeletonPose target(glb_skeleton_.bone_count());
+                jpov::BodyRetargetPose(retarget_plan_, src_pose, &target);
+                glb_skin_poses_.push_back(std::move(target));
+            }
+            // 末尾追加一槽 **identity pose**（全骨恒等 = 骨架自己的 rest / T-pose）。
+            //   ⚠️ 必须单独占一槽：`glb_skin_poses_[0]` 是源动画**第 0 帧**（人体已摆姿势），
+            //   不是 rest。rest 模式若直接指到它，蓝带皮会停在"最后一帧/第一帧动作"上，
+            //   而蓝骨人（走 glb_pose_=identity）却是标准 T-pose —— 两边对不上（血泪）。
+            glb_skin_rest_pose_index_ = nframes;
+            glb_skin_poses_.push_back(
+                jpov::SkeletonPose::Identity(glb_skeleton_.bone_count()));
+            glb_skin_skel_id_ = RegisterSkeleton(glb_skeleton_, glb_skin_poses_);
+            glb_skin_frame_count_ = nframes;
+            glb_skin_ready_ = true;
+            LOG(INFO) << "蓝侧带皮网格装配完成: mesh_id=" << glb_skin_mesh_id_
+                      << " skeleton_id=" << glb_skin_skel_id_
+                      << " 重定向帧数=" << nframes;
+        } else {
+            LOG(ERROR) << "LoadGlbSkeleton: 读真皮网格失败（火柴人对照仍可用）: " << path;
+        }
+    }
 
     // 传了 glb 就是想对比：默认「两者并列」，并把间距按两骨人宽度算好（对称于 x=0）。
     has_glb_ = true;

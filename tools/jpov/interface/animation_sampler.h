@@ -131,6 +131,46 @@ inline int SampleClipPose(const FBXClip& clip, double time_seconds,
     return static_cast<int>(k);
 }
 
+// 取 t 秒处落在哪一帧、以及帧内小数位置 —— **不做插值**，只做帧网格定位。
+//
+// 用途：走 **GPU 双帧插值**（SkinnedInstanceState 的 pose_a/pose_b/ratio）时，CPU 侧不能
+//   先把姿态插好再上传（那样 atlas 里存的就是"已插值帧"，GPU 再插一次 = 双重插值，
+//   运动会被压平/过冲）。正确分工：CPU 只给出「哪两帧 + 权重」，插值交给蒙皮 VS。
+//
+//   out_frame_index : 起始帧下标 k = floor(t·fps)（已按循环归一 + 防上溢）。
+//   out_ratio       : 帧内小数 [0,1)，t 恰落帧网格时为 0。
+//   返回            : 帧总数（供调用方回绕 (k+1)）。
+//
+// Pre-condition: clip 非空且 fps > 0；两个输出指针非空。
+inline int LocateClipFrame(const FBXClip& clip, double time_seconds,
+                           int* out_frame_index /*output*/,
+                           float* out_ratio /*output*/) {
+    CHECK(out_frame_index != nullptr && out_ratio != nullptr)
+        << "LocateClipFrame: 输出指针不能为空";
+    const double fps = clip.frames_per_second;
+    const double duration = ClipLoopDurationSeconds(clip);  // 含非空/fps>0 的 CHECK
+    const size_t frame_count = clip.frames.size();
+
+    double t = std::fmod(time_seconds, duration);
+    if (t < 0.0) {
+        t += duration;
+    }
+    const double f = t * fps;
+    size_t k = static_cast<size_t>(std::floor(f));
+    double frac = f - static_cast<double>(k);
+    if (k >= frame_count) {
+        // 仅当 t 因浮点舍入落到 duration 上界时发生（正常归一后 t < duration，
+        // 且 duration*fps == frame_count 时 f 仍 < frame_count）。
+        k = frame_count - 1;
+        // ratio 必须跟着夹到 0：否则 f 略超上界时 frac 会 **> 1**，GPU 侧变成
+        //   「外推」而非插值（pose_a/pose_b 权重和 >1，姿态被放大）—— 静默几何错误。
+        frac = 0.0;
+    }
+    *out_frame_index = static_cast<int>(k);
+    *out_ratio = static_cast<float>(frac);
+    return static_cast<int>(frame_count);
+}
+
 }  // namespace jpov
 
 #endif  // JPOV_INTERFACE_ANIMATION_SAMPLER_H_

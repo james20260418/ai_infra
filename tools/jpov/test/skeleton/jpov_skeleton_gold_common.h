@@ -44,6 +44,11 @@ public:
     std::vector<jpov::SkeletonPose> poses_;
     // 多帧一致性测试用：本帧蒙皮人用 poses_ 的哪一帧（默认 0 = 与 gold 完全一致）。
     int pose_sel_ = 0;
+    // 双 pose 插值测试用：inst 送 {pose_a_sel_, pose_b_sel_, ratio_sel_}。
+    //   静态/单帧模式只用 pose_sel_（pose_a == pose_b），插值测试改这三个字段。
+    int pose_a_sel_ = 0;
+    int pose_b_sel_ = 0;
+    float ratio_sel_ = 0.0f;
     // 多帧一致性测试用：左人走哪条渲染路径（默认 kSkinned = 与 gold 语义一致）。
     enum class DrawWhich { kSkinned, kDirect, kCpuSkinned };
     DrawWhich draw_which_ = DrawWhich::kSkinned;
@@ -85,15 +90,24 @@ public:
         // 左：按 draw_which_ 选「真蒙皮」或「CPU 真值蒙皮」（两者必须同形）—— 两条路径
         //   都画在同一处（center/up/front/scale 完全一致），故可逐像素比对。
         //   kDirect 时左人也走右人的直画路径（保持旧 gold 语义不变）。
-        //   注意 pose_a == pose_b == pose_sel_：单帧静态采样，ratio 无关。
+        //   静态模式（单帧采样）：pose_a == pose_b == pose_sel_，ratio 无关；
+        //   插值模式：送 (pose_a_sel_, pose_b_sel_, ratio_sel_) 三个字段。
         const bool left_skinned =
             (draw_which_ == DrawWhich::kSkinned || draw_which_ == DrawWhich::kDirect);
         if (left_skinned) {
             if (mesh_id_ != 0 && skel_id_ != 0) {
                 jpov::SkinnedInstanceState inst;
                 inst.center = {0,0,0}; inst.up = {0,1,0}; inst.front = {0,0,1};
-                inst.scale = 4.0f; inst.pose_a = pose_sel_; inst.pose_b = pose_sel_;
-                inst.ratio = 0.0f;
+                inst.scale = 4.0f;
+                if (ratio_sel_ > 0.0f) {
+                    inst.pose_a = pose_a_sel_;
+                    inst.pose_b = pose_b_sel_;
+                    inst.ratio  = ratio_sel_;
+                } else {
+                    inst.pose_a = pose_sel_;
+                    inst.pose_b = pose_sel_;
+                    inst.ratio  = 0.0f;
+                }
                 std::vector<jpov::SkinnedInstanceState> instances{inst};
                 cmds->DrawMeshWithSkeleton(mesh_id_, skel_id_, mat_, std::move(instances));
             }
@@ -147,8 +161,13 @@ inline std::vector<jpov::SkeletonPose> MakeMultiPoses(int bone_count) {
 //   jw(j)    = (根 ? I : jw(parent)) · local(j)
 //   skinM(j) = jw(j) · inverseBind(j)      ← 方案甲折入
 //   v'       = Σ_i w_i · skinM(j_i) · v    （4-bone）
+// 双 pose 版本与 skinning_shader.h 的 LoadBoneMatrix **完全同公式** —— 先在
+//   **矩阵空间**对两套最终肤矩阵逐骨 lerp（不是对关节旋转 slerp），再蒙皮。
+//   用来给「GPU 双帧插值」做逐像素真值比对（ratio=0/1 时退化为单 pose）。
 inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
-                                           const jpov::SkeletonPose& pose,
+                                           const jpov::SkeletonPose& pose_a,
+                                           const jpov::SkeletonPose& pose_b,
+                                           float ratio,
                                            const jpov::MeshData& rest) {
     using geom::math::Mat4;
     type.Validate();
@@ -163,22 +182,36 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
         }
     }
 
-    std::vector<Mat4> jw_all(bone);
-    std::vector<Mat4> skin_m(bone);
-    for (int j = 0; j < bone; ++j) {
-        const geom::Quaternion<float> bind =
-            type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
-                                       : type.bind_rotation[j];
-        const geom::Quaternion<float> pr =
-            pose.joint_rotation.size() > static_cast<size_t>(j)
-                ? pose.joint_rotation[j]
-                : geom::Quaternion<float>::Identity();
-        const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
-        jw_all[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
+    // 单 pose 的最终肤矩阵：local(j) = T(rest)·R(bind)·R(pose_rot)，沿树复合 × inverseBind。
+    auto skin_matrices = [&](const jpov::SkeletonPose& pose) {
+        std::vector<Mat4> jw(bone), sm(bone);
+        for (int j = 0; j < bone; ++j) {
+            const geom::Quaternion<float> bind =
+                type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                           : type.bind_rotation[j];
+            const geom::Quaternion<float> pr =
+                pose.joint_rotation.size() > static_cast<size_t>(j)
+                    ? pose.joint_rotation[j]
+                    : geom::Quaternion<float>::Identity();
+            const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
+            jw[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
                         ? local
                         : geom::math::Mat4Mul(
-                              jw_all[static_cast<size_t>(type.joints[j].parent)], local);
-        skin_m[j] = geom::math::Mat4Mul(jw_all[j], inv[j]);
+                              jw[static_cast<size_t>(type.joints[j].parent)], local);
+            sm[j] = geom::math::Mat4Mul(jw[j], inv[j]);
+        }
+        return sm;
+    };
+
+    std::vector<Mat4> skin_m = skin_matrices(pose_a);
+    if (ratio > 0.0f) {
+        const std::vector<Mat4> mb = skin_matrices(pose_b);
+        for (int j = 0; j < bone; ++j) {
+            for (int k = 0; k < 16; ++k) {
+                // 逐元素 lerp，与 shader 的 mix(mat4 各列) 完全等价（GLSL 矩阵逐分量混）。
+                skin_m[j].m[k] = skin_m[j].m[k] + ratio * (mb[j].m[k] - skin_m[j].m[k]);
+            }
+        }
     }
 
     jpov::MeshData out = rest;
@@ -225,6 +258,13 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
         }
     }
     return out;
+}
+
+// 单 pose 便捷入口（pose_a == pose_b、ratio=0 ⇒ 与 shader 的 uRatio<=0 短路等价）。
+inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
+                                           const jpov::SkeletonPose& pose,
+                                           const jpov::MeshData& rest) {
+    return SkinMeshOnCpuForTest(type, pose, pose, 0.0f, rest);
 }
 
 // 搭建整个场景（须 app 已 Init()）：地面 tiles + 蒙皮人(A/B 共用 mixamo_male mesh/材质/skeleton)。
