@@ -161,6 +161,9 @@ inline void BuildScene(PickHighlightSunnyApp* app,
         return o;
     };
 
+    // 注：2026-09-16 起 loader 不再做坐标旋转（顶点原样保持资产坐标系），故本文件的
+    //   up/front 已按「A_new = A_old · M」同步换算（M = 旧 loader 的 (x,-z,y) 映射），
+    //   使渲染结果与改动前**逐字节一致**。换资产/换角度时直接按肉眼效果调 up/front 即可。
     // 地面：5×5 = 25 块 6x6 小 quad 平铺。
     for (int iz = 0; iz < 5; ++iz) {
         for (int ix = 0; ix < 5; ++ix) {
@@ -169,7 +172,7 @@ inline void BuildScene(PickHighlightSunnyApp* app,
             const bool brick = (gx < 0.0f);
             app->AddSlot(load(brick ? "ground/ground_brick.gltf"
                                     : "ground/ground_dirt.gltf"),
-                         {gx, -0.5f, gz}, {0, 1, 0}, {0, 0, 1});
+                         {gx, -0.5f, gz}, {0, 0, 1}, {0, -1, 0});
         }
     }
 
@@ -186,23 +189,23 @@ inline void BuildScene(PickHighlightSunnyApp* app,
             p.material.ao_tex = 0;
             p.material.emissive_tex = 0;
         }
-        app->AddSlot(std::move(wall), {0.0f, 0.0f, -2.75f}, {0, 0, 1}, {0, 1, 0},
+        app->AddSlot(std::move(wall), {0.0f, 0.0f, -2.75f}, {0, 1, 0}, {0, 0, -1},
                      /*picking_id=*/kIdWall, /*highlight=*/highlight_wall);
     }
 
     // 桌子 / 凳子（可高亮/可拾取）/ 盆栽
     jpov::GltfObject table = load("table.glb");
     brighten(&table, 3.0f);
-    app->AddSlot(std::move(table), {0.0f, 0.71f, 0.2f}, {-1, 0, 0}, {0, 1, 0});
+    app->AddSlot(std::move(table), {0.0f, 0.71f, 0.2f}, {0, 1, 0}, {1, 0, 0});
 
     jpov::GltfObject stool = load("stool.glb");
     brighten(&stool, 3.0f);
-    app->AddSlot(std::move(stool), {0.7f, 0.27f, 0.9f}, {0, 0, 1}, {0, 1, 0},
+    app->AddSlot(std::move(stool), {0.7f, 0.27f, 0.9f}, {0, 1, 0}, {0, 0, -1},
                  /*picking_id=*/kIdStool, /*highlight=*/highlight_stool);
 
     jpov::GltfObject plant = load("houseplant.glb");
     brighten(&plant, 4.0f);
-    app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {1, 0, 0}, {0, 1, 0});
+    app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {0, 1, 0}, {-1, 0, 0});
 }
 
 }  // namespace jpov_pick_highlight_sunny

@@ -115,6 +115,9 @@ inline void BuildScene(SceneApp* app) {
         return o;
     };
 
+    // 注：2026-09-16 起 loader 不再做坐标旋转（顶点原样保持资产坐标系），故本文件的
+    //   up/front 已按「A_new = A_old · M」同步换算（M = 旧 loader 的 (x,-z,y) 映射），
+    //   使渲染结果与改动前**逐字节一致**。换资产/换角度时直接按肉眼效果调 up/front 即可。
     // 地面：5×5 = 25 块 6x6 小 quad 平铺成整片地板，砖块尺寸正确。
     // 左半(x<0)砖地、右半(x≥0)土地。地面整体下移 0.5（配合点光源高度）。
     for (int iz = 0; iz < 5; ++iz) {
@@ -124,7 +127,7 @@ inline void BuildScene(SceneApp* app) {
             const bool brick = (gx < 0.0f);
             app->AddSlot(load(brick ? "ground/ground_brick.gltf"
                                     : "ground/ground_dirt.gltf"),
-                         {gx, -0.5f, gz}, {0,1,0}, {0,0,1});
+                         {gx, -0.5f, gz}, {0,0,1}, {0,-1,0});
         }
     }
 
@@ -142,23 +145,23 @@ inline void BuildScene(SceneApp* app) {
             p.material.ao_tex = 0;
             p.material.emissive_tex = 0;
         }
-        app->AddSlot(std::move(wall), {0.0f, 0.0f, -2.75f}, {0,0,1}, {0,1,0});
+        app->AddSlot(std::move(wall), {0.0f, 0.0f, -2.75f}, {0,1,0}, {0,0,-1});
     }
 
-    // 桌子: 中央, 图上上方为 +Y → up=(-1,0,0), front=(0,1,0)
+    // 桌子: 中央, up=(0,1,0)/front=(1,0,0)
     jpov::GltfObject table = load("table.glb");
     brighten(&table, 3.0f);
-    app->AddSlot(std::move(table), {0.0f, 0.71f, 0.2f}, {-1,0,0}, {0,1,0});
+    app->AddSlot(std::move(table), {0.0f, 0.71f, 0.2f}, {0,1,0}, {1,0,0});
 
-    // 凳子: 桌旁, 方向矢量绕 X 轴 -90°: up(0,1,0)→(0,0,1), front(0,0,1)→(0,1,0)
+    // 凳子: 桌旁, up=(0,1,0)/front=(0,0,-1)
     jpov::GltfObject stool = load("stool.glb");
     brighten(&stool, 3.0f);
-    app->AddSlot(std::move(stool), {0.7f, 0.27f, 0.9f}, {0,0,1}, {0,1,0});
+    app->AddSlot(std::move(stool), {0.7f, 0.27f, 0.9f}, {0,1,0}, {0,0,-1});
 
-    // 盆栽: 桌上, front=(0,1,0) 把 0.38 高立起
+    // 盆栽: 桌上, up=(0,1,0)/front=(-1,0,0) 把 0.38 高立起
     jpov::GltfObject plant = load("houseplant.glb");
     brighten(&plant, 4.0f);
-    app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {1,0,0}, {0,1,0});
+    app->AddSlot(std::move(plant), {0.3f, 1.84f, 0.3f}, {0,1,0}, {-1,0,0});
 }
 
 }  // namespace jpov_scene

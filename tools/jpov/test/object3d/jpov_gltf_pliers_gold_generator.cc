@@ -69,7 +69,7 @@ public:
 
         // 绘制整个 glTF 对象（内部展开为多个 DrawObject3D，无新命令体）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
-                             {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                             {0.0f, 0.0f, 1.0f}, {0.0f, -1.0f, 0.0f});
     }
 
 private:

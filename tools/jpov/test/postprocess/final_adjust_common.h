@@ -96,7 +96,7 @@ public:
 
         // 绘制整个 glTF 对象（pliers，内部展开为多个 DrawObject3D）
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
-                             {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                             {0.0f, 0.0f, 1.0f}, {0.0f, -1.0f, 0.0f});
     }
 
     // 设置 gltf 对象（App 生命周期内持有）。

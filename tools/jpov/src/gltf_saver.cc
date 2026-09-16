@@ -7,6 +7,12 @@
 //
 // ⚠️ 对齐：chunk 的 length **不含** pad（pad 只为把下一 chunk 起点对齐到 4 字节），
 //   但 total_length 含全部 pad。reader（tinygltf）依赖此约定，否则读回崩。
+//
+// 坐标系（2026-09-16，Danis）：**本 saver 不做任何坐标变换** —— 写出去的就是进来时的
+//   坐标系（与 gltf_loader 原样透传对偶，往返恒等）。loader 与 saver 共用同一条铁律：
+//   「加载/保存路径不擅自改方向」，朝哪放由消费侧 up/front 决定。
+//   历史：loader 早期做过 f(X,Y,Z) = (X,−Z,Y)，本文件因此有一个互逆的逆映射；该映射
+//   与"骨架侧不映射"的不对称曾导致蒙皮坐标系不匹配，两侧已一并移除。
 
 #include "tools/jpov/src/gltf_saver.h"
 
@@ -91,22 +97,6 @@ bool ReadFileBytes(const std::string& path, std::vector<unsigned char>* out) {
     return static_cast<bool>(in);
 }
 
-// ==================== 坐标映射（与 loader 互逆） ====================
-//
-// ⚠️ loader 会把 glTF 顶点从 glTF 空间映射到 JPOV 局部空间：
-//     f(X, Y, Z) = (X, −Z, Y)        （gltf_loader.cc ParsePrimitive）
-//   本 saver 写的是 **JPOV 局部坐标**，所以必须在写入前施加 **逆映射**，否则
-//   "存→读"会再被映射一次（模型每次往返多转 90°）。
-//     逆： f⁻¹(a, b, c) = (a, c, −b)
-//   f 与 f⁻¹ 都是行列式 +1 的合法旋转（右手系不变）→ 法线用同一映射。
-//
-// ⚠️ **骨架数据不做映射**：loader 的 LoadGltfSkeleton 读 node.translation /
-//   node.rotation 是**原值**（不施加上述映射）→ 骨架（rest_offset / bind_rotation）
-//   必须**原样写入**。该"几何映射、骨架不映射"的不对称是 loader 的现有契约。
-inline Vec3f JpovToGltf(const Vec3f& v) {
-    return Vec3f(v.x(), v.z(), -v.y());
-}
-
 // ==================== JSON 组装 ====================
 
 // 把一个 primitive 的几何写入 BIN/JSON，返回 primitive 的 json 对象。
@@ -139,10 +129,9 @@ json WritePrimitive(const MeshData& mesh, BinBuilder* bin, json* accessors,
     std::vector<float> pos;
     pos.reserve(vcount * 3);
     for (const Vec3f& p : mesh.positions) {
-        const Vec3f g = JpovToGltf(p);
-        pos.push_back(g.x());
-        pos.push_back(g.y());
-        pos.push_back(g.z());
+        pos.push_back(p.x());
+        pos.push_back(p.y());
+        pos.push_back(p.z());
     }
     const std::pair<size_t, size_t> o_pos = AppendFloats(bin, pos);
     const int a_pos = add_accessor("VEC3", 5126, vcount, o_pos.first,
@@ -151,15 +140,14 @@ json WritePrimitive(const MeshData& mesh, BinBuilder* bin, json* accessors,
     json attributes;
     attributes["POSITION"] = a_pos;
 
-    // NORMAL (vec3 float) —— 有才写（与位置同映射）
+    // NORMAL (vec3 float) —— 有才写（与位置同坐标系，原样写出）
     if (!mesh.normals.empty()) {
         std::vector<float> nor;
         nor.reserve(vcount * 3);
         for (const Vec3f& n : mesh.normals) {
-            const Vec3f g = JpovToGltf(n);
-            nor.push_back(g.x());
-            nor.push_back(g.y());
-            nor.push_back(g.z());
+            nor.push_back(n.x());
+            nor.push_back(n.y());
+            nor.push_back(n.z());
         }
         const std::pair<size_t, size_t> o = AppendFloats(bin, nor);
         attributes["NORMAL"] =
