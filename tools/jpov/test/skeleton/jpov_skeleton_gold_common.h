@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include <cmath>
+
 #include "glog/logging.h"
 
 #include "tools/jpov/include/jpov/jpov.h"
@@ -35,6 +37,20 @@ public:
     uint32_t mesh_id_ = 0;   // 蓝人 mesh(mixamo_male) 已注册
     uint32_t skel_id_ = 0;   // 蓝人骨架 SkeletonManager id
     jpov::PBRMaterial mat_;  // 蓝人材质(baseColor 贴图等)
+    // 多帧 pose 集（下标 = 该骨架 atlas 里的 pose 序号）。第 0 个 = identity（gold 用的
+    //   静态退化门基准，pos 与改动前逐字节一致）；其余帧给若干骨明显旋转，供多帧一致性
+    //   测试（jpov_skinned_multipose_test）覆盖 atlas 的**多行**取址。
+    //   注意：gold(generator/test) 只用 poses_[0]，故 gold 图不受此处新增帧影响。
+    std::vector<jpov::SkeletonPose> poses_;
+    // 多帧一致性测试用：本帧蒙皮人用 poses_ 的哪一帧（默认 0 = 与 gold 完全一致）。
+    int pose_sel_ = 0;
+    // 多帧一致性测试用：人像画在哪条路径上（见 OneIteration）。
+    enum class DrawWhich { kSkinned, kDirect, kCpuSkinned };
+    DrawWhich draw_which_ = DrawWhich::kSkinned;
+    // CPU 真值通道：glTF 原始网格（带 joints/weights）+ 同源骨架 + 其 mesh 句柄。
+    uint32_t cpu_mesh_id_ = 0;
+    jpov::MeshData rest_mesh_;
+    jpov::SkeletonType raw_skel_;
 
     void AddSlot(jpov::GltfObject obj, jpov::Vec3f c, jpov::Vec3f u, jpov::Vec3f f) {
         slots_.push_back({std::move(obj), c, u, f});
@@ -66,16 +82,150 @@ public:
             cmds->DrawObject3D(mesh_id_, mat_,
                                /*center*/ {2.0f,0,0}, /*up*/ {0,0,-1}, /*front*/ {0,1,0},
                                /*scale*/ 4.0f, /*highlight*/ false, /*picking_id*/ 0);
-        // 左：真蒙皮（bind pose, pose_a==pose_b=0）
-        if (mesh_id_ != 0 && skel_id_ != 0) {
-            jpov::SkinnedInstanceState inst;
-            inst.center = {0,0,0}; inst.up = {0,0,-1}; inst.front = {0,1,0};
-            inst.scale = 4.0f; inst.pose_a = 0; inst.pose_b = 0; inst.ratio = 0.0f;
-            std::vector<jpov::SkinnedInstanceState> instances{inst};
-            cmds->DrawMeshWithSkeleton(mesh_id_, skel_id_, mat_, std::move(instances));
+        // 左：本帧按 draw_which_ 选"真蒙皮"或"CPU 真值蒙皮"（两者必须同形）——
+        //   两条路径都画在这一处（center/up/front/scale 完全一致），故可逐像素比对。
+        //   kDirect 时左人也走右人的直画路径（保持旧 gold 语义不变）。
+        const bool left_skinned =
+            (draw_which_ == DrawWhich::kSkinned || draw_which_ == DrawWhich::kDirect);
+        if (left_skinned) {
+            if (mesh_id_ != 0 && skel_id_ != 0) {
+                jpov::SkinnedInstanceState inst;
+                inst.center = {0,0,0}; inst.up = {0,0,-1}; inst.front = {0,1,0};
+                inst.scale = 4.0f; inst.pose_a = pose_sel_; inst.pose_b = pose_sel_;
+                inst.ratio = 0.0f;
+                std::vector<jpov::SkinnedInstanceState> instances{inst};
+                cmds->DrawMeshWithSkeleton(mesh_id_, skel_id_, mat_, std::move(instances));
+            }
+        } else {  // kCpuSkinned
+            if (cpu_mesh_id_ != 0)
+                cmds->DrawObject3D(cpu_mesh_id_, mat_,
+                                   /*center*/ {0,0,0}, /*up*/ {0,0,-1}, /*front*/ {0,1,0},
+                                   /*scale*/ 4.0f, /*highlight*/ false, /*picking_id*/ 0);
         }
     }
 };
+
+// 构造多帧 pose 集（下标即 pose_a/pose_b）。第 0 帧 = identity（与 gold 的静态退化门一致：
+//   bind 姿态下肤矩阵 = I，gold 图逐字节不变），其余帧给若干骨**明显**旋转。
+// 帧数刻意 **> 一行能装的 pose 数**（23 骨：pose_per_row = 2048/92 = 22）：这样才有 pose
+//   落在 atlas 第二行及以后。atlas 布局的歧义只在跨行情形下暴露 —— 帧数 <= pose_per_row
+//   时两种理解等价、测试抓不到。
+inline std::vector<jpov::SkeletonPose> MakeMultiPoses(int bone_count) {
+    CHECK_GT(bone_count, 4) << "MakeMultiPoses: 骨数太少，无法覆盖多骨旋转";
+    constexpr int kNumTurns = 24;
+    std::vector<jpov::SkeletonPose> poses;
+    poses.reserve(kNumTurns + 1);
+    poses.push_back(jpov::SkeletonPose::Identity(bone_count));  // 0: T-pose（基准）
+    for (int k = 1; k <= kNumTurns; ++k) {
+        jpov::SkeletonPose p = jpov::SkeletonPose::Identity(bone_count);
+        const float a[3] = {37.0f * k, -23.0f * k, 61.0f * k};
+        for (int b = 1; b <= 3 && b < bone_count; ++b) {
+            float deg = std::fmod(a[b - 1], 360.0f);
+            if (deg > 180.0f) deg -= 360.0f;
+            if (deg <= -180.0f) deg += 360.0f;
+            const float half = 0.5f * deg * 3.14159265358979323846f / 180.0f;
+            p.joint_rotation[b] = geom::Quaternion<float>(0.0f, 0.0f,
+                                                          std::sin(half),
+                                                          std::cos(half));
+        }
+        poses.push_back(std::move(p));
+    }
+    return poses;
+}
+
+
+// CPU 端"真值"蒙皮：按与 SkeletonManager/shader 完全相同的公式，把 rest 顶点算成该 pose
+// 下的骨架空间坐标，产出新 MeshData（只改 positions/normals，拓扑/UV/joints 原样保留）。
+//
+// ⚠️ 坐标系（关键）：glTF loader 把网格顶点写成了 JPOV 局部 (x,-z,y)，而 LoadGltfSkeleton
+//   保持骨架在 glTF Y-up —— 两侧差一个坐标映射。故必须把顶点先映射回 glTF Y-up 去与骨架
+//   相乘，再把结果映射回 JPOV 局部。**这步是正确性必需**：去掉就会复现 GPU 当前的错误姿态
+//   （实测 CPU 去掉映射后与 GPU 渲染逐像素同形 ⇒ 证实 GPU 侧存在同一处帧不匹配 bug）。
+//   映射：JPOV→glTF (x, z, -y)；glTF→JPOV (x, -z, y)。
+//
+// 公式（与 skeleton_manager.cc 烘焙 + skinning_shader.h 蒙皮一致）：
+//   local(j) = T(rest_offset[j]) · R(bind_rotation[j]) · R(pose.joint_rotation[j])
+//   jw(j)    = (根 ? I : jw(parent)) · local(j)
+//   skinM(j) = jw(j) · inverseBind(j)      ← 方案甲折入
+//   v'       = Σ_i w_i · skinM(j_i) · v    （4-bone）
+inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
+                                           const jpov::SkeletonPose& pose,
+                                           const jpov::MeshData& rest) {
+    using geom::math::Mat4;
+    type.Validate();
+    const int bone = type.bone_count();
+    CHECK_GT(bone, 0);
+
+    const std::vector<std::array<float, 16>> ibm = type.ComputeInverseBind();
+    std::vector<Mat4> inv(bone);
+    for (int j = 0; j < bone; ++j)
+        for (int k = 0; k < 16; ++k) inv[j].m[k] = ibm[static_cast<size_t>(j)][k];
+
+    std::vector<Mat4> jw_all(bone);
+    std::vector<Mat4> skin_m(bone);
+    for (int j = 0; j < bone; ++j) {
+        const geom::Quaternion<float> bind =
+            type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                       : type.bind_rotation[j];
+        const geom::Quaternion<float> pr =
+            pose.joint_rotation.size() > static_cast<size_t>(j)
+                ? pose.joint_rotation[j]
+                : geom::Quaternion<float>::Identity();
+        const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
+        jw_all[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
+                        ? local
+                        : geom::math::Mat4Mul(
+                              jw_all[static_cast<size_t>(type.joints[j].parent)], local);
+        skin_m[j] = geom::math::Mat4Mul(jw_all[j], inv[j]);
+    }
+
+    jpov::MeshData out = rest;
+    auto xf_pt = [](const Mat4& m, const jpov::Vec3f& v) {
+        return jpov::Vec3f(m.m[0] * v.x() + m.m[4] * v.y() + m.m[8] * v.z() + m.m[12],
+                           m.m[1] * v.x() + m.m[5] * v.y() + m.m[9] * v.z() + m.m[13],
+                           m.m[2] * v.x() + m.m[6] * v.y() + m.m[10] * v.z() + m.m[14]);
+    };
+    auto xf_dir = [](const Mat4& m, const jpov::Vec3f& v) {
+        return jpov::Vec3f(m.m[0] * v.x() + m.m[4] * v.y() + m.m[8] * v.z(),
+                           m.m[1] * v.x() + m.m[5] * v.y() + m.m[9] * v.z(),
+                           m.m[2] * v.x() + m.m[6] * v.y() + m.m[10] * v.z());
+    };
+    auto to_gltf = [](const jpov::Vec3f& v) {
+        return jpov::Vec3f(v.x(), v.z(), -v.y());
+    };
+    auto to_jpov = [](const jpov::Vec3f& v) {
+        return jpov::Vec3f(v.x(), -v.z(), v.y());
+    };
+    CHECK_EQ(rest.joint_indices.size(), rest.positions.size());
+    CHECK_EQ(rest.joint_weights.size(), rest.positions.size());
+    for (size_t i = 0; i < rest.positions.size(); ++i) {
+        const jpov::Vec3f vg = to_gltf(rest.positions[i]);
+        const jpov::Vec3f ng =
+            rest.normals.empty() ? jpov::Vec3f{0, 0, 0} : to_gltf(rest.normals[i]);
+        jpov::Vec3f sp{0, 0, 0}, sn{0, 0, 0};
+        float wsum = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            const float w = rest.joint_weights[i][static_cast<size_t>(k)];
+            if (w <= 0.0f) continue;
+            const int j = rest.joint_indices[i][static_cast<size_t>(k)];
+            CHECK(j >= 0 && j < bone) << "CPU 蒙皮: joint 下标越界 " << j;
+            sp = sp + xf_pt(skin_m[static_cast<size_t>(j)], vg) * w;
+            if (!rest.normals.empty())
+                sn = sn + xf_dir(skin_m[static_cast<size_t>(j)], ng) * w;
+            wsum += w;
+        }
+        if (wsum <= 0.0f) sp = vg;
+        out.positions[i] = to_jpov(sp);
+        if (!rest.normals.empty()) {
+            const jpov::Vec3f nj = to_jpov(sn);
+            const float n = std::sqrt(nj.x() * nj.x() + nj.y() * nj.y() + nj.z() * nj.z());
+            out.normals[i] = (n > 1e-8f)
+                                 ? jpov::Vec3f(nj.x() / n, nj.y() / n, nj.z() / n)
+                                 : rest.normals[i];
+        }
+    }
+    return out;
+}
 
 // 搭建整个场景（须 app 已 Init()）：地面 tiles + 蒙皮人(A/B 共用 mixamo_male mesh/材质/skeleton)。
 inline void BuildScene(SkeletonGoldApp* app, const std::string& scene_assets_dir,
@@ -104,9 +254,17 @@ inline void BuildScene(SkeletonGoldApp* app, const std::string& scene_assets_dir
     // 静态退化门：bind 姿态 = 全恒等 pose。
     // （2026-09-11 起 bind 朝向已存在骨架的 bind_rotation 里，不再需要硬编码 bind pose 表；
     //   identity pose 下 jointWorld == JW_bind，×自算 inverse_bind = I。）
-    std::vector<jpov::SkeletonPose> poses;
-    poses.push_back(jpov::SkeletonPose::Identity(skels[0].bone_count()));
-    app->skel_id_ = app->RegisterSkeleton(skels[0], poses);
+    app->poses_ = MakeMultiPoses(skels[0].bone_count());
+    app->skel_id_ = app->RegisterSkeleton(skels[0], app->poses_);
+    app->raw_skel_ = skels[0];
+    // CPU 真值通道：把 glTF 原始网格（带 joints/weights）也读一份，注册成独立 mesh；
+    //   多帧一致性测试会按选中的 pose 在 CPU 端蒙皮后 UpdateMesh。
+    {
+        jpov::GltfMaterialInfo mi;
+        CHECK(jpov::LoadGltf(male_glb, &app->rest_mesh_, &mi))
+            << "CPU 真值通道需要读到原始网格: " << male_glb;
+        app->cpu_mesh_id_ = app->RegisterMesh(app->rest_mesh_);
+    }
     app->mesh_id_ = male.primitives[0].mesh_id;
     app->mat_ = male.primitives[0].material;
 }

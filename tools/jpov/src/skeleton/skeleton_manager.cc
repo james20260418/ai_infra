@@ -85,7 +85,8 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
 
     bone_count_ = bone;
     pose_count_ = pose_count;
-    // 每 pose 占 bone*4 texel(每骨 4 texel)。pose_per_row = floor(dim/(bone*4))。
+    // 每 pose 占 bone*4 texel(每骨 4 texel)。pose_per_row = floor(dim/(bone*4))
+    //   —— 仅作**容量估算**（pose_capacity 的推导）；运行期取址不依赖它（见 ctor 注释）。
     const int pose_tex_w = bone * 4;
     pose_per_row_ = kPoseAtlasDim / pose_tex_w;
     CHECK_GT(pose_per_row_, 0)
@@ -119,7 +120,7 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
     // ---- 2. 逐 pose 烘焙成 atlas 行缓冲(一整张 kPoseAtlasDim² 行优先填) ----
     // GL_RGBA32F 纹理,每 texel 4 float。行缓冲宽度=kPoseAtlasDim texels;每行填满后当下一条。
     // 用"全尺寸一次性 glTexImage2D + 转行缓冲"会爆 memory(2048²*4*4B=64MB×1)；这里按
-    // 实际用行数组织 CPU 缓冲(=ceil(pose/pose_per_row) 条全宽 scanline)，再逐行上传——
+    // 实际用行数组织 CPU 缓冲(=ceil(总 texel/宽) 条全宽 scanline)，再逐行上传——
     // 但 GL 上行总高=2048 固定(纹理尺寸),多出区域填 0 不采样。
     // 简化实现: 分配一个全宽 float 缓冲存"一条 scanline"(2048 texel*4) 逐 Y 构造并上传。
 
@@ -130,23 +131,39 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kPoseAtlasDim, kPoseAtlasDim, 0,
                  GL_RGBA, GL_FLOAT, nullptr);
 
-    // 按 scanline(Y) 逐行写入：Y 行容纳 [poseIdx = Y*pose_per_row_, (Y+1)*pose_per_row_.
-    // (实际 pose 超多的用很多行; 每行 pose 靠 pose_per_row X 横铺)。行宽 X = kPoseAtlasDim。
-    // 注意一行里 pose p(全局序)的 phase 横坐标 = (p % pose_per_row_)*pose_tex_w。
-    const int full_rows = (pose_count_ + pose_per_row_ - 1) / pose_per_row_;
-    std::vector<float> line(kPoseAtlasDim * 4, 0.0f);  // 全宽 scanline(RGBA)
-    for (int y = 0; y < std::min(full_rows, kPoseAtlasDim); ++y) {
+    // 按**行优先**平铺写入：把每个 pose 的 bone*4 个 texel 沿 X 横铺，铺满一行
+    // (kPoseAtlasDim texel) 后换下一行。等价于：atlas 是一段连续 texel，pose 全局序 p 的
+    // 起始平坦下标 flat = p * pose_tex_w，其纹理坐标 = (flat % W, flat / W)。
+    //
+    // ⚠️ 关键：**一个 pose 的 texel 可能跨行**（23 骨、W=2048 时 flat=2024 的 pose 就跨
+    //   第 0/1 行）。因此不能「按 scanline 分组、每组内假设 pose 完整落在本行」地写
+    //   ——那样跨行 pose 的 x0 会算成负数/越界（本 PR 修掉的崩溃）。
+    //   正确做法：**逐 pose 逐 texel**，每个 texel 各自算它的 (x, y) 落到哪一行。
+    //
+    // 上传策略：仍逐 scanline（每行一次 glTexSubImage2D），用一个全宽行缓冲；
+    //   先按行组织好所有 texel 再逐行上传。行缓冲只需一行（2048*4 float = 32KB）。
+    const int full_flat = pose_count_ * pose_tex_w;
+    const int full_rows = (full_flat + kPoseAtlasDim - 1) / kPoseAtlasDim;
+    CHECK_LE(full_rows, kPoseAtlasDim)
+        << "SkeletonManager: 需要的行数 " << full_rows << " 超过 atlas 高度 "
+        << kPoseAtlasDim << "（pose_count=" << pose_count_ << " bone=" << bone << "）";
+
+    // 行缓冲：W*4 float（RGBA32F 一行）。逐行：清零 → 填本行覆盖的 texel → 上传。
+    std::vector<float> line(static_cast<size_t>(kPoseAtlasDim) * 4, 0.0f);
+    for (int y = 0; y < full_rows; ++y) {
         std::fill(line.begin(), line.end(), 0.0f);  // padding 清零
-        const int p0 = y * pose_per_row_;
-        const int p1 = std::min(pose_count_, p0 + pose_per_row_);
-        for (int p = p0; p < p1; ++p) {
+        // 本行覆盖的平坦区间 [y*W, (y+1)*W)。哪些 pose 与之相交：从
+        //   p_begin = (y*W) / pose_tex_w 起，直到其起点 >= (y+1)*W。
+        const int row_lo = y * kPoseAtlasDim;
+        const int row_hi = row_lo + kPoseAtlasDim;  // 半开区间
+        int p = row_lo / pose_tex_w;
+        for (; p < pose_count_ && p * pose_tex_w < row_hi; ++p) {
             const SkeletonPose& pose = poses[p];
             if (pose.bone_count != 0) {
                 CHECK_EQ(pose.bone_count, bone)
                     << "SkeletonManager: pose[" << p << "] bone_count "
                     << pose.bone_count << " 应 == 骨架 " << bone;
             }
-            const int x0 = (p % pose_per_row_) * pose_tex_w;  // 本 pose 横向起始 texel
             // 骨的世界矩阵：局部 = T(rest 平移) × R(bind 朝向) × R(pose 旋转)，沿树复合。
             //   jointWorld[j] = (j==根? I4 : jointWorld[parent]) · local(j)
             // bind_rotation 为空时按恒等处理（兼容"骨长即朝向"的极简骨架）。
@@ -171,8 +188,19 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
                 }
                 // final = jointWorld[j] × inverse_bind[j] (方案甲折入)
                 Mat4 final_m = geom::math::Mat4Mul(jw[j], inv[j]);
-                const int bone_x0 = x0 + j * 4;
-                PutMat4Row(final_m, bone_x0, &line);
+                // 本骨在本 pose 内的平坦下标 = p*pose_tex_w + j*4；4 个 texel 逐个落到
+                // (x=flat%W, y=flat/W) —— **逐 texel 判行**，跨行自然处理。
+                const int bone_flat0 = p * pose_tex_w + j * 4;
+                for (int r = 0; r < 4; ++r) {
+                    const int flat = bone_flat0 + r;
+                    if (flat < row_lo || flat >= row_hi) continue;  // 本 texel 不在此行
+                    const int texel = flat - row_lo;                // 本行内的 x
+                    float* out = line.data();
+                    out[texel * 4 + 0] = final_m.m[r];        // col0 row r
+                    out[texel * 4 + 1] = final_m.m[4 + r];    // col1 row r
+                    out[texel * 4 + 2] = final_m.m[8 + r];    // col2 row r
+                    out[texel * 4 + 3] = final_m.m[12 + r];   // col3 row r
+                }
             }
         }
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, kPoseAtlasDim, 1, GL_RGBA,

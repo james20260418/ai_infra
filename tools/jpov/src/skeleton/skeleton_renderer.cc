@@ -232,11 +232,16 @@ void SkeletonRenderer::DrawSkinnedMesh(
         glUniformMatrix4fv(glGetUniformLocation(sp, "uMVP"), 1, GL_FALSE, mvp_final);
         glUniformMatrix4fv(glGetUniformLocation(sp, "uModel"), 1, GL_FALSE, model);
 
-        // M1 单 pose 静态(pose_a==pose_b)：取 pose_a 行/列。动态(pose_a/pose_b+ratio)后续。
-        const int ppi = gh.pose_per_row;
+        // M1 单 pose 静态(pose_a==pose_b)：取 pose_a 的**平坦** texel 起点
+        //   （= pose_a * pose_width）。shader 内按 atlas 宽度回绕成 (x,y) —— 与 CPU
+        //   行优先平铺的布局逐 texel 对齐；不再依赖 pose_per_row（那是容量估算量）。
+        const int pose_w = gh.bone_count * 4;
         const int pa = inst.pose_a;
-        glUniform1i(glGetUniformLocation(sp, "uPoseRow"), pa / ppi);
-        glUniform1i(glGetUniformLocation(sp, "uPoseCol"), pa % ppi);
+        glUniform1i(glGetUniformLocation(sp, "uPoseRow"), 0);
+        glUniform1i(glGetUniformLocation(sp, "uPoseCol"), pa * pose_w);
+        glUniform2f(glGetUniformLocation(sp, "uAtlasDim"),
+                    static_cast<float>(SkeletonManager::kPoseAtlasDim),
+                    static_cast<float>(SkeletonManager::kPoseAtlasDim));
 
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
@@ -335,7 +340,6 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     CHECK_GT(mesh->vao, 0u);
     CHECK(!cmd.instances.empty()) << "SkinnedMesh instance 数组不能为空";
 
-    const int pose_per_row = gh.pose_per_row;
 
     glUseProgram(shadow_prog);
     glActiveTexture(GL_TEXTURE7);
@@ -355,10 +359,13 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
         glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthMVP"),
                            1, GL_FALSE, dm);
 
-        const int row = inst.pose_a / pose_per_row;
-        const int col = inst.pose_a % pose_per_row;
-        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), row);
-        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseCol"), col);
+        // pose_a 的**平坦** texel 起点（同主 pass；shader 内按 atlas 宽度回绕）。
+        const int pose_w = gh.bone_count * 4;
+        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), 0);
+        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseCol"), inst.pose_a * pose_w);
+        glUniform2f(glGetUniformLocation(shadow_prog, "uAtlasDim"),
+                    static_cast<float>(SkeletonManager::kPoseAtlasDim),
+                    static_cast<float>(SkeletonManager::kPoseAtlasDim));
 
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
