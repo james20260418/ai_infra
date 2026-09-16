@@ -41,6 +41,23 @@
 //   只有"控件相对面板的 box 改变"（重排/resize 单个控件）才触发重置。
 //   想保状态就别在交互进行中改该控件的 box。
 //
+// ============== 跨帧状态的【所有权】（隔离规则，重要） ==============
+//   上面的四个显式状态都是【独占】状态：一个面板内同一时刻只可能有一个
+//   文本框聚焦 / 一个下拉展开 / 一条滑条被拖 / 一个按钮被按。所有权由
+//   StateSlot 表达，写槽位只有两条合法路径：
+//     1. Acquire(box)：本控件本帧成为该状态的发起者
+//        （点框聚焦 / 点开下拉 / 起始拖动 / 起始按下）。
+//     2. Release(box)：本控件正是当前持有者，且本帧状态结束
+//        （点框外 / 回车失焦 / 收起下拉 / 松开左键）。
+//   其余任何情况——尤其是"本控件本帧不持有该状态"——一律【不写槽位】。
+//   这就是隔离：控件之间绝不互相踩状态，且与控件调用顺序无关
+//   （谁先画不影响谁持有；取消态不会被无关控件清掉）。
+//   
+//   ❌ 反例（2026-09-15 修复的 bug）：若每个控件每帧都把"自己的 box +
+//   自己的展开/聚焦态"无条件写回单槽，则同屏第二个控件会每帧凭空清掉
+//   第一个控件的状态——表现为"第二个下拉一存在，第一个下拉一点就收"
+//   （StateSlot 的 Acquire/Release 从类型上封死这种写法）。
+//
 // ===================== 布局：stretch_w / stretch_h =====================
 //   每个控件给一个 box（可用区域）外加两个拉伸开关：
 //     - stretch_w = true  → 控件宽度铺满 box 宽；
@@ -307,15 +324,56 @@ private:
     std::vector<FillRect2DCommand> popup_fill_rects_;
     std::vector<Text2DCommand> popup_texts_;
 
-    // ---- 跨帧状态（仅 InputText 焦点/水平滚动需要；其余控件一律无状态）----
-    // 焦点文本框 box 的 Ui 面板局部坐标。跨帧记忆当前哪个文本框聚焦
-    // （焦点/光标可见属于显式状态语义，需跨帧保持；光标本身绘制为静态不闪烁，
-    // 以便单帧自证 gold 指令可确定性比对）。用 box 位置+尺寸识别同一文本框；
-    // 本帧绘制时若 box 与之相等则视为聚焦。
-    bool input_focused_ = false;
-    UiRect input_focus_box_{};  // 聚焦文本框的 box（input_focused_ 为 true 时有效）
+    // ---- 跨帧状态槽：独占状态的"唯一持有者"（隔离规则的落地点）----
+    // 见文件顶《跨帧状态的所有权》。每个独占状态一个槽位，同一时刻最多
+    // 一个控件持有（用 box 精确相等识别同一控件）。写槽位只有 Acquire /
+    // Release 两条合法路径，其余控件只读——从类型上封死"无条件写回"
+    // 导致的互相踩状态（同屏多控件场景）。
+    //
+    // 边界（本次未扩大范围，行为与历史一致）：槽位是"唯一持有者"，不是
+    // "自动回收"——持有者不再被绘制（控件被删 / 其 box 变了）时槽位不会
+    // 自己释放（只在 Acquire/Release 时变）。对焦点/下拉无实际影响（它们
+    // 本就靠 Acquire 顶替）；但以 IsFree() 作起始门槛的滑条/按钮，会因此
+    // 暂时开不了新的拖动/按下（面板重建即恢复）。
+    struct StateSlot {
+        // 本控件（box 判定）是否持有该状态。
+        bool IsHeldBy(const UiRect& box) const {
+            return is_held && held_box.pos == box.pos &&
+                   held_box.size == box.size;
+        }
+        // 槽位空闲（无人持有）→ 允许本控件发起一个新状态。
+        bool IsFree() const { return !is_held; }
+        // 取得所有权（本帧成为发起者时调用）。会顶掉原持有者 = 状态转移
+        // （如：点另一个输入框 → 焦点从旧框转给新框）。
+        void Acquire(const UiRect& box) {
+            is_held = true;
+            held_box = box;
+        }
+        // 释放所有权：仅当本控件正是持有者时生效；否则【无操作】
+        // （绝不踩别人的槽位——隔离的关键）。
+        void Release(const UiRect& box) {
+            if (IsHeldBy(box)) {
+                is_held = false;
+                held_box = UiRect{};
+            }
+        }
+
+    private:
+        // 字段私有：只有 Ui 的成员函数能改，外部无法绕过 Acquire/Release
+        // 直接写槽位 → 不会重新引入"互相踩状态"的写法（隔离由类型保证）。
+        friend class Ui;
+
+        bool is_held = false;  // 槽位是否有人持有
+        UiRect held_box{};     // 持有者 box（is_held 为 true 时有效）
+    };
+
+    // ---- 跨帧状态（InputText 焦点 + 水平滚动）----
+    // 聚焦中的文本框：跨帧记忆"哪个文本框聚焦"（焦点/光标可见属显式状态
+    // 语义；光标绘制为静态不闪烁，以便单帧自证 gold 可确定性比对）。
+    StateSlot text_focus_;
     // 水平滚动偏移（像素）：文本超出 box 宽时，光标跟随内部滚动，保证
     // 光标不越出 box 右缘（S5.3 内部 scroll，不溢出）。跨帧保持以免重绘闪烁。
+    // 归属上面聚焦的那个文本框（面板内同时至多一个聚焦框）。
     float input_scroll_px_ = 0.0f;
 
     // 本帧时长（毫秒），Begin 设置；<=0 表示无时钟（不产生 hold 重复）。
@@ -329,13 +387,9 @@ private:
     float hold_ms_[kMaxKeyCode] = {};
     int hold_emitted_repeats_[kMaxKeyCode] = {};
 
-    // ---- 跨帧状态（仅 Combo 下拉展开需要；其余控件一律无状态）----
-    // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）。下拉的展开/收起
-    // 属于显式状态语义（需跨帧保持可见），故用与 InputText 焦点相同的模式：
-    // 跨帧记忆展开中的 Combo，用 box 位置+尺寸识别同一 Combo；本帧绘制时若
-    // box 与之相等则视为展开态。
-    bool combo_open_ = false;
-    UiRect combo_open_box_{};  // 展开中的 Combo 框 box（combo_open_ 为 true 时有效）
+    // ---- 跨帧状态（Combo 下拉展开）----
+    // 展开中的 Combo（下拉列表可见，属显式状态语义需跨帧保持）。
+    StateSlot combo_open_;
 
     // ---- 跨帧状态（仅 InputText 键盘 hold 重复需要；其余控件一律无状态）----
     // 键盘 hold 重复阈值（毫秒，验收 bug#11 两态）：
@@ -344,25 +398,19 @@ private:
     static constexpr float kKeyHoldRepeatDelayMs = 150.0f;
     static constexpr float kKeyHoldRepeatIntervalMs = 150.0f;
 
-    // ---- 跨帧状态（仅 SliderFloat 拖动需要；其余控件一律无状态）----
-    // 正在被拖动的滑条框 box（slider_drag_active_ 为 true 时有效）。滑条
-    // 拖动属于显式状态语义：左键在 box 内按下开始 drag 后，只要左键仍按住
-    // 就持续写值，即使鼠标飘出 box 竖直范围也不再校验（符合一般 UI：drag
-    // 一旦开始，判定区不作数，直到左键释放才结束）。跨帧用 box 位置+尺寸
-    // 识别同一滑条（与 InputText 焦点 / Combo 展开同一模式）。
-    bool slider_drag_active_ = false;
-    UiRect slider_drag_box_{};  // 正在拖动的滑条框 box（active 时有效）
+    // ---- 跨帧状态（SliderFloat 拖动）----
+    // 正在被拖动的滑条。滑条拖动属显式状态语义：左键在 box 内按下开始 drag
+    // 后，只要左键仍按住就持续写值，即使鼠标飘出 box 竖直范围也不再校验
+    // （符合一般 UI：drag 一旦开始，判定区不作数，直到左键释放才结束）。
+    StateSlot slider_drag_;
 
-    // ---- 跨帧状态（仅 Button 按下态需要；其余控件一律无状态）----
-    // 正处于按下态的按钮框 box（button_pressed_active_ 为 true 时有效）。
-    // 按钮按下属于显式状态语义：左键在 box 内按下（Drag/Hold）开始后，只要
-    // 左键仍按住就持续保持按下色，即使鼠标飘出 box 也不再校验（符合一般 UI，
-    // hold 一旦开始判定区不作数，直到左键释放才恢复）；起始判据仍保留（box 内
-    // 才可开始）。跨帧用 box 位置+尺寸识别同一按钮（与 InputText 焦点 / Combo
-    // 展开 / SliderFloat 拖动同一模式）；被按的按钮不被其他按钮抢走按下态（A
-    // 飘越 B 时 B 不误抢）。
-    bool button_pressed_active_ = false;
-    UiRect button_pressed_box_{};  // 按下中的按钮框 box（active 时有效）
+    // ---- 跨帧状态（Button 按下态）----
+    // 正处于按下态的按钮。按钮按下属显式状态语义：左键在 box 内按下
+    //（Drag/Hold）开始后，只要左键仍按住就持续保持按下色，即使鼠标飘出
+    // box 也不再校验（符合一般 UI，hold 一旦开始判定区不作数，直到左键
+    // 释放才恢复）；起始判据仍保留（box 内才可开始）。被按的按钮不被其他
+    // 按钮抢走按下态（A 飘越 B 时 B 不误抢，因起始需槽位空闲）。
+    StateSlot button_press_;
 };
 
 // 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试

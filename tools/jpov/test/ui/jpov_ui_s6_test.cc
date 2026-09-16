@@ -11,6 +11,8 @@
 //   5. gold 展开/收起两态比对：指令数量/位置/颜色逐条断言。
 //   6. 值域：selected 越界先夹到 [0, size-1] 写回；空 items → 显示 label 占位符。
 //   7. 容错：越界/零尺寸 → 0 FillRect、0 Text、无展开、不改 selected。
+//   8. 同屏两个下拉：展开态互不干扰（2026-09-15 修复的 bug 回归）——
+//      点开 A 后即使 B 每帧被绘制，A 也不得"一闪即收"。
 //
 // 本测试是纯 CPU 的指令层比对（gold 指令），不渲染、无窗口（headless）。
 // 点击通过 InputSnapshot.left.raw + left_clicks 模拟。
@@ -487,6 +489,116 @@ public:
         LOG(INFO) << "[PASS] Combo 展开态：悬停行 accent、选中行 selected";
     }
 
+    // 同屏两个下拉：展开态互不干扰（2026-09-15 Danis 实测 bug 的回归断言）。
+    //
+    // 症状（修复前）：跨帧展开态是单槽且每个 Combo 每帧无条件写回自己的 box，
+    // 于是同屏第二个 Combo（后绘制）每帧都把第一个的展开态抹掉 —— 点开第一个
+    // 只在那一帧可见，下一帧就被判为收起（"一点就收"）。
+    // 修复：写槽位只走 Acquire（本帧展开）/ Release（本帧收起），不持有则不碰。
+    static void TestTwoCombosIsolation() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box_a{{10.0f, 10.0f}, {200.0f, 26.0f}};
+        const UiRect box_b{{240.0f, 10.0f}, {200.0f, 26.0f}};
+        const std::vector<const char*> items_a = {"a_cur", "a_opt"};
+        const std::vector<const char*> items_b = {"b_cur", "b_opt"};
+        // 点击点：两框中心（同一排）。
+        const float a_cx = 110.0f, a_cy = 23.0f;
+        const float b_cx = 340.0f, b_cy = 23.0f;
+        Ui ui;
+        int sel_a = 0;
+        int sel_b = 0;
+
+        // 帧1：点开 A（B 也必须保持收起）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(a_cx, a_cy), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextSubstr(cmd, "a_opt")) << "点 A 后 A 应展开";
+            CHECK(!HasTextSubstr(cmd, "b_opt")) << "B 不应被牵连展开";
+            CHECK_EQ(cmd.strip2d.size(), 1u)
+                << "仅 B（收起）画下箭头；A 展开不画箭头";
+            // fills：A 框底(hover 展开态) + B 框底(background 收起态) 为普通层，
+            // 弹出层（A 的下拉容器 + 选中行）排在之后。
+            CheckFill(cmd.fillrect2d[0], 10.0f, 10.0f, 200.0f, 26.0f,
+                      theme.hover);
+            CheckFill(cmd.fillrect2d[1], 240.0f, 10.0f, 200.0f, 26.0f,
+                      theme.background);
+        }
+
+        // 帧2（关键回归）：无点击、鼠标在远处 → A 必须仍然展开。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakePlainInputAt(600.0f, 300.0f), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextSubstr(cmd, "a_opt"))
+                << "【回归】无点击时 A 应保持展开（修复前此处一闪即收）";
+            CHECK(!HasTextSubstr(cmd, "b_opt")) << "B 仍应收起";
+            CHECK_EQ(cmd.strip2d.size(), 1u) << "仅 B 画下箭头";
+        }
+
+        // 帧3：鼠标悬停在 A 的下拉行上 → A 仍展开（悬停不影响持有者）。
+        {
+            RenderCommandList cmd;
+            // A 的下拉：list_top = 10+26 = 36，row_h=28 → row1 中心 y = 78。
+            ui.Begin(MakePlainInputAt(50.0f, 78.0f), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextSubstr(cmd, "a_opt")) << "悬停不应收起 A";
+        }
+
+        // 帧4：点 B 框内 → 展开态转移（A 收起、B 展开）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(b_cx, b_cy), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(!HasTextSubstr(cmd, "a_opt")) << "点 B 后 A 应收起";
+            CHECK(HasTextSubstr(cmd, "b_opt")) << "点 B 后 B 应展开";
+            CHECK_EQ(cmd.strip2d.size(), 1u) << "此时仅 A 画下箭头";
+            CheckFill(cmd.fillrect2d[0], 10.0f, 10.0f, 200.0f, 26.0f,
+                      theme.background);  // A 已收起。
+            CheckFill(cmd.fillrect2d[1], 240.0f, 10.0f, 200.0f, 26.0f,
+                      theme.hover);  // B 展开态。
+        }
+
+        // 帧5：无点击 → B 保持展开（同帧 A 先画也不得踩掉 B）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakePlainInputAt(600.0f, 300.0f), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(HasTextSubstr(cmd, "b_opt"))
+                << "【回归】无点击时 B 应保持展开（先画的 A 不得清掉它）";
+            CHECK(!HasTextSubstr(cmd, "a_opt")) << "A 仍应收起";
+        }
+
+        // 帧6：点空白 → B 收起；两个下拉都回到收起态（各画一个下箭头）。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(600.0f, 300.0f), theme, 640.0f, 360.0f);
+            ui.Combo("A", &sel_a, items_a, box_a);
+            ui.Combo("B", &sel_b, items_b, box_b);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(!HasTextSubstr(cmd, "a_opt")) << "点空白后 A 收起";
+            CHECK(!HasTextSubstr(cmd, "b_opt")) << "点空白后 B 收起";
+            CHECK_EQ(cmd.strip2d.size(), 2u) << "两个下拉均画下箭头";
+        }
+        LOG(INFO) << "[PASS] Combo 同屏两个下拉：展开态互不干扰（隔离回归）";
+    }
+
     static void RunAll() {
         TestClosedDraw();
         TestClickOpens();
@@ -497,6 +609,7 @@ public:
         TestOffscreenCombo();
         TestPopupDrawsLast();
         TestDropdownHover();
+        TestTwoCombosIsolation();
         LOG(INFO) << "===== UI S6 (Combo) 自证全部通过 =====";
     }
 };
