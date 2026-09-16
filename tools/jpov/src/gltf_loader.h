@@ -21,18 +21,19 @@
 //
 // 明确不支持（超出本轮范围）：
 //   - 动画: animations 通道
-//   - 皮肤关节树/逆绑定的【坐标一致化 & 渲染驱动】（本 loader 只把 skins 读成
-//     SkeletonType 原始资产, 是否 Z-up 统一次序留 skin/render 消费方，见
-//     LoadGltfSkeleton 注释）
+//   - 皮肤关节树/逆绑定的【渲染驱动】（本 loader 只把 skins 读成 SkeletonType
+//     原始资产，不做坐标变换，见 LoadGltfSkeleton 注释）
 //   - 扩展材质: KHR_materials_pbrSpecularGlossiness / KHR_materials_transmission
 //   - 顶点颜色: COLOR_0
 //   - sparse accessor: tinygltf 内部已展开，本 loader 无需额外处理
 //
-// 坐标系（JPOV 模型局部为 y-up：局部 +Y→世界 up，见 render_command.h 变换约定）：
-//   glTF 规范本身 Y-up。本 loader 在顶点阶段做的映射 (x,-z,y) 把 glTF 的 Y 装进局部 Z ——
-//   对“纯正 glTF y-up 内容”意味着它的上会躺到局部 Z（前），故此处仅是一段有历史包袱的
-//   顶点映射，**不宜称为 “JPOV 用 Z-up”**；轴对齐/渲染方向留给放置层(up/front)与后续
-//   glTF-orientation 处理统一，勿据此断言 JPOV 坐标是 Z-up。
+// 坐标系（铁律，Danis 2026-09-16）：**loader 不改方向**。
+//   本 loader 交出的顶点/法线**原样保持资产自身坐标系**（glTF 资产即 Y-up），
+//   一律不做任何坐标旋转；loader 甚至不需要知道 "Y-up" 这件事。
+//   朝哪放由消费侧决定：DrawObject3D / DrawGltfObject 的 (up, front) 放置参数。
+//   资产方向本身不对 → 用 editor 手工改资产，**不要**在加载路径上偷偷转。
+//   （历史教训：此处曾做 (x,-z,y) 映射，而骨架侧保持原值 ⇒ 蒙皮顶点与骨架帧
+//     不匹配，且 identity 姿态下肤矩阵恒为单位阵 ⇒ 单帧 gold 完全查不出来。）
 //
 // UV 约定：
 //   glTF 规范: TEXCOORD_0 原点 (0,0) = 图片左上角，V 向下增大，
@@ -141,11 +142,9 @@ using GltfMeshEntryCallback = void (*)(const GltfMeshEntry* entry,
 //     与 joints 一一对应，**原样拷自文件，不在此做坐标/自算**。缺省（无 accessor）= 调用方自算，
 //     本 loader 不补（返回相应骨架 inverse_bind 为空）。
 //
-// ⚠️ 坐标系契约：本 loader 的 mesh 顶点在 ParsePrimitive 已做 Y-up→Z-up；(glTF Y-up 资产
-//   的 IBM / node translation / 未来 FBX 都是 glTF Y-up 系)。本函数**保持 glTF(Y-up)原始值**
-//   直填 SkeletonType;把 IBM / 骨位移与已转 Z-up 的顶点统一、以及 FBX 动作的坐标一致，
-//   留给“真正把骨骼驱动成渲染矩阵”的消费方(后续 skin/render PR)—— 本“准备 PR”只保证
-//   “资产层的骨架/逆绑定被忠实地读出来”，不提前做无 gold 可验证的坐标旋装。
+// ⚠️ 坐标系契约：**本 loader 不做任何坐标变换**。mesh 顶点（ParsePrimitive）与骨架
+//   （本函数）都原样保持资产自身坐标系直填，两者**天然同帧**（这正是蒙皮能正确工作的前提）。
+//   朝哪放由消费侧 up/front 决定；不在加载路径上偷偷转任何东西。
 //
 // 返回 true 表示文件解析成功（至少 0 个 skin 也算成功，out 可为空）；false 表示无法加载。
 bool LoadGltfSkeleton(const std::string& path,

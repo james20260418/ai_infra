@@ -64,12 +64,12 @@ public:
         // 右：object3d 直画同 mesh+材质（rest T-pose, 非蒙皮 —— 对照基准）
         if (mesh_id_ != 0)
             cmds->DrawObject3D(mesh_id_, mat_,
-                               /*center*/ {2.0f,0,0}, /*up*/ {0,0,-1}, /*front*/ {0,1,0},
+                               /*center*/ {2.0f,0,0}, /*up*/ {0,1,0}, /*front*/ {0,0,1},
                                /*scale*/ 4.0f, /*highlight*/ false, /*picking_id*/ 0);
         // 左：真蒙皮（bind pose, pose_a==pose_b=0）
         if (mesh_id_ != 0 && skel_id_ != 0) {
             jpov::SkinnedInstanceState inst;
-            inst.center = {0,0,0}; inst.up = {0,0,-1}; inst.front = {0,1,0};
+            inst.center = {0,0,0}; inst.up = {0,1,0}; inst.front = {0,0,1};
             inst.scale = 4.0f; inst.pose_a = 0; inst.pose_b = 0; inst.ratio = 0.0f;
             std::vector<jpov::SkinnedInstanceState> instances{inst};
             cmds->DrawMeshWithSkeleton(mesh_id_, skel_id_, mat_, std::move(instances));
@@ -92,7 +92,7 @@ inline void BuildScene(SkeletonGoldApp* app, const std::string& scene_assets_dir
             const bool brick = (gx < 0.0f);
             auto ground = load(scene_assets_dir + (brick ? "ground/ground_brick.gltf"
                                                          : "ground/ground_dirt.gltf"));
-            app->AddSlot(std::move(ground), {gx, -0.5f, gz}, {0,1,0}, {0,0,1});
+            app->AddSlot(std::move(ground), {gx, -0.5f, gz}, {0,0,1}, {0,-1,0});
         }
     }
     // 蓝人(蒙皮 rest mesh + 材质) + 骨架(bind pose)

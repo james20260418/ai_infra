@@ -9,7 +9,7 @@
 //   2. 定位第一个 mesh → 第一个 primitive
 //   3. 提取 POSITION / NORMAL / TEXCOORD_0 accessor → 顶点数组
 //   4. 展开索引缓冲（若有 indices accessor）
-//   5. 顶点坐标映射（见 ParsePrimitive 注；别写 “JPOV Z-up”）
+//   5. 顶点原样透传（不做坐标旋转；轴对齐留给消费侧 up/front 放置层）
 //   6. 推导 tangent（复用 OBJ loader 的 ComputeTangents）
 //   7. 提取材质贴图路径（相对于 glTF 文件目录）
 
@@ -404,16 +404,19 @@ bool ParsePrimitive(const tinygltf::Model& model,
     }
     const size_t vcount = pos_flat.size() / 3;
 
-    // 转为 Vec3f 顶点：历史映射 (x,-z,y) 把 glTF 的 Y 装进 loader 局部 Z —— 仅一段顶点映射，
-    // **勿称 “JPOV Z-up”**（JPOV 模型局部 up=+Y，见 render_command.h 与 gltf_loader.h 坐标契约）
+    // 转为 Vec3f 顶点：**原样透传，不做任何坐标旋转**。
+    //
+    // 铁律（Danis 2026-09-16）：资产加载器不擅自改方向，loader 甚至不需要知道
+    //   “Y-up” 这件事。顶点一律以资产自身坐标系交付；方向不对是资产的问题，
+    //   由 editor 手工改，或在消费侧用 DrawObject3D 的 up/front 表达放置朝向。
+    //
+    // 历史：本行原为 `Vec3f(gx, -gz, gy)`（glTF→“JPOV Z-up” 映射，c15a549 引入），
+    //   而骨架侧（LoadGltfSkeleton）自始保持原值 ⇒ 蒙皮顶点与骨架帧不匹配。该映射已移除。
     out_mesh->positions.resize(vcount);
     for (size_t i = 0; i < vcount; ++i) {
-        const float gx = pos_flat[i * 3 + 0];
-        const float gy = pos_flat[i * 3 + 1];  // glTF Y
-        const float gz = pos_flat[i * 3 + 2];  // glTF Z
-        // JPOV: +Y = up, +Z = front
-        // glTF Y-up → JPOV: keep X, glTF Y→JPOV Z, glTF Z→JPOV -Y
-        out_mesh->positions[i] = Vec3f(gx, -gz, gy);
+        out_mesh->positions[i] = Vec3f(pos_flat[i * 3 + 0],
+                                       pos_flat[i * 3 + 1],
+                                       pos_flat[i * 3 + 2]);
     }
 
     out_mesh->flags = MeshVertexFlags::kPosition;
@@ -426,10 +429,10 @@ bool ParsePrimitive(const tinygltf::Model& model,
             nrm_flat.size() / 3 == vcount) {
             out_mesh->normals.resize(vcount);
             for (size_t i = 0; i < vcount; ++i) {
-                const float nx = nrm_flat[i * 3 + 0];
-                const float ny = nrm_flat[i * 3 + 1];
-                const float nz = nrm_flat[i * 3 + 2];
-                out_mesh->normals[i] = Vec3f(nx, -nz, ny);
+                // 同理：法线原样透传（与顶点同坐标系，不得单独旋转）
+                out_mesh->normals[i] = Vec3f(nrm_flat[i * 3 + 0],
+                                             nrm_flat[i * 3 + 1],
+                                             nrm_flat[i * 3 + 2]);
             }
             out_mesh->flags = static_cast<MeshVertexFlags>(
                 static_cast<uint8_t>(out_mesh->flags) |
@@ -771,6 +774,8 @@ bool LoadGltfImpl(const std::string& path,
                 return false;
             }
             // 应用 mesh 的节点变换（旋转+缩放，无平移）到 position/normal。
+            // 顺序已正确：ParsePrimitive 原样透传资产坐标（不做坐标旋转），本步才叠加
+            //   glTF 规范定义的节点变换 —— 两者同在资产坐标系内，不再有坐标系错位。
             // ⚠️ 跳过带骨骼(kJoints)的 mesh：蒙皮网格的顶点应留在 mesh 局部空间,
             //    由 skin 的关节矩阵×逆绑定驱动(见 gltf_loader.h 骨骼注释),  此处若再
             //    套 mesh 所在 node 父链的旋缩会对 bind-pose 双重变换、破坏蒙皮对位。

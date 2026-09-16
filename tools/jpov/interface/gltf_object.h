@@ -45,8 +45,8 @@ struct GltfObject {
     std::vector<GltfPrimitive> primitives;
 
     // 模型在 loader 产出的**网格局部坐标**下的轴对齐包围盒（即 DrawGltfObject 施加上 up/front
-    // 旋转前的局部框架，坐标轴方向取决于进货源内容，勿以“Z-up/Y-up”概括 —— JPOV 约定
-    // 局部 +Y→世界 up，见 render_command.h）。由 Renderer::LoadGltf 在加载时遍历所有
+    // 旋转前的局部框架）。**该局部系就是资产自身坐标系**（loader 不改方向，见 gltf_loader.h
+    // 铁律），轴的方向取决于资产内容本身。由 Renderer::LoadGltf 在加载时遍历所有
     // primitive 顶点计算合并，供上层（查看器）做相机自适应/剔除等用，无需再碰 CPU 几何。
     //
     // 约定：

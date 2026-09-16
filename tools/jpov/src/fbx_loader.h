@@ -28,10 +28,8 @@
 //   成功 LOG 会带出源 scene.axes.up 与 unit_meters，便于 debug 手头这份是不是 y-up。
 //   ⚠️ 单位归一只发生在 LoadFbxSkeleton（它面向骨架直接使用/跨源对比，刻意归一为米）；
 //   LoadFbxAnimation 保持"原样透传"——两入口刻意分工，见各自注释。
-//   （若未来某源是 z-up 等非 y-up 且要“立起来渲染”，在其放置/retarget 层按源轴语义对齐即
-//   可 —— 那层有角色朝向，不在本 loader。）
-//   ⚠️ 若读到 gltf_loader 头注释把输出写成 “Z-up”，那是另一条链的术语问题，与本层无冲突；
-//   是否顺手改 gltf 注释语义见 PR 说明（本 PR 不作该链渲染行为变更）。
+//   （若某源是 z-up 等非 y-up 且要“立起来渲染”，在其放置层按 up/front 对齐即可 ——
+//   那层有角色朝向，不在本 loader。同 gltf_loader：加载路径一律不改方向。）
 
 #ifndef JPOV_SRC_FBX_LOADER_H_
 #define JPOV_SRC_FBX_LOADER_H_

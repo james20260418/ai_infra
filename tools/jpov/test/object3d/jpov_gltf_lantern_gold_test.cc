@@ -100,7 +100,7 @@ public:
             .color = {1, 1, 1, 1}, .intensity = 0.5f};
 
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
-                             {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                             {0.0f, 0.0f, 1.0f}, {0.0f, -1.0f, 0.0f});
     }
 
 private:
