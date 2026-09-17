@@ -49,6 +49,10 @@ public:
     jpov::GltfObject gltf_;          // 被查看的模型
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
     jpov::PBRMaterial ground_mat_;   // 高粗糙灰色地面材质
+    // 参考量块网格：地面上 0.1×0.1×0.1 米的立方体，用于肉眼标定 shadow map
+    // 单纹素的世界尺寸（原始阴影像素化格子的边长）。
+    uint32_t refbox_mesh_ = 0;
+    jpov::PBRMaterial refbox_mat_;
 
     // ── 当前视角 view_：交互（右键 drag/滚轮实时改）与 headless 拍摄（外部
     // 赋固定角/逐帧扫角）共用的“单一事实源”。拍摄模式不改 OneIteration，只
@@ -127,6 +131,13 @@ public:
         }
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            /*center*/ {0.0f, 0.0f, 0.0f},
+                           /*up*/     {0.0f, 1.0f, 0.0f},
+                           /*front*/  {0.0f, 0.0f, 1.0f});
+
+        // 参考量块：0.1m 立方体，底面贴地面（中心 y = ground_y_ + 0.05）。
+        // 放在模型侧前方（+x/+z），不遮挡被查看的模型；同样落在投影范围内。
+        cmds->DrawObject3D(refbox_mesh_, refbox_mat_,
+                           /*center*/ {0.5f, ground_y_ + 0.05f, 0.5f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(gltf_,

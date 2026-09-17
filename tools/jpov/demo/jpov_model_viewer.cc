@@ -135,6 +135,13 @@ int main(int argc, char** argv) {
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
     app.ground_mat_  = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
+    // 参考量块：0.1×0.1×0.1 米立方体（MakeBox 三个半宽 = 0.05），
+    // 用于肉眼比对 shadow map 原始像素格子的世界尺寸。
+    app.refbox_mat_  = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.9f, 0.2f, 0.2f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 1.0f);
+    app.refbox_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
+        /*front_half_width*/ 0.05f, /*up_half_width*/ 0.05f,
+        /*left_half_width*/  0.05f));
 
     // 初始视角：目标原点、R 按模型包围盒自适应（退化时退回 DefaultView）。
     app.view_ = jpov_viewer::DefaultView();
