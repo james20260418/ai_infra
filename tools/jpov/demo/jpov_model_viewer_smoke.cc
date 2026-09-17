@@ -30,9 +30,6 @@ public:
     jpov::GltfObject gltf_;
     uint32_t ground_mesh_ = 0;
     jpov::PBRMaterial ground_mat_;
-    // 参考量块：0.1×0.1×0.1 米立方体，用于肉眼标定 shadow map 原始像素格子边长。
-    uint32_t refbox_mesh_ = 0;
-    jpov::PBRMaterial refbox_mat_;
     jpov_viewer::ViewConfig view_;
     jpov_viewer::NoonLighting noon_;
 
@@ -59,10 +56,6 @@ public:
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
                            {0.0f, 0.0f, 1.0f});
-        // 参考量块：0.1m 立方体，底面贴地面（quad 默认 y=-3）。
-        cmds->DrawObject3D(refbox_mesh_, refbox_mat_,
-                           {0.5f, -2.95f, 0.5f}, {0.0f, 1.0f, 0.0f},
-                           {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
                              {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
@@ -86,11 +79,6 @@ int main(int argc, char** argv) {
     CHECK(!app.gltf_.empty()) << "LoadGltf 失败: " << gltf_path;
     app.ground_mat_ = jpov_viewer::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov_viewer::MakeGroundQuad());
-    app.refbox_mat_ = jpov::PBRMaterial::SolidColorMR(
-        /*color*/ {0.9f, 0.2f, 0.2f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 1.0f);
-    app.refbox_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
-        /*front_half_width*/ 0.05f, /*up_half_width*/ 0.05f,
-        /*left_half_width*/  0.05f));
     app.noon_ = jpov_viewer::MakeNoonLighting();
     app.view_ = jpov_viewer::DefaultView();
 
