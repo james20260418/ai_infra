@@ -33,7 +33,9 @@ namespace jpov {
 //
 // 「真 instanced draw」的关键：实例间的差异必须走 **per-instance attribute**（divisor=1），
 // 不能走逐实例 uniform —— 后者必须逐实例一次 draw（N 实例 = N 次 draw call）。
-// 属性槽见 MeshManager 的 VAO 配置（RegisterMesh / UploadInstanceTransforms）。
+// 属性槽：loc6..9 = aInstModel，loc10 = aInstPose。
+//   布局的**唯一约定点**在 src/instance_buffer.h（kInstanceModelAttrSpec / kInstancePoseAttrSpec）；
+//   实例数据由渲染器持有的 InstanceBuffer 承载（属于「这次 draw」，不属于 mesh）。
 //
 //   摆放： location 6..9 = aInstModel (mat4，4 个 vec4 slot)
 //          ★ 全批共享 VAO 的**顶点**属性（loc0-5）不变，与普通 draw 完全一致。
@@ -46,7 +48,7 @@ namespace jpov {
 //
 // 布局与 shader 侧 layout(location=N) 声明一一对应：
 //   loc6 = 第 0 列(vec4)  loc7 = 第 1 列  loc8 = 第 2 列  loc9 = 第 3 列
-//   （列主序，与 BuildModelMatrix 输出一致，见 mesh_manager.h 顶部布局说明）。
+//   （列主序，与 BuildModelMatrix 输出一致，见 instance_buffer.h 的布局表）。
 
 // ==================== 蒙皮顶点着色器 ====================
 // 输出与 object3d kMeshVs3dPBRFull 完全一致（vWorldPos/vWorldNormal/vTexCoord/vWorldTangent），

@@ -161,8 +161,8 @@ struct SkeletonPose {
 //   per-instance attribute 上传时，摆放是**矩阵**（4 个 vec4 slot），pose 选择是
 //   **整数 + 浮点**。两者粒度不同，但蒙皮带骨实例与静态实例**共有的那一部分只有摆放**。
 //   抽出来后，静态实例与带骨实例共用同一份 attribute layout / 同一套 VP 结构
-//   （见 MeshManager::UploadInstanceTransforms 与 skinning_shader.h 的 aInstModel +
-//   uViewProj）。这是「真 instanced draw」（一次 draw call 画 N 个实例）的基础设施：
+//   （见 src/instance_buffer.h 的布局表，与 skinning_shader.h 的 aInstModel / uViewProj）。
+//   这是「真 instanced draw」（一次 draw call 画 N 个实例）的基础设施：
 //   摆放必须逐实例走 attribute（divisor=1），**不能**逐实例走 uniform（那还是 N 次 draw）。
 //
 // 语义与 Object3DCommand 的 center/up/front/scale 完全一致（同一套 BuildModelMatrix）。

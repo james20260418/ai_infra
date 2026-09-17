@@ -15,6 +15,7 @@
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
+#include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
 #include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
@@ -260,6 +261,14 @@ public:
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
     MeshManager mesh_mgr_;
+
+    // per-instance 数据缓冲（Instanced draw 用）。
+    //   ★ 由**渲染器持有、跨 draw 复用** —— 实例数据属于「这次 draw」，不属于任何 mesh
+    //     （见 src/instance_buffer.h 顶部为何不能挂在 GPUMesh 上）。
+    //   主 pass 与 shadow pass 共用同一对缓冲：GL draw 是同步提交的，每个 draw 前
+    //   紧接一次 Upload，故两 pass 不会互相踩。
+    InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};  // loc6..9 = mat4
+    InstanceBuffer instance_pose_buf_{kInstancePoseAttrSpec};    // loc10   = vec3
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

@@ -26,6 +26,7 @@
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/skeleton/skeleton_manager.h"
@@ -386,7 +387,9 @@ void main() {
         const float mvp[16],
         unsigned int skinned_prog,
         const SkeletonManager::GpuHandles& gh,
-        int pose_count);
+        int pose_count,
+        InstanceBuffer& instance_model_buf,
+        InstanceBuffer& instance_pose_buf);
 
     // ---- DrawSkinnedMeshShadow ----
     // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
@@ -401,7 +404,9 @@ void main() {
         int pose_count,
         const float shadow_vp[16],
         const float depth_vp[16],
-        unsigned int shadow_prog);
+        unsigned int shadow_prog,
+        InstanceBuffer& instance_model_buf,
+        InstanceBuffer& instance_pose_buf);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到蒙皮 PBR shader。
@@ -427,12 +432,15 @@ void main() {
                               const AmbientLight& ambient);
 
     // ---- UploadSkinningInstanceAttributes ----
-    // 把一批蒙皮实例的**逐实例 attribute** 传上 GPU（主 pass / shadow pass 共用）。
+    // 把一批蒙皮实例的**逐实例数据**上传到**入参的实例缓冲**（主 pass / shadow pass 共用）。
     //
-    // 传两样东西：
-    //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序），
-    //      → MeshManager::UploadInstanceTransforms（loc6..9）。
-    //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → loc10(ivec2) + loc11(float)。
+    // ⚠️ 数据写进的是「调用方（渲染器）持有的可复用缓冲」，**不是** mesh 资源 ——
+    //   实例数据属于「这次 draw」而不属于几何（见 instance_buffer.h 顶部说明）。
+    //
+    // 传两样：
+    //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序）
+    //      → instance_model_buf（loc6..9 = mat4）。
+    //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → instance_pose_buf（loc10 = vec3）。
     //
     // pose_w = gh.bone_count * 4 = 一个 pose 在 atlas 里的**平坦** texel 宽度；
     //   本函数把 pose 下标乘成平坦起点（shader 内按 atlas 宽回绕，与 CPU 烘焙逐 texel 对齐）。
@@ -440,9 +448,10 @@ void main() {
     // Pre-condition: cmd.instances 非空且 pose_a/pose_b 已校验不越界（调用方先验，
     //   因为逐实例上传后一次 draw 里无法中途报错）。
     static void UploadSkinningInstanceAttributes(
-        MeshManager& mesh_mgr,
         const SkinnedMeshCommand& cmd,
-        int pose_w);
+        int pose_w,
+        InstanceBuffer& instance_model_buf,
+        InstanceBuffer& instance_pose_buf);
 };
 
 }  // namespace jpov

@@ -1051,7 +1051,8 @@ void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                            << cmd.skeleton_id << " 未注册（需先 RegisterSkeleton）";
     SkeletonRenderer::DrawSkinnedMesh(
         cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
-        SkinnedMeshProg(), skel->gpu_handles(), skel->pose_count());
+        SkinnedMeshProg(), skel->gpu_handles(), skel->pose_count(),
+        instance_model_buf_, instance_pose_buf_);
 }
 
 // 太阳阴影 pass 专用 shader（深度专用，见 kShadowVs/kShadowFs）。
@@ -1869,7 +1870,8 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             SkeletonRenderer::DrawSkinnedMeshShadow(
                 s, mesh_mgr_, shader_mgr_, skel->gpu_handles(),
                 skel->pose_count(),
-                shadow_vp_[c], shadow_depth_vp_[c], SkinnedShadowProg());
+                shadow_vp_[c], shadow_depth_vp_[c], SkinnedShadowProg(),
+                instance_model_buf_, instance_pose_buf_);
         }
 
         prev_far = far_i;
