@@ -1252,14 +1252,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_cfg_, eff_sun);
+                shadow_texel_world_, shadow_cfg_, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
             // SkeletonRenderer::DrawSkinnedMesh，其本身不上传光照。
             if (!cmds.skinned_mesh.empty()) {
                 SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProg(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                    shadow_cfg_, eff_sun);
+                    shadow_texel_world_, shadow_cfg_, eff_sun);
             }
         }
 
@@ -1704,12 +1704,18 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             // 退化的级联（如首段 near 极近导致视锥近似点），给最小范围。
             float vp[16]; BuildOrthoProj(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 2.0f, vp);
             RendererMat4Mul(vp, view, shadow_vp_[c]);
+            shadow_texel_world_[c] = 0.0f;
             continue;
         }
 
         float proj[16];
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
         RendererMat4Mul(proj, view, shadow_vp_[c]);
+
+        // 该级联单纹素的世界覆盖边长（米）：正交盒跨度 / map 尺寸。取 x/y 较大者
+        // （各向异性保守）。供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
+        shadow_texel_world_[c] = std::max(right - left, top - bottom)
+                                 / static_cast<float>(shadow_fbos_[c].size);
 
         // 渲第 c 段：绑定对应 FBO + viewport，清屏，画所有投射物体。
         const CascadeFBO& fb = shadow_fbos_[c];

@@ -126,6 +126,9 @@ private:
     // “越大=越深（远离光）”。depth 0 点在主视锥中心；depth pass 存这个 z，主 pass 用同一 z 比较，
     // 两端一致且不经 near/far 归一化。
     float shadow_depth_vp_[ShadowConfig::kMaxCascades][16];
+    // 各级联「单纹素世界边长」（米）= max(正交盒 x 跨度, y 跨度) / cascade_sizes[c]。
+    // DrawShadowPass 每帧算，供 shader 自动推导深度偏置（见 ShadowConfig::cascade_bias）。
+    float shadow_texel_world_[ShadowConfig::kMaxCascades] = {0.0f};
     ShadowConfig shadow_cfg_;               // 当前生效的阴影配置（Init 传入）
 
     void EnsureFBO(int w, int h);
