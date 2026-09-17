@@ -216,11 +216,15 @@ const float PI = 3.14159265;
 // shadow map 存的是**相对主视锥中心的原始线性深度**（米，见 kShadowVs）；
 // 主 pass 用 uShadowDepthVP[c]（DepthProj*view）把 world_pos 重投到同一线性深度，
 // 两端同源一致、不经 near/far 归一化。
-// ⚠️ mile3：固定 3×3 PCF（平均 soft shadow）；depth bias = max(minBias, bias_base*(1-NdotL))：
-//     minBias 全局 0.01（米，兜底垂直光 NdotL→1 使 slope 归零）；
+// ⚠️ mile3：固定 3×3 PCF（平均 soft shadow）；depth bias = max(minBias=0.01, bias_base*(1+tanθ))：
 //     bias_base = uShadowBiasCascade[c]（米，复用挡墙 cascade_bias 配置），
-//     按“≥ 该级联单 texel 世界覆盖大小”原则设定，slope 项管中等倾角。
+//     按“≥ 该级联单 texel 世界覆盖大小”原则设定，**始终生效**；
+//     tanθ = sqrt(1-NdotL²)/max(NdotL,0.05)，管中等/大倾角。
 //     （PCF 系数=固定 3×3，对外部隐藏，不暴露新参数。）
+//     ⚠️ 2026-09-17 修正：旧式为 bias_base*(1-NdotL)，垂直光（NdotL→1）下乘成 0、
+//     退化为 minBias=0.01。远级联单纹素大（C2 13.2cm / C3 46.6cm / C4 72.6cm），
+//     平坦地面的深度误差 ≈ 1.5*texel*tanθ 超过 0.01m → 地面自阴影 acne
+//     （表现为地平线下方一条随级联纹素呈大格子的暗带）。
 // ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
 // 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
 // uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
@@ -235,8 +239,16 @@ void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[0] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[0] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);   // minBias 0.01 全局 + slope 项（bias_base=米）
+    // 深度偏置 = 纹素尺寸项 × (1 + 斜率项)。
+    //  纹素尺寸项 uShadowBiasCascade[0] 按“≥ 该级联单纹素世界覆盖”标定，
+    //  与光线夹角无关、**始终生效**（旧式 * (1-NdotL) 在垂直光下乘成 0，
+    //  退化为 minBias=0.01；远级联纹素大 → 深度误差 1.5*texel*tanθ 超过 0.01
+    //  → 地面自阴影 acne。2026-09-17 修）。
+    //  斜率项 tanθ = sqrt(1-NdotL²)/NdotL，管中等/大倾角。
+    float ndl0 = max(dot(N, L), 0.0);
+    float tanTheta0 = sqrt(max(1.0 - ndl0*ndl0, 0.0)) / max(ndl0, 0.05);
+    float depthBias0 = uShadowBiasCascade[0] * (1.0 + tanTheta0);
+    cur -= max(0.01, depthBias0);
     float s = 0.0;   // 固定 3×3 PCF
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
@@ -250,8 +262,16 @@ void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[1] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[1] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置 = 纹素尺寸项 × (1 + 斜率项)。
+    //  纹素尺寸项 uShadowBiasCascade[1] 按“≥ 该级联单纹素世界覆盖”标定，
+    //  与光线夹角无关、**始终生效**（旧式 * (1-NdotL) 在垂直光下乘成 0，
+    //  退化为 minBias=0.01；远级联纹素大 → 深度误差 1.5*texel*tanθ 超过 0.01
+    //  → 地面自阴影 acne。2026-09-17 修）。
+    //  斜率项 tanθ = sqrt(1-NdotL²)/NdotL，管中等/大倾角。
+    float ndl1 = max(dot(N, L), 0.0);
+    float tanTheta1 = sqrt(max(1.0 - ndl1*ndl1, 0.0)) / max(ndl1, 0.05);
+    float depthBias1 = uShadowBiasCascade[1] * (1.0 + tanTheta1);
+    cur -= max(0.01, depthBias1);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
@@ -265,8 +285,16 @@ void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[2] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[2] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置 = 纹素尺寸项 × (1 + 斜率项)。
+    //  纹素尺寸项 uShadowBiasCascade[2] 按“≥ 该级联单纹素世界覆盖”标定，
+    //  与光线夹角无关、**始终生效**（旧式 * (1-NdotL) 在垂直光下乘成 0，
+    //  退化为 minBias=0.01；远级联纹素大 → 深度误差 1.5*texel*tanθ 超过 0.01
+    //  → 地面自阴影 acne。2026-09-17 修）。
+    //  斜率项 tanθ = sqrt(1-NdotL²)/NdotL，管中等/大倾角。
+    float ndl2 = max(dot(N, L), 0.0);
+    float tanTheta2 = sqrt(max(1.0 - ndl2*ndl2, 0.0)) / max(ndl2, 0.05);
+    float depthBias2 = uShadowBiasCascade[2] * (1.0 + tanTheta2);
+    cur -= max(0.01, depthBias2);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
@@ -280,8 +308,16 @@ void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[3] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[3] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置 = 纹素尺寸项 × (1 + 斜率项)。
+    //  纹素尺寸项 uShadowBiasCascade[3] 按“≥ 该级联单纹素世界覆盖”标定，
+    //  与光线夹角无关、**始终生效**（旧式 * (1-NdotL) 在垂直光下乘成 0，
+    //  退化为 minBias=0.01；远级联纹素大 → 深度误差 1.5*texel*tanθ 超过 0.01
+    //  → 地面自阴影 acne。2026-09-17 修）。
+    //  斜率项 tanθ = sqrt(1-NdotL²)/NdotL，管中等/大倾角。
+    float ndl3 = max(dot(N, L), 0.0);
+    float tanTheta3 = sqrt(max(1.0 - ndl3*ndl3, 0.0)) / max(ndl3, 0.05);
+    float depthBias3 = uShadowBiasCascade[3] * (1.0 + tanTheta3);
+    cur -= max(0.01, depthBias3);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
@@ -295,8 +331,16 @@ void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[4] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[4] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置 = 纹素尺寸项 × (1 + 斜率项)。
+    //  纹素尺寸项 uShadowBiasCascade[4] 按“≥ 该级联单纹素世界覆盖”标定，
+    //  与光线夹角无关、**始终生效**（旧式 * (1-NdotL) 在垂直光下乘成 0，
+    //  退化为 minBias=0.01；远级联纹素大 → 深度误差 1.5*texel*tanθ 超过 0.01
+    //  → 地面自阴影 acne。2026-09-17 修）。
+    //  斜率项 tanθ = sqrt(1-NdotL²)/NdotL，管中等/大倾角。
+    float ndl4 = max(dot(N, L), 0.0);
+    float tanTheta4 = sqrt(max(1.0 - ndl4*ndl4, 0.0)) / max(ndl4, 0.05);
+    float depthBias4 = uShadowBiasCascade[4] * (1.0 + tanTheta4);
+    cur -= max(0.01, depthBias4);
     float s = 0.0;
     for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
         s += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
