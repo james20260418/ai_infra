@@ -1567,8 +1567,9 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 // → 用 AABB 定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段视锥在光源空间
 // 的包围盒"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
 //
-// world_up 固定为 y 轴正向 (0,1,0)；若用户给的太阳方向近乎正上方（direction 与
-// -y 几乎平行），lookAt 会退化，故把方向偏置到非正上方（世界 x 方向略偏）。
+// world_up 固定为 y 轴正向 (0,1,0)；若光方向与它平行（太阳正顶），lookAt 的
+// cross(fwd,up) 退化 —— 只补一个极小水平 epsilon 保持基连续，**不偏置光方向本身**
+//（偏置会让影子方向偏离真实光照方向，见函数内的详细说明）。
 void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun) {
     if (cmds.object3d.empty()) return;
 
@@ -1576,24 +1577,51 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     CHECK_GT(cascade_count, 0);
     CHECK_EQ(shadow_fbos_.size(), static_cast<size_t>(cascade_count));
 
-    // 光传播方向归一化；若近乎正上方（direction 平行 -y 到接近 1），偏置到非正上方，
-    // 避免 lookAt 的 cross(fwd, world_up) 退化（fwd 与 up 平行 → side=0）。
+    // 光传播方向归一化。
+    //
+    // ⚠️ 光的 view 用 BuildLookAt(eye, cam, world_up=(0,1,0))；当光方向与 world_up
+    // 平行（太阳正顶）时 cross(fwd, up)→0，BuildLookAt 的兜底 side=(1,0,0) 会让
+    // 光的基在穿过垂直时 **90° 跳变**（不连续 → 正交盒朝向/纹素网格跟着跳）。
+    // 解法：保证方向**永不与 world_up 平行** —— 仅在水平分量过小时补一个极小
+    // epsilon（≈0.0057°，**不改变实际光照方向**），保持基连续。
+    //
+    // 2026-09-17 修（原实现的 hack）：旧代码用 `if (|dir.y|>0.98) dir=(0.1,±1,z)`，
+    //   即 11.5° 阈值 + 5.7° 大偏置，三宗罪：
+    //     ① 影子投射方向偏离真实光照方向达 5.7°（2m 高物体 ≈20cm 偏移）；
+    //     ② 给平坦地面引入虚假深度梯度 → 自阴影 acne 的根源；
+    //     ③ 阈值处（仰角 78.5°）本身还有一次跳变。
+    constexpr float kEpsNorm = 1e-8f;              // 零长度向量兜底
+    constexpr float kMinLightHorizontal = 1e-4f;   // ≈0.0057°，仅维持基可逆/连续
     Vec3f dir(sun.direction.x(), sun.direction.y(), sun.direction.z());
     float dlen = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
-    if (dlen < 1e-8f) { dir = Vec3f(0.0f, -1.0f, 0.0f); dlen = 1.0f; }
+    if (dlen < kEpsNorm) { dir = Vec3f(0.0f, -1.0f, 0.0f); dlen = 1.0f; }
     dir = Vec3f(dir.x()/dlen, dir.y()/dlen, dir.z()/dlen);
-    if (std::fabs(dir.y()) > 0.98f) {
-        // 近乎正上方：沿 x 略偏，避免与 world_up=(0,1,0) 平行。
-        dir = Vec3f(0.1f, (dir.y() < 0.0f ? -1.0f : 1.0f), dir.z());
-        float nd = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
-        dir = Vec3f(dir.x()/nd, dir.y()/nd, dir.z()/nd);
+    {
+        const float hlen = std::sqrt(dir.x()*dir.x() + dir.z()*dir.z());
+        if (hlen < kMinLightHorizontal) {
+            float hx = dir.x();
+            float hz = dir.z();
+            if (hlen > kEpsNorm) {
+                const float s = kMinLightHorizontal / hlen;   // 保持原水平方位
+                hx *= s;
+                hz *= s;
+            } else {
+                hx = kMinLightHorizontal;                     // 完全垂直：任选方位
+                hz = 0.0f;
+            }
+            const float nd = std::sqrt(hx*hx + dir.y()*dir.y() + hz*hz);
+            dir = Vec3f(hx/nd, dir.y()/nd, hz/nd);
+        }
     }
 
     const Vec3f world_up(0.0f, 1.0f, 0.0f);  // y-up 世界
 
-    // 光源 view 矩阵：正交投影下成像只由方向决定，眼睛沿反向退固定距离。
-    // eye 取相机位置沿光反向退 kLightDist（足够覆盖所有级联范围的视锥）。
-    const float kLightDist = 200.0f;
+    // 光源 view 矩阵：正交投影下成像只由方向决定，眼睛沿光反向退 kLightDist。
+    // kLightDist 由「阴影总距离」推导，不用魔数：阴影关心的区域都在相机
+    // shadow_dist 以内，眼退到 2×该距离即可保证全部落在眼前方（不被 near 裁掉）。
+    // （原来写死 200：场景比 200m 更高/更大时，靠光侧的物体会落到眼后方被裁 → 丢影。）
+    const float shadow_dist = shadow_cfg_.cascade_ranges[cascade_count - 1];
+    const float kLightDist = 2.0f * shadow_dist;
     const Vec3f camera_pos = {
         cmds.camera.position.x(), cmds.camera.position.y(), cmds.camera.position.z()
     };
@@ -1689,24 +1717,29 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             min_y = std::min(min_y, ly); max_y = std::max(max_y, ly);
         }
 
-        // 正交投影：光照沿 -z（光 view 空间），x/y 覆盖切片 AABB；
-        // z 用**全局统一**的固定深度范围，与场景内容无关。
-        // 理由：被比较的深度值来自 uShadowDepthVP（线性米，相对主视锥中心），
-        // 与本正交 near/far 无关；near/far 只用于深度裁剪，只需足够大以容纳
-        // 所有可能投影的 caster。固定 10km 覆盖任意场景纵深，不再随切片/物体变化。
-        const float pad = 1.0f;
-        const float left = min_x - pad, right = max_x + pad;
-        const float bottom = min_y - pad, top = max_y + pad;
-        constexpr float kShadowDepthSpan = 10000.0f;   // 全局统一 10km
-        const float near_dist = 0.1f;
-        const float far_dist  = kShadowDepthSpan;
-        if (right - left < 1e-5f || top - bottom < 1e-5f) {
+        // 正交投影：光照沿 -z（光 view 空间），x/y 覆盖切片 AABB（+1 纹素边距）；
+        // z（near/far）由「眼→阴影纵深」推导，见下方。
+        const float span_x = max_x - min_x;
+        const float span_y = max_y - min_y;
+        if (span_x < 1e-5f || span_y < 1e-5f) {
             // 退化的级联（如首段 near 极近导致视锥近似点），给最小范围。
             float vp[16]; BuildOrthoProj(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 2.0f, vp);
             RendererMat4Mul(vp, view, shadow_vp_[c]);
             shadow_texel_world_[c] = 0.0f;
             continue;
         }
+        // 各向外扩 **1 个纹素**（自缩放，不用写死的米数）：避免片元恰落在盒边缘时
+        // 采样/裁剪出瑕疵；扩大量随级联分辨率自动跟随（原为固定 1.0m，既浪费
+        // 近级联分辨率、又对大场景偏小）。
+        const float pad_x = span_x / static_cast<float>(shadow_fbos_[c].size);
+        const float pad_y = span_y / static_cast<float>(shadow_fbos_[c].size);
+        const float left = min_x - pad_x, right = max_x + pad_x;
+        const float bottom = min_y - pad_y, top = max_y + pad_y;
+        // 正交 near/far：只需覆盖「眼→整个阴影纵深」。被比较的深度来自
+        // uShadowDepthVP（线性米，与这里无关），故 near/far 只影响裁剪 —— 取宽裕值
+        // 即可，无需魔数。（原为 0.1 / 10000 两个写死的数。）
+        const float near_dist = 0.0f;
+        const float far_dist  = 2.0f * kLightDist;   // 覆盖眼前 4×shadow_dist
 
         float proj[16];
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
