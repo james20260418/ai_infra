@@ -574,14 +574,35 @@ struct ShadowConfig {
     float fade_start = 120.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
 
-    // 每级联 1 个 depth-bias 的 bias_base，**单位为米（世界单位）**，用于 slope 项：
-    //   depthBias = max(0.01, cascade_bias[c] * (1-NdotL))
-    //   （minBias=0.01 全局兜底垂直光 NdotL→1 使 slope 归零；slope 项管中等倾角。）
-    // 与级联一一对应：cascade_bias[c] 只作用于第 c 段。外部可逐级联覆盖。
-    // 默认值按“≥ 该级联单 texel 世界覆盖大小”原则设定（2026-08-30）：
-    //   texel_world ≈ 级联覆盖跨度 / 分辨率；以 fov=60° 估 覆盖跨度≈1.155×far。
-    //   近级联小、远级联大（因远级联分辨率低、far 大），故 bias_base 随级联递增。
-    //   ⚠️ 注意：这是米单位（因 depth 已是米），远非旧版 NDC 的 0.002~0.008。
+    // ⚠️ 以下 cascade_bias 是**可选的 override**（手工覆盖），默认**不启用**。
+    //
+    // 【默认：自动几何推导，无需任何配置】（override_cascade_bias=false）
+    //   shader 里逐级联算：
+    //       bias_c = max(minBias, kBiasK · texelW_c · tanθ)
+    //     其中
+    //       texelW_c  = max(该级联正交盒 x 跨度, y 跨度) / cascade_sizes[c]（米）
+    //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）；
+    //       kBiasK   = kBiasSafety(1.5) × kPcfRadiusT —— 与 PCF 核半径联动；
+    //       tanθ     = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，
+    //                  Ld = 深度轴方向（= 阴影 pass 实际用的光传播方向的反向；
+    //                  shader 从 uShadowDepthVP 的 z 行直接取，保证与深度比较同源）。
+    //                  ⚠️ 不能用 uSunDir 算：阴影 pass 在光方向近平行世界 up 时会偏置
+    //                  方向以避开 lookAt 退化，此时深度轴与 uSunDir 不同 —— 平坦地面
+    //                  在深度轴上仍有真实梯度（2026-09-17 实测：用 uSunDir 会得 tanθ=0，
+    //                  自动偏置塌回 minBias，acne 依旧）。
+    //       minBias  = 0.01（米，全局兜底）。
+    //   推导：平坦接收面在一个纹素足迹内的光轴深度偏离 = texelWorld · tanθ
+    //         （足迹被拉长为 t/cosθ，深度梯度为 sinθ，二者相乘 = t·tanθ）；
+    //         PCF 会采样到核半径个纹素外，故再乘核半径（kBiasK 已含）。
+    //   好处：cascade_sizes 或正交盒 fit 一改，偏置自动跟随，不会出现
+    //         “改了纹素尺寸却忘了改偏置配置”导致的地面自阴影 acne
+    //         （2026-09-17 实测教训：暗带从 C2 起，正是 texelWorld·tanθ 越过 minBias 之处）。
+    //
+    // 【override：手工指定等效纹素边长】（override_cascade_bias=true）
+    //   公式不变，只把 texelW_c 换成手工值 cascade_bias[c]（米，等效单纹素世界边长）：
+    //       bias_c = max(minBias, kBiasK · cascade_bias[c] · tanθ)
+    //   仅在需要偏离几何推导（例如自定义阴影强度）时才用。
+    bool  override_cascade_bias = false;
     float cascade_bias[kMaxCascades] = {0.005f, 0.033f, 0.073f, 0.260f, 0.406f};
 
     // 默认配置：5 级联、近处高分辨率远处低分辨率、指数分布（近密远疏）、自然淡出。

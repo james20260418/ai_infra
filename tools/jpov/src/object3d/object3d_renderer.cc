@@ -588,6 +588,7 @@ void Object3DRenderer::UploadSunData(
     const std::vector<CascadeFBO>& shadow_fbos,
     const float shadow_vp[][16],
     const float shadow_depth_vp[][16],
+    const float shadow_texel_world[],
     const ShadowConfig& cfg,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
@@ -618,13 +619,18 @@ void Object3DRenderer::UploadSunData(
         // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
         CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))
             << "UploadSunData: shadow_fbos.size() 与 cascade_count 不一致";
-        // 每级联独立深度偏置（ndc 单位，来自 ShadowConfig::cascade_bias）。
+        // 深度偏置：自动 = shader 用单纹素世界边长几何推导；override = 手工等效边长。
         // 上传全部 kMaxCascades 位（未用位取 0 或默认，shader 只索引实际级联）。
+        // 见 ShadowConfig::cascade_bias 的公式与推导。
         static constexpr int kMaxC = jpov::ShadowConfig::kMaxCascades;
-        float bias[kMaxC] = {0.004f, 0.004f, 0.004f, 0.004f, 0.004f};
+        float bias[kMaxC] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         for (int c = 0; c < kMaxC; ++c) bias[c] = cfg.cascade_bias[c];
         glUniform1fv(shader_mgr.GetUniform(p, "uShadowBiasCascade"),
                      kMaxC, bias);
+        glUniform1i(shader_mgr.GetUniform(p, "uShadowBiasOverride"),
+                    cfg.override_cascade_bias ? 1 : 0);
+        glUniform1fv(shader_mgr.GetUniform(p, "uShadowTexelWorld"),
+                     kMaxC, shadow_texel_world);
         for (int c = 0; c < cascade_count; ++c) {
             const unsigned int unit =
                 static_cast<unsigned int>(kTexUnitShadowMapBase) + static_cast<unsigned int>(c);

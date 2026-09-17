@@ -6,7 +6,6 @@
 #include "tools/jpov/src/renderer.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -998,49 +997,6 @@ SkeletonManager* Renderer::GetSkeleton(uint32_t skeleton_id) {
     return skeleton_managers_[skeleton_id - 1].get();
 }
 
-// ---- 内部：局部→世界模型矩阵（列主序，先缩放后旋转再平移；与 object3d 一致）----
-namespace {
-// 向量归一化（组件式；Vec3f 用 Norm()/无 scalar /，避免 API 歧义）
-Vec3f Norm3(Vec3f v) {
-    const float n = std::sqrt(v.x()*v.x() + v.y()*v.y() + v.z()*v.z());
-    if (n > 1e-8f) {
-        return Vec3f(v.x()/n, v.y()/n, v.z()/n);
-    }
-    return v;
-}
-// 把 mesh 的局部 AABB 8 角点经 (center,up,front,scale) 摆到世界，再经光空间 view
-// 变换，累计成一个光空间 AABB 追加到 out（[min_x,max_x,min_y,max_y,min_z,max_z]）。
-// 逻辑与 DrawShadowPass 里 object3d 的 AABB 一致；skinned 用 mesh(rest) 的 bounds 近似
-// （M1 单 pose 静态，蒙皮后顶点≈bind 顶点，用 rest bounds 够）。
-void AppendLightAabb(const GPUMesh* mesh, const Vec3f& center, Vec3f up,
-                     Vec3f front, float scale, const float view[16],
-                     std::vector<std::array<float, 6>>* out) {
-    if (mesh == nullptr) return;
-    up = Norm3(up); front = Norm3(front);
-    Vec3f left(up.y()*front.z() - up.z()*front.y(),
-               up.z()*front.x() - up.x()*front.z(),
-               up.x()*front.y() - up.y()*front.x());
-    left = Norm3(left);
-    std::array<float, 6> b{1e30f, -1e30f, 1e30f, -1e30f, 1e30f, -1e30f};
-    for (int ix = 0; ix <= 1; ++ix) {
-        const float lx = (ix == 0) ? mesh->bounds_min[0] : mesh->bounds_max[0];
-        for (int iy = 0; iy <= 1; ++iy) {
-            const float ly = (iy == 0) ? mesh->bounds_min[1] : mesh->bounds_max[1];
-            for (int iz = 0; iz <= 1; ++iz) {
-                const float lz = (iz == 0) ? mesh->bounds_min[2] : mesh->bounds_max[2];
-                const Vec3f wp = center + (left*lx + up*ly + front*lz) * scale;
-                const float lx2 = view[0]*wp.x() + view[4]*wp.y() + view[8]*wp.z() + view[12];
-                const float ly2 = view[1]*wp.x() + view[5]*wp.y() + view[9]*wp.z() + view[13];
-                const float lz2 = view[2]*wp.x() + view[6]*wp.y() + view[10]*wp.z() + view[14];
-                b[0]=std::min(b[0],lx2); b[1]=std::max(b[1],lx2);
-                b[2]=std::min(b[2],ly2); b[3]=std::max(b[3],ly2);
-                b[4]=std::min(b[4],lz2); b[5]=std::max(b[5],lz2);
-            }
-        }
-    }
-    if (b[1] > -1e30f) out->push_back(b);
-}
-}  // namespace
 void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                                       const RenderCommandList& cmds,
                                       int fbo_w, int fbo_h) {
@@ -1297,14 +1253,14 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_cfg_, eff_sun);
+                shadow_texel_world_, shadow_cfg_, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
             // SkeletonRenderer::DrawSkinnedMesh，其本身不上传光照。
             if (!cmds.skinned_mesh.empty()) {
                 SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProg(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                    shadow_cfg_, eff_sun);
+                    shadow_texel_world_, shadow_cfg_, eff_sun);
             }
         }
 
@@ -1612,8 +1568,9 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 // → 用 AABB 定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段视锥在光源空间
 // 的包围盒"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
 //
-// world_up 固定为 y 轴正向 (0,1,0)；若用户给的太阳方向近乎正上方（direction 与
-// -y 几乎平行），lookAt 会退化，故把方向偏置到非正上方（世界 x 方向略偏）。
+// world_up 固定为 y 轴正向 (0,1,0)；若光方向与它平行（太阳正顶），lookAt 的
+// cross(fwd,up) 退化 —— 只补一个极小水平 epsilon 保持基连续，**不偏置光方向本身**
+//（偏置会让影子方向偏离真实光照方向，见函数内的详细说明）。
 void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun) {
     if (cmds.object3d.empty()) return;
 
@@ -1621,24 +1578,51 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     CHECK_GT(cascade_count, 0);
     CHECK_EQ(shadow_fbos_.size(), static_cast<size_t>(cascade_count));
 
-    // 光传播方向归一化；若近乎正上方（direction 平行 -y 到接近 1），偏置到非正上方，
-    // 避免 lookAt 的 cross(fwd, world_up) 退化（fwd 与 up 平行 → side=0）。
+    // 光传播方向归一化。
+    //
+    // ⚠️ 光的 view 用 BuildLookAt(eye, cam, world_up=(0,1,0))；当光方向与 world_up
+    // 平行（太阳正顶）时 cross(fwd, up)→0，BuildLookAt 的兜底 side=(1,0,0) 会让
+    // 光的基在穿过垂直时 **90° 跳变**（不连续 → 正交盒朝向/纹素网格跟着跳）。
+    // 解法：保证方向**永不与 world_up 平行** —— 仅在水平分量过小时补一个极小
+    // epsilon（≈0.0057°，**不改变实际光照方向**），保持基连续。
+    //
+    // 2026-09-17 修（原实现的 hack）：旧代码用 `if (|dir.y|>0.98) dir=(0.1,±1,z)`，
+    //   即 11.5° 阈值 + 5.7° 大偏置，三宗罪：
+    //     ① 影子投射方向偏离真实光照方向达 5.7°（2m 高物体 ≈20cm 偏移）；
+    //     ② 给平坦地面引入虚假深度梯度 → 自阴影 acne 的根源；
+    //     ③ 阈值处（仰角 78.5°）本身还有一次跳变。
+    constexpr float kEpsNorm = 1e-8f;              // 零长度向量兜底
+    constexpr float kMinLightHorizontal = 1e-4f;   // ≈0.0057°，仅维持基可逆/连续
     Vec3f dir(sun.direction.x(), sun.direction.y(), sun.direction.z());
     float dlen = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
-    if (dlen < 1e-8f) { dir = Vec3f(0.0f, -1.0f, 0.0f); dlen = 1.0f; }
+    if (dlen < kEpsNorm) { dir = Vec3f(0.0f, -1.0f, 0.0f); dlen = 1.0f; }
     dir = Vec3f(dir.x()/dlen, dir.y()/dlen, dir.z()/dlen);
-    if (std::fabs(dir.y()) > 0.98f) {
-        // 近乎正上方：沿 x 略偏，避免与 world_up=(0,1,0) 平行。
-        dir = Vec3f(0.1f, (dir.y() < 0.0f ? -1.0f : 1.0f), dir.z());
-        float nd = std::sqrt(dir.x()*dir.x() + dir.y()*dir.y() + dir.z()*dir.z());
-        dir = Vec3f(dir.x()/nd, dir.y()/nd, dir.z()/nd);
+    {
+        const float hlen = std::sqrt(dir.x()*dir.x() + dir.z()*dir.z());
+        if (hlen < kMinLightHorizontal) {
+            float hx = dir.x();
+            float hz = dir.z();
+            if (hlen > kEpsNorm) {
+                const float s = kMinLightHorizontal / hlen;   // 保持原水平方位
+                hx *= s;
+                hz *= s;
+            } else {
+                hx = kMinLightHorizontal;                     // 完全垂直：任选方位
+                hz = 0.0f;
+            }
+            const float nd = std::sqrt(hx*hx + dir.y()*dir.y() + hz*hz);
+            dir = Vec3f(hx/nd, dir.y()/nd, hz/nd);
+        }
     }
 
     const Vec3f world_up(0.0f, 1.0f, 0.0f);  // y-up 世界
 
-    // 光源 view 矩阵：正交投影下成像只由方向决定，眼睛沿反向退固定距离。
-    // eye 取相机位置沿光反向退 kLightDist（足够覆盖所有级联范围的视锥）。
-    const float kLightDist = 200.0f;
+    // 光源 view 矩阵：正交投影下成像只由方向决定，眼睛沿光反向退 kLightDist。
+    // kLightDist 由「阴影总距离」推导，不用魔数：阴影关心的区域都在相机
+    // shadow_dist 以内，眼退到 2×该距离即可保证全部落在眼前方（不被 near 裁掉）。
+    // （原来写死 200：场景比 200m 更高/更大时，靠光侧的物体会落到眼后方被裁 → 丢影。）
+    const float shadow_dist = shadow_cfg_.cascade_ranges[cascade_count - 1];
+    const float kLightDist = 2.0f * shadow_dist;
     const Vec3f camera_pos = {
         cmds.camera.position.x(), cmds.camera.position.y(), cmds.camera.position.z()
     };
@@ -1677,68 +1661,6 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     const float fov_rad = cmds.camera.fov * 3.14159265358979323846f / 180.0f;
 
     float prev_far = cmds.camera.near;
-
-    // 预计算每个 Object3D 的光空间 AABB（用其 CPU 包围盒 bounds_min/max + 摆放变换）。
-    // 目标：让每级联 shadow 覆盖能包含“可能往该区域投影”的所有物体，即使其相机
-    // 视锥之外 —— 否则物体在视锥外就不产生阴影（原实现的致命缺陷）。
-    // 结构：[min_x,max_x,min_y,max_y,min_z,max_z] 光空间 AABB。
-    std::vector<std::array<float, 6>> obj_light_aabb;
-    obj_light_aabb.reserve(cmds.object3d.size());
-    for (const auto& o : cmds.object3d) {
-        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
-        if (!mesh) continue;
-        // 本物体世界 AABB：把局部 bounds_min/max 8 角点经（center,up,front）变换到世界。
-        const Vec3f center{o.center.x(), o.center.y(), o.center.z()};
-        const Vec3f up{o.up.x(), o.up.y(), o.up.z()};
-        const Vec3f fr{o.front.x(), o.front.y(), o.front.z()};
-        float u_len = std::sqrt(up.x()*up.x()+up.y()*up.y()+up.z()*up.z());
-        float f_len = std::sqrt(fr.x()*fr.x()+fr.y()*fr.y()+fr.z()*fr.z());
-        if (u_len < 1e-8f || f_len < 1e-8f) continue;
-        const Vec3f un = up * (1.0f/u_len);
-        const Vec3f fn = fr * (1.0f/f_len);
-        // 局部坐标轴：+X=left=cross(up,front)，+Y=up，+Z=front（与 BuildModelMatrix 一致）。
-        Vec3f left{un.y()*fn.z()-un.z()*fn.y(), un.z()*fn.x()-un.x()*fn.z(),
-                   un.x()*fn.y()-un.y()*fn.x()};
-        float l_len = std::sqrt(left.x()*left.x()+left.y()*left.y()+left.z()*left.z());
-        if (l_len < 1e-8f) continue;
-        left = left * (1.0f/l_len);
-        // 局部 AABB 8 角点 → 光空间，累计本物体光空间 AABB。
-        std::array<float,6> b{1e30f,-1e30f,1e30f,-1e30f,1e30f,-1e30f};
-        for (int ix=0; ix<=1; ++ix) {
-          const float lx = (ix==0) ? mesh->bounds_min[0] : mesh->bounds_max[0];
-          for (int iy=0; iy<=1; ++iy) {
-            const float ly = (iy==0) ? mesh->bounds_min[1] : mesh->bounds_max[1];
-            for (int iz=0; iz<=1; ++iz) {
-              const float lz = (iz==0) ? mesh->bounds_min[2] : mesh->bounds_max[2];
-              // 局部 → 世界（center + 轴缩放×对象整体缩放）：world = center + (left*lx + up*ly + fn*lz)*scale
-              // （与 BuildModelMatrix 的 先缩放→旋转→平移 一致，保证 AABB 覆盖与渲染几何吻合。）
-              const Vec3f wp = center + (left*lx + un*ly + fn*lz) * o.scale;
-              const float lx2 = view[0]*wp.x()+view[4]*wp.y()+view[8]*wp.z()+view[12];
-              const float ly2 = view[1]*wp.x()+view[5]*wp.y()+view[9]*wp.z()+view[13];
-              const float lz2 = view[2]*wp.x()+view[6]*wp.y()+view[10]*wp.z()+view[14];
-              b[0]=std::min(b[0],lx2); b[1]=std::max(b[1],lx2);
-              b[2]=std::min(b[2],ly2); b[3]=std::max(b[3],ly2);
-              b[4]=std::min(b[4],lz2); b[5]=std::max(b[5],lz2);
-            }
-          }
-        }
-        if (b[1] > -1e30f) {  // 有效（有顶点）
-            obj_light_aabb.push_back(b);
-        }
-    }
-
-    // 蒙皮实例也应可能投影出阴影：对每条 skinned_mesh 的每个实例，用其 rest mesh 的
-    // AABB + (center,up,front,scale) 摆到世界累加进 obj_light_aabb（M1 单 pose，蒙皮后
-    // 顶点≈bind 顶点，用 rest 包围盒近似足够；真正逐骨变形阴影 AABB 留后续）。
-    for (const auto& s : cmds.skinned_mesh) {
-        const GPUMesh* mesh = mesh_mgr_.GetMesh(s.mesh_id);
-        if (!mesh) continue;
-        for (const SkinnedInstanceState& inst : s.instances) {
-            AppendLightAabb(mesh, inst.transform.center, inst.transform.up,
-                            inst.transform.front, inst.transform.scale,
-                            view, &obj_light_aabb);
-        }
-    }
 
     for (int c = 0; c < cascade_count; ++c) {
         const float near_i = prev_far;
@@ -1782,62 +1704,52 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             c_far  - side*w_far  + upv*h_far,  c_far  + side*w_far  + upv*h_far,
         };
 
-        // 变换到光源 view 空间，求 AABB（光空间 x/y/z 范围）。
-        // 并把场景所有物体的光空间 AABB 并入 —— 保证该级联 shadow map 一定包含
-        // 所有可能投到该区域的物体（即使其在相机视锥外）。这是“相机不对着墙也有
-        // 墙影”的关键修复（原实现只 fit 相机视锥切片，视锥外物体被正交裁剪出不了影）。
+        // 正交盒 x/y = 仅该级联相机视锥切片的光源空间 AABB（与场景内容无关）。
+        // 依据：正交投影下，caster 能对切片内片元投影 ⟺ 其光空间横向位置落在切片
+        // 横向投影范围内。横向不在范围内的物体，其影子横向也不可能落在切片内，
+        // 故无需（也不应）并入任何物体 AABB —— 那会让单个大物体（如 300m 地面）
+        // 把整级联正交盒撑爆，近密远疏失效（2026-09-17 修正）。
         float min_x = 1e30f, max_x = -1e30f;
         float min_y = 1e30f, max_y = -1e30f;
-        float min_z = 1e30f, max_z = -1e30f;
-        const auto acc = [&](float x, float y, float z) {
-            min_x = std::min(min_x, x); max_x = std::max(max_x, x);
-            min_y = std::min(min_y, y); max_y = std::max(max_y, y);
-            min_z = std::min(min_z, z); max_z = std::max(max_z, z);
-        };
         for (const Vec3f& p : corners) {
             const float lx = view[0]*p.x() + view[4]*p.y() + view[8]*p.z()  + view[12];
             const float ly = view[1]*p.x() + view[5]*p.y() + view[9]*p.z()  + view[13];
-            const float lz = view[2]*p.x() + view[6]*p.y() + view[10]*p.z() + view[14];
-            acc(lx, ly, lz);
-        }
-        // 并入“光程与该级联相机切片有重叠”的物体（按光空间 z 筛选）。
-        // 只并入重叠物体：远处物体不撑大近级联覆盖，保持近密远疏的精度分布。
-        // 重叠容差 = 该级联切片 z 跨度的一半（把光路径上的投影体都纳入）；
-        // 物体若与切片 z 有交集（或落在容差内）都可能投影到这片区域 → 并入。
-        if (obj_light_aabb.size() > 0u) {
-            const float slice_max_z = max_z;
-            const float slice_min_z = min_z;
-            const float z_tol = 0.5f * (slice_max_z - slice_min_z) + 10.0f;
-            for (int k = 0; k < (int)obj_light_aabb.size(); ++k) {
-                const auto& b = obj_light_aabb[k];
-                // 物体光空间 z [b[4],b[5]] 与切片 [min_tol,max_tol] 若有重叠则并入。
-                if (b[5] >= slice_min_z - z_tol && b[4] <= slice_max_z + z_tol) {
-                    acc(b[0], b[2], b[4]);
-                    acc(b[1], b[3], b[5]);
-                }
-            }
+            min_x = std::min(min_x, lx); max_x = std::max(max_x, lx);
+            min_y = std::min(min_y, ly); max_y = std::max(max_y, ly);
         }
 
-        // 正交投影：光照沿 -z（光 view 空间），xy 覆盖 AABB；z 覆盖 AABB。
-        // 加少量边距避免边缘裁剪。
-        // ⚠️ BuildOrthoProj 的 near/far 参数是沿 -z 的**正距离**（映射 z_eye=-near→-1、
-        // z_eye=-far→+1），不是光空间 z 本身。光空间里物体在眼前方 z 为负，
-        // 最近处（近平面）是最小负数 → near 距离 = -max_z，far 距离 = -min_z。
-        const float pad = 1.0f;
-        const float left = min_x - pad, right = max_x + pad;
-        const float bottom = min_y - pad, top = max_y + pad;
-        const float near_dist = -max_z + pad;   // 近平面距离（正）
-        const float far_dist  = -min_z + pad;   // 远平面距离（正）
-        if (right - left < 1e-5f || top - bottom < 1e-5f || far_dist - near_dist < 1e-5f) {
+        // 正交投影：光照沿 -z（光 view 空间），x/y 覆盖切片 AABB（+1 纹素边距）；
+        // z（near/far）由「眼→阴影纵深」推导，见下方。
+        const float span_x = max_x - min_x;
+        const float span_y = max_y - min_y;
+        if (span_x < 1e-5f || span_y < 1e-5f) {
             // 退化的级联（如首段 near 极近导致视锥近似点），给最小范围。
             float vp[16]; BuildOrthoProj(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 2.0f, vp);
             RendererMat4Mul(vp, view, shadow_vp_[c]);
+            shadow_texel_world_[c] = 0.0f;
             continue;
         }
+        // 各向外扩 **1 个纹素**（自缩放，不用写死的米数）：避免片元恰落在盒边缘时
+        // 采样/裁剪出瑕疵；扩大量随级联分辨率自动跟随（原为固定 1.0m，既浪费
+        // 近级联分辨率、又对大场景偏小）。
+        const float pad_x = span_x / static_cast<float>(shadow_fbos_[c].size);
+        const float pad_y = span_y / static_cast<float>(shadow_fbos_[c].size);
+        const float left = min_x - pad_x, right = max_x + pad_x;
+        const float bottom = min_y - pad_y, top = max_y + pad_y;
+        // 正交 near/far：只需覆盖「眼→整个阴影纵深」。被比较的深度来自
+        // uShadowDepthVP（线性米，与这里无关），故 near/far 只影响裁剪 —— 取宽裕值
+        // 即可，无需魔数。（原为 0.1 / 10000 两个写死的数。）
+        const float near_dist = 0.0f;
+        const float far_dist  = 2.0f * kLightDist;   // 覆盖眼前 4×shadow_dist
 
         float proj[16];
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
         RendererMat4Mul(proj, view, shadow_vp_[c]);
+
+        // 该级联单纹素的世界覆盖边长（米）：正交盒跨度 / map 尺寸。取 x/y 较大者
+        // （各向异性保守）。供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
+        shadow_texel_world_[c] = std::max(right - left, top - bottom)
+                                 / static_cast<float>(shadow_fbos_[c].size);
 
         // 渲第 c 段：绑定对应 FBO + viewport，清屏，画所有投射物体。
         const CascadeFBO& fb = shadow_fbos_[c];

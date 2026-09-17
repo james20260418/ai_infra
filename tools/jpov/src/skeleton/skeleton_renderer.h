@@ -102,7 +102,20 @@ uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTUR
 uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj（用于把 world_pos 投影到 shadow map uv)
 uniform mat4  uShadowDepthVP[5];      // 各级联光空间线性深度矩阵（DepthProj*view，.z = 相对主视锥中心的线深）
 uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
-uniform float uShadowBiasCascade[5];    // 每级联 depth-bias 的 bias_base（米，外部可配；搭配 minBias=0.01）
+uniform int   uShadowBiasOverride;      // 0=自动几何推导（默认）；1=用手工 uShadowBiasCascade
+uniform float uShadowTexelWorld[5];     // 每级联单纹素世界边长（米），自动偏置用
+uniform float uShadowBiasCascade[5];    // override 的等效单纹素世界边长（米），仅 override=1 时用
+
+// ---- PCF 核 与 深度偏置 联动常量（改核半径，偏置自动跟随）----
+const int   kPcfRadiusT    = 1;                                 // 核半径（纹素）：3×3 → 1
+const int   kPcfTapCountT  = (2*kPcfRadiusT+1) * (2*kPcfRadiusT+1);
+const float kBiasSafety    = 1.5;                               // 满径安全裕度
+const float kBiasK         = kBiasSafety * float(kPcfRadiusT);  // 自动偏置系数
+const float kMinShadowBias = 0.01;                              // 全局兜底（米）
+// 级联权重早退阈值：权重 (wlo·whi) 不大于此值即跳过该级联的 PCF 采样。
+// 与 computeSunShadow 末尾的 `wsum > 1e-5` 同量级——远小于该量的权重对
+// 最终 shadow 的贡献低于浮点有效精度，跳过不改变可见结果。
+const float kShadowWeightEps = 1e-5;
 uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
 uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
 
@@ -116,11 +129,21 @@ const float PI = 3.14159265;
 // shadow map 存的是**相对主视锥中心的原始线性深度**（米，见 kShadowVs）；
 // 主 pass 用 uShadowDepthVP[c]（DepthProj*view）把 world_pos 重投到同一线性深度，
 // 两端同源一致、不经 near/far 归一化。
-// ⚠️ mile3：固定 3×3 PCF（平均 soft shadow）；depth bias = max(minBias, bias_base*(1-NdotL))：
-//     minBias 全局 0.01（米，兜底垂直光 NdotL→1 使 slope 归零）；
-//     bias_base = uShadowBiasCascade[c]（米，复用挡墙 cascade_bias 配置），
-//     按“≥ 该级联单 texel 世界覆盖大小”原则设定，slope 项管中等倾角。
-//     （PCF 系数=固定 3×3，对外部隐藏，不暴露新参数。）
+// ⚠️ PCF：核 = (2·kPcfRadiusT+1)² 采样（kPcfRadiusT=1 → 3×3），平均 soft shadow。
+// depth bias（自动推导，见 ShadowConfig::cascade_bias）：
+//     bias_c = max(kMinShadowBias, kBiasK · texelW_c · tanθ)
+//     texelW_c = uShadowTexelWorld[c]（该级联单纹素世界边长，米；自动）
+//             或 uShadowBiasCascade[c]（override：手工等效边长）
+//     tanθ = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，Ld = 深度轴方向（从 uShadowDepthVP 的 z 行取，
+//            即阴影 pass 实际用的光传播方向的反向 —— 与深度比较同源；不能用 uSunDir，
+//            因为阴影 pass 会对近平行的光方向做偏置以避开 lookAt 退化）
+//   推导：平坦接收面在一个纹素足迹内的光轴深度偏离 = texelWorld·tanθ
+//         （足迹被拉长为 t/cosθ，深度梯度 sinθ，相乘 = t·tanθ）；
+//         PCF 会采到核半径个纹素外，kBiasK 已含核半径与裕度。
+//   ⚠️ 2026-09-17 教训：旧式 bias_base*(1-NdotL) 在垂直光（NdotL→1）下被乘成 0、
+//   退化为 minBias=0.01，而远级联单纹素大（C2 13.2cm/C3 46.6cm/C4 72.6cm），
+//   平坦地面深度误差 texelWorld·tanθ 超过 0.01 → 地面自阴影 acne
+//   （表现为地平线下方一条随级联纹素呈大格子的暗带）。
 // ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
 // 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
 // uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
@@ -135,12 +158,21 @@ void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[0] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[0] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);   // minBias 0.01 全局 + slope 项（bias_base=米）
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd0 = vec3(uShadowDepthVP[0][0][2], uShadowDepthVP[0][1][2], uShadowDepthVP[0][2][2]);
+    vec3 Ld0 = -normalize(dfwd0);
+    float ndl0 = max(dot(N, Ld0), 1e-3);
+    float tanTheta0 = sqrt(max(1.0 - ndl0*ndl0, 0.0)) / ndl0;
+    float texelW0 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[0]
+                                                 : uShadowTexelWorld[0];
+    cur -= max(kMinShadowBias, kBiasK * texelW0 * tanTheta0);
     float s = 0.0;   // 固定 3×3 PCF
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
         s += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
-    shadow = s / 9.0;
+    shadow = s / float(kPcfTapCountT);
     covered = 1.0;
 }
 void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -150,12 +182,21 @@ void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[1] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[1] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd1 = vec3(uShadowDepthVP[1][0][2], uShadowDepthVP[1][1][2], uShadowDepthVP[1][2][2]);
+    vec3 Ld1 = -normalize(dfwd1);
+    float ndl1 = max(dot(N, Ld1), 1e-3);
+    float tanTheta1 = sqrt(max(1.0 - ndl1*ndl1, 0.0)) / ndl1;
+    float texelW1 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[1]
+                                                 : uShadowTexelWorld[1];
+    cur -= max(kMinShadowBias, kBiasK * texelW1 * tanTheta1);
     float s = 0.0;
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
         s += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
-    shadow = s / 9.0;
+    shadow = s / float(kPcfTapCountT);
     covered = 1.0;
 }
 void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -165,12 +206,21 @@ void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[2] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[2] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd2 = vec3(uShadowDepthVP[2][0][2], uShadowDepthVP[2][1][2], uShadowDepthVP[2][2][2]);
+    vec3 Ld2 = -normalize(dfwd2);
+    float ndl2 = max(dot(N, Ld2), 1e-3);
+    float tanTheta2 = sqrt(max(1.0 - ndl2*ndl2, 0.0)) / ndl2;
+    float texelW2 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[2]
+                                                 : uShadowTexelWorld[2];
+    cur -= max(kMinShadowBias, kBiasK * texelW2 * tanTheta2);
     float s = 0.0;
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
         s += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
-    shadow = s / 9.0;
+    shadow = s / float(kPcfTapCountT);
     covered = 1.0;
 }
 void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -180,12 +230,21 @@ void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[3] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[3] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd3 = vec3(uShadowDepthVP[3][0][2], uShadowDepthVP[3][1][2], uShadowDepthVP[3][2][2]);
+    vec3 Ld3 = -normalize(dfwd3);
+    float ndl3 = max(dot(N, Ld3), 1e-3);
+    float tanTheta3 = sqrt(max(1.0 - ndl3*ndl3, 0.0)) / ndl3;
+    float texelW3 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[3]
+                                                 : uShadowTexelWorld[3];
+    cur -= max(kMinShadowBias, kBiasK * texelW3 * tanTheta3);
     float s = 0.0;
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
         s += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
-    shadow = s / 9.0;
+    shadow = s / float(kPcfTapCountT);
     covered = 1.0;
 }
 void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -195,12 +254,21 @@ void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
     vec4 dpos = uShadowDepthVP[4] * vec4(world_pos, 1.0);
     float cur = dpos.z / dpos.w;
-    float slopeBias = uShadowBiasCascade[4] * (1.0 - dot(N, L));
-    cur -= max(0.01, slopeBias);
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd4 = vec3(uShadowDepthVP[4][0][2], uShadowDepthVP[4][1][2], uShadowDepthVP[4][2][2]);
+    vec3 Ld4 = -normalize(dfwd4);
+    float ndl4 = max(dot(N, Ld4), 1e-3);
+    float tanTheta4 = sqrt(max(1.0 - ndl4*ndl4, 0.0)) / ndl4;
+    float texelW4 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[4]
+                                                 : uShadowTexelWorld[4];
+    cur -= max(kMinShadowBias, kBiasK * texelW4 * tanTheta4);
     float s = 0.0;
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
         s += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
-    shadow = s / 9.0;
+    shadow = s / float(kPcfTapCountT);
     covered = 1.0;
 }
 
@@ -227,40 +295,62 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
 
     // 每个实际声明的级联：近端升 × 远端降的平滑权重（与相邻级联互补）。
     // blend 宽度 = 该级联跨度的 15%。级联0 近端 / 末级联远端无邻居 → 恒 1。
+    //
+    // ⚠️ 早退（重要）：权重 (wlo·whi) 只依赖 frag_dist，与 shadow map 采样无关。
+    // 绝大多数片元只有 1~2 个级联权重非零（其余权重为 0，对 wsum/wshadow 贡献
+    // 恒为 0）。因此在**调用 shadowFactorCn 之前**先判权重：为 0 则整段跳过，
+    // 省下该级联的 3×3 PCF（9 次纹理采样）。结果与不跳过**完全等价**（跳过的项
+    // 贡献 = 0 · s），仅去掉纯浪费的采样。
+    // 实测（默认 5 级联配置）：片元平均只 1.24 个级联权重非零，跳过约 75% 采样。
     if (uCascadeCount >= 1) {
         float n = uCameraNear, f = uCascadeRanges[0]; float b = 0.15*(f-n);
         float wlo = (uCascadeCount>=2) ? smoothstep(n - b, n + b, frag_dist) : 1.0;
         float whi = (uCascadeCount>=2) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
-        shadowFactorC0(world_pos, N, L, s, cv);
-        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+        float w0 = wlo * whi;
+        if (w0 > kShadowWeightEps) {
+            shadowFactorC0(world_pos, N, L, s, cv);
+            float cw = w0 * cv; wsum += cw; wshadow += cw * s;
+        }
     }
     if (uCascadeCount >= 2) {
         float n = uCascadeRanges[0], f = uCascadeRanges[1]; float b = 0.15*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=3) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
-        shadowFactorC1(world_pos, N, L, s, cv);
-        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+        float w1 = wlo * whi;
+        if (w1 > kShadowWeightEps) {
+            shadowFactorC1(world_pos, N, L, s, cv);
+            float cw = w1 * cv; wsum += cw; wshadow += cw * s;
+        }
     }
     if (uCascadeCount >= 3) {
         float n = uCascadeRanges[1], f = uCascadeRanges[2]; float b = 0.15*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=4) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
-        shadowFactorC2(world_pos, N, L, s, cv);
-        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+        float w2 = wlo * whi;
+        if (w2 > kShadowWeightEps) {
+            shadowFactorC2(world_pos, N, L, s, cv);
+            float cw = w2 * cv; wsum += cw; wshadow += cw * s;
+        }
     }
     if (uCascadeCount >= 4) {
         float n = uCascadeRanges[2], f = uCascadeRanges[3]; float b = 0.15*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=5) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
-        shadowFactorC3(world_pos, N, L, s, cv);
-        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+        float w3 = wlo * whi;
+        if (w3 > kShadowWeightEps) {
+            shadowFactorC3(world_pos, N, L, s, cv);
+            float cw = w3 * cv; wsum += cw; wshadow += cw * s;
+        }
     }
     if (uCascadeCount >= 5) {
         float n = uCascadeRanges[3], f = uCascadeRanges[4]; float b = 0.15*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = 1.0;
-        shadowFactorC4(world_pos, N, L, s, cv);
-        float cw = (wlo * whi) * cv; wsum += cw; wshadow += cw * s;
+        float w4 = wlo * whi;
+        if (w4 > kShadowWeightEps) {
+            shadowFactorC4(world_pos, N, L, s, cv);
+            float cw = w4 * cv; wsum += cw; wshadow += cw * s;
+        }
     }
 
     float shadow = (wsum > 1e-5) ? (wshadow / wsum) : 1.0;
@@ -421,6 +511,7 @@ void main() {
         const std::vector<CascadeFBO>& shadow_fbos,
         const float shadow_vp[][16],
         const float shadow_depth_vp[][16],
+        const float shadow_texel_world[],
         const ShadowConfig& cfg,
         const std::optional<DirectionalLight>& sun);
 
