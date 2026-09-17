@@ -162,6 +162,12 @@ enum class ViewMode : int {
     kGlbNoRetarget  = 3,  // 只看目标（蓝）：数值直搬（消融对照，预期绕错轴）
     kBothNoRetarget = 4,  // 两者并列：蓝用无重定向直搬（消融对照）
     kBothSkinned    = 5,  // 并列：红骨人 + **蓝带皮网格**（glb 真皮，BodyRetarget 驱动）
+    // 红骨人 + **3 个蓝带皮肉人**：三个肉人**同一 mesh + 同一 skeleton**，只是摆放/pose 不同
+    //   —— 走**一次** instanced draw（glDrawElementsInstanced）。
+    //   本模式的用途是**验收真 instancing**：3 个肉人 = 1 次 draw call。
+    //   若退化回逐实例 draw，肉眼看上去会完全一样（画面对，但 draw call = 3）——
+    //   所以还要看代码里的 glDrawElementsInstanced（或 GL_PROXY / apitrace）。
+    kFbxBones3Skinned = 6,
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
@@ -172,6 +178,7 @@ inline const char* const kViewModeItems[] = {
     "只看目标（蓝，无重定向对照）",
     "两者并列（蓝 = 无重定向对照）",
     "并列（红骨人 + 蓝带皮动画）",
+    "并列（红骨人 + 3 蓝肉人·instanced）",
 };
 inline constexpr int kViewModeItemCount =
     static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
@@ -187,7 +194,8 @@ inline const std::vector<const char*>& ViewModeItems() {
 // 本模式是否显示源（红）骨架。
 inline bool ViewShowsFbx(ViewMode m) {
     return m == ViewMode::kFbxOnly || m == ViewMode::kBothRetarget ||
-           m == ViewMode::kBothNoRetarget || m == ViewMode::kBothSkinned;
+           m == ViewMode::kBothNoRetarget || m == ViewMode::kBothSkinned ||
+           m == ViewMode::kFbxBones3Skinned;
 }
 // 本模式是否显示目标（蓝）。
 inline bool ViewShowsGlb(ViewMode m) {
@@ -196,11 +204,16 @@ inline bool ViewShowsGlb(ViewMode m) {
 // 本模式是否两者并列（决定摆放间距 / 相机适配）。
 inline bool ViewIsSideBySide(ViewMode m) {
     return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget ||
-           m == ViewMode::kBothSkinned;
+           m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned;
 }
-// 本模式的蓝侧是否画**带皮网格**（而非火柴人）。只有 kBothSkinned 用真皮。
+// 本模式的蓝侧是否画**带皮网格**（而非火柴人）。kBothSkinned 与 kFbxBones3Skinned 用真皮。
 inline bool ViewGlbIsSkinned(ViewMode m) {
-    return m == ViewMode::kBothSkinned;
+    return m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned;
+}
+// 本模式的蓝侧是否画 **3 个 instanced 肉人**（而不是 1 个）。
+//   用途：肉眼 + 代码双层验收「真 instanced draw」（一次 draw call 画 N 实例）。
+inline bool ViewGlbIsTripleInstanced(ViewMode m) {
+    return m == ViewMode::kFbxBones3Skinned;
 }
 // 蓝骨驱动方式（仅 ViewShowsGlb 时有意义）。
 inline BlueDrive ViewBlueDrive(ViewMode m) {
@@ -246,6 +259,10 @@ public:
     int glb_skin_frame_count_ = 0;             // 源动画帧数（不含末尾 identity 槽）
     // 末尾 identity 槽在 pose 序列里的下标（= glb_skin_frame_count_）。rest 模式专用。
     int glb_skin_rest_pose_index_ = 0;
+    // kFbxBones3Skinned 模式：3 个 instanced 肉人沿 x 的**实例间距**（米）。
+    //   取真皮网格 rest 包围盒宽度 + 一个身位间隙，保证三者互不重叠。
+    //   装配时算（见 LoadGlbSkeleton 尾部）。
+    float glb_skin_pair_spacing_m_ = 0.0f;
 
     // ── 显示/驱动（**一个 combo** 选的模式，见 ViewMode 注释里为何合并）──
     ViewMode view_mode_ = ViewMode::kFbxOnly;  // 本帧看哪个骨架 + 蓝骨怎么驱动
@@ -369,26 +386,45 @@ public:
                 // 源帧下标 → 目标 pose 下标（逐帧一一对应，越界回绕 = 循环动画）。
                 //   ⚠️ rest 模式必须走**独立的 identity 槽**（见注册处注释），
                 //   不能拿 frame_index_=-1 去回绕成第 n-1 帧（那会画成"最后一帧动作"）。
-                int fi = 0;
-                int fj = 0;
-                float ratio = 0.0f;
-                if (rest_pose_mode_) {
-                    fi = glb_skin_rest_pose_index_;
-                    fj = glb_skin_rest_pose_index_;  // 静止：pose_a == pose_b, ratio=0
-                } else {
-                    fi = ((frame_index_ % n) + n) % n;
-                    fj = (fi + 1) % n;
-                    ratio = static_cast<float>(inter_frame_ratio_);
+                //
+                // **instanced 关键**：一批实例**只发一个** SkinnedMeshCommand，
+                //   内里 N 个 SkinnedInstanceState（摆放 + pose 选择各异）→ 后端一次
+                //   glDrawElementsInstanced 画完。绝不能循环发 N 个命令（那就退回 N 次 draw）。
+                const int triple = ViewGlbIsTripleInstanced(view_mode_) ? 3 : 1;
+                // 3 个肉人沿世界 x 轴摆开，间距取蓝侧自身包围盒宽 + 一个身位间隙，
+                //   使三者互不重叠；整体以 blue_x 为中心对称。
+                const float spacing = glb_skin_pair_spacing_m_;
+                std::vector<jpov::SkinnedInstanceState> instances;
+                instances.reserve(static_cast<size_t>(triple));
+                for (int k = 0; k < triple; ++k) {
+                    // 相位错开：让三个肉人不同步（看得出生动的“三个人在跳”），
+                    //   同时仍共享同一份 pose atlas（meshes/skeleton 都同一份）。
+                    //   ⚠️ 错开相位 ≠ 另做一次 draw —— 它只是每个实例的 pose 选择不同。
+                    const int phase = (triple > 1) ? (k * (n / triple)) : 0;
+                    int fi = 0;
+                    int fj = 0;
+                    float ratio = 0.0f;
+                    if (rest_pose_mode_) {
+                        fi = glb_skin_rest_pose_index_;
+                        fj = glb_skin_rest_pose_index_;  // 静止：pose_a == pose_b, ratio=0
+                    } else {
+                        fi = (((frame_index_ + phase) % n) + n) % n;
+                        fj = (fi + 1) % n;
+                        ratio = static_cast<float>(inter_frame_ratio_);
+                    }
+                    jpov::SkinnedInstanceState inst;
+                    // 第 k 个肉人偏移：(k - (triple-1)/2) * spacing（三者以 blue_x 对称）。
+                    const float off =
+                        (static_cast<float>(k) - 0.5f * static_cast<float>(triple - 1)) * spacing;
+                    inst.transform.center = {blue_x + off, 0.0f, 0.0f};
+                    inst.transform.up     = {0.0f, 1.0f, 0.0f};
+                    inst.transform.front  = {0.0f, 0.0f, 1.0f};
+                    inst.transform.scale  = 1.0f;
+                    inst.pose_a = fi;
+                    inst.pose_b = fj;
+                    inst.ratio  = ratio;
+                    instances.push_back(inst);
                 }
-                jpov::SkinnedInstanceState inst;
-                inst.center = {blue_x, 0.0f, 0.0f};
-                inst.up     = {0.0f, 1.0f, 0.0f};
-                inst.front  = {0.0f, 0.0f, 1.0f};
-                inst.scale  = 1.0f;
-                inst.pose_a = fi;
-                inst.pose_b = fj;
-                inst.ratio  = ratio;
-                std::vector<jpov::SkinnedInstanceState> instances{inst};
                 cmds->DrawMeshWithSkeleton(glb_skin_mesh_id_, glb_skin_skel_id_,
                                            glb_skin_mat_, std::move(instances));
             }
@@ -699,10 +735,17 @@ private:
             //   取 `glb_bounds_`（火柴人）与 `glb_skin_bounds_`（真皮，若已装配）的并集，
             //   这样切模式时相机**不跳**，且两种蓝侧形态都不裁切。
             const Bounds& gb = glb_skin_ready_ ? glb_skin_bounds_ : glb_bounds_;
-            bmin[0] = std::min(bmin[0], gb.min.x() + blue_x);
+            // kFbxBones3Skinned：蓝侧是 **3 个**instanced 肉人，横向铺开。相机适配
+            //   必须按 3 个的整体跨度算（否则两侧肉人被裁切）—— 对称布局下总跨度
+            //   = 2 * spacing（最左到最右），中心在 blue_x。
+            const float blue_half_span =
+                ViewGlbIsTripleInstanced(view_mode_)
+                    ? std::max(glb_skin_pair_spacing_m_, 0.1f)
+                    : 0.0f;
+            bmin[0] = std::min(bmin[0], gb.min.x() + blue_x - blue_half_span);
             bmin[1] = std::min(bmin[1], gb.min.y());
             bmin[2] = std::min(bmin[2], gb.min.z());
-            bmax[0] = std::max(bmax[0], gb.max.x() + blue_x);
+            bmax[0] = std::max(bmax[0], gb.max.x() + blue_x + blue_half_span);
             bmax[1] = std::max(bmax[1], gb.max.y());
             bmax[2] = std::max(bmax[2], gb.max.z());
         }
@@ -867,13 +910,22 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
     has_glb_ = true;
     pair_sep_m_ =
         0.5f * (fbx_bounds_.SizeX() + glb_bounds_.SizeX()) + kPairGapMeters;
+    // 3 个 instanced 肉人的**实例间距**（kFbxBones3Skinned 模式用）：真皮 mesh 的 rest
+    //   宽度 + 一个身位间隙（与 pair_sep 同一套思路，但这个是**实例之间**的间距）。
+    //   真皮未装配时回落到火柴人包围盒宽。
+    {
+        const float blue_w = glb_skin_ready_ ? glb_skin_bounds_.SizeX()
+                                             : glb_bounds_.SizeX();
+        glb_skin_pair_spacing_m_ = blue_w + kPairGapMeters;
+    }
     view_mode_ = ViewMode::kBothRetarget;
     FitInitialView();
 
     LOG(INFO) << "glb 目标骨架装配完成: " << path
               << " bones=" << glb_skeleton_.bone_count()
               << " 骨名命中=" << glb_mapped_bones_ << "/" << glb_skeleton_.bone_count()
-              << " 并列间距=" << pair_sep_m_ << "m";
+              << " 并列间距=" << pair_sep_m_ << "m"
+              << " 3-instance 间距=" << glb_skin_pair_spacing_m_ << "m";
     return true;
 }
 

@@ -21,6 +21,7 @@
 #ifndef JPOV_GPUMESH_H_
 #define JPOV_GPUMESH_H_
 
+#include <cstddef>
 #include <cstdint>
 
 #include "tools/jpov/interface/mesh.h"
@@ -41,6 +42,18 @@ struct GPUMesh {
     uint32_t vertex_count = 0;      // positions 顶点数
     uint32_t index_count = 0;       // indices 数量（0 = non-indexed）
     MeshVertexFlags flags = MeshVertexFlags::kPosition;  // 与上传时 MeshData.flags 一致
+
+    // ---- per-instance attribute（instancing 专用，不属于 MeshData）----
+    // 实例变换 VBO（location 6..9 = mat4 拆成 4 个 vec4，divisor=1）。
+    // 0 = 本 mesh 从未上传过实例变换（VAO 上对应 location 未启用，走普通 draw 无影响）。
+    // 容量（字节）另存，供 UploadInstanceTransforms 判断是否需要 glBufferData 扩容。
+    unsigned int vbo_instance_xform = 0;
+    size_t instance_xform_capacity_bytes = 0;
+
+    // pose 选择 VBO（location 10 = ivec2 pose_col_a/pose_col_b，location 11 = float ratio）。
+    // 仅蒙皮带骨实例用（静态 instanced 不需要）。0 = 从未上传。
+    unsigned int vbo_instance_pose = 0;
+    size_t instance_pose_capacity_bytes = 0;
 
     // CPU 侧模型局部坐标的轴对齐包围盒（RegisterMesh 时从 positions 计算缓存）。
     // 供阴影 pass 计算物体的世界包围盒（结合 Draw 的 center/up/front 变换），

@@ -97,8 +97,10 @@ public:
         if (left_skinned) {
             if (mesh_id_ != 0 && skel_id_ != 0) {
                 jpov::SkinnedInstanceState inst;
-                inst.center = {0,0,0}; inst.up = {0,1,0}; inst.front = {0,0,1};
-                inst.scale = 4.0f;
+                inst.transform.center = {0,0,0};
+                inst.transform.up = {0,1,0};
+                inst.transform.front = {0,0,1};
+                inst.transform.scale = 4.0f;
                 if (ratio_sel_ > 0.0f) {
                     inst.pose_a = pose_a_sel_;
                     inst.pose_b = pose_b_sel_;

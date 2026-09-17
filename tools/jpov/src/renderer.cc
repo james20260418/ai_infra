@@ -1733,7 +1733,8 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         const GPUMesh* mesh = mesh_mgr_.GetMesh(s.mesh_id);
         if (!mesh) continue;
         for (const SkinnedInstanceState& inst : s.instances) {
-            AppendLightAabb(mesh, inst.center, inst.up, inst.front, inst.scale,
+            AppendLightAabb(mesh, inst.transform.center, inst.transform.up,
+                            inst.transform.front, inst.transform.scale,
                             view, &obj_light_aabb);
         }
     }

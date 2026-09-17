@@ -17,8 +17,18 @@
 //   location 4 = weights   (vec4 float)   ← vbo_weights，flags 含 kJoints 才有
 //   location 5 = tangent   (vec3 float)   ← vbo_tangents，flags 含 kTangent 才有
 //
+// Instancing（per-instance attribute，divisor=1；"真 instanced draw" 专用）:
+//   location 6..9  = aInstModel     (mat4，4 个 vec4 slot) ← vbo_instance_xform
+//   location 10    = aInstPoseCol   (ivec2: pose_col_a, pose_col_b) ← vbo_instance_pose
+//   location 11    = aInstRatio     (float)                          ← 同上 buffer
+//   这些是用 UploadInstanceTransforms / UploadInstancePoseSelection 逐实例上传的，
+//   **不属于 MeshData**（不是顶点属性），因此不参与 RegisterMesh/UpdateMesh 的 flags 约定。
+//   默认关闭（divisor=0 + 禁用）。矩阵按“每实例 4 个 vec4”拆到 4 个连续 location
+//   （GL 无 mat4 attribute）。
 // 固定 attribute location 为后续骨骼 shader（mesh3d_skinned）预留「口子」：
 // 新增 shader 只需声明相同的 layout(location=N)，无需改动本类。
+
+#include <vector>
 
 #ifndef JPOV_MESH_MANAGER_H_
 #define JPOV_MESH_MANAGER_H_
@@ -70,6 +80,50 @@ public:
     //
     // 返回 nullptr 表示 mesh_id 不存在。
     const GPUMesh* GetMesh(uint32_t mesh_id) const;
+
+    // ---- Instancing ----
+
+    // UploadInstanceTransforms: 把一批实例的 model 矩阵传成 per-instance attribute。
+    //
+    // 每个 matrix 是**列主序** float[16]（与 glUniformMatrix4fv 同一套，见 BuildModelMatrix）。
+    // 内部拆成 4 个 vec4 连续填到 location 6..9，并调 glVertexAttribDivisor(.., 1)。
+    // 调用方随后用 glDrawElementsInstanced(..., instance_count) 一次画完全批。
+    //
+    // ⚠️ 为什么走 attribute 而不是逐实例 glUniform：逐实例 uniform 必须**逐实例一次 draw**
+    //   （N 个实例 = N 次 draw call）。per-instance attribute（divisor=1）+ Instanced draw
+    //   才能把整批压成**一次** draw call —— 这才是 instancing 的意义（见
+    //   docs/jpov_crowd_instancing_arch.md §1.2）。
+    //
+    // 本函数只喂数据，不改 VAO 之外的任何 GL 状态（draw 形式由调用方决定）。
+    // 同一个 mesh 可反复调用（复用同一 VBO，容量不够时自动扩容）。
+    //
+    // Pre-condition: mesh_id 已注册；instance_matrices 非空
+    void UploadInstanceTransforms(uint32_t mesh_id,
+                                  const std::vector<float>& instance_matrices);
+
+    // UploadInstancePoseSelection: 把一批实例的 **pose 选择** 传成 per-instance attribute。
+    //
+    // 每实例 3 个量：pose_col_a / pose_col_b（均 = pose_idx * pose_width，整数）
+    //   + ratio（float）。布局：
+    //     location 10 = aInstPoseCol (ivec2: pose_col_a, pose_col_b)
+    //     location 11 = aInstRatio   (float)
+    // 一个 float 数组（每实例 3 个 float，按 [col_a, col_b, ratio] 顺序）就够，
+    //   两个 attribute 只是把同一 buffer 的同一 stride 切成不同的子区间（ivec2 读前 2 个，
+    //   float 读第 3 个）。
+    //
+    // 为何也走 attribute：pose 选择是**逐实例**差异；逐实例 uniform 会把整批退化成 N 次
+    //   draw call，与 instancing 的初衷相违。
+    //
+    // Pre-condition: mesh_id 已注册；instance_pose 非空且长度为 3 的倍数
+    void UploadInstancePoseSelection(uint32_t mesh_id,
+                                     const std::vector<float>& instance_pose);
+
+    // DisableInstanceAttributes: 关掉 mesh 的 per-instance 属性（divisor 归 0 + 禁用数组）。
+    // 用途：同一份 mesh 被**非 instanced** 路径复用（如 Object3D 逐物体 draw）时，
+    // 必须先把 per-instance 属性关掉，否则残留的 divisor=1 会让普通 draw 语义错乱。
+    // 无 per-instance 数据时是 no-op。
+    // Pre-condition: mesh_id 已注册
+    void DisableInstanceAttributes(uint32_t mesh_id);
 
 private:
     // 创建 GL 资源（VAO + 按 flags 分离 VBO + EBO），返回填充好句柄的 GPUMesh。

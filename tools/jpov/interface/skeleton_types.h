@@ -155,15 +155,32 @@ struct SkeletonPose {
 
 // ==================== 运行时实例状态 ====================
 
+// 单个实例的**摆放变换**（center 平移 + up/front 旋转 + scale 缩放）。
+//
+// 为什么把「摆放」从 SkinnedInstanceState 里单独抽成一层（2026-09-17）：
+//   per-instance attribute 上传时，摆放是**矩阵**（4 个 vec4 slot），pose 选择是
+//   **整数 + 浮点**。两者粒度不同，但蒙皮带骨实例与静态实例**共有的那一部分只有摆放**。
+//   抽出来后，静态实例与带骨实例共用同一份 attribute layout / 同一套 VP 结构
+//   （见 MeshManager::UploadInstanceTransforms 与 skinning_shader.h 的 aInstModel +
+//   uViewProj）。这是「真 instanced draw」（一次 draw call 画 N 个实例）的基础设施：
+//   摆放必须逐实例走 attribute（divisor=1），**不能**逐实例走 uniform（那还是 N 次 draw）。
+//
+// 语义与 Object3DCommand 的 center/up/front/scale 完全一致（同一套 BuildModelMatrix）。
+struct InstanceTransform {
+    Vec3f center;                      // 世界平移
+    Vec3f up{0.0f, 1.0f, 0.0f};        // 局部 +Y → 世界 up（内部归一化）
+    Vec3f front{0.0f, 0.0f, 1.0f};     // 局部 +Z → 世界 front（内部归一化）
+    float scale = 1.0f;                // 整体缩放（先缩顶点，再旋转平移）
+};
+
 // 单个蒙皮实例的运行时状态：渲染按 (同 mesh + 同 skeleton) 把一批实例 instanced draw，
 // 实例之间只差这份薄状态；渲染时作为 per-instance attribute 上传(glVertexAttribDivisor)。
 //   这是一条"如何画出看得见的这一份"的 description(而非自己背整份几何)。
 struct SkinnedInstanceState {
-    // 模型摆放 —— 复用 Object3DCommand 变换约定(center 平移 + up/front 旋转 + scale)。
-    Vec3f center;            // 角色根(骨盆/原点)在某物体坐标系下的世界平移
-    Vec3f up{0.0f, 1.0f, 0.0f};        // 局部 +Y → 世界 up(会被归一化)
-    Vec3f front{0.0f, 0.0f, 1.0f};     // 局部 +Z → 世界 front(会被归一化)
-    float scale = 1.0f;     // 整体缩放(先缩顶点再转+平移)，S0 只做全局/轴向 scale(§6.1)
+    // 模型摆放 —— center 平移 + up/front 旋转 + scale(见 InstanceTransform)。
+    // 抽成嵌套结构是为了让「摆放矩阵」这道工序与「pose 选择」解耦：
+    //   摆放 → per-instance attribute(mat4)；pose → per-instance attribute(ivec2 + float)。
+    InstanceTransform transform;
 
     // ---- 运动：一份骨架内两个 pose 之间的插值（唯一接口）----
     // 唯一表达动画顶点的字段就是这个三元组：VS 取 pose_a/pose_b 两套 JointMatrix，

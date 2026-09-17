@@ -38,6 +38,9 @@
 #ifndef GL_UNSIGNED_INT
 #define GL_UNSIGNED_INT 0x1405
 #endif
+#ifndef GL_DYNAMIC_DRAW
+#define GL_DYNAMIC_DRAW 0x88E8
+#endif
 #ifndef GL_FALSE
 #define GL_FALSE 0
 #endif
@@ -59,6 +62,18 @@ typedef long GLsizeiptr;
 #include <glog/logging.h>
 
 namespace jpov {
+
+// per-instance 实例变换矩阵的起始 attribute location（mat4 占 6..9，见头文件布局说明）。
+// 避开 loc0-5（顶点属性：pos/normal/uv/joints/weights/tangent）。
+static constexpr unsigned int kInstanceXformLoc = 6;
+// pose 选择：vec3(pose_col_a, pose_col_b, ratio) —— 全部 float，*同一个* buffer、同一 stride，
+//   不做 int/float 混装。
+//   ⚠️ 为何不用 ivec2 + glVertexAttribIPointer：IPointer 读的是**原始整数位模式**，
+//   把 float(92.0f) 的位（0x42B80000 = 1119354880）当整数读会得到天文数字的 texel 列，
+//   texelFetch 直接出界 → 整批几何塌成空白（踩过这个坑）。统一 float 让宿主/GLSL 两侧
+//   的隐式转换规则一致，无隐式位重解释。
+//   三个 float 已在同一个 buffer 里，故只需一个 attribute（一个 vec3）。
+static constexpr unsigned int kInstancePoseLoc = 10;
 
 MeshManager::~MeshManager() {
     for (auto& kv : meshes_) {
@@ -235,6 +250,37 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                      data.indices.data(), GL_STATIC_DRAW);
     }
 
+    // ---- per-instance 实例变换（location 6..9，divisor=1）----
+    // 提前把 VBO 和 attrib 槽配好（但**暂不启用、不喂数据**）：这样 instanced draw 路径
+    // 只需 UploadInstanceTransforms 填数据，无需再碰 VAO 配置。
+    // 注：顶点属性数组的启用状态是 VAO 状态；divisor 也是 VAO 状态（GL 3.3 起）。
+    //   默认 divisor=0 + 禁用 → 普通 draw 不受影响（零回归）。
+    glGenBuffers(1, &mesh.vbo_instance_xform);
+    CHECK_NE(mesh.vbo_instance_xform, 0u);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_instance_xform);
+    for (int k = 0; k < 4; ++k) {
+        const unsigned int loc = kInstanceXformLoc + static_cast<unsigned int>(k);
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE,
+                              sizeof(float) * 16,
+                              reinterpret_cast<const void*>(sizeof(float) * 4 * k));
+        glVertexAttribDivisor(loc, 1);   // 每实例推进一步（instancing 核心）
+        glDisableVertexAttribArray(loc); // 默认关：未上传实例数据时不影响普通 draw
+    }
+
+    // ---- per-instance pose 选择（location 10=ivec2 pose_col_a/pose_col_b，11=float ratio）----
+    // 与实例变换同一个思路：提前配好槽位、默认禁用，由 UploadInstancePoseSelection 启用。
+    // 两者共享同一个 buffer（每实例 3 个 float：col_a, col_b, ratio），只是切成不同的子区间。
+    glGenBuffers(1, &mesh.vbo_instance_pose);
+    CHECK_NE(mesh.vbo_instance_pose, 0u);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_instance_pose);
+    glEnableVertexAttribArray(kInstancePoseLoc);
+    // 每实例 3 个 float：[pose_col_a, pose_col_b, ratio]（一个 vec3 属性）。
+    glVertexAttribPointer(kInstancePoseLoc, 3, GL_FLOAT, GL_FALSE,
+                          sizeof(float) * 3, reinterpret_cast<const void*>(0));
+    glVertexAttribDivisor(kInstancePoseLoc, 1);
+    glDisableVertexAttribArray(kInstancePoseLoc);
+
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
@@ -246,13 +292,92 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
     return mesh;
 }
 
+// ==================== Instancing ====================
+
+void MeshManager::UploadInstanceTransforms(
+    uint32_t mesh_id, const std::vector<float>& instance_matrices) {
+    auto it = meshes_.find(mesh_id);
+    CHECK(it != meshes_.end()) << "UploadInstanceTransforms: mesh_id "
+                               << mesh_id << " 未注册";
+    GPUMesh& mesh = it->second;
+    CHECK(!instance_matrices.empty())
+        << "UploadInstanceTransforms: 实例矩阵数组不能为空（叫它干什么？）";
+    // 必须是完整的 mat4 数组（每实例 16 个 float）——不是 16 的倍数就是调用方算错步长。
+    CHECK_EQ(instance_matrices.size() % 16, 0u)
+        << "UploadInstanceTransforms: 数组长度 " << instance_matrices.size()
+        << " 不是 16 的倍数（每实例一个 mat4）";
+    CHECK_NE(mesh.vbo_instance_xform, 0u)
+        << "UploadInstanceTransforms: mesh " << mesh_id
+        << " 无实例变换 VBO（RegisterMesh 未初始化？）";
+
+    const size_t bytes = instance_matrices.size() * sizeof(float);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_instance_xform);
+    // GL_DYNAMIC_DRAW：实例变换每帧变。
+    //   每帧都用 glBufferData(ptr) 整体重传：整批实例都会重写，留旧内容无意义；
+    //   glBufferData 还会在超出容量时自动重新分配存储（glBufferSubData 只能在已有
+    //   容量内写，扩容必须走 glBufferData）。
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes),
+                 instance_matrices.data(), GL_DYNAMIC_DRAW);
+    mesh.instance_xform_capacity_bytes = bytes;
+    // 启用 per-instance 属性（divisor 已在 RegisterMesh 设为 1）。
+    for (int k = 0; k < 4; ++k) {
+        glEnableVertexAttribArray(kInstanceXformLoc + static_cast<unsigned int>(k));
+    }
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void MeshManager::DisableInstanceAttributes(uint32_t mesh_id) {
+    auto it = meshes_.find(mesh_id);
+    CHECK(it != meshes_.end()) << "DisableInstanceAttributes: mesh_id "
+                               << mesh_id << " 未注册";
+    GPUMesh& mesh = it->second;
+    if (mesh.vbo_instance_xform == 0u && mesh.vbo_instance_pose == 0u) {
+        return;  // 没配过实例属性，no-op
+    }
+    glBindVertexArray(mesh.vao);
+    for (int k = 0; k < 4; ++k) {
+        glDisableVertexAttribArray(kInstanceXformLoc + static_cast<unsigned int>(k));
+    }
+    glDisableVertexAttribArray(kInstancePoseLoc);
+    glBindVertexArray(0);
+}
+
+void MeshManager::UploadInstancePoseSelection(
+    uint32_t mesh_id, const std::vector<float>& instance_pose) {
+    auto it = meshes_.find(mesh_id);
+    CHECK(it != meshes_.end()) << "UploadInstancePoseSelection: mesh_id "
+                               << mesh_id << " 未注册";
+    GPUMesh& mesh = it->second;
+    CHECK(!instance_pose.empty())
+        << "UploadInstancePoseSelection: 数组不能为空";
+    CHECK_EQ(instance_pose.size() % 3, 0u)
+        << "UploadInstancePoseSelection: 长度 " << instance_pose.size()
+        << " 不是 3 的倍数（每实例 pose_col_a/pose_col_b/ratio）";
+    CHECK_NE(mesh.vbo_instance_pose, 0u)
+        << "UploadInstancePoseSelection: mesh " << mesh_id
+        << " 无 pose 选择 VBO（RegisterMesh 未初始化？）";
+
+    const size_t bytes = instance_pose.size() * sizeof(float);
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_instance_pose);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes),
+                 instance_pose.data(), GL_DYNAMIC_DRAW);
+    mesh.instance_pose_capacity_bytes = bytes;
+    glEnableVertexAttribArray(kInstancePoseLoc);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     if (mesh->vao) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete
-    // GPUMesh 至多 6 个属性 VBO + 1 个 EBO = 7 个 GL 缓冲对象
-    static constexpr int kMaxBuffers = 7;
+    // GPUMesh 至多 6 个属性 VBO + 1 个实例变换 VBO + 1 个 pose 选择 VBO + 1 个 EBO
+    // = 9 个 GL 缓冲对象
+    static constexpr int kMaxBuffers = 9;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -272,6 +397,12 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     }
     if (mesh->vbo_tangents) {
         buffers[n++] = mesh->vbo_tangents;
+    }
+    if (mesh->vbo_instance_xform) {
+        buffers[n++] = mesh->vbo_instance_xform;
+    }
+    if (mesh->vbo_instance_pose) {
+        buffers[n++] = mesh->vbo_instance_pose;
     }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;

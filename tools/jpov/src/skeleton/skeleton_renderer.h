@@ -425,6 +425,24 @@ void main() {
     static void UploadAmbient(ShaderManager& shader_mgr,
                               unsigned int prog,
                               const AmbientLight& ambient);
+
+    // ---- UploadSkinningInstanceAttributes ----
+    // 把一批蒙皮实例的**逐实例 attribute** 传上 GPU（主 pass / shadow pass 共用）。
+    //
+    // 传两样东西：
+    //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序），
+    //      → MeshManager::UploadInstanceTransforms（loc6..9）。
+    //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → loc10(ivec2) + loc11(float)。
+    //
+    // pose_w = gh.bone_count * 4 = 一个 pose 在 atlas 里的**平坦** texel 宽度；
+    //   本函数把 pose 下标乘成平坦起点（shader 内按 atlas 宽回绕，与 CPU 烘焙逐 texel 对齐）。
+    //
+    // Pre-condition: cmd.instances 非空且 pose_a/pose_b 已校验不越界（调用方先验，
+    //   因为逐实例上传后一次 draw 里无法中途报错）。
+    static void UploadSkinningInstanceAttributes(
+        MeshManager& mesh_mgr,
+        const SkinnedMeshCommand& cmd,
+        int pose_w);
 };
 
 }  // namespace jpov
