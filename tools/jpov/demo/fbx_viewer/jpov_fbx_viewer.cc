@@ -5,14 +5,15 @@
 //   jpov_fbx_viewer <fbx 路径> [glb 路径] --shot out.png   headless 单帧出图
 //
 // 可选开关（详细说明见 fbx_viewer_app.h 的 ViewMode）：
-//   --view 0|1|2|3|4|5 显示/驱动：0 只看红 / 1 只看蓝(BodyRetarget) / 2 并列(BodyRetarget)
+//   --view 0|1|2|3|4|5|6 显示/驱动：0 只看红 / 1 只看蓝(BodyRetarget) / 2 并列(BodyRetarget)
 //                                / 3 只看蓝(无重定向对照) / 4 并列(无重定向对照)
 //                                / 5 并列(红骨人 + 蓝**带皮网格**，GPU 双帧插值)
+//                                / 6 并列(红骨人 + **3 个 instanced 蓝肉人**，验收真 instancing)
 //   --time 秒 | --frame 帧号 | --rest
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
 //             --rest       固定 pose = identity（rest/T-pose）出图
-//             --view <n>   指定「显示/驱动」出图（0..5，见 fbx_viewer_app.h 的 ViewMode）
+//             --view <n>   指定「显示/驱动」出图（0..6，见 fbx_viewer_app.h 的 ViewMode）
 //                          ——与面板 combo 同一套语义。
 //   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「目标骨架（蓝）」——蓝骨 = 从该
 //     glb 读出的 rest 骨架，驱动方式由 `--view`（或面板 combo）选：
@@ -106,7 +107,7 @@ int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
-           "[--time 秒|--frame 帧号] [--rest] [--view 0..5]";
+           "[--time 秒|--frame 帧号] [--rest] [--view 0..6]";
     const bool capture = !p.shot_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";

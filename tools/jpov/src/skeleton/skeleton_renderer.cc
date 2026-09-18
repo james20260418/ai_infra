@@ -6,6 +6,8 @@
 
 #include "tools/jpov/src/skeleton/skeleton_renderer.h"
 
+#include "tools/jpov/src/texture_units.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -103,10 +105,49 @@ void SkeletonRenderer::UploadAmbient(ShaderManager& shader_mgr,
                 std::max(ambient.intensity, 0.0f));  // 负值 clamp 到 0
 }
 
+// ==================== UploadSkinningInstanceAttributes ====================
+// 主 pass / shadow pass 共用的逐实例数据上传（摆放矩阵 + pose 选择），写进**渲染器持有
+// 的实例缓冲**（不是 mesh 资源 —— 见 instance_buffer.h 顶部）。
+// 两个 pass 必须用**同一套**逐实例数据，否则影子与身体错位。
+void SkeletonRenderer::UploadSkinningInstanceAttributes(
+    const SkinnedMeshCommand& cmd,
+    int pose_w,
+    InstanceBuffer& instance_model_buf,
+    InstanceBuffer& instance_pose_buf) {
+    const size_t n = cmd.instances.size();
+    CHECK_GT(n, 0u) << "UploadSkinningInstanceAttributes: instances 不能为空";
+
+    // 1) 摆放矩阵：每实例一个列主序 mat4（与 DrawObject3D 同一套 BuildModelMatrix）。
+    std::vector<float> xforms;
+    xforms.resize(n * 16);
+    for (size_t k = 0; k < n; ++k) {
+        const InstanceTransform& t = cmd.instances[k].transform;
+        float model[16];
+        BuildModelMatrix(t.center, t.up, t.front, t.scale, model);
+        for (int e = 0; e < 16; ++e) {
+            xforms[k * 16 + static_cast<size_t>(e)] = model[e];
+        }
+    }
+    instance_model_buf.Upload(xforms);
+
+    // 2) pose 选择：每实例 [pose_col_a, pose_col_b, ratio]。
+    //    col = pose_idx * pose_width（一个 pose 在 atlas 里的**平坦** texel 宽度），
+    //    shader 内按 atlas 宽度回绕成 (x,y)——与 CPU 行优先平铺逐 texel 对齐。
+    std::vector<float> poses;
+    poses.resize(n * 3);
+    for (size_t k = 0; k < n; ++k) {
+        const SkinnedInstanceState& inst = cmd.instances[k];
+        poses[k * 3 + 0] = static_cast<float>(inst.pose_a * pose_w);
+        poses[k * 3 + 1] = static_cast<float>(inst.pose_b * pose_w);
+        poses[k * 3 + 2] = inst.ratio;
+    }
+    instance_pose_buf.Upload(poses);
+}
+
 // ==================== DrawSkinnedMesh ====================
-// 一批带骨实例的蒙皮 PBR 渲染：绑材质纹理 + pose atlas，逐实例设
-// uMVP(=proj*view*model)/uModel/uPoseRow/uPoseCol 后 draw。
-// 材质纹理绑定放实例循环外（同一命令内所有实例共用材质）。
+// 一批带骨实例的蒙皮 PBR 渲染：绑材质纹理 + pose atlas，摆放与 pose 选择走 per-instance
+// attribute，**整批一次 instanced draw**。
+// 材质纹理绑定在 draw 之前（同一命令内所有实例共用材质）。
 // 光照（太阳/环境光）由调用方在 Render() 主流程经 UploadSunData/UploadAmbient 预置。
 void SkeletonRenderer::DrawSkinnedMesh(
     const SkinnedMeshCommand& cmd,
@@ -117,7 +158,9 @@ void SkeletonRenderer::DrawSkinnedMesh(
     const float mvp[16],
     unsigned int skinned_prog,
     const SkeletonManager::GpuHandles& gh,
-    int pose_count) {
+    int pose_count,
+    InstanceBuffer& instance_model_buf,
+    InstanceBuffer& instance_pose_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMesh: mesh_id "
                            << cmd.mesh_id << " 未注册";
@@ -178,93 +221,104 @@ void SkeletonRenderer::DrawSkinnedMesh(
     if (cmd.material.base_color_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
         CHECK_NE(gl_tex, 0u) << "蒙皮 base_color_tex 未注册";
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), 1);
+        const int u = kTexUnitMaterialBase + 0;
+        glActiveTexture(GL_TEXTURE0 + u); glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
     }
     if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.metallic_tex);
-        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE2);
+        CHECK_NE(gl_tex, 0u); const int u = kTexUnitMaterialBase + 1;
+        glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uMetallicTex"), 2);
+        glUniform1i(glGetUniformLocation(sp, "uMetallicTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasMetallicTex"), 1);
     }
     if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.roughness_tex);
-        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE3);
+        CHECK_NE(gl_tex, 0u); const int u = kTexUnitMaterialBase + 2;
+        glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uRoughnessTex"), 3);
+        glUniform1i(glGetUniformLocation(sp, "uRoughnessTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasRoughnessTex"), 1);
     }
     if (cmd.material.emissive_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.emissive_tex);
-        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE4);
+        CHECK_NE(gl_tex, 0u); const int u = kTexUnitMaterialBase + 3;
+        glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uEmissiveTex"), 4);
+        glUniform1i(glGetUniformLocation(sp, "uEmissiveTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasEmissiveTex"), 1);
     }
     if (cmd.material.ao_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.ao_tex);
-        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE5);
+        CHECK_NE(gl_tex, 0u); const int u = kTexUnitMaterialBase + 4;
+        glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uAoTex"), 5);
+        glUniform1i(glGetUniformLocation(sp, "uAoTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasAoTex"), 1);
     }
     if (cmd.material.normal_tex != 0) {
         unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.normal_tex);
-        CHECK_NE(gl_tex, 0u); glActiveTexture(GL_TEXTURE6);
+        CHECK_NE(gl_tex, 0u); const int u = kTexUnitMaterialBase + 5;
+        glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(sp, "uNormalTex"), 6);
+        glUniform1i(glGetUniformLocation(sp, "uNormalTex"), u);
         glUniform1i(glGetUniformLocation(sp, "uHasNormalTex"), 1);
         glUniform1f(glGetUniformLocation(sp, "uNormalScale"), cmd.material.normal_scale);
     }
 
-    // ---- 骨纹理 pose atlas（TEXTURE12；避开 0=tile/1-6=材质/7-11=shadow 5 级联）----
-    glActiveTexture(GL_TEXTURE12);
+    // ---- 骨纹理 pose atlas（TEXTURE12，见 texture_units.h；避开 0=tile/1-6=材质/7-11=shadow）----
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
     glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
-    glUniform1i(glGetUniformLocation(sp, "uPoseAtlas"), 12);
+    glUniform1i(glGetUniformLocation(sp, "uPoseAtlas"), kTexUnitPoseAtlas);
     glUniform1i(glGetUniformLocation(sp, "uBoneCount"), gh.bone_count);
+    // ⚠️ uPoseRow / uAtlasDim 是**全批共享**的 atlas 几何参数（不随实例变）——
+    //   与 instancing 改造前一样必须在此上传。漏掉 uAtlasDim → 回绕的分母为 0，
+    //   texelFetch 地址非法，整批几何塌成空白（改造时踩过这个坑）。
+    glUniform1i(glGetUniformLocation(sp, "uPoseRow"), 0);
+    glUniform2f(glGetUniformLocation(sp, "uAtlasDim"),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim));
 
-    // ---- 逐实例：uMVP(=proj*view*model)/uModel/uPose 后 draw ----
+    // ---- uViewProj = proj * view（每帧一张，全批共享）；摆放走 per-instance attribute ----
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, mvp);
+
+    // 越界校验（SkinnedInstanceState 契约：越界 → FATAL，不静默读 atlas 里别人的骨骼）。
+    //   逐实例上传前先全批验一遍：一次 draw 里没法中途报错，验完再画。
+    const int pose_w = gh.bone_count * 4;
+    CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
     for (const SkinnedInstanceState& inst : cmd.instances) {
-        float model[16], mvp_final[16];
-        BuildModelMatrix(inst.center, inst.up, inst.front, inst.scale, model);
-        Mat4Mul(mvp, model, mvp_final);
-        glUniformMatrix4fv(glGetUniformLocation(sp, "uMVP"), 1, GL_FALSE, mvp_final);
-        glUniformMatrix4fv(glGetUniformLocation(sp, "uModel"), 1, GL_FALSE, model);
-
-        // 双 pose 插值：取 pose_a / pose_b 各自的**平坦** texel 起点（= pose_idx * pose_width），
-        //   shader 内按 atlas 宽度回绕成 (x,y)——与 CPU 行优先平铺逐 texel 对齐；
-        //   不再依赖 pose_per_row（那是容量估算量）。
-        //   ratio 由调用方保证落在 [0,1]（见 LocateClipFrame / SkinnedInstanceState 契约）；
-        //   pose_a == pose_b（静态）时 uPoseColB == uPoseCol 且 uRatio=0，shader 短路不读 B。
-        const int pose_w = gh.bone_count * 4;
-        const int pa = inst.pose_a;
-        const int pb = inst.pose_b;
-        // 越界即崩溃（SkinnedInstanceState 契约要求实现 FATAL，见 skeleton_types.h）：
-        //   越界 texel 会静默读到 atlas 里别人的骨骼矩阵，画面变成莫名其妙的形变，
-        //   比直接崩更难查。ratio 越界同理（>1 = 外推）。
-        CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
-        CHECK_GE(pa, 0) << "pose_a 越界: " << pa;
-        CHECK_GE(pb, 0) << "pose_b 越界: " << pb;
-        CHECK_LT(pa, pose_count) << "pose_a 越界: " << pa << " >= " << pose_count;
-        CHECK_LT(pb, pose_count) << "pose_b 越界: " << pb << " >= " << pose_count;
+        CHECK_GE(inst.pose_a, 0) << "pose_a 越界: " << inst.pose_a;
+        CHECK_GE(inst.pose_b, 0) << "pose_b 越界: " << inst.pose_b;
+        CHECK_LT(inst.pose_a, pose_count)
+            << "pose_a 越界: " << inst.pose_a << " >= " << pose_count;
+        CHECK_LT(inst.pose_b, pose_count)
+            << "pose_b 越界: " << inst.pose_b << " >= " << pose_count;
         CHECK_GE(inst.ratio, 0.0f) << "ratio 越界: " << inst.ratio;
         CHECK_LE(inst.ratio, 1.0f) << "ratio 越界: " << inst.ratio;
-        glUniform1i(glGetUniformLocation(sp, "uPoseRow"), 0);
-        glUniform1i(glGetUniformLocation(sp, "uPoseCol"), pa * pose_w);
-        glUniform1i(glGetUniformLocation(sp, "uPoseColB"), pb * pose_w);
-        glUniform1f(glGetUniformLocation(sp, "uRatio"), inst.ratio);
-        glUniform2f(glGetUniformLocation(sp, "uAtlasDim"),
-                    static_cast<float>(SkeletonManager::kPoseAtlasDim),
-                    static_cast<float>(SkeletonManager::kPoseAtlasDim));
+    }
 
+    // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
+    //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf);
+
+    // ★ 整批 = 一次 instanced draw。这才是 instancing 的意义（N 实例 ≠ N draw call）。
+    const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
+    {
+        // RAII：把实例缓冲挂到本 mesh VAO 的 per-instance 槽，出作用域自动摘除。
+        //   用守卫而非手写 enable/disable，是为了**结构上**不可能“挂上忘摘”——
+        //   残留 divisor=1 的启用态会泄漏给后续普通 draw（见 instance_buffer.h）。
+        InstanceBufferBinding bind(mesh->vao,
+                                   {&instance_model_buf, &instance_pose_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
-                           GL_UNSIGNED_INT, nullptr);
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
         } else {
-            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
         }
         glBindVertexArray(0);
     }
@@ -274,6 +328,8 @@ void SkeletonRenderer::DrawSkinnedMesh(
         LOG_FIRST_N(WARNING, 1) << "GL error after DrawSkinnedMesh: "
                                 << draw_err;
     }
+    // 恢复 active texture unit（约定：受入时设过的单元要还原，同 DrawObject3D）。
+    glActiveTexture(GL_TEXTURE0);
     glPopAttrib();
 }
 
@@ -325,7 +381,7 @@ void SkeletonRenderer::UploadSunData(
     glUniform1fv(shader_mgr.GetUniform(prog, "uShadowTexelWorld"),
                  kMaxC, shadow_texel_world);
     for (int c = 0; c < cascade_count; ++c) {
-        const unsigned int unit = 7u + static_cast<unsigned int>(c);
+        const unsigned int unit = static_cast<unsigned int>(kTexUnitShadowMapBase) + static_cast<unsigned int>(c);
         glActiveTexture(GL_TEXTURE0 + unit);
         glBindTexture(GL_TEXTURE_2D, shadow_fbos[c].tex);
         // 纹理单元名 uShadowMap[i]（数组 sampler uniform）。
@@ -346,8 +402,13 @@ void SkeletonRenderer::UploadSunData(
 
 // ==================== DrawSkinnedMeshShadow ====================
 // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写线性深度 .r）。
-// 蒙皮在 mesh 局部空间做（蒙皮 VS 内），再乘光空间 VP*model。
-// pose atlas 绑到 TEXTURE7（阴影 pass 不与主 pass 的 TEXTURE12 冲突）。
+// 蒙皮在 mesh 局部空间做（蒙皮 VS 内），再乘光空间 VP。
+// pose atlas 绑到 kTexUnitPoseAtlas（与主 pass **同号**：两 pass 不同时活跃，无需错开；
+//   单元分配表见 src/texture_units.h）。
+//
+// ⚠️ 整批 = **一次 instanced draw**：摆放矩阵与 pose 选择都走 per-instance attribute，
+//   数据由调用方传入的 InstanceBuffer 承载（instance_buffer.h），
+//   用 InstanceBufferBinding 挂到 mesh VAO 并在出作用域时自动摘除。
 void SkeletonRenderer::DrawSkinnedMeshShadow(
     const SkinnedMeshCommand& cmd,
     MeshManager& mesh_mgr,
@@ -356,36 +417,20 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     int pose_count,
     const float shadow_vp[16],
     const float depth_vp[16],
-    unsigned int shadow_prog) {
+    unsigned int shadow_prog,
+    InstanceBuffer& instance_model_buf,
+    InstanceBuffer& instance_pose_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
     CHECK_GT(mesh->vao, 0u);
     CHECK(!cmd.instances.empty()) << "SkinnedMesh instance 数组不能为空";
 
-
-    glUseProgram(shadow_prog);
-    glActiveTexture(GL_TEXTURE7);
-    glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseAtlas"), 7);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uBoneCount"), gh.bone_count);
-
+    // 越界校验（SkinnedInstanceState 契约：越界 → FATAL，不静默读 atlas 里别人的骨骼）。
+    //   逐实例上传前先全批验一遍：一次 draw 里没法中途报错，验完再画。
+    const int pose_w = gh.bone_count * 4;
+    CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
     for (const SkinnedInstanceState& inst : cmd.instances) {
-        float model[16];
-        BuildModelMatrix(inst.center, inst.up, inst.front, inst.scale, model);
-        // 光空间 MVP = 光VP × model。
-        float sm[16], dm[16];
-        Mat4Mul(shadow_vp, model, sm);
-        Mat4Mul(depth_vp, model, dm);
-        glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowMVP"),
-                           1, GL_FALSE, sm);
-        glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthMVP"),
-                           1, GL_FALSE, dm);
-
-        // pose_a / pose_b 的**平坦** texel 起点 + 插值权重（与主 pass 同套，shader 内回绕）。
-        //   影子必须用与身体完全一致的插值结果，否则影子与身体错位。
-        const int pose_w = gh.bone_count * 4;
-        CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
         CHECK_GE(inst.pose_a, 0) << "pose_a 越界: " << inst.pose_a;
         CHECK_GE(inst.pose_b, 0) << "pose_b 越界: " << inst.pose_b;
         CHECK_LT(inst.pose_a, pose_count)
@@ -394,23 +439,45 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
             << "pose_b 越界: " << inst.pose_b << " >= " << pose_count;
         CHECK_GE(inst.ratio, 0.0f) << "ratio 越界: " << inst.ratio;
         CHECK_LE(inst.ratio, 1.0f) << "ratio 越界: " << inst.ratio;
-        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), 0);
-        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseCol"), inst.pose_a * pose_w);
-        glUniform1i(glGetUniformLocation(shadow_prog, "uPoseColB"), inst.pose_b * pose_w);
-        glUniform1f(glGetUniformLocation(shadow_prog, "uRatio"), inst.ratio);
-        glUniform2f(glGetUniformLocation(shadow_prog, "uAtlasDim"),
-                    static_cast<float>(SkeletonManager::kPoseAtlasDim),
-                    static_cast<float>(SkeletonManager::kPoseAtlasDim));
+    }
 
+    // 实例数据：同一套逐实例缓冲（与主 pass 同源，否则影子与身体错位）。
+    //   光空间 VP 走 uniform（全批共享）。
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf);
+
+    glUseProgram(shadow_prog);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
+    glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseAtlas"), kTexUnitPoseAtlas);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uBoneCount"), gh.bone_count);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), 0);
+    glUniform2f(glGetUniformLocation(shadow_prog, "uAtlasDim"),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim));
+    // 光空间 VP 走 uniform（不含 model）。
+    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowViewProj"),
+                       1, GL_FALSE, shadow_vp);
+    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthViewProj"),
+                       1, GL_FALSE, depth_vp);
+
+    const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
+    {
+        // RAII 配对挂载（同主 pass）。
+        InstanceBufferBinding bind(mesh->vao,
+                                   {&instance_model_buf, &instance_pose_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
-                           GL_UNSIGNED_INT, nullptr);
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
         } else {
-            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
         }
         glBindVertexArray(0);
     }
+    // 恢复 active texture unit（与 DrawSkinnedMesh 同约定）。
+    glActiveTexture(GL_TEXTURE0);
 }
 
 }  // namespace jpov

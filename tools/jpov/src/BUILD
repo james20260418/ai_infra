@@ -59,6 +59,34 @@ cc_library(
     linkstatic = 1,
 )
 
+# TextureUnits — 全渲染器唯一的纹理单元分配表（header-only）。
+# 所有 glActiveTexture 引用此表，禁止裸数字；区间重叠由文件内 static_assert 编译期拦截。
+cc_library(
+    name = "texture_units",
+    hdrs = ["texture_units.h"],
+    visibility = ["//visibility:public"],
+)
+
+# InstanceBuffer — 一次 Instanced draw 的 per-instance attribute 数据缓冲。
+# 实例数据属于「这次 draw」（每帧由调用方给），不属于不可变几何（GPUMesh），
+# 故由渲染器持有、跨 draw 复用，draw 前临时挂到 mesh VAO（RAII 配对，见头文件）。
+cc_library(
+    name = "instance_buffer",
+    srcs = ["instance_buffer.cc"],
+    hdrs = ["instance_buffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # OBJLoader — Wavefront .obj 文本 → CPU MeshData 解析
 cc_library(
     name = "obj_loader",
@@ -244,6 +272,7 @@ cc_library(
         ":mesh_manager",
         ":shader_manager",
         ":texture_manager",
+        ":texture_units",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",

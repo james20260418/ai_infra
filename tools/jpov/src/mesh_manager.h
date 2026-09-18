@@ -17,9 +17,12 @@
 //   location 4 = weights   (vec4 float)   ← vbo_weights，flags 含 kJoints 才有
 //   location 5 = tangent   (vec3 float)   ← vbo_tangents，flags 含 kTangent 才有
 //
+// ⚠️ per-instance attribute（loc6+，Instanced draw 用，divisor=1）**不在本类职责内**：
+//   实例数据是「每次 draw 的输入」，不属于不可变几何，由 InstanceBuffer
+//   （src/instance_buffer.h）承载并在 draw 前临时挂到 VAO 上。
+//   本类只管「RegisterMesh 时定死、之后不变」的顶点属性。
 // 固定 attribute location 为后续骨骼 shader（mesh3d_skinned）预留「口子」：
 // 新增 shader 只需声明相同的 layout(location=N)，无需改动本类。
-
 #ifndef JPOV_MESH_MANAGER_H_
 #define JPOV_MESH_MANAGER_H_
 

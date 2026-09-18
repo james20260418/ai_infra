@@ -29,6 +29,27 @@
 
 namespace jpov {
 
+// ==================== per-instance attribute 布局（主 pass / shadow pass 共用） ====================
+//
+// 「真 instanced draw」的关键：实例间的差异必须走 **per-instance attribute**（divisor=1），
+// 不能走逐实例 uniform —— 后者必须逐实例一次 draw（N 实例 = N 次 draw call）。
+// 属性槽：loc6..9 = aInstModel，loc10 = aInstPose。
+//   布局的**唯一约定点**在 src/instance_buffer.h（kInstanceModelAttrSpec / kInstancePoseAttrSpec）；
+//   实例数据由渲染器持有的 InstanceBuffer 承载（属于「这次 draw」，不属于 mesh）。
+//
+//   摆放： location 6..9 = aInstModel (mat4，4 个 vec4 slot)
+//          ★ 全批共享 VAO 的**顶点**属性（loc0-5）不变，与普通 draw 完全一致。
+//
+// ⚠️ **视图/投影矩阵不入 per-instance attribute**：它全批共享、每帧一张，走 uniform
+//   （uViewProj / uShadowViewProj / uShadowDepthViewProj），满足 minimal surprise ——
+//   把恒定值放 attribute 会浪费带宽、也让调用方以为它可逐实例变。
+//   着色器里世界变换 = uViewProj * aInstModel * (骨架空间顶点)。这是标准 instancing 分体：
+//   **per-instance = 摆放，per-frame = 相机。**
+//
+// 布局与 shader 侧 layout(location=N) 声明一一对应：
+//   loc6 = 第 0 列(vec4)  loc7 = 第 1 列  loc8 = 第 2 列  loc9 = 第 3 列
+//   （列主序，与 BuildModelMatrix 输出一致，见 instance_buffer.h 的布局表）。
+
 // ==================== 蒙皮顶点着色器 ====================
 // 输出与 object3d kMeshVs3dPBRFull 完全一致（vWorldPos/vWorldNormal/vTexCoord/vWorldTangent），
 // 仅把「顶点经 uModel」改为「顶点先经 atlas 肤矩阵蒙皮、再经 uModel」。
@@ -42,14 +63,22 @@ layout(location = 3) in ivec4 aJoint;
 layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
 
-uniform mat4 uMVP;        // proj*view*model（Object3DRenderer/DrawObject3D 同约定；model 由调用方乘进）
-uniform mat4 uModel;      // 局部→世界（center/up/front/scale）
+uniform mat4 uViewProj;   // proj*view（每帧一张，全批共享）；世界→裁剪。model 走 aInstModel。
+// per-instance 摆放矩阵（location 6..9 拆成 4 列；divisor=1，每实例推进一步）。
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+// per-instance pose 选择（divisor=1）：vec3(pose_col_a, pose_col_b, ratio)。
+//   .x/.y = 本实例 pose_a / pose_b 在 atlas 里的**平坦 texel 起点**
+//   .z    = pose_a→pose_b 插值权重 [0,1]（静态时为 0，短路不读 pose_b）
+//   与 aInstModel 同理：逐实例差异必须走 attribute，不然整批就退化回 N 次 draw。
+//   ⚠️ 统一 float（而非 ivec2 + IPointer）：IPointer 按**原始整数位**解释，float 的位
+//   会被读成天文数字列 → texelFetch 出界、整批塌成空白（踩过）。
+layout(location = 10) in vec3 aInstPose;
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas）
 uniform int   uBoneCount;      // 该骨架骨数
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
-uniform int   uPoseCol;        // 本实例 pose 的**平坦** texel 起点（= pose_idx * pose_width）
-uniform int   uPoseColB;       // 本实例 pose_b 的**平坦** texel 起点（==uPoseCol 即静态不插值）
-uniform float uRatio;          // pose_a→pose_b 的插值权重，[0,1]；静态时为 0（短路，不读 pose_b）
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 
 out vec3 vWorldPos;
@@ -58,7 +87,7 @@ out vec2 vTexCoord;
 out vec3 vWorldTangent;
 
 // 从 atlas 取第 bone 的 4×4 行主序矩阵，转成 GLSL mat4（列主序）。
-// pose texel 起点：uPoseCol 给【本 pose 在 atlas 里的平坦 texel 下标】
+// pose texel 起点：调用方给【本 pose 在 atlas 里的平坦 texel 下标】
 //   （= pose_idx * pose_width，pose_width = bone_count*4，CPU 端算好）。**不再乘
 //   uBoneCount*4**：那样把「每 pose 宽 = bone_count*4」写死进 shader，且与 CPU 的
 //   行优先布局假设分叉（历史 bug：两侧对“一行放几个 pose”理解不同 → 取到未上传的黑行）。
@@ -106,15 +135,15 @@ mat4 LoadBoneMatrixAt(int pose_col, int bone) {
 // ratio <= 0 时**短路**只取 pose_a：静态/单帧场景（既有 gold 全走这条）取址与插值实现前
 //   完全一致（零回归）。
 mat4 LoadBoneMatrix(int bone) {
-    mat4 ma = LoadBoneMatrixAt(uPoseCol, bone);
-    if (uRatio <= 0.0) {
+    mat4 ma = LoadBoneMatrixAt(int(aInstPose.x), bone);
+    if (aInstPose.z <= 0.0) {
         return ma;
     }
-    mat4 mb = LoadBoneMatrixAt(uPoseColB, bone);
-    return mat4(mix(ma[0], mb[0], uRatio),
-                mix(ma[1], mb[1], uRatio),
-                mix(ma[2], mb[2], uRatio),
-                mix(ma[3], mb[3], uRatio));
+    mat4 mb = LoadBoneMatrixAt(int(aInstPose.y), bone);
+    return mat4(mix(ma[0], mb[0], aInstPose.z),
+                mix(ma[1], mb[1], aInstPose.z),
+                mix(ma[2], mb[2], aInstPose.z),
+                mix(ma[3], mb[3], aInstPose.z));
 }
 void main() {
     // 4-bone 蒙皮：mesh 局部空间内 pos/normal/tangent = Σ w_i · M_i · (顶点)。
@@ -130,14 +159,16 @@ void main() {
         st += w * vec3(mat3(m) * aTangent);
     }
 
-    // 世界坐标/法线：uModel=model（center/up/front/scale），统一 DrawObject3D 约定。
-    vec4 world = uModel * vec4(sp, 1.0);
+    // 本实例摆放矩阵（per-instance attribute，每实例不同；4 列拼回 mat4）。
+    mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    // 世界坐标/法线：inst_model = center/up/front/scale（与 DrawObject3D 同约定，逐实例）。
+    vec4 world = inst_model * vec4(sp, 1.0);
     vWorldPos = world.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * sn);
-    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * st);
+    vWorldNormal = normalize(mat3(transpose(inverse(inst_model))) * sn);
+    vWorldTangent = normalize(mat3(transpose(inverse(inst_model))) * st);
     vTexCoord = aTexCoord;
-    // ⚠️ uMVP = mvp*model（proj*view*model, Object3DRenderer/DrawObject3D 同约定）, 故直接乘 sp。
-    gl_Position = uMVP * vec4(sp, 1.0);
+    // 裁剪坐标 = (proj*view) * inst_model * 骨架空间顶点 = uViewProj * world。
+    gl_Position = uViewProj * world;
 }
 )glsl";
 
@@ -145,10 +176,13 @@ void main() {
 // {kSkinnedVs, kMeshFs3dPBR} 注册 program（见 object3d_renderer.h 导出）。
 
 // ==================== 蒙皮阴影顶点着色器 ====================
-// 阴影 pass 专用：在网格局部空间蒙皮(同 kSkinnedVs)后, 用光空间 MVP 裁剪 + 输出线性深度
-// （与 object3d 的 kShadowVs 语义一致：uShadowMVP=光VP*model 用于 gl_Position 近远裁剪；
-//   uShadowDepthMVP=DepthVP*model 输出的 vShadowDepth 为相对主视锥中心的线性深度, w=1）。
+// 阴影 pass 专用：在网格局部空间蒙皮(同 kSkinnedVs)后, 用光空间 VP 裁剪 + 输出线性深度
+// （与 object3d 的 kShadowVs 语义一致：uShadowViewProj=光VP 用于 gl_Position 近远裁剪；
+//   uShadowDepthViewProj=DepthVP 输出的 vShadowDepth 为相对主视锥中心的线性深度, w=1）。
 // 输入/输出与 kShadowVs 完全对齐（vShadowDepth），故 FS 复用 kShadowFs。
+//
+// 与主 pass 同构：摆放矩阵走 per-instance attribute（loc6..9），光空间 VP 走 uniform。
+// host 侧 uViewProj ← uShadowViewProj。
 inline constexpr const char* kSkinnedShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -157,14 +191,18 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in ivec4 aJoint;
 layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
-uniform mat4 uShadowMVP;        // 光空间 裁剪(含 model)
-uniform mat4 uShadowDepthMVP;   // 光空间 线性深度(含 model)
+// per-instance 摆放矩阵（同主 pass：location 6..9 拆 4 列，divisor=1）。
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+// per-instance pose 选择（divisor=1，同主 pass）：vec3(pose_col_a, pose_col_b, ratio)。
+layout(location = 10) in vec3 aInstPose;
+uniform mat4 uShadowViewProj;       // 光空间 裁剪（proj*view，model 走 aInstModel）
+uniform mat4 uShadowDepthViewProj;  // 光空间 线性深度（DepthProj*view，model 走 aInstModel）
 uniform sampler2D uPoseAtlas;
 uniform int   uBoneCount;
 uniform int   uPoseRow;
-uniform int   uPoseCol;        // 本实例 pose_a 的**平坦** texel 起点（= pose_idx * pose_width）
-uniform int   uPoseColB;       // 本实例 pose_b 的**平坦** texel 起点（==uPoseCol 即静态不插值）
-uniform float uRatio;          // pose_a→pose_b 的插值权重，[0,1]；静态时为 0（短路）
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 out float vShadowDepth;
 
@@ -191,15 +229,15 @@ mat4 LoadBoneMatrixAt(int pose_col, int bone) {
 
 // 与主 pass **完全一致**的逐骨插值（否则影子与身体错位）。ratio<=0 短路取 pose_a。
 mat4 LoadBoneMatrix(int bone) {
-    mat4 ma = LoadBoneMatrixAt(uPoseCol, bone);
-    if (uRatio <= 0.0) {
+    mat4 ma = LoadBoneMatrixAt(int(aInstPose.x), bone);
+    if (aInstPose.z <= 0.0) {
         return ma;
     }
-    mat4 mb = LoadBoneMatrixAt(uPoseColB, bone);
-    return mat4(mix(ma[0], mb[0], uRatio),
-                mix(ma[1], mb[1], uRatio),
-                mix(ma[2], mb[2], uRatio),
-                mix(ma[3], mb[3], uRatio));
+    mat4 mb = LoadBoneMatrixAt(int(aInstPose.y), bone);
+    return mat4(mix(ma[0], mb[0], aInstPose.z),
+                mix(ma[1], mb[1], aInstPose.z),
+                mix(ma[2], mb[2], aInstPose.z),
+                mix(ma[3], mb[3], aInstPose.z));
 }
 
 void main() {
@@ -210,10 +248,12 @@ void main() {
         mat4 m = LoadBoneMatrix(aJoint[i]);
         sp += w * (m * vec4(aPos, 1.0)).xyz;
     }
-    // 光空间裁剪(uvShadowMVP 含 model): 蒙皮后直接乘光 VP*model。
-    vec4 clip = uShadowMVP * vec4(sp, 1.0);
-    gl_Position = clip;
-    vec4 dpos = uShadowDepthMVP * vec4(sp, 1.0);
+    // 本实例摆放矩阵（per-instance attribute，同主 pass）。
+    mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    // 光空间裁剪：先经本实例摆放，再乘光空间 VP（model 不再入 VP，与主 pass 对称）。
+    vec4 wp = inst_model * vec4(sp, 1.0);
+    gl_Position = uShadowViewProj * wp;
+    vec4 dpos = uShadowDepthViewProj * wp;
     vShadowDepth = dpos.z / dpos.w;
 }
 )glsl";

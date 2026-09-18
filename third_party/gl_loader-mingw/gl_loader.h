@@ -59,6 +59,12 @@ typedef void (*GL_GenVertexArrays)(int, unsigned int*);
 typedef void (*GL_DeleteVertexArrays)(int, const unsigned int*);
 typedef void (*GL_BindVertexArray)(unsigned int);
 typedef void (*GL_DrawArrays)(unsigned int, int, int);
+// Instancing（GL 3.1+ / ARB_instanced_arrays）：MinGW 的 GL 1.1 <GL/gl.h> 无声明。
+//   DrawArraysInstanced/DrawElementsInstanced 为「真 instanced draw」的入口；
+//   VertexAttribDivisor 设置 per-instance attribute 的步进（divisor=1 = 每实例推进）。
+typedef void (*GL_DrawArraysInstanced)(unsigned int, int, int, int);
+typedef void (*GL_DrawElementsInstanced)(unsigned int, int, unsigned int, const void*, int);
+typedef void (*GL_VertexAttribDivisor)(unsigned int, unsigned int);
 typedef void (*GL_TexSubImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
 typedef unsigned int (*GL_GetError)(void);
 typedef void (*GL_PushAttrib)(unsigned int);
@@ -116,6 +122,9 @@ extern GL_GenVertexArrays        gl_GenVertexArrays;
 extern GL_DeleteVertexArrays     gl_DeleteVertexArrays;
 extern GL_BindVertexArray        gl_BindVertexArray;
 extern GL_DrawArrays            gl_DrawArrays;
+extern GL_DrawArraysInstanced   gl_DrawArraysInstanced;
+extern GL_DrawElementsInstanced gl_DrawElementsInstanced;
+extern GL_VertexAttribDivisor   gl_VertexAttribDivisor;
 extern GL_TexSubImage2D         gl_TexSubImage2D;
 extern GL_GetError              gl_GetError;
 extern GL_PushAttrib            gl_PushAttrib;
@@ -149,6 +158,9 @@ int gl_loader_init(void);
 #define glBindTexture            gl_BindTexture
 #define glBindVertexArray        gl_BindVertexArray
 #define glDrawArrays             gl_DrawArrays
+#define glDrawArraysInstanced    gl_DrawArraysInstanced
+#define glDrawElementsInstanced  gl_DrawElementsInstanced
+#define glVertexAttribDivisor    gl_VertexAttribDivisor
 #define glTexSubImage2D          gl_TexSubImage2D
 #define glGetError               gl_GetError
 #define glPushAttrib             gl_PushAttrib

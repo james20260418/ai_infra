@@ -40,6 +40,8 @@ cc_library(
     hdrs = ["skeleton_renderer.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tools/jpov/src:instance_buffer",
+        "//tools/jpov/src:texture_units",
         "//tools/jpov/src:mesh_manager",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",

@@ -85,6 +85,11 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_DeleteVertexArrays,     "glDeleteVertexArrays");
     LOAD_FUNC(gl_BindVertexArray,        "glBindVertexArray");
     LOAD_FUNC(gl_DrawArrays,            "glDrawArrays");
+    // Instancing（GL 3.1+ 核心 / ARB_instanced_arrays）；驱动不支持时为 NULL →
+    //   gl_loader_init 返回值非 0，调用方会 LOG(FATAL)（见 Init 处）。
+    LOAD_FUNC(gl_DrawArraysInstanced,   "glDrawArraysInstanced");
+    LOAD_FUNC(gl_DrawElementsInstanced, "glDrawElementsInstanced");
+    LOAD_FUNC(gl_VertexAttribDivisor,   "glVertexAttribDivisor");
     LOAD_FUNC(gl_TexSubImage2D,         "glTexSubImage2D");
     LOAD_FUNC(gl_GetError,              "glGetError");
     LOAD_FUNC(gl_PushAttrib,            "glPushAttrib");
@@ -145,6 +150,9 @@ DEFINE_PTR(GL_GenVertexArrays,        gl_GenVertexArrays);
 DEFINE_PTR(GL_DeleteVertexArrays,     gl_DeleteVertexArrays);
 DEFINE_PTR(GL_BindVertexArray,        gl_BindVertexArray);
 DEFINE_PTR(GL_DrawArrays,            gl_DrawArrays);
+DEFINE_PTR(GL_DrawArraysInstanced,   gl_DrawArraysInstanced);
+DEFINE_PTR(GL_DrawElementsInstanced, gl_DrawElementsInstanced);
+DEFINE_PTR(GL_VertexAttribDivisor,   gl_VertexAttribDivisor);
 DEFINE_PTR(GL_TexSubImage2D,         gl_TexSubImage2D);
 DEFINE_PTR(GL_GetError,              gl_GetError);
 DEFINE_PTR(GL_PushAttrib,            gl_PushAttrib);

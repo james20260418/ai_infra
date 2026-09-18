@@ -6,6 +6,8 @@
 
 #include "tools/jpov/src/object3d/object3d_renderer.h"
 
+#include "tools/jpov/src/texture_units.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -431,7 +433,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE1);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 0);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uBaseColorTex"), 1);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 1);
@@ -445,7 +447,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: metallic_tex " << cmd.material.metallic_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE2);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 1);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uMetallicTex"), 2);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 1);
@@ -459,7 +461,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: roughness_tex " << cmd.material.roughness_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE3);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 2);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uRoughnessTex"), 3);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 1);
@@ -473,7 +475,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: emissive_tex " << cmd.material.emissive_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE4);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 3);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uEmissiveTex"), 4);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 1);
@@ -487,7 +489,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: ao_tex " << cmd.material.ao_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE5);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 4);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uAoTex"), 5);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 1);
@@ -501,7 +503,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         CHECK_NE(gl_tex, 0u)
             << "DrawObject3D: normal_tex " << cmd.material.normal_tex
             << " 未注册";
-        glActiveTexture(GL_TEXTURE6);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 5);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
         glUniform1i(glGetUniformLocation(selected_prog, "uNormalTex"), 6);
         glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 1);
@@ -512,9 +514,9 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
     }
 
-    glActiveTexture(GL_TEXTURE0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
     glBindTexture(GL_TEXTURE_2D, tile_index_tex);
-    glUniform1i(glGetUniformLocation(selected_prog, "uTileLightIndices"), 0);
+    glUniform1i(glGetUniformLocation(selected_prog, "uTileLightIndices"), kTexUnitTileLightIndex);
 
     glBindVertexArray(mesh->vao);
     if (mesh->index_count > 0) {
@@ -630,7 +632,8 @@ void Object3DRenderer::UploadSunData(
         glUniform1fv(shader_mgr.GetUniform(p, "uShadowTexelWorld"),
                      kMaxC, shadow_texel_world);
         for (int c = 0; c < cascade_count; ++c) {
-            const unsigned int unit = 7u + static_cast<unsigned int>(c);
+            const unsigned int unit =
+                static_cast<unsigned int>(kTexUnitShadowMapBase) + static_cast<unsigned int>(c);
             glActiveTexture(GL_TEXTURE0 + unit);
             glBindTexture(GL_TEXTURE_2D, shadow_fbos[c].tex);
             // 纹理单元名 uShadowMap[i]（数组 sampler uniform）。
