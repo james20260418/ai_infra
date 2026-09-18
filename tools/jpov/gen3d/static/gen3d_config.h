@@ -25,17 +25,44 @@
 #define JPOV_GEN3D_GEN3D_CONFIG_H_
 
 #include <string>
+#include <vector>
 
 namespace jpov {
 
-// 一次"文本 → 3D"生成任务的配置（供应商无关）。
+// 生成任务的输入方式（三者互斥 —— 语义上等价于"用户手里有什么"）。
+// 供应商无关：Tripo 映射为 text-to-model / image-to-model / multiview-to-model
+// 三个端点，各 client 内部完成分发。
+enum class Gen3dInputMode {
+    kText,         // 文本 prompt（原有路径）
+    kSingleImage,  // 单张参考图 → image-to-model
+    kMultiview,    // 2~4 张多视图参考图 → multiview-to-model
+};
+
+// 一次"生成 3D 模型"任务的配置（供应商无关）。
+//
+// 【输入方式三选一】
+//   kText        → prompt 必填；input_image_paths 必须为空。
+//   kSingleImage → input_image_paths 恰好 1 项（即单图）。
+//   kMultiview   → input_image_paths 为 2~4 项，顺序 [front, left, back, right]。
+// 图像路径**由调用方显式声明**（工具不自动扫目录、不猜文件名）。
+// 提交前必须先用 image_input.h 的 CheckImageFile(s) 做本地审查。
 struct Gen3dConfig {
-    // ---- 输入 ----
+    // ---- 输入方式 ----
+    Gen3dInputMode input_mode = Gen3dInputMode::kText;
+
+    // ---- 文本输入（input_mode == kText 时生效）----
     // 描述目标物件的形状 / 材质 / 风格 / 大致尺寸。越具体越好，
     // 建议携带材质与风格线索（利于 PBR 贴图质量）。≤1024 字符。
     std::string prompt;
 
+    // 本地参考图路径（input_mode == kSingleImage / kMultiview 时生效）。
+    // 由调用方声明；本工具不做隐式发现。
+    //   kSingleImage：恰好 1 项。
+    //   kMultiview  ：2~4 项，顺序即视图顺序 [front, left, back, right]。
+    std::vector<std::string> input_image_paths;
+
     // 不希望出现在模型里的内容（如 "blurry, broken mesh"）。≤255 字符。
+    // 仅 kText 模式支持（图像输入模式无 negative_prompt 语义）。
     std::string negative_prompt;
 
     // ---- 生成风格 ----
@@ -70,6 +97,12 @@ struct Gen3dConfig {
     //                       统一摆场 / 统一相机；后续再各自缩放到目标大小。
     //   默认 false：即便必须调尺寸，也容易预测（每件初始尺度一致）。
     bool real_size = false;
+
+    // ---- 图像输入的尺寸对齐（input_mode != kText 时可选用）----
+    // true  = 让模型对齐参考图的观察视角（Tripo: orientation=align_image）。
+    //         仅在 texture=true 时有效（无贴图时供应商会忽略它）。
+    // false = 供应商自动定向（Tripo: orientation=default）。
+    bool align_to_image = false;
 };
 
 }  // namespace jpov

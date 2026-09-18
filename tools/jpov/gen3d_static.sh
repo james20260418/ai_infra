@@ -10,13 +10,22 @@
 #   步骤2: model_viewer --four_views --output_dir → <name>_{front,up,left,perspective}.png
 #   收尾:  打印产物清单（glb + 4 张 png 的绝对路径），防用户对落盘位置 confuse
 #
-# 用法（output_dir 是第一直觉入口）：
+# 用法（三种输入方式互斥，选一种）：
+#   # A. 文本驱动（原有）
 #   ./tools/jpov/gen3d_static.sh <output_dir> <name> --prompt "..." [更多 gen3d_option]
+#   # B. 单图驱动
+#   ./tools/jpov/gen3d_static.sh <output_dir> <name> --image <图片路径>
+#   # C. 多视图驱动（2~4 张，顺序 [front, left, back, right]）
+#   ./tools/jpov/gen3d_static.sh <output_dir> <name> \
+#       --images <front> <left> [<back>] [<right>]
 #   例:
 #     ./tools/jpov/gen3d_static.sh output/gen3d chair --prompt "一把中世纪木椅"
+#     ./tools/jpov/gen3d_static.sh output/gen3d thing --image ref.png
 #   - <output_dir> 不存在会自动创建
-#   - 除 output_dir / name 外，其余参数原样透传给 gen3d_cmd（--prompt/--triangles
-#     [--high_poly] 等）。缺省走 tripo P1 低模 4000 面。
+#   - 除 output_dir / name 外，其余参数原样透传给 gen3d_cmd（--prompt/--image/--images/
+#     --triangles/--high_poly 等）。缺省走 tripo P1 低模 4000 面。
+#   - 图像模式下，gen3d_cmd 提交前先做**本地图片审查**（格式/大小/分辨率），
+#     不合格则不发任何 HTTP、不消耗 credit。图片要求见 gen3d/static/README.md。
 #   - 步骤1用 gen3d_cmd 从其 stdout 末行取 .glb 绝对路径；失败即中止。
 # =============================================================================
 set -euo pipefail
@@ -27,8 +36,10 @@ OUTPUT_ROOT="$PROJECT_DIR/output"
 
 # ---- 必填: output_dir + name（本脚本的核心，最终产物统一落这里）----
 if [ $# -lt 2 ]; then
-    echo "用法: $0 <output_dir> <name> --prompt \"...\" [gen3d 参数...]" >&2
+    echo "用法: $0 <output_dir> <name> (--prompt \"...\" | --image <path> | --images <front> <left> [<back>] [<right>])" >&2
     echo "例:   $0 output/gen3d chair --prompt \"一把中世纪木椅\"" >&2
+    echo "      $0 output/gen3d thing --image ref.png" >&2
+    echo "      $0 output/gen3d thing --images front.png left.png back.png right.png" >&2
     echo "      (gen3d_static.sh 生成静态模型; 带骨骼走 gen3d_skeleton.sh)" >&2
     exit 1
 fi

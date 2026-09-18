@@ -149,6 +149,34 @@ struct Clock {
     }
 };
 
+// 三条生成路共享的"固定管线约束"：恒 PBR + 恒贴图 + 恒 UV + 恒标准贴图质量。
+// 抽出来是为了让 image / multiview 两条新路与原 text 路径**永不发生参数分叉**
+// （历史上 generator 与 test 分叉过，见 MEMORY 里 mrquad 教训）。
+void ApplySharedPipelineConstraints(const Gen3dConfig& config, json* out) {
+    CHECK_NOTNULL(out);
+    (*out)["texture"] = true;
+    (*out)["pbr"] = true;
+    (*out)["export_uv"] = true;
+    (*out)["texture_quality"] = "standard";
+    (*out)["auto_size"] = config.real_size;
+
+    // 模型档位与面数：low_poly → P1 + face_limit；高模暂用自适应。
+    // 注：P1 面数上限 20000。
+    (*out)["model"] = kLowPolyModel;
+    if (config.low_poly && config.max_triangles > 0) {
+        const int kP1FaceMin = 50;
+        const int kP1FaceMax = 20000;
+        int face_limit = config.max_triangles;
+        if (face_limit < kP1FaceMin) {
+            face_limit = kP1FaceMin;
+        }
+        if (face_limit > kP1FaceMax) {
+            face_limit = kP1FaceMax;
+        }
+        (*out)["face_limit"] = face_limit;
+    }
+}
+
 }  // namespace
 
 TripoClient::TripoClient(const std::string& api_key,
@@ -167,15 +195,79 @@ void TripoClient::SetTimeouts(long request_timeout_s, long poll_deadline_s,
 Gen3dResult TripoClient::GenerateTextToModel(const Gen3dConfig& config,
                                              const std::string& output_dir,
                                              const std::string& name) {
+    // 薄封装：保留旧调用点（gen3d_cmd 等）不必改。语义即 kText 模式。
+    // 若调用方传入了图像路径则与 kText 冲突，Generate 内部的 CHECK 会拦住。
+    return Generate(config, output_dir, name);
+}
+
+Gen3dResult TripoClient::Generate(const Gen3dConfig& config,
+                                  const std::string& output_dir,
+                                  const std::string& name) {
     Gen3dResult result;
     if (api_key_.empty()) {
         result.error = "API key 为空（TripoClient 需 api_key，tripo_cmd 用 TRIPO_API_KEY）";
         return result;
     }
+    if (output_dir.empty() || name.empty()) {
+        result.error = "output_dir 与 name 均不能为空";
+        return result;
+    }
 
-    // ---- 1) 提交任务 ----
-    const std::string submit_url = base_url_ + "/generation/text-to-model";
-    const std::string body = BuildTextToModelBody(config);
+    // ---- 分派：按输入方式选端点、组装请求体 ----
+    std::string endpoint;
+    std::string body;
+    switch (config.input_mode) {
+        case Gen3dInputMode::kText: {
+            CHECK(config.input_image_paths.empty())
+                << "kText 模式不应携带 input_image_paths";
+            endpoint = "/generation/text-to-model";
+            body = BuildTextToModelBody(config);
+            break;
+        }
+        case Gen3dInputMode::kSingleImage: {
+            CHECK_EQ(config.input_image_paths.size(), 1u)
+                << "kSingleImage 模式需要恰好 1 张参考图";
+            std::string up_err;
+            const std::string token =
+                UploadFile(config.input_image_paths[0], &up_err);
+            if (token.empty()) {
+                result.error = "上传参考图失败: " + up_err;
+                return result;
+            }
+            LOG(INFO) << "参考图已上传: " << config.input_image_paths[0]
+                      << " → " << token;
+            endpoint = "/generation/image-to-model";
+            body = BuildImageToModelBody(config, token);
+            break;
+        }
+        case Gen3dInputMode::kMultiview: {
+            const size_t n = config.input_image_paths.size();
+            CHECK_GE(n, 2u) << "kMultiview 至少需要 2 张图（Tripo 要求）";
+            CHECK_LE(n, 4u) << "kMultiview 最多 4 张图（front/left/back/right）";
+            std::vector<std::string> tokens;
+            tokens.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                std::string up_err;
+                const std::string t = UploadFile(config.input_image_paths[i], &up_err);
+                if (t.empty()) {
+                    result.error = "上传视图失败: "
+                        + config.input_image_paths[i] + ": " + up_err;
+                    return result;
+                }
+                LOG(INFO) << "视图已上传: " << config.input_image_paths[i]
+                          << " → " << t;
+                tokens.push_back(t);
+            }
+            endpoint = "/generation/multiview-to-model";
+            body = BuildMultiviewToModelBody(config, tokens);
+            break;
+        }
+        default:
+            LOG(FATAL) << "未知 Gen3dInputMode";
+    }
+
+    // ---- 提交任务 ----
+    const std::string submit_url = base_url_ + endpoint;
     std::string submit_body;
     bool submit_ok = false;
     CurlPerform(api_key_, "POST", submit_url, "application/json", body,
@@ -183,7 +275,7 @@ Gen3dResult TripoClient::GenerateTextToModel(const Gen3dConfig& config,
                 request_timeout_s_, &submit_body, &submit_ok);
     if (!submit_ok) {
         if (submit_body.empty()) {
-            result.error = "提交任务失败：无响应体（网络不通或超时），请检查网络/TRIpo 端点可达";
+            result.error = "提交任务失败：无响应体（网络不通或超时），请检查网络/Tripo 端点可达";
         } else {
             result.error = "提交任务失败 (HTTP): " + submit_body;
         }
@@ -199,9 +291,18 @@ Gen3dResult TripoClient::GenerateTextToModel(const Gen3dConfig& config,
             return result;
         }
     }
-    LOG(INFO) << "tripo 任务已提交: task_id=" << task_id;
+    LOG(INFO) << "tripo 任务已提交: task_id=" << task_id
+              << " (endpoint=" << endpoint << ")";
 
-    // ---- 2) 轮询 ----
+    // ---- 轮询 + 下载（三条路共用）----
+    return PollAndDownload(task_id, JoinGlbPath(output_dir, name),
+                           /*context*/ endpoint);
+}
+
+Gen3dResult TripoClient::PollAndDownload(const std::string& task_id,
+                                         const std::string& dst_path,
+                                         const std::string& context) const {
+    Gen3dResult result;
     const std::string task_url = base_url_ + "/tasks/" + task_id;
     const long deadline = Clock::NowEpochS() + poll_deadline_s_;
     std::string final_error = "任务超时（>"
@@ -241,18 +342,16 @@ Gen3dResult TripoClient::GenerateTextToModel(const Gen3dConfig& config,
                 result.error = "任务成功但解析 model_url 失败: " + poll_error;
                 return result;
             }
-            // ---- 3) 下载 ----
-            const std::string glb_path = JoinGlbPath(output_dir, name);
             std::string dl_error;
-            if (!DownloadToFile(model_url, glb_path, &dl_error)) {
+            if (!DownloadToFile(model_url, dst_path, &dl_error)) {
                 result.error = "下载 GLB 失败: " + dl_error;
                 return result;
             }
-            result.glb_path = glb_path;
+            result.glb_path = dst_path;
             return result;
         }
         if (status == "failed" || status == "canceled") {
-            result.error = "tripo 任务" + status + ": " + poll_body;
+            result.error = "tripo 任务" + status + " (" + context + "): " + poll_body;
             return result;
         }
         // 其他（processing/queued/...）继续轮询。
@@ -260,7 +359,6 @@ Gen3dResult TripoClient::GenerateTextToModel(const Gen3dConfig& config,
     result.error = final_error;
     return result;
 }
-
 
 bool TripoClient::DownloadToFile(const std::string& url,
                                  const std::string& dst_path,
@@ -294,33 +392,114 @@ std::string TripoClient::BuildTextToModelBody(const Gen3dConfig& config) const {
     if (!config.negative_prompt.empty()) {
         j["negative_prompt"] = config.negative_prompt;
     }
-    // 固定管线约束：恒 PBR + 恒贴图 + 恒有 UV（gen3d_config.h 顶部约定）。
-    j["texture"] = true;
-    j["pbr"] = true;
-    j["export_uv"] = true;
-    j["texture_quality"] = "standard";
-    // 尺寸语义：auto_size 对应 config.real_size（true=按米真实尺寸）。
-    j["auto_size"] = config.real_size;
-    // 模型档位与面数：low_poly → P1 + face_limit；高模暂用自适应（本次主打低模）。
-    if (config.low_poly) {
-        j["model"] = kLowPolyModel;
-        // max_triangles：>0 时发 face_limit，并 clamp 到 P1 支持范围 50~20000。
-        // -1 = 不限制（供应商自适应拓扑）。防御式：即使调用方传超范围也合法。
-        if (config.max_triangles > 0) {
-            const int kP1FaceMin = 50;
-            const int kP1FaceMax = 20000;
-            int face_limit = config.max_triangles;
-            if (face_limit < kP1FaceMin) face_limit = kP1FaceMin;
-            if (face_limit > kP1FaceMax) face_limit = kP1FaceMax;
-            j["face_limit"] = face_limit;
-        }
-    } else {
-        // 高模走 H 系列；本次 client 暂未核实 H 当前版本串，交由调用方在实测
-        // 阶段确认为 safest —— 默认也发 low_poly=false 时用 P1 取顶上限。
-        LOG(WARNING) << "high_poly(low_poly=false) 暂未映射独立 H 档，退回 P1 自适应";
-        j["model"] = kLowPolyModel;
+    if (config.prompt.empty()) {
+        LOG(WARNING) << "text-to-model 的 prompt 为空——Tripo 大概率返回错误";
     }
+    if (!config.low_poly) {
+        // 高模（H 系列）版本串尚未在本 client 核准，先退回 P1 并告警。
+        LOG(WARNING) << "high_poly(low_poly=false) 暂未映射独立 H 档，退回 P1 自适应";
+    }
+    ApplySharedPipelineConstraints(config, &j);
     return j.dump();
+}
+
+std::string TripoClient::BuildImageToModelBody(
+    const Gen3dConfig& config, const std::string& file_token) const {
+    CHECK(!file_token.empty()) << "BuildImageToModelBody 需要非空 file_token";
+    json j;
+    j["input"] = file_token;
+    // orientation：align_image 需 texture=true（固定管线已是 true，故有效）。
+    j["orientation"] = config.align_to_image ? "align_image" : "default";
+    ApplySharedPipelineConstraints(config, &j);
+    return j.dump();
+}
+
+std::string TripoClient::BuildMultiviewToModelBody(
+    const Gen3dConfig& config,
+    const std::vector<std::string>& file_tokens) const {
+    CHECK_GE(file_tokens.size(), 2u);
+    CHECK_LE(file_tokens.size(), 4u);
+    // view-key 形式（Tripo 推荐）：顺序无关，服务端归一化到 [front,left,back,right]。
+    // 位置即视图语义：index 0..3 = front / left / back / right。
+    constexpr char kViewKeys[4][8] = {"front", "left", "back", "right"};
+    json inputs = json::array();
+    for (size_t i = 0; i < file_tokens.size(); ++i) {
+        CHECK(!file_tokens[i].empty())
+            << "multiview 第 " << i << " 个 file_token 为空";
+        json item;
+        item[kViewKeys[i]] = file_tokens[i];
+        inputs.push_back(item);
+    }
+    json j;
+    j["inputs"] = inputs;
+    j["orientation"] = config.align_to_image ? "align_image" : "default";
+    ApplySharedPipelineConstraints(config, &j);
+    return j.dump();
+}
+
+std::string TripoClient::UploadFile(const std::string& path,
+                                    std::string* out_error /*output*/) const {
+    CHECK_NOTNULL(out_error);
+    CHECK(!path.empty()) << "UploadFile 需要非空路径";
+
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        *out_error = "curl_easy_init 失败";
+        return "";
+    }
+    // multipart/form-data：字段名固定为 file（Tripo 约定）。
+    curl_mime* mime = curl_mime_init(curl);
+    curl_mimepart* part = curl_mime_addpart(mime);
+    curl_mime_name(part, "file");
+    curl_mime_filedata(part, path.c_str());
+
+    const std::string url = base_url_ + "/files";
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, request_timeout_s_);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(
+        headers, ("Authorization: Bearer " + api_key_).c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    std::string resp;
+    CurlWriteCtx ctx;
+    ctx.to_file = false;
+    ctx.userdata = static_cast<void*>(&resp);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+    const CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_mime_free(mime);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+        *out_error = "上传传输失败: " + std::string(curl_easy_strerror(rc));
+        return "";
+    }
+    if (http_code < 200 || http_code >= 300) {
+        *out_error = "上传返回 HTTP " + std::to_string(http_code) + ": " + resp;
+        return "";
+    }
+    // 响应形如 { "code":0, "data":{ "file_token":"file_xxx" } }
+    try {
+        const json j = json::parse(resp);
+        if (!j.contains("data") || !j["data"].is_object() ||
+            !j["data"].contains("file_token")) {
+            *out_error = "上传响应缺少 data.file_token: " + resp;
+            return "";
+        }
+        return j["data"]["file_token"].get<std::string>();
+    } catch (const json::exception& e) {
+        *out_error = "上传响应 JSON 解析失败: " + std::string(e.what());
+        return "";
+    }
 }
 
 std::string TripoClient::ParseTaskId(const std::string& resp_body,
