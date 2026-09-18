@@ -42,7 +42,11 @@ namespace gen3d {
 // 一次 tripo3d 生成任务的结果（仅暴露调用方关心的通用语义）。
 struct Gen3dResult {
     // 生成的 GLB 落盘绝对路径；失败时为空。
+    // （kImageToMultiview 模式不产 GLB，此字段为空。）
     std::string glb_path;
+    // kImageToMultiview 模式产出的 4 张参考图落盘绝对路径，顺序
+    // [front, left, back, right]。其他模式为空。
+    std::vector<std::string> view_image_paths;
     // 失败原因（空 = 成功）。供上层打印，不吞错误。
     std::string error;
 };
@@ -83,18 +87,36 @@ public:
     void SetTimeouts(long request_timeout_s, long poll_deadline_s,
                      long download_timeout_s = -1);
 
+    // 【断点续取】拿已知 task_id 直接轮询 + 下载产物，**不重新提交任务**。
+    // 用途：上一轮客户端超时退出、但服务端任务实际已完成时，用 task_id 把
+    //   产物捞回来，避免重复提交白烧 credit。
+    // input_mode 决定产物形态：kImageToMultiview 产 4 张视图图；其余产 GLB。
+    Gen3dResult ResumeByTaskId(Gen3dInputMode input_mode,
+                              const std::string& task_id,
+                              const std::string& output_dir,
+                              const std::string& name);
+
 private:
     std::string api_key_;
     std::string base_url_;
     long request_timeout_s_ = 60;    // JSON API 单请求超时（提交/轮询）
     long download_timeout_s_ = 300;  // GLB 下载单独更长超时（5 分钟过期前够下完大模型）
-    long poll_deadline_s_ = 180;     // 总轮询时长上限
+    // 轮询总上限。multiview/带贴图任务实测可跑 3 分钟以上（见 2026-09-18 wallet
+    // 实测：任务 success 但客户端在 180s 就超时退出，产物没下载 → credit 白烧）。
+    // 故放宽到 15 分钟，覆盖绝大多数任务；真正超长任务仍可 RescueByTaskId 续取。
+    long poll_deadline_s_ = 900;
 
     // 从签名单 URL 下载到本地文件（GLB 可能较大，不落内存，边下边写盘）。
     // 下载不带 Authorization 头（tripo 签名 URL 已授权）；HTTP 层错误置 out_error。
     bool DownloadToFile(const std::string& url,
                         const std::string& dst_path,
                         std::string* out_error /*output*/) const;
+
+    // 把 4 个视图 URL 逐张下载落盘（[front,left,back,right]）。
+    // 由 GenerateImageToMultiview 与 ResumeByTaskId 共用，避免下载逻辑分叉。
+    Gen3dResult DownloadMultiviewImages(const std::vector<std::string>& urls,
+                                        const std::string& output_dir,
+                                        const std::string& name) const;
 
     // 建 JSON 请求体（映射 Gen3dConfig → tripo3d 字段）。
     // 三条路各自一个 builder，共享同一套"固定管线约束"（恒 PBR/贴图/UV/三角面）。
@@ -104,6 +126,15 @@ private:
     std::string BuildMultiviewToModelBody(
         const Gen3dConfig& config,
         const std::vector<std::string>& file_tokens) const;
+
+    // image-to-multiview（单图 → 4 视图参考图）。无 prompt / 无几何参数。
+    std::string BuildImageToMultiviewBody(const Gen3dConfig& config,
+                                         const std::string& file_token) const;
+
+    // kImageToMultiview 主流程（产出 4 张图，非 GLB）。
+    Gen3dResult GenerateImageToMultiview(const Gen3dConfig& config,
+                                         const std::string& output_dir,
+                                         const std::string& name);
 
     // 上传本地图片 → file_token。失败返回空串并置 out_error。
     // Pre-condition: path 非空且为可读的常规文件。
@@ -120,6 +151,12 @@ private:
     // 从响应解析 task_id；失败置 out_error。
     std::string ParseTaskId(const std::string& resp_body,
                             std::string* out_error /*output*/) const;
+
+    // 轮询 image-to-multiview 任务，从输出解析 4 张视图 URL。
+    // 成功置 out_urls=[front,left,back,right]（缺的视图为空串）。
+    bool PollMultiviewUrls(const std::string& task_id,
+                           std::vector<std::string>* out_urls /*output*/,
+                           std::string* out_error /*output*/) const;
 
     // 从 todo 响应解析 model_url；失败返回空串并置 out_error。
     std::string ParseModelUrl(const std::string& resp_body,

@@ -79,3 +79,23 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# tripo_client_resume_test：守「断点续取」与「超时错误可救」两条不变量。
+# 背景：2026-09-18 wallet 实测中，任务在服务端已 success，但客户端 poll_deadline
+#   到点后退出且**丢掉 task_id**，产物没下载 → 只能重跑（白烧 credit）。
+# 本测试用本地 mock HTTP server 扮演 tripo（不烧 credit、不依赖外网），钉死：
+#   ① 超时/失败错误信息必须带 task_id；② ResumeByTaskId 不重新提交、直接取货。
+cc_test(
+    name = "tripo_client_resume_test",
+    srcs = ["tripo_client_resume_test.cc"],
+    deps = [
+        ":gen3d",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

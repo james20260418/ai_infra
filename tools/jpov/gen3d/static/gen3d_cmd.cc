@@ -18,7 +18,14 @@
 //       [--triangles <n>]         # 面数预算（低模默认 4000；-1=自适应）
 //       [--real_size]             # 按真实尺寸（米）输出
 //       [--align_to_image]        # 图像模式：把模型对齐到参考图视角
+//       [--to_multiview]          # 单图 → 只产出 4 视图参考图（不产 3D）
 //       [--skip_image_check]      # 跳过本地图片审查（危险：可能白烧 credit，仅供调试）
+//
+//   断点续取（不重新提交、不重烧 credit）：
+//       # 上一轮客户端超时退出、但服务端任务可能已完成时，拿 task_id 把产物捞回来。
+//       # task_id 会出现在超时/失败的错误信息里。产图任务附 --to_multiview。
+//       gen3d_cmd generate --name <slug> --output_dir <dir> \
+//           --resume_task <task_id> [--to_multiview]
 //
 // 【图片本地审查】图像模式下，提交前必须过 image_input.h 的审查（格式/大小/分辨率）。
 // 不通过则**不发任何 HTTP 请求**、直接非零退出——避免白烧 credit。
@@ -58,7 +65,11 @@ void PrintUsage() {
         "  [--triangles <n>]      面数预算（低模默认 4000；-1=自适应）\n"
         "  [--real_size]          按真实尺寸（米）输出\n"
         "  [--align_to_image]     图像模式：模型对齐到参考图视角\n"
+        "  [--to_multiview]       单图 → 只产出 4 视图参考图（不产 3D 模型）\n"
         "  [--skip_image_check]   跳过本地图片审查（危险，仅供调试）\n"
+        "断点续取（上一轮超时但服务端任务可能已完成时用，**不重新提交、不重烧 credit**）：\n"
+        "  gen3d_cmd generate --name <slug> --output_dir <dir> \\\n"
+        "      --resume_task <task_id> [--to_multiview]\n"
         "图片要求：PNG/JPG/WebP；≤ 20MB；每边 ≥ 256px；至少 2 张（多视图）；\n"
         "多视图顺序固定 [front, left, back, right]，front 不可省。\n"
         "环境变量 TRIPO_API_KEY 必须已设置（调 tripo3d 用）。\n"
@@ -192,8 +203,62 @@ int main(int argc, char** argv) {
     const std::vector<std::string> multi_images =
         GetFlagValues(argc, argv, "images");
 
+    // ---- 断点续取（--resume_task）：拿已知 task_id 直接取货，不重新提交 ----
+    // 优先级最高，与 --prompt/--image/--images 互斥；不跑图片审查（不重新上传）。
+    std::string resume_task_id;
+    const bool has_resume =
+        GetFlagValue(argc, argv, "resume_task", &resume_task_id)
+        && !resume_task_id.empty();
+
     const int mode_count = (has_prompt ? 1 : 0) + (has_image ? 1 : 0)
-        + (multi_images.empty() ? 0 : 1);
+        + (multi_images.empty() ? 0 : 1) + (has_resume ? 1 : 0);
+    if (has_resume) {
+        if (mode_count > 1) {
+            LOG(ERROR) << "--resume_task 与 --prompt / --image / --images 互斥";
+            PrintUsage();
+            return 1;
+        }
+        if (!GetFlagValue(argc, argv, "output_dir", &output_dir) || output_dir.empty()) {
+            LOG(ERROR) << "--resume_task 需要 --output_dir <dir> 指定产物落盘位置";
+            PrintUsage();
+            return 1;
+        }
+        // 产物形态得靠调用方声明：image-to-multiview 产 4 张图，其余产 GLB。
+        const bool resume_views = HasFlag(argc, argv, "to_multiview");
+        const Gen3dInputMode resume_mode = resume_views
+            ? Gen3dInputMode::kImageToMultiview : Gen3dInputMode::kSingleImage;
+
+        const char* key_c0 = std::getenv("TRIPO_API_KEY");
+        if (key_c0 == nullptr || std::string(key_c0).empty()) {
+            LOG(ERROR) << "环境变量 TRIPO_API_KEY 未设置（调 tripo3d 需 API key）";
+            return 1;
+        }
+        TripoClient resume_client(key_c0);
+        const Gen3dResult rres =
+            resume_client.ResumeByTaskId(resume_mode, resume_task_id,
+                                         output_dir, name);
+        if (resume_views) {
+            if (rres.view_image_paths.empty()) {
+                LOG(ERROR) << "续取失败: " << rres.error;
+                return 1;
+            }
+            LOG(INFO) << "续取成功，产出 " << rres.view_image_paths.size()
+                      << " 张视图图（[front,left,back,right] 顺序）:";
+            for (const std::string& p : rres.view_image_paths) {
+                LOG(INFO) << "  视图图: " << p;
+                std::printf("%s\n", p.c_str());
+            }
+            return 0;
+        }
+        if (rres.glb_path.empty()) {
+            LOG(ERROR) << "续取失败: " << rres.error;
+            return 1;
+        }
+        LOG(INFO) << "续取成功，GLB 产物: " << rres.glb_path;
+        std::printf("%s\n", rres.glb_path.c_str());
+        return 0;
+    }
+
     if (mode_count == 0) {
         LOG(ERROR) << "必须提供 --prompt / --image / --images 之一";
         PrintUsage();
@@ -212,8 +277,7 @@ int main(int argc, char** argv) {
     } else if (has_image) {
         config.input_mode = Gen3dInputMode::kSingleImage;
         config.input_image_paths = {single_image};
-    } else {
-        config.input_mode = Gen3dInputMode::kMultiview;
+    } else {        config.input_mode = Gen3dInputMode::kMultiview;
         config.input_image_paths = multi_images;
         if (config.input_image_paths.size() < 2) {
             LOG(ERROR) << "--images 至少需要 2 张（顺序 front/left/back/right）";
@@ -236,6 +300,15 @@ int main(int argc, char** argv) {
         }
     }
     config.align_to_image = HasFlag(argc, argv, "align_to_image");
+    // --to_multiview：单图入 → 只产 4 视图参考图（不产 3D）。仅与 --image 搭配。
+    if (HasFlag(argc, argv, "to_multiview")) {
+        if (!has_image) {
+            LOG(ERROR) << "--to_multiview 需要与 --image <单图> 搭配使用";
+            PrintUsage();
+            return 1;
+        }
+        config.input_mode = Gen3dInputMode::kImageToMultiview;
+    }
     // 缺省 low_poly=true（JPOV 静态 PBR 资产默认走 tripo P1 低模，快且足够好看）。
     // --high_poly 反向关闭它（本次仍映射 P1，高模 H 档为后续扩展）。
     config.low_poly = !HasFlag(argc, argv, "high_poly");
@@ -283,6 +356,22 @@ int main(int argc, char** argv) {
               << " max_triangles=" << config.max_triangles;
 
     const Gen3dResult result = client.Generate(config, output_dir, name);
+
+    // ---- 产图模式（image-to-multiview）：无 GLB，逐行打印图片路径 ----
+    if (config.input_mode == Gen3dInputMode::kImageToMultiview) {
+        if (result.view_image_paths.empty()) {
+            LOG(ERROR) << "生成失败: " << result.error;
+            return 1;
+        }
+        LOG(INFO) << "生成成功，产出 " << result.view_image_paths.size()
+                  << " 张视图图（[front,left,back,right] 顺序）:";
+        for (const std::string& p : result.view_image_paths) {
+            LOG(INFO) << "  视图图: " << p;
+            std::printf("%s\n", p.c_str());
+        }
+        return 0;
+    }
+
     if (result.glb_path.empty()) {
         LOG(ERROR) << "生成失败: " << result.error;
         return 1;

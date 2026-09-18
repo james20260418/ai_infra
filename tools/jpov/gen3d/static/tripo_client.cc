@@ -141,6 +141,23 @@ std::string JoinGlbPath(const std::string& output_dir, const std::string& name) 
     return p + name + ".glb";
 }
 
+// 绝对路径从 output_dir + name + ext 组装，并确保 output_dir 存在（mkdir -p）。
+// 供产图模式（image-to-multiview 的 _front.png 等）使用。
+std::string JoinNamedPath(const std::string& output_dir,
+                         const std::string& name,
+                         const std::string& ext) {
+    CHECK(!output_dir.empty() && !name.empty());
+    if (::mkdir(output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
+        LOG(FATAL) << "无法创建输出目录: " << output_dir
+                   << " (errno=" << errno << ")";
+    }
+    std::string p = output_dir;
+    if (!p.empty() && p[p.size() - 1] != '/') {
+        p.push_back('/');
+    }
+    return p + name + ext;
+}
+
 // 简单秒级时间戳（用于轮询截止判断）。
 struct Clock {
     static long NowEpochS() {
@@ -213,6 +230,12 @@ Gen3dResult TripoClient::Generate(const Gen3dConfig& config,
         return result;
     }
 
+    // kImageToMultiview 是「产图」而非「产 3D」，尾部流程与其余三个模式不同，
+    // 故单独分发（其余三个共用下面的提交 + PollAndDownload）。
+    if (config.input_mode == Gen3dInputMode::kImageToMultiview) {
+        return GenerateImageToMultiview(config, output_dir, name);
+    }
+
     // ---- 分派：按输入方式选端点、组装请求体 ----
     std::string endpoint;
     std::string body;
@@ -262,6 +285,8 @@ Gen3dResult TripoClient::Generate(const Gen3dConfig& config,
             body = BuildMultiviewToModelBody(config, tokens);
             break;
         }
+        case Gen3dInputMode::kImageToMultiview:
+            LOG(FATAL) << "kImageToMultiview 应在函数开头单独分发";
         default:
             LOG(FATAL) << "未知 Gen3dInputMode";
     }
@@ -305,8 +330,11 @@ Gen3dResult TripoClient::PollAndDownload(const std::string& task_id,
     Gen3dResult result;
     const std::string task_url = base_url_ + "/tasks/" + task_id;
     const long deadline = Clock::NowEpochS() + poll_deadline_s_;
+    // 超时错误必须带 task_id：可拿它续取，不必重跑（重跑=白烧 credit）。
+    // 见 ResumeByTaskId / --resume_task。
     std::string final_error = "任务超时（>"
-        + std::to_string(poll_deadline_s_) + "s）仍未完成: task_id=" + task_id;
+        + std::to_string(poll_deadline_s_) + "s）仍未完成: task_id=" + task_id
+        + "（服务端可能仍在跑，用 --resume_task " + task_id + " 续取，勿重跑）";
 
     while (Clock::NowEpochS() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
@@ -351,13 +379,195 @@ Gen3dResult TripoClient::PollAndDownload(const std::string& task_id,
             return result;
         }
         if (status == "failed" || status == "canceled") {
-            result.error = "tripo 任务" + status + " (" + context + "): " + poll_body;
+            // 带 task_id：失败/取消的任务也要可追溯（用户可能拿它找 Tripo 支持）。
+            result.error = "tripo 任务" + status + " (task_id=" + task_id
+                + ", context=" + context + "): " + poll_body;
             return result;
         }
         // 其他（processing/queued/...）继续轮询。
     }
     result.error = final_error;
     return result;
+}
+
+// kImageToMultiview：单图 → 生成 4 视图参考图。
+// 与另三条生成路的关键区别：① 端点不同；② **产出是 4 张图而不是 GLB**：
+//   Tripo 返回的是 4 个签名 URL，我们需要逐个下载并落盘。
+Gen3dResult TripoClient::GenerateImageToMultiview(const Gen3dConfig& config,
+                                                  const std::string& output_dir,
+                                                  const std::string& name) {
+    Gen3dResult result;
+    CHECK_EQ(config.input_image_paths.size(), 1u)
+        << "kImageToMultiview 需要恰好 1 张输入图（产出才是 4 视图）";
+
+    // ---- 1) 上传输入图 ----
+    std::string up_err;
+    const std::string token = UploadFile(config.input_image_paths[0], &up_err);
+    if (token.empty()) {
+        result.error = "上传参考图失败: " + up_err;
+        return result;
+    }
+    LOG(INFO) << "参考图已上传: " << config.input_image_paths[0]
+              << " → " << token;
+
+    // ---- 2) 提交 image-to-multiview ----
+    const std::string submit_url = base_url_ + "/generation/image-to-multiview";
+    const std::string body = BuildImageToMultiviewBody(config, token);
+    std::string submit_body;
+    bool submit_ok = false;
+    CurlPerform(api_key_, "POST", submit_url, "application/json", body,
+                /*auth_header*/ true, /*to_file*/ false, nullptr,
+                request_timeout_s_, &submit_body, &submit_ok);
+    if (!submit_ok) {
+        result.error = submit_body.empty()
+            ? "提交 image-to-multiview 失败：无响应体（网络不通或超时）"
+            : "提交 image-to-multiview 失败 (HTTP): " + submit_body;
+        return result;
+    }
+    std::string parse_error;
+    const std::string task_id = ParseTaskId(submit_body, &parse_error);
+    if (task_id.empty()) {
+        result.error = parse_error;
+        return result;
+    }
+    LOG(INFO) << "image-to-multiview 任务已提交: task_id=" << task_id;
+
+    // ---- 3) 轮询取 4 个视图 URL ----
+    std::vector<std::string> urls;
+    std::string poll_err;
+    if (!PollMultiviewUrls(task_id, &urls, &poll_err)) {
+        result.error = poll_err;
+        return result;
+    }
+
+    // ---- 4) 逐张下载落盘 ----
+    return DownloadMultiviewImages(urls, output_dir, name);
+}
+
+// 把 4 个视图 URL 逐张下载落盘（[front,left,back,right]）。
+// 独立出来供 GenerateImageToMultiview 与 ResumeByTaskId 共用。
+Gen3dResult TripoClient::DownloadMultiviewImages(
+    const std::vector<std::string>& urls,
+    const std::string& output_dir,
+    const std::string& name) const {
+    Gen3dResult result;
+    constexpr char kViewNames[4][8] = {"front", "left", "back", "right"};
+    if (urls.size() != 4) {
+        result.error = "image-to-multiview 返回的视图数不是 4（实际 "
+            + std::to_string(urls.size()) + "）";
+        return result;
+    }
+    for (size_t i = 0; i < urls.size(); ++i) {
+        if (urls[i].empty()) {
+            // 允许缺视图（Tripo 允许），但记录警告并跳过落盘。
+            LOG(WARNING) << "image-to-multiview 的 " << kViewNames[i]
+                         << " 视图为空，跳过落盘";
+            continue;
+        }
+        const std::string png_path = JoinNamedPath(
+            output_dir, name, std::string("_") + kViewNames[i] + ".png");
+        std::string dl_err;
+        if (!DownloadToFile(urls[i], png_path, &dl_err)) {
+            result.error = std::string("下载 ") + kViewNames[i]
+                + " 视图失败: " + dl_err;
+            return result;
+        }
+        LOG(INFO) << "已落盘 " << kViewNames[i] << " 视图: " << png_path;
+        result.view_image_paths.push_back(png_path);
+    }
+    if (result.view_image_paths.empty()) {
+        result.error = "image-to-multiview 未产出任何可用视图";
+    }
+    return result;
+}
+
+// 【断点续取】已知 task_id 时直接轮询 + 下载，**不重新提交**。
+// 动机：客户端超时退出而服务端任务实际已完成时，重跑会白烧 credit；
+//   用 task_id 把已产出的结果捞回来才是正确做法（见 2026-09-18 wallet 实测）。
+Gen3dResult TripoClient::ResumeByTaskId(Gen3dInputMode input_mode,
+                                        const std::string& task_id,
+                                        const std::string& output_dir,
+                                        const std::string& name) {
+    CHECK(!task_id.empty()) << "--resume_task 需要非空 task_id";
+    LOG(INFO) << "断点续取: task_id=" << task_id
+              << " (不重新提交任务，直接轮询+下载)";
+
+    if (input_mode == Gen3dInputMode::kImageToMultiview) {
+        // 产图模式：轮询拿 4 个视图 URL，再逐张落盘。
+        std::vector<std::string> urls;
+        std::string poll_err;
+        if (!PollMultiviewUrls(task_id, &urls, &poll_err)) {
+            Gen3dResult r;
+            r.error = poll_err;
+            return r;
+        }
+        return DownloadMultiviewImages(urls, output_dir, name);
+    }
+
+    // 产模型模式：轮询 success 后拿 model_url 并下载 GLB。
+    return PollAndDownload(task_id, JoinGlbPath(output_dir, name),
+                           /*context*/ "resume");
+}
+
+bool TripoClient::PollMultiviewUrls(const std::string& task_id,
+                                    std::vector<std::string>* out_urls,
+                                    std::string* out_error) const {
+    CHECK_NOTNULL(out_urls);
+    CHECK_NOTNULL(out_error);
+    const std::string task_url = base_url_ + "/tasks/" + task_id;
+    const long deadline = Clock::NowEpochS() + poll_deadline_s_;
+    std::string final_error = "任务超时（>"
+        + std::to_string(poll_deadline_s_) + "s）仍未完成: task_id=" + task_id
+        + "（服务端可能仍在跑，用 --resume_task " + task_id + " 续取，勿重跑）";
+
+    while (Clock::NowEpochS() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+        std::string poll_body;
+        bool poll_ok = false;
+        CurlPerform(api_key_, "GET", task_url, "", "", /*auth_header*/ true,
+                    /*to_file*/ false, nullptr, request_timeout_s_,
+                    &poll_body, &poll_ok);
+        if (!poll_ok) {
+            final_error = "轮询请求失败: " + poll_body;
+            continue;
+        }
+        json j;
+        try {
+            j = json::parse(poll_body);
+        } catch (const json::parse_error&) {
+            final_error = "轮询响应非合法 JSON";
+            continue;
+        }
+        if (!j.contains("data") || !j["data"].is_object() ||
+            !j["data"].contains("status")) {
+            final_error = "轮询响应缺少 data.status";
+            continue;
+        }
+        const std::string status = j["data"]["status"];
+        LOG(INFO) << "image-to-multiview " << task_id << " 状态: " << status;
+        if (status == "success") {
+            // 官方输出字段：front_view_url / left_view_url / back_view_url /
+            // right_view_url（见 docs generation-image-to-multiview）。
+            constexpr char kUrlKeys[4][16] = {
+                "front_view_url", "left_view_url",
+                "back_view_url", "right_view_url"};
+            const json& out = j["data"]["output"];
+            for (int i = 0; i < 4; ++i) {
+                std::string u;
+                if (out.contains(kUrlKeys[i]) && out[kUrlKeys[i]].is_string()) {
+                    u = out[kUrlKeys[i]].get<std::string>();
+                }
+                out_urls->push_back(u);
+            }
+            return true;
+        }
+        if (status == "failed" || status == "canceled") {
+            *out_error = "image-to-multiview 任务" + status + ": " + poll_body;
+            return false;
+        }
+    }
+    *out_error = final_error;
+    return false;
 }
 
 bool TripoClient::DownloadToFile(const std::string& url,
@@ -500,6 +710,19 @@ std::string TripoClient::UploadFile(const std::string& path,
         *out_error = "上传响应 JSON 解析失败: " + std::string(e.what());
         return "";
     }
+}
+
+std::string TripoClient::BuildImageToMultiviewBody(
+    const Gen3dConfig& config, const std::string& file_token) const {
+    CHECK(!file_token.empty()) << "BuildImageToMultiviewBody 需要非空 file_token";
+    json j;
+    j["input"] = file_token;
+    // 注：image-to-multiview **不接受 prompt**（产出为固定的 4 个正交视图），
+    // 也不接受 face_limit / texture 等几何参数（它产的是图不是网格）。
+    // 固定管线约束在此不适用。唯一透传的可选项是 align_to_image 语义无对应，
+    // 故无需其他字段。
+    (void)config;
+    return j.dump();
 }
 
 std::string TripoClient::ParseTaskId(const std::string& resp_body,
