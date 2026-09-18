@@ -21,7 +21,7 @@
 
 ## 前置条件（先确认，缺一不可）
 
-1. 在 JPOV 仓库根目录（`/james_pm/ai_infra_2`）下操作。
+1. 在 JPOV 仓库根目录（`/james_pm/ai_infra`）下操作。
 2. 环境变量 `TRIPO_API_KEY` 已设置（调 Tripo 需 key，会烧 credits）。
    检查：`echo $TRIPO_API_KEY` 非空即可。没设先去设。
 3. 有 bazel；渲染需要显示（无 DISPLAY 会自动起 Xvfb，见 gen3d_static.sh）。
@@ -154,11 +154,22 @@ DISPLAY=:99 ./bazel-bin/tools/jpov/jpov_model_viewer \
 
 ## 常见问题
 
-- **生成了但下载失败？** 别重生成（会重烧 credits）。Tripo 任务会保留，
-  重查 task 拿新签名 URL 再下即可 → 见 `tripo_model_download.md` §3。
+- **生成了但下载失败 / 客户端超时了？** **别重生成**（会重烧 credits）。
+  任务在服务端已提交，产物可能已经好了。错误信息里会带 `task_id`，直接续取：
+  ```bash
+  ./bazel-bin/tools/jpov/gen3d/static/gen3d_cmd generate \
+      --name <名字> --output_dir <dir> --resume_task <task_id>
+  # 若是产图任务（--to_multiview），额外加 --to_multiview
+  ```
+  `--resume_task` **不会重新提交任务**（证据：只发生「查状态 + 下载」两次 HTTP），
+  所以不会白烧 credit。更多下载层面的细节见 `tripo_model_download.md`。
 - **模型是黑图/花屏？** 确认 GLB 渲染能出非纯黑图 = JPOV 加载 OK；
   纯看渲染问题往 JPOV 渲染侧查。
 - **想删上一次结果？** 直接删 `output/gen3d/<名字>.glb` 和同名 4 张 png。
+- **想知道「什么样的图能出好模型」？** 看仓库内已入库的两个实测样例：
+  正面样例 `test/object3d/wallet_tripo_multiview/`（多视图，硬表面单体可用），
+  反面教材 `test/object3d/oak_tripo_negative/`（单图，复杂植物不可用）。
+  两个目录都含输入图 + 产物 + 渲染图 + 完整结论，**动手前先看能省一轮 credit**。
 
 ## 进阶文档（不用先读，需要时再翻）
 

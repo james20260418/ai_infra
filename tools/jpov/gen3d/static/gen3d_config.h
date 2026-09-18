@@ -29,21 +29,26 @@
 
 namespace jpov {
 
-// 生成任务的输入方式（三者互斥 —— 语义上等价于"用户手里有什么"）。
-// 供应商无关：Tripo 映射为 text-to-model / image-to-model / multiview-to-model
-// 三个端点，各 client 内部完成分发。
+// 生成任务的输入方式（互斥 —— 语义上等价于"用户手里有什么"）。
+// 供应商无关：Tripo 映射为 text-to-model / image-to-model / multiview-to-model /
+// image-to-multiview 等端点，各 client 内部完成分发。
 enum class Gen3dInputMode {
-    kText,         // 文本 prompt（原有路径）
-    kSingleImage,  // 单张参考图 → image-to-model
-    kMultiview,    // 2~4 张多视图参考图 → multiview-to-model
+    kText,             // 文本 prompt（原有路径）
+    kSingleImage,      // 单张参考图 → image-to-model
+    kMultiview,        // 2~4 张多视图参考图 → multiview-to-model
+    kImageToMultiview, // 单图 → 生成 4 视图参考图（不产出 3D，产出图）
 };
 
 // 一次"生成 3D 模型"任务的配置（供应商无关）。
 //
-// 【输入方式三选一】
-//   kText        → prompt 必填；input_image_paths 必须为空。
-//   kSingleImage → input_image_paths 恰好 1 项（即单图）。
-//   kMultiview   → input_image_paths 为 2~4 项，顺序 [front, left, back, right]。
+// 【输入方式四选一】
+//   kText             → prompt 必填；input_image_paths 必须为空。
+//   kSingleImage      → input_image_paths 恰好 1 项（即单图）。
+//   kMultiview        → input_image_paths 为 2~4 项，顺序 [front, left, back, right]。
+//   kImageToMultiview → input_image_paths 恰好 1 项；**产出的是 4 张参考图**
+//                        （不是 3D 模型），落盘为 output_dir/<name>_{front,left,
+//                        back,right}.png。用于「先拿四视图参考图，再拿去出模」
+//                        的两段式链路。
 // 图像路径**由调用方显式声明**（工具不自动扫目录、不猜文件名）。
 // 提交前必须先用 image_input.h 的 CheckImageFile(s) 做本地审查。
 struct Gen3dConfig {
