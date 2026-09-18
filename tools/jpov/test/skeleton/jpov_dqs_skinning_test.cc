@@ -17,18 +17,23 @@
 //   即测试跑的就是渲染用的同一条链路的前半段；后半段（DQS/LBS 混合）分别走
 //   SkinMeshOnCpuForTest / SkinMeshOnCpuForTestLinearBlend（与 shader 同公式）。
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include <glog/logging.h>
 #include "gtest/gtest.h"
 
 #include "geom/math/dual_quat.h"
+#include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/test/skeleton/jpov_skeleton_gold_common.h"
+#include "tools/jpov/test/test_utils.h"
 
 namespace {
 
@@ -161,8 +166,91 @@ TEST(DqsSkinningTest, TwoFrameInterpolationStaysRigid) {
     }
 }
 
-// ── 4. 权重不同的顶点：两者都会“动”，但 DQS 的每个顶点都还是刚体映射 ──
+// ── 5. 真实资产（mixamo_male.glb）：全局边长比统计 —— LBS 系统性收缩，DQS 不收缩 ──
+//
+// 说明（别过度解读）：DQS 是**逐顶点刚体**（不同权重的顶点得到不同刚体变换），故边长整体
+//   变化也不会为零；但刚体映射不带“把长度按夹角余弦压扁”这个**系统性**偏差 ⇒ 边长比中位数
+//   应贴近 1。LBS 的矩阵平均则会让大量边**系统性变短**（关节处尤其）。
+// 本用例跑的就是渲染用的那条链路（SkinMatricesOnCpuForTest + 两个混合实现）。
+TEST(DqsSkinningTest, RealAssetEdgeLengthsStayUnshrunk) {
+    const std::string glb =
+        jpov::GetProjectRoot() + "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+    jpov::MeshData rest;
+    jpov::GltfMaterialInfo mi;
+    ASSERT_TRUE(jpov::LoadGltf(glb, &rest, &mi)) << "读不到资产网格: " << glb;
+    std::vector<jpov::SkeletonType> skels;
+    ASSERT_TRUE(jpov::LoadGltfSkeleton(glb, &skels));
+    ASSERT_FALSE(skels.empty());
+    const jpov::SkeletonType& type = skels[0];
+    ASSERT_EQ(rest.joint_indices.size(), rest.positions.size()) << "该网格应带 joints/weights";
+    ASSERT_FALSE(rest.indices.empty());
 
+    // 用与 multipose 测试同一批「极端」姿态（每帧叠加大角度旋转），使关节处真有大幅混合。
+    const std::vector<jpov::SkeletonPose> poses = jpov_skeleton_gold::MakeMultiPoses(type.bone_count());
+    ASSERT_GE(poses.size(), 2u);
+
+    // 收集所有三角形边（去重不做，统计量对重复不敏感；只求中位数/分位数）。
+    std::vector<std::array<size_t, 2>> edges;
+    for (size_t t = 0; t + 2 < rest.indices.size(); t += 3) {
+        const size_t i0 = rest.indices[t], i1 = rest.indices[t + 1], i2 = rest.indices[t + 2];
+        edges.push_back({i0, i1});
+        edges.push_back({i1, i2});
+        edges.push_back({i2, i0});
+    }
+    ASSERT_FALSE(edges.empty());
+
+    std::vector<float> ratio_dqs;
+    std::vector<float> ratio_lbs;
+    for (size_t p = 1; p < poses.size(); ++p) {
+        const jpov::MeshData md = jpov_skeleton_gold::SkinMeshOnCpuForTest(type, poses[p], rest);
+        const jpov::MeshData ml =
+            jpov_skeleton_gold::SkinMeshOnCpuForTestLinearBlend(type, poses[p], rest);
+        for (const std::array<size_t, 2>& e : edges) {
+            const float d0 = Dist(rest.positions[e[0]], rest.positions[e[1]]);
+            if (d0 < 1e-6f) {
+                continue;  // 退化边（重合点）不参与统计
+            }
+            ratio_dqs.push_back(Dist(md.positions[e[0]], md.positions[e[1]]) / d0);
+            ratio_lbs.push_back(Dist(ml.positions[e[0]], ml.positions[e[1]]) / d0);
+        }
+    }
+    ASSERT_FALSE(ratio_dqs.empty());
+    auto percentile = [](std::vector<float> v, double p) {
+        std::sort(v.begin(), v.end());
+        size_t i = static_cast<size_t>(p * static_cast<double>(v.size() - 1));
+        return v[i];
+    };
+    auto frac_below = [](const std::vector<float>& v, float thr) {
+        size_t n = 0;
+        for (float r : v) {
+            if (r < thr) {
+                ++n;
+            }
+        }
+        return static_cast<double>(n) / static_cast<double>(v.size());
+    };
+    LOG(INFO) << "真实资产边长比（边数=" << ratio_dqs.size() << "）"
+              << "：DQS p1=" << percentile(ratio_dqs, 0.01)
+              << " p5=" << percentile(ratio_dqs, 0.05)
+              << " 中位=" << percentile(ratio_dqs, 0.5)
+              << " | LBS p1=" << percentile(ratio_lbs, 0.01)
+              << " p5=" << percentile(ratio_lbs, 0.05)
+              << " 中位=" << percentile(ratio_lbs, 0.5);
+    LOG(INFO) << "明显缩短的边占比（< 0.98）：DQS=" << frac_below(ratio_dqs, 0.98f)
+              << " LBS=" << frac_below(ratio_lbs, 0.98f) << "（< 0.95）：DQS="
+              << frac_below(ratio_dqs, 0.95f) << " LBS=" << frac_below(ratio_lbs, 0.95f);
+
+    // 门禁：在“确实发生混合”的那一小部分边上，LBS 的缩短必须明显多于 DQS。
+    //   （中位数两边都是 1：绝大多数边完整落在单根骨内 —— 单骨顶点的变换在两种写法下都是
+    //     同一个刚体，完全一样。所以这条只该拿尾部统计量说话，别拿中位数说事。）
+    EXPECT_GT(frac_below(ratio_lbs, 0.95f), frac_below(ratio_dqs, 0.95f))
+        << "LBS 的明显缩短边占比应高于 DQS（否则这条门禁测不到东西）";
+    EXPECT_LT(percentile(ratio_dqs, 0.01), 0.999f)
+        << "DQS 也不该是恒 1（否则说明混合根本没发生，测试无效）";
+}
+
+
+// ── 4. 权重不同的顶点：两者都会“动”，但 DQS 的每个顶点都还是刚体映射 ──
 TEST(DqsSkinningTest, DifferentWeightsStayFiniteAndBounded) {
     const TwoBoneRig rig = MakeTwoBoneRig();
     // 两顶点**权重不同**（0.3 / 0.7）：DQS 下各自拿到不同的刚体变换 ⇒ 距离**可以**变，

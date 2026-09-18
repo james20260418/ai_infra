@@ -218,10 +218,15 @@ cc_test(
         "jpov_dqs_skinning_test.cc",
         "jpov_skeleton_gold_common.h",
     ],
+    data = [
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
         "//geom/math:dual_quat",
         "//tools/jpov/test:test_utils",
         "@glog_static//:glog",
