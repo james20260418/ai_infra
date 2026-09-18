@@ -379,7 +379,8 @@ public:
         if (want_skinned && glb_skin_ready_) {
             // 蓝侧 = glb 真皮网格，走 GPU 蒙皮管线（DrawMeshWithSkeleton）。
             // 双帧插值：{pose_a = floor(frame), pose_b = 下一帧, ratio = 帧内小数}，
-            //   由 shader 逐骨 lerp（见 skinning_shader.h）—— 动画因此是连续的。
+            //   由 shader 逐骨在**对偶四元数空间**插值（NLERP，见 skinning_shader.h）
+            //   —— 动画因此是连续的，中间帧也不会像矩阵插值那样缩体积。
             {
                 const int n = glb_skin_frame_count_;
                 CHECK_GT(n, 0) << "glb_skin_ready_ 但 pose 序列为空";

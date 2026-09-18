@@ -5,16 +5,18 @@
 //
 // 核心概念（v3，2026-09-07 与 Danis 收敛）：只有 **Pose**，没有 Clock/动画的概念流。
 //   - 骨骼动画纹理 = 一块「散装 Pose 关键帧」(pose atlas)：把若干**静态姿态关键帧**解算成
-//     每骨架每关节 JointMatrix 后平铺进一张 RGBA 纹理。纹理的“行/列”只表达存放布局，
+//     每骨架每关节的**蒙皮变换**（对偶四元数，见 geom/math/dual_quat.h）后平铺进一张 RGBA
+//     纹理。纹理的“行/列”只表达存放布局，
 //     不表达时间语义 —— 它不要求 pose 相邻、不区分哪段动作，就是一仓库的单帧位姿。
 //   - “动画”/“一段动作” = 用户自选的一组 pose 的**顺序＋推进**：走就是一个 12 帧的数组、
 //     跳是另一个 60 帧的数组…… 这些是**用户自己维护的列表**，JPOV 不管播放、不管时间轴。
-//   - 渲染端实例只做一件事：**在骨骼纹理里取两个 pose 的 JointMatrix，两者之间逐骨插值**，
+//   - 渲染端实例只做一件事：**在骨骼纹理里取两个 pose 的蒙皮变换，两者之间逐骨插值**，
 //     拿插值结果蒙皮。state 唯一接口 = {pose_a, pose_b, ratio}（见 SkinnedInstanceState）。
 //
 // 物理链路：CPU 把每个 pose 沿骨架树拓扑解算出每关节相对角色根的 JointMatrix →
-// 按 pose 平铺成骨骼动画纹理；运行时实例送 {pose_a, pose_b, ratio}，蒙皮 VS 查这两个
-// pose 的 mat4、逐骨 lerp 后套 4-bone 蒙皮。（详见 src/skeleton/）
+// 折入 inverse_bind 得刚体蒙皮变换 → 转成**对偶四元数**按 pose 平铺成骨骼动画纹理；
+// 运行时实例送 {pose_a, pose_b, ratio}，蒙皮 VS 取这两个
+// pose 的对偶四元数、逐骨插值（NLERP）后套 4-bone 刚体混合蒙皮（DLB）。（详见 src/skeleton/）
 //
 // 约束（铁律）：**同一份骨架的 pose 之间才能插值**。pose 强绑骨架：不同骨架 = 不同
 // 骨骼纹理/骨数量/拓扑，跨骨架插值 = 读两张 GL 纹理、语义也无从谈起 —— 因此插值永远
@@ -124,14 +126,15 @@ struct SkeletonType {
 // atlas 行 / 运行时 pose_a/pose_b 引用）。一段“动作”仅是用户自选的一组 pose 的数组（见文件头），
 // JPOV 不在此表达“哪几帧连成一个动作”。
 //
-// ⚠️ 渲染端插值/蒙皮的只是“同一种骨架”内两个 pose 的 JointMatrix（见文件头铁律）。
+// ⚠️ 渲染端插值/蒙皮的只是“同一种骨架”内两个 pose 的蒙皮变换（见文件头铁律）。
 //   pose 与骨架**强绑定**：一个 pose 严格属于某一种骨架（骨数量/树拓扑一致），否则无法解算
 //   也不能插值。因此 pose 从不单独注册/分发：它只作为构造时整包的一部分落在那一份
 //   SkeletonManager 里，天然不跨骨架。归属见 skeleton_manager.h。
 //
 // 数据表示取舍（定稿 2026-09-08）：SkeletonPose 是**用户资产层**（要可读、可手写、可 retarget），
-//   因此收**每关节旋转（四元素，相对父）**，由 CPU 烘焙端沿骨架树解算出相对根 JointMatrix 后
-//   落 atlas（skeleton_manager.h 负责烘焙，本文件只定义资产格式）。一个 pose 严格从属某一份骨架
+//   因此收**每关节旋转（四元素，相对父）**，由 CPU 烘焙端沿骨架树解算出相对根 JointMatrix、
+//   折入 inverse_bind 得到刚体蒙皮变换后再转对偶四元数落 atlas（skeleton_manager 负责烘焙，
+//   本文件只定义资产格式）。一个 pose 严格从属某一份骨架
 //   （joint_rotation.size() == 该骨架 bone_count），每个顶点的 rest 平移由 joints tree 提供，
 //   pose 只驱动【旋转】；若动画/root-motion 带整体位移则由 root_offset 承载（纯原地动作默认为 0）。
 struct SkeletonPose {
@@ -183,8 +186,8 @@ struct SkinnedInstanceState {
     InstanceTransform transform;
 
     // ---- 运动：一份骨架内两个 pose 之间的插值（唯一接口）----
-    // 唯一表达动画顶点的字段就是这个三元组：VS 取 pose_a/pose_b 两套 JointMatrix，
-    //   按 ratio ∈ [0,1] 逐骨 lerp，得本实例这一帧的最终骨骼姿态后蒙皮。
+    // 唯一表达动画顶点的字段就是这个三元组：VS 取 pose_a/pose_b 两套蒙皮变换（对偶四元数），
+    //   按 ratio ∈ [0,1] 逐骨插值（NLERP），得本实例这一帧的最终骨骼姿态后蒙皮（DLB）。
     // ratio==0 → 完全 pose_a；==1 → 完全 pose_b；中间=两者平滑过渡。
     // 连续动画 = 用户在相邻姿态对之间推进该三元组(自己记数组/自己走时间)——JPOV 不做播放：
     //   例：走＝把 12 个 pose 排成 a0,a1…a11，逐帧发 (a_{k},a_{k+1},t) 推进 k/t。

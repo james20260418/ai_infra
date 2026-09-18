@@ -3,22 +3,27 @@
 // 对应 src/skeleton/skeleton_manager.h 契约（架构文档 §3 方案甲 + docs/jpov_skeleton_manager_design.md）：
 //   - 构造即绑定一种骨架（SkeletonType）+ 一整套 pose → 烘焙并上传**一张** pose atlas
 //     纹理（RGBA32F 固定 kPoseAtlasDim²），CPU 在烘焙期把每 pose 的 jointWorld(相对根)×
-//     骨架级 inverseBind 乘好成「最终肤矩阵」落 atlas 行。GPU 无独立逆绑定资源（不用 SSBO，
-//     工程 GL 层不可移植——见头文件 方案甲 注释）。
-//   - 析构释放 GL 纹理。
+//     骨架级 inverseBind 乘好，再把得到的**刚体矩阵**转成**对偶四元数**落 atlas 行。
+//     GPU 无独立逆绑定资源（不用 SSBO，工程 GL 层不可移植——见头文件 方案甲 注释）。
 //
-// 烘焙数学（对照权威 skinning 公式 jointMatrix(j)=globalJoint(j)·inverseBind(j)）：
+// 烘焙数学（2026-09-18 起为 DQS：**对偶四元数**；矩阵/四元数定义见 geom/math/dual_quat.h）：
 //   bone j 相对角色原点的世界矩阵沿骨架树自根向下复合：
 //     jointLocal(j) = T(rest_offset[j]) · R(pose.joint_rotation[j])   （局部：先平移骨长+再转）
 //     child = parent × jointLocal(child)                             （parent 沿 joints 树向上）
 //   finalMatrix(j, pose) = jointWorld(j, pose) · inverse_bind(j)      （折入逆绑定，方案甲）
-//   pose 之行号/bone 序取 atlas 中该 (pose,bone) 的 4 个 texel（行序）→ 蒙皮 VS 点采样即得。
+//   → 刚体矩阵（本链路只含旋转/平移）⇒ 无损转成对偶四元数 q̂ = q + ε·t，t = ½·v̂ ⊗ q：
+//     atlas 每骨 2 texel：texel0 = 实部 q(xyzw)、texel1 = 对偶部 t(xyzw)；
+//     蒙皮 VS 逐骨取 q、t，做**刚体混合**（DLB）后直接变换顶点（见 skinning_shader.h）。
 //
-// ⚠️ 语义说明（Prep 阶段）：SkeletonJoint.rest 只建模平移(未含 rest 旋转，见 skeleton_types
-//   TODO)；关节的世界位姿驱动 = 固定骨长(rest_offset 平移) + pose 给每骨旋转。最后再乘
-//   glTF/资产自带的 inverse_bind 补偿 rest —— 是否在纯 identity pose 下能完美还原绑定网格，
-//   属于「真正接 render/gold 验证」的下一个 PR 范畴；本 PR 只保证 CPU 烘焙链路自洽可单测、
-//   atlas 上传正确。坐标/双 pose 插值等后续 PR。
+//   【保留：改动前的 LBS（线性混合蒙皮）公式，作为对照/历史】
+//     蒙皮链 = Σ_i weight_i · finalMatrix(j_i) · rest_pos（矩阵加权平均），
+//     法线 = Σ_i weight_i · mat3(finalMatrix(j_i)) · rest_normal。
+//     矩阵加权平均一般**不是**旋转（正交性被破坏）⇒ 关节弯折处顶点被“拉向弦”，
+//     体积塌陷/扭转糖纸。DQS 正是为消除该伪影而换的表示（见 dual_quat.h 文件头）。
+//
+// ⚠️ 语义说明（历史，仍成立）：SkeletonJoint.rest 只建模平移；关节的世界位姿驱动 =
+//   固定骨长(rest_offset 平移) + pose 给每骨旋转。最后再乘 glTF/资产自带的 inverse_bind
+//   补偿 rest。
 
 // geom/math_util.h(经 skeleton_types→quaternion→vec)使用 M_PI/M_PI_2，须在首次 include
 // <cmath> 前定义 _USE_MATH_DEFINES，否则 MinGW 下未定义(生效太晚)。与 render_command.h 同款保护。
@@ -38,6 +43,8 @@
 #include <vector>
 
 #include <glog/logging.h>
+#include "geom/math/dual_quat.h"
+#include "geom/math/mat4.h"
 #ifdef _WIN32
 #include "third_party/gl_loader-mingw/gl_loader.h"
 // MinGW 的 GL/gl.h / gl_loader.h 可能不定义 GL_CLAMP_TO_EDGE(renderer.cc 兜底同款)。
@@ -51,23 +58,33 @@ namespace jpov {
 namespace {
 
 // 烘焙用的 4x4 矩阵与基础运算统一来自 geom/math/mat4.h（列主序 float[16]，与 object3d /
-// primitives3d 的 float[16] + GLSL mat4 约定一致）。此处只留一个本地别名 + atlas 行布局辅助。
+// primitives3d 的 float[16] + GLSL mat4 约定一致）；刚体矩阵 → 对偶四元数用 geom/math/dual_quat.h。
+// 此处只留本地别名 + atlas 行布局辅助。
 using Mat4 = geom::math::Mat4;
+using geom::math::DualQuat;
 using geom::math::JointLocal;
-using geom::math::Mat4Identity;
 using geom::math::Mat4Mul;
 
-// 把列主序 Mat4 写入 RGBA32F texel 行缓冲：binary 骨占 4 个连续 texel，每个 texel（RGBA=4 float）
-//   存矩阵的**一行**（行 r 的分量 = m[col*4+r] for col 0..3）。
-// 布局匹配 atlas: 每 (pose) 占 bone_count×4 texel（横排同一 scanline）。
-void PutMat4Row(const Mat4& mat, int bone_x0, std::vector<float>* out_row) {
-    for (int r = 0; r < 4; ++r) {
-        const int texel = bone_x0 + r;  // bone_x0..bone_x0+3 这 4 个 texel 各存矩阵的一行
-        float* out = out_row->data();
-        out[(texel) * 4 + 0] = mat.m[r];        // col0 row r
-        out[(texel) * 4 + 1] = mat.m[4 + r];    // col1 row r
-        out[(texel) * 4 + 2] = mat.m[8 + r];    // col2 row r
-        out[(texel) * 4 + 3] = mat.m[12 + r];   // col3 row r
+// 把一根骨的**对偶四元数**写进 atlas 行缓冲：一根骨占 **2 个连续 texel**
+//   texel0 = 实部 q(x,y,z,w)     ← 旋转
+//   texel1 = 对偶部 t(x,y,z,w)   ← ½·v̂⊗q（平移编码在其中，见 dual_quat.h）
+// 每个 texel 各自按**全局平坦下标**判自己落在哪一行（一个 pose/一根骨的 texel 可能跨行，
+// 见 ctor 里 “一个 pose 的 texel 可能跨行” 注释）；行内 x = flat − row_lo。
+// Pre: bone_flat0 是该骨在本 pose 内的平坦起点；line 为整行缓冲（kPoseAtlasDim×4 float）。
+void PutDualQuatTexels(const DualQuat& dq, int bone_flat0, int row_lo, int row_hi,
+                       std::vector<float>* line) {
+    const geom::Quaternion<float> parts[2] = {dq.q, dq.t};
+    for (int k = 0; k < 2; ++k) {
+        const int flat = bone_flat0 + k;
+        if (flat < row_lo || flat >= row_hi) {
+            continue;  // 本 texel 不在此行
+        }
+        float* out = line->data();
+        const int texel = flat - row_lo;  // 本行内的 x
+        out[texel * 4 + 0] = parts[k].x;
+        out[texel * 4 + 1] = parts[k].y;
+        out[texel * 4 + 2] = parts[k].z;
+        out[texel * 4 + 3] = parts[k].w;
     }
 }
 
@@ -85,9 +102,10 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
 
     bone_count_ = bone;
     pose_count_ = pose_count;
-    // 每 pose 占 bone*4 texel(每骨 4 texel)。pose_per_row = floor(dim/(bone*4))
-    //   —— 仅作**容量估算**（pose_capacity 的推导）；运行期取址不依赖它（见 ctor 注释）。
-    const int pose_tex_w = bone * 4;
+    // 每 pose 占 bone*2 texel（每骨 2 texel：实部 q + 对偶部 t）。
+    // pose_per_row = floor(dim/(bone*2)) —— 仅作**容量估算**（pose_capacity 的推导）；
+    // 运行期取址不依赖它（见 ctor 注释）。
+    const int pose_tex_w = bone * 2;
     pose_per_row_ = kPoseAtlasDim / pose_tex_w;
     CHECK_GT(pose_per_row_, 0)
         << "SkeletonManager: 一行放不下一个 pose(bone 过大?) bone=" << bone;
@@ -131,7 +149,7 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kPoseAtlasDim, kPoseAtlasDim, 0,
                  GL_RGBA, GL_FLOAT, nullptr);
 
-    // 按**行优先**平铺写入：把每个 pose 的 bone*4 个 texel 沿 X 横铺，铺满一行
+    // 按**行优先**平铺写入：把每个 pose 的 bone*2 个 texel 沿 X 横铺，铺满一行
     // (kPoseAtlasDim texel) 后换下一行。等价于：atlas 是一段连续 texel，pose 全局序 p 的
     // 起始平坦下标 flat = p * pose_tex_w，其纹理坐标 = (flat % W, flat / W)。
     //
@@ -187,20 +205,14 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
                     jw[j] = geom::math::Mat4Mul(jw[pr], local);
                 }
                 // final = jointWorld[j] × inverse_bind[j] (方案甲折入)
-                Mat4 final_m = geom::math::Mat4Mul(jw[j], inv[j]);
-                // 本骨在本 pose 内的平坦下标 = p*pose_tex_w + j*4；4 个 texel 逐个落到
-                // (x=flat%W, y=flat/W) —— **逐 texel 判行**，跨行自然处理。
-                const int bone_flat0 = p * pose_tex_w + j * 4;
-                for (int r = 0; r < 4; ++r) {
-                    const int flat = bone_flat0 + r;
-                    if (flat < row_lo || flat >= row_hi) continue;  // 本 texel 不在此行
-                    const int texel = flat - row_lo;                // 本行内的 x
-                    float* out = line.data();
-                    out[texel * 4 + 0] = final_m.m[r];        // col0 row r
-                    out[texel * 4 + 1] = final_m.m[4 + r];    // col1 row r
-                    out[texel * 4 + 2] = final_m.m[8 + r];    // col2 row r
-                    out[texel * 4 + 3] = final_m.m[12 + r];   // col3 row r
-                }
+                const Mat4 final_m = geom::math::Mat4Mul(jw[j], inv[j]);
+                // 刚体矩阵 → 对偶四元数（DQS 的数据表示；数学见 geom/math/dual_quat.h）。
+                // 含缩放/剪切的非刚体矩阵会在此 LOG(FATAL)（本链路恒刚体，见文件头）。
+                const DualQuat dq = geom::math::DualQuatFromRigidMatrix(final_m);
+                // 本骨在本 pose 内的平坦下标 = p*pose_tex_w + j*2（2 texel：q 与 t）；
+                // 2 个 texel 逐个落到 (x=flat%W, y=flat/W) —— **逐 texel 判行**，跨行自然处理。
+                const int bone_flat0 = p * pose_tex_w + j * 2;
+                PutDualQuatTexels(dq, bone_flat0, row_lo, row_hi, &line);
             }
         }
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, kPoseAtlasDim, 1, GL_RGBA,

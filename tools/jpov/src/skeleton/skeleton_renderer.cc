@@ -131,7 +131,8 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     instance_model_buf.Upload(xforms);
 
     // 2) pose 选择：每实例 [pose_col_a, pose_col_b, ratio]。
-    //    col = pose_idx * pose_width（一个 pose 在 atlas 里的**平坦** texel 宽度），
+    //    col = pose_idx * pose_width（一个 pose 在 atlas 里的**平坦** texel 宽度
+    //    = bone_count * 2：每骨 2 texel 存一个对偶四元数），
     //    shader 内按 atlas 宽度回绕成 (x,y)——与 CPU 行优先平铺逐 texel 对齐。
     std::vector<float> poses;
     poses.resize(n * 3);
@@ -286,7 +287,7 @@ void SkeletonRenderer::DrawSkinnedMesh(
 
     // 越界校验（SkinnedInstanceState 契约：越界 → FATAL，不静默读 atlas 里别人的骨骼）。
     //   逐实例上传前先全批验一遍：一次 draw 里没法中途报错，验完再画。
-    const int pose_w = gh.bone_count * 4;
+    const int pose_w = gh.bone_count * 2;  // 每骨 2 texel（对偶四元数实部 q + 对偶部 t）
     CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
     for (const SkinnedInstanceState& inst : cmd.instances) {
         CHECK_GE(inst.pose_a, 0) << "pose_a 越界: " << inst.pose_a;
@@ -428,7 +429,7 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
 
     // 越界校验（SkinnedInstanceState 契约：越界 → FATAL，不静默读 atlas 里别人的骨骼）。
     //   逐实例上传前先全批验一遍：一次 draw 里没法中途报错，验完再画。
-    const int pose_w = gh.bone_count * 4;
+    const int pose_w = gh.bone_count * 2;  // 同主 pass：每骨 2 texel（实部 q + 对偶部 t）
     CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
     for (const SkinnedInstanceState& inst : cmd.instances) {
         CHECK_GE(inst.pose_a, 0) << "pose_a 越界: " << inst.pose_a;

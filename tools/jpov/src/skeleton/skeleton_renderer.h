@@ -533,7 +533,8 @@ void main() {
     //      → instance_model_buf（loc6..9 = mat4）。
     //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → instance_pose_buf（loc10 = vec3）。
     //
-    // pose_w = gh.bone_count * 4 = 一个 pose 在 atlas 里的**平坦** texel 宽度；
+    // pose_w = gh.bone_count * 2 = 一个 pose 在 atlas 里的**平坦** texel 宽度
+    //   （每骨 2 texel：实部 q + 对偶部 t）；
     //   本函数把 pose 下标乘成平坦起点（shader 内按 atlas 宽回绕，与 CPU 烘焙逐 texel 对齐）。
     //
     // Pre-condition: cmd.instances 非空且 pose_a/pose_b 已校验不越界（调用方先验，
