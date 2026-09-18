@@ -178,6 +178,15 @@ filegroup(
     visibility = ["//tools/jpov:__subpackages__"],
 )
 
+# wallet_tripo_multiview：多视图（--images）模式的**正面样例**。
+# 4 张真正交视图 → 硬表面单体可用模型（结构完整、无破损）。
+# 与 oak_tripo_negative 对照，可看出「输入结构复杂度」如何决定成败。
+filegroup(
+    name = "wallet_tripo_multiview_data",
+    srcs = glob(["wallet_tripo_multiview/*"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
 # ============================================================================
 # Gold Image — glTF Lantern (内嵌贴图 GLB) PBR 渲染验证
 # ============================================================================

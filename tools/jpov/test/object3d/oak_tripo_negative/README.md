@@ -25,6 +25,10 @@
 | `tripo_oak_4k.glb` | P1-20260311 | **3,859** | ❌ 树冠碎成飘浮「碎纸片」 |
 | `tripo_oak_20k.glb` | P1-20260311 | **19,436** | ⚠️ 枝干救回来了，**树冠本质未变**（仍是离散面片堆叠、透空率高） |
 
+两版各有 4 张 `jpov_model_viewer --four_views` 渲染图供直观对照：
+`tripo_oak_4k_{front,left,perspective,up}.png` 与
+`tripo_oak_20k_{front,left,perspective,up}.png`。
+
 两个 GLB 均：单 mesh、PBR 三贴图齐全（baseColor / metallicRoughness / normal）、
 glTF 2.0 合法、JPOV loader 能正常加载渲染。**模型文件本身没有损坏——
 是「重建出来的形状」不对。**
