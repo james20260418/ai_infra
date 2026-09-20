@@ -111,7 +111,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 
 namespace jpov {
 
-void SkyRenderer::DrawSky(const DaySkyCommand& sky_cmd,
+void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
                           ShaderManager& shader_mgr) {
     // ---- 构建 相机 逆(Proj*View) ----
@@ -149,6 +149,12 @@ void SkyRenderer::DrawSky(const DaySkyCommand& sky_cmd,
     glUniform1f(shader_mgr.GetUniform(prog, "uIntensity"), sky_cmd.intensity);
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
+    glUniform3f(shader_mgr.GetUniform(prog, "uNightZenith"),
+                sky_cmd.night_zenith_color.r, sky_cmd.night_zenith_color.g,
+                sky_cmd.night_zenith_color.b);
+    glUniform3f(shader_mgr.GetUniform(prog, "uNightHorizon"),
+                sky_cmd.night_horizon_color.r, sky_cmd.night_horizon_color.g,
+                sky_cmd.night_horizon_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunRadius"), sky_cmd.sun_radius);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunBrightness"), sky_cmd.sun_brightness);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunGlow"), sky_cmd.sun_glow);

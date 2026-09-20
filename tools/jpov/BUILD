@@ -142,6 +142,50 @@ cc_binary(
 )
 
 # ============================================================================
+# 天光查看器（skylight viewer）— 专门肉眼验收 SkyCommand（含夜色双色）
+# 场景 = 三方块（低反/高光/金属）+ 灰地面，视角变换沿用 model viewer 的
+# ViewConfig / ApplyInput（zero 分叉）；滑条含仰角/浊度/季节/太阳强度/
+# 环境光强度/夜色强度。太阳压到 0° 即纯夜色，用于验收 night_zenith_color /
+# night_horizon_color。
+# ============================================================================
+cc_library(
+    name = "skylight_scene",
+    hdrs = ["demo/skylight_scene.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//tools/jpov/include/jpov:jpov"],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
+    name = "skylight_viewer_app",
+    hdrs = ["demo/skylight_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_skylight_viewer",
+    srcs = ["demo/jpov_skylight_viewer.cc"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # 示例：Rect Demo — 演示窗口坐标与渲染分辨率裁剪
 # ============================================================================
 cc_binary(

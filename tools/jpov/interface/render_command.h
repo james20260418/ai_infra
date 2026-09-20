@@ -458,7 +458,7 @@ struct DirectionalLight {
 // ambient * base_color * AO 那一项，让背阳面不至于全黑。
 //
 // 来源任意：天空（蓝天/夜空/晚霞）、岩浆湖（洞穴橙红）、雪地反光、
-// 室内漫反射等。用户可直接手配；不配时使用默认值（后续可由 DaySkyCommand
+// 室内漫反射等。用户可直接手配；不配时使用默认值（后续可由 SkyCommand
 // 依 sun_dir 自动推导一个兜底值）。
 struct AmbientLight {
     // color：环境光**色调**（RGB，乘到材质 base_color 上）。
@@ -620,7 +620,7 @@ struct CascadeFBO {
     int size = 0;
 };
 
-// 天光（Sky）指令 —— 程序化 Preetham 白天天空（DaySkyCommand）
+// 天空（Sky）指令 —— 程序化 Preetham 白天天空 + 夜空底色（SkyCommand）
 //
 // 用解析式大气模型（Preetham-Shirley-Smits 1999，见 box3d preetham.glsl）
 // 计算方向非对称的**白天**天空色：太阳位置(时间) + turbidity(天气) + season(季节)
@@ -634,13 +634,21 @@ struct CascadeFBO {
 //    最终画面需由统一的**后处理 tone map pass**压缩到 [0,1]（见 renderer 的后处理
 //    规划）。任何天空颜色/亮度都应按 HDR 量级给定，不要预选 clamp 到 [0,1]。
 //
-// ⚠️ 本版本为**最小可行·仅白天**：只定义“白天天空”这一天色，
-//   - 不画太阳/月亮盘（天体，后续独立实现）；
+// 组成（2026-09-20 起）：
+//   1. **白天项**：Preetham 太阳散射（上面那套）。太阳落到地平线以下时由 shader 的
+//      daylight 因子压到 0（sun_dir.y < 0.03 ≈ 1.7° 时精确为 0）。
+//   2. **夜色项**：night_zenith_color / night_horizon_color 两个颜色（见下方字段），
+//      **加法**叠在白天项之上（HDR 线性、tone map 之前，同样受 intensity 缩放、
+//      **不**受 season 染色）。
+//   → 日落后白天项已是 0，加法自然退化成"只有夜色"，故**不需要**任何 blends
+//     掩码/日落方位角权重（详见字段注释）。
+//
+// 仍不做的事：
+//   - 不画太阳/月亮盘之外的任何天体（月亮盘的参数与推导是后续独立 PR）；
 //   - 不推导方向光/环境光（derive 方法已移除，2026-08-19 决定）；
-//   - 不提供夜空色（太阳落山后 sky 向 (0,0,0) 逼近，夜空留待独立 layer blend）。
-//   - 夜空/月光散射/辉光不是本模型职责（Preetham 在太阳低于地平线时会发散，
-//     业界不扩展它建模夜晚；夜晚由独立 sky layer + 后处理补）。
-struct DaySkyCommand {
+//   - 夜空仍不建模**月光散射**（Preetham 在太阳低于地平线时发散，业界不扩展它
+//     建模夜晚）；本组"夜色双色"只表达气辉 + 星光 + 城市光污染的低频底色。
+struct SkyCommand {
     // ── 太阳位置（时间） ──
     //
     // sun_dir：太阳在天球上的位置，世界空间单位向量（y-up）。
@@ -729,6 +737,42 @@ struct DaySkyCommand {
     //     真实  0°  → 盘 10 + 1.4×(0−10) = −4°（盘中心已沉到地平线下，半拉盘不再露出）
     //   默认 1.4。
     float sun_set_angle_ratio = 1.4f;
+
+    // ── 夜空底色（2026-09-20 引入：夜空 = 双色，加法叠在白天天空之上）──
+    // 夜空"底色" = 气辉(airglow) + 星光 + 城市光污染在大气中的散射所带来的
+    // 低频天空亮度分布。它**与太阳/月亮方位无关**（不是被照亮的散射体），
+    // 故本组参数只随**仰角**变化，不做任何方位判断。
+    //
+    // 合成算子 = **加法**（HDR 线性域、tone map 之前）：sky = 白天项 + 夜色项。
+    //   为什么不需要 blend 掩码 / 日落方位角 alpha：白天项在 sun_dir.y < 0.03
+    //   （≈1.7° 仰角）时已被 shader 的 daylight 因子精确压到 0，太阳一落加法就
+    //   自动退化成"只有夜色"；再叠一个按日落方位的掩码 = 同一件事编码两遍
+    //   （方向结构本来就在 Preetham 白天项里）。
+    //
+    // 两色 → 垂直渐变：
+    //   - night_zenith_color：天顶方向（视线竖直向上）的底色，通常最深。
+    //   - night_horizon_color：地平线方向（视线贴地）的底色，通常更亮。
+    //   - 两者之间的插值**形状由几何唯一确定**（气辉层视线厚度的 van Rhijn
+    //     增亮，见 sky_renderer.h 的 kAirglow* 常量），不需要第三个"渐变陡不陡"
+    //     的旋钮；给相同值即退化为纯色底色。
+    //   - 量化锚点：**"经典城市夜色"**（无月、城郊/城市光污染）参考值 ——
+    //     天顶 (0.010, 0.013, 0.024)、地平 (0.055, 0.048, 0.045)（线性 HDR）。
+    //     这是**感知标尺**而非物理标尺：严格物理的夜/日比 ≈ 2.5e-6（满月地面
+    //     0.25 lux vs 晴天 1e5 lux），在 ACES 下等于全黑、肉眼无法验收；本组值经
+    //     ACES + sRGB 编码后落在天顶 ≈ 12/255、地平 ≈ 60/255（"看得出是夜景、
+    //     但明确是夜"）。锚点推导与调参纪律见 interface/LIGHT_INTENSITY.md「十」。
+    //
+    // 半球的边界：夜色只作用于地平线**以上**；地平线以下由 ground_color 独占
+    //   （夜间也用它），避免两个底色在下半球叠加两次。
+    // 与 season / intensity 的关系（重要）：
+    //   - **不受 season 染色**：season 的语义是"日光散射的季节色温"，气辉与
+    //     城市光污染不是散射日光，染色即物理错误。
+    //   - **受 intensity 缩放**：intensity 是"天光总强度开关"；由于日落后白天项
+    //     已是 0，intensity 在夜间自动成为夜色总开关（日夜两层在时间上不相交）。
+    //
+    // 默认 (0,0,0) = **关闭夜色** ⇒ 不改动任何既有画面（gold 逐字节不变）。
+    Color night_zenith_color = {0.0f, 0.0f, 0.0f, 1.0f};
+    Color night_horizon_color = {0.0f, 0.0f, 0.0f, 1.0f};
 
     // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
     // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
@@ -1115,13 +1159,13 @@ struct RenderCommandList {
     // 并对直射光施加阴影因子。
     std::optional<DirectionalLight> sun;
 
-    // 全局环境光。未设置时使用默认值（中性灰白 × 0.4），后续可由 DaySkyCommand
+    // 全局环境光。未设置时使用默认值（中性灰白 × 0.4），后续可由 SkyCommand
     // 自动推导。有值时按用户给定的颜色/强度照亮物体背阳面（无方向、无影子）。
     std::optional<AmbientLight> ambient;
 
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
-    std::optional<DaySkyCommand> sky;
+    std::optional<SkyCommand> sky;
 
     // Object3D 跳过点光源（默认 false）。
     // 为 true 时跳过 tile lighting，走 ambient-only PBR 着色（等价原纯色路径）；

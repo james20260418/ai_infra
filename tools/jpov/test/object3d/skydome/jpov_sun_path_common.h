@@ -2,7 +2,7 @@
 //
 // 生成太阳从早到晚的全部天光时段图片。核心抽象：
 //   SkyDirectionAmbient —— 一个完整的天光时段配置，打包三类光照：
-//     1. sky（天光背景 DaySkyCommand，Preetham 程序化天空）
+//     1. sky（天光背景 SkyCommand，Preetham 程序化天空）
 //     2. sun（太阳方向光 DirectionalLight，可带阴影）
 //     3. ambient（环境光 AmbientLight，背阳面补光）
 //   vector<SkyDirectionAmbient> 即一条太阳轨迹配置序列，遍历每个配置渲染一张图，
@@ -30,7 +30,7 @@ namespace jpov_sun_path {
 
 // 一个完整的天光时段配置：天光 + 太阳方向光 + 环境光。
 struct SkyDirectionAmbient {
-    jpov::DaySkyCommand  sky;      // 天光背景（Preetham 程序化天空）
+    jpov::SkyCommand  sky;      // 天光背景（Preetham 程序化天空）
     jpov::DirectionalLight sun;    // 太阳方向光（带阴影）
     jpov::AmbientLight   ambient;  // 环境光（背阳面补光）
 };
@@ -87,7 +87,7 @@ inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
     {
         // 正午晴天：太阳方向光从斜上方 +y 偏 +z 照向场景（光传播方向）。
         const jpov::Vec3f sun_light_dir = {0.0f, -1.0f, -0.0f};
-        jpov::DaySkyCommand sky{
+        jpov::SkyCommand sky{
                 /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                         -sun_light_dir.z()),
                 /*turbidity*/ 2.0f,
@@ -117,7 +117,7 @@ inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
     // 验证 DirectionalIntensity() 随仰角变暗。
     {
         const jpov::Vec3f sun_light_dir = {1.0f, -.4f, 1.0f};
-        jpov::DaySkyCommand sky{
+        jpov::SkyCommand sky{
                 /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                         -sun_light_dir.z()),
                 /*turbidity*/ 6.0f,

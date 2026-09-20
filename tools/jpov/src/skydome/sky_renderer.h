@@ -9,7 +9,9 @@
 //   - 先画天球（垫 3D FBO 背景）→ 再画 3D 物体（深度测试覆盖）。
 //   - 地平线以下（pitch<0）画纯色 ground_color（避免天空倒影）。
 //   - HDR：输出原始亮度（可 >1.0），不做 tone map，由后处理统一压缩。
-//   - 不画日月盘/星星/夜空（DaySkyCommand 仅白天；夜空由独立 layer 处理）。
+//   - 夜空底色（2026-09-20 引入）：night_zenith_color → night_horizon_color 的
+//     垂直渐变（van Rhijn 形状），**加法**叠在白天项上（受 intensity、不受 season）；
+//     默认全 0 = 关闭。仍不画月亮盘/星星（后续独立 PR）。
 //
 // 曲线来源：Preetham 模型实现基于 Erin Catto (box3d, MIT) 的 preetham.glsl，
 // 论文 "A Practical Analytic Model for Daylight" (Preetham, Shirley, Smits 1999)。
@@ -53,7 +55,7 @@ void main() {
 }
 )glsl";
 
-    // kSkyFs: Preetham 程序化天空 + 地平线下地色 + 日月圆盘。
+    // kSkyFs: Preetham 程序化天空 + 地平线下地色 + 日月圆盘 + 夜空底色（双色）。
     //   NDC 由 gl_FragCoord/uResolution 反推（不用 VS varying：无 VAO 全屏
     //   三角形上 varying 插值不可靠，实测 vNDC 几乎不变导致方向重建错误）。
     static constexpr const char* kSkyFs = R"glsl(
@@ -68,6 +70,8 @@ uniform float uTurbidity;     // 浊度（天气）：2 清澈…8 霾
 uniform vec3  uSeason;        // 季节色温乘子（冬冷/夏暖）
 uniform float uIntensity;     // 天光亮度标量
 uniform vec3  uGroundColor;   // 地平线以下地色
+uniform vec3  uNightZenith;   // 夜空底色：天顶方向（线性 HDR；全 0 = 关闭夜色）
+uniform vec3  uNightHorizon;  // 夜空底色：地平线方向（线性 HDR；全 0 = 关闭夜色）
 uniform float uSunRadius;     // 太阳盘角半径（弧度，~0.0047~0.015；≤0 不画）
 uniform float uSunBrightness; // 太阳盘自发光亮度基数（HDR，~1e6；≤0 不画）
 uniform float uSunGlow;       // 太阳盘光晕强度（艺术参数，0=无光晕，~1 默认）
@@ -79,7 +83,7 @@ uniform float uSunSetAngleRatio;  // 阈值以下盘压速比，默认 1.4
 
 const float PI = 3.14159265358979323846;
 // 天光亮度归一化系数：把 Preetham 输出的物理天顶亮度（~几千 cd/m²，即几 kcd/m²）
-// 压到 JPOV 的 HDR 亮度标尺，使 `DaySkyCommand::intensity = 1.0` 时正好对应
+// 压到 JPOV 的 HDR 亮度标尺，使 `SkyCommand::intensity = 1.0` 时正好对应
 // **正午晴天**的蓝天背景。
 //
 // 定值依据（2026-08-19 定，Danis 确认）：在本系数 + intensity=1.0 + ACES tone
@@ -176,6 +180,42 @@ vec3 colorTempToLinear(float kelvin) {
     else if (t <= 19.0) c.b = 0.0;
     else c.b = clamp(0.543206789110196 * log(t - 10.0) - 1.19625408914, 0.0, 1.0);
     return c;
+}
+
+// ===== 夜空底色：气辉的垂直渐变（van Rhijn 增亮）=====
+//
+// 夜空底色由两个颜色给出（uNightZenith / uNightHorizon）。它们之间的插值
+// **形状不是自由参数**：气辉发在 ~90 km 的薄层里，视线越贴地平、穿过的发
+// 光层越厚 → 地面看到的柱亮度越高。这个纯几何关系就是 van Rhijn 函数：
+//
+//     I(θ)/I(天顶) = 1 / sqrt(1 − (R/(R+h))² · sin²θ)
+//
+// 代入 R=6371 km、h=90 km，地平线处因子 ≈ 6.0（几何上限；真实观测常在 2~3×，
+// 因为消光把它压回来一部分）。这里把它归一化到 [0,1]（天顶=0、地平=1）作为
+// 两色的插值参数 t —— 于是：两个颜色定端点，形状由物理定，**不需要第三个
+// "渐变陡不陡"的旋钮**；两个颜色给相同值即退化为纯色底色。
+//
+// 方位无关：气辉是自发光层（外加城市光污染的近似均匀散射），不是被太阳/
+// 月亮照亮的散射体，所以 t 只看仰角，不看水平方向。
+const float kAirglowLayerKm = 90.0;
+const float kEarthRadiusKm  = 6371.0;
+
+float airglowVanRhijn(float cos_zenith) {
+    const float ratio = kEarthRadiusKm / (kEarthRadiusKm + kAirglowLayerKm);
+    const float r2 = ratio * ratio;
+    return 1.0 / sqrt(max(1.0 - r2 * (1.0 - cos_zenith * cos_zenith), 1.0e-6));
+}
+
+// 归一化插值参数：天顶（cos=1）→ 0，地平（cos=0）→ 1。
+// 注：此处不能用 const 局部变量——本工程 shader 的 GLSL 版本下，const 局部变量的
+// 初始化必须是编译期常量表达式，而 airglowVanRhijn() 是函数调用（非 constexpr）。
+float nightGradientT(float cos_zenith) {
+    float at_horizon = airglowVanRhijn(0.0);   // ≈ 6.01
+    return (airglowVanRhijn(cos_zenith) - 1.0) / (at_horizon - 1.0);
+}
+
+vec3 nightSkyColor(float cos_zenith) {
+    return mix(uNightZenith, uNightHorizon, nightGradientT(cos_zenith));
 }
 
 void main() {
@@ -276,9 +316,8 @@ void main() {
         sky = preethamSky(dir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
 
         // ── 昼夜过渡：太阳低于地平线时，日光淡出直到接近黑（(0,0,0)） ──
-        // 不提供夜空色（DaySkyCommand 无 night_color）：太阳落山后 sky 向黑逼近，
-        // 夜空内容（月光散射/辉光/星星）由独立 night sky layer blend 叠加。
-        // （原本 mix(uNightColor, ...) 的夜空底色已移除，2026-08-19 决定。）
+        // 太阳落山后白天项→黑，"夜空"由本 shader 末尾的夜色双色加法叠加
+        // （night_zenith_color / night_horizon_color，默认 0 = 关闭）。
         sky = mix(vec3(0.0), sky, daylight);
 
         // ── 叠太阳盘（加法，和天空散射色在同一 HDR 域）──
@@ -291,7 +330,22 @@ void main() {
     // 注意：这里**不做 tone map**（不再 sky/(1+sky)）——为了后续统一后处理管线，
     // 天空输出保持 HDR 原始亮度（可 >1.0），由最终的后处理 pass 统一压缩到 [0,1]。
     // （2026-08-19：为引入统一后处理，去掉天空 shader 里的前置 Reinhard。）
+    //
+    // ⚠️ 顺序很重要：夜色项必须加在本行**之后** —— 它**不受 season 染色**
+    //   （season 是"日光散射的季节色温"，气辉/城市光污染不是散射日光），
+    //   但**受 intensity 缩放**（intensity = 天光总强度开关；日落后白天项已为 0，
+    //   于是它在夜间自动成为夜色总开关）。
     sky *= uSeason * uIntensity;
+
+    // ── 夜空底色（加法叠加，仅地平线以上）──
+    // 算子用加法而非 mix：白天项在 sun_y < 0.03（≈1.7° 仰角）处已被 daylight 精确
+    // 压到 0，所以太阳一落，加法就自然退化成"只有夜色"—— 不需要任何 blend 掩码/
+    // 日落方位角权重（方向结构本来就在上面的 Preetham 白天项里）。
+    // 地平线以下**不加**：下半球由 ground_color 独占（避免两个底色叠加两次）。
+    // 默认（两个颜色为 0）时本行是精确 +0.0，既有画面逐字节不变。
+    if (dir.y >= 0.0) {
+        sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity;
+    }
 
     FragColor = vec4(sky, 1.0);
 }
@@ -301,7 +355,7 @@ void main() {
     // 在**当前绑定 FBO** 上画全屏程序化天光（背景垫底）。
     //
     // 参数：
-    //   sky_cmd:  DaySkyCommand（程序化参数）。
+    //   sky_cmd:  SkyCommand（程序化参数）。
     //   cam:      当前 Camera（取 position/target/up/fov/近远/fbo 尺寸算逆 VP）。
     //   fbo_w/h:  当前 3D FBO 尺寸。
     //   shader_mgr: 共享资源。
@@ -310,7 +364,7 @@ void main() {
     //   - 目标 FBO 已绑定（天光垫底的 3D FBO），viewport 已设置
     //   - 深度测试已禁用（天空永远垫底，不写深度）
     // Pre-condition: cam.up 非零、target != position
-    static void DrawSky(const DaySkyCommand& sky_cmd,
+    static void DrawSky(const SkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr);
 };

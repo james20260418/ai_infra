@@ -16,7 +16,7 @@
 | 窗口 | 默认 1280×720，渲染同分辨率，不可 resize | `Config` + `fbo_3d_width_/height_` | ✅ 符合 |
 | 坐标 | y-up，相机默认 (1,1,1)→(0,1,0) | `DefaultView()={phi=0,theta=π/4,R=√2}` | ✅ 推导正确（arch §7 已证） |
 | 场景 | 300×300 高粗糙灰 ground quad + glTF | `MakeGroundQuad()` half=150 + `GroundMaterial()` | ✅ 符合；法线 +Y、y=0 |
-| 光照 | DaySkyCommand 正午，太阳方向 (0,-1,-1)，sky 推导平行光+ambient | `MakeNoonLighting()` | ✅ 复用 sun_path 模式，ambient=0.3 |
+| 光照 | SkyCommand 正午，太阳方向 (0,-1,-1)，sky 推导平行光+ambient | `MakeNoonLighting()` | ✅ 复用 sun_path 模式，ambient=0.3 |
 | glTF 路径 | 产物第一参数给定（相对/绝对） | `FirstNonFlagArg()` | ✅ 符合 |
 | 帧率 | 60 fps | `cfg.target_fps=60` | ✅ 符合 |
 | 交互 | 右键 drag 视角 + 滚轮 zoom（R） | `ApplyInput()` | ✅ 公式与需求一致（见 §4） |
@@ -101,7 +101,7 @@ position.z = R * cos(phi) * cos(theta)
 
 ## 5. 正午光照（MakeNoonLighting）
 
-太阳光传播方向 `{0,-1,-1}`；DaySkyCommand：turbidity=2、season 中性、intensity=1.0、
+太阳光传播方向 `{0,-1,-1}`；SkyCommand：turbidity=2、season 中性、intensity=1.0、
 sun_dir=+`{0,1,1}`（取反）；平行光与 ambient 均**由 sky 推导**（task#3 验收）——
 color 用 `DirectionalColor()/AmbientColor()`（色调随太阳仰角变），intensity 用
 `DirectionalIntensity()/AmbientIntensity()`（相对衰减随太阳仰角变），但绝对强度锚定

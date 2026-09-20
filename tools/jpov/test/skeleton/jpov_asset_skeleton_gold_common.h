@@ -92,7 +92,7 @@ public:
         const jpov::Vec3f sun_l = {0.0f, -1.0f, -1.0f};
         cmds->sun = jpov::DirectionalLight{{sun_l}, {1, 1, 1, 1}, 3.0f};
         cmds->ambient = jpov::AmbientLight{.color = {1, 1, 1, 1}, .intensity = 0.3f};
-        cmds->sky = jpov::DaySkyCommand{
+        cmds->sky = jpov::SkyCommand{
             jpov::Vec3f(-sun_l.x(), -sun_l.y(), -sun_l.z()),
             /*turbidity*/ 2.0f, /*season*/ {1, 1, 1, 1}, /*intensity*/ 1.0f,
             /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},

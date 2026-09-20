@@ -1,9 +1,9 @@
 // JPOV 标准晴天（standard_sunny_day）gold 测试 —— 共享场景构建
 //
 // 以 scene_in_sun（石头墙 + 5×5 地面 + 桌/凳/盆栽）为模板，叠加**程序化天光**
-// （DaySkyCommand + DirectionalLight 对齐）：
+// （SkyCommand + DirectionalLight 对齐）：
 //   - 太阳平行光 DirectionalLight：direction=(0,-1,-1)（光从斜上方 +y 略偏 +z 照向场景）
-//   - 天光 DaySkyCommand：sun_dir 与 DirectionalLight 对齐（sun_dir = -direction），
+//   - 天光 SkyCommand：sun_dir 与 DirectionalLight 对齐（sun_dir = -direction），
 //     turbidity=2（清澈晴天）、season 中性、intensity=1.0（用户调参目标：正午晴天）
 //   - tone_mapping = true（HDR 链路，ACES）
 //   - ambient = 0.3（正午阴影基准，见 LIGHT_INTENSITY.md 晴天基准值）
@@ -93,7 +93,7 @@ public:
         // 正午晴天基准：turbidity=2（清澈）、season 中性、intensity=1.0。
         // 太阳盘：sun_radius=0.02（调试放大以便看清盘）、sun_brightness=1e3
         // （降基数以显示盘边缘渐变，纯物理 2e5 会 ACES 饱和成纯白小点）、sun_glow=1.0。
-        cmds->sky = jpov::DaySkyCommand{
+        cmds->sky = jpov::SkyCommand{
             /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                     -sun_light_dir.z()),
             /*turbidity*/ 2.0f,

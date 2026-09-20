@@ -146,7 +146,7 @@ inline ViewConfig DefaultView() {
 
 // 正午晴天光照（sky + 太阳方向光 + 环境光）—— 交互 / four_views / gold 三处共用。
 //
-// 需求：光照用 DaySkyCommand 正午配置，同 sun_path 测试同款方式
+// 需求：光照用 SkyCommand 正午配置，同 sun_path 测试同款方式
 // （由 SkyCommand 推导平行光、推导全局 Ambient）。太阳方向默认 (0,-1,-1)。
 // 平行光与 ambient 的 color/intensity 均由 sky 推导：color 用 DirectionalColor()/
 // AmbientColor()（色调随太阳仰角变），intensity 用 DirectionalIntensity()/
@@ -154,7 +154,7 @@ inline ViewConfig DefaultView() {
 // LIGHT_INTENSITY.md 三·五 晴天正午基准（sun=3.0 : ambient=0.3，5:1，PR#60 教训
 // —— 绝不是 0.5 或裸 AmbientIntensity()=1.0，否则影子会被 ACES 压没）。
 struct NoonLighting {
-    jpov::DaySkyCommand  sky;
+    jpov::SkyCommand  sky;
     jpov::DirectionalLight sun;
     jpov::AmbientLight   ambient;
 };
@@ -162,7 +162,7 @@ struct NoonLighting {
 // 构造正午光照：太阳光传播方向 (0,-1,-1)。
 inline NoonLighting MakeNoonLighting() {
     const jpov::Vec3f sun_light_dir = {0.0f, -1.0f, -1.0f};
-    jpov::DaySkyCommand sky{
+    jpov::SkyCommand sky{
         /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                 -sun_light_dir.z()),  // = {0,1,1}
         /*turbidity*/ 2.0f,
@@ -227,7 +227,7 @@ inline NoonLighting MakeLighting(float elev_deg, float turbidity,
     const float sx = std::cos(elev_rad);   // 水平分量（固定 +x 方向）
     const jpov::Vec3f sun_dir = {sx, sy, 0.0f};          // 指向太阳
     const jpov::Vec3f sun_light_dir = {-sx, -sy, 0.0f};  // = −sun_dir（传播方向）
-    jpov::DaySkyCommand sky{
+    jpov::SkyCommand sky{
         /*sun_dir*/ sun_dir,
         /*turbidity*/ turbidity,   // 影响天空画色（霾化/日盘）+ Turb*Loss 乘子
         /*season*/ {season_r, 1.0f, 1.0f, 1.0f},  // 只调 R 通道（滑条季节色温）
