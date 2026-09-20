@@ -12,11 +12,12 @@
 //   3. 逐帧（k=0..N-1，t=begin+k/fps）对每骨取 ufbx_evaluate_transform(anim,node,t) 的
 //      local 旋转，**减去 bind 后**填 SkeletonPose.joint_rotation（相对 bind 的增量，
 //      2026-09-14 修复：此前直接存全量 local 旋转，会与烘焙式的 R(bind) 双倍施加）；
-//      根骨平移填 root_offset。
+//      根骨平移填 root_offset（= 相对 bind 的平移增量，见下方 `.root_offset` 说明）。
 //
 // 坐标系/单位（与 JPOV 数据模型对齐, 见 fbx_loader.h「坐标系 / 单位」一段）:
-//   SkeletonPose 存的是相对父的旋转 + 根位移 —— 姿态内容与全局轴无关（角色最终朝哪由放置
-//   层 up/front 决定，不锁在 pose）。故本 loader 不需把源轴“硬转”进 pose；
+//   SkeletonPose 存的是相对父的**旋转增量** + 相对 bind 的**平移增量** —— 两者都与全局轴
+//   无关（角色最终朝哪由放置层 up/front 决定，不锁在 pose）。故本 loader 不需把源轴“硬转”
+//   进 pose；
 //   源 FBX 轴/单位原样进 clip（对齐 glTF loader 透传原生单位的惯例）。Mixamo 人形源默认
 //   y-up + cm, 传过即已是 y-up。成功 LOG 里带出源 scene 的 axes.up 与 unit_meters 供 debug。
 
@@ -220,10 +221,23 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
             delta.NormalizeInPlace();  // 防御：两单位四元数乘积的浮点微偏
             pose.joint_rotation[i] = delta;
             if (i == 0) {
-                // 根骨(角色骨盆/原点)的动画位移 = root motion; 静止动作恒≈bind 位置。
-                pose.root_offset = Vec3f(static_cast<float>(tf.translation.x),
-                                         static_cast<float>(tf.translation.y),
-                                         static_cast<float>(tf.translation.z));
+                // 根骨的动画位移 = root motion。
+                //
+                // 语义（2026-09-20 定稿，见 docs/jpov_root_offset_design.md §1）：
+                //   root_offset = 根骨在【其父坐标系】下、相对【其 bind 位置】的平移量
+                //               = tf.translation − joints[0].rest_offset
+                // 即"相对 bind 的【增量】"，与上面 joint_rotation 的"相对 bind 的增量旋转"
+                // 同一套语言。identity/静息 ⇒ 0（根停在 bind 位置）。
+                //
+                // ⚠️ 改前（错）直接存 tf.translation（**全量** local 平移），静息时 ≈ 一个
+                //    腰高而非 0 —— 下游若原样当增量用，角色会被整体抬高一个腰高 = 悬空。
+                //
+                // 单位：本函数 BuildSkeletonFromBoneNodes 传 unit_scale = 1.0（源原生单位
+                //   原样透传，见文件头），故 rest_offset 与 tf.translation 同单位，直接相减。
+                const Vec3f& bind_t = clip.skeleton.joints[0].rest_offset;
+                pose.root_offset = Vec3f(static_cast<float>(tf.translation.x) - bind_t.x(),
+                                         static_cast<float>(tf.translation.y) - bind_t.y(),
+                                         static_cast<float>(tf.translation.z) - bind_t.z());
             }
         }
         clip.frames.push_back(std::move(pose));

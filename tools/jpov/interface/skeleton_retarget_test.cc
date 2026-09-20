@@ -501,5 +501,133 @@ TEST(SkeletonRetargetTest, WrongSourcePoseSizeDies) {
     EXPECT_DEATH(BodyRetargetPose(plan, bad, &out), "source_pose 尺寸");
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  root_offset（root-motion）搬运 —— 2026-09-20 接线
+//  定稿定义：根骨在【其父坐标系】下、相对【其 bind 位置】的平移量。
+//  重定向式：root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
+// ══════════════════════════════════════════════════════════════════════════
+
+// 缩放一条 GeoChain 的根高度（= 腰高）：只改根的 rest_offset.y（及其子树位置一起搬）。
+// 这样两套骨架"几何一致、只差身高" —— 正是腿长比要覆盖的场景。
+SkeletonType ScaledByRootHeight(SkeletonType s, float new_root_y) {
+    const float old = s.joints[0].rest_offset.y();
+    const float k = new_root_y / old;
+    for (auto& j : s.joints) {
+        auto sc = [k](float v) { return v * k; };
+        j.rest_offset = Vec3f(sc(j.rest_offset.x()), sc(j.rest_offset.y()), sc(j.rest_offset.z()));
+    }
+    s.Validate();
+    return s;
+}
+
+// ① 向后兼容：源 root_offset = 0 ⟹ 目标 root_offset = 0。
+//    （这是"既有 gold 零回归"的根据 —— 接线前输出恒 0。）
+TEST(SkeletonRetargetTest, RootOffsetZeroInZeroOut) {
+    const SkeletonType src = MakeGeoArmChain().type;
+    const SkeletonType tgt = MakeGeoArmChain().type;
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt, src);
+
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.root_offset = Vec3f(0.0f, 0.0f, 0.0f);  // 纯原地动作
+    SkeletonPose out;
+    BodyRetargetPose(plan, sp, &out);
+    EXPECT_NEAR(out.root_offset.x(), 0.0f, 1e-6f);
+    EXPECT_NEAR(out.root_offset.y(), 0.0f, 1e-6f);
+    EXPECT_NEAR(out.root_offset.z(), 0.0f, 1e-6f);
+}
+
+// ② 只差身高（腿长）的两套骨架：位移按 leg_t/leg_s 等比缩放，方向不变（Q_body 恒等）。
+TEST(SkeletonRetargetTest, RootOffsetScaledByLegLengthRatio) {
+    const SkeletonType src = MakeGeoArmChain().type;                 // 根高 1.00
+    const SkeletonType tgt = ScaledByRootHeight(src, 2.00f);         // 根高 2.00 ⇒ ratio = 2
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt, src);
+
+    EXPECT_NEAR(plan.source_leg_length, 1.00f, 1e-4f);
+    EXPECT_NEAR(plan.target_leg_length, 2.00f, 1e-4f);
+    EXPECT_NEAR(plan.root_offset_scale, 2.00f, 1e-4f);
+    // 两侧几何只差尺度（朝向一致）⇒ Q_body 应为恒等。
+    EXPECT_NEAR(plan.q_body_angle_deg, 0.0f, 1e-3f)
+        << "只差身高时两侧人体随动系应同向";
+
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.root_offset = Vec3f(0.10f, 0.00f, 0.30f);  // 源走了 (0.1, 0, 0.3)
+    SkeletonPose out;
+    BodyRetargetPose(plan, sp, &out);
+    // 期望 = 源 × 2（腿长比），方向不变。
+    EXPECT_NEAR(out.root_offset.x(), 0.20f, 1e-4f);
+    EXPECT_NEAR(out.root_offset.y(), 0.00f, 1e-4f);
+    EXPECT_NEAR(out.root_offset.z(), 0.60f, 1e-4f);
+}
+
+// ③ 朝向差 90°：位移随之旋转（验证 Q_body 生效）—— 源"往前走"应变成目标系的对应方向，
+//    而不是照搬成源系的轴。
+TEST(SkeletonRetargetTest, RootOffsetRotatedByQBody) {
+    const SkeletonType src = MakeGeoArmChain(0.0f).type;    // 面朝 +Z
+    const SkeletonType tgt = MakeGeoArmChain(90.0f).type;   // 整体 yaw 90°
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt, src);
+    EXPECT_NEAR(plan.q_body_angle_deg, 90.0f, 1e-2f) << "Q_body 应捕捉 90° 朝向差";
+
+    SkeletonPose sp = SkeletonPose::Identity(10);
+    sp.root_offset = Vec3f(0.0f, 0.0f, 1.0f);  // 源朝自己的"前"走 1 单位
+    SkeletonPose out;
+    BodyRetargetPose(plan, sp, &out);
+
+    // 模长守恒（纯旋转 + 等比缩放；此处 ratio ≈ 1，因为两骨架同高）。
+    EXPECT_NEAR(plan.root_offset_scale, 1.0f, 1e-3f);
+    EXPECT_NEAR(out.root_offset.Norm(), 1.0f, 1e-4f) << "位移模长应守恒";
+    // 方向被 Q_body 转过 ⇒ 与原向量不同（除非 Q_body 恒等，而此处是 90°）。
+    const float dot = out.root_offset.x() * sp.root_offset.x() +
+                      out.root_offset.y() * sp.root_offset.y() +
+                      out.root_offset.z() * sp.root_offset.z();
+    EXPECT_NEAR(dot, 0.0f, 1e-3f) << "90° 朝向差下位移应正交于原方向（已被旋转）";
+}
+
+// ④ 退化骨架（根高度 ≤ 0）建 plan 时应 FATAL，不静默给一个错的比值。
+TEST(SkeletonRetargetTest, RootOffsetScaleDiesOnDegenerateRootHeight) {
+    // 把 Hips 高度抬到 y=0（其余骨几何保留，以便人体随动系仍能估出）——
+    // 这时骨盆高度退化，腿长比无意义 ⇒ 应 FATAL，不猜一个错的比值。
+    const SkeletonType src = MakeGeoArmChain().type;
+    SkeletonType tgt = MakeGeoArmChain().type;
+    // Hips（idx 0）高度置 0，子树不动（几何仍足够估人体随动系：靠左右 Hand 的 X 向连线）。
+    tgt.joints[0].rest_offset = Vec3f(tgt.joints[0].rest_offset.x(), 0.0f,
+                                      tgt.joints[0].rest_offset.z());
+    tgt.Validate();
+    // 前置断言：确实退化，但人体随动系仍可估（否则测的不是腿长退化）。
+    ASSERT_LE(RestWorldPositions(tgt)[0].y(), 0.0f);
+    ASSERT_TRUE(EstimateBodyFrame(tgt).valid) << "人体随动系应仍可估（否则测的不是腿长退化）";
+    EXPECT_DEATH(BuildBodyRetargetPlan(tgt, src), "骨盆高度");
+}
+
+// ⑤ 量"腿长"用【Hips 骨名】而非 joints[0] —— 针对 Tripo glb 的真实拓扑：
+//    joints[0] 是 'Root' 包装层（高度 ≈ 0），真正的 Hips 是它的子骨。
+//    若错用 joints[0].y，比值会变成 0/腰高 或 腰高/0 ⇒ 崩或错。本用例锁住正确行为。
+TEST(SkeletonRetargetTest, RootOffsetScaleUsesHipsNotWrapperRoot) {
+    const SkeletonType src = MakeGeoArmChain().type;  // joints[0] 就是 Hips（y=1.00）
+
+    // 仿造 glb 拓扑：前面插一个高度≈0 的包装 Root，把原 Hips 挂到它下面。
+    SkeletonType tgt = MakeGeoArmChain().type;
+    SkeletonType wrapped;
+    wrapped.joints.resize(tgt.joints.size() + 1);
+    wrapped.bind_rotation.resize(tgt.joints.size() + 1);
+    wrapped.joints[0].parent = kSkeletonNoParent;
+    wrapped.joints[0].name = "Root";                              // 包装层
+    wrapped.joints[0].rest_offset = Vec3f(0.0f, 0.0f, -0.0045f);  // 导出残差（高度≈0）
+    wrapped.bind_rotation[0] = geom::Quaternion<float>::Identity();
+    for (size_t i = 0; i < tgt.joints.size(); ++i) {
+        SkeletonJoint j = tgt.joints[i];
+        j.parent = (j.parent == kSkeletonNoParent) ? 0 : j.parent + 1;
+        wrapped.joints[i + 1] = j;
+        wrapped.bind_rotation[i + 1] = tgt.bind_rotation[i];
+    }
+    wrapped.Validate();
+    ASSERT_LE(RestWorldPositions(wrapped)[0].y(), 0.01f) << "包装层高度应≈0";
+
+    const BodyRetargetPlan plan = BuildBodyRetargetPlan(wrapped, src);
+    // 关键：腿长取的是被包装的 Hips 高度（1.00），不是包装层的 0。
+    EXPECT_NEAR(plan.target_leg_length, 1.00f, 1e-3f)
+        << "必须按骨名找 Hips，不能用 joints[0] 包装层（其高度≈0）";
+    EXPECT_NEAR(plan.root_offset_scale, 1.00f, 1e-3f);
+}
+
 }  // namespace
 }  // namespace jpov

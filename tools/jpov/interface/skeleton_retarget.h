@@ -55,8 +55,11 @@
 //
 //   · **骨长不参与**：⟨1⟩⟨2⟩ 里 rest_offset 完全不出现。目标用自己的骨长，故"两资产骨长
 //     不同"无需任何处理（设计文档 §6.2）。
-//   · **root_offset 不搬**（输出恒 0）：源多为外部单位（FBX 厘米）而目标是米，且烘焙端尚未
-//     接线 root-motion（§0.2 / §6.3 = M3）。**不静默做单位假设**。
+//   · **root_offset 会被搬**（2026-09-20 起）：按 `Q_body · root_offset_s · (leg_t/leg_s)`
+//     缩放搬运（scale adaptation + 朝向归一），见 `BodyRetargetPose` 内注释与
+//     docs/jpov_root_offset_design.md。源为 0 ⇒ 输出 0（向后兼容）。
+//     ⚠️ 改变资产 bind（骨长/rest 朝向/根位置）⇒ 已重定向的 poses 必须**重新重定向**
+//     （root_offset 携带"属于哪份骨架"的尺度与坐标系）。
 //   · **未命中的目标骨保持自身 rest**（pose = identity）：如 glb 的包装层 `Root`（源无同名骨）。
 //     其子骨会自然把包装层的旋转补偿掉，故包装层不会把整体掰歪。
 //   · **不读文件、不采样时间、不碰 GL**。
@@ -348,6 +351,20 @@ struct BodyRetargetPlan {
     Quatf q_body = Quatf::Identity();
     float q_body_angle_deg = 0.0f;  // Q_body 的旋转角（诊断；= 两侧整体朝向差量级）
 
+    // ── ★ 根位移尺度因子：root-motion 的 scale adaptation（2026-09-20）──
+    //   root_offset_t = Q_body · root_offset_s · root_offset_scale
+    //   取两侧 rest 时**【骨盆/腰】高度 y** 作比值（按骨名找 Hips，与骨名对位同一套凭据）：
+    //     root_offset_scale = target_leg_length / source_leg_length
+    //   ⚠️ 不能用 joints[0]：两套资产的"根骨"语义不同 —— FBX 源 joints[0]=Hips（y≈腰高），
+    //      Tripo glb joints[0]='Root' 包装层（导出残差，高度≈0）。用骨名才一致。
+    //   单位：两侧各自量法一致 ⇒ 比值自动把单位约掉（FBX 源 cm / 目标 m 都行）。
+    //   目的：源走了 d 米，目标（不同身高）走 d×ratio 米 —— "原来两脚站地上，
+    //         retarget 后也站在地上"。粗糙但对走路/跑步类模糊动作够用
+    //         （业界称 scale adaptation，精确踩点需 IK，见设计文档残余）。
+    float source_leg_length = 0.0f;  // 源骨架 rest 骨盆高度 y
+    float target_leg_length = 0.0f;  // 目标骨架 rest 骨盆高度 y
+    float root_offset_scale = 1.0f;  // = target / source（退化时 FATAL，不猜）
+
     // ── 两侧 rest 世界朝向（Rb，与 joints 平行；算 P_t 与诊断用）──
     std::vector<Quatf> target_rest_world;
     std::vector<Quatf> source_rest_world;
@@ -389,6 +406,40 @@ inline BodyRetargetPlan BuildBodyRetargetPlan(const SkeletonType& target,
     // Q_body = M_t · M_s⁻¹（M 为纯旋转 ⇒ 逆 = 共轭）。
     p.q_body = (p.target_frame.rotation * p.source_frame.rotation.Conjugate()).Normalized();
     p.q_body_angle_deg = QuatAngleDeg(p.q_body, Quatf::Identity());
+
+    // ── 根位移尺度因子（"腿长"比）：两侧 rest 时【骨盆/腰】高度的 y 之比 ──
+    //   量法两侧必须一致。
+    //
+    //   ⚠️ 用哪根骨量（2026-09-20 实测结论）：**不能用 joints[0]**。
+    //   两套资产的"根骨"语义不同：
+    //     · FBX 源（Mixamo 官方）   ：joints[0] = mixamorig:Hips，其 rest y ≈ 腰高 ✓
+    //     · Tripo glb（mixamo_male）：joints[0] = 'Root' 包装层，导出残差 ≈ (0,0,-0.0045)
+    //                               —— 高度 **≈ 0**；真正的 Hips 是它的**子骨**（y≈0.534）
+    //   所以直接取 joints[0].y 对 glb 会得 0（TPose 假设下这是数据事实，不是 bug）。
+    //
+    //   改用**按骨名找骨盆**（Hips），两侧同一语义骨 —— 与骨名对位（AlignBonesByName）
+    //   同一套凭据。找不到时退回 joints[0]（单骨链等无骨名的极简骨架）。
+    auto pelvis_rest_height = [](const SkeletonType& skel) -> float {
+        const int hips = FindJointBySuffix(skel, "Hips");  // 兼容 mixamorig:* 前缀
+        const std::vector<Vec3f> pos = RestWorldPositions(skel);
+        return pos[(hips >= 0) ? static_cast<size_t>(hips) : 0u].y();
+    };
+    {
+        p.source_leg_length = pelvis_rest_height(p.source);
+        p.target_leg_length = pelvis_rest_height(p.target);
+        // 退化（骨盆高度 ≤ 0：非人形 / 数据错）⇒ 不猜、不 fallback。
+        LOG_IF(FATAL, p.source_leg_length <= 0.0f)
+            << "BuildBodyRetargetPlan: 源骨架 rest 骨盆高度 y=" << p.source_leg_length
+            << " ≤ 0，无法建立 root-motion 尺度比（不猜）。";
+        LOG_IF(FATAL, p.target_leg_length <= 0.0f)
+            << "BuildBodyRetargetPlan: 目标骨架 rest 骨盆高度 y=" << p.target_leg_length
+            << " ≤ 0，无法建立 root-motion 尺度比（不猜）。";
+        p.root_offset_scale = p.target_leg_length / p.source_leg_length;
+        LOG(INFO) << "BuildBodyRetargetPlan: 骨盆高度 src=" << p.source_leg_length
+                  << " tgt=" << p.target_leg_length
+                  << " ⇒ root_offset_scale=" << p.root_offset_scale
+                  << " (Q_body=" << p.q_body_angle_deg << "°)";
+    }
     return p;
 }
 
@@ -398,7 +449,8 @@ inline BodyRetargetPlan BuildBodyRetargetPlan(const SkeletonType& target,
 //   source_pose : 源位姿（joint_rotation = 相对源 bind 的增量；为空 = 全恒等）。
 //   out         : 输出位姿。bone_count/joint_rotation 尺寸 = 目标骨数；
 //                 每骨为单位四元数、即 `P_t(j)`（相对**目标** bind 的增量，直接可喂烘焙）；
-//                 root_offset 恒 0（不搬 root-motion，与既有实现一致）。
+//                 root_offset = 源 root_offset 按 `Q_body · (leg_t/leg_s)` 换算到目标骨架
+//                 （源为 0 ⇒ 0）。定义/单位见 interface/skeleton_types.h 的 root_offset。
 //
 // 逐帧代价：一次拓扑序扫（源 W）+ 一次拓扑序扫（目标 W_t 与 P_t），纯四元数乘。
 //
@@ -434,7 +486,13 @@ inline void BodyRetargetPose(const BodyRetargetPlan& plan, const SkeletonPose& s
     // ── 2) 目标：按 ⟨1⟩ 得 W_t(j)，再按 ⟨2⟩ 反解 P_t(j)。全程拓扑序。──
     out->bone_count = static_cast<int>(n_dst);
     out->joint_rotation.resize(n_dst);
-    out->root_offset = Vec3f(0.0f, 0.0f, 0.0f);
+
+    // ── 3) 根位移（root-motion）缩放搬运（2026-09-20 接线）──
+    //   root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
+    //   · 尺度因子：把源的位移从【源骨架尺度】换算到【目标骨架尺度】（scale adaptation）。
+    //   · Q_body：位移方向随角色朝向一起转 —— 源朝 +Z / 目标朝 +X 时不会"往前走变往侧面滑"。
+    //   · 源为 0（纯原地动作）⇒ 输出 0（向后兼容，既有 gold 零回归）。
+    out->root_offset = geom::RotateVector(q_body, source_pose.root_offset) * plan.root_offset_scale;
 
     std::vector<Quatf> dst_world(n_dst);
     for (size_t j = 0; j < n_dst; ++j) {

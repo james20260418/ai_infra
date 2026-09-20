@@ -62,9 +62,14 @@ namespace jpov {
 //         Lcl Rotation=0 时的静止形态（Mixamo 源为 T-pose）。
 //         ⚠️ 2026-09-14 修复前直接存 q_full（含静态 bind 朝向）→ 与烘焙式
 //         jointLocal = T(rest_offset)·R(bind_rotation)·R(pose) 里的 R(bind) 双倍施加。
-//       .root_offset    = 根骨(Hips)在该帧的 local translation（源动作里角色整体位移 /
-//         root-motion；静止动作恒 0 附近）。根骨之外每骨平移若也被源动画驱动（少见），
-//         现阶段只取旋转（rest 平移由 skeleton 静止形状给）——超出 debug 范围。
+//       .root_offset    = 根骨在该帧、**相对 bind 位置**的平移量（root-motion），在根的
+//         **父坐标系**下表达（“根是顶层骨”的源即模型系）；静息恒 0。
+//         = tf.translation − joints[0].rest_offset。单位与 rest_offset 同（本入口原样透传）。
+//         ⚠️ 2026-09-20 修：此前存**全量** local translation，静息 ≈ 一个腰高而非 0 ——
+//         下游当增量用会把角色整体抬高一个腰高（悬空）。定稿见
+//         docs/jpov_root_offset_design.md §1。
+//         根骨之外每骨平移若也被源动画驱动（少见），现阶段只取旋转（rest 平移由 skeleton
+//         静止形状给）——超出 debug 范围。
 //   - frames_per_second = scene settings 的 fps；frames 数量 = floor((end-begin)*fps)+1
 //     （0 起点，如 17.2333s@30fps → 518 帧：k=0..517，t_k=k/30）。
 //   - 不做重定向/重采样/播放控制 —— 那是上层与本 loader 无关的后续演变。
