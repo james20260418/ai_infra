@@ -40,9 +40,18 @@ namespace jpov {
 //                 Lcl Rotation 语义；identity pose ⇒ Lcl Rotation=0 的静止形态。源文件
 //                 key 恰在帧网格上，故无需插值）。后续重采样基于本数组二次开发，本基本
 //                 函数不再做二次加工。
+//   - unit_meters : 源文件长度单位的米数（1 源单位 = 多少米；Mixamo 为 0.01 = 厘米）。
+//                 本项目 JPOV **统一为米**，而本 clip 的**长度量**（skeleton.rest_offset /
+//                 frames[].root_offset）按 loader 的"源单位原样透传"惯例存的是**源单位** ——
+//                 消费方要得到米必须**显式乘 unit_meters**。
+//                 ⚠️ **单位陷阱（2026-09-20 踩过）**：旋转是无量纲的（怎么配都对），但
+//                 `root_offset` 是**长度量**。若把本 clip 的帧位姿配到一份**米制**骨架上
+//                 （如 LoadFbxSkeleton 的产物）而忘了换算，位移会被静默放大 1/unit_meters 倍
+//                 （Mixamo 即 100×）—— 实测角色"飞走" 63 米。配骨架前先把长度量归一。
 struct FBXClip {
     SkeletonType skeleton;          // 源骨架（骨名 + parent 树 + bind 静止偏移）
     double frames_per_second = 0.0; // 源帧频（fps）；>0 才视为有效 clip。
+    float unit_meters = 1.0f;       // 源长度单位 → 米（见文件头 unit_meters 一段）。
     std::vector<SkeletonPose> frames;  // 原始全帧位姿，长度 = 这一段动画的帧数。
 };
 

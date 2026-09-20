@@ -37,5 +37,10 @@ int main(int argc, char** argv) {
     Generate(dir + jpov_fbx_pose_gold::GetGlbNaiveGoldRelPath(),
              jpov_fbx_pose_gold::GlbPath(), jpov_fbx_viewer::ViewMode::kBothNoRetarget,
              "JPOV FBX Pose + glb naive Gold");
+
+    // ③ 正式重定向 gold（fbx + glb 并列，蓝骨 = BodyRetarget，**带 root-motion**）
+    Generate(dir + jpov_fbx_pose_gold::GetGlbRetargetGoldRelPath(),
+             jpov_fbx_pose_gold::GlbPath(), jpov_fbx_viewer::ViewMode::kBothRetarget,
+             "JPOV FBX Pose + glb retarget Gold");
     return 0;
 }

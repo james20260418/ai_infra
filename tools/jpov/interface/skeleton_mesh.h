@@ -146,16 +146,27 @@ inline MeshData BuildBoneMeshInBoneSpace(const SkeletonType& type,
     // 1) 沿拓扑序复合出每关节在骨架空间下的 bind 局部→空间变换 JW。
     //    JW[j] = JW[parent] · T(rest_offset[j]) · R(bind_rotation[j]) · R(pose_rotation[j])
     //    pose 恒等时 JW[j] = JW_bind[j]（= T-pose），与 ComputeInverseBind() 同源同值。
+    //
+    //    ⚠️ **根骨附加 root-motion**（2026-09-20，与 skeleton_manager.cc 烘焙同一条规则）：
+    //    仅根骨的平移多吃一项 pose.root_offset（= 相对 bind 位置、根骨父系下的平移量）。
+    //    不加这项 ⇒ 火柴人**只能表现姿态，不能表现位移**（原地滑步），且拿它当
+    //    “重定向效果”的 CPU 自查手段会看不见 root_offset 的问题（曾经因此漏掉单位 bug）。
+    //    非根骨没有平移自由度（SkeletonPose 契约 = 只驱动旋转），故只对根生效。
     std::vector<geom::math::Mat4> jw(n);
     for (size_t j = 0; j < n; ++j) {
+        const bool is_root = (type.joints[j].parent == kSkeletonNoParent);
+        Vec3f off = type.joints[j].rest_offset;
+        if (is_root) {
+            off = Vec3f(off.x() + pose.root_offset.x(), off.y() + pose.root_offset.y(),
+                        off.z() + pose.root_offset.z());
+        }
         const geom::Quaternion<float> bind =
             type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
                                        : type.bind_rotation[j];
         const geom::Quaternion<float> rot =
             pose.joint_rotation.empty() ? geom::Quaternion<float>::Identity()
                                         : pose.joint_rotation[j];
-        const geom::math::Mat4 local =
-            geom::math::JointLocal(type.joints[j].rest_offset, bind, rot);
+        const geom::math::Mat4 local = geom::math::JointLocal(off, bind, rot);
         const int p = type.joints[j].parent;
         if (p == kSkeletonNoParent) {
             jw[j] = local;

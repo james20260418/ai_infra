@@ -142,7 +142,6 @@ jointLocal(root) = T(rest_offset[root] + pose.root_offset) · R(bind) · R(pose_
 ```
 root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
 ```
-
 三项各有理由：
 
 | 因子 | 作用 | 依据 |
@@ -160,6 +159,43 @@ root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
 
 **守卫**：`leg_s` 或 `leg_t` ≤ 0（退化骨架）时不猜、不 fallback ——
 `LOG(FATAL)` 或明确报错（与 `EstimateBodyFrame` 的退化处理同款态度）。
+
+### 2.5 ⚠️ 单位纪律（2026-09-20 实战修 bug 后追加）
+
+**这套公式要求「源位姿的长度量」与「`plan.source` 骨架」同一单位/尺度。**
+
+原因：`leg_t / leg_s` 是**无量纲比值**，它只能做**比例缩放**，**不能做单位换算**。
+若 `root_offset_s` 是 cm 而 `leg_s` 是按 m 量的，比值会静默错 **100 倍**。
+
+#### 实际发生的 bug（Danis 实测：蓝色肉人飞走了很远）
+
+| 环节 | 值 |
+|---|---|
+| 源帧 `root_offset`（来自 `LoadFbxAnimation`，**源单位 cm**）| 最大 ~124 cm |
+| `plan.source` = `LoadFbxSkeleton` 产物（**米制**）| 骨盆高 1.0427 **m** |
+| ⇒ 比值 | 0.5122（看似正常！）|
+| ⇒ 重定向后 \|root_offset\| | **63.6 m**（= 应然值 0.64 m 的 100 倍）|
+
+后果：蓝骨人 / 蓝带皮**飞出画面**。且旧 gold 只盖了 naive 对照路径（那里 `root_offset`
+置 0）→ **静默通过**；已补上重定向路径的门禁。
+
+#### 定下的纪律
+
+1. **交米制下游前，长度量必须归一为米**。`FBXClip` 新增 `unit_meters` 字段（= 1 源单位
+   多少米）供消费方显式换算；观察器统一在 `NormalizePoseLengthsToMeters()` 一处做。
+2. **配骨架/位姿先看尺度**：旋转无量纲（怎么配都对），**长度量必须同尺度** ——
+   这类 bug 只在“长度量”上现形，历史上用错的骨架都没暴露。
+3. **火柴人也是下游**：`BuildBoneMeshInBoneSpace` 已接 root_offset（与烘焙同一条规则），
+   所以它也吃这条纪律，不能拿它做“无所谓单位”的旁路。
+
+#### 已知残余（非本 PR）
+
+`LoadFbxAnimation` 仍“原样透传”源单位（一个刻意的loader 分工）。这让
+「clip 位姿 + 米制骨架」这个组合成为一个**需要调用方自觉**的陷阱。
+更彻底的做法是让 clip 直接输出米（两入口就完全同源）；但那会改变已文档化的 loader 行为 +
+动到既有测试的意图，故**本 PR 不做，留给 Danis 拍板**。
+
+---
 
 ### 2.4 边界：不搬 root_offset 的场合
 

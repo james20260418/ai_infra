@@ -46,11 +46,15 @@
 //   不烘进 pose（同 fbx_loader.h 的朝向约定）。
 //
 // ⚠️ 骨架与动画**分两个 loader 入口取**（都是既有能力，本 PR 不新增读取路径）：
-//   - skeleton_ 走 jpov::LoadFbxSkeleton —— rest_offset 已归一到**米**；
+//   - skeleton_ 走 jpov::LoadFbxSkeleton —— rest_offset 已归一到**米**（供渲染 / 跨源对比）；
 //   - clip_     走 jpov::LoadFbxAnimation —— 给 帧频 + 全帧；帧里存的是**相对 bind 的
-//     增量旋转**（纯旋转量，与单位无关）。
-//   两者骨序同源（都按 node 树 DFS 收 bone 节点），叠加起来即"米制骨架 + 增量旋转"，
-//   LoadFbx 里 CHECK 住骨数一致，防止未来某侧改了收集顺序而静默错位。
+//     增量旋转**（纯旋转量，与单位无关）+ **相对 bind 的根位移 root_offset**（长量，**源单位**）。
+//   两者骨序同源（都按 node 树 DFS 收 bone 节点），LoadFbx 里 CHECK 住骨数一致，
+//   防止未来某侧改了收集顺序而静默错位。
+//   ⚠️ **单位陷阱（2026-09-20 修）**：旋转与单位无关，红骨人叠加无碍；但 **root_offset 是
+//     长度量**，本观察器下游几何全是**米制**（skeleton_ 米制视图 / glb 米 / 地面米），
+//     故取样后**先把 root_offset 归一为米**（见 UpdateFramePose 的「单位归一」段）。
+//     不归一 ⇒ 重定向与火柴人会把 cm 当米用 → 位移放大 100 倍（蓝骨人飞走 63 米）。
 
 #ifndef JPOV_DEMO_FBX_VIEWER_FBX_VIEWER_APP_H_
 #define JPOV_DEMO_FBX_VIEWER_FBX_VIEWER_APP_H_
@@ -472,9 +476,11 @@ public:
     }
     BlueDrive blue_drive_for_test() const { return ViewBlueDrive(view_mode_); }
     void RebuildBindForTest() {
-        retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
+        retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, SourceSkeletonForRetarget());
     }
     bool has_glb_for_test() const { return has_glb_; }
+    // ⚠️ 注入的位姿视为**已归一（长度量为米）** —— 它绕过了 UpdateFramePose 的归一，
+    //    等价于“把采样结果直接换掉”。注入非零 root_offset 时请用米。
     void SetFramePoseForTest(const jpov::SkeletonPose& p) { frame_pose_ = p; }
     // 直接跑"算蓝骨位姿"那一步（不碰 GL；UpdateGlbBoneMeshIfNeeded 里的纯 CPU 部分）。
     void ComputeGlbPoseForTest() {
@@ -493,6 +499,29 @@ private:
     // 单测 friend（白盒回归，见 fbx_viewer_playback_test.cc）。
     friend class FbxViewerPlaybackTest;
 
+    // 重定向该用的**源骨架**：必须与源位姿的**长度单位/尺度一致**。
+    //
+    // ⚠️ 用 **skeleton_**（米制），因为源位姿已在取用时把 root_offset 归一为**米**
+    //   （见 NormalizePoseLengthsToMeters）。反过来若用 `clip_.skeleton`（源单位 cm）
+    //   → 骨架的骨盆高是 cm 而位移已是米，比值会再错 100 倍。
+    //   （历史上这里曾用 skeleton_ 配**未归一**的 cm 位姿 → 蓝骨人飞走 63 米，
+    //    2026-09-20 修。根因是「骨架与位姿必须同尺度」这条契约被静默破坏。）
+    const jpov::SkeletonType& SourceSkeletonForRetarget() const {
+        return skeleton_;  // 米制，与已归一的源位姿同尺度
+    }
+
+    // 把源位姿的**长度量归一为米**（旋转无量纲、不动）。
+    //
+    // 本观察器下游几何全是**米制**：红侧 `skeleton_`（LoadFbxSkeleton 的米制视图）、
+    // 蓝侧 `glb_skeleton_`（glTF 原生米）、地面板（米）。而源帧来自 `clip_`，其
+    // `root_offset` 按 loader "源单位原样透传"惯例是**源单位**（Mixamo = 厘米）。
+    // 故凡把源帧交给米制下游时，必须先过本函数 —— 否则 cm 被当米用，位移放大 100 倍
+    // （实测 |root_offset| 最大 63.6 m，蓝骨人/蓝带皮直接飞出画面）。
+    // ⚠️ 本函数只动 root_offset：joint_rotation 是无量纲旋转，与单位无关。
+    void NormalizePoseLengthsToMeters(jpov::SkeletonPose* pose) const {
+        pose->root_offset = pose->root_offset * clip_.unit_meters;
+    }
+
     // 本帧位姿（唯一真相）：rest 模式 = identity；动画模式 = 按 anim_time_seconds_ 采样。
     // 取帧结果（帧号）一并记在 frame_index_，供面板显示/测试读取。
     // Pre-condition: skeleton_.bone_count() > 0 且 clip_ 已加载（LoadFbx 保证）。
@@ -505,6 +534,8 @@ private:
         }
         // 源（红）侧是 CPU 采样 + CPU 插值（火柴人每帧重建几何，没有 GPU 插值的余地）。
         frame_index_ = jpov::SampleClipPose(clip_, anim_time_seconds_, &frame_pose_);
+        // 长度量归一为米（旋转无量纲）；详见 NormalizePoseLengthsToMeters 注释。
+        NormalizePoseLengthsToMeters(&frame_pose_);
         // 帧内小数：**给蓝带皮侧的 GPU 双帧插值用**（见 OneIteration 的 kBothSkinned 分支）。
         //   同一时刻的红（CPU 插值）与蓝（GPU 插值）因此落在同一相位上 —— 两边可比。
         //   这里刻意再调 LocateClipFrame 而非自己算：帧网格定位只应有一份真相。
@@ -836,7 +867,7 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
     glb_center_x_ = glb_bounds_.CenterX();
 
     // 骨名命中数（面板显示）：用**重定向 plan 的对位表**（与 BodyRetarget 同一真相，不另算）。
-    retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
+    retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, SourceSkeletonForRetarget());
     glb_mapped_bones_ = retarget_plan_.matched_bone_count;
     LOG(INFO) << "BodyRetarget plan: 骨名命中=" << retarget_plan_.matched_bone_count << "/"
               << retarget_plan_.target_bone_count << "  Q_body="
@@ -884,7 +915,11 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
             glb_skin_poses_.clear();
             glb_skin_poses_.reserve(static_cast<size_t>(nframes) + 1);
             for (int k = 0; k < nframes; ++k) {
-                const jpov::SkeletonPose& src_pose = clip_.frames[static_cast<size_t>(k)];
+                jpov::SkeletonPose src_pose = clip_.frames[static_cast<size_t>(k)];
+                // 🔴 **必须归一为米**（2026-09-20 修）：本路径直接裸拷 clip_ 帧，而 clip_
+                //   的 root_offset 是**源单位(cm)**，retarget_plan_ 的源骨架却是**米制**
+                //   skeleton_ → 比值错 100 倍 → 蓝带皮飞走（Danis 实测的症状就是这个）。
+                NormalizePoseLengthsToMeters(&src_pose);
                 jpov::SkeletonPose target(glb_skeleton_.bone_count());
                 jpov::BodyRetargetPose(retarget_plan_, src_pose, &target);
                 glb_skin_poses_.push_back(std::move(target));

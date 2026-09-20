@@ -58,6 +58,11 @@
 //   · **root_offset 会被搬**（2026-09-20 起）：按 `Q_body · root_offset_s · (leg_t/leg_s)`
 //     缩放搬运（scale adaptation + 朝向归一），见 `BodyRetargetPose` 内注释与
 //     docs/jpov_root_offset_design.md。源为 0 ⇒ 输出 0（向后兼容）。
+//     ⚠️ **单位/尺度契约（硬要求）**：`leg_t/leg_s` 是无量纲**比值**，只能做**比例缩放**、
+//     **不能做单位换算**。故 `source_pose` 的长度量必须与 `plan.source` **同一单位/尺度**
+//     （即 source_pose 得与 plan.source 配套）。违反它不会报错 —— 只会把位移静默放大
+//     `1/unit` 倍（如把 cm 的位姿配到 m 的骨架 ⇒ 100× ⇒ 角色“飞走” 63 m，真实踩过）。
+//     源帧是 cm 而目标是米时，调用方需先按 `FBXClip::unit_meters` 归一。
 //     ⚠️ 改变资产 bind（骨长/rest 朝向/根位置）⇒ 已重定向的 poses 必须**重新重定向**
 //     （root_offset 携带"属于哪份骨架"的尺度与坐标系）。
 //   · **未命中的目标骨保持自身 rest**（pose = identity）：如 glb 的包装层 `Root`（源无同名骨）。

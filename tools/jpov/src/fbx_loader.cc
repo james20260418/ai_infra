@@ -195,6 +195,9 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
     }
 
     clip.frames_per_second = fps;
+    // 源长度单位 → 米（供消费方把长度量 root_offset 显式归一；见 animation_clip.h 的
+    //   unit_meters 段）。本 clip 仍**原样透传**源单位（与既有惯例一致）。
+    clip.unit_meters = static_cast<float>(scene->settings.unit_meters);
     clip.frames.reserve(static_cast<size_t>(frame_count));
     for (int k = 0; k < frame_count; ++k) {
         const double t = t_begin + static_cast<double>(k) / fps;
