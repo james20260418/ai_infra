@@ -162,13 +162,6 @@ inline std::vector<jpov::SkeletonPose> MakeMultiPoses(int bone_count) {
 //     该 bug 修掉后这对补丁反而成为错误的来源，已删。）
 //
 // 公式（与 skeleton_manager.cc 烘焙 + skinning_shader.h 蒙皮一致）：
-//
-// 用途：给「GPU 蒙皮/双帧插值」做逐像素真值比对（test/skeleton/jpov_skinned_multipose_test.cc）。
-//
-// 坐标系（2026-09-16 起）：loader **不做任何坐标旋转**（PR #103），网格顶点与骨架都是资产
-//   原坐标系、**天然同帧** ⇒ 这里直接相乘，不需要任何映射。
-//
-// 公式（与 skeleton_manager.cc 烘焙 + skinning_shader.h 蒙皮一致）：
 //   local(j) = T(rest_offset[j]) · R(bind_rotation[j]) · R(pose.joint_rotation[j])
 //   jw(j)    = (根 ? I : jw(parent)) · local(j)
 //   skinM(j) = jw(j) · inverseBind(j)                    ← 方案甲折入（刚体）

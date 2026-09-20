@@ -44,7 +44,7 @@
 //   - DualQuatMultiply(a, b) 语义 = 「先作用 b、再作用 a」，与 Mat4Mul 一致。
 //   - 不用运算符重载（同 mat4.h 的取舍：矩阵/对偶四元数乘法不满足交换律，具名更直白）。
 //   - 本模块**不碰 GL**：GPU 侧只有一份“同公式”的 GLSL（src/skeleton/skinning_shader.h），
-//     两侧由测试逐像素对齐（见 test/skeleton/jpov_skinned_multipose_test.cc）。
+//     两侧由测试逐位对齐（见 geom/math/dual_quat_test.cc 的 ShaderFormulaMatchesRotationPlusTranslation）。
 
 #ifndef GEOM_MATH_DUAL_QUAT_H_
 #define GEOM_MATH_DUAL_QUAT_H_

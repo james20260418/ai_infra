@@ -271,7 +271,7 @@ TEST(DualQuatTest, FromRigidMatrixRejectsShear) {
 // （已经单测过的实部/对偶部正规算法）逐位一致。将来谁把 GLSL 公式抄错，这里的对照就是
 // 唯一能提前发现的依据 —— 改 skinning_shader.h 的公式时，请同步改本函数。
 Vec3<float> TransformPointViaShaderFormula(const DualQuat& dq, const Vec3<float>& p) {
-    // 与 skinning_shader.h 的 DualQuatTransform（GLSL）逐字对应：
+    // 与 skinning_shader.h 的 DualQuatTransformPoint（GLSL）逐字对应：
     //   vec3 Rot = p + 2.0*q.w*cross(q.xyz, p) + 2.0*cross(q.xyz, cross(q.xyz, p));
     //   vec3 Tra = 2.0*(q.w*t.xyz - t.w*q.xyz + cross(q.xyz, t.xyz));
     //   return Rot + Tra;
