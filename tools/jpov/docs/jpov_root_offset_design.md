@@ -113,8 +113,8 @@ pose.root_offset = tf.translation;
 pose.root_offset = tf.translation - bind_translation_of_root;
 ```
 
-其中 `bind_translation_of_root` = `clip.skeleton.joints[0].rest_offset`
-（`LoadFbxAnimation` 传 `unit_scale = 1.0` ⇒ 源原生单位，与 `tf.translation` 同单位，直接相减）。
+其中 bind 平移 = 根节点**原始（源单位）**的 `local_transform.translation`；两项在源单位下相减，
+最后一次性 ×`unit_meters` 换成米（避免“一项已换算一项没换”的混尺）。
 
 ⚠️ 根骨 = `i == 0`，即 `CollectBoneNodes` DFS 出来的**第一个 bone 节点**。
 对「Hips 是顶层骨」的源，它就是 Hips；对「零长包装 Root → Hips」的源，它是包装 Root
@@ -148,14 +148,15 @@ root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
 |---|---|---|
 | `leg_t / leg_s` | **尺度归一**（scale adaptation）| 设计文档 §6.2/§6.3：业界称 root motion 的 scale adaptation，跑步/走路够用 |
 | `Q_body` | **朝向归一** —— 横移方向跟着角色朝向一起转，源朝 +Z / 目标朝 +X 时不会「往前走变成往侧面滑」 | `Q_body = M_t · M_s⁻¹` 已在 `BuildBodyRetargetPlan` 里算好，零额外成本 |
-| （不额外做单位换算） | 尺度因子已含单位归一 | 见下 |
+| （不额外做单位换算） | 输入本身已同尺度 | loader 在加载边界统一换算为米（见 §2.5）；比值只负责比例缩放 |
 
 **腿长的量法（Danis 定）**：取 **bind 时根关节世界位置的高度 y**（= 腰高）。
 
 - 「根是顶层骨」时，根的 rest 世界位置 = `rest_offset[root]`，其 y 分量即腰高。
 - **两侧必须用同一种量法**：都用 `RestWorldPositions(skeleton)[root]` 的 y。
-- ⚠️ 单位：两侧的骨架各自带自己的单位（FBX 源若走 `LoadFbxAnimation` 的 clip.skeleton 是
-  源单位，走 `LoadFbxSkeleton` 是米）。**比值**把单位约掉了，但要求**两侧量法一致**。
+- ⚠️ 单位：两侧都用 **米**（FBX / glTF 两个 loader 都在加载边界换算，见 §2.5）。
+  就算将来出现异单位输入，**无量纲比值**会把单位约掉 —— 但**要求两侧量法一致**
+  （量法不一致时约不掉，会静默错 `1/unit` 倍）。
 
 **守卫**：`leg_s` 或 `leg_t` ≤ 0（退化骨架）时不猜、不 fallback ——
 `LOG(FATAL)` 或明确报错（与 `EstimateBodyFrame` 的退化处理同款态度）。
@@ -171,7 +172,7 @@ root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
 
 | 环节 | 值 |
 |---|---|
-| 源帧 `root_offset`（来自 `LoadFbxAnimation`，**源单位 cm**）| 最大 ~124 cm |
+| 源帧 `root_offset`（来自 `LoadFbxAnimation`，旧行为：**源单位 cm**）| 最大 ~124 cm |
 | `plan.source` = `LoadFbxSkeleton` 产物（**米制**）| 骨盆高 1.0427 **m** |
 | ⇒ 比值 | 0.5122（看似正常！）|
 | ⇒ 重定向后 \|root_offset\| | **63.6 m**（= 应然值 0.64 m 的 100 倍）|
@@ -179,21 +180,20 @@ root_offset_t = Q_body · root_offset_s · (leg_t / leg_s)
 后果：蓝骨人 / 蓝带皮**飞出画面**。且旧 gold 只盖了 naive 对照路径（那里 `root_offset`
 置 0）→ **静默通过**；已补上重定向路径的门禁。
 
+**根修**：把换算提到**加载边界**（`LoadFbxAnimation` 也输出米）—— 陷阱从“调用方要自觉”
+变成“loader 已保证”。
+
 #### 定下的纪律
 
-1. **交米制下游前，长度量必须归一为米**。`FBXClip` 新增 `unit_meters` 字段（= 1 源单位
-   多少米）供消费方显式换算；观察器统一在 `NormalizePoseLengthsToMeters()` 一处做。
+1. **换算只在加载边界发生**。两个 loader 入口（`LoadFbxSkeleton` / `LoadFbxAnimation`）
+   都把长度量 × `scene.settings.unit_meters` 输出**米**；`FBXClip::source_unit_meters`
+   退化为**metadata**（只供日志/测试证明“确实是厘米源且确实换算过”），消费方不再做任何换算。
 2. **配骨架/位姿先看尺度**：旋转无量纲（怎么配都对），**长度量必须同尺度** ——
    这类 bug 只在“长度量”上现形，历史上用错的骨架都没暴露。
 3. **火柴人也是下游**：`BuildBoneMeshInBoneSpace` 已接 root_offset（与烘焙同一条规则），
    所以它也吃这条纪律，不能拿它做“无所谓单位”的旁路。
 
 #### 已知残余（非本 PR）
-
-`LoadFbxAnimation` 仍“原样透传”源单位（一个刻意的loader 分工）。这让
-「clip 位姿 + 米制骨架」这个组合成为一个**需要调用方自觉**的陷阱。
-更彻底的做法是让 clip 直接输出米（两入口就完全同源）；但那会改变已文档化的 loader 行为 +
-动到既有测试的意图，故**本 PR 不做，留给 Danis 拍板**。
 
 ---
 

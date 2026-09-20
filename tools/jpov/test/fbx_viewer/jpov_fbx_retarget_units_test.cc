@@ -1,21 +1,25 @@
-// JPOV — 「源帧长度量必须归一为米才能交给米制下游」契约测试（纯 CPU，不碰 GL）
+// JPOV — 「长度单位只能在加载边界换算」契约测试（纯 CPU，不碰 GL）
 //
-// 背景（2026-09-20 实修的 bug）：
-//   源帧来自 `LoadFbxAnimation`，按 loader「源单位原样透传」惯例，其 `root_offset` 是
-//   **源单位**（Mixamo = 厘米）；而目标骨架 `glb`、观察器的 `skeleton_` 都是**米**。
-//   旋转是无量纲的（怎么配都对），但 `root_offset` 是**长度量** —— 于是「重定向时用
-//   骨盆高做尺度比」这一步，把 cm 的位移配到 m 的骨架上，比值静默错 100 倍：
+// 背景（2026-09-20 实修的 bug，Danis 在 fbx viewer 里看到"蓝带皮飞走"）：
+//   重定向的尺度因子是**无量纲骨长比**，只能做比例缩放、**不能做单位换算**。
+//   旧行为下两个 loader 入口尺度不同：`LoadFbxAnimation` 把源单位（Mixamo = 厘米）原样
+//   透传，而 `LoadFbxSkeleton` 已归一为米 ⇒ 比值静默错 100 倍：
 //
-//     实测 |root_offset| 最大 63.6 m  →  蓝骨人/蓝带皮直接飞出画面（Danis 实测报的）
+//     实测 |root_offset| 最大 63.6 m  →  蓝骨人/蓝带皮直接飞出画面
 //
-//   修正：交给米制下游前，先把源帧的长度量乘 `clip.unit_meters` 归一为米。
+//   定稿（单位铁律）：**换算只发生在加载边界** —— 两个入口都输出米，JPOV 内部不流通
+//   厘米制数字，消费方（重定向 / 烘焙 / 火柴人 / 观察器）**不做任何换算**。
 //
-// 本测试钉住三件事：
-//   ① 陷阱真实存在（两入口单位不同：clip 是 cm、LoadFbxSkeleton 是 m）；
-//   ② 归一后重定向的位移**合理**（量级与人身高相称）；
-//   ③ **负向验证**：不归一就会超量级 —— 证明门禁②真有区分力（不是恒真断言）。
+// 本测试钉住四件事：
+//   ① 两个入口同尺度且确实是**米**（Hips 在 [0.5, 2.0] m）；
+//   ② 源资产确实是厘米制（source_unit_meters ≈ 0.01）—— 否则"已换算"无从证明；
+//   ③ 拿 clip 帧**直接**重定向（零换算）位移量级合理（< 2 m）——
+//      这正是观察器的真实路径；一旦哪天又漏换算，这里立刻炸；
+//   ④ **负向验证**：把帧当成"漏换算的旧行为"（×1/unit）⇒ 超量级（> 50 m），
+//      证明门禁③真有区分力，不是恒真断言。
 //
-// 参考：docs/jpov_root_offset_design.md、interface/animation_clip.h 的 unit_meters 段。
+// 参考：docs/jpov_root_offset_design.md、interface/animation_clip.h（source_unit_meters 段）、
+//      src/fbx_loader.h（「单位铁律」）。
 
 #include <algorithm>
 #include <cmath>
@@ -35,13 +39,6 @@ using jpov::FBXClip;
 using jpov::SkeletonPose;
 using jpov::SkeletonType;
 using jpov::Vec3f;
-
-// 把源帧归一为米（与观察器 FbxViewerApp::NormalizePoseLengthsToMeters 同一语义）。
-SkeletonPose InMeters(const SkeletonPose& raw, const FBXClip& clip) {
-    SkeletonPose p = raw;
-    p.root_offset = p.root_offset * clip.unit_meters;
-    return p;
-}
 
 // 逐帧重定向，返回输出根位移的最大模长（米）。
 float MaxRetargetedOffsetNorm(const jpov::BodyRetargetPlan& plan,
@@ -75,8 +72,8 @@ int main(int argc, char** argv) {
     const std::string fbx = dir + "/animations/hip_hop_dance.fbx";
     const std::string glb = dir + "/object3d/mixamo_male/mixamo_male.glb";
 
-    SkeletonType skeleton_m;  // LoadFbxSkeleton → **米**
-    FBXClip clip;             // LoadFbxAnimation → 源单位（cm）+ unit_meters
+    SkeletonType skeleton_m;
+    FBXClip clip;
     CHECK(jpov::LoadFbxSkeleton(fbx, &skeleton_m)) << "LoadFbxSkeleton 失败: " << fbx;
     CHECK(jpov::LoadFbxAnimation(fbx, &clip)) << "LoadFbxAnimation 失败: " << fbx;
     std::vector<SkeletonType> skins;
@@ -85,23 +82,32 @@ int main(int argc, char** argv) {
     const SkeletonType& glb_skel = skins[0];
     CHECK_GT(clip.frames.size(), 0u) << "源动画没有帧";
 
-    // ---- ① 陷阱真实存在：两入口单位不同 ----
+    // ---- ① 两个入口同尺度，且都是「米」----
     const int hips_m = FindBySuffix(skeleton_m, "Hips");
     const int hips_c = FindBySuffix(clip.skeleton, "Hips");
-    CHECK_GE(hips_m, 0) << "米制骨架应含 Hips";
-    CHECK_GE(hips_c, 0) << "clip 骨架应含 Hips";
+    CHECK_GE(hips_m, 0) << "LoadFbxSkeleton 产物应含 Hips";
+    CHECK_GE(hips_c, 0) << "clip.skeleton 应含 Hips";
     const float h_m = skeleton_m.joints[static_cast<size_t>(hips_m)].rest_offset.y();
     const float h_c = clip.skeleton.joints[static_cast<size_t>(hips_c)].rest_offset.y();
-    LOG(INFO) << "Hips 高度: skeleton_(米)=" << h_m << "  clip_.skeleton(源单位)=" << h_c
-              << "  unit_meters=" << clip.unit_meters;
-    CHECK_LT(clip.unit_meters, 0.5f)
-        << "Mixamo 源应为厘米（unit_meters≈0.01），实际 " << clip.unit_meters;
-    const float ratio_entries = std::fabs(h_c * clip.unit_meters - h_m);
-    CHECK_LT(ratio_entries, 1e-3f)
-        << "两入口应只差 unit_meters 这一个因子（否则陷阱不成立，本测试前提有误）: "
-        << h_c * clip.unit_meters << " vs " << h_m;
+    LOG(INFO) << "Hips 高度: LoadFbxSkeleton=" << h_m << " m  clip.skeleton=" << h_c << " m";
+    // 人形 Hips 静息高在 [0.5, 2.0] m；cm 制会得 ≈104，米/厘米混算会得 ≈0.01。
+    CHECK_GT(h_m, 0.5f) << "LoadFbxSkeleton 的 Hips 高 " << h_m << " 偏小，应已归一为米";
+    CHECK_LT(h_m, 2.0f) << "LoadFbxSkeleton 的 Hips 高 " << h_m << " 偏大，疑似没换算";
+    CHECK_GT(h_c, 0.5f) << "clip.skeleton 的 Hips 高 " << h_c
+                        << " 偏小 —— 长度量必须在加载边界归一为米（旧 bug：这里原样透传 cm，"
+                           "下游按无量纲骨长比缩放时会静默错 100 倍）";
+    CHECK_LT(h_c, 2.0f) << "clip.skeleton 的 Hips 高 " << h_c << " 偏大，疑似没换算";
+    CHECK_LT(std::fabs(h_c - h_m), 1e-3f)
+        << "两个 loader 入口必须给出**同尺度**骨架（骨长逐骨相等的抽样）: " << h_c
+        << " vs " << h_m;
 
-    // ---- 两套 plan：源骨架用米制 skeleton_（与归一后的位姿同尺度）----
+    // ---- ② 源资产确实是厘米制（否则"换算过"无从证明）----
+    LOG(INFO) << "source_unit_meters = " << clip.source_unit_meters;
+    CHECK_LT(clip.source_unit_meters, 0.5f)
+        << "Mixamo 源应为厘米（source_unit_meters≈0.01），实际 " << clip.source_unit_meters;
+    CHECK_GT(clip.source_unit_meters, 0.0f) << "source_unit_meters 必须 >0";
+
+    // ---- 两套 plan：源骨架用米制 skeleton_m（与 clip 帧同尺度）----
     const jpov::BodyRetargetPlan plan =
         jpov::BuildBodyRetargetPlan(glb_skel, skeleton_m);
     LOG(INFO) << "plan: 源骨盆高(米)=" << plan.source_leg_length
@@ -109,47 +115,51 @@ int main(int argc, char** argv) {
               << " 尺度=" << plan.root_offset_scale
               << " Q_body=" << plan.q_body_angle_deg << "°";
 
-    // 源帧（原始单位）与归一后（米）两份。
-    std::vector<SkeletonPose> raw;
-    raw.reserve(clip.frames.size());
-    std::vector<SkeletonPose> meters;
-    meters.reserve(clip.frames.size());
-    for (const SkeletonPose& f : clip.frames) {
-        raw.push_back(f);
-        meters.push_back(InMeters(f, clip));
-    }
-
     // 源位移确实非零（否则本测试无意义 —— 全是 0 的话什么断言都"过"）。
     float src_max = 0.0f;
-    for (const SkeletonPose& p : meters) {
+    for (const SkeletonPose& p : clip.frames) {
         src_max = std::max(src_max, p.root_offset.Norm());
     }
+    LOG(INFO) << "源（clip，已为米）|root_offset| 最大 = " << src_max << " m";
     CHECK_GT(src_max, 0.05f)
         << "源动画的 root_offset 几乎全 0（实测最大 " << src_max
         << " m）—— 取错了资产或不含 root-motion，本测试无区分力";
+    CHECK_LT(src_max, 2.0f)
+        << "源帧位移 " << src_max << " m 过大 —— loader 单位换算有问题？";
 
-    // ---- ② 归一为米后：位移量级与人身高相称 ----
+    // ---- ③ 观察器的真实路径：clip 帧**直接**重定向（零换算）----
     //   人跳舞的骨盆位移不该超过 ~2 米（目标骨盆高 0.53 m 的好几倍已很夸张）。
-    const float fixed_max = MaxRetargetedOffsetNorm(plan, meters);
-    LOG(INFO) << "归一为米后: 重定向 |root_offset| 最大 = " << fixed_max << " m";
+    const float fixed_max = MaxRetargetedOffsetNorm(plan, clip.frames);
+    LOG(INFO) << "clip 帧直接重定向（零换算）: |root_offset| 最大 = " << fixed_max << " m";
     CHECK_LT(fixed_max, 2.0f)
-        << "🔴 归一后位移仍过大（" << fixed_max << " m）—— 单位链路又有问题";
+        << "🔴 直接重定向后位移过大（" << fixed_max
+        << " m）—— 蓝骨人会飞出画面。多为「加载边界没换算单位」（cm 被当米用）。";
     CHECK_GT(fixed_max, 0.01f)
-        << "归一后位移几乎为 0（" << fixed_max << " m）—— root_offset 没被搬过去？";
+        << "重定向后位移几乎为 0（" << fixed_max << " m）—— root_offset 没被搬过去？";
 
-    // ---- ③ 负向验证：忘记归一 → 超量级（证明门禁②有区分力）----
-    const float buggy_max = MaxRetargetedOffsetNorm(plan, raw);
-    LOG(INFO) << "忘记归一（源单位直接给米制骨架）: |root_offset| 最大 = " << buggy_max
-              << " m";
-    CHECK_GT(buggy_max, 50.0f)
-        << "忘记归一竟没造成超量级位移（" << buggy_max
-        << " m）—— 「门禁②能抓住忘归一」这一前提不成立，需重新审视本测试";
-    // 两者之比应≈ 1/unit_meters（=100），这也直接体现"无量纲比值吃掉了单位差"。
-    const float ratio = buggy_max / fixed_max;
-    LOG(INFO) << "放大倍数 ≈ " << ratio << "（应≈ 1/unit_meters = "
-              << 1.0f / clip.unit_meters << "）";
+    // ---- ④ 负向验证：模拟"漏换算的旧行为"⇒ 超量级 ----
+    {
+        std::vector<SkeletonPose> buggy;
+        buggy.reserve(clip.frames.size());
+        const float inv = 1.0f / clip.source_unit_meters;  // 1/0.01 = 100
+        for (const SkeletonPose& p : clip.frames) {
+            SkeletonPose q = p;
+            q.root_offset = q.root_offset * inv;  // cm 冒充米 = 旧行为
+            buggy.push_back(q);
+        }
+        const float buggy_max = MaxRetargetedOffsetNorm(plan, buggy);
+        LOG(INFO) << "漏换算（源单位直接给米制骨架）: |root_offset| 最大 = " << buggy_max
+                  << " m";
+        CHECK_GT(buggy_max, 50.0f)
+            << "漏换算竟没造成超量级位移（" << buggy_max
+            << " m）—— 「门禁③能抓住漏换算」这一前提不成立，需重新审视本测试";
+        const float factor = buggy_max / fixed_max;
+        LOG(INFO) << "放大倍数 ≈ " << factor << "（应≈ 1/source_unit_meters = " << inv
+                  << "）";
+        CHECK_GT(factor, 50.0f) << "放大倍数过小 —— 单位错配未被放大，前提可疑";
+    }
 
-    // ---- ④ 零入零出（纯原地动作 ⇒ 输出 0，向后兼容的根据）----
+    // ---- ⑤ 零入零出（纯原地动作 ⇒ 输出 0，向后兼容的根据）----
     {
         SkeletonPose still = SkeletonPose::Identity(skeleton_m.bone_count());
         still.root_offset = Vec3f(0.0f, 0.0f, 0.0f);

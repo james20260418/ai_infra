@@ -559,27 +559,40 @@ TEST(SkeletonRetargetTest, RootOffsetScaledByLegLengthRatio) {
     EXPECT_NEAR(out.root_offset.z(), 0.60f, 1e-4f);
 }
 
-// ③ 朝向差 90°：位移随之旋转（验证 Q_body 生效）—— 源"往前走"应变成目标系的对应方向，
-//    而不是照搬成源系的轴。
+// ③ 朝向差 90°：位移随之旋转（验证 Q_body 生效，且**方向符号正确**）。
+//    场景：目标骨架 = 源绕 +Y 转 90°（`MakeGeoArmChain(90)` 对每个 rest_offset 都做了
+//    RotateVector(R_y(90°), ·)）。
+//
+//    期望值的**手算推导**（写下来是为了让断言能区分“转对了/转反了”）：
+//      · 两侧骨盆高相同 ⇒ root_offset_scale = 1。
+//      · 体侧左右轴：目的 X 轴被转到 RotateVector(R_y(90°), (1,0,0)) = (0,0,-1)
+//        ⇒ M_t = R_y(θ)，θ = atan2(−left.z, left.x) = atan2(1, 0) = +90°，M_s = I。
+//      · Q_body = M_t · M_s⁻¹ = R_y(+90°)。
+//      · 给定源位移 v_s = (0,0,1)（源模型系）；Q_body 把【源模型系】坐标映到
+//        【目标模型系】（v_model_t = M_t · M_s⁻¹ · v_model_s，因为 M: 体轴→模型系）。
+//      · RotateVector(R_y(90°), (0,0,1)) = (sin90, 0, cos90) = **(1, 0, 0)**。
+//    ⇒ 断言**逐分量**等 (1,0,0)：若哪天把 Q_body 写反（用共轭），结果会是 (−1,0,0)，
+//      而“与原向量正交 / 模长守恒”这两个旧判据对两者**都成立**（±90° 都正交）——
+//      故必须这样钉，否则该测试对符号错误是盲的（同 PR #104 的 0.5 mix 不动点教训）。
 TEST(SkeletonRetargetTest, RootOffsetRotatedByQBody) {
     const SkeletonType src = MakeGeoArmChain(0.0f).type;    // 面朝 +Z
-    const SkeletonType tgt = MakeGeoArmChain(90.0f).type;   // 整体 yaw 90°
+    const SkeletonType tgt = MakeGeoArmChain(90.0f).type;   // 整体 yaw +90°
     const BodyRetargetPlan plan = BuildBodyRetargetPlan(tgt, src);
     EXPECT_NEAR(plan.q_body_angle_deg, 90.0f, 1e-2f) << "Q_body 应捕捉 90° 朝向差";
+    EXPECT_NEAR(plan.root_offset_scale, 1.0f, 1e-3f) << "两骨架同高 ⇒ 尺度比应为 1";
 
     SkeletonPose sp = SkeletonPose::Identity(10);
     sp.root_offset = Vec3f(0.0f, 0.0f, 1.0f);  // 源朝自己的"前"走 1 单位
     SkeletonPose out;
     BodyRetargetPose(plan, sp, &out);
 
-    // 模长守恒（纯旋转 + 等比缩放；此处 ratio ≈ 1，因为两骨架同高）。
-    EXPECT_NEAR(plan.root_offset_scale, 1.0f, 1e-3f);
+    EXPECT_NEAR(out.root_offset.x(), 1.0f, 1e-4f)
+        << "R_y(+90°) 应把 (0,0,1) 映到 (1,0,0)；得 (" << out.root_offset.x() << ","
+        << out.root_offset.y() << "," << out.root_offset.z()
+        << ") —— 若 x≈−1 则 Q_body 用了共轭（转反了）";
+    EXPECT_NEAR(out.root_offset.y(), 0.0f, 1e-4f);
+    EXPECT_NEAR(out.root_offset.z(), 0.0f, 1e-4f);
     EXPECT_NEAR(out.root_offset.Norm(), 1.0f, 1e-4f) << "位移模长应守恒";
-    // 方向被 Q_body 转过 ⇒ 与原向量不同（除非 Q_body 恒等，而此处是 90°）。
-    const float dot = out.root_offset.x() * sp.root_offset.x() +
-                      out.root_offset.y() * sp.root_offset.y() +
-                      out.root_offset.z() * sp.root_offset.z();
-    EXPECT_NEAR(dot, 0.0f, 1e-3f) << "90° 朝向差下位移应正交于原方向（已被旋转）";
 }
 
 // ④ 退化骨架（根高度 ≤ 0）建 plan 时应 FATAL，不静默给一个错的比值。

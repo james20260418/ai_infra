@@ -2,13 +2,20 @@
 //
 // 本文件提供两个入口（共用同一套 bone 节点收集/骨架构建）：
 //   - LoadFbxSkeleton   : 只要骨架（rest_offset 归一为米），供跨源对比/渲染/重定向用。
-//   - LoadFbxAnimation  : 「骨架 + 动画原始全帧 + 帧频」→ FBXClip（单位原样透传）。
+//   - LoadFbxAnimation  : 「骨架 + 动画全帧 + 帧频」→ FBXClip（长度量同样归一为米）。
 // 均不做重定向 / 重采样 / 播放；那属于基于 FBXClip 的二次开发。
+//
+// 🔑 **单位铁律（2026-09-20 定稿）**：**加载边界是唯一的换算点**。两个入口都把长度量
+//   乘上源文件的 unit_meters 输出**米**，故 JPOV 内部（骨架/位姿/重定向/烘焙/渲染）
+//   **永远不见厘米制数字**，也没有“某个字段是源单位”这种例外。
+//   （旧行为：LoadFbxAnimation “原样透传”源单位 ⇒ clip 是 cm、LoadFbxSkeleton 是 m，
+//    两个入口不同尺度，重定向按无量纲比值缩放时静默错 100×，角色“飞走” 63 米。）
 //
 // 具体步骤（LoadFbxAnimation）:
 //   1. 戴 ufbx load opts（跳过几何大件，只留 node/bone/anim），读文件。
 //   2. 沿 node 树深度优先收集『带 bone 属性』的节点（Skeleton node）当骨架 → 按遍历序给
-//      索引发 SkeletonType: name / parent(沿树向上最近 bone) / rest_offset(local 平移)。
+//      索引发 SkeletonType: name / parent(沿树向上最近 bone) / rest_offset(local 平移 ×
+//      unit_meters → 米)。
 //   3. 逐帧（k=0..N-1，t=begin+k/fps）对每骨取 ufbx_evaluate_transform(anim,node,t) 的
 //      local 旋转，**减去 bind 后**填 SkeletonPose.joint_rotation（相对 bind 的增量，
 //      2026-09-14 修复：此前直接存全量 local 旋转，会与烘焙式的 R(bind) 双倍施加）；
@@ -18,8 +25,9 @@
 //   SkeletonPose 存的是相对父的**旋转增量** + 相对 bind 的**平移增量** —— 两者都与全局轴
 //   无关（角色最终朝哪由放置层 up/front 决定，不锁在 pose）。故本 loader 不需把源轴“硬转”
 //   进 pose；
-//   源 FBX 轴/单位原样进 clip（对齐 glTF loader 透传原生单位的惯例）。Mixamo 人形源默认
-//   y-up + cm, 传过即已是 y-up。成功 LOG 里带出源 scene 的 axes.up 与 unit_meters 供 debug。
+//   源 FBX 轴原样进 clip（对齐 glTF loader 透传原生轴的惯例）。Mixamo 人形源默认
+//   y-up + cm：轴传过即已是 y-up；**长度量则在边界一律乘 unit_meters 换成米**（见上
+//   “单位铁律”）。成功 LOG 里带出源 scene 的 axes.up 与 unit_meters 供 debug。
 
 // <cmath> 前定义 _USE_MATH_DEFINES，否则 MinGW 下 M_PI 未定义(生效太晚)。
 // 与 render_command.h / skeleton_manager.cc 同款保护（本文件被 windows 交叉编译时必需）。
@@ -83,7 +91,8 @@ void CollectBoneNodes(const ufbx_node* n, std::vector<const ufbx_node*>* out) {
 
 // 由 bone 节点列表构建 SkeletonType（LoadFbxSkeleton / LoadFbxAnimation 共用）。
 //
-//   unit_scale: rest_offset 的单位换算系数（1.0 = 源单位原样透传；传 unit_meters 则归一为米）。
+//   unit_scale: rest_offset 的单位换算系数。两个调用点**都传源文件 unit_meters**
+//     （即输出恒为米；见文件头“单位铁律”）。1.0 只剩“源本身已是米”的语义。
 //
 // 语义（两处调用共守，2026-09-14 定；与 glTF 侧 LoadGltfSkeleton 同构）：
 //   - joints[i].rest_offset   = 该骨 bind(静止) 的 local 平移 × unit_scale；
@@ -169,7 +178,7 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
         return false;
     }
 
-    // ---- 骨架: 收 bone 子树（单位原样透传：unit_scale = 1.0）----
+    // ---- 骨架: 收 bone 子树（长度量在边界归一为米：unit_scale = unit_meters）----
     std::vector<const ufbx_node*> nodes;
     CollectBoneNodes(scene->root_node, &nodes);
     if (nodes.empty()) {
@@ -180,7 +189,14 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
 
     const int bone_count = static_cast<int>(nodes.size());
     FBXClip clip;
-    BuildSkeletonFromBoneNodes(nodes, /*unit_scale=*/1.0f, &clip.skeleton);
+    // 🔑 单位换算发生在这里（**唯一换算点**）：源文件单位 → 米（Mixamo cm 源 → ×0.01）。
+    //   之后本 clip 的所有长度量（skeleton.rest_offset / frames[].root_offset）都是米，
+    //   与 LoadFbxSkeleton / glTF 骨架 / 场景地面同尺度 —— 消费方**不再做任何换算**。
+    const double src_unit = scene->settings.unit_meters;
+    CHECK_GT(src_unit, 0.0)
+        << "LoadFbxAnimation: " << path << " unit_meters 非法: " << src_unit;
+    const float unit = static_cast<float>(src_unit);
+    BuildSkeletonFromBoneNodes(nodes, unit, &clip.skeleton);
 
     // ---- 帧序时基: 数 = floor((end-begin)*fps)+1, t_k = begin + k/fps ----
     const double t_begin = anim->time_begin;
@@ -195,10 +211,13 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
     }
 
     clip.frames_per_second = fps;
-    // 源长度单位 → 米（供消费方把长度量 root_offset 显式归一；见 animation_clip.h 的
-    //   unit_meters 段）。本 clip 仍**原样透传**源单位（与既有惯例一致）。
-    clip.unit_meters = static_cast<float>(scene->settings.unit_meters);
+    // 源文件单位（**metadata**：仅供日志/测试证明“确实是厘米源且确实被换算过”，
+    //   见 animation_clip.h 的 source_unit_meters 段）。长度量已全部是米。
+    clip.source_unit_meters = unit;
     clip.frames.reserve(static_cast<size_t>(frame_count));
+    // 根骨的**原始（源单位）bind 平移** = root_offset 的基准点。直接取 node 原始值做差
+    //   （而非用已换米的 rest_offset 除回源单位），保证单一真相、无浮点往返。
+    const ufbx_vec3 bind_src = nodes[0]->local_transform.translation;
     for (int k = 0; k < frame_count; ++k) {
         const double t = t_begin + static_cast<double>(k) / fps;
         SkeletonPose pose;
@@ -228,19 +247,20 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
                 //
                 // 语义（2026-09-20 定稿，见 docs/jpov_root_offset_design.md §1）：
                 //   root_offset = 根骨在【其父坐标系】下、相对【其 bind 位置】的平移量
-                //               = tf.translation − joints[0].rest_offset
+                //               = tf.translation − bind 位置的 local 平移
                 // 即"相对 bind 的【增量】"，与上面 joint_rotation 的"相对 bind 的增量旋转"
                 // 同一套语言。identity/静息 ⇒ 0（根停在 bind 位置）。
                 //
                 // ⚠️ 改前（错）直接存 tf.translation（**全量** local 平移），静息时 ≈ 一个
                 //    腰高而非 0 —— 下游若原样当增量用，角色会被整体抬高一个腰高 = 悬空。
                 //
-                // 单位：本函数 BuildSkeletonFromBoneNodes 传 unit_scale = 1.0（源原生单位
-                //   原样透传，见文件头），故 rest_offset 与 tf.translation 同单位，直接相减。
-                const Vec3f& bind_t = clip.skeleton.joints[0].rest_offset;
-                pose.root_offset = Vec3f(static_cast<float>(tf.translation.x) - bind_t.x(),
-                                         static_cast<float>(tf.translation.y) - bind_t.y(),
-                                         static_cast<float>(tf.translation.z) - bind_t.z());
+                // 单位：两项都在**源单位**下相减（直接取 node 的原始 bind 平移），最后一次
+                //   性 ×unit 换成米 —— 既避免"一项已换算一项没换"的混尺，也避免
+                //   “米制数 ÷unit 再 ×unit”的来回折腾（唯一真相是 node，不是换算后的值）。
+                pose.root_offset = Vec3f(
+                    (static_cast<float>(tf.translation.x) - bind_src.x) * unit,
+                    (static_cast<float>(tf.translation.y) - bind_src.y) * unit,
+                    (static_cast<float>(tf.translation.z) - bind_src.z) * unit);
             }
         }
         clip.frames.push_back(std::move(pose));
@@ -252,7 +272,8 @@ bool LoadFbxAnimation(const std::string& path, FBXClip* out) {
               << AxName(scene->settings.axes.right)
               << " up=" << AxName(scene->settings.axes.up)
               << " front=" << AxName(scene->settings.axes.front)
-              << " unit_meters=" << scene->settings.unit_meters;
+              << " source_unit_meters=" << src_unit
+              << "（长度量已归一为米）";
     if (out != nullptr) *out = std::move(clip);
     ufbx_free_scene(scene);
     return true;
@@ -280,8 +301,8 @@ bool LoadFbxSkeleton(const std::string& path, SkeletonType* out) {
     }
 
     // 单位归一：rest_offset × unit_meters → 米（Mixamo cm 源 → ×0.01）。
-    // 归一化是本函数与 LoadFbxAnimation 的刻意差异（后者面向动画素材忠实抓取、原样透传单位）：
-    // 骨架直接使用/跨源对比（对 glb 骨架、Mixamo23 模板等米制骨架）需要统一尺度。
+    // 本入口与 LoadFbxAnimation **同规则**（都把长度量在边界换成米，见文件头“单位铁律”）：
+    // 两个入口产物尺度一致，与 glb 骨架、Mixamo23 模板、场景地面同尺度，可直接混用/对比。
     const double unit = scene->settings.unit_meters;
     CHECK_GT(unit, 0.0)
         << "LoadFbxSkeleton: " << path << " unit_meters 非法: " << unit;

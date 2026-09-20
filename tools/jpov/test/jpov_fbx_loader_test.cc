@@ -155,19 +155,21 @@ int main(int argc, char** argv) {
 
     // ---- 5. root_offset 语义（2026-09-20 修复）：相对 bind 的【平移增量】----
     //   定稿见 docs/jpov_root_offset_design.md §1：
-    //     root_offset = tf.translation − joints[0].rest_offset
+    //     root_offset = (当前 local 平移 − bind 位置 local 平移) × source_unit_meters
     //   修复前 bug：直接存 tf.translation（**全量** local 平移）→ 静息时 ≈ 一个腰高
-    //   （Mixamo 源是 cm，Hips 静息 y ≈ 104cm），下游当增量用会把角色整体抬高一个腰高（悬空）。
+    //   （下游当增量用会把角色整体抬高一个腰高 = 悬空）。
     {
-        // 5a) 参考量：根的 bind 平移 = joints[0].rest_offset（本入口 unit_scale=1.0，源单位）。
+        // 5a) **单位门禁**：长度量必须已是**米** —— 人形源 Hips 静息高应在 [0.5, 2.0] m。
+        //    若 loader 忘了换算（Mixamo cm 源会得 ≈104）或过头（≈0.0104）都会失败。
         const float root_bind_y = skel.joints[0].rest_offset.y();
-        LOG(INFO) << "root bind 平移 y = " << root_bind_y << " (源单位, Mixamo 为 cm)";
-        CHECK_GT(root_bind_y, 50.0f)
-            << "Mixamo 源 Hips 静息 y 应 ≈ 一个腰高(cm)，实际 " << root_bind_y
-            << " —— 若接近 0 说明 loader 单位/字段变了，本组断言失效需重核";
+        LOG(INFO) << "root bind 平移 y = " << root_bind_y << " m（已归一为米）";
+        CHECK_GT(root_bind_y, 0.5f)
+            << "Hips 静息高 " << root_bind_y << " 偏小 —— 长度量应已归一为米（人形应 ≈1 m）";
+        CHECK_LT(root_bind_y, 2.0f)
+            << "Hips 静息高 " << root_bind_y << " 偏大 —— 疑似没做单位换算（Mixamo cm 源会得 ≈104）";
 
         // 5b) **关键门禁**：任一帧的 |root_offset.y| 必须远小于 bind 腰高 ——
-        //     即确认存的是"增量"而非"全量"。bug 版每帧都 ≈ +104cm（大比值），必失败。
+        //     即确认存的是"增量"而非"全量"。bug 版每帧都 ≈ bind 腰高（大比值），必失败。
         float max_abs_y = 0.0f;
         for (size_t k = 0; k < nf; ++k) {
             max_abs_y = std::max(max_abs_y, std::fabs(clip.frames[k].root_offset.y()));
@@ -176,10 +178,10 @@ int main(int argc, char** argv) {
             << "max |root_offset.y| = " << max_abs_y << " 相对 bind 腰高 " << root_bind_y
             << " 过大 —— 疑似又存了全量 local 平移（悬空回归）";
         LOG(INFO) << "root_offset 增量范围: max|y|=" << max_abs_y
-                  << " (bind 腰高 " << root_bind_y << ") —— 确认是增量";
+                  << " m (bind 腰高 " << root_bind_y << " m) —— 确认是增量";
 
         // 5c) 舞蹈有原地起伏/横移 → 应当**至少有一帧** root_offset 非零（真的在动，
-        //     而非全 0 的"没接线"状态）。
+        //     而非全 0 的"没接线"状态）。阈值 5 cm（米制）——远大于浮点噪声、又远小于腰高。
         float max_abs_any = 0.0f;
         for (size_t k = 0; k < nf; ++k) {
             const jpov::Vec3f& r = clip.frames[k].root_offset;
@@ -187,9 +189,9 @@ int main(int argc, char** argv) {
                                                         std::max(std::fabs(r.y()),
                                                                  std::fabs(r.z()))));
         }
-        CHECK_GT(max_abs_any, 0.1f)
-            << "所有帧 root_offset 均≈0 —— 舞蹈应有起伏/位移，疑似漏填或尺寸错";
-        LOG(INFO) << "root_offset 最大值(任一分量) = " << max_abs_any;
+        CHECK_GT(max_abs_any, 0.05f)
+            << "所有帧 root_offset 均≨0.05 m —— 舞蹈应有起伏/位移，疑似漏填或尺寸错";
+        LOG(INFO) << "root_offset 最大值(任一分量) = " << max_abs_any << " m";
     }
 
     LOG(INFO) << "jpov_fbx_loader_test PASSED";

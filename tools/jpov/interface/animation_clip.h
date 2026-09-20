@@ -16,6 +16,7 @@
 //     见 src/fbx_loader.h）—— 原样倒进 JPOV 的 CPU 容器，
 //     不重采样、不裁剪、不二次解释。后续重采样/重定向在「基于本 clip 二次开发」里做，
 //     本基本函数不掺。
+//   - 单位：本容器里**一切长度量都是米**（加载边界已换算，见 source_unit_meters 段）。
 
 #ifndef JPOV_INTERFACE_ANIMATION_CLIP_H_
 #define JPOV_INTERFACE_ANIMATION_CLIP_H_
@@ -40,18 +41,19 @@ namespace jpov {
 //                 Lcl Rotation 语义；identity pose ⇒ Lcl Rotation=0 的静止形态。源文件
 //                 key 恰在帧网格上，故无需插值）。后续重采样基于本数组二次开发，本基本
 //                 函数不再做二次加工。
-//   - unit_meters : 源文件长度单位的米数（1 源单位 = 多少米；Mixamo 为 0.01 = 厘米）。
-//                 本项目 JPOV **统一为米**，而本 clip 的**长度量**（skeleton.rest_offset /
-//                 frames[].root_offset）按 loader 的"源单位原样透传"惯例存的是**源单位** ——
-//                 消费方要得到米必须**显式乘 unit_meters**。
-//                 ⚠️ **单位陷阱（2026-09-20 踩过）**：旋转是无量纲的（怎么配都对），但
-//                 `root_offset` 是**长度量**。若把本 clip 的帧位姿配到一份**米制**骨架上
-//                 （如 LoadFbxSkeleton 的产物）而忘了换算，位移会被静默放大 1/unit_meters 倍
-//                 （Mixamo 即 100×）—— 实测角色"飞走" 63 米。配骨架前先把长度量归一。
+//   - source_unit_meters : **仅记录**源文件长度单位的米数（1 源单位 = 多少米；Mixamo 为
+//                 0.01 = 厘米）。**纯 metadata，不是消费方要用的换算系数** ——
+//                 本 clip 的**长度量（skeleton.rest_offset / frames[].root_offset）已全部是米**
+//                 （loader 职责，见 fbx_loader.h），消费方不需要、也不应再做任何换算。
+//                 留着只为：成功日志可读、测试能证明"该资产确实是厘米源且确实被换算过"。
+//
+// 单位铁律（2026-09-20 定稿）：**JPOV 内不流通厘米制的数字**。凡从外部素材进来的长度量，
+//   一律在**加载边界**换算成米；越界之后全链路只有米。故 `FBXClip` 出去的东西（含
+//   `root_offset`）与 `LoadFbxSkeleton`、glTF 骨架、场景地面**同尺度**，可直接混用。
 struct FBXClip {
-    SkeletonType skeleton;          // 源骨架（骨名 + parent 树 + bind 静止偏移）
+    SkeletonType skeleton;          // 源骨架（骨名 + parent 树 + bind 静止偏移）—— 米。
     double frames_per_second = 0.0; // 源帧频（fps）；>0 才视为有效 clip。
-    float unit_meters = 1.0f;       // 源长度单位 → 米（见文件头 unit_meters 一段）。
+    float source_unit_meters = 1.0f;  // 源文件单位（metadata，见上；不参与消费方计算）。
     std::vector<SkeletonPose> frames;  // 原始全帧位姿，长度 = 这一段动画的帧数。
 };
 

@@ -161,6 +161,11 @@ struct SkeletonPose {
     // ⚠️ 长度量在 pose 里、骨架尺度在 SkeletonType 里，二者独立：**缩放骨架不会自动缩放
     //    已产出的 pose**。故改了资产 bind（骨长/rest 朝向/根位置）⇒ 针对它重定向过的所有
     //    poses **必须重新重定向**（同“跨骨架 pose 不能插值”一类约束）。
+    //
+    // 施加规则：烘焙（SkeletonManager）与火柴人都把它加到【顶层骨】
+    //   (parent == kSkeletonNoParent) 的平移上（= T(rest_offset + root_offset)）。合法骨架
+    //   只有一根顶层骨（即 0 号）⇒ 等价于“加在 0 号上”。`Validate()` 并不禁止多顶层骨，
+    //   那种骨架会把同一偏移加到每个顶层骨 —— 未定义的边缘情形，真人形资产不会出现。
     Vec3f root_offset{0.0f, 0.0f, 0.0f};
 
     // 全恒等 pose（每关节旋转 = identity，root_offset = 0）。

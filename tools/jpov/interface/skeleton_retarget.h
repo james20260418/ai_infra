@@ -59,10 +59,13 @@
 //     缩放搬运（scale adaptation + 朝向归一），见 `BodyRetargetPose` 内注释与
 //     docs/jpov_root_offset_design.md。源为 0 ⇒ 输出 0（向后兼容）。
 //     ⚠️ **单位/尺度契约（硬要求）**：`leg_t/leg_s` 是无量纲**比值**，只能做**比例缩放**、
-//     **不能做单位换算**。故 `source_pose` 的长度量必须与 `plan.source` **同一单位/尺度**
+//     **不能做单位换算**。故 `source_pose` 的长度量必须与 `plan.source` **同一尺度**
 //     （即 source_pose 得与 plan.source 配套）。违反它不会报错 —— 只会把位移静默放大
 //     `1/unit` 倍（如把 cm 的位姿配到 m 的骨架 ⇒ 100× ⇒ 角色“飞走” 63 m，真实踩过）。
-//     源帧是 cm 而目标是米时，调用方需先按 `FBXClip::unit_meters` 归一。
+//     ✅ **现状已是安全区**：FBX / glTF 两个 loader 都在**加载边界**把长度量换成米
+//     （见 fbx_loader.h「单位铁律」），故本仓内合法的输入天然同尺度 —— 这条契约从
+//     “调用方要自觉”变成“loader 已保证”。自行造 pose 的调用方（如注入的 test pose）
+//     仍需遵守：长度量请用米。
 //     ⚠️ 改变资产 bind（骨长/rest 朝向/根位置）⇒ 已重定向的 poses 必须**重新重定向**
 //     （root_offset 携带"属于哪份骨架"的尺度与坐标系）。
 //   · **未命中的目标骨保持自身 rest**（pose = identity）：如 glb 的包装层 `Root`（源无同名骨）。
@@ -362,7 +365,7 @@ struct BodyRetargetPlan {
     //     root_offset_scale = target_leg_length / source_leg_length
     //   ⚠️ 不能用 joints[0]：两套资产的"根骨"语义不同 —— FBX 源 joints[0]=Hips（y≈腰高），
     //      Tripo glb joints[0]='Root' 包装层（导出残差，高度≈0）。用骨名才一致。
-    //   单位：两侧各自量法一致 ⇒ 比值自动把单位约掉（FBX 源 cm / 目标 m 都行）。
+    //   单位：无量纲比值（两侧若各自量法一致则单位自动约掉；本仓两侧都是米）。
     //   目的：源走了 d 米，目标（不同身高）走 d×ratio 米 —— "原来两脚站地上，
     //         retarget 后也站在地上"。粗糙但对走路/跑步类模糊动作够用
     //         （业界称 scale adaptation，精确踩点需 IK，见设计文档残余）。
@@ -423,11 +426,15 @@ inline BodyRetargetPlan BuildBodyRetargetPlan(const SkeletonType& target,
     //   所以直接取 joints[0].y 对 glb 会得 0（TPose 假设下这是数据事实，不是 bug）。
     //
     //   改用**按骨名找骨盆**（Hips），两侧同一语义骨 —— 与骨名对位（AlignBonesByName）
-    //   同一套凭据。找不到时退回 joints[0]（单骨链等无骨名的极简骨架）。
+    //   同一套凭据。找不到时（如无骨名的极简测试骨架）退回 joints[0]，**并告警**（不静默）。
     auto pelvis_rest_height = [](const SkeletonType& skel) -> float {
         const int hips = FindJointBySuffix(skel, "Hips");  // 兼容 mixamorig:* 前缀
-        const std::vector<Vec3f> pos = RestWorldPositions(skel);
-        return pos[(hips >= 0) ? static_cast<size_t>(hips) : 0u].y();
+        if (hips < 0) {
+            LOG(WARNING) << "BuildBodyRetargetPlan: 骨架里没有 *Hips 骨名，退回 joints[0]"
+                            "量骨盆高度。若 joints[0] 是零长包装层（如 Tripo glb 的 Root），"
+                            "这个比值会是错的。";
+        }
+        return RestWorldPositions(skel)[(hips >= 0) ? static_cast<size_t>(hips) : 0u].y();
     };
     {
         p.source_leg_length = pelvis_rest_height(p.source);
