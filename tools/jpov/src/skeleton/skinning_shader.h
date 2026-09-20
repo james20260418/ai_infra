@@ -1,28 +1,46 @@
-// JPOV skeleton skinning — 蒙皮顶点/片元着色器 + 渲染入口（M1 静态退化为先调通）
+// JPOV skeleton skinning — 蒙皮顶点/片元着色器 + 渲染入口
 //
 // 目的：把「rest mesh 顶点 (带 JOINTS_0/WEIGHTS_0) 经 SkeletonManager 的 pose atlas
-// 肤色矩阵蒙皮，再走与 object3d PBR 相同的光照」落成可渲染路径。
+// 蒙皮，再走与 object3d PBR 相同的光照」落成可渲染路径。
 //
-// M1（本阶段）目标：**静态退化门** —— 用 bind pose（肤矩阵=I）走真实蒙皮 VS，
-// 输出应与「直画非蒙皮该 rest mesh」几乎一致（diff≈0）。证明「顶点→atlas 肤矩阵→Σw·M·v」
-// 这条链路本身对，之后才是动画（两 pose 插值）。
+// ═══════════════ 蒙皮算法：DQS（对偶四元数）—— 2026-09-18 起 ═══════════════
+// 本 pass 用 **Dual Quaternion Skinning**：atlas 每根骨存一个**对偶四元数**
+//   q̂ = q + ε·t（实部 q = 旋转，对偶部 t = ½·v̂⊗q 编码平移；数学/推导/单测见
+//   geom/math/dual_quat.h + geom/math/dual_quat_test.cc），顶点变换为
+//     v' = DLB( {w_i, q̂_i} ) 作用在 rest 顶点上
+//   其中 DLB（Dual Quaternion Linear Blending，Kavan 2007）=
+//     ① 逐骨两帧插值：NLERP(q̂_a, q̂_b, ratio)（四元数空间插值 + 归一化）
+//     ② 抗对偶：把参与混合的 q̂ 与**参考骨**（权重最大那根）统一到同一半球
+//     ③ 加权求和 Σ w_i·q̂_i，再按 |Σ w_i·q_i| **同除实部与对偶部**归一化
+//     ④ 用该 q̂ 变换顶点（旋转 + 平移）；法线/切线只用其旋转部分
+//   ⇒ 混合结果**仍是刚体变换**，不塌体积、不糖纸（LBS 的核心缺陷）。
 //
-// 设计：
-//   - VS 与 object3d PBR 完整版共用同一套 uniform( uMVP / uModel )与输出 varying：
+// 【保留：改动前的 LBS 实现（线性混合蒙皮），仅作对照/历史，不再执行】
+//   atlas 当时每骨存 4×4「最终肤矩阵」（行主序 4 texel），VS 侧：
+//     mat4 m = LoadBoneMatrixAt(pose_col, bone);          // 4 texel 还原 mat4
+//     sp += w * (m * vec4(aPos, 1.0)).xyz;                // 位置：Σ w·M·v
+//     sn += w * vec3(mat3(m) * aNormal);                  // 法线：Σ w·mat3(M)·n
+//     st += w * vec3(mat3(m) * aTangent);                 // 切线：同上
+//     // 两帧之间：在**矩阵空间**逐列 mix（mix(ma[k], mb[k], ratio)）后蒙皮
+//   问题：Σ w_i·M_i 一般不是旋转（正交性被破坏）⇒ 关节弯折处顶点被“拉向弦”而体积塌陷，
+//   扭转时出糖纸。DQS 换掉的正是这一步（矩阵加权平均 → 刚体变换混合）。
+//
+// 设计（M1 起沿用，未变）：
+//   - VS 与 object3d PBR 完整版共用同一套 uniform( uViewProj / 摆放矩阵 )与输出 varying：
 //     vWorldPos / vWorldNormal / vTexCoord / vWorldTangent —— 因此 **FS 直接复用
 //     kMeshFs3dPBR（同光照），不重写片元**。
-//   - 顶点蒙皮发生在 mesh 局部空间：pos = Σ w_i·(M_i·aPos)，M_i = atlas 该骨最终肤矩阵。
-//     normal / tangent 用同一套肤矩阵 mat3(M_i) 蒙皮（绑定时肤矩阵=I，各 M_i 单位）。
-//   - 蒙皮后再做模型变换 uModel(center/up/front/scale)：世界法线/切线沿用 object3d 的
-//     mat3(transpose(inverse(uModel))) 约定 —— 这样在 bind pose 下，本 VS 的输出与
-//     object3d PBR 完整版**逐位一致**（M_i=I 时 Σ w·aPos = aPos、法线/切线同理），
-//     保证 M1 diff≈0。
-//   - 每骨 4×4 矩阵在 pose atlas 为【行主序 texel】（见 SkeletonManager PutMat4Row：
-//     bone 占 4 连续 texel，texel t 存矩阵第 t 行），故从 texel 还原成 GLSL mat4
-//     （列主序存储）需按「行元素 → mat 列位置」重排（见 LoadBoneMatrix）。
+//   - 顶点蒙皮发生在 mesh 局部空间，蒙皮后再做本实例摆放矩阵 aInstModel(center/up/front/
+//     scale)：世界法线/切线沿用 object3d 的 mat3(transpose(inverse(uModel))) 约定 —— 这样在
+//     bind pose 下（每骨 q̂ = 单位元）本 VS 的输出与 object3d PBR 完整版**逐位一致**，
+//     保证静态 gold 零回归（dual_quat_test 的 BlendOfIdentityBonesIsExactIdentity 是这条的
+//     数学依据）。
+//   - 每骨 2 个 texel（q + t）在 atlas 为**行优先平铺**：flat → (flat % W, flat / W)。
+//     一个 pose 的 texel **可能跨行**（23 骨 = 46 texel 时必然跨），故逐 texel 各自回绕，
+//     与 CPU 烘焙（skeleton_manager.cc PutDualQuatTexels）逐 texel 对齐。
 //
-// M1 只做「单 pose 静态」（可退化成同 pose 或仅一个实例），不铺 instancing ——
-// instancing 与两 pose 插值交给后续。每步独立可测、崩溃面小。
+// ⚠️ 本文件里的两份 VS（主 pass / 阴影 pass）**必须逐字同公式** —— GLSL 没有 #include，
+//   两个 program 各持一份完整源码；PR #104 的教训：主/阴影蒙皮公式一旦分叉，影子就和身体
+//   错位。改其中一处时必须同步改另一处。
 
 #ifndef JPOV_SRC_SKELETON_SKINNING_SHADER_H_
 #define JPOV_SRC_SKELETON_SKINNING_SHADER_H_
@@ -50,10 +68,10 @@ namespace jpov {
 //   loc6 = 第 0 列(vec4)  loc7 = 第 1 列  loc8 = 第 2 列  loc9 = 第 3 列
 //   （列主序，与 BuildModelMatrix 输出一致，见 instance_buffer.h 的布局表）。
 
-// ==================== 蒙皮顶点着色器 ====================
+// ==================== 蒙皮顶点着色器（DQS） ====================
 // 输出与 object3d kMeshVs3dPBRFull 完全一致（vWorldPos/vWorldNormal/vTexCoord/vWorldTangent），
-// 仅把「顶点经 uModel」改为「顶点先经 atlas 肤矩阵蒙皮、再经 uModel」。
-// 因此 FS 端直接复用 kMeshFs3dPBR（同光照），保证 M1 sunny-day 效果与 object3d 一致。
+// 仅把「顶点经 uModel」改为「顶点先经 atlas 对偶四元数蒙皮、再经 uModel」。
+// 因此 FS 端直接复用 kMeshFs3dPBR（同光照），保证 sunny-day 效果与 object3d 一致。
 inline constexpr const char* kSkinnedVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -70,13 +88,14 @@ layout(location = 7) in vec4 aInstCol1;
 layout(location = 8) in vec4 aInstCol2;
 layout(location = 9) in vec4 aInstCol3;
 // per-instance pose 选择（divisor=1）：vec3(pose_col_a, pose_col_b, ratio)。
-//   .x/.y = 本实例 pose_a / pose_b 在 atlas 里的**平坦 texel 起点**
+//   .x/.y = 本实例 pose_a / pose_b 在 atlas 里的**平坦 texel 起点**（= pose_idx * bone_count * 2，
+//           CPU 端算好；每骨占 2 texel）
 //   .z    = pose_a→pose_b 插值权重 [0,1]（静态时为 0，短路不读 pose_b）
 //   与 aInstModel 同理：逐实例差异必须走 attribute，不然整批就退化回 N 次 draw。
 //   ⚠️ 统一 float（而非 ivec2 + IPointer）：IPointer 按**原始整数位**解释，float 的位
 //   会被读成天文数字列 → texelFetch 出界、整批塌成空白（踩过）。
 layout(location = 10) in vec3 aInstPose;
-uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas）
+uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas，每骨 2 texel：实部 q + 对偶部 t）
 uniform int   uBoneCount;      // 该骨架骨数
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
@@ -86,78 +105,128 @@ out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
 
-// 从 atlas 取第 bone 的 4×4 行主序矩阵，转成 GLSL mat4（列主序）。
-// pose texel 起点：调用方给【本 pose 在 atlas 里的平坦 texel 下标】
-//   （= pose_idx * pose_width，pose_width = bone_count*4，CPU 端算好）。**不再乘
-//   uBoneCount*4**：那样把「每 pose 宽 = bone_count*4」写死进 shader，且与 CPU 的
-//   行优先布局假设分叉（历史 bug：两侧对“一行放几个 pose”理解不同 → 取到未上传的黑行）。
-// atlas 是行优先平铺的一整块 texel：flat → (flat % W, flat / W)。一个 pose 的
-//   4*bone_count 个 texel **可能跨行**（23 骨下必然跨），故逐 texel 各自回绕，
-//   与 CPU 烘焙逐 texel 对齐（一行放几个 pose 与取址无关）。
-// x0 = 本 pose 平坦起点 + bone*4；每个 texel=矩阵一行（row-major），行序 r=t+0..
-mat4 LoadBoneMatrixAt(int pose_col, int bone) {
-    int x0 = pose_col + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
-    // texel[t] 存矩阵【第 t 行】：m_{row,col}。GLSL mat4 以列主序存储/构造 →
-    // 我们把「行主序元素」填到对应列/行位置：
-    //   col0 = (m00, m10, m20, m30)
-    //   col1 = (m01, m11, m21, m31) ...
-    return mat4(
-        m00, m10, m20, m30,   // column 0
-        m01, m11, m21, m31,   // column 1
-        m02, m12, m22, m32,   // column 2
-        m03, m13, m23, m33);  // column 3
+// 从 atlas 取第 bone 根骨的**对偶四元数** q̂ = q + ε·t（每骨 2 个连续 texel）。
+//   texel0 = 实部 q(xyzw)（旋转），texel1 = 对偶部 t(xyzw)（t = ½·v̂⊗q，平移编码）
+// 取址：pose_col 是**本 pose 在 atlas 里的平坦 texel 起点**（CPU 端算好 = pose_idx * bone*2）。
+//   **不再乘 uBoneCount**：那样把「每 pose 宽 = bone_count*2」写死进 shader，且与 CPU 的
+//   平铺布局假设分叉（历史 bug：两侧对“一行放几个 pose”理解不同 → 取到未上传的黑行）。
+//   atlas 是行优先平铺的一整块 texel：flat → (flat % W, flat / W)。
+void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
+    int x0 = pose_col + bone * 2;
+    q = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), uPoseRow + (x0 + 0) / int(uAtlasDim.x)), 0);
+    t = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), uPoseRow + (x0 + 1) / int(uAtlasDim.x)), 0);
 }
 
-// 本实例这一帧的骨骼矩阵：在 pose_a / pose_b 两套 JointMatrix 之间**逐骨插值**。
+// 本实例这一帧第 bone 根骨的对偶四元数：在两帧（pose_a / pose_b）之间**在四元数空间**插值。
 //
-// 插值对象（关键，2026-09-16）：插的是 atlas 里的**最终肤矩阵** jointWorld(pose)·inverseBind。
-//   理由：方案甲已把 inverseBind 折进 atlas 行，且本工程 IBM 是**自算派生量**
-//   （joints + bind_rotation），两侧同源一致。矩阵空间 lerp 的语义 = "两帧姿态的线性混合"，
-//   对相邻帧稠密动画足够。若要物理正确的插值，应改在**关节旋转四元数**上 slerp 后重算矩阵
-//   （需 atlas 另存旋转、或 CPU 侧插值后重烘焙）—— 不在本 PR 范围。
+// 为什么不是矩阵 lerp（LBS 时代的做法）：矩阵逐元素线性插值得到的中间态不是旋转，
+//   中间帧同样会缩体积；且大角度相邻帧还可能“绕远路”。改为对偶四元数 NLERP：
+//   逐分量 mix + 归一化，并在符号相反时按**最短路径**翻转（q 与 −q 表示同一旋转，
+//   不翻会插到相反方向去）。
 //
 // ratio <= 0 时**短路**只取 pose_a：静态/单帧场景（既有 gold 全走这条）取址与插值实现前
 //   完全一致（零回归）。
-mat4 LoadBoneMatrix(int bone) {
-    mat4 ma = LoadBoneMatrixAt(int(aInstPose.x), bone);
+void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
+    vec4 qa, ta;
+    LoadDualQuatAt(int(aInstPose.x), bone, qa, ta);
     if (aInstPose.z <= 0.0) {
-        return ma;
+        q = qa;
+        t = ta;
+        return;
     }
-    mat4 mb = LoadBoneMatrixAt(int(aInstPose.y), bone);
-    return mat4(mix(ma[0], mb[0], aInstPose.z),
-                mix(ma[1], mb[1], aInstPose.z),
-                mix(ma[2], mb[2], aInstPose.z),
-                mix(ma[3], mb[3], aInstPose.z));
+    vec4 qb, tb;
+    LoadDualQuatAt(int(aInstPose.y), bone, qb, tb);
+    // 最短路径：dot < 0 ⇒ q_b 在另一半球，整体取负（(q,t) 同取负 = 同一个刚体变换）。
+    if (dot(qa, qb) < 0.0) {
+        qb = -qb;
+        tb = -tb;
+    }
+    float r = aInstPose.z;
+    vec4 qm = mix(qa, qb, r);
+    vec4 tm = mix(ta, tb, r);
+    // 归一化（NLERP）：实部与对偶部**同除 |q|**（只除实部会让平移尺度错，见 dual_quat.h）。
+    // 病态保护与本工程 CPU 侧 DualQuatNormalized 一致：|q| 近零时不除（原样返回）。
+    // 注：翻符号后 dot ≥ 0 ⇒ |mix|² ≥ (1−r)²+r² ≥ 0.5，实际到不了近零。
+    float n = length(qm);
+    if (n > 1e-8) {
+        qm = qm / n;
+        tm = tm / n;
+    }
+    q = qm;
+    t = tm;
 }
+
+// 对偶四元数变换点（q/t 视为已归一）：
+//   p' = p + 2·q.w·(q.xyz × p) + 2·(q.xyz × (q.xyz × p))      ← 旋转（RotateVector 同式）
+//        + 2·(q.w·t.xyz − t.w·q.xyz + q.xyz × t.xyz)           ← 平移（= 2·vec(t⊗q*)）
+// 该展开式与 geom/math/dual_quat.h 的 DualQuatTransformPoint 等价，后者由
+//   dual_quat_test.cc 的 ShaderFormulaMatchesRotationPlusTranslation 逐位钉住 —— 改公式时
+//   同步改那个对照函数与这里。
+vec3 DualQuatTransformPoint(vec4 q, vec4 t, vec3 p) {
+    vec3 rot = p + 2.0 * q.w * cross(q.xyz, p) + 2.0 * cross(q.xyz, cross(q.xyz, p));
+    vec3 tra = 2.0 * (q.w * t.xyz - t.w * q.xyz + cross(q.xyz, t.xyz));
+    return rot + tra;
+}
+
+// 只用**旋转部分**转方向（法线/切线）：平移对方向无影响。
+vec3 DualQuatRotateVector(vec4 q, vec3 v) {
+    return v + 2.0 * q.w * cross(q.xyz, v) + 2.0 * cross(q.xyz, cross(q.xyz, v));
+}
+
 void main() {
-    // 4-bone 蒙皮：mesh 局部空间内 pos/normal/tangent = Σ w_i · M_i · (顶点)。
-    vec3 sp = vec3(0.0);
-    vec3 sn = vec3(0.0);
-    vec3 st = vec3(0.0);
+    // ── ① 逐骨取「本帧」对偶四元数（两帧插值在 LoadBoneDualQuat 内完成）──
+    vec4 qs[4];
+    vec4 ts[4];
+    float ws[4];
+    int ref = 0;          // 参考骨下标（抗对偶的符号基准）= 权重最大者
+    float ref_w = 0.0;    // 参考骨的权重（用严格 > 比较 ⇒ 并列时取小下标，确定）
+    float wsum = 0.0;
     for (int i = 0; i < 4; ++i) {
+        qs[i] = vec4(0.0, 0.0, 0.0, 1.0);
+        ts[i] = vec4(0.0);
+        ws[i] = 0.0;
         float w = aWeight[i];
-        if (w <= 0.0) continue;
-        mat4 m = LoadBoneMatrix(aJoint[i]);
-        sp += w * (m * vec4(aPos, 1.0)).xyz;
-        sn += w * vec3(mat3(m) * aNormal);
-        st += w * vec3(mat3(m) * aTangent);
+        if (w <= 0.0) {
+            continue;
+        }
+        LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
+        ws[i] = w;
+        wsum += w;
+        if (w > ref_w) {
+            ref_w = w;
+            ref = i;
+        }
     }
+
+    // ── ② 抗对偶 + ③ 加权求和 ──
+    // q̂ 与 −q̂ 是同一个刚体变换，但直接相加会互相抵消（得到垃圾）⇒ 逐骨先与参考骨统一半球。
+    // 参考取**权重最大的骨**（逐顶点确定，与姿态/时间无关）；并列时取小下标（见上面严格 >）。
+    vec4 q_ref = qs[ref];
+    vec4 q_sum = vec4(0.0);
+    vec4 t_sum = vec4(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (ws[i] <= 0.0) {
+            continue;
+        }
+        float s = (dot(qs[i], q_ref) < 0.0) ? -1.0 : 1.0;
+        q_sum += s * ws[i] * qs[i];
+        t_sum += s * ws[i] * ts[i];
+    }
+
+    // ── ④ 归一化并变换顶点 ──
+    // 退化情形（顶点没有任何有效权重，或符号统一后仍完全抵消）→ 取**单位元**，即顶点保持
+    // rest 不动。这与 CPU 真值实现（test/skeleton/jpov_skeleton_gold_common.h 里 wsum<=0
+    // 分支）逐项一致；改动前的 LBS 版本在这里会把顶点塌到原点（静默错），顺手对齐。
+    vec4 dq_q = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 dq_t = vec4(0.0);
+    float n_sum = length(q_sum);
+    if (wsum > 0.0 && n_sum > 1e-8) {
+        dq_q = q_sum / n_sum;
+        dq_t = t_sum / n_sum;
+    }
+    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, aPos);
+    vec3 sn = DualQuatRotateVector(dq_q, aNormal);
+    vec3 st = DualQuatRotateVector(dq_q, aTangent);
 
     // 本实例摆放矩阵（per-instance attribute，每实例不同；4 列拼回 mat4）。
     mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
@@ -175,7 +244,7 @@ void main() {
 // FS 复用 object3d PBR 片元（同光照）。本模块不重复定义；绘制时直接以
 // {kSkinnedVs, kMeshFs3dPBR} 注册 program（见 object3d_renderer.h 导出）。
 
-// ==================== 蒙皮阴影顶点着色器 ====================
+// ==================== 蒙皮阴影顶点着色器（DQS） ====================
 // 阴影 pass 专用：在网格局部空间蒙皮(同 kSkinnedVs)后, 用光空间 VP 裁剪 + 输出线性深度
 // （与 object3d 的 kShadowVs 语义一致：uShadowViewProj=光VP 用于 gl_Position 近远裁剪；
 //   uShadowDepthViewProj=DepthVP 输出的 vShadowDepth 为相对主视锥中心的线性深度, w=1）。
@@ -183,6 +252,10 @@ void main() {
 //
 // 与主 pass 同构：摆放矩阵走 per-instance attribute（loc6..9），光空间 VP 走 uniform。
 // host 侧 uViewProj ← uShadowViewProj。
+//
+// ⚠️ 蒙皮部分（LoadDualQuatAt / LoadBoneDualQuat / DualQuatTransformPoint）与 kSkinnedVs
+//   **逐字同公式**：主/阴影两 pass 一旦分叉，影子与身体就会错位（PR #104 的教训）。
+//   阴影只需位置（不需要法线/切线）。
 inline constexpr const char* kSkinnedShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -206,48 +279,91 @@ uniform int   uPoseRow;
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 out float vShadowDepth;
 
-mat4 LoadBoneMatrixAt(int pose_col, int bone) {
-    int x0 = pose_col + bone * 4;
-    float m00 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).r;
-    float m01 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).g;
-    float m02 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).b;
-    float m03 = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), (uPoseRow + (x0 + 0) / int(uAtlasDim.x))), 0).a;
-    float m10 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).r;
-    float m11 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).g;
-    float m12 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).b;
-    float m13 = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), (uPoseRow + (x0 + 1) / int(uAtlasDim.x))), 0).a;
-    float m20 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).r;
-    float m21 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).g;
-    float m22 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).b;
-    float m23 = texelFetch(uPoseAtlas, ivec2((x0 + 2) % int(uAtlasDim.x), (uPoseRow + (x0 + 2) / int(uAtlasDim.x))), 0).a;
-    float m30 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).r;
-    float m31 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).g;
-    float m32 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).b;
-    float m33 = texelFetch(uPoseAtlas, ivec2((x0 + 3) % int(uAtlasDim.x), (uPoseRow + (x0 + 3) / int(uAtlasDim.x))), 0).a;
-    return mat4(m00,m10,m20,m30, m01,m11,m21,m31, m02,m12,m22,m32, m03,m13,m23,m33);
+// 同主 pass：每骨 2 texel（实部 q + 对偶部 t）。
+void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
+    int x0 = pose_col + bone * 2;
+    q = texelFetch(uPoseAtlas, ivec2((x0 + 0) % int(uAtlasDim.x), uPoseRow + (x0 + 0) / int(uAtlasDim.x)), 0);
+    t = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), uPoseRow + (x0 + 1) / int(uAtlasDim.x)), 0);
 }
 
-// 与主 pass **完全一致**的逐骨插值（否则影子与身体错位）。ratio<=0 短路取 pose_a。
-mat4 LoadBoneMatrix(int bone) {
-    mat4 ma = LoadBoneMatrixAt(int(aInstPose.x), bone);
+// 同主 pass：两帧 NLERP（最短路径 + 归一化），ratio<=0 短路取 pose_a。
+void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
+    vec4 qa, ta;
+    LoadDualQuatAt(int(aInstPose.x), bone, qa, ta);
     if (aInstPose.z <= 0.0) {
-        return ma;
+        q = qa;
+        t = ta;
+        return;
     }
-    mat4 mb = LoadBoneMatrixAt(int(aInstPose.y), bone);
-    return mat4(mix(ma[0], mb[0], aInstPose.z),
-                mix(ma[1], mb[1], aInstPose.z),
-                mix(ma[2], mb[2], aInstPose.z),
-                mix(ma[3], mb[3], aInstPose.z));
+    vec4 qb, tb;
+    LoadDualQuatAt(int(aInstPose.y), bone, qb, tb);
+    if (dot(qa, qb) < 0.0) {
+        qb = -qb;
+        tb = -tb;
+    }
+    float r = aInstPose.z;
+    vec4 qm = mix(qa, qb, r);
+    vec4 tm = mix(ta, tb, r);
+    float n = length(qm);
+    if (n > 1e-8) {
+        qm = qm / n;
+        tm = tm / n;
+    }
+    q = qm;
+    t = tm;
+}
+
+// 同主 pass：对偶四元数变换点。
+vec3 DualQuatTransformPoint(vec4 q, vec4 t, vec3 p) {
+    vec3 rot = p + 2.0 * q.w * cross(q.xyz, p) + 2.0 * cross(q.xyz, cross(q.xyz, p));
+    vec3 tra = 2.0 * (q.w * t.xyz - t.w * q.xyz + cross(q.xyz, t.xyz));
+    return rot + tra;
 }
 
 void main() {
-    vec3 sp = vec3(0.0);
+    // 蒙皮：与主 pass **完全一致**的流程（参考骨 = 权重最大者；抗对偶；加权求和；归一化）。
+    vec4 qs[4];
+    vec4 ts[4];
+    float ws[4];
+    int ref = 0;
+    float ref_w = 0.0;
+    float wsum = 0.0;
     for (int i = 0; i < 4; ++i) {
+        qs[i] = vec4(0.0, 0.0, 0.0, 1.0);
+        ts[i] = vec4(0.0);
+        ws[i] = 0.0;
         float w = aWeight[i];
-        if (w <= 0.0) continue;
-        mat4 m = LoadBoneMatrix(aJoint[i]);
-        sp += w * (m * vec4(aPos, 1.0)).xyz;
+        if (w <= 0.0) {
+            continue;
+        }
+        LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
+        ws[i] = w;
+        wsum += w;
+        if (w > ref_w) {
+            ref_w = w;
+            ref = i;
+        }
     }
+    vec4 q_ref = qs[ref];
+    vec4 q_sum = vec4(0.0);
+    vec4 t_sum = vec4(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (ws[i] <= 0.0) {
+            continue;
+        }
+        float s = (dot(qs[i], q_ref) < 0.0) ? -1.0 : 1.0;
+        q_sum += s * ws[i] * qs[i];
+        t_sum += s * ws[i] * ts[i];
+    }
+    vec4 dq_q = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 dq_t = vec4(0.0);
+    float n_sum = length(q_sum);
+    if (wsum > 0.0 && n_sum > 1e-8) {
+        dq_q = q_sum / n_sum;
+        dq_t = t_sum / n_sum;
+    }
+    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, aPos);
+
     // 本实例摆放矩阵（per-instance attribute，同主 pass）。
     mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     // 光空间裁剪：先经本实例摆放，再乘光空间 VP（model 不再入 VP，与主 pass 对称）。

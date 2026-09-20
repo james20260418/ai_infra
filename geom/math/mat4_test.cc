@@ -186,5 +186,34 @@ TEST(Mat4Test, JointLocalRestIsTranslateThenRotate) {
     ExpectVec3Near(Mat4TranslationOf(local), offset);
 }
 
+// ── 旋转矩阵 → 四元数（DQS 需要把己算好的刚体矩阵重新表达成旋转+平移）──
+
+TEST(Mat4Test, ToQuaternionInvertsRotation) {
+    // 覆盖 Shepperd 的四个分支（trace>0 / x / y / z 主导）与大于 180° 的角。
+    const Vec3<float> axes[4] = {Vec3<float>(1.0f, 0.0f, 0.0f),
+                                 Vec3<float>(0.0f, 1.0f, 0.0f),
+                                 Vec3<float>(0.0f, 0.0f, 1.0f),
+                                 Vec3<float>(1.0f, 2.0f, -3.0f)};
+    const float degs[4] = {10.0f, 100.0f, 179.0f, 250.0f};
+    for (int i = 0; i < 4; ++i) {
+        const Quaternion<float> q = Quaternion<float>::FromAxisAngle(
+            axes[i].Unit(), degs[i] * kPi / 180.0f);
+        const Quaternion<float> back = Mat4ToQuaternion(Mat4Rotation(q));
+        // 真正要比的是**矩阵**（q 与 −q 同一旋转，符号不参与几何）：
+        ExpectMat4Near(Mat4Rotation(back), Mat4Rotation(q));
+    }
+}
+
+TEST(Mat4Test, ToQuaternionPinsSignToWNonNegative) {
+    // 250° 绕 Z 的原始四元数 w = cos(125°) < 0；反解必须固定到 w ≥ 0 那一支
+    // （同一姿态每次烘焙得到同一符号 ⇒ atlas 内容可复现）。
+    const Quaternion<float> q = Quaternion<float>::FromAxisAngle(
+        Vec3<float>(0.0f, 0.0f, 1.0f), 250.0f * kPi / 180.0f);
+    EXPECT_LT(q.w, 0.0f) << "前置：这个角度构造出的四元数 w 应为负";
+    const Quaternion<float> back = Mat4ToQuaternion(Mat4Rotation(q));
+    EXPECT_GE(back.w, 0.0f);
+    ExpectMat4Near(Mat4Rotation(back), Mat4Rotation(q));
+}
+
 }  // namespace math
 }  // namespace geom

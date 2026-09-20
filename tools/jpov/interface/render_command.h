@@ -979,8 +979,9 @@ struct Object3DCommand {
 //
 // 一批「同一种骨架 + 同 rest mesh」的实例，共用一份蒙皮几何 —— 对应架构文档
 // docs/jpov_crowd_instancing_arch.md §6.2-B 骨骼动画纹理：把若干 pose(单帧静态位姿)解算成
-// 每骨架每关节 JointMatrix 后平铺进一张 RGBA **pose atlas**，实例送 {pose_a, pose_b, ratio}，
-// 蒙皮 VS 查这两个 pose 逐骨插值 + 保留 4-bone 蒙皮（顶点 4-bone 权重来自 VBO loc3/4，见
+// 每骨架每关节**对偶四元数**（蒙皮变换的实部 q + 对偶部 t，见 geom/math/dual_quat.h）后平铺
+// 进一张 RGBA **pose atlas**，实例送 {pose_a, pose_b, ratio}，
+// 蒙皮 VS 取这两个 pose 在四元数空间插值 + 保留 4-bone 蒙皮（顶点 4-bone 权重来自 VBO loc3/4，见
 // gpumesh.h）。一命令 = 一次 instanced draw（千人压 draw-call，是本子系统的核心诉求）。
 //
 // 资源边界：CPU 侧描述在 interface/skeleton_types.h（SkeletonType / SkeletonPose /
@@ -1424,7 +1425,8 @@ struct RenderCommandList {
     // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
     // TODO(2026-09-06): 首个实现 = 静态蒙皮(S0 零动画退化门)：某实例 pose_a==pose_b 时等价于
     //   只查一个 pose（不插值）把 rest 顶点蒙过去,是现有“不带蒙皮 VS”的自然扩展。真正的
-    //   pose atlas 查表逐骨插值 + instanced divisor 上传随骨骼动画纹理 pass 一并落地。
+    //   pose atlas 查表 + 两帧对偶四元数插值 + instanced divisor 上传已落地（见
+    //   src/skeleton/skinning_shader.h）。
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,

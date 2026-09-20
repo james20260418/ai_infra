@@ -17,6 +17,8 @@
 //     故非 bind 帧用「**形状合理性**」门禁：蒙皮人像必须是一个连通、无碎片、无爆炸的
 //    人形（前景像素面积、包围盒纵横比、连通块数都在合理范围）——取错骨会塌陷/炸开，
 //     这些量会立刻越界。
+//   · “CPU 真值”自 2026-09-18 起 = **DQS**（对偶四元数混合），与蒙皮 VS 逐条同公式；
+//     改动前的 LBS 实现在测试里保留为对照（见“门禁零”）。
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -177,6 +179,40 @@ int main() {
     const int W = jpov_skeleton_gold::kOutW;
     const int HW = W / 2;  // 左半屏宽（左 = 蒙皮人所在）
 
+    // ============ 门禁零：DQS 与旧 LBS 必须**真的不同**（纯 CPU，不渲染）============
+    // 同一批 pose 下，两种混合方式得到的顶点位置必须明显不同。若几乎相同，说明“换成 DQS”
+    //   这件事实际没生效（例如烘焙/VS 又退回矩阵路径，或权重与符号处理把两者算成了同一个
+    //   东西）—— 这条是本次改动的“真换了”守卫，成本几毫秒。
+    // （LBS 实现在本工程已不作为渲染路径，只作对照保留：见 SkinMeshOnCpuForTestLinearBlend。）
+    {
+        double max_d = 0.0;
+        double sum_d = 0.0;
+        size_t n_v = 0;
+        for (int k = 1; k < npose; ++k) {
+            const jpov::MeshData dqs_mesh = jpov_skeleton_gold::SkinMeshOnCpuForTest(
+                app.raw_skel_, app.poses_[static_cast<size_t>(k)], app.rest_mesh_);
+            const jpov::MeshData lbs_mesh =
+                jpov_skeleton_gold::SkinMeshOnCpuForTestLinearBlend(
+                    app.raw_skel_, app.poses_[static_cast<size_t>(k)], app.rest_mesh_);
+            CHECK_EQ(dqs_mesh.positions.size(), lbs_mesh.positions.size());
+            for (size_t i = 0; i < dqs_mesh.positions.size(); ++i) {
+                const jpov::Vec3f d = dqs_mesh.positions[i] - lbs_mesh.positions[i];
+                const double len = std::sqrt(d.x() * d.x() + d.y() * d.y() + d.z() * d.z());
+                max_d = std::max(max_d, len);
+                sum_d += len;
+                ++n_v;
+            }
+        }
+        const double mean_d = (n_v > 0) ? sum_d / static_cast<double>(n_v) : 0.0;
+        LOG(INFO) << "门禁零 DQS vs LBS（纯 CPU，" << (npose - 1) << " 帧）顶点偏差 平均="
+                  << mean_d << " 最大=" << max_d;
+        if (max_d < 1e-3) {
+            LOG(ERROR) << "门禁 失败: DQS 与 LBS 结果几乎相同（max=" << max_d
+                       << "）—— 本次改动（矩阵混合 → 对偶四元数混合）实际未生效？";
+            ++fail;
+        }
+    }
+
     // ============ 门禁：每个 pose 的「GPU 蒙皮」必须与「CPU 真值蒙皮」逐像素同形 ============
     // 覆盖 atlas 全部行（25 帧 > 一行 22）。左半屏放同一位置的人像，只切换渲染路径，
     // 故两次渲染可直接比像素。同时报 mask 不一致率（只看几何）与平均通道差（含着色）。
@@ -215,7 +251,8 @@ int main() {
 
     // ============ 门禁二：GPU 双帧插值（VS lerp）必须与 CPU 真值同形 ============
     // 取相邻两帧 (k, k+1) 在 ratio∈{0.25,0.75} 下插值：GPU 走 SkeletonManager 的 atlas 双 pose 取址 +
-    //   shader 矩阵 lerp；CPU 按**同一公式**（矩阵空间逐元素 lerp 后蒙皮）算真值。
+    //   shader 逐骨 NLERP（对偶四元数空间）；CPU 按**同一公式**（NLERP + 参考骨抗对偶 +
+    //   加权归一化）算真值。
     //   两者必须几何同形 —— 这是「插值真的按姿态在动、且位置正确」的硬证据。
     //
     // 同时统计前景占比做「插值合理性」门禁：中间帧的人像面积必须落在两端点之间（含裕量），

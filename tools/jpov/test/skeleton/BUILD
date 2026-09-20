@@ -20,6 +20,7 @@ cc_binary(
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src/skeleton:skeleton",
+        "//geom/math:dual_quat",
         "//tools/common:utils",
         "//tools/jpov/test:test_utils",
     ],
@@ -44,6 +45,7 @@ cc_test(
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src/skeleton:skeleton",
+        "//geom/math:dual_quat",
         "//tools/common:utils",
         "//third_party/stb:stb_image",
         "//tools/jpov/test:test_utils",
@@ -80,6 +82,7 @@ cc_test(
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src/skeleton:skeleton",
+        "//geom/math:dual_quat",
         "//tools/common:utils",
         "//third_party/stb:stb_image",
         "//tools/jpov/test:test_utils",
@@ -194,6 +197,40 @@ cc_test(
         "//third_party/stb:stb_image",
         "//tools/jpov/test:test_utils",
         "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# ============================================================================
+# DQS 蒙皮物理性质（**纯 CPU**，不需 GL/DISPLAY）—— 肘部弯折的“保体积”量化
+#
+# multipose 测试证明「GPU 的 DQS 与 CPU 真值同形」（实现对不对）；
+# 本测试证明「为什么要换 DQS」：同一混合权重下，DQS 是刚体（保距/保体积），
+# LBS 是矩阵平均（90° 对分处压到 cos45°≈0.707 倍）。最小 2 骨骨架 + 手写权重，
+# 不依赖资产，毫秒级。
+# ============================================================================
+
+cc_test(
+    name = "jpov_dqs_skinning_test",
+    srcs = [
+        "jpov_dqs_skinning_test.cc",
+        "jpov_skeleton_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//geom/math:dual_quat",
+        "//tools/jpov/test:test_utils",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,

@@ -13,6 +13,7 @@
 
 #include "glog/logging.h"
 
+#include "geom/math/dual_quat.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/src/gltf_loader.h"
@@ -150,8 +151,10 @@ inline std::vector<jpov::SkeletonPose> MakeMultiPoses(int bone_count) {
     return poses;
 }
 
-// CPU 端「真值」蒙皮：按与 SkeletonManager/shader 完全相同的公式，把 rest 顶点算成该 pose
-//   下的骨架空间坐标，产出新 MeshData（只改 positions/normals，拓扑/UV/joints 原样保留）。
+// ── CPU 端「真值」蒙皮（DQS）—— 与 skinning_shader.h 逐条同公式 ──
+//
+// 用途：给「GPU 蒙皮/双帧插值」做逐像素真值比对（test/skeleton/jpov_skinned_multipose_test.cc）。
+//   产出新 MeshData（只改 positions/normals/tangents，拓扑/UV/joints 原样保留）。
 //
 // 坐标系（2026-09-16 起）：loader **不做任何坐标旋转**（PR #103），网格顶点与骨架都是资产
 //   原坐标系、**天然同帧** ⇒ 这里直接相乘，不需要任何映射。
@@ -161,16 +164,16 @@ inline std::vector<jpov::SkeletonPose> MakeMultiPoses(int bone_count) {
 // 公式（与 skeleton_manager.cc 烘焙 + skinning_shader.h 蒙皮一致）：
 //   local(j) = T(rest_offset[j]) · R(bind_rotation[j]) · R(pose.joint_rotation[j])
 //   jw(j)    = (根 ? I : jw(parent)) · local(j)
-//   skinM(j) = jw(j) · inverseBind(j)      ← 方案甲折入
-//   v'       = Σ_i w_i · skinM(j_i) · v    （4-bone）
-// 双 pose 版本与 skinning_shader.h 的 LoadBoneMatrix **完全同公式** —— 先在
-//   **矩阵空间**对两套最终肤矩阵逐骨 lerp（不是对关节旋转 slerp），再蒙皮。
-//   用来给「GPU 双帧插值」做逐像素真值比对（ratio=0/1 时退化为单 pose）。
-inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
-                                           const jpov::SkeletonPose& pose_a,
-                                           const jpov::SkeletonPose& pose_b,
-                                           float ratio,
-                                           const jpov::MeshData& rest) {
+//   skinM(j) = jw(j) · inverseBind(j)                    ← 方案甲折入（刚体）
+//   q̂(j)     = DualQuatFromRigidMatrix(skinM(j))
+//   双帧： q̂(j) = NLERP(q̂_a(j), q̂_b(j), ratio)           ← 四元数空间插值（不是矩阵 lerp）
+//   顶点： q̂ = DLB({w_i, q̂(j_i)})                        ← 参考骨 = 权重最大者；先统一符号再求和
+//          v' = DualQuatTransformPoint(q̂, v)
+//          n' = DualQuatRotateVector(q̂, n)（只用旋转部分；刚体混合保长，故无需再归一）
+// 与旧版（LBS，矩阵空间 lerp + Σ w·M·v）的差别就在这里；旧版仍保留在
+//   SkinMeshOnCpuForTestLinearBlend 作为对照（见下）。
+inline std::vector<geom::math::Mat4> SkinMatricesOnCpuForTest(
+    const jpov::SkeletonType& type, const jpov::SkeletonPose& pose) {
     using geom::math::Mat4;
     type.Validate();
     const int bone = type.bone_count();
@@ -184,33 +187,117 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
         }
     }
 
-    // 单 pose 的最终肤矩阵：local(j) = T(rest)·R(bind)·R(pose_rot)，沿树复合 × inverseBind。
-    auto skin_matrices = [&](const jpov::SkeletonPose& pose) {
-        std::vector<Mat4> jw(bone), sm(bone);
-        for (int j = 0; j < bone; ++j) {
-            const geom::Quaternion<float> bind =
-                type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
-                                           : type.bind_rotation[j];
-            const geom::Quaternion<float> pr =
-                pose.joint_rotation.size() > static_cast<size_t>(j)
-                    ? pose.joint_rotation[j]
-                    : geom::Quaternion<float>::Identity();
-            const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
-            jw[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
-                        ? local
-                        : geom::math::Mat4Mul(
-                              jw[static_cast<size_t>(type.joints[j].parent)], local);
-            sm[j] = geom::math::Mat4Mul(jw[j], inv[j]);
-        }
-        return sm;
-    };
+    std::vector<Mat4> jw(bone), sm(bone);
+    for (int j = 0; j < bone; ++j) {
+        const geom::Quaternion<float> bind =
+            type.bind_rotation.empty() ? geom::Quaternion<float>::Identity()
+                                       : type.bind_rotation[j];
+        const geom::Quaternion<float> pr =
+            pose.joint_rotation.size() > static_cast<size_t>(j)
+                ? pose.joint_rotation[j]
+                : geom::Quaternion<float>::Identity();
+        const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
+        jw[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
+                    ? local
+                    : geom::math::Mat4Mul(
+                          jw[static_cast<size_t>(type.joints[j].parent)], local);
+        sm[j] = geom::math::Mat4Mul(jw[j], inv[j]);
+    }
+    return sm;
+}
 
-    std::vector<Mat4> skin_m = skin_matrices(pose_a);
+// CPU 端真值蒙皮（**DQS**）：与 skinning_shader.h 的
+//   LoadBoneDualQuat（两帧 NLERP）+ 参考骨抗对偶 + 加权归一 + DualQuatTransformPoint 同公式。
+// ratio <= 0 退化为单 pose_a（与 shader 的短路一致）。
+inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
+                                           const jpov::SkeletonPose& pose_a,
+                                           const jpov::SkeletonPose& pose_b,
+                                           float ratio,
+                                           const jpov::MeshData& rest) {
+    using geom::math::DualQuat;
+    using geom::math::Mat4;
+    type.Validate();
+    const int bone = type.bone_count();
+    CHECK_GT(bone, 0);
+
+    // 每骨的「本帧」对偶四元数（两帧插值在四元数空间做）。
+    const std::vector<Mat4> skin_a = SkinMatricesOnCpuForTest(type, pose_a);
+    std::vector<DualQuat> dq(bone);
+    if (ratio <= 0.0f) {
+        for (int j = 0; j < bone; ++j) {
+            dq[j] = geom::math::DualQuatFromRigidMatrix(skin_a[static_cast<size_t>(j)]);
+        }
+    } else {
+        const std::vector<Mat4> skin_b = SkinMatricesOnCpuForTest(type, pose_b);
+        for (int j = 0; j < bone; ++j) {
+            dq[j] = geom::math::DualQuatLerp(
+                geom::math::DualQuatFromRigidMatrix(skin_a[static_cast<size_t>(j)]),
+                geom::math::DualQuatFromRigidMatrix(skin_b[static_cast<size_t>(j)]), ratio);
+        }
+    }
+
+    jpov::MeshData out = rest;
+    CHECK_EQ(rest.joint_indices.size(), rest.positions.size());
+    CHECK_EQ(rest.joint_weights.size(), rest.positions.size());
+    for (size_t i = 0; i < rest.positions.size(); ++i) {
+        // ① 收集本顶点参与的骨（保持 shader 的槽位顺序）+ 挑参考骨（权重最大者，
+        //    比较用严格 > ⇒ 并列取小（槽位）下标，与 shader 逐位一致）。
+        //    值拷贝（8 float）——与 shader 里逐槽位存 q/t 的数组对应，避免在热循环里指来指去。
+        DualQuat dqs[4];
+        float ws[4];
+        int count = 0;
+        int ref = 0;
+        float ref_w = 0.0f;
+        for (int k = 0; k < 4; ++k) {
+            const float w = rest.joint_weights[i][static_cast<size_t>(k)];
+            if (w <= 0.0f) {
+                continue;
+            }
+            const int j = rest.joint_indices[i][static_cast<size_t>(k)];
+            CHECK(j >= 0 && j < bone) << "CPU 蒙皮: joint 下标越界 " << j;
+            dqs[count] = dq[static_cast<size_t>(j)];
+            ws[count] = w;
+            if (w > ref_w) {
+                ref_w = w;
+                ref = count;
+            }
+            ++count;
+        }
+        // ② 参考骨抗对偶 + 加权求和 + 归一化（count==0 = 顶点无有效权重 → 单位元 = 保持 rest，
+        //    与 shader 的 wsum<=0 分支、旧版 CPU 真值的 wsum<=0 分支三者一致）。
+        const DualQuat blended =
+            (count > 0) ? geom::math::DualQuatBlendWithReference(dqs, ws, count, ref)
+                        : geom::math::DualQuatIdentity();
+        // ③ 变换：位置用旋转+平移；法线/切线只用旋转（刚体混合保长，不需再归一化）。
+        out.positions[i] = geom::math::DualQuatTransformPoint(blended, rest.positions[i]);
+        if (!rest.normals.empty()) {
+            out.normals[i] = geom::math::DualQuatRotateVector(blended, rest.normals[i]);
+        }
+        if (!rest.tangents.empty()) {
+            out.tangents[i] = geom::math::DualQuatRotateVector(blended, rest.tangents[i]);
+        }
+    }
+    return out;
+}
+
+// 【对照 / 历史】CPU 端 LBS 真值蒙皮（**改动前的算法**，保留用于 A/B 与回归守卫）：
+//   两帧在**矩阵空间**逐元素 lerp，再 v' = Σ w·skinM·v、n' = Σ w·mat3(skinM)·n。
+//   保留理由：① multipose 测试用它做“DQS 真的换掉了混合方式”的差异守卫；
+//            ② 日后出问题时能立刻分清是“表示换错”还是“本身另有问题”。
+//   ⚠️ 测试里的“真值”是 SkinMeshOnCpuForTest（DQS），本函数只作对照。
+inline jpov::MeshData SkinMeshOnCpuForTestLinearBlend(const jpov::SkeletonType& type,
+                                                      const jpov::SkeletonPose& pose_a,
+                                                      const jpov::SkeletonPose& pose_b,
+                                                      float ratio,
+                                                      const jpov::MeshData& rest) {
+    using geom::math::Mat4;
+    const int bone = type.bone_count();
+    std::vector<Mat4> skin_m = SkinMatricesOnCpuForTest(type, pose_a);
     if (ratio > 0.0f) {
-        const std::vector<Mat4> mb = skin_matrices(pose_b);
+        const std::vector<Mat4> mb = SkinMatricesOnCpuForTest(type, pose_b);
         for (int j = 0; j < bone; ++j) {
             for (int k = 0; k < 16; ++k) {
-                // 逐元素 lerp，与 shader 的 mix(mat4 各列) 完全等价（GLSL 矩阵逐分量混）。
+                // 逐元素 lerp（旧的 shader 就是 mix 矩阵各列）。
                 skin_m[j].m[k] = skin_m[j].m[k] + ratio * (mb[j].m[k] - skin_m[j].m[k]);
             }
         }
@@ -233,7 +320,9 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
         const jpov::Vec3f vg = rest.positions[i];
         const jpov::Vec3f ng =
             rest.normals.empty() ? jpov::Vec3f{0, 0, 0} : rest.normals[i];
-        jpov::Vec3f sp{0, 0, 0}, sn{0, 0, 0};
+        const jpov::Vec3f tg =
+            rest.tangents.empty() ? jpov::Vec3f{0, 0, 0} : rest.tangents[i];
+        jpov::Vec3f sp{0, 0, 0}, sn{0, 0, 0}, st{0, 0, 0};
         float wsum = 0.0f;
         for (int k = 0; k < 4; ++k) {
             const float w = rest.joint_weights[i][static_cast<size_t>(k)];
@@ -245,6 +334,9 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
             sp = sp + xf_pt(skin_m[static_cast<size_t>(j)], vg) * w;
             if (!rest.normals.empty()) {
                 sn = sn + xf_dir(skin_m[static_cast<size_t>(j)], ng) * w;
+            }
+            if (!rest.tangents.empty()) {
+                st = st + xf_dir(skin_m[static_cast<size_t>(j)], tg) * w;
             }
             wsum += w;
         }
@@ -258,8 +350,21 @@ inline jpov::MeshData SkinMeshOnCpuForTest(const jpov::SkeletonType& type,
                                  ? jpov::Vec3f(sn.x() / n, sn.y() / n, sn.z() / n)
                                  : rest.normals[i];
         }
+        if (!rest.tangents.empty()) {
+            const float t = std::sqrt(st.x() * st.x() + st.y() * st.y() + st.z() * st.z());
+            out.tangents[i] = (t > 1e-8f)
+                                  ? jpov::Vec3f(st.x() / t, st.y() / t, st.z() / t)
+                                  : rest.tangents[i];
+        }
     }
     return out;
+}
+
+// 单 pose 便捷入口（pose_a == pose_b、ratio=0）。
+inline jpov::MeshData SkinMeshOnCpuForTestLinearBlend(const jpov::SkeletonType& type,
+                                                      const jpov::SkeletonPose& pose,
+                                                      const jpov::MeshData& rest) {
+    return SkinMeshOnCpuForTestLinearBlend(type, pose, pose, 0.0f, rest);
 }
 
 // 单 pose 便捷入口（pose_a == pose_b、ratio=0 ⇒ 与 shader 的 uRatio<=0 短路等价）。

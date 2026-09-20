@@ -19,6 +19,7 @@ cc_library(
     deps = [
         "//tools/jpov/interface:skeleton_types",
         "//geom/common:quaternion",
+        "//geom/math:dual_quat",
         "//geom/math:mat4",
         "@glog_static//:glog",
     ] + select({

@@ -40,14 +40,21 @@
 
 ## 2. Pose Atlas 布局(定稿,勿改)
 
+> **2026-09-18 修订**：每骨改存**对偶四元数**（实部 q + 对偶部 t）而非 4×4 矩阵 —— 蒙皮混合
+> 从 LBS 换成 DQS（详见 `docs/jpov_dqs_skinning_design.md`）。所以本节的“每骨 4 texel / pose 宽
+> 4×bone / 22 pose 每行 / 容量 45,590”全部翻倍减半为：**每骨 2 texel / pose 宽 2×bone /
+> 44 pose 每行 / 容量 ≈91,180**，纹理内存 64 MB → 32 MB。其余（RGBA32F、2048²、行优先平铺、
+> padding 不用、高度无包袱）不变。
+
 - **纹理类型**:`GL_RGBA32F`,2D,固定 **2048 × 2048**。
-- **单个 pose 的尺寸**:每节一个 4×4 矩阵 = 4 个 RGBA texel 排成一列;一行放完某骨架
-  全部 bone → pose 宽 = `bone_count × 4` texel。(biped 23 骨 → 92 texel 宽。)
-- **每行放几个 pose**:`pose_per_row = floor(2048 / (4 * bone_count))`
-  (23 骨 → 22 pose/行)。行尾 2048 − pose_per_row×4×bone_count 的 padding **不使用**。
-- **对齐铁律**:pose 宽 `4×bone_count` 恒能整除行宽排布 → **每个 pose 整段落在同一行,
+- **单个 pose 的尺寸**:每节一个**对偶四元数** = 2 个 RGBA texel(q 在前、t 在后)；一行放完某骨架
+  全部 bone → pose 宽 = `bone_count × 2` texel。(biped 23 骨 → 46 texel 宽。)
+- **每行放几个 pose**:`pose_per_row = floor(2048 / (2 * bone_count))`
+  (23 骨 → 44 pose/行)。行尾 padding **不使用**。
+- **对齐铁律**:pose 宽 `2×bone_count` 恒能整除行宽排布 → **每个 pose 整段落在同一行,
   绝不跨行**(行宽是 pose 宽的整数倍,行尾直接留白),无 fragment 拆分。
-- **容量**:单张 atlas `≈ floor(2048²/(4×bone_count))`(23 骨 ≈ 45,590 pose),远超业务
+  （注：实际取址代码仍**逐 texel 判行**，与“不跨行”的布局无关，是防回归写法。）
+- **容量**:单张 atlas `≈ floor(2048²/(2×bone_count))`(23 骨 ≈ 91,180 pose),远超业务
   (现估 ~1800,即 60 动作×30 帧)。
 - **高度无 4096 包袱**:因为用 2D 平铺而非"一行一 pose 的高窄条",capacity 不撞
   `GL_MAX_TEXTURE_SIZE`/FBO 维度的保守上限,海量 pose 也无压力。
@@ -63,11 +70,13 @@ glBindBuffer/glBufferData 当 VBO/EBO、glTextureData、glTexSubImage2D、glUnif
 故走**方案甲 = 业界把 inverse_bind 折进 pose bake 的主流做法**:
 
 ### 方案甲 — inverse_bind 由 CPU 在烘焙期折入 pose atlas,不进 GPU 独立存储
-- **蒙皮所需的“最终肤矩阵”** baked 成 atlas 每 pose 每骨:
+- **蒙皮所需的变换** baked 成 atlas 每 pose 每骨:
   `mappedMatrix(bone, pose) = jointWorld(bone, pose) × inverseBind(bone)`
-  (CPU 沿骨架树解出每骨相对角色根的 jointWorld 后, 乘上骨架级逆绑定, 再落 atlas 行)。
+  (CPU 沿骨架树解出每骨相对角色根的 jointWorld 后, 乘上骨架级逆绑定)。
+  **该乘积必为刚体**(链路只有旋转/平移) → 2026-09-18 起再转成**对偶四元数**落 atlas
+  (每骨 2 texel)；旧版直接落 4×4 矩阵 (每骨 4 texel)。
 - GPU 只持有**一张 pose atlas 纹理**(RGBA32F 2048²), 无独立 inverse_bind 资源。蒙皮 VS 每骨
-  只要**一次点采样** atlas 得该 (pose, bone) 的最终矩阵, 直接 Σ weight·M·v; 无需再读
+  取该 (pose, bone) 的对偶四元数, 参与 DLB 刚体混合；无需再读
   inverse_bind(已被 CPU 乘进去)。
 - 这正是 GPU Gems 3 Ch.2 / 各 VAT 教程的 `palette.skinningMatrix[j]=globalPose[j]×inverseBind[j]`。
 - inverse_bind 作为**骨架级 CPU 持有**(构造时传入 / LoadGltfSkeleton 读出), 只用于烘焙。
@@ -77,21 +86,22 @@ glBindBuffer/glBufferData 当 VBO/EBO、glTextureData、glTexSubImage2D、glUnif
 | 数据 | 归属 | 载体 | 说明 |
 |---|---|---|---|
 | **inverse_bind** | 骨架级 CPU 持有 | 不单独上 GPU | 只作烘焙乘数, 折入 atlas 后 render 不见它 |
-| **映射后的最终肤矩阵**(= jointWorld×inverseBind) | 骨架级烘焙成 **pose atlas** | RGBA32F 2D atlas(§2) | CPU 先乘好 inverse_bind; instance 以行号引用 |
-| 该 instance 用哪个 pose / 插值 | **per-instance** | per-instance attribute | 传 pose (row,col) offset + ratio, 不给矩阵 |
+| **映射后的最终变换**(= jointWorld×inverseBind,→ 对偶四元数) | 骨架级烘焙成 **pose atlas** | RGBA32F 2D atlas(§2) | CPU 先乘好 inverse_bind 再转 DQS; instance 以平坦 texel 起点引用 |
+| 该 instance 用哪个 pose / 插值 | **per-instance** | per-instance attribute | 传 pose 平坦起点 + ratio, 不给矩阵 |
 
-**蒙皮链(方案甲)**:per-instance 行号 → atlas 点采样得 (pose,bone) 最终肤矩阵 M →
-Σ weight·(M×v)。VS 不需另一处取 inverse_bind(y CPU 已折入)。
+**蒙皮链(方案甲 + DQS)**:per-instance 平坦起点 → atlas 取每骨对偶四元数 q̂ →
+DLB({w_i, q̂_i})（参考骨抗对偶 + 归一化）→ 变换顶点。VS 不需另一处取 inverse_bind(CPU 已折入)。
 
-⚠️ 注:运行时若要在两个 pose **之间**插值(prace ratio),先各自从 atlas 取 pose_a/pose_b 的
-矩阵、shader 里逐骨 lerp 两矩阵后再蒙皮 —— 语义与 09-07 双 pose 插值一致(都是对肤矩阵 lerp)。
+⚠️ 注:运行时若要在两个 pose **之间**插值(ratio),先各自从 atlas 取 pose_a/pose_b 的对偶四元数、
+shader 里逐骨 **NLERP**（四元数空间插值 + 归一化，不是矩阵 lerp）后再做 DLB ——
+2026-09-18 起如此；旧版是对两套矩阵逐元素 lerp（中间帧会缩体积）。
 
 ### 关键优化(成本定论,已消的担忧)
 - **行列 offset 是 per-instance,不是每顶点**:1000 个 instance 只有 1000 组 pose 引用,
   故把 `pose_idx―(row,col)` 的 divmod 在 **CPU 端每 instance 一次**算好、作为 per-instance
   整数行列传进 VS;**VS 全程零除法**。
 - **VS 只读该顶点被影响的 ≤4 骨**(loc3 joints 带 bone 索引),非全 23 遍历;每顶点最多
-  16 次 RGBA32F texelFetch,layout 无关,不可再砍。
+  **8 次 RGBA32F texelFetch**(4 骨 × 2 texel;旧版矩阵为 16 次),layout 无关,不可再砍。
 - 2D tile 多付出的仅每 instance 一次 CPU divmod(≈0)+ 更高 2D cache 命中, 换来不撞高度
   上限+大容量, 净赚 —— 定 2D tile(§2)。
 
@@ -100,9 +110,10 @@ glBindBuffer/glBufferData 当 VBO/EBO、glTextureData、glTexSubImage2D、glUnif
 ## 4. 一句话契约(写进 skeleton_manager.h 头注释用语)
 
 > 骨骼动画纹理(SkeletonManager 所有) = 固定 **2048×2048 RGBA32F** pose atlas:
-> 行宽容纳 `floor(2048/(4*bone_count))` 个 pose,每个 pose 宽 `4*bone_count` texel
-> (每骨一个 4×4 矩阵 = 4 texel),**整 pose 不跨行**,行尾 padding 不使用。atlas 里每
-> (pose,bone) 存的是 **最终肤矩阵 jointWorld(pose,bone)×inverseBind(bone)**(CPU 在烘焙期
-> 已把骨架级 inverse_bind 折入, GPU 无独立逆绑定资源);蒙皮 VS 每骨一次点采样即得, 直接
-> Σ weight·M·v。instance 的每个 pose 用 CPU 端预算好的 **(row,col) 行列 offset** 作
-> per-instance attribute 传入,VS 零除法。(方案甲,不采 SSBO —— 工程 GL 层不可移植。)
+> 行宽容纳 `floor(2048/(2*bone_count))` 个 pose,每个 pose 宽 `2*bone_count` texel
+> (每骨一个**对偶四元数** = 2 texel:实部 q + 对偶部 t),**整 pose 不跨行**,行尾 padding 不使用。
+> atlas 里每 (pose,bone) 存的是 **最终蒙皮变换 jointWorld(pose,bone)×inverseBind(bone)**
+> 的对偶四元数(CPU 在烘焙期已把骨架级 inverse_bind 折入并转 DQS, GPU 无独立逆绑定资源);
+> 蒙皮 VS 每骨取 q/t 做 DLB 刚体混合。instance 的每个 pose 用 CPU 端预算好的**平坦 texel 起点**
+> 作 per-instance attribute 传入,VS 零除法。(方案甲,不采 SSBO —— 工程 GL 层不可移植。)
+> （2026-09-18 前为“每骨 4 texel 4×4 矩阵 + Σ weight·M·v”，见 `docs/jpov_dqs_skinning_design.md`。）

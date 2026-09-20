@@ -73,6 +73,62 @@ inline Mat4 Mat4Rotation(const Quaternion<float>& q) {
     return r;
 }
 
+// 从**纯旋转**矩阵（左上 3×3 正交、无缩放）反解四元数 —— Mat4Rotation 的逆。
+//
+// 用途：对偶四元数蒙皮（DQS）需要把「已算好的刚体矩阵」重新表达成旋转四元数 + 平移
+//   （见 dual_quat.h 的 DualQuatFromRigidMatrix）；骨架烘焙链路是一路矩阵乘出来的，
+//   故必须有这道矩阵 → 四元数的逆运算。
+//
+// 实现：Shepperd 法（按 trace 与 3×3 对角元挑最大分支，避免除以近零量，数值最稳）。
+// Pre: 左上 3×3 是正交旋转矩阵（调用方保证；本函数**不做**正交性校验，非正交输入
+//   会得到无意义四元数）。返回值为**单位**四元数。
+// 说明：q 与 −q 表示同一旋转；本函数固定返回 w ≥ 0 那一支，使**同一姿态的烘焙结果唯一**
+//   （便于测试与逐字节复现）。真正的抗对偶（antipodality）修正在混合处做 —— 见
+//   dual_quat.h 文件头（逐顶点按权重最大骨统一符号）。
+inline Quaternion<float> Mat4ToQuaternion(const Mat4& m) {
+    // 列主序：R[row][col] = m.m[col * 4 + row]（下同，逐项摊开避免下标绕晕）。
+    const float r00 = m.m[0],  r01 = m.m[4],  r02 = m.m[8];
+    const float r10 = m.m[1],  r11 = m.m[5],  r12 = m.m[9];
+    const float r20 = m.m[2],  r21 = m.m[6],  r22 = m.m[10];
+
+    Quaternion<float> q;
+    const float trace = r00 + r11 + r22;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;  // 4w
+        q.w = 0.25f * s;
+        q.x = (r21 - r12) / s;
+        q.y = (r02 - r20) / s;
+        q.z = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+        const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;  // 4x
+        q.w = (r21 - r12) / s;
+        q.x = 0.25f * s;
+        q.y = (r01 + r10) / s;
+        q.z = (r02 + r20) / s;
+    } else if (r11 > r22) {
+        const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;  // 4y
+        q.w = (r02 - r20) / s;
+        q.x = (r01 + r10) / s;
+        q.y = 0.25f * s;
+        q.z = (r12 + r21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;  // 4z
+        q.w = (r10 - r01) / s;
+        q.x = (r02 + r20) / s;
+        q.y = (r12 + r21) / s;
+        q.z = 0.25f * s;
+    }
+    q.NormalizeInPlace();
+    // 符号归一（w ≥ 0）：让同一旋转矩阵每次都反解出**同一个**四元数（见上方说明）。
+    if (q.w < 0.0f) {
+        q.x = -q.x;
+        q.y = -q.y;
+        q.z = -q.z;
+        q.w = -q.w;
+    }
+    return q;
+}
+
 // 由轴 + 角（弧度）构造旋转矩阵。内部归一化轴（零轴则返回单位阵）。
 inline Mat4 Mat4RotationAxisAngle(const Vec3<float>& axis, float radians) {
     const float len = axis.Norm();

@@ -1,5 +1,19 @@
 # JPOV — 骨架蒙皮渲染 · M1 设计（基础 shader 单 pose 采样链路）
 
+> ## ⚠️ 2026-09-18 更新（蒙皮混合方式已换）
+> 蒙皮从 **LBS（矩阵加权平均）** 换成 **DQS（对偶四元数，DLB 混合）**，以消除关节弯折处的
+> 体积塌缩/糖纸伪影。数学/布局/验证详见 **`docs/jpov_dqs_skinning_design.md`**。
+>
+> 因此本文下列内容**已被取代**（保留作历史，勿当现状）：
+> - §3 数据流里的「atlas 一行 = 23 骨 4×4」「Σ w·M·v」；
+> - §4 的蒙皮公式、矩阵还原（`LoadBoneMatrix`）、uniform 名（`uMVP/uModel/uPoseCol` → 现为
+>   `uViewProj` + per-instance `aInstModel/aInstPose`，分层见 instance_buffer.h）；
+> - §8「两 pose 插值留后续」「蒙皮进 shadow 留后续」——**均已落地**（插值在四元数空间 NLERP；
+>   主/阴影两 pass 同一套 DQS 蒙皮）。
+>
+> 仍然有效的部分：M1 的验收思路（bind pose ⇒ 变换=单位 ⇒ diff≈0）、坐标/单位约定、
+> bind pose cover 的动机、以及「FS 复用 object3d PBR 片元」的决策。
+
 > 本 PR 把「蒙皮渲染」的第一块落地：**单 pose 静态采样的基础蒙皮 shader 链路**。范围刻意收窄
 > 到最小可验证的一步（M1）：用一份 **bind pose（T-rest）** 驱动一个 rest 蓝人网格，走真正
 > 的蒙皮 VS（读 JOINTS/WEIGHTS + pose atlas）→ 复用 object3d PBR 片元 → 渲出 T-pose 蓝人，
@@ -19,6 +33,8 @@
 
 这第一步只求打通并证明正确的链条：
 `顶点(joints/weights) → atlas 肤矩阵 → Σ w·M·v →（与 object3d 同光照）→ 蒙皮位姿`
+（2026-09-18 起后半段改为「atlas 对偶四元数 → DLB 刚体混合 → 变换顶点」，见顶部更新说明
+及 `docs/jpov_dqs_skinning_design.md`。）
 之后才谈动画（两 pose 插值）/ instancing / 动画源重采样。
 
 ## 2. 现状（这块其实大部分已 ready）
@@ -44,8 +60,10 @@ glb(mixamo_male.glb)
 SkeletonManager(SkeletonType, {bindPose})
    → 沿树 jointWorld(bind)= T(rest_offset)·R(joint_rotation)
    → × inverseBind = I   ⇒ 该 pose 的肤矩阵=单位 ⇒ 蒙皮=原 rest 网格 ⇒ M1 diff≈0 成立
-   → 烘焙成 pose atlas（一行 = 一个 pose 的 23 骨 4×4）
-蒙皮 VS: 每顶点 loc3/4 → Σ w_i · atlas(pose,bone_i) 的肤矩阵 · rest_pos（mesh 局部空间蒙皮）
+   → 烘焙成 pose atlas（一行 = 一个 pose 的 23 骨**对偶四元数**，每骨 2 texel；
+     2026-09-18 前为 4×4 矩阵 4 texel —— 见 jpov_dqs_skinning_design.md §4）
+蒙皮 VS: 每顶点 loc3/4 → DLB({w_i, atlas(pose,bone_i) 的对偶四元数}) → 变换 rest_pos
+        （mesh 局部空间蒙皮；旧写法是 Σ w_i · 肤矩阵 · rest_pos，见 skinning_shader.h 保留段）
         → 再乘 uModel(center/up/front/scale) 到世界（法线/切线同用蒙皮后 mat3）
 FS: kMeshFs3dPBRFull（与 object3d 相同，sunny-day 光照照抄，不改）
 renderer: RegisterSkeleton(SkeletonType, poses)→skeleton_id；DrawMeshWithSkeleton(mesh_id,skeleton_id,instances)
@@ -57,19 +75,25 @@ renderer: RegisterSkeleton(SkeletonType, poses)→skeleton_id；DrawMeshWithSkel
 
 - 输入沿用 object3d PBR 完整版：`aPos(0)/aNormal(1)/aTexCoord(2)/aTangent(5)`；
   另读 `aJoint(3, ivec4)`、`aWeight(4, vec4)`（mesh_manager VBO 已备好 loc3/4）。
-- uniform：`uMVP`、`uModel`（同 object3d）+ `uPoseAtlas`(sampler2D RGBA32F)、`uBoneCount`、
-  `uPoseRow`、`uPoseCol`（本实例该 pose 在 atlas 的行/列起点，CPU 已 divmod 好）。
+- uniform / attribute（**现状**，较 M1 已有 instancing 改造）：`uViewProj`（每帧共享）+ per-instance
+  `aInstModel(loc6..9)`、`aInstPose(loc10 = pose_col_a/pose_col_b/ratio)`；atlas 相关
+  `uPoseAtlas`(sampler2D RGBA32F)、`uBoneCount`、`uPoseRow`、`uAtlasDim`。
+  *M1 当时：* `uMVP/uModel` + `uPoseRow/uPoseCol`（CPU 已 divmod）——现改为传**平坦 texel 起点**，
+  VS 内按 `uAtlasDim` 回绕（见 instance_buffer.h 布局表 + skinning_shader.h）。
 - 输出与 `kMeshVs3dPBRFull` **完全一致**：`vWorldPos / vWorldNormal / vTexCoord / vWorldTangent`
   → 因此 FS 直接复用 `kMeshFs3dPBRFull`（同光照，片元 0 改动）。
-- 蒙皮：在 mesh 局部空间做 4-bone 加权累加
-  `sp = Σ w_i·(M_i·aPos)`，`sn = Σ w_i·mat3(M_i)·aNormal`，`st = Σ w_i·mat3(M_i)·aTangent`；
-  然后 `vWorldPos=(uModel·sp).xyz`、`vWorldNormal=normalize(mat3(transpose(inverse(uModel)))·sn)`、
-  `vWorldTangent` 同理、`vTexCoord=aTexCoord`、`gl_Position=uMVP·vec4(sp,1)`。
-- **矩阵还原**：atlas 里每 (pose,bone) 存的是**行主序** 4×4（SkeletonManager PutMat4Row：
-  bone 占 4 连续 texel，texel t 存矩阵第 t 行）。从 4 个 texel 还原成 GLSL `mat4`（列主序存储）
-  需按行主序元素重排（`col0=(m00,m10,m20,m30)`…见 `LoadBoneMatrix` 注释，防错序）。
-- **bind pose 一致性**：绑定时 M_i=I ⇒ sp=aPos、sn=aNormal、st=aTangent，与 kMeshVs3dPBRFull
-  逐位一致 ⇒ M1 diff≈0。
+- 蒙皮（**当前 = DQS**；下附旧 LBS 写法作对照）：在 mesh 局部空间做 4-bone 刚体混合，
+  `q̂ = DLB({w_i, q̂_i})`（参考骨抗对偶 + 归一化），`sp = DualQuatTransformPoint(q̂, aPos)`、
+  `sn = DualQuatRotateVector(q̂, aNormal)`、`st = DualQuatRotateVector(q̂, aTangent)`；
+  然后 `vWorldPos=(inst_model·sp).xyz`、`vWorldNormal=normalize(mat3(transpose(inverse(inst_model)))·sn)`、
+  `vWorldTangent` 同理、`vTexCoord=aTexCoord`、`gl_Position=uViewProj·vec4(sp,1)`。
+  *旧（LBS）：* `sp = Σ w_i·(M_i·aPos)`、`sn = Σ w_i·mat3(M_i)·aNormal`、`st` 同 —— 已按注释
+  保留在 `skinning_shader.h` 顶部「保留」段。
+- **取数**：atlas 里每 (pose,bone) 存 **2 texel**（实部 q + 对偶部 t，行优先）——旧版是
+  行主序 4×4 的 4 texel + `LoadBoneMatrix` 重排。两者都是逐 texel 回绕，可跨行。
+- **bind pose 一致性**：绑定时每骨 q̂ = 单位元（q=(0,0,0,1)、t=0）⇒ sp=aPos、sn=aNormal、st=aTangent，
+  与 kMeshVs3dPBRFull 逐位一致 ⇒ M1 diff≈0（数学依据：dual_quat_test 的
+  `BlendOfIdentityBonesIsExactIdentity`）。
 
 ### 坐标 / 单位
 - 蒙皮发生在 **mesh 局部空间**（loader 已刻意把 bind 顶点留在此，不套 node 旋缩），
