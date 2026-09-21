@@ -1137,7 +1137,10 @@ void Renderer::Render(const RenderCommandList& cmds,
     }
 
     // ---- 检查是否有 3D 指令 ----
-    bool has_3d = false;
+    // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
+    // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
+    // 只剩下清屏色，天空永远画不出来。
+    bool has_3d = cmds.sky.has_value();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
