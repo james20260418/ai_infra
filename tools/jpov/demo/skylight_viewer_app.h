@@ -1,13 +1,19 @@
 // JPOV 天光查看器（skylight viewer）— 渲染核心 App（场景渲染体 + 交互面板宿主）
 //
 // 与 model viewer 的 viewer_app.h 同构（同一套 JPOV::OneIteration 渲染体 +
-// 即时模式 UI 面板约定），差别只在**场景与光照参数**：
+// 即时模式 UI 面板约定），差别只在**场景与光照来源**：
 //   - 场景 = 三方块（低反/高光/金属）+ 灰色地面（skylight_scene.h），不加载 glTF；
-//   - 光照 = skylight_scene.h 的 MakeSky/MakeSun/MakeAmbient，滑条里多了
-//     「天光强度（太阳）/ 环境光强度 / 夜色强度」三个绝对量旋钮。
+//   - 天光 = `CreateDefaultSkyCommand(四自由度)`（其余参数走默认构造）；
+//   - 光照 = 由该 SkyCommand **推导**（日光色/强 + ambient 色/强），不手配。
 //
-// 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + ApplyInput 右键拖拽/
-// 滚轮缩放），保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
+// 交互面板只有**四个滑条**（Danis 2026-09-21 定）：
+//   ① 浊度 turb [0,8]
+//   ② 季节色温 [−1,+1]（左=蓝偏 / 右=红偏；这是查看器的交互设计，见 scene 头注释）
+//   ③ 太阳方向：仰角 [0,90] + 方位角 [0,360)（两个滑条，属同一个自由度）
+//   ④ 月亮方向：仰角 [0,90] + 方位角 [0,360)
+//
+// 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
+// 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
 
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
@@ -45,16 +51,13 @@ public:
     // ── 视角：沿用 ViewConfig（y-up 球面角 + 右键拖拽/滚轮缩放）──
     jpov_viewer::ViewConfig view_;
 
-    // ── 光照滑条状态（跨帧持有；色调由 sky 推导，亮度由滑条直接给）──
-    float elev_deg_    = 20.0f;   // 太阳仰角 [0,90]：0=日落（纯夜色），90=正午
-    float turbidity_   = 2.0f;    // 大气浊度 [2,8]
-    float season_r_    = 1.0f;    // 季节 R 色温乘子 [0.5,2.0]（只染白天项）
-    float sun_intensity_     = 3.0f;   // 太阳平行光强度（绝对值；0=无直射）
-    float ambient_intensity_ = 0.3f;   // 环境光强度（绝对值；0=无 ambient）
-    float night_scale_ = 1.0f;    // 夜色强度乘子 [0,4]（只乘夜色两色；0=关夜色）
-    float moon_elev_deg_     = 30.0f;  // 月亮仰角 [0,90]（与太阳仰角独立）
-    float moon_brightness_   = 100.0f; // 月盘亮度基数（绝对值；0=不画月盘）
-    float moon_glow_         = 2.0f;   // 月晕强度（绝对值；0=无月晕）
+    // ── 四个自由度（跨帧持有；天光与光照全由它们推导）──
+    float turbidity_    = kTurbidityDef;   // ① 浊度 [0,8]
+    float season_tint_  = 0.0f;            // ② 季节色温 [−1,+1]（蓝偏..红偏，0=中性）
+    float sun_elev_deg_ = 45.0f;           // ③ 太阳仰角 [0,90]
+    float sun_azim_deg_ = 45.0f;           // ③ 太阳方位角 [0,360)
+    float moon_elev_deg_ = 30.0f;          // ④ 月亮仰角 [0,90]
+    float moon_azim_deg_ = 225.0f;         // ④ 月亮方位角 [0,360)
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
@@ -63,8 +66,8 @@ public:
     // 交互窗口是否绘制光照面板（headless 拍摄=false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
 
-    // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”（月盘/天色）时
-    // 置 false——排除方块遮挡与受光干扰，只留天光背景。
+    // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”时置 false，
+    // 排除方块遮挡与受光干扰，只留天光背景。
     void SetShowScene(bool show) { show_scene_ = show; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -97,13 +100,14 @@ public:
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;
 
-        // 光照：sky（含夜色两色 × 夜色强度 + 月盘）+ 由 sky 推导色调的 sun/ambient。
-        const jpov::SkyCommand sky =
-            MakeSky(elev_deg_, turbidity_, season_r_, night_scale_,
-                    moon_elev_deg_, moon_brightness_, moon_glow_);
-        cmds->sky     = sky;
-        cmds->sun     = MakeSun(sky, sun_intensity_);
-        cmds->ambient = MakeAmbient(sky, ambient_intensity_);
+        // 天光 + 光照：全由四个自由度推导（sky 走 CreateDefaultSkyCommand，
+        // 日光/ambient 由该 sky 推导）。
+        const SkyLighting nl = MakeSkyLighting(
+            turbidity_, season_tint_, sun_elev_deg_, sun_azim_deg_,
+            moon_elev_deg_, moon_azim_deg_);
+        cmds->sky     = nl.sky;
+        cmds->sun     = nl.sun;
+        cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
         // 场景：灰色地面 + 三方块（低反/高光/金属）。
@@ -137,8 +141,7 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 光照面板：9 个滑条（仰角 / 浊度 / 季节 R / 太阳强度 / 环境光强度 / 夜色强度
-    //   + 月亮仰角 / 月盘亮度 / 月晕强度）。
+    // 光照面板：6 个滑条，表达**四个自由度**（太阳/月亮各占仰角+方位角两个滑条）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -151,7 +154,7 @@ private:
         const float kRowH    = 26.0f;
         const float kSpacing = 6.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 9;
+        const int   kRows    = 6;
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -162,23 +165,18 @@ private:
                                 {kSliderWidth, kRowH}};
         };
 
-        // 太阳仰角 0~90：左端 0° = 日落（白天项被压到 0，留纯夜色），右端正午。
-        ui_.SliderFloat("太阳仰角 °", &elev_deg_, row(0), 0.0f, 90.0f, 0);
-        // 浊度 [2,8]：看霾化 + Turb*Loss 强度衰减 + **月晕变宽**。
-        ui_.SliderFloat("浊度 turb", &turbidity_, row(1), 2.0f, 8.0f, 1);
-        // 季节 R [0.5,2.0]：只染白天项，拉极端可验证"夜色不被季节染色"。
-        ui_.SliderFloat("季节 R", &season_r_, row(2), 0.5f, 2.0f, 2);
-        // 太阳/环境光强度是**绝对量**（滑条所见即所得，不走 PWL 相对曲线）。
-        ui_.SliderFloat("太阳强度", &sun_intensity_, row(3), 0.0f, 10.0f, 2);
-        ui_.SliderFloat("环境光强度", &ambient_intensity_, row(4), 0.0f, 2.0f, 2);
-        // 夜色强度 [0,4]：独立乘夜色两色（0=关夜色，用于对照无夜色画面）。
-        ui_.SliderFloat("夜色强度", &night_scale_, row(5), 0.0f, 4.0f, 2);
-        // ── 月盘（与太阳仰角独立；月盘水平方位在 −X 侧）──
-        ui_.SliderFloat("月亮仰角 °", &moon_elev_deg_, row(6), 0.0f, 90.0f, 0);
-        // 月盘亮度：0 = 不画月盘（默认给 100 使月盘醒目可见）。
-        ui_.SliderFloat("月盘亮度", &moon_brightness_, row(7), 0.0f, 500.0f, 0);
-        // 月晕强度：0 = 无月晕；配合浊度滑条看**晕宽随浊度变化**。
-        ui_.SliderFloat("月晕强度", &moon_glow_, row(8), 0.0f, 10.0f, 1);
+        // ① 浊度 [0,8]：看霾化（天色发白）+ 日盘/月盘衰减 + 月晕变宽。
+        ui_.SliderFloat("浊度 turb", &turbidity_, row(0),
+                        kTurbidityMin, kTurbidityMax, 1);
+        // ② 季节色温 [−1,+1]：左蓝偏 / 右红偏 / 中间中性（只偏色温，不改亮度）。
+        ui_.SliderFloat("季节色温 (左蓝偏..右红偏)", &season_tint_, row(1),
+                        -1.0f, 1.0f, 2);
+        // ③ 太阳方向（仰角 + 方位角）。
+        ui_.SliderFloat("太阳仰角 °", &sun_elev_deg_, row(2), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("太阳方位角 °", &sun_azim_deg_, row(3), 0.0f, 360.0f, 0);
+        // ④ 月亮方向（仰角 + 方位角）。月盘亮度走默认 5（常亮）。
+        ui_.SliderFloat("月亮仰角 °", &moon_elev_deg_, row(4), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("月亮方位角 °", &moon_azim_deg_, row(5), 0.0f, 360.0f, 0);
     }
 
     bool show_panel_ = true;

@@ -1126,6 +1126,86 @@ struct SkyCommand {
     }
 };
 
+// ── 天光构造参数（全部字段，带默认值）──
+//
+// 与 SkyCommand 字段**一一对应**，供 CreateSkyCommand() 的“完整版”接口一次传入
+// 全部参数。用结构体而非 17 个位置参数：参数太多、同类 float 相邻极易传错位置，
+// 结构体可读且可只覆盖关心的字段（其余走默认）。
+//
+// 各字段含义/取值域见 SkyCommand 里对应字段的注释，此处不重复。
+// 默认值 = SkyCommand 的默认值（即“标准天光”）。
+struct SkyParams {
+    jpov::Vec3f sun_dir = jpov::Vec3f(0.0f, 1.0f, 0.0f);
+    float turbidity = 2.0f;
+    Color season = {1.0f, 1.0f, 1.0f, 1.0f};
+    float intensity = 1.0f;
+    Color ground_color = {0.05f, 0.06f, 0.08f, 1.0f};
+    float sun_radius = 0.0094f;
+    float sun_brightness = 2.0e5f;
+    float sun_glow = 1.0f;
+    float sun_set_start_angle = 10.0f;
+    float sun_set_angle_ratio = 1.4f;
+    jpov::Vec3f moon_dir = jpov::Vec3f(0.0f, -1.0f, 0.0f);
+    float moon_radius = 0.0094f;
+    float moon_brightness = 5.0f;
+    float moon_glow = 0.1f;
+    float moon_set_start_angle = 10.0f;
+    float moon_set_angle_ratio = 1.4f;
+    Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
+    Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
+};
+
+// CreateSkyCommand —— **完整版**天光构造接口：由 SkyParams 逐字段填充 SkyCommand。
+//
+// 语义：直接透传（无任何隐式推导/覆盖），params 的每个字段落到 sky 的同名字段。
+// 需要“标准天光 + 少数几个自由度”的调用方用 CreateDefaultSkyCommand()。
+inline SkyCommand CreateSkyCommand(const SkyParams& params) {
+    SkyCommand sky;
+    sky.sun_dir = params.sun_dir;
+    sky.turbidity = params.turbidity;
+    sky.season = params.season;
+    sky.intensity = params.intensity;
+    sky.ground_color = params.ground_color;
+    sky.sun_radius = params.sun_radius;
+    sky.sun_brightness = params.sun_brightness;
+    sky.sun_glow = params.sun_glow;
+    sky.sun_set_start_angle = params.sun_set_start_angle;
+    sky.sun_set_angle_ratio = params.sun_set_angle_ratio;
+    sky.moon_dir = params.moon_dir;
+    sky.moon_radius = params.moon_radius;
+    sky.moon_brightness = params.moon_brightness;
+    sky.moon_glow = params.moon_glow;
+    sky.moon_set_start_angle = params.moon_set_start_angle;
+    sky.moon_set_angle_ratio = params.moon_set_angle_ratio;
+    sky.night_zenith_color = params.night_zenith_color;
+    sky.night_horizon_color = params.night_horizon_color;
+    return sky;
+}
+
+// CreateDefaultSkyCommand —— **简单版**天光构造接口：只暴露 4 个自由度。
+//
+// 四个自由度（其余参数一律走 SkyCommand 的默认值 = 标准天光）：
+//   turbidity — 大气浊度（天气），典型晴天 2、重霾 8。
+//   season_tint — 季节色温乘子（RGB 分量相乘，只调色不调亮）。注意这是**颜色**，
+//                 不是标量；“红偏/蓝偏滑条”是查看器侧的交互设计，不属于本接口。
+//   sun_dir   — 太阳方向（世界空间，y-up）。驱动天色 + 昼夜过渡。
+//   moon_dir  — 月亮方向（独立输入；y<0 时月盘沉入地平线下，自然不可见）。
+//
+// 实现：构造一个默认 SkyParams，只覆盖这四个字段，交给完整版 CreateSkyCommand ——
+// 保证“简单版”与“完整版”永远同源，不会各自漂移。
+//
+// Pre-condition: sun_dir / moon_dir 非零向量（方向未定义；内部会 normalize）。
+inline SkyCommand CreateDefaultSkyCommand(float turbidity, const Color& season_tint,
+                                          const jpov::Vec3f& sun_dir,
+                                          const jpov::Vec3f& moon_dir) {
+    SkyParams params;
+    params.turbidity = turbidity;
+    params.season = season_tint;
+    params.sun_dir = sun_dir;
+    params.moon_dir = moon_dir;
+    return CreateSkyCommand(params);
+}
+
 // 3D 静态模型（世界空间，参与深度测试）
 //
 // 渲染一个已注册的 GPU mesh（见 gpumesh.h / RegisterMesh），
