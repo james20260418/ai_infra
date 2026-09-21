@@ -1161,8 +1161,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         //                   不再改矩阵栈了，但保留 push/pop 习惯）
         glPushAttrib(GL_ENABLE_BIT | GL_VIEWPORT_BIT);
 
-        // ---- 太阳平行光与环境光：直接取用户手配值，不从 DaySkyCommand 推导 -------
-        // （2026-08-19 回归最小可行：DaySkyCommand 只定义“天色”，不再 Derive 方向光/
+        // ---- 太阳平行光与环境光：直接取用户手配值，不从 SkyCommand 推导 -------
+        // （2026-08-19 回归最小可行：SkyCommand 只定义“天色”，不再 Derive 方向光/
         // 环境光。eff_sun=用户配的 cmds.sun（可为空）；eff_ambient=用户配的
         // cmds.ambient，未配则用默认值）
         const std::optional<DirectionalLight> eff_sun = cmds.sun;

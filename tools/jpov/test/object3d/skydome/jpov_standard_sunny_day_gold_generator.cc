@@ -4,7 +4,7 @@
 // 太阳平行光 + CSM 阴影）并写仓库 gold image：
 //   tools/jpov/test/object3d/skydome/standard_sunny_day_1280x720.png
 //
-// 用于调试天空（DaySkyCommand）与太阳直射（DirectionalLight）在 HDR 链路上
+// 用于调试天空（SkyCommand）与太阳直射（DirectionalLight）在 HDR 链路上
 // 的对齐。tone_mapping 开启、天空 intensity=1.0，供 Danis 手动调 sky.intensity。
 // 输出 640x360（同其它 gold 惯例，文件名 1280x720 仅为分辨率标记）。
 

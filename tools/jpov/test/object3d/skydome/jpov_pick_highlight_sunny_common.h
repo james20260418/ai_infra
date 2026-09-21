@@ -109,7 +109,7 @@ public:
         };
 
         // ── 天光（Preetham）—— 与 standard_sunny_day 一致 ──
-        cmds->sky = jpov::DaySkyCommand{
+        cmds->sky = jpov::SkyCommand{
             /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                     -sun_light_dir.z()),
             /*turbidity*/ 2.0f,

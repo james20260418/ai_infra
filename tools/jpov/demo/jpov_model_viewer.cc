@@ -1,7 +1,7 @@
 // JPOV JPOV 模型查看器 — 主程序（装配 + 模式分发）
 //
 // 一个附属于 JPOV 的小工具：加载一个 glTF 模型到场景中，y-up，地平面 300×300 米
-// 高粗糙灰色 quad，光照用 DaySkyCommand（由 sky 推导平行光 + 全局 Ambient），
+// 高粗糙灰色 quad，光照用 SkyCommand（由 sky 推导平行光 + 全局 Ambient），
 // 窗口底部居中 5 个滑条实时调节（仰角 / 浊度 / 季节色温 / 地面高度 / 模型缩放）。
 //
 // 架构（重构后，docs/jpov_model_viewer_arch.md）：本主程序只做三件事——

@@ -42,7 +42,7 @@
   - 日出/日落 ≈ 暖橙红（约 2000~3000K）。
 - `intensity = 1.0` ≈ **正午晴空直射太阳 ≈ 100,000 lux**。
 - 低角度太阳的强度衰减由**经验照度表**决定（不再用 Beer-Lambert 解析拟合，见下）。
-- **自动推导 `DaySkyCommand::DirectionalIntensity()`（2026-08-22 改，2026-08-31 调参）**：
+- **自动推导 `SkyCommand::DirectionalIntensity()`（2026-08-22 改，2026-08-31 调参）**：
   从 `sun_dir` 仰角查经验照度 PWL，再乘混度衰减 `TurbSunLoss(turb)`：
   `intensity = midday_intensity × 衰减系数(仰角) × TurbSunLoss(turb)`，
   `midday_intensity` 当前默认 **2.2**（2026-08-31 肉眼标定，见注）。
@@ -57,12 +57,12 @@
     会因 AM 发散（大气球壳 d2 有上界，并不无限增长），散射主导时纯吸收模型失真，
     衰减趋势也偏离实际照度，故改为直接查经验照度锚点插值。
   - 用法：`light.intensity = sky.DirectionalIntensity()`（颜色仍用 `DirectionalColor()`，
-    两者配套，见 `DaySkyCommand` 注释）。
+    两者配套，见 `SkyCommand` 注释）。
 - 月光方向光：物理上月光 ≈ 阳光的 1/400,000，即 `intensity ≈ 2.5e-6`
   （满月地面照度 ≈ 0.3 lux / 100,000 lux）。配合冷色（约 4100K）。
 
-### 2. 天光背景 `DaySkyCommand`
-- `sun_dir / turbidity / season / ground_color`：见 DaySkyCommand 注释。
+### 2. 天光背景 `SkyCommand`
+- `sun_dir / turbidity / season / ground_color`：见 SkyCommand 注释。
 - `season`：**只调天空的色温气氛**（多分量乘子），不染太阳盘（太阳盘是自发光天体，
   色调由仰角散射决定，不受季节色温染色）。
 - `intensity = 1.0` ≈ **正午晴天的蓝天背景**（已定标，2026-08-19 Danis 确认）。
@@ -220,7 +220,7 @@
 - [x] `AmbientLight.strength` → `intensity`（统一命名）。
 - [x] `DirectionalLight` 保留 `intensity`，确认锚点 = 100k lux 正午直射。
 - [x] 现有带光照 test 全部给成 intensity=1.0（color 改成纯色温 1,1,1）。
-- [x] `DaySkyCommand` 厘清 `intensity` 与内部 `SKY_LUMINANCE_SCALE` 关系，
+- [x] `SkyCommand` 厘清 `intensity` 与内部 `SKY_LUMINANCE_SCALE` 关系，
       把天空归一到与物体光照同一标尺（`SKY_LUMINANCE_SCALE=0.04` 已定，
       intensity=1.0 = 正午晴天，见三·五 + 第二节）。
 - [x] 太阳盘参数化：`sun_radius`（角半径，物理 2×）+ `sun_brightness`（自发光
@@ -288,10 +288,10 @@ float glow = uSunGlow * exp(-(d*d) / (2.0*sigma*sigma));
 ## 九、浊度（turbidity）对光照强度的衰减（2026-08-31 引入）
 
 > 目标是让 `turbidity` 从“只影响天色/日盘”扩展为**同时按物理趋势衰减场景光照强度**。
-> 由 `DaySkyCommand` 的两个纯函数承载，并以 turb=2（大晴）为基准 = 1.0，因此现有
+> 由 `SkyCommand` 的两个纯函数承载，并以 turb=2（大晴）为基准 = 1.0，因此现有
 > turb=2 的 test/gold **零回归**。
 
-### 1. 两个衰减函数（在 `DaySkyCommand` 内）
+### 1. 两个衰减函数（在 `SkyCommand` 内）
 
 | 函数 | 作用对象 | 物理依据 | 衰减趋势 |
 |---|---|---|---|
@@ -353,3 +353,56 @@ TurbAmbLoss(turb)： 2→1.00  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50
 
 > **下一步候选**：①距离雾层；②太阳气溶胶光晕随 turb 联动；③season 透传到物体光照。
 
+
+## 十、夜色底色（night sky）—— 感知标尺锚点（2026-09-20 引入）
+
+> 本节定义 `SkyCommand` 的 `night_zenith_color / night_horizon_color` 两色的取值纪律。
+> 与上面各节（sun/ambient 的**物理**标尺）不同，夜景在本渲染器里只能走**感知标尺**
+> ——原因见下「为什么不能直接用物理值」。
+
+### 1. 构成与算子
+
+- 夜色 = 两个颜色（天顶 / 地平线）之间的垂直渐变，算子为**加法**：`sky = 白天项 + 夜色项`。
+  白天项在 `sun_dir.y < 0.03`（≈1.7° 仰角）时被 shader 的 daylight 因子精确压到 0，
+  故太阳一落，加法自然退化成「只有夜色」，**不需要**任何 blend 掩码或日落方位角权重。
+- 渐变**形状不是自由参数**：气辉发在 ~90 km 薄层，视线越贴地平穿过的发光层越厚。
+  该纯几何关系即 van Rhijn 函数（`R=6371km, h=90km` 时地平/天顶 ≈ 6.0），
+  在 shader 里归一化成插值参数 `t`（天顶=0, 地平=1）。
+  → **两个颜色定端点，形状由物理定**；给相同值即退化为纯色底色。
+- **不受 `season` 染色**（season = 日光散射的季节色温；气辉/城市光污染不是散射日光）。
+- **受 `intensity` 缩放**（intensity = 天光总开关；日落后白天项已为 0，于是它在夜间
+  自动成为夜色总开关）。
+
+### 2. 为什么不能直接用物理值（关键结论）
+
+- 物理夜/日比 ≈ **2.5e-6**（满月地面照度 ≈ 0.25 lux vs 晴天 ≈ 1e5 lux；
+  另一条等价推导 0.12 × (AU/月距)² 同值）。
+- 但 JPOV 最终走 **ACES tone map + sRGB 编码**：把 1e-6 量级的值喂进去 = **全黑**，
+  肉眼完全无法验收「夜色对不对」。
+- → 夜色底色必须按**「ACES 之后落在哪个 8-bit 灰阶」**反推，即**感知标尺**。
+
+### 3. 「经典城市夜色」锚点（当前默认）
+
+无月、城郊/城市光污染，天顶最深（偏冷蓝紫）、地平线明显更亮且偏暖（钠灯散射橙黄晕）：
+
+| 位置 | 线性 HDR 值（RGB） | ACES+sRGB 后 ≈ |
+|---|---|---|
+| 天顶 `night_zenith_color` | (0.010, 0.013, 0.024) | ≈ 12/255 |
+| 地平 `night_horizon_color` | (0.055, 0.048, 0.045) | ≈ 60/255 |
+
+观感目标：**「看得出是夜景，但明确是夜」**。调参纪律：改这两色时同样按「ACES 后落在
+哪个灰阶」验收，不要按线性值的大小直觉调（线性差 5× 在 ACES 下可能只差十几个灰阶）。
+
+### 4. 零回归保证
+
+- 两色**默认 (0,0,0) = 关闭夜色**。此时 shader 里那行加法是精确 `+0.0`，
+  既有画面（gold 图）逐字节不变。
+- 需要夜色的调用方（如 skylight viewer）显式填值；锚点常量见
+  `demo/skylight_scene.h` 的 `kCityNightZenith / kCityNightHorizon`。
+
+### 5. 已知边界（本 PR 不做）
+
+- **不建模月光散射**：Preetham 在太阳低于地平线时发散，业界不扩展它建模夜晚；
+  本组双色只表达气辉 + 星光 + 城市光污染的低频底色。
+- **月亮盘**（`moon_dir / moon_phase`）与**月光方向光/ambient 的推导**是后续独立 PR。
+- `ground_color` 永远是纯色兜底（夜 shader 下半球输出 0，夜色只作用于地平线以上）。
