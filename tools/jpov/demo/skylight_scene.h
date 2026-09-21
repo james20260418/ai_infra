@@ -197,7 +197,7 @@ inline jpov::DirectionalLight MakeSun(const jpov::SkyCommand& sky,
                                       float intensity) {
     return jpov::DirectionalLight{
         /*direction*/ {-sky.sun_dir.x(), -sky.sun_dir.y(), -sky.sun_dir.z()},
-        /*color*/ sky.DirectionalColor(),
+        /*color*/ sky.SunDirectionalColor(),
         /*intensity*/ intensity,
     };
 }

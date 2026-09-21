@@ -5,8 +5,8 @@
 //   - ApplyInput：像素→角度映射（1280=360°、720=180°）、φ clamp ±90°、
 //                 R clamp [0.1,300]、滚轮 √2 缩放
 //   - MakeNoonLighting：正午日照三元组非空、平行光与 ambient 均"由 SkyCommand
-//     推导"（color 用 DirectionalColor/AmbientColor，intensity 用
-//     DirectionalIntensity/AmbientIntensity，绝对强度锚定 LIGHT_INTENSITY.md
+//     推导"（color 用 SunDirectionalColor/AmbientColor，intensity 用
+//     SunDirectionalIntensity/AmbientIntensity，绝对强度锚定 LIGHT_INTENSITY.md
 //     三·五 晴天基准 sun=3.0 : ambient=0.3，5:1）
 //
 // 纯函数测试，无需 JPOV::Init（不创建 GL context）。
@@ -153,17 +153,17 @@ void TestMakeNoonLighting() {
     // sky sun_dir = -(光传播方向) = (0,1,1)。
     ExpectVecNear(nl.sky.sun_dir, {0.0f, 1.0f, 1.0f}, 1e-6f);
 
-    // sun.intensity 应等于“由 sky 推导”的 DirectionalIntensity(正午基准 3.0)，
+    // sun.intensity 应等于“由 sky 推导”的 SunDirectionalIntensity(正午基准 3.0)，
     // 而非硬编码。正午方向 (0,1,1) 仰角 45° → DNI 系数 0.8513 → ≈2.55。
     // 这里不自造预期值，直接重算 sky 推导结果做一致性校验（防提交时手写死）。
-    // sun.color 应由 sky.DirectionalColor() 推导（色调跟随太阳仰角自动变化）。
-    const jpov::Color dc = nl.sky.DirectionalColor();
+    // sun.color 应由 sky.SunDirectionalColor() 推导（色调跟随太阳仰角自动变化）。
+    const jpov::Color dc = nl.sky.SunDirectionalColor();
     ExpectNear(nl.sun.color.r, dc.r, 1e-6f, "sun.color.r 应由 sky 推导");
     ExpectNear(nl.sun.color.g, dc.g, 1e-6f, "sun.color.g 应由 sky 推导");
     ExpectNear(nl.sun.color.b, dc.b, 1e-6f, "sun.color.b 应由 sky 推导");
     ExpectNear(static_cast<double>(nl.sun.intensity),
-               static_cast<double>(nl.sky.DirectionalIntensity()),
-               1e-6, "sun.intensity 应由 sky.DirectionalIntensity() 推导");
+               static_cast<double>(nl.sky.SunDirectionalIntensity()),
+               1e-6, "sun.intensity 应由 sky.SunDirectionalIntensity() 推导");
 
     // ambient 强度应“由 SkyCommand 推导”，且锚定到 LIGHT_INTENSITY.md 三·五
     // 晴天正午基准 0.3（PR #60 定标，勿 0.5）。task#3 要求『Ambient 由推导得到』，

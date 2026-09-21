@@ -94,7 +94,7 @@ int RunCapture(const std::string& out_dir) {
     app.ambient_intensity_ = 0.0f;
     app.night_scale_ = 1.0f;
     app.moon_elev_deg_ = 20.0f;
-    app.moon_brightness_ = 100.0f;
+    app.moon_brightness_ = 5.0f;
     app.moon_glow_ = 0.0f;
     app.turbidity_ = 2.0f;
     shoot("moon_night_base");        // 月盘（无晕）夜景基准
@@ -106,7 +106,7 @@ int RunCapture(const std::string& out_dir) {
     shoot("moon_elev20");            // 20° 月盘在真实位置
 
     // ⭐ 本 PR 重点：月晕宽度随浊度变化（固定月盘/亮度/晕强，只改浊度）。
-    app.moon_glow_ = 3.0f;
+    app.moon_glow_ = 0.1f;
     app.turbidity_ = 2.0f;
     shoot("moon_glow_turb2");        // 清澈：晕窄
     app.turbidity_ = 8.0f;
