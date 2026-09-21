@@ -118,6 +118,16 @@ int RunCapture(const std::string& out_dir) {
     app.moon_brightness_ = 0.0f;
     shoot("moon_off_control");       // 无月盘对照
 
+    // 带场景的对照：开三方块 + 给一点环境光，看月盘与物体的同屏效果。
+    // （默认环境光 0.3 的“物体光照不随夜色变”已知边界见设计笔记 5.2）
+    app.SetShowScene(true);
+    app.ambient_intensity_ = 0.3f;
+    app.moon_brightness_ = 100.0f;
+    app.moon_glow_ = 3.0f;
+    app.view_.phi   = 0.25;
+    app.view_.theta = 3.0f * 3.14159265358979323846 / 4.0;  // 斜看三方块
+    shoot("moon_with_scene");        // 三方块 + 月盘同屏
+
     app.Finalize();
     return 0;
 }
