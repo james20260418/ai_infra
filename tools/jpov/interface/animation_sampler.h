@@ -63,6 +63,8 @@ inline constexpr float kFrameEpsilon = 4e-6f;
 //   time_seconds : 动画时间（秒）。按循环语义归一（见文件头第 3 条），无需调用方预处理。
 //   out          : 输出位姿（非空）。bone_count / joint_rotation 尺寸 = 该 clip 的骨数，
 //                  joint_rotation 全单位四元数，root_offset 为插值后的根位移。
+//                  **长度量（root_offset）已是米** —— 与它所属 clip（loader 产物）同尺度，
+//                  本函数不做也不该做单位换算（见 fbx_loader.h「单位铁律」）。
 //   返回         : 本次采样用的**起始帧下标 k**（= floor(t·fps) 归一后的值）。供调用方显示/
 //                  日志用（"当前在第几帧"），采样结果本身与返回值无关。
 //

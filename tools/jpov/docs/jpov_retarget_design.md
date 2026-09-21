@@ -42,6 +42,7 @@
 - **朝向(j) = 从根到 j 路径上所有 `R` 的连乘**（与 `rest_offset` 无关）
 - `rest_offset` 在**父关节系**；根的 `rest_offset` 在**骨架空间**（skeleton space，即「骨架自身坐标系的原点」—— 旧称"原父系"，2026-09-11 与 Danis 统一改为此名）
 - **`root_offset` 当前未接线**（`skeleton_manager.cc` 零引用）→ 播不了 root-motion
+  > ✅ **已修（2026-09-20）**：烘焙已接线，语义也已定稿 —— 见 `jpov_root_offset_design.md`。
 - 顶点 joint 信息 = **4 对 (索引 uint8, 权重 float)**，和恒 1；`POSITION` 是 rest 坐标
 
 ---
@@ -416,7 +417,11 @@ v_posed = JW_pose[i] · inverseBind[i] · v_rest
 |---|---|---|
 | **旋转** | **100% 保留**（经 rest 基准共轭） | 用 §1.2 的核心式做基准对齐；"保留"= 不丢失旋转信息，非原样搬运 |
 | **骨长** | **走 `SkeletonType` 自身长度** | 不动目标骨长（见 §6.3）|
-| **root_offset** | **乘缩放因子**（`fbx腿长 / skeleton腿长`） | 把人物上下位移捕捉到，"原来两脚站地上，retarget 后也站地上" |
+| **root_offset** | **乘缩放因子** + 乘 `Q_body`（`leg_t/leg_s`） | 把人物上下位移捕捉到，"原来两脚站地上，retarget 后也站地上"。**✅ 已落地**（2026-09-20）|
+
+> ✅ **本行已落地**：`root_offset` 的**完整语义定义**（坐标系/单位/量纲）、烘焙接线、重定向搬运
+> 三项均已于 2026-09-20 完成 —— **定稿见 `jpov_root_offset_design.md`**（本文件为设计源流，
+> 落地细节以那份为准）。
 
 ### 6.3 root_offset 缩放（Danis 方案 + 评估）
 
@@ -428,9 +433,10 @@ Danis：
 
 ✅ **方向与业界一致** —— 业界称 root motion 的 **scale adaptation**，是常规做法。
 
-⚠️ **两个必须先解决的问题**：
+⚠️ **两个必须先解决的问题**（→ **已于 2026-09-20 全部解决**，见 `jpov_root_offset_design.md`）：
 
 1. **`root_offset` 当前没接线**（§0.2）—— 要生效必须**先把它接进烘焙**（`skeleton_manager.cc`）
+   → ✅ 已接线（`skeleton_manager.cc` 根骨抹平项）；同时修正了 FBX 侧存的"全量 vs 增量"语义。
 2. **标量因子是粗略近似** —— 更准是按链长比（"根到脚"的骨长和之比）；但步幅、接触点仍受影响
 
 **业界的现实态度**（引文）：

@@ -49,17 +49,33 @@ retarget（M4）之前有一步「**先别上真皮**」：把 FBX 动作套到*
 
 ### 3.1 骨架与动画**分两个 loader 入口**取，靠「旋转与单位无关」拼起来
 
-- `skeleton_` ← `LoadFbxSkeleton`：`rest_offset` 已归一为**米**，`bind_rotation` 为 bind 朝向；
-- `clip_` ← `LoadFbxAnimation`：`fps` + 全帧；帧里存的是**相对 bind 的增量旋转**。
+- `skeleton_` ← `LoadFbxSkeleton`：`rest_offset` 为**米**，`bind_rotation` 为 bind 朝向；
+- `clip_` ← `LoadFbxAnimation`：`fps` + 全帧；帧里存的是**相对 bind 的增量旋转**（无量纲）
+  + **相对 bind 的根位移 `root_offset`（长度量，**米**）**。
 
-帧里只有**旋转**（纯角度量，与单位无关）+ 根位移，而骨架给的是**米制骨长** —— 两者
-叠起来天然自洽（米制骨架 + 增量旋转），无需任何缩放。两个入口的骨序同源（同一条
+**旋转**是纯角度量、与单位无关 ⇒ “米制骨架 + 增量旋转”叠加无碍；两道**长度量也都是米**
+（loader 在加载边界换算，见 `src/fbx_loader.h`「单位铁律」）⇒ 下游（重定向/火柴人/场景）
+**任何地方都不需要再做换算**。两个入口的骨序同源（同一条
 `CollectBoneNodes` DFS），`LoadFbx` 里 **CHECK 骨数 + 逐骨骨名一致**，防止将来某侧改了
 收集顺序而静默错位（把 A 骨的旋转套到 B 骨上）。
 
-> 为什么不直接用 `LoadFbxAnimation` 的 `clip.skeleton`（源单位 cm）？那样骨架是 cm 制，
-> 要么整体缩放（还得知道 `unit_meters`），要么场景尺度不对。用 `LoadFbxSkeleton`
-> 顺便复用「与 glb / Mixamo23 同尺度（米）」这条既有约定。
+> 两个入口现在**完全同源**（同一文件 → 同一骨架、同尺度），用哪个都行。本文件用
+> `LoadFbxSkeleton`（语义上“取骨架”更直白）。
+
+#### ⚠️ 单位纪律（2026-09-20 修 bug 后新增 —— 勿删）
+
+本条曾是一道真陷阱：`root_offset` 是**长度量**，旧行为下 `clip_` 的帧是**源单位**
+（Mixamo = cm），而下游几何**全是米制**（`skeleton_` 米 / glb 米 / 地面米）。重定向时用骨盆高
+做尺度比（无量纲骨长比），把 cm 的位移配到 m 的骨架上 ⇒ 比值静默错 **100 倍**
+（实测 |root_offset| 最大 **63.6 m**）⇒ 蓝骨人 / 蓝带皮**飞出画面**。
+且当时的 gold 只盖了 naive 对照路径（`root_offset` 置 0）→ 静默通过；现已补上重定向路径的
+数值 + 可见性 + gold 三道门禁（见 test/fbx_viewer/jpov_fbx_pose_gold_test.cc ⑤）。
+
+**现行纪律：换算只在加载边界发生。** `LoadFbxAnimation` 现在也输出米，观察器因此
+**不再需要任何归一函数**（历史上那个 `NormalizePoseLengthsToMeters()` 已删）。
+自查造 pose 注入时（`SetFramePoseForTest`）仍请用米。
+
+关联测试：`test/fbx_viewer/jpov_fbx_retarget_units_test.cc`（含负向验证：把帧当漏换算 ⇒ 超量级）。
 
 ### 3.2 「位姿 → 几何」直通（CPU 重建 mesh），不走 GPU 蒙皮
 
@@ -169,7 +185,7 @@ tools/jpov/build_jpov_fbx_viewer.sh                   # 编译 + 拷字体 + 打
 
 `TransferPoseByNameNoRetarget` 的语义（**刻意直搬**，函数名即警示）：按骨名匹配；
 命中则**数值原样**写入（不转轴、不共轭）；未命中 / 源走 rest 的骨保持 identity；
-`root_offset` 不搬（跨骨架单位/比例无意义、火柴人也不用它）。
+`root_offset` 置 0（无重定向 ⇒ 没有 Q_body / 腿长比，无从换算；且它是刻意做的对照路径）。
 
 ### 4.2 为什么这个"错"是可预期的（实测数据）
 

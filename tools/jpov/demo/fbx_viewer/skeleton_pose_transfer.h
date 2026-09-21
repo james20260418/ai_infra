@@ -14,7 +14,9 @@
 //   - 命中但源 pose 为空（= 源走 rest，没旋转可搬）→ 也是 identity；
 //   - stats.mapped 统计的是**骨名命中数**（与源 pose 有无内容无关，供面板显示"对得上多少骨"）；
 //   - 源里多出的骨（如手指）原样忽略；
-//   - root_offset **不搬**：跨骨架的单位/比例不同，数值搬过去无意义；且火柴人渲染不使用它。
+//   - root_offset **不搬**（输出恒 0）：本函数是**刻意不做重定向的对照组**，没有两侧几何
+//     基准（没有 Q_body、没有两侧腿长比）⇒ 无从换算。注：火柴人渲染现已会用 root_offset
+//     （见 interface/skeleton_mesh.h），故本函数置 0 是"不搬"，不是"下游用不上"。
 //
 // 职责边界：纯 CPU / GL-free / 不碰渲染（同 animation_sampler.h、skeleton_mesh.h）。
 

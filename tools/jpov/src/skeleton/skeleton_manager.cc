@@ -11,6 +11,10 @@
 //     jointLocal(j) = T(rest_offset[j]) · R(pose.joint_rotation[j])   （局部：先平移骨长+再转）
 //     child = parent × jointLocal(child)                             （parent 沿 joints 树向上）
 //   finalMatrix(j, pose) = jointWorld(j, pose) · inverse_bind(j)      （折入逆绑定，方案甲）
+//   【根骨附加项（2026-09-20 接线）】根骨的平移取 T(rest_offset[root] + pose.root_offset)：
+//     root_offset = 相对 bind 位置的 root-motion 平移量（根骨父坐标系、同单位；默认 0），
+//     使动画的"整体位移"能真正落到骨架上，不再原地滑步/悬空。
+//     定义与量纲见 interface/skeleton_types.h 的 root_offset 字段 + docs/jpov_root_offset_design.md。
 //   → 刚体矩阵（本链路只含旋转/平移）⇒ 无损转成对偶四元数 q̂ = q + ε·t，t = ½·v̂ ⊗ q：
 //     atlas 每骨 2 texel：texel0 = 实部 q(xyzw)、texel1 = 对偶部 t(xyzw)；
 //     蒙皮 VS 逐骨取 q、t，做**刚体混合**（DLB）后直接变换顶点（见 skinning_shader.h）。
@@ -185,9 +189,22 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
             // 骨的世界矩阵：局部 = T(rest 平移) × R(bind 朝向) × R(pose 旋转)，沿树复合。
             //   jointWorld[j] = (j==根? I4 : jointWorld[parent]) · local(j)
             // bind_rotation 为空时按恒等处理（兼容"骨长即朝向"的极简骨架）。
+            //
+            // root-motion（2026-09-20 接线，见 docs/jpov_root_offset_design.md §2.2）：
+            //   仅**根骨**的平移多吃一项 pose.root_offset（= 相对 bind 位置的平移量，父系下）。
+            //   即 jointLocal(root) = T(rest_offset[root] + root_offset) · R(bind) · R(pose)。
+            //   非根骨没有平移自由度（SkeletonPose 契约="只驱动旋转"，骨长由 rest_offset 给），
+            //   故 root_offset 只对 parent == kSkeletonNoParent 那一根生效。
+            //   ⚠️ 本项**不改 JointLocal 签名**（它被多处在用），只在调用点把平移量相加。
+            //   root_offset 默认 0 ⟹ 与接线前逐字节一致（零回归）。
             std::vector<Mat4> jw(bone);
             for (int j = 0; j < bone; ++j) {
-                const Vec3f& off = type.joints[j].rest_offset;
+                const bool is_root = (type.joints[j].parent == kSkeletonNoParent);
+                Vec3f off = type.joints[j].rest_offset;
+                if (is_root) {
+                    off = Vec3f(off.x() + pose.root_offset.x(), off.y() + pose.root_offset.y(),
+                                off.z() + pose.root_offset.z());
+                }
                 const geom::Quaternion<float> bind =
                     type.bind_rotation.empty()
                         ? geom::Quaternion<float>::Identity()
@@ -197,7 +214,7 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
                         ? pose.joint_rotation[j]
                         : geom::Quaternion<float>::Identity();
                 Mat4 local = geom::math::JointLocal(off, bind, pose_rot);
-                if (type.joints[j].parent == kSkeletonNoParent) {
+                if (is_root) {
                     jw[j] = local;
                 } else {
                     const int pr = type.joints[j].parent;
