@@ -78,11 +78,13 @@
     越大，把色温往灰白插值（霾天蓝天发白、饱和度下降）。只调色，不调亮。
 - `intensity = 1.0` ≈ **正午晴空亭子阴影里的环境光 ≈ 20,000 lux**。
 - 环境光无方向、无影子，是 PBR 的 `ambient × base_color × AO` 项。
-- **自动推导 `AmbientLight::AmbientIntensity()`（2026-08-31 调参）**：随仰角查天光衰减
-  PWL × 混度衰减 `TurbAmbLoss(turb)`：
-  `intensity = noon_intensity × 仰角系数 × TurbAmbLoss(turb)`。
+- **自动推导 `AmbientLight::AmbientIntensity()`（2026-08-31 调参，2026-09-21 加夜色项）**：
+  日间随仰角查天光衰减 PWL × 混度衰减 `TurbAmbLoss(turb)`：
+  `日间项 = base_intensity × 仰角系数 × TurbAmbLoss(turb)`。
   仰角表（2026-08-31 当前实测标定版）：`{1,2,5,10,30,45,90}° → {0.1,0.15,0.25,0.25,0.3,0.38,0.4}`。
   混度乘子见【第九节】；turb=2 时为 1.0，不改变晴空基准。
+  **夜色项**（2026-09-21 加）：`kNightAmbientCurve(夜色平均亮度)` × `(1−daylight)`，
+  与日间项按同一 daylight 因子交接（详见【第十节·4.1】）。
 - 参考：Godot 官方 `Ambient Energy 0.3~0.8`（"lower = harder shadows"）；
   LearnOpenGL/PBR 常数环境项 ≈ 0.03（相对光源 1.0）。JPOV 以 20k lux 阴影为
   1.0 锚点，其他时刻/天气按比例缩放（夜晚远小于日间）。
@@ -406,19 +408,24 @@ TurbAmbLoss(turb)： 2→1.00  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50
 
 ### 4.1 夜间环境光的重新标定（2026-09-21，随夜色上天一起做）
 
-`AmbientIntensity()` 原曲线是按「暮色仍未消失」的旧场景标定的（那时夜色默认 0），
-在 0° 以下 PWL 夹断到 **0.10**。夜色上天后，该值比夜色底色的量级（平均亮度
-≈ 0.0325）大 3 倍，且与夜色天空的亮度关系不成立。故 `AmbientIntensity()` 叠加一项
-**由夜色两色平均亮度推导的常数环境光**，用同一 `(1−daylight)` 因子交叉淡入淡出：
+`AmbientIntensity()` 叠加一项**由夜色亮度驱动的额外环境光**，用同一 `(1−daylight)`
+因子交叉淡入淡出：
 
 ```
-ambient = 暮色项(仰角曲线 × TurbAmbLoss) × daylight × noon_intensity
-        + night_ambient_intensity × mean(night_zenith, night_horizon) × (1−daylight)
+ambient = 暮色项(仰角曲线 × TurbAmbLoss) × daylight × base_intensity
+        + kNightAmbientCurve(夜色平均亮度) × base_intensity × (1−daylight)
 ```
 
-- 夜色项默认倍数 `night_ambient_intensity = 1.0`（环境光亮度量级与夜空底色相当）。
-- 改夜色两色即自动同步缩放夜间环境光，不需第二个旋钮。
-- 日间（daylight=1）与旧行为**完全一致**；两色为 0 时也退化为旧行为。
+- `kNightAmbientCurve`：**夜色平均亮度 → 夜间额外 ambient 绝对强度** 的分段线性映射，
+  当前两个采样点（Danis 2026-09-21 定）：
+  `lum=0.0 → 0.0`（无夜色则无额外 ambient）、`lum=1.0 → 0.4`（与白天正午同量级）。
+  当前夜色（平均亮度 0.0325）→ 夜间额外 ambient = **0.0130**。
+- **与夜色颜色解耦**：本曲线吃的是“夜色亮度”这个标量，它映射到**绝对强度**；
+  改夜色**颜色**（色调）不会静默改 ambient 强度。要调夜间亮度就改这条曲线。
+- `base_intensity`（原 `noon_intensity`）是 ambient 的**整体倍率**（同时作用于
+  暮色项与夜色项），默认 1.0。
+- 日间（daylight=1）与旧行为**完全一致**；夜色两色为 0 时夜色项也为 0（曲线过原点），
+  退化为旧行为。
 - 同理 `AmbientColor()` 也按同一因子在暮色色温与夜色底色间插值（只改色调）——
   三者（天空 / 环境光色 / 环境光强）同一条时间轴，不会一个已入夜另一个还在黄昏。
 

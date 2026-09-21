@@ -948,38 +948,49 @@ struct SkyCommand {
     //   90→1.00  60→0.92  45→0.84  30→0.70  20→0.55  15→0.44  12→0.38
     //   10→0.32  7→0.24  5→0.18  3→0.12  0→0.06  -3→0.03  -6→0.012
     //   -12→0.004  -18→0.001
-    // 正午（90°）系数=1.0，故 intensity = noon_intensity × 系数。
+    // 正午（90°）系数=1.0，故 intensity = base_intensity × 系数。
     // 仰角 >90° 夹断到 1.0；< -18° 夹断到 ~0.001（夜天空底色，不归纯黑）。
     //
     // ── 夜色 ambient 叠加（2026-09-21）──
     // 背景：本曲线原本是按“暮色仍未消失”的旧场景标定的（那时夜色两色默认 0）。
-    // 现在夜色成为标准天光的默认组成部分，夜间环境光的**亮度**必须跟夜色底色
-    // 量级匹配，否则物体比天空暗一个数量级（夜色天空 14~62/255，而旧曲线在
-    // 0° 以下夹断到 0.10 → 物体只剩 ~3/255，几乎全黑）。故叠加一项**由夜色两色
-    // 推导的常量环境光**：
+    // 现在夜色成为标准天光的默认组成部分，需要在日落后**额外**补一项由夜色
+    // 亮度驱动的 ambient，否则太阳一落 ambient 就掉到曲线的夹断值，与夜空亮度
+    // 失配（物体比天空暗一个数量级）。
     //
-    //   ambient = 暮色项(本曲线) × daylight × noon_intensity
-    //           + 夜色项(night_ambient_night_intensity × 夜色平均亮度) × (1−daylight)
+    //   ambient = 暮色项(本曲线 × TurbAmbLoss) × daylight × base_intensity
+    //           + 夜色项 × (1 − daylight)
     //
-    // 其中 daylight = clamp((sun_y-0.03)/0.10, 0, 1) 与 shader、AmbientColor
-    // 完全同源 —— 保证“天色 / 环境光色 / 环境光强”三者是同一条时间轴。
-    //
-    // 夜色项的亮度基准：夜色底色的**平均亮度**（night_ambient_intensity 是相对
-    // 该亮度的倍数，默认 1.0 = 环境光亮度量级与夜空底色相当）。这样调夜色两色
-    // 即可同步自动缩放夜间环境光，不需手调第二个旋钮。
+    // 其中：
+    //   daylight = clamp((sun_y-0.03)/0.10, 0, 1) 与 shader / AmbientColor 同源
+    //             —— 保证“天色 / 环境光色 / 环境光强”是同一条时间轴。
+    //   夜色项 = kNightAmbientCurve(夜色平均亮度) —— 一个**分段线性函数**，
+    //            把“夜色底色的平均亮度”映射到“夜间额外的 ambient 绝对强度”。
+    //            采样点（Danis 2026-09-21 定，与白天表同一数量级）：
+    //              夜色 lum = 0.0 → 额外 ambient 0.0
+    //              夜色 lum = 1.0 → 额外 ambient 0.4（= 白天正午 0.4 同量级）
+    //            故本曲线是“夜色 lum → night ambient”的**绝对强度映射**，
+    //            与夜色**颜色**（色调）解耦：改夜色颜色不会静默改 ambient 强度。
+    //            后续细调夜色只需改这条曲线（加采样点即可），不动其它逻辑。
     //
     // 注：日间行为与曲线完全一致（daylight=1 → 夜色项 0）；夜色两色为 0 时
-    // 夜色项也是 0，退化为旧行为。
+    // 夜色项也是 0（曲线过原点），退化为旧行为。
     //
     // 用法：ambient 的亮度跟随天光自动变化：
     //   AmbientLight light;
     //   light.color = sky.AmbientColor();
     //   light.intensity = sky.AmbientIntensity();   // 正午最亮，黄昏转暖，入夜接夜色
-    float AmbientIntensity(float noon_intensity = 1.0f,
-                           float night_ambient_intensity = 1.0f) const {
+    float AmbientIntensity(float base_intensity = 1.0f) const {
         static const geom::math::PiecewiseLinearFunction<double> kSkyIntensityCurve(
             std::vector<double>{1,  2,   5,   10,  30, 45,  90},
             std::vector<double>{0.1,0.15,0.25,0.25,0.3,0.38,0.4});
+        // 夜色平均亮度 → 夜间额外 ambient 绝对强度 的分段线性映射。
+        // 两个采样点（Danis 定）：lum=0→0.0（无夜色则无额外 ambient），
+        //                       lum=1→0.4（与白天正午同量级）。
+        // lum 超出 [0,1] 时**夹断到端点 y**（PiecewiseLinearFunction 不外推）；
+        // 后续细调夜色只改本表（加采样点即可），不动其它逻辑。
+        static const geom::math::PiecewiseLinearFunction<double> kNightAmbientCurve(
+            std::vector<double>{0.0, 1.0},
+            std::vector<double>{0.0, 0.4});
         const Vec3f d = sun_dir.Unit();
         const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
         const float elev_deg = std::asin(sun_y) *
@@ -988,19 +999,21 @@ struct SkyCommand {
         // （DHI），随浊度衰减**远比直射光缓和**：薄云时漫射甚至略升（更多直射被
         // 散射成漫射），仅重霾才明显下降。故用独立的平缓曲线，不与 TurbSunLoss 同用。
         const float day_term =
-            noon_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg)) *
+            base_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg)) *
             TurbAmbLoss(turbidity);
         // 与 shader / AmbientColor 同源的昼夜因子（0=夜 1=日）。
         const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
         if (daylight >= 1.0f) {
             return day_term;
         }
-        // 夜色项：夜色两色的平均亮度（整个上半球的环境光量级）。
+        // 夜色项：把夜色底色的**平均亮度**经 kNightAmbientCurve 映射成夜间额外
+        // ambient 的绝对强度（lum=0→0.0, lum=1→0.4）。与夜色颜色解耦。
         const float night_lum = (night_zenith_color.r + night_zenith_color.g +
                                  night_zenith_color.b + night_horizon_color.r +
                                  night_horizon_color.g + night_horizon_color.b) /
                                 6.0f;
-        const float night_term = night_ambient_intensity * night_lum;
+        const float night_term =
+            base_intensity * static_cast<float>(kNightAmbientCurve(night_lum));
         return day_term * daylight + night_term * (1.0f - daylight);
     }
 
