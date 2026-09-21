@@ -103,11 +103,11 @@ position.z = R * cos(phi) * cos(theta)
 
 太阳光传播方向 `{0,-1,-1}`；SkyCommand：turbidity=2、season 中性、intensity=1.0、
 sun_dir=+`{0,1,1}`（取反）；平行光与 ambient 均**由 sky 推导**（task#3 验收）——
-color 用 `DirectionalColor()/AmbientColor()`（色调随太阳仰角变），intensity 用
-`DirectionalIntensity()/AmbientIntensity()`（相对衰减随太阳仰角变），但绝对强度锚定
+color 用 `SunDirectionalColor()/AmbientColor()`（色调随太阳仰角变），intensity 用
+`SunDirectionalIntensity()/AmbientIntensity()`（相对衰减随太阳仰角变），但绝对强度锚定
 LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准 0.3（PR #60 定标，
 勿 0.5，勿裸 `AmbientIntensity()=1.0`，否则影子被 ACES 压没）；`tone_mapping=true`。
-（注：2026-08-31 调参，`DirectionalIntensity` 的 midday 默认已改 2.2，`MakeNoonLighting`
+（注：2026-08-31 调参，`SunDirectionalIntensity` 的 midday 默认已改 2.2，`MakeNoonLighting`
 实际 sun≈2.2×正午系数、ambient=0.3；5:1 比例不变，文档基准 3.0 为设计锚点。）
 `near=0.05, far=1000, fov=60°`。
 
@@ -128,11 +128,11 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 
 光照（滑条 1~3）**全部由 sky 自动推导**（2026-08-31 移除旧的 sun/ambient 强度滑条，
 因为强度已内置到 sky 自动推导不再需人调）：
-- 传给 sky 的 `sun_dir` = `{cos(仰角), sin(仰角), 0}`，驱动 `DirectionalColor()/AmbientColor()/
-  DirectionalIntensity()/AmbientIntensity()`；turb 经 `TurbSunLoss()/TurbAmbLoss()` 衰减
+- 传给 sky 的 `sun_dir` = `{cos(仰角), sin(仰角), 0}`，驱动 `SunDirectionalColor()/AmbientColor()/
+  SunDirectionalIntensity()/AmbientIntensity()`；turb 经 `TurbSunLoss()/TurbAmbLoss()` 衰减
   强度，season 经 `SeasonTintScale()` 归一化偏置 color（天空+sun+ambient 色调一致）。
 - 交互与拍照共用 `OneIteration`，靠 `app.interactive_` 区分是否 `ui_.Emit`（同 arch §4 的 headless 区分思路）。
-- 基准强度锚定：`DirectionalIntensity()` midday 默认 2.2、`AmbientIntensity()` noon 默认 1.0
+- 基准强度锚定：`SunDirectionalIntensity()` midday 默认 2.2、`AmbientIntensity()` noon 默认 1.0
   （正午环境光再叠加，见 MakeLighting 注释）；turb=2（大晴）时 Turb*Loss=1.0 不改变基准。
 
 ---
