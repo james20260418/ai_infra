@@ -64,7 +64,7 @@ int RunCapture(const std::string& out_dir) {
 
     jpov_skylight::SkylightApp app(cfg);
     app.SetShowPanel(false);    // 纯 3D 截图（无面板）
-    app.SetShowScene(true);
+    app.SetShowScene(false);    // 关掉三方块/地面——本组拍的是**天空本身**
     app.Init();
     InstallScene(app);
 
