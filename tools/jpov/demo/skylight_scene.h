@@ -126,7 +126,8 @@ inline jpov::PBRMaterial GroundMaterial() {
 //                  daylight 因子精确压到 0，画面**只剩夜色**（本查看器的主要用途）。
 //                  90° = 正午。
 //   turbidity    — 大气浊度 [2,8]。影响 (a) 天空散射色/日盘 + (b) sun/ambient
-//                  的浊度衰减乘子（TurbSunLoss/TurbAmbLoss）。
+//                  的浊度衰减乘子（TurbSunLoss/TurbAmbLoss）+ (c) **月晕宽度**
+//                  （浊度越大晕越宽，见 sky_renderer.h 的 discGlow 调用）。
 //   season_r     — 季节 R 色温乘子 [0.5,2.0]。**只染白天项**（见 SkyCommand 注释：
 //                  season 是"日光散射的季节色温"）——夜色项不受它影响，用滑条
 //                  拉到极端即可肉眼验证"夜色不被季节染色"。
@@ -136,26 +137,45 @@ inline jpov::PBRMaterial GroundMaterial() {
 //                  实现方式：把 kCityNight* × night_scale 直接写进 sky 的两个
 //                  night 颜色；sky.intensity 保持 1.0 不动（intensity 是"天光总
 //                  开关"，同时作用于日夜两层，不适合拿来做夜色的独立旋钮）。
+//   moon_elev_deg   — 月亮仰角（度，[0,90]），与太阳仰角**独立**（日月的场景是
+//                  两个天体各自的位置）；月盘方向 = 同方位 + 极角，但**水平方位
+//                  与太阳相反**（本查看器的摆放选择：日月各在天球一侧，见下）。
+//   moon_brightness — 月盘自发光亮度基数（绝对量；0 = 不画月盘）。
+//   moon_glow       — 月晕强度（绝对量；0 = 无月晕）。
 //
 // 注：sun/ambient 的强度不在此函数参数里——本函数只造 sky；平行光与环境光由
 //     MakeSun()/MakeAmbient() 另造（它们只取 sky 的色调，强度由调用方给绝对量，
 //     见下）。
 inline jpov::SkyCommand MakeSky(float elev_deg, float turbidity, float season_r,
-                                float night_scale) {
-    const float elev_rad = elev_deg * (3.14159265358979323846f / 180.0f);
+                                float night_scale, float moon_elev_deg,
+                                float moon_brightness, float moon_glow) {
+    const float deg2rad = 3.14159265358979323846f / 180.0f;
+    const float elev_rad = elev_deg * deg2rad;
     const float sy = std::sin(elev_rad);
     const float sx = std::cos(elev_rad);
     const jpov::Vec3f sun_dir = {sx, sy, 0.0f};   // 指向太阳（+X 侧升起）
 
+    // 月盘方向：**水平方位与太阳相反**（−X 侧升起），仰角独立由 moon_elev_deg 给。
+    // 这是**查看器的摆放选择**（日月各在天球一侧，便于同屏对照），不是接口契约——
+    // sky.moon_dir 是独立输入，接口不假设"月 = −日"。
+    const float moon_rad = moon_elev_deg * deg2rad;
+    const float mx = -std::cos(moon_rad);
+    const float my = std::sin(moon_rad);
+
     jpov::SkyCommand sky{};
     sky.sun_dir     = sun_dir;
+    sky.moon_dir    = {mx, my, 0.0f};
     sky.turbidity   = turbidity;
     sky.season      = {season_r, 1.0f, 1.0f, 1.0f};   // 只调 R 通道（季节色温）
     sky.intensity   = 1.0f;                            // 天光总开关（日夜共用）
     sky.ground_color = {0.02f, 0.02f, 0.025f, 1.0f};   // 夜间地色偏暗（地平线下）
     sky.sun_radius     = 0.02f;
     sky.sun_brightness = 1e3f;
-    sky.sun_glow       = 0.0f;
+    sky.sun_glow       = 0.0f;   // 日盘不开光晕（本查看器只看盘与天色）
+    // 月盘：半径与日盘同值；亮度/光晕由滑条给绝对量（0 = 不画）。
+    sky.moon_radius     = 0.02f;
+    sky.moon_brightness = moon_brightness;
+    sky.moon_glow       = moon_glow;
     // 夜色两色 × 夜色强度（滑条独立旋钮；=0 即关闭夜色，用于对照）。
     sky.night_zenith_color  = {kCityNightZenith.r  * night_scale,
                                kCityNightZenith.g  * night_scale,
