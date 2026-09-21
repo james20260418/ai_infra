@@ -128,6 +128,18 @@ int RunCapture(const std::string& out_dir) {
     app.view_.theta = 3.0f * 3.14159265358979323846 / 4.0;  // 斜看三方块
     shoot("moon_with_scene");        // 三方块 + 月盘同屏
 
+    // ── 昼夜过渡扫谱（环境光色/强连续性验收）：场景 + 夜色 + 月盘，扫太阳仰角 ──
+    app.SetShowScene(true);
+    app.ambient_intensity_ = 1.0f;   // 走 AmbientIntensity 曲线（含夜色项）
+    app.moon_brightness_ = 5.0f;
+    app.moon_glow_ = 0.1f;
+    app.view_.phi   = 0.15;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    for (int e : {20, 8, 4, 2, 0}) {
+        app.elev_deg_ = static_cast<float>(e);
+        shoot(("transition_elev" + std::to_string(e)).c_str());
+    }
+
     app.Finalize();
     return 0;
 }
