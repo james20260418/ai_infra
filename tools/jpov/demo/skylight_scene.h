@@ -143,6 +143,9 @@ inline jpov::Vec3f DirFromAngles(float elev_deg, float azim_deg) {
 
 // ── 天光装配：由四个自由度构造 SkyCommand，并**由它推导**全部光照 ──
 //
+// 场景另加两个模型（桌子 / 高模橡树）供夜色标定时观察物体受光；模型加载与
+// 摆放见 LoadSceneModels()（资源由 build 脚本拷到 exe 旁 models/，相对路径硬编码）。
+//
 // 这是本查看器与 model viewer 的核心差别所在，故单列并写清语义：
 //
 //   sky = CreateDefaultSkyCommand(turb, season_tint, sun_dir, moon_dir)

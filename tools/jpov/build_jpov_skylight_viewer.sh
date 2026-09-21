@@ -46,7 +46,15 @@ echo "==> 3. 拷贝字体资源到 output/jpov_skylight_viewer/fonts/"
 mkdir -p "$OUTPUT_DIR/fonts"
 cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts/"
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
-ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/"
+
+# 拷贝模型资源到 exe 旁 models/（与 demo 里硬编码的相对路径 "models/xxx.glb" 对应）。
+# 来源：桌子取自 test/object3d/scene_assets/，高模橡树取自 test/object3d/oak_tripo_negative/。
+echo ""
+echo "==> 4. 拷贝模型资源到 output/jpov_skylight_viewer/models/"
+mkdir -p "$OUTPUT_DIR/models"
+cp -v "$PROJECT_DIR/tools/jpov/test/object3d/scene_assets/table.glb"              "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/test/object3d/oak_tripo_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
+ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"
 
 echo ""
 echo "============================================"

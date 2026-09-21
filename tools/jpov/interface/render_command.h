@@ -835,6 +835,25 @@ struct SkyCommand {
     Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
     Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
 
+    // ── 夜色亮度旋钮（2026-09-21 晚新增）──
+    //
+    // night_scale：把夜色两色**整体缩放**到给定亮度等级的简单旋钮。
+    //   - 语义：夜色两色先各自 **乘** night_scale，再进着色器。
+    //   - 默认 1.0 = 不改（既有默认都市夜色原值）。
+    //   - 为什么单独给：调“夜有多亮”不应要求逐个改两个颜色（易破坏色调比例），
+    //     也不应用 intensity（那是天光总开关，会连带改白天）。
+    //   - 注：它同时影响**夜色 ambient**（因为后者以 night_lum 为乘子，见下）。
+    float night_scale = 1.0f;
+
+    // night_ambient：夜间**额外 ambient 强度**的直接旋钮（绝对量，默认 0 = 不开）。
+    //   - 用法（在 AmbientIntensity 里）：
+    //       night_term = base_intensity × night_ambient × night_lum
+    //     其中 night_lum = 夜色两色**经 night_scale 缩放后**的平均亮度。
+    //   - 为何是“直接旋钮”而非分段线性映射：夜色与 ambient 都要标定，中间再套
+    //     一条曲线会把两个自由度耦在一起、反而难调；直接给旋钮，用眼睛标定。
+    //   - 默认 0 = 不开夜色 ambient（退化为旧行为）。
+    float night_ambient = 0.0f;
+
     // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
     // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
     // colorTempToLinear() 逐字一致，保证 C++ 侧推导的直射光颜色与 shader 侧
@@ -983,14 +1002,6 @@ struct SkyCommand {
         static const geom::math::PiecewiseLinearFunction<double> kSkyIntensityCurve(
             std::vector<double>{1,  2,   5,   10,  30, 45,  90},
             std::vector<double>{0.1,0.15,0.25,0.25,0.3,0.38,0.4});
-        // 夜色平均亮度 → 夜间额外 ambient 绝对强度 的分段线性映射。
-        // 两个采样点（Danis 定）：lum=0→0.0（无夜色则无额外 ambient），
-        //                       lum=1→0.4（与白天正午同量级）。
-        // lum 超出 [0,1] 时**夹断到端点 y**（PiecewiseLinearFunction 不外推）；
-        // 后续细调夜色只改本表（加采样点即可），不动其它逻辑。
-        static const geom::math::PiecewiseLinearFunction<double> kNightAmbientCurve(
-            std::vector<double>{0.0, 1.0},
-            std::vector<double>{0.0, 0.4});
         const Vec3f d = sun_dir.Unit();
         const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
         const float elev_deg = std::asin(sun_y) *
@@ -1006,14 +1017,17 @@ struct SkyCommand {
         if (daylight >= 1.0f) {
             return day_term;
         }
-        // 夜色项：把夜色底色的**平均亮度**经 kNightAmbientCurve 映射成夜间额外
-        // ambient 的绝对强度（lum=0→0.0, lum=1→0.4）。与夜色颜色解耦。
+        // 夜色项（直接旋钮，不再经 PWL 映射）：
+        //   night_term = base_intensity × night_ambient × night_lum
+        // night_lum = 夜色两色平均亮度（经 night_scale 缩放后的），作为**乘子**；
+        // night_ambient = 夜间额外 ambient 的直接旋钮（默认 0 = 不开）。
+        // 为何直接给：夜色与 ambient 都要标定，中间再套一条曲线会把两个自由度
+        // 耦在一起、反而难调；两个独立旋钮可各自用眼睛标定。
         const float night_lum = (night_zenith_color.r + night_zenith_color.g +
                                  night_zenith_color.b + night_horizon_color.r +
                                  night_horizon_color.g + night_horizon_color.b) /
                                 6.0f;
-        const float night_term =
-            base_intensity * static_cast<float>(kNightAmbientCurve(night_lum));
+        const float night_term = base_intensity * night_ambient * night_lum;
         return day_term * daylight + night_term * (1.0f - daylight);
     }
 
@@ -1099,11 +1113,12 @@ struct SkyCommand {
         // daylight=1（白天）→ 纯暮色/日光色；daylight=0（夜）→ 纯夜色底色。
         const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
         if (daylight < 1.0f) {
-            // 夜色端 = 天顶色与地平色的平均（环境光 = 上半球平均入射）。
+            // 夜色端 = 天顶色与地平色的平均（环境光 = 上半球平均入射），
+            // 含 night_scale（与天空背景同一缩放，保证天色与环境光色一致）。
             const Color night_avg{
-                (night_zenith_color.r + night_horizon_color.r) * 0.5f,
-                (night_zenith_color.g + night_horizon_color.g) * 0.5f,
-                (night_zenith_color.b + night_horizon_color.b) * 0.5f,
+                (night_zenith_color.r + night_horizon_color.r) * 0.5f * night_scale,
+                (night_zenith_color.g + night_horizon_color.g) * 0.5f * night_scale,
+                (night_zenith_color.b + night_horizon_color.b) * 0.5f * night_scale,
                 1.0f,
             };
             // 把夜色当“颜色”（单位尺度），再乘回当前天光的**总亮度量级**，
@@ -1153,6 +1168,8 @@ struct SkyParams {
     float moon_set_angle_ratio = 1.4f;
     Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
     Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
+    float night_scale = 1.0f;
+    float night_ambient = 0.0f;
 };
 
 // CreateSkyCommand —— **完整版**天光构造接口：由 SkyParams 逐字段填充 SkyCommand。
@@ -1179,6 +1196,8 @@ inline SkyCommand CreateSkyCommand(const SkyParams& params) {
     sky.moon_set_angle_ratio = params.moon_set_angle_ratio;
     sky.night_zenith_color = params.night_zenith_color;
     sky.night_horizon_color = params.night_horizon_color;
+    sky.night_scale = params.night_scale;
+    sky.night_ambient = params.night_ambient;
     return sky;
 }
 

@@ -23,6 +23,7 @@
 //   ./tools/jpov/build_jpov_skylight_viewer.sh
 //   → output/jpov_skylight_viewer/jpov_skylight_viewer
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -48,6 +49,52 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.mat_ground_ = jpov_skylight::GroundMaterial();
 }
 
+// 额外模型（桌子 / 高模橡树）的**相对路径**（相对 exe 所在目录）。
+// build_jpov_skylight_viewer.sh 把两个 glb 拷到 output/<demo>/models/ 下；
+// 分发态即“exe 旁 models/” —— 与字体同一套“拷贝法”惯例（SOUL：路径硬编码 + 脚本拷贝）。
+inline constexpr const char* kTableModelPath = "models/table.glb";
+inline constexpr const char* kOakModelPath   = "models/tripo_oak_4k.glb";
+
+// 装载额外模型并摆到三方块周囲（供标定夜色 ambient 时观察物体受光）。
+// 位置/朝向由肉眼调：桌子放左侧（−X）、橡树放右侧（+X），都落在 40×40 地面内。
+//
+// 缩放：资产原始尺寸差异很大（橡树是 Tripo 生成的高模，原始尺寸未知），故按
+// **目标世界高度** 自动归一：scale = 目标高 / 资产包围盒高（Y 向）。若 bounds 无效
+// 则 scale=1（不静默乱缩，宁可看得出来不对）。
+void InstallModels(jpov_skylight::SkylightApp& app) {
+    auto load = [&app](const char* rel) {
+        jpov::GltfObject o = app.LoadGltf(rel);
+        CHECK(!o.empty()) << "LoadGltf failed: " << rel
+                          << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
+        return o;
+    };
+    // 按目标高度求缩放因子（bounds 无效时返回 1.0，不静默乱缩）。
+    auto scale_to_height = [](const jpov::GltfObject& o, float target_h) {
+        if (!o.bounds_valid) {
+            LOG(WARNING) << "模型无 bounds，scale 置 1（不自动归一）";
+            return 1.0f;
+        }
+        const float h = o.bounds_max[1] - o.bounds_min[1];
+        if (h <= 1.0e-6f) {
+            LOG(WARNING) << "模型 Y 向高度≈0，scale 置 1（不自动归一）";
+            return 1.0f;
+        }
+        return target_h / h;
+    };
+
+    // 桌子（低矮家具）：放到左侧，目标高 ~0.75 m（现代餐桌面高）。
+    jpov::GltfObject table = load(kTableModelPath);
+    const float table_scale = scale_to_height(table, 0.75f);
+    app.AddModel(std::move(table), /*center*/ {-2.6f, 0.0f, -0.4f},
+                 /*up*/ {0, 1, 0}, /*front*/ {1, 0, 0}, table_scale);
+
+    // 高模橡树：放到右侧，目标高 ~6 m（成熟橡树）。
+    jpov::GltfObject oak = load(kOakModelPath);
+    const float oak_scale = scale_to_height(oak, 6.0f);
+    app.AddModel(std::move(oak), /*center*/ {3.2f, 0.0f, -0.6f},
+                 /*up*/ {0, 1, 0}, /*front*/ {-1, 0, 0}, oak_scale);
+}
+
 // headless 拍摄：按硬编码的一组场景出图，写到 out_dir。
 // 这是交付验收用的确定性通路——不入 UI、不依赖交互。
 int RunCapture(const std::string& out_dir) {
@@ -65,6 +112,7 @@ int RunCapture(const std::string& out_dir) {
     app.SetShowPanel(false);    // 纯 3D 截图（无面板）
     app.Init();
     InstallScene(app);
+    InstallModels(app);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -94,11 +142,11 @@ int RunCapture(const std::string& out_dir) {
         LOG(INFO) << "capture: " << path;
     };
 
-    // 相机：三方块斜前方（theta=45° 在 +X/+Z 象限；R=6 使三块完整入画）。
+    // 相机：三方块 + 桌子/橡树整体入画（拉远 + 抬高，整体宽 ~9m、橡树高 6m）。
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.25;
+    app.view_.phi   = 0.35;
     app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 6.0;
+    app.view_.R     = 9.5;
 
     // ── A. 昼夜扫谱（太阳仰角递减，固定其余自由度）──
     // 场景 + 月色，验证天色/日照/环境光在同一条时间轴上平滑过渡。
@@ -154,6 +202,29 @@ int RunCapture(const std::string& out_dir) {
     app.view_.theta = 3.14159265358979323846 / 4.0;
     app.view_.R     = 6.0;
 
+    // ── F. 夜色标定矩阵（本 PR 目的）：night_scale × night_ambient 网格 ──
+    // 固定“入夜 + 月亮在天”，扫两个旋钮，让 Danis 肉眼标定二者的关系。
+    app.sun_elev_deg_ = 0.0f;         // 太阳落山（只剩夜色）
+    app.moon_elev_deg_ = 30.0f;
+    app.moon_azim_deg_ = 135.0f;      // 月亮在相机侧后方，不抢镜
+    app.view_.R     = 9.5;            // 拉远，把桌子/橡树都收进画面
+    for (float ns : {0.0f, 1.0f, 2.0f, 4.0f}) {
+        for (float na : {0.0f, 0.5f, 1.0f, 2.0f}) {
+            app.night_scale_ = ns;
+            app.night_ambient_ = na;
+            char name[64];
+            std::snprintf(name, sizeof(name), "cal_ns%.0f_na%.1f", ns, na);
+            shoot(name);
+        }
+    }
+    app.night_scale_ = 1.0f;
+    app.night_ambient_ = 0.0f;
+
+    // ── G. 模型放置自检：正午（看桌子/橡树是否正常入画）──
+    app.sun_elev_deg_ = 60.0f;
+    app.sun_azim_deg_ = 45.0f;
+    shoot("scene_noon_check");
+
     app.Finalize();
     return 0;
 }
@@ -191,12 +262,13 @@ int main(int argc, char** argv) {
 
     // ── 场景静态资源（只建一次，不在 OneIteration 里重复构造/上传）──
     InstallScene(app);
+    InstallModels(app);
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();
     app.view_.phi   = 0.25;                       // 略俯视（~14°）
     app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位
-    app.view_.R     = 6.0;
+    app.view_.R     = 9.5;
 
     // 交互事件循环（阻塞）。
     app.Run();
