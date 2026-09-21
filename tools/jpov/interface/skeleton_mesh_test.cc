@@ -554,4 +554,59 @@ TEST(MakeOrientedBox, NormalsStayUnitLengthAfterRotation) {
     }
 }
 
+// ==================== root_offset（root-motion）====================
+//
+// BuildBoneMeshInBoneSpace 必须把 pose.root_offset 当成**根骨的额外平移**（2026-09-20 接线，
+// 与 skeleton_manager.cc 烘焙同一条规则）。不接的话火柴人**只能表现姿态、不能表现位移**
+// （原地滑步）—— 而这正是当初拿来 CPU 自查重定向效果的手段，漏接就会看不见 root_offset 的错。
+//
+// 判据用**顶点质心位移**（而不是 size() 这类恒真量）：注入 root_offset=(0,0.3,0) 后，
+// 整堆顶点的质心必须恰好平移 (0,0.3,0)。
+
+// 顶点质心（用已有的 rod 端面顶点，无需借助其它不变量）。
+Vec3f MeshCentroid(const MeshData& m) {
+    Vec3f c(0.0f, 0.0f, 0.0f);
+    for (const Vec3f& p : m.positions) {
+        c += p;
+    }
+    const float n = static_cast<float>(m.positions.size());
+    return Vec3f(c.x() / n, c.y() / n, c.z() / n);
+}
+
+TEST(SkeletonMesh, RootOffsetTranslatesWholeMesh) {
+    const SkeletonType type = jpov::Mixamo23Skeleton(1.75f);
+    SkeletonPose base = SkeletonPose::Identity(type.bone_count());
+    SkeletonPose moved = base;
+    moved.root_offset = Vec3f(0.0f, 0.3f, 0.0f);  // 米
+
+    const MeshData m0 = jpov::BuildBoneMeshInBoneSpace(type, base, 0.04f);
+    const MeshData m1 = jpov::BuildBoneMeshInBoneSpace(type, moved, 0.04f);
+
+    ASSERT_EQ(m0.positions.size(), m1.positions.size());
+    ASSERT_GT(m0.positions.size(), 0u);
+    // 顶点数不能变（只是平移，不是重建）；但对错要看质心。
+    const Vec3f c0 = MeshCentroid(m0);
+    const Vec3f c1 = MeshCentroid(m1);
+    EXPECT_NEAR(c1.x() - c0.x(), 0.0f, 1e-5f) << "root_offset 的 x 分量没生效";
+    EXPECT_NEAR(c1.y() - c0.y(), 0.3f, 1e-5f) << "root_offset 的 y 分量没生效";
+    EXPECT_NEAR(c1.z() - c0.z(), 0.0f, 1e-5f) << "root_offset 的 z 分量没生效";
+}
+
+TEST(SkeletonMesh, ZeroRootOffsetIsByteIdentical) {
+    // root_offset = 0（默认）⇒ 与接线前逐顶点一致（零回归）。
+    const SkeletonType type = jpov::Mixamo23Skeleton(1.75f);
+    SkeletonPose explicit_zero = SkeletonPose::Identity(type.bone_count());
+    explicit_zero.root_offset = Vec3f(0.0f, 0.0f, 0.0f);
+    const SkeletonPose default_zero = SkeletonPose::Identity(type.bone_count());
+
+    const MeshData a = jpov::BuildBoneMeshInBoneSpace(type, explicit_zero, 0.04f);
+    const MeshData b = jpov::BuildBoneMeshInBoneSpace(type, default_zero, 0.04f);
+    ASSERT_EQ(a.positions.size(), b.positions.size());
+    for (size_t i = 0; i < a.positions.size(); ++i) {
+        EXPECT_FLOAT_EQ(a.positions[i].x(), b.positions[i].x());
+        EXPECT_FLOAT_EQ(a.positions[i].y(), b.positions[i].y());
+        EXPECT_FLOAT_EQ(a.positions[i].z(), b.positions[i].z());
+    }
+}
+
 }  // namespace

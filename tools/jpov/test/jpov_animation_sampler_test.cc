@@ -2,8 +2,8 @@
 //
 // 用 hip_hop_dance.fbx（Mixamo 舞，30fps / 518 帧 / 65 骨）验证：
 //   1. 两个 loader 入口给出**同一种骨架**（观察器"LoadFbxSkeleton 取骨架 + LoadFbxAnimation
-//      取帧"这条组合的前提）：骨数/骨名逐一相同、bind 朝向相同、rest_offset 只差一个统一的
-//      单位因子（≈ unit_meters，即 cm→m 归一）。
+//      取帧"这条组合的前提）：骨数/骨名逐一相同、bind 朝向相同、rest_offset 逐骨相等
+//      （两入口都在加载边界归一到米，2026-09-20「单位铁律」）。
 //   2. 帧网格上的采样 = 该帧本身（帧精确），且返回的起始帧下标正确。
 //   3. 全时间轴上采到的每个位姿都合法（骨数/尺寸/单位四元数/有限）。
 //   4. 动作确实在动（不是定格）。
@@ -147,14 +147,15 @@ int main(int argc, char** argv) {
     }
     LOG(INFO) << "1. 两个 loader 入口骨架一致（骨数/骨名/父索引/bind 朝向）";
 
-    // ---- 1b. rest_offset 只差一个统一单位因子（cm→m）----
-    // 骨长比值必须对所有骨**同一个数**（= unit_meters）；若两个入口真的取了不同骨长
-    // （如某侧没做单位归一），比值就会散开 → 本检查失败。
+    // ---- 1b. rest_offset 两入口**逐骨相等**（都在加载边界归一到米）----
+    // 两个 loader 入口对同一文件必须给出**同尺度的骨架**（2026-09-20 “单位铁律”：
+    // 换算只发生在加载边界）。骨长比值必须对全部骨都 = 1；若某一侧没做单位归一
+    // （旧行为：clip 原样透传 cm 源），比值就会是 0.01 而不等于 1 → 本检查失败。
     double ratio_sum = 0.0;
     size_t ratio_count = 0;
     for (size_t i = 0; i < nb; ++i) {
         const jpov::Vec3f& a = skel.joints[i].rest_offset;           // 米
-        const jpov::Vec3f& b = clip.skeleton.joints[i].rest_offset;  // 源单位(cm)
+        const jpov::Vec3f& b = clip.skeleton.joints[i].rest_offset;  // 也应为米
         if (b.Norm() <= 1e-6f) {
             continue;
         }
@@ -163,17 +164,30 @@ int main(int argc, char** argv) {
     }
     CHECK_GT(ratio_count, 0u) << "应当有非零长骨可供比较";
     const double ratio = ratio_sum / static_cast<double>(ratio_count);
-    CheckNear(ratio, 0.01, 1e-4, "单位因子应为 Mixamo 的 cm→m(=0.01)");
+    CheckNear(ratio, 1.0, 1e-4,
+              "两入口骨长比应为 1（都是米）；≠1 说明某侧没在加载边界换算单位");
     for (size_t i = 0; i < nb; ++i) {
         const jpov::Vec3f& a = skel.joints[i].rest_offset;
         const jpov::Vec3f& b = clip.skeleton.joints[i].rest_offset;
         if (b.Norm() <= 1e-6f) {
             continue;
         }
-        CheckNear((a - b * static_cast<float>(ratio)).Norm(), 0.0, 1e-4,
-                  "rest_offset 不是统一的单位缩放（骨长比不一致）");
+        CheckNear((a - b).Norm(), 0.0, 1e-4,
+                  "rest_offset 不是逐骨一致（两入口尺度分叉）");
     }
-    LOG(INFO) << "1b. rest_offset = 源单位 × " << ratio << "（统一 cm→m 归一）";
+    // 且确实是**米**（防"两入口一起忘了换算"这种同时错、比值仍为 1 的盲区）：
+    // 找 Hips（腰高）应在人形尺度 [0.5, 2.0] m；cm 制会得 ≈104。
+    for (size_t i = 0; i < nb; ++i) {
+        const std::string& nm = skel.joints[i].name;
+        if (nm.size() >= 4 && nm.compare(nm.size() - 4, 4, "Hips") == 0) {
+            const float hy = skel.joints[i].rest_offset.y();
+            CHECK_GT(hy, 0.5f) << "Hips 高 " << hy << " 偏小，长度量应已归一为米";
+            CHECK_LT(hy, 2.0f) << "Hips 高 " << hy << " 偏大 —— 疑似没做单位换算";
+            LOG(INFO) << "1b-h. Hips 高 = " << hy << " m（人形尺度 ✓）";
+            break;
+        }
+    }
+    LOG(INFO) << "1b. 两入口 rest_offset 逐骨相等（比值 = " << ratio << "，均为米）";
 
     // ---- 2. 帧网格上的采样 = 该帧本身（帧精确）----
     const size_t kProbeFrames[] = {0, 1, 17, 250, 517};
@@ -239,7 +253,10 @@ int main(int argc, char** argv) {
         ufbx_scene* scene = ufbx_load_file(kFbx.c_str(), &opts, &err);
         CHECK(scene != nullptr) << "ufbx 直接加载失败";
         const double unit = scene->settings.unit_meters;
-        CheckNear(unit, ratio, 1e-6, "unit_meters 应与两入口的归一因子一致");
+        // 两入口骨长比现应为 1（都已归一米）；同时与“源文件确实是厘米制”对得上：
+        // unit 应 ≈ 0.01（证明该资产长度量确实是 cm、换算确实发生过）。
+        CheckNear(ratio, 1.0, 1e-4, "两入口骨架应同为米（骨长比 = 1）");
+        CheckNear(unit, 0.01, 1e-6, "本源应为厘米制（为“已换算”提供对照）");
 
         // 帧网格上的时刻（按 fbx fps 播放到的地方）→ 应与源逐骨一致到浮点精度。
         const double kOnGrid[] = {0.0, 0.5, 1.0, 2.0, 5.0, 9.0, 17.0};

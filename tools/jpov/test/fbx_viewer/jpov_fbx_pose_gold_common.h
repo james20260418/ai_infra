@@ -35,6 +35,13 @@ inline std::string GetGlbNaiveGoldRelPath() {
     return "/fbx_viewer/fbx_pose_glb_naive_1280x720.png";
 }
 
+// 第三张 gold：**正式重定向**路径（两者并列，蓝 = BodyRetarget）——
+// 本路径曾经**没有 gold 覆盖**，于是 2026-09-20 的「蓝骨人飞走 63 米」单位 bug
+// 静默通过（naive 对照路径把 root_offset 置 0，恰好不受影响）。补上以钉住该路径。
+inline std::string GetGlbRetargetGoldRelPath() {
+    return "/fbx_viewer/fbx_pose_glb_retarget_1280x720.png";
+}
+
 // 出图尺寸（winfo，单位像素）。与其它 gold 同规格：3D FBO 恒为 1280×720，
 // 落盘用 640×360（省仓库体积）。
 inline constexpr float kShotWidth  = 640.0f;

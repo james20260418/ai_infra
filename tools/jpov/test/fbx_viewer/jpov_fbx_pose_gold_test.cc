@@ -59,6 +59,20 @@ std::string GlbGoldPath() {
            jpov_fbx_pose_gold::GetGlbNaiveGoldRelPath();
 }
 
+std::string RetargetGoldPath() {
+    const char* e = std::getenv("TEST_SRCDIR");
+    if (e) {
+        std::string s = e;
+        if (!s.empty() && s.back() != '/') {
+            s.push_back('/');
+        }
+        return s + "__main__/tools/jpov/test" +
+               jpov_fbx_pose_gold::GetGlbRetargetGoldRelPath();
+    }
+    return jpov::GetProjectRoot() + "tools/jpov/test" +
+           jpov_fbx_pose_gold::GetGlbRetargetGoldRelPath();
+}
+
 // 整图"强红"像素数（火柴人是纯红材质，光照后仍远高于其它物体）。
 long long CountStrongRedPixels(const std::string& png) {
     int w = 0;
@@ -159,6 +173,7 @@ int main() {
     const std::string out_other_frame = outdir + "frame_other_time.png";
     const std::string out_rest_pose = outdir + "rest_pose.png";
     const std::string out_glb_both = outdir + "glb_both.png";
+    const std::string out_glb_retarget = outdir + "glb_retarget.png";
 
     // ── 四帧都由观察器本体渲出（走共用的 MakeApp，与 generator 零分叉）──
     //   ⚠️ 分两个 App："无 glb"与"有 glb"是**两种机位**（LoadGltf 会按并列重算初始机位），
@@ -185,6 +200,56 @@ int main() {
                                         jpov_fbx_pose_gold::GlbPath(),
                                         jpov_fbx_viewer::ViewMode::kBothNoRetarget);
         jpov_fbx_pose_gold::RenderFrame(app.get(), out_glb_both.c_str());
+    }
+
+    // ⑤ 正式**重定向**路径（kBothRetarget）—— 曾经的覆盖盲区（见下）。
+    //    🔴 历史 bug（2026-09-20）：重定向把源帧的 root_offset（**源单位 cm**）当成米用，
+    //    位移被静默放大 100 倍（实测最大 63.6 m）→ 蓝骨人/蓝带皮飞出画面。
+    //    旧 gold 只盖了 naive 对照路径（它把 root_offset 置 0），故静默通过。本节补上三条门禁：
+    //      (a) 数值：重定向后根位移必须与人身高相称（< 2 m）；
+    //      (b) 可见性：蓝骨人必须还在画面里（飞走则严格蓝像素骤降）；
+    //      (c) gold 字节级对比：锁住该路径的固定帧画面。
+    {
+        std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+            jpov_fbx_pose_gold::MakeApp("JPOV FBX Pose Gold Test",
+                                        jpov_fbx_pose_gold::kGoldTimeSeconds,
+                                        /*rest_pose*/ false,
+                                        jpov_fbx_pose_gold::GlbPath(),
+                                        jpov_fbx_viewer::ViewMode::kBothRetarget);
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_glb_retarget.c_str());
+
+        // (a) 数值门禁：根位移量级。
+        const jpov::Vec3f& ro = app->glb_pose_for_test().root_offset;
+        LOG(INFO) << "重定向根位移（本帧）: |root_offset| = " << ro.Norm() << " m";
+        CHECK_LT(ro.Norm(), 2.0f)
+            << "🔴 重定向后的根位移过大（" << ro.Norm() << " m）—— 蓝骨人会飞出画面。"
+               "多为「骨架与位姿不同单位」（忘记把源长量归一为米）。";
+        // 且确实非零（root-motion 真接上了，而不是又被丢掉）。
+        CHECK_GT(ro.Norm(), 1e-4f)
+            << "重定向后根位移几乎为 0 —— root-motion 没接上？";
+
+        // (b) 可见性门禁：蓝骨人仍在画面内。
+        const long long blue_retarget = CountStrongBluePixels(out_glb_retarget);
+        LOG(INFO) << "蓝骨可见性(重定向路径): 严格蓝像素 = " << blue_retarget;
+        CHECK_GT(blue_retarget, 15)
+            << "🔴 重定向路径下蓝骨人未渲出/已飞走（严格蓝像素仅 " << blue_retarget << "）";
+
+        // (c) gold 对比。
+        const std::string rt_gold = RetargetGoldPath();
+        {
+            FILE* f = std::fopen(rt_gold.c_str(), "rb");
+            CHECK(f != nullptr) << "重定向 gold 缺失，请先跑 generator: " << rt_gold;
+            std::fclose(f);
+        }
+        constexpr double kRtGoldThreshold = 25.0;
+        const double rt_diff =
+            jpov::CompareLightMeanRoiPng(rt_gold, out_glb_retarget, 8, 8);
+        LOG(INFO) << "GLB RETARGET GOLD COMPARE: max-channel-mean-diff = " << rt_diff
+                  << " (threshold=" << kRtGoldThreshold << ")";
+        if (rt_diff < 0 || rt_diff > kRtGoldThreshold) {
+            LOG(ERROR) << "GLB RETARGET GOLD COMPARE FAILED: " << rt_diff;
+            return 1;
+        }
     }
 
     // ── 可见性门禁：火柴人必须渲出来了 ──

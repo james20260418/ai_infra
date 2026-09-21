@@ -46,11 +46,15 @@
 //   不烘进 pose（同 fbx_loader.h 的朝向约定）。
 //
 // ⚠️ 骨架与动画**分两个 loader 入口取**（都是既有能力，本 PR 不新增读取路径）：
-//   - skeleton_ 走 jpov::LoadFbxSkeleton —— rest_offset 已归一到**米**；
+//   - skeleton_ 走 jpov::LoadFbxSkeleton —— rest_offset 为**米**（供渲染 / 跨源对比）；
 //   - clip_     走 jpov::LoadFbxAnimation —— 给 帧频 + 全帧；帧里存的是**相对 bind 的
-//     增量旋转**（纯旋转量，与单位无关）。
-//   两者骨序同源（都按 node 树 DFS 收 bone 节点），叠加起来即"米制骨架 + 增量旋转"，
-//   LoadFbx 里 CHECK 住骨数一致，防止未来某侧改了收集顺序而静默错位。
+//     增量旋转**（纯旋转量，与单位无关）+ **相对 bind 的根位移 root_offset**（长度量）。
+//   两者骨序同源（都按 node 树 DFS 收 bone 节点），LoadFbx 里 CHECK 住骨数一致，
+//   防止未来某侧改了收集顺序而静默错位。
+//   ✅ **两个入口的长度量都是米**（loader 在边界换算，见 fbx_loader.h「单位铁律」）⇒
+//     本观察器下游全是米制（skeleton_ / glb / 地面），**任何地方都不需要再做单位换算**。
+//     （历史坑：曾限定"clip 原样透传源单位"，于是 cm 被当米用，位移放大 100 倍、
+//      蓝骨人飞走 63 米。现在该隐式契约已被 loader 自身消除。）
 
 #ifndef JPOV_DEMO_FBX_VIEWER_FBX_VIEWER_APP_H_
 #define JPOV_DEMO_FBX_VIEWER_FBX_VIEWER_APP_H_
@@ -475,6 +479,8 @@ public:
         retarget_plan_ = jpov::BuildBodyRetargetPlan(glb_skeleton_, skeleton_);
     }
     bool has_glb_for_test() const { return has_glb_; }
+    // ⚠️ 注入的位姿必须**长度量已是米**（与 loader 产物同一契约）：它绕过 UpdateFramePose，
+    //    等价于“把采样结果直接换掉”。注入非零 root_offset 时请用米。
     void SetFramePoseForTest(const jpov::SkeletonPose& p) { frame_pose_ = p; }
     // 直接跑"算蓝骨位姿"那一步（不碰 GL；UpdateGlbBoneMeshIfNeeded 里的纯 CPU 部分）。
     void ComputeGlbPoseForTest() {
@@ -504,6 +510,7 @@ private:
             return;
         }
         // 源（红）侧是 CPU 采样 + CPU 插值（火柴人每帧重建几何，没有 GPU 插值的余地）。
+        // （长度量已是米 —— loader 在加载边界换算，见 fbx_loader.h「单位铁律」。）
         frame_index_ = jpov::SampleClipPose(clip_, anim_time_seconds_, &frame_pose_);
         // 帧内小数：**给蓝带皮侧的 GPU 双帧插值用**（见 OneIteration 的 kBothSkinned 分支）。
         //   同一时刻的红（CPU 插值）与蓝（GPU 插值）因此落在同一相位上 —— 两边可比。
@@ -884,7 +891,8 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
             glb_skin_poses_.clear();
             glb_skin_poses_.reserve(static_cast<size_t>(nframes) + 1);
             for (int k = 0; k < nframes; ++k) {
-                const jpov::SkeletonPose& src_pose = clip_.frames[static_cast<size_t>(k)];
+                // 裸拷 clip_ 帧：长度量已是米（loader 边界换算），与米制 plan 同尺度。
+                jpov::SkeletonPose src_pose = clip_.frames[static_cast<size_t>(k)];
                 jpov::SkeletonPose target(glb_skeleton_.bone_count());
                 jpov::BodyRetargetPose(retarget_plan_, src_pose, &target);
                 glb_skin_poses_.push_back(std::move(target));

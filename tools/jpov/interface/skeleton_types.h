@@ -136,7 +136,8 @@ struct SkeletonType {
 //   折入 inverse_bind 得到刚体蒙皮变换后再转对偶四元数落 atlas（skeleton_manager 负责烘焙，
 //   本文件只定义资产格式）。一个 pose 严格从属某一份骨架
 //   （joint_rotation.size() == 该骨架 bone_count），每个顶点的 rest 平移由 joints tree 提供，
-//   pose 只驱动【旋转】；若动画/root-motion 带整体位移则由 root_offset 承载（纯原地动作默认为 0）。
+//   pose 只驱动【旋转】；若动画/root-motion 带整体位移则由 root_offset 承载（纯原地动作默认为 0；
+//   坐标系与单位见下方 root_offset 字段注释）。
 struct SkeletonPose {
     int bone_count = 0;   // 应 == 所用 SkeletonType::bone_count（同一种骨架）。
 
@@ -146,7 +147,25 @@ struct SkeletonPose {
     // 非空但 size != bone_count 视为非法（烘焙端 LOG(FATAL)）。
     std::vector<geom::Quaternion<float>> joint_rotation;
 
-    // 根(0 号关节)相对“角色原点”的位移 / root motion（通常 0）。纯原地动作/静态 pose 保持默认。
+    // 根(0 号关节)的 **root-motion 平移量**：根关节在【其父坐标系】下、相对【其 bind 位置】
+    // 的平移（= 当前平移 − bind 平移）。纯原地动作/静态 pose 保持默认 0（根停在 bind 位置）。
+    //
+    // 坐标系铁律（2026-09-20 定稿，详见 docs/jpov_root_offset_design.md §1）：
+    //   - **是「根关节的父坐标系」，不是「根自己的 bind 系」**。对“根是顶层骨”的资产
+    //     （Mixamo 源 / 多数 glb），父系 ≡ **模型系**（scene root）；两者在那种拓扑下数值
+    //     重合，但定义取父系才在所有资产（含“零长包装 Root → Hips”两层拓扑）上站得住。
+    //   - 理由：与 joint_rotation 语言对称（那根是“相对父的旋转增量”），且与烘焙式的
+    //     jointLocal(root) = T(rest_offset[root]) · R(bind) · R(pose) 天然对齐。
+    //
+    // 单位 = **该 SkeletonType 的长度单位**（JPOV 统一为米）——与 rest_offset 同尺度。
+    // ⚠️ 长度量在 pose 里、骨架尺度在 SkeletonType 里，二者独立：**缩放骨架不会自动缩放
+    //    已产出的 pose**。故改了资产 bind（骨长/rest 朝向/根位置）⇒ 针对它重定向过的所有
+    //    poses **必须重新重定向**（同“跨骨架 pose 不能插值”一类约束）。
+    //
+    // 施加规则：烘焙（SkeletonManager）与火柴人都把它加到【顶层骨】
+    //   (parent == kSkeletonNoParent) 的平移上（= T(rest_offset + root_offset)）。合法骨架
+    //   只有一根顶层骨（即 0 号）⇒ 等价于“加在 0 号上”。`Validate()` 并不禁止多顶层骨，
+    //   那种骨架会把同一偏移加到每个顶层骨 —— 未定义的边缘情形，真人形资产不会出现。
     Vec3f root_offset{0.0f, 0.0f, 0.0f};
 
     // 全恒等 pose（每关节旋转 = identity，root_offset = 0）。

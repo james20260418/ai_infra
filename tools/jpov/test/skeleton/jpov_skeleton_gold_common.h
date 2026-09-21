@@ -196,8 +196,19 @@ inline std::vector<geom::math::Mat4> SkinMatricesOnCpuForTest(
             pose.joint_rotation.size() > static_cast<size_t>(j)
                 ? pose.joint_rotation[j]
                 : geom::Quaternion<float>::Identity();
-        const Mat4 local = geom::math::JointLocal(type.joints[j].rest_offset, bind, pr);
-        jw[j] = (type.joints[j].parent == jpov::kSkeletonNoParent)
+        // ⚠️ 与 skeleton_manager.cc 的烘焙**同一条规则**（2026-09-20 接线 root-motion）：
+        //   顶层骨（parent == kSkeletonNoParent）的平移多吃一项 pose.root_offset。
+        //   本函数是“CPU 真值/对照”，必须与 GPU 侧镜像同步，否则今天正好都取 0 而「看着对」，
+        //   哪天有人拿带 root_offset 的 pose 来对照就会静默偏掉。
+        const bool is_root = (type.joints[j].parent == jpov::kSkeletonNoParent);
+        jpov::Vec3f off = type.joints[j].rest_offset;
+        if (is_root) {
+            off = jpov::Vec3f(off.x() + pose.root_offset.x(),
+                              off.y() + pose.root_offset.y(),
+                              off.z() + pose.root_offset.z());
+        }
+        const Mat4 local = geom::math::JointLocal(off, bind, pr);
+        jw[j] = is_root
                     ? local
                     : geom::math::Mat4Mul(
                           jw[static_cast<size_t>(type.joints[j].parent)], local);
