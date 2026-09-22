@@ -26,6 +26,12 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 
+// Windows/MinGW: windef.h 定义 near/far 宏，与 Camera::near/far 字段冲突。
+#ifdef _WIN32
+#undef near
+#undef far
+#endif
+
 #include <glog/logging.h>
 
 // stb_image_write — 轻量级 PNG 编码
