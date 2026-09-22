@@ -146,8 +146,12 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform3f(shader_mgr.GetUniform(prog, "uMoonDir"),
                 sky_cmd.moon_dir.x(), sky_cmd.moon_dir.y(), sky_cmd.moon_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uTurbidity"), sky_cmd.turbidity);
-    glUniform3f(shader_mgr.GetUniform(prog, "uSeason"),
-                sky_cmd.season.r, sky_cmd.season.g, sky_cmd.season.b);
+    glUniform3f(shader_mgr.GetUniform(prog, "uDaylightSeason"),
+                sky_cmd.daylight_season.r, sky_cmd.daylight_season.g,
+                sky_cmd.daylight_season.b);
+    glUniform3f(shader_mgr.GetUniform(prog, "uMoonSeason"),
+                sky_cmd.moon_season.r, sky_cmd.moon_season.g,
+                sky_cmd.moon_season.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uIntensity"), sky_cmd.intensity);
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);

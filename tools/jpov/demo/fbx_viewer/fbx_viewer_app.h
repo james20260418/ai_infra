@@ -97,7 +97,7 @@ inline constexpr const char* kViewerFontAlias = jpov::kFontBuiltinCJK;
 // 太阳仰角 90°（天顶正午）、浊度 2（大晴）、中性色温。
 inline constexpr float kSunElevDeg = 90.0f;
 inline constexpr float kTurbidity  = 2.0f;
-inline constexpr float kSeasonR    = 1.0f;
+inline constexpr float kDaylightSeasonR    = 1.0f;
 
 // 地面板：浅灰实心板，中心在 y = -kGroundHalfThickness、顶面精确落在 y = 0，
 // 于是骨架空间原点（脚底）正好踩在板上（同火柴人 gold 的布景约定）。
@@ -334,7 +334,7 @@ public:
 
         // 光照：sunny day（天光 + 太阳 + 环境光，全由 sky 推导；同查看器晴天配置）。
         const jpov_viewer::NoonLighting light =
-            jpov_viewer::MakeLighting(kSunElevDeg, kTurbidity, kSeasonR);
+            jpov_viewer::MakeLighting(kSunElevDeg, kTurbidity, kDaylightSeasonR);
         cmds->sky     = light.sky;
         cmds->sun     = light.sun;
         cmds->ambient = light.ambient;

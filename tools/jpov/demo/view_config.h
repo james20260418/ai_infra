@@ -166,7 +166,7 @@ inline NoonLighting MakeNoonLighting() {
         /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                 -sun_light_dir.z()),  // = {0,1,1}
         /*turbidity*/ 2.0f,
-        /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
+        /*daylight_season*/ {1.0f, 1.0f, 1.0f, 1.0f},
         /*intensity*/ 1.0f,
         /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
         /*sun_radius*/ 0.02,
@@ -210,16 +210,16 @@ inline NoonLighting MakeNoonLighting() {
 //   turbidity        — 大气浊度 [2,8]。同时影响 (a) 天空画色（shader 霾化/日盘）
 //                      + (b) sun/ambient 的 turb 衰减乘子（TurbSunLoss/TurbAmbLoss）。
 //                      滑条用它肉眼标定“高浊度下 sun/ambient 强度分别该衰减成多少”。
-//   season_r         — 季节色温 R 通道乘子 [0.5, 2.0]，默认 1.0 中性（见 SeasonTintScale
+//   daylight_season_r         — 季节色温 R 通道乘子 [0.5, 2.0]，默认 1.0 中性（见 DaylightSeasonTintScale
 //                      归一化，只偏色不改亮度），联动 sky 天空背景 + sun/ambient 色温。
 //
 // 注：sun/ambient 的 intensity 这里**不再由调用方给定**，全部走 sky 自动推导
 // （sky.SunDirectionalIntensity()/sky.AmbientIntensity()，含 Turb*Loss 乘子 + 仰角曲线），
 // 因此不再需要 sun_intensity/ambient_intensity 两个参数（gltf viewer 已移除对应滑条）。
-// season 这里由 season_r（R 通道）给定（G/B=1.0）；sky 其余参数（intensity/ground_color/
+// season 这里由 daylight_season_r（R 通道）给定（G/B=1.0）；sky 其余参数（intensity/ground_color/
 // sun_radius/sun_brightness/sun_glow）由本函数固定。
 inline NoonLighting MakeLighting(float elev_deg, float turbidity,
-                                 float season_r = 1.0f) {
+                                 float daylight_season_r = 1.0f) {
     // 太阳仰角（度）→ 弧度。sun_dir（指向太阳）y 分量 = sin(仰角)：
     // 仰角 0° → y=0（贴地），仰角 90° → y=1（天顶）。
     const float elev_rad = elev_deg * (static_cast<float>(M_PI) / 180.0f);
@@ -230,7 +230,7 @@ inline NoonLighting MakeLighting(float elev_deg, float turbidity,
     jpov::SkyCommand sky{
         /*sun_dir*/ sun_dir,
         /*turbidity*/ turbidity,   // 影响天空画色（霾化/日盘）+ Turb*Loss 乘子
-        /*season*/ {season_r, 1.0f, 1.0f, 1.0f},  // 只调 R 通道（滑条季节色温）
+        /*daylight_season*/ {daylight_season_r, 1.0f, 1.0f, 1.0f},  // 只调 R 通道（滑条季节色温）
         /*intensity*/ 1.0f,
         /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
         /*sun_radius*/ 0.02,

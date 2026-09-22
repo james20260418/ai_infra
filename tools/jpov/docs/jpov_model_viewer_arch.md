@@ -101,7 +101,7 @@ position.z = R * cos(phi) * cos(theta)
 
 ## 5. 正午光照（MakeNoonLighting）
 
-太阳光传播方向 `{0,-1,-1}`；SkyCommand：turbidity=2、season 中性、intensity=1.0、
+太阳光传播方向 `{0,-1,-1}`；SkyCommand：turbidity=2、daylight_season 中性、intensity=1.0、
 sun_dir=+`{0,1,1}`（取反）；平行光与 ambient 均**由 sky 推导**（task#3 验收）——
 color 用 `SunDirectionalColor()/AmbientColor()`（色调随太阳仰角变），intensity 用
 `SunDirectionalIntensity()/AmbientIntensity()`（相对衰减随太阳仰角变），但绝对强度锚定
@@ -122,7 +122,7 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 |---|------|------|------|------|
 | 1 | 太阳仰角 ° | [0, 90] 度 | 90 | 太阳仰角（0=贴地日出日落 → 90=天顶正午）；sun_dir y=sin(仰角) 驱动全部光照推导 |
 | 2 | 浊度 turb | [2, 8] | 2 | 大气浊度：高浊度衰减 sun/ambient 强度（Turb*Loss）+ 天空霾化发白 |
-| 3 | 季节 R | [0.5, 2.0] | 1.0 | 季节色温乘子（只调 R 通道，归一化不改亮度），联动天空背景 + sun/ambient 色温 |
+| 3 | 日光季节 R | [0.5, 2.0] | 1.0 | daylight_season 乘子（只调 R 通道，归一化不改亮度）：只染太阳能通道（天空背景 + 日主光 + 白天 ambient） |
 | 4 | 地面高度 y | [-3, +3] 米 | -3 | 实时重建地面 quad（UpdateMesh），看物体落地面/阴影落地面 |
 | 5 | 模型缩放 | [0.1, 20] | 1.0 | 整体缩放（先缩放再旋转平移，见 Object3DCommand::scale），验证小物体阴影 |
 
@@ -130,7 +130,7 @@ LIGHT_INTENSITY.md 三·五 晴天正午基准：sun 基准 3.0、ambient 基准
 因为强度已内置到 sky 自动推导不再需人调）：
 - 传给 sky 的 `sun_dir` = `{cos(仰角), sin(仰角), 0}`，驱动 `SunDirectionalColor()/AmbientColor()/
   SunDirectionalIntensity()/AmbientIntensity()`；turb 经 `TurbSunLoss()/TurbAmbLoss()` 衰减
-  强度，season 经 `SeasonTintScale()` 归一化偏置 color（天空+sun+ambient 色调一致）。
+  强度，daylight_season 经 `DaylightSeasonTintScale()` 归一化偏置 color（只染太阳能通道）。
 - 交互与拍照共用 `OneIteration`，靠 `app.interactive_` 区分是否 `ui_.Emit`（同 arch §4 的 headless 区分思路）。
 - 基准强度锚定：`SunDirectionalIntensity()` midday 默认 2.2、`AmbientIntensity()` noon 默认 1.0
   （正午环境光再叠加，见 MakeLighting 注释）；turb=2（大晴）时 Turb*Loss=1.0 不改变基准。

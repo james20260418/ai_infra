@@ -113,7 +113,7 @@ public:
             /*sun_dir*/ jpov::Vec3f(-sun_light_dir.x(), -sun_light_dir.y(),
                                     -sun_light_dir.z()),
             /*turbidity*/ 2.0f,
-            /*season*/ {1.0f, 1.0f, 1.0f, 1.0f},
+            /*daylight_season*/ {1.0f, 1.0f, 1.0f, 1.0f},
             /*intensity*/ 1.0f,
             /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
             /*sun_radius*/ 0.02,

@@ -1,13 +1,13 @@
 // JPOV 天光查看器（skylight viewer）— 场景 + 天光装配（header-only）
 //
 // 目的：一个专门用来**肉眼验收天光（SkyCommand）**的最小场景——
-// 固定三个不同 PBR 材质的方块 + 灰色地面，配上四个自由度（浊度 / 季节色温 /
-// 太阳方向 / 月亮方向），一眼看全「标准天光」在材质上的反映。
+// 固定三个不同 PBR 材质的方块 + 灰色地面，配上三个自由度（浊度 / 季节色温 /
+// 天体方向），一眼看全「标准天光」在材质上的反映。
 //
-// ⭐ 天光一律由 `CreateDefaultSkyCommand(4 自由度)` 构造（其余参数走默认构造值），
-//    画面光照则由该 SkyCommand **推导**（SunDirectionalColor/Intensity +
-//    AmbientColor/Intensity）——保证「看到的日照/环境光」与「天空」同源，
-//    不会各配一套而漂移。
+// ⭐ 天光一律由 `CreateDefaultSkyCommand` 构造（其余参数走默认构造值），
+//    画面光照（主平行光 + ambient）则由该 SkyCommand **推导**——保证「看到的
+//    天色」与「物体受光」同源，不会各配一套而漂移。天体方向只给一条仰角轴：
+//    月亮恒在反日点（moon_dir = −sun_dir），据此白天用太阳主光、夜间用月亮主光。
 //
 // 为什么用三个方块而不是加载 glTF（与 model viewer 的区别）：
 //   - model viewer 的目的是"看模型"，天光只是背景；本查看器的目的是"看天光"，
@@ -107,28 +107,48 @@ inline jpov::PBRMaterial GroundMaterial() {
         /*roughness*/ 1.0f);
 }
 
-// ── 四个自由度的取值范围与编码（面板与拍摄共用，单一出处）──
+// ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //
 // turbidity：大气浊度 [0, 8]，默认 2（清澈）。
-// season_tint：季节色温乘子（Color）。查看器把它压缩成**一个滑条**：
-//     左端 = 蓝偏、右端 = 红偏、中间 = 中性；G 通道恒 1（只调冷/暖，不动绿）。
+// 季节色温：daylight_season 乘子（Color，**只染太阳能通道**）。查看器把它压缩成
+//     **一个滑条**：左端 = 蓝偏、右端 = 红偏、中间 = 中性；G 通道恒 1。
 //     这是**查看器的交互设计**，不是 SkyCommand 的接口契约（接口收的是 Color）。
-// sun_dir / moon_dir：世界空间 y-up 方向，按**仰角(度) + 方位角(度)** 两个滑条给。
-//     仰角 [0,90]（0=贴地）；方位角 [0,360) 绕 +Y。
+// 月色变红：moon_season 乘子（Color，**只染月盘 + 月光**）。查看器一个滑条 [0,1]：
+//     0 = 中性常月，1 = 血月（又红又暗）。不走亮度归一化（有意让它变暗）。
+// 夜蓝：夜色两色（night_zenith/horizon_color）的整体乘子（Color）。查看器一个滑条
+//     [0,1]：0 = 出厂夜色，1 = 梦幻蓝且更亮。**不改接口**，只是把出厂两色乘一下。
+// 天体方向：世界空间 y-up 方向，按**仰角(度) + 方位角(度)** 两个滑条给。
+//     仰角 [−90, +90]（0=地平线；正=太阳在地平线上，负=太阳沉下、月亮升到反向等高）；
+//     方位角 [0,360) 绕 +Y。月亮方向恒取 −sun_dir，不单独占滑条。
 inline constexpr float kTurbidityMin   = 0.0f;
 inline constexpr float kTurbidityMax   = 8.0f;
 inline constexpr float kTurbidityDef   = 2.0f;
 
 // 季节色温偏置幅度：滑条端点 ±kSeasonTintSpan（乘到 R / 除到 B）。
-//   红偏端 season=(1+span, 1, 1-span)；蓝偏端 season=(1-span, 1, 1+span)。
+//   红偏端 daylight_season=(1+span, 1, 1-span)；蓝偏端 daylight_season=(1-span, 1, 1+span)。
 inline constexpr float kSeasonTintSpan = 0.25f;
 
-// 把 [-1,+1] 的季节滑条值编码成 Color（-1=蓝偏，0=中性，+1=红偏）。
+// 把 [-1,+1] 的季节滑条值编码成 daylight_season（-1=蓝偏，0=中性，+1=红偏）。
 //   R = 1 + span·t，B = 1 − span·t，G = 1。
-// SeasonTintScale() 会把总亮度归一回去（只偏色温、不增减光强）。
-inline jpov::Color SeasonTintFromSlider(float t) {
+// DaylightSeasonTintScale() 会把总亮度归一回去（只偏色温、不增减光强）。
+inline jpov::Color DaylightSeasonTintFromSlider(float t) {
     const float tc = std::max(-1.0f, std::min(1.0f, t));
     return {1.0f + kSeasonTintSpan * tc, 1.0f, 1.0f - kSeasonTintSpan * tc, 1.0f};
+}
+
+// 把 [0,1] 的「月色变红」滑条值编码成 moon_season（0=中性常月，1=血月）。
+// 压绿 0.80、压蓝 0.97（R 不动）⇒ 血色；**不归一化** ⇒ 总亮度随滑条下降，血月又红又暗。
+inline jpov::Color MoonSeasonFromSlider(float t) {
+    const float tc = std::max(0.0f, std::min(1.0f, t));
+    return {1.0f, 1.0f - 0.80f * tc, 1.0f - 0.97f * tc, 1.0f};
+}
+
+// 把 [0,1] 的「夜蓝」滑条值编码成夜色两色的整体乘子（0=出厂，1=最蓝最亮）。
+// 压红 0.45、提绿 0.25、提蓝 2.40 ⇒ 色相偏蓝且亮度上升（蓝通道 + 绿通道一起抬，
+// 保证 ACES 后人眼亮度（G 主）也真的变亮，而不是“只是变蓝”）。“梦幻蓝、有点亮”。
+inline jpov::Color NightTintFromSlider(float t) {
+    const float tc = std::max(0.0f, std::min(1.0f, t));
+    return {1.0f - 0.45f * tc, 1.0f + 0.25f * tc, 1.0f + 2.40f * tc, 1.0f};
 }
 
 // 由「仰角(度) + 方位角(度)」构造方向单位向量（y-up）。
@@ -141,46 +161,87 @@ inline jpov::Vec3f DirFromAngles(float elev_deg, float azim_deg) {
     return {ce * std::sin(a), std::sin(e), ce * std::cos(a)};
 }
 
-// ── 天光装配：由四个自由度构造 SkyCommand，并**由它推导**全部光照 ──
+// ── 天光装配：由查看器自由度构造 SkyCommand，并**由它推导**全部光照 ──
 //
 // 场景另加两个模型（桌子 / 高模橡树）供夜色标定时观察物体受光；模型加载与
 // 摆放见 LoadSceneModels()（资源由 build 脚本拷到 exe 旁 models/，相对路径硬编码）。
 //
 // 这是本查看器与 model viewer 的核心差别所在，故单列并写清语义：
 //
-//   sky = CreateDefaultSkyCommand(turb, season_tint, sun_dir, moon_dir)
+//   sky = CreateDefaultSkyCommand(turb, daylight_season, sun_dir, moon_dir)
 //         —— 其余参数（日/月盘半径与亮度、夜色两色、ground_color、intensity…）
-//            一律走 SkyCommand 的默认构造值（= 标准天光）。
+//            一律走 SkyCommand 的默认构造值（= 标准天光）；
+//            再用两个滑条覆盖 `moon_season` 与夜色两色（月色/夜蓝），见 SkyDegrees。
 //
-//   光照（日光 + ambient）**由 sky 推导**，不手配：
-//     sun.color     = sky.SunDirectionalColor()      （色温随仰角变）
-//     sun.intensity = sky.SunDirectionalIntensity()  （DNI 衰减 + 浊度）
-//     sun.direction = −sun_dir                       （光传播方向）
-//     ambient.color     = sky.AmbientColor()         （含夜色叠加）
-//     ambient.intensity = sky.AmbientIntensity()     （含夜间项）
-//   月光**平行光不做**（本 PR 明确范围外；月盘只作为天体画出，不照亮物体）。
+//   月亮方向恒取 **moon_dir = −sun_dir**（满月落在反日点）：查看器只给一条
+//   「仰角」滑条 [−90°, +90°]，正=太阳在地平线上、负=太阳沉下（月亮升到反向等高）。
+//   同一条仰角轴于是覆盖「日光 / 月光」两种主光，切换面在 sun_dir.y = 0：
+//
+//     sun_dir.y >= 0（白天）：主光 = 太阳平行光
+//       direction = −sun_dir （光传播方向，从上往下）
+//       color     = sky.SunDirectionalColor()   intensity = sky.SunDirectionalIntensity()
+//     sun_dir.y < 0（夜间）：主光 = 月亮平行光
+//       direction = −moon_dir = +sun_dir （月亮在天上，光同样从上往下）
+//       color     = sky.MoonDirectionalColor()  intensity = sky.MoonDirectionalIntensity()
+//
+//   ambient（环境光）始终由 sky 推导，与天色/昼夜同源：
+//     ambient.color     = sky.AmbientColor()     （含夜色叠加；夜色端不吃 daylight_season）
+//     ambient.intensity = sky.AmbientIntensity() （含夜间项）
 //
 // 返回：装配好的完整光照三元组。
 struct SkyLighting {
     jpov::SkyCommand sky;
-    jpov::DirectionalLight sun;
+    // 主平行光：白天是太阳、夜间是月亮（按 sun_dir.y 切换，见上）。渲染侧只有一个
+    // 平行光槽（RenderCommandList::sun），故日/月共用这一个字段。
+    jpov::DirectionalLight dir_light;
     jpov::AmbientLight ambient;
 };
 
-inline SkyLighting MakeSkyLighting(float turbidity, float season_slider,
-                                   float sun_elev_deg, float sun_azim_deg,
-                                   float moon_elev_deg, float moon_azim_deg) {
-    const jpov::Vec3f sun_dir  = DirFromAngles(sun_elev_deg, sun_azim_deg);
-    const jpov::Vec3f moon_dir = DirFromAngles(moon_elev_deg, moon_azim_deg);
-    const jpov::SkyCommand sky = jpov::CreateDefaultSkyCommand(
-        turbidity, SeasonTintFromSlider(season_slider), sun_dir, moon_dir);
+// 查看器的天光自由度（滑条 → SkyCommand 字段的单点编码，面板与拍摄共用）。
+struct SkyDegrees {
+    float turbidity = kTurbidityDef;   // ① 浊度 [0,8]
+    float daylight_season = 0.0f;      // ② 季节色温 [−1,+1] → daylight_season
+    float sun_elev_deg = 45.0f;        // ③ 天体仰角 [−90,+90]
+    float sun_azim_deg = 45.0f;        // ③ 天体方位角 [0,360)
+    float moon_red = 0.0f;             // ④ 月色变红 [0,1] → moon_season（1=血月）
+    float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
+};
+
+inline SkyLighting MakeSkyLighting(const SkyDegrees& d) {
+    const jpov::Vec3f sun_dir = DirFromAngles(d.sun_elev_deg, d.sun_azim_deg);
+    // 满月落在反日点：moon_dir = −sun_dir（月盘位置与光源方位由此单点确定）。
+    const jpov::Vec3f moon_dir = {-sun_dir.x(), -sun_dir.y(), -sun_dir.z()};
+    jpov::SkyCommand sky = jpov::CreateDefaultSkyCommand(
+        d.turbidity, DaylightSeasonTintFromSlider(d.daylight_season), sun_dir,
+        moon_dir);
+    // 月色（血月）与夜蓝：覆盖标准天光对应的两个字段（其余仍走默认）。
+    sky.moon_season = MoonSeasonFromSlider(d.moon_red);
+    const jpov::Color nt = NightTintFromSlider(d.night_blue);
+    sky.night_zenith_color =
+        jpov::Color{sky.night_zenith_color.r * nt.r,
+                    sky.night_zenith_color.g * nt.g,
+                    sky.night_zenith_color.b * nt.b, 1.0f};
+    sky.night_horizon_color =
+        jpov::Color{sky.night_horizon_color.r * nt.r,
+                    sky.night_horizon_color.g * nt.g,
+                    sky.night_horizon_color.b * nt.b, 1.0f};
 
     SkyLighting out;
-    out.sun = jpov::DirectionalLight{
-        /*direction*/ {-sky.sun_dir.x(), -sky.sun_dir.y(), -sky.sun_dir.z()},
-        /*color*/ sky.SunDirectionalColor(),
-        /*intensity*/ sky.SunDirectionalIntensity(),
-    };
+    if (sun_dir.y() >= 0.0f) {
+        // 白天：太阳平行光（传播方向 = −sun_dir）。
+        out.dir_light = jpov::DirectionalLight{
+            /*direction*/ {-sun_dir.x(), -sun_dir.y(), -sun_dir.z()},
+            /*color*/ sky.SunDirectionalColor(),
+            /*intensity*/ sky.SunDirectionalIntensity(),
+        };
+    } else {
+        // 夜间：月亮平行光（传播方向 = −moon_dir = +sun_dir）。
+        out.dir_light = jpov::DirectionalLight{
+            /*direction*/ sun_dir,
+            /*color*/ sky.MoonDirectionalColor(),
+            /*intensity*/ sky.MoonDirectionalIntensity(),
+        };
+    }
     out.ambient = jpov::AmbientLight{
         .color = sky.AmbientColor(),
         .intensity = sky.AmbientIntensity(),

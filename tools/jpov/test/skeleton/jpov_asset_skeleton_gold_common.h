@@ -94,7 +94,7 @@ public:
         cmds->ambient = jpov::AmbientLight{.color = {1, 1, 1, 1}, .intensity = 0.3f};
         cmds->sky = jpov::SkyCommand{
             jpov::Vec3f(-sun_l.x(), -sun_l.y(), -sun_l.z()),
-            /*turbidity*/ 2.0f, /*season*/ {1, 1, 1, 1}, /*intensity*/ 1.0f,
+            /*turbidity*/ 2.0f, /*daylight_season*/ {1, 1, 1, 1}, /*intensity*/ 1.0f,
             /*ground_color*/ {0.05f, 0.06f, 0.08f, 1.0f},
             /*sun_radius*/ 0.02, /*sun_brightness*/ 1e3, /*sun_glow*/ 1.0};
         cmds->tone_mapping = true;
