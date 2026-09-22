@@ -842,13 +842,14 @@ struct SkyCommand {
     //   - 默认 1.0 = 不改（既有默认都市夜色原值）。
     //   - 为什么单独给：调“夜有多亮”不应要求逐个改两个颜色（易破坏色调比例），
     //     也不应用 intensity（那是天光总开关，会连带改白天）。
-    //   - 注：它同时影响**夜色 ambient**（因为后者以 night_lum 为乘子，见下）。
+    //   - 注：它只影响**天色与环境光色**，不影响夜间 ambient 强度（后者的旋钮是
+    //     night_ambient，见下）。
     float night_scale = 1.0f;
 
     // night_ambient：夜间**额外 ambient 强度**的直接旋钮（绝对量，默认 0 = 不开）。
     //   - 用法（在 AmbientIntensity 里）：
-    //       night_term = base_intensity × night_ambient × night_lum
-    //     其中 night_lum = 夜色两色**经 night_scale 缩放后**的平均亮度。
+    //       night_term = base_intensity × night_ambient
+    //     纯绝对强度，**不乘夜色亮度**（与夜色颜色解耦）。
     //   - 为何是“直接旋钮”而非分段线性映射：夜色与 ambient 都要标定，中间再套
     //     一条曲线会把两个自由度耦在一起、反而难调；直接给旋钮，用眼睛标定。
     //   - 默认 0 = 不开夜色 ambient（退化为旧行为）。
@@ -973,26 +974,22 @@ struct SkyCommand {
     // ── 夜色 ambient 叠加（2026-09-21）──
     // 背景：本曲线原本是按“暮色仍未消失”的旧场景标定的（那时夜色两色默认 0）。
     // 现在夜色成为标准天光的默认组成部分，需要在日落后**额外**补一项由夜色
-    // 亮度驱动的 ambient，否则太阳一落 ambient 就掉到曲线的夹断值，与夜空亮度
-    // 失配（物体比天空暗一个数量级）。
+    // 亮度驱动，否则太阳一落 ambient 就掉到曲线的夹断值，与夜空亮度失配（物体比
+    // 天空暗一个数量级）。
     //
     //   ambient = 暮色项(本曲线 × TurbAmbLoss) × daylight × base_intensity
-    //           + 夜色项 × (1 − daylight)
+    //           + base_intensity × night_ambient × (1 − daylight)
     //
     // 其中：
     //   daylight = clamp((sun_y-0.03)/0.10, 0, 1) 与 shader / AmbientColor 同源
     //             —— 保证“天色 / 环境光色 / 环境光强”是同一条时间轴。
-    //   夜色项 = kNightAmbientCurve(夜色平均亮度) —— 一个**分段线性函数**，
-    //            把“夜色底色的平均亮度”映射到“夜间额外的 ambient 绝对强度”。
-    //            采样点（Danis 2026-09-21 定，与白天表同一数量级）：
-    //              夜色 lum = 0.0 → 额外 ambient 0.0
-    //              夜色 lum = 1.0 → 额外 ambient 0.4（= 白天正午 0.4 同量级）
-    //            故本曲线是“夜色 lum → night ambient”的**绝对强度映射**，
-    //            与夜色**颜色**（色调）解耦：改夜色颜色不会静默改 ambient 强度。
-    //            后续细调夜色只需改这条曲线（加采样点即可），不动其它逻辑。
+    //   night_ambient = 夜间额外 ambient 的**直接旋钮**（绝对强度，默认 0.0）：
+    //             纯绝对量，**不乘夜色亮度**（与夜色颜色解耦）。为何直接给：夜色
+    //             与 ambient 都要标定，中间再套曲线/乘子会把两个自由度耦在一起、
+    //             反而难调；直接给旋钮，用眼睛标定（推荐在 skylight viewer 里调）。
     //
-    // 注：日间行为与曲线完全一致（daylight=1 → 夜色项 0）；夜色两色为 0 时
-    // 夜色项也是 0（曲线过原点），退化为旧行为。
+    // 注：日间行为与曲线完全一致（daylight=1 → 夜色项 0）；night_ambient=0 时
+    // 退化为旧行为。
     //
     // 用法：ambient 的亮度跟随天光自动变化：
     //   AmbientLight light;
@@ -1017,16 +1014,13 @@ struct SkyCommand {
         if (daylight >= 1.0f) {
             return day_term;
         }
-        // 夜色项（直接旋钮，不再经 PWL 映射）：
-        //   night_term = base_intensity × night_ambient × night_lum
-        // night_lum = 夜色两色平均亮度（经 night_scale 缩放后的），作为**乘子**；
-        // night_ambient = 夜间额外 ambient 的直接旋钮（默认 0 = 不开）。
-        // 为何直接给：夜色与 ambient 都要标定，中间再套一条曲线会把两个自由度
-        // 耦在一起、反而难调；两个独立旋钮可各自用眼睛标定。
-        const float night_lum = (night_zenith_color.r + night_zenith_color.g +
-                                 night_zenith_color.b + night_horizon_color.r +
-                                 night_horizon_color.g + night_horizon_color.b) /
-                                6.0f;
+        // 夜色项（**纯绝对强度**，不乘夜色亮度）：
+        //   night_term = base_intensity × night_ambient
+        // night_ambient = 夜间额外 ambient 的直接旋钮（绝对量，默认 0 = 不开）。
+        // 为何直接给：夜色与 ambient 都要标定，中间再套一条曲线/乘子会把两个
+        // 自由度耦在一起、反而难调；直接给旋钮，用眼睛标定。
+        // 注：夜色亮度（night_scale）只影响**天空/环境光色**，不影响此处强度——
+        //     “夜有多亮”（天空）与“物体被环境光照得多亮”是两个独立旋钮。
         const float night_term = base_intensity * night_ambient;
         return day_term * daylight + night_term * (1.0f - daylight);
     }
