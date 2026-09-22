@@ -65,7 +65,7 @@ inline constexpr const char* kEditorFontAlias = jpov::kFontBuiltinCJK;
 // 需求原文"光照固定为sunny day 同款配置"——不暴露滑条，常量集中于此，改动只有一处。
 inline constexpr float kEditorSunElevDeg = 90.0f;
 inline constexpr float kEditorTurbidity  = 2.0f;
-inline constexpr float kEditorSeasonR    = 1.0f;
+inline constexpr float kEditorDaylightSeasonR    = 1.0f;
 
 // 地面高度滑条范围（需求："地面依然是0~-3米可调"）。
 inline constexpr float kEditorGroundMin = -3.0f;
@@ -239,7 +239,7 @@ public:
 
         // ── 光照：固定 sunny day（不暴露滑条）──
         const NoonLighting light =
-            MakeLighting(kEditorSunElevDeg, kEditorTurbidity, kEditorSeasonR);
+            MakeLighting(kEditorSunElevDeg, kEditorTurbidity, kEditorDaylightSeasonR);
         cmds->sky = light.sky;
         cmds->sun = light.sun;
         cmds->ambient = light.ambient;

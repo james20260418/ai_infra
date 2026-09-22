@@ -58,7 +58,7 @@ public:
     // ── 光照滑条状态（跨帧持有；交互面板 UI_ 在下方）。色温/强度全由 sky 推导。
     float elev_deg_  = 90.0f;        // 太阳仰角（度 [0,90]）
     float turbidity_ = 2.0f;         // 大气浊度 [2,8]
-    float season_r_  = 1.0f;         // 季节 R 色温乘子 [0.5,2.0]
+    float daylight_season_r_  = 1.0f;         // 季节 R 色温乘子 [0.5,2.0]
     float ground_y_  = -3.0f;        // 地面高度 [-3,+3]
     float model_scale_ = 1.0f;       // 模型整体缩放 [0.1,20]
 
@@ -114,7 +114,7 @@ public:
         cmds->camera.far      = 1000.0f;  // 场景 R 最大 300，far 足够
 
         // ── 光照：由滑条状态经 sky 推导（含 Turb*Loss/季节色温）──
-        const NoonLighting light = MakeLighting(elev_deg_, turbidity_, season_r_);
+        const NoonLighting light = MakeLighting(elev_deg_, turbidity_, daylight_season_r_);
         cmds->sky = light.sky;
         cmds->sun = light.sun;
         cmds->ambient = light.ambient;
@@ -182,7 +182,7 @@ private:
                                      {kSliderWidth, kRowH}},
                         2.0f, 8.0f, /*decimal_places*/1);
         // 季节 R 色温乘子：[0.5,2.0]，归一化只偏红/青不改亮度。
-        ui_.SliderFloat("季节 R", &season_r_,
+        ui_.SliderFloat("季节 R", &daylight_season_r_,
                         jpov::UiRect{{left, top + 2.0f * (kRowH + kSpacing)},
                                      {kSliderWidth, kRowH}},
                         0.5f, 2.0f, /*decimal_places*/2);

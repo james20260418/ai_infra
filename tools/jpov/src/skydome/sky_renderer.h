@@ -2,7 +2,7 @@
 //
 // 用解析式大气模型（Preetham-Shirley-Smits 1999）计算白天天空背景，
 // 与 3D 相机视角一致（相机逆 VP 重建视线方向）。纯程序化、参数少、连续可动画，
-// 支持太阳位置/天气(turbidity)/季节(season)/亮度(intensity)。
+// 支持太阳位置/天气(turbidity)/季节(daylight_season)/月亮(moon_season)/亮度(intensity)。
 //
 // 设计要点：
 //   - 独立轻量 sky shader（含 Preetham 函数），一帧一次 draw，不掺 object3d。
@@ -10,8 +10,8 @@
 //   - 地平线以下（pitch<0）画纯色 ground_color（避免天空倒影）。
 //   - HDR：输出原始亮度（可 >1.0），不做 tone map，由后处理统一压缩。
 //   - 夜空底色：night_zenith_color → night_horizon_color 的垂直渐变（van Rhijn 形状），
-//     **加法**叠在白天项上（受 intensity、不受 season）；按 (1−daylight) 淡入。
-//   - 月亮盘：moon_dir + moon_* 一组参数，与日盘走**同一推导链**
+//     **加法**叠在白天项上（受 intensity、不受任何 season）；按 (1−daylight) 淡入。
+//   - 月亮：moon_season（色温）+ moon_dir + moon_* 一组参数；月盘与日盘走**同一推导链**
 //     （俯仰角重映射 / 黑体色温 / Beer-Lambert 衰减 / 角度空间盘 mask / 高斯光晕）。
 //
 // 曲线来源：Preetham 模型实现基于 Erin Catto (box3d, MIT) 的 preetham.glsl，
@@ -68,7 +68,8 @@ uniform vec3  uCamPos;        // 相机世界位置（方向 = 反投影点 - �
 uniform vec3  uSunDir;        // 太阳位置单位向量（世界中，y-up）
 uniform vec3  uMoonDir;       // 月亮位置单位向量（世界中，y-up；独立于 uSunDir）
 uniform float uTurbidity;     // 浊度（天气）：2 清澈…8 霾
-uniform vec3  uSeason;        // 季节色温乘子（冬冷/夏暖）
+uniform vec3  uDaylightSeason; // 季节色温乘子（**只染太阳能通道**：日盘/日主光/白天散射）
+uniform vec3  uMoonSeason;    // 月亮色温乘子（**只染月盘 + 月光**；血月）
 uniform float uIntensity;     // 天光亮度标量
 uniform vec3  uGroundColor;   // 地平线以下地色
 uniform vec3  uNightZenith;   // 夜空底色：天顶方向（线性 HDR；全 0 = 关闭夜色）
@@ -369,42 +370,42 @@ void main() {
     vec3 sky;
     if (dir.y < 0.0) {
         // ── 地平线以下：纯色地色（避免天空倒影感），不采样大气模型 ──
+        // 地色既非散射日光也非月亮，不受任何 season 乘子。
         sky = uGroundColor;
     } else {
-        // ── 上半球：Preetham 大气模型算天空色 ──
-        sky = preethamSky(dir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
+        // ── 太阳能通道：Preetham 白天散射 + 日盘 + 日晕，统一乘 daylight_season ──
+        // 这里**不做 tone map** —— 天空输出保持 HDR 原始亮度（可 >1.0），
+        // 由最终的后处理 pass 统一压缩到 [0,1]。
+        vec3 solar = preethamSky(dir, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
 
         // ── 昼夜过渡：太阳低于地平线时，日光淡出直到接近黑（(0,0,0)） ──
         // 太阳落山后白天项→黑，"夜空"由本 shader 末尾的夜色双色加法叠加
-        // （night_zenith_color / night_horizon_color，默认 0 = 关闭）。
-        sky = mix(vec3(0.0), sky, daylight);
+        //（night_zenith_color / night_horizon_color）。
+        solar = mix(vec3(0.0), solar, daylight);
 
-        // ── 叠太阳盘（加法，和天空散射色在同一 HDR 域）──
-        // 太阳盘是自发光天体，与天空散射色加法叠加，不受 season 染色（见下）。
-        sky += sun_contrib;
-        sky += sun_glow_contrib;
+        // 叠太阳盘/日晕（加法，和天空散射色在同一 HDR 域）。日盘是自发光天体，
+        // 但同属"太阳能通道"，与散射天光一起受 daylight_season 染。
+        solar += sun_contrib;
+        solar += sun_glow_contrib;
+        solar *= uDaylightSeason;
 
-        // ── 叠月亮盘（同样加法、同 HDR 域；默认亮度 0 时不贡献任何值）──
-        sky += moon_contrib;
-        sky += moon_glow_contrib;
+        // ── 月亮通道：月盘 + 月晕，统一乘 moon_season（血月、变暗即此处）──
+        vec3 lunar = (moon_contrib + moon_glow_contrib) * uMoonSeason;
+
+        sky = solar + lunar;
     }
 
-    // 季节色温 + 亮度。
-    // 注意：这里**不做 tone map** —— 天空输出保持 HDR 原始亮度（可 >1.0），
-    // 由最终的后处理 pass 统一压缩到 [0,1]。
-    //
-    // ⚠️ 顺序很重要：夜色项必须加在本行**之后** —— 它**不受 season 染色**
-    //   （season 是"日光散射的季节色温"，气辉/城市光污染不是散射日光），
-    //   但**受 intensity 缩放**（intensity = 天光总强度开关；日落后白天项已为 0，
-    //   于是它在夜间自动成为夜色总开关）。
-    sky *= uSeason * uIntensity;
+    // 天光亮度总开关：所有通道（含夜色）都由此缩放。
+    sky *= uIntensity;
 
     // ── 夜空底色（加法叠加，仅地平线以上；**按 (1−daylight) 淡入**）──
     // 夜间项乘 (1−daylight)：气辉/城市光污染白天被日光完全淹没，不应给日间天空抬底；
     // 日落后 (daylight→0) 淡入到满值。白天项的 daylight 因子只能把白天项压到 0，
     // 挡不住夜色项在白天被加进来，故两层各自门控。用同一个 daylight 因子，使 sky /
     // AmbientColor / 昼夜过渡共用同一条时间轴。
-    // 本行在 sky *= uSeason * uIntensity 之后：夜幕不受 season 染、受 intensity 缩放。
+    // 颜色完全由用户配置的夜色两色决定：**不受 daylight_season / moon_season 染**
+    //（气辉/星光/城市光污染不是散射日光也不是月亮）；只受 intensity 缩放（intensity
+    //  是"天光总强度开关"；日落后白天项已为 0，于是夜间自动成为夜色总开关）。
     // 地平线以下不加：下半球由 ground_color 独占。夜色两色设为 0 时本行恒为 +0.0。
     if (dir.y >= 0.0) {
         sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);

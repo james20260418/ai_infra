@@ -42,7 +42,7 @@
   - 日出/日落 ≈ 暖橙红（约 2000~3000K）。
 - `intensity = 1.0` ≈ **正午晴空直射太阳 ≈ 100,000 lux**。
 - 低角度太阳的强度衰减由**经验照度表**决定（不再用 Beer-Lambert 解析拟合，见下）。
-- **自动推导 `SkyCommand::DirectionalIntensity()`（2026-08-22 改，2026-08-31 调参）**：
+- **自动推导 `SkyCommand::SunDirectionalIntensity()`（2026-08-22 改，2026-08-31 调参）**：
   从 `sun_dir` 仰角查经验照度 PWL，再乘混度衰减 `TurbSunLoss(turb)`：
   `intensity = midday_intensity × 衰减系数(仰角) × TurbSunLoss(turb)`，
   `midday_intensity` 当前默认 **2.2**（2026-08-31 肉眼标定，见注）。
@@ -56,15 +56,24 @@
   - 背景：早期用 Beer-Lambert `exp(−τ·AM)`（`AM=1/sin(elev)`）解析拟合，但该式在低仰角
     会因 AM 发散（大气球壳 d2 有上界，并不无限增长），散射主导时纯吸收模型失真，
     衰减趋势也偏离实际照度，故改为直接查经验照度锚点插值。
-  - 用法：`light.intensity = sky.DirectionalIntensity()`（颜色仍用 `DirectionalColor()`，
+  - 用法：`light.intensity = sky.SunDirectionalIntensity()`（颜色仍用 `SunDirectionalColor()`，
     两者配套，见 `SkyCommand` 注释）。
-- 月光方向光：物理上月光 ≈ 阳光的 1/400,000，即 `intensity ≈ 2.5e-6`
-  （满月地面照度 ≈ 0.3 lux / 100,000 lux）。配合冷色（约 4100K）。
+- 月光方向光（2026-09-22 接入）：`MoonDirectionalColor() / MoonDirectionalIntensity()`。
+  - `color` = 常量 **4100K**（与月盘同色；月亮反射日光，且月盘不做低仰角红化）。
+  - `intensity = 基准 × DniFactor(月仰角) × TurbSunLoss(turb) × (1−daylight)`，**与太阳共用同一条
+    仰角 DNI 曲线与浊度衰减**；基准默认 **0.22 = 太阳基准 2.2 的 1/10**。
+  - 夜景走**感知标尺**（与月盘亮度 5.0 / 夜色两色同一套）：物理月光 ≈ 阳光的 1/400,000
+    （`≈ 2.5e-6`，满月地面照度 ≈ 0.3 lux / 100,000 lux），落 ACES 是纯黑、无法验收。
+  - `(1−daylight)` 门控：`moon_dir` 与 `sun_dir` 独立，月亮白天也可能在地平线上，不门控会在
+    正午平白多一份月光。
+  - **未建模月相**：当前月盘是整圆，真实满月/弦月地面照度差 ~10×。
 
 ### 2. 天光背景 `SkyCommand`
-- `sun_dir / turbidity / season / ground_color`：见 SkyCommand 注释。
-- `season`：**只调天空的色温气氛**（多分量乘子），不染太阳盘（太阳盘是自发光天体，
-  色调由仰角散射决定，不受季节色温染色）。
+- `sun_dir / turbidity / daylight_season / moon_season / ground_color`：见 SkyCommand 注释。
+- `daylight_season`：**只染太阳能相关通道**——日盘、太阳直射光、白天散射天光、白天 ambient
+  （暮色端）。**不染**夜色（气辉/星光/城市光污染，含夜间 ambient）与月亮。
+- `moon_season`：**只染月亮**——月盘 + 月亮直射光（两者必须同色）；血月（月全食）
+  ≈ (1.0, 0.2, 0.03)。不做亮度归一化 → 也能把月亮压暗（血月又红又暗）。
 - `intensity = 1.0` ≈ **正午晴天的蓝天背景**（已定标，2026-08-19 Danis 确认）。
   - 归一化系数 `SKY_LUMINANCE_SCALE = 0.04`（`sky_renderer.h`）已定：把 Preetham
     的物理天顶亮度（~几千 cd/m²）压到 JPOV HDR 标尺，使 intensity=1.0 时天空为
@@ -348,12 +357,13 @@ TurbAmbLoss(turb)： 2→1.00  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50
   的 exp(−density×dist) 雾层。因此近景物体“霾感”弱——霾辨识度的主力本是“远处发白的
   空气媒介”和“太阳周围气溶胶光晕”，这两者当前都未随 turb 实现。Danis 判断当前素材/场景
   纵深感不足、以现有条件只能做到光照衰减层面，故暂不加雾层/光晕（记录备查，非本次 scope）。
-- **season 只染天空背景**：`uSeason` 只作用于天空 dome（`sky *= uSeason`），不染太阳盘，也
-  不作用于 sun/ambient 的光照（物体受光没有季节色温偏置）。季节真实影响（冬冷夏暖、低仰角
-  偏冷）未贯通到物体光，如需“天空与物体色调一致”需后续把 season 透传到 Directional/
-  Ambient。
+- **季节染色的边界**：`daylight_season` 只染**太阳能通道**（日盘 / 太阳直射光 / 白天散射天光 /
+  白天 ambient 暮色端），**月亮**由 `moon_season` 单独管（月盘 + 月光），**夜色**两把都不染。
+  完整边界与理由见【二·2】【十】。
 
-> **下一步候选**：①距离雾层；②太阳气溶胶光晕随 turb 联动；③season 透传到物体光照。
+> **下一步候选**：①距离雾层；②太阳气溶胶光晕随 turb 联动。
+> （旧列项“season 透传到物体光照”已完成：`daylight_season` 已用于日盘/日主光/白天 ambient，
+>  月亮则另有 `moon_season`——见【二·1】【二·2】与【十】。）
 
 
 ## 十、夜色底色（night sky）—— 感知标尺锚点（2026-09-20 引入）
@@ -373,7 +383,8 @@ TurbAmbLoss(turb)： 2→1.00  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50
   该纯几何关系即 van Rhijn 函数（`R=6371km, h=90km` 时地平/天顶 ≈ 6.0），
   在 shader 里归一化成插值参数 `t`（天顶=0, 地平=1）。
   → **两个颜色定端点，形状由物理定**；给相同值即退化为纯色底色。
-- **不受 `season` 染色**（season = 日光散射的季节色温；气辉/城市光污染不是散射日光）。
+- **不受 `daylight_season` 染**（= 日光散射的季节色温；气辉/城市光污染不是散射日光）。
+  **夜间 ambient 的夜色端**同理（由本两色推导，不过 daylight_season）；`moon_season` 也不染它。
 - **受 `intensity` 缩放**（intensity = 天光总开关）。
 
 ### 2. 为什么不能直接用物理值（关键结论）
@@ -400,34 +411,37 @@ TurbAmbLoss(turb)： 2→1.00  3→1.08  4→1.05  5→0.90  6→0.70  8→0.50
 
 - **默认值 = 上表锚点**（不再是 (0,0,0)）：`SkyCommand` 默认构造即构成「带夜色的
   标准天光」——白天 Preetham 蓝天、日落后城市夜色，两层由 daylight 自动过渡。
-  于是「默认构造 + season / turbidity / sun_dir / moon_dir」即完整标准天光。
+  于是「默认构造 + daylight_season / turbidity / sun_dir / moon_dir」即完整标准天光。
 - 日间零回归：夜色项乘 (1−daylight)，在 `sun_dir.y ≥ 0.13` 时精确为 `0.0`，
   白天画面（及其 gold）逐字节不变（已验证：全量 gold 未变）。
-- 若需旧行为（无夜色），显式把两色置 `(0,0,0)`（同时夜间 ambient 夜色项也归零，
-  退化为旧的全天候暮色曲线）。
+- 若需旧行为（无夜色），显式把两色置 `(0,0,0)`：夜色天空为 0，但夜间 ambient 的夜色项会
+  夹断到首点 `0.10`（**不归零**，见 4.1），并非退化成旧的全天候暮色曲线。
 
-### 4.1 夜间环境光的重新标定（2026-09-21，随夜色上天一起做）
+### 4.1 夜间环境光的重新标定（随夜色上天一起做）
 
 `AmbientIntensity()` 叠加一项**由夜色亮度驱动的额外环境光**，用同一 `(1−daylight)`
 因子交叉淡入淡出：
 
 ```
 ambient = 暮色项(仰角曲线 × TurbAmbLoss) × daylight × base_intensity
-        + kNightAmbientCurve(夜色平均亮度) × base_intensity × (1−daylight)
+        + NightTermFromLum(夜色平均亮度) × base_intensity × (1−daylight)
 ```
 
-- `kNightAmbientCurve`：**夜色平均亮度 → 夜间额外 ambient 绝对强度** 的分段线性映射，
-  当前两个采样点（Danis 2026-09-21 定）：
-  `lum=0.0 → 0.0`（无夜色则无额外 ambient）、`lum=1.0 → 0.4`（与白天正午同量级）。
-  当前夜色（平均亮度 0.0325）→ 夜间额外 ambient = **0.0130**。
+- `NightTermFromLum()`（`SkyCommand` 内的静态函数）：**夜色平均亮度 → 夜间额外 ambient
+  绝对强度** 的分段线性映射，Danis 标定的五个采样点：
+  `0.02→0.10  0.035→0.17  0.05→0.20  0.10→0.25  0.33→0.40`；越界夹断到端点。
+  当前夜色（平均亮度 0.0325）→ 夜间额外 ambient = **0.158**。
+- **曲线不过原点**：夜色两色置 `(0,0,0)`（lum=0）时会夹断到首点 `0.10`，即夜间 ambient
+  不会被关到 0——本曲线是“夜色亮度 → 夜间 ambient”的标定表，不是“无夜色则无 ambient”。
 - **与夜色颜色解耦**：本曲线吃的是“夜色亮度”这个标量，它映射到**绝对强度**；
   改夜色**颜色**（色调）不会静默改 ambient 强度。要调夜间亮度就改这条曲线。
 - `base_intensity`（原 `noon_intensity`）是 ambient 的**整体倍率**（同时作用于
   暮色项与夜色项），默认 1.0。
-- 日间（daylight=1）与旧行为**完全一致**；夜色两色为 0 时夜色项也为 0（曲线过原点），
-  退化为旧行为。
+- 日间（daylight=1）与旧行为**完全一致**。
 - 同理 `AmbientColor()` 也按同一因子在暮色色温与夜色底色间插值（只改色调）——
   三者（天空 / 环境光色 / 环境光强）同一条时间轴，不会一个已入夜另一个还在黄昏。
+- ⚠️ **本曲线吃不到浊度**：夜色底色（气辉/星光/城市光污染）本身与 turbidity 无关，
+  故 `NightTermFromLum` 不乘 `TurbAmbLoss`（日间暮色项才乘）。这是已知的、有意保留的边界。
 
 ### 5. 已知边界（本 PR 不做）
 
@@ -435,5 +449,5 @@ ambient = 暮色项(仰角曲线 × TurbAmbLoss) × daylight × base_intensity
   本组双色只表达气辉 + 星光 + 城市光污染的低频底色。
 - **月盘已实现**（2026-09-21）：`moon_dir` + `moon_*` 一组参数，与日盘共用推导链；
   默认亮度 5.0 / 晕 0.1（同为感知标尺，见 `SkyCommand` 字段注释）。**月相未做**。
-- **月光方向光/ambient 的推导**仍是后续独立 PR（月盘只画不照）。
+- **月光方向光已接入**（2026-09-22，见【二·1】）；**月光驱动的天空散射 / 月盘环境光**仍不做。
 - `ground_color` 永远是纯色兜底（夜 shader 下半球输出 0，夜色只作用于地平线以上）。

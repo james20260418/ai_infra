@@ -4,13 +4,15 @@
 // 场景固定为三个不同 PBR 材质的方块（低反 / 高光 / 金属）+ 灰色地面，
 // 视角变换与 model viewer 相同。
 //
-// 交互面板只有**四个自由度**（其余参数全走 SkyCommand 默认构造值）：
+// 交互面板有五个自由度（其余参数全走 SkyCommand 默认构造值）：
 //   ① 浊度 turb [0,8]（默认 2）
-//   ② 季节色温 [−1,+1]（左=蓝偏 / 右=红偏 / 中=中性）
-//   ③ 太阳方向（仰角 [0,90] + 方位角 [0,360)）
-//   ④ 月亮方向（仰角 [0,90] + 方位角 [0,360)）
-// 天光由 `CreateDefaultSkyCommand` 构造，**光照（日光 + ambient）由它推导**；
-// 月光平行光不做（月盘只作为天体画出）。
+//   ② 季节色温 日光 [−1,+1]（左=蓝偏 / 右=红偏 / 中=中性；只染太阳能通道）
+//   ③ 天体方向（仰角 [−90,+90] + 方位角 [0,360)）
+//   ④ 月色变红 [0,1]（0=常月，1=血月；只染月盘 + 月光）
+//   ⑤ 夜空偏蓝 [0,1]（0=出厂夜色，1=梦幻蓝且更亮）
+// 天光由 `CreateDefaultSkyCommand` 构造，**主平行光 + ambient 由它推导**。
+// 月亮恒在反日点（moon_dir = −sun_dir）：仰角为正时主光是太阳、为负时主光是月亮
+//（两者在地平线 0° 处交接），一条仰角轴即可验收日/月两种主光的强度与颜色。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 //
@@ -146,53 +148,87 @@ int RunCapture(const std::string& out_dir) {
     app.view_.theta = 3.14159265358979323846 / 4.0;
     app.view_.R     = 9.5;
 
-    // ── A. 昼夜扫谱（太阳仰角递减，固定其余自由度）──
-    // 场景 + 月色，验证天色/日照/环境光在同一条时间轴上平滑过渡。
-    app.moon_elev_deg_ = 30.0f;
-    app.moon_azim_deg_ = 225.0f;
-    app.turbidity_     = jpov_skylight::kTurbidityDef;
-    app.season_tint_   = 0.0f;
-    app.sun_azim_deg_  = 45.0f;
-    for (int e : {90, 30, 10, 4, 0}) {
-        app.sun_elev_deg_ = static_cast<float>(e);
-        shoot(("sun_elev" + std::to_string(e)).c_str());
+    // ── A. 昼夜扫谱（天体仰角 +90° → −90°，固定其余自由度）──
+    // 同一条仰角轴从正午扫到午夜：>0 段主光是太阳、<0 段主光是月亮（恒在 −sun_dir）。
+    // 验证天色 / 主光（日↔月）/ 环境光在同一条时间轴上平滑过渡，且在 0° 处交接
+    //（太阳与月亮都在地平线，两侧主光强度都趋零）。
+    app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season  = 0.0f;
+    app.deg_.sun_azim_deg = 45.0f;
+    for (int e : {90, 45, 30, 10, 4, 0, -4, -10, -30, -45, -60, -90}) {
+        app.deg_.sun_elev_deg = static_cast<float>(e);
+        shoot(("body_elev" + std::to_string(e)).c_str());
     }
 
-    // ── B. 浊度扫谱（固定默认正午 + 月盘，看霾化与月晕变宽）──
-    app.sun_elev_deg_ = 45.0f;
-    app.moon_elev_deg_ = 30.0f;
+    // ── B. 浊度扫谱（夜间月光 + 月盘，看霾化与月晕变宽 + 月光 turb 衰减）──
+    // 仰角取 −30°（夜间，月亮升到 +30°）：一图同看天色霾化、月盘/月晕变宽、
+    // 以及月光主光被 TurbSunLoss 衰减。
+    app.deg_.sun_elev_deg = -30.0f;
     for (int t : {0, 2, 5, 8}) {
-        app.turbidity_ = static_cast<float>(t);
+        app.deg_.turbidity = static_cast<float>(t);
         shoot(("turb" + std::to_string(t)).c_str());
     }
-    app.turbidity_ = jpov_skylight::kTurbidityDef;
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
 
-    // ── C. 季节色温扫谱（蓝偏 .. 红偏，看冷暖偏色）──
+    // ── C. 日光季节色温扫谱（蓝偏 .. 红偏，看冷暖偏色；白天日光）──
+    app.deg_.sun_elev_deg = 45.0f;
     for (int s : {-1, 0, 1}) {
-        app.season_tint_ = static_cast<float>(s);
+        app.deg_.daylight_season = static_cast<float>(s);
         shoot(("season" + std::to_string(s + 1)).c_str());
     }
-    app.season_tint_ = 0.0f;
+    app.deg_.daylight_season = 0.0f;
 
-    // ── D. 月亮方位/仰角：月盘在天球不同位置 ──
-    // 相机对准月亮方位（aim_at：φ=−仰角、θ=方位角+180°），太阳落山（0°）→
-    // 只剩夜色 + 月盘，便于单独看月盘位置与月晕。
-    app.sun_elev_deg_ = 0.0f;
-    app.moon_azim_deg_ = 90.0f;   // 月亮在 +X 侧（方位角 90°=+X）
-    aim_at_azimuth(app.moon_azim_deg_);
-    for (int e : {25, 10, 3}) {
-        app.moon_elev_deg_ = static_cast<float>(e);
-        shoot(("moon_elev" + std::to_string(e)).c_str());
+    // ── C2. 日光季节色温扫谱（夜间，月亮在 +30°）：验收它**只染太阳能通道**──
+    // 预期：天色（夜色）与月盘**不变**，只有环境光的“暮色端”随白光程度变。
+    app.deg_.sun_elev_deg = -30.0f;
+    for (int s : {-1, 0, 1}) {
+        app.deg_.daylight_season = static_cast<float>(s);
+        shoot(("season_night" + std::to_string(s + 1)).c_str());
     }
-    // 月亮降到 0°（贴地平线）→ 被俯仰角重映射压进地平线，整盘淹没
-    app.moon_elev_deg_ = 0.0f;
+    app.deg_.daylight_season = 0.0f;
+
+    // ── C3. 谷色变红扫谱（夜景 + 全景，月亮在 +30°）——月盘与月光一起变红变暗 ──
+    app.deg_.sun_elev_deg = -30.0f;
+    for (float mr : {0.0f, 0.5f, 1.0f}) {
+        app.deg_.moon_red = mr;
+        shoot(("moon_red" + std::to_string(static_cast<int>(mr * 10))).c_str());
+    }
+    app.deg_.moon_red = 0.0f;
+
+    // ── C4. 夜蓝扫谱（夜景，月亮在 +30°）——夜色两色整体偏蓝且变亮 ──
+    for (float nb : {0.0f, 0.5f, 1.0f}) {
+        app.deg_.night_blue = nb;
+        shoot(("night_blue" + std::to_string(static_cast<int>(nb * 10))).c_str());
+    }
+    app.deg_.night_blue = 0.0f;
+
+    // ── D. 月亮位置扫谱（月亮仰角 = −天体仰角；相机对准月亮方位）──
+    // 月亮方位 = sun_azim + 180 = 90°（+X 侧）⇒ 取 sun_azim = 270°。
+    // 天体仰角取负值 ⇒ 月亮升到 25°/10°/3°；相机对准月亮方位看月盘与月晕。
+    app.deg_.sun_azim_deg = 270.0f;
+    aim_at_azimuth(90.0f);
+
+    // 对准月亮时扫“谷色变红” → 直接看月盘颜色（夜间）。
+    // 日光季节色温**不该**改变月盘（daylight_season 不吃月亮），此处一并验证。
+    app.deg_.sun_elev_deg = -25.0f;
+    for (float mr : {0.0f, 0.5f, 1.0f}) {
+        app.deg_.moon_red = mr;
+        shoot(("moon_season" + std::to_string(static_cast<int>(mr * 10))).c_str());
+    }
+    app.deg_.moon_red = 0.0f;
+
+    for (int e : {-25, -10, -3}) {
+        app.deg_.sun_elev_deg = static_cast<float>(e);
+        shoot(("moon_elev" + std::to_string(-e)).c_str());
+    }
+    // 月亮贴地平线（天体仰角 0°）→ 月盘被俯仰角重映射压进地平线，整盘淹没
+    app.deg_.sun_elev_deg = 0.0f;
     shoot("moon_at_horizon");
 
     // ── E. 月亮藏匿验证：月亮真仰角 < 0（沉到地平线下）→ 月盘完全不可见 ──
-    // 仰角滑条下限是 0°，但接口不限制（moon_dir.y<0 即沉下）；直接给负仰角验证。
-    app.moon_elev_deg_ = -20.0f;
+    // 天体仰角 +20° ⇒ 月亮在 −20°（地平线下）；接口不限制负的 moon_dir.y。
+    app.deg_.sun_elev_deg = 20.0f;
     shoot("moon_below_horizon");
-    app.moon_elev_deg_ = 30.0f;
 
     // 恢复默认视角（后续场景拍摄用）
     app.view_ = jpov_viewer::DefaultView();
@@ -201,8 +237,8 @@ int RunCapture(const std::string& out_dir) {
     app.view_.R     = 6.0;
 
     // ── F. 模型放置自检：正午（看桌子/橡树是否正常入画）──
-    app.sun_elev_deg_ = 60.0f;
-    app.sun_azim_deg_ = 45.0f;
+    app.deg_.sun_elev_deg = 60.0f;
+    app.deg_.sun_azim_deg = 45.0f;
     shoot("scene_noon_check");
 
     app.Finalize();

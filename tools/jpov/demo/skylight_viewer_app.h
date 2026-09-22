@@ -3,14 +3,17 @@
 // 与 model viewer 的 viewer_app.h 同构（同一套 JPOV::OneIteration 渲染体 +
 // 即时模式 UI 面板约定），差别只在**场景与光照来源**：
 //   - 场景 = 三方块（低反/高光/金属）+ 灰色地面（skylight_scene.h），不加载 glTF；
-//   - 天光 = `CreateDefaultSkyCommand(四自由度)`（其余参数走默认构造）；
-//   - 光照 = 由该 SkyCommand **推导**（日光色/强 + ambient 色/强），不手配。
+//   - 天光 = `CreateDefaultSkyCommand`（其余参数走默认构造；月亮恒取 moon_dir = −sun_dir）；
+//   - 光照 = 由该 SkyCommand **推导**（主平行光 + ambient 色/强），不手配。
 //
-// 交互面板只有**四个自由度**（六个滑条）：
+// 交互面板有五个自由度（六个滑条）：
 //   ① 浊度 turb [0,8]
-//   ② 季节色温 [−1,+1]（左=蓝偏 / 右=红偏；这是查看器的交互设计，见 scene 头注释）
-//   ③ 太阳方向：仰角 [0,90] + 方位角 [0,360)（两个滑条，属同一个自由度）
-//   ④ 月亮方向：仰角 [0,90] + 方位角 [0,360)
+//   ② 季节色温 日光 [−1,+1]（左=蓝偏 / 右=红偏；只染太阳能通道）
+//   ③ 天体方向：仰角 [−90,+90] + 方位角 [0,360)（两个滑条，属同一个自由度）
+//      仰角正 = 太阳在地平线上（白天，太阳平行光）；负 = 太阳沉下、月亮升到反向
+//      等高（夜间，月亮平行光）。月亮方向恒取 moon_dir = −sun_dir，不单独给滑条。
+//   ④ 月色变红 [0,1]（0=常月，1=血月；只染月盘 + 月光）
+//   ⑤ 夜空偏蓝 [0,1]（0=出厂夜色，1=梦幻蓝且更亮；夜色两色整体乘子）
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
@@ -68,13 +71,9 @@ public:
     // ── 视角：沿用 ViewConfig（y-up 球面角 + 右键拖拽/滚轮缩放）──
     jpov_viewer::ViewConfig view_;
 
-    // ── 四个自由度（跨帧持有；天光与光照全由它们推导）──
-    float turbidity_    = kTurbidityDef;   // ① 浊度 [0,8]
-    float season_tint_  = 0.0f;            // ② 季节色温 [−1,+1]（蓝偏..红偏，0=中性）
-    float sun_elev_deg_ = 45.0f;           // ③ 太阳仰角 [0,90]
-    float sun_azim_deg_ = 45.0f;           // ③ 太阳方位角 [0,360)
-    float moon_elev_deg_ = 30.0f;          // ④ 月亮仰角 [0,90]
-    float moon_azim_deg_ = 225.0f;         // ④ 月亮方位角 [0,360)
+    // ── 天光自由度（跨帧持有；天光与光照全由它们推导）──
+    // 滑条值 → SkyCommand 字段的编码见 skylight_scene.h 的 SkyDegrees。
+    SkyDegrees deg_;
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
@@ -117,23 +116,12 @@ public:
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;
 
-        // 天光 + 光照：全由四个自由度推导（sky 走 CreateDefaultSkyCommand，
-        // 日光/ambient 由该 sky 推导）；夜色两个标定旋钮覆盖默认值。
-        SkyLighting nl = MakeSkyLighting(
-            turbidity_, season_tint_, sun_elev_deg_, sun_azim_deg_,
-            moon_elev_deg_, moon_azim_deg_);
-        // 光照由该 sky 推导（日光/ambient 全部由 SkyCommand 推出，不手配）。
-        nl.sun = jpov::DirectionalLight{
-            /*direction*/ {-nl.sky.sun_dir.x(), -nl.sky.sun_dir.y(), -nl.sky.sun_dir.z()},
-            /*color*/ nl.sky.SunDirectionalColor(),
-            /*intensity*/ nl.sky.SunDirectionalIntensity(),
-        };
-        nl.ambient = jpov::AmbientLight{
-            .color = nl.sky.AmbientColor(),
-            .intensity = nl.sky.AmbientIntensity(),
-        };
+        // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
+        // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
+        // moon_season 与夜空蓝覆盖默认值。
+        const SkyLighting nl = MakeSkyLighting(deg_);
         cmds->sky     = nl.sky;
-        cmds->sun     = nl.sun;
+        cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
@@ -172,7 +160,7 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 光照面板：6 个滑条 = 四个自由度（日月各占仰角+方位角）。
+    // 光照面板：6 个滑条 = 五个自由度（浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -197,17 +185,20 @@ private:
         };
 
         // ① 浊度 [0,8]：看霾化（天色发白）+ 日盘/月盘衰减 + 月晕变宽。
-        ui_.SliderFloat("浊度 turb", &turbidity_, row(0),
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0),
                         kTurbidityMin, kTurbidityMax, 1);
-        // ② 季节色温 [−1,+1]：左蓝偏 / 右红偏 / 中间中性（只偏色温，不改亮度）。
-        ui_.SliderFloat("季节色温 (左蓝偏..右红偏)", &season_tint_, row(1),
-                        -1.0f, 1.0f, 2);
-        // ③ 太阳方向（仰角 + 方位角）。
-        ui_.SliderFloat("太阳仰角 °", &sun_elev_deg_, row(2), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("太阳方位角 °", &sun_azim_deg_, row(3), 0.0f, 360.0f, 0);
-        // ④ 月亮方向（仰角 + 方位角）。月盘亮度走默认 5（常亮）。
-        ui_.SliderFloat("月亮仰角 °", &moon_elev_deg_, row(4), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("月亮方位角 °", &moon_azim_deg_, row(5), 0.0f, 360.0f, 0);
+        // ② 日光季节色温 [−1,+1]：左蓝偏 / 右红偏 / 中间中性（只偏色温，不改亮度）。
+        ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
+                        row(1), -1.0f, 1.0f, 2);
+        // ③ 天体方向（仰角 + 方位角）。仰角正=太阳当空（日光主光），负=月亮当空
+        //    （月光主光）；月亮恒在 −sun_dir，故不再单列月亮滑条。
+        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg, row(2),
+                        -90.0f, 90.0f, 0);
+        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(3), 0.0f, 360.0f, 0);
+        // ④ 月色变红 [0,1]：0=常月，1=血月（只染月盘 + 月光）。
+        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
+        // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
+        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
     }
 
     bool show_panel_ = true;
