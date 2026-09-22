@@ -1027,7 +1027,7 @@ struct SkyCommand {
                                  night_zenith_color.b + night_horizon_color.r +
                                  night_horizon_color.g + night_horizon_color.b) /
                                 6.0f;
-        const float night_term = base_intensity * night_ambient * night_lum;
+        const float night_term = base_intensity * night_ambient;
         return day_term * daylight + night_term * (1.0f - daylight);
     }
 

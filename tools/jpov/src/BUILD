@@ -220,6 +220,7 @@ cc_library(
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",
+        "//tools/common:utils",
         "//tools/jpov/src/skeleton:skeleton",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",

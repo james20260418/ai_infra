@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
@@ -2663,6 +2664,11 @@ uint32_t LoadGltfOcclusion(TextureManager& tex_mgr,
 GltfObject Renderer::LoadGltf(const std::string& path) {
     GltfObject obj;
 
+    // 路径解析：允许相对路径（分发态 = exe 旁 resources）。查找顺序 exe 旁 → cwd
+    // → TEST_SRCDIR，详见 ResolveResourcePath。先把**已解析**的路径固定下来，
+    // 后续所有子资源（贴图 / ORM）都从它的目录出发，避免二次解析不一致。
+    const std::string resolved_path = ResolveResourcePath(path);
+
     // ORM 贴图按源路径去重缓存（多 primitive 共享同一 arm 图时只拆一次）
     std::unordered_map<std::string, OrmTextureIds> orm_cache;
 
@@ -2772,14 +2778,14 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
     };
 
     CollectCtx ctx{this, &obj, &orm_cache};
-    if (!jpov::LoadGltfScene(path, collect, &ctx) || obj.primitives.empty()) {
+    if (!jpov::LoadGltfScene(resolved_path, collect, &ctx) || obj.primitives.empty()) {
         // 失败或空：释放已注册的资源
         ReleaseGltf(obj);
         LOG(ERROR) << "Renderer::LoadGltf: 加载失败 " << path;
         return {};
     }
 
-    LOG(INFO) << "Renderer::LoadGltf: " << path << " → "
+    LOG(INFO) << "Renderer::LoadGltf: " << resolved_path << " → "
               << obj.primitives.size() << " primitives";
     return obj;
 }
