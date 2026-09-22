@@ -301,3 +301,76 @@ cc_binary(
 )
 
 # 见 //tools/jpov/test:BUILD — gold generator + gold test 均移至 test/BUILD 管理
+
+# ============================================================================
+# ARAP 软体查看器 — 与 jpov_model_viewer 并列的交互式查看器
+#
+#   arap_sim         : 纯 CPU 软体仿真（焊接 + PBD 三类约束），可独立单测
+#   arap_viewer_app  : 渲染核心 App（仿真宿主 + 交互面板）
+#   jpov_arap_viewer : 主程序（CLI 装配 + 交互/headless 分发）
+#
+# 与 model viewer 共用 view_config.h（ViewConfig/ApplyInput/MakeLighting/
+# MakeGroundQuad/GroundMaterial）与 viewer_app.h 的窗口常量，杜绝两个查看器分叉。
+# ============================================================================
+cc_library(
+    name = "arap_sim",
+    srcs = ["demo/arap_sim.cc"],
+    hdrs = ["demo/arap_sim.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_library(
+    name = "arap_viewer_app",
+    hdrs = ["demo/arap_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:arap_sim",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh_geometry",
+        "//tools/jpov/interface:ui",
+        "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_arap_viewer",
+    srcs = ["demo/jpov_arap_viewer.cc"],
+    deps = [
+        "//tools/jpov:arap_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_output",
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "arap_sim_test",
+    srcs = ["demo/arap_sim_test.cc"],
+    deps = [
+        "//tools/jpov:arap_sim",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

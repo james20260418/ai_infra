@@ -330,6 +330,17 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+cc_library(
+    name = "mesh_geometry",
+    hdrs = ["mesh_geometry.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # GPUMesh — CPU MeshData 上传到 GPU 后的句柄（VAO + 分离 VBO + EBO）
 cc_library(
     name = "gpumesh",
@@ -400,3 +411,16 @@ cc_library(
 )
 
 
+
+cc_test(
+    name = "mesh_geometry_test",
+    srcs = ["mesh_geometry_test.cc"],
+    deps = [
+        ":mesh",
+        ":mesh_geometry",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
