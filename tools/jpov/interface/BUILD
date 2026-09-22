@@ -61,6 +61,19 @@ cc_library(
     ],
 )
 
+# SkyCommand 平行光推导单测（纯 CPU）：月亮直射光的颜色/强度 + 太阳强度零回归锚点。
+cc_test(
+    name = "sky_lighting_test",
+    srcs = ["sky_lighting_test.cc"],
+    deps = [
+        ":render_command",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonType/SkeletonPose/SkinnedInstanceState）
 # 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
 # 头里用到 geom::Quaternion（SkeletonPose.joint_rotation）、geom::math::Mat4（ComputeInverseBind）
