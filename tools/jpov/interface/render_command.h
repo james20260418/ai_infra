@@ -634,20 +634,14 @@ struct CascadeFBO {
 //    最终画面需由统一的**后处理 tone map pass**压缩到 [0,1]（见 renderer 的后处理
 //    规划）。任何天空颜色/亮度都应按 HDR 量级给定，不要预选 clamp 到 [0,1]。
 //
-// 组成（2026-09-20 起）：
-//   1. **白天项**：Preetham 太阳散射（上面那套）。太阳落到地平线以下时由 shader 的
-//      daylight 因子压到 0（sun_dir.y < 0.03 ≈ 1.7° 时精确为 0）。
-//   2. **夜色项**：night_zenith_color / night_horizon_color 两个颜色（见下方字段），
-//      **加法**叠在白天项之上（HDR 线性、tone map 之前，同样受 intensity 缩放、
-//      **不**受 season 染色）。
-//   → 日落后白天项已是 0，加法自然退化成"只有夜色"，故**不需要**任何 blends
-//     掩码/日落方位角权重（详见字段注释）。
-//
-// 仍不做的事：
-//   - 不画太阳/月亮盘之外的任何天体（月亮盘的参数与推导是后续独立 PR）；
-//   - 不推导方向光/环境光（derive 方法已移除，2026-08-19 决定）；
-//   - 夜空仍不建模**月光散射**（Preetham 在太阳低于地平线时发散，业界不扩展它
-//     建模夜晚）；本组"夜色双色"只表达气辉 + 星光 + 城市光污染的低频底色。
+// 组成：
+//   1. **白天项**：Preetham 太阳散射（上面那套）。太阳降到地平线以下时由 shader 的
+//      daylight 因子压到 0（sun_dir.y < 0.03 ≈ 1.7° 时为 0）。
+//   2. **夜色项**：night_zenith_color / night_horizon_color 两色（见下方字段），
+//      **加法**叠在白天项之上（HDR 线性、tone map 之前，受 intensity 缩放、
+//      不受 season 染色）。日落后白天项为 0，加法即退化成"只有夜色"。
+//   3. **月亮盘**：moon_dir + moon_* 一组参数（见下方字段），与日盘走同一推导链。
+// 月盘为整圆发光盘（无月相）；夜色只表达气辉 + 星光 + 城市光污染的低频底色。
 struct SkyCommand {
     // ── 太阳位置（时间） ──
     //
@@ -738,30 +732,76 @@ struct SkyCommand {
     //   默认 1.4。
     float sun_set_angle_ratio = 1.4f;
 
-    // ── 夜空底色（2026-09-20 引入：夜空 = 双色，加法叠在白天天空之上）──
-    // 夜空"底色" = 气辉(airglow) + 星光 + 城市光污染在大气中的散射所带来的
-    // 低频天空亮度分布。它**与太阳/月亮方位无关**（不是被照亮的散射体），
-    // 故本组参数只随**仰角**变化，不做任何方位判断。
+    // ── 月亮盘（自发光天体，与太阳盘完全对称的一套参数） ──
+    //
+    // 月盘与日盘在 shader 里走**完全相同的推导链**（角盘 mask + 黑体色温 + 光晕），
+    // 故本组字段与 sun_* 一一对应，参数含义逐条相同，只是默认值/色温按月亮调整。
+    // 本组自带 moon_dir：月盘方向是**独立输入**。"日月方向相反"是调用方的摆放选择
+    // （查看器里配成 −sun_dir），不是接口契约；独立输入才能表达"月在任意位置"。
+    //
+    // moon_dir：月亮在天球上的位置，世界空间单位向量（y-up），语义与 sun_dir 一致
+    //   （y>0 在地平线上，y=0 恰在地平线，y<0 沉在地平线下；长度不必归一但勿给零向量）。
+    //   月盘有效亮度的可见性由 moon_dir.y 驱动：月在地平线下时盘被压没、不显现。
+    //   注：本字段只决定**月盘**的位置，不参与天色/昼夜过渡（那些仍只由 sun_dir 驱动）。
+    jpov::Vec3f moon_dir = jpov::Vec3f(0.0f, -1.0f, 0.0f);
+
+    // moon_radius：月亮盘**角半径**（弧度）。物理真实 ~0.26°≈0.0045 rad
+    //   （月与日的视直径几乎相同，这是日全食的成因）。默认取物理 2 倍
+    //   （~0.52°≈0.0094 rad，与 sun_radius 同值）使盘在低分辨率下更醒目。
+    //   0 或负 = 不画月亮盘。
+    float moon_radius = 0.0094f;
+
+    // moon_brightness：月亮盘**自发光亮度基数**（HDR 值）。
+    //
+    // 默认 **5.0**：夜景走**感知标尺**（与夜色两色同一套，见 night_zenith_color）。
+    //   物理满月盘亮度 ≈ 2500 cd/m²，换算到本链路 HDR 会落 10³~10⁵，远超 ACES
+    //   饱和点（~1.0）→ 调色信息全丢。5.0 下 20° 仰角 → HDR≈2.08 → 屏显
+    //   ≈(255,240,219) 暖白盘，比夜色天顶亮 ~40~80 倍，层级合理。
+    //
+    // 实际盘亮度 = moon_brightness × exp(−τ·AM(仰角,浊度))（Beer-Lambert，
+    // 在 shader 内推导，与日盘同一公式）。0 或负 = 不画月亮盘。
+    float moon_brightness = 5.0f;
+
+    // moon_glow：月亮盘**光晕强度**（艺术参数，独立于盘；与 sun_glow 同义）。
+    //   光晕是大气散射（月晕/华），物理强度远低于盘，故为**独立的绝对 HDR 强度**。
+    //   默认 **0.1**：晕峰值 → 屏显 ≈(96,87,79)，明显亮于夜色地平 (62,58,56)，
+    //   晕可见但不抢戏。月晕**宽度受 turbidity 影响**（浊度越大晕越宽越散，见 shader）。
+    //   0 = 无光晕。
+    float moon_glow = 0.1f;
+
+    // moon_set_start_angle / moon_set_angle_ratio：月盘俯仰角重映射（与日盘同义）。
+    //   日盘用这套参数把低仰角的盘提前“压进地平线”（0° 时整盘淹没，不留半拉盘）。
+    //   月盘照做同一件事（默认值与 sun 的完全一致：10° / 1.4），只是**月盘单独持有**
+    //   一份，互不耦合。真实仰角 ≥ start 时盘在真实位置；低于 start 时：
+    //     盘俯仰角(°) = start + ratio × (真实仰角° − start)
+    //   默认 10°/1.4 下：真实 0° → 盘 −4°（整盘沉到地平线下，不再露半拉盘）。
+    float moon_set_start_angle = 10.0f;
+    float moon_set_angle_ratio = 1.4f;
+
+    // ── 夜空底色（夜色 = 双色，加法叠在白天天空之上）──
+    // 夜空"底色" = 气辉(airglow) + 星光 + 城市光污染在大气中的散射带来的低频
+    // 天空亮度分布。它与太阳/月亮方位无关（不是被照亮的散射体），故只随**仰角**
+    // 变化，不做方位判断。
     //
     // 合成算子 = **加法**（HDR 线性域、tone map 之前）：sky = 白天项 + 夜色项。
-    //   为什么不需要 blend 掩码 / 日落方位角 alpha：白天项在 sun_dir.y < 0.03
-    //   （≈1.7° 仰角）时已被 shader 的 daylight 因子精确压到 0，太阳一落加法就
-    //   自动退化成"只有夜色"；再叠一个按日落方位的掩码 = 同一件事编码两遍
-    //   （方向结构本来就在 Preetham 白天项里）。
+    // 白天项在 sun_dir.y < 0.03 时已被 daylight 因子压到 0，太阳一落加法即退化成
+    // "只有夜色"，方向结构由 Preetham 白天项表达。
     //
     // 两色 → 垂直渐变：
     //   - night_zenith_color：天顶方向（视线竖直向上）的底色，通常最深。
     //   - night_horizon_color：地平线方向（视线贴地）的底色，通常更亮。
-    //   - 两者之间的插值**形状由几何唯一确定**（气辉层视线厚度的 van Rhijn
-    //     增亮，见 sky_renderer.h 的 kAirglow* 常量），不需要第三个"渐变陡不陡"
-    //     的旋钮；给相同值即退化为纯色底色。
-    //   - 量化锚点：**"经典城市夜色"**（无月、城郊/城市光污染）参考值 ——
-    //     天顶 (0.010, 0.013, 0.024)、地平 (0.055, 0.048, 0.045)（线性 HDR）。
-    //     这是**感知标尺**而非物理标尺：严格物理的夜/日比 ≈ 2.5e-6（满月地面
-    //     0.25 lux vs 晴天 1e5 lux），在 ACES 下等于全黑、肉眼无法验收；本组值经
-    //     ACES + sRGB 编码后落在天顶 ≈ 12/255、地平 ≈ 60/255（"看得出是夜景、
-    //     但明确是夜"）。锚点推导与调参纪律见 interface/LIGHT_INTENSITY.md「十」。
+    //   - 插值**形状由几何唯一确定**（气辉层视线厚度的 van Rhijn 增亮，见
+    //     sky_renderer.h 的 kAirglow* 常量）；两色给相同值即退化为纯色。
+    // 量化锚点：**"经典城市夜色"**（无月、城郊/城市光污染）——
+    //   天顶 (0.010, 0.013, 0.024)、地平 (0.055, 0.048, 0.045)（线性 HDR）。
+    //   这是**感知标尺**而非物理标尺（严格物理夜/日比 ≈2.5e-6，在 ACES 下全黑、
+    //   无法验收）；经 ACES + sRGB 后落在天顶 ≈ 14/255、地平 ≈ 62/255。
+    //   锚点推导与调参纪律见 interface/LIGHT_INTENSITY.md「十」。
     //
+    // 默认值 = 上述锚点，即**标准天光的夜景部分**：默认构造的 SkyCommand 再给
+    //   season/turb/sun_dir/moon_dir 即一个带夜色的标准天光——白天 Preetham 蓝天、
+    //   日落后城市夜色，两层由 daylight 因子自动过渡。置 (0,0,0) 可关掉夜色。
+
     // 半球的边界：夜色只作用于地平线**以上**；地平线以下由 ground_color 独占
     //   （夜间也用它），避免两个底色在下半球叠加两次。
     // 与 season / intensity 的关系（重要）：
@@ -769,10 +809,37 @@ struct SkyCommand {
     //     城市光污染不是散射日光，染色即物理错误。
     //   - **受 intensity 缩放**：intensity 是"天光总强度开关"；由于日落后白天项
     //     已是 0，intensity 在夜间自动成为夜色总开关（日夜两层在时间上不相交）。
+    Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
+    Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
+
+    // ── 夜间 ambient：由夜色亮度推导 ──
     //
-    // 默认 (0,0,0) = **关闭夜色** ⇒ 不改动任何既有画面（gold 逐字节不变）。
-    Color night_zenith_color = {0.0f, 0.0f, 0.0f, 1.0f};
-    Color night_horizon_color = {0.0f, 0.0f, 0.0f, 1.0f};
+    // 夜间环境光强度由夜空的夜色亮度 night_lum 推导，而非独立配置：两者同源才能
+    // 保证"天色亮度"与"物体受环境光强度"自洽——改夜色两色，夜间 ambient 跟着走。
+    //
+    //   night_lum → night_term（base_intensity = 1.0 时的绝对强度，分段线性）
+    //     0.02  → 0.10
+    //     0.035 → 0.17
+    //     0.05  → 0.20
+    //     0.10  → 0.25
+    //     0.33  → 0.40
+    //
+    // 区间外夹断到端点（见 NightTermFromLum）。
+
+    // 夜色平均亮度：两个夜色 RGB 的 6 个分量之和 ÷ 6（夜空的平均通道亮度）。
+    float NightLum() const {
+        return (night_zenith_color.r + night_zenith_color.g +
+                night_zenith_color.b + night_horizon_color.r +
+                night_horizon_color.g + night_horizon_color.b) / 6.0f;
+    }
+
+    // 夜色亮度 → 夜间 ambient 强度（标定表；分段线性，越界夹断到端点）。
+    static float NightTermFromLum(float night_lum) {
+        static const geom::math::PiecewiseLinearFunction<double> kCurve(
+            std::vector<double>{0.02, 0.035, 0.05, 0.10, 0.33},
+            std::vector<double>{0.10, 0.17, 0.20, 0.25, 0.40});
+        return static_cast<float>(kCurve(night_lum));
+    }
 
     // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
     // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
@@ -801,12 +868,15 @@ struct SkyCommand {
     //（正午 ~5600K 中性白 → 日出日落 ~2000K 橙红），与 sky shader 里太阳盘颜色
     // 用同一套色温曲线，保证天色与 DirectionalLight 颜色协调一致。
     //
+    // 命名：带 `Sun` 前缀与 Ambient* 区分——本函数只描述**太阳直射光**，
+    // 不含夜色（夜色是环境光/天光底色的事，见 AmbientColor）。
+    //
     // 用法：让 sun（DirectionalLight）的颜色跟随 sun_dir 自动变化，而不是手配：
     //   DirectionalLight light;
     //   light.direction = <光传播方向（= -sky.sun_dir）>;
-    //   light.color = sky.DirectionalColor();
+    //   light.color = sky.SunDirectionalColor();
     //   light.intensity = ...（强度仍独立配，本方法只管色调）
-    Color DirectionalColor() const {
+    Color SunDirectionalColor() const {
         // 太阳在天球上的仰角（弧度）。sun_dir 长度不必归一，取 y 前先 normalize。
         const Vec3f d = sun_dir.Unit();
         const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
@@ -850,9 +920,11 @@ struct SkyCommand {
     // 用法：让 sun（DirectionalLight）的强度跟随 sun_dir 自动变化，而不是固定 3.0：
     //   DirectionalLight light;
     //   light.direction = <光传播方向（= -sky.sun_dir）>;
-    //   light.color = sky.DirectionalColor();
-    //   light.intensity = sky.DirectionalIntensity();   // 正午=3.0，低仰角自动变暗
-    float DirectionalIntensity(float midday_intensity = 2.2f) const {
+    //   light.color = sky.SunDirectionalColor();
+    //   light.intensity = sky.SunDirectionalIntensity();   // 正午=基准，低仰角自动变暗
+    //
+    // 命名：带 `Sun` 前缀与 AmbientIntensity 区分（本函数只算太阳直射 DNI）。
+    float SunDirectionalIntensity(float midday_intensity = 2.2f) const {
         static const geom::math::PiecewiseLinearFunction<double> kSunIntensityCurve(
             // 太阳仰角(°) → 相对正午系数。基于法向直射辐照度 DNI 的
             // 大气透过率（Bouguer-Lambert-Beer：exp(−tau·AM)，tau≈0.39 晴空，
@@ -882,25 +954,48 @@ struct SkyCommand {
     //   90→1.00  60→0.92  45→0.84  30→0.70  20→0.55  15→0.44  12→0.38
     //   10→0.32  7→0.24  5→0.18  3→0.12  0→0.06  -3→0.03  -6→0.012
     //   -12→0.004  -18→0.001
-    // 正午（90°）系数=1.0，故 intensity = noon_intensity × 系数。
+    // 正午（90°）系数=1.0，故 intensity = base_intensity × 系数。
     // 仰角 >90° 夹断到 1.0；< -18° 夹断到 ~0.001（夜天空底色，不归纯黑）。
+    //
+    // ── 夜色 ambient 叠加 ──
+    // 日落后需要在暮色曲线之上**额外**补一项由夜色亮度驱动的环境光，否则太阳一落
+    // ambient 就掉到曲线夹断值，与夜空亮度失配（物体比天空暗一个数量级）。
+    //
+    //   ambient = 暮色项(本曲线 × TurbAmbLoss) × daylight × base_intensity
+    //           + NightTermFromLum(night_lum) × base_intensity × (1 − daylight)
+    //
+    //   daylight = clamp((sun_y-0.03)/0.10, 0, 1) 与 shader / AmbientColor 同源，
+    //             保证"天色 / 环境光色 / 环境光强"在同一条时间轴上。
+    //   night_lum = 夜色两色 6 分量之和 ÷ 6（见 NightLum）。
+    //   NightTermFromLum = 夜色亮度 → 夜间 ambient 强度的映射（见字段区）。
     //
     // 用法：ambient 的亮度跟随天光自动变化：
     //   AmbientLight light;
     //   light.color = sky.AmbientColor();
-    //   light.intensity = sky.AmbientIntensity();   // 正午=1.0，黄昏/夜晚自动变暗
-    float AmbientIntensity(float noon_intensity = 1.0f) const {
+    //   light.intensity = sky.AmbientIntensity();   // 正午最亮，黄昏转暖，入夜接夜色
+    float AmbientIntensity(float base_intensity = 1.0f) const {
         static const geom::math::PiecewiseLinearFunction<double> kSkyIntensityCurve(
             std::vector<double>{1,  2,   5,   10,  30, 45,  90},
             std::vector<double>{0.1,0.15,0.25,0.25,0.3,0.38,0.4});
         const Vec3f d = sun_dir.Unit();
-        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+        const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
+        const float elev_deg = std::asin(sun_y) *
                                (180.0f / static_cast<float>(M_PI));
         // 基准晴空（turb=2）曲线 × 浊度衰减（turb=2 时 Loss=1.0）——环境光是散射光
         // （DHI），随浊度衰减**远比直射光缓和**：薄云时漫射甚至略升（更多直射被
         // 散射成漫射），仅重霾才明显下降。故用独立的平缓曲线，不与 TurbSunLoss 同用。
-        return noon_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg)) *
-               TurbAmbLoss(turbidity);
+        const float day_term =
+            base_intensity * static_cast<float>(kSkyIntensityCurve(elev_deg)) *
+            TurbAmbLoss(turbidity);
+        // 与 shader / AmbientColor 同源的昼夜因子（0=夜 1=日）。
+        const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
+        if (daylight >= 1.0f) {
+            return day_term;
+        }
+        // 夜色项：由夜色亮度推导（NightTermFromLum，见字段区标定表），
+        // 再乘 base_intensity。夜间 ambient 与夜色亮度恒定自洽。
+        const float night_term = NightTermFromLum(NightLum()) * base_intensity;
+        return day_term * daylight + night_term * (1.0f - daylight);
     }
 
     // 太阳直射光随浊度（turbidity）的整体衰减系数，以 turb=2 大晴天为基准 = 1.0。
@@ -937,7 +1032,7 @@ struct SkyCommand {
 
     // 环境光颜色（AmbientLight::color）——天光平均色。
     // 正午晴天天空偏蓝（高色温 ~15000K）；黄昏太阳低，散射光转橙（低色温）；
-    // 太阳落山后继续转深橙（暮光）。与 DirectionalColor 用同一套色温曲线
+    // 太阳落山后继续转深橙（暮光）。与 SunDirectionalColor 用同一套色温曲线
     // （ColorTempToLinear），但色温映射区间不同（天光比太阳盘冷/蓝）。
     //
     // 色温锚点（太阳仰角° → 天光色温 K）：
@@ -948,32 +1043,146 @@ struct SkyCommand {
     // turbidity 影响：浊度大（霾/烟雾）→ 大气散射更强 → 蓝天发白、饱和度下降，
     // 故把天光色往中性灰白插值。雾度系数 clamp((turb-2)/6)∈[0,1]（turb=2 晴→0，
     // turb=8 重霾→1），插值限幅 0.6（不完全变白，保留底色）。
+    //
+    // ── 夜色叠加 ──
+    // 太阳落到地平线以下后，天光不再是“被照亮的散射体”（暮色橙是大气散射的
+    // 残留），而是**气辉 + 星光 + 城市光污染**的底色——即 night_zenith / night_
+    // horizon 两色。故 AmbientColor 在暮色（Preetham 色温曲线）与夜色底色之间
+    // 按**天黑程度**插值，使环境光色调与天空背景一致。
+    //
+    // 权重：用与 shader 完全相同的 daylight 因子 clamp((sun_y-0.03)/0.10,0,1)
+    // （0=夜 1=日），保证「天色」与「环境光色」是同一个过渡。夜色端取 night_zenith
+    // 与 night_horizon 的平均（环境光是整个上半球的平均入射，不是单一方向）。
+    // 插值只改**色调**（与 season 同理），亮度由 AmbientIntensity 单独管。
     Color AmbientColor() const {
         static const geom::math::PiecewiseLinearFunction<double> kSkyTempCurve(
             std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 5.0, 12.0, 20.0, 30.0, 45.0, 60.0, 90.0},
             std::vector<double>{2150.0, 2600.0, 3050.0, 3275.0, 3500.0, 4139.0, 5033.0, 6056.0, 7333.0, 9250.0, 11167.0, 15000.0});
         const Vec3f d = sun_dir.Unit();
-        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+        const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
+        const float elev_deg = std::asin(sun_y) *
                                (180.0f / static_cast<float>(M_PI));
         const float temp = static_cast<float>(kSkyTempCurve(elev_deg));
         const Color tint = ColorTempToLinear(temp);
         // 浊度 → 雾度系数：turb=2 晴无雾，turb=8 重霾趋向发白。
         const float haze = std::clamp((turbidity - 2.0f) / 6.0f, 0.0f, 1.0f) * 0.6f;
         const Color white = {0.9f, 0.9f, 0.9f, 1.0f};
-        const Color c{
+        Color c{
             tint.r * (1.0f - haze) + white.r * haze,
             tint.g * (1.0f - haze) + white.g * haze,
             tint.b * (1.0f - haze) + white.b * haze,
             1.0f,
         };
+        // ── 夜色叠加：按 daylight（与 shader 同一公式）在暮色与夜空底色间插值 ──
+        // daylight=1（白天）→ 纯暮色/日光色；daylight=0（夜）→ 纯夜色底色。
+        const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
+        if (daylight < 1.0f) {
+            // 夜色端 = 天顶色与地平色的平均（环境光 = 上半球平均入射）。
+            const Color night_avg{
+                (night_zenith_color.r + night_horizon_color.r) * 0.5f,
+                (night_zenith_color.g + night_horizon_color.g) * 0.5f,
+                (night_zenith_color.b + night_horizon_color.b) * 0.5f,
+                1.0f,
+            };
+            // 把夜色当“颜色”（单位尺度），再乘回当前天光的**总亮度量级**，
+            // 保证插值只改色调、不改变三通道之和的尺度感（与 season 同理）。
+            const float lum = (c.r + c.g + c.b) / 3.0f;
+            const float night_lum = (night_avg.r + night_avg.g + night_avg.b) / 3.0f;
+            const float scale = (night_lum > 1.0e-6f) ? (lum / night_lum) : 1.0f;
+            const Color night_tinted{night_avg.r * scale, night_avg.g * scale,
+                                     night_avg.b * scale, 1.0f};
+            c.r = night_tinted.r * (1.0f - daylight) + c.r * daylight;
+            c.g = night_tinted.g * (1.0f - daylight) + c.g * daylight;
+            c.b = night_tinted.b * (1.0f - daylight) + c.b * daylight;
+        }
         // 季节色温偏置：乘归一化后的纯色调 season（只偏色、不改亮度），
-        // 与 DirectionalColor 用同一 SeasonTintScale()，保证天空与物体受光色调一致。
+        // 与 SunDirectionalColor 用同一 SeasonTintScale()，保证天空与物体受光色调一致。
         return Color{c.r * season.r * SeasonTintScale(),
                      c.g * season.g * SeasonTintScale(),
                      c.b * season.b * SeasonTintScale(),
                      1.0f};
     }
 };
+
+// ── 天光构造参数（全部字段，带默认值）──
+//
+// 与 SkyCommand 字段**一一对应**，供 CreateSkyCommand() 的“完整版”接口一次传入
+// 全部参数。用结构体而非 17 个位置参数：参数太多、同类 float 相邻极易传错位置，
+// 结构体可读且可只覆盖关心的字段（其余走默认）。
+//
+// 各字段含义/取值域见 SkyCommand 里对应字段的注释，此处不重复。
+// 默认值 = SkyCommand 的默认值（即“标准天光”）。
+struct SkyParams {
+    jpov::Vec3f sun_dir = jpov::Vec3f(0.0f, 1.0f, 0.0f);
+    float turbidity = 2.0f;
+    Color season = {1.0f, 1.0f, 1.0f, 1.0f};
+    float intensity = 1.0f;
+    Color ground_color = {0.05f, 0.06f, 0.08f, 1.0f};
+    float sun_radius = 0.0094f;
+    float sun_brightness = 2.0e5f;
+    float sun_glow = 1.0f;
+    float sun_set_start_angle = 10.0f;
+    float sun_set_angle_ratio = 1.4f;
+    jpov::Vec3f moon_dir = jpov::Vec3f(0.0f, -1.0f, 0.0f);
+    float moon_radius = 0.0094f;
+    float moon_brightness = 5.0f;
+    float moon_glow = 0.1f;
+    float moon_set_start_angle = 10.0f;
+    float moon_set_angle_ratio = 1.4f;
+    Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
+    Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
+};
+
+// CreateSkyCommand —— **完整版**天光构造接口：由 SkyParams 逐字段填充 SkyCommand。
+//
+// 语义：直接透传（无任何隐式推导/覆盖），params 的每个字段落到 sky 的同名字段。
+// 需要“标准天光 + 少数几个自由度”的调用方用 CreateDefaultSkyCommand()。
+inline SkyCommand CreateSkyCommand(const SkyParams& params) {
+    SkyCommand sky;
+    sky.sun_dir = params.sun_dir;
+    sky.turbidity = params.turbidity;
+    sky.season = params.season;
+    sky.intensity = params.intensity;
+    sky.ground_color = params.ground_color;
+    sky.sun_radius = params.sun_radius;
+    sky.sun_brightness = params.sun_brightness;
+    sky.sun_glow = params.sun_glow;
+    sky.sun_set_start_angle = params.sun_set_start_angle;
+    sky.sun_set_angle_ratio = params.sun_set_angle_ratio;
+    sky.moon_dir = params.moon_dir;
+    sky.moon_radius = params.moon_radius;
+    sky.moon_brightness = params.moon_brightness;
+    sky.moon_glow = params.moon_glow;
+    sky.moon_set_start_angle = params.moon_set_start_angle;
+    sky.moon_set_angle_ratio = params.moon_set_angle_ratio;
+    sky.night_zenith_color = params.night_zenith_color;
+    sky.night_horizon_color = params.night_horizon_color;
+    return sky;
+}
+
+// CreateDefaultSkyCommand —— **简单版**天光构造接口：只暴露 4 个自由度。
+//
+// 四个自由度（其余参数一律走 SkyCommand 的默认值 = 标准天光）：
+//   turbidity — 大气浊度（天气），典型晴天 2、重霾 8。
+//   season_tint — 季节色温乘子（RGB 分量相乘，只调色不调亮）。注意这是**颜色**，
+//                 不是标量；“红偏/蓝偏滑条”是查看器侧的交互设计，不属于本接口。
+//   sun_dir   — 太阳方向（世界空间，y-up）。驱动天色 + 昼夜过渡。
+//   moon_dir  — 月亮方向（独立输入；y<0 时月盘沉入地平线下，自然不可见）。
+//
+// 实现：构造一个默认 SkyParams，只覆盖这四个字段，交给完整版 CreateSkyCommand ——
+// 保证“简单版”与“完整版”永远同源，不会各自漂移。
+//
+// Pre-condition: sun_dir / moon_dir 非零向量（方向未定义；内部会 normalize）。
+inline SkyCommand CreateDefaultSkyCommand(float turbidity, const Color& season_tint,
+                                          const jpov::Vec3f& sun_dir,
+                                          const jpov::Vec3f& moon_dir) {
+    SkyParams params;
+    params.turbidity = turbidity;
+    params.season = season_tint;
+    params.sun_dir = sun_dir;
+    params.moon_dir = moon_dir;
+    return CreateSkyCommand(params);
+}
 
 // 3D 静态模型（世界空间，参与深度测试）
 //

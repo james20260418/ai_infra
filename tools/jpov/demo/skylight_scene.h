@@ -1,14 +1,18 @@
-// JPOV 天光查看器（skylight viewer）— 场景 + 光照装配（header-only）
+// JPOV 天光查看器（skylight viewer）— 场景 + 天光装配（header-only）
 //
-// 目的（Danis 需求）：一个专门用来**肉眼验收天光（SkyCommand）**的最小场景——
-// 固定三个不同 PBR 材质的方块，配上可调的太阳仰角 / 浊度 / 季节 / 天光强度，
-// 一直把太阳压到 0°（落山）就能看到纯夜色（night_zenith_color /
-// night_horizon_color 的加法叠加效果）。
+// 目的：一个专门用来**肉眼验收天光（SkyCommand）**的最小场景——
+// 固定三个不同 PBR 材质的方块 + 灰色地面，配上四个自由度（浊度 / 季节色温 /
+// 太阳方向 / 月亮方向），一眼看全「标准天光」在材质上的反映。
+//
+// ⭐ 天光一律由 `CreateDefaultSkyCommand(4 自由度)` 构造（其余参数走默认构造值），
+//    画面光照则由该 SkyCommand **推导**（SunDirectionalColor/Intensity +
+//    AmbientColor/Intensity）——保证「看到的日照/环境光」与「天空」同源，
+//    不会各配一套而漂移。
 //
 // 为什么用三个方块而不是加载 glTF（与 model viewer 的区别）：
 //   - model viewer 的目的是"看模型"，天光只是背景；本查看器的目的是"看天光"，
 //     被测物要**材质可控**且**常量**，否则每换一个模型就换一组变量，无法标定。
-//   - 三块方块的材质刻意隔离变量（Danis 定的三段）：
+//   - 三块方块的材质刻意隔离变量（三段）：
 //       低反（rough=1.0, metal=0）→ 纯漫反射，最能反映"天空/环境光的平均色与量"；
 //       高光（rough=0.05, metal=0, 同 albedo）→ 只差粗糙度，用于看太阳/月色高光
 //         的**颜色与位置**（低反块看不见高光，两者对比即"高光从哪来"）；
@@ -28,20 +32,6 @@
 
 namespace jpov_skylight {
 
-// ── "经典城市夜色"锚点（线性 HDR，感知标尺）──
-//
-// 夜里无月、城郊/城市光污染的典型天色：天顶最深（偏冷蓝紫），地平线明显更亮
-// 且偏暖（钠灯/城市光污染在大气中散射出的橙黄晕）。这两个端点是本查看器的
-// **固定常量**（不是滑条）——Danis 的验收对象是"夜色这两个颜色对不对"，
-// 所以先把观感锚在一组经典值上，再用"天光强度"滑条调整体亮度。
-//
-// 量级说明（重要）：这是**感知标尺**而非物理标尺。严格物理的夜/日比 ≈ 2.5e-6
-// （满月地面 ≈0.25 lux vs 晴天 ≈1e5 lux），在 ACES tone map 下等于全黑、肉眼
-// 无法验收。本组值经 ACES + sRGB 输出后，天顶 ≈ 12/255、地平 ≈ 60/255——
-// "看得出是夜景，但明确是夜"。推导与调参纪律见 interface/LIGHT_INTENSITY.md 第十节。
-inline constexpr jpov::Color kCityNightZenith  = {0.010f, 0.013f, 0.024f, 1.0f};
-inline constexpr jpov::Color kCityNightHorizon = {0.055f, 0.048f, 0.045f, 1.0f};
-
 // ── 三方块在场景中的布局 ──
 //
 // 沿 +X 一字排开（间距 2×half），中心在 y = 0（方块底面贴 y=0 地面）。
@@ -50,7 +40,7 @@ inline constexpr jpov::Color kCityNightHorizon = {0.055f, 0.048f, 0.045f, 1.0f};
 inline constexpr float kBoxHalf    = 0.5f;   // 半宽（1×1×1 方块）
 inline constexpr float kBoxSpacing = 1.6f;   // 相邻方块中心距（米）
 
-// 三块方块的材质（Danis 定的三段）。albedo 统一 0.55 中性灰。
+// 三块方块的材质（三段）。albedo 统一 0.55 中性灰。
 //
 //   index 0：低反（粗糙漫反射）——roughness=1.0 且 metallic=0
 //   index 1：高光（光滑非金属）——roughness=0.05 且 metallic=0（同 albedo，隔离变量）
@@ -117,78 +107,86 @@ inline jpov::PBRMaterial GroundMaterial() {
         /*roughness*/ 1.0f);
 }
 
-// ── 天光装配：由滑条状态构造一整组光照（sky + sun + ambient）──
+// ── 四个自由度的取值范围与编码（面板与拍摄共用，单一出处）──
+//
+// turbidity：大气浊度 [0, 8]，默认 2（清澈）。
+// season_tint：季节色温乘子（Color）。查看器把它压缩成**一个滑条**：
+//     左端 = 蓝偏、右端 = 红偏、中间 = 中性；G 通道恒 1（只调冷/暖，不动绿）。
+//     这是**查看器的交互设计**，不是 SkyCommand 的接口契约（接口收的是 Color）。
+// sun_dir / moon_dir：世界空间 y-up 方向，按**仰角(度) + 方位角(度)** 两个滑条给。
+//     仰角 [0,90]（0=贴地）；方位角 [0,360) 绕 +Y。
+inline constexpr float kTurbidityMin   = 0.0f;
+inline constexpr float kTurbidityMax   = 8.0f;
+inline constexpr float kTurbidityDef   = 2.0f;
+
+// 季节色温偏置幅度：滑条端点 ±kSeasonTintSpan（乘到 R / 除到 B）。
+//   红偏端 season=(1+span, 1, 1-span)；蓝偏端 season=(1-span, 1, 1+span)。
+inline constexpr float kSeasonTintSpan = 0.25f;
+
+// 把 [-1,+1] 的季节滑条值编码成 Color（-1=蓝偏，0=中性，+1=红偏）。
+//   R = 1 + span·t，B = 1 − span·t，G = 1。
+// SeasonTintScale() 会把总亮度归一回去（只偏色温、不增减光强）。
+inline jpov::Color SeasonTintFromSlider(float t) {
+    const float tc = std::max(-1.0f, std::min(1.0f, t));
+    return {1.0f + kSeasonTintSpan * tc, 1.0f, 1.0f - kSeasonTintSpan * tc, 1.0f};
+}
+
+// 由「仰角(度) + 方位角(度)」构造方向单位向量（y-up）。
+//   仰角 0=地平线，90=天顶；方位角绕 +Y，0=+Z，90=+X。
+inline jpov::Vec3f DirFromAngles(float elev_deg, float azim_deg) {
+    const float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+    const float e = elev_deg * kDeg2Rad;
+    const float a = azim_deg * kDeg2Rad;
+    const float ce = std::cos(e);
+    return {ce * std::sin(a), std::sin(e), ce * std::cos(a)};
+}
+
+// ── 天光装配：由四个自由度构造 SkyCommand，并**由它推导**全部光照 ──
+//
+// 场景另加两个模型（桌子 / 高模橡树）供夜色标定时观察物体受光；模型加载与
+// 摆放见 LoadSceneModels()（资源由 build 脚本拷到 exe 旁 models/，相对路径硬编码）。
 //
 // 这是本查看器与 model viewer 的核心差别所在，故单列并写清语义：
 //
-// 参数：
-//   elev_deg     — 太阳仰角（度，[0,90]）。0° = 贴地日落 → 白天项被 shader 的
-//                  daylight 因子精确压到 0，画面**只剩夜色**（本查看器的主要用途）。
-//                  90° = 正午。
-//   turbidity    — 大气浊度 [2,8]。影响 (a) 天空散射色/日盘 + (b) sun/ambient
-//                  的浊度衰减乘子（TurbSunLoss/TurbAmbLoss）。
-//   season_r     — 季节 R 色温乘子 [0.5,2.0]。**只染白天项**（见 SkyCommand 注释：
-//                  season 是"日光散射的季节色温"）——夜色项不受它影响，用滑条
-//                  拉到极端即可肉眼验证"夜色不被季节染色"。
-//   night_scale  — 夜色强度乘子 [0,4]，默认 1.0。它**只乘夜色两色**，不乘白天项，
-//                  方便在太阳未落时单独观察夜色分量（=0 时完全关闭夜色，用于
-//                  对照"没有夜色的同一画面"）。
-//                  实现方式：把 kCityNight* × night_scale 直接写进 sky 的两个
-//                  night 颜色；sky.intensity 保持 1.0 不动（intensity 是"天光总
-//                  开关"，同时作用于日夜两层，不适合拿来做夜色的独立旋钮）。
+//   sky = CreateDefaultSkyCommand(turb, season_tint, sun_dir, moon_dir)
+//         —— 其余参数（日/月盘半径与亮度、夜色两色、ground_color、intensity…）
+//            一律走 SkyCommand 的默认构造值（= 标准天光）。
 //
-// 注：sun/ambient 的强度不在此函数参数里——本函数只造 sky；平行光与环境光由
-//     MakeSun()/MakeAmbient() 另造（它们只取 sky 的色调，强度由调用方给绝对量，
-//     见下）。
-inline jpov::SkyCommand MakeSky(float elev_deg, float turbidity, float season_r,
-                                float night_scale) {
-    const float elev_rad = elev_deg * (3.14159265358979323846f / 180.0f);
-    const float sy = std::sin(elev_rad);
-    const float sx = std::cos(elev_rad);
-    const jpov::Vec3f sun_dir = {sx, sy, 0.0f};   // 指向太阳（+X 侧升起）
+//   光照（日光 + ambient）**由 sky 推导**，不手配：
+//     sun.color     = sky.SunDirectionalColor()      （色温随仰角变）
+//     sun.intensity = sky.SunDirectionalIntensity()  （DNI 衰减 + 浊度）
+//     sun.direction = −sun_dir                       （光传播方向）
+//     ambient.color     = sky.AmbientColor()         （含夜色叠加）
+//     ambient.intensity = sky.AmbientIntensity()     （含夜间项）
+//   月光**平行光不做**（本 PR 明确范围外；月盘只作为天体画出，不照亮物体）。
+//
+// 返回：装配好的完整光照三元组。
+struct SkyLighting {
+    jpov::SkyCommand sky;
+    jpov::DirectionalLight sun;
+    jpov::AmbientLight ambient;
+};
 
-    jpov::SkyCommand sky{};
-    sky.sun_dir     = sun_dir;
-    sky.turbidity   = turbidity;
-    sky.season      = {season_r, 1.0f, 1.0f, 1.0f};   // 只调 R 通道（季节色温）
-    sky.intensity   = 1.0f;                            // 天光总开关（日夜共用）
-    sky.ground_color = {0.02f, 0.02f, 0.025f, 1.0f};   // 夜间地色偏暗（地平线下）
-    sky.sun_radius     = 0.02f;
-    sky.sun_brightness = 1e3f;
-    sky.sun_glow       = 0.0f;
-    // 夜色两色 × 夜色强度（滑条独立旋钮；=0 即关闭夜色，用于对照）。
-    sky.night_zenith_color  = {kCityNightZenith.r  * night_scale,
-                               kCityNightZenith.g  * night_scale,
-                               kCityNightZenith.b  * night_scale,
-                               1.0f};
-    sky.night_horizon_color = {kCityNightHorizon.r * night_scale,
-                               kCityNightHorizon.g * night_scale,
-                               kCityNightHorizon.b * night_scale,
-                               1.0f};
-    return sky;
-}
+inline SkyLighting MakeSkyLighting(float turbidity, float season_slider,
+                                   float sun_elev_deg, float sun_azim_deg,
+                                   float moon_elev_deg, float moon_azim_deg) {
+    const jpov::Vec3f sun_dir  = DirFromAngles(sun_elev_deg, sun_azim_deg);
+    const jpov::Vec3f moon_dir = DirFromAngles(moon_elev_deg, moon_azim_deg);
+    const jpov::SkyCommand sky = jpov::CreateDefaultSkyCommand(
+        turbidity, SeasonTintFromSlider(season_slider), sun_dir, moon_dir);
 
-// 由 sky 推导平行光（方向 = 反太阳方向；色调由 sky 给，亮度由调用方给）。
-// intensity 是**绝对强度**（滑条所见即所得），不乘 PWL 相对衰减曲线——本查看器
-// 的用途是标定"某个仰角下太阳该多亮"，需要绝对可控；需要"由 sky 自动推导"的行为
-// 请用 model viewer（MakeLighting）。色调仍由 sky 自动推导（色调的物理性交给 sky，
-// 亮度的手感交给滑条）。
-inline jpov::DirectionalLight MakeSun(const jpov::SkyCommand& sky,
-                                      float intensity) {
-    return jpov::DirectionalLight{
+    SkyLighting out;
+    out.sun = jpov::DirectionalLight{
         /*direction*/ {-sky.sun_dir.x(), -sky.sun_dir.y(), -sky.sun_dir.z()},
-        /*color*/ sky.DirectionalColor(),
-        /*intensity*/ intensity,
+        /*color*/ sky.SunDirectionalColor(),
+        /*intensity*/ sky.SunDirectionalIntensity(),
     };
-}
-
-// 由 sky 推导环境光（色调由 sky 给，亮度由调用方给）。intensity 同为绝对量（见上）。
-inline jpov::AmbientLight MakeAmbient(const jpov::SkyCommand& sky,
-                                      float intensity) {
-    return jpov::AmbientLight{
+    out.ambient = jpov::AmbientLight{
         .color = sky.AmbientColor(),
-        .intensity = intensity,
+        .intensity = sky.AmbientIntensity(),
     };
+    out.sky = sky;
+    return out;
 }
 
 }  // namespace jpov_skylight

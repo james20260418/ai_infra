@@ -148,8 +148,8 @@ inline ViewConfig DefaultView() {
 //
 // 需求：光照用 SkyCommand 正午配置，同 sun_path 测试同款方式
 // （由 SkyCommand 推导平行光、推导全局 Ambient）。太阳方向默认 (0,-1,-1)。
-// 平行光与 ambient 的 color/intensity 均由 sky 推导：color 用 DirectionalColor()/
-// AmbientColor()（色调随太阳仰角变），intensity 用 DirectionalIntensity()/
+// 平行光与 ambient 的 color/intensity 均由 sky 推导：color 用 SunDirectionalColor()/
+// AmbientColor()（色调随太阳仰角变），intensity 用 SunDirectionalIntensity()/
 // AmbientIntensity()（相对衰减随太阳仰角变），但绝对强度锚定在
 // LIGHT_INTENSITY.md 三·五 晴天正午基准（sun=3.0 : ambient=0.3，5:1，PR#60 教训
 // —— 绝不是 0.5 或裸 AmbientIntensity()=1.0，否则影子会被 ACES 压没）。
@@ -177,8 +177,8 @@ inline NoonLighting MakeNoonLighting() {
     nl.sky = sky;
     nl.sun = jpov::DirectionalLight{
         /*direction*/ sun_light_dir,
-        /*color*/ sky.DirectionalColor(),
-        /*intensity*/ sky.DirectionalIntensity(),
+        /*color*/ sky.SunDirectionalColor(),
+        /*intensity*/ sky.SunDirectionalIntensity(),
     };
     // ambient 强度也由 SkyCommand 推导（同 sun_path/太阳同款方式），但把绝对强度
     // 锚定到 LIGHT_INTENSITY.md 三·五 的晴天正午基准（sun=3.0 : ambient=0.3，5:1，
@@ -204,7 +204,7 @@ inline NoonLighting MakeNoonLighting() {
 //                      太阳光传播方向（sun.direction）取 {−cosx, −sinelev, 0} 这种
 //                      y 分量随仰角抬升（仰角越高 y 越负，光从越高处照向场景）；
 //                      传给 sky 的 sun_dir 取反，y = sin(elev_deg)，正好驱动
-//                      DirectionalColor()/AmbientColor() 的仰角色调曲线。
+//                      SunDirectionalColor()/AmbientColor() 的仰角色调曲线。
 //                      （注意：滑条直接给仰角，不再像旧版 theta 那样 0=正午、
 //                      越大越贴地，左到右 0°→90° 就是日出→正午，完整覆盖标定工况。）
 //   turbidity        — 大气浊度 [2,8]。同时影响 (a) 天空画色（shader 霾化/日盘）
@@ -214,7 +214,7 @@ inline NoonLighting MakeNoonLighting() {
 //                      归一化，只偏色不改亮度），联动 sky 天空背景 + sun/ambient 色温。
 //
 // 注：sun/ambient 的 intensity 这里**不再由调用方给定**，全部走 sky 自动推导
-// （sky.DirectionalIntensity()/sky.AmbientIntensity()，含 Turb*Loss 乘子 + 仰角曲线），
+// （sky.SunDirectionalIntensity()/sky.AmbientIntensity()，含 Turb*Loss 乘子 + 仰角曲线），
 // 因此不再需要 sun_intensity/ambient_intensity 两个参数（gltf viewer 已移除对应滑条）。
 // season 这里由 season_r（R 通道）给定（G/B=1.0）；sky 其余参数（intensity/ground_color/
 // sun_radius/sun_brightness/sun_glow）由本函数固定。
@@ -244,8 +244,8 @@ inline NoonLighting MakeLighting(float elev_deg, float turbidity,
     // 两者各自标定。
     nl.sun = jpov::DirectionalLight{
         /*direction*/ sun_light_dir,
-        /*color*/ sky.DirectionalColor(),
-        /*intensity*/ sky.DirectionalIntensity(),
+        /*color*/ sky.SunDirectionalColor(),
+        /*intensity*/ sky.SunDirectionalIntensity(),
     };
     nl.ambient = jpov::AmbientLight{
         .color = sky.AmbientColor(),

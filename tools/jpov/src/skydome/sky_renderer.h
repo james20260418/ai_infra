@@ -9,9 +9,10 @@
 //   - 先画天球（垫 3D FBO 背景）→ 再画 3D 物体（深度测试覆盖）。
 //   - 地平线以下（pitch<0）画纯色 ground_color（避免天空倒影）。
 //   - HDR：输出原始亮度（可 >1.0），不做 tone map，由后处理统一压缩。
-//   - 夜空底色（2026-09-20 引入）：night_zenith_color → night_horizon_color 的
-//     垂直渐变（van Rhijn 形状），**加法**叠在白天项上（受 intensity、不受 season）；
-//     默认全 0 = 关闭。仍不画月亮盘/星星（后续独立 PR）。
+//   - 夜空底色：night_zenith_color → night_horizon_color 的垂直渐变（van Rhijn 形状），
+//     **加法**叠在白天项上（受 intensity、不受 season）；按 (1−daylight) 淡入。
+//   - 月亮盘：moon_dir + moon_* 一组参数，与日盘走**同一推导链**
+//     （俯仰角重映射 / 黑体色温 / Beer-Lambert 衰减 / 角度空间盘 mask / 高斯光晕）。
 //
 // 曲线来源：Preetham 模型实现基于 Erin Catto (box3d, MIT) 的 preetham.glsl，
 // 论文 "A Practical Analytic Model for Daylight" (Preetham, Shirley, Smits 1999)。
@@ -55,8 +56,7 @@ void main() {
 }
 )glsl";
 
-    // kSkyFs: Preetham 程序化天空 + 地平线下地色 + 日月圆盘 + 夜空底色（双色）。
-    //   NDC 由 gl_FragCoord/uResolution 反推（不用 VS varying：无 VAO 全屏
+    // kSkyFs: Preetham 程序化天空 + 地平线下地色 + 日月圆盘 + 夜空底色（双色）。    //   NDC 由 gl_FragCoord/uResolution 反推（不用 VS varying：无 VAO 全屏
     //   三角形上 varying 插值不可靠，实测 vNDC 几乎不变导致方向重建错误）。
     static constexpr const char* kSkyFs = R"glsl(
 #version 330 core
@@ -66,6 +66,7 @@ uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_Fr
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
 uniform vec3  uCamPos;        // 相机世界位置（方向 = 反投影点 - 相机）
 uniform vec3  uSunDir;        // 太阳位置单位向量（世界中，y-up）
+uniform vec3  uMoonDir;       // 月亮位置单位向量（世界中，y-up；独立于 uSunDir）
 uniform float uTurbidity;     // 浊度（天气）：2 清澈…8 霾
 uniform vec3  uSeason;        // 季节色温乘子（冬冷/夏暖）
 uniform float uIntensity;     // 天光亮度标量
@@ -80,6 +81,12 @@ uniform float uSunGlow;       // 太阳盘光晕强度（艺术参数，0=无光
 //   + uSunSetAngleRatio × (真实仰角 − uSunSetStartAngle)（盘比太阳降得更快）。
 uniform float uSunSetStartAngle; // 重映射起始阈值（度），建议 [0,60]，默认 10
 uniform float uSunSetAngleRatio;  // 阈值以下盘压速比，默认 1.4
+// 月亮盘（与日盘同义的一套参数；uMoonBrightness ≤ 0 或 uMoonRadius ≤ 0 = 不画月盘）
+uniform float uMoonRadius;        // 月亮盘角半径（弧度；≤ 0 不画）
+uniform float uMoonBrightness;    // 月亮盘自发光亮度基数（HDR；≤ 0 不画）
+uniform float uMoonGlow;          // 月亮盘光晕强度（艺术参数；0 = 无光晕）
+uniform float uMoonSetStartAngle; // 月盘俯仰角重映射起始阈值（度），默认 10
+uniform float uMoonSetAngleRatio; // 月盘阈值以下压速比，默认 1.4
 
 const float PI = 3.14159265358979323846;
 // 天光亮度归一化系数：把 Preetham 输出的物理天顶亮度（~几千 cd/m²，即几 kcd/m²）
@@ -218,6 +225,68 @@ vec3 nightSkyColor(float cos_zenith) {
     return mix(uNightZenith, uNightHorizon, nightGradientT(cos_zenith));
 }
 
+// ===== 天体发光盘（日盘与月盘共用）=====
+//
+// 日盘与月盘走**同一套推导链**：俯仰角重映射 → 黑体色温 → Beer-Lambert 衰减 →
+// 角度空间盘 mask → 高斯光晕。差别只在“数值 + 色温来源”，故全部抽为共用函数——
+// 避免两份拷贝各自漂移（尤其压盘角那套三角函数，写两遍极易分叉）。
+
+// 俯仰角重映射：把低仰角的盘提前“压进地平线”。真实仰角 ≥ start 时盘在真实位置；
+// 低于 start 时盘俯仰角(°) = start + ratio × (真实仰角° − start)（>1 = 盘降得更快）。
+// 只改盘的**俯仰**，保留原水平方位（盘绕天顶落到另一仰角，而非绕天体方向）。
+// 传入真实方向单位向量与真实仰角（弧度）；返回重映射后的盘方向单位向量。
+vec3 discDirRemap(vec3 body_dir, float body_elev, float start_angle_deg,
+                  float angle_ratio) {
+    const float rad2deg = 180.0 / PI;
+    const float deg2rad = PI / 180.0;
+    float elev_deg = body_elev * rad2deg;
+    if (elev_deg < start_angle_deg) {
+        elev_deg = start_angle_deg + angle_ratio * (elev_deg - start_angle_deg);
+    }
+    float disc_elev = elev_deg * deg2rad;
+    float sy = sin(disc_elev);
+    float sh = sqrt(max(1.0 - sy * sy, 0.0));   // 水平分量长度
+    // 保持原水平方位（x,z）方向不变，只改俯仰（y）：
+    // 水平单位向量 = (x0,z0)/|水平|，乘 sh 得新的水平分量。
+    float horiz_len = length(body_dir.xz);
+    if (horiz_len > 1.0e-6) {
+        return vec3(body_dir.x / horiz_len * sh, sy, body_dir.z / horiz_len * sh);
+    }
+    // 原方向几乎垂直向上/下（无水平分量）：退化为只留 y。
+    return vec3(0.0, sy, 0.0);
+}
+
+// Beer-Lambert 大气衰减（天体辉度穿大气）：AM ≈ 1/sin(仰角)（低角度穿更多大气），
+// tau 从浊度近似（简化光学厚度）。返回衰减系数 ∈ (0,1]。
+float beerLambertAttenuation(float body_elev, float turbidity) {
+    float sin_elev = max(sin(body_elev), 0.05);
+    float AM = 1.0 / sin_elev;
+    float tau = 0.1 + 0.1 * turbidity;   // 简化光学厚度
+    return exp(-tau * AM);
+}
+
+// 角盘 mask：在**角度空间**做 smoothstep（而非 cos 空间）。
+// 经典写法 smoothstep(cosSA, 1.0, cos_theta) 在 cosSA 接近 1（小盘）时失效：
+// cos 在 θ→0 处斜率→0，cos 空间分辨率极不均匀，过渡被挤成 1 像素硬边。
+// 正确：先算角距离 ang=acos(dot)，再在角度空间 smoothstep，过渡覆盖整个盘半径。
+// 同时返回角距离 ang（光晕需要在它基础上算距盘边缘的角距）。
+float discMaskAndAngle(vec3 view_dir, vec3 disc_dir, float disc_radius,
+                       out float ang) {
+    float cos_ang = dot(view_dir, disc_dir);
+    ang = acos(clamp(cos_ang, -1.0, 1.0));   // 到盘中心的角距离（弧度）
+    return 1.0 - smoothstep(0.0, disc_radius, ang);
+}
+
+// 高斯光晕（盖锯齿 + 大气辉光感）：glow = strength × exp(−d²/2σ²)，σ ∝ 盘半径。
+// 关键：光晕是大气散射，物理强度远低于盘，故 strength 是**独立的绝对 HDR 强度**
+//（量级 ~几），不与盘亮度同源。d = 距盘边缘的角距离（盘内为 0）。
+// glow_width_scale：光晕宽度相对盘半径的倍数（日盘固定 2.0；月盘随浊度变宽，见下）。
+float discGlow(float ang, float disc_radius, float strength, float glow_width_scale) {
+    float glow_sigma = disc_radius * glow_width_scale;
+    float d = max(ang - disc_radius, 0.0);
+    return strength * exp(-(d * d) / (2.0 * glow_sigma * glow_sigma));
+}
+
 void main() {
     // gl_FragCoord → NDC：frag 坐标在 [0,w]×[0,h]，NDC 在 [-1,1]。
     //（不用 VS 的 vNDC varying —— 无 VAO 全屏三角形上插值不可靠）
@@ -237,74 +306,64 @@ void main() {
     vec3 sun_dir = normalize(uSunDir);
     float sun_elev = asin(clamp(sun_dir.y, -1.0, 1.0));   // 仰角（弧度）
 
-    // ── 日盘俯仰角重映射（只改日盘位置，不碰天空散射/昼夜/色温/衰减）──
-    // 真实仰角 < uSunSetStartAngle 时压盘：盘俯仰角(°) = uSunSetStartAngle +
-    // uSunSetAngleRatio × (真实仰角° − uSunSetStartAngle)。盘比太阳降得快，
-    // 使低仰角时盘提前没入地平线（0° 时半拉盘不再露出），高仰角（尤为正午 90°）
-    // 盘仍钉在真实位置（≥ 阈值处连续，无突变）。仅用于盘的角距余弦；其它推导
-    // （散射/色温/Beer-Lambert 衰减）仍用真实 sun_dir/sun_elev。
-    vec3 sun_disc_dir = sun_dir;   // 只被日盘/光晕的角距用
-    {
-        const float rad2deg = 180.0 / PI;
-        const float deg2rad = PI / 180.0;
-        float elev_deg = sun_elev * rad2deg;
-        if (elev_deg < uSunSetStartAngle) {
-            elev_deg = uSunSetStartAngle
-                     + uSunSetAngleRatio * (elev_deg - uSunSetStartAngle);
-        }
-        float disc_elev = elev_deg * deg2rad;
-        float sy = sin(disc_elev);
-        float sh = sqrt(max(1.0 - sy * sy, 0.0));  // 水平分量长度
-        // 保持原水平方位（x,z）方向不变，只改俯仰（y）：
-        // 水平单位向量 = (x0,z0)/|水平|，乘 sh 得新的水平分量。
-        float horiz_len = length(sun_dir.xz);
-        if (horiz_len > 1.0e-6) {
-            sun_disc_dir = vec3(sun_dir.x / horiz_len * sh,
-                                sy,
-                                sun_dir.z / horiz_len * sh);
-        } else {
-            // 原方向几乎垂直向上（无水平分量）：退化为只留 y。
-            sun_disc_dir = vec3(0.0, sy, 0.0);
-        }
-    }
+    // 日盘俯仰角重映射（只改日盘位置，不碰天空散射/昼夜/色温/衰减）——
+    // 真实仰角 < uSunSetStartAngle 时压盘，使低仰角时盘提前没入地平线（0° 时半拉盘
+    // 不再露出），高仰角（尤为正午 90°）盘仍钉在真实位置（≥ 阈值处连续，无突变）。
+    // 仅用于盘的角距余弦；其它推导（散射/色温/Beer-Lambert 衰减）仍用真实 sun_dir。
+    vec3 sun_disc_dir = discDirRemap(sun_dir, sun_elev, uSunSetStartAngle,
+                                     uSunSetAngleRatio);
 
     // 太阳盘色温（开尔文）：仰角越高色温越高（正午白~5600K，日出日落红~2000K）。
     float sun_temp = mix(2000.0, 5600.0, clamp(sun_elev / 0.3, 0.0, 1.0));
     vec3 sun_body_color = colorTempToLinear(sun_temp);   // 黑体色，线性 RGB
 
-    // Beer-Lambert 大气衰减：AM ≈ 1/sin(仰角)（低角度穿更多大气）。
-    // tau 从浊度近似（Preetham 光学厚度，简化用 turbidity 线性映射）。
-    float sin_elev = max(sin(sun_elev), 0.05);
-    float AM = 1.0 / sin_elev;
-    float tau = 0.1 + 0.1 * uTurbidity;   // 简化光学厚度
-    float attenuation = exp(-tau * AM);
-    // HDR 亮度：sun_brightness × 衰减（只有太阳在地平线上时才画）。
-    float sun_brightness = uSunBrightness * attenuation;
+    // HDR 亮度：sun_brightness × Beer-Lambert 衰减（只有太阳在地平线上时才画）。
+    float sun_brightness = uSunBrightness * beerLambertAttenuation(sun_elev, uTurbidity);
 
-    // 太阳盘 mask：在**角度空间**做 smoothstep（而非 cos 空间）。
-    // 经典写法 smoothstep(cosSA, 1.0, cos_theta) 在 cosSA 接近 1（小太阳盘）时失效：
-    // cos 在 θ→0 处斜率→0，cos 空间分辨率极不均匀，导致过渡被挤成 1 像素的硬边。
-    // 正确：先算角距离 ang=acos(cos_ang)，再在角度空间 smoothstep，过渡覆盖整个盘半径。
-    float cos_ang = dot(dir, sun_disc_dir);   // 用重映射后的日盘方向
-    float ang = acos(clamp(cos_ang, -1.0, 1.0));   // 到太阳中心的角距离（弧度）
-    float disk = 1.0 - smoothstep(0.0, uSunRadius, ang);
+    // 日盘 mask + 光晕（共用函数）。
+    float sun_ang = 0.0;
+    float disk = discMaskAndAngle(dir, sun_disc_dir, uSunRadius, sun_ang);
 
     // sun_brightness ≤ 0 时不画（disk 为 0）；否则叠加自发光盘。
     float sun_enable = (uSunBrightness > 0.0 && uSunRadius > 0.0) ? 1.0 : 0.0;
     vec3 sun_contrib = sun_body_color * (sun_brightness * disk * sun_enable);
 
-    // ── 太阳光晕（艺术参数，独立于盘，用于盖锯齿 + 大气辉光感）──
-    // 标准高斯辉光：glow = uSunGlow × exp(−d²/2σ²)，σ ∝ sun_radius。
-    // 关键：光晕是大气散射，物理强度远低于盘（~盘的 1e-4~1e-5），故**独立强度**
-    // uSunGlow 直接作为光晕的 HDR 亮度（量级 ~几，非盘的 1e5），不与盘亮度同源。
-    // 之前误写成 sun_brightness×glow，导致盘外几像素仍被 1e3 基数顶到 ACES 饱和。
-    float glow = 0.0;
-    if (uSunGlow > 0.0 && sun_enable > 0.0) {
-        float glow_sigma = uSunRadius * 2.0;                 // 光晕宽度 ∝ 盘大小
-        float d = max(ang - uSunRadius, 0.0);                // 距盘边缘的角距离
-        glow = uSunGlow * exp(-(d * d) / (2.0 * glow_sigma * glow_sigma));
-    }
-    vec3 glow_contrib = sun_body_color * (glow * sun_enable);
+    // 太阳光晕：σ = 2×盘半径（日盘固定宽度，不随浊度变）。
+    float sun_glow = (uSunGlow > 0.0 && sun_enable > 0.0)
+        ? discGlow(sun_ang, uSunRadius, uSunGlow, 2.0) : 0.0;
+    vec3 sun_glow_contrib = sun_body_color * (sun_glow * sun_enable);
+
+    // ── 月亮盘（自发光天体）：与日盘同一套推导链，只是参数/色温按月亮调 ──
+    // 方向 uMoonDir 是**独立输入**（日月反向只是调用方的摆放选择，不是接口契约）。
+    // uMoonRadius ≤ 0 或 uMoonBrightness ≤ 0 时不画（默认亮度 0 = 关闭，零回归）。
+    vec3 moon_dir = normalize(uMoonDir);
+    float moon_elev = asin(clamp(moon_dir.y, -1.0, 1.0));
+
+    // 月盘俯仰角重映射：与日盘同义、同一套默认值（10°/1.4），使 0° 时整盘淹没在地平线下。
+    vec3 moon_disc_dir = discDirRemap(moon_dir, moon_elev, uMoonSetStartAngle,
+                                      uMoonSetAngleRatio);
+
+    // 月亮色温：月亮不发光，是反射日光，实际偏冷白/淡黄（~4100K），且**不随仰角变红**
+    // （复现日盘的仰角色温曲线会把月亮染成落日般的橙红，不符合直觉）。故取常量色温。
+    vec3 moon_body_color = colorTempToLinear(4100.0);
+
+    // HDR 亮度：moon_brightness × Beer-Lambert 衰减（与日盘同一公式，含浊度）。
+    float moon_brightness = uMoonBrightness * beerLambertAttenuation(moon_elev, uTurbidity);
+
+    float moon_ang = 0.0;
+    float moon_disk = discMaskAndAngle(dir, moon_disc_dir, uMoonRadius, moon_ang);
+    float moon_enable = (uMoonBrightness > 0.0 && uMoonRadius > 0.0) ? 1.0 : 0.0;
+    vec3 moon_contrib = moon_body_color * (moon_brightness * moon_disk * moon_enable);
+
+    // ── 月晕（本 PR 重点：**宽度受 turbidity 影响**）──
+    // 物理依据：月晕/华是月光经大气中水汽/气溶胶的散射（日晕同理）。浊度越大（水汽/
+    // 气溶胶越多），散射越强 → 晕越**宽、越散**。故把光晕宽度倍数（σ/半径）随浊度线性
+    // 增长：turb=2（极清澈）→ 2.0×（同日盘）；turb=8（重霾）→ 4.0×（晕宽一倍）。
+    // 同时晕的**峰值强度**不变（moon_glow 只给绝对峰值），保证“晕变宽”而非“变亮”。
+    float moon_glow_width = mix(2.0, 4.0, clamp((uTurbidity - 2.0) / 6.0, 0.0, 1.0));
+    float moon_glow = (uMoonGlow > 0.0 && moon_enable > 0.0)
+        ? discGlow(moon_ang, uMoonRadius, uMoonGlow, moon_glow_width) : 0.0;
+    vec3 moon_glow_contrib = moon_body_color * (moon_glow * moon_enable);
 
 
     vec3 sky;
@@ -323,13 +382,16 @@ void main() {
         // ── 叠太阳盘（加法，和天空散射色在同一 HDR 域）──
         // 太阳盘是自发光天体，与天空散射色加法叠加，不受 season 染色（见下）。
         sky += sun_contrib;
-        sky += glow_contrib;
+        sky += sun_glow_contrib;
+
+        // ── 叠月亮盘（同样加法、同 HDR 域；默认亮度 0 时不贡献任何值）──
+        sky += moon_contrib;
+        sky += moon_glow_contrib;
     }
 
     // 季节色温 + 亮度。
-    // 注意：这里**不做 tone map**（不再 sky/(1+sky)）——为了后续统一后处理管线，
-    // 天空输出保持 HDR 原始亮度（可 >1.0），由最终的后处理 pass 统一压缩到 [0,1]。
-    // （2026-08-19：为引入统一后处理，去掉天空 shader 里的前置 Reinhard。）
+    // 注意：这里**不做 tone map** —— 天空输出保持 HDR 原始亮度（可 >1.0），
+    // 由最终的后处理 pass 统一压缩到 [0,1]。
     //
     // ⚠️ 顺序很重要：夜色项必须加在本行**之后** —— 它**不受 season 染色**
     //   （season 是"日光散射的季节色温"，气辉/城市光污染不是散射日光），
@@ -337,14 +399,15 @@ void main() {
     //   于是它在夜间自动成为夜色总开关）。
     sky *= uSeason * uIntensity;
 
-    // ── 夜空底色（加法叠加，仅地平线以上）──
-    // 算子用加法而非 mix：白天项在 sun_y < 0.03（≈1.7° 仰角）处已被 daylight 精确
-    // 压到 0，所以太阳一落，加法就自然退化成"只有夜色"—— 不需要任何 blend 掩码/
-    // 日落方位角权重（方向结构本来就在上面的 Preetham 白天项里）。
-    // 地平线以下**不加**：下半球由 ground_color 独占（避免两个底色叠加两次）。
-    // 默认（两个颜色为 0）时本行是精确 +0.0，既有画面逐字节不变。
+    // ── 夜空底色（加法叠加，仅地平线以上；**按 (1−daylight) 淡入**）──
+    // 夜间项乘 (1−daylight)：气辉/城市光污染白天被日光完全淹没，不应给日间天空抬底；
+    // 日落后 (daylight→0) 淡入到满值。白天项的 daylight 因子只能把白天项压到 0，
+    // 挡不住夜色项在白天被加进来，故两层各自门控。用同一个 daylight 因子，使 sky /
+    // AmbientColor / 昼夜过渡共用同一条时间轴。
+    // 本行在 sky *= uSeason * uIntensity 之后：夜幕不受 season 染、受 intensity 缩放。
+    // 地平线以下不加：下半球由 ground_color 独占。夜色两色设为 0 时本行恒为 +0.0。
     if (dir.y >= 0.0) {
-        sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity;
+        sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
     }
 
     FragColor = vec4(sky, 1.0);

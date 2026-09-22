@@ -20,10 +20,17 @@
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
+
+// Windows/MinGW: windef.h 定义 near/far 宏，与 Camera::near/far 字段冲突。
+#ifdef _WIN32
+#undef near
+#undef far
+#endif
 
 #include <glog/logging.h>
 
@@ -1137,7 +1144,10 @@ void Renderer::Render(const RenderCommandList& cmds,
     }
 
     // ---- 检查是否有 3D 指令 ----
-    bool has_3d = false;
+    // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
+    // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
+    // 只剩下清屏色，天空永远画不出来。
+    bool has_3d = cmds.sky.has_value();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -2660,6 +2670,11 @@ uint32_t LoadGltfOcclusion(TextureManager& tex_mgr,
 GltfObject Renderer::LoadGltf(const std::string& path) {
     GltfObject obj;
 
+    // 路径解析：允许相对路径（分发态 = exe 旁 resources）。查找顺序 exe 旁 → cwd
+    // → TEST_SRCDIR，详见 ResolveResourcePath。先把**已解析**的路径固定下来，
+    // 后续所有子资源（贴图 / ORM）都从它的目录出发，避免二次解析不一致。
+    const std::string resolved_path = ResolveResourcePath(path);
+
     // ORM 贴图按源路径去重缓存（多 primitive 共享同一 arm 图时只拆一次）
     std::unordered_map<std::string, OrmTextureIds> orm_cache;
 
@@ -2769,14 +2784,14 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
     };
 
     CollectCtx ctx{this, &obj, &orm_cache};
-    if (!jpov::LoadGltfScene(path, collect, &ctx) || obj.primitives.empty()) {
+    if (!jpov::LoadGltfScene(resolved_path, collect, &ctx) || obj.primitives.empty()) {
         // 失败或空：释放已注册的资源
         ReleaseGltf(obj);
         LOG(ERROR) << "Renderer::LoadGltf: 加载失败 " << path;
         return {};
     }
 
-    LOG(INFO) << "Renderer::LoadGltf: " << path << " → "
+    LOG(INFO) << "Renderer::LoadGltf: " << resolved_path << " → "
               << obj.primitives.size() << " primitives";
     return obj;
 }

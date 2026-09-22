@@ -102,8 +102,8 @@ inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
             .sky = sky,
             .sun =  jpov::DirectionalLight{
                 /*direction*/ sun_light_dir,
-                /*color*/ sky.DirectionalColor(),
-                /*intensity*/ sky.DirectionalIntensity(4),
+                /*color*/ sky.SunDirectionalColor(),
+                /*intensity*/ sky.SunDirectionalIntensity(4),
             },
             .ambient = jpov::AmbientLight{
                 .color = sky.AmbientColor(),
@@ -114,7 +114,7 @@ inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
 
     // 低仰角黄昏：太阳接近地平线（仰角 ~12°），方向光强度由经验照度表
     // PiecewiseLinearFunction 插值衰减到 ~0.39（正午 90° 为 3.0），天色橙黄。——
-    // 验证 DirectionalIntensity() 随仰角变暗。
+    // 验证 SunDirectionalIntensity() 随仰角变暗。
     {
         const jpov::Vec3f sun_light_dir = {1.0f, -.4f, 1.0f};
         jpov::SkyCommand sky{
@@ -132,8 +132,8 @@ inline std::vector<SkyDirectionAmbient> DefaultSunPath() {
             .sky = sky,
             .sun =  jpov::DirectionalLight{
                 /*direction*/ sun_light_dir,
-                /*color*/ sky.DirectionalColor(),
-                /*intensity*/ sky.DirectionalIntensity(4),
+                /*color*/ sky.SunDirectionalColor(),
+                /*intensity*/ sky.SunDirectionalIntensity(4),
             },
             .ambient = jpov::AmbientLight{
                 .color = sky.AmbientColor(),

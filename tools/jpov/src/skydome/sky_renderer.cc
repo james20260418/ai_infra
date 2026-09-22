@@ -143,6 +143,8 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform3f(shader_mgr.GetUniform(prog, "uCamPos"), eye[0], eye[1], eye[2]);
     glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"),
                 sky_cmd.sun_dir.x(), sky_cmd.sun_dir.y(), sky_cmd.sun_dir.z());
+    glUniform3f(shader_mgr.GetUniform(prog, "uMoonDir"),
+                sky_cmd.moon_dir.x(), sky_cmd.moon_dir.y(), sky_cmd.moon_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uTurbidity"), sky_cmd.turbidity);
     glUniform3f(shader_mgr.GetUniform(prog, "uSeason"),
                 sky_cmd.season.r, sky_cmd.season.g, sky_cmd.season.b);
@@ -150,10 +152,12 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
     glUniform3f(shader_mgr.GetUniform(prog, "uNightZenith"),
-                sky_cmd.night_zenith_color.r, sky_cmd.night_zenith_color.g,
+                sky_cmd.night_zenith_color.r,
+                sky_cmd.night_zenith_color.g,
                 sky_cmd.night_zenith_color.b);
     glUniform3f(shader_mgr.GetUniform(prog, "uNightHorizon"),
-                sky_cmd.night_horizon_color.r, sky_cmd.night_horizon_color.g,
+                sky_cmd.night_horizon_color.r,
+                sky_cmd.night_horizon_color.g,
                 sky_cmd.night_horizon_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunRadius"), sky_cmd.sun_radius);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunBrightness"), sky_cmd.sun_brightness);
@@ -162,6 +166,14 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 sky_cmd.sun_set_start_angle);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunSetAngleRatio"),
                 sky_cmd.sun_set_angle_ratio);
+    glUniform1f(shader_mgr.GetUniform(prog, "uMoonRadius"), sky_cmd.moon_radius);
+    glUniform1f(shader_mgr.GetUniform(prog, "uMoonBrightness"),
+                sky_cmd.moon_brightness);
+    glUniform1f(shader_mgr.GetUniform(prog, "uMoonGlow"), sky_cmd.moon_glow);
+    glUniform1f(shader_mgr.GetUniform(prog, "uMoonSetStartAngle"),
+                sky_cmd.moon_set_start_angle);
+    glUniform1f(shader_mgr.GetUniform(prog, "uMoonSetAngleRatio"),
+                sky_cmd.moon_set_angle_ratio);
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);
