@@ -152,13 +152,13 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
     glUniform3f(shader_mgr.GetUniform(prog, "uNightZenith"),
-                sky_cmd.night_zenith_color.r * sky_cmd.night_scale,
-                sky_cmd.night_zenith_color.g * sky_cmd.night_scale,
-                sky_cmd.night_zenith_color.b * sky_cmd.night_scale);
+                sky_cmd.night_zenith_color.r,
+                sky_cmd.night_zenith_color.g,
+                sky_cmd.night_zenith_color.b);
     glUniform3f(shader_mgr.GetUniform(prog, "uNightHorizon"),
-                sky_cmd.night_horizon_color.r * sky_cmd.night_scale,
-                sky_cmd.night_horizon_color.g * sky_cmd.night_scale,
-                sky_cmd.night_horizon_color.b * sky_cmd.night_scale);
+                sky_cmd.night_horizon_color.r,
+                sky_cmd.night_horizon_color.g,
+                sky_cmd.night_horizon_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunRadius"), sky_cmd.sun_radius);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunBrightness"), sky_cmd.sun_brightness);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunGlow"), sky_cmd.sun_glow);

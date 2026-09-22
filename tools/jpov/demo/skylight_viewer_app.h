@@ -6,7 +6,7 @@
 //   - 天光 = `CreateDefaultSkyCommand(四自由度)`（其余参数走默认构造）；
 //   - 光照 = 由该 SkyCommand **推导**（日光色/强 + ambient 色/强），不手配。
 //
-// 交互面板只有**四个滑条**（Danis 2026-09-21 定）：
+// 交互面板只有**四个自由度**（六个滑条；Danis 2026-09-21 定）：
 //   ① 浊度 turb [0,8]
 //   ② 季节色温 [−1,+1]（左=蓝偏 / 右=红偏；这是查看器的交互设计，见 scene 头注释）
 //   ③ 太阳方向：仰角 [0,90] + 方位角 [0,360)（两个滑条，属同一个自由度）
@@ -76,10 +76,6 @@ public:
     float moon_elev_deg_ = 30.0f;          // ④ 月亮仰角 [0,90]
     float moon_azim_deg_ = 225.0f;         // ④ 月亮方位角 [0,360)
 
-    // ── 夜色标定旋钮（不属那四个自由度，但标定夜必须直接给）──
-    float night_scale_ = 1.0f;      // 夜色两色整体缩放（0..4；1=默认夜色）
-    float night_ambient_ = 0.0f;    // 夜间额外 ambient 强度（0..2；0=不开）
-
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
     }
@@ -126,10 +122,7 @@ public:
         SkyLighting nl = MakeSkyLighting(
             turbidity_, season_tint_, sun_elev_deg_, sun_azim_deg_,
             moon_elev_deg_, moon_azim_deg_);
-        nl.sky.night_scale = night_scale_;
-        nl.sky.night_ambient = night_ambient_;
-        // 光照需**重建**：night_scale / night_ambient 影响 AmbientColor/Intensity，
-        // 必须在改完 sky 之后重新推导（否则物体受光与天色不同步）。
+        // 光照由该 sky 推导（日光/ambient 全部由 SkyCommand 推出，不手配）。
         nl.sun = jpov::DirectionalLight{
             /*direction*/ {-nl.sky.sun_dir.x(), -nl.sky.sun_dir.y(), -nl.sky.sun_dir.z()},
             /*color*/ nl.sky.SunDirectionalColor(),
@@ -179,7 +172,7 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 光照面板：8 个滑条 = 四个自由度（日月各占仰角+方位角）+ 夜色两个标定旋钮。
+    // 光照面板：6 个滑条 = 四个自由度（日月各占仰角+方位角）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -192,7 +185,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 8;
+        const int   kRows    = 6;
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -215,13 +208,6 @@ private:
         // ④ 月亮方向（仰角 + 方位角）。月盘亮度走默认 5（常亮）。
         ui_.SliderFloat("月亮仰角 °", &moon_elev_deg_, row(4), 0.0f, 90.0f, 0);
         ui_.SliderFloat("月亮方位角 °", &moon_azim_deg_, row(5), 0.0f, 360.0f, 0);
-        // ⑤ 夜色两个标定旋钮（标定“夜间 ambient 与 night_lum 的关系”用）。
-        //   night_scale：夜色两色整体缩放（0=无夜色；1=默认都市夜色；>1=亮亮的夜晚）。
-        ui_.SliderFloat("夜色亮度 night_scale", &night_scale_, row(6),
-                        0.0f, 4.0f, 2);
-        //   night_ambient：夜间额外 ambient 强度（0=不开；直接旋钮）。
-        ui_.SliderFloat("夜色 ambient", &night_ambient_, row(7),
-                        0.0f, 2.0f, 3);
     }
 
     bool show_panel_ = true;

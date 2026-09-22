@@ -835,25 +835,36 @@ struct SkyCommand {
     Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
     Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
 
-    // ── 夜色亮度旋钮（2026-09-21 晚新增）──
+    // ── 夜间 ambient：由夜色亮度推导（2026-09-22 标定）──
     //
-    // night_scale：把夜色两色**整体缩放**到给定亮度等级的简单旋钮。
-    //   - 语义：夜色两色先各自 **乘** night_scale，再进着色器。
-    //   - 默认 1.0 = 不改（既有默认都市夜色原值）。
-    //   - 为什么单独给：调“夜有多亮”不应要求逐个改两个颜色（易破坏色调比例），
-    //     也不应用 intensity（那是天光总开关，会连带改白天）。
-    //   - 注：它只影响**天色与环境光色**，不影响夜间 ambient 强度（后者的旋钮是
-    //     night_ambient，见下）。
-    float night_scale = 1.0f;
+    // 夜间环境光强度**不再独立给旋钮**，而是**由夜空的夜色亮度（night_lum）推导**。
+    // 亮度↔强度的对应关系来自标定实验（Danis 2026-09-22，夜场景实测）：
+    //
+    //   night_lum → night_term（base_intensity=1.0 时的绝对强度）
+    //     0.02  → 0.10
+    //     0.035 → 0.17
+    //     0.05  → 0.20
+    //     0.10  → 0.25
+    //     0.33  → 0.40
+    //
+    // 中间线性插值，越界夹断到端点（见 NightTermFromLum）。
+    // 这样“天色亮度”与“物体受环境光强度”永远自洽：改夜色两色，夜间 ambient
+    // 自动跟着走，不需要再手工配一个绝对强度（两个量解耦正是之前标定困难的根源）。
 
-    // night_ambient：夜间**额外 ambient 强度**的直接旋钮（绝对量，默认 0 = 不开）。
-    //   - 用法（在 AmbientIntensity 里）：
-    //       night_term = base_intensity × night_ambient
-    //     纯绝对强度，**不乘夜色亮度**（与夜色颜色解耦）。
-    //   - 为何是“直接旋钮”而非分段线性映射：夜色与 ambient 都要标定，中间再套
-    //     一条曲线会把两个自由度耦在一起、反而难调；直接给旋钮，用眼睛标定。
-    //   - 默认 0 = 不开夜色 ambient（退化为旧行为）。
-    float night_ambient = 0.0f;
+    // 夜色平均亮度：两个夜色 RGB 的 6 个分量之和 ÷ 6（夜空的平均通道亮度）。
+    float NightLum() const {
+        return (night_zenith_color.r + night_zenith_color.g +
+                night_zenith_color.b + night_horizon_color.r +
+                night_horizon_color.g + night_horizon_color.b) / 6.0f;
+    }
+
+    // 夜色亮度 → 夜间 ambient 强度（标定表；分段线性，越界夹断到端点）。
+    static float NightTermFromLum(float night_lum) {
+        static const geom::math::PiecewiseLinearFunction<double> kCurve(
+            std::vector<double>{0.02, 0.035, 0.05, 0.10, 0.33},
+            std::vector<double>{0.10, 0.17, 0.20, 0.25, 0.40});
+        return static_cast<float>(kCurve(night_lum));
+    }
 
     // 色温（开尔文）→ 线性 sRGB。黑体辐射到 sRGB 的近似（Tanner Helland 拟合 +
     // 白平衡到 ~5600K 中性，再归一化）。与 sky_renderer.h 里 shader 的
@@ -971,25 +982,21 @@ struct SkyCommand {
     // 正午（90°）系数=1.0，故 intensity = base_intensity × 系数。
     // 仰角 >90° 夹断到 1.0；< -18° 夹断到 ~0.001（夜天空底色，不归纯黑）。
     //
-    // ── 夜色 ambient 叠加（2026-09-21）──
+    // ── 夜色 ambient 叠加（2026-09-22 标定）──
     // 背景：本曲线原本是按“暮色仍未消失”的旧场景标定的（那时夜色两色默认 0）。
     // 现在夜色成为标准天光的默认组成部分，需要在日落后**额外**补一项由夜色
     // 亮度驱动，否则太阳一落 ambient 就掉到曲线的夹断值，与夜空亮度失配（物体比
     // 天空暗一个数量级）。
     //
     //   ambient = 暮色项(本曲线 × TurbAmbLoss) × daylight × base_intensity
-    //           + base_intensity × night_ambient × (1 − daylight)
+    //           + NightTermFromLum(night_lum) × base_intensity × (1 − daylight)
     //
     // 其中：
     //   daylight = clamp((sun_y-0.03)/0.10, 0, 1) 与 shader / AmbientColor 同源
     //             —— 保证“天色 / 环境光色 / 环境光强”是同一条时间轴。
-    //   night_ambient = 夜间额外 ambient 的**直接旋钮**（绝对强度，默认 0.0）：
-    //             纯绝对量，**不乘夜色亮度**（与夜色颜色解耦）。为何直接给：夜色
-    //             与 ambient 都要标定，中间再套曲线/乘子会把两个自由度耦在一起、
-    //             反而难调；直接给旋钮，用眼睛标定（推荐在 skylight viewer 里调）。
-    //
-    // 注：日间行为与曲线完全一致（daylight=1 → 夜色项 0）；night_ambient=0 时
-    // 退化为旧行为。
+    //   night_lum = 夜色两色 6 分量之和 ÷ 6（见 NightLum）—— 夜空亮度的客观度量。
+    //   NightTermFromLum = 夜色亮度 → 夜间 ambient 强度的标定映射（见字段区）。
+    //             夜间 ambient 不再有独立旋钮，而是**跟着夜色亮度走**，两者恒定自洽。
     //
     // 用法：ambient 的亮度跟随天光自动变化：
     //   AmbientLight light;
@@ -1014,14 +1021,9 @@ struct SkyCommand {
         if (daylight >= 1.0f) {
             return day_term;
         }
-        // 夜色项（**纯绝对强度**，不乘夜色亮度）：
-        //   night_term = base_intensity × night_ambient
-        // night_ambient = 夜间额外 ambient 的直接旋钮（绝对量，默认 0 = 不开）。
-        // 为何直接给：夜色与 ambient 都要标定，中间再套一条曲线/乘子会把两个
-        // 自由度耦在一起、反而难调；直接给旋钮，用眼睛标定。
-        // 注：夜色亮度（night_scale）只影响**天空/环境光色**，不影响此处强度——
-        //     “夜有多亮”（天空）与“物体被环境光照得多亮”是两个独立旋钮。
-        const float night_term = base_intensity * night_ambient;
+        // 夜色项：由夜色亮度推导（NightTermFromLum，见字段区标定表），
+        // 再乘 base_intensity。夜间 ambient 与夜色亮度恒定自洽。
+        const float night_term = NightTermFromLum(NightLum()) * base_intensity;
         return day_term * daylight + night_term * (1.0f - daylight);
     }
 
@@ -1107,12 +1109,11 @@ struct SkyCommand {
         // daylight=1（白天）→ 纯暮色/日光色；daylight=0（夜）→ 纯夜色底色。
         const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
         if (daylight < 1.0f) {
-            // 夜色端 = 天顶色与地平色的平均（环境光 = 上半球平均入射），
-            // 含 night_scale（与天空背景同一缩放，保证天色与环境光色一致）。
+            // 夜色端 = 天顶色与地平色的平均（环境光 = 上半球平均入射）。
             const Color night_avg{
-                (night_zenith_color.r + night_horizon_color.r) * 0.5f * night_scale,
-                (night_zenith_color.g + night_horizon_color.g) * 0.5f * night_scale,
-                (night_zenith_color.b + night_horizon_color.b) * 0.5f * night_scale,
+                (night_zenith_color.r + night_horizon_color.r) * 0.5f,
+                (night_zenith_color.g + night_horizon_color.g) * 0.5f,
+                (night_zenith_color.b + night_horizon_color.b) * 0.5f,
                 1.0f,
             };
             // 把夜色当“颜色”（单位尺度），再乘回当前天光的**总亮度量级**，
@@ -1162,8 +1163,6 @@ struct SkyParams {
     float moon_set_angle_ratio = 1.4f;
     Color night_zenith_color = {0.010f, 0.013f, 0.024f, 1.0f};
     Color night_horizon_color = {0.055f, 0.048f, 0.045f, 1.0f};
-    float night_scale = 1.0f;
-    float night_ambient = 0.0f;
 };
 
 // CreateSkyCommand —— **完整版**天光构造接口：由 SkyParams 逐字段填充 SkyCommand。
@@ -1190,8 +1189,6 @@ inline SkyCommand CreateSkyCommand(const SkyParams& params) {
     sky.moon_set_angle_ratio = params.moon_set_angle_ratio;
     sky.night_zenith_color = params.night_zenith_color;
     sky.night_horizon_color = params.night_horizon_color;
-    sky.night_scale = params.night_scale;
-    sky.night_ambient = params.night_ambient;
     return sky;
 }
 

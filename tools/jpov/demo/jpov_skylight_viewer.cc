@@ -202,25 +202,7 @@ int RunCapture(const std::string& out_dir) {
     app.view_.theta = 3.14159265358979323846 / 4.0;
     app.view_.R     = 6.0;
 
-    // ── F. 夜色标定矩阵（本 PR 目的）：night_scale × night_ambient 网格 ──
-    // 固定“入夜 + 月亮在天”，扫两个旋钮，让 Danis 肉眼标定二者的关系。
-    app.sun_elev_deg_ = 0.0f;         // 太阳落山（只剩夜色）
-    app.moon_elev_deg_ = 30.0f;
-    app.moon_azim_deg_ = 135.0f;      // 月亮在相机侧后方，不抢镜
-    app.view_.R     = 9.5;            // 拉远，把桌子/橡树都收进画面
-    for (float ns : {0.0f, 1.0f, 2.0f, 4.0f}) {
-        for (float na : {0.0f, 0.5f, 1.0f, 2.0f}) {
-            app.night_scale_ = ns;
-            app.night_ambient_ = na;
-            char name[64];
-            std::snprintf(name, sizeof(name), "cal_ns%.0f_na%.1f", ns, na);
-            shoot(name);
-        }
-    }
-    app.night_scale_ = 1.0f;
-    app.night_ambient_ = 0.0f;
-
-    // ── G. 模型放置自检：正午（看桌子/橡树是否正常入画）──
+    // ── F. 模型放置自检：正午（看桌子/橡树是否正常入画）──
     app.sun_elev_deg_ = 60.0f;
     app.sun_azim_deg_ = 45.0f;
     shoot("scene_noon_check");
@@ -234,10 +216,14 @@ int RunCapture(const std::string& out_dir) {
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
+    std::string out_dir;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
-            return RunCapture(argv[i + 1]);
+            out_dir = argv[i + 1];
         }
+    }
+    if (!out_dir.empty()) {
+        return RunCapture(out_dir);
     }
 
     // ── 交互模式 ──
