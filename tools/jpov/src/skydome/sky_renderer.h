@@ -9,12 +9,10 @@
 //   - 先画天球（垫 3D FBO 背景）→ 再画 3D 物体（深度测试覆盖）。
 //   - 地平线以下（pitch<0）画纯色 ground_color（避免天空倒影）。
 //   - HDR：输出原始亮度（可 >1.0），不做 tone map，由后处理统一压缩。
-//   - 夜空底色（2026-09-20 引入）：night_zenith_color → night_horizon_color 的
-//     垂直渐变（van Rhijn 形状），**加法**叠在白天项上（受 intensity、不受 season）；
-//     按 (1−daylight) 淡入（白天零影响、日落后满值）。
-//   - 月亮盘（2026-09-21 引入）：moon_dir + moon_* 一组参数，与日盘走**同一推导链**
+//   - 夜空底色：night_zenith_color → night_horizon_color 的垂直渐变（van Rhijn 形状），
+//     **加法**叠在白天项上（受 intensity、不受 season）；按 (1−daylight) 淡入。
+//   - 月亮盘：moon_dir + moon_* 一组参数，与日盘走**同一推导链**
 //     （俯仰角重映射 / 黑体色温 / Beer-Lambert 衰减 / 角度空间盘 mask / 高斯光晕）。
-//     月盘默认亮度 0 = 关闭（既有画面逐字节不变）。仍不画月相/星星。
 //
 // 曲线来源：Preetham 模型实现基于 Erin Catto (box3d, MIT) 的 preetham.glsl，
 // 论文 "A Practical Analytic Model for Daylight" (Preetham, Shirley, Smits 1999)。
@@ -392,9 +390,8 @@ void main() {
     }
 
     // 季节色温 + 亮度。
-    // 注意：这里**不做 tone map**（不再 sky/(1+sky)）——为了后续统一后处理管线，
-    // 天空输出保持 HDR 原始亮度（可 >1.0），由最终的后处理 pass 统一压缩到 [0,1]。
-    // （2026-08-19：为引入统一后处理，去掉天空 shader 里的前置 Reinhard。）
+    // 注意：这里**不做 tone map** —— 天空输出保持 HDR 原始亮度（可 >1.0），
+    // 由最终的后处理 pass 统一压缩到 [0,1]。
     //
     // ⚠️ 顺序很重要：夜色项必须加在本行**之后** —— 它**不受 season 染色**
     //   （season 是"日光散射的季节色温"，气辉/城市光污染不是散射日光），
@@ -402,18 +399,13 @@ void main() {
     //   于是它在夜间自动成为夜色总开关）。
     sky *= uSeason * uIntensity;
 
-    // ── 夜空底色（加法叠加，仅地平线以上；**按天黑程度 (1−daylight) 淡入**）──
-    // 算子：加法，但夜间项乘 (1−daylight) —— 物理上气辉/城市光污染白天被日光完全
-    // 淹没，不应给日间天空抬底；日落后 (daylight→0) 淡入到满值。
-    //   为何不像白天项那样“只靠加法自然退化”：白天项的 daylight 因子只能把**白天项**
-    //   压到 0（日落即无日散射），但反过来不能阻止**夜色项**在白天被加上去；两层的
-    //   时间边界需各自门控。用同一个 daylight 因子 ⇒ 与 AmbientColor 的夜色叠加、
-    //   与 shader 的昼夜过渡是同一条时间轴（不会一个已入夜另一个还在黄昏）。
-    //   注：本行也是 sky *= uSeason * uIntensity 的**之后**，故夜色不受 season 染，
-    //   但受 intensity 缩放（intensity = 天光总开关）。
-    // 地平线以下**不加**：下半球由 ground_color 独占。
-    // (1−daylight) 在 sun_y ≥ 0.13 时为精确 0.0（白天零影响）；
-    // 若显式把夜色两色设为 0，本行在任何情况下都是 +0.0。
+    // ── 夜空底色（加法叠加，仅地平线以上；**按 (1−daylight) 淡入**）──
+    // 夜间项乘 (1−daylight)：气辉/城市光污染白天被日光完全淹没，不应给日间天空抬底；
+    // 日落后 (daylight→0) 淡入到满值。白天项的 daylight 因子只能把白天项压到 0，
+    // 挡不住夜色项在白天被加进来，故两层各自门控。用同一个 daylight 因子，使 sky /
+    // AmbientColor / 昼夜过渡共用同一条时间轴。
+    // 本行在 sky *= uSeason * uIntensity 之后：夜幕不受 season 染、受 intensity 缩放。
+    // 地平线以下不加：下半球由 ground_color 独占。夜色两色设为 0 时本行恒为 +0.0。
     if (dir.y >= 0.0) {
         sky += nightSkyColor(clamp(dir.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
     }

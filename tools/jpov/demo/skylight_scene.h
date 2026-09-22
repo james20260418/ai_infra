@@ -1,6 +1,6 @@
 // JPOV 天光查看器（skylight viewer）— 场景 + 天光装配（header-only）
 //
-// 目的（Danis 需求）：一个专门用来**肉眼验收天光（SkyCommand）**的最小场景——
+// 目的：一个专门用来**肉眼验收天光（SkyCommand）**的最小场景——
 // 固定三个不同 PBR 材质的方块 + 灰色地面，配上四个自由度（浊度 / 季节色温 /
 // 太阳方向 / 月亮方向），一眼看全「标准天光」在材质上的反映。
 //
@@ -12,7 +12,7 @@
 // 为什么用三个方块而不是加载 glTF（与 model viewer 的区别）：
 //   - model viewer 的目的是"看模型"，天光只是背景；本查看器的目的是"看天光"，
 //     被测物要**材质可控**且**常量**，否则每换一个模型就换一组变量，无法标定。
-//   - 三块方块的材质刻意隔离变量（Danis 定的三段）：
+//   - 三块方块的材质刻意隔离变量（三段）：
 //       低反（rough=1.0, metal=0）→ 纯漫反射，最能反映"天空/环境光的平均色与量"；
 //       高光（rough=0.05, metal=0, 同 albedo）→ 只差粗糙度，用于看太阳/月色高光
 //         的**颜色与位置**（低反块看不见高光，两者对比即"高光从哪来"）；
@@ -40,7 +40,7 @@ namespace jpov_skylight {
 inline constexpr float kBoxHalf    = 0.5f;   // 半宽（1×1×1 方块）
 inline constexpr float kBoxSpacing = 1.6f;   // 相邻方块中心距（米）
 
-// 三块方块的材质（Danis 定的三段）。albedo 统一 0.55 中性灰。
+// 三块方块的材质（三段）。albedo 统一 0.55 中性灰。
 //
 //   index 0：低反（粗糙漫反射）——roughness=1.0 且 metallic=0
 //   index 1：高光（光滑非金属）——roughness=0.05 且 metallic=0（同 albedo，隔离变量）
