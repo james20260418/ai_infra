@@ -371,9 +371,13 @@ inline void ArapViewerApp::BuildSim() {
     LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
               << " s（目标步长 1/60 = " << (1.0f / 60.0f)
               << " s；需求方上限 60 Hz，不加子步）";
-    if (bound < 2.0f / 60.0f) {
+    // 与 AdvanceDynamics 的安全步长判据**保持同一依据**（safe_dt = 2.5·bound，
+    // 实测标定，见那里的注释），避免"一处说会慢动作、另一处说没问题"的自相矛盾。
+    constexpr float kTargetDtLog = 1.0f / 60.0f;
+    if (bound > 0.0f && kTargetDtLog > 2.5f * bound) {
         LOG(WARNING) << "材质偏硬：稳定上限 " << bound
-                     << " s < 2/60 s ⇒ 自动进入慢动作（不会出 NaN，但物理变慢）。"
+                     << " s，安全步长 " << (2.5f * bound) << " s < 1/60 s"
+                     << " ⇒ 会进入慢动作（不会出 NaN，但物理变慢）。"
                         "要全速需降 c（更软材料）或升 ρ（更重/更厚）";
     }
 }
