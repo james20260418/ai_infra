@@ -710,6 +710,33 @@ void ArapSim::RotateCurrentState(const jpov::Vec3f& axis, float angle_rad,
     ScatterToVertices();
 }
 
+void ArapSim::SnapshotState(
+    std::vector<jpov::Vec3f>* positions /*output*/,
+    std::vector<jpov::Vec3f>* velocities /*output*/) const {
+    CHECK_NOTNULL(positions);
+    CHECK_NOTNULL(velocities);
+    *positions = pos_;
+    *velocities = vel_;
+}
+
+void ArapSim::RestoreState(const std::vector<jpov::Vec3f>& positions,
+                           const std::vector<jpov::Vec3f>& velocities) {
+    CHECK_EQ(positions.size(), particle_count_)
+        << "ArapSim::RestoreState: positions 长度必须是 particle_count()";
+    CHECK_EQ(velocities.size(), particle_count_)
+        << "ArapSim::RestoreState: velocities 长度必须是 particle_count()";
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        // 只接受有限值：坏快照会把 NaN 永久钉在状态里（下次仿真还是一样坏）。
+        CHECK(std::isfinite(positions[i].x()) && std::isfinite(positions[i].y()) &&
+              std::isfinite(positions[i].z()))
+            << "ArapSim::RestoreState: 快照含 NaN/inf（质点 " << i
+            << "），拒绝恢复";
+    }
+    pos_ = positions;
+    vel_ = velocities;
+    ScatterToVertices();
+}
+
 void ArapSim::SetConfig(const ArapSimConfig& config) {
     config_ = config;
     // 材质刚度是「构建期派生量」（β 默认由 T 换算、质量由面密度×面积得到），

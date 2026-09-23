@@ -185,6 +185,17 @@ public:
     // 恢复到 bind pose（清空速度）。对应界面上的「重置」按钮。
     void Reset();
 
+    // 把【当前】位置/速度导出为快照 / 从快照恢复（诊断与"发散回滚"用）。
+    //
+    // 用途：显式积分在步长超限时会一步炸成 NaN；调用方在每步之前存一份快照，
+    // 发现几何坏掉时用快照回滚，就能保证屏幕上不会出现"模型消失"。
+    //
+    // Pre-condition: 已 Build()；positions/velocities 长度 = particle_count()。
+    void SnapshotState(std::vector<jpov::Vec3f>* positions /*output*/,
+                       std::vector<jpov::Vec3f>* velocities /*output*/) const;
+    void RestoreState(const std::vector<jpov::Vec3f>& positions,
+                      const std::vector<jpov::Vec3f>& velocities);
+
     // 把当前状态整体绕 (pivot, axis) 旋转 angle_rad（刚体旋转 + 速度同步旋转）。
     //
     // 用途：① 交互上「把物体翻个面再摔」，比较不同入姿势下的行为；

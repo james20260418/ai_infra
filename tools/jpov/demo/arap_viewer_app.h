@@ -213,7 +213,11 @@ private:
     bool show_panel_ = true;                   // 是否绘制交互面板
     bool dynamics_running_ = false;            // 仿真是否推进（默认暂停，按按钮启动）
     bool diverged_ = false;                    // 已判出发散（见 AdvanceDynamics 的保护）
-    float physics_accum_ = 0.0f;               // 物理时间累加器（固定步长 0.05 s）
+    float physics_accum_ = 0.0f;               // 物理时间累加器（默认步长 0.05 s）
+    bool slow_motion_warned_ = false;           // 慢动作提示只打一次
+    // 每帧开始时的状态快照：发散时用它回滚（保证屏幕不出现 NaN 几何）。
+    std::vector<jpov::Vec3f> snapshot_pos_;
+    std::vector<jpov::Vec3f> snapshot_vel_;
 
     // 需求方指定的物理积分步长（秒）。
     static constexpr float kPhysicsDt = 0.05f;
@@ -281,6 +285,11 @@ inline int ArapViewerApp::SimSubstepsFor(float bound_s, int fixed) {
                      << kMaxAutoSubsteps
                      << "（仍可能发散：请调小 h/b，或用 --substeps 指定）";
     }
+    // ⚠️ 封顶是个**陷阱**，故不再静默封顶：
+    //   封顶后 h 仍大于稳定上限 ⇒ 仿真**一定会发散**（NaN/飞走）。而原来的代码只打了
+    //   一行 WARNING 就继续跑 ⇒ 用户第一步就看到 NaN，只会看到「出nan值，模型消失」。
+    //   调用方（AdvanceDynamics）在自动模式下会把实际步长放大到 上限/2（慢动作），
+    //   力模型与积分格式**一字不改** —— 宁可慢放，也不要静默出垃圾几何。
     return std::min(std::max(needed, 1), kMaxAutoSubsteps);
 }
 
@@ -533,27 +542,84 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
     sim_config_.substeps = substeps_in_use_;
     sim_.SetConfig(sim_config_);
 
-    // 固定步长 kPhysicsDt = 0.05 s（需求方指定）+ 累加器：
-    // 渲染帧 1/60 s 凑够 0.05 s 才推进一步 ⇒ 物理按真实时间演化、且与帧率无关。
-    physics_accum_ += frame_dt;
-    while (physics_accum_ >= kPhysicsDt) {
-        sim_.Step(kPhysicsDt);
-        physics_accum_ -= kPhysicsDt;
+    // ── 安全步长（自动模式下）──
+    //   若封顶后 h 仍超过稳定上限，就**放大实际步长**（慢动作）而不是硬推：
+    //   显式积分一旦 h > 上限 就必然发散（NaN/飞走），对用户就是「模型消失」。
+    //   力模型、积分格式、substeps 都不变，只是物理时间走得慢一点。
+    // 本帧开始时的状态快照（发散回滚用；只在真要推进时才存）。
+    if (dynamics_running_) {
+        sim_.SnapshotState(&snapshot_pos_, &snapshot_vel_);
     }
 
-    // ── 发散保护（诚实兜底，不掩盖问题）──
-    //   显式积分在 h 超过稳定上限（max_stable_dt()）时会发散；与其让用户看着模型
-    //   飞走/糊成一团却不知为何，不如**停住并明说**：边畸变 > 100%（几何已完全不
-    //   是原形）就自动暂停并告警。
-    constexpr float kDivergeDistortion = 1.0f;
-    if (!diverged_ && sim_.edge_distortion_rms() > kDivergeDistortion) {
-        diverged_ = true;
-        dynamics_running_ = false;
+    float physics_dt = kPhysicsDt;
+    if (fixed_substeps_ <= 0) {
+        // ⚠️ 条件必须用【substeps 是否够用】判断，**不能**用 `步长 > 0.5·上限`：
+        //   网格够软时（上限 > 步长/2）子步会自动取 > 1 个，h 已经安全了；
+        //   再用 h 去比上限就会把本来没问题的场景也拖成慢动作（实测：方块上限
+        //   0.071 s、步长 0.05 s 本来只需 2 子步很稳，却被误判成"慢 1.4 倍"）。
+        const float bound = sim_.max_stable_dt();
+        const int needed = SimSubstepsFor(bound, /*fixed=*/0);
+        const bool substeps_capped = (needed > kMaxAutoSubsteps);
+        const bool still_unstable =
+            (bound > 0.0f) &&
+            (kPhysicsDt / static_cast<float>(substeps_in_use_) > 0.5f * bound);
+        if (substeps_capped && still_unstable) {
+            physics_dt = std::max(0.5f * bound * static_cast<float>(substeps_in_use_),
+                                  1e-4f);
+            if (!slow_motion_warned_) {
+                slow_motion_warned_ = true;
+                LOG(WARNING) << "仿真进入慢动作：当前网格在指定的 T/面密度下太硬，"
+                                "0.05 s 步长会发散，故把实际步长放到 "
+                             << physics_dt << " s（慢 " << (kPhysicsDt / physics_dt)
+                             << " 倍；力模型未改）。要全速请减面/放宽网格、调大"
+                                "面密度、或调小 T（或用 --substeps 自行承担）";
+            }
+        }
+    }
+
+    // 固定步长 + 累加器：渲染帧凑够 physics_dt 才推进一步（物理按真实时间演化、
+    // 且与帧率无关）。physics_dt 默认 0.05 s（需求方指定），仅在网格太硬时自动放大（慢动作）。
+    physics_accum_ += frame_dt;
+    while (physics_accum_ >= physics_dt) {
+        sim_.Step(physics_dt);
+        physics_accum_ -= physics_dt;
+    }
+
+    // ── 发散保护（挡住 NaN，不让它进 GPU）──
+    //   显式积分在 h 超过稳定上限时**必然**发散：位置先爆到 ±1e30，然后变成 NaN，
+    //   于是顶点缓冲全 NaN ⇒ 模型在原地消失（实测症状就是这个）。
+    //   这里在**上传之前**加两道闸：
+    //     ① 每次 Step 后查几何是否已非有限值（NaN/inf），一旦发现立刻回滚到
+    //        本帧开始时的状态（快照）并暂停 —— 用户看到的画面不会消失。
+    //     ② 边长畸变 > 100%（几何已完全不是原形）也停，并说明原因。
+    //   宁可停在上一帧的好状态，也不要把糊掉的几何送到屏幕上（且日志要能说清根因）。
+    bool bad_geometry = false;
+    for (uint32_t i = 0; i < sim_.particle_count(); ++i) {
+        const jpov::Vec3f& p = sim_.vertex_positions()[i];
+        if (!std::isfinite(p.x()) || !std::isfinite(p.y()) ||
+            !std::isfinite(p.z())) {
+            bad_geometry = true;
+            break;
+        }
+    }
+    if (!bad_geometry) {
+        const float dist = sim_.edge_distortion_rms();
+        if (!(dist >= 0.0f) || dist > 1.0f) {
+            bad_geometry = true;
+        }
+    }
+    if (bad_geometry) {
+        // 回滚到本帧开始时的状态：用快照恢复位置/速度，并重置累加器。
+        sim_.RestoreState(snapshot_pos_, snapshot_vel_);
         physics_accum_ = 0.0f;
-        LOG(WARNING) << "仿真发散（边长畸变 " << sim_.edge_distortion_rms()
-                     << " > " << kDivergeDistortion << "）：步长 " << kPhysicsDt
-                     << " s 超过稳定上限 " << sim_.max_stable_dt()
-                     << " s。按「重置 mesh」恢复；根治办法是加大 substeps 或调小 h/b";
+        dynamics_running_ = false;
+        diverged_ = true;
+        LOG(ERROR) << "仿真发散：已回滚到本帧开始的状态并暂停（画面上不会出现消失/糊掉的"
+                      "模型）。根因：当前网格在 T=" << sim_config_.hooke_n_per_m
+                   << " N/m、面密度 " << sim_config_.area_density_kg_per_m2
+                   << " kg/m² 下太硬 —— 稳定上限 " << sim_.max_stable_dt()
+                   << " s 远小于步长。根治：减面/放宽网格、调大面密度、或调小 T";
+        return;   // 不再上传坏几何
     }
 
     // 顺序铁律：写回位置 → 重算 TN → 上传。法线/切线是位置的派生量。
@@ -671,6 +737,7 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
         sim_.Reset();
         diverged_ = false;
         physics_accum_ = 0.0f;
+        slow_motion_warned_ = false;
         std::vector<jpov::MeshData> meshes;
         meshes.reserve(prims_.size());
         for (const SimPrimitive& p : prims_) {
