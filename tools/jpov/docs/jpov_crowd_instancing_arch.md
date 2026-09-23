@@ -8,6 +8,9 @@
 > 前置阅读：本文档是 `docs/jpov_engine_integration.md`（JPOV 作 0 级引擎的边界收敛）的
 > 直接延续——那里的「世界演化归用户/渲染归 JPOV」「每帧全量 cmds 缝是真实接口」「static meshing ✅ /
 > 分层/局部更新 ❌」结论在这里原样适用。文档描述以代码现状为准。
+>
+> 相关：`docs/jpov_crowd_body_shape_face_design.md`（2026-09-23：per-instance 体型〔整体 scale +
+> 骨通道膨胀 μ〕与「脸是装备」+ 近邻动态表情的设计定稿）。
 
 ---
 
@@ -85,7 +88,9 @@ instance[i] (很薄, select 共享区):
   transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)
   body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int）
   cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」
-  cheap_body_scale   —— 几档全局/轴向 scale 标量（身高胖瘦微差，见 §6.1）
+  cheap_body_scale   —— 高矮：per-instance 整体 scale（`InstanceTransform::scale`）
+  shape_channels[8]  —— 胖瘦：per-instance 骨通道膨胀系数 μ（见 §6.1 与
+                        `jpov_crowd_body_shape_face_design.md`）
   face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引
   tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）
   seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现）
@@ -128,6 +133,7 @@ instance[i] (很薄, select 共享区):
 | 肤色 / 肤质差异 | per-instance **vec3 tint** 乘共享肤质贴图；或 texture-array 取肤 | tint uniform / texture array | 最省（constant） |
 | 「4 副面孔」的五官/肤(外观) | texture-array / 材质变体 + `face_index` | face_index selector | 低（一个 int） |
 | 「4 副面孔」的脸型/头骨几何 | **共享 N 个 baked 头部 rest-mesh 变体** + `head_idx` | head_idx selector | 低（一个 int） |
+| 近景表情（只给最近邻 K 张脸）| CPU 微操 rest 顶点 + 单独 draw | 动态头槽位池 + blendshape | 中（K≈10，见 `jpov_crowd_body_shape_face_design.md` §4） |
 | 衣物不同款式 | **预备 N 套绑骨 rest-mesh 变体** + `cloth_style_idx` | part_pool[:].cloth + idx | 低（一个 int） |
 | 衣物/部位颜色微调 | per-part tint / 该部位材质变体 | tint selectors | 低 |
 | 装备差异 | 同衣物——rest-mesh/材质变体 + idx | part_pool + idx | 低 |
@@ -197,6 +203,14 @@ JPOV 拥有“烘焙动画纹理资源 + 4-bone 蒙皮 shader + 把同档同动�
    这是「廉价形变(scalar) + 衣物贴合」两全的最稳档。 ✅ S0 用
 2. 衣物 bake 成身体变体（每变体一套衣）——复杂，延后。
 3. 接受「衣带骨、体可微调但衣物按标人」的近似——文档标注取舍，若需要再开。
+
+> **2026-09-23 补充（Danis 收敛）**：体型差异拆成两个按实例的旋钮，且**第一坑解掉一大半**：
+> ① **高矮** = per-instance 整体 `scale`（`InstanceTransform::scale`，零新机制）；
+> ② **胖瘦/部位粗细** = **骨通道膨胀 μ**（蒙皮前对 rest 顶点做骨局部系横径缩放）。
+> μ 是「蒙皮前的顶点算子、按骨通道生效」，**与 mesh 身份无关** ⇒ 绑同一骨架的衣物/装备**自动同比跟随**，
+> 不会豁开（比「整体 scale」更好：长度不变、可按部位）。
+> 代价：通道表骨架级唯一一份 ⇒ 同骨上身体与衣物共用同一 μ，**做不出「衣物比身体松」**。
+> 「长度比例」明确**不做**（用整体 scale 替代）。详见 `jpov_crowd_body_shape_face_design.md`。
 
 ### 6.2 人群角色的动画：三档谱系（本文档核心取舍，决定人群主体形态）
 
