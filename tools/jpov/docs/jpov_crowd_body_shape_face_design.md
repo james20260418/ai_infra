@@ -169,6 +169,10 @@ struct SkeletonShapeChannels {
 人体骨架示例（7 通道）：`Hips`→ch0（胯）、`Spine/Spine1/Spine2`→ch1（腰）、
 左腿三骨→ch2、右腿三骨→ch3、左臂三骨→ch4、右臂三骨→ch5、`Neck/Head`→ch6。
 
+⚠️ **通道划分本身是 JPOV 用户的事**，不是 JPOV 的语义：JPOV 只提供「表结构 + `Validate()`」
+（骨→通道、通道名表）；**分几个通道、哪根骨进哪个通道由用户/资产决定**。
+上面那 7 通道只是 demo 的一个候选分组（具体待定）。
+
 - 上传形态：`uniform int uBoneChannel[N]` —— GLSL 330 的 uniform 数组支持**动态索引**，直接可用。
 - 另需每骨静态几何：`uniform vec3 uBindPos[N]`（`p_j`）+ `uniform vec4 uBindRotQ[N]`（`R_bind_j`
   = 已有 `bind_rotation`，**目前尚未上传到 VS**，需补）。

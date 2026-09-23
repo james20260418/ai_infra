@@ -88,6 +88,8 @@ instance[i] (很薄, select 共享区):
   transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)
   body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int）
   cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」
+                       注：上面两个数组 = 同一张「部位表」上的两个**层**（body / cloth），
+                       与 §4 的槽位表是同一件事；统一读法见 §4「slot / 层 / 批次」。
   cheap_body_scale   —— 高矮：per-instance 整体 scale（`InstanceTransform::scale`）
   shape_channels[8]  —— 胖瘦：per-instance 骨通道膨胀系数 μ（见 §6.1 与
                         `jpov_crowd_body_shape_face_design.md`）
@@ -167,6 +169,28 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 ```
 
 绘制时按 `Draw_SlotPart(part_idx)` 把选中的 rest-mesh 用**共享骨架矩阵**蒙皮，随 `transform` 摆放。
+
+**slot / 层 / 批次 —— 三条读法（把上面两种写法统一起来；2026-09-23 补）**
+
+1. **slot（部位）是一张骨架级的表**：`head / torso / upper_arm / lower_arm / hand …`。
+   「部位」= 一簇骨的**语义分组**，与 mesh 无关 ⇒ 一个骨架供 N 种 mesh 时，这套 slot 名不变。
+2. **肉体与衣物不是两套系统，只是同一张 slot 表上的两个「层」**：`body` 层与 `cloth` 层各自 select。
+   因此 §2 的 `body_part_idx[]` / `cloth_part_idx[]` 与本节这张槽位表**是同一件事的两种写法**；
+   最清楚的形式是**二维 selector**：`part_idx[层][部位]`（空 = 该层该部位不画 = 露肤）。
+   - `body` 层通常不留空（留空 = 该部位无几何 ⇒ 露洞）；`cloth` 层留空是常态。
+   - 将来做叠穿（`jpov_clothes_rig_design.md` §2.3 目前明确只做贴身单层）= 层数变多，结构不用改。
+3. **批次按 `(part, 动画)` 分组，不是按「人」分组**。因为一次 instanced draw 里几何必须相同，
+   **不能把同一个人的各个 part 混在一次 draw 里**。真实做法：对池子里每个「被用到的 part」，
+   把选了它的所有实例凑一批、一次 `glDrawElementsInstanced`。
+   ⇒ **draw 次数 ≈（被用到的 part 数 × 动画批次），与人数无关**（1000 人与 10000 人同量级）；
+   每个人 = 他选中的 5~8 个 part 各画一次叠加而成。
+   ⇒ **池子规模直接决定 draw 上限** —— 这正是「差异要廉价富足、别靠烘更多几何」的动机：
+   几何变体一膨胀，draw 次数立刻回升；差异应靠 tint / 材质变体 / `shape_channels` 补。
+
+**两条硬不变量**：
+- 所有 part 必须绑**同一骨架定义**，且顶点里的 `JOINTS_0` **必须用同一套骨 index 空间**
+  （否则 pose atlas 查表全错）——这是「共骨架」的硬约束。
+- part 存的是 **rest 姿态**几何，姿势一律由共享骨架的 pose atlas 驱动 ⇒ part 之间不能各自动画。
 
 ---
 
