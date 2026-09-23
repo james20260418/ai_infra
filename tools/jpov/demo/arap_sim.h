@@ -275,6 +275,9 @@ public:
     // 被短边过滤跳过的边数（见 .cc 里 min_edge_length_ 的说明）——数据卫生指标。
     size_t skipped_short_edge_count() const { return skipped_short_edges_; }
 
+    // 约束图规模（诊断/性能评估用）。
+    size_t edge_count() const { return edges_.size(); }
+
 private:
     // 建立焊接映射（位置 ε 内合并，跨全部输入网格）、边表、邻域、原始形状目标。
     void BuildTopology(const std::vector<jpov::MeshData>& meshes);
