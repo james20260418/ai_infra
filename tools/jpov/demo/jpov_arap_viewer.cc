@@ -49,12 +49,13 @@ struct CliParsed {
     int frames = 90;             // 仅 headless：推进的总帧数
     int every = 10;              // 仅 headless：每 N 帧落盘一张（第 0 帧恒落）
     int substeps = 0;            // 0 = 代码内默认；>0 则固定子步数
-    // 四个物理参数的覆盖值（< 0 = 不覆盖、用代码内默认）。
+    // 材质/物理量的覆盖值（< 0 = 不覆盖、用代码内默认）。
     // 用途：无界面地做「只改一个变量」的对照实验（headless 批量跑）。
-    float hooke = -1.0f;
-    float gravity = -1.0f;
-    float arap = -1.0f;
-    float damping = -1.0f;
+    float area_density = -1.0f;  // kg/m²
+    float hooke = -1.0f;         // N/m
+    float arap = -1.0f;          // N/m（0 = 按 T/7 自动换算）
+    float damping = -1.0f;       // 1/s
+    float gravity = -1.0f;       // m/s²
 };
 
 // 内置方块模式的产物文件名前缀（无资产文件时用于命名输出）。
@@ -95,6 +96,12 @@ CliParsed ParseCli(int argc, char** argv) {
                 p.substeps = std::atoi(argv[++i]);
             } else {
                 LOG(WARNING) << "--substeps 缺少数值，忽略";
+            }
+        } else if (arg == "--area_density") {
+            if (i + 1 < argc) {
+                p.area_density = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--area_density 缺少数值，忽略";
             }
         } else if (arg == "--hooke") {
             if (i + 1 < argc) {
@@ -251,22 +258,27 @@ int main(int argc, char** argv) {
         app.SetFixedSubsteps(cli.substeps);
         LOG(INFO) << "物理子步数（命令行固定）= " << cli.substeps;
     }
-    // 四个物理参数的单变量覆盖（headless 对照实验用）。
+    // 材质与物理量的单变量覆盖（headless 对照实验用）。
+    // 注意：这些都是**代码内常量**，命令行只用于批量跑对照实验，交互界面不暴露。
+    if (cli.area_density >= 0.0f) {
+        app.sim_config_.area_density_kg_per_m2 = cli.area_density;
+        LOG(INFO) << "覆盖 面密度 = " << cli.area_density << " kg/m²";
+    }
     if (cli.hooke >= 0.0f) {
-        app.hooke_ = cli.hooke;
-        LOG(INFO) << "覆盖 胡克 h = " << cli.hooke;
+        app.sim_config_.hooke_n_per_m = cli.hooke;
+        LOG(INFO) << "覆盖 胡克 T = " << cli.hooke << " N/m";
+    }
+    if (cli.arap >= 0.0f) {
+        app.sim_config_.arap_stiffness_n_per_m = cli.arap;
+        LOG(INFO) << "覆盖 ARAP β = " << cli.arap << " N/m（0 = 按 T/7 自动换算）";
+    }
+    if (cli.damping >= 0.0f) {
+        app.sim_config_.damping_per_second = cli.damping;
+        LOG(INFO) << "覆盖 阻尼 = " << cli.damping << "/s";
     }
     if (cli.gravity >= 0.0f) {
         app.gravity_ = cli.gravity;
-        LOG(INFO) << "覆盖 重力 g = " << cli.gravity;
-    }
-    if (cli.arap >= 0.0f) {
-        app.arap_ = cli.arap;
-        LOG(INFO) << "覆盖 ARAP b = " << cli.arap;
-    }
-    if (cli.damping >= 0.0f) {
-        app.damping_ = cli.damping;
-        LOG(INFO) << "覆盖 阻尼 u = " << cli.damping;
+        LOG(INFO) << "覆盖 重力 g = " << cli.gravity << " m/s²";
     }
 
     if (use_box) {

@@ -182,6 +182,170 @@ private:
 
 }  // namespace
 
+// AnalyzeMasses 的实现：与 BuildTopology 同一套规则（位置焊接 ε=1e-6、
+// 顶点面积 = Σ 关联三角形面积/3、退化边/三角形跳过），但**不建任何状态**，
+// 便于在 Build 之前就把「多重 / 稳不稳」说清楚。
+MassDiagnostics AnalyzeMasses(const std::vector<jpov::MeshData>& meshes,
+                              const ArapSimConfig& config) {
+    return AnalyzeMasses(meshes, config.area_density_kg_per_m2);
+}
+
+MassDiagnostics AnalyzeMasses(const std::vector<jpov::MeshData>& meshes,
+                              float area_density_kg_per_m2) {
+    MassDiagnostics out;
+    CHECK(!meshes.empty());
+    CHECK_GT(area_density_kg_per_m2, 0.0f);
+
+    // ── 与 BuildTopology 一致的全局顶点空间 + 焊接 ──
+    size_t vcount = 0;
+    for (const jpov::MeshData& m : meshes) {
+        vcount += m.positions.size();
+    }
+    std::vector<jpov::Vec3f> gpos;
+    gpos.reserve(vcount);
+    for (const jpov::MeshData& m : meshes) {
+        for (const jpov::Vec3f& p : m.positions) {
+            gpos.push_back(p);
+        }
+    }
+    UnionFind uf(vcount);
+    {
+        const float cell = kWeldEpsilon;
+        std::unordered_map<CellKey, std::vector<uint32_t>, CellKeyHash> grid;
+        grid.reserve(vcount);
+        for (size_t i = 0; i < vcount; ++i) {
+            const CellKey key = MakeCellKey(gpos[i], cell);
+            for (int64_t dx = -1; dx <= 1; ++dx) {
+                for (int64_t dy = -1; dy <= 1; ++dy) {
+                    for (int64_t dz = -1; dz <= 1; ++dz) {
+                        const CellKey nk{key.x + dx, key.y + dy, key.z + dz};
+                        std::unordered_map<CellKey, std::vector<uint32_t>,
+                                           CellKeyHash>::iterator it =
+                            grid.find(nk);
+                        if (it == grid.end()) {
+                            continue;
+                        }
+                        for (uint32_t j : it->second) {
+                            if ((gpos[j] - gpos[i]).Norm() < kWeldEpsilon) {
+                                uf.Union(static_cast<uint32_t>(i), j);
+                            }
+                        }
+                    }
+                }
+            }
+            grid[key].push_back(static_cast<uint32_t>(i));
+        }
+    }
+    std::unordered_map<uint32_t, uint32_t> root_to_pid;
+    std::vector<uint32_t> pid_of_vertex(vcount, 0);
+    for (size_t i = 0; i < vcount; ++i) {
+        const uint32_t root = uf.Find(static_cast<uint32_t>(i));
+        std::unordered_map<uint32_t, uint32_t>::iterator it =
+            root_to_pid.find(root);
+        if (it == root_to_pid.end()) {
+            const uint32_t pid = static_cast<uint32_t>(root_to_pid.size());
+            root_to_pid.emplace(root, pid);
+            pid_of_vertex[i] = pid;
+        } else {
+            pid_of_vertex[i] = it->second;
+        }
+    }
+    const size_t pcount = root_to_pid.size();
+    if (pcount == 0) {
+        return out;
+    }
+
+    // 质点级 rest（首见即取） + 顶点面积累加 + 边表（去重，记 rest 长度）
+    std::vector<jpov::Vec3f> rest(pcount, jpov::Vec3f(0.0f, 0.0f, 0.0f));
+    std::vector<bool> filled(pcount, false);
+    for (size_t i = 0; i < vcount; ++i) {
+        if (!filled[pid_of_vertex[i]]) {
+            rest[pid_of_vertex[i]] = gpos[i];
+            filled[pid_of_vertex[i]] = true;
+        }
+    }
+    std::vector<float> area(pcount, 0.0f);
+    std::unordered_set<uint64_t> tri_keys;
+    std::unordered_map<uint64_t, float> edge_len;   // key → rest 长度
+    for (const jpov::MeshData& m : meshes) {
+        const size_t nt = m.indices.size() / 3;
+        for (size_t t = 0; t < nt; ++t) {
+            const uint32_t p[3] = {pid_of_vertex[m.indices[t * 3 + 0]],
+                                   pid_of_vertex[m.indices[t * 3 + 1]],
+                                   pid_of_vertex[m.indices[t * 3 + 2]]};
+            uint32_t s3[3] = {p[0], p[1], p[2]};
+            if (s3[0] == s3[1] || s3[1] == s3[2] || s3[0] == s3[2]) {
+                continue;
+            }
+            std::sort(s3, s3 + 3);
+            const uint64_t tkey = (static_cast<uint64_t>(s3[0]) * pcount + s3[1]) *
+                                      pcount + s3[2];
+            if (tri_keys.insert(tkey).second) {
+                const float ta = 0.5f * ((rest[p[1]] - rest[p[0]])
+                                             .Cross(rest[p[2]] - rest[p[0]]))
+                                            .Norm();
+                if (ta > 0.0f) {
+                    for (int k = 0; k < 3; ++k) {
+                        area[p[k]] += ta / 3.0f;
+                    }
+                }
+            }
+            for (int k = 0; k < 3; ++k) {
+                const uint32_t a = p[k];
+                const uint32_t b = p[(k + 1) % 3];
+                if (a == b) {
+                    continue;
+                }
+                const uint32_t lo = std::min(a, b);
+                const uint32_t hi = std::max(a, b);
+                const uint64_t key = static_cast<uint64_t>(lo) * pcount + hi;
+                if (edge_len.find(key) == edge_len.end()) {
+                    edge_len.emplace(key, (rest[hi] - rest[lo]).Norm());
+                }
+            }
+        }
+    }
+
+    // 短边阈值（与 BuildTopology 同规则：rest 包围盒对角线的 1e-4）
+    jpov::Vec3f lo = rest[0];
+    jpov::Vec3f hi = rest[0];
+    for (const jpov::Vec3f& p : rest) {
+        lo = jpov::Vec3f(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()),
+                         std::min(lo.z(), p.z()));
+        hi = jpov::Vec3f(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()),
+                         std::max(hi.z(), p.z()));
+    }
+    const float min_edge_length = 1e-4f * (hi - lo).Norm();
+
+    float total_area = 0.0f;
+    float total_mass = 0.0f;
+    float max_k_over_m = 0.0f;
+    for (size_t i = 0; i < pcount; ++i) {
+        total_area += area[i];
+        total_mass += area[i] * area_density_kg_per_m2;
+    }
+    for (const auto& kv : edge_len) {
+        const float L0 = kv.second;
+        if (!(L0 > min_edge_length) || !(L0 > 1e-12f)) {
+            continue;   // 与仿真一致：退化短边不参与
+        }
+        const uint32_t a = static_cast<uint32_t>(kv.first / pcount);
+        const uint32_t b = static_cast<uint32_t>(kv.first % pcount);
+        const float m_a = area[a] * area_density_kg_per_m2;
+        const float m_b = area[b] * area_density_kg_per_m2;
+        if (!(m_a > 0.0f) || !(m_b > 0.0f)) {
+            continue;
+        }
+        const float inv_l = 1.0f / L0;
+        max_k_over_m = std::max(max_k_over_m,
+                                std::max(inv_l / m_a, inv_l / m_b));
+    }
+    out.total_area_m2 = total_area;
+    out.total_mass_kg = total_mass;
+    out.max_edge_k_over_m = max_k_over_m;
+    return out;
+}
+
 void ArapSim::Build(const jpov::MeshData& mesh, const ArapSimConfig& config) {
     std::vector<jpov::MeshData> one;
     one.push_back(mesh);
@@ -200,10 +364,16 @@ void ArapSim::Build(const std::vector<jpov::MeshData>& meshes,
             << "ArapSim::Build: mesh " << i << " indices 必须是 3 的倍数";
     }
     CHECK_GE(config.substeps, 1) << "ArapSim::Build: substeps 必须 ≥ 1";
-    CHECK_GE(config.hooke, 0.0f) << "ArapSim::Build: hooke 必须 ≥ 0";
-    CHECK_GE(config.arap_stiffness, 0.0f)
-        << "ArapSim::Build: arap_stiffness 必须 ≥ 0";
-    CHECK_GE(config.damping, 0.0f) << "ArapSim::Build: damping 必须 ≥ 0";
+    CHECK_GT(config.area_density_kg_per_m2, 0.0f)
+        << "ArapSim::Build: area_density_kg_per_m2 必须 > 0";
+    CHECK_GE(config.hooke_n_per_m, 0.0f)
+        << "ArapSim::Build: hooke_n_per_m 必须 ≥ 0";
+    CHECK_GE(config.arap_stiffness_n_per_m, 0.0f)
+        << "ArapSim::Build: arap_stiffness_n_per_m 必须 ≥ 0";
+    CHECK_GE(config.damping_per_second, 0.0f)
+        << "ArapSim::Build: damping_per_second 必须 ≥ 0";
+    CHECK_GE(config.gravity_magnitude, 0.0f)
+        << "ArapSim::Build: gravity_magnitude 必须 ≥ 0";
     config_ = config;
     BuildTopology(meshes);
     Reset();
@@ -420,6 +590,50 @@ void ArapSim::BuildTopology(const std::vector<jpov::MeshData>& meshes) {
                   << skipped_short_edges_ << "/" << edges_.size();
     }
 
+    // ── 8. 质量分配（面密度 × 顶点面积）与两类刚度（见文件头的物理约定）。──
+    //   顶点面积 = 其周围三角形面积之和 / 3（三角形三个顶点各占 1/3）。
+    //   退化（零面积）三角形不贡献面积，不影响质量守恒。
+    particle_area_m2_.assign(particle_count_, 0.0f);
+    mass_.assign(particle_count_, 0.0f);
+    float total_area = 0.0f;
+    for (const std::array<uint32_t, 3>& tri : tris_) {
+        const jpov::Vec3f& pa = rest_pos_[tri[0]];
+        const jpov::Vec3f& pb = rest_pos_[tri[1]];
+        const jpov::Vec3f& pc = rest_pos_[tri[2]];
+        const float area = 0.5f * ((pb - pa).Cross(pc - pa)).Norm();
+        if (!(area > 0.0f)) {
+            continue;   // 退化三角形：零面积，不贡献质量
+        }
+        total_area += area;
+        for (int k = 0; k < 3; ++k) {
+            particle_area_m2_[tri[k]] += area / 3.0f;
+        }
+    }
+    float total_mass = 0.0f;
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        mass_[i] = particle_area_m2_[i] * config_.area_density_kg_per_m2;
+        CHECK_GT(mass_[i], 0.0f)
+            << "ArapSim::BuildTopology: 质点 " << i
+            << " 的面积为 0（无有效关联三角形）⇒ 质量为 0，无法仿真";
+        total_mass += mass_[i];
+    }
+    total_mass_ = total_mass;
+    surface_area_ = total_area;
+
+    // 两类刚度：边弹簧刚度系数 T，ARAP 刚度 β（默认按 T 换算，见 config 注释）。
+    edge_hooke_n_per_m_ = config_.hooke_n_per_m;
+    arap_beta_ = config_.arap_stiffness_n_per_m > 0.0f
+                     ? config_.arap_stiffness_n_per_m
+                     : config_.hooke_n_per_m * ArapSimConfig::kArapPerHooke;
+
+    LOG(INFO) << "ArapSim 物理量: 面密度 " << config_.area_density_kg_per_m2
+              << " kg/m² ⇒ 总面积 " << total_area << " m²，总质量 "
+              << total_mass << " kg（实测密度 " << (total_area > 0.0f ? total_mass / total_area : 0.0f)
+              << " kg/m²）; 胡克 T=" << edge_hooke_n_per_m_ << " N/m（0.1 m 产生 "
+              << 0.1f * edge_hooke_n_per_m_ << " N）; ARAP β=" << arap_beta_
+              << " N/m; 阻尼 u=" << config_.damping_per_second
+              << "/s（每 kg）; 子步=" << config_.substeps;
+
     pos_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
     vel_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
     force_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
@@ -498,6 +712,22 @@ void ArapSim::RotateCurrentState(const jpov::Vec3f& axis, float angle_rad,
 
 void ArapSim::SetConfig(const ArapSimConfig& config) {
     config_ = config;
+    // 材质刚度是「构建期派生量」（β 默认由 T 换算、质量由面密度×面积得到），
+    // 故改配置时必须同步刷新它们——否则"关掉刚度"（置 0）不会生效，
+    // 且把 β 从 0 改成非 0 时会静默沿用旧的自动值。质量只随面密度变。
+    edge_hooke_n_per_m_ = config_.hooke_n_per_m;
+    arap_beta_ = config_.arap_stiffness_n_per_m > 0.0f
+                     ? config_.arap_stiffness_n_per_m
+                     : config_.hooke_n_per_m * ArapSimConfig::kArapPerHooke;
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        mass_[i] = particle_area_m2_[i] * config_.area_density_kg_per_m2;
+        CHECK_GT(mass_[i], 0.0f) << "ArapSim::SetConfig: 质点 " << i
+                                 << " 质量变为 0（面密度必须 > 0）";
+    }
+    total_mass_ = 0.0f;
+    for (float m : mass_) {
+        total_mass_ += m;
+    }
 }
 
 void ArapSim::Step(float dt_seconds) {
@@ -531,11 +761,16 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
     CHECK_EQ(velocities.size(), particle_count_)
         << "ArapSim::ComputeForcesAt: velocities 长度必须是 particle_count()";
 
-    // ② 重力（m = 1 ⇒ 加速度就是 g）
-    out->assign(particle_count_, config_.gravity);
+    const jpov::Vec3f gravity_vector(0.0f, -config_.gravity_magnitude, 0.0f);
 
-    // ① 胡克弹簧：每条边一根，k_e = hooke/L0；拉伸时两端互相拉近。
-    if (config_.hooke > 0.0f) {
+    // 输出是【加速度】F/m：逐力累加时先除以该质点质量。
+    //   重力：mg/m = g（与质量无关 —— 质量不改变自由落体）。
+    out->assign(particle_count_, gravity_vector);
+
+    // ① 胡克弹簧：每条边一根，k_e = T/L0，单测可验证「0.1 m 产生 10 N」。
+    //   注意返回的是 F/m ⇒ 除以两端质量时要把"力"和"加速度"分清：
+    //   这里直接在加速度域累加：a += ±F_e/m_i，m_i 是加速度侧的质量。
+    if (edge_hooke_n_per_m_ > 0.0f) {
         for (const Edge& e : edges_) {
             if (e.rest_length < min_edge_length_) {
                 continue;   // 退化短边（数据卫生，见 arap_sim.h）
@@ -545,29 +780,31 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
             if (len < 1e-12f) {
                 continue;   // 两端完全重合：方向未定义（下一个子步/别的力会拉开）
             }
-            const float k_e = config_.hooke / e.rest_length;
-            const float pull = k_e * (len - e.rest_length);   // >0 = 被拉长
+            // k_e [N/m] × 伸长量 [m] = 力 [N]
+            const float k_e = edge_hooke_n_per_m_ / e.rest_length;
+            const float tension_n = k_e * (len - e.rest_length);   // >0 = 被拉长
             const jpov::Vec3f unit = d * (1.0f / len);
-            (*out)[e.a] += unit * pull;
-            (*out)[e.b] -= unit * pull;
+            const jpov::Vec3f f_n = unit * tension_n;              // 作用在 b 上的力（拉向 a）
+            (*out)[e.a] += f_n * (1.0f / mass_[e.a]);
+            (*out)[e.b] -= f_n * (1.0f / mass_[e.b]);
         }
     }
 
-    // ③ ARAP 局部形状力：goal_i = c_i + R_i·(rest_i − rest_c_i)
-    if (config_.arap_stiffness > 0.0f) {
+    // ② ARAP 局部形状力：F_i = β·(goal_i − x_i)，每质点除以自身质量。
+    if (arap_beta_ > 0.0f) {
         std::vector<jpov::Vec3f> shape_offset;
         ComputeLocalRotationsInto(positions, &shape_offset);
         for (uint32_t i = 0; i < particle_count_; ++i) {
             const jpov::Vec3f goal =
                 NeighborhoodCentroid(positions, i) + shape_offset[i];
-            (*out)[i] += (goal - positions[i]) * config_.arap_stiffness;
+            (*out)[i] += (goal - positions[i]) * (arap_beta_ / mass_[i]);
         }
     }
 
-    // ④ 线性阻尼：F = −u·v
-    if (config_.damping > 0.0f) {
+    // ③ 线性阻尼：F = −u·m·v ⇒ 加速度 −u·v（与质量无关），即"速度衰减时间常数 1/u"。
+    if (config_.damping_per_second > 0.0f) {
         for (uint32_t i = 0; i < particle_count_; ++i) {
-            (*out)[i] -= velocities[i] * config_.damping;
+            (*out)[i] -= velocities[i] * config_.damping_per_second;
         }
     }
 }
@@ -653,20 +890,20 @@ float ArapSim::max_stable_dt() const {
         return 0.0f;
     }
     std::vector<float> row_sum(particle_count_, 0.0f);
-    if (config_.hooke > 0.0f) {
+    if (edge_hooke_n_per_m_ > 0.0f) {
         for (const Edge& e : edges_) {
             if (e.rest_length < min_edge_length_) {
                 continue;
             }
-            const float k_e = config_.hooke / e.rest_length;
-            row_sum[e.a] += k_e;
-            row_sum[e.b] += k_e;
+            const float k_e = edge_hooke_n_per_m_ / e.rest_length;
+            row_sum[e.a] += k_e / mass_[e.a];
+            row_sum[e.b] += k_e / mass_[e.b];
         }
     }
-    if (config_.arap_stiffness > 0.0f) {
+    if (arap_beta_ > 0.0f) {
         for (uint32_t i = 0; i < particle_count_; ++i) {
             const float n = static_cast<float>(ring_[i].size());
-            row_sum[i] += config_.arap_stiffness * n / (n + 1.0f);
+            row_sum[i] += arap_beta_ * n / ((n + 1.0f) * mass_[i]);
         }
     }
     float max_row = 0.0f;

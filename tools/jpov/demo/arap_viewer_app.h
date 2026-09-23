@@ -4,12 +4,24 @@
 // 额外多出一套**动力学仿真**能力——把被加载的网格当作可变形软体（胡克弹簧 + ARAP
 // 形状力 + 重力 + 阻尼），在重力场里从高处摔到地面上，肉眼观察它的形变。
 //
-// 交互面板（左列 4 个光照/标高滑条 + 右列 4 个物理滑条 + 顶部 2 按钮）：
-//   左列：太阳仰角 ° [0,90] / 浊度 turb [2,8] / 季节 R [0.5,2.0] / 地面高度 y（自适应范围）
-//   右列：胡克 h / 重力 g / ARAP b / 阻尼 u —— **需求方指定的四个物理参数**，
-//         实时可调，便于做「只改一个变量」的对照实验（力模型见 arap_sim.h 文件头）。
+// 交互面板（底部 5 滑条 + 顶部 2 按钮）：
+//   ① 太阳仰角 °  [0,90]  ② 浊度 turb [2,8]  ③ 季节 R [0.5,2.0]
+//   ④ 地面高度 y  [自适应]  ⑤ **重力 g [0,30]（默认 1.0）** —— 唯一暴露的物理量
 //   [动力学：运行/暂停] —— 仿真启停（暂停时不推进物理，仅保持当前形变）
 //   [重置 mesh]         —— 把网格恢复到 bind pose（清空速度与形变）
+//
+// ═══ 物理与单位（需求方 Danis 2026-09-23 定稿）═══
+//   长度单位 = **米**（单位铁律 MKS；glb 的 cm 资产在加载边界已换算，见 gltf_loader）。
+//   **材质 = 面密度 + 胡克系数**（固定常量，面板不可改）：
+//     · 面密度 ρ = 1 kg/m²（"一平米一 kg"）⇒ 顶点质量 m_i = ρ · 该顶点周围三角形面积
+//       （每个三角形给三个顶点各 1/3 面积）⇒ **质量与网格密度无关**，细分不会变重。
+//     · 胡克 T = 100 N/m：边的弹簧刚度 k_e = T/L0，即**在 0.1 m 的边上产生 10 N 的力**；
+//       按初始边长归一化（除以 L0）⇒ 与"边被分了几段"无关（分辨率无关）。
+//     · ARAP β 由 T 按固定比例换算（β = T/7，见 arap_sim.h kArapPerHooke），
+//       于是"胡克变了 ARAP 跟着变"，两者相对硬度不漂。
+//   **面板可调**：只有重力 g（滑条，默认 1.0）。理由：g 与 h 之比即线密度，
+//   稳态立不立得住只看这个无量纲比、与阻尼无关；而质量/阻尼会牵动整个运动过程，
+//   先固定住免得引入不确定因子。
 //
 // 物理步长：**固定 0.05 s**（需求方指定）。渲染帧（1/60 s）用累加器凑够 0.05 s
 // 才推进一步 ⇒ 物理按真实时间演化，且结果与帧率抖动无关（确定性，便于出 gold）。
@@ -123,13 +135,11 @@ public:
     float ground_y_min_ = -3.0f;
     float ground_y_max_ = 3.0f;
 
-    // 物理参数（四参数模型，见 arap_sim.h；面板右列可实时调）。
+    // 物理参数（材质固定 + 重力可调，见文件头）。
+    //   **代码常量**：面密度 1 kg/m²、胡克 100 N/m、ARAP 按 T/7 换算、阻尼 0.6/s。
+    //   **面板可调**：只有重力 g（默认 1.0）。
     jpov_arap::ArapSimConfig sim_config_;
-    // 面板右列四个物理参数的当前值（每帧同步进 sim_config_）。
-    float hooke_ = 300.0f;      // 胡克系数 h
-    float gravity_ = 9.8f;      // 重力大小（方向恒为 −y）
-    float arap_ = 300.0f;       // ARAP 局部刚度 b
-    float damping_ = 1.0f;      // 线性阻尼 u
+    float gravity_ = 1.0f;      // 面板滑条：重力大小（方向恒为 −y）
 
     // 已加载的 primitive 列表（main 用来算包围盒做相机自适应）。
     const std::vector<SimPrimitive>& primitives() const { return prims_; }
@@ -308,30 +318,63 @@ inline void ArapViewerApp::BuildSim() {
     //   Build → Reset 会做一次「初始地面投射」。若此刻 ground_y 还是默认值、而模型
     //   底部低于它，模型会被硬压扁 ⇒ 纯人为的初始条件错误（实测：灯罩最低点
     //   y ≈ −3.0 而默认 ground_y = −3.0，t=0 就被压出 5% 边长畸变 + 7% 退化旋转）。
-    //   故先把地面放到「模型底部下方 0.5 个模型高度」（⇒ 摔落高度 = 0.5 个模型高），
-    //   滑条范围也按模型尺度自适应（固定 [-3,3] 装不下 22 单位高的路灯）。
+    //   故先把地面放到「模型底部下方 0.5 个模型高度」（⇒ 摔落高度 = 0.5 个模型高）。
     ComputeModelBounds();
     const float model_h = std::max(1e-4f, model_max_.y() - model_min_.y());
     ground_y_ = model_min_.y() - 0.5f * model_h;
+    // 滑条范围与模型尺度挂钩（固定 [-3,3] 装不下 25 m 高的路灯）。
     ground_y_min_ = model_min_.y() - 3.0f * model_h;
     ground_y_max_ = model_min_.y() + 0.5f * model_h;
     ground_y_prev_ = ground_y_;
     sim_config_.ground_y = ground_y_;
 
+    // ── 质量诊断 + 稳定步长的**先验**提示（都在 Build 前完成）──
+    LOG(INFO) << "模型包围盒（米）：[" << model_min_.x() << "," << model_min_.y()
+              << "," << model_min_.z() << "] ~ [" << model_max_.x() << ","
+              << model_max_.y() << "," << model_max_.z() << "]";
+    const jpov_arap::MassDiagnostics mass = jpov_arap::AnalyzeMasses(meshes, sim_config_);
+    LOG(INFO) << "面密度诊断（构建前）：总面积 " << mass.total_area_m2
+              << " m² ⇒ 总质量 " << mass.total_mass_kg << " kg（"
+              << sim_config_.area_density_kg_per_m2 << " kg/m²）";
+    if (mass.max_edge_k_over_m > 0.0f) {
+        // 稳定上限的大头是 k_e/m = (T/L0)/m ⇒ 用全局最大 (1/L0)/m 先验一下。
+        const float k_e_over_m = sim_config_.hooke_n_per_m * mass.max_edge_k_over_m;
+        const float approx_bound =
+            k_e_over_m > 0.0f ? 2.0f / std::sqrt(k_e_over_m) : 1e9f;
+        if (approx_bound < kPhysicsDt) {
+            LOG(WARNING)
+                << "稳定步长先验：k_e/m 最大 " << k_e_over_m << " ⇒ 上限 ≈ "
+                << approx_bound << " s < 步长 " << kPhysicsDt
+                << " s ⇒ 会发散。办法（都不改变力模型）：① 把网格减面/放宽到 "
+                   "k_e/m 小一些；② 加 --substeps N 固定更多子步；"
+                   "③ 调小 T；④ 调大面密度（质量越大越稳）";
+        }
+    }
+
     sim_.Build(meshes, sim_config_);
+    // 注意：ARAP β 在 Build 里按"β = T/7"换算好，回写到 sim_config_ 便于面板/日志显示。
+    sim_config_.arap_stiffness_n_per_m = sim_.config().arap_stiffness_n_per_m;
     LOG(INFO) << "物理物体：网格 " << sim_.mesh_count() << " 个，顶点 "
               << sim_.vertex_count() << "，焊接质点 " << sim_.particle_count()
               << "（跨 primitive 焊接 ⇒ 各部件互相支撑）";
-    LOG(INFO) << "四个物理参数: 胡克 h=" << sim_config_.hooke
-              << " 重力 g=(" << sim_config_.gravity.x() << ","
-              << sim_config_.gravity.y() << "," << sim_config_.gravity.z()
-              << ") ARAP b=" << sim_config_.arap_stiffness
-              << " 阻尼 u=" << sim_config_.damping
-              << " 子步=" << sim_config_.substeps;
+    LOG(INFO) << "材质: 面密度 " << sim_config_.area_density_kg_per_m2
+              << " kg/m² ⇒ 总质量 " << sim_.total_mass() << " kg / 总面积 "
+              << sim_.surface_area() << " m²; 胡克 T="
+              << sim_config_.hooke_n_per_m << " N/m（0.1 m ⇒ "
+              << 0.1f * sim_config_.hooke_n_per_m << " N）; ARAP β="
+              << sim_config_.arap_stiffness_n_per_m << " N/m; 阻尼 "
+              << sim_config_.damping_per_second << "/s; 重力 g="
+              << gravity_ << " m/s²; 子步=" << sim_config_.substeps;
     const float bound = sim_.max_stable_dt();
     LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
               << " s；物理步长 " << kPhysicsDt << " s ⇒ 子步 "
               << SimSubstepsFor(/*bound_s=*/bound, /*fixed=*/fixed_substeps_);
+    if (bound < kPhysicsDt) {
+        LOG(WARNING) << "当前步长 " << kPhysicsDt << " s 超过稳定上限 " << bound
+                     << " s；子步已封顶到 " << kMaxAutoSubsteps
+                     << " ⇒ 仍会发散。根治办法：减面/放宽网格、调小胡克 T、"
+                        "或调大面密度（都要动材质或资产，不是加力）";
+    }
 }
 
 inline bool ArapViewerApp::AddPrimitive(jpov::MeshData mesh,
@@ -478,14 +521,12 @@ inline void ArapViewerApp::ReleaseModel() {
 }
 
 inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
-    // 面板上的四个物理参数 + 地面高度每帧同步进物理（改动即立刻生效）。
-    sim_config_.hooke = hooke_;
-    sim_config_.gravity = jpov::Vec3f(0.0f, -gravity_, 0.0f);
-    sim_config_.arap_stiffness = arap_;
-    sim_config_.damping = damping_;
+    // 面板上的重力 + 地面高度每帧同步进物理（改动即立刻生效）；
+    // 其余物理量（面密度 / 胡克 / ARAP / 阻尼）是固定常量，只在 sim_config_ 初值处配置。
+    sim_config_.gravity_magnitude = gravity_;
     sim_config_.ground_y = ground_y_;
 
-    // 子步数：h/b 一变稳定上限就变 ⇒ 每帧按当前参数重算（同一格式，只改分辨率）。
+    // 子步数：当前参数下的稳定上限可能小于 0.05 s ⇒ 每帧重算（同一格式，只改分辨率）。
     sim_.SetConfig(sim_config_);
     substeps_in_use_ = SimSubstepsFor(/*bound_s=*/sim_.max_stable_dt(),
                                       /*fixed=*/fixed_substeps_);
@@ -645,60 +686,54 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
         dynamics_running_ = false;
     }
 
-    // ── 底部两列滑条 ──
-    //   左列：光照/标高（与 model viewer 同款）；右列：需求方指定的四个物理参数。
-    const float kSliderWidth = 0.42f * w;
+    // ── 底部 5 个半屏宽滑条 ──
+    //   前 4 个是光照/标高（与 model viewer 同款）；最后一个 **重力 g** 是本查看器
+    //   唯一暴露的物理量（其余物理参数固定在代码里，见 arap_viewer_app.h 文件头）。
+    const float kSliderWidth = 0.5f * w;
     const float kBottom = 20.0f;
-    const float left_col = 0.04f * w;
-    const float right_col = 0.54f * w;
-    const float top = h - kBottom - (4.0f * kPanelRowH + 3.0f * kPanelSpacing);
+    const float left = (w - kSliderWidth) * 0.5f;
+    const float top = h - kBottom - (5.0f * kPanelRowH + 4.0f * kPanelSpacing);
 
     ui_.SliderFloat("太阳仰角 °", &elev_deg_,
-                    jpov::UiRect{{left_col, top}, {kSliderWidth, kPanelRowH}},
+                    jpov::UiRect{{left, top}, {kSliderWidth, kPanelRowH}},
                     0.0f, 90.0f, /*decimal_places*/ 0);
     ui_.SliderFloat("浊度 turb", &turbidity_,
-                    jpov::UiRect{{left_col, top + (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left, top + (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     2.0f, 8.0f, /*decimal_places*/ 1);
     ui_.SliderFloat("季节 R", &season_r_,
-                    jpov::UiRect{{left_col, top + 2.0f * (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left, top + 2.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     0.5f, 2.0f, /*decimal_places*/ 2);
     ui_.SliderFloat("地面高度 y", &ground_y_,
-                    jpov::UiRect{{left_col, top + 3.0f * (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left, top + 3.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     ground_y_min_, ground_y_max_, /*decimal_places*/ 2);
-
-    // 右列：四参数模型（越靠上越“硬”；h/b 太大会超过稳定上限 ⇒ 面板会显示）
-    ui_.SliderFloat("胡克 h", &hooke_,
-                    jpov::UiRect{{right_col, top}, {kSliderWidth, kPanelRowH}},
-                    0.0f, 2000.0f, /*decimal_places*/ 0);
     ui_.SliderFloat("重力 g", &gravity_,
-                    jpov::UiRect{{right_col, top + (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left, top + 4.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
-                    0.0f, 30.0f, /*decimal_places*/ 1);
-    ui_.SliderFloat("ARAP b", &arap_,
-                    jpov::UiRect{{right_col, top + 2.0f * (kPanelRowH + kPanelSpacing)},
-                                 {kSliderWidth, kPanelRowH}},
-                    0.0f, 3000.0f, /*decimal_places*/ 0);
-    ui_.SliderFloat("阻尼 u", &damping_,
-                    jpov::UiRect{{right_col, top + 3.0f * (kPanelRowH + kPanelSpacing)},
-                                 {kSliderWidth, kPanelRowH}},
-                    0.0f, 20.0f, /*decimal_places*/ 1);
+                    0.0f, 30.0f, /*decimal_places*/ 2);
 
-    // ── 状态文本：质点数 + 边长畸变（“有多软”）+ 形状力 + 退化旋转 + 稳定上限 ──
+    // ── 状态文本：质点数 + 边长畸变（“有多软”）+ 形状力 + 退化旋转 + 子步数
+    //     + 固定住的物理参数（面板不可改，故列出来便于对照）──
     if (!prims_.empty()) {
-        char status[320];
+        char status[400];
         std::snprintf(status, sizeof(status),
                       "网格 %zu / 顶点 %zu / 质点 %zu   边长畸变 %.3f  形状力 %.4f  "
-                      "退化旋转 %zu   子步 %d（步长 0.05 s）",
+                      "退化旋转 %zu   子步 %d（步长 0.05 s）   材质: 面密度 %.2f / "
+                      "胡克 %.0f N/m / ARAP %.1f / 阻尼 %.2f　总质量 %.2f kg",
                       sim_.mesh_count(), sim_.vertex_count(),
                       sim_.particle_count(),
                       static_cast<double>(sim_.edge_distortion_rms()),
                       static_cast<double>(sim_.shape_residual_rms()),
-                      sim_.degenerate_rotation_count(), substeps_in_use_);
+                      sim_.degenerate_rotation_count(), substeps_in_use_,
+                      static_cast<double>(sim_config_.area_density_kg_per_m2),
+                      static_cast<double>(sim_config_.hooke_n_per_m),
+                      static_cast<double>(sim_config_.arap_stiffness_n_per_m),
+                      static_cast<double>(sim_config_.damping_per_second),
+                      static_cast<double>(sim_.total_mass()));
         ui_.Text(status, jpov::UiRect{{16.0f, btn_y + kBtnH + 8.0f},
-                                     {900.0f, 24.0f}},
+                                     {1200.0f, 24.0f}},
                  /*stretch_w*/ false, /*stretch_h*/ false);
     }
 }

@@ -50,6 +50,30 @@
 // 量纲：位置 = 模型局部坐标；时间 = 秒；重力 = 模型长度/秒²（默认 9.8）。
 // 确定性：不做任何随机采样，同样的输入 / dt 序列必然得到同样的输出（便于出 gold）。
 
+// ═══ 物理约定（需求方 Danis 2026-09-23 定稿；单位铁律 MKS）═══
+//   **长度单位 = 米**。glb 常常是 cm 等其它单位，故在**装载边界**统一换算一次
+//   （见 view_config.h 的 kMetersPerModelUnit），此后仿真内部一切量都是 MKS。
+//
+//   顶点质量由【面密度】决定：每个质点取「它周围三角形面积的三分之一」之和为面积，
+//   再乘面密度 ρ（kg/m²）：
+//         m_i = ρ · Σ_{t∈tris(i)} area(t)/3          （三角形三个顶点各占 1/3）
+//   于是"1 m² 面积 = 1 kg"这种材质描述可以直接写进去，且**与网格密度无关**：
+//   同一块布无论三角化多细，总质量都一样（细网格只是把同样的质量分给更多质点）。
+//
+//   两类力的参数都用「物理量」直接给（都是牛顿）：
+//     ① 胡克弹簧（每条边一根）：k_e = T / L0          [N/m] = [kg/s²]
+//        T = "多长产生多大力"。默认 T = 100 N/m ⇔ 伸长 0.1 m 产生 10 N 的力。
+//        **按初始边长归一化**（除以 L0）：一条长边 L0 细分成 n 段后每段 k = nT/L0，
+//        串联等效刚度 k_串 = k/n = T/L0 —— 与"分了几段"无关（分辨率无关）。
+//     ② ARAP 局部形状力：F_i = β·(goal_i − x_i)，β [N/m] 与边弹簧同量纲。
+//        需求方要求"ARAP 跟着胡克系数换算"，故 β 由 T 按【每单位长度」的刚度等效换算，
+//        具体系数在下面的 kArapPerHooke 处说明。
+//     ③ 重力 g [m/s²]（面板滑条；默认 1.0）。
+//     ④ 线性阻尼 F = −u·v，u 的刚度形式是 [kg/s]；**以顶点质量为单位**：
+//        u_i = u_per_mass · m_i，这样阻尼表现为"每个质点的速度衰减时间常数 1/u_per_mass"，
+//        不随面密度/网格密度漂移（否则同一块布细分后阻尼会变味）。
+//        阻尼只影响运动过程不影响稳态（稳态由 ①/③ 的比值决定）。
+
 #ifndef JPOV_DEMO_ARAP_SIM_H_
 #define JPOV_DEMO_ARAP_SIM_H_
 
@@ -66,32 +90,76 @@ namespace jpov_arap {
 // 若每帧重新焊接会把「本已分开的两点」错焊。
 inline constexpr float kWeldEpsilon = 1e-6f;
 
-// 仿真参数：**只有四个物理参数**（需求方指定），外加地面与步长细分。
+// 仿真参数：材质与物理量（MKS；长度单位 = 米，见文件头）。
 struct ArapSimConfig {
-    // ① 胡克系数 h（量纲：长度²/秒² —— 它乘在"归一化应变"上得到加速度）。
-    //    每条边的弹簧刚度 k_e = hooke / L0（L0 = 该边初始长度）。
-    float hooke = 300.0f;
+    // ── 材质：面密度（kg/m²）──
+    //   顶点质量由它乘「该质点周围的三角形面积之和」得到，见文件头。
+    //   默认 1.0 kg/m²（需求方 2026-09-23 说的"一平米一 kg"）。
+    float area_density_kg_per_m2 = 1.0f;
 
-    // ② 重力加速度（模型长度/秒²）。默认 y-up 向下 9.8。
-    jpov::Vec3f gravity = {0.0f, -9.8f, 0.0f};
+    // ── 材质：胡克系数（N/m）──
+    //   每条边的弹簧刚度 k_e = hooke_n_per_m / L0，即「伸长一个单位长度需要多大的力」。
+    //   默认 100 N/m：**在 0.1 m 的边上产生 10 N 的力**。
+    float hooke_n_per_m = 100.0f;
 
-    // ③ ARAP 局部形状刚度 b（1/秒²）：F_i = b·(goal_i − x_i)。0 = 关闭。
-    float arap_stiffness = 300.0f;
+    // ── 材质：ARAP 局部形状刚度（N/m）──
+    //   由 hooke_n_per_m 按下面的比例自动换算（需求方要求"跟着胡克系数换算"），
+    //   也可直接覆写本字段做实验。语义：F_i = β·(goal_i − x_i)，量纲 [kg/s²]。
+    //   • 比例 kArapPerHooke 的由来：ARAP 局部形状力的位移增量是"整块邻域的形变"，
+    //     而不是某一根边的伸长。若邻域含 n 个邻居，则把"每个邻居贡献一根等效弹簧"
+    //     的刚度折起来，单位位移对应的恢复力约为 (n+1)·β；与边弹簧的"单位位移 → k_e"
+    //     对齐，取 β = T / (n̄+1)（n̄ = 全网格平均 1-ring 度，典型三角网格 n̄=6 ⇒ β=T/7）。
+    //   • 好处：ARAP 与胡克随同一个 T 同步缩放，调 T 不会改变两者的相对硬度。
+    float arap_stiffness_n_per_m = 0.0f;   // 0 = Build() 时按 hooke_n_per_m 换算
 
-    // ④ 线性阻尼系数 u（1/秒）：F_i = −u·v_i。0 = 无阻尼（会一直抖）。
-    float damping = 1.0f;
+    // ── 重力加速度（模型长度/秒²，长度单位 = 米）──
+    //   默认 1.0（需求方要求默认 1）。方向恒为 −y（世界 up 为 +y）。
+    float gravity_magnitude = 1.0f;
 
-    // 步长细分：Step(dt) 内部把 dt 均分为 substeps 个子步（每个子步 h = dt/substeps）。
-    // 默认 1 —— 需求方指定 0.05 s 一step。**仅当 dt > max_stable_dt() 时才需要加大**
-    // （显式积分的稳定上限，见文件头）。
+    // ── 线性阻尼（1/秒，"每单位质量"的阻尼系数）──
+    //   F_i = −u_per_mass · m_i · v_i。默认 0.6 —— 宽松阻尼，让惯性看得见。
+    //   0 = 无阻尼（会一直抖）。
+    float damping_per_second = 0.6f;
+
+    // 步长细分：Step(dt) 内部把 dt 均分为 substeps 个子步。默认 1；
+    // 若 dt 超过 max_stable_dt()（显式积分上限），应加大 substeps（同一格式、更小步长）。
     int substeps = 1;
 
-    // 地面平面 y（世界坐标）与其上方留出的间隙：碰撞后约束 y ≥ ground_y + ground_offset。
-    // ground_offset 给一点离地间隙，避免与地面几何恰好贴合时 z-fighting。
+    // 地面平面 y（世界坐标，米）与其上方留出的间隙。
+    // 碰撞 = 位置硬约束 + 法向速度归零（完全非弹性）。
+    // 注意：四力模型里**没有摩擦**——这是需求方的模型决定，不是遗漏。
     float ground_y = -3.0f;
     float ground_offset = 0.002f;
     bool enable_ground = true;
+
+    // ARAP 刚度相对胡克的比例基准（见 arap_stiffness_n_per_m 的说明）。
+    static constexpr float kArapPerHooke = 1.0f / 7.0f;
 };
+
+// 质量与稳定性的前置诊断（**不建仿真器**就能算）：用于在 Build 之前就告诉用户
+// 「这份资产按当前面密度会有多重、按当前胡克系数会不会超过稳定步长」。
+//
+// 为什么需要它：这份仿真是**显式积分**，而 k_e/m = (T/L0)/m 完全由资产决定
+// （L0 是网格边长、m 是顶点面积×面密度）。高模资产（4k+ 顶点、边长 0.02 m）在
+// T=100 N/m 下 k_e/m 可到 1e5 量级 ⇒ 稳定步长 ~1e-3 s，而需求方指定步长 0.05 s，
+// **必然发散**。这是资产/材质的物理事实，不是调参能绕的；早点说清楚比看模型飞走好。
+struct MassDiagnostics {
+    float total_area_m2 = 0.0f;
+    float total_mass_kg = 0.0f;
+    // 逐边收集 max( (1/L0)/m_i, (1/L0)/m_j )：它乘 T 就是 k_e/m 的保守上界。
+    float max_edge_k_over_m = 0.0f;
+};
+
+// 从一组 CPU 网格算 MassDiagnostics。
+//
+// Pre-condition:  meshes 非空；各网格 positions/indices 合法（同 ArapSim::Build）。
+// Post-condition: 返回面积/质量与 max_edge_k_over_m（无法计算时为 0）。
+MassDiagnostics AnalyzeMasses(const std::vector<jpov::MeshData>& meshes,
+                              float area_density_kg_per_m2);
+
+// 同上，但面密度取自 config。
+MassDiagnostics AnalyzeMasses(const std::vector<jpov::MeshData>& meshes,
+                              const ArapSimConfig& config);
 
 // 一个可仿真的软体：由若干 CPU 网格（glTF 的 primitive）构建，内部维护质点位置/速度。
 //
@@ -100,9 +168,10 @@ class ArapSim {
 public:
     ArapSim() = default;
 
-    // 从 CPU 网格构建仿真（建立焊接映射、边表、邻域、原始形状目标）。
+    // 从 CPU 网格构建仿真（建立焊接映射、边表、邻域、面密度质量、原始形状目标）。
     //
     // Pre-condition:  mesh.positions 非空；mesh.indices 非空且为 3 的倍数、索引在界内。
+    //                 config 的材质参数为 MKS（长度单位 = 米）。
     // Post-condition: 仿真就绪，当前状态 == bind pose（Reset() 的等价初始态）。
     void Build(const jpov::MeshData& mesh, const ArapSimConfig& config);
 
@@ -140,8 +209,10 @@ public:
     // 这是全部力律的唯一实现：Step 内部就是调用它。独立暴露是为了让力律**可直接
     // 单测**（在已知构型上比对解析力），而不是只能通过"跑一步看位移"间接观测。
     //
+    // 返回的是 F/m（即加速度），m 由面密度给出（见文件头）。
+    //
     // Pre-condition: 已 Build()；positions/velocities 长度 == particle_count()。
-    // Post-condition: *out 长度 == particle_count()，为 F/m（m = 1，故就是加速度）。
+    // Post-condition: *out 长度 == particle_count()。
     void ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
                          const std::vector<jpov::Vec3f>& velocities,
                          std::vector<jpov::Vec3f>* out /*output*/) const;
@@ -155,8 +226,13 @@ public:
     const std::vector<jpov::Vec3f>& vertex_positions() const {
         return vertex_positions_;
     }
-    // 当前逐质点速度（诊断/单测读速度用，阻尼律是 F = −u·v）。
+    // 当前逐质点速度（诊断/单测读速度用，阻尼律是 F = −u·m·v）。
     const std::vector<jpov::Vec3f>& velocities() const { return vel_; }
+
+    // 逐质点质量（kg）与"这个物体的总质量 / 总表面积"诊断量（供验证面密度生效）。
+    const std::vector<float>& masses() const { return mass_; }
+    float total_mass() const { return total_mass_; }
+    float surface_area() const { return surface_area_; }
 
     // 把当前逐顶点位置写回网格（不触碰 UV / flags）。
     //
@@ -189,10 +265,9 @@ public:
     // 显式积分的稳定步长上限估计（秒）：h < 2/ω_max。
     //
     // ω²_max 用 Gershgorin 行和上界估计：K 的对角/非对角绝对值行和
-    //   row_i = Σ_{边 (i,j)} k_e + b·n_i/(n_i+1)
-    // （边弹簧的 Hessian 每边贡献 ≤ k_e；ARAP 力对 x 的 Jacobian 行和 = b·n/(n+1)）。
-    // 返回 2/sqrt(max_i row_i)。**只是估计**（真实本征值 ≤ 该行和），用于提示步长；
-    // 无刚度（h=0,b=0）时返回 +∞ 语义的大数。
+    //   row_i = Σ_{边 (i,j)} k_e/m_i + β·n_i/((n_i+1)·m_i)
+    // （边弹簧每边贡献 ≤ k_e，除以该质点质量；ARAP 力对 x 的 Jacobian 行和 = β·n/(n+1)）。
+    // 返回 2/sqrt(max_i row_i)。**只是估计**（真实本征值 ≤ 该行和），用于提示步长。
     //
     // Pre-condition: 已 Build()。
     float max_stable_dt() const;
@@ -230,11 +305,17 @@ private:
     std::vector<uint32_t> particle_of_vertex_;   // 全局顶点 → 质点
     std::vector<size_t> mesh_vertex_begin_;      // 各网格在全局顶点空间的前缀和（长度 +1）
 
-    // ── 质点状态（焊接拓扑上的物理量）──
+    // ── 质点状态（焊接拓扑上的物理量；长度 = 米、质量 = kg）──
     std::vector<jpov::Vec3f> rest_pos_;   // bind pose 质点位置（原始形状目标）
     std::vector<jpov::Vec3f> pos_;        // 当前质点位置
     std::vector<jpov::Vec3f> vel_;        // 质点速度
     std::vector<jpov::Vec3f> force_;      // 逐质点合力（Step 的暂存缓冲，避免每步分配）
+    std::vector<float> mass_;             // 逐质点质量（kg，由面密度 × 顶点面积得到）
+    std::vector<float> particle_area_m2_;           // 逐质点面积（m²，面密度的乘子）
+    float edge_hooke_n_per_m_ = 0.0f;     // 本物体的边弹簧刚度系数 T（N/m）
+    float arap_beta_ = 0.0f;              // 本物体的 ARAP 刚度 β（N/m）
+    float total_mass_ = 0.0f;             // Σm（kg）——诊断/验证面密度用
+    float surface_area_ = 0.0f;           // Σ 三角形面积（m²）——同上
 
     // ── 约束图 ──
     struct Edge {
@@ -257,9 +338,11 @@ private:
 
     // 短边阈值（模型 rest 包围盒对角线的 1e-4 倍）与已跳过条数。
     //   ⚠️ 真实资产（尤其 Unity/Tripo 导出的多 primitive 模型）里常残留**极短的
-    //   退化边**（长度 1e-5 量级）。而 k_e = hooke/L0 ⇒ 这类边刚度 ∝ 1/L0 极大，
+    //   退化边**（长度 1e-5 量级）。而 k_e = T/L0 ⇒ 这类边刚度 ∝ 1/L0 极大，
     //   一步就能把它拉长千倍 ⇒ 直接毁掉整个仿真（实测路灯首帧畸变 230%、随后飞到
     //   15000）。故：拓扑（1-ring）保留这些边，但**弹簧力与畸变度量都跳过**它们。
+    //   同样地，**三角形面积**也只在非退化的三角形上累加质量（否则零面积三角形
+    //   不影响，但把退化面积算进总面积会让面密度失真诊断）。
     //   跳过条数会记录并在装载时打印（不静默）。
     float min_edge_length_ = 0.0f;
     size_t skipped_short_edges_ = 0;

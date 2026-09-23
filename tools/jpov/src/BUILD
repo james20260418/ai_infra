@@ -102,6 +102,13 @@ cc_library(
 )
 
 # GltfLoader — glTF 2.0 → MeshData + 材质贴图
+#
+# 单位约定（
+#   加载边界负责把资产换算成【米】，仿真侧不再问资产是什么单位）。
+#   做法 = **按包围盒自动推断**（gltf 2.0 规定长度单位本就是米，现实中大量资产以 cm 导出）：
+#     最大尺度 < kCmAssetMaxExtentMeters(10 m) 且 ≈ 100 的整数倍 ⇒ 判为 cm，一律 ×0.01；
+#     否则原样透传（保持既有渲染行为，避免把"本来就是米的资产"改坏）。
+#   显式标注的资产永远不会被误改：gltf 的 extras.unit / asset.extras.unit 为 "m"/"cm" 时优先。
 cc_library(
     name = "gltf_loader",
     srcs = ["gltf_loader.cc"],
