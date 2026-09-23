@@ -50,6 +50,25 @@
 // 量纲：位置 = 模型局部坐标；时间 = 秒；重力 = 模型长度/秒²（默认 9.8）。
 // 确定性：不做任何随机采样，同样的输入 / dt 序列必然得到同样的输出（便于出 gold）。
 
+// ═══ 数值方案：XPBD（Extended Position-Based Dynamics，2026-09-23 需求方改为 XPBD）═══
+//   为什么换：原来用**显式半隐式欧拉**，硬材料（大 c）下受 `h < 2/ω` 限制 ⇒ 60 Hz 跑不动、
+//   且显式积分对弹簧系统**会缓慢泵能量**（实测抛石机"越演化越快"）。XPBD 是隐式位置法：
+//   无条件稳定（不受 h 限制）、能量单调不增、且刚度以**合规 α = 1/k** 给出 —— 与物理刚度严格对应。
+//
+//   每步流程（与 PBD 同族，但拉格朗日乘子按合规累积）：
+//     ① 预测：v += (g + 外力/m)·h ;  x_prev = x ; x += v·h
+//     ② ARAP 的局部旋转 R_i：用**预测位置**算一遍（local-global 交替的 local 步）
+//     ③ 迭代 m 次（Gauss-Seidel）：依次投影【弹簧约束 → ARAP 约束 → 地面约束】
+//        每个约束：Δλ = (−C − α̃·λ) / (Σ w_i|∇C_i|² + α̃) ,  α̃ = α/h²
+//                  λ += Δλ ;  x_i += w_i·∇C_i·Δλ     （w_i = 1/m_i）
+//        λ 在**每个子步开始时清零**（XPBD 的标准做法）。
+//     ④ 速度回写：v = (x − x_prev)/h ，再乘阻尼
+//
+//   三类约束的合规（compliance = 1/刚度，单位 m/N）：
+//     弹簧：C = |x_b − x_a| − L0        k = k_e = c·√(a_i·a_j)   ⇒ α = 1/k_e
+//     ARAP：C = x_i − goal_i（3 维）   k = β_i = c'·a_i          ⇒ α = 1/β_i
+//     地面：C = min(0, y − ground_y)    α = 0（硬约束，完全非弹性）
+//
 // ═══ 物理约定（需求方 Danis 2026-09-23 定稿；MKS；单位铁律：长度 = 米）═══
 //   glb 的 cm 等资产在**装载边界**统一换算成米，此后仿真内部一切量都是 MKS。
 //
@@ -63,29 +82,16 @@
 //         m_i  = ρ · a_i                          [kg]      ∝ 1/N
 //         k_e  = c · √(a_i·a_j)                   [N/m]     ∝ 1/N   （边 (i,j)）
 //         β_i  = c' · a_i                         [N/m]     ∝ 1/N
+//   🔑 三者幂次一致 ⇒ k_e/m = c/ρ、β/m = c'/ρ **与 N、与尺度 L0 都无关**。
 //
-//   🔑 为什么必须这么定（需求方 2026-09-23 一起推的结论）：
-//     · 三者幂次一致 ⇒ k_e/m = c/ρ、β/m = c'/ρ **与 N、与尺度 L0 都无关** ⇒
-//       同一物体换网格密度、或不同尺度的同种材料，行为一致（这才是"不漂"的含义）。
-//     · 旧的 `k_e = T/L0` 让 k_e ∝ N^0.5（越密越硬）、`β = 常数` 让 β ∝ N⁰，
-//       两者与 m ∝ 1/N 幂次失配 ⇒ 细网格必然"又轻又硬"（实测抛石机 k_e/m 达 5e11，
-//       稳定步长 1.5e-6 s，必炸）。
-//     · 取几何平均 √(a_i·a_j) 是为了非均匀网格（腋下密、平面疏）时两边面积不等也自洽。
+//   ── 阻尼（与质量无关，需求方指定）──  a_damp = −u · v_i,  u [1/s]，默认 0.1
 //
-//   ── 阻尼（与质量无关，需求方 2026-09-23 指定）──
-//         a_damp = −u · v_i                       u [1/s]，默认 0.1
-//     写成加速度（而不是力）⇒ 每个质点的速度衰减时间常数恒为 1/u，与质量/网格无关。
-//     阻尼只影响运动过程，不改稳态（稳态由 弹簧/ARAP/重力 三者决定）。
+//   ── 默认材质 = 厚度 1 cm 的橡胶皮 ──
+//     ρ = 11 kg/m²、c = 1.5e4 N/m³（E≈1.5 MPa）、c' = 5e3 N/m³（G≈E/3）
+//   ⚠️ XPBD 下**不再有稳定步长限制**（这正是换它的原因）：
+//      原显式方案的 60 Hz 判据（c ≤ 2290ρ）已作废；现在 60 Hz / 20 Hz / 0.05 s 都可跑，
+//      只是迭代次数影响"约束满足得有多硬"（见 solver_iterations）。
 //
-//   ── 默认材质 = 厚度 1 cm 的橡胶皮（需求方选定，用来验收）──
-//     ρ = 11   kg/m²   （1100 kg/m³ × 0.01 m）
-//     c = 1.5e4 N/m³   （E ≈ 1.5 MPa × 0.01 m）
-//     c'= 5e3  N/m³    （G ≈ 0.5 MPa × 0.01 m，橡胶 G ≈ E/3）
-//     ⇒ 60 Hz（h = 1/60 s）显式积分稳定：逐质点 row = n·c/ρ + β/m ≈ 6.3·c/ρ ≈ 8.6e3
-//       < (2/h)² = 1.44e4，余量约 1.65 倍。（n = 平均 1-ring 度 ≈ 6）
-//     ⚠️ 通用判据：稳定要求 row ≤ (2/h)²，即 c ≤ 2290·ρ（h = 1/60 s 时）。
-//        比橡胶更硬的材料（E 更大）或更薄的面密度会超 ⇒ 只能降 ρ 或换隐式积分。
-
 #ifndef JPOV_DEMO_ARAP_SIM_H_
 #define JPOV_DEMO_ARAP_SIM_H_
 
@@ -121,10 +127,16 @@ struct ArapSimConfig {
     // ── 阻尼（1/s，**与质量无关**）：a_damp = −u·v ⇒ 速度衰减时间常数 1/u ──
     float damping_per_second = 0.1f;
 
-    // 步长细分：Step(dt) 内部把 dt 均分为 substeps 个子步。
-    // 默认 1；需求方 2026-09-23 明确：**最多接受 60 Hz（h ≥ 1/60 s）**，
-    // 再细分不可接受 ⇒ 材质参数必须自己满足稳定条件（见文件头的通用判据）。
+    // 步长细分：Step(dt) 内部把 dt 均分为 substeps 个子步。默认 1。
+    // XPBD 对步长不敏感（无条件稳定），故 substeps 不再用于"救稳定性"，
+    // 只在需要更小步长以提升精度时使用。
     int substeps = 1;
+
+    // 每个子步内的约束迭代次数（Gauss-Seidel 扫描次数）。
+    // **XPBD 的"软硬"就是靠它体现的**：迭代越多，约束被满足得越彻底（越硬）。
+    // 合规 α 决定"物理刚度"，迭代次数决定"数值上收敛到多接近那个刚度"。
+    // 默认 8（够让 α 的物理语义生效；太小会显得比设定材质更软）。
+    int solver_iterations = 8;
 
     // 地面平面 y（世界坐标，米）与其上方留出的间隙。
     // 碰撞 = 位置硬约束 + 法向速度归零（完全非弹性）。模型里**没有摩擦**（需求方决定）。
@@ -237,6 +249,23 @@ public:
     // 当前逐质点速度（诊断/单测读速度用，阻尼律是 F = −u·m·v）。
     const std::vector<jpov::Vec3f>& velocities() const { return vel_; }
 
+    // ── 能量诊断（需求方 2026-09-23 要的验收判据：总能量应单调不增）──
+    //
+    // E = 动能 Σ½m|v|² + 弹簧势能 Σ½k_e(|d|−L0)² + ARAP 势能 Σ½β|goal−x|² + 重力势能 Σm·g·y
+    //
+    // ⚠️ 语义提醒：ARAP 项严格说不是保守力（goal 依赖当前局部旋转 R_i），故这个 E
+    //   不是严格守恒量，但作为"单调性监控"足够用 —— XPBD 下它应当不增（验证见单测）。
+    struct Energy {
+        float kinetic = 0.0f;
+        float spring = 0.0f;
+        float arap = 0.0f;
+        float gravity = 0.0f;
+        float total() const { return kinetic + spring + arap + gravity; }
+    };
+    //
+    // Pre-condition: 已 Build()。
+    Energy ComputeEnergy() const;
+
     // 逐质点质量（kg）、逐质点面积（m²）与"总质量 / 总表面积"诊断量。
     // areas() 是材质定标的基准（k_e ∝ √(a_i a_j)、β ∝ a、m ∝ a），单测要靠它算解析值。
     const std::vector<float>& masses() const { return mass_; }
@@ -294,6 +323,9 @@ private:
     // 建立焊接映射（位置 ε 内合并，跨全部输入网格）、边表、邻域、原始形状目标。
     void BuildTopology(const std::vector<jpov::MeshData>& meshes);
 
+    // 用**当前位置（pos_）**算 R_i 并写入 rot_（XPBD 每子步的 local 步）。
+    void ComputeLocalRotations();
+
     // 用给定位置算每个质点的邻域最优旋转 R_i，写 R_i·(rest_i − rest_c_i) 到 *out。
     // 独立成「读给定位置」的形态：Step 与 ComputeForcesAt 都用同一份实现（不分叉）。
     void ComputeLocalRotationsInto(const std::vector<jpov::Vec3f>& pos,
@@ -310,6 +342,13 @@ private:
     // 地面位置约束 + 法向速度归零（完全非弹性）。就地修改 pos_ / vel_。
     void ProjectGround();
 
+    // ── XPBD 约束投影（见文件头的数值方案说明）──
+    //
+    // Pre-condition: 已 Build()；h > 0；lambda_*_ 长度已就绪（BuildTopology 里分配）。
+    // Post-condition: pos_ 被就地修改（约束被满足一步）；lambda_*_ 累积更新。
+    void SolveSpringConstraints(float h);
+    void SolveArapConstraints(float h);
+
     // 把质点位置散布到逐顶点数组 vertex_positions_（未焊接写回）。
     void ScatterToVertices();
 
@@ -324,9 +363,15 @@ private:
     std::vector<jpov::Vec3f> rest_pos_;   // bind pose 质点位置（原始形状目标）
     std::vector<jpov::Vec3f> pos_;        // 当前质点位置
     std::vector<jpov::Vec3f> vel_;        // 质点速度
-    std::vector<jpov::Vec3f> force_;      // 逐质点合力（Step 的暂存缓冲，避免每步分配）
+    std::vector<jpov::Vec3f> force_;      // 逐质点合力（诊断/单测用：重力+阻尼这些非约束力）
+    std::vector<jpov::Vec3f> prev_pos_;   // 本子步预测前的位置（XPBD 的速度回写用 x_prev）
+    std::vector<jpov::Vec3f> rot_;        // R_i·(rest_i − rest_c_i)（ARAP 的 goal 偏移，每子步刷新）
     std::vector<float> mass_;             // 逐质点质量（kg，由面密度 × 顶点面积得到）
     std::vector<float> particle_area_m2_;           // 逐质点面积（m²，面密度的乘子）
+
+    // ── XPBD 的拉格朗日乘子（每子步清零；弹簧逐边、ARAP 逐质点 3 维）──
+    std::vector<float> lambda_spring_;              // 长度 = edges_.size()
+    std::vector<jpov::Vec3f> lambda_arap_;          // 长度 = particle_count()
     float spring_c_ = 0.0f;               // 本物体的胡克材料常数 c（N/m³）
     float arap_beta_c_ = 0.0f;            // 本物体的 ARAP 材料常数 c'（N/m³）
     float total_mass_ = 0.0f;             // Σm（kg）——诊断/验证面密度用

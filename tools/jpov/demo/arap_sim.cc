@@ -641,6 +641,10 @@ void ArapSim::BuildTopology(const std::vector<jpov::MeshData>& meshes) {
     pos_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
     vel_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
     force_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
+    prev_pos_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
+    // XPBD 拉格朗日乘子缓冲（每个子步清零，故只分配一次）。
+    lambda_spring_.assign(edges_.size(), 0.0f);
+    lambda_arap_.assign(particle_count_, jpov::Vec3f(0.0f, 0.0f, 0.0f));
     vertex_positions_.assign(vcount, jpov::Vec3f(0.0f, 0.0f, 0.0f));
 }
 
@@ -763,22 +767,129 @@ void ArapSim::Step(float dt_seconds) {
     CHECK_GT(particle_count_, 0u) << "ArapSim::Step: 尚未 Build";
     CHECK_GT(dt_seconds, 0.0f) << "ArapSim::Step: dt 必须 > 0，收到 " << dt_seconds;
     CHECK_GE(config_.substeps, 1) << "ArapSim::Step: substeps 必须 ≥ 1";
+    CHECK_GE(config_.solver_iterations, 1)
+        << "ArapSim::Step: solver_iterations 必须 ≥ 1";
 
     const float h = dt_seconds / static_cast<float>(config_.substeps);
+    const float inv_h = 1.0f / h;
+    // 速度保留系数（阻尼以"加速度 a=−u·v"的形式做预测，故这里用 (1 − u·h) 的等价形式：
+    // a_damp·h = −u·v·h ⇒ v 乘 (1 − u·h)。u·h < 1 时为正；XPBD 下 h 可以很大，
+    // 故用 exp(−u·h) 更稳（不会变负翻号）。
+    const float vel_retain = std::exp(-config_.damping_per_second * h);
+    const float gravity_y = -config_.gravity_magnitude;
+
     for (int s = 0; s < config_.substeps; ++s) {
-        // ① 力（F/m，m = 1）
-        ComputeForcesAt(pos_, vel_, &force_);
-        // ② 半隐式欧拉：先更新速度，再用新速度更新位置
+        // ── ① 预测（外力：只有重力；阻尼放在速度回写处一并处理）──
         for (uint32_t i = 0; i < particle_count_; ++i) {
-            vel_[i] += force_[i] * h;
+            vel_[i] = jpov::Vec3f(vel_[i].x(), vel_[i].y() + gravity_y * h,
+                                  vel_[i].z());
+            prev_pos_[i] = pos_[i];
             pos_[i] += vel_[i] * h;
         }
-        // ③ 地面（位置硬约束 + 法向速度归零）
-        if (config_.enable_ground) {
-            ProjectGround();
+
+        // ── ② ARAP 的局部旋转 R_i（用预测位置算一次；local-global 的 local 步）──
+        //   XPBD 里 ARAP 是"位置约束"：C_i = x_i − goal_i，而 goal_i 依赖 R_i。
+        //   R_i 每步只算一次（迭代内部当常量）—— 这是该做法的标准近似。
+        if (arap_beta_c_ > 0.0f) {
+            ComputeLocalRotations();
+        }
+
+        // ── ③ 约束迭代（Gauss-Seidel）──
+        //   λ 每个子步清零（XPBD 标准）；顺序：弹簧 → ARAP → 地面（地面最后，避免残余穿透）。
+        for (float& l : lambda_spring_) {
+            l = 0.0f;
+        }
+        for (int it = 0; it < config_.solver_iterations; ++it) {
+            if (spring_c_ > 0.0f) {
+                SolveSpringConstraints(h);
+            }
+            if (arap_beta_c_ > 0.0f) {
+                SolveArapConstraints(h);
+            }
+            if (config_.enable_ground) {
+                ProjectGround();
+            }
+        }
+
+        // ── ④ 速度回写 + 阻尼 ──
+        //   v = (x − x_prev)/h。⚠️ **x_prev 必须先投射到可行域**（与地面同规则），
+        //   否则地面把 x 往上钳的那一段位移会被算成速度 ⇒ **碰撞凭空注入动能**
+        //   （实测：纯刚体落地、无弹簧无 ARAP 时能量涨 200 就是这个原因；
+        //     显式方案里也踩过同一个坑 —— 教训："速度的参考位置也要可行化"）。
+        const float min_y = config_.ground_y + config_.ground_offset;
+        for (uint32_t i = 0; i < particle_count_; ++i) {
+            jpov::Vec3f p_prev = prev_pos_[i];
+            if (config_.enable_ground && p_prev.y() < min_y) {
+                p_prev = jpov::Vec3f(p_prev.x(), min_y, p_prev.z());
+            }
+            vel_[i] = (pos_[i] - p_prev) * (inv_h * vel_retain);
         }
     }
     ScatterToVertices();
+}
+
+// XPBD 弹簧约束：C = |x_b − x_a| − L0，合规 α = 1/k_e（m/N）。
+//
+//   Δλ = (−C − α̃·λ) / (w_a + w_b + α̃)        w = 1/m，α̃ = α/h²
+//   λ += Δλ
+//   x_a −= w_a·û·Δλ        x_b += w_b·û·Δλ
+//
+// 说明：α=0 时退化为"硬距离约束"（PBD），α 越大越软。XPBD 的 λ 累积项
+//   （−α̃·λ）使约束力随时间不会无限增长 —— 这是它比 PBD 能量行为好的原因。
+void ArapSim::SolveSpringConstraints(float h) {
+    const float inv_h2 = 1.0f / (h * h);
+    for (size_t e = 0; e < edges_.size(); ++e) {
+        const Edge& edge = edges_[e];
+        if (edge.rest_length < min_edge_length_) {
+            continue;   // 退化短边（数据卫生，见 arap_sim.h）
+        }
+        const jpov::Vec3f d = pos_[edge.b] - pos_[edge.a];
+        const float len = d.Norm();
+        if (len < 1e-12f) {
+            continue;   // 两端完全重合：方向未定义
+        }
+        const float C = len - edge.rest_length;
+        const jpov::Vec3f grad = d * (1.0f / len);   // ∇C 对 b（对 a 取负）
+        const float w_a = 1.0f / mass_[edge.a];
+        const float w_b = 1.0f / mass_[edge.b];
+        // k_e = c·√(a_i·a_j) ⇒ α = 1/k_e
+        const float k_e = spring_c_ * edge.geom_mean_area;
+        if (!(k_e > 0.0f)) {
+            continue;
+        }
+        const float alpha_tilde = (1.0f / k_e) * inv_h2;
+        const float denom = w_a + w_b + alpha_tilde;
+        const float dlambda =
+            (-C - alpha_tilde * lambda_spring_[e]) / denom;
+        lambda_spring_[e] += dlambda;
+        pos_[edge.a] -= grad * (w_a * dlambda);
+        pos_[edge.b] += grad * (w_b * dlambda);
+    }
+}
+
+// XPBD ARAP 约束：C_i = x_i − goal_i（3 维向量约束），合规 α = 1/β_i。
+//   goal_i 里的质心与 R_i 在本子步内视为常量（R_i 见 Step 的 ② 步）⇒ 只有 x_i 一个自由度：
+//       Δλ = (−C_i − α̃·λ) / (w_i + α̃)     （λ 为 3 维，但每分量独立、分母相同）
+//       x_i += w_i·λ_vec·Δ... → 直接 x_i −= w_i·Δλ_vec
+void ArapSim::SolveArapConstraints(float h) {
+    const float inv_h2 = 1.0f / (h * h);
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        const jpov::Vec3f centroid = NeighborhoodCentroid(pos_, i);
+        const jpov::Vec3f goal = centroid + rot_[i];
+        const jpov::Vec3f C = pos_[i] - goal;
+        const float beta_i = arap_beta_c_ * particle_area_m2_[i];
+        if (!(beta_i > 0.0f)) {
+            continue;
+        }
+        const float w = 1.0f / mass_[i];
+        const float alpha_tilde = (1.0f / beta_i) * inv_h2;
+        // 3 维约束：分母对三个分量相同，故 λ 也是 3 维、逐分量更新。
+        const float denom = w + alpha_tilde;
+        const jpov::Vec3f dlambda =
+            (C * -1.0f - lambda_arap_[i] * alpha_tilde) * (1.0f / denom);
+        lambda_arap_[i] += dlambda;
+        pos_[i] += dlambda * w;
+    }
 }
 
 void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
@@ -838,6 +949,10 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
             (*out)[i] -= velocities[i] * config_.damping_per_second;
         }
     }
+}
+
+void ArapSim::ComputeLocalRotations() {
+    ComputeLocalRotationsInto(pos_, &rot_);
 }
 
 void ArapSim::ComputeLocalRotationsInto(const std::vector<jpov::Vec3f>& pos,
@@ -904,14 +1019,16 @@ void ArapSim::ComputeLocalRotationsInto(const std::vector<jpov::Vec3f>& pos,
 }
 
 void ArapSim::ProjectGround() {
+    // ⚠️ **只改位置，不碰速度**（XPBD 的规矩：约束只投影位置，速度统一由 Step 的 ④
+    //    用 v=(x−x_prev)/h 回写）。曾在这里顺手把 vel_.y 归零 —— 会被 ④ 的回写覆盖
+    //    （白做），且回写进来的速度带着"钳位位移"⇒ **碰撞注入动能**
+    //    （实测：纯刚体落地、无弹簧无 ARAP 时能量涨 200）。
+    //    速度层的地面效果现在靠"把 x_prev 也钳到可行域"实现（见 Step ④），
+    //    物理上正是"完全非弹性：法向速度归零"。
     const float min_y = config_.ground_y + config_.ground_offset;
     for (uint32_t i = 0; i < particle_count_; ++i) {
         if (pos_[i].y() < min_y) {
             pos_[i] = jpov::Vec3f(pos_[i].x(), min_y, pos_[i].z());
-            // 完全非弹性：法向（y）速度归零；切向不动（四参数模型里没有摩擦）。
-            if (vel_[i].y() < 0.0f) {
-                vel_[i] = jpov::Vec3f(vel_[i].x(), 0.0f, vel_[i].z());
-            }
         }
     }
 }
@@ -978,6 +1095,46 @@ void ArapSim::WriteBackPositions(std::vector<jpov::MeshData>* meshes) const {
             (*meshes)[mi].positions[k] = vertex_positions_[begin + k];
         }
     }
+}
+
+ArapSim::Energy ArapSim::ComputeEnergy() const {
+    Energy e;
+    // 动能 Σ½m|v|²
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        e.kinetic += 0.5f * mass_[i] * vel_[i].Sqr();
+    }
+    // 弹簧势能 Σ½k_e(|d|−L0)²
+    if (spring_c_ > 0.0f) {
+        for (const Edge& edge : edges_) {
+            if (edge.rest_length < min_edge_length_) {
+                continue;
+            }
+            const float len = (pos_[edge.b] - pos_[edge.a]).Norm();
+            const float k_e = spring_c_ * edge.geom_mean_area;
+            const float d = len - edge.rest_length;
+            e.spring += 0.5f * k_e * d * d;
+        }
+    }
+    // ARAP 势能 Σ½β|goal − x|²（goal 用当前 R_i 现算一份，避免读到过期缓存）
+    if (arap_beta_c_ > 0.0f) {
+        std::vector<jpov::Vec3f> shape_offset;
+        ComputeLocalRotationsInto(pos_, &shape_offset);
+        for (uint32_t i = 0; i < particle_count_; ++i) {
+            const jpov::Vec3f goal =
+                NeighborhoodCentroid(pos_, i) + shape_offset[i];
+            const float beta_i = arap_beta_c_ * particle_area_m2_[i];
+            e.arap += 0.5f * beta_i * (goal - pos_[i]).Sqr();
+        }
+    }
+    // 重力势能 = Σ m·g·(−y + y_ref)   ← **符号关键**：重力沿 −y ⇒ y 越高势能越大，
+    //   故 PE 必须随 y 增大而增大，即 PE = −m·g·y（+常数）。
+    //   ⚠️ 曾写成 +m·g·y（符号错）⇒ 自由落体时 KE 与 PE **同向增长**，总能量假性递增
+    //      （实测 240 步里 239 步在涨，误判为"求解器泵能量"）。参考点取 y=0（常数项不影响单调性）。
+    const float g = config_.gravity_magnitude;
+    for (uint32_t i = 0; i < particle_count_; ++i) {
+        e.gravity -= mass_[i] * g * pos_[i].y();
+    }
+    return e;
 }
 
 float ArapSim::shape_residual_rms() const {

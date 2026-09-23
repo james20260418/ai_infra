@@ -392,20 +392,13 @@ inline void ArapViewerApp::BuildSim() {
               << sim_config_.arap_stiffness_per_area << " N/m³; 阻尼 u="
               << sim_config_.damping_per_second << "/s; 重力 g=" << gravity_
               << " m/s²; 子步=" << sim_config_.substeps;
+    // 数值方案 = XPBD ⇒ **没有步长限制**（无条件稳定）。故这里只报"每步迭代次数"
+    // （那才是现在决定"约束满足得多硬"的旋钮），不再有"材质偏硬会慢动作"的警告。
     const float bound = sim_.max_stable_dt();
-    LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
-              << " s（目标步长 1/60 = " << (1.0f / 60.0f)
-              << " s；需求方上限 60 Hz，不加子步）";
-    // 与 AdvanceDynamics 的安全步长判据**保持同一依据**（safe_dt = 0.7·bound，
-    // 实测标定，见那里的注释），避免"一处说会慢动作、另一处说没问题"的自相矛盾。
-    constexpr float kTargetDtLog = 1.0f / 60.0f;
-    constexpr float kSafeDtFactorLog = 0.7f;
-    if (bound > 0.0f && kTargetDtLog > kSafeDtFactorLog * bound) {
-        LOG(WARNING) << "材质偏硬：稳定上限 " << bound
-                     << " s，安全步长 " << (kSafeDtFactorLog * bound) << " s < 1/60 s"
-                     << " ⇒ 会进入慢动作（不会出 NaN，但物理变慢）。"
-                        "要全速需降 c（更软材料）或升 ρ（更重/更厚）";
-    }
+    LOG(INFO) << "数值方案 = XPBD（无条件稳定）；步长 " << (1.0f / 60.0f)
+              << " s（每帧一步，不加子步）；迭代 " << sim_config_.solver_iterations
+              << " 次/子步。参考：显式方案在该材质下的稳定上限会是 " << bound
+              << " s（XPBD 不需要这个限制）";
 }
 
 inline bool ArapViewerApp::AddPrimitive(jpov::MeshData mesh,
@@ -568,48 +561,21 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
     sim_config_.substeps = substeps_in_use_;
     sim_.SetConfig(sim_config_);
 
-    // ── 安全步长（自动模式下）──
-    //   若封顶后 h 仍超过稳定上限，就**放大实际步长**（慢动作）而不是硬推：
-    //   显式积分一旦 h > 上限 就必然发散（NaN/飞走），对用户就是「模型消失」。
-    //   力模型、积分格式、substeps 都不变，只是物理时间走得慢一点。
     // 本帧开始时的状态快照（发散回滚用；只在真要推进时才存）。
     if (dynamics_running_) {
         sim_.SnapshotState(&snapshot_pos_, &snapshot_vel_);
     }
 
-    // 目标步长 = 1/60 s（需求方允许的最细物理频率，正好一个渲染帧）。
+    // ── 步长：XPBD 下**不需要慢动作保护** ──
+    //   旧实现（显式半隐式欧拉）必须在 h < 2/ω 内才不发散，故这里会按 max_stable_dt()
+    //   自动放大步长（慢动作）。**换成 XPBD 后该限制不再存在**：它是隐式位置法，
+    //   无条件稳定（单测 XpbdStaysStableBeyondExplicitStabilityBound 直接验证
+    //   dt 到 0.2 s 也保持有界）。故这里恒用目标步长，不再进慢动作。
+    //
+    //   "软硬"现在由 **solver_iterations**（迭代次数）与合规 α=1/k 共同决定，
+    //   而不是由步长决定 —— 见 arap_sim.h 的数值方案说明。
     constexpr float kTargetDt = 1.0f / 60.0f;
-    float physics_dt = kTargetDt;
-    if (fixed_substeps_ <= 0) {
-        // 自动模式：材质不够软时**放大步长（慢动作）**，而不是加子步。
-        //
-        // 安全步长：以 max_stable_dt() 为基准、乘**实测标定的安全系数**。
-        //
-        // ⚠️ 这个系数不是理论值，是量出来的：max_stable_dt() 用 Gershgorin 行和估 ω²，
-        //   它假设的是**纯弹簧**系统；而本模型还含 ARAP 形状力（耦合整个 1-ring，
-        //   非对角耦合比行和估计强）与地面硬钳位（制造瞬时压缩）。实测两组材质：
-        //     · c=15000（橡胶皮）⇒ 报 0.01015 s，实测稳的边界 ≈ 0.015 s（偏乐观 1.5×）
-        //     · c=150 （软 100 倍）⇒ 报 0.0731 s，实测 h=0.05 s 都稳
-        //   取 1.0（即直接用 max_stable_dt）在这两组上都偏乐观 ⇒ 不能这么用。
-        //   实测校准值：**0.7**（在 c=15000 这组上 0.7·0.01015 = 0.0071 s < 0.015 ✓）。
-        //   宁可慢一点也不要炸（炸一下整个画面就没用了）。
-        constexpr float kSafeDtFactor = 0.7f;
-        const float bound = sim_.max_stable_dt();
-        const float safe_dt = kSafeDtFactor * bound;
-        if (bound > 0.0f && kTargetDt > safe_dt) {
-            physics_dt = std::max(safe_dt, 1e-4f);
-            if (!slow_motion_warned_) {
-                slow_motion_warned_ = true;
-                LOG(WARNING) << "仿真进入慢动作：当前材质（c="
-                             << sim_config_.spring_stiffness_per_area << " N/m³, ρ="
-                             << sim_config_.area_density_kg_per_m2
-                             << " kg/m²）太硬，1/60 s 步长会发散 ⇒ 实际步长 "
-                             << physics_dt << " s（慢 " << (kTargetDt / physics_dt)
-                             << " 倍；力模型未改，也没加子步）。"
-                                "要全速只能换更软/更重的材质（降 c、升 ρ）";
-            }
-        }
-    }
+    const float physics_dt = kTargetDt;
 
     // 固定步长 + 累加器：渲染帧凑够 physics_dt 才推进一步。
     // physics_dt 目标值 = 1/60 s（**需求方限制的最细物理频率**；正好等于一个渲染帧，
