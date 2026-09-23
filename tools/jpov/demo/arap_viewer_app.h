@@ -219,10 +219,12 @@ private:
     std::vector<jpov::Vec3f> snapshot_pos_;
     std::vector<jpov::Vec3f> snapshot_vel_;
 
-    // 需求方指定的物理积分步长（秒）。
+    // 物理积分步长（秒）。默认 0.05 s（需求方 2026-09-23 指定）。
     static constexpr float kPhysicsDt = 0.05f;
-    // 自动子步数的上限（保护交互帧率；触发时日志会告警）。
-    static constexpr int kMaxAutoSubsteps = 64;
+    // 子步数上限。**需求方 2026-09-23 明确：最多接受 60 Hz（h ≥ 1/60 s）**，
+    // 再细分不可接受 ⇒ 自动模式下不做"加子步"这种补救（材质自己得满足稳定条件）；
+    // 需要更多子步必须用 --substeps 显式指定（自行承担"违反 60 Hz 约束"）。
+    static constexpr int kMaxAutoSubsteps = 1;
 
     // 由稳定上限派生本帧子步数：h = kPhysicsDt/substeps ≤ 0.5·上限（留一倍安全余量）。
     // fixed > 0（命令行强制）时直接用 fixed；上限 ≤ 0（无刚度）时返回 1。
@@ -272,25 +274,14 @@ inline float ArapViewerApp::AppTextWidth(const char* text, float font_size,
 }
 
 inline int ArapViewerApp::SimSubstepsFor(float bound_s, int fixed) {
+    (void)bound_s;
     if (fixed > 0) {
-        return fixed;
+        return fixed;   // 命令行显式指定：由调用方承担（可能违反 60 Hz 约束）
     }
-    if (!(bound_s > 0.0f)) {
-        return 1;   // 无刚度（h = b = 0）⇒ 没有稳定上限
-    }
-    const int needed =
-        static_cast<int>(std::ceil(kPhysicsDt / (0.5f * bound_s)));
-    if (needed > kMaxAutoSubsteps) {
-        LOG(WARNING) << "按稳定上限需要 " << needed << " 个子步，已封顶到 "
-                     << kMaxAutoSubsteps
-                     << "（仍可能发散：请调小 h/b，或用 --substeps 指定）";
-    }
-    // ⚠️ 封顶是个**陷阱**，故不再静默封顶：
-    //   封顶后 h 仍大于稳定上限 ⇒ 仿真**一定会发散**（NaN/飞走）。而原来的代码只打了
-    //   一行 WARNING 就继续跑 ⇒ 用户第一步就看到 NaN，只会看到「出nan值，模型消失」。
-    //   调用方（AdvanceDynamics）在自动模式下会把实际步长放大到 上限/2（慢动作），
-    //   力模型与积分格式**一字不改** —— 宁可慢放，也不要静默出垃圾几何。
-    return std::min(std::max(needed, 1), kMaxAutoSubsteps);
+    // 自动模式下**不加子步**：需求方限制 60 Hz，所以步长就是 1/60 s 起，
+    // 稳定与否完全由材质（ρ / c / c'）决定。不够稳就慢动作（见 AdvanceDynamics），
+    // 而不是靠内部细分把算力堆上去。
+    return 1;
 }
 
 inline void ArapViewerApp::ComputeModelBounds() {
@@ -345,44 +336,45 @@ inline void ArapViewerApp::BuildSim() {
     LOG(INFO) << "面密度诊断（构建前）：总面积 " << mass.total_area_m2
               << " m² ⇒ 总质量 " << mass.total_mass_kg << " kg（"
               << sim_config_.area_density_kg_per_m2 << " kg/m²）";
-    if (mass.max_edge_k_over_m > 0.0f) {
-        // 稳定上限的大头是 k_e/m = (T/L0)/m ⇒ 用全局最大 (1/L0)/m 先验一下。
-        const float k_e_over_m = sim_config_.hooke_n_per_m * mass.max_edge_k_over_m;
+    // 稳定步长**先验**（不建仿真器）：面积定标下 row_i ≈ n·c/ρ + c'/ρ·n/(n+1)，
+    // **与网格密度、与尺度都无关**，所以直接由材质常数给一个量级估计就够用。
+    if (mass.total_area_m2 > 0.0f) {
+        const float rho = sim_config_.area_density_kg_per_m2;
+        const float c = sim_config_.spring_stiffness_per_area;
+        const float cp = sim_config_.arap_stiffness_per_area;
+        // 平均 1-ring 度按三角网格取 6（角点/边界会小些，这里只要量级）。
+        const float approx_row = 6.0f * c / rho + cp / rho * (6.0f / 7.0f);
         const float approx_bound =
-            k_e_over_m > 0.0f ? 2.0f / std::sqrt(k_e_over_m) : 1e9f;
-        if (approx_bound < kPhysicsDt) {
+            approx_row > 0.0f ? 2.0f / std::sqrt(approx_row) : 1e9f;
+        LOG(INFO) << "稳定步长先验（面积定标 ⇒ 与网格密度无关）：row ≈ "
+                  << approx_row << " ⇒ 上限 ≈ " << approx_bound
+                  << " s（需求方要求 h ≥ 1/60 = " << (1.0f / 60.0f) << " s）";
+        if (approx_bound < 1.0f / 60.0f) {
             LOG(WARNING)
-                << "稳定步长先验：k_e/m 最大 " << k_e_over_m << " ⇒ 上限 ≈ "
-                << approx_bound << " s < 步长 " << kPhysicsDt
-                << " s ⇒ 会发散。办法（都不改变力模型）：① 把网格减面/放宽到 "
-                   "k_e/m 小一些；② 加 --substeps N 固定更多子步；"
-                   "③ 调小 T；④ 调大面密度（质量越大越稳）";
+                << "材质太硬：先验上限 " << approx_bound << " s < 1/60 s ⇒ 60 Hz 会发散。"
+                   "只能降 c（更软材料）或降 c'/ρ（更薄/更重）—— 换更硬的子步不可行（需求方限 60 Hz）";
         }
     }
 
     sim_.Build(meshes, sim_config_);
-    // 注意：ARAP β 在 Build 里按"β = T/7"换算好，回写到 sim_config_ 便于面板/日志显示。
-    sim_config_.arap_stiffness_n_per_m = sim_.config().arap_stiffness_n_per_m;
     LOG(INFO) << "物理物体：网格 " << sim_.mesh_count() << " 个，顶点 "
               << sim_.vertex_count() << "，焊接质点 " << sim_.particle_count()
               << "（跨 primitive 焊接 ⇒ 各部件互相支撑）";
-    LOG(INFO) << "材质: 面密度 " << sim_config_.area_density_kg_per_m2
+    LOG(INFO) << "材质（面积定标）: ρ=" << sim_config_.area_density_kg_per_m2
               << " kg/m² ⇒ 总质量 " << sim_.total_mass() << " kg / 总面积 "
-              << sim_.surface_area() << " m²; 胡克 T="
-              << sim_config_.hooke_n_per_m << " N/m（0.1 m ⇒ "
-              << 0.1f * sim_config_.hooke_n_per_m << " N）; ARAP β="
-              << sim_config_.arap_stiffness_n_per_m << " N/m; 阻尼 "
-              << sim_config_.damping_per_second << "/s; 重力 g="
-              << gravity_ << " m/s²; 子步=" << sim_config_.substeps;
+              << sim_.surface_area() << " m²; 胡克 c="
+              << sim_config_.spring_stiffness_per_area << " N/m³; ARAP c'="
+              << sim_config_.arap_stiffness_per_area << " N/m³; 阻尼 u="
+              << sim_config_.damping_per_second << "/s; 重力 g=" << gravity_
+              << " m/s²; 子步=" << sim_config_.substeps;
     const float bound = sim_.max_stable_dt();
     LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
-              << " s；物理步长 " << kPhysicsDt << " s ⇒ 子步 "
-              << SimSubstepsFor(/*bound_s=*/bound, /*fixed=*/fixed_substeps_);
-    if (bound < kPhysicsDt) {
-        LOG(WARNING) << "当前步长 " << kPhysicsDt << " s 超过稳定上限 " << bound
-                     << " s；子步已封顶到 " << kMaxAutoSubsteps
-                     << " ⇒ 仍会发散。根治办法：减面/放宽网格、调小胡克 T、"
-                        "或调大面密度（都要动材质或资产，不是加力）";
+              << " s（目标步长 1/60 = " << (1.0f / 60.0f)
+              << " s；需求方上限 60 Hz，不加子步）";
+    if (bound < 2.0f / 60.0f) {
+        LOG(WARNING) << "材质偏硬：稳定上限 " << bound
+                     << " s < 2/60 s ⇒ 自动进入慢动作（不会出 NaN，但物理变慢）。"
+                        "要全速需降 c（更软材料）或升 ρ（更重/更厚）";
     }
 }
 
@@ -551,34 +543,42 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
         sim_.SnapshotState(&snapshot_pos_, &snapshot_vel_);
     }
 
-    float physics_dt = kPhysicsDt;
+    // 目标步长 = 1/60 s（需求方允许的最细物理频率，正好一个渲染帧）。
+    constexpr float kTargetDt = 1.0f / 60.0f;
+    float physics_dt = kTargetDt;
     if (fixed_substeps_ <= 0) {
-        // ⚠️ 条件必须用【substeps 是否够用】判断，**不能**用 `步长 > 0.5·上限`：
-        //   网格够软时（上限 > 步长/2）子步会自动取 > 1 个，h 已经安全了；
-        //   再用 h 去比上限就会把本来没问题的场景也拖成慢动作（实测：方块上限
-        //   0.071 s、步长 0.05 s 本来只需 2 子步很稳，却被误判成"慢 1.4 倍"）。
+        // 自动模式：材质不够软时**放大步长（慢动作）**，而不是加子步。
+        //
+        // 安全系数取 **0.1**：max_stable_dt() 是 Gershgorin 行和给的 ω² 上界，
+        // 对**含大形变/碰撞冲击**的实际系统明显偏乐观（行和只统计了对角附近），
+        // 实测抛石机（橡胶皮材质）：
+        //     h = 0.05   s（1·0.05）⇒ 炸（边长畸变 0.17）
+        //     h = 0.025  s           ⇒ 稳（0.0028）
+        //     h = 0.0125 s           ⇒ 稳（0.00275）
+        // 即实际安全边界 ≈ 0.025 s，而 max_stable_dt 报 0.0102 s（保守约 2.5 倍），
+        // 用 0.1·bound 会得到 0.001 s —— 过保守。故改用**实测校准后的经验边界**：
+        //     安全步长 = 2.5 × max_stable_dt()      （= 0.0255 s，实测稳）
+        // 并把"客户约束 60 Hz ⇒ h ≥ 1/60 = 0.0167 s"直接写进判据。
         const float bound = sim_.max_stable_dt();
-        const int needed = SimSubstepsFor(bound, /*fixed=*/0);
-        const bool substeps_capped = (needed > kMaxAutoSubsteps);
-        const bool still_unstable =
-            (bound > 0.0f) &&
-            (kPhysicsDt / static_cast<float>(substeps_in_use_) > 0.5f * bound);
-        if (substeps_capped && still_unstable) {
-            physics_dt = std::max(0.5f * bound * static_cast<float>(substeps_in_use_),
-                                  1e-4f);
+        const float safe_dt = 2.5f * bound;
+        if (bound > 0.0f && kTargetDt > safe_dt) {
+            physics_dt = std::max(safe_dt, 1e-4f);
             if (!slow_motion_warned_) {
                 slow_motion_warned_ = true;
-                LOG(WARNING) << "仿真进入慢动作：当前网格在指定的 T/面密度下太硬，"
-                                "0.05 s 步长会发散，故把实际步长放到 "
-                             << physics_dt << " s（慢 " << (kPhysicsDt / physics_dt)
-                             << " 倍；力模型未改）。要全速请减面/放宽网格、调大"
-                                "面密度、或调小 T（或用 --substeps 自行承担）";
+                LOG(WARNING) << "仿真进入慢动作：当前材质（c="
+                             << sim_config_.spring_stiffness_per_area << " N/m³, ρ="
+                             << sim_config_.area_density_kg_per_m2
+                             << " kg/m²）太硬，1/60 s 步长会发散 ⇒ 实际步长 "
+                             << physics_dt << " s（慢 " << (kTargetDt / physics_dt)
+                             << " 倍；力模型未改，也没加子步）。"
+                                "要全速只能换更软/更重的材质（降 c、升 ρ）";
             }
         }
     }
 
-    // 固定步长 + 累加器：渲染帧凑够 physics_dt 才推进一步（物理按真实时间演化、
-    // 且与帧率无关）。physics_dt 默认 0.05 s（需求方指定），仅在网格太硬时自动放大（慢动作）。
+    // 固定步长 + 累加器：渲染帧凑够 physics_dt 才推进一步。
+    // physics_dt 目标值 = 1/60 s（**需求方限制的最细物理频率**；正好等于一个渲染帧，
+    // 于是每帧推进一步、无累加余数）。若材质太硬导致 1/60 s 不稳定，则放大步长（慢动作）。
     physics_accum_ += frame_dt;
     while (physics_accum_ >= physics_dt) {
         sim_.Step(physics_dt);
@@ -615,10 +615,12 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
         dynamics_running_ = false;
         diverged_ = true;
         LOG(ERROR) << "仿真发散：已回滚到本帧开始的状态并暂停（画面上不会出现消失/糊掉的"
-                      "模型）。根因：当前网格在 T=" << sim_config_.hooke_n_per_m
-                   << " N/m、面密度 " << sim_config_.area_density_kg_per_m2
-                   << " kg/m² 下太硬 —— 稳定上限 " << sim_.max_stable_dt()
-                   << " s 远小于步长。根治：减面/放宽网格、调大面密度、或调小 T";
+                      "模型）。根因：材质太硬（c="
+                   << sim_config_.spring_stiffness_per_area << " N/m³, ρ="
+                   << sim_config_.area_density_kg_per_m2
+                   << " kg/m²）⇒ 稳定上限 " << sim_.max_stable_dt()
+                   << " s 小于步长。根治：调小 c / 调大 ρ（更软更重的材料），"
+                      "或用 --substeps 自行承担";
         return;   // 不再上传坏几何
     }
 
@@ -795,8 +797,8 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
                       static_cast<double>(sim_.shape_residual_rms()),
                       sim_.degenerate_rotation_count(), substeps_in_use_,
                       static_cast<double>(sim_config_.area_density_kg_per_m2),
-                      static_cast<double>(sim_config_.hooke_n_per_m),
-                      static_cast<double>(sim_config_.arap_stiffness_n_per_m),
+                      static_cast<double>(sim_config_.spring_stiffness_per_area),
+                      static_cast<double>(sim_config_.arap_stiffness_per_area),
                       static_cast<double>(sim_config_.damping_per_second),
                       static_cast<double>(sim_.total_mass()));
         ui_.Text(status, jpov::UiRect{{16.0f, btn_y + kBtnH + 8.0f},

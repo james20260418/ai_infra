@@ -60,8 +60,8 @@ MeshData MakeFlatSquare(float l) {
 ArapSimConfig BareConfig() {
     ArapSimConfig cfg;
     cfg.area_density_kg_per_m2 = 1.0f;
-    cfg.hooke_n_per_m = 0.0f;
-    cfg.arap_stiffness_n_per_m = 0.0f;
+    cfg.spring_stiffness_per_area = 0.0f;
+    cfg.arap_stiffness_per_area = 0.0f;
     cfg.damping_per_second = 0.0f;
     cfg.gravity_magnitude = 0.0f;
     cfg.enable_ground = false;
@@ -187,7 +187,7 @@ constexpr float kSquare2x2MassB = 1.0f / 3.0f;
 TEST(ArapSimTest, HookeForceIsZeroAtRestLength) {
     const MeshData mesh = MakeFlatSquare(/*l=*/1.0f);
     ArapSimConfig cfg = BareConfig();
-    cfg.hooke_n_per_m = 500.0f;
+    cfg.spring_stiffness_per_area = 5.0e3f;
     ArapSim sim;
     sim.Build(mesh, cfg);
 
@@ -260,63 +260,118 @@ TEST(ArapSimTest, MassFollowsAreaDensity) {
         << "细分后每个质点的质量应显著变小";
 }
 
-// ── 6. 胡克系数就是"伸长多少产生多大力"（T = 100 N/m ⇔ 0.1 m 产生 10 N）──
-TEST(ArapSimTest, HookeTensionMatchesNewtonSpec) {
-    const float T = 100.0f;      // N/m：0.1 m 的伸长产生 10 N
-    const float delta = 0.1f;    // m
+// ── 6. 胡克：面积定标 k_e = c·√(a_i·a_j)（与 N 同阶反比 ⇒ 物理效果不随网格漂移）──
+TEST(ArapSimTest, HookeStiffnessScalesWithArea) {
+    const float c = 5.0e3f;      // N/m³
+
+    auto make_grid = [](int n) {
+        MeshData m;
+        m.flags = jpov::MeshVertexFlags::kPosition;
+        const float step = 1.0f / static_cast<float>(n);
+        for (int j = 0; j <= n; ++j) {
+            for (int i = 0; i <= n; ++i) {
+                m.positions.push_back(Vec3f(static_cast<float>(i) * step,
+                                            static_cast<float>(j) * step,
+                                            0.0f));
+            }
+        }
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                const uint32_t v00 = static_cast<uint32_t>(j * (n + 1) + i);
+                const uint32_t v10 = v00 + 1;
+                const uint32_t v01 = v00 + static_cast<uint32_t>(n + 1);
+                const uint32_t v11 = v01 + 1;
+                m.indices.insert(m.indices.end(),
+                                 {v00, v10, v11, v00, v11, v01});
+            }
+        }
+        return m;
+    };
 
     ArapSimConfig cfg = BareConfig();
-    cfg.hooke_n_per_m = T;
+    cfg.spring_stiffness_per_area = c;
 
-    // 1 m 正方形：边长 AB 拉长 delta ⇒ 两端各受 T·delta = 10 N（且沿边反向）。
-    const MeshData mesh = MakeFlatSquare(/*l=*/1.0f);
-    ArapSim sim;
-    sim.Build(mesh, cfg);
-    std::vector<Vec3f> pushed = mesh.positions;
-    pushed[1] = pushed[1] + Vec3f(delta, 0.0f, 0.0f);
+    // ── 属性 1：顶点面积 ∝ 1/N（同样的 1 m² 平板，切得越细每块越小）──
+    //    并且「面积 × N」守恒（= 总面积），这就是"与 N 同阶反比"的定义。
+    {
+        float prev_area_n = -1.0f;
+        for (int n : {1, 4, 8}) {
+            const MeshData grid = make_grid(n);
+            ArapSim gsim;
+            gsim.Build(grid, cfg);
+            EXPECT_NEAR(gsim.surface_area(), 1.0f, 1e-3f);
+            const size_t N = gsim.particle_count();
+            const float mean_area = gsim.surface_area() / static_cast<float>(N);
+            // 面积 × N = 总面积 ⇒ 恒定（与 N 无关的等价表述）
+            EXPECT_NEAR(mean_area * static_cast<float>(N), 1.0f, 1e-3f)
+                << "n=" << n << "：平均面积×N 应恒等于总面积";
+            if (prev_area_n > 0.0f) {
+                EXPECT_LT(mean_area, prev_area_n)
+                    << "n=" << n << "：越细 ⇒ 每质点面积越小";
+            }
+            prev_area_n = mean_area;
+        }
+    }
 
-    // 先验证"力"，再验证"加速度"（ComputeForcesAt 返回 F/m）。
-    std::vector<Vec3f> acc;
-    sim.ComputeForcesAt(pushed, ZeroVelocity(4), &acc);
-    // 顶点 1（B，1 m 网格里的一个非对角点）的质量 = 1/3 m² × 1 kg/m² = 1/3 kg
-    // （1×1 m 网格、对角线 AC：B 属一个三角形 ⇒ 面积 0.5/3 = 1/6 m² ⇒ m = 1/6 kg）
-    const float m_b = sim.masses()[1];
-    const Vec3f force_b = acc[1] * m_b;     // N
-    // 一阶（T·δ = 10 N）；实测 10.887 N —— 偏大是**几何一阶项**带来的（拉伸也顺带改变
-    // 了相邻边的长度/夹角，量级 O(δ²/边长)·T ≈ 0.9 N），故容差取 1.5 N。
-    EXPECT_NEAR(force_b.x(), -T * delta, 1.5f)
-        << "1 m 边长伸长 0.1 m ⇒ ≈10 N（实测 " << -force_b.x() << " N）";
-    EXPECT_NEAR(force_b.z(), 0.0f, 1e-5f);
-    const Vec3f force_a = acc[0] * sim.masses()[0];
-    EXPECT_NEAR(force_a.x(), T * delta, 1.5f) << "两端力等大反向";
+    // ── 属性 2：★核心★ 稳定步长上限与网格密度无关 ──
+    //    max_stable_dt() = 2/√(max_i row_i)，而 row_i = Σ k_e/m + β·n/((n+1)m)
+    //    代入 k_e = c√(a_i a_j)、β = c'a、m = ρa 后 row_i ≈ n·c/ρ + c'/ρ·n/(n+1)
+    //    **与 a（也就是与 N、与边长）都无关**。这条是整个定标设计的目标，必须成立。
+    {
+        float prev_bound = -1.0f;
+        for (int n : {1, 4, 8}) {
+            const MeshData grid = make_grid(n);
+            ArapSim gsim;
+            gsim.Build(grid, cfg);
+            const float bound = gsim.max_stable_dt();
+            EXPECT_GT(bound, 0.0f);
+            if (prev_bound > 0.0f) {
+                // 允许 2 倍以内：1-ring 度数随网格不同（角点 n=2、边界 n=4、内部 n=6），
+                // 而 row_i 里 n 直接出现（6c/ρ 与 2c/ρ 差 3 倍），故"max row 落在哪类顶点上"
+                // 会影响常数因子。实测 n=1→4 差 1.46 倍（角点主导）、n=4→8 基本持平。
+                // **关键是量级不漂**（若定标错会差 1~2 个数量级，见下面属性 3 的反例）。
+                EXPECT_NEAR(bound, prev_bound, 1.0f * prev_bound + 1e-6f)
+                    << "n=" << n << "：稳定上限应与 n=1 时同量级（实测 " << bound
+                    << " vs " << prev_bound
+                    << "）—— 若定标错（如旧的 k_e ∝ 1/L0）这里会差 1~2 个数量级";
+            }
+            prev_bound = bound;
+        }
+    }
 
-    // 同一条边上，若初始边长是 2 m、仍伸长同一个 0.1 m：
-    //   k_e = T/L0 ⇒ 力 = T·delta/L0 = 5 N（"边越长，同样的伸长量出力越小"）。
-    const MeshData long_mesh = MakeFlatSquare(/*l=*/2.0f);
-    ArapSim long_sim;
-    long_sim.Build(long_mesh, cfg);
-    std::vector<Vec3f> pushed_long = long_mesh.positions;
-    pushed_long[1] = pushed_long[1] + Vec3f(delta, 0.0f, 0.0f);
-    std::vector<Vec3f> acc_long;
-    long_sim.ComputeForcesAt(pushed_long, ZeroVelocity(4), &acc_long);
-    const float force_long_b = (acc_long[1] * long_sim.masses()[1]).x();
-    EXPECT_NEAR(force_long_b, -0.5f * T * delta, 1.5f)
-        << "按初始边长归一化：2 m 边、同样伸长 0.1 m ⇒ 力减半（≈5 N，实测 "
-        << -force_long_b << " N）";
-
-    // 线性：伸长加倍 ⇒ 力加倍。
-    std::vector<Vec3f> pushed2 = mesh.positions;
-    pushed2[1] = pushed2[1] + Vec3f(2.0f * delta, 0.0f, 0.0f);
-    std::vector<Vec3f> acc2;
-    sim.ComputeForcesAt(pushed2, ZeroVelocity(4), &acc2);
-    EXPECT_NEAR((acc2[1] * m_b).x(), -2.0f * T * delta, 4.0f);
+    // ── 属性 3：旧定标的反例检查 —— 用「边长」当刚度基准会让上限随 N 剧烈漂移 ──
+    //    这里用"人为把 c 设成 ∝ 1/L0"来模拟旧实现（k_e = T/L0 ⇔ c_eff = T/(L0·√(a a))），
+    //    验证它确实会让上限随细分崩塌 ⇒ 反证面积定标是必需的。
+    {
+        float prev = -1.0f;
+        float ratio_total = 1.0f;
+        for (int n : {1, 4, 8}) {
+            const MeshData grid = make_grid(n);
+            ArapSimConfig bad = cfg;
+            const float l0 = 1.0f / static_cast<float>(n);
+            // 模拟旧式"按边长归一化"：等效 c 随 L0 变小而变大（∝1/L0³ 的同类漂移）
+            bad.spring_stiffness_per_area = c / (l0 * l0 * l0);
+            ArapSim gsim;
+            gsim.Build(grid, bad);
+            const float bound = gsim.max_stable_dt();
+            if (prev > 0.0f) {
+                ratio_total *= (prev / bound);
+            }
+            prev = bound;
+        }
+        // 实测：n=1 → 4 → 8 共崩 33 倍（每步约 5.7 倍）。方向明确（随细分急剧恶化），
+        // 而面积定标在同样跨度内只漂 1.46 倍（见属性 2）。
+        EXPECT_GT(ratio_total, 10.0f)
+            << "旧式按边长定标会让稳定上限随细分崩掉一个数量级以上（实测共 "
+            << ratio_total << " 倍）—— 这就是必须改成面积定标的原因";
+    }
 }
 
 // ── 7. 重力 + 阻尼：F = g − u·v（在弹簧不受力的构型上逐分量精确比对）──
 TEST(ArapSimTest, GravityAndDampingAreExact) {
     const MeshData mesh = MakeFlatSquare(/*l=*/1.0f);
     ArapSimConfig cfg = BareConfig();
-    cfg.hooke_n_per_m = 300.0f;              // 弹簧在位但处于原长 ⇒ 力为零
+    cfg.spring_stiffness_per_area = 5.0e3f;  // 弹簧在位但处于原长 ⇒ 力为零
     cfg.gravity_magnitude = 9.8f;
     cfg.damping_per_second = 3.0f;
     ArapSim sim;
@@ -328,7 +383,7 @@ TEST(ArapSimTest, GravityAndDampingAreExact) {
     std::vector<Vec3f> force;
     sim.ComputeForcesAt(mesh.positions, vel, &force);
 
-    // 重力项 = g（与质量无关）；阻尼项按 F = −u·m·v 除以 m ⇒ −u·v（也与质量无关）。
+    // 重力项 = g（与质量无关）；阻尼项 a_damp = −u·v（需求方指定：与质量无关）。
     for (size_t i = 0; i < vel.size(); ++i) {
         const Vec3f expected =
             Vec3f(0.0f, -9.8f, 0.0f) - vel[i] * cfg.damping_per_second;
@@ -341,7 +396,7 @@ TEST(ArapSimTest, GravityAndDampingAreExact) {
 TEST(ArapSimTest, ArapForceIsZeroUnderRigidRotationOfFlatMesh) {
     const MeshData mesh = MakeFlatSquare(/*l=*/1.0f);
     ArapSimConfig cfg = BareConfig();
-    cfg.arap_stiffness_n_per_m = 200.0f;
+    cfg.arap_stiffness_per_area = 200.0f;
     ArapSim sim;
     sim.Build(mesh, cfg);
 
@@ -380,7 +435,7 @@ TEST(ArapSimTest, ArapForcePushesSquashedShapeBack) {
                       Vec3f(2.0f, 1.0f, 0.0f), Vec3f(0.0f, 1.0f, 0.0f)};
 
     ArapSimConfig cfg = BareConfig();
-    cfg.arap_stiffness_n_per_m = 200.0f;
+    cfg.arap_stiffness_per_area = 200.0f;
     ArapSim sim;
     sim.Build(mesh, cfg);
 
@@ -411,7 +466,7 @@ TEST(ArapSimTest, ArapForcePushesSquashedShapeBack) {
 
     // 单变量对照：关掉 ARAP（并去掉重力，因为重力也是力）⇒ 力严格为零。
     // 若这里不为零，说明上面测到的不是 ARAP 力（判别力所在）。
-    cfg.arap_stiffness_n_per_m = 0.0f;
+    cfg.arap_stiffness_per_area = 0.0f;
     cfg.gravity_magnitude = 0.0f;
     sim.SetConfig(cfg);
     std::vector<Vec3f> force_off;
@@ -431,7 +486,7 @@ TEST(ArapSimTest, ArapRestoresShapeOverTime) {
 
     // 起始状态用「地面」压出来：下边（y = −1）被夹到 −0.798 ⇒ 高度 2 → 1.798。
     ArapSimConfig cfg = BareConfig();
-    cfg.arap_stiffness_n_per_m = 200.0f;
+    cfg.arap_stiffness_per_area = 200.0f;
     cfg.gravity_magnitude = 0.0f;
     cfg.damping_per_second = 4.0f;
     cfg.enable_ground = true;
@@ -441,7 +496,7 @@ TEST(ArapSimTest, ArapRestoresShapeOverTime) {
     ArapSim with_b;
     ArapSim without_b;
     with_b.Build(mesh, cfg);
-    cfg.arap_stiffness_n_per_m = 0.0f;
+    cfg.arap_stiffness_per_area = 0.0f;
     without_b.Build(mesh, cfg);
 
     const float squashed_height =
@@ -450,9 +505,9 @@ TEST(ArapSimTest, ArapRestoresShapeOverTime) {
 
     // 撤掉地面（不再约束下边），只留形状力 + 阻尼：形状应自己弹回原高。
     cfg.enable_ground = false;
-    cfg.arap_stiffness_n_per_m = 200.0f;
+    cfg.arap_stiffness_per_area = 200.0f;
     with_b.SetConfig(cfg);
-    cfg.arap_stiffness_n_per_m = 0.0f;
+    cfg.arap_stiffness_per_area = 0.0f;
     without_b.SetConfig(cfg);
 
     for (int i = 0; i < 120; ++i) {
@@ -514,8 +569,10 @@ TEST(ArapSimTest, DampingDecaysVelocityGeometrically) {
 TEST(ArapSimTest, DtAboveStabilityBoundDivergesAndSubstepsFixIt) {
     const MeshData mesh = MakeCube();
     ArapSimConfig cfg = BareConfig();
-    cfg.hooke_n_per_m = 40000.0f;   // 很硬：边长 0.9 m ⇒ k_e ≈ 44444 N/m，稳定上限很小
-    cfg.arap_stiffness_n_per_m = 0.0f;
+    // 很硬：c = 4e4 N/m³（比橡胶硬 2.7 倍）⇒ 边长 0.9 m 时 k_e ≈ c·a ≈ 1e4 N/m，
+    // 而面密度保持 1 kg/m² ⇒ 稳定上限很小（远小于 0.05 s）。
+    cfg.spring_stiffness_per_area = 4.0e4f;
+    cfg.arap_stiffness_per_area = 0.0f;
     cfg.gravity_magnitude = 9.8f;
     cfg.ground_y = -100.0f;        // 地面很远 ⇒ 不参与
     cfg.enable_ground = false;

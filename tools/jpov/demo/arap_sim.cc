@@ -366,10 +366,10 @@ void ArapSim::Build(const std::vector<jpov::MeshData>& meshes,
     CHECK_GE(config.substeps, 1) << "ArapSim::Build: substeps 必须 ≥ 1";
     CHECK_GT(config.area_density_kg_per_m2, 0.0f)
         << "ArapSim::Build: area_density_kg_per_m2 必须 > 0";
-    CHECK_GE(config.hooke_n_per_m, 0.0f)
-        << "ArapSim::Build: hooke_n_per_m 必须 ≥ 0";
-    CHECK_GE(config.arap_stiffness_n_per_m, 0.0f)
-        << "ArapSim::Build: arap_stiffness_n_per_m 必须 ≥ 0";
+    CHECK_GE(config.spring_stiffness_per_area, 0.0f)
+        << "ArapSim::Build: spring_stiffness_per_area 必须 ≥ 0";
+    CHECK_GE(config.arap_stiffness_per_area, 0.0f)
+        << "ArapSim::Build: arap_stiffness_per_area 必须 ≥ 0";
     CHECK_GE(config.damping_per_second, 0.0f)
         << "ArapSim::Build: damping_per_second 必须 ≥ 0";
     CHECK_GE(config.gravity_magnitude, 0.0f)
@@ -499,6 +499,7 @@ void ArapSim::BuildTopology(const std::vector<jpov::MeshData>& meshes) {
                     e.a = lo;
                     e.b = hi;
                     e.rest_length = (rest_pos_[hi] - rest_pos_[lo]).Norm();
+                    e.geom_mean_area = 0.0f;   // 面积在建完之后回填（见下）
                     edges_.push_back(e);
                 }
             }
@@ -620,17 +621,20 @@ void ArapSim::BuildTopology(const std::vector<jpov::MeshData>& meshes) {
     total_mass_ = total_mass;
     surface_area_ = total_area;
 
+    // 回填每条边的 √(a_i·a_j)（面积定标用；此时两种面积都已就绪）。
+    for (Edge& e : edges_) {
+        e.geom_mean_area =
+            std::sqrt(particle_area_m2_[e.a] * particle_area_m2_[e.b]);
+    }
+
     // 两类刚度：边弹簧刚度系数 T，ARAP 刚度 β（默认按 T 换算，见 config 注释）。
-    edge_hooke_n_per_m_ = config_.hooke_n_per_m;
-    arap_beta_ = config_.arap_stiffness_n_per_m > 0.0f
-                     ? config_.arap_stiffness_n_per_m
-                     : config_.hooke_n_per_m * ArapSimConfig::kArapPerHooke;
+    spring_c_ = config_.spring_stiffness_per_area;
+    arap_beta_c_ = config_.arap_stiffness_per_area;
 
     LOG(INFO) << "ArapSim 物理量: 面密度 " << config_.area_density_kg_per_m2
               << " kg/m² ⇒ 总面积 " << total_area << " m²，总质量 "
               << total_mass << " kg（实测密度 " << (total_area > 0.0f ? total_mass / total_area : 0.0f)
-              << " kg/m²）; 胡克 T=" << edge_hooke_n_per_m_ << " N/m（0.1 m 产生 "
-              << 0.1f * edge_hooke_n_per_m_ << " N）; ARAP β=" << arap_beta_
+              << " kg/m²）; 胡克 c=" << spring_c_ << " N/m³; ARAP c'=" << arap_beta_c_
               << " N/m; 阻尼 u=" << config_.damping_per_second
               << "/s（每 kg）; 子步=" << config_.substeps;
 
@@ -742,10 +746,8 @@ void ArapSim::SetConfig(const ArapSimConfig& config) {
     // 材质刚度是「构建期派生量」（β 默认由 T 换算、质量由面密度×面积得到），
     // 故改配置时必须同步刷新它们——否则"关掉刚度"（置 0）不会生效，
     // 且把 β 从 0 改成非 0 时会静默沿用旧的自动值。质量只随面密度变。
-    edge_hooke_n_per_m_ = config_.hooke_n_per_m;
-    arap_beta_ = config_.arap_stiffness_n_per_m > 0.0f
-                     ? config_.arap_stiffness_n_per_m
-                     : config_.hooke_n_per_m * ArapSimConfig::kArapPerHooke;
+    spring_c_ = config_.spring_stiffness_per_area;
+    arap_beta_c_ = config_.arap_stiffness_per_area;
     for (uint32_t i = 0; i < particle_count_; ++i) {
         mass_[i] = particle_area_m2_[i] * config_.area_density_kg_per_m2;
         CHECK_GT(mass_[i], 0.0f) << "ArapSim::SetConfig: 质点 " << i
@@ -797,7 +799,7 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
     // ① 胡克弹簧：每条边一根，k_e = T/L0，单测可验证「0.1 m 产生 10 N」。
     //   注意返回的是 F/m ⇒ 除以两端质量时要把"力"和"加速度"分清：
     //   这里直接在加速度域累加：a += ±F_e/m_i，m_i 是加速度侧的质量。
-    if (edge_hooke_n_per_m_ > 0.0f) {
+    if (spring_c_ > 0.0f) {
         for (const Edge& e : edges_) {
             if (e.rest_length < min_edge_length_) {
                 continue;   // 退化短边（数据卫生，见 arap_sim.h）
@@ -807,8 +809,8 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
             if (len < 1e-12f) {
                 continue;   // 两端完全重合：方向未定义（下一个子步/别的力会拉开）
             }
-            // k_e [N/m] × 伸长量 [m] = 力 [N]
-            const float k_e = edge_hooke_n_per_m_ / e.rest_length;
+            // k_e = c·√(a_i·a_j) [N/m]（面积定标，见文件头） × 伸长量 [m] = 力 [N]
+            const float k_e = spring_c_ * e.geom_mean_area;
             const float tension_n = k_e * (len - e.rest_length);   // >0 = 被拉长
             const jpov::Vec3f unit = d * (1.0f / len);
             const jpov::Vec3f f_n = unit * tension_n;              // 作用在 b 上的力（拉向 a）
@@ -818,17 +820,19 @@ void ArapSim::ComputeForcesAt(const std::vector<jpov::Vec3f>& positions,
     }
 
     // ② ARAP 局部形状力：F_i = β·(goal_i − x_i)，每质点除以自身质量。
-    if (arap_beta_ > 0.0f) {
+    if (arap_beta_c_ > 0.0f) {
         std::vector<jpov::Vec3f> shape_offset;
         ComputeLocalRotationsInto(positions, &shape_offset);
         for (uint32_t i = 0; i < particle_count_; ++i) {
             const jpov::Vec3f goal =
                 NeighborhoodCentroid(positions, i) + shape_offset[i];
-            (*out)[i] += (goal - positions[i]) * (arap_beta_ / mass_[i]);
+            // β_i = c'·a_i [N/m]（面积定标）⇒ 加速度 = β_i·Δ/m_i
+            const float beta_i = arap_beta_c_ * particle_area_m2_[i];
+            (*out)[i] += (goal - positions[i]) * (beta_i / mass_[i]);
         }
     }
 
-    // ③ 线性阻尼：F = −u·m·v ⇒ 加速度 −u·v（与质量无关），即"速度衰减时间常数 1/u"。
+    // ③ 阻尼（与质量无关）：a_damp = −u·v ⇒ 速度衰减时间常数恒为 1/u。
     if (config_.damping_per_second > 0.0f) {
         for (uint32_t i = 0; i < particle_count_; ++i) {
             (*out)[i] -= velocities[i] * config_.damping_per_second;
@@ -917,20 +921,21 @@ float ArapSim::max_stable_dt() const {
         return 0.0f;
     }
     std::vector<float> row_sum(particle_count_, 0.0f);
-    if (edge_hooke_n_per_m_ > 0.0f) {
+    if (spring_c_ > 0.0f) {
         for (const Edge& e : edges_) {
             if (e.rest_length < min_edge_length_) {
                 continue;
             }
-            const float k_e = edge_hooke_n_per_m_ / e.rest_length;
+            const float k_e = spring_c_ * e.geom_mean_area;
             row_sum[e.a] += k_e / mass_[e.a];
             row_sum[e.b] += k_e / mass_[e.b];
         }
     }
-    if (arap_beta_ > 0.0f) {
+    if (arap_beta_c_ > 0.0f) {
         for (uint32_t i = 0; i < particle_count_; ++i) {
             const float n = static_cast<float>(ring_[i].size());
-            row_sum[i] += arap_beta_ * n / ((n + 1.0f) * mass_[i]);
+            const float beta_i = arap_beta_c_ * particle_area_m2_[i];
+            row_sum[i] += beta_i * n / ((n + 1.0f) * mass_[i]);
         }
     }
     float max_row = 0.0f;

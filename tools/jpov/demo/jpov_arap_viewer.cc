@@ -52,8 +52,8 @@ struct CliParsed {
     // 材质/物理量的覆盖值（< 0 = 不覆盖、用代码内默认）。
     // 用途：无界面地做「只改一个变量」的对照实验（headless 批量跑）。
     float area_density = -1.0f;  // kg/m²
-    float hooke = -1.0f;         // N/m
-    float arap = -1.0f;          // N/m（0 = 按 T/7 自动换算）
+    float hooke = -1.0f;         // N/m³（胡克材料常数 c）
+    float arap = -1.0f;          // N/m³（ARAP 材料常数 c'）
     float damping = -1.0f;       // 1/s
     float gravity = -1.0f;       // m/s²
 };
@@ -265,12 +265,12 @@ int main(int argc, char** argv) {
         LOG(INFO) << "覆盖 面密度 = " << cli.area_density << " kg/m²";
     }
     if (cli.hooke >= 0.0f) {
-        app.sim_config_.hooke_n_per_m = cli.hooke;
-        LOG(INFO) << "覆盖 胡克 T = " << cli.hooke << " N/m";
+        app.sim_config_.spring_stiffness_per_area = cli.hooke;
+        LOG(INFO) << "覆盖 胡克材料常数 c = " << cli.hooke << " N/m³";
     }
     if (cli.arap >= 0.0f) {
-        app.sim_config_.arap_stiffness_n_per_m = cli.arap;
-        LOG(INFO) << "覆盖 ARAP β = " << cli.arap << " N/m（0 = 按 T/7 自动换算）";
+        app.sim_config_.arap_stiffness_per_area = cli.arap;
+        LOG(INFO) << "覆盖 ARAP 材料常数 c' = " << cli.arap << " N/m³";
     }
     if (cli.damping >= 0.0f) {
         app.sim_config_.damping_per_second = cli.damping;
