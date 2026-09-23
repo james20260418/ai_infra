@@ -305,7 +305,7 @@ cc_binary(
 # ============================================================================
 # ARAP 软体查看器 — 与 jpov_model_viewer 并列的交互式查看器
 #
-#   arap_sim         : 纯 CPU 软体仿真（焊接 + PBD 三类约束），可独立单测
+#   arap_sim         : 纯 CPU 软体仿真（四参数受力模型 + 显式积分），可独立单测
 #   arap_viewer_app  : 渲染核心 App（仿真宿主 + 交互面板）
 #   jpov_arap_viewer : 主程序（CLI 装配 + 交互/headless 分发）
 #

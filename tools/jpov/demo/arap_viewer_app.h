@@ -1,19 +1,20 @@
 // JPOV ARAP 查看器 — 渲染核心 App（可交互的软体动力学仿真宿主）
 //
 // 与 model viewer 并列的第二个交互式查看器：同样「加载 glTF + 可调视角/光照/地面」，
-// 额外多出一套**动力学仿真**能力——把被加载的网格当作可变形软体（ARAP 弹性 + PBD
-// 碰撞），在重力场里从高处摔到地面上，肉眼观察它是否呈现「充气城堡」式的回弹。
+// 额外多出一套**动力学仿真**能力——把被加载的网格当作可变形软体（胡克弹簧 + ARAP
+// 形状力 + 重力 + 阻尼），在重力场里从高处摔到地面上，肉眼观察它的形变。
 //
-// 交互面板（底部 4 滑条 + 顶部 2 按钮）：
-//   ① 太阳仰角 °       [0,90]      —— 与 model viewer 同款光照标定
-//   ② 浊度 turb        [2,8]       —— 大气浊度（霾化 + 强度衰减）
-//   ③ 季节 R           [0.5,2.0]   —— 色温乘子
-//   ④ 地面高度 y       [-3,+3]     —— 摔落目标面的高度（实时改变 → 立刻看落点差异）
+// 交互面板（左列 4 个光照/标高滑条 + 右列 4 个物理滑条 + 顶部 2 按钮）：
+//   左列：太阳仰角 ° [0,90] / 浊度 turb [2,8] / 季节 R [0.5,2.0] / 地面高度 y（自适应范围）
+//   右列：胡克 h / 重力 g / ARAP b / 阻尼 u —— **需求方指定的四个物理参数**，
+//         实时可调，便于做「只改一个变量」的对照实验（力模型见 arap_sim.h 文件头）。
 //   [动力学：运行/暂停] —— 仿真启停（暂停时不推进物理，仅保持当前形变）
 //   [重置 mesh]         —— 把网格恢复到 bind pose（清空速度与形变）
 //
-// 重力/阻尼/迭代次数等物理参数本 PR 一律**代码内配置**（见 ArapViewerApp 的
-// sim_config_ 初值），界面只暴露上面 4 个标高/光照量。
+// 物理步长：**固定 0.05 s**（需求方指定）。渲染帧（1/60 s）用累加器凑够 0.05 s
+// 才推进一步 ⇒ 物理按真实时间演化，且结果与帧率抖动无关（确定性，便于出 gold）。
+// 若 max_stable_dt() < 0.05（边太短 ⇒ 弹簧太硬），面板会显示该上限；处理方式是
+// 加大 substeps（同一格式、更小步长），而不是往模型里多塞几个力。
 //
 // ═══ 每帧链路（变形 → 渲染，顺序不可换）═══
 //   Step(dt) → WriteBackPositions → RecomputeTangentSpace → UpdateMesh → Draw
@@ -21,9 +22,10 @@
 //   几何变形后必须用新位置重算，否则光照用「旧形状法线」照「新形状几何」。
 //
 // ═══ 多 primitive 的处理 ═══
-//   每个 glTF primitive 独立仿真、独立绘制。这不是偷懒而是**正确**：primitive 之间
-//   不共享顶点，ARAP 的 Laplacian/1-ring 本来就跨不过 primitive 边界，强行焊接反而
-//   会引入虚假连接。材质亦各自独立（不共用首 primitive 的材质）。
+//   **全部 primitive 合成【一个】物理物体**：跨 primitive 焊接（位置重合处焊成同一
+//   质点）。理由（Danis 2026-09-22 实测）：资产常按材质切开（lantern.glb = 杆/链/
+//   灯罩 3 个 primitive），若各自独立仿真，各部件互不支撑 ⇒ 看起来像模型散架。
+//   渲染侧仍逐 primitive 绘制，材质各自独立。
 
 #ifndef JPOV_DEMO_ARAP_VIEWER_APP_H_
 #define JPOV_DEMO_ARAP_VIEWER_APP_H_
@@ -78,9 +80,9 @@ public:
     // 装载一个内置单位方块（无资产依赖）。
     //
     // 用途：验证动力学本身的「零模型」——方块从水平姿态落下时**不可能翻倒**，
-    // 只能靠压缩来响应碰撞，因此 ARAP 的“弹性/回弹”行为在这里能干净地看到；
-    // 而真实资产的形状往往可以选择“翻倒”这条零能量路径（ARAP 允许等距弯曲/旋转），
-    // 于是看不到明显压缩。需求方验收“充气城堡”直觉时用这个最清楚。
+    // 只能靠压缩来响应碰撞，因此弹性/回弹行为在这里能干净地看到；而真实资产的形状
+    // 往往可以选择「翻倒」这条零能量路径（ARAP 允许等距弯曲/旋转），于是看不到压缩。
+    // 也可以作为 ARAP 局部形状力的验证面——强压方块，看形状力是否把它推回原样。
     //
     // Pre-condition: Init() 已调用；本函数会在推入方块前清空 prims_，
     //                 故只能在启动时调用一次（不支持运行时热切换模型）。
@@ -121,11 +123,25 @@ public:
     float ground_y_min_ = -3.0f;
     float ground_y_max_ = 3.0f;
 
-    // 物理参数（本 PR 代码内配置；界面不暴露，便于做"只改一个变量"的对照实验）。
+    // 物理参数（四参数模型，见 arap_sim.h；面板右列可实时调）。
     jpov_arap::ArapSimConfig sim_config_;
+    // 面板右列四个物理参数的当前值（每帧同步进 sim_config_）。
+    float hooke_ = 300.0f;      // 胡克系数 h
+    float gravity_ = 9.8f;      // 重力大小（方向恒为 −y）
+    float arap_ = 300.0f;       // ARAP 局部刚度 b
+    float damping_ = 1.0f;      // 线性阻尼 u
 
     // 已加载的 primitive 列表（main 用来算包围盒做相机自适应）。
     const std::vector<SimPrimitive>& primitives() const { return prims_; }
+
+    // 模型包围盒（在 BuildSim 里由装载后的 CPU 网格算出）。
+    // 地面自动定位与相机取景都读它——两处必须同源，否则会分叉。
+    const jpov::Vec3f& model_min() const { return model_min_; }
+    const jpov::Vec3f& model_max() const { return model_max_; }
+
+    // 固定物理子步数（≤ 0 / 未调用 = 按 max_stable_dt() 自动派生）。
+    // 命令行 --substeps 用它覆盖，便于做“同一步长下多扫几个子步”的对照实验。
+    void SetFixedSubsteps(int substeps) { fixed_substeps_ = substeps; }
 
     // 全局唯一的仿真器（全部 primitive 合成的一个物理物体）。供 headless 诊断读取
     // 质点/畸变/退化旋转等量。
@@ -141,11 +157,14 @@ private:
     static float AppTextWidth(const char* text, float font_size,
                               const char* /*font_alias*/, void* userdata);
 
-    // 把本帧的物理状态推进一格，并把形变结果同步到 GPU（写回 → 重算 TN → 上传）。
+    // 把本帧的物理推进一格，并把形变结果同步到 GPU（写回 → 重算 TN → 上传）。
     // 仅在 dynamics_running_ 为真时调用。
-    void AdvanceDynamics(float dt_seconds);
+    //
+    // frame_dt 是渲染帧时长（1/60 s）；物理固定步长 kPhysicsDt = 0.05 s，用累加器
+    // 凑够才推进一步（物理按真实时间演化，且与帧率抖动无关）。
+    void AdvanceDynamics(float frame_dt);
 
-    // 绘制底部 4 滑条 + 顶部 2 按钮 + 状态文本（仅交互窗口）。
+    // 绘制底部左列 4 光照/标高滑条 + 右列 4 物理滑条 + 顶部 2 按钮 + 状态文本（仅交互窗口）。
     void DrawPanel(const jpov::InputSnapshot& input);
 
     // 把一个（已备好 flag/法线/切线的）CPU 网格接成一个可仿真 primitive：
@@ -160,12 +179,20 @@ private:
     // Pre-condition: prims_ 非空（AddPrimitive 已完成各 primitive 的注册）。
     void BuildSim();
 
+    // 由 prims_ 的当前位置算模型包围盒 → model_min_ / model_max_。
+    // Pre-condition: prims_ 非空。
+    void ComputeModelBounds();
+
     // 释放某个 primitive 的 GL 网格（幂等）。
     void ReleasePrimitiveMesh(SimPrimitive* prim);
 
     std::vector<SimPrimitive> prims_;
     // 全部 primitive 共用【一个】仿真器：跨 primitive 焊接（见 arap_sim.h 文件头）。
     jpov_arap::ArapSim sim_;
+    jpov::Vec3f model_min_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
+    jpov::Vec3f model_max_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
+    int fixed_substeps_ = 0;         // 0 = 自动派生（见 AdvanceDynamics）
+    int substeps_in_use_ = 1;        // 当前实际用的子步数（面板显示用）
     jpov::GltfObject gltf_;          // 持有材质/纹理的 GPU 资源（本 App 不释放其网格）
     bool has_gltf_ = false;
 
@@ -176,6 +203,16 @@ private:
     bool show_panel_ = true;                   // 是否绘制交互面板
     bool dynamics_running_ = false;            // 仿真是否推进（默认暂停，按按钮启动）
     bool diverged_ = false;                    // 已判出发散（见 AdvanceDynamics 的保护）
+    float physics_accum_ = 0.0f;               // 物理时间累加器（固定步长 0.05 s）
+
+    // 需求方指定的物理积分步长（秒）。
+    static constexpr float kPhysicsDt = 0.05f;
+    // 自动子步数的上限（保护交互帧率；触发时日志会告警）。
+    static constexpr int kMaxAutoSubsteps = 64;
+
+    // 由稳定上限派生本帧子步数：h = kPhysicsDt/substeps ≤ 0.5·上限（留一倍安全余量）。
+    // fixed > 0（命令行强制）时直接用 fixed；上限 ≤ 0（无刚度）时返回 1。
+    static int SimSubstepsFor(float bound_s, int fixed);
 
     jpov::Ui ui_;                              // 跨帧持有（滑条/按钮状态）
     static constexpr float kPanelFontSize = 16.0f;
@@ -220,6 +257,45 @@ inline float ArapViewerApp::AppTextWidth(const char* text, float font_size,
                                  /*text=*/text ? text : "", font_size);
 }
 
+inline int ArapViewerApp::SimSubstepsFor(float bound_s, int fixed) {
+    if (fixed > 0) {
+        return fixed;
+    }
+    if (!(bound_s > 0.0f)) {
+        return 1;   // 无刚度（h = b = 0）⇒ 没有稳定上限
+    }
+    const int needed =
+        static_cast<int>(std::ceil(kPhysicsDt / (0.5f * bound_s)));
+    if (needed > kMaxAutoSubsteps) {
+        LOG(WARNING) << "按稳定上限需要 " << needed << " 个子步，已封顶到 "
+                     << kMaxAutoSubsteps
+                     << "（仍可能发散：请调小 h/b，或用 --substeps 指定）";
+    }
+    return std::min(std::max(needed, 1), kMaxAutoSubsteps);
+}
+
+inline void ArapViewerApp::ComputeModelBounds() {
+    CHECK(!prims_.empty());
+    bool first = true;
+    for (const SimPrimitive& prim : prims_) {
+        for (const jpov::Vec3f& p : prim.mesh.positions) {
+            if (first) {
+                model_min_ = p;
+                model_max_ = p;
+                first = false;
+                continue;
+            }
+            model_min_ = jpov::Vec3f(std::min(model_min_.x(), p.x()),
+                                     std::min(model_min_.y(), p.y()),
+                                     std::min(model_min_.z(), p.z()));
+            model_max_ = jpov::Vec3f(std::max(model_max_.x(), p.x()),
+                                     std::max(model_max_.y(), p.y()),
+                                     std::max(model_max_.z(), p.z()));
+        }
+    }
+    CHECK(!first) << "ArapViewerApp::ComputeModelBounds: 所有 primitive 都没有顶点";
+}
+
 inline void ArapViewerApp::BuildSim() {
     CHECK(!prims_.empty());
     std::vector<jpov::MeshData> meshes;
@@ -227,21 +303,35 @@ inline void ArapViewerApp::BuildSim() {
     for (const SimPrimitive& p : prims_) {
         meshes.push_back(p.mesh);   // 拷贝：MeshData 可整体拷贝
     }
+
+    // ── 模型包围盒 + 地面自动定位（**必须在 Build 之前**）──
+    //   Build → Reset 会做一次「初始地面投射」。若此刻 ground_y 还是默认值、而模型
+    //   底部低于它，模型会被硬压扁 ⇒ 纯人为的初始条件错误（实测：灯罩最低点
+    //   y ≈ −3.0 而默认 ground_y = −3.0，t=0 就被压出 5% 边长畸变 + 7% 退化旋转）。
+    //   故先把地面放到「模型底部下方 0.5 个模型高度」（⇒ 摔落高度 = 0.5 个模型高），
+    //   滑条范围也按模型尺度自适应（固定 [-3,3] 装不下 22 单位高的路灯）。
+    ComputeModelBounds();
+    const float model_h = std::max(1e-4f, model_max_.y() - model_min_.y());
+    ground_y_ = model_min_.y() - 0.5f * model_h;
+    ground_y_min_ = model_min_.y() - 3.0f * model_h;
+    ground_y_max_ = model_min_.y() + 0.5f * model_h;
+    ground_y_prev_ = ground_y_;
+    sim_config_.ground_y = ground_y_;
+
     sim_.Build(meshes, sim_config_);
     LOG(INFO) << "物理物体：网格 " << sim_.mesh_count() << " 个，顶点 "
               << sim_.vertex_count() << "，焊接质点 " << sim_.particle_count()
               << "（跨 primitive 焊接 ⇒ 各部件互相支撑）";
-    LOG(INFO) << "物理参数: g=(" << sim_config_.gravity.x() << ","
+    LOG(INFO) << "四个物理参数: 胡克 h=" << sim_config_.hooke
+              << " 重力 g=(" << sim_config_.gravity.x() << ","
               << sim_config_.gravity.y() << "," << sim_config_.gravity.z()
-              << ") 阻尼=" << sim_config_.velocity_damping_per_second
-              << " 形状恢复率=" << sim_config_.shape_restore_rate_per_second
-              << " 边长恢复率=" << sim_config_.stretch_restore_rate_per_second
-              << " 摩擦=" << sim_config_.ground_friction_per_second
-              << " 子步=" << sim_config_.substeps
-              << " 迭代=" << sim_config_.solver_iterations
-              << " 开关(shape/stretch/ground)=" << sim_config_.enable_shape
-              << "/" << sim_config_.enable_stretch << "/"
-              << sim_config_.enable_ground;
+              << ") ARAP b=" << sim_config_.arap_stiffness
+              << " 阻尼 u=" << sim_config_.damping
+              << " 子步=" << sim_config_.substeps;
+    const float bound = sim_.max_stable_dt();
+    LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
+              << " s；物理步长 " << kPhysicsDt << " s ⇒ 子步 "
+              << SimSubstepsFor(/*bound_s=*/bound, /*fixed=*/fixed_substeps_);
 }
 
 inline bool ArapViewerApp::AddPrimitive(jpov::MeshData mesh,
@@ -387,23 +477,42 @@ inline void ArapViewerApp::ReleaseModel() {
     }
 }
 
-inline void ArapViewerApp::AdvanceDynamics(float dt_seconds) {
-    // 地面高度是界面量，每帧同步进物理参数（改变即立刻影响碰撞）。
+inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
+    // 面板上的四个物理参数 + 地面高度每帧同步进物理（改动即立刻生效）。
+    sim_config_.hooke = hooke_;
+    sim_config_.gravity = jpov::Vec3f(0.0f, -gravity_, 0.0f);
+    sim_config_.arap_stiffness = arap_;
+    sim_config_.damping = damping_;
     sim_config_.ground_y = ground_y_;
+
+    // 子步数：h/b 一变稳定上限就变 ⇒ 每帧按当前参数重算（同一格式，只改分辨率）。
     sim_.SetConfig(sim_config_);
-    sim_.Step(dt_seconds);
+    substeps_in_use_ = SimSubstepsFor(/*bound_s=*/sim_.max_stable_dt(),
+                                      /*fixed=*/fixed_substeps_);
+    sim_config_.substeps = substeps_in_use_;
+    sim_.SetConfig(sim_config_);
+
+    // 固定步长 kPhysicsDt = 0.05 s（需求方指定）+ 累加器：
+    // 渲染帧 1/60 s 凑够 0.05 s 才推进一步 ⇒ 物理按真实时间演化、且与帧率无关。
+    physics_accum_ += frame_dt;
+    while (physics_accum_ >= kPhysicsDt) {
+        sim_.Step(kPhysicsDt);
+        physics_accum_ -= kPhysicsDt;
+    }
 
     // ── 发散保护（诚实兜底，不掩盖问题）──
-    //   本仿真在部分真实资产上仍会发散（详见 docs/jpov_arap_viewer_design.md §12
-    //   的"已知边界"）。与其让用户看着模型飞走/糊成一团却不知为何，不如**停住并
-    //   明说**：一旦边长畸变超过 100%（几何已完全不是原形），自动暂停并告警。
+    //   显式积分在 h 超过稳定上限（max_stable_dt()）时会发散；与其让用户看着模型
+    //   飞走/糊成一团却不知为何，不如**停住并明说**：边畸变 > 100%（几何已完全不
+    //   是原形）就自动暂停并告警。
     constexpr float kDivergeDistortion = 1.0f;
     if (!diverged_ && sim_.edge_distortion_rms() > kDivergeDistortion) {
         diverged_ = true;
         dynamics_running_ = false;
+        physics_accum_ = 0.0f;
         LOG(WARNING) << "仿真发散（边长畸变 " << sim_.edge_distortion_rms()
-                     << " > " << kDivergeDistortion
-                     << "），已自动暂停；按「重置 mesh」恢复，或调整物理参数重试";
+                     << " > " << kDivergeDistortion << "）：步长 " << kPhysicsDt
+                     << " s 超过稳定上限 " << sim_.max_stable_dt()
+                     << " s。按「重置 mesh」恢复；根治办法是加大 substeps 或调小 h/b";
     }
 
     // 顺序铁律：写回位置 → 重算 TN → 上传。法线/切线是位置的派生量。
@@ -520,6 +629,7 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
                    jpov::UiRect{{16.0f + kBtnW + kBtnGap, btn_y}, {kBtnW, kBtnH}})) {
         sim_.Reset();
         diverged_ = false;
+        physics_accum_ = 0.0f;
         std::vector<jpov::MeshData> meshes;
         meshes.reserve(prims_.size());
         for (const SimPrimitive& p : prims_) {
@@ -535,39 +645,60 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
         dynamics_running_ = false;
     }
 
-    // ── 底部 4 个半屏宽滑条（与 model viewer 同布局）──
-    const float kSliderWidth = 0.5f * w;
+    // ── 底部两列滑条 ──
+    //   左列：光照/标高（与 model viewer 同款）；右列：需求方指定的四个物理参数。
+    const float kSliderWidth = 0.42f * w;
     const float kBottom = 20.0f;
-    const float left = (w - kSliderWidth) * 0.5f;
+    const float left_col = 0.04f * w;
+    const float right_col = 0.54f * w;
     const float top = h - kBottom - (4.0f * kPanelRowH + 3.0f * kPanelSpacing);
 
     ui_.SliderFloat("太阳仰角 °", &elev_deg_,
-                    jpov::UiRect{{left, top}, {kSliderWidth, kPanelRowH}},
+                    jpov::UiRect{{left_col, top}, {kSliderWidth, kPanelRowH}},
                     0.0f, 90.0f, /*decimal_places*/ 0);
     ui_.SliderFloat("浊度 turb", &turbidity_,
-                    jpov::UiRect{{left, top + (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left_col, top + (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     2.0f, 8.0f, /*decimal_places*/ 1);
     ui_.SliderFloat("季节 R", &season_r_,
-                    jpov::UiRect{{left, top + 2.0f * (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left_col, top + 2.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     0.5f, 2.0f, /*decimal_places*/ 2);
     ui_.SliderFloat("地面高度 y", &ground_y_,
-                    jpov::UiRect{{left, top + 3.0f * (kPanelRowH + kPanelSpacing)},
+                    jpov::UiRect{{left_col, top + 3.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     ground_y_min_, ground_y_max_, /*decimal_places*/ 2);
 
-    // ── 状态文本：质点/顶点数 + 边长畸变（判断压扁程度与是否已回弹）──
+    // 右列：四参数模型（越靠上越“硬”；h/b 太大会超过稳定上限 ⇒ 面板会显示）
+    ui_.SliderFloat("胡克 h", &hooke_,
+                    jpov::UiRect{{right_col, top}, {kSliderWidth, kPanelRowH}},
+                    0.0f, 2000.0f, /*decimal_places*/ 0);
+    ui_.SliderFloat("重力 g", &gravity_,
+                    jpov::UiRect{{right_col, top + (kPanelRowH + kPanelSpacing)},
+                                 {kSliderWidth, kPanelRowH}},
+                    0.0f, 30.0f, /*decimal_places*/ 1);
+    ui_.SliderFloat("ARAP b", &arap_,
+                    jpov::UiRect{{right_col, top + 2.0f * (kPanelRowH + kPanelSpacing)},
+                                 {kSliderWidth, kPanelRowH}},
+                    0.0f, 3000.0f, /*decimal_places*/ 0);
+    ui_.SliderFloat("阻尼 u", &damping_,
+                    jpov::UiRect{{right_col, top + 3.0f * (kPanelRowH + kPanelSpacing)},
+                                 {kSliderWidth, kPanelRowH}},
+                    0.0f, 20.0f, /*decimal_places*/ 1);
+
+    // ── 状态文本：质点数 + 边长畸变（“有多软”）+ 形状力 + 退化旋转 + 稳定上限 ──
     if (!prims_.empty()) {
-        char status[256];
+        char status[320];
         std::snprintf(status, sizeof(status),
-                      "网格 %zu / 顶点 %zu / 质点 %zu   边长畸变 %.3f  退化旋转 %zu",
+                      "网格 %zu / 顶点 %zu / 质点 %zu   边长畸变 %.3f  形状力 %.4f  "
+                      "退化旋转 %zu   子步 %d（步长 0.05 s）",
                       sim_.mesh_count(), sim_.vertex_count(),
                       sim_.particle_count(),
                       static_cast<double>(sim_.edge_distortion_rms()),
-                      sim_.degenerate_rotation_count());
+                      static_cast<double>(sim_.shape_residual_rms()),
+                      sim_.degenerate_rotation_count(), substeps_in_use_);
         ui_.Text(status, jpov::UiRect{{16.0f, btn_y + kBtnH + 8.0f},
-                                      {520.0f, 24.0f}},
+                                     {900.0f, 24.0f}},
                  /*stretch_w*/ false, /*stretch_h*/ false);
     }
 }

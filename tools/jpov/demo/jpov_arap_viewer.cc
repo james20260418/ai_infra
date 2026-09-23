@@ -2,12 +2,12 @@
 //
 // 与 jpov_model_viewer 并列的第二个交互式查看器。相同点：加载一个 glTF 模型、
 // y-up 球面角相机、SkyCommand 推导光照、300×300 灰色地面。不同点：多一套**软体
-// 动力学仿真**（ARAP 弹性 + PBD 地面碰撞 + 重力 + 阻尼），可把网格从高处摔到地面，
-// 观察其「充气城堡」式回弹——交互面板多出「动力学启停 / 重置 mesh」两个按钮，
-// 以及一个「地面高度」滑条（实时改摔落目标面）。
+// 动力学仿真**（胡克弹簧 + ARAP 形状力 + 重力 + 阻尼，固定步长 0.05 s），可把网格
+// 从高处摔到地面，观察其形变；交互面板多出「动力学启停 / 重置 mesh」两个按钮、
+// 一个「地面高度」滑条，以及右列四个物理参数（h / g / b / u）。
 //
 // 结构（与 model viewer 同款「薄 main + 厚 App」分工）：
-//   demo/arap_sim.{h,cc}        —— 纯 CPU 软体仿真（焊接 + PBD 三类约束），可单测
+//   demo/arap_sim.{h,cc}        —— 纯 CPU 软体仿真（四参数受力 + 显式积分），可单测
 //   interface/mesh_geometry.h   —— 法线/切线 CPU 重算（自推、不焊接），可单测
 //   demo/arap_viewer_app.h      —— 渲染核心 App（仿真宿主 + 交互面板）
 //   本文件                      —— CLI 解析 + 装配 + 交互/headless 分发
@@ -48,6 +48,13 @@ struct CliParsed {
     std::string output_dir;      // 仅 headless：产物目录（空 = glTF 同级）
     int frames = 90;             // 仅 headless：推进的总帧数
     int every = 10;              // 仅 headless：每 N 帧落盘一张（第 0 帧恒落）
+    int substeps = 0;            // 0 = 代码内默认；>0 则固定子步数
+    // 四个物理参数的覆盖值（< 0 = 不覆盖、用代码内默认）。
+    // 用途：无界面地做「只改一个变量」的对照实验（headless 批量跑）。
+    float hooke = -1.0f;
+    float gravity = -1.0f;
+    float arap = -1.0f;
+    float damping = -1.0f;
 };
 
 // 内置方块模式的产物文件名前缀（无资产文件时用于命名输出）。
@@ -83,6 +90,36 @@ CliParsed ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--every 缺少数值，忽略";
             }
+        } else if (arg == "--substeps") {
+            if (i + 1 < argc) {
+                p.substeps = std::atoi(argv[++i]);
+            } else {
+                LOG(WARNING) << "--substeps 缺少数值，忽略";
+            }
+        } else if (arg == "--hooke") {
+            if (i + 1 < argc) {
+                p.hooke = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--hooke 缺少数值，忽略";
+            }
+        } else if (arg == "--gravity") {
+            if (i + 1 < argc) {
+                p.gravity = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--gravity 缺少数值，忽略";
+            }
+        } else if (arg == "--arap") {
+            if (i + 1 < argc) {
+                p.arap = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--arap 缺少数值，忽略";
+            }
+        } else if (arg == "--damping") {
+            if (i + 1 < argc) {
+                p.damping = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--damping 缺少数值，忽略";
+            }
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "; 已忽略";
         } else if (p.gltf_path.empty()) {
@@ -95,6 +132,9 @@ CliParsed ParseCli(int argc, char** argv) {
 }
 
 // headless：从 bind pose 起推进 frames 帧，每 every 帧落盘一张 PNG（第 0 帧恒落）。
+//
+// 注意：物理固定步长 0.05 s、渲染帧 1/60 s ⇒ **每 3 个渲染帧推进一个物理步**。
+// 故 frames 帧 ≈ frames/60 秒的物理时间（与旧版逐帧步进的总时长一致）。
 //
 // 每帧都走 App::OneIteration（与交互窗口同一条渲染体，零分叉）；区别只是
 // 面板关闭、输入为空、动力学强制开启。
@@ -162,11 +202,11 @@ bool RunHeadlessDrop(jpov_arap_viewer::ArapViewerApp* app,
             const jpov_arap::ArapSim& sim = app->sim();
             LOG(INFO) << "  frame " << f << " bbox=[" << lo[0] << "," << lo[1]
                       << "," << lo[2] << "]~[" << hi[0] << "," << hi[1] << ","
-                      << hi[2] << "] 残差=" << sim.shape_residual_rms()
+                      << hi[2] << "] 形状力=" << sim.shape_residual_rms()
                       << " 边长畸变=" << sim.edge_distortion_rms()
-                      << " 弯曲=" << sim.bend_distortion_rms()
                       << " 退化旋转=" << sim.degenerate_rotation_count() << "/"
-                      << sim.particle_count();
+                      << sim.particle_count() << " 稳定上限="
+                      << sim.max_stable_dt() << "s";
         }
     }
     LOG(INFO) << "headless 摔落序列完成: " << saved << " 张（目录 " << out_dir
@@ -205,6 +245,30 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
 
+    // 命令行可覆盖子步数（仅当 dt 超过稳定上限时才需要；见 arap_sim.h 文件头）。
+    // 不指定时由 App 按 max_stable_dt() 自动派生（同一格式、更小步长，不改力模型）。
+    if (cli.substeps > 0) {
+        app.SetFixedSubsteps(cli.substeps);
+        LOG(INFO) << "物理子步数（命令行固定）= " << cli.substeps;
+    }
+    // 四个物理参数的单变量覆盖（headless 对照实验用）。
+    if (cli.hooke >= 0.0f) {
+        app.hooke_ = cli.hooke;
+        LOG(INFO) << "覆盖 胡克 h = " << cli.hooke;
+    }
+    if (cli.gravity >= 0.0f) {
+        app.gravity_ = cli.gravity;
+        LOG(INFO) << "覆盖 重力 g = " << cli.gravity;
+    }
+    if (cli.arap >= 0.0f) {
+        app.arap_ = cli.arap;
+        LOG(INFO) << "覆盖 ARAP b = " << cli.arap;
+    }
+    if (cli.damping >= 0.0f) {
+        app.damping_ = cli.damping;
+        LOG(INFO) << "覆盖 阻尼 u = " << cli.damping;
+    }
+
     if (use_box) {
         CHECK(app.LoadBuiltinBox()) << "内置方块装载失败";
     } else if (!app.LoadModel(gltf_path)) {
@@ -212,40 +276,16 @@ int main(int argc, char** argv) {
                    << "（请确认路径存在且为合法 .gltf/.glb）";
     }
 
-    // 初始视角：默认 45° 方位、20° 仰角。取景要同时容下「模型（起于原点附近）」与
-    // 「落点（地面 y = ground_y_）」：把相机目标点下移到两者中点，并按所需垂直
-    // 半跨度反推 R（俯仰 60° 视锥）。只靠模型包围盒自适应会贴脸而看不到地面。
+    // 相机取景 + 光照/地面：直接用 App 在装载时算好的模型包围盒（BuildSim 里算的，
+    // 与地面自动定位同源，避免两处各算一遍而分叉）。
     app.view_ = jpov_viewer::DefaultView();
     app.view_.phi = 20.0 * (M_PI / 180.0);
-    float bmin[3] = {-1.0f, -1.0f, -1.0f};
-    float bmax[3] = {1.0f, 1.0f, 1.0f};
-    {
-        bool first = true;
-        for (const auto& prim : app.primitives()) {
-            for (const jpov::Vec3f& p : prim.mesh.positions) {
-                if (first) {
-                    bmin[0] = bmax[0] = p.x();
-                    bmin[1] = bmax[1] = p.y();
-                    bmin[2] = bmax[2] = p.z();
-                    first = false;
-                    continue;
-                }
-                bmin[0] = std::min(bmin[0], p.x());
-                bmax[0] = std::max(bmax[0], p.x());
-                bmin[1] = std::min(bmin[1], p.y());
-                bmax[1] = std::max(bmax[1], p.y());
-                bmin[2] = std::min(bmin[2], p.z());
-                bmax[2] = std::max(bmax[2], p.z());
-            }
-        }
-    }
-    // 地面自动定位：放在模型底部下方 0.5 个模型高度处（⇒ 摔落高度 = 0.5 高度）。
-    // 这样任何尺度的资产都不会一开始就埋进地面（那是「首帧爆炸」的根因），
-    // 滑条范围也按模型尺度自适应。
-    const float model_h = std::max(1e-4f, bmax[1] - bmin[1]);
-    app.ground_y_ = bmin[1] - 0.5f * model_h;
-    app.ground_y_min_ = bmin[1] - 3.0f * model_h;
-    app.ground_y_max_ = bmin[1] + 0.5f * model_h;
+    const float bmin[3] = {app.model_min().x(), app.model_min().y(),
+                           app.model_min().z()};
+    const float bmax[3] = {app.model_max().x(), app.model_max().y(),
+                           app.model_max().z()};
+    // 地面已在 BuildSim 里按模型尺度放好（必须早于仿真的首次地面投射，否则会把
+    // 模型压扁）；此处只按同一尺度定滑条范围与相机取景。
 
     constexpr float kMargin = 0.3f;
     const float top = bmax[1] + kMargin;
