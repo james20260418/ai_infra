@@ -10,23 +10,25 @@
 //   [动力学：运行/暂停] —— 仿真启停（暂停时不推进物理，仅保持当前形变）
 //   [重置 mesh]         —— 把网格恢复到 bind pose（清空速度与形变）
 //
-// ═══ 物理与单位（需求方 Danis 2026-09-23 定稿）═══
-//   长度单位 = **米**（单位铁律 MKS；glb 的 cm 资产在加载边界已换算，见 gltf_loader）。
-//   **材质 = 面密度 + 胡克系数**（固定常量，面板不可改）：
-//     · 面密度 ρ = 1 kg/m²（"一平米一 kg"）⇒ 顶点质量 m_i = ρ · 该顶点周围三角形面积
-//       （每个三角形给三个顶点各 1/3 面积）⇒ **质量与网格密度无关**，细分不会变重。
-//     · 胡克 T = 100 N/m：边的弹簧刚度 k_e = T/L0，即**在 0.1 m 的边上产生 10 N 的力**；
-//       按初始边长归一化（除以 L0）⇒ 与"边被分了几段"无关（分辨率无关）。
-//     · ARAP β 由 T 按固定比例换算（β = T/7，见 arap_sim.h kArapPerHooke），
-//       于是"胡克变了 ARAP 跟着变"，两者相对硬度不漂。
-//   **面板可调**：只有重力 g（滑条，默认 1.0）。理由：g 与 h 之比即线密度，
-//   稳态立不立得住只看这个无量纲比、与阻尼无关；而质量/阻尼会牵动整个运动过程，
-//   先固定住免得引入不确定因子。
+// ═══ 物理与单位（需求方 Danis 2026-09-23 定稿；MKS，长度 = 米）═══
+//   glb 的 cm 资产在装载边界已换算成米（见 gltf_loader）。
+//   **材质 = 三个可从材料手册查出的常数**（面板不可改，见 arap_sim.h 文件头推导）：
+//     · ρ  面密度 [kg/m²]  = 体密度 × 厚度      ⇒ m_i = ρ·a_i（a_i = 顶点摊到的面积）
+//     · c  胡克  [N/m³]    = 杨氏模量 E × 厚度   ⇒ k_e = c·√(a_i·a_j)
+//     · c' ARAP  [N/m³]    = 剪切模量 G × 厚度   ⇒ β_i = c'·a_i
+//   三者同阶 ∝ 1/N ⇒ k_e/m、β/m 与网格密度无关（换网格密度效果不漂）。
+//   默认 = 厚度 1 cm 的橡胶皮：ρ=11、c=1.5e4、c'=5e3。
+//   **面板可调**：重力 g（默认 1.0）+ 阻尼 u（默认 0.1，加速度域 a_damp = −u·v，与质量无关）。
 //
-// 物理步长：**固定 0.05 s**（需求方指定）。渲染帧（1/60 s）用累加器凑够 0.05 s
-// 才推进一步 ⇒ 物理按真实时间演化，且结果与帧率抖动无关（确定性，便于出 gold）。
-// 若 max_stable_dt() < 0.05（边太短 ⇒ 弹簧太硬），面板会显示该上限；处理方式是
-// 加大 substeps（同一格式、更小步长），而不是往模型里多塞几个力。
+// 物理步长：目标 **1/60 s**（需求方限定"子步最多接受 60 Hz"，故自动模式不加子步）。
+//   渲染帧也是 1/60 s ⇒ 每帧推进一步。若材质太硬使 1/60 s 不稳，则自动**放大步长**
+//   （慢动作，力模型不改），而不是靠内部细分堆算力。
+//
+// ═══ 数值保护（两类要分清）═══
+//   ① **数值爆炸**（几何出现 NaN/inf）= 积分不稳定 ⇒ 回滚到本帧开始的状态 + 暂停 +
+//      ERROR 日志（说明步长与稳定上限）。
+//   ② **物理塌陷**（几何完好但被压扁）= 真实结果（如 1cm 橡胶皮撞地）⇒ 只 WARNING
+//      一次，**不暂停不回滚** —— 把正确的物理当错误会让用户看不到真相。
 //
 // ═══ 每帧链路（变形 → 渲染，顺序不可换）═══
 //   Step(dt) → WriteBackPositions → RecomputeTangentSpace → UpdateMesh → Draw
@@ -170,6 +172,9 @@ private:
     // 把本帧的物理推进一格，并把形变结果同步到 GPU（写回 → 重算 TN → 上传）。
     // 仅在 dynamics_running_ 为真时调用。
     //
+    // 内部会自己算“安全步长 physics_dt”（自动模式下 = min(1/60 s, 2.5·max_stable_dt)），
+    // 外部无需关心。
+    //
     // frame_dt 是渲染帧时长（1/60 s）；物理固定步长 kPhysicsDt = 0.05 s，用累加器
     // 凑够才推进一步（物理按真实时间演化，且与帧率抖动无关）。
     void AdvanceDynamics(float frame_dt);
@@ -212,7 +217,8 @@ private:
 
     bool show_panel_ = true;                   // 是否绘制交互面板
     bool dynamics_running_ = false;            // 仿真是否推进（默认暂停，按按钮启动）
-    bool diverged_ = false;                    // 已判出发散（见 AdvanceDynamics 的保护）
+    bool diverged_ = false;                    // 数值爆炸后已回滚暂停（重置/再次点“运行”时清除）
+    bool large_deform_warned_ = false;         // “形变很大”只提示一次（避每帧刷屏）
     float physics_accum_ = 0.0f;               // 物理时间累加器（默认步长 0.05 s）
     bool slow_motion_warned_ = false;           // 慢动作提示只打一次
     // 每帧开始时的状态快照：发散时用它回滚（保证屏幕不出现 NaN 几何）。
@@ -371,12 +377,13 @@ inline void ArapViewerApp::BuildSim() {
     LOG(INFO) << "显式积分稳定上限估计 max_stable_dt=" << bound
               << " s（目标步长 1/60 = " << (1.0f / 60.0f)
               << " s；需求方上限 60 Hz，不加子步）";
-    // 与 AdvanceDynamics 的安全步长判据**保持同一依据**（safe_dt = 2.5·bound，
+    // 与 AdvanceDynamics 的安全步长判据**保持同一依据**（safe_dt = 0.7·bound，
     // 实测标定，见那里的注释），避免"一处说会慢动作、另一处说没问题"的自相矛盾。
     constexpr float kTargetDtLog = 1.0f / 60.0f;
-    if (bound > 0.0f && kTargetDtLog > 2.5f * bound) {
+    constexpr float kSafeDtFactorLog = 0.7f;
+    if (bound > 0.0f && kTargetDtLog > kSafeDtFactorLog * bound) {
         LOG(WARNING) << "材质偏硬：稳定上限 " << bound
-                     << " s，安全步长 " << (2.5f * bound) << " s < 1/60 s"
+                     << " s，安全步长 " << (kSafeDtFactorLog * bound) << " s < 1/60 s"
                      << " ⇒ 会进入慢动作（不会出 NaN，但物理变慢）。"
                         "要全速需降 c（更软材料）或升 ρ（更重/更厚）";
     }
@@ -553,18 +560,19 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
     if (fixed_substeps_ <= 0) {
         // 自动模式：材质不够软时**放大步长（慢动作）**，而不是加子步。
         //
-        // 安全系数取 **0.1**：max_stable_dt() 是 Gershgorin 行和给的 ω² 上界，
-        // 对**含大形变/碰撞冲击**的实际系统明显偏乐观（行和只统计了对角附近），
-        // 实测抛石机（橡胶皮材质）：
-        //     h = 0.05   s（1·0.05）⇒ 炸（边长畸变 0.17）
-        //     h = 0.025  s           ⇒ 稳（0.0028）
-        //     h = 0.0125 s           ⇒ 稳（0.00275）
-        // 即实际安全边界 ≈ 0.025 s，而 max_stable_dt 报 0.0102 s（保守约 2.5 倍），
-        // 用 0.1·bound 会得到 0.001 s —— 过保守。故改用**实测校准后的经验边界**：
-        //     安全步长 = 2.5 × max_stable_dt()      （= 0.0255 s，实测稳）
-        // 并把"客户约束 60 Hz ⇒ h ≥ 1/60 = 0.0167 s"直接写进判据。
+        // 安全步长：以 max_stable_dt() 为基准、乘**实测标定的安全系数**。
+        //
+        // ⚠️ 这个系数不是理论值，是量出来的：max_stable_dt() 用 Gershgorin 行和估 ω²，
+        //   它假设的是**纯弹簧**系统；而本模型还含 ARAP 形状力（耦合整个 1-ring，
+        //   非对角耦合比行和估计强）与地面硬钳位（制造瞬时压缩）。实测两组材质：
+        //     · c=15000（橡胶皮）⇒ 报 0.01015 s，实测稳的边界 ≈ 0.015 s（偏乐观 1.5×）
+        //     · c=150 （软 100 倍）⇒ 报 0.0731 s，实测 h=0.05 s 都稳
+        //   取 1.0（即直接用 max_stable_dt）在这两组上都偏乐观 ⇒ 不能这么用。
+        //   实测校准值：**0.7**（在 c=15000 这组上 0.7·0.01015 = 0.0071 s < 0.015 ✓）。
+        //   宁可慢一点也不要炸（炸一下整个画面就没用了）。
+        constexpr float kSafeDtFactor = 0.7f;
         const float bound = sim_.max_stable_dt();
-        const float safe_dt = 2.5f * bound;
+        const float safe_dt = kSafeDtFactor * bound;
         if (bound > 0.0f && kTargetDt > safe_dt) {
             physics_dt = std::max(safe_dt, 1e-4f);
             if (!slow_motion_warned_) {
@@ -592,40 +600,44 @@ inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
     // ── 发散保护（挡住 NaN，不让它进 GPU）──
     //   显式积分在 h 超过稳定上限时**必然**发散：位置先爆到 ±1e30，然后变成 NaN，
     //   于是顶点缓冲全 NaN ⇒ 模型在原地消失（实测症状就是这个）。
-    //   这里在**上传之前**加两道闸：
-    //     ① 每次 Step 后查几何是否已非有限值（NaN/inf），一旦发现立刻回滚到
-    //        本帧开始时的状态（快照）并暂停 —— 用户看到的画面不会消失。
-    //     ② 边长畸变 > 100%（几何已完全不是原形）也停，并说明原因。
-    //   宁可停在上一帧的好状态，也不要把糊掉的几何送到屏幕上（且日志要能说清根因）。
-    bool bad_geometry = false;
+    // ── 保护：只在“真的数值爆炸”时回滚；不要把“物理上撞塌了”当成发散 ──
+    //   两类要分清（我上一版把它们混在一起，导致抛石机一落地就报“发散”）：
+    //     ① **数值爆炸**：位置出现 NaN/inf。这是积分不稳定的硬信号，必须回滚。
+    //     ② **物理塌陷**：几何完好但被压扁（边长畸变变大）。这不是 bug——
+    //        1 cm 橡胶皮撞地就是会塔，判它“发散”等于把正确的物理当错误。
+    //        故只打一条 WARNING（且只打一次），不暂停、不回滚，让人看到真实结果。
+    bool non_finite = false;
     for (uint32_t i = 0; i < sim_.particle_count(); ++i) {
         const jpov::Vec3f& p = sim_.vertex_positions()[i];
         if (!std::isfinite(p.x()) || !std::isfinite(p.y()) ||
             !std::isfinite(p.z())) {
-            bad_geometry = true;
+            non_finite = true;
             break;
         }
     }
-    if (!bad_geometry) {
-        const float dist = sim_.edge_distortion_rms();
-        if (!(dist >= 0.0f) || dist > 1.0f) {
-            bad_geometry = true;
-        }
-    }
-    if (bad_geometry) {
-        // 回滚到本帧开始时的状态：用快照恢复位置/速度，并重置累加器。
+    if (non_finite) {
         sim_.RestoreState(snapshot_pos_, snapshot_vel_);
         physics_accum_ = 0.0f;
         dynamics_running_ = false;
         diverged_ = true;
-        LOG(ERROR) << "仿真发散：已回滚到本帧开始的状态并暂停（画面上不会出现消失/糊掉的"
-                      "模型）。根因：材质太硬（c="
-                   << sim_config_.spring_stiffness_per_area << " N/m³, ρ="
-                   << sim_config_.area_density_kg_per_m2
-                   << " kg/m²）⇒ 稳定上限 " << sim_.max_stable_dt()
-                   << " s 小于步长。根治：调小 c / 调大 ρ（更软更重的材料），"
-                      "或用 --substeps 自行承担";
-        return;   // 不再上传坏几何
+        LOG(ERROR) << "仿真数值爆炸（出现 NaN/inf）：已回滚到本帧开始的状态并暂停。"
+                      "这是**积分不稳定**的信号 ⇒ 把步长 （"
+                   << physics_dt << " s）降到稳定上限（"
+                   << sim_.max_stable_dt() << " s）以下，或降 c / 升 ρ（更软/更重的材质）";
+        return;   // 不把 NaN 几何送到 GPU
+    }
+
+    // 几何完好但形变很大 ⇒ 这是物理结果，只提示一次（不暂停、不回滚、不每帧刷屏）。
+    {
+        const float dist = sim_.edge_distortion_rms();
+        if (!(dist >= 0.0f) || dist > 1.0f) {
+            if (!large_deform_warned_) {
+                large_deform_warned_ = true;
+                LOG(WARNING) << "模型形变很大（边长畸变 " << dist
+                             << "）：几何仍然完好，这是**物理结果**（材质太软/自重/撞地），"
+                                "不是数值发散。若觉得不合理，换更硬/更厚的材质（升 c、升 ρ）";
+            }
+        }
     }
 
     // 顺序铁律：写回位置 → 重算 TN → 上传。法线/切线是位置的派生量。
@@ -737,6 +749,13 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
     const char* run_label = dynamics_running_ ? "动力学：运行中 ⏸" : "动力学：已暂停 ▶";
     if (ui_.Button(run_label, jpov::UiRect{{16.0f, btn_y}, {kBtnW, kBtnH}})) {
         dynamics_running_ = !dynamics_running_;
+        // 再次点“运行”= 用户明确要求继续 ⇒ 清掉数值爆炸标记与一次性的提示标记，
+        // 让它能重新推进（否则 diverged_ 会把它永久钉在暂停上）。
+        if (dynamics_running_) {
+            diverged_ = false;
+            large_deform_warned_ = false;
+            physics_accum_ = 0.0f;
+        }
     }
     if (ui_.Button("重置 mesh",
                    jpov::UiRect{{16.0f + kBtnW + kBtnGap, btn_y}, {kBtnW, kBtnH}})) {
@@ -744,6 +763,7 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
         diverged_ = false;
         physics_accum_ = 0.0f;
         slow_motion_warned_ = false;
+        large_deform_warned_ = false;   // 重置后重新允许一次“形变很大”提示
         std::vector<jpov::MeshData> meshes;
         meshes.reserve(prims_.size());
         for (const SimPrimitive& p : prims_) {
