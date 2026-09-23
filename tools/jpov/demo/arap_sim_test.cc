@@ -755,5 +755,57 @@ TEST(ArapSimTest, XpbdEnergyBoundedWithoutDamping) {
         << "）—— 升 >> 降 说明在泵能量";
 }
 
+
+// ── 14. ARAP 约束：静止构型必须是**不动点**，且不能随质量变小而失稳 ──
+//
+// 这条测试专门锁住 2026-09-23 发现的一个真错误：我曾把 ARAP 约束里「邻居的解析梯度」
+// 也作为额外力去推动邻居 —— 而邻居耦合**已经通过质心 c_i 包含在约束里**（c_i 就是 i 与
+// 邻居的平均），再加一份等于**重复计算 + 正反馈**。症状极具特征：
+//   · 畸变从某一步开始**指数增长**，而 max|pos| 几乎不动（纯形状失稳）
+//   · 质量越小（k_e/m、β/m 越大）越早炸，小到一定程度直接 NaN
+//   · 去掉邻居项立刻恢复稳定
+// 这里用「多档面密度 + 静止构型」把这两个性质都断言住。
+TEST(ArapSimTest, ArapIsStableAcrossDensityAndKeepsRestPoseAsFixedPoint) {
+    const MeshData mesh = MakeCube();
+
+    // (a) 静止（g=0、无地面、无初速）⇒ ARAP 不得自己制造形变。
+    {
+        ArapSimConfig cfg = BareConfig();
+        cfg.spring_stiffness_per_area = 5.0e2f;
+        cfg.arap_stiffness_per_area = 2.0e2f;
+        cfg.damping_per_second = 0.0f;
+        ArapSim sim;
+        sim.Build(mesh, cfg);
+        EXPECT_LT(sim.edge_distortion_rms(), 1e-5f) << "bind pose 的畸变应为 0";
+        for (int i = 0; i < 600; ++i) {          // 10 秒
+            sim.Step(1.0f / 60.0f);
+        }
+        EXPECT_LT(sim.edge_distortion_rms(), 1e-3f)
+            << "g=0 静置 10 秒：ARAP 不得自发变形（实测 "
+            << sim.edge_distortion_rms() << "）";
+    }
+
+    // (b) 面密度从很小到很大都不能失稳（k_e/m = c/ρ 在 ρ 小时最大 ⇒ 最容易暴露
+    //     重复计算/正反馈类错误）。要求：全程有限值，且畸变有界。
+    for (float rho : {0.5f, 1.0f, 2.0f, 11.0f, 110.0f}) {
+        ArapSimConfig cfg = BareConfig();
+        cfg.spring_stiffness_per_area = 5.0e2f;
+        cfg.arap_stiffness_per_area = 2.0e2f;
+        cfg.area_density_kg_per_m2 = rho;
+        cfg.damping_per_second = 0.1f;
+        ArapSim sim;
+        sim.Build(mesh, cfg);
+        for (int i = 0; i < 600; ++i) {
+            sim.Step(1.0f / 60.0f);
+        }
+        const float d = sim.edge_distortion_rms();
+        EXPECT_TRUE(std::isfinite(d))
+            << "ρ=" << rho << "：出现 NaN/inf（曾实测 ρ≤2 会炸）";
+        EXPECT_LT(d, 0.2f)
+            << "ρ=" << rho << "：静置 10 秒的畸变应有界（实测 " << d
+            << "）—— 若爆炸则说明约束里有重复计算/正反馈";
+    }
+}
+
 }  // namespace
 }  // namespace jpov_arap

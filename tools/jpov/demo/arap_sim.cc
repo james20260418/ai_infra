@@ -882,23 +882,36 @@ void ArapSim::SolveSpringConstraints(float h) {
 void ArapSim::SolveArapConstraints(float h) {
     const float inv_h2 = 1.0f / (h * h);
     for (uint32_t i = 0; i < particle_count_; ++i) {
-        // ⚠️ 用**迭代前冻结**的质心（arap_goal_centroid_），不要用 pos_ 现算 ——
-        //    后者会让目标跟着位置漂移，约束无法收敛（见头文件与 Step ②b 的说明）。
-        const jpov::Vec3f& centroid = arap_goal_centroid_[i];
-        const jpov::Vec3f goal = centroid + rot_[i];
-        const jpov::Vec3f C = pos_[i] - goal;
         const float beta_i = arap_beta_c_ * particle_area_m2_[i];
         if (!(beta_i > 0.0f)) {
             continue;
         }
-        const float w = 1.0f / mass_[i];
+        // 约束：C_i = x_i − goal_i，goal_i = c_i + R_i·(rest_i − rest_c_i)。
+        //
+        // 🔑 关键（这里我错过一次，记清楚）：**质心 c_i 在进入迭代前已冻结**
+        //   （见 Step ②b 与 arap_goal_centroid_），故迭代内部 goal_i 是**已知常量**
+        //   ⇒ C_i 对 x_i 的梯度就是单位阵 I，且只有 x_i 一个自由度：
+        //       Δλ = (−C_i − α̃·λ) / (w_i + α̃),      α̃ = (1/β_i)/h²
+        //       x_i += w_i·Δλ
+        //
+        // ❌ 我一度把邻居的解析梯度 ∇_{x_j}C_i = −1/(n_i+1)·I 也当作额外力去推邻居
+        //   —— **那是错的**：邻居耦合已经通过质心 c_i 包含在约束里（c_i 就是 i 与
+        //   邻居的平均），再加一份"邻居受力"等于**重复计算**并形成正反馈。
+        //   实测：畸变从第 5 步起指数增长（maxpos 几乎不动 ⇒ 纯形状失稳），
+        //   ρ 小（k_e/m 大）时直接 NaN；去掉邻居项立即恢复稳定（畸变 5e-4 不增）。
+        //   同理梯度应为 I（不是 n/(n+1) 的一阶展开）—— 质心已冻结、不再依赖 x_i。
+        const jpov::Vec3f& centroid = arap_goal_centroid_[i];
+        const jpov::Vec3f goal = centroid + rot_[i];
+        const jpov::Vec3f C = pos_[i] - goal;
+
+        const float w_i = 1.0f / mass_[i];
         const float alpha_tilde = (1.0f / beta_i) * inv_h2;
-        // 3 维约束：分母对三个分量相同，故 λ 也是 3 维、逐分量更新。
-        const float denom = w + alpha_tilde;
+        const float denom = w_i + alpha_tilde;
+
         const jpov::Vec3f dlambda =
             (C * -1.0f - lambda_arap_[i] * alpha_tilde) * (1.0f / denom);
         lambda_arap_[i] += dlambda;
-        pos_[i] += dlambda * w;
+        pos_[i] += dlambda * w_i;
     }
 }
 
