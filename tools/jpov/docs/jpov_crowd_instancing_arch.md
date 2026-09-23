@@ -84,18 +84,22 @@
                           cloth  : topA / topB / armor… / pants… （都 bind 到同一骨架）
   material_tex[]      —— baseColor/normal/metallicRoughness… 变体（肤色/穿着差异在此）
 
-instance[i] (很薄, select 共享区):
-  transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)
-  body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int）
-  cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」
+instance[i] (很薄, select 共享区) —— ⚠️ 这张表混着**三类**字段，"归谁消费"不同（2026-09-23 标注）：
+  · `[GPU]` = 每实例送进 shader 的 per-instance attribute（占 attribute location）
+  · `[CPU]` = CPU 装配/批处理层自己用，**不进 shader**
+  transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)      [GPU]
+  body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int） [CPU]
+  cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」          [CPU]
                        注：上面两个数组 = 同一张「部位表」上的两个**层**（body / cloth），
                        与 §4 的槽位表是同一件事；统一读法见 §4「slot / 层 / 批次」。
-  cheap_body_scale   —— 高矮：per-instance 整体 scale（`InstanceTransform::scale`）
+                       ⚠️ 它们是**批处理分组 key，不是顶点属性**：一次 draw 内换不了几何，
+                       它们只决定「这个人归到哪些批次」。
+  cheap_body_scale   —— 高矮：per-instance 整体 scale（`InstanceTransform::scale`） [GPU]
   shape_channels[8]  —— 胖瘦：per-instance 骨通道膨胀系数 μ（见 §6.1 与
-                        `jpov_crowd_body_shape_face_design.md`）
-  face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引
-  tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）
-  seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现）
+                        `jpov_crowd_body_shape_face_design.md`）                  [GPU]
+  face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引       [GPU]（预计）
+  tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）                        [GPU]
+  seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现） [CPU]
 ```
 
 ### 2.1 关键收益
@@ -179,13 +183,27 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
    最清楚的形式是**二维 selector**：`part_idx[层][部位]`（空 = 该层该部位不画 = 露肤）。
    - `body` 层通常不留空（留空 = 该部位无几何 ⇒ 露洞）；`cloth` 层留空是常态。
    - 将来做叠穿（`jpov_clothes_rig_design.md` §2.3 目前明确只做贴身单层）= 层数变多，结构不用改。
-3. **批次按 `(part, 动画)` 分组，不是按「人」分组**。因为一次 instanced draw 里几何必须相同，
-   **不能把同一个人的各个 part 混在一次 draw 里**。真实做法：对池子里每个「被用到的 part」，
+3. **批次按「被选中的 mesh」分组，不是按「人」分组**。因为一次 instanced draw 里几何必须相同，
+   **不能把同一个人的各个 part 混在一次 draw 里**。真实做法：对池子里每个「被用到的 mesh」，
    把选了它的所有实例凑一批、一次 `glDrawElementsInstanced`。
-   ⇒ **draw 次数 ≈（被用到的 part 数 × 动画批次），与人数无关**（1000 人与 10000 人同量级）；
+   ⇒ **draw 次数 ≈（被用到的 mesh 数 × 骨架组数），与人数、与组合方式、与动画相位都无关**
+   （1000 人与 10000 人同量级；动画相位是 per-instance attribute，同批可混不同相位）。
    每个人 = 他选中的 5~8 个 part 各画一次叠加而成。
    ⇒ **池子规模直接决定 draw 上限** —— 这正是「差异要廉价富足、别靠烘更多几何」的动机：
    几何变体一膨胀，draw 次数立刻回升；差异应靠 tint / 材质变体 / `shape_channels` 补。
+
+**`part_idx` 的定位（2026-09-23 澄清）**：
+- 它是 **CPU 装配层的组合 key**，**不是 per-instance attribute**，**不进 shader**。
+  一次 draw 内换不了几何（见上），所以它唯一的职责 = 把「这个人」分到若干批次里。
+- 它**不占 attribute location**。注：GL 的 16 个 location 是**顶点属性与实例属性共用**的
+  一个编号池（mesh 几何占 loc0–5），但「省出位置」不是因为共用池，而是因为 part_idx 根本不上 GPU。
+- **池子上限 = draw 预算**（`Σ_类型 用到的 mesh 数`），不是 part_idx 能「扩展」的东西：
+  想让差异更大而不涨 draw，靠 tint / 材质变体 / 连续形状参数（scale、`shape_channels`）这三样。
+- **千人千面 = 用组合换复制**：`部位数^池子大小` 的组合 × 廉价旋钮。例：7 部位 × 每池 12 套
+  = 12⁷ ≈ 3.6e7 种装配，而几何只存 84 套。
+- 把 `part_idx` 变成 GPU 侧的 key（per-instance attribute / buffer）**只在 GPU-driven 管线**下才有意义
+  （compute 按 part_idx 分桶 + **实例放大** + `glMultiDrawElementsIndirect`），换来「CPU 不参与装配分组」；
+  S0 不做。
 
 **两条硬不变量**：
 - 所有 part 必须绑**同一骨架定义**，且顶点里的 `JOINTS_0` **必须用同一套骨 index 空间**
@@ -205,7 +223,7 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 | 部位 / 变体 mesh 池与材质贴图变体（`PBRMaterial` + texture-array） | **JPOV** | 肤色 tint、衣物颜色、部位变体 = 现有材质/mesh 体系可表达 |
 | **骨骼动画纹理资源**（烘焙出的 bone 矩阵×clip→帧 纹理）| **JPOV** | 作为 JPOV 官方渲染资源类型（与 mesh/材质/texture 平级）持有、管理生命周期 |
 | **消费该纹理的蒙皮 shader（VS 查表 + 4-bone 蒙皮）** | **JPOV** | 复用 rest 上传；shade/shadow/picking 各 pass 用同一查表蒙皮保证 4-pass 一致（防“手动/拾取错位”）|
-| **把一堆 instance(相位+selector+transform…) batch 成 instanced draw** | **JPOV** | render 关心：接收“同 mesh+同 anim 一批 instance + 帧号”，一次批量画 |
+| **把一堆 instance(每实例相位 + 摆放 + 形状参数…) batch 成 instanced draw** | **JPOV** | 接收“同 mesh + 同一骨架（atlas）一批 instance”，一次批量画；**动画相位/形状/摆放走 per-instance attribute**，故同批可混不同相位。**selector/装配分组归用户侧**（见 §4）|
 | **动画资产是否/怎么烘焙**（clip 从何而来、传几帧进内纹）| **资产/用户** | 跟「素材归用户」同归一类；JPOV 消费烘焙好的纹理 |
 | **每 instance 处在哪段动画 / 哪个相位 / 谁是哪个人**（世界状态）| **用户 / 骨架系统** | 同“世界演化归用户” |
 | **LOD：切不切、每 instance 归哪档、高模/低模各自一档 draw 喂不同几何** | **用户（可见性系统）** | JPOV 不必知道“几个 LOD 档”；JPOV 只需“给一批同档 instance + 这份 mesh 批量画”。**与 instancing 蒙皮彻底解耦** 见 §6.3 |

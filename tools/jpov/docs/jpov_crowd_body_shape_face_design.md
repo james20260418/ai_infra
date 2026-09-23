@@ -224,8 +224,10 @@ for (int i = 0; i < 4; ++i) {
 | **合计** | | **108 B/实例** |
 
 - **带宽不是瓶颈**：108 B/实例 × 1000 人 = 108 KB/帧，一次上传。
-- **真正的硬约束是 attribute slot 数**：`GL_MAX_VERTEX_ATTRIBS` 保证 16；现状占用 11 个
-  （loc0..10），加 2 个 → 13 个，**剩 3 个余量**。
+- **真正的硬约束是 attribute slot 数**：`GL_MAX_VERTEX_ATTRIBS` 保证 16；**这 16 个 location 是
+  “顶点属性与实例属性共用的一个编号池”**（mesh 几何占 loc0–5：pos/normal/uv/joint/weight/tangent），
+  当前 per-instance 部分占 loc6–10（摆放矩阵 6–9 + pose 选择 10）⇒ 已用 11 个，
+  加 2 个 → 13 个，**剩 3 个余量**。
 - **决策**：**2 个 vec4 专供膨胀自由度**（8 个通道，当前用 6~7 个，余 1~2 个备用）；
   其余功能"挤一挤"（`aInstPose` 的 `.w` 目前空着，slot 真紧张时可用，但正常情况建议独立 location，
   语义清楚）。
@@ -343,3 +345,11 @@ for (int i = 0; i < 4; ++i) {
 6. 门禁：无通道表零回归 gold + `μ≡1` 容差门禁 + 截面直径量化测试 + 混合区近距离 gold（§3.6）。
 7. 脸：`head_idx` / `face_expr_idx` / `face_tex_idx` 三个 selector 接入 part 模型；
    动态头槽位池 + CPU blendshape 微操 + 过渡（§4）。
+
+### 顺手可清（体检发现，可选）
+- **`uBoneCount` 是死 uniform**：shader 里只声明、body 零消费（注释也写明「不再乘 uBoneCount」），
+  但 host 每次 draw 都 `glUniform1i` 一次（主 + 阴影 pass）⇒ 可删 shader 声明与那两句上传。
+  注意 `GpuHandles::bone_count` **本身不能删**（CPU 侧算 `pose_w` 还在用）。
+- `aInstPose` 是 `vec3`（`kInstancePoseAttrSpec{10,1,3,3}`）⇒ 第 4 个分量空着。若不想再加 location，
+  可升为 `vec4` 白拿 1 个 per-instance float（每实例 +4 B，千人 +4 KB）；但要注意与
+  「pose 选择」混在同一 attribute 里的语义清晰性。
