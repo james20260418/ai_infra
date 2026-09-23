@@ -137,11 +137,22 @@ public:
     float ground_y_min_ = -3.0f;
     float ground_y_max_ = 3.0f;
 
-    // 物理参数（材质固定 + 重力可调，见文件头）。
-    //   **代码常量**：面密度 1 kg/m²、胡克 100 N/m、ARAP 按 T/7 换算、阻尼 0.6/s。
-    //   **面板可调**：只有重力 g（默认 1.0）。
+    // 物理参数（三个材料常数在代码里 + 三个面板滑条）。
+    //   **代码常量**：胡克 c、ARAP c'（材料属性，不该随手改）。
+    //   **面板可调**：面密度 ρ（倍率）、重力 g、阻尼 u。
+    //     加 ρ 滑条的理由（需求方 2026-09-23）：ρ 与 g 都影响"自重 vs 刚度"⇒ 都能救塌陷。
+    //     ⚠️ 但两者副作用**相反**（关键，必须写清）：
+    //       · 降 g：自重↓ ⇒ 更容易撑住；**稳定上限不变**（稳定只看 c/ρ，与 g 无关）—— 纯赚。
+    //       · 降 ρ：自重↓ ⇒ 更容易撑住；但 k_e/m = c/ρ ↑ ⇒ **稳定上限↓、更容易炸**。
+    //         ⇒ "撑住"与"稳定"对 ρ 的要求是相反的（想撑住要轻、想稳要重）。
     jpov_arap::ArapSimConfig sim_config_;
     float gravity_ = 1.0f;      // 面板滑条：重力大小（方向恒为 −y）
+    float damping_ = 0.1f;      // 阻尼 u（1/s；加速度域 −u·v，与质量无关）
+    // 面密度滑条 = **相对基准值的倍率**（0.1× ~ 10×）。用倍率而非绝对值，便于换材料后复用。
+    float density_scale_ = 1.0f;
+    // 面密度**基准**：装载完成时从 sim_config_ 抓一次（这样命令行/程序化的设置会成为基准），
+    // 之后面板的倍率滑条都是相对它。0 = 尚未抓取（BuildSim 末尾会填）。
+    float density_base_kg_per_m2_ = 0.0f;
 
     // 已加载的 primitive 列表（main 用来算包围盒做相机自适应）。
     const std::vector<SimPrimitive>& primitives() const { return prims_; }
@@ -363,11 +374,19 @@ inline void ArapViewerApp::BuildSim() {
     }
 
     sim_.Build(meshes, sim_config_);
+    // 把**当前** ρ 记作基准（命令行 --area_density 会在这之前设进 sim_config_，
+    // 故它成为基准、面板倍率随后相对它生效）。0 保护：避免基准为 0 导致质量恒为 0。
+    if (density_base_kg_per_m2_ <= 0.0f) {
+        density_base_kg_per_m2_ = sim_config_.area_density_kg_per_m2;
+    }
+    CHECK_GT(density_base_kg_per_m2_, 0.0f)
+        << "ArapViewerApp: 面密度基准必须为正";
     LOG(INFO) << "物理物体：网格 " << sim_.mesh_count() << " 个，顶点 "
               << sim_.vertex_count() << "，焊接质点 " << sim_.particle_count()
               << "（跨 primitive 焊接 ⇒ 各部件互相支撑）";
     LOG(INFO) << "材质（面积定标）: ρ=" << sim_config_.area_density_kg_per_m2
-              << " kg/m² ⇒ 总质量 " << sim_.total_mass() << " kg / 总面积 "
+              << " kg/m²（基准 " << density_base_kg_per_m2_ << " × 倍率 "
+              << density_scale_ << "）⇒ 总质量 " << sim_.total_mass() << " kg / 总面积 "
               << sim_.surface_area() << " m²; 胡克 c="
               << sim_config_.spring_stiffness_per_area << " N/m³; ARAP c'="
               << sim_config_.arap_stiffness_per_area << " N/m³; 阻尼 u="
@@ -533,9 +552,13 @@ inline void ArapViewerApp::ReleaseModel() {
 }
 
 inline void ArapViewerApp::AdvanceDynamics(float frame_dt) {
-    // 面板上的重力 + 地面高度每帧同步进物理（改动即立刻生效）；
-    // 其余物理量（面密度 / 胡克 / ARAP / 阻尼）是固定常量，只在 sim_config_ 初值处配置。
+    // 面板上的 ρ / g / u / 地面高度每帧同步进物理（改动即立刻生效）；
+    // 胡克 c 与 ARAP c' 是材料常数，只在 sim_config_ 初值处配置。
     sim_config_.gravity_magnitude = gravity_;
+    sim_config_.damping_per_second = damping_;
+    // 面密度 = 基准 × 倍率。滑条已把下限夹在 0.1×，这里再兜一层（防 0/负 ⇒ 质量 0 ⇒ 数值飞走）。
+    sim_config_.area_density_kg_per_m2 =
+        std::max(density_base_kg_per_m2_ * density_scale_, 1e-3f);
     sim_config_.ground_y = ground_y_;
 
     // 子步数：当前参数下的稳定上限可能小于 0.05 s ⇒ 每帧重算（同一格式，只改分辨率）。
@@ -785,7 +808,7 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
     const float kSliderWidth = 0.5f * w;
     const float kBottom = 20.0f;
     const float left = (w - kSliderWidth) * 0.5f;
-    const float top = h - kBottom - (5.0f * kPanelRowH + 4.0f * kPanelSpacing);
+    const float top = h - kBottom - (7.0f * kPanelRowH + 6.0f * kPanelSpacing);
 
     ui_.SliderFloat("太阳仰角 °", &elev_deg_,
                     jpov::UiRect{{left, top}, {kSliderWidth, kPanelRowH}},
@@ -806,6 +829,16 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
                     jpov::UiRect{{left, top + 4.0f * (kPanelRowH + kPanelSpacing)},
                                  {kSliderWidth, kPanelRowH}},
                     0.0f, 30.0f, /*decimal_places*/ 2);
+    ui_.SliderFloat("阻尼 u", &damping_,
+                    jpov::UiRect{{left, top + 5.0f * (kPanelRowH + kPanelSpacing)},
+                                 {kSliderWidth, kPanelRowH}},
+                    0.0f, 5.0f, /*decimal_places*/ 2);
+    // 面密度倍率：0.1× ~ 10×。下限夹紧：既防"太轻 ⇒ 数值飞走"，也避免"轻到没惯性"。
+    // ⚠️ 降 ρ 能救塌陷，但会让稳定上限下降（k_e/m = c/ρ ↑）——副作用与降 g 相反。
+    ui_.SliderFloat("面密度 ×ρ", &density_scale_,
+                    jpov::UiRect{{left, top + 6.0f * (kPanelRowH + kPanelSpacing)},
+                                 {kSliderWidth, kPanelRowH}},
+                    0.1f, 10.0f, /*decimal_places*/ 2);
 
     // ── 状态文本：质点数 + 边长畸变（“有多软”）+ 形状力 + 退化旋转 + 子步数
     //     + 固定住的物理参数（面板不可改，故列出来便于对照）──
@@ -813,8 +846,8 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
         char status[400];
         std::snprintf(status, sizeof(status),
                       "网格 %zu / 顶点 %zu / 质点 %zu   边长畸变 %.3f  形状力 %.4f  "
-                      "退化旋转 %zu   子步 %d（步长 0.05 s）   材质: 面密度 %.2f / "
-                      "胡克 %.0f N/m / ARAP %.1f / 阻尼 %.2f　总质量 %.2f kg",
+                      "退化旋转 %zu   子步 %d   ρ=%.1f kg/m²  c=%.0f  c'=%.0f N/m³  "
+                      "总质量 %.1f kg   稳定上限 %.4f s",
                       sim_.mesh_count(), sim_.vertex_count(),
                       sim_.particle_count(),
                       static_cast<double>(sim_.edge_distortion_rms()),
@@ -823,8 +856,8 @@ inline void ArapViewerApp::DrawPanel(const jpov::InputSnapshot& input) {
                       static_cast<double>(sim_config_.area_density_kg_per_m2),
                       static_cast<double>(sim_config_.spring_stiffness_per_area),
                       static_cast<double>(sim_config_.arap_stiffness_per_area),
-                      static_cast<double>(sim_config_.damping_per_second),
-                      static_cast<double>(sim_.total_mass()));
+                      static_cast<double>(sim_.total_mass()),
+                      static_cast<double>(sim_.max_stable_dt()));
         ui_.Text(status, jpov::UiRect{{16.0f, btn_y + kBtnH + 8.0f},
                                      {1200.0f, 24.0f}},
                  /*stretch_w*/ false, /*stretch_h*/ false);
