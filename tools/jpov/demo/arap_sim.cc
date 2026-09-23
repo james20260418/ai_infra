@@ -794,6 +794,14 @@ void ArapSim::Step(float dt_seconds) {
             ComputeLocalRotations();
         }
 
+        // ── ②b. ARAP 的目标质心：迭代前冻结（见头文件说明）──
+        if (arap_beta_c_ > 0.0f) {
+            arap_goal_centroid_.resize(particle_count_);
+            for (uint32_t i = 0; i < particle_count_; ++i) {
+                arap_goal_centroid_[i] = NeighborhoodCentroid(pos_, i);
+            }
+        }
+
         // ── ③ 约束迭代（Gauss-Seidel）──
         //   λ 每个子步清零（XPBD 标准）；顺序：弹簧 → ARAP → 地面（地面最后，避免残余穿透）。
         for (float& l : lambda_spring_) {
@@ -874,7 +882,9 @@ void ArapSim::SolveSpringConstraints(float h) {
 void ArapSim::SolveArapConstraints(float h) {
     const float inv_h2 = 1.0f / (h * h);
     for (uint32_t i = 0; i < particle_count_; ++i) {
-        const jpov::Vec3f centroid = NeighborhoodCentroid(pos_, i);
+        // ⚠️ 用**迭代前冻结**的质心（arap_goal_centroid_），不要用 pos_ 现算 ——
+        //    后者会让目标跟着位置漂移，约束无法收敛（见头文件与 Step ②b 的说明）。
+        const jpov::Vec3f& centroid = arap_goal_centroid_[i];
         const jpov::Vec3f goal = centroid + rot_[i];
         const jpov::Vec3f C = pos_[i] - goal;
         const float beta_i = arap_beta_c_ * particle_area_m2_[i];

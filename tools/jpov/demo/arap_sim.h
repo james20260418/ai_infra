@@ -366,6 +366,11 @@ private:
     std::vector<jpov::Vec3f> force_;      // 逐质点合力（诊断/单测用：重力+阻尼这些非约束力）
     std::vector<jpov::Vec3f> prev_pos_;   // 本子步预测前的位置（XPBD 的速度回写用 x_prev）
     std::vector<jpov::Vec3f> rot_;        // R_i·(rest_i − rest_c_i)（ARAP 的 goal 偏移，每子步刷新）
+    // ARAP 约束的目标质心：**每个子步在迭代开始前冻结一次**。
+    //   ⚠️ 不能在迭代循环里用 pos_ 现算 —— 那样 goal 会跟着被推动的位置漂移，
+    //      约束永远追不上自己的目标（不动点被破坏：bind pose 下 PE_arap ≠ 0），
+    //      而且迭代次数加多少都不收敛（实测 iters=1/8/64/256 结果几乎一致）。
+    std::vector<jpov::Vec3f> arap_goal_centroid_;
     std::vector<float> mass_;             // 逐质点质量（kg，由面密度 × 顶点面积得到）
     std::vector<float> particle_area_m2_;           // 逐质点面积（m²，面密度的乘子）
 
