@@ -8,7 +8,15 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 #
 # 对外只暴露一个概念：jpov::soft_mesh_simulator::Simulator
 #   主入口 = Step(mesh, dt) → 新的 mesh（网格经 dt 秒动力学后的结果）
+#
+# 设计定稿见 DESIGN.md（签字版）—— 实现必须遵守它。
 # ============================================================================
+
+filegroup(
+    name = "docs",
+    srcs = ["DESIGN.md"],
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "soft_mesh_simulator",
