@@ -720,6 +720,104 @@ void BuildMeshTransforms(const tinygltf::Model& model,
 
 // 解析 glTF 文件 → 场景中所有 primitive，通过 cb 逐条交付。
 // 返回 false 表示文件无法加载或解析失败。
+// 从 glTF 资产推断「资产单位 → 米」的换算系数（加载边界做一次）。
+//
+// 为什么需要它：JPOV 的单位铁律是 **MKS（长度 = 米）**（同 2026-09-20 FBX 那条），
+// 但现实中不少 glb 是以 cm 导出的（实测：Lantern.glb = 25.7 cm 高），而仿真里
+// 「面密度 / 胡克系数 / 重力」全是有量纲的物理量，单位不一致就会换错材质。
+//
+// 判据（按优先级）：
+//   ① 显式标注：asset.extras.unit = "m"/"meter" 或 "cm"/"centimeter" ⇒ 直接采信；
+//   ② 顶点最大尺度 ≥ 10 m ⇒ 判为 cm（现实里 10 m 以上的资产极罕见，而 cm 资产被
+//      当成米就会正好大 100 倍）。实测 Lantern.glb 顶点尺度 25.66 ⇒ 0.257 m 的路灯。
+//      ⚠️ 判据**不是**「100 的整数倍」：25.66/100 = 0.2566 不是整数，但它是 2570 cm
+//      —— 「被 100 整除」是不必要的条件（真实物体尺寸本来就不是整米数）。
+//   ③ 小尺度（< 10 m）：一律视为米。实测 scene 资产（table/stool/houseplant）顶点只有
+//      2.8/0.58/0.38 cm，但它们的 node scale=100 已经把 cm 放大成 m ⇒ **本来就是米**。
+//      曾用「≈100 整数倍 + 有 node 缩放」判它们为 cm，导致 scene gold 整体缩小 100 倍。
+//   ⚠️ 局限（刻意接受）：无从几何上区分「25 m 的真实物体」与「被当成米的 cm 资产」；
+//      需要精确控制的资产请显式标注 asset.extras.unit。
+float ResolveUnitScaleToMeters(const tinygltf::Model& model) {
+    constexpr float kCmAssetMinExtentMeters = 10.0f;
+
+    // ① 显式标注
+    if (model.asset.extras.IsObject() && model.asset.extras.Has("unit")) {
+        const tinygltf::Value& u = model.asset.extras.Get("unit");
+        if (u.IsString()) {
+            const std::string s = u.Get<std::string>();
+            if (s == "m" || s == "meter" || s == "meters") {
+                LOG(INFO) << "glTF 单位：资产显式标注 unit=" << s << " ⇒ 已是米";
+                return 1.0f;
+            }
+            if (s == "cm" || s == "centimeter" || s == "centimeters") {
+                LOG(INFO) << "glTF 单位：资产显式标注 unit=" << s << " ⇒ ×0.01";
+                return 0.01f;
+            }
+        }
+    }
+
+    // ② node scale 的签名只用于「日志提示」，不参与判定（见 ④ 的说明）。
+    bool has_nonunit_node_scale = false;
+    for (const tinygltf::Node& n : model.nodes) {
+        for (double sv : n.scale) {
+            if (std::fabs(sv - 1.0) > 1e-6) {
+                has_nonunit_node_scale = true;
+                break;
+            }
+        }
+    }
+
+    // ③ 几何尺度（accessor 的 min/max，不读缓冲，代价为零）
+    float lo[3] = {1e30f, 1e30f, 1e30f};
+    float hi[3] = {-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (const tinygltf::Mesh& m : model.meshes) {
+        for (const auto& p : m.primitives) {
+            const auto it = p.attributes.find("POSITION");
+            if (it == p.attributes.end()) {
+                continue;
+            }
+            const int ai = it->second;
+            if (ai < 0 || static_cast<size_t>(ai) >= model.accessors.size()) {
+                continue;
+            }
+            const tinygltf::Accessor& acc = model.accessors[ai];
+            if (acc.minValues.size() < 3 || acc.maxValues.size() < 3) {
+                continue;
+            }
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = std::min(lo[k], static_cast<float>(acc.minValues[k]));
+                hi[k] = std::max(hi[k], static_cast<float>(acc.maxValues[k]));
+            }
+            any = true;
+        }
+    }
+    if (!any) {
+        return 1.0f;
+    }
+    const float raw_extent = std::max(hi[0] - lo[0],
+                                      std::max(hi[1] - lo[1], hi[2] - lo[2]));
+
+    // ③ 几何尺度判据：**只在很大时**用，且判据是「尺度大到现实里不可能」
+    //    （≥ 10 m 的物体非常少见，而 cm 资产被当成米就会大 100 倍）。
+    //    实测 Lantern.glb 顶点尺度 25.66 ⇒ 真实 0.257 m 的路灯 ⇒ cm 资产，就是这样判出来的。
+    //    ⚠️ 不要用「是否是 100 的整数倍」当判据：25.66 / 100 = 0.2566 不是整数，
+    //    但它是 2570 cm —— 被 100 整除是**不必要**的条件（真实物体尺寸本来就不是整米数）。
+    if (raw_extent >= kCmAssetMinExtentMeters) {
+        LOG(INFO) << "glTF 单位推断：顶点最大尺度 " << raw_extent
+                  << " m ≥ " << kCmAssetMinExtentMeters
+                  << " m（现实尺度不可能）⇒ 判为厘米资产，×0.01 换算为米"
+                  << "（如实际确实是米，请显式声明 asset.extras.unit = \"m\"）";
+        return 0.01f;
+    }
+    // ④ 中等尺度（0.5~10 m，即"现实里合理的物体尺寸"）：一律视为米。
+    //    实测的小家具（table/stool/houseplant 顶点 2.8/0.58/0.38 cm + node scale=100）
+    //    就落在这一段：它们的 node scale 已经把 cm 放大成 m，顶点尺度很小但**本来就是米**。
+    //    曾用「≈100 整数倍 + 有 node 缩放」判它们为 cm，导致 scene gold 整体缩小 100 倍。
+    (void)has_nonunit_node_scale;
+    return 1.0f;
+}
+
 bool LoadGltfImpl(const std::string& path,
                   GltfMeshEntryCallback cb,
                   void* user_data) {
@@ -760,6 +858,9 @@ bool LoadGltfImpl(const std::string& path,
     // 先于 primitive 遍历构建，供下面应用到顶点。
     std::vector<Mat3> mesh_trans;
     BuildMeshTransforms(model, &mesh_trans);
+
+    // 单位换算系数：资产 → 米（加载边界做一次，见 ResolveUnitScaleToMeters）。
+    const float unit_scale = ResolveUnitScaleToMeters(model);
 
     // ---- 3. 遍历所有 mesh → 所有 primitive ----
     bool delivered_any = false;
@@ -812,6 +913,13 @@ bool LoadGltfImpl(const std::string& path,
                         if (len > 1e-8f) n = Vec3f(n.x()/len, n.y()/len, n.z()/len);
                         entry.mesh.normals[i] = n;
                     }
+                }
+            }
+            // 单位换算：资产 → 米（纯缩放，法线方向不受影响）。
+            if (unit_scale != 1.0f) {
+                for (Vec3f& p : entry.mesh.positions) {
+                    p = Vec3f(p.x() * unit_scale, p.y() * unit_scale,
+                              p.z() * unit_scale);
                 }
             }
             if (cb) {
