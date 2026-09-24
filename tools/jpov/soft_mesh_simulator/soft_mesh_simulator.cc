@@ -6,7 +6,9 @@
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <unordered_set>
 
 #include <glog/logging.h>
 
@@ -14,7 +16,13 @@ namespace jpov {
 namespace soft_mesh_simulator {
 
 void Simulator::Init(const jpov::MeshData& mesh) {
+    Init(mesh, kDefaultBindDistance);
+}
+
+void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
     mesh.Validate();  // 长度/属性一致性：非法输入在这里就崩，不带进物理
+    CHECK_GT(bind_distance, 0.0f)
+        << "Simulator::Init 要求 bind_distance > 0，got " << bind_distance;
 
     // 绑定姿态 = 输入网格的副本；当前网格也从绑定姿态起步。
     bind_mesh_ = mesh;
@@ -25,12 +33,20 @@ void Simulator::Init(const jpov::MeshData& mesh) {
     triangle_count_ = mesh_.indices.empty() ? (vertex_count_ / 3)
                                             : (mesh_.indices.size() / 3);
 
+    bind_distance_ = bind_distance;
+
+    // 构建仿真点集合（含长边加密）。
+    const size_t virtual_count = BuildSimulationPoints(mesh, bind_distance);
+
     time_ = 0.0;
     step_count_ = 0;
     inited_ = true;
 
-    LOG(INFO) << "soft_mesh_simulator::Init 顶点 " << vertex_count_
-              << " / 三角形 " << triangle_count_ << "（M0 静态阶段：Step 为恒等）";
+    LOG(INFO) << "simulator::Init 原始顶点 " << vertex_count_
+              << " / 三角形 " << triangle_count_
+              << " / 虚拟顶点 " << virtual_count
+              << " / 仿真点合计 " << sim_positions_.size()
+              << "（bind_distance=" << bind_distance << " m；M0 阶段 Step 为恒等）";
 }
 
 jpov::MeshData Simulator::Step(double dt) {
@@ -76,6 +92,83 @@ SimBounds Simulator::Bounds() const {
     b.max = hi;
     b.valid = true;
     return b;
+}
+
+size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
+    sim_positions_.clear();
+    virtual_positions_.clear();
+
+    // 1) 原始顶点先入队（保持输入顺序；索引 0..N-1）。
+    sim_positions_.reserve(mesh.positions.size());
+    for (const geom::Vec3<float>& p : mesh.positions) {
+        sim_positions_.push_back(p);
+    }
+
+    // 2) 长边加密：对每条 "边长 > d*0.9" 的边，中间等距插入虚拟顶点。
+    //
+    // 只处理**索引化** mesh 的三角形边。无索引网格按 triangle list 语义
+    // （每 3 个连续顶点一个三角形）提取边——与渲染一致。
+    //
+    // 去重：同一条边（i,j）会被相邻三角形各遍历一次；用 (min,max) 归一化后
+    // 查 hash 集合去重，避免同一条边插入两遍虚拟点。
+    const float max_len = d * 0.9f;
+    const float max_len_sq = max_len * max_len;
+    CHECK_GT(max_len, 0.0f);
+
+    std::unordered_set<uint64_t> seen_edges;
+    const size_t vcount = mesh.positions.size();
+
+    auto process_edge = [&](uint32_t ia, uint32_t ib) {
+        CHECK_LT(ia, vcount);
+        CHECK_LT(ib, vcount);
+        if (ia == ib) return;  // 退化边忽略
+        const uint32_t lo = std::min(ia, ib);
+        const uint32_t hi = std::max(ia, ib);
+        const uint64_t key = (static_cast<uint64_t>(lo) << 32) | hi;
+        if (!seen_edges.insert(key).second) return;  // 已处理过
+
+        const geom::Vec3<float>& pa = mesh.positions[ia];
+        const geom::Vec3<float>& pb = mesh.positions[ib];
+        const geom::Vec3<float> delta = pb - pa;
+        const float len_sq = delta[0] * delta[0] + delta[1] * delta[1] +
+                             delta[2] * delta[2];
+        if (len_sq <= max_len_sq) return;  // 不过长，不加密
+
+        const float len = std::sqrt(len_sq);
+        // 目标：插入 n 个点，把这条边切成 (n+1) 段，每段 <= max_len。
+        //   n = ceil(len / max_len) - 1
+        const int segments = static_cast<int>(std::ceil(len / max_len));
+        for (int s = 1; s < segments; ++s) {  // s = 1..segments-1（不含两端）
+            const float t = static_cast<float>(s) / static_cast<float>(segments);
+            const geom::Vec3<float> vp = pa + delta * t;
+            virtual_positions_.push_back(vp);
+            sim_positions_.push_back(vp);
+        }
+    };
+
+    if (mesh.indices.empty()) {
+        const size_t tri_count = vcount / 3;
+        for (size_t t = 0; t < tri_count; ++t) {
+            const uint32_t a = 3u * static_cast<uint32_t>(t) + 0u;
+            const uint32_t b = 3u * static_cast<uint32_t>(t) + 1u;
+            const uint32_t c = 3u * static_cast<uint32_t>(t) + 2u;
+            process_edge(a, b);
+            process_edge(b, c);
+            process_edge(c, a);
+        }
+    } else {
+        const size_t tri_count = mesh.indices.size() / 3;
+        for (size_t t = 0; t < tri_count; ++t) {
+            const uint32_t a = mesh.indices[3 * t + 0];
+            const uint32_t b = mesh.indices[3 * t + 1];
+            const uint32_t c = mesh.indices[3 * t + 2];
+            process_edge(a, b);
+            process_edge(b, c);
+            process_edge(c, a);
+        }
+    }
+
+    return virtual_positions_.size();
 }
 
 void Simulator::Reset() {

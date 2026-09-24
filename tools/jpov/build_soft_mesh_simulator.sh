@@ -19,6 +19,12 @@
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_soft_mesh_viewer/jpov_soft_mesh_viewer <glb 路径>
 #
+# 仿真点可视化（M1）：
+#   --bind_distance <m>  关联距离 d（默认 0.1）；决定长边加密密度，即仿真点数量。
+#                        原始顶点画**红**点，加密插入的虚拟顶点画**蓝**点（2px 圆，
+#                        不看遮挡）。地面叠 1m 栅格（±5m，XZ 平面）作尺度参照。
+#   仿真点计数会打印在日志与面板上。
+#
 # headless UI 自检（不弹窗，出单张带面板的图）：
 #   ... --ui_shot --output_dir /tmp/ui
 # =============================================================================
@@ -72,6 +78,10 @@ echo ""
 echo "   2. UI 自检（headless 单帧 + 面板，不开窗口即可检查布局/字体）："
 echo "       $OUTPUT_DIR/jpov_soft_mesh_viewer --ui_shot --output_dir /tmp/ui /path/to.glb"
 echo "       → /tmp/ui/soft_mesh_viewer_ui.png"
+echo ""
+echo "   3. 仿真点可视化（M1）：--bind_distance <m> 调关联距离（默认 0.1）"
+echo "       红点 = 原始顶点，蓝点 = 长边加密插入的虚拟顶点（2px 圆，不看遮挡）"
+echo "       地面叠 1m 栅格（±5m，XZ 平面）作尺度参照；仿真点计数打印在日志+面板"
 echo ""
 echo "   验收：1280x720 不可 resize 窗口，300×300 灰色地面 + 被加载的模型，"
 echo "   固定正午晴天光照（太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"

@@ -34,6 +34,9 @@
 #define JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
 
 #include <cstddef>
+#include <vector>
+
+#include <glog/logging.h>
 
 #include "geom/common/vec.h"
 #include "tools/jpov/interface/mesh.h"
@@ -61,8 +64,13 @@ struct SimBounds {
 //   Bounds()          —— 取值景包围盒
 //   Reset()           —— 回到绑定姿态（bind pose）并清零时钟
 //
-// 所有物理常量都以命名常量/成员暴露，便于后续 UI 滑条或 headless 批量实验覆盖；
-// 当前 M0 阶段只有一个时间常量。
+// 仿真点（simulation point）：参与仿真的实际质点集合。它由初始化时的
+// **长边加密**（见 DESIGN.md §3.2）从输入的原始网格生成——
+//   - 原始顶点：输入网格自带的点
+//   - 虚拟顶点：为「任一边长 > bind_distance*0.9」的边在中间等距插入的点
+// 二者参与仿真时地位完全一样；但**提取变形 mesh 时只用原始顶点**。
+//
+// 所有物理常量都以命名常量/成员暴露，便于后续 UI 滑条或 headless 批量实验覆盖。
 class Simulator {
 public:
     // 外部时钟的一个标准步长：1/60 秒（60 Hz）。
@@ -71,13 +79,24 @@ public:
     // 让「物理怎么走」这件事完全归物理模块所有（查看器只读不改）。
     static constexpr double kDefaultDt = 1.0 / 60.0;
 
+    // 默认关联距离 d（米）。见 DESIGN.md §5（当前为全局常量，非滑条）。
+    static constexpr float kDefaultBindDistance = 0.1f;
+
     Simulator() = default;
 
     // 用给定网格初始化仿真体。可重复调用（等价于 Reset 到新网格）。
     //
     // 保存输入的顶点/索引副本作为**绑定姿态**：Reset() 回到这里。
     // 输入 mesh 不被修改；不要求有法线/UV（物理只关心位置，法线在显示侧重算）。
+    // 使用默认关联距离 kDefaultBindDistance。
     void Init(const jpov::MeshData& mesh);
+
+    // 同上，但显式指定关联距离 d（米）。必须 > 0，否则 CHECK 崩溃。
+    //
+    // d 影响两件事：
+    //   1. 长边加密（|edge| > d*0.9 的边会插入虚拟顶点）—— 决定仿真点数量
+    //   2. （后续）关联邻居表 nb_list = { j : |v_j - v_i| <= d }
+    void Init(const jpov::MeshData& mesh, float bind_distance);
 
     // ⭐ 主入口：网格经 dt 秒动力学后，变成新的网格。
     //
@@ -97,8 +116,38 @@ public:
     size_t step_count() const { return step_count_; }
 
     // 顶点数 / 三角形数（无索引网格按 positions/3 记三角形）。
+    // ⚠️ 这是**原始输入网格**的计数（提取 mesh 的规模），不含虚拟顶点。
     size_t vertex_count() const { return vertex_count_; }
     size_t triangle_count() const { return triangle_count_; }
+
+    // ── 仿真点（原始 + 虚拟）────────
+    //
+    // 当前关联距离 d（米），Init 时设定。
+    float bind_distance() const { return bind_distance_; }
+
+    // 仿真点总数（原始顶点 + 虚拟顶点）。M1 可视化与后续物理都基于它。
+    size_t sim_point_count() const { return sim_positions_.size(); }
+    // 其中原始顶点数（= 输入网格顶点数）。
+    size_t original_point_count() const { return vertex_count_; }
+    // 其中虚拟顶点数（加密插入）。
+    size_t virtual_point_count() const {
+        return sim_positions_.size() - vertex_count_;
+    }
+
+    // 仿真点的绑定姿态位置（索引 0..original_point_count()-1 为原始顶点，
+    // 其后为虚拟顶点）。纯查询，返回常量引用。
+    const std::vector<geom::Vec3<float>>& sim_positions() const {
+        return sim_positions_;
+    }
+
+    // 该仿真点是否为虚拟顶点（加密插入）。
+    // Pre-condition: sim_index < sim_point_count()；越界传入是调用方 bug → 崩。
+    bool IsVirtualPoint(size_t sim_index) const {
+        CHECK_LT(sim_index, sim_positions_.size())
+            << "IsVirtualPoint 索引越界: " << sim_index << " >= "
+            << sim_positions_.size();
+        return sim_index >= vertex_count_;
+    }
 
     // 当前取景包围盒（纯查询）。
     SimBounds Bounds() const;
@@ -108,11 +157,24 @@ public:
     void Reset();
 
 private:
+    // 由输入网格构建仿真点集合（含长边加密），返回虚拟点数量。
+    // 纯 CPU，只读输入，无副作用（除了填充 sim_positions_/sim_edges_）。
+    size_t BuildSimulationPoints(const jpov::MeshData& mesh, float d);
+
     // ── 物理状态（当前 M0 阶段仅"当前网格 + 时钟"；后续物理量都加在这里）──
     // 说明：把「当前网格」当作唯一事实源，而不是另外维护一份顶点数组，
     // 是为了让 Step 的输出与状态永远一致——查看器拿到的就是仿真器认的那份。
-    jpov::MeshData mesh_;      // 当前网格
+    jpov::MeshData mesh_;      // 当前网格（原始顶点；提取用）
     jpov::MeshData bind_mesh_; // 绑定姿态（Reset 用）
+
+    // 仿真点集合（原始 + 虚拟）的绑定姿态位置。索引 0..vertex_count_-1 = 原始顶点，
+    // 之后为虚拟顶点。M1 可视化与后续物理都基于这份。
+    std::vector<geom::Vec3<float>> sim_positions_;
+
+    // 加密产生的虚拟点列表（仅 position），用于可视化/调试（蓝色点）。
+    std::vector<geom::Vec3<float>> virtual_positions_;
+
+    float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
     double time_ = 0.0;        // 已仿真时间（秒）
     size_t step_count_ = 0;    // 已执行步数

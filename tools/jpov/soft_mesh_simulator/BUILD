@@ -21,7 +21,10 @@ filegroup(
 cc_library(
     name = "soft_mesh_simulator",
     srcs = ["soft_mesh_simulator.cc"],
-    hdrs = ["soft_mesh_simulator.h"],
+    hdrs = [
+        "screen_projection.h",
+        "soft_mesh_simulator.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//geom/common:vec",
@@ -39,6 +42,22 @@ cc_test(
         ":soft_mesh_simulator",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "screen_projection_test",
+    srcs = ["screen_projection_test.cc"],
+    deps = [
+        ":soft_mesh_simulator",
+        "//geom/common:vec",
         "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],

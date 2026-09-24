@@ -26,6 +26,7 @@
 #include <string>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/soft_mesh_simulator/screen_projection.h"
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/interface/ui.h"
@@ -71,6 +72,18 @@ public:
 
     // ── 当前视角 view_：交互（右键 drag/滚轮实时改）与 headless 出图共用的单一事实源。
     ViewConfig view_;
+
+    // ── M1 可视化开关（仿真点 + 地面栅格）──
+    bool show_sim_points_ = true;   // 画仿真点（红=原始 / 蓝=虚拟）
+    bool show_ground_grid_ = true;  // 画地面 1m 栅格（±5m，XZ 平面）
+
+    // 仿真点像素半径（Danis 需求：2px，"就点个点"）。
+    static constexpr float kSimPointRadiusPx = 2.0f;
+
+    // 地面栅格参数（Danis 需求：1m 格子、±5m、只画 XZ 平面）。
+    static constexpr float kGridHalfExtentM = 5.0f;  // 每边 5m → 总 10m×10m
+    static constexpr float kGridStepM = 1.0f;        // 1m 一格
+    static constexpr float kGridLineHalfWidthM = 0.01f;  // 线半宽 1cm → 线宽 2cm
 
     // ── UI 状态 ──
     float ground_y_ = -3.0f;            // 地面高度 [-3,+3]（需求保留的滑条）
@@ -135,7 +148,7 @@ public:
         cmds->ambient = light.ambient;
         cmds->tone_mapping = true;
 
-        // ── 场景：地面 + 仿真网格。地面高度变化时原地重建 quad。──
+        // ── 场景：地面 + 地面栅格 + 仿真网格。地面高度变化时原地重建 quad。──
         if (ground_y_ != ground_y_last_built_) {
             UpdateMesh(ground_mesh_, MakeGroundQuad(ground_y_));
             ground_y_last_built_ = ground_y_;
@@ -144,11 +157,23 @@ public:
                            /*center*/ {0.0f, 0.0f, 0.0f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
+
+        // 地面 1m 栅格（±5m，XZ 平面；用 3D 条带画线，便于目测距离）。
+        if (show_ground_grid_) {
+            DrawGroundGrid(cmds);
+        }
+
         // 仿真网格以恒等摆放画在原点（顶点已是世界坐标：物理在世界系里积分）。
         cmds->DrawObject3D(mesh_id_, mesh_mat_,
                            /*center*/ {0.0f, 0.0f, 0.0f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
+
+        // ── 仿真点可视化（M1 需求：把仿真点画成 2D 圆点，看它长什么样）──
+        // 画在 3D 网格之前 → 2D 圆点始终盖在 3D 内容之上（"不看遮挡"）。
+        if (show_sim_points_) {
+            DrawSimulationPoints(cmds);
+        }
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
@@ -159,6 +184,76 @@ public:
     }
 
 private:
+    // 把仿真点集画成屏幕空间的 2D 圆点（2px 半径）。
+    //
+    // 颜色：原始顶点 = 红，虚拟顶点（加密插入）= 蓝。
+    // 位置：世界坐标经 screen_projection 投到屏幕像素；相机背后的点不画。
+    //
+    // ⚠️ 用 2D 圆（非 3D 圆球）是刻意的（Danis 需求）：
+    //   - 屏幕空间恒定 2px，不随距离缩放 → 远处的密集点也能分辨
+    //   - 2D 图元在 3D 之后绘制，**不看遮挡** → 背面的点也能看见
+    void DrawSimulationPoints(jpov::RenderCommandList* cmds) {
+        const auto& pts = sim_.sim_positions();
+        const size_t original = sim_.original_point_count();
+
+        // 相机参数 → 投影用（与 cmds->camera 同源，保证圆点与 3D 网格对齐）。
+        jpov::soft_mesh_simulator::ProjectionCamera cam;
+        cam.position = cmds->camera.position;
+        cam.target   = cmds->camera.target;
+        cam.up       = cmds->camera.up;
+        cam.fov_deg  = cmds->camera.fov;
+        cam.near     = cmds->camera.near;
+        cam.far      = cmds->camera.far;
+        cam.fbo_w    = static_cast<int>(cmds->camera.fbo_3d_width_);
+        cam.fbo_h    = static_cast<int>(cmds->camera.fbo_3d_height_);
+
+        // 颜色（sRGB 屏显语义；2D 图元不经 tone map，直接用）。
+        const jpov::Color kOriginalColor = {1.0f, 0.15f, 0.15f, 1.0f};  // 红
+        const jpov::Color kVirtualColor  = {0.2f, 0.45f, 1.0f, 1.0f};   // 蓝
+
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const auto sp = jpov::soft_mesh_simulator::ProjectToScreen(pts[i], cam);
+            if (!sp.visible) {
+                continue;
+            }
+            const jpov::Color c = (i < original) ? kOriginalColor : kVirtualColor;
+            cmds->DrawCircle({sp.x, sp.y}, kSimPointRadiusPx, c);
+        }
+    }
+    // 地面 1m 栅格：在 y = ground_y_ 的 XZ 平面上画直线网（±5m），
+    // 用 3D 条带（DrawStrip3D）画 1m 间隔的平行线。用于目测仿真点的间距/尺度。
+    //
+    // 实现：每条线是一个「宽度 2cm 的窄条带」（两个三角形）。
+    // 条纹贴在稍高于地面的 y（+1cm）避免与地面 z-fighting。
+    void DrawGroundGrid(jpov::RenderCommandList* cmds) {
+        const float y = ground_y_ + 0.01f;  // 抬高 1cm 避 z-fighting
+        const float half = kGridHalfExtentM;
+        const float hw = kGridLineHalfWidthM;  // 线半宽
+        // 颜色：比地面（0.5 中灰）暗 → 形成可辨对比（同为中灰会像“隐形”）
+        const jpov::Color color = {0.18f, 0.20f, 0.24f, 1.0f};
+
+        // 平行于 Z 轴的线（固定 x）：x = -5, -4, ..., +5
+        //
+        // ⚠️ 缠绕必须是从 +Y 俯视的逆时针（CCW）。渲染器用 glFrontFace(GL_CCW)
+        //   + glCullFace(GL_BACK)，地面朝 +Y，故从上方看的三角形顶点序须为 CCW，
+        //   否则整片被背面裁剪掉（表现为“栅格完全不出现”）。
+        for (float x = -half; x <= half + 1e-4f; x += kGridStepM) {
+            // 条带规则：三角形 (p0,p1,p2) 与 (p1,p2,p3)。
+            // 顶点序 = 从上方俯视 CCW。
+            const std::vector<jpov::Vec3f> strip = {
+                {x - hw, y, -half}, {x - hw, y, half},
+                {x + hw, y, -half}, {x + hw, y, half}};
+            cmds->DrawStrip3D(strip, color);
+        }
+        // 平行于 X 轴的线（固定 z）：z = -5, -4, ..., +5
+        for (float z = -half; z <= half + 1e-4f; z += kGridStepM) {
+            const std::vector<jpov::Vec3f> strip = {
+                {-half, y, z - hw}, {-half, y, z + hw},
+                { half, y, z - hw}, { half, y, z + hw}};
+            cmds->DrawStrip3D(strip, color);
+        }
+    }
+
     // 文本测量回调：转发到 JPOV::MeasureTextWidth（真实字体进宽）。
     static float ViewerTextWidth(const char* text, float font_size,
                                  const char* /*font_alias*/, void* userdata) {

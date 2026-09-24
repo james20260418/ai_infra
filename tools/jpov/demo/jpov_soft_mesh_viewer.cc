@@ -18,6 +18,7 @@
 //   ./tools/jpov/build_soft_mesh_simulator.sh
 //   → output/jpov_soft_mesh_viewer/jpov_soft_mesh_viewer <glb 路径>
 
+#include <cstdlib>  // atof
 #include <string>
 #include <utility>  // std::move
 
@@ -57,7 +58,8 @@ struct CliOptions {
     std::string gltf_path;
     std::string output_dir;  // --ui_shot 的落盘目录（默认当前目录）
     bool ui_shot = false;    // headless 单帧出图（含面板，UI 自检）
-};
+    float bind_distance = jpov::soft_mesh_simulator::Simulator::kDefaultBindDistance;
+};                                     // --bind_distance 关联距离 d（米）
 
 // 解析 CLI：标志可任意位置；第一个非 "--" 前缀参数 = glTF 路径；
 // 未知标志 → WARNING 忽略（不崩溃）。
@@ -72,6 +74,16 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.output_dir = argv[++i];
             } else {
                 LOG(WARNING) << "--output_dir 缺少目录参数，忽略";
+            }
+        } else if (arg == "--bind_distance") {
+            if (i + 1 < argc) {
+                opt.bind_distance = std::atof(argv[++i]);
+                if (!(opt.bind_distance > 0.0f)) {
+                    LOG(FATAL) << "--bind_distance 必须 > 0，got "
+                               << opt.bind_distance;
+                }
+            } else {
+                LOG(WARNING) << "--bind_distance 缺少数值参数，忽略";
             }
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "; 已忽略";
@@ -136,10 +148,21 @@ int main(int argc, char** argv) {
     app.mesh_id_ = app.RegisterMesh(sim_mesh);
 
     // 仿真器初始化（绑定姿态 = 这份网格；Reset 会回到它）。
-    app.sim_.Init(sim_mesh);
+    // bind_distance（关联距离 d）由 CLI 控制，默认 0.1 m —— 它决定长边加密密度，
+    // 从而决定仿真点（原始+虚拟）的数量。
+    app.sim_.Init(sim_mesh, opt.bind_distance);
+    LOG(INFO) << "── 仿真点统计 ──  原始顶点 " << app.sim_.original_point_count()
+              << " / 虚拟顶点 " << app.sim_.virtual_point_count()
+              << " / 合计 " << app.sim_.sim_point_count()
+              << "（bind_distance=" << app.sim_.bind_distance() << " m）";
 
     // 初始视角：目标原点、R 按 CPU 包围盒自适应（退化时退回 DefaultView）。
+    //
+    // 初始俯视角 phi = +25° ——Position() 里 y = R*sin(phi)，**phi > 0 才是相机在
+    // 上方俯视地面**（phi 为负会跑到地面下方）。俯视保证地面 + 1m 栅格在画面里
+    // （栅格贴地，不俯视就看不见）。视角仍可右键自由旋转。
     app.view_ = jpov::soft_mesh_viewer::DefaultView();
+    app.view_.phi = 25.0 * 3.14159265358979323846 / 180.0;  // 俯视 25°
     const jpov::soft_mesh_simulator::SimBounds bounds = app.sim_.Bounds();
     if (bounds.valid) {
         const float bmin[3] = {bounds.min[0], bounds.min[1], bounds.min[2]};

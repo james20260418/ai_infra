@@ -215,4 +215,121 @@ TEST(SoftMeshSimulatorTest, StepRequiresInit) {
     EXPECT_DEATH(sim.Step(Simulator::kDefaultDt), "Init");
 }
 
+// ==================== M1：仿真点（长边加密）与投影 ====================
+
+// 边长均 <= d*0.9 时不需要加密：仿真点数 == 原始顶点数。
+TEST(SoftMeshSimulatorTest, NoSubdivisionWhenEdgesAreShort) {
+    // 三角形边长 ~1，d=10 → max_len=9，无一条边超过。
+    Simulator sim;
+    sim.Init(MakeTri(), /*bind_distance=*/10.0f);
+    EXPECT_EQ(sim.original_point_count(), 3u);
+    EXPECT_EQ(sim.virtual_point_count(), 0u);
+    EXPECT_EQ(sim.sim_point_count(), 3u);
+}
+
+// 长边必须按 d*0.9 切分：边长 10、d=1（max_len=0.9）→ 切 ceil(10/0.9)=12 段
+// → 插 11 个虚拟点（每条边）。
+TEST(SoftMeshSimulatorTest, LongEdgeIsSubdivided) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 单条边长 10 的退化“三角形”（第三点与第一点重合，让三条边里只有一条长边）。
+    m.positions = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+
+    Simulator sim;
+    sim.Init(m, /*bind_distance=*/1.0f);
+    EXPECT_EQ(sim.original_point_count(), 3u);
+    // 长边 (0,1) 与 (1,2) 都长 10；但 (0,2) 是退化边（长 0）且与 0==2。
+    // 边 (0,1)：切 12 段 → 11 个点；边 (1,2)：切 12 段 → 11 个点。
+    // 合计 22 个虚拟点。
+    EXPECT_EQ(sim.virtual_point_count(), 22u);
+    EXPECT_EQ(sim.sim_point_count(), 25u);
+}
+
+// 加密后每段长度都必须 <= d*0.9（这是加密的目的：保证关联不断）。
+TEST(SoftMeshSimulatorTest, SubdividedSegmentsRespectMaxLen) {
+    const float d = 1.0f;
+    const float max_len = d * 0.9f;
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {7.3f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+
+    Simulator sim;
+    sim.Init(m, d);
+
+    // 取原始点 0 → 原始点 1 之间的所有仿真点（原始 0/1 + 虚拟点），
+    // 按 x 排序，逐一验证相邻间距 <= max_len。
+    const auto& pts = sim.sim_positions();
+    std::vector<float> xs;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        if (std::abs(pts[i][1]) < 1e-6f && std::abs(pts[i][2]) < 1e-6f) {
+            xs.push_back(pts[i][0]);
+        }
+    }
+    ASSERT_GT(xs.size(), 2u);  // 确实插了点
+    std::sort(xs.begin(), xs.end());
+    for (size_t i = 1; i < xs.size(); ++i) {
+        EXPECT_LE(xs[i] - xs[i - 1], max_len + 1e-4f)
+            << "段 " << i << " 长度超限";
+    }
+}
+
+// 虚拟点判定：前 original_point_count() 个不是虚拟点，其后都是。
+TEST(SoftMeshSimulatorTest, IsVirtualPointBoundary) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+
+    Simulator sim;
+    sim.Init(m, 1.0f);
+    const size_t orig = sim.original_point_count();
+    ASSERT_GT(sim.virtual_point_count(), 0u);
+    for (size_t i = 0; i < orig; ++i) {
+        EXPECT_FALSE(sim.IsVirtualPoint(i));
+    }
+    for (size_t i = orig; i < sim.sim_point_count(); ++i) {
+        EXPECT_TRUE(sim.IsVirtualPoint(i));
+    }
+    // 越界传入是调用方 bug → 崩（不静默返回错误答案）。
+    EXPECT_DEATH(sim.IsVirtualPoint(sim.sim_point_count()), "越界");
+}
+
+// 取景包围盒基于**原始网格**（不含虚拟点，但虚拟点在边上，不扩大包围盒）。
+TEST(SoftMeshSimulatorTest, BoundsIgnoresVirtualPoints) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {3.0f, 0.0f, 0.0f}, {0.0f, 3.0f, 0.0f}};
+    m.Validate();
+
+    Simulator sim;
+    sim.Init(m, 0.5f);  // 边长 ~3/4.24 > 0.45 → 会加密
+    const auto b = sim.Bounds();
+    ASSERT_TRUE(b.valid);
+    EXPECT_FLOAT_EQ(b.min[0], 0.0f);
+    EXPECT_FLOAT_EQ(b.max[0], 3.0f);
+    EXPECT_FLOAT_EQ(b.max[1], 3.0f);
+}
+
+// 关联距离必须 > 0，否则崩。
+TEST(SoftMeshSimulatorTest, InitRejectsNonPositiveBindDistance) {
+    EXPECT_DEATH(Simulator().Init(MakeTri(), 0.0f), "bind_distance");
+    EXPECT_DEATH(Simulator().Init(MakeTri(), -1.0f), "bind_distance");
+}
+
+// d 影响加密密度：d 越大，虚拟点越少（大 d 不需要细密加密）。
+TEST(SoftMeshSimulatorTest, LargerBindDistanceYieldsFewerVirtualPoints) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+
+    Simulator fine;
+    fine.Init(m, 0.5f);
+    Simulator coarse;
+    coarse.Init(m, 5.0f);
+    EXPECT_GT(fine.virtual_point_count(), coarse.virtual_point_count());
+}
+
 }  // namespace
