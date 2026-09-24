@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# soft_mesh_simulator.sh — 编译 jpov_soft_mesh_viewer（JPOV 软体仿真查看器）
+# build_soft_mesh_simulator.sh — 编译 jpov_soft_mesh_viewer（JPOV 软体仿真查看器）
 #
-# 用法：
-#   ./soft_mesh_simulator.sh
+# 用法（在仓库根或本目录下均可）：
+#   ./tools/jpov/build_soft_mesh_simulator.sh
 #
 # 效果：
 #   1. bazel build //tools/jpov:jpov_soft_mesh_viewer（Linux ELF）
@@ -25,8 +25,10 @@
 
 set -euo pipefail
 
+# 本脚本位于 <repo>/tools/jpov/，故工程根 = 上溯两级（与兄弟脚本
+# build_jpov_model_viewer.sh 等同构）。
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BAZEL_BIN="$PROJECT_DIR/bazel-bin/tools/jpov"
 OUTPUT_DIR="$PROJECT_DIR/output/jpov_soft_mesh_viewer"
 
@@ -50,8 +52,8 @@ cp -v "$BAZEL_BIN/jpov_soft_mesh_viewer" "$OUTPUT_DIR/jpov_soft_mesh_viewer"
 echo ""
 echo "==> 3. 拷贝字体资源到 output/jpov_soft_mesh_viewer/fonts/"
 mkdir -p "$OUTPUT_DIR/fonts"
-cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts/"
-cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
+cp -v "$SCRIPT_DIR/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts/"
+cp -v "$SCRIPT_DIR/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/"
 
 echo ""

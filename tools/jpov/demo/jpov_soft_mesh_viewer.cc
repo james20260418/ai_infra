@@ -14,8 +14,8 @@
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov:jpov_soft_mesh_viewer -- /path/to/model.glb
-//   或 sh 脚本（仓库根）：
-//   ./soft_mesh_simulator.sh
+//   或 sh 脚本：
+//   ./tools/jpov/build_soft_mesh_simulator.sh
 //   → output/jpov_soft_mesh_viewer/jpov_soft_mesh_viewer <glb 路径>
 
 #include <string>
