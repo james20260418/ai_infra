@@ -1,18 +1,19 @@
-// JPOV 软体仿真器 — 实现（见 soft_mesh_sim.h 的文件头）
+// JPOV 软体仿真器 — 实现（见 soft_mesh_simulator.h 的文件头）
 //
 // 纯 CPU / GL-free：本文件不 include 任何 GL 头，只碰 MeshData 与几何数学，
-// 因此可以被单测直接跑（soft_mesh_sim_test.cc）。
+// 因此可以被单测直接跑（soft_mesh_simulator_test.cc）。
 
-#include "tools/jpov/demo/soft_mesh_sim.h"
+#include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
 #include <algorithm>
 #include <limits>
 
 #include <glog/logging.h>
 
-namespace jpov_soft {
+namespace jpov {
+namespace soft_mesh_simulator {
 
-void SoftMeshSimulator::Init(const jpov::MeshData& mesh) {
+void Simulator::Init(const jpov::MeshData& mesh) {
     mesh.Validate();  // 长度/属性一致性：非法输入在这里就崩，不带进物理
 
     // 绑定姿态 = 输入网格的副本；当前网格也从绑定姿态起步。
@@ -28,13 +29,13 @@ void SoftMeshSimulator::Init(const jpov::MeshData& mesh) {
     step_count_ = 0;
     inited_ = true;
 
-    LOG(INFO) << "SoftMeshSimulator::Init 顶点 " << vertex_count_
+    LOG(INFO) << "soft_mesh_simulator::Init 顶点 " << vertex_count_
               << " / 三角形 " << triangle_count_ << "（M0 静态阶段：Step 为恒等）";
 }
 
-jpov::MeshData SoftMeshSimulator::Step(double dt) {
-    CHECK(inited_) << "SoftMeshSimulator::Step 调用前必须先 Init(mesh)";
-    CHECK(dt > 0.0) << "SoftMeshSimulator::Step 要求 dt > 0，got " << dt
+jpov::MeshData Simulator::Step(double dt) {
+    CHECK(inited_) << "soft_mesh_simulator::Step 调用前必须先 Init(mesh)";
+    CHECK(dt > 0.0) << "soft_mesh_simulator::Step 要求 dt > 0，got " << dt
                     << "（静默跳过时间会掩盖时钟 bug，故直接崩溃）";
 
     // ── M0（静态阶段）：恒等桩。──
@@ -56,7 +57,7 @@ jpov::MeshData SoftMeshSimulator::Step(double dt) {
     return mesh_;
 }
 
-SimBounds SoftMeshSimulator::Bounds() const {
+SimBounds Simulator::Bounds() const {
     SimBounds b;
     if (mesh_.positions.empty()) return b;  // valid = false
 
@@ -77,14 +78,15 @@ SimBounds SoftMeshSimulator::Bounds() const {
     return b;
 }
 
-void SoftMeshSimulator::Reset() {
+void Simulator::Reset() {
     if (!inited_) return;  // 未初始化过：no-op（幂等，便于查看器无脑调用）
 
     mesh_ = bind_mesh_;
     time_ = 0.0;
     step_count_ = 0;
 
-    LOG(INFO) << "SoftMeshSimulator::Reset 已回到绑定姿态（时间/步数清零）";
+    LOG(INFO) << "soft_mesh_simulator::Reset 已回到绑定姿态（时间/步数清零）";
 }
 
-}  // namespace jpov_soft
+}  // namespace soft_mesh_simulator
+}  // namespace jpov

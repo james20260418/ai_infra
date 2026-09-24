@@ -1,23 +1,25 @@
 // JPOV 软体仿真器 — 主入口（某时刻的 mesh，经一小段时间的动力学后，变成新的 mesh）
 //
-// ============================ 本文件回答的唯一问题 ============================
+// ============================ 本模块回答的唯一问题 ============================
 //
-//     SoftMeshSimulator::Step(mesh, dt)  →  新的 mesh
+//     Simulator::Step(mesh, dt)  →  新的 mesh
 //
 // 即：一个三角形网格（MeshData），经过 dt 秒的动力学演化，变成一个新的三角形网格。
-// 这是软体仿真链条的【唯一主入口】。查看器（soft_mesh_simulator.sh 产物）只负责
-// 把「上一步的输出」当成「下一步的输入」逐帧喂给本接口，并把结果画出来——它不
-// 持有任何物理状态，物理状态全部封在本类内部。
+// 这是软体仿真链条的【唯一主入口】。查看器只负责把「上一步的输出」当成「下一步的
+// 输入」逐帧喂给本接口，并把结果画出来——它不持有任何物理状态，物理状态全部封在
+// 本类内部。
 //
-// ============================ 当前阶段（M0）======================
+// 本模块是**独立包**（tools/jpov/soft_mesh_simulator/），不依赖渲染层：
+// 纯 CPU、零 GL、可单测。这是刻意的边界——显示（JPOV 渲染管线）与物理（本包）
+// 各自独立演进，互不污染。
+//
+// ============================ 当前阶段（M0）==============================
 //
 // **只做静态展示**：动力学尚未实现，Step() 是显式的恒等桩（恒等映射 + 计数）。
-// 查看器已经把「渲染一帧 mesh」这条链路完全打通（加载 → 地面/光照 → 相机 →
-// UI → OneIteration），后续每加一条物理功能（重力 / 弹簧约束 / 地面碰撞 / …）
-// 都是在本文件里往里填，查看器一行都不用改。
+// 后续每加一条物理（重力 / 弹簧约束 / 地面碰撞 / …）都是在本包内往里填。
 //
 // 之所以先立这个骨架，是为了让「物理」和「显示」从一开始就完全解耦：
-//   - 物理：纯 CPU、零 GL、可单测（soft_mesh_sim_test.cc）
+//   - 物理：纯 CPU、零 GL、可单测（soft_mesh_simulator_test.cc）
 //   - 显示：JPOV 渲染管线，物理只是喂给它的一个 MeshData
 //
 // ============================ 设计约定 ============================
@@ -26,17 +28,18 @@
 // 不可变性：Step(dt) 只推进内部状态并返回结果，输入 mesh 不被修改。
 // 单位铁律：长度统一为**米**。glTF 资产在加载边界已换算（见 gltf_loader.cc），
 //   本类不做任何单位推断。dt 单位为**秒**。
+// 前置条件用 CHECK 崩，不藏隐式行为（没有"传 0 就表示自动"这类魔法默认值）。
 
-#ifndef JPOV_DEMO_SOFT_MESH_SIM_H_
-#define JPOV_DEMO_SOFT_MESH_SIM_H_
+#ifndef JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
+#define JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
 
 #include <cstddef>
-#include <vector>
 
 #include "geom/common/vec.h"
 #include "tools/jpov/interface/mesh.h"
 
-namespace jpov_soft {
+namespace jpov {
+namespace soft_mesh_simulator {
 
 // 仿真体在某一时刻的取景包围盒（纯查询，无副作用）。
 //
@@ -44,7 +47,7 @@ namespace jpov_soft {
 // 输入网格的包围盒。带 valid 标志：空网格时 min/max 未定义，调用方必须先看标志。
 struct SimBounds {
     // 说明：这里用完整拼写 geom::Vec3<float>（而非 jpov 命名空间内的 Vec3f 别名），
-    // 因为本头不属于 jpov 命名空间、需要自带类型来源，避免被别名可见性牵连。
+    // 因为本头需要自带类型来源，避免被别名可见性牵连。
     geom::Vec3<float> min = geom::Vec3<float>(0.0f, 0.0f, 0.0f);
     geom::Vec3<float> max = geom::Vec3<float>(0.0f, 0.0f, 0.0f);
     bool valid = false;
@@ -60,7 +63,7 @@ struct SimBounds {
 //
 // 所有物理常量都以命名常量/成员暴露，便于后续 UI 滑条或 headless 批量实验覆盖；
 // 当前 M0 阶段只有一个时间常量。
-class SoftMeshSimulator {
+class Simulator {
 public:
     // 外部时钟的一个标准步长：1/60 秒（60 Hz）。
     //
@@ -68,7 +71,7 @@ public:
     // 让「物理怎么走」这件事完全归物理模块所有（查看器只读不改）。
     static constexpr double kDefaultDt = 1.0 / 60.0;
 
-    SoftMeshSimulator() = default;
+    Simulator() = default;
 
     // 用给定网格初始化仿真体。可重复调用（等价于 Reset 到新网格）。
     //
@@ -120,6 +123,7 @@ private:
     bool inited_ = false;      // 是否已 Init（Reset 的前置校验）
 };
 
-}  // namespace jpov_soft
+}  // namespace soft_mesh_simulator
+}  // namespace jpov
 
-#endif  // JPOV_DEMO_SOFT_MESH_SIM_H_
+#endif  // JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_

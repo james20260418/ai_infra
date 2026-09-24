@@ -10,10 +10,11 @@
 #   2. 产物拷贝到工程 output/jpov_soft_mesh_viewer/ 下（含 exe 旁 fonts/）
 #   3. 打印用法提示
 #
-# ⚠️ 当前阶段（M0）：仿真器的动力学尚未实现 —— SoftMeshSimulator::Step 是显式的
+# ⚠️ 当前阶段（M0）：仿真器的动力学尚未实现 —— Simulator::Step 是显式的
 #    恒等桩（mesh 进、mesh 出，只推进时钟）。本脚本现在验证的是**静态展示模型**
 #    的能力（加载 → 摆放 → 光照 → 相机 → UI 全链路）。
-#    后续每加一条物理，都改 tools/jpov/demo/soft_mesh_sim.cc，本查看器一行不用改。
+#    后续每加一条物理，都改 tools/jpov/soft_mesh_simulator/soft_mesh_simulator.cc，
+#    本查看器一行不用改。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_soft_mesh_viewer/jpov_soft_mesh_viewer <glb 路径>
@@ -78,6 +79,6 @@ echo "   （太阳仰角 / 浊度 / 季节 R / 模型缩放 已按需求删除 �
 echo "   面板上方另有只读状态行：仿真 t / 步数 / 顶点数 / 三角形数。"
 echo ""
 echo "   架构："
-echo "     · 物理：tools/jpov/demo/soft_mesh_sim.{h,cc}（纯 CPU、GL-free、可单测）"
+echo "     · 物理：tools/jpov/soft_mesh_simulator/（独立包，纯 CPU、GL-free、可单测）"
 echo "     · 显示：tools/jpov/demo/soft_mesh_viewer_app.h + jpov_soft_mesh_viewer.cc"
-echo "     · 单测：bazel test //tools/jpov:soft_mesh_sim_test"
+echo "     · 单测：bazel test //tools/jpov/soft_mesh_simulator:soft_mesh_simulator_test"

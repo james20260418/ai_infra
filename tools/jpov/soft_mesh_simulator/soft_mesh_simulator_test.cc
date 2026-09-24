@@ -8,9 +8,9 @@
 //   - 输入 mesh 不被修改（调用方的网格是只读的）
 //   - Bounds() 正确且是纯查询（多调几次结果一致，不影响时钟）
 //
-// ⚠️ 负向验证过：把 Step 改成"返回零顶点网格"，本测试立即 FAIL（非恒真）。
+// ⚠️ 负向验证过：把 Bounds 改成"只取首顶点"，本测试立即 FAIL（非恒真）。
 
-#include "tools/jpov/demo/soft_mesh_sim.h"
+#include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
 #include <cmath>
 
@@ -20,6 +20,8 @@
 #include "tools/jpov/interface/mesh.h"
 
 namespace {
+
+using jpov::soft_mesh_simulator::Simulator;
 
 // 造一个单三角形（3 顶点，带法线/UV/索引）的测试网格。
 jpov::MeshData MakeTri() {
@@ -59,8 +61,8 @@ jpov::MeshData MakeAsymmetricMesh() {
     return m;
 }
 
-TEST(SoftMeshSim, InitCountsVerticesAndTriangles) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, InitCountsVerticesAndTriangles) {
+    Simulator sim;
     sim.Init(MakeTri());
     EXPECT_EQ(sim.vertex_count(), 3u);
     EXPECT_EQ(sim.triangle_count(), 1u);
@@ -68,20 +70,20 @@ TEST(SoftMeshSim, InitCountsVerticesAndTriangles) {
     EXPECT_EQ(sim.step_count(), 0u);
 }
 
-TEST(SoftMeshSim, NonIndexedTriangleCountUsesVertexCountOver3) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, NonIndexedTriangleCountUsesVertexCountOver3) {
+    Simulator sim;
     sim.Init(MakeNonIndexed());
     EXPECT_EQ(sim.vertex_count(), 6u);
     EXPECT_EQ(sim.triangle_count(), 2u);  // 6/3
 }
 
 // M0 契约：Step 是恒等映射 —— 输出顶点与输入逐分量相同。
-TEST(SoftMeshSim, StepIsIdentityInM0) {
+TEST(SoftMeshSimulatorTest, StepIsIdentityInM0) {
     const jpov::MeshData in = MakeTri();
-    jpov_soft::SoftMeshSimulator sim;
+    Simulator sim;
     sim.Init(in);
 
-    const jpov::MeshData out = sim.Step(jpov_soft::SoftMeshSimulator::kDefaultDt);
+    const jpov::MeshData out = sim.Step(Simulator::kDefaultDt);
 
     ASSERT_EQ(out.positions.size(), in.positions.size());
     for (size_t i = 0; i < in.positions.size(); ++i) {
@@ -93,12 +95,12 @@ TEST(SoftMeshSim, StepIsIdentityInM0) {
 }
 
 // 拓扑与其它顶点属性也必须原样保留（物理不应擅自改索引/法线/UV）。
-TEST(SoftMeshSim, StepPreservesTopologyAndAttributes) {
+TEST(SoftMeshSimulatorTest, StepPreservesTopologyAndAttributes) {
     const jpov::MeshData in = MakeTri();
-    jpov_soft::SoftMeshSimulator sim;
+    Simulator sim;
     sim.Init(in);
 
-    const jpov::MeshData out = sim.Step(jpov_soft::SoftMeshSimulator::kDefaultDt);
+    const jpov::MeshData out = sim.Step(Simulator::kDefaultDt);
     EXPECT_EQ(out.indices, in.indices);
     ASSERT_EQ(out.normals.size(), in.normals.size());
     for (size_t i = 0; i < in.normals.size(); ++i) {
@@ -112,11 +114,11 @@ TEST(SoftMeshSim, StepPreservesTopologyAndAttributes) {
 }
 
 // 时钟：time == Σdt，步数 == 调用次数（即使动力学是恒等的，时间也必须真实推进）。
-TEST(SoftMeshSim, ClockAccumulates) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, ClockAccumulates) {
+    Simulator sim;
     sim.Init(MakeTri());
 
-    const double dt = jpov_soft::SoftMeshSimulator::kDefaultDt;
+    const double dt = Simulator::kDefaultDt;
     const int n = 60;
     for (int i = 0; i < n; ++i) sim.Step(dt);
 
@@ -126,26 +128,26 @@ TEST(SoftMeshSim, ClockAccumulates) {
 
 // 输入网格是只读的：Step 不得回头改调用方那份（物理只改自己内部副本）。
 // 用非零值做基准（0.0 是未初始化内存的常见值，用它做期望会让"没写"也通过）。
-TEST(SoftMeshSim, InputMeshNotMutated) {
+TEST(SoftMeshSimulatorTest, InputMeshNotMutated) {
     const jpov::MeshData in = MakeAsymmetricMesh();
     const float orig_x = in.positions[1][0];  // = 3.0（非 0，能真区分）
     const float orig_y = in.positions[2][1];  // = 7.0
 
-    jpov_soft::SoftMeshSimulator sim;
+    Simulator sim;
     sim.Init(in);
-    sim.Step(jpov_soft::SoftMeshSimulator::kDefaultDt);
+    sim.Step(Simulator::kDefaultDt);
 
     EXPECT_FLOAT_EQ(in.positions[1][0], orig_x);
     EXPECT_FLOAT_EQ(in.positions[2][1], orig_y);
 }
 
 // Reset：回到绑定姿态 + 清零时间/步数。
-TEST(SoftMeshSim, ResetRestoresBindPoseAndClock) {
+TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
     const jpov::MeshData in = MakeTri();
-    jpov_soft::SoftMeshSimulator sim;
+    Simulator sim;
     sim.Init(in);
 
-    for (int i = 0; i < 10; ++i) sim.Step(jpov_soft::SoftMeshSimulator::kDefaultDt);
+    for (int i = 0; i < 10; ++i) sim.Step(Simulator::kDefaultDt);
     ASSERT_GT(sim.time(), 0.0);
 
     sim.Reset();
@@ -160,8 +162,8 @@ TEST(SoftMeshSim, ResetRestoresBindPoseAndClock) {
 }
 
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
-TEST(SoftMeshSim, ResetBeforeInitIsNoOp) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
+    Simulator sim;
     sim.Reset();  // 不应崩溃
     EXPECT_DOUBLE_EQ(sim.time(), 0.0);
     EXPECT_EQ(sim.step_count(), 0u);
@@ -169,11 +171,11 @@ TEST(SoftMeshSim, ResetBeforeInitIsNoOp) {
 
 // Bounds：正确覆盖全部顶点，且是纯查询（多调不改变时钟）。
 // 用不对称网格，断言能真区分对错（原点三角形是恒真测试，见 MakeAsymmetricMesh 注释）。
-TEST(SoftMeshSim, BoundsCoversAllVerticesAndIsPure) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, BoundsCoversAllVerticesAndIsPure) {
+    Simulator sim;
     sim.Init(MakeAsymmetricMesh());
 
-    const jpov_soft::SimBounds b1 = sim.Bounds();
+    const jpov::soft_mesh_simulator::SimBounds b1 = sim.Bounds();
     ASSERT_TRUE(b1.valid);
     // min：三个分量各自来自不同顶点（-2/1/-5、3/-4/0、0/7/2）——
     // 漏算任何一个顶点都会让对应分量的断言失败。
@@ -185,7 +187,7 @@ TEST(SoftMeshSim, BoundsCoversAllVerticesAndIsPure) {
     EXPECT_FLOAT_EQ(b1.max[2],  2.0f);  // 仅顶点2 提供
 
     // 多调几次：结果一致，且时钟不动（纯查询）。
-    const jpov_soft::SimBounds b2 = sim.Bounds();
+    const jpov::soft_mesh_simulator::SimBounds b2 = sim.Bounds();
     EXPECT_FLOAT_EQ(b2.max[0], b1.max[0]);
     EXPECT_FLOAT_EQ(b2.min[1], b1.min[1]);
     EXPECT_DOUBLE_EQ(sim.time(), 0.0);
@@ -193,24 +195,24 @@ TEST(SoftMeshSim, BoundsCoversAllVerticesAndIsPure) {
 }
 
 // 空网格：Bounds().valid == false（min/max 未定义，调用方必须先看标志）。
-TEST(SoftMeshSim, BoundsInvalidForEmptyMesh) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, BoundsInvalidForEmptyMesh) {
+    Simulator sim;
     // 未 Init → 内部网格空。
     EXPECT_FALSE(sim.Bounds().valid);
 }
 
 // Step 的前置条件：dt <= 0 必须崩（静默跳帧会掩盖时钟 bug）。
-TEST(SoftMeshSim, StepRejectsNonPositiveDt) {
-    jpov_soft::SoftMeshSimulator sim;
+TEST(SoftMeshSimulatorTest, StepRejectsNonPositiveDt) {
+    Simulator sim;
     sim.Init(MakeTri());
     EXPECT_DEATH(sim.Step(0.0), "dt");
     EXPECT_DEATH(sim.Step(-0.01), "dt");
 }
 
 // Step 的前置条件：必须先 Init。
-TEST(SoftMeshSim, StepRequiresInit) {
-    jpov_soft::SoftMeshSimulator sim;
-    EXPECT_DEATH(sim.Step(jpov_soft::SoftMeshSimulator::kDefaultDt), "Init");
+TEST(SoftMeshSimulatorTest, StepRequiresInit) {
+    Simulator sim;
+    EXPECT_DEATH(sim.Step(Simulator::kDefaultDt), "Init");
 }
 
 }  // namespace
