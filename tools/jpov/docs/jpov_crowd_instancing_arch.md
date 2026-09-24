@@ -8,6 +8,9 @@
 > 前置阅读：本文档是 `docs/jpov_engine_integration.md`（JPOV 作 0 级引擎的边界收敛）的
 > 直接延续——那里的「世界演化归用户/渲染归 JPOV」「每帧全量 cmds 缝是真实接口」「static meshing ✅ /
 > 分层/局部更新 ❌」结论在这里原样适用。文档描述以代码现状为准。
+>
+> 相关：`docs/jpov_crowd_body_shape_face_design.md`（2026-09-23：per-instance 体型〔整体 scale +
+> 骨通道膨胀 μ〕与「脸是装备」+ 近邻动态表情的设计定稿）。
 
 ---
 
@@ -81,14 +84,22 @@
                           cloth  : topA / topB / armor… / pants… （都 bind 到同一骨架）
   material_tex[]      —— baseColor/normal/metallicRoughness… 变体（肤色/穿着差异在此）
 
-instance[i] (很薄, select 共享区):
-  transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)
-  body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int）
-  cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」
-  cheap_body_scale   —— 几档全局/轴向 scale 标量（身高胖瘦微差，见 §6.1）
-  face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引
-  tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）
-  seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现）
+instance[i] (很薄, select 共享区) —— ⚠️ 这张表混着**三类**字段，"归谁消费"不同（2026-09-23 标注）：
+  · `[GPU]` = 每实例送进 shader 的 per-instance attribute（占 attribute location）
+  · `[CPU]` = CPU 装配/批处理层自己用，**不进 shader**
+  transform          —— 摆放 (等价现有 Object3D 的 center/up/front/scale)      [GPU]
+  body_part_idx[]    —— 此人由哪几个绑骨 part 拼成（头/躯干/上臂/小臂/手… 各一 int） [CPU]
+  cloth_part_idx[]   —— 此人的衣物款式（外衣/裤/… 各一 int），可为「无」          [CPU]
+                       注：上面两个数组 = 同一张「部位表」上的两个**层**（body / cloth），
+                       与 §4 的槽位表是同一件事；统一读法见 §4「slot / 层 / 批次」。
+                       ⚠️ 它们是**批处理分组 key，不是顶点属性**：一次 draw 内换不了几何，
+                       它们只决定「这个人归到哪些批次」。
+  cheap_body_scale   —— 高矮：per-instance 整体 scale（`InstanceTransform::scale`） [GPU]
+  shape_channels[8]  —— 胖瘦：per-instance 骨通道膨胀系数 μ（见 §6.1 与
+                        `jpov_crowd_body_shape_face_design.md`）                  [GPU]
+  face_index         —— 肤色/五官外观 → texture-array / 材质纹理变体索引       [GPU]（预计）
+  tint (vec3)        —— 肤色 / 衣物颜色微调（廉价乘子）                        [GPU]
+  seed (int)         —— 派生上面各 selector 的确定性随机源（同 seed 同长相，可复现） [CPU]
 ```
 
 ### 2.1 关键收益
@@ -128,6 +139,7 @@ instance[i] (很薄, select 共享区):
 | 肤色 / 肤质差异 | per-instance **vec3 tint** 乘共享肤质贴图；或 texture-array 取肤 | tint uniform / texture array | 最省（constant） |
 | 「4 副面孔」的五官/肤(外观) | texture-array / 材质变体 + `face_index` | face_index selector | 低（一个 int） |
 | 「4 副面孔」的脸型/头骨几何 | **共享 N 个 baked 头部 rest-mesh 变体** + `head_idx` | head_idx selector | 低（一个 int） |
+| 近景表情（只给最近邻 K 张脸）| CPU 微操 rest 顶点 + 单独 draw | 动态头槽位池 + blendshape | 中（K≈10，见 `jpov_crowd_body_shape_face_design.md` §4） |
 | 衣物不同款式 | **预备 N 套绑骨 rest-mesh 变体** + `cloth_style_idx` | part_pool[:].cloth + idx | 低（一个 int） |
 | 衣物/部位颜色微调 | per-part tint / 该部位材质变体 | tint selectors | 低 |
 | 装备差异 | 同衣物——rest-mesh/材质变体 + idx | part_pool + idx | 低 |
@@ -162,6 +174,42 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 
 绘制时按 `Draw_SlotPart(part_idx)` 把选中的 rest-mesh 用**共享骨架矩阵**蒙皮，随 `transform` 摆放。
 
+**slot / 层 / 批次 —— 三条读法（把上面两种写法统一起来；2026-09-23 补）**
+
+1. **slot（部位）是一张骨架级的表**：`head / torso / upper_arm / lower_arm / hand …`。
+   「部位」= 一簇骨的**语义分组**，与 mesh 无关 ⇒ 一个骨架供 N 种 mesh 时，这套 slot 名不变。
+2. **肉体与衣物不是两套系统，只是同一张 slot 表上的两个「层」**：`body` 层与 `cloth` 层各自 select。
+   因此 §2 的 `body_part_idx[]` / `cloth_part_idx[]` 与本节这张槽位表**是同一件事的两种写法**；
+   最清楚的形式是**二维 selector**：`part_idx[层][部位]`（空 = 该层该部位不画 = 露肤）。
+   - `body` 层通常不留空（留空 = 该部位无几何 ⇒ 露洞）；`cloth` 层留空是常态。
+   - 将来做叠穿（`jpov_clothes_rig_design.md` §2.3 目前明确只做贴身单层）= 层数变多，结构不用改。
+3. **批次按「被选中的 mesh」分组，不是按「人」分组**。因为一次 instanced draw 里几何必须相同，
+   **不能把同一个人的各个 part 混在一次 draw 里**。真实做法：对池子里每个「被用到的 mesh」，
+   把选了它的所有实例凑一批、一次 `glDrawElementsInstanced`。
+   ⇒ **draw 次数 ≈（被用到的 mesh 数 × 骨架组数），与人数、与组合方式、与动画相位都无关**
+   （1000 人与 10000 人同量级；动画相位是 per-instance attribute，同批可混不同相位）。
+   每个人 = 他选中的 5~8 个 part 各画一次叠加而成。
+   ⇒ **池子规模直接决定 draw 上限** —— 这正是「差异要廉价富足、别靠烘更多几何」的动机：
+   几何变体一膨胀，draw 次数立刻回升；差异应靠 tint / 材质变体 / `shape_channels` 补。
+
+**`part_idx` 的定位（2026-09-23 澄清）**：
+- 它是 **CPU 装配层的组合 key**，**不是 per-instance attribute**，**不进 shader**。
+  一次 draw 内换不了几何（见上），所以它唯一的职责 = 把「这个人」分到若干批次里。
+- 它**不占 attribute location**。注：GL 的 16 个 location 是**顶点属性与实例属性共用**的
+  一个编号池（mesh 几何占 loc0–5），但「省出位置」不是因为共用池，而是因为 part_idx 根本不上 GPU。
+- **池子上限 = draw 预算**（`Σ_类型 用到的 mesh 数`），不是 part_idx 能「扩展」的东西：
+  想让差异更大而不涨 draw，靠 tint / 材质变体 / 连续形状参数（scale、`shape_channels`）这三样。
+- **千人千面 = 用组合换复制**：`部位数^池子大小` 的组合 × 廉价旋钮。例：7 部位 × 每池 12 套
+  = 12⁷ ≈ 3.6e7 种装配，而几何只存 84 套。
+- 把 `part_idx` 变成 GPU 侧的 key（per-instance attribute / buffer）**只在 GPU-driven 管线**下才有意义
+  （compute 按 part_idx 分桶 + **实例放大** + `glMultiDrawElementsIndirect`），换来「CPU 不参与装配分组」；
+  S0 不做。
+
+**两条硬不变量**：
+- 所有 part 必须绑**同一骨架定义**，且顶点里的 `JOINTS_0` **必须用同一套骨 index 空间**
+  （否则 pose atlas 查表全错）——这是「共骨架」的硬约束。
+- part 存的是 **rest 姿态**几何，姿势一律由共享骨架的 pose atlas 驱动 ⇒ part 之间不能各自动画。
+
 ---
 
 ## 5. JPOV / 用户的边界（沿用 engine-integration 收敛）
@@ -175,7 +223,7 @@ val:   head_idx / 上臂idx / 小臂idx / …        / ... 衣idx …（可 null
 | 部位 / 变体 mesh 池与材质贴图变体（`PBRMaterial` + texture-array） | **JPOV** | 肤色 tint、衣物颜色、部位变体 = 现有材质/mesh 体系可表达 |
 | **骨骼动画纹理资源**（烘焙出的 bone 矩阵×clip→帧 纹理）| **JPOV** | 作为 JPOV 官方渲染资源类型（与 mesh/材质/texture 平级）持有、管理生命周期 |
 | **消费该纹理的蒙皮 shader（VS 查表 + 4-bone 蒙皮）** | **JPOV** | 复用 rest 上传；shade/shadow/picking 各 pass 用同一查表蒙皮保证 4-pass 一致（防“手动/拾取错位”）|
-| **把一堆 instance(相位+selector+transform…) batch 成 instanced draw** | **JPOV** | render 关心：接收“同 mesh+同 anim 一批 instance + 帧号”，一次批量画 |
+| **把一堆 instance(每实例相位 + 摆放 + 形状参数…) batch 成 instanced draw** | **JPOV** | 接收“同 mesh + 同一骨架（atlas）一批 instance”，一次批量画；**动画相位/形状/摆放走 per-instance attribute**，故同批可混不同相位。**selector/装配分组归用户侧**（见 §4）|
 | **动画资产是否/怎么烘焙**（clip 从何而来、传几帧进内纹）| **资产/用户** | 跟「素材归用户」同归一类；JPOV 消费烘焙好的纹理 |
 | **每 instance 处在哪段动画 / 哪个相位 / 谁是哪个人**（世界状态）| **用户 / 骨架系统** | 同“世界演化归用户” |
 | **LOD：切不切、每 instance 归哪档、高模/低模各自一档 draw 喂不同几何** | **用户（可见性系统）** | JPOV 不必知道“几个 LOD 档”；JPOV 只需“给一批同档 instance + 这份 mesh 批量画”。**与 instancing 蒙皮彻底解耦** 见 §6.3 |
@@ -197,6 +245,14 @@ JPOV 拥有“烘焙动画纹理资源 + 4-bone 蒙皮 shader + 把同档同动�
    这是「廉价形变(scalar) + 衣物贴合」两全的最稳档。 ✅ S0 用
 2. 衣物 bake 成身体变体（每变体一套衣）——复杂，延后。
 3. 接受「衣带骨、体可微调但衣物按标人」的近似——文档标注取舍，若需要再开。
+
+> **2026-09-23 补充（Danis 收敛）**：体型差异拆成两个按实例的旋钮，且**第一坑解掉一大半**：
+> ① **高矮** = per-instance 整体 `scale`（`InstanceTransform::scale`，零新机制）；
+> ② **胖瘦/部位粗细** = **骨通道膨胀 μ**（蒙皮前对 rest 顶点做骨局部系横径缩放）。
+> μ 是「蒙皮前的顶点算子、按骨通道生效」，**与 mesh 身份无关** ⇒ 绑同一骨架的衣物/装备**自动同比跟随**，
+> 不会豁开（比「整体 scale」更好：长度不变、可按部位）。
+> 代价：通道表骨架级唯一一份 ⇒ 同骨上身体与衣物共用同一 μ，**做不出「衣物比身体松」**。
+> 「长度比例」明确**不做**（用整体 scale 替代）。详见 `jpov_crowd_body_shape_face_design.md`。
 
 ### 6.2 人群角色的动画：三档谱系（本文档核心取舍，决定人群主体形态）
 
