@@ -208,11 +208,19 @@ public:
     //         Mixamo23Skeleton 产出）。inverse_bind 是派生量，不再作为字段（需时 ComputeInverseBind）。
     // poses : 该骨架的全部静态位姿关键帧（烘焙成 pose atlas）。静态退化门传
     //         SkeletonPose::Identity(bone_count)（全恒等 = 该骨架的 bind/T-pose）。
+    // thickness_scaling_config: 骨架级「部位粗细」全局配置（可选）：至多
+    //         kNumThicknessGroup(=8) 个**关节组**，每组一串**关节 index**（= type.joints 下标）；
+    //         同组关节共用一个 per-instance 缩放系数，由 SkinnedInstanceState::thickness_scales
+    //         按**组号**给出（用来调该部位胖瘦，例：腿一组 / 手臂一组 / Hips 一组）。
+    //         index 合法性在注册时立即校验（越界、一骨两组 → LOG(FATAL)）；空组 = 不用；
+    //         全空 = 该骨架不做粗细（渲染侧整段跳过，旧场景零回归）。
+    //         默认 {} 即"不做粗细"，不是隐藏的魔术默认（"没有配置"就表达"不做"）。
     // 返回 skeleton_id 供 cmds->DrawMeshWithSkeleton(mesh_id, skeleton_id, instances) 引用。
     //
     // Pre-condition: Init() 已调用；type.Validate() 通过；poses 非空。
-    uint32_t RegisterSkeleton(const jpov::SkeletonType& type,
-                              std::vector<jpov::SkeletonPose> poses);
+    uint32_t RegisterSkeleton(
+        const jpov::SkeletonType& type, std::vector<jpov::SkeletonPose> poses,
+        std::array<std::vector<int>, jpov::kNumThicknessGroup> thickness_scaling_config = {});
 
     // UpdateMesh: 更新已有 mesh 的顶点数据。
     //

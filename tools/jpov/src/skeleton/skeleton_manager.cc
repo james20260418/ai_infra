@@ -97,12 +97,43 @@ void PutDualQuatTexels(const DualQuat& dq, int bone_flat0, int row_lo, int row_h
 // ==================== SkeletonManager ====================
 
 SkeletonManager::SkeletonManager(const SkeletonType& type,
-                                 std::vector<SkeletonPose> poses) {
+                                 std::vector<SkeletonPose> poses,
+                                 std::array<std::vector<int>, kNumThicknessGroup>
+                                     thickness_scaling_config) {
     type.Validate();
     const int bone = type.bone_count();
     CHECK_GT(bone, 0) << "SkeletonManager: bone_count 必须 >0";
     const int pose_count = static_cast<int>(poses.size());
     CHECK_GT(pose_count, 0) << "SkeletonManager: 至少一个 pose";
+
+    // ---- 部位粗细：立即校验配置（index 合法性）----
+    // 配置 = 至多 8 个关节组，每组一串关节 index。统一在此编成「骨 index → 组号」（-1 = 不受控）。
+    // 校验（违规一律 LOG(FATAL)）：index 越界；同一个关节出现在两个组。
+    // 同组内重复列同一关节 → 允许（幂等，无害）。空组 = 该组不用；全空 = 本骨架不做粗细。
+    std::vector<int> bone_channel(static_cast<size_t>(bone), -1);
+    int nonempty_group_count = 0;  // 非空组的**个数**（日志用；不是“最大组号+1”）
+    for (int g = 0; g < kNumThicknessGroup; ++g) {
+        const std::vector<int>& group = thickness_scaling_config[static_cast<size_t>(g)];
+        if (!group.empty()) {
+            ++nonempty_group_count;
+        }
+        for (int joint_index : group) {
+            CHECK_GE(joint_index, 0)
+                << "SkeletonManager: thickness_scaling_config[" << g << "] 里有负数关节 index "
+                << joint_index << "（合法范围 [0, bone_count=" << bone << ")）";
+            CHECK_LT(joint_index, bone)
+                << "SkeletonManager: thickness_scaling_config[" << g << "] 里的关节 index "
+                << joint_index << " 越界（bone_count=" << bone << "）";
+            const int prev = bone_channel[static_cast<size_t>(joint_index)];
+            CHECK(prev == -1 || prev == g)
+                << "SkeletonManager: 关节 index " << joint_index << " 同时出现在组 " << prev
+                << " 与组 " << g << "；一根骨只能归一个组（否则两个系数打架，语义歧义）";
+            bone_channel[static_cast<size_t>(joint_index)] = g;
+        }
+    }
+    // 有没有组（= 该骨架做不做粗细）：只有“有组”时才建绑定表纹理；无组 = 纹理句柄 0，
+    // 渲染侧整段跳过 ⇒ 旧资产/旧 gold 逐字节零回归（设计文档 §3.3-4）。
+    const bool thickness_enabled = (nonempty_group_count > 0);
 
     bone_count_ = bone;
     pose_count_ = pose_count;
@@ -245,6 +276,48 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
     handles_.bone_count = bone;
     handles_.pose_per_row = pose_per_row_;
 
+    // ---- 部位粗细：**绑定表纹理**（bone_count × 2，RGBA32F）----
+    // 只在配置里真有组时建（不建 = handles_.thickness_bind_tex 为 0 = 渲染侧整段跳过）。
+    // 内容（每骨 2 texel）：
+    //   (j, 0) = (p_j.x, p_j.y, p_j.z, 组号)     p_j = JW_bind[j] 平移（膨胀中心；-1 = 不受控）
+    //   (j, 1) = R_bind_j(x, y, z, w)            JW_bind[j] 朝向（局部 +Y = 骨长轴）
+    // 为什么需要：蒙皮 VS 手里只有 (顶点, JOINTS/WEIGHTS, pose atlas)，而 inverse_bind 已折进
+    //   atlas（方案甲）⇒ VS 拿不到“骨骼绑定时的位置/朝向”，而要「只缩横截面」就必须知道骨轴。
+    // 数据来源：JW_bind[j] = **inverse_bind[j] 的逆**（上面刚算好的 inv[]）—— 不再单跑一次树
+    //   遍历，与蒙皮数学同源、天然不会分叉（同 inverse_bind：骨架派生量、不是用户输入）。
+    // 为何走纹理而不走 uniform 数组：不受顶点 uniform 分量预算约束（无骨数上限），
+    //   且与 pose atlas 同一套“大块常量表进纹理”的做法（见头文件 banner）。
+    if (thickness_enabled) {
+        // ⚠️ 布局按**行主序**写：纹理是 W×H（W=bone, H=2），texel(x,y) 在 (y*W + x)*4 处。
+        //   即「(j,0) 那一行整条连续」+「(j,1) 那一行整条连续」，**不是**「同一骨的两个 texel
+        //   相邻」（后者是 pose atlas 那种 flat 拼法的直觉，在这里会静默错乱：shader 取到
+        //   别人的 p_j/R_bind_j → 顶点被推到离谱的位置，画面像"炸开"）。
+        std::vector<float> tex(static_cast<size_t>(bone) * 2 * 4, 0.0f);
+        for (int j = 0; j < bone; ++j) {
+            const Mat4 bind_world = geom::math::Mat4InverseAffine(inv[static_cast<size_t>(j)]);
+            const geom::Vec3<float> p = geom::math::Mat4TranslationOf(bind_world);
+            const geom::Quaternion<float> q = geom::math::Mat4ToQuaternion(bind_world);
+            const size_t x = static_cast<size_t>(j);
+            float* t0 = &tex[x * 4];                            // 行 0：(p_j.xyz, 组号)
+            t0[0] = p.x(); t0[1] = p.y(); t0[2] = p.z();
+            t0[3] = static_cast<float>(bone_channel[x]);        // 组号（整数存 float，精确）
+            float* t1 = &tex[(static_cast<size_t>(bone) + x) * 4];  // 行 1：R_bind_j 四元数
+            t1[0] = q.x; t1[1] = q.y; t1[2] = q.z; t1[3] = q.w;
+        }
+        glGenTextures(1, &handles_.thickness_bind_tex);
+        CHECK_NE(handles_.thickness_bind_tex, 0u)
+            << "SkeletonManager: glGenTextures(thickness bind) failed";
+        glBindTexture(GL_TEXTURE_2D, handles_.thickness_bind_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, bone, 2, 0, GL_RGBA, GL_FLOAT, tex.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        LOG(INFO) << "SkeletonManager: 部位粗细启用：非空组 " << nonempty_group_count << " / "
+                  << kNumThicknessGroup << "，绑定表纹理 " << bone << "×2（bone=" << bone << "）";
+    }
+
     GLenum err = glGetError();
     CHECK_EQ(err, GL_NO_ERROR)
         << "SkeletonManager: GL error after bake, code=" << err;
@@ -257,6 +330,11 @@ SkeletonManager::~SkeletonManager() {
     if (handles_.pose_atlas_tex != 0) {
         glDeleteTextures(1, &handles_.pose_atlas_tex);
         handles_.pose_atlas_tex = 0;
+    }
+    // 部位粗细的绑定表纹理（没启用时本就是 0，glDeleteTextures 也无妨）。
+    if (handles_.thickness_bind_tex != 0) {
+        glDeleteTextures(1, &handles_.thickness_bind_tex);
+        handles_.thickness_bind_tex = 0;
     }
 }
 

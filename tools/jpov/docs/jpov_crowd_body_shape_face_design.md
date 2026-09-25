@@ -265,6 +265,30 @@ for (int i = 0; i < 4; ++i) {
 
 ---
 
+### 3.8 实现现状（as-built，2026-09-24 落地）
+
+本节记「已实现」与上面设计稿的差异，避免后来者照 §3.4 的初期设想改代码。
+
+- **接口**（收敛后的最终形状，见 `interface/skeleton_types.h` / `src/skeleton/skeleton_manager.h`）：
+  - 骨架级：`SkeletonManager(type, poses, std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config)`
+    —— 每组一串**关节 index**（不是骨名；骨名→index 由调用方注册时定位，见 fbx viewer 的 `GlbJointIndexByName`）。
+    ctor 立即校验（负数 / 越界 / 一骨两组 → LOG(FATAL)）；空组 = 不用，全空 = 该骨架不做粗细。
+  - 实例级：`SkinnedInstanceState::thickness_scales`（每项默认 1.0 = 原样）。
+  - 组数常量 `kNumThicknessGroup = 8`（= 2×vec4，见 §3.5）。
+- **每骨 bind 位置/朝向不进公开接口**：由 SkeletonManager 自己从 `inverse_bind` 取逆得到，烘成一张
+  `bone_count × 2` 的 RGBA32F 纹理（`GpuHandles::thickness_bind_tex`，0 = 不做粗细；texel 单元
+  `kTexUnitThicknessBind = 13`）。**与 §3.4 的 `uBoneChannel[]/uBindPos[]/uBindRotQ[]` uniform 数组不同**：
+  走纹理既不受顶点 uniform 分量预算约束（无骨数上限），也不必把内部量摆到公开接口上。
+- **§3.4 一处修正**：`R_bind_j` **不是** `bind_rotation`（那是相对父的局部朝向），必须沿树复合到骨架空间
+  （与 `inverse_bind` 同源）。写绑定时按纹理**行主序**（W=骨数、H=2；不是「同一骨两 texel 相邻」）。
+- **零回归**：无配置的骨架 `uThicknessEnabled = 0` → 蒙皮 VS 的 shape 段整段跳过（不是「乘 1」）。
+- **§3.3-3 的「AABB 放大」在本实现里不适用**：级联正交盒由相机视锥切片推导（2026-09-17 定，不并入任何
+  物体 AABB），蒙皮路径也没有 tile culling ⇒ 变粗的几何不会被剔除/裁剪错。
+- **未做**（留给后续门禁）：§3.6 的量化门禁（μ → 截面直径、混合区近距离 gold）目前只有人工像素计数验收；
+  CPU 侧仅 `test/jpov_thickness_config_test.cc`（配置校验 + 默认值）。
+
+---
+
 ## 4. 「脸是装备」+ 近邻动态表情
 
 ### 4.1 脸是装备（千人静态，Danis 2026-09-23 方案）

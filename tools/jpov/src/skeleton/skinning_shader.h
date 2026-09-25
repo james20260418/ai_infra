@@ -95,10 +95,25 @@ layout(location = 9) in vec4 aInstCol3;
 //   ⚠️ 统一 float（而非 ivec2 + IPointer）：IPointer 按**原始整数位**解释，float 的位
 //   会被读成天文数字列 → texelFetch 出界、整批塌成空白（踩过）。
 layout(location = 10) in vec3 aInstPose;
+// per-instance 部位粗细系数（divisor=1）：8 个组（kNumThicknessGroup）的横径缩放系数，
+//   打包成 2 个 vec4。.x..w = 组 0..3（loc11）/ 组 4..7（loc12）；1.0 = 原样（默认）。
+//   组号 → 哪些关节 的映射由**骨架级配置**决定（SkeletonManager 构造入参），见 skeleton_types.h。
+layout(location = 11) in vec4 aInstThick0;
+layout(location = 12) in vec4 aInstThick1;
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas，每骨 2 texel：实部 q + 对偶部 t）
 uniform int   uBoneCount;      // 该骨架骨数
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
+
+// ---- 部位粗细（骨架级能力；设计 docs/jpov_crowd_body_shape_face_design.md §3）----
+// 开关：0 = 该骨架没配粗细（对应 uThicknessBind 未建）→ **整段跳过**，零额外开销、旧场景零回归。
+//   host 每 draw 依据骨架是否有粗细配置置 0/1（见 SkeletonRenderer::DrawSkinnedMesh）。
+uniform int uThicknessEnabled;
+// 每骨 2 texel（RGBA32F，尺寸 bone_count × 2）：
+//   (j,0) = (p_j.xyz, 组号)   p_j = 该骨 bind 位置（骨架空间）= 膨胀中心；组号 -1 = 不属于任何组
+//   (j,1) = R_bind_j(xyzw)    该骨 bind 朝向（局部 +Y = 骨长轴），单位四元数
+//   内容由 SkeletonManager 构造时从骨架导出（派生量，不是用户输入）。
+uniform sampler2D uThicknessBind;
 
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -173,6 +188,83 @@ vec3 DualQuatRotateVector(vec4 q, vec3 v) {
     return v + 2.0 * q.w * cross(q.xyz, v) + 2.0 * cross(q.xyz, cross(q.xyz, v));
 }
 
+// ==================== 部位粗细（横径缩放）====================
+// 逐顶点、**蒙皮之前**施加：把「顶点相对关节的偏移」转到该骨的局部系，只缩横截面（XZ），
+//   不缩沿轴长度（Y = 骨长轴）→ 「这根骨所辖的肉变粗/变细」。之后再走既有 DQS 蒙皮。
+//   公式（设计文档 §3.1）：o = v − p_j；o_loc = R_bind_jᵀ·o；o_loc.xz ×= μ；
+//                            v' = p_j + R_bind_j·o_loc
+//   法线用**逆转置**（各向异性缩放下 x/z 除 μ）；切线是切向、按正向算子（x/z 乘 μ）。
+// 与 DQS 正交：μ 只改 rest 顶点，不碰对偶四元数（DQ 表达不了缩放，塞进去会让蒙皮塌掉）。
+
+// 用四元数转向量（与 DualQuatRotateVector 的旋转部同式；q 需单位）。
+vec3 RotateByQuat(vec4 q, vec3 v) {
+    return v + 2.0 * q.w * cross(q.xyz, v) + 2.0 * cross(q.xyz, cross(q.xyz, v));
+}
+
+// 用四元数的**共轭**转向量 = 逆旋转（q 单位时 q⁻¹ = conj(q)）。
+vec3 RotateByQuatConj(vec4 q, vec3 v) {
+    return RotateByQuat(vec4(-q.xyz, q.w), v);
+}
+
+// 取第 channel 个组的横径缩放系数；channel 越界 / -1（不受控）→ 1.0 = 不缩放。
+//   写成 if 链而非动态下标：GLSL 3.30 对向量动态下标的保证弱（llvmpipe 上也更慢），
+//   而只有 8 个分支、且被上层「mu==1 早退」挡住，实际几乎不命中。
+float ThicknessOfChannel(int channel) {
+    if (channel == 0) { return aInstThick0.x; }
+    if (channel == 1) { return aInstThick0.y; }
+    if (channel == 2) { return aInstThick0.z; }
+    if (channel == 3) { return aInstThick0.w; }
+    if (channel == 4) { return aInstThick1.x; }
+    if (channel == 5) { return aInstThick1.y; }
+    if (channel == 6) { return aInstThick1.z; }
+    if (channel == 7) { return aInstThick1.w; }
+    return 1.0;
+}
+
+// 某骨对「顶点 / 法线 / 切线」的粗细算子。返回 false = 该骨**不需要**算
+//   （不属于任何组，或该组系数为 1.0）→ 调用方直接跳过，不引入额外计算。
+bool ThicknessOfBone(int bone, vec3 v, vec3 n, vec3 t,
+                     out vec3 v_out, out vec3 n_out, out vec3 t_out) {
+    vec4 t0 = texelFetch(uThicknessBind, ivec2(bone, 0), 0);   // (p_j.xyz, 组号)
+    int channel = int(t0.w);
+    if (channel < 0) { return false; }            // 不属于任何组：跳过（最常见的情形）
+    float mu = ThicknessOfChannel(channel);
+    if (mu == 1.0) { return false; }              // 系数 1.0（默认）：跳过，且**逐位**不变（零噪声）
+    vec4 rq = normalize(texelFetch(uThicknessBind, ivec2(bone, 1), 0));
+    vec3 o_loc = RotateByQuatConj(rq, v - t0.xyz);
+    v_out = t0.xyz + RotateByQuat(rq, vec3(o_loc.x * mu, o_loc.y, o_loc.z * mu));
+    vec3 n_loc = RotateByQuatConj(rq, n);
+    n_out = RotateByQuat(rq, vec3(n_loc.x / mu, n_loc.y, n_loc.z / mu));
+    vec3 t_loc = RotateByQuatConj(rq, t);
+    t_out = RotateByQuat(rq, vec3(t_loc.x * mu, t_loc.y, t_loc.z * mu));
+    return true;
+}
+
+// 逐顶点把参与蒙皮的 ≤4 骨的粗细算子按权重混合。写成「基准 + Σw·(f(v) − v)」而非 Σw·f(v)：
+//   ① 没有任何骨需要算时，结果**逐位**等于入参（与权重是否归一化无关）→ μ≡1 零回归、零噪声；
+//   ② 权重和为 1 时与 Σw·f(v) 等价（普通蒙皮网格都满足）。
+void ShapeByWeight(ivec4 joint, vec4 weight, vec3 v, vec3 n, vec3 t,
+                   out vec3 v_out, out vec3 n_out, out vec3 t_out) {
+    v_out = v;
+    n_out = n;
+    t_out = t;
+    if (uThicknessEnabled == 0) { return; }       // 该骨架没配粗细 → 整段跳过（零成本）
+    vec3 dv = vec3(0.0);
+    vec3 dn = vec3(0.0);
+    vec3 dt = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (weight[i] <= 0.0) { continue; }
+        vec3 bv; vec3 bn; vec3 bt;
+        if (!ThicknessOfBone(joint[i], v, n, t, bv, bn, bt)) { continue; }
+        dv += weight[i] * (bv - v);
+        dn += weight[i] * (bn - n);
+        dt += weight[i] * (bt - t);
+    }
+    v_out = v + dv;
+    n_out = n + dn;
+    t_out = t + dt;
+}
+
 void main() {
     // ── ① 逐骨取「本帧」对偶四元数（两帧插值在 LoadBoneDualQuat 内完成）──
     vec4 qs[4];
@@ -224,9 +316,13 @@ void main() {
         dq_q = q_sum / n_sum;
         dq_t = t_sum / n_sum;
     }
-    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, aPos);
-    vec3 sn = DualQuatRotateVector(dq_q, aNormal);
-    vec3 st = DualQuatRotateVector(dq_q, aTangent);
+    // ── 部位粗细：先把 rest 顶点/法线/切线按骨分组做横径缩放，再喂给蒙皮（顺序固定）──
+    vec3 sv; vec3 sn2; vec3 st2;
+    ShapeByWeight(aJoint, aWeight, aPos, aNormal, aTangent, sv, sn2, st2);
+
+    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, sv);
+    vec3 sn = DualQuatRotateVector(dq_q, sn2);
+    vec3 st = DualQuatRotateVector(dq_q, st2);
 
     // 本实例摆放矩阵（per-instance attribute，每实例不同；4 列拼回 mat4）。
     mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
@@ -271,12 +367,19 @@ layout(location = 8) in vec4 aInstCol2;
 layout(location = 9) in vec4 aInstCol3;
 // per-instance pose 选择（divisor=1，同主 pass）：vec3(pose_col_a, pose_col_b, ratio)。
 layout(location = 10) in vec3 aInstPose;
+// per-instance 部位粗细系数（同主 pass，loc11/12；divisor=1）。阴影必须与主 pass 同用一份，
+//   否则影子与身体错位（同 §「主/阴影公式必须逐字一致」）。
+layout(location = 11) in vec4 aInstThick0;
+layout(location = 12) in vec4 aInstThick1;
 uniform mat4 uShadowViewProj;       // 光空间 裁剪（proj*view，model 走 aInstModel）
 uniform mat4 uShadowDepthViewProj;  // 光空间 线性深度（DepthProj*view，model 走 aInstModel）
 uniform sampler2D uPoseAtlas;
 uniform int   uBoneCount;
 uniform int   uPoseRow;
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
+// 部位粗细（与主 pass 同开关、同绑定表；阴影只需位置）。
+uniform int uThicknessEnabled;
+uniform sampler2D uThicknessBind;
 out float vShadowDepth;
 
 // 同主 pass：每骨 2 texel（实部 q + 对偶部 t）。
@@ -318,6 +421,51 @@ vec3 DualQuatTransformPoint(vec4 q, vec4 t, vec3 p) {
     vec3 rot = p + 2.0 * q.w * cross(q.xyz, p) + 2.0 * cross(q.xyz, cross(q.xyz, p));
     vec3 tra = 2.0 * (q.w * t.xyz - t.w * q.xyz + cross(q.xyz, t.xyz));
     return rot + tra;
+}
+
+// 部位粗细（**位置**部分）：与主 pass 的 ThicknessOfBone 同一公式（o = v − p_j → 骨局部系 →
+//   xz×μ → 回骨架空间）。阴影不需要法线/切线，故只算位置（省掉主 pass 的逆转置那一支）。
+//   ⚠️ 改主 pass 的位置公式时必须同步改这里（否则影子与身体错位）。
+vec3 RotateByQuatS(vec4 q, vec3 v) {
+    return v + 2.0 * q.w * cross(q.xyz, v) + 2.0 * cross(q.xyz, cross(q.xyz, v));
+}
+
+float ThicknessOfChannelS(int channel) {
+    if (channel == 0) { return aInstThick0.x; }
+    if (channel == 1) { return aInstThick0.y; }
+    if (channel == 2) { return aInstThick0.z; }
+    if (channel == 3) { return aInstThick0.w; }
+    if (channel == 4) { return aInstThick1.x; }
+    if (channel == 5) { return aInstThick1.y; }
+    if (channel == 6) { return aInstThick1.z; }
+    if (channel == 7) { return aInstThick1.w; }
+    return 1.0;
+}
+
+// 返回 false = 该骨不需要算（不属任何组 / 系数为 1）→ 跳过。
+bool ThicknessOfBoneS(int bone, vec3 v, out vec3 v_out) {
+    vec4 t0 = texelFetch(uThicknessBind, ivec2(bone, 0), 0);
+    int channel = int(t0.w);
+    if (channel < 0) { return false; }
+    float mu = ThicknessOfChannelS(channel);
+    if (mu == 1.0) { return false; }
+    vec4 rq = normalize(texelFetch(uThicknessBind, ivec2(bone, 1), 0));
+    vec3 o_loc = RotateByQuatS(vec4(-rq.xyz, rq.w), v - t0.xyz);
+    v_out = t0.xyz + RotateByQuatS(rq, vec3(o_loc.x * mu, o_loc.y, o_loc.z * mu));
+    return true;
+}
+
+// 逐顶点按权重混合（同主 pass：基准 + Σw·(f(v) − v) ⇒ 无可算骨时逐位不变）。
+vec3 ShapeByWeightS(ivec4 joint, vec4 weight, vec3 v) {
+    if (uThicknessEnabled == 0) { return v; }
+    vec3 dv = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (weight[i] <= 0.0) { continue; }
+        vec3 bv;
+        if (!ThicknessOfBoneS(joint[i], v, bv)) { continue; }
+        dv += weight[i] * (bv - v);
+    }
+    return v + dv;
 }
 
 void main() {
@@ -362,7 +510,8 @@ void main() {
         dq_q = q_sum / n_sum;
         dq_t = t_sum / n_sum;
     }
-    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, aPos);
+    // 部位粗细（与主 pass 同公式、同 per-instance 系数；否则影子错位）。
+    vec3 sp = DualQuatTransformPoint(dq_q, dq_t, ShapeByWeightS(aJoint, aWeight, aPos));
 
     // 本实例摆放矩阵（per-instance attribute，同主 pass）。
     mat4 inst_model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);

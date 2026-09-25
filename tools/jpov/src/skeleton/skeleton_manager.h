@@ -78,6 +78,18 @@ public:
         unsigned int pose_atlas_tex = 0;  // RGBA32F 2D pose atlas（含折入 inverse_bind 的最终蒙皮变换，DQS 表示）
         int bone_count = 0;    // 该骨架骨数
         int pose_per_row = 0;  // 每行 pose 数 = floor(2048/(2*bone_count))
+
+        // 粗细「绑定表」纹理（RGBA32F，尺寸 bone_count × 2；0 = 该骨架不做粗细控制）。
+        //   每骨 2 个 texel：
+        //     (j, 0) = (p_j.x, p_j.y, p_j.z, **通道下标**)   // p_j = JW_bind[j] 平移（膨胀中心）
+        //     (j, 1) = R_bind_j(x, y, z, w)                 // JW_bind[j] 朝向（局部 +Y = 骨长轴）
+        //   通道下标是**整数存为 float**（0..7，精确可表示；-1 = 该骨不受控）。
+        //   用途：蒙皮 VS 需要它才能「只缩横截面」（旋转到骨局部系 → 缩 XZ → 转回）；
+        //   而 p_j / R_bind_j 是 manager 从骨架导出的，**不走任何公开 CPU 接口**
+        //   （同 inverse_bind：派生量、从不做输入）。
+        //   为何走纹理而不走 uniform 数组：① 不受顶点 uniform 分量预算约束（无骨数上限）；
+        //   ② 与 pose atlas 同一套「大块常量表进纹理」的做法（见本文件顶 banner）。
+        unsigned int thickness_bind_tex = 0;
     };
 
     // 构造：绑定一种骨架的【定义 + 全套 pose】，烘焙并上传骨骼动画纹理（pose atlas）。
@@ -85,10 +97,24 @@ public:
     //   poses: 该骨架的全部静态位姿关键帧。构造即把每个 pose 沿骨架树解算成每骨 jointWorld
     //          （相对骨架空间原点）× 骨架级 inverseBind（由 ComputeInverseBind() 现算）→
     //          取刚体变换转**对偶四元数**烘焙上传（atlas 每骨 2 texel = 实部 q + 对偶部 t）。
+    //   thickness_scaling_config:
+    //          骨架级的「部位粗细」全局配置：至多 kNumThicknessGroup(=8) 个**关节组**，
+    //          每组一串**关节 index**（= type.joints 的下标）；同组关节共用一个
+    //          per-instance 缩放系数（由 SkinnedInstanceState::thickness_scales 按**组号**给），
+    //          用来调该部位的胖瘦（例：{左腿三骨} / {右腿三骨} / {Hips} / {Head}）。
+    //          构造时**立即校验 index 合法性**（越界 / 同一关节出现在两个组 → LOG(FATAL)，
+    //          不 fallback）：配置写错就早崩，别等到画出来才发现。
+    //          空组 = 该组不用；全部为空 = 本骨架不做粗细（渲染侧整段跳过，纹理句柄为 0）。
+    //          ❗ 就这一个骨架级入参 —— 渲染要的「每骨 bind 位置/朝向」由本类自己从骨架导出
+    //          （同 inverse_bind 的地位：派生量、从不做输入），不进任何公开签名。
+    //          ⚠️ 定义在**骨架**上而不是 mesh 上：一个骨架要配 N 种 mesh（肉体/衣服/装备），
+    //          挂在骨上才能让贴着身体的衣服跟着一起胀（同 docs/jpov_crowd_body_shape_face_design.md
+    //          §3.7-1）。
     //   Pre-condition: GL context 已激活；type.Validate() 通过。
     //   ⚠️ 每个 pose 的 bone_count 应与 type.bone_count 一致（同一种骨架）。poses 总容量
     //      不得超过 pose_capacity()（超→LOG(FATAL)，不 fallback）。
-    SkeletonManager(const SkeletonType& type, std::vector<SkeletonPose> poses);
+    SkeletonManager(const SkeletonType& type, std::vector<SkeletonPose> poses,
+                    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {});
 
     // 析构：释放本 manager 持有的 GL 资源（骨骼动画纹理）。
     ~SkeletonManager();
@@ -112,6 +138,11 @@ public:
     // 这里**老实暴露**底层 GPU 资源的句柄，renderer 据此把骨骼动画纹理/逆绑定 bind 到蒙皮
     // 批次。本方法只提供 renderer 取句柄的入口，不对外暴露 id / 不做面向用户的 load。
     GpuHandles gpu_handles() const { return handles_; }
+
+    // ---- 部位粗细（无独立公开接口；渲染侧只看 GpuHandles::thickness_bind_tex）----
+    // 配置（关节 index 分组）与「每骨 bind 位置/朝向」全在本类内部消化：构造时校验配置、
+    // 导出一张绑定表纹理（每骨 2 texel：bind 位置 + 通道号 / bind 朝向）。
+    // 调用方（JPOV 用户）的接口只有两个：构造时的 index 分组配置 + 实例上的 thickness_scales。
 
 private:
     int bone_count_ = 0;
