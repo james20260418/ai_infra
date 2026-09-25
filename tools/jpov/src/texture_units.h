@@ -37,11 +37,17 @@ inline constexpr int kMaxShadowCascades = 5;      // == ShadowConfig::kMaxCascad
 // 骨骼 pose atlas（蒙皮；主 pass 与 shadow pass **同号共用**，因为两 pass 不同时活跃）。
 inline constexpr int kTexUnitPoseAtlas = 12;
 
+// 部位粗细的「绑定表」纹理（每骨 2 texel：bind 位置 + 通道下标 / bind 朝向；蒙皮用）。
+//   同为「主/shadow pass 同号共用」（两 pass 不同时活跃）。
+inline constexpr int kTexUnitThicknessBind = 13;
+
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
 static_assert(kTexUnitMaterialBase + kMaterialTexUnitCount <= kTexUnitShadowMapBase,
               "材质纹理单元区间与 shadow map 区间重叠");
 static_assert(kTexUnitShadowMapBase + kMaxShadowCascades <= kTexUnitPoseAtlas,
               "shadow map 区间与 pose atlas 单元重叠");
+static_assert(kTexUnitPoseAtlas < kTexUnitThicknessBind,
+              "pose atlas 与粗细绑定表单元重叠");
 
 }  // namespace jpov
 

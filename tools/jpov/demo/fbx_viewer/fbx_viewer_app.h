@@ -60,6 +60,7 @@
 #define JPOV_DEMO_FBX_VIEWER_FBX_VIEWER_APP_H_
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -172,6 +173,9 @@ enum class ViewMode : int {
     //   若退化回逐实例 draw，肉眼看上去会完全一样（画面对，但 draw call = 3）——
     //   所以还要看代码里的 glDrawElementsInstanced（或 GL_PROXY / apitrace）。
     kFbxBones3Skinned = 6,
+    // 并列（红骨人 + 蓝带皮）：与 kBothSkinned 同一条蒙皮渲染链，**外加两个部位粗细滑条**
+    //   （腿 / 手臂，0.3~2.0）—— 用来验收「per-instance 的骨通道膨胀」。
+    kSkinnedThickness = 7,
 };
 
 // combo 下拉项文本（顺序 == 上面的枚举；两者必须同步改）。
@@ -183,6 +187,7 @@ inline const char* const kViewModeItems[] = {
     "两者并列（蓝 = 无重定向对照）",
     "并列（红骨人 + 蓝带皮动画）",
     "并列（红骨人 + 3 蓝肉人·instanced）",
+    "并列（红骨人 + 蓝带皮·粗细微调）",
 };
 inline constexpr int kViewModeItemCount =
     static_cast<int>(sizeof(kViewModeItems) / sizeof(kViewModeItems[0]));
@@ -199,7 +204,7 @@ inline const std::vector<const char*>& ViewModeItems() {
 inline bool ViewShowsFbx(ViewMode m) {
     return m == ViewMode::kFbxOnly || m == ViewMode::kBothRetarget ||
            m == ViewMode::kBothNoRetarget || m == ViewMode::kBothSkinned ||
-           m == ViewMode::kFbxBones3Skinned;
+           m == ViewMode::kFbxBones3Skinned || m == ViewMode::kSkinnedThickness;
 }
 // 本模式是否显示目标（蓝）。
 inline bool ViewShowsGlb(ViewMode m) {
@@ -208,11 +213,68 @@ inline bool ViewShowsGlb(ViewMode m) {
 // 本模式是否两者并列（决定摆放间距 / 相机适配）。
 inline bool ViewIsSideBySide(ViewMode m) {
     return m == ViewMode::kBothRetarget || m == ViewMode::kBothNoRetarget ||
-           m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned;
+           m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned ||
+           m == ViewMode::kSkinnedThickness;
 }
-// 本模式的蓝侧是否画**带皮网格**（而非火柴人）。kBothSkinned 与 kFbxBones3Skinned 用真皮。
+// 本模式的蓝侧是否画**带皮网格**（而非火柴人）。kBothSkinned / kFbxBones3Skinned /
+//   kSkinnedThickness 用真皮。
 inline bool ViewGlbIsSkinned(ViewMode m) {
-    return m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned;
+    return m == ViewMode::kBothSkinned || m == ViewMode::kFbxBones3Skinned ||
+           m == ViewMode::kSkinnedThickness;
+}
+
+// 本模式是否显示「部位粗细」滑条（只有看得到蓝带皮网格时才有意义）。
+inline bool ViewShowsThicknessSliders(ViewMode m) {
+    return m == ViewMode::kSkinnedThickness;
+}
+
+// ---- 部位粗细：本演示的组号约定 + 滑条值域 ----
+// 组号 = 骨架级配置（MakeGlbThicknessConfig）里的顺序，也 = 面板滑条顺序。
+inline constexpr int kThicknessGroupLeg = 0;  // 组 0：腿（左右大腿/小腿/脚/脚趾）
+inline constexpr int kThicknessGroupArm = 1;  // 组 1：手臂（左右上臂/前臂/手）
+// 滑条值域：0.3 ~ 2.0（1.0 = 原样；<1 变细、>1 变粗）。
+inline constexpr float kThicknessScaleMin = 0.3f;
+inline constexpr float kThicknessScaleMax = 2.0f;
+
+// 按骨名找 glb 骨架里的关节 index。找不到 → LOG(FATAL)：
+//   index 是**资产内部编号**（重导出/换资产就变），骨名才是语义（同 BodyRetarget 的骨名对位）；
+//   名字对不上说明配置或资产变了，必须早崩，不能静默少调一根骨。
+inline int GlbJointIndexByName(const jpov::SkeletonType& skel, const char* name) {
+    for (size_t j = 0; j < skel.joints.size(); ++j) {
+        if (skel.joints[j].name == name) {
+            return static_cast<int>(j);
+        }
+    }
+    LOG(FATAL) << "GlbJointIndexByName: glb 骨架里没有关节 \"" << name
+               << "\"（骨名写错 / 资产换了命名）";
+    return -1;
+}
+
+// 本演示的粗细配置：组 0 = 腿、组 1 = 手臂（其余组留空 = 不用）。
+//   只列**真在骨架里的**骨名（本资产的 mixamo 命名已核对：LeftUpLeg…RightToeBase /
+//   LeftArm…RightHand 都在）；缺一根就早崩（见 GlbJointIndexByName）。
+inline std::array<std::vector<int>, jpov::kNumThicknessGroup>
+MakeGlbThicknessConfig(const jpov::SkeletonType& skel) {
+    std::array<std::vector<int>, jpov::kNumThicknessGroup> cfg{};
+    cfg[kThicknessGroupLeg] = {
+        GlbJointIndexByName(skel, "mixamorig:LeftUpLeg"),
+        GlbJointIndexByName(skel, "mixamorig:LeftLeg"),
+        GlbJointIndexByName(skel, "mixamorig:LeftFoot"),
+        GlbJointIndexByName(skel, "mixamorig:LeftToeBase"),
+        GlbJointIndexByName(skel, "mixamorig:RightUpLeg"),
+        GlbJointIndexByName(skel, "mixamorig:RightLeg"),
+        GlbJointIndexByName(skel, "mixamorig:RightFoot"),
+        GlbJointIndexByName(skel, "mixamorig:RightToeBase"),
+    };
+    cfg[kThicknessGroupArm] = {
+        GlbJointIndexByName(skel, "mixamorig:LeftArm"),
+        GlbJointIndexByName(skel, "mixamorig:LeftForeArm"),
+        GlbJointIndexByName(skel, "mixamorig:LeftHand"),
+        GlbJointIndexByName(skel, "mixamorig:RightArm"),
+        GlbJointIndexByName(skel, "mixamorig:RightForeArm"),
+        GlbJointIndexByName(skel, "mixamorig:RightHand"),
+    };
+    return cfg;
 }
 // 本模式的蓝侧是否画 **3 个 instanced 肉人**（而不是 1 个）。
 //   用途：肉眼 + 代码双层验收「真 instanced draw」（一次 draw call 画 N 实例）。
@@ -270,6 +332,12 @@ public:
 
     // ── 显示/驱动（**一个 combo** 选的模式，见 ViewMode 注释里为何合并）──
     ViewMode view_mode_ = ViewMode::kFbxOnly;  // 本帧看哪个骨架 + 蓝骨怎么驱动
+
+    // ── 部位粗细（kSkinnedThickness 模式的滑条值）──
+    //   滑条直接写进**每个实例**的 thickness_scales → 渲染时走 per-instance attribute
+    //   (loc11/12)，不做任何重注册/重建（这正是 per-instance 的意义）。
+    float thickness_leg_ = 1.0f;  // 组 0 = 腿（1.0 = 原样）
+    float thickness_arm_ = 1.0f;  // 组 1 = 手臂
 
     // ── 播放状态 ──
     double anim_time_seconds_ = 0.0;  // 动画时间（秒）；循环语义由 SampleClipPose 承担
@@ -428,6 +496,9 @@ public:
                     inst.pose_a = fi;
                     inst.pose_b = fj;
                     inst.ratio  = ratio;
+                    // 部位粗细：滑条值 → 本实例的组系数（per-instance attribute；两帧插值无关）。
+                    inst.thickness_scales[kThicknessGroupLeg] = thickness_leg_;
+                    inst.thickness_scales[kThicknessGroupArm] = thickness_arm_;
                     instances.push_back(inst);
                 }
                 cmds->DrawMeshWithSkeleton(glb_skin_mesh_id_, glb_skin_skel_id_,
@@ -675,6 +746,21 @@ private:
         const std::string line = std::string(head) + mode_tag;
         ui_.Text(line.c_str(), jpov::UiRect{{ctrl_left, text_top},
                                             {w - 2.0f * ctrl_left, kTextRow}});
+
+        // 部位粗细滑条（仅 kSkinnedThickness 模式）：值直接写进每实例的 thickness_scales。
+        //   0.3~2.0（1.0 = 原样）；两位小数便于看出 1.00 这个"原样"刻度。
+        if (has_glb_ && ViewShowsThicknessSliders(view_mode_)) {
+            const float kSliderW = 0.5f * w;
+            const float kSliderLeft = (w - kSliderW) * 0.5f;
+            const float slider_top = text_top + kTextRow + kGap;
+            ui_.SliderFloat("腿粗细 (组0)", &thickness_leg_,
+                            jpov::UiRect{{kSliderLeft, slider_top}, {kSliderW, kRowH}},
+                            kThicknessScaleMin, kThicknessScaleMax, /*decimal_places*/2);
+            ui_.SliderFloat("手臂粗细 (组1)", &thickness_arm_,
+                            jpov::UiRect{{kSliderLeft, slider_top + kRowH + kGap},
+                                         {kSliderW, kRowH}},
+                            kThicknessScaleMin, kThicknessScaleMax, /*decimal_places*/2);
+        }
     }
 
     // 文本测量回调 → JPOV::MeasureTextWidth（空别名 = 首个注册字体，同查看器接线）。
@@ -904,7 +990,10 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
             glb_skin_rest_pose_index_ = nframes;
             glb_skin_poses_.push_back(
                 jpov::SkeletonPose::Identity(glb_skeleton_.bone_count()));
-            glb_skin_skel_id_ = RegisterSkeleton(glb_skeleton_, glb_skin_poses_);
+            // 部位粗细：把「腿 / 手臂」两组（骨名 → index）作为骨架级配置交给 SkeletonManager
+            //   （校验 + 绑定表纹理都在它内部完成）；本工具只负责滑条值 → 实例系数。
+            glb_skin_skel_id_ = RegisterSkeleton(glb_skeleton_, glb_skin_poses_,
+                                                 MakeGlbThicknessConfig(glb_skeleton_));
             glb_skin_frame_count_ = nframes;
             glb_skin_ready_ = true;
             LOG(INFO) << "蓝侧带皮网格装配完成: mesh_id=" << glb_skin_mesh_id_

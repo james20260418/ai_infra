@@ -54,7 +54,8 @@ struct InstanceAttrSpec {
 // ---- 蒙皮带骨实例的布局（与 skinning_shader.h 的 layout(location=…) 逐字对应）----
 //   摆放矩阵 model：loc6..9（mat4 拆 4 个 vec4 slot），每实例 16 float
 //   pose 选择     ：loc10   （vec3: pose_col_a, pose_col_b, ratio），每实例 3 float
-// ⚠️ 这两个常量是 host 侧与 shader 侧**唯一**的 layout 约定点：改 shader 的
+//   部位粗细系数  ：loc11..12（8 个 float = 2 个 vec4），每实例 8 float
+// ⚠️ 这三个常量是 host 侧与 shader 侧**唯一**的 layout 约定点：改 shader 的
 //   layout(location=…) 必须同步改这里（反之亦然），否则静默读错槽位。
 //   ⚠️ pose 用 float 而非 ivec2 + glVertexAttribIPointer：IPointer 按**原始整数位**
 //   解释，把 float 上传后当整数读会得到天文数字（0x42B80000 = 1119354880）→ 取址出界。
@@ -62,6 +63,13 @@ inline constexpr InstanceAttrSpec kInstanceModelAttrSpec{/*base_loc*/ 6,  /*slot
                                                         /*slot_components*/ 4, /*stride*/ 16};
 inline constexpr InstanceAttrSpec kInstancePoseAttrSpec{/*base_loc*/ 10, /*slot_count*/ 1,
                                                         /*slot_components*/ 3, /*stride*/ 3};
+// 部位粗细：每实例 kNumThicknessGroup(=8) 个组系数，**两**个 vec4 slot（loc11/12）。
+//   为什么拆两个 vec4 而不做成 vec8：GL 单属性最大 vec4；shader 侧再按组号（0..7）取。
+//   与 skeleton_types.h 的 kNumThicknessGroup / SkinnedInstanceState::thickness_scales 一一对应
+//   —— 组数的**唯一定义处**是 kNumThicknessGroup（skeleton_types.h）；本常量与 shader 的
+//   `layout(location = 11/12)` 声明必须同步（两个 vec4 ⇒ stride 8 float）。
+inline constexpr InstanceAttrSpec kInstanceThicknessAttrSpec{/*base_loc*/ 11, /*slot_count*/ 2,
+                                                             /*slot_components*/ 4, /*stride*/ 8};
 
 // ==================== InstanceBuffer ====================
 

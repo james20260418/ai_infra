@@ -62,6 +62,25 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 部位粗细（thickness scale）配置校验单测 —— 纯 CPU / 不依赖资产、不需要 GL 上下文。
+# 对应设计 docs/jpov_crowd_body_shape_face_design.md §3：关节 index 分组的合法性 + 实例系数默认值。
+# 需要 -lGL：依赖 skeleton 库（其 GL 符号在“非法配置”用例里根本不会被调到 —— 校验排在
+# 所有 GL 调用之前）。
+cc_test(
+    name = "jpov_thickness_config_test",
+    srcs = ["jpov_thickness_config_test.cc"],
+    deps = [
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src/skeleton:skeleton",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    linkopts = ["-lGL"],
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # glTF loader smoke test (CPU-only parse check)
 cc_test(
     name = "jpov_gltf_loader_test",

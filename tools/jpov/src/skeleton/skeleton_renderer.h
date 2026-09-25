@@ -468,6 +468,8 @@ void main() {
     //   pose_count: 该骨架已烘焙的 pose 总数（SkeletonManager::pose_count()）—— 用于校验
     //               instances 的 pose_a/pose_b 不越界（GpuHandles 是纯 GL 句柄、不含此值）。
     //   cmd: SkinnedMeshCommand（mesh_id + material + instances[center/up/front/scale/pose_a]）。
+    //   骨骼级"部位粗细"（可选）：gh.thickness_bind_tex != 0 时上传开关 + 绑定表纹理 +
+    //   per-instance 系数（loc11/12）；否则 uThicknessEnabled=0，蒙皮 VS 整段跳过（零开销）。
     static void DrawSkinnedMesh(
         const SkinnedMeshCommand& cmd,
         const RenderCommandList& cmds,
@@ -479,7 +481,8 @@ void main() {
         const SkeletonManager::GpuHandles& gh,
         int pose_count,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf);
+        InstanceBuffer& instance_pose_buf,
+        InstanceBuffer& instance_thickness_buf);
 
     // ---- DrawSkinnedMeshShadow ----
     // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
@@ -496,7 +499,8 @@ void main() {
         const float depth_vp[16],
         unsigned int shadow_prog,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf);
+        InstanceBuffer& instance_pose_buf,
+        InstanceBuffer& instance_thickness_buf);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到蒙皮 PBR shader。
@@ -532,6 +536,8 @@ void main() {
     //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序）
     //      → instance_model_buf（loc6..9 = mat4）。
     //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → instance_pose_buf（loc10 = vec3）。
+    //   3) 部位粗细系数：每实例 {thickness_scales[0..7]} → instance_thickness_buf
+    //      （loc11/12 = 2×vec4；组号 → 系数。骨架没配粗细时全是 1.0，shader 侧被开关跳过）。
     //
     // pose_w = gh.bone_count * 2 = 一个 pose 在 atlas 里的**平坦** texel 宽度
     //   （每骨 2 texel：实部 q + 对偶部 t）；
@@ -543,7 +549,8 @@ void main() {
         const SkinnedMeshCommand& cmd,
         int pose_w,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf);
+        InstanceBuffer& instance_pose_buf,
+        InstanceBuffer& instance_thickness_buf);
 };
 
 }  // namespace jpov
