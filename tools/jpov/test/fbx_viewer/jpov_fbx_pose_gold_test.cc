@@ -6,9 +6,16 @@
 //      否则两帧会渲成同一张图）；
 //   ③ rest 模式（identity 位姿）→ 必须与 ① 不同（证明 rest 复选框真的换了位姿来源）。
 //
-// 另外两道门禁（本 PR 新增的 glb 对照组）：
+// 另外几道门禁：
 //   ④ 传 glb → 「两者并列」渲一帧 → 与第二张 gold 比对；并统计**强蓝像素**：
 //      无蓝物体的基线图必须 ~0、含蓝骨人的图必须明显 >0（蓝骨真渲出来了）。
+//   ⑤ 正式重定向路径（kBothRetarget）→ 根位移量级 + 蓝骨可见性 + 第三张 gold。
+//   ⑥ **组合拳**（本次新增）：fbx 动作（BodyRetarget）驱动 glb **带皮**动画 +
+//      **3 个实例**（一个 SkinnedMeshCommand / 一次 instanced draw）+ **部位粗细 μ**。
+//      一张 gold 盖住蓝侧这条链路的三个环，邻路再带两道**逐像素**非恒真门禁：
+//      μ=(1.6,0.6) vs μ≡1（证明系数真的到了 shader）、t=2.0s vs 5.0s（证明重定向动画在驱动）。
+//      为何不只用 gold：8×8 ROI 均值对只占全图 ~0.6% 的小人会稀释到看不出（见 PerPixelDiffStats）。
+//      ⚠️ 已知边界：gold 无法判「3 个实例是不是**一次** draw 画完」（需 apitrace/GL_PROXY）。
 // 可见性门禁（基础）：场景里唯一的红色物体就是火柴人，故全图"强红"像素数若塌向 0，
 // 说明火柴人没渲出来（headless 出图不画面板与文字，没有任何其它红色来源）。
 // ⚠️ 蓝色不能用同款"全图计数"判：天空本身就是蓝的 —— 故用**严格蓝**判据
@@ -71,6 +78,20 @@ std::string RetargetGoldPath() {
     }
     return jpov::GetProjectRoot() + "tools/jpov/test" +
            jpov_fbx_pose_gold::GetGlbRetargetGoldRelPath();
+}
+
+std::string ThicknessGoldPath() {
+    const char* e = std::getenv("TEST_SRCDIR");
+    if (e) {
+        std::string s = e;
+        if (!s.empty() && s.back() != '/') {
+            s.push_back('/');
+        }
+        return s + "__main__/tools/jpov/test" +
+               jpov_fbx_pose_gold::GetSkinnedThicknessGoldRelPath();
+    }
+    return jpov::GetProjectRoot() + "tools/jpov/test" +
+           jpov_fbx_pose_gold::GetSkinnedThicknessGoldRelPath();
 }
 
 // 整图"强红"像素数（火柴人是纯红材质，光照后仍远高于其它物体）。
@@ -174,6 +195,9 @@ int main() {
     const std::string out_rest_pose = outdir + "rest_pose.png";
     const std::string out_glb_both = outdir + "glb_both.png";
     const std::string out_glb_retarget = outdir + "glb_retarget.png";
+    const std::string out_skinned_thick = outdir + "skinned_instanced_thick.png";
+    const std::string out_skinned_neutral = outdir + "skinned_instanced_neutral.png";
+    const std::string out_skinned_other = outdir + "skinned_instanced_other_time.png";
 
     // ── 四帧都由观察器本体渲出（走共用的 MakeApp，与 generator 零分叉）──
     //   ⚠️ 分两个 App："无 glb"与"有 glb"是**两种机位**（LoadGltf 会按并列重算初始机位），
@@ -248,6 +272,78 @@ int main() {
                   << " (threshold=" << kRtGoldThreshold << ")";
         if (rt_diff < 0 || rt_diff > kRtGoldThreshold) {
             LOG(ERROR) << "GLB RETARGET GOLD COMPARE FAILED: " << rt_diff;
+            return 1;
+        }
+    }
+
+    // ⑥ 组合拳（本次新增）：**3 实例 instanced 带皮 + BodyRetarget 驱动 + 部位粗细 μ**。
+    //    一张 gold 同时钉住蓝侧这条链路的三个环（instance 绘制 / 重定向驱动 / thickness），
+    //    任一环断掉本图必变；邻路再加两道**逐像素**门禁（gold 的 8×8 ROI 均值对只占全图
+    //    ~0.6% 的小人会稀释到看不出来，故不能只靠 gold）：
+    //      (a) μ=(1.6,0.6) vs μ=(1,1) 同帧对比 → 差异只能来自 μ（证明 per-instance 系数
+    //          真的送到 shader 了，且带皮实例真的存在）；
+    //      (b) 时刻 2.0s vs 5.0s 同 μ 对比 → 差异只能来自位姿（证明重定向动画真的在驱动实例）。
+    {
+        std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+            jpov_fbx_pose_gold::MakeSkinnedThicknessApp(
+                "JPOV FBX Skinned Instanced Thickness Gold Test",
+                jpov_fbx_pose_gold::kGoldTimeSeconds,
+                jpov_fbx_pose_gold::kThickLegGold, jpov_fbx_pose_gold::kThickArmGold);
+        // 三帧都在**设定时刻**出图（paused_ 只停时间自行推进，不影响本帧渲染）：
+        //   否则第二帧会叠加动画自身的变化，"μ 是否生效"就分不清了。
+        app->paused_ = true;
+        app->anim_time_seconds_ = jpov_fbx_pose_gold::kGoldTimeSeconds;
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_skinned_thick.c_str());
+        // 对照帧 1：同模式 / 同帧 / 同相机，只把 μ 归 1（= 不做粗细）。
+        app->thickness_leg_ = 1.0f;
+        app->thickness_arm_ = 1.0f;
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_skinned_neutral.c_str());
+        // 对照帧 2：同模式 / 同 μ，只换时刻（位姿不同）。
+        app->thickness_leg_ = jpov_fbx_pose_gold::kThickLegGold;
+        app->thickness_arm_ = jpov_fbx_pose_gold::kThickArmGold;
+        app->anim_time_seconds_ = jpov_fbx_pose_gold::kOtherTimeSeconds;
+        jpov_fbx_pose_gold::RenderFrame(app.get(), out_skinned_other.c_str());
+    }
+
+    // (a) μ 真的送到 GPU 了：与 μ≡1 的对照帧必须有可见差异。
+    //     噪声底 ≈ 0：同帧同姿态的两次渲染走同一条 OneIteration，既有 gold 门禁实测逐字节相同
+    //     ⇒ 出现差异只能是 μ 改了几何。门禁取 300 像素（远高于噪声底；实测见 log）。
+    {
+        int max_abs = 0;
+        long long moved_px = 0;
+        PerPixelDiffStats(out_skinned_neutral, out_skinned_thick, &max_abs, &moved_px);
+        LOG(INFO) << "μ 生效门禁: μ=(1.6,0.6) vs μ=(1,1) 逐像素 max-abs=" << max_abs
+                  << " 差>30 像素数=" << moved_px;
+        CHECK_GT(max_abs, 30) << "改 μ 后画面几乎没变（per-instance 系数没送到 shader？）";
+        CHECK_GT(moved_px, 300) << "改 μ 后变化像素过少: " << moved_px;
+    }
+
+    // (b) 重定向动画真的在驱动这 3 个实例：换时刻必须换画面（同一 μ、同一相机）。
+    {
+        int max_abs = 0;
+        long long moved_px = 0;
+        PerPixelDiffStats(out_skinned_thick, out_skinned_other, &max_abs, &moved_px);
+        LOG(INFO) << "组合拳动态门禁: t=2.0s vs 5.0s 逐像素 max-abs=" << max_abs
+                  << " 差>30 像素数=" << moved_px;
+        CHECK_GT(max_abs, 60) << "不同时刻的带皮实例几乎一样（重定向位姿没到 atlas/没换帧？）";
+        CHECK_GT(moved_px, 100) << "不同时刻变化像素过少: " << moved_px;
+    }
+
+    // (c) gold 比对（组合拳固定帧）。
+    {
+        const std::string th_gold = ThicknessGoldPath();
+        {
+            FILE* f = std::fopen(th_gold.c_str(), "rb");
+            CHECK(f != nullptr) << "组合拳 gold 缺失，请先跑 generator: " << th_gold;
+            std::fclose(f);
+        }
+        constexpr double kThGoldThreshold = 25.0;
+        const double th_diff =
+            jpov::CompareLightMeanRoiPng(th_gold, out_skinned_thick, 8, 8);
+        LOG(INFO) << "SKINNED INSTANCED THICKNESS GOLD COMPARE: max-channel-mean-diff = "
+                  << th_diff << " (threshold=" << kThGoldThreshold << ")";
+        if (th_diff < 0 || th_diff > kThGoldThreshold) {
+            LOG(ERROR) << "SKINNED INSTANCED THICKNESS GOLD COMPARE FAILED: " << th_diff;
             return 1;
         }
     }

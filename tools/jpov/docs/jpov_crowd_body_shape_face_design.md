@@ -371,9 +371,10 @@ for (int i = 0; i < 4; ++i) {
    动态头槽位池 + CPU blendshape 微操 + 过渡（§4）。
 
 ### 顺手可清（体检发现，可选）
-- **`uBoneCount` 是死 uniform**：shader 里只声明、body 零消费（注释也写明「不再乘 uBoneCount」），
-  但 host 每次 draw 都 `glUniform1i` 一次（主 + 阴影 pass）⇒ 可删 shader 声明与那两句上传。
-  注意 `GpuHandles::bone_count` **本身不能删**（CPU 侧算 `pose_w` 还在用）。
+- ~~`uBoneCount` 是死 uniform~~ **（2026-09-25 已了结）**：它当时确实只声明、body 零消费；但**越界防护正需要它**
+  —— 现在两片蒙皮 VS 的取址入口 `JointInRange(joint)` = `joint >= 0 && joint < uBoneCount`（aJoint 来自资产，
+  越界值直接 texelFetch 是 GL 未定义行为）⇒ 这个 uniform **不再死，保留**（host 那两句上传正好是它的数据源）。
+  注意 `GpuHandles::bone_count` 本来就不能删（CPU 侧算 `pose_w` 还在用）。
 - `aInstPose` 是 `vec3`（`kInstancePoseAttrSpec{10,1,3,3}`）⇒ 第 4 个分量空着。若不想再加 location，
   可升为 `vec4` 白拿 1 个 per-instance float（每实例 +4 B，千人 +4 KB）；但要注意与
   「pose 选择」混在同一 attribute 里的语义清晰性。

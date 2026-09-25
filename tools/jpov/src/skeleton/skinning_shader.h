@@ -101,7 +101,8 @@ layout(location = 10) in vec3 aInstPose;
 layout(location = 11) in vec4 aInstThick0;
 layout(location = 12) in vec4 aInstThick1;
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas，每骨 2 texel：实部 q + 对偶部 t）
-uniform int   uBoneCount;      // 该骨架骨数
+// 该骨架骨数 —— 也是「合法关节 index」的上界：蒙皮/粗细取址前用它做越界防护（见 JointInRange）。
+uniform int   uBoneCount;
 uniform int   uPoseRow;        // 本实例 pose 在 atlas 的行（y）
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
 
@@ -119,6 +120,16 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+
+// 关节 index 越界防护（所有取址的唯一入口判据）。
+//   为什么需要：aJoint 来自**资产**（JOINTS_0）；坏资产 / 坏导出可能给出越界值（<0 或
+//   ≥ bone_count），直接拿它去 texelFetch 是 GL 未定义行为（不同驱动返回不同垃圾，
+//   甚至 GPU fault）—— 越界值不是“看着不对”，是**不许发生**。
+//   越界骨的语义 = 「这根骨不存在」：跳过（权重不参与加权求和，与 w<=0 同路）；
+//   4 骨全越界 → 走既有退化分支（单位元 = 顶点保持 rest）。
+bool JointInRange(int joint) {
+    return joint >= 0 && joint < uBoneCount;
+}
 
 // 从 atlas 取第 bone 根骨的**对偶四元数** q̂ = q + ε·t（每骨 2 个连续 texel）。
 //   texel0 = 实部 q(xyzw)（旋转），texel1 = 对偶部 t(xyzw)（t = ½·v̂⊗q，平移编码）
@@ -225,6 +236,9 @@ float ThicknessOfChannel(int channel) {
 //   （不属于任何组，或该组系数为 1.0）→ 调用方直接跳过，不引入额外计算。
 bool ThicknessOfBone(int bone, vec3 v, vec3 n, vec3 t,
                      out vec3 v_out, out vec3 n_out, out vec3 t_out) {
+    if (!JointInRange(bone)) {
+        return false;  // 越界骨：同蒙皮路径，当它不存在（防 texelFetch 越界 UB）
+    }
     vec4 t0 = texelFetch(uThicknessBind, ivec2(bone, 0), 0);   // (p_j.xyz, 组号)
     int channel = int(t0.w);
     if (channel < 0) { return false; }            // 不属于任何组：跳过（最常见的情形）
@@ -280,6 +294,9 @@ void main() {
         float w = aWeight[i];
         if (w <= 0.0) {
             continue;
+        }
+        if (!JointInRange(aJoint[i])) {
+            continue;  // 越界骨：当它不存在（防 texelFetch 越界 UB）
         }
         LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
         ws[i] = w;
@@ -374,6 +391,7 @@ layout(location = 12) in vec4 aInstThick1;
 uniform mat4 uShadowViewProj;       // 光空间 裁剪（proj*view，model 走 aInstModel）
 uniform mat4 uShadowDepthViewProj;  // 光空间 线性深度（DepthProj*view，model 走 aInstModel）
 uniform sampler2D uPoseAtlas;
+// 该骨架骨数 —— 与主 pass 同：蒙皮/粗细取址前的越界防护上界（见 JointInRange）。
 uniform int   uBoneCount;
 uniform int   uPoseRow;
 uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回绕用
@@ -381,6 +399,11 @@ uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回�
 uniform int uThicknessEnabled;
 uniform sampler2D uThicknessBind;
 out float vShadowDepth;
+
+// 同主 pass：关节 index 越界防护（详见主 pass 里的 JointInRange 注释）。
+bool JointInRange(int joint) {
+    return joint >= 0 && joint < uBoneCount;
+}
 
 // 同主 pass：每骨 2 texel（实部 q + 对偶部 t）。
 void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
@@ -444,6 +467,9 @@ float ThicknessOfChannelS(int channel) {
 
 // 返回 false = 该骨不需要算（不属任何组 / 系数为 1）→ 跳过。
 bool ThicknessOfBoneS(int bone, vec3 v, out vec3 v_out) {
+    if (!JointInRange(bone)) {
+        return false;  // 越界骨：同主 pass（防 texelFetch 越界 UB）
+    }
     vec4 t0 = texelFetch(uThicknessBind, ivec2(bone, 0), 0);
     int channel = int(t0.w);
     if (channel < 0) { return false; }
@@ -483,6 +509,9 @@ void main() {
         float w = aWeight[i];
         if (w <= 0.0) {
             continue;
+        }
+        if (!JointInRange(aJoint[i])) {
+            continue;  // 越界骨：同主 pass（防 texelFetch 越界 UB）
         }
         LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
         ws[i] = w;
