@@ -174,6 +174,7 @@ TEST(SoftMeshSimulatorTest, FreeFallMatchesReferenceIntegrator) {
     Simulator sim;
     sim.Init(MakeTri());
     sim.SetGravity(g);
+    sim.SetGroundY(-1e6f);  // 把地面推到极低，隔离重力（本测不关心地面）
     for (int i = 0; i < n_steps; ++i) {
         sim.Step(dt);
     }
@@ -202,6 +203,7 @@ TEST(SoftMeshSimulatorTest, TerminalVelocityApproachesGOverK) {
     Simulator sim;
     sim.Init(MakeTri());
     sim.SetGravity(g);
+    sim.SetGroundY(-1e6f);  // 隔离地面（本测只关心终速，60s 会坠穿 -3）
 
     // 终速是指数逼近（时间常数 1/k = 10 s）：跑 60 s = 6 个时间常数 →
     // 1 - e^-6 ≈ 99.75% 收敛。若只跑 10 s 仅 63%（那就不是“逼近”了）。
@@ -507,6 +509,107 @@ TEST(SoftMeshSimulatorTest, LargerBindDistanceYieldsFewerVirtualPoints) {
     Simulator coarse;
     coarse.Init(m, 5.0f);
     EXPECT_GT(fine.virtual_point_count(), coarse.virtual_point_count());
+}
+
+// ==================== M4：地面投影（非穿透） ====================
+
+// ⑩ 地面之上的点自由下坠；穿入地面的点被拧回地面（不穿透）。
+TEST(SoftMeshSimulatorTest, GroundStopsFallingMesh) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 一个位于 y=0 的三角形（高于地面 y=-1）。
+    m.positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m);
+    sim.SetGroundY(-1.0f);
+
+    // 跑足够久（必然坠穿地面）→ 所有顶点应停在地面，不低于地面。
+    for (int i = 0; i < 300; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    for (const geom::Vec3<float>& p : sim.mesh().positions) {
+        EXPECT_GE(p[1], -1.0f - 1e-5f) << "顶点不应穿透地面";
+    }
+    // 且确实落到了地面（不是还悬在空中）。
+    EXPECT_NEAR(sim.mesh().positions[0][1], -1.0f, 1e-4f);
+}
+
+// ⑪ 落到地面后，向下的法向速度被清零（不积累、不反弹）。
+TEST(SoftMeshSimulatorTest, GroundKillsDownwardVelocity) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m);
+    sim.SetGroundY(-0.5f);
+    for (int i = 0; i < 300; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    // 静止在地面 → y 速度应 ≈ 0（若实现只 clamp 位置不清速度，v.y 会持续负增长）。
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        EXPECT_NEAR(v[1], 0.0f, 1e-5f) << "落地后法向速度应被清零";
+    }
+    // 且不反弹（不会出现正的速度）。
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        EXPECT_LE(v[1], 1e-6f);
+    }
+}
+
+// ⑫ 地面以上的点不受影响：未下坠到地面以下则不投影（保持正常下坠轨迹）。
+TEST(SoftMeshSimulatorTest, PointsAboveGroundUnaffected) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 100.0f, 0.0f}, {1.0f, 100.0f, 0.0f}, {0.0f, 100.0f, 1.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m);
+    sim.SetGroundY(-1.0f);
+
+    // 自由下坠参考（同公式、double），不与地面接触。
+    const float g = Simulator::kDefaultGravity;
+    const double dt = Simulator::kDefaultDt;
+    const double k = Simulator::kVelocityDamping;
+    const double dt_sub = dt / static_cast<double>(Simulator::kSubsteps);
+    double y = 100.0;
+    double v = 0.0;
+    const int n = 30;
+    for (int s = 0; s < n * Simulator::kSubsteps; ++s) {
+        const double damp_half = std::exp(-k * dt_sub * 0.5);
+        const double a = -g;
+        const double v_half = v * damp_half + a * dt_sub * 0.5;
+        y += v_half * dt_sub;
+        v = (v_half + a * dt_sub * 0.5) * damp_half;
+    }
+    for (int i = 0; i < n; ++i) {
+        sim.Step(dt);
+    }
+    EXPECT_NEAR(sim.mesh().positions[0][1], y, 1e-2f);
+}
+
+// ⑬ 地面高度可设：跑完落地后 y == 设定的地面高度（不是写死的 -3）。
+TEST(SoftMeshSimulatorTest, GroundHeightIsConfigurable) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m);
+    sim.SetGroundY(2.5f);
+    EXPECT_FLOAT_EQ(sim.ground_y(), 2.5f);
+    for (int i = 0; i < 300; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    EXPECT_NEAR(sim.mesh().positions[0][1], 2.5f, 1e-4f);
+}
+
+// ⑭ SetGroundY：非有限值崩。
+TEST(SoftMeshSimulatorTest, SetGroundYRejectsNonFinite) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetGroundY(std::numeric_limits<float>::infinity()),
+                 "SetGroundY");
 }
 
 }  // namespace

@@ -192,6 +192,8 @@ int main(int argc, char** argv) {
     // 重力：CLI 设定初值 + 滑条镜像对齐（两者不一致时才写仿真器）。
     app.sim_.SetGravity(opt.gravity);
     app.gravity_ui_ = opt.gravity;
+    // 地面高度：同步视觉 quad 与仿真器物理地面（两者同值）。
+    app.SetGroundHeight(app.ground_y_);
     LOG(INFO) << "── 仿真点统计 ──  原始顶点 " << app.sim_.original_point_count()
               << " / 虚拟顶点 " << app.sim_.virtual_point_count()
               << " / 合计 " << app.sim_.sim_point_count()

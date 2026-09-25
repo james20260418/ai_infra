@@ -100,6 +100,10 @@ public:
     // 实际积分的步长 = dt / kSubsteps = 1/(60*30) = 5.5556e-4 s。
     static constexpr int kSubsteps = 30;
 
+    // 默认地面高度 y（米）。地面是水平面（法线 +Y），低于它的顶点被投影回去。
+    // 默认值 -3 与查看器地面 quad 的默认高度一致（view_config.h::MakeGroundQuad）。
+    static constexpr float kDefaultGroundY = -3.0f;
+
     Simulator() = default;
 
     // 用给定网格初始化仿真体。可重复调用（等价于 Reset 到新网格）。
@@ -175,6 +179,12 @@ public:
     // Pre-condition: gravity >= 0（0 合法 = 无重力，供将来的开关用）；负值崩。
     void SetGravity(float gravity);
 
+    // 地面高度的 y（米）。地面为水平面（法线 +Y），低于它的顶点被**纯位置投影**回
+    // 地面（不注入动能，见 .cc）。查询与设置都走这里。
+    float ground_y() const { return ground_y_; }
+    // 设置地面高度。CHECK 有限；无值域限制（地面可以在任意高度）。
+    void SetGroundY(float ground_y);
+
     // ── 仿真点速度（纯查询）──
     //
     // 与 sim_positions() 同序同长：索引 0..original_point_count()-1 = 原始顶点，
@@ -216,6 +226,9 @@ private:
     // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
     float gravity_ = kDefaultGravity;
 
+    // 当前地面高度 y（米）。低于它的顶点被投影回地面（水平面，法线 +Y）。
+    float ground_y_ = kDefaultGroundY;
+
     float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
     double time_ = 0.0;        // 已仿真时间（秒）
@@ -230,8 +243,8 @@ private:
     // 虚拟顶点不进入输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
     void ExtractMesh();
 
-    // 在给定子步长 dt_sub 上执行一次「重力 + 对称阻尼」的 leapfrog 积分。
-    // 见 .cc 的完整公式与推导。
+    // 在给定子步长 dt_sub 上执行一次「重力 + 对称阻尼」的 leapfrog 积分，
+    // 然后做地面投影（非穿透）。见 .cc 的完整公式与推导。
     void IntegrateSubstep(double dt_sub);
 };
 

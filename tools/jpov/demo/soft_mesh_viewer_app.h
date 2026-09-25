@@ -116,6 +116,16 @@ public:
     void SetShowPanel(bool show) { show_panel_ = show; }
     bool show_panel() const { return show_panel_; }
 
+    // 设置地面高度（米）：同步视觉地面 quad 与仿真器的物理地面。
+    // 两者必须同值，否则会看到模型“悬浮/陷入”。装配期（Init 后）与面板滑条
+    // 变化时都走这里，单一入口。
+    void SetGroundHeight(float y) {
+        ground_y_ = y;
+        sim_.SetGroundY(y);
+        UpdateMesh(ground_mesh_, MakeGroundQuad(y));
+        ground_y_last_built_ = y;
+    }
+
     // ⭐ 唯一的渲染体：交互循环与 headless 出图共用（zero 分叉）。
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
@@ -179,10 +189,10 @@ public:
         cmds->ambient = light.ambient;
         cmds->tone_mapping = true;
 
-        // ── 场景：地面 + 地面栅格 + 仿真网格。地面高度变化时原地重建 quad。──
+        // ── 场景：地面 + 地面栅格 + 仿真网格。地面高度变化时同步视觉与物理。──
+        // 滑条拖到新值 → SetGroundHeight（重建 quad + 写仿真器地面高度）。
         if (ground_y_ != ground_y_last_built_) {
-            UpdateMesh(ground_mesh_, MakeGroundQuad(ground_y_));
-            ground_y_last_built_ = ground_y_;
+            SetGroundHeight(ground_y_);
         }
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            /*center*/ {0.0f, 0.0f, 0.0f},

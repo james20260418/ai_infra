@@ -95,6 +95,8 @@ jpov::MeshData Simulator::Step(double dt) {
 //     再用新位置的加速度回写整步速度——这是“辛”的体现：位置与速度的
 //     更新互相嵌套，保证相空间体积守恒（无阻尼时）。
 //   * 重力方向 -Y（地面在下方）。
+//   * 每子步末做一次**地面投影**（非穿透）：低于地面 y 的顶点被拧回地面，
+//     且向下的法向速度分量清零（无反弹，不注入动能）。
 void Simulator::IntegrateSubstep(double dt_sub) {
     CHECK_GT(dt_sub, 0.0);
 
@@ -113,9 +115,25 @@ void Simulator::IntegrateSubstep(double dt_sub) {
         // v_half = v(t)*exp(-k*dt/2) + a*dt/2
         const geom::Vec3<float> v_half = v_old * damp_half + accel * half_dt;
         // x(t+dt) = x(t) + v_half*dt
-        sim_positions_[i] = x_old + v_half * static_cast<float>(dt_sub);
+        geom::Vec3<float> x_new = x_old + v_half * static_cast<float>(dt_sub);
         // a(t+dt) = g（常量，与位置无关）；v(t+dt) = (v_half + a*dt/2)*exp(-k*dt/2)
-        sim_velocities_[i] = (v_half + accel * half_dt) * damp_half;
+        geom::Vec3<float> v_new = (v_half + accel * half_dt) * damp_half;
+
+        // ── 地面投影（非穿透，DESIGN.md §1.2 机制 1 的平面简化版；M4）──
+        // 「纯位置投影，不额外注入动能」：顶点落在地面下方 → 直接抬回地面。
+        // 同时把向下的法向速度分量清零（消去侵入速度）——否则顶点虽被钉在
+        // 地面，v.y 仍会持续累加到极大（以后接上弹簧力场就是个隐患），且
+        // “不注入动能”意味着无反弹（恢复系数 0）。向上的速度分量不受影响
+        // （允许被推离地面）。
+        if (x_new[1] < ground_y_) {
+            x_new[1] = ground_y_;
+            if (v_new[1] < 0.0f) {
+                v_new[1] = 0.0f;
+            }
+        }
+
+        sim_positions_[i] = x_new;
+        sim_velocities_[i] = v_new;
     }
 }
 
@@ -132,6 +150,11 @@ void Simulator::SetGravity(float gravity) {
     CHECK(std::isfinite(gravity)) << "SetGravity 要求有限值，got " << gravity;
     CHECK_GE(gravity, 0.0f) << "SetGravity 要求 gravity >= 0，got " << gravity;
     gravity_ = gravity;
+}
+
+void Simulator::SetGroundY(float ground_y) {
+    CHECK(std::isfinite(ground_y)) << "SetGroundY 要求有限值，got " << ground_y;
+    ground_y_ = ground_y;
 }
 
 SimBounds Simulator::Bounds() const {
