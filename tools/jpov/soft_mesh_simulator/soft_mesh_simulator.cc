@@ -180,7 +180,6 @@ SimBounds Simulator::Bounds() const {
 
 size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
     sim_positions_.clear();
-    virtual_positions_.clear();
 
     // 1) 原始顶点先入队（保持输入顺序；索引 0..N-1）。
     sim_positions_.reserve(mesh.positions.size());
@@ -201,22 +200,29 @@ size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
 
     std::unordered_set<uint64_t> seen_edges;
     const size_t vcount = mesh.positions.size();
+    size_t virtual_count = 0;
 
     auto process_edge = [&](uint32_t ia, uint32_t ib) {
         CHECK_LT(ia, vcount);
         CHECK_LT(ib, vcount);
-        if (ia == ib) return;  // 退化边忽略
+        if (ia == ib) {
+            return;  // 退化边忽略
+        }
         const uint32_t lo = std::min(ia, ib);
         const uint32_t hi = std::max(ia, ib);
         const uint64_t key = (static_cast<uint64_t>(lo) << 32) | hi;
-        if (!seen_edges.insert(key).second) return;  // 已处理过
+        if (!seen_edges.insert(key).second) {
+            return;  // 已处理过
+        }
 
         const geom::Vec3<float>& pa = mesh.positions[ia];
         const geom::Vec3<float>& pb = mesh.positions[ib];
         const geom::Vec3<float> delta = pb - pa;
         const float len_sq = delta[0] * delta[0] + delta[1] * delta[1] +
                              delta[2] * delta[2];
-        if (len_sq <= max_len_sq) return;  // 不过长，不加密
+        if (len_sq <= max_len_sq) {
+            return;  // 不过长，不加密
+        }
 
         const float len = std::sqrt(len_sq);
         // 目标：插入 n 个点，把这条边切成 (n+1) 段，每段 <= max_len。
@@ -224,9 +230,8 @@ size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
         const int segments = static_cast<int>(std::ceil(len / max_len));
         for (int s = 1; s < segments; ++s) {  // s = 1..segments-1（不含两端）
             const float t = static_cast<float>(s) / static_cast<float>(segments);
-            const geom::Vec3<float> vp = pa + delta * t;
-            virtual_positions_.push_back(vp);
-            sim_positions_.push_back(vp);
+            sim_positions_.push_back(pa + delta * t);
+            ++virtual_count;
         }
     };
 
@@ -252,7 +257,7 @@ size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
         }
     }
 
-    return virtual_positions_.size();
+    return virtual_count;
 }
 
 void Simulator::Reset() {

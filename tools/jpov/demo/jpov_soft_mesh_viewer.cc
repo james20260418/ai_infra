@@ -19,7 +19,7 @@
 //   ./tools/jpov/build_soft_mesh_simulator.sh
 //   → output/jpov_soft_mesh_viewer/jpov_soft_mesh_viewer <glb 路径>
 
-#include <cstdlib>  // atof
+#include <cstdlib>  // atof / atoi（CLI 数值解析）
 #include <string>
 #include <utility>  // std::move
 

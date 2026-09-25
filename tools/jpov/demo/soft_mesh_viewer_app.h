@@ -252,7 +252,6 @@ private:
     //   - 2D 图元在 3D 之后绘制，**不看遮挡** → 背面的点也能看见
     void DrawSimulationPoints(jpov::RenderCommandList* cmds) {
         const auto& pts = sim_.sim_positions();
-        const size_t original = sim_.original_point_count();
 
         // 相机参数 → 投影用（与 cmds->camera 同源，保证圆点与 3D 网格对齐）。
         jpov::soft_mesh_simulator::ProjectionCamera cam;
@@ -274,7 +273,8 @@ private:
             if (!sp.visible) {
                 continue;
             }
-            const jpov::Color c = (i < original) ? kOriginalColor : kVirtualColor;
+            const jpov::Color c =
+                sim_.IsVirtualPoint(i) ? kVirtualColor : kOriginalColor;
             cmds->DrawCircle({sp.x, sp.y}, kSimPointRadiusPx, c);
         }
     }

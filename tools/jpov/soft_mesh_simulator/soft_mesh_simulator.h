@@ -220,9 +220,6 @@ private:
     // 积分状态之一；Reset/Init 时清零。
     std::vector<geom::Vec3<float>> sim_velocities_;
 
-    // 加密产生的虚拟点列表（仅 position），用于可视化/调试（蓝色点）。
-    std::vector<geom::Vec3<float>> virtual_positions_;
-
     // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
     float gravity_ = kDefaultGravity;
 
