@@ -9,7 +9,7 @@
 //     model_viewer 里的 太阳仰角 / 浊度 / 季节 R / 模型缩放 全部删掉，光照固定正午。
 //   - 视角调节 = 直接鼠标操作（右键 drag 转、滚轮 zoom），与 model_viewer 完全同款
 //     （走 view_config.h::ApplyInput）；它不需要滑条，故面板里只有一个滑条。
-//   - 第一阶段只验证**静态展示模型**的能力（动力学尚未接上，Step 为恒等桩）。
+//   - M2 起动力学已接上（重力 + 速度衰减）；顶点间力场、地面/人体排斥尚待接入。
 //
 // 与 model_viewer 的关键差异（务必注意，别照抄错）：
 //   1. 进 scene 的是 **注册进 MeshManager 的 mesh handle**，不是 GltfObject。
@@ -103,6 +103,10 @@ public:
     // 重新 Init（重建仿真点集合）。范围见 kBindDistanceMinM/MaxM。
     float bind_distance_ui_ = soft_mesh_simulator::Simulator::kDefaultBindDistance;
 
+    // 重力加速度 g（m/s²）的滑条镜像值。拖它 → 直接 SetGravity 写到仿真器。
+    // 范围 [kMinGravity, kMaxGravity]，默认 kDefaultGravity（9.8）。
+    float gravity_ui_ = soft_mesh_simulator::Simulator::kDefaultGravity;
+
     // 装配真实字体文本测量回调（UI 内部用），Init() 后调用一次。
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SoftMeshViewerApp::ViewerTextWidth, this);
@@ -137,6 +141,11 @@ public:
                        static_cast<int>(winfo.height));
         }
 
+        // ── 拖动 g 滑条 → 写到仿真器（不需重建，g 不改变仿真点集合）。──
+        if (gravity_ui_ != sim_.gravity()) {
+            sim_.SetGravity(gravity_ui_);
+        }
+
         // ── 拖动 d 滑条 → 重建仿真点集合。──
         // d 只在 Init 时生效（决定长边加密密度 ⇒ 虚拟点数量），所以拖完必须
         // 重建。重建输入用 original_mesh_（原始网格，非仿真器当前输出）：
@@ -150,8 +159,8 @@ public:
         if (sim_running_) {
             sim_.Step(soft_mesh_simulator::Simulator::kDefaultDt);
             // 顶点在 CPU 侧被物理改过 → 必须把新几何推上 GPU。
-            // （M0 恒等桩下顶点其实没变，这条 UpdateMesh 仍照走：
-            //   接口先接通，动力学一上线就自动生效，无需改查看器。）
+            // （M2 下顶点真的在动，这条 UpdateMesh 把新位置推上 GPU：
+            //   不推就会看到模型停在原地不动。）
             UpdateMesh(mesh_id_, sim_.mesh());
         }
 
@@ -301,7 +310,10 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 面板：两个滑条（地面高度 / 关联距离 d）+ 三个勾选 + 只读状态文本。
+    // 面板（自上而下）：只读信息行 + 滑条 + 勾选。
+    //
+    // 布局用一个“行游标”自下而上堆叠：从底部倒数第一行开始，每画一行
+    // 向上推一个 step。不写死行号，加/减行时只动局部。
     void DrawPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -309,59 +321,69 @@ private:
         theme.font_alias = kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
-        const float kRowH    = 30.0f;
-        const float kSpacing = 10.0f;
-        const float kBottom  = 20.0f;
+        const float kRowH    = 28.0f;
+        const float kSpacing = 6.0f;
+        const float kBottom  = 16.0f;
         const float kSliderW = 0.5f * w;
         const float left     = (w - kSliderW) * 0.5f;
-        const float top      = h - kBottom - kRowH;
-        // 行间距（滑条/勾选/文本统一按此自上而下堆叠）。
         const float step     = kRowH + kSpacing;
 
-        // 行 0：地面高度（米）：[-3,+3]，实时看物体落地面/阴影。
-        ui_.SliderFloat("地面高度 y", &ground_y_,
-                        jpov::UiRect{{left, top}, {kSliderW, kRowH}},
-                        -3.0f, 3.0f, /*decimal_places*/2);
+        // 行游标：row_y 指向当前要画的那一行的 y（从底部向上递增行号）。
+        float row_y = h - kBottom - kRowH;
 
-        // 行 1：关联距离 d（米）。拖它重建仿真点集合 → 红/蓝点实时变化。
+        // 行 0（最底）：地面高度（米）：[-3,+3]，实时看物体落地面/阴影。
+        ui_.SliderFloat("地面高度 y", &ground_y_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        -3.0f, 3.0f, /*decimal_places*/2);
+        row_y -= step;
+
+        // 行 1：重力加速度 g（m/s²）。本阶段唯一的力；拖它看下坠快慢。
+        ui_.SliderFloat("重力 g (m/s²)", &gravity_ui_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        jpov::soft_mesh_simulator::Simulator::kMinGravity,
+                        jpov::soft_mesh_simulator::Simulator::kMaxGravity,
+                        /*decimal_places*/1);
+        row_y -= step;
+
+        // 行 2：关联距离 d（米）。拖它重建仿真点集合 → 红/蓝点实时变化。
         // 默认 0.1m；往小拖 → 更多蓝点（切得更碎），往大拖 → 蓝点消失。
         ui_.SliderFloat("关联距离 d (m)", &bind_distance_ui_,
-                        jpov::UiRect{{left, top - step}, {kSliderW, kRowH}},
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
                         kBindDistanceMinM, kBindDistanceMaxM,
                         /*decimal_places*/3);
+        row_y -= step;
 
-        // 行 2：三个勾选（同一行排三个）：推进仿真 / 显示仿真点 / 显示地面栅格。
-        // 说明：「推进仿真」默认关（首帧先看静态模型）；开启后每帧调 Step，
-        //   面板 t/步数会涨（M0 恒等桩下顶点不动，但时钟确实推进）。
+        // 行 3：三个勾选（同一行排三个）：推进仿真 / 仿真点 / 地面栅格。
+        // 说明：「推进仿真」默认关（首帧先看静态模型）；开启后每帧调 Step。
         const float kCheckW = kSliderW / 3.0f;
         ui_.Checkbox("推进仿真", &sim_running_,
-                     jpov::UiRect{{left, top - 2.0f * step}, {kCheckW, kRowH}});
+                     jpov::UiRect{{left, row_y}, {kCheckW, kRowH}});
         ui_.Checkbox("仿真点", &show_sim_points_,
-                     jpov::UiRect{{left + kCheckW, top - 2.0f * step},
-                                  {kCheckW, kRowH}});
+                     jpov::UiRect{{left + kCheckW, row_y}, {kCheckW, kRowH}});
         ui_.Checkbox("地面栅格", &show_ground_grid_,
-                     jpov::UiRect{{left + 2.0f * kCheckW, top - 2.0f * step},
+                     jpov::UiRect{{left + 2.0f * kCheckW, row_y},
                                   {kCheckW, kRowH}});
+        row_y -= step;
 
-        // 行 3：仿真点计数（本步验收的核心数字）——原始/虚拟/合计。
+        // 行 4：仿真点计数（本步验收的核心数字）——原始/虚拟/合计。
         const std::string point_status =
             Format("仿真点：原始 %zu + 虚拟 %zu = %zu",
                    sim_.original_point_count(), sim_.virtual_point_count(),
                    sim_.sim_point_count());
-        ui_.Text(point_status.c_str(),
-                 jpov::UiRect{{left, top - 3.0f * step}, {kSliderW, kRowH}});
+        ui_.Text(point_status.c_str(), jpov::UiRect{{left, row_y}, {kSliderW, kRowH}});
+        row_y -= step;
 
-        // 行 4：仿真状态（只读）：时间 / 步数 / 顶点-三角形。
+        // 行 5：仿真状态（只读）：时间 / 步数 / 顶点-三角形。
         const std::string sim_status =
             Format("仿真 t=%.2fs  步=%zu  顶点=%zu  三角形=%zu",
                    sim_.time(), sim_.step_count(),
                    sim_.vertex_count(), sim_.triangle_count());
-        ui_.Text(sim_status.c_str(),
-                 jpov::UiRect{{left, top - 4.0f * step}, {kSliderW, kRowH}});
+        ui_.Text(sim_status.c_str(), jpov::UiRect{{left, row_y}, {kSliderW, kRowH}});
+        row_y -= step;
 
-        // 行 5：视角操作提示（只读）。
+        // 行 6（最上）：视角与颜色提示（只读）。
         ui_.Text("右键 drag 转视角 · 滚轮 zoom · 红=原始顶点 蓝=虚拟顶点",
-                 jpov::UiRect{{left, top - 5.0f * step}, {kSliderW, kRowH}});
+                 jpov::UiRect{{left, row_y}, {kSliderW, kRowH}});
     }
 
     // 极简 snprintf 包装（面板只读文本用；避免在头里引入 printf 变参手写）。

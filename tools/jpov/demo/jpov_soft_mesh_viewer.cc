@@ -9,7 +9,8 @@
 // 但**滑条只保留「地面高度」**（视角靠鼠标操作），删掉了太阳仰角/浊度/季节 R/
 // 模型缩放——光照在本查看器里是固定标定值，不是被调对象。
 //
-// 当前阶段（M0）：动力学尚未实现，Simulator::Step 是恒等桩。
+// 当前阶段（M2）：动力学只做了**重力 + 速度衰减**两项（能基本地下坠）；
+// 顶点间的弹力/形状恢复力场尚未接入。
 // 本查看器现在验证的是「静态展示模型」的能力（加载/摆放/光照/相机/UI 全链路）。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
@@ -38,7 +39,7 @@ constexpr const char* kDefaultGltfPath =
 
 // LoadGltfScene 的回调是**函数指针**（不是 std::function，见 gltf_loader.h 的
 // GltfMeshEntryCallback），故用「函数指针 + void* user_data」这一对表达「取第一条」。
-// 只收第一条 primitive 作为被仿真网格（M0 单网格；多 primitive 后续再谈）。
+// 只收第一条 primitive 作为被仿真网格（单网格；多 primitive 后续再谈）。
 struct FirstMeshSink {
     jpov::MeshData mesh;
     bool have = false;
@@ -60,6 +61,9 @@ struct CliOptions {
     bool ui_shot = false;    // headless 单帧出图（含面板，UI 自检）
     float bind_distance = jpov::soft_mesh_simulator::Simulator::kDefaultBindDistance;
                              // --bind_distance 关联距离 d（米）
+    float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
+                             // --gravity 重力加速度（m/s²，≥ 0）
+    int sim_steps = 0;       // --sim_steps 出图前先推进的仿真步数（headless 验证下坠用）
     float phi_deg = 25.0f;   // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
 };
 
@@ -86,6 +90,24 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--bind_distance 缺少数值参数，忽略";
+            }
+        } else if (arg == "--gravity") {
+            if (i + 1 < argc) {
+                opt.gravity = std::atof(argv[++i]);
+                if (opt.gravity < 0.0f) {
+                    LOG(FATAL) << "--gravity 必须 >= 0，got " << opt.gravity;
+                }
+            } else {
+                LOG(WARNING) << "--gravity 缺少数值参数，忽略";
+            }
+        } else if (arg == "--sim_steps") {
+            if (i + 1 < argc) {
+                opt.sim_steps = std::atoi(argv[++i]);
+                if (opt.sim_steps < 0) {
+                    LOG(FATAL) << "--sim_steps 必须 >= 0，got " << opt.sim_steps;
+                }
+            } else {
+                LOG(WARNING) << "--sim_steps 缺少数值参数，忽略";
             }
         } else if (arg == "--phi_deg") {
             if (i + 1 < argc) {
@@ -167,6 +189,9 @@ int main(int argc, char** argv) {
     app.sim_.Init(sim_mesh, opt.bind_distance);
     // 面板 d 滑条镜像值与 CLI 对齐，避免首帧误触「不一致 → 重建」。
     app.bind_distance_ui_ = opt.bind_distance;
+    // 重力：CLI 设定初值 + 滑条镜像对齐（两者不一致时才写仿真器）。
+    app.sim_.SetGravity(opt.gravity);
+    app.gravity_ui_ = opt.gravity;
     LOG(INFO) << "── 仿真点统计 ──  原始顶点 " << app.sim_.original_point_count()
               << " / 虚拟顶点 " << app.sim_.virtual_point_count()
               << " / 合计 " << app.sim_.sim_point_count()
@@ -192,6 +217,16 @@ int main(int argc, char** argv) {
     if (opt.ui_shot) {
         // headless 单帧出图（带面板，UI 布局/字体自检用）。
         app.SetShowPanel(true);
+        // 可选：出图前先推进 N 步仿真（验证下坠/变形；交互窗口里由「推进仿真」勾选驱动）。
+        for (int i = 0; i < opt.sim_steps; ++i) {
+            app.sim_.Step(jpov::soft_mesh_simulator::Simulator::kDefaultDt);
+        }
+        if (opt.sim_steps > 0) {
+            app.UpdateMesh(app.mesh_id_, app.sim_.mesh());
+            const jpov::soft_mesh_simulator::SimBounds b = app.sim_.Bounds();
+            LOG(INFO) << "推进 " << opt.sim_steps << " 步后包围盒 min.y=" << b.min[1]
+                      << " max.y=" << b.max[1] << "，仿真 t=" << app.sim_.time() << "s";
+        }
         jpov::WindowInfo winfo;
         winfo.width  = jpov::soft_mesh_viewer::kViewerWidth;
         winfo.height = jpov::soft_mesh_viewer::kViewerHeight;

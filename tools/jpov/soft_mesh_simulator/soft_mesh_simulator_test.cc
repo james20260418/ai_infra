@@ -1,18 +1,22 @@
 // JPOV 软体仿真器 — 纯 CPU 单测（GL-free）
 //
-// 锁定的是**主入口的契约**，而不是某条物理规律（M0 阶段尚无物理）：
-//   - Init 后：Step 输出 == 输入网格（M0 恒等桩的确切语义）
+// 锁定的是**主入口的契约**与**积分器行为**：
+//   - M2：重力 + 速度衰减。Step 在重力下下坠；终速 → g/k；无重力纯衰减按 exp(-k·t)
 //   - 时钟正确推进：time == Σdt，step_count == 调用次数
 //   - 拓扑/属性在 Step 后原样保留（索引、法线、UV 不被动）
-//   - Reset 回到绑定姿态并清零计数
+//   - Reset 回到绑定姿态并清零计数/速度
 //   - 输入 mesh 不被修改（调用方的网格是只读的）
 //   - Bounds() 正确且是纯查询（多调几次结果一致，不影响时钟）
+//   - 虚拟顶点参与仿真但不出现在输出 mesh 里
 //
 // ⚠️ 负向验证过：把 Bounds 改成"只取首顶点"，本测试立即 FAIL（非恒真）。
+// ⚠️ 终速断言 (TerminalVelocityApproachesGOverK) 非恒真：若阻尼项写成
+//    正号/漏乘，v_y 不会收敛到 -g/k，断言如期失败。
 
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
 #include <cmath>
+#include <limits>
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -77,8 +81,9 @@ TEST(SoftMeshSimulatorTest, NonIndexedTriangleCountUsesVertexCountOver3) {
     EXPECT_EQ(sim.triangle_count(), 2u);  // 6/3
 }
 
-// M0 契约：Step 是恒等映射 —— 输出顶点与输入逐分量相同。
-TEST(SoftMeshSimulatorTest, StepIsIdentityInM0) {
+// M2 契约：dt 很小的一步后，顶点只发生与重力一致的微小位移（不再是恒等）。
+// 注：M0 的「Step 恒等」断言已被 M2 取代——现在 Step 会真的落下。
+TEST(SoftMeshSimulatorTest, StepMovesMeshUnderGravity) {
     const jpov::MeshData in = MakeTri();
     Simulator sim;
     sim.Init(in);
@@ -86,15 +91,16 @@ TEST(SoftMeshSimulatorTest, StepIsIdentityInM0) {
     const jpov::MeshData out = sim.Step(Simulator::kDefaultDt);
 
     ASSERT_EQ(out.positions.size(), in.positions.size());
+    // 一步（1/60 s）内：所有顶点都应向 -Y 下移（x/z 不变——无水平力）。
     for (size_t i = 0; i < in.positions.size(); ++i) {
-        for (int c = 0; c < 3; ++c) {
-            EXPECT_FLOAT_EQ(out.positions[i][c], in.positions[i][c])
-                << "顶点 " << i << " 分量 " << c << " 在 M0 应保持不变";
-        }
+        EXPECT_LT(out.positions[i][1], in.positions[i][1])
+            << "顶点 " << i << " 应在重力下向 -Y 移动";
+        EXPECT_FLOAT_EQ(out.positions[i][0], in.positions[i][0]) << "x 不应变";
+        EXPECT_FLOAT_EQ(out.positions[i][2], in.positions[i][2]) << "z 不应变";
     }
 }
 
-// 拓扑与其它顶点属性也必须原样保留（物理不应擅自改索引/法线/UV）。
+// 拓扑与其它顶点属性必须原样保留（物理只改位置，不应擅自动索引/法线/UV）。
 TEST(SoftMeshSimulatorTest, StepPreservesTopologyAndAttributes) {
     const jpov::MeshData in = MakeTri();
     Simulator sim;
@@ -141,7 +147,170 @@ TEST(SoftMeshSimulatorTest, InputMeshNotMutated) {
     EXPECT_FLOAT_EQ(in.positions[2][1], orig_y);
 }
 
-// Reset：回到绑定姿态 + 清零时间/步数。
+// ==================== M2：重力 + 对称阻尼（逐项校验积分器） ====================
+
+// ① 无重力（g=0）+ 无阻尼影响下：初始静止的点不应移动。
+//   （g=0 时 a=0，v 始终 0，位置不变——验证「没有力就不动」。）
+TEST(SoftMeshSimulatorTest, ZeroGravityKeepsStaticPointsStill) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(0.0f);
+    for (int i = 0; i < 30; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    const jpov::MeshData& m = sim.mesh();
+    EXPECT_NEAR(m.positions[0][1], 0.0f, 1e-6f);
+    EXPECT_NEAR(m.positions[1][1], 0.0f, 1e-6f);
+}
+
+// ② 自由下坠位移与解析解一致（无阻尼极限）。
+//   单步 dt 内 30 子步、每子步 dt_sub：连续极限下 y = -½·g·t²。
+//   这里与**参考积分器**（同公式、直接算）逐子步对比，保证实现没写错顺序。
+TEST(SoftMeshSimulatorTest, FreeFallMatchesReferenceIntegrator) {
+    const float g = 9.8f;
+    const double dt = Simulator::kDefaultDt;
+    const int n_steps = 60;  // 1 秒
+
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(g);
+    for (int i = 0; i < n_steps; ++i) {
+        sim.Step(dt);
+    }
+
+    // 参考实现：完全按 DESIGN §3.3 公式、以 double 逐子步演进一个静止点。
+    const double k = Simulator::kVelocityDamping;
+    const double dt_sub = dt / static_cast<double>(Simulator::kSubsteps);
+    double y = 0.0;
+    double v = 0.0;
+    for (int s = 0; s < n_steps * Simulator::kSubsteps; ++s) {
+        const double damp_half = std::exp(-k * dt_sub * 0.5);
+        const double a = -g;
+        const double v_half = v * damp_half + a * dt_sub * 0.5;
+        y += v_half * dt_sub;
+        v = (v_half + a * dt_sub * 0.5) * damp_half;
+    }
+    // 实现用 float 累积、参考用 double；允许小幅容差。
+    EXPECT_NEAR(sim.mesh().positions[0][1], y, 1e-3f);
+}
+
+// ③ 终速锚点：有阻尼时速度收敛到 g/k（解析终速）。
+//   这是「速度指数衰减」这一项的**可判断正确性**断言（不是恒真）。
+TEST(SoftMeshSimulatorTest, TerminalVelocityApproachesGOverK) {
+    const float g = 9.8f;
+    const float k = Simulator::kVelocityDamping;
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(g);
+
+    // 终速是指数逼近（时间常数 1/k = 10 s）：跑 60 s = 6 个时间常数 →
+    // 1 - e^-6 ≈ 99.75% 收敛。若只跑 10 s 仅 63%（那就不是“逼近”了）。
+    const double dt = Simulator::kDefaultDt;
+    for (int i = 0; i < 3600; ++i) {  // 60 s
+        sim.Step(dt);
+    }
+
+    const float v_term_analytic = g / k;  // 9.8/0.1 = 98 m/s，向下
+    const float v_y = sim.sim_velocities()[0][1];
+    // 用 1% 容差（已跑 6 个时间常数，残余 e^-6 ≈ 0.25%）。
+    EXPECT_NEAR(v_y, -v_term_analytic, 0.01f * v_term_analytic)
+        << "终速应逼近 -g/k = " << -v_term_analytic;
+}
+
+// ④ 纯衰减（g=0 且给定初速）：速度按 exp(-k*t) 指数衰减。
+//   验证「速度指数衰减」这一项的独立性（与重力解耦）。
+TEST(SoftMeshSimulatorTest, VelocityDecaysExponentiallyWithoutGravity) {
+    // 用单顶点网格，手工给它一个初速（通过重力积累后关掉也行，
+    // 这里用「先加一秒重力得到初速，再关重力观测衰减」的方式构造）。
+    Simulator sim;
+    sim.Init(MakeTri());
+    const double dt = Simulator::kDefaultDt;
+    sim.SetGravity(9.8f);
+    for (int i = 0; i < 6; ++i) {  // 0.1 s
+        sim.Step(dt);
+    }
+    const float v0 = sim.sim_velocities()[0][1];
+    ASSERT_LT(v0, 0.0f);  // 确实向下有速
+
+    sim.SetGravity(0.0f);
+    const int steps = 60;  // 1 s
+    for (int i = 0; i < steps; ++i) {
+        sim.Step(dt);
+    }
+    const float v1 = sim.sim_velocities()[0][1];
+    const double k = Simulator::kVelocityDamping;
+    // 期望 v1 ≈ v0 * exp(-k * 1s) = v0 * exp(-0.1)
+    EXPECT_NEAR(v1, static_cast<float>(v0 * std::exp(-k * 1.0)),
+                0.02f * std::abs(v0));
+}
+
+// ⑤ 重力方向：必须向下（-Y），不产生水平位移。
+TEST(SoftMeshSimulatorTest, GravityPullsAlongNegativeYOnly) {
+    jpov::MeshData m = MakeAsymmetricMesh();
+    const geom::Vec3<float> p0_before = m.positions[0];
+    Simulator sim;
+    sim.Init(m);
+    for (int i = 0; i < 30; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    const geom::Vec3<float>& p0_after = sim.mesh().positions[0];
+    EXPECT_LT(p0_after[1], p0_before[1]);       // 下坠
+    EXPECT_FLOAT_EQ(p0_after[0], p0_before[0]); // 无 x 漂移
+    EXPECT_FLOAT_EQ(p0_after[2], p0_before[2]); // 无 z 漂移
+}
+
+// ⑥ 虚拟顶点也参与仿真（与原始点同等地受到重力下坠）。
+TEST(SoftMeshSimulatorTest, VirtualPointsAlsoFall) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*bind_distance=*/1.0f);
+    ASSERT_GT(sim.virtual_point_count(), 0u);
+    const float vy_before = sim.sim_positions()[sim.original_point_count()][1];
+
+    for (int i = 0; i < 30; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    const float vy_after = sim.sim_positions()[sim.original_point_count()][1];
+    EXPECT_LT(vy_after, vy_before) << "虚拟顶点也应下坠";
+    // 所有仿真点（含虚拟）速度同号向下。
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        EXPECT_LT(v[1], 0.0f);
+    }
+}
+
+// ⑦ 提取 mesh 不含虚拟顶点：Step 输出的顶点数 == 原始网格顶点数。
+TEST(SoftMeshSimulatorTest, ExtractMeshExcludesVirtualPoints) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*bind_distance=*/1.0f);
+    ASSERT_GT(sim.virtual_point_count(), 0u);
+    const jpov::MeshData out = sim.Step(Simulator::kDefaultDt);
+    EXPECT_EQ(out.positions.size(), 3u) << "输出只含原始顶点";
+}
+
+// ⑧ SetGravity：负值/非有限值必须崩（不静默夹断）。
+TEST(SoftMeshSimulatorTest, SetGravityRejectsInvalidValues) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetGravity(-1.0f), "gravity");
+    EXPECT_DEATH(sim.SetGravity(std::numeric_limits<float>::infinity()),
+                 "gravity");
+}
+
+// ⑨ 子步数常量与 DESIGN §3.4 一致（防日后被误改而无人察觉）。
+TEST(SoftMeshSimulatorTest, SubstepCountMatchesDesign) {
+    EXPECT_EQ(Simulator::kSubsteps, 30);
+    EXPECT_FLOAT_EQ(Simulator::kVelocityDamping, 0.1f);
+    EXPECT_FLOAT_EQ(Simulator::kDefaultGravity, 9.8f);
+}
+
+// Reset：回到绑定姿态 + 清零时间/步数/速度。
 TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
     const jpov::MeshData in = MakeTri();
     Simulator sim;
@@ -149,6 +318,7 @@ TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
 
     for (int i = 0; i < 10; ++i) sim.Step(Simulator::kDefaultDt);
     ASSERT_GT(sim.time(), 0.0);
+    ASSERT_GT(sim.sim_velocities()[0][1], -1e30f);  // 有过速度（非无穷）
 
     sim.Reset();
 
@@ -158,6 +328,13 @@ TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
     ASSERT_EQ(cur.positions.size(), in.positions.size());
     for (size_t i = 0; i < in.positions.size(); ++i) {
         EXPECT_FLOAT_EQ(cur.positions[i][0], in.positions[i][0]);
+        EXPECT_FLOAT_EQ(cur.positions[i][1], in.positions[i][1]);
+    }
+    // 速度也应清零。
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        EXPECT_FLOAT_EQ(v[0], 0.0f);
+        EXPECT_FLOAT_EQ(v[1], 0.0f);
+        EXPECT_FLOAT_EQ(v[2], 0.0f);
     }
 }
 

@@ -13,14 +13,15 @@
 // 纯 CPU、零 GL、可单测。这是刻意的边界——显示（JPOV 渲染管线）与物理（本包）
 // 各自独立演进，互不污染。
 //
-// ============================ 当前阶段（M0）==============================
+// ============================ 当前阶段（M2：重力 + 速度衰减）==============================
 //
-// **只做静态展示**：动力学尚未实现，Step() 是显式的恒等桩（恒等映射 + 计数）。
-// 后续每加一条物理（重力 / 弹簧约束 / 地面碰撞 / …）都是在本包内往里填。
+// 动力学**第一项**落地：只做**重力**与**速度指数衰减**两项，让网格能「基本地下坠」。
+// 弹簧/自碰撞等顶点间力场尚未接入（见 DESIGN.md §7 的 M1/M3）——本阶段的力只有重力，
+// 故 a(t) = g 是常量，积分器因此有闭式解，可被单测逐项校验（见 .cc）。
 //
-// 之所以先立这个骨架，是为了让「物理」和「显示」从一开始就完全解耦：
-//   - 物理：纯 CPU、零 GL、可单测（soft_mesh_simulator_test.cc）
-//   - 显示：JPOV 渲染管线，物理只是喂给它的一个 MeshData
+// 之所以先只做这两项，是为了在引入顶点间耦合（力场）之前，先把**积分器本身**
+// 钉死并验收：子步切分、对称阻尼、速度-位置更新顺序。耦合力一上线，这些都会
+// 被掩盖（力算错与积分器写错混在一起，很难二分定位）。
 //
 // ============================ 设计约定 ============================
 //
@@ -46,8 +47,9 @@ namespace soft_mesh_simulator {
 
 // 仿真体在某一时刻的取景包围盒（纯查询，无副作用）。
 //
-// 查看器用它做「相机是否要跟着变形体缩放」这类判断；当前 M0 阶段几乎恒等于
-// 输入网格的包围盒。带 valid 标志：空网格时 min/max 未定义，调用方必须先看标志。
+// 查看器用它做「相机是否要跟着变形体缩放」这类判断；M2 起网格会在重力下
+// 下坠/变形，包围盒随仿真推进而变化（未 Step 时等于绑定姿态的包围盒）。
+// 带 valid 标志：空网格时 min/max 未定义，调用方必须先看标志。
 struct SimBounds {
     // 说明：这里用完整拼写 geom::Vec3<float>（而非 jpov 命名空间内的 Vec3f 别名），
     // 因为本头需要自带类型来源，避免被别名可见性牵连。
@@ -82,6 +84,22 @@ public:
     // 默认关联距离 d（米）。见 DESIGN.md §5（当前为全局常量，非滑条）。
     static constexpr float kDefaultBindDistance = 0.1f;
 
+    // 默认重力加速度（m/s²），方向 -Y（DESIGN.md §1.2 第 3 项；地面在下方）。
+    static constexpr float kDefaultGravity = 9.8f;
+
+    // 重力滑条范围（m/s²）。下限 > 0（0 会让本阶段退化成「匀速直线」没意义；
+    // 若将来要「关重力」，应由调用方显式表达，而不是把 0 当作魔法值）。
+    static constexpr float kMinGravity = 1.0f;
+    static constexpr float kMaxGravity = 20.0f;
+
+    // 速度指数衰减系数 k（1/s）。DESIGN.md §2 第 3 项：V *= exp(-k*dt)。
+    // 本阶段固定 0.1（Danis 2026-09-25 指定）—— 尚未做成滑条。
+    static constexpr float kVelocityDamping = 0.1f;
+
+    // 每个外部步（1/60 s）内的子步数。DESIGN.md §3.4：30 个子步（暴力解）。
+    // 实际积分的步长 = dt / kSubsteps = 1/(60*30) = 5.5556e-4 s。
+    static constexpr int kSubsteps = 30;
+
     Simulator() = default;
 
     // 用给定网格初始化仿真体。可重复调用（等价于 Reset 到新网格）。
@@ -102,8 +120,8 @@ public:
     //
     // 返回**按值**的新网格，调用方可直接交给渲染/下一步。
     //   - dt 必须 > 0，否则 CHECK 崩溃（静默跳帧会掩盖时间 bug）
-    //   - 内部按 dt 推进时间累加器与步数计数
-    //   - M0 阶段：恒等映射（位置原样返回），拓扑/属性全部保留
+    //   - 内部把 dt 切成 kSubsteps 个子步，逐步积分（见 .cc 的积分器说明）
+    //   - 本阶段（M2）：只施加**重力 + 速度衰减**，无顶点间力场
     jpov::MeshData Step(double dt);
 
     // 当前网格（最近一次 Step 的输出；未 Step 过则等于 Init 的网格）。
@@ -149,6 +167,22 @@ public:
         return sim_index >= vertex_count_;
     }
 
+    // ── 物理参数（可被查看器滑条覆盖）──
+    //
+    // 重力加速度 g（m/s²，≥ 0），方向恒为 -Y。滑条范围 [kMinGravity, kMaxGravity]。
+    // 查询与设置都走这里；设置时 CHECK 值域，不静默夹断（避免隐藏调用方的错值）。
+    float gravity() const { return gravity_; }
+    // Pre-condition: gravity >= 0（0 合法 = 无重力，供将来的开关用）；负值崩。
+    void SetGravity(float gravity);
+
+    // ── 仿真点速度（纯查询）──
+    //
+    // 与 sim_positions() 同序同长：索引 0..original_point_count()-1 = 原始顶点，
+    // 其后为虚拟顶点。未 Step 过时全为 0。供单测/调试读取。
+    const std::vector<geom::Vec3<float>>& sim_velocities() const {
+        return sim_velocities_;
+    }
+
     // 当前取景包围盒（纯查询）。
     SimBounds Bounds() const;
 
@@ -161,18 +195,26 @@ private:
     // 纯 CPU，只读输入，无副作用（除了填充 sim_positions_/sim_edges_）。
     size_t BuildSimulationPoints(const jpov::MeshData& mesh, float d);
 
-    // ── 物理状态（当前 M0 阶段仅"当前网格 + 时钟"；后续物理量都加在这里）──
+    // ── 物理状态（M2：位置 + 速度 + 时钟；后续物理量都加在这里）──
     // 说明：把「当前网格」当作唯一事实源，而不是另外维护一份顶点数组，
     // 是为了让 Step 的输出与状态永远一致——查看器拿到的就是仿真器认的那份。
     jpov::MeshData mesh_;      // 当前网格（原始顶点；提取用）
     jpov::MeshData bind_mesh_; // 绑定姿态（Reset 用）
 
-    // 仿真点集合（原始 + 虚拟）的绑定姿态位置。索引 0..vertex_count_-1 = 原始顶点，
+    // 仿真点集合（原始 + 虚拟）的**当前位置**。索引 0..vertex_count_-1 = 原始顶点，
     // 之后为虚拟顶点。M1 可视化与后续物理都基于这份。
+    // 不变量：其前 vertex_count_ 个元素始终与 mesh_.positions 一致（见 ExtractMesh）。
     std::vector<geom::Vec3<float>> sim_positions_;
+
+    // 仿真点集合的**当前速度**（与 sim_positions_ 同序同长）。
+    // 积分状态之一；Reset/Init 时清零。
+    std::vector<geom::Vec3<float>> sim_velocities_;
 
     // 加密产生的虚拟点列表（仅 position），用于可视化/调试（蓝色点）。
     std::vector<geom::Vec3<float>> virtual_positions_;
+
+    // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
+    float gravity_ = kDefaultGravity;
 
     float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
@@ -183,6 +225,14 @@ private:
     size_t triangle_count_ = 0;
 
     bool inited_ = false;      // 是否已 Init（Reset 的前置校验）
+
+    // 把仿真点当前的前 vertex_count_ 个位置写回 mesh_.positions（提取变形 mesh）。
+    // 虚拟顶点不进入输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
+    void ExtractMesh();
+
+    // 在给定子步长 dt_sub 上执行一次「重力 + 对称阻尼」的 leapfrog 积分。
+    // 见 .cc 的完整公式与推导。
+    void IntegrateSubstep(double dt_sub);
 };
 
 }  // namespace soft_mesh_simulator

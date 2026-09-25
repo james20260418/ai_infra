@@ -38,6 +38,10 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
     // 构建仿真点集合（含长边加密）。
     const size_t virtual_count = BuildSimulationPoints(mesh, bind_distance);
 
+    // 速度数组与位置同长同序，初始全 0（绑定姿态静止）。
+    sim_velocities_.assign(sim_positions_.size(),
+                           geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
     time_ = 0.0;
     step_count_ = 0;
     inited_ = true;
@@ -46,7 +50,7 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
               << " / 三角形 " << triangle_count_
               << " / 虚拟顶点 " << virtual_count
               << " / 仿真点合计 " << sim_positions_.size()
-              << "（bind_distance=" << bind_distance << " m；M0 阶段 Step 为恒等）";
+              << "（bind_distance=" << bind_distance << " m；M2 重力+衰减）";
 }
 
 jpov::MeshData Simulator::Step(double dt) {
@@ -54,23 +58,80 @@ jpov::MeshData Simulator::Step(double dt) {
     CHECK(dt > 0.0) << "soft_mesh_simulator::Step 要求 dt > 0，got " << dt
                     << "（静默跳过时间会掩盖时钟 bug，故直接崩溃）";
 
-    // ── M0（静态阶段）：恒等桩。──
-    //
-    // 这里**故意什么都不做**：不做位置积分、不做约束投影。它的价值是先把
-    // 「输入 mesh → 输出 mesh」这条接口钉死，让查看器/单测/headless 全部围绕
-    // 它建好骨架。后续每加一条物理，都是替换注释下面这几行，接口不变。
-    //
-    // 下一步（M1）将在此加入：重力预测 → 约束投影 → 速度回写；
-    // 届时需要本类额外持有：顶点速度数组、约束集（边/面）、拓扑邻接。
-    //
-    // 当前恒等映射下 mesh_ 不需要变，直接返回当前值即可（零拷贝路径）。
+    // ── 把外部步 dt 切成 kSubsteps 个子步逐步积分（DESIGN.md §3.4）。──
+    // 子步是稳定性手段：dt_sub 越小，显式积分越稳（相应也会略微改变
+    // 轨迹的离散化误差——1 步与 30 子步的结果相差 O(dt²) 量级，不是完全等价）。
+    // 本阶段力只有常量重力，子步仅影响离散化精度；但为与将来接入的弹簧力场
+    // 保持同一套结构，现在就切。
+    const double dt_sub = dt / static_cast<double>(kSubsteps);
+    for (int s = 0; s < kSubsteps; ++s) {
+        IntegrateSubstep(dt_sub);
+    }
 
-    // 时间与步数照常累加——即使动力学是恒等的，时钟也必须真实推进，
-    // 否则查看器/测试无法区分"停住了"和"没在走"。
+    // 把仿真点位置写回 mesh_（只用原始顶点，虚拟顶点不输出）。
+    ExtractMesh();
+
+    // 时间与步数照常累加。
     time_ += dt;
     ++step_count_;
 
     return mesh_;
+}
+
+// 「重力 + 对称阻尼」的 leapfrog 积分（DESIGN.md §3.3 定稿，Danis 签字）。
+//
+// 逐点更新，点与点之间无耦合（本阶段力场未接入，故 a(t) = g 对每点相同）。
+// 公式（逐顶点，m = 质量与力无关——本阶段只有重力，质量不影响加速度）：
+//
+//     v_half  = v(t) * exp(-k*dt/2) + a(t) * dt/2
+//     x(t+dt) = x(t) + v_half * dt
+//     a(t+dt) = g                        ← 本阶段唯一的外力
+//     v(t+dt) = (v_half + a(t+dt) * dt/2) * exp(-k*dt/2)
+//
+// 要点：
+//   * 阻尼 **对称地劈成两半**（前后各 exp(-k*dt/2)），包在 leapfrog 外侧；
+//     两半相乘 = exp(-k*dt)，与「整步衰减一次」等价到 O(dt²)。
+//   * 先算 v_half（半步速度），用它推位置（leapfrog 的“跳蛙”特征），
+//     再用新位置的加速度回写整步速度——这是“辛”的体现：位置与速度的
+//     更新互相嵌套，保证相空间体积守恒（无阻尼时）。
+//   * 重力方向 -Y（地面在下方）。
+void Simulator::IntegrateSubstep(double dt_sub) {
+    CHECK_GT(dt_sub, 0.0);
+
+    const float k = kVelocityDamping;
+    // 半步阻尼因子 exp(-k*dt_sub/2)；用 double 中间量算，避免 float 精度损失。
+    const float damp_half = static_cast<float>(
+        std::exp(-static_cast<double>(k) * dt_sub * 0.5));
+    const float half_dt = static_cast<float>(dt_sub) * 0.5f;
+    // 本阶段唯一外力：重力，方向 -Y。
+    const geom::Vec3<float> accel(0.0f, -gravity_, 0.0f);
+
+    for (size_t i = 0; i < sim_positions_.size(); ++i) {
+        const geom::Vec3<float> v_old = sim_velocities_[i];
+        const geom::Vec3<float> x_old = sim_positions_[i];
+
+        // v_half = v(t)*exp(-k*dt/2) + a*dt/2
+        const geom::Vec3<float> v_half = v_old * damp_half + accel * half_dt;
+        // x(t+dt) = x(t) + v_half*dt
+        sim_positions_[i] = x_old + v_half * static_cast<float>(dt_sub);
+        // a(t+dt) = g（常量，与位置无关）；v(t+dt) = (v_half + a*dt/2)*exp(-k*dt/2)
+        sim_velocities_[i] = (v_half + accel * half_dt) * damp_half;
+    }
+}
+
+// 提取变形 mesh：把仿真点前 vertex_count_ 个位置写回 mesh_.positions。
+// 虚拟顶点参与仿真但不输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
+void Simulator::ExtractMesh() {
+    CHECK_GE(sim_positions_.size(), vertex_count_);
+    for (size_t i = 0; i < vertex_count_; ++i) {
+        mesh_.positions[i] = sim_positions_[i];
+    }
+}
+
+void Simulator::SetGravity(float gravity) {
+    CHECK(std::isfinite(gravity)) << "SetGravity 要求有限值，got " << gravity;
+    CHECK_GE(gravity, 0.0f) << "SetGravity 要求 gravity >= 0，got " << gravity;
+    gravity_ = gravity;
 }
 
 SimBounds Simulator::Bounds() const {
@@ -175,10 +236,16 @@ void Simulator::Reset() {
     if (!inited_) return;  // 未初始化过：no-op（幂等，便于查看器无脑调用）
 
     mesh_ = bind_mesh_;
+    // 位置回到绑定姿态，速度清零（重新从静止开始）。
+    // 注意：BuildSimulationPoints 会重填 sim_positions_（原始顶点 + 虚拟点），
+    // 其前 vertex_count_ 个即 bind_mesh_ 的原顶点位置，故无需另行拷贝。
+    BuildSimulationPoints(bind_mesh_, bind_distance_);
+    sim_velocities_.assign(sim_positions_.size(),
+                           geom::Vec3<float>(0.0f, 0.0f, 0.0f));
     time_ = 0.0;
     step_count_ = 0;
 
-    LOG(INFO) << "soft_mesh_simulator::Reset 已回到绑定姿态（时间/步数清零）";
+    LOG(INFO) << "soft_mesh_simulator::Reset 已回到绑定姿态（位置/速度/时间/步数清零）";
 }
 
 }  // namespace soft_mesh_simulator
