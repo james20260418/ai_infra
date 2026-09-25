@@ -70,6 +70,11 @@ public:
     // ── 被查看的仿真器。查看器只驱动它、读它，不碰它的内部状态。──
     soft_mesh_simulator::Simulator sim_;
 
+    // 原始（未加密）网格的 CPU 副本。仿真器只把它当输入，自己保存自己的副本；
+    // 这里另存一份是为了「改 d 后重新 Init」——d 决定加密密度，改 d 必须重建
+    // 仿真点集合，而重建的输入永远是这份原始网格（不是仿真器的输出，避免累计漂移）。
+    jpov::MeshData original_mesh_;
+
     // ── 当前视角 view_：交互（右键 drag/滚轮实时改）与 headless 出图共用的单一事实源。
     ViewConfig view_;
 
@@ -80,6 +85,11 @@ public:
     // 仿真点像素半径（Danis 需求：2px，"就点个点"）。
     static constexpr float kSimPointRadiusPx = 2.0f;
 
+    // d 滑条范围（米）。下限 5mm：高密度模型也能拆出成片虚拟点；
+    // 上限 1m：覆盖「大 d ⇒ 几乎不加密」的对照情形。
+    static constexpr float kBindDistanceMinM = 0.005f;
+    static constexpr float kBindDistanceMaxM = 1.0f;
+
     // 地面栅格参数（Danis 需求：1m 格子、±5m、只画 XZ 平面）。
     static constexpr float kGridHalfExtentM = 5.0f;  // 每边 5m → 总 10m×10m
     static constexpr float kGridStepM = 1.0f;        // 1m 一格
@@ -88,6 +98,10 @@ public:
     // ── UI 状态 ──
     float ground_y_ = -3.0f;            // 地面高度 [-3,+3]（需求保留的滑条）
     bool  sim_running_ = false;         // 是否推进仿真（默认暂停：先看静态模型）
+
+    // 关联距离 d（米）的滑条镜像值。拖它 → 与 sim_.bind_distance() 不一致时
+    // 重新 Init（重建仿真点集合）。范围见 kBindDistanceMinM/MaxM。
+    float bind_distance_ui_ = soft_mesh_simulator::Simulator::kDefaultBindDistance;
 
     // 装配真实字体文本测量回调（UI 内部用），Init() 后调用一次。
     void InstallTextMeasure() {
@@ -121,6 +135,14 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+        }
+
+        // ── 拖动 d 滑条 → 重建仿真点集合。──
+        // d 只在 Init 时生效（决定长边加密密度 ⇒ 虚拟点数量），所以拖完必须
+        // 重建。重建输入用 original_mesh_（原始网格，非仿真器当前输出）：
+        // 保证 d 来回拖动后回到同一状态，不累计任何历史。
+        if (bind_distance_ui_ != sim_.bind_distance()) {
+            ReinitSimulation();
         }
 
         // ── 仿真推进：把「当前 mesh 经 1/60 s 动力学」这件事交给仿真器。──
@@ -184,6 +206,23 @@ public:
     }
 
 private:
+    // ⭐ 用当前 d 滑条值重建仿真点集合（原始网格不变，只重建加密/邻接）。
+    //
+    // 调用者：OneIteration 里检测到 bind_distance_ui_ 与 sim_.bind_distance() 不一致时。
+    // 用 original_mesh_ 作为重建输入 —— 它永远是 Init 时那份原始网格，
+    // 不是 sim_.mesh()（后者在 M3+ 会被物理改过，拿它重建会把形变当绑定姿态）。
+    void ReinitSimulation() {
+        CHECK(!original_mesh_.positions.empty())
+            << "ReinitSimulation 前必须先设置 original_mesh_（Init 时保存）";
+        sim_.Init(original_mesh_, bind_distance_ui_);
+        // 重建后网格回到绑定姿态 → 推上 GPU，并把推进时钟归零。
+        UpdateMesh(mesh_id_, sim_.mesh());
+        LOG(INFO) << "重建仿真点（d=" << bind_distance_ui_ << " m）：原始 "
+                  << sim_.original_point_count() << " + 虚拟 "
+                  << sim_.virtual_point_count() << " = "
+                  << sim_.sim_point_count();
+    }
+
     // 把仿真点集画成屏幕空间的 2D 圆点（2px 半径）。
     //
     // 颜色：原始顶点 = 红，虚拟顶点（加密插入）= 蓝。
@@ -262,7 +301,7 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 面板：地面高度滑条 + 两行只读文本（仿真状态、视角操作提示）。
+    // 面板：两个滑条（地面高度 / 关联距离 d）+ 三个勾选 + 只读状态文本。
     void DrawPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -271,30 +310,58 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
         const float kRowH    = 30.0f;
-        const float kSpacing = 12.0f;
+        const float kSpacing = 10.0f;
         const float kBottom  = 20.0f;
         const float kSliderW = 0.5f * w;
         const float left     = (w - kSliderW) * 0.5f;
         const float top      = h - kBottom - kRowH;
+        // 行间距（滑条/勾选/文本统一按此自上而下堆叠）。
+        const float step     = kRowH + kSpacing;
 
-        // 地面高度（米）：[-3,+3]，实时看物体落地面/阴影。
+        // 行 0：地面高度（米）：[-3,+3]，实时看物体落地面/阴影。
         ui_.SliderFloat("地面高度 y", &ground_y_,
                         jpov::UiRect{{left, top}, {kSliderW, kRowH}},
                         -3.0f, 3.0f, /*decimal_places*/2);
 
-        // 仿真状态（只读）：时间 / 步数 / 顶点-三角形。显出来是为了一眼看懂
-        // 「仿真在走没有」（M0 恒等桩下顶点不动、时间照涨）。
-        const std::string status =
+        // 行 1：关联距离 d（米）。拖它重建仿真点集合 → 红/蓝点实时变化。
+        // 默认 0.1m；往小拖 → 更多蓝点（切得更碎），往大拖 → 蓝点消失。
+        ui_.SliderFloat("关联距离 d (m)", &bind_distance_ui_,
+                        jpov::UiRect{{left, top - step}, {kSliderW, kRowH}},
+                        kBindDistanceMinM, kBindDistanceMaxM,
+                        /*decimal_places*/3);
+
+        // 行 2：三个勾选（同一行排三个）：推进仿真 / 显示仿真点 / 显示地面栅格。
+        // 说明：「推进仿真」默认关（首帧先看静态模型）；开启后每帧调 Step，
+        //   面板 t/步数会涨（M0 恒等桩下顶点不动，但时钟确实推进）。
+        const float kCheckW = kSliderW / 3.0f;
+        ui_.Checkbox("推进仿真", &sim_running_,
+                     jpov::UiRect{{left, top - 2.0f * step}, {kCheckW, kRowH}});
+        ui_.Checkbox("仿真点", &show_sim_points_,
+                     jpov::UiRect{{left + kCheckW, top - 2.0f * step},
+                                  {kCheckW, kRowH}});
+        ui_.Checkbox("地面栅格", &show_ground_grid_,
+                     jpov::UiRect{{left + 2.0f * kCheckW, top - 2.0f * step},
+                                  {kCheckW, kRowH}});
+
+        // 行 3：仿真点计数（本步验收的核心数字）——原始/虚拟/合计。
+        const std::string point_status =
+            Format("仿真点：原始 %zu + 虚拟 %zu = %zu",
+                   sim_.original_point_count(), sim_.virtual_point_count(),
+                   sim_.sim_point_count());
+        ui_.Text(point_status.c_str(),
+                 jpov::UiRect{{left, top - 3.0f * step}, {kSliderW, kRowH}});
+
+        // 行 4：仿真状态（只读）：时间 / 步数 / 顶点-三角形。
+        const std::string sim_status =
             Format("仿真 t=%.2fs  步=%zu  顶点=%zu  三角形=%zu",
                    sim_.time(), sim_.step_count(),
                    sim_.vertex_count(), sim_.triangle_count());
-        ui_.Text(status.c_str(),
-                 jpov::UiRect{{left, top - (kRowH + kSpacing)}, {kSliderW, kRowH}});
+        ui_.Text(sim_status.c_str(),
+                 jpov::UiRect{{left, top - 4.0f * step}, {kSliderW, kRowH}});
 
-        // 视角操作提示（只读）。
-        ui_.Text("右键 drag 转视角 · 滚轮 zoom",
-                 jpov::UiRect{{left, top - 2.0f * (kRowH + kSpacing)},
-                              {kSliderW, kRowH}});
+        // 行 5：视角操作提示（只读）。
+        ui_.Text("右键 drag 转视角 · 滚轮 zoom · 红=原始顶点 蓝=虚拟顶点",
+                 jpov::UiRect{{left, top - 5.0f * step}, {kSliderW, kRowH}});
     }
 
     // 极简 snprintf 包装（面板只读文本用；避免在头里引入 printf 变参手写）。
