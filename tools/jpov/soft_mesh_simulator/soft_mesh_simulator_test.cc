@@ -678,15 +678,11 @@ TEST(SoftMeshSimulatorTest, SpringForceZeroAtBindPose) {
                 1e-5f);
 }
 
-// Ⓒ 力场是**弹簧**：拉伸产生的恢复力使两端相互靠近。
-//   构造可解析的单轴情形：初始两点沿 x 相距 0.1m（关联），
-//   把 F 设大、无重力，然后用“给定初速”不可得的限制下，改用**间接**手段：
-//   借助重力制造 y 向位移不会沿 x 拉伸。故本测试改为验证弹簧力的**存在与方向**
-//   通过一个可解析的构造：两点初始间距 d/2，而后“瞬间”把其中一个挪远是做不到的。
-//   ⇒ 拉黑难构造的情形不硬凑：证明“弹簧在动作 + 方向正确”交给 Ⓕ（开关差异）
-//     + Ⓔ（镜像对称）两测试，本测试删除。
-//
-// Ⓔ Σ Fij = 0（DESIGN §6 单测 #1）——力场内部净力为零（牛顿第三定律）：
+// Ⓒ 力场的**方向正确性**（恢复性）——见下方 SpringForceIsRestoringNotRepulsive。
+//   （早期版本此处曾计划用“拉伸”构造，后证明在无位置 setter 时难以可解析构造，
+//    改用“压缩 + 地面钉住”的鲁棒构造，见后。）
+
+// Ⓓ ΣFij = 0（DESIGN §6 单测 #1）——力场内部净力为零（牛顿第三定律）：
 //   整个系统作为刚体自由下落时，内部弹簧力必成对抵消 ⇒ 各点轨迹应完全一致。
 //   因为无 setter 改初速，用重力制造整体下落（对每点相同），弹簧保持零变形。
 TEST(SoftMeshSimulatorTest, InternalSpringForceCancelsUnderRigidFall) {
@@ -715,14 +711,14 @@ TEST(SoftMeshSimulatorTest, InternalSpringForceCancelsUnderRigidFall) {
     EXPECT_NEAR(P[1][1], P[2][1], 1e-4f);
 }
 
-// Ⓔ Σ Fij = 0（DESIGN §6 单测 #1）——力场内部净力为零（牛顿第三定律）。
-//   构造持续变形（竖向链 + 地面 clamp），关重力后读弹簧加速度，
-//   验证 Σ a_i · m = 0（内部力成对抵消）。
+// Ⓔ Σ a_i·m = 0（DESIGN §6 单测 #2）——内部力整体净和为零（不变量）。
+//   构造持续变形（竖向链 + 地面 clamp），关重力后读弹簧加速度。
 //
-//   ⚠️ 局限：在强变形/截断主导的稳态下，力多被 clamp 封顶（本身对称），
-//   故本测试对“单个点力的轻微非对称”不敏感——它验证的是**整体净力守恒**这一
-//   不变量，不是逐对力的正确性。逐对力的正确性由截断测试（Ⓛ）
-//   + 开关差异测试（Ⓕ）+ 刚体下落不变性（内联在下面新版）共同锁定。
+//   ⚠️ 局限：强变形稳态下力多被 clamp 封顶（本身对称），故本测试对“单个点力的
+//   轻微非对称”不敏感——它验证的是**整体净力守恒**不变量，不是逐对力的正确性。
+//   逐对力正确性由：方向测试（SpringForceIsRestoringNotRepulsive）+ 截断测试
+//   （SpringForceIsClampedAtForceMax）+ 开关差异测试（SpringFieldActuallyChangesMotion）
+//   + 刚体下落不变性（InternalSpringForceCancelsUnderRigidFall）共同锁定。
 TEST(SoftMeshSimulatorTest, SpringInternalForceSumsToZero) {
     jpov::MeshData m;
     m.flags = jpov::MeshVertexFlags::kPosition;
@@ -754,7 +750,7 @@ TEST(SoftMeshSimulatorTest, SpringInternalForceSumsToZero) {
     EXPECT_NEAR(f_sum[2], 0.0f, 1e-3f) << "内部弹簧力 z 分量和应为 0";
 }
 
-// Ⓕ近 力的**方向正确性**（恢复性，可解析）——这是“力场写对了”的最直接证据：
+// Ⓕ 力的**方向正确性**（恢复性，可解析）——这是“力场写对了”的最直接证据：
 //   两点沿 y 上下排，下点被地面钉住，上点在重力下远离。在变形状态下，
 //   上点受到的**弹簧力**应指向下点（把它拉回），即关重力后
 //   AccelAtPoint(上点).y < 0（向下指向被钉住的下点）。
@@ -848,6 +844,36 @@ TEST(SoftMeshSimulatorTest, NeighborTableFrozenAfterInit) {
 }
 
 // Ⓗ Reset 后关联表仍在（Reset 重建仿真点集合，关联表应一并重填）。
+// Ⓗ 关联表在截断后**保持对称**（无向）——性能降本的代价不能破坏牛顿第三定律。
+//   用密集点团（每点邻居远 > kMaxNeighbors）强制走截断路径，验证：
+//   对每一条边 i→j，必有反向边 j→i（对称性）。
+//   若截断改成“逐点独立”，本测试会 FAIL（力不再对称 → 能量泵浦）。
+TEST(SoftMeshSimulatorTest, NeighborTruncationKeepsSymmetry) {
+    // 3D 密点团：5×5×5 = 125 点，间距 0.01，d=0.1 → 每点邻居数远超 20。
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    for (int x = 0; x < 5; ++x)
+        for (int y = 0; y < 5; ++y)
+            for (int z = 0; z < 5; ++z)
+                m.positions.push_back(
+                    {0.01f * x, 0.01f * y, 0.01f * z});
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*d=*/0.1f);
+
+    // 确实走了截断：平均邻居数 <= 2*kMaxNeighbors（并集的上界）。
+    const double avg =
+        static_cast<double>(sim.neighbor_pair_count()) / sim.sim_point_count();
+    EXPECT_GT(avg, 0.0);
+    EXPECT_LE(avg, 2.0 * static_cast<double>(Simulator::kMaxNeighbors) + 1.0)
+        << "截断后平均邻居应 <= 2k（并集上界），实测 " << avg;
+
+    // ⭐ 核心：关联表**严格对称**（i 关联 j ⇔ j 关联 i）。
+    //   若截断改成“逐点独立”（i 保留 j 但 j 未必保留 i），本断言 FAIL。
+    EXPECT_TRUE(sim.neighbors_symmetric())
+        << "截断后关联表必须保持无向对称（否则能量不守恒）";
+}
+
 TEST(SoftMeshSimulatorTest, NeighborTableSurvivesReset) {
     Simulator sim;
     sim.Init(MakeTwoPoints(0.1f), 0.5f);
@@ -877,13 +903,13 @@ TEST(SoftMeshSimulatorTest, SetParamsRejectInvalidValues) {
     EXPECT_FLOAT_EQ(sim.force_coeff(), 1.5f);
 }
 
-// 速度衰减系数 k：默认 0.1；值域护栏（>=0）；k 越大衰减越快（衰减效果可测）。
+// 速度衰减系数 k：默认 5.0；值域护栏（>=0）；k 越大衰减越快（衰减效果可测）。
 TEST(SoftMeshSimulatorTest, SetVelocityDampingWorksAndRejectsInvalid) {
     Simulator sim;
     sim.Init(MakeTri());
     EXPECT_FLOAT_EQ(sim.velocity_damping(), 5.0f);  // 默认
-    sim.SetVelocityDamping(5.0f);
-    EXPECT_FLOAT_EQ(sim.velocity_damping(), 5.0f);
+    sim.SetVelocityDamping(2.5f);                   // 设一个与默认不同的值
+    EXPECT_FLOAT_EQ(sim.velocity_damping(), 2.5f);
     sim.SetVelocityDamping(0.0f);  // 0 = 无阻尼，合法
     EXPECT_FLOAT_EQ(sim.velocity_damping(), 0.0f);
     EXPECT_DEATH(sim.SetVelocityDamping(-1.0f), "SetVelocityDamping");
@@ -958,9 +984,10 @@ TEST(SoftMeshSimulatorTest, SpringForceIsClampedAtForceMax) {
         << "本构造应确实触发截断（否则测不到）";
 }
 
-// Ⓛ 力的截断下系统保持有限：密集网格 + 最大 F + 最大重力
-//   + 最小质量（加速度最大）+ 长时积分，位置/速度必须始终有限（无 NaN/Inf）。
-TEST(SoftMeshSimulatorTest, LargeForceStaysFiniteWithClamp) {
+// Ⓛ 长期积分稳定性烟雾测试（非“截断生效”的验证——截断的验证见 SpringForceIsClampedAtForceMax）。
+//   密集共线点 + 最大 F + 最大重力 + 最小质量 + 长时积分，位置/速度必须有限（无 NaN/Inf）。
+//   目的：捕捉“参数拉满 + 长跑”下的数值崩溃回归。
+ TEST(SoftMeshSimulatorTest, LargeForceStaysFiniteWithClamp) {
     // 密集共线点（间距 0.05，d=0.5）→ 大量关联，F 拉满到 20N。
     jpov::MeshData m;
     m.flags = jpov::MeshVertexFlags::kPosition;

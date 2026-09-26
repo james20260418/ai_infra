@@ -46,6 +46,7 @@
 #ifndef JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
 #define JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -203,6 +204,28 @@ public:
         size_t total = 0;
         for (const auto& nb : neighbors_) total += nb.size();
         return total;
+    }
+
+    // 某点的关联邻居点 id 列表（纯查询；调试/单测用，用于验证关联表对称性）。
+    // Pre-condition: idx < sim_point_count()。
+    const std::vector<uint32_t>& neighbors_of(size_t idx) const {
+        CHECK_LT(idx, neighbors_.size()) << "neighbors_of 索引越界: " << idx;
+        return neighbors_[idx];
+    }
+
+    // 关联表是否严格对称（i 关联 j ⇔ j 关联 i）——牛顿第三定律的必要条件。
+    // 纯查询，O(Σ neighbors)；调试/单测用。
+    bool neighbors_symmetric() const {
+        for (size_t i = 0; i < neighbors_.size(); ++i) {
+            for (uint32_t j : neighbors_[i]) {
+                const auto& jn = neighbors_[j];
+                if (std::find(jn.begin(), jn.end(), static_cast<uint32_t>(i)) ==
+                    jn.end()) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // 仿真点总数（原始顶点 + 虚拟顶点）。M1 可视化与后续物理都基于它。
