@@ -277,49 +277,58 @@ void Simulator::BuildNeighborTable(float d) {
         }
     }
 
-    // ── 邻居数上限：每点只保留**最近的 kMaxNeighbors 个**（性能关键）。──
+    // ── 邻居数上限：每点只保留最近的 kMaxNeighbors 个（性能关键）。──
     //
     // 动机（2026-09-26 Danis 实测）：d=0.1 对点距 ~0.01 的密模，平均邻居数可达 300+，
     // 每个子步的力循环要跑 O(Σ_neighbors) 次随机访存 → 60fps 下亿级/帧，卡顿。
-    // 截到 20 个最近邻后，力计算量降 ~16×（且 cache 命中率大幅改善）。
     //
-    // 物理上合理：力 Fij = Δp · F / max(|pij(0)|, d/10)，**近邻的 |pij(0)| 小 →
-    // denom 小 → 单位位移的力大**，故近邻主导力学贡献，保 20 个最近邻即保住绝大部分。
-    //
-    // 注：逐点独立截断——i 保留 j 不代表 j 保留 i（力近似不再严格对称）。
+    // ⚠️⚠️ **必须保持对称（无向）**：力遵循牛顿第三定律（F_ij = -F_ji），
+    //   若逐点独立截断（i 保留 j 但 j 不保留 i）会破坏对称 ⇒ 系统净力非零 ⇒
+    //   自发泵浦能量 ⇒ “弹着弹着就飞了”（2026-09-26 Danis 报，实测：1204 点
+    //   方块无重力无地面下 KE 从 1.3 爆到 1.4e7）。
+    //   ⇒ 用**无向边集**：只要 j 在 i 的最近 k 内**或** i 在 j 的最近 k 内，就保留
+    //     这对关联（并集）——保证对称，每点邻居 ≤ 2k 左右。
     if (kMaxNeighbors > 0) {
+        const size_t k = kMaxNeighbors;
+        // 1) 每个点算出“最近 k 邻居”的**点 id 集合** topk[i]（O(n·k) 内存）。
+        std::vector<std::vector<uint32_t>> topk(n);
         for (size_t i = 0; i < n; ++i) {
             auto& nbrs = neighbors_[i];
             auto& dists = nb_init_dist_[i];
-            if (nbrs.size() <= kMaxNeighbors) {
+            const size_t mi = nbrs.size();
+            if (mi <= k) {
+                topk[i] = nbrs;  // 不足 k，全部视为“在前 k 内”
+                std::sort(topk[i].begin(), topk[i].end());
                 continue;
             }
-            // 按初始距离升序取前 kMaxNeighbors 个。
-            // 用“选择前 k 小”的部分排序（nth_element + 前缀排序），代价 O(m log k)。
-            std::vector<uint32_t> ord(nbrs.size());
-            for (size_t t = 0; t < ord.size(); ++t) {
-                ord[t] = static_cast<uint32_t>(t);
-            }
-            const size_t k = kMaxNeighbors;
+            std::vector<uint32_t> ord(mi);
+            for (size_t t = 0; t < mi; ++t) ord[t] = static_cast<uint32_t>(t);
             std::nth_element(ord.begin(), ord.begin() + k, ord.end(),
                              [&dists](uint32_t a, uint32_t b) {
                                  return dists[a] < dists[b];
                              });
-            ord.resize(k);
-            // 稳定输出（距离升序；同距离按原索引，保证确定性）。
-            std::sort(ord.begin(), ord.end(), [&dists](uint32_t a, uint32_t b) {
-                if (dists[a] != dists[b]) return dists[a] < dists[b];
-                return a < b;
-            });
-            std::vector<uint32_t> new_nbrs(k);
-            std::vector<float> new_dists(k);
-            for (size_t t = 0; t < k; ++t) {
-                new_nbrs[t] = nbrs[ord[t]];
-                new_dists[t] = dists[ord[t]];
-            }
-            nbrs.swap(new_nbrs);
-            dists.swap(new_dists);
+            topk[i].reserve(k);
+            for (size_t t = 0; t < k; ++t) topk[i].push_back(nbrs[ord[t]]);
+            std::sort(topk[i].begin(), topk[i].end());  // 便于二分查找
         }
+
+        // 2) 无向并集：保留 (i,j) 当 j∈topk(i) 或 i∈topk(j)。
+        auto in_topk = [&topk](size_t a, uint32_t b) {
+            return std::binary_search(topk[a].begin(), topk[a].end(), b);
+        };
+        std::vector<std::vector<uint32_t>> new_nbrs(n);
+        std::vector<std::vector<float>> new_dists(n);
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t t = 0; t < neighbors_[i].size(); ++t) {
+                const uint32_t j = neighbors_[i][t];
+                if (in_topk(i, j) || in_topk(j, static_cast<uint32_t>(i))) {
+                    new_nbrs[i].push_back(j);
+                    new_dists[i].push_back(nb_init_dist_[i][t]);
+                }
+            }
+        }
+        neighbors_.swap(new_nbrs);
+        nb_init_dist_.swap(new_dists);
     }
 }
 
