@@ -21,6 +21,7 @@
 #ifndef JPOV_DEMO_SOFT_MESH_VIEWER_APP_H_
 #define JPOV_DEMO_SOFT_MESH_VIEWER_APP_H_
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -107,6 +108,40 @@ public:
     // 范围 [kMinGravity, kMaxGravity]，默认 kDefaultGravity（9.8）。
     float gravity_ui_ = soft_mesh_simulator::Simulator::kDefaultGravity;
 
+    // 总质量 M_total（kg）滑条镜像值。拖它 → SetTotalMass（不需重建关联表）。
+    // 范围 [kMinTotalMass, kMaxTotalMass]，默认 kDefaultTotalMass（1）。
+    float total_mass_ui_ = soft_mesh_simulator::Simulator::kDefaultTotalMass;
+
+    // 力系数 F（N）滑条镜像值。UI 用**指数坐标**（§5）：滑条位置 t∈[0,1] 映射到
+    // F = kMinForceCoeff * (kMax/kMin)^t（对数均匀）。拖它 → SetForceCoeff。
+    // 镜像存的是**指数位置 t**（0..1），不是 F 本身（滑条用 t 直接线性）。
+    float force_coeff_t_ui_ = 0.0f;
+
+    // 速度衰减系数 k（1/s）滑条镜像值。拖它 → SetVelocityDamping。
+    // 范围 [kMinDamping, kMaxDamping] = [0.1, 10]（k 越大衰减越快）。
+    float damping_ui_ = soft_mesh_simulator::Simulator::kVelocityDamping;
+
+    // F 的指数映射：t(0..1) ↔ F(N)。
+    static float ForceTToNewton(float t) {
+        const float lo = soft_mesh_simulator::Simulator::kMinForceCoeff;
+        const float hi = soft_mesh_simulator::Simulator::kMaxForceCoeff;
+        return lo * std::pow(hi / lo, t);
+    }
+    static float ForceNewtonToT(float f) {
+        const float lo = soft_mesh_simulator::Simulator::kMinForceCoeff;
+        const float hi = soft_mesh_simulator::Simulator::kMaxForceCoeff;
+        return std::log(f / lo) / std::log(hi / lo);
+    }
+
+    // ⭐ mesh 位置重置：把仿真网格恢复到**初始放置**（绑定姿态）并清零时钟/速度。
+    // 等价于 Simulator::Reset()，并把新（绑定姿态）几何推上 GPU。
+    // 由面板「重置网格位置」按钮触发（Danis 需求：投石车验收时看模型瞬回初始位）。
+    void ResetSimulation() {
+        sim_.Reset();
+        UpdateMesh(mesh_id_, sim_.mesh());
+        LOG(INFO) << "重置网格位置：已回到绑定姿态（t=0，速度/步数清零）";
+    }
+
     // 装配真实字体文本测量回调（UI 内部用），Init() 后调用一次。
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SoftMeshViewerApp::ViewerTextWidth, this);
@@ -154,6 +189,22 @@ public:
         // ── 拖动 g 滑条 → 写到仿真器（不需重建，g 不改变仿真点集合）。──
         if (gravity_ui_ != sim_.gravity()) {
             sim_.SetGravity(gravity_ui_);
+        }
+
+        // ── 拖动 M_total 滑条 → 写到仿真器（只改每点质量 m，不重建关联表）。──
+        if (total_mass_ui_ != sim_.total_mass()) {
+            sim_.SetTotalMass(total_mass_ui_);
+        }
+
+        // ── 拖动 F 滑条（指数坐标 t）→ 换算成牛顿写到仿真器。──
+        const float force_from_ui = ForceTToNewton(force_coeff_t_ui_);
+        if (force_from_ui != sim_.force_coeff()) {
+            sim_.SetForceCoeff(force_from_ui);
+        }
+
+        // ── 拖动 k 滑条 → 写到仿真器（不重建，纯时间属性）。──
+        if (damping_ui_ != sim_.velocity_damping()) {
+            sim_.SetVelocityDamping(damping_ui_);
         }
 
         // ── 拖动 d 滑条 → 重建仿真点集合。──
@@ -347,7 +398,7 @@ private:
                         -3.0f, 3.0f, /*decimal_places*/2);
         row_y -= step;
 
-        // 行 1：重力加速度 g（m/s²）。本阶段唯一的力；拖它看下坠快慢。
+        // 行 1：重力加速度 g（m/s²）。唯一的恒定外力；拖它看下坠快慢。
         ui_.SliderFloat("重力 g (m/s²)", &gravity_ui_,
                         jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
                         jpov::soft_mesh_simulator::Simulator::kMinGravity,
@@ -355,17 +406,48 @@ private:
                         /*decimal_places*/1);
         row_y -= step;
 
+        // 行 1b：总质量 M_total（kg）。控制每点质量 m = M/N → 越重越难推动。
+        ui_.SliderFloat("总质量 M (kg)", &total_mass_ui_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        jpov::soft_mesh_simulator::Simulator::kMinTotalMass,
+                        jpov::soft_mesh_simulator::Simulator::kMaxTotalMass,
+                        /*decimal_places*/1);
+        row_y -= step;
+
+        // 行 1c：力系数 F（N）——**指数坐标**滑条（§5：0.01~20 跨 3 个数量级）。
+        // 滑条位置 t∈[0,1] 线性，实际 F = min*(max/min)^t（对数均匀）。
+        // 标签右侧附带当前 F 值，便于读实际牛顿数。
+        ui_.SliderFloat("力系数 F (指数)", &force_coeff_t_ui_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        0.0f, 1.0f, /*decimal_places*/2);
+        {
+            const std::string f_label = Format(
+                "  F = %.4g N", static_cast<double>(ForceTToNewton(force_coeff_t_ui_)));
+            ui_.Text(f_label.c_str(),
+                     jpov::UiRect{{left + kSliderW + 8.0f, row_y}, {120.0f, kRowH}});
+        }
+        row_y -= step;
+
+        // 行 1d：速度衰减系数 k（1/s）。V *= exp(-k·dt) → **k 越大衰减越快**。
+        // 范围 [0.1, 10]：0.1 = 1s 只衰 10%（弱）；10 = 0.1s 就衰 63%（强、快速平息振荡）。
+        ui_.SliderFloat("衰减 k (1/s)", &damping_ui_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        jpov::soft_mesh_simulator::Simulator::kMinDamping,
+                        jpov::soft_mesh_simulator::Simulator::kMaxDamping,
+                        /*decimal_places*/2);
+        row_y -= step;
+
         // 行 2：关联距离 d（米）。拖它重建仿真点集合 → 红/蓝点实时变化。
-        // 默认 0.1m；往小拖 → 更多蓝点（切得更碎），往大拖 → 蓝点消失。
         ui_.SliderFloat("关联距离 d (m)", &bind_distance_ui_,
                         jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
                         kBindDistanceMinM, kBindDistanceMaxM,
                         /*decimal_places*/3);
         row_y -= step;
 
-        // 行 3：三个勾选（同一行排三个）：推进仿真 / 仿真点 / 地面栅格。
-        // 说明：「推进仿真」默认关（首帧先看静态模型）；开启后每帧调 Step。
-        const float kCheckW = kSliderW / 3.0f;
+        // 行 3：勾选（推进仿真 / 仿真点 / 地面栅格）+ **重置网格位置按钮**。
+        // 「推进仿真」默认关（首帧先看静态模型）；开启后每帧调 Step。
+        // 重置按钮：一键把网格恢复到绑定姿态（投石车验收：看模型瞬回初始位）。
+        const float kCheckW = kSliderW / 4.0f;
         ui_.Checkbox("推进仿真", &sim_running_,
                      jpov::UiRect{{left, row_y}, {kCheckW, kRowH}});
         ui_.Checkbox("仿真点", &show_sim_points_,
@@ -373,13 +455,18 @@ private:
         ui_.Checkbox("地面栅格", &show_ground_grid_,
                      jpov::UiRect{{left + 2.0f * kCheckW, row_y},
                                   {kCheckW, kRowH}});
+        if (ui_.Button("重置网格位置",
+                       jpov::UiRect{{left + 3.0f * kCheckW, row_y},
+                                    {kCheckW, kRowH}})) {
+            ResetSimulation();
+        }
         row_y -= step;
 
-        // 行 4：仿真点计数（本步验收的核心数字）——原始/虚拟/合计。
+        // 行 4：仿真点计数（验收的核心数字）——原始/虚拟/合计 + 关联对。
         const std::string point_status =
-            Format("仿真点：原始 %zu + 虚拟 %zu = %zu",
+            Format("仿真点：原始 %zu + 虚拟 %zu = %zu  关联对 %zu",
                    sim_.original_point_count(), sim_.virtual_point_count(),
-                   sim_.sim_point_count());
+                   sim_.sim_point_count(), sim_.neighbor_pair_count());
         ui_.Text(point_status.c_str(), jpov::UiRect{{left, row_y}, {kSliderW, kRowH}});
         row_y -= step;
 

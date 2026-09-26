@@ -63,6 +63,12 @@ struct CliOptions {
                              // --bind_distance 关联距离 d（米）
     float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
                              // --gravity 重力加速度（m/s²，≥ 0）
+    float total_mass = jpov::soft_mesh_simulator::Simulator::kDefaultTotalMass;
+                             // --total_mass 总质量 M（kg，≥ 1）
+    float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
+                             // --force_coeff 力系数 F（N，> 0）
+    float damping = jpov::soft_mesh_simulator::Simulator::kVelocityDamping;
+                             // --damping 速度衰减系数 k（1/s，>= 0）
     int sim_steps = 0;       // --sim_steps 出图前先推进的仿真步数（headless 验证下坠用）
     float phi_deg = 25.0f;   // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
 };
@@ -99,6 +105,35 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--gravity 缺少数值参数，忽略";
+            }
+        } else if (arg == "--total_mass") {
+            if (i + 1 < argc) {
+                opt.total_mass = std::atof(argv[++i]);
+                if (!(opt.total_mass >= jpov::soft_mesh_simulator::Simulator::kMinTotalMass)) {
+                    LOG(FATAL) << "--total_mass 必须 >= "
+                               << jpov::soft_mesh_simulator::Simulator::kMinTotalMass
+                               << "，got " << opt.total_mass;
+                }
+            } else {
+                LOG(WARNING) << "--total_mass 缺少数值参数，忽略";
+            }
+        } else if (arg == "--force_coeff") {
+            if (i + 1 < argc) {
+                opt.force_coeff = std::atof(argv[++i]);
+                if (!(opt.force_coeff > 0.0f)) {
+                    LOG(FATAL) << "--force_coeff 必须 > 0，got " << opt.force_coeff;
+                }
+            } else {
+                LOG(WARNING) << "--force_coeff 缺少数值参数，忽略";
+            }
+        } else if (arg == "--damping") {
+            if (i + 1 < argc) {
+                opt.damping = std::atof(argv[++i]);
+                if (opt.damping < 0.0f) {
+                    LOG(FATAL) << "--damping 必须 >= 0，got " << opt.damping;
+                }
+            } else {
+                LOG(WARNING) << "--damping 缺少数值参数，忽略";
             }
         } else if (arg == "--sim_steps") {
             if (i + 1 < argc) {
@@ -192,6 +227,15 @@ int main(int argc, char** argv) {
     // 重力：CLI 设定初值 + 滑条镜像对齐（两者不一致时才写仿真器）。
     app.sim_.SetGravity(opt.gravity);
     app.gravity_ui_ = opt.gravity;
+    // 总质量 M：CLI 初值 + 滑条镜像对齐。
+    app.sim_.SetTotalMass(opt.total_mass);
+    app.total_mass_ui_ = opt.total_mass;
+    // 力系数 F：CLI 初值 + 滑条镜像（存指数位置 t）。
+    app.sim_.SetForceCoeff(opt.force_coeff);
+    app.force_coeff_t_ui_ = jpov::soft_mesh_viewer::SoftMeshViewerApp::ForceNewtonToT(opt.force_coeff);
+    // 速度衰减系数 k：CLI 初值 + 滑条镜像对齐。
+    app.sim_.SetVelocityDamping(opt.damping);
+    app.damping_ui_ = opt.damping;
     // 地面高度：同步视觉 quad 与仿真器物理地面（两者同值）。
     app.SetGroundHeight(app.ground_y_);
     LOG(INFO) << "── 仿真点统计 ──  原始顶点 " << app.sim_.original_point_count()
