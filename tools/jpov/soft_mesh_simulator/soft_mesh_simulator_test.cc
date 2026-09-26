@@ -166,6 +166,7 @@ TEST(SoftMeshSimulatorTest, ZeroGravityKeepsStaticPointsStill) {
 // ② 自由下坠位移与解析解一致（无阻尼极限）。
 //   单步 dt 内 30 子步、每子步 dt_sub：连续极限下 y = -½·g·t²。
 //   这里与**参考积分器**（同公式、直接算）逐子步对比，保证实现没写错顺序。
+//   关闭弹簧力场（M3 已接入），隔离重力——否则虚拟顶点间的弹簧力会把结果搅进去。
 TEST(SoftMeshSimulatorTest, FreeFallMatchesReferenceIntegrator) {
     const float g = 9.8f;
     const double dt = Simulator::kDefaultDt;
@@ -174,6 +175,7 @@ TEST(SoftMeshSimulatorTest, FreeFallMatchesReferenceIntegrator) {
     Simulator sim;
     sim.Init(MakeTri());
     sim.SetGravity(g);
+    sim.SetSpringEnabled(false);  // 只留重力+阻尼（本测的考察对象）
     sim.SetGroundY(-1e6f);  // 把地面推到极低，隔离重力（本测不关心地面）
     for (int i = 0; i < n_steps; ++i) {
         sim.Step(dt);
@@ -203,6 +205,7 @@ TEST(SoftMeshSimulatorTest, TerminalVelocityApproachesGOverK) {
     Simulator sim;
     sim.Init(MakeTri());
     sim.SetGravity(g);
+    sim.SetSpringEnabled(false);  // 隔离力场，只测重力+阻尼的终速
     sim.SetGroundY(-1e6f);  // 隔离地面（本测只关心终速，60s 会坠穿 -3）
 
     // 终速是指数逼近（时间常数 1/k = 10 s）：跑 60 s = 6 个时间常数 →
@@ -226,6 +229,7 @@ TEST(SoftMeshSimulatorTest, VelocityDecaysExponentiallyWithoutGravity) {
     // 这里用「先加一秒重力得到初速，再关重力观测衰减」的方式构造）。
     Simulator sim;
     sim.Init(MakeTri());
+    sim.SetSpringEnabled(false);  // 隔离力场，只测重力+阻尼的纯衰减
     const double dt = Simulator::kDefaultDt;
     sim.SetGravity(9.8f);
     for (int i = 0; i < 6; ++i) {  // 0.1 s
@@ -247,11 +251,13 @@ TEST(SoftMeshSimulatorTest, VelocityDecaysExponentiallyWithoutGravity) {
 }
 
 // ⑤ 重力方向：必须向下（-Y），不产生水平位移。
+//   关弹簧力场（本测只考察重力方向）；否则加密后的密集弹簧力会淹没信号。
 TEST(SoftMeshSimulatorTest, GravityPullsAlongNegativeYOnly) {
     jpov::MeshData m = MakeAsymmetricMesh();
     const geom::Vec3<float> p0_before = m.positions[0];
     Simulator sim;
     sim.Init(m);
+    sim.SetSpringEnabled(false);  // 隔离力场，只测重力方向
     for (int i = 0; i < 30; ++i) {
         sim.Step(Simulator::kDefaultDt);
     }
@@ -269,6 +275,7 @@ TEST(SoftMeshSimulatorTest, VirtualPointsAlsoFall) {
     m.Validate();
     Simulator sim;
     sim.Init(m, /*bind_distance=*/1.0f);
+    sim.SetSpringEnabled(false);  // 隔离力场，只验证“虚拟点也受重力”
     ASSERT_GT(sim.virtual_point_count(), 0u);
     const float vy_before = sim.sim_positions()[sim.original_point_count()][1];
 
@@ -565,6 +572,7 @@ TEST(SoftMeshSimulatorTest, PointsAboveGroundUnaffected) {
     m.Validate();
     Simulator sim;
     sim.Init(m);
+    sim.SetSpringEnabled(false);  // 隔离力场，只测重力自由下坠轨迹
     sim.SetGroundY(-1.0f);
 
     // 自由下坠参考（同公式、double），不与地面接触。
@@ -610,6 +618,298 @@ TEST(SoftMeshSimulatorTest, SetGroundYRejectsNonFinite) {
     sim.Init(MakeTri());
     EXPECT_DEATH(sim.SetGroundY(std::numeric_limits<float>::infinity()),
                  "SetGroundY");
+}
+
+// ==================== M3：顶点间弹簧力场（Danis 自创） ====================
+//
+// 力公式（DESIGN §2.3）：Fij = -[pij(t) - pij(0)] * F / max(|pij(0)|, d/10)，
+// 逐分量 clamp 到 ±F_max。F_i = Σ_j Fij；a_i = (重力 + F_i) / m。
+//
+// 下面这组测试把力场拧到“可判断”的构造上：单轴、两点、已知位移 → 力可解析算。
+
+// 造一个只有两个点、恰好关联的小网格（间距 0.1m，d=0.5 必关联，且不会加密）。
+// 返回 Simulator（通过 Init 传入）。两点：(0,0,0) 与 (0.1,0,0)。
+namespace {
+jpov::MeshData MakeTwoPoints(float sep) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {sep, 0.0f, 0.0f}};
+    // 无索引：triangle_count = 2/3 = 0（无三角形），不影响仿真点（仍 2 个点）。
+    m.Validate();
+    return m;
+}
+}  // namespace
+
+// Ⓐ 关联表：两点距离 <= d 时互相关联；d 滑小到 < 间距则完全无关联。
+TEST(SoftMeshSimulatorTest, NeighborTableRespectsBindDistance) {
+    Simulator close;
+    close.Init(MakeTwoPoints(0.1f), /*d=*/0.5f);
+    EXPECT_EQ(close.neighbor_pair_count(), 2u)
+        << "两点 0.1m <= d=0.5 → i→j 与 j→i 各一条，计 2";
+
+    Simulator far;
+    far.Init(MakeTwoPoints(0.1f), /*d=*/0.05f);
+    EXPECT_EQ(far.neighbor_pair_count(), 0u)
+        << "两点 0.1m > d=0.05 → 无关联";
+}
+
+// Ⓑ 力场零平衡：处在**绑定姿态**且无重力时，弹簧力为零 → 系统不动。
+//   （pij(t)=pij(0) ⇒ Δp=0 ⇒ Fij=0。验证“没变形就没弹力”。）
+TEST(SoftMeshSimulatorTest, SpringForceZeroAtBindPose) {
+    Simulator sim;
+    sim.Init(MakeTwoPoints(0.1f), /*d=*/0.5f);
+    sim.SetGravity(0.0f);
+    // 开到最大 F，若「绑定姿态力不为零」就无处遁形。
+    sim.SetForceCoeff(Simulator::kMaxForceCoeff);
+
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+
+    // 位置与速度都应保持（数值上近零漂移）。
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        const auto& p = sim.sim_positions()[i];
+        EXPECT_NEAR(p[1], 0.0f, 1e-6f);
+        EXPECT_NEAR(p[2], 0.0f, 1e-6f);
+        const auto& v = sim.sim_velocities()[i];
+        EXPECT_NEAR(v[0], 0.0f, 1e-6f);
+        EXPECT_NEAR(v[1], 0.0f, 1e-6f);
+    }
+    // x 也不动（绑定姿态间距 0.1 保持）。
+    EXPECT_NEAR(sim.sim_positions()[1][0] - sim.sim_positions()[0][0], 0.1f,
+                1e-5f);
+}
+
+// Ⓒ 力场是**弹簧**：拉伸产生的恢复力使两端相互靠近。
+//   构造可解析的单轴情形：初始两点沿 x 相距 0.1m（关联），
+//   把 F 设大、无重力，然后用“给定初速”不可得的限制下，改用**间接**手段：
+//   借助重力制造 y 向位移不会沿 x 拉伸。故本测试改为验证弹簧力的**存在与方向**
+//   通过一个可解析的构造：两点初始间距 d/2，而后“瞬间”把其中一个挪远是做不到的。
+//   ⇒ 拉黑难构造的情形不硬凑：证明“弹簧在动作 + 方向正确”交给 Ⓕ（开关差异）
+//     + Ⓔ（镜像对称）两测试，本测试删除。
+//
+// Ⓔ Σ Fij = 0（DESIGN §6 单测 #1）——力场内部净力为零（牛顿第三定律）：
+//   整个系统作为刚体自由下落时，内部弹簧力必成对抵消 ⇒ 各点轨迹应完全一致。
+//   因为无 setter 改初速，用重力制造整体下落（对每点相同），弹簧保持零变形。
+TEST(SoftMeshSimulatorTest, InternalSpringForceCancelsUnderRigidFall) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 三点共线沿 x，等距 0.1：x = 0, 0.1, 0.2。
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.1f, 0.0f, 0.0f}, {0.2f, 0.0f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*d=*/0.5f);  // 全关联（0.1,0.2 <= 0.5）
+    sim.SetGravity(9.8f);
+    sim.SetSpringEnabled(true);
+    sim.SetForceCoeff(Simulator::kMaxForceCoeff);  // 力开到最大也不影响刚体下落
+    sim.SetGroundY(-1e6f);  // 隔离地面：否则先落地的点被 clamp → 打破刚体下落
+
+    for (int i = 0; i < 60; ++i) sim.Step(Simulator::kDefaultDt);
+
+    // 绑定姿态下 Δp≡0 ⇒ 弹簧力恒为 0 ⇒ 整体像刚体下落：
+    //   x/z 不变，y 完全同步（各点仅受重力）。
+    const auto& P = sim.sim_positions();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(P[i][0], 0.1f * static_cast<float>(i), 1e-5f);
+        EXPECT_NEAR(P[i][2], 0.0f, 1e-6f);
+    }
+    EXPECT_NEAR(P[0][1], P[1][1], 1e-4f) << "刚体下落：各点 y 应同步";
+    EXPECT_NEAR(P[1][1], P[2][1], 1e-4f);
+}
+
+// Ⓔ Σ Fij = 0（DESIGN §6 单测 #1）——力场内部净力为零（牛顿第三定律）。
+//   构造持续变形（竖向链 + 地面 clamp），关重力后读弹簧加速度，
+//   验证 Σ a_i · m = 0（内部力成对抵消）。
+//
+//   ⚠️ 局限：在强变形/截断主导的稳态下，力多被 clamp 封顶（本身对称），
+//   故本测试对“单个点力的轻微非对称”不敏感——它验证的是**整体净力守恒**这一
+//   不变量，不是逐对力的正确性。逐对力的正确性由截断测试（Ⓛ）
+//   + 开关差异测试（Ⓕ）+ 刚体下落不变性（内联在下面新版）共同锁定。
+TEST(SoftMeshSimulatorTest, SpringInternalForceSumsToZero) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 竖向链 4 点（非对称间距），确保受力方向不平凡、且地面 clamp 能造成变形。
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.05f, 0.1f, 0.0f},
+                   {0.0f, 0.2f, 0.02f}, {0.03f, 0.28f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, 0.5f);  // 全部点两两关联
+    sim.SetSpringEnabled(true);
+    sim.SetForceCoeff(3.0f);
+    sim.SetGroundY(0.05f);  // 下半部被地面钉住、上半部下坠 → 持续变形
+
+    // 先开重力制造**持续变形**（地面把部分点钉住），再关重力——
+    // 此时 AccelAtPoint 只剩内部弹簧力，可验证 ΣF_spring = 0。
+    sim.SetGravity(9.8f);
+    for (int i = 0; i < 200; ++i) sim.Step(Simulator::kDefaultDt);
+    sim.SetGravity(0.0f);
+
+    geom::Vec3<float> f_sum(0.0f, 0.0f, 0.0f);
+    const float m_pt = sim.point_mass();
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        const geom::Vec3<float> a = sim.AccelAtPoint(i);
+        f_sum = f_sum + a * m_pt;
+    }
+    // m 对所有点相同，故 ΣF = m · Σa；断言 Σa ≈ 0（等价于 ΣF=0）。
+    EXPECT_NEAR(f_sum[0], 0.0f, 1e-3f) << "内部弹簧力 x 分量和应为 0";
+    EXPECT_NEAR(f_sum[1], 0.0f, 1e-3f) << "内部弹簧力 y 分量和应为 0";
+    EXPECT_NEAR(f_sum[2], 0.0f, 1e-3f) << "内部弹簧力 z 分量和应为 0";
+}
+
+// Ⓕ 力场确实在动作（对“力场真的接进去了”的最直接证据）。
+//   ⚠️ 必须构造**持续变形**场景：刚体下落/同时落地时弹簧零作用。
+//   故用**竖直链条**（4 点沿 y 排）+ 地面 clamp：上端持续被重力下拽、
+//   下端被地面钉住 → 持续拉伸 ⇒ 弹簧介入。开/关弹簧结果必有差异。
+TEST(SoftMeshSimulatorTest, SpringFieldActuallyChangesMotion) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 4 点沿 y 等距 0.1：y = 0, 0.1, 0.2, 0.3。全关联（0.1..0.3 <= d=0.5）。
+    for (int i = 0; i < 4; ++i) {
+        m.positions.push_back({0.0f, 0.1f * static_cast<float>(i), 0.0f});
+    }
+    m.Validate();
+
+    Simulator with_spring;
+    with_spring.Init(m, 0.5f);
+    with_spring.SetGravity(9.8f);
+    with_spring.SetSpringEnabled(true);
+    with_spring.SetForceCoeff(2.0f);
+    with_spring.SetGroundY(0.15f);  // 下半部分被地面钉住、上半部分继续下坠
+
+    Simulator no_spring;
+    no_spring.Init(m, 0.5f);
+    no_spring.SetGravity(9.8f);
+    no_spring.SetSpringEnabled(false);
+    no_spring.SetGroundY(0.15f);
+
+    for (int i = 0; i < 120; ++i) {
+        with_spring.Step(Simulator::kDefaultDt);
+        no_spring.Step(Simulator::kDefaultDt);
+    }
+    float max_diff = 0.0f;
+    for (size_t i = 0; i < with_spring.sim_point_count(); ++i) {
+        const auto& a = with_spring.sim_positions()[i];
+        const auto& b = no_spring.sim_positions()[i];
+        for (int c = 0; c < 3; ++c) {
+            max_diff = std::max(max_diff, std::abs(a[c] - b[c]));
+        }
+    }
+    EXPECT_GT(max_diff, 1e-3f) << "开关弹簧力场必须造成可观测的运动差异";
+}
+
+// Ⓖ 关联表在 Init 后**冻结**（DESIGN §2.1：t=0 定死，永不更新）：
+//   即使 Step 把点撑得极远，关联对数不变。
+TEST(SoftMeshSimulatorTest, NeighborTableFrozenAfterInit) {
+    Simulator sim;
+    sim.Init(MakeTwoPoints(0.1f), 0.5f);
+    const size_t before = sim.neighbor_pair_count();
+    ASSERT_EQ(before, 2u);
+    sim.SetGravity(9.8f);  // 让它们一直下坠（相对位置不变，但验证“不因运动变化”）
+    for (int i = 0; i < 120; ++i) sim.Step(Simulator::kDefaultDt);
+    EXPECT_EQ(sim.neighbor_pair_count(), before)
+        << "关联表必须在仿真中保持冻结";
+}
+
+// Ⓗ Reset 后关联表仍在（Reset 重建仿真点集合，关联表应一并重填）。
+TEST(SoftMeshSimulatorTest, NeighborTableSurvivesReset) {
+    Simulator sim;
+    sim.Init(MakeTwoPoints(0.1f), 0.5f);
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    sim.Reset();
+    EXPECT_EQ(sim.neighbor_pair_count(), 2u);
+    sim.SetGravity(0.0f);
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    EXPECT_NEAR(sim.sim_positions()[1][0] - sim.sim_positions()[0][0], 0.1f,
+                1e-5f);
+}
+
+// Ⓘ SetTotalMass / SetForceCoeff 值域护栏（不静默夹断）。
+TEST(SoftMeshSimulatorTest, SetParamsRejectInvalidValues) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetTotalMass(0.5f), "SetTotalMass");  // < 1kg 下限
+    EXPECT_DEATH(sim.SetTotalMass(-1.0f), "SetTotalMass");
+    EXPECT_DEATH(sim.SetTotalMass(std::numeric_limits<float>::infinity()),
+                 "SetTotalMass");
+    EXPECT_DEATH(sim.SetForceCoeff(0.0f), "SetForceCoeff");   // F 必须 > 0
+    EXPECT_DEATH(sim.SetForceCoeff(-1.0f), "SetForceCoeff");
+    // 合法值正常写入。
+    sim.SetTotalMass(2.0f);
+    EXPECT_FLOAT_EQ(sim.total_mass(), 2.0f);
+    sim.SetForceCoeff(1.5f);
+    EXPECT_FLOAT_EQ(sim.force_coeff(), 1.5f);
+}
+
+// Ⓙ 每点质量 = M_total / N（含虚拟顶点）。
+TEST(SoftMeshSimulatorTest, PointMassIsTotalOverCount) {
+    Simulator sim;
+    sim.Init(MakeTwoPoints(0.1f), 0.5f);
+    sim.SetTotalMass(10.0f);
+    EXPECT_NEAR(sim.point_mass(),
+                10.0f / static_cast<float>(sim.sim_point_count()), 1e-6f);
+}
+
+// Ⓚ 力的截断（DESIGN §2.5 / §6 单测 #2）：|Δp| 极大时弹簧力被封顶在 F_max。
+//
+//   构造：两点沿 y（下 (0,0,0)、上 (0,0.1,0)），d=0.5（分母 floor = 0.05）。
+//   地面 y=0 → 下点被钉住，上点在重力下持续下坠。两点的 Δp 沿 y 持续增大，
+//   弹簧力本应无限增长；截断应将它封顶在 F_max。
+//   验证：上点的**弹簧加速度分量** = |a_spring| = |a_total - g| <= F_max / m。
+//   （a_total 含重力，故必须减去重力项再比较。）
+TEST(SoftMeshSimulatorTest, SpringForceIsClampedAtForceMax) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.1f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, 0.5f);
+    const float g = 9.8f;
+    sim.SetGravity(g);
+    sim.SetSpringEnabled(true);
+    sim.SetForceCoeff(Simulator::kMaxForceCoeff);  // 拉满，保证未截断力远超 F_max
+    sim.SetTotalMass(1.0f);
+
+    // 跑足够久：下点被地面钉住，上点越坠越远 → |Δp| 巨大。
+    for (int i = 0; i < 300; ++i) sim.Step(Simulator::kDefaultDt);
+
+    // 上点（idx=1）的弹簧加速度 = a_total - 重力（重力是纯 -y）。
+    const auto a = sim.AccelAtPoint(1);
+    const float a_spring_y = a[1] - (-g);  // 减掉重力得弹簧贡献
+    const float m_pt = sim.point_mass();
+    const float f_spring_y = a_spring_y * m_pt;  // 还原为力
+    // 两点远离 ⇒ 弹簧把上点**往下拉**（恢复力指向下点）⇒ f_spring_y <= 0；
+    // 其绝对值不得超过 F_max（+ 一点数值容差）。
+    EXPECT_LE(std::abs(f_spring_y), Simulator::kForceMax + 1e-3f)
+        << "弹簧力应被截断在 F_max = " << Simulator::kForceMax
+        << "，实测 " << std::abs(f_spring_y);
+    // 且确实“撞了”截断（本构造下 |Δp| 足够大，未截断力应远超 F_max）。
+    EXPECT_GT(std::abs(f_spring_y), 0.9f * Simulator::kForceMax)
+        << "本构造应确实触发截断（否则测不到）";
+}
+
+// Ⓛ 力的截断下系统保持有限：密集网格 + 最大 F + 最大重力
+//   + 最小质量（加速度最大）+ 长时积分，位置/速度必须始终有限（无 NaN/Inf）。
+TEST(SoftMeshSimulatorTest, LargeForceStaysFiniteWithClamp) {
+    // 密集共线点（间距 0.05，d=0.5）→ 大量关联，F 拉满到 20N。
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    for (int i = 0; i < 8; ++i) {
+        m.positions.push_back({0.05f * static_cast<float>(i), 0.0f, 0.0f});
+    }
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, 0.5f);
+    sim.SetGravity(20.0f);
+    sim.SetForceCoeff(Simulator::kMaxForceCoeff);
+    sim.SetTotalMass(1.0f);  // 最小质量 → 加速度最大 → 最易发散
+
+    for (int i = 0; i < 600; ++i) sim.Step(Simulator::kDefaultDt);
+
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_TRUE(std::isfinite(sim.sim_positions()[i][c]))
+                << "点 " << i << " 分量 " << c << " 非有限（截断/积分失稳）";
+            EXPECT_TRUE(std::isfinite(sim.sim_velocities()[i][c]));
+        }
+    }
 }
 
 }  // namespace

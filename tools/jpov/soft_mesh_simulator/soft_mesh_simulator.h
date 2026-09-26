@@ -27,6 +27,14 @@
 //    的加速度（前半用 a(x_old)，后半用 a(x_new)）。当前重力与位置无关，故两者取值
 //    相同；接入位置相关力场后，「用新位置求第二个 a」即辛性的必要条件（详见 .cc）。
 //
+// ============================ M3：顶点间弹簧力场（Danis 自创）==============================
+//
+// 在 M2（重力+阻尼）基础上，接入**核心的顶点间弹性力场**（DESIGN.md §2，Danis 定稿）：
+//   - 关联邻居表 nb_list：|v_j(0) - v_i(0)| <= d 的点对（纯欧氏距离，t=0 定死，永不更新）；
+//   - 力：Fij = -[pij(t) - pij(0)] * F / max(|pij(0)|, d/10)，逐分量 clamp 到 ±F_max；
+//   - 质量：m = M_total / N，加速度 a = (重力 + ΣFij) / m。
+// 详见 .cc 的 ComputeAccel / BuildNeighborTable。
+//
 // ============================ 设计约定 ============================
 //
 // 无状态查询：任何 Get* 接口都不改变物理状态（查看器画 UI 时随便调）。
@@ -39,6 +47,7 @@
 #define JPOV_SOFT_MESH_SIMULATOR_SOFT_MESH_SIMULATOR_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include <glog/logging.h>
@@ -87,6 +96,25 @@ public:
 
     // 默认关联距离 d（米）。见 DESIGN.md §5（当前为全局常量，非滑条）。
     static constexpr float kDefaultBindDistance = 0.1f;
+
+    // 默认总质量 M_total（kg）。DESIGN.md §3.1：按顶点均分 m = M_total / N。
+    // 质量只影响加速度 a = F/m（力的公式本身与质量无关）；越大越“重”、越不易被推动。
+    static constexpr float kDefaultTotalMass = 1.0f;
+    // 总质量滑条下限（kg）。DESIGN.md §3.1 护栏：防止 m 过小导致数值病态（§4.3）。
+    static constexpr float kMinTotalMass = 1.0f;
+    static constexpr float kMaxTotalMass = 200.0f;
+
+    // 默认力系数 F（N）。DESIGN.md §2.3：含义 = “压缩比 1.0 时产生的力”。
+    // 高模更硬 → 用户手动降 F（不自动归一化，§1.3）。
+    static constexpr float kDefaultForceCoeff = 0.3f;
+    // 力系数 F 的滑条范围（N）。DESIGN.md §5：0.01~20，跨 3 个数量级。
+    // §5 要求用**指数坐标**滑条（低端也要有分辨率），UI 侧负责映射。
+    static constexpr float kMinForceCoeff = 0.01f;
+    static constexpr float kMaxForceCoeff = 20.0f;
+
+    // 力的截断上限 F_max（N，绝对值）。DESIGN.md §2.5：兜底，防止 nb_list 不更新
+    // 时 |Δp| 疯长导致力无限增长（数值灾难）。正常工况力 ~0.3N，不触发。
+    static constexpr float kForceMax = 20.0f;
 
     // 默认重力加速度（m/s²），方向 -Y（DESIGN.md §1.2 第 3 项；地面在下方）。
     static constexpr float kDefaultGravity = 9.8f;
@@ -151,8 +179,25 @@ public:
     // 当前关联距离 d（米），Init 时设定。
     float bind_distance() const { return bind_distance_; }
 
+    // 关联邻居表规模（纯查询，调试/面板用）：所有点各自关联数的总和（有向计数，
+    // i→j 与 j→i 各计一次）。力场接上后这个数字直接决定每子步的计算量。
+    size_t neighbor_pair_count() const {
+        size_t total = 0;
+        for (const auto& nb : neighbors_) total += nb.size();
+        return total;
+    }
+
     // 仿真点总数（原始顶点 + 虚拟顶点）。M1 可视化与后续物理都基于它。
     size_t sim_point_count() const { return sim_positions_.size(); }
+
+    // 当前状态下某仿真点的**加速度** a(x_i)（纯查询，无副作用）。
+    // 调试/单测/面板诊断用：直接暴露“该点当前受什么加速度”，使力的公式可被
+    // 逐项验证（DESIGN §6 的单测需要它读力的截断效果）。
+    // Pre-condition: idx < sim_point_count()；越界是调用方 bug → 崩。
+    geom::Vec3<float> AccelAtPoint(size_t idx) const {
+        CHECK_LT(idx, sim_positions_.size()) << "AccelAtPoint 索引越界: " << idx;
+        return ComputeAccel(idx, sim_positions_[idx]);
+    }
     // 其中原始顶点数（= 输入网格顶点数）。
     size_t original_point_count() const { return vertex_count_; }
     // 其中虚拟顶点数（加密插入）。
@@ -177,6 +222,33 @@ public:
 
     // ── 物理参数（可被查看器滑条覆盖）──
     //
+    // 总质量 M_total（kg，≥ kMinTotalMass）。按顶点均分 → 每点质量 m = M/N。
+    // 只影响 a = F/m；不影响力的公式。
+    float total_mass() const { return total_mass_; }
+    // Pre-condition: mass 有限且 >= kMinTotalMass；否则崩（护栏见 §3.1/§4.3）。
+    // 注意：改质量会改变每点质量 m（下次子步生效），但**不重建**关联表。
+    void SetTotalMass(float mass);
+
+    // 每点质量 m = M_total / N（kg）。N = 仿真点总数（含虚拟顶点）。
+    // 查询时现算（纯查询）；N 为 0 时为 0。
+    float point_mass() const {
+        return sim_positions_.empty()
+                   ? 0.0f
+                   : total_mass_ / static_cast<float>(sim_positions_.size());
+    }
+
+    // 力系数 F（N，§2.3）。
+    float force_coeff() const { return force_coeff_; }
+    // Pre-condition: F 有限且 > 0；否则崩。负 F 会变成“反弹簧”（远离反而相吸）。
+    void SetForceCoeff(float f);
+
+    // 顶点间弹簧力场的**总开关**（DESIGN.md §1.2 机制 2）。
+    // 关掉时：只保留重力（+阻尼），与 M2 行为一致——供单测隔离重力、以及
+    // 用户对照“有力场 vs 无力场”。默认开。
+    // 注意：关掉只是跳过力场累加，**不重建**关联表（开关瞬时生效）。
+    bool spring_enabled() const { return spring_enabled_; }
+    void SetSpringEnabled(bool enabled) { spring_enabled_ = enabled; }
+
     // 重力加速度 g（m/s²，≥ 0），方向恒为 -Y。滑条范围 [kMinGravity, kMaxGravity]。
     // 查询与设置都走这里；设置时 CHECK 值域，不静默夹断（避免隐藏调用方的错值）。
     float gravity() const { return gravity_; }
@@ -206,8 +278,16 @@ public:
 
 private:
     // 由输入网格构建仿真点集合（含长边加密），返回虚拟点数量。
-    // 纯 CPU，只读输入，无副作用（除了填充 sim_positions_/sim_edges_）。
+    // 纯 CPU，只读输入，无副作用（除了填充 sim_positions_）。
     size_t BuildSimulationPoints(const jpov::MeshData& mesh, float d);
+
+    // 由当前的 sim_positions_（绑定姿态）一次性构建**关联邻居表** nb_list
+    // （DESIGN.md §2.1）：对每点 i，记录所有满足 |v_j(0) - v_i(0)| <= d 的 j
+    // （纯欧氏距离，不看拓扑；在 t=0 定死，仿真中**永不更新**）。
+    //
+    // 同时缓存初始距离 |pij(0)| 进 nb_init_dist_（力的公式 §2.3 分母用）。
+    // 复杂度 O(N²) 是刻意的“暴力解”（§3.4）；网格大时可后续加空间哈希。
+    void BuildNeighborTable(float d);
 
     // ── 物理状态（M2：位置 + 速度 + 时钟；后续物理量都加在这里）──
     // 说明：把「当前网格」当作唯一事实源，而不是另外维护一份顶点数组，
@@ -224,8 +304,33 @@ private:
     // 积分状态之一；Reset/Init 时清零。
     std::vector<geom::Vec3<float>> sim_velocities_;
 
+    // 积分器第一趟的**半步速度**缓冲（与 sim_positions_ 同长）。
+    // 作为成员复用：每个子步 resize 一次（不增不减时零开销），避免每子步堆分配。
+    // 之所以需要它，是因为「前半 kick 必须全部基于旧位置算完，才能批量推进位置」——
+    // 否则后算的点会读到已推进的邻居位置（半新半旧，见 IntegrateSubstep 注释）。
+    std::vector<geom::Vec3<float>> v_half_buf_;
+
     // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
     float gravity_ = kDefaultGravity;
+
+    // 总质量 M_total（kg）与力系数 F（N）。见 .h 顶部常量说明。
+    float total_mass_ = kDefaultTotalMass;
+    float force_coeff_ = kDefaultForceCoeff;
+    // 弹簧力场总开关（默认开）；见 SetSpringEnabled。
+    bool spring_enabled_ = true;
+
+    // ── 关联邻居表（DESIGN.md §2.1；Init 时一次性建立，之后永不更新）──
+    // neighbors_[i] = 与点 i 初始距离 <= d 的点的下标列表（不含 i 自身）。
+    std::vector<std::vector<uint32_t>> neighbors_;
+    // nb_init_dist_[i][k] = |pij(0)| = 点 i 与其第 k 个关联点 j = neighbors_[i][k]
+    // 的**初始**距离（力的公式 §2.3 的分母用）。与 neighbors_ 同构同序。
+    std::vector<std::vector<float>> nb_init_dist_;
+
+    // 仿真点集合的**绑定姿态位置**（与 sim_positions_ 同序同长，含虚拟顶点）。
+    // 力的公式里有 pij(0) = v_j(0) - v_i(0)（§2.2），需要绑定姿态坐标；
+    // 而 sim_positions_ 会被 Step 推着走，bind_mesh_ 又不含虚拟顶点，
+    // 故单独快照一份（Init/Reset 时更新）。
+    std::vector<geom::Vec3<float>> bind_positions_;
 
     // 当前地面高度 y（米）。低于它的顶点被投影回地面（水平面，法线 +Y）。
     float ground_y_ = kDefaultGroundY;
@@ -249,11 +354,22 @@ private:
     // 用新位置求 a(x_new) 回写 v_new。见 .cc 的完整公式与推导。
     void IntegrateSubstep(double dt_sub);
 
-    // 某点在某位置受到的加速度 a(x)（单位 m/s²）。
-    // 本阶段唯一外力是常量重力 → 返回 (0, -g, 0)，与 x 无关。
-    // 接入顶点间力场（DESIGN.md §2）时改这里：返回「该点所有关联力之和 / 质量」。
-    // 积分器已按「a(t) 与 a(t+dt) 各自位置求值」的 KDK 结构写好，接入时无需改动。
-    geom::Vec3<float> ComputeAccel(const geom::Vec3<float>& x) const;
+    // ⭐ 该点在某位置受到的**总加速度** a(x) = (重力 + 弹簧力场) / m。
+    //
+    // 本阶段外力有两项（DESIGN.md §1.2）：
+    //   1. 重力：常量 (0, -g, 0)；g=0 时为零。
+    //   2. 顶点间弹簧力场（§2）：F_i = Σ_j Fij，其中
+    //        Fij = -[pij(t) - pij(0)] * F / max(|pij(0)|, d/10)
+    //      pij(t) = x_j(t) - x_i(t)（**当前**位置差），pij(0) 为初始位移（缓存于 nb_init_dist_）。
+    //      Fij 逐分量 clamp 到 [-F_max, +F_max]（§2.5）。
+    //      注意：力的公式不含质量；m 只在末尾做除法 a = F_total / m。
+    //
+    // ⚠️ 力是**点与点之间的耦合量**：a(x_i) 依赖**所有点**的当前位置。调用方
+    //    （IntegrateSubstep 第二趟）必须保证本轮积分里所有点都已推进到 x_new，
+    //    才能调本函数（这正是“KDK 两趟”结构的原因）。
+    //
+    // idx = 该点在 sim_positions_ 中的下标（力场需要它去查 neighbors_[idx]）。
+    geom::Vec3<float> ComputeAccel(size_t idx, const geom::Vec3<float>& x) const;
 };
 
 }  // namespace soft_mesh_simulator

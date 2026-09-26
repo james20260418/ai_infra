@@ -38,6 +38,12 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
     // 构建仿真点集合（含长边加密）。
     const size_t virtual_count = BuildSimulationPoints(mesh, bind_distance);
 
+    // 保存仿真点的**绑定姿态**快照（力的公式 pij(0) 用它；含虚拟顶点）。
+    bind_positions_ = sim_positions_;
+
+    // 构建关联邻居表 nb_list（DESIGN.md §2.1）——基于绑定姿态，一次性定死。
+    BuildNeighborTable(bind_distance);
+
     // 速度数组与位置同长同序，初始全 0（绑定姿态静止）。
     sim_velocities_.assign(sim_positions_.size(),
                            geom::Vec3<float>(0.0f, 0.0f, 0.0f));
@@ -50,7 +56,8 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
               << " / 三角形 " << triangle_count_
               << " / 虚拟顶点 " << virtual_count
               << " / 仿真点合计 " << sim_positions_.size()
-              << "（bind_distance=" << bind_distance << " m；M2 重力+衰减）";
+              << " / 关联对(有向) " << neighbor_pair_count()
+              << "（bind_distance=" << bind_distance << " m；M3 重力+弹簧力场+阻尼）";
 }
 
 jpov::MeshData Simulator::Step(double dt) {
@@ -78,14 +85,65 @@ jpov::MeshData Simulator::Step(double dt) {
     return mesh_;
 }
 
-// 某点在某位置受到的加速度 a(x)（DESIGN.md §2 力场尚未接入）。
+// 某点在某位置受到的总加速度 a(x) = (重力 + 弹簧力场) / m（DESIGN.md §1.2/§2）。
 //
-// 本阶段唯一外力是**重力**，与位置无关 ⇒ 返回常量 (0, -g, 0)。
-// 将来接入顶点间弹簧力场时，这里改成「该点所有关联力之和 / 质量」即可，
-// 而积分器本体（下面的 IntegrateSubstep）**不需要动**——它已经按
-// 「a(t) 与 a(t+dt) 用各自位置求值」的正确结构写好（见 .cc 顶部说明）。
-geom::Vec3<float> Simulator::ComputeAccel(const geom::Vec3<float>& /*x*/) const {
-    return geom::Vec3<float>(0.0f, -gravity_, 0.0f);
+// 弹簧力（Danis 自创，§2.3）：对该点的每个关联 j，
+//     Fij = -[pij(t) - pij(0)] * F / max(|pij(0)|, d/10)
+// pij(t) = x_j(t) - x_i(t)（当前位移差）；pij(0) = 初始位移（隐含在 nb_init_dist_
+// 里的是它的分量——因为 §2.2 定义 pij(0) = v_j(0) - v_i(0)，而我们缓存了坐标，
+// 这里用绑定姿态坐标重算分量）。
+//
+// 注意：本函数用 sim_positions_（**当前**位置）读 x_j，而传入的 x 是 **调用方算好的
+// 该点自己的**（可能是未回写的 x_new）——二者一致：调用方在第二趟里 x==sim_positions_[idx]。
+// 之所以仍把 x 传进来，是为了让「a 依赖位置」这件事在签名上显式（将来若有单点扰动
+// 测试可直接传任意位置）。
+geom::Vec3<float> Simulator::ComputeAccel(size_t idx,
+                                          const geom::Vec3<float>& x) const {
+    // a = F_total / m（质量只在末尾除；力公式本身不含质量）。
+    const float m = point_mass();
+    // m 应为正（Init/SetTotalMass 已保证 M_total >= kMinTotalMass 且 N >= 1）。
+    CHECK_GT(m, 0.0f) << "point_mass 必须 > 0（仿真点为空或 M_total 非法）";
+
+    // 重力：作为**力**参与总力（F_grav = m·g），最后统一除 m → 加速度恰为 (0,-g,0)。
+    // （本阶段 m 对所有点相同，故重力对加速度的贡献与 m 无关；写成力是为了
+    //   将来若引入逐点质量时能自然融合，也保证单位一致：F_total 是力、除以 m 得 a。）
+    geom::Vec3<float> f_total(0.0f, -gravity_ * m, 0.0f);
+
+    // 弹簧力部分：F_i = Σ_j Fij。无关联点时该项为零（孤点只受重力）。
+    // 力场总开关关闭时整段跳过（与 M2 的“只重力”行为一致）。
+    if (spring_enabled_) {
+        const std::vector<uint32_t>& nbrs = neighbors_[idx];
+        const std::vector<float>& init_dists = nb_init_dist_[idx];
+        // 分母 clamp：max(|pij(0)|, d/10)（§2.3）——统一取常量，避免逐对比较。
+        const float dist_floor = bind_distance_ * 0.1f;
+        // 力系数 F 在进入循环前备好。
+        const float F = force_coeff_;
+
+        for (size_t k = 0; k < nbrs.size(); ++k) {
+            const size_t j = nbrs[k];
+            // pij(0) 分量 = 绑定姿态下 v_j(0) - v_i(0)（方向敏感，§2.3）。
+            const geom::Vec3<float> p0 =
+                bind_positions_[j] - bind_positions_[idx];
+            // pij(t) = 当前 v_j(t) - v_i(t)。
+            const geom::Vec3<float> px = sim_positions_[j] - x;
+            // Δp = pij(t) - pij(0)（位移变化量，矢量 ⇒ 隐含抗扭转，§2.4）。
+            const geom::Vec3<float> dp = px - p0;
+            // 分母 = max(|pij(0)|, d/10)。
+            const float denom = std::max(init_dists[k], dist_floor);
+            // Fij = -Δp * F / denom（逐分量）。
+            geom::Vec3<float> fij(-dp[0] * F / denom,
+                                  -dp[1] * F / denom,
+                                  -dp[2] * F / denom);
+            // 逐分量 clamp 到 ±F_max（§2.5）。
+            for (int c = 0; c < 3; ++c) {
+                fij[c] = std::clamp(fij[c], -kForceMax, kForceMax);
+            }
+            f_total = f_total + fij;
+        }
+    }
+
+    // a = F_total / m（质量只在末尾除；力公式本身不含质量）。
+    return f_total * (1.0f / m);
 }
 
 // 「重力 + 对称阻尼」的 leapfrog 积分（DESIGN.md §3.3 定稿，Danis 签字）。
@@ -99,16 +157,13 @@ geom::Vec3<float> Simulator::ComputeAccel(const geom::Vec3<float>& /*x*/) const 
 //
 // ★ 结构要点（Danis 2026-09-26 指出）：**两个 kick 用的是各自时刻的加速度**。
 //   前半 kick 用 a(t) = a(x_old)，后半 kick 用 a(t+dt) = a(x_new)。
-//   本阶段力是常量重力（a(x) 与 x 无关），故两者取值相同、结果不变；但一旦
-//   接入位置相关力场（§2 弹簧），「用新位置求第二个 a」就是**辛性的必要条件**——
-//   若沿用旧 a，积分器会退化为非辛，能量/稳定性性质尽失。因此**结构必须先摆对**。
+//   现力场已含位置相关弹簧力（§2），故两者**取值不同**，“用新位置求第二个 a”
+//   是辛性的必要条件——若沿用旧 a，积分器会退化为非辛，能量/稳定性性质尽失。
 //
-//   因为 a(t+dt) 依赖 x_new，而每点的 x_new 又依赖各自的 v_half，故必须
-//   分两趟：
-//     【第一趟】对全部点算 v_half 与 x_new（此刻 a(t) 已知，可并行/逐点独立）；
+//   因为 a(t+dt) 依赖 x_new，而每点的 x_new 又依赖各自的 v_half，且弹簧力是
+//   **点与点之间的耦合量**，故必须分两趟：
+//     【第一趟】对全部点算 v_half 与 x_new（此刻 a(t) 已知）；
 //     【第二趟】全部点都有 x_new 后，逐点求 a(x_new) 并回写 v_new + 地面投影。
-//   将来接入顶点间力场时，「求 a(x_new) 需要所有点的新位置」这一点尤其关键——
-//   力是点与点之间的耦合量，绝不能在单趟循环里边算边用半新半旧的位置。
 //
 // 要点：
 //   * 阻尼 **对称地劈成两半**（前后各 exp(-k*dt/2)），包在 leapfrog 外侧；
@@ -130,28 +185,36 @@ void Simulator::IntegrateSubstep(double dt_sub) {
     const float half_dt = static_cast<float>(dt_sub) * 0.5f;
     const float dt_sub_f = static_cast<float>(dt_sub);
 
-    // ── 第一趟：前半 kick（用 a(x_old)）+ drift → 得到全部点的 x_new。──
-    // 输出的 v_half 就地写回 sim_velocities_（第二趟会把它补成 v_new），
-    // 这样不需要额外的一整份「半步速度」临时数组。
+    // 复用成员级临时缓冲（同长，避免每子步分配；见 .h 的 v_half_buf_ 说明）。
+    v_half_buf_.resize(n);
+
+    // ── 第一趟：前半 kick（用 a(x_old)）→ 得到全部点的 v_half。──
+    // ⚠️ 关键：本趟**只读** sim_positions_、**只写** v_half_buf_，绝不就地改位置。
+    //   否则（若边算边写位置）后算的点会读到**已推进**的邻居位置——即“半新半旧”，
+    //   使结果依赖遍历顺序，破坏辛性/对称性。弹簧力是点间耦合量，此处尤须注意。
     for (size_t i = 0; i < n; ++i) {
         const geom::Vec3<float> x_old = sim_positions_[i];
-        const geom::Vec3<float> a_old = ComputeAccel(x_old);
+        const geom::Vec3<float> a_old = ComputeAccel(i, x_old);
         // v_half = v(t)*exp(-k*dt/2) + a(x_old)*dt/2
-        const geom::Vec3<float> v_half =
-            sim_velocities_[i] * damp_half + a_old * half_dt;
-        // 暂存 v_half（第二趟用）；位置先推进到 x_new = x(t) + v_half*dt。
-        sim_velocities_[i] = v_half;
-        sim_positions_[i] = x_old + v_half * dt_sub_f;
+        v_half_buf_[i] = sim_velocities_[i] * damp_half + a_old * half_dt;
+    }
+
+    // ── 第一趟（drift）：x(t+dt) = x(t) + v_half*dt。──
+    // 此时全部 v_half 已算好（都基于旧的 x），可以安全地批量推进位置。
+    for (size_t i = 0; i < n; ++i) {
+        sim_positions_[i] = sim_positions_[i] + v_half_buf_[i] * dt_sub_f;
     }
 
     // ── 第二趟：全部点都已有 x_new 后，求 a(x_new) 并回写 v_new + 地面投影。──
+    // ★ 关键：弹簧力是点间耦合量，ComputeAccel 会读**全部点**的当前位置；
+    //   故必须等第一趟把**所有**点都推进到 x_new 后才能跑这一趟（不能合并）。
     for (size_t i = 0; i < n; ++i) {
         geom::Vec3<float> x_new = sim_positions_[i];
-        // a(t+dt) = a(x_new)：★ 用新位置求第二个加速度（常量力时与 a_old 相同）。
-        const geom::Vec3<float> a_new = ComputeAccel(x_new);
+        // a(t+dt) = a(x_new)：用新位置求第二个加速度（含弹簧力，§2）。
+        const geom::Vec3<float> a_new = ComputeAccel(i, x_new);
         // v(t+dt) = (v_half + a(x_new)*dt/2) * exp(-k*dt/2)
         geom::Vec3<float> v_new =
-            (sim_velocities_[i] + a_new * half_dt) * damp_half;
+            (v_half_buf_[i] + a_new * half_dt) * damp_half;
 
         // ── 地面投影（非穿透，DESIGN.md §1.2 机制 1 的平面简化版；M4）──
         // 「纯位置投影，不额外注入动能」：顶点落在地面下方 → 直接抬回地面。
@@ -180,6 +243,38 @@ void Simulator::ExtractMesh() {
     }
 }
 
+void Simulator::BuildNeighborTable(float d) {
+    CHECK_GT(d, 0.0f);
+
+    const size_t n = sim_positions_.size();
+    const float d_sq = d * d;
+
+    neighbors_.assign(n, {});
+    nb_init_dist_.assign(n, {});
+
+    // O(N²) 暴力两两比较（DESIGN.md §3.4 “暴力解”）。
+    // 只填 i<j 的一半，成对互为关联（力对称：F_ij = -F_ji，§6 单测 ΣFij=0 依赖此对称）。
+    for (size_t i = 0; i < n; ++i) {
+        const geom::Vec3<float>& pi = sim_positions_[i];
+        for (size_t j = i + 1; j < n; ++j) {
+            const geom::Vec3<float>& pj = sim_positions_[j];
+            const float dx = pj[0] - pi[0];
+            const float dy = pj[1] - pi[1];
+            const float dz = pj[2] - pi[2];
+            const float dist_sq = dx * dx + dy * dy + dz * dz;
+            // 严格 <= d （§2.1）；含等于边界。
+            if (dist_sq > d_sq) {
+                continue;
+            }
+            const float dist = std::sqrt(dist_sq);
+            neighbors_[i].push_back(static_cast<uint32_t>(j));
+            nb_init_dist_[i].push_back(dist);
+            neighbors_[j].push_back(static_cast<uint32_t>(i));
+            nb_init_dist_[j].push_back(dist);
+        }
+    }
+}
+
 void Simulator::SetGravity(float gravity) {
     CHECK(std::isfinite(gravity)) << "SetGravity 要求有限值，got " << gravity;
     CHECK_GE(gravity, 0.0f) << "SetGravity 要求 gravity >= 0，got " << gravity;
@@ -189,6 +284,20 @@ void Simulator::SetGravity(float gravity) {
 void Simulator::SetGroundY(float ground_y) {
     CHECK(std::isfinite(ground_y)) << "SetGroundY 要求有限值，got " << ground_y;
     ground_y_ = ground_y;
+}
+
+void Simulator::SetTotalMass(float mass) {
+    CHECK(std::isfinite(mass)) << "SetTotalMass 要求有限值，got " << mass;
+    CHECK_GE(mass, kMinTotalMass)
+        << "SetTotalMass 要求 mass >= " << kMinTotalMass << " kg（护栏，§3.1/§4.3），got "
+        << mass;
+    total_mass_ = mass;
+}
+
+void Simulator::SetForceCoeff(float f) {
+    CHECK(std::isfinite(f)) << "SetForceCoeff 要求有限值，got " << f;
+    CHECK_GT(f, 0.0f) << "SetForceCoeff 要求 F > 0（负 F 会变成反弹簧），got " << f;
+    force_coeff_ = f;
 }
 
 SimBounds Simulator::Bounds() const {
@@ -302,6 +411,9 @@ void Simulator::Reset() {
     // 注意：BuildSimulationPoints 会重填 sim_positions_（原始顶点 + 虚拟点），
     // 其前 vertex_count_ 个即 bind_mesh_ 的原顶点位置，故无需另行拷贝。
     BuildSimulationPoints(bind_mesh_, bind_distance_);
+    // 重建绑定姿态快照与关联表（d 未变，关联表内容相同，但一并重填保证一致）。
+    bind_positions_ = sim_positions_;
+    BuildNeighborTable(bind_distance_);
     sim_velocities_.assign(sim_positions_.size(),
                            geom::Vec3<float>(0.0f, 0.0f, 0.0f));
     time_ = 0.0;
