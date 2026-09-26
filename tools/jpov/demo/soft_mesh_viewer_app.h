@@ -117,6 +117,10 @@ public:
     // 镜像存的是**指数位置 t**（0..1），不是 F 本身（滑条用 t 直接线性）。
     float force_coeff_t_ui_ = 0.0f;
 
+    // 速度衰减系数 k（1/s）滑条镜像值。拖它 → SetVelocityDamping。
+    // 范围 [kMinDamping, kMaxDamping] = [0.1, 10]（k 越大衰减越快）。
+    float damping_ui_ = soft_mesh_simulator::Simulator::kVelocityDamping;
+
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
         const float lo = soft_mesh_simulator::Simulator::kMinForceCoeff;
@@ -196,6 +200,11 @@ public:
         const float force_from_ui = ForceTToNewton(force_coeff_t_ui_);
         if (force_from_ui != sim_.force_coeff()) {
             sim_.SetForceCoeff(force_from_ui);
+        }
+
+        // ── 拖动 k 滑条 → 写到仿真器（不重建，纯时间属性）。──
+        if (damping_ui_ != sim_.velocity_damping()) {
+            sim_.SetVelocityDamping(damping_ui_);
         }
 
         // ── 拖动 d 滑条 → 重建仿真点集合。──
@@ -417,6 +426,15 @@ private:
             ui_.Text(f_label.c_str(),
                      jpov::UiRect{{left + kSliderW + 8.0f, row_y}, {120.0f, kRowH}});
         }
+        row_y -= step;
+
+        // 行 1d：速度衰减系数 k（1/s）。V *= exp(-k·dt) → **k 越大衰减越快**。
+        // 范围 [0.1, 10]：0.1 = 1s 只衰 10%（弱）；10 = 0.1s 就衰 63%（强、快速平息振荡）。
+        ui_.SliderFloat("衰减 k (1/s)", &damping_ui_,
+                        jpov::UiRect{{left, row_y}, {kSliderW, kRowH}},
+                        jpov::soft_mesh_simulator::Simulator::kMinDamping,
+                        jpov::soft_mesh_simulator::Simulator::kMaxDamping,
+                        /*decimal_places*/2);
         row_y -= step;
 
         // 行 2：关联距离 d（米）。拖它重建仿真点集合 → 红/蓝点实时变化。

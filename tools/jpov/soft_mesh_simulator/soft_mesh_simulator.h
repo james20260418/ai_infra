@@ -134,9 +134,14 @@ public:
     static constexpr float kMinGravity = 1.0f;
     static constexpr float kMaxGravity = 20.0f;
 
-    // 速度指数衰减系数 k（1/s）。DESIGN.md §2 第 3 项：V *= exp(-k*dt)。
-    // 本阶段固定 0.1（Danis 2026-09-25 指定）—— 尚未做成滑条。
+    // 速度指数衰减系数 k（1/s），**默认值**。DESIGN.md §2 第 3 项：V *= exp(-k*dt)。
+    // 运行时可经 SetVelocityDamping 覆盖（面板滑条），范围 [kMinDamping, kMaxDamping]。
     static constexpr float kVelocityDamping = 0.1f;
+    // 衰减系数滑条范围（1/s）。Danis 2026-09-26：k 越大衰减越快（exp(-k·dt)），
+    // 默认 0.1 偏弱（10s 时间常数），放大到 10（0.1s 时间常数）可快速平息振荡。
+    // 下限 > 0（0 = 无阻尼，弹簧会一直振荡不静；若要“关阻尼”由调用方显式表达）。
+    static constexpr float kMinDamping = 0.1f;
+    static constexpr float kMaxDamping = 10.0f;
 
     // 每个外部步（1/60 s）内的子步数。DESIGN.md §3.4：30 个子步（暴力解）。
     // 实际积分的步长 = dt / kSubsteps = 1/(60*30) = 5.5556e-4 s。
@@ -252,6 +257,12 @@ public:
     // Pre-condition: F 有限且 > 0；否则崩。负 F 会变成“反弹簧”（远离反而相吸）。
     void SetForceCoeff(float f);
 
+    // 速度指数衰减系数 k（1/s）。公式 V *= exp(-k·dt)；**k 越大衰减越快**。
+    // 滑条范围 [kMinDamping, kMaxDamping] = [0.1, 10]。
+    float velocity_damping() const { return velocity_damping_; }
+    // Pre-condition: k 有限且 >= 0（0 = 无阻尼，合法但不静止）；负值崩。
+    void SetVelocityDamping(float k);
+
     // 顶点间弹簧力场的**总开关**（DESIGN.md §1.2 机制 2）。
     // 关掉时：只保留重力（+阻尼），与 M2 行为一致——供单测隔离重力、以及
     // 用户对照“有力场 vs 无力场”。默认开。
@@ -326,6 +337,8 @@ private:
     // 总质量 M_total（kg）与力系数 F（N）。见 .h 顶部常量说明。
     float total_mass_ = kDefaultTotalMass;
     float force_coeff_ = kDefaultForceCoeff;
+    // 速度指数衰减系数 k（1/s）。默认 kVelocityDamping（0.1），可由滑条覆盖。
+    float velocity_damping_ = kVelocityDamping;
     // 弹簧力场总开关（默认开）；见 SetSpringEnabled。
     bool spring_enabled_ = true;
 

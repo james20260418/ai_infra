@@ -873,6 +873,39 @@ TEST(SoftMeshSimulatorTest, SetParamsRejectInvalidValues) {
     EXPECT_FLOAT_EQ(sim.force_coeff(), 1.5f);
 }
 
+// 速度衰减系数 k：默认 0.1；值域护栏（>=0）；k 越大衰减越快（衰减效果可测）。
+TEST(SoftMeshSimulatorTest, SetVelocityDampingWorksAndRejectsInvalid) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_FLOAT_EQ(sim.velocity_damping(), 0.1f);  // 默认
+    sim.SetVelocityDamping(5.0f);
+    EXPECT_FLOAT_EQ(sim.velocity_damping(), 5.0f);
+    sim.SetVelocityDamping(0.0f);  // 0 = 无阻尼，合法
+    EXPECT_FLOAT_EQ(sim.velocity_damping(), 0.0f);
+    EXPECT_DEATH(sim.SetVelocityDamping(-1.0f), "SetVelocityDamping");
+    EXPECT_DEATH(sim.SetVelocityDamping(std::numeric_limits<float>::infinity()),
+                 "SetVelocityDamping");
+
+    // 行为：k 越大，同样时长后速度衰减越多（关重力、隔离地面，看纯衰减）。
+    Simulator weak;
+    weak.Init(MakeTri());
+    weak.SetGravity(9.8f);
+    for (int i = 0; i < 6; ++i) weak.Step(Simulator::kDefaultDt);  // 先积一点速度
+    weak.SetSpringEnabled(false);
+    weak.SetGravity(0.0f);
+    weak.SetGroundY(-1e9f);
+    Simulator strong = weak;  // 同状态起步
+    weak.SetVelocityDamping(0.1f);
+    strong.SetVelocityDamping(10.0f);
+    for (int i = 0; i < 30; ++i) {
+        weak.Step(Simulator::kDefaultDt);
+        strong.Step(Simulator::kDefaultDt);
+    }
+    const float v_weak = std::abs(weak.sim_velocities()[0][1]);
+    const float v_strong = std::abs(strong.sim_velocities()[0][1]);
+    EXPECT_LT(v_strong, v_weak) << "k 越大衰减越快";
+}
+
 // Ⓙ 每点质量 = M_total / N（含虚拟顶点）。
 TEST(SoftMeshSimulatorTest, PointMassIsTotalOverCount) {
     Simulator sim;

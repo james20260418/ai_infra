@@ -180,7 +180,7 @@ void Simulator::IntegrateSubstep(double dt_sub) {
     CHECK_GT(dt_sub, 0.0);
 
     const size_t n = sim_positions_.size();
-    const float k = kVelocityDamping;
+    const float k = velocity_damping_;
     // 半步阻尼因子 exp(-k*dt_sub/2)；用 double 中间量算，避免 float 精度损失。
     const float damp_half = static_cast<float>(
         std::exp(-static_cast<double>(k) * dt_sub * 0.5));
@@ -355,6 +355,12 @@ void Simulator::SetForceCoeff(float f) {
     CHECK(std::isfinite(f)) << "SetForceCoeff 要求有限值，got " << f;
     CHECK_GT(f, 0.0f) << "SetForceCoeff 要求 F > 0（负 F 会变成反弹簧），got " << f;
     force_coeff_ = f;
+}
+
+void Simulator::SetVelocityDamping(float k) {
+    CHECK(std::isfinite(k)) << "SetVelocityDamping 要求有限值，got " << k;
+    CHECK_GE(k, 0.0f) << "SetVelocityDamping 要求 k >= 0（0 = 无阻尼），got " << k;
+    velocity_damping_ = k;
 }
 
 SimBounds Simulator::Bounds() const {
