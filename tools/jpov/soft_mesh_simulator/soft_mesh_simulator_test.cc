@@ -315,7 +315,7 @@ TEST(SoftMeshSimulatorTest, SetGravityRejectsInvalidValues) {
 // ⑨ 子步数常量与 DESIGN §3.4 一致（防日后被误改而无人察觉）。
 TEST(SoftMeshSimulatorTest, SubstepCountMatchesDesign) {
     EXPECT_EQ(Simulator::kSubsteps, 30);
-    EXPECT_FLOAT_EQ(Simulator::kVelocityDamping, 0.1f);
+    EXPECT_FLOAT_EQ(Simulator::kVelocityDamping, 5.0f);
     EXPECT_FLOAT_EQ(Simulator::kDefaultGravity, 9.8f);
 }
 
@@ -807,13 +807,17 @@ TEST(SoftMeshSimulatorTest, SpringFieldActuallyChangesMotion) {
     with_spring.SetGravity(9.8f);
     with_spring.SetSpringEnabled(true);
     with_spring.SetForceCoeff(2.0f);
-    with_spring.SetGroundY(0.15f);  // 下半部分被地面钉住、上半部分继续下坠
+    with_spring.SetTotalMass(1.0f);       // 固定 M（不受默认值变化影响）
+    with_spring.SetGroundY(0.15f);
+    with_spring.SetVelocityDamping(0.1f);  // 低阻尼：让弹簧效应持久可观测
 
     Simulator no_spring;
     no_spring.Init(m, 0.5f);
     no_spring.SetGravity(9.8f);
     no_spring.SetSpringEnabled(false);
+    no_spring.SetTotalMass(1.0f);
     no_spring.SetGroundY(0.15f);
+    no_spring.SetVelocityDamping(0.1f);
 
     for (int i = 0; i < 120; ++i) {
         with_spring.Step(Simulator::kDefaultDt);
@@ -877,7 +881,7 @@ TEST(SoftMeshSimulatorTest, SetParamsRejectInvalidValues) {
 TEST(SoftMeshSimulatorTest, SetVelocityDampingWorksAndRejectsInvalid) {
     Simulator sim;
     sim.Init(MakeTri());
-    EXPECT_FLOAT_EQ(sim.velocity_damping(), 0.1f);  // 默认
+    EXPECT_FLOAT_EQ(sim.velocity_damping(), 5.0f);  // 默认
     sim.SetVelocityDamping(5.0f);
     EXPECT_FLOAT_EQ(sim.velocity_damping(), 5.0f);
     sim.SetVelocityDamping(0.0f);  // 0 = 无阻尼，合法

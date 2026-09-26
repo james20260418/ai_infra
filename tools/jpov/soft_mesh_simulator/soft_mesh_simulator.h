@@ -99,14 +99,16 @@ public:
 
     // 默认总质量 M_total（kg）。DESIGN.md §3.1：按顶点均分 m = M_total / N。
     // 质量只影响加速度 a = F/m（力的公式本身与质量无关）；越大越“重”、越不易被推动。
-    static constexpr float kDefaultTotalMass = 1.0f;
+    // 默认值 20（Danis 2026-09-27 验收后定：投石车等高密度小资产合适）。
+    static constexpr float kDefaultTotalMass = 20.0f;
     // 总质量滑条下限（kg）。DESIGN.md §3.1 护栏：防止 m 过小导致数值病态（§4.3）。
     static constexpr float kMinTotalMass = 1.0f;
     static constexpr float kMaxTotalMass = 200.0f;
 
     // 默认力系数 F（N）。DESIGN.md §2.3：含义 = “压缩比 1.0 时产生的力”。
     // 高模更硬 → 用户手动降 F（不自动归一化，§1.3）。
-    static constexpr float kDefaultForceCoeff = 0.3f;
+    // 默认值 3.0（Danis 2026-09-27 验收后定：投石车合适）。
+    static constexpr float kDefaultForceCoeff = 3.0f;
     // 力系数 F 的滑条范围（N）。DESIGN.md §5：0.01~20，跨 3 个数量级。
     // §5 要求用**指数坐标**滑条（低端也要有分辨率），UI 侧负责映射。
     static constexpr float kMinForceCoeff = 0.01f;
@@ -136,7 +138,8 @@ public:
 
     // 速度指数衰减系数 k（1/s），**默认值**。DESIGN.md §2 第 3 项：V *= exp(-k*dt)。
     // 运行时可经 SetVelocityDamping 覆盖（面板滑条），范围 [kMinDamping, kMaxDamping]。
-    static constexpr float kVelocityDamping = 0.1f;
+    // 默认值 5（Danis 2026-09-27 验收后定：振荡快速平息、不呆滞）。
+    static constexpr float kVelocityDamping = 5.0f;
     // 衰减系数滑条范围（1/s）。Danis 2026-09-26：k 越大衰减越快（exp(-k·dt)），
     // 默认 0.1 偏弱（10s 时间常数），放大到 10（0.1s 时间常数）可快速平息振荡。
     // 下限 > 0（0 = 无阻尼，弹簧会一直振荡不静；若要“关阻尼”由调用方显式表达）。
