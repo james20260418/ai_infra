@@ -78,15 +78,37 @@ jpov::MeshData Simulator::Step(double dt) {
     return mesh_;
 }
 
+// 某点在某位置受到的加速度 a(x)（DESIGN.md §2 力场尚未接入）。
+//
+// 本阶段唯一外力是**重力**，与位置无关 ⇒ 返回常量 (0, -g, 0)。
+// 将来接入顶点间弹簧力场时，这里改成「该点所有关联力之和 / 质量」即可，
+// 而积分器本体（下面的 IntegrateSubstep）**不需要动**——它已经按
+// 「a(t) 与 a(t+dt) 用各自位置求值」的正确结构写好（见 .cc 顶部说明）。
+geom::Vec3<float> Simulator::ComputeAccel(const geom::Vec3<float>& /*x*/) const {
+    return geom::Vec3<float>(0.0f, -gravity_, 0.0f);
+}
+
 // 「重力 + 对称阻尼」的 leapfrog 积分（DESIGN.md §3.3 定稿，Danis 签字）。
 //
-// 逐点更新，点与点之间无耦合（本阶段力场未接入，故 a(t) = g 对每点相同）。
-// 公式（逐顶点，m = 质量与力无关——本阶段只有重力，质量不影响加速度）：
+// 这是 **KDK（kick-drift-kick）** 形式的 velocity-Verlet / leapfrog：
 //
-//     v_half  = v(t) * exp(-k*dt/2) + a(t) * dt/2
-//     x(t+dt) = x(t) + v_half * dt
-//     a(t+dt) = g                        ← 本阶段唯一的外力
-//     v(t+dt) = (v_half + a(t+dt) * dt/2) * exp(-k*dt/2)
+//     v_half  = v(t) * exp(-k*dt/2) + a(t)   * dt/2     ← 前半 kick，用 a(t)=a(x(t))
+//     x(t+dt) = x(t) + v_half * dt                        ← drift
+//     a(t+dt) = a(x(t+dt))                                ← ★用【新位置】重新求力
+//     v(t+dt) = (v_half + a(t+dt) * dt/2) * exp(-k*dt/2)  ← 后半 kick，用 a(t+dt)
+//
+// ★ 结构要点（Danis 2026-09-26 指出）：**两个 kick 用的是各自时刻的加速度**。
+//   前半 kick 用 a(t) = a(x_old)，后半 kick 用 a(t+dt) = a(x_new)。
+//   本阶段力是常量重力（a(x) 与 x 无关），故两者取值相同、结果不变；但一旦
+//   接入位置相关力场（§2 弹簧），「用新位置求第二个 a」就是**辛性的必要条件**——
+//   若沿用旧 a，积分器会退化为非辛，能量/稳定性性质尽失。因此**结构必须先摆对**。
+//
+//   因为 a(t+dt) 依赖 x_new，而每点的 x_new 又依赖各自的 v_half，故必须
+//   分两趟：
+//     【第一趟】对全部点算 v_half 与 x_new（此刻 a(t) 已知，可并行/逐点独立）；
+//     【第二趟】全部点都有 x_new 后，逐点求 a(x_new) 并回写 v_new + 地面投影。
+//   将来接入顶点间力场时，「求 a(x_new) 需要所有点的新位置」这一点尤其关键——
+//   力是点与点之间的耦合量，绝不能在单趟循环里边算边用半新半旧的位置。
 //
 // 要点：
 //   * 阻尼 **对称地劈成两半**（前后各 exp(-k*dt/2)），包在 leapfrog 外侧；
@@ -100,24 +122,36 @@ jpov::MeshData Simulator::Step(double dt) {
 void Simulator::IntegrateSubstep(double dt_sub) {
     CHECK_GT(dt_sub, 0.0);
 
+    const size_t n = sim_positions_.size();
     const float k = kVelocityDamping;
     // 半步阻尼因子 exp(-k*dt_sub/2)；用 double 中间量算，避免 float 精度损失。
     const float damp_half = static_cast<float>(
         std::exp(-static_cast<double>(k) * dt_sub * 0.5));
     const float half_dt = static_cast<float>(dt_sub) * 0.5f;
-    // 本阶段唯一外力：重力，方向 -Y。
-    const geom::Vec3<float> accel(0.0f, -gravity_, 0.0f);
+    const float dt_sub_f = static_cast<float>(dt_sub);
 
-    for (size_t i = 0; i < sim_positions_.size(); ++i) {
-        const geom::Vec3<float> v_old = sim_velocities_[i];
+    // ── 第一趟：前半 kick（用 a(x_old)）+ drift → 得到全部点的 x_new。──
+    // 输出的 v_half 就地写回 sim_velocities_（第二趟会把它补成 v_new），
+    // 这样不需要额外的一整份「半步速度」临时数组。
+    for (size_t i = 0; i < n; ++i) {
         const geom::Vec3<float> x_old = sim_positions_[i];
+        const geom::Vec3<float> a_old = ComputeAccel(x_old);
+        // v_half = v(t)*exp(-k*dt/2) + a(x_old)*dt/2
+        const geom::Vec3<float> v_half =
+            sim_velocities_[i] * damp_half + a_old * half_dt;
+        // 暂存 v_half（第二趟用）；位置先推进到 x_new = x(t) + v_half*dt。
+        sim_velocities_[i] = v_half;
+        sim_positions_[i] = x_old + v_half * dt_sub_f;
+    }
 
-        // v_half = v(t)*exp(-k*dt/2) + a*dt/2
-        const geom::Vec3<float> v_half = v_old * damp_half + accel * half_dt;
-        // x(t+dt) = x(t) + v_half*dt
-        geom::Vec3<float> x_new = x_old + v_half * static_cast<float>(dt_sub);
-        // a(t+dt) = g（常量，与位置无关）；v(t+dt) = (v_half + a*dt/2)*exp(-k*dt/2)
-        geom::Vec3<float> v_new = (v_half + accel * half_dt) * damp_half;
+    // ── 第二趟：全部点都已有 x_new 后，求 a(x_new) 并回写 v_new + 地面投影。──
+    for (size_t i = 0; i < n; ++i) {
+        geom::Vec3<float> x_new = sim_positions_[i];
+        // a(t+dt) = a(x_new)：★ 用新位置求第二个加速度（常量力时与 a_old 相同）。
+        const geom::Vec3<float> a_new = ComputeAccel(x_new);
+        // v(t+dt) = (v_half + a(x_new)*dt/2) * exp(-k*dt/2)
+        geom::Vec3<float> v_new =
+            (sim_velocities_[i] + a_new * half_dt) * damp_half;
 
         // ── 地面投影（非穿透，DESIGN.md §1.2 机制 1 的平面简化版；M4）──
         // 「纯位置投影，不额外注入动能」：顶点落在地面下方 → 直接抬回地面。
