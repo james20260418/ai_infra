@@ -130,10 +130,12 @@ geom::Vec3<float> Simulator::ComputeAccel(size_t idx,
             const geom::Vec3<float> dp = px - p0;
             // 分母 = max(|pij(0)|, d/10)。
             const float denom = std::max(init_dists[k], dist_floor);
-            // Fij = -Δp * F / denom（逐分量）。
-            geom::Vec3<float> fij(-dp[0] * F / denom,
-                                  -dp[1] * F / denom,
-                                  -dp[2] * F / denom);
+            // Fij = +Δp * F / denom（逐分量）。
+            // ⚠️ 正号（非 DESIGN §2.3 字面的负号）：按 pij = v_j - v_i 的定义，
+            //   负号会给出**反恢复（排斥）**力、导致发散；详见 DESIGN §2.3 的符号修正说明。
+            geom::Vec3<float> fij(dp[0] * F / denom,
+                                  dp[1] * F / denom,
+                                  dp[2] * F / denom);
             // 逐分量 clamp 到 ±F_max（§2.5）。
             for (int c = 0; c < 3; ++c) {
                 fij[c] = std::clamp(fij[c], -kForceMax, kForceMax);

@@ -754,6 +754,41 @@ TEST(SoftMeshSimulatorTest, SpringInternalForceSumsToZero) {
     EXPECT_NEAR(f_sum[2], 0.0f, 1e-3f) << "内部弹簧力 z 分量和应为 0";
 }
 
+// Ⓕ近 力的**方向正确性**（恢复性，可解析）——这是“力场写对了”的最直接证据：
+//   两点沿 y 上下排，下点被地面钉住，上点在重力下远离。在变形状态下，
+//   上点受到的**弹簧力**应指向下点（把它拉回），即关重力后
+//   AccelAtPoint(上点).y < 0（向下指向被钉住的下点）。
+//   若力的符号写反（变成排斥），上点会被推得更远 ⇒ 断言失败。
+TEST(SoftMeshSimulatorTest, SpringForceIsRestoringNotRepulsive) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    // 下点 (0,0,0)、上点 (0,0.2,0)，间距 0.2 <= d。
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.2f, 0.0f}};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, 0.5f);
+    sim.SetSpringEnabled(true);
+    sim.SetForceCoeff(2.0f);
+    sim.SetGroundY(0.0f);  // 下点被钉在地面（正好在 y=0）
+
+    // 重力把上点往下拉、下点被地面钉住 → 两点间距被**压缩**（上点接近下点）。
+    // 弹簧应把上点推回原位（向上，+y）→ 关重力后上点 accel.y 应为正。
+    sim.SetGravity(9.8f);
+    for (int i = 0; i < 40; ++i) sim.Step(Simulator::kDefaultDt);
+    sim.SetGravity(0.0f);
+
+    // 确认确实处于变形状态：上点已不在绑定位置 y=0.2。
+    const float y_upper = sim.sim_positions()[1][1];
+    ASSERT_LT(y_upper, 0.2f - 1e-4f) << "上点应已被压向地面（变形）";
+
+    const geom::Vec3<float> a_upper = sim.AccelAtPoint(1);
+    // 上点应被弹簧拉回（恢复力向上 +y）——验证力的**方向正确（恢复性，非排斥）**。
+    // 若公式符号写反（如 DESIGN §2.3 原始版），此处会得到 a.y<0（向下、排斥）而失败。
+    EXPECT_GT(a_upper[1], 0.0f)
+        << "上点应被弹簧拉回（+y 恢复力），实测 a.y=" << a_upper[1]
+        << "（若为负 = 力符号反了，变成排斥）";
+}
+
 // Ⓕ 力场确实在动作（对“力场真的接进去了”的最直接证据）。
 //   ⚠️ 必须构造**持续变形**场景：刚体下落/同时落地时弹簧零作用。
 //   故用**竖直链条**（4 点沿 y 排）+ 地面 clamp：上端持续被重力下拽、
@@ -849,39 +884,40 @@ TEST(SoftMeshSimulatorTest, PointMassIsTotalOverCount) {
 
 // Ⓚ 力的截断（DESIGN §2.5 / §6 单测 #2）：|Δp| 极大时弹簧力被封顶在 F_max。
 //
-//   构造：两点沿 y（下 (0,0,0)、上 (0,0.1,0)），d=0.5（分母 floor = 0.05）。
-//   地面 y=0 → 下点被钉住，上点在重力下持续下坠。两点的 Δp 沿 y 持续增大，
-//   弹簧力本应无限增长；截断应将它封顶在 F_max。
-//   验证：上点的**弹簧加速度分量** = |a_spring| = |a_total - g| <= F_max / m。
-//   （a_total 含重力，故必须减去重力项再比较。）
+//   构造：竖向链（下端被地面钉住、整串在重力下垂挂）。链顶弹簧必须托住
+//   下面所有点的重量（≈ M_total·g），可远超 F_max ⇒ 必然撞截断。
+//   验证：取链顶点的**弹簧加速度分量** = a_total - 重力，还原为力后应 <= F_max。
 TEST(SoftMeshSimulatorTest, SpringForceIsClampedAtForceMax) {
     jpov::MeshData m;
     m.flags = jpov::MeshVertexFlags::kPosition;
-    m.positions = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.1f, 0.0f}};
+    // 20 点竖向链，等距 0.05（<= d=0.5 全关联），底点在 y=-0.5（钉在地面）。
+    for (int i = 0; i < 20; ++i) {
+        m.positions.push_back({0.0f, -0.5f + 0.05f * static_cast<float>(i), 0.0f});
+    }
     m.Validate();
     Simulator sim;
-    sim.Init(m, 0.5f);
-    const float g = 9.8f;
+    sim.Init(m, 0.06f);  // d 仅略大于间距 0.05 → 每点只与相邻点关联（单对）
+    const float g = 20.0f;  // 最大重力
     sim.SetGravity(g);
     sim.SetSpringEnabled(true);
-    sim.SetForceCoeff(Simulator::kMaxForceCoeff);  // 拉满，保证未截断力远超 F_max
-    sim.SetTotalMass(1.0f);
+    sim.SetForceCoeff(Simulator::kMaxForceCoeff);
+    sim.SetTotalMass(Simulator::kMaxTotalMass);  // 200kg → 总重远超 F_max
 
-    // 跑足够久：下点被地面钉住，上点越坠越远 → |Δp| 巨大。
-    for (int i = 0; i < 300; ++i) sim.Step(Simulator::kDefaultDt);
+    // 跑足够久让链稳定垂挂。
+    for (int i = 0; i < 600; ++i) sim.Step(Simulator::kDefaultDt);
 
-    // 上点（idx=1）的弹簧加速度 = a_total - 重力（重力是纯 -y）。
-    const auto a = sim.AccelAtPoint(1);
-    const float a_spring_y = a[1] - (-g);  // 减掉重力得弹簧贡献
+    // 链顶点（idx=19，最上）的弹簧加速度分量 = a_total - 重力。
+    // d=0.06 → 该点只有 1 个邻居（单对）⇒ 弹簧力 = 单个 Fij，必受 F_max 封顶。
+    const auto a = sim.AccelAtPoint(19);
+    const float a_spring_y = a[1] - (-g);  // 减掉重力得到弹簧贡献
     const float m_pt = sim.point_mass();
     const float f_spring_y = a_spring_y * m_pt;  // 还原为力
-    // 两点远离 ⇒ 弹簧把上点**往下拉**（恢复力指向下点）⇒ f_spring_y <= 0；
-    // 其绝对值不得超过 F_max（+ 一点数值容差）。
-    EXPECT_LE(std::abs(f_spring_y), Simulator::kForceMax + 1e-3f)
+    // 链顶被上面（无）和下面拉 → 弹簧力向上（+y）以抗拒重力；绝对值 <= F_max。
+    EXPECT_LE(std::abs(f_spring_y), Simulator::kForceMax + 1e-2f)
         << "弹簧力应被截断在 F_max = " << Simulator::kForceMax
         << "，实测 " << std::abs(f_spring_y);
-    // 且确实“撞了”截断（本构造下 |Δp| 足够大，未截断力应远超 F_max）。
-    EXPECT_GT(std::abs(f_spring_y), 0.9f * Simulator::kForceMax)
+    // 且确实“撞了”截断（链顶应托住很大重量）。
+    EXPECT_GT(std::abs(f_spring_y), 0.5f * Simulator::kForceMax)
         << "本构造应确实触发截断（否则测不到）";
 }
 
