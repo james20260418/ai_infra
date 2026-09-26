@@ -43,7 +43,9 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 
+#include <array>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <glog/logging.h>
@@ -96,10 +98,10 @@ void PutDualQuatTexels(const DualQuat& dq, int bone_flat0, int row_lo, int row_h
 
 // ==================== SkeletonManager ====================
 
-SkeletonManager::SkeletonManager(const SkeletonType& type,
-                                 std::vector<SkeletonPose> poses,
-                                 std::array<std::vector<int>, kNumThicknessGroup>
-                                     thickness_scaling_config) {
+SkeletonManager::SkeletonManager(
+    const SkeletonType& type, std::vector<SkeletonPose> poses,
+    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config,
+    std::array<std::string, kNumPartialRotation> partial_rotation_config) {
     type.Validate();
     const int bone = type.bone_count();
     CHECK_GT(bone, 0) << "SkeletonManager: bone_count 必须 >0";
@@ -134,6 +136,48 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
     // 有没有组（= 该骨架做不做粗细）：只有“有组”时才建绑定表纹理；无组 = 纹理句柄 0，
     // 渲染侧整段跳过 ⇒ 旧资产/旧 gold 逐字节零回归（设计文档 §3.3-4）。
     const bool thickness_enabled = (nonempty_group_count > 0);
+
+    // ---- 部位额外旋转：先把两个**关节名**解成关节 index（-1 = 未配置）----
+    // ⚠️ 名字→index 的校验放在**所有 GL 调用之前**（与 thickness 的 index 校验同理）：配置写错
+    //   要最早崩，且让「非法配置」用例无需 GL 上下文即可覆盖（见
+    //   test/jpov_partial_rotation_config_test.cc）。为何用骨名而非 index：index 是资产内部编号
+    //   （重导出/换资产就变），骨名才是语义（同 BodyRetarget 的骨名对位）。
+    std::array<int, kNumPartialRotation> partial_joint = {-1, -1};
+    for (int c = 0; c < kNumPartialRotation; ++c) {
+        const std::string& nm = partial_rotation_config[static_cast<size_t>(c)];
+        if (nm.empty()) {
+            continue;  // 该通道不用
+        }
+        int found = -1;
+        for (int j = 0; j < bone; ++j) {
+            if (type.joints[static_cast<size_t>(j)].name == nm) {
+                CHECK_EQ(found, -1)
+                    << "SkeletonManager: partial_rotation_config[" << c << "] 的关节名 \""
+                    << nm << "\" 在骨架里出现多次（骨名必须唯一，否则无法定位通道）";
+                found = j;
+            }
+        }
+        CHECK_NE(found, -1)
+            << "SkeletonManager: partial_rotation_config[" << c << "] 的关节名 \"" << nm
+            << "\" 不在骨架里（骨名写错 / 资产换了命名）";
+        partial_joint[static_cast<size_t>(c)] = found;
+    }
+    // 两条通道不能指向同一根关节：否则同一根骨被两个旋转同时前乘（打架、语义歧义）。
+    // 同 thickness 的「一根骨只能归一个组」。
+    for (int a = 0; a < kNumPartialRotation; ++a) {
+        for (int b2 = a + 1; b2 < kNumPartialRotation; ++b2) {
+            if (partial_joint[static_cast<size_t>(a)] >= 0 &&
+                partial_joint[static_cast<size_t>(b2)] >= 0) {
+                CHECK_NE(partial_joint[static_cast<size_t>(a)],
+                         partial_joint[static_cast<size_t>(b2)])
+                    << "SkeletonManager: partial_rotation_config 两条通道指向同一根关节 index "
+                    << partial_joint[static_cast<size_t>(a)]
+                    << "；一根关节只能驱动一条通道";
+            }
+        }
+    }
+    const bool partial_enabled =
+        (partial_joint[0] >= 0 || partial_joint[1] >= 0);
 
     bone_count_ = bone;
     pose_count_ = pose_count;
@@ -318,6 +362,97 @@ SkeletonManager::SkeletonManager(const SkeletonType& type,
                   << kNumThicknessGroup << "，绑定表纹理 " << bone << "×2（bone=" << bone << "）";
     }
 
+    // ---- 部位额外旋转：烘两张小表（每骨通道槽 + 每通道常量）----
+    // 配置（partial_joint / partial_enabled）已在 ctor 开头、**所有 GL 调用之前**解析并校验
+    //   （名字→index、两通道不得同指一骨）。这里推导「每根骨受哪些通道影响」（沿树自底向上：
+    //   先遇到的（更靠叶/自身）= 内层，后遇到的（更靠根）= 外层）并烘两张纹理。
+    if (partial_enabled) {
+        // 各通道的 pivot = 该关节的 **bind 世界位置**（骨架空间）= inverse_bind[j] 取逆后的平移
+        //   （同 thickness 的膨胀中心来源：不再另跑一次树遍历，与蒙皮同源、天然不会分叉）。
+        std::array<Vec3f, kNumPartialRotation> partial_pivot = {
+            Vec3f{0.0f, 0.0f, 0.0f}, Vec3f{0.0f, 0.0f, 0.0f}};
+        for (int c = 0; c < kNumPartialRotation; ++c) {
+            const int j = partial_joint[static_cast<size_t>(c)];
+            if (j >= 0) {
+                const Mat4 bw = geom::math::Mat4InverseAffine(inv[static_cast<size_t>(j)]);
+                partial_pivot[static_cast<size_t>(c)] = geom::math::Mat4TranslationOf(bw);
+            }
+        }
+        // 逐骨算槽位：{外层通道, 内层通道}（-1 = 无）。
+        //   沿树自底向上（本骨 → 根）行走：先遇到的配置关节 = 内层（更靠叶，先作用），
+        //   后遇到的 = 外层（更靠根，后作用）。两通道嵌套（如 腰⊃头）时两槽都有值。
+        std::vector<std::array<int, 2>> slot_ch(static_cast<size_t>(bone),
+                                                std::array<int, 2>{-1, -1});
+        for (int b2 = 0; b2 < bone; ++b2) {
+            int deep = -1;
+            int shallow = -1;
+            for (int x = b2; x != kSkeletonNoParent; x = type.joints[static_cast<size_t>(x)].parent) {
+                for (int c = 0; c < kNumPartialRotation; ++c) {
+                    if (partial_joint[static_cast<size_t>(c)] != x) {
+                        continue;
+                    }
+                    if (deep < 0) {
+                        deep = c;
+                    } else if (shallow < 0) {
+                        shallow = c;
+                    }
+                }
+            }
+            if (shallow >= 0) {
+                slot_ch[static_cast<size_t>(b2)] = {shallow, deep};  // 槽0 = 外层，槽1 = 内层
+            } else {
+                slot_ch[static_cast<size_t>(b2)] = {deep, -1};       // 单通道（或 -1）
+            }
+        }
+        // (1) 每骨通道槽纹理（bone_count × 1）：texel(b) = (ch_outer, ch_inner, 0, 0)；-1 = 无。
+        std::vector<float> slot_tex(static_cast<size_t>(bone) * 4, 0.0f);
+        for (int b2 = 0; b2 < bone; ++b2) {
+            float* t = &slot_tex[static_cast<size_t>(b2) * 4];
+            t[0] = static_cast<float>(slot_ch[static_cast<size_t>(b2)][0]);  // 外层（靠根/后作用）
+            t[1] = static_cast<float>(slot_ch[static_cast<size_t>(b2)][1]);  // 内层（靠叶/先作用）
+        }
+        glGenTextures(1, &handles_.partial_rotation_bind_tex);
+        CHECK_NE(handles_.partial_rotation_bind_tex, 0u)
+            << "SkeletonManager: glGenTextures(partial rotation bind) failed";
+        glBindTexture(GL_TEXTURE_2D, handles_.partial_rotation_bind_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, bone, 1, 0, GL_RGBA, GL_FLOAT,
+                     slot_tex.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // (2) 每通道常量纹理（kNumPartialRotation × 1）：texel(c) = (p_c.xyz, 骨号)；未用 = -1。
+        std::vector<float> chan_tex(static_cast<size_t>(kNumPartialRotation) * 4, 0.0f);
+        for (int c = 0; c < kNumPartialRotation; ++c) {
+            float* t = &chan_tex[static_cast<size_t>(c) * 4];
+            const int j = partial_joint[static_cast<size_t>(c)];
+            if (j >= 0) {
+                const Vec3f& p = partial_pivot[static_cast<size_t>(c)];
+                t[0] = p.x();
+                t[1] = p.y();
+                t[2] = p.z();
+                t[3] = static_cast<float>(j);
+            } else {
+                t[3] = -1.0f;  // 该通道未配置
+            }
+        }
+        glGenTextures(1, &handles_.partial_rotation_channel_tex);
+        CHECK_NE(handles_.partial_rotation_channel_tex, 0u)
+            << "SkeletonManager: glGenTextures(partial rotation channel) failed";
+        glBindTexture(GL_TEXTURE_2D, handles_.partial_rotation_channel_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kNumPartialRotation, 1, 0, GL_RGBA, GL_FLOAT,
+                     chan_tex.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        LOG(INFO) << "SkeletonManager: 部位额外旋转启用：通道关节 " << partial_joint[0] << "/"
+                  << partial_joint[1] << "（index，-1=未配），通道表 " << bone << "×2";
+    }
+
     GLenum err = glGetError();
     CHECK_EQ(err, GL_NO_ERROR)
         << "SkeletonManager: GL error after bake, code=" << err;
@@ -335,6 +470,15 @@ SkeletonManager::~SkeletonManager() {
     if (handles_.thickness_bind_tex != 0) {
         glDeleteTextures(1, &handles_.thickness_bind_tex);
         handles_.thickness_bind_tex = 0;
+    }
+    // 部位额外旋转的两张表（没启用时本就是 0）。
+    if (handles_.partial_rotation_bind_tex != 0) {
+        glDeleteTextures(1, &handles_.partial_rotation_bind_tex);
+        handles_.partial_rotation_bind_tex = 0;
+    }
+    if (handles_.partial_rotation_channel_tex != 0) {
+        glDeleteTextures(1, &handles_.partial_rotation_channel_tex);
+        handles_.partial_rotation_channel_tex = 0;
     }
 }
 

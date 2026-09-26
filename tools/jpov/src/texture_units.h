@@ -41,6 +41,12 @@ inline constexpr int kTexUnitPoseAtlas = 12;
 //   同为「主/shadow pass 同号共用」（两 pass 不同时活跃）。
 inline constexpr int kTexUnitThicknessBind = 13;
 
+// 部位额外旋转的「通道表」纹理（每骨 1 texel：外层/内层通道号；蒙皮用）。
+//   同为「主/shadow pass 同号共用」（两 pass 不同时活跃）。
+inline constexpr int kTexUnitPartialRotationBind = 14;
+// 部位额外旋转的「每通道常量」纹理（kNumPartialRotation texel：bind pivot + 关节骨号）。
+inline constexpr int kTexUnitPartialRotationChannel = 15;
+
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
 static_assert(kTexUnitMaterialBase + kMaterialTexUnitCount <= kTexUnitShadowMapBase,
               "材质纹理单元区间与 shadow map 区间重叠");
@@ -48,6 +54,10 @@ static_assert(kTexUnitShadowMapBase + kMaxShadowCascades <= kTexUnitPoseAtlas,
               "shadow map 区间与 pose atlas 单元重叠");
 static_assert(kTexUnitPoseAtlas < kTexUnitThicknessBind,
               "pose atlas 与粗细绑定表单元重叠");
+static_assert(kTexUnitThicknessBind < kTexUnitPartialRotationBind,
+              "粗细绑定表与部位额外旋转通道表单元重叠");
+static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
+              "部位额外旋转的两张表单元重叠");
 
 }  // namespace jpov
 

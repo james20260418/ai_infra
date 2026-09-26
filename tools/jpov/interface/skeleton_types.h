@@ -74,6 +74,33 @@ inline constexpr int kSkeletonNoParent = -1;
 //   （见 docs/jpov_crowd_body_shape_face_design.md §3.5 的 slot 预算表）。
 inline constexpr int kNumThicknessGroup = 8;
 
+// ==================== 部位额外旋转（partial rotation） ====================
+//
+// 用途：给「拉弓射箭 / 举枪瞄准」这类动作补一条**骨骼级整体转动** —— 例：姿势摆好后，把整个
+//   上半身再扭一个角（扭腰）、把头再抬/低（仰头）。两个通道，各由**一根配置关节**驱动：
+//   该关节及其**全部子树（descendants）**一起做一次刚体旋转。
+// 机制（乙，2026-09-26 Danis 定：pose 先摆好、再叠加）：对参与某顶点的每根骨的对偶四元数
+//   **前乘**一个模型系刚体变换 G_b（= ∏ 作用于该骨的通道 c 的 G_c，按 祖先→后代 顺序），其中
+//     G_c = 在模型系里绕 **j_c 当前世界位置** pos_c 旋转 R_c = T(pos_c)·R_c·T(pos_c)⁻¹
+//     pos_c = final(j_c)·p_c（final = pose atlas 里 j_c 本帧的最终变换；p_c = j_c 的 bind 位置）
+//   ⇒ 落在该骨上的顶点被整体（绕 j_c 当前位置）转动；**权重混合区**（腰/颈边界）在相邻骨之间按
+//   权重平滑过渡（与 thickness 同构：每骨算子按权重插值，见 skinning_shader.h）。
+//   绕“当前点”的刚体旋转 ⇒ 根/祖先把身体挪到哪，扭转都跟得动，**不会腰斩**。
+//
+// 接口只有两处（与 thickness 同构）：
+//   ① 骨架级「全局配置」：构造 SkeletonManager 时给两个**关节名**
+//      （std::array<std::string, kNumPartialRotation>），见 skeleton_manager.h；
+//   ② 实例级取值：SkinnedInstanceState::partial_rotations（本文件）。
+// 每骨用到的「bind 位置（pivot）」与「该骨被哪条通道影响」由 SkeletonManager 自己从骨架
+//   导出（子树的波及范围 = 派生量、从不做输入），不进任何公开签名。
+//
+// ⚠️ 语义（2026-09-26 Danis 定）：R_c 定义在**模型系**（= 骨架根空间，与 rest 顶点 / pose
+//   atlas 同一空间；本工程人形资产面朝 +X、上为 +Y）—— 用户不必去处理骨局部系。额外旋转是
+//   **在 pose 之后叠加**的（等价于在 j_c 的局部变换末尾额外乘一个旋转）；因 R_c 是模型系量，
+//   落到 j_c **已 pose 的局部帧**后，净效果 = 绕 j_c **当前**位置、按**模型系 R_c** 转
+//   （轴不随 pose 变）。详见设计文档 docs/jpov_partial_rotation_design.md。
+inline constexpr int kNumPartialRotation = 2;
+
 // ==================== 骨架关节（一棵有根树的节点） ====================
 
 // 骨架中一个关节（一根骨/树的节点）。每个关节一个父（根的父为 kSkeletonNoParent），
@@ -257,6 +284,29 @@ struct SkinnedInstanceState {
     //   其余为 0 —— 那是「零粗细」的致命退化，且极难一眼看出。
     std::array<float, kNumThicknessGroup> thickness_scales = {
         1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
+    // ---- 部位额外旋转：每实例给每个「旋转通道」一个**模型系**四元数 ----
+    // 数组下标 = 通道号（0/1），与骨架级配置（skeleton_manager.h 的 partial_rotation_config）
+    //   同序。这个 R **相对什么、定义在哪个系**（接口语义，很重要）：
+    //
+    //   · R **定义在模型系**（= 骨架根空间，与 rest 顶点 / pose atlas 同一空间；本工程人形
+    //     资产面朝 +X、上为 +Y）——**不是**相对父关节、也**不是**相对该关节的局部坐标系；
+    //     用户只需面对这一个坐标系。
+    //   · 顺序是「**先摆 pose、再叠加 R**」：R 作用于该通道关节的**整个子树**，绕该关节的
+    //     **当前 pose 位置**整体转（见 skinning_shader.h 的 ApplyPartialRotation）。
+    //   · ⇒ R 的轴在模型系里是**固定**的，它的“解剖含义”取决于该关节**当前被 pose 摆成什么
+    //     朝向**。
+    //
+    //   【例：TPose 歪头】TPose 下头朝 +X ⇒“仰头”= 绕模型 +Z 转 = 正常点头；但若 pose 已把
+    //   上身转到头朝 +Z，同一个“绕 +Z”就变成**歪头（roll）**——而且此时再用另一条 partial 把
+    //   上身扭回 +X 也救不回来（嵌套合成里“头的 R 先作用”，歪头已产生，后面的扭腰只把它整体
+    //   转回去）。要“不管 pose 朝哪、仰头都相对身体点头”是另一种定义（轴随关节朝向共轭），
+    //   **本接口不做**——这里刻意选的是“模型系固定轴”的清晰定义（2026-09-26 Danis 定）。
+    //
+    // 默认恒等 = 不转（旧场景零回归，靠 host 侧开关跳过整段）。
+    // Pre-condition: 每项为单位四元数（实现会归一化；NaN/非有限判非法）。
+    std::array<geom::Quaternion<float>, kNumPartialRotation> partial_rotations = {
+        geom::Quaternion<float>::Identity(), geom::Quaternion<float>::Identity()};
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。
