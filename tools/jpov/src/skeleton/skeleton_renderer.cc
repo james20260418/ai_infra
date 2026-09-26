@@ -41,6 +41,25 @@
 
 namespace jpov {
 
+// 编译期钉住 per-instance 粗细的布局约定（三处必须同步：本文件的上传循环、
+// instance_buffer.h 的 kInstanceThicknessAttrSpec、skinning_shader.h 的 loc11/12）。
+// 任一处单改都不会编译报错，而是**静默错位**（读到别人的槽位 / 每实例只传一半数据）
+// ⇒ 在这里做交叉校验，把“三处同步”变成编译期强制。
+static_assert(kNumThicknessGroup == 8, "部位粗细系数按 2 个 vec4 上传 ⇒ kNumThicknessGroup 必须是 8");
+static_assert(kInstanceThicknessAttrSpec.slot_count *
+                      kInstanceThicknessAttrSpec.slot_components ==
+                  kNumThicknessGroup,
+              "kInstanceThicknessAttrSpec 的 (slot_count × slot_components) 必须 == "
+              "kNumThicknessGroup（每实例 8 个组系数）");
+static_assert(kInstanceThicknessAttrSpec.stride_floats == kNumThicknessGroup,
+              "kInstanceThicknessAttrSpec::stride_floats 必须 == 每实例上传的 float 数"
+              "（= kNumThicknessGroup，见 UploadSkinningInstanceAttributes）");
+static_assert(kInstanceThicknessAttrSpec.base_loc ==
+                  kInstancePoseAttrSpec.base_loc + kInstancePoseAttrSpec.slot_count,
+              "粗细系数的 base_loc 必须紧接 pose 选择槽（10 + 1 = 11）");
+static_assert(kInstanceThicknessAttrSpec.base_loc + kInstanceThicknessAttrSpec.slot_count <= 16,
+              "per-instance 槽位总数不得超过 GL_MAX_VERTEX_ATTRIBS 保证的 16");
+
 namespace {
 
 // 4x4 矩阵乘法：out = a * b（列主序）
@@ -113,7 +132,8 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     const SkinnedMeshCommand& cmd,
     int pose_w,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf) {
+    InstanceBuffer& instance_pose_buf,
+    InstanceBuffer& instance_thickness_buf) {
     const size_t n = cmd.instances.size();
     CHECK_GT(n, 0u) << "UploadSkinningInstanceAttributes: instances 不能为空";
 
@@ -143,6 +163,27 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
         poses[k * 3 + 2] = inst.ratio;
     }
     instance_pose_buf.Upload(poses);
+
+    // 3) 部位粗细系数：每实例 kNumThicknessGroup 个 float（组号序，2×vec4 = loc11/12）。
+    //    与 pose 选择同样是「这次 draw」的输入；骨架没配粗细时这里传的全是默认 1.0，
+    //    蒙皮 VS 因 uThicknessEnabled=0 整段跳过（不产生任何计算）。
+    std::vector<float> thickness(n * static_cast<size_t>(kNumThicknessGroup));
+    for (size_t k = 0; k < n; ++k) {
+        for (int g = 0; g < kNumThicknessGroup; ++g) {
+            const float mu = cmd.instances[k].thickness_scales[static_cast<size_t>(g)];
+            // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0。0/负会把截面压成零面积 /
+            //   翻法线；NaN 也被这一条拦下（NaN 的任何比较都是 false）。不 clamp 成
+            //   “看起来还行”的值 —— 那是把用户的非法输入静默吞掉。
+            CHECK_GT(mu, 0.0f) << "thickness_scales[" << g << "] 必须 > 0（系数为 0/负会把"
+                                  "截面压成零面积/翻法线）—— 实例 " << k;
+            // +inf 通过上面的 >0：它会算出 inf/NaN 顶点并污染整条管线（比 0 更隐蔽），
+            //   所以有限性单独判一次（一次批内每实例 8 次浮点比较，可忽略）。
+            CHECK(std::isfinite(mu)) << "thickness_scales[" << g << "] 必须是有限值，got " << mu
+                                     << " —— 实例 " << k;
+            thickness[k * static_cast<size_t>(kNumThicknessGroup) + static_cast<size_t>(g)] = mu;
+        }
+    }
+    instance_thickness_buf.Upload(thickness);
 }
 
 // ==================== DrawSkinnedMesh ====================
@@ -161,7 +202,8 @@ void SkeletonRenderer::DrawSkinnedMesh(
     const SkeletonManager::GpuHandles& gh,
     int pose_count,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf) {
+    InstanceBuffer& instance_pose_buf,
+    InstanceBuffer& instance_thickness_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMesh: mesh_id "
                            << cmd.mesh_id << " 未注册";
@@ -282,6 +324,18 @@ void SkeletonRenderer::DrawSkinnedMesh(
                 static_cast<float>(SkeletonManager::kPoseAtlasDim),
                 static_cast<float>(SkeletonManager::kPoseAtlasDim));
 
+    // ---- 部位粗细：开关 + 绑定表纹理（专用槽 kTexUnitThicknessBind，与 tile/材质/shadow/
+    //      pose atlas 都不重叠，见 texture_units.h 的编译期校验）----
+    //   开关与纹理同源：骨架没配粗细 ⇒ gh.thickness_bind_tex == 0 ⇒ uThicknessEnabled = 0，
+    //   shader 整段跳过（旧场景零回归）。纹理绑 0 也无所谓：开着开关时才有 0 以外的采样。
+    //   状态机：只动了 active unit 与本槽的 2D 绑定；本 pass 末尾统一 glActiveTexture(GL_TEXTURE0)
+    //   还原（与 pose atlas 同约定），槽位专属本功能、无需还原别人的绑定。
+    glUniform1i(glGetUniformLocation(sp, "uThicknessEnabled"),
+                gh.thickness_bind_tex != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitThicknessBind);
+    glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
+    glUniform1i(glGetUniformLocation(sp, "uThicknessBind"), kTexUnitThicknessBind);
+
     // ---- uViewProj = proj * view（每帧一张，全批共享）；摆放走 per-instance attribute ----
     glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, mvp);
 
@@ -302,7 +356,8 @@ void SkeletonRenderer::DrawSkinnedMesh(
 
     // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
     //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf);
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
+                                     instance_thickness_buf);
 
     // ★ 整批 = 一次 instanced draw。这才是 instancing 的意义（N 实例 ≠ N draw call）。
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
@@ -311,7 +366,8 @@ void SkeletonRenderer::DrawSkinnedMesh(
         //   用守卫而非手写 enable/disable，是为了**结构上**不可能“挂上忘摘”——
         //   残留 divisor=1 的启用态会泄漏给后续普通 draw（见 instance_buffer.h）。
         InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_buf});
+                                   {&instance_model_buf, &instance_pose_buf,
+                                    &instance_thickness_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -420,7 +476,8 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     const float depth_vp[16],
     unsigned int shadow_prog,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf) {
+    InstanceBuffer& instance_pose_buf,
+    InstanceBuffer& instance_thickness_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -444,7 +501,8 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
 
     // 实例数据：同一套逐实例缓冲（与主 pass 同源，否则影子与身体错位）。
     //   光空间 VP 走 uniform（全批共享）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf);
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
+                                     instance_thickness_buf);
 
     glUseProgram(shadow_prog);
     glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
@@ -455,6 +513,12 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glUniform2f(glGetUniformLocation(shadow_prog, "uAtlasDim"),
                 static_cast<float>(SkeletonManager::kPoseAtlasDim),
                 static_cast<float>(SkeletonManager::kPoseAtlasDim));
+    // 部位粗细：与主 pass **同一开关 + 同一份表 + 同一份 per-instance 系数**（异则影子错位）。
+    glUniform1i(glGetUniformLocation(shadow_prog, "uThicknessEnabled"),
+                gh.thickness_bind_tex != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitThicknessBind);
+    glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uThicknessBind"), kTexUnitThicknessBind);
     // 光空间 VP 走 uniform（不含 model）。
     glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowViewProj"),
                        1, GL_FALSE, shadow_vp);
@@ -465,7 +529,8 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     {
         // RAII 配对挂载（同主 pass）。
         InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_buf});
+                                   {&instance_model_buf, &instance_pose_buf,
+                                    &instance_thickness_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,

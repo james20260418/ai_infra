@@ -58,6 +58,7 @@ cc_test(
         ":fbx_dance_frame_1280x720.png",
         ":fbx_pose_glb_naive_1280x720.png",
         ":fbx_pose_glb_retarget_1280x720.png",
+        ":fbx_skinned_instanced_thickness_1280x720.png",
     ],
     deps = [
         "//tools/jpov/demo/fbx_viewer:fbx_viewer_app",

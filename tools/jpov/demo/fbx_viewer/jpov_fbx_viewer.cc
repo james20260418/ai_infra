@@ -13,7 +13,7 @@
 //       可选：--time <秒>   指定动画时刻（默认 0）
 //             --frame <n>  指定源帧号（优先级低于 --time；按 fbx 的 fps 换算成时刻）
 //             --rest       固定 pose = identity（rest/T-pose）出图
-//             --view <n>   指定「显示/驱动」出图（0..6，见 fbx_viewer_app.h 的 ViewMode）
+//             --view <n>   指定「显示/驱动」出图（0..7，见 fbx_viewer_app.h 的 ViewMode）
 //                          ——与面板 combo 同一套语义。
 //   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「目标骨架（蓝）」——蓝骨 = 从该
 //     glb 读出的 rest 骨架，驱动方式由 `--view`（或面板 combo）选：
@@ -49,9 +49,14 @@ struct CliParsed {
     int frame_index = 0;       // --frame 的值（源帧号，按 fps 换算时刻）
     bool has_view = false;         // --view 是否给出
     // --view 的值（ViewMode 下标：0 只看红 / 1 只看蓝 / 2 并列 / 3 蓝直搬 /
-    //   4 并列直搬 / 5 并列带皮网格）。
+    //   4 并列直搬 / 5 并列带皮网格 / 6 并列 3 蓝肉人·instanced / 7 并列带皮·粗细微调）。
     int view_mode = 0;
     bool rest = false;         // --rest：固定 pose = identity
+    // --thick-leg / --thick-arm：部位粗细（组 0 = 腿 / 组 1 = 手臂）系数，
+    //   **交互与 headless 出图都生效**（交互时也可继续用面板滑条改）。
+    //   与 ViewMode::kSkinnedThickness 的面板滑条是同一份状态。
+    float thick_leg = 1.0f;
+    float thick_arm = 1.0f;
 };
 
 // 解析 CLI：标志可任意顺序，位置参数按序 = fbx / [glb]；未知标志 WARNING 忽略。
@@ -88,6 +93,18 @@ CliParsed ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--rest") {
             p.rest = true;
+        } else if (arg == "--thick-leg") {
+            if (i + 1 < argc) {
+                p.thick_leg = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--thick-leg 缺少数值，忽略";
+            }
+        } else if (arg == "--thick-arm") {
+            if (i + 1 < argc) {
+                p.thick_arm = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--thick-arm 缺少数值，忽略";
+            }
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "；已忽略";
         } else if (p.fbx_path.empty()) {
@@ -107,7 +124,8 @@ int main(int argc, char** argv) {
     const CliParsed p = ParseCli(argc, argv);
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
-           "[--time 秒|--frame 帧号] [--rest] [--view 0..6]";
+           "[--time 秒|--frame 帧号] [--rest] [--view 0..7] "
+           "[--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0]";
     const bool capture = !p.shot_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";
@@ -137,6 +155,21 @@ int main(int argc, char** argv) {
         // 可选目标骨架：glb 的 rest 骨架（蓝），驱动方式由 view_mode_ 决定。
         CHECK(app.LoadGlbSkeleton(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
     }
+
+    // 部位粗细滑条值（与面板滑条同一份状态）：交互与出图都生效。
+    //   值域与面板滑条一致（kThicknessScaleMin..kThicknessScaleMax）：CLI 手打越界多半是笔误，
+    //   当场早崩并报出合法范围（不 clamp —— 到时渲染侧的 thickness_scales 契约也会崩，
+    //   但那条消息说不出“是 --thick-leg 这个参数打错了”）。
+    CHECK(p.thick_leg >= jpov_fbx_viewer::kThicknessScaleMin &&
+          p.thick_leg <= jpov_fbx_viewer::kThicknessScaleMax)
+        << "--thick-leg 取值应在 [" << jpov_fbx_viewer::kThicknessScaleMin << ", "
+        << jpov_fbx_viewer::kThicknessScaleMax << "]，got " << p.thick_leg;
+    CHECK(p.thick_arm >= jpov_fbx_viewer::kThicknessScaleMin &&
+          p.thick_arm <= jpov_fbx_viewer::kThicknessScaleMax)
+        << "--thick-arm 取值应在 [" << jpov_fbx_viewer::kThicknessScaleMin << ", "
+        << jpov_fbx_viewer::kThicknessScaleMax << "]，got " << p.thick_arm;
+    app.thickness_leg_ = p.thick_leg;
+    app.thickness_arm_ = p.thick_arm;
 
     if (capture) {
         // headless 单帧：先把时间/模式设好，再 RunOnce（OneIteration 画的是"推进前"

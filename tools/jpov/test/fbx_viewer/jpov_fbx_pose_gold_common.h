@@ -81,6 +81,27 @@ inline JPOV::Config MakeConfig(const char* title) {
     return cfg;
 }
 
+// 第四张 gold：**组合拳** —— fbx 动作经 BodyRetarget 驱动 glb **带皮**动画 + **3 个实例**
+//   （一个 SkinnedMeshCommand / 一次 instanced draw）+ **部位粗细 μ**（per-instance 系数）。
+//   此图把观察器蓝侧这条链路的三个环（instance 绘制 / 重定向驱动 / thickness）一次钉住 ——
+//   任一环断掉本图必变（故不再为三者各写一份渲染单测）。
+inline std::string GetSkinnedThicknessGoldRelPath() {
+    return "/fbx_viewer/fbx_skinned_instanced_thickness_1280x720.png";
+}
+
+// 组合拳 gold 的部位粗细取值：腿加粗 / 手臂变细，**两者都 ≠ 1.0**（确保真走了形变分支，
+//   而不是被 "μ==1 早退" 盖过去）。
+inline constexpr float kThickLegGold = 1.6f;
+inline constexpr float kThickArmGold = 0.6f;
+
+// 造组合拳出图 App：蓝侧 = **3 个 instanced 带皮实例**（kFbxBones3Skinned）+ 指定粗细系数。
+//   该模式的蓝侧驱动 = BodyRetarget（逐帧重定向烘进 pose atlas，见 LoadGlbSkeleton），
+//   故一帧里同时覆盖「重定向驱动」「instanced draw 」「per-instance μ」。
+//   ⚠️ 必须与 generator 用**同一个**本函数（防两态分叉）。
+//   定义在 MakeApp 之后（它要用 MakeApp / GlbPath）。
+inline std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> MakeSkinnedThicknessApp(
+    const char* title, double time_seconds, float thick_leg, float thick_arm);
+
 // 造并装配一个出图用 App（generator 与 test **共用本入口**，防分叉）。
 //   glb_path 非空 → 同时装目标骨架（蓝）并选定 mesh_source；
 //   注意：LoadGltf 会按“两者并列”重算初始机位，故“含 glb”与“不含 glb”是两种不同机位。
@@ -113,6 +134,17 @@ inline void RenderFrame(jpov_fbx_viewer::FbxViewerApp* app /*inout*/,
     winfo.height = kShotHeight;
     const jpov::InputSnapshot input{};
     app->RunOnce(input, winfo, out_png);
+}
+
+// 组合拳 App 的实现（在 MakeApp 之后定义，故这里可以调它）。
+inline std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> MakeSkinnedThicknessApp(
+    const char* title, double time_seconds, float thick_leg, float thick_arm) {
+    std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+        MakeApp(title, time_seconds, /*rest_pose*/ false, GlbPath(),
+                jpov_fbx_viewer::ViewMode::kFbxBones3Skinned);
+    app->thickness_leg_ = thick_leg;
+    app->thickness_arm_ = thick_arm;
+    return app;
 }
 
 }  // namespace jpov_fbx_pose_gold
