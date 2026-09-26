@@ -250,9 +250,13 @@ public:
     // ---- 骨架（SkeletonManager）注册 / 取用 ----
     // 注册一种骨架（SkeletonType + 一套 pose）→ skeleton_id。
     // 内部持 skeleton_id → SkeletonManager（唯一针，资源在注册时构造/上传 GL）。
+    //   thickness_scaling_config: 骨架级「部位粗细」全局配置（至多 8 个关节组，每组一串关节
+    //     index；空 = 该骨架不做粗细）。校验在 SkeletonManager ctor 里立即做（越界/一骨两组
+    //     → FATAL）。几何表由 SkeletonManager 自己从骨架导出，不走本接口。
     // Pre-condition: Init() 已调用（GL context 激活）；type.Validate() 通过；poses 非空。
-    uint32_t RegisterSkeleton(const SkeletonType& type,
-                              std::vector<SkeletonPose> poses);
+    uint32_t RegisterSkeleton(
+        const SkeletonType& type, std::vector<SkeletonPose> poses,
+        std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {});
     // 取 skeleton_id 对应的 SkeletonManager（无则 nullptr）。
     SkeletonManager* GetSkeleton(uint32_t skeleton_id);
 
@@ -270,8 +274,9 @@ public:
     //     （见 src/instance_buffer.h 顶部为何不能挂在 GPUMesh 上）。
     //   主 pass 与 shadow pass 共用同一对缓冲：GL draw 是同步提交的，每个 draw 前
     //   紧接一次 Upload，故两 pass 不会互相踩。
-    InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};  // loc6..9 = mat4
-    InstanceBuffer instance_pose_buf_{kInstancePoseAttrSpec};    // loc10   = vec3
+    InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};           // loc6..9  = mat4
+    InstanceBuffer instance_pose_buf_{kInstancePoseAttrSpec};             // loc10    = vec3
+    InstanceBuffer instance_thickness_buf_{kInstanceThicknessAttrSpec};   // loc11..12 = 2×vec4
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

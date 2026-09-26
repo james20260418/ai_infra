@@ -42,5 +42,18 @@ int main(int argc, char** argv) {
     Generate(dir + jpov_fbx_pose_gold::GetGlbRetargetGoldRelPath(),
              jpov_fbx_pose_gold::GlbPath(), jpov_fbx_viewer::ViewMode::kBothRetarget,
              "JPOV FBX Pose + glb retarget Gold");
+
+    // ④ 组合拳 gold：3 实例 instanced 带皮 + BodyRetarget 驱动 + 部位粗细 μ。
+    //    （不能用上面的 Generate：它没有粗细入参 —— 走共用的 MakeSkinnedThicknessApp。）
+    {
+        std::unique_ptr<jpov_fbx_viewer::FbxViewerApp> app =
+            jpov_fbx_pose_gold::MakeSkinnedThicknessApp(
+                "JPOV FBX Skinned Instanced Thickness Gold",
+                jpov_fbx_pose_gold::kGoldTimeSeconds,
+                jpov_fbx_pose_gold::kThickLegGold, jpov_fbx_pose_gold::kThickArmGold);
+        const std::string path = dir + jpov_fbx_pose_gold::GetSkinnedThicknessGoldRelPath();
+        jpov_fbx_pose_gold::RenderFrame(app.get(), path.c_str());
+        LOG(INFO) << "gold generated: " << path;
+    }
     return 0;
 }

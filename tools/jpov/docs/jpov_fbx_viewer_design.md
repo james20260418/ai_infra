@@ -41,7 +41,7 @@ retarget（M4）之前有一步「**先别上真皮**」：把 FBX 动作套到*
 | 模式 | **顶部**面板复选框「固定 rest 位姿(identity)」：勾上 = 不看动画，固定 `pose = identity` 渲骨架 rest（T-pose）形态；此时时间同样不推进，取消勾选后从停住的时刻继续 |
 | 状态行 | 帧号 / 总帧数 / 源帧频 / 动画时刻 / 播放态（+ 传了 glb 时蓝骨对照信息与骨名命中数） |
 | 显示/驱动 | 传了 glb 后多一个「显示/驱动」下拉（`ViewMode`）：看红 / 看蓝 / 两者并列 × 蓝骨 `BodyRetarget`（正式重定向）/ 无重定向（数值直搬对照）。⚠️ 只放**一个** combo —— `Ui::Combo` 展开态是单例，同屏两个会互相干扰（下个 PR 修）|
-| headless 出图 | `--shot <png> [--time <秒>｜--frame <帧号>] [--view 0..4] [--rest]`：与交互共用同一条 `OneIteration`（零分叉） |
+| headless 出图 | `--shot <png> [--time <秒>｜--frame <帧号>] [--view 0..7] [--rest] [--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0]`：与交互共用同一条 `OneIteration`（零分叉） |
 
 ---
 

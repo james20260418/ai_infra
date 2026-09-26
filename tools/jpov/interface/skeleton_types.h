@@ -52,6 +52,28 @@ using Vec3f = geom::Vec3<float>;
 // 根关节的父索引哨兵（SkeletonJoint::parent）
 inline constexpr int kSkeletonNoParent = -1;
 
+// ==================== 部位粗细（thickness scale） ====================
+//
+// 用途：给同一份共享骨架的实例补一条**个体差异**来源 —— 「胖瘦 / 部位粗细」，不新增
+//   顶点属性、不改骨架拓扑、不需要重烘 pose atlas。
+// 机制：蒙皮**之前**，把顶点相对关节的偏移转到「该骨的局部坐标系」里，只缩**横截面**
+//   （垂直于骨长轴的两个方向），不缩沿轴长度 ⇒ 视觉上 = 「这根骨所辖的肉变粗/变细」；
+//   之后照常走既有 DQS 蒙皮（公式一个字不改）。设计与推导见
+//   docs/jpov_crowd_body_shape_face_design.md §3（尤其 §3.1 公式 / §3.2 为什么作用在 rest
+//   顶点上 / §3.3 与 DQS 正交 / §3.3-4 零回归只能靠开关）。
+//
+// **接口只有两处**（其余全是骨架/渲染器自己消化的内部量）：
+//   ① 骨架级「全局配置」：构造 SkeletonManager 时给「关节 index 分组」
+//      （std::array<std::vector<int>, kNumThicknessGroup>），见 skeleton_manager.h；
+//   ② 实例级取值：SkinnedInstanceState::thickness_scales（本文件）。
+//   渲染侧要用的「每骨 bind 位置/朝向」由 SkeletonManager 自己从骨架导出（同 inverse_bind
+//   的地位：派生量、从不做输入），不进任何公开签名。
+
+// 粗细「关节组」的组数 = 每实例可独立控制的粗细自由度数。
+//   取 8：与 per-instance attribute 的预算对齐 —— 2 个 vec4（loc11/12）= 8 个 float
+//   （见 docs/jpov_crowd_body_shape_face_design.md §3.5 的 slot 预算表）。
+inline constexpr int kNumThicknessGroup = 8;
+
 // ==================== 骨架关节（一棵有根树的节点） ====================
 
 // 骨架中一个关节（一根骨/树的节点）。每个关节一个父（根的父为 kSkeletonNoParent），
@@ -218,6 +240,23 @@ struct SkinnedInstanceState {
     //
     // 约束：pose_a / pose_b 是同一个 SkeletonManager(同一种骨架) 的 pose 下标；不同骨架(
     //   不同 SkeletonManager)严禁放同实例混插 —— 语义无意义且要读两张骨骼纹理。见本文件顶铁律。
+
+    // ---- 部位粗细：每实例给每个「关节组」一个横径缩放系数（Divisor=1 的 per-instance
+    // attribute，见 src/instance_buffer.h 的 kInstanceThicknessAttrSpec）----
+    // 语义：本组所辖关节上的顶点，其**横径**（垂直于骨长轴的两个方向）按该系数缩放，
+    //   沿骨长轴的长度**不变**；1.0 = 原样（默认）。多骨权重混合区的顶点按权重插值
+    //   （见 skinning_shader.h 的 shape 段）。
+    // 对齐：数组下标 = **组号**（不是关节号）。「组号 → 哪些关节」由**骨架级**配置决定
+    //   （SkeletonManager 构造时传入的 std::array<std::vector<int>, kNumThicknessGroup>）
+    //   ⇒ **同一个组号在不同骨架上可以是完全不同的部位**，语义由那份骨架的配置负责。
+    // 生效条件：该骨架的构造配置里有非空组；组号未被任何骨引用（或骨不在该组）时该系数
+    //   无效果。配置里没有组 = 该骨架不做粗细（渲染侧整段跳过）。
+    // Pre-condition: 每项 > 0（=0 会把截面压成零面积、<0 会翻法线）；实现应判非法即崩，
+    //   不得 clamp 成「看起来还行」的值（否则 0.0 与 0.01 的区别会被静默吞掉）。
+    // ⚠️ 默认值必须**逐个写满**（1.0 × 8）：std::array 的聚合初始化里写 {1.0f} 只会填第 0 个，
+    //   其余为 0 —— 那是「零粗细」的致命退化，且极难一眼看出。
+    std::array<float, kNumThicknessGroup> thickness_scales = {
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。
