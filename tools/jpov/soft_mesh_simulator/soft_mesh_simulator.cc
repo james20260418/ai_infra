@@ -255,7 +255,8 @@ void Simulator::BuildNeighborTable(float d) {
     nb_init_dist_.assign(n, {});
 
     // O(N²) 暴力两两比较（DESIGN.md §3.4 “暴力解”）。
-    // 只填 i<j 的一半，成对互为关联（力对称：F_ij = -F_ji，§6 单测 ΣFij=0 依赖此对称）。
+    // 先无差别收集每个点在 d 内的**所有**关联（含距离），最后再按最近 kMaxNeighbors
+    // 截断（每一头独立截断——即“每点最多 20 个最近邻”）。
     for (size_t i = 0; i < n; ++i) {
         const geom::Vec3<float>& pi = sim_positions_[i];
         for (size_t j = i + 1; j < n; ++j) {
@@ -273,6 +274,51 @@ void Simulator::BuildNeighborTable(float d) {
             nb_init_dist_[i].push_back(dist);
             neighbors_[j].push_back(static_cast<uint32_t>(i));
             nb_init_dist_[j].push_back(dist);
+        }
+    }
+
+    // ── 邻居数上限：每点只保留**最近的 kMaxNeighbors 个**（性能关键）。──
+    //
+    // 动机（2026-09-26 Danis 实测）：d=0.1 对点距 ~0.01 的密模，平均邻居数可达 300+，
+    // 每个子步的力循环要跑 O(Σ_neighbors) 次随机访存 → 60fps 下亿级/帧，卡顿。
+    // 截到 20 个最近邻后，力计算量降 ~16×（且 cache 命中率大幅改善）。
+    //
+    // 物理上合理：力 Fij = Δp · F / max(|pij(0)|, d/10)，**近邻的 |pij(0)| 小 →
+    // denom 小 → 单位位移的力大**，故近邻主导力学贡献，保 20 个最近邻即保住绝大部分。
+    //
+    // 注：逐点独立截断——i 保留 j 不代表 j 保留 i（力近似不再严格对称）。
+    if (kMaxNeighbors > 0) {
+        for (size_t i = 0; i < n; ++i) {
+            auto& nbrs = neighbors_[i];
+            auto& dists = nb_init_dist_[i];
+            if (nbrs.size() <= kMaxNeighbors) {
+                continue;
+            }
+            // 按初始距离升序取前 kMaxNeighbors 个。
+            // 用“选择前 k 小”的部分排序（nth_element + 前缀排序），代价 O(m log k)。
+            std::vector<uint32_t> ord(nbrs.size());
+            for (size_t t = 0; t < ord.size(); ++t) {
+                ord[t] = static_cast<uint32_t>(t);
+            }
+            const size_t k = kMaxNeighbors;
+            std::nth_element(ord.begin(), ord.begin() + k, ord.end(),
+                             [&dists](uint32_t a, uint32_t b) {
+                                 return dists[a] < dists[b];
+                             });
+            ord.resize(k);
+            // 稳定输出（距离升序；同距离按原索引，保证确定性）。
+            std::sort(ord.begin(), ord.end(), [&dists](uint32_t a, uint32_t b) {
+                if (dists[a] != dists[b]) return dists[a] < dists[b];
+                return a < b;
+            });
+            std::vector<uint32_t> new_nbrs(k);
+            std::vector<float> new_dists(k);
+            for (size_t t = 0; t < k; ++t) {
+                new_nbrs[t] = nbrs[ord[t]];
+                new_dists[t] = dists[ord[t]];
+            }
+            nbrs.swap(new_nbrs);
+            dists.swap(new_dists);
         }
     }
 }

@@ -116,6 +116,16 @@ public:
     // 时 |Δp| 疯长导致力无限增长（数值灾难）。正常工况力 ~0.3N，不触发。
     static constexpr float kForceMax = 20.0f;
 
+    // 每点的**关联邻居数上限**（保留最近的 kMaxNeighbors 个）。
+    //
+    // 性能关键（2026-09-26 Danis 实测）：d=0.1 对点距 ~0.01 的密模，平均邻居可达 300+，
+    // 力循环 O(Σ_neighbors) × 30 子步 × 2 趟(KDK) → 60fps 下亿级/帧，明显卡顿。
+    // 截到 20 个最近邻后，力计算量 ≈ 降 16×（且随机访存减少、cache 命中率改善）。
+    //
+    // 物理依据：近邻 |pij(0)| 小 ⇒ 力公式分母小 ⇒ 单位位移的力大 ⇒ 近邻主导力学贡献。
+    // 0 = 不限制（保留 d 内全部邻居；仅供对照/调试，正常别用）。
+    static constexpr size_t kMaxNeighbors = 20;
+
     // 默认重力加速度（m/s²），方向 -Y（DESIGN.md §1.2 第 3 项；地面在下方）。
     static constexpr float kDefaultGravity = 9.8f;
 

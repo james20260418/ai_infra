@@ -306,6 +306,13 @@ jpov::MeshData Simulator::Step(double dt);
 - **关联邻居表** `neighbors_` / `nb_init_dist_`（`BuildNeighborTable`）：Init/Reset 时
   一次性 O(N²) 两两建立（§2.1/§3.4）；绑定姿态下 |v_j−v_i| <= d 的点对互关联；
   **仿真中永不更新**（§2.1）。绑定姿态位置快照存 `bind_positions_`（pij(0) 用它）。
+- **邻居数上限 `kMaxNeighbors = 20`（性能关键，2026-09-26）**：建表后每点**按初始
+  距离升序只保留最近的 20 个邻居**。动机：d=0.1 对点距~0.01 的密模（如 catapult
+  9937 点）平均邻居达 **332**，力循环 O(Σ_neighbors)×30 子步×2 趟(KDK) → 60fps 下
+  亿级/帧、实质卡顿。截到 20 后力计算量 ≈ **降 16×**（catapult 实例：关联对
+  3.3M → 199K），且随机访存减少、cache 命中率提升。物理合理：近邻 |pij(0)| 小 ⇒
+  公式分母小 ⇒ 单位位移的力大 ⇒ 近邻主导。逐点独立截断（i 保留 j 不代表 j 保留 i，
+  力近似不再严格对称）。`kMaxNeighbors = 0` = 不限制（仅对照用）。
 - **力（`ComputeAccel`）**：F_i = Σ_j Fij，其中
   `Fij = -[pij(t) - pij(0)] · F / max(|pij(0)|, d/10)`，逐分量 clamp 到 ±F_max（§2.3/§2.5）。
   `pij(t) = x_j(t) - x_i(t)`（当前位置）；`pij(0)` 来自 `bind_positions_`。
