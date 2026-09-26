@@ -300,4 +300,45 @@ cc_binary(
     ],
 )
 
+# ============================================================================
+# 软体仿真查看器 — 与 jpov_model_viewer 并列的交互式查看器
+#
+# 需求（2026-09-24）：仿 model_viewer，但滑条只保留「地面高度」（视角靠鼠标），
+# 光照固定正午；先把「软体仿真器产出的 mesh」静态显示出来。
+#
+# 仿真器本体在**独立包** //tools/jpov/soft_mesh_simulator（纯 CPU/GL-free/可单测），
+# 本处只放查看器：
+#   soft_mesh_viewer_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
+#   jpov_soft_mesh_viewer: 主程序（CLI 装配 + 交互/headless 分发）
+# ============================================================================
+
+cc_library(
+    name = "soft_mesh_viewer_app",
+    hdrs = ["demo/soft_mesh_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
+        "//tools/jpov/soft_mesh_simulator",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_soft_mesh_viewer",
+    srcs = ["demo/jpov_soft_mesh_viewer.cc"],
+    deps = [
+        "//tools/jpov:soft_mesh_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/soft_mesh_simulator",
+        "//tools/jpov/src:gltf_loader",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # 见 //tools/jpov/test:BUILD — gold generator + gold test 均移至 test/BUILD 管理
