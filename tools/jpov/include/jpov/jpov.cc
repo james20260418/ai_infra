@@ -231,11 +231,13 @@ uint32_t JPOV::RegisterMesh(const jpov::MeshData& data) {
 
 uint32_t JPOV::RegisterSkeleton(
     const jpov::SkeletonType& type, std::vector<jpov::SkeletonPose> poses,
-    std::array<std::vector<int>, jpov::kNumThicknessGroup> thickness_scaling_config) {
+    std::array<std::vector<int>, jpov::kNumThicknessGroup> thickness_scaling_config,
+    std::array<std::string, jpov::kNumPartialRotation> partial_rotation_config) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK(renderer_ != nullptr);
     return renderer_->RegisterSkeleton(type, std::move(poses),
-                                       std::move(thickness_scaling_config));
+                                       std::move(thickness_scaling_config),
+                                       std::move(partial_rotation_config));
 }
 
 void JPOV::UpdateMesh(uint32_t mesh_id, const jpov::MeshData& new_data) {

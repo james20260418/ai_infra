@@ -482,7 +482,8 @@ void main() {
         int pose_count,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf);
+        InstanceBuffer& instance_thickness_buf,
+        InstanceBuffer& instance_partial_buf);
 
     // ---- DrawSkinnedMeshShadow ----
     // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
@@ -500,7 +501,8 @@ void main() {
         unsigned int shadow_prog,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf);
+        InstanceBuffer& instance_thickness_buf,
+        InstanceBuffer& instance_partial_buf);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到蒙皮 PBR shader。
@@ -538,6 +540,8 @@ void main() {
     //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → instance_pose_buf（loc10 = vec3）。
     //   3) 部位粗细系数：每实例 {thickness_scales[0..7]} → instance_thickness_buf
     //      （loc11/12 = 2×vec4；组号 → 系数。骨架没配粗细时全是 1.0，shader 侧被开关跳过）。
+    //   4) 部位额外旋转：每实例 {partial_rotations[0..1]} → instance_partial_buf
+    //      （loc13/14 = 2×vec4；模型系四元数。默认全恒等，shader 侧被开关跳过）。
     //
     // pose_w = gh.bone_count * 2 = 一个 pose 在 atlas 里的**平坦** texel 宽度
     //   （每骨 2 texel：实部 q + 对偶部 t）；
@@ -550,7 +554,8 @@ void main() {
         int pose_w,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf);
+        InstanceBuffer& instance_thickness_buf,
+        InstanceBuffer& instance_partial_buf);
 };
 
 }  // namespace jpov

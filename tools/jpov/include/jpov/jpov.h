@@ -215,12 +215,21 @@ public:
     //         index 合法性在注册时立即校验（越界、一骨两组 → LOG(FATAL)）；空组 = 不用；
     //         全空 = 该骨架不做粗细（渲染侧整段跳过，旧场景零回归）。
     //         默认 {} 即"不做粗细"，不是隐藏的魔术默认（"没有配置"就表达"不做"）。
+    // partial_rotation_config: 骨架级「部位额外旋转」全局配置（可选）：至多
+    //         kNumPartialRotation(=2) 个**关节名**，每个定义一条旋转通道 —— 该关节及其**整个
+    //         子树**会被 SkinnedInstanceState::partial_rotations 里同下标的四元数 R
+    //         **在模型系**绕该关节的**当前 pose 位置**整体旋转（先摆 pose、再叠加 R；用途：扭腰 / 仰头等）。
+    //         “R 相对什么、定义在哪个系”的完整语义（含 TPose 歪头边界）见 interface/skeleton_types.h
+    //         的 partial_rotations 字段注释。骨名合法性在注册时立即校验（空 = 该通道不用；
+    //         查不到 / 两通道同指一骨 → LOG(FATAL)）；全空 = 不做额外旋转（渲染侧整段跳过，
+    //         旧场景零回归）。默认 {} 即"不做"。
     // 返回 skeleton_id 供 cmds->DrawMeshWithSkeleton(mesh_id, skeleton_id, instances) 引用。
     //
     // Pre-condition: Init() 已调用；type.Validate() 通过；poses 非空。
     uint32_t RegisterSkeleton(
         const jpov::SkeletonType& type, std::vector<jpov::SkeletonPose> poses,
-        std::array<std::vector<int>, jpov::kNumThicknessGroup> thickness_scaling_config = {});
+        std::array<std::vector<int>, jpov::kNumThicknessGroup> thickness_scaling_config = {},
+        std::array<std::string, jpov::kNumPartialRotation> partial_rotation_config = {});
 
     // UpdateMesh: 更新已有 mesh 的顶点数据。
     //

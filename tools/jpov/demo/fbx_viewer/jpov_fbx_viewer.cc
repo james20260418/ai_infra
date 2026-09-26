@@ -15,6 +15,8 @@
 //             --rest       固定 pose = identity（rest/T-pose）出图
 //             --view <n>   指定「显示/驱动」出图（0..7，见 fbx_viewer_app.h 的 ViewMode）
 //                          ——与面板 combo 同一套语义。
+//             --twist-deg <度>  扭腰（通道 0，±90°）；--tilt-deg <度> 仰头（通道 1，±30°）
+//                          —— 与面板滑条同一份语义，仅「蓝带皮」模式生效。
 //   → 第二个位置参数（可选）是 **glb 路径**：给了它就多一个「目标骨架（蓝）」——蓝骨 = 从该
 //     glb 读出的 rest 骨架，驱动方式由 `--view`（或面板 combo）选：
 //     **BodyRetarget**（正式重定向）或**数值直搬**（无重定向对照，用来肉眼验证
@@ -57,6 +59,10 @@ struct CliParsed {
     //   与 ViewMode::kSkinnedThickness 的面板滑条是同一份状态。
     float thick_leg = 1.0f;
     float thick_arm = 1.0f;
+    // --twist-deg / --tilt-deg：部位额外旋转（通道 0=腰 绕模型上轴，±90°；通道 1=头
+    //   绕模型左右轴，±30°）。与 ViewShowsPartialRotationSliders 的面板滑条是同一份状态。
+    float twist_deg = 0.0f;
+    float tilt_deg  = 0.0f;
 };
 
 // 解析 CLI：标志可任意顺序，位置参数按序 = fbx / [glb]；未知标志 WARNING 忽略。
@@ -105,6 +111,18 @@ CliParsed ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--thick-arm 缺少数值，忽略";
             }
+        } else if (arg == "--twist-deg") {
+            if (i + 1 < argc) {
+                p.twist_deg = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--twist-deg 缺少数值，忽略";
+            }
+        } else if (arg == "--tilt-deg") {
+            if (i + 1 < argc) {
+                p.tilt_deg = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--tilt-deg 缺少数值，忽略";
+            }
         } else if (arg.rfind("--", 0) == 0) {
             LOG(WARNING) << "未知参数: " << arg << "；已忽略";
         } else if (p.fbx_path.empty()) {
@@ -125,7 +143,8 @@ int main(int argc, char** argv) {
     CHECK(!p.fbx_path.empty())
         << "用法: jpov_fbx_viewer <fbx 路径> [glb 路径] [--shot out.png] "
            "[--time 秒|--frame 帧号] [--rest] [--view 0..7] "
-           "[--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0]";
+           "[--thick-leg 0.3~2.0] [--thick-arm 0.3~2.0] "
+           "[--twist-deg -90~90] [--tilt-deg -30~30]";
     const bool capture = !p.shot_path.empty();
     CHECK(!(p.has_time && p.has_frame))
         << "--time 与 --frame 只能给一个（都指出的是同一件事：看哪个时刻的帧）";
@@ -170,6 +189,20 @@ int main(int argc, char** argv) {
         << jpov_fbx_viewer::kThicknessScaleMax << "]，got " << p.thick_arm;
     app.thickness_leg_ = p.thick_leg;
     app.thickness_arm_ = p.thick_arm;
+
+    // 部位额外旋转角度（与面板滑条同一份状态）：交互与出图都生效。
+    //   值域与面板滑条一致（±kPartialTwistMaxDeg / ±kPartialTiltMaxDeg）：CLI 手打越界多半是
+    //   笔误，当场早崩并报出合法范围（不 clamp）。
+    CHECK(p.twist_deg >= -jpov_fbx_viewer::kPartialTwistMaxDeg &&
+          p.twist_deg <= jpov_fbx_viewer::kPartialTwistMaxDeg)
+        << "--twist-deg 取值应在 [" << -jpov_fbx_viewer::kPartialTwistMaxDeg << ", "
+        << jpov_fbx_viewer::kPartialTwistMaxDeg << "], got " << p.twist_deg;
+    CHECK(p.tilt_deg >= -jpov_fbx_viewer::kPartialTiltMaxDeg &&
+          p.tilt_deg <= jpov_fbx_viewer::kPartialTiltMaxDeg)
+        << "--tilt-deg 取值应在 [" << -jpov_fbx_viewer::kPartialTiltMaxDeg << ", "
+        << jpov_fbx_viewer::kPartialTiltMaxDeg << "], got " << p.tilt_deg;
+    app.partial_twist_waist_deg_ = p.twist_deg;
+    app.partial_tilt_head_deg_   = p.tilt_deg;
 
     if (capture) {
         // headless 单帧：先把时间/模式设好，再 RunOnce（OneIteration 画的是"推进前"

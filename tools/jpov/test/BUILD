@@ -81,6 +81,25 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 部位额外旋转（partial rotation）配置校验单测 —— 纯 CPU / 不依赖资产、不需要 GL 上下文。
+# 对应设计 interface/skeleton_types.h「部位额外旋转」+ docs/jpov_partial_rotation_design.md：
+# 两个关节名的合法性（查不到 / 重复 / 两通道同指一骨）+ 实例默认四元数。
+# 同 thickness：需 -lGL（依赖 skeleton 库；死亡用例的校验排在所有 GL 调用之前）。
+cc_test(
+    name = "jpov_partial_rotation_config_test",
+    srcs = ["jpov_partial_rotation_config_test.cc"],
+    deps = [
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src/skeleton:skeleton",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    linkopts = ["-lGL"],
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # glTF loader smoke test (CPU-only parse check)
 cc_test(
     name = "jpov_gltf_loader_test",

@@ -993,9 +993,11 @@ unsigned int Renderer::SkinnedShadowProg() {
 // id 从 1 起：DrawMeshWithSkeleton 要求 skeleton_id > 0（0 = 无效，见 render_command.cc）。
 uint32_t Renderer::RegisterSkeleton(
     const SkeletonType& type, std::vector<SkeletonPose> poses,
-    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config) {
+    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config,
+    std::array<std::string, kNumPartialRotation> partial_rotation_config) {
     auto mgr = std::make_unique<SkeletonManager>(type, std::move(poses),
-                                                 std::move(thickness_scaling_config));
+                                                 std::move(thickness_scaling_config),
+                                                 std::move(partial_rotation_config));
     const uint32_t id = static_cast<uint32_t>(skeleton_managers_.size()) + 1;
     skeleton_managers_.push_back(std::move(mgr));
     return id;
@@ -1017,7 +1019,8 @@ void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
     SkeletonRenderer::DrawSkinnedMesh(
         cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
         SkinnedMeshProg(), skel->gpu_handles(), skel->pose_count(),
-        instance_model_buf_, instance_pose_buf_, instance_thickness_buf_);
+        instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
+        instance_partial_buf_);
 }
 
 // 太阳阴影 pass 专用 shader（深度专用，见 kShadowVs/kShadowFs）。
@@ -1795,7 +1798,8 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
                 s, mesh_mgr_, shader_mgr_, skel->gpu_handles(),
                 skel->pose_count(),
                 shadow_vp_[c], shadow_depth_vp_[c], SkinnedShadowProg(),
-                instance_model_buf_, instance_pose_buf_, instance_thickness_buf_);
+                instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
+                instance_partial_buf_);
         }
 
         prev_far = far_i;
