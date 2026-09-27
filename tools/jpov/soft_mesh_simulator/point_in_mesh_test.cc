@@ -97,6 +97,46 @@ MeshData MergePositionMeshes(const MeshData& a, const MeshData& b) {
     return m;
 }
 
+// 圆环面（torus）：主半径 R、管半径 r（r < R 时不自交），闭合、genus-1、**非凸**。
+// 用于对着**解析体积**逐点校验——这是最容易暴露「射线/求交 corner case」的形状。
+// 顶点参数化：u（主）、v（管），P = ((R + r·cos v)·cos u, (R + r·cos v)·sin u, r·sin v)。
+// （缝合处顶点位置重合，几何上仍封闭——奇偶法不看拓扑，只看三角形。）
+MeshData MakeTorus(int major_seg, int minor_seg, float R, float r) {
+    CHECK_GE(major_seg, 3);
+    CHECK_GE(minor_seg, 3);
+    MeshData m;
+    m.flags = MeshVertexFlags::kPosition;
+    for (int i = 0; i <= major_seg; ++i) {
+        const double u = 2.0 * M_PI * i / major_seg;
+        for (int j = 0; j <= minor_seg; ++j) {
+            const double v = 2.0 * M_PI * j / minor_seg;
+            const double ring = R + r * std::cos(v);
+            m.positions.push_back(Vec3f(static_cast<float>(ring * std::cos(u)),
+                                        static_cast<float>(ring * std::sin(u)),
+                                        static_cast<float>(r * std::sin(v))));
+        }
+    }
+    const auto vid = [&](int i, int j) {
+        return static_cast<uint32_t>(i * (minor_seg + 1) + j);
+    };
+    for (int i = 0; i < major_seg; ++i) {
+        for (int j = 0; j < minor_seg; ++j) {
+            const uint32_t a = vid(i, j);
+            const uint32_t b = vid(i + 1, j);
+            const uint32_t c = vid(i + 1, j + 1);
+            const uint32_t d = vid(i, j + 1);
+            m.indices.push_back(a);
+            m.indices.push_back(b);
+            m.indices.push_back(c);
+            m.indices.push_back(a);
+            m.indices.push_back(c);
+            m.indices.push_back(d);
+        }
+    }
+    m.Validate();
+    return m;
+}
+
 // ---------------------------------------------------------------- 凸多面体 ---
 
 TEST(PointInMeshTest, AxisAlignedBoxInteriorIsInside) {
@@ -135,6 +175,41 @@ TEST(PointInMeshTest, OctahedronInteriorAndExterior) {
     EXPECT_FALSE(IsPointInMesh(P(0.5f, 0.5f, 0.5f), oct));   // 1.5 > 1
     EXPECT_FALSE(IsPointInMesh(P(0.6f, 0.3f, 0.2f), oct));   // 1.1 > 1
     EXPECT_FALSE(IsPointInMesh(P(2.0f, 0.0f, 0.0f), oct));
+}
+
+// ----------------------------------------------- 非凸：圆环面 vs 解析体积 ---
+
+// 非凸（genus-1）形状是计算几何最容易踩 corner case 的地方，而圆环面的「内/外」
+// 有**闭式解**（到管轴环线的距离）。用几千个随机点逐点比对，能抓住射线法在
+// 非凸/凹处的系统性错误（实测：把奇偶取反、或把三角形分组写错，本用例均会 FAIL）。
+//
+// 解析判据：令 ρ=√(x²+y²)、d=ρ−R，则点在管内 ⟺ d²+z² < r²。
+TEST(PointInMeshTest, NonConvexTorusMatchesAnalyticInterior) {
+    const float kMajor = 1.0f;
+    const float kTube = 0.35f;
+    const MeshData torus = MakeTorus(/*major_seg=*/96, /*minor_seg=*/48, kMajor, kTube);
+
+    std::mt19937 rng(20260927u);
+    const float range = kMajor + kTube + 0.2f;
+    std::uniform_real_distribution<float> coord(-range, range);
+
+    int checked = 0;
+    for (int i = 0; i < 4000; ++i) {
+        const Vec3f p(coord(rng), coord(rng), coord(rng));
+        const float rho = std::sqrt(p.x() * p.x() + p.y() * p.y());
+        const float d = rho - kMajor;
+        const float sdf = std::fabs(std::sqrt(d * d + p.z() * p.z()) - kTube);
+        // 网格是多面体近似（分段弦），贴近真表面处与解析解有 ~1e-3 的偏差；
+        // 这些点「在不在内」本就未定义，跳过，只校验离表面足够远的点。
+        if (sdf < 0.02f) {
+            continue;
+        }
+        const bool analytic_inside = (d * d + p.z() * p.z()) < kTube * kTube;
+        EXPECT_EQ(IsPointInMesh(p, torus), analytic_inside)
+            << "圆环面点 (" << p.x() << "," << p.y() << "," << p.z() << ") 判定与解析解不符";
+        ++checked;
+    }
+    EXPECT_GT(checked, 1000);  // 保证真的校验了足够多的点（否则用例形同虚设）
 }
 
 // ------------------------------------------------------------ 带空腔的壳 ---
