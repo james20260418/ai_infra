@@ -100,6 +100,11 @@ layout(location = 10) in vec3 aInstPose;
 //   组号 → 哪些关节 的映射由**骨架级配置**决定（SkeletonManager 构造入参），见 skeleton_types.h。
 layout(location = 11) in vec4 aInstThick0;
 layout(location = 12) in vec4 aInstThick1;
+// per-instance 部位额外旋转（divisor=1）：两个通道的**模型系**四元数（xyzw），默认恒等=不转。
+//   语义见 skeleton_types.h「部位额外旋转」/ skeleton_manager.h 的 partial_rotation_config：
+//   该通道所辖关节的整个子树绕其 bind pivot 旋转（模型系）。两通道嵌套时（腰⊃头）叠加。
+layout(location = 13) in vec4 aInstPartial0;
+layout(location = 14) in vec4 aInstPartial1;
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas，每骨 2 texel：实部 q + 对偶部 t）
 // 该骨架骨数 —— 也是「合法关节 index」的上界：蒙皮/粗细取址前用它做越界防护（见 JointInRange）。
 uniform int   uBoneCount;
@@ -115,6 +120,15 @@ uniform int uThicknessEnabled;
 //   (j,1) = R_bind_j(xyzw)    该骨 bind 朝向（局部 +Y = 骨长轴），单位四元数
 //   内容由 SkeletonManager 构造时从骨架导出（派生量，不是用户输入）。
 uniform sampler2D uThicknessBind;
+// ---- 部位额外旋转（骨架级能力；只在配置了通道 **且本批有非恒等旋转** 时开）----
+// 开关：0 = 整段跳过（未配通道 / 本批所有实例旋转都是恒等 ⇒ 逐字节零回归）。
+//   host 每 draw 依据「骨架有通道表」且「至少一个实例的 partial_rotations 非恒等」置 0/1
+//   （见 SkeletonRenderer::DrawSkinnedMesh）。
+uniform int uPartialEnabled;
+// 每骨 1 texel（RGBA32F，尺寸 bone_count × 1）：(ch_outer, ch_inner, _, _)；-1 = 无。
+uniform sampler2D uPartialBind;
+// 每通道 1 texel（RGBA32F，尺寸 kNumPartialRotation × 1）：(p_c.xyz, j_c 骨号)；未用 = 骨号 -1。
+uniform sampler2D uPartialChannel;
 
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -279,7 +293,81 @@ void ShapeByWeight(ivec4 joint, vec4 weight, vec3 v, vec3 n, vec3 t,
     t_out = t + dt;
 }
 
+// ==================== 部位额外旋转（乙：pose 之后叠加；2026-09-26 Danis 定）====================
+// 语义：R_c 在**模型系**（面朝 +X、上为 +Y）定义。作用在 j_c 的**整个子树**上，等价于
+//   「pose 已摆好后，把子树绕 **j_c 当前 pose 位置** 整体转 R_c」。即对 j_c 的局部变换**末尾**
+//   额外乘一个旋转（先 pose、后叠加）；因 R_c 是模型系量、要落到 j_c 的**已 pose 的局部帧**，
+//   换算后世界效果就是「绕 j_c 当前位置、按模型系 R_c 转」：
+//       G_c = T(pos_c) · R_c · T(pos_c)⁻¹ ,  pos_c = final(j_c)·p_c（= j_c 当前世界位置）
+//   绕“当前点”的刚体旋转 ⇒ 不会出现“下半身不动、上半身绕原地转”的腰斩。
+// 每骨用到的通道（外层/内层）由 uPartialBind 给；每通道常量（p_c + 骨号）由 uPartialChannel 给。
+
+// 四元数 Hamilton 乘法：a⊗b = 「先 b 后 a」（与 geom::Quaternion::operator* 同序）。
+vec4 QuatMulP(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+// 本实例通道 c 的模型系旋转四元数（c 只可能 0/1；由骨架配置保证）。
+vec4 PartialQuatOfChannel(int c) {
+    return normalize((c == 0) ? aInstPartial0 : aInstPartial1);
+}
+
+// 构造通道 c 的额外旋转 G_c 的**对偶四元数**：绕 j_c 当前位置 pos_c、按模型系 R_c 转。
+//   Pre: 该通道已配置（uPartialChannel 的骨号 >= 0）。顶点级常量（与骨无关）。
+void BuildPartialGDq(int c, out vec4 gq, out vec4 gt) {
+    vec4 chd = texelFetch(uPartialChannel, ivec2(c, 0), 0);
+    int joint = int(chd.w);
+    vec4 qj, tj;
+    LoadBoneDualQuat(joint, qj, tj);                          // j_c 本帧（两帧插值）的最终变换
+    vec3 pos = DualQuatTransformPoint(qj, tj, chd.xyz);       // pos_c = final(j_c)·p_c
+    vec4 Qg = PartialQuatOfChannel(c);                        // 轴 = 模型系原样
+    vec3 vg = pos - RotateByQuat(Qg, pos);                    // F 的平移部 = pos − R·pos
+    gq = Qg;
+    gt = 0.5 * QuatMulP(vec4(vg, 0.0), gq);
+}
+
+// 把某骨的**对偶四元数** (q,t) 前乘合成后的 G = G_outer ∘ G_inner（本骨所属通道，见下表）。
+//   gq0/gt0、gq1/gt1 = 通道 0/1 已预计算好的 G（DQ）。本骨不属任何通道时直接返回（不改 q/t）。
+void ApplyPartialRotation(int bone, vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
+                          inout vec4 q, inout vec4 t) {
+    vec4 sl = texelFetch(uPartialBind, ivec2(bone, 0), 0);
+    int c0 = int(sl.x);   // 外层（靠根、后作用）
+    if (c0 < 0) {
+        return;                 // 本骨不属任何通道
+    }
+    vec4 gq = (c0 == 0) ? gq0 : gq1;
+    vec4 gt = (c0 == 0) ? gt0 : gt1;
+    int c1 = int(sl.y);   // 内层（靠叶、先作用）
+    if (c1 >= 0) {
+        vec4 igq = (c1 == 0) ? gq0 : gq1;
+        vec4 igt = (c1 == 0) ? gt0 : gt1;
+        vec4 nq = QuatMulP(gq, igq);                 // G = G_outer ∘ G_inner
+        vec4 nt = QuatMulP(gq, igt) + QuatMulP(gt, igq);
+        gq = nq;
+        gt = nt;
+    }
+    vec4 bq = QuatMulP(gq, q);                       // 前乘：H = G ∘ T
+    vec4 bt = QuatMulP(gq, t) + QuatMulP(gt, q);
+    q = bq;
+    t = bt;
+}
+
 void main() {
+    // 部位额外旋转（乙）：每条**已配置**通道的 G（DQ）都是顶点级常量，先算好（与骨无关）。
+    vec4 pGq0 = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 pGt0 = vec4(0.0);
+    vec4 pGq1 = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 pGt1 = vec4(0.0);
+    if (uPartialEnabled != 0) {
+        if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
+            BuildPartialGDq(0, pGq0, pGt0);
+        }
+        if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
+            BuildPartialGDq(1, pGq1, pGt1);
+        }
+    }
+
     // ── ① 逐骨取「本帧」对偶四元数（两帧插值在 LoadBoneDualQuat 内完成）──
     vec4 qs[4];
     vec4 ts[4];
@@ -299,6 +387,11 @@ void main() {
             continue;  // 越界骨：当它不存在（防 texelFetch 越界 UB）
         }
         LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
+        // 部位额外旋转（乙）：在**混合之前**把该骨的对偶四元数前乘 G_b（= 该骨所属通道的
+        //   G_outer ∘ G_inner）。逐骨混合 ⇒ 腰/颈边界权重混合区平滑过渡。
+        if (uPartialEnabled != 0) {
+            ApplyPartialRotation(aJoint[i], pGq0, pGt0, pGq1, pGt1, qs[i], ts[i]);
+        }
         ws[i] = w;
         wsum += w;
         if (w > ref_w) {
@@ -388,6 +481,10 @@ layout(location = 10) in vec3 aInstPose;
 //   否则影子与身体错位（同 §「主/阴影公式必须逐字一致」）。
 layout(location = 11) in vec4 aInstThick0;
 layout(location = 12) in vec4 aInstThick1;
+// per-instance 部位额外旋转（divisor=1，同主 pass，loc13/14）——阴影必须与主 pass 同用一份，
+//   否则影子与身体错位（同 §「主/阴影公式必须逐字一致」）。
+layout(location = 13) in vec4 aInstPartial0;
+layout(location = 14) in vec4 aInstPartial1;
 uniform mat4 uShadowViewProj;       // 光空间 裁剪（proj*view，model 走 aInstModel）
 uniform mat4 uShadowDepthViewProj;  // 光空间 线性深度（DepthProj*view，model 走 aInstModel）
 uniform sampler2D uPoseAtlas;
@@ -398,6 +495,10 @@ uniform vec2  uAtlasDim;       // atlas 纹理尺寸 (w,h)，平坦→(x,y) 回�
 // 部位粗细（与主 pass 同开关、同绑定表；阴影只需位置）。
 uniform int uThicknessEnabled;
 uniform sampler2D uThicknessBind;
+// 部位额外旋转（与主 pass 同开关、同两张表、同 per-instance 四元数）。
+uniform int uPartialEnabled;
+uniform sampler2D uPartialBind;
+uniform sampler2D uPartialChannel;
 out float vShadowDepth;
 
 // 同主 pass：关节 index 越界防护（详见主 pass 里的 JointInRange 注释）。
@@ -494,7 +595,68 @@ vec3 ShapeByWeightS(ivec4 joint, vec4 weight, vec3 v) {
     return v + dv;
 }
 
+// 部位额外旋转（阴影只需位置，但对偶四元数整体前乘的公式与主 pass **逐字一致**，
+//   否则影子与身体错位 —— 与 thickness「主/阴影同改」同一铁律）。语义见主 pass。
+vec4 QuatMulS(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+vec4 PartialQuatOfChannelS(int c) {
+    return normalize((c == 0) ? aInstPartial0 : aInstPartial1);
+}
+
+// 详主 pass 的 BuildPartialGDq（同公式）：绕 j_c 当前位置、按模型系 R_c 转。
+void BuildPartialGDqS(int c, out vec4 gq, out vec4 gt) {
+    vec4 chd = texelFetch(uPartialChannel, ivec2(c, 0), 0);
+    int joint = int(chd.w);
+    vec4 qj, tj;
+    LoadBoneDualQuat(joint, qj, tj);
+    vec3 pos = DualQuatTransformPoint(qj, tj, chd.xyz);
+    vec4 Qg = PartialQuatOfChannelS(c);
+    vec3 vg = pos - RotateByQuatS(Qg, pos);
+    gq = Qg;
+    gt = 0.5 * QuatMulS(vec4(vg, 0.0), gq);
+}
+
+// 详主 pass 的 ApplyPartialRotation（同公式）。
+void ApplyPartialRotationS(int bone, vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
+                           inout vec4 q, inout vec4 t) {
+    vec4 sl = texelFetch(uPartialBind, ivec2(bone, 0), 0);
+    int c0 = int(sl.x);
+    if (c0 < 0) { return; }
+    vec4 gq = (c0 == 0) ? gq0 : gq1;
+    vec4 gt = (c0 == 0) ? gt0 : gt1;
+    int c1 = int(sl.y);
+    if (c1 >= 0) {
+        vec4 igq = (c1 == 0) ? gq0 : gq1;
+        vec4 igt = (c1 == 0) ? gt0 : gt1;
+        vec4 nq = QuatMulS(gq, igq);
+        vec4 nt = QuatMulS(gq, igt) + QuatMulS(gt, igq);
+        gq = nq;
+        gt = nt;
+    }
+    vec4 bq = QuatMulS(gq, q);
+    vec4 bt = QuatMulS(gq, t) + QuatMulS(gt, q);
+    q = bq;
+    t = bt;
+}
+
 void main() {
+    // 部位额外旋转：预计算已配置通道的 G（顶点级常量）。
+    vec4 pGq0 = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 pGt0 = vec4(0.0);
+    vec4 pGq1 = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 pGt1 = vec4(0.0);
+    if (uPartialEnabled != 0) {
+        if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
+            BuildPartialGDqS(0, pGq0, pGt0);
+        }
+        if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
+            BuildPartialGDqS(1, pGq1, pGt1);
+        }
+    }
+
     // 蒙皮：与主 pass **完全一致**的流程（参考骨 = 权重最大者；抗对偶；加权求和；归一化）。
     vec4 qs[4];
     vec4 ts[4];
@@ -514,6 +676,9 @@ void main() {
             continue;  // 越界骨：同主 pass（防 texelFetch 越界 UB）
         }
         LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
+        if (uPartialEnabled != 0) {  // 同主 pass（否则影子错位）
+            ApplyPartialRotationS(aJoint[i], pGq0, pGt0, pGq1, pGt1, qs[i], ts[i]);
+        }
         ws[i] = w;
         wsum += w;
         if (w > ref_w) {

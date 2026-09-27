@@ -236,6 +236,36 @@ inline constexpr int kThicknessGroupArm = 1;  // 组 1：手臂（左右上臂/�
 inline constexpr float kThicknessScaleMin = 0.3f;
 inline constexpr float kThicknessScaleMax = 2.0f;
 
+// ---- 部位额外旋转：本演示的通道约定 + 滑条值域 ----
+// 通道号 = 骨架级配置（MakeGlbPartialRotationConfig）里的顺序，也 = 面板滑条顺序。
+inline constexpr int kPartialChannelWaist = 0;  // 通道 0：腰（Spine）—— 扭腰
+inline constexpr int kPartialChannelHead  = 1;  // 通道 1：头（Head）—— 仰头
+// 滑条值域（度）：扭腰 ±90、仰头 ±30（2026-09-26 Danis 定）。
+inline constexpr float kPartialTwistMaxDeg = 90.0f;
+inline constexpr float kPartialTiltMaxDeg  = 30.0f;
+
+// 把两个滑条角度构造成**模型系**四元数（语义见 interface/skeleton_types.h「部位额外旋转」）。
+//   骨架空间 ≡ 模型系：本资产面朝 +X、上为 +Y ⇒
+//     扭腰 = 绕 +Y（竖直轴）转（正角把朝向前方从 +X 扭向 -Z）；
+//     仰头 = 绕 +Z（左右轴）转（正角把 +X 转向 +Y = 抬头向上）。
+//   （用 SkeletonManager 的通道配置，这两个四元数会被施加到「腰/头关节的整个子树」。）
+inline std::array<geom::Quaternion<float>, jpov::kNumPartialRotation> MakeGlbPartialRotations(
+    float twist_waist_deg, float tilt_head_deg) {
+    constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+    std::array<geom::Quaternion<float>, jpov::kNumPartialRotation> r;
+    r[static_cast<size_t>(kPartialChannelWaist)] = geom::Quaternion<float>::FromAxisAngle(
+        jpov::Vec3f(0.0f, 1.0f, 0.0f), twist_waist_deg * kDeg2Rad);
+    r[static_cast<size_t>(kPartialChannelHead)] = geom::Quaternion<float>::FromAxisAngle(
+        jpov::Vec3f(0.0f, 0.0f, 1.0f), tilt_head_deg * kDeg2Rad);
+    return r;
+}
+
+// 本模式是否显示「部位额外旋转」滑条（扭腰 / 仰头）—— 只要画的是蓝带皮网格就有意义
+//   （含 3 人 instanced 与粗细微调模式）；配 rest（TPose）也能生效，便于调试旋转方向。
+inline bool ViewShowsPartialRotationSliders(ViewMode m) {
+    return ViewGlbIsSkinned(m);
+}
+
 // 按骨名找 glb 骨架里的关节 index。找不到 → LOG(FATAL)：
 //   index 是**资产内部编号**（重导出/换资产就变），骨名才是语义（同 BodyRetarget 的骨名对位）；
 //   名字对不上说明配置或资产变了，必须早崩，不能静默少调一根骨。
@@ -248,6 +278,19 @@ inline int GlbJointIndexByName(const jpov::SkeletonType& skel, const char* name)
     LOG(FATAL) << "GlbJointIndexByName: glb 骨架里没有关节 \"" << name
                << "\"（骨名写错 / 资产换了命名）";
     return -1;
+}
+
+// 本演示的部位额外旋转配置：通道 0 = 腰（mixamorig:Spine）、通道 1 = 头（mixamorig:Head）。
+//   先用 GlbJointIndexByName 确认骨名存在（缺一根就带骨名早崩，消息指向本资产）；
+//   名字→index 的最终解析与合法性（唯一性 / 两通道同指一骨）在 SkeletonManager 里二次校验。
+inline std::array<std::string, jpov::kNumPartialRotation> MakeGlbPartialRotationConfig(
+    const jpov::SkeletonType& skel) {
+    const std::array<std::string, jpov::kNumPartialRotation> cfg = {"mixamorig:Spine",
+                                                                  "mixamorig:Head"};
+    for (const std::string& nm : cfg) {
+        GlbJointIndexByName(skel, nm.c_str());
+    }
+    return cfg;
 }
 
 // 本演示的粗细配置：组 0 = 腿、组 1 = 手臂（其余组留空 = 不用）。
@@ -338,6 +381,11 @@ public:
     //   (loc11/12)，不做任何重注册/重建（这正是 per-instance 的意义）。
     float thickness_leg_ = 1.0f;  // 组 0 = 腿（1.0 = 原样）
     float thickness_arm_ = 1.0f;  // 组 1 = 手臂
+
+    // ── 部位额外旋转（扭腰 / 仰头；任意「蓝带皮」模式下生效，含 TPose/rest 调试）──
+    //   滑条值（度）→ 每实例的 partial_rotations（模型系四元数）→ per-instance attribute(loc13/14)。
+    float partial_twist_waist_deg_ = 0.0f;  // 通道 0（腰）：绕模型上轴 +Y，±90°
+    float partial_tilt_head_deg_  = 0.0f;   // 通道 1（头）：绕模型左右轴 +Z，±30°
 
     // ── 播放状态 ──
     double anim_time_seconds_ = 0.0;  // 动画时间（秒）；循环语义由 SampleClipPose 承担
@@ -499,6 +547,9 @@ public:
                     // 部位粗细：滑条值 → 本实例的组系数（per-instance attribute；两帧插值无关）。
                     inst.thickness_scales[kThicknessGroupLeg] = thickness_leg_;
                     inst.thickness_scales[kThicknessGroupArm] = thickness_arm_;
+                    // 部位额外旋转：两个滑条值 → 模型系四元数（per-instance；两帧插值无关）。
+                    inst.partial_rotations =
+                        MakeGlbPartialRotations(partial_twist_waist_deg_, partial_tilt_head_deg_);
                     instances.push_back(inst);
                 }
                 cmds->DrawMeshWithSkeleton(glb_skin_mesh_id_, glb_skin_skel_id_,
@@ -747,19 +798,35 @@ private:
         ui_.Text(line.c_str(), jpov::UiRect{{ctrl_left, text_top},
                                             {w - 2.0f * ctrl_left, kTextRow}});
 
+        // 滑条区从状态行下方开始；粗细与额外旋转两组滑条**上下堆叠**（都有时各自占一行）。
+        const float kSliderW = 0.5f * w;
+        const float kSliderLeft = (w - kSliderW) * 0.5f;
+        float slider_y = text_top + kTextRow + kGap;
+
         // 部位粗细滑条（仅 kSkinnedThickness 模式）：值直接写进每实例的 thickness_scales。
         //   0.3~2.0（1.0 = 原样）；两位小数便于看出 1.00 这个"原样"刻度。
         if (has_glb_ && ViewShowsThicknessSliders(view_mode_)) {
-            const float kSliderW = 0.5f * w;
-            const float kSliderLeft = (w - kSliderW) * 0.5f;
-            const float slider_top = text_top + kTextRow + kGap;
             ui_.SliderFloat("腿粗细 (组0)", &thickness_leg_,
-                            jpov::UiRect{{kSliderLeft, slider_top}, {kSliderW, kRowH}},
+                            jpov::UiRect{{kSliderLeft, slider_y}, {kSliderW, kRowH}},
                             kThicknessScaleMin, kThicknessScaleMax, /*decimal_places*/2);
             ui_.SliderFloat("手臂粗细 (组1)", &thickness_arm_,
-                            jpov::UiRect{{kSliderLeft, slider_top + kRowH + kGap},
+                            jpov::UiRect{{kSliderLeft, slider_y + kRowH + kGap},
                                          {kSliderW, kRowH}},
                             kThicknessScaleMin, kThicknessScaleMax, /*decimal_places*/2);
+            slider_y += 2.0f * (kRowH + kGap);
+        }
+
+        // 部位额外旋转滑条（扭腰 / 仰头）：任意"蓝带皮"模式下显示，值 → 每实例
+        //   partial_rotations（模型系四元数）。TPose（rest）下也生效，便于核对旋转方向。
+        //   0° = 不转（默认，逐字节零回归）。
+        if (has_glb_ && ViewShowsPartialRotationSliders(view_mode_)) {
+            ui_.SliderFloat("扭腰 (通道0 ±90°)", &partial_twist_waist_deg_,
+                            jpov::UiRect{{kSliderLeft, slider_y}, {kSliderW, kRowH}},
+                            -kPartialTwistMaxDeg, kPartialTwistMaxDeg, /*decimal_places*/1);
+            ui_.SliderFloat("仰头 (通道1 ±30°)", &partial_tilt_head_deg_,
+                            jpov::UiRect{{kSliderLeft, slider_y + kRowH + kGap},
+                                         {kSliderW, kRowH}},
+                            -kPartialTiltMaxDeg, kPartialTiltMaxDeg, /*decimal_places*/1);
         }
     }
 
@@ -993,7 +1060,8 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
             // 部位粗细：把「腿 / 手臂」两组（骨名 → index）作为骨架级配置交给 SkeletonManager
             //   （校验 + 绑定表纹理都在它内部完成）；本工具只负责滑条值 → 实例系数。
             glb_skin_skel_id_ = RegisterSkeleton(glb_skeleton_, glb_skin_poses_,
-                                                 MakeGlbThicknessConfig(glb_skeleton_));
+                                                 MakeGlbThicknessConfig(glb_skeleton_),
+                                                 MakeGlbPartialRotationConfig(glb_skeleton_));
             glb_skin_frame_count_ = nframes;
             glb_skin_ready_ = true;
             LOG(INFO) << "蓝侧带皮网格装配完成: mesh_id=" << glb_skin_mesh_id_

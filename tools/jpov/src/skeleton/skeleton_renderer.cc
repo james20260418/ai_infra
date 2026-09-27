@@ -59,6 +59,19 @@ static_assert(kInstanceThicknessAttrSpec.base_loc ==
               "粗细系数的 base_loc 必须紧接 pose 选择槽（10 + 1 = 11）");
 static_assert(kInstanceThicknessAttrSpec.base_loc + kInstanceThicknessAttrSpec.slot_count <= 16,
               "per-instance 槽位总数不得超过 GL_MAX_VERTEX_ATTRIBS 保证的 16");
+// 部位额外旋转：三处同步（instance_buffer.h 的 spec / skinning_shader.h 的 loc13/14 / 本文上传循环）。
+static_assert(kInstancePartialAttrSpec.slot_count * kInstancePartialAttrSpec.slot_components ==
+                  kNumPartialRotation * 4,
+              "kInstancePartialAttrSpec 的 (slot_count × slot_components) 必须 == "
+              "kNumPartialRotation × 4（每实例 2 个四元数 = 8 float）");
+static_assert(kInstancePartialAttrSpec.stride_floats == kNumPartialRotation * 4,
+              "kInstancePartialAttrSpec::stride_floats 必须 == 每实例上传的 float 数"
+              "（= kNumPartialRotation × 4，见 UploadSkinningInstanceAttributes）");
+static_assert(kInstancePartialAttrSpec.base_loc ==
+                  kInstanceThicknessAttrSpec.base_loc + kInstanceThicknessAttrSpec.slot_count,
+              "额外旋转的 base_loc 必须紧接粗细系数槽（11 + 2 = 13）");
+static_assert(kInstancePartialAttrSpec.base_loc + kInstancePartialAttrSpec.slot_count <= 16,
+              "per-instance 槽位总数不得超过 GL_MAX_VERTEX_ATTRIBS 保证的 16");
 
 namespace {
 
@@ -110,6 +123,20 @@ void BuildModelMatrix(const Vec3f& center,
     model[3] = 0.0f;      model[7] = 0.0f;    model[11] = 0.0f;    model[15] = 1.0f;
 }
 
+// 本批实例里是否存在「非恒等」的部位额外旋转 —— 用于 host 侧开关 uPartialEnabled。
+//   全恒等 + 骨架无通道 ⇒ 整段跳过（逐字节零回归，不靠“乘单位元”）。
+bool AnyNonIdentityPartialRotation(const std::vector<SkinnedInstanceState>& instances) {
+    for (const SkinnedInstanceState& inst : instances) {
+        for (int c = 0; c < kNumPartialRotation; ++c) {
+            const geom::Quaternion<float>& q = inst.partial_rotations[static_cast<size_t>(c)];
+            if (q.x != 0.0f || q.y != 0.0f || q.z != 0.0f || q.w != 1.0f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 // ==================== UploadAmbient ====================
@@ -133,7 +160,8 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     int pose_w,
     InstanceBuffer& instance_model_buf,
     InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf) {
+    InstanceBuffer& instance_thickness_buf,
+    InstanceBuffer& instance_partial_buf) {
     const size_t n = cmd.instances.size();
     CHECK_GT(n, 0u) << "UploadSkinningInstanceAttributes: instances 不能为空";
 
@@ -184,6 +212,31 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
         }
     }
     instance_thickness_buf.Upload(thickness);
+
+    // 4) 部位额外旋转：每实例 kNumPartialRotation(=2) 个模型系四元数（xyzw，2×vec4 = loc13/14）。
+    //    契约：每项为单位四元数（有限、非退化）。默认全恒等；非恒等时才由 host 开开关
+    //    （见 DrawSkinnedMesh 的 uPartialEnabled），shader 侧才逐骨前乘。
+    std::vector<float> partial(n * static_cast<size_t>(kNumPartialRotation) * 4);
+    for (size_t k = 0; k < n; ++k) {
+        for (int c = 0; c < kNumPartialRotation; ++c) {
+            const geom::Quaternion<float>& q =
+                cmd.instances[k].partial_rotations[static_cast<size_t>(c)];
+            CHECK(std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) &&
+                  std::isfinite(q.w))
+                << "partial_rotations[" << c << "] 含非有限分量 —— 实例 " << k;
+            // 范数应 ≈ 1（单位四元数）；范数近 0 会让 shader 的 normalize 出 NaN。
+            const float norm2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+            CHECK_GT(norm2, 0.25f)
+                << "partial_rotations[" << c << "] 范数过小（应为单位四元数）—— 实例 " << k;
+            const size_t base =
+                (k * static_cast<size_t>(kNumPartialRotation) + static_cast<size_t>(c)) * 4;
+            partial[base + 0] = q.x;
+            partial[base + 1] = q.y;
+            partial[base + 2] = q.z;
+            partial[base + 3] = q.w;
+        }
+    }
+    instance_partial_buf.Upload(partial);
 }
 
 // ==================== DrawSkinnedMesh ====================
@@ -203,7 +256,8 @@ void SkeletonRenderer::DrawSkinnedMesh(
     int pose_count,
     InstanceBuffer& instance_model_buf,
     InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf) {
+    InstanceBuffer& instance_thickness_buf,
+    InstanceBuffer& instance_partial_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMesh: mesh_id "
                            << cmd.mesh_id << " 未注册";
@@ -336,6 +390,20 @@ void SkeletonRenderer::DrawSkinnedMesh(
     glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
     glUniform1i(glGetUniformLocation(sp, "uThicknessBind"), kTexUnitThicknessBind);
 
+    // ---- 部位额外旋转：通道表 + 开关（骨架有通道表 **且本批有非恒等旋转** 才开）----
+    //   与粗细同源思路：host 侧开关，全恒等/未配置时 shader 整段跳过（逐字节零回归）。
+    const int partial_on =
+        (gh.partial_rotation_bind_tex != 0 && gh.partial_rotation_channel_tex != 0 &&
+         AnyNonIdentityPartialRotation(cmd.instances))
+            ? 1 : 0;
+    glUniform1i(glGetUniformLocation(sp, "uPartialEnabled"), partial_on);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationBind);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_bind_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPartialBind"), kTexUnitPartialRotationBind);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationChannel);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_channel_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPartialChannel"), kTexUnitPartialRotationChannel);
+
     // ---- uViewProj = proj * view（每帧一张，全批共享）；摆放走 per-instance attribute ----
     glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, mvp);
 
@@ -357,7 +425,7 @@ void SkeletonRenderer::DrawSkinnedMesh(
     // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
     //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
     UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
-                                     instance_thickness_buf);
+                                     instance_thickness_buf, instance_partial_buf);
 
     // ★ 整批 = 一次 instanced draw。这才是 instancing 的意义（N 实例 ≠ N draw call）。
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
@@ -367,7 +435,7 @@ void SkeletonRenderer::DrawSkinnedMesh(
         //   残留 divisor=1 的启用态会泄漏给后续普通 draw（见 instance_buffer.h）。
         InstanceBufferBinding bind(mesh->vao,
                                    {&instance_model_buf, &instance_pose_buf,
-                                    &instance_thickness_buf});
+                                    &instance_thickness_buf, &instance_partial_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -477,7 +545,8 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     unsigned int shadow_prog,
     InstanceBuffer& instance_model_buf,
     InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf) {
+    InstanceBuffer& instance_thickness_buf,
+    InstanceBuffer& instance_partial_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -502,7 +571,7 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     // 实例数据：同一套逐实例缓冲（与主 pass 同源，否则影子与身体错位）。
     //   光空间 VP 走 uniform（全批共享）。
     UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
-                                     instance_thickness_buf);
+                                     instance_thickness_buf, instance_partial_buf);
 
     glUseProgram(shadow_prog);
     glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
@@ -519,6 +588,19 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glActiveTexture(GL_TEXTURE0 + kTexUnitThicknessBind);
     glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
     glUniform1i(glGetUniformLocation(shadow_prog, "uThicknessBind"), kTexUnitThicknessBind);
+    // 部位额外旋转：与主 pass **同一开关 + 同一份表 + 同一份 per-instance 旋转**（否则影子错位）。
+    const int partial_on =
+        (gh.partial_rotation_bind_tex != 0 && gh.partial_rotation_channel_tex != 0 &&
+         AnyNonIdentityPartialRotation(cmd.instances))
+            ? 1 : 0;
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialEnabled"), partial_on);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationBind);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_bind_tex);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialBind"), kTexUnitPartialRotationBind);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationChannel);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_channel_tex);
+    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialChannel"),
+                kTexUnitPartialRotationChannel);
     // 光空间 VP 走 uniform（不含 model）。
     glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowViewProj"),
                        1, GL_FALSE, shadow_vp);
@@ -530,7 +612,7 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
         // RAII 配对挂载（同主 pass）。
         InstanceBufferBinding bind(mesh->vao,
                                    {&instance_model_buf, &instance_pose_buf,
-                                    &instance_thickness_buf});
+                                    &instance_thickness_buf, &instance_partial_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,

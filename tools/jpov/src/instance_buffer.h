@@ -55,6 +55,7 @@ struct InstanceAttrSpec {
 //   摆放矩阵 model：loc6..9（mat4 拆 4 个 vec4 slot），每实例 16 float
 //   pose 选择     ：loc10   （vec3: pose_col_a, pose_col_b, ratio），每实例 3 float
 //   部位粗细系数  ：loc11..12（8 个 float = 2 个 vec4），每实例 8 float
+//   部位额外旋转  ：loc13..14（2 个模型系四元数 = 2 个 vec4），每实例 8 float
 // ⚠️ 这三个常量是 host 侧与 shader 侧**唯一**的 layout 约定点：改 shader 的
 //   layout(location=…) 必须同步改这里（反之亦然），否则静默读错槽位。
 //   ⚠️ pose 用 float 而非 ivec2 + glVertexAttribIPointer：IPointer 按**原始整数位**
@@ -70,6 +71,12 @@ inline constexpr InstanceAttrSpec kInstancePoseAttrSpec{/*base_loc*/ 10, /*slot_
 //   `layout(location = 11/12)` 声明必须同步（两个 vec4 ⇒ stride 8 float）。
 inline constexpr InstanceAttrSpec kInstanceThicknessAttrSpec{/*base_loc*/ 11, /*slot_count*/ 2,
                                                              /*slot_components*/ 4, /*stride*/ 8};
+// 部位额外旋转：每实例 kNumPartialRotation(=2) 个通道的**模型系**四元数（xyzw），
+//   两 个 vec4 slot（loc13/14）。与 skeleton_types.h 的 kNumPartialRotation /
+//   SkinnedInstanceState::partial_rotations 一一对应；shader 的 `layout(location=13/14)`
+//   声明必须同步（2 个 vec4 ⇒ stride 8 float）。
+inline constexpr InstanceAttrSpec kInstancePartialAttrSpec{/*base_loc*/ 13, /*slot_count*/ 2,
+                                                           /*slot_components*/ 4, /*stride*/ 8};
 
 // ==================== InstanceBuffer ====================
 
