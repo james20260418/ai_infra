@@ -43,6 +43,8 @@
 #ifndef JPOV_SRC_SKELETON_SKELETON_MANAGER_H_
 #define JPOV_SRC_SKELETON_SKELETON_MANAGER_H_
 
+#include <array>
+#include <string>
 #include <vector>
 
 #include "tools/jpov/interface/skeleton_types.h"
@@ -90,6 +92,23 @@ public:
         //   为何走纹理而不走 uniform 数组：① 不受顶点 uniform 分量预算约束（无骨数上限）；
         //   ② 与 pose atlas 同一套「大块常量表进纹理」的做法（见本文件顶 banner）。
         unsigned int thickness_bind_tex = 0;
+
+        // 「部位额外旋转」两张表（0 = 该骨架不做额外旋转；两张同生同灭）：
+        //
+        //   partial_rotation_bind_tex（bone_count × 1，RGBA32F）：**每骨一个 texel**
+        //     (ch_outer, ch_inner, _, _)：影响该骨的两条通道里，外层次（更靠根、后作用）
+        //     与内层次（更靠叶、先作用）的通道号（整数存 float：0/1，精确可表示；-1 = 无）。
+        //     子树范围在构造期从骨架树导出（派生量），VS 据此判断哪根骨要叠加旋转。
+        //   partial_rotation_channel_tex（kNumPartialRotation × 1，RGBA32F）：**每通道一个 texel**
+        //     (p_c.xyz, j_c 骨号)：p_c = 该通道关节的 **bind 世界位置**；j_c 骨号供 VS 去
+        //     pose atlas 取该关节**本 pose**的最终变换，从而算出它的**当前 pos**（额外旋转
+        //     的 pivot，也是一个参照帧）。未用通道 = 骨号 -1。
+        //
+        // 语义（乙，2026-09-26 Danis 定）：额外旋转 R 在**模型系**定义，作用在配置关节的
+        //   整个子树上，等价于「pose 摆好后，把子树绕**该关节当前 pose 位置**整体转 R」
+        //   （详见 skinning_shader.h 的 ApplyPartialRotation）。
+        unsigned int partial_rotation_bind_tex = 0;
+        unsigned int partial_rotation_channel_tex = 0;
     };
 
     // 构造：绑定一种骨架的【定义 + 全套 pose】，烘焙并上传骨骼动画纹理（pose atlas）。
@@ -113,8 +132,22 @@ public:
     //   Pre-condition: GL context 已激活；type.Validate() 通过。
     //   ⚠️ 每个 pose 的 bone_count 应与 type.bone_count 一致（同一种骨架）。poses 总容量
     //      不得超过 pose_capacity()（超→LOG(FATAL)，不 fallback）。
+    //   partial_rotation_config:
+    //          骨架级的「部位额外旋转」全局配置：至多 kNumPartialRotation(=2) 个**关节名**
+    //          （= SkeletonJoint::name）；每个名字定义一条「旋转通道」：该关节及其**整个子树**
+    //          会被 SkinnedInstanceState::partial_rotations 里同下标的四元数 R **在模型系**
+    //          绕该关节的**当前 pose 位置**整体旋转（先摆 pose、再叠加 R；用途：扭腰 / 仰头等）。
+    //          具体的“R 相对什么、定义在哪个系”、以及 TPose 歪头的边界，
+    //          见 interface/skeleton_types.h 的 partial_rotations 字段注释 + 设计文档
+    //          docs/jpov_partial_rotation_design.md。
+    //          构造时**立即校验**（名字为空 = 该通道不用；非空但骨架里查不到 / 骨名重复 /
+    //          两个通道指向同一根关节 → LOG(FATAL)，不 fallback）：配置写错就早崩。全空 = 本骨架
+    //          不做额外旋转（渲染侧整段跳过，纹理句柄为 0）。
+    //          ⚠️ 用**关节名**而非 index：index 是资产内部编号（重导出/换资产就变），骨名才是
+    //          语义（同 fbx viewer 的 GlbJointIndexByName / BodyRetarget 的骨名对位）。
     SkeletonManager(const SkeletonType& type, std::vector<SkeletonPose> poses,
-                    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {});
+                    std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {},
+                    std::array<std::string, kNumPartialRotation> partial_rotation_config = {});
 
     // 析构：释放本 manager 持有的 GL 资源（骨骼动画纹理）。
     ~SkeletonManager();

@@ -253,10 +253,13 @@ public:
     //   thickness_scaling_config: 骨架级「部位粗细」全局配置（至多 8 个关节组，每组一串关节
     //     index；空 = 该骨架不做粗细）。校验在 SkeletonManager ctor 里立即做（越界/一骨两组
     //     → FATAL）。几何表由 SkeletonManager 自己从骨架导出，不走本接口。
+    //   partial_rotation_config: 骨架级「部位额外旋转」全局配置（至多 2 个关节名，每名一条
+    //     旋转通道；空 = 该骨架不做额外旋转）。校验同样在 SkeletonManager ctor 里立即做。
     // Pre-condition: Init() 已调用（GL context 激活）；type.Validate() 通过；poses 非空。
     uint32_t RegisterSkeleton(
         const SkeletonType& type, std::vector<SkeletonPose> poses,
-        std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {});
+        std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config = {},
+        std::array<std::string, kNumPartialRotation> partial_rotation_config = {});
     // 取 skeleton_id 对应的 SkeletonManager（无则 nullptr）。
     SkeletonManager* GetSkeleton(uint32_t skeleton_id);
 
@@ -277,6 +280,7 @@ public:
     InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};           // loc6..9  = mat4
     InstanceBuffer instance_pose_buf_{kInstancePoseAttrSpec};             // loc10    = vec3
     InstanceBuffer instance_thickness_buf_{kInstanceThicknessAttrSpec};   // loc11..12 = 2×vec4
+    InstanceBuffer instance_partial_buf_{kInstancePartialAttrSpec};       // loc13..14 = 2×vec4
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };
