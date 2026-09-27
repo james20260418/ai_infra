@@ -35,6 +35,42 @@ cc_library(
     linkstatic = 1,
 )
 
+# point_in_mesh — 「点是否在网格体内」查询（纯 CPU，射线奇偶法）。
+#
+# 与本包的仿真器本体**互不依赖**：只用到 MeshData 与 geom 向量，故单列一个库，
+# 便于将来的八叉树等结构直接复用，而不必牵扯整套物理。
+cc_library(
+    name = "point_in_mesh",
+    srcs = ["point_in_mesh.cc"],
+    hdrs = ["point_in_mesh.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:vec",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "point_in_mesh_test",
+    srcs = ["point_in_mesh_test.cc"],
+    deps = [
+        ":point_in_mesh",
+        "//geom/common:vec",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 cc_test(
     name = "soft_mesh_simulator_test",
     srcs = ["soft_mesh_simulator_test.cc"],
