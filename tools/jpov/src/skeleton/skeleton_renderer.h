@@ -422,6 +422,7 @@ void main() {
     ao = clamp(ao, 0.0, 1.0);
 
     // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
+    // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
     vec3 ambient;
     if (uAmbientTricolorEnabled == 1) {
         float ambient_up = clamp(N.y, -1.0, 1.0);

@@ -216,12 +216,12 @@ struct SkyLighting {
     jpov::SkyCommand sky;
     // 主平行光：白天是太阳、夜间是月亮（按 sun_dir.y 切换，见上）。渲染侧只有一个
     // 平行光槽（RenderCommandList::sun），故日/月共用这一个字段。
+    jpov::DirectionalLight dir_light;
     // ambient（环境光）始终由 sky 推导，与天色/昼夜同源：
     //   ambient.color     = sky.AmbientColor()     （含夜色叠加；夜色端不吃 daylight_season）
     //   ambient.intensity = sky.AmbientIntensity() （含夜间项）
     // 若 tricolor_ambient=true（MakeSkyLighting 参数），额外填 ambient.tricolor =
     //   sky.AmbientTricolor()（[天, 天际线, 地]）——渲染侧改用三色梯度，单色 color 被忽略。
-    jpov::DirectionalLight dir_light;
     jpov::AmbientLight ambient;
 };
 
