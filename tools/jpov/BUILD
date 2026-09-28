@@ -166,6 +166,7 @@ cc_library(
         "//tools/jpov:viewer_app",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:ui",
+        "//tools/jpov/effect/particle_fire:fire_particles",
     ],
     copts = ["-std=c++20"],
 )

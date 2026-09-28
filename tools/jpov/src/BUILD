@@ -215,6 +215,7 @@ cc_library(
         ":object3d_renderer",
         ":primitives3d_renderer",
         "//tools/jpov/src/effect/fire_render:fire_renderer",
+        "//tools/jpov/effect/burning_render:burning_renderer",
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
         ":sky_renderer",

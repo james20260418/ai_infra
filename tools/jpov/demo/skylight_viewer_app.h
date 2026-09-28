@@ -29,6 +29,7 @@
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
+#include "tools/jpov/effect/particle_fire/fire_particles.h"
 
 namespace jpov_skylight {
 
@@ -95,6 +96,19 @@ public:
     // 交互面板有一个 toggle；headless 拍摄可用本 setter 单独开/关出图对比。
     void SetShowFire(bool show) { show_fire_ = show; }
     bool show_fire() const { return show_fire_; }
+
+    // 粒子是否每帧推进（交互=true 看动态；headless 拍摄时 false + WarmUpParticles 冻结）。
+    void SetParticlesLive(bool live) { particles_live_ = live; }
+
+    // 把粒子模拟向前“预热” seconds 秒（固定 dt=1/60），用于 headless 拍到稳定状态。
+    void WarmUpParticles(float seconds) {
+        const float dt = 1.0f / 60.0f;
+        const int steps = static_cast<int>(seconds / dt);
+        for (int i = 0; i < steps; ++i) {
+            StepParticles(dt);
+        }
+    }
+    size_t alive_particles() const { return emitter_.AliveCount(); }
 
     // 覆盖特效时钟（秒）。headless 拍摄用：不推进帧计数器，也能拍到动画中段。
     // 传 0 生效；传负值恢复“跟随帧计数器”（交互默认）。
@@ -175,11 +189,22 @@ public:
                                /*front*/  {0.0f, 0.0f, 1.0f});
         }
 
-        // 火焰（实验）：只受 show_fire_ 控制。
-        //   ① 立柱底部环绕火苗（“包裹”实验，本阶段主角）
-        //   ② 中间方块顶上的一团火（旧对比项，默认关）
+        // 火焰/燃烧（粒子实验）：
+        //   ① 立柱**粒子燃烧**（粒子化火舌，本阶段主角）
+        //   ② 立柱底部环绕火苗（旧“包裹”验证，默认关）
+        //   ③ 立柱几何燃烧体（旧，默认关）
+        //   ④ 方块顶上一团火（旧“火焰”，默认关）
         if (show_fire_) {
-            AppendPillarFire(cmds);
+            if (particles_live_) {
+                StepParticles(1.0f / static_cast<float>(kViewerFps));
+            }
+            AppendPillarBurningParticles(cmds);
+            if (show_ring_fire_) {
+                AppendPillarFire(cmds);
+            }
+            if (show_burning_body_) {
+                AppendPillarBurning(cmds);
+            }
             if (show_box_fire_) {
                 AppendFire(cmds);
             }
@@ -194,6 +219,65 @@ public:
     }
 
 private:
+    // 立柱底部一圈采集点（粒子发射源）：柱底圆周，略出于柱面。
+    void PillarBaseRing(std::vector<jpov::Vec3f>* out) const {
+        out->clear();
+        constexpr int kRing = 10;
+        const float ring = kPillarHalfX + 0.03f;
+        const float px = pillar_center_.x();
+        const float pz = pillar_center_.z();
+        for (int i = 0; i < kRing; ++i) {
+            const float a = 6.2831853f * static_cast<float>(i) / kRing;
+            out->push_back({px + ring * std::cos(a), 0.06f, pz + ring * std::sin(a)});
+        }
+    }
+
+    // 推进一步粒子模拟（发射 + 上升/摆动 + 老化）。
+    void StepParticles(float dt) {
+        std::vector<jpov::Vec3f> src;
+        PillarBaseRing(&src);
+        emitter_.SetRate(kParticleRate);
+        emitter_.EmitAccumulated(dt, src, /*spread*/ 0.07f,
+                                 /*up_speed*/ 0.95f, /*jit*/ 0.22f);
+        // 浮力越大 → 火苗往上窜得明显；sway 大 → 左右摆（对应“摆动明显”）。
+        emitter_.Update(dt, /*buoyancy*/ 3.2f, /*sway*/ 1.5f, /*drag*/ 1.2f);
+    }
+
+    // 立柱「燃烧」——**粒子化**：柱底一圈发射火苗粒子，各自上升/摆动/变冷熄灭。
+    void AppendPillarBurningParticles(jpov::RenderCommandList* cmds) const {
+        // 每颗粒子 = 一条 FireCommand（逐条命令）；颜色从热（黄白）到冷（暗红）。
+        emitter_.Append(cmds,
+                        /*color_hot*/  {1.00f, 0.86f, 0.45f, 1.0f},
+                        /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
+                        /*intensity*/ 1.35f,
+                        /*blend*/ fire_blend_,
+                        /*noise_scale*/ 3.4f);
+        // 暖色点光源：柱底，照亮柱子/地面。
+        jpov::PointLight light;
+        light.position = {pillar_center_.x(), 0.55f, pillar_center_.z()};
+        light.color = {1.0f, 0.50f, 0.16f, 1.0f};
+        light.linear_radius = 7.0f;
+        light.intensity = 7.0f;
+        cmds->point_lights.push_back(light);
+    }
+
+    // 立柱「燃烧」：把立柱声明为一个**燃烧体**（几何驱动，BurningRenderer 采样）。
+    void AppendPillarBurning(jpov::RenderCommandList* cmds) const {
+        cmds->DrawBurning(/*center*/ pillar_center_,
+                          /*up*/     {0.0f, 1.0f, 0.0f},
+                          /*front*/  {0.0f, 0.0f, 1.0f},
+                          /*half_extents*/ {kPillarHalfX, kPillarHalfY, kPillarHalfZ},
+                          /*strength*/ 0.8f,
+                          /*seed*/ 7u);
+        // 暖色点光源：柱底，照亮柱子/地面。
+        jpov::PointLight light;
+        light.position = {pillar_center_.x(), 0.6f, pillar_center_.z()};
+        light.color = {1.0f, 0.50f, 0.16f, 1.0f};
+        light.linear_radius = 7.0f;
+        light.intensity = 7.0f;
+        cmds->point_lights.push_back(light);
+    }
+
     // 叠加火焰（实验）：立柱底部**环状小火焰**——验证“包裹”。
     //
     // 为什么这么做：单个 quad 如果穿过柱轴，柱子会把quad中间吃掉、只剩两侧
@@ -314,8 +398,15 @@ private:
 
     bool show_panel_ = true;
     bool show_scene_ = true;
-    bool show_fire_  = true;   // 火焰开关（面板 toggle / headless setter）
+    bool show_fire_  = true;   // 火焰/燃烧总开关
     bool show_box_fire_ = false;  // 旧的“方块顶上一团火”对比项（默认关）
+    bool show_ring_fire_ = false; // 旧的“柱底环状火焰”对比项（默认关）
+    bool show_burning_body_ = false;  // 旧的“几何燃烧体”对比项（默认关）
+    bool particles_live_ = true;      // 粒子是否每帧推进（交互=true）
+
+    // 粒子发射器（有状态的模拟层；固定池，不无限增长）。
+    jpov::FireParticleEmitter emitter_{1200};
+    static constexpr float kParticleRate = 380.0f;  // 每秒发射数（柱底一圈）
     bool show_boxes_ = true;      // 三校方块开关（拍立柱时关）
     // 立柱中心（拍立柱时可挪到原点）。
     jpov::Vec3f pillar_center_{kPillarCx, kPillarHalfY, kPillarCz};

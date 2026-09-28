@@ -966,6 +966,18 @@ unsigned int Renderer::FireProg() {
         {FireRenderer::kFireVs, FireRenderer::kFireFs});
 }
 
+// 燃烧特效 program（火舌）。
+unsigned int Renderer::BurningProg() {
+    return shader_mgr_.GetOrCreate("burning",
+        {BurningRenderer::kBurningVs, BurningRenderer::kBurningFs});
+}
+
+// 燃烧烟 program。
+unsigned int Renderer::SmokeProg() {
+    return shader_mgr_.GetOrCreate("burning_smoke",
+        {BurningRenderer::kSmokeVs, BurningRenderer::kSmokeFs});
+}
+
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
 // vertex shader 只声明 location 0/1（aPos/aNormal），避免 VAO 中未绑定的
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
@@ -1167,7 +1179,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kText3D ||
             type == DrawCommandType::kObject3D ||
             type == DrawCommandType::kSkinnedMesh ||
-            type == DrawCommandType::kFire) {
+            type == DrawCommandType::kFire ||
+            type == DrawCommandType::kBurning) {
             has_3d = true;
             break;
         }
@@ -1321,11 +1334,11 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 火焰特效 pass：3D 不透明内容之后、resolve/tone map 之前。
+        // ---- 火焰/燃烧特效 pass：3D 不透明内容之后、resolve/tone map 之前。
         // 沿用当前 3D FBO 与同一张 depth buffer：测深度（被遮挡正确）、
-        // 不写深度（半透明互不遮挡）、加法混合。HDR 下 >1 的亮度交由 ACES 压。
-        if (!cmds.fires.empty()) {
-            DrawFirePass(cmds, fbo_3d_w, fbo_3d_h);
+        // 不写深度（半透明互不遮挡）。HDR 下 >1 的亮度交由 ACES 压。
+        if (!cmds.fires.empty() || !cmds.burnings.empty()) {
+            DrawEffectPass(cmds, fbo_3d_w, fbo_3d_h);
         }
 
         // ---- 第二步：MSAA resolve + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
@@ -1622,10 +1635,83 @@ void Renderer::DrawFirePass(const RenderCommandList& cmds, int fbo_w, int fbo_h)
                 break;
         }
         FireRenderer::DrawFire(fire, cmds.camera, stream_vbo_, prog, mvp_,
-                               cmds.effect_time);
+                               cmds.effect_time + fire.time_offset);
     }
 
     // 恢复默认状态（写深度 + 正面裁剪 + 标准 alpha 混合）。
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+// ---- DrawBurningPass ----
+// 「燃烧」特效 pass：与火焰 pass 同层（3D 不透明之后、tone map 之前），
+// 同 depth buffer。测深度、不写深度。
+void Renderer::DrawBurningPass(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+    (void)fbo_w;
+    (void)fbo_h;
+
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const unsigned int fire_prog = BurningProg();
+    const unsigned int smoke_prog = SmokeProg();
+    for (const auto& [type, idx] : cmds.order) {
+        if (type != DrawCommandType::kBurning) {
+            continue;
+        }
+        CHECK_GE(idx, 0);
+        CHECK_LT(idx, static_cast<int>(cmds.burnings.size()));
+        BurningRenderer::DrawBurning(cmds.burnings[idx], cmds.camera, stream_vbo_,
+                                     fire_prog, smoke_prog, mvp_, cmds.effect_time);
+    }
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+// ---- DrawEffectPass ----
+// 火焰 + 燃烧的合并入口：**按 order 顺序**依次处理两种命令，保证二者互相
+// 遮挡关系正确（而不是“先全部火、再全部燃烧”）。
+void Renderer::DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+    (void)fbo_w;
+    (void)fbo_h;
+
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+
+    const unsigned int fire_prog = FireProg();
+    const unsigned int burning_prog = BurningProg();
+    const unsigned int smoke_prog = SmokeProg();
+    for (const auto& [type, idx] : cmds.order) {
+        if (type == DrawCommandType::kFire) {
+            CHECK_GE(idx, 0);
+            CHECK_LT(idx, static_cast<int>(cmds.fires.size()));
+            const FireCommand& fire = cmds.fires[idx];
+            switch (fire.blend) {
+                case ParticleBlend::kAdditive:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    break;
+                case ParticleBlend::kAlpha:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    break;
+            }
+            FireRenderer::DrawFire(fire, cmds.camera, stream_vbo_, fire_prog, mvp_,
+                                   cmds.effect_time + fire.time_offset);
+        } else if (type == DrawCommandType::kBurning) {
+            CHECK_GE(idx, 0);
+            CHECK_LT(idx, static_cast<int>(cmds.burnings.size()));
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            BurningRenderer::DrawBurning(cmds.burnings[idx], cmds.camera, stream_vbo_,
+                                         burning_prog, smoke_prog, mvp_,
+                                         cmds.effect_time);
+        }
+    }
+
     glDepthMask(GL_TRUE);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);

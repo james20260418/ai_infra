@@ -34,6 +34,7 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"
+#include "tools/jpov/interface/burning_command.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
 #include "tools/jpov/interface/skeleton_types.h"
 
@@ -95,6 +96,8 @@ enum class DrawCommandType : uint8_t {
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
     kFire,              // 3D 火焰特效（世界空间，billboard 面片 + 加法混合）
                         //      程序化噪声，无纹理；参与深度测试、不写深度，见 FireCommand
+    kBurning,           // 3D 燃烧特效（世界空间，物体表面着火：火舌 + 烟）
+                        //      由物体几何驱动（火跟着物体走），见 BurningCommand
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
 };
@@ -1382,6 +1385,10 @@ struct FireCommand {
     float speed = 1.0f;         // 动画速度倍率（噪声向上滚动快慢）。
     float noise_scale = 3.0f;   // 噪声频率（焰舌粗细：小=细密，大=大块）。
 
+    // 动画相位偏移（秒）：实际动画时间 = RenderCommandList::effect_time + time_offset。
+    // 用途：同一帧里的多个火苗/粒子**不同步**（否则会看到整齐划一的跳动）。
+    float time_offset = 0.0f;
+
     ParticleBlend blend = ParticleBlend::kAdditive;  // 混合模式（MVP 火焰恒加法）。
 
     // Pre-condition: radius > 0
@@ -1465,6 +1472,8 @@ struct RenderCommandList {
     std::vector<Object3DCommand> object3d;
     // 3D 火焰特效（世界空间，billboard 面片 + 加法混合）。逐条独立，渲染时逐条画。
     std::vector<FireCommand> fires;
+    // 3D 燃烧特效（世界空间，物体表面着火）。逐条独立，渲染时逐条画。
+    std::vector<BurningCommand> burnings;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -1842,7 +1851,20 @@ struct RenderCommandList {
                   const Color& color_core, const Color& color_outer,
                   float intensity = 1.0f, float speed = 1.0f,
                   float noise_scale = 3.0f,
-                  ParticleBlend blend = ParticleBlend::kAdditive);
+                  ParticleBlend blend = ParticleBlend::kAdditive,
+                  float time_offset = 0.0f);
+
+    // 3D 燃烧（物体表面着火：火舌 + 烟）。由物体几何驱动，火跟着物体走。
+    //
+    // center/up/front:    物体的世界摆放（同 Object3DCommand）
+    // half_extents:       物体半尺寸（米，各分量 >0）
+    // strength:           0~1 火势（>0 时才会被绘制；==0 不画）
+    // seed:               确定性种子（同参数 → 同分布）
+    //
+    // Pre-condition: half_extents 各分量 > 0；strength >= 0
+    void DrawBurning(const Vec3f& center, const Vec3f& up, const Vec3f& front,
+                     const Vec3f& half_extents, float strength = 1.0f,
+                     uint32_t seed = 0);
 };
 
 }  // namespace jpov

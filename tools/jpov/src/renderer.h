@@ -15,6 +15,7 @@
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
+#include "tools/jpov/effect/burning_render/burning_renderer.h"
 #include "tools/jpov/src/effect/fire_render/fire_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
@@ -158,6 +159,13 @@ private:
     // 无火焰命令时是零开销（调用方先判 cmds.fires.empty()）。
     void DrawFirePass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
+    // 燃烧特效 pass（effect/burning_render）：物体表面着火（火舌 + 烟）。
+    // 与火焰 pass 同层、同 depth buffer；cmds.burnings 非空时才跑。
+    void DrawBurningPass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+
+    // 火焰 + 燃烧的合并入口：按 cmds.order 顺序依次绘制，保证两者互相遮挡正确。
+    void DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+
     // 拾取：color-ID pass。cmds.pick.enabled 时，把 picking_id>0 的物体用
     // 纯色 ID shader 画进离屏 pick FBO，glReadPixels 解码光标像素 → last_pick_。
     // fbo_w/fbo_h 为 3D FBO 尺寸；vp_x/y/w/h 为当前生效的 viewport（窗口坐标）。
@@ -238,6 +246,8 @@ private:
     unsigned int Solid3DProg();
     unsigned int Text3DProg();
     unsigned int FireProg();
+    unsigned int BurningProg();
+    unsigned int SmokeProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();

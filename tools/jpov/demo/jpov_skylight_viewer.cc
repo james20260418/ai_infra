@@ -306,6 +306,33 @@ int RunCapture(const std::string& out_dir) {
     app.SetShowFire(true);
     app.SetShowBoxes(true);
 
+    // ── K. 燃烧的立柱（**粒子化**）：柱底一圈发射火苗粒子，各自上升/摆动/熄灭 ──
+    app.deg_.sun_elev_deg = -18.0f;
+    app.SetShowBoxes(false);
+    app.SetPillarCenter({0.0f, jpov_skylight::kPillarHalfY, 0.0f});
+    app.SetShowFire(true);
+    app.SetEffectTime(0.7f);
+    // 拍摄冻结粒子 + 预热到稳态。
+    app.SetParticlesLive(false);
+    app.WarmUpParticles(4.0f);
+    LOG(INFO) << "burn particles alive=" << app.alive_particles();
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.10;
+    app.view_.R     = 5.5;
+    for (float th : {0.0f, 35.0f, 70.0f, 110.0f}) {
+        app.view_.theta = th * 3.14159265358979323846 / 180.0;
+        shoot(("burn_th" + std::to_string(static_cast<int>(th))).c_str());
+    }
+    // 近景 + 关火对照
+    app.view_.R = 3.0f;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    shoot("burn_close");
+    app.SetShowFire(false);
+    shoot("burn_off");
+    app.SetShowFire(true);
+    app.SetParticlesLive(true);
+    app.SetShowBoxes(true);
+
     app.Finalize();
     return 0;
 }

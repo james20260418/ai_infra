@@ -28,6 +28,7 @@ void RenderCommandList::Clear() {
     object3d.clear();
     skinned_mesh.clear();
     fires.clear();
+    burnings.clear();
     point_lights.clear();
     object_use_default_color = false;
     order.clear();
@@ -251,7 +252,8 @@ void RenderCommandList::DrawFire(const Vec3f& base, float radius, float height,
                                  const Color& color_core,
                                  const Color& color_outer,
                                  float intensity, float speed,
-                                 float noise_scale, ParticleBlend blend) {
+                                 float noise_scale, ParticleBlend blend,
+                                 float time_offset) {
     CHECK_GT(radius, 0.0f) << "DrawFire: radius 必须 > 0";
     CHECK_GT(height, 0.0f) << "DrawFire: height 必须 > 0";
     CHECK_GE(intensity, 0.0f) << "DrawFire: intensity 必须 >= 0";
@@ -268,8 +270,32 @@ void RenderCommandList::DrawFire(const Vec3f& base, float radius, float height,
     cmd.speed = speed;
     cmd.noise_scale = noise_scale;
     cmd.blend = blend;
+    cmd.time_offset = time_offset;
     fires.push_back(cmd);
     order.emplace_back(DrawCommandType::kFire, idx);
+}
+
+void RenderCommandList::DrawBurning(const Vec3f& center, const Vec3f& up,
+                                    const Vec3f& front,
+                                    const Vec3f& half_extents, float strength,
+                                    uint32_t seed) {
+    CHECK_GT(half_extents.x(), 0.0f) << "DrawBurning: half_extents.x 必须 > 0";
+    CHECK_GT(half_extents.y(), 0.0f) << "DrawBurning: half_extents.y 必须 > 0";
+    CHECK_GT(half_extents.z(), 0.0f) << "DrawBurning: half_extents.z 必须 > 0";
+    CHECK_GE(strength, 0.0f) << "DrawBurning: strength 必须 >= 0";
+    if (strength <= 0.0f) {
+        return;   // 火势为 0：不画（无命令）
+    }
+    int idx = static_cast<int>(burnings.size());
+    BurningCommand cmd;
+    cmd.center = center;
+    cmd.up = up;
+    cmd.front = front;
+    cmd.half_extents = half_extents;
+    cmd.strength = strength;
+    cmd.seed = seed;
+    burnings.push_back(cmd);
+    order.emplace_back(DrawCommandType::kBurning, idx);
 }
 
 }  // namespace jpov

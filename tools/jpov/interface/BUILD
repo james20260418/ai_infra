@@ -44,6 +44,18 @@ cc_library(
     deps = [],
 )
 
+# BurningCommand — 「燃烧」特效命令（物体表面着火）。与 render_command 分离，
+# 使 fire/burning 两条线各自独立、互不污染。
+cc_library(
+    name = "burning_command",
+    hdrs = ["burning_command.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pbr_material",
+        "//geom/common:vec",
+    ],
+)
+
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
@@ -55,6 +67,7 @@ cc_library(
         ":gltf_object",
         ":pbr_material",
         ":skeleton_types",
+        ":burning_command",
         "//geom/common:vec",
         "//geom/math:piecewise_linear_function",
         "@glog_static//:glog",
