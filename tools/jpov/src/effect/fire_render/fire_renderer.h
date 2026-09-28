@@ -47,23 +47,27 @@ void main() {
 )glsl";
 
     // kFireFs：程序化火焰。
-    //   形状：底部宽、顶部收窄的三角剪影（形状梯度）。
-    //   动态：fbm 噪声沿 +v 方向滚动（火向上蹿）。
-    //   颜色：低热处 = 外焰色，高热处 = 核心色（热色阶）。
-    //   alpha：剪影覆盖率（加法混合下即发光强度的一部分）。
-    // 全部 uniform 由 CPU 每帧上传（时间/颜色/强度/噪声频率）。
+    //   由两部分叠加：
+    //     ① 根部：持续不断的一束小火苗（不消失，钉在底部）。
+    //     ② 火舌串：竖直方向分成若干“团”，像烟囱的烟团一样不断向上冒出、
+    //        各自摆动/淡出 —— 火焰主体由这些断续的火舌构成（不是连续柱）。
+    //   水平摆动幅度随高度增大；噪声用低频（纹理疏，不做高频细密纹理）。
     static constexpr const char* kFireFs = R"glsl(
 #version 330 core
 in vec2 vUv;
 out vec4 FragColor;
 uniform float uTime;        // 特效时钟（秒）
 uniform float uSpeed;       // 动画速度倍率
-uniform float uNoiseScale;  // 噪声频率（焰舌粗细）
+uniform float uNoiseScale;  // 噪声频率（焰舌粗细/纹理疏密）
 uniform vec3  uColorCore;   // 核心色（热）
 uniform vec3  uColorOuter;  // 外焰色（冷）
 uniform float uIntensity;   // 发光强度（HDR 乘子）
 
-float hash(vec2 p) {
+float hash11(float p) {
+    return fract(sin(p * 127.1) * 43758.5453123);
+}
+
+float hash12(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
@@ -71,17 +75,17 @@ float vnoise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
+    float a = hash12(i);
+    float b = hash12(i + vec2(1.0, 0.0));
+    float c = hash12(i + vec2(0.0, 1.0));
+    float d = hash12(i + vec2(1.0, 1.0));
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 float fbm(vec2 p) {
     float v = 0.0;
     float amp = 0.5;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 3; ++i) {          // 3 层，纹理更疏
         v += amp * vnoise(p);
         p *= 2.0;
         amp *= 0.5;
@@ -90,35 +94,62 @@ float fbm(vec2 p) {
 }
 
 void main() {
-    vec2 uv = vUv;                                  // u:0→1 左→右; v:0→1 底→顶
+    vec2 uv = vUv;                          // x:0→1 左→右; y:0→1 底→顶
     float t = uTime * uSpeed;
+    float x = uv.x - 0.5;                   // -0.5 .. 0.5
+    float y = uv.y;
 
-    // 噪声：三个频率叠加（大块 + 细节 + 细纹），均向上滚动（火往上蹿）。
-    float n1 = fbm(vec2(uv.x * uNoiseScale, uv.y * uNoiseScale * 0.5 - t));
-    float n2 = fbm(vec2(uv.x * uNoiseScale * 2.4 + 3.0,
-                        uv.y * uNoiseScale * 1.1 - t * 1.6));
-    float n3 = fbm(vec2(uv.x * uNoiseScale * 3.7 - t * 2.4,
-                        uv.y * uNoiseScale * 2.1 - t * 2.2));
-    float n = mix(mix(n1, n2, 0.4), n3, 0.22);
-    n = smoothstep(0.22, 0.85, n);                  // 提高对比度 → 更像“火舌”而非雾
+    // ── 火舌串：竖直方向分格，每格是一团向上冒出、摆动、消失的火舌 ──
+    const float kBands = 5.0;
+    float sv  = y * kBands - t * 1.2;
+    float ci  = floor(sv);
+    float cf  = fract(sv);
+    float rnd = hash11(ci);
 
-    // 宽度包络：底部宽、顶部收窄；边缘被噪声侵蚀 → 不规则火舌。
-    float w = mix(1.0, 0.10, uv.y);
-    float dx = abs(uv.x - 0.5) * 2.0;               // 0(中) .. 1(边)
-    float mask = 1.0 - smoothstep(w * 0.35, w * (0.55 + 0.6 * n), dx);
-    mask *= smoothstep(1.0, 0.68, uv.y);            // 顶部渐隐
-    mask *= smoothstep(0.0, 0.06, uv.y);            // 底部不硬贴
+    // 活跃区间：软收尾，相邻团略有重叠 → 连成一条上升的火焰，但仍能看出“一团团”。
+    float life = smoothstep(0.0, 0.28, cf) * (1.0 - smoothstep(0.72, 1.0, cf));
 
-    // 热度：底热顶冷 × 噪声（给火焰内部纹理）。
-    float grad = pow(max(1.0 - uv.y, 0.0), 1.4) * 1.9;
-    float heat = clamp(n * grad * mask, 0.0, 1.0);
+    // 水平摆动：沿高度连续变化（关键：不能用每格随机的相，否则相邻团会水平错开、
+    // 看起来是“分离的悬浮块”）。幅度随高度增大 → 顶部摆得更大。
+    float swayAmp = 0.05 + 0.35 * y;
+    float sway = 0.60 * sin(t * 1.5 + y * 3.0)
+               + 0.40 * sin(t * 2.7 + y * 6.0 + 1.3);
+    float cx = 0.5 + swayAmp * sway + 0.02 * (rnd - 0.5);
 
-    // 热色阶：低热 = 外焰色（橙红），高热 = 核心色（亮黄）。
-    // 亮度用 pow(heat,0.6) 拉开（否则颜色被 heat 乘暗、不鲜艳）。
-    vec3 tone = mix(uColorOuter, uColorCore, smoothstep(0.12, 0.85, heat));
-    float bright = pow(heat, 0.6);
-    // alpha：剪影覆盖率；热处更实（原子透明的焰心更亮、更不透明）。
-    float a = clamp(mask * (0.45 + 0.75 * heat), 0.0, 1.0);
+    // 火舌形状：先定一条连续的火柱宽度包络（底宽顶窄），再被噪声 + 每团的
+    // “鼓包”调制 → 既连成一条火焰，又能看出一团团上升的火舌。
+    float vp  = clamp(cf, 0.0, 1.0);
+    float nW  = vnoise(vec2(uv.x * uNoiseScale * 1.6, uv.y * 3.6 - t * 2.0));
+    float wCol = 0.27 * (1.0 - 0.62 * y);
+    float w  = wCol * (0.60 + 0.60 * nW) * (0.80 + 0.50 * life);
+    float dx = abs(uv.x - cx);
+    float tongue = (1.0 - smoothstep(w * 0.35, w, dx)) * (0.55 + 0.45 * life);
+
+    // ── 根部：持续不断的一小束小火苗（不随格子消失，钉在底部）──
+    const float kRootH = 0.22;
+    float nR = vnoise(vec2(uv.x * uNoiseScale * 2.2, uv.y * 5.0 - t * 2.6));
+    float rootW = 0.13 * (1.0 - y / kRootH) * (0.60 + 0.90 * nR);
+    float rootMask = (1.0 - smoothstep(0.0, kRootH, y)) *
+                     (1.0 - smoothstep(rootW * 0.25, rootW, abs(x)));
+    rootMask *= 0.85 + 0.15 * sin(t * 3.4 + y * 10.0);
+
+    // 噪声侵蚀：让剪影不规则 + 断续（大块 + 细节两层）。
+    float n1 = fbm(vec2(uv.x * uNoiseScale * 0.80, uv.y * 2.4 - t * 1.4));
+    float n2 = vnoise(vec2(uv.x * uNoiseScale * 2.6 + 5.0, uv.y * 4.6 - t * 2.4));
+    float erode = n1 * 0.65 + n2 * 0.35;
+
+    float density = max(tongue, rootMask);
+    float shape = density * smoothstep(0.28, 0.62, erode + 0.15 * density);
+
+    // 热度由单层噪声驱动（分布宽）→ 颜色从橙红到黄白有层次。
+    float nH  = vnoise(vec2(uv.x * uNoiseScale * 1.1, uv.y * 3.0 - t * 1.8));
+    float heat = clamp(density * (0.25 + 1.35 * nH) * (1.0 - 0.25 * y), 0.0, 1.0);
+
+    // 颜色与亮度解耦：亮度不再随 heat 归零（否则外缘橙红被压黑看不见）
+    // → 外缘保留可见的橙红（外焰），核心趋黄白。
+    vec3 tone = mix(uColorOuter, uColorCore, smoothstep(0.05, 0.70, heat));
+    float bright = mix(0.55, 1.0, heat);
+    float a = clamp(shape * (0.55 + 0.45 * heat), 0.0, 1.0);
     FragColor = vec4(tone * bright * uIntensity, a);
 }
 )glsl";

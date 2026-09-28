@@ -272,6 +272,29 @@ int RunCapture(const std::string& out_dir) {
     app.SetShowFire(true);
     shoot("fire_dusk_on");
 
+    // ── H. 夜间近景：火焰轮廓最清楚（调火舌形态用）──
+    app.deg_.sun_elev_deg = -60.0f;
+    app.view_.R = 3.4f;
+    for (float t : {0.0f, 0.5f, 1.0f, 1.5f}) {
+        app.SetEffectTime(t);
+        shoot(("fire_night_t" + std::to_string(static_cast<int>(t * 10))).c_str());
+    }
+
+    // ── I. 纯净火焰（无场景/无地面）：只留火焰本体，调火舌形态 ──
+    app.deg_.sun_elev_deg = -80.0f;
+    app.SetShowScene(false);
+    app.SetShowFire(true);
+    app.SetFireBlend(jpov::ParticleBlend::kAlpha);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.06;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 4.0;
+    for (float t : {0.0f, 0.35f, 0.7f, 1.05f, 1.4f, 1.75f}) {
+        app.SetEffectTime(t);
+        shoot(("fire_only_t" + std::to_string(static_cast<int>(t * 100))).c_str());
+    }
+    app.SetShowScene(true);
+
     app.Finalize();
     return 0;
 }
