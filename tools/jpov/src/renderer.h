@@ -15,6 +15,7 @@
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
+#include "tools/jpov/src/effect/fire_render/fire_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
@@ -149,6 +150,14 @@ private:
     void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
     void DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun);
 
+    // 火焰特效 pass：在 3D 不透明内容全部画完后、resolve/tone map 之前调用。
+    // 沿用当前 3D FBO（HDR 或 LDR）+ 同一张 depth buffer：
+    //   - 测深度（被前方 Object3D 正确遮挡）
+    //   - **不写深度**（glDepthMask false，半透明面片互不遮挡）
+    //   - 按各自 ParticleBlend 设置混合（加法 / alpha），画完恢复默认状态
+    // 无火焰命令时是零开销（调用方先判 cmds.fires.empty()）。
+    void DrawFirePass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+
     // 拾取：color-ID pass。cmds.pick.enabled 时，把 picking_id>0 的物体用
     // 纯色 ID shader 画进离屏 pick FBO，glReadPixels 解码光标像素 → last_pick_。
     // fbo_w/fbo_h 为 3D FBO 尺寸；vp_x/y/w/h 为当前生效的 viewport（窗口坐标）。
@@ -228,6 +237,7 @@ private:
     unsigned int ImageProg();
     unsigned int Solid3DProg();
     unsigned int Text3DProg();
+    unsigned int FireProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();

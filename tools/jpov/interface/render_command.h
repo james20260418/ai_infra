@@ -93,6 +93,10 @@ enum class DrawCommandType : uint8_t {
     kSkinnedMesh,       // 3D 骨架蒙皮模型（世界空间，instancing）
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
+    kFire,              // 3D 火焰特效（世界空间，billboard 面片 + 加法混合）
+                        //      程序化噪声，无纹理；参与深度测试、不写深度，见 FireCommand
+                        //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
+                        //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -1334,8 +1338,57 @@ struct SkinnedMeshCommand {
                              // 由 renderer 经 IdAllocator 分配；0 = 无效（实现应 LOG(FATAL)/忽略）。
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
-    PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
+    PBRMaterial material;  // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
+};
+
+// ==================== 特效（effect）====================
+
+// 特效混合模式。
+//   只有加法（发光）与标准 alpha 透明（遮挡）两种；
+//   不提供乘法/减法混合（那属于「作用于已成画面的调制类效果」，
+//   载体是全屏后处理/贴面几何，不是粒子/面片特效）。
+//
+//   kAdditive：GL_SRC_ALPHA, GL_ONE
+//              → 发光特效（火焰/电/能量/发光圈）。满足交换律，**天然免排序**。
+//   kAlpha   ：GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+//              → 半透明遮挡类（烟/雾/雨幕）。**顺序敏感**，需按深度排序后绘制。
+enum class ParticleBlend : uint8_t {
+    kAdditive,
+    kAlpha,
+};
+
+// 3D 火焰（世界空间）—— 程序化 shader 火焰（无纹理、无粒子模拟）。
+//
+// 实现：一个面向相机的竖直 quad（圆柱 billboard：仅绕 Y 轴朝相机，
+// 保证「火向上」方向永远正确），在 fragment 里用「形状梯度 × 滚动噪声」
+// 程序化生成火焰。参与深度测试（被前景物体遮挡）、**不写深度**（半透明），
+// 与 Object3D 共享同一张 depth buffer。
+//
+// 设计约定（见 docs/jpov_effect_pass_design.md）：命令层只描述「画什么」
+//（位置/尺寸/颜色等视觉原语），不描述「怎么画」（不泄漏 GL 常量）。
+// 「用户说这里有一团多大的火、风往哪吹」——风、密度等更高级的语义
+// 属后续（本 MVP 用 noise_scale/speed 直接控形态与动态）。
+struct FireCommand {
+    Vec3f base;          // 火焰**底部中心**的世界坐标（quad 底边中点）
+    float radius;        // 水平半宽（米）。quad 宽 = 2*radius。
+    float height;        // 向上伸展高度（米）。quad 高 = height。
+
+    Color color_core;    // 核心色（气体最热处，亮，如白黄）。
+    Color color_outer;   // 外焰色（较冷，暗，如橙红）。
+                         // 业界经验：火焰**至少两个颜色**（热色阶），单色必假。
+
+    float intensity = 1.0f;     // 发光强度（HDR 乘子，可 >1；>1 才「亮」）。
+    float speed = 1.0f;         // 动画速度倍率（噪声向上滚动快慢）。
+    float noise_scale = 3.0f;   // 噪声频率（焰舌粗细：小=细密，大=大块）。
+
+    ParticleBlend blend = ParticleBlend::kAdditive;  // 混合模式（MVP 火焰恒加法）。
+
+    // Pre-condition: radius > 0
+    // Pre-condition: height > 0
+    // Pre-condition: intensity >= 0
+    // Pre-condition: speed >= 0
+    // Pre-condition: noise_scale > 0
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
@@ -1410,6 +1463,8 @@ struct RenderCommandList {
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
+    // 3D 火焰特效（世界空间，billboard 面片 + 加法混合）。逐条独立，渲染时逐条画。
+    std::vector<FireCommand> fires;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -1532,6 +1587,11 @@ struct RenderCommandList {
     // 框架在 Render() 时自动使用该 Camera 计算 MVP 变换。
     // 若无需 3D 渲染可保持默认值（此时 3D 绘制结果未定义）。
     Camera camera;
+
+    // 特效动画时钟（秒）。仅「随时间变化」的特效命令（如火焰 FireCommand）使用；
+    // 用户负责推进（例如 time = frame_count / target_fps）。默认 0（定格首帧）。
+    // 用显式时钟而不用 wall-clock，保证**确定性**（同样输入 → 同样画面，可复现）。
+    float effect_time = 0.0f;
 
     // 清空本帧所有指令（框架在每帧开始时调用）
     void Clear();
@@ -1762,6 +1822,27 @@ struct RenderCommandList {
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,
                               std::vector<SkinnedInstanceState> instances);
+
+    // ---- 特效绘制辅助方法（世界空间）----
+
+    // 3D 火焰（程序化 shader，无纹理）。
+    //
+    // base:        火焰底部中心的世界坐标
+    // radius:      水平半宽（米，>0）
+    // height:      向上高度（米，>0）
+    // color_core:  核心色（亮）
+    // color_outer: 外焰色（暗）
+    // intensity:   发光强度（HDR 乘子，>=0）
+    // speed:       动画速度倍率（>=0）
+    // noise_scale: 噪声频率（>0）
+    // blend:       混合模式（默认加法；alpha 透明下火色更清楚、不被亮背景洗白）
+    //
+    // Pre-condition: radius > 0, height > 0, intensity >= 0, speed >= 0, noise_scale > 0
+    void DrawFire(const Vec3f& base, float radius, float height,
+                  const Color& color_core, const Color& color_outer,
+                  float intensity = 1.0f, float speed = 1.0f,
+                  float noise_scale = 3.0f,
+                  ParticleBlend blend = ParticleBlend::kAdditive);
 };
 
 }  // namespace jpov

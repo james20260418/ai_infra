@@ -960,6 +960,12 @@ unsigned int Renderer::Text3DProg() {
         {Primitives3DRenderer::kTexVs3d, Primitives3DRenderer::kText3dFs});
 }
 
+// 火焰特效 program：CPU 展开的 world 顶点(kFireVs) + 程序化火焰片元(kFireFs)。
+unsigned int Renderer::FireProg() {
+    return shader_mgr_.GetOrCreate("fire",
+        {FireRenderer::kFireVs, FireRenderer::kFireFs});
+}
+
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
 // vertex shader 只声明 location 0/1（aPos/aNormal），避免 VAO 中未绑定的
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
@@ -1160,7 +1166,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kLine3D ||
             type == DrawCommandType::kText3D ||
             type == DrawCommandType::kObject3D ||
-            type == DrawCommandType::kSkinnedMesh) {
+            type == DrawCommandType::kSkinnedMesh ||
+            type == DrawCommandType::kFire) {
             has_3d = true;
             break;
         }
@@ -1313,6 +1320,13 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // ---- 火焰特效 pass：3D 不透明内容之后、resolve/tone map 之前。
+        // 沿用当前 3D FBO 与同一张 depth buffer：测深度（被遮挡正确）、
+        // 不写深度（半透明互不遮挡）、加法混合。HDR 下 >1 的亮度交由 ACES 压。
+        if (!cmds.fires.empty()) {
+            DrawFirePass(cmds, fbo_3d_w, fbo_3d_h);
+        }
 
         // ---- 第二步：MSAA resolve + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
@@ -1573,6 +1587,49 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 break;
         }
     }
+}
+
+// ---- DrawFirePass ----
+// 火焰特效 pass：在 3D 不透明内容之后、resolve/tone map 之前，沿用当前 3D FBO
+// 与同一张 depth buffer 画火焰 quad。
+//
+// 状态语义（与设计文档一致）：
+//   - glEnable(GL_DEPTH_TEST) 已在（沿用 3D pass），故火焰**被前方物体遮挡**；
+//   - glDepthMask(GL_FALSE)：**不写深度** —— 半透明面片之间不互相遮挡；
+//   - 关 CULL_FACE：billboard 两面都可见（不依赖顶点绕序）；
+//   - 按每命令 ParticleBlend 设混合（加法/alpha），画完恢复默认。
+void Renderer::DrawFirePass(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+    (void)fbo_w;
+    (void)fbo_h;
+
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+
+    const unsigned int prog = FireProg();
+    for (const auto& [type, idx] : cmds.order) {
+        if (type != DrawCommandType::kFire) {
+            continue;
+        }
+        CHECK_GE(idx, 0);
+        CHECK_LT(idx, static_cast<int>(cmds.fires.size()));
+        const FireCommand& fire = cmds.fires[idx];
+        switch (fire.blend) {
+            case ParticleBlend::kAdditive:
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                break;
+            case ParticleBlend::kAlpha:
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                break;
+        }
+        FireRenderer::DrawFire(fire, cmds.camera, stream_vbo_, prog, mvp_,
+                               cmds.effect_time);
+    }
+
+    // 恢复默认状态（写深度 + 正面裁剪 + 标准 alpha 混合）。
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
 // ---- DrawShadowPass ----
