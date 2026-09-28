@@ -187,6 +187,17 @@ filegroup(
     visibility = ["//tools/jpov:__subpackages__"],
 )
 
+# clothing：JPOV 穿衣工具（tools/jpov/clothing/）用的衣物资产库。
+# 每件衣服一个子目录（glb + 四视图预览 + 生成溯源 README）。
+# 现状：harness_vest（战术背心，单图重建，双面）/ yoga_pants（瑜伽裤，文本生成，单面）。
+# 用途：为穿衣管线提供可复现、可引用的输入。**不承载 gold test**（外部生成资产，
+# 非本项目可控的渲染基准）。详见 clothing/README.md。
+filegroup(
+    name = "clothing_data",
+    srcs = glob(["clothing/**"]),
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
 # ============================================================================
 # Gold Image — glTF Lantern (内嵌贴图 GLB) PBR 渲染验证
 # ============================================================================
