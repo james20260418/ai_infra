@@ -19,6 +19,8 @@ cc_test(
     srcs = ["triangle_3_test.cc"],
     deps = [
         ":triangle_3",
+        "//geom/common:common",
+        "//geom/common:vec",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],
