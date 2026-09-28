@@ -306,6 +306,17 @@ int RunCapture(const std::string& out_dir) {
     app.deg_.sun_azim_deg = 45.0f;
     shoot("scene_noon_check");
 
+    // ── G. 三色环境光对比：**同机位/同自由度**，只切 ambient 三色开关 ──
+    // 正午（看“天顶冷蓝 vs 地平”梯度）与低斜阳（看暖地平端）。
+    for (int e : {60, 12}) {
+        app.deg_.sun_elev_deg = static_cast<float>(e);
+        app.SetTricolorAmbient(false);
+        shoot(("ambient_single_elev" + std::to_string(e)).c_str());
+        app.SetTricolorAmbient(true);
+        shoot(("ambient_tricolor_elev" + std::to_string(e)).c_str());
+    }
+    app.SetTricolorAmbient(false);
+
     app.Finalize();
     return 0;
 }

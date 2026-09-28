@@ -17,6 +17,7 @@
 #define JPOV_RENDER_COMMAND_H_
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -474,6 +475,19 @@ struct AmbientLight {
     //   - 可 >1 做整体提亮；
     //   - 负值在 shader 里 clamp 到 0。
     float intensity = 1.0f;
+
+    // tricolor：**可选**的三色垂直梯度环境光（增量式扩展；未设置时=现有单色 color）。
+    //   存在时，管线按**片元法线的仰角**在三色间插值，**替代**单色 color（此时 color 被忽略）：
+    //     法线朝上 (N.y=+1) → 天；水平 (N.y=0) → 天际线；朝下 (N.y=−1) → 地；
+    //     N.y∈[−1,+1] 分段线性插值（天际线作中继）。
+    //   数组顺序**固定**为 **[0]=天, [1]=天际线, [2]=地**（此即语义顺序，不要换位）。
+    //   目的：给环境光装上方向感（上亮下暗 / 冷暖渐变），消除单色 ambient 的“塑料平感”；
+    //     下半球的“地色”天然兜底，不会像“三向光替代 ambient”那样在下半球死黑。
+    //   与 color / intensity：tricolor 与 color **互斥**（tricolor 优先）；intensity 是整体亮度
+    //     标量，对两者同样生效（乘在最终环境光上）。
+    //   推导：由 SkyCommand::AmbientTricolor() 产出（与单色 AmbientColor() **并列且独立**，
+    //     单色接口的语义/数值不受本字段影响）。
+    std::optional<std::array<Color, 3>> tricolor = std::nullopt;
 };
 
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
@@ -1102,6 +1116,15 @@ struct SkyCommand {
         return static_cast<float>(kTurbAmb(turb));
     }
 
+    // 天光色温曲线（太阳仰角° → 天光色温 K）。AmbientColor / AmbientTricolor 共用同一真相，
+    // 避免两条色温曲线分叉。锚点见下方 AmbientColor 注释。
+    static float SkyAmbientTempK(float elev_deg) {
+        static const geom::math::PiecewiseLinearFunction<double> kSkyTempCurve(
+            std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 5.0, 12.0, 20.0, 30.0, 45.0, 60.0, 90.0},
+            std::vector<double>{2150.0, 2600.0, 3050.0, 3275.0, 3500.0, 4139.0, 5033.0, 6056.0, 7333.0, 9250.0, 11167.0, 15000.0});
+        return static_cast<float>(kSkyTempCurve(elev_deg));
+    }
+
     // 环境光颜色（AmbientLight::color）——天光平均色。
     // 正午晴天天空偏蓝（高色温 ~15000K）；黄昏太阳低，散射光转橙（低色温）；
     // 太阳落山后继续转深橙（暮光）。与 SunDirectionalColor 用同一套色温曲线
@@ -1127,14 +1150,11 @@ struct SkyCommand {
     // 与 night_horizon 的平均（环境光是整个上半球的平均入射，不是单一方向）。
     // 插值只改**色调**，亮度由 AmbientIntensity 单独管。
     Color AmbientColor() const {
-        static const geom::math::PiecewiseLinearFunction<double> kSkyTempCurve(
-            std::vector<double>{-18.0, -12.0, -6.0, -3.0, 0.0, 5.0, 12.0, 20.0, 30.0, 45.0, 60.0, 90.0},
-            std::vector<double>{2150.0, 2600.0, 3050.0, 3275.0, 3500.0, 4139.0, 5033.0, 6056.0, 7333.0, 9250.0, 11167.0, 15000.0});
         const Vec3f d = sun_dir.Unit();
         const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
         const float elev_deg = std::asin(sun_y) *
                                (180.0f / static_cast<float>(M_PI));
-        const float temp = static_cast<float>(kSkyTempCurve(elev_deg));
+        const float temp = SkyAmbientTempK(elev_deg);
         const Color tint = ColorTempToLinear(temp);
         // 浊度 → 雾度系数：turb=2 晴无雾，turb=8 重霾趋向发白。
         const float haze = std::clamp((turbidity - 2.0f) / 6.0f, 0.0f, 1.0f) * 0.6f;
@@ -1175,6 +1195,68 @@ struct SkyCommand {
         // 夜色端不再乘任何 season：气辉/星光/城市光污染不是散射日光，
         // 与夜色天空（shader 里同样不染）保持同源。
         return c;
+    }
+
+    // ── 三色环境光推导（2026-09-28 新增，与 AmbientColor 独立并行）──
+    //
+    // 返回 [0]=天(天顶) / [1]=天际线(地平) / [2]=地 三个 Color（此即渲染侧的语义顺序）。
+    // 与单色 AmbientColor() **并列且独立**：单色版语义/数值不变，本函数是它的三色版。
+    //
+    // 推导与 AmbientColor 共用同一条时间轴（昼夜 daylight / 浊度 haze / 季节 daylight_season）：
+    //   · 天(天顶)：色温在曲线基础上抬冷（*1.4，夹断到 25000K）——清空天顶更深蓝，
+    //     与地平拉开色差（不能夹到曲线冷端 15000K，否则正午两者相等、无梯度）；霾化减半；
+    //   · 天际线(地平)：现 AmbientColor 的那条色（暖端），霾化全量（近地更浊更白）；
+    //   · 地(地面)：地平结果 × kGroundReflect（0.35）——地面反射光，比天空暗但不死黑。
+    //     注：**不直接用 sky.ground_color**（那是天空渲染的下半球填色，接近纯黑，
+    //     当 ambient 底会把朝下面打到黢黑，失去“兜底”意义）。
+    // 夜晚天/地平分别取 night_zenith_color / night_horizon_color，按同一 daylight 因子
+    //   （与 shader / AmbientColor 同源）插值；季节只染白天端（气辉/星光/城市光污染非散射日光）。
+    //   地面始终 = 地平结果 × kGroundReflect（昼/夜同一规则，保持“下暗上亮”层次）。
+    std::array<Color, 3> AmbientTricolor() const {
+        const Vec3f d = sun_dir.Unit();
+        const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
+        const float elev_deg = std::asin(sun_y) *
+                               (180.0f / static_cast<float>(M_PI));
+        // 浊度 → 雾度系数（与 AmbientColor 同式）。
+        const float haze = std::clamp((turbidity - 2.0f) / 6.0f, 0.0f, 1.0f) * 0.6f;
+        const Color white = {0.9f, 0.9f, 0.9f, 1.0f};
+        const auto haze_mix = [&](const Color& c, float h) {
+            return Color{c.r * (1.0f - h) + white.r * h,
+                         c.g * (1.0f - h) + white.g * h,
+                         c.b * (1.0f - h) + white.b * h, 1.0f};
+        };
+        const auto season = [&](const Color& c) {
+            return Color{c.r * daylight_season.r * DaylightSeasonTintScale(),
+                         c.g * daylight_season.g * DaylightSeasonTintScale(),
+                         c.b * daylight_season.b * DaylightSeasonTintScale(), 1.0f};
+        };
+
+        // 地面反射比例：地面把地平方向天光的多少反射回上半球（环境光的“地”端）。
+        // 0.35 是常见取值（漫射地面反射率量级），保证下半球暗但不黑。
+        static constexpr float kGroundReflect = 0.35f;
+
+        const float temp = SkyAmbientTempK(elev_deg);
+        // 天顶：色温抬冷（*1.4，夹断 25000K），霾化减半（高空更通透）。
+        const Color zenith_day =
+            season(haze_mix(ColorTempToLinear(std::min(temp * 1.4f, 25000.0f)),
+                            haze * 0.5f));
+        // 地平：现 AmbientColor 的那条色，霾化全量。
+        const Color horizon_day = season(haze_mix(ColorTempToLinear(temp), haze));
+
+        // 昼夜插值（与 shader / AmbientColor 同一 daylight 公式）。
+        const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
+        const auto blend = [&](const Color& day, const Color& night) {
+            return Color{day.r * daylight + night.r * (1.0f - daylight),
+                         day.g * daylight + night.g * (1.0f - daylight),
+                         day.b * daylight + night.b * (1.0f - daylight), 1.0f};
+        };
+        const Color zenith  = blend(zenith_day, night_zenith_color);
+        const Color horizon = blend(horizon_day, night_horizon_color);
+        // 地 = 地平 × 反射比（昼/夜同规则；比天空暗、但不黑 ⇒ 天然兜底）。
+        const Color ground{horizon.r * kGroundReflect,
+                           horizon.g * kGroundReflect,
+                           horizon.b * kGroundReflect, 1.0f};
+        return {zenith, horizon, ground};
     }
 };
 

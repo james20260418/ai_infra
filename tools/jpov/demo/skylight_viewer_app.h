@@ -85,6 +85,10 @@ public:
     // 滑条值 → SkyCommand 字段的编码见 skylight_scene.h 的 SkyDegrees。
     SkyDegrees deg_;
 
+    // 是否使用**三色环境光**（[天, 天际线, 地] 垂直梯度）替代单色 ambient。
+    // 供肉眼对比：开=由 SkyCommand 推导的三色（AmbientTricolor），关=原来的单色（AmbientColor）。
+    void SetTricolorAmbient(bool on) { tricolor_ambient_ = on; }
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
     }
@@ -129,7 +133,7 @@ public:
         // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
         // moon_season 与夜空蓝覆盖默认值。
-        const SkyLighting nl = MakeSkyLighting(deg_);
+        const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         cmds->sky     = nl.sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
@@ -189,7 +193,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 6;
+        const int   kRows    = 7;  // 6 个滑条 + 1 个三色 ambient 开关
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -215,10 +219,13 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
         // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
+        // ⑥ 三色环境光开关：开=天/天际线/地 三色垂直梯度（AmbientTricolor），关=单色。
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(6));
     }
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     jpov::Ui ui_;
 
     static constexpr float kSliderFontSize = 15.0f;

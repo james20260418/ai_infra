@@ -216,6 +216,11 @@ struct SkyLighting {
     jpov::SkyCommand sky;
     // 主平行光：白天是太阳、夜间是月亮（按 sun_dir.y 切换，见上）。渲染侧只有一个
     // 平行光槽（RenderCommandList::sun），故日/月共用这一个字段。
+    // ambient（环境光）始终由 sky 推导，与天色/昼夜同源：
+    //   ambient.color     = sky.AmbientColor()     （含夜色叠加；夜色端不吃 daylight_season）
+    //   ambient.intensity = sky.AmbientIntensity() （含夜间项）
+    // 若 tricolor_ambient=true（MakeSkyLighting 参数），额外填 ambient.tricolor =
+    //   sky.AmbientTricolor()（[天, 天际线, 地]）——渲染侧改用三色梯度，单色 color 被忽略。
     jpov::DirectionalLight dir_light;
     jpov::AmbientLight ambient;
 };
@@ -230,7 +235,7 @@ struct SkyDegrees {
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
 };
 
-inline SkyLighting MakeSkyLighting(const SkyDegrees& d) {
+inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {
     const jpov::Vec3f sun_dir = DirFromAngles(d.sun_elev_deg, d.sun_azim_deg);
     // 满月落在反日点：moon_dir = −sun_dir（月盘位置与光源方位由此单点确定）。
     const jpov::Vec3f moon_dir = {-sun_dir.x(), -sun_dir.y(), -sun_dir.z()};
@@ -269,6 +274,11 @@ inline SkyLighting MakeSkyLighting(const SkyDegrees& d) {
         .color = sky.AmbientColor(),
         .intensity = sky.AmbientIntensity(),
     };
+    if (tricolor_ambient) {
+        // 三色环境光：由同一 sky 推导（与单色 AmbientColor 并列，互不影响）。开启后
+        // shader 按片元法线仰角在 [天, 天际线, 地] 间插值，替代单色 color；intensity 不变。
+        out.ambient.tricolor = sky.AmbientTricolor();
+    }
     out.sky = sky;
     return out;
 }
