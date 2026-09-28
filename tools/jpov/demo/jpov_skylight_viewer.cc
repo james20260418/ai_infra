@@ -45,10 +45,19 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
         jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf,
         jpov_skylight::kBoxHalf));
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
+    // 立柱（0.6 × 3.0 × 0.6）："燃烧的立柱"实验用。
+    app.pillar_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
+        jpov_skylight::kPillarHalfX, jpov_skylight::kPillarHalfY,
+        jpov_skylight::kPillarHalfZ));
     app.mat_low_    = jpov_skylight::MaterialLowGloss();
     app.mat_high_   = jpov_skylight::MaterialHighGloss();
     app.mat_metal_  = jpov_skylight::MaterialMetal();
     app.mat_ground_ = jpov_skylight::GroundMaterial();
+    // 立柱材质：木色、粗糙（像根木柱）。取偏亮一点的颜色，黄昏下才看得清。
+    app.mat_pillar_ = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.66f, 0.50f, 0.34f, 1.0f},
+        /*metallic*/ 0.0f,
+        /*roughness*/ 0.9f);
 }
 
 // 额外模型（桌子 / 高模橡树）的**相对路径**（相对 exe 所在目录）。
@@ -271,6 +280,31 @@ int RunCapture(const std::string& out_dir) {
     shoot("fire_dusk_off");
     app.SetShowFire(true);
     shoot("fire_dusk_on");
+
+    // ── J. 燃烧的立柱：底部环状火苗（验证“包裹”）──
+    // 拍立柱时：隐藏三校方块、把柱子挪到原点 → 可绕柱环绕取景。
+    // 看到的是「近侧火苗在前、远侧火苗被柱体遮住」。
+    app.deg_.sun_elev_deg = -18.0f;      // 黄昏偏暗，火光更明显
+    app.SetShowBoxes(false);
+    app.SetPillarCenter({0.0f, jpov_skylight::kPillarHalfY, 0.0f});
+    app.SetShowFire(true);
+    app.SetFireBlend(jpov::ParticleBlend::kAlpha);
+    app.SetEffectTime(0.7f);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.10;
+    app.view_.R     = 5.0;
+    for (float th : {0.0f, 25.0f, 50.0f, 90.0f, 135.0f, 180.0f}) {
+        app.view_.theta = th * 3.14159265358979323846 / 180.0;
+        shoot(("pillar_th" + std::to_string(static_cast<int>(th))).c_str());
+    }
+    // 近景（R=2.6，能看清柱底火苗）+ 关火对照。
+    app.view_.R     = 2.6f;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    shoot("pillar_close");
+    app.SetShowFire(false);
+    shoot("pillar_off");
+    app.SetShowFire(true);
+    app.SetShowBoxes(true);
 
     app.Finalize();
     return 0;

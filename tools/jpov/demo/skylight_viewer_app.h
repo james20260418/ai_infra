@@ -47,10 +47,12 @@ public:
     // ── 场景静态资源（Init() 后装配一次，不在 OneIteration 里重复构造/上传）──
     uint32_t box_mesh_ = 0;              // 1×1×1 方块（三块共用）
     uint32_t ground_mesh_ = 0;           // 40×40 地面 quad
+    uint32_t pillar_mesh_ = 0;           // 立柱（0.6 × 3.0 × 0.6，用于「燃烧的立柱」实验）
     jpov::PBRMaterial mat_low_;          // 低反（rough=1.0, metal=0）
     jpov::PBRMaterial mat_high_;         // 高光（rough=0.05, metal=0）
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
+    jpov::PBRMaterial mat_pillar_;       // 立柱（木色）
 
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
@@ -82,9 +84,12 @@ public:
     // 交互窗口是否绘制光照面板（headless 拍摄=false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
 
-    // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”时置 false，
-    // 排除方块遮挡与受光干扰，只留天光背景。
+    // 是否绘制场景几何（三方块 + 地面 + 立柱）。headless 拍“天空本身”时置 false。
     void SetShowScene(bool show) { show_scene_ = show; }
+    // 是否绘制三校方块（拍立柱时置 false，留出空间）。
+    void SetShowBoxes(bool show) { show_boxes_ = show; }
+    // 立柱中心（拍立柱时挪到原点，便于环绕取景）。
+    void SetPillarCenter(const jpov::Vec3f& c) { pillar_center_ = c; }
 
     // 是否绘制实验性火焰（含其上方的暖色点光源）。
     // 交互面板有一个 toggle；headless 拍摄可用本 setter 单独开/关出图对比。
@@ -151,22 +156,33 @@ public:
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
                                /*front*/  {0.0f, 0.0f, 1.0f});
-            cmds->DrawObject3D(box_mesh_, mat_low_,   BoxCenter(0),
-                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-            cmds->DrawObject3D(box_mesh_, mat_high_,  BoxCenter(1),
-                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-            cmds->DrawObject3D(box_mesh_, mat_metal_, BoxCenter(2),
-                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-            // 额外模型（桌子 / 橡树）：用来看“物体受光”，供夜色标定。
-            for (const ModelSlot& m : models_) {
-                cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            if (show_boxes_) {
+                cmds->DrawObject3D(box_mesh_, mat_low_,   BoxCenter(0),
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                cmds->DrawObject3D(box_mesh_, mat_high_,  BoxCenter(1),
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                cmds->DrawObject3D(box_mesh_, mat_metal_, BoxCenter(2),
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                // 额外模型（桌子 / 橡树）：与方块同开关（拍立柱时一起隐藏）。
+                for (const ModelSlot& m : models_) {
+                    cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+                }
             }
+            // 立柱（燃烧实验）：默认立在方块行前方；拍立柱时可挪到原点并隐藏方块。
+            cmds->DrawObject3D(pillar_mesh_, mat_pillar_,
+                               /*center*/ pillar_center_,
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f});
         }
 
-        // 火焰（实验）：中间方块顶上的一团火 + 一个暖色点光源。
-        // 仅交互/拍摄场景模式下有效（纯天空截图时整组跳过）。
-        if (show_scene_ && show_fire_) {
-            AppendFire(cmds);
+        // 火焰（实验）：只受 show_fire_ 控制。
+        //   ① 立柱底部环绕火苗（“包裹”实验，本阶段主角）
+        //   ② 中间方块顶上的一团火（旧对比项，默认关）
+        if (show_fire_) {
+            AppendPillarFire(cmds);
+            if (show_box_fire_) {
+                AppendFire(cmds);
+            }
         }
 
         // 光照面板（仅交互窗口；headless 拍摄是纯 3D 截图）。
@@ -178,6 +194,45 @@ public:
     }
 
 private:
+    // 叠加火焰（实验）：立柱底部**环状小火焰**——验证“包裹”。
+    //
+    // 为什么这么做：单个 quad 如果穿过柱轴，柱子会把quad中间吃掉、只剩两侧
+    // （一眼假）。改为在柱底**圆周上撒 N 个小火苗**：相机绕柱时，
+    // 近侧火苗在柱前、远侧火苗被柱体遮掉（深度测试自动处理）→ “火从柱周烧起”。
+    void AppendPillarFire(jpov::RenderCommandList* cmds) const {
+        constexpr int   kFlames = 10;
+        constexpr float kTwoPi  = 6.28318530717958647692f;
+        // 立柱轴心（x/z）取 pillar_center_，允许拍立柱时把柱子挪到原点。
+        const float px = pillar_center_.x();
+        const float pz = pillar_center_.z();
+
+        for (int i = 0; i < kFlames; ++i) {
+            const float a = kTwoPi * static_cast<float>(i) / kFlames + 0.30f;
+            // 内外交替贴柱面（内环贴柱、外环略出）→ 有一点前后层次。
+            const float ring = kPillarHalfX + ((i % 2 == 0) ? 0.02f : 0.12f);
+            const jpov::Vec3f base{px + ring * std::cos(a),
+                                   0.05f,
+                                   pz + ring * std::sin(a)};
+            cmds->DrawFire(/*base*/ base,
+                           /*radius*/ 0.16f,
+                           /*height*/ 0.45f + 0.07f * static_cast<float>(i % 4),
+                           /*color_core*/ {1.0f, 0.86f, 0.48f, 1.0f},
+                           /*color_outer*/ {1.0f, 0.20f, 0.03f, 1.0f},
+                           /*intensity*/ 1.2f,
+                           /*speed*/ 1.2f + 0.25f * static_cast<float>(i % 3),
+                           /*noise_scale*/ 3.2f,
+                           /*blend*/ fire_blend_);
+        }
+
+        // 暖色点光源：放在柱底，照亮柱子/地面。
+        jpov::PointLight light;
+        light.position = {px, 0.5f, pz};
+        light.color = {1.0f, 0.50f, 0.16f, 1.0f};
+        light.linear_radius = 6.0f;
+        light.intensity = 6.0f;
+        cmds->point_lights.push_back(light);
+    }
+
     // 叠加火焰（实验）：中间方块顶上的一团火 + 一个同位置的暖色点光源。
     // 火是“程序化 shader 火焰”（1 个 billboard quad，见 FireRenderer）；
     // 点光源让周围方块被火光染暖（JPOV 版的“rim light”错觉）。
@@ -260,6 +315,10 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     bool show_fire_  = true;   // 火焰开关（面板 toggle / headless setter）
+    bool show_box_fire_ = false;  // 旧的“方块顶上一团火”对比项（默认关）
+    bool show_boxes_ = true;      // 三校方块开关（拍立柱时关）
+    // 立柱中心（拍立柱时可挪到原点）。
+    jpov::Vec3f pillar_center_{kPillarCx, kPillarHalfY, kPillarCz};
     float effect_time_override_ = -1.0f;  // >=0 时覆盖特效时钟（headless 用）
     jpov::ParticleBlend fire_blend_ = jpov::ParticleBlend::kAlpha;  // 火焰混合模式
 

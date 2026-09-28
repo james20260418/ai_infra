@@ -70,6 +70,13 @@ inline jpov::Vec3f BoxCenter(int index) {
     return {x, kBoxHalf, 0.0f};   // 底面贴地：中心 y = 半宽
 }
 
+// ── 立柱（“燃烧的立柱”实验）：0.6 × 3.0 × 0.6，立在方块行前方。──
+inline constexpr float kPillarHalfX = 0.30f;   // 半宽（x）
+inline constexpr float kPillarHalfY = 1.50f;   // 半高（y）→ 高 3.0
+inline constexpr float kPillarHalfZ = 0.30f;   // 半深（z）
+inline constexpr float kPillarCx    = 0.0f;    // 柱轴 x
+inline constexpr float kPillarCz    = 2.40f;   // 柱轴 z
+
 // ── 地面：中性灰、高粗糙（与 model viewer 同款语义，但更小更贴场景）──
 //
 // 300×300 的大地在这里没有意义（本场景只关心方块上的天光反射），改用 40×40 的
