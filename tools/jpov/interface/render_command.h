@@ -1209,9 +1209,13 @@ struct SkyCommand {
     //   · 地(地面)：地平结果 × kGroundReflect（0.35）——地面反射光，比天空暗但不死黑。
     //     注：**不直接用 sky.ground_color**（那是天空渲染的下半球填色，接近纯黑，
     //     当 ambient 底会把朝下面打到黢黑，失去“兜底”意义）。
-    // 夜晚天/地平分别取 night_zenith_color / night_horizon_color，按同一 daylight 因子
-    //   （与 shader / AmbientColor 同源）插值；季节只染白天端（气辉/星光/城市光污染非散射日光）。
+    // 夜晚天/地平取 night_zenith_color / night_horizon_color，按同一 daylight 因子（与 shader /
+    //   AmbientColor 同源）插值；季节只染白天端。
     //   地面始终 = 地平结果 × kGroundReflect（昼/夜同一规则，保持“下暗上亮”层次）。
+    // ⭐ 最后一步**均值归一**：把三色的均值缩放到单色 AmbientColor() 的均值，保证三色方案的
+    //   整体环境光量 = 单色（只有方向梯度在变，不漂亮/漂暗）。这一步同时搞定夜景：单色
+    //   AmbientColor() 夜里把夜色按 lum/night_lum 放大到暮色量级，三色若用原始 night_*（0.01~0.05）
+    //   就会脏黑——均值对齐后昼/夜整体亮度都与单色严格一致。
     std::array<Color, 3> AmbientTricolor() const {
         const Vec3f d = sun_dir.Unit();
         const float sun_y = std::clamp(d.y(), -1.0f, 1.0f);
@@ -1236,26 +1240,44 @@ struct SkyCommand {
         static constexpr float kGroundReflect = 0.35f;
 
         const float temp = SkyAmbientTempK(elev_deg);
-        // 天顶：色温抬冷（*1.4，夹断 25000K），霾化减半（高空更通透）。
+        // 地平端（= AmbientColor 白天那条色）。
+        const Color horizon_day = season(haze_mix(ColorTempToLinear(temp), haze));
+        // 天顶端：色温抬冷（*1.4，夹断 25000K），霾化减半（高空更通透）。
         const Color zenith_day =
             season(haze_mix(ColorTempToLinear(std::min(temp * 1.4f, 25000.0f)),
                             haze * 0.5f));
-        // 地平：现 AmbientColor 的那条色，霾化全量。
-        const Color horizon_day = season(haze_mix(ColorTempToLinear(temp), haze));
 
-        // 昼夜插值（与 shader / AmbientColor 同一 daylight 公式）。
+        // 昼夜插值（与 shader / AmbientColor 同一 daylight 公式）。夜端直接用 night_* 原始色，
+        //   其“太小”由下面的均值归一统一解决（不在这里单独缩放）。
         const float daylight = std::clamp((sun_y - 0.03f) / 0.10f, 0.0f, 1.0f);
         const auto blend = [&](const Color& day, const Color& night) {
             return Color{day.r * daylight + night.r * (1.0f - daylight),
                          day.g * daylight + night.g * (1.0f - daylight),
                          day.b * daylight + night.b * (1.0f - daylight), 1.0f};
         };
-        const Color zenith  = blend(zenith_day, night_zenith_color);
-        const Color horizon = blend(horizon_day, night_horizon_color);
+        Color zenith  = blend(zenith_day, night_zenith_color);
+        Color horizon = blend(horizon_day, night_horizon_color);
         // 地 = 地平 × 反射比（昼/夜同规则；比天空暗、但不黑 ⇒ 天然兜底）。
-        const Color ground{horizon.r * kGroundReflect,
-                           horizon.g * kGroundReflect,
-                           horizon.b * kGroundReflect, 1.0f};
+        Color ground{horizon.r * kGroundReflect,
+                     horizon.g * kGroundReflect,
+                     horizon.b * kGroundReflect, 1.0f};
+
+        // ⭐ 亮度对齐（关键）：把三色的**均值**缩放到单色 AmbientColor() 的均值，保证三色方案
+        //   的“整体环境光量”与单色**完全一致**——只有方向梯度在变，不会整体漂亮/漂暗。
+        //   这一步同时解决了夜景问题：单色 AmbientColor() 夜里把夜色按 lum/night_lum 归一（量级
+        //   = 白天暮色量级），而三色直接用原始 night_*（只有 0.01~0.05）→ 不归一就脏黑。
+        //   均值对齐后，夜/昼整体亮度与单色严格一致。
+        const Color ref = AmbientColor();
+        const float ref_lum = (ref.r + ref.g + ref.b) / 3.0f;
+        const float trio_lum = (zenith.r + zenith.g + zenith.b +
+                                horizon.r + horizon.g + horizon.b +
+                                ground.r + ground.g + ground.b) / 9.0f;
+        if (trio_lum > 1.0e-6f) {
+            const float k = ref_lum / trio_lum;
+            zenith  = {zenith.r * k, zenith.g * k, zenith.b * k, 1.0f};
+            horizon = {horizon.r * k, horizon.g * k, horizon.b * k, 1.0f};
+            ground  = {ground.r * k, ground.g * k, ground.b * k, 1.0f};
+        }
         return {zenith, horizon, ground};
     }
 };

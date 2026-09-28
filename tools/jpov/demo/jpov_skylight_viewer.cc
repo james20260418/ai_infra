@@ -307,8 +307,8 @@ int RunCapture(const std::string& out_dir) {
     shoot("scene_noon_check");
 
     // ── G. 三色环境光对比：**同机位/同自由度**，只切 ambient 三色开关 ──
-    // 正午（看“天顶冷蓝 vs 地平”梯度）与低斜阳（看暖地平端）。
-    for (int e : {60, 12}) {
+    // 正午（看“天顶冷蓝 vs 地平”梯度）、低斜阳（暖地平端）与夜间（看夜色量级是否与单色对齐）。
+    for (int e : {60, 12, -30}) {
         app.deg_.sun_elev_deg = static_cast<float>(e);
         app.SetTricolorAmbient(false);
         shoot(("ambient_single_elev" + std::to_string(e)).c_str());
