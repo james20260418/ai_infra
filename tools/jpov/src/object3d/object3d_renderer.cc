@@ -187,13 +187,15 @@ void Object3DRenderer::UploadAmbient(ShaderManager& shader_mgr,
         glUniform1i(shader_mgr.GetUniform(p, "uAmbientTricolorEnabled"),
                     ambient.tricolor.has_value() ? 1 : 0);
         if (ambient.tricolor.has_value()) {
+            // ⚠️ 用三次 glUniform3f（逐元素名）而非 glUniform3fv：Windows 的 MinGW GL
+            //   扩展加载器（third_party/gl_loader-mingw）未声明 glUniform3fv。
             const std::array<Color, 3>& tc = *ambient.tricolor;
-            const float rgb[9] = {
-                tc[0].r, tc[0].g, tc[0].b,
-                tc[1].r, tc[1].g, tc[1].b,
-                tc[2].r, tc[2].g, tc[2].b,
-            };
-            glUniform3fv(shader_mgr.GetUniform(p, "uAmbientTricolor"), 3, rgb);
+            static const char* const kTricolorUniforms[3] = {
+                "uAmbientTricolor[0]", "uAmbientTricolor[1]", "uAmbientTricolor[2]"};
+            for (int i = 0; i < 3; ++i) {
+                glUniform3f(shader_mgr.GetUniform(p, kTricolorUniforms[i]),
+                            tc[i].r, tc[i].g, tc[i].b);
+            }
         }
     }
 }
