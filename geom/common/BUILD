@@ -96,3 +96,48 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+# Grid — N 维等距栅格的坐标↔索引换算（header-only，模板）
+cc_library(
+    name = "grid",
+    hdrs = ["grid.h"],
+    deps = [
+        ":check",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# GridMap — 以格索引为键的稀疏栅格（哈希表，header-only，模板）
+cc_library(
+    name = "grid_map",
+    hdrs = ["grid_map.h"],
+    deps = [
+        ":grid",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# Grid tests
+cc_test(
+    name = "grid_test",
+    srcs = ["grid_test.cc"],
+    deps = [
+        ":grid",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# GridMap tests（对稠密参考实现做一致性 fuzz）
+cc_test(
+    name = "grid_map_test",
+    srcs = ["grid_map_test.cc"],
+    deps = [
+        ":common",
+        ":grid_map",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
