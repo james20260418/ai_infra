@@ -9,6 +9,7 @@
 #include "tools/jpov/src/texture_units.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -180,6 +181,22 @@ void Object3DRenderer::UploadAmbient(ShaderManager& shader_mgr,
                     ambient.color.r, ambient.color.g, ambient.color.b);
         glUniform1f(shader_mgr.GetUniform(p, "uAmbientIntensity"),
                     std::max(ambient.intensity, 0.0f));  // 负值 clamp 到 0
+        // 三色环境光（可选）：存在则开开关 + 上传 [天, 天际线, 地] 三色（每色 vec3）。
+        //   按数组名取 location = 元素 [0] 的 location（GL 惯例），一次 glUniform3fv 传 3 个。
+        //   location 为 -1（shader 未声明）时 glUniform 是 no-op，安全。
+        glUniform1i(shader_mgr.GetUniform(p, "uAmbientTricolorEnabled"),
+                    ambient.tricolor.has_value() ? 1 : 0);
+        if (ambient.tricolor.has_value()) {
+            // ⚠️ 用三次 glUniform3f（逐元素名）而非 glUniform3fv：Windows 的 MinGW GL
+            //   扩展加载器（third_party/gl_loader-mingw）未声明 glUniform3fv。
+            const std::array<Color, 3>& tc = *ambient.tricolor;
+            static const char* const kTricolorUniforms[3] = {
+                "uAmbientTricolor[0]", "uAmbientTricolor[1]", "uAmbientTricolor[2]"};
+            for (int i = 0; i < 3; ++i) {
+                glUniform3f(shader_mgr.GetUniform(p, kTricolorUniforms[i]),
+                            tc[i].r, tc[i].g, tc[i].b);
+            }
+        }
     }
 }
 

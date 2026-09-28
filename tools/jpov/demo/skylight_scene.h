@@ -4,6 +4,11 @@
 // 固定三个不同 PBR 材质的方块 + 灰色地面，配上三个自由度（浊度 / 季节色温 /
 // 天体方向），一眼看全「标准天光」在材质上的反映。
 //
+// 2026-09-28 增补：**每个方块顶面各站一个 T-pose 蓝人（mixamo_male）**，供观察
+// 环境光/天光在有人形时的立体感（假人换成真人有方向性的明暗）。三人同一份蒙皮
+// mesh + 同一骨架 + 同一 pose，只差摆放 → **一次 instanced draw call**，见 BoxTopCenter
+// 与 demo 主程序的装配；不引入第二份几何。
+//
 // ⭐ 天光一律由 `CreateDefaultSkyCommand` 构造（其余参数走默认构造值），
 //    画面光照（主平行光 + ambient）则由该 SkyCommand **推导**——保证「看到的
 //    天色」与「物体受光」同源，不会各配一套而漂移。天体方向只给一条仰角轴：
@@ -69,6 +74,24 @@ inline jpov::Vec3f BoxCenter(int index) {
     const float x = (static_cast<float>(index) - 1.0f) * kBoxSpacing;  // -1.6, 0, +1.6
     return {x, kBoxHalf, 0.0f};   // 底面贴地：中心 y = 半宽
 }
+
+// 方块 i 的**顶面**中心（人站在这里）：底面 y=0、顶面 y=2*kBoxHalf。
+// 蓝人的脚点对齐此点，人因此站（而非陷在）方块上。
+inline jpov::Vec3f BoxTopCenter(int index) {
+    const float x = (static_cast<float>(index) - 1.0f) * kBoxSpacing;
+    return {x, 2.0f * kBoxHalf, 0.0f};
+}
+
+// ── 蓝人（mixamo_male）在三个方块上的站位 ──
+//
+// 每个方块顶面各站一个 T-pose 蓝人：**同一份蒙皮 mesh + 同一骨架 + 同一 pose**，
+// 只差摆放 → 由 render_command 的 instancing 通道一次 glDrawElementsInstanced 画完
+// （3 个 SkinnedInstanceState，1 次 draw call；绝不能循环发 3 条命令）。
+//
+// 高度归一：资产原始坐标系/尺度未知（Tripo 自动绑定导出），故按**目标世界身高**
+// 归一（scale = 目标高 / 资产包围盒 Y 高），脚点由资产的局部包围盒 min.y 对齐到
+// 方块顶面（而不是假设原点就在脚底）——见 demo 主程序的装配逻辑。
+inline constexpr float kPersonTargetHeight = 1.7f;   // 归一后的世界身高（米）
 
 // ── 地面：中性灰、高粗糙（与 model viewer 同款语义，但更小更贴场景）──
 //
@@ -194,6 +217,11 @@ struct SkyLighting {
     // 主平行光：白天是太阳、夜间是月亮（按 sun_dir.y 切换，见上）。渲染侧只有一个
     // 平行光槽（RenderCommandList::sun），故日/月共用这一个字段。
     jpov::DirectionalLight dir_light;
+    // ambient（环境光）始终由 sky 推导，与天色/昼夜同源：
+    //   ambient.color     = sky.AmbientColor()     （含夜色叠加；夜色端不吃 daylight_season）
+    //   ambient.intensity = sky.AmbientIntensity() （含夜间项）
+    // 若 tricolor_ambient=true（MakeSkyLighting 参数），额外填 ambient.tricolor =
+    //   sky.AmbientTricolor()（[天, 天际线, 地]）——渲染侧改用三色梯度，单色 color 被忽略。
     jpov::AmbientLight ambient;
 };
 
@@ -207,7 +235,7 @@ struct SkyDegrees {
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
 };
 
-inline SkyLighting MakeSkyLighting(const SkyDegrees& d) {
+inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {
     const jpov::Vec3f sun_dir = DirFromAngles(d.sun_elev_deg, d.sun_azim_deg);
     // 满月落在反日点：moon_dir = −sun_dir（月盘位置与光源方位由此单点确定）。
     const jpov::Vec3f moon_dir = {-sun_dir.x(), -sun_dir.y(), -sun_dir.z()};
@@ -246,6 +274,11 @@ inline SkyLighting MakeSkyLighting(const SkyDegrees& d) {
         .color = sky.AmbientColor(),
         .intensity = sky.AmbientIntensity(),
     };
+    if (tricolor_ambient) {
+        // 三色环境光：由同一 sky 推导（与单色 AmbientColor 并列，互不影响）。开启后
+        // shader 按片元法线仰角在 [天, 天际线, 地] 间插值，替代单色 color；intensity 不变。
+        out.ambient.tricolor = sky.AmbientTricolor();
+    }
     out.sky = sky;
     return out;
 }
