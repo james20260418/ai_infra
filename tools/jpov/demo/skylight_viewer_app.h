@@ -164,8 +164,8 @@ public:
         }
 
         // 火焰（实验）：中间方块顶上的一团火 + 一个暖色点光源。
-        // 只受 show_fire_ 控制（可与 show_scene_ 独立，便于夜间拍“纯火焰”调试形态）。
-        if (show_fire_) {
+        // 仅交互/拍摄场景模式下有效（纯天空截图时整组跳过）。
+        if (show_scene_ && show_fire_) {
             AppendFire(cmds);
         }
 
@@ -190,11 +190,11 @@ private:
         cmds->DrawFire(/*base*/ base,
                        /*radius*/ kFireRadius,
                        /*height*/ kFireHeight,
-                       /*color_core*/ {1.0f, 0.66f, 0.16f, 1.0f},   // 橙黄芯
-                       /*color_outer*/ {0.85f, 0.09f, 0.0f, 1.0f},   // 深红外焰
-                       /*intensity*/ 1.0f,
-                       /*speed*/ 1.0f,
-                       /*noise_scale*/ 1.6f,
+                       /*color_core*/ {1.0f, 0.86f, 0.48f, 1.0f},   // 亮黄芯
+                       /*color_outer*/ {1.0f, 0.20f, 0.03f, 1.0f},   // 橙红外焰
+                       /*intensity*/ 1.3f,
+                       /*speed*/ 1.6f,
+                       /*noise_scale*/ 3.2f,
                        /*blend*/ fire_blend_);
 
         // 暖色点光源：放在火焰中部，照亮周围方块（“火光照亮环境”）。
@@ -203,7 +203,7 @@ private:
         light.position = {base.x(), base.y() + 0.5f * kFireHeight, base.z()};
         light.color = {1.0f, 0.55f, 0.20f, 1.0f};
         light.linear_radius = 8.0f;
-        light.intensity = 8.0f;
+        light.intensity = 4.0f;
         cmds->point_lights.push_back(light);
     }
 
@@ -264,8 +264,8 @@ private:
     jpov::ParticleBlend fire_blend_ = jpov::ParticleBlend::kAlpha;  // 火焰混合模式
 
     // 火焰几何参数（实验默认值；调手感改这里）。
-    static constexpr float kFireRadius = 0.45f;  // 水平半宽（米）
-    static constexpr float kFireHeight = 2.0f;   // 向上高度（米）
+    static constexpr float kFireRadius = 0.55f;  // 水平半宽（米）
+    static constexpr float kFireHeight = 1.6f;   // 向上高度（米）
 
     jpov::Ui ui_;
 
