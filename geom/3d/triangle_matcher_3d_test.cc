@@ -159,13 +159,25 @@ TEST(TriangleMatcher3dTest, FarPointReturnsEmpty) {
   EXPECT_TRUE(matcher.FindNearestTriangles(far).empty());
 }
 
-TEST(TriangleMatcher3dTest, QueryIsDeterministic) {
+TEST(TriangleMatcher3dTest, QueryIsDeterministicAndNonMutating) {
   std::vector<Triangle3d> cube = MakeUnitCubeTriangles();
   TriangleMatcher3d<double> matcher(/*local_distance=*/0.05, /*grid_size=*/0.01, cube);
 
-  const Vec3d p(0.3, 0.3, 0.3);
-  EXPECT_EQ(matcher.FindNearestTriangles(p), matcher.FindNearestTriangles(p));
-  EXPECT_EQ(matcher.FindAllRecentTriangles(p), matcher.FindAllRecentTriangles(p));
+  const Vec3d p(0.3, 0.3, 0.5);  // 落在 +z 面上：结果非空
+  // 复制成值再比较（直接比较两个返回引用是自比，恒真）。
+  const std::vector<int> nearest_before = matcher.FindNearestTriangles(p);
+  const std::vector<int> recent_before = matcher.FindAllRecentTriangles(p);
+  EXPECT_FALSE(nearest_before.empty());
+
+  // 中间穿插别的查询：不得改变先前结果（返回引用共享内部表 → 防别名/污染）。
+  matcher.FindNearestTriangles(Vec3d(0.5, 0.3, 0.3));
+  matcher.FindAllRecentTriangles(Vec3d(0.3, 0.5, 0.3));
+  matcher.FindNearestTriangles(Vec3d(-0.5, -0.3, -0.3));
+
+  const std::vector<int> nearest_after = matcher.FindNearestTriangles(p);
+  const std::vector<int> recent_after = matcher.FindAllRecentTriangles(p);
+  EXPECT_EQ(nearest_before, nearest_after);
+  EXPECT_EQ(recent_before, recent_after);
 }
 
 }  // namespace geom

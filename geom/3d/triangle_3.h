@@ -25,6 +25,7 @@
 #include <cmath>
 #include <optional>
 #include <string>
+#include <type_traits>
 
 #include "geom/common/check.h"
 #include "geom/common/common.h"
@@ -35,13 +36,15 @@ namespace geom {
 	// 空间三角形（三个非退化顶点 a、b、c）。
 	template <typename T>
 	class Triangle3 {
+		static_assert(std::is_floating_point<T>::value, "Triangle3 scalar must be floating point");
+
 	public:
 		// 构造工厂：三点构成非退化三角形时返回 Triangle3，否则返回 std::nullopt。
 		//
 		// Pre-condition：a、b、c 必须有限（否则 LOG(FATAL)）。
 		//
 		// 退化判据（见 kDegenerateAreaRatio）：2*面积 ≤ kDegenerateAreaRatio * 最长边²。
-		// 该式同时覆盖"两点重合""三点重合"（此时最长边为 0，右端为 0，左端也为 0）。
+		// 两点重合：面积 = 0 而最长边 > 0 ⇒ 左端 0 ≤ 右端，拒绝；三点重合：两端同为 0，拒绝。
 		static std::optional<Triangle3> Create(const Vec3<T>& a, const Vec3<T>& b,
 			const Vec3<T>& c);
 
@@ -64,7 +67,7 @@ namespace geom {
 
 		// 三角形上（含内部 / 边 / 顶点）离 point 最近的点。
 		// 用 Ericson《Real-Time Collision Detection》§5.1.5 的分区域求法：先判断最近点
-		// 落在哪个顶点/边/面区域，再在该区域内解析求投影。详见 .cc 实现处注释。
+		// 落在哪个顶点/边/面区域，再在该区域内解析求投影（实现见本文件末尾）。
 		Vec3<T> ClosestPointTo(const Vec3<T>& point) const;
 
 		// point 到三角形的**平方**距离（= 到最近点的平方距离）。
@@ -121,7 +124,7 @@ namespace geom {
 
 	template <typename T>
 	Vec3<T> Triangle3<T>::ClosestPointTo(const Vec3<T>& p) const {
-		// 记顶点为 A=a_、B=b_、C=c_。以下按 P 在 AABB 外接区域的划分选最近特征，
+		// 记顶点为 A=a_、B=b_、C=c_。以下按 P 落在三角形的哪个（顶点/边/面）Voronoi 区域选最近特征，
 		// 变量 d1..d6 是 P 相对三条边的投影点积（Ericson §5.1.5 的标准记号）。
 		const Vec3<T> ab = b_ - a_;
 		const Vec3<T> ac = c_ - a_;

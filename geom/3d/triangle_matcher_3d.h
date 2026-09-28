@@ -60,9 +60,18 @@ namespace geom {
 		//   - triangles 非空：对着空气建匹配器是编程错误。
 		//
 		// triangles 按**值**保存（本容器持有其副本）；查询返回的下标即该副本的下标。
+		//
+		// 坐标范围：三角形与查询点须落在体素栅格可表示范围内（|坐标 / grid_size| < 2^31）；
+		//   更远会被 grid 夹断到同一极端体素、使结果失真（本工具的使用范围——人体 glb，米制
+		//   ——与之相差多个数量级，不会碰到）。查询点须有限（NaN/Inf 会触发 grid 的 CHECK）。
+		//
+		// 内存：同时保留“全量表”（all_recent，仅供 FindAllRecentTriangles）与“淘汰表”（nearest）
+		//   两套体素桶。若上层只用 FindNearestTriangles，可省掉全量表（需另一套“只存每体素
+		//   最近距离”的中间结构，暂未实现）。
 		TriangleMatcher3d(T local_distance, T grid_size, std::vector<Triangle3<T>> triangles);
 
-		// 返回"中心距 point ≤ local_distance + 体素半径"的三角形下标（**保召回**，可能含略远者）。
+		// 返回 point 所在**体素**桶内的三角形下标（= 该体素中心到三角形距离 ≤ local_distance +
+		// 体素半径）。它是「距 point ≤ local_distance 的三角形」的**超集**（保召回，可能含略远者）。
 		const std::vector<int>& FindAllRecentTriangles(const Vec3<T>& point) const;
 
 		// 返回"可能是 point 最近邻"的三角形下标（已按体素离线淘汰，见文件头）。O(1)。
