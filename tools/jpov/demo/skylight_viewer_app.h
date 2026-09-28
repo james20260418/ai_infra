@@ -52,6 +52,16 @@ public:
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
 
+    // ── 蓝人（mixamo_male）：同一份蒙皮 mesh + 骨架，每个方块顶面各一个 T-pose 实例 ──
+    // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
+    // person_instances_ 只存 3 个**静态** SkinnedInstanceState（pose_a==pose_b=0 = 恒等 pose
+    //   = 骨架 rest = T-pose），每帧拷一份交给 DrawMeshWithSkeleton（一次 instanced draw）。
+    uint32_t person_mesh_ = 0;           // 蒙皮 mesh_id（glb 第一个 primitive）
+    uint32_t person_skeleton_id_ = 0;    // RegisterSkeleton 返回的骨架 id
+    jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
+    jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
+    std::vector<jpov::SkinnedInstanceState> person_instances_;
+
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
     struct ModelSlot {
@@ -141,6 +151,12 @@ public:
             // 额外模型（桌子 / 橡树）：用来看“物体受光”，供夜色标定。
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            }
+            // 蓝人：三份 T-pose 实例**一次** instanced draw（person_instances_ 拷贝传入，
+            //   DrawMeshWithSkeleton 按值收 vector）。未装配时 person_mesh_==0 → 跳过。
+            if (person_mesh_ != 0 && !person_instances_.empty()) {
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           person_material_, person_instances_);
             }
         }
 
