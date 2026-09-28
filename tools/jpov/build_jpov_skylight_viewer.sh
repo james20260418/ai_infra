@@ -48,12 +48,14 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 
 # 拷贝模型资源到 exe 旁 models/（与 demo 里硬编码的相对路径 "models/xxx.glb" 对应）。
-# 来源：桌子取自 test/object3d/scene_assets/，高模橡树取自 test/object3d/oak_tripo_negative/。
+# 来源：桌子取自 test/object3d/scene_assets/，高模橡树取自 test/object3d/oak_tripo_negative/，
+#       蓝人（T-pose 人形，带骨架/蒙皮）取自 test/object3d/mixamo_male/。
 echo ""
 echo "==> 4. 拷贝模型资源到 output/jpov_skylight_viewer/models/"
 mkdir -p "$OUTPUT_DIR/models"
 cp -v "$PROJECT_DIR/tools/jpov/test/object3d/scene_assets/table.glb"              "$OUTPUT_DIR/models/"
 cp -v "$PROJECT_DIR/tools/jpov/test/object3d/oak_tripo_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/test/object3d/mixamo_male/mixamo_male.glb"         "$OUTPUT_DIR/models/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"
 
 echo ""
@@ -69,11 +71,14 @@ echo "   交互窗口（需 DISPLAY/WSLg）："
 echo "       $OUTPUT_DIR/jpov_skylight_viewer"
 echo ""
 echo "   验收：1280×720 不可 resize 窗口，场景为三个不同材质的方块（低反 / 高光 /"
-echo "   金属）+ 灰色地面，视角变换与 model viewer 相同（右键 drag 转视角、滚轮 zoom）。"
-echo "   窗口底部居中 4 个半屏宽滑条（表达**三个自由度**，其余走 SkyCommand 默认）："
+echo "   金属）+ 灰色地面 + 每块顶面一个 T-pose 蓝人（instanced，一次 draw）；视角变换"
+echo "   与 model viewer 相同（右键 drag 转视角、滚轮 zoom）。"
+echo "   窗口底部居中 6 个半屏宽滑条（五个自由度）+ 1 个环境光开关（其余走 SkyCommand 默认）："
 echo "     ① 浊度 turb [0,8]（默认 2）"
 echo "     ② 季节色温 [−1,+1]（左=蓝偏 / 右=红偏 / 中=中性）"
 echo "     ③ 天体方向：仰角 [−90,+90] + 方位角 [0,360)"
+echo "     ④ 月色变红 [0,1] / ⑤ 夜空偏蓝 [0,1]"
+echo "     ⑥ 开关：三色环境光（天/天际线/地 垂直梯度，对比单色 ambient）"
 echo ""
 echo "   天光由 CreateDefaultSkyCommand 构造，**主平行光 + ambient 由它推导**。"
 echo "   月亮恒在反日点（moon_dir = −sun_dir）：仰角正=太阳在主光（白天），负=月亮"

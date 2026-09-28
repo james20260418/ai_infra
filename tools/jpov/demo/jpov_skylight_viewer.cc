@@ -36,6 +36,9 @@
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/skylight_viewer_app.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/src/gltf_loader.h"
+#include "tools/common/utils.h"
 
 namespace {
 
@@ -56,6 +59,10 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
 // 分发态即“exe 旁 models/” —— 与字体同一套“拷贝法”惯例（SOUL：路径硬编码 + 脚本拷贝）。
 inline constexpr const char* kTableModelPath = "models/table.glb";
 inline constexpr const char* kOakModelPath   = "models/tripo_oak_4k.glb";
+
+// 蓝人（T-pose 人形）模型：带骨架 + 蒙皮通道（JOINTS_0/WEIGHTS_0）。
+// build 脚本把 mixamo_male.glb 拷到 exe 旁 models/（同其它模型一套“拷贝法”惯例）。
+inline constexpr const char* kMaleModelPath  = "models/mixamo_male.glb";
 
 // 装载额外模型并摆到三方块周囲（供标定夜色 ambient 时观察物体受光）。
 // 位置/朝向由肉眼调：桌子放左侧（−X）、橡树放右侧（+X），都落在 40×40 地面内。
@@ -97,6 +104,63 @@ void InstallModels(jpov_skylight::SkylightApp& app) {
                  /*up*/ {0, 1, 0}, /*front*/ {-1, 0, 0}, oak_scale);
 }
 
+// 蓝人（mixamo_male）：一份蒙皮 mesh + 一份骨架（单 identity pose = T-pose），
+// 每个方块顶面各摆一个实例 —— 三人共用同一份几何/骨架，只差摆放，**一次 instanced
+// draw call** 画完（见 SkylightApp::OneIteration）。
+//
+// 高度/落地归一（不假设资产坐标系）：scale = 目标身高 / 资产包围盒 Y 高；脚点对齐方块
+// 顶面（center.y = 顶面 − scale·资产 min.y），因此“脚贴在方块上”与资产原点在哪无关。
+void InstallPerson(jpov_skylight::SkylightApp& app) {
+    jpov::GltfObject obj = app.LoadGltf(kMaleModelPath);
+    CHECK(!obj.empty()) << "LoadGltf failed: " << kMaleModelPath
+                        << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
+    CHECK(!obj.primitives.empty());
+    CHECK(obj.bounds_valid) << "蓝人资产无包围盒，无法归一高度: " << kMaleModelPath;
+    const float asset_h = obj.bounds_max[1] - obj.bounds_min[1];
+    CHECK_GT(asset_h, 1.0e-6f) << "蓝人资产 Y 向高度≈0: " << kMaleModelPath;
+    const float scale = jpov_skylight::kPersonTargetHeight / asset_h;
+    const float min_y = obj.bounds_min[1];
+
+    app.person_mesh_     = obj.primitives[0].mesh_id;
+    app.person_material_ = obj.primitives[0].material;
+    CHECK_NE(app.person_mesh_, 0u) << "蓝人真皮网格句柄为 0（加载失败）";
+
+    // 骨架：同一 glb 的 skin[0]；只烘培一帧 identity pose（= rest/T-pose）。
+    //   ⚠️ LoadGltfSkeleton 是**纯 loader**，不解析相对路径（不认 exe 旁 / TEST_SRCDIR）；
+    //   而上面的 app.LoadGltf 走 Renderer::LoadGltf 已经解析过。这里用同一套
+    //   ResolveResourcePath 手动解析，否则分发态下会“文件找不到”（实测血泪）。
+    const std::string skel_path = jpov::ResolveResourcePath(kMaleModelPath);
+    std::vector<jpov::SkeletonType> skins;
+    CHECK(jpov::LoadGltfSkeleton(skel_path, &skins) && !skins.empty())
+        << "LoadGltfSkeleton 失败或无 skin: " << skel_path;
+    jpov::SkeletonType type = skins[0];
+    type.Validate();
+    app.person_skeleton_id_ = app.RegisterSkeleton(
+        type, {jpov::SkeletonPose::Identity(type.bone_count())});
+
+    // 三个站位：每个方块顶面一个（同一份 mesh/骨架/pose，只差 transform）。
+    app.person_instances_.clear();
+    app.person_instances_.reserve(3);
+    for (int i = 0; i < 3; ++i) {
+        const jpov::Vec3f top = jpov_skylight::BoxTopCenter(i);
+        jpov::SkinnedInstanceState inst;
+        inst.transform.center = {top.x(), top.y() - scale * min_y, top.z()};
+        inst.transform.up     = {0.0f, 1.0f, 0.0f};
+        inst.transform.front  = {0.0f, 0.0f, 1.0f};
+        inst.transform.scale  = scale;
+        inst.pose_a = 0;   // 唯一一帧 = identity = T-pose
+        inst.pose_b = 0;
+        inst.ratio  = 0.0f;
+        app.person_instances_.push_back(inst);
+    }
+    app.person_gltf_ = std::move(obj);   // 资源保活（释放走 Finalize）
+
+    LOG(INFO) << "blue-man assembled: mesh_id=" << app.person_mesh_
+              << " skeleton_id=" << app.person_skeleton_id_
+              << " bones=" << type.bone_count()
+              << " asset_h=" << asset_h << " scale=" << scale;
+}
+
 // headless 拍摄：按硬编码的一组场景出图，写到 out_dir。
 // 这是交付验收用的确定性通路——不入 UI、不依赖交互。
 int RunCapture(const std::string& out_dir) {
@@ -115,6 +179,7 @@ int RunCapture(const std::string& out_dir) {
     app.Init();
     InstallScene(app);
     InstallModels(app);
+    InstallPerson(app);
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_skylight::kViewerWidth;
@@ -241,6 +306,17 @@ int RunCapture(const std::string& out_dir) {
     app.deg_.sun_azim_deg = 45.0f;
     shoot("scene_noon_check");
 
+    // ── G. 三色环境光对比：**同机位/同自由度**，只切 ambient 三色开关 ──
+    // 正午（看“天顶冷蓝 vs 地平”梯度）、低斜阳（暖地平端）与夜间（看夜色量级是否与单色对齐）。
+    for (int e : {60, 12, -30}) {
+        app.deg_.sun_elev_deg = static_cast<float>(e);
+        app.SetTricolorAmbient(false);
+        shoot(("ambient_single_elev" + std::to_string(e)).c_str());
+        app.SetTricolorAmbient(true);
+        shoot(("ambient_tricolor_elev" + std::to_string(e)).c_str());
+    }
+    app.SetTricolorAmbient(false);
+
     app.Finalize();
     return 0;
 }
@@ -283,6 +359,7 @@ int main(int argc, char** argv) {
     // ── 场景静态资源（只建一次，不在 OneIteration 里重复构造/上传）──
     InstallScene(app);
     InstallModels(app);
+    InstallPerson(app);
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();

@@ -122,6 +122,10 @@ uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影
 // 全局环境光（AmbientLight）：无方向、无影子，照亮背阳面。
 uniform vec3  uAmbientColor;      // 环境光色调（RGB）
 uniform float uAmbientIntensity;  // 环境光亮度标量（乘 color）
+// 三色环境光（可选，增量扩展）：uAmbientTricolorEnabled==1 时按片元法线仰角在
+// [天, 天际线, 地] 间插值，**替代** uAmbientColor；==0 时走上面的单色。
+uniform int   uAmbientTricolorEnabled;
+uniform vec3  uAmbientTricolor[3];
 
 const float PI = 3.14159265;
 
@@ -417,7 +421,18 @@ void main() {
         : uAO;
     ao = clamp(ao, 0.0, 1.0);
 
-    vec3 ambient = uAmbientColor * uAmbientIntensity;
+    // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
+    // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
+    vec3 ambient;
+    if (uAmbientTricolorEnabled == 1) {
+        float ambient_up = clamp(N.y, -1.0, 1.0);
+        vec3 amb3 = (ambient_up >= 0.0)
+            ? mix(uAmbientTricolor[1], uAmbientTricolor[0], ambient_up)    // 天际线→天
+            : mix(uAmbientTricolor[1], uAmbientTricolor[2], -ambient_up);  // 天际线→地
+        ambient = amb3 * uAmbientIntensity;
+    } else {
+        ambient = uAmbientColor * uAmbientIntensity;
+    }
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
 

@@ -6,7 +6,7 @@
 //   - 天光 = `CreateDefaultSkyCommand`（其余参数走默认构造；月亮恒取 moon_dir = −sun_dir）；
 //   - 光照 = 由该 SkyCommand **推导**（主平行光 + ambient 色/强），不手配。
 //
-// 交互面板有五个自由度（六个滑条）：
+// 交互面板五个自由度（六个滑条）+ 一个环境光开关：
 //   ① 浊度 turb [0,8]
 //   ② 季节色温 日光 [−1,+1]（左=蓝偏 / 右=红偏；只染太阳能通道）
 //   ③ 天体方向：仰角 [−90,+90] + 方位角 [0,360)（两个滑条，属同一个自由度）
@@ -14,6 +14,8 @@
 //      等高（夜间，月亮平行光）。月亮方向恒取 moon_dir = −sun_dir，不单独给滑条。
 //   ④ 月色变红 [0,1]（0=常月，1=血月；只染月盘 + 月光）
 //   ⑤ 夜空偏蓝 [0,1]（0=出厂夜色，1=梦幻蓝且更亮；夜色两色整体乘子）
+//   ⑥（开关）三色环境光：开 = ambient 按法线仰角在 [天, 天际线, 地] 间插值（AmbientTricolor），
+//      关 = 原单色 ambient（AmbientColor）。供肉眼对比两种环境光。
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
@@ -52,6 +54,16 @@ public:
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
 
+    // ── 蓝人（mixamo_male）：同一份蒙皮 mesh + 骨架，每个方块顶面各一个 T-pose 实例 ──
+    // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
+    // person_instances_ 只存 3 个**静态** SkinnedInstanceState（pose_a==pose_b=0 = 恒等 pose
+    //   = 骨架 rest = T-pose），每帧拷一份交给 DrawMeshWithSkeleton（一次 instanced draw）。
+    uint32_t person_mesh_ = 0;           // 蒙皮 mesh_id（glb 第一个 primitive）
+    uint32_t person_skeleton_id_ = 0;    // RegisterSkeleton 返回的骨架 id
+    jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
+    jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
+    std::vector<jpov::SkinnedInstanceState> person_instances_;
+
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
     struct ModelSlot {
@@ -74,6 +86,10 @@ public:
     // ── 天光自由度（跨帧持有；天光与光照全由它们推导）──
     // 滑条值 → SkyCommand 字段的编码见 skylight_scene.h 的 SkyDegrees。
     SkyDegrees deg_;
+
+    // 是否使用**三色环境光**（[天, 天际线, 地] 垂直梯度）替代单色 ambient。
+    // 供肉眼对比：开=由 SkyCommand 推导的三色（AmbientTricolor），关=原来的单色（AmbientColor）。
+    void SetTricolorAmbient(bool on) { tricolor_ambient_ = on; }
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
@@ -119,7 +135,7 @@ public:
         // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
         // moon_season 与夜空蓝覆盖默认值。
-        const SkyLighting nl = MakeSkyLighting(deg_);
+        const SkyLighting nl = MakeSkyLighting(deg_, tricolor_ambient_);
         cmds->sky     = nl.sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
@@ -141,6 +157,12 @@ public:
             // 额外模型（桌子 / 橡树）：用来看“物体受光”，供夜色标定。
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            }
+            // 蓝人：三份 T-pose 实例**一次** instanced draw（person_instances_ 拷贝传入，
+            //   DrawMeshWithSkeleton 按值收 vector）。未装配时 person_mesh_==0 → 跳过。
+            if (person_mesh_ != 0 && !person_instances_.empty()) {
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                           person_material_, person_instances_);
             }
         }
 
@@ -173,7 +195,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 6;
+        const int   kRows    = 7;  // 6 个滑条 + 1 个三色 ambient 开关
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -199,10 +221,13 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
         // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
+        // ⑥ 三色环境光开关：开=天/天际线/地 三色垂直梯度（AmbientTricolor），关=单色。
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(6));
     }
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     jpov::Ui ui_;
 
     static constexpr float kSliderFontSize = 15.0f;
