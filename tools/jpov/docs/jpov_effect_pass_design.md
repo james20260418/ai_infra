@@ -1,7 +1,7 @@
 # JPOV 粒子特效 Pass 设计（火焰 MVP）
 
 > 日期：2026-09-28
-> 状态：设计敲定，待实现（MVP 范围 = 火焰）
+> 状态：设计敲定；**火焰 MVP 已实现**（见 §11 as-built）
 > 范围：新增一个**并列于 primitive3d 的特效渲染 pass**，MVP 只做火焰，验证接口与目录形态。
 
 ## 一、背景与目标
@@ -172,7 +172,7 @@ tools/jpov/effect/
 - **②在 tone map 之前** → HDR 的亮（>1.0 的火团）能被 ACES 正确压，不会被 clamp 成死白。
 - **HDR 红利**：现有 HDR FBO + ACES（PR #60）本就是发光特效的前提，链路已备好一半。
 
-## 十一、MVP 待抉择（实现前需定）
+## 十一、MVP 抉择与实现现状（as-built，2026-09-28）
 
 业界火焰有两种实现哲学，接口形态取决于选哪种：
 
@@ -181,7 +181,19 @@ tools/jpov/effect/
 | **粒子派** | 火 = 上百颗粒子，接口偏发射器参数 | 更像「通用粒子底座」，雨雪烟可复用 | 一团火要 1 批 draw（按 blend 分桶） |
 | **Shader 派** | 火 = 一个 quad + 滚动噪声 shader，只 2~4 个 uniform | 1 draw call 铁定，参数最少，最像「火焰引擎」 | 不复用粒子体系（雨雪烟另做） |
 
-**倾向**：MVP 用 **shader 派**快速出可看效果，验证 `effect/fire_render/` 的目录/接口形态；等雨雪烟要做时，再回头抽粒子底座。
+**MVP 抉择：走 Shader 派**（程序化噪声 quad）。理由：
+- 直接回答“一团火 1 个 draw call”与“远处自动变便宜”（quad 投影小则填充小，无需 LOD）；
+- 参数化（color_core/color_outer/intensity/speed/noise_scale），不依赖美术资源；
+- 火焰本质是“连续流体”，程序化噪声比离散粒子更贴切；且**不需要粒子模拟**（参考 Besiege：游戏的火焰是廉价视觉 + 传播判定，不做流体/粒子物理）。
+
+### 实现现状（as-built）
+
+- `interface/render_command.h/.cc`：新增 `ParticleBlend` 枚举、`FireCommand`、`RenderCommandList::fires` + `DrawFire(...)`、`DrawCommandType::kFire`、`effect_time`（特效时钟）。
+- `src/effect/fire_render/fire_renderer.{h,cc}`：`FireRenderer`（静态工具集）—— CPU 端圆柱 billboard 顶点展开 + 程序化火焰 shader（形状梯度 × 三频滚动 fbm × 热色阶）。
+- `src/renderer.{h,cc}`：`DrawFirePass`（3D 不透明之后、resolve/tone map 之前；测深度、不写深度、按 blend 设混合）、`FireProg()`。
+- `demo/skylight_viewer_app.h`：中间方块顶上一团火 + 暖色点光源；面板一个 `Checkbox` 开关；headless 用 `SetShowFire`/`SetFireBlend`/`SetEffectTime` 出图对比。
+
+**实测观感**：alpha 混合下火色（暗红→橙→黄白）比加法混合清楚（加法在明亮日空下会被洗白）；点光源能把周围方块/地面染暖（“火光照明”）。内部纹理、边缘跳动的细腻度仍可继续打磨（属参数/美术层）。
 
 ## 十二、非目标（明确不做）
 

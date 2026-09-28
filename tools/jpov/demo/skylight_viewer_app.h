@@ -86,14 +86,33 @@ public:
     // 排除方块遮挡与受光干扰，只留天光背景。
     void SetShowScene(bool show) { show_scene_ = show; }
 
+    // 是否绘制实验性火焰（含其上方的暖色点光源）。
+    // 交互面板有一个 toggle；headless 拍摄可用本 setter 单独开/关出图对比。
+    void SetShowFire(bool show) { show_fire_ = show; }
+    bool show_fire() const { return show_fire_; }
+
+    // 覆盖特效时钟（秒）。headless 拍摄用：不推进帧计数器，也能拍到动画中段。
+    // 传 0 生效；传负值恢复“跟随帧计数器”（交互默认）。
+    void SetEffectTime(float t) { effect_time_override_ = t; }
+
+    // 火焰混合模式（加法/alpha），供拍摄对比用。
+    void SetFireBlend(jpov::ParticleBlend b) { fire_blend_ = b; }
+
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)frame_count;
-
         cmds->camera.fbo_3d_width_  = kViewerWidth;
         cmds->camera.fbo_3d_height_ = kViewerHeight;
+
+        // 特效时钟：默认由帧计数器推进（确定性，不用 wall-clock）；
+        // headless 拍摄可用 SetEffectTime 覆盖以拍到动画中段。
+        if (effect_time_override_ >= 0.0f) {
+            cmds->effect_time = effect_time_override_;
+        } else {
+            cmds->effect_time = static_cast<float>(frame_count) /
+                                static_cast<float>(kViewerFps);
+        }
 
         // 交互输入 → 改视角（同 model viewer 的 ApplyInput）；headless 不消费输入。
         if (show_panel_) {
@@ -144,6 +163,12 @@ public:
             }
         }
 
+        // 火焰（实验）：中间方块顶上的一团火 + 一个暖色点光源。
+        // 仅交互/拍摄场景模式下有效（纯天空截图时整组跳过）。
+        if (show_scene_ && show_fire_) {
+            AppendFire(cmds);
+        }
+
         // 光照面板（仅交互窗口；headless 拍摄是纯 3D 截图）。
         if (show_panel_) {
             DrawLightPanel(input);
@@ -153,6 +178,35 @@ public:
     }
 
 private:
+    // 叠加火焰（实验）：中间方块顶上的一团火 + 一个同位置的暖色点光源。
+    // 火是“程序化 shader 火焰”（1 个 billboard quad，见 FireRenderer）；
+    // 点光源让周围方块被火光染暖（JPOV 版的“rim light”错觉）。
+    void AppendFire(jpov::RenderCommandList* cmds) const {
+        // 基础高度：中间方块（BoxCenter(1)）顶面 y = 2*kBoxHalf。
+        const float base_y = 2.0f * kBoxHalf;
+        const jpov::Vec3f base{0.0f, base_y, 0.0f};
+
+        // 火焰参数（内眼调过的一组“壁炉/火盆”量级）：占地~1m，高~1.2m。
+        cmds->DrawFire(/*base*/ base,
+                       /*radius*/ kFireRadius,
+                       /*height*/ kFireHeight,
+                       /*color_core*/ {1.0f, 0.86f, 0.48f, 1.0f},   // 亮黄芯
+                       /*color_outer*/ {1.0f, 0.20f, 0.03f, 1.0f},   // 橙红外焰
+                       /*intensity*/ 1.3f,
+                       /*speed*/ 1.6f,
+                       /*noise_scale*/ 3.2f,
+                       /*blend*/ fire_blend_);
+
+        // 暖色点光源：放在火焰中部，照亮周围方块（“火光照亮环境”）。
+        // intensity=1.0 ≈ 100W 白炽灯（见 LIGHT_INTENSITY.md）；火取略高于此。
+        jpov::PointLight light;
+        light.position = {base.x(), base.y() + 0.5f * kFireHeight, base.z()};
+        light.color = {1.0f, 0.55f, 0.20f, 1.0f};
+        light.linear_radius = 8.0f;
+        light.intensity = 4.0f;
+        cmds->point_lights.push_back(light);
+    }
+
     static float AppTextWidth(const char* text, float font_size,
                               const char* /*font_alias*/, void* userdata) {
         SkylightApp* app = static_cast<SkylightApp*>(userdata);
@@ -173,7 +227,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 6;
+        const int   kRows    = 7;
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -199,10 +253,20 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
         // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
+        // ⑥ 火焰开关（实验）：中间方块顶上的程序化火焰 + 暖色点光源。
+        ui_.Checkbox("火焰 Fire (实验)", &show_fire_, row(6));
     }
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    bool show_fire_  = true;   // 火焰开关（面板 toggle / headless setter）
+    float effect_time_override_ = -1.0f;  // >=0 时覆盖特效时钟（headless 用）
+    jpov::ParticleBlend fire_blend_ = jpov::ParticleBlend::kAlpha;  // 火焰混合模式
+
+    // 火焰几何参数（实验默认值；调手感改这里）。
+    static constexpr float kFireRadius = 0.55f;  // 水平半宽（米）
+    static constexpr float kFireHeight = 1.6f;   // 向上高度（米）
+
     jpov::Ui ui_;
 
     static constexpr float kSliderFontSize = 15.0f;

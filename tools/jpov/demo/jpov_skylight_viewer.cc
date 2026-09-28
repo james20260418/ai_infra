@@ -241,6 +241,37 @@ int RunCapture(const std::string& out_dir) {
     app.deg_.sun_azim_deg = 45.0f;
     shoot("scene_noon_check");
 
+    // ── G. 火焰特效（实验）：中间方块顶上的一团火 + 暖色点光源 ──
+    // 同一场景拍「关火 / 开火」两张，看火焰本体（程序化 shader，加法混合）
+    // 以及火光照亮周围方块的效果。近视角对准中间方块。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.20;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 4.5;
+    app.SetShowFire(false);
+    shoot("fire_off");
+    app.SetShowFire(true);
+    // 拍动画中段的几个时刻（同一开关，不同相位，看噪声滚动）：加法混合。
+    app.SetFireBlend(jpov::ParticleBlend::kAdditive);
+    for (float t : {0.0f, 0.4f, 0.8f, 1.2f}) {
+        app.SetEffectTime(t);
+        shoot(("fire_add_t" + std::to_string(static_cast<int>(t * 10))).c_str());
+    }
+    // alpha 混合（对比：火色是否更清楚）。
+    app.SetFireBlend(jpov::ParticleBlend::kAlpha);
+    for (float t : {0.0f, 0.8f}) {
+        app.SetEffectTime(t);
+        shoot(("fire_alpha_t" + std::to_string(static_cast<int>(t * 10))).c_str());
+    }
+
+    // 黄昏（太阳压低）：火光在暗环境里更显（看点光源是否照亮方块）。
+    app.deg_.sun_elev_deg = -8.0f;
+    app.SetEffectTime(0.8f);
+    app.SetShowFire(false);
+    shoot("fire_dusk_off");
+    app.SetShowFire(true);
+    shoot("fire_dusk_on");
+
     app.Finalize();
     return 0;
 }

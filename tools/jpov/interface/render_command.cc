@@ -27,6 +27,7 @@ void RenderCommandList::Clear() {
     image2d.clear();
     object3d.clear();
     skinned_mesh.clear();
+    fires.clear();
     point_lights.clear();
     object_use_default_color = false;
     order.clear();
@@ -244,6 +245,31 @@ void RenderCommandList::DrawMeshWithSkeleton(
     cmd.instances = std::move(instances);  // 每实例自己的插值 pose(pose_a/pose_b/ratio)在 instances 里(见 skeleton_types.h)
     skinned_mesh.push_back(cmd);
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
+}
+
+void RenderCommandList::DrawFire(const Vec3f& base, float radius, float height,
+                                 const Color& color_core,
+                                 const Color& color_outer,
+                                 float intensity, float speed,
+                                 float noise_scale, ParticleBlend blend) {
+    CHECK_GT(radius, 0.0f) << "DrawFire: radius 必须 > 0";
+    CHECK_GT(height, 0.0f) << "DrawFire: height 必须 > 0";
+    CHECK_GE(intensity, 0.0f) << "DrawFire: intensity 必须 >= 0";
+    CHECK_GE(speed, 0.0f) << "DrawFire: speed 必须 >= 0";
+    CHECK_GT(noise_scale, 0.0f) << "DrawFire: noise_scale 必须 > 0";
+    int idx = static_cast<int>(fires.size());
+    FireCommand cmd;
+    cmd.base = base;
+    cmd.radius = radius;
+    cmd.height = height;
+    cmd.color_core = color_core;
+    cmd.color_outer = color_outer;
+    cmd.intensity = intensity;
+    cmd.speed = speed;
+    cmd.noise_scale = noise_scale;
+    cmd.blend = blend;
+    fires.push_back(cmd);
+    order.emplace_back(DrawCommandType::kFire, idx);
 }
 
 }  // namespace jpov
