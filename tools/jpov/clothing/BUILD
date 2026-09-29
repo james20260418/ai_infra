@@ -32,6 +32,7 @@ cc_library(
     deps = [
         ":clothing_axis_input",
         "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",

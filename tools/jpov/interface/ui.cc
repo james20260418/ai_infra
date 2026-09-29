@@ -19,7 +19,9 @@
 #include "tools/jpov/interface/ui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <string>
 
 #include <glog/logging.h>
 
@@ -530,19 +532,63 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
 
 // S5 键盘字符映射：KeyCode → 可编辑字符（与 ui.h 声明一致）。
 char UiInputCharForKey(KeyCode key) {
-    // 字母表 a-z（InputSnapshot 无 Shift 修饰，一律小写）。
+    return UiInputCharForKey(key, /*shift=*/false);
+}
+
+// 带 Shift 的映射：返回该键在给定修饰下应写入的字符，不可编辑返回 '\0'。
+//   - 字母：Shift 决定大小写。
+//   - 数字：本接口不带小键盘；主键盘数字 Shift 是上档符号（!@#...），
+//     为保证“输入小数/负数”这类数值场景直覂，数字键**不带 Shift 时**输出数字，
+//     带 Shift 时输出其美国键盘上档符号（1→!，2→@，…）。
+//   - 标点：不带 Shift 输出下档符号，带 Shift 输出上档符号。
+char UiInputCharForKey(KeyCode key, bool shift) {
+    // 字母表 a-z。
     if (key >= KeyCode::A && key <= KeyCode::Z) {
-        return static_cast<char>('a' + (static_cast<int>(key) - static_cast<int>(KeyCode::A)));
+        const char lower =
+            static_cast<char>('a' + (static_cast<int>(key) - static_cast<int>(KeyCode::A)));
+        return shift ? static_cast<char>(lower - 'a' + 'A') : lower;
     }
-    // 数字 0-9。
+    // 数字 0-9（同上）。
     if (key >= KeyCode::_0 && key <= KeyCode::_9) {
-        return static_cast<char>('0' + (static_cast<int>(key) - static_cast<int>(KeyCode::_0)));
+        const char digit =
+            static_cast<char>('0' + (static_cast<int>(key) - static_cast<int>(KeyCode::_0)));
+        if (!shift) {
+            return digit;
+        }
+        // 美国键盘上档符号。
+        static const char kShiftedDigits[10] = {'!', '@', '#', '$', '%',
+                                                '^', '&', '*', '(', ')'};
+        return kShiftedDigits[digit - '0'];
     }
+    if (key == KeyCode::Space) {
+        return ' ';
+    }
+    // 标点：下档 / 上档（美国键盘）。
     switch (key) {
-        case KeyCode::Space:
-            return ' ';
+        case KeyCode::Apostrophe:
+            return shift ? '"' : '\'';
+        case KeyCode::Comma:
+            return shift ? '<' : ',';
+        case KeyCode::Minus:
+            return shift ? '_' : '-';
+        case KeyCode::Period:
+            return shift ? '>' : '.';
+        case KeyCode::Slash:
+            return shift ? '?' : '/';
+        case KeyCode::Semicolon:
+            return shift ? ':' : ';';
+        case KeyCode::Equal:
+            return shift ? '+' : '=';
+        case KeyCode::LeftBracket:
+            return shift ? '{' : '[';
+        case KeyCode::Backslash:
+            return shift ? '|' : '\\';
+        case KeyCode::RightBracket:
+            return shift ? '}' : ']';
+        case KeyCode::GraveAccent:
+            return shift ? '~' : '`';
         default:
-            return '\0';  // 修饰键/控制键/方向键等：不可编辑字符，调用方忽略。
+            return '\0';  // 修饰键/控制键/方向键等：不可编辑字符。
     }
 }
 
@@ -629,19 +675,29 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     }
     // 聚焦状态结算（先做，供下方键入判断使用）：
     //  - 点本框 → 聚焦（Acquire）；点别处 → 本框失焦（Release，仅当自己是持有者）。
+    //  - 点本框内时，按点击 x 把光标定位到最近的字符边界（点哪插哪，符合直觉）。
     if (clicked_inside) {
+        const bool was_focused = text_focus_.IsHeldBy(b);
         text_focus_.Acquire(b);
-        input_scroll_px_ = 0.0f;  // 聚焦时滚动归零（从头显示）。
+        if (!was_focused) {
+            input_scroll_px_ = 0.0f;  // 新聚焦：滚动归零（从头显示）。
+        }
+        // 按点击 x 定位光标（用真实字体进宽逐字符累加，选最接近的边界）。
+        const float pad = theme_.padding_px;
+        const float click_x = in.left_clicks[0].x - (b.pos.x() + pad) +
+                              input_scroll_px_;
+        input_caret_ = CaretIndexForX(buffer, text_len, click_x);
     } else if (in.left.IsClick()) {
         text_focus_.Release(b);  // 仅当本框正是聚焦者时释放；否则无操作。
     }
 
     // ---- 键盘写回 char*（S5.2）：仅聚焦框消费键入 ----
-    // 用本轮聚焦判定后的 is_focused 快照决定是否消费按键，避免同帧内
-    // 焦点迁移（点框外导致失焦）后仍把字符打进刚失焦的 buffer。
-    // 可编辑长度用可变变量跟踪（追加/删除会改变它）。
+    // 用本轮聚焦判定后的 is_focused 快照决定是否消费按键。
+    // 可编辑长度与光标位置用可变变量跟踪（插入/删除会改变二者）。
     size_t len = text_len;
     const size_t cap = buffer_size - 1;  // 可容纳的最大字符数（留 '\0'）。
+    // 光标夹到 [0, len]（调用方可能改了 buffer，导致长度变短）。
+    int caret = std::clamp(input_caret_, 0, static_cast<int>(len));
     if (is_focused) {
         // 控制键：Enter / Escape → 失焦（提交/取消，都不改变 buffer）。
         const KeyState& enter = in.GetKey(KeyCode::Enter);
@@ -649,50 +705,108 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
         if (enter.IsClick() || esc.IsClick()) {
             text_focus_.Release(b);  // 回车/取消 → 失焦（本框为持有者）。
         } else {
-            // Backspace：删除最后一个字符（删除发生在追加前）。
-            // 键盘 hold 150ms 阈值两态（验收 bug#11）：
-            //   - Click 帧：按 click_count 次删除（短按一次删 1 个）。
-            //   - Hold 帧：AdvanceKeyHold 累计按住时长，>150ms 后每 150ms 删 1 次；
-            //     <150ms 的短按（已被 Click 消费）不再重复删除。
-            const KeyState& bs = in.GetKey(KeyCode::Backspace);
+            // 某键本帧的动作次数（Click 帧 = click_count；Hold 帧 = 阈值重复）。
+            const auto actions_of = [&](KeyCode key) -> int {
+                const KeyState& ks = in.GetKey(key);
+                return ks.IsClick() ? ks.click_count()
+                                    : AdvanceKeyHold(key);
+            };
+            const auto move_caret = [&](int delta, int times) {
+                for (int t = 0; t < times; ++t) {
+                    caret = std::clamp(caret + delta, 0, static_cast<int>(len));
+                }
+            };
+
+            // 光标移动（方向键 / Home / End）。
+            move_caret(-1, actions_of(KeyCode::Left));
+            move_caret(+1, actions_of(KeyCode::Right));
             {
-                const int repeats =
-                    bs.IsClick() ? bs.click_count() : AdvanceKeyHold(KeyCode::Backspace);
-                const size_t n =
-                    std::min(static_cast<size_t>(std::max(repeats, 0)), len);
-                for (size_t i = 0; i < n; ++i) {
-                    buffer[len - i - 1] = '\0';
+                const int home = actions_of(KeyCode::Home);
+                if (home > 0) {
+                    caret = 0;
                 }
-                len -= n;
-                buffer[len] = '\0';
+                const int end = actions_of(KeyCode::End);
+                if (end > 0) {
+                    caret = static_cast<int>(len);
+                }
             }
-            // 可编辑字符：从 KeyCode 读，逐字符追加，遇容量上限截断（S5.2）。
-            // 按码点序扫描（Space..Z，含 a-z / 0-9 / 空格区间）。键盘 hold
-            // 150ms 阈值两态（验收 bug#11）：Click 帧按次追加（单击立即输入）；
-            // Hold 帧由 AdvanceKeyHold 每 150ms 追加 1 次。容量满则丢弃余量（截断）。
-            for (int code = static_cast<int>(KeyCode::Space);
+
+            // Backspace：删光标**左侧**字符（删除发生在插入前）。
+            {
+                const int n = std::min(actions_of(KeyCode::Backspace), caret);
+                for (int i = 0; i < n; ++i) {
+                    // 把 [caret-1, len) 整体左移一位，删掉 buffer[caret-1]。
+                    for (size_t j = static_cast<size_t>(caret) - 1; j + 1 < len; ++j) {
+                        buffer[j] = buffer[j + 1];
+                    }
+                    --len;
+                    buffer[len] = '\0';
+                    --caret;
+                }
+            }
+            // Delete：删光标**右侧**字符（光标不动）。
+            {
+                const int room = static_cast<int>(len) - caret;
+                const int n = std::min(actions_of(KeyCode::Delete), room);
+                for (int i = 0; i < n; ++i) {
+                    for (size_t j = static_cast<size_t>(caret); j + 1 < len; ++j) {
+                        buffer[j] = buffer[j + 1];
+                    }
+                    --len;
+                    buffer[len] = '\0';
+                }
+            }
+
+            // 可打印字符：按码点序扫描，**插入在光标处**，遇容量上限截断。
+            // 两个扫描段**互不重叠**：标点段（显式列出的标点码）+ 字母/数字/空格段。
+            const auto insert_char = [&](char ch, int times) {
+                for (int t = 0; t < times && len < cap; ++t) {
+                    // 从末尾起把 [caret, len) 右移一位，腾出 buffer[caret]。
+                    for (size_t j = len; j > static_cast<size_t>(caret); --j) {
+                        buffer[j] = buffer[j - 1];
+                    }
+                    buffer[caret] = ch;
+                    ++len;
+                    buffer[len] = '\0';
+                    ++caret;
+                }
+            };
+            const auto try_key = [&](KeyCode key) {
+                const int n = actions_of(key);
+                if (n <= 0) {
+                    return;
+                }
+                const char ch = UiInputCharForKey(key, in.mods.shift);
+                if (ch != '\0') {
+                    insert_char(ch, n);
+                }
+            };
+            // 段 1：标点（显式枚举；避开字母/数字码，免得与段 2 重复）。
+            static const KeyCode kPunctKeys[] = {
+                KeyCode::Apostrophe,  KeyCode::Comma,       KeyCode::Minus,
+                KeyCode::Period,      KeyCode::Slash,       KeyCode::Semicolon,
+                KeyCode::Equal,       KeyCode::LeftBracket, KeyCode::Backslash,
+                KeyCode::RightBracket, KeyCode::GraveAccent,
+            };
+            for (const KeyCode key : kPunctKeys) {
+                try_key(key);
+            }
+            // 段 2：空格(32) / 数字(48-57) / 字母(65-90)。
+            // 注意：不能简单扫 [Space..Z] 区间——该区间夹着若干标点码
+            // （45 减号/46 句点/47 斜杠/59 分号/61 等号），会与段 1 重复。
+            try_key(KeyCode::Space);
+            for (int code = static_cast<int>(KeyCode::_0);
+                 code <= static_cast<int>(KeyCode::_9); ++code) {
+                try_key(static_cast<KeyCode>(code));
+            }
+            for (int code = static_cast<int>(KeyCode::A);
                  code <= static_cast<int>(KeyCode::Z); ++code) {
-                const KeyState& ks = in.GetKey(static_cast<KeyCode>(code));
-                const int actions = ks.IsClick()
-                                        ? ks.click_count()
-                                        : AdvanceKeyHold(static_cast<KeyCode>(code));
-                if (actions <= 0) {
-                    continue;
-                }
-                const char ch = UiInputCharForKey(static_cast<KeyCode>(code));
-                if (ch == '\0') {
-                    continue;  // 不可编辑字符跳过。
-                }
-                const size_t n = std::min(static_cast<size_t>(actions),
-                                          cap - len);
-                for (size_t i = 0; i < n; ++i) {
-                    buffer[len + i] = ch;
-                }
-                len += n;
-                buffer[len] = '\0';
+                try_key(static_cast<KeyCode>(code));
             }
         }
     }
+    // 回写光标（跨帧状态）。
+    input_caret_ = caret;
 
     // 绘制/返回用的“当前聚焦”判定：必须在本帧全部输入处理（含 Enter/Escape
     // 失焦）之后结算，才能正确反映本帧点击聚焦/框外失焦/回车失焦的最终状态。
@@ -712,11 +826,11 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
 
     if (len > 0) {
         // 内容文本：foreground 色、左对齐、垂直居中（kMidLeft，pos=左缘中点）。
-        // 手动压一条 Text2DCommand（与 S4 滑条数值文本一致），而非 PushText
-        //（PushText 仅 kTopLeft，无法垂直居中，与光标不对齐）。
+        // 随 input_scroll_px_ 水平滚动，与光标位置保持一致（否则长文本时光标
+        // 与字形错位）。
         Text2DCommand c;
         c.text = buffer;
-        c.pos = {text_left, cy};
+        c.pos = {text_left - input_scroll_px_, cy};
         c.font_size = theme_.font_size;
         c.color = theme_.foreground;
         c.alignment = TextAlignment::kMidLeft;
@@ -734,27 +848,23 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
         texts_.push_back(c);
     }
 
-    // 光标（S5.1/S5.3）：聚焦时在文本末尾画一条竖线（静态，不闪烁保 gold 可测）。
-    // 水平滚动：文本末位估计宽度超过 box 右缘（去 padding）→ 推进内部滚动，
-    // 保证光标不越出右缘（S5.3 内部 scroll、不溢出）。
-    // 文本宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽
-    // 估计（0.6*font_size/字符）——真实字体混合 Latin/CJK 时 0.6em 对 Latin
-    // 偏宽约 1.5~2x，导致光标漂到文本长度 1.5~2 倍（danis 验收 bug#7），
-    // 有回调后光标精确贴合文本末尾（见 MeasureTextWidth）。
+    // 光标（S5.1/S5.3）：聚焦时在**光标位置**（字符索引 caret）画一条竖线
+    //（静态，不闪烁保 gold 可测）。水平滚动：光标 X 超过 box 右缘（去 padding）
+    // → 推进内部滚动，保证光标不越出右缘（S5.3 内部 scroll、不溢出）。
+    // 宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽估计。
     if (focused_eff) {
         const float caret_w = std::max(1.0f, theme_.border_width_px);
         const float caret_right = b.pos.x() + b.size.x() - pad;
-        // 光标相对内容左缘的原始位置 = 文本总宽度（真实度量或等宽估计）
-        // - 当前滚动偏移。
-        const float text_w =
-            (len > 0) ? MeasureTextWidth(buffer, theme_.font_size) : 0.0f;
-        const float caret_x = text_left + text_w - input_scroll_px_;
+        // 光标 X（未滚动前）= 文本左缘 + 【0..caret】前缀的绘制宽度。
+        const float prefix_w = (caret > 0)
+                                   ? MeasureTextPrefixWidth(buffer, caret, theme_.font_size)
+                                   : 0.0f;
+        const float caret_x = text_left + prefix_w - input_scroll_px_;
         if (caret_x > caret_right) {
-            // 越过右缘：滚动多出的量，使光标保持恰在右缘内侧。
             input_scroll_px_ += caret_x - caret_right;
         }
         // 最终光标 X：贴右缘内侧，绝不越界。
-        const float cx = std::min(text_left + text_w, caret_right);
+        const float cx = std::min(text_left + prefix_w, caret_right);
         const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
         PushFillRect(UiRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
                      theme_.accent, theme_.accent, 0.0f);
@@ -998,6 +1108,40 @@ float Ui::MeasureTextWidth(const char* text, float font_size) const {
         w += font_size * 0.6f;
     }
     return w;
+}
+
+float Ui::MeasureTextPrefixWidth(const char* text, int count,
+                                 float font_size) const {
+    if (count <= 0) {
+        return 0.0f;
+    }
+    if (measure_text_ == nullptr) {
+        // 等宽估计：直接字符数 × 单字宽（无需拷贝）。
+        return font_size * 0.6f * static_cast<float>(count);
+    }
+    // 真实字体度量：需对前缀做一次测量（回调只接受终止字符串），
+    // 拷前 count 个字符到临时 buffer。
+    std::string prefix(text, static_cast<size_t>(count));
+    return MeasureTextWidth(prefix.c_str(), font_size);
+}
+
+int Ui::CaretIndexForX(const char* text, size_t len, float x) const {
+    if (x <= 0.0f || len == 0) {
+        return 0;
+    }
+    // 在 0..len 共 len+1 个字符边界中，选与 x 距离最小的那个。
+    int best = 0;
+    float best_dist = std::abs(x);  // 边界 0 的前缀宽 = 0。
+    for (size_t i = 1; i <= len; ++i) {
+        const float w = MeasureTextPrefixWidth(text, static_cast<int>(i),
+                                               theme_.font_size);
+        const float dist = std::abs(x - w);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
 }
 
 UiRect Ui::ResolveBox(const UiRect& box, float ideal_w, float ideal_h,

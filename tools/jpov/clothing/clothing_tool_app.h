@@ -34,6 +34,7 @@
 
 #include "tools/jpov/clothing/clothing_axis_input.h"
 #include "tools/jpov/clothing/clothing_init.h"
+#include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/ui.h"
@@ -41,15 +42,14 @@
 namespace jpov {
 namespace clothing {
 
-// 视角 / 光照 / 地面工具复用姊妹查看器（jpov_model_viewer / soft_mesh_viewer）的
-// 纯函数：ViewConfig、ApplyInput、MakeNoonLighting、MakeGroundQuad、GroundMaterial
-// 都在 jpov_viewer 命名空间里，不重复实现，保证各查看器的视角手感与光照观感一致。
+// 视角 / 光照 / 地面工具：视角与地面复用姊妹查看器的纯函数（ViewConfig、ApplyInput、
+// MakeGroundQuad、GroundMaterial 在 jpov_viewer 命名空间）。
+// 光照改用 **skylight viewer 的天光配置**（太阳仰角 45° + 三色环境光），而非旧版的
+// MakeNoonLighting——Danis 2026-09-29 反馈原来 ambient 偏暗，要求参照 skylight viewer。
 using jpov_viewer::ApplyInput;
 using jpov_viewer::DefaultView;
 using jpov_viewer::GroundMaterial;
 using jpov_viewer::MakeGroundQuad;
-using jpov_viewer::MakeNoonLighting;
-using jpov_viewer::NoonLighting;
 using jpov_viewer::ViewConfig;
 
 // 渲染/窗口分辨率（与姊妹查看器一致：1280×720，不可 resize）。单点定义。
@@ -218,10 +218,15 @@ public:
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;
 
-        // ── 光照：固定正午（本工具不暴露光照滑条，光照是标定值不是被调对象）──
-        const NoonLighting light = MakeNoonLighting();
+        // ── 光照：skylight viewer 同款天光（太阳仰角 45° + 三色环境光）──
+        // 天光与主平行光、ambient 全由同一 SkyCommand 推导（同源，不漂移）；
+        // 三色 ambient 按片元法线仰角在 [天, 天际线, 地] 间插值，去单色平感、
+        // 避免旧 MakeNoonLighting 偏暗。太阳角度固定 45°（Danis 指定，不暴露滑条）。
+        const jpov_skylight::SkyDegrees sky_deg;  // 默认：仰角 45°、方位 45°、浊度默认
+        const jpov_skylight::SkyLighting light =
+            jpov_skylight::MakeSkyLighting(sky_deg, /*tricolor_ambient*/ true);
         cmds->sky     = light.sky;
-        cmds->sun     = light.sun;
+        cmds->sun     = light.dir_light;
         cmds->ambient = light.ambient;
         cmds->tone_mapping = true;
 
