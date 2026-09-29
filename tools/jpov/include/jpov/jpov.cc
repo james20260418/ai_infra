@@ -487,12 +487,11 @@ double JPOV::FrameInterval() const {
 
 void JPOV::HandleKey(int key, int, int action, int mods) {
     // 修饰键状态：每次按键事件都从 mods 位掩码刷新（GLFW 在事件里携带当前
-    // 修饰键快照）。位值同 GLFW_MOD_*（SHIFT=0x1/CTRL=0x2/ALT=0x4/SUPER=0x8）。
-    // 用字面量而非 GLFW 宏，避免本文件以外依赖（此处已是 JPOV 实现，可直接用常量）。
-    mods_.shift = (mods & 0x0001) != 0;
-    mods_.ctrl  = (mods & 0x0002) != 0;
-    mods_.alt   = (mods & 0x0004) != 0;
-    mods_.super = (mods & 0x0008) != 0;
+    // 修饰键快照，shift 为左右任一按下）。文本输入框用它决定上档符号/大小写。
+    mods_.shift = (mods & GLFW_MOD_SHIFT) != 0;
+    mods_.ctrl  = (mods & GLFW_MOD_CONTROL) != 0;
+    mods_.alt   = (mods & GLFW_MOD_ALT) != 0;
+    mods_.super = (mods & GLFW_MOD_SUPER) != 0;
 
     if (key < 0 || key >= jpov::kMaxKeyCode) {
         return;

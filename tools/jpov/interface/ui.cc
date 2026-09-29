@@ -531,11 +531,7 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
 }
 
 // S5 键盘字符映射：KeyCode → 可编辑字符（与 ui.h 声明一致）。
-char UiInputCharForKey(KeyCode key) {
-    return UiInputCharForKey(key, /*shift=*/false);
-}
-
-// 带 Shift 的映射：返回该键在给定修饰下应写入的字符，不可编辑返回 '\0'。
+// 带 Shift：返回该键在给定修饰下应写入的字符，不可编辑返回 '\0'。
 //   - 字母：Shift 决定大小写。
 //   - 数字：本接口不带小键盘；主键盘数字 Shift 是上档符号（!@#...），
 //     为保证“输入小数/负数”这类数值场景直覂，数字键**不带 Shift 时**输出数字，
@@ -858,22 +854,24 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     }
 
     // 光标（S5.1/S5.3）：聚焦时在**光标位置**（字符索引 caret）画一条竖线
-    //（静态，不闪烁保 gold 可测）。水平滚动：光标 X 超过 box 右缘（去 padding）
-    // → 推进内部滚动，保证光标不越出右缘（S5.3 内部 scroll、不溢出）。
+    //（静态，不闪烁保 gold 可测）。水平滚动：把滚动量夹到“光标恰可见”的区间
+    //（双向），保证光标不越出 box 左右缘（S5.3 内部 scroll、不溢出），且
+    //与同样按 input_scroll_px_ 平移的正文保持一致（否则光标漂到字形外）。
     // 宽度优先用注入的真实字体度量（pen 水平终点），无回调时回退到等宽估计。
     if (focused_eff) {
         const float caret_w = std::max(1.0f, theme_.border_width_px);
-        const float caret_right = b.pos.x() + b.size.x() - pad;
+        const float text_right = b.pos.x() + b.size.x() - pad;
         // 光标 X（未滚动前）= 文本左缘 + 【0..caret】前缀的绘制宽度。
         const float prefix_w = (caret > 0)
                                    ? MeasureTextPrefixWidth(buffer, caret, theme_.font_size)
                                    : 0.0f;
-        const float caret_x = text_left + prefix_w - input_scroll_px_;
-        if (caret_x > caret_right) {
-            input_scroll_px_ += caret_x - caret_right;
-        }
-        // 最终光标 X：贴右缘内侧，绝不越界。
-        const float cx = std::min(text_left + prefix_w, caret_right);
+        // 滚动量区间：min = 光标贴左缘（0 为下界，不把文本往右推），
+        //            max = 光标贴右缘。当前滚动量夹进该区间（双向修正）。
+        const float max_scroll = prefix_w;
+        const float min_scroll =
+            std::max(0.0f, prefix_w - (text_right - text_left));
+        input_scroll_px_ = std::clamp(input_scroll_px_, min_scroll, max_scroll);
+        const float cx = text_left + prefix_w - input_scroll_px_;
         const float caret_h = std::max(2.0f, b.size.y() * 0.7f);
         PushFillRect(UiRect{{cx, cy - caret_h * 0.5f}, {caret_w, caret_h}},
                      theme_.accent, theme_.accent, 0.0f);

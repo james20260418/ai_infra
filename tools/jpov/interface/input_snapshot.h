@@ -171,7 +171,6 @@ constexpr int kMaxClicksPerFrame = 8;
 //
 // 目前只有文本输入框（InputText）消费它：Shift 决定标点键的上档符号
 // （如 Minus → '-' / '_'，Period → '.' / '>'），以及字母大小写。
-// 用 gflw 同值的位标志，但本接口不依赖 GLFW（用普通 constexpr 常量）。
 struct KeyMods {
     bool shift = false;  // 左/右 Shift（任一按下即 true）
     bool ctrl  = false;  // 左/右 Ctrl

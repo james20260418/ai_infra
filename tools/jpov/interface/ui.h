@@ -439,16 +439,11 @@ private:
     StateSlot button_press_;
 };
 
-// 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试
-// 合成按键时复用同一套映射，避免测试与实现分叉。
-// 返回该 key 在本帧应写入 buffer 的字符；无法映射为可编辑字符（修饰键/
-// 控制键）返回 '\0'，调用方忽略。大小写：InputSnapshot 未携带 Shift 修饰，
-// 一律输出小写（可编辑字符全集：a-z / 0-9 / 空格）。
-char UiInputCharForKey(KeyCode key);
-
-// 带 Shift 版本的字符映射（2026-09-29 输入框重做）：Shift 决定字母大小写
-// 与标点/数字的上档符号（如 Minus → '_'，Period → '>'，_1 → '!'）。
-// 不可编辑键（修饰键/控制键/方向键等）返回 '\0'。
+// 键盘字符映射：KeyCode → 可编辑字符（供 InputText 写回 buffer，也供测试
+// 合成按键时复用同一套映射，避免测试与实现分叉）。
+//
+// shift 决定字母大小写，以及标点/数字键的上档符号（如 Minus → '-' / '_'，
+// Period → '.' / '>'，_1 → '!'）。不可编辑键（修饰键/控制键/方向键等）返回 '\0'。
 char UiInputCharForKey(KeyCode key, bool shift);
 
 }  // namespace jpov

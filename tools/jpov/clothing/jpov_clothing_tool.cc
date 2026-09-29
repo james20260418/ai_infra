@@ -24,7 +24,6 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/clothing/clothing_tool_app.h"
-#include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
 
 namespace {

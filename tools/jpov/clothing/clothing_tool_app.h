@@ -16,7 +16,7 @@
 //
 // 仍不做（后续管线的事）：穿衣物理、衣服贴合。本文件只负责"加载 + 显示 + 粗调位置"。
 //
-// 与 soft_mesh_viewer 的关键差异：本工具的两个模型是**静态资产**（M0 不变形），
+// 与 soft_mesh_viewer 的关键差异：本工具的两个模型是**静态资产**（当前不变形），
 // 故直接用 LoadGltf → GltfObject 画（cmds->DrawGltfObject），不需要像软体仿真那样
 // 每帧 UpdateMesh 把 CPU 侧形变推上 GPU。
 //
@@ -135,7 +135,7 @@ public:
     //
     // 返回：本帧是否已就绪（可画 3D 场景，即 GPU 资产已上传）。
     bool TickInit() {
-        const bool changed = init_.Tick();
+        init_.Tick();  // 推进后台建图状态机（无返回值需用）
         if (init_.state() != InitState::kDone) {
             return false;  // kBuilding（继续显进度）/ kFailed（由调用方显失败页）
         }
@@ -148,7 +148,6 @@ public:
             return false;
         }
         UploadGpuAssets();
-        (void)changed;
         return true;
     }
 
@@ -379,7 +378,9 @@ private:
         cmds->DrawRect(/*pos*/ {panel_x, panel_y},
                        /*size*/ {panel_w, panel_h}, kPanelBg);
 
-        // Ui 控件发出的坐标是**屏幕像素**（非面板局部坐标），故控件位置 = 面板屏幕位置 + 内边距。
+        // Ui 不做面板平移（无面板 transform）：控件 UiRect 直接按传入坐标绘制。
+        // 本工具只有一个面板，故把控件定位在面板屏幕位置 + 内边距（left/top）
+        // 即面板内的位置（面板整体位移已并进 left/top，无需额外偏移）。
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
         const float row_w = panel_w - kPad * 2.0f;
