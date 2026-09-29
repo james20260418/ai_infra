@@ -978,6 +978,12 @@ unsigned int Renderer::SmokeProg() {
         {BurningRenderer::kSmokeVs, BurningRenderer::kSmokeFs});
 }
 
+// 粒子 program（三种形状族共用，靠 uStyle 分支）。
+unsigned int Renderer::ParticleProg() {
+    return shader_mgr_.GetOrCreate("particle",
+        {ParticleRenderer::kParticleVs, ParticleRenderer::kParticleFs});
+}
+
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
 // vertex shader 只声明 location 0/1（aPos/aNormal），避免 VAO 中未绑定的
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
@@ -1180,7 +1186,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kObject3D ||
             type == DrawCommandType::kSkinnedMesh ||
             type == DrawCommandType::kFire ||
-            type == DrawCommandType::kBurning) {
+            type == DrawCommandType::kBurning ||
+            type == DrawCommandType::kParticle) {
             has_3d = true;
             break;
         }
@@ -1337,7 +1344,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         // ---- 火焰/燃烧特效 pass：3D 不透明内容之后、resolve/tone map 之前。
         // 沿用当前 3D FBO 与同一张 depth buffer：测深度（被遮挡正确）、
         // 不写深度（半透明互不遮挡）。HDR 下 >1 的亮度交由 ACES 压。
-        if (!cmds.fires.empty() || !cmds.burnings.empty()) {
+        if (!cmds.fires.empty() || !cmds.burnings.empty() ||
+            !cmds.particles.empty()) {
             DrawEffectPass(cmds, fbo_3d_w, fbo_3d_h);
         }
 
@@ -1687,6 +1695,7 @@ void Renderer::DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_
     const unsigned int fire_prog = FireProg();
     const unsigned int burning_prog = BurningProg();
     const unsigned int smoke_prog = SmokeProg();
+    const unsigned int particle_prog = ParticleProg();
     for (const auto& [type, idx] : cmds.order) {
         if (type == DrawCommandType::kFire) {
             CHECK_GE(idx, 0);
@@ -1709,6 +1718,21 @@ void Renderer::DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_
             BurningRenderer::DrawBurning(cmds.burnings[idx], cmds.camera, stream_vbo_,
                                          burning_prog, smoke_prog, mvp_,
                                          cmds.effect_time);
+        } else if (type == DrawCommandType::kParticle) {
+            CHECK_GE(idx, 0);
+            CHECK_LT(idx, static_cast<int>(cmds.particles.size()));
+            const ParticleCommand& pc = cmds.particles[idx];
+            switch (pc.blend) {
+                case ParticleBlend::kAdditive:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    break;
+                case ParticleBlend::kAlpha:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    break;
+            }
+            ParticleRenderer::DrawParticleQuad(pc, cmds.camera, stream_vbo_,
+                                               particle_prog, mvp_,
+                                               cmds.effect_time);
         }
     }
 

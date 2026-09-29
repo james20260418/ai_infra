@@ -29,6 +29,7 @@ void RenderCommandList::Clear() {
     skinned_mesh.clear();
     fires.clear();
     burnings.clear();
+    particles.clear();
     point_lights.clear();
     object_use_default_color = false;
     order.clear();
@@ -296,6 +297,27 @@ void RenderCommandList::DrawBurning(const Vec3f& center, const Vec3f& up,
     cmd.seed = seed;
     burnings.push_back(cmd);
     order.emplace_back(DrawCommandType::kBurning, idx);
+}
+
+void RenderCommandList::DrawParticle(const Vec3f& position, float size,
+                                     float aspect, float heat, float alpha,
+                                     float time_offset, ParticleStyle style,
+                                     ParticleBlend blend) {
+    CHECK_GT(size, 0.0f) << "DrawParticle: size 必须 > 0";
+    CHECK_GT(aspect, 0.0f) << "DrawParticle: aspect 必须 > 0";
+    CHECK_GE(alpha, 0.0f) << "DrawParticle: alpha 必须 >= 0";
+    int idx = static_cast<int>(particles.size());
+    ParticleCommand cmd;
+    cmd.position = position;
+    cmd.size = size;
+    cmd.aspect = aspect;
+    cmd.heat = heat;
+    cmd.alpha = alpha;
+    cmd.time_offset = time_offset;
+    cmd.style = style;
+    cmd.blend = blend;
+    particles.push_back(cmd);
+    order.emplace_back(DrawCommandType::kParticle, idx);
 }
 
 }  // namespace jpov

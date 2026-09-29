@@ -97,6 +97,14 @@ public:
     void SetShowFire(bool show) { show_fire_ = show; }
     bool show_fire() const { return show_fire_; }
 
+    // 粒子风格（0=软团 / 1=火舌 / 2=涡流）；切换时清池避免混形。
+    void SetParticleStyle(int style) {
+        particle_style_ = std::max(0, std::min(2, style));
+        emitter_.Clear();
+        emitter_.SetMode(static_cast<jpov::FireParticleEmitter::Mode>(particle_style_));
+    }
+    int particle_style() const { return particle_style_; }
+
     // 粒子是否每帧推进（交互=true 看动态；headless 拍摄时 false + WarmUpParticles 冻结）。
     void SetParticlesLive(bool live) { particles_live_ = live; }
 
@@ -232,26 +240,32 @@ private:
         }
     }
 
-    // 推进一步粒子模拟（发射 + 上升/摆动 + 老化）。
+    // 推进一步粒子模拟（发射 + 各风格动力学 + 老化）。
     void StepParticles(float dt) {
+        if (!style_synced_) {           // 首次：把发射器风格同步到 particle_style_
+            SetParticleStyle(particle_style_);
+            style_synced_ = true;
+        }
         std::vector<jpov::Vec3f> src;
         PillarBaseRing(&src);
-        emitter_.SetRate(kParticleRate);
-        emitter_.EmitAccumulated(dt, src, /*spread*/ 0.07f,
-                                 /*up_speed*/ 0.95f, /*jit*/ 0.22f);
-        // 浮力越大 → 火苗往上窜得明显；sway 大 → 左右摆（对应“摆动明显”）。
-        emitter_.Update(dt, /*buoyancy*/ 3.2f, /*sway*/ 1.5f, /*drag*/ 1.2f);
+        // 各风格发射率/扩散不同。
+        const float rate = (particle_style_ == 1) ? 520.0f
+                         : (particle_style_ == 2) ? 330.0f : 260.0f;
+        const float spread = (particle_style_ == 1) ? 0.05f
+                           : (particle_style_ == 2) ? 0.09f : 0.10f;
+        emitter_.SetRate(rate);
+        emitter_.EmitAccumulated(dt, src, spread);
+        emitter_.Update(dt, particle_clock_);
+        particle_clock_ += dt;
     }
 
-    // 立柱「燃烧」——**粒子化**：柱底一圈发射火苗粒子，各自上升/摆动/变冷熄灭。
+    // 立柱「燃烧」——**粒子化**（三种风格可选）。
     void AppendPillarBurningParticles(jpov::RenderCommandList* cmds) const {
-        // 每颗粒子 = 一条 FireCommand（逐条命令）；颜色从热（黄白）到冷（暗红）。
-        emitter_.Append(cmds,
-                        /*color_hot*/  {1.00f, 0.86f, 0.45f, 1.0f},
-                        /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
-                        /*intensity*/ 1.35f,
-                        /*blend*/ fire_blend_,
-                        /*noise_scale*/ 3.4f);
+        emitter_.AppendParticles(cmds,
+                                 /*color_hot*/  {1.00f, 0.88f, 0.50f, 1.0f},
+                                 /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
+                                 /*intensity*/ 1.15f,
+                                 /*blend*/ particle_blend_);
         // 暖色点光源：柱底，照亮柱子/地面。
         jpov::PointLight light;
         light.position = {pillar_center_.x(), 0.55f, pillar_center_.z()};
@@ -366,7 +380,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 7;
+        const int   kRows    = 8;
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -392,8 +406,15 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
         // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
-        // ⑥ 火焰开关（实验）：中间方块顶上的程序化火焰 + 暖色点光源。
+        // ⑥ 火焰开关（实验）：立柱粒子燃烧。
         ui_.Checkbox("火焰 Fire (实验)", &show_fire_, row(6));
+        // ⑦ 粒子风格（实验）：软团 / 火舌 / 涡流 —— 切换时清池重发。
+        const int before_style = particle_style_;
+        ui_.Combo("粒子风格 (软团/火舌/涡流)", &particle_style_,
+                  {"软团 puff", "火舌 tongue", "涡流 vortex"}, row(7));
+        if (particle_style_ != before_style) {
+            SetParticleStyle(particle_style_);
+        }
     }
 
     bool show_panel_ = true;
@@ -405,8 +426,11 @@ private:
     bool particles_live_ = true;      // 粒子是否每帧推进（交互=true）
 
     // 粒子发射器（有状态的模拟层；固定池，不无限增长）。
-    jpov::FireParticleEmitter emitter_{1200};
-    static constexpr float kParticleRate = 380.0f;  // 每秒发射数（柱底一圈）
+    jpov::FireParticleEmitter emitter_{1500};
+    int particle_style_ = 1;          // 0=软团 / 1=火舌 / 2=涡流（默认火舌）
+    bool style_synced_ = false;       // 首次 StepParticles 时同步发射器风格
+    float particle_clock_ = 0.0f;     // 涡流场的演化时钟
+    jpov::ParticleBlend particle_blend_ = jpov::ParticleBlend::kAdditive;
     bool show_boxes_ = true;      // 三校方块开关（拍立柱时关）
     // 立柱中心（拍立柱时可挪到原点）。
     jpov::Vec3f pillar_center_{kPillarCx, kPillarHalfY, kPillarCz};

@@ -16,6 +16,7 @@
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/effect/burning_render/burning_renderer.h"
+#include "tools/jpov/effect/particle_fire/particle_renderer.h"
 #include "tools/jpov/src/effect/fire_render/fire_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
@@ -248,6 +249,7 @@ private:
     unsigned int FireProg();
     unsigned int BurningProg();
     unsigned int SmokeProg();
+    unsigned int ParticleProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();

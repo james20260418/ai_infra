@@ -306,30 +306,36 @@ int RunCapture(const std::string& out_dir) {
     app.SetShowFire(true);
     app.SetShowBoxes(true);
 
-    // ── K. 燃烧的立柱（**粒子化**）：柱底一圈发射火苗粒子，各自上升/摆动/熄灭 ──
+    // ── K. 粒子燃烧的立柱（三种风格各自出图对比）──
     app.deg_.sun_elev_deg = -18.0f;
     app.SetShowBoxes(false);
     app.SetPillarCenter({0.0f, jpov_skylight::kPillarHalfY, 0.0f});
     app.SetShowFire(true);
     app.SetEffectTime(0.7f);
-    // 拍摄冻结粒子 + 预热到稳态。
-    app.SetParticlesLive(false);
-    app.WarmUpParticles(4.0f);
-    LOG(INFO) << "burn particles alive=" << app.alive_particles();
-    app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.10;
-    app.view_.R     = 5.5;
-    for (float th : {0.0f, 35.0f, 70.0f, 110.0f}) {
-        app.view_.theta = th * 3.14159265358979323846 / 180.0;
-        shoot(("burn_th" + std::to_string(static_cast<int>(th))).c_str());
+    app.SetParticlesLive(false);   // 冻结粒子，预热到稳态
+    const char* kStyleName[3] = {"puff", "tongue", "vortex"};
+    for (int st = 0; st < 3; ++st) {
+        app.SetParticleStyle(st);
+        app.WarmUpParticles(5.0f);
+        LOG(INFO) << "style=" << kStyleName[st]
+                  << " alive=" << app.alive_particles();
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.10;
+        app.view_.R     = 5.0f;
+        for (float th : {0.0f, 45.0f}) {
+            app.view_.theta = th * 3.14159265358979323846 / 180.0;
+            shoot(("p" + std::string(kStyleName[st]) + "_th" +
+                   std::to_string(static_cast<int>(th))).c_str());
+        }
+        app.view_.R = 3.0f;
+        app.view_.theta = 3.14159265358979323846 / 4.0;
+        shoot(("p" + std::string(kStyleName[st]) + "_close").c_str());
     }
-    // 近景 + 关火对照
-    app.view_.R = 3.0f;
-    app.view_.theta = 3.14159265358979323846 / 4.0;
-    shoot("burn_close");
+    // 关火对照
     app.SetShowFire(false);
-    shoot("burn_off");
+    shoot("pburn_off");
     app.SetShowFire(true);
+    app.SetParticleStyle(0);
     app.SetParticlesLive(true);
     app.SetShowBoxes(true);
 

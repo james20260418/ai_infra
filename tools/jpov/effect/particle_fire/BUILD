@@ -14,3 +14,23 @@ cc_library(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# ParticleRenderer — 粒子特效渲染（三种形状族：软团/火舌/涡流）。
+cc_library(
+    name = "particle_renderer",
+    srcs = ["particle_renderer.cc"],
+    hdrs = ["particle_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

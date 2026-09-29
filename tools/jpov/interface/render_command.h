@@ -98,6 +98,8 @@ enum class DrawCommandType : uint8_t {
                         //      程序化噪声，无纹理；参与深度测试、不写深度，见 FireCommand
     kBurning,           // 3D 燃烧特效（世界空间，物体表面着火：火舌 + 烟）
                         //      由物体几何驱动（火跟着物体走），见 BurningCommand
+    kParticle,          // 3D 粒子特效（世界空间，粒子快照，逐条绘制）
+                        //      模拟层产出，见 ParticleCommand
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
 };
@@ -1361,6 +1363,31 @@ enum class ParticleBlend : uint8_t {
     kAlpha,
 };
 
+// 粒子「形状族」——同一颗粒子命令，三种截然不同的外貌/动力特征（实验）。
+//   kSoftPuff：软边圆团（“把烟囱的烟变成火”那类，面积大、圆、靠数量堆）。
+//   kTongue  ：细长上尖的火舌（底宽顶尖、摆动大，像蜡烛/火炬的舌头）。
+//   kVortex  ：被气流卷起的涡流团（涡卷 + 破碎，动力学由小尺度湍流驱动）。
+enum class ParticleStyle : uint8_t {
+    kSoftPuff,
+    kTongue,
+    kVortex,
+};
+
+// 一颗粒子的**无状态快照**（渲染层只画它，不关心它怎么动）。
+// 有状态的粒子池/生命周期/流场住在模拟层（见 effect/particle_fire）。
+struct ParticleCommand {
+    Vec3f position;      // 世界位置
+    float size = 0.1f;   // 面片边长（米）
+    float aspect = 1.0f; // 高/宽比（1=方；>1 细长，给火舌用）
+    float heat = 1.0f;   // 0~1 当前“热度”（决定颜色与亮度）
+    float alpha = 1.0f;  // 额外不透明度乘子（0~1）
+    float time_offset = 0.0f;  // 动画相位（秒），使各粒子不同步
+    ParticleStyle style = ParticleStyle::kSoftPuff;
+    ParticleBlend blend = ParticleBlend::kAdditive;
+
+    // Pre-condition: size > 0; aspect > 0; alpha >= 0
+};
+
 // 3D 火焰（世界空间）—— 程序化 shader 火焰（无纹理、无粒子模拟）。
 //
 // 实现：一个面向相机的竖直 quad（圆柱 billboard：仅绕 Y 轴朝相机，
@@ -1474,6 +1501,8 @@ struct RenderCommandList {
     std::vector<FireCommand> fires;
     // 3D 燃烧特效（世界空间，物体表面着火）。逐条独立，渲染时逐条画。
     std::vector<BurningCommand> burnings;
+    // 3D 粒子特效（世界空间，粒子快照）。逐条独立，渲染时逐条画。
+    std::vector<ParticleCommand> particles;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -1865,6 +1894,13 @@ struct RenderCommandList {
     void DrawBurning(const Vec3f& center, const Vec3f& up, const Vec3f& front,
                      const Vec3f& half_extents, float strength = 1.0f,
                      uint32_t seed = 0);
+
+    // 3D 粒子（世界空间快照）。逐条独立；模拟层（粒子池）每帧产出。
+    //
+    // Pre-condition: size > 0；aspect > 0；alpha >= 0
+    void DrawParticle(const Vec3f& position, float size, float aspect, float heat,
+                      float alpha, float time_offset, ParticleStyle style,
+                      ParticleBlend blend = ParticleBlend::kAdditive);
 };
 
 }  // namespace jpov
