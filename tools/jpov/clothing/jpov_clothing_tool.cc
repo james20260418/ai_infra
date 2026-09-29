@@ -4,8 +4,10 @@
 // 为后续「衣服贴合人体」的穿衣管线提供可视化底座。y-up，地平面 300×300 米高粗糙
 // 灰色 quad，光照固定正午晴天，视角靠鼠标操作（右键 drag 转、滚轮 zoom）。
 //
-// 本阶段（M0）**只做「加载 + 显示」**：不做对齐、不做穿衣物理。详见
-// clothing_tool_app.h 的边界说明。
+// 本阶段（2026-09-29）：**加载 + 显示 + 粗调位置**。
+//   ① 后台线程为两份 glb 建最近邻三角形匹配器（完成后主线程上传 GPU 资产）；
+//   ② 左上角面板用 x/y/z 填值输入框粗调衣服 center（回车/焦点丧失即生效）。
+//   仍不做：对齐/穿衣物理。详见 clothing_tool_app.h 的边界说明。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov/clothing:jpov_clothing_tool -- --body_reference_path /path/to/body.glb --cloth_path /path/to/cloth.glb
@@ -14,8 +16,10 @@
 //   → output/jpov_clothing_tool/jpov_clothing_tool ...
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>  // atof
 #include <string>
+#include <thread>
 
 #include <glog/logging.h>
 
@@ -75,30 +79,6 @@ CliOptions ParseCli(int argc, char** argv) {
     return opt;
 }
 
-// 人体 reference + 衣服两个资产包围盒的并集（相机自适应用）。
-// 任一资产为空时只取另一份；两份都空时 valid=false。
-struct BoundsUnion {
-    float min[3] = {0.0f, 0.0f, 0.0f};
-    float max[3] = {0.0f, 0.0f, 0.0f};
-    bool valid = false;
-};
-
-void AccumulateBounds(const jpov::GltfObject& obj, BoundsUnion* out /*inout*/) {
-    if (!obj.bounds_valid) {
-        return;
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (!out->valid) {
-            out->min[i] = obj.bounds_min[i];
-            out->max[i] = obj.bounds_max[i];
-        } else {
-            out->min[i] = std::min(out->min[i], obj.bounds_min[i]);
-            out->max[i] = std::max(out->max[i], obj.bounds_max[i]);
-        }
-    }
-    out->valid = true;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -138,41 +118,33 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
 
-    // ── 加载两个资产（各自整份画；M0 静态，不需要 CPU 侧形变）。──
-    app.body_ = app.LoadGltf(body_path);
-    CHECK(!app.body_.empty())
-        << "人体 reference 加载失败或为空: " << body_path
-        << "（请确认路径存在且为合法 .gltf/.glb）";
-    app.cloth_ = app.LoadGltf(opt.cloth_path);
-    CHECK(!app.cloth_.empty())
-        << "衣服模型加载失败或为空: " << opt.cloth_path
-        << "（请确认路径存在且为合法 .gltf/.glb）";
+    // ── 第一步：后台初始化（为两份 glb 建最近邻三角形匹配器）──
+    // 路径先存到 App（面板/进度页要显示），再发起后台线程。
     app.body_path_  = body_path;
     app.cloth_path_ = opt.cloth_path;
+    app.init_.Start(body_path, opt.cloth_path);
 
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
+    // 地面与 GPU 资产无关，可先行建成；两个模型资产的 GPU 上传由 App::TickInit()
+    // 在建图完成后的主线程里做（zero 分叉：Run 与 RunOnce 共用）。
     app.ground_mat_  = jpov::clothing::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov::clothing::MakeGroundQuad());
 
-    // 初始视角：目标原点、R 按「人体 ∪ 衣服」包围盒自适应（退化时退回 DefaultView）。
+    // 初始视角：默认目标原点、R 先取默认值；等 GPU 资产上传后由 App 按「人体 ∪ 衣服」
+    // 包围盒自适应（退化则保持默认）。
     app.view_ = jpov::clothing::DefaultView();
     app.view_.phi = static_cast<double>(opt.phi_deg) * 3.14159265358979323846 / 180.0;
-    BoundsUnion bounds;
-    AccumulateBounds(app.body_, &bounds);
-    AccumulateBounds(app.cloth_, &bounds);
-    if (bounds.valid) {
-        app.view_.R = jpov::clothing::ViewConfig::FitRadius(bounds.min, bounds.max,
-                                                            /*fov_deg*/ 60.0);
-        LOG(INFO) << "场景包围盒 [" << bounds.min[0] << "," << bounds.min[1] << ","
-                  << bounds.min[2] << "] ~ [" << bounds.max[0] << "," << bounds.max[1]
-                  << "," << bounds.max[2] << "]，初始 R=" << app.view_.R;
-    }
-    LOG(INFO) << "人体 reference: " << body_path << "（" << app.body_.size()
-              << " primitives）";
-    LOG(INFO) << "衣服模型: " << opt.cloth_path << "（" << app.cloth_.size()
-              << " primitives）";
 
     if (opt.ui_shot) {
+        // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。
+        // 反复调 TickInit（与交互循环同一条流程）直到场景就绪（GPU 资产已上传）。
+        while (!app.TickInit()) {
+            if (app.init_.state() == jpov::clothing::InitState::kFailed) {
+                LOG(FATAL) << "后台初始化失败：" << app.init_.error_message();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+
         // headless 单帧出图（带面板，UI 布局/字体自检用）。
         app.SetShowPanel(true);
         jpov::WindowInfo winfo;

@@ -10,9 +10,10 @@
 #   2. 产物拷贝到工程 output/jpov_clothing_tool/ 下（含 exe 旁 fonts/）
 #   3. 打印用法提示
 #
-# 本工具当前阶段（M0）：**只做「加载 + 显示」** —— 把一个人体 reference 与一件
-# 衣服模型加载进同一个 JPOV 场景并显示（固定正午光照、鼠标转视角）。不做人体/衣服
-# 对齐，也不做穿衣物理（对齐/穿衣是后续管线的事）。
+# 本工具当前阶段：**加载 + 显示 + 粗调位置**。
+#   ① 进入界面时后台线程为两份 glb 建「最近邻三角形」匹配器（期间主界面黑底白字显进度）；
+#   ② 左上角半透明黑底面板，用 x/y/z 填值输入框粗调衣服模型 center（回车/焦点丧失即生效）。
+#   仍不做：穿衣物理/贴合（后续管线的事）。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_clothing_tool/jpov_clothing_tool \
@@ -82,16 +83,19 @@ echo "       $OUTPUT_DIR/jpov_clothing_tool --ui_shot --output_dir /tmp/ui \\"
 echo "         --cloth_path /path/to/cloth.glb"
 echo "       → /tmp/ui/clothing_tool_ui.png"
 echo ""
-echo "   验收：1280x720 不可 resize 窗口，300×300 灰色地面 + 人体 reference + 衣服，"
-echo "   固定正午晴天光照（太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"
-echo "   窗口底部居中一个面板（自上而下）："
+echo "   验收：1280x720 不可 resize 窗口。启动先黑底白字显示后台进度（建最近邻三角形），"
+echo "   完成后显示场景：300×300 灰色地面 + 人体 reference + 衣服，固定正午晴天光照"
+echo "   （太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"
+echo "   左上角半透明黑底面板（自上而下）："
+echo "     · 衣服 X / Y / Z 三个填值输入框（回车或焦点丧失即把衣服 center 移到给定坐标）"
 echo "     · 地面高度 y [-3,+3]（默认 -3）"
 echo "     · 勾选：显示人体 reference / 显示衣服"
-echo "     · 只读行：人体 reference 与衣服的来源路径 + primitive 数"
-echo "     · 操作提示（M0 仅加载显示）"
+echo "     · 只读行：人体 reference 与衣服的来源文件名 + primitive 数"
 echo ""
 echo "   架构："
 echo "     · 本工具：tools/jpov/clothing/（独立包，namespace jpov::clothing）"
-echo "         - clothing_tool_app.h   渲染核心 App（场景 + 面板 + OneIteration）"
-echo "         - jpov_clothing_tool.cc 主程序（CLI 装配 + 交互/headless 分发）"
+echo "         - clothing_tool_app.h    渲染核心 App（场景 + 面板 + OneIteration）"
+echo "         - clothing_init.{h,cc}    后台初始化（建图 + 进度）"
+echo "         - clothing_axis_input.h   坐标填值解析（纯函数）"
+echo "         - jpov_clothing_tool.cc  主程序（CLI 装配 + 交互/headless 分发）"
 echo "     · 视角/光照/地面：复用 //tools/jpov:view_config（zero 分叉）"

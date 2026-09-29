@@ -13,16 +13,48 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
 # ============================================================================
 
+# 坐标填值输入解析（纯函数；header-only，无 GL/glog 依赖），单列一个库便于纯单测。
+cc_library(
+    name = "clothing_axis_input",
+    hdrs = ["clothing_axis_input.h"],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "clothing_tool_app",
-    hdrs = ["clothing_tool_app.h"],
+    srcs = ["clothing_init.cc"],
+    hdrs = [
+        "clothing_init.h",
+        "clothing_tool_app.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
+        ":clothing_axis_input",
+        "//geom/3d:triangle_matcher_3d",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:ui",
+        "//tools/jpov/src:gltf_loader",
+        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
+)
+
+# 坐标填值输入解析（纯函数单测；无 GL）。
+cc_test(
+    name = "clothing_axis_input_test",
+    srcs = ["clothing_axis_input_test.cc"],
+    deps = [
+        ":clothing_axis_input",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
 )
 
 cc_binary(
