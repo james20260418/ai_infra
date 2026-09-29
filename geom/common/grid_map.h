@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 
@@ -28,15 +29,29 @@
 
 namespace geom {
 
-	// 格索引的哈希函数（逐维取 std::hash 后异或合并）。
+	// 格索引的哈希函数（逐维用 splitmix64 风格混合函数搅动后折叠）。
+	//
+	// 注意：**不要**写成「各维 std::hash 直接异或」。libstdc++ 的 std::hash<int> 是恒等
+	// 映射，异或后小范围整数索引的不同取值极少：实测 3D 体素索引 1.4M 个键只剩 ~128 个
+	// 不同哈希值，于是 unordered_map 的桶极度聚集（每桶上万条链），插入退化为 O(n²)。
+	// 混合后相邻/小范围索引也能均匀散列。
 	template <typename GridType>
 	struct GridIndiceHash {
 		size_t operator()(const typename GridType::Indice& indice) const {
-			size_t result = 0;
+			size_t seed = static_cast<size_t>(0x9e3779b97f4a7c15ULL);
 			for (int i = 0; i < GridType::kDim; ++i) {
-				result ^= std::hash<typename GridType::IntT>{}(indice[i]);
+				seed = MixBits(seed ^ static_cast<size_t>(static_cast<int64_t>(indice[i])));
 			}
-			return result;
+			return seed;
+		}
+
+	private:
+		// 64-bit splitmix64 finalizer：雪崩充分，低位也被打散。
+		static size_t MixBits(size_t x) {
+			x += static_cast<size_t>(0x9e3779b97f4a7c15ULL);
+			x = (x ^ (x >> 30)) * static_cast<size_t>(0xbf58476d1ce4e5b9ULL);
+			x = (x ^ (x >> 27)) * static_cast<size_t>(0x94d049bb133111ebULL);
+			return x ^ (x >> 31);
 		}
 	};
 

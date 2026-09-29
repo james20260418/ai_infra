@@ -165,6 +165,7 @@ cc_library(
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
     ],
     copts = ["-std=c++20"],
@@ -178,6 +179,9 @@ cc_binary(
         "//tools/jpov:skylight_viewer_app",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
     ],
     target_compatible_with = [
         "@platforms//os:linux",
