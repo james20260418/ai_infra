@@ -490,6 +490,12 @@ Renderer::~Renderer() {
         glDeleteRenderbuffers(1, &pick_depth_rb_);
         pick_fbo_ = 0; pick_tex_ = 0; pick_depth_rb_ = 0;
     }
+    if (scene_depth_fbo_) {
+        glDeleteFramebuffers(1, &scene_depth_fbo_);
+        glDeleteTextures(1, &scene_depth_tex_);
+        glDeleteRenderbuffers(1, &scene_depth_rb_);
+        scene_depth_fbo_ = 0; scene_depth_tex_ = 0; scene_depth_rb_ = 0;
+    }
     // 注意：shader program 由 ShaderManager::~ShaderManager() 统一释放
     if (stream_vbo_)   glDeleteBuffers(1, &stream_vbo_);
     if (stream_vao_)   glDeleteVertexArrays(1, &stream_vao_);
@@ -984,6 +990,41 @@ unsigned int Renderer::ParticleProg() {
         {ParticleRenderer::kParticleVs, ParticleRenderer::kParticleFs});
 }
 
+// 体积特效 program（预实验：真 3D 体积团，逐像素 ray-march）。
+unsigned int Renderer::VolumetricProg() {
+    return shader_mgr_.GetOrCreate("volumetric",
+        {VolumetricRenderer::kVolumetricVs, VolumetricRenderer::kVolumetricFs});
+}
+
+// 场景线性深度 program：只写「相机到该像素的距离」到 RGBA32F 颜色纹理的 .r。
+//（体积特效 pass 用它的输出做遮挡裁剪。）
+namespace {
+const char* kSceneDepthVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorld;
+void main() {
+    vWorld = (uModel * vec4(aPos, 1.0)).xyz;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+const char* kSceneDepthFs = R"glsl(
+#version 330 core
+in vec3 vWorld;
+uniform vec3 uCamPos;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(length(vWorld - uCamPos), 0.0, 0.0, 1.0);
+}
+)glsl";
+}  // namespace
+
+unsigned int Renderer::SceneDepthProg() {
+    return shader_mgr_.GetOrCreate("scene_depth", {kSceneDepthVs, kSceneDepthFs});
+}
+
 // DrawObject3D PBR shader — 无 UV 版本（mesh 不含 kUV 时使用）。
 // vertex shader 只声明 location 0/1（aPos/aNormal），避免 VAO 中未绑定的
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
@@ -1187,7 +1228,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kSkinnedMesh ||
             type == DrawCommandType::kFire ||
             type == DrawCommandType::kBurning ||
-            type == DrawCommandType::kParticle) {
+            type == DrawCommandType::kParticle ||
+            type == DrawCommandType::kVolumetric) {
             has_3d = true;
             break;
         }
@@ -1345,7 +1387,21 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 沿用当前 3D FBO 与同一张 depth buffer：测深度（被遮挡正确）、
         // 不写深度（半透明互不遮挡）。HDR 下 >1 的亮度交由 ACES 压。
         if (!cmds.fires.empty() || !cmds.burnings.empty() ||
-            !cmds.particles.empty()) {
+            !cmds.particles.empty() || !cmds.volumetrics.empty()) {
+            // 体积特效需要"场景线性深度"做遮挡裁剪：先出一张 object3d 的
+            // 距离图（自己切 FBO），再回主 3D FBO 跑特效 pass。
+            if (!cmds.volumetrics.empty()) {
+                DrawSceneDepthPass(cmds, fbo_3d_w, fbo_3d_h, mvp_);
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                glEnable(GL_DEPTH_TEST);
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);
+                glEnable(GL_CULL_FACE);
+                glCullFace(GL_BACK);
+                glFrontFace(GL_CCW);
+                glEnable(GL_BLEND);
+            }
             DrawEffectPass(cmds, fbo_3d_w, fbo_3d_h);
         }
 
@@ -1696,6 +1752,7 @@ void Renderer::DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_
     const unsigned int burning_prog = BurningProg();
     const unsigned int smoke_prog = SmokeProg();
     const unsigned int particle_prog = ParticleProg();
+    const unsigned int volumetric_prog = VolumetricProg();
     for (const auto& [type, idx] : cmds.order) {
         if (type == DrawCommandType::kFire) {
             CHECK_GE(idx, 0);
@@ -1733,6 +1790,26 @@ void Renderer::DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_
             ParticleRenderer::DrawParticleQuad(pc, cmds.camera, stream_vbo_,
                                                particle_prog, mvp_,
                                                cmds.effect_time);
+        } else if (type == DrawCommandType::kVolumetric) {
+            CHECK_GE(idx, 0);
+            CHECK_LT(idx, static_cast<int>(cmds.volumetrics.size()));
+            const VolumetricCommand& vc = cmds.volumetrics[idx];
+            switch (vc.blend) {
+                case ParticleBlend::kAdditive:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                    break;
+                case ParticleBlend::kAlpha:
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    break;
+            }
+            // 体积团的形状活在**世界空间**，包围 quad 只是信封：不靠深度测试，
+            // 改在 shader 里用**场景线性深度**裁剪被不透明物挡住的段。
+            // 画完恢复深度测试，供后续 fire/burning/particle 继续用。
+            glDisable(GL_DEPTH_TEST);
+            VolumetricRenderer::DrawVolumetric(vc, cmds.camera, stream_vbo_,
+                                               volumetric_prog, mvp_, fbo_w, fbo_h,
+                                               scene_depth_tex_, cmds.effect_time);
+            glEnable(GL_DEPTH_TEST);
         }
     }
 
@@ -1979,6 +2056,95 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
 // 拾取（color-ID）pass。cmds.pick.enabled 时调用：把所有 picking_id>0 的物体
 // 用纯色 ID shader 画进一个自管理的小 RGBA8 FBO（带 depth，resolve 前景），
 // 读回光标像素解码成 picking_id → last_pick_。
+// 场景线性深度 pass（体积特效用）：把不透明 object3d 几何的"相机距离"写进
+// scene_depth_tex_（RGBA32F 颜色纹理），供体积 shader 采样做遮挡裁剪。
+// 为何不采样 depth texture：llvmpipe 下不可靠（见 EnsureShadowFBO 注释），
+// 故照 shadow 的做法把深度写进 float 颜色纹理。
+// 只覆盖 object3d（不含蒙皮 mesh；需要体积遮挡的场景当前没有蒙皮物体）。
+void Renderer::DrawSceneDepthPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                                  const float mvp[16]) {
+    // ---- 自管理 FBO（RGBA32F 颜色 + depth renderbuffer），尺寸 = 3D FBO ----
+    // 注：即使没有遮挡物也要出这张图（清为"极远"），否则体积 pass 会采样到
+    // 未初始化的纹理。几何循环为空时只是没东西写进去。
+    if (scene_depth_fbo_w_ != fbo_w || scene_depth_fbo_h_ != fbo_h ||
+        scene_depth_fbo_ == 0) {
+        if (scene_depth_fbo_) {
+            glDeleteFramebuffers(1, &scene_depth_fbo_);
+            glDeleteTextures(1, &scene_depth_tex_);
+            glDeleteRenderbuffers(1, &scene_depth_rb_);
+        }
+        glGenTextures(1, &scene_depth_tex_);
+        glBindTexture(GL_TEXTURE_2D, scene_depth_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, fbo_w, fbo_h, 0,
+                     GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glGenRenderbuffers(1, &scene_depth_rb_);
+        glBindRenderbuffer(GL_RENDERBUFFER, scene_depth_rb_);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fbo_w, fbo_h);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        glGenFramebuffers(1, &scene_depth_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, scene_depth_fbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, scene_depth_tex_, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, scene_depth_rb_);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
+            << "scene depth FBO failed, status=" << status;
+        scene_depth_fbo_w_ = fbo_w;
+        scene_depth_fbo_h_ = fbo_h;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, scene_depth_fbo_);
+    glViewport(0, 0, fbo_w, fbo_h);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glDisable(GL_BLEND);
+
+    // 清成"极远"（无遮挡物像素 = 大值）。far=1000 远大于场景，取 1e6 有余量。
+    glClearColor(1.0e6f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    const unsigned int prog = SceneDepthProg();
+    glUseProgram(prog);
+    glUniform3f(glGetUniformLocation(prog, "uCamPos"),
+                cmds.camera.position.x(), cmds.camera.position.y(),
+                cmds.camera.position.z());
+    for (const auto& o : cmds.object3d) {
+        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
+        CHECK(mesh != nullptr) << "DrawSceneDepthPass: mesh_id " << o.mesh_id << " 未注册";
+        CHECK_GT(mesh->vao, 0u);
+
+        float model[16], final_mvp[16];
+        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model, o.scale);
+        Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uMVP"), 1, GL_FALSE, final_mvp);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "uModel"), 1, GL_FALSE, model);
+
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                           GL_UNSIGNED_INT, nullptr);
+        } else {
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+        }
+        glBindVertexArray(0);
+    }
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+}
+
 void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                                float vp_x, float vp_y, float vp_w, float vp_h) {
     // 没有任何可拾取物体 → 直接判未命中，不建 FBO 不画（零成本）。

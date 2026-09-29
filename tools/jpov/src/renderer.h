@@ -17,6 +17,7 @@
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/effect/burning_render/burning_renderer.h"
 #include "tools/jpov/effect/particle_fire/particle_renderer.h"
+#include "tools/jpov/effect/volumetric_render/volumetric_renderer.h"
 #include "tools/jpov/src/effect/fire_render/fire_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
@@ -167,6 +168,14 @@ private:
     // 火焰 + 燃烧的合并入口：按 cmds.order 顺序依次绘制，保证两者互相遮挡正确。
     void DrawEffectPass(const RenderCommandList& cmds, int fbo_w, int fbo_h);
 
+    // 场景线性深度 pass（体积特效用）：把 cmds.object3d 的不透明几何用「距离」
+    // 写进一张 RGBA32F 颜色纹理（scene_depth_tex_），供体积 pass 采样做裁剪。
+    // 为什么不用 depth texture：llvmpipe 下 shader 采样 depth texture 不可靠
+    //（见 EnsureShadowFBO 的踩坑注释），故照 shadow 的做法把深度写进颜色纹理。
+    // 只覆盖 object3d（不含蒙皮 mesh；当前需要体积遮挡的场景没有蒙皮物体）。
+    void DrawSceneDepthPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                            const float mvp[16]);
+
     // 拾取：color-ID pass。cmds.pick.enabled 时，把 picking_id>0 的物体用
     // 纯色 ID shader 画进离屏 pick FBO，glReadPixels 解码光标像素 → last_pick_。
     // fbo_w/fbo_h 为 3D FBO 尺寸；vp_x/y/w/h 为当前生效的 viewport（窗口坐标）。
@@ -212,6 +221,12 @@ private:
     unsigned int pick_fbo_ = 0, pick_tex_ = 0, pick_depth_rb_ = 0;
     int pick_fbo_w_ = 0, pick_fbo_h_ = 0;
 
+    // 场景线性深度 FBO（RGBA32F 颜色存「相机距离」+ depth renderbuffer），
+    // 尺寸 = 3D FBO。体积特效 pass 前由 DrawSceneDepthPass 填充，
+    // 其颜色纹理 scene_depth_tex_ 供体积 shader 采样做遮挡裁剪。
+    unsigned int scene_depth_fbo_ = 0, scene_depth_tex_ = 0, scene_depth_rb_ = 0;
+    int scene_depth_fbo_w_ = 0, scene_depth_fbo_h_ = 0;
+
     // 高亮叠加 FBO：color-only 单采样（RGBA16F）。blit 场景 color 到此处后，
     // 在此叠加恒定像素宽边框（CPU 剪影膨胀求边缘环）。
     // 完成后其颜色纹理作为 tone map 的输入。
@@ -250,6 +265,9 @@ private:
     unsigned int BurningProg();
     unsigned int SmokeProg();
     unsigned int ParticleProg();
+    unsigned int VolumetricProg();
+    // 场景线性深度 pass 的 program（只写「相机到该像素的距离」到 float 颜色纹理）。
+    unsigned int SceneDepthProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
     unsigned int ShadowProg();

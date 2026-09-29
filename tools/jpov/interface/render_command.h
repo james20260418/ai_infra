@@ -102,6 +102,9 @@ enum class DrawCommandType : uint8_t {
                         //      模拟层产出，见 ParticleCommand
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
+    kVolumetric,        // 3D 体积特效（世界空间，逐个"体积团"逐像素 ray-march）
+                        //      模拟层产出，见 VolumetricCommand
+                        //      用场景深度裁剪；任意视角都是真 3D 团（非 billboard）
 };
 
 // ==================== 各类绘制命令结构体 ====================
@@ -1393,6 +1396,29 @@ struct ParticleCommand {
     // Pre-condition: size > 0; aspect > 0; alpha >= 0
 };
 
+// 一个"体积团"（世界空间）—— 预实验：把一颗粒子从 2D billboard 升级成
+// **真 3D 体积**。渲染层把它当作"相机朝向的屏幕包围盒"，在 fragment 里按
+// **世界空间 3D 密度场**逐像素 ray-march（含场景深度裁剪）→ 俯视/侧视一致，
+// 不再有"纸片"穿帮。密度场由参数驱动（形状族 = 参数组合），接口不出现业务名。
+//
+// 说明：几何（包围盒）只是"信封"；真正的形状/密度活在**世界**里。
+struct VolumetricCommand {
+    Vec3f center;        // 体积团中心（世界坐标）
+    float radius = 1.0f; // 球形包络半径（米）
+    float heat = 1.0f;   // 0~1 当前"热度"（决定颜色与亮度）
+    float swirl = 2.2f;  // 绕 Y 轴旋涡强度（涡流的"卷"）
+    float intensity = 1.0f;  // 整体发光乘子
+    float time_offset = 0.0f;  // 动画相位（秒），使各团不同步
+
+    Color color_core;    // 核心色（最热处，亮，如白黄）。
+    Color color_outer;   // 外焰色（较冷，暗，如橙红）。
+                         // 与 FireCommand 同约定：片元按 heat 在两色间插值。
+
+    ParticleBlend blend = ParticleBlend::kAdditive;
+
+    // Pre-condition: radius > 0; heat >= 0; intensity >= 0
+};
+
 // 3D 火焰（世界空间）—— 程序化 shader 火焰（无纹理、无粒子模拟）。
 //
 // 实现：一个面向相机的竖直 quad（圆柱 billboard：仅绕 Y 轴朝相机，
@@ -1508,6 +1534,9 @@ struct RenderCommandList {
     std::vector<BurningCommand> burnings;
     // 3D 粒子特效（世界空间，粒子快照）。逐条独立，渲染时逐条画。
     std::vector<ParticleCommand> particles;
+    // 3D 体积特效（世界空间，体积团）。逐条独立，渲染时逐条 ray-march。
+    // 需要场景**线性深度纹理**做裁剪（renderer 在画之前先出这张图）。
+    std::vector<VolumetricCommand> volumetrics;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -1911,6 +1940,17 @@ struct RenderCommandList {
                       const Color& color_outer, float time_offset,
                       ParticleStyle style,
                       ParticleBlend blend = ParticleBlend::kAdditive);
+
+    // 3D 体积团（世界空间）。逐条独立；模拟层每帧产出。
+    //
+    // 渲染层逐像素 ray-march 一个世界空间 3D 密度场，并用**场景线性深度**裁剪
+    // （被不透明物体挡住的部分不画）。与 billboard 不同：任意视角都是真 3D。
+    //
+    // Pre-condition: radius > 0；heat >= 0；intensity >= 0
+    void DrawVolumetric(const Vec3f& center, float radius, float heat, float swirl,
+                        float intensity, const Color& color_core,
+                        const Color& color_outer, float time_offset,
+                        ParticleBlend blend = ParticleBlend::kAdditive);
 };
 
 }  // namespace jpov

@@ -217,6 +217,7 @@ cc_library(
         "//tools/jpov/src/effect/fire_render:fire_renderer",
         "//tools/jpov/effect/burning_render:burning_renderer",
         "//tools/jpov/effect/particle_fire:particle_renderer",
+        "//tools/jpov/effect/volumetric_render:volumetric_renderer",
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
         ":sky_renderer",

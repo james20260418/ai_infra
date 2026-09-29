@@ -206,7 +206,11 @@ public:
             if (particles_live_) {
                 StepParticles(1.0f / static_cast<float>(kViewerFps));
             }
-            AppendPillarBurningParticles(cmds);
+            if (volumetric_mode_) {
+                AppendPillarBurningVolumetric(cmds);   // 预实验：真 3D 体积团
+            } else {
+                AppendPillarBurningParticles(cmds);    // 旧：billboard 纸片粒子
+            }
             if (show_ring_fire_) {
                 AppendPillarFire(cmds);
             }
@@ -266,6 +270,24 @@ private:
                                  /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
                                  /*intensity*/ 1.15f,
                                  /*blend*/ particle_blend_);
+        // 暖色点光源：柱底，照亮柱子/地面。
+        jpov::PointLight light;
+        light.position = {pillar_center_.x(), 0.55f, pillar_center_.z()};
+        light.color = {1.0f, 0.50f, 0.16f, 1.0f};
+        light.linear_radius = 7.0f;
+        light.intensity = 7.0f;
+        cmds->point_lights.push_back(light);
+    }
+
+    // 立柱「燃烧」——**体积版**（预实验：真 3D 体积团，替代纸片粒子）。
+    // 每颗粒子 = 一个 ray-march 的体积团（见 VolumetricRenderer），任意视角不穿帮。
+    void AppendPillarBurningVolumetric(jpov::RenderCommandList* cmds) const {
+        emitter_.AppendVolumetric(cmds,
+                                  /*color_hot*/  {1.00f, 0.88f, 0.50f, 1.0f},
+                                  /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
+                                  /*intensity*/ 1.15f,
+                                  /*swirl*/ 2.2f,
+                                  /*blend*/ particle_blend_);
         // 暖色点光源：柱底，照亮柱子/地面。
         jpov::PointLight light;
         light.position = {pillar_center_.x(), 0.55f, pillar_center_.z()};
@@ -425,6 +447,8 @@ private:
         if (particle_style_ != before_style) {
             SetParticleStyle(particle_style_);
         }
+        // ⑧ 体积渲染开关（预实验）：把纸片粒子换成真 3D 体积团。
+        ui_.Checkbox("体积渲染 (预实验)", &volumetric_mode_, top_row(2));
     }
 
     bool show_panel_ = true;
@@ -433,6 +457,7 @@ private:
     bool show_box_fire_ = false;  // 旧的“方块顶上一团火”对比项（默认关）
     bool show_ring_fire_ = false; // 旧的“柱底环状火焰”对比项（默认关）
     bool show_burning_body_ = false;  // 旧的“几何燃烧体”对比项（默认关）
+    bool volumetric_mode_ = true;     // 预实验：真 3D 体积团（默认开，看动态）
     bool particles_live_ = true;      // 粒子是否每帧推进（交互=true）
 
     // 粒子发射器（有状态的模拟层；固定池，不无限增长）。
