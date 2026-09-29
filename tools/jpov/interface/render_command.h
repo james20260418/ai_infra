@@ -1382,6 +1382,11 @@ struct ParticleCommand {
     float heat = 1.0f;   // 0~1 当前“热度”（决定颜色与亮度）
     float alpha = 1.0f;  // 额外不透明度乘子（0~1）
     float time_offset = 0.0f;  // 动画相位（秒），使各粒子不同步
+
+    Color color_core;    // 核心色（最热处，亮，如白黄）。
+    Color color_outer;   // 外焰色（较冷，暗，如橙红）。
+                         // 与 FireCommand 同约定：片元按 heat 在两色间插值。
+
     ParticleStyle style = ParticleStyle::kSoftPuff;
     ParticleBlend blend = ParticleBlend::kAdditive;
 
@@ -1897,9 +1902,14 @@ struct RenderCommandList {
 
     // 3D 粒子（世界空间快照）。逐条独立；模拟层（粒子池）每帧产出。
     //
+    // color_core/color_outer：热/冷两端色，片元按 heat 在两色间插值
+    // （与 FireCommand 同约定；缺了它粒子会画成全黑 → 加法混合下完全看不见）。
+    //
     // Pre-condition: size > 0；aspect > 0；alpha >= 0
     void DrawParticle(const Vec3f& position, float size, float aspect, float heat,
-                      float alpha, float time_offset, ParticleStyle style,
+                      float alpha, const Color& color_core,
+                      const Color& color_outer, float time_offset,
+                      ParticleStyle style,
                       ParticleBlend blend = ParticleBlend::kAdditive);
 };
 

@@ -301,6 +301,8 @@ void RenderCommandList::DrawBurning(const Vec3f& center, const Vec3f& up,
 
 void RenderCommandList::DrawParticle(const Vec3f& position, float size,
                                      float aspect, float heat, float alpha,
+                                     const Color& color_core,
+                                     const Color& color_outer,
                                      float time_offset, ParticleStyle style,
                                      ParticleBlend blend) {
     CHECK_GT(size, 0.0f) << "DrawParticle: size 必须 > 0";
@@ -313,6 +315,8 @@ void RenderCommandList::DrawParticle(const Vec3f& position, float size,
     cmd.aspect = aspect;
     cmd.heat = heat;
     cmd.alpha = alpha;
+    cmd.color_core = color_core;
+    cmd.color_outer = color_outer;
     cmd.time_offset = time_offset;
     cmd.style = style;
     cmd.blend = blend;

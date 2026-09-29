@@ -368,6 +368,8 @@ private:
     }
 
     // 光照面板：6 个滑条 = 五个自由度（浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝）。
+    // 滑条贴屏幕下方；实验性火焰控件（火焰开关 + 粒子风格下拉）贴屏幕上方
+    //（见 top_row 说明：下拉朝下展开，靠底会被裁掉）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -380,7 +382,8 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 8;
+        const float kTop     = 16.0f;
+        const int   kRows    = 6;   // 六个天光滑条
         const float left     = (w - kSliderWidth) * 0.5f;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
@@ -388,6 +391,13 @@ private:
 
         auto row = [&](int i) {
             return jpov::UiRect{{left, top + static_cast<float>(i) * (kRowH + kSpacing)},
+                                {kSliderWidth, kRowH}};
+        };
+        // 实验性火焰控件贴**屏幕上沿**：Combo 的下拉列表朝框下方展开
+        //（见 Ui::Combo：list_top = box 底边），贴着屏幕下沿时下拉会被裁掉
+        // 看不见。故这两项单独一行组，放最上方。
+        auto top_row = [&](int i) {
+            return jpov::UiRect{{left, kTop + static_cast<float>(i) * (kRowH + kSpacing)},
                                 {kSliderWidth, kRowH}};
         };
 
@@ -406,12 +416,12 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
         // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
-        // ⑥ 火焰开关（实验）：立柱粒子燃烧。
-        ui_.Checkbox("火焰 Fire (实验)", &show_fire_, row(6));
+        // ⑥ 火焰开关（实验）：立柱粒子燃烧。放屏幕上方（见 top_row 说明）。
+        ui_.Checkbox("火焰 Fire (实验)", &show_fire_, top_row(0));
         // ⑦ 粒子风格（实验）：软团 / 火舌 / 涡流 —— 切换时清池重发。
         const int before_style = particle_style_;
         ui_.Combo("粒子风格 (软团/火舌/涡流)", &particle_style_,
-                  {"软团 puff", "火舌 tongue", "涡流 vortex"}, row(7));
+                  {"软团 puff", "火舌 tongue", "涡流 vortex"}, top_row(1));
         if (particle_style_ != before_style) {
             SetParticleStyle(particle_style_);
         }

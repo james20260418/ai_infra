@@ -179,14 +179,14 @@ public:
             const float heat = std::max(0.0f, 1.0f - 0.95f * t);
             const float fade = std::sin(std::min(1.0f, t * 1.15f) * 3.14159f);
             const float alpha = std::max(0.0f, fade) * (0.55f + 0.45f * heat);
-            // 颜色：让 shader 用 heat 在两色间插值，故把两端色按 heat 组合后直接给 core。
-            const Color c = LerpColor(color_cold, color_hot, heat);
+            // 颜色：两端色原样交给 shader，由 heat 在片元里插值（不在此预混）。
             cmds->DrawParticle(/*position*/ p.pos, /*size*/ size,
                                /*aspect*/ aspect, /*heat*/ heat,
                                /*alpha*/ alpha * intensity,
+                               /*color_core*/ color_hot,
+                               /*color_outer*/ color_cold,
                                /*time_offset*/ p.phase, /*style*/ style,
                                /*blend*/ blend);
-            (void)c;
         }
     }
 

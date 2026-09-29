@@ -62,6 +62,12 @@ void ParticleRenderer::DrawParticleQuad(const ParticleCommand& cmd,
     glUniform1f(glGetUniformLocation(prog, "uAlpha"), cmd.alpha);
     glUniform1i(glGetUniformLocation(prog, "uStyle"),
                 static_cast<int>(cmd.style));
+    // 两端色（片元按 heat 插值）。缺了这两行 uColorCore/uColorOuter 恒为 0
+    // → 片元输出全黑，加法混合下粒子完全不可见。
+    glUniform3f(glGetUniformLocation(prog, "uColorCore"),
+                cmd.color_core.r, cmd.color_core.g, cmd.color_core.b);
+    glUniform3f(glGetUniformLocation(prog, "uColorOuter"),
+                cmd.color_outer.r, cmd.color_outer.g, cmd.color_outer.b);
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
