@@ -87,6 +87,9 @@ void VolumetricRenderer::DrawVolumetric(const VolumetricCommand& cmd,
     glUniform3f(glGetUniformLocation(prog, "uCenter"), c.x(), c.y(), c.z());
     glUniform1f(glGetUniformLocation(prog, "uRadius"), cmd.radius);
     glUniform1f(glGetUniformLocation(prog, "uHeat"), cmd.heat);
+    glUniform1f(glGetUniformLocation(prog, "uNoiseFreq"), cmd.noise_freq);
+    glUniform1i(glGetUniformLocation(prog, "uOctaves"), cmd.octaves);
+    glUniform1f(glGetUniformLocation(prog, "uDensityThreshold"), cmd.density_threshold);
     glUniform1f(glGetUniformLocation(prog, "uSwirl"), cmd.swirl);
     glUniform1f(glGetUniformLocation(prog, "uIntensity"), cmd.intensity);
     glUniform1f(glGetUniformLocation(prog, "uTime"), time + cmd.time_offset);

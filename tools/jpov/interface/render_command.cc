@@ -326,18 +326,23 @@ void RenderCommandList::DrawParticle(const Vec3f& position, float size,
 }
 
 void RenderCommandList::DrawVolumetric(const Vec3f& center, float radius, float heat,
-                                       float swirl, float intensity,
-                                       const Color& color_core,
+                                       float noise_freq, int octaves,
+                                       float density_threshold, float swirl,
+                                       float intensity, const Color& color_core,
                                        const Color& color_outer,
                                        float time_offset, ParticleBlend blend) {
     CHECK_GT(radius, 0.0f) << "DrawVolumetric: radius 必须 > 0";
     CHECK_GE(heat, 0.0f) << "DrawVolumetric: heat 必须 >= 0";
     CHECK_GE(intensity, 0.0f) << "DrawVolumetric: intensity 必须 >= 0";
+    CHECK_GE(octaves, 1) << "DrawVolumetric: octaves 必须 >= 1";
     int idx = static_cast<int>(volumetrics.size());
     VolumetricCommand cmd;
     cmd.center = center;
     cmd.radius = radius;
     cmd.heat = heat;
+    cmd.noise_freq = noise_freq;
+    cmd.octaves = octaves;
+    cmd.density_threshold = density_threshold;
     cmd.swirl = swirl;
     cmd.intensity = intensity;
     cmd.color_core = color_core;

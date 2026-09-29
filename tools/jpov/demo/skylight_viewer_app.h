@@ -15,6 +15,12 @@
 //   ④ 月色变红 [0,1]（0=常月，1=血月；只染月盘 + 月光）
 //   ⑤ 夜空偏蓝 [0,1]（0=出厂夜色，1=梦幻蓝且更亮；夜色两色整体乘子）
 //
+// **实验性火焰控件**（贴屏幕上方，与天光滑条分开）：
+//   ⑥ 火焰开关（Fire）/ ⑦ 粒子风格（软团/火舌/涡流）/ ⑧ 体积渲染开关（预实验）
+//   ⑨~⑫ 体积内部纹理旋钮：噪声频率 / fbm 倍频 / 密度阈值 / 旋涡强度
+//          （texture-free：火的长相全由这几个数定义，供对照 besigge 那种空灵调）
+//   本查看器单独降频到 24fps（见 kViewerFps）。
+//
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
 
@@ -37,8 +43,10 @@ namespace jpov_skylight {
 // 避免两个查看器各写一套硬编码而分叉。
 using jpov_viewer::kViewerWidth;
 using jpov_viewer::kViewerHeight;
-using jpov_viewer::kViewerFps;
 using jpov_viewer::kViewerFontAlias;
+// 实验性质：skylight viewer 单独降频到 24fps（体积 raymarch 较贵，交互更顺）。
+// 注：覆盖 viewer_app.h 的 kViewerFps（model viewer 仍用 60）。
+inline constexpr int kViewerFps = 24;
 
 // 天光查看器渲染核心 App。
 class SkylightApp : public JPOV {
@@ -286,7 +294,10 @@ private:
                                   /*color_hot*/  {1.00f, 0.88f, 0.50f, 1.0f},
                                   /*color_cold*/ {0.85f, 0.14f, 0.02f, 1.0f},
                                   /*intensity*/ 1.15f,
-                                  /*swirl*/ 2.2f,
+                                  /*noise_freq*/ vol_noise_freq_,
+                                  /*octaves*/ vol_octaves_,
+                                  /*density_threshold*/ vol_density_threshold_,
+                                  /*swirl*/ vol_swirl_,
                                   /*blend*/ particle_blend_);
         // 暖色点光源：柱底，照亮柱子/地面。
         jpov::PointLight light;
@@ -390,8 +401,8 @@ private:
     }
 
     // 光照面板：6 个滑条 = 五个自由度（浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝）。
-    // 滑条贴屏幕下方；实验性火焰控件（火焰开关 + 粒子风格下拉）贴屏幕上方
-    //（见 top_row 说明：下拉朝下展开，靠底会被裁掉）。
+    // 滑条贴屏幕下方；实验性火焰控件（火焰开关 + 粒子风格下拉 + 体积开关 + 体积纹理旋钮）
+    // 贴屏幕上方（见 top_row 说明：下拉朝下展开，靠底会被裁掉）。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -449,6 +460,15 @@ private:
         }
         // ⑧ 体积渲染开关（预实验）：把纸片粒子换成真 3D 体积团。
         ui_.Checkbox("体积渲染 (预实验)", &volumetric_mode_, top_row(2));
+        // ⑨~⑫ 体积内部纹理旋钮（texture-free：火的长相全由这几个数定义）。
+        ui_.SliderFloat("纹理尺度 (噪声频率)", &vol_noise_freq_, top_row(3),
+                        1.0f, 8.0f, 1);
+        ui_.SliderFloat("纹理复杂度 (倍频数)", &vol_octaves_f_, top_row(4),
+                        1.0f, 5.0f, 0);
+        vol_octaves_ = static_cast<int>(vol_octaves_f_ + 0.5f);
+        ui_.SliderFloat("空透度 (密度阈值)", &vol_density_threshold_, top_row(5),
+                        0.10f, 0.80f, 2);
+        ui_.SliderFloat("摇曳强度 (旋涡)", &vol_swirl_, top_row(6), 0.0f, 4.0f, 1);
     }
 
     bool show_panel_ = true;
@@ -458,6 +478,12 @@ private:
     bool show_ring_fire_ = false; // 旧的“柱底环状火焰”对比项（默认关）
     bool show_burning_body_ = false;  // 旧的“几何燃烧体”对比项（默认关）
     bool volumetric_mode_ = true;     // 预实验：真 3D 体积团（默认开，看动态）
+    // 体积内部纹理旋钮（对照 besigge 那种"空灵/简洁"调）。
+    float vol_noise_freq_ = 3.4f;         // 纹理尺度（越大越细碎）
+    float vol_octaves_f_ = 3.0f;          // 滑条用的浮点（显示整数）
+    int   vol_octaves_ = 3;               // 实际倍频数
+    float vol_density_threshold_ = 0.34f; // 空透度（越大越空）
+    float vol_swirl_ = 2.2f;              // 摇曳强度（旋涡）
     bool particles_live_ = true;      // 粒子是否每帧推进（交互=true）
 
     // 粒子发射器（有状态的模拟层；固定池，不无限增长）。

@@ -1406,9 +1406,14 @@ struct VolumetricCommand {
     Vec3f center;        // 体积团中心（世界坐标）
     float radius = 1.0f; // 球形包络半径（米）
     float heat = 1.0f;   // 0~1 当前"热度"（决定颜色与亮度）
-    float swirl = 2.2f;  // 绕 Y 轴旋涡强度（涡流的"卷"）
     float intensity = 1.0f;  // 整体发光乘子
     float time_offset = 0.0f;  // 动画相位（秒），使各团不同步
+
+    // ── 内部纹理（texture-free：火的长相全由这几个数定义）──
+    float noise_freq = 3.4f;          // 噪声频率（纹理尺度：越大越细碎）
+    int   octaves = 3;                // fbm 倍频数（纹理复杂度：越小越简洁）
+    float density_threshold = 0.34f;  // 密度阈值（越大越空透）
+    float swirl = 2.2f;               // 绕 Y 轴旋涡强度（涡流的"卷"）
 
     Color color_core;    // 核心色（最热处，亮，如白黄）。
     Color color_outer;   // 外焰色（较冷，暗，如橙红）。
@@ -1416,7 +1421,7 @@ struct VolumetricCommand {
 
     ParticleBlend blend = ParticleBlend::kAdditive;
 
-    // Pre-condition: radius > 0; heat >= 0; intensity >= 0
+    // Pre-condition: radius > 0; heat >= 0; intensity >= 0; octaves >= 1
 };
 
 // 3D 火焰（世界空间）—— 程序化 shader 火焰（无纹理、无粒子模拟）。
@@ -1946,9 +1951,12 @@ struct RenderCommandList {
     // 渲染层逐像素 ray-march 一个世界空间 3D 密度场，并用**场景线性深度**裁剪
     // （被不透明物体挡住的部分不画）。与 billboard 不同：任意视角都是真 3D。
     //
-    // Pre-condition: radius > 0；heat >= 0；intensity >= 0
-    void DrawVolumetric(const Vec3f& center, float radius, float heat, float swirl,
-                        float intensity, const Color& color_core,
+    // noise_freq/octaves/density_threshold：内部纹理旋钮（见 VolumetricCommand）。
+    //
+    // Pre-condition: radius > 0；heat >= 0；intensity >= 0；octaves >= 1
+    void DrawVolumetric(const Vec3f& center, float radius, float heat,
+                        float noise_freq, int octaves, float density_threshold,
+                        float swirl, float intensity, const Color& color_core,
                         const Color& color_outer, float time_offset,
                         ParticleBlend blend = ParticleBlend::kAdditive);
 };

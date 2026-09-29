@@ -54,7 +54,10 @@ uniform vec3  uCenter;
 uniform float uRadius;
 uniform float uHeat;
 uniform float uTime;
-uniform float uSwirl;
+uniform float uNoiseFreq;      // 噪声频率（纹理尺度：越大越细碎）
+uniform int   uOctaves;        // fbm 倍频数（纹理复杂度）
+uniform float uDensityThreshold;  // 密度阈值（越大越空透）
+uniform float uSwirl;          // 绕 Y 轴旋涡强度
 uniform float uIntensity;
 uniform vec3  uColorCore;
 uniform vec3  uColorOuter;
@@ -75,9 +78,13 @@ float vnoise3(vec3 x) {
                mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), u.x),
                    mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), u.x), u.y), u.z);
 }
-float fbm3(vec3 p) {
+// oct：倍频数（1=只剩一团大低频，越简洁；5=细节最多）。上限常量 6，超出丢弃。
+float fbm3(vec3 p, int oct) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 6; ++i) {
+        if (i >= oct) {
+            break;
+        }
         v += a * vnoise3(p);
         p = p * 2.03 + vec3(1.7, 9.2, 3.1);
         a *= 0.5;
@@ -97,11 +104,11 @@ float density(vec3 p) {
     float ang = uSwirl * (1.0 - h) / (length(q.xz) / R + 0.22) + uTime * 0.9;
     float s = sin(ang), c = cos(ang);
     vec3 qq = vec3(q.x * c - q.z * s, q.y, q.x * s + q.z * c);
-    vec3 pw = qq * (3.4 / R) + vec3(0.0, -uTime * 1.1, 0.0);
-    vec3 warp = vec3(fbm3(pw), fbm3(pw + vec3(5.2, 1.3, 2.7)),
-                     fbm3(pw + vec3(9.1, 4.4, 7.7))) - 0.5;
-    float d = fbm3(pw + warp * 1.5);
-    return env * max(0.0, d - 0.34) * (0.55 + 0.9 * uHeat);
+    vec3 pw = qq * (uNoiseFreq / R) + vec3(0.0, -uTime * 1.1, 0.0);
+    vec3 warp = vec3(fbm3(pw, uOctaves), fbm3(pw + vec3(5.2, 1.3, 2.7), uOctaves),
+                     fbm3(pw + vec3(9.1, 4.4, 7.7), uOctaves)) - 0.5;
+    float d = fbm3(pw + warp * 1.5, uOctaves);
+    return env * max(0.0, d - uDensityThreshold) * (0.55 + 0.9 * uHeat);
 }
 
 void main() {

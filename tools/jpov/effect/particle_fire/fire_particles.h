@@ -194,8 +194,9 @@ public:
     // 每颗粒子 = 一个**体积团**：把 2D billboard 升级成世界空间 ray-march 的
     // 3D 密度场。参数与 AppendParticles 同源（size/heat/相位），另给旋涡强度。
     void AppendVolumetric(RenderCommandList* cmds, const Color& color_hot,
-                          const Color& color_cold, float intensity, float swirl,
-                          ParticleBlend blend) const {
+                          const Color& color_cold, float intensity,
+                          float noise_freq, int octaves, float density_threshold,
+                          float swirl, ParticleBlend blend) const {
         for (const FireParticleState& p : pool_) {
             if (!p.alive) {
                 continue;
@@ -207,7 +208,10 @@ public:
             const float fade = std::sin(std::min(1.0f, t * 1.15f) * 3.14159f);
             const float alpha = std::max(0.0f, fade) * (0.55f + 0.45f * heat);
             cmds->DrawVolumetric(/*center*/ p.pos, /*radius*/ radius,
-                                 /*heat*/ heat, /*swirl*/ swirl,
+                                 /*heat*/ heat, /*noise_freq*/ noise_freq,
+                                 /*octaves*/ octaves,
+                                 /*density_threshold*/ density_threshold,
+                                 /*swirl*/ swirl,
                                  /*intensity*/ alpha * intensity,
                                  /*color_core*/ color_hot,
                                  /*color_outer*/ color_cold,
