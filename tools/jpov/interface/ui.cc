@@ -697,7 +697,14 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
     size_t len = text_len;
     const size_t cap = buffer_size - 1;  // 可容纳的最大字符数（留 '\0'）。
     // 光标夹到 [0, len]（调用方可能改了 buffer，导致长度变短）。
-    int caret = std::clamp(input_caret_, 0, static_cast<int>(len));
+    // ⚠️ input_caret_ 是**跨帧共享字段**（同一 Ui 面板里同时可能有多个输入框）。
+    // 它只属于**当前聚焦的框**：非聚焦框绝不能读它（会把别人的光标夹到自己的
+    // 长度上）也不能回写它（会把别人记住的光标覆盖成自己的）。否则同屏第二个
+    // 框每帧都会把第一个框的光标冲掉——表现为“输入一个字符后光标弹到 1 号位”。
+    // 本帧“拥有光标”的框 = 帧首已聚焦 或 本帧刚点中（后者已在上面写入点击位置）。
+    const bool owns_caret = is_focused || clicked_inside;
+    int caret = owns_caret ? std::clamp(input_caret_, 0, static_cast<int>(len))
+                           : static_cast<int>(len);
     if (is_focused) {
         // 控制键：Enter / Escape → 失焦（提交/取消，都不改变 buffer）。
         const KeyState& enter = in.GetKey(KeyCode::Enter);
@@ -805,8 +812,10 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
             }
         }
     }
-    // 回写光标（跨帧状态）。
-    input_caret_ = caret;
+    // 回写光标（跨帧状态）。**仅本帧拥有光标的框回写**（见上：共享字段只属聚焦框）。
+    if (owns_caret) {
+        input_caret_ = caret;
+    }
 
     // 绘制/返回用的“当前聚焦”判定：必须在本帧全部输入处理（含 Enter/Escape
     // 失焦）之后结算，才能正确反映本帧点击聚焦/框外失焦/回车失焦的最终状态。

@@ -931,6 +931,63 @@ public:
         LOG(INFO) << "[PASS] InputText 插入后光标随之前移";
     }
 
+    // 同屏两个输入框，且后画的框较短：在 A 打字时 A 的光标不得被 B 冲掉。
+    // 回归 bug（2026-09-29 Danis）：输入字符后光标不由自主弹到第 1 个字符后。
+    // 根因：input_caret_ 是跨帧共享字段，非聚焦框 B 每帧把自己的 len 夹写回去，
+    // 把 A 的光标夹成 B 的长度（B 只有 1 字符 → 夹到 1）。
+    static void TestCaretSharedFieldNotClobberedByOtherBox() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box_a{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        const UiRect box_b{{240.0f, 10.0f}, {200.0f, 24.0f}};
+        char a[64] = "aa";
+        char b[64] = "b";  // 后画的框只 1 字符。
+        Ui ui;
+
+        // 帧1：点 A 框内靠右 → A 聚焦，光标在“aa”末尾（2）。
+        ui.Begin(MakeClickInput(205.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", a, sizeof(a), box_a);
+        ui.InputText("n", b, sizeof(b), box_b);
+        ui.End();
+
+        // 帧2：输入 'x'（无点击）→ 光标应在 2 插入 → "aax"，光标 3。
+        //       同帧又画 B（后于 A，键盘写 B 时不该动 A 的光标）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::X);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aax") << "x 应插在 A 末尾";
+            CHECK_STREQ(b, "b") << "B 不应被改";
+        }
+
+        // 帧3：再输入 'y' → 应接在末尾得 "aaxy"（光标 4）。
+        //       若光标被 B 冲成 1，则会得到 "ayax"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Y);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aaxy")
+                << "A 的光标不应被后画的 B 框冲掉（否则得 ayax）";
+        }
+
+        // 帧4：再键入 'z' → "aaxyz"（继续验证光标稳定在末尾）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Z);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aaxyz");
+        }
+        LOG(INFO) << "[PASS] InputText 光标共享字段不被其他框冲掉（回归 Danis 弹到第1位）";
+    }
+
     static void RunAll() {
         TestInitNotFocused();
         TestClickFocusToggle();
@@ -949,6 +1006,7 @@ public:
         TestShiftUppercase();
         TestCaretMoveAndInsertMiddle();
         TestCaretFollowsInsert();
+        TestCaretSharedFieldNotClobberedByOtherBox();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };
