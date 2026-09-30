@@ -5,6 +5,10 @@
 // 从 O(三角形数) 降到近 O(1)。建图不快（人体面片数万），故把它放在**后台线程**里做，
 // 主界面（JPOV 窗口）在完成后台前黑底白字显示进度（"正在..."）。
 //
+// 2026-09-30 追加：后台加载时**顺带保留衣服的 CPU 几何**（每个 primitive 一份
+//   MeshData + 材质），供衣物烘焙（把平移/旋转/缩放烘进顶点）与保存 glb 用（见
+//   TakeClothGeometry）。body 侧不保留（不需要）。
+//
 // 设计边界（重要，别越界）：
 //   - 本控制器**只做纯 CPU 工作**：用纯净 loader（LoadGltfScene，GL-free）读 CPU 几何，
 //     抽出三角形后建 TriangleMatcher3d。**不碰任何 GL**（GL 资源的上传由主线程在
@@ -31,6 +35,7 @@
 
 #include "geom/3d/triangle_matcher_3d.h"
 #include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/src/gltf_loader.h"
 
 namespace jpov {
 namespace clothing {
@@ -54,9 +59,11 @@ enum class InitState {
 
 // 一个模型（人体 reference 或衣服）的建图结果。
 //
-// 语义：matcher 建在**资产自身坐标系**（= 恒等摆放时 DrawGltfObject 所画的世界坐标，
-// 即 JPOV 世界系），故查询点须用同一坐标系（本工具里衣服按 cloth_center_ 平移后，
-// 查询点须先减去该平移，见 clothing_tool_app.h）。
+// 语义：matcher 建在**资产自身坐标系**（= 未做任何调节时衣服的原始坐标，即 glb 里
+//   写死的 y-up 坐标）。⚠️ 注意：衣服面板的平移/旋转/缩放是**烘进渲染 mesh 顶点**的
+//   （见 clothing_transform.h），matcher 仍反映**未调节的原始几何**；将来对齐步骤若要用
+//   这个 matcher，查询点需先按当前变换反向映射（或届时重建 matcher）。当前（本任务）
+//   matcher 尚未被消费。
 struct MatcherBundle {
     // TriangleMatcher3d 不能空构造（构造时 CHECK triangles 非空），故用 optional
     // 承载"尚未建成"的空态；valid 与 matcher.has_value() 同义，仅为调用处可读。
@@ -101,6 +108,14 @@ public:
     const MatcherBundle& body_matcher() const { return body_; }
     const MatcherBundle& cloth_matcher() const { return cloth_; }
 
+    // 取走衣服的 CPU 几何（base MeshData + 材质），供衣物烘焙（clothing_transform.h）与
+    // 保存（clothing_save.h）用。kDone 后调用一次；取走后本控制器不再持有（move 语义）。
+    // 说明：几何在后台线程加载时**顺带保留**（不额外读一遍 glb）；body 侧不保留。
+    std::vector<jpov::GltfMeshEntry> TakeClothGeometry() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return std::move(cloth_geometry_);
+    }
+
 private:
     void JoinIfRunning();
 
@@ -112,6 +127,8 @@ private:
     std::string error_message_;
     MatcherBundle body_;
     MatcherBundle cloth_;
+    // 衣服的 CPU 几何（每个 primitive 一份 MeshData + 材质）；仅衣服侧保留。
+    std::vector<jpov::GltfMeshEntry> cloth_geometry_;
 
     std::thread worker_;
     std::atomic<bool> finished_{false};  // worker 置 true 表示已收工（读结果前先看它）
