@@ -33,6 +33,7 @@ public:
     jpov_viewer::ViewConfig view_;
     jpov_viewer::NoonLighting noon_;
     bool show_scene_depth_ = false;   // 调试：输出 MRT 场景深度灰度图
+    bool fog_on_ = false;             // 调试：开启局部体积雾演示
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -60,6 +61,16 @@ public:
                            {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(gltf_, {0.0f, 0.0f, 0.0f},
                              {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+
+        if (fog_on_) {
+            jpov::FogSphere fs;
+            fs.center = {0.0f, 0.0f, 0.0f};
+            fs.radius = 2.5f;
+            fs.color = {1.0f, 1.0f, 1.0f, 1.0f};
+            fs.intensity = 0.8f;
+            fs.profile = jpov::FogProfile::kDome;
+            cmds->fog_spheres.push_back(fs);
+        }
     }
 };
 
@@ -99,6 +110,10 @@ int main(int argc, char** argv) {
     // 调试自检：JPOV_SMOKE_SCENE_DEPTH=1 时输出 MRT 场景深度灰度图（验收深度写入）。
     if (const char* d = std::getenv("JPOV_SMOKE_SCENE_DEPTH")) {
         app.show_scene_depth_ = (std::atof(d) != 0.0);
+    }
+    // 调试自检：JPOV_SMOKE_FOG=1 时开局部体积雾演示。
+    if (const char* f = std::getenv("JPOV_SMOKE_FOG")) {
+        app.fog_on_ = (std::atof(f) != 0.0);
     }
 
     jpov::WindowInfo winfo;

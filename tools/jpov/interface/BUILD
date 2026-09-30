@@ -44,6 +44,18 @@ cc_library(
     deps = [],
 )
 
+# FogVolume — 局部体积雾的数据模型（命令层可见；见 docs/jpov_volumetric_fog_design.md）
+cc_library(
+    name = "fog_volume",
+    hdrs = ["fog_volume.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":camera",
+        ":pbr_material",
+        "//geom/common:vec",
+    ],
+)
+
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
@@ -52,6 +64,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
+        ":fog_volume",
         ":gltf_object",
         ":pbr_material",
         ":skeleton_types",

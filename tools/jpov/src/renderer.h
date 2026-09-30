@@ -26,6 +26,7 @@
 #include "tools/jpov/src/skeleton/skeleton_manager.h"
 #include "tools/jpov/src/skeleton/skinning_shader.h"
 #include "tools/jpov/src/texture_manager.h"
+#include "tools/jpov/src/volumetric_fog/fog_pass.h"
 
 struct GLFWwindow;
 
@@ -125,6 +126,9 @@ private:
     unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
     unsigned int resolve_scene_depth_tex_ = 0;  // MSAA resolve 后的单采样场景深度
     int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
+
+    // 局部体积雾 pass 的 GL 资源（tile 表 / 属性纹理 / ping-pong 输出）。
+    volumetric_fog::FogPassState fog_state_;
 
     // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
     // 每一级联独立 FBO/深度纹理/尺寸，数量 = ShadowConfig::cascade_count。

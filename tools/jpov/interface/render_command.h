@@ -34,6 +34,7 @@
 #include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/fog_volume.h"
 #include "tools/jpov/interface/pbr_material.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
 #include "tools/jpov/interface/skeleton_types.h"
@@ -1541,6 +1542,12 @@ struct RenderCommandList {
     // 让该光源覆盖更大范围（甚至全屏）以保证不漏光。因此“某 light 影响
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
+
+    // 局部体积雾体的列表（世界空间）。与 point_lights 并列，渲染时仿点光源做 CPU
+    // tile culling（每 tile ≤ K 个，先到先得 ⇒ **请按重要度（从高到低）预排**）。
+    // 见 docs/jpov_volumetric_fog_design.md。空列表 = 不做体积雾 pass（零开销）。
+    std::vector<FogSphere> fog_spheres;
+    std::vector<FogCylinder> fog_cylinders;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图

@@ -184,6 +184,57 @@ cc_library(
     linkstatic = 1,
 )
 
+# FogVolume — 局部体积雾的闭式积分核（GL-free、纯 CPU、可单测；见 docs/jpov_volumetric_fog_design.md §6）
+cc_library(
+    name = "fog_volume",
+    hdrs = ["volumetric_fog/fog_volume.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:fog_volume",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# TileFogCulling — 体积雾的 CPU tile 建表（仿点光源；GL-free、可单测）
+cc_library(
+    name = "tile_fog_culling",
+    srcs = ["volumetric_fog/tile_fog_culling.cc"],
+    hdrs = ["volumetric_fog/tile_fog_culling.h", "volumetric_fog/fog_common.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:fog_volume",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# FogPass — 全屏体积雾 pass（GL；读 tile 表 + 属性纹理 + HDR + 深度，就地合成）
+cc_library(
+    name = "fog_pass",
+    srcs = ["volumetric_fog/fog_pass.cc"],
+    hdrs = [
+        "volumetric_fog/fog_pass.h",
+        "volumetric_fog/fog_pass_shader.h",
+        "volumetric_fog/fog_common.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        ":tile_fog_culling",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # GltfSaver — CPU 资产（MeshData + 材质 + 可选骨架）→ 自洽 .glb（GL-free）
 cc_library(
     name = "gltf_saver",
@@ -203,8 +254,7 @@ cc_library(
 
 # Renderer — GL FBO + 动态分辨率渲染核心
 cc_library(
-    name = "renderer",
-    srcs = ["renderer.cc"],
+    name = "renderer",    srcs = ["renderer.cc"],
     hdrs = ["renderer.h"],
     data = ["//tools/jpov/fonts:all_fonts"],
     visibility = ["//visibility:public"],
@@ -220,6 +270,7 @@ cc_library(
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",
+        ":fog_pass",
         "//tools/common:utils",
         "//tools/jpov/src/skeleton:skeleton",
         "//tools/jpov/interface:camera",

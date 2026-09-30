@@ -66,6 +66,31 @@ cc_test(
 # 对应设计 docs/jpov_crowd_body_shape_face_design.md §3：关节 index 分组的合法性 + 实例系数默认值。
 # 需要 -lGL：依赖 skeleton 库（其 GL 符号在“非法配置”用例里根本不会被调到 —— 校验排在
 # 所有 GL 调用之前）。
+# ============ 局部体积雾（docs/jpov_volumetric_fog_design.md）============
+cc_test(
+    name = "jpov_fog_volume_test",
+    srcs = ["volumetric_fog/fog_volume_test.cc"],
+    deps = [
+        "//tools/jpov/src:fog_volume",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_tile_fog_culling_test",
+    srcs = ["volumetric_fog/tile_fog_culling_test.cc"],
+    deps = [
+        "//tools/jpov/src:tile_fog_culling",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 cc_test(
     name = "jpov_thickness_config_test",
     srcs = ["jpov_thickness_config_test.cc"],

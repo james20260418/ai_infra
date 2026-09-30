@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/jpov/src/volumetric_fog/fog_pass.h"
 #include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
@@ -505,6 +506,7 @@ Renderer::~Renderer() {
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
+    volumetric_fog::DestroyFogPass(&fog_state_);
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1446,6 +1448,20 @@ void Renderer::Render(const RenderCommandList& cmds,
             unsigned int hdr_input_tex = resolve_tex_hdr_;
             hdr_scene_depth_tex = resolve_scene_depth_tex_;
 #endif
+
+            // ── 局部体积雾 pass —— 在 highlight / bloom / tone map **之前**，把雾
+            //    就地合成进 HDR（内散射是光，必须在线性 HDR 里加）。读 HDR + 场景深度。
+            if (!cmds.fog_spheres.empty() || !cmds.fog_cylinders.empty()) {
+                const unsigned int fogged = volumetric_fog::RunFogPass(
+                    cmds, shader_mgr_, mvp_, cam.position, hdr_input_tex,
+                    hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h, &fog_state_);
+                if (fogged != 0) {
+                    hdr_input_tex = fogged;
+                }
+                // fog pass 改了 FBO/viewport/depth/blend/cull，复位。
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            }
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
             // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：

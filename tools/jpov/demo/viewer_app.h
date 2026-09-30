@@ -138,6 +138,17 @@ public:
                              /*scale*/ model_scale_, /*highlight*/ false,
                              /*picking_id*/ 0);
 
+        // ── 局部体积雾演示（可在左侧面板开关/调参；验收 docs/jpov_volumetric_fog_design.md）──
+        if (fog_enabled_) {
+            jpov::FogSphere fs;
+            fs.center = {0.0f, fog_sphere_y_, 0.0f};
+            fs.radius = fog_radius_;
+            fs.color = {fog_color_[0], fog_color_[1], fog_color_[2], 1.0f};
+            fs.intensity = fog_intensity_;   // σ₀（峰值消光，1/米）
+            fs.profile = jpov::FogProfile::kDome;
+            cmds->fog_spheres.push_back(fs);
+        }
+
         // ── 光照调节面板（仅交互窗口绘制；headless 拍摄是纯 3D 截图）──
         if (show_panel_) {
             DrawLightPanel(input);
@@ -202,10 +213,30 @@ private:
         ui_.Checkbox("显示场景深度", &visualize_scene_depth_,
                      jpov::UiRect{{left, top + 5.0f * (kRowH + kSpacing)},
                                   {kSliderWidth, kRowH}});
+
+        // ── 左侧：局部体积雾控制 ──
+        const float fw = 360.0f;
+        const float fx = 20.0f;
+        const float fy0 = 40.0f;
+        const float fr = kRowH + kSpacing;
+        ui_.Checkbox("体积雾", &fog_enabled_,
+                     jpov::UiRect{{fx, fy0}, {fw, kRowH}});
+        ui_.SliderFloat("雾球半径", &fog_radius_,
+                        jpov::UiRect{{fx, fy0 + fr}, {fw, kRowH}}, 0.3f, 8.0f, 2);
+        ui_.SliderFloat("雾浓度 σ₀", &fog_intensity_,
+                        jpov::UiRect{{fx, fy0 + 2.0f * fr}, {fw, kRowH}}, 0.0f, 3.0f, 2);
+        ui_.SliderFloat("雾球高度 y", &fog_sphere_y_,
+                        jpov::UiRect{{fx, fy0 + 3.0f * fr}, {fw, kRowH}}, -3.0f, 5.0f, 2);
     }
 
     bool show_panel_ = true;              // 是否画交互光照面板（headless=false）
     bool visualize_scene_depth_ = false;  // 调试：显示 MRT 场景深度（灰度）
+    // 局部体积雾演示参数（见 docs/jpov_volumetric_fog_design.md）。
+    bool fog_enabled_ = true;
+    float fog_radius_ = 2.5f;             // 雾球半径（米）
+    float fog_intensity_ = 0.8f;          // σ₀（峰值消光，1/米）
+    float fog_sphere_y_ = 0.0f;           // 雾球中心高度 y（米）
+    float fog_color_[3] = {1.0f, 1.0f, 1.0f};  // 内散射色
     float ground_y_prev_ = -3.0f;         // 上一帧地面高度（检测变化才 UpdateMesh）
     jpov::Ui ui_;                         // 跨帧持有（滑条拖动态内部记忆）
 
