@@ -177,6 +177,13 @@ uniform bool uGradeEnabled;
 uniform vec3 uGradeSlope;
 uniform vec3 uGradeOffset;
 uniform vec3 uGradePower;
+// 场景深度可视化（调试）：uVisualizeSceneDepth != 0 时把 MRT#1 场景深度
+// （R32F，值 = gl_FragCoord.z ∈ [0,1]，1=远平面/背景）先反算线性眼空间深度，
+// 再对数归一化后作灰度输出，跳过 tone map。用于目视验收 MRT 深度写入。
+uniform sampler2D uSceneDepthTexture;
+uniform int uVisualizeSceneDepth;
+uniform float uCameraNear;   // 深度可视化用：相机近平面（米）
+uniform float uCameraFar;    // 深度可视化用：相机远平面（米）
 
 // ACES filmic 曲线（Narkowicz / Stephen Hill RRTAndODTFit 拟合）。
 // 对标量亮度工作，输出 [0,1] 附近，高光有柔和 S 型肩。
@@ -215,6 +222,21 @@ vec3 srgb_encode(vec3 color) {
 }
 
 void main() {
+    // 场景深度可视化（调试）：输出对数归一化后的深度灰度，不走后续 tone map。
+    if (uVisualizeSceneDepth != 0) {
+        float ndc_z = texture(uSceneDepthTexture, vTexCoord).r;  // [0,1]，1=远/背景
+        // NDC z → 线性眼空间深度（米）。
+        float ndc = ndc_z * 2.0 - 1.0;
+        float lin = (2.0 * uCameraNear * uCameraFar) /
+                    (uCameraFar + uCameraNear -
+                     ndc * (uCameraFar - uCameraNear));
+        // 对数归一化到 [0,1]：以 [near,far] 为参照按 log 展开，避免远平面远大于
+        // 场景尺寸时近场被压成一团（线性归一化不可读）。
+        float t = log(max(lin, uCameraNear) / uCameraNear) /
+                  log(uCameraFar / uCameraNear);
+        FragColor = vec4(vec3(clamp(t, 0.0, 1.0)), 1.0);
+        return;
+    }
     vec3 hdr = texture(uHdrTexture, vTexCoord).rgb;
     // 曝光：tone map 前对 HDR 线性值做固定 EV 缩放（决定映射到 LDR 的起点）。
     // uExposure=1.0（默认 EV=0）时无感，零回归。
@@ -563,6 +585,9 @@ void Renderer::DestroyHDRFBO() {
     if (fbo_hdr_) {
         glDeleteFramebuffers(1, &fbo_hdr_);
         glDeleteTextures(1, &color_tex_hdr_);
+        if (scene_depth_tex_hdr_) {
+            glDeleteTextures(1, &scene_depth_tex_hdr_);
+        }
 #ifndef JPOV_WITHOUT_MSAA
         if (depth_rb_hdr_) {
             glDeleteRenderbuffers(1, &depth_rb_hdr_);
@@ -574,6 +599,7 @@ void Renderer::DestroyHDRFBO() {
 #endif
         fbo_hdr_ = 0;
         color_tex_hdr_ = 0;
+        scene_depth_tex_hdr_ = 0;
         depth_rb_hdr_ = 0;
         depth_tex_hdr_ = 0;
     }
@@ -585,8 +611,12 @@ void Renderer::DestroyHDRResolveFBO() {
     if (resolve_fbo_hdr_) {
         glDeleteFramebuffers(1, &resolve_fbo_hdr_);
         glDeleteTextures(1, &resolve_tex_hdr_);
+        if (resolve_scene_depth_tex_) {
+            glDeleteTextures(1, &resolve_scene_depth_tex_);
+        }
         resolve_fbo_hdr_ = 0;
         resolve_tex_hdr_ = 0;
+        resolve_scene_depth_tex_ = 0;
     }
     resolve_fbo_hdr_w_ = 0;
     resolve_fbo_hdr_h_ = 0;
@@ -850,12 +880,32 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
+    // MRT #1：场景深度（R32F）。与颜色共享同一渲染 pass，值 = gl_FragCoord.z
+    // （窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）；需线性深度时下游用相机
+    // near/far 反算（见 tonemap 的可视化代码）。用 R32F（float32）精度充足。
+    glGenTextures(1, &scene_depth_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D, scene_depth_tex_hdr_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0,
+                 GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     glGenFramebuffers(1, &fbo_hdr_);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, color_tex_hdr_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                           GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, depth_tex_hdr_, 0);
+    // 开启 MRT：COLOR_ATTACHMENT0 = 颜色，COLOR_ATTACHMENT1 = 场景深度。
+    {
+        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(2, bufs);
+    }
 
     // 注意：HDR FBO 不再带 stencil。高亮（方法 B）由独立的 DrawHighlightPass
     // 在 color-only 单采样 hl FBO 上统一执行（见 DrawHighlightPass），
@@ -888,12 +938,28 @@ void Renderer::EnsureHDRFBO(int width, int height) {
                                      width, height);
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
+    // MRT #1：场景深度（R32F 多重采样纹理）。最终由 glBlitFramebuffer 平均 resolve
+    // 到 resolve_scene_depth_tex_（同颜色附件一致）。
+    glGenTextures(1, &scene_depth_tex_hdr_);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, scene_depth_tex_hdr_);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_R32F,
+                            width, height, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+
     glGenFramebuffers(1, &fbo_hdr_);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                           GL_TEXTURE_2D_MULTISAMPLE, scene_depth_tex_hdr_, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_RENDERBUFFER, depth_rb_hdr_);
+    {
+        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(2, bufs);
+    }
     // 注意：不在 MSAA HDR FBO 上附加 stencil —— MSAA stencil renderbuffer 在
     //   llvmpipe（headless 软渲染）下导致 FBO 不完整（GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。
     //   高亮描边在 MSAA 路径走另一条路：统一由 DrawHighlightPass 在单采样
@@ -903,7 +969,7 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
         << "HDR MSAA FBO failed, status=" << status;
 
-    // === 中间 non-MSAA resolve FBO（RGBA16F，同尺寸） ===
+    // === 中间 non-MSAA resolve FBO（MRT：RGBA16F 颜色 + R32F 场景深度） ===
     glGenTextures(1, &resolve_tex_hdr_);
     glBindTexture(GL_TEXTURE_2D, resolve_tex_hdr_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
@@ -914,10 +980,26 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
+    glGenTextures(1, &resolve_scene_depth_tex_);
+    glBindTexture(GL_TEXTURE_2D, resolve_scene_depth_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0,
+                 GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     glGenFramebuffers(1, &resolve_fbo_hdr_);
     glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_hdr_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, resolve_tex_hdr_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                           GL_TEXTURE_2D, resolve_scene_depth_tex_, 0);
+    {
+        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(2, bufs);
+    }
 
     status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
@@ -1215,9 +1297,19 @@ void Renderer::Render(const RenderCommandList& cmds,
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // Clear 3D FBO（颜色 + 深度）
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        // Clear 3D FBO（颜色 + 深度 + [MRT] 场景深度）
+        if (use_hdr) {
+            // MRT：分别清两个附件（glClear 用单一 glClearColor，无法给 R32F 附件单独设值）。
+            //   附件0（颜色）= (0,0,0,0)；附件1（场景深度）= 1.0（= 最远/背景）。
+            const GLfloat clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            glClearBufferfv(GL_COLOR, 0, clear_color);
+            const GLfloat clear_scene_depth[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            glClearBufferfv(GL_COLOR, 1, clear_scene_depth);
+            glClear(GL_DEPTH_BUFFER_BIT);
+        } else {
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
 
         // ---- 第 0.5 步：天光背景（有 sky 指令时）----
         // 先画程序化天光垫底（不写深度、不参与深度测试），3D 物体随后用深度覆盖。
@@ -1321,19 +1413,38 @@ void Renderer::Render(const RenderCommandList& cmds,
         if (use_hdr) {
             // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
             //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
+            // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
+            unsigned int hdr_scene_depth_tex = 0;
 #ifdef JPOV_WITHOUT_MSAA
             // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
             unsigned int hdr_input_tex = color_tex_hdr_;
+            hdr_scene_depth_tex = scene_depth_tex_hdr_;
 #else
-            // MSAA 路径：先把 MSAA HDR FBO resolve 到单采样浮点纹理。
+            // MSAA 路径：把 MSAA HDR FBO 的两个附件分别 resolve 到单采样浮点纹理。
+            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个，故分两次：
+            //   附件0（颜色）、附件1（场景深度）各 blit 一次，用 glReadBuffer/glDrawBuffer 选择。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
+            // 附件0：颜色
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            // 附件1：场景深度
+            glReadBuffer(GL_COLOR_ATTACHMENT1);
+            glDrawBuffer(GL_COLOR_ATTACHMENT1);
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            // 复位 read/draw buffer 回附件0（后续 highlight pass 仍从 fbo_hdr_ 读颜色）。
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
 
             unsigned int hdr_input_tex = resolve_tex_hdr_;
+            hdr_scene_depth_tex = resolve_scene_depth_tex_;
 #endif
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
@@ -1362,6 +1473,16 @@ void Renderer::Render(const RenderCommandList& cmds,
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, hdr_input_tex);
             glUniform1i(shader_mgr_.GetUniform(prog, "uHdrTexture"), 0);
+            // 场景深度（MRT#1）：供可视化调试（uVisualizeSceneDepth=1 时直接看深度图）。
+            // 也作为后续 pass（体积雾深度裁剪/软粒子）的前置产出。
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, hdr_scene_depth_tex);
+            glUniform1i(shader_mgr_.GetUniform(prog, "uSceneDepthTexture"), 1);
+            glUniform1i(shader_mgr_.GetUniform(prog, "uVisualizeSceneDepth"),
+                        cmds.visualize_scene_depth ? 1 : 0);
+            glUniform1f(shader_mgr_.GetUniform(prog, "uCameraNear"), cam.near);
+            glUniform1f(shader_mgr_.GetUniform(prog, "uCameraFar"), cam.far);
+            glActiveTexture(GL_TEXTURE0);
             // 输出 sRGB 编码开关：默认开（true），false 时直写线性值供对比。
             glUniform1i(shader_mgr_.GetUniform(prog, "uSrgbEncode"),
                         cmds.srgb_encode ? 1 : 0);
@@ -1394,6 +1515,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             // 全屏三角形（无 VAO/VBO，用 gl_VertexID）
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glUseProgram(0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
         } else {
             // ---- LDR 路径（旧行为，字节兼容） ----

@@ -108,12 +108,22 @@ private:
     unsigned int resolve_fbo_3d_ = 0, resolve_tex_3d_ = 0;
     int resolve_fbo_3d_w_ = 0, resolve_fbo_3d_h_ = 0;
 
-    // HDR 3D FBO（RGBA16F 颜色 + depth）：3D 内容（天空 + object3d + primitives3d）
-    // 统一渲染目标，可存 >1.0 的 HDR 亮度。渲染完成后由统一后处理 pass
-    // （tone map）压缩到 LDR。MSAA 路径下保留 separate resolve FBO（16F）。
+    // HDR 3D FBO（MRT：颜色 RGBA16F + 场景深度 R32F，另挂 depth buffer）：3D 内容
+    // （天空 + object3d + primitives3d + 蒙皮 + 3D 文本）统一渲染目标，可存 >1.0 的
+    // HDR 亮度。渲染完成后由统一后处理 pass（tone map）压缩到 LDR。
+    // MSAA 路径下保留 separate resolve FBO。
+    //
+    // ⭐ 第二颜色附件（COLOR_ATTACHMENT1，R32F）= 「场景深度」：值 = gl_FragCoord.z
+    //   （窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景；需线性深度用相机 near/far 反算）。
+    //   动机（2026-09-30）：llvmpipe 下 shader 采 depth texture 不可靠（见
+    //   EnsureShadowFBO 的 2026-08-17 踩坑注释）——直接把场景深度当普通颜色附件写出，
+    //   供后续 pass（体积雾深度裁剪 / 软粒子 / DOF）用普通 texture() 采样，绕开该坑。
+    //   每个写入本 FBO 的 3D shader 都必须写该附件（否则其像素深度未定义）。
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_rb_hdr_ = 0, depth_tex_hdr_ = 0;
+    unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（MSAA 时为多重采样纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
     unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
+    unsigned int resolve_scene_depth_tex_ = 0;  // MSAA resolve 后的单采样场景深度
     int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
 
     // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。

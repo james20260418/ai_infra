@@ -65,7 +65,9 @@ in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度）。vec4 + alpha=1 保证混合恒等写入。
+layout(location = 1) out vec4 FragSceneDepth;
 
 uniform vec3 uCameraPos;
 uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级联过渡权重用）
@@ -467,6 +469,7 @@ void main() {
 
     vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
     FragColor = vec4(result, 1.0);
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 

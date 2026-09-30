@@ -60,7 +60,10 @@ void main() {
     //   三角形上 varying 插值不可靠，实测 vNDC 几乎不变导致方向重建错误）。
     static constexpr const char* kSkyFs = R"glsl(
 #version 330 core
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度。天空是背景（全屏三角形，NDC z=1），恒写 1.0（= 最远）。
+// vec4 + alpha=1 保证在全局 alpha 混合下恒等写入。
+layout(location = 1) out vec4 FragSceneDepth;
 
 uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_FragCoord→NDC
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
@@ -412,6 +415,7 @@ void main() {
     }
 
     FragColor = vec4(sky, 1.0);
+    FragSceneDepth = vec4(1.0, 0.0, 0.0, 1.0);
 }
 )glsl";
 

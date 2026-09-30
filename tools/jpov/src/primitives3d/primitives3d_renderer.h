@@ -39,11 +39,14 @@ void main() {
     // kFs3d: 3D 纯色 fragment shader
     static constexpr const char* kFs3d = R"glsl(
 #version 330 core
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度 = gl_FragCoord.z（仅 .r 被存）。vec4 + alpha=1 保证混合恒等写入。
+layout(location = 1) out vec4 FragSceneDepth;
 uniform vec4 uColor;
 
 void main() {
     FragColor = uColor;
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 
@@ -70,12 +73,15 @@ void main() {
     static constexpr const char* kText3dFs = R"glsl(
 #version 330 core
 in vec2 vTexCoord;
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度 = gl_FragCoord.z（仅 .r 被存）。vec4 + alpha=1 保证混合恒等写入。
+layout(location = 1) out vec4 FragSceneDepth;
 uniform sampler2D uTexture;
 uniform vec4 uColor;
 void main() {
     float alpha = texture(uTexture, vTexCoord).r;
     FragColor = vec4(uColor.rgb, uColor.a * alpha);
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 

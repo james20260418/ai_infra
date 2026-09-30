@@ -150,7 +150,12 @@ in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）。
+// 不用 varying 传线性深度（llvmpipe 对超大三角形的 varying 插值会退化成 0，实测）；
+// gl_FragCoord.z 由光栅器算出，可靠。输出作 vec4 + alpha=1：3D pass 全局开着
+// alpha 混合，标量 float 输出的缺失 alpha 被 Mesa 当 0 → 写入被丢弃（Blend 实测）。
+layout(location = 1) out vec4 FragSceneDepth;
 
 struct Light {
     vec3 position;
@@ -677,6 +682,7 @@ void main() {
 
     vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
     FragColor = vec4(result, 1.0);
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 
