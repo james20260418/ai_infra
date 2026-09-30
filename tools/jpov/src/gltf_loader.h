@@ -16,8 +16,10 @@
 //   - PBR 材质贴图路径提取: baseColor / normal / metallicRoughness(ORM) /
 //     occlusion / emissive
 //   - 贴图来源: 外部文件（image.uri 相对路径）与内嵌 bufferView
-//     （GLB 单文件内嵌 PNG/JPEG）均支持。内嵌图导出到 /tmp/jpov_gltf_embed/
-//     临时文件后由下游 TextureManager 加载，下游接口保持不变。
+//     （GLB 单文件内嵌 PNG/JPEG）均支持。内嵌图**原样保留原始压缩字节**
+//     （不做解码→PNG 重编码，避免 JPEG→PNG 体积膨胀）导出到
+//     /tmp/jpov_gltf_embed/ 临时文件后由下游 TextureManager 加载，
+//     下游接口保持不变。
 //
 // 明确不支持（超出本轮范围）：
 //   - 动画: animations 通道

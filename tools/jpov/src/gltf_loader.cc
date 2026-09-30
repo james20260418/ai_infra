@@ -34,7 +34,6 @@
 #include <glog/logging.h>
 
 #include "third_party/tinygltf/tiny_gltf.h"
-#include "tools/jpov/src/orm_unpack.h"
 
 namespace jpov {
 
@@ -298,18 +297,44 @@ bool ComputeTangentsGltf(MeshData* out) {
 
 // ==================== LoadGltf 实现 ====================
 
+// 判定内嵌图片的文件扩展名：优先 glTF 的 mimeType（内嵌图规范要求必须有），
+// 缺失/未知时按**文件头**嗅探（PNG: 89 50 4E 47；JPEG: FF D8 FF）。
+// 返回空串表示无法判定（调用方跳过贴图）。
+// Pre-condition: size == 0 时 data 可为 nullptr。
+std::string EmbeddedImageExt(const std::string& mime,
+                             const unsigned char* data, size_t size) {
+    if (mime == "image/png") {
+        return ".png";
+    }
+    if (mime == "image/jpeg") {
+        return ".jpg";
+    }
+    if (data != nullptr && size >= 4 && data[0] == 0x89 && data[1] == 0x50 &&
+        data[2] == 0x4E && data[3] == 0x47) {
+        return ".png";
+    }
+    if (data != nullptr && size >= 3 && data[0] == 0xFF && data[1] == 0xD8 &&
+        data[2] == 0xFF) {
+        return ".jpg";
+    }
+    return std::string();
+}
+
 // 把 glTF image 解析为一个可加载的图片路径（供 TextureManager::LoadFromFile）。
 //
 // 两种来源：
 //   - 外部图片（image.uri 非空）：返回 base_dir + uri（沿用既有约定，
 //     uri 为相对于 glTF 文件所在目录的路径）。
-//   - 内嵌图片（image.bufferView >= 0，uri 为空）：字节存在 image.image
-//     （如 GBK 单文件 GLB 内嵌 bufferView 贴图）。把它导出到
-//     /tmp/jpov_gltf_embed/ 临时目录，返回临时文件绝对路径。
+//   - 内嵌图片（image.bufferView >= 0，uri 为空）：把 image 的**原始压缩字节**
+//     （仍存在 model.buffers/bufferViews 里）切出来，按 mimeType 定扩展名
+//     （.png/.jpg）导出到 /tmp/jpov_gltf_embed/ 临时目录，返回临时文件绝对路径。
+//     ⭐ **不做解码→PNG 重编码**：否则 JPEG（有损、小）会被转成 PNG（无损、大），
+//     保存 glb 时贴图体积成倍膨胀（实测 harness 4MB→14MB 几乎全是这个）。
+//     原始字节落盘后，下游 TextureManager::LoadFromFile（stb 支持 png/jpeg）与
+//     gltf_saver::EmbedImage（按扩展名定 mimeType、原样内嵌）都能无损处理。
 //
 // 返回空串表示无法解析（不产出可用贴图）。临时文件按 image.name/stem +
-// mimeType 扩展名 稳定命名，保证 TextureManager 按绝对路径去重
-// （同一内嵌图只导出/上传一次）。
+// 扩展名 稳定命名，保证 TextureManager 按绝对路径去重（同一内嵌图只导出/上传一次）。
 std::string ResolveImagePath(const tinygltf::Model& model, int image_index,
                              const std::string& base_dir) {
     if (image_index < 0 ||
@@ -323,57 +348,64 @@ std::string ResolveImagePath(const tinygltf::Model& model, int image_index,
         return base_dir + img.uri;
     }
 
-    // 内嵌图片（bufferView）。tinygltf 默认 LoadImageData 已把图片解码为
-    // 像素存入 image.image（w*h*component 字节，组件序 R,G,B[,A]），而非
-    // 原始压缩字节。故不能当 JPEG 拷贝，需重新编码为 PNG 临时文件
-    // （复用 orm_unpack 的 RgbaToPng，避免 gltf_loader 自己接管 stb 实现）。
-    if (img.bufferView >= 0 && !img.image.empty()) {
-        std::string stem = img.name;
-        if (stem.empty()) {
-            stem = "img" + std::to_string(image_index);
-        }
-        // 去掉 name 里可能带的分隔符（只是安全化文件名）。
-        for (char& c : stem) {
-            if (c == '/' || c == '\\' || c == ':') c = '_';
-        }
-
-        if (img.width <= 0 || img.height <= 0) {
-            LOG(ERROR) << "LoadGltf: 内嵌图片 image[" << image_index
-                       << "] 尺寸无效 " << img.width << "x" << img.height;
-            return std::string();
-        }
-
-        // 每像素通道数以实际解码结果为准（1..4），缺省按 4。
-        const int comps = (img.component >= 1 && img.component <= 4)
-                              ? img.component
-                              : 4;
-
-        // 用 orm_unpack 编码为 PNG 字节流，再落盘临时文件。
-        const std::vector<unsigned char> png =
-            jpov::RgbaToPng(img.image.data(), img.width, img.height, comps);
-        if (png.empty()) {
-            LOG(ERROR) << "LoadGltf: RgbaToPng 失败 image[" << image_index
-                       << "]";
-            return std::string();
-        }
-
-        const std::string scratch_dir = "/tmp/jpov_gltf_embed/";
-        std::system(("mkdir -p " + scratch_dir).c_str());
-        const std::string tmp = scratch_dir + stem + ".png";
-        std::ofstream out(tmp, std::ofstream::binary);
-        if (!out) {
-            LOG(ERROR) << "LoadGltf: 无法写内嵌贴图临时文件 " << tmp;
-            return std::string();
-        }
-        out.write(reinterpret_cast<const char*>(png.data()),
-                  static_cast<std::streamsize>(png.size()));
-        out.close();
-        return tmp;
-    } else {
+    // 内嵌图片（bufferView）：取**原始压缩字节**落盘（见函数头说明）。
+    if (img.bufferView < 0) {
         LOG(WARNING) << "LoadGltf: image[" << image_index
                      << "] 既无 uri 也无 bufferView 数据，跳过贴图";
+        return std::string();
     }
-    return std::string();
+    if (img.bufferView >= static_cast<int>(model.bufferViews.size())) {
+        LOG(ERROR) << "LoadGltf: image[" << image_index << "] bufferView 越界";
+        return std::string();
+    }
+    const tinygltf::BufferView& view = model.bufferViews[img.bufferView];
+    if (view.buffer < 0 ||
+        view.buffer >= static_cast<int>(model.buffers.size())) {
+        LOG(ERROR) << "LoadGltf: image[" << image_index << "] buffer 越界";
+        return std::string();
+    }
+    const tinygltf::Buffer& buffer = model.buffers[view.buffer];
+    const size_t begin = view.byteOffset;
+    const size_t end = view.byteOffset + view.byteLength;
+    if (begin > end || end > buffer.data.size()) {
+        LOG(ERROR) << "LoadGltf: image[" << image_index << "] 字节范围越界 ["
+                   << begin << "," << end << ")，buffer 大小 "
+                   << buffer.data.size();
+        return std::string();
+    }
+    const unsigned char* raw_bytes = buffer.data.data() + begin;
+    const size_t raw_size = end - begin;
+
+    // 扩展名：优先 mimeType（内嵌图规范要求必须有）；缺失/未知时按文件头嗅探。
+    const std::string ext = EmbeddedImageExt(img.mimeType, raw_bytes, raw_size);
+    if (ext.empty()) {
+        LOG(ERROR) << "LoadGltf: image[" << image_index
+                   << "] 无法判定图片格式（mimeType='" << img.mimeType
+                   << "'，头字节也不像 PNG/JPEG），跳过贴图";
+        return std::string();
+    }
+
+    std::string stem = img.name;
+    if (stem.empty()) {
+        stem = "img" + std::to_string(image_index);
+    }
+    // 去掉 name 里可能带的分隔符（只是安全化文件名）。
+    for (char& c : stem) {
+        if (c == '/' || c == '\\' || c == ':') c = '_';
+    }
+
+    const std::string scratch_dir = "/tmp/jpov_gltf_embed/";
+    std::system(("mkdir -p " + scratch_dir).c_str());
+    const std::string tmp = scratch_dir + stem + ext;
+    std::ofstream out(tmp, std::ofstream::binary);
+    if (!out) {
+        LOG(ERROR) << "LoadGltf: 无法写内嵌贴图临时文件 " << tmp;
+        return std::string();
+    }
+    out.write(reinterpret_cast<const char*>(raw_bytes),
+              static_cast<std::streamsize>(raw_size));
+    out.close();
+    return tmp;
 }
 
 // 解析单个 primitive → CPU MeshData + 材质贴图路径。
