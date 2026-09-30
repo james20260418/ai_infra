@@ -53,8 +53,6 @@ void JPOV::OnScroll(GLFWwindow* window, double /*xoffset*/, double yoffset) {
 }
 
 void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    (void)mods;
-    (void)scancode;
     CHECK(window != nullptr);
     JPOV* self = static_cast<JPOV*>(glfwGetWindowUserPointer(window));
     if (self) {
@@ -487,7 +485,14 @@ double JPOV::FrameInterval() const {
     return 1.0 / 60.0;
 }
 
-void JPOV::HandleKey(int key, int, int action, int) {
+void JPOV::HandleKey(int key, int, int action, int mods) {
+    // 修饰键状态：每次按键事件都从 mods 位掩码刷新（GLFW 在事件里携带当前
+    // 修饰键快照，shift 为左右任一按下）。文本输入框用它决定上档符号/大小写。
+    mods_.shift = (mods & GLFW_MOD_SHIFT) != 0;
+    mods_.ctrl  = (mods & GLFW_MOD_CONTROL) != 0;
+    mods_.alt   = (mods & GLFW_MOD_ALT) != 0;
+    mods_.super = (mods & GLFW_MOD_SUPER) != 0;
+
     if (key < 0 || key >= jpov::kMaxKeyCode) {
         return;
     }
@@ -517,4 +522,5 @@ void JPOV::FlushKeyboard(jpov::InputSnapshot* input) {
         }
         input->keys[i].raw = raw;
     }
+    input->mods = mods_;
 }

@@ -113,6 +113,21 @@ enum class KeyCode : uint16_t {
     _0 = 48, _1 = 49, _2 = 50, _3 = 51, _4 = 52,
     _5 = 53, _6 = 54, _7 = 55, _8 = 56, _9 = 57,
 
+    // 标点（GLFW 码；Shift 可派生上档符号。文本输入框需要小数/负数等，
+    // 这些键必须能被捕获 —— 否则 KeyCode 里没有对应项，窗口层虽存入
+    // keys_[key] 但无人能按名字引用）。
+    Apostrophe = 39,    // ' / "
+    Comma      = 44,    // , / <
+    Minus      = 45,    // - / _
+    Period     = 46,    // . / >
+    Slash      = 47,    // / / ?
+    Semicolon  = 59,    // ; / :
+    Equal      = 61,    // = / +
+    LeftBracket  = 91,  // [ / {
+    Backslash    = 92,  // \ / |
+    RightBracket = 93,  // ] / }
+    GraveAccent  = 96,  // ` / ~
+
     // 功能键
     F1 = 290, F2 = 291, F3 = 292, F4 = 293,
     F5 = 294, F6 = 295, F7 = 296, F8 = 297,
@@ -134,6 +149,8 @@ enum class KeyCode : uint16_t {
     Right   = 262,
     Up      = 265,
     Down    = 264,
+    Home    = 268,
+    End     = 269,
 
     // 范围上限
     MaxKey = 348,  // GLFW_KEY_LAST
@@ -147,6 +164,19 @@ constexpr int kMaxKeyCode = static_cast<int>(KeyCode::MaxKey) + 1;
 // 1fps = 1000ms/帧，CLICK_DELTA = 250ms → 最多 4 次/帧
 // 取 8 给足余量
 constexpr int kMaxClicksPerFrame = 8;
+
+// ==================== 修饰键状态 ====================
+
+// 本帧修饰键（Shift/Ctrl/Alt/Super）的按下状态（窗口层从平台事件填入）。
+//
+// 目前只有文本输入框（InputText）消费它：Shift 决定标点键的上档符号
+// （如 Minus → '-' / '_'，Period → '.' / '>'），以及字母大小写。
+struct KeyMods {
+    bool shift = false;  // 左/右 Shift（任一按下即 true）
+    bool ctrl  = false;  // 左/右 Ctrl
+    bool alt   = false;  // 左/右 Alt
+    bool super = false;  // Win/Cmd
+};
 
 // ==================== InputSnapshot ====================
 
@@ -170,6 +200,7 @@ struct InputSnapshot {
 
     // ---- 键盘 ----
     KeyState keys[kMaxKeyCode];  // 索引 = KeyCode 数值
+    KeyMods  mods;               // 本帧修饰键状态（Shift/Ctrl/Alt/Super）
 
     // ---- 辅助方法 ----
 

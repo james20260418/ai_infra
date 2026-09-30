@@ -464,8 +464,10 @@ public:
     }
 
     // 文本宽度测量回调（验收 bug#7 根因修复）：设置回调后，光标用回调返回的
-    // 真实字体进宽定位，精确贴合文本末尾，而不是脚本内 0.6*font_size/字符 的
-    // 等宽估计（对混合 Latin/CJK 会偏宽 1.5~2x，光标漂到文本长度 1.5~2 倍）。
+    // 真实字体进宽定位，而不是脚本内 0.6*font_size/字符 的等宽估计（对混合
+    // Latin/CJK 会偏宽 1.5~2x，光标漂到文本长度 1.5~2 倍）。
+    // 注：2026-09-29 重做后，**点击会按点击 x 定位光标**，故“光标贴文本末尾”
+    // 需把点击位置放在文本之后（这里点框内靠右 x=205 → 光标落在末尾）。
     // 验证：
     //   1. 未设回调 → 光标 X = text_left + len*0.6*font_size（原估计，确定性）。
     //   2. 设回调（返回已知宽度 W）→ 光标 X = text_left + W（真实进宽），
@@ -476,12 +478,14 @@ public:
         const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
         char buf[64] = "hello";  // len=5。
         const float text_left = box.pos.x() + theme.padding_px;  // 16
+        // 点击框内靠右（205），把光标定位到文本末尾（len=5）。
+        const float kClickEndX = 205.0f;
 
         // 1. 未设回调 → 0.6 估计（len*9.6）。
         {
             Ui ui;
             RenderCommandList cmd;
-            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.Begin(MakeClickInput(kClickEndX, 20.0f), theme, 640.0f, 360.0f);
             ui.InputText("n", buf, sizeof(buf), box);
             ui.End();
             ui.Emit(&cmd);
@@ -502,7 +506,7 @@ public:
             Ui ui;
             ui.SetTextMeasure(&Local::measure);
             RenderCommandList cmd;
-            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.Begin(MakeClickInput(kClickEndX, 20.0f), theme, 640.0f, 360.0f);
             ui.InputText("n", buf, sizeof(buf), box);
             ui.End();
             ui.Emit(&cmd);
@@ -523,7 +527,7 @@ public:
             Ui ui;
             ui.SetTextMeasure(&Local::measure);
             RenderCommandList cmd;
-            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            ui.Begin(MakeClickInput(kClickEndX, 20.0f), theme, 640.0f, 360.0f);
             ui.InputText("n", empty, sizeof(empty), box);
             ui.End();
             ui.Emit(&cmd);
@@ -639,7 +643,8 @@ public:
             // C. Backspace 长 hold（>150ms）：单击删 1，long-hold 按阈值重复删。
             Ui ui;
             char buf[64] = "abcdef";
-            ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+            // 点击框内靠右（205）→ 光标落在文本末尾，Backspace 才是删“末尾字符”。
+            ui.Begin(MakeClickInput(205.0f, 20.0f), theme, 640.0f, 360.0f);
             ui.InputText("n", buf, sizeof(buf), box);
             ui.End();  // 聚焦。
             {
@@ -758,6 +763,231 @@ public:
         LOG(INFO) << "[PASS] InputText 同屏两个输入框：焦点互不干扰（隔离回归）";
     }
 
+    // ↓↓↓ 2026-09-29 输入框重做新增：标点/小数/负数 + 光标移动 ↓↓↓
+
+    // 标点/小数/负数：可以输入 '.', '-', '+' 等（关键需求：坐标填值）。
+    static void TestPunctuationDecimalNegative() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        Ui ui;
+        char buf[64] = "";
+        ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", buf, sizeof(buf), box);
+        ui.End();
+        // 逐帧输入 "-1.25"（Minus, 1, Period, 2, 5）。
+        const struct { KeyCode key; char ch; } seq[] = {
+            {KeyCode::Minus, '-'},  {KeyCode::_1, '1'},
+            {KeyCode::Period, '.'}, {KeyCode::_2, '2'},
+            {KeyCode::_5, '5'},
+        };
+        for (const auto& s : seq) {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, s.key);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "-1.25") << "应能输入负小数 -1.25";
+
+        // Shift + Equal → '+'，Shift + Minus → '_'。
+        {
+            InputSnapshot in = MakePlainInput();
+            in.mods.shift = true;
+            PressKey(&in, KeyCode::Equal);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            CHECK_STREQ(buf, "-1.25+") << "Shift+Equal 应输入 '+'";
+        }
+        {
+            InputSnapshot in = MakePlainInput();
+            in.mods.shift = true;
+            PressKey(&in, KeyCode::Minus);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+            CHECK_STREQ(buf, "-1.25+_") << "Shift+Minus 应输入 '_'";
+        }
+        LOG(INFO) << "[PASS] InputText 标点/小数/负数/Shift 上档符号";
+    }
+
+    // Shift 字母大写。
+    static void TestShiftUppercase() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        Ui ui;
+        char buf[64] = "";
+        ui.Begin(MakeClickInput(50.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", buf, sizeof(buf), box);
+        ui.End();
+        for (int i = 0; i < 2; ++i) {
+            InputSnapshot in = MakePlainInput();
+            in.mods.shift = (i == 1);  // 第 1 帧小写 a，第 2 帧大写 B。
+            PressKey(&in, i == 0 ? KeyCode::A : KeyCode::B);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "aB") << "Shift 应使字母大写";
+        LOG(INFO) << "[PASS] InputText Shift 大写";
+    }
+
+    // 光标移动 + 中间插入：Left 后插入字符应插在光标处，而非末尾。
+    static void TestCaretMoveAndInsertMiddle() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        Ui ui;
+        char buf[64] = "ac";
+        // 点框内靠右 → 光标在末尾（len=2）。
+        ui.Begin(MakeClickInput(205.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", buf, sizeof(buf), box);
+        ui.End();
+        // Left → 光标到 1（a|c）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Left);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        // 插入 'b' → 应得 "abc"（插在 a 与 c 之间）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::B);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "abc") << "光标移动后应插在中间（a|b|c）";
+        // Home → 光标到 0；Delete 删光标右侧 'a' → "bc"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Home);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Delete);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "bc") << "Home 后 Delete 应删光标右侧字符（删 'a'）";
+        // End → 光标到末尾；Backspace 删左侧 'c' → "b"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::End);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Backspace);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "b") << "End 后 Backspace 应删末尾 'c'";
+        LOG(INFO) << "[PASS] InputText 光标移动 + 中间插入 + Home/End/Delete";
+    }
+
+    // 中间插入后光标位置：插入不会把光标留在原位（应随插入右移）。
+    static void TestCaretFollowsInsert() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        Ui ui;
+        char buf[64] = "ac";
+        ui.Begin(MakeClickInput(205.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", buf, sizeof(buf), box);
+        ui.End();
+        // Left 到 1，插 'x' → "axc"，光标应在 2（ax|c）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Left);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::X);  // 无 Shift → 小写 'x'。
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "axc");
+        // 再插 'y'：若光标停在 2，应得 "axyc"；若光标错回 1，则 "ayxc"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Y);  // 无 Shift → 小写 'y'。
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", buf, sizeof(buf), box);
+            ui.End();
+        }
+        CHECK_STREQ(buf, "axyc") << "插入后光标应随之前移，后续字符接在后面";
+        LOG(INFO) << "[PASS] InputText 插入后光标随之前移";
+    }
+
+    // 同屏两个输入框，且后画的框较短：在 A 打字时 A 的光标不得被 B 冲掉。
+    // 回归 bug（2026-09-29 Danis）：输入字符后光标不由自主弹到第 1 个字符后。
+    // 根因：input_caret_ 是跨帧共享字段，非聚焦框 B 每帧把自己的 len 夹写回去，
+    // 把 A 的光标夹成 B 的长度（B 只有 1 字符 → 夹到 1）。
+    static void TestCaretSharedFieldNotClobberedByOtherBox() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box_a{{10.0f, 10.0f}, {200.0f, 24.0f}};
+        const UiRect box_b{{240.0f, 10.0f}, {200.0f, 24.0f}};
+        char a[64] = "aa";
+        char b[64] = "b";  // 后画的框只 1 字符。
+        Ui ui;
+
+        // 帧1：点 A 框内靠右 → A 聚焦，光标在“aa”末尾（2）。
+        ui.Begin(MakeClickInput(205.0f, 20.0f), theme, 640.0f, 360.0f);
+        ui.InputText("n", a, sizeof(a), box_a);
+        ui.InputText("n", b, sizeof(b), box_b);
+        ui.End();
+
+        // 帧2：输入 'x'（无点击）→ 光标应在 2 插入 → "aax"，光标 3。
+        //       同帧又画 B（后于 A，键盘写 B 时不该动 A 的光标）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::X);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aax") << "x 应插在 A 末尾";
+            CHECK_STREQ(b, "b") << "B 不应被改";
+        }
+
+        // 帧3：再输入 'y' → 应接在末尾得 "aaxy"（光标 4）。
+        //       若光标被 B 冲成 1，则会得到 "ayax"。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Y);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aaxy")
+                << "A 的光标不应被后画的 B 框冲掉（否则得 ayax）";
+        }
+
+        // 帧4：再键入 'z' → "aaxyz"（继续验证光标稳定在末尾）。
+        {
+            InputSnapshot in = MakePlainInput();
+            PressKey(&in, KeyCode::Z);
+            ui.Begin(in, theme, 640.0f, 360.0f);
+            ui.InputText("n", a, sizeof(a), box_a);
+            ui.InputText("n", b, sizeof(b), box_b);
+            ui.End();
+            CHECK_STREQ(a, "aaxyz");
+        }
+        LOG(INFO) << "[PASS] InputText 光标共享字段不被其他框冲掉（回归 Danis 弹到第1位）";
+    }
+
     static void RunAll() {
         TestInitNotFocused();
         TestClickFocusToggle();
@@ -772,6 +1002,11 @@ public:
         TestCaretUsesTextMeasure();
         TestKeyboardHoldThreshold150ms();
         TestTwoInputTextsIsolation();
+        TestPunctuationDecimalNegative();
+        TestShiftUppercase();
+        TestCaretMoveAndInsertMiddle();
+        TestCaretFollowsInsert();
+        TestCaretSharedFieldNotClobberedByOtherBox();
         LOG(INFO) << "===== UI S5 (InputText) 自证全部通过 =====";
     }
 };

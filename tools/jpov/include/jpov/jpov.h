@@ -318,6 +318,7 @@ private:
     MouseButtonState right_btn_;
     MouseButtonState middle_btn_;
     KeyButtonState keys_[jpov::kMaxKeyCode];
+    jpov::KeyMods  mods_;   // 本帧修饰键状态（HandleKey 从事件 mods 刷新）
     FrameEvents frame_;
     double frame_start_time_ = 0.0;
     Config config_;

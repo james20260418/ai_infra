@@ -203,6 +203,16 @@ public:
                      bool stretch_h = true);
 
     // 文本输入框。buffer 为 in/out（C 字符串 + 容量上限 buffer_size）。
+    //
+    // 编辑模型（2026-09-29 重做）：
+    //   - 光标可在**任意字符间**定位（不是只能在末尾）：Left/Right 移动一位，
+    //     Home/End 移到行首/行尾；光标为**跨帧状态**（input_caret_，跟踪当前聚焦框）。
+    //   - 字符**插入在光标处**，Backspace 删光标左侧、Delete 删光标右侧。
+    //   - 可输入字符集：字母（Shift 决定大小写）/ 数字 / 空格 / 标点
+    //     （`.,-+/;'[]\`=` 等，Shift 派生上档符号）。可用它输入小数/负数。
+    //   - Enter/Escape → 失焦（不改变 buffer）。
+    //   - 键盘 hold 重复（150ms 阈值）对可打印字符/Backspace/Delete/方向键均生效。
+    // 返回：本帧**帧末**是否聚焦（用于感知回车/焦点丧失；字符改动经 buffer 体现）。
     bool InputText(const char* label, char* buffer /*inout*/,
                    size_t buffer_size, const UiRect& box,
                    bool stretch_w = true, bool stretch_h = true);
@@ -278,6 +288,17 @@ private:
     // 未注入时回退到 0.6*font_size/字符 的等宽估计（供无字体的 CPU gold 测试）。
     // return：文本绘制后 pen 落到的水平终点（像素，相对文本左缘）。
     float MeasureTextWidth(const char* text, float font_size) const;
+
+    // 量文本**前 count 个字符**（前缀）的绘制宽度（像素）。用于光标定位：
+    // 光标在第 caret 个字符边界时，其相对文本左缘的 X = 前 caret 字符的宽度。
+    // （真实字体的前缀宽 ≠ 单字宽×count，故必须按前缀实测，不能简单按字符数乘。）
+    // Pre-condition: text 非空且 strlen(text) >= count。
+    float MeasureTextPrefixWidth(const char* text, int count,
+                                 float font_size) const;
+
+    // 给定点击的相对文本左缘 X（像素），返回光标应落的**字符索引**（0..len）：
+    // 逐字符累加前缀宽度，取与 x 最接近的字符边界。用于“点哪插哪”。
+    int CaretIndexForX(const char* text, size_t len, float x) const;
 
     // 布局解析（C1）：根据 stretch 开关把给定 box 解析成控件实际占用的矩形。
     //   - stretch 方向非拉伸时，用 ideal（控件理想尺寸）在该方向收缩。
@@ -376,6 +397,11 @@ private:
     // 归属上面聚焦的那个文本框（面板内同时至多一个聚焦框）。
     float input_scroll_px_ = 0.0f;
 
+    // 输入框光标位置（**字符索引**，0..文本长度，插在 buffer[caret-1] 与
+    // buffer[caret] 之间）。跨帧保持；点框内新聚焦时按点击 x 定位光标（见实现）。
+    // 与 text_focus_ 同属一个聚焦框。
+    int input_caret_ = 0;
+
     // 本帧时长（毫秒），Begin 设置；<=0 表示无时钟（不产生 hold 重复）。
     float frame_dt_ms_ = 0.0f;
     // 键盘 hold 重复跨帧累积：按键被持续按住的总时长（毫秒）。
@@ -413,12 +439,12 @@ private:
     StateSlot button_press_;
 };
 
-// 文本输入框 S5 实现的字符来源（KeyCode → 可编辑字符）辅助，供自证测试
-// 合成按键时复用同一套映射，避免测试与实现分叉。
-// 返回该 key 在本帧应写入 buffer 的字符；无法映射为可编辑字符（修饰键/
-// 控制键）返回 '\0'，调用方忽略。大小写：InputSnapshot 未携带 Shift 修饰，
-// 一律输出小写（可编辑字符全集：a-z / 0-9 / 空格）。
-char UiInputCharForKey(KeyCode key);
+// 键盘字符映射：KeyCode → 可编辑字符（供 InputText 写回 buffer，也供测试
+// 合成按键时复用同一套映射，避免测试与实现分叉）。
+//
+// shift 决定字母大小写，以及标点/数字键的上档符号（如 Minus → '-' / '_'，
+// Period → '.' / '>'，_1 → '!'）。不可编辑键（修饰键/控制键/方向键等）返回 '\0'。
+char UiInputCharForKey(KeyCode key, bool shift);
 
 }  // namespace jpov
 
