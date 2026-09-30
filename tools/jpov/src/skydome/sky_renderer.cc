@@ -113,7 +113,7 @@ namespace jpov {
 
 void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
-                          ShaderManager& shader_mgr) {
+                          ShaderManager& shader_mgr, bool atmo_only) {
     // ---- 构建 相机 逆(Proj*View) ----
     const float aspect = static_cast<float>(fbo_w) / static_cast<float>(std::max(fbo_h,1));
     const float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
@@ -178,6 +178,7 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 sky_cmd.moon_set_start_angle);
     glUniform1f(shader_mgr.GetUniform(prog, "uMoonSetAngleRatio"),
                 sky_cmd.moon_set_angle_ratio);
+    glUniform1i(shader_mgr.GetUniform(prog, "uAtmoOnly"), atmo_only ? 1 : 0);
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);

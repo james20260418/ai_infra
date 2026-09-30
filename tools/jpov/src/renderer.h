@@ -193,6 +193,20 @@ private:
     void EnsureBloomChain(int full_w, int full_h, int levels);
     void DestroyBloomChain();
 
+    // 远景仰角雾（空气透视）pass：一次全屏三角形，读 HDR 颜色 + 场景深度，按
+    // 距离 + 视线仰角就地把远景朝雾色收敛。返回 fogged HDR 纹理（ping-pong）。
+    // 调用前提：use_hdr=true，cmds.elevation_fog 有值且 enabled。
+    unsigned int DrawElevationFogPass(const ElevationFogConfig& cfg,
+                                      unsigned int hdr_input_tex,
+                                      unsigned int scene_depth_tex,
+                                      unsigned int sky_color_tex,
+                                      const Camera& cam, int fbo_w, int fbo_h);
+    void EnsureElevationFogFBO(int w, int h);
+    void DestroyElevationFogFBO();
+    // 「天空色」离屏 FBO（远景雾收敛色用；单独一趟天空绘制）。
+    void EnsureSkyColorFBO(int w, int h);
+    void DestroySkyColorFBO();
+
     float mvp_[16];
     ShaderManager shader_mgr_;
 
@@ -227,6 +241,16 @@ private:
     std::vector<int> bloom_level_h_;
     unsigned int bloom_work_fbo_ = 0, bloom_work_tex_ = 0;
     int bloom_work_w_ = 0, bloom_work_h_ = 0;
+
+    // 「天空色」纹理（RGBA16F，单采样，与 3D FBO 同尺寸）：天光**大气色**（不含日月盘/光晕）
+    // 单独渲一份，供远景仰角雾当收敛色。为什么不直接用 MRT 附属附件：GL 规范里「某 shader
+    // 未写该颜色附件」其内容是**未定义**的，会被之后画的几何 shader 写成垃圾（实测 NaN）。
+    unsigned int sky_fbo_ = 0, sky_tex_ = 0;
+    int sky_w_ = 0, sky_h_ = 0;
+
+    // 远景仰角雾 ping-pong 输出（RGBA16F，与 HDR 同尺寸；随尺寸按需重建）。
+    unsigned int elev_fog_fbo_ = 0, elev_fog_tex_ = 0;
+    int elev_fog_w_ = 0, elev_fog_h_ = 0;
     // 上采样累加后，最终辉光所在的 acc 纹理（L0 分辨率），供 composite 采样。
     unsigned int bloom_final_tex_ = 0;
     // 上采样累加用的乒乓缓冲（acc_a/acc_b 各半分辨率，随链一起分配）。

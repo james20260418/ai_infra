@@ -552,6 +552,45 @@ struct BloomConfig {
     int levels = 3;
 };
 
+// 远景仰角雾（空气透视，elevation fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
+//
+// 与「局部体积雾体 + tile culling」是**两条不同的通道**（后者设计未定，未实现）。
+// 本雾是纯屏幕空间解析式：每像素由相机逆 VP 反推视线方向 d 与到可见面的距离 dist，
+// 然后
+//   band = 1 − smoothstep(elev_inner, elev_outer, |d.y|)   // 仰角带（水平带内=1）
+//   ramp = smoothstep(start_distance, full_distance, dist)  // 距离
+//   τ    = density · band · ramp
+//   L    = L_scene · exp(−τ) + color · (1 − exp(−τ))       // HDR 线性域内就地和成
+//
+// 关键：沿视线 d 不变 ⇒ `d.y` 整条射线是**常量** ⇒ 仰角这个条件**不用求交**，就是一个乘子。
+//**与相机位置无关**（不像“高度雾”锚在世界 y）——相机怎么飞，地平线带都一致。
+// 只作用于有几何的像素（天空/背景像素保持原样，避免“雾把天空吃成一块色”）。
+struct ElevationFogConfig {
+    // 是否启用。false（默认）时整个 pass 跳过，零开销零回归。
+    bool enabled = false;
+
+    // 起雾距离（米）：dist ≤ 此值无雾；≥ full_distance 满雾（中间 smoothstep 过渡）。
+    float start_distance = 300.0f;
+    float full_distance = 1500.0f;
+
+    // 仰角带（度）：|视线仰角| ≤ elev_inner → 满，≥ elev_outer → 无（中间软边）。
+    // 仰角 = 视线方向与水平面的夹角（由 |d.y| 得）。_inner < _outer（否则报错）。
+    float elev_inner_deg = 1.0f;
+    float elev_outer_deg = 4.0f;
+
+    // 最大消光 σ_max（站在带内、满距离处的 τ；越大越糊）。
+    float density = 2.0f;
+
+    // 雾色（内散射色，线性 HDR）。默认 "use_sky_color=true" ⇒ 取**该像素方向的天空色**
+    // （雾收敛到天边，接缝最干净）；场景无天空 / 关掉该开关时退回本字段。
+    // 本字段可取 SkyCommand::ElevationFogColor()（CPU 推导的地平线天光色，作参考/无天空时用）。
+    Color color = {0.6f, 0.68f, 0.8f, 1.0f};
+
+    // true（默认）：收敛色 = 渲染出的天空色（MRT #2）——与天空严格一致，最自然。
+    // false：用上面的 color 常量。
+    bool use_sky_color = true;
+};
+
 // 全局阴影配置（级联阴影贴图 CSM）——"太阳怎么投影子"的工程参数。
 //
 // 与 DirectionalLight（光学参数：方向/颜色/强度，每帧在
@@ -1277,6 +1316,22 @@ struct SkyCommand {
         }
         return {zenith, horizon, ground};
     }
+
+    // ── 远景仰角雾（空气透视）雾色推导（2026-09-30）──
+    //
+    // 仰角雾把「低仰角 + 大距离」的远处像素朝**雾色**收敛，使远景/地平线淡出、
+    // 融进天里。雾色取「**地平线附近的天光色**」：与 AmbientTricolor() 的地平
+    //（天际线）端同源 —— 同一条时间轴（昼夜 daylight / 浊度 haze / 季节
+    // daylight_season），故雾色会随太阳起落 / 天气 / 季节一起变，与天空、环境光
+    // 保持一致。
+    //
+    // 用途：ElevationFogConfig::color 可直接取本值（见 demo/skylight_viewer_app.h
+    // 的雾色色块，可目视核对“天光 → 雾色”的推理链）。
+    // 返回**色调与相对量级**（线性 RGB）；需要匹配天空亮度时可另乘一个增益。
+    Color ElevationFogColor() const {
+        const std::array<Color, 3> trio = AmbientTricolor();
+        return trio[1];   // [天, 天际线, 地] 的「天际线(地平)」端
+    }
 };
 
 // ── 天光构造参数（全部字段，带默认值）──
@@ -1575,6 +1630,11 @@ struct RenderCommandList {
     //   - false：不走 tone map，直接 blit 到 LDR（HDR 值被 RGBA8 clamp，
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
+
+    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在 3D 不透明 pass 之后、
+    // highlight/bloom/tone map 之前插入一次全屏 fog pass（读场景颜色 + 场景深度）。
+    // 未设置 / enabled=false 时零开销。见 ElevationFogConfig。
+    std::optional<ElevationFogConfig> elevation_fog;
 
     // 场景深度可视化开关（调试，默认 false）。
     //   HDR 3D pass 用 MRT 把「场景深度」写进第二颜色附件（R32F，值 = gl_FragCoord.z
