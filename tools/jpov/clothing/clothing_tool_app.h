@@ -412,8 +412,9 @@ private:
         const float panel_w  = 0.36f * w;
         const float panel_x  = kMargin;
         const float panel_y  = kMargin;
-        // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存1 + 滑条1 + 开关1 + 只读2 = 14。
-        constexpr int kRows = 14;
+        // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存按钮1 + 保存状态1
+        //        + 滑条1 + 开关1 + 只读2 = 15。
+        constexpr int kRows = 15;
         const float panel_h = kPad * 2.0f + kRows * kRowH +
                               (kRows - 1) * kSpacing;
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
@@ -548,18 +549,29 @@ private:
                   scale_info_x, left + row_w - scale_info_x, row_y);
         row_y += step_y;
 
-        // ---- 保存行：按钮 + 状态文本 ----
+        // ---- 保存行：仅按钮 ----
         const float save_btn_w = 140.0f;
         const char* save_label =
             (save_ctrl_.state() == ClothSaveState::kSaving) ? "保存中..."
                                                             : "保存衣服 glb";
         if (ui_.Button(save_label,
-                       jpov::UiRect{{col_axis, row_y}, {save_btn_w, kRowH}})) {
+                       jpov::UiRect{{left, row_y}, {save_btn_w, kRowH}})) {
             StartSaveCloth();
         }
-        const float save_info_x = col_axis + save_btn_w + gap;
-        DrawLabel(save_ctrl_.message().c_str(), save_info_x,
-                  left + row_w - save_info_x, row_y);
+        row_y += step_y;
+
+        // ---- 保存状态行：单独一行 + 真左对齐 ----
+        // 不用 Ui::Text（它总是把文字在 box 内居中；长文案会横向压到上一行的按钮上）。
+        // 对齐交给渲染层（kTopLeft 以 pos 为左上角），与 editor_app.h 的做法一致。
+        // 未保存过时 message() 为空 → 不画。
+        const std::string& save_msg = save_ctrl_.message();
+        if (!save_msg.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};  // 同 UiTheme 前景色
+            cmds->DrawText(save_msg,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
         row_y += step_y;
 
         // ---- 地面高度（米）：[-3,+3] ----
