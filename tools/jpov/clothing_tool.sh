@@ -10,9 +10,15 @@
 #   2. 产物拷贝到工程 output/jpov_clothing_tool/ 下（含 exe 旁 fonts/）
 #   3. 打印用法提示
 #
-# 本工具当前阶段：**加载 + 显示 + 粗调位置**。
+# 本工具当前阶段：**加载 + 显示 + 调节 + 保存**。
 #   ① 进入界面时后台线程为两份 glb 建「最近邻三角形」匹配器（期间主界面黑底白字显进度）；
-#   ② 左上角半透明黑底面板，用 x/y/z 填值输入框粗调衣服模型 center（回车/焦点丧失即生效）。
+#   ② 左上角半透明黑底面板：
+#        - 平移 x/y/z：绝对位置输入框 + 步长输入框（默认 0.1，|值|≤5.0）+ 步进按钮 "<" ">"；
+#        - 旋转 RX/RY/RZ：步长输入框（默认 45°，|值|≤90°）+ 步进按钮 "<" ">"（绕该轴逆时针）；
+#        - 整体缩放：系数输入框（默认 1.1，夹在 [1.0,2.0]）+ "-"（除系数）/ "+"（乘系数）
+#          + 当前缩放只读；
+#        - "保存衣服 glb" 按钮：把当前几何写到源 glb 同目录的 *_cloth_edit<时间戳>.glb。
+#        ⭐ 所有调节都**直接烘进衣服 mesh 顶点**（不靠绘制参数），见 clothing_transform.h。
 #   仍不做：穿衣物理/贴合（后续管线的事）。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
@@ -84,10 +90,13 @@ echo "         --cloth_path /path/to/cloth.glb"
 echo "       → /tmp/ui/clothing_tool_ui.png"
 echo ""
 echo "   验收：1280x720 不可 resize 窗口。启动先黑底白字显示后台进度（建最近邻三角形），"
-echo "   完成后显示场景：300×300 灰色地面 + 人体 reference + 衣服，固定正午晴天光照"
-echo "   （太阳阴影 + 环境光）。右键 drag 转视角、滚轮 zoom。"
+echo "   完成后显示场景：300×300 灰色地面 + 人体 reference + 衣服，固定 45° 天光 + 三色环境光。"
+echo "   右键 drag 转视角、滚轮 zoom。"
 echo "   左上角半透明黑底面板（自上而下）："
-echo "     · 衣服 X / Y / Z 三个填值输入框（回车或焦点丧失即把衣服 center 移到给定坐标）"
+echo "     · 平移表头（轴/绝对位置/步长/步进） + X/Y/Z 行（绝对位置框 + 步长框 + \"<\" \">\"）"
+echo "     · 旋转表头（轴/步长(°)/步进） + RX/RY/RZ 行（步长框 + \"<\" \">\"）"
+echo "     · 缩放系数框 + \"-\" \"+\" + 当前缩放只读"
+echo "     · \"保存衣服 glb\" 按钮 + 保存状态"
 echo "     · 地面高度 y [-3,+3]（默认 -3）"
 echo "     · 勾选：显示人体 reference / 显示衣服"
 echo "     · 只读行：人体 reference 与衣服的来源文件名 + primitive 数"
@@ -95,7 +104,9 @@ echo ""
 echo "   架构："
 echo "     · 本工具：tools/jpov/clothing/（独立包，namespace jpov::clothing）"
 echo "         - clothing_tool_app.h    渲染核心 App（场景 + 面板 + OneIteration）"
-echo "         - clothing_init.{h,cc}    后台初始化（建图 + 进度）"
-echo "         - clothing_axis_input.h   坐标填值解析（纯函数）"
+echo "         - clothing_init.{h,cc}    后台初始化（加载 + 建图 + 保留衣服 CPU 几何）"
+echo "         - clothing_axis_input.h   数值填值解析（纯函数）"
+echo "         - clothing_transform.h    衣物变换烘焙（纯函数：平移/旋转/缩放 → 顶点）"
+echo "         - clothing_save.{h,cc}    保存衣服 mesh 为 glb（后台线程）"
 echo "         - jpov_clothing_tool.cc  主程序（CLI 装配 + 交互/headless 分发）"
-echo "     · 视角/光照/地面：复用 //tools/jpov:view_config（zero 分叉）"
+echo "     · 视角/光照/地面：复用 //tools/jpov:view_config / skylight_scene（zero 分叉）"
