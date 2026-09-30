@@ -92,8 +92,10 @@ struct NumberField {
     bool focused_prev = false;
 
     NumberField() { text[0] = '\0'; }
-    explicit NumberField(const char* init) {
-        snprintf(text, kAxisInputCapacity, "%s", init);
+    // 从初始数值构造：文本用 "%g" 规范化，保证与默认常量（如 kDefaultRotStep）**单一来源**，
+    // 不会出现"改了常量但初始文本没改"的分叉。
+    explicit NumberField(float init) {
+        snprintf(text, kAxisInputCapacity, "%g", static_cast<double>(init));
     }
 };
 
@@ -137,15 +139,17 @@ public:
     float rot_step_[3]   = {kDefaultRotStep, kDefaultRotStep, kDefaultRotStep};
     float scale_step_    = kDefaultScaleStep;
 
-    // 面板数值输入框的跨帧文本 + 聚焦态。
-    // 绝对位置默认 "0"；平移步长 "0.1"；旋转步长 "45"；缩放系数 "1.1"。
-    NumberField pos_field_[3] = {NumberField("0"), NumberField("0"),
-                                 NumberField("0")};
-    NumberField trans_step_field_[3] = {NumberField("0.1"), NumberField("0.1"),
-                                        NumberField("0.1")};
-    NumberField rot_step_field_[3] = {NumberField("45"), NumberField("45"),
-                                      NumberField("45")};
-    NumberField scale_step_field_ = NumberField("1.1");
+    // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
+    // 绝对位置默认 0；平移步长 0.1；旋转步长 45；缩放系数 1.1。
+    NumberField pos_field_[3] = {NumberField(0.0f), NumberField(0.0f),
+                                 NumberField(0.0f)};
+    NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
+                                        NumberField(kDefaultTransStep),
+                                        NumberField(kDefaultTransStep)};
+    NumberField rot_step_field_[3] = {NumberField(kDefaultRotStep),
+                                      NumberField(kDefaultRotStep),
+                                      NumberField(kDefaultRotStep)};
+    NumberField scale_step_field_ = NumberField(kDefaultScaleStep);
 
     // 衣服保存控制器（后台线程写 glb）。
     ClothingSaveController save_ctrl_;

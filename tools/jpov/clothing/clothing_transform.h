@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glog/logging.h>
+
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/mesh_transform.h"
 

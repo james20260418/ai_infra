@@ -5,6 +5,7 @@
 
 #include "tools/jpov/clothing/clothing_save.h"
 
+#include <exception>
 #include <string>
 #include <utility>
 

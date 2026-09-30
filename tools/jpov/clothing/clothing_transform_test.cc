@@ -101,13 +101,23 @@ TEST(ClothingTransformTest, EulerRotateAboutZ) {
     ExpectVec3Near(front, 0.0f, 0.0f, 1.0f); // 绕 Z 转不动 front
 }
 
-TEST(ClothingTransformTest, EulerAppliesXThenYThenZ) {
-    // 先绕 X 90°、再绕 Y 90°：验证复合顺序 = Rx → Ry。
+TEST(ClothingTransformTest, EulerAppliesXBeforeY) {
+    // 先绕 X 90°、再绕 Y 90°：验证复合顺序为 Rx → Ry（若反了结果不同）。
     Vec3f up;
     Vec3f front;
     EulerDegToUpFront(Vec3f(90.0f, 90.0f, 0.0f), &up, &front);
     ExpectVec3Near(up, 1.0f, 0.0f, 0.0f);
     ExpectVec3Near(front, 0.0f, -1.0f, 0.0f);
+}
+
+TEST(ClothingTransformTest, EulerAppliesZLast) {
+    // 绕 Y 90° 再绕 Z 90°（X=0）：确认 Z 是**最后**施加的（R = Rz·Ry·Rx）。
+    // 若 Z 先施加（R = Rx·Ry·Rz），up/front 会是 (0,0,1)/(1,0,0)，与本断言不符。
+    Vec3f up;
+    Vec3f front;
+    EulerDegToUpFront(Vec3f(0.0f, 90.0f, 90.0f), &up, &front);
+    ExpectVec3Near(up, -1.0f, 0.0f, 0.0f);
+    ExpectVec3Near(front, 0.0f, 1.0f, 0.0f);
 }
 
 // ==================== 烘焙 ====================

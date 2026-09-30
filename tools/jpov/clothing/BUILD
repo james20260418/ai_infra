@@ -35,6 +35,7 @@ cc_library(
     deps = [
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:mesh_transform",
+        "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
 )
