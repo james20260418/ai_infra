@@ -62,27 +62,37 @@ void AppendTrianglesFromMesh(const MeshData& mesh,
     }
 }
 
-// 回调 user_data：把每个 primitive 的三角形收集进一个 vector。
-struct TriangleCollector {
+// 回调 user_data：把每个 primitive 的三角形收集进一个 vector；若 geometry 非空，
+// 同时保留一份 CPU 几何（MeshData + 材质）供上层烘焙/保存用。
+struct PrimitiveCollector {
     std::vector<Triangle3d> triangles;
+    // 非空则同时保留 CPU 几何（衣服侧用；body 侧传 nullptr 以省一份拷贝）。
+    std::vector<jpov::GltfMeshEntry>* geometry = nullptr;
 };
 
-void CollectTriangles(const GltfMeshEntry* entry, void* user_data) {
+void CollectPrimitive(const GltfMeshEntry* entry, void* user_data) {
     CHECK(entry != nullptr);
     CHECK(user_data != nullptr);
-    TriangleCollector* collector = static_cast<TriangleCollector*>(user_data);
+    PrimitiveCollector* collector = static_cast<PrimitiveCollector*>(user_data);
     AppendTrianglesFromMesh(entry->mesh, &collector->triangles);
+    if (collector->geometry != nullptr) {
+        // loader 回调给的是 const 引用，只能拷贝一份（初始化期一次性，可接受）。
+        collector->geometry->push_back(*entry);
+    }
 }
 
-// 读一个 glb 并抽出所有三角形。失败（解析失败）返回 false。
-bool LoadTriangles(const std::string& path, std::vector<Triangle3d>* out) {
-    CHECK(out != nullptr);
-    TriangleCollector collector;
-    const bool ok = LoadGltfScene(path, &CollectTriangles, &collector);
+// 读一个 glb 并抽出所有三角形（可选同时保留 CPU 几何）。失败返回 false。
+bool LoadModel(const std::string& path, bool keep_geometry,
+               std::vector<Triangle3d>* out_triangles,
+               std::vector<jpov::GltfMeshEntry>* out_geometry /*output*/) {
+    CHECK(out_triangles != nullptr);
+    PrimitiveCollector collector;
+    collector.geometry = keep_geometry ? out_geometry : nullptr;
+    const bool ok = LoadGltfScene(path, &CollectPrimitive, &collector);
     if (!ok) {
         return false;
     }
-    *out = std::move(collector.triangles);
+    *out_triangles = std::move(collector.triangles);
     return true;
 }
 
@@ -115,6 +125,7 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
         error_message_.clear();
         body_ = MatcherBundle{};
         cloth_ = MatcherBundle{};
+        cloth_geometry_.clear();
     }
     state_ = InitState::kBuilding;
 
@@ -128,10 +139,11 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
             progress_message_ = msg;
         };
 
-        // 1) 人体 reference：读三角形 → 建匹配器。
+        // 1) 人体 reference：读三角形 → 建匹配器（不保留 CPU 几何）。
         set_progress("正在加载人体 reference...");
         std::vector<Triangle3d> body_triangles;
-        if (!LoadTriangles(body_reference_path, &body_triangles)) {
+        if (!LoadModel(body_reference_path, /*keep_geometry=*/false,
+                       &body_triangles, nullptr)) {
             error = "加载人体 reference 失败：" + body_reference_path;
         } else if (body_triangles.empty()) {
             error = "人体 reference 无有效三角形：" + body_reference_path;
@@ -149,11 +161,13 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
                       << " ms";
         }
 
-        // 2) 衣服：同流程（仅在人体步骤成功时继续）。
+        // 2) 衣服：同流程（仅在人体步骤成功时继续），并**保留 CPU 几何**供烘焙/保存。
+        std::vector<jpov::GltfMeshEntry> cloth_geometry;
         if (error.empty() && !cancel_.load()) {
             set_progress("正在加载衣服模型...");
             std::vector<Triangle3d> cloth_triangles;
-            if (!LoadTriangles(cloth_path, &cloth_triangles)) {
+            if (!LoadModel(cloth_path, /*keep_geometry=*/true, &cloth_triangles,
+                           &cloth_geometry)) {
                 error = "加载衣服模型失败：" + cloth_path;
             } else if (cloth_triangles.empty()) {
                 error = "衣服模型无有效三角形：" + cloth_path;
@@ -181,6 +195,7 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
             std::lock_guard<std::mutex> lock(mtx_);
             body_ = std::move(body);
             cloth_ = std::move(cloth);
+            cloth_geometry_ = std::move(cloth_geometry);
             error_message_ = error;
             progress_message_ = error.empty() ? "初始化完成" : "初始化失败";
         }
