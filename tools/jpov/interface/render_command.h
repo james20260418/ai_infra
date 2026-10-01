@@ -580,8 +580,17 @@ struct ShadowConfig {
     // `ShadowConfig shadow;` / `ShadowConfig{}` 即为合法可用状态，
     // 无需用户显式调 Default()。未用到的数组位（i >= cascade_count）填 0。
     int   cascade_count = 5;                            // 级联段数 [1, kMaxCascades]
-    float cascade_ranges[kMaxCascades] = {7.2f, 28.8f, 64.8f, 115.2f, 180.0f};
-    int   cascade_sizes[kMaxCascades]  = {2048, 1024, 1024, 512, 512};
+    // 距离带：far_n = 16·2^n − 8 ⇒ 带宽严格 2 倍（8,16,32,64,128）、中心 12·2^n − 8。
+    // 分辨率 sizes 按「屏幕空间纹素尺寸尽量一致」与之配套标定（见下）。
+    float cascade_ranges[kMaxCascades] = {8.0f, 24.0f, 56.0f, 120.0f, 248.0f};
+    // 每级联 shadow map 分辨率。默认按「屏幕空间纹素尺寸尽量一致」标定：
+    //   单纹素屏幕 px ≈ (2·级联盒半径 / 尺寸) / 该带中心距离 × (H / (2·tan(fov/2)))
+    // 而盒半径 r ≈ 1.178·far（包围球由远平面那圈定，见 renderer.cc DrawShadowPass），
+    // 故 size_c ∝ far_c / 中心距离。下面这组使 5 级的屏幕纹素都落在 ~1.9 px
+    // （极差 < 1.05×），总纹素数 6.97M ≈ 111 MB（RGBA32F）。
+    // **改了 cascade_ranges 请按同一关系重标 sizes**，否则各级屏幕颗粒感会重新拉开。
+    // ⚠️ sizes 同时决定自动深度偏置：texelW = 2r/size，改这里偏置会自动跟随（见 cascade_bias）。
+    int   cascade_sizes[kMaxCascades]  = {1536, 1152, 1088, 1024, 1024};
     float fade_start = 120.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
 
