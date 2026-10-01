@@ -25,6 +25,7 @@
 
 namespace {
 
+using jpov::soft_mesh_simulator::Axis;
 using jpov::soft_mesh_simulator::Simulator;
 
 // 造一个单三角形（3 顶点，带法线/UV/索引）的测试网格。
@@ -1010,6 +1011,147 @@ TEST(SoftMeshSimulatorTest, SpringForceIsClampedAtForceMax) {
             EXPECT_TRUE(std::isfinite(sim.sim_velocities()[i][c]));
         }
     }
+}
+
+// ==================== 即时操作（ApplyTranslation / ApplyRotation / ApplyScaling）====================
+//
+// Danis 2026-10-01：面板要在**仿真进行中**也能改变位置 / 朝向 / 大小，不中断仿真。语义：
+//   位置与绑定姿态同步变换；速度只在**旋转**时参与。以下验证各条语义。
+
+// 造一个「小三角形」：边 ~0.03/0.042 m，落在默认关联距离 d=0.1 内 ⇒ 有邻居（弹簧生效），
+// 且每条边 << d*0.9=0.09 ⇒ 不触发长边加密（无虚拟点）。用于验证即时操作**不引入伪力**。
+jpov::MeshData MakeSmallTri() {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.03f, 0.0f, 0.0f}, {0.0f, 0.03f, 0.0f}};
+    m.Validate();
+    return m;
+}
+
+TEST(SoftMeshSimulatorTest, ApplyTranslationMovesStateKeepsVelocityAndForce) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+    const geom::Vec3<float> a_before = sim.AccelAtPoint(0);
+
+    const geom::Vec3<float> delta(0.2f, -0.3f, 0.5f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    sim.ApplyTranslation(delta);
+    // 即时操作**不重置**仿真（不重 Init / Reset）——时钟与步数保持。
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);
+    EXPECT_EQ(sim.step_count(), steps_before);
+
+    ASSERT_EQ(sim.sim_positions().size(), p_before.size());
+    for (size_t i = 0; i < p_before.size(); ++i) {
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].x(), p_before[i].x() + delta.x());
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].y(), p_before[i].y() + delta.y());
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].z(), p_before[i].z() + delta.z());
+        // 速度不参与平移。
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].x(), v_before[i].x());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].y(), v_before[i].y());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].z(), v_before[i].z());
+    }
+    // 平移不改变相对位移 ⇒ 力（从而加速度）不变。
+    const geom::Vec3<float> a_after = sim.AccelAtPoint(0);
+    EXPECT_NEAR(a_after.x(), a_before.x(), 1e-4f);
+    EXPECT_NEAR(a_after.y(), a_before.y(), 1e-4f);
+    EXPECT_NEAR(a_after.z(), a_before.z(), 1e-4f);
+    // mesh() 的位置也同步（否则显示不动）。
+    EXPECT_FLOAT_EQ(sim.mesh().positions[0].x(), sim.sim_positions()[0].x());
+}
+
+// 非恒真：若 ApplyRotation 只转位置、不转绑定姿态，Δp=(R−I)p0≠0 ⇒ 弹簧被触发，
+// 下面的“加速度仍 = 重力”断言会失败。
+TEST(SoftMeshSimulatorTest, ApplyRotationIsRigidOnFreshBindPose) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    const geom::Vec3<float> g0 = sim.AccelAtPoint(0);
+    EXPECT_NEAR(g0.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(g0.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(g0.z(), 0.0f, 1e-5f);
+
+    sim.ApplyRotation(Axis::kZ, 90.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const geom::Vec3<float> g1 = sim.AccelAtPoint(0);
+    EXPECT_NEAR(g1.x(), 0.0f, 1e-4f);
+    EXPECT_NEAR(g1.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(g1.z(), 0.0f, 1e-4f);
+}
+
+TEST(SoftMeshSimulatorTest, ApplyRotationRotatesPositionsAndVelocity) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+
+    const geom::Vec3<float> pivot(0.1f, 0.0f, 0.0f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    sim.ApplyRotation(Axis::kZ, 90.0f, pivot);
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);      // 不重置仿真
+    EXPECT_EQ(sim.step_count(), steps_before);
+
+    // Rz(90): 相对 pivot 的 (x,y,z) → (-y, x, z)。
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        const float rx = p_before[i].x() - pivot.x();
+        const float ry = p_before[i].y() - pivot.y();
+        const float rz = p_before[i].z() - pivot.z();
+        EXPECT_NEAR(sim.sim_positions()[i].x(), pivot.x() - ry, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].y(), pivot.y() + rx, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].z(), pivot.z() + rz, 1e-4f);
+        // 速度也旋转（绕轴，不平移）。
+        EXPECT_NEAR(sim.sim_velocities()[i].x(), -v_before[i].y(), 1e-4f);
+        EXPECT_NEAR(sim.sim_velocities()[i].y(), v_before[i].x(), 1e-4f);
+        EXPECT_NEAR(sim.sim_velocities()[i].z(), v_before[i].z(), 1e-4f);
+    }
+}
+
+TEST(SoftMeshSimulatorTest, ApplyScalingScalesPositionsKeepsVelocity) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+
+    const geom::Vec3<float> pivot(0.0f, 1.0f, 0.0f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    sim.ApplyScaling(2.0f, pivot);
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);      // 不重置仿真
+    EXPECT_EQ(sim.step_count(), steps_before);
+
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        EXPECT_NEAR(sim.sim_positions()[i].x(),
+                    pivot.x() + (p_before[i].x() - pivot.x()) * 2.0f, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].y(),
+                    pivot.y() + (p_before[i].y() - pivot.y()) * 2.0f, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].z(),
+                    pivot.z() + (p_before[i].z() - pivot.z()) * 2.0f, 1e-4f);
+        // 速度**不**参与缩放。
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].x(), v_before[i].x());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].y(), v_before[i].y());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].z(), v_before[i].z());
+    }
+    // 位置与绑定姿态同步缩放 ⇒ 仍处于绑定姿态 ⇒ 弹簧力为 0 ⇒ 加速度 = 重力。
+    const geom::Vec3<float> a = sim.AccelAtPoint(0);
+    EXPECT_NEAR(a.x(), 0.0f, 1e-4f);
+    EXPECT_NEAR(a.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(a.z(), 0.0f, 1e-4f);
+}
+
+TEST(SoftMeshSimulatorTest, ApplyScalingRejectsNonPositiveFactor) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    EXPECT_DEATH(sim.ApplyScaling(0.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f)), "");
+}
+
+TEST(SoftMeshSimulatorTest, ApplyBeforeInitCrashes) {
+    Simulator sim;
+    EXPECT_DEATH(sim.ApplyTranslation(geom::Vec3<float>(1.0f, 0.0f, 0.0f)), "");
 }
 
 }  // namespace

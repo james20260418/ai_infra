@@ -13,8 +13,9 @@
 //       ① 衣服几何被 soft_mesh_simulator::Simulator 驱动（每 primitive 一个仿真器）；
 //       ② 右上角面板控制动力学系数（重力 g / 总质量 M / 力系数 F / 衰减 k）；
 //       ③ 「暂停 / 继续」与「重置衣服」两个按钮（重置回到**启动时**的原始几何）；
-//       ④ 删除「绝对平移」输入框——变换改为**就地**作用在当前顶点上，状态即顶点坐标
-//          （见 clothing_transform.h）；仿真变形后仍可继续平移 / 旋转 / 缩放。
+//       ④ 删除「绝对平移」输入框——平移 / 旋转 / 缩放改为**即时作用于仿真器状态**
+//          （见 Simulator::ApplyTranslation/ApplyRotation/ApplyScaling）：仿真进行中也能调，
+//          不中断（位置与绑定姿态同步变换；速度只随旋转转动）。
 //     ⚠️ 人体排斥（Step 2）尚未接入：本阶段只有重力 + 弹簧 + 地面。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -66,6 +67,7 @@ using jpov_viewer::GroundMaterial;
 using jpov_viewer::MakeGroundQuad;
 using jpov_viewer::ViewConfig;
 // 软体仿真器（纯 CPU / GL-free，独立包）。
+using soft_mesh_simulator::Axis;
 using soft_mesh_simulator::Simulator;
 
 // 默认窗口尺寸（= headless 出图尺寸）。⚠️ 这只是**初始**尺寸；运行时窗口可 resize，
@@ -137,13 +139,12 @@ public:
     // 地面高度（米）滑条值，[-3, +3]。同时写入仿真器的物理地面（同值）。
     float ground_y_ = -3.0f;
 
-    // ══════════════ 衣服几何（状态 = mesh 顶点本身）══════════════
+    // ══════════════ 衣服几何（当前态快照）══════════════
     //
-    // cloth_current_ 是**唯一事实源**：平移 / 旋转 / 缩放**就地**改它的顶点（见
-    // clothing_transform.h），仿真器也逐帧写回它的顶点。cloth_geometry_ 保存**启动时**
-    // 的原始几何，供「重置衣服」按钮恢复（Danis：重置回"clothing tool 启动时的样子"）。
-    std::vector<jpov::GltfMeshEntry> cloth_geometry_;   // 启动态（不可变，reset 用）
-    std::vector<jpov::GltfSaveMesh> cloth_current_;     // 当前态（显示 / 保存 / 仿真用）
+    // **唯一事实源是仿真器**（sims_[i].mesh()）：平移 / 旋转 / 缩放、仿真推进都直接作用于
+    // 仿真器的内部状态（见 Simulator::ApplyTranslation 等），随后把结果同步过来显示 / 保存。
+    // cloth_current_ 只是「当前几何快照」，供保存 glb（main 线程按值取走）。
+    std::vector<jpov::GltfSaveMesh> cloth_current_;     // 当前态（显示 / 保存用）
 
     // 各步长 / 系数（供步进按钮使用；用户可在面板里用输入框改，提交时 clamp）。
     float trans_step_[3] = {kDefaultTransStep, kDefaultTransStep, kDefaultTransStep};
@@ -167,13 +168,13 @@ public:
     // ══════════════ 软体仿真（Step 1）══════════════
     //
     // 每 clothes primitive 一个仿真器（多为单 primitive）。生命周期：
-    //   - 场景就绪（GPU 上传）后按当前几何 Init（绑定姿态）；
-    //   - 用户改变换 / 重置 → 绑定姿态失效（sim_bind_dirty_），下一步前重建；
-    //   - 「推进仿真」时逐帧 Step 并 UpdateMesh。
+    //   - 场景就绪（GPU 上传）后按启动几何 Init（绑定姿态）；
+    //   - 平移 / 旋转 / 缩放**即时作用于仿真器状态**（不重建、不中断，见 ApplyXxx）；
+    //   - 「重置」= sim.Reset()（回绑定姿态）；「推进仿真」时逐帧 Step。
+    //   ⇒ 仿真中也能点击变换，衣服会带着速度继续演化。
     std::vector<Simulator> sims_;
 
     bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
-    bool sim_bind_dirty_ = false;    // 绑定姿态失效：几何被手动改过，下步前须重建
 
     // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
     float gravity_ui_ = Simulator::kDefaultGravity;
@@ -250,18 +251,18 @@ public:
         cloth_ = LoadGltf(cloth_path_);
         CHECK(!cloth_.empty()) << "衣服模型加载失败或为空: " << cloth_path_;
 
-        // 取回后台顺带保留的衣服 CPU 几何（base 几何 + 材质），供变换 / 保存 / 仿真用。
+        // 取回后台顺带保留的衣服 CPU 几何（base 几何 + 材质），供仿真 / 保存用。
         // 顺序与 LoadGltf 内部的 LoadGltfScene 一致（同一次遍历的同一顺序），故可下标对齐。
-        cloth_geometry_ = init_.TakeClothGeometry();
-        CHECK_EQ(cloth_geometry_.size(), cloth_.size())
+        std::vector<jpov::GltfMeshEntry> startup_geometry = init_.TakeClothGeometry();
+        CHECK_EQ(startup_geometry.size(), cloth_.size())
             << "衣服 CPU 几何与 GPU primitive 数量不一致："
-            << cloth_geometry_.size() << " vs " << cloth_.size();
+            << startup_geometry.size() << " vs " << cloth_.size();
 
-        // 当前几何快照（唯一事实源）：初值 = 启动几何（未做任何变换）。
-        cloth_current_.resize(cloth_geometry_.size());
-        for (size_t i = 0; i < cloth_geometry_.size(); ++i) {
-            cloth_current_[i].mesh = cloth_geometry_[i].mesh;
-            cloth_current_[i].material = cloth_geometry_[i].material;
+        // 当前几何快照：初值 = 启动几何（未做任何变换）。
+        cloth_current_.resize(startup_geometry.size());
+        for (size_t i = 0; i < startup_geometry.size(); ++i) {
+            cloth_current_[i].mesh = startup_geometry[i].mesh;
+            cloth_current_[i].material = startup_geometry[i].material;
         }
 
         // 建仿真器（绑定姿态 = 启动几何）。
@@ -389,7 +390,7 @@ private:
 
     // ==================== 仿真器接线 ====================
 
-    // 按当前几何（cloth_current_）建/重建每个 primitive 的仿真器（绑定姿态）。
+    // 按当前几何（cloth_current_）建每个 primitive 的仿真器（绑定姿态）。
     // Pre-condition: cloth_current_ 非空且与 cloth_ 的 primitive 数一致。
     void InitSimulators() {
         CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
@@ -399,8 +400,7 @@ private:
             sims_[i].Init(cloth_current_[i].mesh);  // 默认关联距离 d = kDefaultBindDistance
             PushSimParams(&sims_[i]);
         }
-        sim_bind_dirty_ = false;
-        LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 当前衣服几何）";
+        LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 启动衣服几何）";
     }
 
     // 把本 primitive 的仿真器参数写成 UI 镜像值（建/重建后调用，保证一致）。
@@ -435,35 +435,39 @@ private:
         }
     }
 
-    // 推进一个外部步（1/60 s）：
-    //   1) 绑定姿态若失效（几何被手动改过）→ 先重建仿真器；
-    //   2) 每个 primitive 各自 Step，重算法线，推上 GPU，刷新当前几何快照。
+    // 推进一个外部步（1/60 s）：每个 primitive 各自 Step，然后同步到显示 / 快照。
     void StepSimulationOnce() {
         if (sims_.empty()) {
             return;
         }
-        if (sim_bind_dirty_) {
-            InitSimulators();
+        for (Simulator& sim : sims_) {
+            sim.Step(Simulator::kDefaultDt);
         }
+        SyncSimsToCloth();
+    }
+
+    // ==================== 衣服变换（即时作用于仿真状态） ====================
+
+    // 同步仿真器状态 → 显示：把每个 primitive 的当前 mesh 取回、重算法线、推上 GPU、
+    // 刷新保存用快照。
+    void SyncSimsToCloth() {
         for (size_t i = 0; i < sims_.size(); ++i) {
-            jpov::MeshData stepped = sims_[i].Step(Simulator::kDefaultDt);
-            // 顶点被物理改过 → 法线须重算，否则着色停留在绑定姿态（形状动了光不动）。
-            RecomputeVertexNormals(&stepped);
-            UpdateMesh(cloth_.primitives[i].mesh_id, stepped);
-            cloth_current_[i].mesh = std::move(stepped);
+            jpov::MeshData m = sims_[i].mesh();
+            // 顶点被物理改过 / 被即时变换过 → 法线须重算，否则着色停留在旧姿态。
+            RecomputeVertexNormals(&m);
+            UpdateMesh(cloth_.primitives[i].mesh_id, m);
+            cloth_current_[i].mesh = std::move(m);
         }
     }
 
-    // ==================== 衣服变换（就地改顶点） ====================
-
-    // 合并包围盒中心（所有 primitive 的并集）——就地旋转 / 缩放的公共枢轴。
-    // 单 primitive 时即该 primitive 的包围盒中心。空几何返回原点。
-    jpov::Vec3f ClothBoundsCenter() const {
+    // 旋转 / 缩放共用的枢轴 = 所有仿真点（全部 primitive）的合并包围盒中心。
+    // 空仿真器返回原点。
+    jpov::Vec3f SimsBoundsCenter() const {
         jpov::Vec3f lo(0.0f, 0.0f, 0.0f);
         jpov::Vec3f hi(0.0f, 0.0f, 0.0f);
         bool any = false;
-        for (const jpov::GltfSaveMesh& m : cloth_current_) {
-            for (const jpov::Vec3f& p : m.mesh.positions) {
+        for (const Simulator& sim : sims_) {
+            for (const jpov::Vec3f& p : sim.sim_positions()) {
                 if (!any) {
                     lo = p;
                     hi = p;
@@ -483,43 +487,50 @@ private:
                            (lo.z() + hi.z()) * 0.5f);
     }
 
-    // 把「就地改过顶点」的 cloth_current_ 推上 GPU，并标记仿真绑定姿态失效。
-    void RefreshClothGpu() {
-        for (size_t i = 0; i < cloth_current_.size(); ++i) {
-            UpdateMesh(cloth_.primitives[i].mesh_id, cloth_current_[i].mesh);
+    // app 的轴号（0/1/2 = X/Y/Z）→ 仿真器 Axis。
+    static Axis ToSimAxis(int axis) {
+        switch (axis) {
+            case 0:
+                return Axis::kX;
+            case 1:
+                return Axis::kY;
+            case 2:
+                return Axis::kZ;
+            default:
+                LOG(FATAL) << "ToSimAxis: axis 必须 ∈ {0,1,2}，got " << axis;
         }
-        sim_bind_dirty_ = true;
+        return Axis::kX;  // 不可达（LOG(FATAL) 已终止）；为满足返回类型。
     }
 
-    // 平移步进：每个 primitive 顶点沿 axis 轴 += direction * trans_step_[axis]。
+    // 平移步进：所有仿真器状态沿 axis 轴平移 direction * trans_step_[axis]（速度不变）。
     // Pre-condition: 0 <= axis < 3。
     void StepTranslation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
         const float d = direction * trans_step_[axis];
-        jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
-                          axis == 2 ? d : 0.0f);
-        for (jpov::GltfSaveMesh& m : cloth_current_) {
-            TranslateMeshInPlace(&m.mesh, delta);
+        const jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
+                                axis == 2 ? d : 0.0f);
+        for (Simulator& sim : sims_) {
+            sim.ApplyTranslation(delta);
         }
-        RefreshClothGpu();
+        SyncSimsToCloth();
     }
 
-    // 旋转步进：绕合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度。
-    // Pre-condition: 0 <= axis < 3。
+    // 旋转步进：绕合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度
+    // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。
     void StepRotation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
         const float deg = direction * rot_step_[axis];
-        const jpov::Vec3f pivot = ClothBoundsCenter();
-        for (jpov::GltfSaveMesh& m : cloth_current_) {
-            RotateMeshInPlace(&m.mesh, axis, deg, pivot);
+        const jpov::Vec3f pivot = SimsBoundsCenter();
+        for (Simulator& sim : sims_) {
+            sim.ApplyRotation(ToSimAxis(axis), deg, pivot);
         }
-        RefreshClothGpu();
+        SyncSimsToCloth();
     }
 
     // 缩放步进：整体缩放乘 factor（> 1 放大、< 1 缩小），绕合并中心；累计系数夹到
-    // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。
+    // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。**速度**不参与缩放。
     // Pre-condition: factor > 0。
     void StepScale(float factor) {
         CHECK_GT(factor, 0.0f);
@@ -528,26 +539,24 @@ private:
         if (applied == 1.0f) {
             return;  // 已到缩放上下界，本次不动
         }
-        const jpov::Vec3f pivot = ClothBoundsCenter();
-        for (jpov::GltfSaveMesh& m : cloth_current_) {
-            ScaleMeshInPlace(&m.mesh, applied, pivot);
+        const jpov::Vec3f pivot = SimsBoundsCenter();
+        for (Simulator& sim : sims_) {
+            sim.ApplyScaling(applied, pivot);
         }
         cloth_scale_ = target;
-        RefreshClothGpu();
+        SyncSimsToCloth();
     }
 
-    // 「重置衣服」：把所有 primitive 恢复成**启动时**的原始几何，停仿真回到可重调状态。
+    // 「重置衣服」：所有仿真器 Reset（回**启动时**的绑定姿态），停仿真回到可重调状态。
     // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
     void ResetClothMesh() {
-        CHECK_EQ(cloth_geometry_.size(), cloth_current_.size());
-        for (size_t i = 0; i < cloth_geometry_.size(); ++i) {
-            cloth_current_[i].mesh = cloth_geometry_[i].mesh;
-            UpdateMesh(cloth_.primitives[i].mesh_id, cloth_current_[i].mesh);
+        for (Simulator& sim : sims_) {
+            sim.Reset();
         }
         cloth_scale_ = 1.0f;
         sim_running_ = false;   // 停机，回到可重调状态
-        sim_bind_dirty_ = true; // 下步前按启动几何重建仿真器
-        LOG(INFO) << "重置衣服：已恢复启动几何（缩放归 1、仿真暂停）";
+        SyncSimsToCloth();
+        LOG(INFO) << "重置衣服：仿真器已回启动姿态（缩放归 1、仿真暂停）";
     }
 
     // ==================== 面板 ====================

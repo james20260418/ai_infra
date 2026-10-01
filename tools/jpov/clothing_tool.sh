@@ -18,8 +18,9 @@
 #        - 整体缩放：系数输入框（默认 1.1，夹在 [1.0,2.0]）+ "-"（除系数）/ "+"（乘系数）
 #          + 当前缩放只读；
 #        - "保存衣服 glb" 按钮：把当前几何写到源 glb 同目录的 *_cloth_edit<时间戳>.glb。
-#        ⭐ 所有调节都**就地直接改衣服 mesh 顶点**（不靠绘制参数，也不再有"绝对位置"输入框），
-#          见 clothing_transform.h——状态即顶点坐标。
+#        ⭐ 所有调节**即时作用于仿真器内部状态**（soft_mesh_simulator 的 ApplyTranslation /
+#          ApplyRotation / ApplyScaling）——仿真进行中也能调，不中断（位置与绑定姿态同步变换；
+#          速度只随旋转转动）。不再有“绝对位置”输入框。
 #   ③ 右上角面板（贴右边缘，随窗口 resize 自适应）：
 #        - 动力学滑条：重力 g / 总质量 M / 力系数 F（指数坐标）/ 衰减 k；
 #        - "继续/暂停仿真" 与 "重置衣服"（重置回**启动时**的原始几何）；
@@ -115,7 +116,7 @@ echo "     · 本工具：tools/jpov/clothing/（独立包，namespace jpov::clo
 echo "         - clothing_tool_app.h    渲染核心 App（场景 + 面板 + 仿真接线 + OneIteration）"
 echo "         - clothing_init.{h,cc}    后台初始化（加载 + 建图 + 保留衣服 CPU 几何）"
 echo "         - clothing_axis_input.h   数值填值解析（纯函数）"
-echo "         - clothing_transform.h    衣物 mesh 就地几何操作（平移/旋转/缩放 + 法线重算）"
+echo "         - clothing_transform.h    面板参数 clamp + 法线重算（平移/旋转/缩放见仿真器）"
 echo "         - clothing_save.{h,cc}    保存衣服 mesh 为 glb（后台线程）"
 echo "         - jpov_clothing_tool.cc  主程序（CLI 装配 + 交互/headless 分发）"
 echo "     · 软体仿真：复用 //tools/jpov/soft_mesh_simulator（独立包，纯 CPU）"

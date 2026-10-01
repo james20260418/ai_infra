@@ -27,6 +27,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//geom/common:quaternion",
         "//geom/common:vec",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",

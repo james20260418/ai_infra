@@ -12,6 +12,8 @@
 
 #include <glog/logging.h>
 
+#include "geom/common/quaternion.h"
+
 namespace jpov {
 namespace soft_mesh_simulator {
 
@@ -341,6 +343,86 @@ void Simulator::SetGravity(float gravity) {
 void Simulator::SetGroundY(float ground_y) {
     CHECK(std::isfinite(ground_y)) << "SetGroundY 要求有限值，got " << ground_y;
     ground_y_ = ground_y;
+}
+
+// ── 即时操作（见 .h 的语义说明）──
+//
+// 位置与绑定姿态**同步变换**（避免弹簧把顶点拽回旧形状、产生炸掉的恢复力）；速度只在
+// 旋转时参与。变换后立即把位置写回 mesh_（ExtractMesh）；法线/切线不在此处更新。
+
+void Simulator::ApplyTranslation(const geom::Vec3<float>& delta) {
+    CHECK(inited_) << "ApplyTranslation 调用前必须先 Init(mesh)";
+    CHECK(delta.IsFinite()) << "ApplyTranslation 要求 delta 有限";
+    for (geom::Vec3<float>& p : sim_positions_) {
+        p = p + delta;
+    }
+    for (geom::Vec3<float>& p : bind_positions_) {
+        p = p + delta;
+    }
+    // 速度不参与平移。
+    ExtractMesh();
+}
+
+void Simulator::ApplyRotation(Axis axis, float degrees,
+                              const geom::Vec3<float>& pivot) {
+    CHECK(inited_) << "ApplyRotation 调用前必须先 Init(mesh)";
+    CHECK(std::isfinite(degrees)) << "ApplyRotation 要求 degrees 有限";
+    CHECK(pivot.IsFinite()) << "ApplyRotation 要求 pivot 有限，got "
+                            << pivot.DebugString();
+
+    geom::Vec3<float> axis_dir(0.0f, 0.0f, 0.0f);
+    switch (axis) {
+        case Axis::kX:
+            axis_dir = geom::Vec3<float>(1.0f, 0.0f, 0.0f);
+            break;
+        case Axis::kY:
+            axis_dir = geom::Vec3<float>(0.0f, 1.0f, 0.0f);
+            break;
+        case Axis::kZ:
+            axis_dir = geom::Vec3<float>(0.0f, 0.0f, 1.0f);
+            break;
+        default:
+            LOG(FATAL) << "ApplyRotation: 非法 axis" << static_cast<int>(axis);
+    }
+
+    constexpr float kDegToRad =
+        static_cast<float>(3.14159265358979323846 / 180.0);
+    const geom::Quaternion<float> q =
+        geom::Quaternion<float>::FromAxisAngle(axis_dir, degrees * kDegToRad);
+    auto rotate = [&q, &pivot](const geom::Vec3<float>& v) {
+        return pivot + geom::RotateVector(q, v - pivot);
+    };
+
+    for (geom::Vec3<float>& p : sim_positions_) {
+        p = rotate(p);
+    }
+    // **速度参与旋转**（旋转 => 角速度）。
+    for (geom::Vec3<float>& v : sim_velocities_) {
+        v = geom::RotateVector(q, v);
+    }
+    for (geom::Vec3<float>& p : bind_positions_) {
+        p = rotate(p);
+    }
+    ExtractMesh();
+}
+
+void Simulator::ApplyScaling(float factor, const geom::Vec3<float>& pivot) {
+    CHECK(inited_) << "ApplyScaling 调用前必须先 Init(mesh)";
+    CHECK(std::isfinite(factor)) << "ApplyScaling 要求 factor 有限";
+    CHECK_GT(factor, 0.0f) << "ApplyScaling 要求 factor > 0，got " << factor;
+    CHECK(pivot.IsFinite()) << "ApplyScaling 要求 pivot 有限，got "
+                            << pivot.DebugString();
+    auto scale = [factor, &pivot](const geom::Vec3<float>& v) {
+        return pivot + (v - pivot) * factor;
+    };
+    for (geom::Vec3<float>& p : sim_positions_) {
+        p = scale(p);
+    }
+    for (geom::Vec3<float>& p : bind_positions_) {
+        p = scale(p);
+    }
+    // 速度**不**参与缩放。
+    ExtractMesh();
 }
 
 void Simulator::SetTotalMass(float mass) {

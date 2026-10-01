@@ -59,6 +59,9 @@
 namespace jpov {
 namespace soft_mesh_simulator {
 
+// 旋转轴（即时操作参数；用 enum class 避免裸 0/1/2 传错轴）。
+enum class Axis { kX = 0, kY = 1, kZ = 2 };
+
 // 仿真体在某一时刻的取景包围盒（纯查询，无副作用）。
 //
 // 查看器用它做「相机是否要跟着变形体缩放」这类判断；M2 起网格会在重力下
@@ -307,6 +310,31 @@ public:
     float ground_y() const { return ground_y_; }
     // 设置地面高度。CHECK 有限；无值域限制（地面可以在任意高度）。
     void SetGroundY(float ground_y);
+
+    // ── 即时操作：对**当前仿真状态**就地施加变换（面板 / 交互驱动）──
+    //
+    // 用途（Danis 2026-10-01）：穿衣工具的左上面板要在**仿真进行中**也能改变这件衣服的
+    // 位置 / 朝向 / 大小，且**不中断**仿真（不是重建）。语义：
+    //   - 位置与“绑定姿态”（力的参考形状 pij(0)）**同步变换**。必须同步，否则弹簧会把
+    //     顶点拽回旧形状：旋转 45° 会给出 ~10⁴ m/s² 量级的恢复力（直接炸）；同步后是
+    //     **刚体式重新摆位**，仿真从中继续。
+    //   - **速度**：只有**旋转**会让速度跟着转；平移 / 缩放**不动速度**。
+    //
+    // 这些操作只改内部状态（位置 / 速度 / 绑定姿态），不改拓扑 / 关联表；调用后
+    // mesh() 的**位置**立即更新（**法线 / 切线不随之更新**——由显示层自行重算）。
+
+    // 平移：位置与绑定姿态 += delta；速度不变。
+    // Pre-condition（不满足即 LOG(FATAL)）：已 Init；delta 各分量有限。
+    void ApplyTranslation(const geom::Vec3<float>& delta);
+
+    // 绕轴 axis、通过 pivot 的直线旋转 degrees 度（右手系逆时针）：位置与绑定姿态
+    // 绕 pivot 旋转，**速度也旋转**（旋转 ⇒ 角速度）。
+    // Pre-condition（不满足即 LOG(FATAL)）：已 Init；degrees / pivot 有限。
+    void ApplyRotation(Axis axis, float degrees, const geom::Vec3<float>& pivot);
+
+    // 以 pivot 为中心等比缩放 factor 倍：位置与绑定姿态缩放；**速度不变**。
+    // Pre-condition（不满足即 LOG(FATAL)）：已 Init；factor > 0 且有限；pivot 有限。
+    void ApplyScaling(float factor, const geom::Vec3<float>& pivot);
 
     // ── 仿真点速度（纯查询）──
     //
