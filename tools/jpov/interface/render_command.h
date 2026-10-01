@@ -554,17 +554,42 @@ struct BloomConfig {
 
 // 远景仰角雾（空气透视，elevation fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
 //
-// 与「局部体积雾体 + tile culling」是**两条不同的通道**（后者设计未定，未实现）。
-// 本雾是纯屏幕空间解析式：每像素由相机逆 VP 反推视线方向 d 与到可见面的距离 dist，
-// 然后
+// ── 在后处理链中的位置（用户视角）──
+// 它是一次**全屏后处理**，只走 HDR 路径，时机在 3D 绘制全部结束、MSAA resolve 之后，
+// 且**早于** highlight / bloom / tone map：
+//
+//   阴影 pass → 3D 不透明 pass（天空 + object3d…；MRT：颜色 + 场景深度）
+//            → MSAA resolve
+//            → 【本雾 pass】            ← 读「场景颜色 + 场景深度 + 天空色」，写 ping-pong HDR 纹理
+//            → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
+//
+//  · 读：HDR 场景颜色、MRT#1 场景深度（R32F）、以及**单独一趟**渲的「大气色天空」。
+//  · 写：输出到一张 ping-pong 的 HDR 纹理并继续往下走（不改场景本身的 FBO）。
+//  · 因为落在**线性 HDR 域、tone map 之前**，雾是「内散射加光」语义，能正确参与
+//    bloom 提取与最终 tone map；放到 tone map 之后会变成非线性域的灰糊。
+//  · 前置条件：**cmds.tone_mapping 必须为 true**。tone_mapping=false（旧 LDR 直通
+//    路径）时本雾无法执行，Renderer 会 CHECK 报错，而不是静默失效。
+//
+// ── 影响什么 / 不影响什么 ──
+//  · 影响：低仰角带内（|视线仰角| ≤ elev_inner_deg）且距离 ≥ start_distance 的像素，
+//    按 τ 朝雾色收敛 —— 远景/地平线淡出、融进天边。
+//  · 不影响：高仰角像素（|仰角| ≥ elev_outer_deg ⇒ band=0）、近处像素
+//    （dist < start_distance ⇒ ramp=0）、以及其后绘制的 2D/UI 叠加层。
+//  · 天空像素：本 pass 对**每个像素**都跑，但天空像素的收敛色取「该像素方向的天空色」，
+//    故 L_scene≈雾色 ⇒ 输出≈原样（不会“把天空吃成一块色”）。收敛色用的天空纹理
+//    只含大气+夜色（不含日月盘/光晕），故带内的日月盘会被略微朝大气色拉。
+//
+// 与「局部体积雾体 + tile culling」是**两条不同的通道**（后者设计未定，未实现）：
+// 本雾是屏幕空间解析式、无体积、无光源；雾体雾是 3D 定位 + 闭式积分 + tile 列表。
+//
+// 计算式：每像素由相机逆 VP 反推视线方向 d 与到可见面的距离 dist，然后
 //   band = 1 − smoothstep(elev_inner, elev_outer, |d.y|)   // 仰角带（水平带内=1）
 //   ramp = smoothstep(start_distance, full_distance, dist)  // 距离
 //   τ    = density · band · ramp
-//   L    = L_scene · exp(−τ) + color · (1 − exp(−τ))       // HDR 线性域内就地和成
+//   L    = L_scene · exp(−τ) + fog_color · (1 − exp(−τ))   // HDR 线性域内就地和成
 //
 // 关键：沿视线 d 不变 ⇒ `d.y` 整条射线是**常量** ⇒ 仰角这个条件**不用求交**，就是一个乘子。
-//**与相机位置无关**（不像“高度雾”锚在世界 y）——相机怎么飞，地平线带都一致。
-// 只作用于有几何的像素（天空/背景像素保持原样，避免“雾把天空吃成一块色”）。
+// **与相机位置无关**（不像“高度雾”锚在世界 y）——相机怎么飞，地平线带都一致。
 struct ElevationFogConfig {
     // 是否启用。false（默认）时整个 pass 跳过，零开销零回归。
     bool enabled = false;
@@ -574,7 +599,8 @@ struct ElevationFogConfig {
     float full_distance = 1500.0f;
 
     // 仰角带（度）：|视线仰角| ≤ elev_inner → 满，≥ elev_outer → 无（中间软边）。
-    // 仰角 = 视线方向与水平面的夹角（由 |d.y| 得）。_inner < _outer（否则报错）。
+    // 仰角 = 视线方向与水平面的夹角（由 |d.y| 得）。语义上须 _inner < _outer；
+    // 越界不报错，Renderer 内部会夹断（outer = max(outer, inner + 0.01°)）。
     float elev_inner_deg = 1.0f;
     float elev_outer_deg = 4.0f;
 
@@ -586,7 +612,8 @@ struct ElevationFogConfig {
     // 本字段可取 SkyCommand::ElevationFogColor()（CPU 推导的地平线天光色，作参考/无天空时用）。
     Color color = {0.6f, 0.68f, 0.8f, 1.0f};
 
-    // true（默认）：收敛色 = 渲染出的天空色（MRT #2）——与天空严格一致，最自然。
+    // true（默认）：收敛色 = 该像素方向的天空色（**单独一趟**渲的「大气色天空」，
+    //   不含日月盘/光晕；不是 MRT 附件）——与天空严格一致，最自然。
     // false：用上面的 color 常量。
     bool use_sky_color = true;
 };
@@ -1631,9 +1658,11 @@ struct RenderCommandList {
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
 
-    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在 3D 不透明 pass 之后、
-    // highlight/bloom/tone map 之前插入一次全屏 fog pass（读场景颜色 + 场景深度）。
-    // 未设置 / enabled=false 时零开销。见 ElevationFogConfig。
+    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在「3D 不透明 pass + MSAA
+    // resolve」之后、「highlight / bloom / tone map」之前插入一次全屏 fog pass
+    //（读场景颜色 + MRT#1 场景深度 + 单独一趟渲的天空色，在线性 HDR 域就地合成；
+    //  所在位置、影响范围与前置条件详见 ElevationFogConfig 头注释）。
+    // 未设置 / enabled=false 时零开销。**需要 tone_mapping=true**，否则 CHECK 报错。
     std::optional<ElevationFogConfig> elevation_fog;
 
     // 场景深度可视化开关（调试，默认 false）。

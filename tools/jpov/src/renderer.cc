@@ -1493,6 +1493,9 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
+        CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
+            << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
+               "tone map 之前）；否则会静默失效";
         unsigned int fbo_3d_target = 0;
         if (use_hdr) {
             EnsureHDRFBO(fbo_3d_w, fbo_3d_h);
@@ -1640,7 +1643,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
             unsigned int hdr_scene_depth_tex = 0;
-            unsigned int hdr_sky_color_tex = sky_tex_;   // 天空色（无 sky 时为 0）
+            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一
+            // 帧残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
+            unsigned int hdr_sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
 #ifdef JPOV_WITHOUT_MSAA
             // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
             unsigned int hdr_input_tex = color_tex_hdr_;
