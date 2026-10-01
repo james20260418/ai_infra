@@ -443,6 +443,10 @@ void RendererMat4Mul(const float a[16], const float b[16], float out[16]) {
 // crash，避免运行期才发现（如级联段重叠/越界导致 FBO 创建崩溃）。
 void ValidateShadowConfig(const jpov::ShadowConfig& s) {
     CHECK_GE(s.cascade_count, 1) << "cascade_count 至少 1，当前 " << s.cascade_count;
+    CHECK_GT(s.cascade_blend_fraction, 0.0f)
+        << "cascade_blend_fraction 必须 > 0（0 会让混合带退化/除零）";
+    CHECK_LE(s.cascade_blend_fraction, 0.5f)
+        << "cascade_blend_fraction 至多 0.5（再大会让相邻两级重叠过宽/出现三级同混）";
     CHECK_LE(s.cascade_count, jpov::ShadowConfig::kMaxCascades)
         << "cascade_count 至多 " << jpov::ShadowConfig::kMaxCascades
         << "，当前 " << s.cascade_count;

@@ -591,6 +591,11 @@ struct ShadowConfig {
     // 总纹素数 8.59M ≈ 137 MB（RGBA32F）。**改 cascade_ranges 请按同一关系重标 sizes**。
     // ⚠️ sizes 同时决定自动深度偏置：texelW = 2r/size，改这里偏置会自动跟随（见 cascade_bias）。
     int   cascade_sizes[kMaxCascades]  = {1536, 1280, 1280, 1216, 1216};
+    // 级联间混合带宽度（占该级联跨度的比例，取值 (0, 0.5]）。相邻两级在边界附近
+    // ±fraction·span 内平滑升降权重、做归一化加权平均；重叠带宽 ≈ 2·min(相邻两级的 b)。
+    // 越大过渡越顺，代价是：①“两级不同分辨率的叠影”区越宽；②主 pass 里多采一张
+    // shadow map 的像素比例上升（仅采样端，几何/draw 不变）。0 会退化成硬切（非法）。
+    float cascade_blend_fraction = 0.35f;
     // 淡出：末段 ~1/3 起线性淡到 0（与原 120→180 同口径，随总距离顺延）。
     float fade_start = 1820.0f;               // 阴影淡出起点（距相机）
     float fade_end   = 2728.0f;               // 阴影淡出终点（此距离后无阴影）
