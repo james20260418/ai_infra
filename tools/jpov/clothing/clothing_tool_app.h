@@ -1,36 +1,42 @@
-// JPOV 穿衣工具 — 渲染核心 App（可视化框架）
+// JPOV 穿衣工具 — 渲染核心 App（可视化框架 + 软体仿真）
 //
-// 与 jpov_soft_mesh_viewer 是**姊妹工具**（同款渲染核心骨架：场景静态资源 + 交互
-// 面板宿主 + 唯一 OneIteration 渲染体），但职责聚焦：**把「一件衣服」摆到「一个人体
-// reference」旁边显示出来**，为后续「衣服贴合人体」的穿衣管线提供可视化底座。
+// 与 jpov_soft_mesh_viewer / jpov_model_editor 是**姊妹工具**（同款渲染核心骨架：
+// 场景静态资源 + 交互面板宿主 + 唯一 OneIteration 渲染体），职责聚焦：把「一件人体
+// reference」与「一件衣服模型」加载进同一场景显示，并让衣服**被软体仿真器驱动**
+// （重力 + 顶点间弹簧力场 + 地面投影），为后续「衣服贴合人体」的穿衣管线提供底座。
 //
-// 需求（2026-09-27 Danis 定稿；2026-09-29 / 2026-09-30 完善）：
-//   - 框架负责：加载人体 reference（--body_reference_path）、加载衣服模型
-//     （--cloth_path），并把二者显示在同一场景里。
-//   - 2026-09-29：① **后台初始化**（建最近邻三角形匹配器，期间黑底白字进度页）；
-//     ② 左上角面板用 x/y/z 填值输入框粗调衣服位置。
-//   - 2026-09-30：③ 给衣服补齐一整套**变换调节**：
-//       · 平移 x/y/z：绝对位置输入框 + 步长输入框 + 步进按钮（"<" ">"）；
-//       · 旋转 x/y/z：步长输入框 + 步进按钮（度，绕 X/Y/Z 逆时针），默认 45°；
-//       · 整体缩放：步进式（"+" 乘系数 / "−" 除系数），系数用输入框调，默认 1.1；
-//       · "保存衣服 glb" 按钮：把**当前已变换好的几何**写成 glb。
-//     ⭐ 关键：**一律直接修改衣服 mesh 的顶点数据来实现调节**（见 clothing_transform.h），
-//     不靠 DrawGltfObject 的 center/up/front/scale 放置参数——旋转尤其如此。这样"编辑后
-//     保存 / 后续仿真统一化"拿到的就是已经变换好的几何，不必再套一层放置变换。
+// 能力演进：
+//   - M0（2026-09-27）：加载 + 显示。
+//   - 2026-09-29：后台建图（最近邻三角形）+ 左上角 x/y/z 粗调。
+//   - 2026-09-30：完整变换调节（平移 / 旋转 / 缩放；一律直接改衣服 mesh 顶点）+ 保存 glb。
+//   - 2026-10-01（本 PR，Step 1）：**纳入软体仿真器**——
+//       ① 衣服几何被 soft_mesh_simulator::Simulator 驱动（每 primitive 一个仿真器）；
+//       ② 右上角面板控制动力学系数（重力 g / 总质量 M / 力系数 F / 衰减 k）；
+//       ③ 「暂停 / 继续」与「重置衣服」两个按钮（重置回到**启动时**的原始几何）；
+//       ④ 删除「绝对平移」输入框——变换改为**就地**作用在当前顶点上，状态即顶点坐标
+//          （见 clothing_transform.h）；仿真变形后仍可继续平移 / 旋转 / 缩放。
+//     ⚠️ 人体排斥（Step 2）尚未接入：本阶段只有重力 + 弹簧 + 地面。
 //
-// 仍不做（后续管线的事）：穿衣物理、衣服贴合。本文件只负责"加载 + 显示 + 调节 + 保存"。
+// 与 soft_mesh_viewer 的关键差异：
+//   - 人体 reference 与衣服都是**静态 glTF 资产**（LoadGltf → GltfObject 画）；
+//     衣服侧额外保留 CPU 几何（clothing_init 后台加载时顺带保留）用于变换 / 保存 / 仿真。
+//   - 衣服几何每帧可能被仿真改写 → 必须 UpdateMesh 把新顶点推上 GPU（GltfObject 进
+//     GPU 后几何就固化了，塞不进动态形变）。
 //
-// 与 soft_mesh_viewer 的关键差异：本工具的两个模型是**静态资产**，故直接用
-// LoadGltf → GltfObject 画（cmds->DrawGltfObject）；衣服侧额外保留一份 CPU 几何
-// （clothing_init 后台加载时顺带保留）用于烘焙变换与保存。
+// 坐标空间（⚠️ Danis 特别提醒：别把「窗口尺寸」和「3D FBO」搞混）：
+//   - 2D 面板/文字画在**主 FBO**上，其尺寸 = **本帧窗口尺寸** winfo.width/height
+//     （JPOV 每帧 `BeginFrame(winfo.width, winfo.height)`）；随窗口 resize 而变。
+//     ⇒ 面板布局**必须**从 winfo 推算（不能用常量），否则窗口一变面板就飘。
+//   - 3D 场景渲染到 **3D FBO**（cmds->camera.fbo_3d_width_/height_）。本工具让它
+//     **跟随窗口尺寸**（同 model_editor 的做法），避免 resize 时 3D 被拉伸。
 //
-// 命名空间 jpov::clothing、文件夹 tools/jpov/clothing/ 均为**独立**的一整套，
-// 与 soft_mesh_simulator 互不牵连（Danis 要求「单独文件夹和命名空间」）。
+// 命名空间 jpov::clothing、文件夹 tools/jpov/clothing/ 均为**独立**的一整套。
 
 #ifndef JPOV_CLOTHING_CLOTHING_TOOL_APP_H_
 #define JPOV_CLOTHING_CLOTHING_TOOL_APP_H_
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -46,26 +52,29 @@
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/ui.h"
+#include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 #include "tools/jpov/src/gltf_loader.h"
 
 namespace jpov {
 namespace clothing {
 
-// 视角 / 光照 / 地面工具：视角与地面复用姊妹查看器的纯函数（ViewConfig、ApplyInput、
+// 视角 / 光照 / 地面工具：复用姊妹查看器的纯函数（ViewConfig、ApplyInput、
 // MakeGroundQuad、GroundMaterial 在 jpov_viewer 命名空间）。
-// 光照改用 **skylight viewer 的天光配置**（太阳仰角 45° + 三色环境光），而非旧版的
-// MakeNoonLighting——Danis 2026-09-29 反馈原来 ambient 偏暗，要求参照 skylight viewer。
 using jpov_viewer::ApplyInput;
 using jpov_viewer::DefaultView;
 using jpov_viewer::GroundMaterial;
 using jpov_viewer::MakeGroundQuad;
 using jpov_viewer::ViewConfig;
+// 软体仿真器（纯 CPU / GL-free，独立包）。
+using soft_mesh_simulator::Simulator;
 
-// 渲染/窗口分辨率（与姊妹查看器一致：1280×720，不可 resize）。单点定义。
-inline constexpr int kViewerWidth  = 1280;
-inline constexpr int kViewerHeight = 720;
+// 默认窗口尺寸（= headless 出图尺寸）。⚠️ 这只是**初始**尺寸；运行时窗口可 resize，
+// 实际每帧尺寸以 winfo.width/height 为准（见文件头坐标空间说明）。**不要**拿它当
+// 面板布局的依据（那是"窗口尺寸/分辨率" = winfo 的职责）。
+inline constexpr int kDefaultWindowWidth  = 1280;
+inline constexpr int kDefaultWindowHeight = 720;
 
-// 交互帧率（查看器刷新率，Hz）。
+// 交互帧率（查看器刷新率，Hz）。仿真步长固定为 Simulator::kDefaultDt（1/60 s）。
 inline constexpr float kViewerFps = 60.0f;
 
 // UI 文本默认字体 = CJK（面板标签显中文）。
@@ -92,8 +101,7 @@ struct NumberField {
     bool focused_prev = false;
 
     NumberField() { text[0] = '\0'; }
-    // 从初始数值构造：文本用 "%g" 规范化，保证与默认常量（如 kDefaultRotStep）**单一来源**，
-    // 不会出现"改了常量但初始文本没改"的分叉。
+    // 从初始数值构造：文本用 "%g" 规范化，保证与默认常量（如 kDefaultRotStep）**单一来源**。
     explicit NumberField(float init) {
         snprintf(text, kAxisInputCapacity, "%g", static_cast<double>(init));
     }
@@ -126,23 +134,25 @@ public:
     bool show_body_  = true;   // 画人体 reference
     bool show_cloth_ = true;   // 画衣服模型
 
-    // 地面高度（米）滑条值，[-3, +3]。
+    // 地面高度（米）滑条值，[-3, +3]。同时写入仿真器的物理地面（同值）。
     float ground_y_ = -3.0f;
 
-    // ── 衣服变换状态（平移 / 旋转 / 缩放）──
-    // 所有调节都**烘进衣服 CPU 顶点**（见 clothing_transform.h / RebakeClothMesh），
-    // 不靠 DrawGltfObject 的放置参数。默认全为恒等。
-    ClothTransform transform_;
+    // ══════════════ 衣服几何（状态 = mesh 顶点本身）══════════════
+    //
+    // cloth_current_ 是**唯一事实源**：平移 / 旋转 / 缩放**就地**改它的顶点（见
+    // clothing_transform.h），仿真器也逐帧写回它的顶点。cloth_geometry_ 保存**启动时**
+    // 的原始几何，供「重置衣服」按钮恢复（Danis：重置回"clothing tool 启动时的样子"）。
+    std::vector<jpov::GltfMeshEntry> cloth_geometry_;   // 启动态（不可变，reset 用）
+    std::vector<jpov::GltfSaveMesh> cloth_current_;     // 当前态（显示 / 保存 / 仿真用）
 
     // 各步长 / 系数（供步进按钮使用；用户可在面板里用输入框改，提交时 clamp）。
     float trans_step_[3] = {kDefaultTransStep, kDefaultTransStep, kDefaultTransStep};
     float rot_step_[3]   = {kDefaultRotStep, kDefaultRotStep, kDefaultRotStep};
     float scale_step_    = kDefaultScaleStep;
+    // 累计缩放系数（相对启动几何），仅用于把整体缩放夹在 [kClothScaleMin, kClothScaleMax]。
+    float cloth_scale_   = 1.0f;
 
     // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
-    // 绝对位置默认 0；平移步长 0.1；旋转步长 45；缩放系数 1.1。
-    NumberField pos_field_[3] = {NumberField(0.0f), NumberField(0.0f),
-                                 NumberField(0.0f)};
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep)};
@@ -154,6 +164,37 @@ public:
     // 衣服保存控制器（后台线程写 glb）。
     ClothingSaveController save_ctrl_;
 
+    // ══════════════ 软体仿真（Step 1）══════════════
+    //
+    // 每 clothes primitive 一个仿真器（多为单 primitive）。生命周期：
+    //   - 场景就绪（GPU 上传）后按当前几何 Init（绑定姿态）；
+    //   - 用户改变换 / 重置 → 绑定姿态失效（sim_bind_dirty_），下一步前重建；
+    //   - 「推进仿真」时逐帧 Step 并 UpdateMesh。
+    std::vector<Simulator> sims_;
+
+    bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
+    bool sim_bind_dirty_ = false;    // 绑定姿态失效：几何被手动改过，下步前须重建
+
+    // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
+    float gravity_ui_ = Simulator::kDefaultGravity;
+    float total_mass_ui_ = Simulator::kDefaultTotalMass;
+    // 力系数 F 用**指数坐标**滑条：存滑条位置 t∈[0,1]，F = min*(max/min)^t（对数均匀）。
+    // 初值取自 kDefaultForceCoeff（默认 F=3 N ⇒ t≈0.75），保证 UI 与物理默认一致。
+    float force_coeff_t_ui_ = ForceNewtonToT(Simulator::kDefaultForceCoeff);
+    float damping_ui_ = Simulator::kVelocityDamping;
+
+    // F 的指数映射：t(0..1) ↔ F(N)。
+    static float ForceTToNewton(float t) {
+        const float lo = Simulator::kMinForceCoeff;
+        const float hi = Simulator::kMaxForceCoeff;
+        return lo * std::pow(hi / lo, t);
+    }
+    static float ForceNewtonToT(float f) {
+        const float lo = Simulator::kMinForceCoeff;
+        const float hi = Simulator::kMaxForceCoeff;
+        return std::log(f / lo) / std::log(hi / lo);
+    }
+
     // 装配真实字体文本测量回调（UI 内部用），Init() 后调用一次。
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&ClothingToolApp::ViewerTextWidth, this);
@@ -163,14 +204,24 @@ public:
     void SetShowPanel(bool show) { show_panel_ = show; }
     bool show_panel() const { return show_panel_; }
 
+    // ⭐ 主入口：推进 N 步仿真（headless 出图前推进用；交互窗口由 sim_running_ 驱动）。
+    // 每步 = 1/60 s 动力学。返回是否真的推进了（无仿真器时返回 false）。
+    bool AdvanceSimulationSteps(int steps) {
+        if (sims_.empty() || steps <= 0) {
+            return false;
+        }
+        for (int i = 0; i < steps; ++i) {
+            StepSimulationOnce();
+        }
+        return true;
+    }
+
     // 后台初始化泵（每帧，在主/GL 线程调用；供 OneIteration 与 headless main 循环使用）。
     //
     // 三阶段：
     //   1) kBuilding：后台线程建图，屏幕上显示进度文案（不阻帧）。
-    //   2) kDone 第一帧：先把进度页切成"正在上传 GPU 资源..."（本帧只画不做事，
-    //      保证用户能看到文案，而不是被 LoadGltf 阻帧时停留在上一帧的旧文案）。
-    //   3) 下一帧：真正做 GPU 上传（LoadGltf 必须走 GL，仅主线程；会阻帧几秒，
-    //      但屏幕上已显示正确文案）+ 相机自适应。
+    //   2) kDone 第一帧：先把进度页切成"正在上传 GPU 资源..."（本帧只画不做事）。
+    //   3) 下一帧：真正做 GPU 上传（LoadGltf 必须走 GL，仅主线程；会阻帧几秒）。
     //
     // 返回：本帧是否已就绪（可画 3D 场景，即 GPU 资产已上传）。
     bool TickInit() {
@@ -189,7 +240,7 @@ public:
         return true;
     }
 
-    // 上传两份 GPU 资产（仅主线程/GL 上下文）+ 相机自适应 + 取回衣服 CPU 几何。
+    // 上传两份 GPU 资产（仅主线程/GL 上下文）+ 相机自适应 + 取回衣服 CPU 几何 + 建仿真器。
     // Pre-condition: init_.state() == kDone。
     void UploadGpuAssets() {
         CHECK_EQ(static_cast<int>(init_.state()), static_cast<int>(InitState::kDone));
@@ -199,19 +250,22 @@ public:
         cloth_ = LoadGltf(cloth_path_);
         CHECK(!cloth_.empty()) << "衣服模型加载失败或为空: " << cloth_path_;
 
-        // 取回后台顺带保留的衣服 CPU 几何（base 几何 + 材质），供烘焙 / 保存用。
+        // 取回后台顺带保留的衣服 CPU 几何（base 几何 + 材质），供变换 / 保存 / 仿真用。
         // 顺序与 LoadGltf 内部的 LoadGltfScene 一致（同一次遍历的同一顺序），故可下标对齐。
         cloth_geometry_ = init_.TakeClothGeometry();
         CHECK_EQ(cloth_geometry_.size(), cloth_.size())
             << "衣服 CPU 几何与 GPU primitive 数量不一致："
             << cloth_geometry_.size() << " vs " << cloth_.size();
 
-        // 当前几何快照（保存用）：初值 = 未变换的 base（默认变换为恒等）。
+        // 当前几何快照（唯一事实源）：初值 = 启动几何（未做任何变换）。
         cloth_current_.resize(cloth_geometry_.size());
         for (size_t i = 0; i < cloth_geometry_.size(); ++i) {
             cloth_current_[i].mesh = cloth_geometry_[i].mesh;
             cloth_current_[i].material = cloth_geometry_[i].material;
         }
+
+        // 建仿真器（绑定姿态 = 启动几何）。
+        InitSimulators();
 
         gpu_uploaded_ = true;
         LOG(INFO) << "人体 reference: " << body_path_ << "（" << body_.size()
@@ -226,30 +280,28 @@ public:
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
         (void)frame_count;
-        cmds->camera.fbo_3d_width_  = kViewerWidth;
-        cmds->camera.fbo_3d_height_ = kViewerHeight;
+        // 3D FBO 跟随窗口尺寸（见文件头坐标空间说明）：scene 按窗口分辨率渲染，
+        // resize 时不拉伸。注意这与「2D 面板用的 winfo」是**同一个本帧窗口尺寸**，
+        // 而不是某个固定常量。
+        CHECK_GT(winfo.width, 0.0f);
+        CHECK_GT(winfo.height, 0.0f);
+        cmds->camera.fbo_3d_width_  = static_cast<int>(winfo.width);
+        cmds->camera.fbo_3d_height_ = static_cast<int>(winfo.height);
 
         // 后台初始化泵：完成分两帧（先显"上传中"再真传，见 TickInit）。
         const bool scene_ready = TickInit();
 
         if (init_.state() == InitState::kFailed) {
-            DrawInitFailedScreen(cmds);
+            DrawInitFailedScreen(winfo, cmds);
             return;
         }
         if (!scene_ready) {
-            DrawInitProgressScreen(cmds);
+            DrawInitProgressScreen(winfo, cmds);
             return;
         }
 
         // 保存状态机泵（每帧）。
         save_ctrl_.Tick();
-
-        // 衣服几何重建：上一帧面板若有调节（cloth_dirty_），在此烘进顶点并更新 GPU
-        // （UpdateMesh 需 GL 上下文，故只能在主线程这段做）。1 帧延迟，符合即时模式惯例。
-        if (cloth_dirty_) {
-            RebakeClothMesh();
-            cloth_dirty_ = false;
-        }
 
         // 交互输入 → 视角（仅可见窗口消费输入；headless 的相机由外部赋 view_）。
         if (show_panel_) {
@@ -266,6 +318,14 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+        }
+
+        // ── 滑块 / 参数同步到仿真器（每个 primitive 一份）。──
+        SyncSimParams();
+
+        // ── 仿真推进：勾选运行时逐帧 Step（headless 由 AdvanceSimulationSteps 驱动）。──
+        if (sim_running_) {
+            StepSimulationOnce();
         }
 
         // ── 相机：由 view_ 推导 ──
@@ -302,7 +362,7 @@ public:
                                  /*up*/     {0.0f, 1.0f, 0.0f},
                                  /*front*/  {0.0f, 0.0f, 1.0f});
         }
-        // 衣服：变换已烘进顶点，故此处用**恒等放置**（center=0/up=+Y/front=+Z）。
+        // 衣服：几何是唯一的（顶点已含全部变换 / 仿真形变），故用**恒等放置**。
         if (show_cloth_) {
             cmds->DrawGltfObject(cloth_,
                                  /*center*/ {0.0f, 0.0f, 0.0f},
@@ -312,7 +372,7 @@ public:
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
-            DrawPanel(input, cmds);
+            DrawPanels(input, winfo, cmds);
             ui_.End();
             ui_.Emit(cmds);
         }
@@ -327,56 +387,174 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // ==================== 衣服变换烘焙 ====================
+    // ==================== 仿真器接线 ====================
 
-    // 把当前变换（平移/旋转/缩放）烘进衣服每个 primitive 的顶点，更新 GPU mesh，
-    // 并刷新"当前几何快照"（保存用）。
-    // Pre-condition: gpu_uploaded_ == true（cloth_geometry_/cloth_current_ 已就绪）。
-    void RebakeClothMesh() {
-        CHECK_EQ(cloth_geometry_.size(), cloth_.primitives.size());
+    // 按当前几何（cloth_current_）建/重建每个 primitive 的仿真器（绑定姿态）。
+    // Pre-condition: cloth_current_ 非空且与 cloth_ 的 primitive 数一致。
+    void InitSimulators() {
         CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
-        for (size_t i = 0; i < cloth_geometry_.size(); ++i) {
-            jpov::MeshData baked =
-                BakeClothMesh(cloth_geometry_[i].mesh, transform_);
-            UpdateMesh(cloth_.primitives[i].mesh_id, baked);
-            cloth_current_[i].mesh = std::move(baked);
+        sims_.clear();
+        sims_.resize(cloth_current_.size());
+        for (size_t i = 0; i < sims_.size(); ++i) {
+            sims_[i].Init(cloth_current_[i].mesh);  // 默认关联距离 d = kDefaultBindDistance
+            PushSimParams(&sims_[i]);
+        }
+        sim_bind_dirty_ = false;
+        LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 当前衣服几何）";
+    }
+
+    // 把本 primitive 的仿真器参数写成 UI 镜像值（建/重建后调用，保证一致）。
+    void PushSimParams(Simulator* sim) {
+        CHECK(sim != nullptr);
+        sim->SetGravity(gravity_ui_);
+        sim->SetTotalMass(total_mass_ui_);
+        sim->SetForceCoeff(ForceTToNewton(force_coeff_t_ui_));
+        sim->SetVelocityDamping(damping_ui_);
+        sim->SetGroundY(ground_y_);
+    }
+
+    // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
+    void SyncSimParams() {
+        for (Simulator& sim : sims_) {
+            if (sim.gravity() != gravity_ui_) {
+                sim.SetGravity(gravity_ui_);
+            }
+            if (sim.total_mass() != total_mass_ui_) {
+                sim.SetTotalMass(total_mass_ui_);
+            }
+            const float f = ForceTToNewton(force_coeff_t_ui_);
+            if (sim.force_coeff() != f) {
+                sim.SetForceCoeff(f);
+            }
+            if (sim.velocity_damping() != damping_ui_) {
+                sim.SetVelocityDamping(damping_ui_);
+            }
+            if (sim.ground_y() != ground_y_) {
+                sim.SetGroundY(ground_y_);
+            }
         }
     }
 
-    // 平移步进：offset[axis] += direction * trans_step_[axis]（direction = ±1），
-    // 同步刷新"绝对位置"输入框文本。
+    // 推进一个外部步（1/60 s）：
+    //   1) 绑定姿态若失效（几何被手动改过）→ 先重建仿真器；
+    //   2) 每个 primitive 各自 Step，重算法线，推上 GPU，刷新当前几何快照。
+    void StepSimulationOnce() {
+        if (sims_.empty()) {
+            return;
+        }
+        if (sim_bind_dirty_) {
+            InitSimulators();
+        }
+        for (size_t i = 0; i < sims_.size(); ++i) {
+            jpov::MeshData stepped = sims_[i].Step(Simulator::kDefaultDt);
+            // 顶点被物理改过 → 法线须重算，否则着色停留在绑定姿态（形状动了光不动）。
+            RecomputeVertexNormals(&stepped);
+            UpdateMesh(cloth_.primitives[i].mesh_id, stepped);
+            cloth_current_[i].mesh = std::move(stepped);
+        }
+    }
+
+    // ==================== 衣服变换（就地改顶点） ====================
+
+    // 合并包围盒中心（所有 primitive 的并集）——就地旋转 / 缩放的公共枢轴。
+    // 单 primitive 时即该 primitive 的包围盒中心。空几何返回原点。
+    jpov::Vec3f ClothBoundsCenter() const {
+        jpov::Vec3f lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f hi(0.0f, 0.0f, 0.0f);
+        bool any = false;
+        for (const jpov::GltfSaveMesh& m : cloth_current_) {
+            for (const jpov::Vec3f& p : m.mesh.positions) {
+                if (!any) {
+                    lo = p;
+                    hi = p;
+                    any = true;
+                } else {
+                    lo = jpov::Vec3f(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()),
+                                     std::min(lo.z(), p.z()));
+                    hi = jpov::Vec3f(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()),
+                                     std::max(hi.z(), p.z()));
+                }
+            }
+        }
+        if (!any) {
+            return jpov::Vec3f(0.0f, 0.0f, 0.0f);
+        }
+        return jpov::Vec3f((lo.x() + hi.x()) * 0.5f, (lo.y() + hi.y()) * 0.5f,
+                           (lo.z() + hi.z()) * 0.5f);
+    }
+
+    // 把「就地改过顶点」的 cloth_current_ 推上 GPU，并标记仿真绑定姿态失效。
+    void RefreshClothGpu() {
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            UpdateMesh(cloth_.primitives[i].mesh_id, cloth_current_[i].mesh);
+        }
+        sim_bind_dirty_ = true;
+    }
+
+    // 平移步进：每个 primitive 顶点沿 axis 轴 += direction * trans_step_[axis]。
     // Pre-condition: 0 <= axis < 3。
     void StepTranslation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
-        transform_.offset[axis] += direction * trans_step_[axis];
-        snprintf(pos_field_[axis].text, kAxisInputCapacity, "%g",
-                 static_cast<double>(transform_.offset[axis]));
-        cloth_dirty_ = true;
+        const float d = direction * trans_step_[axis];
+        jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
+                          axis == 2 ? d : 0.0f);
+        for (jpov::GltfSaveMesh& m : cloth_current_) {
+            TranslateMeshInPlace(&m.mesh, delta);
+        }
+        RefreshClothGpu();
     }
 
-    // 旋转步进：rotation_deg[axis] += direction * rot_step_[axis]（度）。
+    // 旋转步进：绕合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度。
     // Pre-condition: 0 <= axis < 3。
     void StepRotation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
-        transform_.rotation_deg[axis] += direction * rot_step_[axis];
-        cloth_dirty_ = true;
+        const float deg = direction * rot_step_[axis];
+        const jpov::Vec3f pivot = ClothBoundsCenter();
+        for (jpov::GltfSaveMesh& m : cloth_current_) {
+            RotateMeshInPlace(&m.mesh, axis, deg, pivot);
+        }
+        RefreshClothGpu();
     }
 
-    // 缩放步进：factor > 1 放大、< 1 缩小。整体缩放夹到 [kClothScaleMin, kClothScaleMax]。
+    // 缩放步进：整体缩放乘 factor（> 1 放大、< 1 缩小），绕合并中心；累计系数夹到
+    // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。
     // Pre-condition: factor > 0。
     void StepScale(float factor) {
         CHECK_GT(factor, 0.0f);
-        transform_.scale = ClampClothScale(transform_.scale * factor);
-        cloth_dirty_ = true;
+        const float target = ClampClothScale(cloth_scale_ * factor);
+        const float applied = target / cloth_scale_;  // 实际生效的比例（可能被 clamp 到 1）
+        if (applied == 1.0f) {
+            return;  // 已到缩放上下界，本次不动
+        }
+        const jpov::Vec3f pivot = ClothBoundsCenter();
+        for (jpov::GltfSaveMesh& m : cloth_current_) {
+            ScaleMeshInPlace(&m.mesh, applied, pivot);
+        }
+        cloth_scale_ = target;
+        RefreshClothGpu();
     }
+
+    // 「重置衣服」：把所有 primitive 恢复成**启动时**的原始几何，停仿真回到可重调状态。
+    // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
+    void ResetClothMesh() {
+        CHECK_EQ(cloth_geometry_.size(), cloth_current_.size());
+        for (size_t i = 0; i < cloth_geometry_.size(); ++i) {
+            cloth_current_[i].mesh = cloth_geometry_[i].mesh;
+            UpdateMesh(cloth_.primitives[i].mesh_id, cloth_current_[i].mesh);
+        }
+        cloth_scale_ = 1.0f;
+        sim_running_ = false;   // 停机，回到可重调状态
+        sim_bind_dirty_ = true; // 下步前按启动几何重建仿真器
+        LOG(INFO) << "重置衣服：已恢复启动几何（缩放归 1、仿真暂停）";
+    }
+
+    // ==================== 面板 ====================
 
     // 提交一个数值输入框：解析文本 →（可选）clamp → 写回目标；非法输入不改目标。
     // 无论成功与否，都把文本框规范化为**最终生效值**（用户可见 clamp 后的结果）。
     // 返回 true = 目标值发生了变化。
-    //
-    // clamp_fn：把解析出的原始数值映射到合法范围（不需要范围时传恒等函数）。
     // Pre-condition: field != nullptr；target != nullptr。
     template <typename ClampFn>
     static bool CommitNumberField(NumberField* field, ClampFn clamp_fn,
@@ -393,94 +571,74 @@ private:
         return *target != before;
     }
 
-    // ==================== 面板 ====================
-
-    // 面板（左上角半透明黑底 + 自上而下的控件）：
-    //   平移列表头 / X,Y,Z 行（绝对位置 + 步长 + "<" ">"）
-    //   旋转列表头 / RX,RY,RZ 行（步长 + "<" ">"）
-    //   缩放行（系数 + "−" "+" + 当前缩放只读）
-    //   保存行（按钮 + 状态）
-    //   地面高度滑条 / 显示开关 / 两行只读信息
-    //
-    // 布局用一个"行游标"自上而下堆叠（每行 row_h，行间 spacing）。
-    void DrawPanel(const jpov::InputSnapshot& input,
-                   jpov::RenderCommandList* cmds) {
-        const float w = static_cast<float>(kViewerWidth);
-        const float h = static_cast<float>(kViewerHeight);
-
-        // 半透明黑底版（Danis 指定 0.5 半透明黑）。面板几何：左上角 + margin。
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;  // 单点定义（DrawLabel 也用同一常量）
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.36f * w;
-        const float panel_x  = kMargin;
-        const float panel_y  = kMargin;
-        // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存按钮1 + 保存状态1
-        //        + 滑条1 + 开关1 + 只读2 = 15。
-        constexpr int kRows = 15;
-        const float panel_h = kPad * 2.0f + kRows * kRowH +
-                              (kRows - 1) * kSpacing;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y},
-                       /*size*/ {panel_w, panel_h}, kPanelBg);
-
-        // Ui 不做面板平移：控件 UiRect 直接按屏幕像素定位（本工具只有一个面板，
-        // 故把面板屏幕位置 + 内边距并进 left/top）。
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
+    // 画两个面板（左上 = 变换 / 保存 / 地面 / 显示；右上 = 仿真动力学）。
+    // 所有布局都从**本帧窗口尺寸** winfo 推算（见文件头坐标空间说明）。
+    void DrawPanels(const jpov::InputSnapshot& input,
+                    const jpov::WindowInfo& winfo,
+                    jpov::RenderCommandList* cmds) {
+        const float w = winfo.width;
+        const float h = winfo.height;
 
         jpov::UiTheme theme = jpov::UiTheme::Default(kFontSize);
         theme.font_alias = kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
-        // ---- 平移行的列布局 ----
-        const float axis_w = 24.0f;      // "轴"列（X/Y/Z）
-        const float hdr_step_w = 40.0f;  // 表头"步长"列宽 / 行内"步长"标签宽
-        const float stepbox_w = 66.0f;   // 步长输入框宽
-        const float btn_w = 26.0f;       // "<" / ">" / "−" / "+" 按钮宽
+        DrawLeftPanel(cmds, w);
+        DrawRightPanel(cmds, w, h);
+    }
+
+    // ---- 左上角：变换 / 保存 / 地面 / 显示 ----
+    //
+    // 布局（自上而下，行游标）：
+    //   平移表头(轴/步长/步进) + X/Y/Z 三行（步长框 + "<" ">"）
+    //   旋转表头 + RX/RY/RZ 三行
+    //   缩放行（系数框 + "-" "+" + 只读当前）
+    //   保存按钮 + 保存状态
+    //   地面高度滑条
+    //   显示勾选（人体 / 衣服）
+    //   两行只读（人体 / 衣服来源）
+    void DrawLeftPanel(jpov::RenderCommandList* cmds, float win_w) {
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.32f * win_w;
+        const float panel_x  = kMargin;
+        const float panel_y  = kMargin;
+        // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存1 + 保存状态1
+        //        + 地面1 + 勾选1 + 只读2 = 15。
+        constexpr int kRows = 15;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+
+        const float axis_w = 30.0f;     // "轴"列（X/Y/Z）
+        const float stepbox_w = 72.0f;  // 步长输入框宽
+        const float btn_w = 26.0f;      // "<" / ">" / "−" / "+" 按钮宽
         const float gap = kSpacing;
-        // 绝对位置框吃掉剩余宽度。
-        const float pos_w = row_w - (axis_w + hdr_step_w + stepbox_w +
-                                     2.0f * btn_w) - 5.0f * gap;
         const float col_axis   = left;
-        const float col_pos    = col_axis + axis_w + gap;
-        const float col_steplb = col_pos + pos_w + gap;
-        const float col_stepbx = col_steplb + hdr_step_w + gap;
+        const float col_stepbx = col_axis + axis_w + gap;
         const float col_btn_in = col_stepbx + stepbox_w + gap;   // "<"
         const float col_btn_in2 = col_btn_in + btn_w + gap;      // ">"
 
         float row_y = top;
 
-        // ---- 平移列表头 ----
+        // ---- 平移表头 ----
         DrawLabel("轴", col_axis, axis_w, row_y);
-        DrawLabel("绝对位置", col_pos, pos_w, row_y);
-        DrawLabel("步长", col_steplb, hdr_step_w, row_y);
+        DrawLabel("步长(米)", col_stepbx, stepbox_w, row_y);
         DrawLabel("步进", col_btn_in, col_btn_in2 + btn_w - col_btn_in, row_y);
         row_y += step_y;
 
-        // ---- 平移 X / Y / Z 行 ----
+        // ---- 平移 X / Y / Z 行（只有步长框 + 步进按钮；无绝对位置）----
         static const char* const kAxisTags[3] = {"X", "Y", "Z"};
         for (int axis = 0; axis < 3; ++axis) {
             DrawLabel(kAxisTags[axis], col_axis, axis_w, row_y);
-
-            // 绝对位置（回车 / 焦点丧失提交；无 clamp）。
-            const bool pos_focus = ui_.InputText(
-                "", pos_field_[axis].text, kAxisInputCapacity,
-                jpov::UiRect{{col_pos, row_y}, {pos_w, kRowH}});
-            if (pos_field_[axis].focused_prev && !pos_focus) {
-                if (CommitNumberField(&pos_field_[axis], NoClamp,
-                                      &transform_.offset[axis])) {
-                    cloth_dirty_ = true;
-                }
-            }
-            pos_field_[axis].focused_prev = pos_focus;
-
-            DrawLabel("步长", col_steplb, hdr_step_w, row_y);
-
-            // 步长（回车 / 焦点丧失提交并 clamp；改的是"下一步的步长"，不影响当前几何）。
             const bool step_focus = ui_.InputText(
                 "", trans_step_field_[axis].text, kAxisInputCapacity,
                 jpov::UiRect{{col_stepbx, row_y}, {stepbox_w, kRowH}});
@@ -499,21 +657,19 @@ private:
             row_y += step_y;
         }
 
-        // ---- 旋转列表头 ----
+        // ---- 旋转表头 ----
         DrawLabel("轴", col_axis, axis_w, row_y);
-        DrawLabel("步长(°)", col_pos, stepbox_w, row_y);
+        DrawLabel("步长(°)", col_stepbx, stepbox_w, row_y);
         DrawLabel("步进", col_btn_in, col_btn_in2 + btn_w - col_btn_in, row_y);
         row_y += step_y;
 
-        // ---- 旋转 RX / RY / RZ 行（只有步长 + 步进按钮，无绝对输入）----
+        // ---- 旋转 RX / RY / RZ 行（只有步长框 + 步进按钮）----
         static const char* const kRotTags[3] = {"RX", "RY", "RZ"};
         for (int axis = 0; axis < 3; ++axis) {
             DrawLabel(kRotTags[axis], col_axis, axis_w, row_y);
-
-            // 旋转步长（度）。
             const bool rot_focus = ui_.InputText(
                 "", rot_step_field_[axis].text, kAxisInputCapacity,
-                jpov::UiRect{{col_pos, row_y}, {stepbox_w, kRowH}});
+                jpov::UiRect{{col_stepbx, row_y}, {stepbox_w, kRowH}});
             if (rot_step_field_[axis].focused_prev && !rot_focus) {
                 CommitNumberField(&rot_step_field_[axis], ClampRotStep,
                                   &rot_step_[axis]);
@@ -529,7 +685,7 @@ private:
             row_y += step_y;
         }
 
-        // ---- 缩放行：系数输入框 + "−" "+" + 当前缩放只读 ----
+        // ---- 缩放行：系数输入框 + "−" "+" + 当前累计缩放只读 ----
         const float scale_lbl_w = 72.0f;
         DrawLabel("缩放系数", col_axis, scale_lbl_w, row_y);
         const float scale_bx = col_axis + scale_lbl_w + gap;
@@ -549,11 +705,11 @@ private:
             StepScale(scale_step_);
         }
         const float scale_info_x = scale_plus_x + btn_w + gap;
-        DrawLabel(Format("x%.3f", static_cast<double>(transform_.scale)).c_str(),
+        DrawLabel(Format("x%.3f", static_cast<double>(cloth_scale_)).c_str(),
                   scale_info_x, left + row_w - scale_info_x, row_y);
         row_y += step_y;
 
-        // ---- 保存行：仅按钮 ----
+        // ---- 保存按钮行 ----
         const float save_btn_w = 140.0f;
         const char* save_label =
             (save_ctrl_.state() == ClothSaveState::kSaving) ? "保存中..."
@@ -564,13 +720,10 @@ private:
         }
         row_y += step_y;
 
-        // ---- 保存状态行：单独一行 + 真左对齐 ----
-        // 不用 Ui::Text（它总是把文字在 box 内居中；长文案会横向压到上一行的按钮上）。
-        // 对齐交给渲染层（kTopLeft 以 pos 为左上角），与 editor_app.h 的做法一致。
-        // 未保存过时 message() 为空 → 不画。
+        // ---- 保存状态行：单独一行 + 真左对齐（长文案避免压到上一行按钮）。----
         const std::string& save_msg = save_ctrl_.message();
         if (!save_msg.empty()) {
-            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};  // 同 UiTheme 前景色
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
             cmds->DrawText(save_msg,
                            /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                            kFontSize, kForeground,
@@ -607,6 +760,100 @@ private:
         row_y += step_y;
     }
 
+    // ---- 右上角：仿真动力学 ----
+    //
+    // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
+    // 这样窗口 resize 时右上角面板始终贴住右上角。
+    //
+    // 行：标题(1) + 重力/质量/力系数/衰减 滑条(4) + 按钮行(1) + 状态行(2) = 8。
+    void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        (void)win_h;
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.30f * win_w;
+        const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
+        const float panel_y  = kMargin;
+        constexpr int kRows = 8;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+        float row_y = top;
+
+        // ---- 标题 ----
+        DrawLabel("仿真动力学", left, row_w, row_y);
+        row_y += step_y;
+
+        // ---- 重力 g ----
+        ui_.SliderFloat("重力 g (m/s²)", &gravity_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinGravity, Simulator::kMaxGravity,
+                        /*decimal_places*/1);
+        row_y += step_y;
+
+        // ---- 总质量 M ----
+        ui_.SliderFloat("总质量 M (kg)", &total_mass_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinTotalMass, Simulator::kMaxTotalMass,
+                        /*decimal_places*/1);
+        row_y += step_y;
+
+        // ---- 力系数 F（指数坐标）：滑条位置 t∈[0,1] 线性，F = min*(max/min)^t。----
+        ui_.SliderFloat("力系数 F (指数)", &force_coeff_t_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        0.0f, 1.0f, /*decimal_places*/2);
+        row_y += step_y;
+
+        // ---- 衰减 k ----
+        ui_.SliderFloat("衰减 k (1/s)", &damping_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinDamping, Simulator::kMaxDamping,
+                        /*decimal_places*/2);
+        row_y += step_y;
+
+        // ---- 按钮行：[暂停/继续] [重置衣服] ----
+        const float kBtnW = (row_w - kSpacing) * 0.5f;
+        const char* pause_label = sim_running_ ? "暂停仿真" : "继续仿真";
+        if (ui_.Button(pause_label, jpov::UiRect{{left, row_y}, {kBtnW, kRowH}})) {
+            sim_running_ = !sim_running_;
+            LOG(INFO) << (sim_running_ ? "仿真：继续" : "仿真：暂停");
+        }
+        if (ui_.Button("重置衣服",
+                       jpov::UiRect{{left + kBtnW + kSpacing, row_y},
+                                    {kBtnW, kRowH}})) {
+            ResetClothMesh();
+        }
+        row_y += step_y;
+
+        // ---- 状态行 1：F 实际牛顿数 + 仿真时间 / 步数 ----
+        const std::string line1 = Format(
+            "F = %.4g N   仿真 t=%.2fs 步=%zu",
+            static_cast<double>(ForceTToNewton(force_coeff_t_ui_)),
+            sims_.empty() ? 0.0 : sims_.front().time(),
+            sims_.empty() ? static_cast<size_t>(0) : sims_.front().step_count());
+        ui_.Text(line1.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // ---- 状态行 2：仿真点计数（原始 + 虚拟 = 合计）----
+        size_t orig = 0;
+        size_t virt = 0;
+        for (const Simulator& s : sims_) {
+            orig += s.original_point_count();
+            virt += s.virtual_point_count();
+        }
+        const std::string line2 = Format(
+            "仿真点 原始 %zu + 虚拟 %zu = %zu", orig, virt, orig + virt);
+        ui_.Text(line2.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+    }
+
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
@@ -617,11 +864,6 @@ private:
         if (cloth_current_.empty()) {
             LOG(WARNING) << "保存被忽略：衣服几何尚未就绪";
             return;
-        }
-        // 若同一帧内刚改过变换（尚未到期下一帧的重烘），先烘一次，保证存的是最新几何。
-        if (cloth_dirty_) {
-            RebakeClothMesh();
-            cloth_dirty_ = false;
         }
         save_ctrl_.Start(cloth_current_, cloth_path_, "cloth");
     }
@@ -659,41 +901,42 @@ private:
         if (!bounds.valid) {
             return;
         }
+        // 把**地面高度**也纳入 y 范围：衣服会在重力下落到地面，若只按模型包围盒取景，
+        // 落地过程可能跑出画面（无法一眼看到“砸地”效果）。
+        bounds.min[1] = std::min(bounds.min[1], ground_y_);
         view_.R = ViewConfig::FitRadius(bounds.min, bounds.max, /*fov_deg*/ 60.0);
         LOG(INFO) << "场景包围盒 [" << bounds.min[0] << "," << bounds.min[1] << ","
                   << bounds.min[2] << "] ~ [" << bounds.max[0] << "," << bounds.max[1]
                   << "," << bounds.max[2] << "]，初始 R=" << view_.R;
     }
 
-    // 后台初始化进度页：整屏黑底（不透明）+ 居中白字。
-    void DrawInitProgressScreen(jpov::RenderCommandList* cmds) {
+    // 后台初始化进度页：整屏黑底（不透明）+ 居中白字。尺寸用**本帧窗口尺寸**。
+    void DrawInitProgressScreen(const jpov::WindowInfo& winfo,
+                                jpov::RenderCommandList* cmds) {
         const jpov::Color kBlack{0.0f, 0.0f, 0.0f, 1.0f};
         const jpov::Color kWhite{1.0f, 1.0f, 1.0f, 1.0f};
-        cmds->DrawRect(/*pos*/ {0.0f, 0.0f},
-                       /*size*/ {static_cast<float>(kViewerWidth),
-                                 static_cast<float>(kViewerHeight)},
+        cmds->DrawRect(/*pos*/ {0.0f, 0.0f}, /*size*/ {winfo.width, winfo.height},
                        kBlack);
         std::string msg = init_.progress_message();
         if (init_.state() == InitState::kDone && !gpu_uploaded_) {
             msg = "正在上传 GPU 资源...";
         }
         cmds->DrawText(msg.empty() ? "正在初始化..." : msg,
-                       /*pos*/ {kViewerWidth * 0.5f, kViewerHeight * 0.5f},
+                       /*pos*/ {winfo.width * 0.5f, winfo.height * 0.5f},
                        /*font_size*/ 24.0f, kWhite,
                        jpov::TextAlignment::kCenter, kViewerFontAlias);
     }
 
-    // 后台初始化失败页：整屏黑底 + 居中白字（出错原因）。
-    void DrawInitFailedScreen(jpov::RenderCommandList* cmds) {
+    // 后台初始化失败页：整屏黑底 + 居中白字（出错原因）。尺寸用**本帧窗口尺寸**。
+    void DrawInitFailedScreen(const jpov::WindowInfo& winfo,
+                              jpov::RenderCommandList* cmds) {
         const jpov::Color kBlack{0.0f, 0.0f, 0.0f, 1.0f};
         const jpov::Color kWhite{1.0f, 1.0f, 1.0f, 1.0f};
-        cmds->DrawRect(/*pos*/ {0.0f, 0.0f},
-                       /*size*/ {static_cast<float>(kViewerWidth),
-                                 static_cast<float>(kViewerHeight)},
+        cmds->DrawRect(/*pos*/ {0.0f, 0.0f}, /*size*/ {winfo.width, winfo.height},
                        kBlack);
         const std::string msg = init_.error_message();
         cmds->DrawText(msg.empty() ? "初始化失败" : ("初始化失败：" + msg),
-                       /*pos*/ {kViewerWidth * 0.5f, kViewerHeight * 0.5f},
+                       /*pos*/ {winfo.width * 0.5f, winfo.height * 0.5f},
                        /*font_size*/ 20.0f, kWhite,
                        jpov::TextAlignment::kCenter, kViewerFontAlias);
     }
@@ -703,9 +946,6 @@ private:
         const size_t slash = path.find_last_of("/\\");
         return (slash == std::string::npos) ? path : path.substr(slash + 1);
     }
-
-    // 恒等 clamp（绝对位置不做范围限制）。
-    static float NoClamp(float v) { return v; }
 
     // 极简 snprintf 包装（面板只读文本用）。
     static std::string Format(const char* fmt, ...) {
@@ -721,12 +961,6 @@ private:
     bool gpu_uploaded_ = false;          // 后台建图完成后是否已上传 GPU 资产（一次性）
     bool upload_screen_drawn_ = false;   // 是否已画过"上传中"页（见 TickInit 两帧安排）
     float ground_y_last_built_ = -3.0f;  // 上次建 quad 用的地面高度（变了才重建）
-    bool cloth_dirty_ = false;           // 上一帧面板是否改过衣服变换（待重烘焙）
-
-    // 衣服的 base CPU 几何（每个 primitive 的 MeshData + 材质）——烘焙的输入。
-    std::vector<jpov::GltfMeshEntry> cloth_geometry_;
-    // 衣服的当前几何快照（= 最新烘焙结果 + 材质）——保存的输入。
-    std::vector<jpov::GltfSaveMesh> cloth_current_;
 
     jpov::Ui ui_;                        // 跨帧持有（滑条拖动态 / 聚焦态等内部记忆）
 

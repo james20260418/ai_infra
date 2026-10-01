@@ -108,8 +108,8 @@ public:
     const MatcherBundle& body_matcher() const { return body_; }
     const MatcherBundle& cloth_matcher() const { return cloth_; }
 
-    // 取走衣服的 CPU 几何（base MeshData + 材质），供衣物烘焙（clothing_transform.h）与
-    // 保存（clothing_save.h）用。kDone 后调用一次；取走后本控制器不再持有（move 语义）。
+    // 取走衣服的 CPU 几何（base MeshData + 材质），供衣物变换（就地改顶点，
+    // clothing_transform.h）、软体仿真与保存（clothing_save.h）用。kDone 后调用一次；取走后本控制器不再持有（move 语义）。
     // 说明：几何在后台线程加载时**顺带保留**（不额外读一遍 glb）；body 侧不保留。
     std::vector<jpov::GltfMeshEntry> TakeClothGeometry() {
         std::lock_guard<std::mutex> lock(mtx_);

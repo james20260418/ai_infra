@@ -8,7 +8,7 @@
 //   - 线程运行期按钮不可重复触发；完成后面板显示 "保存至 <path>" / "保存失败：<原因>"。
 //   - 传入的 meshes 是**按下当帧的几何快照**（按值传入），之后 UI 再改衣服不影响本次保存。
 //
-// 与 editor_save 的差异：本工具在**改动时就已把变换烘进 mesh 顶点**（见
+// 与 editor_save 的差异：本工具在**改动时就已就地改好 mesh 顶点**（见
 //   clothing_transform.h），故保存时**不再施加任何放置变换**，直接写当前几何即可。
 
 #ifndef JPOV_CLOTHING_CLOTHING_SAVE_H_

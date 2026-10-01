@@ -1,13 +1,14 @@
 // JPOV 穿衣工具 — 主程序（装配 + 模式分发）
 //
-// 用途：把「一件人体 reference」与「一件衣服模型」加载进同一个 JPOV 场景并显示，
-// 为后续「衣服贴合人体」的穿衣管线提供可视化底座。y-up，地平面 300×300 米高粗糙
-// 灰色 quad，光照固定正午晴天，视角靠鼠标操作（右键 drag 转、滚轮 zoom）。
+// 用途：把「一件人体 reference」与「一件衣服模型」加载进同一个 JPOV 场景显示，
+// 并让衣服被软体仿真器驱动（重力 + 顶点间弹簧力场 + 地面投影）。y-up，地平面
+// 300×300 米高粗糙灰色 quad，光照固定 45° 天光，视角靠鼠标操作（右键 drag 转、滚轮 zoom）。
 //
-// 本阶段（2026-09-29）：**加载 + 显示 + 粗调位置**。
+// 当前阶段（2026-10-01，Step 1）：
 //   ① 后台线程为两份 glb 建最近邻三角形匹配器（完成后主线程上传 GPU 资产）；
-//   ② 左上角面板用 x/y/z 填值输入框粗调衣服 center（回车/焦点丧失即生效）。
-//   仍不做：对齐/穿衣物理。详见 clothing_tool_app.h 的边界说明。
+//   ② 衣服被 soft_mesh_simulator::Simulator 驱动，右上角面板调动力学系数、
+//      暂停 / 重置；左上角面板做平移 / 旋转 / 缩放（**就地**改顶点）+ 保存 glb。
+//   仍不做：人体排斥（Step 2）、对齐。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov/clothing:jpov_clothing_tool -- --body_reference_path /path/to/body.glb --cloth_path /path/to/cloth.glb
@@ -17,7 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>  // atof
+#include <cstdlib>  // atof / atoi
 #include <string>
 #include <thread>
 
@@ -34,6 +35,9 @@ struct CliOptions {
     std::string cloth_path;           // --cloth_path 衣服模型（.glb/.gltf）
     std::string output_dir;           // --ui_shot 的落盘目录（默认当前目录）
     bool  ui_shot = false;            // headless 单帧出图（含面板，UI 自检）
+    int   sim_steps = 0;              // --sim_steps 出图前先推进的仿真步数（验证下坠/落地）
+    int   window_width = 0;           // --window_width 覆盖窗口宽（0 = 用默认；验证 resize 布局）
+    int   window_height = 0;          // --window_height 覆盖窗口高（0 = 用默认）
     float phi_deg = 20.0f;            // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
 };
 
@@ -61,6 +65,33 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.output_dir = argv[++i];
             } else {
                 LOG(WARNING) << "--output_dir 缺少目录参数，忽略";
+            }
+        } else if (arg == "--sim_steps") {
+            if (i + 1 < argc) {
+                opt.sim_steps = std::atoi(argv[++i]);
+                if (opt.sim_steps < 0) {
+                    LOG(FATAL) << "--sim_steps 必须 >= 0，got " << opt.sim_steps;
+                }
+            } else {
+                LOG(WARNING) << "--sim_steps 缺少数值参数，忽略";
+            }
+        } else if (arg == "--window_width") {
+            if (i + 1 < argc) {
+                opt.window_width = std::atoi(argv[++i]);
+                if (opt.window_width <= 0) {
+                    LOG(FATAL) << "--window_width 必须 > 0，got " << opt.window_width;
+                }
+            } else {
+                LOG(WARNING) << "--window_width 缺少数值参数，忽略";
+            }
+        } else if (arg == "--window_height") {
+            if (i + 1 < argc) {
+                opt.window_height = std::atoi(argv[++i]);
+                if (opt.window_height <= 0) {
+                    LOG(FATAL) << "--window_height 必须 > 0，got " << opt.window_height;
+                }
+            } else {
+                LOG(WARNING) << "--window_height 缺少数值参数，忽略";
             }
         } else if (arg == "--phi_deg") {
             if (i + 1 < argc) {
@@ -99,12 +130,18 @@ int main(int argc, char** argv) {
                    << "    --cloth_path /path/to/cloth.glb";
     }
 
-    // ── 配置：1280×720 不可 resize、60fps。--ui_shot 走 headless（无可见窗口）。──
+    // ── 配置：初始窗口 1280×720、60fps。--ui_shot 走 headless（无可见窗口）。──
+    // 注意：JPOV 窗口**可 resize**（框架未设 GLFW_RESIZABLE=GLFW_FALSE）；config.resizable
+    // 未被框架消费，仅为语义声明。面板布局在 App 里按**每帧窗口尺寸** winfo 推算。
+    const int cfg_w = opt.window_width > 0 ? opt.window_width
+                                           : jpov::clothing::kDefaultWindowWidth;
+    const int cfg_h = opt.window_height > 0 ? opt.window_height
+                                            : jpov::clothing::kDefaultWindowHeight;
     JPOV::Config cfg;
     cfg.title = "JPOV — 穿衣工具";
-    cfg.width  = jpov::clothing::kViewerWidth;
-    cfg.height = jpov::clothing::kViewerHeight;
-    cfg.resizable = false;
+    cfg.width  = cfg_w;
+    cfg.height = cfg_h;
+    cfg.resizable = true;
     cfg.target_fps = static_cast<int>(jpov::clothing::kViewerFps);
     cfg.headless   = opt.ui_shot;
     cfg.fonts = {
@@ -124,8 +161,6 @@ int main(int argc, char** argv) {
     app.init_.Start(body_path, opt.cloth_path);
 
     // 场景静态资源只建一次（不在 OneIteration 里重复构造/上传）。
-    // 地面与 GPU 资产无关，可先行建成；两个模型资产的 GPU 上传由 App::TickInit()
-    // 在建图完成后的主线程里做（zero 分叉：Run 与 RunOnce 共用）。
     app.ground_mat_  = jpov::clothing::GroundMaterial();
     app.ground_mesh_ = app.RegisterMesh(jpov::clothing::MakeGroundQuad());
 
@@ -144,11 +179,22 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
+        // 可选：出图前推进 N 步仿真（验证下坠 / 落地；交互窗口由「继续仿真」按钮驱动）。
+        if (opt.sim_steps > 0) {
+            app.AdvanceSimulationSteps(opt.sim_steps);
+            for (const auto& sim : app.sims_) {
+                const auto b = sim.Bounds();
+                LOG(INFO) << "推进 " << opt.sim_steps << " 步后：包围盒 y ["
+                          << b.min[1] << ", " << b.max[1] << "]，t=" << sim.time()
+                          << "s，步=" << sim.step_count();
+            }
+        }
+
         // headless 单帧出图（带面板，UI 布局/字体自检用）。
         app.SetShowPanel(true);
         jpov::WindowInfo winfo;
-        winfo.width  = jpov::clothing::kViewerWidth;
-        winfo.height = jpov::clothing::kViewerHeight;
+        winfo.width  = static_cast<float>(cfg_w);
+        winfo.height = static_cast<float>(cfg_h);
         const std::string out_dir =
             opt.output_dir.empty() ? std::string(".") : opt.output_dir;
         const std::string out_path = out_dir + "/clothing_tool_ui.png";

@@ -10,10 +10,11 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 # 能力演进：
 #   - M0（2026-09-27）：加载 + 显示。
 #   - 2026-09-29：后台建图（最近邻三角形）+ 左上角 x/y/z 填值粗调。
-#   - 2026-09-30：完整变换调节 —— 平移（绝对位置 + 步长 + "<" ">"）、旋转（步长 + "<" ">"，
-#     度，绕 X/Y/Z 逆时针）、整体缩放（"+"/"−" 乘/除系数）；**一律直接改衣服 mesh 顶点**
-#     （见 clothing_transform.h）；并加「保存衣服 glb」按钮（clothing_save.h）。
-#   仍不做：对齐 / 穿衣物理。
+#   - 2026-09-30：完整变换调节 —— 平移、旋转（度，绕 X/Y/Z 逆时针）、整体缩放；
+#     **一律直接改衣服 mesh 顶点**（见 clothing_transform.h）；并加「保存衣服 glb」按钮。
+#   - 2026-10-01：**纳入软体仿真器**（重力+弹簧+地面）；右上角动力学面板（g/M/F/k）
+#     + 暂停/重置按钮；删除「绝对平移」输入框，变换改为**就地**作用于当前顶点。
+#   仍不做：人体排斥（Step 2）/ 对齐。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
@@ -27,14 +28,13 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-# 衣物变换（平移/旋转/缩放）状态 + 烘进 CPU 顶点（纯函数；无 GL，仅依赖 mesh/mesh_transform）。
+# 衣物 mesh 就地几何操作（平移/旋转/缩放 + 法线重算；纯函数；无 GL，仅依赖 mesh）。
 cc_library(
     name = "clothing_transform",
     hdrs = ["clothing_transform.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:mesh_transform",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
@@ -64,6 +64,7 @@ cc_library(
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src:gltf_saver",
+        "//tools/jpov/soft_mesh_simulator:soft_mesh_simulator",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
