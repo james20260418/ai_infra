@@ -300,23 +300,38 @@ void Simulator::ApplyBodyRepulsion(geom::Vec3<float>* x /*inout*/,
     }
     const geom::Vec3<double>& n = tris[best_tri].normal();
     // 有符号距离：沿外法线为正 = 体外；为负 = 体内。
-    const double signed_d = (p - best_cp).Dot(n);
+    const geom::Vec3<double> rel = p - best_cp;  // 最近点 → 点
+    const double signed_d = rel.Dot(n);
     if (signed_d >= static_cast<double>(body_buffer_)) {
         return;  // 在体外且离表面已超过 buffer → 无需排斥
     }
-    // 投影到「最近点 + buffer·外法线」：体内点被推到体表外 buffer；体外过近的点被顶到 buffer 处。
-    const geom::Vec3<double> target = best_cp + n * static_cast<double>(body_buffer_);
+    // 推离方向 = **几何方向**（指向体外），**不是**最近三角形的面法线：
+    //   面法线在棱/顶点处会随“最近三角形”翻面而跳变（距离相等，由候选表顺序/所在体素
+    //   决定），而这里是**每子步一次的硬位置投影** ⇒ 顶点在两面法线间反复被瞬移 ⇒ 抖动。
+    //   几何方向（体外用 p−cp、体内用 cp−p）在棱/顶点处连续、也不受候选表变化影响
+    //   （跨体素时 cp 与 p−cp 均不变）—— 与 glb_repulsion.txt 一致（体内点用“表面点−point”）。
+    geom::Vec3<double> outward = (signed_d >= 0.0) ? rel : (best_cp - p);
+    const double outward_len = outward.Norm();
+    if (outward_len > 1e-12) {
+        outward = outward * (1.0 / outward_len);
+    } else {
+        outward = n;  // 退化（点几乎落在最近点上，方向不定）→ 回退到面法线
+    }
+    // 投影到「最近点 + buffer·几何外侧方向」：体内点被推到体表外 buffer；
+    // 体外过近的点沿“离表面最近的方向”顶到 buffer 处。
+    const geom::Vec3<double> target = best_cp + outward * static_cast<double>(body_buffer_);
     *x = geom::Vec3<float>(static_cast<float>(target.x()),
                            static_cast<float>(target.y()),
                            static_cast<float>(target.z()));
-    // 去掉**指向体内**的法向速度分量（同地面投影：纯位置投影、不注入动能）。
-    const float nx = static_cast<float>(n.x());
-    const float ny = static_cast<float>(n.y());
-    const float nz = static_cast<float>(n.z());
-    const float vn = (*v)[0] * nx + (*v)[1] * ny + (*v)[2] * nz;
+    // 去掉**指向体内**的速度分量（同地面投影：纯位置投影、不注入动能）。
+    // 方向同样用几何外侧方向（而非面法线），保证连续。
+    const float ox = static_cast<float>(outward.x());
+    const float oy = static_cast<float>(outward.y());
+    const float oz = static_cast<float>(outward.z());
+    const float vn = (*v)[0] * ox + (*v)[1] * oy + (*v)[2] * oz;
     if (vn < 0.0f) {
-        *v = geom::Vec3<float>((*v)[0] - nx * vn, (*v)[1] - ny * vn,
-                               (*v)[2] - nz * vn);
+        *v = geom::Vec3<float>((*v)[0] - ox * vn, (*v)[1] - oy * vn,
+                               (*v)[2] - oz * vn);
     }
 }
 
