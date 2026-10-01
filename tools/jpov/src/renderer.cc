@@ -1703,9 +1703,15 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 // 太阳阴影 pass（CSM）：当 cmds.sun 有值时，把场景里所有 Object3D 从太阳正交视角
 // 按级联渲染进各段阴影纹理（只写光空间 ndc.z），供主 pass 的 PBR shader 采样做 PCF。
 //
-// 每段：取相机在该级联 near~far 之间的视锥 8 角点 → 变换到光源 view 空间 → 求 AABB
-// → 用 AABB 定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段视锥在光源空间
-// 的包围盒"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
+// 每段：取相机在该级联 near~far 之间的视锥切片，求其**包围球**（球心在相机轴上），
+// 再把球心在光源 right/up 轴上的**世界投影量化到纹素整数倍**（texel snapping）后，
+// 用「snap 后的球心 ± 半径」定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段
+// 视锥的近邻"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
+//
+// 为什么用包围球 + snap（而不是光空间 AABB）：球半径只由切片 near/far/fov/aspect
+// 决定、**不随相机旋转变化** ⟹ 单纹素世界尺寸恒定 ⟹ 量化球心后纹素网格才真正 world
+// 对齐、影缘不抖。AABB 的 span 会随相机旋转连续变化，纹素尺寸跟着漂，snap 也压不住
+// shimmer（见下方 x/y 计算的详细注释）。
 //
 // world_up 固定为 y 轴正向 (0,1,0)；若光方向与它平行（太阳正顶），lookAt 的
 // cross(fwd,up) 退化 —— 只补一个极小水平 epsilon 保持基连续，**不偏置光方向本身**
@@ -1805,10 +1811,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         const float near_i = prev_far;
         const float far_i = shadow_cfg_.cascade_ranges[c];
 
-        // 该级联相机视锥 8 角点：相机朝向 +fwd，frustum 从 near 平面延伸到 far 平面。
-        // 用相机 lookAt 的基向量展开：
+        // 该级联相机视锥切片：相机朝向 +fwd，切片从 near 平面延伸到 far 平面。
+        // 切片关于相机轴对称 ⟹ 包围球球心在轴上，故只需轴向量 fwd 与近/远面半宽高。
         //   fwd = normalize(target - position)
-        //   side, upv 由 RendererMat4Mul 同套 BuildLookAt 逻辑推导
         Vec3f fwd = {
             cmds.camera.target.x() - cmds.camera.position.x(),
             cmds.camera.target.y() - cmds.camera.position.y(),
@@ -1816,65 +1821,70 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         };
         float fl = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
         if (fl < 1e-8f) fwd = Vec3f(0.0f, 0.0f, -1.0f); else fwd = Vec3f(fwd.x()/fl, fwd.y()/fl, fwd.z()/fl);
-        const Vec3f cu = { cmds.camera.up.x(), cmds.camera.up.y(), cmds.camera.up.z() };
-        Vec3f side = Vec3f(fwd.y()*cu.z() - fwd.z()*cu.y(),
-                           fwd.z()*cu.x() - fwd.x()*cu.z(),
-                           fwd.x()*cu.y() - fwd.y()*cu.x());
-        float sl = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
-        if (sl < 1e-8f) side = Vec3f(1.0f, 0.0f, 0.0f); else side = Vec3f(side.x()/sl, side.y()/sl, side.z()/sl);
-        Vec3f upv = Vec3f(side.y()*fwd.z() - side.z()*fwd.y(),
-                          side.z()*fwd.x() - side.x()*fwd.z(),
-                          side.x()*fwd.y() - side.y()*fwd.x());
-
-        // 半高度 h = tan(fov/2) * dist；半宽 w = h * aspect。
+        // 半高度 h = tan(fov/2) * dist；半宽 w = h * aspect（切片在近/远面处）。
         const float tan_half = std::tan(fov_rad * 0.5f);
         const float h_near = tan_half * near_i;
         const float h_far  = tan_half * far_i;
         const float w_near = h_near * aspect;
         const float w_far  = h_far * aspect;
-        const Vec3f c_near = camera_pos + fwd * near_i;   // near 平面中心
-        const Vec3f c_far  = camera_pos + fwd * far_i;    // far 平面中心
 
-        // 8 角点（世界空间）：near 四角 + far 四角。
-        Vec3f corners[8] = {
-            c_near - side*w_near - upv*h_near, c_near + side*w_near - upv*h_near,
-            c_near - side*w_near + upv*h_near, c_near + side*w_near + upv*h_near,
-            c_far  - side*w_far  - upv*h_far,  c_far  + side*w_far  - upv*h_far,
-            c_far  - side*w_far  + upv*h_far,  c_far  + side*w_far  + upv*h_far,
-        };
-
-        // 正交盒 x/y = 仅该级联相机视锥切片的光源空间 AABB（与场景内容无关）。
+        // 正交盒 x/y = 仅该级联相机视锥**切片的包围球**（与场景内容无关）。
         // 依据：正交投影下，caster 能对切片内片元投影 ⟺ 其光空间横向位置落在切片
         // 横向投影范围内。横向不在范围内的物体，其影子横向也不可能落在切片内，
         // 故无需（也不应）并入任何物体 AABB —— 那会让单个大物体（如 300m 地面）
         // 把整级联正交盒撑爆，近密远疏失效（2026-09-17 修正）。
-        float min_x = 1e30f, max_x = -1e30f;
-        float min_y = 1e30f, max_y = -1e30f;
-        for (const Vec3f& p : corners) {
-            const float lx = view[0]*p.x() + view[4]*p.y() + view[8]*p.z()  + view[12];
-            const float ly = view[1]*p.x() + view[5]*p.y() + view[9]*p.z()  + view[13];
-            min_x = std::min(min_x, lx); max_x = std::max(max_x, lx);
-            min_y = std::min(min_y, ly); max_y = std::max(max_y, ly);
+        //
+        // 切片（截锥）关于相机轴对称 ⟹ 包围球球心在轴上。令近/远面半对角为
+        // d_near / d_far，切片沿轴长 L = far_i - near_i；球心距近面 z 处，球半径平方 = 
+        // max(d_near²+z², d_far²+(L−z)²)。令两者相等解得最优 z（夹到 [0,L]，切片在
+        // 近端收敛为锥尖时最优 z 会落到远面）。
+        const float d_near = std::sqrt(w_near*w_near + h_near*h_near);  // 近面半对角
+        const float d_far  = std::sqrt(w_far *w_far  + h_far *h_far);   // 远面半对角
+        const float slice_len = far_i - near_i;
+        float z_center = 0.0f;
+        if (slice_len > 1e-6f) {
+            z_center = (d_far*d_far - d_near*d_near + slice_len*slice_len)
+                       / (2.0f * slice_len);
         }
+        z_center = std::max(0.0f, std::min(slice_len, z_center));
+        const Vec3f sphere_c = camera_pos + fwd * (near_i + z_center);
+        // 半径取近/远角点到球心的**较大者**：z 被夹到 [0,L] 边界时两式不再相等
+        // （例如首段 near≈0、切片在远端张得最开 ⇒ 球心夹到远面，半径应由远角点定，
+        // 否则球装不下切片 → 切角跑到盒外被裁掉）。
+        const float r_near = std::sqrt(d_near*d_near + z_center*z_center);
+        const float r_far  = std::sqrt(d_far*d_far
+                             + (slice_len - z_center)*(slice_len - z_center));
+        const float sphere_r = std::max(r_near, r_far);
 
-        // 正交投影：光照沿 -z（光 view 空间），x/y 覆盖切片 AABB（+1 纹素边距）；
-        // z（near/far）由「眼→阴影纵深」推导，见下方。
-        const float span_x = max_x - min_x;
-        const float span_y = max_y - min_y;
-        if (span_x < 1e-5f || span_y < 1e-5f) {
-            // 退化的级联（如首段 near 极近导致视锥近似点），给最小范围。
+        if (sphere_r < 1e-5f || slice_len < 1e-5f) {
+            // 退化的级联（如首段 near 极近导致切片近似一点），给最小范围。
             float vp[16]; BuildOrthoProj(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 2.0f, vp);
             RendererMat4Mul(vp, view, shadow_vp_[c]);
             shadow_texel_world_[c] = 0.0f;
             continue;
         }
-        // 各向外扩 **1 个纹素**（自缩放，不用写死的米数）：避免片元恰落在盒边缘时
-        // 采样/裁剪出瑕疵；扩大量随级联分辨率自动跟随（原为固定 1.0m，既浪费
-        // 近级联分辨率、又对大场景偏小）。
-        const float pad_x = span_x / static_cast<float>(shadow_fbos_[c].size);
-        const float pad_y = span_y / static_cast<float>(shadow_fbos_[c].size);
-        const float left = min_x - pad_x, right = max_x + pad_x;
-        const float bottom = min_y - pad_y, top = max_y + pad_y;
+
+        // ── texel snapping ──
+        // 量化「球心 − 半径」（即盒的 min 角）在光源 right/up 轴上的**世界投影**到纹素
+        // 整数倍（floor），盒再向 + 方向延伸 2r。这样无论相机/光照怎么变，恒有
+        //   [left, left+2r] ⊇ [c_wp−r, c_wp+r] ⊇ 切片投影
+        // ⇒ 保证装得住切片、**不会夹边**，故无需再另加纹素边距（若只量化球心，floor
+        // 会把球心往 − 推最多 1 纹素、可能使 + 侧切片溢出盒右边界而丢影）。
+        // 量化用**世界投影**（而非光空间坐标）是为了抵消光 view 的平移项 view[12/13]：
+        // 眼位随相机移动，只有量化世界投影才能让纹素网格锚定世界、不逐帧滑。
+        //   world_proj(p) = right·p（right = view 第 0 行 = (view[0],view[4],view[8])）
+        //   光空间 lx = world_proj(p) + view[12]（view 第 0 行的平移分量）
+        const float map_size = static_cast<float>(shadow_fbos_[c].size);
+        const float texel_w = 2.0f * sphere_r / map_size;   // 单纹素世界边长（米）
+        const float c_wp_x = view[0]*sphere_c.x() + view[4]*sphere_c.y() + view[8]*sphere_c.z();
+        const float c_wp_y = view[1]*sphere_c.x() + view[5]*sphere_c.y() + view[9]*sphere_c.z();
+        const float left_wp   = std::floor((c_wp_x - sphere_r) / texel_w) * texel_w;
+        const float bottom_wp = std::floor((c_wp_y - sphere_r) / texel_w) * texel_w;
+        // snap 后的世界投影 → 光空间坐标（+ view 平移项），供 BuildOrthoProj。
+        const float left   = left_wp              + view[12];
+        const float right  = left_wp   + 2.0f*sphere_r + view[12];
+        const float bottom = bottom_wp            + view[13];
+        const float top    = bottom_wp + 2.0f*sphere_r + view[13];
         // 正交 near/far：只需覆盖「眼→整个阴影纵深」。被比较的深度来自
         // uShadowDepthVP（线性米，与这里无关），故 near/far 只影响裁剪 —— 取宽裕值
         // 即可，无需魔数。（原为 0.1 / 10000 两个写死的数。）
@@ -1885,10 +1895,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
         RendererMat4Mul(proj, view, shadow_vp_[c]);
 
-        // 该级联单纹素的世界覆盖边长（米）：正交盒跨度 / map 尺寸。取 x/y 较大者
-        // （各向异性保守）。供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
-        shadow_texel_world_[c] = std::max(right - left, top - bottom)
-                                 / static_cast<float>(shadow_fbos_[c].size);
+        // 该级联单纹素的世界覆盖边长（米）：盒跨度 = 2·球半径，故 = 2r/map 尺寸。
+        // 供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
+        shadow_texel_world_[c] = texel_w;
 
         // 渲第 c 段：绑定对应 FBO + viewport，清屏，画所有投射物体。
         const CascadeFBO& fb = shadow_fbos_[c];

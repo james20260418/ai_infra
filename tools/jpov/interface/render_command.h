@@ -591,8 +591,12 @@ struct ShadowConfig {
     //   shader 里逐级联算：
     //       bias_c = max(minBias, kBiasK · texelW_c · tanθ)
     //     其中
-    //       texelW_c  = max(该级联正交盒 x 跨度, y 跨度) / cascade_sizes[c]（米）
-    //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）；
+    //       texelW_c  = 该级联正交盒单边跨度 / cascade_sizes[c]（米）
+    //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）。
+    //                   正交盒现由「视锥切片包围球」定（边长 = 2·球半径），故
+    //                   texelW_c = 2·球半径 / cascade_sizes[c]（各向同性；不再取 max(x,y)）。
+    //                   注：球盒比原光空间 AABB 略大（典型 ~1.14×）⇒ texelW 随之略增
+    //                   ⇒ 自动偏置随之略增（更不易 acne、略多 peter-pan），属预期。
     //       kBiasK   = kBiasSafety(1.5) × kPcfRadiusT —— 与 PCF 核半径联动；
     //       tanθ     = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，
     //                  Ld = 深度轴方向（= 阴影 pass 实际用的光传播方向的反向；
@@ -613,6 +617,9 @@ struct ShadowConfig {
     //   公式不变，只把 texelW_c 换成手工值 cascade_bias[c]（米，等效单纹素世界边长）：
     //       bias_c = max(minBias, kBiasK · cascade_bias[c] · tanθ)
     //   仅在需要偏离几何推导（例如自定义阴影强度）时才用。
+    //   ⚠️ 下面这组默认值是**按旧的光空间 AABB 纹素边长**标定的；正交盒改成「切片包围球」
+    //      后实际的 uShadowTexelWorld 约为其 1.14×。override 默认关，若要开启请按当前
+    //      uShadowTexelWorld 重标，否则偏置会偏小。
     bool  override_cascade_bias = false;
     float cascade_bias[kMaxCascades] = {0.005f, 0.033f, 0.073f, 0.260f, 0.406f};
 
