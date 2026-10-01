@@ -1576,6 +1576,14 @@ struct RenderCommandList {
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
 
+    // 场景深度可视化开关（调试，默认 false）。
+    //   HDR 3D pass 用 MRT 把「场景深度」写进第二颜色附件（R32F，值 = gl_FragCoord.z
+    //   ∈ [0,1]，1.0=远平面/背景）。本开关为 true 时，统一 tone map pass 把该深度图
+    //   反算线性深度后对数归一化输出灰度（近暗远亮），跳过色彩处理，用于目视验收
+    //   MRT 深度写入是否正确。默认 false（正常 tone map）。
+    //   仅在 tone_mapping=true 的 HDR 路径有意义。
+    bool visualize_scene_depth = false;
+
     // 后处理输出 sRGB 编码开关（默认 true = 开启）。
     //   - true ：tone map 输出的线性 LDR 值在写屏前做 sRGB 编码
     //            （IEC 61966-2-1，分段 lin→srgb 映射），预补偿显示器的

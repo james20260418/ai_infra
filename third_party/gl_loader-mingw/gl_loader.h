@@ -45,6 +45,11 @@ typedef void (*GL_TexImage2D)(unsigned int, int, int, int, int, int, unsigned in
 typedef void (*GL_TexParameteri)(unsigned int, unsigned int, int);
 typedef void (*GL_GenerateMipmap)(unsigned int);
 typedef void (*GL_BlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+// MRT / per-buffer clear（GL 2.0 / 3.0）：多颜色附件渲染与按工位清缓冲。
+typedef void (*GL_DrawBuffers)(int, const unsigned int*);
+typedef void (*GL_ClearBufferfv)(unsigned int, int, const float*);
+typedef void (*GL_ReadBuffer)(unsigned int);
+typedef void (*GL_DrawBuffer)(unsigned int);
 typedef void (*GL_EnableVertexAttribArray)(unsigned int);
 typedef void (*GL_DisableVertexAttribArray)(unsigned int);
 typedef void (*GL_VertexAttribPointer)(unsigned int, int, unsigned int, unsigned char, int, const void*);
@@ -108,6 +113,10 @@ extern GL_TexImage2D             gl_TexImage2D;
 extern GL_TexParameteri          gl_TexParameteri;
 extern GL_GenerateMipmap         gl_GenerateMipmap;
 extern GL_BlitFramebuffer        gl_BlitFramebuffer;
+extern GL_DrawBuffers            gl_DrawBuffers;
+extern GL_ClearBufferfv          gl_ClearBufferfv;
+extern GL_ReadBuffer             gl_ReadBuffer;
+extern GL_DrawBuffer             gl_DrawBuffer;
 extern GL_EnableVertexAttribArray gl_EnableVertexAttribArray;
 extern GL_DisableVertexAttribArray gl_DisableVertexAttribArray;
 extern GL_VertexAttribPointer    gl_VertexAttribPointer;
@@ -166,6 +175,10 @@ int gl_loader_init(void);
 #define glPushAttrib             gl_PushAttrib
 #define glPopAttrib              gl_PopAttrib
 #define glBlitFramebuffer        gl_BlitFramebuffer
+#define glDrawBuffers            gl_DrawBuffers
+#define glClearBufferfv          gl_ClearBufferfv
+#define glReadBuffer             gl_ReadBuffer
+#define glDrawBuffer             gl_DrawBuffer
 #define glBufferData             gl_BufferData
 #define glCheckFramebufferStatus gl_CheckFramebufferStatus
 #define glGenRenderbuffers        gl_GenRenderbuffers

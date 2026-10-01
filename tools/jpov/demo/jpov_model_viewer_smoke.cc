@@ -32,6 +32,7 @@ public:
     jpov::PBRMaterial ground_mat_;
     jpov_viewer::ViewConfig view_;
     jpov_viewer::NoonLighting noon_;
+    bool show_scene_depth_ = false;   // 调试：输出 MRT 场景深度灰度图
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -52,6 +53,7 @@ public:
         cmds->sun = noon_.sun;
         cmds->ambient = noon_.ambient;
         cmds->tone_mapping = true;
+        cmds->visualize_scene_depth = show_scene_depth_;
 
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
@@ -93,6 +95,10 @@ int main(int argc, char** argv) {
     }
     if (const char* t = std::getenv("JPOV_SMOKE_THETA_DEG")) {
         app.view_.theta = std::atof(t) * (3.14159265358979323846 / 180.0);
+    }
+    // 调试自检：JPOV_SMOKE_SCENE_DEPTH=1 时输出 MRT 场景深度灰度图（验收深度写入）。
+    if (const char* d = std::getenv("JPOV_SMOKE_SCENE_DEPTH")) {
+        app.show_scene_depth_ = (std::atof(d) != 0.0);
     }
 
     jpov::WindowInfo winfo;

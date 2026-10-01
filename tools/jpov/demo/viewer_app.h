@@ -119,6 +119,8 @@ public:
         cmds->sun = light.sun;
         cmds->ambient = light.ambient;
         cmds->tone_mapping = true;
+        // 调试开关：显示 MRT 场景深度（灰度，近黑远白）。
+        cmds->visualize_scene_depth = visualize_scene_depth_;
 
         // ── 场景：地面 + 被加载的 glTF。地面高度变化时原地重建 quad。──
         if (ground_y_ != ground_y_prev_) {
@@ -170,7 +172,7 @@ private:
         const float kSpacing = 12.0f;
         const float kBottom  = 20.0f;
         const float left     = (w - kSliderWidth) * 0.5f;
-        const float top      = h - kBottom - (5.0f * kRowH + 4.0f * kSpacing);
+        const float top      = h - kBottom - (6.0f * kRowH + 5.0f * kSpacing);
 
         // 太阳仰角直接用度（0~90 覆盖日出→正午全部标定工况），0 位小数。
         ui_.SliderFloat("太阳仰角 °", &elev_deg_,
@@ -196,9 +198,14 @@ private:
                         jpov::UiRect{{left, top + 4.0f * (kRowH + kSpacing)},
                                      {kSliderWidth, kRowH}},
                         0.1f, 20.0f, /*decimal_places*/1);
+        // 调试：显示 MRT 场景深度（灰度高图，近黑远白）——验收 3D pass 的深度写入。
+        ui_.Checkbox("显示场景深度", &visualize_scene_depth_,
+                     jpov::UiRect{{left, top + 5.0f * (kRowH + kSpacing)},
+                                  {kSliderWidth, kRowH}});
     }
 
     bool show_panel_ = true;              // 是否画交互光照面板（headless=false）
+    bool visualize_scene_depth_ = false;  // 调试：显示 MRT 场景深度（灰度）
     float ground_y_prev_ = -3.0f;         // 上一帧地面高度（检测变化才 UpdateMesh）
     jpov::Ui ui_;                         // 跨帧持有（滑条拖动态内部记忆）
 
