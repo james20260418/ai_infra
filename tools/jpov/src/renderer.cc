@@ -1466,53 +1466,37 @@ void Renderer::Render(const RenderCommandList& cmds,
             // ---- HDR 路径：把 HDR 内容 resolve/blit 到同尺寸 non-MSAA 浮点纹理，
             //      作为后续后处理（雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
-            const bool fog_enabled =
+            // 只此一处判定要不要起雾；下方 resolve 顺序与它就配合。
+            const bool horizon_fog_enabled =
                 cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
             // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
             // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
-            const unsigned int hdr_sky_color_tex =
-                cmds.sky.has_value() ? sky_tex_ : 0;
-            unsigned int hdr_scene_depth_tex = 0;
+            const unsigned int sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
 #ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入。
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入（雾也叠在这张上）。
             unsigned int hdr_input_tex = color_tex_hdr_;
-            hdr_scene_depth_tex = scene_depth_tex_hdr_;
+            unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 #else
-            // MSAA 路径：把 MSAA HDR FBO 的两个附件分别 resolve 到单采样浮点纹理。
-            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个，故分两次：
-            //   附件0（颜色）、附件1（场景深度）各 blit 一次，用 glReadBuffer/glDrawBuffer 选择。
-            //   开雾时顺序不同：雾要就地混合进 fbo_hdr_（见下），故「场景深度先 resolve、
-            //   颜色留到雾之后再 resolve」；不开雾则颜色+深度一起 resolve（原行为）。
+            // MSAA 路径：先 resolve 场景深度（雾要单采样深度）——放在颜色之前，这样
+            // 「雾就地叠进 fbo_hdr_」之后，再统一 resolve 颜色（开雾时含雾）。
+            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个；用 glReadBuffer/
+            //   glDrawBuffer 选择附件。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            if (!fog_enabled) {
-                // 附件0：颜色
-                glReadBuffer(GL_COLOR_ATTACHMENT0);
-                glDrawBuffer(GL_COLOR_ATTACHMENT0);
-                glBlitFramebuffer(
-                    0, 0, fbo_3d_w, fbo_3d_h,
-                    0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            }
-            // 附件1：场景深度（雾需单采样深度，故开雾时也必须先 resolve）
             glReadBuffer(GL_COLOR_ATTACHMENT1);
             glDrawBuffer(GL_COLOR_ATTACHMENT1);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 复位 read/draw buffer 回附件0（后续 pass 仍从 fbo_hdr_ 读颜色）。
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
             unsigned int hdr_input_tex = resolve_tex_hdr_;
-            hdr_scene_depth_tex = resolve_scene_depth_tex_;
+            unsigned int hdr_scene_depth_tex = resolve_scene_depth_tex_;
 #endif
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
             //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
-            //    只读 MRT#1 场景深度。必须在线性 HDR 域、tone map 之前加。
-            if (fog_enabled) {
+            //    只读 MRT#1 场景深度 + 大气色天空纹理。必须在线性 HDR 域、tone map 之前加。
+            if (horizon_fog_enabled) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
                 // 只写颜色附件；雾不碰场景深度附件。
@@ -1525,7 +1509,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                                        GL_TEXTURE_2D, 0, 0);
 #endif
                 HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
-                                         hdr_sky_color_tex, mvp_, cam, shader_mgr_);
+                                         sky_color_tex, mvp_, cam, shader_mgr_);
 #ifdef JPOV_WITHOUT_MSAA
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
@@ -1535,19 +1519,17 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
 
 #ifndef JPOV_WITHOUT_MSAA
-            // 开雾时：颜色在雾之后才 resolve（此时 fbo_hdr_ 已含雾）。
-            if (fog_enabled) {
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-                glReadBuffer(GL_COLOR_ATTACHMENT0);
-                glDrawBuffer(GL_COLOR_ATTACHMENT0);
-                glBlitFramebuffer(
-                    0, 0, fbo_3d_w, fbo_3d_h,
-                    0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
-                glReadBuffer(GL_COLOR_ATTACHMENT0);
-                glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            }
+            // resolve 颜色：若开雾，此时 fbo_hdr_ 里已经含雾。
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
 #endif
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。

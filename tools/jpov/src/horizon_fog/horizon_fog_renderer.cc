@@ -143,7 +143,7 @@ void HorizonFogRenderer::Draw(const ElevationFogConfig& cfg,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
+    // 混合方程用默认的 GL_FUNC_ADD（不显式设：MinGW 的 GL 头/loader 没导出 glBlendEquation）。
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glDrawArrays(GL_TRIANGLES, 0, 3);   // 全屏三角形（无 VAO/VBO，用 gl_VertexID）
