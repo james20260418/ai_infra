@@ -39,6 +39,12 @@ struct CliOptions {
     int   window_width = 0;           // --window_width 覆盖窗口宽（0 = 用默认；验证 resize 布局）
     int   window_height = 0;          // --window_height 覆盖窗口高（0 = 用默认）
     float phi_deg = 20.0f;            // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
+    // 动力学初始值（默认 = Simulator 默认；仅 headless 调参 / 复现用）。
+    float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
+    float total_mass = jpov::soft_mesh_simulator::Simulator::kDefaultTotalMass;
+    float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
+    float damping = jpov::soft_mesh_simulator::Simulator::kVelocityDamping;
+    float max_speed = jpov::clothing::kDefaultMaxSpeed;  // --max_speed 全局速度上限（m/s；0 = 不限）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 → WARNING 忽略（不崩溃）。
@@ -74,6 +80,53 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--sim_steps 缺少数值参数，忽略";
+            }
+        } else if (arg == "--gravity") {
+            if (i + 1 < argc) {
+                opt.gravity = std::atof(argv[++i]);
+                if (opt.gravity < 0.0f) {
+                    LOG(FATAL) << "--gravity 必须 >= 0，got " << opt.gravity;
+                }
+            } else {
+                LOG(WARNING) << "--gravity 缺少数值参数，忽略";
+            }
+        } else if (arg == "--total_mass") {
+            if (i + 1 < argc) {
+                opt.total_mass = std::atof(argv[++i]);
+                if (!(opt.total_mass >= jpov::soft_mesh_simulator::Simulator::kMinTotalMass)) {
+                    LOG(FATAL) << "--total_mass 必须 >= "
+                               << jpov::soft_mesh_simulator::Simulator::kMinTotalMass
+                               << "，got " << opt.total_mass;
+                }
+            } else {
+                LOG(WARNING) << "--total_mass 缺少数值参数，忽略";
+            }
+        } else if (arg == "--force_coeff") {
+            if (i + 1 < argc) {
+                opt.force_coeff = std::atof(argv[++i]);
+                if (!(opt.force_coeff > 0.0f)) {
+                    LOG(FATAL) << "--force_coeff 必须 > 0，got " << opt.force_coeff;
+                }
+            } else {
+                LOG(WARNING) << "--force_coeff 缺少数值参数，忽略";
+            }
+        } else if (arg == "--damping") {
+            if (i + 1 < argc) {
+                opt.damping = std::atof(argv[++i]);
+                if (opt.damping < 0.0f) {
+                    LOG(FATAL) << "--damping 必须 >= 0，got " << opt.damping;
+                }
+            } else {
+                LOG(WARNING) << "--damping 缺少数值参数，忽略";
+            }
+        } else if (arg == "--max_speed") {
+            if (i + 1 < argc) {
+                opt.max_speed = std::atof(argv[++i]);
+                if (opt.max_speed < 0.0f) {
+                    LOG(FATAL) << "--max_speed 必须 >= 0，got " << opt.max_speed;
+                }
+            } else {
+                LOG(WARNING) << "--max_speed 缺少数值参数，忽略";
             }
         } else if (arg == "--window_width") {
             if (i + 1 < argc) {
@@ -168,6 +221,14 @@ int main(int argc, char** argv) {
     // 包围盒自适应（退化则保持默认）。
     app.view_ = jpov::clothing::DefaultView();
     app.view_.phi = static_cast<double>(opt.phi_deg) * 3.14159265358979323846 / 180.0;
+
+    // 动力学初值（CLI，可选）：在场景就绪（建仿真器）前设好镜像，使仿真器按此初始化。
+    app.gravity_ui_ = opt.gravity;
+    app.total_mass_ui_ = opt.total_mass;
+    app.force_coeff_t_ui_ = jpov::clothing::ClothingToolApp::ForceNewtonToT(
+        opt.force_coeff);
+    app.damping_ui_ = opt.damping;
+    app.max_speed_ui_ = opt.max_speed;
 
     if (opt.ui_shot) {
         // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。

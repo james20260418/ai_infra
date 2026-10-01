@@ -1176,4 +1176,30 @@ TEST(SoftMeshSimulatorTest, ApplyBeforeInitCrashes) {
     EXPECT_DEATH(sim.ApplyTranslation(geom::Vec3<float>(1.0f, 0.0f, 0.0f)), "");
 }
 
+TEST(SoftMeshSimulatorTest, MaxSpeedClampsVelocityAndZeroDisables) {
+    // 自由落体（无邻居 ⇒ 纯重力）：限速后 |v| 不超过上限；把限速设为 0（不限）→ 又继续加速。
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(20.0f);
+    sim.SetMaxSpeed(0.5f);
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        const float sp = std::sqrt(v.x() * v.x() + v.y() * v.y() + v.z() * v.z());
+        EXPECT_LE(sp, 0.5f + 1e-4f) << "速度应被限到 0.5 m/s";
+    }
+    sim.SetMaxSpeed(0.0f);  // 关限速
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    float max_sp = 0.0f;
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        max_sp = std::max(max_sp, std::sqrt(v.x() * v.x() + v.y() * v.y() + v.z() * v.z()));
+    }
+    EXPECT_GT(max_sp, 0.5f) << "关限速后应能超过原上限";
+}
+
+TEST(SoftMeshSimulatorTest, SetMaxSpeedRejectsNegative) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetMaxSpeed(-1.0f), "");
+}
+
 }  // namespace

@@ -236,6 +236,28 @@ void Simulator::IntegrateSubstep(double dt_sub) {
         sim_positions_[i] = x_new;
         sim_velocities_[i] = v_new;
     }
+
+    // 全局速度上限（兑底，默认关）。
+    ClampMaxSpeed();
+}
+
+// 全局速度上限：把每个点的速度矢量的模长截到 max_speed_（> 0 时）。放在子步末（地面
+// 投影之后）作为最后一道兑底：低质量 + 大刚度时，单个子步内弹簧力会把速度推到极大
+// （a = F/m，m 小），显式积分随即发散（顶点被甩飞、拉出“淌”状长条）。限速把状态钉在
+// 一个有界范围内，避免发散。
+// 注：这是**兑底**而非根治（根治需更小 dt_sub / 隐式积分）；默认关闭（0）。
+void Simulator::ClampMaxSpeed() {
+    if (max_speed_ <= 0.0f) {
+        return;
+    }
+    const float v_max_sq = max_speed_ * max_speed_;
+    for (geom::Vec3<float>& v : sim_velocities_) {
+        const float sp_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        if (sp_sq > v_max_sq) {
+            const float scale = max_speed_ / std::sqrt(sp_sq);
+            v = v * scale;
+        }
+    }
 }
 
 // 提取变形 mesh：把仿真点前 vertex_count_ 个位置写回 mesh_.positions。
@@ -343,6 +365,12 @@ void Simulator::SetGravity(float gravity) {
 void Simulator::SetGroundY(float ground_y) {
     CHECK(std::isfinite(ground_y)) << "SetGroundY 要求有限值，got " << ground_y;
     ground_y_ = ground_y;
+}
+
+void Simulator::SetMaxSpeed(float v_max) {
+    CHECK(std::isfinite(v_max)) << "SetMaxSpeed 要求有限值，got " << v_max;
+    CHECK_GE(v_max, 0.0f) << "SetMaxSpeed 要求 v_max >= 0（0 = 不限），got " << v_max;
+    max_speed_ = v_max;
 }
 
 // ── 即时操作（见 .h 的语义说明）──

@@ -96,6 +96,10 @@ inline constexpr float kDefaultTransStep = 0.1f;
 inline constexpr float kDefaultRotStep = 45.0f;
 inline constexpr float kDefaultScaleStep = 1.1f;
 
+// 默认全局速度上限（m/s）。低质量数值失稳的兑底（Danis 2026-10-01：把 M 调小后布料被
+// 甩飞、拉成“淌”状长条）。0 = 不限；实测 25 m/s 能在保留正常下落（~8 m/s）的同时挡住失稳。
+inline constexpr float kDefaultMaxSpeed = 25.0f;
+
 // 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
 // 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
 struct NumberField {
@@ -183,6 +187,8 @@ public:
     // 初值取自 kDefaultForceCoeff（默认 F=3 N ⇒ t≈0.75），保证 UI 与物理默认一致。
     float force_coeff_t_ui_ = ForceNewtonToT(Simulator::kDefaultForceCoeff);
     float damping_ui_ = Simulator::kVelocityDamping;
+    // 全局速度上限（m/s；0 = 不限）。低质量数值失稳的兑底（danis 2026-10-01）。
+    float max_speed_ui_ = kDefaultMaxSpeed;
 
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
@@ -411,6 +417,7 @@ private:
         sim->SetForceCoeff(ForceTToNewton(force_coeff_t_ui_));
         sim->SetVelocityDamping(damping_ui_);
         sim->SetGroundY(ground_y_);
+        sim->SetMaxSpeed(max_speed_ui_);
     }
 
     // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
@@ -431,6 +438,9 @@ private:
             }
             if (sim.ground_y() != ground_y_) {
                 sim.SetGroundY(ground_y_);
+            }
+            if (sim.max_speed() != max_speed_ui_) {
+                sim.SetMaxSpeed(max_speed_ui_);
             }
         }
     }
@@ -784,7 +794,7 @@ private:
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y  = kMargin;
-        constexpr int kRows = 8;
+        constexpr int kRows = 9;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
@@ -825,6 +835,12 @@ private:
                         jpov::UiRect{{left, row_y}, {row_w, kRowH}},
                         Simulator::kMinDamping, Simulator::kMaxDamping,
                         /*decimal_places*/2);
+        row_y += step_y;
+
+        // ---- 全局速度上限（m/s；0 = 不限）----
+        ui_.SliderFloat("速度上限 (m/s, 0=不限)", &max_speed_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        0.0f, 100.0f, /*decimal_places*/0);
         row_y += step_y;
 
         // ---- 按钮行：[暂停/继续] [重置衣服] ----

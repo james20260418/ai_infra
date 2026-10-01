@@ -321,6 +321,15 @@ public:
     // 设置地面高度。CHECK 有限；无值域限制（地面可以在任意高度）。
     void SetGroundY(float ground_y);
 
+    // ── 全局速度上限（数值鲁棒性）──
+    //
+    // 每子步末把速度矢量的模长截到 v_max（m/s）；**0 = 不限（默认）**。
+    // 动机（2026-10-01 Danis）：低 M_total ⇒ 每点质量 m 极小 ⇒ 同样的力给出巨大加速度
+    // （a = F/m）⇒ 固定子步下显式积分失稳（顶点被甩飞、拉出“淌”状长条）。限速是全局兜底。
+    float max_speed() const { return max_speed_; }
+    // Pre-condition（不满足即 LOG(FATAL)）：v_max 有限且 >= 0。
+    void SetMaxSpeed(float v_max);
+
     // ── 即时操作：对**当前仿真状态**就地施加变换（面板 / 交互驱动）──
     //
     // 用途（Danis 2026-10-01）：穿衣工具的左上面板要在**仿真进行中**也能改变这件衣服的
@@ -424,6 +433,9 @@ private:
     // 当前地面高度 y（米）。低于它的顶点被投影回地面（水平面，法线 +Y）。
     float ground_y_ = kDefaultGroundY;
 
+    // 全局速度上限（m/s，0 = 不限）。见 max_speed()。
+    float max_speed_ = 0.0f;
+
     float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
     double time_ = 0.0;        // 已仿真时间（秒）
@@ -442,6 +454,9 @@ private:
     // 然后做地面投影（非穿透）。分两趟：先对全部点算 v_half/x_new，再对全部点
     // 用新位置求 a(x_new) 回写 v_new。见 .cc 的完整公式与推导。
     void IntegrateSubstep(double dt_sub);
+
+    // 全局速度上限：把每个点的速度截到 max_speed_（>0 时）。子步末调用（见 .cc）。
+    void ClampMaxSpeed();
 
     // ⭐ 该点在某位置受到的**总加速度** a(x) = (重力 + 弹簧力场) / m。
     //
