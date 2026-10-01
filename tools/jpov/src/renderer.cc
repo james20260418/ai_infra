@@ -19,6 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/common/utils.h"
 
@@ -58,38 +59,6 @@
 namespace {
 
 using jpov::Vec3f;
-
-// 4x4 矩阵求逆（列主序，Gauss-Jordan + 部分主元）。用于把 MVP 转成逆 VP
-// （仰角雾/sky 需由屏幕坐标反推世界方向）。不可逆返回 false。
-bool Mat4InvertLocal(const float m[16], float out[16]) {
-    float a[16];
-    for (int i = 0; i < 16; ++i) a[i] = m[i];
-    float inv[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    for (int col = 0; col < 4; ++col) {
-        int piv = col;
-        float best = std::fabs(a[col * 4 + col]);
-        for (int r = col + 1; r < 4; ++r) {
-            const float v = std::fabs(a[col * 4 + r]);
-            if (v > best) { best = v; piv = r; }
-        }
-        if (best < 1e-12f) return false;
-        if (piv != col) {
-            for (int c = 0; c < 4; ++c) {
-                float t = a[c * 4 + col]; a[c * 4 + col] = a[c * 4 + piv]; a[c * 4 + piv] = t;
-                t = inv[c * 4 + col]; inv[c * 4 + col] = inv[c * 4 + piv]; inv[c * 4 + piv] = t;
-            }
-        }
-        const float d = a[col * 4 + col];
-        for (int c = 0; c < 4; ++c) { a[c * 4 + col] /= d; inv[c * 4 + col] /= d; }
-        for (int r = 0; r < 4; ++r) {
-            if (r == col) continue;
-            const float f = a[col * 4 + r];
-            for (int c = 0; c < 4; ++c) { a[c * 4 + r] -= f * a[c * 4 + col]; inv[c * 4 + r] -= f * inv[c * 4 + col]; }
-        }
-    }
-    for (int i = 0; i < 16; ++i) out[i] = inv[i];
-    return true;
-}
 
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
@@ -381,50 +350,6 @@ void main() {
 }
 )glsl";
 
-// 远景仰角雾（空气透视）—— 全屏三角形 VS（复用 tone map 的 gl_VertexID 模式）。
-const char* kElevationFogVs = kTonemapVs;
-
-// 远景仰角雾 FS：由逆 VP 反推视线方向 d 与到可见面的距离 dist；
-// `|d.y|` 是逐像素常量 ⇒ 仰角带无需求交，只是一个乘子；
-// τ = σ·band·ramp，L = L_scene·exp(−τ) + fog_color·(1−exp(−τ))（HDR 线性域）。
-const char* kElevationFogFs = R"glsl(
-#version 330 core
-in vec2 vTexCoord;
-out vec4 FragColor;
-uniform sampler2D uHdrTex;      // 场景 HDR 颜色
-uniform sampler2D uDepthTex;    // 场景深度（R32F，gl_FragCoord.z）
-uniform sampler2D uSkyTex;      // 天空色（MRT #2；= 该像素方向的天空色）
-uniform mat4  uInvVP;           // 相机 逆(Proj*View)
-uniform vec3  uCamPos;          // 相机世界位置
-uniform float uStart;           // 起雾距离（米）
-uniform float uFull;            // 满雾距离（米）
-uniform float uElevSinInner;    // sin(仰角带内边界)；|d.y| ≤ 它 → 满
-uniform float uElevSinOuter;    // sin(仰角带外边界)；|d.y| ≥ 它 → 无
-uniform float uDensity;         // σ_max
-uniform vec3  uFogColor;        // 雾色（CPU 推导，uUseSkyColor=0 时用）
-uniform int   uUseSkyColor;     // 1 = 收敛色取 uSkyTex（该方向天空色）；0 = 用 uFogColor
-void main() {
-    vec2 uv = vTexCoord;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pn = uInvVP * vec4(ndc, -1.0, 1.0);
-    vec4 pf = uInvVP * vec4(ndc,  1.0, 1.0);
-    vec3 d = normalize(pf.xyz / pf.w - pn.xyz / pn.w);
-    float ndc_z = texture(uDepthTex, uv).r;
-    vec3 scene = texture(uHdrTex, uv).rgb;
-    // 收敛色：默认取**该像素方向的天空色**（天空自身就是“远到看不清”的颜色），
-    // 使远处几何/天空都自然收敛到天边，接缝最干净。
-    vec3 fog_col = (uUseSkyColor != 0) ? texture(uSkyTex, uv).rgb : uFogColor;
-    vec4 pw = uInvVP * vec4(ndc, ndc_z * 2.0 - 1.0, 1.0);
-    float dist = length(pw.xyz / pw.w - uCamPos);
-    float elev = abs(d.y);
-    float band = 1.0 - smoothstep(uElevSinInner, uElevSinOuter, elev);
-    float ramp = smoothstep(uStart, uFull, dist);
-    float tau = uDensity * band * ramp;
-    float T = exp(-tau);
-    FragColor = vec4(scene * T + fog_col * (1.0 - T), 1.0);
-}
-)glsl";
-
 // 拾取（color-ID）pass 的 vertex shader：与 Object3D PBR 的顶点语义一致
 //（aPos loc=0 + aNormal loc=1），只需把物体摆到正确世界位置（MVP×Model）。
 const char* kPickVs = R"glsl(
@@ -581,7 +506,6 @@ Renderer::~Renderer() {
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
-    DestroyElevationFogFBO();
     DestroySkyColorFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -700,30 +624,6 @@ void Renderer::DestroyHDRResolveFBO() {
     resolve_fbo_hdr_h_ = 0;
 }
 
-void Renderer::EnsureElevationFogFBO(int w, int h) {
-    if (elev_fog_fbo_ != 0 && elev_fog_w_ == w && elev_fog_h_ == h) {
-        return;
-    }
-    DestroyElevationFogFBO();
-    glGenTextures(1, &elev_fog_tex_);
-    glBindTexture(GL_TEXTURE_2D, elev_fog_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glGenFramebuffers(1, &elev_fog_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, elev_fog_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           elev_fog_tex_, 0);
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "Elevation fog FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    elev_fog_w_ = w;
-    elev_fog_h_ = h;
-}
-
 void Renderer::EnsureSkyColorFBO(int w, int h) {
     if (sky_fbo_ != 0 && sky_w_ == w && sky_h_ == h) {
         return;
@@ -759,82 +659,6 @@ void Renderer::DestroySkyColorFBO() {
     sky_h_ = 0;
 }
 
-void Renderer::DestroyElevationFogFBO() {
-    if (elev_fog_fbo_) {
-        glDeleteFramebuffers(1, &elev_fog_fbo_);
-        glDeleteTextures(1, &elev_fog_tex_);
-        elev_fog_fbo_ = 0;
-        elev_fog_tex_ = 0;
-    }
-    elev_fog_w_ = 0;
-    elev_fog_h_ = 0;
-}
-
-unsigned int Renderer::DrawElevationFogPass(const ElevationFogConfig& cfg,
-                                            unsigned int hdr_input_tex,
-                                            unsigned int scene_depth_tex,
-                                            unsigned int sky_color_tex,
-                                            const Camera& cam, int fbo_w,
-                                            int fbo_h) {
-    EnsureElevationFogFBO(fbo_w, fbo_h);
-    const unsigned int prog =
-        shader_mgr_.GetOrCreate("elevation_fog", {kElevationFogVs, kElevationFogFs});
-    glUseProgram(prog);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, hdr_input_tex);
-    glUniform1i(shader_mgr_.GetUniform(prog, "uHdrTex"), 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
-    glUniform1i(shader_mgr_.GetUniform(prog, "uDepthTex"), 1);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, sky_color_tex);
-    glUniform1i(shader_mgr_.GetUniform(prog, "uSkyTex"), 2);
-    glActiveTexture(GL_TEXTURE0);
-
-    // 收敛色：场景有天空 且 cfg.use_sky_color ⇒ 取该方向天空色（推荐）；否则用 cfg.color。
-    const int use_sky = (cfg.use_sky_color && sky_color_tex != 0) ? 1 : 0;
-    glUniform1i(shader_mgr_.GetUniform(prog, "uUseSkyColor"), use_sky);
-
-    float inv_vp[16];
-    CHECK(Mat4InvertLocal(mvp_, inv_vp))
-        << "DrawElevationFogPass: 相机矩阵不可逆（near/far 非法或退化）";
-    glUniformMatrix4fv(shader_mgr_.GetUniform(prog, "uInvVP"), 1, GL_FALSE, inv_vp);
-    glUniform3f(shader_mgr_.GetUniform(prog, "uCamPos"), cam.position.x(),
-                cam.position.y(), cam.position.z());
-
-    // 参数夹断（避免退化：full>start、outer>inner），供交互滑条安全调节。
-    const float start = std::max(cfg.start_distance, 0.0f);
-    const float full = std::max(cfg.full_distance, start + 1.0f);
-    const float inner = std::max(cfg.elev_inner_deg, 0.0f);
-    const float outer = std::max(cfg.elev_outer_deg, inner + 0.01f);
-    constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
-    glUniform1f(shader_mgr_.GetUniform(prog, "uStart"), start);
-    glUniform1f(shader_mgr_.GetUniform(prog, "uFull"), full);
-    glUniform1f(shader_mgr_.GetUniform(prog, "uElevSinInner"),
-                std::sin(inner * kDeg2Rad));
-    glUniform1f(shader_mgr_.GetUniform(prog, "uElevSinOuter"),
-                std::sin(outer * kDeg2Rad));
-    glUniform1f(shader_mgr_.GetUniform(prog, "uDensity"), std::max(cfg.density, 0.0f));
-    glUniform3f(shader_mgr_.GetUniform(prog, "uFogColor"), cfg.color.r, cfg.color.g,
-                cfg.color.b);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, elev_fog_fbo_);
-    glViewport(0, 0, fbo_w, fbo_h);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
-    glDisable(GL_CULL_FACE);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-
-    glUseProgram(0);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return elev_fog_tex_;
-}
 
 void Renderer::DestroyShadowFBO() {
     for (auto& c : shadow_fbos_) {
@@ -1639,38 +1463,45 @@ void Renderer::Render(const RenderCommandList& cmds,
         glDisable(GL_DEPTH_TEST);
 
         if (use_hdr) {
-            // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
-            //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
+            // ---- HDR 路径：把 HDR 内容 resolve/blit 到同尺寸 non-MSAA 浮点纹理，
+            //      作为后续后处理（雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
+            const bool fog_enabled =
+                cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
+            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
+            // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
+            const unsigned int hdr_sky_color_tex =
+                cmds.sky.has_value() ? sky_tex_ : 0;
             unsigned int hdr_scene_depth_tex = 0;
-            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一
-            // 帧残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
-            unsigned int hdr_sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
 #ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入。
             unsigned int hdr_input_tex = color_tex_hdr_;
             hdr_scene_depth_tex = scene_depth_tex_hdr_;
 #else
             // MSAA 路径：把 MSAA HDR FBO 的两个附件分别 resolve 到单采样浮点纹理。
             //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个，故分两次：
             //   附件0（颜色）、附件1（场景深度）各 blit 一次，用 glReadBuffer/glDrawBuffer 选择。
+            //   开雾时顺序不同：雾要就地混合进 fbo_hdr_（见下），故「场景深度先 resolve、
+            //   颜色留到雾之后再 resolve」；不开雾则颜色+深度一起 resolve（原行为）。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            // 附件0：颜色
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 附件1：场景深度
+            if (!fog_enabled) {
+                // 附件0：颜色
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                glDrawBuffer(GL_COLOR_ATTACHMENT0);
+                glBlitFramebuffer(
+                    0, 0, fbo_3d_w, fbo_3d_h,
+                    0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            }
+            // 附件1：场景深度（雾需单采样深度，故开雾时也必须先 resolve）
             glReadBuffer(GL_COLOR_ATTACHMENT1);
             glDrawBuffer(GL_COLOR_ATTACHMENT1);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 复位 read/draw buffer 回附件0（后续 highlight pass 仍从 fbo_hdr_ 读颜色）。
+            // 复位 read/draw buffer 回附件0（后续 pass 仍从 fbo_hdr_ 读颜色）。
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             glDrawBuffer(GL_COLOR_ATTACHMENT0);
 
@@ -1678,18 +1509,46 @@ void Renderer::Render(const RenderCommandList& cmds,
             hdr_scene_depth_tex = resolve_scene_depth_tex_;
 #endif
 
-            // ── 远景仰角雾（空气透视）—— 在 highlight / bloom / tone map **之前**，
-            //    把远处（低仰角 + 大距离）朝雾色收敛（内散射，必须在线性 HDR 里加）。
-            if (cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled) {
-                const unsigned int fogged = DrawElevationFogPass(
-                    *cmds.elevation_fog, hdr_input_tex, hdr_scene_depth_tex,
-                    hdr_sky_color_tex, cam, fbo_3d_w, fbo_3d_h);
-                if (fogged != 0) {
-                    hdr_input_tex = fogged;
-                }
+            // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
+            //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
+            //    只读 MRT#1 场景深度。必须在线性 HDR 域、tone map 之前加。
+            if (fog_enabled) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件；雾不碰场景深度附件。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+#ifdef JPOV_WITHOUT_MSAA
+                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+#endif
+                HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
+                                         hdr_sky_color_tex, mvp_, cam, shader_mgr_);
+#ifdef JPOV_WITHOUT_MSAA
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
+#endif
+                const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs);
             }
+
+#ifndef JPOV_WITHOUT_MSAA
+            // 开雾时：颜色在雾之后才 resolve（此时 fbo_hdr_ 已含雾）。
+            if (fog_enabled) {
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                glDrawBuffer(GL_COLOR_ATTACHMENT0);
+                glBlitFramebuffer(
+                    0, 0, fbo_3d_w, fbo_3d_h,
+                    0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            }
+#endif
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
             // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：

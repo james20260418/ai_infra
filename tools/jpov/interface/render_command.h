@@ -552,19 +552,21 @@ struct BloomConfig {
     int levels = 3;
 };
 
-// 远景仰角雾（空气透视，elevation fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
+// 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
 //
 // ── 在后处理链中的位置（用户视角）──
-// 它是一次**全屏后处理**，只走 HDR 路径，时机在 3D 绘制全部结束、MSAA resolve 之后，
-// 且**早于** highlight / bloom / tone map：
+// 它是一次**全屏后处理**，只走 HDR 路径，时机在 3D 绘制全部完成之后，且**早于**
+// highlight / bloom / tone map（即「其它 3D 渲染之后、HDR 后处理之前」）：
 //
 //   阴影 pass → 3D 不透明 pass（天空 + object3d…；MRT：颜色 + 场景深度）
-//            → MSAA resolve
-//            → 【本雾 pass】            ← 读「场景颜色 + 场景深度 + 天空色」，写 ping-pong HDR 纹理
-//            → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
+//            → 【本雾 pass】   ← 就地 alpha 混合进已有的 3D HDR FBO（只读 MRT#1 场景深度）
+//            → MSAA resolve → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
 //
-//  · 读：HDR 场景颜色、MRT#1 场景深度（R32F）、以及**单独一趟**渲的「大气色天空」。
-//  · 写：输出到一张 ping-pong 的 HDR 纹理并继续往下走（不改场景本身的 FBO）。
+//  · **不持有自己的 FBO**：用固定管线 alpha 混合（SRC_ALPHA, ONE_MINUS_SRC_ALPHA）
+//    把雾**就地**叠到当前 3D HDR FBO 上。雾色作为源、α = 1−e^{−τ}，与帧缓冲里**已有的**
+//    场景颜色混合 ⇒ 无需采样场景颜色、也无需自己的 FBO。
+//  · 读：MRT#1 场景深度（R32F，取距离用）+ **大气色天空纹理**（取收敛色用；若场景无天空
+//    或 use_sky_color=false 则退回 color 常量）。
 //  · 因为落在**线性 HDR 域、tone map 之前**，雾是「内散射加光」语义，能正确参与
 //    bloom 提取与最终 tone map；放到 tone map 之后会变成非线性域的灰糊。
 //  · 前置条件：**cmds.tone_mapping 必须为 true**。tone_mapping=false（旧 LDR 直通
@@ -574,10 +576,11 @@ struct BloomConfig {
 //  · 影响：低仰角带内（|视线仰角| ≤ elev_inner_deg）且距离 ≥ start_distance 的像素，
 //    按 τ 朝雾色收敛 —— 远景/地平线淡出、融进天边。
 //  · 不影响：高仰角像素（|仰角| ≥ elev_outer_deg ⇒ band=0）、近处像素
-//    （dist < start_distance ⇒ ramp=0）、以及其后绘制的 2D/UI 叠加层。
-//  · 天空像素：本 pass 对**每个像素**都跑，但天空像素的收敛色取「该像素方向的天空色」，
-//    故 L_scene≈雾色 ⇒ 输出≈原样（不会“把天空吃成一块色”）。收敛色用的天空纹理
-//    只含大气+夜色（不含日月盘/光晕），故带内的日月盘会被略微朝大气色拉。
+//    （dist < start_distance ⇒ ramp=0）、以及其后绘制的 2D/UI 叠加层。天空像素的收敛色
+//    = 它自己的天空色 ⇒ 几乎不变（不会“把天空吃成一块色”）。
+//  · 收敛色默认 = **该像素方向的天空辐射色**（由 sky 单独一趟渲的大气色纹理，不含日月盘/
+//    光晕）⇒ 远景与天边无缝。⚠️ 别用 CPU 推导的“天光色”（AmbientTricolor，环境光量级，
+//    比天空辐射暗很多）当收敛色，那会把远景压暗成一条脏带（实测）。无天空时才退回 color。
 //
 // 与「局部体积雾体 + tile culling」是**两条不同的通道**（后者设计未定，未实现）：
 // 本雾是屏幕空间解析式、无体积、无光源；雾体雾是 3D 定位 + 闭式积分 + tile 列表。
@@ -586,7 +589,7 @@ struct BloomConfig {
 //   band = 1 − smoothstep(elev_inner, elev_outer, |d.y|)   // 仰角带（水平带内=1）
 //   ramp = smoothstep(start_distance, full_distance, dist)  // 距离
 //   τ    = density · band · ramp
-//   L    = L_scene · exp(−τ) + fog_color · (1 − exp(−τ))   // HDR 线性域内就地和成
+//   α    = 1 − exp(−τ)；  L_out = L_scene · (1−α) + fog_color · α   // 线性 HDR 域内就地混合
 //
 // 关键：沿视线 d 不变 ⇒ `d.y` 整条射线是**常量** ⇒ 仰角这个条件**不用求交**，就是一个乘子。
 // **与相机位置无关**（不像“高度雾”锚在世界 y）——相机怎么飞，地平线带都一致。
@@ -607,14 +610,13 @@ struct ElevationFogConfig {
     // 最大消光 σ_max（站在带内、满距离处的 τ；越大越糊）。
     float density = 2.0f;
 
-    // 雾色（内散射色，线性 HDR）。默认 "use_sky_color=true" ⇒ 取**该像素方向的天空色**
-    // （雾收敛到天边，接缝最干净）；场景无天空 / 关掉该开关时退回本字段。
-    // 本字段可取 SkyCommand::ElevationFogColor()（CPU 推导的地平线天光色，作参考/无天空时用）。
+    // 雾色（内散射色，线性 HDR）。**仅当无天空纹理 / use_sky_color=false 时**才用。
+    // 无天空时可以取 SkyCommand::ElevationFogColor()（CPU 推导的地平线天光色）。
     Color color = {0.6f, 0.68f, 0.8f, 1.0f};
 
-    // true（默认）：收敛色 = 该像素方向的天空色（**单独一趟**渲的「大气色天空」，
-    //   不含日月盘/光晕；不是 MRT 附件）——与天空严格一致，最自然。
-    // false：用上面的 color 常量。
+    // true（默认）：收敛色 = 该像素方向的天空色（sky 单独一趟渲的**大气色**纹理，
+    //   不含日月盘/光晕；不是 MRT 附件）——与天边无缝，推荐。场景无天空时退回 color。
+    // false：始终用上面的 color 常量。
     bool use_sky_color = true;
 };
 
@@ -1658,10 +1660,10 @@ struct RenderCommandList {
     //            仅作调试/ before-after 对比用）。
     bool tone_mapping = true;
 
-    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在「3D 不透明 pass + MSAA
-    // resolve」之后、「highlight / bloom / tone map」之前插入一次全屏 fog pass
-    //（读场景颜色 + MRT#1 场景深度 + 单独一趟渲的天空色，在线性 HDR 域就地合成；
-    //  所在位置、影响范围与前置条件详见 ElevationFogConfig 头注释）。
+    // 远景仰角雾（空气透视）。有值且 enabled=true 时，在 3D 绘制之后、HDR 后处理
+    //（highlight/bloom/tone map）之前，就地 alpha 混合进已有的 3D HDR FBO ——
+    // **不持有自己的 FBO**，读 MRT#1 场景深度 + 大气色天空纹理。
+    // 位置/影响/前置条件详见 ElevationFogConfig。
     // 未设置 / enabled=false 时零开销。**需要 tone_mapping=true**，否则 CHECK 报错。
     std::optional<ElevationFogConfig> elevation_fog;
 

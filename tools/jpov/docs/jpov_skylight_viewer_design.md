@@ -54,8 +54,9 @@
 ### 3.1 右列：远景仰角雾（空气透视）
 
 把「低仰角 + 大距离」的远处像素朝雾色收敛，使远景融进天边。**位置**：一次全屏后处理，
-在 3D pass + MSAA resolve 之后、highlight/bloom/tone map **之前**（线性 HDR 域就地合成）；
-详见 `render_command.h` 的 `ElevationFogConfig` 头注释。
+在 3D 绘制之后、HDR 后处理（highlight/bloom/tone map）**之前**，用 alpha 混合**就地**叠进
+已有的 3D HDR FBO（不持有自己的 FBO）；读场景深度 + 天空大气色纹理（收敛色，
+天空像素收敛到自身 ⇒ 几乎不变）；详见 `render_command.h` 的 `ElevationFogConfig` 头注释。
 
 | 控件（右列） | 范围 | 说明 |
 |---|---|---|

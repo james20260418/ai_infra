@@ -240,7 +240,7 @@ struct SkyDegrees {
     float elev_fog_inner_deg = 3.0f;   // 仰角带内边界（度）
     float elev_fog_outer_deg = 25.0f;  // 仰角带外边界（度；宽软边，避免硬边）
     float elev_fog_density = 1.5f;     // σ_max
-    float elev_fog_gain = 1.0f;        // 雾色增益（乘在推导出的地平线天光色上；仅 use_sky=false 时生效）
+    float elev_fog_gain = 1.0f;        // 雾色增益（仅 use_sky=false 时生效）
     bool  elev_fog_use_sky = true;     // 收敛色取「该像素方向的天空色」（推荐）；false=用推导常量色
 };
 
