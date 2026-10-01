@@ -216,6 +216,16 @@ public:
         return neighbors_[idx];
     }
 
+    // 某点的关联邻居**初始距离** |pij(0)| 列表（与 neighbors_of 同构同序）。
+    // 纯查询；调试/单测用。它是力公式 §2.3 的分母；因此**随即时缩放一起缩放**
+    // （旋转 / 平移不改变模长）。
+    // Pre-condition: idx < sim_point_count()。
+    const std::vector<float>& neighbor_initial_distances_of(size_t idx) const {
+        CHECK_LT(idx, nb_init_dist_.size())
+            << "neighbor_initial_distances_of 索引越界: " << idx;
+        return nb_init_dist_[idx];
+    }
+
     // 关联表是否严格对称（i 关联 j ⇔ j 关联 i）——牛顿第三定律的必要条件。
     // 纯查询，O(Σ neighbors)；调试/单测用。
     bool neighbors_symmetric() const {
@@ -401,6 +411,8 @@ private:
     std::vector<std::vector<uint32_t>> neighbors_;
     // nb_init_dist_[i][k] = |pij(0)| = 点 i 与其第 k 个关联点 j = neighbors_[i][k]
     // 的**初始**距离（力的公式 §2.3 的分母用）。与 neighbors_ 同构同序。
+    // 注：“初始”指“当前绑定姿态下”（Init 时建立；之后被 ApplyScaling 随缩放一起缩放——
+    //     因为它是绑定的 offset 的模长，理应随绑定姿态缩放；旋转 / 平移不改变模长）。
     std::vector<std::vector<float>> nb_init_dist_;
 
     // 仿真点集合的**绑定姿态位置**（与 sim_positions_ 同序同长，含虚拟顶点）。

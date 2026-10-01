@@ -421,6 +421,13 @@ void Simulator::ApplyScaling(float factor, const geom::Vec3<float>& pivot) {
     for (geom::Vec3<float>& p : bind_positions_) {
         p = scale(p);
     }
+    // 绑定 offset 的**模长缓存**（= 力的分母 |pij(0)|）同步缩放：它是绑定的 offset 的模长，
+    // 理应随绑定姿态缩放（否则分母陈旧而与分子 p0 不一致）。旋转 / 平移不改模长，不此处处理。
+    for (std::vector<float>& row : nb_init_dist_) {
+        for (float& d : row) {
+            d *= factor;
+        }
+    }
     // 速度**不**参与缩放。
     ExtractMesh();
 }

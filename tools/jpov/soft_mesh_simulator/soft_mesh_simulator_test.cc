@@ -1091,9 +1091,16 @@ TEST(SoftMeshSimulatorTest, ApplyRotationRotatesPositionsAndVelocity) {
     const geom::Vec3<float> pivot(0.1f, 0.0f, 0.0f);
     const double t_before = sim.time();
     const size_t steps_before = sim.step_count();
+    const std::vector<float> nd_before = sim.neighbor_initial_distances_of(0);
     sim.ApplyRotation(Axis::kZ, 90.0f, pivot);
     EXPECT_DOUBLE_EQ(sim.time(), t_before);      // 不重置仿真
     EXPECT_EQ(sim.step_count(), steps_before);
+    // 旋转不改变 |pij(0)| 模长 ⇒ 邻居初始距离表不变。
+    const std::vector<float>& nd_after = sim.neighbor_initial_distances_of(0);
+    ASSERT_EQ(nd_after.size(), nd_before.size());
+    for (size_t k = 0; k < nd_before.size(); ++k) {
+        EXPECT_FLOAT_EQ(nd_after[k], nd_before[k]);
+    }
 
     // Rz(90): 相对 pivot 的 (x,y,z) → (-y, x, z)。
     for (size_t i = 0; i < sim.sim_point_count(); ++i) {
@@ -1141,6 +1148,21 @@ TEST(SoftMeshSimulatorTest, ApplyScalingScalesPositionsKeepsVelocity) {
     EXPECT_NEAR(a.x(), 0.0f, 1e-4f);
     EXPECT_NEAR(a.y(), -sim.gravity(), 1e-4f);
     EXPECT_NEAR(a.z(), 0.0f, 1e-4f);
+}
+
+// 绑定 offset 的**模长缓存**（|pij(0)|，力的分母）随缩放一起缩放（旋转/平移不变）——
+// 否则分母陈旧、与分子 p0 不一致。
+TEST(SoftMeshSimulatorTest, ApplyScalingScalesNeighborInitialDistances) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());  // d=0.1，三角形三边均在 d 内 ⇒ 顶点 0 有 2 个邻居
+    const std::vector<float> before = sim.neighbor_initial_distances_of(0);
+    ASSERT_FALSE(before.empty());
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    const std::vector<float>& after = sim.neighbor_initial_distances_of(0);
+    ASSERT_EQ(after.size(), before.size());
+    for (size_t k = 0; k < before.size(); ++k) {
+        EXPECT_NEAR(after[k], before[k] * 2.0f, 1e-6f);
+    }
 }
 
 TEST(SoftMeshSimulatorTest, ApplyScalingRejectsNonPositiveFactor) {
