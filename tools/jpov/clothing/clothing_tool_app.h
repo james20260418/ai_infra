@@ -16,6 +16,8 @@
 //       ④ 删除「绝对平移」输入框——平移 / 旋转 / 缩放改为**即时作用于仿真器状态**
 //          （见 Simulator::ApplyTranslation/ApplyRotation/ApplyScaling）：仿真进行中也能调，
 //          不中断（位置与绑定姿态同步变换；速度只随旋转转动）。
+//       ⑤ Step 2：**人体排斥**（glb_repulsion 设计）——右上角开关 + buffer(0~0.1m，默认 0.01)；
+//          衣服被人体顶开、不穿模。另加全局「速度上限」兑底（低质量数值失稳）。
 //     ⚠️ 人体排斥（Step 2）尚未接入：本阶段只有重力 + 弹簧 + 地面。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -189,6 +191,9 @@ public:
     float damping_ui_ = Simulator::kVelocityDamping;
     // 全局速度上限（m/s；0 = 不限）。低质量数值失稳的兑底（danis 2026-10-01）。
     float max_speed_ui_ = kDefaultMaxSpeed;
+    // 人体排斥（Step 2）：开关 + buffer（米，离开体表的最小距离）。
+    bool body_repulsion_ui_ = true;
+    float body_buffer_ui_ = Simulator::kDefaultBodyBuffer;
 
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
@@ -221,6 +226,18 @@ public:
             StepSimulationOnce();
         }
         return true;
+    }
+
+    // 把衣服整体平移 delta（等价于面板平移一次）。供 headless 预摆位 / 脚本用。
+    // 场景未就绪（sims_ 空）时 no-op。
+    void TranslateCloth(const jpov::Vec3f& delta) {
+        if (sims_.empty()) {
+            return;
+        }
+        for (Simulator& sim : sims_) {
+            sim.ApplyTranslation(delta);
+        }
+        SyncSimsToCloth();
     }
 
     // 后台初始化泵（每帧，在主/GL 线程调用；供 OneIteration 与 headless main 循环使用）。
@@ -273,6 +290,16 @@ public:
 
         // 建仿真器（绑定姿态 = 启动几何）。
         InitSimulators();
+
+        // 人体排斥（Step 2）：把后台建好的「人体最近三角形」匹配器借给各仿真器。
+        // 匹配器在 init_ 里（比 sims_ 活得久：init_ 声明在 sims_ 之前 ⇒ 后析构）。
+        if (init_.body_matcher().valid()) {
+            for (Simulator& sim : sims_) {
+                sim.SetBodyMatcher(&init_.body_matcher().matcher.value());
+            }
+        } else {
+            LOG(WARNING) << "人体匹配器不可用，人体排斥将无效果";
+        }
 
         gpu_uploaded_ = true;
         LOG(INFO) << "人体 reference: " << body_path_ << "（" << body_.size()
@@ -418,6 +445,8 @@ private:
         sim->SetVelocityDamping(damping_ui_);
         sim->SetGroundY(ground_y_);
         sim->SetMaxSpeed(max_speed_ui_);
+        sim->SetBodyRepulsionEnabled(body_repulsion_ui_);
+        sim->SetBodyBuffer(body_buffer_ui_);
     }
 
     // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
@@ -441,6 +470,12 @@ private:
             }
             if (sim.max_speed() != max_speed_ui_) {
                 sim.SetMaxSpeed(max_speed_ui_);
+            }
+            if (sim.body_repulsion_enabled() != body_repulsion_ui_) {
+                sim.SetBodyRepulsionEnabled(body_repulsion_ui_);
+            }
+            if (sim.body_buffer() != body_buffer_ui_) {
+                sim.SetBodyBuffer(body_buffer_ui_);
             }
         }
     }
@@ -784,7 +819,8 @@ private:
     // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
     // 这样窗口 resize 时右上角面板始终贴住右上角。
     //
-    // 行：标题(1) + 重力/质量/力系数/衰减 滑条(4) + 按钮行(1) + 状态行(2) = 8。
+    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1) + buffer(1)
+    //     + 按钮行(1) + 状态行(2) = 11。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
         const float kMargin  = 12.0f;
@@ -794,7 +830,7 @@ private:
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y  = kMargin;
-        constexpr int kRows = 9;
+        constexpr int kRows = 11;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
@@ -841,6 +877,16 @@ private:
         ui_.SliderFloat("速度上限 (m/s, 0=不限)", &max_speed_ui_,
                         jpov::UiRect{{left, row_y}, {row_w, kRowH}},
                         0.0f, 100.0f, /*decimal_places*/0);
+        row_y += step_y;
+
+        // ---- 人体排斥：开关 + buffer（离开体表的最小距离）----
+        ui_.Checkbox("人体排斥", &body_repulsion_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+        ui_.SliderFloat("排斥 buffer (m)", &body_buffer_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinBodyBuffer, Simulator::kMaxBodyBuffer,
+                        /*decimal_places*/3);
         row_y += step_y;
 
         // ---- 按钮行：[暂停/继续] [重置衣服] ----
@@ -933,6 +979,16 @@ private:
         LOG(INFO) << "场景包围盒 [" << bounds.min[0] << "," << bounds.min[1] << ","
                   << bounds.min[2] << "] ~ [" << bounds.max[0] << "," << bounds.max[1]
                   << "," << bounds.max[2] << "]，初始 R=" << view_.R;
+        if (body_.bounds_valid) {
+            LOG(INFO) << "  人体包围盒 [" << body_.bounds_min[0] << "," << body_.bounds_min[1]
+                      << "," << body_.bounds_min[2] << "] ~ [" << body_.bounds_max[0]
+                      << "," << body_.bounds_max[1] << "," << body_.bounds_max[2] << "]";
+        }
+        if (cloth_.bounds_valid) {
+            LOG(INFO) << "  衣服包围盒 [" << cloth_.bounds_min[0] << "," << cloth_.bounds_min[1]
+                      << "," << cloth_.bounds_min[2] << "] ~ [" << cloth_.bounds_max[0]
+                      << "," << cloth_.bounds_max[1] << "," << cloth_.bounds_max[2] << "]";
+        }
     }
 
     // 后台初始化进度页：整屏黑底（不透明）+ 居中白字。尺寸用**本帧窗口尺寸**。

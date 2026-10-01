@@ -17,6 +17,9 @@
 
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -1200,6 +1203,109 @@ TEST(SoftMeshSimulatorTest, SetMaxSpeedRejectsNegative) {
     Simulator sim;
     sim.Init(MakeTri());
     EXPECT_DEATH(sim.SetMaxSpeed(-1.0f), "");
+}
+
+// ==================== 人体排斥（ApplyBodyRepulsion / SetBody*）====================
+
+// 由 MeshData 抽三角形 → 建「最近三角形」匹配器（与 clothing_init 同做法，供单测）。
+// local_distance/grid_size 取得比测试盒大/细，保证体内/贴面点都能命中。
+std::unique_ptr<geom::TriangleMatcher3d<double>> MakeMatcherFromMesh(
+    const jpov::MeshData& mesh) {
+    std::vector<geom::Triangle3<double>> tris;
+    const std::vector<jpov::Vec3f>& pos = mesh.positions;
+    const auto add = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+        const geom::Vec3<double> a(pos[i0].x(), pos[i0].y(), pos[i0].z());
+        const geom::Vec3<double> b(pos[i1].x(), pos[i1].y(), pos[i1].z());
+        const geom::Vec3<double> c(pos[i2].x(), pos[i2].y(), pos[i2].z());
+        std::optional<geom::Triangle3<double>> t =
+            geom::Triangle3<double>::Create(a, b, c);
+        if (t.has_value()) {
+            tris.push_back(t.value());
+        }
+    };
+    if (!mesh.indices.empty()) {
+        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            add(mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
+        }
+    } else {
+        for (size_t i = 0; i + 2 < pos.size(); i += 3) {
+            add(static_cast<uint32_t>(i), static_cast<uint32_t>(i + 1),
+                static_cast<uint32_t>(i + 2));
+        }
+    }
+    return std::make_unique<geom::TriangleMatcher3d<double>>(0.05, 0.01,
+                                                             std::move(tris));
+}
+
+// 造一个「人体」= 边长 0.2m 的立方体（±0.1）。
+jpov::MeshData MakeBodyBox() { return jpov::MeshData::MakeBox(0.1f, 0.1f, 0.1f); }
+
+// 把顶点的第 0 个点平移到 x（其余点跟着平移，但远离盒子 ⇒ 不受排斥），跑一步看结果。
+float RunRepulsionAndGetV0X(const geom::TriangleMatcher3d<double>& matcher,
+                            float x, float buffer, bool enabled) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(0.0f);       // 隔离重力
+    sim.SetSpringEnabled(false);  // 隔离弹簧（MakeTri 无邻居，本不需要；显式关更明确）
+    sim.SetBodyMatcher(&matcher);
+    sim.SetBodyRepulsionEnabled(enabled);
+    sim.SetBodyBuffer(buffer);
+    sim.ApplyTranslation(geom::Vec3<float>(x, 0.0f, 0.0f));
+    sim.Step(Simulator::kDefaultDt);
+    return sim.sim_positions()[0].x();
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionPushesInsidePointToSurfacePlusBuffer) {
+    const jpov::MeshData box = MakeBodyBox();  // +X 面在 x=0.1
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.09,0,0) 在体内、离 +X 面 0.01 ⇒ 应被推到 0.1 + buffer(0.01) = 0.11。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.01f, true), 0.11f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionPushesNearOutsidePointToBuffer) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.105,0,0) 在体外、离面 0.005 < buffer ⇒ 顶到 0.1 + 0.01 = 0.11。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.105f, 0.01f, true), 0.11f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionLeavesFarOutsidePointAlone) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.12,0,0) 在体外、离面 0.02 > buffer ⇒ 不动。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.12f, 0.01f, true), 0.12f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionZeroBufferPushesToSurface) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // buffer = 0：体内点被推到刚好贴表面 x=0.1。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.0f, true), 0.1f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionDisabledIsNoOp) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 关开关：即使点在体内也不排斥。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.01f, false), 0.09f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionWithoutMatcherIsNoOp) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(0.0f);
+    sim.SetBodyRepulsionEnabled(true);   // 开但没给 matcher
+    sim.SetBodyBuffer(0.01f);
+    sim.ApplyTranslation(geom::Vec3<float>(0.09f, 0.0f, 0.0f));
+    sim.Step(Simulator::kDefaultDt);     // 不得崩
+    EXPECT_NEAR(sim.sim_positions()[0].x(), 0.09f, 1e-4f);
+}
+
+TEST(SoftMeshSimulatorTest, SetBodyBufferRejectsOutOfRange) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetBodyBuffer(-0.001f), "");
+    EXPECT_DEATH(sim.SetBodyBuffer(0.11f), "");
 }
 
 }  // namespace

@@ -45,6 +45,10 @@ struct CliOptions {
     float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
     float damping = jpov::soft_mesh_simulator::Simulator::kVelocityDamping;
     float max_speed = jpov::clothing::kDefaultMaxSpeed;  // --max_speed 全局速度上限（m/s；0 = 不限）
+    int   body_repulsion = 1;         // --body_repulsion 0/1（人体排斥开关）
+    float body_buffer = jpov::soft_mesh_simulator::Simulator::kDefaultBodyBuffer;  // --body_buffer（m）
+    bool  has_cloth_offset = false;   // 是否给了 --cloth_offset
+    float cloth_offset[3] = {0.0f, 0.0f, 0.0f};  // --cloth_offset dx dy dz（米）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 → WARNING 忽略（不崩溃）。
@@ -127,6 +131,38 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--max_speed 缺少数值参数，忽略";
+            }
+        } else if (arg == "--body_repulsion") {
+            if (i + 1 < argc) {
+                opt.body_repulsion = std::atoi(argv[++i]);
+                if (opt.body_repulsion != 0 && opt.body_repulsion != 1) {
+                    LOG(FATAL) << "--body_repulsion 必须是 0 或 1，got "
+                               << opt.body_repulsion;
+                }
+            } else {
+                LOG(WARNING) << "--body_repulsion 缺少数值参数，忽略";
+            }
+        } else if (arg == "--body_buffer") {
+            if (i + 1 < argc) {
+                opt.body_buffer = std::atof(argv[++i]);
+                if (!(opt.body_buffer >= jpov::soft_mesh_simulator::Simulator::kMinBodyBuffer &&
+                      opt.body_buffer <= jpov::soft_mesh_simulator::Simulator::kMaxBodyBuffer)) {
+                    LOG(FATAL) << "--body_buffer 必须在 ["
+                               << jpov::soft_mesh_simulator::Simulator::kMinBodyBuffer << ", "
+                               << jpov::soft_mesh_simulator::Simulator::kMaxBodyBuffer
+                               << "] 内，got " << opt.body_buffer;
+                }
+            } else {
+                LOG(WARNING) << "--body_buffer 缺少数值参数，忽略";
+            }
+        } else if (arg == "--cloth_offset") {
+            if (i + 3 < argc) {
+                opt.cloth_offset[0] = std::atof(argv[++i]);
+                opt.cloth_offset[1] = std::atof(argv[++i]);
+                opt.cloth_offset[2] = std::atof(argv[++i]);
+                opt.has_cloth_offset = true;
+            } else {
+                LOG(WARNING) << "--cloth_offset 需要 3 个数值（dx dy dz），忽略";
             }
         } else if (arg == "--window_width") {
             if (i + 1 < argc) {
@@ -229,6 +265,8 @@ int main(int argc, char** argv) {
         opt.force_coeff);
     app.damping_ui_ = opt.damping;
     app.max_speed_ui_ = opt.max_speed;
+    app.body_repulsion_ui_ = (opt.body_repulsion != 0);
+    app.body_buffer_ui_ = opt.body_buffer;
 
     if (opt.ui_shot) {
         // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。
@@ -240,6 +278,13 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
+        // 可选：出图前先把衣服预摆位（headless 复现“穿衣服”用；等价面板平移）。
+        if (opt.has_cloth_offset) {
+            app.TranslateCloth(jpov::Vec3f(opt.cloth_offset[0], opt.cloth_offset[1],
+                                           opt.cloth_offset[2]));
+            LOG(INFO) << "衣服预平移 [" << opt.cloth_offset[0] << ","
+                      << opt.cloth_offset[1] << "," << opt.cloth_offset[2] << "]";
+        }
         // 可选：出图前推进 N 步仿真（验证下坠 / 落地；交互窗口由「继续仿真」按钮驱动）。
         if (opt.sim_steps > 0) {
             app.AdvanceSimulationSteps(opt.sim_steps);

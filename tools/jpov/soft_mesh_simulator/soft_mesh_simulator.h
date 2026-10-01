@@ -53,6 +53,7 @@
 
 #include <glog/logging.h>
 
+#include "geom/3d/triangle_matcher_3d.h"
 #include "geom/common/vec.h"
 #include "tools/jpov/interface/mesh.h"
 
@@ -153,6 +154,12 @@ public:
     // 每个外部步（1/60 s）内的子步数。DESIGN.md §3.4：30 个子步（暴力解）。
     // 实际积分的步长 = dt / kSubsteps = 1/(60*30) = 5.5556e-4 s。
     static constexpr int kSubsteps = 30;
+
+    // ── 人体排斥：buffer 值域与默认（Danis 2026-10-01 指定）──
+    // buffer = 排斥目标离人体表面的最小距离（米）。0 = 直接贴表面。
+    static constexpr float kMinBodyBuffer = 0.0f;
+    static constexpr float kMaxBodyBuffer = 0.1f;
+    static constexpr float kDefaultBodyBuffer = 0.01f;
 
     // 默认地面高度 y（米）。地面是水平面（法线 +Y），低于它的顶点被投影回去。
     // 默认值 -3 与查看器地面 quad 的默认高度一致（view_config.h::MakeGroundQuad）。
@@ -330,6 +337,27 @@ public:
     // Pre-condition（不满足即 LOG(FATAL)）：v_max 有限且 >= 0。
     void SetMaxSpeed(float v_max);
 
+    // ── 人体排斥（可选；见 james_pm/glb_repulsion.txt 的设计）──
+    //
+    // 语义：每子步末（地面投影之后）对每个仿真点：查「最近的人体三角形」，若在**体内**
+    //   或离表面 < buffer，则把它**投影**到「最近点 + buffer·外向法线」（= 离开体表
+    //   buffer 距离）；并把指向体内的法向速度分量清零（同地面投影：纯位置投影、不注入动能）。
+    // 用途：让衣服被人体“撑开”，不嵌进身体；buffer 防衣服彻底贴合（0 = 贴着表面）。
+    //
+    // 法线方向：判定“体内/体外”用最近三角形的外法线（点在外法线负侧=体内）。⇒ **前提：
+    //   人体网格法线朝外且几何相对光滑**（与本工具使用的人体资产一致）。
+    //
+    // 命中范围：受传入 matcher 的 local_distance 限制（本工具 = 5cm）；离体表更远的点
+    //   不会被排斥（靠衣物整体拉扯解决）——故 buffer 设到 >5cm 时效果会被 5cm 查询半径截断。
+    //
+    // matcher：外部拥有，必须比本对象**活得久**（本类只借用，不拥有；传 nullptr = 关查询）。
+    void SetBodyMatcher(const geom::TriangleMatcher3d<double>* matcher);
+    bool body_repulsion_enabled() const { return body_repulsion_enabled_; }
+    void SetBodyRepulsionEnabled(bool enabled) { body_repulsion_enabled_ = enabled; }
+    float body_buffer() const { return body_buffer_; }
+    // Pre-condition（不满足即 LOG(FATAL)）：buffer 有限且 ∈ [kMinBodyBuffer, kMaxBodyBuffer]。
+    void SetBodyBuffer(float buffer);
+
     // ── 即时操作：对**当前仿真状态**就地施加变换（面板 / 交互驱动）──
     //
     // 用途（Danis 2026-10-01）：穿衣工具的左上面板要在**仿真进行中**也能改变这件衣服的
@@ -436,6 +464,11 @@ private:
     // 全局速度上限（m/s，0 = 不限）。见 max_speed()。
     float max_speed_ = 0.0f;
 
+    // 人体排斥（见 SetBodyMatcher / SetBodyBuffer / SetBodyRepulsionEnabled）。
+    const geom::TriangleMatcher3d<double>* body_matcher_ = nullptr;  // 借用（不拥有）
+    bool body_repulsion_enabled_ = false;
+    float body_buffer_ = kDefaultBodyBuffer;
+
     float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
     double time_ = 0.0;        // 已仿真时间（秒）
@@ -457,6 +490,10 @@ private:
 
     // 全局速度上限：把每个点的速度截到 max_speed_（>0 时）。子步末调用（见 .cc）。
     void ClampMaxSpeed();
+
+    // 对单点做人体排斥（改 x / v）。无 matcher / 开关关 / 查询未命中则不动作。见 .cc。
+    // Pre-condition: x != nullptr 且 v != nullptr。
+    void ApplyBodyRepulsion(geom::Vec3<float>* x /*inout*/, geom::Vec3<float>* v /*inout*/) const;
 
     // ⭐ 该点在某位置受到的**总加速度** a(x) = (重力 + 弹簧力场) / m。
     //

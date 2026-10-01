@@ -233,6 +233,9 @@ void Simulator::IntegrateSubstep(double dt_sub) {
             }
         }
 
+        // ── 人体排斥（可选；纯位置投影，同地面语义）──
+        ApplyBodyRepulsion(&x_new, &v_new);
+
         sim_positions_[i] = x_new;
         sim_velocities_[i] = v_new;
     }
@@ -257,6 +260,63 @@ void Simulator::ClampMaxSpeed() {
             const float scale = max_speed_ / std::sqrt(sp_sq);
             v = v * scale;
         }
+    }
+}
+
+// 人体排斥（见 .h 的语义与前提）。每子步逐点调用；纯查询 + 位置投影。
+void Simulator::ApplyBodyRepulsion(geom::Vec3<float>* x /*inout*/,
+                                   geom::Vec3<float>* v /*inout*/) const {
+    CHECK(x != nullptr);
+    CHECK(v != nullptr);
+    if (!body_repulsion_enabled_ || body_matcher_ == nullptr) {
+        return;
+    }
+    const geom::Vec3<double> p(static_cast<double>((*x)[0]),
+                               static_cast<double>((*x)[1]),
+                               static_cast<double>((*x)[2]));
+    const std::vector<int>& candidates = body_matcher_->FindNearestTriangles(p);
+    if (candidates.empty()) {
+        return;  // 逃出体表查询半径（未命中）→ 不排斥
+    }
+    const std::vector<geom::Triangle3<double>>& tris = body_matcher_->triangles();
+
+    // 在候选里找**真正最近**的三角形（体素淘汰表保证真最近邻在其中）。
+    double best_sq = std::numeric_limits<double>::infinity();
+    int best_tri = -1;
+    geom::Vec3<double> best_cp(0.0, 0.0, 0.0);
+    for (int tri_index : candidates) {
+        CHECK_GE(tri_index, 0);
+        CHECK_LT(tri_index, static_cast<int>(tris.size()));
+        const geom::Vec3<double> cp = tris[tri_index].ClosestPointTo(p);
+        const double dsq = (p - cp).Sqr();
+        if (dsq < best_sq) {
+            best_sq = dsq;
+            best_tri = tri_index;
+            best_cp = cp;
+        }
+    }
+    if (best_tri < 0) {
+        return;
+    }
+    const geom::Vec3<double>& n = tris[best_tri].normal();
+    // 有符号距离：沿外法线为正 = 体外；为负 = 体内。
+    const double signed_d = (p - best_cp).Dot(n);
+    if (signed_d >= static_cast<double>(body_buffer_)) {
+        return;  // 在体外且离表面已超过 buffer → 无需排斥
+    }
+    // 投影到「最近点 + buffer·外法线」：体内点被推到体表外 buffer；体外过近的点被顶到 buffer 处。
+    const geom::Vec3<double> target = best_cp + n * static_cast<double>(body_buffer_);
+    *x = geom::Vec3<float>(static_cast<float>(target.x()),
+                           static_cast<float>(target.y()),
+                           static_cast<float>(target.z()));
+    // 去掉**指向体内**的法向速度分量（同地面投影：纯位置投影、不注入动能）。
+    const float nx = static_cast<float>(n.x());
+    const float ny = static_cast<float>(n.y());
+    const float nz = static_cast<float>(n.z());
+    const float vn = (*v)[0] * nx + (*v)[1] * ny + (*v)[2] * nz;
+    if (vn < 0.0f) {
+        *v = geom::Vec3<float>((*v)[0] - nx * vn, (*v)[1] - ny * vn,
+                               (*v)[2] - nz * vn);
     }
 }
 
@@ -371,6 +431,20 @@ void Simulator::SetMaxSpeed(float v_max) {
     CHECK(std::isfinite(v_max)) << "SetMaxSpeed 要求有限值，got " << v_max;
     CHECK_GE(v_max, 0.0f) << "SetMaxSpeed 要求 v_max >= 0（0 = 不限），got " << v_max;
     max_speed_ = v_max;
+}
+
+void Simulator::SetBodyMatcher(const geom::TriangleMatcher3d<double>* matcher) {
+    // 允许 nullptr（= 关查询）；借用的指针，生命周期由调用方保证（见 .h）。
+    body_matcher_ = matcher;
+}
+
+void Simulator::SetBodyBuffer(float buffer) {
+    CHECK(std::isfinite(buffer)) << "SetBodyBuffer 要求有限值，got " << buffer;
+    CHECK_GE(buffer, kMinBodyBuffer)
+        << "SetBodyBuffer 要求 buffer >= " << kMinBodyBuffer << "，got " << buffer;
+    CHECK_LE(buffer, kMaxBodyBuffer)
+        << "SetBodyBuffer 要求 buffer <= " << kMaxBodyBuffer << "，got " << buffer;
+    body_buffer_ = buffer;
 }
 
 // ── 即时操作（见 .h 的语义说明）──
