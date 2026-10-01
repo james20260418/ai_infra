@@ -184,6 +184,32 @@ cc_library(
     linkstatic = 1,
 )
 
+# HorizonFogRenderer — 远景仰角雾（空气透视）：一次全屏后处理（独立子渲染器）。
+# 不持有自己的 FBO：用 alpha 混合就地合成到调用方当前绑定的 3D HDR FBO。
+cc_library(
+    name = "horizon_fog_renderer",
+    srcs = ["horizon_fog/horizon_fog_renderer.cc"],
+    hdrs = [
+        "horizon_fog/horizon_fog_renderer.h",
+        # 雾的着色器（与 renderer 平级，前缀 horizon_fog_）
+        "horizon_fog/horizon_fog_shader.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # GltfSaver — CPU 资产（MeshData + 材质 + 可选骨架）→ 自洽 .glb（GL-free）
 cc_library(
     name = "gltf_saver",
@@ -217,6 +243,7 @@ cc_library(
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
         ":sky_renderer",
+        ":horizon_fog_renderer",
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",

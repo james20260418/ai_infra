@@ -193,6 +193,10 @@ private:
     void EnsureBloomChain(int full_w, int full_h, int levels);
     void DestroyBloomChain();
 
+    // 「大气色天空」离屏 FBO（远景仰角雾的收敛色用；单独一趟天空绘制，不含日月盘/光晕）。
+    void EnsureSkyColorFBO(int w, int h);
+    void DestroySkyColorFBO();
+
     float mvp_[16];
     ShaderManager shader_mgr_;
 
@@ -227,6 +231,12 @@ private:
     std::vector<int> bloom_level_h_;
     unsigned int bloom_work_fbo_ = 0, bloom_work_tex_ = 0;
     int bloom_work_w_ = 0, bloom_work_h_ = 0;
+
+    // 「天空色」纹理（RGBA16F，单采样，与 3D FBO 同尺寸）：大气色天空（不含日月盘/光晕），
+    // 供远景仰角雾当收敛色。为何不用 MRT 附件：GL 规范里「某 shader 未写该颜色附件」
+    // 其内容是未定义的，会被之后画的几何 shader 写成垃圾（实测 NaN）。
+    unsigned int sky_fbo_ = 0, sky_tex_ = 0;
+    int sky_w_ = 0, sky_h_ = 0;
     // 上采样累加后，最终辉光所在的 acc 纹理（L0 分辨率），供 composite 采样。
     unsigned int bloom_final_tex_ = 0;
     // 上采样累加用的乒乓缓冲（acc_a/acc_b 各半分辨率，随链一起分配）。
