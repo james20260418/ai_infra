@@ -74,6 +74,19 @@ cc_test(
     linkstatic = 1,
 )
 
+# 远景仰角雾雾色推导单测（SkyCommand::ElevationFogColor()）：昼夜/浊度/季节影响 + 与三色地平端一致。
+cc_test(
+    name = "elevation_fog_color_test",
+    srcs = ["elevation_fog_color_test.cc"],
+    deps = [
+        ":render_command",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # SkeletonTypes — 骨架蒙皮 CPU 侧数据定义（SkeletonType/SkeletonPose/SkinnedInstanceState）
 # 被 render_command（SkinnedMeshCommand / DrawMeshWithSkeleton 引用）与 src/skeleton（GPU 管理器）共用。
 # 头里用到 geom::Quaternion（SkeletonPose.joint_rotation）、geom::math::Mat4（ComputeInverseBind）

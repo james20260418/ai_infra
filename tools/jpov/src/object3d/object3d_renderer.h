@@ -203,6 +203,7 @@ uniform vec3  uSunColor;     // 光颜色
 uniform float uSunIntensity;
 uniform int   uCascadeCount;          // 级联段数
 uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
+uniform float uCascadeBlendFraction;   // 级联间混合带宽度（占该级联跨度的比例，见 ShadowConfig::cascade_blend_fraction）
 uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = 线性深度，相对主视锥中心）
 uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj（用于把 world_pos 投影到 shadow map uv)
 uniform mat4  uShadowDepthVP[5];      // 各级联光空间线性深度矩阵（DepthProj*view，.z = 相对主视锥中心的线深）
@@ -404,7 +405,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
     float wshadow = 0.0;
 
     // 每个实际声明的级联：近端升 × 远端降的平滑权重（与相邻级联互补）。
-    // blend 宽度 = 该级联跨度的 15%。级联0 近端 / 末级联远端无邻居 → 恒 1。
+    // blend 宽度 = 该级联跨度 × uCascadeBlendFraction。级联0 近端 / 末级联远端无邻居 → 恒 1。
     //
     // ⚠️ 早退（重要）：权重 (wlo·whi) 只依赖 frag_dist，与 shadow map 采样无关。
     // 绝大多数片元只有 1~2 个级联权重非零（其余权重为 0，对 wsum/wshadow 贡献
@@ -413,7 +414,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
     // 贡献 = 0 · s），仅去掉纯浪费的采样。
     // 实测（默认 5 级联配置）：片元平均只 1.24 个级联权重非零，跳过约 75% 采样。
     if (uCascadeCount >= 1) {
-        float n = uCameraNear, f = uCascadeRanges[0]; float b = 0.15*(f-n);
+        float n = uCameraNear, f = uCascadeRanges[0]; float b = uCascadeBlendFraction*(f-n);
         float wlo = (uCascadeCount>=2) ? smoothstep(n - b, n + b, frag_dist) : 1.0;
         float whi = (uCascadeCount>=2) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
         float w0 = wlo * whi;
@@ -423,7 +424,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
         }
     }
     if (uCascadeCount >= 2) {
-        float n = uCascadeRanges[0], f = uCascadeRanges[1]; float b = 0.15*(f-n);
+        float n = uCascadeRanges[0], f = uCascadeRanges[1]; float b = uCascadeBlendFraction*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=3) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
         float w1 = wlo * whi;
@@ -433,7 +434,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
         }
     }
     if (uCascadeCount >= 3) {
-        float n = uCascadeRanges[1], f = uCascadeRanges[2]; float b = 0.15*(f-n);
+        float n = uCascadeRanges[1], f = uCascadeRanges[2]; float b = uCascadeBlendFraction*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=4) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
         float w2 = wlo * whi;
@@ -443,7 +444,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
         }
     }
     if (uCascadeCount >= 4) {
-        float n = uCascadeRanges[2], f = uCascadeRanges[3]; float b = 0.15*(f-n);
+        float n = uCascadeRanges[2], f = uCascadeRanges[3]; float b = uCascadeBlendFraction*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = (uCascadeCount>=5) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
         float w3 = wlo * whi;
@@ -453,7 +454,7 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
         }
     }
     if (uCascadeCount >= 5) {
-        float n = uCascadeRanges[3], f = uCascadeRanges[4]; float b = 0.15*(f-n);
+        float n = uCascadeRanges[3], f = uCascadeRanges[4]; float b = uCascadeBlendFraction*(f-n);
         float wlo = smoothstep(n - b, n + b, frag_dist);
         float whi = 1.0;
         float w4 = wlo * whi;

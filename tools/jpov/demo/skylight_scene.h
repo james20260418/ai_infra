@@ -233,6 +233,15 @@ struct SkyDegrees {
     float sun_azim_deg = 45.0f;        // ③ 天体方位角 [0,360)
     float moon_red = 0.0f;             // ④ 月色变红 [0,1] → moon_season（1=血月）
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
+    // ⑥ 远景仰角雾（空气透视）几何属性（雾色由天光推导，见 ElevationFogColor）。
+    bool  elev_fog_on = true;          // 开关
+    float elev_fog_start = 0.5f;       // 起雾距离（米；小场景默认小值使效果可见）
+    float elev_fog_full = 12.0f;       // 满雾距离（米）
+    float elev_fog_inner_deg = 3.0f;   // 仰角带内边界（度）
+    float elev_fog_outer_deg = 25.0f;  // 仰角带外边界（度；宽软边，避免硬边）
+    float elev_fog_density = 1.5f;     // σ_max
+    float elev_fog_gain = 1.0f;        // 雾色增益（仅 use_sky=false 时生效）
+    bool  elev_fog_use_sky = true;     // 收敛色取「该像素方向的天空色」（推荐）；false=用推导常量色
 };
 
 inline SkyLighting MakeSkyLighting(const SkyDegrees& d, bool tricolor_ambient) {
