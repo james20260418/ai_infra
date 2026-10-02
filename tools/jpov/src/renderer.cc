@@ -1954,26 +1954,33 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         }
 
         // ── texel snapping ──
-        // 量化「球心 − 半径」（即盒的 min 角）在光源 right/up 轴上的**世界投影**到纹素
-        // 整数倍（floor），盒再向 + 方向延伸 2r。这样无论相机/光照怎么变，恒有
-        //   [left, left+2r] ⊇ [c_wp−r, c_wp+r] ⊇ 切片投影
-        // ⇒ 保证装得住切片、**不会夹边**，故无需再另加纹素边距（若只量化球心，floor
-        // 会把球心往 − 推最多 1 纹素、可能使 + 侧切片溢出盒右边界而丢影）。
-        // 量化用**世界投影**（而非光空间坐标）是为了抵消光 view 的平移项 view[12/13]：
-        // 眼位随相机移动，只有量化世界投影才能让纹素网格锚定世界、不逐帧滑。
+        // 量化「盒 min 角 = 球心 − 盒半径」在光源 right/up 轴上的**世界投影**到纹素整数
+        // 倍（floor），盒再向 + 方向延伸 2·盒半径。量化用**世界投影**（而非光空间坐标）
+        // 是为了抵消光 view 的平移项 view[12/13]：眼位随相机移动，只有量化世界投影才能
+        // 让纹素网格锚定世界、不逐帧滑。
         //   world_proj(p) = right·p（right = view 第 0 行 = (view[0],view[4],view[8])）
         //   光空间 lx = world_proj(p) + view[12]（view 第 0 行的平移分量）
+        //
+        // ⚠️ 盒半径用**放大后的半径** R = r·N/(N−2)（N = map 尺寸，r = 切片包围球半径）。
+        //   为什么：min 角的 floor 会把盒往 − 推最多 1 个纹素，若盒边长仍取 2r，则 + 侧
+        //   最多会短 1 个纹素 ⇒ 切片最外缘一条窄带可能越出盒被丢影。取口径：
+        //     left_wp = floor((c−R)/t)·t，t = 2R/N；需 left_wp + 2R ≥ c + r。
+        //     由 left_wp > c−R−t 得 left_wp + 2R > c + R(1 − 2/N)，令其 ≥ c + r
+        //     ⟺ R ≥ r·N/(N−2)。取等号即可（严格覆盖）。N 很大时盒只多出 ~1 个纹素，
+        //     纹素尺寸随之 +O(1/N)，可忽略。
         const float map_size = static_cast<float>(shadow_fbos_[c].size);
-        const float texel_w = 2.0f * sphere_r / map_size;   // 单纹素世界边长（米）
+        const float box_r = (map_size > 2.0f)
+            ? sphere_r * (map_size / (map_size - 2.0f)) : sphere_r;
+        const float texel_w = 2.0f * box_r / map_size;      // 单纹素世界边长（米）
         const float c_wp_x = view[0]*sphere_c.x() + view[4]*sphere_c.y() + view[8]*sphere_c.z();
         const float c_wp_y = view[1]*sphere_c.x() + view[5]*sphere_c.y() + view[9]*sphere_c.z();
-        const float left_wp   = std::floor((c_wp_x - sphere_r) / texel_w) * texel_w;
-        const float bottom_wp = std::floor((c_wp_y - sphere_r) / texel_w) * texel_w;
+        const float left_wp   = std::floor((c_wp_x - box_r) / texel_w) * texel_w;
+        const float bottom_wp = std::floor((c_wp_y - box_r) / texel_w) * texel_w;
         // snap 后的世界投影 → 光空间坐标（+ view 平移项），供 BuildOrthoProj。
-        const float left   = left_wp              + view[12];
-        const float right  = left_wp   + 2.0f*sphere_r + view[12];
-        const float bottom = bottom_wp            + view[13];
-        const float top    = bottom_wp + 2.0f*sphere_r + view[13];
+        const float left   = left_wp            + view[12];
+        const float right  = left_wp + 2.0f*box_r + view[12];
+        const float bottom = bottom_wp          + view[13];
+        const float top    = bottom_wp + 2.0f*box_r + view[13];
         // 正交 near/far：只需覆盖「眼→整个阴影纵深」。被比较的深度来自
         // uShadowDepthVP（线性米，与这里无关），故 near/far 只影响裁剪 —— 取宽裕值
         // 即可，无需魔数。（原为 0.1 / 10000 两个写死的数。）
@@ -1984,7 +1991,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
         RendererMat4Mul(proj, view, shadow_vp_[c]);
 
-        // 该级联单纹素的世界覆盖边长（米）：盒跨度 = 2·球半径，故 = 2r/map 尺寸。
+        // 该级联单纹素的世界覆盖边长（米）：盒跨度 = 2·盒半径，故 = 2·box_r/map 尺寸。
         // 供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
         shadow_texel_world_[c] = texel_w;
 

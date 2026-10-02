@@ -22,10 +22,11 @@ int main() {
     jpov_sun_shadow::SunShadowApp app(cfg);
     app.Init();
 
-    // 平板：扁 box，front=4 / up=0.1 / left=4（8×8 米地面）。
+    // 地面：扁 box，front=400 / up=0.1 / left=400（800×800 米开阔地面，
+    // 远到看不见边缘，避免露出地平线外的黑底）。
     app.ground_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
-        /*front_half_width*/ 4.0f, /*up_half_width*/ 0.1f,
-        /*left_half_width*/ 4.0f));
+        /*front_half_width*/ 400.0f, /*up_half_width*/ 0.1f,
+        /*left_half_width*/ 400.0f));
     // 立柱：竖直 box，front=0.5 / up=1.0 / left=0.5（1×1×2 米）。
     app.pillar_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
         /*front_half_width*/ 0.5f, /*up_half_width*/ 1.0f,

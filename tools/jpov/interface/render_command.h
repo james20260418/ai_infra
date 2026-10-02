@@ -636,7 +636,7 @@ struct ElevationFogConfig {
 //   fade_start/fade_end 定义距相机距离区间，在此区间内影子强度线性衰减到 0
 //   （fade_end 之后无影子）。淡出的是"影子强度"，独立于太阳光 intensity。
 //
-// ShadowConfig::Default() 提供一份面向开放世界场景的通用配置（3 段）。
+// ShadowConfig::Default() 提供一份面向开放世界场景的通用配置（默认 5 段）。
 // 小场景用默认值即可：近段覆盖全场景，效果等价单张 shadow map。
 //
 // Pre-condition: 由 JPOV::Init() → Renderer::Init 时校验（ValidateShadowConfig），
@@ -676,9 +676,9 @@ struct ShadowConfig {
     //     其中
     //       texelW_c  = 该级联正交盒单边跨度 / cascade_sizes[c]（米）
     //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）。
-    //                   正交盒现由「视锥切片包围球」定（边长 = 2·球半径），故
-    //                   texelW_c = 2·球半径 / cascade_sizes[c]（各向同性；不再取 max(x,y)）。
-    //                   注：球盒比原光空间 AABB 略大（典型 ~1.14×）⇒ texelW 随之略增
+    //                   正交盒现由「视锥切片包围球（含 ~1 纹素防夹边余量）」定，
+    //                   故 texelW_c = 2·盒半径 / cascade_sizes[c]（各向同性；不再取 max(x,y)）。
+    //                   注：盒比原光空间 AABB 略大（典型 ~1.15×）⇒ texelW 随之略增
     //                   ⇒ 自动偏置随之略增（更不易 acne、略多 peter-pan），属预期。
     //       kBiasK   = kBiasSafety(1.5) × kPcfRadiusT —— 与 PCF 核半径联动；
     //       tanθ     = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，
@@ -701,7 +701,7 @@ struct ShadowConfig {
     //       bias_c = max(minBias, kBiasK · cascade_bias[c] · tanθ)
     //   仅在需要偏离几何推导（例如自定义阴影强度）时才用。
     //   ⚠️ 下面这组默认值是**按旧的光空间 AABB 纹素边长**标定的；正交盒改成「切片包围球」
-    //      后实际的 uShadowTexelWorld 约为其 1.14×。override 默认关，若要开启请按当前
+    //      后实际的 uShadowTexelWorld 约为其 1.15×。override 默认关，若要开启请按当前
     //      uShadowTexelWorld 重标，否则偏置会偏小。
     bool  override_cascade_bias = false;
     float cascade_bias[kMaxCascades] = {0.005f, 0.033f, 0.073f, 0.260f, 0.406f};
