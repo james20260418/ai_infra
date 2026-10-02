@@ -636,7 +636,7 @@ struct ElevationFogConfig {
 //   fade_start/fade_end 定义距相机距离区间，在此区间内影子强度线性衰减到 0
 //   （fade_end 之后无影子）。淡出的是"影子强度"，独立于太阳光 intensity。
 //
-// ShadowConfig::Default() 提供一份面向开放世界场景的通用配置（3 段）。
+// ShadowConfig::Default() 提供一份面向开放世界场景的通用配置（默认 5 段）。
 // 小场景用默认值即可：近段覆盖全场景，效果等价单张 shadow map。
 //
 // Pre-condition: 由 JPOV::Init() → Renderer::Init 时校验（ValidateShadowConfig），
@@ -648,10 +648,25 @@ struct ShadowConfig {
     // `ShadowConfig shadow;` / `ShadowConfig{}` 即为合法可用状态，
     // 无需用户显式调 Default()。未用到的数组位（i >= cascade_count）填 0。
     int   cascade_count = 5;                            // 级联段数 [1, kMaxCascades]
-    float cascade_ranges[kMaxCascades] = {7.2f, 28.8f, 64.8f, 115.2f, 180.0f};
-    int   cascade_sizes[kMaxCascades]  = {2048, 1024, 1024, 512, 512};
-    float fade_start = 120.0f;                // 阴影淡出起点（距相机）
-    float fade_end   = 180.0f;                // 阴影淡出终点（此距离后无阴影）
+    // 距离带：前 3 级带宽 2× 增长、后 2 级 3× 增长（带宽 8,16,32,96,288），
+    // 第 n 级远端 = 带宽累加。最终覆盖 0~440m。倍率只改覆盖/纹素，**不改 draw 趟数**；
+    // 要更远就加大后段倍率，而不是加级（加级要动 kMaxCascades/纹理单元/shader 展开）。
+    float cascade_ranges[kMaxCascades] = {8.0f, 24.0f, 56.0f, 152.0f, 440.0f};
+    // 每级联 shadow map 分辨率。按「屏幕空间纹素尺寸尽量一致」标定：
+    //   单纹素屏幕 px ≈ (2·级联盒半径 / 尺寸) / 该带中心距离 × (H / (2·tan(fov/2)))
+    // 而盒半径 r ≈ 1.178·far（包围球由远平面那圈定，见 renderer.cc DrawShadowPass），
+    // 故 size_c ∝ far_c / 中心距离。下面这组使 5 级屏幕纹素都落在 ~1.9 px（1.86–1.91）；
+    // 总纹素数 7.52M ≈ 120 MB（RGBA32F）。**改 cascade_ranges 请按同一关系重标 sizes**。
+    // ⚠️ sizes 同时决定自动深度偏置：texelW = 2r/size，改这里偏置会自动跟随（见 cascade_bias）。
+    int   cascade_sizes[kMaxCascades]  = {1536, 1152, 1088, 1152, 1152};
+    // 级联间混合带宽度（占该级联跨度的比例，取值 (0, 0.5]）。相邻两级在边界附近
+    // ±fraction·span 内平滑升降权重、做归一化加权平均；重叠带宽 ≈ 2·min(相邻两级的 b)。
+    // 越大过渡越顺，代价是：①“两级不同分辨率的叠影”区越宽；②主 pass 里多采一张
+    // shadow map 的像素比例上升（仅采样端，几何/draw 不变）。0 会退化成硬切（非法）。
+    float cascade_blend_fraction = 0.30f;
+    // 淡出：末段 ~1/3 起线性淡到 0（与原 120→180 同口径，与总距离同比）。
+    float fade_start = 293.0f;                // 阴影淡出起点（距相机）
+    float fade_end   = 440.0f;                // 阴影淡出终点（此距离后无阴影）
 
     // ⚠️ 以下 cascade_bias 是**可选的 override**（手工覆盖），默认**不启用**。
     //
@@ -659,8 +674,12 @@ struct ShadowConfig {
     //   shader 里逐级联算：
     //       bias_c = max(minBias, kBiasK · texelW_c · tanθ)
     //     其中
-    //       texelW_c  = max(该级联正交盒 x 跨度, y 跨度) / cascade_sizes[c]（米）
-    //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）；
+    //       texelW_c  = 该级联正交盒单边跨度 / cascade_sizes[c]（米）
+    //                   —— 单个 shadow 纹素在世界空间的覆盖边长（shader 取 uShadowTexelWorld[c]）。
+    //                   正交盒现由「视锥切片包围球（含 ~1 纹素防夹边余量）」定，
+    //                   故 texelW_c = 2·盒半径 / cascade_sizes[c]（各向同性；不再取 max(x,y)）。
+    //                   注：盒比原光空间 AABB 略大（典型 ~1.15×）⇒ texelW 随之略增
+    //                   ⇒ 自动偏置随之略增（更不易 acne、略多 peter-pan），属预期。
     //       kBiasK   = kBiasSafety(1.5) × kPcfRadiusT —— 与 PCF 核半径联动；
     //       tanθ     = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，
     //                  Ld = 深度轴方向（= 阴影 pass 实际用的光传播方向的反向；
@@ -681,6 +700,9 @@ struct ShadowConfig {
     //   公式不变，只把 texelW_c 换成手工值 cascade_bias[c]（米，等效单纹素世界边长）：
     //       bias_c = max(minBias, kBiasK · cascade_bias[c] · tanθ)
     //   仅在需要偏离几何推导（例如自定义阴影强度）时才用。
+    //   ⚠️ 下面这组默认值是**按旧的光空间 AABB 纹素边长**标定的；正交盒改成「切片包围球」
+    //      后实际的 uShadowTexelWorld 约为其 1.15×。override 默认关，若要开启请按当前
+    //      uShadowTexelWorld 重标，否则偏置会偏小。
     bool  override_cascade_bias = false;
     float cascade_bias[kMaxCascades] = {0.005f, 0.033f, 0.073f, 0.260f, 0.406f};
 
