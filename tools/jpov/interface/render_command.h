@@ -595,7 +595,7 @@ struct ShadowConfig {
     // ±fraction·span 内平滑升降权重、做归一化加权平均；重叠带宽 ≈ 2·min(相邻两级的 b)。
     // 越大过渡越顺，代价是：①“两级不同分辨率的叠影”区越宽；②主 pass 里多采一张
     // shadow map 的像素比例上升（仅采样端，几何/draw 不变）。0 会退化成硬切（非法）。
-    float cascade_blend_fraction = 0.15f;
+    float cascade_blend_fraction = 0.30f;
     // 淡出：末段 ~1/3 起线性淡到 0（与原 120→180 同口径，与总距离同比）。
     float fade_start = 293.0f;                // 阴影淡出起点（距相机）
     float fade_end   = 440.0f;                // 阴影淡出终点（此距离后无阴影）
