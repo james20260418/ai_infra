@@ -19,6 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/common/utils.h"
 
@@ -509,6 +510,7 @@ Renderer::~Renderer() {
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
+    DestroySkyColorFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -625,6 +627,42 @@ void Renderer::DestroyHDRResolveFBO() {
     resolve_fbo_hdr_w_ = 0;
     resolve_fbo_hdr_h_ = 0;
 }
+
+void Renderer::EnsureSkyColorFBO(int w, int h) {
+    if (sky_fbo_ != 0 && sky_w_ == w && sky_h_ == h) {
+        return;
+    }
+    DestroySkyColorFBO();
+    glGenTextures(1, &sky_tex_);
+    glBindTexture(GL_TEXTURE_2D, sky_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffers(1, &sky_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           sky_tex_, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
+        << "Sky color FBO incomplete";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sky_w_ = w;
+    sky_h_ = h;
+}
+
+void Renderer::DestroySkyColorFBO() {
+    if (sky_fbo_) {
+        glDeleteFramebuffers(1, &sky_fbo_);
+        glDeleteTextures(1, &sky_tex_);
+        sky_fbo_ = 0;
+        sky_tex_ = 0;
+    }
+    sky_w_ = 0;
+    sky_h_ = 0;
+}
+
 
 void Renderer::DestroyShadowFBO() {
     for (auto& c : shadow_fbos_) {
@@ -905,7 +943,7 @@ void Renderer::EnsureHDRFBO(int width, int height) {
                            GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, depth_tex_hdr_, 0);
-    // 开启 MRT：COLOR_ATTACHMENT0 = 颜色，COLOR_ATTACHMENT1 = 场景深度。
+    // 开启 MRT：0=颜色，1=场景深度。
     {
         const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
         glDrawBuffers(2, bufs);
@@ -1283,6 +1321,9 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
+        CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
+            << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
+               "tone map 之前）；否则会静默失效";
         unsigned int fbo_3d_target = 0;
         if (use_hdr) {
             EnsureHDRFBO(fbo_3d_w, fbo_3d_h);
@@ -1326,6 +1367,17 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_);
+
+            // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
+            // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
+            // 会被之后画的几何 shader 写成垃圾（2026-09-30 实测 NaN）。
+            EnsureSkyColorFBO(fbo_3d_w, fbo_3d_h);
+            glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+                                 shader_mgr_, /*atmo_only=*/true);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
             // 恢复 3D 物体所需的深度状态
             glEnable(GL_DEPTH_TEST);
@@ -1415,40 +1467,73 @@ void Renderer::Render(const RenderCommandList& cmds,
         glDisable(GL_DEPTH_TEST);
 
         if (use_hdr) {
-            // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
-            //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
+            // ---- HDR 路径：把 HDR 内容 resolve/blit 到同尺寸 non-MSAA 浮点纹理，
+            //      作为后续后处理（雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
-            unsigned int hdr_scene_depth_tex = 0;
+            // 只此一处判定要不要起雾；下方 resolve 顺序与它就配合。
+            const bool horizon_fog_enabled =
+                cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
+            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
+            // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
+            const unsigned int sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
 #ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入（雾也叠在这张上）。
             unsigned int hdr_input_tex = color_tex_hdr_;
-            hdr_scene_depth_tex = scene_depth_tex_hdr_;
+            unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 #else
-            // MSAA 路径：把 MSAA HDR FBO 的两个附件分别 resolve 到单采样浮点纹理。
-            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个，故分两次：
-            //   附件0（颜色）、附件1（场景深度）各 blit 一次，用 glReadBuffer/glDrawBuffer 选择。
+            // MSAA 路径：先 resolve 场景深度（雾要单采样深度）——放在颜色之前，这样
+            // 「雾就地叠进 fbo_hdr_」之后，再统一 resolve 颜色（开雾时含雾）。
+            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个；用 glReadBuffer/
+            //   glDrawBuffer 选择附件。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            // 附件0：颜色
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 附件1：场景深度
             glReadBuffer(GL_COLOR_ATTACHMENT1);
             glDrawBuffer(GL_COLOR_ATTACHMENT1);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 复位 read/draw buffer 回附件0（后续 highlight pass 仍从 fbo_hdr_ 读颜色）。
+            unsigned int hdr_input_tex = resolve_tex_hdr_;
+            unsigned int hdr_scene_depth_tex = resolve_scene_depth_tex_;
+#endif
+
+            // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
+            //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
+            //    只读 MRT#1 场景深度 + 大气色天空纹理。必须在线性 HDR 域、tone map 之前加。
+            if (horizon_fog_enabled) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件；雾不碰场景深度附件。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+#ifdef JPOV_WITHOUT_MSAA
+                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+#endif
+                HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
+                                         sky_color_tex, mvp_, cam, shader_mgr_);
+#ifdef JPOV_WITHOUT_MSAA
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
+#endif
+                const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs);
+            }
+
+#ifndef JPOV_WITHOUT_MSAA
+            // resolve 颜色：若开雾，此时 fbo_hdr_ 里已经含雾。
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
-            unsigned int hdr_input_tex = resolve_tex_hdr_;
-            hdr_scene_depth_tex = resolve_scene_depth_tex_;
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
 #endif
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。

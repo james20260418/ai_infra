@@ -141,6 +141,23 @@ public:
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
+        // 远景仰角雾（空气透视）：几何属性走滑条；**雾色由天光推导**
+        // （SkyCommand::ElevationFogColor() = 地平线附近天光色），使远景收敛到天边。
+        if (deg_.elev_fog_on) {
+            const jpov::Color fc = nl.sky.ElevationFogColor();
+            jpov::ElevationFogConfig ef;
+            ef.enabled = true;
+            ef.start_distance = deg_.elev_fog_start;
+            ef.full_distance = deg_.elev_fog_full;
+            ef.elev_inner_deg = deg_.elev_fog_inner_deg;
+            ef.elev_outer_deg = deg_.elev_fog_outer_deg;
+            ef.density = deg_.elev_fog_density;
+            ef.use_sky_color = deg_.elev_fog_use_sky;
+            ef.color = {fc.r * deg_.elev_fog_gain, fc.g * deg_.elev_fog_gain,
+                        fc.b * deg_.elev_fog_gain, 1.0f};
+            cmds->elevation_fog = ef;
+        }
+
         // 场景：灰色地面 + 三方块（低反/高光/金属）。
         // show_scene_=false 时整组跳过（headless 拍纯天空用）。
         if (show_scene_) {
@@ -182,7 +199,8 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 光照面板：6 个滑条 = 五个自由度（浊度 / 日光季节色温 / 天体方向 / 月色变红 / 夜空偏蓝）。
+    // 光照面板（两列）：左列 = 五个天光自由度 + 三色 ambient 开关；右列 = 远景仰角雾
+    // （开关 + 几何滑条 + 雾色色块）。雾色由天光推导，色块可目视核对“天光 → 雾色”的推理链。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -191,38 +209,52 @@ private:
         const float frame_dt_ms = 1000.0f / kViewerFps;
         ui_.Begin(input, theme, w, h, frame_dt_ms);
 
-        const float kSliderWidth = 0.5f * w;
+        const float kColW    = 0.45f * w;
+        const float kColX[2] = {0.025f * w, 0.515f * w};
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 7;  // 6 个滑条 + 1 个三色 ambient 开关
-        const float left     = (w - kSliderWidth) * 0.5f;
+        const int   kRows    = 9;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
 
-        auto row = [&](int i) {
-            return jpov::UiRect{{left, top + static_cast<float>(i) * (kRowH + kSpacing)},
-                                {kSliderWidth, kRowH}};
+        auto row = [&](int col, int i) {
+            return jpov::UiRect{{kColX[col], top + static_cast<float>(i) * (kRowH + kSpacing)},
+                                {kColW, kRowH}};
         };
 
-        // ① 浊度 [0,8]：看霾化（天色发白）+ 日盘/月盘衰减 + 月晕变宽。
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0),
+        // ── 左列：天光自由度 ──
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 0),
                         kTurbidityMin, kTurbidityMax, 1);
-        // ② 日光季节色温 [−1,+1]：左蓝偏 / 右红偏 / 中间中性（只偏色温，不改亮度）。
         ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
-                        row(1), -1.0f, 1.0f, 2);
-        // ③ 天体方向（仰角 + 方位角）。仰角正=太阳当空（日光主光），负=月亮当空
-        //    （月光主光）；月亮恒在 −sun_dir，故不再单列月亮滑条。
-        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg, row(2),
-                        -90.0f, 90.0f, 0);
-        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(3), 0.0f, 360.0f, 0);
-        // ④ 月色变红 [0,1]：0=常月，1=血月（只染月盘 + 月光）。
-        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(4), 0.0f, 1.0f, 2);
-        // ⑤ 夜空偏蓝 [0,1]：0=出厂夜色，1=梦幻蓝且更亮（夜色两色整体乘子）。
-        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(5), 0.0f, 1.0f, 2);
-        // ⑥ 三色环境光开关：开=天/天际线/地 三色垂直梯度（AmbientTricolor），关=单色。
-        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(6));
+                        row(0, 1), -1.0f, 1.0f, 2);
+        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                        row(0, 2), -90.0f, 90.0f, 0);
+        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 3), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 4), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 5), 0.0f, 1.0f, 2);
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 6));
+
+        // ── 右列：远景仰角雾 ──
+        ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
+        ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
+        ui_.SliderFloat("满雾距离 m", &deg_.elev_fog_full, row(1, 2), 1.0f, 5000.0f, 1);
+        ui_.SliderFloat("仰角带内 °", &deg_.elev_fog_inner_deg, row(1, 3), 0.0f, 20.0f, 1);
+        ui_.SliderFloat("仰角带外 °", &deg_.elev_fog_outer_deg, row(1, 4), 0.1f, 40.0f, 1);
+        ui_.SliderFloat("雾浓度 σ", &deg_.elev_fog_density, row(1, 5), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
+        // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
+        ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+        // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
+        {
+            const jpov::Color fc = MakeSkyLighting(deg_, tricolor_ambient_)
+                                       .sky.ElevationFogColor();
+            const jpov::Color shown{std::min(fc.r * deg_.elev_fog_gain, 1.0f),
+                                    std::min(fc.g * deg_.elev_fog_gain, 1.0f),
+                                    std::min(fc.b * deg_.elev_fog_gain, 1.0f), 1.0f};
+            ui_.ColorSwatch("雾色推导参考→", shown, row(1, 8));
+        }
     }
 
     bool show_panel_ = true;
