@@ -580,25 +580,25 @@ struct ShadowConfig {
     // `ShadowConfig shadow;` / `ShadowConfig{}` 即为合法可用状态，
     // 无需用户显式调 Default()。未用到的数组位（i >= cascade_count）填 0。
     int   cascade_count = 5;                            // 级联段数 [1, kMaxCascades]
-    // 距离带：带宽 8·4^k 等比（8,32,128,512,2048），第 n 级远端 = 8·(4^n−1)/3。
-    // 最终覆盖 0~2728m（最远一级 texel 已 ~5m，够中远景）。倍率 r 只改覆盖/纹素，
-    // **不改 draw 趟数**；要更远就加大 r，而不是加级（加级要动 kMaxCascades/纹理单元/shader 展开）。
-    float cascade_ranges[kMaxCascades] = {8.0f, 40.0f, 168.0f, 680.0f, 2728.0f};
+    // 距离带：前 3 级带宽 2× 增长、后 2 级 3× 增长（带宽 8,16,32,96,288），
+    // 第 n 级远端 = 带宽累加。最终覆盖 0~440m。倍率只改覆盖/纹素，**不改 draw 趟数**；
+    // 要更远就加大后段倍率，而不是加级（加级要动 kMaxCascades/纹理单元/shader 展开）。
+    float cascade_ranges[kMaxCascades] = {8.0f, 24.0f, 56.0f, 152.0f, 440.0f};
     // 每级联 shadow map 分辨率。按「屏幕空间纹素尺寸尽量一致」标定：
     //   单纹素屏幕 px ≈ (2·级联盒半径 / 尺寸) / 该带中心距离 × (H / (2·tan(fov/2)))
     // 而盒半径 r ≈ 1.178·far（包围球由远平面那圈定，见 renderer.cc DrawShadowPass），
-    // 故 size_c ∝ far_c / 中心距离。下面这组使 5 级屏幕纹素都落在 ~1.9 px（1.85–1.94）；
-    // 总纹素数 8.59M ≈ 137 MB（RGBA32F）。**改 cascade_ranges 请按同一关系重标 sizes**。
+    // 故 size_c ∝ far_c / 中心距离。下面这组使 5 级屏幕纹素都落在 ~1.9 px（1.86–1.91）；
+    // 总纹素数 7.52M ≈ 120 MB（RGBA32F）。**改 cascade_ranges 请按同一关系重标 sizes**。
     // ⚠️ sizes 同时决定自动深度偏置：texelW = 2r/size，改这里偏置会自动跟随（见 cascade_bias）。
-    int   cascade_sizes[kMaxCascades]  = {1536, 1280, 1280, 1216, 1216};
+    int   cascade_sizes[kMaxCascades]  = {1536, 1152, 1088, 1152, 1152};
     // 级联间混合带宽度（占该级联跨度的比例，取值 (0, 0.5]）。相邻两级在边界附近
     // ±fraction·span 内平滑升降权重、做归一化加权平均；重叠带宽 ≈ 2·min(相邻两级的 b)。
     // 越大过渡越顺，代价是：①“两级不同分辨率的叠影”区越宽；②主 pass 里多采一张
     // shadow map 的像素比例上升（仅采样端，几何/draw 不变）。0 会退化成硬切（非法）。
-    float cascade_blend_fraction = 0.35f;
-    // 淡出：末段 ~1/3 起线性淡到 0（与原 120→180 同口径，随总距离顺延）。
-    float fade_start = 1820.0f;               // 阴影淡出起点（距相机）
-    float fade_end   = 2728.0f;               // 阴影淡出终点（此距离后无阴影）
+    float cascade_blend_fraction = 0.15f;
+    // 淡出：末段 ~1/3 起线性淡到 0（与原 120→180 同口径，与总距离同比）。
+    float fade_start = 293.0f;                // 阴影淡出起点（距相机）
+    float fade_end   = 440.0f;                // 阴影淡出终点（此距离后无阴影）
 
     // ⚠️ 以下 cascade_bias 是**可选的 override**（手工覆盖），默认**不启用**。
     //
