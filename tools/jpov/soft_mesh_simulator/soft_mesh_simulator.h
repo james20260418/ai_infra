@@ -160,6 +160,10 @@ public:
     static constexpr float kMinBodyBuffer = 0.0f;
     static constexpr float kMaxBodyBuffer = 0.1f;
     static constexpr float kDefaultBodyBuffer = 0.01f;
+    // 接触壳的极小裕量（米）：有符号距离 ≤ buffer + 本值即视为“接触”。用来吸收浮点
+    // 噪声，保证恰好停在 buffer 上的点下一子步的**预速度约束**仍然生效（否则会出现
+    // 一子步的位置锯齿）。0.1mm，远小于 buffer。
+    static constexpr float kBodyContactMargin = 1.0e-4f;
 
     // 默认地面高度 y（米）。地面是水平面（法线 +Y），低于它的顶点被投影回去。
     // 默认值 -3 与查看器地面 quad 的默认高度一致（view_config.h::MakeGroundQuad）。
@@ -247,6 +251,10 @@ public:
         }
         return true;
     }
+
+    // 关联图的**连通分量数**（纯查询，并查集）。1 = 所有仿真点连成一张网。
+    // 调试/单测用；也用于验证 Init 的连通性修复（EnsureNeighborGraphConnected）。
+    size_t neighbor_component_count() const;
 
     // 仿真点总数（原始顶点 + 虚拟顶点）。M1 可视化与后续物理都基于它。
     size_t sim_point_count() const { return sim_positions_.size(); }
@@ -358,6 +366,18 @@ public:
     // Pre-condition（不满足即 LOG(FATAL)）：buffer 有限且 ∈ [kMinBodyBuffer, kMaxBodyBuffer]。
     void SetBodyBuffer(float buffer);
 
+    // ── 切向（平行于表面）速度保留系数（Danis 2026-10-02）──
+    //
+    // clamp 时：**消除沿法向的速度分量**；平行（切向）分量乘本系数：
+    //   v_new = parallel_factor · (v − (v·n)n)。
+    // 0 = 切向也全消（完全粘住）；1 = 全保留（默认，即原行为）。
+    static constexpr float kMinBodyParallelDamping = 0.0f;
+    static constexpr float kMaxBodyParallelDamping = 1.0f;
+    static constexpr float kDefaultBodyParallelDamping = 1.0f;
+    float body_parallel_damping() const { return body_parallel_damping_; }
+    // Pre-condition（不满足即 LOG(FATAL)）：factor 有限且 ∈ [0,1]。
+    void SetBodyParallelDamping(float factor);
+
     // ── 即时操作：对**当前仿真状态**就地施加变换（面板 / 交互驱动）──
     //
     // 用途（Danis 2026-10-01）：穿衣工具的左上面板要在**仿真进行中**也能改变这件衣服的
@@ -394,7 +414,11 @@ public:
     // 当前取景包围盒（纯查询）。
     SimBounds Bounds() const;
 
-    // 回到绑定姿态（Init 时的网格）并清零时间/步数计数。
+    // 回到**启动几何**（Init 时的网格，含长边虚拟点 / 连通性桥接点）并清零时间 / 步数 / 速度。
+    // ⭐ 也会把**物理绑定姿态**（bind_positions_ / nb_init_dist_）一并复位回启动几何——
+    //   因为 ApplyTranslation/Rotation/Scaling 会改绑定姿态；若不复位，Reset 只能回到“变换后
+    //   的姿态”，等于没重置（2026-10-02 Danis 报的 bug）。故内部用**独立**的 startup_positions_
+    //   快照（Apply* 从不改它），而不是 bind_positions_。
     // 与 Init 的区别：保留已初始化标记——未 Init 过时 Reset 是 no-op。
     void Reset();
 
@@ -410,6 +434,21 @@ private:
     // 同时缓存初始距离 |pij(0)| 进 nb_init_dist_（力的公式 §2.3 分母用）。
     // 复杂度 O(N²) 是刻意的“暴力解”（§3.4）；网格大时可后续加空间哈希。
     void BuildNeighborTable(float d);
+
+    // 连通性修复（Danis 2026-10-02）：保证关联图是**单一连通分量**。
+    // 衣服网格在关联图上可能裂成多个子网 → 子网只受重力、独自坠落。两种成因分别处理：
+    //   ① 空间间隙 > d：取最大分量为“主网”，对每个非主分量找它与主网的**最近点对**，
+    //      沿线插**桥接虚拟点**（间距 ≤ 0.95 d），再重建关联表（迭代）；
+    //   ② 间隙 ≤ d 但被 kMaxNeighbors 顶 k 截断砍掉了跨网边（实测战术背心就是这种）：
+    //      直接**强制补一条对称边**（不重建）。
+    // 桥接点**追加在末尾**（index ≥ vertex_count_ ⇒ 属“虚拟点”，不进输出 mesh），
+    // 故本函数**必须在任何按点数分配速度/缓存缓冲之前**调用。
+    // Pre-condition: d > 0；neighbors_ 已构建。
+    void EnsureNeighborGraphConnected(float d);
+
+    // 并查集求关联图的连通分量：返回每个点的分量标签（连续 0..C-1，C=分量数）；
+    // 空图返回空 vector。neighbor_component_count() 与 EnsureNeighborGraphConnected 共用。
+    std::vector<uint32_t> ComputeComponentLabels() const;
 
     // ── 物理状态（M2：位置 + 速度 + 时钟；后续物理量都加在这里）──
     // 说明：把「当前网格」当作唯一事实源，而不是另外维护一份顶点数组，
@@ -431,6 +470,14 @@ private:
     // 之所以需要它，是因为「前半 kick 必须全部基于旧位置算完，才能批量推进位置」——
     // 否则后算的点会读到已推进的邻居位置（半新半旧，见 IntegrateSubstep 注释）。
     std::vector<geom::Vec3<float>> v_half_buf_;
+
+    // 人体接触的**几何外侧方向**缓存（与 sim_positions_ 同长）：上一子步查到的人体
+    // 外方向（单位向量）；(0,0,0) = 上一子步无接触。第一趟拿它做**预速度约束**（把
+    // 指向体内的 v_half 分量去掉），使 drift **不会**把接触点往体内飘——这是消除
+    // “硬投影×硬弹簧 ⇒ 每子步位置锯齿（阻尼无效）”的关键（见 IntegrateSubstep 注释）。
+    // mutable：ApplyBodyRepulsion 是**逻辑 const**（纯查询 + 位置投影，不改可观测状态），
+    //   但需要把本子步查到的接触方向写进这份**跨步缓存**，故声明为 mutable。
+    mutable std::vector<geom::Vec3<float>> body_outward_buf_;
 
     // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
     float gravity_ = kDefaultGravity;
@@ -456,7 +503,14 @@ private:
     // 力的公式里有 pij(0) = v_j(0) - v_i(0)（§2.2），需要绑定姿态坐标；
     // 而 sim_positions_ 会被 Step 推着走，bind_mesh_ 又不含虚拟顶点，
     // 故单独快照一份（Init/Reset 时更新）。
+    // ⚠️ 注意：ApplyTranslation/Rotation/Scaling 会**同步变换 bind_positions_**（否则弹簧
+    //   会把顶点拽回旧形状），故它反映的是“**当前变换后**的静止形状”，**不是**启动几何。
     std::vector<geom::Vec3<float>> bind_positions_;
+
+    // 启动几何的**原始快照**（Init 时录入，Apply* **绝不**改它）。
+    // 专供 Reset()：重置必须回到“clothing tool 启动时的样子”，而 bind_positions_ 已被
+    //   即时变换污染（见上），不能直接用它（否则重置只回到“变换后的姿态”，等于没重置）。
+    std::vector<geom::Vec3<float>> startup_positions_;
 
     // 当前地面高度 y（米）。低于它的顶点被投影回地面（水平面，法线 +Y）。
     float ground_y_ = kDefaultGroundY;
@@ -468,6 +522,8 @@ private:
     const geom::TriangleMatcher3d<double>* body_matcher_ = nullptr;  // 借用（不拥有）
     bool body_repulsion_enabled_ = false;
     float body_buffer_ = kDefaultBodyBuffer;
+    // 切向速度保留系数（0~1；见 SetBodyParallelDamping）。
+    float body_parallel_damping_ = kDefaultBodyParallelDamping;
 
     float bind_distance_ = kDefaultBindDistance;  // 关联距离 d（米）
 
@@ -491,9 +547,42 @@ private:
     // 全局速度上限：把每个点的速度截到 max_speed_（>0 时）。子步末调用（见 .cc）。
     void ClampMaxSpeed();
 
-    // 对单点做人体排斥（改 x / v）。无 matcher / 开关关 / 查询未命中则不动作。见 .cc。
-    // Pre-condition: x != nullptr 且 v != nullptr。
-    void ApplyBodyRepulsion(geom::Vec3<float>* x /*inout*/, geom::Vec3<float>* v /*inout*/) const;
+    // 对单点做人体排斥（改 x / v），并把接触外方向写回 body_outward_buf_[idx] 供下一
+    // 子步第一趟的预速度约束。
+    //   x_pre = 本子步 drift **前**的位置 x(t)（用于二分求“本子步新穿入体表”的逃逸点）。
+    // 算法（Danis 2026-10-02）：
+    //   - 用**带 buffer 的体内判定** IsInsideBodyWithBuffer 判“在体内(含 buffer 壳)”；
+    //   - 若 x(t) **也在**体内 → 旧方式：投影到 最近点 + buffer·外向几何方向；
+    //   - 若 x(t) 在体外（本子步新穿入）→ 在线段 [x(t), x(t+dt)] 上**二分 10 轮**，求
+    //     离 x(t+dt) 最近的“不在体内”点（≈ 穿越点）；
+    //   - clamp 点法线 = 它**最近邻三角形的朝外法线**；
+    //   - 速度：消除沿 n 的分量，平行分量乘 body_parallel_damping_。
+    // 无 matcher / 开关关 / 查询未命中则不动（缓存清零）。
+    // Pre-condition: x/v != nullptr；idx < 仿真点数。
+    void ApplyBodyRepulsion(size_t idx, const geom::Vec3<float>& x_pre,
+                            geom::Vec3<float>* x /*inout*/,
+                            geom::Vec3<float>* v /*inout*/) const;
+
+    // ── 人体最近三角形查询（内部工具）──
+    //
+    // BodyHit：点 p 的最近人体三角形查询结果。ok=false = 未命中（无 matcher 或逃出
+    //   查询半径 local_distance）。normal 是最近三角形的**朝外**法线（假定资产绕序朝外）；
+    //   signed_dist = (p − closest)·normal：>0 体外 / <0 体内。
+    struct BodyHit {
+        bool ok = false;
+        geom::Vec3<double> closest = geom::Vec3<double>(0.0, 0.0, 0.0);
+        geom::Vec3<double> normal = geom::Vec3<double>(0.0, 0.0, 0.0);
+        double signed_dist = 0.0;
+    };
+    // 查 p 的最近人体三角形（借 body_matcher_）。
+    BodyHit QueryBody(const geom::Vec3<double>& p) const;
+    // 「带 buffer 的体内」判定：命中且 signed_dist < body_buffer_（buffer=0 即严格体内）。
+    bool IsInsideBodyWithBuffer(const geom::Vec3<double>& p) const;
+    // 在 [outside, inside] 上二分 rounds 轮，返回**离 inside 最近**的“不在体内(带 buffer)”点。
+    // Pre-condition: inside 在体内；outside 通常在外（若也在内，结果退化为 outside）。
+    geom::Vec3<double> BisectEscapeBoundary(const geom::Vec3<double>& outside,
+                                            const geom::Vec3<double>& inside,
+                                            int rounds) const;
 
     // ⭐ 该点在某位置受到的**总加速度** a(x) = (重力 + 弹簧力场) / m。
     //

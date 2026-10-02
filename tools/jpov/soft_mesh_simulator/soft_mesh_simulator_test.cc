@@ -15,6 +15,7 @@
 
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -351,6 +352,35 @@ TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
     }
 }
 
+// Ⓙ 崩溃修复（2026-10-02 Danis）：即时变换（Apply*）会**污染“绑定姿态”**，若 Reset 直接用
+//    bind_positions_ 就会回到“变换后的姿态”而非**启动几何**——重置等于没重置。
+//    本测试：变换 + 推进后再 Reset，必须回到 Init 时的顶点坐标。
+TEST(SoftMeshSimulatorTest, ResetRestoresStartupGeometryAfterTransforms) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    const std::vector<geom::Vec3<float>> startup = sim.sim_positions();  // 启动几何快照（拷贝）
+    // 即时变换：平移 + 旋转 + 缩放（三者都会改绑定姿态）。
+    sim.ApplyTranslation(geom::Vec3<float>(5.0f, 0.0f, 0.0f));
+    sim.ApplyRotation(Axis::kY, 30.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    for (int i = 0; i < 5; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    ASSERT_GT((sim.sim_positions()[0] - startup[0]).Norm(), 1e-3f)
+        << "前置：变换后位置应已改变";
+
+    sim.Reset();
+
+    // 核心：必须回到**启动几何**（不是变换后的绑定姿态）。
+    ASSERT_EQ(sim.sim_positions().size(), startup.size());
+    for (size_t i = 0; i < startup.size(); ++i) {
+        EXPECT_NEAR((sim.sim_positions()[i] - startup[i]).Norm(), 0.0f, 1e-6f)
+            << "顶点 " << i << " 未回到启动位置";
+    }
+    EXPECT_DOUBLE_EQ(sim.time(), 0.0);
+    EXPECT_EQ(sim.step_count(), 0u);
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;
@@ -644,17 +674,23 @@ jpov::MeshData MakeTwoPoints(float sep) {
 }
 }  // namespace
 
-// Ⓐ 关联表：两点距离 <= d 时互相关联；d 滑小到 < 间距则完全无关联。
+// Ⓐ 关联表：两点距离 <= d 时互相关联；d < 间距时无**直接**关联（连通性修复会另补桥，见下）。
 TEST(SoftMeshSimulatorTest, NeighborTableRespectsBindDistance) {
     Simulator close;
     close.Init(MakeTwoPoints(0.1f), /*d=*/0.5f);
     EXPECT_EQ(close.neighbor_pair_count(), 2u)
         << "两点 0.1m <= d=0.5 → i→j 与 j→i 各一条，计 2";
+    EXPECT_EQ(close.virtual_point_count(), 0u) << "本就连通，不应补桥";
 
+    // d < 间距：两点之间**无直接关联**（仍守 d 规则）；但 **2026-10-02 新增的连通性修复**
+    // （EnsureNeighborGraphConnected）会在两者间补桥接虚拟点，使图仍为单一连通分量。
     Simulator far;
     far.Init(MakeTwoPoints(0.1f), /*d=*/0.05f);
-    EXPECT_EQ(far.neighbor_pair_count(), 0u)
-        << "两点 0.1m > d=0.05 → 无关联";
+    const std::vector<uint32_t>& nb0 = far.neighbors_of(0);
+    EXPECT_EQ(std::find(nb0.begin(), nb0.end(), 1u), nb0.end())
+        << "两点间距 0.1 > d=0.05 → 不得直接互关联";
+    EXPECT_GT(far.virtual_point_count(), 0u) << "连通性修复应补桥接虚拟点";
+    EXPECT_EQ(far.neighbor_component_count(), 1u);
 }
 
 // Ⓑ 力场零平衡：处在**绑定姿态**且无重力时，弹簧力为零 → 系统不动。
@@ -1255,6 +1291,8 @@ float RunRepulsionAndGetV0X(const geom::TriangleMatcher3d<double>& matcher,
     return sim.sim_positions()[0].x();
 }
 
+// 注：2026-10-02 新版逃逸算法下，仿真前点已在体内 ⇒ 走“旧方式（投影到 cp + buffer·外向）”，
+// 故这两个断言 buffer 行为的用例重新有效。
 TEST(SoftMeshSimulatorTest, BodyRepulsionPushesInsidePointToSurfacePlusBuffer) {
     const jpov::MeshData box = MakeBodyBox();  // +X 面在 x=0.1
     auto matcher = MakeMatcherFromMesh(box);
@@ -1306,6 +1344,79 @@ TEST(SoftMeshSimulatorTest, SetBodyBufferRejectsOutOfRange) {
     sim.Init(MakeTri());
     EXPECT_DEATH(sim.SetBodyBuffer(-0.001f), "");
     EXPECT_DEATH(sim.SetBodyBuffer(0.11f), "");
+}
+
+// 新版逃逸："体外点本子步新穿入 buffer 壳" ⇒ 走二分，被 clamp 在体表外 ~buffer，不深入体内。
+TEST(SoftMeshSimulatorTest, BodyRepulsionFreshEntryClampsAtBufferShell) {
+    const jpov::MeshData box = MakeBodyBox();  // ±0.1（顶面 y=0.1）
+    auto matcher = MakeMatcherFromMesh(box);
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetSpringEnabled(false);
+    sim.SetBodyMatcher(matcher.get());
+    sim.SetBodyRepulsionEnabled(true);
+    sim.SetBodyBuffer(0.01f);
+    sim.SetGravity(9.8f);
+    // 把整网格抬到盒子正上方（点 0 在 y=0.5, x=z=0），让重力把它拉入 buffer 壳。
+    sim.ApplyTranslation(geom::Vec3<float>(0.0f, 0.5f, 0.0f));
+    for (int i = 0; i < 120; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    // 点 0 应停在顶面外 ~buffer（0.1+0.01≈0.11），不深入体内。
+    EXPECT_GE(sim.sim_positions()[0].y(), 0.1f);
+    EXPECT_LE(sim.sim_positions()[0].y(), 0.14f);
+}
+
+TEST(SoftMeshSimulatorTest, SetBodyParallelDampingRejectsOutOfRange) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    // 合法范围 [0,1]：默认 1.0（全保留切向）。
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 1.0f);
+    sim.SetBodyParallelDamping(0.0f);
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 0.0f);
+    sim.SetBodyParallelDamping(0.5f);
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 0.5f);
+    EXPECT_DEATH(sim.SetBodyParallelDamping(-0.001f), "");
+    EXPECT_DEATH(sim.SetBodyParallelDamping(1.001f), "");
+}
+
+// ==================== 关联图连通性修复（EnsureNeighborGraphConnected）====================
+
+// 两个小三角形（边长 0.05 < d；各自内部连通），彼此相距 ~1m（> d）⇒ 初始为 2 个分量。
+// Init 应补桥接虚拟点把它们合成**一张**连通网。
+jpov::MeshData MakeTwoDisjointPieces() {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {
+        {0.00f, 0.0f, 0.0f}, {0.05f, 0.0f, 0.0f}, {0.00f, 0.05f, 0.0f},
+        {1.00f, 0.0f, 0.0f}, {1.05f, 0.0f, 0.0f}, {1.00f, 0.05f, 0.0f},
+    };
+    m.indices = {0, 1, 2, 3, 4, 5};
+    m.Validate();
+    return m;
+}
+
+TEST(SoftMeshSimulatorTest, NeighborGraphRepairsDisjointPiecesToSingleComponent) {
+    Simulator sim;
+    sim.Init(MakeTwoDisjointPieces(), /*bind_distance=*/0.1f);
+    EXPECT_EQ(sim.original_point_count(), 6u);
+    // 两个不连通面片 ⇒ 修复后应该是一个连通分量。
+    EXPECT_EQ(sim.neighbor_component_count(), 1u) << "关联图未合成单一连通网";
+    EXPECT_GT(sim.virtual_point_count(), 0u) << "应在两片之间补桥接虚拟点";
+    EXPECT_TRUE(sim.neighbors_symmetric());
+}
+
+TEST(SoftMeshSimulatorTest, NeighborGraphSinglePieceAddsNoBridgePoints) {
+    // 单个小三角形（边长 0.05 < d）：本就连通，不应额外交桥接点。
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.05f, 0.0f, 0.0f}, {0.0f, 0.05f, 0.0f}};
+    m.indices = {0, 1, 2};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*bind_distance=*/0.1f);
+    EXPECT_EQ(sim.neighbor_component_count(), 1u);
+    EXPECT_EQ(sim.virtual_point_count(), 0u) << "本就连通，不应补点";
 }
 
 }  // namespace

@@ -4,11 +4,11 @@
 // 并让衣服被软体仿真器驱动（重力 + 顶点间弹簧力场 + 地面投影）。y-up，地平面
 // 300×300 米高粗糙灰色 quad，光照固定 45° 天光，视角靠鼠标操作（右键 drag 转、滚轮 zoom）。
 //
-// 当前阶段（2026-10-01，Step 1）：
+// 当前阶段（2026-10-02）：
 //   ① 后台线程为两份 glb 建最近邻三角形匹配器（完成后主线程上传 GPU 资产）；
-//   ② 衣服被 soft_mesh_simulator::Simulator 驱动，右上角面板调动力学系数、
-//      暂停 / 重置；左上角面板做平移 / 旋转 / 缩放（**就地**改顶点）+ 保存 glb。
-//   仍不做：人体排斥（Step 2）、对齐。
+//   ② 衣服被 soft_mesh_simulator::Simulator 驱动，右上角面板调动力学系数 / 人体排斥 /
+//      暂停 / 重置；左上角面板做平移 / 旋转 / 缩放（**即时**作用于仿真状态）+ 保存 glb。
+//   仍不做：穿衣对齐 / 自动贴合。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
 //   bazel run //tools/jpov/clothing:jpov_clothing_tool -- --body_reference_path /path/to/body.glb --cloth_path /path/to/cloth.glb
@@ -47,6 +47,8 @@ struct CliOptions {
     float max_speed = jpov::clothing::kDefaultMaxSpeed;  // --max_speed 全局速度上限（m/s；0 = 不限）
     int   body_repulsion = 1;         // --body_repulsion 0/1（人体排斥开关）
     float body_buffer = jpov::soft_mesh_simulator::Simulator::kDefaultBodyBuffer;  // --body_buffer（m）
+    float body_parallel_damping =  // --body_parallel_damping（切向速度保留系数 0~1）
+        jpov::soft_mesh_simulator::Simulator::kDefaultBodyParallelDamping;
     bool  has_cloth_offset = false;   // 是否给了 --cloth_offset
     float cloth_offset[3] = {0.0f, 0.0f, 0.0f};  // --cloth_offset dx dy dz（米）
 };
@@ -154,6 +156,22 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--body_buffer 缺少数值参数，忽略";
+            }
+        } else if (arg == "--body_parallel_damping") {
+            if (i + 1 < argc) {
+                opt.body_parallel_damping = std::atof(argv[++i]);
+                if (!(opt.body_parallel_damping >=
+                          jpov::soft_mesh_simulator::Simulator::kMinBodyParallelDamping &&
+                      opt.body_parallel_damping <=
+                          jpov::soft_mesh_simulator::Simulator::kMaxBodyParallelDamping)) {
+                    LOG(FATAL) << "--body_parallel_damping 必须在 ["
+                               << jpov::soft_mesh_simulator::Simulator::kMinBodyParallelDamping
+                               << ", "
+                               << jpov::soft_mesh_simulator::Simulator::kMaxBodyParallelDamping
+                               << "] 内，got " << opt.body_parallel_damping;
+                }
+            } else {
+                LOG(WARNING) << "--body_parallel_damping 缺少数值参数，忽略";
             }
         } else if (arg == "--cloth_offset") {
             if (i + 3 < argc) {
@@ -267,6 +285,7 @@ int main(int argc, char** argv) {
     app.max_speed_ui_ = opt.max_speed;
     app.body_repulsion_ui_ = (opt.body_repulsion != 0);
     app.body_buffer_ui_ = opt.body_buffer;
+    app.body_parallel_damping_ui_ = opt.body_parallel_damping;
 
     if (opt.ui_shot) {
         // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。

@@ -18,7 +18,11 @@
 //          不中断（位置与绑定姿态同步变换；速度只随旋转转动）。
 //       ⑤ Step 2：**人体排斥**（glb_repulsion 设计）——右上角开关 + buffer(0~0.1m，默认 0.01)；
 //          衣服被人体顶开、不穿模。另加全局「速度上限」兑底（低质量数值失稳）。
-//     ⚠️ 人体排斥（Step 2）尚未接入：本阶段只有重力 + 弹簧 + 地面。
+//   - 2026-10-02：人体排斥强化——① 逃逸改用「入射线段二分」（新穿入按 [x(t),x(t+dt)]
+//       二分 10 轮取边界点；仿真前已在体内则用旧投影）；② buffer 重新启用（作为“带 buffer 的
+//       体内判定”）；③ 新增切向速度保留系数（默认 1.0）；④ 关联图连通性修复；
+//       ⑤ 修「重置未能真正重置」（Reset 改用独立启动快照 startup_positions_）。
+//   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
 //   - 人体 reference 与衣服都是**静态 glTF 资产**（LoadGltf → GltfObject 画）；
@@ -194,6 +198,8 @@ public:
     // 人体排斥（Step 2）：开关 + buffer（米，离开体表的最小距离）。
     bool body_repulsion_ui_ = true;
     float body_buffer_ui_ = Simulator::kDefaultBodyBuffer;
+    // 人体排斥的切向速度保留系数（0~1；默认 1.0 = 全保留）。Danis 2026-10-02。
+    float body_parallel_damping_ui_ = Simulator::kDefaultBodyParallelDamping;
 
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
@@ -447,6 +453,7 @@ private:
         sim->SetMaxSpeed(max_speed_ui_);
         sim->SetBodyRepulsionEnabled(body_repulsion_ui_);
         sim->SetBodyBuffer(body_buffer_ui_);
+        sim->SetBodyParallelDamping(body_parallel_damping_ui_);
     }
 
     // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
@@ -476,6 +483,9 @@ private:
             }
             if (sim.body_buffer() != body_buffer_ui_) {
                 sim.SetBodyBuffer(body_buffer_ui_);
+            }
+            if (sim.body_parallel_damping() != body_parallel_damping_ui_) {
+                sim.SetBodyParallelDamping(body_parallel_damping_ui_);
             }
         }
     }
@@ -819,8 +829,8 @@ private:
     // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
     // 这样窗口 resize 时右上角面板始终贴住右上角。
     //
-    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1) + buffer(1)
-    //     + 按钮行(1) + 状态行(2) = 11。
+    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
+    //     + buffer(1) + 切向保留系数(1) + 按钮行(1) + 状态行(2) = 12。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
         const float kMargin  = 12.0f;
@@ -830,7 +840,7 @@ private:
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y  = kMargin;
-        constexpr int kRows = 11;
+        constexpr int kRows = 12;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
@@ -879,14 +889,21 @@ private:
                         0.0f, 100.0f, /*decimal_places*/0);
         row_y += step_y;
 
-        // ---- 人体排斥：开关 + buffer（离开体表的最小距离）----
+        // ---- 人体排斥：开关 + buffer（离开体表的最小距离）+ 切向速度保留系数 ----
         ui_.Checkbox("人体排斥", &body_repulsion_ui_,
                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         row_y += step_y;
         ui_.SliderFloat("排斥 buffer (m)", &body_buffer_ui_,
                         jpov::UiRect{{left, row_y}, {row_w, kRowH}},
                         Simulator::kMinBodyBuffer, Simulator::kMaxBodyBuffer,
-                        /*decimal_places*/3);
+                        /*decimal_places*/ 3);
+        row_y += step_y;
+        // 切向（平行于表面）速度保留系数：0 = 全消（粘住）/ 1 = 全保留（默认）。
+        ui_.SliderFloat("切向速度保留系数", &body_parallel_damping_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinBodyParallelDamping,
+                        Simulator::kMaxBodyParallelDamping,
+                        /*decimal_places*/ 2);
         row_y += step_y;
 
         // ---- 按钮行：[暂停/继续] [重置衣服] ----
