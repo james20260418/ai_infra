@@ -2776,12 +2776,46 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
 
 namespace {
 
+// 一张 glTF 贴图来源（GltfTextureRef）→ GPU 纹理 id。
+//   内嵌（内存字节）→ FromMemory（**不经文件**）；外部（uri）→ LoadFromFile。
+//   返回 0 表示无贴图。
+uint32_t ResolveTextureRef(const GltfTextureRef& ref, TextureManager& tex_mgr,
+                           const TextureOptions& opts = {}) {
+    if (ref.is_embedded()) {
+        return tex_mgr.FromMemory(ref.bytes, ref.key, opts);
+    }
+    if (!ref.uri.empty()) {
+        return tex_mgr.LoadFromFile(ref.uri, opts);
+    }
+    return 0;
+}
+
+// 把 RGBA 像素缓冲的**单通道**展开为 RGBA 像素（R=G=B=该通道, A=255）。
+// 供 TextureManager::FromPixels 直接上传（**跳过 PNG 编/解码**）。
+std::vector<unsigned char> ExtractChannelToRgba(const unsigned char* pixels,
+                                                int width, int height, int channel) {
+    CHECK(pixels != nullptr);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_GE(channel, 0);
+    CHECK_LT(channel, 4);
+    std::vector<unsigned char> out(static_cast<size_t>(width) * height * 4);
+    const int npix = width * height;
+    for (int i = 0; i < npix; ++i) {
+        const unsigned char v = pixels[i * 4 + channel];
+        out[i * 4 + 0] = v;
+        out[i * 4 + 1] = v;
+        out[i * 4 + 2] = v;
+        out[i * 4 + 3] = 255;
+    }
+    return out;
+}
+
 // 把 ORM（metallicRoughnessTexture，R=Occlusion/G=Roughness/B=Metallic）拆成
-// roughness / metallic 两张独立灰度 PNG 写入临时文件，并逐个加载为 GPU 纹理。
+// roughness / metallic 两张独立灰度图，**直接在内存里上传 GPU**（不再写临时文件）。
 //
 // 返回 {roughness_id, metallic_id}。任何一步失败返回全 0。
-// 临时文件写到 <orm_path 所在目录>/<basename>_rough.png / _metal.png，保证
-// TextureManager 按绝对路径去重（同一 ORM 只拆/传一次）。
+// 去重身份：以源 ORM 的 ref.key + "/rough" / "/metal" 为键（同一 ORM 只拆/传一次）。
 //
 // 注意：ORM 的 R（Occlusion）在本 loader 中不作为 AO —— 按 glTF 规范，
 // occlusion 仅在 occlusionTexture 显式引用时有效（见 LoadGltfOcclusion）。
@@ -2791,55 +2825,40 @@ struct OrmTextureIds {
     bool ok = false;
 };
 
-OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
-                              const std::string& orm_path) {
+OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr, const GltfTextureRef& ref) {
     OrmTextureIds out;
 
+    // 取 ORM 原始像素：内嵌走内存解码，外部走文件。
     int ow = 0, oh = 0, oc = 0;
-    unsigned char* orm_pixels = stbi_load(orm_path.c_str(), &ow, &oh, &oc, 4);
+    unsigned char* orm_pixels = nullptr;
+    if (ref.is_embedded()) {
+        orm_pixels = stbi_load_from_memory(ref.bytes.data(),
+                                           static_cast<int>(ref.bytes.size()),
+                                           &ow, &oh, &oc, 4);
+    } else if (!ref.uri.empty()) {
+        orm_pixels = stbi_load(ref.uri.c_str(), &ow, &oh, &oc, 4);
+    }
     if (!orm_pixels) {
-        LOG(ERROR) << "LoadGltf: 无法加载 ORM 贴图 " << orm_path
-                   << " (" << stbi_failure_reason() << ")";
+        LOG(ERROR) << "LoadGltf: 无法读取 ORM 贴图 (" << ref.key << ") ("
+                   << stbi_failure_reason() << ")";
         return out;
     }
 
-    // 临时 ORM 文件写到统一 scratch 目录，避免污染资源目录/仓库。
-    // 路径按 ORM 源 basename 稳定生成，保证 TextureManager 按绝对路径
-    // 去重（同一 ORM 只拆/传一次）。
-    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
-    std::system(("mkdir -p " + scratch_dir).c_str());
-    const size_t last_slash = orm_path.find_last_of("/\\");
-    const std::string base_name = (last_slash == std::string::npos)
-        ? orm_path : orm_path.substr(last_slash + 1);
-    const size_t dot = base_name.find_last_of('.');
-    const std::string stem = (dot == std::string::npos)
-        ? base_name : base_name.substr(0, dot);
-
     // 只拆 roughness(G)/metallic(B) 两通道；ORM 的 R(Occlusion) 不作为 AO
-    // （见 OrmTextureIds 注释）。
-    const struct { int channel; const char* suffix; } kChannels[] = {
-        {1, "_rough.png"},   // G = Roughness
-        {2, "_metal.png"},   // B = Metallic
+    // （见 OrmTextureIds 注释）。直接上传像素（FromPixels），不落盘。
+    const struct {
+        int channel;
+        const char* suffix;
+    } kChannels[] = {
+        {1, "/rough"},  // G = Roughness
+        {2, "/metal"},  // B = Metallic
     };
     uint32_t ids[2] = {0, 0};
     for (int i = 0; i < 2; ++i) {
-        std::vector<unsigned char> png =
-            ExtractChannelToPng(orm_pixels, ow, oh, kChannels[i].channel);
-        if (png.empty()) {
-            LOG(ERROR) << "LoadGltf: ORM 通道 " << i << " 拆包失败";
-            stbi_image_free(orm_pixels);
-            return out;
-        }
-        const std::string tmp = scratch_dir + stem + kChannels[i].suffix;
-        FILE* f = std::fopen(tmp.c_str(), "wb");
-        if (!f) {
-            LOG(ERROR) << "LoadGltf: 无法写临时 ORM 文件 " << tmp;
-            stbi_image_free(orm_pixels);
-            return out;
-        }
-        std::fwrite(png.data(), 1, png.size(), f);
-        std::fclose(f);
-        ids[i] = tex_mgr.LoadFromFile(tmp);
+        std::vector<unsigned char> rgba =
+            ExtractChannelToRgba(orm_pixels, ow, oh, kChannels[i].channel);
+        ids[i] = tex_mgr.FromPixels(rgba.data(), ow, oh,
+                                    ref.key + kChannels[i].suffix);
     }
     stbi_image_free(orm_pixels);
 
@@ -2851,53 +2870,39 @@ OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
 
 // 从独立的 occlusionTexture 提取 AO（R 通道），并按 occlusionStrength 烘焙：
 // ao' = mix(1, R, S) = 1-S + R*S。返回 TextureManager 的贴图 id（0=失败）。
-// 临时文件写到 /tmp/jpov_gltf_orm/（同 ORM 拆包），按源 basename 稳定命名。
-uint32_t LoadGltfOcclusion(TextureManager& tex_mgr,
-                           const std::string& occ_path,
+// 内嵌/外部均支持；结果**直接在内存里上传**（FromPixels），不写临时文件。
+uint32_t LoadGltfOcclusion(TextureManager& tex_mgr, const GltfTextureRef& ref,
                            float ao_strength) {
     int ow = 0, oh = 0, oc = 0;
-    unsigned char* px = stbi_load(occ_path.c_str(), &ow, &oh, &oc, 4);
+    unsigned char* px = nullptr;
+    if (ref.is_embedded()) {
+        px = stbi_load_from_memory(ref.bytes.data(),
+                                   static_cast<int>(ref.bytes.size()), &ow, &oh, &oc, 4);
+    } else if (!ref.uri.empty()) {
+        px = stbi_load(ref.uri.c_str(), &ow, &oh, &oc, 4);
+    }
     if (!px) {
-        LOG(ERROR) << "LoadGltf: 无法加载 occlusion 贴图 " << occ_path
-                   << " (" << stbi_failure_reason() << ")";
+        LOG(ERROR) << "LoadGltf: 无法读取 occlusion 贴图 (" << ref.key << ") ("
+                   << stbi_failure_reason() << ")";
         return 0;
     }
 
     // 按 strength 重算 R 通道：mix(1, R, S)。S=0→全 255(无遮蔽)，S=1→原 R。
-    std::vector<unsigned char> mixed(static_cast<size_t>(ow) * oh * 4);
-    for (int p = 0; p < ow * oh; ++p) {
-        const int idx = p * 4;
-        for (int c = 0; c < 4; ++c) mixed[idx + c] = px[idx + c];
-        const float r = px[idx] / 255.0f;
-        const float aom = (1.0f - ao_strength) + r * ao_strength;
-        mixed[idx] = static_cast<unsigned char>(aom * 255.0f + 0.5f);
+    // 展开为 RGBA（R=G=B=AO 值，A=255），直接 FromPixels 上传。
+    std::vector<unsigned char> rgba(static_cast<size_t>(ow) * oh * 4);
+    const int npix = ow * oh;
+    for (int p = 0; p < npix; ++p) {
+        const unsigned char r = px[p * 4 + 0];
+        const float aom = (1.0f - ao_strength) + (r / 255.0f) * ao_strength;
+        const unsigned char v = static_cast<unsigned char>(aom * 255.0f + 0.5f);
+        rgba[p * 4 + 0] = v;
+        rgba[p * 4 + 1] = v;
+        rgba[p * 4 + 2] = v;
+        rgba[p * 4 + 3] = 255;
     }
     stbi_image_free(px);
 
-    std::vector<unsigned char> png =
-        ExtractChannelToPng(mixed.data(), ow, oh, 0);  // R 通道 = AO
-    if (png.empty()) {
-        LOG(ERROR) << "LoadGltf: occlusion R 通道拆包失败 " << occ_path;
-        return 0;
-    }
-
-    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
-    std::system(("mkdir -p " + scratch_dir).c_str());
-    const size_t last_slash = occ_path.find_last_of("/\\");
-    const std::string base_name = (last_slash == std::string::npos)
-        ? occ_path : occ_path.substr(last_slash + 1);
-    const size_t dot = base_name.find_last_of('.');
-    const std::string stem = (dot == std::string::npos)
-        ? base_name : base_name.substr(0, dot);
-    const std::string tmp = scratch_dir + stem + "_ao.png";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f) {
-        LOG(ERROR) << "LoadGltf: 无法写 occlusion 临时文件 " << tmp;
-        return 0;
-    }
-    std::fwrite(png.data(), 1, png.size(), f);
-    std::fclose(f);
-    return tex_mgr.LoadFromFile(tmp);
+    return tex_mgr.FromPixels(rgba.data(), ow, oh, ref.key + "/ao");
 }
 
 }  // namespace
@@ -2955,7 +2960,7 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor
         if (!mi.base_color_tex.empty()) {
             mat.base_color_tex =
-                self->texture_mgr_.LoadFromFile(mi.base_color_tex);
+                ResolveTextureRef(mi.base_color_tex, self->texture_mgr_);
             mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         } else {
             mat.base_color = {mi.base_color[0], mi.base_color[1],
@@ -2968,24 +2973,24 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
                         mi.emissive_factor[2], 1.0f};
         if (!mi.emissive_tex.empty()) {
             mat.emissive_tex =
-                self->texture_mgr_.LoadFromFile(mi.emissive_tex);
+                ResolveTextureRef(mi.emissive_tex, self->texture_mgr_);
         }
         // normal
         if (!mi.normal_tex.empty()) {
             mat.normal_tex =
-                self->texture_mgr_.LoadFromFile(mi.normal_tex);
+                ResolveTextureRef(mi.normal_tex, self->texture_mgr_);
             mat.normal_scale = mi.normal_scale;
         }
         // ORM → metallic / roughness / ao
         if (!mi.metallic_roughness_tex.empty()) {
-            const std::string& orm = mi.metallic_roughness_tex;
+            const std::string& orm_key = mi.metallic_roughness_tex.key;
             OrmTextureIds oid;
-            auto it = orm_cache->find(orm);
+            auto it = orm_cache->find(orm_key);
             if (it != orm_cache->end()) {
                 oid = it->second;
             } else {
-                oid = LoadOrmTextures(self->texture_mgr_, orm);
-                (*orm_cache)[orm] = oid;
+                oid = LoadOrmTextures(self->texture_mgr_, mi.metallic_roughness_tex);
+                (*orm_cache)[orm_key] = oid;
             }
             if (oid.ok) {
                 mat.metallic = mi.metallic_factor;

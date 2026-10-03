@@ -42,13 +42,13 @@
 
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/skeleton_types.h"
-#include "tools/jpov/src/gltf_loader.h"   // 复用 GltfMaterialInfo（贴图路径 + 常值）
+#include "tools/jpov/src/gltf_loader.h"   // 复用 GltfMaterialInfo（贴图来源 + 常值）
 
 namespace jpov {
 
 // 一个待保存的 primitive：一份 CPU 几何 + 一份材质信息。
 //
-// material 直接复用 loader 的 GltfMaterialInfo（贴图**路径** + 常值），使
+// material 直接复用 loader 的 GltfMaterialInfo（贴图**来源**（外部路径/内嵌字节）+ 常值），使
 // "加载 → 编辑 → 保存"用的是同一套材质描述，不引入第二套类型。
 struct GltfSaveMesh {
     MeshData mesh;

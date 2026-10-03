@@ -1,6 +1,6 @@
 // JPOV TextureManager 实现
 //
-// GPU 纹理管理：PNG 加载 → GPU 上传 → 去重缓存。
+// GPU 纹理管理：图片/像素 → GPU 上传 → 去重缓存。
 
 // 需要 glGenerateMipmap 等 GL 扩展函数原型，必须在任何 GL 头 include 之前定义。
 // MinGW 路径：原型经 gl_loader.h 的别名宏替换为运行时加载函数指针。
@@ -58,43 +58,33 @@ TextureManager::~TextureManager() {
         }
     }
     entries_.clear();
-    path_to_id_.clear();
+    dedup_to_id_.clear();
     gl_tex_to_id_.clear();
 }
 
-uint32_t TextureManager::LoadFromFile(const std::string& path,
-                                      const TextureOptions& opts) {
-    CHECK(!path.empty()) << "TextureManager::LoadFromFile: path is empty";
+std::string TextureManager::MakeDedupKey(const char* kind, const std::string& name,
+                                         const TextureOptions& opts) {
+    CHECK(kind != nullptr);
+    // 同一「来源 + 名称」不同选项 → 不同纹理，key 附 mip/repeat 位。
+    return std::string(kind) + ":" + name + "#mip=" + (opts.mipmap ? "1" : "0") +
+           ";rep=" + (opts.repeat ? "1" : "0");
+}
 
-    // 去重：同一「路径+选项」已加载过
-    const std::string key = MakePathKey(path, opts);
-    auto it = path_to_id_.find(key);
-    if (it != path_to_id_.end()) {
-        return it->second;
-    }
-
-    // stb_image 解码
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
-    CHECK(data != nullptr)
-        << "TextureManager::LoadFromFile: failed to load image: " << path
-        << " — " << stbi_failure_reason();
+unsigned int TextureManager::UploadRgba(const unsigned char* rgba, int width,
+                                        int height, const TextureOptions& opts) {
+    CHECK(rgba != nullptr);
     CHECK_GT(width, 0);
     CHECK_GT(height, 0);
 
-    // 上传到 GPU
     GLuint gl_tex = 0;
     glGenTextures(1, &gl_tex);
     CHECK_NE(gl_tex, 0u);
     glBindTexture(GL_TEXTURE_2D, gl_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, rgba);
 
     // 采样过滤器：mipmap 开 → 三线性（大透视平铺面防摩尔纹/闪烁）；否则单 mip。
-    const GLint min_filter =
-        opts.mipmap ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+    const GLint min_filter = opts.mipmap ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -109,23 +99,99 @@ uint32_t TextureManager::LoadFromFile(const std::string& path,
     }
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    stbi_image_free(data);
-
     GLenum err = glGetError();
-    CHECK_EQ(err, GL_NO_ERROR)
-        << "TextureManager::LoadFromFile: GL error after upload, code=" << err;
+    CHECK_EQ(err, GL_NO_ERROR) << "TextureManager: GL error after upload, code=" << err;
+    return gl_tex;
+}
 
+uint32_t TextureManager::RegisterOwned(unsigned int gl_tex, int width, int height,
+                                       const TextureOptions& opts,
+                                       const std::string& dedup_key,
+                                       const std::string& log_name) {
     uint32_t id = id_alloc_.Acquire();  // 复用释放的纹理 id 或开新号（避回绕，见 id_allocator.h）
     entries_[id] = {gl_tex, width, height, /*owned=*/true, opts};
-    path_to_id_[key] = id;
+    dedup_to_id_[dedup_key] = id;
 
-    LOG(INFO) << "TextureManager: loaded \"" << path << "\" "
-              << width << "x" << height << " → id=" << id
-              << " gl_tex=" << gl_tex
+    LOG(INFO) << "TextureManager: loaded " << log_name << " " << width << "x" << height
+              << " → id=" << id << " gl_tex=" << gl_tex
               << " (mipmap=" << (opts.mipmap ? "on" : "off")
               << ", repeat=" << (opts.repeat ? "on" : "off") << ")";
-
     return id;
+}
+
+uint32_t TextureManager::LoadFromFile(const std::string& path,
+                                      const TextureOptions& opts) {
+    CHECK(!path.empty()) << "TextureManager::LoadFromFile: path is empty";
+
+    // 去重：同一「路径+选项」已加载过
+    const std::string key = MakeDedupKey("file", path, opts);
+    auto it = dedup_to_id_.find(key);
+    if (it != dedup_to_id_.end()) {
+        return it->second;
+    }
+
+    // stb_image 解码
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    CHECK(data != nullptr)
+        << "TextureManager::LoadFromFile: failed to load image: " << path
+        << " — " << stbi_failure_reason();
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+
+    const unsigned int gl_tex = UploadRgba(data, width, height, opts);
+    stbi_image_free(data);
+
+    return RegisterOwned(gl_tex, width, height, opts, key, "\"" + path + "\"");
+}
+
+uint32_t TextureManager::FromMemory(const std::vector<unsigned char>& encoded,
+                                    const std::string& key,
+                                    const TextureOptions& opts) {
+    CHECK(!encoded.empty()) << "TextureManager::FromMemory: encoded 为空";
+    CHECK(!key.empty()) << "TextureManager::FromMemory: key 为空";
+
+    const std::string dkey = MakeDedupKey("mem", key, opts);
+    auto it = dedup_to_id_.find(dkey);
+    if (it != dedup_to_id_.end()) {
+        return it->second;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* data = stbi_load_from_memory(
+        encoded.data(), static_cast<int>(encoded.size()), &width, &height, &channels, 4);
+    CHECK(data != nullptr)
+        << "TextureManager::FromMemory: 解码失败 (" << key << ") — "
+        << stbi_failure_reason();
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+
+    const unsigned int gl_tex = UploadRgba(data, width, height, opts);
+    stbi_image_free(data);
+
+    return RegisterOwned(gl_tex, width, height, opts, dkey, "mem:" + key);
+}
+
+uint32_t TextureManager::FromPixels(const unsigned char* rgba, int width, int height,
+                                    const std::string& key,
+                                    const TextureOptions& opts) {
+    CHECK(rgba != nullptr) << "TextureManager::FromPixels: rgba 为空";
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK(!key.empty()) << "TextureManager::FromPixels: key 为空";
+
+    const std::string dkey = MakeDedupKey("px", key, opts);
+    auto it = dedup_to_id_.find(dkey);
+    if (it != dedup_to_id_.end()) {
+        return it->second;
+    }
+
+    const unsigned int gl_tex = UploadRgba(rgba, width, height, opts);
+    return RegisterOwned(gl_tex, width, height, opts, dkey, "pixels:" + key);
 }
 
 uint32_t TextureManager::Register(uint32_t gl_tex, int width, int height) {
@@ -181,10 +247,10 @@ void TextureManager::Release(uint32_t id) {
         glDeleteTextures(1, &entry.gl_tex);
     }
 
-    // 清理反向索引
-    for (auto pi = path_to_id_.begin(); pi != path_to_id_.end(); ++pi) {
+    // 清理反向索引（去重表按值扫描）
+    for (auto pi = dedup_to_id_.begin(); pi != dedup_to_id_.end(); ++pi) {
         if (pi->second == id) {
-            path_to_id_.erase(pi);
+            dedup_to_id_.erase(pi);
             break;
         }
     }
@@ -194,13 +260,6 @@ void TextureManager::Release(uint32_t id) {
 
     entries_.erase(it);
     id_alloc_.Release(id);  // 纹理 ID 空号回池，供后续 load/register 立即复用。
-}
-
-std::string TextureManager::MakePathKey(const std::string& path,
-                                        const TextureOptions& opts) {
-    // 同一路径不同选项 → 不同纹理，key 附 mip/repeat 位。
-    return path + "#mip=" + (opts.mipmap ? "1" : "0") +
-           ";rep=" + (opts.repeat ? "1" : "0");
 }
 
 }  // namespace jpov
