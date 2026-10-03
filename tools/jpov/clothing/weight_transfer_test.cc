@@ -1,0 +1,293 @@
+// JPOV 穿衣工具 — 软布自动蒙皮（weight transfer）纯函数单测
+//
+// 覆盖：重心插值（顶点精确命中 / 边中点 / 面内点）、top-K 剪枝与归一化、gap 兜底、
+// 退化三角形在「三角形表」与「蒙皮表」两侧同步跳过、平滑降低总变差、kJoints 标记与
+// 数组对齐。全部构造性输入（小网格 + 手写权重），无 GL / glTF。
+
+#include "tools/jpov/clothing/weight_transfer.h"
+
+#include <array>
+#include <cmath>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "geom/3d/triangle_matcher_3d.h"
+#include "tools/jpov/interface/mesh.h"
+
+namespace jpov {
+namespace clothing {
+namespace {
+
+// 造一个 3×2 的平面网格（y=0，x=0/1/2，z=0/1）：
+//   v0=(0,0,0) v1=(1,0,0) v2=(2,0,0)
+//   v3=(0,0,1) v4=(1,0,1) v5=(2,0,1)
+//   三角形 (0,1,4)(0,4,3)(1,2,5)(1,5,4)
+// 蒙皮：x=0 的顶点 → 骨 0；x=1 → 骨 1；x=2 → 骨 2（权重 1）。
+MeshData MakeGridBody() {
+    MeshData m;
+    m.flags = static_cast<MeshVertexFlags>(static_cast<uint8_t>(MeshVertexFlags::kPosition) |
+                                           static_cast<uint8_t>(MeshVertexFlags::kJoints));
+    m.positions = {Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(2, 0, 0),
+                   Vec3f(0, 0, 1), Vec3f(1, 0, 1), Vec3f(2, 0, 1)};
+    m.indices = {0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4};
+    m.joint_indices.assign(6, {0, 0, 0, 0});
+    m.joint_weights.assign(6, {0.0f, 0.0f, 0.0f, 0.0f});
+    const int bone_of_x[3] = {0, 1, 2};
+    const std::array<float, 3> xs = {0.0f, 1.0f, 2.0f};
+    for (size_t i = 0; i < m.positions.size(); ++i) {
+        int bone = 0;
+        for (int c = 0; c < 3; ++c) {
+            if (m.positions[i].x() == xs[static_cast<size_t>(c)]) {
+                bone = bone_of_x[c];
+            }
+        }
+        m.joint_indices[i] = {bone, 0, 0, 0};
+        m.joint_weights[i] = {1.0f, 0.0f, 0.0f, 0.0f};
+    }
+    return m;
+}
+
+// 从 body mesh 建三角形 + 蒙皮表 + 匹配器（本测试的小尺度参数）。
+struct BodyFixture {
+    std::vector<Triangle3d> tris;
+    BodySkinTable table;
+    std::optional<geom::TriangleMatcher3d<double>> matcher;
+};
+
+BodyFixture BuildFixture(const MeshData& body, double local_distance = 0.1,
+                         double grid = 0.1) {
+    BodyFixture f;
+    AppendMeshTriangles(body, &f.tris, &f.table);
+    f.matcher.emplace(local_distance, grid, f.tris);
+    return f;
+}
+
+// 一个位置处布料顶点（positions 单点）的 MeshData 骨架。
+MeshData MakeCloth(const std::vector<Vec3f>& pts) {
+    MeshData m;
+    m.flags = MeshVertexFlags::kPosition;
+    m.positions = pts;
+    return m;
+}
+
+// 权重和。
+float SumWeights(const std::array<float, 4>& w) {
+    return w[0] + w[1] + w[2] + w[3];
+}
+
+// 找 joint 对应的权重（找不到返回 0）。
+float WeightOfJoint(const std::array<int32_t, 4>& j,
+                    const std::array<float, 4>& w, int32_t joint) {
+    for (int k = 0; k < 4; ++k) {
+        if (j[k] == joint && w[k] > 0.0f) {
+            return w[k];
+        }
+    }
+    return 0.0f;
+}
+
+}  // namespace
+
+// 顶点精确落在身体某顶点上 → 完全拿到该顶点权重（无插值误差）。
+TEST(WeightTransferTest, ExactBodyVertexCopiesWeights) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    MeshData cloth = MakeCloth({Vec3f(1, 0, 0)});  // = v1（骨 1）
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
+                            /*max_inf*/4, /*smooth*/0);
+    EXPECT_EQ(s.vertex_count, 1u);
+    EXPECT_EQ(s.gap_vertex_count, 0u);
+    EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f,
+                1e-5f);
+    EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
+}
+
+// 顶点落在三角形内部（边中点）→ 重心插值：两骨各半。
+TEST(WeightTransferTest, EdgeMidpointBlendsTwoBones) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    // (0.5,0,0) 是三角形 (0,1,4) 的 a-b 边中点：骨0 / 骨1 各 0.5。
+    MeshData cloth = MakeCloth({Vec3f(0.5f, 0.0f, 0.0f)});
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
+                            /*max_inf*/4, /*smooth*/0);
+    EXPECT_EQ(s.gap_vertex_count, 0u);
+    EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 0), 0.5f,
+                1e-4f);
+    EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 0.5f,
+                1e-4f);
+    EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
+}
+
+// 面内点（三角形质心）→ 三骨均分。
+TEST(WeightTransferTest, TriangleCentroidBlendsThreeBones) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    // 三角形 (1,2,5) 质心 = ((1+2+2)/3, 0, (0+0+1)/3) = (5/3, 0, 1/3)：
+    // 三角为 v1(骨1)、v2(骨2)、v5(骨2)；重心均分 → 骨1=1/3、骨2=2/3。
+    const Vec3f c((1.0f + 2.0f + 2.0f) / 3.0f, 0.0f, (0.0f + 0.0f + 1.0f) / 3.0f);
+    MeshData cloth = MakeCloth({c});
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.05f,
+                            /*max_inf*/4, /*smooth*/0);
+    EXPECT_EQ(s.gap_vertex_count, 0u);
+    EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f / 3.0f,
+                1e-4f);
+    EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 2), 2.0f / 3.0f,
+                1e-4f);
+    EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
+}
+
+// top-K 剪枝：单三角形 3 角共 10 个不同骨 → 结果只保留 4 个、降序、归一化。
+TEST(WeightTransferTest, TopKPrunesAndNormalizes) {
+    MeshData body = MakeCloth({Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(0, 0, 1)});
+    body.flags = static_cast<MeshVertexFlags>(static_cast<uint8_t>(MeshVertexFlags::kPosition) |
+                                              static_cast<uint8_t>(MeshVertexFlags::kJoints));
+    body.indices = {0, 1, 2};
+    body.joint_indices = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 4, 8, 9}};
+    body.joint_weights = {{0.4f, 0.3f, 0.2f, 0.1f},
+                          {0.4f, 0.3f, 0.2f, 0.1f},
+                          {0.4f, 0.3f, 0.2f, 0.1f}};
+    BodyFixture f = BuildFixture(body);
+    const Vec3f centroid(1.0f / 3.0f, 0.0f, 1.0f / 3.0f);
+    MeshData cloth = MakeCloth({centroid});
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.05f,
+                            /*max_inf*/4, /*smooth*/0);
+    EXPECT_EQ(s.gap_vertex_count, 0u);
+    // 恰好 4 个非零（第 4 槽之后归零）。
+    int nonzero = 0;
+    for (int k = 0; k < 4; ++k) {
+        if (cloth.joint_weights[0][k] > 0.0f) {
+            ++nonzero;
+        }
+    }
+    EXPECT_EQ(nonzero, 4);
+    // 降序。
+    for (int k = 1; k < 4; ++k) {
+        EXPECT_GE(cloth.joint_weights[0][k - 1], cloth.joint_weights[0][k]);
+    }
+    // 归一化。
+    EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
+    // 最大两项应是 joint0（0.4/3 + 0.4/3）与 joint4（0.4/3 + 0.3/3）。
+    EXPECT_EQ(cloth.joint_indices[0][0], 0);
+    EXPECT_EQ(cloth.joint_indices[0][1], 4);
+    EXPECT_GT(cloth.joint_weights[0][0], cloth.joint_weights[0][1]);
+}
+
+// gap 兜底：布料顶点远离身体（> 阈值）→ 计入 gap，权重取最近角、仍归一化。
+TEST(WeightTransferTest, GapVertexFallsBackAndCounts) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body, /*local_distance*/0.1, /*grid*/0.1);
+    MeshData cloth = MakeCloth({Vec3f(1.0f, 5.0f, 0.5f)});  // 远离身体
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
+                            /*max_inf*/4, /*smooth*/0);
+    EXPECT_EQ(s.gap_vertex_count, 1u);
+    EXPECT_GT(s.max_gap_m, 4.0f);
+    EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
+    // 候选为空 → 走线性兜底（也计入 no_candidate）。
+    EXPECT_EQ(s.no_candidate_count, 1u);
+}
+
+// 退化三角形在「三角形表」与「蒙皮表」两侧同步跳过（两表恒同长）。
+TEST(WeightTransferTest, DegenerateTriangleSkippedOnBothTables) {
+    MeshData body = MakeCloth({Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(0, 0, 1)});
+    body.flags = static_cast<MeshVertexFlags>(static_cast<uint8_t>(MeshVertexFlags::kPosition) |
+                                              static_cast<uint8_t>(MeshVertexFlags::kJoints));
+    // 第 2 个三角形 (3,4,5) 共线 = 退化。
+    body.positions.push_back(Vec3f(0, 0, 2));
+    body.positions.push_back(Vec3f(1, 0, 2));
+    body.positions.push_back(Vec3f(2, 0, 2));
+    body.joint_indices.assign(6, {0, 0, 0, 0});
+    body.joint_weights.assign(6, {1.0f, 0.0f, 0.0f, 0.0f});
+    body.indices = {0, 1, 2, 3, 4, 5};
+    std::vector<Triangle3d> tris;
+    BodySkinTable table;
+    AppendMeshTriangles(body, &tris, &table);
+    EXPECT_EQ(tris.size(), 1u);          // 退化面被跳过
+    EXPECT_EQ(table.triangle_count(), 1u);  // 蒙皮表同进同出
+}
+
+// 平滑：降低邻接顶点的权重总变差（消除边界条带），且保持归一化。
+TEST(WeightTransferTest, SmoothingReducesTotalVariation) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    // 布料 = 身体 6 个顶点原位置（蒙皮沿 x 突变：骨0/1/2）。
+    const std::vector<Vec3f> pts = body.positions;
+    MeshData coarse = MakeCloth(pts);
+    coarse.indices = body.indices;  // 借用身体拓扑做邻接
+    MeshData smooth = coarse;
+
+    const SkinTransferStats s0 =
+        TransferSkinWeights(f.table, f.matcher.value(), &coarse, 0.005f, 4, /*smooth*/0);
+    const SkinTransferStats s2 =
+        TransferSkinWeights(f.table, f.matcher.value(), &smooth, 0.005f, 4, /*smooth*/2);
+    EXPECT_EQ(s0.smooth_passes, 0u);
+    EXPECT_EQ(s2.smooth_passes, 2u);
+
+    // 总变差：沿网格边累加「权重向量的 L1 距离」（用 3 个骨作稠密）。
+    const auto total_variation = [](const MeshData& m) {
+        double tv = 0.0;
+        const auto dense = [&](size_t v, int bone) {
+            for (int k = 0; k < 4; ++k) {
+                if (m.joint_indices[v][k] == bone && m.joint_weights[v][k] > 0.0f) {
+                    return static_cast<double>(m.joint_weights[v][k]);
+                }
+            }
+            return 0.0;
+        };
+        for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+            const uint32_t tri[3] = {m.indices[i], m.indices[i + 1], m.indices[i + 2]};
+            for (int e = 0; e < 3; ++e) {
+                const uint32_t a = tri[e];
+                const uint32_t b = tri[(e + 1) % 3];
+                for (int bone = 0; bone < 3; ++bone) {
+                    tv += std::abs(dense(a, bone) - dense(b, bone));
+                }
+            }
+        }
+        return tv;
+    };
+    EXPECT_GT(total_variation(coarse), 0.0);
+    EXPECT_LT(total_variation(smooth), total_variation(coarse));
+    // 归一化仍成立。
+    for (size_t v = 0; v < smooth.positions.size(); ++v) {
+        EXPECT_NEAR(SumWeights(smooth.joint_weights[v]), 1.0f, 1e-5f);
+    }
+}
+
+// 平滑对「已经是均匀权重」的输入不变（幂等：不会凭空制造变化）。
+TEST(WeightTransferTest, SmoothingKeepsUniformField) {
+    MeshData body = MakeGridBody();
+    // 把所有身体顶点权重都改成骨 0（均匀场）。
+    for (size_t i = 0; i < body.joint_indices.size(); ++i) {
+        body.joint_indices[i] = {0, 0, 0, 0};
+        body.joint_weights[i] = {1.0f, 0.0f, 0.0f, 0.0f};
+    }
+    BodyFixture f = BuildFixture(body);
+    MeshData cloth = MakeCloth(body.positions);
+    cloth.indices = body.indices;
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, 4, /*smooth*/2);
+    for (size_t v = 0; v < cloth.positions.size(); ++v) {
+        EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[v], cloth.joint_weights[v], 0), 1.0f,
+                    1e-5f);
+        EXPECT_NEAR(SumWeights(cloth.joint_weights[v]), 1.0f, 1e-5f);
+    }
+}
+
+// 结果置 kJoints flag，且 joint 数组长度 == 顶点数（供 GPU/保存使用）。
+TEST(WeightTransferTest, SetsKJointsFlagAndAlignedArrays) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    MeshData cloth = MakeCloth({Vec3f(0.5f, 0, 0), Vec3f(1.5f, 0, 0)});
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, 4, 0);
+    EXPECT_TRUE(MeshHasFlag(cloth.flags, MeshVertexFlags::kJoints));
+    EXPECT_EQ(cloth.joint_indices.size(), cloth.positions.size());
+    EXPECT_EQ(cloth.joint_weights.size(), cloth.positions.size());
+}
+
+}  // namespace clothing
+}  // namespace jpov

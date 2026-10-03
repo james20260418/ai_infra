@@ -19,54 +19,13 @@ namespace clothing {
 
 namespace {
 
-// 把一个 primitive 的 MeshData 抽成空间三角形，追加到 out。
-//
-// 索引网格：按 indices 三三分组；非索引网格：按顶点序每 3 个一组（triangle list 语义，
-// 与渲染/仿真的解释一致）。退化（共线/重合/面积趋近 0）的三角形被 Triangle3::Create
-// 拒绝（返回 nullopt），静默跳过——退化面片对"最近邻"贡献为零，无须报错。
-void AppendTrianglesFromMesh(const MeshData& mesh,
-                             std::vector<Triangle3d>* out /*inout*/) {
-    CHECK(out != nullptr);
-    const std::vector<Vec3f>& pos = mesh.positions;
-    if (pos.empty()) {
-        return;
-    }
-
-    const auto append_one = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
-        CHECK_LT(i0, pos.size());
-        CHECK_LT(i1, pos.size());
-        CHECK_LT(i2, pos.size());
-        // MeshData 顶点是 float，本匹配器用 double 标量：显式提升，避免丢精度。
-        const geom::Vec3<double> a(pos[i0].x(), pos[i0].y(), pos[i0].z());
-        const geom::Vec3<double> b(pos[i1].x(), pos[i1].y(), pos[i1].z());
-        const geom::Vec3<double> c(pos[i2].x(), pos[i2].y(), pos[i2].z());
-        std::optional<Triangle3d> tri = Triangle3d::Create(a, b, c);
-        if (tri.has_value()) {
-            out->push_back(tri.value());
-        }
-    };
-
-    if (!mesh.indices.empty()) {
-        CHECK_EQ(mesh.indices.size() % 3, 0u)
-            << "索引网格的 indices 必须是 3 的倍数（triangle list）";
-        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
-            append_one(mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
-        }
-    } else {
-        CHECK_EQ(pos.size() % 3, 0u)
-            << "非索引网格的顶点数必须是 3 的倍数（triangle list）";
-        for (size_t i = 0; i + 2 < pos.size(); i += 3) {
-            append_one(static_cast<uint32_t>(i), static_cast<uint32_t>(i + 1),
-                       static_cast<uint32_t>(i + 2));
-        }
-    }
-}
-
-// 回调 user_data：把每个 primitive 的三角形收集进一个 vector；若 geometry 非空，
-// 同时保留一份 CPU 几何（MeshData + 材质）供上层烘焙/保存用。
+// 回调 user_data：把每个 primitive 的三角形收集进一个 vector；可选同步建「三角形 → 3 角
+// 蒙皮」表（人体侧用）；可选保留一份 CPU 几何（衣服侧用）。
 struct PrimitiveCollector {
     std::vector<Triangle3d> triangles;
-    // 非空则同时保留 CPU 几何（衣服侧用；body 侧传 nullptr 以省一份拷贝）。
+    // 非空则同步建蒙皮表（见 weight_transfer.h 的 AppendMeshTriangles）。
+    BodySkinTable* skin = nullptr;
+    // 非空则同时保留 CPU 几何（衣服侧用）。
     std::vector<jpov::GltfMeshEntry>* geometry = nullptr;
 };
 
@@ -74,20 +33,30 @@ void CollectPrimitive(const GltfMeshEntry* entry, void* user_data) {
     CHECK(entry != nullptr);
     CHECK(user_data != nullptr);
     PrimitiveCollector* collector = static_cast<PrimitiveCollector*>(user_data);
-    AppendTrianglesFromMesh(entry->mesh, &collector->triangles);
+    // 只对「带蒙皮通道」的 primitive 建表：缺蒙皮的 primitive 会把表与三角形错位，
+    // 由调用方在末尾检测（triangle_count != triangles.size()）；此处不 CHECK 崩溃，
+    // 让工具在「无蒙皮人体」上仍可用于仿真 / 保存（只是自动蒙皮不可用）。
+    BodySkinTable* table =
+        (collector->skin != nullptr &&
+         MeshHasFlag(entry->mesh.flags, MeshVertexFlags::kJoints))
+            ? collector->skin
+            : nullptr;
+    AppendMeshTriangles(entry->mesh, &collector->triangles, table);
     if (collector->geometry != nullptr) {
         // loader 回调给的是 const 引用，只能拷贝一份（初始化期一次性，可接受）。
         collector->geometry->push_back(*entry);
     }
 }
 
-// 读一个 glb 并抽出所有三角形（可选同时保留 CPU 几何）。失败返回 false。
+// 读一个 glb 并抽出所有三角形（可选同时保留 CPU 几何 / 建人体蒙皮表）。失败返回 false。
 bool LoadModel(const std::string& path, bool keep_geometry,
                std::vector<Triangle3d>* out_triangles,
-               std::vector<jpov::GltfMeshEntry>* out_geometry /*output*/) {
+               std::vector<jpov::GltfMeshEntry>* out_geometry /*output, 可空*/,
+               BodySkinTable* out_skin /*output, 可空*/) {
     CHECK(out_triangles != nullptr);
     PrimitiveCollector collector;
     collector.geometry = keep_geometry ? out_geometry : nullptr;
+    collector.skin = out_skin;
     const bool ok = LoadGltfScene(path, &CollectPrimitive, &collector);
     if (!ok) {
         return false;
@@ -125,6 +94,7 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
         error_message_.clear();
         body_ = MatcherBundle{};
         cloth_ = MatcherBundle{};
+        body_skin_ = BodySkinTable{};
         cloth_geometry_.clear();
     }
     state_ = InitState::kBuilding;
@@ -133,21 +103,32 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
         std::string error;
         MatcherBundle body;
         MatcherBundle cloth;
+        BodySkinTable body_skin;
 
         const auto set_progress = [this](const std::string& msg) {
             std::lock_guard<std::mutex> lock(mtx_);
             progress_message_ = msg;
         };
 
-        // 1) 人体 reference：读三角形 → 建匹配器（不保留 CPU 几何）。
+        // 1) 人体 reference：读三角形 → 建匹配器；顺带建「三角形 → 3 角蒙皮」表
+        //    （供软布自动蒙皮用；人体无蒙皮通道时表为空，自动蒙皮不可用）。
         set_progress("正在加载人体 reference...");
         std::vector<Triangle3d> body_triangles;
         if (!LoadModel(body_reference_path, /*keep_geometry=*/false,
-                       &body_triangles, nullptr)) {
+                       &body_triangles, /*out_geometry=*/nullptr,
+                       /*out_skin=*/&body_skin)) {
             error = "加载人体 reference 失败：" + body_reference_path;
         } else if (body_triangles.empty()) {
             error = "人体 reference 无有效三角形：" + body_reference_path;
         } else {
+            // 蒙皮表必须与三角形同序同长；不等 ⇒ 某些 primitive 缺 JOINTS/WEIGHTS，
+            // 清空表（自动蒙皮不可用），但不阻断初始化（仿真 / 保存仍可用）。
+            if (body_skin.triangle_count() != body_triangles.size()) {
+                LOG(WARNING) << "人体 reference 缺蒙皮信息（JOINTS_0/WEIGHTS_0），"
+                                "软布自动蒙皮不可用："
+                             << body_reference_path;
+                body_skin = BodySkinTable{};
+            }
             set_progress("正在为人体 reference 建图（" +
                          std::to_string(body_triangles.size()) + " 面）...");
             const auto t0 = std::chrono::steady_clock::now();
@@ -167,7 +148,7 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
             set_progress("正在加载衣服模型...");
             std::vector<Triangle3d> cloth_triangles;
             if (!LoadModel(cloth_path, /*keep_geometry=*/true, &cloth_triangles,
-                           &cloth_geometry)) {
+                           &cloth_geometry, /*out_skin=*/nullptr)) {
                 error = "加载衣服模型失败：" + cloth_path;
             } else if (cloth_triangles.empty()) {
                 error = "衣服模型无有效三角形：" + cloth_path;
@@ -195,6 +176,7 @@ bool ClothingInitController::Start(const std::string& body_reference_path,
             std::lock_guard<std::mutex> lock(mtx_);
             body_ = std::move(body);
             cloth_ = std::move(cloth);
+            body_skin_ = std::move(body_skin);
             cloth_geometry_ = std::move(cloth_geometry);
             error_message_ = error;
             progress_message_ = error.empty() ? "初始化完成" : "初始化失败";
