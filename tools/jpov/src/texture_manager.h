@@ -11,6 +11,7 @@
 //
 // 去重:
 //   - LoadFromFile 对同一绝对路径只加载一次，返回相同 ID。
+//   - FromMemory / FromPixels 对同一 key 只上传一次（key 由调用方给，如内嵌图内容哈希）。
 //   - Register 直接注册现有 GL 纹理，不查重（调用者保证不重复注册）。
 
 #ifndef JPOV_TEXTURE_MANAGER_H_
@@ -54,6 +55,26 @@ public:
     // Pre-condition: path 非空
     uint32_t LoadFromFile(const std::string& path,
                           const TextureOptions& opts = {});
+
+    // FromMemory: 从**内存里的编码图片字节**（PNG/JPEG…）加载纹理到 GPU。
+    //
+    // 用于「本来就在内存里」的图（如 glb 内嵌贴图的 bufferView 字节）——**不再经临时文件**
+    // （文件法不可靠：全局可写路径 + 同名覆盖）。内部走 stbi_load_from_memory 解码后与
+    // LoadFromFile 同一条上传路径。
+    // key：去重身份（同一 key+opts 只加载一次、只上传一次）；调用方应给**内容相关**的键
+    //   （如内容哈希或资产内 image 下标），不要用可能与别的图重名的东西。
+    //
+    // Pre-condition: GL context 已激活；encoded 非空；key 非空。
+    uint32_t FromMemory(const std::vector<unsigned char>& encoded,
+                        const std::string& key, const TextureOptions& opts = {});
+
+    // FromPixels: 从**已解码的 RGBA 像素**直接上传（跳过图片编/解码）。
+    //
+    // 用于「本来就在内存里、且无需再编码」的图（如 ORM 拆包/occlusion 烘焙后的像素）。
+    //
+    // Pre-condition: GL context 已激活；rgba 指向 width*height*4 字节；width>0；height>0；key 非空。
+    uint32_t FromPixels(const unsigned char* rgba, int width, int height,
+                        const std::string& key, const TextureOptions& opts = {});
 
     // Register: 直接注册已有 GL 纹理。
     //
@@ -100,15 +121,28 @@ private:
     // id → Entry
     std::unordered_map<uint32_t, Entry> entries_;
 
-    // 文件路径+选项 → id（LoadFromFile 去重；同路径不同选项=不同纹理）
-    std::unordered_map<std::string, uint32_t> path_to_id_;
+    // 去重键（带来源前缀）→ id。三类来源：file:/mem:/px:（见 MakeDedupKey），
+    //   同一键 + 同一选项只分配一次；同键不同选项 = 不同纹理。
+    std::unordered_map<std::string, uint32_t> dedup_to_id_;
 
     // gl_tex → id（Register 去重）
     std::unordered_map<uint32_t, uint32_t> gl_tex_to_id_;
 
-    // 由路径+选项生成去重 key（追加 mip/repeat 位）。
-    static std::string MakePathKey(const std::string& path,
-                                   const TextureOptions& opts);
+    // 像素 → GL 纹理（生成/上传/参数/mipmap）。rgba 指向 w*h*4 字节。
+    // Pre-condition: rgba 非空；w>0；h>0。失败 LOG(FATAL)。
+    unsigned int UploadRgba(const unsigned char* rgba, int width, int height,
+                            const TextureOptions& opts);
+
+    // 登记一个由本管理器拥有的纹理（上传后）：分配 id、写 entries_ 与去重表。
+    // 返回分配的 id。log_name 仅用于日志。
+    uint32_t RegisterOwned(unsigned int gl_tex, int width, int height,
+                           const TextureOptions& opts,
+                           const std::string& dedup_key,
+                           const std::string& log_name);
+
+    // 由「来源前缀 + 名称 + 选项」生成去重键（追加 mip/repeat 位）。
+    static std::string MakeDedupKey(const char* kind, const std::string& name,
+                                    const TextureOptions& opts);
 };
 
 }  // namespace jpov

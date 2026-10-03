@@ -43,9 +43,9 @@ int main(int argc, char** argv) {
     CHECK(!mat.normal_tex.empty());
     CHECK(!mat.metallic_roughness_tex.empty());
 
-    LOG(INFO) << "baseColorTex=" << mat.base_color_tex;
-    LOG(INFO) << "normalTex=" << mat.normal_tex;
-    LOG(INFO) << "metallicRoughnessTex=" << mat.metallic_roughness_tex;
+    LOG(INFO) << "baseColorTex=" << mat.base_color_tex.key;
+    LOG(INFO) << "normalTex=" << mat.normal_tex.key;
+    LOG(INFO) << "metallicRoughnessTex=" << mat.metallic_roughness_tex.key;
 
     LOG(INFO) << "TEST PASSED";
     return 0;

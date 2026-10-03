@@ -227,6 +227,34 @@ json EmbedImage(const std::string& path, BinBuilder* bin, json* buffer_views) {
     return json{{"bufferView", bv}, {"mimeType", use_mime}};
 }
 
+// 由图片字节的魔数判定 mime（内嵌图无边路可推断，看内容）。
+std::string MimeTypeOfBytes(const std::vector<unsigned char>& b) {
+    if (b.size() >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E &&
+        b[3] == 0x47) {
+        return "image/png";
+    }
+    if (b.size() >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) {
+        return "image/jpeg";
+    }
+    return "image/png";  // 兜底（未知按 png）
+}
+
+// 把**已在内存里的图片字节**内嵌到 BIN，返回 image 的 json。空字节返回空 json。
+//   —— 内嵌图（如从别的 glb 读出来的 bufferView）不再重编码：原样写回（保原格式）。
+json EmbedImageBytes(const std::vector<unsigned char>& bytes, BinBuilder* bin,
+                     json* buffer_views) {
+    if (bytes.empty()) {
+        return json();
+    }
+    const std::string use_mime = MimeTypeOfBytes(bytes);
+    const size_t off = bin->Append(bytes.data(), bytes.size());
+    const int bv = static_cast<int>(buffer_views->size());
+    buffer_views->push_back({{"buffer", 0},
+                             {"byteOffset", off},
+                             {"byteLength", bytes.size()}});
+    return json{{"bufferView", bv}, {"mimeType", use_mime}};
+}
+
 }  // namespace
 
 bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
@@ -251,19 +279,21 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
 
     BinBuilder bin;
 
-    // ---- 贴图去重（同一路径只内嵌一次）----
-    std::map<std::string, int> tex_index_by_path;   // path → texture 索引
-    auto texture_for = [&](const std::string& img_path) -> int {
-        if (img_path.empty()) {
+    // ---- 贴图去重（同一贴图：外部路径 或 内嵌字节 只内嵌一次）----
+    std::map<std::string, int> tex_index_by_path;   // 去重键 → texture 索引
+    auto texture_for = [&](const GltfTextureRef& ref) -> int {
+        if (ref.empty()) {
             return -1;
         }
-        std::map<std::string, int>::const_iterator it =
-            tex_index_by_path.find(img_path);
+        const std::string key = ref.is_embedded() ? ("mem:" + ref.key) : ref.uri;
+        std::map<std::string, int>::const_iterator it = tex_index_by_path.find(key);
         if (it != tex_index_by_path.end()) {
             return it->second;
         }
-        // 先记索引位（image/texture 数组同步 append）。
-        json img = EmbedImage(img_path, &bin, &root["bufferViews"]);
+        // 内嵌（内存字节）→ 原样内嵌；外部（路径）→ 读文件内嵌。
+        json img = ref.is_embedded()
+                       ? EmbedImageBytes(ref.bytes, &bin, &root["bufferViews"])
+                       : EmbedImage(ref.uri, &bin, &root["bufferViews"]);
         if (img.is_null() || img.empty()) {
             return -1;
         }
@@ -272,7 +302,7 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
         const int tex_index = static_cast<int>(root["textures"].size());
         root["textures"].push_back(
             json{{"source", image_index}, {"sampler", 0}});
-        tex_index_by_path[img_path] = tex_index;
+        tex_index_by_path[key] = tex_index;
         return tex_index;
     };
 
