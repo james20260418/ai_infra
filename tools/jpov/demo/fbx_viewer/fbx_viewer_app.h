@@ -62,8 +62,10 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -148,6 +150,14 @@ inline Bounds ComputeMeshBounds(const jpov::MeshData& mesh) {
 enum class BlueDrive : int {
     kNoRetarget   = 0,
     kBodyRetarget = 1,
+};
+
+// 一件挂在「蓝侧骨架」上的已蒙皮衣服：一个 primitive 的 GPU mesh + 材质。
+//   ⚠️ 不另建 SkeletonManager：直接绑到蓝人那份 glb_skin_skel_id_，并复用同一份
+//   SkinnedInstanceState（pose/摆放）⇒ 与蓝人逐帧天然同步（本工具的最简实现）。
+struct ClothDrawMesh {
+    uint32_t mesh_id = 0;
+    jpov::PBRMaterial material;
 };
 
 // 「显示/驱动」选项（**合并成一个 combo**）——看哪个骨架 + 蓝骨由什么驱动。
@@ -364,6 +374,8 @@ public:
     jpov::PBRMaterial glb_skin_mat_;           // glb 真皮材质（baseColor 贴图等）
     std::vector<jpov::SkeletonPose> glb_skin_poses_;  // 逐帧重定向后的 pose（下标 = 帧号）
     bool glb_skin_ready_ = false;
+    // 挂在蓝侧骨架上的衣服（来自 --cloth_path；空 = 不穿衣服）。仅在带皮模式绘制。
+    std::vector<ClothDrawMesh> cloths_;
     Bounds glb_skin_bounds_{};                 // 真皮网格的 rest 包围盒（摄像机适配用）
     int glb_skin_frame_count_ = 0;             // 源动画帧数（不含末尾 identity 槽）
     // 末尾 identity 槽在 pose 序列里的下标（= glb_skin_frame_count_）。rest 模式专用。
@@ -404,6 +416,14 @@ public:
     //   须在 LoadFbx 之后调（骨名命中数依赖源骨架）；调用后 view_mode_ 默认切到
     //   kBoth（传了 glb 就是想对比），初始机位重新按两者并列的包围盒适配。
     bool LoadGlbSkeleton(const std::string& path);
+
+    // 加载若干「已自动蒙皮的衣服」并挂到蓝侧骨架（带皮模式下与蓝人同步渲染）。
+    //   path：一个目录（加载其中所有 *.glb / *.gltf，按名排序）或单个文件。
+    //   前置：蓝侧真皮骨架已装配（LoadGlbSkeleton 成功）。
+    //   每件衣服要求：① 带 JOINTS_0/WEIGHTS_0；② 骨序（骨数 + 逐骨名）与 glb_skeleton_
+    //   一致（保证其 joint 索引在同一骨架下语义正确）；不符者跳过并 LOG(ERROR)（不崩）。
+    //   返回成功挂载的 primitive 数（一件多 primitive 都计入）。
+    int LoadCloths(const std::string& path);
 
     // 渲染/交互是否绘制顶部面板。
     //   true  = 交互窗口（OneIteration 末尾画面板）
@@ -553,7 +573,13 @@ public:
                     instances.push_back(inst);
                 }
                 cmds->DrawMeshWithSkeleton(glb_skin_mesh_id_, glb_skin_skel_id_,
-                                           glb_skin_mat_, std::move(instances));
+                                           glb_skin_mat_, instances);
+                // 衣服：同一 skeleton_id + 同一 instances（pose/摆放）⇒ 与蓝人逐帧同步。
+                //   （instances 按值传入 ⇒ 每次调用各拷一份；蓝人的也是拷贝，不再 move。）
+                for (const ClothDrawMesh& cloth : cloths_) {
+                    cmds->DrawMeshWithSkeleton(cloth.mesh_id, glb_skin_skel_id_,
+                                               cloth.material, instances);
+                }
             }
         } else if (show_glb) {
             // 蓝火柴人：常规蓝骨模式，以及「要带皮但网格没装配成功」的回落。
@@ -1093,6 +1119,90 @@ inline bool FbxViewerApp::LoadGlbSkeleton(const std::string& path) {
               << " 并列间距=" << pair_sep_m_ << "m"
               << " 3-instance 间距=" << glb_skin_pair_spacing_m_ << "m";
     return true;
+}
+
+inline int FbxViewerApp::LoadCloths(const std::string& path) {
+    CHECK(glb_skin_ready_)
+        << "LoadCloths: 请先成功装配蓝侧真皮骨架（LoadGlbSkeleton）";
+
+    // 解析目标：目录（取其中所有 .glb/.gltf，按名排序）或单文件。
+    namespace fs = std::filesystem;
+    std::vector<std::string> files;
+    std::error_code ec;
+    if (fs::is_directory(path, ec)) {
+        for (const fs::directory_entry& de : fs::directory_iterator(path, ec)) {
+            if (!de.is_regular_file()) {
+                continue;
+            }
+            const std::string ext = de.path().extension().string();
+            if (ext == ".glb" || ext == ".gltf") {
+                files.push_back(de.path().string());
+            }
+        }
+        std::sort(files.begin(), files.end());  // 确定顺序（目录遍历不保证序）
+    } else {
+        files.push_back(path);
+    }
+    if (files.empty()) {
+        LOG(WARNING) << "LoadCloths: 未找到任何 .glb/.gltf: " << path;
+        return 0;
+    }
+
+    int added = 0;
+    for (const std::string& file : files) {
+        // ① CPU 侧先验：必须带骨骼蒙皮通道。
+        jpov::MeshData probe;
+        jpov::GltfMaterialInfo probe_mat;
+        if (!jpov::LoadGltf(file, &probe, &probe_mat)) {
+            LOG(ERROR) << "LoadCloths: 读取失败，跳过: " << file;
+            continue;
+        }
+        if (!jpov::MeshHasFlag(probe.flags, jpov::MeshVertexFlags::kJoints)) {
+            LOG(ERROR) << "LoadCloths: 无骨骼蒙皮通道（JOINTS/WEIGHTS），跳过: " << file;
+            continue;
+        }
+        // ② 骨序必须与蓝骨一致（骨数 + 逐骨名）：否则 joint 索引语义错位。
+        std::vector<jpov::SkeletonType> skins;
+        if (!jpov::LoadGltfSkeleton(file, &skins) || skins.empty()) {
+            LOG(ERROR) << "LoadCloths: 无 skin，跳过: " << file;
+            continue;
+        }
+        if (skins[0].bone_count() != glb_skeleton_.bone_count()) {
+            LOG(ERROR) << "LoadCloths: 骨数不符（" << skins[0].bone_count() << " vs "
+                       << glb_skeleton_.bone_count() << "），跳过: " << file;
+            continue;
+        }
+        bool names_ok = true;
+        for (int i = 0; i < glb_skeleton_.bone_count(); ++i) {
+            if (skins[0].joints[i].name != glb_skeleton_.joints[i].name) {
+                LOG(ERROR) << "LoadCloths: 骨名不符 @" << i << "（"
+                           << skins[0].joints[i].name << " vs "
+                           << glb_skeleton_.joints[i].name << "），跳过: " << file;
+                names_ok = false;
+                break;
+            }
+        }
+        if (!names_ok) {
+            continue;
+        }
+
+        // ③ 上传 GPU 网格与材质；每个 primitive 一个可蒙皮绘制项。
+        jpov::GltfObject obj = LoadGltf(file);
+        if (obj.empty()) {
+            LOG(ERROR) << "LoadCloths: GPU 上传失败或无 primitive，跳过: " << file;
+            continue;
+        }
+        for (const jpov::GltfPrimitive& prim : obj.primitives) {
+            CHECK_NE(prim.mesh_id, 0u);
+            cloths_.push_back(ClothDrawMesh{prim.mesh_id, prim.material});
+            ++added;
+        }
+        LOG(INFO) << "LoadCloths: 挂载 " << file << "（" << obj.primitives.size()
+                  << " primitives）";
+    }
+    LOG(INFO) << "LoadCloths: 共挂载 " << added << " 个衣服 primitive（扫到 "
+              << files.size() << " 个文件）";
+    return added;
 }
 
 }  // namespace jpov_fbx_viewer

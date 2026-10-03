@@ -41,6 +41,21 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 软布自动蒙皮（weight transfer）—— header-only 纯函数，无 GL / glTF / 渲染栈依赖。
+# 单独成库：① 供 clothing_tool_app 使用；② 可被纯单测直接依赖（不拖入整个 JPOV 渲染栈）。
+cc_library(
+    name = "weight_transfer",
+    hdrs = ["weight_transfer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "clothing_tool_app",
     srcs = [
@@ -56,12 +71,15 @@ cc_library(
     deps = [
         ":clothing_axis_input",
         ":clothing_transform",
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
         "//geom/3d:triangle_matcher_3d",
         "//tools/common:utils",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src:gltf_saver",
@@ -93,6 +111,53 @@ cc_test(
     deps = [
         ":clothing_transform",
         "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 软布自动蒙皮（weight transfer）纯函数单测（重心插值 / top-K / gap 兜底 / 平滑；无 GL）。
+cc_test(
+    name = "weight_transfer_test",
+    srcs = ["weight_transfer_test.cc"],
+    deps = [
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 端到端（CPU-only）：真资材 mixamo_male + harness_vest → 自动蒙皮 → 写带 skin glb
+# → 用生产 loader 读回自证（JOINTS/WEIGHTS/骨数/归一）。
+cc_test(
+    name = "clothing_skin_e2e_test",
+    srcs = ["clothing_skin_e2e_test.cc"],
+    data = [
+        "//tools/jpov/test/object3d:clothing_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
+    deps = [
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/common:utils",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],

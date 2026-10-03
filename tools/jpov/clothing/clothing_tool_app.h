@@ -55,9 +55,11 @@
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
 #include "tools/jpov/clothing/clothing_transform.h"
+#include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 #include "tools/jpov/src/gltf_loader.h"
@@ -105,6 +107,15 @@ inline constexpr float kDefaultScaleStep = 1.1f;
 // 默认全局速度上限（m/s）。低质量数值失稳的兑底（Danis 2026-10-01：把 M 调小后布料被
 // 甩飞、拉成“淌”状长条）。0 = 不限；实测 25 m/s 能在保留正常下落（~8 m/s）的同时挡住失稳。
 inline constexpr float kDefaultMaxSpeed = 25.0f;
+
+// ── 软布自动蒙皮（weight transfer）参数 ──
+// gap 阈值：衣物顶点到身体最近距离 > 该值即视为“不贴合”（宽松/缝线悬挂），走兜底
+// 权重并被计数。5mm（设计文档 §3.3 建议 3~5mm 取上界，包容贴身件的数值误差）。
+inline constexpr float kSkinGapThresholdM = 0.005f;
+// 每顶点最大影响骨数（与 MeshData 的 4 组 joint/weight 对齐）。
+inline constexpr int kSkinMaxInfluences = 4;
+// 打开“平滑权重”时的拉普拉斯迭代次数（消关节附近条带）。
+inline constexpr int kSkinSmoothPasses = 2;
 
 // 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
 // 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
@@ -175,6 +186,15 @@ public:
     // 衣服保存控制器（后台线程写 glb）。
     ClothingSaveController save_ctrl_;
 
+    // ── 软布自动蒙皮（weight transfer）状态 ──
+    // 人体 reference 的骨架：蒙皮产出的权重按该骨架的关节序索引，保存时写进 glb 的 skin。
+    jpov::SkeletonType body_skeleton_;
+    bool has_body_skeleton_ = false;   // body_skeleton_ 是否有效（人体 glb 带 skin）
+    // 已自动蒙皮：此后**冻结几何**（禁变换/禁仿真/禁重置），否则权重↔顶点对应被破坏。
+    bool skinned_ = false;
+    std::string skin_msg_;             // 蒙皮结果 / 失败提示（面板显示）
+    bool skin_smooth_ui_ = true;       // 「平滑权重」勾选（默认开）
+
     // ══════════════ 软体仿真（Step 1）══════════════
     //
     // 每 clothes primitive 一个仿真器（多为单 primitive）。生命周期：
@@ -235,9 +255,9 @@ public:
     }
 
     // 把衣服整体平移 delta（等价于面板平移一次）。供 headless 预摆位 / 脚本用。
-    // 场景未就绪（sims_ 空）时 no-op。
+    // 场景未就绪（sims_ 空）或已蒙皮（几何已冻结）时 no-op。
     void TranslateCloth(const jpov::Vec3f& delta) {
-        if (sims_.empty()) {
+        if (skinned_ || sims_.empty()) {
             return;
         }
         for (Simulator& sim : sims_) {
@@ -308,6 +328,16 @@ public:
         }
 
         gpu_uploaded_ = true;
+        // 人体骨架（蒙皮产出的权重按它索引；保存 glb 时作为 skin）。无 skin 时自动蒙皮不可用。
+        std::vector<jpov::SkeletonType> body_skins;
+        if (jpov::LoadGltfSkeleton(body_path_, &body_skins) && !body_skins.empty()) {
+            body_skeleton_ = body_skins[0];
+            body_skeleton_.Validate();
+            has_body_skeleton_ = true;
+        } else {
+            LOG(WARNING) << "人体 reference 无骨架（skin），软布自动蒙皮不可用: "
+                         << body_path_;
+        }
         LOG(INFO) << "人体 reference: " << body_path_ << "（" << body_.size()
                   << " primitives）";
         LOG(INFO) << "衣服模型: " << cloth_path_ << "（" << cloth_.size()
@@ -491,8 +521,9 @@ private:
     }
 
     // 推进一个外部步（1/60 s）：每个 primitive 各自 Step，然后同步到显示 / 快照。
+    // 已蒙皮后冻结（冻几何）：直接 no-op，避免破坏权重↔顶点对应。
     void StepSimulationOnce() {
-        if (sims_.empty()) {
+        if (skinned_ || sims_.empty()) {
             return;
         }
         for (Simulator& sim : sims_) {
@@ -558,10 +589,13 @@ private:
     }
 
     // 平移步进：所有仿真器状态沿 axis 轴平移 direction * trans_step_[axis]（速度不变）。
-    // Pre-condition: 0 <= axis < 3。
+    // Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
     void StepTranslation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
+        if (skinned_) {
+            return;
+        }
         const float d = direction * trans_step_[axis];
         const jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
                                 axis == 2 ? d : 0.0f);
@@ -572,10 +606,13 @@ private:
     }
 
     // 旋转步进：绕合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度
-    // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。
+    // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
     void StepRotation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
+        if (skinned_) {
+            return;
+        }
         const float deg = direction * rot_step_[axis];
         const jpov::Vec3f pivot = SimsBoundsCenter();
         for (Simulator& sim : sims_) {
@@ -586,9 +623,12 @@ private:
 
     // 缩放步进：整体缩放乘 factor（> 1 放大、< 1 缩小），绕合并中心；累计系数夹到
     // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。**速度**不参与缩放。
-    // Pre-condition: factor > 0。
+    // Pre-condition: factor > 0。已蒙皮后冻结（no-op）。
     void StepScale(float factor) {
         CHECK_GT(factor, 0.0f);
+        if (skinned_) {
+            return;
+        }
         const float target = ClampClothScale(cloth_scale_ * factor);
         const float applied = target / cloth_scale_;  // 实际生效的比例（可能被 clamp 到 1）
         if (applied == 1.0f) {
@@ -605,6 +645,10 @@ private:
     // 「重置衣服」：所有仿真器 Reset（回**启动时**的绑定姿态），停仿真回到可重调状态。
     // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
     void ResetClothMesh() {
+        if (skinned_) {
+            LOG(WARNING) << "已蒙皮，重置被忽略（几何已冻结）";
+            return;
+        }
         for (Simulator& sim : sims_) {
             sim.Reset();
         }
@@ -649,6 +693,7 @@ private:
 
         DrawLeftPanel(cmds, w);
         DrawRightPanel(cmds, w, h);
+        DrawSkinPanel(cmds, w, h);
     }
 
     // ---- 左上角：变换 / 保存 / 地面 / 显示 ----
@@ -942,18 +987,120 @@ private:
         row_y += step_y;
     }
 
+    // ---- 右下角：软布自动蒙皮（一键）----
+    //
+    // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
+    // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 平滑权重勾选(1) + 状态文本(1) = 4。
+    void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.30f * win_w;
+        constexpr int kRows = 4;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        const float panel_x = win_w - panel_w - kMargin;  // 贴右边缘
+        const float panel_y = win_h - panel_h - kMargin;  // 贴底边缘
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+        float row_y = top;
+
+        DrawLabel("软布自动蒙皮", left, row_w, row_y);
+        row_y += step_y;
+
+        // 一键蒙皮按钮：已蒙皮后 RunAutoSkin 自身 no-op（按钮仍可点，文案变明示状态）。
+        const char* btn = skinned_ ? "已蒙皮（已冻结）" : "一键蒙皮";
+        if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            RunAutoSkin();
+        }
+        row_y += step_y;
+
+        ui_.Checkbox("平滑权重", &skin_smooth_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // 状态 / 提示（可能为空）。
+        if (!skin_msg_.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+            cmds->DrawText(skin_msg_,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
+    }
+
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
     }
 
     // 发起保存：把当前衣服几何快照交给保存控制器（按值快照，之后改动不影响本次）。
+    // 已自动蒙皮时带上骨架（写 glb 的 skin + inverseBindMatrices）。
     void StartSaveCloth() {
         if (cloth_current_.empty()) {
             LOG(WARNING) << "保存被忽略：衣服几何尚未就绪";
             return;
         }
-        save_ctrl_.Start(cloth_current_, cloth_path_, "cloth");
+        std::optional<jpov::SkeletonType> skin;
+        if (skinned_ && has_body_skeleton_) {
+            skin = body_skeleton_;
+        }
+        save_ctrl_.Start(cloth_current_, std::move(skin), cloth_path_, "cloth");
+    }
+
+    // 一键：软布自动蒙皮（weight transfer，见 weight_transfer.h）。成功后就地给每个
+    // 衣物 primitive 写入 JOINTS_0/WEIGHTS_0（并在 flags 置 kJoints），随后**冻结几何**
+    // （禁变换 / 禁仿真 / 禁重置），保证权重↔顶点对应不被破坏。
+    //
+    // 全程主线程同步：顶点数万量级、最近三角形查询近 O(1)，实测亚秒级。
+    // Pre-condition: 场景就绪（gpu_uploaded_）。
+    void RunAutoSkin() {
+        if (skinned_) {
+            skin_msg_ = "已蒙皮（几何已冻结，可保存）";
+            return;
+        }
+        if (!has_body_skeleton_) {
+            skin_msg_ = "人体 reference 无骨架（skin），无法自动蒙皮";
+            LOG(WARNING) << skin_msg_;
+            return;
+        }
+        if (!init_.body_matcher().valid() || init_.body_skin().triangle_count() == 0) {
+            skin_msg_ = "人体无蒙皮信息（JOINTS_0/WEIGHTS_0），无法自动蒙皮";
+            LOG(WARNING) << skin_msg_;
+            return;
+        }
+        if (cloth_current_.empty()) {
+            skin_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        SyncSimsToCloth();  // 以当前（仿真后）几何为准
+
+        const int passes = skin_smooth_ui_ ? kSkinSmoothPasses : 0;
+        const geom::TriangleMatcher3d<double>& matcher =
+            init_.body_matcher().matcher.value();
+        size_t total_verts = 0;
+        size_t total_gap = 0;
+        float max_gap_m = 0.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const SkinTransferStats s = TransferSkinWeights(
+                init_.body_skin(), matcher, &cloth_current_[i].mesh,
+                kSkinGapThresholdM, kSkinMaxInfluences, passes);
+            total_verts += s.vertex_count;
+            total_gap += s.gap_vertex_count;
+            max_gap_m = std::max(max_gap_m, s.max_gap_m);
+        }
+        skinned_ = true;
+        sim_running_ = false;
+        skin_msg_ = Format("已蒙皮 %zu 顶点 / gap %zu（max %.1f mm）/ 平滑 %d 轮",
+                           total_verts, total_gap,
+                           static_cast<double>(max_gap_m * 1000.0f), passes);
+        LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
     }
 
     // ---- 资产包围盒的并集（相机自适应用）。----

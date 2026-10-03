@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "geom/3d/triangle_matcher_3d.h"
+#include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/src/gltf_loader.h"
 
@@ -108,6 +109,12 @@ public:
     const MatcherBundle& body_matcher() const { return body_; }
     const MatcherBundle& cloth_matcher() const { return cloth_; }
 
+    // 人体「三角形 → 3 角蒙皮」表：与 body_matcher().matcher->triangles() **同序同长**。
+    // 供软布自动蒙皮（weight transfer，见 weight_transfer.h）用。
+    // ⚠️ 人体 reference 无蒙皮通道（JOINTS_0/WEIGHTS_0）时该表为空（triangle_count()==0）
+    //    —— 调用方据此判定「自动蒙皮不可用」，不要当异常崩溃。
+    const BodySkinTable& body_skin() const { return body_skin_; }
+
     // 取走衣服的 CPU 几何（base MeshData + 材质），供衣物变换（就地改顶点，
     // clothing_transform.h）、软体仿真与保存（clothing_save.h）用。kDone 后调用一次；取走后本控制器不再持有（move 语义）。
     // 说明：几何在后台线程加载时**顺带保留**（不额外读一遍 glb）；body 侧不保留。
@@ -127,6 +134,8 @@ private:
     std::string error_message_;
     MatcherBundle body_;
     MatcherBundle cloth_;
+    // 人体「三角形 → 3 角蒙皮」表（与 body_ 的三角形同序同长）；无蒙皮时为空。
+    BodySkinTable body_skin_;
     // 衣服的 CPU 几何（每个 primitive 一份 MeshData + 材质）；仅衣服侧保留。
     std::vector<jpov::GltfMeshEntry> cloth_geometry_;
 
