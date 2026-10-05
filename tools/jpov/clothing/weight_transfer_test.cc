@@ -293,7 +293,7 @@ TEST(WeightTransferTest, WeldMergesCoincidentKeepsDistinct) {
         Vec3f(0.0f, 0.0f, 0.0f),            // 0
         Vec3f(0.0f, 0.0f, 0.0f),            // 1 == 0（完全重合）
         Vec3f(1.0f, 0.0f, 0.0f),            // 2
-        Vec3f(1.0f + 5.0e-5f, 0.0f, 0.0f),  // 3：离 2 仅 0.05mm（容差 0.1mm 内）
+        Vec3f(1.0f + 5.0e-5f, 0.0f, 0.0f),  // 3：离 2 仅 0.05mm（在 5mm 容差内）
         Vec3f(2.0f, 0.0f, 0.0f),            // 4
         Vec3f(2.0f + 1.0e-2f, 0.0f, 0.0f),  // 5：离 4 1cm（远超容差）
     };

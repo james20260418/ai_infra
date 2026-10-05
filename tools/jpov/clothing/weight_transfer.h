@@ -45,10 +45,10 @@ inline constexpr int kMaxSkinInfluences = 4;
 
 // 缝合焊接的距离阈值（米）：位置相距在该值内的顶点视为「同一缝合点」（导出时被拆开的
 // 重复顶点），在权重图上合并成一体。
-//   默认 0.1mm —— 足以吃掉导出 / 变换带来的浮点重复，又远小于任何真实布料的两层间距，
-//   不会误并相邻顶点；上界 5mm —— 再大只会误并相邻布料层，仅供工具面板 clamp。
-inline constexpr float kWeldToleranceM = 1.0e-4f;     // 默认值（0.1mm）
-inline constexpr float kWeldToleranceMaxM = 5.0e-3f;  // 面板上界（5mm）
+//   默认 5mm（2026-10-05 Danis 实测更优）—— 足以吃掉导出 / 变换带来的浮点重复与常见
+//   接缝偏移，又不至于误并真实布料的两层；上界 10mm，仅供工具面板 clamp。
+inline constexpr float kWeldToleranceM = 5.0e-3f;     // 默认值（5mm）
+inline constexpr float kWeldToleranceMaxM = 1.0e-2f;  // 面板上界（10mm）
 
 // 生长（种子冻结的高斯-赛德尔松弛）的弱收敛判据：单轮内所有代表权重的最大变化 < 该值即停。
 inline constexpr double kGrowthConvergeTol = 1.0e-5;

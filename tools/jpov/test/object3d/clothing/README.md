@@ -55,3 +55,12 @@ bash tools/jpov/gen3d_static.sh output/gen3d yoga_pants \
     --cloth_path tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants.glb
 # 人体 reference 缺省 = tools/jpov/test/object3d/mixamo_male/mixamo_male.glb
 ```
+
+## 成品样例（成功典范，2026-10-05 Danis 定）
+
+`harness_vest/harness_vest_skinned_sample.glb` —— `harness_vest` 对齐到 `mixamo_male`、
+经穿衣工具**自动蒙皮**后保存的标准成品（带 skin / 24 骨）。作为穿衣管线的「正确结果」
+参考与回归对照。用法见工具说明 `tools/jpov/clothing/README.md`。
+
+> 区别：`harness_vest.glb` 是**原始生成物**（未对齐、无骨骼）；`..._skinned_sample.glb` 是
+> 经穿衣工具处理后的**成品**。二者同为入库资材，但角色不同。
