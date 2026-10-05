@@ -7,6 +7,7 @@
 > 代码路径：`tools/jpov/src/point_fog/`（**单一自包含 renderer**）
 > 继承：`tools/jpov/docs/jpov_ball_fog_design.md`（闭式剖面 + tile culling 的前置结论）
 > 参照：`ai_infra_1/tools/jpov/docs/jpov_volumetric_fog_design.md`（v2 局部体积雾）
+> **➡️ 最终精炼版见 [`jpov_fire_fog_design.md`](jpov_fire_fog_design.md)；本文保留推演史。**
 
 ---
 
