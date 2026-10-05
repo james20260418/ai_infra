@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -287,6 +288,71 @@ TEST(WeightTransferTest, SetsKJointsFlagAndAlignedArrays) {
     EXPECT_TRUE(MeshHasFlag(cloth.flags, MeshVertexFlags::kJoints));
     EXPECT_EQ(cloth.joint_indices.size(), cloth.positions.size());
     EXPECT_EQ(cloth.joint_weights.size(), cloth.positions.size());
+}
+
+// 焊接：位置完全重合 / 容差内重合的顶点并成一组；超出容差的不并。
+TEST(WeightTransferTest, WeldMergesCoincidentKeepsDistinct) {
+    const std::vector<Vec3f> pts = {
+        Vec3f(0.0f, 0.0f, 0.0f),            // 0
+        Vec3f(0.0f, 0.0f, 0.0f),            // 1 == 0（完全重合）
+        Vec3f(1.0f, 0.0f, 0.0f),            // 2
+        Vec3f(1.0f + 5.0e-5f, 0.0f, 0.0f),  // 3：离 2 仅 0.05mm（容差 0.1mm 内）
+        Vec3f(2.0f, 0.0f, 0.0f),            // 4
+        Vec3f(2.0f + 1.0e-2f, 0.0f, 0.0f),  // 5：离 4 1cm（远超容差）
+    };
+    const std::vector<int> rep = WeldVerticesByPosition(pts, kWeldToleranceM);
+    EXPECT_EQ(rep[0], rep[1]);  // 完全重合 → 同组
+    EXPECT_EQ(rep[2], rep[3]);  // 容差内 → 同组
+    EXPECT_NE(rep[4], rep[5]);  // 超容差 → 不同组
+    EXPECT_NE(rep[0], rep[2]);
+    // 代表 = 组内最小下标。
+    EXPECT_EQ(rep[0], 0);
+    EXPECT_EQ(rep[1], 0);
+    EXPECT_EQ(rep[2], 2);
+    EXPECT_EQ(rep[3], 2);
+    EXPECT_EQ(rep[4], 4);
+    EXPECT_EQ(rep[5], 5);
+}
+
+// 焊接关闭：tolerance <= 0 → 恒等映射。
+TEST(WeightTransferTest, WeldDisabledWhenNonPositive) {
+    const std::vector<Vec3f> pts = {Vec3f(0, 0, 0), Vec3f(0, 0, 0)};
+    const std::vector<int> rep = WeldVerticesByPosition(pts, /*tolerance*/ 0.0f);
+    EXPECT_EQ(rep[0], 0);
+    EXPECT_EQ(rep[1], 1);
+}
+
+// 🔴 开裂回归：缝合处被拆开的重复顶点，平滑后必须拿到**完全相同**的权重。
+// 两块布片沿 x=1 缝合，但缝合线顶点各存两份（左边 L1/L3、右边 R0/R2 同位置）。
+// 不焊接时：L1 只与左侧邻（骨0/1）平滑、R0 只与右侧邻（骨1/2）平滑 → 两侧发散 → 开裂。
+TEST(WeightTransferTest, WeldKeepsSeamVerticesIdenticalAfterSmoothing) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+
+    MeshData cloth = MakeCloth({
+        Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(0, 0, 1), Vec3f(1, 0, 1),  // L0..L3
+        Vec3f(1, 0, 0), Vec3f(2, 0, 0), Vec3f(1, 0, 1), Vec3f(2, 0, 1),  // R0..R3
+    });
+    cloth.indices = {0, 1, 3, 0, 3, 2, 4, 5, 7, 4, 7, 6};
+
+    const SkinTransferStats s =
+        TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/ 0.005f,
+                            /*max_inf*/ 4, /*smooth*/ 2);
+
+    // 缝合对：L1(1)↔R0(4)，L3(3)↔R2(6)。
+    const std::pair<int, int> seams[2] = {std::make_pair(1, 4), std::make_pair(3, 6)};
+    for (const std::pair<int, int>& seam : seams) {
+        EXPECT_EQ(cloth.joint_indices[static_cast<size_t>(seam.first)],
+                  cloth.joint_indices[static_cast<size_t>(seam.second)]);
+        for (int k = 0; k < 4; ++k) {
+            EXPECT_NEAR(cloth.joint_weights[static_cast<size_t>(seam.first)][k],
+                        cloth.joint_weights[static_cast<size_t>(seam.second)][k], 1e-6f);
+        }
+        EXPECT_NEAR(SumWeights(cloth.joint_weights[static_cast<size_t>(seam.first)]),
+                    1.0f, 1e-5f);
+    }
+    EXPECT_EQ(s.weld_merged_vertex_count, 2u);  // 两组重复（L1/R0、L3/R2）
+    EXPECT_EQ(s.smooth_passes, 2u);
 }
 
 }  // namespace clothing

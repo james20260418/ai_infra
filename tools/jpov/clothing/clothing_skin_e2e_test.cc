@@ -9,8 +9,10 @@
 // 这是「工具产出的蒙皮 glb 真能被打开且权重自洽」的直接证据（不跑 GL）。
 // ⚠️ 本测试对**原始（未仿真贴合）**的背心做蒙皮，只作链路自证；贴身对齐 + 验收靠交互工具。
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -100,6 +102,34 @@ TEST(ClothingSkinE2E, TransferThenSaveThenReload) {
         EXPECT_LE(nonzero, 4);
     }
     EXPECT_TRUE(MeshHasFlag(vest.flags, MeshVertexFlags::kJoints));
+
+    // 缝合一致性（开裂回归）：位置重合的重复顶点必须拿到**完全相同**的权重，否则蒙皮后
+    // 缝合两侧分离（"开裂"）。harness_vest 有上万这类重复顶点（导出器在 UV/材质缝合处拆开）。
+    {
+        const double kQuant = 1.0e4;  // 量化到 0.1mm，与 kWeldToleranceM 同量级
+        std::map<std::array<long long, 3>, size_t> first_of_cell;
+        size_t duplicate_vertex_count = 0;
+        for (size_t v = 0; v < vcount; ++v) {
+            const std::array<long long, 3> q = {
+                std::llround(static_cast<double>(vest.positions[v].x()) * kQuant),
+                std::llround(static_cast<double>(vest.positions[v].y()) * kQuant),
+                std::llround(static_cast<double>(vest.positions[v].z()) * kQuant)};
+            const auto it = first_of_cell.find(q);
+            if (it == first_of_cell.end()) {
+                first_of_cell.emplace(q, v);
+                continue;
+            }
+            ++duplicate_vertex_count;
+            const size_t ref = it->second;
+            EXPECT_EQ(vest.joint_indices[v], vest.joint_indices[ref]) << "v=" << v;
+            for (int k = 0; k < 4; ++k) {
+                EXPECT_NEAR(vest.joint_weights[v][k], vest.joint_weights[ref][k], 1e-6f)
+                    << "v=" << v << " k=" << k;
+            }
+        }
+        // 资产确实含缝合重复顶点（否则该断言空转、无意义）。
+        EXPECT_GT(duplicate_vertex_count, 0u);
+    }
 
     // 3) 写带 skin 的 glb。
     std::vector<SkeletonType> skins;

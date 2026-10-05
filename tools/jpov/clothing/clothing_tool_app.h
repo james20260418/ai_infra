@@ -22,6 +22,8 @@
 //       二分 10 轮取边界点；仿真前已在体内则用旧投影）；② buffer 重新启用（作为“带 buffer 的
 //       体内判定”）；③ 新增切向速度保留系数（默认 1.0）；④ 关联图连通性修复；
 //       ⑤ 修「重置未能真正重置」（Reset 改用独立启动快照 startup_positions_）。
+//   - 2026-10-05：蒙皮修复「缝合开裂」——位置重合的重复顶点（导出器在 UV/材质缝合处拆开的）
+//       先在权重图上焊接成组再做平滑，缝合两侧权重逐位一致，消除撕裂。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -1086,6 +1088,7 @@ private:
             init_.body_matcher().matcher.value();
         size_t total_verts = 0;
         size_t total_gap = 0;
+        size_t total_weld = 0;
         float max_gap_m = 0.0f;
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
             const SkinTransferStats s = TransferSkinWeights(
@@ -1093,13 +1096,14 @@ private:
                 kSkinGapThresholdM, kSkinMaxInfluences, passes);
             total_verts += s.vertex_count;
             total_gap += s.gap_vertex_count;
+            total_weld += s.weld_merged_vertex_count;
             max_gap_m = std::max(max_gap_m, s.max_gap_m);
         }
         skinned_ = true;
         sim_running_ = false;
-        skin_msg_ = Format("已蒙皮 %zu 顶点 / gap %zu（max %.1f mm）/ 平滑 %d 轮",
+        skin_msg_ = Format("已蒙皮 %zu 顶点 / gap %zu（max %.1f mm）/ 缝合焊接 %zu / 平滑 %d 轮",
                            total_verts, total_gap,
-                           static_cast<double>(max_gap_m * 1000.0f), passes);
+                           static_cast<double>(max_gap_m * 1000.0f), total_weld, passes);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
     }
 

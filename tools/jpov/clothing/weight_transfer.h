@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <glog/logging.h>
@@ -41,6 +42,11 @@ using Triangle3d = geom::Triangle3<double>;
 
 // 每顶点固定 4 组 joint/weight（与 MeshData.joint_indices/joint_weights 对齐）。
 inline constexpr int kMaxSkinInfluences = 4;
+
+// 缝合焊接的距离阈值（米）：位置相距在该值内的顶点视为「同一缝合点」（导出时被拆开的
+// 重复顶点），在权重图上合并成一体。0.1mm —— 足以吃掉导出 / 变换带来的浮点重复，又远小于
+// 任何真实布料的两层间距，不会误并相邻顶点。
+inline constexpr float kWeldToleranceM = 1.0e-4f;
 
 // 一个三角形角的蒙皮 = 身体某顶点的 (joints, weights)。
 struct SkinCorner {
@@ -101,7 +107,17 @@ struct SkinTransferStats {
     size_t no_candidate_count = 0;// 最近三角形候选为空的顶点数（走全局线性兜底）
     float max_gap_m = 0.0f;       // 最大 gap 距离（米）
     size_t smooth_passes = 0;     // 实际执行的平滑迭代次数
+    size_t weld_merged_vertex_count = 0;  // 因位置重合被焊接合并掉的重复顶点数（0 = 无重复）
 };
+
+// 位置重合顶点焊接：把位置相距 <= tolerance_m 的顶点并成一组（并查集），返回每个顶点的
+// **组代表下标**（组代表 = 组内最小下标，满足 rep_of[v] == v）。用于让导出器在 UV / 材质
+// 缝合处拆开的**重复顶点**在权重图上重新连成一体 —— 否则平滑会把缝合两侧朝不同邻居拉，
+// 权重发散、蒙皮后缝合分离（“开裂”）。
+//   tolerance_m <= 0：不做任何合并（恒等映射 rep_of[v] == v）。
+// Pre-condition: positions 元素均为有限值。
+std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
+                                        float tolerance_m);
 
 // 软布自动蒙皮（weight transfer）：
 //   对 cloth 每个顶点 v：
@@ -111,8 +127,9 @@ struct SkinTransferStats {
 //     4) 归一化（Σ=1）写入 cloth->joint_indices / joint_weights。
 //   到最近三角形距离 > gap_threshold_m 的顶点：仍用"最近三角形的最近角权重"兜底
 //     （不用重心插值——离太远时插值无意义），并计入 gap 统计（不静默丢弃）。
-//   smooth_iterations > 0：在衣物**拓扑邻接图**上做若干轮拉普拉斯平滑（消除关节附近
-//     因"相邻衣物顶点落到不同身体部位"产生的权重条带），随后重新 top-K 剪枝 + 归一化。
+//   smooth_iterations > 0：先把位置重合的**缝合重复顶点**焊接成组，再在**组代表图**上做
+//     若干轮拉普拉斯平滑（既消除关节附近"相邻衣物顶点落到不同身体部位"的权重条带，又保证
+//     缝合两侧权重逐位一致、不裂开），随后逐代表 top-K 剪枝 + 归一化并散射回所有组员。
 //
 // 就地写 cloth->joint_indices/weights 并置 kJoints flag。**不改顶点位置**（rest 形状
 // 由调用方定稿后传入；蒙皮后再改几何会破坏权重↔顶点对应，须冻结）。
@@ -191,6 +208,117 @@ inline void AppendMeshTriangles(const MeshData& mesh,
                        static_cast<uint32_t>(i + 2));
         }
     }
+}
+
+inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
+                                               float tolerance_m) {
+    CHECK_GE(tolerance_m, 0.0f);
+    const size_t n = positions.size();
+    std::vector<int> rep(n);
+    for (size_t i = 0; i < n; ++i) {
+        rep[i] = static_cast<int>(i);
+    }
+    if (n == 0 || tolerance_m <= 0.0f) {
+        return rep;  // 不做合并（恒等映射）
+    }
+
+    // 并查集：find 带路径压缩；union 让代表恒为组内最小下标（确定性）。
+    const auto find_root = [&rep](int x) {
+        int r = x;
+        while (rep[r] != r) {
+            r = rep[r];
+        }
+        while (rep[x] != r) {
+            const int next = rep[x];
+            rep[x] = r;
+            x = next;
+        }
+        return r;
+    };
+    const auto unite = [&rep, &find_root](int a, int b) {
+        const int ra = find_root(a);
+        const int rb = find_root(b);
+        if (ra == rb) {
+            return;
+        }
+        if (ra < rb) {
+            rep[rb] = ra;
+        } else {
+            rep[ra] = rb;
+        }
+    };
+
+    // 空间哈希：按 tolerance 量化到体素；查本格 + 26 邻居格，保证跨格边界的重合对不漏。
+    struct CellKey {
+        int64_t x = 0;
+        int64_t y = 0;
+        int64_t z = 0;
+        bool operator==(const CellKey& o) const {
+            return x == o.x && y == o.y && z == o.z;
+        }
+    };
+    struct CellHash {
+        size_t operator()(const CellKey& k) const {
+            uint64_t h = 1469598103934665603ULL;  // FNV offset
+            const int64_t v[3] = {k.x, k.y, k.z};
+            for (int i = 0; i < 3; ++i) {
+                uint64_t u = static_cast<uint64_t>(v[i]);
+                u += 0x9e3779b97f4a7c15ULL;  // splitmix64 混合（避免相邻整数哈希扎堆）
+                u = (u ^ (u >> 30)) * 0xbf58476d1ce4e5b9ULL;
+                u = (u ^ (u >> 27)) * 0x94d049bb133111ebULL;
+                u ^= (u >> 31);
+                h ^= u;
+                h *= 1099511628211ULL;
+            }
+            return static_cast<size_t>(h);
+        }
+    };
+    const double inv = 1.0 / static_cast<double>(tolerance_m);
+    const auto key_of = [inv](const Vec3f& p) {
+        return CellKey{static_cast<int64_t>(std::floor(p.x() * inv)),
+                       static_cast<int64_t>(std::floor(p.y() * inv)),
+                       static_cast<int64_t>(std::floor(p.z() * inv))};
+    };
+    std::unordered_map<CellKey, std::vector<int>, CellHash> cells;
+    for (size_t i = 0; i < n; ++i) {
+        cells[key_of(positions[i])].push_back(static_cast<int>(i));
+    }
+
+    const double tol2 =
+        static_cast<double>(tolerance_m) * static_cast<double>(tolerance_m);
+    for (size_t i = 0; i < n; ++i) {
+        const CellKey base = key_of(positions[i]);
+        const double px = positions[i].x();
+        const double py = positions[i].y();
+        const double pz = positions[i].z();
+        for (int64_t dx = -1; dx <= 1; ++dx) {
+            for (int64_t dy = -1; dy <= 1; ++dy) {
+                for (int64_t dz = -1; dz <= 1; ++dz) {
+                    const auto found =
+                        cells.find(CellKey{base.x + dx, base.y + dy, base.z + dz});
+                    if (found == cells.end()) {
+                        continue;
+                    }
+                    for (int j : found->second) {
+                        if (j <= static_cast<int>(i)) {
+                            continue;  // 每对只处理一次
+                        }
+                        const double ddx = px - positions[static_cast<size_t>(j)].x();
+                        const double ddy = py - positions[static_cast<size_t>(j)].y();
+                        const double ddz = pz - positions[static_cast<size_t>(j)].z();
+                        if (ddx * ddx + ddy * ddy + ddz * ddz <= tol2) {
+                            unite(static_cast<int>(i), j);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 压缩到根代表（根 = 组内最小下标）。
+    for (size_t i = 0; i < n; ++i) {
+        rep[i] = find_root(static_cast<int>(i));
+    }
+    return rep;
 }
 
 inline std::array<double, 3> BarycentricOnTriangle(const geom::Vec3<double>& a,
@@ -421,15 +549,45 @@ inline SkinTransferStats TransferSkinWeights(
         }
     }
     // 3) 可选：衣物拓扑邻接图上的拉普拉斯平滑（去条带），再重剪枝 + 归一化。
+    //
+    // ⚠️ 关键：平滑图建在**焊接后的组代表**上，而不是原始顶点上。导出资产在 UV / 材质
+    // 缝合处会把同一位置拆成多份互不相连的顶点（harness_vest 15123 顶点里 10227 个是这种
+    // 重复），它们在原始拓扑图里没有边 ⇒ 平滑把缝合两侧朝不同邻居拉，权重发散 ⇒ 蒙皮后
+    // 缝合两侧分离（“开裂”）。焊接后两侧同属一个代表，权重逐位一致，开裂消除。
     if (smooth_iterations > 0) {
         const int bones = std::max(body_skin.referenced_bone_count(), 1);
-        // 邻接表（无向；去重，避免重复边放大某邻居的权重）。
-        std::vector<std::vector<int>> adj(vcount);
+
+        // (a) 焊接：位置在 kWeldToleranceM 内的顶点并成一组。
+        //     WeldVerticesByPosition 的组代表是「组内最小下标」（不连续），这里再压成稠密
+        //     编号 0..rep_count-1，供后续数组直接索引（否则会出现下标越过 rep_count）。
+        const std::vector<int> root_of =
+            WeldVerticesByPosition(cloth->positions, kWeldToleranceM);
+        std::vector<int> rep(vcount);
+        std::vector<int> dense_of_root(vcount, -1);
+        int rep_count = 0;
+        for (size_t i = 0; i < vcount; ++i) {
+            const int root = root_of[i];
+            CHECK_GE(root, 0);
+            CHECK_LT(root, static_cast<int>(vcount));
+            if (dense_of_root[static_cast<size_t>(root)] < 0) {
+                dense_of_root[static_cast<size_t>(root)] = rep_count++;
+            }
+            rep[i] = dense_of_root[static_cast<size_t>(root)];
+        }
+        stats.weld_merged_vertex_count = vcount - static_cast<size_t>(rep_count);
+
+        // (b) 代表相邻接表（无向；去重，避免重复边放大某邻居的权重）。
+        std::vector<std::vector<int>> adj(static_cast<size_t>(rep_count));
         const auto add_edge = [&](uint32_t i0, uint32_t i1) {
             CHECK_LT(i0, vcount);
             CHECK_LT(i1, vcount);
-            adj[i0].push_back(static_cast<int>(i1));
-            adj[i1].push_back(static_cast<int>(i0));
+            const int r0 = rep[i0];
+            const int r1 = rep[i1];
+            if (r0 == r1) {
+                return;  // 同组（缝合）内部不连边
+            }
+            adj[static_cast<size_t>(r0)].push_back(r1);
+            adj[static_cast<size_t>(r1)].push_back(r0);
         };
         if (!cloth->indices.empty()) {
             CHECK_EQ(cloth->indices.size() % 3, 0u);
@@ -450,26 +608,30 @@ inline SkinTransferStats TransferSkinWeights(
             nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
         }
 
-        // 稠密权重（N×B），平滑后回写。
-        std::vector<double> w(vcount * static_cast<size_t>(bones), 0.0);
+        // (c) 初始稠密权重（按代表累加组内所有顶点的当前权重）。
+        std::vector<double> w(
+            static_cast<size_t>(rep_count) * static_cast<size_t>(bones), 0.0);
         for (size_t vi = 0; vi < vcount; ++vi) {
+            const size_t row =
+                static_cast<size_t>(rep[vi]) * static_cast<size_t>(bones);
             for (int j = 0; j < 4; ++j) {
                 const int32_t bone = cloth->joint_indices[vi][j];
                 const float weight = cloth->joint_weights[vi][j];
                 if (weight > 0.0f && bone >= 0 && bone < bones) {
-                    w[vi * static_cast<size_t>(bones) + static_cast<size_t>(bone)] += weight;
+                    w[row + static_cast<size_t>(bone)] += weight;
                 }
             }
         }
-        std::vector<double> w_next(vcount * static_cast<size_t>(bones), 0.0);
+        // (d) 拉普拉斯平滑（逐代表；自项 + 邻居均值）。
+        std::vector<double> w_next(w.size(), 0.0);
         for (int it = 0; it < smooth_iterations; ++it) {
-            for (size_t vi = 0; vi < vcount; ++vi) {
-                const size_t row = vi * static_cast<size_t>(bones);
-                const size_t deg = adj[vi].size();
+            for (int r = 0; r < rep_count; ++r) {
+                const size_t row = static_cast<size_t>(r) * static_cast<size_t>(bones);
+                const size_t deg = adj[static_cast<size_t>(r)].size();
                 const double denom = 1.0 + static_cast<double>(deg);
                 for (int b = 0; b < bones; ++b) {
                     double s = w[row + static_cast<size_t>(b)];  // 自项
-                    for (int nb : adj[vi]) {
+                    for (int nb : adj[static_cast<size_t>(r)]) {
                         s += w[static_cast<size_t>(nb) * static_cast<size_t>(bones) +
                                static_cast<size_t>(b)];
                     }
@@ -479,17 +641,21 @@ inline SkinTransferStats TransferSkinWeights(
             w.swap(w_next);
             stats.smooth_passes = static_cast<size_t>(it + 1);
         }
-        // 稠密 → top-K + 归一化。
-        for (size_t vi = 0; vi < vcount; ++vi) {
-            const size_t row = vi * static_cast<size_t>(bones);
+        // (e) 逐代表 top-K + 归一化，再**散射**回该组所有顶点（缝合两侧得到同一份权重）。
+        std::vector<std::array<int32_t, 4>> rep_joints(static_cast<size_t>(rep_count));
+        std::vector<std::array<float, 4>> rep_weights(static_cast<size_t>(rep_count));
+        for (int r = 0; r < rep_count; ++r) {
+            const size_t row = static_cast<size_t>(r) * static_cast<size_t>(bones);
             std::vector<std::pair<double, int32_t>> items;
             for (int b = 0; b < bones; ++b) {
                 if (w[row + static_cast<size_t>(b)] > 0.0) {
                     items.emplace_back(w[row + static_cast<size_t>(b)], b);
                 }
             }
+            rep_joints[static_cast<size_t>(r)].fill(0);
+            rep_weights[static_cast<size_t>(r)].fill(0.0f);
             if (items.empty()) {
-                continue;  // 保持原值（理论上不会：原值已归一化）。
+                continue;  // 理论不会：初始权重已带质量（除非该组权重全零）。
             }
             std::stable_sort(items.begin(), items.end(),
                              [](const std::pair<double, int32_t>& a,
@@ -504,13 +670,15 @@ inline SkinTransferStats TransferSkinWeights(
             for (int i = 0; i < take; ++i) {
                 sum += items[i].first;
             }
-            cloth->joint_indices[vi].fill(0);
-            cloth->joint_weights[vi].fill(0.0f);
             for (int i = 0; i < take; ++i) {
-                cloth->joint_indices[vi][i] = items[i].second;
-                cloth->joint_weights[vi][i] =
+                rep_joints[static_cast<size_t>(r)][i] = items[i].second;
+                rep_weights[static_cast<size_t>(r)][i] =
                     (sum > 0.0) ? static_cast<float>(items[i].first / sum) : 0.0f;
             }
+        }
+        for (size_t vi = 0; vi < vcount; ++vi) {
+            cloth->joint_indices[vi] = rep_joints[static_cast<size_t>(rep[vi])];
+            cloth->joint_weights[vi] = rep_weights[static_cast<size_t>(rep[vi])];
         }
     }
 
