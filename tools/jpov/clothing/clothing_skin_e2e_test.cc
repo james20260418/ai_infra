@@ -108,7 +108,7 @@ TEST(ClothingSkinE2E, TransferThenSaveThenReload) {
     // 缝合一致性（开裂回归）：位置重合的重复顶点必须拿到**完全相同**的权重，否则蒙皮后
     // 缝合两侧分离（"开裂"）。harness_vest 有上万这类重复顶点（导出器在 UV/材质缝合处拆开）。
     {
-        const double kQuant = 1.0e4;  // 量化到 0.1mm，与 kWeldToleranceM 同量级
+        const double kQuant = 1.0e4;  // 量化到 0.1mm（比 kWeldToleranceM 更细，确保重合点落同一格）
         std::map<std::array<long long, 3>, size_t> first_of_cell;
         size_t duplicate_vertex_count = 0;
         for (size_t v = 0; v < vcount; ++v) {
