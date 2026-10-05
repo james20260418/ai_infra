@@ -8,9 +8,11 @@
 // 为什么"最近三角形 + 重心插值"就够（设计文档 §2.1 铁律）：衣物与身体在**同一 rest
 //   pose（T-pose）**下几何对齐，故衣物顶点的蒙皮权重应等于它贴着的那片身体表面的权重；
 //   身体权重本就在相邻三角面之间连续，取最近三角形的重心插值即得连续、贴合的那份权重。
+//   对**离体**顶点（宽松 / 悬空），则在其（焊接后的）邻接图上做**种子冻结的调和扩散**，
+//   把权重从贴身种子"生长"过去（见 TransferSkinWeights）。
 //
 // 边界（本轮范围，呼应设计文档 §2.3）：
-//   - 只做**贴身软布**；宽松/叠穿不在范围（太远的顶点走 gap 兜底并被计数，不静默丢弃）。
+//   - 以**贴身软布**为主；离体顶点由种子生长补出并计入统计，不静默丢弃。
 //   - 硬部分（甲片/工具）不走这里（它们该 100% 绑单骨，是另一套机制，见后续）。
 //
 // 本文件只依赖 geom（三角形/匹配器）与 mesh.h，**不碰 GL / glTF**，便于纯单测。
@@ -113,13 +115,13 @@ struct SkinTransferStats {
     size_t no_candidate_count = 0;     // 最近三角形候选为空的顶点数（走全局线性兜底）
     float max_body_distance_m = 0.0f;  // 最大「到身体」距离（米）
     size_t growth_passes = 0;          // 实际执行 / 收敛的生长迭代次数
-    size_t weld_merged_vertex_count = 0;// 因位置重合被焊接合并掉的重复顶点数（0 = 无重复）
+    size_t weld_merged_vertex_count = 0;  // 因位置重合被焊接合并掉的重复顶点数（0 = 无重复）
 };
 
 // 位置重合顶点焊接：把位置相距 <= tolerance_m 的顶点并成一组（并查集），返回每个顶点的
 // **组代表下标**（组代表 = 组内最小下标，满足 rep_of[v] == v）。用于让导出器在 UV / 材质
-// 缝合处拆开的**重复顶点**在权重图上重新连成一体 —— 否则平滑会把缝合两侧朝不同邻居拉，
-// 权重发散、蒙皮后缝合分离（“开裂”）。
+// 缝合处拆开的**重复顶点**在权重图上重新连成一体 —— 否则生长（松弛）会把缝合两侧朝不同
+// 邻居拉，权重发散、蒙皮后缝合分离（“开裂”）。
 //   tolerance_m <= 0：不做任何合并（恒等映射 rep_of[v] == v）。
 // Pre-condition: positions 元素均为有限值。
 std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
@@ -259,9 +261,9 @@ inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positio
 
     // 空间哈希：按 tolerance 量化到体素；查本格 + 26 邻居格，保证跨格边界的重合对不漏。
     struct CellKey {
-        int64_t x = 0;
-        int64_t y = 0;
-        int64_t z = 0;
+        int64_t x;
+        int64_t y;
+        int64_t z;
         bool operator==(const CellKey& o) const {
             return x == o.x && y == o.y && z == o.z;
         }
@@ -412,7 +414,7 @@ inline bool PickTopKNormalized(const JointAccumBuf& acc, int n, int k,
     return true;
 }
 
-// 三角形 3 角里离点 v 最近的角下标（gap / 权重全零两条兜底路径共用）。
+// 三角形 3 角里离点 v 最近的角下标（仅「权重全零」兜底路径用）。
 // Pre-condition: v 有限。
 inline int NearestCornerIndex(const Triangle3d& tri, const geom::Vec3<double>& v) {
     const geom::Vec3<double> cs[3] = {tri.a(), tri.b(), tri.c()};
