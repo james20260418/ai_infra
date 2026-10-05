@@ -97,7 +97,7 @@ TEST(WeightTransferTest, ExactBodyVertexCopiesWeights) {
     MeshData cloth = MakeCloth({Vec3f(1, 0, 0)});  // = v1（骨 1）
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
-                            /*max_inf*/4, /*smooth*/0);
+                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*smooth*/0);
     EXPECT_EQ(s.vertex_count, 1u);
     EXPECT_EQ(s.gap_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f,
@@ -113,7 +113,7 @@ TEST(WeightTransferTest, EdgeMidpointBlendsTwoBones) {
     MeshData cloth = MakeCloth({Vec3f(0.5f, 0.0f, 0.0f)});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
-                            /*max_inf*/4, /*smooth*/0);
+                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*smooth*/0);
     EXPECT_EQ(s.gap_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 0), 0.5f,
                 1e-4f);
@@ -132,7 +132,7 @@ TEST(WeightTransferTest, TriangleCentroidBlendsThreeBones) {
     MeshData cloth = MakeCloth({c});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.05f,
-                            /*max_inf*/4, /*smooth*/0);
+                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*smooth*/0);
     EXPECT_EQ(s.gap_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f / 3.0f,
                 1e-4f);
@@ -156,7 +156,7 @@ TEST(WeightTransferTest, TopKPrunesAndNormalizes) {
     MeshData cloth = MakeCloth({centroid});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.05f,
-                            /*max_inf*/4, /*smooth*/0);
+                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*smooth*/0);
     EXPECT_EQ(s.gap_vertex_count, 0u);
     // 恰好 4 个非零（第 4 槽之后归零）。
     int nonzero = 0;
@@ -185,7 +185,7 @@ TEST(WeightTransferTest, GapVertexFallsBackAndCounts) {
     MeshData cloth = MakeCloth({Vec3f(1.0f, 5.0f, 0.5f)});  // 远离身体
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/0.005f,
-                            /*max_inf*/4, /*smooth*/0);
+                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*smooth*/0);
     EXPECT_EQ(s.gap_vertex_count, 1u);
     EXPECT_GT(s.max_gap_m, 4.0f);
     EXPECT_NEAR(SumWeights(cloth.joint_weights[0]), 1.0f, 1e-5f);
@@ -223,9 +223,9 @@ TEST(WeightTransferTest, SmoothingReducesTotalVariation) {
     MeshData smooth = coarse;
 
     const SkinTransferStats s0 =
-        TransferSkinWeights(f.table, f.matcher.value(), &coarse, 0.005f, 4, /*smooth*/0);
+        TransferSkinWeights(f.table, f.matcher.value(), &coarse, 0.005f, /*weld*/kWeldToleranceM, 4, /*smooth*/0);
     const SkinTransferStats s2 =
-        TransferSkinWeights(f.table, f.matcher.value(), &smooth, 0.005f, 4, /*smooth*/2);
+        TransferSkinWeights(f.table, f.matcher.value(), &smooth, 0.005f, /*weld*/kWeldToleranceM, 4, /*smooth*/2);
     EXPECT_EQ(s0.smooth_passes, 0u);
     EXPECT_EQ(s2.smooth_passes, 2u);
 
@@ -271,7 +271,7 @@ TEST(WeightTransferTest, SmoothingKeepsUniformField) {
     BodyFixture f = BuildFixture(body);
     MeshData cloth = MakeCloth(body.positions);
     cloth.indices = body.indices;
-    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, 4, /*smooth*/2);
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/kWeldToleranceM, 4, /*smooth*/2);
     for (size_t v = 0; v < cloth.positions.size(); ++v) {
         EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[v], cloth.joint_weights[v], 0), 1.0f,
                     1e-5f);
@@ -284,7 +284,7 @@ TEST(WeightTransferTest, SetsKJointsFlagAndAlignedArrays) {
     const MeshData body = MakeGridBody();
     BodyFixture f = BuildFixture(body);
     MeshData cloth = MakeCloth({Vec3f(0.5f, 0, 0), Vec3f(1.5f, 0, 0)});
-    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, 4, 0);
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/kWeldToleranceM, 4, 0);
     EXPECT_TRUE(MeshHasFlag(cloth.flags, MeshVertexFlags::kJoints));
     EXPECT_EQ(cloth.joint_indices.size(), cloth.positions.size());
     EXPECT_EQ(cloth.joint_weights.size(), cloth.positions.size());
@@ -337,7 +337,7 @@ TEST(WeightTransferTest, WeldKeepsSeamVerticesIdenticalAfterSmoothing) {
 
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*gap*/ 0.005f,
-                            /*max_inf*/ 4, /*smooth*/ 2);
+                            /*weld*/ kWeldToleranceM, /*max_inf*/ 4, /*smooth*/ 2);
 
     // 缝合对：L1(1)↔R0(4)，L3(3)↔R2(6)。
     const std::pair<int, int> seams[2] = {std::make_pair(1, 4), std::make_pair(3, 6)};
@@ -353,6 +353,34 @@ TEST(WeightTransferTest, WeldKeepsSeamVerticesIdenticalAfterSmoothing) {
     }
     EXPECT_EQ(s.weld_merged_vertex_count, 2u);  // 两组重复（L1/R0、L3/R2）
     EXPECT_EQ(s.smooth_passes, 2u);
+}
+
+// 焊接容差可配：缝合线右侧整体偏移 0.5mm；容差 0.1mm 不并、2mm 并，并后两侧权重一致。
+TEST(WeightTransferTest, WeldToleranceParameterControlsMerging) {
+    const MeshData body = MakeGridBody();
+    BodyFixture f = BuildFixture(body);
+    MeshData cloth = MakeCloth({
+        Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(0, 0, 1), Vec3f(1, 0, 1),  // L0..L3
+        Vec3f(1.0005f, 0, 0), Vec3f(2, 0, 0), Vec3f(1.0005f, 0, 1),
+        Vec3f(2, 0, 1),  // R0..R3（缝合线偏移 +0.5mm）
+    });
+    cloth.indices = {0, 1, 3, 0, 3, 2, 4, 5, 7, 4, 7, 6};
+
+    MeshData fine = cloth;
+    const SkinTransferStats s_fine = TransferSkinWeights(
+        f.table, f.matcher.value(), &fine, /*gap*/0.005f, /*weld*/1.0e-4f,
+        /*max_inf*/4, /*smooth*/2);
+    EXPECT_EQ(s_fine.weld_merged_vertex_count, 0u);  // 0.5mm > 0.1mm → 不并
+
+    MeshData coarse = cloth;
+    const SkinTransferStats s_coarse = TransferSkinWeights(
+        f.table, f.matcher.value(), &coarse, /*gap*/0.005f, /*weld*/2.0e-3f,
+        /*max_inf*/4, /*smooth*/2);
+    EXPECT_EQ(s_coarse.weld_merged_vertex_count, 2u);  // 0.5mm < 2mm → R0、R2 并入
+    for (int k = 0; k < 4; ++k) {
+        EXPECT_NEAR(coarse.joint_weights[1][k], coarse.joint_weights[4][k], 1e-6f);
+        EXPECT_NEAR(coarse.joint_weights[3][k], coarse.joint_weights[6][k], 1e-6f);
+    }
 }
 
 }  // namespace clothing

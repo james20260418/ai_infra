@@ -87,7 +87,8 @@ TEST(ClothingSkinE2E, TransferThenSaveThenReload) {
     const size_t vcount = vest.positions.size();
 
     const SkinTransferStats st = TransferSkinWeights(
-        bc.table, matcher, &vest, /*gap*/0.005f, /*max_inf*/4, /*smooth*/2);
+        bc.table, matcher, &vest, /*gap*/0.005f, /*weld*/kWeldToleranceM, /*max_inf*/4,
+        /*smooth*/2);
     EXPECT_EQ(st.vertex_count, vcount);
     EXPECT_EQ(st.smooth_passes, 2u);
     // 权重归一 + ≤4 影响。

@@ -44,9 +44,11 @@ using Triangle3d = geom::Triangle3<double>;
 inline constexpr int kMaxSkinInfluences = 4;
 
 // 缝合焊接的距离阈值（米）：位置相距在该值内的顶点视为「同一缝合点」（导出时被拆开的
-// 重复顶点），在权重图上合并成一体。0.1mm —— 足以吃掉导出 / 变换带来的浮点重复，又远小于
-// 任何真实布料的两层间距，不会误并相邻顶点。
-inline constexpr float kWeldToleranceM = 1.0e-4f;
+// 重复顶点），在权重图上合并成一体。
+//   默认 0.1mm —— 足以吃掉导出 / 变换带来的浮点重复，又远小于任何真实布料的两层间距，
+//   不会误并相邻顶点；上界 5mm —— 再大只会误并相邻布料层，仅供工具面板 clamp。
+inline constexpr float kWeldToleranceM = 1.0e-4f;     // 默认值（0.1mm）
+inline constexpr float kWeldToleranceMaxM = 5.0e-3f;  // 面板上界（5mm）
 
 // 一个三角形角的蒙皮 = 身体某顶点的 (joints, weights)。
 struct SkinCorner {
@@ -127,6 +129,8 @@ std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
 //     4) 归一化（Σ=1）写入 cloth->joint_indices / joint_weights。
 //   到最近三角形距离 > gap_threshold_m 的顶点：仍用"最近三角形的最近角权重"兜底
 //     （不用重心插值——离太远时插值无意义），并计入 gap 统计（不静默丢弃）。
+//   weld_tolerance_m：平滑前焊接「位置重合的缝合重复顶点」的距离阈值（米）；0 = 关闭焊接。
+//     相距 <= 该值的顶点在权重图上并成一组 ⇒ 缝合两侧权重逐位一致（消除开裂）。
 //   smooth_iterations > 0：先把位置重合的**缝合重复顶点**焊接成组，再在**组代表图**上做
 //     若干轮拉普拉斯平滑（既消除关节附近"相邻衣物顶点落到不同身体部位"的权重条带，又保证
 //     缝合两侧权重逐位一致、不裂开），随后逐代表 top-K 剪枝 + 归一化并散射回所有组员。
@@ -141,12 +145,13 @@ std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
 //   - cloth->positions 非空；
 //   - cloth->joint_indices / joint_weights 为空，或长度 == positions.size()；
 //   - 1 <= max_influences <= kMaxSkinInfluences；
-//   - gap_threshold_m > 0；smooth_iterations >= 0。
+//   - gap_threshold_m > 0；weld_tolerance_m >= 0；smooth_iterations >= 0。
 SkinTransferStats TransferSkinWeights(
     const BodySkinTable& body_skin,
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
     float gap_threshold_m,
+    float weld_tolerance_m,
     int max_influences,
     int smooth_iterations);
 
@@ -442,6 +447,7 @@ inline SkinTransferStats TransferSkinWeights(
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
     float gap_threshold_m,
+    float weld_tolerance_m,
     int max_influences,
     int smooth_iterations) {
     CHECK(cloth != nullptr);
@@ -451,6 +457,7 @@ inline SkinTransferStats TransferSkinWeights(
     CHECK_GE(max_influences, 1);
     CHECK_LE(max_influences, kMaxSkinInfluences);
     CHECK_GT(gap_threshold_m, 0.0f);
+    CHECK_GE(weld_tolerance_m, 0.0f);
     CHECK_GE(smooth_iterations, 0);
     if (!cloth->joint_indices.empty()) {
         CHECK_EQ(cloth->joint_indices.size(), cloth->positions.size());
@@ -561,7 +568,7 @@ inline SkinTransferStats TransferSkinWeights(
         //     WeldVerticesByPosition 的组代表是「组内最小下标」（不连续），这里再压成稠密
         //     编号 0..rep_count-1，供后续数组直接索引（否则会出现下标越过 rep_count）。
         const std::vector<int> root_of =
-            WeldVerticesByPosition(cloth->positions, kWeldToleranceM);
+            WeldVerticesByPosition(cloth->positions, weld_tolerance_m);
         std::vector<int> rep(vcount);
         std::vector<int> dense_of_root(vcount, -1);
         int rep_count = 0;
