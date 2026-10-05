@@ -10,10 +10,12 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 # 能力演进：
 #   - M0（2026-09-27）：加载 + 显示。
 #   - 2026-09-29：后台建图（最近邻三角形）+ 左上角 x/y/z 填值粗调。
-#   - 2026-09-30：完整变换调节 —— 平移（绝对位置 + 步长 + "<" ">"）、旋转（步长 + "<" ">"，
-#     度，绕 X/Y/Z 逆时针）、整体缩放（"+"/"−" 乘/除系数）；**一律直接改衣服 mesh 顶点**
-#     （见 clothing_transform.h）；并加「保存衣服 glb」按钮（clothing_save.h）。
-#   仍不做：对齐 / 穿衣物理。
+#   - 2026-09-30：完整变换调节 —— 平移、旋转（度，绕 X/Y/Z 逆时针）、整体缩放；
+#     **一律直接改衣服 mesh 顶点**（见 clothing_transform.h）；并加「保存衣服 glb」按钮。
+#   - 2026-10-01：**纳入软体仿真器**（重力+弹簧+地面）；右上角动力学面板（g/M/F/k）
+#     + 暂停/重置按钮；删除「绝对平移」输入框，变换改为**即时**作用于仿真状态。
+#   - 2026-10-02：人体排斥（开关 + buffer + 切向速度保留系数）、关联图连通性修复、
+#     Reset 修复。仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
@@ -27,14 +29,28 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
-# 衣物变换（平移/旋转/缩放）状态 + 烘进 CPU 顶点（纯函数；无 GL，仅依赖 mesh/mesh_transform）。
+# 衣物 mesh 就地几何操作（平移/旋转/缩放 + 法线重算；纯函数；无 GL，仅依赖 mesh）。
 cc_library(
     name = "clothing_transform",
     hdrs = ["clothing_transform.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:mesh_transform",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# 软布自动蒙皮（weight transfer）—— header-only 纯函数，无 GL / glTF / 渲染栈依赖。
+# 单独成库：① 供 clothing_tool_app 使用；② 可被纯单测直接依赖（不拖入整个 JPOV 渲染栈）。
+cc_library(
+    name = "weight_transfer",
+    hdrs = ["weight_transfer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
@@ -55,15 +71,19 @@ cc_library(
     deps = [
         ":clothing_axis_input",
         ":clothing_transform",
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
         "//geom/3d:triangle_matcher_3d",
         "//tools/common:utils",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src:gltf_saver",
+        "//tools/jpov/soft_mesh_simulator:soft_mesh_simulator",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
@@ -91,6 +111,53 @@ cc_test(
     deps = [
         ":clothing_transform",
         "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 软布自动蒙皮（weight transfer）纯函数单测（重心插值 / top-K / gap 兜底 / 平滑；无 GL）。
+cc_test(
+    name = "weight_transfer_test",
+    srcs = ["weight_transfer_test.cc"],
+    deps = [
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 端到端（CPU-only）：真资材 mixamo_male + harness_vest → 自动蒙皮 → 写带 skin glb
+# → 用生产 loader 读回自证（JOINTS/WEIGHTS/骨数/归一）。
+cc_test(
+    name = "clothing_skin_e2e_test",
+    srcs = ["clothing_skin_e2e_test.cc"],
+    data = [
+        "//tools/jpov/test/object3d:clothing_data",
+        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+    ],
+    deps = [
+        ":weight_transfer",
+        "//geom/3d:triangle_3",
+        "//geom/3d:triangle_matcher_3d",
+        "//tools/common:utils",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],

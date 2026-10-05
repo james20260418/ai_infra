@@ -53,6 +53,7 @@ std::string ClothingSaveController::MakeOutputPath(const std::string& source,
 }
 
 bool ClothingSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
+                                   std::optional<jpov::SkeletonType> skin,
                                    const std::string& source_path,
                                    const std::string& asset_name) {
     if (state_ == ClothSaveState::kSaving) {
@@ -75,13 +76,15 @@ bool ClothingSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
     message_ = "保存中...";
 
     // worker 只读 geometry（按值捕获，随线程移动），写受 mtx_ 保护的结果字段。
-    std::thread worker([this, meshes = std::move(meshes), asset_name]() mutable {
+    std::thread worker([this, meshes = std::move(meshes), skin = std::move(skin),
+                        asset_name]() mutable {
         bool ok = true;
         std::string err;
         try {
             jpov::GltfSaveAsset asset;
             asset.name = asset_name.empty() ? "cloth" : asset_name;
             asset.meshes = std::move(meshes);  // 已是"烘好变换"的几何，直接写
+            asset.skin = std::move(skin);      // 未蒙皮 = nullopt（不写 skin）
             ok = jpov::WriteGlb(asset, out_path_);
             if (!ok) {
                 err = "写入失败（见日志）";

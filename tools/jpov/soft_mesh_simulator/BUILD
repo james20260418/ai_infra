@@ -27,6 +27,8 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//geom/3d:triangle_matcher_3d",
+        "//geom/common:quaternion",
         "//geom/common:vec",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
@@ -76,6 +78,8 @@ cc_test(
     srcs = ["soft_mesh_simulator_test.cc"],
     deps = [
         ":soft_mesh_simulator",
+        "//geom/3d:triangle_matcher_3d",
+        "//geom/common:vec",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
         "@gtest//:gtest_main",

@@ -630,6 +630,8 @@ void Object3DRenderer::UploadSunData(
         CHECK_LE(cascade_count, ShadowConfig::kMaxCascades);
         glUniform1fv(shader_mgr.GetUniform(p, "uCascadeRanges"),
                      cascade_count, cfg.cascade_ranges);
+        glUniform1f(shader_mgr.GetUniform(p, "uCascadeBlendFraction"),
+                    cfg.cascade_blend_fraction);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeStart"), cfg.fade_start);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeEnd"), cfg.fade_end);
 

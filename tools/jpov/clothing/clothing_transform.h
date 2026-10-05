@@ -1,25 +1,13 @@
-// JPOV 穿衣工具 — 衣物变换（平移 / 旋转 / 缩放）状态与烘焙（纯函数 / 无 GL）
+// JPOV 穿衣工具 — 面板参数 clamp 与 mesh 法线重算（纯函数 / 无 GL）
 //
-// 需求（2026-09-30 Danis 定）：穿衣工具面板要给衣服提供
-//   ① 平移：x / y / z 三个**绝对位置**输入框 + 各自的**步长**输入框 + 步进按钮（"<" ">"）；
-//   ② 旋转：只有**步长**输入框 + 步进按钮（"<" ">"），角度单位度，语义 = 让当前模型绕
-//      X / Y / Z 轴**逆时针**转多少度；
-//   ③ 整体缩放：步进式（"+" 乘系数变大 / "−" 除以系数变小），系数本身也用输入框调。
+// 2026-10-01 改版（Danis）：平移 / 旋转 / 缩放**不再是**作用在 CPU 顶点上的“烘焙”变换，
+//   而是**即时作用于仿真器内部状态**（见 soft_mesh_simulator 的 ApplyTranslation /
+//   ApplyRotation / ApplyScaling）——因为面板要在**仿真进行中**也能改变这件衣服的位置 /
+//   朝向 / 大小，且不中断仿真。故本文件只剩两块与 mesh 无关/有关的小工具：
 //
-// 关键约定（Danis 明确强调）：**一律直接修改模型的 mesh 数据来实现衣服的调节**，
-//   不靠 DrawGltfObject 的 center / up / front / scale 放置参数。旋转尤其如此
-//   （"我所有的旋转衣物的操作都是直接 apply 到 mesh 上"）。这样编辑后保存 / 后续
-//   仿真统一化时，拿到的就是已经变换好的几何，不必再套一遍放置变换。
-//
-// 因此本文件是"变换状态 → 烘进 CPU 顶点"的纯函数层：
-//   - 状态 = ClothTransform（绝对平移 + 欧拉角 + 整体缩放）；
-//   - 烘焙 = 由欧拉角构造旋转基 (up, front)，复用既有 ApplyPlacementToMesh
-//     （v' = center + R·(scale·v)，法线只转不平移、切线按 scale 缩放）把几何写死在顶点上。
-//
-// 本文件与 GL / UI 解耦（header-only 纯函数），便于单测覆盖的边界：
-//   - 步长 / 系数的 clamp 语义（Danis 指定的三档上限）；
-//   - 欧拉角 → 旋转基的方向与"逆时针"符号；
-//   - 烘焙后顶点的期望坐标。
+//   - 面板输入值的 **clamp**：步长 / 缩放系数 / 累计缩放的合法范围（Danis 指定）。
+//   - RecomputeVertexNormals：软体仿真 / 即时变换会改顶点位置，**法线必须重算**，
+//     否则着色停留在旧姿态（形状动了光不动）。显示层每帧调用。
 
 #ifndef JPOV_CLOTHING_CLOTHING_TRANSFORM_H_
 #define JPOV_CLOTHING_CLOTHING_TRANSFORM_H_
@@ -30,7 +18,6 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/interface/mesh.h"
-#include "tools/jpov/interface/mesh_transform.h"
 
 namespace jpov {
 namespace clothing {
@@ -46,28 +33,10 @@ inline constexpr float kRotStepAbsMax = 90.0f;
 inline constexpr float kScaleStepMin = 1.0f;
 inline constexpr float kScaleStepMax = 2.0f;
 
-// 整体缩放的合法范围。沿用项目既有约定（模型编辑器 ModelPlacement 同为 [0.1, 10]），
-// 防止连续步进把缩放推成极小 / 极大。
+// 整体缩放的合法范围（相对初始几何的累计缩放系数）。沿用项目既有约定
+// （模型编辑器 ModelPlacement 同为 [0.1, 10]），防止连续步进把缩放推成极小 / 极大。
 inline constexpr float kClothScaleMin = 0.1f;
 inline constexpr float kClothScaleMax = 10.0f;
-
-// 度数 → 弧度。
-inline constexpr double kClothDegToRad = 3.14159265358979323846 / 180.0;
-
-// ==================== 变换状态 ====================
-
-// 衣服的调节状态（状态外置：由 App 持有，面板控件写回，本层只读）。
-//
-// 默认全为"恒等"：绝对位置 0、旋转 0 度、缩放 1.0 —— 与"衣服按资产原始坐标显示"一致。
-struct ClothTransform {
-    // 绝对位置（米）。平移没有范围限制（Danis 只要求步长有上限），故不做 clamp。
-    jpov::Vec3f offset{0.0f, 0.0f, 0.0f};
-    // 绕世界 X / Y / Z 轴的逆时针旋转角（度）。旋转角本身不 clamp / 不 wrap，
-    // 由烘焙时按三角函数取值（周期 360°，故数值大小不影响结果）。
-    jpov::Vec3f rotation_deg{0.0f, 0.0f, 0.0f};
-    // 整体缩放系数（无量纲），范围 [kClothScaleMin, kClothScaleMax]。
-    float scale = 1.0f;
-};
 
 // ==================== clamp（用户完成输入后调用） ====================
 
@@ -86,87 +55,84 @@ inline float ClampScaleStep(float v) {
     return std::clamp(v, kScaleStepMin, kScaleStepMax);
 }
 
-// 整体缩放：夹到 [kClothScaleMin, kClothScaleMax]。
+// 整体缩放（累计系数）：夹到 [kClothScaleMin, kClothScaleMax]。
 inline float ClampClothScale(float v) {
     return std::clamp(v, kClothScaleMin, kClothScaleMax);
 }
 
-// ==================== 旋转（右手系，"逆时针"约定） ====================
+// ==================== 法线重算 ====================
 
-// 绕 +X 轴逆时针旋转 deg 度。右手系下 +Y → +Z：
-//   Rx = [ 1   0    0  ]
-//        [ 0  cos -sin ]
-//        [ 0  sin  cos ]
-// 从 +X 轴看向原点时，+Y 转向 +Z 即逆时针（Danis 的"逆时针"语义）。
-inline jpov::Vec3f RotateClothX(const jpov::Vec3f& v, float deg) {
-    const float a = static_cast<float>(deg * kClothDegToRad);
-    const float c = std::cos(a);
-    const float s = std::sin(a);
-    return jpov::Vec3f(v.x(), c * v.y() - s * v.z(), s * v.y() + c * v.z());
-}
-
-// 绕 +Y 轴逆时针旋转 deg 度。右手系下 +Z → +X：
-//   Ry = [ cos  0  sin ]
-//        [  0   1   0  ]
-//        [-sin  0  cos ]
-inline jpov::Vec3f RotateClothY(const jpov::Vec3f& v, float deg) {
-    const float a = static_cast<float>(deg * kClothDegToRad);
-    const float c = std::cos(a);
-    const float s = std::sin(a);
-    return jpov::Vec3f(c * v.x() + s * v.z(), v.y(), -s * v.x() + c * v.z());
-}
-
-// 绕 +Z 轴逆时针旋转 deg 度。右手系下 +X → +Y：
-//   Rz = [ cos -sin  0 ]
-//        [ sin  cos  0 ]
-//        [  0    0   1 ]
-inline jpov::Vec3f RotateClothZ(const jpov::Vec3f& v, float deg) {
-    const float a = static_cast<float>(deg * kClothDegToRad);
-    const float c = std::cos(a);
-    const float s = std::sin(a);
-    return jpov::Vec3f(c * v.x() - s * v.y(), s * v.x() + c * v.y(), v.z());
-}
-
-// 依次施加 X → Y → Z 旋转（即总旋转 R = Rz·Ry·Rx）。
-// 说明：三个角都绕**世界轴**，先转 X 再转 Y 最后转 Z。该顺序是 UI 步进式
-//   "先点哪个轴先转哪个"的自然读法；不同顺序会给出不同的欧拉表示，但都是合法旋转。
-inline jpov::Vec3f RotateClothEuler(const jpov::Vec3f& v,
-                                    const jpov::Vec3f& rot_deg) {
-    const jpov::Vec3f after_x = RotateClothX(v, rot_deg.x());
-    const jpov::Vec3f after_y = RotateClothY(after_x, rot_deg.y());
-    return RotateClothZ(after_y, rot_deg.z());
-}
-
-// 欧拉角（度）→ ApplyPlacementToMesh 需要的旋转基 (up, front)。
-//   up    = R·(0,1,0)   // 模型局部 +Y 的世界方向
-//   front = R·(0,0,1)   // 模型局部 +Z 的世界方向
-// R 为正交旋转，故 up / front 单位且正交，MakePlacementBasis 可无损还原 R。
+// 重算逐顶点法线（**面积加权**），供软体仿真 / 即时变换后刷新着色。
 //
-// Pre-condition: up != nullptr 且 front != nullptr。
-inline void EulerDegToUpFront(const jpov::Vec3f& rot_deg,
-                              jpov::Vec3f* up /*output*/,
-                              jpov::Vec3f* front /*output*/) {
-    CHECK(up != nullptr);
-    CHECK(front != nullptr);
-    *up = RotateClothEuler(jpov::Vec3f(0.0f, 1.0f, 0.0f), rot_deg);
-    *front = RotateClothEuler(jpov::Vec3f(0.0f, 0.0f, 1.0f), rot_deg);
-}
-
-// ==================== 烘焙 ====================
-
-// 把变换状态烘进一份 CPU mesh（返回新 mesh，不改入参）。
+// 做法：对每个三角形算**未归一化**的面法线 n = (b-a)×(c-a)，其模长 = 2×面积，
+//   直接累加到三个顶点即为面积加权平均；最后逐顶点归一化。这是最常用的“平滑法线”
+//   做法，与网格密度无关。
 //
-// 复用既有 ApplyPlacementToMesh：v' = offset + R·(scale·v)，法线 = R·n，
-// 切线 = scale·(R·t)；uvs / indices / 骨骼 / flags 原样保留。
+// 边界：
+//   - 网格无 kNormal 标志（normals 为空）→ 不动（显示层本就不用法线）。
+//   - indices 为空 → 按 non-indexed 语义（每 3 个连续顶点一个三角形）。
+//   - 某顶点的所有相邻面都退化（累加后模长 ~0）→ 该顶点法线回退为 (0,1,0)，
+//     避免出现零向量让着色出现 NaN。
 //
-// Pre-condition: base.Validate() 通过；transform.scale ∈ [kClothScaleMin, kClothScaleMax]。
-inline jpov::MeshData BakeClothMesh(const jpov::MeshData& base,
-                                    const ClothTransform& transform) {
-    jpov::Vec3f up;
-    jpov::Vec3f front;
-    EulerDegToUpFront(transform.rotation_deg, &up, &front);
-    return jpov::ApplyPlacementToMesh(base, transform.offset, up, front,
-                                      transform.scale);
+// Pre-condition（不满足即 LOG(FATAL)）：mesh != nullptr；positions 非空；若 indices
+//   非空则长度为 3 的倍数且每个索引 < positions.size()（越界崩，不带坏数据进渲染）。
+inline void RecomputeVertexNormals(jpov::MeshData* mesh) {
+    CHECK(mesh != nullptr);
+    CHECK(!mesh->positions.empty()) << "RecomputeVertexNormals: mesh 无顶点";
+    if (mesh->normals.empty()) {
+        return;  // 该网格不用法线（flags 无 kNormal），无需重算。
+    }
+    const size_t vcount = mesh->positions.size();
+    CHECK_EQ(mesh->normals.size(), vcount)
+        << "RecomputeVertexNormals: normals 与 positions 长度不一致";
+
+    std::vector<jpov::Vec3f> acc(vcount, jpov::Vec3f(0.0f, 0.0f, 0.0f));
+
+    auto add_face = [&acc, mesh](uint32_t ia, uint32_t ib, uint32_t ic) {
+        CHECK_LT(ia, acc.size()) << "RecomputeVertexNormals: 索引越界 " << ia;
+        CHECK_LT(ib, acc.size()) << "RecomputeVertexNormals: 索引越界 " << ib;
+        CHECK_LT(ic, acc.size()) << "RecomputeVertexNormals: 索引越界 " << ic;
+        const jpov::Vec3f& a = mesh->positions[ia];
+        const jpov::Vec3f& b = mesh->positions[ib];
+        const jpov::Vec3f& c = mesh->positions[ic];
+        const jpov::Vec3f ab(b.x() - a.x(), b.y() - a.y(), b.z() - a.z());
+        const jpov::Vec3f ac(c.x() - a.x(), c.y() - a.y(), c.z() - a.z());
+        // 未归一化叉积 = 2×面积方向 → 面积加权。
+        const jpov::Vec3f n(ab.y() * ac.z() - ab.z() * ac.y(),
+                            ab.z() * ac.x() - ab.x() * ac.z(),
+                            ab.x() * ac.y() - ab.y() * ac.x());
+        acc[ia] = jpov::Vec3f(acc[ia].x() + n.x(), acc[ia].y() + n.y(),
+                              acc[ia].z() + n.z());
+        acc[ib] = jpov::Vec3f(acc[ib].x() + n.x(), acc[ib].y() + n.y(),
+                              acc[ib].z() + n.z());
+        acc[ic] = jpov::Vec3f(acc[ic].x() + n.x(), acc[ic].y() + n.y(),
+                              acc[ic].z() + n.z());
+    };
+
+    if (mesh->indices.empty()) {
+        for (size_t t = 0; t + 2 < vcount; t += 3) {
+            add_face(static_cast<uint32_t>(t), static_cast<uint32_t>(t + 1),
+                     static_cast<uint32_t>(t + 2));
+        }
+    } else {
+        CHECK_EQ(mesh->indices.size() % 3, 0u)
+            << "RecomputeVertexNormals: indices 长度不是 3 的倍数";
+        for (size_t t = 0; t + 2 < mesh->indices.size(); t += 3) {
+            add_face(mesh->indices[t], mesh->indices[t + 1], mesh->indices[t + 2]);
+        }
+    }
+
+    for (size_t i = 0; i < vcount; ++i) {
+        const float len = std::sqrt(acc[i].x() * acc[i].x() +
+                                    acc[i].y() * acc[i].y() +
+                                    acc[i].z() * acc[i].z());
+        if (len > 1e-20f) {
+            mesh->normals[i] = jpov::Vec3f(acc[i].x() / len, acc[i].y() / len,
+                                           acc[i].z() / len);
+        } else {
+            mesh->normals[i] = jpov::Vec3f(0.0f, 1.0f, 0.0f);  // 退化回退
+        }
+    }
 }
 
 }  // namespace clothing

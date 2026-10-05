@@ -504,6 +504,8 @@ void SkeletonRenderer::UploadSunData(
     CHECK_LE(cascade_count, ShadowConfig::kMaxCascades);
     glUniform1fv(shader_mgr.GetUniform(prog, "uCascadeRanges"),
                  cascade_count, cfg.cascade_ranges);
+    glUniform1f(shader_mgr.GetUniform(prog, "uCascadeBlendFraction"),
+                cfg.cascade_blend_fraction);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeStart"), cfg.fade_start);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeEnd"), cfg.fade_end);
 

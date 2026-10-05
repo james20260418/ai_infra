@@ -19,6 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/common/utils.h"
 
@@ -443,6 +444,10 @@ void RendererMat4Mul(const float a[16], const float b[16], float out[16]) {
 // crash，避免运行期才发现（如级联段重叠/越界导致 FBO 创建崩溃）。
 void ValidateShadowConfig(const jpov::ShadowConfig& s) {
     CHECK_GE(s.cascade_count, 1) << "cascade_count 至少 1，当前 " << s.cascade_count;
+    CHECK_GT(s.cascade_blend_fraction, 0.0f)
+        << "cascade_blend_fraction 必须 > 0（0 会让混合带退化/除零）";
+    CHECK_LE(s.cascade_blend_fraction, 0.5f)
+        << "cascade_blend_fraction 至多 0.5（再大会让相邻两级重叠过宽/出现三级同混）";
     CHECK_LE(s.cascade_count, jpov::ShadowConfig::kMaxCascades)
         << "cascade_count 至多 " << jpov::ShadowConfig::kMaxCascades
         << "，当前 " << s.cascade_count;
@@ -505,6 +510,7 @@ Renderer::~Renderer() {
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
+    DestroySkyColorFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -621,6 +627,42 @@ void Renderer::DestroyHDRResolveFBO() {
     resolve_fbo_hdr_w_ = 0;
     resolve_fbo_hdr_h_ = 0;
 }
+
+void Renderer::EnsureSkyColorFBO(int w, int h) {
+    if (sky_fbo_ != 0 && sky_w_ == w && sky_h_ == h) {
+        return;
+    }
+    DestroySkyColorFBO();
+    glGenTextures(1, &sky_tex_);
+    glBindTexture(GL_TEXTURE_2D, sky_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffers(1, &sky_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           sky_tex_, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
+        << "Sky color FBO incomplete";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sky_w_ = w;
+    sky_h_ = h;
+}
+
+void Renderer::DestroySkyColorFBO() {
+    if (sky_fbo_) {
+        glDeleteFramebuffers(1, &sky_fbo_);
+        glDeleteTextures(1, &sky_tex_);
+        sky_fbo_ = 0;
+        sky_tex_ = 0;
+    }
+    sky_w_ = 0;
+    sky_h_ = 0;
+}
+
 
 void Renderer::DestroyShadowFBO() {
     for (auto& c : shadow_fbos_) {
@@ -901,7 +943,7 @@ void Renderer::EnsureHDRFBO(int width, int height) {
                            GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_TEXTURE_2D, depth_tex_hdr_, 0);
-    // 开启 MRT：COLOR_ATTACHMENT0 = 颜色，COLOR_ATTACHMENT1 = 场景深度。
+    // 开启 MRT：0=颜色，1=场景深度。
     {
         const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
         glDrawBuffers(2, bufs);
@@ -1279,6 +1321,9 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
+        CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
+            << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
+               "tone map 之前）；否则会静默失效";
         unsigned int fbo_3d_target = 0;
         if (use_hdr) {
             EnsureHDRFBO(fbo_3d_w, fbo_3d_h);
@@ -1322,6 +1367,17 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
                                  shader_mgr_);
+
+            // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
+            // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，
+            // 会被之后画的几何 shader 写成垃圾（2026-09-30 实测 NaN）。
+            EnsureSkyColorFBO(fbo_3d_w, fbo_3d_h);
+            glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
+                                 shader_mgr_, /*atmo_only=*/true);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
             // 恢复 3D 物体所需的深度状态
             glEnable(GL_DEPTH_TEST);
@@ -1411,40 +1467,73 @@ void Renderer::Render(const RenderCommandList& cmds,
         glDisable(GL_DEPTH_TEST);
 
         if (use_hdr) {
-            // ---- HDR 路径：先把 HDR 内容 resolve/blit 到一张同尺寸 non-MSAA 浮点
-            //      纹理（resolve_tex_hdr_），作为 tone map pass 的输入采样纹理。
+            // ---- HDR 路径：把 HDR 内容 resolve/blit 到同尺寸 non-MSAA 浮点纹理，
+            //      作为后续后处理（雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
-            unsigned int hdr_scene_depth_tex = 0;
+            // 只此一处判定要不要起雾；下方 resolve 顺序与它就配合。
+            const bool horizon_fog_enabled =
+                cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
+            // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
+            // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
+            const unsigned int sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
 #ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为 tone map 输入。
+            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入（雾也叠在这张上）。
             unsigned int hdr_input_tex = color_tex_hdr_;
-            hdr_scene_depth_tex = scene_depth_tex_hdr_;
+            unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 #else
-            // MSAA 路径：把 MSAA HDR FBO 的两个附件分别 resolve 到单采样浮点纹理。
-            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个，故分两次：
-            //   附件0（颜色）、附件1（场景深度）各 blit 一次，用 glReadBuffer/glDrawBuffer 选择。
+            // MSAA 路径：先 resolve 场景深度（雾要单采样深度）——放在颜色之前，这样
+            // 「雾就地叠进 fbo_hdr_」之后，再统一 resolve 颜色（开雾时含雾）。
+            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个；用 glReadBuffer/
+            //   glDrawBuffer 选择附件。
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            // 附件0：颜色
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 附件1：场景深度
             glReadBuffer(GL_COLOR_ATTACHMENT1);
             glDrawBuffer(GL_COLOR_ATTACHMENT1);
             glBlitFramebuffer(
                 0, 0, fbo_3d_w, fbo_3d_h,
                 0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            // 复位 read/draw buffer 回附件0（后续 highlight pass 仍从 fbo_hdr_ 读颜色）。
+            unsigned int hdr_input_tex = resolve_tex_hdr_;
+            unsigned int hdr_scene_depth_tex = resolve_scene_depth_tex_;
+#endif
+
+            // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
+            //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
+            //    只读 MRT#1 场景深度 + 大气色天空纹理。必须在线性 HDR 域、tone map 之前加。
+            if (horizon_fog_enabled) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件；雾不碰场景深度附件。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+#ifdef JPOV_WITHOUT_MSAA
+                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+#endif
+                HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
+                                         sky_color_tex, mvp_, cam, shader_mgr_);
+#ifdef JPOV_WITHOUT_MSAA
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
+#endif
+                const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs);
+            }
+
+#ifndef JPOV_WITHOUT_MSAA
+            // resolve 颜色：若开雾，此时 fbo_hdr_ 里已经含雾。
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
-            unsigned int hdr_input_tex = resolve_tex_hdr_;
-            hdr_scene_depth_tex = resolve_scene_depth_tex_;
+            glBlitFramebuffer(
+                0, 0, fbo_3d_w, fbo_3d_h,
+                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
+                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
 #endif
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
@@ -1703,9 +1792,15 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 // 太阳阴影 pass（CSM）：当 cmds.sun 有值时，把场景里所有 Object3D 从太阳正交视角
 // 按级联渲染进各段阴影纹理（只写光空间 ndc.z），供主 pass 的 PBR shader 采样做 PCF。
 //
-// 每段：取相机在该级联 near~far 之间的视锥 8 角点 → 变换到光源 view 空间 → 求 AABB
-// → 用 AABB 定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段视锥在光源空间
-// 的包围盒"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
+// 每段：取相机在该级联 near~far 之间的视锥切片，求其**包围球**（球心在相机轴上），
+// 再把球心在光源 right/up 轴上的**世界投影量化到纹素整数倍**（texel snapping）后，
+// 用「snap 后的球心 ± 半径」定该段正交投影范围。这样每段 shadow map 只覆盖 "这一段
+// 视锥的近邻"，而非全场景 —— 近段高分辨率、远段低分辨率（CSM 核心）。
+//
+// 为什么用包围球 + snap（而不是光空间 AABB）：球半径只由切片 near/far/fov/aspect
+// 决定、**不随相机旋转变化** ⟹ 单纹素世界尺寸恒定 ⟹ 量化球心后纹素网格才真正 world
+// 对齐、影缘不抖。AABB 的 span 会随相机旋转连续变化，纹素尺寸跟着漂，snap 也压不住
+// shimmer（见下方 x/y 计算的详细注释）。
 //
 // world_up 固定为 y 轴正向 (0,1,0)；若光方向与它平行（太阳正顶），lookAt 的
 // cross(fwd,up) 退化 —— 只补一个极小水平 epsilon 保持基连续，**不偏置光方向本身**
@@ -1805,10 +1900,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         const float near_i = prev_far;
         const float far_i = shadow_cfg_.cascade_ranges[c];
 
-        // 该级联相机视锥 8 角点：相机朝向 +fwd，frustum 从 near 平面延伸到 far 平面。
-        // 用相机 lookAt 的基向量展开：
+        // 该级联相机视锥切片：相机朝向 +fwd，切片从 near 平面延伸到 far 平面。
+        // 切片关于相机轴对称 ⟹ 包围球球心在轴上，故只需轴向量 fwd 与近/远面半宽高。
         //   fwd = normalize(target - position)
-        //   side, upv 由 RendererMat4Mul 同套 BuildLookAt 逻辑推导
         Vec3f fwd = {
             cmds.camera.target.x() - cmds.camera.position.x(),
             cmds.camera.target.y() - cmds.camera.position.y(),
@@ -1816,65 +1910,77 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         };
         float fl = std::sqrt(fwd.x()*fwd.x() + fwd.y()*fwd.y() + fwd.z()*fwd.z());
         if (fl < 1e-8f) fwd = Vec3f(0.0f, 0.0f, -1.0f); else fwd = Vec3f(fwd.x()/fl, fwd.y()/fl, fwd.z()/fl);
-        const Vec3f cu = { cmds.camera.up.x(), cmds.camera.up.y(), cmds.camera.up.z() };
-        Vec3f side = Vec3f(fwd.y()*cu.z() - fwd.z()*cu.y(),
-                           fwd.z()*cu.x() - fwd.x()*cu.z(),
-                           fwd.x()*cu.y() - fwd.y()*cu.x());
-        float sl = std::sqrt(side.x()*side.x() + side.y()*side.y() + side.z()*side.z());
-        if (sl < 1e-8f) side = Vec3f(1.0f, 0.0f, 0.0f); else side = Vec3f(side.x()/sl, side.y()/sl, side.z()/sl);
-        Vec3f upv = Vec3f(side.y()*fwd.z() - side.z()*fwd.y(),
-                          side.z()*fwd.x() - side.x()*fwd.z(),
-                          side.x()*fwd.y() - side.y()*fwd.x());
-
-        // 半高度 h = tan(fov/2) * dist；半宽 w = h * aspect。
+        // 半高度 h = tan(fov/2) * dist；半宽 w = h * aspect（切片在近/远面处）。
         const float tan_half = std::tan(fov_rad * 0.5f);
         const float h_near = tan_half * near_i;
         const float h_far  = tan_half * far_i;
         const float w_near = h_near * aspect;
         const float w_far  = h_far * aspect;
-        const Vec3f c_near = camera_pos + fwd * near_i;   // near 平面中心
-        const Vec3f c_far  = camera_pos + fwd * far_i;    // far 平面中心
 
-        // 8 角点（世界空间）：near 四角 + far 四角。
-        Vec3f corners[8] = {
-            c_near - side*w_near - upv*h_near, c_near + side*w_near - upv*h_near,
-            c_near - side*w_near + upv*h_near, c_near + side*w_near + upv*h_near,
-            c_far  - side*w_far  - upv*h_far,  c_far  + side*w_far  - upv*h_far,
-            c_far  - side*w_far  + upv*h_far,  c_far  + side*w_far  + upv*h_far,
-        };
-
-        // 正交盒 x/y = 仅该级联相机视锥切片的光源空间 AABB（与场景内容无关）。
+        // 正交盒 x/y = 仅该级联相机视锥**切片的包围球**（与场景内容无关）。
         // 依据：正交投影下，caster 能对切片内片元投影 ⟺ 其光空间横向位置落在切片
         // 横向投影范围内。横向不在范围内的物体，其影子横向也不可能落在切片内，
         // 故无需（也不应）并入任何物体 AABB —— 那会让单个大物体（如 300m 地面）
         // 把整级联正交盒撑爆，近密远疏失效（2026-09-17 修正）。
-        float min_x = 1e30f, max_x = -1e30f;
-        float min_y = 1e30f, max_y = -1e30f;
-        for (const Vec3f& p : corners) {
-            const float lx = view[0]*p.x() + view[4]*p.y() + view[8]*p.z()  + view[12];
-            const float ly = view[1]*p.x() + view[5]*p.y() + view[9]*p.z()  + view[13];
-            min_x = std::min(min_x, lx); max_x = std::max(max_x, lx);
-            min_y = std::min(min_y, ly); max_y = std::max(max_y, ly);
+        //
+        // 切片（截锥）关于相机轴对称 ⟹ 包围球球心在轴上。令近/远面半对角为
+        // d_near / d_far，切片沿轴长 L = far_i - near_i；球心距近面 z 处，球半径平方 = 
+        // max(d_near²+z², d_far²+(L−z)²)。令两者相等解得最优 z（夹到 [0,L]，切片在
+        // 近端收敛为锥尖时最优 z 会落到远面）。
+        const float d_near = std::sqrt(w_near*w_near + h_near*h_near);  // 近面半对角
+        const float d_far  = std::sqrt(w_far *w_far  + h_far *h_far);   // 远面半对角
+        const float slice_len = far_i - near_i;
+        float z_center = 0.0f;
+        if (slice_len > 1e-6f) {
+            z_center = (d_far*d_far - d_near*d_near + slice_len*slice_len)
+                       / (2.0f * slice_len);
         }
+        z_center = std::max(0.0f, std::min(slice_len, z_center));
+        const Vec3f sphere_c = camera_pos + fwd * (near_i + z_center);
+        // 半径取近/远角点到球心的**较大者**：z 被夹到 [0,L] 边界时两式不再相等
+        // （例如首段 near≈0、切片在远端张得最开 ⇒ 球心夹到远面，半径应由远角点定，
+        // 否则球装不下切片 → 切角跑到盒外被裁掉）。
+        const float r_near = std::sqrt(d_near*d_near + z_center*z_center);
+        const float r_far  = std::sqrt(d_far*d_far
+                             + (slice_len - z_center)*(slice_len - z_center));
+        const float sphere_r = std::max(r_near, r_far);
 
-        // 正交投影：光照沿 -z（光 view 空间），x/y 覆盖切片 AABB（+1 纹素边距）；
-        // z（near/far）由「眼→阴影纵深」推导，见下方。
-        const float span_x = max_x - min_x;
-        const float span_y = max_y - min_y;
-        if (span_x < 1e-5f || span_y < 1e-5f) {
-            // 退化的级联（如首段 near 极近导致视锥近似点），给最小范围。
+        if (sphere_r < 1e-5f || slice_len < 1e-5f) {
+            // 退化的级联（如首段 near 极近导致切片近似一点），给最小范围。
             float vp[16]; BuildOrthoProj(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 2.0f, vp);
             RendererMat4Mul(vp, view, shadow_vp_[c]);
             shadow_texel_world_[c] = 0.0f;
             continue;
         }
-        // 各向外扩 **1 个纹素**（自缩放，不用写死的米数）：避免片元恰落在盒边缘时
-        // 采样/裁剪出瑕疵；扩大量随级联分辨率自动跟随（原为固定 1.0m，既浪费
-        // 近级联分辨率、又对大场景偏小）。
-        const float pad_x = span_x / static_cast<float>(shadow_fbos_[c].size);
-        const float pad_y = span_y / static_cast<float>(shadow_fbos_[c].size);
-        const float left = min_x - pad_x, right = max_x + pad_x;
-        const float bottom = min_y - pad_y, top = max_y + pad_y;
+
+        // ── texel snapping ──
+        // 量化「盒 min 角 = 球心 − 盒半径」在光源 right/up 轴上的**世界投影**到纹素整数
+        // 倍（floor），盒再向 + 方向延伸 2·盒半径。量化用**世界投影**（而非光空间坐标）
+        // 是为了抵消光 view 的平移项 view[12/13]：眼位随相机移动，只有量化世界投影才能
+        // 让纹素网格锚定世界、不逐帧滑。
+        //   world_proj(p) = right·p（right = view 第 0 行 = (view[0],view[4],view[8])）
+        //   光空间 lx = world_proj(p) + view[12]（view 第 0 行的平移分量）
+        //
+        // ⚠️ 盒半径用**放大后的半径** R = r·N/(N−2)（N = map 尺寸，r = 切片包围球半径）。
+        //   为什么：min 角的 floor 会把盒往 − 推最多 1 个纹素，若盒边长仍取 2r，则 + 侧
+        //   最多会短 1 个纹素 ⇒ 切片最外缘一条窄带可能越出盒被丢影。取口径：
+        //     left_wp = floor((c−R)/t)·t，t = 2R/N；需 left_wp + 2R ≥ c + r。
+        //     由 left_wp > c−R−t 得 left_wp + 2R > c + R(1 − 2/N)，令其 ≥ c + r
+        //     ⟺ R ≥ r·N/(N−2)。取等号即可（严格覆盖）。N 很大时盒只多出 ~1 个纹素，
+        //     纹素尺寸随之 +O(1/N)，可忽略。
+        const float map_size = static_cast<float>(shadow_fbos_[c].size);
+        const float box_r = (map_size > 2.0f)
+            ? sphere_r * (map_size / (map_size - 2.0f)) : sphere_r;
+        const float texel_w = 2.0f * box_r / map_size;      // 单纹素世界边长（米）
+        const float c_wp_x = view[0]*sphere_c.x() + view[4]*sphere_c.y() + view[8]*sphere_c.z();
+        const float c_wp_y = view[1]*sphere_c.x() + view[5]*sphere_c.y() + view[9]*sphere_c.z();
+        const float left_wp   = std::floor((c_wp_x - box_r) / texel_w) * texel_w;
+        const float bottom_wp = std::floor((c_wp_y - box_r) / texel_w) * texel_w;
+        // snap 后的世界投影 → 光空间坐标（+ view 平移项），供 BuildOrthoProj。
+        const float left   = left_wp            + view[12];
+        const float right  = left_wp + 2.0f*box_r + view[12];
+        const float bottom = bottom_wp          + view[13];
+        const float top    = bottom_wp + 2.0f*box_r + view[13];
         // 正交 near/far：只需覆盖「眼→整个阴影纵深」。被比较的深度来自
         // uShadowDepthVP（线性米，与这里无关），故 near/far 只影响裁剪 —— 取宽裕值
         // 即可，无需魔数。（原为 0.1 / 10000 两个写死的数。）
@@ -1885,10 +1991,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         BuildOrthoProj(left, right, bottom, top, near_dist, far_dist, proj);
         RendererMat4Mul(proj, view, shadow_vp_[c]);
 
-        // 该级联单纹素的世界覆盖边长（米）：正交盒跨度 / map 尺寸。取 x/y 较大者
-        // （各向异性保守）。供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
-        shadow_texel_world_[c] = std::max(right - left, top - bottom)
-                                 / static_cast<float>(shadow_fbos_[c].size);
+        // 该级联单纹素的世界覆盖边长（米）：盒跨度 = 2·盒半径，故 = 2·box_r/map 尺寸。
+        // 供 shader 自动推导深度偏置，见 ShadowConfig::cascade_bias。
+        shadow_texel_world_[c] = texel_w;
 
         // 渲第 c 段：绑定对应 FBO + viewport，清屏，画所有投射物体。
         const CascadeFBO& fb = shadow_fbos_[c];
@@ -2671,12 +2776,46 @@ void Renderer::SaveScreenshotToBuffer(int win_w, int win_h,
 
 namespace {
 
+// 一张 glTF 贴图来源（GltfTextureRef）→ GPU 纹理 id。
+//   内嵌（内存字节）→ FromMemory（**不经文件**）；外部（uri）→ LoadFromFile。
+//   返回 0 表示无贴图。
+uint32_t ResolveTextureRef(const GltfTextureRef& ref, TextureManager& tex_mgr,
+                           const TextureOptions& opts = {}) {
+    if (ref.is_embedded()) {
+        return tex_mgr.FromMemory(ref.bytes, ref.key, opts);
+    }
+    if (!ref.uri.empty()) {
+        return tex_mgr.LoadFromFile(ref.uri, opts);
+    }
+    return 0;
+}
+
+// 把 RGBA 像素缓冲的**单通道**展开为 RGBA 像素（R=G=B=该通道, A=255）。
+// 供 TextureManager::FromPixels 直接上传（**跳过 PNG 编/解码**）。
+std::vector<unsigned char> ExtractChannelToRgba(const unsigned char* pixels,
+                                                int width, int height, int channel) {
+    CHECK(pixels != nullptr);
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_GE(channel, 0);
+    CHECK_LT(channel, 4);
+    std::vector<unsigned char> out(static_cast<size_t>(width) * height * 4);
+    const int npix = width * height;
+    for (int i = 0; i < npix; ++i) {
+        const unsigned char v = pixels[i * 4 + channel];
+        out[i * 4 + 0] = v;
+        out[i * 4 + 1] = v;
+        out[i * 4 + 2] = v;
+        out[i * 4 + 3] = 255;
+    }
+    return out;
+}
+
 // 把 ORM（metallicRoughnessTexture，R=Occlusion/G=Roughness/B=Metallic）拆成
-// roughness / metallic 两张独立灰度 PNG 写入临时文件，并逐个加载为 GPU 纹理。
+// roughness / metallic 两张独立灰度图，**直接在内存里上传 GPU**（不再写临时文件）。
 //
 // 返回 {roughness_id, metallic_id}。任何一步失败返回全 0。
-// 临时文件写到 <orm_path 所在目录>/<basename>_rough.png / _metal.png，保证
-// TextureManager 按绝对路径去重（同一 ORM 只拆/传一次）。
+// 去重身份：以源 ORM 的 ref.key + "/rough" / "/metal" 为键（同一 ORM 只拆/传一次）。
 //
 // 注意：ORM 的 R（Occlusion）在本 loader 中不作为 AO —— 按 glTF 规范，
 // occlusion 仅在 occlusionTexture 显式引用时有效（见 LoadGltfOcclusion）。
@@ -2686,55 +2825,40 @@ struct OrmTextureIds {
     bool ok = false;
 };
 
-OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
-                              const std::string& orm_path) {
+OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr, const GltfTextureRef& ref) {
     OrmTextureIds out;
 
+    // 取 ORM 原始像素：内嵌走内存解码，外部走文件。
     int ow = 0, oh = 0, oc = 0;
-    unsigned char* orm_pixels = stbi_load(orm_path.c_str(), &ow, &oh, &oc, 4);
+    unsigned char* orm_pixels = nullptr;
+    if (ref.is_embedded()) {
+        orm_pixels = stbi_load_from_memory(ref.bytes.data(),
+                                           static_cast<int>(ref.bytes.size()),
+                                           &ow, &oh, &oc, 4);
+    } else if (!ref.uri.empty()) {
+        orm_pixels = stbi_load(ref.uri.c_str(), &ow, &oh, &oc, 4);
+    }
     if (!orm_pixels) {
-        LOG(ERROR) << "LoadGltf: 无法加载 ORM 贴图 " << orm_path
-                   << " (" << stbi_failure_reason() << ")";
+        LOG(ERROR) << "LoadGltf: 无法读取 ORM 贴图 (" << ref.key << ") ("
+                   << stbi_failure_reason() << ")";
         return out;
     }
 
-    // 临时 ORM 文件写到统一 scratch 目录，避免污染资源目录/仓库。
-    // 路径按 ORM 源 basename 稳定生成，保证 TextureManager 按绝对路径
-    // 去重（同一 ORM 只拆/传一次）。
-    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
-    std::system(("mkdir -p " + scratch_dir).c_str());
-    const size_t last_slash = orm_path.find_last_of("/\\");
-    const std::string base_name = (last_slash == std::string::npos)
-        ? orm_path : orm_path.substr(last_slash + 1);
-    const size_t dot = base_name.find_last_of('.');
-    const std::string stem = (dot == std::string::npos)
-        ? base_name : base_name.substr(0, dot);
-
     // 只拆 roughness(G)/metallic(B) 两通道；ORM 的 R(Occlusion) 不作为 AO
-    // （见 OrmTextureIds 注释）。
-    const struct { int channel; const char* suffix; } kChannels[] = {
-        {1, "_rough.png"},   // G = Roughness
-        {2, "_metal.png"},   // B = Metallic
+    // （见 OrmTextureIds 注释）。直接上传像素（FromPixels），不落盘。
+    const struct {
+        int channel;
+        const char* suffix;
+    } kChannels[] = {
+        {1, "/rough"},  // G = Roughness
+        {2, "/metal"},  // B = Metallic
     };
     uint32_t ids[2] = {0, 0};
     for (int i = 0; i < 2; ++i) {
-        std::vector<unsigned char> png =
-            ExtractChannelToPng(orm_pixels, ow, oh, kChannels[i].channel);
-        if (png.empty()) {
-            LOG(ERROR) << "LoadGltf: ORM 通道 " << i << " 拆包失败";
-            stbi_image_free(orm_pixels);
-            return out;
-        }
-        const std::string tmp = scratch_dir + stem + kChannels[i].suffix;
-        FILE* f = std::fopen(tmp.c_str(), "wb");
-        if (!f) {
-            LOG(ERROR) << "LoadGltf: 无法写临时 ORM 文件 " << tmp;
-            stbi_image_free(orm_pixels);
-            return out;
-        }
-        std::fwrite(png.data(), 1, png.size(), f);
-        std::fclose(f);
-        ids[i] = tex_mgr.LoadFromFile(tmp);
+        std::vector<unsigned char> rgba =
+            ExtractChannelToRgba(orm_pixels, ow, oh, kChannels[i].channel);
+        ids[i] = tex_mgr.FromPixels(rgba.data(), ow, oh,
+                                    ref.key + kChannels[i].suffix);
     }
     stbi_image_free(orm_pixels);
 
@@ -2746,53 +2870,39 @@ OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr,
 
 // 从独立的 occlusionTexture 提取 AO（R 通道），并按 occlusionStrength 烘焙：
 // ao' = mix(1, R, S) = 1-S + R*S。返回 TextureManager 的贴图 id（0=失败）。
-// 临时文件写到 /tmp/jpov_gltf_orm/（同 ORM 拆包），按源 basename 稳定命名。
-uint32_t LoadGltfOcclusion(TextureManager& tex_mgr,
-                           const std::string& occ_path,
+// 内嵌/外部均支持；结果**直接在内存里上传**（FromPixels），不写临时文件。
+uint32_t LoadGltfOcclusion(TextureManager& tex_mgr, const GltfTextureRef& ref,
                            float ao_strength) {
     int ow = 0, oh = 0, oc = 0;
-    unsigned char* px = stbi_load(occ_path.c_str(), &ow, &oh, &oc, 4);
+    unsigned char* px = nullptr;
+    if (ref.is_embedded()) {
+        px = stbi_load_from_memory(ref.bytes.data(),
+                                   static_cast<int>(ref.bytes.size()), &ow, &oh, &oc, 4);
+    } else if (!ref.uri.empty()) {
+        px = stbi_load(ref.uri.c_str(), &ow, &oh, &oc, 4);
+    }
     if (!px) {
-        LOG(ERROR) << "LoadGltf: 无法加载 occlusion 贴图 " << occ_path
-                   << " (" << stbi_failure_reason() << ")";
+        LOG(ERROR) << "LoadGltf: 无法读取 occlusion 贴图 (" << ref.key << ") ("
+                   << stbi_failure_reason() << ")";
         return 0;
     }
 
     // 按 strength 重算 R 通道：mix(1, R, S)。S=0→全 255(无遮蔽)，S=1→原 R。
-    std::vector<unsigned char> mixed(static_cast<size_t>(ow) * oh * 4);
-    for (int p = 0; p < ow * oh; ++p) {
-        const int idx = p * 4;
-        for (int c = 0; c < 4; ++c) mixed[idx + c] = px[idx + c];
-        const float r = px[idx] / 255.0f;
-        const float aom = (1.0f - ao_strength) + r * ao_strength;
-        mixed[idx] = static_cast<unsigned char>(aom * 255.0f + 0.5f);
+    // 展开为 RGBA（R=G=B=AO 值，A=255），直接 FromPixels 上传。
+    std::vector<unsigned char> rgba(static_cast<size_t>(ow) * oh * 4);
+    const int npix = ow * oh;
+    for (int p = 0; p < npix; ++p) {
+        const unsigned char r = px[p * 4 + 0];
+        const float aom = (1.0f - ao_strength) + (r / 255.0f) * ao_strength;
+        const unsigned char v = static_cast<unsigned char>(aom * 255.0f + 0.5f);
+        rgba[p * 4 + 0] = v;
+        rgba[p * 4 + 1] = v;
+        rgba[p * 4 + 2] = v;
+        rgba[p * 4 + 3] = 255;
     }
     stbi_image_free(px);
 
-    std::vector<unsigned char> png =
-        ExtractChannelToPng(mixed.data(), ow, oh, 0);  // R 通道 = AO
-    if (png.empty()) {
-        LOG(ERROR) << "LoadGltf: occlusion R 通道拆包失败 " << occ_path;
-        return 0;
-    }
-
-    const std::string scratch_dir = "/tmp/jpov_gltf_orm/";
-    std::system(("mkdir -p " + scratch_dir).c_str());
-    const size_t last_slash = occ_path.find_last_of("/\\");
-    const std::string base_name = (last_slash == std::string::npos)
-        ? occ_path : occ_path.substr(last_slash + 1);
-    const size_t dot = base_name.find_last_of('.');
-    const std::string stem = (dot == std::string::npos)
-        ? base_name : base_name.substr(0, dot);
-    const std::string tmp = scratch_dir + stem + "_ao.png";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f) {
-        LOG(ERROR) << "LoadGltf: 无法写 occlusion 临时文件 " << tmp;
-        return 0;
-    }
-    std::fwrite(png.data(), 1, png.size(), f);
-    std::fclose(f);
-    return tex_mgr.LoadFromFile(tmp);
+    return tex_mgr.FromPixels(rgba.data(), ow, oh, ref.key + "/ao");
 }
 
 }  // namespace
@@ -2850,7 +2960,7 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor
         if (!mi.base_color_tex.empty()) {
             mat.base_color_tex =
-                self->texture_mgr_.LoadFromFile(mi.base_color_tex);
+                ResolveTextureRef(mi.base_color_tex, self->texture_mgr_);
             mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         } else {
             mat.base_color = {mi.base_color[0], mi.base_color[1],
@@ -2863,24 +2973,24 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
                         mi.emissive_factor[2], 1.0f};
         if (!mi.emissive_tex.empty()) {
             mat.emissive_tex =
-                self->texture_mgr_.LoadFromFile(mi.emissive_tex);
+                ResolveTextureRef(mi.emissive_tex, self->texture_mgr_);
         }
         // normal
         if (!mi.normal_tex.empty()) {
             mat.normal_tex =
-                self->texture_mgr_.LoadFromFile(mi.normal_tex);
+                ResolveTextureRef(mi.normal_tex, self->texture_mgr_);
             mat.normal_scale = mi.normal_scale;
         }
         // ORM → metallic / roughness / ao
         if (!mi.metallic_roughness_tex.empty()) {
-            const std::string& orm = mi.metallic_roughness_tex;
+            const std::string& orm_key = mi.metallic_roughness_tex.key;
             OrmTextureIds oid;
-            auto it = orm_cache->find(orm);
+            auto it = orm_cache->find(orm_key);
             if (it != orm_cache->end()) {
                 oid = it->second;
             } else {
-                oid = LoadOrmTextures(self->texture_mgr_, orm);
-                (*orm_cache)[orm] = oid;
+                oid = LoadOrmTextures(self->texture_mgr_, mi.metallic_roughness_tex);
+                (*orm_cache)[orm_key] = oid;
             }
             if (oid.ok) {
                 mat.metallic = mi.metallic_factor;

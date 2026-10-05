@@ -21,6 +21,8 @@
 //     glb 读出的 rest 骨架，驱动方式由 `--view`（或面板 combo）选：
 //     **BodyRetarget**（正式重定向）或**数值直搬**（无重定向对照，用来肉眼验证
 //     “不加重定向直接搬 lcl rotation 会不对”）。见 fbx_viewer_app.h 头注 / 设计文档。
+//   → `--cloth_path <目录|文件>`（可选）：给已**自动蒙皮**的衣服 glb（目录则加载其中所有
+//     *.glb/*.gltf），挂到蓝侧同一骨架 —— 带皮模式下与蓝人**逐帧同步**变形。需配合 glb。
 //
 // 交互操作：右键 drag 转视角、滚轮 zoom（与模型查看器同款）；**顶部**面板两行 ——
 //   控件行（显示/驱动 combo / 暂停按钮 / rest 复选框）+ 状态行。
@@ -44,6 +46,7 @@ namespace {
 struct CliParsed {
     std::string fbx_path;      // 被观察的 FBX（第一个非 "--" 参数）
     std::string glb_path;      // 可选的目标骨架 glb（第二个非 "--" 参数；空 = 不启用对照组）
+    std::string cloth_path;    // --cloth_path：已蒙皮衣服 glb（目录/文件；空 = 不穿衣服）
     std::string shot_path;     // 非空 = headless 单帧出图到该路径
     bool has_time = false;     // --time 是否给出
     double time_seconds = 0.0; // --time 的值（动画时刻，秒）
@@ -99,6 +102,12 @@ CliParsed ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--rest") {
             p.rest = true;
+        } else if (arg == "--cloth_path") {
+            if (i + 1 < argc) {
+                p.cloth_path = argv[++i];
+            } else {
+                LOG(WARNING) << "--cloth_path 缺少路径参数，忽略";
+            }
         } else if (arg == "--thick-leg") {
             if (i + 1 < argc) {
                 p.thick_leg = static_cast<float>(std::atof(argv[++i]));
@@ -173,6 +182,13 @@ int main(int argc, char** argv) {
     if (!p.glb_path.empty()) {
         // 可选目标骨架：glb 的 rest 骨架（蓝），驱动方式由 view_mode_ 决定。
         CHECK(app.LoadGlbSkeleton(p.glb_path)) << "glb 目标骨架装配失败: " << p.glb_path;
+    }
+    if (!p.cloth_path.empty()) {
+        // 已蒙皮衣服：挂到蓝侧同一骨架（需先有蓝骨；骨序须一致，见 LoadCloths）。
+        CHECK(!p.glb_path.empty())
+            << "--cloth_path 需配合第二个位置参数（目标骨架 glb）一起用";
+        CHECK(app.LoadCloths(p.cloth_path) > 0)
+            << "衣服挂载失败（0 个 primitive 挂上）：" << p.cloth_path;
     }
 
     // 部位粗细滑条值（与面板滑条同一份状态）：交互与出图都生效。

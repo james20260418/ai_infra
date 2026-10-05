@@ -8,7 +8,7 @@
 //   - 线程运行期按钮不可重复触发；完成后面板显示 "保存至 <path>" / "保存失败：<原因>"。
 //   - 传入的 meshes 是**按下当帧的几何快照**（按值传入），之后 UI 再改衣服不影响本次保存。
 //
-// 与 editor_save 的差异：本工具在**改动时就已把变换烘进 mesh 顶点**（见
+// 与 editor_save 的差异：本工具在**改动时就已就地改好 mesh 顶点**（见
 //   clothing_transform.h），故保存时**不再施加任何放置变换**，直接写当前几何即可。
 
 #ifndef JPOV_CLOTHING_CLOTHING_SAVE_H_
@@ -17,6 +17,7 @@
 #include <atomic>
 #include <ctime>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,11 +49,15 @@ public:
     // 发起一次保存。
     //
     // meshes      : 当前衣服几何快照（按值传入，worker 只读）。为空则拒绝（返回 false）。
+    // skin        : 蒙皮骨架（软布自动蒙皮后传入；未蒙皮传 nullopt）。非空时写入 glb 的
+    //               skin（含 inverseBindMatrices），前提是各 mesh 带 JOINTS_0/WEIGHTS_0
+    //               （即 flags 含 kJoints）——否则写出的 skin 是死的（无顶点引用）。
     // source_path : 被编辑的衣服 glb / gltf 路径（用于取 stem 与同目录定位）。
     // asset_name  : 写入 glb 的模型名（面板显示用；空则写 "cloth"）。
     //
     // 返回 false：正在保存中 / 没有几何。返回 true：已起线程。
     bool Start(std::vector<jpov::GltfSaveMesh> meshes,
+               std::optional<jpov::SkeletonType> skin,
                const std::string& source_path, const std::string& asset_name);
 
     // 每帧调用：后台线程完成后收尾（join + 切状态 + 组装提示文本）。

@@ -15,8 +15,12 @@
 
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -25,6 +29,7 @@
 
 namespace {
 
+using jpov::soft_mesh_simulator::Axis;
 using jpov::soft_mesh_simulator::Simulator;
 
 // 造一个单三角形（3 顶点，带法线/UV/索引）的测试网格。
@@ -347,6 +352,35 @@ TEST(SoftMeshSimulatorTest, ResetRestoresBindPoseAndClock) {
     }
 }
 
+// Ⓙ 崩溃修复（2026-10-02 Danis）：即时变换（Apply*）会**污染“绑定姿态”**，若 Reset 直接用
+//    bind_positions_ 就会回到“变换后的姿态”而非**启动几何**——重置等于没重置。
+//    本测试：变换 + 推进后再 Reset，必须回到 Init 时的顶点坐标。
+TEST(SoftMeshSimulatorTest, ResetRestoresStartupGeometryAfterTransforms) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    const std::vector<geom::Vec3<float>> startup = sim.sim_positions();  // 启动几何快照（拷贝）
+    // 即时变换：平移 + 旋转 + 缩放（三者都会改绑定姿态）。
+    sim.ApplyTranslation(geom::Vec3<float>(5.0f, 0.0f, 0.0f));
+    sim.ApplyRotation(Axis::kY, 30.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    for (int i = 0; i < 5; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    ASSERT_GT((sim.sim_positions()[0] - startup[0]).Norm(), 1e-3f)
+        << "前置：变换后位置应已改变";
+
+    sim.Reset();
+
+    // 核心：必须回到**启动几何**（不是变换后的绑定姿态）。
+    ASSERT_EQ(sim.sim_positions().size(), startup.size());
+    for (size_t i = 0; i < startup.size(); ++i) {
+        EXPECT_NEAR((sim.sim_positions()[i] - startup[i]).Norm(), 0.0f, 1e-6f)
+            << "顶点 " << i << " 未回到启动位置";
+    }
+    EXPECT_DOUBLE_EQ(sim.time(), 0.0);
+    EXPECT_EQ(sim.step_count(), 0u);
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;
@@ -640,17 +674,23 @@ jpov::MeshData MakeTwoPoints(float sep) {
 }
 }  // namespace
 
-// Ⓐ 关联表：两点距离 <= d 时互相关联；d 滑小到 < 间距则完全无关联。
+// Ⓐ 关联表：两点距离 <= d 时互相关联；d < 间距时无**直接**关联（连通性修复会另补桥，见下）。
 TEST(SoftMeshSimulatorTest, NeighborTableRespectsBindDistance) {
     Simulator close;
     close.Init(MakeTwoPoints(0.1f), /*d=*/0.5f);
     EXPECT_EQ(close.neighbor_pair_count(), 2u)
         << "两点 0.1m <= d=0.5 → i→j 与 j→i 各一条，计 2";
+    EXPECT_EQ(close.virtual_point_count(), 0u) << "本就连通，不应补桥";
 
+    // d < 间距：两点之间**无直接关联**（仍守 d 规则）；但 **2026-10-02 新增的连通性修复**
+    // （EnsureNeighborGraphConnected）会在两者间补桥接虚拟点，使图仍为单一连通分量。
     Simulator far;
     far.Init(MakeTwoPoints(0.1f), /*d=*/0.05f);
-    EXPECT_EQ(far.neighbor_pair_count(), 0u)
-        << "两点 0.1m > d=0.05 → 无关联";
+    const std::vector<uint32_t>& nb0 = far.neighbors_of(0);
+    EXPECT_EQ(std::find(nb0.begin(), nb0.end(), 1u), nb0.end())
+        << "两点间距 0.1 > d=0.05 → 不得直接互关联";
+    EXPECT_GT(far.virtual_point_count(), 0u) << "连通性修复应补桥接虚拟点";
+    EXPECT_EQ(far.neighbor_component_count(), 1u);
 }
 
 // Ⓑ 力场零平衡：处在**绑定姿态**且无重力时，弹簧力为零 → 系统不动。
@@ -1010,6 +1050,373 @@ TEST(SoftMeshSimulatorTest, SpringForceIsClampedAtForceMax) {
             EXPECT_TRUE(std::isfinite(sim.sim_velocities()[i][c]));
         }
     }
+}
+
+// ==================== 即时操作（ApplyTranslation / ApplyRotation / ApplyScaling）====================
+//
+// Danis 2026-10-01：面板要在**仿真进行中**也能改变位置 / 朝向 / 大小，不中断仿真。语义：
+//   位置与绑定姿态同步变换；速度只在**旋转**时参与。以下验证各条语义。
+
+// 造一个「小三角形」：边 ~0.03/0.042 m，落在默认关联距离 d=0.1 内 ⇒ 有邻居（弹簧生效），
+// 且每条边 << d*0.9=0.09 ⇒ 不触发长边加密（无虚拟点）。用于验证即时操作**不引入伪力**。
+jpov::MeshData MakeSmallTri() {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.03f, 0.0f, 0.0f}, {0.0f, 0.03f, 0.0f}};
+    m.Validate();
+    return m;
+}
+
+TEST(SoftMeshSimulatorTest, ApplyTranslationMovesStateKeepsVelocityAndForce) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+    const geom::Vec3<float> a_before = sim.AccelAtPoint(0);
+
+    const geom::Vec3<float> delta(0.2f, -0.3f, 0.5f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    sim.ApplyTranslation(delta);
+    // 即时操作**不重置**仿真（不重 Init / Reset）——时钟与步数保持。
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);
+    EXPECT_EQ(sim.step_count(), steps_before);
+
+    ASSERT_EQ(sim.sim_positions().size(), p_before.size());
+    for (size_t i = 0; i < p_before.size(); ++i) {
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].x(), p_before[i].x() + delta.x());
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].y(), p_before[i].y() + delta.y());
+        EXPECT_FLOAT_EQ(sim.sim_positions()[i].z(), p_before[i].z() + delta.z());
+        // 速度不参与平移。
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].x(), v_before[i].x());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].y(), v_before[i].y());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].z(), v_before[i].z());
+    }
+    // 平移不改变相对位移 ⇒ 力（从而加速度）不变。
+    const geom::Vec3<float> a_after = sim.AccelAtPoint(0);
+    EXPECT_NEAR(a_after.x(), a_before.x(), 1e-4f);
+    EXPECT_NEAR(a_after.y(), a_before.y(), 1e-4f);
+    EXPECT_NEAR(a_after.z(), a_before.z(), 1e-4f);
+    // mesh() 的位置也同步（否则显示不动）。
+    EXPECT_FLOAT_EQ(sim.mesh().positions[0].x(), sim.sim_positions()[0].x());
+}
+
+// 非恒真：若 ApplyRotation 只转位置、不转绑定姿态，Δp=(R−I)p0≠0 ⇒ 弹簧被触发，
+// 下面的“加速度仍 = 重力”断言会失败。
+TEST(SoftMeshSimulatorTest, ApplyRotationIsRigidOnFreshBindPose) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    const geom::Vec3<float> g0 = sim.AccelAtPoint(0);
+    EXPECT_NEAR(g0.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(g0.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(g0.z(), 0.0f, 1e-5f);
+
+    sim.ApplyRotation(Axis::kZ, 90.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const geom::Vec3<float> g1 = sim.AccelAtPoint(0);
+    EXPECT_NEAR(g1.x(), 0.0f, 1e-4f);
+    EXPECT_NEAR(g1.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(g1.z(), 0.0f, 1e-4f);
+}
+
+TEST(SoftMeshSimulatorTest, ApplyRotationRotatesPositionsAndVelocity) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+
+    const geom::Vec3<float> pivot(0.1f, 0.0f, 0.0f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    const std::vector<float> nd_before = sim.neighbor_initial_distances_of(0);
+    sim.ApplyRotation(Axis::kZ, 90.0f, pivot);
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);      // 不重置仿真
+    EXPECT_EQ(sim.step_count(), steps_before);
+    // 旋转不改变 |pij(0)| 模长 ⇒ 邻居初始距离表不变。
+    const std::vector<float>& nd_after = sim.neighbor_initial_distances_of(0);
+    ASSERT_EQ(nd_after.size(), nd_before.size());
+    for (size_t k = 0; k < nd_before.size(); ++k) {
+        EXPECT_FLOAT_EQ(nd_after[k], nd_before[k]);
+    }
+
+    // Rz(90): 相对 pivot 的 (x,y,z) → (-y, x, z)。
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        const float rx = p_before[i].x() - pivot.x();
+        const float ry = p_before[i].y() - pivot.y();
+        const float rz = p_before[i].z() - pivot.z();
+        EXPECT_NEAR(sim.sim_positions()[i].x(), pivot.x() - ry, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].y(), pivot.y() + rx, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].z(), pivot.z() + rz, 1e-4f);
+        // 速度也旋转（绕轴，不平移）。
+        EXPECT_NEAR(sim.sim_velocities()[i].x(), -v_before[i].y(), 1e-4f);
+        EXPECT_NEAR(sim.sim_velocities()[i].y(), v_before[i].x(), 1e-4f);
+        EXPECT_NEAR(sim.sim_velocities()[i].z(), v_before[i].z(), 1e-4f);
+    }
+}
+
+TEST(SoftMeshSimulatorTest, ApplyScalingScalesPositionsKeepsVelocity) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    for (int i = 0; i < 5; ++i) sim.Step(Simulator::kDefaultDt);
+    const std::vector<geom::Vec3<float>> p_before = sim.sim_positions();
+    const std::vector<geom::Vec3<float>> v_before = sim.sim_velocities();
+
+    const geom::Vec3<float> pivot(0.0f, 1.0f, 0.0f);
+    const double t_before = sim.time();
+    const size_t steps_before = sim.step_count();
+    sim.ApplyScaling(2.0f, pivot);
+    EXPECT_DOUBLE_EQ(sim.time(), t_before);      // 不重置仿真
+    EXPECT_EQ(sim.step_count(), steps_before);
+
+    for (size_t i = 0; i < sim.sim_point_count(); ++i) {
+        EXPECT_NEAR(sim.sim_positions()[i].x(),
+                    pivot.x() + (p_before[i].x() - pivot.x()) * 2.0f, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].y(),
+                    pivot.y() + (p_before[i].y() - pivot.y()) * 2.0f, 1e-4f);
+        EXPECT_NEAR(sim.sim_positions()[i].z(),
+                    pivot.z() + (p_before[i].z() - pivot.z()) * 2.0f, 1e-4f);
+        // 速度**不**参与缩放。
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].x(), v_before[i].x());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].y(), v_before[i].y());
+        EXPECT_FLOAT_EQ(sim.sim_velocities()[i].z(), v_before[i].z());
+    }
+    // 位置与绑定姿态同步缩放 ⇒ 仍处于绑定姿态 ⇒ 弹簧力为 0 ⇒ 加速度 = 重力。
+    const geom::Vec3<float> a = sim.AccelAtPoint(0);
+    EXPECT_NEAR(a.x(), 0.0f, 1e-4f);
+    EXPECT_NEAR(a.y(), -sim.gravity(), 1e-4f);
+    EXPECT_NEAR(a.z(), 0.0f, 1e-4f);
+}
+
+// 绑定 offset 的**模长缓存**（|pij(0)|，力的分母）随缩放一起缩放（旋转/平移不变）——
+// 否则分母陈旧、与分子 p0 不一致。
+TEST(SoftMeshSimulatorTest, ApplyScalingScalesNeighborInitialDistances) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());  // d=0.1，三角形三边均在 d 内 ⇒ 顶点 0 有 2 个邻居
+    const std::vector<float> before = sim.neighbor_initial_distances_of(0);
+    ASSERT_FALSE(before.empty());
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    const std::vector<float>& after = sim.neighbor_initial_distances_of(0);
+    ASSERT_EQ(after.size(), before.size());
+    for (size_t k = 0; k < before.size(); ++k) {
+        EXPECT_NEAR(after[k], before[k] * 2.0f, 1e-6f);
+    }
+}
+
+TEST(SoftMeshSimulatorTest, ApplyScalingRejectsNonPositiveFactor) {
+    Simulator sim;
+    sim.Init(MakeSmallTri());
+    EXPECT_DEATH(sim.ApplyScaling(0.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f)), "");
+}
+
+TEST(SoftMeshSimulatorTest, ApplyBeforeInitCrashes) {
+    Simulator sim;
+    EXPECT_DEATH(sim.ApplyTranslation(geom::Vec3<float>(1.0f, 0.0f, 0.0f)), "");
+}
+
+TEST(SoftMeshSimulatorTest, MaxSpeedClampsVelocityAndZeroDisables) {
+    // 自由落体（无邻居 ⇒ 纯重力）：限速后 |v| 不超过上限；把限速设为 0（不限）→ 又继续加速。
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(20.0f);
+    sim.SetMaxSpeed(0.5f);
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        const float sp = std::sqrt(v.x() * v.x() + v.y() * v.y() + v.z() * v.z());
+        EXPECT_LE(sp, 0.5f + 1e-4f) << "速度应被限到 0.5 m/s";
+    }
+    sim.SetMaxSpeed(0.0f);  // 关限速
+    for (int i = 0; i < 30; ++i) sim.Step(Simulator::kDefaultDt);
+    float max_sp = 0.0f;
+    for (const geom::Vec3<float>& v : sim.sim_velocities()) {
+        max_sp = std::max(max_sp, std::sqrt(v.x() * v.x() + v.y() * v.y() + v.z() * v.z()));
+    }
+    EXPECT_GT(max_sp, 0.5f) << "关限速后应能超过原上限";
+}
+
+TEST(SoftMeshSimulatorTest, SetMaxSpeedRejectsNegative) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetMaxSpeed(-1.0f), "");
+}
+
+// ==================== 人体排斥（ApplyBodyRepulsion / SetBody*）====================
+
+// 由 MeshData 抽三角形 → 建「最近三角形」匹配器（与 clothing_init 同做法，供单测）。
+// local_distance/grid_size 取得比测试盒大/细，保证体内/贴面点都能命中。
+std::unique_ptr<geom::TriangleMatcher3d<double>> MakeMatcherFromMesh(
+    const jpov::MeshData& mesh) {
+    std::vector<geom::Triangle3<double>> tris;
+    const std::vector<jpov::Vec3f>& pos = mesh.positions;
+    const auto add = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+        const geom::Vec3<double> a(pos[i0].x(), pos[i0].y(), pos[i0].z());
+        const geom::Vec3<double> b(pos[i1].x(), pos[i1].y(), pos[i1].z());
+        const geom::Vec3<double> c(pos[i2].x(), pos[i2].y(), pos[i2].z());
+        std::optional<geom::Triangle3<double>> t =
+            geom::Triangle3<double>::Create(a, b, c);
+        if (t.has_value()) {
+            tris.push_back(t.value());
+        }
+    };
+    if (!mesh.indices.empty()) {
+        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            add(mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
+        }
+    } else {
+        for (size_t i = 0; i + 2 < pos.size(); i += 3) {
+            add(static_cast<uint32_t>(i), static_cast<uint32_t>(i + 1),
+                static_cast<uint32_t>(i + 2));
+        }
+    }
+    return std::make_unique<geom::TriangleMatcher3d<double>>(0.05, 0.01,
+                                                             std::move(tris));
+}
+
+// 造一个「人体」= 边长 0.2m 的立方体（±0.1）。
+jpov::MeshData MakeBodyBox() { return jpov::MeshData::MakeBox(0.1f, 0.1f, 0.1f); }
+
+// 把顶点的第 0 个点平移到 x（其余点跟着平移，但远离盒子 ⇒ 不受排斥），跑一步看结果。
+float RunRepulsionAndGetV0X(const geom::TriangleMatcher3d<double>& matcher,
+                            float x, float buffer, bool enabled) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(0.0f);       // 隔离重力
+    sim.SetSpringEnabled(false);  // 隔离弹簧（MakeTri 无邻居，本不需要；显式关更明确）
+    sim.SetBodyMatcher(&matcher);
+    sim.SetBodyRepulsionEnabled(enabled);
+    sim.SetBodyBuffer(buffer);
+    sim.ApplyTranslation(geom::Vec3<float>(x, 0.0f, 0.0f));
+    sim.Step(Simulator::kDefaultDt);
+    return sim.sim_positions()[0].x();
+}
+
+// 注：2026-10-02 新版逃逸算法下，仿真前点已在体内 ⇒ 走“旧方式（投影到 cp + buffer·外向）”，
+// 故这两个断言 buffer 行为的用例重新有效。
+TEST(SoftMeshSimulatorTest, BodyRepulsionPushesInsidePointToSurfacePlusBuffer) {
+    const jpov::MeshData box = MakeBodyBox();  // +X 面在 x=0.1
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.09,0,0) 在体内、离 +X 面 0.01 ⇒ 应被推到 0.1 + buffer(0.01) = 0.11。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.01f, true), 0.11f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionPushesNearOutsidePointToBuffer) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.105,0,0) 在体外、离面 0.005 < buffer ⇒ 顶到 0.1 + 0.01 = 0.11。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.105f, 0.01f, true), 0.11f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionLeavesFarOutsidePointAlone) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 点 (0.12,0,0) 在体外、离面 0.02 > buffer ⇒ 不动。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.12f, 0.01f, true), 0.12f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionZeroBufferPushesToSurface) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // buffer = 0：体内点被推到刚好贴表面 x=0.1。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.0f, true), 0.1f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionDisabledIsNoOp) {
+    const jpov::MeshData box = MakeBodyBox();
+    auto matcher = MakeMatcherFromMesh(box);
+    // 关开关：即使点在体内也不排斥。
+    EXPECT_NEAR(RunRepulsionAndGetV0X(*matcher, 0.09f, 0.01f, false), 0.09f, 1e-3f);
+}
+
+TEST(SoftMeshSimulatorTest, BodyRepulsionWithoutMatcherIsNoOp) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetGravity(0.0f);
+    sim.SetBodyRepulsionEnabled(true);   // 开但没给 matcher
+    sim.SetBodyBuffer(0.01f);
+    sim.ApplyTranslation(geom::Vec3<float>(0.09f, 0.0f, 0.0f));
+    sim.Step(Simulator::kDefaultDt);     // 不得崩
+    EXPECT_NEAR(sim.sim_positions()[0].x(), 0.09f, 1e-4f);
+}
+
+TEST(SoftMeshSimulatorTest, SetBodyBufferRejectsOutOfRange) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    EXPECT_DEATH(sim.SetBodyBuffer(-0.001f), "");
+    EXPECT_DEATH(sim.SetBodyBuffer(0.11f), "");
+}
+
+// 新版逃逸："体外点本子步新穿入 buffer 壳" ⇒ 走二分，被 clamp 在体表外 ~buffer，不深入体内。
+TEST(SoftMeshSimulatorTest, BodyRepulsionFreshEntryClampsAtBufferShell) {
+    const jpov::MeshData box = MakeBodyBox();  // ±0.1（顶面 y=0.1）
+    auto matcher = MakeMatcherFromMesh(box);
+    Simulator sim;
+    sim.Init(MakeTri());
+    sim.SetSpringEnabled(false);
+    sim.SetBodyMatcher(matcher.get());
+    sim.SetBodyRepulsionEnabled(true);
+    sim.SetBodyBuffer(0.01f);
+    sim.SetGravity(9.8f);
+    // 把整网格抬到盒子正上方（点 0 在 y=0.5, x=z=0），让重力把它拉入 buffer 壳。
+    sim.ApplyTranslation(geom::Vec3<float>(0.0f, 0.5f, 0.0f));
+    for (int i = 0; i < 120; ++i) {
+        sim.Step(Simulator::kDefaultDt);
+    }
+    // 点 0 应停在顶面外 ~buffer（0.1+0.01≈0.11），不深入体内。
+    EXPECT_GE(sim.sim_positions()[0].y(), 0.1f);
+    EXPECT_LE(sim.sim_positions()[0].y(), 0.14f);
+}
+
+TEST(SoftMeshSimulatorTest, SetBodyParallelDampingRejectsOutOfRange) {
+    Simulator sim;
+    sim.Init(MakeTri());
+    // 合法范围 [0,1]：默认 1.0（全保留切向）。
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 1.0f);
+    sim.SetBodyParallelDamping(0.0f);
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 0.0f);
+    sim.SetBodyParallelDamping(0.5f);
+    EXPECT_FLOAT_EQ(sim.body_parallel_damping(), 0.5f);
+    EXPECT_DEATH(sim.SetBodyParallelDamping(-0.001f), "");
+    EXPECT_DEATH(sim.SetBodyParallelDamping(1.001f), "");
+}
+
+// ==================== 关联图连通性修复（EnsureNeighborGraphConnected）====================
+
+// 两个小三角形（边长 0.05 < d；各自内部连通），彼此相距 ~1m（> d）⇒ 初始为 2 个分量。
+// Init 应补桥接虚拟点把它们合成**一张**连通网。
+jpov::MeshData MakeTwoDisjointPieces() {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {
+        {0.00f, 0.0f, 0.0f}, {0.05f, 0.0f, 0.0f}, {0.00f, 0.05f, 0.0f},
+        {1.00f, 0.0f, 0.0f}, {1.05f, 0.0f, 0.0f}, {1.00f, 0.05f, 0.0f},
+    };
+    m.indices = {0, 1, 2, 3, 4, 5};
+    m.Validate();
+    return m;
+}
+
+TEST(SoftMeshSimulatorTest, NeighborGraphRepairsDisjointPiecesToSingleComponent) {
+    Simulator sim;
+    sim.Init(MakeTwoDisjointPieces(), /*bind_distance=*/0.1f);
+    EXPECT_EQ(sim.original_point_count(), 6u);
+    // 两个不连通面片 ⇒ 修复后应该是一个连通分量。
+    EXPECT_EQ(sim.neighbor_component_count(), 1u) << "关联图未合成单一连通网";
+    EXPECT_GT(sim.virtual_point_count(), 0u) << "应在两片之间补桥接虚拟点";
+    EXPECT_TRUE(sim.neighbors_symmetric());
+}
+
+TEST(SoftMeshSimulatorTest, NeighborGraphSinglePieceAddsNoBridgePoints) {
+    // 单个小三角形（边长 0.05 < d）：本就连通，不应额外交桥接点。
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0.0f, 0.0f, 0.0f}, {0.05f, 0.0f, 0.0f}, {0.0f, 0.05f, 0.0f}};
+    m.indices = {0, 1, 2};
+    m.Validate();
+    Simulator sim;
+    sim.Init(m, /*bind_distance=*/0.1f);
+    EXPECT_EQ(sim.neighbor_component_count(), 1u);
+    EXPECT_EQ(sim.virtual_point_count(), 0u) << "本就连通，不应补点";
 }
 
 }  // namespace

@@ -16,8 +16,8 @@
 //   - PBR 材质贴图路径提取: baseColor / normal / metallicRoughness(ORM) /
 //     occlusion / emissive
 //   - 贴图来源: 外部文件（image.uri 相对路径）与内嵌 bufferView
-//     （GLB 单文件内嵌 PNG/JPEG）均支持。内嵌图导出到 /tmp/jpov_gltf_embed/
-//     临时文件后由下游 TextureManager 加载，下游接口保持不变。
+//     （GLB 单文件内嵌 PNG/JPEG）均支持。内嵌图**不经临时文件**：以原始编码字节
+//     放入 GltfTextureRef.bytes，由下游 TextureManager::FromMemory 直接上 GPU。
 //
 // 明确不支持（超出本轮范围）：
 //   - 动画: animations 通道
@@ -55,23 +55,41 @@
 
 namespace jpov {
 
-// 从 glTF 材质中提取的贴图路径信息。
+// 一张 glTF 贴图的**来源**：外部文件，或内嵌（bufferView）字节。
 //
-// 所有路径为相对于 glTF 文件所在目录的路径（或空表示无对应贴图）。
-// Renderer::LoadGltf 用这些路径经 TextureManager 注册贴图，再填入
-// PBRMaterial 的对应 *_tex 字段。
+// 为什么不一律用文件路径：内嵌图（GLB 单文件）本来就在内存里，旧做法是把它写成一个
+//   /tmp 临时 PNG 再让 TextureManager 读回来 —— 把“进程内传数据”降级成“全局可写的磁盘”，
+//   既不可靠（同名覆盖）又慢。现改为把**原始编码字节**直接交付上层（内存法）。
+//
+//   - 外部图（image.uri 非空）：uri = 已并 base_dir 的路径；bytes 空。
+//   - 内嵌图（image.bufferView）：bytes = 该 bufferView 的**原始编码字节**（保留原
+//     JPEG/PNG 格式，避免重编码膨胀）；uri 空。
+//   - key：去重身份（外部 = uri；内嵌 = 内容哈希）。空 key ⇒ 该槽无贴图。
+struct GltfTextureRef {
+    std::string uri;                   // 外部文件路径（已并 base_dir）；内嵌时为空
+    std::vector<unsigned char> bytes;  // 内嵌图原始编码字节（PNG/JPEG…）；外部时为空
+    std::string key;                    // 去重身份（外部=uri；内嵌=内容哈希）；空=无贴图
+
+    bool empty() const { return key.empty(); }
+    bool is_embedded() const { return !bytes.empty(); }
+};
+
+// 从 glTF 材质中提取的贴图**来源** + 常值。
+//
+// 每张贴图是一个 GltfTextureRef：外部图给路径、内嵌图给字节（.empty() 表示无该贴图）。
+// Renderer::LoadGltf 据此:**内嵌→TextureManager::FromMemory（不经文件）**、
+//   外部→LoadFromFile；再拆 ORM/occlusion（直接给 FromPixels）。
 //
 // metallic_roughness_tex: glTF 的 metallicRoughnessTexture（ORM 三合一，
 //   R=AO / G=Roughness / B=Metallic）。由 Renderer::LoadGltf 在 CPU 拆包为
-//   3 张独立灰度图，分别绑到 PBRMaterial 的 ao_tex / roughness_tex /
-//   metallic_tex。occlusion_tex / emissive_tex 预留（当前 ORM 已含 AO；
-//   若 glTF 单独指定 occlusionTexture 则应优先用它）。
+//   独立灰度图，分别绑到 PBRMaterial 的 roughness_tex / metallic_tex。
+//   occlusion_tex 单独指定时优先用它。（ORM 的 R 不当作 AO。）
 struct GltfMaterialInfo {
-    std::string base_color_tex;         // baseColorTexture 路径（或空）
-    std::string normal_tex;             // normalTexture 路径（或空）
-    std::string metallic_roughness_tex; // metallicRoughnessTexture (ORM) 路径（或空）
-    std::string occlusion_tex;          // occlusionTexture 路径（或空）
-    std::string emissive_tex;           // emissiveTexture 路径（或空）
+    GltfTextureRef base_color_tex;         // baseColorTexture（或空）
+    GltfTextureRef normal_tex;             // normalTexture（或空）
+    GltfTextureRef metallic_roughness_tex; // metallicRoughnessTexture (ORM)（或空）
+    GltfTextureRef occlusion_tex;          // occlusionTexture（或空）
+    GltfTextureRef emissive_tex;           // emissiveTexture（或空）
 
     // 常值 fallback（纹理不存在时使用）
     float metallic_factor = 1.0f;
