@@ -87,10 +87,11 @@ TEST(ClothingSkinE2E, TransferThenSaveThenReload) {
     const size_t vcount = vest.positions.size();
 
     const SkinTransferStats st = TransferSkinWeights(
-        bc.table, matcher, &vest, /*gap*/0.005f, /*weld*/kWeldToleranceM, /*max_inf*/4,
-        /*smooth*/2);
+        bc.table, matcher, &vest, /*seed_eps*/0.01f, /*weld*/kWeldToleranceM, /*max_inf*/4,
+        /*growth*/8);
     EXPECT_EQ(st.vertex_count, vcount);
-    EXPECT_EQ(st.smooth_passes, 2u);
+    EXPECT_EQ(st.seed_vertex_count + st.non_seed_vertex_count, vcount);
+    EXPECT_GE(st.growth_passes, 1u);
     // 权重归一 + ≤4 影响。
     for (size_t v = 0; v < vcount; ++v) {
         EXPECT_NEAR(Sum4(vest.joint_weights[v]), 1.0f, 1e-4f) << "v=" << v;

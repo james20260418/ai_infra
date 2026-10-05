@@ -136,10 +136,10 @@ public:
     // 默认重力加速度（m/s²），方向 -Y（DESIGN.md §1.2 第 3 项；地面在下方）。
     static constexpr float kDefaultGravity = 9.8f;
 
-    // 重力滑条范围（m/s²）。下限 > 0（0 会让本阶段退化成「匀速直线」没意义；
-    // 若将来要「关重力」，应由调用方显式表达，而不是把 0 当作魔法值）。
-    static constexpr float kMinGravity = 1.0f;
-    static constexpr float kMaxGravity = 20.0f;
+    // 重力滑条范围（m/s²）。下限为负 = 允许「反重力 / 上浮」（供试验负重力，2026-10-05
+    // Danis 定）；0 = 无重力（匀速直线）。
+    static constexpr float kMinGravity = -3.0f;
+    static constexpr float kMaxGravity = 10.0f;
 
     // 速度指数衰减系数 k（1/s），**默认值**。DESIGN.md §2 第 3 项：V *= exp(-k*dt)。
     // 运行时可经 SetVelocityDamping 覆盖（面板滑条），范围 [kMinDamping, kMaxDamping]。
@@ -324,10 +324,10 @@ public:
     bool spring_enabled() const { return spring_enabled_; }
     void SetSpringEnabled(bool enabled) { spring_enabled_ = enabled; }
 
-    // 重力加速度 g（m/s²，≥ 0），方向恒为 -Y。滑条范围 [kMinGravity, kMaxGravity]。
-    // 查询与设置都走这里；设置时 CHECK 值域，不静默夹断（避免隐藏调用方的错值）。
+    // 重力加速度 g（m/s²），方向恒为 -Y；可为负（负 = 反重力 / 上浮，供试验）。滑条范围
+    // [kMinGravity, kMaxGravity]。查询与设置都走这里；设置时只 CHECK 有限，不夹断。
     float gravity() const { return gravity_; }
-    // Pre-condition: gravity >= 0（0 合法 = 无重力，供将来的开关用）；负值崩。
+    // Pre-condition: gravity 有限（可为负）；非有限值崩。
     void SetGravity(float gravity);
 
     // 地面高度的 y（米）。地面为水平面（法线 +Y），低于它的顶点被**纯位置投影**回
@@ -479,7 +479,7 @@ private:
     //   但需要把本子步查到的接触方向写进这份**跨步缓存**，故声明为 mutable。
     mutable std::vector<geom::Vec3<float>> body_outward_buf_;
 
-    // 当前重力加速度（m/s²，≥ 0），方向 -Y。可由 SetGravity 覆盖。
+    // 当前重力加速度（m/s²，可负），方向 -Y。可由 SetGravity 覆盖。
     float gravity_ = kDefaultGravity;
 
     // 总质量 M_total（kg）与力系数 F（N）。见 .h 顶部常量说明。
