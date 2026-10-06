@@ -214,9 +214,13 @@ int main(int argc, char** argv) {
   run("B) SAT (hull + per-tile)", [&](const Vec2d* pts) {
     return CountSat(pts, cell, g.cols, g.rows, W, H);
   });
+  std::vector<Vec2d> in(8);                              // 复用输入（零分配）
+  std::vector<geom::math::TileCoord> out;                // 复用输出缓冲（零分配）
   run("C) scanline (ConvexHullTiles)", [&](const Vec2d* pts) {
-    std::vector<Vec2d> p(pts, pts + 8);
-    return static_cast<long long>(ConvexHullCoveredTiles(g, p).size());
+    in.assign(pts, pts + 8);
+    out.clear();
+    geom::math::AppendConvexHullCoveredTiles(g, in, &out);
+    return static_cast<long long>(out.size());
   });
   printf("\n");
   return 0;

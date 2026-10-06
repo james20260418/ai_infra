@@ -150,52 +150,66 @@ inline int ClampIndex(double v, double cell, int n) {
   return static_cast<int>(f);
 }
 
-// 该列（x ∈ [a, b]）内 hull 的 [底, 顶]：取列两端 + 夹在列内的采样点。
+// 该列（x ∈ [a, b]）内 hull 的 [底, 顶] = 列两端的值 + **列内部的顶点**。
+// 注意：上壳是**凹**函数（∩），其**极大可能在列内部**（峰）；下壳凸，**极小可能在列内部**（谷）。
+// 故列内顶点必须计入；但**不必每列重扫全部顶点**——用单调游标（up_vi/lo_vi）推进，均摊 O(1)。
 inline void ColumnSpan(const ScreenHull& hull, double a, double b,
                        int* up_hint /*inout*/, int* lo_hint /*inout*/,
+                       int* up_vi /*inout*/, int* lo_vi /*inout*/,
                        double* top /*output*/, double* bot /*output*/) {
   const SizeLimitedPiecewiseLinearFunction<ScreenHull::kMaxPts>& up = hull.upper();
   const SizeLimitedPiecewiseLinearFunction<ScreenHull::kMaxPts>& lo = hull.lower();
   double t = std::max(up.Evaluate(a, up_hint), up.Evaluate(b, up_hint));
   double bo = std::min(lo.Evaluate(a, lo_hint), lo.Evaluate(b, lo_hint));
-  // 夹在本列 (a, b) 内的采样点（index 增长即表示跨过一个顶点）。
-  for (int i = 0; i < up.size(); ++i) {
-    const double xv = up.x(i);
-    if (xv > a && xv < b) t = std::max(t, up.y(i));
+  // 列内 (a,b) 的顶点：游标只前进（a 随列推进），故两个 while 合计均摊 O(1)。
+  int i = *up_vi;
+  while (i < up.size() && up.x(i) <= a) ++i;
+  while (i < up.size() && up.x(i) < b) {
+    t = std::max(t, up.y(i));
+    ++i;
   }
-  for (int i = 0; i < lo.size(); ++i) {
-    const double xv = lo.x(i);
-    if (xv > a && xv < b) bo = std::min(bo, lo.y(i));
+  *up_vi = i;
+  int j = *lo_vi;
+  while (j < lo.size() && lo.x(j) <= a) ++j;
+  while (j < lo.size() && lo.x(j) < b) {
+    bo = std::min(bo, lo.y(j));
+    ++j;
   }
+  *lo_vi = j;
   *top = t;
   *bot = bo;
 }
 
 }  // namespace internal
 
-// 求点集凸包交叠了哪些栅格 tile（按 (col,row) 升序输出、已去重）。
-// 点集上限 ScreenHull::kMaxPts；网格尺寸非法 / 点集退化 → 返回空。
-inline std::vector<TileCoord> ConvexHullCoveredTiles(const TileGrid& grid,
-                                                     const std::vector<Vec2d>& pts) {
-  std::vector<TileCoord> out;
+// 求点集凸包交叠了哪些栅格 tile，**追加**到 *out（不清空）。
+// 每个 tile 恰好 append 一次（列内按 row 升序；跨列按 col 升序），**天然无重复**。
+// 点集上限 ScreenHull::kMaxPts；网格尺寸非法 / 点集退化 → 不追加。
+// out 若预留足够容量则**零分配**（生产里可直接接到共享 tile 表 / 调用方缓冲）。
+inline void AppendConvexHullCoveredTiles(const TileGrid& grid,
+                                         const std::vector<Vec2d>& pts,
+                                         std::vector<TileCoord>* out /*inout*/) {
+  CHECK(out != nullptr);
   CHECK_GT(grid.cell, 0.0) << "cell 必须 > 0";
   CHECK_GE(grid.cols, 1);
   CHECK_GE(grid.rows, 1);
   if (pts.empty() || static_cast<int>(pts.size()) > ScreenHull::kMaxPts) {
-    return out;
+    return;
   }
   ScreenHull hull;
   hull.Build(pts.data(), static_cast<int>(pts.size()));
   if (!hull.valid()) {
-    return out;
+    return;
   }
   const int c0 = internal::ClampIndex(hull.x_min(), grid.cell, grid.cols);
   const int c1 = internal::ClampIndex(hull.x_max(), grid.cell, grid.cols);
   if (c0 > c1) {
-    return out;
+    return;
   }
   int up_hint = 0;
   int lo_hint = 0;
+  int up_vi = 0;   // 上壳顶点游标（单调）
+  int lo_vi = 0;   // 下壳顶点游标（单调）
   const double hx0 = hull.x_min();
   const double hx1 = hull.x_max();
   for (int c = c0; c <= c1; ++c) {
@@ -207,16 +221,20 @@ inline std::vector<TileCoord> ConvexHullCoveredTiles(const TileGrid& grid,
     }
     double top = 0.0;
     double bot = 0.0;
-    internal::ColumnSpan(hull, a, b, &up_hint, &lo_hint, &top, &bot);
+    internal::ColumnSpan(hull, a, b, &up_hint, &lo_hint, &up_vi, &lo_vi, &top, &bot);
     const int r0 = internal::ClampIndex(bot, grid.cell, grid.rows);
     const int r1 = internal::ClampIndex(top, grid.cell, grid.rows);
-    if (r0 > r1) {
-      continue;
-    }
     for (int r = r0; r <= r1; ++r) {
-      out.push_back(TileCoord{c, r});
+      out->push_back(TileCoord{c, r});
     }
   }
+}
+
+// 便捷：返回新 vector（每次调用一次分配）。
+inline std::vector<TileCoord> ConvexHullCoveredTiles(const TileGrid& grid,
+                                                     const std::vector<Vec2d>& pts) {
+  std::vector<TileCoord> out;
+  AppendConvexHullCoveredTiles(grid, pts, &out);
   return out;
 }
 
