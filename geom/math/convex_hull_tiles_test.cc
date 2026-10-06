@@ -208,14 +208,13 @@ TEST(ConvexHullTilesTest, HullBoundsMatchReference) {
     ScreenHull sh;
     sh.Build(p.data(), 8);
     ASSERT_TRUE(sh.valid());
-    int up_hint = 0, lo_hint = 0;
     bool bad = false;
     for (int s = 0; s <= 20 && !bad; ++s) {
       const double x = sh.x_min() + (sh.x_max() - sh.x_min()) * s / 20.0;
       double rt = 0, rb = 0;
       RefBoundsAt(ref_hull, x, &rt, &rb);
-      if (std::abs(sh.upper().Evaluate(x, &up_hint) - rt) > 1e-9 ||
-          std::abs(sh.lower().Evaluate(x, &lo_hint) - rb) > 1e-9) {
+      if (std::abs(ChainValueAt(sh.upper(), sh.upper_size(), x) - rt) > 1e-9 ||
+          std::abs(ChainValueAt(sh.lower(), sh.lower_size(), x) - rb) > 1e-9) {
         bad = true;
       }
     }

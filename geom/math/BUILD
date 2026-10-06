@@ -50,7 +50,6 @@ cc_library(
     name = "convex_hull_tiles",
     hdrs = ["convex_hull_tiles.h"],
     deps = [
-        ":size_limited_piecewise_linear_function",
         "//geom/common:check",
     ],
     copts = ["-std=c++20"],
