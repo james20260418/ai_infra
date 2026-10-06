@@ -171,12 +171,47 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# FireFog 查看器 App（雾火调试；header-only 渲染核心 + 三列面板）。
+cc_library(
+    name = "fire_fog_viewer_app",
+    hdrs = ["demo/fire_fog_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/interface:ui",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_binary(
     name = "jpov_skylight_viewer",
     srcs = ["demo/jpov_skylight_viewer.cc"],
     deps = [
         "//tools/jpov:skylight_scene",
         "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# FireFog 查看器（雾火调试）—— 主程序。
+cc_binary(
+    name = "jpov_fire_fog_viewer",
+    srcs = ["demo/jpov_fire_fog_viewer.cc"],
+    deps = [
+        "//tools/jpov:fire_fog_viewer_app",
+        "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:skeleton_types",

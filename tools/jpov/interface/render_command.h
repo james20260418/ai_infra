@@ -1684,6 +1684,10 @@ struct RenderCommandList {
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
 
+    // 调试：把「有雾火元素覆盖的 tile」涂一层 color blend（验证 L1 tile 剪枝）。
+    // 默认 false。仅点雾调试查看器用；不影响正式画面。
+    bool debug_fire_fog_tiles = false;
+
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
     // 并对直射光施加阴影因子。

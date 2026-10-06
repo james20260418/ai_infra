@@ -1527,12 +1527,18 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // ── 点状雾火（体积雾 + 火，fire_fog）—— 与 horizon_fog 同为「其它 3D
             //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
-            //    v1 骨架：Draw 尚未实现（空操作）。见 docs/jpov_fire_fog_design.md §10.6。
+            //    本 PR 落地 L1（tile 剪枝）+ 调试可视化；L2（ZDist）见设计文档 §10.6。
             if (!cmds.point_fogs.empty()) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-                fire_fog_renderer_.Draw(cmds.point_fogs, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
+                // 只写颜色附件（雾火不碰场景深度附件）。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.debug_fire_fog_tiles,
+                                        cam, mvp_, fbo_3d_w, fbo_3d_h,
+                                        hdr_scene_depth_tex);
+                const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs);
             }
 
 #ifndef JPOV_WITHOUT_MSAA
