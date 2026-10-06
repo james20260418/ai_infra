@@ -51,6 +51,10 @@ struct CliOptions {
         jpov::soft_mesh_simulator::Simulator::kDefaultBodyParallelDamping;
     bool  has_cloth_offset = false;   // 是否给了 --cloth_offset
     float cloth_offset[3] = {0.0f, 0.0f, 0.0f};  // --cloth_offset dx dy dz（米）
+    // 焊接判据（蒙皮面板的对应控件）：相对局部边长（比例）或绝对距离（mm）。
+    bool  weld_relative = false;  // --weld_relative 0/1（1 = 相对局部边长）
+    float weld_ratio = jpov::clothing::kSkinWeldRatio;  // --weld_ratio（相对模式比例）
+    bool  auto_skin = false;      // --auto_skin：headless 出图前跑一次一键蒙皮（脚本化验证）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 → WARNING 忽略（不崩溃）。
@@ -182,6 +186,20 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--cloth_offset 需要 3 个数值（dx dy dz），忽略";
             }
+        } else if (arg == "--auto_skin") {
+            opt.auto_skin = true;
+        } else if (arg == "--weld_relative") {
+            if (i + 1 < argc) {
+                opt.weld_relative = (std::atoi(argv[++i]) != 0);
+            } else {
+                LOG(WARNING) << "--weld_relative 缺少数值参数，忽略";
+            }
+        } else if (arg == "--weld_ratio") {
+            if (i + 1 < argc) {
+                opt.weld_ratio = std::atof(argv[++i]);
+            } else {
+                LOG(WARNING) << "--weld_ratio 缺少数值参数，忽略";
+            }
         } else if (arg == "--window_width") {
             if (i + 1 < argc) {
                 opt.window_width = std::atoi(argv[++i]);
@@ -286,6 +304,8 @@ int main(int argc, char** argv) {
     app.body_repulsion_ui_ = (opt.body_repulsion != 0);
     app.body_buffer_ui_ = opt.body_buffer;
     app.body_parallel_damping_ui_ = opt.body_parallel_damping;
+    app.weld_relative_ui_ = opt.weld_relative;
+    app.weld_ratio_ = opt.weld_ratio;
 
     if (opt.ui_shot) {
         // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。
@@ -303,6 +323,10 @@ int main(int argc, char** argv) {
                                            opt.cloth_offset[2]));
             LOG(INFO) << "衣服预平移 [" << opt.cloth_offset[0] << ","
                       << opt.cloth_offset[1] << "," << opt.cloth_offset[2] << "]";
+        }
+        // 可选：出图前跑一次一键蒙皮（脚本化验证焊接模式等；交互窗口由按钮驱动）。
+        if (opt.auto_skin) {
+            app.RunAutoSkinNow();
         }
         // 可选：出图前推进 N 步仿真（验证下坠 / 落地；交互窗口由「继续仿真」按钮驱动）。
         if (opt.sim_steps > 0) {

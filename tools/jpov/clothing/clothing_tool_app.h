@@ -27,6 +27,9 @@
 //       「焊接容差(mm)」（面板输入框，0~10mm，默认 5，0 = 关闭）。② 蒙皮升级为**种子生长**：
 //       距离身体 <=「种子半径 seed_eps(mm)」的顶点为种子（权重冻结为直接投影权重），离体顶点
 //       由种子冻结的调和扩散生长补出；面板新增「种子半径(mm)」（默认 10）与「权重生长」勾选。
+//   - 2026-10-06：焊接判据新增**相对局部边长**模式（面板勾选「焊接用相对局部边长」）——
+//       与「绝对距离(mm)」并列：判据是「相距 < 比例 × 局部边长」，与模型缩放 / 局部密度
+//       均无关，拉伸后无需重调（详见 weight_transfer.h 的 WeldMode）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -126,6 +129,9 @@ inline constexpr int kSkinGrowthPasses = 300;
 // 位置相距 <= 该值的顶点视为「同一缝合点」（导出器在 UV/材质缝合处拆开的重复顶点），
 // 在权重图上焊接成组后再生长/平滑，消除接缝开裂。0 = 关闭焊接。
 inline constexpr float kSkinWeldToleranceMm = kWeldToleranceM * 1000.0f;
+// 「相对局部边长焊接」面板默认比例（× 局部边长）：与 weight_transfer.h 单一来源。
+// 与「绝对距离」并列的另一种焊接判据：与模型缩放 / 局部密度无关，拉伸后无需调参。
+inline constexpr float kSkinWeldRatio = kDefaultLocalEdgeWeldRatio;
 
 // 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
 // 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
@@ -208,6 +214,10 @@ public:
     NumberField seed_eps_field_ = NumberField(kSkinSeedEpsMm);
     float weld_tolerance_mm_ = kSkinWeldToleranceMm;  // 缝合焊接容差（mm；0 = 关闭）
     NumberField weld_tolerance_field_ = NumberField(kSkinWeldToleranceMm);
+    // 焊接判据模式：false = 绝对距离(mm)（默认，保持既有行为）；true = 相对局部边长(比例)。
+    bool weld_relative_ui_ = false;
+    float weld_ratio_ = kSkinWeldRatio;  // 相对模式比例（× 局部边长；0 = 关闭）
+    NumberField weld_ratio_field_ = NumberField(kSkinWeldRatio);
 
     // ══════════════ 软体仿真（Step 1）══════════════
     //
@@ -251,6 +261,9 @@ public:
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&ClothingToolApp::ViewerTextWidth, this);
     }
+
+    // 供 headless / 脚本用：立即执行一键蒙皮（等价面板「一键蒙皮」按钮）。
+    void RunAutoSkinNow() { RunAutoSkin(); }
 
     // 渲染/出图时是否绘制面板（交互窗口 = true；headless 纯 3D 截图 = false）。
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -1005,14 +1018,14 @@ private:
     //
     // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
     // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
-    //             + 焊接容差输入(1) + 状态文本(1) = 6。
+    //             + 焊接模式勾选(1) + 焊接参数输入(1) + 状态文本(1) = 7。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         const float kMargin  = 12.0f;
         const float kPad     = 10.0f;
         const float kRowH    = kPanelRowH;
         const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 6;
+        constexpr int kRows = 7;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const float panel_x = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y = win_h - panel_h - kMargin;  // 贴底边缘
@@ -1054,19 +1067,36 @@ private:
         seed_eps_field_.focused_prev = seed_focus;
         row_y += step_y;
 
-        // 焊接容差（mm）：位置重合的缝合重复顶点焊接阈值；0 = 关闭。
+        // 焊接判据模式：勾选 = 相对局部边长（比例，与缩放/密度无关）；否则 = 绝对距离（mm）。
+        ui_.Checkbox("焊接用相对局部边长", &weld_relative_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // 焊接参数：相对模式填「比例(×局部边长)」，绝对模式填「容差(mm)」。
         const float weld_label_w = 96.0f;
-        DrawLabel("焊接容差(mm)", left, weld_label_w, row_y);
+        const char* weld_label =
+            weld_relative_ui_ ? "焊接比例(×边长)" : "焊接容差(mm)";
+        DrawLabel(weld_label, left, weld_label_w, row_y);
         const float weld_box_x = left + weld_label_w + 8.0f;
         const float weld_box_w = row_w - weld_label_w - 8.0f;
-        const bool weld_focus = ui_.InputText(
-            "", weld_tolerance_field_.text, kAxisInputCapacity,
-            jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
-        if (weld_tolerance_field_.focused_prev && !weld_focus) {
-            CommitNumberField(&weld_tolerance_field_, ClampWeldToleranceMm,
-                              &weld_tolerance_mm_);
+        if (weld_relative_ui_) {
+            const bool f = ui_.InputText(
+                "", weld_ratio_field_.text, kAxisInputCapacity,
+                jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
+            if (weld_ratio_field_.focused_prev && !f) {
+                CommitNumberField(&weld_ratio_field_, ClampWeldRatio, &weld_ratio_);
+            }
+            weld_ratio_field_.focused_prev = f;
+        } else {
+            const bool f = ui_.InputText(
+                "", weld_tolerance_field_.text, kAxisInputCapacity,
+                jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
+            if (weld_tolerance_field_.focused_prev && !f) {
+                CommitNumberField(&weld_tolerance_field_, ClampWeldToleranceMm,
+                                  &weld_tolerance_mm_);
+            }
+            weld_tolerance_field_.focused_prev = f;
         }
-        weld_tolerance_field_.focused_prev = weld_focus;
         row_y += step_y;
 
         // 状态 / 提示（可能为空）。
@@ -1087,6 +1117,12 @@ private:
     // 焊接容差（mm）clamp：0（关闭）~ 上界（对应 kWeldToleranceMaxM）。
     static float ClampWeldToleranceMm(float mm) {
         return std::min(std::max(mm, 0.0f), kWeldToleranceMaxM * 1000.0f);
+    }
+
+    // 焊接比例（× 局部边长）clamp：0（关闭）~ kMaxLocalEdgeWeldRatio。
+    static float ClampWeldRatio(float ratio) {
+        return std::min(std::max(ratio, kMinLocalEdgeWeldRatio),
+                        kMaxLocalEdgeWeldRatio);
     }
 
     // 种子半径（mm）clamp：[0.1, 200]（种子半径必须为正）。
@@ -1138,6 +1174,10 @@ private:
         const int passes = skin_grow_ui_ ? kSkinGrowthPasses : 0;
         const geom::TriangleMatcher3d<double>& matcher =
             init_.body_matcher().matcher.value();
+        // 焊接判据：相对局部边长（比例）或绝对距离（mm）。
+        const WeldSpec weld =
+            weld_relative_ui_ ? WeldSpec::Relative(weld_ratio_)
+                              : WeldSpec::Absolute(weld_tolerance_mm_ * 0.001f);
         size_t total_verts = 0;
         size_t total_seed = 0;
         size_t total_non_seed = 0;
@@ -1147,8 +1187,7 @@ private:
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
             const SkinTransferStats s = TransferSkinWeights(
                 init_.body_skin(), matcher, &cloth_current_[i].mesh,
-                seed_eps_mm_ * 0.001f, weld_tolerance_mm_ * 0.001f, kSkinMaxInfluences,
-                passes);
+                seed_eps_mm_ * 0.001f, weld, kSkinMaxInfluences, passes);
             total_verts += s.vertex_count;
             total_seed += s.seed_vertex_count;
             total_non_seed += s.non_seed_vertex_count;
@@ -1159,9 +1198,11 @@ private:
         skinned_ = true;
         sim_running_ = false;
         skin_msg_ = Format(
-            "已蒙皮 %zu 顶点 / 种子 %zu（非种子 %zu, max %.1f mm）/ 焊接 %zu / 生长 %zu 轮",
+            "已蒙皮 %zu 顶点 / 种子 %zu（非种子 %zu, max %.1f mm）/ 焊接 %s %zu / 生长 %zu 轮",
             total_verts, total_seed, total_non_seed,
-            static_cast<double>(max_body_dist_m * 1000.0f), total_weld, max_growth);
+            static_cast<double>(max_body_dist_m * 1000.0f),
+            weld_relative_ui_ ? "(相对局部边长)" : "(绝对距离)", total_weld,
+            max_growth);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
     }
 

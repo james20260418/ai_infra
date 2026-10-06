@@ -87,7 +87,7 @@ TEST(ClothingSkinE2E, TransferThenSaveThenReload) {
     const size_t vcount = vest.positions.size();
 
     const SkinTransferStats st = TransferSkinWeights(
-        bc.table, matcher, &vest, /*seed_eps*/0.01f, /*weld*/kWeldToleranceM, /*max_inf*/4,
+        bc.table, matcher, &vest, /*seed_eps*/0.01f, /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4,
         /*growth*/8);
     EXPECT_EQ(st.vertex_count, vcount);
     EXPECT_EQ(st.seed_vertex_count + st.non_seed_vertex_count, vcount);
