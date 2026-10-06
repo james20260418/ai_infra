@@ -308,13 +308,14 @@ TEST(SoftMeshSimulatorTest, ExtractMeshExcludesVirtualPoints) {
     EXPECT_EQ(out.positions.size(), 3u) << "输出只含原始顶点";
 }
 
-// ⑧ SetGravity：负值/非有限值必须崩（不静默夹断）。
+// ⑧ SetGravity：非有限值必须崩；负值（反重力）合法。
 TEST(SoftMeshSimulatorTest, SetGravityRejectsInvalidValues) {
     Simulator sim;
     sim.Init(MakeTri());
-    EXPECT_DEATH(sim.SetGravity(-1.0f), "gravity");
     EXPECT_DEATH(sim.SetGravity(std::numeric_limits<float>::infinity()),
                  "gravity");
+    sim.SetGravity(-1.0f);  // 负重力合法（反重力）
+    EXPECT_FLOAT_EQ(sim.gravity(), -1.0f);
 }
 
 // ⑨ 子步数常量与 DESIGN §3.4 一致（防日后被误改而无人察觉）。

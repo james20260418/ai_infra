@@ -22,6 +22,11 @@
 //       二分 10 轮取边界点；仿真前已在体内则用旧投影）；② buffer 重新启用（作为“带 buffer 的
 //       体内判定”）；③ 新增切向速度保留系数（默认 1.0）；④ 关联图连通性修复；
 //       ⑤ 修「重置未能真正重置」（Reset 改用独立启动快照 startup_positions_）。
+//   - 2026-10-05：① 蒙皮修复「缝合开裂」——位置重合的重复顶点（导出器在 UV/材质缝合处拆开的）
+//       先在权重图上焊接成组（生长/平滑前），缝合两侧权重逐位一致，消除撕裂。焊接阈值做成可配
+//       「焊接容差(mm)」（面板输入框，0~10mm，默认 5，0 = 关闭）。② 蒙皮升级为**种子生长**：
+//       距离身体 <=「种子半径 seed_eps(mm)」的顶点为种子（权重冻结为直接投影权重），离体顶点
+//       由种子冻结的调和扩散生长补出；面板新增「种子半径(mm)」（默认 10）与「权重生长」勾选。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -108,14 +113,19 @@ inline constexpr float kDefaultScaleStep = 1.1f;
 // 甩飞、拉成“淌”状长条）。0 = 不限；实测 25 m/s 能在保留正常下落（~8 m/s）的同时挡住失稳。
 inline constexpr float kDefaultMaxSpeed = 25.0f;
 
-// ── 软布自动蒙皮（weight transfer）参数 ──
-// gap 阈值：衣物顶点到身体最近距离 > 该值即视为“不贴合”（宽松/缝线悬挂），走兜底
-// 权重并被计数。5mm（设计文档 §3.3 建议 3~5mm 取上界，包容贴身件的数值误差）。
-inline constexpr float kSkinGapThresholdM = 0.005f;
+// ── 软布自动蒙皮（weight transfer + 种子生长）参数 ──
+// 种子半径 seed_eps（mm）：衣物顶点到身体最近距离 <= 该值即视为「贴身」→ 生长锚点（种子），
+// 其权重冻结为直接投影权重；> 该值 → 非种子，由生长从种子扩散补出。默认 10mm（1cm，照顾
+// 不那么贴身的衣物）。面板输入框可调。
+inline constexpr float kSkinSeedEpsMm = 10.0f;
 // 每顶点最大影响骨数（与 MeshData 的 4 组 joint/weight 对齐）。
 inline constexpr int kSkinMaxInfluences = 4;
-// 打开“平滑权重”时的拉普拉斯迭代次数（消关节附近条带）。
-inline constexpr int kSkinSmoothPasses = 2;
+// 生长迭代上限（内部弱收敛会提前停）；0 = 不生长（只保留逐顶点直接投影权重）。
+inline constexpr int kSkinGrowthPasses = 300;
+// 「焊接容差」面板默认值（mm）：与 weight_transfer.h 的默认焊接阈值单一来源（ = 5mm）。
+// 位置相距 <= 该值的顶点视为「同一缝合点」（导出器在 UV/材质缝合处拆开的重复顶点），
+// 在权重图上焊接成组后再生长/平滑，消除接缝开裂。0 = 关闭焊接。
+inline constexpr float kSkinWeldToleranceMm = kWeldToleranceM * 1000.0f;
 
 // 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
 // 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
@@ -193,7 +203,11 @@ public:
     // 已自动蒙皮：此后**冻结几何**（禁变换/禁仿真/禁重置），否则权重↔顶点对应被破坏。
     bool skinned_ = false;
     std::string skin_msg_;             // 蒙皮结果 / 失败提示（面板显示）
-    bool skin_smooth_ui_ = true;       // 「平滑权重」勾选（默认开）
+    bool skin_grow_ui_ = true;         // 「权重生长」勾选（默认开；关掉 = 只留直接投影权重）
+    float seed_eps_mm_ = kSkinSeedEpsMm;  // 种子半径（mm）
+    NumberField seed_eps_field_ = NumberField(kSkinSeedEpsMm);
+    float weld_tolerance_mm_ = kSkinWeldToleranceMm;  // 缝合焊接容差（mm；0 = 关闭）
+    NumberField weld_tolerance_field_ = NumberField(kSkinWeldToleranceMm);
 
     // ══════════════ 软体仿真（Step 1）══════════════
     //
@@ -990,14 +1004,15 @@ private:
     // ---- 右下角：软布自动蒙皮（一键）----
     //
     // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
-    // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 平滑权重勾选(1) + 状态文本(1) = 4。
+    // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
+    //             + 焊接容差输入(1) + 状态文本(1) = 6。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         const float kMargin  = 12.0f;
         const float kPad     = 10.0f;
         const float kRowH    = kPanelRowH;
         const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 4;
+        constexpr int kRows = 6;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const float panel_x = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y = win_h - panel_h - kMargin;  // 贴底边缘
@@ -1021,8 +1036,37 @@ private:
         }
         row_y += step_y;
 
-        ui_.Checkbox("平滑权重", &skin_smooth_ui_,
+        ui_.Checkbox("权重生长（种子扩散）", &skin_grow_ui_,
                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // 种子半径（mm）：到身体距离 <= 该值的顶点 = 种子（生长锚点，权重冻结）。
+        const float seed_label_w = 96.0f;
+        DrawLabel("种子半径(mm)", left, seed_label_w, row_y);
+        const float seed_box_x = left + seed_label_w + 8.0f;
+        const float seed_box_w = row_w - seed_label_w - 8.0f;
+        const bool seed_focus = ui_.InputText(
+            "", seed_eps_field_.text, kAxisInputCapacity,
+            jpov::UiRect{{seed_box_x, row_y}, {seed_box_w, kRowH}});
+        if (seed_eps_field_.focused_prev && !seed_focus) {
+            CommitNumberField(&seed_eps_field_, ClampSeedEpsMm, &seed_eps_mm_);
+        }
+        seed_eps_field_.focused_prev = seed_focus;
+        row_y += step_y;
+
+        // 焊接容差（mm）：位置重合的缝合重复顶点焊接阈值；0 = 关闭。
+        const float weld_label_w = 96.0f;
+        DrawLabel("焊接容差(mm)", left, weld_label_w, row_y);
+        const float weld_box_x = left + weld_label_w + 8.0f;
+        const float weld_box_w = row_w - weld_label_w - 8.0f;
+        const bool weld_focus = ui_.InputText(
+            "", weld_tolerance_field_.text, kAxisInputCapacity,
+            jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
+        if (weld_tolerance_field_.focused_prev && !weld_focus) {
+            CommitNumberField(&weld_tolerance_field_, ClampWeldToleranceMm,
+                              &weld_tolerance_mm_);
+        }
+        weld_tolerance_field_.focused_prev = weld_focus;
         row_y += step_y;
 
         // 状态 / 提示（可能为空）。
@@ -1038,6 +1082,16 @@ private:
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
+    }
+
+    // 焊接容差（mm）clamp：0（关闭）~ 上界（对应 kWeldToleranceMaxM）。
+    static float ClampWeldToleranceMm(float mm) {
+        return std::min(std::max(mm, 0.0f), kWeldToleranceMaxM * 1000.0f);
+    }
+
+    // 种子半径（mm）clamp：[0.1, 200]（种子半径必须为正）。
+    static float ClampSeedEpsMm(float mm) {
+        return std::min(std::max(mm, 0.1f), 200.0f);
     }
 
     // 发起保存：把当前衣服几何快照交给保存控制器（按值快照，之后改动不影响本次）。
@@ -1081,25 +1135,33 @@ private:
         }
         SyncSimsToCloth();  // 以当前（仿真后）几何为准
 
-        const int passes = skin_smooth_ui_ ? kSkinSmoothPasses : 0;
+        const int passes = skin_grow_ui_ ? kSkinGrowthPasses : 0;
         const geom::TriangleMatcher3d<double>& matcher =
             init_.body_matcher().matcher.value();
         size_t total_verts = 0;
-        size_t total_gap = 0;
-        float max_gap_m = 0.0f;
+        size_t total_seed = 0;
+        size_t total_non_seed = 0;
+        size_t total_weld = 0;
+        size_t max_growth = 0;
+        float max_body_dist_m = 0.0f;
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
             const SkinTransferStats s = TransferSkinWeights(
                 init_.body_skin(), matcher, &cloth_current_[i].mesh,
-                kSkinGapThresholdM, kSkinMaxInfluences, passes);
+                seed_eps_mm_ * 0.001f, weld_tolerance_mm_ * 0.001f, kSkinMaxInfluences,
+                passes);
             total_verts += s.vertex_count;
-            total_gap += s.gap_vertex_count;
-            max_gap_m = std::max(max_gap_m, s.max_gap_m);
+            total_seed += s.seed_vertex_count;
+            total_non_seed += s.non_seed_vertex_count;
+            total_weld += s.weld_merged_vertex_count;
+            max_growth = std::max(max_growth, s.growth_passes);
+            max_body_dist_m = std::max(max_body_dist_m, s.max_body_distance_m);
         }
         skinned_ = true;
         sim_running_ = false;
-        skin_msg_ = Format("已蒙皮 %zu 顶点 / gap %zu（max %.1f mm）/ 平滑 %d 轮",
-                           total_verts, total_gap,
-                           static_cast<double>(max_gap_m * 1000.0f), passes);
+        skin_msg_ = Format(
+            "已蒙皮 %zu 顶点 / 种子 %zu（非种子 %zu, max %.1f mm）/ 焊接 %zu / 生长 %zu 轮",
+            total_verts, total_seed, total_non_seed,
+            static_cast<double>(max_body_dist_m * 1000.0f), total_weld, max_growth);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
     }
 

@@ -749,7 +749,7 @@ void Simulator::EnsureNeighborGraphConnected(float d) {
 
 void Simulator::SetGravity(float gravity) {
     CHECK(std::isfinite(gravity)) << "SetGravity 要求有限值，got " << gravity;
-    CHECK_GE(gravity, 0.0f) << "SetGravity 要求 gravity >= 0，got " << gravity;
+    // 允许负重力（反重力 / 上浮）；不夹断到非负。
     gravity_ = gravity;
 }
 

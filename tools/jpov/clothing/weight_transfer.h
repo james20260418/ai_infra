@@ -8,9 +8,11 @@
 // 为什么"最近三角形 + 重心插值"就够（设计文档 §2.1 铁律）：衣物与身体在**同一 rest
 //   pose（T-pose）**下几何对齐，故衣物顶点的蒙皮权重应等于它贴着的那片身体表面的权重；
 //   身体权重本就在相邻三角面之间连续，取最近三角形的重心插值即得连续、贴合的那份权重。
+//   对**离体**顶点（宽松 / 悬空），则在其（焊接后的）邻接图上做**种子冻结的调和扩散**，
+//   把权重从贴身种子"生长"过去（见 TransferSkinWeights）。
 //
 // 边界（本轮范围，呼应设计文档 §2.3）：
-//   - 只做**贴身软布**；宽松/叠穿不在范围（太远的顶点走 gap 兜底并被计数，不静默丢弃）。
+//   - 以**贴身软布**为主；离体顶点由种子生长补出并计入统计，不静默丢弃。
 //   - 硬部分（甲片/工具）不走这里（它们该 100% 绑单骨，是另一套机制，见后续）。
 //
 // 本文件只依赖 geom（三角形/匹配器）与 mesh.h，**不碰 GL / glTF**，便于纯单测。
@@ -24,6 +26,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <glog/logging.h>
@@ -41,6 +44,16 @@ using Triangle3d = geom::Triangle3<double>;
 
 // 每顶点固定 4 组 joint/weight（与 MeshData.joint_indices/joint_weights 对齐）。
 inline constexpr int kMaxSkinInfluences = 4;
+
+// 缝合焊接的距离阈值（米）：位置相距在该值内的顶点视为「同一缝合点」（导出时被拆开的
+// 重复顶点），在权重图上合并成一体。
+//   默认 5mm（2026-10-05 Danis 实测更优）—— 足以吃掉导出 / 变换带来的浮点重复与常见
+//   接缝偏移，又不至于误并真实布料的两层；上界 10mm，仅供工具面板 clamp。
+inline constexpr float kWeldToleranceM = 5.0e-3f;     // 默认值（5mm）
+inline constexpr float kWeldToleranceMaxM = 1.0e-2f;  // 面板上界（10mm）
+
+// 生长（种子冻结的高斯-赛德尔松弛）的弱收敛判据：单轮内所有代表权重的最大变化 < 该值即停。
+inline constexpr double kGrowthConvergeTol = 1.0e-5;
 
 // 一个三角形角的蒙皮 = 身体某顶点的 (joints, weights)。
 struct SkinCorner {
@@ -96,23 +109,37 @@ std::array<double, 3> BarycentricOnTriangle(const geom::Vec3<double>& a,
 
 // 一次自动蒙皮的统计（供面板回显 / 单测断言）。
 struct SkinTransferStats {
-    size_t vertex_count = 0;      // 处理的衣物顶点数
-    size_t gap_vertex_count = 0;  // 到身体最近距离 > gap_threshold 的顶点数（兜底）
-    size_t no_candidate_count = 0;// 最近三角形候选为空的顶点数（走全局线性兜底）
-    float max_gap_m = 0.0f;       // 最大 gap 距离（米）
-    size_t smooth_passes = 0;     // 实际执行的平滑迭代次数
+    size_t vertex_count = 0;           // 处理的衣物顶点数
+    size_t seed_vertex_count = 0;      // 到身体距离 <= seed_eps 的顶点数（生长锚点）
+    size_t non_seed_vertex_count = 0;  // 离体顶点数（> seed_eps；交给生长 / 兜底）
+    size_t no_candidate_count = 0;     // 最近三角形候选为空的顶点数（走全局线性兜底）
+    float max_body_distance_m = 0.0f;  // 最大「到身体」距离（米）
+    size_t growth_passes = 0;          // 实际执行 / 收敛的生长迭代次数
+    size_t weld_merged_vertex_count = 0;  // 因位置重合被焊接合并掉的重复顶点数（0 = 无重复）
 };
 
-// 软布自动蒙皮（weight transfer）：
+// 位置重合顶点焊接：把位置相距 <= tolerance_m 的顶点并成一组（并查集），返回每个顶点的
+// **组代表下标**（组代表 = 组内最小下标，满足 rep_of[v] == v）。用于让导出器在 UV / 材质
+// 缝合处拆开的**重复顶点**在权重图上重新连成一体 —— 否则生长（松弛）会把缝合两侧朝不同
+// 邻居拉，权重发散、蒙皮后缝合分离（“开裂”）。
+//   tolerance_m <= 0：不做任何合并（恒等映射 rep_of[v] == v）。
+// Pre-condition: positions 元素均为有限值。
+std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
+                                        float tolerance_m);
+
+// 软布自动蒙皮（weight transfer + 种子生长）：
 //   对 cloth 每个顶点 v：
 //     1) 在 body_matcher 找候选三角形（FindNearestTriangles）→ 取真正最近的 tri；
 //     2) cp = tri.ClosestPointTo(v)；重心坐标 (wa,wb,wc)；
-//     3) 按重心坐标 + 3 角 (joints,weights) 累加，取全局 top-`max_influences` 骨；
-//     4) 归一化（Σ=1）写入 cloth->joint_indices / joint_weights。
-//   到最近三角形距离 > gap_threshold_m 的顶点：仍用"最近三角形的最近角权重"兜底
-//     （不用重心插值——离太远时插值无意义），并计入 gap 统计（不静默丢弃）。
-//   smooth_iterations > 0：在衣物**拓扑邻接图**上做若干轮拉普拉斯平滑（消除关节附近
-//     因"相邻衣物顶点落到不同身体部位"产生的权重条带），随后重新 top-K 剪枝 + 归一化。
+//     3) 按重心坐标 + 3 角 (joints,weights) 累加，取全局 top-`max_influences` 骨、归一化
+//        → 这份「直接投影权重」是所有顶点的初值（既是种子权重，也是生长不到的兜底）。
+//   种子 = 到身体最近距离 <= seed_eps_m 的顶点（视为「贴身」，其直接投影权重可信）。
+//   weld_tolerance_m：生长前焊接「位置重合的缝合重复顶点」的距离阈值（米）；0 = 关闭焊接。
+//   growth_iterations > 0：**种子冻结**的调和扩散——在（焊接后的）衣物邻接图上做高斯-赛德尔
+//     松弛：种子权重固定为直接投影权重，非种子 = (自身 + 邻居均值)/(1+deg)，跑到弱收敛或达
+//     迭代上限。自由区（离体 / 宽松 / 悬空）的权重于是从种子向内「生长」出来，既连续、又不会
+//     像逐顶点最近邻那样乱跳；跑到上限仍未被充分覆盖的顶点更接近初值（= 兜底）。
+//   growth_iterations == 0：只保留逐顶点的直接投影权重（不生长、不焊接）。
 //
 // 就地写 cloth->joint_indices/weights 并置 kJoints flag。**不改顶点位置**（rest 形状
 // 由调用方定稿后传入；蒙皮后再改几何会破坏权重↔顶点对应，须冻结）。
@@ -124,14 +151,15 @@ struct SkinTransferStats {
 //   - cloth->positions 非空；
 //   - cloth->joint_indices / joint_weights 为空，或长度 == positions.size()；
 //   - 1 <= max_influences <= kMaxSkinInfluences；
-//   - gap_threshold_m > 0；smooth_iterations >= 0。
+//   - seed_eps_m > 0；weld_tolerance_m >= 0；growth_iterations >= 0。
 SkinTransferStats TransferSkinWeights(
     const BodySkinTable& body_skin,
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
-    float gap_threshold_m,
+    float seed_eps_m,
+    float weld_tolerance_m,
     int max_influences,
-    int smooth_iterations);
+    int growth_iterations);
 
 // ==================== 实现 ====================
 
@@ -191,6 +219,117 @@ inline void AppendMeshTriangles(const MeshData& mesh,
                        static_cast<uint32_t>(i + 2));
         }
     }
+}
+
+inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
+                                               float tolerance_m) {
+    CHECK_GE(tolerance_m, 0.0f);
+    const size_t n = positions.size();
+    std::vector<int> rep(n);
+    for (size_t i = 0; i < n; ++i) {
+        rep[i] = static_cast<int>(i);
+    }
+    if (n == 0 || tolerance_m <= 0.0f) {
+        return rep;  // 不做合并（恒等映射）
+    }
+
+    // 并查集：find 带路径压缩；union 让代表恒为组内最小下标（确定性）。
+    const auto find_root = [&rep](int x) {
+        int r = x;
+        while (rep[r] != r) {
+            r = rep[r];
+        }
+        while (rep[x] != r) {
+            const int next = rep[x];
+            rep[x] = r;
+            x = next;
+        }
+        return r;
+    };
+    const auto unite = [&rep, &find_root](int a, int b) {
+        const int ra = find_root(a);
+        const int rb = find_root(b);
+        if (ra == rb) {
+            return;
+        }
+        if (ra < rb) {
+            rep[rb] = ra;
+        } else {
+            rep[ra] = rb;
+        }
+    };
+
+    // 空间哈希：按 tolerance 量化到体素；查本格 + 26 邻居格，保证跨格边界的重合对不漏。
+    struct CellKey {
+        int64_t x;
+        int64_t y;
+        int64_t z;
+        bool operator==(const CellKey& o) const {
+            return x == o.x && y == o.y && z == o.z;
+        }
+    };
+    struct CellHash {
+        size_t operator()(const CellKey& k) const {
+            uint64_t h = 1469598103934665603ULL;  // FNV offset
+            const int64_t v[3] = {k.x, k.y, k.z};
+            for (int i = 0; i < 3; ++i) {
+                uint64_t u = static_cast<uint64_t>(v[i]);
+                u += 0x9e3779b97f4a7c15ULL;  // splitmix64 混合（避免相邻整数哈希扎堆）
+                u = (u ^ (u >> 30)) * 0xbf58476d1ce4e5b9ULL;
+                u = (u ^ (u >> 27)) * 0x94d049bb133111ebULL;
+                u ^= (u >> 31);
+                h ^= u;
+                h *= 1099511628211ULL;
+            }
+            return static_cast<size_t>(h);
+        }
+    };
+    const double inv = 1.0 / static_cast<double>(tolerance_m);
+    const auto key_of = [inv](const Vec3f& p) {
+        return CellKey{static_cast<int64_t>(std::floor(p.x() * inv)),
+                       static_cast<int64_t>(std::floor(p.y() * inv)),
+                       static_cast<int64_t>(std::floor(p.z() * inv))};
+    };
+    std::unordered_map<CellKey, std::vector<int>, CellHash> cells;
+    for (size_t i = 0; i < n; ++i) {
+        cells[key_of(positions[i])].push_back(static_cast<int>(i));
+    }
+
+    const double tol2 =
+        static_cast<double>(tolerance_m) * static_cast<double>(tolerance_m);
+    for (size_t i = 0; i < n; ++i) {
+        const CellKey base = key_of(positions[i]);
+        const double px = positions[i].x();
+        const double py = positions[i].y();
+        const double pz = positions[i].z();
+        for (int64_t dx = -1; dx <= 1; ++dx) {
+            for (int64_t dy = -1; dy <= 1; ++dy) {
+                for (int64_t dz = -1; dz <= 1; ++dz) {
+                    const auto found =
+                        cells.find(CellKey{base.x + dx, base.y + dy, base.z + dz});
+                    if (found == cells.end()) {
+                        continue;
+                    }
+                    for (int j : found->second) {
+                        if (j <= static_cast<int>(i)) {
+                            continue;  // 每对只处理一次
+                        }
+                        const double ddx = px - positions[static_cast<size_t>(j)].x();
+                        const double ddy = py - positions[static_cast<size_t>(j)].y();
+                        const double ddz = pz - positions[static_cast<size_t>(j)].z();
+                        if (ddx * ddx + ddy * ddy + ddz * ddz <= tol2) {
+                            unite(static_cast<int>(i), j);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 压缩到根代表（根 = 组内最小下标）。
+    for (size_t i = 0; i < n; ++i) {
+        rep[i] = find_root(static_cast<int>(i));
+    }
+    return rep;
 }
 
 inline std::array<double, 3> BarycentricOnTriangle(const geom::Vec3<double>& a,
@@ -275,7 +414,7 @@ inline bool PickTopKNormalized(const JointAccumBuf& acc, int n, int k,
     return true;
 }
 
-// 三角形 3 角里离点 v 最近的角下标（gap / 权重全零两条兜底路径共用）。
+// 三角形 3 角里离点 v 最近的角下标（仅「权重全零」兜底路径用）。
 // Pre-condition: v 有限。
 inline int NearestCornerIndex(const Triangle3d& tri, const geom::Vec3<double>& v) {
     const geom::Vec3<double> cs[3] = {tri.a(), tri.b(), tri.c()};
@@ -313,17 +452,19 @@ inline SkinTransferStats TransferSkinWeights(
     const BodySkinTable& body_skin,
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
-    float gap_threshold_m,
+    float seed_eps_m,
+    float weld_tolerance_m,
     int max_influences,
-    int smooth_iterations) {
+    int growth_iterations) {
     CHECK(cloth != nullptr);
     CHECK_EQ(body_skin.triangle_count(), body_matcher.triangles().size())
         << "TransferSkinWeights: 蒙皮表与身体匹配器不同序不同长";
     CHECK(!cloth->positions.empty()) << "TransferSkinWeights: 衣物顶点为空";
+    CHECK_GT(seed_eps_m, 0.0f);
+    CHECK_GE(weld_tolerance_m, 0.0f);
     CHECK_GE(max_influences, 1);
     CHECK_LE(max_influences, kMaxSkinInfluences);
-    CHECK_GT(gap_threshold_m, 0.0f);
-    CHECK_GE(smooth_iterations, 0);
+    CHECK_GE(growth_iterations, 0);
     if (!cloth->joint_indices.empty()) {
         CHECK_EQ(cloth->joint_indices.size(), cloth->positions.size());
     }
@@ -342,11 +483,16 @@ inline SkinTransferStats TransferSkinWeights(
     SkinTransferStats stats;
     stats.vertex_count = vcount;
 
+    // 每个顶点到身体的最近距离（供种子判定 / 统计）。
+    std::vector<double> body_dist(vcount, 0.0);
+
+    // 1) 逐顶点：最近三角形 → 投影点重心插值（= 「直接投影权重」）。这份权重同时是
+    //    种子权重与「生长不到的兜底」。种子 = 到身体距离 <= seed_eps_m 的顶点。
     for (size_t vi = 0; vi < vcount; ++vi) {
         const Vec3f& pv = cloth->positions[vi];
         const geom::Vec3<double> v(pv.x(), pv.y(), pv.z());
 
-        // 1) 候选 → 真正最近三角形。
+        // 候选 → 真正最近三角形。
         const std::vector<int>& candidates = body_matcher.FindNearestTriangles(v);
         int nearest = -1;
         double nearest_sqr = std::numeric_limits<double>::max();
@@ -361,7 +507,6 @@ inline SkinTransferStats TransferSkinWeights(
         }
         if (nearest < 0) {
             // 候选为空（顶点离身体 > local_distance 的体素桶）：全局线性兜底（罕见）。
-            // 记录并以 LOG_FIRST_N 提示一次，避免被静默忽略。
             ++stats.no_candidate_count;
             LOG_FIRST_N(WARNING, 1)
                 << "TransferSkinWeights: 衣物顶点最近三角形候选为空，走全表线性兜底";
@@ -379,19 +524,19 @@ inline SkinTransferStats TransferSkinWeights(
         const std::array<SkinCorner, 3>& corners =
             body_skin.corners[static_cast<size_t>(nearest)];
         const double dist = std::sqrt(nearest_sqr);
-        if (dist > static_cast<double>(gap_threshold_m)) {
-            ++stats.gap_vertex_count;
-            stats.max_gap_m = std::max(stats.max_gap_m, static_cast<float>(dist));
-            // gap 兜底：取"离衣物顶点最近的角"的权重（离太远时重心插值无意义）。
-            const int best_corner = internal::NearestCornerIndex(tri, v);
-            internal::AssignCornerNormalized(corners[best_corner],
-                                             &cloth->joint_indices[vi],
-                                             &cloth->joint_weights[vi]);
-            continue;
+        body_dist[vi] = dist;
+        stats.max_body_distance_m = std::max(stats.max_body_distance_m,
+                                             static_cast<float>(dist));
+        if (dist <= static_cast<double>(seed_eps_m)) {
+            ++stats.seed_vertex_count;
+        } else {
+            ++stats.non_seed_vertex_count;
         }
-        // 2) 重心坐标 + 3 角插值 → top-K 归一化。
+
+        // 直接投影权重：投影点重心插值（种子用；生长不到的顶点保留它作兜底）。
         const geom::Vec3<double> cp = tri.ClosestPointTo(v);
-        const std::array<double, 3> bary = BarycentricOnTriangle(tri.a(), tri.b(), tri.c(), cp);
+        const std::array<double, 3> bary =
+            BarycentricOnTriangle(tri.a(), tri.b(), tri.c(), cp);
         internal::JointAccumBuf acc;
         int n = 0;
         for (int k = 0; k < 3; ++k) {
@@ -407,9 +552,9 @@ inline SkinTransferStats TransferSkinWeights(
                                               bary[k] * static_cast<double>(w));
             }
         }
-        bool ok = internal::PickTopKNormalized(acc, n, max_influences,
-                                               &cloth->joint_indices[vi],
-                                               &cloth->joint_weights[vi]);
+        const bool ok = internal::PickTopKNormalized(acc, n, max_influences,
+                                                     &cloth->joint_indices[vi],
+                                                     &cloth->joint_weights[vi]);
         if (!ok) {
             // 3 角权重全为 0（异常资产）：退回最近角的权重，避免顶点塌到原点。
             LOG_FIRST_N(WARNING, 1)
@@ -420,16 +565,40 @@ inline SkinTransferStats TransferSkinWeights(
                                              &cloth->joint_weights[vi]);
         }
     }
-    // 3) 可选：衣物拓扑邻接图上的拉普拉斯平滑（去条带），再重剪枝 + 归一化。
-    if (smooth_iterations > 0) {
+
+    // 2) 种子生长（种子冻结的调和扩散）。growth_iterations == 0 → 只保留直接投影权重。
+    if (growth_iterations > 0) {
         const int bones = std::max(body_skin.referenced_bone_count(), 1);
-        // 邻接表（无向；去重，避免重复边放大某邻居的权重）。
-        std::vector<std::vector<int>> adj(vcount);
+
+        // (a) 焊接：位置重合（缝合拆开）的顶点并成一组，压成稠密编号 0..rep_count-1。
+        const std::vector<int> root_of =
+            WeldVerticesByPosition(cloth->positions, weld_tolerance_m);
+        std::vector<int> rep(vcount);
+        std::vector<int> dense_of_root(vcount, -1);
+        int rep_count = 0;
+        for (size_t i = 0; i < vcount; ++i) {
+            const int root = root_of[i];
+            CHECK_GE(root, 0);
+            CHECK_LT(root, static_cast<int>(vcount));
+            if (dense_of_root[static_cast<size_t>(root)] < 0) {
+                dense_of_root[static_cast<size_t>(root)] = rep_count++;
+            }
+            rep[i] = dense_of_root[static_cast<size_t>(root)];
+        }
+        stats.weld_merged_vertex_count = vcount - static_cast<size_t>(rep_count);
+
+        // (b) 代表相邻接表（无向；去重）。
+        std::vector<std::vector<int>> adj(static_cast<size_t>(rep_count));
         const auto add_edge = [&](uint32_t i0, uint32_t i1) {
             CHECK_LT(i0, vcount);
             CHECK_LT(i1, vcount);
-            adj[i0].push_back(static_cast<int>(i1));
-            adj[i1].push_back(static_cast<int>(i0));
+            const int r0 = rep[i0];
+            const int r1 = rep[i1];
+            if (r0 == r1) {
+                return;  // 同组（缝合）内部不连边
+            }
+            adj[static_cast<size_t>(r0)].push_back(r1);
+            adj[static_cast<size_t>(r1)].push_back(r0);
         };
         if (!cloth->indices.empty()) {
             CHECK_EQ(cloth->indices.size() % 3, 0u);
@@ -450,46 +619,127 @@ inline SkinTransferStats TransferSkinWeights(
             nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
         }
 
-        // 稠密权重（N×B），平滑后回写。
-        std::vector<double> w(vcount * static_cast<size_t>(bones), 0.0);
+        // (c) 每个代表的「到身体距离」（取组内最小）→ 种子 = 距离 <= seed_eps。
+        std::vector<double> rep_dist(static_cast<size_t>(rep_count),
+                                     std::numeric_limits<double>::max());
         for (size_t vi = 0; vi < vcount; ++vi) {
+            double& d = rep_dist[static_cast<size_t>(rep[vi])];
+            d = std::min(d, body_dist[vi]);
+        }
+        std::vector<char> is_seed(static_cast<size_t>(rep_count), 0);
+        for (int r = 0; r < rep_count; ++r) {
+            if (rep_dist[static_cast<size_t>(r)] <= static_cast<double>(seed_eps_m)) {
+                is_seed[static_cast<size_t>(r)] = 1;
+            }
+        }
+
+        // (c') 每个连通分量至少保一个种子（取该分量内离身体最近的代表）；否则该分量没有
+        //      边界条件、会被松弛成常数。
+        std::vector<char> visited(static_cast<size_t>(rep_count), 0);
+        std::vector<int> stack;
+        for (int s = 0; s < rep_count; ++s) {
+            if (visited[static_cast<size_t>(s)]) {
+                continue;
+            }
+            stack.clear();
+            stack.push_back(s);
+            visited[static_cast<size_t>(s)] = 1;
+            int best = s;
+            bool has_seed = false;
+            while (!stack.empty()) {
+                const int r = stack.back();
+                stack.pop_back();
+                if (is_seed[static_cast<size_t>(r)]) {
+                    has_seed = true;
+                }
+                if (rep_dist[static_cast<size_t>(r)] <
+                    rep_dist[static_cast<size_t>(best)]) {
+                    best = r;
+                }
+                for (int nb : adj[static_cast<size_t>(r)]) {
+                    if (!visited[static_cast<size_t>(nb)]) {
+                        visited[static_cast<size_t>(nb)] = 1;
+                        stack.push_back(nb);
+                    }
+                }
+            }
+            if (!has_seed) {
+                is_seed[static_cast<size_t>(best)] = 1;  // 保底锚点
+            }
+        }
+
+        // (d) 初始稠密权重（按代表累加组内顶点的直接投影权重，再逐代表归一）。
+        std::vector<double> w(
+            static_cast<size_t>(rep_count) * static_cast<size_t>(bones), 0.0);
+        for (size_t vi = 0; vi < vcount; ++vi) {
+            const size_t row =
+                static_cast<size_t>(rep[vi]) * static_cast<size_t>(bones);
             for (int j = 0; j < 4; ++j) {
                 const int32_t bone = cloth->joint_indices[vi][j];
                 const float weight = cloth->joint_weights[vi][j];
                 if (weight > 0.0f && bone >= 0 && bone < bones) {
-                    w[vi * static_cast<size_t>(bones) + static_cast<size_t>(bone)] += weight;
+                    w[row + static_cast<size_t>(bone)] += weight;
                 }
             }
         }
-        std::vector<double> w_next(vcount * static_cast<size_t>(bones), 0.0);
-        for (int it = 0; it < smooth_iterations; ++it) {
-            for (size_t vi = 0; vi < vcount; ++vi) {
-                const size_t row = vi * static_cast<size_t>(bones);
-                const size_t deg = adj[vi].size();
+        for (int r = 0; r < rep_count; ++r) {
+            const size_t row = static_cast<size_t>(r) * static_cast<size_t>(bones);
+            double row_sum = 0.0;
+            for (int b = 0; b < bones; ++b) {
+                row_sum += w[row + static_cast<size_t>(b)];
+            }
+            if (row_sum > 0.0) {
+                for (int b = 0; b < bones; ++b) {
+                    w[row + static_cast<size_t>(b)] /= row_sum;
+                }
+            }
+        }
+
+        // (e) 高斯-赛德尔松弛：种子冻结；非种子 = (自身 + 邻居均值)/(1+deg)。跑到弱收敛
+        //     或达 growth_iterations 上限。
+        for (int it = 0; it < growth_iterations; ++it) {
+            double max_delta = 0.0;
+            for (int r = 0; r < rep_count; ++r) {
+                if (is_seed[static_cast<size_t>(r)]) {
+                    continue;  // 种子冻结
+                }
+                const size_t row = static_cast<size_t>(r) * static_cast<size_t>(bones);
+                const size_t deg = adj[static_cast<size_t>(r)].size();
                 const double denom = 1.0 + static_cast<double>(deg);
                 for (int b = 0; b < bones; ++b) {
-                    double s = w[row + static_cast<size_t>(b)];  // 自项
-                    for (int nb : adj[vi]) {
-                        s += w[static_cast<size_t>(nb) * static_cast<size_t>(bones) +
-                               static_cast<size_t>(b)];
+                    double acc = w[row + static_cast<size_t>(b)];
+                    for (int nb : adj[static_cast<size_t>(r)]) {
+                        acc += w[static_cast<size_t>(nb) * static_cast<size_t>(bones) +
+                                 static_cast<size_t>(b)];
                     }
-                    w_next[row + static_cast<size_t>(b)] = s / denom;
+                    const double next = acc / denom;
+                    max_delta = std::max(
+                        max_delta,
+                        std::fabs(next - w[row + static_cast<size_t>(b)]));
+                    w[row + static_cast<size_t>(b)] = next;
                 }
             }
-            w.swap(w_next);
-            stats.smooth_passes = static_cast<size_t>(it + 1);
+            stats.growth_passes = static_cast<size_t>(it + 1);
+            if (max_delta < kGrowthConvergeTol) {
+                break;
+            }
         }
-        // 稠密 → top-K + 归一化。
-        for (size_t vi = 0; vi < vcount; ++vi) {
-            const size_t row = vi * static_cast<size_t>(bones);
+
+        // (f) 逐代表 top-K + 归一化，再散射回该组所有顶点（缝合两侧得到同一份权重）。
+        std::vector<std::array<int32_t, 4>> rep_joints(static_cast<size_t>(rep_count));
+        std::vector<std::array<float, 4>> rep_weights(static_cast<size_t>(rep_count));
+        for (int r = 0; r < rep_count; ++r) {
+            const size_t row = static_cast<size_t>(r) * static_cast<size_t>(bones);
             std::vector<std::pair<double, int32_t>> items;
             for (int b = 0; b < bones; ++b) {
                 if (w[row + static_cast<size_t>(b)] > 0.0) {
                     items.emplace_back(w[row + static_cast<size_t>(b)], b);
                 }
             }
+            rep_joints[static_cast<size_t>(r)].fill(0);
+            rep_weights[static_cast<size_t>(r)].fill(0.0f);
             if (items.empty()) {
-                continue;  // 保持原值（理论上不会：原值已归一化）。
+                continue;  // 理论不会：初始权重已带质量（除非该组权重全零）。
             }
             std::stable_sort(items.begin(), items.end(),
                              [](const std::pair<double, int32_t>& a,
@@ -504,13 +754,15 @@ inline SkinTransferStats TransferSkinWeights(
             for (int i = 0; i < take; ++i) {
                 sum += items[i].first;
             }
-            cloth->joint_indices[vi].fill(0);
-            cloth->joint_weights[vi].fill(0.0f);
             for (int i = 0; i < take; ++i) {
-                cloth->joint_indices[vi][i] = items[i].second;
-                cloth->joint_weights[vi][i] =
+                rep_joints[static_cast<size_t>(r)][i] = items[i].second;
+                rep_weights[static_cast<size_t>(r)][i] =
                     (sum > 0.0) ? static_cast<float>(items[i].first / sum) : 0.0f;
             }
+        }
+        for (size_t vi = 0; vi < vcount; ++vi) {
+            cloth->joint_indices[vi] = rep_joints[static_cast<size_t>(rep[vi])];
+            cloth->joint_weights[vi] = rep_weights[static_cast<size_t>(rep[vi])];
         }
     }
 

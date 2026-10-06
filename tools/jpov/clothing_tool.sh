@@ -5,6 +5,8 @@
 # 用法（在仓库根或本目录下均可）：
 #   ./tools/jpov/clothing_tool.sh
 #
+# 完整使用说明（人 + AI）：tools/jpov/clothing/README.md
+#
 # 效果：
 #   1. bazel build //tools/jpov/clothing:jpov_clothing_tool（Linux ELF）
 #   2. 产物拷贝到工程 output/jpov_clothing_tool/ 下（含 exe 旁 fonts/）
@@ -123,3 +125,5 @@ echo "         - clothing_save.{h,cc}    保存衣服 mesh 为 glb（后台线�
 echo "         - jpov_clothing_tool.cc  主程序（CLI 装配 + 交互/headless 分发）"
 echo "     · 软体仿真：复用 //tools/jpov/soft_mesh_simulator（独立包，纯 CPU）"
 echo "     · 视角/光照/地面：复用 //tools/jpov:view_config / skylight_scene（zero 分叉）"
+echo ""
+echo "   完整使用说明（人 + AI）：tools/jpov/clothing/README.md"

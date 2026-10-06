@@ -121,7 +121,7 @@ cc_test(
     ],
 )
 
-# 软布自动蒙皮（weight transfer）纯函数单测（重心插值 / top-K / gap 兜底 / 平滑；无 GL）。
+# 软布自动蒙皮（weight transfer）纯函数单测（重心插值 / top-K / 种子生长 / 焊接 / 离体兜底；无 GL）。
 cc_test(
     name = "weight_transfer_test",
     srcs = ["weight_transfer_test.cc"],
