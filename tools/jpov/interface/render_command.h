@@ -437,6 +437,37 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
+// 点雾体的径向衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
+//
+// 剖面给出半径 r ∈ [0, R] 处的相对消光权重 w(r) ∈ [0,1]；r > R 处 w = 0（球外不贡献）。
+// 实际消光强度由 Fire-Fog 管线结合 intensity / 颜色推出，本字段只定「形状」。
+enum class FogAttenuation : uint8_t {
+    kUniform = 0,      // 均匀：r ≤ R 恒为 1（硬边球）
+    kLinear = 1,       // 线性：w = 1 − r/R
+    kQuadratic = 2,    // 二次（穹顶/平滑）：w = 1 − (r/R)²
+    kExponential = 3,  // 指数（归一化到边缘为 0）：w = (e^{−k·r/R} − e^{−k}) / (1 − e^{−k})，k = 4
+};
+
+// 点状雾体（世界空间）—— JPOV 雾火管线的用户级输入（v1：简单点状雾）。
+//
+// 雾体「像点光源一样摆放」：在 center 处放一团半径 radius 的雾，半径内按 attenuation
+// 剖面给出消光密度，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
+// 逐像素 ZDist；见 tools/jpov/docs/jpov_fire_fog_design.md），与 ElevationFogConfig
+//（屏幕空间解析雾）是**两条不同的通道**。
+//
+// 字段（按此顺序聚合初始化）：
+//   { center, radius, color, intensity, attenuation }
+// 例: { {0,1,0}, 3.0f, {1.0f,0.6f,0.2f,1.0f}, 1.5f, FogAttenuation::kQuadratic }
+//
+// Pre-condition: radius > 0
+struct PointFog {
+    Vec3f center;                 // 雾体中心（世界坐标）
+    float radius;                 // 半径（米，> 0）；超出该半径的像素不受本团影响
+    Color color;                  // 介质色 / 内散射色（HDR 线性域）
+    float intensity;              // 强度（HDR，可 > 1）
+    FogAttenuation attenuation;   // 径向衰减剖面
+};
+
 // 全局平行光（太阳 Directional Light）。
 //
 // 与点光源不同：无位置、无衰减、影响所有片元，因此不走 tile culling，
@@ -1647,6 +1678,11 @@ struct RenderCommandList {
     // 让该光源覆盖更大范围（甚至全屏）以保证不漏光。因此“某 light 影响
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
+
+    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（屏幕 tile 剪枝 + 逐像素 ZDist），
+    // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
+    // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
+    std::vector<PointFog> point_fogs;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
