@@ -224,5 +224,87 @@ TEST(ConvexHullTilesTest, HullBoundsMatchReference) {
   EXPECT_EQ(mismatched, 0);
 }
 
+// ── 边界 / 契约 ──
+
+TEST(ConvexHullTilesTest, EmptyAndDegenerateInputsYieldNothing) {
+  const TileGrid g = MakeGrid(1, 16, 16);
+  EXPECT_TRUE(ConvexHullCoveredTiles(g, {}).empty());                 // 空
+  EXPECT_TRUE(ConvexHullCoveredTiles(g, {{5, 5}}).empty());           // 单点
+  EXPECT_TRUE(ConvexHullCoveredTiles(g, {{5, 1}, {5, 9}}).empty());   // 全同 x
+  EXPECT_TRUE(ConvexHullCoveredTiles(g, {{5, 5}, {5, 5}}).empty());   // 重复点
+}
+
+TEST(ConvexHullTilesTest, TooManyPointsIsRejected) {
+  const TileGrid g = MakeGrid(1, 16, 16);
+  std::vector<Vec2d> p(9);   // > kMaxPts(8)
+  for (int i = 0; i < 9; ++i) p[i] = {static_cast<double>(i), static_cast<double>(i % 3)};
+  std::vector<TileCoord> out;
+  EXPECT_DEATH(AppendConvexHullCoveredTiles(g, p, &out), "");
+}
+
+TEST(ConvexHullTilesTest, AppendKeepsExistingAndStaysSortedUnique) {
+  const TileGrid g = MakeGrid(1, 16, 16);
+  std::vector<TileCoord> out = {{99, 99}};   // 预置一条 → 验证 append 不清空
+  const std::vector<Vec2d> p = {{0, 0}, {10, 0}, {0, 10}};
+  AppendConvexHullCoveredTiles(g, p, &out);
+  ASSERT_GT(out.size(), 3u);
+  EXPECT_TRUE((out[0] == TileCoord{99, 99}));
+  // 追加段（index>=1）按 (col,row) 升序且无重复。
+  for (size_t i = 2; i < out.size(); ++i) {
+    const TileCoord& a = out[i - 1];
+    const TileCoord& b = out[i];
+    EXPECT_TRUE(a.x != b.x ? a.x < b.x : a.y < b.y);
+  }
+}
+
+TEST(ConvexHullTilesTest, OffGridHullClampsToGrid) {
+  const TileGrid g = MakeGrid(1, 10, 10);
+  // 凸包远超网格 → 全部夹断到 [0,9]，不越界、不崩溃
+  const std::vector<Vec2d> p = {{-100, -100}, {100, -100}, {100, 100}, {-100, 100}};
+  const std::vector<TileCoord> t = Sorted(ConvexHullCoveredTiles(g, p));
+  EXPECT_EQ(t.size(), 100u);   // 整屏 10x10
+  for (const TileCoord& c : t) {
+    EXPECT_GE(c.x, 0);
+    EXPECT_LE(c.x, 9);
+    EXPECT_GE(c.y, 0);
+    EXPECT_LE(c.y, 9);
+  }
+}
+
+TEST(ConvexHullTilesTest, TinyHullWithinOneTile) {
+  const TileGrid g = MakeGrid(10.0, 8, 8);
+  // 三点全落在 tile (1,1) = [10,20)x[10,20)
+  const std::vector<Vec2d> p = {{12.0, 12.0}, {17.0, 13.0}, {14.0, 18.0}, {16.0, 16.0}};
+  const std::vector<TileCoord> t = Sorted(ConvexHullCoveredTiles(g, p));
+  ASSERT_EQ(t.size(), 1u);
+  EXPECT_TRUE((t[0] == TileCoord{1, 1}));
+}
+
+TEST(ConvexHullTilesTest, VerticalEdgeMatchesReference) {
+  // 左竖直边（同 x 两顶点）→ 折叠成单值函数，不得崩。
+  // 用**非整数**坐标，避开「顶点正好落在 tile 边界」时 util(floor 半开) 与
+  // 参照 SAT(擦边算相交) 的口径差（那是测度零的约定差，非缺陷）。
+  const TileGrid g = MakeGrid(1, 12, 12);
+  const std::vector<Vec2d> p = {{0.5, 0.5}, {0.5, 9.5}, {10.5, 5.5}};
+  EXPECT_TRUE(Sorted(ConvexHullCoveredTiles(g, p)) == RefTiles(g, p));
+}
+
+TEST(ConvexHullTilesTest, BuildRejectsBadPointCount) {
+  Vec2d p[16];
+  for (int i = 0; i < 16; ++i) p[i] = {static_cast<double>(i), static_cast<double>(i)};
+  EXPECT_DEATH({ ScreenHull h; h.Build(p, 0); }, "");
+  EXPECT_DEATH({ ScreenHull h; h.Build(p, 9); }, "");
+  EXPECT_DEATH({ ScreenHull h; h.Build(p, 16); }, "");
+}
+
+TEST(ConvexHullTilesTest, ChainValueAtInterpAndExtrapolate) {
+  const Vec2d c[3] = {{0, 0}, {2, 4}, {4, 0}};
+  EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, 0.0), 0.0);
+  EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, 1.0), 2.0);
+  EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, 3.0), 2.0);
+  EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, -1.0), -2.0);   // 左外推（斜率 2）
+  EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, 5.0), -2.0);    // 右外推（斜率 -2）
+}
+
 }  // namespace math
 }  // namespace geom

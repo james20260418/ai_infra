@@ -227,8 +227,11 @@ inline void AppendConvexHullCoveredTiles(const TileGrid& grid,
   CHECK_GT(grid.cell, 0.0) << "cell 必须 > 0";
   CHECK_GE(grid.cols, 1);
   CHECK_GE(grid.rows, 1);
-  if (pts.empty() || static_cast<int>(pts.size()) > ScreenHull::kMaxPts) {
-    return;
+  // 点数上限是硬约束（box = 8）：超了是调用方错误，crash 早暴露（不静默吞）。
+  CHECK_LE(pts.size(), static_cast<size_t>(ScreenHull::kMaxPts))
+      << "点数 " << pts.size() << " 超过上限 " << ScreenHull::kMaxPts;
+  if (pts.empty()) {
+    return;   // 无点 → 无覆盖（合法退化）
   }
   ScreenHull hull;
   hull.Build(pts.data(), static_cast<int>(pts.size()));
