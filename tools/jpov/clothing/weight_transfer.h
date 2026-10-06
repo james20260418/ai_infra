@@ -52,6 +52,46 @@ inline constexpr int kMaxSkinInfluences = 4;
 inline constexpr float kWeldToleranceM = 5.0e-3f;     // 默认值（5mm）
 inline constexpr float kWeldToleranceMaxM = 1.0e-2f;  // 面板上界（10mm）
 
+// ── 焊接判据模式（2026-10-06 Danis）──
+//
+// 绝对距离焊接（kAbsoluteDistance）在**模型被缩放/拉伸后**会失配：阈值是绝对米，缩放后
+//   真实重复点距离同步放大（低阈值漏焊→裂缝）而密集区相邻点被相对拉近（高阈值误焊→发硬）。
+// 相对局部边长焊接（kRelativeLocalEdge）用「相距 < 比例 × 局部边长」判定重复点：
+//   重复点（缝合拆开）距离≈0，真实相邻点距离≈1×局部边长，两者中间有大空档；
+//   该判据**与模型尺度、与局部密度都无关**，无需按模型大小/疏密反复调参。
+//   （数据见 memory/2026-10-06.md：harness_vest 98% / yoga_pants 29% 顶点最近邻≈0。）
+enum class WeldMode {
+    kAbsoluteDistance,   // 绝对距离阈值（米）
+    kRelativeLocalEdge,  // 相对局部边长比例
+};
+
+// 相对模式默认比例（× 局部边长）：相距 < 30% 局部边长才算重复点。
+inline constexpr float kDefaultLocalEdgeWeldRatio = 0.3f;
+// 相对模式比例的合法范围（工具面板 clamp）：0 = 关闭焊接。
+inline constexpr float kMinLocalEdgeWeldRatio = 0.0f;
+inline constexpr float kMaxLocalEdgeWeldRatio = 1.0f;
+
+// 一次焊接的判据（值 + 模式）。用结构体而非裸 float：两种模式的量纲不同（米 vs 比例），
+// 分开表达避免「同一个 float 传了不同含义」的隐式坑。
+struct WeldSpec {
+    WeldMode mode = WeldMode::kAbsoluteDistance;
+    float absolute_tolerance_m = kWeldToleranceM;         // 仅 kAbsoluteDistance 用
+    float local_edge_ratio = kDefaultLocalEdgeWeldRatio;  // 仅 kRelativeLocalEdge 用
+
+    static WeldSpec Absolute(float tolerance_m) {
+        WeldSpec w;
+        w.mode = WeldMode::kAbsoluteDistance;
+        w.absolute_tolerance_m = tolerance_m;
+        return w;
+    }
+    static WeldSpec Relative(float ratio) {
+        WeldSpec w;
+        w.mode = WeldMode::kRelativeLocalEdge;
+        w.local_edge_ratio = ratio;
+        return w;
+    }
+};
+
 // 生长（种子冻结的高斯-赛德尔松弛）的弱收敛判据：单轮内所有代表权重的最大变化 < 该值即停。
 inline constexpr double kGrowthConvergeTol = 1.0e-5;
 
@@ -127,6 +167,21 @@ struct SkinTransferStats {
 std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
                                         float tolerance_m);
 
+// 每顶点的「局部边长」= 其所有关联三角形边的长度均值（无关联边则 0）。供相对焊接定标。
+// Pre-condition: indices 为空（按每 3 个连续顶点成三角形）或长度为 3 的倍数；索引 < n。
+std::vector<float> ComputeVertexLocalEdgeLength(
+    const std::vector<Vec3f>& positions, const std::vector<uint32_t>& indices);
+
+// 相对局部边长焊接：相距 < ratio × min(局部边长_u, 局部边长_v) 的顶点并成一组（并查集），
+// 返回每个顶点的**组代表下标**（组代表 = 组内最小下标，rep_of[v] == v）。
+//   用 min 而非 max/均值：一侧密集（局部边长短）时不把远处稀疏顶点误并进来，更保守。
+//   与模型尺度无关：缩放后所有距离同比例变化，判据不变 ⇒ 拉伸后无需重调。
+//   ratio <= 0：不做任何合并（恒等映射）。
+// Pre-condition: positions 元素均为有限值。
+std::vector<int> WeldVerticesByLocalEdgeRatio(
+    const std::vector<Vec3f>& positions, const std::vector<uint32_t>& indices,
+    float ratio);
+
 // 软布自动蒙皮（weight transfer + 种子生长）：
 //   对 cloth 每个顶点 v：
 //     1) 在 body_matcher 找候选三角形（FindNearestTriangles）→ 取真正最近的 tri；
@@ -134,7 +189,8 @@ std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
 //     3) 按重心坐标 + 3 角 (joints,weights) 累加，取全局 top-`max_influences` 骨、归一化
 //        → 这份「直接投影权重」是所有顶点的初值（既是种子权重，也是生长不到的兜底）。
 //   种子 = 到身体最近距离 <= seed_eps_m 的顶点（视为「贴身」，其直接投影权重可信）。
-//   weld_tolerance_m：生长前焊接「位置重合的缝合重复顶点」的距离阈值（米）；0 = 关闭焊接。
+//   weld：生长前焊接「缝合重复顶点」的判据（WeldSpec）——绝对距离（米）或相对局部边长（比例）。
+//     见 WeldMode 注释；值为 0 时各自表示「关闭焊接」。
 //   growth_iterations > 0：**种子冻结**的调和扩散——在（焊接后的）衣物邻接图上做高斯-赛德尔
 //     松弛：种子权重固定为直接投影权重，非种子 = (自身 + 邻居均值)/(1+deg)，跑到弱收敛或达
 //     迭代上限。自由区（离体 / 宽松 / 悬空）的权重于是从种子向内「生长」出来，既连续、又不会
@@ -151,13 +207,13 @@ std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
 //   - cloth->positions 非空；
 //   - cloth->joint_indices / joint_weights 为空，或长度 == positions.size()；
 //   - 1 <= max_influences <= kMaxSkinInfluences；
-//   - seed_eps_m > 0；weld_tolerance_m >= 0；growth_iterations >= 0。
+//   - seed_eps_m > 0；weld 值 >= 0（绝对模式距离 / 相对模式比例）；growth_iterations >= 0。
 SkinTransferStats TransferSkinWeights(
     const BodySkinTable& body_skin,
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
     float seed_eps_m,
-    float weld_tolerance_m,
+    const WeldSpec& weld,
     int max_influences,
     int growth_iterations);
 
@@ -221,19 +277,56 @@ inline void AppendMeshTriangles(const MeshData& mesh,
     }
 }
 
-inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
-                                               float tolerance_m) {
-    CHECK_GE(tolerance_m, 0.0f);
+// ── 焊接共用工具（绝对距离 / 相对局部边长两种模式共用并查集 + 空间哈希）──
+namespace weld_detail {
+
+struct CellKey {
+    int64_t x;
+    int64_t y;
+    int64_t z;
+    bool operator==(const CellKey& o) const {
+        return x == o.x && y == o.y && z == o.z;
+    }
+};
+struct CellHash {
+    size_t operator()(const CellKey& k) const {
+        uint64_t h = 1469598103934665603ULL;  // FNV offset
+        const int64_t v[3] = {k.x, k.y, k.z};
+        for (int i = 0; i < 3; ++i) {
+            uint64_t u = static_cast<uint64_t>(v[i]);
+            u += 0x9e3779b97f4a7c15ULL;  // splitmix64 混合（避免相邻整数哈希扎堆）
+            u = (u ^ (u >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            u = (u ^ (u >> 27)) * 0x94d049bb133111ebULL;
+            u ^= (u >> 31);
+            h ^= u;
+            h *= 1099511628211ULL;
+        }
+        return static_cast<size_t>(h);
+    }
+};
+inline CellKey CellOf(const Vec3f& p, double inv) {
+    return CellKey{static_cast<int64_t>(std::floor(p.x() * inv)),
+                   static_cast<int64_t>(std::floor(p.y() * inv)),
+                   static_cast<int64_t>(std::floor(p.z() * inv))};
+}
+
+// 并查集合并：对每对 (i,j)（i<j），若 dist(i,j) <= min(thr[i], thr[j]) 则并入一组。
+// 返回每顶点的组代表（组内最小下标，rep_of[v]==v）。cell_size 为空间哈希体素边长（米）；
+// 查本格 + 26 邻居格（每轴 ±1），保证跨格边界的重复对不漏。
+// Pre-condition: thr.size() == positions.size()；所有 thr >= 0；cell_size > 0。
+inline std::vector<int> WeldUnionFind(const std::vector<Vec3f>& positions,
+                                      const std::vector<float>& thr,
+                                      double cell_size) {
+    CHECK_EQ(thr.size(), positions.size());
+    CHECK_GT(cell_size, 0.0);
     const size_t n = positions.size();
     std::vector<int> rep(n);
     for (size_t i = 0; i < n; ++i) {
         rep[i] = static_cast<int>(i);
     }
-    if (n == 0 || tolerance_m <= 0.0f) {
-        return rep;  // 不做合并（恒等映射）
+    if (n == 0) {
+        return rep;
     }
-
-    // 并查集：find 带路径压缩；union 让代表恒为组内最小下标（确定性）。
     const auto find_root = [&rep](int x) {
         int r = x;
         while (rep[r] != r) {
@@ -259,46 +352,18 @@ inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positio
         }
     };
 
-    // 空间哈希：按 tolerance 量化到体素；查本格 + 26 邻居格，保证跨格边界的重合对不漏。
-    struct CellKey {
-        int64_t x;
-        int64_t y;
-        int64_t z;
-        bool operator==(const CellKey& o) const {
-            return x == o.x && y == o.y && z == o.z;
-        }
-    };
-    struct CellHash {
-        size_t operator()(const CellKey& k) const {
-            uint64_t h = 1469598103934665603ULL;  // FNV offset
-            const int64_t v[3] = {k.x, k.y, k.z};
-            for (int i = 0; i < 3; ++i) {
-                uint64_t u = static_cast<uint64_t>(v[i]);
-                u += 0x9e3779b97f4a7c15ULL;  // splitmix64 混合（避免相邻整数哈希扎堆）
-                u = (u ^ (u >> 30)) * 0xbf58476d1ce4e5b9ULL;
-                u = (u ^ (u >> 27)) * 0x94d049bb133111ebULL;
-                u ^= (u >> 31);
-                h ^= u;
-                h *= 1099511628211ULL;
-            }
-            return static_cast<size_t>(h);
-        }
-    };
-    const double inv = 1.0 / static_cast<double>(tolerance_m);
-    const auto key_of = [inv](const Vec3f& p) {
-        return CellKey{static_cast<int64_t>(std::floor(p.x() * inv)),
-                       static_cast<int64_t>(std::floor(p.y() * inv)),
-                       static_cast<int64_t>(std::floor(p.z() * inv))};
-    };
+    const double inv = 1.0 / cell_size;
     std::unordered_map<CellKey, std::vector<int>, CellHash> cells;
     for (size_t i = 0; i < n; ++i) {
-        cells[key_of(positions[i])].push_back(static_cast<int>(i));
+        cells[CellOf(positions[i], inv)].push_back(static_cast<int>(i));
     }
 
-    const double tol2 =
-        static_cast<double>(tolerance_m) * static_cast<double>(tolerance_m);
     for (size_t i = 0; i < n; ++i) {
-        const CellKey base = key_of(positions[i]);
+        const double ti = static_cast<double>(thr[i]);
+        if (ti <= 0.0) {
+            continue;  // 阈值为 0：永不与他点合并。
+        }
+        const CellKey base = CellOf(positions[i], inv);
         const double px = positions[i].x();
         const double py = positions[i].y();
         const double pz = positions[i].z();
@@ -314,10 +379,15 @@ inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positio
                         if (j <= static_cast<int>(i)) {
                             continue;  // 每对只处理一次
                         }
+                        const double limit = std::min(
+                            ti, static_cast<double>(thr[static_cast<size_t>(j)]));
+                        if (limit <= 0.0) {
+                            continue;
+                        }
                         const double ddx = px - positions[static_cast<size_t>(j)].x();
                         const double ddy = py - positions[static_cast<size_t>(j)].y();
                         const double ddz = pz - positions[static_cast<size_t>(j)].z();
-                        if (ddx * ddx + ddy * ddy + ddz * ddz <= tol2) {
+                        if (ddx * ddx + ddy * ddy + ddz * ddz <= limit * limit) {
                             unite(static_cast<int>(i), j);
                         }
                     }
@@ -325,11 +395,107 @@ inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positio
             }
         }
     }
-    // 压缩到根代表（根 = 组内最小下标）。
     for (size_t i = 0; i < n; ++i) {
         rep[i] = find_root(static_cast<int>(i));
     }
     return rep;
+}
+
+}  // namespace weld_detail
+
+inline std::vector<int> WeldVerticesByPosition(const std::vector<Vec3f>& positions,
+                                               float tolerance_m) {
+    CHECK_GE(tolerance_m, 0.0f);
+    const size_t n = positions.size();
+    if (n == 0 || tolerance_m <= 0.0f) {
+        std::vector<int> rep(n);
+        for (size_t i = 0; i < n; ++i) {
+            rep[i] = static_cast<int>(i);
+        }
+        return rep;  // 不做合并（恒等映射）
+    }
+    const std::vector<float> thr(n, tolerance_m);
+    return weld_detail::WeldUnionFind(positions, thr,
+                                      static_cast<double>(tolerance_m));
+}
+
+inline std::vector<float> ComputeVertexLocalEdgeLength(
+    const std::vector<Vec3f>& positions, const std::vector<uint32_t>& indices) {
+    const size_t n = positions.size();
+    std::vector<double> sum(n, 0.0);
+    std::vector<int> cnt(n, 0);
+    const auto add_edge = [&](uint32_t a, uint32_t b) {
+        CHECK_LT(a, n);
+        CHECK_LT(b, n);
+        const double dx = static_cast<double>(positions[a].x()) - positions[b].x();
+        const double dy = static_cast<double>(positions[a].y()) - positions[b].y();
+        const double dz = static_cast<double>(positions[a].z()) - positions[b].z();
+        const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        sum[a] += d;
+        ++cnt[a];
+        sum[b] += d;
+        ++cnt[b];
+    };
+    const auto add_tri = [&](size_t i0, size_t i1, size_t i2) {
+        add_edge(static_cast<uint32_t>(i0), static_cast<uint32_t>(i1));
+        add_edge(static_cast<uint32_t>(i1), static_cast<uint32_t>(i2));
+        add_edge(static_cast<uint32_t>(i2), static_cast<uint32_t>(i0));
+    };
+    if (!indices.empty()) {
+        CHECK_EQ(indices.size() % 3, 0u)
+            << "ComputeVertexLocalEdgeLength: indices 长度不是 3 的倍数";
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            add_tri(indices[i], indices[i + 1], indices[i + 2]);
+        }
+    } else {
+        for (size_t i = 0; i + 2 < n; i += 3) {
+            add_tri(i, i + 1, i + 2);
+        }
+    }
+    std::vector<float> out(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        if (cnt[i] > 0) {
+            out[i] = static_cast<float>(sum[i] / static_cast<double>(cnt[i]));
+        }
+    }
+    return out;
+}
+
+inline std::vector<int> WeldVerticesByLocalEdgeRatio(
+    const std::vector<Vec3f>& positions, const std::vector<uint32_t>& indices,
+    float ratio) {
+    CHECK_GE(ratio, 0.0f);
+    const size_t n = positions.size();
+    std::vector<int> rep(n);
+    for (size_t i = 0; i < n; ++i) {
+        rep[i] = static_cast<int>(i);
+    }
+    if (n == 0 || ratio <= 0.0f) {
+        return rep;  // 关闭
+    }
+    const std::vector<float> local = ComputeVertexLocalEdgeLength(positions, indices);
+    // 稳健的网格边长 = 正局部边长的中位数（无拓扑 → 无从判断局部尺度 → 不做合并）。
+    std::vector<float> positive;
+    positive.reserve(n);
+    for (float v : local) {
+        if (v > 0.0f) {
+            positive.push_back(v);
+        }
+    }
+    if (positive.empty()) {
+        return rep;
+    }
+    std::sort(positive.begin(), positive.end());
+    const double cell = static_cast<double>(positive[positive.size() / 2]);
+    if (!(cell > 0.0)) {
+        return rep;
+    }
+    // 每顶点阈值 = 比例 × 局部边长；无拓扑的顶点阈值 0（永不被并）。
+    std::vector<float> thr(n);
+    for (size_t i = 0; i < n; ++i) {
+        thr[i] = ratio * local[i];
+    }
+    return weld_detail::WeldUnionFind(positions, thr, cell);
 }
 
 inline std::array<double, 3> BarycentricOnTriangle(const geom::Vec3<double>& a,
@@ -453,7 +619,7 @@ inline SkinTransferStats TransferSkinWeights(
     const geom::TriangleMatcher3d<double>& body_matcher,
     MeshData* cloth /*inout*/,
     float seed_eps_m,
-    float weld_tolerance_m,
+    const WeldSpec& weld,
     int max_influences,
     int growth_iterations) {
     CHECK(cloth != nullptr);
@@ -461,7 +627,8 @@ inline SkinTransferStats TransferSkinWeights(
         << "TransferSkinWeights: 蒙皮表与身体匹配器不同序不同长";
     CHECK(!cloth->positions.empty()) << "TransferSkinWeights: 衣物顶点为空";
     CHECK_GT(seed_eps_m, 0.0f);
-    CHECK_GE(weld_tolerance_m, 0.0f);
+    CHECK_GE(weld.absolute_tolerance_m, 0.0f);
+    CHECK_GE(weld.local_edge_ratio, 0.0f);
     CHECK_GE(max_influences, 1);
     CHECK_LE(max_influences, kMaxSkinInfluences);
     CHECK_GE(growth_iterations, 0);
@@ -570,9 +737,13 @@ inline SkinTransferStats TransferSkinWeights(
     if (growth_iterations > 0) {
         const int bones = std::max(body_skin.referenced_bone_count(), 1);
 
-        // (a) 焊接：位置重合（缝合拆开）的顶点并成一组，压成稠密编号 0..rep_count-1。
+        // (a) 焊接：缝合拆开的重复顶点并成一组，压成稠密编号 0..rep_count-1。
+        //     判据由 weld.mode 决定：绝对距离（米）/ 相对局部边长（比例）。
         const std::vector<int> root_of =
-            WeldVerticesByPosition(cloth->positions, weld_tolerance_m);
+            (weld.mode == WeldMode::kAbsoluteDistance)
+                ? WeldVerticesByPosition(cloth->positions, weld.absolute_tolerance_m)
+                : WeldVerticesByLocalEdgeRatio(cloth->positions, cloth->indices,
+                                               weld.local_edge_ratio);
         std::vector<int> rep(vcount);
         std::vector<int> dense_of_root(vcount, -1);
         int rep_count = 0;

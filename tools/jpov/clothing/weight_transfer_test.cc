@@ -97,7 +97,7 @@ TEST(WeightTransferTest, ExactBodyVertexCopiesWeights) {
     MeshData cloth = MakeCloth({Vec3f(1, 0, 0)});  // = v1（骨 1）
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/0.005f,
-                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     EXPECT_EQ(s.vertex_count, 1u);
     EXPECT_EQ(s.non_seed_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f,
@@ -113,7 +113,7 @@ TEST(WeightTransferTest, EdgeMidpointBlendsTwoBones) {
     MeshData cloth = MakeCloth({Vec3f(0.5f, 0.0f, 0.0f)});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/0.005f,
-                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     EXPECT_EQ(s.non_seed_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 0), 0.5f,
                 1e-4f);
@@ -132,7 +132,7 @@ TEST(WeightTransferTest, TriangleCentroidBlendsThreeBones) {
     MeshData cloth = MakeCloth({c});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/0.05f,
-                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     EXPECT_EQ(s.non_seed_vertex_count, 0u);
     EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[0], cloth.joint_weights[0], 1), 1.0f / 3.0f,
                 1e-4f);
@@ -156,7 +156,7 @@ TEST(WeightTransferTest, TopKPrunesAndNormalizes) {
     MeshData cloth = MakeCloth({centroid});
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/0.05f,
-                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     EXPECT_EQ(s.non_seed_vertex_count, 0u);
     // 恰好 4 个非零（第 4 槽之后归零）。
     int nonzero = 0;
@@ -185,7 +185,7 @@ TEST(WeightTransferTest, NonSeedVertexKeepsDirectTransfer) {
     MeshData cloth = MakeCloth({Vec3f(1.0f, 5.0f, 0.5f)});  // 远离身体
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/0.005f,
-                            /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     EXPECT_EQ(s.non_seed_vertex_count, 1u);
     EXPECT_EQ(s.seed_vertex_count, 0u);
     EXPECT_GT(s.max_body_distance_m, 4.0f);
@@ -221,7 +221,7 @@ TEST(WeightTransferTest, GrowthBlendsTowardSeedsAndFreezesSeeds) {
     MeshData cloth = MakeCloth({Vec3f(0, 0, 0), Vec3f(1, 0.5f, 0), Vec3f(2, 0, 0)});
     cloth.indices = {0, 1, 2};
     const SkinTransferStats s = TransferSkinWeights(
-        f.table, f.matcher.value(), &cloth, /*seed_eps*/0.1f, /*weld*/kWeldToleranceM,
+        f.table, f.matcher.value(), &cloth, /*seed_eps*/0.1f, /*weld*/ WeldSpec::Absolute(kWeldToleranceM),
         /*max_inf*/4, /*growth*/50);
     EXPECT_EQ(s.seed_vertex_count, 2u);      // 顶点 0、2
     EXPECT_EQ(s.non_seed_vertex_count, 1u);  // 顶点 1
@@ -248,9 +248,9 @@ TEST(WeightTransferTest, SeedlessSingletonKeepsDirectTransfer) {
     MeshData no_grow = base;
     MeshData grow = base;
     TransferSkinWeights(f.table, f.matcher.value(), &no_grow, /*seed_eps*/0.1f,
-                        /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/0);
+                        /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/0);
     TransferSkinWeights(f.table, f.matcher.value(), &grow, /*seed_eps*/0.1f,
-                        /*weld*/kWeldToleranceM, /*max_inf*/4, /*growth*/50);
+                        /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/4, /*growth*/50);
     EXPECT_EQ(grow.joint_indices[3], no_grow.joint_indices[3]);
     for (int k = 0; k < 4; ++k) {
         EXPECT_NEAR(grow.joint_weights[3][k], no_grow.joint_weights[3][k], 1e-6f);
@@ -268,7 +268,7 @@ TEST(WeightTransferTest, GrowthKeepsUniformFieldWhenAllSeeds) {
     BodyFixture f = BuildFixture(body);
     MeshData cloth = MakeCloth(body.positions);
     cloth.indices = body.indices;
-    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/kWeldToleranceM, 4, /*growth*/2);
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/ WeldSpec::Absolute(kWeldToleranceM), 4, /*growth*/2);
     for (size_t v = 0; v < cloth.positions.size(); ++v) {
         EXPECT_NEAR(WeightOfJoint(cloth.joint_indices[v], cloth.joint_weights[v], 0), 1.0f,
                     1e-5f);
@@ -281,7 +281,7 @@ TEST(WeightTransferTest, SetsKJointsFlagAndAlignedArrays) {
     const MeshData body = MakeGridBody();
     BodyFixture f = BuildFixture(body);
     MeshData cloth = MakeCloth({Vec3f(0.5f, 0, 0), Vec3f(1.5f, 0, 0)});
-    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/kWeldToleranceM, 4, 0);
+    TransferSkinWeights(f.table, f.matcher.value(), &cloth, 0.005f, /*weld*/ WeldSpec::Absolute(kWeldToleranceM), 4, 0);
     EXPECT_TRUE(MeshHasFlag(cloth.flags, MeshVertexFlags::kJoints));
     EXPECT_EQ(cloth.joint_indices.size(), cloth.positions.size());
     EXPECT_EQ(cloth.joint_weights.size(), cloth.positions.size());
@@ -334,7 +334,7 @@ TEST(WeightTransferTest, WeldKeepsSeamVerticesIdenticalAfterGrowth) {
 
     const SkinTransferStats s =
         TransferSkinWeights(f.table, f.matcher.value(), &cloth, /*seed_eps*/ 0.005f,
-                            /*weld*/ kWeldToleranceM, /*max_inf*/ 4, /*growth*/ 2);
+                            /*weld*/ WeldSpec::Absolute(kWeldToleranceM), /*max_inf*/ 4, /*growth*/ 2);
 
     // 缝合对：L1(1)↔R0(4)，L3(3)↔R2(6)。
     const std::pair<int, int> seams[2] = {std::make_pair(1, 4), std::make_pair(3, 6)};
@@ -365,19 +365,111 @@ TEST(WeightTransferTest, WeldToleranceParameterControlsMerging) {
 
     MeshData fine = cloth;
     const SkinTransferStats s_fine = TransferSkinWeights(
-        f.table, f.matcher.value(), &fine, /*seed_eps*/0.005f, /*weld*/1.0e-4f,
+        f.table, f.matcher.value(), &fine, /*seed_eps*/0.005f, /*weld*/ WeldSpec::Absolute(1.0e-4f),
         /*max_inf*/4, /*growth*/2);
     EXPECT_EQ(s_fine.weld_merged_vertex_count, 0u);  // 0.5mm > 0.1mm → 不并
 
     MeshData coarse = cloth;
     const SkinTransferStats s_coarse = TransferSkinWeights(
-        f.table, f.matcher.value(), &coarse, /*seed_eps*/0.005f, /*weld*/2.0e-3f,
+        f.table, f.matcher.value(), &coarse, /*seed_eps*/0.005f, /*weld*/ WeldSpec::Absolute(2.0e-3f),
         /*max_inf*/4, /*growth*/2);
     EXPECT_EQ(s_coarse.weld_merged_vertex_count, 2u);  // 0.5mm < 2mm → R0、R2 并入
     for (int k = 0; k < 4; ++k) {
         EXPECT_NEAR(coarse.joint_weights[1][k], coarse.joint_weights[4][k], 1e-6f);
         EXPECT_NEAR(coarse.joint_weights[3][k], coarse.joint_weights[6][k], 1e-6f);
     }
+}
+
+// ==================== 相对局部边长焊接（2026-10-06） ====================
+
+namespace {
+
+// 测试网格：两个 2mm 偏移的「重复对」+ 一个真实顶点。
+//   v0/v1/v2 = 基准三角；v3/v4/v5 = 各自偏移 2mm 的重复点；v6 = 真实「邻近但不同」点。
+std::vector<Vec3f> RelativeWeldPositions() {
+    return {
+        Vec3f(0.0f, 0.0f, 0.0f),        // 0
+        Vec3f(1.0f, 0.0f, 0.0f),        // 1
+        Vec3f(0.0f, 1.0f, 0.0f),        // 2
+        Vec3f(0.002f, 0.0f, 0.0f),      // 3 ≈ 0（+2mm）
+        Vec3f(1.002f, 0.0f, 0.0f),      // 4 ≈ 1（+2mm）
+        Vec3f(0.002f, 1.0f, 0.0f),      // 5 ≈ 2（+2mm）
+        Vec3f(0.5f, 0.0f, 0.0f),        // 6：真实点（离 0/1 各 0.5）
+    };
+}
+const std::vector<uint32_t> kRelativeWeldIndices = {0, 1, 2, 3, 4, 5, 6, 1, 2};
+
+std::vector<Vec3f> ScalePositions(const std::vector<Vec3f>& p, float s) {
+    std::vector<Vec3f> out;
+    out.reserve(p.size());
+    for (const Vec3f& v : p) {
+        out.push_back(Vec3f(v.x() * s, v.y() * s, v.z() * s));
+    }
+    return out;
+}
+
+}  // namespace
+
+// 相对焊接：2mm 的重复点（远小于 0.3×局部边长≈0.3）被并；0.5 的真实近邻不被并。
+TEST(WeightTransferTest, RelativeWeldMergesDuplicatesKeepsDistinct) {
+    const std::vector<Vec3f> pts = RelativeWeldPositions();
+    const std::vector<int> rep =
+        WeldVerticesByLocalEdgeRatio(pts, kRelativeWeldIndices, /*ratio*/ 0.3f);
+    EXPECT_EQ(rep[0], rep[3]);
+    EXPECT_EQ(rep[1], rep[4]);
+    EXPECT_EQ(rep[2], rep[5]);
+    EXPECT_NE(rep[6], rep[0]);  // 真实点不被并
+    EXPECT_NE(rep[6], rep[1]);
+    EXPECT_NE(rep[6], rep[2]);
+    EXPECT_NE(rep[0], rep[1]);
+    // 代表 = 组内最小下标。
+    EXPECT_EQ(rep[3], 0);
+    EXPECT_EQ(rep[4], 1);
+    EXPECT_EQ(rep[5], 2);
+    EXPECT_EQ(rep[6], 6);
+}
+
+// ⭐ 核心优势：相对焊接与模型缩放无关。同一网格放大 100× / 缩小 100× → 分组不变。
+//（对照：绝对 5mm 阈值在放大 100× 后，2mm→20cm 的重复点就漏焊了。）
+TEST(WeightTransferTest, RelativeWeldIsScaleInvariant) {
+    const std::vector<Vec3f> base = RelativeWeldPositions();
+    const std::vector<int> rep1 =
+        WeldVerticesByLocalEdgeRatio(base, kRelativeWeldIndices, 0.3f);
+
+    for (float s : {100.0f, 0.01f}) {
+        const std::vector<Vec3f> scaled = ScalePositions(base, s);
+        const std::vector<int> rep =
+            WeldVerticesByLocalEdgeRatio(scaled, kRelativeWeldIndices, 0.3f);
+        for (size_t i = 0; i < base.size(); ++i) {
+            EXPECT_EQ(rep[i], rep1[i]) << "scale=" << s << " i=" << i;
+        }
+    }
+
+    // 对照：绝对焊接在大尺度下漏焊（重复点差 0.2m >> 5mm）。
+    const std::vector<Vec3f> big = ScalePositions(base, 100.0f);
+    const std::vector<int> abs_rep = WeldVerticesByPosition(big, kWeldToleranceM);
+    EXPECT_NE(abs_rep[0], abs_rep[3]);  // 绝对阈值失配
+}
+
+// 相对焊接关闭：ratio <= 0 → 恒等映射。
+TEST(WeightTransferTest, RelativeWeldDisabledWhenZero) {
+    const std::vector<Vec3f> pts = RelativeWeldPositions();
+    const std::vector<int> rep =
+        WeldVerticesByLocalEdgeRatio(pts, kRelativeWeldIndices, 0.0f);
+    for (size_t i = 0; i < pts.size(); ++i) {
+        EXPECT_EQ(rep[i], static_cast<int>(i));
+    }
+}
+
+// 局部边长：均值关联边；无拓扑顶点（孤立）为 0。
+TEST(WeightTransferTest, LocalEdgeLengthBasic) {
+    const std::vector<Vec3f> pts = {
+        Vec3f(0, 0, 0), Vec3f(1, 0, 0), Vec3f(0, 1, 0), Vec3f(9, 9, 9)};
+    const std::vector<uint32_t> idx = {0, 1, 2};  // 顶点 3 孤立
+    const std::vector<float> local = ComputeVertexLocalEdgeLength(pts, idx);
+    EXPECT_NEAR(local[0], 1.0f, 1e-6f);  // 边 0-1=1, 0-2=1 → 1.0
+    EXPECT_NEAR(local[1], (1.0f + std::sqrt(2.0f)) * 0.5f, 1e-5f);
+    EXPECT_FLOAT_EQ(local[3], 0.0f);  // 孤立顶点
 }
 
 }  // namespace clothing
