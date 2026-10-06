@@ -1,35 +1,35 @@
-// JPOV 模型编辑器 — 沿水平面裁剪网格（纯函数 / GL-free）
+// JPOV 模型编辑器 — 沿坐标平面裁剪网格（纯函数 / GL-free）
 //
-// 用途（2026-10-06 Danis）：模型编辑器的「裁剪」面板——把 target 模型沿水平面
-//   y = y0 切一刀，**删掉某一侧**（y < y0 或 y > y0）。典型场景：瑜伽裤裤腿下方
-//   要开口，裁掉低于某个高度的部分。
+// 用途（2026-10-06 Danis）：模型编辑器的「裁剪」面板——把 target 模型沿一个**坐标平面**
+//   切一刀，**删掉某一侧**。坐标轴可选 X / Y / Z（2026-10-07 Danis 追加 X、Z）：
+//   例如瑜伽裤裤腿下方要开口，就沿水平面（Y 轴）裁掉低于某个坐标的部分。
 //
-// 为什么不能只挑三角形整块留/删：真正落在裁剪面上的三角形是**跨面**的——一部分
-//   在保留侧、一部分在删除侧。这类三角形必须在裁剪面上截断，并按线性插值**补出
-//   新的边界顶点**；否则边界会是锯齿状、且留下的几何与裁剪面不齐。
+// 为什么不能只挑三角形整块留/删：真正落在裁剪面上的三角形是**跨面**的——一部分在保留
+//   侧、一部分在删除侧。这类三角形必须在裁剪面上截断，并按线性插值**补出新的边界顶点**；
+//   否则边界会是锯齿状、且留下的几何与裁剪面不齐。
 //
-// 本文件负责：遍历每个三角形，全在保留侧 → 原样保留；全在删除侧 → 丢弃；跨界 →
-//   用 Sutherland–Hodgman 半空间裁剪裁成 3 或 4 边形，再扇形三角化。新顶点由交叉
-//   边的两个端点**按参数 t 插值**所有逐顶点属性：
+// 本文件负责：遍历每个三角形，全在保留侧 → 原样保留；全在删除侧 → 丢弃；跨界 → 用
+//   Sutherland–Hodgman 半空间裁剪裁成 3 或 4 边形，再扇形三角化。新顶点由交叉边的两个
+//   端点**按参数 t 插值**所有逐顶点属性：
 //     - 位置 position（线性插值）
 //     - 法线 normal（插值后重新归一化）
 //     - UV（线性插值）
 //     - 切线 tangent（线性插值，遵守「切线不归一化」的项目约定）
-//     - 骨权 joint_indices / joint_weights（把两端点的 (joint, weight) 合并，按
-//       (1-t)/t 加权，取权重最大的 4 个，再按保留的 4 个之和归一）
+//     - 骨权 joint_indices / joint_weights（把两端点的 (joint, weight) 合并，按 (1-t)/t
+//       加权，取权重最大的 4 个，再按保留的 4 个之和归一）
 //
-// 输出网格是**索引化**的：原始顶点按原下标去重（同一原始顶点只复制一份），跨边新建
-//   的边界顶点按「无序边 (min,max)」去重（同一条边被相邻两个三角形共享时命中同一顶点）。
-//   这样既不炸顶点数，也保证缝合处不出裂缝。
+// 输出网格是**索引化**的：原始顶点按原下标去重（同一原始顶点只复制一份），跨边新建的边界
+//   顶点按「无序边 (min,max)」去重（同一条边被相邻两个三角形共享时命中同一顶点）。这样既
+//   不炸顶点数，也保证缝合处不出裂缝。
 //
 // 语义约定（与 mesh.h / gltf_loader.h 一致）：
 //   - 三角形按 triangle list 语义（每 3 个索引一个三角形）；indices 为空 = non-indexed。
 //   - 不改变属性 flags；input 有哪些属性，output 就有哪些。
 //
-// Pre-condition（不满足即 LOG(FATAL)）：in.Validate() 通过。
+// Pre-condition（不满足即 LOG(FATAL)）：in.Validate() 通过；axis ∈ {0,1,2}。
 //
-// 返回值：true = 输出非空（已写入 *out）；false = 裁剪后为空（*out 保持未写，调用方
-//   据此「报错并不做」）。
+// 返回值：true = 输出非空（已写入 *out）；false = 裁剪后为空（*out 保持未写，调用方据此
+//   「报错并不做」）。
 
 #ifndef JPOV_MODEL_EDITOR_MESH_CLIP_H_
 #define JPOV_MODEL_EDITOR_MESH_CLIP_H_
@@ -48,10 +48,10 @@
 namespace jpov {
 namespace model_editor {
 
-// 保留裁剪面的哪一侧。
+// 保留裁剪面的哪一侧（按所选坐标轴的分量大小）。
 enum class ClipKeepSide {
-    kAbove,  // 保留 y >= plane_y 的一侧（删除 y < plane_y 的部分）
-    kBelow,  // 保留 y <= plane_y 的一侧（删除 y > plane_y 的部分）
+    kGreater,  // 保留 coord >= plane 的一侧（删除 coord < plane 的一侧）
+    kLess,     // 保留 coord <= plane 的一侧（删除 coord > plane 的一侧）
 };
 
 // 一次裁剪的统计（供面板显示 / 单测断言）。
@@ -62,6 +62,18 @@ struct ClipStats {
     size_t new_boundary_vertices = 0;   // 输出中新建的边界顶点唯一数量
 };
 
+// 坐标轴分量（0=X, 1=Y, 2=Z）。
+inline float AxisComponent(const jpov::Vec3f& p, int axis) {
+    switch (axis) {
+        case 0:
+            return p.x();
+        case 1:
+            return p.y();
+        default:
+            return p.z();
+    }
+}
+
 // 「在保留侧」判定的距离容差（米）：|d| <= 该值视为落在裁剪面上（保留，不算跨界）。
 inline constexpr float kClipEps = 1e-6f;
 // 丢弃「零面积」退化三角形的阈值（平方米）：例如三角形恰好完全落在裁剪面上时。
@@ -71,9 +83,11 @@ inline constexpr float kClipMinTriangleArea = 1e-12f;
 namespace mesh_clip_internal {
 
 // 顶点到裁剪面的「保留侧有向距离」：>= 0 表示在保留侧。两侧统一成同一表达式，
-// 使「inside = d >= -eps」对 kAbove / kBelow 都成立。
-inline float KeepSignedDistance(float y, float plane_y, ClipKeepSide side) {
-    return (side == ClipKeepSide::kAbove) ? (y - plane_y) : (plane_y - y);
+// 使「inside = d >= -eps」对 kGreater / kLess 都成立。
+inline float KeepSignedDistance(const jpov::Vec3f& p, int axis, float plane,
+                                ClipKeepSide side) {
+    const float c = AxisComponent(p, axis);
+    return (side == ClipKeepSide::kGreater) ? (c - plane) : (plane - c);
 }
 
 // 无序边 key（min,max），用于跨边新建顶点的去重。
@@ -162,20 +176,23 @@ inline void BlendJointWeights(const std::array<int32_t, 4>& ja,
 
 }  // namespace mesh_clip_internal
 
-// 沿水平面 y = plane_y 裁剪 mesh，保留 keep 侧；结果写入 *out。
+// 沿坐标平面（轴 = axis，值为 plane_coord）裁剪 mesh，保留 keep 侧；结果写入 *out。
 //
-// in      : 输入网格（不改）。
-// plane_y : 裁剪面高度（米）。
-// keep    : 保留哪一侧（见 ClipKeepSide）。
-// out     : 输出网格（仅返回 true 时写入）。
-// stats   : 可选统计输出（可空）。
+// in          : 输入网格（不改）。
+// axis        : 坐标轴 0=X / 1=Y / 2=Z。
+// plane_coord : 裁剪面在该轴上的坐标。
+// keep        : 保留哪一侧（见 ClipKeepSide）。
+// out         : 输出网格（仅返回 true 时写入）。
+// stats       : 可选统计输出（可空）。
 //
 // 返回 true = 输出非空；false = 裁剪后为空（调用方应「报错并不做」）。
-// Pre-condition: out != nullptr；in.Validate() 通过。
-inline bool ClipMeshByY(const jpov::MeshData& in, float plane_y,
-                        ClipKeepSide keep, jpov::MeshData* out /*output*/,
-                        ClipStats* stats /*output, 可空*/) {
+// Pre-condition: out != nullptr；in.Validate() 通过；0 <= axis < 3。
+inline bool ClipMeshByAxis(const jpov::MeshData& in, int axis, float plane_coord,
+                           ClipKeepSide keep, jpov::MeshData* out /*output*/,
+                           ClipStats* stats /*output, 可空*/) {
     CHECK(out != nullptr);
+    CHECK_GE(axis, 0);
+    CHECK_LT(axis, 3);
     in.Validate();
     if (stats != nullptr) {
         *stats = ClipStats{};
@@ -321,9 +338,9 @@ inline bool ClipMeshByY(const jpov::MeshData& in, float plane_y,
         bool inside[3];
         int n_in = 0;
         for (int c = 0; c < 3; ++c) {
-            CHECK_LT(idx[c], vcount) << "ClipMeshByY: 索引越界 " << idx[c];
+            CHECK_LT(idx[c], vcount) << "ClipMeshByAxis: 索引越界 " << idx[c];
             d[c] = mesh_clip_internal::KeepSignedDistance(
-                in.positions[idx[c]].y(), plane_y, keep);
+                in.positions[idx[c]], axis, plane_coord, keep);
             inside[c] = d[c] >= -kClipEps;
             if (inside[c]) {
                 ++n_in;
@@ -392,6 +409,13 @@ inline bool ClipMeshByY(const jpov::MeshData& in, float plane_y,
     }
     *out = std::move(result);
     return true;
+}
+
+// 便捷：沿水平面 y = plane_y 裁剪（= ClipMeshByAxis(axis=1)）。
+inline bool ClipMeshByY(const jpov::MeshData& in, float plane_y,
+                        ClipKeepSide keep, jpov::MeshData* out /*output*/,
+                        ClipStats* stats /*output, 可空*/) {
+    return ClipMeshByAxis(in, /*axis*/ 1, plane_y, keep, out, stats);
 }
 
 }  // namespace model_editor

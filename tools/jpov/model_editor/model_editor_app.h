@@ -4,8 +4,8 @@
 //   仿真 / 自动蒙皮 / 人体排斥 / 建最近邻三角形（本工具都用不上），只保留：
 //     ① 加载：reference（可空）+ target 两个模型；reference 只显示，target 可编辑；
 //     ② 左上角面板：target 的平移 / 旋转 / 缩放（步进式）+ 保存按钮（沿用穿衣工具）；
-//     ③ 右侧面板：**裁剪**——沿水平面 y=y0 删掉一侧（y<y0 或 y>y0），裁剪面用
-//        primitive3d（DrawStrip3D）半透明画出。
+//     ③ 右侧面板：**裁剪**——沿坐标平面（X / Y / Z 可选）删掉一侧，裁剪面用
+//        primitive3d（DrawStrip3D）半透明画出（尺寸 = target 包围盒大小，可 toggle 关闭显示）。
 //
 // 与穿衣工具的关键差异：
 //   - **没有仿真器**：变换直接烘进 target 的 CPU 顶点（见 model_transform.h），
@@ -140,11 +140,12 @@ public:
     NumberField scale_step_field_ = NumberField(kDefaultScaleStep);
 
     // ══════════════ 裁剪 ══════════════
-    float clip_y0_ = 0.0f;      // 裁剪面高度（米）
-    float clip_y_min_ = -1.0f;  // 滑块下界（= target 启动包围盒 ymin）
-    float clip_y_max_ = 1.0f;   // 滑块上界（= target 启动包围盒 ymax）
+    int clip_axis_ = 1;        // 裁剪坐标轴：0=X / 1=Y / 2=Z（默认 Y = 水平面）
+    float clip_coord_ = 0.0f;  // 裁剪面在该轴上的坐标（米）
+    float clip_min_[3] = {-1.0f, -1.0f, -1.0f};  // 各轴滑块下界（= target 启动包围盒 min）
+    float clip_max_[3] = {1.0f, 1.0f, 1.0f};     // 各轴滑块上界（= target 启动包围盒 max）
     bool show_clip_plane_ = true;
-    std::string clip_msg_;      // 裁剪结果 / 错误提示
+    std::string clip_msg_;     // 裁剪结果 / 错误提示
 
     ModelSaveController save_ctrl_;
 
@@ -198,15 +199,19 @@ public:
             target_skeleton_ = skins[0];
         }
 
-        // 裁剪滑块范围 = target 启动包围盒 y 范围（固定，不随裁剪跳动）。
+        // 裁剪滑块范围 = target 启动包围盒（逐轴，固定，不随裁剪跳动）。
         MeshBounds bounds = TargetBounds();
         if (bounds.valid) {
-            clip_y_min_ = bounds.min.y();
-            clip_y_max_ = bounds.max.y();
-            if (clip_y_max_ - clip_y_min_ < 1e-4f) {
-                clip_y_max_ = clip_y_min_ + 1e-4f;  // 退化保护（Ui Slider 要求 min<max）
+            const float bmin[3] = {bounds.min.x(), bounds.min.y(), bounds.min.z()};
+            const float bmax[3] = {bounds.max.x(), bounds.max.y(), bounds.max.z()};
+            for (int a = 0; a < 3; ++a) {
+                clip_min_[a] = bmin[a];
+                clip_max_[a] = bmax[a];
+                if (clip_max_[a] - clip_min_[a] < 1e-4f) {
+                    clip_max_[a] = clip_min_[a] + 1e-4f;  // 退化保护（Ui Slider 要求 min<max）
+                }
             }
-            clip_y0_ = (clip_y_min_ + clip_y_max_) * 0.5f;
+            clip_coord_ = (clip_min_[clip_axis_] + clip_max_[clip_axis_]) * 0.5f;
         }
 
         // 地面。
@@ -228,8 +233,14 @@ public:
     // 交互窗口在 main 里用它设置初始俯视角（弧度）。
     void SetInitialViewPhi(double phi_rad) { view_phi_rad_ = phi_rad; }
 
-    // 供 headless / CLI 复现裁剪用：设裁剪面高度后按 keep 侧裁一刀。
-    void SetClipY0(float y0) { clip_y0_ = y0; }
+    // 供 headless / CLI 复现裁剪用：设坐标轴（坐标重置到该轴范围中点）/ 坐标 / 按 keep 侧裁一刀。
+    void SetClipAxis(int axis) {
+        CHECK_GE(axis, 0);
+        CHECK_LT(axis, 3);
+        clip_axis_ = axis;
+        clip_coord_ = (clip_min_[axis] + clip_max_[axis]) * 0.5f;
+    }
+    void SetClipCoord(float coord) { clip_coord_ = coord; }
     void ApplyClip(ClipKeepSide keep) { DoClip(keep); }
     // 供 headless / CLI 用：阻塞等待上一次保存完成。
     void WaitForSave() {
@@ -445,7 +456,10 @@ private:
 
     // ==================== 裁剪 ====================
 
-    // 沿 y=clip_y0_ 裁剪 target，保留 keep 侧。裁空则报错并不做。
+    // 坐标轴字母（面板标签 / 日志用）。
+    char AxisTag() const { return "XYZ"[clip_axis_]; }
+
+    // 沿所选坐标轴（clip_axis_）在 clip_coord_ 处裁剪 target，保留 keep 侧。裁空则报错并不做。
     void DoClip(ClipKeepSide keep) {
         std::vector<jpov::GltfSaveMesh> new_meshes(target_current_.size());
         std::vector<bool> new_enabled(target_current_.size(), false);
@@ -459,8 +473,9 @@ private:
             }
             jpov::MeshData out;
             ClipStats stats;
-            const bool ok = ClipMeshByY(target_current_[i].mesh, clip_y0_, keep,
-                                        &out, &stats);
+            const bool ok =
+                ClipMeshByAxis(target_current_[i].mesh, clip_axis_, clip_coord_,
+                               keep, &out, &stats);
             if (ok) {
                 new_meshes[i].mesh = std::move(out);
                 new_meshes[i].material = target_current_[i].material;
@@ -473,8 +488,9 @@ private:
         }
 
         if (total_out_tris == 0) {
-            clip_msg_ = "裁剪会清空模型，已取消（未修改几何）";
-            LOG(WARNING) << "裁剪被取消：结果为空。y0=" << clip_y0_;
+            clip_msg_ = Format("%c 轴裁剪会清空模型，已取消（未修改几何）", AxisTag());
+            LOG(WARNING) << "裁剪被取消：结果为空。axis=" << clip_axis_
+                         << " coord=" << clip_coord_;
             return;
         }
 
@@ -491,29 +507,41 @@ private:
             }
         }
         SyncTargetToGpu();
-        clip_msg_ = Format("裁剪完成：保留 %zu 三角形，新增边界顶点 %zu%s",
-                           total_out_tris, total_new_verts,
+        clip_msg_ = Format("裁剪完成（%c 轴）：保留 %zu 三角形，新增边界顶点 %zu%s",
+                           AxisTag(), total_out_tris, total_new_verts,
                            dropped_prims > 0 ? "（有 primitive 被裁空）" : "");
-        LOG(INFO) << "裁剪完成（keep="
-                  << (keep == ClipKeepSide::kAbove ? "above" : "below")
-                  << "，y0=" << clip_y0_ << "）：" << clip_msg_;
+        LOG(INFO) << "裁剪完成（axis=" << clip_axis_ << " coord=" << clip_coord_
+                  << " keep=" << (keep == ClipKeepSide::kGreater ? "greater" : "less")
+                  << "）：" << clip_msg_;
     }
 
-    // 画裁剪面：一块覆盖 target XZ 范围（放大 1.4×）的半透明水平 quad。
+    // 画裁剪面：一块与 target 包围盒**同样大小**的半透明 quad，位于所选轴上 clip_coord_ 处。
     void DrawClipPlane(jpov::RenderCommandList* cmds) {
         const MeshBounds b = TargetBounds();
         if (!b.valid) {
             return;
         }
-        const float y = clip_y0_;
-        const float cx = (b.min.x() + b.max.x()) * 0.5f;
-        const float cz = (b.min.z() + b.max.z()) * 0.5f;
-        const float hx = std::max((b.max.x() - b.min.x()) * 0.5f, 0.5f) * 1.4f;
-        const float hz = std::max((b.max.z() - b.min.z()) * 0.5f, 0.5f) * 1.4f;
-        const jpov::Vec3f p00(cx - hx, y, cz - hz);
-        const jpov::Vec3f p01(cx - hx, y, cz + hz);
-        const jpov::Vec3f p10(cx + hx, y, cz - hz);
-        const jpov::Vec3f p11(cx + hx, y, cz + hz);
+        const int a = clip_axis_;
+        const int u = (a + 1) % 3;  // 面内两轴
+        const int v = (a + 2) % 3;
+        const float bmin[3] = {b.min.x(), b.min.y(), b.min.z()};
+        const float bmax[3] = {b.max.x(), b.max.y(), b.max.z()};
+        const float cu = (bmin[u] + bmax[u]) * 0.5f;
+        const float cv = (bmin[v] + bmax[v]) * 0.5f;
+        // quad 边长 = 包围盒在另两轴的尺寸（即「同 bounding box 大小」）；退化轴给极小兜底。
+        const float hu = std::max((bmax[u] - bmin[u]) * 0.5f, 1e-3f);
+        const float hv = std::max((bmax[v] - bmin[v]) * 0.5f, 1e-3f);
+        const auto point = [&](float du, float dv) {
+            float p[3] = {0.0f, 0.0f, 0.0f};
+            p[a] = clip_coord_;
+            p[u] = cu + du;
+            p[v] = cv + dv;
+            return jpov::Vec3f(p[0], p[1], p[2]);
+        };
+        const jpov::Vec3f p00 = point(-hu, -hv);
+        const jpov::Vec3f p01 = point(-hu, +hv);
+        const jpov::Vec3f p10 = point(+hu, -hv);
+        const jpov::Vec3f p11 = point(+hu, +hv);
         // 一个 quad = 两条 4 顶点 strip（相反绕序），保证从两侧都可见。
         cmds->DrawStrip3D({p00, p01, p10, p11}, kClipPlaneColor);
         cmds->DrawStrip3D({p00, p10, p01, p11}, kClipPlaneColor);
@@ -745,8 +773,8 @@ private:
         const float panel_w = 0.30f * win_w;
         const float panel_x = win_w - panel_w - kMargin;
         const float panel_y = kMargin;
-        // 标题1 + y0滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 6。
-        constexpr int kRows = 6;
+        // 标题1 + 轴选择1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7。
+        constexpr int kRows = 7;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         cmds->DrawRect({panel_x, panel_y}, {panel_w, panel_h},
                        jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
@@ -757,22 +785,34 @@ private:
         const float step_y = kRowH + kSpacing;
         float row_y = top;
 
-        DrawLabel("裁剪（水平面 y = y0）", left, row_w, row_y);
+        DrawLabel("裁剪（沿坐标平面切一刀）", left, row_w, row_y);
         row_y += step_y;
 
-        ui_.SliderFloat("裁剪面 y0 (米)", &clip_y0_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, clip_y_min_,
-                        clip_y_max_, /*decimal_places*/ 3);
-        row_y += step_y;
-
-        // 两个裁剪按钮。
-        const float kBtnW = (row_w - kSpacing) * 0.5f;
-        if (ui_.Button("删除 y < y0", jpov::UiRect{{left, row_y}, {kBtnW, kRowH}})) {
-            DoClip(ClipKeepSide::kAbove);
+        // 坐标轴选择（X/Y/Z）。切换轴时把坐标重置到该轴范围中点。
+        {
+            static const std::vector<const char*> kAxisItems = {"X", "Y", "Z"};
+            if (ui_.Combo("轴", &clip_axis_, kAxisItems,
+                          jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+                clip_coord_ = (clip_min_[clip_axis_] + clip_max_[clip_axis_]) * 0.5f;
+            }
         }
-        if (ui_.Button("删除 y > y0",
+        row_y += step_y;
+
+        ui_.SliderFloat(Format("裁剪面 %c (米)", AxisTag()).c_str(), &clip_coord_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        clip_min_[clip_axis_], clip_max_[clip_axis_],
+                        /*decimal_places*/ 3);
+        row_y += step_y;
+
+        // 两个裁剪按钮：删除「坐标小的一侧」/「坐标大的一侧」。
+        const float kBtnW = (row_w - kSpacing) * 0.5f;
+        if (ui_.Button(Format("删除 %c < 侧", AxisTag()).c_str(),
+                       jpov::UiRect{{left, row_y}, {kBtnW, kRowH}})) {
+            DoClip(ClipKeepSide::kGreater);
+        }
+        if (ui_.Button(Format("删除 %c > 侧", AxisTag()).c_str(),
                        jpov::UiRect{{left + kBtnW + kSpacing, row_y}, {kBtnW, kRowH}})) {
-            DoClip(ClipKeepSide::kBelow);
+            DoClip(ClipKeepSide::kLess);
         }
         row_y += step_y;
 

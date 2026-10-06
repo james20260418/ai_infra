@@ -1,7 +1,7 @@
 // JPOV 模型编辑器 — 主程序（装配 + 模式分发）
 //
 // 用途：加载 reference（可空）与 target 两个模型，在同一个 JPOV 场景显示；对 target
-//   做平移 / 旋转 / 缩放（左上角面板）与裁剪（右侧面板，沿水平面 y=y0 删一侧），
+//   做平移 / 旋转 / 缩放（左上角面板）与裁剪（右侧面板，沿坐标平面 X/Y/Z 删一侧），
 //   结果可保存成 glb。详见 model_editor_app.h。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
@@ -10,7 +10,8 @@
 //         [--reference_path /path/to/reference.glb]
 //
 // headless UI 自检（不弹窗，出单张带面板的图）：
-//   ... --ui_shot --output_dir /tmp/ui [--clip_y0 Y --clip_side above|below]
+//   加 --ui_shot --output_dir /tmp/ui
+//   加 [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_high]
 
 #include <cstdlib>  // atof / atoi
 #include <string>
@@ -30,10 +31,12 @@ struct CliOptions {
     float phi_deg = 20.0f;
     int window_width = 0;
     int window_height = 0;
-    bool has_clip = false;       // 是否给了 --clip_side（配合 --clip_y0 在出图前裁一刀）
-    float clip_y0 = 0.0f;        // --clip_y0（米）
+    bool has_clip = false;       // 是否给了 --clip_side（在出图前裁一刀）
+    int clip_axis = 1;           // --clip_axis x|y|z（默认 y）
+    float clip_coord = 0.0f;     // --clip_coord（米）
+    bool has_clip_coord = false; // 是否给了 --clip_coord（否则用该轴范围中点）
     jpov::model_editor::ClipKeepSide clip_side =
-        jpov::model_editor::ClipKeepSide::kAbove;
+        jpov::model_editor::ClipKeepSide::kGreater;  // --clip_side 删除哪侧
     bool save_after_clip = false;  // --save_after_clip：出图前把（裁剪后）target 存盘
 };
 
@@ -91,21 +94,37 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--phi_deg 缺少数值参数，忽略";
             }
-        } else if (arg == "--clip_y0") {
+        } else if (arg == "--clip_axis") {
             if (i + 1 < argc) {
-                opt.clip_y0 = static_cast<float>(std::atof(argv[++i]));
+                const std::string s = argv[++i];
+                if (s == "x" || s == "X") {
+                    opt.clip_axis = 0;
+                } else if (s == "y" || s == "Y") {
+                    opt.clip_axis = 1;
+                } else if (s == "z" || s == "Z") {
+                    opt.clip_axis = 2;
+                } else {
+                    LOG(FATAL) << "--clip_axis 必须是 x|y|z，got " << s;
+                }
             } else {
-                LOG(WARNING) << "--clip_y0 缺少数值参数，忽略";
+                LOG(WARNING) << "--clip_axis 缺少取值参数，忽略";
+            }
+        } else if (arg == "--clip_coord") {
+            if (i + 1 < argc) {
+                opt.clip_coord = static_cast<float>(std::atof(argv[++i]));
+                opt.has_clip_coord = true;
+            } else {
+                LOG(WARNING) << "--clip_coord 缺少数值参数，忽略";
             }
         } else if (arg == "--clip_side") {
             if (i + 1 < argc) {
                 const std::string s = argv[++i];
-                if (s == "above") {
-                    opt.clip_side = jpov::model_editor::ClipKeepSide::kAbove;
-                } else if (s == "below") {
-                    opt.clip_side = jpov::model_editor::ClipKeepSide::kBelow;
+                if (s == "delete_low") {
+                    opt.clip_side = jpov::model_editor::ClipKeepSide::kGreater;
+                } else if (s == "delete_high") {
+                    opt.clip_side = jpov::model_editor::ClipKeepSide::kLess;
                 } else {
-                    LOG(FATAL) << "--clip_side 必须是 above|below，got " << s;
+                    LOG(FATAL) << "--clip_side 必须是 delete_low|delete_high，got " << s;
                 }
                 opt.has_clip = true;
             } else {
@@ -161,12 +180,16 @@ int main(int argc, char** argv) {
     // headless 出图前可选：按 CLI 裁一刀 +（可选）存盘，便于脚本化验证。
     if (opt.ui_shot) {
         if (opt.has_clip) {
-            app.SetClipY0(opt.clip_y0);
+            app.SetClipAxis(opt.clip_axis);
+            if (opt.has_clip_coord) {
+                app.SetClipCoord(opt.clip_coord);
+            }
             app.ApplyClip(opt.clip_side);
-            LOG(INFO) << "headless 预裁剪：y0=" << opt.clip_y0
-                      << " side=" << (opt.clip_side == jpov::model_editor::ClipKeepSide::kAbove
-                                          ? "above(删 y<y0)"
-                                          : "below(删 y>y0)");
+            LOG(INFO) << "headless 预裁剪：axis=" << opt.clip_axis
+                      << " coord=" << opt.clip_coord
+                      << " side=" << (opt.clip_side == jpov::model_editor::ClipKeepSide::kGreater
+                                          ? "delete_low(保留大侧)"
+                                          : "delete_high(保留小侧)");
         }
         if (opt.save_after_clip) {
             app.SaveTargetToSourceSync();

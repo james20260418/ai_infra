@@ -11,8 +11,9 @@
 #   3. 打印用法提示
 #
 # 本工具：加载 reference（可空）+ target；target 平移/旋转/缩放（左上角面板）+
-#   沿水平面 y=y0 裁剪（右侧面板，删除 y<y0 或 y>y0）+ 保存 glb。
-#   裁剪面用 primitives3d 半透明画出。裁剪会截断跨面三角形并按插值补边界顶点。
+#   沿坐标平面（X/Y/Z 可选）裁剪（右侧面板，删除某一侧）+ 保存 glb。
+#   裁剪面用 primitives3d 半透明画出（尺寸 = 包围盒大小，可关显示）。
+#   裁剪会截断跨面三角形并按插值补边界顶点。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_model_editor/jpov_model_editor \
@@ -70,10 +71,11 @@ echo "       [--reference_path /absolute/path/to/reference.glb]"
 echo ""
 echo "   headless 自检："
 echo "   $OUTPUT_DIR/jpov_model_editor --ui_shot --output_dir /tmp/ui \\"
-echo "       --target_path /path/to/target.glb [--clip_y0 0.5 --clip_side above]"
+echo "       --target_path /path/to/target.glb \\"
+echo "       [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_high]"
 echo "       → /tmp/ui/model_editor_ui.png"
 echo ""
 echo "🖐  交互：右键 drag = 相机环绕；滚轮 = 缩放。"
 echo "    左上角面板：target 平移/旋转/缩放（步进式）+ 保存 + 地面 + 显示开关 + 重置。"
-echo "    右侧面板：裁剪面 y0 滑条 + [删除 y<y0] + [删除 y>y0] + 显示裁剪面开关。"
+echo "    右侧面板：裁剪轴选择 X/Y/Z + 裁剪面坐标滑条 + [删除 < 侧] + [删除 > 侧] + 显示裁剪面开关。"
 echo ""

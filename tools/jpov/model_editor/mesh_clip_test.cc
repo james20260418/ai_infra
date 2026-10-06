@@ -78,7 +78,7 @@ TEST(MeshClip, AllAboveKeptUnchanged) {
     const MeshData in = MakeTriangle({0, 1, 0}, {1, 1, 0}, {0, 2, 0});
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     EXPECT_EQ(st.input_triangles, 1u);
     EXPECT_EQ(st.output_triangles, 1u);
     EXPECT_EQ(st.new_boundary_vertices, 0u);
@@ -92,7 +92,7 @@ TEST(MeshClip, AllBelowDroppedReturnsFalse) {
     MeshData out;
     ClipStats st;
     // keep below（保留 y<=0.5）→ 三角形全在删除侧 → 空。
-    EXPECT_FALSE(ClipMeshByY(in, 0.5f, ClipKeepSide::kBelow, &out, &st));
+    EXPECT_FALSE(ClipMeshByY(in, 0.5f, ClipKeepSide::kLess, &out, &st));
     EXPECT_EQ(st.output_triangles, 0u);
 }
 
@@ -101,7 +101,7 @@ TEST(MeshClip, OneVertexKept) {
     const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     EXPECT_EQ(st.output_triangles, 1u);
     EXPECT_EQ(st.new_boundary_vertices, 2u);
     ASSERT_EQ(out.positions.size(), 3u);  // 1 原顶点 + 2 边界顶点
@@ -124,7 +124,7 @@ TEST(MeshClip, TwoVerticesKeptGivesQuad) {
     const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kBelow, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kLess, &out, &st));
     EXPECT_EQ(st.output_triangles, 2u);
     EXPECT_EQ(st.new_boundary_vertices, 2u);
     for (const Vec3f& p : out.positions) {
@@ -146,7 +146,7 @@ TEST(MeshClip, BoundaryAttributesInterpolate) {
 
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     // 边 A(0,0,0)-B(0,1,0) 的交点 y=0.5 → uv 应插值到 (10, 20.5)。
     bool found = false;
     for (size_t i = 0; i < out.positions.size(); ++i) {
@@ -180,7 +180,7 @@ TEST(MeshClip, BoundaryWeightsNormalized) {
 
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     // 边 A(0)-B(1) 的交点：t=0.5 → joint0 0.5 + joint1 0.5。
     bool checked = false;
     for (size_t i = 0; i < out.positions.size(); ++i) {
@@ -210,7 +210,7 @@ TEST(MeshClip, WindingPreserved) {
     const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     // 原始三角 (0,0,0),(1,0,0),(0,1,0)：叉积 z = +1（正向）。
     EXPECT_GT(NormalZ(in), 0.0f);
     EXPECT_GT(NormalZ(out), 0.0f);  // 裁剪后绕序保持。
@@ -234,7 +234,7 @@ TEST(MeshClip, SharedEdgeWeldsToOneVertex) {
 
     MeshData out;
     ClipStats st;
-    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kAbove, &out, &st));
+    ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &out, &st));
     EXPECT_EQ(st.new_boundary_vertices, 3u);
     int on_plane = 0;
     for (const Vec3f& p : out.positions) {
@@ -243,6 +243,45 @@ TEST(MeshClip, SharedEdgeWeldsToOneVertex) {
         }
     }
     EXPECT_EQ(on_plane, 3);
+}
+
+TEST(MeshClip, AxisXAndZ) {
+    // X 轴：keep greater（保留 x>=0.5）→ 边界顶点 x 恰在 0.5。
+    {
+        const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
+        MeshData out;
+        ClipStats st;
+        ASSERT_TRUE(ClipMeshByAxis(in, /*axis*/ 0, 0.5f, ClipKeepSide::kGreater,
+                                   &out, &st));
+        EXPECT_EQ(st.new_boundary_vertices, 2u);
+        for (const Vec3f& p : out.positions) {
+            EXPECT_GE(p.x(), 0.5f - 1e-5f);
+        }
+    }
+    // Z 轴：keep less（保留 z<=0.5）→ 2 个顶点在内 → quad → 2 三角形。
+    {
+        const MeshData in = MakeTriangle({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+        MeshData out;
+        ClipStats st;
+        ASSERT_TRUE(ClipMeshByAxis(in, /*axis*/ 2, 0.5f, ClipKeepSide::kLess, &out,
+                                   &st));
+        EXPECT_EQ(st.output_triangles, 2u);
+        for (const Vec3f& p : out.positions) {
+            EXPECT_LE(p.z(), 0.5f + 1e-5f);
+        }
+    }
+    // 三轴一致：ClipMeshByY 等于 ClipMeshByAxis(axis=1)。
+    {
+        const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
+        MeshData oy;
+        MeshData oa;
+        ClipStats sy;
+        ClipStats sa;
+        ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &oy, &sy));
+        ASSERT_TRUE(ClipMeshByAxis(in, 1, 0.5f, ClipKeepSide::kGreater, &oa, &sa));
+        EXPECT_EQ(sy.output_triangles, sa.output_triangles);
+        EXPECT_EQ(sy.new_boundary_vertices, sa.new_boundary_vertices);
+    }
 }
 
 // ==================== 真资材端到端 ====================
@@ -297,7 +336,7 @@ TEST(MeshClipE2E, YogaPantsClipSaveReload) {
     for (const GltfMeshEntry& e : entries) {
         MeshData out;
         ClipStats st;
-        const bool ok = ClipMeshByY(e.mesh, y0, ClipKeepSide::kAbove, &out, &st);
+        const bool ok = ClipMeshByY(e.mesh, y0, ClipKeepSide::kGreater, &out, &st);
         in_tris += st.input_triangles;
         if (!ok) {
             continue;

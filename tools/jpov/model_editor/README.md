@@ -1,7 +1,7 @@
 # JPOV 模型编辑器（model editor · 裁剪）
 
 从穿衣工具（`tools/jpov/clothing/`）**复制做减法**而来的独立小工具：加载 reference
-（可空）+ target 两个模型，对 target 做**平移 / 旋转 / 缩放**与**沿水平面裁剪**，结果
+（可空）+ target 两个模型，对 target 做**平移 / 旋转 / 缩放**与**沿坐标平面裁剪**，结果
 可保存成 glb。命名空间 `jpov::model_editor`、目录 `tools/jpov/model_editor/` 均独立一整套。
 
 > 定位：给「瑜伽裤裤腿下方开口」这类**裁一刀**的需求用。旧 model editor
@@ -27,21 +27,29 @@ headless UI 自检（不弹窗，出单张带面板的图；可脚本化复现�
 ```bash
 output/jpov_model_editor/jpov_model_editor --ui_shot --output_dir /tmp/ui \
     --target_path /path/to/target.glb \
-    [--clip_y0 0.5 --clip_side above|below] [--save_after_clip]
+    [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_high] [--save_after_clip]
 # → /tmp/ui/model_editor_ui.png
 ```
+
+- `--clip_axis`：裁剪坐标轴（`x`/`y`/`z`，默认 `y`）。
+- `--clip_coord`：裁剪面在该轴上的坐标；不给则用该轴包围盒范围中点。
+- `--clip_side`：删除哪侧（`delete_low` 删坐标小的一侧 / `delete_high` 删大的一侧）。
 
 ## 交互
 
 - **右键 drag**：相机环绕；**滚轮**：缩放。
 - **左上角面板**：target 平移 / 旋转 / 缩放（**步进式**：步长输入框 + `<` `>` 按钮）；
   `保存 target glb`；地面高度；显示开关；`重置 target`（撤销全部变换 / 裁剪，回到加载态）。
-- **右侧面板**：裁剪面 `y0` 滑条；`删除 y < y0` 与 `删除 y > y0` 两个按钮；`显示裁剪面`
-  开关；结果 / 错误提示；当前三角形数。
+- **右侧面板**：裁剪坐标轴选择（`X` / `Y` / `Z`）；裁剪面坐标滑条（范围 = 该轴包围盒）；
+  `删除 <轴> < 侧` 与 `删除 <轴> > 侧` 两个按钮；`显示裁剪面` 开关（裁剪面半透明块可能影响
+  观感，可直接关掉显示）；结果 / 错误提示；当前三角形数。
 
 ## 裁剪语义（`mesh_clip.h`）
 
-沿水平面 `y = y0` 把网格切成两半，**保留一侧、删除另一侧**：
+沿所选坐标轴（`X` / `Y` / `Z`）的平面把网格切成两半，**保留一侧、删除另一侧**；
+透明裁剪面的尺寸 = target 的**包围盒大小**（面内两轴铺满包围盒），便于判断切口位置。
+裁剪坐标轴与判据在 `ClipMeshByAxis`：`axis ∈ {0,1,2}`；`ClipKeepSide{kGreater,kLess}`
+分别表示保留坐标大 / 小的一侧。
 
 - 三角形整体在保留侧 → 原样保留；整体在删除侧 → 丢弃；**跨面** → 截断。
 - 跨面三角形用 Sutherland–Hodgman 半空间裁剪裁成 3 / 4 边形，再扇形三角化；
@@ -62,7 +70,7 @@ glb 同目录；target 自带骨架时一并写入 skin。后台线程写文件�
 
 | 文件 | 职责 |
 |---|---|
-| `mesh_clip.h` | 沿 y 平面裁剪三角形（纯函数 / GL-free） |
+| `mesh_clip.h` | 沿 X/Y/Z 坐标平面裁剪三角形（纯函数 / GL-free） |
 | `model_transform.h` | target 平移 / 旋转 / 缩放（就地改顶点，纯函数） |
 | `number_input.h` | 数值输入解析（纯函数） |
 | `model_save.{h,cc}` | 保存 glb（后台线程 + 状态机） |
