@@ -270,17 +270,17 @@ TEST(MeshClip, AxisXAndZ) {
             EXPECT_LE(p.z(), 0.5f + 1e-5f);
         }
     }
-    // 三轴一致：ClipMeshByY 等于 ClipMeshByAxis(axis=1)。
+    // X 轴 + keep less（保留 x<=0.5）→ 2 个顶点在内 → quad → 2 三角形，边界 x 恰在 0.5。
     {
         const MeshData in = MakeTriangle({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
-        MeshData oy;
-        MeshData oa;
-        ClipStats sy;
-        ClipStats sa;
-        ASSERT_TRUE(ClipMeshByY(in, 0.5f, ClipKeepSide::kGreater, &oy, &sy));
-        ASSERT_TRUE(ClipMeshByAxis(in, 1, 0.5f, ClipKeepSide::kGreater, &oa, &sa));
-        EXPECT_EQ(sy.output_triangles, sa.output_triangles);
-        EXPECT_EQ(sy.new_boundary_vertices, sa.new_boundary_vertices);
+        MeshData out;
+        ClipStats st;
+        ASSERT_TRUE(
+            ClipMeshByAxis(in, /*axis*/ 0, 0.5f, ClipKeepSide::kLess, &out, &st));
+        EXPECT_EQ(st.output_triangles, 2u);
+        for (const Vec3f& p : out.positions) {
+            EXPECT_LE(p.x(), 0.5f + 1e-5f);
+        }
     }
 }
 
