@@ -19,6 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/common/utils.h"
@@ -511,6 +512,7 @@ Renderer::~Renderer() {
     DestroyHighlightFBO();
     DestroyBloomChain();
     DestroySkyColorFBO();
+    fire_fog_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1237,6 +1239,7 @@ void Renderer::Init(
     ValidateShadowConfig(shadow_cfg);
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
+    fire_fog_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
 }
@@ -1520,6 +1523,16 @@ void Renderer::Render(const RenderCommandList& cmds,
 #endif
                 const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs);
+            }
+
+            // ── 点状雾火（体积雾 + 火，fire_fog）—— 与 horizon_fog 同为「其它 3D
+            //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
+            //    v1 骨架：Draw 尚未实现（空操作）。见 docs/jpov_fire_fog_design.md §10.6。
+            if (!cmds.point_fogs.empty()) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                fire_fog_renderer_.Draw(cmds.point_fogs, cam, mvp_,
+                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
             }
 
 #ifndef JPOV_WITHOUT_MSAA

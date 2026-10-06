@@ -28,6 +28,7 @@ void RenderCommandList::Clear() {
     object3d.clear();
     skinned_mesh.clear();
     point_lights.clear();
+    point_fogs.clear();
     object_use_default_color = false;
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
