@@ -316,8 +316,12 @@ void FireFogRenderer::BuildTileIndices(const float view_proj[16],
             pts.push_back(Vec2f{px, py});
         }
 
-        // 任一角在相机背后 → 保守全覆盖（与点光源 culling「球跨相机 → 全屏」同规则）。
-        if (crosses_camera || pts.empty()) {
+        // 全部角都在相机后方 → 该团对屏幕无贡献，跳过（**不是全屏**！）。
+        if (pts.empty()) {
+            continue;
+        }
+        // 部分角在相机后方（团跨过相机）→ 保守全覆盖（与点光源 culling「球跨相机 → 全屏」同规则）。
+        if (crosses_camera) {
             for (int tr = 0; tr < tile_grid_h_; ++tr) {
                 for (int tc = 0; tc < tile_grid_w_; ++tc) {
                     mark_tile(bi, tc, tr);

@@ -119,17 +119,18 @@ bool ProjectPt(const float m[16], const V3& p, int W, int H, float* ox, float* o
     return true;
 }
 
-// 团的屏幕 AABB（px）；返回 false 表示全在相机后（保守=全屏）。
-bool FogAabb(const Body& b, const float m[16], int W, int H,
-             float* x0, float* y0, float* x1, float* y1, bool* crosses) {
-    float mnx=1e30f,mxx=-1e30f,mny=1e30f,mxy=-1e30f; bool any=false, cr=false;
+// 团的屏幕 AABB（px）。返回：0=OK(有 AABB)，1=跨相机(部分角在前，保守全屏)，2=全在相机后(跳过)。
+int FogAabb(const Body& b, const float m[16], int W, int H,
+            float* x0, float* y0, float* x1, float* y1) {
+    float mnx=1e30f,mxx=-1e30f,mny=1e30f,mxy=-1e30f; int nfront=0;
     for (int s=0;s<8;++s){
         float sx=(s&1)?b.r:-b.r, sy=(s&2)?b.r:-b.r, sz=(s&4)?b.r:-b.r;
-        float px,py; if(!ProjectPt(m, V3{b.c.x+sx,b.c.y+sy,b.c.z+sz}, W,H,&px,&py)){cr=true;continue;}
-        mnx=std::min(mnx,px);mxx=std::max(mxx,px);mny=std::min(mny,py);mxy=std::max(mxy,py);any=true;
+        float px,py; if(!ProjectPt(m, V3{b.c.x+sx,b.c.y+sy,b.c.z+sz}, W,H,&px,&py)) continue;
+        ++nfront; mnx=std::min(mnx,px);mxx=std::max(mxx,px);mny=std::min(mny,py);mxy=std::max(mxy,py);
     }
-    if (cr || !any) { *crosses=true; *x0=-1;*y0=-1;*x1=-1;*y1=-1; return true; }
-    *crosses=false; *x0=mnx-1; *x1=mxx+1; *y0=mny-1; *y1=mxy+1; return true;
+    if (nfront==0) return 2;              // 全部在相机后 → 不贡献
+    if (nfront<8)  return 1;              // 跨相机 → 保守全屏
+    *x0=mnx-1; *x1=mxx+1; *y0=mny-1; *y1=mxy+1; return 0;
 }
 
 // ---------- 凸包 + SAT（同生产实现） ----------
@@ -157,7 +158,7 @@ bool RectHull(float x0,float y0,float x1,float y1,const std::vector<V2>& h){
 }
 
 // ---------- CPU culling ----------
-struct CullResult { std::vector<int> table; long long cand=0, marks=0; int culled=0; };
+struct CullResult { std::vector<int> table; long long cand=0, marks=0; int culled=0, behind=0; };
 
 // mode: 0=AABB, 1=SAT. coarse: 视锥粗剔。
 CullResult CullCpu(const std::vector<Body>& bodies, const float m[16], int W, int H,
@@ -179,10 +180,11 @@ CullResult CullCpu(const std::vector<Body>& bodies, const float m[16], int W, in
             }
             if(out){ ++r.culled; continue; }
         }
-        float x0,y0,x1,y1; bool crosses;
-        FogAabb(b,m,W,H,&x0,&y0,&x1,&y1,&crosses);
+        float x0,y0,x1,y1;
+        int kind=FogAabb(b,m,W,H,&x0,&y0,&x1,&y1);
+        if(kind==2){ ++r.behind; continue; }   // 全在相机后 → 跳过（不是全屏！）
         int mnx,mxx,mny,mxy;
-        if(crosses){mnx=0;mxx=W;mny=0;mxy=H;}
+        if(kind==1){mnx=0;mxx=W;mny=0;mxy=H;}
         else{mnx=(int)std::floor(x0);mxx=(int)std::ceil(x1);mny=(int)std::floor(y0);mxy=(int)std::ceil(y1);}
         int min_tc=std::max(0,mnx/tile),max_tc=std::min(gw-1,mxx/tile);
         int min_tr=std::max(0,mny/tile),max_tr=std::min(gh-1,mxy/tile);
@@ -259,10 +261,11 @@ GpuSetup MakeGpu(int gw,int gh){
 std::vector<float> BuildInstances(const std::vector<Body>& bodies,const float m[16],int W,int H){
     std::vector<float> inst; inst.reserve(bodies.size()*5);
     for(size_t i=0;i<bodies.size();++i){
-        float x0,y0,x1,y1; bool crosses;
-        FogAabb(bodies[i],m,W,H,&x0,&y0,&x1,&y1,&crosses);
+        float x0,y0,x1,y1;
+        int kind=FogAabb(bodies[i],m,W,H,&x0,&y0,&x1,&y1);
+        if(kind==2) continue;   // 全在相机后 → 不发实例
         float cx,cy,hx,hy;
-        if(crosses){ cx=0;cy=0;hx=1;hy=1; }
+        if(kind==1){ cx=0;cy=0;hx=1;hy=1; }
         else { cx=(x0+x1)/(float)W - 1.0f; cy=(y0+y1)/(float)H - 1.0f; hx=(x1-x0)/(float)W; hy=(y1-y0)/(float)H; }
         inst.push_back(cx); inst.push_back(cy); inst.push_back(hx); inst.push_back(hy);
         inst.push_back((float)(i+1));
@@ -383,13 +386,13 @@ int main(int argc, char** argv) {
     // GPU 光栅规则 = tile 中心落在 quad（= 团的屏幕 AABB）内 ⇒ 用它做 ground truth。
     {
         std::vector<Body> one = { { {0.0f,1.0f,0.0f}, 2.0f } };
-        float x0,y0,x1,y1; bool cr;
-        FogAabb(one[0],m,W,H,&x0,&y0,&x1,&y1,&cr);
+        float x0,y0,x1,y1;
+        int kind=FogAabb(one[0],m,W,H,&x0,&y0,&x1,&y1);
         std::vector<int> gt((size_t)gw*gh*K,-1);
         int gt_tiles=0;
         for(int tr=0;tr<gh;++tr)for(int tc=0;tc<gw;++tc){
             float cx=tc*tile+tile*0.5f, cy2=tr*tile+tile*0.5f;   // FBO 像素中心 → 屏幕 px
-            bool in = cr || (cx>=x0&&cx<=x1&&cy2>=y0&&cy2<=y1);
+            bool in = (kind!=0) || (cx>=x0&&cx<=x1&&cy2>=y0&&cy2<=y1);
             if(in){ gt[(size_t)(tr*gw+tc)*K+0]=0; ++gt_tiles; }
         }
         std::vector<float> i1 = BuildInstances(one,m,W,H);
