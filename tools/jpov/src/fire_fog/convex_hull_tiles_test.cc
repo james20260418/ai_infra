@@ -1,6 +1,6 @@
 // ConvexHullTiles 单元测试 —— 用**完全不同的另一套算法** cross-validate。
 //
-// 被测：geom::math::ConvexHullCoveredTiles（PWL 上/下壳 + 扫描线）。
+// 被测：jpov::ConvexHullCoveredTiles（屏幕凸包 上/下壳 + 扫描线）。
 // 参照：独立实现——单调链凸包 + 逐 tile 矩形 vs 凸多边形 SAT。
 //
 // 覆盖：
@@ -11,7 +11,7 @@
 // 注：随机用例里建的栅格必须**盖住**点范围，否则越界坐标会被夹断到边界格，
 //     与参照（只遍历栅格内 tile）口径不一致。
 
-#include "geom/math/convex_hull_tiles.h"
+#include "tools/jpov/src/fire_fog/convex_hull_tiles.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,23 +21,22 @@
 
 #include "gtest/gtest.h"
 
-namespace geom {
-namespace math {
+namespace jpov {
 
 namespace {
 
 // ---------- 参照实现 A：单调链凸包（CCW，去共线） ----------
 std::vector<Vec2d> RefHull(std::vector<Vec2d> p) {
   std::sort(p.begin(), p.end(), [](const Vec2d& a, const Vec2d& b) {
-    return a.x != b.x ? a.x < b.x : a.y < b.y;
+    return a.x() != b.x() ? a.x() < b.x() : a.y() < b.y();
   });
   p.erase(std::unique(p.begin(), p.end(), [](const Vec2d& a, const Vec2d& b) {
-            return a.x == b.x && a.y == b.y;
+            return a.x() == b.x() && a.y() == b.y();
           }),
           p.end());
   if (p.size() < 3) return p;
   auto cross = [](const Vec2d& o, const Vec2d& a, const Vec2d& b) {
-    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x());
   };
   std::vector<Vec2d> h;
   for (const Vec2d& q : p) {   // 下链
@@ -68,7 +67,7 @@ bool RectPolyIntersect(double x0, double y0, double x1, double y1,
     }
     double hmin = 1e300, hmax = -1e300;
     for (const Vec2d& v : poly) {
-      const double q = ax * v.x + ay * v.y;
+      const double q = ax * v.x() + ay * v.y();
       hmin = std::min(hmin, q);
       hmax = std::max(hmax, q);
     }
@@ -78,7 +77,7 @@ bool RectPolyIntersect(double x0, double y0, double x1, double y1,
   for (size_t i = 0; i < poly.size(); ++i) {
     const Vec2d& a = poly[i];
     const Vec2d& b = poly[(i + 1) % poly.size()];
-    if (sep(-(b.y - a.y), (b.x - a.x))) return false;
+    if (sep(-(b.y() - a.y()), (b.x() - a.x()))) return false;
   }
   return true;
 }
@@ -110,18 +109,18 @@ std::vector<TileCoord> Sorted(std::vector<TileCoord> v) {
 void RefBoundsAt(const std::vector<Vec2d>& hull, double x, double* top, double* bot) {
   double xmin = 1e300, xmax = -1e300;
   for (const Vec2d& v : hull) {
-    xmin = std::min(xmin, v.x);
-    xmax = std::max(xmax, v.x);
+    xmin = std::min(xmin, v.x());
+    xmax = std::max(xmax, v.x());
   }
   x = std::max(xmin, std::min(xmax, x));   // clamp（端点浮点舍入会越界）
   double t = -1e300, b = 1e300;
   for (size_t i = 0; i < hull.size(); ++i) {
     const Vec2d& p = hull[i];
     const Vec2d& q = hull[(i + 1) % hull.size()];
-    if (p.x == q.x) continue;
-    const double xa = std::min(p.x, q.x), xb = std::max(p.x, q.x);
+    if (p.x() == q.x()) continue;
+    const double xa = std::min(p.x(), q.x()), xb = std::max(p.x(), q.x());
     if (x < xa || x > xb) continue;
-    const double y = p.y + (q.y - p.y) * (x - p.x) / (q.x - p.x);
+    const double y = p.y() + (q.y() - p.y()) * (x - p.x()) / (q.x() - p.x());
     t = std::max(t, y);
     b = std::min(b, y);
   }
@@ -306,5 +305,4 @@ TEST(ConvexHullTilesTest, ChainValueAtInterpAndExtrapolate) {
   EXPECT_DOUBLE_EQ(ChainValueAt(c, 3, 5.0), -2.0);    // 右外推（斜率 -2）
 }
 
-}  // namespace math
-}  // namespace geom
+}  // namespace jpov

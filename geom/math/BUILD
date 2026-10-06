@@ -45,27 +45,6 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
-# ConvexHullTiles — 屏幕空间凸包（PWL 上/下壳）→ 覆盖的栅格 tile（扫描线；context 无关）
-cc_library(
-    name = "convex_hull_tiles",
-    hdrs = ["convex_hull_tiles.h"],
-    deps = [
-        "//geom/common:check",
-    ],
-    copts = ["-std=c++20"],
-)
-
-# ConvexHullTiles tests（含随机 8 点 cross-validate）
-cc_test(
-    name = "convex_hull_tiles_test",
-    srcs = ["convex_hull_tiles_test.cc"],
-    deps = [
-        ":convex_hull_tiles",
-        "@gtest//:gtest_main",
-    ],
-    copts = ["-std=c++20"],
-)
-
 # Mat4 — 4x4 变换矩阵（列主序）+ 仿射求逆（骨架 rest/inverse-bind 用；header-only）
 cc_library(
     name = "mat4",

@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 # FireFog（雾火）—— 统一体积雾/火子渲染器（屏幕 tile 剪枝 + 逐像素 ZDist）。
 #
@@ -26,4 +26,28 @@ cc_library(
     }),
     copts = ["-std=c++20"],
     linkstatic = 1,
+)
+
+# ConvexHullTiles — fire_fog tile culling 专用：box 屏幕凸包（≤8 点）→ 覆盖的 tile（扫描线）。
+# context 无关、无 GL、可单测；点用 geom::Vec2d。
+cc_library(
+    name = "convex_hull_tiles",
+    hdrs = ["convex_hull_tiles.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:check",
+        "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# ConvexHullTiles tests（含随机 8 点 cross-validate）
+cc_test(
+    name = "convex_hull_tiles_test",
+    srcs = ["convex_hull_tiles_test.cc"],
+    deps = [
+        ":convex_hull_tiles",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
 )
