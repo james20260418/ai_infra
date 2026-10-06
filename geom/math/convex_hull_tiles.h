@@ -4,9 +4,11 @@
 // 供 tile culling 用（替代「AABB 矩形」的保守覆盖，给出真轮廓）。
 //
 // 做法（context 无关、无 GL、可单测）：
-//   1. 屏幕空间凸包：8 点 → 取 x 最小/最大两点为左右极点 → 以极点为两端建
-//      SizeLimitedPiecewiseLinearFunction → 其余点**依次 UpProp** 得上凸壳、
-//      **DownProp** 得下凸壳。
+//   1. 屏幕空间凸包：点按 x 排序，用**单调链（Andrew）**分别求上壳 / 下壳——
+//      x 升序遍历、栈维护；遇到「凹折角」（中间点掉到两邻居连线下方 / 上方）就 pop
+//      上一个点，直到折角正确。结果塞进 SizeLimitedPiecewiseLinearFunction。
+//      （注：早先试过「极点 + 逐个 UpProp」，但 UpProp 只单向顶、不摘冗余点，会留
+//       「凹坑」→ 不是真凸壳 → 改成这个标准栈法。）
 //   2. 扫描线：先定列 (x) 范围，再逐列求该列内凸包的 [底, 顶]（= 列两端 + 中间夹住的
 //      采样点），换算成行 (y) 范围，标该列内的 tile。
 //
@@ -45,58 +47,81 @@ struct TileCoord {
   bool operator==(const TileCoord& o) const { return x == o.x && y == o.y; }
 };
 
-namespace internal {
-// 凸性清理（定义见下）：反复摘掉「不在两邻居连线上/下方」的冗余采样，收敛后即真凸壳。
-template <int Cap>
-void CleanupHull(SizeLimitedPiecewiseLinearFunction<Cap>* f, bool upper);
-}  // namespace internal
-
-// 屏幕空间凸包（上/下壳）。
-// 点集上限 kMaxPts（box = 8）。
+// 屏幕空间凸包（上/下壳）。点集上限 kMaxPts（box = 8）。
 class ScreenHull {
  public:
   static constexpr int kMaxPts = 8;
 
-  // 由点集构造。degenerate（点数 < 2 或所有点同 x）时 valid()==false。
-  // 非极点按**x 升序**依次 UpProp(上壳) / DownProp(下壳)。
+  // 由点集构造（单调链）。degenerate（有效点 < 2 或所有点同 x）时 valid()==false。
   // Pre-condition: 1 <= n <= kMaxPts。
   void Build(const Vec2d* pts, int n) {
-    CHECK(n >= 1 && n <= kMaxPts) << "点数 " << n << " 越界 [1, " << kMaxPts << "]";
+    CHECK(n >= 1 && n <= kMaxPts) << "点数 " << n << " 越界 [1," << kMaxPts << "]";
     valid_ = false;
-    int i_l = 0, i_r = 0;
-    for (int i = 1; i < n; ++i) {
-      if (pts[i].x < pts[i_l].x) i_l = i;
-      if (pts[i].x > pts[i_r].x) i_r = i;
-    }
-    if (pts[i_r].x <= pts[i_l].x) {
-      return;   // 零宽（全同 x）→ 退化
-    }
-    // 上/下壳初值 = 左右极点的直线。
-    upper_.Clear();
-    lower_.Clear();
-    upper_.AddSample(pts[i_l].x, pts[i_l].y);
-    upper_.AddSample(pts[i_r].x, pts[i_r].y);
-    lower_.AddSample(pts[i_l].x, pts[i_l].y);
-    lower_.AddSample(pts[i_r].x, pts[i_r].y);
-    // 其余点按 x 升序依次顶起 / 压下。
-    int order[kMaxPts];
+    // 排序（x 升、同 x 按 y 升）后去重。
+    Vec2d s[kMaxPts];
     int m = 0;
     for (int i = 0; i < n; ++i) {
-      if (i != i_l && i != i_r) order[m++] = i;
+      s[m++] = pts[i];
     }
-    std::sort(order, order + m, [&](int a, int b) { return pts[a].x < pts[b].x; });
-    for (int k = 0; k < m; ++k) {
-      const Vec2d p = pts[order[k]];
-      upper_.UpProp(p.x, p.y);
-      lower_.DownProp(p.x, p.y);
+    std::sort(s, s + m, [](const Vec2d& a, const Vec2d& b) {
+      return a.x != b.x ? a.x < b.x : a.y < b.y;
+    });
+    int w = 0;
+    for (int i = 0; i < m; ++i) {
+      if (i == 0 || s[i].x != s[i - 1].x || s[i].y != s[i - 1].y) {
+        s[w++] = s[i];
+      }
     }
-    // ⚠️ UpProp/DownProp 只往一个方向顶、**不摘除冗余点** ⇒ 后插入的点会把先前的点
-    //    变成「凹坑」（先前的点在两邻居连线下方）。故再跑一趟**凸性清理**：反复摘掉
-    //    「不在两邻居连线上/下方」的冗余采样，收敛后即为真凸壳。
-    internal::CleanupHull(&upper_, /*upper=*/true);
-    internal::CleanupHull(&lower_, /*upper=*/false);
-    x_min_ = pts[i_l].x;
-    x_max_ = pts[i_r].x;
+    m = w;
+    if (m < 2 || s[0].x == s[m - 1].x) {
+      return;   // 退化（无横向跨度）
+    }
+    const auto cross = [](const Vec2d& o, const Vec2d& a, const Vec2d& b) {
+      return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    };
+    // 下壳：x 升序，pop 直到左转（cross>0）。
+    Vec2d lo[kMaxPts];
+    int ln = 0;
+    for (int i = 0; i < m; ++i) {
+      while (ln >= 2 && cross(lo[ln - 2], lo[ln - 1], s[i]) <= 0) {
+        --ln;
+      }
+      lo[ln++] = s[i];
+    }
+    // 上壳：x 降序，pop 直到左转（cross>0）；再反转成 x 升序。
+    Vec2d up[kMaxPts];
+    int un = 0;
+    for (int i = m - 1; i >= 0; --i) {
+      while (un >= 2 && cross(up[un - 2], up[un - 1], s[i]) <= 0) {
+        --un;
+      }
+      up[un++] = s[i];
+    }
+    std::reverse(up, up + un);
+
+    // 上/下壳可能含「同 x 的竖直边」→ PWL 要求 x 严格递增，故按 x 折叠：
+    // 上壳同 x 取 y 最大，下壳取 y 最小（= 该 x 处的顶/底）。
+    const auto fill = [&](const Vec2d* chain, int cn, bool upper,
+                          SizeLimitedPiecewiseLinearFunction<kMaxPts>* f) {
+      Vec2d c[kMaxPts];
+      int on = 0;
+      for (int i = 0; i < cn; ++i) {
+        if (on > 0 && c[on - 1].x == chain[i].x) {
+          c[on - 1].y = upper ? std::max(c[on - 1].y, chain[i].y)
+                              : std::min(c[on - 1].y, chain[i].y);
+        } else {
+          c[on++] = chain[i];
+        }
+      }
+      f->Clear();
+      for (int i = 0; i < on; ++i) {
+        f->AddSample(c[i].x, c[i].y);
+      }
+    };
+    fill(up, un, /*upper=*/true, &upper_);
+    fill(lo, ln, /*upper=*/false, &lower_);
+    x_min_ = s[0].x;
+    x_max_ = s[m - 1].x;
     valid_ = true;
   }
 
@@ -115,42 +140,6 @@ class ScreenHull {
 };
 
 namespace internal {
-
-// 清理一条壳：反复摘除内部采样 i，若它不在两邻居连线的「上壳=上方 / 下壳=下方」侧。
-// 收敛后折线即为该方向上的凸壳（去共线）。
-template <int Cap>
-void CleanupHull(SizeLimitedPiecewiseLinearFunction<Cap>* f, bool upper) {
-  double xs[Cap];
-  double ys[Cap];
-  int n = 0;
-  for (int i = 0; i < f->size(); ++i) {
-    xs[n] = f->x(i);
-    ys[n] = f->y(i);
-    ++n;
-  }
-  bool changed = true;
-  while (changed && n >= 3) {
-    changed = false;
-    for (int i = 1; i + 1 < n; ++i) {
-      const double t = (xs[i] - xs[i - 1]) / (xs[i + 1] - xs[i - 1]);
-      const double chord = ys[i - 1] + (ys[i + 1] - ys[i - 1]) * t;
-      const bool redundant = upper ? (ys[i] <= chord) : (ys[i] >= chord);
-      if (redundant) {
-        for (int k = i; k + 1 < n; ++k) {
-          xs[k] = xs[k + 1];
-          ys[k] = ys[k + 1];
-        }
-        --n;
-        changed = true;
-        break;
-      }
-    }
-  }
-  f->Clear();
-  for (int i = 0; i < n; ++i) {
-    f->AddSample(xs[i], ys[i]);
-  }
-}
 
 inline int ClampIndex(double v, double cell, int n) {
   CHECK_GT(cell, 0.0);
@@ -184,7 +173,7 @@ inline void ColumnSpan(const ScreenHull& hull, double a, double b,
 
 }  // namespace internal
 
-// 求点集凸包交叠了哪些栅格 tile（列优先，tile 按 (col,row) 升序输出、已去重）。
+// 求点集凸包交叠了哪些栅格 tile（按 (col,row) 升序输出、已去重）。
 // 点集上限 ScreenHull::kMaxPts；网格尺寸非法 / 点集退化 → 返回空。
 inline std::vector<TileCoord> ConvexHullCoveredTiles(const TileGrid& grid,
                                                      const std::vector<Vec2d>& pts) {
@@ -219,8 +208,8 @@ inline std::vector<TileCoord> ConvexHullCoveredTiles(const TileGrid& grid,
     double top = 0.0;
     double bot = 0.0;
     internal::ColumnSpan(hull, a, b, &up_hint, &lo_hint, &top, &bot);
-    int r0 = internal::ClampIndex(bot, grid.cell, grid.rows);
-    int r1 = internal::ClampIndex(top, grid.cell, grid.rows);
+    const int r0 = internal::ClampIndex(bot, grid.cell, grid.rows);
+    const int r1 = internal::ClampIndex(top, grid.cell, grid.rows);
     if (r0 > r1) {
       continue;
     }
