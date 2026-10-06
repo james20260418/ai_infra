@@ -244,6 +244,7 @@ cc_library(
         ":shader_manager",
         ":sky_renderer",
         ":horizon_fog_renderer",
+        "//tools/jpov/src/fire_fog:fire_fog_renderer",
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",

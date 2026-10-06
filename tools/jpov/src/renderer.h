@@ -14,6 +14,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
+#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
@@ -265,6 +266,10 @@ private:
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
     SkeletonRenderer skeleton_renderer_;
+
+    // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
+    // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
+    FireFogRenderer fire_fog_renderer_;
 
 public:
     // ---- 骨架（SkeletonManager）注册 / 取用 ----

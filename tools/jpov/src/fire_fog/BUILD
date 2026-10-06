@@ -1,0 +1,29 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# FireFog（雾火）—— 统一体积雾/火子渲染器（屏幕 tile 剪枝 + 逐像素 ZDist）。
+#
+# 与 object3d / horizon_fog 平级、单一自包含。设计见 tools/jpov/docs/jpov_fire_fog_design.md。
+# 本 PR 只落头文件与框架：数据模型（fog_body.h）+ 渲染器签名（fire_fog_renderer.h）；
+# pass 实现见设计文档 §10.6 的 M1a。
+cc_library(
+    name = "fire_fog_renderer",
+    srcs = ["fire_fog_renderer.cc"],
+    hdrs = [
+        "fire_fog_renderer.h",
+        "fog_body.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/src:shader_manager",
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
