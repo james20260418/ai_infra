@@ -137,9 +137,9 @@ int RunCapture(const std::string& out_dir) {
     jpov::InputSnapshot input{};
 
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.25;
+    app.view_.phi   = 0.55;
     app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 6.0;
+    app.view_.R     = 11.0;
     app.deg_.elev_fog_on = false;   // 关远景雾，专注看局部点雾
 
     // ① tile 调试：屏幕中心 2 米点雾 → 覆盖的 tile 应被涂成绿色块。
@@ -201,9 +201,9 @@ int main(int argc, char** argv) {
     InstallPerson(app);
 
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.25;
+    app.view_.phi   = 0.55;
     app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 6.0;
+    app.view_.R     = 11.0;
     app.deg_.elev_fog_on = false;
 
     app.Run();

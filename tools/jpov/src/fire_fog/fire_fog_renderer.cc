@@ -4,6 +4,10 @@
 // 建 tile 索引表（每 tile ≤ K = 16，先到先得），并用一个调试 FS 把「有元素的 tile」
 // 涂一层 color blend 就地合成到当前绑定的 FBO（验证剪枝正确性）。
 // L2（逐像素 ZDist + 末端积分）见 docs/jpov_fire_fog_design.md §10.6。
+//
+// tile 覆盖用**团的 OBB 的屏幕真轮廓**：投影 8 角点 → 取 2D 凸包（= 透视下凸多面体
+// 的像；角对角看是六边形）→ 每候选 tile 与凸包做 SAT 相交测试。比「8 角点 AABB
+// 包围矩形」（廉价保守，会多标四个角）更紧，仍**不漏**（轮廓 ⊂ AABB）。
 
 #define GL_GLEXT_PROTOTYPES
 
@@ -92,6 +96,84 @@ bool ProjectToScreen(const float mvp[16], const Vec3f& p, int fbo_w, int fbo_h,
     const float ny = (mvp[1]*p.x() + mvp[5]*p.y() + mvp[9] *p.z() + mvp[13]) * inv;
     *out_x = (nx * 0.5f + 0.5f) * static_cast<float>(fbo_w);
     *out_y = (ny * 0.5f + 0.5f) * static_cast<float>(fbo_h);
+    return true;
+}
+
+// 2D 凸包（单调链；去重后返回边界点）。用于求 OBB 的屏幕真轮廓：凸多面体的透视像 =
+// 其顶点投影的凸包（当全部顶点在相机前方时精确）—— 即 box 的真实屏幕覆盖形状。
+std::vector<Vec2f> ConvexHull2D(std::vector<Vec2f> pts) {
+    std::sort(pts.begin(), pts.end(), [](const Vec2f& a, const Vec2f& b) {
+        if (a.x() != b.x()) {
+            return a.x() < b.x();
+        }
+        return a.y() < b.y();
+    });
+    pts.erase(std::unique(pts.begin(), pts.end(), [](const Vec2f& a, const Vec2f& b) {
+                  return a.x() == b.x() && a.y() == b.y();
+              }),
+              pts.end());
+    if (pts.size() < 3) {
+        return pts;
+    }
+    auto cross = [](const Vec2f& o, const Vec2f& a, const Vec2f& b) {
+        return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x());
+    };
+    std::vector<Vec2f> hull;
+    for (const Vec2f& p : pts) {   // 下链
+        while (hull.size() >= 2 &&
+               cross(hull[hull.size() - 2], hull.back(), p) <= 0.0f) {
+            hull.pop_back();
+        }
+        hull.push_back(p);
+    }
+    const size_t lower = hull.size() + 1;
+    for (size_t i = pts.size() - 1; i-- > 0;) {   // 上链
+        const Vec2f& p = pts[i];
+        while (hull.size() >= lower &&
+               cross(hull[hull.size() - 2], hull.back(), p) <= 0.0f) {
+            hull.pop_back();
+        }
+        hull.push_back(p);
+    }
+    hull.pop_back();   // 收尾与起点重合
+    return hull;
+}
+
+// 轴对齐矩形 [x0,x1]×[y0,y1] 与凸多边形 hull 是否相交（分离轴定理 SAT）。
+// 轴集 = 矩形 2 轴 + 多边形各边法线；任一轴上投影分离则不相交。
+bool RectHullIntersect(float x0, float y0, float x1, float y1,
+                       const std::vector<Vec2f>& hull) {
+    auto separates = [&](float ax, float ay) -> bool {
+        const float r0 = ax * x0 + ay * y0;
+        const float r1 = ax * x1 + ay * y0;
+        const float r2 = ax * x0 + ay * y1;
+        const float r3 = ax * x1 + ay * y1;
+        const float rmin = std::min(std::min(r0, r1), std::min(r2, r3));
+        const float rmax = std::max(std::max(r0, r1), std::max(r2, r3));
+        float hmin = 1.0e30f;
+        float hmax = -1.0e30f;
+        for (const Vec2f& v : hull) {
+            const float q = ax * v.x() + ay * v.y();
+            hmin = std::min(hmin, q);
+            hmax = std::max(hmax, q);
+        }
+        return (rmax < hmin) || (hmax < rmin);
+    };
+    if (separates(1.0f, 0.0f)) {
+        return false;
+    }
+    if (separates(0.0f, 1.0f)) {
+        return false;
+    }
+    for (size_t i = 0; i < hull.size(); ++i) {
+        const Vec2f& a = hull[i];
+        const Vec2f& b = hull[(i + 1) % hull.size()];
+        const float ex = b.x() - a.x();
+        const float ey = b.y() - a.y();
+        if (separates(-ey, ex)) {   // 边 (ex,ey) 的法线 (-ey,ex)
+            return false;
+        }
+    }
     return true;
 }
 
@@ -196,13 +278,23 @@ void FireFogRenderer::BuildTileIndices(const float view_proj[16],
     std::vector<float> slots(static_cast<size_t>(tile_tex_w_) * tile_tex_h_, 0.0f);
     std::vector<int> counts(static_cast<size_t>(total_tiles), 0);
 
+    auto mark_tile = [&](int body_index, int tc, int tr) {
+        const int t = tr * tile_grid_w_ + tc;
+        if (counts[t] >= kMaxFogsPerTile) {
+            return;
+        }
+        const int slot = counts[t];
+        slots[static_cast<size_t>(tr) * tile_tex_w_ + tc * kMaxFogsPerTile + slot] =
+            static_cast<float>(body_index + 1);
+        ++counts[t];
+    };
+
     for (int bi = 0; bi < static_cast<int>(bodies_.size()); ++bi) {
         const Obb& box = bodies_[bi].bound;
 
-        // 投影 OBB 的 8 个角点到屏幕，取包围矩形（Obb ⊇ 球 ⇒ 其 8 角投影包围盒 ⊇ 球投影，
-        // 保守不漏）。任一角在相机背后则退化为「保守全覆盖」。
-        float min_x = 0.0f, max_x = 0.0f, min_y = 0.0f, max_y = 0.0f;
-        bool have_point = false;
+        // 投影 OBB 的 8 个角点到屏幕。
+        std::vector<Vec2f> pts;
+        pts.reserve(8);
         bool crosses_camera = false;
         for (int s = 0; s < 8; ++s) {
             const float sx = (s & 1) ? 1.0f : -1.0f;
@@ -221,32 +313,32 @@ void FireFogRenderer::BuildTileIndices(const float view_proj[16],
                 crosses_camera = true;
                 continue;
             }
-            if (!have_point) {
-                min_x = max_x = px;
-                min_y = max_y = py;
-                have_point = true;
-            } else {
-                min_x = std::min(min_x, px);
-                max_x = std::max(max_x, px);
-                min_y = std::min(min_y, py);
-                max_y = std::max(max_y, py);
-            }
+            pts.push_back(Vec2f{px, py});
         }
 
-        int min_px, max_px, min_py, max_py;
-        if (crosses_camera || !have_point) {
-            // 保守：覆盖全屏（与点光源 culling「球跨相机 → 全屏」同规则）。
-            min_px = 0;
-            max_px = fbo_w;
-            min_py = 0;
-            max_py = fbo_h;
-        } else {
-            // ±1 余量防边界舍入（宁多勿少）。
-            min_px = static_cast<int>(std::floor(min_x)) - 1;
-            max_px = static_cast<int>(std::ceil(max_x)) + 1;
-            min_py = static_cast<int>(std::floor(min_y)) - 1;
-            max_py = static_cast<int>(std::ceil(max_y)) + 1;
+        // 任一角在相机背后 → 保守全覆盖（与点光源 culling「球跨相机 → 全屏」同规则）。
+        if (crosses_camera || pts.empty()) {
+            for (int tr = 0; tr < tile_grid_h_; ++tr) {
+                for (int tc = 0; tc < tile_grid_w_; ++tc) {
+                    mark_tile(bi, tc, tr);
+                }
+            }
+            continue;
         }
+
+        // 候选 tile = 8 点屏幕 AABB；精确覆盖 = 其凸包（box 的屏幕轮廓）。
+        float min_x = pts[0].x(), max_x = pts[0].x();
+        float min_y = pts[0].y(), max_y = pts[0].y();
+        for (const Vec2f& p : pts) {
+            min_x = std::min(min_x, p.x());
+            max_x = std::max(max_x, p.x());
+            min_y = std::min(min_y, p.y());
+            max_y = std::max(max_y, p.y());
+        }
+        const int min_px = static_cast<int>(std::floor(min_x)) - 1;
+        const int max_px = static_cast<int>(std::ceil(max_x)) + 1;
+        const int min_py = static_cast<int>(std::floor(min_y)) - 1;
+        const int max_py = static_cast<int>(std::ceil(max_y)) + 1;
 
         const int min_tc = std::max(0, min_px / kTileSize);
         const int max_tc = std::min(tile_grid_w_ - 1, max_px / kTileSize);
@@ -256,17 +348,27 @@ void FireFogRenderer::BuildTileIndices(const float view_proj[16],
             continue;
         }
 
-        // 向覆盖的每个 tile 写入雾 index（先到先得，每 tile ≤ K）。
+        const std::vector<Vec2f> hull = ConvexHull2D(pts);
+        if (hull.size() < 3) {
+            // 退化（投影近似一点/线段）→ 保守按 AABB 标。
+            for (int tr = min_tr; tr <= max_tr; ++tr) {
+                for (int tc = min_tc; tc <= max_tc; ++tc) {
+                    mark_tile(bi, tc, tr);
+                }
+            }
+            continue;
+        }
+
+        // 只标与凸包相交的 tile（轮廓外、AABB 内的四个角被剔除）。
         for (int tr = min_tr; tr <= max_tr; ++tr) {
             for (int tc = min_tc; tc <= max_tc; ++tc) {
-                const int t = tr * tile_grid_w_ + tc;
-                if (counts[t] >= kMaxFogsPerTile) {
-                    continue;
+                const float x0 = static_cast<float>(tc * kTileSize);
+                const float x1 = static_cast<float>((tc + 1) * kTileSize);
+                const float y0 = static_cast<float>(tr * kTileSize);
+                const float y1 = static_cast<float>((tr + 1) * kTileSize);
+                if (RectHullIntersect(x0, y0, x1, y1, hull)) {
+                    mark_tile(bi, tc, tr);
                 }
-                const int slot = counts[t];
-                slots[static_cast<size_t>(tr) * tile_tex_w_ + tc * kMaxFogsPerTile + slot] =
-                    static_cast<float>(bi + 1);
-                ++counts[t];
             }
         }
     }
