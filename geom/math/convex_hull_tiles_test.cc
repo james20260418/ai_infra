@@ -180,6 +180,20 @@ TEST(ConvexHullTilesTest, RandomEightPointsVariousGrids) {
   EXPECT_EQ(mismatched, 0);
 }
 
+TEST(ConvexHullTilesTest, RandomEightPointsLargeCells) {
+  std::mt19937_64 rng(31);
+  std::uniform_real_distribution<double> U(0.0, 192.0);
+  const TileGrid g = MakeGrid(16.0, 12, 12);
+  int mismatched = 0;
+  for (int trial = 0; trial < 3000; ++trial) {
+    std::vector<Vec2d> p(8);
+    for (int i = 0; i < 8; ++i) p[i] = {U(rng), U(rng)};
+    if (Sorted(ConvexHullCoveredTiles(g, p)) != RefTiles(g, p)) ++mismatched;
+  }
+  printf("large-cell(16): %d mismatched\n", mismatched);
+  EXPECT_EQ(mismatched, 0);
+}
+
 // ── ScreenHull 上下界 vs 参照 ──
 
 TEST(ConvexHullTilesTest, HullBoundsMatchReference) {
