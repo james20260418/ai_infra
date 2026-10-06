@@ -67,15 +67,25 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 - **离体/悬空处权重乱**（种子太少、生长范围过大）→ 视情况调「种子半径」。
 
 ## 7. 成品样例（成功典范，已入库）
-`tools/jpov/test/object3d/clothing/harness_vest/harness_vest_skinned_sample.glb`
-—— harness_vest 对齐到 mixamo_male、一键蒙皮后保存的**标准成品**（带 skin / 24 骨）。
-作为「正确结果」参考与回归对照。查看：
+两个「对齐 → 蒙皮 → 保存」的**标准成品**（带 skin / 24 骨），作「正确结果」参考与回归对照：
+- `tools/jpov/test/object3d/clothing/harness_vest/harness_vest_skinned_sample.glb`
+  —— 战术背心，对齐到 mixamo_male。
+- `tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants_skinned_sample.glb`
+  —— 瑜伽裤：先经 **model editor** 沿水平面裁掉裤腿下方（开个口），再对齐 mixamo_male +
+  一键蒙皮，焊接用**相对局部边长 0.3**。
+
+查看（任选一个成品）：
 ```bash
 output/jpov_clothing_tool/jpov_clothing_tool \
   --body_reference_path tools/jpov/test/object3d/mixamo_male/mixamo_male.glb \
-  --cloth_path tools/jpov/test/object3d/clothing/harness_vest/harness_vest_skinned_sample.glb
+  --cloth_path tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants_skinned_sample.glb
 ```
 （也可用任意 glTF 查看器 / Blender / fbx_viewer 打开；带 skin，可直接接渲染管线。）
+
+### 经验（2026-10-06 Danis）
+- **焊接用「相对局部边长」更合适**：与缩放 / 密度无关、拉伸后免调；实测 **0.3** 效果迄今最好。
+- **配合 model editor 事半功倍**：先在 model editor 里裁剪（如给瑜伽裤裤腿开个口）——
+  裁剪会按插值补出边界顶点、带好法线/UV/骨权；再到本工具对齐 + 蒙皮，比在蒙皮阶段硬补救省事得多。
 
 ## 8. 边界
 - 面向**贴身软布**；宽松 / 叠穿非本工具目标（离体顶点靠生长 + 兜底）。
