@@ -23,6 +23,28 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# SizeLimitedPiecewiseLinearFunction — 定长分段线性函数（段数极少时用；header-only）
+# 线性扫描求值 + 带 index_hint 的双指针查询 + UpProp/DownProp（立柱顶起/压下）。
+cc_library(
+    name = "size_limited_piecewise_linear_function",
+    hdrs = ["size_limited_piecewise_linear_function.h"],
+    deps = [
+        "//geom/common:check",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# SizeLimitedPiecewiseLinearFunction tests
+cc_test(
+    name = "size_limited_piecewise_linear_function_test",
+    srcs = ["size_limited_piecewise_linear_function_test.cc"],
+    deps = [
+        ":size_limited_piecewise_linear_function",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # Mat4 — 4x4 变换矩阵（列主序）+ 仿射求逆（骨架 rest/inverse-bind 用；header-only）
 cc_library(
     name = "mat4",
