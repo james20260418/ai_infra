@@ -56,6 +56,19 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 随机摆动测试姿态发生器（pure header-only；只依赖 geom+skeleton_types，无 GL）。
+cc_library(
+    name = "random_pose_driver",
+    hdrs = ["random_pose_driver.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:quaternion",
+        "//tools/jpov/interface:skeleton_types",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "clothing_tool_app",
     srcs = [
@@ -71,6 +84,7 @@ cc_library(
     deps = [
         ":clothing_axis_input",
         ":clothing_transform",
+        ":random_pose_driver",
         ":weight_transfer",
         "//geom/3d:triangle_3",
         "//geom/3d:triangle_matcher_3d",
@@ -112,6 +126,24 @@ cc_test(
     deps = [
         ":clothing_transform",
         "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 随机摆动姿态发生器单测（确定性 / 周期性 / 限幅 / 根不动；无 GL）。
+cc_test(
+    name = "random_pose_driver_test",
+    srcs = ["random_pose_driver_test.cc"],
+    deps = [
+        ":random_pose_driver",
+        "//geom/common:quaternion",
+        "//tools/jpov/interface:skeleton_types",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],

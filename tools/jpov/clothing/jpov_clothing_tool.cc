@@ -55,6 +55,10 @@ struct CliOptions {
     bool  weld_relative = false;  // --weld_relative 0/1（1 = 相对局部边长）
     float weld_ratio = jpov::clothing::kSkinWeldRatio;  // --weld_ratio（相对模式比例）
     bool  auto_skin = false;      // --auto_skin：headless 出图前跑一次一键蒙皮（脚本化验证）
+    // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
+    bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
+    float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
+    float motion_amp = -1.0f;     // --motion_amp 度 [0,90]（<0 = 未指定）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 → WARNING 忽略（不崩溃）。
@@ -188,6 +192,29 @@ CliOptions ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--auto_skin") {
             opt.auto_skin = true;
+        } else if (arg == "--motion_enable") {
+            opt.motion_enable = true;
+        } else if (arg == "--motion_phase") {
+            if (i + 1 < argc) {
+                opt.motion_phase = static_cast<float>(std::atof(argv[++i]));
+                if (opt.motion_phase < 0.0f || opt.motion_phase > 1.0f) {
+                    LOG(FATAL) << "--motion_phase 必须在 [0,1]，got " << opt.motion_phase;
+                }
+            } else {
+                LOG(WARNING) << "--motion_phase 缺少数值参数，忽略";
+            }
+        } else if (arg == "--motion_amp") {
+            if (i + 1 < argc) {
+                opt.motion_amp = static_cast<float>(std::atof(argv[++i]));
+                if (opt.motion_amp < 0.0f ||
+                    opt.motion_amp > jpov::clothing::kMotionAmplitudeMaxDeg) {
+                    LOG(FATAL) << "--motion_amp 必须在 [0,"
+                               << jpov::clothing::kMotionAmplitudeMaxDeg
+                               << "]，got " << opt.motion_amp;
+                }
+            } else {
+                LOG(WARNING) << "--motion_amp 缺少数值参数，忽略";
+            }
         } else if (arg == "--weld_relative") {
             if (i + 1 < argc) {
                 opt.weld_relative = (std::atoi(argv[++i]) != 0);
@@ -306,6 +333,16 @@ int main(int argc, char** argv) {
     app.body_parallel_damping_ui_ = opt.body_parallel_damping;
     app.weld_relative_ui_ = opt.weld_relative;
     app.weld_ratio_ = opt.weld_ratio;
+
+    // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
+    app.motion_test_enabled_ = opt.motion_enable;
+    if (opt.motion_phase >= 0.0f) {
+        app.motion_test_enabled_ = true;  // 给了相位即启用（便于 headless 出图）
+        app.motion_phase_ = opt.motion_phase;
+    }
+    if (opt.motion_amp >= 0.0f) {
+        app.motion_amplitude_deg_ = opt.motion_amp;
+    }
 
     if (opt.ui_shot) {
         // headless 单帧出图：无事件循环，需先把后台建图与 GPU 上传推进到就绪。
