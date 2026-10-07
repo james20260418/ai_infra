@@ -141,7 +141,7 @@ inline std::string ResolveResourcePath(const std::string& raw_path) {
 // 生成"编辑时间戳后缀"字符串：`YYYYMMDD-HHMMSS`（本地时间）。
 //
 // 用途：模型编辑器保存按钮拼文件名（`<stem>_edit<后缀>.glb`）。放在公共位置是因为
-//   "日期时间字符串"是跨模块的通用需求，不该在 demo/editor 里私有实现。
+//   "日期时间字符串"是跨模块的通用需求，不该在某个具体工具目录里私有实现。
 //
 // 收 `now`（std::time_t）而非内部取当前时间 —— 便于单测固定输入、结果可复现。
 // Pre-condition: now 为有效 time_t（正常调用传 std::time(nullptr)）。

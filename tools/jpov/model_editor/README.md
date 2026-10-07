@@ -4,8 +4,8 @@
 （可空）+ target 两个模型，对 target 做**平移 / 旋转 / 缩放**与**沿坐标平面裁剪**，结果
 可保存成 glb。命名空间 `jpov::model_editor`、目录 `tools/jpov/model_editor/` 均独立一整套。
 
-> 定位：给「瑜伽裤裤腿下方开口」这类**裁一刀**的需求用。旧 model editor
-> （`tools/jpov/demo/editor/`）在验证完本工具后删除。
+> 定位：给「瑜伽裤裤腿下方开口」这类**裁一刀**的需求用。本工具已完全取代早先的
+> 旧 model editor（原 `tools/jpov/demo/editor/`，已随其 build 脚本一并删除）。
 
 ## 编译 / 运行
 
