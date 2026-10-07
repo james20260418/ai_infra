@@ -159,9 +159,9 @@ void TestEmptySourcePoseIsRest() {
 
 // ── B. 真实资产：直搬后骨段朝向与源差得很远（= 不做重定向确实"不对"）──
 void TestNaiveTransferIsWrongOnRealAssets() {
-    const std::string fbx = jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx";
+    const std::string fbx = jpov::GetModelsDir() + "/characters/hip_hop_dance.fbx";
     const std::string glb =
-        jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb";
+        jpov::GetModelsDir() + "/characters/mixamo_male.glb";
 
     jpov::SkeletonType src;      // fbx 源骨架（红）
     jpov::FBXClip clip;

@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
     jpov::MeshData mesh;
     jpov::GltfMaterialInfo mat;
     bool ok = jpov::LoadGltf(
-        "tools/jpov/test/object3d/pliers_gltf/pliers.gltf",
+        "tools/jpov/assets/models/samples/pliers/pliers.gltf",
         &mesh, &mat);
     CHECK(ok) << "LoadGltf returned false";
 

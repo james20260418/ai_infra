@@ -209,7 +209,7 @@ int main() {
     if (!jpov::ReadFileBytes(gold_path, &expected_bytes)) {
         LOG(ERROR) << "无法加载 gold: " << gold_path
                    << "（首次生成请跑 "
-                      "bazel run //tools/jpov/test/object3d:"
+                      "bazel run //tools/jpov/assets/models:"
                       "text3d_depth_alpha_gold_generator）";
         return 1;
     }

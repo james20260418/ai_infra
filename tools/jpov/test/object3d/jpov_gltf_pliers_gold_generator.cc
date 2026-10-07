@@ -88,7 +88,7 @@ int main() {
 
     // 加载 pliers 场景（内部上传 mesh + 贴图，含 ORM 拆包）
     jpov::GltfObject gltf = app.LoadGltf(
-        jpov::GetTestDataDir() + "/object3d/pliers_gltf/pliers.gltf");
+        jpov::GetModelsDir() + "/samples/pliers/pliers.gltf");
     CHECK(!gltf.empty()) << "LoadGltf failed / empty";
     LOG(INFO) << "Loaded " << gltf.size() << " glTF primitives";
     app.SetGltfObject(std::move(gltf));

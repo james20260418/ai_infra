@@ -77,6 +77,7 @@ cc_library(
         "//tools/common:utils",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
+        "//tools/jpov/assets/models:models_path",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:skeleton_types",
@@ -146,8 +147,8 @@ cc_test(
     name = "clothing_skin_e2e_test",
     srcs = ["clothing_skin_e2e_test.cc"],
     data = [
-        "//tools/jpov/test/object3d:clothing_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:clothing_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         ":weight_transfer",

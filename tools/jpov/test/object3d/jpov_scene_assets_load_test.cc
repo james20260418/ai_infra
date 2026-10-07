@@ -23,12 +23,12 @@ struct Case {
 };
 
 const Case kCases[] = {
-    {"tools/jpov/test/object3d/scene_assets/stool.glb", "stool.glb"},
-    {"tools/jpov/test/object3d/scene_assets/table.glb", "table.glb"},
-    {"tools/jpov/test/object3d/scene_assets/houseplant.glb", "houseplant.glb"},
-    {"tools/jpov/test/object3d/scene_assets/wall_rock/wall_rock.gltf", "wall_rock"},
-    {"tools/jpov/test/object3d/scene_assets/ground/ground_dirt.gltf", "ground_dirt"},
-    {"tools/jpov/test/object3d/scene_assets/ground/ground_brick.gltf", "ground_brick"},
+    {"tools/jpov/assets/models/scene/scene_assets/stool.glb", "stool.glb"},
+    {"tools/jpov/assets/models/scene/scene_assets/table.glb", "table.glb"},
+    {"tools/jpov/assets/models/scene/scene_assets/houseplant.glb", "houseplant.glb"},
+    {"tools/jpov/assets/models/scene/scene_assets/wall_rock/wall_rock.gltf", "wall_rock"},
+    {"tools/jpov/assets/models/scene/scene_assets/ground/ground_dirt.gltf", "ground_dirt"},
+    {"tools/jpov/assets/models/scene/scene_assets/ground/ground_brick.gltf", "ground_brick"},
 };
 
 }  // namespace

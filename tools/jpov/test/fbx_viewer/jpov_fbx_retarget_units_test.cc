@@ -68,9 +68,9 @@ int FindBySuffix(const SkeletonType& s, const std::string& suffix) {
 
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
-    const std::string dir = jpov::GetTestDataDir();
-    const std::string fbx = dir + "/animations/hip_hop_dance.fbx";
-    const std::string glb = dir + "/object3d/mixamo_male/mixamo_male.glb";
+    const std::string models_dir = jpov::GetModelsDir();
+    const std::string fbx = models_dir + "/characters/hip_hop_dance.fbx";
+    const std::string glb = models_dir + "/characters/mixamo_male.glb";
 
     SkeletonType skeleton_m;
     FBXClip clip;

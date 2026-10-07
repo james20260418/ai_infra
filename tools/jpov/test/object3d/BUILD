@@ -6,7 +6,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 cc_binary(
     name = "jpov_object3d_gold_generator",
     srcs = ["jpov_object3d_gold_generator.cc"],
-    data = [":beetle.obj"],
+    data = ["//tools/jpov/assets/models:primitives/beetle.obj"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -21,7 +21,7 @@ cc_test(
     srcs = ["jpov_object3d_gold_test.cc"],
     data = [
         ":object3d_beetle_1280x720.png",
-        ":beetle.obj",
+        "//tools/jpov/assets/models:primitives/beetle.obj",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
@@ -40,7 +40,7 @@ cc_test(
 cc_binary(
     name = "jpov_pbr_cube_normal_gold_generator",
     srcs = ["jpov_pbr_cube_normal_gold_generator.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -53,7 +53,7 @@ cc_binary(
 cc_test(
     name = "jpov_pbr_cube_normal_gold_test",
     srcs = ["jpov_pbr_cube_normal_gold_test.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_cube_normal_1280x720.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_cube_normal_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -73,7 +73,7 @@ cc_test(
 cc_binary(
     name = "jpov_pbr_cube_normal_mr_gold_generator",
     srcs = ["jpov_pbr_cube_normal_mr_gold_generator.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -86,7 +86,7 @@ cc_binary(
 cc_test(
     name = "jpov_pbr_cube_normal_mr_gold_test",
     srcs = ["jpov_pbr_cube_normal_mr_gold_test.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_cube_normal_mr_1280x720.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_cube_normal_mr_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -106,7 +106,7 @@ cc_test(
 cc_binary(
     name = "jpov_pbr_cube_normal_mr_ea_gold_generator",
     srcs = ["jpov_pbr_cube_normal_mr_ea_gold_generator.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_emissive_256x256.png", ":pbr_ao_256x256.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_emissive_256x256.png", ":pbr_ao_256x256.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -119,7 +119,7 @@ cc_binary(
 cc_test(
     name = "jpov_pbr_cube_normal_mr_ea_gold_test",
     srcs = ["jpov_pbr_cube_normal_mr_ea_gold_test.cc"],
-    data = [":cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_emissive_256x256.png", ":pbr_ao_256x256.png", ":pbr_cube_normal_mr_ea_1280x720.png"],
+    data = ["//tools/jpov/assets/models:primitives/cube_hand.obj", ":cube_tex_256x256.png", ":pbr_normal_256x256.png", ":pbr_metallic_256x256.png", ":pbr_roughness_256x256.png", ":pbr_emissive_256x256.png", ":pbr_ao_256x256.png", ":pbr_cube_normal_mr_ea_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src:obj_loader",
@@ -133,78 +133,13 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
-filegroup(
-    name = "pliers_gltf_data",
-    srcs = glob(["pliers_gltf/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# 内嵌 bufferView 贴图 GLB（Tripo 生成投石车，单文件自包含）
-# 用于验证 loader 支持内嵌贴图（无外部 uri）。
-filegroup(
-    name = "catapult_glb_data",
-    srcs = glob(["catapult_glb/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# 内嵌贴图 GLB（Khronos 官方 Lantern，单文件，PBR 全通道：baseColor/normal/
-# metallicRoughness(ORM)/emissive，无独立 occlusion）。用于验证内嵌贴图 GLB
-# 的完整加载 + AO/emissive 规范语义修复。
-filegroup(
-    name = "lantern_glb_data",
-    srcs = glob(["lantern_glb/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# 带骨骼(Tripo Auto Rig spec=mixamo)人形 GLB——gen3d/skeleton 真调资材。
-# mixamorig 23 关节 + JOINTS_0/WEIGHTS_0 蒙皮权重; 无预烘焙动画帧。
-# 用途: loader 接 skins 的权威资材 + SkeletonType::Mixamo 模板 dump 基准
-# (渲染相关 test 在后续 PR 挂接, 本 filegroup 先就位供引用)。
-filegroup(
-    name = "mixamo_male_glb_data",
-    srcs = glob(["mixamo_male/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# ⚠️ 反面教材（不是可用资产）——Tripo 单图重建复杂植物不可用的证据。
-# 2026-09-18 实验：同一张橡树图分别以 P1 低模 3859 面 / 19436 面出模，
-# 树冠均为「离散面片堆叠」，未形成连续叶面（拉满面数只救回枝干）。
-# 结论：植物类资产应走「纸片 + 透明纹理」，不要用 AI 单图重建。
-# 用途：留证 + 决策参照。**故意不挂任何 gold test**——拿已知畸形的模型
-# 做渲染回归基准没有意义。详见本目录 README.md。
-filegroup(
-    name = "oak_tripo_negative_data",
-    srcs = glob(["oak_tripo_negative/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# wallet_tripo_multiview：多视图（--images）模式的**正面样例**。
-# 4 张真正交视图 → 硬表面单体可用模型（结构完整、无破损）。
-# 与 oak_tripo_negative 对照，可看出「输入结构复杂度」如何决定成败。
-filegroup(
-    name = "wallet_tripo_multiview_data",
-    srcs = glob(["wallet_tripo_multiview/*"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
-# clothing：JPOV 穿衣工具（tools/jpov/clothing/）用的衣物资产库。
-# 每件衣服一个子目录（glb + 四视图预览 + 生成溯源 README）。
-# 现状：harness_vest（战术背心，单图重建，双面）/ yoga_pants（瑜伽裤，文本生成，单面）。
-# 用途：为穿衣管线提供可复现、可引用的输入。**不承载 gold test**（外部生成资产，
-# 非本项目可控的渲染基准）。详见 clothing/README.md。
-filegroup(
-    name = "clothing_data",
-    srcs = glob(["clothing/**"]),
-    visibility = ["//tools/jpov:__subpackages__"],
-)
-
 # ============================================================================
 # Gold Image — glTF Lantern (内嵌贴图 GLB) PBR 渲染验证
 # ============================================================================
 cc_binary(
     name = "jpov_gltf_lantern_gold_generator",
     srcs = ["jpov_gltf_lantern_gold_generator.cc"],
-    data = [":lantern_glb_data"],
+    data = ["//tools/jpov/assets/models:lantern_glb_data"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -217,7 +152,7 @@ cc_binary(
 cc_test(
     name = "jpov_gltf_lantern_gold_test",
     srcs = ["jpov_gltf_lantern_gold_test.cc"],
-    data = [":lantern_glb_data", ":lantern_1280x720.png"],
+    data = ["//tools/jpov/assets/models:lantern_glb_data", ":lantern_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -237,7 +172,7 @@ cc_test(
 cc_binary(
     name = "jpov_gltf_pliers_gold_generator",
     srcs = ["jpov_gltf_pliers_gold_generator.cc"],
-    data = [":pliers_gltf_data"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -250,7 +185,7 @@ cc_binary(
 cc_test(
     name = "jpov_gltf_pliers_gold_test",
     srcs = ["jpov_gltf_pliers_gold_test.cc"],
-    data = [":pliers_gltf_data", ":pliers_1280x720.png"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data", ":pliers_1280x720.png"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -264,20 +199,11 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
-# ============================================================================
-# 第三方 glTF/GLB 资源（场景 gold test 用）
-# ============================================================================
-filegroup(
-    name = "scene_assets",
-    srcs = glob(["scene_assets/**"]),
-    visibility = ["//visibility:public"],
-)
-
 # 第三方 glTF/GLB 加载 smoke test（纯 CPU 解析，不渲染）
 cc_test(
     name = "jpov_scene_assets_load_test",
     srcs = ["jpov_scene_assets_load_test.cc"],
-    data = [":scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/src:gltf_loader",
         "@glog_static//:glog",
@@ -297,7 +223,7 @@ cc_binary(
         "jpov_scene_gold_generator.cc",
         "jpov_scene_common.h",
     ],
-    data = [":scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -316,7 +242,7 @@ cc_test(
         "jpov_scene_common.h",
     ],
     data = [
-        ":scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":scene_1280x720.png",
     ],
     deps = [
@@ -342,7 +268,7 @@ cc_binary(
         "jpov_scene_in_sun_gold_generator.cc",
         "jpov_scene_in_sun_common.h",
     ],
-    data = [":scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -361,7 +287,7 @@ cc_test(
         "jpov_scene_in_sun_common.h",
     ],
     data = [
-        ":scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":scene_in_sun_1280x720.png",
     ],
     deps = [

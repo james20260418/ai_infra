@@ -167,8 +167,8 @@ DISPLAY=:99 ./bazel-bin/tools/jpov/jpov_model_viewer \
   纯看渲染问题往 JPOV 渲染侧查。
 - **想删上一次结果？** 直接删 `output/gen3d/<名字>.glb` 和同名 4 张 png。
 - **想知道「什么样的图能出好模型」？** 看仓库内已入库的两个实测样例：
-  正面样例 `test/object3d/wallet_tripo_multiview/`（多视图，硬表面单体可用），
-  反面教材 `test/object3d/oak_tripo_negative/`（单图，复杂植物不可用）。
+  正面样例 `assets/models/samples/wallet/`（多视图，硬表面单体可用），
+  反面教材 `assets/models/samples/oak_negative/`（单图，复杂植物不可用）。
   两个目录都含输入图 + 产物 + 渲染图 + 完整结论，**动手前先看能省一轮 credit**。
 
 ## 进阶文档（不用先读，需要时再翻）

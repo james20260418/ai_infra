@@ -33,6 +33,23 @@ inline std::string GetTestDataDir() {
     return GetProjectRoot() + "tools/jpov/test";
 }
 
+// Returns the managed 3D-model asset root (no trailing slash):
+//   bazel test sandbox: $TEST_SRCDIR/__main__/tools/jpov/assets/models
+//   bazel run / local: <project_root>/tools/jpov/assets/models
+// All 3D model assets (obj / fbx / glb / gltf, plus their .bin/textures) live in
+// this single tree so they can be managed apart from the gold-image baselines
+// (which stay under tools/jpov/test/). Build model paths from this prefix.
+inline std::string GetModelsDir() {
+    const char* test_srcdir = std::getenv("TEST_SRCDIR");
+    if (test_srcdir) {
+        std::string p = test_srcdir;
+        if (!p.empty() && p.back() != '/') p.push_back('/');
+        p += "__main__/tools/jpov/assets/models";
+        return p;
+    }
+    return GetProjectRoot() + "tools/jpov/assets/models";
+}
+
 // Read entire file into vector.
 // Returns false on failure (logs error internally).
 inline bool ReadFileBytes(const std::string& path,

@@ -48,14 +48,14 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 
 # 拷贝模型资源到 exe 旁 models/（与 demo 里硬编码的相对路径 "models/xxx.glb" 对应）。
-# 来源：桌子取自 test/object3d/scene_assets/，高模橡树取自 test/object3d/oak_tripo_negative/，
-#       蓝人（T-pose 人形，带骨架/蒙皮）取自 test/object3d/mixamo_male/。
+# 来源：桌子取自 assets/models/scene/scene_assets/，高模橡树取自 assets/models/samples/oak_negative/，
+#       蓝人（T-pose 人形，带骨架/蒙皮）取自 assets/models/characters/。
 echo ""
 echo "==> 4. 拷贝模型资源到 output/jpov_skylight_viewer/models/"
 mkdir -p "$OUTPUT_DIR/models"
-cp -v "$PROJECT_DIR/tools/jpov/test/object3d/scene_assets/table.glb"              "$OUTPUT_DIR/models/"
-cp -v "$PROJECT_DIR/tools/jpov/test/object3d/oak_tripo_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
-cp -v "$PROJECT_DIR/tools/jpov/test/object3d/mixamo_male/mixamo_male.glb"         "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/assets/models/scene/scene_assets/table.glb"              "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/assets/models/characters/mixamo_male.glb"         "$OUTPUT_DIR/models/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"
 
 echo ""

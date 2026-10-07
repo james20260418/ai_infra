@@ -18,8 +18,8 @@
 
 | 样例目录 | 模式 | 结论 |
 |---|---|---|
-| `test/object3d/wallet_tripo_multiview/` | `--images`（4 视图） | ✅ **正面样例**：硬表面单体可用（结构完整、无破损）；含 4 张输入图 + GLB + 四视图渲染 |
-| `test/object3d/oak_tripo_negative/` | `--image`（单图） | ❌ **反面教材**：单图重建复杂植物不可用（树冠碎成飘浮面片）；含输入图 + 4k/20k 两版 GLB + 渲染 |
+| `assets/models/samples/wallet/` | `--images`（4 视图） | ✅ **正面样例**：硬表面单体可用（结构完整、无破损）；含 4 张输入图 + GLB + 四视图渲染 |
+| `assets/models/samples/oak_negative/` | `--image`（单图） | ❌ **反面教材**：单图重建复杂植物不可用（树冠碎成飘浮面片）；含输入图 + 4k/20k 两版 GLB + 渲染 |
 
 两个样例各配 `README.md`，记录了完整命令、参数、验收结论与教训（含「低模必须先高模再减面」
 「植物类该用 billboard 纸片」等结论）。对照看可直观理解**输入结构复杂度如何决定成败**。

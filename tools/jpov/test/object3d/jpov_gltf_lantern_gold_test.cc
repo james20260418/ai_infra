@@ -1,6 +1,6 @@
 // JPOV glTF Lantern (GLB) PBR Gold Image Test
 //
-// 用 Khronos 官方 Lantern.glb（贴图内嵌单文件 GLB）端到端验证：
+// 用 Khronos 官方 lantern.glb（贴图内嵌单文件 GLB）端到端验证：
 //   1. JPOV::LoadGltf(path) → GltfObject（GLB 内嵌 bufferView 贴图自动解出）
 //   2. RenderCommandList::DrawGltfObject(obj, ...) 渲染整个对象
 //   3. JPOV::ReleaseGltf(obj) 整体释放
@@ -36,11 +36,11 @@ std::string GetGltfPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d/lantern_glb/Lantern.glb";
+        p += "__main__/tools/jpov/assets/models/samples/lantern/lantern.glb";
         return p;
     }
     return jpov::GetProjectRoot() +
-        "tools/jpov/test/object3d/lantern_glb/Lantern.glb";
+        "tools/jpov/assets/models/samples/lantern/lantern.glb";
 }
 
 std::string GetOutputDir() {
@@ -122,7 +122,7 @@ int main() {
 
     jpov::GltfObject gltf = app.LoadGltf(GetGltfPath());
     CHECK(!gltf.empty()) << "LoadGltf failed / empty";
-    CHECK_GT(gltf.size(), 0u) << "Lantern.glb 应至少有一个 primitive";
+    CHECK_GT(gltf.size(), 0u) << "lantern.glb 应至少有一个 primitive";
     LOG(INFO) << "Loaded " << gltf.size() << " glTF primitives";
     app.SetGltfObject(std::move(gltf));
 

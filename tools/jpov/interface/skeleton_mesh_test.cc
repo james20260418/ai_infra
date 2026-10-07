@@ -463,13 +463,13 @@ TEST(SkeletonMesh, HipsRodThinOnRealSkeletons) {
 
     std::vector<SkeletonType> skins;
     ASSERT_TRUE(jpov::LoadGltfSkeleton(
-        jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb", &skins));
+        jpov::GetModelsDir() + "/characters/mixamo_male.glb", &skins));
     ASSERT_FALSE(skins.empty());
     check_hips("mixamo_male.glb", skins[0]);
 
     SkeletonType fbx;
     ASSERT_TRUE(jpov::LoadFbxSkeleton(
-        jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx", &fbx));
+        jpov::GetModelsDir() + "/characters/hip_hop_dance.fbx", &fbx));
     check_hips("hip_hop_dance.fbx", fbx);
 }
 

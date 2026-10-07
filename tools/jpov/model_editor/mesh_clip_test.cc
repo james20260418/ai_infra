@@ -301,7 +301,7 @@ std::string AssetPath(const std::string& rel) {
 }
 
 constexpr char kPantsRel[] =
-    "tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants.glb";
+    "tools/jpov/assets/models/clothing/yoga_pants/yoga_pants.glb";
 
 }  // namespace
 

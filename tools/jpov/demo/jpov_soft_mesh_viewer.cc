@@ -26,6 +26,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/assets/models/models_path.h"
 #include "tools/jpov/demo/soft_mesh_viewer_app.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
@@ -34,8 +35,7 @@
 namespace {
 
 // 项目内可用的演示 glTF（未指定路径时 fallback，便于快速跑通）。
-constexpr const char* kDefaultGltfPath =
-    "tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
+constexpr const char* kDefaultGltfPath = jpov::kDemoPliersGltf;
 
 // LoadGltfScene 的回调是**函数指针**（不是 std::function，见 gltf_loader.h 的
 // GltfMeshEntryCallback），故用「函数指针 + void* user_data」这一对表达「取第一条」。

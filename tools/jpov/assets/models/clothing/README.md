@@ -52,8 +52,8 @@ bash tools/jpov/gen3d_static.sh output/gen3d yoga_pants \
 
 ```bash
 ./output/jpov_clothing_tool/jpov_clothing_tool \
-    --cloth_path tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants.glb
-# 人体 reference 缺省 = tools/jpov/test/object3d/mixamo_male/mixamo_male.glb
+    --cloth_path tools/jpov/assets/models/clothing/yoga_pants/yoga_pants.glb
+# 人体 reference 缺省 = tools/jpov/assets/models/characters/mixamo_male.glb
 ```
 
 ## 成品样例（成功典范，2026-10-05 Danis 定）

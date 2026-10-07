@@ -98,7 +98,7 @@ cc_test(
     name = "mesh_clip_test",
     srcs = ["mesh_clip_test.cc"],
     data = [
-        "//tools/jpov/test/object3d:clothing_data",
+        "//tools/jpov/assets/models:clothing_data",
     ],
     deps = [
         ":model_mesh_ops",

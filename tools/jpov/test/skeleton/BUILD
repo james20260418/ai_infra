@@ -12,8 +12,8 @@ cc_binary(
         "jpov_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
@@ -36,8 +36,8 @@ cc_test(
         "jpov_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
         ":human_skeleton_gold_t_rest_1280x720.png",
     ],
     deps = [
@@ -74,8 +74,8 @@ cc_test(
         "jpov_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
@@ -159,8 +159,8 @@ cc_binary(
         "jpov_asset_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",
@@ -183,8 +183,8 @@ cc_test(
         "jpov_asset_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
         ":skeleton_from_glb_fbx_1280x720.png",
     ],
     deps = [
@@ -219,7 +219,7 @@ cc_test(
         "jpov_skeleton_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         "//tools/jpov/include/jpov:jpov",

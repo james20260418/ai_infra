@@ -43,8 +43,8 @@ std::string AssetPath(const std::string& rel) {
     return jpov::GetProjectRoot() + rel;
 }
 
-constexpr char kBodyRel[] = "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
-constexpr char kVestRel[] = "tools/jpov/test/object3d/clothing/harness_vest/harness_vest.glb";
+constexpr char kBodyRel[] = "tools/jpov/assets/models/characters/mixamo_male.glb";
+constexpr char kVestRel[] = "tools/jpov/assets/models/clothing/harness_vest/harness_vest.glb";
 
 // 收集身体几何的三角形 + 蒙皮角表（回调式，与 clothing_init 同构）。
 struct BodyCollector {

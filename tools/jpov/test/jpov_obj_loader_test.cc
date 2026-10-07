@@ -18,8 +18,8 @@
 
 namespace {
 
-// 测试资源路径（bazel data 会把 test 目录作为 runfiles 根）
-const char* kDataRoot = "tools/jpov/test/";
+// 测试资源路径（bazel data 会把 3D 模型资产目录作为 runfiles 根的一部分）
+const char* kDataRoot = "tools/jpov/assets/models/primitives/";
 
 void Check(bool cond, const std::string& msg) {
     if (!cond) {

@@ -119,8 +119,8 @@ void CheckNear(double got, double want, double tol, const char* what) {
 
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
-    const std::string kFbx = jpov::GetTestDataDir() +
-                             "/animations/hip_hop_dance.fbx";
+    const std::string kFbx = jpov::GetModelsDir() +
+                             "/characters/hip_hop_dance.fbx";
 
     jpov::SkeletonType skel;   // 米制骨架（LoadFbxSkeleton）
     jpov::FBXClip clip;        // 帧频 + 全帧（LoadFbxAnimation）

@@ -80,7 +80,7 @@ cc_binary(
         "//tools/jpov/test:test_utils",
         "@glog_static//:glog",
     ],
-    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
@@ -102,7 +102,7 @@ cc_test(
     data = [
         ":final_adjust_highcontrast_lowbright.png",
         ":final_adjust_lowcontrast.png",
-        "//tools/jpov/test/object3d:pliers_gltf_data",
+        "//tools/jpov/assets/models:pliers_gltf_data",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
@@ -125,7 +125,7 @@ cc_test(
         "//tools/jpov/test:test_utils",
     ],
     data = [
-        "//tools/jpov/test/object3d:pliers_gltf_data",
+        "//tools/jpov/assets/models:pliers_gltf_data",
     ],
     copts = ["-std=c++20"],
     linkstatic = 1,
@@ -146,7 +146,7 @@ cc_binary(
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/test:test_utils",
     ],
-    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
@@ -167,7 +167,7 @@ cc_test(
         "//third_party/stb:stb_image",
         "//tools/jpov/test:test_utils",
     ],
-    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data"],
     copts = ["-std=c++20"],
     linkstatic = 1,
     target_compatible_with = [

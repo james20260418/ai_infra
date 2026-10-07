@@ -163,4 +163,4 @@ BUILD 新增：`view_config`(cc_library header) + `jpov_model_viewer`(cc_binary)
 - [x] ~~ambient=0.3~~ 由 sky.AmbientIntensity(0.3) 推导（锚定 PR#60 基准）；near/far/fov 对齐 §5
 - [ ] 单测通过（view_config_test）
 - [ ] sh 脚本产出 output/jpov_model_viewer/ 可执行
-- [ ] 用仓里现有 gltf（test/object3d/scene_assets 的 pliers/stool 等）实跑 four_views 出图验证
+- [ ] 用仓里现有 gltf（assets/models/scene/scene_assets 的 pliers/stool 等）实跑 four_views 出图验证

@@ -7,7 +7,7 @@ cc_binary(
         "jpov_standard_sunny_day_gold_generator.cc",
         "jpov_standard_sunny_day_common.h",
     ],
-    data = ["//tools/jpov/test/object3d:scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -26,7 +26,7 @@ cc_test(
         "jpov_standard_sunny_day_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":standard_sunny_day_1280x720.png",
     ],
     deps = [
@@ -53,7 +53,7 @@ cc_binary(
         "jpov_sun_path_common.h",
         "jpov_standard_sunny_day_common.h",
     ],
-    data = ["//tools/jpov/test/object3d:scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -73,7 +73,7 @@ cc_test(
         "jpov_standard_sunny_day_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":sun_path_0.png",
         ":sun_path_1.png",
     ],
@@ -99,7 +99,7 @@ cc_binary(
         "jpov_pick_highlight_sunny_gold_generator.cc",
         "jpov_pick_highlight_sunny_common.h",
     ],
-    data = ["//tools/jpov/test/object3d:scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -118,7 +118,7 @@ cc_test(
         "jpov_pick_highlight_sunny_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":pick_highlight_sunny_1280x720.png",
     ],
     deps = [
@@ -146,7 +146,7 @@ cc_binary(
         "jpov_sun_path_common.h",
         "jpov_standard_sunny_day_common.h",
     ],
-    data = ["//tools/jpov/test/object3d:scene_assets"],
+    data = ["//tools/jpov/assets/models:scene_assets"],
     deps = [
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
@@ -167,7 +167,7 @@ cc_test(
         "jpov_standard_sunny_day_common.h",
     ],
     data = [
-        "//tools/jpov/test/object3d:scene_assets",
+        "//tools/jpov/assets/models:scene_assets",
         ":sun_path_bloom_1.png",
         ":sun_path_nobloom_1.png",
     ],
