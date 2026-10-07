@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>  // snprintf（把 CLI 种子写回面板输入框）
 #include <cstdlib>  // atof / atoi
 #include <string>
 #include <thread>
@@ -59,6 +60,7 @@ struct CliOptions {
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
     float motion_amp = -1.0f;     // --motion_amp 度 [0,90]（<0 = 未指定）
+    int   motion_seed = -1;       // --motion_seed [0,65535]（<0 = 未指定）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 → WARNING 忽略（不崩溃）。
@@ -215,6 +217,17 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--motion_amp 缺少数值参数，忽略";
             }
+        } else if (arg == "--motion_seed") {
+            if (i + 1 < argc) {
+                opt.motion_seed = std::atoi(argv[++i]);
+                if (opt.motion_seed < 0 || opt.motion_seed > jpov::clothing::kMotionSeedMax) {
+                    LOG(FATAL) << "--motion_seed 必须在 [0,"
+                               << jpov::clothing::kMotionSeedMax << "]，got "
+                               << opt.motion_seed;
+                }
+            } else {
+                LOG(WARNING) << "--motion_seed 缺少数值参数，忽略";
+            }
         } else if (arg == "--weld_relative") {
             if (i + 1 < argc) {
                 opt.weld_relative = (std::atoi(argv[++i]) != 0);
@@ -342,6 +355,12 @@ int main(int argc, char** argv) {
     }
     if (opt.motion_amp >= 0.0f) {
         app.motion_amplitude_deg_ = opt.motion_amp;
+    }
+    if (opt.motion_seed >= 0) {
+        app.motion_seed_ = opt.motion_seed;
+        // 同步面板输入框文本，保持单一事实源一致。
+        snprintf(app.motion_seed_field_.text, jpov::clothing::kAxisInputCapacity, "%d",
+                 opt.motion_seed);
     }
 
     if (opt.ui_shot) {
