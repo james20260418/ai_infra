@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
 
     const std::string kGlb =
-        "tools/jpov/test/object3d/catapult_glb/catapult.glb";
+        "tools/jpov/assets/models/samples/catapult/catapult.glb";
 
     jpov::MeshData mesh;
     jpov::GltfMaterialInfo mat;

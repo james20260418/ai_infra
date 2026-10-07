@@ -32,10 +32,10 @@ inline std::string AssetPath(const std::string& rel) {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        return p + "__main__/tools/jpov/test/object3d/scene_assets/" + rel;
+        return p + "__main__/tools/jpov/assets/models/scene/scene_assets/" + rel;
     }
     return jpov::GetProjectRoot() +
-        "tools/jpov/test/object3d/scene_assets/" + rel;
+        "tools/jpov/assets/models/scene/scene_assets/" + rel;
 }
 
 // 高亮对象 picking_id（供 test 断言 + generator/test 引用，需 >0 才可拾取）。

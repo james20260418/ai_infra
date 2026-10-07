@@ -59,6 +59,7 @@
 
 #include <glog/logging.h>
 
+#include "tools/jpov/assets/models/models_path.h"
 #include "tools/jpov/clothing/clothing_axis_input.h"
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
@@ -100,8 +101,7 @@ inline constexpr const char* kViewerFontAlias = jpov::kFontBuiltinCJK;
 
 // 未显式指定 --body_reference_path 时的演示用人体 reference。
 // 项目内自带的 Mixamo 男性人体资产（rest/T-pose），便于快速跑通。
-inline constexpr const char* kDefaultBodyReferencePath =
-    "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+inline constexpr const char* kDefaultBodyReferencePath = jpov::kDefaultCharacterGlb;
 
 // 数值输入框文本容量（含终止符）。填值格式如 "-0.35" / "45"，64 字节足够。
 inline constexpr size_t kAxisInputCapacity = 64;

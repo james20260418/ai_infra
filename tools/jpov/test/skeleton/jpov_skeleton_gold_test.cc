@@ -23,8 +23,8 @@ std::string GoldPath() {
              return s + "__main__/tools/jpov/test" + jpov_skeleton_gold::GetGoldRelPath(); }
     return jpov::GetProjectRoot() + "tools/jpov/test" + jpov_skeleton_gold::GetGoldRelPath();
 }
-std::string Assets() { return jpov::GetProjectRoot() + "tools/jpov/test/object3d/scene_assets/"; }
-std::string Male()  { return jpov::GetProjectRoot() + "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb"; }
+std::string Assets() { return jpov::GetProjectRoot() + "tools/jpov/assets/models/scene/scene_assets/"; }
+std::string Male()  { return jpov::GetProjectRoot() + "tools/jpov/assets/models/characters/mixamo_male.glb"; }
 }  // namespace
 
 int main() {

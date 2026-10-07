@@ -174,7 +174,7 @@ TEST(DqsSkinningTest, TwoFrameInterpolationStaysRigid) {
 // 本用例跑的就是渲染用的那条链路（SkinMatricesOnCpuForTest + 两个混合实现）。
 TEST(DqsSkinningTest, RealAssetEdgeLengthsStayUnshrunk) {
     const std::string glb =
-        jpov::GetProjectRoot() + "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+        jpov::GetProjectRoot() + "tools/jpov/assets/models/characters/mixamo_male.glb";
     jpov::MeshData rest;
     jpov::GltfMaterialInfo mi;
     ASSERT_TRUE(jpov::LoadGltf(glb, &rest, &mi)) << "读不到资产网格: " << glb;

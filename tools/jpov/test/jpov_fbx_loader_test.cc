@@ -33,7 +33,7 @@ bool IsUnit(const geom::Quaternion<float>& q, float eps = 1e-3f) {
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
 
-    const std::string kFbx = "tools/jpov/test/animations/hip_hop_dance.fbx";
+    const std::string kFbx = "tools/jpov/assets/models/characters/hip_hop_dance.fbx";
 
     jpov::FBXClip clip;
     CHECK(jpov::LoadFbxAnimation(kFbx, &clip)) << "应能加载 hip_hop_dance.fbx";

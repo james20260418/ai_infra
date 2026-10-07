@@ -58,8 +58,8 @@ cc_test(
     name = "skeleton_pose_transfer_test",
     srcs = ["skeleton_pose_transfer_test.cc"],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         ":fbx_viewer_app",

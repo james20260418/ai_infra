@@ -319,7 +319,7 @@ AI 没有足够信息推断每片叶子的位置与朝向，只能猜。
 ⇒ **植物类资产的正确做法：纸片（billboard / alpha card）+ 透明纹理**
 （业界标准；JPOV 已有 `text3d_depth_alpha_*` 验证带 alpha 贴片渲染可用）。
 
-留证资产见 `test/object3d/oak_tripo_negative/`（README 详述，**故意不挂 gold test**）。
+留证资产见 `assets/models/samples/oak_negative/`（README 详述，**故意不挂 gold test**）。
 
 ### 🔑 方法论结论①：低模必须「先高模再减面」
 
@@ -406,7 +406,7 @@ Tripo 之前**就得把背景处理好，反向支持「Tripo 不吃 alpha」。
 ⇒ 结论：**硬表面单体是多视图重建的舒适区；难点在「高频细碎几何」与
 「高自遮挡」**（见 §4.5 植物案例）。选资产时按此判。
 
-留证资产见 `test/object3d/wallet_tripo_multiview/`（README 详述，**故意不挂 gold test**）。
+留证资产见 `assets/models/samples/wallet/`（README 详述，**故意不挂 gold test**）。
 
 ---
 

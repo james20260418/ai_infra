@@ -220,8 +220,8 @@ cc_test(
     srcs = ["skeleton_mesh_test.cc"],
     # 真实资产回归：mixamo_male.glb（顶层 Root 是 4.5mm 导出残差 → 讨要"根杆收窄"）。
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         ":mixamo23_skeleton",

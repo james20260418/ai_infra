@@ -38,11 +38,11 @@
 namespace {
 std::string OutDir() { return jpov::GetOutputDir() + "jpov_skinned_multipose_test/"; }
 std::string Assets() {
-    return jpov::GetProjectRoot() + "tools/jpov/test/object3d/scene_assets/";
+    return jpov::GetProjectRoot() + "tools/jpov/assets/models/scene/scene_assets/";
 }
 std::string Male() {
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+           "tools/jpov/assets/models/characters/mixamo_male.glb";
 }
 
 struct Img {

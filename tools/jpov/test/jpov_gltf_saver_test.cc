@@ -34,10 +34,10 @@ std::string SkinnedAssetPath() {
     if (srcdir) {
         std::string p = srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        return p + "__main__/tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+        return p + "__main__/tools/jpov/assets/models/characters/mixamo_male.glb";
     }
     return jpov::GetProjectRoot() +
-           "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+           "tools/jpov/assets/models/characters/mixamo_male.glb";
 }
 
 std::string TmpPath(const std::string& name) {

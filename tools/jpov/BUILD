@@ -88,6 +88,7 @@ cc_binary(
         "//tools/jpov:viewer_app",
         "//tools/jpov:viewer_capture",
         "//tools/jpov:viewer_output",
+        "//tools/jpov/assets/models:models_path",
         "//tools/jpov/include/jpov:jpov",
     ],
     target_compatible_with = [
@@ -335,6 +336,7 @@ cc_binary(
     deps = [
         "//tools/jpov:soft_mesh_viewer_app",
         "//tools/jpov:view_config",
+        "//tools/jpov/assets/models:models_path",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/soft_mesh_simulator",
         "//tools/jpov/src:gltf_loader",

@@ -2,7 +2,7 @@
 //
 // 生成 jpov_gltf_lantern_gold_test 的参考图。
 //
-// 用 Khronos 官方 Lantern.glb（贴图内嵌单文件 GLB，3 primitive，PBR 全通道：
+// 用 Khronos 官方 lantern.glb（贴图内嵌单文件 GLB，3 primitive，PBR 全通道：
 // baseColor + normal + metallic/roughness(ORM) + emissive，无独立 AO）端到端
 // 验证：
 //   - JPOV::LoadGltf(path) 加载 glTF/GLB（GLB 内嵌 bufferView 贴图自动解出）
@@ -83,7 +83,7 @@ int main() {
 
     // 加载 lantern（内嵌贴图 GLB 单文件，PBR 全通道）
     jpov::GltfObject gltf = app.LoadGltf(
-        jpov::GetTestDataDir() + "/object3d/lantern_glb/Lantern.glb");
+        jpov::GetModelsDir() + "/samples/lantern/lantern.glb");
     CHECK(!gltf.empty()) << "LoadGltf failed / empty";
     LOG(INFO) << "Loaded " << gltf.size() << " glTF primitives";
     app.SetGltfObject(std::move(gltf));

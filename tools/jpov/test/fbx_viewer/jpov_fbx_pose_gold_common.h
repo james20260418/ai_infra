@@ -56,12 +56,12 @@ inline constexpr double kOtherTimeSeconds = 5.0;
 
 // 被观察的 FBX（经 Bazel data 提供；GetTestDataDir 兼容 bazel test/run 两态）。
 inline std::string FbxPath() {
-    return jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx";
+    return jpov::GetModelsDir() + "/characters/hip_hop_dance.fbx";
 }
 
 // 可选目标骨架 glb（Tripo 23 骨；同上经 Bazel data 提供）。
 inline std::string GlbPath() {
-    return jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb";
+    return jpov::GetModelsDir() + "/characters/mixamo_male.glb";
 }
 
 // 出图用配置：headless（不弹窗）、1280×720、60fps、只注册出图需要的拉丁字体

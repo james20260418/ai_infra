@@ -4,7 +4,7 @@
 // 场景（必须逐字节一致）。
 //
 // 用法（repo 根）：
-//   bazel run //tools/jpov/test/object3d:text3d_depth_alpha_gold_generator
+//   bazel run //tools/jpov/assets/models:text3d_depth_alpha_gold_generator
 // 产物：tools/jpov/test/object3d/text3d_depth_alpha_1280x720.png
 //
 // ⚠️ 改场景（相机/文字/颜色/字体/锚点）后必须重跑本生成器，否则 test 会红。

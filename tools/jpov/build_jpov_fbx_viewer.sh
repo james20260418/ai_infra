@@ -13,7 +13,7 @@
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_fbx_viewer/jpov_fbx_viewer <fbx 路径>
 # 该工具需要**带动画**的 FBX（项目里可用的样例：
-#   tools/jpov/test/animations/hip_hop_dance.fbx，Mixamo "Hip Hop Dancing"）。
+#   tools/jpov/assets/models/characters/hip_hop_dance.fbx，Mixamo "Hip Hop Dancing"）。
 # =============================================================================
 
 set -euo pipefail
@@ -60,8 +60,8 @@ echo "   $OUTPUT_DIR/jpov_fbx_viewer       (Linux ELF)"
 echo ""
 echo "🧪 用法："
 echo "   $OUTPUT_DIR/jpov_fbx_viewer /absolute/path/to/anim.fbx [glb 路径]"
-echo "   （样例：$PROJECT_DIR/tools/jpov/test/animations/hip_hop_dance.fbx"
-echo "            可选目标骨架：$PROJECT_DIR/tools/jpov/test/object3d/mixamo_male/mixamo_male.glb）"
+echo "   （样例：$PROJECT_DIR/tools/jpov/assets/models/characters/hip_hop_dance.fbx"
+echo "            可选目标骨架：$PROJECT_DIR/tools/jpov/assets/models/characters/mixamo_male.glb）"
 echo ""
 echo "🖐  交互："
 echo "   右键拖动  = 相机环绕（与模型查看器同款）"

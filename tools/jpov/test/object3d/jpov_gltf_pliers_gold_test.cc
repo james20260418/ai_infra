@@ -32,11 +32,11 @@ std::string GetGltfPath() {
     if (test_srcdir) {
         std::string p = test_srcdir;
         if (!p.empty() && p.back() != '/') p.push_back('/');
-        p += "__main__/tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
+        p += "__main__/tools/jpov/assets/models/samples/pliers/pliers.gltf";
         return p;
     }
     return jpov::GetProjectRoot() +
-        "tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
+        "tools/jpov/assets/models/samples/pliers/pliers.gltf";
 }
 
 std::string GetOutputDir() {

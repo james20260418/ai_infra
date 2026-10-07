@@ -27,6 +27,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"
+#include "tools/jpov/assets/models/models_path.h"
 #include "tools/jpov/demo/viewer_capture.h"
 
 namespace {
@@ -39,7 +40,7 @@ enum class RunMode { kInteractive, kFourViews, kRoundVideo, kInvalid };
 // 项目内可用的演示 glTF（若命令行未指定路径时的 fallback，便于快速跑通）。
 std::string DefaultGltfPath() {
     // 运行时工作目录在仓库顶层时可用；测试/演示通常显式传路径。
-    return "tools/jpov/test/object3d/pliers_gltf/pliers.gltf";
+    return jpov::kDemoPliersGltf;
 }
 
 // 命令行解析结果。产出=解析 + 返回 (run_mode, spec-or-null, gltf_path)。

@@ -29,9 +29,9 @@ cc_test(
     name = "jpov_obj_loader_test",
     srcs = ["jpov_obj_loader_test.cc"],
     data = [
-        ":beetle.obj",
-        ":cube_hand.obj",
-        ":suzanne.obj",
+        "//tools/jpov/assets/models:primitives/beetle.obj",
+        "//tools/jpov/assets/models:primitives/cube_hand.obj",
+        "//tools/jpov/assets/models:primitives/suzanne.obj",
     ],
     deps = [
         "//tools/jpov/interface:mesh",
@@ -104,7 +104,7 @@ cc_test(
 cc_test(
     name = "jpov_gltf_loader_test",
     srcs = ["jpov_gltf_loader_test.cc"],
-    data = ["//tools/jpov/test/object3d:pliers_gltf_data"],
+    data = ["//tools/jpov/assets/models:pliers_gltf_data"],
     deps = [
         "//tools/jpov/src:gltf_loader",
         "@glog_static//:glog",
@@ -119,7 +119,7 @@ cc_test(
 cc_test(
     name = "jpov_gltf_embedded_loader_test",
     srcs = ["jpov_gltf_embedded_loader_test.cc"],
-    data = ["//tools/jpov/test/object3d:catapult_glb_data"],
+    data = ["//tools/jpov/assets/models:catapult_glb_data"],
     deps = [
         "//tools/jpov/src:gltf_loader",
         "//third_party/stb:stb_image",
@@ -134,7 +134,7 @@ cc_test(
 cc_test(
     name = "jpov_fbx_loader_test",
     srcs = ["jpov_fbx_loader_test.cc"],
-    data = ["//tools/jpov/test/animations:hip_hop_dance_fbx_data"],
+    data = ["//tools/jpov/assets/models:hip_hop_dance_fbx_data"],
     deps = [
         "//tools/jpov/src:fbx_loader",
         "@glog_static//:glog",
@@ -152,7 +152,7 @@ cc_test(
 cc_test(
     name = "jpov_animation_sampler_test",
     srcs = ["jpov_animation_sampler_test.cc"],
-    data = ["//tools/jpov/test/animations:hip_hop_dance_fbx_data"],
+    data = ["//tools/jpov/assets/models:hip_hop_dance_fbx_data"],
     deps = [
         "//tools/jpov/interface:animation_sampler",
         "//tools/jpov/interface:skeleton_types",
@@ -173,7 +173,7 @@ cc_test(
 cc_test(
     name = "jpov_gltf_skeleton_loader_test",
     srcs = ["jpov_gltf_skeleton_loader_test.cc"],
-    data = ["//tools/jpov/test/object3d:mixamo_male_glb_data"],
+    data = ["//tools/jpov/assets/models:mixamo_male_glb_data"],
     deps = [
         "//tools/jpov/src:gltf_loader",
         "@glog_static//:glog",
@@ -187,7 +187,7 @@ cc_test(
 cc_test(
     name = "jpov_gltf_saver_test",
     srcs = ["jpov_gltf_saver_test.cc"],
-    data = ["//tools/jpov/test/object3d:mixamo_male_glb_data"],
+    data = ["//tools/jpov/assets/models:mixamo_male_glb_data"],
     deps = [
         "//tools/common:utils",
         "//tools/jpov/interface:mesh",

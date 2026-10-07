@@ -19,8 +19,8 @@ bash tools/jpov/clothing_tool.sh        # 编译到 output/jpov_clothing_tool/
 ## 3. 运行（示例：Mixamo 男性 + 战术背心，照抄即可试）
 ```bash
 output/jpov_clothing_tool/jpov_clothing_tool \
-  --body_reference_path tools/jpov/test/object3d/mixamo_male/mixamo_male.glb \
-  --cloth_path          tools/jpov/test/object3d/clothing/harness_vest/harness_vest.glb
+  --body_reference_path tools/jpov/assets/models/characters/mixamo_male.glb \
+  --cloth_path          tools/jpov/assets/models/clothing/harness_vest/harness_vest.glb
 ```
 | 参数 | 说明 |
 |---|---|
@@ -68,17 +68,17 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 
 ## 7. 成品样例（成功典范，已入库）
 两个「对齐 → 蒙皮 → 保存」的**标准成品**（带 skin / 24 骨），作「正确结果」参考与回归对照：
-- `tools/jpov/test/object3d/clothing/harness_vest/harness_vest_skinned_sample.glb`
+- `tools/jpov/assets/models/clothing/harness_vest/harness_vest_skinned_sample.glb`
   —— 战术背心，对齐到 mixamo_male。
-- `tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants_skinned_sample.glb`
+- `tools/jpov/assets/models/clothing/yoga_pants/yoga_pants_skinned_sample.glb`
   —— 瑜伽裤：先经 **model editor** 沿水平面裁掉裤腿下方（开个口），再对齐 mixamo_male +
   一键蒙皮，焊接用**相对局部边长 0.3**。
 
 查看（任选一个成品）：
 ```bash
 output/jpov_clothing_tool/jpov_clothing_tool \
-  --body_reference_path tools/jpov/test/object3d/mixamo_male/mixamo_male.glb \
-  --cloth_path tools/jpov/test/object3d/clothing/yoga_pants/yoga_pants_skinned_sample.glb
+  --body_reference_path tools/jpov/assets/models/characters/mixamo_male.glb \
+  --cloth_path tools/jpov/assets/models/clothing/yoga_pants/yoga_pants_skinned_sample.glb
 ```
 （也可用任意 glTF 查看器 / Blender / fbx_viewer 打开；带 skin，可直接接渲染管线。）
 

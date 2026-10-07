@@ -70,7 +70,7 @@ public:
             .intensity = 0.5f
         };
         std::string obj_path = jpov::GetProjectRoot() +
-                               "tools/jpov/test/object3d/cube_hand.obj";
+                               "tools/jpov/assets/models/primitives/cube_hand.obj";
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load cube_hand.obj";
         // 确认 OBJ loader 已推导 kTangent（法线映射 TBN 前提）

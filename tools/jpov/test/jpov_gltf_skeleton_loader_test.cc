@@ -21,7 +21,7 @@ int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
 
     const std::string kGlb =
-        "tools/jpov/test/object3d/mixamo_male/mixamo_male.glb";
+        "tools/jpov/assets/models/characters/mixamo_male.glb";
 
     // ---- 1. 顶点侧 JOINTS_0 / WEIGHTS_0 ----
     jpov::MeshData mesh;

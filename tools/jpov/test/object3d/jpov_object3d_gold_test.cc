@@ -44,7 +44,7 @@ public:
 
         // 加载 beetle 模型
         std::string obj_path = jpov::GetProjectRoot() +
-                               "tools/jpov/test/object3d/beetle.obj";
+                               "tools/jpov/assets/models/primitives/beetle.obj";
         jpov::MeshData mesh;
         CHECK(jpov::LoadObj(obj_path, &mesh)) << "Failed to load beetle.obj";
 

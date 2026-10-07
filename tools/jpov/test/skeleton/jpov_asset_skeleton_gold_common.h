@@ -62,10 +62,10 @@ inline constexpr float kGroundHalfSize = 30.0f;
 
 // 两个资产路径（经 Bazel data 依赖提供；GetTestDataDir 兼容 bazel test/run 两态）。
 inline std::string GlbSkeletonPath() {
-    return jpov::GetTestDataDir() + "/object3d/mixamo_male/mixamo_male.glb";
+    return jpov::GetModelsDir() + "/characters/mixamo_male.glb";
 }
 inline std::string FbxSkeletonPath() {
-    return jpov::GetTestDataDir() + "/animations/hip_hop_dance.fbx";
+    return jpov::GetModelsDir() + "/characters/hip_hop_dance.fbx";
 }
 
 // 渲染应用：浅灰纯色地面 + 天光天色 + 两根 identity 摆放的骨人（glb 红 / fbx 蓝）。

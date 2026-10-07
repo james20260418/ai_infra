@@ -13,8 +13,8 @@ cc_binary(
         "jpov_fbx_pose_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         "//tools/jpov/demo/fbx_viewer:fbx_viewer_app",
@@ -31,8 +31,8 @@ cc_test(
     name = "jpov_fbx_retarget_units_test",
     srcs = ["jpov_fbx_retarget_units_test.cc"],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
     ],
     deps = [
         "//tools/jpov/interface:skeleton_retarget",
@@ -53,8 +53,8 @@ cc_test(
         "jpov_fbx_pose_gold_common.h",
     ],
     data = [
-        "//tools/jpov/test/animations:hip_hop_dance_fbx_data",
-        "//tools/jpov/test/object3d:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:hip_hop_dance_fbx_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
         ":fbx_dance_frame_1280x720.png",
         ":fbx_pose_glb_naive_1280x720.png",
         ":fbx_pose_glb_retarget_1280x720.png",
