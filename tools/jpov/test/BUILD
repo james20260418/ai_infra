@@ -187,7 +187,10 @@ cc_test(
 cc_test(
     name = "jpov_gltf_saver_test",
     srcs = ["jpov_gltf_saver_test.cc"],
-    data = ["//tools/jpov/assets/models:mixamo_male_glb_data"],
+    data = [
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:lantern_glb_data",
+    ],
     deps = [
         "//tools/common:utils",
         "//tools/jpov/interface:mesh",

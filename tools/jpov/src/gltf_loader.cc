@@ -528,6 +528,17 @@ bool ParsePrimitive(const tinygltf::Model& model,
         prim.material < static_cast<int>(model.materials.size())) {
         const tinygltf::Material& mat = model.materials[prim.material];
 
+        // alphaMode / alphaCutoff（透明模式）。
+        // glTF 取值 "OPAQUE" / "MASK" / "BLEND"。混合暂未实现，BLEND 退化为 MASK。
+        if (mat.alphaMode == "MASK" || mat.alphaMode == "BLEND") {
+            out_mat->alpha_mode = AlphaMode::kMask;
+        } else {
+            out_mat->alpha_mode = AlphaMode::kOpaque;
+        }
+        out_mat->alpha_cutoff = static_cast<float>(mat.alphaCutoff);
+        // doubleSided：是否双面渲染（不剔背面）。缺省 false。
+        out_mat->double_sided = mat.doubleSided;
+
         // baseColorTexture
         if (mat.pbrMetallicRoughness.baseColorTexture.index >= 0) {
             const tinygltf::Texture& tex =

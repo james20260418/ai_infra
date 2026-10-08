@@ -42,20 +42,37 @@ std::string StemOf(const std::string& base) {
     return base.substr(0, dot);
 }
 
+// 格式 → 输出扩展名（glb / gltf）。
+// Pre-condition: format 为枚举合法值。
+const char* OutputExtensionOf(ModelOutputFormat format) {
+    switch (format) {
+        case ModelOutputFormat::kGlb:
+            return ".glb";
+        case ModelOutputFormat::kGltfExternal:
+            return ".gltf";
+    }
+    LOG(FATAL) << "OutputExtensionOf: 非法 format="
+               << static_cast<int>(format);
+    return ".glb";   // 不可达（LOG(FATAL) 已终止）；仅为满足编译器。
+}
+
 }  // namespace
 
 std::string ModelSaveController::MakeOutputPath(const std::string& source,
-                                                std::time_t now) {
+                                                std::time_t now,
+                                                ModelOutputFormat format) {
     CHECK(!source.empty()) << "ModelSaveController::MakeOutputPath: 路径为空";
     const std::string dir = DirNameOf(source);
     const std::string stem = StemOf(BaseNameOf(source));
-    return dir + stem + "_model_edit" + jpov::EditTimestampSuffix(now) + ".glb";
+    return dir + stem + "_model_edit" + jpov::EditTimestampSuffix(now) +
+           OutputExtensionOf(format);
 }
 
 bool ModelSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
                                 std::optional<jpov::SkeletonType> skin,
                                 const std::string& source_path,
-                                const std::string& asset_name) {
+                                const std::string& asset_name,
+                                ModelOutputFormat format) {
     if (state_ == ModelSaveState::kSaving) {
         LOG(WARNING) << "ModelSaveController::Start 被忽略：正在保存中";
         return false;
@@ -67,7 +84,7 @@ bool ModelSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
     CHECK(!source_path.empty()) << "ModelSaveController::Start：source_path 为空";
     JoinIfRunning();  // 回收上一轮线程（已 finished）
 
-    out_path_ = MakeOutputPath(source_path, std::time(nullptr));
+    out_path_ = MakeOutputPath(source_path, std::time(nullptr), format);
     error_.clear();
     ok_ = false;
     finished_.store(false);
@@ -76,7 +93,7 @@ bool ModelSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
 
     // worker 只读 meshes（按值捕获，随线程移动），写受 mtx_ 保护的结果字段。
     std::thread worker([this, meshes = std::move(meshes), skin = std::move(skin),
-                        asset_name]() mutable {
+                        asset_name, format]() mutable {
         bool ok = true;
         std::string err;
         try {
@@ -84,7 +101,9 @@ bool ModelSaveController::Start(std::vector<jpov::GltfSaveMesh> meshes,
             asset.name = asset_name.empty() ? "model" : asset_name;
             asset.meshes = std::move(meshes);  // 已是「改好」的几何，直接写
             asset.skin = std::move(skin);      // 无骨 = nullopt（不写 skin）
-            ok = jpov::WriteGlb(asset, out_path_);
+            ok = (format == ModelOutputFormat::kGltfExternal)
+                     ? jpov::WriteGltf(asset, out_path_)
+                     : jpov::WriteGlb(asset, out_path_);
             if (!ok) {
                 err = "写入失败（见日志）";
             }

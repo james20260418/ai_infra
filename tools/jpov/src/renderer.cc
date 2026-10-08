@@ -1102,6 +1102,23 @@ unsigned int Renderer::DrawObject3DProgFull() {
         {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
 }
 
+// alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（FS 里含 discard）。
+// 单独成 program（而非在同一 shader 里加 uniform 分支），以免不透明 program 出现 discard
+// 而被编译器保守地降级 early-Z。
+unsigned int Renderer::DrawObject3DProgCutout() {
+    return shader_mgr_.GetOrCreate(
+        "draw_object3d_pbr_cutout",
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR,
+         {"JPOV_ALPHA_CUTOUT"}});
+}
+
+unsigned int Renderer::DrawObject3DProgFullCutout() {
+    return shader_mgr_.GetOrCreate(
+        "draw_object3d_pbr_full_cutout",
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR,
+         {"JPOV_ALPHA_CUTOUT"}});
+}
+
 // 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
 unsigned int Renderer::SkinnedMeshProg() {
     return shader_mgr_.GetOrCreate("skinned_mesh",
@@ -1403,6 +1420,9 @@ void Renderer::Render(const RenderCommandList& cmds,
         if (!cmds.object_use_default_color && !cmds.object3d.empty()) {
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull());
+            // cutout 变体 program 同源，也需光照 uniform。
+            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+                DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
             if (cmds.tile_culling) {
                 Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
                     &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
@@ -1418,6 +1438,11 @@ void Renderer::Render(const RenderCommandList& cmds,
         if (!cmds.object3d.empty() || !cmds.skinned_mesh.empty()) {
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
+                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                shadow_texel_world_, shadow_cfg_, eff_sun);
+            // cutout 变体 program 同源，也需 sun/阴影 uniform。
+            Object3DRenderer::UploadSunData(shader_mgr_,
+                DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
@@ -1437,6 +1462,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
+            Object3DRenderer::UploadAmbient(shader_mgr_,
+                DrawObject3DProgCutout(), DrawObject3DProgFullCutout(), ambient);
         }
         if (!cmds.skinned_mesh.empty()) {
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
@@ -1785,6 +1812,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 Object3DRenderer::DrawObject3D(obj, cmds,
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawObject3DProg(), DrawObject3DProgFull(),
+                    DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
                     tile_index_tex_);
                 break;
             }
@@ -2994,6 +3022,10 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
                 ResolveTextureRef(mi.normal_tex, self->texture_mgr_);
             mat.normal_scale = mi.normal_scale;
         }
+        // 透明模式（alpha test / cutout）：从 loader 的 alphaMode 透传到 PBRMaterial。
+        mat.alpha_mode = mi.alpha_mode;
+        mat.alpha_cutoff = mi.alpha_cutoff;
+        mat.double_sided = mi.double_sided;
         // ORM → metallic / roughness / ao
         if (!mi.metallic_roughness_tex.empty()) {
             const std::string& orm_key = mi.metallic_roughness_tex.key;

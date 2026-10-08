@@ -46,6 +46,16 @@ filegroup(
     srcs = glob(["samples/lantern/*"]),
 )
 
+# 薄纱蕾丝裙（Tripo 单图生成 → 蓝标记抠 alpha 后）——透明 / cutout 渲染样例。
+#   lace_skirt.glb                    : 原始 Tripo PBR 模型（不透明，baseColor=JPEG 无 alpha）。
+#   lace_skirt_cutout.gltf (+.bin+贴图): 外置纹理版，alphaMode=MASK + alphaCutoff + doubleSided；
+#                                        baseColor 为 RGBA PNG（蓝区→薄纱网 alpha）。
+# 用途：验证 object3d cutout（alpha test）+ 双面渲染 + 外置 glTF（.gltf+.bin+独立贴图）加载。
+filegroup(
+    name = "lace_skirt_data",
+    srcs = glob(["samples/lace_skirt/*"]),
+)
+
 # 外部 uri 的 glTF + bin + jpg（PBR 三贴图，非自包含容器）。
 filegroup(
     name = "pliers_gltf_data",

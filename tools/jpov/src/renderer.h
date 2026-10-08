@@ -251,6 +251,9 @@ private:
     unsigned int Text3DProg();
     unsigned int DrawObject3DProg();
     unsigned int DrawObject3DProgFull();
+    // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int DrawObject3DProgCutout();
+    unsigned int DrawObject3DProgFullCutout();
     unsigned int ShadowProg();
     unsigned int TonemapProg();
     unsigned int PickProg();

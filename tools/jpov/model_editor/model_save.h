@@ -1,10 +1,11 @@
-// JPOV 模型编辑器 — 保存 target 为 glb（后台线程 + 状态机）
+// JPOV 模型编辑器 — 保存 target（后台线程 + 状态机）
 //
-// 把当前 target 的 CPU 几何（已含平移 / 旋转 / 缩放 / 裁剪的结果）写成一个 glb，落在
-// 源 glb 同目录、文件名 <stem>_model_edit<时间戳>.glb。带骨架的 target 一并写 skin。
+// 把当前 target 的 CPU 几何（已含平移 / 旋转 / 缩放 / 裁剪的结果）写成文件，落在
+// 源文件同目录、文件名 <stem>_model_edit<时间戳>.<ext>。带骨架的 target 一并写 skin。
+// 两种输出格式（ModelOutputFormat）：单文件 .glb（贴图内嵌）/ .gltf（外置纹理，可编辑）。
 //
 // 设计沿用穿衣工具 clothing_save.h 的模式：
-//   - 起一个后台线程写 glb（WriteGlb 是纯 CPU 文件 IO，不碰 GL）；
+//   - 起一个后台线程写文件（WriteGlb / WriteGltf 是纯 CPU 文件 IO，不碰 GL）；
 //   - 线程运行期按钮不可重复触发；完成后面板显示「保存至 <path>」/「保存失败：<原因>」；
 //   - 传入的 meshes 是**按下当帧的几何快照**（按值传入），之后 UI 再改不影响本次保存。
 //
@@ -35,6 +36,12 @@ enum class ModelSaveState {
     kFailed,   // 上次保存失败：显示「保存失败：<原因>」，可重试
 };
 
+// 保存的输出格式。
+enum class ModelOutputFormat {
+    kGlb,           // 单文件 .glb（贴图内嵌）；
+    kGltfExternal,  // .gltf + .bin + 独立贴图（外置纹理，可外部编辑）
+};
+
 // 保存控制器（ModelEditorApp 的组合成员；跨帧持有）。
 //
 // 生命周期：Start 起线程 → Tick 每帧检查完成 → 析构时 join（不 detach）。
@@ -49,15 +56,17 @@ public:
     // 发起一次保存。
     //
     // meshes      : 当前 target 几何快照（按值传入，worker 只读）。为空则拒绝（返回 false）。
-    // skin        : target 骨架（带骨 target 才有；无骨传 nullopt）。非空时写入 glb 的
-    //               skin（含 inverseBindMatrices），前提是各 mesh 带 JOINTS_0/WEIGHTS_0。
+    // skin        : target 骨架（带骨 target 才有；无骨传 nullopt）。非空时写入 skin
+    //               （含 inverseBindMatrices），前提是各 mesh 带 JOINTS_0/WEIGHTS_0。
     // source_path : 被编辑的 target glb / gltf 路径（取 stem 与同目录定位）。
-    // asset_name  : 写入 glb 的模型名（空则写 "model"）。
+    // asset_name  : 写入文件的模型名（空则写 "model"）。
+    // format      : 输出格式（glb 内嵌 / gltf 外置纹理）。决定落盘函数与文件名后缀。
     //
     // 返回 false：正在保存中 / 没有几何。返回 true：已起线程。
     bool Start(std::vector<jpov::GltfSaveMesh> meshes,
                std::optional<jpov::SkeletonType> skin,
-               const std::string& source_path, const std::string& asset_name);
+               const std::string& source_path, const std::string& asset_name,
+               ModelOutputFormat format);
 
     // 每帧调用：后台线程完成后收尾（join + 切状态 + 组装提示文本）。
     bool Tick();
@@ -66,10 +75,11 @@ public:
     const std::string& message() const { return message_; }
 
     // ---- 纯函数（可单测） ----
-    // 由源 glb 路径生成输出路径：同目录 + 原 stem + `_model_edit<时间戳>.glb`。
+    // 由源路径生成输出路径：同目录 + 原 stem + `_model_edit<时间戳>` + 格式后缀。
     // 目录不可推导（无路径分隔符）时退化为当前目录。
     // Pre-condition: source 非空。
-    static std::string MakeOutputPath(const std::string& source, std::time_t now);
+    static std::string MakeOutputPath(const std::string& source, std::time_t now,
+                                      ModelOutputFormat format);
 
 private:
     void JoinIfRunning();

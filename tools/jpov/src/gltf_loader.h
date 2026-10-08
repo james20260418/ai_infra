@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "tools/jpov/interface/mesh.h"
+#include "tools/jpov/interface/pbr_material.h"
 #include "tools/jpov/interface/skeleton_types.h"
 
 namespace jpov {
@@ -109,6 +110,15 @@ struct GltfMaterialInfo {
     // emissiveFactor: 常值自发光色 (RGB, [0,1])。
     // 默认黑色（无自发光）。
     float emissive_factor[3] = {0.0f, 0.0f, 0.0f};
+
+    // alphaMode（glTF）：OPAQUE / MASK / BLEND。BLEND 目前按 MASK 处理（混合未实现）。
+    // 缺省 OPAQUE。
+    AlphaMode alpha_mode = AlphaMode::kOpaque;
+    // alphaCutoff（glTF，仅 alphaMode=MASK 有意义）：默认 0.5（规范默认）。
+    float alpha_cutoff = 0.5f;
+
+    // doubleSided（glTF）：true 时该 primitive 双面渲染（不剔背面）。缺省 false（单面）。
+    bool double_sided = false;
 };
 
 // 加载 glTF 2.0 (.gltf 或 .glb) 文件中的第一个 mesh/primitve。

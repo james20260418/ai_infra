@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -448,6 +449,139 @@ TEST(GltfSaverTest, RealSkinnedAssetSaveRoundTrip) {
                   1e-4f);
     }
     std::remove(out.c_str());
+}
+
+// ==================== 6. 外置纹理导出 + 往返（WriteGltf） ====================
+
+// 定位 lantern 真资材（内嵌 PNG 贴图，用于外置纹理往返）。
+std::string LanternAssetPath() {
+    const char* srcdir = std::getenv("TEST_SRCDIR");
+    if (srcdir) {
+        std::string p = srcdir;
+        if (!p.empty() && p.back() != '/') p.push_back('/');
+        return p +
+               "__main__/tools/jpov/assets/models/samples/lantern/lantern.glb";
+    }
+    return jpov::GetProjectRoot() +
+           "tools/jpov/assets/models/samples/lantern/lantern.glb";
+}
+
+// 把一条 entry 收进 vector<GltfSaveMesh>（可复用的读回回调）。
+void CollectSaveMeshes(const GltfMeshEntry* e, void* user) {
+    std::vector<GltfSaveMesh>* v = static_cast<std::vector<GltfSaveMesh>*>(user);
+    v->push_back(GltfSaveMesh{e->mesh, e->material});
+}
+
+// WriteGltf 应产出 .gltf + .bin + 独立贴图，且**能被生产 loader 读回**；
+//   再走 WriteGlb 打包回单文件 glb 后贴图仍在（外置→内嵌往返不丢）。
+TEST(GltfSaverTest, WriteGltfExternalTextureRoundTrip) {
+    const std::string src = LanternAssetPath();
+
+    std::vector<GltfSaveMesh> meshes;
+    ASSERT_TRUE(LoadGltfScene(src, CollectSaveMeshes, &meshes))
+        << "lantern.glb 应能加载";
+    ASSERT_FALSE(meshes.empty());
+
+    // 至少一个材质带 baseColor 贴图，否则本测试无意义。
+    bool any_tex = false;
+    for (const GltfSaveMesh& sm : meshes) {
+        if (!sm.material.base_color_tex.empty()) {
+            any_tex = true;
+        }
+    }
+    ASSERT_TRUE(any_tex) << "lantern 应有 baseColor 贴图（测试前提）";
+
+    const std::string dir = "/tmp/jpov_saver_ext_test/";
+    std::filesystem::create_directories(dir);
+    const std::string gltf_path = dir + "lantern.gltf";
+    const std::string bin_path = dir + "lantern.bin";
+    std::remove(gltf_path.c_str());
+    std::remove(bin_path.c_str());
+
+    GltfSaveAsset asset;
+    asset.name = "lantern";
+    asset.meshes = meshes;
+    ASSERT_TRUE(WriteGltf(asset, gltf_path)) << "WriteGltf 应成功";
+
+    // 产物齐全：.gltf + .bin。
+    EXPECT_TRUE(std::filesystem::exists(gltf_path));
+    EXPECT_TRUE(std::filesystem::exists(bin_path));
+
+    // .gltf 文本应外置引用（含 <stem>.bin / <stem>_texN，且不含 base64 data:）。
+    std::ifstream gf(gltf_path, std::ifstream::binary);
+    ASSERT_TRUE(gf.good());
+    const std::string text((std::istreambuf_iterator<char>(gf)),
+                           std::istreambuf_iterator<char>());
+    EXPECT_NE(text.find("lantern.bin"), std::string::npos)
+        << ".gltf 的 buffer 应外置引用 <stem>.bin";
+    EXPECT_NE(text.find("lantern_tex"), std::string::npos)
+        << ".gltf 的 image 应外置引用 <stem>_texN";
+    EXPECT_EQ(text.find("data:image"), std::string::npos)
+        << "外置导出不应把贴图内嵌成 base64";
+
+    // 读回外置 .gltf：几何数一致 + 材质贴图仍能解析（image.uri 指向的 sidecar 真在）。
+    std::vector<GltfSaveMesh> back;
+    ASSERT_TRUE(LoadGltfScene(gltf_path, CollectSaveMeshes, &back))
+        << "外置 .gltf 应能读回";
+    ASSERT_EQ(back.size(), meshes.size());
+    for (size_t i = 0; i < back.size(); ++i) {
+        EXPECT_EQ(back[i].mesh.VertexCount(), meshes[i].mesh.VertexCount());
+        if (!meshes[i].material.base_color_tex.empty()) {
+            EXPECT_FALSE(back[i].material.base_color_tex.empty())
+                << "外置贴图应能被 loader 解析回来";
+        }
+    }
+
+    // 再打包回单文件 glb → 贴图内嵌仍在（外置→内嵌无损往返）。
+    const std::string glb_path = dir + "lantern_repack.glb";
+    std::remove(glb_path.c_str());
+    GltfSaveAsset repack;
+    repack.name = "lantern";
+    repack.meshes = back;
+    ASSERT_TRUE(WriteGlb(repack, glb_path)) << "读回后应能再打包成 glb";
+
+    std::vector<GltfSaveMesh> back2;
+    ASSERT_TRUE(LoadGltfScene(glb_path, CollectSaveMeshes, &back2));
+    ASSERT_EQ(back2.size(), meshes.size());
+    for (size_t i = 0; i < back2.size(); ++i) {
+        EXPECT_EQ(back2[i].mesh.VertexCount(), meshes[i].mesh.VertexCount());
+        if (!meshes[i].material.base_color_tex.empty()) {
+            EXPECT_FALSE(back2[i].material.base_color_tex.empty())
+                << "往返 glb 后 baseColor 贴图不应丢";
+        }
+    }
+}
+
+// 负面：非 .gltf 后缀必须 crash（契约：输出路径以 .gltf 结尾）。
+TEST(GltfSaverTest, WriteGltfRejectsNonGltfPath) {
+    GltfSaveAsset asset;
+    asset.name = "tri";
+    asset.meshes.push_back(GltfSaveMesh{MakeTriMesh(1.0f), GltfMaterialInfo{}});
+    EXPECT_DEATH(WriteGltf(asset, TmpPath("notgltf")), "必须以 .gltf 结尾");
+}
+
+// 透明模式 / 双面：写→读回应保留 alphaMode=MASK + alphaCutoff + doubleSided。
+// （否则“存→读”会静默丢掉 cutout / 双面语义。）
+TEST(GltfSaverTest, RoundTripAlphaModeAndDoubleSided) {
+    GltfSaveAsset asset;
+    asset.name = "cutout";
+    GltfMaterialInfo mi;
+    mi.alpha_mode = AlphaMode::kMask;
+    mi.alpha_cutoff = 0.4f;
+    mi.double_sided = true;
+    asset.meshes.push_back(GltfSaveMesh{MakeTriMesh(1.0f), mi});
+
+    const std::string path = TmpPath("cutout");
+    std::remove(path.c_str());
+    ASSERT_TRUE(WriteGlb(asset, path));
+
+    Collect c;
+    ASSERT_TRUE(LoadGltfScene(path, CollectCb, &c));
+    ASSERT_EQ(c.mats.size(), 1u);
+    EXPECT_EQ(c.mats[0].alpha_mode, AlphaMode::kMask) << "alphaMode 应写回 MASK";
+    EXPECT_NEAR(c.mats[0].alpha_cutoff, 0.4f, 1e-6f);
+    EXPECT_TRUE(c.mats[0].double_sided) << "doubleSided 应写回 true";
+    std::remove(path.c_str());
 }
 
 }  // namespace
