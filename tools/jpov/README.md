@@ -9,6 +9,7 @@ JPOV 是一个面向 AI 自测输出的、支持流式绘制 + 简单交互的�
 > - **[DESIGN.md](DESIGN.md)** — 设计文档（注意其中早期 API 描述部分与代码现状不一致，以代码为准，见集成文档 §8）。
 > - **[docs/jpov_effect_pass_design.md](docs/jpov_effect_pass_design.md)** — 粒子特效 pass 设计（火焰 MVP）：并列 primitive3d 的特效通道、简单深度（测而不写）、additive + alpha 两种混合、无 instancing、「照抄式复用」+ 薄公共层策略。做火焰/烟/雨/雪前先读。
 > - **[docs/jpov_volumetric_fog_design.md](docs/jpov_volumetric_fog_design.md)** — 局部体积雾（球形/圆柱）设计：像点光源一样摆放雾体、**闭式积分**（零采样零噪声）、**tile culling 限流**（每像素 overdraw 硬上限 K）、一次全屏 pass 累加 τ/S + 就地合成、HDR/tone map 之前。做局部雾/烟尘/发光体空气光前先读。
+> - **[docs/jpov_instance_attr_lag_design.md](docs/jpov_instance_attr_lag_design.md)** — 人物 instancing per-instance attribute 布局重排 + 布料 LAG（惯性滞后副运动）：双 pose + 双 partial + 逐顶点松弛度 mix；三视图约定（一槽=4 float/8 short/16 int8）；16 槽（loc0..15）定稿布局。做副运动/重排 attribute 前先读。
 > - **[interface/README.md](interface/README.md)** — 渲染接口层说明。
 
 ## 快速开始
