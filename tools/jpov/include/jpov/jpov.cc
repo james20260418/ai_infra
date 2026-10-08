@@ -253,6 +253,15 @@ void JPOV::ReleaseMesh(uint32_t mesh_id) {
     renderer_->GetMeshManager().ReleaseMesh(mesh_id);
 }
 
+void JPOV::ReleaseSkeleton(uint32_t skeleton_id) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    if (skeleton_id == 0) {
+        return;  // 0 = "无骨架"，静默忽略（无骨架是合法常态，不同于 ReleaseMesh 的 mesh_id>0）
+    }
+    renderer_->ReleaseSkeleton(skeleton_id);
+}
+
 // ========== glTF 模型加载 ==========
 
 jpov::GltfObject JPOV::LoadGltf(const std::string& path) {

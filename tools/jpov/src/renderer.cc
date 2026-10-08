@@ -1134,6 +1134,7 @@ unsigned int Renderer::SkinnedShadowProg() {
 // 注册一种骨架（SkeletonType + 一整包 pose）→ skeleton_id（非 0，= vector 下标 + 1）。
 // SkeletonManager 构造即把 pose 烘焙成 pose atlas 上传 GL（需 GL context，Init 后）。
 // id 从 1 起：DrawMeshWithSkeleton 要求 skeleton_id > 0（0 = 无效，见 render_command.cc）。
+// 槽位复用：优先复用 ReleaseSkeleton 释放出的空槽（否则每注册一次就只增不减、泄漏 GL 资源）。
 uint32_t Renderer::RegisterSkeleton(
     const SkeletonType& type, std::vector<SkeletonPose> poses,
     std::array<std::vector<int>, kNumThicknessGroup> thickness_scaling_config,
@@ -1141,9 +1142,24 @@ uint32_t Renderer::RegisterSkeleton(
     auto mgr = std::make_unique<SkeletonManager>(type, std::move(poses),
                                                  std::move(thickness_scaling_config),
                                                  std::move(partial_rotation_config));
+    for (size_t i = 0; i < skeleton_managers_.size(); ++i) {
+        if (skeleton_managers_[i] == nullptr) {
+            skeleton_managers_[i] = std::move(mgr);
+            return static_cast<uint32_t>(i) + 1;
+        }
+    }
     const uint32_t id = static_cast<uint32_t>(skeleton_managers_.size()) + 1;
     skeleton_managers_.push_back(std::move(mgr));
     return id;
+}
+
+// 释放一种骨架（析构 SkeletonManager → 回收 pose atlas / 逆绑定等 GL 资源），槽位置空
+// 以便后续 RegisterSkeleton 复用。未注册 / id 非法 → 静默忽略（与 ReleaseMesh 同风格）。
+void Renderer::ReleaseSkeleton(uint32_t skeleton_id) {
+    if (skeleton_id == 0 || skeleton_id > skeleton_managers_.size()) {
+        return;
+    }
+    skeleton_managers_[skeleton_id - 1].reset();
 }
 
 SkeletonManager* Renderer::GetSkeleton(uint32_t skeleton_id) {

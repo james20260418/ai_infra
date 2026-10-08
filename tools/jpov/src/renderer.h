@@ -291,6 +291,11 @@ public:
     // 取 skeleton_id 对应的 SkeletonManager（无则 nullptr）。
     SkeletonManager* GetSkeleton(uint32_t skeleton_id);
 
+    // 释放 RegisterSkeleton 返回的骨架（析构 SkeletonManager，回收 GL 资源）；槽位回收复用。
+    // 未注册 / id 非法 → 静默忽略。释放后该 id 上再 DrawMeshWithSkeleton 会 LOG(FATAL)
+    // （找不到 manager），故调用方需保证不再引用。
+    void ReleaseSkeleton(uint32_t skeleton_id);
+
     // 主 pass 执行一条蒙皮指令（Draw3DCommands 的 kSkinnedMesh case 调用）。
     void DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                                 const RenderCommandList& cmds,
