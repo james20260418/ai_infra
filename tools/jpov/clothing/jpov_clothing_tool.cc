@@ -41,6 +41,7 @@ struct CliOptions {
     int   window_height = 0;          // --window_height 覆盖窗口高（0 = 用默认）
     float phi_deg = 20.0f;            // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
     // 动力学初始值（默认 = Simulator 默认；仅 headless 调参 / 复现用）。
+    float bind_distance = jpov::soft_mesh_simulator::Simulator::kDefaultBindDistance;  // --bind_distance 关联距离 d（m）
     float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
     float total_mass = jpov::soft_mesh_simulator::Simulator::kDefaultTotalMass;
     float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
@@ -134,6 +135,15 @@ CliOptions ParseCli(int argc, char** argv) {
                 }
             } else {
                 LOG(WARNING) << "--damping 缺少数值参数，忽略";
+            }
+        } else if (arg == "--bind_distance") {
+            if (i + 1 < argc) {
+                opt.bind_distance = static_cast<float>(std::atof(argv[++i]));
+                if (!(opt.bind_distance > 0.0f)) {
+                    LOG(FATAL) << "--bind_distance 必须 > 0，got " << opt.bind_distance;
+                }
+            } else {
+                LOG(WARNING) << "--bind_distance 缺少数值参数，忽略";
             }
         } else if (arg == "--max_speed") {
             if (i + 1 < argc) {
@@ -335,6 +345,7 @@ int main(int argc, char** argv) {
     app.view_.phi = static_cast<double>(opt.phi_deg) * 3.14159265358979323846 / 180.0;
 
     // 动力学初值（CLI，可选）：在场景就绪（建仿真器）前设好镜像，使仿真器按此初始化。
+    app.bind_distance_ui_ = opt.bind_distance;
     app.gravity_ui_ = opt.gravity;
     app.total_mass_ui_ = opt.total_mass;
     app.force_coeff_t_ui_ = jpov::clothing::ClothingToolApp::ForceNewtonToT(

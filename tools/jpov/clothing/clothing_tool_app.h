@@ -36,6 +36,10 @@
 //       播放/暂停 + 「主轴」相位（播放时自动推进、暂停时可拖动查看任意时刻动作）+ 关节幅度
 //       + **随机种子输入框**（0~65535，换种子 = 换一套随机动作）。
 //       「衣服没蒙皮则不用动」：衣服未蒙皮时该动作不带动衣服（保持静止）。
+//   - 2026-10-08（本 PR）：**关联距离 d 旋钮**——右上仿真面板新增「关联距离 d (m)」滑条
+//       （0.005~1 m，默认 0.1）+ CLI `--bind_distance`。d 是仿真点的「缝合」半径（关联邻居
+//       表 + 长边加密阈值）；此前它硬编码为 kDefaultBindDistance，无旋钮（姊妹 soft_mesh_viewer
+//       早有该滑条）。拖它 → 从**启动几何**重建仿真点集合（几何回启动姿态、仿真暂停）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -272,9 +276,16 @@ public:
     //   ⇒ 仿真中也能点击变换，衣服会带着速度继续演化。
     std::vector<Simulator> sims_;
 
+    // 仿真点的**启动几何**快照（每 primitive 一份）：关联距离 d 变更需重建仿真点集合，
+    // 重建必须基于启动几何（而非 cloth_current_，后者会被仿真/变换改过——拿形变当绑定姿态）。
+    std::vector<jpov::MeshData> sim_startup_mesh_;
+
     bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
 
     // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
+    // 关联距离 d（米）：决定仿真点集合（长边加密）与关联邻居表（= 仿真点"缝合"半径）。
+    // 拖动它 → 与 sim.bind_distance() 不一致时重建仿真点集合（见 SyncSimParams）。
+    float bind_distance_ui_ = Simulator::kDefaultBindDistance;
     float gravity_ui_ = Simulator::kDefaultGravity;
     float total_mass_ui_ = Simulator::kDefaultTotalMass;
     // 力系数 F 用**指数坐标**滑条：存滑条位置 t∈[0,1]，F = min*(max/min)^t（对数均匀）。
@@ -579,11 +590,37 @@ private:
         CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
         sims_.clear();
         sims_.resize(cloth_current_.size());
+        // 启动几何快照：关联距离 d 变更时据此重建（见 ReinitSimulators）。
+        // 场景首次就绪时 cloth_current_ == 启动几何，故此处拷贝即「启动姿态」。
+        sim_startup_mesh_.resize(cloth_current_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
-            sims_[i].Init(cloth_current_[i].mesh);  // 默认关联距离 d = kDefaultBindDistance
+            sim_startup_mesh_[i] = cloth_current_[i].mesh;
+            sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_);
             PushSimParams(&sims_[i]);
         }
-        LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 启动衣服几何）";
+        LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 启动衣服几何，d="
+                  << bind_distance_ui_ << " m）";
+    }
+
+    // 用当前 d 滑条值**重建**所有仿真器（从启动几何出发，丢弃仿真/变换带来的形变）。
+    // 与 soft_mesh_viewer 的 ReinitSimulation 同语义：d 变了 ⇒ 仿真点集合与邻居表都变，
+    // 只能重建。重建后回到启动姿态（缩放归 1、仿真暂停），再推 GPU。
+    // Pre-condition: 已 InitSimulators；未蒙皮（蒙皮后几何冻结，禁止重建）。
+    void ReinitSimulators() {
+        CHECK_EQ(sims_.size(), sim_startup_mesh_.size());
+        for (size_t i = 0; i < sims_.size(); ++i) {
+            sims_[i].Init(sim_startup_mesh_[i], bind_distance_ui_);
+            PushSimParams(&sims_[i]);
+        }
+        cloth_scale_ = 1.0f;
+        sim_running_ = false;   // 重建回启动姿态，停机回到可重调状态
+        SyncSimsToCloth();
+        if (!sims_.empty()) {
+            LOG(INFO) << "重建仿真点（d=" << bind_distance_ui_ << " m）：仿真点 原始 "
+                      << sims_.front().original_point_count() << " + 虚拟 "
+                      << sims_.front().virtual_point_count() << " = "
+                      << sims_.front().sim_point_count();
+        }
     }
 
     // 把本 primitive 的仿真器参数写成 UI 镜像值（建/重建后调用，保证一致）。
@@ -602,6 +639,16 @@ private:
 
     // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
     void SyncSimParams() {
+        // 关联距离 d 不是逐点 setter：它决定仿真点集合与邻居表，变了必须重建。
+        // 已蒙皮时几何冻结：忽略并回写滑条镜像值（保持面板与实际一致）。
+        if (!sims_.empty() && bind_distance_ui_ != sims_.front().bind_distance()) {
+            if (skinned_) {
+                bind_distance_ui_ = sims_.front().bind_distance();
+            } else {
+                ReinitSimulators();
+                return;  // 重建已同步了全部状态
+            }
+        }
         for (Simulator& sim : sims_) {
             if (sim.gravity() != gravity_ui_) {
                 sim.SetGravity(gravity_ui_);
@@ -1000,7 +1047,7 @@ private:
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
         const float panel_y  = kMargin;
-        constexpr int kRows = 12;
+        constexpr int kRows = 13;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
@@ -1014,6 +1061,14 @@ private:
 
         // ---- 标题 ----
         DrawLabel("仿真动力学", left, row_w, row_y);
+        row_y += step_y;
+
+        // ---- 关联距离 d（米）：仿真点集合 / 关联邻居表（= 仿真点"缝合"半径）。
+        //      拖它 → 重建仿真点集合（与 soft_mesh_viewer 同语义）。----
+        ui_.SliderFloat("关联距离 d (m)", &bind_distance_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        Simulator::kMinBindDistance, Simulator::kMaxBindDistance,
+                        /*decimal_places*/3);
         row_y += step_y;
 
         // ---- 重力 g ----

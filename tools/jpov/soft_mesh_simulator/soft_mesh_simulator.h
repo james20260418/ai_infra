@@ -99,8 +99,12 @@ public:
     // 让「物理怎么走」这件事完全归物理模块所有（查看器只读不改）。
     static constexpr double kDefaultDt = 1.0 / 60.0;
 
-    // 默认关联距离 d（米）。见 DESIGN.md §5（当前为全局常量，非滑条）。
+    // 默认关联距离 d（米）。见 DESIGN.md §5。
     static constexpr float kDefaultBindDistance = 0.1f;
+    // 关联距离 d 的合法范围（米），供查看器 / 穿衣工具的面板滑条 clamp。
+    // 下限 5mm：高密度模型也能拆出成片虚拟点；上限 1m：覆盖「大 d ⇒ 几乎不加密」的对照情形。
+    static constexpr float kMinBindDistance = 0.005f;
+    static constexpr float kMaxBindDistance = 1.0f;
 
     // 默认总质量 M_total（kg）。DESIGN.md §3.1：按顶点均分 m = M_total / N。
     // 质量只影响加速度 a = F/m（力的公式本身与质量无关）；越大越“重”、越不易被推动。
