@@ -29,6 +29,9 @@
 #        - "继续/暂停仿真" 与 "重置衣服"（重置回**启动时**的原始几何）；
 #        - 只读：实际 F(N) / 仿真 t·步 / 仿真点计数。
 #   仍不做：穿衣对齐 / 自动贴合。
+#   ④ 左下角面板（随机摆动测试，贴左下角）：勾选启用 + 播放/暂停 + 主轴（相位）
+#      / 关节幅度 滑条 + 随机种子输入框（0~65535）——蒙皮过的衣服绑到同一骨架实例后逐帧跟随。
+#      衣服未蒙皮时动作不带动衣服。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_clothing_tool/jpov_clothing_tool \
@@ -38,9 +41,14 @@
 #   --body_reference_path  人体 reference（.glb/.gltf）；缺省用项目自带 Mixamo 男性人体
 #   --cloth_path           衣服模型（.glb/.gltf）；**必填**（没有通用默认值）
 #   --phi_deg              初始俯视角（度，默认 20；>0 = 相机在上方俯视）
+#   --motion_enable        启动即启用随机摆动测试（等价左下角勾选）
+#   --motion_phase 0~1     主轴相位初值（给了即启用；便于 headless 出图）
+#   --motion_amp 0~90      关节幅度初值（度，按 5° 量化）
+#   --motion_seed 0~65535  随机种子初值（换种子 = 换一套随机动作）
 #
 # headless UI 自检（不弹窗，出单张带面板的图）：
 #   ... --ui_shot --output_dir /tmp/ui [--sim_steps N] [--window_width W --window_height H]
+#   摆动测试回归：--auto_skin --motion_phase 0.3 --motion_amp 45 --ui_shot
 #   → /tmp/ui/clothing_tool_ui.png（--sim_steps 出图前先推进 N 步仿真验证下坠/落地）
 # =============================================================================
 
@@ -93,7 +101,11 @@ echo "         --cloth_path /absolute/path/to/cloth.glb"
 echo "       （--body_reference_path 缺省 = 项目自带 Mixamo 男性人体；"
 echo "        --cloth_path 必填）"
 echo ""
-echo "   2. UI 自检（headless 单帧 + 面板，不开窗口即可检查布局/字体）："
+echo "   3. 摆动测试（headless 回归，无需窗口）："
+echo "       $OUTPUT_DIR/jpov_clothing_tool --auto_skin --motion_phase 0.3 --motion_amp 45 \\"
+echo "         --body_reference_path <body.glb> --cloth_path <cloth.glb> --ui_shot --output_dir /tmp/ui"
+echo ""
+echo "   4. UI 自检（headless 单帧 + 面板，不开窗口即可检查布局/字体）："
 echo "       $OUTPUT_DIR/jpov_clothing_tool --ui_shot --output_dir /tmp/ui \\"
 echo "         --cloth_path /path/to/cloth.glb"
 echo "       → /tmp/ui/clothing_tool_ui.png"
@@ -121,6 +133,7 @@ echo "         - clothing_tool_app.h    渲染核心 App（场景 + 面板 + 仿
 echo "         - clothing_init.{h,cc}    后台初始化（加载 + 建图 + 保留衣服 CPU 几何）"
 echo "         - clothing_axis_input.h   数值填值解析（纯函数）"
 echo "         - clothing_transform.h    面板参数 clamp + 法线重算（平移/旋转/缩放见仿真器）"
+echo "         - random_pose_driver.h    随机摆动姿态发生器（程序化 / 确定性 / 无重定向）"
 echo "         - clothing_save.{h,cc}    保存衣服 mesh 为 glb（后台线程）"
 echo "         - jpov_clothing_tool.cc  主程序（CLI 装配 + 交互/headless 分发）"
 echo "     · 软体仿真：复用 //tools/jpov/soft_mesh_simulator（独立包，纯 CPU）"

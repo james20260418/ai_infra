@@ -30,6 +30,12 @@
 //   - 2026-10-06：焊接判据新增**相对局部边长**模式（面板勾选「焊接用相对局部边长」）——
 //       与「绝对距离(mm)」并列：判据是「相距 < 比例 × 局部边长」，与模型缩放 / 局部密度
 //       均无关，拉伸后无需重调（详见 weight_transfer.h 的 WeldMode）。
+//   - 2026-10-07（本 PR）：**随机摆动测试**——用**真骨架蒙皮**驱动参考人体做程序化随机动作
+//       （见 random_pose_driver.h；不导入外部动画 ⇒ **无需重定向**），蒙皮过的衣服绑到
+//       **同一骨架实例**后逐帧跟随（零新增同步逻辑）。左下角面板（贴底左）：启用勾选 +
+//       播放/暂停 + 「主轴」相位（播放时自动推进、暂停时可拖动查看任意时刻动作）+ 关节幅度
+//       + **随机种子输入框**（0~65535，换种子 = 换一套随机动作）。
+//       「衣服没蒙皮则不用动」：衣服未蒙皮时该动作不带动衣服（保持静止）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -64,6 +70,7 @@
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
 #include "tools/jpov/clothing/clothing_transform.h"
+#include "tools/jpov/clothing/random_pose_driver.h"
 #include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
@@ -132,6 +139,29 @@ inline constexpr float kSkinWeldToleranceMm = kWeldToleranceM * 1000.0f;
 // 「相对局部边长焊接」面板默认比例（× 局部边长）：与 weight_transfer.h 单一来源。
 // 与「绝对距离」并列的另一种焊接判据：与模型缩放 / 局部密度无关，拉伸后无需调参。
 inline constexpr float kSkinWeldRatio = kDefaultLocalEdgeWeldRatio;
+
+// ── 随机摆动测试（2026-10-07 Danis）：主轴相位 / 速度 / 幅度的默认与烘焙布局 ──
+//
+// 骨架注册表已加 ReleaseSkeleton（槽位复用，本 PR）⇒ 面板「随机种子」变更时可按新种子
+// **重烘焙**并替换骨架（见 RebakeMotionPoses）。幅度仍是烘焙维度（19 档一次烘完，
+// 切幅度无需重烘），按 kMotionAmplitudeStepDeg 量化。
+// pose 下标布局：level * kMotionPhasesPerCycle + 相位序号。
+
+// 一个主轴周期内均匀烘焙的相位帧数（足够采样 3 倍频正弦；运行时相邻两帧插值）。
+inline constexpr int kMotionPhasesPerCycle = 60;
+// 幅度档位步长（度）与上限（度）→ 档位数 = 上限/步长 + 1（0,5,…,90 共 19 档）。
+inline constexpr float kMotionAmplitudeStepDeg = 5.0f;
+inline constexpr float kMotionAmplitudeMaxDeg = 90.0f;
+inline constexpr int kMotionAmplitudeLevels =
+    static_cast<int>(kMotionAmplitudeMaxDeg / kMotionAmplitudeStepDeg) + 1;
+// 默认随机种子（0~65535；面板输入框可改，改后按新种子重烘焙姿态集）。
+inline constexpr int kDefaultMotionSeed = 0;
+// 种子上界（含）：面板输入 clamp 到 [0, kMotionSeedMax]。
+inline constexpr int kMotionSeedMax = 65535;
+// 默认关节幅度（度，取 5 的倍数以对齐档位）。
+inline constexpr float kDefaultMotionAmplitudeDeg = 30.0f;
+// 播放推进速度（Hz = 每秒推进的主轴周期数）。固定值 —— 快慢不影响判断蒙皮效果，故不做滑条。
+inline constexpr float kMotionPlaySpeedHz = 0.5f;
 
 // 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
 // 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
@@ -218,6 +248,20 @@ public:
     bool weld_relative_ui_ = false;
     float weld_ratio_ = kSkinWeldRatio;  // 相对模式比例（× 局部边长；0 = 关闭）
     NumberField weld_ratio_field_ = NumberField(kSkinWeldRatio);
+
+    // ══════════════ 随机摆动测试（2026-10-07 Danis）══════════════
+    //
+    // 用**真骨架蒙皮**驱动参考人体做程序化随机动作（random_pose_driver.h）；蒙皮过的衣服绑到
+    // **同一骨架实例**后逐帧跟随。衣服未蒙皮时该动作不带动衣服（保持静止）。
+    bool motion_test_enabled_ = false;  // 勾选：启用（人体走 GPU 蒙皮渲染路径）
+    bool motion_playing_ = false;       // 播放/暂停（播放时主轴相位自动推进，速度=固定常量）
+    float motion_phase_ = 0.0f;         // 主轴相位 ∈ [0,1)（1 = 一个周期）
+    float motion_amplitude_deg_ = kDefaultMotionAmplitudeDeg;  // 关节幅度（度；按 5° 量化）
+    int motion_seed_ = kDefaultMotionSeed;  // 随机种子 [0, kMotionSeedMax]（变则重烘焙姿态集）
+    NumberField motion_seed_field_ = NumberField(static_cast<float>(kDefaultMotionSeed));
+    uint32_t body_skel_id_ = 0;         // 人体骨架句柄（RegisterSkeleton 产物；0 = 未注册）
+    std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
+    std::string motion_msg_;            // 面板状态提示（每帧刷新）
 
     // ══════════════ 软体仿真（Step 1）══════════════
     //
@@ -362,8 +406,20 @@ public:
             body_skeleton_.Validate();
             has_body_skeleton_ = true;
         } else {
-            LOG(WARNING) << "人体 reference 无骨架（skin），软布自动蒙皮不可用: "
+            LOG(WARNING) << "人体 reference 无骨架（skin），软布自动蒙皮 / 随机摆动测试"
+                            "不可用: "
                          << body_path_;
+        }
+        // 随机摆动测试：预烘焙周期 pose 序列 + 注册骨架（有骨架时一次注册，见 renderer.h
+        // 骨架注册表无释放接口）。
+        if (has_body_skeleton_) {
+            BakeMotionPoses();
+            body_skel_id_ = RegisterSkeleton(body_skeleton_, body_motion_poses_);
+            CHECK_NE(body_skel_id_, 0u) << "随机摆动测试：RegisterSkeleton 失败";
+            LOG(INFO) << "随机摆动测试：已注册骨架 skeleton_id=" << body_skel_id_
+                      << "，预烘焙 pose " << body_motion_poses_.size() << " 帧（"
+                      << kMotionAmplitudeLevels << " 幅度档 × " << kMotionPhasesPerCycle
+                      << " 相位）";
         }
         LOG(INFO) << "人体 reference: " << body_path_ << "（" << body_.size()
                   << " primitives）";
@@ -399,6 +455,17 @@ public:
 
         // 保存状态机泵（每帧）。
         save_ctrl_.Tick();
+
+        // 随机摆动测试：播放时主轴相位自动推进（按 1 周期取模；周期函数保证循环无缝）。
+        if (motion_playing_ && MotionTestActive()) {
+            motion_phase_ += kMotionPlaySpeedHz / kViewerFps;
+            while (motion_phase_ >= 1.0f) {
+                motion_phase_ -= 1.0f;
+            }
+            while (motion_phase_ < 0.0f) {
+                motion_phase_ += 1.0f;
+            }
+        }
 
         // 交互输入 → 视角（仅可见窗口消费输入；headless 的相机由外部赋 view_）。
         if (show_panel_) {
@@ -452,19 +519,39 @@ public:
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
 
+        // 随机摆动测试生效时：人体 / 衣服共用**同一份**实例状态（摆放 + pose），故逐帧同步。
+        const bool motion_active = MotionTestActive();
+        const jpov::SkinnedInstanceState motion_inst =
+            motion_active ? MotionInstanceState() : jpov::SkinnedInstanceState();
+
         // 人体 reference 固定画在原点（不参与衣服调节）。
         if (show_body_) {
-            cmds->DrawGltfObject(body_,
-                                 /*center*/ {0.0f, 0.0f, 0.0f},
-                                 /*up*/     {0.0f, 1.0f, 0.0f},
-                                 /*front*/  {0.0f, 0.0f, 1.0f});
+            if (motion_active) {
+                for (const jpov::GltfPrimitive& prim : body_.primitives) {
+                    cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
+                                               prim.material, {motion_inst});
+                }
+            } else {
+                cmds->DrawGltfObject(body_,
+                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*up*/     {0.0f, 1.0f, 0.0f},
+                                     /*front*/  {0.0f, 0.0f, 1.0f});
+            }
         }
-        // 衣服：几何是唯一的（顶点已含全部变换 / 仿真形变），故用**恒等放置**。
+        // 衣服：静态绘制用恒等放置（顶点已含变换 / 仿真形变）；摆动测试 + 已蒙皮时用
+        // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
-            cmds->DrawGltfObject(cloth_,
-                                 /*center*/ {0.0f, 0.0f, 0.0f},
-                                 /*up*/     {0.0f, 1.0f, 0.0f},
-                                 /*front*/  {0.0f, 0.0f, 1.0f});
+            if (motion_active && skinned_) {
+                for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
+                    cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
+                                               prim.material, {motion_inst});
+                }
+            } else {
+                cmds->DrawGltfObject(cloth_,
+                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*up*/     {0.0f, 1.0f, 0.0f},
+                                     /*front*/  {0.0f, 0.0f, 1.0f});
+            }
         }
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
@@ -721,6 +808,7 @@ private:
         DrawLeftPanel(cmds, w);
         DrawRightPanel(cmds, w, h);
         DrawSkinPanel(cmds, w, h);
+        DrawMotionPanel(cmds, w, h);
     }
 
     // ---- 左上角：变换 / 保存 / 地面 / 显示 ----
@@ -1109,6 +1197,186 @@ private:
         }
     }
 
+    // ---- 左下角：随机摆动测试（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
+    //
+    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）：固定吸附在这个角，
+    // 与左上（变换/保存）、右上（动力学）、右下（蒙皮）互不遮挡。
+    // 行：启用勾选(1) + 播放/暂停(1) + 主轴(1) + 幅度(1) + 随机种子(1) + 状态(1) = 6。
+    void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        // 状态提示（每帧刷新，供面板与出图自检）。
+        if (!has_body_skeleton_) {
+            motion_msg_ = "人体无骨架，无法摆动";
+        } else if (body_skel_id_ == 0) {
+            motion_msg_ = "骨架未注册";
+        } else if (!motion_test_enabled_) {
+            motion_msg_ = "勾选后启用（先蒙皮再播放，衣服才跟随）";
+        } else if (!skinned_) {
+            motion_msg_ = "衣服未蒙皮：动作不带动衣服";
+        } else {
+            motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
+        }
+
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.32f * win_w;
+        constexpr int kRows = 6;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        const float panel_x = kMargin;  // 贴左边缘
+        // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
+        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+        float row_y = top;
+
+        // 启用勾选（兼作面板标题）。
+        ui_.Checkbox("随机摆动测试（启用）", &motion_test_enabled_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        const char* play_label = motion_playing_ ? "暂停" : "播放";
+        if (ui_.Button(play_label, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            motion_playing_ = !motion_playing_;
+        }
+        row_y += step_y;
+
+        // 主轴（相位）：播放时自动推进（速度固定）；暂停时可拖动查看任意时刻的动作。
+        ui_.SliderFloat("主轴（相位）", &motion_phase_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        0.0f, 1.0f, /*decimal_places*/ 3);
+        row_y += step_y;
+
+        // 幅度：按档位量化（幅度是烘焙维度，19 档一次烘完，切档无需重烘）。
+        float amp = motion_amplitude_deg_;
+        ui_.SliderFloat("关节幅度 (°)", &amp,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        0.0f, kMotionAmplitudeMaxDeg, /*decimal_places*/ 0);
+        motion_amplitude_deg_ = SnapAmplitudeDeg(amp);
+        row_y += step_y;
+
+        // 随机种子：输入框（0~65535，失焦/回车提交 → clamp → 变了则重烘焙姿态集）。
+        const float seed_label_w = 96.0f;
+        DrawLabel("随机种子", left, seed_label_w, row_y);
+        const float seed_box_x = left + seed_label_w + 8.0f;
+        const float seed_box_w = row_w - seed_label_w - 8.0f;
+        const bool seed_focus = ui_.InputText(
+            "", motion_seed_field_.text, kAxisInputCapacity,
+            jpov::UiRect{{seed_box_x, row_y}, {seed_box_w, kRowH}});
+        if (motion_seed_field_.focused_prev && !seed_focus) {
+            CommitMotionSeedField();
+        }
+        motion_seed_field_.focused_prev = seed_focus;
+        row_y += step_y;
+
+        const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+        cmds->DrawText(motion_msg_,
+                       /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                       kFontSize, kForeground,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+    }
+
+    // 提交「随机种子」输入：解析 → clamp [0, kMotionSeedMax] →（变了则）重烘焙姿态集。
+    // 文本框规范化为**最终生效值**（用户可见 clamp 后的结果）。
+    void CommitMotionSeedField() {
+        float parsed = 0.0f;
+        int next = motion_seed_;
+        if (ParseAxisValue(motion_seed_field_.text, &parsed)) {
+            next = static_cast<int>(std::clamp(
+                std::lround(parsed), 0L, static_cast<long>(kMotionSeedMax)));
+        }
+        snprintf(motion_seed_field_.text, kAxisInputCapacity, "%d", next);
+        if (next != motion_seed_) {
+            motion_seed_ = next;
+            RebakeMotionPoses();
+        }
+    }
+
+    // 按当前种子重烘焙姿态集并**替换**骨架（ReleaseSkeleton + RegisterSkeleton；骨架槽位复用，
+    // 不会泄漏 GL 资源）。先释放旧骨架再注册（复用同一槽位，id 稳定），中间不做任何 Draw。
+    // Pre-condition: has_body_skeleton_。
+    void RebakeMotionPoses() {
+        if (!has_body_skeleton_) {
+            return;
+        }
+        BakeMotionPoses();
+        ReleaseSkeleton(body_skel_id_);
+        body_skel_id_ = RegisterSkeleton(body_skeleton_, body_motion_poses_);
+        CHECK_NE(body_skel_id_, 0u) << "随机摆动测试：RegisterSkeleton 失败";
+        LOG(INFO) << "随机摆动测试：种子=" << motion_seed_ << "，重烘焙 pose "
+                  << body_motion_poses_.size() << " 帧（skeleton_id=" << body_skel_id_
+                  << "）";
+    }
+
+    // 幅度按 kMotionAmplitudeStepDeg 量化为档位（与预烘焙 pose 集对齐）。
+    static float SnapAmplitudeDeg(float deg) {
+        const float level = std::round(deg / kMotionAmplitudeStepDeg);
+        const float clamped =
+            std::clamp(level, 0.0f, static_cast<float>(kMotionAmplitudeLevels - 1));
+        return clamped * kMotionAmplitudeStepDeg;
+    }
+
+    // 随机摆动测试是否生效（启用 + 有已注册骨架）。衣服是否跟随由 skinned_ 另行判定。
+    bool MotionTestActive() const {
+        return motion_test_enabled_ && body_skel_id_ != 0;
+    }
+
+    // 当前幅度对应的烘焙档位（0..kMotionAmplitudeLevels-1）。
+    int MotionAmplitudeLevel() const {
+        const int level = static_cast<int>(
+            std::lround(motion_amplitude_deg_ / kMotionAmplitudeStepDeg));
+        return std::clamp(level, 0, kMotionAmplitudeLevels - 1);
+    }
+
+    // 本帧人体 / 衣服共享的实例状态：摆放在原点（与静态绘制一致），pose = 预烘焙序列里
+    // 「当前幅度档 + 主轴相位」相邻两帧之间插值（末尾环绕到本档首帧，无缝）。
+    jpov::SkinnedInstanceState MotionInstanceState() const {
+        const int total = kMotionPhasesPerCycle;
+        const int level = MotionAmplitudeLevel();
+        float scaled = motion_phase_ * static_cast<float>(total);
+        if (scaled < 0.0f) {
+            scaled = 0.0f;
+        }
+        int a = static_cast<int>(scaled);
+        float frac = scaled - static_cast<float>(a);
+        if (a >= total) {
+            a = 0;
+            frac = 0.0f;
+        }
+        const int b = (a + 1) % total;
+        jpov::SkinnedInstanceState inst;
+        inst.pose_a = level * total + a;
+        inst.pose_b = level * total + b;
+        inst.ratio = frac;
+        return inst;
+    }
+
+    // 预烘焙「一个主轴周期」的姿态序列（幅度档 × 相位），交给 RegisterSkeleton。
+    // pose 下标 = level * kMotionPhasesPerCycle + 相位序号。
+    // Pre-condition: has_body_skeleton_。
+    void BakeMotionPoses() {
+        CHECK(has_body_skeleton_) << "BakeMotionPoses: 人体无骨架";
+        body_motion_poses_.clear();
+        body_motion_poses_.reserve(
+            static_cast<size_t>(kMotionAmplitudeLevels * kMotionPhasesPerCycle));
+        for (int level = 0; level < kMotionAmplitudeLevels; ++level) {
+            RandomMotionParams params;
+            params.amplitude_deg = static_cast<float>(level) * kMotionAmplitudeStepDeg;
+            params.seed = motion_seed_;
+            for (int k = 0; k < kMotionPhasesPerCycle; ++k) {
+                const float phase =
+                    static_cast<float>(k) / static_cast<float>(kMotionPhasesPerCycle);
+                body_motion_poses_.push_back(RandomPoseAt(body_skeleton_, phase, params));
+            }
+        }
+    }
+
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
@@ -1197,6 +1465,13 @@ private:
         }
         skinned_ = true;
         sim_running_ = false;
+        // 衣服几何现在带上 JOINTS/WEIGHTS（kJoints）→ 换成**可蒙皮**的 GPU mesh：先释放原
+        // 静态 mesh，再用带骨几何重注册。静止外观不变；摆动测试时按骨架蒙皮绘制。
+        // （骨架注册表无释放接口，故这里只换 mesh，不重建骨架。）
+        for (size_t i = 0; i < cloth_.size(); ++i) {
+            ReleaseMesh(cloth_.primitives[i].mesh_id);
+            cloth_.primitives[i].mesh_id = RegisterMesh(cloth_current_[i].mesh);
+        }
         skin_msg_ = Format(
             "已蒙皮 %zu 顶点 / 种子 %zu（非种子 %zu, max %.1f mm）/ 焊接 %s %zu / 生长 %zu 轮",
             total_verts, total_seed, total_non_seed,

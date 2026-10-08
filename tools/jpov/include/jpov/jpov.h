@@ -246,6 +246,14 @@ public:
     // Pre-condition: Init() 已调用
     void ReleaseMesh(uint32_t mesh_id);
 
+    // ReleaseSkeleton: 释放 RegisterSkeleton 返回的骨架资源（回收 pose atlas 等 GL 资源；
+    // 槽位回收，后续 RegisterSkeleton 复用）。
+    //
+    // skeleton_id 为 0 / 不存在 → 静默忽略；释放后该 id 不可再用于 DrawMeshWithSkeleton
+    // （否则 LOG(FATAL)）。
+    // Pre-condition: Init() 已调用
+    void ReleaseSkeleton(uint32_t skeleton_id);
+
     // ---- glTF 模型加载 ----
 
     // LoadGltf: 从 .gltf/.glb 文件加载整个模型并上传 GPU 资源。
