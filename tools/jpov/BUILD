@@ -172,6 +172,37 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 雾火查看器（点状雾 MVP 测试场）：场景 = 地面 + 橡树 + 点状雾，交互面板调雾参数。
+cc_library(
+    name = "fire_fog_viewer_app",
+    hdrs = ["demo/fire_fog_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_fire_fog_viewer",
+    srcs = ["demo/jpov_fire_fog_viewer.cc"],
+    deps = [
+        "//tools/jpov:fire_fog_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 cc_binary(
     name = "jpov_skylight_viewer",
     srcs = ["demo/jpov_skylight_viewer.cc"],

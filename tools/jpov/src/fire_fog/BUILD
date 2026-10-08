@@ -10,10 +10,13 @@ cc_library(
     srcs = ["fire_fog_renderer.cc"],
     hdrs = [
         "fire_fog_renderer.h",
+        "fire_fog_shader.h",
+        "fire_fog_lower.h",
         "fog_body.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":convex_hull_tiles",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
@@ -39,6 +42,35 @@ cc_library(
         "//geom/common:vec",
     ],
     copts = ["-std=c++20"],
+)
+
+# FireFogLower — GL-free CPU 工具（PointFog→FogBody 降维 + 屏幕 tile 剪枝表）。
+cc_library(
+    name = "fire_fog_lower",
+    hdrs = [
+        "fire_fog_lower.h",
+        "fog_body.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":convex_hull_tiles",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# FireFogLower tests（降维 + tile 剪枝表，GL-free）。
+cc_test(
+    name = "fire_fog_lower_test",
+    srcs = ["fire_fog_lower_test.cc"],
+    deps = [
+        ":fire_fog_lower",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
 )
 
 # ConvexHullTiles tests（含随机 8 点 cross-validate）
