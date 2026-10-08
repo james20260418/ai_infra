@@ -1,6 +1,6 @@
 // JPOV Fire-Fog — ZDist（逐像素深度函数）CPU 参考实现
 //
-// 设计见 tools/jpov/docs/jpov_fire_fog_design.md §14（ZDist）与 §16（本 CPU 参考）。
+// 设计见 tools/jpov/docs/jpov_fire_fog_design.md §3（ZDist）与 §11（本 CPU 参考）。
 //
 // 目的：把 shader 里「叠加 z 段 → 降维到 ≤8 控制点 → 末端积分」这套操作，先在 CPU 上
 // 用可直接单测的代码实现一遍，作为 shader 的**对照 / 真值**（debug、gold、回归）。
@@ -15,7 +15,7 @@
 //   - 与设计文档「z 自墙深累积到最近」是同一积分的反向记法，数学等价（这里取相机正向，
 //     读起来更直接）。
 //
-// 两阶段（设计文档 §14.3）：
+// 两阶段（设计文档 §3）：
 //   1. 精确累加（ZDistAccumulator）：段以**加法**叠加（乱序可加、免排序），控制点数不受限；
 //   2. 降采样（ZDistFunction::Reduce）：压到 ≤8 控制点，**端点保留 ⇒ 总上升量守恒**
 //      （τ_total / Ed_total 逐位不变）。
@@ -39,7 +39,7 @@
 
 namespace jpov {
 
-// ZDist 控制点上限（设计锁定 8；见 jpov_fire_fog_design.md §14.9）。
+// ZDist 控制点上限（设计锁定 8；见 jpov_fire_fog_design.md §9 参数速查）。
 inline constexpr int kZDistControlPoints = 8;
 
 // 候选断点上限（= 累加器规模）。GPU 侧用定长缓冲；此处作 CHECK 上界 + 定长数组容量。
