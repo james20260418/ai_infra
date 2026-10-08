@@ -15,6 +15,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace jpov {
 
@@ -22,6 +23,11 @@ namespace jpov {
 struct ShaderSource {
     const char* vertex;
     const char* fragment;
+    // 可选的编译期宏：非空时，在每个源码的 `#version` 行之后插入 `#define <name>`。
+    // 用途：生成「同源、少量分支差」的 shader **变体**（如 opaque / alpha-cutout），
+    // 使不透明 program 里不出现 `discard`（否则编译器保守降级 early-Z）。
+    // 这不是「chunk 拼装」——整份 shader 仍是一份可独立编译/单测的源，只是多几个宏。
+    std::vector<std::string> defines;
 };
 
 class ShaderManager {

@@ -248,9 +248,9 @@ public:
             save_ctrl_.Tick();
         }
     }
-    // 供 headless / CLI 用：把当前 target 存到指定 glb（同步等待完成）。
-    void SaveTargetToSourceSync() {
-        StartSaveTarget();
+    // 供 headless / CLI 用：把当前 target 存到指定格式文件（同步等待完成）。
+    void SaveTargetToSourceSync(ModelOutputFormat format) {
+        StartSaveTarget(format);
         WaitForSave();
     }
 
@@ -549,7 +549,7 @@ private:
 
     // ==================== 保存 ====================
 
-    void StartSaveTarget() {
+    void StartSaveTarget(ModelOutputFormat format) {
         std::vector<jpov::GltfSaveMesh> meshes;
         for (size_t i = 0; i < target_current_.size(); ++i) {
             if (target_prim_enabled_[i]) {
@@ -560,7 +560,8 @@ private:
             LOG(WARNING) << "保存被忽略：target 几何为空";
             return;
         }
-        save_ctrl_.Start(std::move(meshes), target_skeleton_, target_path_, "target");
+        save_ctrl_.Start(std::move(meshes), target_skeleton_, target_path_,
+                         "target", format);
     }
 
     // ==================== 面板 ====================
@@ -711,13 +712,19 @@ private:
                   scale_info_x, left + row_w - scale_info_x, row_y);
         row_y += step_y;
 
-        // 保存按钮行。
-        const float save_btn_w = 140.0f;
-        const char* save_label =
-            (save_ctrl_.state() == ModelSaveState::kSaving) ? "保存中..."
-                                                            : "保存 target glb";
-        if (ui_.Button(save_label, jpov::UiRect{{left, row_y}, {save_btn_w, kRowH}})) {
-            StartSaveTarget();
+        // 保存按钮行：glb（内嵌单文件）/ gltf（外置纹理，可外部编辑贴图）。
+        const bool saving = save_ctrl_.state() == ModelSaveState::kSaving;
+        const float save_btn_w = (row_w - 8.0f) * 0.5f;
+        const float save_btn2_x = left + save_btn_w + 8.0f;
+        const char* glb_label = saving ? "保存中..." : "保存 glb";
+        if (ui_.Button(glb_label,
+                       jpov::UiRect{{left, row_y}, {save_btn_w, kRowH}})) {
+            StartSaveTarget(ModelOutputFormat::kGlb);
+        }
+        const char* gltf_label = saving ? "保存中..." : "导出 gltf(外置)";
+        if (ui_.Button(gltf_label,
+                       jpov::UiRect{{save_btn2_x, row_y}, {save_btn_w, kRowH}})) {
+            StartSaveTarget(ModelOutputFormat::kGltfExternal);
         }
         row_y += step_y;
 

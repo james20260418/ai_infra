@@ -81,6 +81,31 @@ unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
     return prog;
 }
 
+// 在 shader 源的 `#version` 行之后插入 `#define <name>` 行。
+// GLSL 要求 `#version` 必须是首条语句（本项目的 shader 字串以 `\n#version` 开头，
+// 故不能简单地插在第一个换行后），因此定位到 `#version` 所在行的末尾再插。
+// defines 为空时原样返回。
+std::string InjectDefines(const char* src, const std::vector<std::string>& defines) {
+    std::string s(src);
+    if (defines.empty()) {
+        return s;
+    }
+    std::string defs;
+    for (const std::string& d : defines) {
+        defs += "#define " + d + "\n";
+    }
+    const size_t vp = s.find("#version");
+    if (vp == std::string::npos) {
+        // 无 #version：放最前（保持可用；正常不会走到）。
+        return defs + s;
+    }
+    const size_t nl = s.find('\n', vp);
+    if (nl == std::string::npos) {
+        return s + "\n" + defs;
+    }
+    return s.substr(0, nl + 1) + defs + s.substr(nl + 1);
+}
+
 }  // anonymous namespace
 
 ShaderManager::~ShaderManager() {
@@ -104,8 +129,10 @@ unsigned int ShaderManager::GetOrCreate(const std::string& name,
     CHECK(source.vertex != nullptr) << "ShaderManager: null vertex source, name=" << name;
     CHECK(source.fragment != nullptr) << "ShaderManager: null fragment source, name=" << name;
 
-    unsigned int vs = CompileShader(GL_VERTEX_SHADER, source.vertex);
-    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, source.fragment);
+    const std::string vs_src = InjectDefines(source.vertex, source.defines);
+    const std::string fs_src = InjectDefines(source.fragment, source.defines);
+    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vs_src.c_str());
+    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fs_src.c_str());
     unsigned int prog = LinkProgram(vs, fs);
     CHECK_NE(prog, 0u) << "ShaderManager: link failed, name=" << name;
 

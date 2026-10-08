@@ -12,6 +12,7 @@
 // headless UI 自检（不弹窗，出单张带面板的图）：
 //   加 --ui_shot --output_dir /tmp/ui
 //   加 [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_high]
+//   加 --save_after_clip [--save_format glb|gltf]（默认 glb；gltf = 外置纹理，可编辑）
 
 #include <cstdlib>  // atof / atoi
 #include <string>
@@ -38,6 +39,7 @@ struct CliOptions {
     jpov::model_editor::ClipKeepSide clip_side =
         jpov::model_editor::ClipKeepSide::kGreater;  // --clip_side 删除哪侧
     bool save_after_clip = false;  // --save_after_clip：出图前把（裁剪后）target 存盘
+    std::string save_format = "glb";  // --save_format glb|gltf（gltf = 外置纹理）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 WARNING 忽略。
@@ -49,6 +51,17 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.ui_shot = true;
         } else if (arg == "--save_after_clip") {
             opt.save_after_clip = true;
+        } else if (arg == "--save_format") {
+            if (i + 1 < argc) {
+                const std::string v = argv[++i];
+                if (v == "glb" || v == "gltf") {
+                    opt.save_format = v;
+                } else {
+                    LOG(FATAL) << "--save_format 仅支持 glb|gltf，got " << v;
+                }
+            } else {
+                LOG(WARNING) << "--save_format 缺少参数（glb|gltf），忽略";
+            }
         } else if (arg == "--target_path") {
             if (i + 1 < argc) {
                 opt.target_path = argv[++i];
@@ -192,8 +205,11 @@ int main(int argc, char** argv) {
                                           : "delete_high(保留小侧)");
         }
         if (opt.save_after_clip) {
-            app.SaveTargetToSourceSync();
-            LOG(INFO) << "headless 存盘完成";
+            app.SaveTargetToSourceSync(
+                opt.save_format == "gltf"
+                    ? jpov::model_editor::ModelOutputFormat::kGltfExternal
+                    : jpov::model_editor::ModelOutputFormat::kGlb);
+            LOG(INFO) << "headless 存盘完成（format=" << opt.save_format << "）";
         }
         app.SetShowPanel(true);
         jpov::WindowInfo winfo;

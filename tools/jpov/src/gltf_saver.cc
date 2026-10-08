@@ -255,11 +255,83 @@ json EmbedImageBytes(const std::vector<unsigned char>& bytes, BinBuilder* bin,
     return json{{"bufferView", bv}, {"mimeType", use_mime}};
 }
 
-}  // namespace
+// ==================== 保存模式（内嵌 vs 外置纹理） ====================
 
-bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
-    CHECK(!asset.meshes.empty()) << "WriteGlb: 资产没有任何 primitive";
-    CHECK(!path.empty()) << "WriteGlb: 输出路径为空";
+// 贴图落法：内嵌进 BIN，或写成 .gltf 同目录的 sidecar 文件。
+enum class TextureStorage { kEmbedded, kExternal };
+
+// 一次保存的上下文。
+struct SaveContext {
+    TextureStorage storage = TextureStorage::kEmbedded;
+    std::string out_dir;   // 外置：sidecar 落盘目录（含尾 '/'），空 = 当前目录
+    std::string stem;      // 外置：sidecar 文件名前缀（<stem>_texN.<ext>）
+};
+
+// 一次性写文件（失败返回 false）。
+bool WriteBytesToFile(const std::string& path,
+                      const std::vector<unsigned char>& bytes) {
+    std::ofstream f(path, std::ofstream::binary);
+    if (!f) {
+        return false;
+    }
+    f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    return static_cast<bool>(f);
+}
+
+// 由图片字节魔数判定扩展名（与 MimeTypeOfBytes 同一判定；glTF 只认 png/jpeg）。
+std::string ExtensionFromBytes(const std::vector<unsigned char>& b) {
+    if (b.size() >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E &&
+        b[3] == 0x47) {
+        return ".png";
+    }
+    if (b.size() >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) {
+        return ".jpg";
+    }
+    return ".png";   // 兜底（未知按 png，与 MimeTypeOfBytes 一致）
+}
+
+// 把一张贴图落成 glTF image json。
+//   - 内嵌：追加进 BIN，返回 {"bufferView", "mimeType"}。
+//   - 外置：把原始字节写成 <out_dir><stem>_tex<ordinal>.<ext>，返回 {"uri": "<文件名>"}。
+// 空 ref / 读取失败 / 写文件失败 → 返回空 json（调用方跳过该贴图槽）。
+// ordinal: 该图在 images 数组中的序号（外置文件名后缀用，保证唯一）。
+json EmitImage(const GltfTextureRef& ref, const SaveContext& ctx, int ordinal,
+               BinBuilder* bin, json* buffer_views) {
+    if (ref.empty()) {
+        return json();
+    }
+    if (ctx.storage == TextureStorage::kEmbedded) {
+        return ref.is_embedded()
+                   ? EmbedImageBytes(ref.bytes, bin, buffer_views)
+                   : EmbedImage(ref.uri, bin, buffer_views);
+    }
+    // 外置：取原始编码字节（内存内嵌 或 读外部文件），写 sidecar，返回相对 uri。
+    std::vector<unsigned char> bytes;
+    if (ref.is_embedded()) {
+        bytes = ref.bytes;
+    } else if (!ReadFileBytes(ref.uri, &bytes)) {
+        LOG(ERROR) << "gltf_saver: 无法读取贴图 " << ref.uri << "，跳过该贴图";
+        return json();
+    }
+    if (bytes.empty()) {
+        return json();
+    }
+    const std::string fname =
+        ctx.stem + "_tex" + std::to_string(ordinal) + ExtensionFromBytes(bytes);
+    if (!WriteBytesToFile(ctx.out_dir + fname, bytes)) {
+        LOG(ERROR) << "gltf_saver: 无法写贴图文件 " << ctx.out_dir + fname;
+        return json();
+    }
+    return json{{"uri", fname}};
+}
+
+// 组装 glTF JSON 根对象（几何写进 *bin；贴图按 ctx 落法处理）。
+// 不含 buffers 段（内嵌/外置的 buffer 描述由调用方补），也不含容器封装。
+// Pre-condition: asset.meshes 非空；各 mesh.mesh.Validate() 通过。
+json BuildRoot(const GltfSaveAsset& asset, const SaveContext& ctx,
+               BinBuilder* bin) {
+    CHECK(!asset.meshes.empty()) << "gltf_saver: 资产没有任何 primitive";
 
     json root;
     root["asset"] = {{"version", "2.0"}, {"generator", "JPOV gltf_saver"}};
@@ -277,9 +349,7 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
                                          {"wrapS", 10497},       // REPEAT
                                          {"wrapT", 10497}}});
 
-    BinBuilder bin;
-
-    // ---- 贴图去重（同一贴图：外部路径 或 内嵌字节 只内嵌一次）----
+    // ---- 贴图去重（同一贴图：外部路径 或 内嵌字节 只落一次）----
     std::map<std::string, int> tex_index_by_path;   // 去重键 → texture 索引
     auto texture_for = [&](const GltfTextureRef& ref) -> int {
         if (ref.empty()) {
@@ -290,10 +360,9 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
         if (it != tex_index_by_path.end()) {
             return it->second;
         }
-        // 内嵌（内存字节）→ 原样内嵌；外部（路径）→ 读文件内嵌。
-        json img = ref.is_embedded()
-                       ? EmbedImageBytes(ref.bytes, &bin, &root["bufferViews"])
-                       : EmbedImage(ref.uri, &bin, &root["bufferViews"]);
+        // 按模式落图（内嵌进 BIN / 写成 sidecar 文件）；ordinal = 当前 images 数。
+        json img = EmitImage(ref, ctx, static_cast<int>(root["images"].size()),
+                             bin, &root["bufferViews"]);
         if (img.is_null() || img.empty()) {
             return -1;
         }
@@ -322,7 +391,10 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
             mi.metallic_factor == 1.0f && mi.roughness_factor == 1.0f &&
             mi.emissive_factor[0] == 0.0f && mi.emissive_factor[1] == 0.0f &&
             mi.emissive_factor[2] == 0.0f;
-        if (!has_any_tex && default_factors) {
+        // 无任何贴图、因子全默认、且透明模式也默认（Opaque/单面）→ 不写材质。
+        const bool default_alpha =
+            mi.alpha_mode == AlphaMode::kOpaque && !mi.double_sided;
+        if (!has_any_tex && default_factors && default_alpha) {
             return -1;
         }
 
@@ -373,6 +445,17 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
                                                  mi.emissive_factor[2]});
         }
 
+        // 透明模式（alpha test / cutout）：非 Opaque 时写 alphaMode/alphaCutoff，
+        // 否则“存→读”会丢掉 cutout 语义（几何不受影响，但渲染变回不透明）。
+        if (mi.alpha_mode == AlphaMode::kMask) {
+            mat["alphaMode"] = "MASK";
+            mat["alphaCutoff"] = mi.alpha_cutoff;
+        }
+        // 双面渲染：true 时写 doubleSided（否则单面几何的背面会丢）。
+        if (mi.double_sided) {
+            mat["doubleSided"] = true;
+        }
+
         const int mat_index = static_cast<int>(root["materials"].size());
         root["materials"].push_back(mat);
         return mat_index;
@@ -389,7 +472,7 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
         const std::string mat_name =
             base_name + "_mat" + std::to_string(i);
 
-        json prim = WritePrimitive(mesh, &bin, &root["accessors"],
+        json prim = WritePrimitive(mesh, bin, &root["accessors"],
                                   &root["bufferViews"]);
         const int mat_index = material_for(sm.material, mat_name);
         if (mat_index >= 0) {
@@ -425,7 +508,7 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
                 ibm_flat.push_back(m[k]);
             }
         }
-        const std::pair<size_t, size_t> o = AppendFloats(&bin, ibm_flat);
+        const std::pair<size_t, size_t> o = AppendFloats(bin, ibm_flat);
         const int bv = static_cast<int>(root["bufferViews"].size());
         root["bufferViews"].push_back({{"buffer", 0},
                                        {"byteOffset", o.first},
@@ -494,6 +577,17 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
         }
     }
 
+    return root;
+}
+
+}  // namespace
+
+bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
+    CHECK(!path.empty()) << "WriteGlb: 输出路径为空";
+
+    BinBuilder bin;
+    json root = BuildRoot(asset, SaveContext{}, &bin);
+
     // ---- buffer：byteLength = BIN 长度（**不含** chunk pad）。----
     root["buffers"] =
         json::array({json{{"byteLength", bin.bytes.size()}}});
@@ -545,6 +639,56 @@ bool WriteGlb(const GltfSaveAsset& asset, const std::string& path) {
         return false;
     }
     LOG(INFO) << "WriteGlb: " << path << " (" << out.size() << " bytes, "
+              << asset.meshes.size() << " primitives"
+              << (asset.skin.has_value() ? ", skinned" : "") << ")";
+    return true;
+}
+
+bool WriteGltf(const GltfSaveAsset& asset, const std::string& path) {
+    CHECK(!path.empty()) << "WriteGltf: 输出路径为空";
+    CHECK(path.size() >= 5 && path.compare(path.size() - 5, 5, ".gltf") == 0)
+        << "WriteGltf: 输出路径必须以 .gltf 结尾，got " << path;
+
+    // 拆出目录（含尾 '/'）与去扩展名的 stem，用于 sidecar 命名。
+    const size_t slash = path.find_last_of("/\\");
+    const std::string dir =
+        (slash == std::string::npos) ? std::string() : path.substr(0, slash + 1);
+    const std::string base =
+        (slash == std::string::npos) ? path : path.substr(slash + 1);
+    const size_t dot = base.find_last_of('.');
+    const std::string stem =
+        (dot == std::string::npos || dot == 0) ? base : base.substr(0, dot);
+
+    SaveContext ctx;
+    ctx.storage = TextureStorage::kExternal;
+    ctx.out_dir = dir;
+    ctx.stem = stem;
+
+    BinBuilder bin;
+    json root = BuildRoot(asset, ctx, &bin);
+
+    // 几何写独立 <stem>.bin；buffers[0] 用 uri 引用（外置）。
+    const std::string bin_name = stem + ".bin";
+    if (!WriteBytesToFile(dir + bin_name, bin.bytes)) {
+        LOG(ERROR) << "WriteGltf: 无法写几何缓冲 " << dir + bin_name;
+        return false;
+    }
+    root["buffers"] =
+        json::array({json{{"uri", bin_name}, {"byteLength", bin.bytes.size()}}});
+
+    // 写 .gltf（缩进 2 空格，便于人读与 git diff）。
+    std::ofstream f(path, std::ofstream::binary);
+    if (!f) {
+        LOG(ERROR) << "WriteGltf: 无法打开输出文件 " << path;
+        return false;
+    }
+    const std::string text = root.dump(2);
+    f.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!f) {
+        LOG(ERROR) << "WriteGltf: 写入失败 " << path;
+        return false;
+    }
+    LOG(INFO) << "WriteGltf: " << path << " (+" << bin_name << ", "
               << asset.meshes.size() << " primitives"
               << (asset.skin.has_value() ? ", skinned" : "") << ")";
     return true;

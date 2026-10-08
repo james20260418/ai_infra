@@ -379,6 +379,8 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
                                     const float mvp[16],
                                     unsigned int prog,
                                     unsigned int prog_full,
+                                    unsigned int prog_cutout,
+                                    unsigned int prog_full_cutout,
                                     unsigned int tile_index_tex) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawObject3D: mesh_id " << cmd.mesh_id
@@ -411,9 +413,27 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
 
     glPushAttrib(GL_ENABLE_BIT);
 
+    // 双面渲染：材质声明 double_sided 时关背面剔除（配合 FS 的 gl_FrontFacing 法线翻转）。
+    // 缺省保持调用方状态（背面剔除开）。由 glPushAttrib/glPopAttrib 自动恢复。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    // alpha test（cutout）：材质为 kMask 时选含 discard 的变体 program。
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
     unsigned int selected_prog;
-    selected_prog = any_tex ? prog_full : prog;
+    if (cutout) {
+        selected_prog = any_tex ? prog_full_cutout : prog_cutout;
+    } else {
+        selected_prog = any_tex ? prog_full : prog;
+    }
     glUseProgram(selected_prog);
+
+    // cutout 阈值（仅 cutout program 有该 uniform；不透明 program 返回 -1，上传无害）。
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(selected_prog, "uAlphaCutoff"),
+                    cmd.material.alpha_cutoff);
+    }
 
     glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uMVP"),
                        1, GL_FALSE, mvp_final);

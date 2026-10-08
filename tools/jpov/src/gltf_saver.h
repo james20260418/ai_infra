@@ -78,6 +78,25 @@ struct GltfSaveAsset {
 //   目录可写。
 bool WriteGlb(const GltfSaveAsset& asset, const std::string& path);
 
+// 把资产写成一族**外置纹理**文件：<path>(.gltf) + <stem>.bin + 独立贴图文件。
+//
+// 与 WriteGlb 的关系：JSON 结构同构，唯一差别在「贴图 / 几何是否内嵌」——
+//   本函数把几何写进独立 <stem>.bin（buffer.uri），把每张贴图写成独立文件
+//   （image.uri），全部与 .gltf 同目录、以相对路径引用（不外嵌）。
+//
+// 用途：把 .glb 里的贴图「摊开」成可外部编辑的文件（配 model editor 的「导出 gltf」）。
+//   编辑完贴图后可用 LoadGltfScene 读回、再用 WriteGlb 重新打包成单文件 glb ——
+//   **往返无损**：贴图像素字节原样搬运（saver 只搬运不重编码，见 EmbedImageBytes）。
+//
+// 产物布局（dir = path 的目录，stem = path 去扩展名的文件名）：
+//   <dir>/<stem>.gltf                —— glTF JSON（buffer.uri=<stem>.bin；image.uri=<stem>_texN.<ext>）
+//   <dir>/<stem>.bin                 —— 几何缓冲
+//   <dir>/<stem>_tex0.png / .jpg ... —— 每张**唯一**贴图一个文件（按内容魔数定扩展名）
+//
+// Pre-condition: asset.meshes 非空；每个 mesh.mesh.Validate() 通过；
+//   path 非空、以 ".gltf" 结尾、所在目录可写。
+bool WriteGltf(const GltfSaveAsset& asset, const std::string& path);
+
 }  // namespace jpov
 
 #endif  // JPOV_SRC_GLTF_SAVER_H_

@@ -173,6 +173,8 @@ uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级�
 uniform vec3  uBaseColor;
 uniform sampler2D uBaseColorTex;
 uniform int   uHasBaseColorTex;
+// alpha test 阈值（仅 cutout program 使用；不透明 program 未引用 → location = -1）。
+uniform float uAlphaCutoff;
 uniform float uMetallic;
 uniform sampler2D uMetallicTex;
 uniform int   uHasMetallicTex;
@@ -588,9 +590,25 @@ void main() {
         N = normalize(TBN * tex_normal);
     }
 
-    vec3 base_color = (uHasBaseColorTex == 1)
-        ? texture(uBaseColorTex, vTexCoord).rgb
-        : uBaseColor;
+    // 双面渲染：背面（gl_FrontFacing==false）法线翻转，否则朝内的背面光照错误。
+    // 与渲染端 glDisable(GL_CULL_FACE) 配套（默认双面）。
+    if (!gl_FrontFacing) {
+        N = -N;
+    }
+
+    vec4 base_texel = (uHasBaseColorTex == 1)
+        ? texture(uBaseColorTex, vTexCoord)
+        : vec4(uBaseColor, 1.0);
+    vec3 base_color = base_texel.rgb;
+
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。
+    // 本段由独立 program（宏 JPOV_ALPHA_CUTOUT）编译，使不透明 program 不含 discard
+    //（否则编译器保守地把 early-Z 的 depth-write 快路径降级）。
+    if (uHasBaseColorTex == 1 && base_texel.a < uAlphaCutoff) {
+        discard;
+    }
+#endif
 
     float metallic = (uHasMetallicTex == 1)
         ? texture(uMetallicTex, vTexCoord).r
@@ -767,12 +785,16 @@ void main() {
     //   mvp:            MVP 矩阵（Proj×View），16 floats 列主序。
     //   prog:           DrawObject3DProg()（无 UV 版本）。
     //   prog_full:      DrawObject3DProgFull()（完整版，含 UV+tangent）。
+    //   prog_cutout / prog_full_cutout：alpha-test（cutout）变体，含 discard；
+    //                   当 cmd.material.alpha_mode==kMask 时选它们（与 prog/prog_full 同构，
+    //                   只是 FS 多一个 JPOV_ALPHA_CUTOUT 宏）。
     //   tile_index_tex: tile culling 纹理（绑定到 TEXTURE0）。
     //
     // GL 状态前置要求（调用方负责）：
     //   - 3D MSAA FBO 已绑定，viewport 已设置
     //   - glEnable(GL_DEPTH_TEST) + GL_CULL_FACE 已设置
-    //   - 若有光照：UploadLightData + BuildTileLightIndices 已调用
+    //   - 若有光照：UploadLightData + BuildTileLightIndex 已调用
+    //     （需对 opaque 与 cutout 两套 program 都上传）
     //
     // 内部通过 glPushAttrib/glPopAttrib 恢复修改的 GL 状态。
     static void DrawObject3D(const Object3DCommand& cmd,
@@ -783,6 +805,8 @@ void main() {
                              const float mvp[16],
                              unsigned int prog,
                              unsigned int prog_full,
+                             unsigned int prog_cutout,
+                             unsigned int prog_full_cutout,
                              unsigned int tile_index_tex);
 
     // ---- DrawObject3DShadow ----

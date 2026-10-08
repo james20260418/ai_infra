@@ -36,6 +36,13 @@ extern const Color kColorWhite;
 extern const Color kColorBlack;
 extern const Color kColorTransparent;
 
+// 材质透明模式。
+//   kOpaque：不透明（默认）。alpha 通道被忽略。
+//   kMask  ：alpha test（cutout）——采样 baseColor 贴图的 alpha，低于 alpha_cutoff
+//            的片元直接 discard。不排序、写深度，与阴影 / picking 兼容。
+//   （kBlend 透明混合暂未实现，后续再加。）
+enum class AlphaMode : uint8_t { kOpaque, kMask };
+
 struct PBRMaterial {
     // 便利构造：纯色材质（无纹理/法线/emissive/AO）。
     // metallic / roughness 给一组居中默认值（塑料感）：
@@ -82,6 +89,16 @@ struct PBRMaterial {
     // 常值取 .r 作为标量强度（灰度）；默认 1.0 = 无遮蔽。
     Color ao{1.0f, 1.0f, 1.0f, 1.0f};
     uint32_t ao_tex = 0;
+
+    // 透明模式：kOpaque（默认，忽略 alpha）/ kMask（cutout alpha test，见 AlphaMode）。
+    AlphaMode alpha_mode = AlphaMode::kOpaque;
+    // alpha test 阈值（仅 alpha_mode==kMask 生效）：baseColor.a < alpha_cutoff 的片元
+    // 丢弃。Pre-condition（kMask 时）：base_color_tex 非 0（无贴图则无 alpha 可测）。
+    float alpha_cutoff = 0.5f;
+
+    // 双面渲染：true 时不剔背面（配合 FS 的 gl_FrontFacing 法线翻转）。
+    // 来源：glTF doubleSided（缺省 false）；薄片 / 单面几何（叶子卡片、薄纱）需要它。
+    bool double_sided = false;
 };
 
 }  // namespace jpov
