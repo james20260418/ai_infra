@@ -336,5 +336,107 @@ TEST(ZDistTest, ReduceDpIsOptimal) {
     EXPECT_NEAR(dp_cost, best, 1e-12 * (1.0 + std::abs(best)));
 }
 
+// 从降维结果复原候选下标 → 用 ChoiceCost 算它的总代价（DP/贪心共用）。
+static double ReducedCost(const ZDistAccumulator& acc, const ZDistFunction& f) {
+    int idx[kZDistControlPoints];
+    for (int i = 0; i < f.size(); ++i) {
+        int j = 0;
+        while (acc.z(j) != f.z(i)) {
+            ++j;
+        }
+        idx[i] = j;
+    }
+    return ZDistFunction::ChoiceCost(acc, idx, f.size());
+}
+
+// ── 8. 前缀和 O(1) 代价：与现算 SegmentCost 逐值一致 ──
+TEST(ZDistTest, PrefixCostMatchesSegmentCost) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 20.0);
+    acc.AddSegment(ZDistSegment{2.0, 5.0, 0.4, V3(1.0f, 0.5f, 0.2f)});
+    acc.AddSegment(ZDistSegment{8.0, 12.0, 0.2, V3(0.0f, 1.0f, 0.3f)});
+    acc.AddSegment(ZDistSegment{14.0, 17.0, 0.3, V3(0.2f, 0.2f, 1.0f)});
+    zdist_detail::PrefixCost pc;
+    pc.Build(acc);
+    const int m = acc.size();
+    for (int p = 0; p < m; ++p) {
+        for (int q = p + 1; q < m; ++q) {
+            const double a = ZDistFunction::SegmentCost(acc, p, q);
+            const double b = pc.Cost(acc, p, q);
+            EXPECT_NEAR(b, a, 1e-9 * (1.0 + std::abs(a))) << "p=" << p << " q=" << q;
+        }
+    }
+}
+
+// ── 9. 贪心降维（GPU 友好）──
+TEST(ZDistTest, GreedyReduceKeepsEndpointsAndConserves) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 24.0);
+    for (int i = 0; i < 14; ++i) {
+        const double z0 = NextUnit() * 20.0;
+        acc.AddSegment(ZDistSegment{z0, z0 + 1.0 + NextUnit() * 3.0,
+                                    0.1 + NextUnit() * 0.3, V3(0.5f, 0.7f, 0.9f)});
+    }
+    ASSERT_GT(acc.size(), kZDistControlPoints);
+    const ZDistFunction g = GreedyReduce(acc);
+    EXPECT_EQ(g.size(), kZDistControlPoints);
+    EXPECT_DOUBLE_EQ(g.z(0), acc.z_near());
+    EXPECT_DOUBLE_EQ(g.z(g.size() - 1), acc.z_far());
+    EXPECT_DOUBLE_EQ(g.tau(g.size() - 1), acc.tau(acc.size() - 1));  // 总上升量守恒
+    EXPECT_FLOAT_EQ(g.ed(g.size() - 1)[0], acc.ed(acc.size() - 1)[0]);
+}
+
+TEST(ZDistTest, GreedyReduceMonotone) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 18.0);
+    for (int i = 0; i < 10; ++i) {
+        const double z0 = (i % 3) * 2.0 + NextUnit() * 8.0;
+        acc.AddSegment(ZDistSegment{z0, z0 + 2.0 + NextUnit() * 3.0, 0.2,
+                                    V3(1.0f, 1.0f, 1.0f)});
+    }
+    const ZDistFunction g = GreedyReduce(acc);
+    for (int i = 1; i < g.size(); ++i) {
+        EXPECT_GT(g.z(i), g.z(i - 1));
+        EXPECT_GE(g.tau(i), g.tau(i - 1));
+        EXPECT_GE(g.ed(i)[0], g.ed(i - 1)[0] - 1e-5f);
+    }
+}
+
+TEST(ZDistTest, GreedyReduceSmallStaysExact) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 10.0);
+    acc.AddSegment(ZDistSegment{1.0, 3.0, 0.5, V3(1, 0, 0)});
+    acc.AddSegment(ZDistSegment{4.0, 8.0, 0.25, V3(0, 1, 0)});
+    ASSERT_LE(acc.size(), kZDistControlPoints);
+    const ZDistFunction g = GreedyReduce(acc);
+    for (int i = 0; i < acc.size(); ++i) {
+        EXPECT_DOUBLE_EQ(g.z(i), acc.z(i));
+        EXPECT_DOUBLE_EQ(g.tau(i), acc.tau(i));
+    }
+}
+
+// 贪心不劣于 DP（DP 最优 ⇒ 贪心代价 >= DP 代价）。
+TEST(ZDistTest, GreedyCostNotBelowDp) {
+    for (int t = 0; t < 50; ++t) {
+        ZDistAccumulator acc;
+        acc.Reset(0.0, 30.0);
+        for (int i = 0; i < 12; ++i) {
+            const double z0 = NextUnit() * 27.0;
+            acc.AddSegment(ZDistSegment{z0, z0 + 1.0 + NextUnit() * 4.0,
+                                        0.05 + NextUnit() * 0.4,
+                                        V3(static_cast<float>(NextUnit() * 2),
+                                           static_cast<float>(NextUnit() * 2),
+                                           static_cast<float>(NextUnit() * 2))});
+        }
+        if (acc.size() <= kZDistControlPoints) {
+            continue;
+        }
+        const double c_dp = ReducedCost(acc, ZDistFunction::Reduce(acc));
+        const double c_gr = ReducedCost(acc, GreedyReduce(acc));
+        EXPECT_LE(c_dp, c_gr + 1e-9 * (1.0 + std::abs(c_dp)))
+            << "t=" << t << " dp=" << c_dp << " greedy=" << c_gr;
+    }
+}
+
 }  // namespace
 }  // namespace jpov

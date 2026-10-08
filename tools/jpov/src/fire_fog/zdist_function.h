@@ -41,6 +41,10 @@ namespace jpov {
 // ZDist 控制点上限（设计锁定 8；见 jpov_fire_fog_design.md §14.9）。
 inline constexpr int kZDistControlPoints = 8;
 
+// 候选断点上限（= 累加器规模）。GPU 侧用定长缓冲；此处作 CHECK 上界 + 定长数组容量。
+// 一个像素的候选上限 ≈ K（体，≤16）× M（段）× 2 + 2，留裕量取 256。
+inline constexpr int kZDistMaxCandidates = 256;
+
 // 一条视线穿过一团雾的一个 z 段：在 [z0, z1] 上近似恒定。
 //
 // 该段对 ZDist 的贡献 = 在 [z0,z1] 上叠一条 ramp：
@@ -391,6 +395,159 @@ inline ZDistFunction ZDistFunction::Reduce(const ZDistAccumulator& acc) {
         out.AddPoint(acc.z(i), acc.tau(i), acc.ed(i));
     }
     return out;
+}
+
+namespace zdist_detail {
+
+// 「弦 vs 真折线」加权 L2 误差的 **O(1)** 求值器（前缀和）。
+//
+// 推导（见设计文档 §11.7）：子区间 i=[z_i,z_{i+1}] 上弦与真线都线性 ⇒ 差 d_i=α+s·z_i−y_i
+// 在该子区间线性；加权区间误差 = Σ_i g_i(d_i²+d_i·d_{i+1}+d_{i+1}²)，g_i=(z_{i+1}−z_i)/3·w_i。
+// 展开后对 (α,s) 是**二次型**，系数是 6 条区间和（前缀和 O(1) 取）⇒ Cost(p,q) O(1)。
+// GPU 友好：定长数组、无堆分配、无二分、无递归。
+class PrefixCost {
+public:
+    // Pre-condition: 2 <= acc.size() <= kZDistMaxCandidates
+    void Build(const ZDistAccumulator& acc) {
+        const int m = acc.size();
+        CHECK_GE(m, 2);
+        CHECK_LE(m, kZDistMaxCandidates);
+        m_ = m;
+        p0_[0] = 0.0;
+        pz_[0] = 0.0;
+        pzz_[0] = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            py_[c][0] = 0.0;
+            pzy_[c][0] = 0.0;
+            pyy_[c][0] = 0.0;
+        }
+        for (int i = 0; i + 1 < m; ++i) {
+            const double zi = acc.z(i);
+            const double zj = acc.z(i + 1);
+            const double w = std::exp(-0.5 * (acc.tau(i) + acc.tau(i + 1)));
+            const double g = (zj - zi) / 3.0 * w;
+            p0_[i + 1] = p0_[i] + g;
+            pz_[i + 1] = pz_[i] + g * (zi + zj);
+            pzz_[i + 1] = pzz_[i] + g * (zi * zi + zi * zj + zj * zj);
+            for (int c = 0; c < 4; ++c) {
+                const double yi = ZDistFunction::ChannelValue(acc, i, c);
+                const double yj = ZDistFunction::ChannelValue(acc, i + 1, c);
+                py_[c][i + 1] = py_[c][i] + g * (yi + yj);
+                pzy_[c][i + 1] =
+                    pzy_[c][i] + g * (2 * zi * yi + zi * yj + zj * yi + 2 * zj * yj);
+                pyy_[c][i + 1] = pyy_[c][i] + g * (yi * yi + yi * yj + yj * yj);
+            }
+        }
+    }
+    // Pre-condition: 0 <= p < q < m_；Build 已调用
+    double Cost(const ZDistAccumulator& acc, int p, int q) const {
+        CHECK_GE(p, 0);
+        CHECK_LT(p, q);
+        CHECK_LT(q, m_);
+        const double zp = acc.z(p);
+        const double zq = acc.z(q);
+        const double P0 = p0_[q] - p0_[p];
+        const double Pz = pz_[q] - pz_[p];
+        const double Pzz = pzz_[q] - pzz_[p];
+        double total = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            const double yp = ZDistFunction::ChannelValue(acc, p, c);
+            const double yq = ZDistFunction::ChannelValue(acc, q, c);
+            const double s = (yq - yp) / (zq - zp);
+            const double a = yp - s * zp;
+            const double Py = py_[c][q] - py_[c][p];
+            const double Pzy = pzy_[c][q] - pzy_[c][p];
+            const double Pyy = pyy_[c][q] - pyy_[c][p];
+            total += 3.0 * P0 * a * a + 3.0 * Pz * a * s + Pzz * s * s -
+                     3.0 * Py * a - Pzy * s + Pyy;
+        }
+        return total;
+    }
+
+private:
+    int m_ = 0;
+    double p0_[kZDistMaxCandidates + 1];
+    double pz_[kZDistMaxCandidates + 1];
+    double pzz_[kZDistMaxCandidates + 1];
+    double py_[4][kZDistMaxCandidates + 1];
+    double pzy_[4][kZDistMaxCandidates + 1];
+    double pyy_[4][kZDistMaxCandidates + 1];
+};
+
+}  // namespace zdist_detail
+
+// 贪心降维（GPU 友好）：从 m 个候选里**反复合并掉增量误差最小的相邻点**，直到剩 ≤8。
+//
+// - 无堆、无二分、无递归、无堆分配：定长数组 + 前后指针链表 + 线性扫描选最小；
+//   合并代价用 zdist_detail::PrefixCost（O(1)，同一套前缀和）。
+// - 复杂度：每次合并 O(m) 扫描，共 (m−K) 次 ⇒ **O(m·(m−K)) work**（GPU 上该扫描是可并行归约；
+//   若日后 m 很大可换堆做 O(m log m)，但堆不适配 GPU 的 SIMD 风格）。
+// - **启发式**（不保证全局最优）；用 ZDistFunction::Reduce（DP 最优）做误差对照。
+// - 两端点恒保留 ⇒ τ_total/Ed_total 逐位不变（同 DP）。
+// Pre-condition: 2 <= acc.size() <= kZDistMaxCandidates
+inline ZDistFunction GreedyReduce(const ZDistAccumulator& acc) {
+    const int m = acc.size();
+    CHECK_GE(m, 2);
+    CHECK_LE(m, kZDistMaxCandidates);
+    double zs[kZDistControlPoints];
+    double taus[kZDistControlPoints];
+    Vec3f eds[kZDistControlPoints];
+    if (m <= kZDistControlPoints) {
+        for (int i = 0; i < m; ++i) {
+            zs[i] = acc.z(i);
+            taus[i] = acc.tau(i);
+            eds[i] = acc.ed(i);
+        }
+        return ZDistFunction::FromSamples(zs, taus, eds, m);
+    }
+    zdist_detail::PrefixCost pc;
+    pc.Build(acc);
+    int prev[kZDistMaxCandidates];
+    int next[kZDistMaxCandidates];
+    bool alive[kZDistMaxCandidates];
+    for (int i = 0; i < m; ++i) {
+        prev[i] = i - 1;
+        next[i] = (i + 1 < m) ? (i + 1) : -1;
+        alive[i] = true;
+    }
+    int count = m;
+    while (count > kZDistControlPoints) {
+        double best = 1e300;
+        int bi = -1;
+        for (int i = 0; i < m; ++i) {
+            if (!alive[i]) {
+                continue;
+            }
+            const int p = prev[i];
+            const int q = next[i];
+            if (p < 0 || q < 0) {
+                continue;  // 端点不可删（p/q < 0）
+            }
+            const double inc = pc.Cost(acc, p, q) - pc.Cost(acc, p, i) - pc.Cost(acc, i, q);
+            if (inc < best) {
+                best = inc;
+                bi = i;
+            }
+        }
+        CHECK_GE(bi, 0) << "贪心未找到可合并的点（不应发生）";
+        const int p = prev[bi];
+        const int q = next[bi];
+        next[p] = q;
+        prev[q] = p;
+        alive[bi] = false;
+        --count;
+    }
+    int n = 0;
+    for (int i = 0; i < m; ++i) {
+        if (alive[i]) {
+            zs[n] = acc.z(i);
+            taus[n] = acc.tau(i);
+            eds[n] = acc.ed(i);
+            ++n;
+        }
+    }
+    CHECK_EQ(n, kZDistControlPoints);
+    return ZDistFunction::FromSamples(zs, taus, eds, n);
 }
 
 }  // namespace jpov
