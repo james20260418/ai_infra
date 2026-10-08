@@ -3,16 +3,17 @@
 > 来源：Tripo 单图生成（`/james_pm/red skirt/red_skirt_v4.png`，图里把"蕾丝盖住的红底"
 > 刷成**蓝色标记**）→ 生成 GLB → 用「蓝色→alpha」抠出薄纱孔 → 打回带 alpha 的 baseColor。
 >
-> 用途：JPOV **object3d alpha test（cutout）+ 双面渲染 + 外置 glTF 加载**的渲染样例。
+> 用途：JPOV **object3d alpha test（cutout）+ 双面渲染**的渲染样例。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
 | `lace_skirt.glb` | 原始 Tripo PBR 模型（**不透明**；`alphaMode` 缺省 OPAQUE、baseColor=JPEG、`doubleSided=true`）。 |
-| `lace_skirt_cutout.gltf` (+ `.bin` + 贴图) | **外置纹理**版：`alphaMode=MASK`、`alphaCutoff=0.5`、`doubleSided=true`；baseColor 换成 RGBA PNG（蓝色区域=薄纱网 alpha）。 |
-| `lace_skirt_basecolor_alpha.png` | RGBA baseColor：蕾丝不透明、原蓝色底区→细网纱（alpha-test 保留网线）。 |
-| `lace_skirt_orm.jpg` / `lace_skirt_normal.png` | 对应的 ORM / 法线贴图。 |
+| `lace_skirt_cutout.glb` | **单文件嵌入式**版：`alphaMode=MASK`、`alphaCutoff=0.5`、`doubleSided=true`；baseColor 为**内嵌 RGBA PNG**（蓝色区域=薄纱网 alpha）。 |
+
+两个都是自包含 GLB（纹理内嵌）；cutout 版由「model editor 加载外置 glTF → 存 glb」产出
+（正好验证 saver 会写回 `alphaMode`/`doubleSided` + 内嵌 RGBA 贴图不丢 alpha）。
 
 ## 关键事实（踩坑记录）
 
@@ -26,11 +27,10 @@
 ## 复现渲染
 
 ```bash
-# 需要 DISPLAY（如 Xvfb :99）；从仓库根运行
-cd /tmp/workdir   # 任意含 fonts/ 的目录（model viewer 需字体）
+# 需要 DISPLAY（如 Xvfb :99）；从任意含 fonts/ 的目录运行（model viewer 需字体）
 DISPLAY=:99 <repo>/bazel-bin/tools/jpov/jpov_model_viewer --four_views \
-    --output_dir /tmp/out <models_dir>/samples/lace_skirt/lace_skirt_cutout.gltf
+    --output_dir /tmp/out <models_dir>/samples/lace_skirt/lace_skirt_cutout.glb
 # → /tmp/out/lace_skirt_cutout_{front,left,up,perspective}.png（裙摆透空、上身实心）
 ```
 
-> ⚠️ 本样例**不承载 gold test**（外部生成资产不可控）。留作 cutout/双面/外置 glTF 的**人工验收入口**。
+> ⚠️ 本样例**不承载 gold test**（外部生成资产不可控）。留作 cutout/双面的**人工验收入口**。
