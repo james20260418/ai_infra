@@ -245,6 +245,44 @@ public:
     static ZDistFunction FromSamples(const double* zs, const double* taus,
                                      const Vec3f* eds, int n);
 
+    // ── 降维误差度量（public，便于单测/评估）──
+    // 候选点 i 的通道取值：c=0 → τd；c=1/2/3 → Ed.r/g/b。
+    static double ChannelValue(const ZDistAccumulator& acc, int i, int c) {
+        return (c == 0) ? acc.tau(i) : static_cast<double>(acc.ed(i)[c - 1]);
+    }
+    // 保留候选点 p、q 而丢掉中间点时，[z_p,z_q] 段被一条**弦**（连 (z_p,值) 与 (z_q,值)
+    // 的直线）近似；本函数 = 弦与真折线之间以 exp(−τd) 加权的四通道 L2 误差（闭式）。
+    static double SegmentCost(const ZDistAccumulator& acc, int p, int q) {
+        const double zp = acc.z(p);
+        const double zq = acc.z(q);
+        double total = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            const double yp = ChannelValue(acc, p, c);
+            const double yq = ChannelValue(acc, q, c);
+            const double slope = (yq - yp) / (zq - zp);
+            for (int i = p; i < q; ++i) {
+                const double a = acc.z(i);
+                const double b = acc.z(i + 1);
+                const double d0 = (yp + slope * (a - zp)) - ChannelValue(acc, i, c);
+                const double d1 = (yp + slope * (b - zp)) - ChannelValue(acc, i + 1, c);
+                // 权重 ≈ 子区间中点的 exp(−τd)：越近（τ 小）贡献越大。
+                const double w = std::exp(-0.5 * (acc.tau(i) + acc.tau(i + 1)));
+                total += w * (b - a) * (d0 * d0 + d0 * d1 + d1 * d1) / 3.0;
+            }
+        }
+        return total;
+    }
+    // 给定一组保留的候选下标（严格递增，k >= 2）的总代价。
+    static double ChoiceCost(const ZDistAccumulator& acc, const int* idx, int k) {
+        CHECK(idx != nullptr);
+        CHECK_GE(k, 2);
+        double total = 0.0;
+        for (int i = 0; i + 1 < k; ++i) {
+            total += SegmentCost(acc, idx[i], idx[i + 1]);
+        }
+        return total;
+    }
+
     int size() const { return tau_.size(); }
     // Pre-condition: 0 <= i < size()
     double z(int i) const { return tau_.x(i); }
@@ -312,35 +350,6 @@ inline ZDistFunction ZDistFunction::Reduce(const ZDistAccumulator& acc) {
         return out;
     }
 
-    // 通道取值：0 = τd；1/2/3 = Ed.r/g/b。
-    const auto chan = [&acc](int i, int c) -> double {
-        if (c == 0) {
-            return acc.tau(i);
-        }
-        return static_cast<double>(acc.ed(i)[c - 1]);
-    };
-    // 子区间 [p, q] 的加权 L2 误差（错差为两线之差 ⇒ 子区间上线性，可闭式积分）。
-    const auto cost = [&](int p, int q) -> double {
-        const double zp = acc.z(p);
-        const double zq = acc.z(q);
-        double total = 0.0;
-        for (int c = 0; c < 4; ++c) {
-            const double yp = chan(p, c);
-            const double yq = chan(q, c);
-            const double slope = (yq - yp) / (zq - zp);
-            for (int i = p; i < q; ++i) {
-                const double a = acc.z(i);
-                const double b = acc.z(i + 1);
-                const double d0 = (yp + slope * (a - zp)) - chan(i, c);
-                const double d1 = (yp + slope * (b - zp)) - chan(i + 1, c);
-                // 权重 ≈ 子区间中点的 exp(−τd)：越近（τ 小）贡献越大。
-                const double w = std::exp(-0.5 * (acc.tau(i) + acc.tau(i + 1)));
-                total += w * (b - a) * (d0 * d0 + d0 * d1 + d1 * d1) / 3.0;
-            }
-        }
-        return total;
-    };
-
     const int K = kZDistControlPoints;  // 目标控制点数 ⇒ K-1 段
     const double kInf = 1e300;
     // dp[s][q] = 用 s 段覆盖候选 [0..q]、末顶点落在 q 的最小代价（s ∈ [1, K-1]）。
@@ -348,7 +357,7 @@ inline ZDistFunction ZDistFunction::Reduce(const ZDistAccumulator& acc) {
     std::vector<std::vector<double>> dp(K, std::vector<double>(m, kInf));
     std::vector<std::vector<int>> prev(K, std::vector<int>(m, -1));
     for (int q = 1; q < m; ++q) {
-        dp[1][q] = cost(0, q);  // 一段：顶点 0 与 q
+        dp[1][q] = SegmentCost(acc, 0, q);  // 一段：顶点 0 与 q
         prev[1][q] = 0;
     }
     for (int s = 2; s <= K - 1; ++s) {
@@ -357,7 +366,7 @@ inline ZDistFunction ZDistFunction::Reduce(const ZDistAccumulator& acc) {
                 if (dp[s - 1][p] >= kInf) {
                     continue;
                 }
-                const double v = dp[s - 1][p] + cost(p, q);
+                const double v = dp[s - 1][p] + SegmentCost(acc, p, q);
                 if (v < dp[s][q]) {
                     dp[s][q] = v;
                     prev[s][q] = p;

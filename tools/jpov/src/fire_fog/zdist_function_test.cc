@@ -9,7 +9,9 @@
 
 #include "tools/jpov/src/fire_fog/zdist_function.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -226,7 +228,7 @@ TEST(ZDistTest, ReduceIntegralWithinToleranceOfExact) {
     EXPECT_NEAR(S1[2], S0[2], tol);
 }
 
-// ── 5. 纹理布局往返 ──
+// ── 5. 纹理布局往返（6 texel：z fp32 + τ uint16 + Ed fp16）──
 TEST(ZDistTest, TexturePackUnpackRoundTrip) {
     ZDistAccumulator acc;
     acc.Reset(0.0, 16.0);
@@ -236,24 +238,102 @@ TEST(ZDistTest, TexturePackUnpackRoundTrip) {
                                     0.2, V3(0.3f, 0.6f, 0.9f)});
     }
     const ZDistFunction f = ZDistFunction::Reduce(acc);
-    float buf[ZDistTextureLayout::kFloatsPerPixel];
+    uint32_t buf[ZDistTextureLayout::kLanesPerPixel];
     PackZDist(f, buf);
     const ZDistFunction g = UnpackZDist(buf);
     ASSERT_EQ(g.size(), f.size());
     for (int i = 0; i < f.size(); ++i) {
-        EXPECT_FLOAT_EQ(static_cast<float>(g.z(i)), static_cast<float>(f.z(i)));
-        EXPECT_FLOAT_EQ(static_cast<float>(g.tau(i)),
-                        static_cast<float>(f.tau(i)));
-        EXPECT_FLOAT_EQ(g.ed(i)[0], f.ed(i)[0]);
-        EXPECT_FLOAT_EQ(g.ed(i)[1], f.ed(i)[1]);
-        EXPECT_FLOAT_EQ(g.ed(i)[2], f.ed(i)[2]);
+        EXPECT_FLOAT_EQ(static_cast<float>(g.z(i)), static_cast<float>(f.z(i)));  // z fp32
+        // τ uint16：误差 ≤ 总步长 kTauMax/65535
+        EXPECT_NEAR(g.tau(i), f.tau(i), ZDistTextureLayout::kTauMax / 65535.0 + 1e-9);
+        for (int c = 0; c < 3; ++c) {  // Ed fp16：相对 ~1e-3
+            EXPECT_NEAR(g.ed(i)[c], f.ed(i)[c], 1e-3f * std::abs(f.ed(i)[c]) + 1e-4f);
+        }
     }
 }
 
 TEST(ZDistTest, TextureLayoutBudgetConstants) {
     EXPECT_EQ(ZDistTextureLayout::kPoints, 8);
-    EXPECT_EQ(ZDistTextureLayout::kFloatsPerPixel, 40);
-    EXPECT_EQ(ZDistTextureLayout::kTexelsPerPixel, 10);
+    EXPECT_EQ(ZDistTextureLayout::kTexelsPerPixel, 6);   // 6 个 RGBA32F texel
+    EXPECT_EQ(ZDistTextureLayout::kLanesPerPixel, 24);
+    EXPECT_EQ(ZDistTextureLayout::kBytesPerPixel, 96);
+}
+
+// ── 6. 半精度 / τ 定点编解码 ──
+TEST(ZDistTest, HalfConversionKnownValues) {
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(1.0f), 0x3c00u);
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(0.5f), 0x3800u);
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(2.0f), 0x4000u);
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(-1.0f), 0xbc00u);
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(0.0f), 0x0000u);
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(65504.0f), 0x7bffu);  // half 最大正规
+    EXPECT_EQ(zdist_pack_detail::FloatToHalfBits(100000.0f), 0x7c00u);  // 溢出 → inf
+    EXPECT_FLOAT_EQ(zdist_pack_detail::HalfBitsToFloat(0x3c00u), 1.0f);
+    EXPECT_FLOAT_EQ(zdist_pack_detail::HalfBitsToFloat(0x7bffu), 65504.0f);
+    EXPECT_TRUE(std::isinf(zdist_pack_detail::HalfBitsToFloat(0x7c00u)));
+    for (float v : {0.1f, 1.2345f, -3.7f, 12.0f, 0.0002f, 1234.0f}) {
+        const float back = zdist_pack_detail::HalfBitsToFloat(
+            zdist_pack_detail::FloatToHalfBits(v));
+        EXPECT_NEAR(back, v, 1e-3f * std::abs(v) + 1e-6f) << "v=" << v;
+    }
+}
+
+TEST(ZDistTest, TauUint16RoundTripWithinStep) {
+    const double step = ZDistTextureLayout::kTauMax / 65535.0;
+    for (double tau : {0.0, 0.1, 1.0, 3.14159, 10.0, 31.9}) {
+        const double back = zdist_pack_detail::DecodeTau(
+            zdist_pack_detail::EncodeTau(tau));
+        EXPECT_LE(std::abs(back - tau), step + 1e-9) << "tau=" << tau;
+    }
+    EXPECT_EQ(zdist_pack_detail::EncodeTau(100.0), 65535u);  // 超量程 → 钳顶
+}
+
+// ── 7. DP 的最优性（小规模与暴力枚举比对）──
+TEST(ZDistTest, ReduceDpIsOptimal) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 20.0);
+    // 6 段不重叠 → 12 个内部断点 + 2 端点 = 14 个候选（可暴力枚举）。
+    for (int i = 0; i < 6; ++i) {
+        const double z = 1.0 + i * 3.0;
+        acc.AddSegment(ZDistSegment{z, z + 1.0, 0.3,
+                                    V3(0.5f, 0.5f, 0.5f)});
+    }
+    const int m = acc.size();
+    ASSERT_GT(m, kZDistControlPoints);
+    ASSERT_LE(m, 16);  // 2^m 暴力可承受
+    const ZDistFunction f = ZDistFunction::Reduce(acc);
+    // 从返回的 z 复原 DP 选中的候选下标。
+    int chosen[kZDistControlPoints];
+    for (int i = 0; i < f.size(); ++i) {
+        int j = 0;
+        while (acc.z(j) != f.z(i)) {
+            ++j;
+        }
+        chosen[i] = j;
+    }
+    const double dp_cost = ZDistFunction::ChoiceCost(acc, chosen, f.size());
+    // 暴力：枚举含首尾的 K 子集，取最小代价。
+    double best = 1e300;
+    for (int mask = 0; mask < (1 << m); ++mask) {
+        if (!(mask & 1) || !((mask >> (m - 1)) & 1)) {
+            continue;
+        }
+        int idx[kZDistControlPoints];
+        int k = 0;
+        for (int j = 0; j < m; ++j) {
+            if ((mask >> j) & 1) {
+                if (k < kZDistControlPoints) {
+                    idx[k] = j;
+                }
+                ++k;
+            }
+        }
+        if (k != kZDistControlPoints) {
+            continue;
+        }
+        best = std::min(best, ZDistFunction::ChoiceCost(acc, idx, k));
+    }
+    EXPECT_NEAR(dp_cost, best, 1e-12 * (1.0 + std::abs(best)));
 }
 
 }  // namespace
