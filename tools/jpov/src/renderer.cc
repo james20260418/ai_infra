@@ -1125,6 +1125,13 @@ unsigned int Renderer::SkinnedMeshProg() {
         {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR});
 }
 
+// alpha-test（cutout）蒙皮变体：与 SkinnedMeshProg 同源，仅多一个 JPOV_ALPHA_CUTOUT 宏
+//（FS 里含 discard）。与 object3d 同理单独成 program，避免不透明 program 含 discard 而降级 early-Z。
+unsigned int Renderer::SkinnedMeshProgCutout() {
+    return shader_mgr_.GetOrCreate("skinned_mesh_cutout",
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR, {"JPOV_ALPHA_CUTOUT"}});
+}
+
 // 蒙皮阴影 program：蒙皮阴影 VS(kSkinnedShadowVs) + 复用对象3D片元(kShadowFs，只写线性深度)。
 unsigned int Renderer::SkinnedShadowProg() {
     return shader_mgr_.GetOrCreate("skinned_shadow",
@@ -1177,7 +1184,8 @@ void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
                            << cmd.skeleton_id << " 未注册（需先 RegisterSkeleton）";
     SkeletonRenderer::DrawSkinnedMesh(
         cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
-        SkinnedMeshProg(), skel->gpu_handles(), skel->pose_count(),
+        SkinnedMeshProg(), SkinnedMeshProgCutout(),
+        skel->gpu_handles(), skel->pose_count(),
         instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
         instance_partial_buf_);
 }
@@ -1468,6 +1476,11 @@ void Renderer::Render(const RenderCommandList& cmds,
                     SkinnedMeshProg(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                     shadow_texel_world_, shadow_cfg_, eff_sun);
+                // cutout 变体同源，也需 sun/阴影 uniform。
+                SkeletonRenderer::UploadSunData(shader_mgr_,
+                    SkinnedMeshProgCutout(),
+                    shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                    shadow_texel_world_, shadow_cfg_, eff_sun);
             }
         }
 
@@ -1485,6 +1498,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
             SkeletonRenderer::UploadAmbient(shader_mgr_,
                 SkinnedMeshProg(), ambient);
+            SkeletonRenderer::UploadAmbient(shader_mgr_,
+                SkinnedMeshProgCutout(), ambient);
         }
 
         // 拾取（color-ID）pass：仅在用户发起了 pick 查询时才跑。

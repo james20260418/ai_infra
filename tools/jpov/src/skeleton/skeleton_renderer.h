@@ -90,6 +90,8 @@ uniform int   uHasAoTex;
 uniform sampler2D uNormalTex;
 uniform int   uHasNormalTex;
 uniform float uNormalScale;
+// alpha test 阈值（仅 cutout program 使用；不透明 program 未引用 → location = -1）。
+uniform float uAlphaCutoff;
 
 // 太阳平行光（DirectionalLight）+ 级联阴影（CSM）。
 // uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并按片元距相机距离选级联，
@@ -406,9 +408,25 @@ void main() {
         N = normalize(TBN * tex_normal);
     }
 
-    vec3 base_color = (uHasBaseColorTex == 1)
-        ? texture(uBaseColorTex, vTexCoord).rgb
-        : uBaseColor;
+    // 双面渲染：背面（gl_FrontFacing==false）法线翻转，否则朝内的背面光照错误。
+    // 与渲染端按材质 glDisable(GL_CULL_FACE) 配套（见 DrawSkinnedMesh）。
+    if (!gl_FrontFacing) {
+        N = -N;
+    }
+
+    vec4 base_texel = (uHasBaseColorTex == 1)
+        ? texture(uBaseColorTex, vTexCoord)
+        : vec4(uBaseColor, 1.0);
+    vec3 base_color = base_texel.rgb;
+
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。
+    // 本段由独立 program（宏 JPOV_ALPHA_CUTOUT）编译，使不透明 program 不含 discard
+    //（否则编译器保守地把 early-Z 的 depth-write 快路径降级）。
+    if (uHasBaseColorTex == 1 && base_texel.a < uAlphaCutoff) {
+        discard;
+    }
+#endif
 
     float metallic = (uHasMetallicTex == 1)
         ? texture(uMetallicTex, vTexCoord).r
@@ -476,13 +494,18 @@ void main() {
 
     // ---- DrawSkinnedMesh ----
     // 渲染一批带骨实例（蒙皮主体渲染入口）：
-    //   0) 用【蒙皮 program】(kSkinnedVs + kMeshFs3dPBR, 含骨槽) —— 无 prog/prog_full 选择；
+    //   0) 用【蒙皮 program】(kSkinnedVs + kMeshFs3dPBR, 含骨槽)。与 object3d 一致：
+    //      材质 alpha_mode==kMask 时选含 discard 的 cutout 变体（skinned_prog_cutout），
+    //      否则用不透明 program（skinned_prog）。两者同源，仅差一个 JPOV_ALPHA_CUTOUT 宏。
+    //      材质 double_sided 时关背面剔除（配合 FS 的 gl_FrontFacing 法线翻转）。
     //   1) take SkeletonManager.gpu_handles() → 把【骨纹理 pose atlas】绑到空闲槽(TEXTURE12)
     //      + uBoneCount, 并设 per-instance 的 uPoseRow/uPoseCol（pose 从 cmd.instances[k] 取）;
     //   2) 绑材质纹理 + mesh VAO + 逐实例 draw（光照由调用方在 Render() 主流程经
     //      UploadSunData / UploadAmbient 预置好，此处不上传光照）。
     // 参数：
     //   skinned_prog: 蒙皮 program（调用方经 ShaderManager 建 {kSkinnedVs, kMeshFs3dPBR} 传入）。
+    //   skinned_prog_cutout: 同源 cutout 变体（多一个 JPOV_ALPHA_CUTOUT 宏，含 discard）；
+    //                        材质 alpha_mode==kMask 时选它。
     //   gh: SkeletonManager::GpuHandles（pose_atlas_tex/bone_count/pose_per_row）。
     //   pose_count: 该骨架已烘焙的 pose 总数（SkeletonManager::pose_count()）—— 用于校验
     //               instances 的 pose_a/pose_b 不越界（GpuHandles 是纯 GL 句柄、不含此值）。
@@ -497,6 +520,7 @@ void main() {
         ShaderManager& shader_mgr,
         const float mvp[16],
         unsigned int skinned_prog,
+        unsigned int skinned_prog_cutout,
         const SkeletonManager::GpuHandles& gh,
         int pose_count,
         InstanceBuffer& instance_model_buf,
