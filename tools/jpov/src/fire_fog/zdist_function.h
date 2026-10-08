@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
@@ -536,6 +537,140 @@ inline ZDistFunction GreedyReduce(const ZDistAccumulator& acc) {
         prev[q] = p;
         alive[bi] = false;
         --count;
+    }
+    int n = 0;
+    for (int i = 0; i < m; ++i) {
+        if (alive[i]) {
+            zs[n] = acc.z(i);
+            taus[n] = acc.tau(i);
+            eds[n] = acc.ed(i);
+            ++n;
+        }
+    }
+    CHECK_EQ(n, kZDistControlPoints);
+    return ZDistFunction::FromSamples(zs, taus, eds, n);
+}
+
+namespace zdist_detail {
+
+// 定长二叉最小堆的条目：一次「合并候选点 i（当前邻居 l,r）」的增量代价。
+struct MergeHeapItem {
+    double inc;
+    int i;
+    int l;
+    int r;
+};
+
+// 最小堆 push / pop：无 STL 容器、定长缓冲、确定性。
+// Pre-condition: *n < cap（调用方保证容量）
+inline void HeapPush(MergeHeapItem* h, int* n, const MergeHeapItem& x) {
+    int i = (*n)++;
+    h[i] = x;
+    while (i > 0) {
+        const int par = (i - 1) / 2;
+        if (h[par].inc <= h[i].inc) {
+            break;
+        }
+        std::swap(h[par], h[i]);
+        i = par;
+    }
+}
+inline MergeHeapItem HeapPop(MergeHeapItem* h, int* n) {
+    MergeHeapItem top = h[0];
+    h[0] = h[--(*n)];
+    int i = 0;
+    for (;;) {
+        const int l = 2 * i + 1;
+        const int r = 2 * i + 2;
+        int sm = i;
+        if (l < *n && h[l].inc < h[sm].inc) {
+            sm = l;
+        }
+        if (r < *n && h[r].inc < h[sm].inc) {
+            sm = r;
+        }
+        if (sm == i) {
+            break;
+        }
+        std::swap(h[sm], h[i]);
+        i = sm;
+    }
+    return top;
+}
+
+}  // namespace zdist_detail
+
+// 贪心降维（**最快版**）：与 GreedyReduce 同一贪心（每次合并增量最小的相邻点），但用
+// **二叉最小堆**维护“每次合并的增量”：取最小 O(1)、每次更新 O(log m) ⇒ **O(m log m)**。
+// K=8 且 m ≲ 256 时 log2(m) ≤ 8 = K ⇒ 实际就是 **O(m·K)**。
+// - 惰性失效：堆条目带当时的 (l,r)，弹出时若点已删/邻居已变则丢弃。
+// - 无需“二分搜索”（链表 + 堆），无 STL 容器、无动态分配。
+// - 堆属数据依赖分支，**不适配 GPU 的 SIMD 风格**；GPU 侧用 GreedyReduce（线性扫描版）。
+// Pre-condition: 2 <= acc.size() <= kZDistMaxCandidates
+inline ZDistFunction GreedyReduceFast(const ZDistAccumulator& acc) {
+    const int m = acc.size();
+    CHECK_GE(m, 2);
+    CHECK_LE(m, kZDistMaxCandidates);
+    double zs[kZDistControlPoints];
+    double taus[kZDistControlPoints];
+    Vec3f eds[kZDistControlPoints];
+    if (m <= kZDistControlPoints) {
+        for (int i = 0; i < m; ++i) {
+            zs[i] = acc.z(i);
+            taus[i] = acc.tau(i);
+            eds[i] = acc.ed(i);
+        }
+        return ZDistFunction::FromSamples(zs, taus, eds, m);
+    }
+    zdist_detail::PrefixCost pc;
+    pc.Build(acc);
+    int prev[kZDistMaxCandidates];
+    int next[kZDistMaxCandidates];
+    bool alive[kZDistMaxCandidates];
+    for (int i = 0; i < m; ++i) {
+        prev[i] = i - 1;
+        next[i] = (i + 1 < m) ? (i + 1) : -1;
+        alive[i] = true;
+    }
+    constexpr int kCap = 3 * kZDistMaxCandidates + 8;  // 初始 (m−2) + 每次移除 ≤2 次更新
+    zdist_detail::MergeHeapItem heap[kCap];
+    int hn = 0;
+    // 把“合并内部点 i”的增量入堆（端点不入）。
+    const auto push_if_interior = [&](int i) {
+        if (i < 0 || i >= m || !alive[i]) {
+            return;
+        }
+        const int p = prev[i];
+        const int q = next[i];
+        if (p < 0 || q < 0) {
+            return;
+        }
+        CHECK_LT(hn, kCap);
+        zdist_detail::MergeHeapItem it;
+        it.inc = pc.Cost(acc, p, q) - pc.Cost(acc, p, i) - pc.Cost(acc, i, q);
+        it.i = i;
+        it.l = p;
+        it.r = q;
+        zdist_detail::HeapPush(heap, &hn, it);
+    };
+    for (int i = 1; i + 1 < m; ++i) {
+        push_if_interior(i);
+    }
+    int count = m;
+    while (count > kZDistControlPoints) {
+        CHECK_GT(hn, 0) << "堆空（不应发生）";
+        const zdist_detail::MergeHeapItem it = zdist_detail::HeapPop(heap, &hn);
+        if (!alive[it.i] || prev[it.i] != it.l || next[it.i] != it.r) {
+            continue;  // 陈旧条目
+        }
+        const int p = prev[it.i];
+        const int q = next[it.i];
+        next[p] = q;
+        prev[q] = p;
+        alive[it.i] = false;
+        --count;
+        push_if_interior(p);
+        push_if_interior(q);
     }
     int n = 0;
     for (int i = 0; i < m; ++i) {

@@ -438,5 +438,68 @@ TEST(ZDistTest, GreedyCostNotBelowDp) {
     }
 }
 
+TEST(ZDistTest, GreedyReduceFastInvariants) {
+    ZDistAccumulator acc;
+    acc.Reset(0.0, 24.0);
+    for (int i = 0; i < 16; ++i) {
+        const double z0 = NextUnit() * 20.0;
+        acc.AddSegment(ZDistSegment{z0, z0 + 1.0 + NextUnit() * 3.0,
+                                    0.1 + NextUnit() * 0.3, V3(0.5f, 0.7f, 0.9f)});
+    }
+    ASSERT_GT(acc.size(), kZDistControlPoints);
+    const ZDistFunction g = GreedyReduceFast(acc);
+    EXPECT_EQ(g.size(), kZDistControlPoints);
+    EXPECT_DOUBLE_EQ(g.z(0), acc.z_near());
+    EXPECT_DOUBLE_EQ(g.z(g.size() - 1), acc.z_far());
+    EXPECT_DOUBLE_EQ(g.tau(g.size() - 1), acc.tau(acc.size() - 1));
+    for (int i = 1; i < g.size(); ++i) {
+        EXPECT_GT(g.z(i), g.z(i - 1));
+        EXPECT_GE(g.tau(i), g.tau(i - 1));
+    }
+}
+
+// 快/慢两版是同一贪心（增量最小合并）⇒ 无并列时结果应逐位一致。
+TEST(ZDistTest, GreedyReduceFastMatchesSlow) {
+    for (int t = 0; t < 30; ++t) {
+        ZDistAccumulator acc;
+        acc.Reset(0.0, 30.0);
+        for (int i = 0; i < 12; ++i) {
+            const double z0 = NextUnit() * 27.0;
+            acc.AddSegment(ZDistSegment{z0, z0 + 1.0 + NextUnit() * 4.0,
+                                        0.05 + NextUnit() * 0.4,
+                                        V3(static_cast<float>(NextUnit() * 2),
+                                           static_cast<float>(NextUnit() * 2),
+                                           static_cast<float>(NextUnit() * 2))});
+        }
+        if (acc.size() <= kZDistControlPoints) {
+            continue;
+        }
+        const ZDistFunction slow = GreedyReduce(acc);
+        const ZDistFunction fast = GreedyReduceFast(acc);
+        ASSERT_EQ(fast.size(), slow.size());
+        for (int i = 0; i < fast.size(); ++i) {
+            EXPECT_DOUBLE_EQ(fast.z(i), slow.z(i)) << "t=" << t << " i=" << i;
+        }
+    }
+}
+
+TEST(ZDistTest, GreedyReduceFastNotBelowDp) {
+    for (int t = 0; t < 30; ++t) {
+        ZDistAccumulator acc;
+        acc.Reset(0.0, 30.0);
+        for (int i = 0; i < 12; ++i) {
+            const double z0 = NextUnit() * 27.0;
+            acc.AddSegment(ZDistSegment{z0, z0 + 1.0 + NextUnit() * 4.0,
+                                        0.05 + NextUnit() * 0.4, V3(1.0f, 1.0f, 1.0f)});
+        }
+        if (acc.size() <= kZDistControlPoints) {
+            continue;
+        }
+        const double c_dp = ReducedCost(acc, ZDistFunction::Reduce(acc));
+        const double c_fast = ReducedCost(acc, GreedyReduceFast(acc));
+        EXPECT_LE(c_dp, c_fast + 1e-9 * (1.0 + std::abs(c_dp)));
+    }
+}
+
 }  // namespace
 }  // namespace jpov
