@@ -185,8 +185,9 @@ private:
         ui_.SliderFloat("色 G", &fog_color_.g, row(1, 1), 0.0f, 2.0f, 2);
         ui_.SliderFloat("色 B", &fog_color_.b, row(1, 2), 0.0f, 2.0f, 2);
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(1, 3), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 4), 0.0f, 8.0f, 1);
-        ui_.ColorSwatch("雾色参考→", fog_color_, row(1, 5));
+        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 4), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 5), 0.0f, 8.0f, 1);
+        ui_.ColorSwatch("雾色参考→", fog_color_, row(1, 6));
     }
 
     bool show_panel_ = true;
