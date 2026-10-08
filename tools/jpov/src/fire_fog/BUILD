@@ -51,3 +51,34 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+# ZDistFunction — ZDist（逐像素深度函数）的 CPU 参考实现（GL-free）：
+#   z 段加法累加（乱序可加）+ 降采样到 ≤8 控制点（端点保留 ⇒ 总上升量守恒）+ 末端积分
+#   + GPU 纹理布局打包。供 shader 对照 / debug / gold。设计见 docs/jpov_fire_fog_design.md §16。
+cc_library(
+    name = "zdist_function",
+    hdrs = [
+        "zdist_function.h",
+        "zdist_texture_layout.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/math:size_limited_piecewise_linear_function",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# ZDistFunction tests
+cc_test(
+    name = "zdist_function_test",
+    srcs = ["zdist_function_test.cc"],
+    deps = [
+        ":zdist_function",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
