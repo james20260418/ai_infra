@@ -988,12 +988,12 @@ private:
         }
     }
 
-    // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     // 记录一块面板的屏幕矩形（画笔判定「鼠标是否落在 UI 上」用；每帧 DrawPanels 先 clear）。
     void RecordPanel(float x, float y, float w, float h) {
         panel_rects_.push_back(jpov::UiRect{{x, y}, {w, h}});
     }
 
+    // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
     }
