@@ -15,6 +15,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace jpov {
 
@@ -40,6 +41,12 @@ public:
     // Pre-condition: GL context 已激活。
     unsigned int GetOrCreate(const std::string& name, const ShaderSource& source);
 
+    // 同上，但显式绑定片元着色器输出到 MRT 颜色附件：frag_outputs[i] → COLOR_ATTACHMENTi。
+    // 用于多输出（MRT）程序；单输出程序用上面的重载即可（默认 location 0）。
+    // Pre-condition: frag_outputs 中的名字与 FS 里 `out` 变量名一一对应（顺序即 location）。
+    unsigned int GetOrCreate(const std::string& name, const ShaderSource& source,
+                             const std::vector<const char*>& frag_outputs);
+
     // 根据 program ID 获取 uniform location（首次查询后缓存）。
     //
     // 返回 -1 表示该 uniform 不存在（GL 惯例，合法，由调用方决定是否使用）。
@@ -50,6 +57,10 @@ public:
     size_t Size() const { return programs_.size(); }
 
 private:
+    // 编译 + 链接 + 缓存（两个 GetOrCreate 重载的公共实现）。
+    unsigned int CreateProgram(const std::string& name, const ShaderSource& source,
+                               const std::vector<const char*>& frag_outputs);
+
     struct ShaderProgram {
         unsigned int program = 0;
         // uniform name → location（首次查询后缓存，避免重复 glGetUniformLocation）

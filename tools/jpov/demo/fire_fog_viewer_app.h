@@ -59,6 +59,12 @@ public:
     float fog_intensity_ = 0.6f;                               // 消光尺度 σ 系数
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
+    // ── Fire-Fog 管线开关（对比用）──
+    bool gaussian_enable_ = true;      // 屏幕空间高斯合并（去噪）
+    bool jitter_enable_ = true;        // 段内抖动（关 → 段中点）
+    float gaussian_sigma_ = 1.0f;      // 高斯 σ（低分辨率像素）
+    float downsample_ = 4.0f;          // ZDist 降采样倍数 N（1 = 不降采样）
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
     }
@@ -124,6 +130,13 @@ public:
             fog.intensity = fog_intensity_;
             fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
             cmds->point_fogs.push_back(fog);
+
+            jpov::FireFogParams ff;
+            ff.gaussian_enable = gaussian_enable_;
+            ff.jitter_enable = jitter_enable_;
+            ff.gaussian_sigma = gaussian_sigma_;
+            ff.downsample = static_cast<int>(downsample_ + 0.5f);
+            cmds->fire_fog = ff;
         }
 
         if (show_panel_) {
@@ -155,7 +168,7 @@ private:
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 8;
+        const int kRows = 10;
         const float top = h - kBottom
                         - (static_cast<float>(kRows) * kRowH
                            + static_cast<float>(kRows - 1) * kSpacing);
@@ -177,8 +190,11 @@ private:
                 "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
             ui_.Combo("衰减剖面", &fog_attenuation_, items, row(0, 5));
         }
-        // 只读：JPOV 锁定的内部量（M / K / tile）。
-        ui_.Text("内部锁定: M=2 段/团  K=8 团/tile  tile=16px", row(0, 6));
+        // ── 管线开关（对比）：高斯合并 / 抖动 / 核大小 / 降采样 ──
+        ui_.Checkbox("高斯合并", &gaussian_enable_, row(0, 6));
+        ui_.Checkbox("抖动", &jitter_enable_, row(0, 7));
+        ui_.SliderFloat("高斯 σ(低分辨率px)", &gaussian_sigma_, row(0, 8), 0.2f, 3.0f, 1);
+        ui_.SliderFloat("降采样 N", &downsample_, row(0, 9), 1.0f, 8.0f, 0);
 
         // ── 右列：雾色 + 天光主光仰角（便于观察雾与实体受光对比）──
         ui_.SliderFloat("色 R", &fog_color_.r, row(1, 0), 0.0f, 2.0f, 2);
@@ -188,6 +204,7 @@ private:
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 4), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 5), 0.0f, 8.0f, 1);
         ui_.ColorSwatch("雾色参考→", fog_color_, row(1, 6));
+        ui_.Text("M=2段/团  K=8团/tile  tile=16px", row(1, 7));
     }
 
     bool show_panel_ = true;

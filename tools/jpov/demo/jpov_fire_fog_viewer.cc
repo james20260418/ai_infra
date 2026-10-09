@@ -162,6 +162,37 @@ int RunCapture(const std::string& out_dir) {
         shoot(("09_orbit_" + std::to_string(deg)).c_str());
     }
 
+    // ── G. 屏幕空间高斯 / 抖动 / 降采样 对比（本轮重点：看噪点消失）──
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 3.0f;
+    app.fog_intensity_ = 0.6f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+    default_view();
+    // 高斯关（只有低分辨率，无合并）——N=1（全分辨率基线）/ N=4。
+    app.gaussian_enable_ = false;
+    app.jitter_enable_ = true;
+    app.downsample_ = 1.0f;
+    shoot("10_gauss_off_N1");
+    app.downsample_ = 4.0f;
+    shoot("11_gauss_off_N4");
+    // 高斯开：σ / N 扫描。
+    app.gaussian_enable_ = true;
+    app.gaussian_sigma_ = 1.0f;
+    shoot("12_gauss_on_N4_s1");
+    app.gaussian_sigma_ = 2.0f;
+    shoot("13_gauss_on_N4_s2");
+    app.downsample_ = 2.0f;
+    app.gaussian_sigma_ = 1.0f;
+    shoot("14_gauss_on_N2_s1");
+    // 抖动对照（高斯开、N=4）：关抖动 = 段中点。
+    app.downsample_ = 4.0f;
+    app.jitter_enable_ = false;
+    shoot("15_gauss_on_nojit_N4");
+    // 复位
+    app.jitter_enable_ = true;
+    app.downsample_ = 4.0f;
+    app.gaussian_sigma_ = 1.0f;
+
     app.Finalize();
     return 0;
 }

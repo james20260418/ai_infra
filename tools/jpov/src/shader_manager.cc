@@ -64,10 +64,15 @@ unsigned int CompileShader(GLenum type, const char* source) {
 
 // 链接 vertex + fragment 为 program。
 // 链接失败 → LOG(FATAL) crash。
-unsigned int LinkProgram(unsigned int vs, unsigned int fs) {
+unsigned int LinkProgram(unsigned int vs, unsigned int fs,
+                         const std::vector<const char*>& frag_outputs) {
     unsigned int prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
+    // 显式绑定片元输出到 MRT 颜色附件（必须在 glLinkProgram 之前）。
+    for (size_t i = 0; i < frag_outputs.size(); ++i) {
+        glBindFragDataLocation(prog, static_cast<GLuint>(i), frag_outputs[i]);
+    }
     glLinkProgram(prog);
     GLint ok = 0;
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
@@ -104,9 +109,28 @@ unsigned int ShaderManager::GetOrCreate(const std::string& name,
     CHECK(source.vertex != nullptr) << "ShaderManager: null vertex source, name=" << name;
     CHECK(source.fragment != nullptr) << "ShaderManager: null fragment source, name=" << name;
 
+    return CreateProgram(name, source, {});
+}
+
+unsigned int ShaderManager::GetOrCreate(const std::string& name,
+                                        const ShaderSource& source,
+                                        const std::vector<const char*>& frag_outputs) {
+    auto it = programs_.find(name);
+    if (it != programs_.end()) {
+        return it->second.program;
+    }
+    return CreateProgram(name, source, frag_outputs);
+}
+
+unsigned int ShaderManager::CreateProgram(const std::string& name,
+                                          const ShaderSource& source,
+                                          const std::vector<const char*>& frag_outputs) {
+    CHECK(source.vertex != nullptr) << "ShaderManager: null vertex source, name=" << name;
+    CHECK(source.fragment != nullptr) << "ShaderManager: null fragment source, name=" << name;
+
     unsigned int vs = CompileShader(GL_VERTEX_SHADER, source.vertex);
     unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, source.fragment);
-    unsigned int prog = LinkProgram(vs, fs);
+    unsigned int prog = LinkProgram(vs, fs, frag_outputs);
     CHECK_NE(prog, 0u) << "ShaderManager: link failed, name=" << name;
 
     ShaderProgram entry;

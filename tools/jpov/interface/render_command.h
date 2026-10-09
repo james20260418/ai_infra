@@ -468,6 +468,21 @@ struct PointFog {
     FogAttenuation attenuation;   // 径向衰减剖面
 };
 
+// Fire-Fog 管线参数（屏幕空间深度敏感高斯 + 低分辨率 ZDist）。
+//
+// 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
+// Pre-conditions: gaussian_sigma > 0；downsample ∈ [1, 8]。
+struct FireFogParams {
+    // 屏幕空间高斯合并（去噪）开关：false 时跳过趟 B，趟 C 直接读趟 A 的 ZDist。
+    bool gaussian_enable = true;
+    // 段内抖动开关：false 时每段取中点（观感更平滑但出现分层带）。
+    bool jitter_enable = true;
+    // 高斯核 σ，单位 = **低分辨率像素**（off 时忽略）；核半径 = clamp(ceil(2σ), 1, 3)。
+    float gaussian_sigma = 1.0f;
+    // ZDist 降采样倍数 N：ZDist 纹理 = 主 pass ÷ N（tile 剪枝也按低分辨率做）；1 = 不降采样。
+    int downsample = 4;
+};
+
 // 全局平行光（太阳 Directional Light）。
 //
 // 与点光源不同：无位置、无衰减、影响所有片元，因此不走 tile culling，
@@ -1683,6 +1698,10 @@ struct RenderCommandList {
     // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
+
+    // Fire-Fog 管线参数（高斯核 / 降采样倍数 / 抖动开关）。未设置时用默认值
+    // （高斯开、抖动开、σ=1、N=4）。仅在 point_fogs 非空时生效。
+    std::optional<FireFogParams> fire_fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图

@@ -1558,7 +1558,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                                        GL_TEXTURE_2D, 0, 0);
 #endif
                 fire_fog_renderer_.Draw(cmds.point_fogs, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
+                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
+                                        cmds.fire_fog.value_or(FireFogParams{}));
 #ifdef JPOV_WITHOUT_MSAA
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
