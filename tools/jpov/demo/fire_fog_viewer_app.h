@@ -62,7 +62,7 @@ public:
     // ── Fire-Fog 管线开关（对比用）──
     bool gaussian_enable_ = true;      // 屏幕空间高斯合并（去噪）
     bool jitter_enable_ = true;        // 段内抖动（关 → 段中点）
-    float gaussian_sigma_ = 1.0f;      // 高斯 σ（低分辨率像素）
+    float gaussian_sigma_ = 2.0f;      // 高斯 σ（低分辨率像素）；默认给到能抹平抖动的量级
     float downsample_ = 4.0f;          // ZDist 降采样倍数 N（1 = 不降采样）
 
     void InstallTextMeasure() {
@@ -193,7 +193,7 @@ private:
         // ── 管线开关（对比）：高斯合并 / 抖动 / 核大小 / 降采样 ──
         ui_.Checkbox("高斯合并", &gaussian_enable_, row(0, 6));
         ui_.Checkbox("抖动", &jitter_enable_, row(0, 7));
-        ui_.SliderFloat("高斯 σ(低分辨率px)", &gaussian_sigma_, row(0, 8), 0.2f, 3.0f, 1);
+        ui_.SliderFloat("高斯 σ(低分辨率px)", &gaussian_sigma_, row(0, 8), 0.2f, 6.0f, 1);
         ui_.SliderFloat("降采样 N", &downsample_, row(0, 9), 1.0f, 8.0f, 0);
 
         // ── 右列：雾色 + 天光主光仰角（便于观察雾与实体受光对比）──

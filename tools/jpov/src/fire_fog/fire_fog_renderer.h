@@ -45,7 +45,7 @@ public:
     static constexpr int kSegmentsPerFog = 2;         // M：每团 z 段数
     static constexpr int kZDistTexelsPerPixel = 6;    // ZDist 每像素 RGBA32F texel 数（见 zdist_texture_layout.h）
     static constexpr int kMaxDownsample = 8;          // ZDist 降采样倍数上限
-    static constexpr int kMaxKernelRadius = 3;        // 高斯核半径上限（低分辨率像素）
+    static constexpr int kMaxKernelRadius = 6;        // 高斯核半径上限（低分辨率像素）；σ=3 ⇒ 6
 
     FireFogRenderer() = default;
     ~FireFogRenderer();

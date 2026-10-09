@@ -16,6 +16,7 @@
 //   或 sh 脚本：./tools/jpov/build_jpov_fire_fog_viewer.sh
 //   → output/jpov_fire_fog_viewer/jpov_fire_fog_viewer
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,8 +87,11 @@ int RunCapture(const std::string& out_dir) {
 
     auto shoot = [&](const char* name) {
         const std::string path = out_dir + "/" + name + ".png";
+        const auto t0 = std::chrono::steady_clock::now();
         app.RunOnce(input, winfo, path.c_str());
-        LOG(INFO) << "capture: " << path;
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        LOG(INFO) << "capture: " << path << "  (" << ms << " ms)";
     };
 
     // 默认视角：橡树（高 6m）斜前方，看全树 + 雾。
@@ -184,6 +188,12 @@ int RunCapture(const std::string& out_dir) {
     app.downsample_ = 2.0f;
     app.gaussian_sigma_ = 1.0f;
     shoot("14_gauss_on_N2_s1");
+    // 大核（σ=3 ⇒ 半径6）+ 更强降采样（N=8）。
+    app.downsample_ = 4.0f;
+    app.gaussian_sigma_ = 3.0f;
+    shoot("16_gauss_on_N4_s3");
+    app.downsample_ = 8.0f;
+    shoot("17_gauss_on_N8_s3");
     // 抖动对照（高斯开、N=4）：关抖动 = 段中点。
     app.downsample_ = 4.0f;
     app.jitter_enable_ = false;

@@ -5,21 +5,19 @@
 // 管线（Danis 2026-10-09 定「简单加权」版）分三趟，ZDist 全部在**低分辨率**域：
 //   A 累加（fire_fog_zdist）  低分辨率：tile 剪枝 → 逐团 M 段采样 → ZDist 累加 → 降维 ≤8
 //                             → 打包成 6 个 RGBA32F texel（见 zdist_texture_layout.h）。
-//   B 合并（fire_fog_gauss）  低分辨率：读中心 + 核内邻居的 ZDist → **简单加权**合并
-//                             （权重 g_i·ρ_i，非重叠段用中心 Z0 补全）→ 降维 ≤8 → 打包。
+//   B 合并（fire_fog_gauss）  低分辨率：读中心 + 核内邻居的 ZDist → **逐槽简单加权**合并
+//                             （中心 8 槽 z 不动，每槽独立对「覆盖该 z 的邻居」求加权平均；
+//                              无重叠的邻居在该槽既不出值也不进分母）→ 直接打包（仍 8 槽）。
 //   C 合成（fire_fog_compose）主分辨率：逐像素对合并后的 ZDist 做**双线性**重建 → 末端积分
 //                             → 就地混合到当前 3D HDR FBO（GL_ONE / GL_SRC_ALPHA）。
 //
-// 「简单加权」的合并公式（Danis 2026-10-09 确认；标量分母版）：
-//   中心像素 0，Z0 定义域 [z_near, b0]；邻居 i：Zi 定义域 [z_near, b_i]（所有像素共用一个
-//   z_near）。令 overlap 占比 ρ_i = (min(b0,b_i) − z_near)/(b0 − z_near)，高斯权重
-//   g_i = exp(−|Δ_i|²/(2σ²))，w_i = g_i·ρ_i（ρ_i = 0 ⇒ 该邻居被真正跳过）。
-//     Ẑ_i(z) = Zi(z) if z ≤ min(b0,b_i) else Z0(z)          // 非重叠段用 Z0 补全
-//     N(z)   = w0·Z0(z) + Σ_i w_i·Ẑ_i(z)   （w0 = 1）
-//     D      = w0 + Σ_i w_i                （标量）
-//     F(z)   = N(z) / D,  z ∈ [z_near, b0]
-//   N 建在「Z0 断点 ∪ 各邻居断点 ∪ 各 overlap 端点」的共享 z 网格上（放得下就放），
-//   再对 F 做二叉最小堆贪心降维到 ≤8（与 CPU GreedyReduceFast 一致，O(m log m)）。
+// 「逐槽简单加权」的合并公式（Danis 2026-10-09 定简单加权；此为其 8 槽离散版）：
+//   中心像素 0，Z0 定义域 [z_near, b0]、断点 z_i（i<8）；邻居 j：Zj 定义域 [z_near, b_j]，
+//   高斯权重 g_j = exp(−|Δ_j|²/(2σ²))。对每个中心槽 z_i：
+//     den_i = w0 + Σ_{j: z_i ≤ b_j} g_j            （只统计覆盖 z_i 的邻居；w0 = 1）
+//     F(z_i) = ( w0·Z0(z_i) + Σ_{j: z_i ≤ b_j} g_j·Zj(z_i) ) / den_i
+//   未覆盖 z_i 的邻居 ⇒ 既不出值也不进分母（= 逐 z 归一在 8 槽上的离散化；
+//   ρ 从「全局占比」精确化为逐槽 0/1 重叠）。输出 z 沿用中心（域 = Z0 域，天然单调）。
 //
 // ⚠️ shader 里的 #define 常量必须与 fire_fog_renderer.h / zdist_texture_layout.h 对应。
 
@@ -60,7 +58,9 @@ inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 #define TAU_MAX           32.0     // τd 的 uint16 归一化量程（与 zdist_texture_layout.h 同）
 
 // ── 高斯核：邻居偏移半径上限（编译期常量；运行期用 uKernelRadius 夹紧）──
-#define MAX_KERNEL_RADIUS    3
+//    半径 = clamp(ceil(2σ), 1, MAX_KERNEL_RADIUS)；σ=3 ⇒ 半径 6（13×13）。
+//    ⚠️ 半径上限过小会让大 σ 失效（曾把上限卡在 3 ⇒ σ>1.5 白调）——故放到 6。
+#define MAX_KERNEL_RADIUS    6
 
 in vec2 vTexCoord;
 
@@ -690,33 +690,37 @@ out vec4 out3;
 out vec4 out4;
 out vec4 out5;
 
+// 低分辨率屏幕空间深度敏感高斯（**逐槽**简单加权）。
+//
+// 输出直接用中心的 8 个 z 槽（Z0 的断点），每槽各自求加权平均：
+//   den[i] = w0 + Σ_{覆盖该槽 z 的邻居} g_j          （z_i ≤ 邻居域末端 ⇒ 该 z 有重叠）
+//   F[i]   = ( w0·Z0(z_i) + Σ_{覆盖} g_j·Zj(z_i) ) / den[i]
+// 邻居在该槽 z 上无重叠 ⇒ 既不出值也不进分母（= 逐 z 归一在 8 槽上的离散版，
+// 即「g·ρ」的精确化：ρ 从“全局占比”变成逐槽的 0/1 重叠）。σ 控制 g_j。
+// 仅 8 点级小数组、无并集网格、无堆 ⇒ O(8·邻居)，llvmpipe 下也轻。
 void main() {
     ivec2 size = textureSize(uZDist0, 0);
     ivec2 cp = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - ivec2(1));
 
     float zs0[ZC];
-    float tau0[ZC];
-    vec3  ed0[ZC];
+    float t0[ZC];
+    vec3  e0[ZC];
     int n0;
     FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5,
-               cp, zs0, tau0, ed0, n0);
-    float z_near = zs0[0];
-    float b0 = zs0[n0 - 1];
-    float span0 = max(b0 - z_near, 1e-6);
+               cp, zs0, t0, e0, n0);
 
-    // 合并网格（N）：初始 = w0·Z0（w0 = 1），并含 Z0 的全部断点。
-    float gz[ZC];
-    float gNt[ZC];
-    vec3  gNe[ZC];
-    int gm = n0;
-    for (int i = 0; i < n0; ++i) {
-        gz[i] = zs0[i];
-        gNt[i] = tau0[i];
-        gNe[i] = ed0[i];
+    float fz[ZC];
+    float ftau[ZC];
+    vec3  fed[ZC];
+    float den[ZDIST_K];
+    for (int i = 0; i < ZDIST_K; ++i) {
+        fz[i] = zs0[i];                 // 槽 z 沿用中心（输出域 = Z0 的域，天然单调）
+        ftau[i] = t0[i];
+        fed[i] = e0[i];
+        den[i] = 1.0;                   // w0 = 1
     }
-    float D = 1.0;                                       // 分母（标量）
 
-    float inv2sig2 = 1.0 / (2.0 * max(uGaussSigma, 1e-3) * max(uGaussSigma, 1e-3));
+    float inv2s2 = 1.0 / (2.0 * max(uGaussSigma, 1e-3) * max(uGaussSigma, 1e-3));
 
     for (int dy = -MAX_KERNEL_RADIUS; dy <= MAX_KERNEL_RADIUS; ++dy) {
         for (int dx = -MAX_KERNEL_RADIUS; dx <= MAX_KERNEL_RADIUS; ++dx) {
@@ -733,58 +737,26 @@ void main() {
             int ni;
             FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5,
                        np, zsi, taui, edi, ni);
-            float bi = zsi[ni - 1];
-            float oe = min(b0, bi);                        // overlap 端点
-            float rho = (oe - z_near) / span0;             // z 重叠占比
-            if (rho <= 0.0) {
-                continue;                                  // 无 z 重叠 → 真正跳过
-            }
-            float gauss = exp(-float(dx * dx + dy * dy) * inv2sig2);
-            float wgt = gauss * clamp(rho, 0.0, 1.0);
-
-            // 先把邻居的断点（≤ oe 的部分）与 overlap 端点并入网格（保持 N 连续）。
-            for (int k = 0; k < ni; ++k) {
-                if (zsi[k] > z_near && zsi[k] <= oe && gm < ZC) {
-                    ZInsertBreakpoint(gz, gNt, gNe, gm, zsi[k]);
+            float bj = zsi[ni - 1];                       // 邻居域末端
+            float g = exp(-float(dx * dx + dy * dy) * inv2s2);
+            for (int i = 0; i < ZDIST_K; ++i) {
+                float z = fz[i];
+                if (z <= bj) {                            // 该槽 z 有重叠才参与
+                    ftau[i] += g * ZInterpTau(zsi, taui, ni, z);
+                    fed[i]  += g * ZInterpEd(zsi, edi, ni, z);
+                    den[i]  += g;
                 }
             }
-            if (oe > z_near && oe < b0 && gm < ZC) {
-                ZInsertBreakpoint(gz, gNt, gNe, gm, oe);
-            }
-
-            // 再加 wgt·Ẑ_i：Ẑ_i = Zi on [z_near,oe]，Z0 otherwise。
-            for (int j = 0; j < gm; ++j) {
-                float z = gz[j];
-                float vt;
-                vec3 ve;
-                if (z <= oe) {
-                    vt = ZInterpTau(zsi, taui, ni, z);
-                    ve = ZInterpEd(zsi, edi, ni, z);
-                } else {
-                    vt = ZInterpTau(zs0, tau0, n0, z);
-                    ve = ZInterpEd(zs0, ed0, n0, z);
-                }
-                gNt[j] += wgt * vt;
-                gNe[j] += wgt * ve;
-            }
-            D += wgt;
         }
     }
 
-    float invD = 1.0 / D;
-    for (int j = 0; j < gm; ++j) {
-        gNt[j] *= invD;
-        gNe[j] *= invD;
+    for (int i = 0; i < ZDIST_K; ++i) {
+        ftau[i] /= den[i];
+        fed[i]  /= den[i];
     }
 
-    float fz[ZC];
-    float ftau[ZC];
-    vec3  fed[ZC];
-    int fn;
-    Reduce8(gz, gNt, gNe, gm, fz, ftau, fed, fn);
-
     uint L[24];
-    PackZDist(fz, ftau, fed, fn, L);
+    PackZDist(fz, ftau, fed, ZDIST_K, L);
     out0 = vec4(U2F(L[0]), U2F(L[1]), U2F(L[2]), U2F(L[3]));
     out1 = vec4(U2F(L[4]), U2F(L[5]), U2F(L[6]), U2F(L[7]));
     out2 = vec4(U2F(L[8]), U2F(L[9]), U2F(L[10]), U2F(L[11]));
