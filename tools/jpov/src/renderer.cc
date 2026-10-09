@@ -1138,6 +1138,13 @@ unsigned int Renderer::SkinnedShadowProg() {
         {kSkinnedShadowVs, SkeletonRenderer::kShadowFs});
 }
 
+// alpha-test（cutout）蒙皮阴影变体：与 SkinnedShadowProg 同源，仅多一个 JPOV_ALPHA_CUTOUT
+// 宏（FS 里含 discard）。与主 pass 同理单独成 program，避免不透明 program 含 discard 而降级 early-Z。
+unsigned int Renderer::SkinnedShadowProgCutout() {
+    return shader_mgr_.GetOrCreate("skinned_shadow_cutout",
+        {kSkinnedShadowVs, SkeletonRenderer::kShadowFs, {"JPOV_ALPHA_CUTOUT"}});
+}
+
 // 注册一种骨架（SkeletonType + 一整包 pose）→ skeleton_id（非 0，= vector 下标 + 1）。
 // SkeletonManager 构造即把 pose 烘焙成 pose atlas 上传 GL（需 GL context，Init 后）。
 // id 从 1 起：DrawMeshWithSkeleton 要求 skeleton_id > 0（0 = 无效，见 render_command.cc）。
@@ -1194,6 +1201,14 @@ void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
 unsigned int Renderer::ShadowProg() {
     return shader_mgr_.GetOrCreate("shadow",
         {Object3DRenderer::kShadowVs, Object3DRenderer::kShadowFs});
+}
+
+// alpha-test（cutout）阴影变体：与 ShadowProg 同源，仅多一个 JPOV_ALPHA_CUTOUT 宏
+//（FS 里含 discard）。与主 pass 同理单独成 program，避免不透明 program 含 discard 而降级 early-Z。
+unsigned int Renderer::ShadowProgCutout() {
+    return shader_mgr_.GetOrCreate("shadow_cutout",
+        {Object3DRenderer::kShadowVs, Object3DRenderer::kShadowFs,
+         {"JPOV_ALPHA_CUTOUT"}});
 }
 
 // 统一后处理 tone map shader（ACES filmic，见 kTonemapVs/kTonemapFs）。
@@ -1463,24 +1478,24 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_texel_world_, shadow_cfg_, eff_sun);
+                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // cutout 变体 program 同源，也需 sun/阴影 uniform。
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_texel_world_, shadow_cfg_, eff_sun);
+                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
             // SkeletonRenderer::DrawSkinnedMesh，其本身不上传光照。
             if (!cmds.skinned_mesh.empty()) {
                 SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProg(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                    shadow_texel_world_, shadow_cfg_, eff_sun);
+                    shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
                 // cutout 变体同源，也需 sun/阴影 uniform。
                 SkeletonRenderer::UploadSunData(shader_mgr_,
                     SkinnedMeshProgCutout(),
                     shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                    shadow_texel_world_, shadow_cfg_, eff_sun);
+                    shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             }
         }
 
@@ -1994,6 +2009,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
     }
 
     const unsigned int shadow_prog = ShadowProg();
+    const unsigned int shadow_prog_cutout = ShadowProgCutout();
 
     // 相机透视投影参数：fov + aspect（用于展开视锥角点）、near（首段）、
     // 各级联 far（cascade_ranges）。
@@ -2125,9 +2141,9 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         for (const auto& o : cmds.object3d) {
-            Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, shader_mgr_,
+            Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
-                                                 shadow_prog);
+                                                 shadow_prog, shadow_prog_cutout);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {
@@ -2135,9 +2151,10 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             CHECK(skel != nullptr) << "阴影 pass: skeleton_id " << s.skeleton_id
                                    << " 未注册";
             SkeletonRenderer::DrawSkinnedMeshShadow(
-                s, mesh_mgr_, shader_mgr_, skel->gpu_handles(),
+                s, mesh_mgr_, texture_mgr_, shader_mgr_, skel->gpu_handles(),
                 skel->pose_count(),
                 shadow_vp_[c], shadow_depth_vp_[c], SkinnedShadowProg(),
+                SkinnedShadowProgCutout(),
                 instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
                 instance_partial_buf_);
         }

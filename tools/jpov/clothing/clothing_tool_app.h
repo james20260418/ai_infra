@@ -48,6 +48,21 @@
 //       概念：鼠标周围画淡黄半透明圆表示尺寸，左键非 UI 区涂抹把靠近鼠标射线的衣服顶点选入
 //       选区（淡黄 2px 方块标记）；ESC / 再点按钮结束并清空选区（见 brush_tool.h /
 //       camera_projection.h）。中键纵向 drag pan 相机注视点（半屏 = 1m，见 VerticalPanDeltaY）。
+//   - 2026-10-09（本 PR）：**base color alpha 归一 + 选区变换**——
+//       ① 右下蒙皮面板新增「base color alpha 归一」按钮：把 base color 贴图 alpha 置 1
+//          （不透明），修补透明/镂空贴图的破洞；画笔有选区 → 只处理「被选中顶点围成的三角形」
+//          覆盖的 texel，无选区 → 整图（见 base_color_alpha.h）。「重置衣服」会一并重置该贴图
+//          （后端把 mesh reset 与 material reset 分开：ResetClothMesh / ResetClothMaterial）。
+//       ② 左侧平移/旋转/缩放：画笔有选区时**只作用于被选中的顶点**，旋转/缩放枢轴 = 选区顶点
+//          包围盒中心；无选区时作用于全体（原行为）。选区变换属「几何编辑」——**只改当前位置**，
+//          **不改力学参照**也**不**更新关联邻居表；力的参照 = **原始 mesh + 全体 scale/rotation**
+//          （不含选区变换 / 仿真形变），见 README「用户须知」。底层 = soft_mesh_simulator 新增
+//          ApplyPartial{Translation,Rotation,Scaling}。
+//       ③ 仿真面板新增「显示力学参照网格」勾选：把参照网格（reference_positions()）的原始顶点
+//          用**蓝色 2D 像素**画出（参照响应全体旋转/缩放；平移时参照包围盒中心对齐实际 cloth）。
+//       ④ **仿真焊接（方案 B）**：把位置重合的顶点在仿真里并成**一个质点**（容差默认 0.1mm，
+//          CLI --weld_tolerance），Step 后写回组内所有顶点 ⇒ 缝合缝不裂（修“碎了裂缝”）。
+//          输出 mesh 顶点数/拓扑/属性不变 ⇒ 法线/UV/蒙皮权重仍合法。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -71,6 +86,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -78,6 +94,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/assets/models/models_path.h"
+#include "tools/jpov/clothing/base_color_alpha.h"
 #include "tools/jpov/clothing/brush_tool.h"
 #include "tools/jpov/clothing/camera_projection.h"
 #include "tools/jpov/clothing/clothing_axis_input.h"
@@ -194,6 +211,16 @@ public:
     float weld_ratio_ = kSkinWeldRatio;  // 相对模式比例（× 局部边长；0 = 关闭）
     NumberField weld_ratio_field_ = NumberField(kSkinWeldRatio);
 
+    // ── base color alpha 归一（2026-10-09 Danis）──
+    // 把 base color 贴图 alpha 置 1（不透明）：画笔有选区时只处理「被选中顶点围成的三角形」
+    // 覆盖的 texel，无选区时整图。见 base_color_alpha.h。
+    //   - alpha_orig_ref_ / alpha_orig_handle_：启动时贴图的原始**来源**与 GPU 句柄（材料重置恢复）。
+    //   - alpha_custom_tex_：本工具新上传的贴图 id（0 = 未改），重置/再次编辑时回收，避免泄漏。
+    std::vector<jpov::GltfTextureRef> alpha_orig_ref_;  // 每 primitive 的原始贴图来源
+    std::vector<uint32_t> alpha_orig_handle_;           // 每 primitive 的原始 GPU 贴图 id
+    std::vector<uint32_t> alpha_custom_tex_;            // 每 primitive 的编辑后 GPU 贴图 id（0=无）
+    std::string alpha_msg_;                             // 面板状态提示
+
     // ══════════════ 随机摆动测试（2026-10-07 Danis）══════════════
     //
     // 用**真骨架蒙皮**驱动参考人体做程序化随机动作（random_pose_driver.h）；蒙皮过的衣服绑到
@@ -230,6 +257,10 @@ public:
 
     bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
 
+    // 仿真「焊接容差」（米，方案 B，Danis 2026-10-09）：位置相距 ≤ 该值的原始顶点在仿真器里并成
+    // 一个质点（缝不裂）。默认 = kClothSimWeldToleranceM（0.1mm）；CLI --weld_tolerance 可覆。
+    float sim_weld_tolerance_ = kClothSimWeldToleranceM;
+
     // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
     // 关联距离 d（米）：决定仿真点集合（长边加密）与关联邻居表（= 仿真点"缝合"半径）。
     // 拖动它 → 与 sim.bind_distance() 不一致时重建仿真点集合（见 SyncSimParams）。
@@ -247,6 +278,11 @@ public:
     float body_buffer_ui_ = Simulator::kDefaultBodyBuffer;
     // 人体排斥的切向速度保留系数（0~1；默认 1.0 = 全保留）。Danis 2026-10-02。
     float body_parallel_damping_ui_ = Simulator::kDefaultBodyParallelDamping;
+    // 「显示力学参照网格」开关（右上面板）：开启后把每个仿真器的**力学参照**
+    // （绑定姿态 reference_positions()，= 原始 mesh + 全体 scale/rotation）的原始顶点用**蓝色
+    // 2D 像素**画出来，用于核对「力参照的网格」（Danis 2026-10-09）。显示位置把参照整体平移，
+    // 使其包围盒中心对齐**实际 cloth 几何**的包围盒中心（平移不参与参照）。
+    bool show_ref_mesh_ = false;
 
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
@@ -270,6 +306,9 @@ public:
 
     // 供 headless / 脚本用：立即执行补洞（等价面板「执行补洞」按钮）。
     void RunHoleFillNow() { RunHoleFill(); }
+
+    // 供 headless / 脚本用：立即执行 base color alpha 归一（等价面板按钮）。
+    void RunAlphaNormalizeNow() { RunAlphaNormalize(); }
 
     // 供 headless / CLI 设置补洞参数（在 RunHoleFillNow 前设好）。
     void SetHoleFillParams(float max_hole_perimeter_m, bool refine, bool fair) {
@@ -355,6 +394,15 @@ public:
         }
         // 3D 画笔：选区容器对齐衣服 primitive 数（初始为空选区）。
         brush_.EnsurePrimitives(cloth_current_.size());
+
+        // 记录 base color 贴图的**原始**来源与 GPU 句柄（「重置」的材料重置据此恢复）。
+        alpha_orig_ref_.resize(cloth_current_.size());
+        alpha_orig_handle_.resize(cloth_current_.size());
+        alpha_custom_tex_.assign(cloth_current_.size(), 0u);
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            alpha_orig_ref_[i] = cloth_current_[i].material.base_color_tex;
+            alpha_orig_handle_[i] = cloth_.primitives[i].material.base_color_tex;
+        }
 
         // 建仿真器（绑定姿态 = 启动几何）。仿真器的人体排斥匹配器（Step 2）由
         // InitSimulators() 内部统一挂载（见 AttachBodyMatcherToSims；匹配器在 init_ 里，
@@ -534,6 +582,9 @@ public:
             }
         }
 
+        // 力学参照网格（蓝色 2D 像素；右上面板开关）。画在面板之下。
+        DrawReferenceMesh(winfo, cmds);
+
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
             DrawPanels(input, winfo, cmds);
@@ -567,7 +618,7 @@ private:
         sim_startup_mesh_.resize(cloth_current_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
             sim_startup_mesh_[i] = cloth_current_[i].mesh;
-            sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_);
+            sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_, sim_weld_tolerance_);
             PushSimParams(&sims_[i]);
         }
         AttachBodyMatcherToSims();
@@ -582,7 +633,7 @@ private:
     void ReinitSimulators() {
         CHECK_EQ(sims_.size(), sim_startup_mesh_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
-            sims_[i].Init(sim_startup_mesh_[i], bind_distance_ui_);
+            sims_[i].Init(sim_startup_mesh_[i], bind_distance_ui_, sim_weld_tolerance_);
             PushSimParams(&sims_[i]);
         }
         cloth_scale_ = 1.0f;
@@ -733,7 +784,8 @@ private:
         return Axis::kX;  // 不可达（LOG(FATAL) 已终止）；为满足返回类型。
     }
 
-    // 平移步进：所有仿真器状态沿 axis 轴平移 direction * trans_step_[axis]（速度不变）。
+    // 平移步进：有画笔选区时**只平移选中的顶点**（其余不动）；无选区时平移全体
+    // （所有仿真器状态沿 axis 轴平移 direction * trans_step_[axis]，速度不变）。
     // Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
     void StepTranslation(int axis, float direction) {
         CHECK_GE(axis, 0);
@@ -744,13 +796,18 @@ private:
         const float d = direction * trans_step_[axis];
         const jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
                                 axis == 2 ? d : 0.0f);
-        for (Simulator& sim : sims_) {
-            sim.ApplyTranslation(delta);
+        if (brush_.HasSelection()) {
+            ApplyPartialTranslationToSelection(delta);
+        } else {
+            for (Simulator& sim : sims_) {
+                sim.ApplyTranslation(delta);
+            }
         }
         SyncSimsToCloth();
     }
 
-    // 旋转步进：绕合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度
+    // 旋转步进：有画笔选区时**只旋转选中的顶点**，枢轴 = 选区顶点包围盒中心；无选区时
+    // 绕全体合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度
     // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
     void StepRotation(int axis, float direction) {
         CHECK_GE(axis, 0);
@@ -759,19 +816,32 @@ private:
             return;
         }
         const float deg = direction * rot_step_[axis];
-        const jpov::Vec3f pivot = SimsBoundsCenter();
-        for (Simulator& sim : sims_) {
-            sim.ApplyRotation(ToSimAxis(axis), deg, pivot);
+        if (brush_.HasSelection()) {
+            ApplyPartialRotationToSelection(ToSimAxis(axis), deg,
+                                            SelectedVertsBoundsCenter());
+        } else {
+            const jpov::Vec3f pivot = SimsBoundsCenter();
+            for (Simulator& sim : sims_) {
+                sim.ApplyRotation(ToSimAxis(axis), deg, pivot);
+            }
         }
         SyncSimsToCloth();
     }
 
-    // 缩放步进：整体缩放乘 factor（> 1 放大、< 1 缩小），绕合并中心；累计系数夹到
+    // 缩放步进：有画笔选区时**只缩放选中的顶点**，枢轴 = 选区顶点包围盒中心；无选区时整体
+    // 缩放乘 factor（> 1 放大、< 1 缩小）、绕全体合并中心，累计系数夹到
     // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。**速度**不参与缩放。
+    // 说明：cloth_scale_（累计整体缩放镜像）只统计**全体**缩放；选区缩放是「几何编辑」，
+    //   不改变该镜像（因此也不受其上下界限制）。
     // Pre-condition: factor > 0。已蒙皮后冻结（no-op）。
     void StepScale(float factor) {
         CHECK_GT(factor, 0.0f);
         if (skinned_) {
+            return;
+        }
+        if (brush_.HasSelection()) {
+            ApplyPartialScalingToSelection(factor, SelectedVertsBoundsCenter());
+            SyncSimsToCloth();
             return;
         }
         const float target = ClampClothScale(cloth_scale_ * factor);
@@ -787,6 +857,73 @@ private:
         SyncSimsToCloth();
     }
 
+    // ── 选区顶点变换（左侧平移 / 旋转 / 缩放的「只作用于选区」路径）──
+    //
+    // 语义（Danis 2026-10-09）：3D 画笔存在选区时，左侧变换只作用于被选中顶点；
+    //   旋转 / 缩放的枢轴 = **选区顶点包围盒中心**。各 primitive 各自施于其选中的原始顶点
+    //   index（选区本就按 primitive 分组）。空选区的 primitive 是 no-op。
+    // 注意：这些是「几何编辑」——**只改当前位置**，既**不**改力学参照（绑定姿态）也**不**更新
+    //   关联邻居表（父类 ApplyPartial* 的语义）。力始终参照「**原始 mesh + 全体 scale/rotation**」
+    //   （= reference_positions()，可用右上面板「显示力学参照网格」查看），不含选区变换。
+
+    // 选区顶点包围盒中心（世界坐标，取当前几何）；无选区返回原点。
+    jpov::Vec3f SelectedVertsBoundsCenter() const {
+        jpov::Vec3f lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f hi(0.0f, 0.0f, 0.0f);
+        bool any = false;
+        const size_t prims = std::min(cloth_current_.size(), brush_.primitive_count());
+        for (size_t i = 0; i < prims; ++i) {
+            const std::vector<jpov::Vec3f>& pos = cloth_current_[i].mesh.positions;
+            for (uint32_t idx : brush_.selected(i)) {
+                if (idx >= pos.size()) {
+                    continue;
+                }
+                const jpov::Vec3f& p = pos[idx];
+                if (!any) {
+                    lo = p;
+                    hi = p;
+                    any = true;
+                } else {
+                    lo = jpov::Vec3f(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()),
+                                     std::min(lo.z(), p.z()));
+                    hi = jpov::Vec3f(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()),
+                                     std::max(hi.z(), p.z()));
+                }
+            }
+        }
+        if (!any) {
+            return jpov::Vec3f(0.0f, 0.0f, 0.0f);
+        }
+        return jpov::Vec3f((lo.x() + hi.x()) * 0.5f, (lo.y() + hi.y()) * 0.5f,
+                           (lo.z() + hi.z()) * 0.5f);
+    }
+
+    // 选区顶点平移（各 primitive 各自动作）。
+    void ApplyPartialTranslationToSelection(const jpov::Vec3f& delta) {
+        const size_t prims = std::min(sims_.size(), brush_.primitive_count());
+        for (size_t i = 0; i < prims; ++i) {
+            sims_[i].ApplyPartialTranslation(brush_.selected(i), delta);
+        }
+    }
+
+    // 选区顶点旋转（绕 pivot；位置与速度一起转）。
+    void ApplyPartialRotationToSelection(Axis axis, float degrees,
+                                         const jpov::Vec3f& pivot) {
+        const size_t prims = std::min(sims_.size(), brush_.primitive_count());
+        for (size_t i = 0; i < prims; ++i) {
+            sims_[i].ApplyPartialRotation(brush_.selected(i), axis, degrees, pivot);
+        }
+    }
+
+    // 选区顶点缩放（以 pivot 为中心；速度不参与）。
+    void ApplyPartialScalingToSelection(float factor, const jpov::Vec3f& pivot) {
+        const size_t prims = std::min(sims_.size(), brush_.primitive_count());
+        for (size_t i = 0; i < prims; ++i) {
+            sims_[i].ApplyPartialScaling(brush_.selected(i), factor, pivot);
+        }
+    }
+
+
     // 「重置衣服」：所有仿真器 Reset（回**启动时**的绑定姿态），停仿真回到可重调状态。
     // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
     void ResetClothMesh() {
@@ -801,6 +938,90 @@ private:
         sim_running_ = false;   // 停机，回到可重调状态
         SyncSimsToCloth();
         LOG(INFO) << "重置衣服：仿真器已回启动姿态（缩放归 1、仿真暂停）";
+    }
+
+    // ==================== 力学参照网格（蓝色 2D 像素可视化）====================
+    //
+    // 用于核对「力参照的网格」（Danis 2026-10-09）：仿真力的参照是「原始 mesh + 全体
+    // scale/rotation」（= 各仿真器 reference_positions()，见 soft_mesh_simulator.h），**不含**
+    // 选区变换与仿真形变。本方法把该参照的原始顶点（前 original_point_count() 个）投到屏幕，
+    // 用 2px 蓝色方块标记。
+    // 显示位置：把参照整体平移 offset = 实际 cloth 包围盒中心 − 参照包围盒中心
+    //（平移不参与参照；这样参照总与 cloth 居中对齐）。
+    // 仅当 show_ref_mesh_ 开（右上面板勾选）时绘制。
+    void DrawReferenceMesh(const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) {
+        if (!show_ref_mesh_ || sims_.empty()) {
+            return;
+        }
+        auto grow = [](jpov::Vec3f* lo, jpov::Vec3f* hi, bool* any, const jpov::Vec3f& p) {
+            if (!*any) {
+                *lo = p;
+                *hi = p;
+                *any = true;
+            } else {
+                *lo = jpov::Vec3f(std::min(lo->x(), p.x()), std::min(lo->y(), p.y()),
+                                  std::min(lo->z(), p.z()));
+                *hi = jpov::Vec3f(std::max(hi->x(), p.x()), std::max(hi->y(), p.y()),
+                                  std::max(hi->z(), p.z()));
+            }
+        };
+
+        // 参照包围盒（各 primitive 的原始顶点）。
+        jpov::Vec3f ref_lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f ref_hi(0.0f, 0.0f, 0.0f);
+        bool any_ref = false;
+        for (const Simulator& s : sims_) {
+            const std::vector<jpov::Vec3f>& rp = s.reference_positions();
+            const size_t n = std::min(s.original_point_count(), rp.size());
+            for (size_t j = 0; j < n; ++j) {
+                grow(&ref_lo, &ref_hi, &any_ref, rp[j]);
+            }
+        }
+        // 实际 cloth 包围盒（当前几何）。
+        jpov::Vec3f cur_lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f cur_hi(0.0f, 0.0f, 0.0f);
+        bool any_cur = false;
+        for (const jpov::GltfSaveMesh& m : cloth_current_) {
+            for (const jpov::Vec3f& p : m.mesh.positions) {
+                grow(&cur_lo, &cur_hi, &any_cur, p);
+            }
+        }
+        if (!any_ref || !any_cur) {
+            return;
+        }
+        const jpov::Vec3f ref_c((ref_lo.x() + ref_hi.x()) * 0.5f,
+                                (ref_lo.y() + ref_hi.y()) * 0.5f,
+                                (ref_lo.z() + ref_hi.z()) * 0.5f);
+        const jpov::Vec3f cur_c((cur_lo.x() + cur_hi.x()) * 0.5f,
+                                (cur_lo.y() + cur_hi.y()) * 0.5f,
+                                (cur_lo.z() + cur_hi.z()) * 0.5f);
+        const jpov::Vec3f offset(cur_c.x() - ref_c.x(), cur_c.y() - ref_c.y(),
+                                 cur_c.z() - ref_c.z());
+
+        // 相机基（与渲染相机 / 画笔一致）。
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg, winfo.width,
+                            winfo.height);
+        const jpov::Color kRefBlue{0.20f, 0.55f, 1.0f, 1.0f};
+        const float kMarkSize = 2.0f;
+        for (const Simulator& s : sims_) {
+            const std::vector<jpov::Vec3f>& rp = s.reference_positions();
+            const size_t n = std::min(s.original_point_count(), rp.size());
+            for (size_t j = 0; j < n; ++j) {
+                float px = 0.0f;
+                float py = 0.0f;
+                const jpov::Vec3f p(rp[j].x() + offset.x(), rp[j].y() + offset.y(),
+                                    rp[j].z() + offset.z());
+                if (!ProjectToScreen(basis, p, &px, &py, nullptr)) {
+                    continue;
+                }
+                cmds->DrawRect(
+                    /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                    /*size*/ {kMarkSize, kMarkSize}, kRefBlue);
+            }
+        }
     }
 
     // ==================== 面板（绘制 / UI）====================
@@ -1074,6 +1295,114 @@ private:
             weld_relative_ui_ ? "(相对局部边长)" : "(绝对距离)", total_weld,
             max_growth);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
+    }
+
+    // base color alpha 一键归一（面板按钮，见 base_color_alpha.h）：把贴图 alpha 置 1（不透明）。
+    //   - 画笔有选区 → 只处理「三顶点都被选中」的三角形覆盖的 texel（各 primitive 分别）；
+    //     某 primitive 若无这样的三角形 → 跳过（不动其贴图）。
+    //   - 画笔无选区 → 每个带 base color 贴图的 primitive 整图归一。
+    // 结果：更新 cloth_current_ 的材质来源（内嵌 PNG 字节，供保存）+ 重新上传 GPU。
+    void RunAlphaNormalize() {
+        if (cloth_current_.empty()) {
+            alpha_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        const bool whole = !brush_.HasSelection();
+        size_t done = 0;
+        size_t skipped = 0;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const jpov::GltfTextureRef& ref = cloth_current_[i].material.base_color_tex;
+            if (ref.empty()) {
+                ++skipped;  // 无 base color 贴图：无 alpha 可归一
+                continue;
+            }
+            std::vector<unsigned char> rgba;
+            int w = 0;
+            int h = 0;
+            if (!DecodeImageRgba(ref.uri, ref.bytes, &rgba, &w, &h)) {
+                ++skipped;
+                continue;
+            }
+            if (whole) {
+                NormalizeAlphaWholeImage(w, h, &rgba);
+            } else {
+                const std::vector<jpov::Vec2f> tris =
+                    CollectSelectedTrianglesUv(cloth_current_[i].mesh, brush_.selected(i));
+                if (tris.empty()) {
+                    ++skipped;  // 该 primitive 没有被全部选中的三角形：不动它
+                    continue;
+                }
+                NormalizeAlphaInUvTriangles(tris, w, h, &rgba);
+            }
+            std::vector<unsigned char> png;
+            if (!EncodeRgbaToPng(rgba, w, h, &png)) {
+                ++skipped;
+                continue;
+            }
+            PublishBaseColorTexture(i, png);
+            ++done;
+        }
+        alpha_msg_ = Format("base color alpha 归一：%zu 个 primitive（%s）、跳过 %zu",
+                            done, whole ? "整图" : "选区三角形", skipped);
+        LOG(INFO) << alpha_msg_;
+    }
+
+    // 把编辑后的 base color PNG 字节发布：更新 cloth_current_ 的材质来源 + 上传 GPU，
+    // 并回收上一次的临时贴图（避免泄漏；**原始**贴图由 GltfObject 持有，不在此释放）。
+    // Pre-condition: prim < cloth_current_.size()（且已上传资产，alpha_custom_tex_ 已就绪）。
+    void PublishBaseColorTexture(size_t prim, const std::vector<unsigned char>& png) {
+        CHECK_LT(prim, cloth_current_.size());
+        CHECK_EQ(alpha_custom_tex_.size(), cloth_current_.size());
+        const std::string key =
+            "cloth_alpha_" + std::to_string(prim) + "_" + HashBytes(png);
+        const uint32_t tex_id = RegisterTextureFromMemory(png, key);
+        const uint32_t prev = alpha_custom_tex_[prim];
+        if (prev != 0u && prev != tex_id) {
+            ReleaseTexture(prev);
+        }
+        alpha_custom_tex_[prim] = tex_id;
+        // 材质来源换成内嵌字节（保存时按内嵌图写回；下次归一从它继续解码，累计效果）。
+        jpov::GltfTextureRef edited;
+        edited.bytes = png;
+        edited.key = key;
+        cloth_current_[prim].material.base_color_tex = edited;
+        cloth_.primitives[prim].material.base_color_tex = tex_id;
+    }
+
+    // 材料重置（“重置衣服”的一半）：恢复 base color 贴图为**启动时**的原始来源 + GPU 句柄，
+    // 并回收本工具新上传的临时贴图。与 ResetClothMesh（几何重置）分开，便于各自复用/单测。
+    void ResetClothMaterial() {
+        for (size_t i = 0; i < alpha_custom_tex_.size(); ++i) {
+            if (alpha_custom_tex_[i] != 0u) {
+                ReleaseTexture(alpha_custom_tex_[i]);
+                alpha_custom_tex_[i] = 0u;
+            }
+            if (i < cloth_current_.size()) {
+                cloth_current_[i].material.base_color_tex = alpha_orig_ref_[i];
+                cloth_.primitives[i].material.base_color_tex = alpha_orig_handle_[i];
+            }
+        }
+        alpha_msg_ = "base color alpha 已重置";
+        LOG(INFO) << alpha_msg_;
+    }
+
+    // 「重置衣服」按钮：几何重置（ResetClothMesh）+ 材料重置（ResetClothMaterial）。两者分开
+    // 实现（后端可各自单独调用）；材质重置不受蒙皮冻结约束（贴图与权重无关）。
+    void ResetCloth() {
+        ResetClothMesh();
+        ResetClothMaterial();
+    }
+
+    // 内容哈希（FNV-1a 64）：给编辑后的贴图生成内容相关的去重 key 后缀。
+    static std::string HashBytes(const std::vector<unsigned char>& bytes) {
+        uint64_t hash = 1469598103934665603ull;
+        for (unsigned char b : bytes) {
+            hash ^= static_cast<uint64_t>(b);
+            hash *= 1099511628211ull;
+        }
+        char buf[17];
+        snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(hash));
+        return std::string(buf);
     }
 
     // ---- 资产包围盒的并集（相机自适应用）。----

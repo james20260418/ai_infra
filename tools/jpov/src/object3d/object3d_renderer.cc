@@ -577,10 +577,12 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
 
 void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
                                           MeshManager& mesh_mgr,
+                                          TextureManager& texture_mgr,
                                           ShaderManager& shader_mgr,
                                           const float shadow_vp[16],
                                           const float depth_vp[16],
-                                          unsigned int shadow_prog) {
+                                          unsigned int shadow_prog,
+                                          unsigned int shadow_prog_cutout) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawObject3DShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -593,6 +595,41 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
     CHECK_GT(up_len, 1e-8f) << "DrawObject3DShadow: up 向量不能为零";
     CHECK_GT(fr_len, 1e-8f) << "DrawObject3DShadow: front 向量不能为零";
 
+    // 双面（同 DrawObject3D）：材质声明 double_sided 时关背面剔除，使薄片资产
+    // （如镂空裙摆）两面都投出影子；否则保持背面剔除（与旧行为一致）。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        glEnable(GL_CULL_FACE);
+    }
+
+    // alpha test（cutout）：材质为 kMask 时选含 discard 的变体 program。
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? shadow_prog_cutout : shadow_prog;
+    glUseProgram(sp);
+
+    // cutout：上传阈值 + 绑 baseColor 贴图（同主 pass 的 unit 分配，见 texture_units.h）。
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"),
+                    cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawObject3DShadow: cutout 且 base_color_tex 非 0 但 mesh 无 kUV"
+                << "，无法采样 alpha（mesh_id=" << cmd.mesh_id << "）";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u)
+                << "DrawObject3DShadow: base_color_tex " << cmd.material.base_color_tex
+                << " 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+
     float model[16];
     float shadow_mvp[16];
     float depth_mvp[16];
@@ -600,10 +637,9 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
     Mat4Mul(shadow_vp, model, shadow_mvp);
     Mat4Mul(depth_vp, model, depth_mvp);
 
-    glUseProgram(shadow_prog);
-    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowMVP"),
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowMVP"),
                        1, GL_FALSE, shadow_mvp);
-    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthMVP"),
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthMVP"),
                        1, GL_FALSE, depth_mvp);
 
     glBindVertexArray(mesh->vao);
@@ -627,8 +663,20 @@ void Object3DRenderer::UploadSunData(
     const float shadow_depth_vp[][16],
     const float shadow_texel_world[],
     const ShadowConfig& cfg,
+    const ShadowPcfConfig& pcf,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
+
+    // PCF 采样核参数校验 + 黄金角螺旋采点偏移表（CPU 预算，见
+    // ShadowPcfConfig::GoldenSpiralOffsets —— 公式真值在那边）。只算一次、两张 shader
+    // 共用；shader 里仅剩「查表 + 乘加」，无 per-tap sqrt/除法/cos/sin。
+    CHECK_GE(pcf.tap_count, 1) << "ShadowPcfConfig::tap_count 必须 ≥1";
+    CHECK_LE(pcf.tap_count, ShadowPcfConfig::kMaxPcfTaps)
+        << "ShadowPcfConfig::tap_count 至多 " << ShadowPcfConfig::kMaxPcfTaps;
+    CHECK_GT(pcf.radius_texels, 0.0f) << "ShadowPcfConfig::radius_texels 必须 >0";
+    float pcf_offsets[2 * ShadowPcfConfig::kMaxPcfTaps];
+    pcf.GoldenSpiralOffsets(pcf_offsets);
+    const float pcf_inv_tap_count = 1.0f / static_cast<float>(pcf.tap_count);
 
     const unsigned int progs[2] = {prog, prog_full};
     for (int pidx = 0; pidx < 2; ++pidx) {
@@ -654,6 +702,20 @@ void Object3DRenderer::UploadSunData(
                     cfg.cascade_blend_fraction);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeStart"), cfg.fade_start);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeEnd"), cfg.fade_end);
+
+        // PCF 采样核（每帧可切；见 ShadowPcfConfig）：模式/点数/半径 + CPU 预算的采点表。
+        glUniform1i(shader_mgr.GetUniform(p, "uPcfMode"),
+                    static_cast<int>(pcf.mode));
+        glUniform1i(shader_mgr.GetUniform(p, "uPcfTapCount"), pcf.tap_count);
+        glUniform1f(shader_mgr.GetUniform(p, "uPcfRadiusTexels"), pcf.radius_texels);
+        glUniform1f(shader_mgr.GetUniform(p, "uPcfInvTapCount"), pcf_inv_tap_count);
+        // ⚠️ 逐元素 glUniform2f 而非 glUniform2fv：Windows 的 MinGW 扩展加载器
+        //   （third_party/gl_loader-mingw）未声明 glUniform2fv（同 uAmbientTricolor 的处理）。
+        for (int i = 0; i < pcf.tap_count; ++i) {
+            const std::string uni = "uPcfOffsets[" + std::to_string(i) + "]";
+            glUniform2f(shader_mgr.GetUniform(p, uni.c_str()),
+                        pcf_offsets[2 * i], pcf_offsets[2 * i + 1]);
+        }
 
         // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
         CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))

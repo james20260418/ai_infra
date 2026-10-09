@@ -499,8 +499,20 @@ void SkeletonRenderer::UploadSunData(
     const float shadow_depth_vp[][16],
     const float shadow_texel_world[],
     const ShadowConfig& cfg,
+    const ShadowPcfConfig& pcf,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
+
+    // PCF 采样核参数校验 + 黄金角螺旋采点偏移表（CPU 预算，见
+    // ShadowPcfConfig::GoldenSpiralOffsets —— 公式真值在那边）。shader 里仅剩
+    // 「查表 + 乘加」，无 per-tap sqrt/除法/cos/sin。
+    CHECK_GE(pcf.tap_count, 1) << "ShadowPcfConfig::tap_count 必须 ≥1";
+    CHECK_LE(pcf.tap_count, ShadowPcfConfig::kMaxPcfTaps)
+        << "ShadowPcfConfig::tap_count 至多 " << ShadowPcfConfig::kMaxPcfTaps;
+    CHECK_GT(pcf.radius_texels, 0.0f) << "ShadowPcfConfig::radius_texels 必须 >0";
+    float pcf_offsets[2 * ShadowPcfConfig::kMaxPcfTaps];
+    pcf.GoldenSpiralOffsets(pcf_offsets);
+    const float pcf_inv_tap_count = 1.0f / static_cast<float>(pcf.tap_count);
 
     glUseProgram(prog);
     glUniform1i(shader_mgr.GetUniform(prog, "uHasSun"), sun.has_value() ? 1 : 0);
@@ -523,6 +535,19 @@ void SkeletonRenderer::UploadSunData(
                 cfg.cascade_blend_fraction);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeStart"), cfg.fade_start);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeEnd"), cfg.fade_end);
+
+    // PCF 采样核（每帧可切；见 ShadowPcfConfig）：模式/点数/半径 + CPU 预算的采点表。
+    glUniform1i(shader_mgr.GetUniform(prog, "uPcfMode"), static_cast<int>(pcf.mode));
+    glUniform1i(shader_mgr.GetUniform(prog, "uPcfTapCount"), pcf.tap_count);
+    glUniform1f(shader_mgr.GetUniform(prog, "uPcfRadiusTexels"), pcf.radius_texels);
+    glUniform1f(shader_mgr.GetUniform(prog, "uPcfInvTapCount"), pcf_inv_tap_count);
+    // ⚠️ 逐元素 glUniform2f 而非 glUniform2fv：Windows 的 MinGW 扩展加载器
+    //   （third_party/gl_loader-mingw）未声明 glUniform2fv（同 uAmbientTricolor 的处理）。
+    for (int i = 0; i < pcf.tap_count; ++i) {
+        const std::string uni = "uPcfOffsets[" + std::to_string(i) + "]";
+        glUniform2f(shader_mgr.GetUniform(prog, uni.c_str()),
+                    pcf_offsets[2 * i], pcf_offsets[2 * i + 1]);
+    }
 
     // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
     CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))
@@ -570,12 +595,14 @@ void SkeletonRenderer::UploadSunData(
 void SkeletonRenderer::DrawSkinnedMeshShadow(
     const SkinnedMeshCommand& cmd,
     MeshManager& mesh_mgr,
+    TextureManager& texture_mgr,
     ShaderManager& shader_mgr,
     const SkeletonManager::GpuHandles& gh,
     int pose_count,
     const float shadow_vp[16],
     const float depth_vp[16],
     unsigned int shadow_prog,
+    unsigned int shadow_prog_cutout,
     InstanceBuffer& instance_model_buf,
     InstanceBuffer& instance_pose_buf,
     InstanceBuffer& instance_thickness_buf,
@@ -606,38 +633,70 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
                                      instance_thickness_buf, instance_partial_buf);
 
-    glUseProgram(shadow_prog);
+    // 双面（同 DrawSkinnedMesh）：材质声明 double_sided 时关背面剔除，使镂空薄片
+    // 蒙皮资产（如蕾丝裙）两面都投出影子；否则保持背面剔除（与旧行为一致）。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        glEnable(GL_CULL_FACE);
+    }
+
+    // alpha test（cutout）：材质为 kMask 时选含 discard 的变体 program。
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? shadow_prog_cutout : shadow_prog;
+    glUseProgram(sp);
+
+    // cutout：上传阈值 + 绑 baseColor 贴图（同主 pass 的 unit 分配，见 texture_units.h）。
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"),
+                    cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawSkinnedMeshShadow: cutout 且 base_color_tex 非 0 但 mesh 无 kUV"
+                << "，无法采样 alpha（mesh_id=" << cmd.mesh_id << "）";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshShadow: base_color_tex 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+
     glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
     glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseAtlas"), kTexUnitPoseAtlas);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uBoneCount"), gh.bone_count);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPoseRow"), 0);
-    glUniform2f(glGetUniformLocation(shadow_prog, "uAtlasDim"),
+    glUniform1i(glGetUniformLocation(sp, "uPoseAtlas"), kTexUnitPoseAtlas);
+    glUniform1i(glGetUniformLocation(sp, "uBoneCount"), gh.bone_count);
+    glUniform1i(glGetUniformLocation(sp, "uPoseRow"), 0);
+    glUniform2f(glGetUniformLocation(sp, "uAtlasDim"),
                 static_cast<float>(SkeletonManager::kPoseAtlasDim),
                 static_cast<float>(SkeletonManager::kPoseAtlasDim));
     // 部位粗细：与主 pass **同一开关 + 同一份表 + 同一份 per-instance 系数**（异则影子错位）。
-    glUniform1i(glGetUniformLocation(shadow_prog, "uThicknessEnabled"),
+    glUniform1i(glGetUniformLocation(sp, "uThicknessEnabled"),
                 gh.thickness_bind_tex != 0 ? 1 : 0);
     glActiveTexture(GL_TEXTURE0 + kTexUnitThicknessBind);
     glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uThicknessBind"), kTexUnitThicknessBind);
+    glUniform1i(glGetUniformLocation(sp, "uThicknessBind"), kTexUnitThicknessBind);
     // 部位额外旋转：与主 pass **同一开关 + 同一份表 + 同一份 per-instance 旋转**（否则影子错位）。
     const int partial_on =
         (gh.partial_rotation_bind_tex != 0 && gh.partial_rotation_channel_tex != 0 &&
          AnyNonIdentityPartialRotation(cmd.instances))
             ? 1 : 0;
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialEnabled"), partial_on);
+    glUniform1i(glGetUniformLocation(sp, "uPartialEnabled"), partial_on);
     glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationBind);
     glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_bind_tex);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialBind"), kTexUnitPartialRotationBind);
+    glUniform1i(glGetUniformLocation(sp, "uPartialBind"), kTexUnitPartialRotationBind);
     glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationChannel);
     glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_channel_tex);
-    glUniform1i(glGetUniformLocation(shadow_prog, "uPartialChannel"),
+    glUniform1i(glGetUniformLocation(sp, "uPartialChannel"),
                 kTexUnitPartialRotationChannel);
     // 光空间 VP 走 uniform（不含 model）。
-    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowViewProj"),
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowViewProj"),
                        1, GL_FALSE, shadow_vp);
-    glUniformMatrix4fv(glGetUniformLocation(shadow_prog, "uShadowDepthViewProj"),
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthViewProj"),
                        1, GL_FALSE, depth_vp);
 
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());

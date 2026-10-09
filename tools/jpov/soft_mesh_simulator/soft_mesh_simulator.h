@@ -189,6 +189,15 @@ public:
     //   2. （后续）关联邻居表 nb_list = { j : |v_j - v_i| <= d }
     void Init(const jpov::MeshData& mesh, float bind_distance);
 
+    // 同上，但额外指定**焊接容差**（米）：把位置相距 ≤ weld_tolerance 的**原始顶点**
+    //   并成**同一个仿真点**（一条缝就是一个质点）——仿真点位置 = 该组质心；Step / 即时变换后，
+    //   ExtractMesh 把该点位置**写回组内所有原始顶点**（输出 mesh 的顶点数 / 拓扑 / 属性不变，
+    //   只是组内顶点逐帧保持重合 ⇒ 缝不会裂）。0 = 关焊接（每个顶点各自一个仿真点，旧行为）。
+    //   ⚠️ 容差要**远小于顶点间距**（只并真正重合的缝合点）；过大（> 约 2×顶点间距）会把整片
+    //   网格并成极少的点（实测本工具资产顶点间距中位数 ~6mm，容差 0.02m 即全并为 1 点）。
+    // Pre-condition: bind_distance > 0；weld_tolerance >= 0。
+    void Init(const jpov::MeshData& mesh, float bind_distance, float weld_tolerance);
+
     // ⭐ 主入口：网格经 dt 秒动力学后，变成新的网格。
     //
     // 返回**按值**的新网格，调用方可直接交给渲染/下一步。
@@ -272,14 +281,14 @@ public:
         return ComputeAccel(idx, sim_positions_[idx]);
     }
     // 其中原始顶点数（= 输入网格顶点数）。
-    size_t original_point_count() const { return vertex_count_; }
+    size_t original_point_count() const { return orig_point_count_; }
     // 其中虚拟顶点数（加密插入）。
     size_t virtual_point_count() const {
-        return sim_positions_.size() - vertex_count_;
+        return sim_positions_.size() - orig_point_count_;
     }
 
-    // 仿真点的绑定姿态位置（索引 0..original_point_count()-1 为原始顶点，
-    // 其后为虚拟顶点）。纯查询，返回常量引用。
+    // 仿真点的**当前**位置（索引 0..original_point_count()-1 为原始仿真点（焊接组质心；
+    // 未开焊接时 = 原始顶点），其后为虚拟顶点）。纯查询，返回常量引用。
     const std::vector<geom::Vec3<float>>& sim_positions() const {
         return sim_positions_;
     }
@@ -407,9 +416,33 @@ public:
     // Pre-condition（不满足即 LOG(FATAL)）：已 Init；factor > 0 且有限；pivot 有限。
     void ApplyScaling(float factor, const geom::Vec3<float>& pivot);
 
+    // ── 即时操作（**部分顶点**）：只对指定的**原始顶点子集**施加变换，其余顶点不动 ──
+    //
+    // 用途（Danis 2026-10-09）：3D 画笔存在选区时，clothing tool 左侧「平移 / 旋转 / 缩放」
+    //   只作用于被选中的顶点（无选区时走全体版 ApplyTranslation/Rotation/Scaling）。
+    //   旋转 / 缩放的枢轴由调用方给（clothing tool 用「选区顶点包围盒中心」）。
+    //
+    // 与全体 Apply* 的关键差异：**不更新关联邻居表**（neighbors_ / nb_init_dist_），
+    //   也**不改绑定姿态**（力学参照 reference_positions_）。关联动力学（弹簧参考形状 pij(0)
+    //   与初始距离分母）只随**全体**操作更新；局部编辑属「几何编辑」，**不计入**力学参照。
+    //   这是刻意的简化（Danis：会十分复杂）。
+    //
+    // 语义：**只改当前位置**（sim_positions_）——旋转时速度同步旋转，平移 / 缩放不动速度；
+    //   变换后立即 ExtractMesh（法线 / 切线由显示层重算）。
+    //   ⚠️ **不改绑定姿态**：力学参照始终 = 原始 mesh + 全体 scale/rotation（见
+    //   reference_positions()），故部分变换不会被弹簧当作新的静止形状。
+    // Pre-condition（不满足即 LOG(FATAL)）：已 Init；每个 index < original_point_count()；
+    //   数值参数有限（factor > 0）。
+    void ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indices,
+                                 const geom::Vec3<float>& delta);
+    void ApplyPartialRotation(const std::vector<uint32_t>& vertex_indices, Axis axis,
+                              float degrees, const geom::Vec3<float>& pivot);
+    void ApplyPartialScaling(const std::vector<uint32_t>& vertex_indices, float factor,
+                             const geom::Vec3<float>& pivot);
+
     // ── 仿真点速度（纯查询）──
     //
-    // 与 sim_positions() 同序同长：索引 0..original_point_count()-1 = 原始顶点，
+    // 与 sim_positions() 同序同长：索引 0..original_point_count()-1 = 原始仿真点，
     // 其后为虚拟顶点。未 Step 过时全为 0。供单测/调试读取。
     const std::vector<geom::Vec3<float>>& sim_velocities() const {
         return sim_velocities_;
@@ -417,6 +450,17 @@ public:
 
     // 当前取景包围盒（纯查询）。
     SimBounds Bounds() const;
+
+    // 力学参照位置（“绑定姿态参照”）——仿真力的公式里的 pij(0) / |pij(0)| 用它（见 DESIGN §2）。
+    //   = **原始 mesh**（Init 输入，含长边虚拟点 / 桥接连通点）经**全体**即时操作
+    //   （ApplyTranslation / ApplyRotation / ApplyScaling）变换后的位置；**不含**部分顶点变换
+    //   （ApplyPartial*）与仿真形变。索引 0..original_point_count()-1 = 原始仿真点（焊接组质心），
+    //   其后为虚拟点。
+    //   注意：全体平移也会写进本数组，但力公式用相对 offset（pij(0) = 两者之差）⇒ 平移无影响。
+    // 供查看器可视化「力学参照网格」（clothing tool 的蓝色调试点）用。
+    const std::vector<geom::Vec3<float>>& reference_positions() const {
+        return bind_positions_;
+    }
 
     // 回到**启动几何**（Init 时的网格，含长边虚拟点 / 连通性桥接点）并清零时间 / 步数 / 速度。
     // ⭐ 也会把**物理绑定姿态**（bind_positions_ / nb_init_dist_）一并复位回启动几何——
@@ -427,9 +471,10 @@ public:
     void Reset();
 
 private:
-    // 由输入网格构建仿真点集合（含长边加密），返回虚拟点数量。
-    // 纯 CPU，只读输入，无副作用（除了填充 sim_positions_）。
-    size_t BuildSimulationPoints(const jpov::MeshData& mesh, float d);
+    // 由输入网格构建仿真点集合（含长边加密 + 可选焊接），返回**原始仿真点数** G。
+    // 填充 sim_positions_（前 G 个 = 焊接组质心/原始顶点，其后 = 虚拟点）与 vertex_to_group_。
+    // 纯 CPU，只读输入。
+    size_t BuildSimulationPoints(const jpov::MeshData& mesh, float d, float weld_tolerance);
 
     // 由当前的 sim_positions_（绑定姿态）一次性构建**关联邻居表** nb_list
     // （DESIGN.md §2.1）：对每点 i，记录所有满足 |v_j(0) - v_i(0)| <= d 的 j
@@ -537,10 +582,15 @@ private:
     size_t vertex_count_ = 0;  // 缓存（每帧 UI 要显示，避免反复算）
     size_t triangle_count_ = 0;
 
+    // ── 焊接（2026-10-09 Danis，方案 B）──
+    // 把位置重合的原始顶点并成一个仿真点；ExtractMesh 时写回组内所有顶点。见 Init 说明。
+    size_t orig_point_count_ = 0;             // 焊接后的原始仿真点数（G）
+    std::vector<uint32_t> vertex_to_group_;   // 原始顶点 i → 其仿真点下标（0..G-1）
+
     bool inited_ = false;      // 是否已 Init（Reset 的前置校验）
 
-    // 把仿真点当前的前 vertex_count_ 个位置写回 mesh_.positions（提取变形 mesh）。
-    // 虚拟顶点不进入输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
+    // 把变形后的仿真点位置写回 mesh_.positions：每个**原始顶点**取它所属焊接组的位置
+    // （vertex_to_group_）；虚拟顶点不进入输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
     void ExtractMesh();
 
     // 在给定子步长 dt_sub 上执行一次「重力 + 对称阻尼」的 leapfrog（KDK）积分，

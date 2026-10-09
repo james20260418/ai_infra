@@ -182,6 +182,18 @@ public:
     // Pre-condition: gl_texture_id != 0, width > 0, height > 0
     uint32_t RegisterTexture(uint32_t gl_texture_id, int width, int height);
 
+    // RegisterTexture: 从**内存里的编码图片字节**（PNG/JPEG…）加载纹理到 GPU。
+    //
+    // 用于「本来就已在内存里」的图（如程序生成 / 编辑后的贴图、glb 内嵌图），无需先落盘。
+    // key：去重身份（同一 key + 选项只加载一次、只上传一次）；调用方应给**内容相关**的键，
+    //   （如内容哈希），不要用可能与别的图重名的东西。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: encoded 非空；key 非空
+    uint32_t RegisterTextureFromMemory(const std::vector<unsigned char>& encoded,
+                                       const std::string& key,
+                                       const jpov::TextureOptions& opts = {});
+
     // ReleaseTexture: 释放纹理。
     //
     // 纹理 ID 不存在 → 静默忽略。

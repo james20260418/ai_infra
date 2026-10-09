@@ -382,6 +382,133 @@ TEST(SoftMeshSimulatorTest, ResetRestoresStartupGeometryAfterTransforms) {
     EXPECT_EQ(sim.step_count(), 0u);
 }
 
+// Ⓐ 部分顶点即时变换（2026-10-09 Danis）：只对指定原始顶点子集生效，其余顶点不动。
+//   用不对称网格 + 只选一个顶点，能真区分「只动选中」与「动了全体」。
+TEST(SoftMeshSimulatorTest, PartialTranslationMovesOnlySelectedVertices) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());  // 顶点 (-2,1,-5) / (3,-4,0) / (0,7,2)
+    const geom::Vec3<float> a0 = sim.sim_positions()[0];
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialTranslation({0}, geom::Vec3<float>(5.0f, -1.0f, 2.0f));
+
+    const auto& p = sim.sim_positions();
+    EXPECT_NEAR(p[0].x(), a0.x() + 5.0f, 1e-6f);
+    EXPECT_NEAR(p[0].y(), a0.y() - 1.0f, 1e-6f);
+    EXPECT_NEAR(p[0].z(), a0.z() + 2.0f, 1e-6f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+
+    // Reset 回到启动几何（部分变换也不应污染 startup）。
+    sim.Reset();
+    EXPECT_LT((sim.sim_positions()[0] - a0).Norm(), 1e-6f);
+}
+
+// 部分旋转：绕给定 pivot、只转选中顶点（这里绕原点，y 轴 +90°）。
+//   绕 +Y 轴 +90°： (x,y,z) → (z, y, -x)。
+TEST(SoftMeshSimulatorTest, PartialRotationRotatesOnlySelectedAroundPivot) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialRotation({0}, Axis::kY, 90.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const auto& p = sim.sim_positions();
+    // 顶点 0 原 (-2,1,-5) → (-5,1,2)。
+    EXPECT_NEAR(p[0].x(), -5.0f, 1e-5f);
+    EXPECT_NEAR(p[0].y(), 1.0f, 1e-5f);
+    EXPECT_NEAR(p[0].z(), 2.0f, 1e-5f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+}
+
+// 部分缩放：以 pivot 为中心、只缩放选中顶点（这里 pivot=原点、factor=2）。
+TEST(SoftMeshSimulatorTest, PartialScalingScalesOnlySelectedAroundPivot) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialScaling({0}, 2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const auto& p = sim.sim_positions();
+    // 顶点 0 原 (-2,1,-5) → (-4,2,-10)。
+    EXPECT_NEAR(p[0].x(), -4.0f, 1e-6f);
+    EXPECT_NEAR(p[0].y(), 2.0f, 1e-6f);
+    EXPECT_NEAR(p[0].z(), -10.0f, 1e-6f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+}
+
+// 空选区：部分变换是 no-op（不动任何顶点）。
+TEST(SoftMeshSimulatorTest, PartialTransformEmptySelectionIsNoOp) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const std::vector<geom::Vec3<float>> before = sim.sim_positions();
+    sim.ApplyPartialTranslation({}, geom::Vec3<float>(9.0f, 9.0f, 9.0f));
+    sim.ApplyPartialRotation({}, Axis::kX, 30.0f, geom::Vec3<float>(1.0f, 2.0f, 3.0f));
+    sim.ApplyPartialScaling({}, 3.0f, geom::Vec3<float>(1.0f, 2.0f, 3.0f));
+    for (size_t i = 0; i < before.size(); ++i) {
+        EXPECT_LT((sim.sim_positions()[i] - before[i]).Norm(), 1e-6f);
+    }
+}
+
+// 部分顶点变换**不**改变力学参照（绑定姿态）——参照只随**全体** scale/rotation 更新。
+//   这是 Danis 2026-10-09 的设计：力参照 = 原始 mesh + 全体 scale/rotation，不含部分变换。
+TEST(SoftMeshSimulatorTest, PartialTransformDoesNotChangeReference) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const std::vector<geom::Vec3<float>> ref0 = sim.reference_positions();
+
+    sim.ApplyPartialTranslation({0}, geom::Vec3<float>(5.0f, 5.0f, 5.0f));
+    sim.ApplyPartialRotation({0, 1}, Axis::kY, 45.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    sim.ApplyPartialScaling({2}, 2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    ASSERT_EQ(sim.reference_positions().size(), ref0.size());
+    for (size_t i = 0; i < ref0.size(); ++i) {
+        EXPECT_LT((sim.reference_positions()[i] - ref0[i]).Norm(), 1e-6f)
+            << "力学参照不该被部分变换改变 (点 " << i << ")";
+    }
+
+    // 对照：**全体**缩放确实会改变参照（证明上面的断言不是恒真）。
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    EXPECT_GT((sim.reference_positions()[0] - ref0[0]).Norm(), 1e-3f)
+        << "全体缩放应改变参照";
+}
+
+// 焊接（方案 B，2026-10-09 Danis）：位置重合的顶点并成一个仿真点；多步后缝不裂。
+// 网格 = 一个 quad（两个三角形共享边，但共享边顶点**重复**）：A,B,C + B',D,C'，B'≡B、C'≡C。
+TEST(SoftMeshSimulatorTest, WeldMergesCoincidentVerticesAndKeepsSeamClosed) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    m.indices = {0, 1, 2, 3, 4, 5};
+    m.Validate();
+
+    // 不开焊接：6 个原始仿真点。
+    Simulator a;
+    a.Init(m, /*d=*/0.1f, /*weld_tolerance=*/0.0f);
+    EXPECT_EQ(a.original_point_count(), 6u);
+
+    // 开焊接（容差远小于顶点间距=1）：B与B'、C与C' 各并 → 4 个原始仿真点。
+    Simulator b;
+    b.Init(m, /*d=*/0.1f, /*weld_tolerance=*/1e-3f);
+    EXPECT_EQ(b.original_point_count(), 4u) << "重合顶点应被焊接合并";
+
+    // 关键不变量：多步后，原本重合的顶点必须仍**逐位重合**（缝不裂）。
+    for (int s = 0; s < 120; ++s) {
+        b.Step(Simulator::kDefaultDt);
+    }
+    const jpov::MeshData& out = b.mesh();
+    ASSERT_EQ(out.positions.size(), 6u) << "输出 mesh 仍应是原始拓扑（6 顶点）";
+    EXPECT_LT((out.positions[1] - out.positions[3]).Norm(), 1e-6f)
+        << "B/B' 缝裂了";
+    EXPECT_LT((out.positions[2] - out.positions[5]).Norm(), 1e-6f)
+        << "C/C' 缝裂了";
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;

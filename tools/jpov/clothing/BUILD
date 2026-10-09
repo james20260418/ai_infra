@@ -21,6 +21,14 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-09：**3D 画笔（选区）+ 中键纵向 pan**——顶部中间画笔面板（激活 / 半径滑条）；
 #     激活态下左键涂抹把邻近顶点选入选区（brush_tool.h / camera_projection.h）；
 #     中键纵向 pan 注视点（半屏 = 1m）。
+#   - 2026-10-09（本 PR）：**base color alpha 归一 + 选区变换**——
+#     ① 蒙皮面板「base color alpha 归一」按钮（base_color_alpha.h）；
+#     ② 左侧平移/旋转/缩放：画笔有选区时只作用于选中顶点（枢轴 = 选区顶点包围盒中心）；
+#        底层 = soft_mesh_simulator 新增 ApplyPartial{Translation,Rotation,Scaling}；
+#        力学参照 = 原始 mesh + 全体 scale/rotation（不含选区变换）。
+#     ③ 仿真面板「显示力学参照网格」勾选：参照网格原始顶点用蓝色 2D 像素画出。
+#     ④ 仿真焊接（方案 B）：重合顶点在仿真里并成一个质点（soft_mesh_simulator::Init 新增
+#        weld_tolerance 参数），Step 后写回组内所有顶点 ⇒ 缝合缝不裂。
 #     仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
@@ -45,6 +53,24 @@ cc_library(
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],
+)
+
+# base color 贴图 alpha 归一（纯区域逻辑 + stb 图片编/解码）。
+#   - 纯函数（区域归一 / 收集选区三角形 UV）无 GL，可单测；
+#   - 解/编码依赖 stb（仅实现文件）。
+cc_library(
+    name = "base_color_alpha",
+    srcs = ["base_color_alpha.cc"],
+    hdrs = ["base_color_alpha.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/src:orm_unpack",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
 )
 
 # 软布自动蒙皮（weight transfer）—— header-only 纯函数，无 GL / glTF / 渲染栈依赖。
@@ -121,6 +147,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":base_color_alpha",
         ":brush_tool",
         ":clothing_axis_input",
         ":clothing_transform",
@@ -201,6 +228,23 @@ cc_test(
     srcs = ["mesh_hole_fill_test.cc"],
     deps = [
         ":mesh_hole_fill",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# base color alpha 归一纯函数单测（整图 / UV 三角形区域 / 选区三角形收集；无 GL）。
+cc_test(
+    name = "base_color_alpha_test",
+    srcs = ["base_color_alpha_test.cc"],
+    deps = [
+        ":base_color_alpha",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
         "@gtest//:gtest_main",

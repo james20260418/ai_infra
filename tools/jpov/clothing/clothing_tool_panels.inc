@@ -406,14 +406,14 @@
     // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
     // 这样窗口 resize 时右上角面板始终贴住右上角。
     //
-    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
-    //     + buffer(1) + 切向保留系数(1) + 按钮行(1) + 状态行(2) = 12。
+    // 行：标题(1) + 关联距离(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
+    //     + buffer(1) + 切向保留系数(1) + 显示力学参照网格(1) + 按钮行(1) + 状态行(2) = 14。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kPanelMargin;  // 贴右边缘
         const float panel_y  = kPanelMargin;
-        constexpr int kRows = 13;
+        constexpr int kRows = 14;
         PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
         const float left = frame.left;
         const float row_w = frame.row_w;
@@ -484,6 +484,12 @@
                         /*decimal_places*/ 2);
         row_y += step_y;
 
+        // ---- 力学参照网格：开启后用蓝色 2D 像素画出「力参照的网格」
+        //      （= 原始 mesh + 全体 scale/rotation；不含选区变换 / 仿真形变，见 README）。----
+        ui_.Checkbox("显示力学参照网格", &show_ref_mesh_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
         // ---- 按钮行：[暂停/继续] [重置衣服] ----
         const float kBtnW = (row_w - kSpacing) * 0.5f;
         const char* pause_label = sim_running_ ? "暂停仿真" : "继续仿真";
@@ -494,7 +500,7 @@
         if (ui_.Button("重置衣服",
                        jpov::UiRect{{left + kBtnW + kSpacing, row_y},
                                     {kBtnW, kRowH}})) {
-            ResetClothMesh();
+            ResetCloth();
         }
         row_y += step_y;
 
@@ -524,10 +530,11 @@
     //
     // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
     // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
-    //             + 焊接模式勾选(1) + 焊接参数输入(1) + 状态文本(1) = 7。
+    //             + 焊接模式勾选(1) + 焊接参数输入(1) + base color alpha 归一按钮(1)
+    //             + 蒙皮状态(1) + alpha 状态(1) = 9。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 7;
+        constexpr int kRows = 9;
         const float panel_x = win_w - panel_w - kPanelMargin;  // 贴右边缘
         const float panel_y = win_h - PanelHeight(kRows) - kPanelMargin;  // 贴底边缘
         PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
@@ -597,10 +604,28 @@
         }
         row_y += step_y;
 
-        // 状态 / 提示（可能为空）。
+        // base color alpha 归一：把贴图 alpha 置 1（不透明）。画笔有选区 → 只处理「被选中
+        // 顶点围成的三角形」覆盖的 texel；无选区 → 整图。（见 base_color_alpha.h / README）
+        if (ui_.Button("base color alpha 归一",
+                       jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            RunAlphaNormalize();
+        }
+        row_y += step_y;
+
+        // 蒙皮状态 / 提示（可能为空）。
         if (!skin_msg_.empty()) {
             const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
             cmds->DrawText(skin_msg_,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
+        row_y += step_y;
+
+        // alpha 归一状态 / 提示（可能为空）。
+        if (!alpha_msg_.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+            cmds->DrawText(alpha_msg_,
                            /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                            kFontSize, kForeground,
                            jpov::TextAlignment::kTopLeft, kViewerFontAlias);
