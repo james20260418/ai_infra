@@ -1583,14 +1583,53 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(2, mrt_bufs);
             }
 
-            // ── 点状雾火（体积雾 + 火，fire_fog）—— 与 horizon_fog 同为「其它 3D
+            // ── 点状雾火（froxel 体积雾）—— 与 horizon_fog 同为「其它 3D
             //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
-            //    v1 骨架：Draw 尚未实现（空操作）。见 docs/jpov_fire_fog_design.md §10.6。
+            //    只读 MRT#1 场景深度做 z 裁剪；靠 GL_ONE/GL_SRC_ALPHA 混合与帧缓冲已有
+            //    颜色合成（不采样场景颜色）。见 docs/jpov_froxel_design.md。
             if (!cmds.point_fogs.empty()) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件0；雾不碰场景深度附件。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+#ifdef JPOV_WITHOUT_MSAA
+                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+#endif
+                // 物理光照：内散射源 = 天光单色 ambient + 太阳经 CSM 阴影
+                // （god ray 来自后者）。ambient 走 sky 的单色推导函数。
+                const FireFogParams ff_params = cmds.fire_fog.value_or(FireFogParams{});
+                FireFogLighting ff_light;
+                if (cmds.sky.has_value()) {
+                    ff_light.ambient_color = cmds.sky->AmbientColor();
+                    ff_light.ambient_intensity = cmds.sky->AmbientIntensity();
+                } else if (cmds.ambient.has_value()) {
+                    ff_light.ambient_color = cmds.ambient->color;
+                    ff_light.ambient_intensity = cmds.ambient->intensity;
+                }
+                ff_light.sun = eff_sun;
+                ff_light.shadow_cfg = shadow_cfg_;
+                if (eff_sun.has_value()) {
+                    ff_light.shadow_fbos = shadow_fbos_;
+                    std::memcpy(ff_light.shadow_vp, shadow_vp_, sizeof(shadow_vp_));
+                    std::memcpy(ff_light.shadow_depth_vp, shadow_depth_vp_,
+                                sizeof(shadow_depth_vp_));
+                    std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
+                                sizeof(shadow_texel_world_));
+                }
                 fire_fog_renderer_.Draw(cmds.point_fogs, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
+                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
+                                        ff_params, ff_light);
+#ifdef JPOV_WITHOUT_MSAA
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
+#endif
+                const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
+                                               GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_ff);
             }
 
 #ifndef JPOV_WITHOUT_MSAA
