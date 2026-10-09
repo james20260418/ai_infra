@@ -211,6 +211,29 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
 
 ---
 
+## 10. 后续 / 可选（业界 low-hanging fruit，备忘，不阻塞主线）
+
+> 简单引用，供后续按需加。
+
+- **① STBN（时空蓝噪声）+ 时域重投影 / EMA**：把抖动从「每帧白噪」变成「空间+时间都蓝噪声」的采样，
+  再配历史帧累积 ⇒ 收敛快、感知误差小，**不必靠大高斯把光柱糊掉**（正对本管线早期「噪声↔糊 ray」的痛点）。
+  — Wolfe 2022（`arXiv:2112.09629`）、FAST（Donnelly 2024）、Wronski 2014（froxel 时域重投影）。
+- **② 深度感知双边上采样**（低分辨率 froxel → 全屏）：按 depth（可选 normal）加权，避免雾糊到物体边缘。
+  — Wronski 2014 / Frostbite（Hillaire 2015）/ TLOU2（2020）。
+- **③ 双叶 HG / Mie 相位**（g ≈ 0.76）：比单叶 HG 更接近真实前向散射，god ray 更自然；
+  且光柱由**介质积分自然产生**，无需单独的 radial blur。— Schneider 2015（Horizon）/ Hillaire 2015。
+
+### 其它记档（低优先）
+- **级联体积（cascaded volume）** 扩 range（Frostbite）；**detail spread / 多 octave**（Godot / Wronski，收益有限）；
+- **光照低频化 + 缓存**（TLOU2 探针树 ambient、sun light cache / snapshot）；**光源剔除**给体素用；
+- **async compute / indirect dispatch 只算可见·新暴露 froxel**（TLOU2）；
+- **粒子/透明表面体素化进 extinction volume**（Frostbite 的 unified 卖点）。
+
+> ⚠️ 已知坑：体素沿视线很长 ⇒ **深度泄漏**（光从几何后面漏出）；**Composite 必须严格按像素深度截断**
+> （本设计 §4.4 已如此）；时域重投影需处理 **newly-revealed areas**。
+
+---
+
 ## 附：术语
 
 - **froxel** = frustum voxel：视锥对齐的 3D 体素。
