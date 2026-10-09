@@ -5,6 +5,7 @@
 //   1. LowerPointFog：把命令层 PointFog（球）降维成后端统一团 FogBody（立方 OBB）；
 //   2. BuildTileFogIndexData：把团列表投影成「每 tile ≤K 个团索引」的 tile 索引纹理数据
 //      （RGBA8；每 tile kTexelsPerTile 个 texel，每 texel RGBA 各 1 个 uint8 团索引）。
+//   3. BuildTileZRangeData：每 tile 的**保守 z 范围**，供 inject 短路「该切片是否可能碰雾」。
 //
 // MVP 约定：只有 kAnalyticProfile；PointFog.intensity 直接作为消光尺度（σ = intensity·profile），
 // 光照明用常量发射色（color）。这些语义在 fire_fog_shader.h 里与之对应。
@@ -12,7 +13,9 @@
 #ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
 #define JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "glog/logging.h"
@@ -49,6 +52,71 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     return b;
 }
 
+// 某团 OBB 覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒ *out_behind=true 且 out_tiles 清空，
+// 调用方按「保守全屏」处理。
+//
+// 步骤：8 角点投影到屏幕像素 → 屏幕凸包（convex_hull_tiles.h）→ 覆盖的 tile。
+// Pre-conditions: grid_w >= 1, grid_h >= 1, tile_size > 0
+inline void AppendBodyCoveredTiles(const FogBody& b,
+                                   const float mvp[16],
+                                   int tile_size,
+                                   int grid_w,
+                                   int grid_h,
+                                   std::vector<TileCoord>* out_tiles /*output*/,
+                                   bool* out_behind /*output*/) {
+    CHECK(out_tiles != nullptr);
+    CHECK(out_behind != nullptr);
+    CHECK_GE(grid_w, 1);
+    CHECK_GE(grid_h, 1);
+    CHECK_GT(tile_size, 0);
+    out_tiles->clear();
+    *out_behind = false;
+
+    const float fw = static_cast<float>(grid_w * tile_size);
+    const float fh = static_cast<float>(grid_h * tile_size);
+    const auto project = [&](const Vec3f& p, float* px /*output*/, float* py /*output*/,
+                             float* w /*output*/) {
+        const float cx = mvp[0] * p.x() + mvp[4] * p.y() + mvp[8] * p.z() + mvp[12];
+        const float cy = mvp[1] * p.x() + mvp[5] * p.y() + mvp[9] * p.z() + mvp[13];
+        const float cw = mvp[3] * p.x() + mvp[7] * p.y() + mvp[11] * p.z() + mvp[15];
+        *w = cw;
+        if (cw <= 0.0f) {
+            *px = 0.0f;
+            *py = 0.0f;
+            return;
+        }
+        const float iw = 1.0f / cw;
+        *px = (cx * iw * 0.5f + 0.5f) * fw;
+        *py = (cy * iw * 0.5f + 0.5f) * fh;
+    };
+
+    // 8 个 OBB 角点：center ± Σ_i axis[i]·half_extent[i]。
+    std::vector<Vec2d> pts;
+    pts.reserve(8);
+    for (int s = 0; s < 8; ++s) {
+        const float sx = (s & 1) ? 1.0f : -1.0f;
+        const float sy = (s & 2) ? 1.0f : -1.0f;
+        const float sz = (s & 4) ? 1.0f : -1.0f;
+        Vec3f corner = b.bound.center;
+        for (int a = 0; a < 3; ++a) {
+            const float sign = (a == 0) ? sx : ((a == 1) ? sy : sz);
+            corner = corner + b.bound.axis[a] * (b.bound.half_extent[a] * sign);
+        }
+        float px = 0.0f;
+        float py = 0.0f;
+        float w = 0.0f;
+        project(corner, &px, &py, &w);
+        if (w <= 0.0f) {
+            *out_behind = true;
+            return;
+        }
+        pts.push_back(Vec2d(static_cast<double>(px), static_cast<double>(py)));
+    }
+
+    const TileGrid grid{static_cast<double>(tile_size), grid_w, grid_h};
+    AppendConvexHullCoveredTiles(grid, pts, out_tiles);
+}
+
 // 由团列表 + 相机 MVP 生成 tile 索引纹理（RGBA8）的像素数据。
 //
 // 步骤：每团取 OBB 8 角点 → 投影到屏幕像素 → 屏幕凸包（convex_hull_tiles.h）→ 覆盖的
@@ -78,52 +146,11 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
     std::vector<uint8_t> counts(static_cast<size_t>(total_tiles), 0);
     std::vector<uint8_t> idx(static_cast<size_t>(total_tiles) * max_per_tile, sentinel);
 
-    const float fw = static_cast<float>(grid_w * tile_size);
-    const float fh = static_cast<float>(grid_h * tile_size);
-
-    const auto project = [&](const Vec3f& p, float* px /*output*/, float* py /*output*/,
-                             float* w /*output*/) {
-        const float cx = mvp[0] * p.x() + mvp[4] * p.y() + mvp[8] * p.z() + mvp[12];
-        const float cy = mvp[1] * p.x() + mvp[5] * p.y() + mvp[9] * p.z() + mvp[13];
-        const float cw = mvp[3] * p.x() + mvp[7] * p.y() + mvp[11] * p.z() + mvp[15];
-        *w = cw;
-        if (cw <= 0.0f) {
-            *px = 0.0f;
-            *py = 0.0f;
-            return;
-        }
-        const float iw = 1.0f / cw;
-        *px = (cx * iw * 0.5f + 0.5f) * fw;
-        *py = (cy * iw * 0.5f + 0.5f) * fh;
-    };
-
     const int body_count = static_cast<int>(bodies.size());
     for (int bi = 0; bi < body_count; ++bi) {
-        const FogBody& b = bodies[bi];
-        // 8 个 OBB 角点：center ± Σ_i axis[i]·half_extent[i]。
-        std::vector<Vec2d> pts;
-        pts.reserve(8);
+        std::vector<TileCoord> covered;
         bool behind = false;
-        for (int s = 0; s < 8; ++s) {
-            const float sx = (s & 1) ? 1.0f : -1.0f;
-            const float sy = (s & 2) ? 1.0f : -1.0f;
-            const float sz = (s & 4) ? 1.0f : -1.0f;
-            Vec3f corner = b.bound.center;
-            for (int a = 0; a < 3; ++a) {
-                const float sign = (a == 0) ? sx : ((a == 1) ? sy : sz);
-                corner = corner +
-                         b.bound.axis[a] * (b.bound.half_extent[a] * sign);
-            }
-            float px = 0.0f;
-            float py = 0.0f;
-            float w = 0.0f;
-            project(corner, &px, &py, &w);
-            if (w <= 0.0f) {
-                behind = true;
-                break;
-            }
-            pts.push_back(Vec2d(static_cast<double>(px), static_cast<double>(py)));
-        }
+        AppendBodyCoveredTiles(bodies[bi], mvp, tile_size, grid_w, grid_h, &covered, &behind);
 
         if (behind) {
             // 近平面后 → 保守覆盖全屏。
@@ -137,10 +164,6 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
             }
             continue;
         }
-
-        const TileGrid grid{static_cast<double>(tile_size), grid_w, grid_h};
-        std::vector<TileCoord> covered;
-        AppendConvexHullCoveredTiles(grid, pts, &covered);
         for (const TileCoord& tc : covered) {
             if (tc.x < 0 || tc.x >= grid_w || tc.y < 0 || tc.y >= grid_h) {
                 continue;
@@ -170,6 +193,85 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
         }
     }
     return packed;
+}
+
+// 每 tile 的**保守 z 范围**（2 float/tile：zmin, zmax），供 inject 短路。
+//
+// 团的 z 范围按「团心到相机的距离 d ± 外接球半径」保守估计：
+//   [max(z_near, d − r), min(z_far, d + r)]，r = |half_extent|（OBB 外接球）。
+// 该区间是团实际相交深度的**超集**（保守）⇒ 短路安全，不会漏掉真正相交的切片。
+// 覆盖 tile 与 BuildTileFogIndexData 同源（凸包；近平面后 = 全屏）。
+// 空 tile 返回 (0, 0)。
+//
+// 输出布局：宽 = grid_w，高 = grid_h，逐行接排，每 tile 2 个 float (zmin, zmax)。
+// 可直接 glTexImage2D(..., GL_RG, GL_FLOAT, data)。
+//
+// Pre-conditions: grid_w >= 1, grid_h >= 1, tile_size > 0, z_far > z_near > 0
+inline std::vector<float> BuildTileZRangeData(const std::vector<FogBody>& bodies,
+                                              const float mvp[16],
+                                              const Vec3f& cam_pos,
+                                              int grid_w,
+                                              int grid_h,
+                                              int tile_size,
+                                              float z_near,
+                                              float z_far) {
+    CHECK_GE(grid_w, 1);
+    CHECK_GE(grid_h, 1);
+    CHECK_GT(tile_size, 0);
+    CHECK_GT(z_near, 0.0f);
+    CHECK_GT(z_far, z_near);
+
+    const int total_tiles = grid_w * grid_h;
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> zmin(static_cast<size_t>(total_tiles), inf);
+    std::vector<float> zmax(static_cast<size_t>(total_tiles), -inf);
+
+    const int body_count = static_cast<int>(bodies.size());
+    for (int bi = 0; bi < body_count; ++bi) {
+        const FogBody& b = bodies[bi];
+        const float dx = b.bound.center.x() - cam_pos.x();
+        const float dy = b.bound.center.y() - cam_pos.y();
+        const float dz = b.bound.center.z() - cam_pos.z();
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float r = std::sqrt(b.bound.half_extent.x() * b.bound.half_extent.x() +
+                                  b.bound.half_extent.y() * b.bound.half_extent.y() +
+                                  b.bound.half_extent.z() * b.bound.half_extent.z());
+        const float zmn = std::max(z_near, d - r);
+        const float zmx = std::min(z_far, d + r);
+        if (zmx <= zmn) {
+            continue;   // 该团完全在 froxel z 区间之外
+        }
+
+        std::vector<TileCoord> covered;
+        bool behind = false;
+        AppendBodyCoveredTiles(b, mvp, tile_size, grid_w, grid_h, &covered, &behind);
+
+        const auto merge_tile = [&](int t) {
+            zmin[static_cast<size_t>(t)] = std::min(zmin[static_cast<size_t>(t)], zmn);
+            zmax[static_cast<size_t>(t)] = std::max(zmax[static_cast<size_t>(t)], zmx);
+        };
+        if (behind) {
+            for (int t = 0; t < total_tiles; ++t) {
+                merge_tile(t);
+            }
+            continue;
+        }
+        for (const TileCoord& tc : covered) {
+            if (tc.x < 0 || tc.x >= grid_w || tc.y < 0 || tc.y >= grid_h) {
+                continue;
+            }
+            merge_tile(tc.y * grid_w + tc.x);
+        }
+    }
+
+    std::vector<float> out(static_cast<size_t>(total_tiles) * 2, 0.0f);
+    for (int t = 0; t < total_tiles; ++t) {
+        if (zmin[static_cast<size_t>(t)] <= zmax[static_cast<size_t>(t)]) {
+            out[static_cast<size_t>(t) * 2 + 0] = zmin[static_cast<size_t>(t)];
+            out[static_cast<size_t>(t) * 2 + 1] = zmax[static_cast<size_t>(t)];
+        }   // 否则保持 (0,0) = 无候选
+    }
+    return out;
 }
 
 }  // namespace jpov

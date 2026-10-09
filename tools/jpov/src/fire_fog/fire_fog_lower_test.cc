@@ -5,6 +5,7 @@
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -203,6 +204,112 @@ TEST(FireFogLower, BehindCameraCoversWholeScreen) {
             ASSERT_EQ(idx.size(), 1u) << "tile(" << tc << "," << tr << ")";
             EXPECT_EQ(idx[0], 0);
         }
+    }
+}
+
+TEST(FireFogLower, ZRangeEmptyBodiesAllZero) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    const std::vector<float> zr =
+        BuildTileZRangeData({}, mvp, Vec3f(0.0f, 0.0f, -10.0f), 4, 4, 16, 0.1f, 2000.0f);
+    ASSERT_EQ(zr.size(), static_cast<size_t>(4 * 4 * 2));
+    for (float v : zr) {
+        EXPECT_EQ(v, 0.0f);   // 无候选 ⇒ (0,0)
+    }
+}
+
+TEST(FireFogLower, ZRangeCenteredBodyCoversExpectedTiles) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+
+    PointFog fog;
+    fog.center = Vec3f(0.0f, 0.0f, 0.0f);
+    fog.radius = 0.15f;
+    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    fog.intensity = 1.0f;
+    fog.attenuation = FogAttenuation::kUniform;
+    std::vector<FogBody> bodies{LowerPointFog(fog)};
+
+    // 相机在 (0,0,-10)：团心距相机 d=10，外接球 r=radius*√3（立方 OBB）。
+    const std::vector<float> zr = BuildTileZRangeData(
+        bodies, mvp, Vec3f(0.0f, 0.0f, -10.0f), kGridW, kGridH, kTile, 0.1f, 2000.0f);
+    const float r = 0.15f * std::sqrt(3.0f);
+    const float zmn = 10.0f - r;
+    const float zmx = 10.0f + r;
+
+    int hit = 0;
+    for (int tr = 0; tr < kGridH; ++tr) {
+        for (int tc = 0; tc < kGridW; ++tc) {
+            const float a = zr[static_cast<size_t>((tr * kGridW + tc) * 2 + 0)];
+            const float b = zr[static_cast<size_t>((tr * kGridW + tc) * 2 + 1)];
+            const bool in_region = (tc >= 1 && tc <= 2 && tr >= 1 && tr <= 2);
+            if (in_region) {
+                EXPECT_NEAR(a, zmn, 1e-3f) << "tile(" << tc << "," << tr << ")";
+                EXPECT_NEAR(b, zmx, 1e-3f) << "tile(" << tc << "," << tr << ")";
+                ++hit;
+            } else {
+                EXPECT_EQ(a, 0.0f) << "tile(" << tc << "," << tr << ")";
+                EXPECT_EQ(b, 0.0f) << "tile(" << tc << "," << tr << ")";
+            }
+        }
+    }
+    EXPECT_EQ(hit, 4);
+}
+
+TEST(FireFogLower, ZRangeBehindCameraCoversWholeScreen) {
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+
+    float mvp[16];
+    for (int i = 0; i < 16; ++i) {
+        mvp[i] = 0.0f;
+    }
+    mvp[0] = 1.0f;
+    mvp[5] = 1.0f;
+    mvp[11] = -1.0f;   // clip.w = -z ⇒ z>0 处 w<0（近平面后）
+    mvp[15] = 0.0f;
+
+    PointFog fog;
+    fog.center = Vec3f(0.0f, 0.0f, 2.0f);
+    fog.radius = 0.1f;
+    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    fog.intensity = 1.0f;
+    fog.attenuation = FogAttenuation::kUniform;
+    std::vector<FogBody> bodies{LowerPointFog(fog)};
+
+    const std::vector<float> zr =
+        BuildTileZRangeData(bodies, mvp, Vec3f(0.0f, 0.0f, 0.0f), kGridW, kGridH, kTile,
+                            0.1f, 2000.0f);
+    const float r = 0.1f * std::sqrt(3.0f);   // d=2（团心到原点相机）
+    const float zmn = 2.0f - r;
+    const float zmx = 2.0f + r;
+    for (int t = 0; t < kGridW * kGridH; ++t) {
+        EXPECT_NEAR(zr[static_cast<size_t>(t * 2 + 0)], zmn, 1e-3f);
+        EXPECT_NEAR(zr[static_cast<size_t>(t * 2 + 1)], zmx, 1e-3f);
+    }
+}
+
+TEST(FireFogLower, ZRangeBodyOutsideDepthRangeAllZero) {
+    float mvp[16];
+    IdentityMvp(mvp);
+
+    // 团心距相机 3000m，z_far=2000 ⇒ 完全在 froxel z 区间外 ⇒ 无 tile 命中。
+    PointFog fog;
+    fog.center = Vec3f(0.0f, 0.0f, 3000.0f);
+    fog.radius = 0.15f;
+    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    fog.intensity = 1.0f;
+    fog.attenuation = FogAttenuation::kUniform;
+    std::vector<FogBody> bodies{LowerPointFog(fog)};
+
+    const std::vector<float> zr =
+        BuildTileZRangeData(bodies, mvp, Vec3f(0.0f, 0.0f, 0.0f), 4, 4, 16, 0.1f, 2000.0f);
+    for (float v : zr) {
+        EXPECT_EQ(v, 0.0f);
     }
 }
 

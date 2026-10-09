@@ -1,19 +1,22 @@
 // JPOV Fire-Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
 //
-// 设计见 tools/jpov/docs/jpov_froxel_design.md。三趟（全部在主 FBO 尺寸）：
-//   inject   （fire_fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
-//                                   视线，在 [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
-//   scatter  （fire_fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀
-//                                   （over 合成；MVP 串行，金字塔 O(log Nz) 为后续优化）。
+// 设计见 tools/jpov/docs/jpov_froxel_design.md。趟（前两趟跑在 froxel 纹理上，最后一趟全屏）：
+//   inject  （fire_fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
+//                                  视线，在 [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
+//   reduce  （fire_fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
+//                                  得到「每块 = 4^j 个切片」的粗粒度块，供 scatter「大块跳」。
+//   scatter （fire_fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
+//                                  用金字塔 + **base-4 分解** ⇒ 每 texel **O(log Nz)** 次合成。
 //   composite（fire_fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
-//                                   切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
+//                                  切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
 //
 // froxel 网格：每个 Nxy 单元 = froxel 纹理上一块 sblock×sblock texel（sblock=√nz），
 // 承载 nz 个 z 切片（指数分布，近密远疏）；texel 索引 k = iy*uBlockSide + ix（行主序）。
 // 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FireFogParams.nz / tile_px）。
 //
-// 存储语义（inject 与 scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
-//   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))（over 形式）。
+// 存储语义（inject / 各级 / scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
+//   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))。
+//   - reduce 级 j 每个 cell = 上一级 4 个 cell（z 序）的 over 合成，覆盖 4^j 个切片。
 //   - scatter 的 texel k 存**累积**「覆盖 [z_near, z_{k+1})」的 (τ, S)，其自然位置 = z_{k+1}。
 // ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fire_fog_renderer.h 对应。
 
@@ -36,7 +39,7 @@ void main() {
 }
 )glsl";
 
-// 三趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
+// 各趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
 inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 
 // ── tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
@@ -73,17 +76,25 @@ float ProfileAtten(int kind, float u) {
     const float k = 4.0;
     return (exp(-k * u) - exp(-k)) / (1.0 - exp(-k));
 }
+
+// over 合成算子（z 序：A 在**近**、B 在**远**）。vec4 = (τ, S.rgb)。
+//   τ = τA + τB；S = SA + exp(−τA)·SB
+// 可结合、**不可交换**（合并顺序必须保持 z 序）。空段 = (0,0)（恒等）。
+vec4 OverCompose(vec4 A, vec4 B) {
+    return vec4(A.x + B.x, A.yzw + exp(-A.x) * B.yzw);
+}
 )glsl";
 
 // ── 趟 1：inject —— 逐 froxel 局部 (τ, S) ──
 inline constexpr const char* kFireFogInjectBody = R"glsl(
 
 uniform sampler2D uTileFogIndices;
+uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, zmax)
 uniform sampler2D uFogBodyTex;
 uniform mat4  uInvVP;
 uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
-uniform float uZFar;           // froxel z 分布远端（米）
+uniform float uR;              // z 生长系数 = (uZFar/uZNear)^(1/uNz)（CPU 预算，见 renderer）
 uniform vec2  uFboSize;        // 主 FBO 像素尺寸（重建 tile 中心视线用）
 uniform int   uTotalFogs;
 
@@ -184,9 +195,16 @@ void main() {
     int k = iy * uBlockSide + ix;
 
     // 本 froxel 的 z 区间 [z_k, z_{k+1})（指数分布）。
-    float R = pow(uZFar / uZNear, 1.0 / float(uNz));
-    float zk  = uZNear * pow(R, float(k));
-    float zk1 = zk * R;
+    float zk  = uZNear * pow(uR, float(k));
+    float zk1 = zk * uR;
+
+    // ★ 短路：本 tile 候选团的保守 z 范围是 [zr.x, zr.y]；切片若完全在其外 ⇒ 局部恒等
+    //（省掉下方 ≤8 个团的射线-球求交 + CSM 采样）。空 tile（无候选）zr=(0,0) ⇒ 恒等。
+    vec2 zr = texelFetch(uTileZRange, ivec2(tile_col, tile_row), 0).xy;
+    if (zk1 <= zr.x || zk >= zr.y) {
+        oColor = vec4(0.0);
+        return;
+    }
 
     // tile 中心视线（froxel = 整柱一个值，用 tile 中心而非像素自身视线）。
     vec2 center_px = vec2(float(tile_col * uBlockSide) + 0.5 * float(uBlockSide),
@@ -218,8 +236,7 @@ void main() {
         }
     }
 
-    float tau = 0.0;
-    vec3  S = vec3(0.0);
+    vec4 acc = vec4(0.0);   // 局部 (τ, S)，本 froxel 内多团 over 合成（顺序无关）
     for (int j = 0; j < nf; ++j) {
         int bi = int(fog_idx[j]);
         vec4 t0 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 0, 0), 0);
@@ -271,18 +288,51 @@ void main() {
                          + uSunColor * uSunIntensity * ph * sh);
         }
         vec3 Sleaf = Lin * (1.0 - exp(-dtau));
-        // over 合成（本 froxel 内多团，顺序无关）。
-        S = S + exp(-tau) * Sleaf;
-        tau += dtau;
+        acc = OverCompose(acc, vec4(dtau, Sleaf));   // over 合成（团无序 ⇒ 可任意序）
     }
-    oColor = vec4(tau, S);
+    oColor = acc;
 }
 )glsl";
 
-// ── 趟 2：scatter —— 沿 z 有序前缀（累积 (τ, S)）──
+// ── 趟 2：reduce —— 金字塔一级（每柱边长 uLevelSide，由上一级 4 合 1）──
+// 输出 cell m = 上一级 cell 4m..4m+3（z 序）的 over 合成 = 覆盖 4^level 个切片。
+inline constexpr const char* kFireFogReduceBody = R"glsl(
+
+uniform sampler2D uSrcLevel;
+uniform int uLevelSide;   // 本级每柱 texel 边长 S_j
+uniform int uSrcSide;     // 上一级每柱 texel 边长 S_{j-1} = 2·S_j
+
+out vec4 oColor;   // (τ, S.rgb)
+
+void main() {
+    ivec2 frag = ivec2(gl_FragCoord.xy);
+    int tile_col = frag.x / uLevelSide;
+    int tile_row = frag.y / uLevelSide;
+    int mx = frag.x - tile_col * uLevelSide;
+    int my = frag.y - tile_row * uLevelSide;
+    int m = my * uLevelSide + mx;              // 本级 cell 在柱内的索引
+    ivec2 origin = ivec2(tile_col * uSrcSide, tile_row * uSrcSide);
+
+    vec4 acc = vec4(0.0);
+    for (int c = 0; c < 4; ++c) {
+        int p = m * 4 + c;                     // 上一级 4 个子 cell（z 序升）
+        int px = p % uSrcSide;
+        int py = p / uSrcSide;
+        acc = OverCompose(acc, texelFetch(uSrcLevel, origin + ivec2(px, py), 0));
+    }
+    oColor = acc;
+}
+)glsl";
+
+// ── 趟 3：scatter —— 沿 z 有序前缀（金字塔 + base-4 分解，O(log Nz)）──
+// uLevels[0] = L1（inject，块大小 1）；uLevels[j] = 缩减级 j（每柱边长 uBlockSide>>j，
+// 块大小 4^j）。n = k+1（累积覆盖切片 [0, n)）：把 n 按 base-4 分解，
+// 级 j 取块 [ (n>>2j)&~3 , +((n>>2j)&3) )，**从大块到小块按 z 序** over 合成。
+// 每级 ≤3 块 ⇒ 总 ≤3·(uLevelsCount+1) 次合成 = O(log Nz)。
 inline constexpr const char* kFireFogScatterBody = R"glsl(
 
-uniform sampler2D uInject;   // 趟 1 输出（局部 (τ, S)）
+uniform sampler2D uLevels[6];   // [0]=L1（inject），[1..5]=缩减级（块 4^1..4^5）
+uniform int uLevelsCount;        // 缩减级数 = log4(uNz)
 
 out vec4 oColor;   // (τ_cum, S_cum)，覆盖 [z_near, z_{k+1})
 
@@ -293,22 +343,81 @@ void main() {
     int ix = frag.x - tile_col * uBlockSide;
     int iy = frag.y - tile_row * uBlockSide;
     int k = iy * uBlockSide + ix;
-    ivec2 base = ivec2(tile_col * uBlockSide, tile_row * uBlockSide);
+    int n = k + 1;
 
-    float tau = 0.0;
-    vec3  S = vec3(0.0);
-    // MVP：串行前缀。金字塔 L2/L3/L4 + base-4 分解（O(log Nz)）为后续优化。
-    for (int kk = 0; kk <= k; ++kk) {
-        ivec2 lp = ivec2(kk % uBlockSide, kk / uBlockSide);
-        vec4 v = texelFetch(uInject, base + lp, 0);
-        S = S + exp(-tau) * v.yzw;
-        tau += v.x;
+    vec4 acc = vec4(0.0);   // 恒等
+
+    // 级 5（块 64，覆盖 1024 切片；nz<1024 时该级不启用）
+    if (uLevelsCount >= 5) {
+        int side = uBlockSide >> 5;
+        int first = (n >> 10) & ~3;
+        int cnt = (n >> 10) & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[5], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
     }
-    oColor = vec4(tau, S);
+    // 级 4（块 16，覆盖 256 切片）
+    if (uLevelsCount >= 4) {
+        int side = uBlockSide >> 4;
+        int first = (n >> 8) & ~3;
+        int cnt = (n >> 8) & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[4], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
+    }
+    // 级 3（块 4，覆盖 64 切片）
+    if (uLevelsCount >= 3) {
+        int side = uBlockSide >> 3;
+        int first = (n >> 6) & ~3;
+        int cnt = (n >> 6) & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[3], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
+    }
+    // 级 2（块 16，覆盖 16 切片）
+    if (uLevelsCount >= 2) {
+        int side = uBlockSide >> 2;
+        int first = (n >> 4) & ~3;
+        int cnt = (n >> 4) & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[2], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
+    }
+    // 级 1（块 4，覆盖 4 切片）
+    if (uLevelsCount >= 1) {
+        int side = uBlockSide >> 1;
+        int first = (n >> 2) & ~3;
+        int cnt = (n >> 2) & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[1], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
+    }
+    // 级 0 = L1（inject，块大小 1，覆盖 1 切片）
+    {
+        int side = uBlockSide;
+        int first = n & ~3;
+        int cnt = n & 3;
+        for (int c = 0; c < cnt; ++c) {
+            int b = first + c;
+            acc = OverCompose(acc, texelFetch(
+                uLevels[0], ivec2(tile_col * side + b % side, tile_row * side + b / side), 0));
+        }
+    }
+    oColor = acc;
 }
 )glsl";
 
-// ── 趟 3：composite —— 全屏查表 + z 向插值 + Nxy 双线性 → 就地混合 ──
+// ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 → 就地混合 ──
 inline constexpr const char* kFireFogCompositeBody = R"glsl(
 
 uniform sampler2D uScatter;
@@ -317,6 +426,9 @@ uniform mat4  uInvVP;
 uniform vec3  uCamPos;
 uniform float uZNear;
 uniform float uZFar;
+uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
+uniform int   uGridCols;   // Nxy 单元列数
+uniform int   uGridRows;   // Nxy 单元行数
 
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
@@ -349,11 +461,7 @@ void main() {
     vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
     float z = length(pw.xyz / pw.w - ro);
     z = clamp(z, uZNear, uZFar);
-    float ell = float(uNz) * log(z / uZNear) / log(uZFar / uZNear);
-
-    ivec2 tex_sz = textureSize(uScatter, 0);
-    int grid_cols = tex_sz.x / uBlockSide;
-    int grid_rows = tex_sz.y / uBlockSide;
+    float ell = uZScale * log(z / uZNear);
 
     // 4 邻 tile（双线性，按 tile 中心对齐）。Nxy 单元在屏幕上是 uTilePx 像素。
     vec2 px = gl_FragCoord.xy;
@@ -367,10 +475,10 @@ void main() {
     float tau = 0.0;
     vec3  S = vec3(0.0);
     for (int dy = 0; dy < 2; ++dy) {
-        int ty = clamp(ty0 + dy, 0, grid_rows - 1);
+        int ty = clamp(ty0 + dy, 0, uGridRows - 1);
         float wy = (dy == 0) ? (1.0 - fv) : fv;
         for (int dx = 0; dx < 2; ++dx) {
-            int tx = clamp(tx0 + dx, 0, grid_cols - 1);
+            int tx = clamp(tx0 + dx, 0, uGridCols - 1);
             float wx = (dx == 0) ? (1.0 - fu) : fu;
             float w = wx * wy;
             float ctau;
