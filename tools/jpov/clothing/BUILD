@@ -116,6 +116,7 @@ cc_library(
         "clothing_init.h",
         "clothing_save.h",
         "clothing_tool_app.h",
+        "clothing_tool_panels.inc",
     ],
     visibility = ["//visibility:public"],
     deps = [
