@@ -276,6 +276,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     CHECK_GT(viewport_h, 0);
     CHECK_GT(cam.near, 0.0f);
     CHECK_GT(cam.far, cam.near);
+    CHECK_GT(params.z_near, 0.0f) << "FireFogParams.z_near 必须 > 0";
+    CHECK_GT(params.z_far, params.z_near) << "FireFogParams.z_far 必须 > z_near";
     CHECK_GE(params.sun_phase_g, 0.0f);
     CHECK_LT(params.sun_phase_g, 0.95f) << "FireFogParams.sun_phase_g 必须 ∈ [0, 0.95)";
 
@@ -374,8 +376,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_inject_, "uInvVP"), 1, GL_FALSE, inv_vp);
     glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
-    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZNear"), cam.near);
-    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZFar"), cam.far);
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZNear"), params.z_near);
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZFar"), params.z_far);
     glUniform2f(shader_mgr_->GetUniform(prog_inject_, "uFboSize"),
                 static_cast<float>(viewport_w), static_cast<float>(viewport_h));
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalFogs"), count);
@@ -476,8 +478,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_composite_, "uInvVP"), 1, GL_FALSE, inv_vp);
     glUniform3f(shader_mgr_->GetUniform(prog_composite_, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
-    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZNear"), cam.near);
-    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZFar"), cam.far);
+    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZNear"), params.z_near);
+    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZFar"), params.z_far);
 
     // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾像素 → 恒等。
     glEnable(GL_BLEND);

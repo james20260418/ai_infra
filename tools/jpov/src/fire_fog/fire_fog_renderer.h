@@ -6,7 +6,7 @@
 // **就地**合成到调用方当前绑定的 3D HDR FBO（与 HorizonFogRenderer 同为「其它 3D 之后、
 // HDR 后处理之前」的一次全屏 pass）。
 //
-// 三趟（全部在主 FBO 尺寸；froxel 网格 = 屏幕 16×16 tile 为一个柱、柱内 256 个 z 切片）：
+// 三趟（全部在主 FBO 尺寸；froxel 网格 = 屏幕 kTileSize² tile 为一个柱、柱内 kTileSize² 个 z 切片）：
 //   1. inject（fire_fog_inject）  逐 texel = 某 froxel 的**局部** (τ, S)：tile 中心视线 ×
 //                                [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
 //   2. scatter（fire_fog_scatter）逐 texel = 某 froxel 的**累积** (τ, S)：沿 z 有序前缀。
@@ -53,8 +53,10 @@ struct FireFogLighting {
 class FireFogRenderer {
 public:
     // ── 常量（shader 里同名 #define 与之逐字对应；改一处必须同步）──
-    static constexpr int kTileSize = 16;               // tile 边长（像素）= froxel 柱的 Nxy 单元
-    static constexpr int kNz = kTileSize * kTileSize;  // 每柱 z 切片数 = 256（= tile 像素数）
+    // tile 边长 = 每柱的 Nxy 单元边长，同时决定 z 切片数（kNz = tile 像素数，硬约束）。
+    // 8×8 ⇒ Nz=64（粗活/实验档）；16×16 ⇒ Nz=256（高质量档）。
+    static constexpr int kTileSize = 8;                // tile 边长（像素）
+    static constexpr int kNz = kTileSize * kTileSize;  // 每柱 z 切片数（= tile 像素数）
     static constexpr int kMaxFogsPerTile = 8;          // K：每 tile 团上限
     static constexpr int kTexelsPerTile = kMaxFogsPerTile / 4;  // 每 tile 的 RGBA8 texel 数 = 2
     static constexpr int kMaxTotalFogs = 255;          // 全局团上限（uint8 索引，sentinel=255）
@@ -75,11 +77,11 @@ public:
     // froxel 雾火管线（见头文件顶部）：inject/scatter 在自建 FBO 上跑，composite 回到调用方
     // 当前绑定的 3D HDR FBO **就地**混合（GL_ONE/GL_SRC_ALPHA）。
     //   fogs            : 本帧的点状雾体（命令层 PointFog）。
-    //   cam             : 相机（取世界位置做光线原点；near/far 作 froxel z 分布区间）。
+    //   cam             : 相机（取世界位置做光线原点）。
     //   view_proj       : Proj*View（列主序 16 float）。
     //   viewport_w/h    : 当前 3D FBO 像素尺寸（= froxel 纹理尺寸）。
     //   scene_depth_tex : MRT#1 场景深度（R32F，单采样），composite 按像素深度裁剪；0 = 不裁剪。
-    //   params          : 光照开关 / 相位 / 增益（见 FireFogParams）。
+    //   params          : 光照开关 / 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
     //   light           : 物理光照 + CSM 资源（仅 sun_enable=true 时使用）。
     // Pre-conditions: Init 已调用；调用方已绑定 HDR FBO 并设好 viewport；场景深度纹理
     //                 **不**是当前 draw FBO 的附件（否则采样↔写入反馈环）。

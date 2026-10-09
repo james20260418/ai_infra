@@ -200,7 +200,7 @@ private:
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 5), 0.0f, 8.0f, 1);
         ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 6), 0.0f, 0.9f, 2);
         ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 7), 0.0f, 4.0f, 2);
-        ui_.Text("froxel: Nz=256 tile=16 K=8", row(1, 8));
+        ui_.Text("froxel: Nz=64 tile=8 K=8  z=[0.1,2000]", row(1, 8));
 
         ui_.ColorSwatch("雾色参考→", fog_color_, row(0, 7));
     }

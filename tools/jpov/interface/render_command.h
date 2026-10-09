@@ -472,7 +472,7 @@ struct PointFog {
 //
 // 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
-// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0。
+// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0。
 struct FireFogParams {
     // 光照开关（分步验收用）：
     //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
@@ -483,6 +483,10 @@ struct FireFogParams {
     float sun_phase_g = 0.5f;
     // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
     float sun_gain = 1.0f;
+    // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
+    // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/Nz}。near 别设太小（浪费近端）。
+    float z_near = 0.1f;
+    float z_far = 2000.0f;
 };
 
 // 全局平行光（太阳 Directional Light）。

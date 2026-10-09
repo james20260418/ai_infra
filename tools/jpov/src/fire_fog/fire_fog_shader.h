@@ -8,8 +8,9 @@
 //   composite（fire_fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
 //                                   切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
 //
-// froxel 网格：屏幕 16×16 tile = 一个 froxel 柱，柱内 256 个像素承载 256 个 z 切片
-//（指数分布，近密远疏）；texel 索引 k = iy*16 + ix（行主序）。
+// froxel 网格：屏幕 tile 为一个 froxel 柱，柱内 kTileSize×kTileSize 个像素承载同样数目的
+// z 切片（指数分布，近密远疏）；texel 索引 k = iy*TILE_SIZE + ix（行主序）。
+// MVP-lite 档：8×8 tile ⇒ Nz=64（较粗但 XY 更细）；16×16 ⇒ Nz=256（高质量档）。
 //
 // 存储语义（inject 与 scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
 //   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))（over 形式）。
@@ -39,8 +40,9 @@ void main() {
 inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 
 // ── froxel / tile 常量（与 fire_fog_renderer.h、fire_fog_lower.h 对应）──
-#define TILE_SIZE           16
-#define NZ                  (TILE_SIZE * TILE_SIZE)   // 每柱切片数 = 16*16 = 256
+// ⚠️ TILE_SIZE 必须与 FireFogRenderer::kTileSize 一致；NZ 也随之为 TILE_SIZE²。
+#define TILE_SIZE           8
+#define NZ                  (TILE_SIZE * TILE_SIZE)   // 每柱切片数 = TILE_SIZE²
 #define MAX_FOGS_PER_TILE    8
 #define TEXELS_PER_TILE      2
 #define FOG_INDEX_SENTINEL   255u
