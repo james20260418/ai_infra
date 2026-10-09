@@ -185,6 +185,37 @@ vec3 ZInterpEd(float zs[ZC], vec3 eds[ZC], int m, float z) {
     return eds[i] + (eds[i + 1] - eds[i]) * t;
 }
 
+// 8 槽版插值：打包/合并/合成路径最多只碰 ≤ZDIST_K 个点，用 8 长度数组省寄存器
+//（GLSL dynamic 索引会让编译器整块分配数组，长度越小寄存器压力越低）。
+float ZInterpTau8(float zs[ZDIST_K], float taus[ZDIST_K], int m, float z) {
+    if (z <= zs[0]) {
+        return taus[0];
+    }
+    if (z >= zs[m - 1]) {
+        return taus[m - 1];
+    }
+    int i = 0;
+    while (i + 2 < m && z > zs[i + 1]) {
+        ++i;
+    }
+    float t = (z - zs[i]) / (zs[i + 1] - zs[i]);
+    return taus[i] + (taus[i + 1] - taus[i]) * t;
+}
+vec3 ZInterpEd8(float zs[ZDIST_K], vec3 eds[ZDIST_K], int m, float z) {
+    if (z <= zs[0]) {
+        return eds[0];
+    }
+    if (z >= zs[m - 1]) {
+        return eds[m - 1];
+    }
+    int i = 0;
+    while (i + 2 < m && z > zs[i + 1]) {
+        ++i;
+    }
+    float t = (z - zs[i]) / (zs[i + 1] - zs[i]);
+    return eds[i] + (eds[i + 1] - eds[i]) * t;
+}
+
 // 保证 x 是断点（缺失则用当前精确函数值插入，保持升序、无重复）。
 void ZInsertBreakpoint(inout float zs[ZC], inout float taus[ZC], inout vec3 eds[ZC],
                        inout int m, float x) {
@@ -270,7 +301,7 @@ float ZCost(float zs[ZC], float taus[ZC], vec3 eds[ZC],
 
 // 把 (zs,taus,eds) 的 m 个点贪心降到 ≤ZDIST_K。m ≤ 8 时原样拷贝。
 void Reduce8(inout float zs[ZC], inout float taus[ZC], inout vec3 eds[ZC], inout int m,
-             out float fz[ZC], out float ftau[ZC], out vec3 fed[ZC],
+             out float fz[ZDIST_K], out float ftau[ZDIST_K], out vec3 fed[ZDIST_K],
              out int fn) {
     if (m <= ZDIST_K) {
         for (int i = 0; i < m; ++i) {
@@ -428,7 +459,7 @@ void Reduce8(inout float zs[ZC], inout float taus[ZC], inout vec3 eds[ZC], inout
 }
 
 // ═══════════════════════════ 末端积分（Stieltjes 闭式）═══════════════════════════
-void EndIntegrate(float zs[ZC], float taus[ZC], vec3 eds[ZC], int n,
+void EndIntegrate(float zs[ZDIST_K], float taus[ZDIST_K], vec3 eds[ZDIST_K], int n,
                   out vec3 S, out float T) {
     T = exp(-taus[n - 1]);
     S = vec3(0.0);
@@ -446,7 +477,7 @@ void EndIntegrate(float zs[ZC], float taus[ZC], vec3 eds[ZC], int n,
 
 // ═══════════════════════════ 6-texel 打包 / 解包（与 zdist_texture_layout.h 同布局）═══════════════════════════
 // lane[0..8) z fp32；lane[8..12) τd uint16（2/lane）；lane[12..24) Ed fp16（2/lane）。
-void PackZDist(float zs[ZC], float taus[ZC], vec3 eds[ZC], int n,
+void PackZDist(float zs[ZDIST_K], float taus[ZDIST_K], vec3 eds[ZDIST_K], int n,
                out uint L[24]) {
     for (int i = 0; i < 24; ++i) {
         L[i] = 0u;
@@ -474,8 +505,8 @@ void PackZDist(float zs[ZC], float taus[ZC], vec3 eds[ZC], int n,
     }
 }
 
-void UnpackZDist(uint L[24], out float zs[ZC], out float taus[ZC],
-                 out vec3 eds[ZC], out int n) {
+void UnpackZDist(uint L[24], out float zs[ZDIST_K], out float taus[ZDIST_K],
+                 out vec3 eds[ZDIST_K], out int n) {
     n = 0;
     for (int i = 0; i < ZDIST_K; ++i) {
         float z = U2F(L[i]);
@@ -529,8 +560,8 @@ void LoadLanes(vec4 a0, vec4 a1, vec4 a2, vec4 a3, vec4 a4, vec4 a5, out uint L[
 // 读 ZDist 纹理组（6 张）在像素 p 的值 → 控制点。
 void FetchZDist(sampler2D s0, sampler2D s1, sampler2D s2,
                 sampler2D s3, sampler2D s4, sampler2D s5,
-                ivec2 p, out float zs[ZC], out float taus[ZC],
-                out vec3 eds[ZC], out int n) {
+                ivec2 p, out float zs[ZDIST_K], out float taus[ZDIST_K],
+                out vec3 eds[ZDIST_K], out int n) {
     uint L[24];
     LoadLanes(texelFetch(s0, p, 0), texelFetch(s1, p, 0), texelFetch(s2, p, 0),
               texelFetch(s3, p, 0), texelFetch(s4, p, 0), texelFetch(s5, p, 0), L);
@@ -654,9 +685,9 @@ void main() {
         }
     }
 
-    float fz[ZC];
-    float ftau[ZC];
-    vec3  fed[ZC];
+    float fz[ZDIST_K];
+    float ftau[ZDIST_K];
+    vec3  fed[ZDIST_K];
     int fn;
     Reduce8(zs, taus, eds, m, fz, ftau, fed, fn);
 
@@ -702,16 +733,16 @@ void main() {
     ivec2 size = textureSize(uZDist0, 0);
     ivec2 cp = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - ivec2(1));
 
-    float zs0[ZC];
-    float t0[ZC];
-    vec3  e0[ZC];
+    float zs0[ZDIST_K];
+    float t0[ZDIST_K];
+    vec3  e0[ZDIST_K];
     int n0;
     FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5,
                cp, zs0, t0, e0, n0);
 
-    float fz[ZC];
-    float ftau[ZC];
-    vec3  fed[ZC];
+    float fz[ZDIST_K];
+    float ftau[ZDIST_K];
+    vec3  fed[ZDIST_K];
     float den[ZDIST_K];
     for (int i = 0; i < ZDIST_K; ++i) {
         fz[i] = zs0[i];                 // 槽 z 沿用中心（输出域 = Z0 的域，天然单调）
@@ -731,9 +762,9 @@ void main() {
                 continue;
             }
             ivec2 np = clamp(cp + ivec2(dx, dy), ivec2(0), size - ivec2(1));
-            float zsi[ZC];
-            float taui[ZC];
-            vec3  edi[ZC];
+            float zsi[ZDIST_K];
+            float taui[ZDIST_K];
+            vec3  edi[ZDIST_K];
             int ni;
             FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5,
                        np, zsi, taui, edi, ni);
@@ -742,8 +773,8 @@ void main() {
             for (int i = 0; i < ZDIST_K; ++i) {
                 float z = fz[i];
                 if (z <= bj) {                            // 该槽 z 有重叠才参与
-                    ftau[i] += g * ZInterpTau(zsi, taui, ni, z);
-                    fed[i]  += g * ZInterpEd(zsi, edi, ni, z);
+                    ftau[i] += g * ZInterpTau8(zsi, taui, ni, z);
+                    fed[i]  += g * ZInterpEd8(zsi, edi, ni, z);
                     den[i]  += g;
                 }
             }
@@ -799,10 +830,10 @@ void main() {
     ivec2 i01 = clamp(i0 + ivec2(0, 1), ivec2(0), sz - ivec2(1));
     ivec2 i11 = clamp(i0 + ivec2(1, 1), ivec2(0), sz - ivec2(1));
 
-    float zA[ZC]; float tA[ZC]; vec3 eA[ZC]; int nA;
-    float zB[ZC]; float tB[ZC]; vec3 eB[ZC]; int nB;
-    float zC[ZC]; float tC[ZC]; vec3 eC[ZC]; int nC;
-    float zD[ZC]; float tD[ZC]; vec3 eD[ZC]; int nD;
+    float zA[ZDIST_K]; float tA[ZDIST_K]; vec3 eA[ZDIST_K]; int nA;
+    float zB[ZDIST_K]; float tB[ZDIST_K]; vec3 eB[ZDIST_K]; int nB;
+    float zC[ZDIST_K]; float tC[ZDIST_K]; vec3 eC[ZDIST_K]; int nC;
+    float zD[ZDIST_K]; float tD[ZDIST_K]; vec3 eD[ZDIST_K]; int nD;
     FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5, i00, zA, tA, eA, nA);
     FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5, i10, zB, tB, eB, nB);
     FetchZDist(uZDist0, uZDist1, uZDist2, uZDist3, uZDist4, uZDist5, i01, zC, tC, eC, nC);
@@ -814,9 +845,9 @@ void main() {
     float w01 = (1.0 - fr.x) * fr.y;
     float w11 = fr.x * fr.y;
 
-    float zs[ZC];
-    float taus[ZC];
-    vec3  eds[ZC];
+    float zs[ZDIST_K];
+    float taus[ZDIST_K];
+    vec3  eds[ZDIST_K];
     for (int i = 0; i < ZDIST_K; ++i) {
         zs[i]   = w00 * zA[i] + w10 * zB[i] + w01 * zC[i] + w11 * zD[i];
         taus[i] = w00 * tA[i] + w10 * tB[i] + w01 * tC[i] + w11 * tD[i];
@@ -831,9 +862,9 @@ void main() {
     float scene_t = length(pw.xyz / pw.w - ro);
 
     // 去掉退化槽位 + 单调化。
-    float mz[ZC];
-    float mt[ZC];
-    vec3  me[ZC];
+    float mz[ZDIST_K];
+    float mt[ZDIST_K];
+    vec3  me[ZDIST_K];
     int mm = 0;
     for (int i = 0; i < ZDIST_K; ++i) {
         float z = clamp(zs[i], uZNear, max(scene_t, uZNear + 1e-4));
