@@ -63,10 +63,11 @@ public:
     // ── Fire-Fog 管线开关（对比用）──
     bool gaussian_enable_ = true;      // 屏幕空间高斯合并（去噪）
     bool jitter_enable_ = true;        // 段内抖动（关 → 段中点）
-    float gaussian_sigma_ = 2.0f;      // 高斯 σ（低分辨率像素）；默认给到能抹平抖动的量级
-    float downsample_ = 4.0f;          // ZDist 降采样倍数 N（1 = 不降采样）
+    float gaussian_sigma_ = 1.0f;      // 高斯 σ（低分辨率像素）
+    float downsample_ = 2.0f;          // ZDist 降采样倍数 N（1 = 不降采样）
     float sun_phase_g_ = 0.5f;         // HG 相位各向异性（god ray 强度）
     float sun_gain_ = 1.0f;            // 太阳项增益
+    float segments_per_fog_ = 6.0f;    // M：每团 z 段数（噪声源头旋钮，1..8）
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
@@ -141,6 +142,7 @@ public:
             ff.downsample = static_cast<int>(downsample_ + 0.5f);
             ff.sun_phase_g = sun_phase_g_;
             ff.sun_gain = sun_gain_;
+            ff.segments_per_fog = static_cast<int>(segments_per_fog_ + 0.5f);
             cmds->fire_fog = ff;
         }
 
@@ -200,6 +202,7 @@ private:
         ui_.Checkbox("抖动", &jitter_enable_, row(0, 7));
         ui_.SliderFloat("高斯 σ(低分辨率px)", &gaussian_sigma_, row(0, 8), 0.2f, 6.0f, 1);
         ui_.SliderFloat("降采样 N", &downsample_, row(0, 9), 1.0f, 8.0f, 0);
+        ui_.SliderFloat("每团段数 M", &segments_per_fog_, row(1, 8), 1.0f, 8.0f, 0);
 
         // ── 右列：雾色 + 天光主光仰角（便于观察雾与实体受光对比）──
         ui_.SliderFloat("色 R", &fog_color_.r, row(1, 0), 0.0f, 2.0f, 2);

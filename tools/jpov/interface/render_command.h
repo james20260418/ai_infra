@@ -477,6 +477,9 @@ struct FireFogParams {
     bool gaussian_enable = true;
     // 段内抖动开关：false 时每段取中点（观感更平滑但出现分层带）。
     bool jitter_enable = true;
+    // M：每团 z 段数（每段 1 个抖动样本）——**噪声源头旋钮**。M↑ ⇒ 每像素深度样本↑
+    // ⇒ 抖动噪声↓（∝1/√M）⇒ 可用更小的高斯 σ 而保住 ray 结构。范围 [1,8]。
+    int segments_per_fog = 2;
     // 高斯核 σ，单位 = **低分辨率像素**（off 时忽略）；核半径 = clamp(ceil(2σ), 1, 3)。
     float gaussian_sigma = 1.0f;
     // ZDist 降采样倍数 N：ZDist 纹理 = 主 pass ÷ N（tile 剪枝也按低分辨率做）；1 = 不降采样。

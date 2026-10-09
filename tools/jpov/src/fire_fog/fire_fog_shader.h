@@ -51,7 +51,7 @@ inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 
 // ── ZDist 常量（与 zdist_function.h 对应）──
 #define ZDIST_K              8     // 控制点上限
-#define SEG_PER_FOG          2     // M：每团 z 段数
+#define MAX_SEG_PER_FOG      8     // 每团 z 段数上限（M：运行期用 uSegmentsPerFog 夹紧）
 #define ZC                  40     // 候选断点 / 合并网格上限
 #define ZC1                 41
 #define HEAP_CAP           128     // 降维堆容量
@@ -581,6 +581,7 @@ uniform float uZNear;
 uniform float uZFar;
 uniform int   uTotalFogs;
 uniform int   uJitterEnable;     // 0 = 关抖动（用段中点）
+uniform int   uSegmentsPerFog;   // M：每团 z 段数（每段 1 个抖动样本）——噪声源头旋钮
 
 // ── 光照（物理）：内散射源 L_in = ambient·intensity + sun·intensity·CSM阴影 ──
 uniform vec3  uAmbientColor;       // 天光单色 ambient 色（SkyCommand::AmbientColor()）
@@ -751,8 +752,12 @@ void main() {
         if (cs1 <= cs0) {
             continue;
         }
-        float seg_len = (cs1 - cs0) / float(SEG_PER_FOG);
-        for (int k = 0; k < SEG_PER_FOG; ++k) {
+        int nseg = clamp(uSegmentsPerFog, 1, MAX_SEG_PER_FOG);
+        float seg_len = (cs1 - cs0) / float(nseg);
+        for (int k = 0; k < MAX_SEG_PER_FOG; ++k) {
+            if (k >= nseg) {
+                break;
+            }
             float s0 = cs0 + float(k) * seg_len;
             float s1 = s0 + seg_len;
             float jit = (uJitterEnable != 0)

@@ -374,6 +374,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uTotalFogs"), count);
     glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uJitterEnable"),
                 params.jitter_enable ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uSegmentsPerFog"),
+                std::min(std::max(params.segments_per_fog, 1), 8));
 
     // ── 物理光照 + CSM 阴影（趟 A）──
     const int cascade_count =

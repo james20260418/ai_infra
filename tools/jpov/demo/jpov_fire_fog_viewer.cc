@@ -226,6 +226,17 @@ int RunCapture(const std::string& out_dir) {
     app.sun_gain_ = 2.0f;
     shoot("22_sun_on");
 
+    // god-ray 平衡扫描：M（噪声源）/ σ（高斯）/ N（降采样）
+    auto gray_view = [&]() { default_view(); };
+    app.segments_per_fog_ = 2.0f; app.gaussian_sigma_ = 2.0f; app.downsample_ = 4.0f;
+    gray_view(); shoot("30_M2_s2_N4");
+    app.segments_per_fog_ = 8.0f; app.gaussian_sigma_ = 1.0f; app.downsample_ = 1.0f;
+    gray_view(); shoot("31_M8_s1_N1");
+    app.segments_per_fog_ = 8.0f; app.gaussian_sigma_ = 1.0f; app.downsample_ = 2.0f;
+    gray_view(); shoot("32_M8_s1_N2");
+    app.segments_per_fog_ = 4.0f; app.gaussian_sigma_ = 1.5f; app.downsample_ = 2.0f;
+    gray_view(); shoot("33_M4_s15_N2");
+
     // 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。
     default_view();
     app.InstallTextMeasure();
