@@ -59,25 +59,15 @@
     // 行：标题(1) + 按钮(1) + 半径(1) + 状态(1) = 4。
     void DrawBrushPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 4;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         const float panel_x = (win_w - panel_w) * 0.5f;  // 顶部居中
-        const float panel_y = kMargin;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
+        const float panel_y = kPanelMargin;
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, /*rows*/ 4);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
 
         DrawLabel("3D 画笔", left, row_w, row_y);
         row_y += step_y;
@@ -201,26 +191,18 @@
     // 在仿真关联之前）；「最大洞周长」滑条滤掉腰口/下摆这类本来该开的口。
     // 行：标题(1) + 按钮(1) + 细分(1) + 平滑(1) + 最大周长(1) + 状态(1) = 6。
     void DrawHoleFillPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
         constexpr int kRows = 6;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         // 贴底、位于蒙皮面板（贴右）左侧；与左下摆动面板留出间隔。
-        const float panel_x = win_w - 2.0f * panel_w - 2.0f * kMargin;
-        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
+        const float panel_x = win_w - 2.0f * panel_w - 2.0f * kPanelMargin;
+        const float panel_y =
+            std::max(win_h - PanelHeight(kRows) - kPanelMargin, kPanelMargin);
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
 
         DrawLabel("补洞（推进法）", left, row_w, row_y);
         row_y += step_y;
@@ -264,26 +246,18 @@
     //   显示勾选（人体 / 衣服）
     //   两行只读（人体 / 衣服来源）
     void DrawLeftPanel(jpov::RenderCommandList* cmds, float win_w) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.32f * win_w;
-        const float panel_x  = kMargin;
-        const float panel_y  = kMargin;
+        const float panel_x  = kPanelMargin;
+        const float panel_y  = kPanelMargin;
         // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存1 + 保存状态1
         //        + 地面1 + 勾选1 + 只读2 = 15。
         constexpr int kRows = 15;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        const float kSpacing = kPanelSpacing;
 
         const float axis_w = 30.0f;     // "轴"列（X/Y/Z）
         const float stepbox_w = 72.0f;  // 步长输入框宽
@@ -294,7 +268,7 @@
         const float col_btn_in = col_stepbx + stepbox_w + gap;   // "<"
         const float col_btn_in2 = col_btn_in + btn_w + gap;      // ">"
 
-        float row_y = top;
+        float row_y = frame.row_y;
 
         // ---- 平移表头 ----
         DrawLabel("轴", col_axis, axis_w, row_y);
@@ -436,25 +410,17 @@
     //     + buffer(1) + 切向保留系数(1) + 按钮行(1) + 状态行(2) = 12。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
-        const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
-        const float panel_y  = kMargin;
+        const float panel_x  = win_w - panel_w - kPanelMargin;  // 贴右边缘
+        const float panel_y  = kPanelMargin;
         constexpr int kRows = 13;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        const float kSpacing = kPanelSpacing;
+        float row_y = frame.row_y;
 
         // ---- 标题 ----
         DrawLabel("仿真动力学", left, row_w, row_y);
@@ -560,25 +526,16 @@
     // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
     //             + 焊接模式勾选(1) + 焊接参数输入(1) + 状态文本(1) = 7。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.30f * win_w;
         constexpr int kRows = 7;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const float panel_x = win_w - panel_w - kMargin;  // 贴右边缘
-        const float panel_y = win_h - panel_h - kMargin;  // 贴底边缘
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
+        const float panel_x = win_w - panel_w - kPanelMargin;  // 贴右边缘
+        const float panel_y = win_h - PanelHeight(kRows) - kPanelMargin;  // 贴底边缘
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
 
         DrawLabel("软布自动蒙皮", left, row_w, row_y);
         row_y += step_y;
@@ -669,26 +626,18 @@
             motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
         }
 
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
         const float panel_w  = 0.32f * win_w;
         constexpr int kRows = 6;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const float panel_x = kMargin;  // 贴左边缘
+        const float panel_x = kPanelMargin;  // 贴左边缘
         // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
-        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-        RecordPanel(panel_x, panel_y, panel_w, panel_h);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
+        const float panel_y =
+            std::max(win_h - PanelHeight(kRows) - kPanelMargin, kPanelMargin);
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
 
         // 启用勾选（兼作面板标题）。
         ui_.Checkbox("随机摆动测试（启用）", &motion_test_enabled_,

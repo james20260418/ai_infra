@@ -115,6 +115,7 @@ cc_library(
     hdrs = [
         "clothing_init.h",
         "clothing_save.h",
+        "clothing_tool_config.h",
         "clothing_tool_app.h",
         "clothing_tool_panels.inc",
     ],
