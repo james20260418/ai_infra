@@ -211,6 +211,16 @@ uint32_t JPOV::RegisterTexture(uint32_t gl_texture_id, int width, int height) {
     return renderer_->GetTextureManager().Register(gl_texture_id, width, height);
 }
 
+uint32_t JPOV::RegisterTextureFromMemory(const std::vector<unsigned char>& encoded,
+                                         const std::string& key,
+                                         const jpov::TextureOptions& opts) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(!encoded.empty()) << "RegisterTextureFromMemory: encoded 为空";
+    CHECK(!key.empty()) << "RegisterTextureFromMemory: key 为空";
+    CHECK(renderer_ != nullptr);
+    return renderer_->GetTextureManager().FromMemory(encoded, key, opts);
+}
+
 void JPOV::ReleaseTexture(uint32_t texture_id) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK_GT(texture_id, 0u);

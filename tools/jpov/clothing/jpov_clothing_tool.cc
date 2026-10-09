@@ -42,6 +42,7 @@ struct CliOptions {
     float phi_deg = 20.0f;            // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
     // 动力学初始值（默认 = Simulator 默认；仅 headless 调参 / 复现用）。
     float bind_distance = jpov::soft_mesh_simulator::Simulator::kDefaultBindDistance;  // --bind_distance 关联距离 d（m）
+    float weld_tolerance = jpov::clothing::kClothSimWeldToleranceM;  // --weld_tolerance 仿真焊接容差（m）
     float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
     float total_mass = jpov::soft_mesh_simulator::Simulator::kDefaultTotalMass;
     float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
@@ -59,6 +60,8 @@ struct CliOptions {
     bool  auto_skin = false;      // --auto_skin：headless 出图前跑一次一键蒙皮（脚本化验证）
     bool  hole_fill = false;      // --hole_fill：headless 出图前跑一次补洞（脚本化验证）
     float hole_perimeter = 0.2f;  // --hole_perimeter 只补周长 ≤ 该值（米）的洞；0 = 不限制
+    bool  alpha_normalize = false;  // --alpha_normalize：headless 出图前跑一次 base color alpha 归一
+    bool  show_ref_mesh = false;    // --show_ref_mesh：headless 出图前开启「显示力学参照网格」
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -156,6 +159,15 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--max_speed 缺少数值参数，忽略";
             }
+        } else if (arg == "--weld_tolerance") {
+            if (i + 1 < argc) {
+                opt.weld_tolerance = static_cast<float>(std::atof(argv[++i]));
+                if (!(opt.weld_tolerance >= 0.0f)) {
+                    LOG(FATAL) << "--weld_tolerance 必须 >= 0，got " << opt.weld_tolerance;
+                }
+            } else {
+                LOG(WARNING) << "--weld_tolerance 缺少数值参数，忽略";
+            }
         } else if (arg == "--body_repulsion") {
             if (i + 1 < argc) {
                 opt.body_repulsion = std::atoi(argv[++i]);
@@ -217,6 +229,10 @@ CliOptions ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--auto_skin") {
             opt.auto_skin = true;
+        } else if (arg == "--alpha_normalize") {
+            opt.alpha_normalize = true;
+        } else if (arg == "--show_ref_mesh") {
+            opt.show_ref_mesh = true;
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -359,6 +375,7 @@ int main(int argc, char** argv) {
 
     // 动力学初值（CLI，可选）：在场景就绪（建仿真器）前设好镜像，使仿真器按此初始化。
     app.bind_distance_ui_ = opt.bind_distance;
+    app.sim_weld_tolerance_ = opt.weld_tolerance;
     app.gravity_ui_ = opt.gravity;
     app.total_mass_ui_ = opt.total_mass;
     app.force_coeff_t_ui_ = jpov::clothing::ClothingToolApp::ForceNewtonToT(
@@ -372,6 +389,8 @@ int main(int argc, char** argv) {
     app.SetHoleFillParams(opt.hole_perimeter, /*refine=*/true, /*fair=*/true);
     app.weld_relative_ui_ = opt.weld_relative;
     app.weld_ratio_ = opt.weld_ratio;
+    // 力学参照网格显示（headless；交互窗口由右上面板勾选驱动）。
+    app.show_ref_mesh_ = opt.show_ref_mesh;
 
     // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
     app.motion_test_enabled_ = opt.motion_enable;
@@ -409,6 +428,10 @@ int main(int argc, char** argv) {
         // 可选：出图前跑一次补洞（在仿真关联之前；交互窗口由按钮驱动）。
         if (opt.hole_fill) {
             app.RunHoleFillNow();
+        }
+        // 可选：出图前跑一次 base color alpha 归一（脚本化验证；交互窗口由面板按钮驱动）。
+        if (opt.alpha_normalize) {
+            app.RunAlphaNormalizeNow();
         }
         // 可选：出图前跑一次一键蒙皮（脚本化验证焊接模式等；交互窗口由按钮驱动）。
         if (opt.auto_skin) {

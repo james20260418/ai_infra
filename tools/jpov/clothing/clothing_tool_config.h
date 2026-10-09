@@ -50,6 +50,13 @@ inline constexpr float kDefaultScaleStep = 1.1f;
 // 甩飞、拉成“淌”状长条）。0 = 不限；实测 25 m/s 能在保留正常下落（~8 m/s）的同时挡住失稳。
 inline constexpr float kDefaultMaxSpeed = 25.0f;
 
+// ── 仿真「焊接容差」（2026-10-09 Danis，方案 B）──
+// 位置相距 ≤ 该值的原始顶点，在**仿真器里并成一个质点**（一条缝 = 一个点）；Step / 变换后写回
+// 组内所有顶点 ⇒ 缝合缝不会裂开（“碎了裂缝”的根因）。
+// ⚠️ 必须**远小于顶点间距**：实测本工具资产（lace_skirt）顶点间距中位数 ~6mm，容差 0.02 m 即把
+// 整件并成 **1 个点**。Danis 口述「0.1m」，按其意图（只并真正重合的缝合点）取 **0.1mm**。
+inline constexpr float kClothSimWeldToleranceM = 1e-4f;
+
 // ── 软布自动蒙皮（weight transfer + 种子生长）参数 ──
 // 种子半径 seed_eps（mm）：衣物顶点到身体最近距离 <= 该值即视为「贴身」→ 生长锚点（种子），
 // 其权重冻结为直接投影权重；> 该值 → 非种子，由生长从种子扩散补出。默认 10mm（1cm，照顾

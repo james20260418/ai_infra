@@ -32,6 +32,10 @@
 #   ④ 左下角面板（随机摆动测试，贴左下角）：勾选启用 + 播放/暂停 + 主轴（相位）
 #      / 关节幅度 滑条 + 随机种子输入框（0~65535）——蒙皮过的衣服绑到同一骨架实例后逐帧跟随。
 #      衣服未蒙皮时动作不带动衣服。
+#   ⑤ 本 PR 新增：右侧蒙皮面板「base color alpha 归一」按钮（把贴图 alpha 置 1，修破洞；
+#      有画笔选区时只处理选中顶点围成的三角形覆盖的区域）；左侧平移/旋转/缩放**有选区时只作用于
+#      选中顶点**（枢轴 = 选区顶点包围盒中心）；右侧仿真面板「显示力学参照网格」勾选（蓝色 2D 像素
+#      画出「原始 mesh + 全体 scale/rotation」的力学参照，见 README「用户须知」）。
 #
 # 运行（交互窗口，需 DISPLAY/WSLg）：
 #   output/jpov_clothing_tool/jpov_clothing_tool \
@@ -45,6 +49,10 @@
 #   --motion_phase 0~1     主轴相位初值（给了即启用；便于 headless 出图）
 #   --motion_amp 0~90      关节幅度初值（度，按 5° 量化）
 #   --motion_seed 0~65535  随机种子初值（换种子 = 换一套随机动作）
+#   --alpha_normalize      headless 出图前跑一次 base color alpha 归一（脚本化验证）
+#   --show_ref_mesh        headless 出图前开启「显示力学参照网格」（蓝色 2D 像素）
+#   --bind_distance <m>   关联距离 d（米，默认 0.1）
+#   --weld_tolerance <m>  仿真焊接容差（米，默认 0.0001 = 0.1mm）—— 重合顶点并成一个质点（防缝裂）
 #
 # headless UI 自检（不弹窗，出单张带面板的图）：
 #   ... --ui_shot --output_dir /tmp/ui [--sim_steps N] [--window_width W --window_height H]
