@@ -753,15 +753,46 @@ struct ShadowConfig {
 //                    极角 θ = i·黄金角（2π/φ² ≈ 137.508°），任意连续 N 点都近乎均匀
 //                    铺满半径 R 的圆盘。用 N ≪ (2R+1)² 次采样达到相近的空间柔化带宽
 //                    （例：N=12,R=2 ≈ 5 纹素；N=25,R=4 ≈ 9 纹素）。
+//                    采点偏移**在 CPU 预算成表**（GoldenSpiralOffsets → shader
+//                    uPcfOffsets），shader 仅做查表 + 乘加，不再逐 tap 算 sqrt/cos/sin。
 // 自动深度偏置随「有效半径」联动（网格=kGridPcfRadiusT，螺旋=R，见 shader
 // pcfEffectiveRadiusTexels），故换核不会出现「改了采样半径却忘了改偏置」的 acne。
 struct ShadowPcfConfig {
     // 采样核类型。kGrid=原固定 3×3；kGoldenSpiral=黄金角螺旋。
     enum class Mode { kGrid = 0, kGoldenSpiral = 1 };
 
+    // 螺旋采样点数上限 = shader uniform 数组 uPcfOffsets[kMaxPcfTaps] 长度。
+    // ⚠️ 必须与两份 PBR shader 里的 `const int kMaxPcfTaps` 一致。
+    static constexpr int kMaxPcfTaps = 64;
+
     Mode  mode = Mode::kGoldenSpiral;  // 默认黄金角螺旋（本次 PCF 采样升级）
-    int   tap_count = 12;              // 螺旋采样点数 N（仅 kGoldenSpiral 用；≥1）
+    int   tap_count = 12;              // 螺旋采样点数 N（仅 kGoldenSpiral 用；1..kMaxPcfTaps）
     float radius_texels = 2.0f;        // 采样盘半径 R（纹素；仅 kGoldenSpiral 用；>0）
+
+    // 计算黄金角螺旋 N 个采点的**偏移表**（纹素，已 ×radius），写入 out[2*kMaxPcfTaps]
+    // （未用位填 0），供 shader 的 uPcfOffsets 上传。
+    //
+    // ⚠️ 这是采样点公式的**唯一真值来源**，与 shader 的 pcfShadow 逐位同源：
+    //     第 i 点半径 r = R·√((i+0.5)/N)（等面积分布）、极角 θ = i·黄金角（2π/φ² ≈ 2.399963）；
+    //     偏移 = r·(cos θ, sin θ)。
+    // 为何在 CPU 预算：这些量只依赖 (i, N, R)（每 draw 不变），却在 shader 里每片元、
+    // 每 tap 重算 sqrt / 除法 / cos / sin（超越函数吞吐低）。移到 CPU 后 shader 只剩
+    // 「uniform 读 + 一次 vec2×float 乘 + 比较」，逐位等价。
+    void GoldenSpiralOffsets(float* out) const {
+        constexpr float kGoldenAngle = 2.39996323f;   // 2π/φ² ≈ 137.508°（弧度）
+        // 除法→乘以倒数（N 为循环外常量）。
+        const float inv_n = 1.0f / static_cast<float>(tap_count);
+        for (int i = 0; i < 2 * kMaxPcfTaps; ++i) {
+            out[i] = 0.0f;
+        }
+        for (int i = 0; i < tap_count; ++i) {
+            const float u = (static_cast<float>(i) + 0.5f) * inv_n;   // ∈ (0,1)
+            const float r = radius_texels * std::sqrt(u);
+            const float theta = static_cast<float>(i) * kGoldenAngle;
+            out[2 * i]     = r * std::cos(theta);
+            out[2 * i + 1] = r * std::sin(theta);
+        }
+    }
 };
 
 // 单个级联的 shadow FBO + 深度纹理（Renderer 内部持有，UploadSunData 读取 .tex）。

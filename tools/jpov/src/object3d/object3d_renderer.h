@@ -243,9 +243,14 @@ uniform float uShadowBiasCascade[5];    // override 的等效单纹素世界边�
 // uPcfMode==1：黄金角螺旋 uPcfTapCount 点（等面积布点），采样盘半径 uPcfRadiusTexels 纹素。
 const int   kGridPcfRadiusT   = 1;                                  // 网格核半径（纹素）：3×3 → 1
 const int   kGridPcfTapCountT = (2*kGridPcfRadiusT+1) * (2*kGridPcfRadiusT+1);
+const int   kMaxPcfTaps       = 64;   // == ShadowPcfConfig::kMaxPcfTaps（uPcfOffsets 长度）
 uniform int   uPcfMode;          // 0=规则网格；1=黄金角螺旋
-uniform int   uPcfTapCount;      // 螺旋采样点数 N（仅 mode==1；≥1）
-uniform float uPcfRadiusTexels;  // 采样盘半径 R（纹素，仅 mode==1；>0）
+uniform int   uPcfTapCount;      // 螺旋采样点数 N（仅 mode==1；1..kMaxPcfTaps）
+uniform float uPcfRadiusTexels;  // 采样盘半径 R（纹素，仅 mode==1；>0）——亦用于自动偏置
+uniform float uPcfInvTapCount;   // 1/N（除法→乘倒数；仅 mode==1 用）
+// 黄金角螺旋采点偏移（纹素，已 ×R）：CPU 预算（见 ShadowPcfConfig::GoldenSpiralOffsets）。
+// 仅前 uPcfTapCount 项有效。把 per-tap 的 sqrt/除法/cos/sin 移出 shader。
+uniform vec2  uPcfOffsets[kMaxPcfTaps];
 // ---- 深度偏置与「采样核有效半径」联动（改核半径，偏置自动跟随）----
 const float kBiasSafety    = 1.5;                               // 满径安全裕度
 const float kMinShadowBias = 0.01;                              // 全局兜底（米）
@@ -302,19 +307,15 @@ float pcfEffectiveRadiusTexels() {
 // PCF 阴影采样：在 shadow_map 的 uv 邻域对 cur（已减偏置的线性深度）做
 // 「cur <= 深度」二值比较并求平均 → [0,1]（1=受照，0=全影）。
 //   uPcfMode==0：固定规则网格 (2R+1)² 点，箱式平均（经典 3×3）。
-//   uPcfMode==1：黄金角螺旋 N 点——第 i 点半径 r = R·√((i+0.5)/N)（等面积分布），
-//                极角 θ = i·黄金角（2π/φ²≈137.5°），任意连续 N 点都近乎均匀铺满圆盘。
+//   uPcfMode==1：黄金角螺旋 N 点——采点偏移由 CPU 预算于 uPcfOffsets（公式真值来源见
+//                ShadowPcfConfig::GoldenSpiralOffsets），此处只剩查表 + 乘加。
 float pcfShadow(sampler2D shadow_map, vec2 uv, float cur, float texel_step) {
     float s = 0.0;
     if (uPcfMode == 1) {
-        const float kGoldenAngle = 2.39996323;   // 2π/φ² ≈ 137.508°（弧度）
         for (int i = 0; i < uPcfTapCount; ++i) {
-            float r = uPcfRadiusTexels * sqrt((float(i) + 0.5) / float(uPcfTapCount));
-            float theta = float(i) * kGoldenAngle;
-            vec2 offset = vec2(cos(theta), sin(theta)) * r;
-            s += (cur <= texture(shadow_map, uv + offset * texel_step).r) ? 1.0 : 0.0;
+            s += (cur <= texture(shadow_map, uv + uPcfOffsets[i] * texel_step).r) ? 1.0 : 0.0;
         }
-        return s / float(uPcfTapCount);
+        return s * uPcfInvTapCount;
     }
     for (int dy = -kGridPcfRadiusT; dy <= kGridPcfRadiusT; ++dy) {
         for (int dx = -kGridPcfRadiusT; dx <= kGridPcfRadiusT; ++dx) {
