@@ -37,18 +37,17 @@ inline constexpr float kSunElevDeg = 20.0f;
 inline constexpr float kSunAzimDeg = 0.0f;
 inline constexpr float kTurbidity   = 2.0f;
 
-// 相机：目标 = 树根（原点）；仰角 +45°（俯视 45°）；R 到原点 12m；
+// 相机：目标 = 树根（原点）；仰角 +30°（与地面 30°，俯视 30°）；R 到原点（米）；
 // 方位 = sun_azim + 180 ⇒ 视线水平朝 **太阳方位**（面冲太阳）。
-inline constexpr float kCamPhiDeg  = 45.0f;
-inline constexpr float kCamR       = 12.0f;
+inline constexpr float kCamPhiDeg  = 30.0f;
+inline constexpr float kCamR       = 6.0f;
 inline constexpr float kViewFovDeg = 60.0f;
 inline constexpr float kViewNear   = 0.05f;
 inline constexpr float kViewFar    = 1000.0f;
 
-// 点雾：kLinear 剖面、σ=1.0、色 (0.25,0.25,0.25)，摆在中段（半径 3m；实测该构图
-// 雾成整体、树仍可读、god ray 最明显——r=5 会把树糊成一片、r=2 太像局部光晕）。
+// 点雾：kLinear 剖面、σ=1.0、色 (0.25,0.25,0.25)，摆在中段（半径 4.5m = 查看器默认）。
 inline constexpr float kFogCenter[3] = {0.0f, 3.0f, 0.0f};
-inline constexpr float kFogRadius    = 3.0f;
+inline constexpr float kFogRadius    = 4.5f;
 inline constexpr float kFogIntensity = 1.0f;
 inline constexpr float kFogColor     = 0.25f;
 
