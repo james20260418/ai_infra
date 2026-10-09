@@ -54,7 +54,7 @@ public:
 
     // ── 点状雾参数（单个团；用户可调）──
     jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // 雾体中心（橡树中段）
-    float fog_radius_ = 3.0f;                                  // 半径（米）
+    float fog_radius_ = 4.5f;                                  // 半径（米）；大一点 god ray 更明显
     // 雾色 = 内散射源 L_in 的**色调 tint**（默认白=纯物理：ambient + 太阳×CSM）。
     jpov::Color fog_color_ = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
     float fog_intensity_ = 0.6f;                               // 消光尺度 σ 系数
