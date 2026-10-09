@@ -8,14 +8,14 @@
 //   composite（fire_fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
 //                                   切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
 //
-// froxel 网格：屏幕 tile 为一个 froxel 柱，柱内 kTileSize×kTileSize 个像素承载同样数目的
-// z 切片（指数分布，近密远疏）；texel 索引 k = iy*TILE_SIZE + ix（行主序）。
-// 当前档：16×16 tile ⇒ Nz=256。
+// froxel 网格：每个 Nxy 单元 = froxel 纹理上一块 sblock×sblock texel（sblock=√nz），
+// 承载 nz 个 z 切片（指数分布，近密远疏）；texel 索引 k = iy*uBlockSide + ix（行主序）。
+// 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FireFogParams.nz / tile_px）。
 //
 // 存储语义（inject 与 scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
 //   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))（over 形式）。
 //   - scatter 的 texel k 存**累积**「覆盖 [z_near, z_{k+1})」的 (τ, S)，其自然位置 = z_{k+1}。
-// ⚠️ shader 里的 #define 常量必须与 fire_fog_renderer.h / fire_fog_lower.h 对应。
+// ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fire_fog_renderer.h 对应。
 
 #ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
 #define JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
@@ -39,13 +39,18 @@ void main() {
 // 三趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
 inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 
-// ── froxel / tile 常量（与 fire_fog_renderer.h、fire_fog_lower.h 对应）──
-// ⚠️ TILE_SIZE 必须与 FireFogRenderer::kTileSize 一致；NZ 也随之为 TILE_SIZE²。
-#define TILE_SIZE           16
-#define NZ                  (TILE_SIZE * TILE_SIZE)   // 每柱切片数 = TILE_SIZE²
+// ── tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
 #define MAX_FOGS_PER_TILE    8
 #define TEXELS_PER_TILE      2
 #define FOG_INDEX_SENTINEL   255u
+
+// ── froxel 网格（运行期 uniform；见 FireFogParams.nz / tile_px）──
+//   uNz        每柱 z 切片数（= uBlockSide²）
+//   uBlockSide 每柱在 froxel 纹理上的 texel 边长（= √uNz）
+//   uTilePx    每个 Nxy 单元对应的**屏幕**像素边长（每轴）
+uniform int uNz;
+uniform int uBlockSide;
+uniform int uTilePx;
 
 in vec2 vTexCoord;
 
@@ -172,20 +177,20 @@ void main() {
     ivec2 tex_sz = textureSize(uTileFogIndices, 0);
     int grid_cols = tex_sz.x / TEXELS_PER_TILE;
     int grid_rows = tex_sz.y;
-    int tile_col = clamp(frag.x / TILE_SIZE, 0, grid_cols - 1);
-    int tile_row = clamp(frag.y / TILE_SIZE, 0, grid_rows - 1);
-    int ix = frag.x - tile_col * TILE_SIZE;
-    int iy = frag.y - tile_row * TILE_SIZE;
-    int k = iy * TILE_SIZE + ix;
+    int tile_col = clamp(frag.x / uBlockSide, 0, grid_cols - 1);
+    int tile_row = clamp(frag.y / uBlockSide, 0, grid_rows - 1);
+    int ix = frag.x - tile_col * uBlockSide;
+    int iy = frag.y - tile_row * uBlockSide;
+    int k = iy * uBlockSide + ix;
 
     // 本 froxel 的 z 区间 [z_k, z_{k+1})（指数分布）。
-    float R = pow(uZFar / uZNear, 1.0 / float(NZ));
+    float R = pow(uZFar / uZNear, 1.0 / float(uNz));
     float zk  = uZNear * pow(R, float(k));
     float zk1 = zk * R;
 
     // tile 中心视线（froxel = 整柱一个值，用 tile 中心而非像素自身视线）。
-    vec2 center_px = vec2(float(tile_col * TILE_SIZE) + 0.5 * float(TILE_SIZE),
-                          float(tile_row * TILE_SIZE) + 0.5 * float(TILE_SIZE));
+    vec2 center_px = vec2(float(tile_col * uBlockSide) + 0.5 * float(uBlockSide),
+                          float(tile_row * uBlockSide) + 0.5 * float(uBlockSide));
     vec2 uv = center_px / uFboSize;
     vec2 ndc = uv * 2.0 - 1.0;
     vec4 pn = uInvVP * vec4(ndc, -1.0, 1.0);
@@ -283,18 +288,18 @@ out vec4 oColor;   // (τ_cum, S_cum)，覆盖 [z_near, z_{k+1})
 
 void main() {
     ivec2 frag = ivec2(gl_FragCoord.xy);
-    int tile_col = frag.x / TILE_SIZE;
-    int tile_row = frag.y / TILE_SIZE;
-    int ix = frag.x - tile_col * TILE_SIZE;
-    int iy = frag.y - tile_row * TILE_SIZE;
-    int k = iy * TILE_SIZE + ix;
-    ivec2 base = ivec2(tile_col * TILE_SIZE, tile_row * TILE_SIZE);
+    int tile_col = frag.x / uBlockSide;
+    int tile_row = frag.y / uBlockSide;
+    int ix = frag.x - tile_col * uBlockSide;
+    int iy = frag.y - tile_row * uBlockSide;
+    int k = iy * uBlockSide + ix;
+    ivec2 base = ivec2(tile_col * uBlockSide, tile_row * uBlockSide);
 
     float tau = 0.0;
     vec3  S = vec3(0.0);
     // MVP：串行前缀。金字塔 L2/L3/L4 + base-4 分解（O(log Nz)）为后续优化。
     for (int kk = 0; kk <= k; ++kk) {
-        ivec2 lp = ivec2(kk % TILE_SIZE, kk / TILE_SIZE);
+        ivec2 lp = ivec2(kk % uBlockSide, kk / uBlockSide);
         vec4 v = texelFetch(uInject, base + lp, 0);
         S = S + exp(-tau) * v.yzw;
         tau += v.x;
@@ -312,7 +317,6 @@ uniform mat4  uInvVP;
 uniform vec3  uCamPos;
 uniform float uZNear;
 uniform float uZFar;
-uniform float uSuperScale;   // 超屏存储倍数 k（每轴）：屏幕像素→froxel 纹理坐标的缩放
 
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
@@ -321,13 +325,13 @@ out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 void SampleColumn(ivec2 tile_xy, float ell, out float tau, out vec3 S) {
     int t_hi = int(floor(ell));
     float fr = ell - float(t_hi);
-    t_hi = clamp(t_hi, 0, NZ - 1);
+    t_hi = clamp(t_hi, 0, uNz - 1);
     int t_lo = t_hi - 1;
-    vec4 vhi = texelFetch(uScatter, ivec2(tile_xy.x + (t_hi % TILE_SIZE),
-                                          tile_xy.y + (t_hi / TILE_SIZE)), 0);
+    vec4 vhi = texelFetch(uScatter, ivec2(tile_xy.x + (t_hi % uBlockSide),
+                                          tile_xy.y + (t_hi / uBlockSide)), 0);
     vec4 vlo = (t_lo >= 0)
-        ? texelFetch(uScatter, ivec2(tile_xy.x + (t_lo % TILE_SIZE),
-                                     tile_xy.y + (t_lo / TILE_SIZE)), 0)
+        ? texelFetch(uScatter, ivec2(tile_xy.x + (t_lo % uBlockSide),
+                                     tile_xy.y + (t_lo / uBlockSide)), 0)
         : vec4(0.0);   // identity：τ=0, S=0 ⇒ T=1, S=0
     tau = mix(vlo.x, vhi.x, fr);
     S   = mix(vlo.yzw, vhi.yzw, fr);
@@ -345,16 +349,16 @@ void main() {
     vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
     float z = length(pw.xyz / pw.w - ro);
     z = clamp(z, uZNear, uZFar);
-    float ell = float(NZ) * log(z / uZNear) / log(uZFar / uZNear);
+    float ell = float(uNz) * log(z / uZNear) / log(uZFar / uZNear);
 
     ivec2 tex_sz = textureSize(uScatter, 0);
-    int grid_cols = tex_sz.x / TILE_SIZE;
-    int grid_rows = tex_sz.y / TILE_SIZE;
+    int grid_cols = tex_sz.x / uBlockSide;
+    int grid_rows = tex_sz.y / uBlockSide;
 
-    // 4 邻 tile（双线性，按 tile 中心对齐）。屏幕像素先 ×k 换算到 froxel 纹理坐标。
-    vec2 px = gl_FragCoord.xy * uSuperScale;
-    float cu = px.x / float(TILE_SIZE) - 0.5;
-    float cv = px.y / float(TILE_SIZE) - 0.5;
+    // 4 邻 tile（双线性，按 tile 中心对齐）。Nxy 单元在屏幕上是 uTilePx 像素。
+    vec2 px = gl_FragCoord.xy;
+    float cu = px.x / float(uTilePx) - 0.5;
+    float cv = px.y / float(uTilePx) - 0.5;
     int tx0 = int(floor(cu));
     int ty0 = int(floor(cv));
     float fu = cu - float(tx0);
@@ -371,7 +375,7 @@ void main() {
             float w = wx * wy;
             float ctau;
             vec3  cS;
-            SampleColumn(ivec2(tx * TILE_SIZE, ty * TILE_SIZE), ell, ctau, cS);
+            SampleColumn(ivec2(tx * uBlockSide, ty * uBlockSide), ell, ctau, cS);
             tau += w * ctau;
             S   += w * cS;
         }

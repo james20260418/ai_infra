@@ -6,8 +6,8 @@
 // **就地**合成到调用方当前绑定的 3D HDR FBO（与 HorizonFogRenderer 同为「其它 3D 之后、
 // HDR 后处理之前」的一次全屏 pass）。
 //
-// 三趟（inject/scatter 跑在 froxel 纹理上 = 主 FBO × super_scale 每轴；composite 跑在主 FBO）；
-// froxel 网格 = froxel 纹理上 kTileSize² tile 为一个柱、柱内 kTileSize² 个 z 切片：
+// 三趟（inject/scatter 跑在 froxel 纹理上；composite 跑在主 FBO）；
+// froxel 网格：每个 Nxy 单元占 froxel 纹理上一块 sblock×sblock texel（sblock=√nz，承载 nz 个 z 切片）：
 //   1. inject（fire_fog_inject）  逐 texel = 某 froxel 的**局部** (τ, S)：tile 中心视线 ×
 //                                [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
 //   2. scatter（fire_fog_scatter）逐 texel = 某 froxel 的**累积** (τ, S)：沿 z 有序前缀。
@@ -53,12 +53,14 @@ struct FireFogLighting {
 
 class FireFogRenderer {
 public:
-    // ── 常量（shader 里同名 #define 与之逐字对应；改一处必须同步）──
-    // tile 边长 = 每柱的 Nxy 单元边长，同时决定 z 切片数（kNz = tile 像素数，硬约束）。
-    // 16×16 ⇒ Nz=256（高质量档，实测 8×8/Nz=64 的 z 带把颗粒衬得更明显，故用 256）。
-    static constexpr int kTileSize = 16;               // tile 边长（像素）
-    static constexpr int kNz = kTileSize * kTileSize;  // 每柱 z 切片数（= tile 像素数）
-    static constexpr int kMaxSuperScale = 4;           // 超屏存储倍数 k（每轴）上限
+    // ── 常量 ──
+    // froxel 网格分辨率由 FireFogParams 的 nz / tile_px 给出（运行期），下列为其**合法范围**，
+    // Draw() 会 CHECK（不合法直接 crash，不静默回退）。
+    static constexpr int kMinNz = 4;             // nz 下界（完全平方，sblock≥2）
+    static constexpr int kMaxNz = 1024;          // nz 上界（sblock≤32）
+    static constexpr int kMinTilePx = 1;         // tile_px 下界（屏幕像素）
+    static constexpr int kMaxTilePx = 256;       // tile_px 上界（屏幕像素）
+    static constexpr int kMaxFroxelDim = 16384;  // 派生 froxel 纹理单轴上限（GL 常见上限）
     static constexpr int kMaxFogsPerTile = 8;          // K：每 tile 团上限
     static constexpr int kTexelsPerTile = kMaxFogsPerTile / 4;  // 每 tile 的 RGBA8 texel 数 = 2
     static constexpr int kMaxTotalFogs = 255;          // 全局团上限（uint8 索引，sentinel=255）
@@ -98,8 +100,8 @@ public:
               const FireFogLighting& light);
 
 private:
-    // 按 (w, h) 确保 tile 索引纹理存在且尺寸匹配（变化则重建）。
-    void EnsureTileTexture(int w, int h);
+    // 按 (grid_cols, grid_rows)（= Nxy 的列/行数）确保 tile 索引纹理存在且尺寸匹配。
+    void EnsureTileTexture(int grid_cols, int grid_rows);
     // 按 (w, h) 确保 inject / scatter RGBA32F 目标存在且尺寸匹配（变化则重建）。
     void EnsureFroxelTargets(int w, int h);
 

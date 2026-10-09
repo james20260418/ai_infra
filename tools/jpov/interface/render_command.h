@@ -472,7 +472,8 @@ struct PointFog {
 //
 // 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
-// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；super_scale ∈ [1,4]。
+// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
+//                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
 struct FireFogParams {
     // 光照开关（分步验收用）：
     //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
@@ -484,14 +485,22 @@ struct FireFogParams {
     // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
     float sun_gain = 1.0f;
     // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
-    // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/Nz}。near 别设太小（浪费近端）。
+    // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/nz}。near 别设太小（浪费近端）。
     float z_near = 0.1f;
     float z_far = 2000.0f;
-    // 超屏存储倍数 k（**每轴**，与 Nz 解耦）：froxel 纹理 = (k·W)×(k·H)，
-    // 面积/耗时 ×k²，Nxy 每轴 ×k，Nz 不变。k=1：Nxy=屏/16（16px 单元）；
-    // k=2：纹理 2W×2H（4× 面积）、Nxy 每轴翻倍（80×45→160×90，8px 单元）。
-    // 范围 [1, 4]。
-    int super_scale = 1;
+    // ── froxel 网格分辨率（两个**独立**自由度）──
+    //   nz      : 每柱 z 切片数。必须是**完全平方**（存储块边长 sblock = √nz，方阵铺砖）。
+    //   tile_px : 每个 Nxy 单元的**屏幕像素**边长（每轴）。
+    //   派生量：
+    //     sblock = √nz；
+    //     Nxy    = ceil(W/tile_px) × ceil(H/tile_px)；
+    //     k（超屏/屏，“每轴”） = sblock/tile_px，面积/耗时 ×k²；
+    //     froxel 纹理 = Nxy.x·sblock × Nxy.y·sblock。
+    //   约束（JPOV 会 CHECK，见 fire_fog_renderer.cc）：
+    //     nz ∈ 完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]；
+    //     派生 froxel 纹理两轴 ≤ kMaxFroxelDim。
+    int nz = 256;
+    int tile_px = 16;
 };
 
 // 全局平行光（太阳 Directional Light）。

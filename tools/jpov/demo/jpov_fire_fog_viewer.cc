@@ -181,17 +181,24 @@ int RunCapture(const std::string& out_dir) {
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("10_big_fog");
 
-    // ── I. 超屏存储 k=1 vs k=2（16px vs 8px froxel 单元）对比 ──
+    // ── I. froxel 分辨率对比：Nz/tile 组合 ──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 3.0f;
     app.fog_intensity_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
-    for (int kidx : {0, 1}) {
-        app.super_k_index_ = kidx;   // 0→k=1, 1→k=2
-        shoot(("30_superk" + std::to_string(kidx + 1)).c_str());
+    {
+        // (Nz index, tile index): (256,16) / (64,8) / (64,16)
+        const int cases[3][2] = {{1, 1}, {0, 0}, {0, 1}};
+        const char* names[3] = {"30_nz256_tile16", "31_nz64_tile8", "32_nz64_tile16"};
+        for (int c = 0; c < 3; ++c) {
+            app.nz_index_ = cases[c][0];
+            app.tile_px_index_ = cases[c][1];
+            shoot(names[c]);
+        }
     }
-    app.super_k_index_ = 0;
+    app.nz_index_ = 1;
+    app.tile_px_index_ = 1;
 
     // ═══════════ step2：ambient + 太阳×CSM（god ray）——与 step1 对照 ═══════════
     app.sun_enable_ = true;

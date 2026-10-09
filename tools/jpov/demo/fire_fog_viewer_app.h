@@ -31,6 +31,11 @@ using jpov_viewer::kViewerHeight;
 using jpov_viewer::kViewerFps;
 using jpov_viewer::kViewerFontAlias;
 
+// froxel 分辨率可选档（与 FireFogParams.nz / tile_px 对应，面板下拉的候选值）。
+// nz 必须是完全平方（见 FireFogParams 约束）。
+inline constexpr int kNzChoices[] = {64, 256};
+inline constexpr int kTilePxChoices[] = {8, 16, 32};
+
 // 点状雾查看器渲染核心 App。
 class FireFogApp : public JPOV {
 public:
@@ -65,8 +70,9 @@ public:
     float sun_phase_g_ = 0.7f;         // HG 相位各向异性（god ray 强度）
     float sun_gain_ = 2.0f;            // 太阳项增益
 
-    // ── 超屏存储倍数 k（每轴，1 或 2）：k=1 → 16px froxel 单元；k=2 → 8px（纹理 4× 面积）──
-    int super_k_index_ = 0;            // 0 → k=1；1 → k=2（面板下拉）
+    // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
+    int nz_index_ = 1;        // 0 → Nz=64，1 → Nz=256
+    int tile_px_index_ = 1;   // 0 → 8px，1 → 16px，2 → 32px
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
@@ -138,7 +144,8 @@ public:
             ff.sun_enable = sun_enable_;
             ff.sun_phase_g = sun_phase_g_;
             ff.sun_gain = sun_gain_;
-            ff.super_scale = super_k_index_ + 1;   // 0→1, 1→2
+            ff.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
+            ff.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
             cmds->fire_fog = ff;
         }
 
@@ -182,33 +189,36 @@ private:
                 {slim, kRowH}};
         };
 
-        // ── 左列：雾体几何/强度/剖面 ──
+        // ── 左列：雾体几何/强度 + froxel 分辨率 + 光照开关 ──
         ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
         ui_.SliderFloat("中心 z", &fog_center_.z(), row(0, 2), -10.0f, 10.0f, 2);
         ui_.SliderFloat("半径 m", &fog_radius_, row(0, 3), 0.2f, 10.0f, 2);
         ui_.SliderFloat("强度 σ", &fog_intensity_, row(0, 4), 0.0f, 4.0f, 3);
         {
-            const std::vector<const char*> items = {
-                "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
-            ui_.Combo("衰减剖面", &fog_attenuation_, items, row(0, 5));
+            const std::vector<const char*> items = {"Nz=64", "Nz=256"};
+            ui_.Combo("z 切片 Nz", &nz_index_, items, row(0, 5));
+        }
+        {
+            const std::vector<const char*> items = {"tile=8px", "tile=16px", "tile=32px"};
+            ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 6));
         }
         ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 7));
-        {
-            const std::vector<const char*> items = {"超屏 k=1 (16px)", "超屏 k=2 (8px)"};
-            ui_.Combo("超屏存储 k", &super_k_index_, items, row(0, 6));
-        }
 
-        // ── 右列：雾色 + 天光主光仰角 + god ray ──
-        ui_.SliderFloat("色 R", &fog_color_.r, row(1, 0), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("色 G", &fog_color_.g, row(1, 1), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("色 B", &fog_color_.b, row(1, 2), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(1, 3), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 4), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 5), 0.0f, 8.0f, 1);
-        ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 6), 0.0f, 0.9f, 2);
-        ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 7), 0.0f, 4.0f, 2);
-        ui_.Text("froxel: Nz=256 tile=16 K=8  z=[0.1,2000]", row(1, 8));
+        // ── 右列：剖面 + 雾色 + 天光主光仰角 + god ray ──
+        {
+            const std::vector<const char*> items = {
+                "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
+            ui_.Combo("衰减剖面", &fog_attenuation_, items, row(1, 0));
+        }
+        ui_.SliderFloat("色 R", &fog_color_.r, row(1, 1), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("色 G", &fog_color_.g, row(1, 2), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("色 B", &fog_color_.b, row(1, 3), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(1, 4), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 5), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 6), 0.0f, 8.0f, 1);
+        ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 7), 0.0f, 0.9f, 2);
+        ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 8), 0.0f, 4.0f, 2);
     }
 
     bool show_panel_ = true;
