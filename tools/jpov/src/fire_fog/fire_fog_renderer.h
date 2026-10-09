@@ -24,6 +24,7 @@
 #define JPOV_SRC_FIRE_FOG_FIRE_FOG_RENDERER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,25 @@
 #include "tools/jpov/src/shader_manager.h"
 
 namespace jpov {
+
+// 雾火的**物理光照输入**（与 object3d 共用同一套 CSM 资源，由调用方填）。
+//
+// 内散射源：L_in = fog_tint · ( ambient_color·ambient_intensity
+//                                + sun_color·sun_intensity·csm_shadow )。
+// 前者来自天光单色 ambient 推导（SkyCommand::AmbientColor()/AmbientIntensity()），
+// 后者是太阳直射经 CSM 阴影调制 —— god ray 正是来自后者。
+struct FireFogLighting {
+    Color ambient_color{0.9f, 0.9f, 0.9f, 1.0f};   // SkyCommand::AmbientColor()
+    float ambient_intensity = 1.0f;                // SkyCommand::AmbientIntensity()
+    std::optional<DirectionalLight> sun;           // 无 ⇒ 无 god ray
+    float sun_phase_g = 0.5f;                       // HG 相位各向异性 g
+    float sun_gain = 1.0f;                          // 太阳项增益
+    ShadowConfig shadow_cfg{};                      // 级联范围 / 淡出 / 偏置
+    std::vector<CascadeFBO> shadow_fbos;            // 长度 = cascade_count（仅 sun 时有效）
+    float shadow_vp[ShadowConfig::kMaxCascades][16] = {};
+    float shadow_depth_vp[ShadowConfig::kMaxCascades][16] = {};
+    float shadow_texel_world[ShadowConfig::kMaxCascades] = {};
+};
 
 class FireFogRenderer {
 public:
@@ -77,7 +97,8 @@ public:
               int viewport_w,
               int viewport_h,
               unsigned int scene_depth_tex,
-              const FireFogParams& params);
+              const FireFogParams& params,
+              const FireFogLighting& light);
 
 private:
     // 按 (low_w, low_h) 确保 tile 索引纹理存在且尺寸匹配；变化则重建（低分辨率域）。

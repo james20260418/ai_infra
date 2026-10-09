@@ -481,6 +481,11 @@ struct FireFogParams {
     float gaussian_sigma = 1.0f;
     // ZDist 降采样倍数 N：ZDist 纹理 = 主 pass ÷ N（tile 剪枝也按低分辨率做）；1 = 不降采样。
     int downsample = 4;
+    // 太阳项散射相位（Henyey-Greenstein 各向异性 g ∈ [0,1)；0=各向同性=1/4π）。
+    // 越大 ⇒ 逆着太阳看时雾越亮（god ray 更明显）；只影响太阳直射项，不影响 ambient。
+    float sun_phase_g = 0.5f;
+    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
+    float sun_gain = 1.0f;
 };
 
 // 全局平行光（太阳 Directional Light）。

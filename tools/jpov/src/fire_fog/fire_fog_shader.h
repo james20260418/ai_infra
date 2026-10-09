@@ -582,12 +582,95 @@ uniform float uZFar;
 uniform int   uTotalFogs;
 uniform int   uJitterEnable;     // 0 = 关抖动（用段中点）
 
+// ── 光照（物理）：内散射源 L_in = ambient·intensity + sun·intensity·CSM阴影 ──
+uniform vec3  uAmbientColor;       // 天光单色 ambient 色（SkyCommand::AmbientColor()）
+uniform float uAmbientIntensity;   // 天光 ambient 亮度标量（SkyCommand::AmbientIntensity()）
+uniform int   uHasSun;             // 1 = 有主平行光（太阳/月亮）
+uniform vec3  uSunColor;
+uniform float uSunIntensity;
+uniform vec3  uSunDir;             // 光传播方向（= -sun_dir，从太阳指向场景）
+uniform float uSunPhaseG;          // Henyey-Greenstein 各向异性 g（0=各向同性=1/4π）
+uniform float uSunGain;            // 太阳项额外增益（1=物理）
+
+// ── CSM 阴影（与 object3d 同一套资源；此处**原始单次采样，无 PCF**）──
+uniform int   uCascadeCount;
+uniform float uCascadeRanges[5];
+uniform sampler2D uShadowMap[5];
+uniform mat4  uShadowVP[5];
+uniform mat4  uShadowDepthVP[5];
+uniform float uShadowTexelWorld[5];
+uniform float uShadowBiasCascade[5];
+uniform int   uShadowBiasOverride;
+uniform float uShadowFadeStart;
+uniform float uShadowFadeEnd;
+
 out vec4 out0;
 out vec4 out1;
 out vec4 out2;
 out vec4 out3;
 out vec4 out4;
 out vec4 out5;
+
+// 单级联单次采样（无 PCF）。因 GLSL 330 禁动态 sampler 索引，调用处按常量索引展开。
+float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texelW,
+             float biasVal, int biasOv, vec3 wp) {
+    vec4 lsp = vp * vec4(wp, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;                        // 不在该级联覆盖内 ⇒ 视为受照
+    }
+    vec4 dpos = dvp * vec4(wp, 1.0);
+    float cur = dpos.z / dpos.w;
+    float tw = (biasOv != 0) ? biasVal : texelW;
+    cur -= max(0.01, 1.5 * tw);            // 雾无表面法线 ⇒ 用 tanθ=1 的保守深度偏置
+    return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
+}
+
+// Henyey-Greenstein 散射相位（相对太阳→视线的散射角）。μ=1 = 朝太阳看（前向散射，
+// 这正是 god ray / 逆光光柱的成因）；g=0 ⇒ 各向同性 = 1/(4π)。
+float SunPhase(vec3 rd) {
+    vec3 sd = normalize(uSunDir);
+    float mu = clamp(dot(normalize(rd), -sd), -1.0, 1.0);
+    float g = clamp(uSunPhaseG, 0.0, 0.95);
+    float denom = 1.0 + g * g - 2.0 * g * mu;
+    return uSunGain * (1.0 - g * g)
+           / (4.0 * 3.14159265 * pow(max(denom, 1e-4), 1.5));
+}
+
+// 原始 CSM（单次采样，无 PCF）：按采样点到相机的距离选主级联，末尾按 fade 淡出。
+float CsmShadow(vec3 wp, float dist) {
+    if (uHasSun == 0 || uCascadeCount <= 0) {
+        return 1.0;
+    }
+    int c = uCascadeCount - 1;
+    for (int i = 0; i < 5; ++i) {
+        if (i < uCascadeCount && dist <= uCascadeRanges[i]) {
+            c = i;
+            break;
+        }
+    }
+    float s;
+    if (c == 0) {
+        s = CsmTap(uShadowMap[0], uShadowVP[0], uShadowDepthVP[0], uShadowTexelWorld[0],
+                   uShadowBiasCascade[0], uShadowBiasOverride, wp);
+    } else if (c == 1) {
+        s = CsmTap(uShadowMap[1], uShadowVP[1], uShadowDepthVP[1], uShadowTexelWorld[1],
+                   uShadowBiasCascade[1], uShadowBiasOverride, wp);
+    } else if (c == 2) {
+        s = CsmTap(uShadowMap[2], uShadowVP[2], uShadowDepthVP[2], uShadowTexelWorld[2],
+                   uShadowBiasCascade[2], uShadowBiasOverride, wp);
+    } else if (c == 3) {
+        s = CsmTap(uShadowMap[3], uShadowVP[3], uShadowDepthVP[3], uShadowTexelWorld[3],
+                   uShadowBiasCascade[3], uShadowBiasOverride, wp);
+    } else {
+        s = CsmTap(uShadowMap[4], uShadowVP[4], uShadowDepthVP[4], uShadowTexelWorld[4],
+                   uShadowBiasCascade[4], uShadowBiasOverride, wp);
+    }
+    float fade = 1.0 - clamp((dist - uShadowFadeStart)
+                             / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
+    return mix(1.0, s, fade);
+}
 
 void main() {
     vec2 ndc = vTexCoord * 2.0 - 1.0;
@@ -676,12 +759,19 @@ void main() {
                 ? Hash01(uvec3(uint(pix.x), uint(pix.y), uint(bi) * 131u + uint(k)))
                 : 0.5;
             float ts = s0 + jit * seg_len;
-            float rr = length(ro + ts * rd - c);
+            vec3  swp = ro + ts * rd;
+            float rr = length(swp - c);
             float wgt = ProfileAtten(atten, rr / rad);
             if (wgt <= 0.0) {
                 continue;
             }
-            ZAddSegment(zs, taus, eds, m, s0, s1, inten * wgt, col);
+            // 物理内散射源：天光 ambient（非方向，占比大）+ 太阳经 CSM 阴影 + HG 相位
+            // 后的直射（god ray 来自后者：前向散射时朝太阳看最亮，且被阴影切开）。
+            float sh = CsmShadow(swp, ts);
+            float ph = SunPhase(rd);
+            vec3 Lin = col * (uAmbientColor * uAmbientIntensity
+                              + uSunColor * uSunIntensity * ph * sh);
+            ZAddSegment(zs, taus, eds, m, s0, s1, inten * wgt, Lin);
         }
     }
 

@@ -98,6 +98,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 }
 
 constexpr int kBodyTexelsPerFog = 3;   // 每团 3 个 RGBA32F texel
+constexpr int kShadowTexUnitBase = 3;  // 趟 A 的 CSM 阴影纹理起始单元（趟 A 已用 0/1/2）
 
 // 组装一趟的 FS 源码（#version + 公共前置 + 趟体）。
 std::string AssembleFragmentShader(const char* body) {
@@ -253,7 +254,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            int viewport_w,
                            int viewport_h,
                            unsigned int scene_depth_tex,
-                           const FireFogParams& params) {
+                           const FireFogParams& params,
+                           const FireFogLighting& light) {
     CHECK(shader_mgr_ != nullptr) << "FireFogRenderer::Init 未调用";
     if (fogs.empty()) {
         return;   // 零开销
@@ -372,7 +374,77 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uTotalFogs"), count);
     glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uJitterEnable"),
                 params.jitter_enable ? 1 : 0);
+
+    // ── 物理光照 + CSM 阴影（趟 A）──
+    const int cascade_count =
+        light.sun.has_value()
+            ? std::min(light.shadow_cfg.cascade_count, ShadowConfig::kMaxCascades)
+            : 0;
+    glUniform3f(shader_mgr_->GetUniform(prog_zdst_, "uAmbientColor"),
+                light.ambient_color.r, light.ambient_color.g, light.ambient_color.b);
+    glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uAmbientIntensity"),
+                light.ambient_intensity);
+    glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uHasSun"),
+                light.sun.has_value() ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uSunPhaseG"), light.sun_phase_g);
+    glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uSunGain"), light.sun_gain);
+    if (light.sun.has_value()) {
+        glUniform3f(shader_mgr_->GetUniform(prog_zdst_, "uSunColor"),
+                    light.sun->color.r, light.sun->color.g, light.sun->color.b);
+        glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uSunIntensity"),
+                    light.sun->intensity);
+        glUniform3f(shader_mgr_->GetUniform(prog_zdst_, "uSunDir"),
+                    light.sun->direction.x(), light.sun->direction.y(),
+                    light.sun->direction.z());
+    } else {
+        // 无太阳：清零（防止上一帧残留）。
+        glUniform3f(shader_mgr_->GetUniform(prog_zdst_, "uSunColor"), 0.0f, 0.0f, 0.0f);
+        glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uSunIntensity"), 0.0f);
+        glUniform3f(shader_mgr_->GetUniform(prog_zdst_, "uSunDir"), 0.0f, -1.0f, 0.0f);
+    }
+    glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uCascadeCount"), cascade_count);
+    if (cascade_count > 0) {
+        CHECK_EQ(light.shadow_fbos.size(), static_cast<size_t>(cascade_count))
+            << "FireFog: shadow_fbos 与 cascade_count 不一致";
+        const ShadowConfig& sc = light.shadow_cfg;
+        glUniform1fv(shader_mgr_->GetUniform(prog_zdst_, "uCascadeRanges"),
+                     cascade_count, sc.cascade_ranges);
+        glUniform1fv(shader_mgr_->GetUniform(prog_zdst_, "uShadowTexelWorld"),
+                     ShadowConfig::kMaxCascades, light.shadow_texel_world);
+        float bias[ShadowConfig::kMaxCascades] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+            bias[c] = sc.cascade_bias[c];
+        }
+        glUniform1fv(shader_mgr_->GetUniform(prog_zdst_, "uShadowBiasCascade"),
+                     ShadowConfig::kMaxCascades, bias);
+        glUniform1i(shader_mgr_->GetUniform(prog_zdst_, "uShadowBiasOverride"),
+                    sc.override_cascade_bias ? 1 : 0);
+        glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uShadowFadeStart"), sc.fade_start);
+        glUniform1f(shader_mgr_->GetUniform(prog_zdst_, "uShadowFadeEnd"), sc.fade_end);
+        for (int c = 0; c < cascade_count; ++c) {
+            const unsigned int unit =
+                static_cast<unsigned int>(kShadowTexUnitBase) + static_cast<unsigned int>(c);
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, light.shadow_fbos[c].tex);
+            const std::string n_unit = "uShadowMap[" + std::to_string(c) + "]";
+            glUniform1i(shader_mgr_->GetUniform(prog_zdst_, n_unit.c_str()),
+                        static_cast<int>(unit));
+            const std::string n_vp = "uShadowVP[" + std::to_string(c) + "]";
+            glUniformMatrix4fv(shader_mgr_->GetUniform(prog_zdst_, n_vp.c_str()),
+                               1, GL_FALSE, light.shadow_vp[c]);
+            const std::string n_dvp = "uShadowDepthVP[" + std::to_string(c) + "]";
+            glUniformMatrix4fv(shader_mgr_->GetUniform(prog_zdst_, n_dvp.c_str()),
+                               1, GL_FALSE, light.shadow_depth_vp[c]);
+        }
+        glActiveTexture(GL_TEXTURE0);
+    }
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    // 解绑 CSM 单元（趟 B 会用 0..5）。
+    for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+        glActiveTexture(GL_TEXTURE0 + kShadowTexUnitBase + c);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
 
     // ═══════════ 趟 B：低分辨率高斯合并 → zdist_tex_[1] ═══════════
     const int src = params.gaussian_enable ? 1 : 0;

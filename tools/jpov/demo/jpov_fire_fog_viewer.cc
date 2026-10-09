@@ -203,6 +203,22 @@ int RunCapture(const std::string& out_dir) {
     app.downsample_ = 4.0f;
     app.gaussian_sigma_ = 1.0f;
 
+    // ── H. 物理光照 + CSM god ray（低太阳 + 逆光看）──
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 4.0f;
+    app.fog_intensity_ = 1.0f;
+    app.gaussian_enable_ = true;
+    app.downsample_ = 4.0f;
+    app.gaussian_sigma_ = 2.0f;
+    app.sun_gain_ = 1.0f;
+    app.sun_phase_g_ = 0.6f;
+    app.deg_.sun_elev_deg = 12.0f;
+    for (int az : {0, 90, 180, 270}) {
+        app.deg_.sun_azim_deg = static_cast<float>(az);
+        default_view();
+        shoot(("20_godray_az" + std::to_string(az)).c_str());
+    }
+
     // 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。
     default_view();
     app.InstallTextMeasure();

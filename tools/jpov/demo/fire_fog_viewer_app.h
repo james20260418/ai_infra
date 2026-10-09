@@ -55,7 +55,8 @@ public:
     // ── 点状雾参数（单个团；用户可调）──
     jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // 雾体中心（橡树中段）
     float fog_radius_ = 3.0f;                                  // 半径（米）
-    jpov::Color fog_color_ = jpov::Color{1.0f, 0.55f, 0.22f, 1.0f};  // 介质/发射色（暖橙）
+    // 雾色 = 内散射源 L_in 的**色调 tint**（默认白=纯物理：ambient + 太阳×CSM）。
+    jpov::Color fog_color_ = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
     float fog_intensity_ = 0.6f;                               // 消光尺度 σ 系数
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
@@ -64,6 +65,8 @@ public:
     bool jitter_enable_ = true;        // 段内抖动（关 → 段中点）
     float gaussian_sigma_ = 2.0f;      // 高斯 σ（低分辨率像素）；默认给到能抹平抖动的量级
     float downsample_ = 4.0f;          // ZDist 降采样倍数 N（1 = 不降采样）
+    float sun_phase_g_ = 0.5f;         // HG 相位各向异性（god ray 强度）
+    float sun_gain_ = 1.0f;            // 太阳项增益
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
@@ -136,6 +139,8 @@ public:
             ff.jitter_enable = jitter_enable_;
             ff.gaussian_sigma = gaussian_sigma_;
             ff.downsample = static_cast<int>(downsample_ + 0.5f);
+            ff.sun_phase_g = sun_phase_g_;
+            ff.sun_gain = sun_gain_;
             cmds->fire_fog = ff;
         }
 
@@ -203,6 +208,8 @@ private:
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(1, 3), 0.0f, 90.0f, 0);
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 4), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 5), 0.0f, 8.0f, 1);
+        ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 8), 0.0f, 0.9f, 2);
+        ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 9), 0.0f, 4.0f, 2);
         ui_.ColorSwatch("雾色参考→", fog_color_, row(1, 6));
         ui_.Text("M=2段/团  K=8团/tile  tile=16px", row(1, 7));
     }
