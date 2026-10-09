@@ -35,8 +35,21 @@
   ⚠️ **skeleton renderer 尚未接 cutout**（下个 PR）。
 - **双面已实现**：`PBRMaterial.double_sided` ← glTF `doubleSided`；draw 时按它关 `GL_CULL_FACE` + FS 翻法线。saver 已能写回 `doubleSided`。
 - **glTF 外置纹理导出**：`gltf_saver::WriteGltf`（`.gltf + .bin + 独立贴图`）；model editor 加“导出 gltf(外置)”按钮 + CLI `--save_format gltf`。
-- **blend 未做**（按决策 1）；**shadow pass 未 discard**（裙子投影仍实心轮廓，待办）。
+- **blend 未做**（按决策 1）；**shadow pass 未 discard**（裙子投影仍实心轮廓）—— 已于 §0.7 补齐。
 - 验证：`//tools/jpov/test/object3d:all` 14/14、`jpov_gltf_saver_test` 12/12 绿。
+
+---
+
+## 〇.7、后续实现状态（2026-10-09）
+
+- **skeleton renderer 接 cutout + 双面**（PR #156）：蒙皮带骨实例此前只走不透明 program，现按
+  `alpha_mode==kMask` 选 cutout 变体（`JPOV_ALPHA_CUTOUT`，含 `discard`）、`double_sided` 时关背面
+  剔除 + FS 翻法线 —— 与 object3d 对齐。
+- **阴影 pass 接 cutout + 双面**（本 PR）：object3d 与蒙皮**两条阴影路径**都拆出 cutout 变体
+  （同源 + `JPOV_ALPHA_CUTOUT`），按材质选 program + 采样 baseColor 的 alpha 做 `discard`；
+  `double_sided` 时关背面剔除（两面都投影）。不透明阴影路径零行为变化。
+  ⇒ **叶片 / 蕾丝这类镂空资产的投影不再是实心轮廓。**
+- 因此「①透明切孔」这条线在引擎侧的底座已齐：[主 pass cutout（object3d #155 / skeleton #156）] + [阴影 pass cutout（本 PR）]。
 
 ---
 
@@ -172,7 +185,7 @@ Danis 猜「纹理的渐变，总不至于是画两遍 Dither 吧」——**方�
 | **Alpha cutout 材质** | ❌ **无**（PBR 无 alpha；仅 `kText3D` 有覆盖率 alpha） | 叶子切孔 | **最大缺口，第一块砖** |
 | 双面渲染 / 法线翻转 | ❌ 无 | 叶片双面 | 要补 |
 | tile culling | ✅（但治的是**光源**，不是 overdraw） | — | 不是本用 |
-| 阴影 CSM | ✅ | 植物投影 | 复用（cutout 需 shadow pass 也 `discard`） |
+| 阴影 CSM | ✅ | 植物投影 | 复用（shadow pass 已支持 `discard` + 双面，见 §0.7） |
 | LOD / impostor / billboard | ❌ 无 | 压远处 | 后续 |
 | 植被生成器 | ❌ 无 | 树/草 | 新增（CPU/GL-free） |
 | 风 VS | ❌ 无 | 摆动 | 新增 |
@@ -192,6 +205,7 @@ Danis 猜「纹理的渐变，总不至于是画两遍 Dither 吧」——**方�
 **Step 0 — 两块地基（不含植物，通用能力）**
 1. **Cutout 材质**：`PBRMaterial` 加 `alpha_mode{none|mask} + alpha_cutoff`，FS 加 `discard`；
    **shadow pass 同步 `discard`**（否则叶子影是方片）。→ 这一步本身就是引擎级升级。
+   ✅ **已实现**（2026-10-09）：object3d（#155）/ skeleton（#156）主 pass + 两条阴影 pass（本 PR）均已支持 cutout + 双面，见 §0.6/§0.7。
 2. **静态 `DrawInstancedObject`**：补完 instancing 第二条腿（Danis 在 #106 已点名它是下一步）。
 
 **Step 1 — 第一棵「不丢人」的树**
