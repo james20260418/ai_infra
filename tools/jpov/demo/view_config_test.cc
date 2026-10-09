@@ -146,6 +146,20 @@ void TestFitRadius() {
     LOG(INFO) << "OK TestFitRadius";
 }
 
+void TestVerticalPanDeltaY() {
+    // 纵向 pan 半个窗口高（720/2=360px）⇒ 注视点升降 1m。
+    ExpectNear(jpov_viewer::VerticalPanDeltaY(/*mouse_dy*/ 360.0f, /*h*/ 720.0f),
+               1.0f, 1e-6, "下拖半屏 pan 应 = +1m");
+    ExpectNear(jpov_viewer::VerticalPanDeltaY(-360.0f, 720.0f), -1.0f, 1e-6,
+               "上拖半屏 pan 应 = -1m");
+    // 整屏 ⇒ 2m；零位移 ⇒ 0。
+    ExpectNear(jpov_viewer::VerticalPanDeltaY(720.0f, 720.0f), 2.0f, 1e-6,
+               "下拖整屏应 = +2m");
+    ExpectNear(jpov_viewer::VerticalPanDeltaY(0.0f, 720.0f), 0.0f, 1e-9,
+               "零位移应 = 0");
+    LOG(INFO) << "OK TestVerticalPanDeltaY";
+}
+
 void TestMakeNoonLighting() {
     const jpov_viewer::NoonLighting nl = jpov_viewer::MakeNoonLighting();
     // 太阳光传播方向 (0,-1,-1)。
@@ -195,6 +209,7 @@ int main() {
     TestPhiMappingAndClamp();
     TestRClampAndZoom();
     TestFitRadius();
+    TestVerticalPanDeltaY();
     TestMakeNoonLighting();
     TestGroundQuad();
     LOG(INFO) << "全部 ViewConfig 单测通过";

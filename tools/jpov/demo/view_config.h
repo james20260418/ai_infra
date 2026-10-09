@@ -130,6 +130,20 @@ inline void ApplyInput(ViewConfig* v /*inout*/, float dx, float dy,
     v->R   = std::clamp(v->R, ViewConfig::kRMin, ViewConfig::kRMax);
 }
 
+// 中键纵向 pan：把「本帧鼠标纵向位移」（像素）映射为相机**注视点**的世界 Y 位移（米）。
+//
+// 约定（需求定稿）：鼠标纵向 pan **半个窗口高** ⇒ 注视点升降 **1m**。
+// 方向 =「抓取世界」：鼠标下拖（dy>0）⇒ 世界随手下移 ⇒ 注视点上升（+Y）。
+//
+// 用法：调用方自建可平移的注视点 target_y_，每帧
+//   target_y_ += VerticalPanDeltaY(mouse_dy, window_h);
+// 并把相机 position 与 target **同时**平移该量（朝向不变 ⇒ 纯平移而非旋转）。
+// Pre-condition: window_h > 0。
+inline float VerticalPanDeltaY(float mouse_dy, float window_h) {
+    CHECK_GT(window_h, 0.0f);
+    return mouse_dy * (2.0f / window_h);
+}
+
 // 默认初始视角：目标点 (0,0,0)，方位 45°，仰角 0°，R=√2（单位尺度模型）。
 // 初始相机位置 = (1, 0, 1)（r=√2, theta=π/4, phi=0 → {cos·sin·R, 0, cos·cos·R}）。
 //

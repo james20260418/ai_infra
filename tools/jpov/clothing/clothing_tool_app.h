@@ -43,6 +43,11 @@
 //   - 2026-10-09：**补洞（推进法）面板**——底部中间新增「执行补洞」按钮 + 细分/平滑
 //       勾选 + 「最大洞周长 (m)」滑条（+ CLI `--hole_fill`/`--hole_perimeter`）。补洞在**建仿真器
 //       （关联邻居表）之前**跑（"关联前先补洞"），把网格破洞/裂缝补上（见 mesh_hole_fill.h）。
+//   - 2026-10-09（本 PR）：**3D 画笔（选区）+ 中键纵向 pan**——顶部中间「3D 画笔」面板
+//       （激活/结束按钮 + 「画笔半径 (px)」滑条 5~200，默认 100）。画笔**激活态**下才有「选区」
+//       概念：鼠标周围画淡黄半透明圆表示尺寸，左键非 UI 区涂抹把靠近鼠标射线的衣服顶点选入
+//       选区（淡黄 2px 方块标记）；ESC / 再点按钮结束并清空选区（见 brush_tool.h /
+//       camera_projection.h）。中键纵向 drag pan 相机注视点（半屏 = 1m，见 VerticalPanDeltaY）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -73,6 +78,8 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/assets/models/models_path.h"
+#include "tools/jpov/clothing/brush_tool.h"
+#include "tools/jpov/clothing/camera_projection.h"
 #include "tools/jpov/clothing/clothing_axis_input.h"
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
@@ -97,6 +104,7 @@ using jpov_viewer::ApplyInput;
 using jpov_viewer::DefaultView;
 using jpov_viewer::GroundMaterial;
 using jpov_viewer::MakeGroundQuad;
+using jpov_viewer::VerticalPanDeltaY;
 using jpov_viewer::ViewConfig;
 // 软体仿真器（纯 CPU / GL-free，独立包）。
 using soft_mesh_simulator::Axis;
@@ -110,6 +118,10 @@ inline constexpr int kDefaultWindowHeight = 720;
 
 // 交互帧率（查看器刷新率，Hz）。仿真步长固定为 Simulator::kDefaultDt（1/60 s）。
 inline constexpr float kViewerFps = 60.0f;
+
+// 相机垂直 fov（度）：渲染相机与画笔「射线/投影」必须共用同一值，否则顶点标记 /
+// 画笔圆会与画面错位。
+inline constexpr float kCameraFovDeg = 60.0f;
 
 // UI 文本默认字体 = CJK（面板标签显中文）。
 inline constexpr const char* kViewerFontAlias = jpov::kFontBuiltinCJK;
@@ -227,6 +239,16 @@ public:
     float scale_step_    = kDefaultScaleStep;
     // 累计缩放系数（相对启动几何），仅用于把整体缩放夹在 [kClothScaleMin, kClothScaleMax]。
     float cloth_scale_   = 1.0f;
+
+    // ── 相机中键纵向 pan：注视点世界 Y 偏移（米）。相机 position 与 target **同步**平移
+    //    该量（朝向不变 = 纯平移）。半屏 pan = 1m（见 VerticalPanDeltaY）。──
+    float cam_target_y_ = 0.0f;
+
+    // ── 3D 画笔（选区）──
+    //   brush_ 存画笔激活态 + 半径 + 选区（衣服各 primitive 的顶点 index）。
+    //   panel_rects_ 每帧收集各面板的屏幕矩形，供「鼠标是否落在 UI 上」判定（画笔用）。
+    BrushTool brush_;
+    std::vector<jpov::UiRect> panel_rects_;
 
     // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
@@ -416,6 +438,8 @@ public:
             cloth_current_[i].mesh = startup_geometry[i].mesh;
             cloth_current_[i].material = startup_geometry[i].material;
         }
+        // 3D 画笔：选区容器对齐衣服 primitive 数（初始为空选区）。
+        brush_.EnsurePrimitives(cloth_current_.size());
 
         // 建仿真器（绑定姿态 = 启动几何）。仿真器的人体排斥匹配器（Step 2）由
         // InitSimulators() 内部统一挂载（见 AttachBodyMatcherToSims；匹配器在 init_ 里，
@@ -455,6 +479,11 @@ public:
         LOG(INFO) << "衣服模型: " << cloth_path_ << "（" << cloth_.size()
                   << " primitives）";
         FitViewToScene();
+    }
+
+    // 相机注视点（叠加中键纵向 pan 的 Y 偏移）。渲染相机与画笔射线/投影都用它，保证一致。
+    jpov::Vec3f CameraTarget() const {
+        return jpov::Vec3f(0.0f, cam_target_y_, 0.0f);
     }
 
     // ⭐ 唯一的渲染体：交互循环与 headless 出图共用（zero 分叉）。
@@ -511,6 +540,12 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+
+            // 中键纵向 pan：平移相机注视点（相机 position 与 target 同步跟随，朝向不变）。
+            // 半屏 pan = 1m（见 jpov_viewer::VerticalPanDeltaY）。
+            if (input.middle.IsDrag()) {
+                cam_target_y_ += VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
         // ── 滑块 / 参数同步到仿真器（每个 primitive 一份）。──
@@ -521,11 +556,12 @@ public:
             StepSimulationOnce();
         }
 
-        // ── 相机：由 view_ 推导 ──
-        cmds->camera.position = view_.Position();
-        cmds->camera.target   = ViewConfig::Target();  // (0,0,0)
+        // ── 相机：由 view_ 推导（叠加中键 pan 的注视点 Y 偏移；position 与 target 同步平移）。──
+        const jpov::Vec3f cam_target = CameraTarget();
+        cmds->camera.position = view_.Position() + cam_target;
+        cmds->camera.target   = cam_target;
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
-        cmds->camera.fov      = 60.0f;
+        cmds->camera.fov      = kCameraFovDeg;
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;
 
@@ -588,6 +624,9 @@ public:
             DrawPanels(input, winfo, cmds);
             ui_.End();
             ui_.Emit(cmds);
+            // 画笔在面板之后处理（此刻已知本帧面板矩形 + 画笔激活态），并把画笔圆 /
+            // 顶点标记画在面板之上。
+            ProcessBrush(input, winfo, cmds);
         }
     }
 
@@ -882,11 +921,157 @@ private:
         theme.font_alias = kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
+        panel_rects_.clear();   // 重新收集本帧面板矩形（画笔「鼠标在 UI 上」判定用）
         DrawLeftPanel(cmds, w);
         DrawRightPanel(cmds, w, h);
+        DrawBrushPanel(cmds, w, h);
         DrawSkinPanel(cmds, w, h);
         DrawHoleFillPanel(cmds, w, h);
         DrawMotionPanel(cmds, w, h);
+    }
+
+    // ---- 顶部中间：3D 画笔 ----
+    //
+    // 「画笔」按钮切换激活态（激活 = 存在选区概念；再点 / ESC = 结束并清空选区）；
+    // 「画笔半径 (px)」滑条 5~200（默认 100）。激活态下鼠标周围画淡黄半透明圆表示尺
+    // 寸，左键在非 UI 区涂抹把邻近顶点选入选区（见 ProcessBrush）。
+    // 行：标题(1) + 按钮(1) + 半径(1) + 状态(1) = 4。
+    void DrawBrushPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        (void)win_h;
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.30f * win_w;
+        constexpr int kRows = 4;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        const float panel_x = (win_w - panel_w) * 0.5f;  // 顶部居中
+        const float panel_y = kMargin;
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+        float row_y = top;
+
+        DrawLabel("3D 画笔", left, row_w, row_y);
+        row_y += step_y;
+
+        // 激活态按钮：点一次激活，再点一次结束（生命周期）。
+        const char* btn =
+            brush_.active() ? "画笔：激活中（点击结束）" : "画笔：点击激活";
+        if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            brush_.Toggle();
+        }
+        row_y += step_y;
+
+        // 画笔半径（屏幕像素）：5~200，默认 100。
+        ui_.SliderFloat("画笔半径 (px)", brush_.radius_px_mutable(),
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        BrushTool::kMinRadiusPx, BrushTool::kMaxRadiusPx,
+                        /*decimal_places*/ 0);
+        row_y += step_y;
+
+        const std::string status =
+            brush_.active()
+                ? Format("激活 · 已选 %zu 点（左键涂抹；ESC 结束）",
+                         brush_.selected_count())
+                : std::string("未激活（点按钮开始；ESC 结束）");
+        const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+        cmds->DrawText(status, /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                       kFontSize, kForeground, jpov::TextAlignment::kTopLeft,
+                       kViewerFontAlias);
+    }
+
+    // ---- 3D 画笔：每帧处理（在面板之后调用；可用本帧面板矩形）----
+    //
+    //  ① 生命周期：ESC 结束（→ 清空选区）；激活/结束切换在 DrawBrushPanel 的按钮。
+    //  ② 涂抹：仅「激活 + 鼠标不在任何面板上 + 在视口内 + 左键 drag/click」时，
+    //     由鼠标像素构造世界射线，把衣物各 primitive 中靠近射线的顶点选入选区。
+    //  ③ 绘制：激活态下画顶点标记（2px 淡黄方块）；鼠标非 UI 时再画画笔圆（淡黄半透明）。
+    //  ④ 激活态结束 → 选区清空（BrushTool::SetActive(false)）。
+    void ProcessBrush(const jpov::InputSnapshot& input,
+                      const jpov::WindowInfo& winfo,
+                      jpov::RenderCommandList* cmds) {
+        // 生命周期：ESC 结束。
+        if (brush_.active() && input.GetKey(jpov::KeyCode::Escape).IsClick()) {
+            brush_.SetActive(false);
+        }
+        if (!brush_.active()) {
+            return;
+        }
+
+        const float w = winfo.width;
+        const float h = winfo.height;
+        const float mx = input.mouse_x;
+        const float my = input.mouse_y;
+        const bool over_ui = MouseOverUi(mx, my);
+        const bool in_view = (mx >= 0.0f && mx < w && my >= 0.0f && my < h);
+
+        // 相机基（与渲染相机一致：position = view_.Position() + 注视点偏移）。
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg, w, h);
+
+        // 涂抹：仅非 UI、视口内、左键 drag/click（drag 用帧末鼠标位置，靠 60Hz 连续）。
+        if (!over_ui && in_view && (input.left.IsDrag() || input.left.IsClick())) {
+            const CameraRay ray = RayFromPixel(basis, mx, my);
+            const size_t prims =
+                std::min(cloth_current_.size(), brush_.primitive_count());
+            for (size_t i = 0; i < prims; ++i) {
+                brush_.PaintAlongRay(i, cloth_current_[i].mesh.positions, ray.origin,
+                                     ray.dir, brush_.radius_px(), h,
+                                     basis.tan_half_fov);
+            }
+        }
+
+        // 画笔圆（淡黄半透明）：鼠标非 UI 且在视口内时显示。
+        if (!over_ui && in_view) {
+            const jpov::Color kBrushCircle{1.0f, 0.95f, 0.55f, 0.30f};
+            cmds->DrawCircle(/*center*/ {mx, my}, brush_.radius_px(), kBrushCircle);
+        }
+
+        // 顶点标记（2px 淡黄方块）：激活态下始终画选中点。
+        DrawBrushMarkers(basis, cmds);
+    }
+
+    // 把选中顶点投影到屏幕，用 2px 淡黄方块标记（相机后方 / 越界跳过）。
+    void DrawBrushMarkers(const CameraBasis& basis, jpov::RenderCommandList* cmds) {
+        const jpov::Color kMark{1.0f, 0.93f, 0.45f, 1.0f};
+        const float kMarkSize = 2.0f;
+        const size_t prims =
+            std::min(cloth_current_.size(), brush_.primitive_count());
+        for (size_t i = 0; i < prims; ++i) {
+            const std::vector<jpov::Vec3f>& pos = cloth_current_[i].mesh.positions;
+            for (uint32_t idx : brush_.selected(i)) {
+                if (idx >= pos.size()) {
+                    continue;
+                }
+                float px = 0.0f;
+                float py = 0.0f;
+                if (!ProjectToScreen(basis, pos[idx], &px, &py, nullptr)) {
+                    continue;
+                }
+                cmds->DrawRect(/*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                               /*size*/ {kMarkSize, kMarkSize}, kMark);
+            }
+        }
+    }
+
+    // 鼠标是否落在任一面板（UI）矩形内（画笔「UI hover 不算画笔」用）。
+    bool MouseOverUi(float mx, float my) const {
+        for (const jpov::UiRect& r : panel_rects_) {
+            if (mx >= r.pos.x() && mx <= r.pos.x() + r.size.x() && my >= r.pos.y() &&
+                my <= r.pos.y() + r.size.y()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- 底部中间：补洞（推进法）----
@@ -908,6 +1093,7 @@ private:
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
                        kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
 
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
@@ -971,6 +1157,7 @@ private:
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
                        kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
 
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
@@ -1140,6 +1327,7 @@ private:
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
                        kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
 
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
@@ -1263,6 +1451,7 @@ private:
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
                        kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
 
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
@@ -1372,6 +1561,7 @@ private:
         const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
         cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
                        kPanelBg);
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
 
         const float left = panel_x + kPad;
         const float top  = panel_y + kPad;
@@ -1521,6 +1711,11 @@ private:
     }
 
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
+    // 记录一块面板的屏幕矩形（画笔判定「鼠标是否落在 UI 上」用；每帧 DrawPanels 先 clear）。
+    void RecordPanel(float x, float y, float w, float h) {
+        panel_rects_.push_back(jpov::UiRect{{x, y}, {w, h}});
+    }
+
     void DrawLabel(const char* text, float x, float width, float y) {
         ui_.Text(text, jpov::UiRect{{x, y}, {width, kPanelRowH}}, false, false);
     }

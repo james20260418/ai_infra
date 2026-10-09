@@ -18,6 +18,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #     Reset 修复。
 #   - 2026-10-09：**补洞（推进法）面板**——底部中间「执行补洞」+ 细分/平滑 + 最大洞周长阈值；
 #     在仿真关联之前把网格破洞补上（mesh_hole_fill.h，与面板同库）。
+#   - 2026-10-09：**3D 画笔（选区）+ 中键纵向 pan**——顶部中间画笔面板（激活 / 半径滑条）；
+#     激活态下左键涂抹把邻近顶点选入选区（brush_tool.h / camera_projection.h）；
+#     中键纵向 pan 注视点（半屏 = 1m）。
 #     仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
@@ -85,6 +88,24 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 3D 画笔（选区）工具 + 相机投影 —— header-only 纯函数，无 GL。
+#   brush_tool.h      选区状态（各 primitive 的顶点 index）+ 射线选点谓词；
+#   camera_projection.h  相机基 / 像素↔世界投影（与渲染器 lookAt 约定一致）。
+# 单独成库：① 供 clothing_tool_app 使用；② 可纯单测（不拖渲染栈）。
+cc_library(
+    name = "brush_tool",
+    hdrs = [
+        "brush_tool.h",
+        "camera_projection.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "clothing_tool_app",
     srcs = [
@@ -98,6 +119,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":brush_tool",
         ":clothing_axis_input",
         ":clothing_transform",
         ":mesh_hole_fill",
@@ -178,6 +200,23 @@ cc_test(
     deps = [
         ":mesh_hole_fill",
         "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 3D 画笔（选区）工具 + 相机投影 纯函数单测（生命周期 / 半径换算 / 投影往返；无 GL）。
+cc_test(
+    name = "brush_tool_test",
+    srcs = ["brush_tool_test.cc"],
+    deps = [
+        ":brush_tool",
+        "//tools/jpov/interface:camera",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],
