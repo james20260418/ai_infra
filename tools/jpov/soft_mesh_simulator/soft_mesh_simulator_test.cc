@@ -478,6 +478,37 @@ TEST(SoftMeshSimulatorTest, PartialTransformDoesNotChangeReference) {
         << "全体缩放应改变参照";
 }
 
+// 焊接（方案 B，2026-10-09 Danis）：位置重合的顶点并成一个仿真点；多步后缝不裂。
+// 网格 = 一个 quad（两个三角形共享边，但共享边顶点**重复**）：A,B,C + B',D,C'，B'≡B、C'≡C。
+TEST(SoftMeshSimulatorTest, WeldMergesCoincidentVerticesAndKeepsSeamClosed) {
+    jpov::MeshData m;
+    m.flags = jpov::MeshVertexFlags::kPosition;
+    m.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    m.indices = {0, 1, 2, 3, 4, 5};
+    m.Validate();
+
+    // 不开焊接：6 个原始仿真点。
+    Simulator a;
+    a.Init(m, /*d=*/0.1f, /*weld_tolerance=*/0.0f);
+    EXPECT_EQ(a.original_point_count(), 6u);
+
+    // 开焊接（容差远小于顶点间距=1）：B与B'、C与C' 各并 → 4 个原始仿真点。
+    Simulator b;
+    b.Init(m, /*d=*/0.1f, /*weld_tolerance=*/1e-3f);
+    EXPECT_EQ(b.original_point_count(), 4u) << "重合顶点应被焊接合并";
+
+    // 关键不变量：多步后，原本重合的顶点必须仍**逐位重合**（缝不裂）。
+    for (int s = 0; s < 120; ++s) {
+        b.Step(Simulator::kDefaultDt);
+    }
+    const jpov::MeshData& out = b.mesh();
+    ASSERT_EQ(out.positions.size(), 6u) << "输出 mesh 仍应是原始拓扑（6 顶点）";
+    EXPECT_LT((out.positions[1] - out.positions[3]).Norm(), 1e-6f)
+        << "B/B' 缝裂了";
+    EXPECT_LT((out.positions[2] - out.positions[5]).Norm(), 1e-6f)
+        << "C/C' 缝裂了";
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;

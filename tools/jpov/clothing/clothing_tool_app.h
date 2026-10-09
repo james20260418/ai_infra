@@ -60,6 +60,9 @@
 //          ApplyPartial{Translation,Rotation,Scaling}。
 //       ③ 仿真面板新增「显示力学参照网格」勾选：把参照网格（reference_positions()）的原始顶点
 //          用**蓝色 2D 像素**画出（参照响应全体旋转/缩放；平移时参照包围盒中心对齐实际 cloth）。
+//       ④ **仿真焊接（方案 B）**：把位置重合的顶点在仿真里并成**一个质点**（容差默认 0.1mm，
+//          CLI --weld_tolerance），Step 后写回组内所有顶点 ⇒ 缝合缝不裂（修“碎了裂缝”）。
+//          输出 mesh 顶点数/拓扑/属性不变 ⇒ 法线/UV/蒙皮权重仍合法。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -253,6 +256,10 @@ public:
     std::string hole_fill_msg_;         // 面板状态回显
 
     bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
+
+    // 仿真「焊接容差」（米，方案 B，Danis 2026-10-09）：位置相距 ≤ 该值的原始顶点在仿真器里并成
+    // 一个质点（缝不裂）。默认 = kClothSimWeldToleranceM（0.1mm）；CLI --weld_tolerance 可覆。
+    float sim_weld_tolerance_ = kClothSimWeldToleranceM;
 
     // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
     // 关联距离 d（米）：决定仿真点集合（长边加密）与关联邻居表（= 仿真点"缝合"半径）。
@@ -611,7 +618,7 @@ private:
         sim_startup_mesh_.resize(cloth_current_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
             sim_startup_mesh_[i] = cloth_current_[i].mesh;
-            sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_);
+            sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_, sim_weld_tolerance_);
             PushSimParams(&sims_[i]);
         }
         AttachBodyMatcherToSims();
@@ -626,7 +633,7 @@ private:
     void ReinitSimulators() {
         CHECK_EQ(sims_.size(), sim_startup_mesh_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
-            sims_[i].Init(sim_startup_mesh_[i], bind_distance_ui_);
+            sims_[i].Init(sim_startup_mesh_[i], bind_distance_ui_, sim_weld_tolerance_);
             PushSimParams(&sims_[i]);
         }
         cloth_scale_ = 1.0f;

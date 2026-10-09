@@ -27,6 +27,8 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #        底层 = soft_mesh_simulator 新增 ApplyPartial{Translation,Rotation,Scaling}；
 #        力学参照 = 原始 mesh + 全体 scale/rotation（不含选区变换）。
 #     ③ 仿真面板「显示力学参照网格」勾选：参照网格原始顶点用蓝色 2D 像素画出。
+#     ④ 仿真焊接（方案 B）：重合顶点在仿真里并成一个质点（soft_mesh_simulator::Init 新增
+#        weld_tolerance 参数），Step 后写回组内所有顶点 ⇒ 缝合缝不裂。
 #     仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）

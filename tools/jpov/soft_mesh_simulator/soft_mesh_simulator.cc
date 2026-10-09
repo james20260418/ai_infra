@@ -6,8 +6,10 @@
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <unordered_set>
 
 #include <glog/logging.h>
@@ -37,18 +39,44 @@ geom::Vec3<float> AxisUnit(Axis axis) {
 constexpr float kDegToRad =
     static_cast<float>(3.14159265358979323846 / 180.0);
 
+// 把**原始顶点 index** 列表映射成**唯一的**仿真点（焊接组）下标列表（升序去重）。
+// 用于 ApplyPartial*：选区按原始顶点给，但变换要落到焊接组仿真点上（同组只动一次）。
+std::vector<uint32_t> GroupsOf(const std::vector<uint32_t>& vertex_indices,
+                               const std::vector<uint32_t>& vertex_to_group,
+                               size_t vertex_count) {
+    std::vector<uint32_t> groups;
+    groups.reserve(vertex_indices.size());
+    for (uint32_t idx : vertex_indices) {
+        CHECK_LT(idx, vertex_count)
+            << "GroupsOf: 原始顶点 index 越界 " << idx << "（vertex_count="
+            << vertex_count << "）";
+        groups.push_back(vertex_to_group[idx]);
+    }
+    std::sort(groups.begin(), groups.end());
+    groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
+    return groups;
+}
+
 }  // namespace
 
 void Simulator::Init(const jpov::MeshData& mesh) {
-    Init(mesh, kDefaultBindDistance);
+    Init(mesh, kDefaultBindDistance, /*weld_tolerance=*/0.0f);
 }
 
 void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
+    Init(mesh, bind_distance, /*weld_tolerance=*/0.0f);
+}
+
+void Simulator::Init(const jpov::MeshData& mesh, float bind_distance,
+                     float weld_tolerance) {
     mesh.Validate();  // 长度/属性一致性：非法输入在这里就崩，不带进物理
     CHECK_GT(bind_distance, 0.0f)
         << "Simulator::Init 要求 bind_distance > 0，got " << bind_distance;
+    CHECK_GE(weld_tolerance, 0.0f)
+        << "Simulator::Init 要求 weld_tolerance >= 0，got " << weld_tolerance;
 
-    // 绑定姿态 = 输入网格的副本；当前网格也从绑定姿态起步。
+    // 绑定姿态 = 输入网格的副本；当前网格也从绑定姿态起步。mesh_ 保持**原始拓扑**
+    // （输出 / Reset 用；焊接只改仿真点，ExtractMesh 再把位置写回原始顶点）。
     bind_mesh_ = mesh;
     mesh_ = mesh;
 
@@ -59,9 +87,8 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
 
     bind_distance_ = bind_distance;
 
-    // 构建仿真点集合（含长边加密）。返回值（长边加密插入数）不单独用：桥接修复后
-    // 虚拟点总数在下面日志里按 sim_positions_.size() - vertex_count_ 统计（含桥接）。
-    BuildSimulationPoints(mesh, bind_distance);
+    // 构建仿真点集合（焊接分组 + 长边加密），返回原始仿真点数（焊接后的顶点数）。
+    orig_point_count_ = BuildSimulationPoints(mesh, bind_distance, weld_tolerance);
 
     // 保存仿真点的**绑定姿态**快照（力的公式 pij(0) 用它；含虚拟顶点）。
     bind_positions_ = sim_positions_;
@@ -87,11 +114,11 @@ void Simulator::Init(const jpov::MeshData& mesh, float bind_distance) {
     step_count_ = 0;
     inited_ = true;
 
-    LOG(INFO) << "simulator::Init 原始顶点 " << vertex_count_
-              << " / 三角形 " << triangle_count_
-              << " / 虚拟顶点 " << (sim_positions_.size() - vertex_count_)
-              << "（含桥接） / 仿真点合计 " << sim_positions_.size()
-              << " / 关联对(有向) " << neighbor_pair_count()
+    LOG(INFO) << "simulator::Init 原始顶点 " << vertex_count_ << " → 原始仿真点 "
+              << orig_point_count_ << "（焊接容差 " << weld_tolerance
+              << " m） / 三角形 " << triangle_count_ << " / 虚拟顶点 "
+              << (sim_positions_.size() - orig_point_count_) << "（含桥接） / 仿真点合计 "
+              << sim_positions_.size() << " / 关联对(有向) " << neighbor_pair_count()
               << " / 连通分量 " << neighbor_component_count()
               << "（bind_distance=" << bind_distance << " m；M3 重力+弹簧力场+阻尼）";
 }
@@ -464,9 +491,11 @@ void Simulator::ApplyBodyRepulsion(size_t idx, const geom::Vec3<float>& x_pre_f,
 // 提取变形 mesh：把仿真点前 vertex_count_ 个位置写回 mesh_.positions。
 // 虚拟顶点参与仿真但不输出（DESIGN.md §3.2）。只改位置，拓扑/属性不动。
 void Simulator::ExtractMesh() {
-    CHECK_GE(sim_positions_.size(), vertex_count_);
+    CHECK_GE(sim_positions_.size(), orig_point_count_);
+    CHECK_EQ(vertex_to_group_.size(), vertex_count_);
     for (size_t i = 0; i < vertex_count_; ++i) {
-        mesh_.positions[i] = sim_positions_[i];
+        // 同焊接组的所有原始顶点取同一个仿真点位置 ⇒ 组内顶点逐帧保持重合（缝不裂）。
+        mesh_.positions[i] = sim_positions_[vertex_to_group_[i]];
     }
 }
 
@@ -887,11 +916,10 @@ void Simulator::ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indi
                                         const geom::Vec3<float>& delta) {
     CHECK(inited_) << "ApplyPartialTranslation 调用前必须先 Init(mesh)";
     CHECK(delta.IsFinite()) << "ApplyPartialTranslation 要求 delta 有限";
-    for (uint32_t idx : vertex_indices) {
-        CHECK_LT(idx, vertex_count_)
-            << "ApplyPartialTranslation: 仅接受原始顶点 index，got " << idx
-            << "（original_point_count()=" << vertex_count_ << "）";
-        sim_positions_[idx] = sim_positions_[idx] + delta;
+    const std::vector<uint32_t> groups =
+        GroupsOf(vertex_indices, vertex_to_group_, vertex_count_);
+    for (uint32_t g : groups) {
+        sim_positions_[g] = sim_positions_[g] + delta;
     }
     // 速度不参与平移；绑定姿态（力学参照）/ 关联邻居表**均不**更新（见 .h 说明）。
     ExtractMesh();
@@ -910,13 +938,10 @@ void Simulator::ApplyPartialRotation(const std::vector<uint32_t>& vertex_indices
     auto rotate = [&q, &pivot](const geom::Vec3<float>& v) {
         return pivot + geom::RotateVector(q, v - pivot);
     };
-    for (uint32_t idx : vertex_indices) {
-        CHECK_LT(idx, vertex_count_)
-            << "ApplyPartialRotation: 仅接受原始顶点 index，got " << idx
-            << "（original_point_count()=" << vertex_count_ << "）";
-        sim_positions_[idx] = rotate(sim_positions_[idx]);
+    for (uint32_t g : GroupsOf(vertex_indices, vertex_to_group_, vertex_count_)) {
+        sim_positions_[g] = rotate(sim_positions_[g]);
         // 速度参与旋转（旋转 ⇒ 角速度），与全体 ApplyRotation 一致。
-        sim_velocities_[idx] = geom::RotateVector(q, sim_velocities_[idx]);
+        sim_velocities_[g] = geom::RotateVector(q, sim_velocities_[g]);
     }
     // 绑定姿态（力学参照）/ 关联邻居表**均不**更新（见 .h 说明）。
     ExtractMesh();
@@ -932,11 +957,8 @@ void Simulator::ApplyPartialScaling(const std::vector<uint32_t>& vertex_indices,
     auto scale = [factor, &pivot](const geom::Vec3<float>& v) {
         return pivot + (v - pivot) * factor;
     };
-    for (uint32_t idx : vertex_indices) {
-        CHECK_LT(idx, vertex_count_)
-            << "ApplyPartialScaling: 仅接受原始顶点 index，got " << idx
-            << "（original_point_count()=" << vertex_count_ << "）";
-        sim_positions_[idx] = scale(sim_positions_[idx]);
+    for (uint32_t g : GroupsOf(vertex_indices, vertex_to_group_, vertex_count_)) {
+        sim_positions_[g] = scale(sim_positions_[g]);
     }
     // 速度不参与缩放；绑定姿态（力学参照）/ 关联邻居表 / nb_init_dist_ **均不**更新（见 .h）。
     ExtractMesh();
@@ -983,52 +1005,134 @@ SimBounds Simulator::Bounds() const {
     return b;
 }
 
-size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
+size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d,
+                                        float weld_tolerance) {
     sim_positions_.clear();
+    const size_t vcount = mesh.positions.size();
+    vertex_to_group_.assign(vcount, 0);
 
-    // 1) 原始顶点先入队（保持输入顺序；索引 0..N-1）。
-    sim_positions_.reserve(mesh.positions.size());
-    for (const geom::Vec3<float>& p : mesh.positions) {
-        sim_positions_.push_back(p);
+    // 1) 焊接：把位置相距 ≤ weld_tolerance 的原始顶点并成一组（一条缝 = 一个质点）。
+    //    仿真点位置 = 组质心；组内所有原始顶点共用该仿真点（ExtractMesh 写回）。
+    //    weld_tolerance == 0 → 每个顶点自成一“组”（旧行为，逐顶点仿真）。
+    size_t group_count = 0;
+    if (weld_tolerance > 0.0f && vcount > 0) {
+        std::vector<uint32_t> parent(vcount);
+        for (size_t i = 0; i < vcount; ++i) {
+            parent[i] = static_cast<uint32_t>(i);
+        }
+        auto find_root = [&parent](uint32_t x) {
+            while (parent[x] != x) {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            return x;
+        };
+        const float tol_sq = weld_tolerance * weld_tolerance;
+        auto cell_of = [weld_tolerance](const geom::Vec3<float>& p) {
+            return std::array<long long, 3>{
+                static_cast<long long>(std::floor(p[0] / weld_tolerance)),
+                static_cast<long long>(std::floor(p[1] / weld_tolerance)),
+                static_cast<long long>(std::floor(p[2] / weld_tolerance))};
+        };
+        std::map<std::array<long long, 3>, std::vector<uint32_t>> grid;
+        for (size_t i = 0; i < vcount; ++i) {
+            grid[cell_of(mesh.positions[i])].push_back(static_cast<uint32_t>(i));
+        }
+        for (const auto& kv : grid) {
+            const std::array<long long, 3>& c = kv.first;
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const auto it = grid.find({c[0] + dx, c[1] + dy, c[2] + dz});
+                        if (it == grid.end()) {
+                            continue;
+                        }
+                        for (uint32_t i : kv.second) {
+                            const geom::Vec3<float>& pi = mesh.positions[i];
+                            for (uint32_t j : it->second) {
+                                if (j <= i) {
+                                    continue;  // 每对只处理一次
+                                }
+                                const geom::Vec3<float>& pj = mesh.positions[j];
+                                const float e0 = pi[0] - pj[0];
+                                const float e1 = pi[1] - pj[1];
+                                const float e2 = pi[2] - pj[2];
+                                if (e0 * e0 + e1 * e1 + e2 * e2 <= tol_sq) {
+                                    const uint32_t ri = find_root(i);
+                                    const uint32_t rj = find_root(j);
+                                    if (ri != rj) {
+                                        parent[rj] = ri;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 组编号（按首次出现顺序，确定性）+ 组质心。
+        std::vector<uint32_t> root_group(vcount, 0xffffffffu);
+        std::vector<geom::Vec3<float>> sums;
+        std::vector<size_t> counts;
+        for (size_t i = 0; i < vcount; ++i) {
+            const uint32_t r = find_root(static_cast<uint32_t>(i));
+            if (root_group[r] == 0xffffffffu) {
+                root_group[r] = static_cast<uint32_t>(sums.size());
+                sums.push_back(geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+                counts.push_back(0);
+            }
+            const uint32_t g = root_group[r];
+            vertex_to_group_[i] = g;
+            sums[g] = sums[g] + mesh.positions[i];
+            counts[g] += 1;
+        }
+        group_count = sums.size();
+        sim_positions_.reserve(group_count);
+        for (size_t g = 0; g < group_count; ++g) {
+            const float inv = 1.0f / static_cast<float>(counts[g]);
+            sim_positions_.push_back(sums[g] * inv);
+        }
+    } else {
+        group_count = vcount;
+        sim_positions_.reserve(vcount);
+        for (size_t i = 0; i < vcount; ++i) {
+            vertex_to_group_[i] = static_cast<uint32_t>(i);
+            sim_positions_.push_back(mesh.positions[i]);
+        }
     }
 
     // 2) 长边加密：对每条 "边长 > d*0.9" 的边，中间等距插入虚拟顶点。
-    //
-    // 只处理**索引化** mesh 的三角形边。无索引网格按 triangle list 语义
-    // （每 3 个连续顶点一个三角形）提取边——与渲染一致。
-    //
-    // 去重：同一条边（i,j）会被相邻三角形各遍历一次；用 (min,max) 归一化后
-    // 查 hash 集合去重，避免同一条边插入两遍虚拟点。
+    //    边按**焊接组**去重（同组 = 零长边，跳过）；端点取**组位置**（= 仿真点位置）。
     const float max_len = d * 0.9f;
     const float max_len_sq = max_len * max_len;
     CHECK_GT(max_len, 0.0f);
 
     std::unordered_set<uint64_t> seen_edges;
-    const size_t vcount = mesh.positions.size();
     size_t virtual_count = 0;
 
     auto process_edge = [&](uint32_t ia, uint32_t ib) {
         CHECK_LT(ia, vcount);
         CHECK_LT(ib, vcount);
-        if (ia == ib) {
-            return;  // 退化边忽略
+        const uint32_t ga = vertex_to_group_[ia];
+        const uint32_t gb = vertex_to_group_[ib];
+        if (ga == gb) {
+            return;  // 同组（含重合）：零长边，忽略
         }
-        const uint32_t lo = std::min(ia, ib);
-        const uint32_t hi = std::max(ia, ib);
+        const uint32_t lo = std::min(ga, gb);
+        const uint32_t hi = std::max(ga, gb);
         const uint64_t key = (static_cast<uint64_t>(lo) << 32) | hi;
         if (!seen_edges.insert(key).second) {
             return;  // 已处理过
         }
-
-        const geom::Vec3<float>& pa = mesh.positions[ia];
-        const geom::Vec3<float>& pb = mesh.positions[ib];
+        // ⚠️ 必须**拷值**（不能引用）：push_back(sim_positions_) 可能重分配使引用悬空。
+        const geom::Vec3<float> pa = sim_positions_[ga];
+        const geom::Vec3<float> pb = sim_positions_[gb];
         const geom::Vec3<float> delta = pb - pa;
         const float len_sq = delta[0] * delta[0] + delta[1] * delta[1] +
                              delta[2] * delta[2];
         if (len_sq <= max_len_sq) {
             return;  // 不过长，不加密
         }
-
         const float len = std::sqrt(len_sq);
         // 目标：插入 n 个点，把这条边切成 (n+1) 段，每段 <= max_len。
         //   n = ceil(len / max_len) - 1
@@ -1062,7 +1166,8 @@ size_t Simulator::BuildSimulationPoints(const jpov::MeshData& mesh, float d) {
         }
     }
 
-    return virtual_count;
+    (void)virtual_count;  // 虚拟点已追加进 sim_positions_；数量由调用方按 size 统计。
+    return group_count;   // 原始仿真点数（焊接后）
 }
 
 void Simulator::Reset() {

@@ -51,6 +51,8 @@
 #   --motion_seed 0~65535  随机种子初值（换种子 = 换一套随机动作）
 #   --alpha_normalize      headless 出图前跑一次 base color alpha 归一（脚本化验证）
 #   --show_ref_mesh        headless 出图前开启「显示力学参照网格」（蓝色 2D 像素）
+#   --bind_distance <m>   关联距离 d（米，默认 0.1）
+#   --weld_tolerance <m>  仿真焊接容差（米，默认 0.0001 = 0.1mm）—— 重合顶点并成一个质点（防缝裂）
 #
 # headless UI 自检（不弹窗，出单张带面板的图）：
 #   ... --ui_shot --output_dir /tmp/ui [--sim_steps N] [--window_width W --window_height H]
