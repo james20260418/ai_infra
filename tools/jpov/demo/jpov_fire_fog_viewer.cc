@@ -200,6 +200,18 @@ int RunCapture(const std::string& out_dir) {
     app.nz_index_ = 1;
     app.tile_px_index_ = 1;
 
+    // ── J. z 远端扫谱（range ↔ 分层带）──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 3.0f;
+    app.fog_intensity_ = 0.6f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+    for (float fz : {200.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f}) {
+        app.z_far_ = fz;
+        shoot(("40_zfar_" + std::to_string(static_cast<int>(fz))).c_str());
+    }
+    app.z_far_ = 2000.0f;
+
     // ═══════════ step2：ambient + 太阳×CSM（god ray）——与 step1 对照 ═══════════
     app.sun_enable_ = true;
     app.fog_center_ = jpov::Vec3f(0.0f, 4.0f, 0.0f);

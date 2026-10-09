@@ -73,6 +73,8 @@ public:
     // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
     int nz_index_ = 1;        // 0 → Nz=64，1 → Nz=256
     int tile_px_index_ = 1;   // 0 → 8px，1 → 16px，2 → 32px
+    // ── froxel z 分布远端（米）；近端固定 0.1（FireFogParams.z_near 默认）。──
+    float z_far_ = 2000.0f;
 
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
@@ -146,6 +148,7 @@ public:
             ff.sun_gain = sun_gain_;
             ff.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
             ff.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
+            ff.z_far = z_far_;
             cmds->fire_fog = ff;
         }
 
@@ -204,6 +207,7 @@ private:
             ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 6));
         }
         ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 7));
+        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 8), 50.0f, 4000.0f, 0);
 
         // ── 右列：剖面 + 雾色 + 天光主光仰角 + god ray ──
         {
