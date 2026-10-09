@@ -499,8 +499,20 @@ void SkeletonRenderer::UploadSunData(
     const float shadow_depth_vp[][16],
     const float shadow_texel_world[],
     const ShadowConfig& cfg,
+    const ShadowPcfConfig& pcf,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
+
+    // PCF 采样核参数校验 + 黄金角螺旋采点偏移表（CPU 预算，见
+    // ShadowPcfConfig::GoldenSpiralOffsets —— 公式真值在那边）。shader 里仅剩
+    // 「查表 + 乘加」，无 per-tap sqrt/除法/cos/sin。
+    CHECK_GE(pcf.tap_count, 1) << "ShadowPcfConfig::tap_count 必须 ≥1";
+    CHECK_LE(pcf.tap_count, ShadowPcfConfig::kMaxPcfTaps)
+        << "ShadowPcfConfig::tap_count 至多 " << ShadowPcfConfig::kMaxPcfTaps;
+    CHECK_GT(pcf.radius_texels, 0.0f) << "ShadowPcfConfig::radius_texels 必须 >0";
+    float pcf_offsets[2 * ShadowPcfConfig::kMaxPcfTaps];
+    pcf.GoldenSpiralOffsets(pcf_offsets);
+    const float pcf_inv_tap_count = 1.0f / static_cast<float>(pcf.tap_count);
 
     glUseProgram(prog);
     glUniform1i(shader_mgr.GetUniform(prog, "uHasSun"), sun.has_value() ? 1 : 0);
@@ -523,6 +535,19 @@ void SkeletonRenderer::UploadSunData(
                 cfg.cascade_blend_fraction);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeStart"), cfg.fade_start);
     glUniform1f(shader_mgr.GetUniform(prog, "uShadowFadeEnd"), cfg.fade_end);
+
+    // PCF 采样核（每帧可切；见 ShadowPcfConfig）：模式/点数/半径 + CPU 预算的采点表。
+    glUniform1i(shader_mgr.GetUniform(prog, "uPcfMode"), static_cast<int>(pcf.mode));
+    glUniform1i(shader_mgr.GetUniform(prog, "uPcfTapCount"), pcf.tap_count);
+    glUniform1f(shader_mgr.GetUniform(prog, "uPcfRadiusTexels"), pcf.radius_texels);
+    glUniform1f(shader_mgr.GetUniform(prog, "uPcfInvTapCount"), pcf_inv_tap_count);
+    // ⚠️ 逐元素 glUniform2f 而非 glUniform2fv：Windows 的 MinGW 扩展加载器
+    //   （third_party/gl_loader-mingw）未声明 glUniform2fv（同 uAmbientTricolor 的处理）。
+    for (int i = 0; i < pcf.tap_count; ++i) {
+        const std::string uni = "uPcfOffsets[" + std::to_string(i) + "]";
+        glUniform2f(shader_mgr.GetUniform(prog, uni.c_str()),
+                    pcf_offsets[2 * i], pcf_offsets[2 * i + 1]);
+    }
 
     // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
     CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))

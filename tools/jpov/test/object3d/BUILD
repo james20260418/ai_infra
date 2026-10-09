@@ -383,6 +383,65 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# ============================================================================
+# 阴影 PCF 采样核 gold test（黄金角螺旋 vs 固定 3×3）
+# 场景 = 天光查看器同款（灰地面 + 三方块 + 桌子 + 橡树 + 三蓝人），机位/太阳见
+# jpov_pcf_shadow_common.h；gold 用软化核（黄金角螺旋 N=25/R=4 ≈ 9 纹素）。
+# 通过条件 = 粗 ROI 均值(<=25) + 细逐像素变化占比(<=0.05%) 双闸门；后者是保护
+# 黄金角软化的关键闸门（PCF 退回硬 3×3 会失败）。
+cc_binary(
+    name = "jpov_pcf_shadow_gold_generator",
+    srcs = [
+        "jpov_pcf_shadow_gold_generator.cc",
+        "jpov_pcf_shadow_common.h",
+    ],
+    data = [
+        "//tools/jpov/assets/models:oak_tripo_negative_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_pcf_shadow_gold_test",
+    srcs = [
+        "jpov_pcf_shadow_gold_test.cc",
+        "jpov_pcf_shadow_common.h",
+    ],
+    data = [
+        ":pcf_golden_spiral_1280x720.png",
+        "//tools/jpov/assets/models:oak_tripo_negative_data",
+        "//tools/jpov/assets/models:mixamo_male_glb_data",
+        "//tools/jpov/assets/models:scene_assets",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_viewer_app",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 
 # ============================================================================
 # Gold Image Test — 平放 quad + pbr_cube_normal_mr 金属材质（法线凸起观察）

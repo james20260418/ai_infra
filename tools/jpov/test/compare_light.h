@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -164,6 +165,114 @@ inline double CompareLightMeanRoiPng(
     stbi_image_free(gold);
     stbi_image_free(rend);
     return ret;
+}
+
+// ============================================================================
+// 细粒度逐像素对比（区别于上面的 ROI 均值）
+// ============================================================================
+//
+// 动机：ROI 均值会把只在**边缘/高频**处出现的差异摊平 —— 例如阴影核由「硬」变
+// 「软」，只在影缘几十像素宽内改变，8×8 ROI 均值几乎不动（实测 ≤0.5）。本函数做
+// **逐像素**比较，统计「显著变化像素」，用于捕捉这类边缘级差异。
+//
+// 约定：
+//   - 只统计两张图都 alpha>0 的像素（排除背景）。
+//   - 单像素差异 = 三通道 |Δ| 的最大值（0~255）。
+//   - 「显著变化像素」= 该差异 > threshold 的像素。
+
+// 逐像素对比结果。
+struct PixelChangeReport {
+    int width = 0, height = 0;
+    long long opaque = 0;        // 参与统计的像素数（两图均不透明）
+    long long changed = 0;       // 差异 > threshold 的像素数
+    double changed_ratio = 0.0;  // changed / opaque
+    double max_diff = 0.0;       // 全图最大单像素通道差（0~255）
+    double p999_diff = 0.0;      // 像素差 99.9 分位（抗离群）
+};
+
+// 对 gold 与 rendered 两张 RGBA8 图做逐像素对比。threshold 为单像素最大通道差阈值。
+// 纯 CPU、只依赖 stb_image；用差异直方图一次遍历得出 max/分位/计数，无需排序。
+inline PixelChangeReport ComparePixelChange(
+    const unsigned char* gold,
+    const unsigned char* rend,
+    int w, int h,
+    int threshold) {
+    CHECK(gold != nullptr);
+    CHECK(rend != nullptr);
+    CHECK_GT(w, 0);
+    CHECK_GT(h, 0);
+    CHECK_GE(threshold, 0);
+
+    PixelChangeReport rep;
+    rep.width = w; rep.height = h;
+    long long hist[256] = {0};
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const size_t off = (static_cast<size_t>(y) * w + x) * 4;
+            const unsigned char* gp = gold + off;
+            const unsigned char* rp = rend + off;
+            if (gp[3] == 0 || rp[3] == 0) continue;
+            const int dr = std::abs(static_cast<int>(gp[0]) - static_cast<int>(rp[0]));
+            const int dg = std::abs(static_cast<int>(gp[1]) - static_cast<int>(rp[1]));
+            const int db = std::abs(static_cast<int>(gp[2]) - static_cast<int>(rp[2]));
+            const int d = std::max(dr, std::max(dg, db));
+            ++hist[d];
+            ++rep.opaque;
+            if (d > threshold) ++rep.changed;
+        }
+    }
+    if (rep.opaque > 0) {
+        rep.changed_ratio = static_cast<double>(rep.changed) / static_cast<double>(rep.opaque);
+        for (int d = 255; d >= 0; --d) {
+            if (hist[d] > 0) { rep.max_diff = static_cast<double>(d); break; }
+        }
+        const long long need =
+            static_cast<long long>(std::ceil(0.999 * static_cast<double>(rep.opaque)));
+        long long acc = 0;
+        for (int d = 0; d < 256; ++d) {
+            acc += hist[d];
+            if (acc >= need) { rep.p999_diff = static_cast<double>(d); break; }
+        }
+    }
+    LOG(INFO) << "ComparePixelChange: size=" << w << "x" << h
+              << " threshold=" << threshold
+              << " opaque=" << rep.opaque << " changed=" << rep.changed
+              << " (" << (rep.changed_ratio * 100.0) << "%)"
+              << " max_diff=" << rep.max_diff
+              << " p99.9=" << rep.p999_diff;
+    return rep;
+}
+
+// 便捷入口：从两张 PNG 路径读图（RGBA8）做逐像素对比。尺寸不一致返回空报告并报错。
+inline PixelChangeReport ComparePixelChangePng(
+    const std::string& gold_path,
+    const std::string& rend_path,
+    int threshold) {
+    int gw = 0, gh = 0, gn = 0;
+    int rw = 0, rh = 0, rn = 0;
+    unsigned char* gold = stbi_load(gold_path.c_str(), &gw, &gh, &gn, 4);
+    if (!gold) {
+        LOG(ERROR) << "ComparePixelChangePng: failed to load gold: "
+                   << gold_path << " (" << stbi_failure_reason() << ")";
+        return {};
+    }
+    unsigned char* rend = stbi_load(rend_path.c_str(), &rw, &rh, &rn, 4);
+    if (!rend) {
+        LOG(ERROR) << "ComparePixelChangePng: failed to load rendered: "
+                   << rend_path << " (" << stbi_failure_reason() << ")";
+        stbi_image_free(gold);
+        return {};
+    }
+    PixelChangeReport rep;
+    if (gw != rw || gh != rh) {
+        LOG(ERROR) << "ComparePixelChangePng: dimension mismatch gold="
+                   << gw << "x" << gh << " rendered=" << rw << "x" << rh;
+    } else {
+        rep = ComparePixelChange(gold, rend, gw, gh, threshold);
+    }
+    stbi_image_free(gold);
+    stbi_image_free(rend);
+    return rep;
 }
 
 }  // namespace jpov
