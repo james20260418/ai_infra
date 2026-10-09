@@ -427,10 +427,14 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    // 复原状态（调用方随后做 resolve / highlight / bloom，均自设状态）。
+    // 复原状态（调用方随后做 resolve / highlight / bloom / tone map / 2D，均自设状态）。
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    // ⭐ 复位混合函数：调用方的 3D 段用 glPushAttrib(GL_ENABLE_BIT|GL_VIEWPORT_BIT)，
+    //   **不包含** blend func（属 GL_COLOR_BUFFER_BIT）。若不复位，趟 C 设的
+    //   GL_ONE/GL_SRC_ALPHA 会沿用到后续 2D/字体绘制 ⇒ 文字糊成一片。
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(0);
     for (int t = 0; t < kZDistTexelsPerPixel; ++t) {
         glActiveTexture(GL_TEXTURE0 + t);

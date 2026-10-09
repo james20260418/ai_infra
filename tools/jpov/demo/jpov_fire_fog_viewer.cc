@@ -193,6 +193,15 @@ int RunCapture(const std::string& out_dir) {
     app.downsample_ = 4.0f;
     app.gaussian_sigma_ = 1.0f;
 
+    // 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。
+    default_view();
+    app.InstallTextMeasure();
+    app.SetShowPanel(true);
+    app.SetShowFog(false);
+    shoot("98_panel_nofog");
+    app.SetShowFog(true);
+    shoot("99_panel_ui");
+
     app.Finalize();
     return 0;
 }
@@ -217,7 +226,8 @@ int main(int argc, char** argv) {
     cfg.width  = jpov_fire_fog::kViewerWidth;
     cfg.height = jpov_fire_fog::kViewerHeight;
     cfg.resizable  = false;
-    cfg.target_fps = static_cast<int>(jpov_fire_fog::kViewerFps);
+    // 雾火管线较重（低分辨率多趟 + 内核合并）⇒ 交互降到 30fps（Danis 2026-10-09）。
+    cfg.target_fps = 30;
     cfg.headless   = false;
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
