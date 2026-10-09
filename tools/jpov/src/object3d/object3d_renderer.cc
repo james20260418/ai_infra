@@ -663,6 +663,7 @@ void Object3DRenderer::UploadSunData(
     const float shadow_depth_vp[][16],
     const float shadow_texel_world[],
     const ShadowConfig& cfg,
+    const ShadowPcfConfig& pcf,
     const std::optional<DirectionalLight>& sun) {
     const int cascade_count = sun.has_value() ? cfg.cascade_count : 0;
 
@@ -690,6 +691,15 @@ void Object3DRenderer::UploadSunData(
                     cfg.cascade_blend_fraction);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeStart"), cfg.fade_start);
         glUniform1f(shader_mgr.GetUniform(p, "uShadowFadeEnd"), cfg.fade_end);
+
+        // PCF 采样核（每帧可切；见 ShadowPcfConfig）。tap/radius 仅在 golden-spiral
+        // 模式下用，但仍无论哪种模式都校验，避免默认值被破而除零。
+        CHECK_GE(pcf.tap_count, 1) << "ShadowPcfConfig::tap_count 必须 ≥1";
+        CHECK_GT(pcf.radius_texels, 0.0f) << "ShadowPcfConfig::radius_texels 必须 >0";
+        glUniform1i(shader_mgr.GetUniform(p, "uPcfMode"),
+                    static_cast<int>(pcf.mode));
+        glUniform1i(shader_mgr.GetUniform(p, "uPcfTapCount"), pcf.tap_count);
+        glUniform1f(shader_mgr.GetUniform(p, "uPcfRadiusTexels"), pcf.radius_texels);
 
         // 绑各级联 shadow 深度纹理到 TEXTURE(7+i)，上传对应 ViewProj + texel。
         CHECK_EQ(shadow_fbos.size(), static_cast<size_t>(cascade_count))

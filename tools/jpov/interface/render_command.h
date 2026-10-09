@@ -744,6 +744,26 @@ struct ShadowConfig {
     static ShadowConfig Default() { return ShadowConfig{}; }
 };
 
+// 阴影 PCF 采样核（**采样端**选择，每帧可切；不改变 shadow map 几何/FBO/级联切分）。
+// 与 ShadowConfig 分工：ShadowConfig 决定「阴影贴图怎么生成」（级联/分辨率/偏置，
+// 生命周期不变）；本结构只决定「阴影贴图怎么被采样」（每帧可切），故挂在
+// RenderCommandList 上而非 JPOV::Config。两种核：
+//   kGrid         —— 固定规则网格 (2R+1)² 点箱式平均（R = kGridPcfRadiusT = 1 → 经典 3×3）。
+//   kGoldenSpiral —— 黄金角螺旋 N 点：第 i 点半径 r = R·√((i+0.5)/N)（等面积分布）、
+//                    极角 θ = i·黄金角（2π/φ² ≈ 137.508°），任意连续 N 点都近乎均匀
+//                    铺满半径 R 的圆盘。用 N ≪ (2R+1)² 次采样达到相近的空间柔化带宽
+//                    （例：N=12,R=2 ≈ 5 纹素；N=25,R=4 ≈ 9 纹素）。
+// 自动深度偏置随「有效半径」联动（网格=kGridPcfRadiusT，螺旋=R，见 shader
+// pcfEffectiveRadiusTexels），故换核不会出现「改了采样半径却忘了改偏置」的 acne。
+struct ShadowPcfConfig {
+    // 采样核类型。kGrid=原固定 3×3；kGoldenSpiral=黄金角螺旋。
+    enum class Mode { kGrid = 0, kGoldenSpiral = 1 };
+
+    Mode  mode = Mode::kGoldenSpiral;  // 默认黄金角螺旋（本次 PCF 采样升级）
+    int   tap_count = 12;              // 螺旋采样点数 N（仅 kGoldenSpiral 用；≥1）
+    float radius_texels = 2.0f;        // 采样盘半径 R（纹素；仅 kGoldenSpiral 用；>0）
+};
+
 // 单个级联的 shadow FBO + 深度纹理（Renderer 内部持有，UploadSunData 读取 .tex）。
 // shadow 深度实为 RGBA32F 颜色纹理（存光空间 ndc.z），rb 为配套 depth renderbuffer
 //（仅遮挡测试用）。纹理单元从 TEXTURE7 起绑定到 PBR shader 的 uShadowMap[i]。
@@ -1688,6 +1708,11 @@ struct RenderCommandList {
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
     // 并对直射光施加阴影因子。
     std::optional<DirectionalLight> sun;
+
+    // 阴影 PCF 采样核（每帧可切；不改变 shadow map 几何/FBO）。无 sun 时不生效。
+    // 默认 = 黄金角螺旋 N=12 / R=2 纹素（见 ShadowPcfConfig）。切到
+    // ShadowPcfConfig::Mode::kGrid 即退回原固定 3×3 PCF，用于 A/B 对比。
+    ShadowPcfConfig shadow_pcf;
 
     // 全局环境光。未设置时使用默认值（中性灰白 × 0.4），后续可由 SkyCommand
     // 自动推导。有值时按用户给定的颜色/强度照亮物体背阳面（无方向、无影子）。

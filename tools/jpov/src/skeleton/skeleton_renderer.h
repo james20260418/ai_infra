@@ -126,11 +126,16 @@ uniform int   uShadowBiasOverride;      // 0=自动几何推导（默认）；1=
 uniform float uShadowTexelWorld[5];     // 每级联单纹素世界边长（米），自动偏置用
 uniform float uShadowBiasCascade[5];    // override 的等效单纹素世界边长（米），仅 override=1 时用
 
-// ---- PCF 核 与 深度偏置 联动常量（改核半径，偏置自动跟随）----
-const int   kPcfRadiusT    = 1;                                 // 核半径（纹素）：3×3 → 1
-const int   kPcfTapCountT  = (2*kPcfRadiusT+1) * (2*kPcfRadiusT+1);
+// ---- PCF 采样核（每帧经 uPcfMode 选择；见 ShadowPcfConfig）----
+// uPcfMode==0：固定规则网格 (2·kGridPcfRadiusT+1)² 点（经典 3×3）。
+// uPcfMode==1：黄金角螺旋 uPcfTapCount 点（等面积布点），采样盘半径 uPcfRadiusTexels 纹素。
+const int   kGridPcfRadiusT   = 1;                                  // 网格核半径（纹素）：3×3 → 1
+const int   kGridPcfTapCountT = (2*kGridPcfRadiusT+1) * (2*kGridPcfRadiusT+1);
+uniform int   uPcfMode;          // 0=规则网格；1=黄金角螺旋
+uniform int   uPcfTapCount;      // 螺旋采样点数 N（仅 mode==1；≥1）
+uniform float uPcfRadiusTexels;  // 采样盘半径 R（纹素，仅 mode==1；>0）
+// ---- 深度偏置与「采样核有效半径」联动（改核半径，偏置自动跟随）----
 const float kBiasSafety    = 1.5;                               // 满径安全裕度
-const float kBiasK         = kBiasSafety * float(kPcfRadiusT);  // 自动偏置系数
 const float kMinShadowBias = 0.01;                              // 全局兜底（米）
 // 级联权重早退阈值：权重 (wlo·whi) 不大于此值即跳过该级联的 PCF 采样。
 // 与 computeSunShadow 末尾的 `wsum > 1e-5` 同量级——远小于该量的权重对
@@ -153,9 +158,10 @@ const float PI = 3.14159265;
 // shadow map 存的是**相对主视锥中心的原始线性深度**（米，见 kShadowVs）；
 // 主 pass 用 uShadowDepthVP[c]（DepthProj*view）把 world_pos 重投到同一线性深度，
 // 两端同源一致、不经 near/far 归一化。
-// ⚠️ PCF：核 = (2·kPcfRadiusT+1)² 采样（kPcfRadiusT=1 → 3×3），平均 soft shadow。
+// ⚠️ PCF：核由 uPcfMode 选——规则网格 (2·kGridPcfRadiusT+1)²（3×3）或黄金角螺旋
+// uPcfTapCount 点；二者皆“二值比较取均值”的软阴影（参数见 ShadowPcfConfig）。
 // depth bias（自动推导，见 ShadowConfig::cascade_bias）：
-//     bias_c = max(kMinShadowBias, kBiasK · texelW_c · tanθ)
+//     bias_c = max(kMinShadowBias, kBiasSafety · 有效半径 · texelW_c · tanθ)
 //     texelW_c = uShadowTexelWorld[c]（该级联单纹素世界边长，米；自动）
 //             或 uShadowBiasCascade[c]（override：手工等效边长）
 //     tanθ = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，Ld = 深度轴方向（从 uShadowDepthVP 的 z 行取，
@@ -163,7 +169,7 @@ const float PI = 3.14159265;
 //            因为阴影 pass 会对近平行的光方向做偏置以避开 lookAt 退化）
 //   推导：平坦接收面在一个纹素足迹内的光轴深度偏离 = texelWorld·tanθ
 //         （足迹被拉长为 t/cosθ，深度梯度 sinθ，相乘 = t·tanθ）；
-//         PCF 会采到核半径个纹素外，kBiasK 已含核半径与裕度。
+//         PCF 会采到「有效半径」个纹素外，故再乘有效半径（= pcfEffectiveRadiusTexels()）。
 //   ⚠️ 2026-09-17 教训：旧式 bias_base*(1-NdotL) 在垂直光（NdotL→1）下被乘成 0、
 //   退化为 minBias=0.01，而远级联单纹素大（C2 13.2cm/C3 46.6cm/C4 72.6cm），
 //   平坦地面深度误差 texelWorld·tanθ 超过 0.01 → 地面自阴影 acne
@@ -175,6 +181,35 @@ const float PI = 3.14159265;
 // covered=1 表示世界坐标落在该级联 shadow map 的 uv 覆盖内（有效采样）；
 // covered=0 表示不在（uv 越界）—— 此时不贡献 shadow，由 computeSunShadow
 // 用其他覆盖该片元的级联做 blend，避免“shadow map 边缘被硬裁成无影”。
+// PCF 采样核的「有效半径」（纹素）：采样最远覆盖多少个纹素。自动深度偏置用它。
+// 网格核 = kGridPcfRadiusT；螺旋核 = uPcfRadiusTexels（螺旋最外圈 ≈ R）。
+float pcfEffectiveRadiusTexels() {
+    return (uPcfMode == 1) ? uPcfRadiusTexels : float(kGridPcfRadiusT);
+}
+// PCF 阴影采样：在 shadow_map 的 uv 邻域对 cur（已减偏置的线性深度）做
+// 「cur <= 深度」二值比较并求平均 → [0,1]（1=受照，0=全影）。
+//   uPcfMode==0：固定规则网格 (2R+1)² 点，箱式平均（经典 3×3）。
+//   uPcfMode==1：黄金角螺旋 N 点——第 i 点半径 r = R·√((i+0.5)/N)（等面积分布），
+//                极角 θ = i·黄金角（2π/φ²≈137.5°），任意连续 N 点都近乎均匀铺满圆盘。
+float pcfShadow(sampler2D shadow_map, vec2 uv, float cur, float texel_step) {
+    float s = 0.0;
+    if (uPcfMode == 1) {
+        const float kGoldenAngle = 2.39996323;   // 2π/φ² ≈ 137.508°（弧度）
+        for (int i = 0; i < uPcfTapCount; ++i) {
+            float r = uPcfRadiusTexels * sqrt((float(i) + 0.5) / float(uPcfTapCount));
+            float theta = float(i) * kGoldenAngle;
+            vec2 offset = vec2(cos(theta), sin(theta)) * r;
+            s += (cur <= texture(shadow_map, uv + offset * texel_step).r) ? 1.0 : 0.0;
+        }
+        return s / float(uPcfTapCount);
+    }
+    for (int dy = -kGridPcfRadiusT; dy <= kGridPcfRadiusT; ++dy) {
+        for (int dx = -kGridPcfRadiusT; dx <= kGridPcfRadiusT; ++dx) {
+            s += (cur <= texture(shadow_map, uv + vec2(float(dx), float(dy)) * texel_step).r) ? 1.0 : 0.0;
+        }
+    }
+    return s / float(kGridPcfTapCountT);
+}
 void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
     vec4 lsp = uShadowVP[0] * vec4(world_pos, 1.0);
     vec3 ndc = lsp.xyz / lsp.w;
@@ -192,11 +227,9 @@ void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     float tanTheta0 = sqrt(max(1.0 - ndl0*ndl0, 0.0)) / ndl0;
     float texelW0 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[0]
                                                  : uShadowTexelWorld[0];
-    cur -= max(kMinShadowBias, kBiasK * texelW0 * tanTheta0);
-    float s = 0.0;   // 固定 3×3 PCF
-    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
-        s += (cur <= texture(uShadowMap[0], uv + vec2(float(dx), float(dy)) * uShadowTexel[0]).r) ? 1.0 : 0.0;
-    shadow = s / float(kPcfTapCountT);
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW0 * tanTheta0);
+    shadow = pcfShadow(uShadowMap[0], uv, cur, uShadowTexel[0]);
     covered = 1.0;
 }
 void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -216,11 +249,9 @@ void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     float tanTheta1 = sqrt(max(1.0 - ndl1*ndl1, 0.0)) / ndl1;
     float texelW1 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[1]
                                                  : uShadowTexelWorld[1];
-    cur -= max(kMinShadowBias, kBiasK * texelW1 * tanTheta1);
-    float s = 0.0;
-    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
-        s += (cur <= texture(uShadowMap[1], uv + vec2(float(dx), float(dy)) * uShadowTexel[1]).r) ? 1.0 : 0.0;
-    shadow = s / float(kPcfTapCountT);
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW1 * tanTheta1);
+    shadow = pcfShadow(uShadowMap[1], uv, cur, uShadowTexel[1]);
     covered = 1.0;
 }
 void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -240,11 +271,9 @@ void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     float tanTheta2 = sqrt(max(1.0 - ndl2*ndl2, 0.0)) / ndl2;
     float texelW2 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[2]
                                                  : uShadowTexelWorld[2];
-    cur -= max(kMinShadowBias, kBiasK * texelW2 * tanTheta2);
-    float s = 0.0;
-    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
-        s += (cur <= texture(uShadowMap[2], uv + vec2(float(dx), float(dy)) * uShadowTexel[2]).r) ? 1.0 : 0.0;
-    shadow = s / float(kPcfTapCountT);
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW2 * tanTheta2);
+    shadow = pcfShadow(uShadowMap[2], uv, cur, uShadowTexel[2]);
     covered = 1.0;
 }
 void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -264,11 +293,9 @@ void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     float tanTheta3 = sqrt(max(1.0 - ndl3*ndl3, 0.0)) / ndl3;
     float texelW3 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[3]
                                                  : uShadowTexelWorld[3];
-    cur -= max(kMinShadowBias, kBiasK * texelW3 * tanTheta3);
-    float s = 0.0;
-    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
-        s += (cur <= texture(uShadowMap[3], uv + vec2(float(dx), float(dy)) * uShadowTexel[3]).r) ? 1.0 : 0.0;
-    shadow = s / float(kPcfTapCountT);
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW3 * tanTheta3);
+    shadow = pcfShadow(uShadowMap[3], uv, cur, uShadowTexel[3]);
     covered = 1.0;
 }
 void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
@@ -288,11 +315,9 @@ void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float 
     float tanTheta4 = sqrt(max(1.0 - ndl4*ndl4, 0.0)) / ndl4;
     float texelW4 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[4]
                                                  : uShadowTexelWorld[4];
-    cur -= max(kMinShadowBias, kBiasK * texelW4 * tanTheta4);
-    float s = 0.0;
-    for (int dy = -kPcfRadiusT; dy <= kPcfRadiusT; dy++) for (int dx = -kPcfRadiusT; dx <= kPcfRadiusT; dx++)
-        s += (cur <= texture(uShadowMap[4], uv + vec2(float(dx), float(dy)) * uShadowTexel[4]).r) ? 1.0 : 0.0;
-    shadow = s / float(kPcfTapCountT);
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW4 * tanTheta4);
+    shadow = pcfShadow(uShadowMap[4], uv, cur, uShadowTexel[4]);
     covered = 1.0;
 }
 
@@ -574,6 +599,8 @@ void main() {
     //              长度须 == cfg.cascade_count。
     // shadow_vp:   各级联光空间 ViewProj，[kMaxCascades][16]。
     // shadow_depth_vp: 各级联光空间线性深度矩阵（DepthProj*view），[kMaxCascades][16]。
+    // pcf: PCF 采样核（每帧可切；见 ShadowPcfConfig）——上传 uPcfMode/
+    //      uPcfTapCount/uPcfRadiusTexels。
     static void UploadSunData(
         ShaderManager& shader_mgr,
         unsigned int prog,
@@ -582,6 +609,7 @@ void main() {
         const float shadow_depth_vp[][16],
         const float shadow_texel_world[],
         const ShadowConfig& cfg,
+        const ShadowPcfConfig& pcf,
         const std::optional<DirectionalLight>& sun);
 
     // ---- UploadAmbient ----
