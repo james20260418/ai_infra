@@ -193,10 +193,10 @@ private:
                 "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
             ui_.Combo("衰减剖面", &fog_attenuation_, items, row(0, 5));
         }
-        ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 6));
+        ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 7));
         {
             const std::vector<const char*> items = {"超屏 k=1 (16px)", "超屏 k=2 (8px)"};
-            ui_.Combo("超屏存储 k", &super_k_index_, items, row(0, 8));
+            ui_.Combo("超屏存储 k", &super_k_index_, items, row(0, 6));
         }
 
         // ── 右列：雾色 + 天光主光仰角 + god ray ──
@@ -209,8 +209,6 @@ private:
         ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 6), 0.0f, 0.9f, 2);
         ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 7), 0.0f, 4.0f, 2);
         ui_.Text("froxel: Nz=256 tile=16 K=8  z=[0.1,2000]", row(1, 8));
-
-        ui_.ColorSwatch("雾色参考→", fog_color_, row(0, 7));
     }
 
     bool show_panel_ = true;
