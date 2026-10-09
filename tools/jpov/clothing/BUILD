@@ -15,7 +15,10 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-01：**纳入软体仿真器**（重力+弹簧+地面）；右上角动力学面板（g/M/F/k）
 #     + 暂停/重置按钮；删除「绝对平移」输入框，变换改为**即时**作用于仿真状态。
 #   - 2026-10-02：人体排斥（开关 + buffer + 切向速度保留系数）、关联图连通性修复、
-#     Reset 修复。仍不做：穿衣对齐 / 自动贴合。
+#     Reset 修复。
+#   - 2026-10-09：**补洞（推进法）面板**——底部中间「执行补洞」+ 细分/平滑 + 最大洞周长阈值；
+#     在仿真关联之前把网格破洞补上（mesh_hole_fill.h，与面板同库）。
+#     仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
@@ -56,6 +59,19 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# 衣物网格补洞（推进法 / Liepa 风格）—— header-only 纯函数，无 GL。
+# 单独成库：① 供 clothing_tool_app 在仿真前调用（“关联前先补洞”）；② 可纯单测。
+cc_library(
+    name = "mesh_hole_fill",
+    hdrs = ["mesh_hole_fill.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # 随机摆动测试姿态发生器（pure header-only；只依赖 geom+skeleton_types，无 GL）。
 cc_library(
     name = "random_pose_driver",
@@ -84,6 +100,7 @@ cc_library(
     deps = [
         ":clothing_axis_input",
         ":clothing_transform",
+        ":mesh_hole_fill",
         ":random_pose_driver",
         ":weight_transfer",
         "//geom/3d:triangle_3",
@@ -144,6 +161,23 @@ cc_test(
         ":random_pose_driver",
         "//geom/common:quaternion",
         "//tools/jpov/interface:skeleton_types",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 网格补洞纯函数单测（闭合体挖洞→补齐 / 绕序 / 焊接缝合 / 阈值；无 GL）。
+cc_test(
+    name = "mesh_hole_fill_test",
+    srcs = ["mesh_hole_fill_test.cc"],
+    deps = [
+        ":mesh_hole_fill",
+        "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],

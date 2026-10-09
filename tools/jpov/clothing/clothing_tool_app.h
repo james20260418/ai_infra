@@ -36,10 +36,13 @@
 //       播放/暂停 + 「主轴」相位（播放时自动推进、暂停时可拖动查看任意时刻动作）+ 关节幅度
 //       + **随机种子输入框**（0~65535，换种子 = 换一套随机动作）。
 //       「衣服没蒙皮则不用动」：衣服未蒙皮时该动作不带动衣服（保持静止）。
-//   - 2026-10-08（本 PR）：**关联距离 d 旋钮**——右上仿真面板新增「关联距离 d (m)」滑条
+//   - 2026-10-08：**关联距离 d 旋钮**——右上仿真面板新增「关联距离 d (m)」滑条
 //       （0.005~1 m，默认 0.1）+ CLI `--bind_distance`。d 是仿真点的「缝合」半径（关联邻居
 //       表 + 长边加密阈值）；此前它硬编码为 kDefaultBindDistance，无旋钮（姊妹 soft_mesh_viewer
 //       早有该滑条）。拖它 → 从**启动几何**重建仿真点集合（几何回启动姿态、仿真暂停）。
+//   - 2026-10-09：**补洞（推进法）面板**——底部中间新增「执行补洞」按钮 + 细分/平滑
+//       勾选 + 「最大洞周长 (m)」滑条（+ CLI `--hole_fill`/`--hole_perimeter`）。补洞在**建仿真器
+//       （关联邻居表）之前**跑（"关联前先补洞"），把网格破洞/裂缝补上（见 mesh_hole_fill.h）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -74,6 +77,7 @@
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
 #include "tools/jpov/clothing/clothing_transform.h"
+#include "tools/jpov/clothing/mesh_hole_fill.h"
 #include "tools/jpov/clothing/random_pose_driver.h"
 #include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/demo/skylight_scene.h"
@@ -280,6 +284,13 @@ public:
     // 重建必须基于启动几何（而非 cloth_current_，后者会被仿真/变换改过——拿形变当绑定姿态）。
     std::vector<jpov::MeshData> sim_startup_mesh_;
 
+    // ── 补洞（推进法）面板状态 ──
+    // 补洞在「建仿真器（关联邻居表）之前」跑，把网格里的破洞/裂缝补上（见 mesh_hole_fill.h）。
+    bool hole_refine_ui_ = true;        // 细分（按周围边长拆分补丁长边）
+    bool hole_fair_ui_ = true;          // fairing（Laplacian 平滑新增点）
+    float hole_max_perimeter_ = 0.2f;   // 只补周长 ≤ 该值（米）的洞；0 = 不限制
+    std::string hole_fill_msg_;         // 面板状态回显
+
     bool sim_running_ = false;       // 是否推进仿真（暂停按钮的反相）
 
     // 动力学滑条镜像值（UI 写、每帧同步到仿真器）。
@@ -319,6 +330,16 @@ public:
 
     // 供 headless / 脚本用：立即执行一键蒙皮（等价面板「一键蒙皮」按钮）。
     void RunAutoSkinNow() { RunAutoSkin(); }
+
+    // 供 headless / 脚本用：立即执行补洞（等价面板「执行补洞」按钮）。
+    void RunHoleFillNow() { RunHoleFill(); }
+
+    // 供 headless / CLI 设置补洞参数（在 RunHoleFillNow 前设好）。
+    void SetHoleFillParams(float max_hole_perimeter_m, bool refine, bool fair) {
+        hole_max_perimeter_ = max_hole_perimeter_m;
+        hole_refine_ui_ = refine;
+        hole_fair_ui_ = fair;
+    }
 
     // 渲染/出图时是否绘制面板（交互窗口 = true；headless 纯 3D 截图 = false）。
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -396,16 +417,13 @@ public:
             cloth_current_[i].material = startup_geometry[i].material;
         }
 
-        // 建仿真器（绑定姿态 = 启动几何）。
+        // 建仿真器（绑定姿态 = 启动几何）。仿真器的人体排斥匹配器（Step 2）由
+        // InitSimulators() 内部统一挂载（见 AttachBodyMatcherToSims；匹配器在 init_ 里，
+        // 比 sims_ 活得久：init_ 声明在 sims_ 之前 ⇒ 后析构）。
         InitSimulators();
 
-        // 人体排斥（Step 2）：把后台建好的「人体最近三角形」匹配器借给各仿真器。
-        // 匹配器在 init_ 里（比 sims_ 活得久：init_ 声明在 sims_ 之前 ⇒ 后析构）。
-        if (init_.body_matcher().valid()) {
-            for (Simulator& sim : sims_) {
-                sim.SetBodyMatcher(&init_.body_matcher().matcher.value());
-            }
-        } else {
+        // 仅当匹配器不可用时提示（人体排斥将无效果）。
+        if (!init_.body_matcher().valid()) {
             LOG(WARNING) << "人体匹配器不可用，人体排斥将无效果";
         }
 
@@ -598,6 +616,7 @@ private:
             sims_[i].Init(cloth_current_[i].mesh, bind_distance_ui_);
             PushSimParams(&sims_[i]);
         }
+        AttachBodyMatcherToSims();
         LOG(INFO) << "已建软体仿真器 × " << sims_.size() << "（绑定姿态 = 启动衣服几何，d="
                   << bind_distance_ui_ << " m）";
     }
@@ -620,6 +639,17 @@ private:
                       << sims_.front().original_point_count() << " + 虚拟 "
                       << sims_.front().virtual_point_count() << " = "
                       << sims_.front().sim_point_count();
+        }
+    }
+
+    // 把人体「最近三角形」匹配器借给各仿真器（人体排斥用）。重建仿真器后也要重挂。
+    // 匹配器在 init_ 里（比 sims_ 活得久）；未就绪时 no-op。
+    void AttachBodyMatcherToSims() {
+        if (!init_.body_matcher().valid()) {
+            return;
+        }
+        for (Simulator& sim : sims_) {
+            sim.SetBodyMatcher(&init_.body_matcher().matcher.value());
         }
     }
 
@@ -855,7 +885,65 @@ private:
         DrawLeftPanel(cmds, w);
         DrawRightPanel(cmds, w, h);
         DrawSkinPanel(cmds, w, h);
+        DrawHoleFillPanel(cmds, w, h);
         DrawMotionPanel(cmds, w, h);
+    }
+
+    // ---- 底部中间：补洞（推进法）----
+    //
+    // 紧邻右下「软布自动蒙皮」面板的左侧（贴底）。按钮「执行补洞」把网格破洞补上（
+    // 在仿真关联之前）；「最大洞周长」滑条滤掉腰口/下摆这类本来该开的口。
+    // 行：标题(1) + 按钮(1) + 细分(1) + 平滑(1) + 最大周长(1) + 状态(1) = 6。
+    void DrawHoleFillPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        const float kMargin  = 12.0f;
+        const float kPad     = 10.0f;
+        const float kRowH    = kPanelRowH;
+        const float kSpacing = 5.0f;
+        const float panel_w  = 0.30f * win_w;
+        constexpr int kRows = 6;
+        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
+        // 贴底、位于蒙皮面板（贴右）左侧；与左下摆动面板留出间隔。
+        const float panel_x = win_w - 2.0f * panel_w - 2.0f * kMargin;
+        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
+        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       kPanelBg);
+
+        const float left = panel_x + kPad;
+        const float top  = panel_y + kPad;
+        const float row_w = panel_w - kPad * 2.0f;
+        const float step_y = kRowH + kSpacing;
+        float row_y = top;
+
+        DrawLabel("补洞（推进法）", left, row_w, row_y);
+        row_y += step_y;
+
+        if (ui_.Button("执行补洞", jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            RunHoleFill();
+        }
+        row_y += step_y;
+
+        ui_.Checkbox("细分（匹配周围边长）", &hole_refine_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        ui_.Checkbox("平滑（fairing）", &hole_fair_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // 最大洞周长（米）：只补周长 ≤ 该值的环；0 = 不限制（⚠️ 会把腰口/下摆也封上）。
+        ui_.SliderFloat("最大洞周长 (m)", &hole_max_perimeter_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        0.0f, 1.0f, /*decimal_places*/ 3);
+        row_y += step_y;
+
+        if (!hole_fill_msg_.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+            cmds->DrawText(hole_fill_msg_,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
     }
 
     // ---- 左上角：变换 / 保存 / 地面 / 显示 ----
@@ -1465,6 +1553,49 @@ private:
             skin = body_skeleton_;
         }
         save_ctrl_.Start(cloth_current_, std::move(skin), cloth_path_, "cloth");
+    }
+
+    // 补洞（推进法，见 mesh_hole_fill.h）：对每个衣物 primitive 跑补洞，把网格里的破洞 /
+    // 裂缝补上。补洞在**建仿真器（关联邻居表）之前**做（"关联前先补洞"）：补完把结果当作
+    // 新的启动姿态，重建仿真器 + 推 GPU（重算法线）。已蒙皮后几何冻结 → no-op。
+    void RunHoleFill() {
+        if (skinned_) {
+            hole_fill_msg_ = "已蒙皮（几何已冻结），补洞被忽略";
+            return;
+        }
+        if (cloth_current_.empty()) {
+            hole_fill_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        HoleFillOptions opts;
+        opts.max_hole_perimeter = hole_max_perimeter_;
+        opts.refine = hole_refine_ui_;
+        opts.fair = hole_fair_ui_;
+        size_t loops_total = 0;
+        size_t loops_filled = 0;
+        size_t tris_added = 0;
+        size_t verts_added = 0;
+        float max_perim = 0.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            MeshData filled;
+            HoleFillStats st;
+            if (FillMeshHoles(cloth_current_[i].mesh, opts, &filled, &st)) {
+                cloth_current_[i].mesh = std::move(filled);
+            }
+            loops_total += st.loops_total;
+            loops_filled += st.loops_filled;
+            tris_added += st.triangles_added;
+            verts_added += st.vertices_added;
+            max_perim = std::max(max_perim, st.max_filled_perimeter);
+        }
+        // 几何变了 → 以新几何为启动姿态重建仿真器（关联前先补洞）+ 推 GPU（重算法线）。
+        InitSimulators();
+        SyncSimsToCloth();
+        hole_fill_msg_ =
+            Format("补洞：环 %zu 补 %zu，+三角 %zu，+顶点 %zu（最大环周长 %.3f m）",
+                   loops_total, loops_filled, tris_added, verts_added,
+                   static_cast<double>(max_perim));
+        LOG(INFO) << hole_fill_msg_;
     }
 
     // 一键：软布自动蒙皮（weight transfer，见 weight_transfer.h）。成功后就地给每个
