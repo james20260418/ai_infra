@@ -17,13 +17,11 @@
 #include <cmath>
 #include <cstring>
 
-// GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
-#ifdef _WIN32
-#include <GL/gl.h>
-#else
+// GL 头文件必须最先 include（在 MinGW #define 宏替换之前）。
+// ⚠️ MinGW 也要显式包含 <GL/glext.h>：本文件用到 FBO / RGBA32F / R32F 等 GL3 枚举，
+//   它们不在 <GL/gl.h>（仅 GL 1.1），gl_loader.h 也不提供 ⇒ 必须走 glext.h（同 renderer.cc）。
 #include <GL/gl.h>
 #include <GL/glext.h>
-#endif
 
 #ifdef _WIN32
 // MinGW: windows.h 定义 ERROR 宏与 glog 冲突，必须在 glog 之前 suppress
@@ -31,6 +29,10 @@
 #define GLOG_NO_ABBREVIATED_SEVERITIES
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
+// MinGW 的 GL/gl.h 可能不定义 GL_CLAMP_TO_EDGE
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 #endif
 
 // Windows/MinGW: windef.h 定义 near/far 宏，与 Camera::near/far 字段冲突。
