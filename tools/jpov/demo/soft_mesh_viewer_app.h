@@ -86,10 +86,12 @@ public:
     // 仿真点像素半径（Danis 需求：2px，"就点个点"）。
     static constexpr float kSimPointRadiusPx = 2.0f;
 
-    // d 滑条范围（米）。下限 5mm：高密度模型也能拆出成片虚拟点；
-    // 上限 1m：覆盖「大 d ⇒ 几乎不加密」的对照情形。
-    static constexpr float kBindDistanceMinM = 0.005f;
-    static constexpr float kBindDistanceMaxM = 1.0f;
+    // d 滑条范围（米）：单一来源在 Simulator（kMinBindDistance/kMaxBindDistance），
+    // 与穿衣工具共用，避免两处常量漂移。
+    static constexpr float kBindDistanceMinM =
+        soft_mesh_simulator::Simulator::kMinBindDistance;
+    static constexpr float kBindDistanceMaxM =
+        soft_mesh_simulator::Simulator::kMaxBindDistance;
 
     // 地面栅格参数（Danis 需求：1m 格子、±5m、只画 XZ 平面）。
     static constexpr float kGridHalfExtentM = 5.0f;  // 每边 5m → 总 10m×10m

@@ -41,6 +41,7 @@ struct CliOptions {
     int   window_height = 0;          // --window_height 覆盖窗口高（0 = 用默认）
     float phi_deg = 20.0f;            // --phi_deg 初始俯视角（度；>0 = 相机在上方俯视）
     // 动力学初始值（默认 = Simulator 默认；仅 headless 调参 / 复现用）。
+    float bind_distance = jpov::soft_mesh_simulator::Simulator::kDefaultBindDistance;  // --bind_distance 关联距离 d（m）
     float gravity = jpov::soft_mesh_simulator::Simulator::kDefaultGravity;
     float total_mass = jpov::soft_mesh_simulator::Simulator::kDefaultTotalMass;
     float force_coeff = jpov::soft_mesh_simulator::Simulator::kDefaultForceCoeff;
@@ -56,6 +57,8 @@ struct CliOptions {
     bool  weld_relative = false;  // --weld_relative 0/1（1 = 相对局部边长）
     float weld_ratio = jpov::clothing::kSkinWeldRatio;  // --weld_ratio（相对模式比例）
     bool  auto_skin = false;      // --auto_skin：headless 出图前跑一次一键蒙皮（脚本化验证）
+    bool  hole_fill = false;      // --hole_fill：headless 出图前跑一次补洞（脚本化验证）
+    float hole_perimeter = 0.2f;  // --hole_perimeter 只补周长 ≤ 该值（米）的洞；0 = 不限制
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -135,6 +138,15 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--damping 缺少数值参数，忽略";
             }
+        } else if (arg == "--bind_distance") {
+            if (i + 1 < argc) {
+                opt.bind_distance = static_cast<float>(std::atof(argv[++i]));
+                if (!(opt.bind_distance > 0.0f)) {
+                    LOG(FATAL) << "--bind_distance 必须 > 0，got " << opt.bind_distance;
+                }
+            } else {
+                LOG(WARNING) << "--bind_distance 缺少数值参数，忽略";
+            }
         } else if (arg == "--max_speed") {
             if (i + 1 < argc) {
                 opt.max_speed = std::atof(argv[++i]);
@@ -191,6 +203,17 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.has_cloth_offset = true;
             } else {
                 LOG(WARNING) << "--cloth_offset 需要 3 个数值（dx dy dz），忽略";
+            }
+        } else if (arg == "--hole_fill") {
+            opt.hole_fill = true;
+        } else if (arg == "--hole_perimeter") {
+            if (i + 1 < argc) {
+                opt.hole_perimeter = static_cast<float>(std::atof(argv[++i]));
+                if (opt.hole_perimeter < 0.0f) {
+                    LOG(FATAL) << "--hole_perimeter 必须 >= 0，got " << opt.hole_perimeter;
+                }
+            } else {
+                LOG(WARNING) << "--hole_perimeter 缺少数值参数，忽略";
             }
         } else if (arg == "--auto_skin") {
             opt.auto_skin = true;
@@ -335,6 +358,7 @@ int main(int argc, char** argv) {
     app.view_.phi = static_cast<double>(opt.phi_deg) * 3.14159265358979323846 / 180.0;
 
     // 动力学初值（CLI，可选）：在场景就绪（建仿真器）前设好镜像，使仿真器按此初始化。
+    app.bind_distance_ui_ = opt.bind_distance;
     app.gravity_ui_ = opt.gravity;
     app.total_mass_ui_ = opt.total_mass;
     app.force_coeff_t_ui_ = jpov::clothing::ClothingToolApp::ForceNewtonToT(
@@ -344,6 +368,8 @@ int main(int argc, char** argv) {
     app.body_repulsion_ui_ = (opt.body_repulsion != 0);
     app.body_buffer_ui_ = opt.body_buffer;
     app.body_parallel_damping_ui_ = opt.body_parallel_damping;
+    // 补洞参数（headless；交互窗口由底部中间面板驱动）。
+    app.SetHoleFillParams(opt.hole_perimeter, /*refine=*/true, /*fair=*/true);
     app.weld_relative_ui_ = opt.weld_relative;
     app.weld_ratio_ = opt.weld_ratio;
 
@@ -379,6 +405,10 @@ int main(int argc, char** argv) {
                                            opt.cloth_offset[2]));
             LOG(INFO) << "衣服预平移 [" << opt.cloth_offset[0] << ","
                       << opt.cloth_offset[1] << "," << opt.cloth_offset[2] << "]";
+        }
+        // 可选：出图前跑一次补洞（在仿真关联之前；交互窗口由按钮驱动）。
+        if (opt.hole_fill) {
+            app.RunHoleFillNow();
         }
         // 可选：出图前跑一次一键蒙皮（脚本化验证焊接模式等；交互窗口由按钮驱动）。
         if (opt.auto_skin) {

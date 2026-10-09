@@ -268,6 +268,7 @@ void SkeletonRenderer::DrawSkinnedMesh(
     ShaderManager& shader_mgr,
     const float mvp[16],
     unsigned int skinned_prog,
+    unsigned int skinned_prog_cutout,
     const SkeletonManager::GpuHandles& gh,
     int pose_count,
     InstanceBuffer& instance_model_buf,
@@ -296,8 +297,22 @@ void SkeletonRenderer::DrawSkinnedMesh(
     const bool use_normal_map = (cmd.material.normal_tex != 0);
 
     glPushAttrib(GL_ENABLE_BIT);
-    glUseProgram(skinned_prog);
-    unsigned int sp = skinned_prog;
+
+    // 双面渲染（同 DrawObject3D）：材质声明 double_sided 时关背面剔除（配合 FS 的
+    // gl_FrontFacing 法线翻转）。缺省保持调用方状态（背面剔除开）；glPopAttrib 自动恢复。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    // alpha test（cutout）：材质为 kMask 时选含 discard 的变体 program。
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    unsigned int sp = cutout ? skinned_prog_cutout : skinned_prog;
+    glUseProgram(sp);
+
+    // cutout 阈值（仅 cutout program 有该 uniform；不透明 program 返回 -1，上传无害）。
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
+    }
 
     // 统一 baseColor / 法线等材质 uniform（与 DrawObject3D 一致）。
     glUniform3f(glGetUniformLocation(sp, "uBaseColor"),

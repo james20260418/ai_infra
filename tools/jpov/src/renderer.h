@@ -263,6 +263,8 @@ private:
     unsigned int BloomCompositeProg();
     // 蒙皮渲染 program（kSkinnedVs + SkeletonRenderer::kMeshFs3dPBR）。
     unsigned int SkinnedMeshProg();
+    // alpha-test（cutout）蒙皮变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int SkinnedMeshProgCutout();
     // 蒙皮阴影 program（kSkinnedShadowVs + SkeletonRenderer::kShadowFs，深度专用）。
     unsigned int SkinnedShadowProg();
 
