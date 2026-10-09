@@ -54,8 +54,8 @@ class FireFogRenderer {
 public:
     // ── 常量（shader 里同名 #define 与之逐字对应；改一处必须同步）──
     // tile 边长 = 每柱的 Nxy 单元边长，同时决定 z 切片数（kNz = tile 像素数，硬约束）。
-    // 8×8 ⇒ Nz=64（粗活/实验档）；16×16 ⇒ Nz=256（高质量档）。
-    static constexpr int kTileSize = 8;                // tile 边长（像素）
+    // 16×16 ⇒ Nz=256（高质量档，实测 8×8/Nz=64 的 z 带把颗粒衬得更明显，故用 256）。
+    static constexpr int kTileSize = 16;               // tile 边长（像素）
     static constexpr int kNz = kTileSize * kTileSize;  // 每柱 z 切片数（= tile 像素数）
     static constexpr int kMaxFogsPerTile = 8;          // K：每 tile 团上限
     static constexpr int kTexelsPerTile = kMaxFogsPerTile / 4;  // 每 tile 的 RGBA8 texel 数 = 2
