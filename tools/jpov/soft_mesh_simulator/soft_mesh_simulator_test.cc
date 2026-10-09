@@ -382,6 +382,79 @@ TEST(SoftMeshSimulatorTest, ResetRestoresStartupGeometryAfterTransforms) {
     EXPECT_EQ(sim.step_count(), 0u);
 }
 
+// Ⓐ 部分顶点即时变换（2026-10-09 Danis）：只对指定原始顶点子集生效，其余顶点不动。
+//   用不对称网格 + 只选一个顶点，能真区分「只动选中」与「动了全体」。
+TEST(SoftMeshSimulatorTest, PartialTranslationMovesOnlySelectedVertices) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());  // 顶点 (-2,1,-5) / (3,-4,0) / (0,7,2)
+    const geom::Vec3<float> a0 = sim.sim_positions()[0];
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialTranslation({0}, geom::Vec3<float>(5.0f, -1.0f, 2.0f));
+
+    const auto& p = sim.sim_positions();
+    EXPECT_NEAR(p[0].x(), a0.x() + 5.0f, 1e-6f);
+    EXPECT_NEAR(p[0].y(), a0.y() - 1.0f, 1e-6f);
+    EXPECT_NEAR(p[0].z(), a0.z() + 2.0f, 1e-6f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+
+    // Reset 回到启动几何（部分变换也不应污染 startup）。
+    sim.Reset();
+    EXPECT_LT((sim.sim_positions()[0] - a0).Norm(), 1e-6f);
+}
+
+// 部分旋转：绕给定 pivot、只转选中顶点（这里绕原点，y 轴 +90°）。
+//   绕 +Y 轴 +90°： (x,y,z) → (z, y, -x)。
+TEST(SoftMeshSimulatorTest, PartialRotationRotatesOnlySelectedAroundPivot) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialRotation({0}, Axis::kY, 90.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const auto& p = sim.sim_positions();
+    // 顶点 0 原 (-2,1,-5) → (-5,1,2)。
+    EXPECT_NEAR(p[0].x(), -5.0f, 1e-5f);
+    EXPECT_NEAR(p[0].y(), 1.0f, 1e-5f);
+    EXPECT_NEAR(p[0].z(), 2.0f, 1e-5f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+}
+
+// 部分缩放：以 pivot 为中心、只缩放选中顶点（这里 pivot=原点、factor=2）。
+TEST(SoftMeshSimulatorTest, PartialScalingScalesOnlySelectedAroundPivot) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const geom::Vec3<float> a1 = sim.sim_positions()[1];
+    const geom::Vec3<float> a2 = sim.sim_positions()[2];
+
+    sim.ApplyPartialScaling({0}, 2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    const auto& p = sim.sim_positions();
+    // 顶点 0 原 (-2,1,-5) → (-4,2,-10)。
+    EXPECT_NEAR(p[0].x(), -4.0f, 1e-6f);
+    EXPECT_NEAR(p[0].y(), 2.0f, 1e-6f);
+    EXPECT_NEAR(p[0].z(), -10.0f, 1e-6f);
+    EXPECT_LT((p[1] - a1).Norm(), 1e-6f) << "未选中的顶点 1 不该动";
+    EXPECT_LT((p[2] - a2).Norm(), 1e-6f) << "未选中的顶点 2 不该动";
+}
+
+// 空选区：部分变换是 no-op（不动任何顶点）。
+TEST(SoftMeshSimulatorTest, PartialTransformEmptySelectionIsNoOp) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const std::vector<geom::Vec3<float>> before = sim.sim_positions();
+    sim.ApplyPartialTranslation({}, geom::Vec3<float>(9.0f, 9.0f, 9.0f));
+    sim.ApplyPartialRotation({}, Axis::kX, 30.0f, geom::Vec3<float>(1.0f, 2.0f, 3.0f));
+    sim.ApplyPartialScaling({}, 3.0f, geom::Vec3<float>(1.0f, 2.0f, 3.0f));
+    for (size_t i = 0; i < before.size(); ++i) {
+        EXPECT_LT((sim.sim_positions()[i] - before[i]).Norm(), 1e-6f);
+    }
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;

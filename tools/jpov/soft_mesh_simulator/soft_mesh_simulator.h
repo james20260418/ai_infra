@@ -407,6 +407,28 @@ public:
     // Pre-condition（不满足即 LOG(FATAL)）：已 Init；factor > 0 且有限；pivot 有限。
     void ApplyScaling(float factor, const geom::Vec3<float>& pivot);
 
+    // ── 即时操作（**部分顶点**）：只对指定的**原始顶点子集**施加变换，其余顶点不动 ──
+    //
+    // 用途（Danis 2026-10-09）：3D 画笔存在选区时，clothing tool 左侧「平移 / 旋转 / 缩放」
+    //   只作用于被选中的顶点（无选区时走全体版 ApplyTranslation/Rotation/Scaling）。
+    //   旋转 / 缩放的枢轴由调用方给（clothing tool 用「选区顶点包围盒中心」）。
+    //
+    // 与全体 Apply* 的关键差异：**不更新关联邻居表**（neighbors_ / nb_init_dist_）。
+    //   关联动力学（弹簧参考形状 pij(0) 与初始距离分母）只随**全体**操作更新；局部编辑属
+    //   「几何编辑」，若想据此仿真，调用方应**重建仿真器**（重算关联距离 d）——见 clothing
+    //   README 的「用户须知」。这是刻意的简化（Danis：会十分复杂），局部编辑不参与关联动力学。
+    //
+    // 语义：位置与绑定姿态**同步变换**（否则弹簧会把被选顶点拽回旧形状）；旋转时速度同步
+    //   旋转，平移 / 缩放不动速度。变换后立即 ExtractMesh（法线 / 切线由显示层重算）。
+    // Pre-condition（不满足即 LOG(FATAL)）：已 Init；每个 index < original_point_count()；
+    //   数值参数有限（factor > 0）。
+    void ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indices,
+                                 const geom::Vec3<float>& delta);
+    void ApplyPartialRotation(const std::vector<uint32_t>& vertex_indices, Axis axis,
+                              float degrees, const geom::Vec3<float>& pivot);
+    void ApplyPartialScaling(const std::vector<uint32_t>& vertex_indices, float factor,
+                             const geom::Vec3<float>& pivot);
+
     // ── 仿真点速度（纯查询）──
     //
     // 与 sim_positions() 同序同长：索引 0..original_point_count()-1 = 原始顶点，

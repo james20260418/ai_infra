@@ -59,6 +59,7 @@ struct CliOptions {
     bool  auto_skin = false;      // --auto_skin：headless 出图前跑一次一键蒙皮（脚本化验证）
     bool  hole_fill = false;      // --hole_fill：headless 出图前跑一次补洞（脚本化验证）
     float hole_perimeter = 0.2f;  // --hole_perimeter 只补周长 ≤ 该值（米）的洞；0 = 不限制
+    bool  alpha_normalize = false;  // --alpha_normalize：headless 出图前跑一次 base color alpha 归一
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -217,6 +218,8 @@ CliOptions ParseCli(int argc, char** argv) {
             }
         } else if (arg == "--auto_skin") {
             opt.auto_skin = true;
+        } else if (arg == "--alpha_normalize") {
+            opt.alpha_normalize = true;
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -409,6 +412,10 @@ int main(int argc, char** argv) {
         // 可选：出图前跑一次补洞（在仿真关联之前；交互窗口由按钮驱动）。
         if (opt.hole_fill) {
             app.RunHoleFillNow();
+        }
+        // 可选：出图前跑一次 base color alpha 归一（脚本化验证；交互窗口由面板按钮驱动）。
+        if (opt.alpha_normalize) {
+            app.RunAlphaNormalizeNow();
         }
         // 可选：出图前跑一次一键蒙皮（脚本化验证焊接模式等；交互窗口由按钮驱动）。
         if (opt.auto_skin) {

@@ -494,7 +494,7 @@
         if (ui_.Button("重置衣服",
                        jpov::UiRect{{left + kBtnW + kSpacing, row_y},
                                     {kBtnW, kRowH}})) {
-            ResetClothMesh();
+            ResetCloth();
         }
         row_y += step_y;
 
@@ -524,10 +524,11 @@
     //
     // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
     // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
-    //             + 焊接模式勾选(1) + 焊接参数输入(1) + 状态文本(1) = 7。
+    //             + 焊接模式勾选(1) + 焊接参数输入(1) + base color alpha 归一按钮(1)
+    //             + 蒙皮状态(1) + alpha 状态(1) = 9。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 7;
+        constexpr int kRows = 9;
         const float panel_x = win_w - panel_w - kPanelMargin;  // 贴右边缘
         const float panel_y = win_h - PanelHeight(kRows) - kPanelMargin;  // 贴底边缘
         PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
@@ -597,10 +598,28 @@
         }
         row_y += step_y;
 
-        // 状态 / 提示（可能为空）。
+        // base color alpha 归一：把贴图 alpha 置 1（不透明）。画笔有选区 → 只处理「被选中
+        // 顶点围成的三角形」覆盖的 texel；无选区 → 整图。（见 base_color_alpha.h / README）
+        if (ui_.Button("base color alpha 归一",
+                       jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            RunAlphaNormalize();
+        }
+        row_y += step_y;
+
+        // 蒙皮状态 / 提示（可能为空）。
         if (!skin_msg_.empty()) {
             const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
             cmds->DrawText(skin_msg_,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
+        row_y += step_y;
+
+        // alpha 归一状态 / 提示（可能为空）。
+        if (!alpha_msg_.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+            cmds->DrawText(alpha_msg_,
                            /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                            kFontSize, kForeground,
                            jpov::TextAlignment::kTopLeft, kViewerFontAlias);

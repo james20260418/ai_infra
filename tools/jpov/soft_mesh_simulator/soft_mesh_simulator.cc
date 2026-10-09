@@ -17,6 +17,28 @@
 namespace jpov {
 namespace soft_mesh_simulator {
 
+namespace {
+
+// 旋转轴的单位方向（见 Axis）。非法值 LOG(FATAL)。
+geom::Vec3<float> AxisUnit(Axis axis) {
+    switch (axis) {
+        case Axis::kX:
+            return geom::Vec3<float>(1.0f, 0.0f, 0.0f);
+        case Axis::kY:
+            return geom::Vec3<float>(0.0f, 1.0f, 0.0f);
+        case Axis::kZ:
+            return geom::Vec3<float>(0.0f, 0.0f, 1.0f);
+    }
+    LOG(FATAL) << "AxisUnit: 非法 axis " << static_cast<int>(axis);
+    return geom::Vec3<float>(0.0f, 0.0f, 0.0f);  // 不可达（LOG(FATAL) 已终止）
+}
+
+// 度 → 弧度。
+constexpr float kDegToRad =
+    static_cast<float>(3.14159265358979323846 / 180.0);
+
+}  // namespace
+
 void Simulator::Init(const jpov::MeshData& mesh) {
     Init(mesh, kDefaultBindDistance);
 }
@@ -815,23 +837,7 @@ void Simulator::ApplyRotation(Axis axis, float degrees,
     CHECK(pivot.IsFinite()) << "ApplyRotation 要求 pivot 有限，got "
                             << pivot.DebugString();
 
-    geom::Vec3<float> axis_dir(0.0f, 0.0f, 0.0f);
-    switch (axis) {
-        case Axis::kX:
-            axis_dir = geom::Vec3<float>(1.0f, 0.0f, 0.0f);
-            break;
-        case Axis::kY:
-            axis_dir = geom::Vec3<float>(0.0f, 1.0f, 0.0f);
-            break;
-        case Axis::kZ:
-            axis_dir = geom::Vec3<float>(0.0f, 0.0f, 1.0f);
-            break;
-        default:
-            LOG(FATAL) << "ApplyRotation: 非法 axis" << static_cast<int>(axis);
-    }
-
-    constexpr float kDegToRad =
-        static_cast<float>(3.14159265358979323846 / 180.0);
+    const geom::Vec3<float> axis_dir = AxisUnit(axis);
     const geom::Quaternion<float> q =
         geom::Quaternion<float>::FromAxisAngle(axis_dir, degrees * kDegToRad);
     auto rotate = [&q, &pivot](const geom::Vec3<float>& v) {
@@ -874,6 +880,68 @@ void Simulator::ApplyScaling(float factor, const geom::Vec3<float>& pivot) {
         }
     }
     // 速度**不**参与缩放。
+    ExtractMesh();
+}
+
+void Simulator::ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indices,
+                                        const geom::Vec3<float>& delta) {
+    CHECK(inited_) << "ApplyPartialTranslation 调用前必须先 Init(mesh)";
+    CHECK(delta.IsFinite()) << "ApplyPartialTranslation 要求 delta 有限";
+    for (uint32_t idx : vertex_indices) {
+        CHECK_LT(idx, vertex_count_)
+            << "ApplyPartialTranslation: 仅接受原始顶点 index，got " << idx
+            << "（original_point_count()=" << vertex_count_ << "）";
+        sim_positions_[idx] = sim_positions_[idx] + delta;
+        bind_positions_[idx] = bind_positions_[idx] + delta;
+    }
+    // 速度不参与平移；关联邻居表**不**更新（见 .h 说明）。
+    ExtractMesh();
+}
+
+void Simulator::ApplyPartialRotation(const std::vector<uint32_t>& vertex_indices,
+                                     Axis axis, float degrees,
+                                     const geom::Vec3<float>& pivot) {
+    CHECK(inited_) << "ApplyPartialRotation 调用前必须先 Init(mesh)";
+    CHECK(std::isfinite(degrees)) << "ApplyPartialRotation 要求 degrees 有限";
+    CHECK(pivot.IsFinite()) << "ApplyPartialRotation 要求 pivot 有限，got "
+                            << pivot.DebugString();
+    const geom::Vec3<float> axis_dir = AxisUnit(axis);
+    const geom::Quaternion<float> q =
+        geom::Quaternion<float>::FromAxisAngle(axis_dir, degrees * kDegToRad);
+    auto rotate = [&q, &pivot](const geom::Vec3<float>& v) {
+        return pivot + geom::RotateVector(q, v - pivot);
+    };
+    for (uint32_t idx : vertex_indices) {
+        CHECK_LT(idx, vertex_count_)
+            << "ApplyPartialRotation: 仅接受原始顶点 index，got " << idx
+            << "（original_point_count()=" << vertex_count_ << "）";
+        sim_positions_[idx] = rotate(sim_positions_[idx]);
+        // 速度参与旋转（旋转 ⇒ 角速度），与全体 ApplyRotation 一致。
+        sim_velocities_[idx] = geom::RotateVector(q, sim_velocities_[idx]);
+        bind_positions_[idx] = rotate(bind_positions_[idx]);
+    }
+    // 关联邻居表**不**更新（见 .h 说明）。
+    ExtractMesh();
+}
+
+void Simulator::ApplyPartialScaling(const std::vector<uint32_t>& vertex_indices,
+                                    float factor, const geom::Vec3<float>& pivot) {
+    CHECK(inited_) << "ApplyPartialScaling 调用前必须先 Init(mesh)";
+    CHECK(std::isfinite(factor)) << "ApplyPartialScaling 要求 factor 有限";
+    CHECK_GT(factor, 0.0f) << "ApplyPartialScaling 要求 factor > 0，got " << factor;
+    CHECK(pivot.IsFinite()) << "ApplyPartialScaling 要求 pivot 有限，got "
+                            << pivot.DebugString();
+    auto scale = [factor, &pivot](const geom::Vec3<float>& v) {
+        return pivot + (v - pivot) * factor;
+    };
+    for (uint32_t idx : vertex_indices) {
+        CHECK_LT(idx, vertex_count_)
+            << "ApplyPartialScaling: 仅接受原始顶点 index，got " << idx
+            << "（original_point_count()=" << vertex_count_ << "）";
+        sim_positions_[idx] = scale(sim_positions_[idx]);
+        bind_positions_[idx] = scale(bind_positions_[idx]);
+    }
+    // 速度不参与缩放；关联邻居表 / nb_init_dist_ **不**更新（见 .h 说明）。
     ExtractMesh();
 }
 
