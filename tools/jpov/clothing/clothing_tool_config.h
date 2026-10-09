@@ -109,13 +109,12 @@ inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间�
 inline constexpr float kPanelPad     = 10.0f;   // 面板内边距
 inline constexpr float kPanelSpacing = 5.0f;    // 行间距
 
-// 一块面板的布局游标：BeginPanel 返回它；每画完一行后调 Next()。
+// 一块面板的布局值集合：BeginPanel 返回它（各面板把它照抄成局部 left/row_w/step_y/row_y）。
 struct PanelFrame {
     float left   = 0.0f;   // 控件左缘 x
     float row_w  = 0.0f;   // 控件可用宽
     float step_y = 0.0f;   // 行高 + 行间距
-    float row_y  = 0.0f;   // 当前行 y
-    void Next() { row_y += step_y; }
+    float row_y  = 0.0f;   // 首行 y
 };
 
 }  // namespace clothing
