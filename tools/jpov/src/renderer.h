@@ -254,6 +254,12 @@ private:
     // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int DrawObject3DProgCutout();
     unsigned int DrawObject3DProgFullCutout();
+    // 静态批量实例 program（kMeshVs3dPBRInstanced / ...FullInstanced + 同一份 kMeshFs3dPBR）。
+    unsigned int DrawInstancedObjectProg();
+    unsigned int DrawInstancedObjectProgFull();
+    // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int DrawInstancedObjectProgCutout();
+    unsigned int DrawInstancedObjectProgFullCutout();
     unsigned int ShadowProg();
     // alpha-test（cutout）阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int ShadowProgCutout();
@@ -271,6 +277,10 @@ private:
     unsigned int SkinnedShadowProg();
     // alpha-test（cutout）蒙皮阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int SkinnedShadowProgCutout();
+    // 实例版阴影 program（kShadowVsInstanced + Object3DRenderer::kShadowFs，深度专用）。
+    unsigned int InstancedShadowProg();
+    // alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int InstancedShadowProgCutout();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。

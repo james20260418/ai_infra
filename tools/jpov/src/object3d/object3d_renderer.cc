@@ -572,6 +572,195 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     glPopAttrib();
 }
 
+// ==================== DrawInstancedObject ====================
+
+void Object3DRenderer::DrawInstancedObject(const InstancedObjectCommand& cmd,
+                                           const RenderCommandList& cmds,
+                                           MeshManager& mesh_mgr,
+                                           TextureManager& texture_mgr,
+                                           ShaderManager& shader_mgr,
+                                           const float view_proj[16],
+                                           unsigned int prog,
+                                           unsigned int prog_full,
+                                           unsigned int prog_cutout,
+                                           unsigned int prog_full_cutout,
+                                           unsigned int tile_index_tex,
+                                           InstanceBuffer& instance_model_buf) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawInstancedObject: mesh_id " << cmd.mesh_id
+                           << " 未注册（DrawInstancedObject 前需先 RegisterMesh）";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK(!cmd.instances.empty()) << "DrawInstancedObject: instances 不能为空";
+
+    const bool any_tex =
+        (cmd.material.base_color_tex != 0) ||
+        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
+        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
+        (cmd.material.emissive_tex != 0) ||
+        (cmd.material.ao_tex != 0) ||
+        (cmd.material.normal_tex != 0);
+    const bool use_normal_map = (cmd.material.normal_tex != 0);
+
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+        << "DrawInstancedObject: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
+
+    glPushAttrib(GL_ENABLE_BIT);
+
+    // 双面渲染（同 DrawObject3D）：材质声明 double_sided 时关背面剔除 + FS 翻法线。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    // 选 program：有纹理走 full 变体，alpha_mode==kMask 走 cutout 变体（同 DrawObject3D）。
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    unsigned int selected_prog;
+    if (cutout) {
+        selected_prog = any_tex ? prog_full_cutout : prog_cutout;
+    } else {
+        selected_prog = any_tex ? prog_full : prog;
+    }
+    glUseProgram(selected_prog);
+
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(selected_prog, "uAlphaCutoff"),
+                    cmd.material.alpha_cutoff);
+    }
+
+    // 摆放走 per-instance attribute（loc6..9），故只传 VP（= proj*view，不含 model）。
+    glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uViewProj"),
+                       1, GL_FALSE, view_proj);
+    glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
+                cmd.material.base_color.r, cmd.material.base_color.g,
+                cmd.material.base_color.b);
+    glUniform1f(glGetUniformLocation(selected_prog, "uMetallic"), cmd.material.metallic);
+    glUniform1f(glGetUniformLocation(selected_prog, "uRoughness"), cmd.material.roughness);
+    glUniform3f(glGetUniformLocation(selected_prog, "uEmissive"),
+                cmd.material.emissive.r, cmd.material.emissive.g,
+                cmd.material.emissive.b);
+    glUniform1f(glGetUniformLocation(selected_prog, "uAO"), cmd.material.ao.r);
+    glUniform3f(glGetUniformLocation(selected_prog, "uCameraPos"),
+                cmds.camera.position.x(), cmds.camera.position.y(),
+                cmds.camera.position.z());
+    glUniform1f(glGetUniformLocation(selected_prog, "uCameraNear"),
+                cmds.camera.near);
+
+    if (any_tex) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+            << "DrawInstancedObject: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
+    }
+    if (use_normal_map) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
+            << "DrawInstancedObject: normal_tex 非 0 但 mesh 无 kTangent 属性，"
+            << "无法构建 TBN";
+    }
+
+    // ---- 材质纹理绑定（同 DrawObject3D：baseColor1/metallic2/roughness3/emissive4/ao5/normal6）----
+    if (cmd.material.base_color_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: base_color_tex "
+                             << cmd.material.base_color_tex << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 0);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uBaseColorTex"), 1);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 0);
+    }
+    if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.metallic_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: metallic_tex 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 1);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uMetallicTex"), 2);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 0);
+    }
+    if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.roughness_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: roughness_tex 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 2);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uRoughnessTex"), 3);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 0);
+    }
+    if (cmd.material.emissive_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.emissive_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: emissive_tex 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 3);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uEmissiveTex"), 4);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 0);
+    }
+    if (cmd.material.ao_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.ao_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: ao_tex 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 4);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uAoTex"), 5);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 0);
+    }
+    if (cmd.material.normal_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.normal_tex);
+        CHECK_NE(gl_tex, 0u) << "DrawInstancedObject: normal_tex 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 5);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uNormalTex"), 6);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 1);
+        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"),
+                    cmd.material.normal_scale);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 0);
+        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
+    }
+
+    glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
+    glBindTexture(GL_TEXTURE_2D, tile_index_tex);
+    glUniform1i(glGetUniformLocation(selected_prog, "uTileLightIndices"), kTexUnitTileLightIndex);
+
+    // ---- 每实例摆放矩阵（与 DrawObject3D 同一套 BuildModelMatrix）----
+    const size_t n = cmd.instances.size();
+    std::vector<float> xforms(n * 16);
+    for (size_t k = 0; k < n; ++k) {
+        float model[16];
+        const InstanceTransform& t = cmd.instances[k].transform;
+        BuildModelMatrix(t.center, t.up, t.front, t.scale, model);
+        for (int e = 0; e < 16; ++e) {
+            xforms[k * 16 + static_cast<size_t>(e)] = model[e];
+        }
+    }
+    instance_model_buf.Upload(xforms);
+
+    const GLsizei n_inst = static_cast<GLsizei>(n);
+    {
+        // RAII 配对挂载 per-instance 矩阵（loc6..9，divisor=1）。
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
+        } else {
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
+        }
+        glBindVertexArray(0);
+    }
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after DrawInstancedObject: " << draw_err;
+    }
+
+    glPopAttrib();
+}
+
 
 // ==================== DrawObject3DShadow ====================
 
@@ -650,6 +839,87 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
     }
     glBindVertexArray(0);
+}
+
+// ==================== DrawInstancedObjectShadow ====================
+
+void Object3DRenderer::DrawInstancedObjectShadow(const InstancedObjectCommand& cmd,
+                                                 MeshManager& mesh_mgr,
+                                                 TextureManager& texture_mgr,
+                                                 ShaderManager& shader_mgr,
+                                                 const float shadow_vp[16],
+                                                 const float depth_vp[16],
+                                                 unsigned int shadow_prog,
+                                                 unsigned int shadow_prog_cutout,
+                                                 InstanceBuffer& instance_model_buf) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawInstancedObjectShadow: mesh_id " << cmd.mesh_id
+                           << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectShadow: instances 不能为空";
+
+    // 双面（同 DrawObject3DShadow）：材质声明 double_sided 时关背面剔除，使薄片两面都投影。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        glEnable(GL_CULL_FACE);
+    }
+
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? shadow_prog_cutout : shadow_prog;
+    glUseProgram(sp);
+
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"),
+                    cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawInstancedObjectShadow: cutout 且 base_color_tex 非 0 但 mesh 无 kUV"
+                << "，无法采样 alpha（mesh_id=" << cmd.mesh_id << "）";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectShadow: base_color_tex 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+
+    // 摆放走 per-instance attribute，故只传光空间 VP（不含 model）。
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowViewProj"),
+                       1, GL_FALSE, shadow_vp);
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthViewProj"),
+                       1, GL_FALSE, depth_vp);
+
+    const size_t n = cmd.instances.size();
+    std::vector<float> xforms(n * 16);
+    for (size_t k = 0; k < n; ++k) {
+        float model[16];
+        const InstanceTransform& t = cmd.instances[k].transform;
+        BuildModelMatrix(t.center, t.up, t.front, t.scale, model);
+        for (int e = 0; e < 16; ++e) {
+            xforms[k * 16 + static_cast<size_t>(e)] = model[e];
+        }
+    }
+    instance_model_buf.Upload(xforms);
+
+    const GLsizei n_inst = static_cast<GLsizei>(n);
+    {
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
+        } else {
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
+        }
+        glBindVertexArray(0);
+    }
 }
 
 // ==================== UploadSunData ====================

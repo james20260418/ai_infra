@@ -199,6 +199,51 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# ============================================================================
+# Gold Image — 静态批量实例（DrawInstancedObject）渲染验证
+# 场景：地面 + 太阳 + 3 份 lace_skirt 实例（同 mesh = 一次 instanced draw）。
+# ============================================================================
+cc_binary(
+    name = "jpov_instanced_object_gold_generator",
+    srcs = [
+        "jpov_instanced_object_gold_generator.cc",
+        "jpov_instanced_object_gold_common.h",
+    ],
+    data = ["//tools/jpov/assets/models:clothing_data"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "jpov_instanced_object_gold_test",
+    srcs = [
+        "jpov_instanced_object_gold_test.cc",
+        "jpov_instanced_object_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/assets/models:clothing_data",
+        ":instanced_object_1280x720.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # 第三方 glTF/GLB 加载 smoke test（纯 CPU 解析，不渲染）
 cc_test(
     name = "jpov_scene_assets_load_test",

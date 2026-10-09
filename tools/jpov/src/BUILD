@@ -303,6 +303,7 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        ":instance_buffer",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",

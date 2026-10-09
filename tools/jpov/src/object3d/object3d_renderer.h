@@ -26,6 +26,7 @@
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
@@ -94,6 +95,95 @@ void main() {
     vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+    // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent 的 mesh 使用）。
+    //   输出与 kMeshVs3dPBR 逐字一致，但摆放矩阵走 **per-instance attribute（loc6..9，mat4）**
+    //   而非 uModel；裁剪走 uniform uViewProj = proj*view。每实例摆放由 host 用与
+    //   DrawObject3D **同一套** BuildModelMatrix(center/up/front/scale) 算出后上传
+    //   （见 DrawInstancedObject）——定位：静态模型的 instanced 批量。
+    static constexpr const char* kMeshVs3dPBRInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+// per-instance 摆放矩阵（loc6..9 拆 4 列，divisor=1；布局见 instance_buffer.h）。
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+out vec3 vWorldTangent;
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 world_pos = model * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    vWorldNormal = normalize(mat3(transpose(inverse(model))) * aNormal);
+    vTexCoord = vec2(0.0);
+    vWorldTangent = vec3(0.0);
+    gl_Position = uViewProj * world_pos;
+}
+)glsl";
+
+    // kMeshVs3dPBRFullInstanced: 实例版完整顶点着色器（含 UV + tangent）。
+    //   同 kMeshVs3dPBRInstanced，额外传 aTexCoord(loc2) / aTangent(loc5)。
+    static constexpr const char* kMeshVs3dPBRFullInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 5) in vec3 aTangent;
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+out vec3 vWorldTangent;
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 world_pos = model * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    mat3 nrm = mat3(transpose(inverse(model)));
+    vWorldNormal = normalize(nrm * aNormal);
+    vWorldTangent = normalize(nrm * aTangent);
+    vTexCoord = aTexCoord;
+    gl_Position = uViewProj * world_pos;
+}
+)glsl";
+
+    // kShadowVsInstanced: 实例版阴影 pass 顶点着色器。与 kShadowVs 同输出（vShadowDepth），
+    //   但摆放走 **per-instance attribute（loc6..9）**；uShadowViewProj = proj*view（光空间裁剪，
+    //   model 走 per-instance）、uShadowDepthViewProj = DepthProj*view（输出线性深度）。
+    //   cutout 变体（宏 JPOV_ALPHA_CUTOUT）额外比 kShadowVs 多声明/传递 vTexCoord。
+    static constexpr const char* kShadowVsInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uShadowViewProj;
+uniform mat4 uShadowDepthViewProj;
+out float vShadowDepth;
+#ifdef JPOV_ALPHA_CUTOUT
+layout(location = 2) in vec2 aTexCoord;
+out vec2 vTexCoord;
+#endif
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 wp = model * vec4(aPos, 1.0);
+    gl_Position = uShadowViewProj * wp;
+    vec4 dpos = uShadowDepthViewProj * wp;
+    vShadowDepth = dpos.z / dpos.w;
+#ifdef JPOV_ALPHA_CUTOUT
+    vTexCoord = aTexCoord;
+#endif
 }
 )glsl";
 
@@ -859,6 +949,31 @@ void main() {
                              unsigned int prog_full_cutout,
                              unsigned int tile_index_tex);
 
+    // ---- DrawInstancedObject ----
+    // 阴影/主 pass 之外的另一条静态路径：把一个 InstancedObjectCommand（同 mesh + N 份摆放）
+    // 用 **instanced draw** 一次画完。与 DrawObject3D 的材质/光照/tile/阴影 uniform 处理逐项对齐，
+    // 区别仅在：① 摆放走 per-instance attribute（instance_model_buf，loc6..9）而非 uModel；
+    //   ② VP 走 uniform uViewProj（= proj*view，不含 model）；③ glDraw*Instanced。
+    // 每实例摆放由本函数用与 DrawObject3D 同一套 BuildModelMatrix 算出后上传。
+    //
+    // 复用同一份 object3d FS（kMeshFs3dPBR）与 opaque/cutout 双变体：
+    //   any_tex 选 prog_full*，alpha_mode==kMask 选 prog_*cutout*，double_sided 关背面剔除。
+    //
+    // GL 状态前置要求同 DrawObject3D（3D FBO 已绑、depth/cull 已设、光照 uniform 已上传给本套 program）。
+    // 内部 glPushAttrib/glPopAttrib 恢复。
+    static void DrawInstancedObject(const InstancedObjectCommand& cmd,
+                                    const RenderCommandList& cmds,
+                                    MeshManager& mesh_mgr,
+                                    TextureManager& texture_mgr,
+                                    ShaderManager& shader_mgr,
+                                    const float view_proj[16],
+                                    unsigned int prog,
+                                    unsigned int prog_full,
+                                    unsigned int prog_cutout,
+                                    unsigned int prog_full_cutout,
+                                    unsigned int tile_index_tex,
+                                    InstanceBuffer& instance_model_buf);
+
     // ---- DrawObject3DShadow ----
     // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D
     // 从太阳正交光空间视角画进阴影纹理（只写相对主视锥中心的线性深度到颜色 .r，不光照）。
@@ -875,6 +990,21 @@ void main() {
                                    const float depth_vp[16],
                                    unsigned int shadow_prog,
                                    unsigned int shadow_prog_cutout);
+
+    // ---- DrawInstancedObjectShadow ----
+    // 实例版阴影：把一个 InstancedObjectCommand 从太阳正交光空间画进阴影纹理（只写线性深度）。
+    // 与 DrawObject3DShadow 同材质选择（kMask → cutout 变体 + 绑 baseColor、double_sided 关背面剔除），
+    // 区别仅在摆放走 per-instance attribute（instance_model_buf）+ glDraw*Instanced。
+    // shadow_vp: uShadowViewProj = proj*view；depth_vp: uShadowDepthViewProj = DepthProj*view。
+    static void DrawInstancedObjectShadow(const InstancedObjectCommand& cmd,
+                                          MeshManager& mesh_mgr,
+                                          TextureManager& texture_mgr,
+                                          ShaderManager& shader_mgr,
+                                          const float shadow_vp[16],
+                                          const float depth_vp[16],
+                                          unsigned int shadow_prog,
+                                          unsigned int shadow_prog_cutout,
+                                          InstanceBuffer& instance_model_buf);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。

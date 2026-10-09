@@ -1119,6 +1119,30 @@ unsigned int Renderer::DrawObject3DProgFullCutout() {
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
+// 静态批量实例 program（摆放走 per-instance attribute，见 kMeshVs3dPBR*Instanced）。
+unsigned int Renderer::DrawInstancedObjectProg() {
+    return shader_mgr_.GetOrCreate("draw_instanced_object_pbr",
+        {Object3DRenderer::kMeshVs3dPBRInstanced, Object3DRenderer::kMeshFs3dPBR});
+}
+
+unsigned int Renderer::DrawInstancedObjectProgFull() {
+    return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full",
+        {Object3DRenderer::kMeshVs3dPBRFullInstanced, Object3DRenderer::kMeshFs3dPBR});
+}
+
+// alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+unsigned int Renderer::DrawInstancedObjectProgCutout() {
+    return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_cutout",
+        {Object3DRenderer::kMeshVs3dPBRInstanced, Object3DRenderer::kMeshFs3dPBR,
+         {"JPOV_ALPHA_CUTOUT"}});
+}
+
+unsigned int Renderer::DrawInstancedObjectProgFullCutout() {
+    return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full_cutout",
+        {Object3DRenderer::kMeshVs3dPBRFullInstanced, Object3DRenderer::kMeshFs3dPBR,
+         {"JPOV_ALPHA_CUTOUT"}});
+}
+
 // 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
 unsigned int Renderer::SkinnedMeshProg() {
     return shader_mgr_.GetOrCreate("skinned_mesh",
@@ -1208,6 +1232,19 @@ unsigned int Renderer::ShadowProg() {
 unsigned int Renderer::ShadowProgCutout() {
     return shader_mgr_.GetOrCreate("shadow_cutout",
         {Object3DRenderer::kShadowVs, Object3DRenderer::kShadowFs,
+         {"JPOV_ALPHA_CUTOUT"}});
+}
+
+// 实例版阴影 program：kShadowVsInstanced + 复用 object3d 的 kShadowFs（深度专用）。
+unsigned int Renderer::InstancedShadowProg() {
+    return shader_mgr_.GetOrCreate("instanced_shadow",
+        {Object3DRenderer::kShadowVsInstanced, Object3DRenderer::kShadowFs});
+}
+
+// alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+unsigned int Renderer::InstancedShadowProgCutout() {
+    return shader_mgr_.GetOrCreate("instanced_shadow_cutout",
+        {Object3DRenderer::kShadowVsInstanced, Object3DRenderer::kShadowFs,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1456,12 +1493,18 @@ void Renderer::Render(const RenderCommandList& cmds,
         //   - 总是上传光源 uniform + uTileCulling 开关（uLights[]/uTotalLights）
         //   - 仅当 tile_culling=true 才做 CPU 端 tile 索引构建（写入 tile 纹理）；
         //     tile_culling=false 时跳过，shader 走全光源遍历（无分界线）。
-        if (!cmds.object_use_default_color && !cmds.object3d.empty()) {
+        if (!cmds.object_use_default_color &&
+            (!cmds.object3d.empty() || !cmds.instanced_object.empty())) {
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull());
             // cutout 变体 program 同源，也需光照 uniform。
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
+            // 实例 program 同源，也需光照 uniform。
+            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
+            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout());
             if (cmds.tile_culling) {
                 Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
                     &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,
@@ -1474,7 +1517,8 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 太阳平行光 + 级联阴影贴图 uniform（总是上传，无 sun 时置 uHasSun=0）。
         // 绑各级联 shadow 深度纹理到 PBR shader，供直射光的 PCF 阴影采样。
-        if (!cmds.object3d.empty() || !cmds.skinned_mesh.empty()) {
+        if (!cmds.object3d.empty() || !cmds.instanced_object.empty() ||
+            !cmds.skinned_mesh.empty()) {
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
@@ -1482,6 +1526,15 @@ void Renderer::Render(const RenderCommandList& cmds,
             // cutout 变体 program 同源，也需 sun/阴影 uniform。
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
+                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
+            // 实例 program 同源，也需 sun/阴影 uniform。
+            Object3DRenderer::UploadSunData(shader_mgr_,
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
+                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
+            Object3DRenderer::UploadSunData(shader_mgr_,
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // 蒙皮 program 也要 sun/ambient（若这批里带骨物体）—— 蒙皮走
@@ -1501,13 +1554,18 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 全局环境光 uniform（总是上传，未设置则用默认值）。
         // 环境光无方向、无影子，与 sun/点光源并列，照亮物体背阳面。
-        if (!cmds.object3d.empty()) {
+        if (!cmds.object3d.empty() || !cmds.instanced_object.empty()) {
             // 未显式配 ambient 时，用默认值（中性灰白 × 0.4，= 旧的硬编码 AMBIENT）。
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(), ambient);
+            // 实例 program 同源，也需 ambient uniform。
+            Object3DRenderer::UploadAmbient(shader_mgr_,
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(), ambient);
+            Object3DRenderer::UploadAmbient(shader_mgr_,
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(), ambient);
         }
         if (!cmds.skinned_mesh.empty()) {
             const AmbientLight ambient = eff_ambient.value_or(AmbientLight{});
@@ -1901,6 +1959,18 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     tile_index_tex_);
                 break;
             }
+            case DrawCommandType::kInstancedObject: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.instanced_object.size()));
+                const InstancedObjectCommand& io = cmds.instanced_object[idx];
+                // 摆放走 per-instance attribute，原 mvp_（= proj*view，不含 model）即 uViewProj。
+                Object3DRenderer::DrawInstancedObject(io, cmds,
+                    mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
+                    DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                    DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+                    tile_index_tex_, instance_model_buf_);
+                break;
+            }
             case DrawCommandType::kSkinnedMesh: {
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.skinned_mesh.size()));
@@ -1932,7 +2002,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
 // cross(fwd,up) 退化 —— 只补一个极小水平 epsilon 保持基连续，**不偏置光方向本身**
 //（偏置会让影子方向偏离真实光照方向，见函数内的详细说明）。
 void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun) {
-    if (cmds.object3d.empty()) return;
+    if (cmds.object3d.empty() && cmds.instanced_object.empty()) return;
 
     const int cascade_count = shadow_cfg_.cascade_count;
     CHECK_GT(cascade_count, 0);
@@ -2144,6 +2214,13 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog, shadow_prog_cutout);
+        }
+        // 静态实例同样从光空间画深度（instanced shadow program）。
+        for (const auto& io : cmds.instanced_object) {
+            Object3DRenderer::DrawInstancedObjectShadow(
+                io, mesh_mgr_, texture_mgr_, shader_mgr_,
+                shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
+                InstancedShadowProgCutout(), instance_model_buf_);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {
