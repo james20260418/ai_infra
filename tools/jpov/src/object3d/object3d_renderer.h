@@ -98,33 +98,57 @@ void main() {
 )glsl";
 
     // kShadowVs: 阴影 pass 专用 vertex shader。
-    //   输入: vec3 aPos(loc=0)。
+    //   输入: vec3 aPos(loc=0)；cutout 变体额外用 vec2 aTexCoord(loc=2) 传递 UV。
     //   uShadowMVP      = proj*view*model（光空间裁剪，用于 gl_Position 近远裁剪）
     //   uShadowDepthMVP = DepthProj*view*model。vShadowDepth 输出其 z 分量：
     //                     即"相对主视锥中心的原始线性深度"（DepthProj 保证 w=1，
     //                     经 .z 直接得线深，不经 near/far 归一化，depth 0 点在主视锥中心）。
+    //   ⚠️ cutout（alpha test）段由宏 JPOV_ALPHA_CUTOUT 编译：不透明 program 不含
+    //      UV 传递，与主 pass 的 opaque/cutout 双变体做法一致（见 kShadowFs）。
     static constexpr const char* kShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
 out float vShadowDepth;
+#ifdef JPOV_ALPHA_CUTOUT
+layout(location = 2) in vec2 aTexCoord;
+out vec2 vTexCoord;
+#endif
 void main() {
     vec4 clip = uShadowMVP * vec4(aPos, 1.0);
     gl_Position = clip;
     vec4 dpos = uShadowDepthMVP * vec4(aPos, 1.0);
     vShadowDepth = dpos.z / dpos.w;   // 线性深度（DepthProj 下 w=1）
+#ifdef JPOV_ALPHA_CUTOUT
+    vTexCoord = aTexCoord;
+#endif
 }
 )glsl";
 
     // kShadowFs: 阴影 pass fragment shader。把线性深度写入颜色通道 .r。
     // 用 RGBA32F 颜色纹理存深度（而非 GL 深度缓冲），避开 headless/软渲染下
     // depth 纹理采样精度/格式不一致的问题（见 renderer.cc EnsureShadowFBO）。
+    //   ⚠️ 与主 pass 同理分两个 program：不透明变体不含 discard（不降级 early-Z 深度快路径）；
+    //      cutout 变体（宏 JPOV_ALPHA_CUTOUT）按 baseColor 贴图 alpha 做 alpha test，
+    //      使镂空（alphaMode=MASK）物体投出镂空影子，而非实心轮廓。
     static constexpr const char* kShadowFs = R"glsl(
 #version 330 core
 in float vShadowDepth;
 out vec4 FragColor;
+#ifdef JPOV_ALPHA_CUTOUT
+in vec2 vTexCoord;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+uniform float uAlphaCutoff;
+#endif
 void main() {
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test：与主 pass 同判据（baseColor 贴图 alpha < 阈值 → discard）。
+    if (uHasBaseColorTex == 1 && texture(uBaseColorTex, vTexCoord).a < uAlphaCutoff) {
+        discard;
+    }
+#endif
     FragColor = vec4(vShadowDepth, 0.0, 0.0, 1.0);
 }
 )glsl";
@@ -814,12 +838,17 @@ void main() {
     // 从太阳正交光空间视角画进阴影纹理（只写相对主视锥中心的线性深度到颜色 .r，不光照）。
     // shadow_vp: uShadowMVP = proj*view*model（裁剪）；
     // depth_vp:  uShadowDepthMVP = DepthProj*view*model（输出线性深度）。
+    // 按材质选 program：alpha_mode==kMask 用 cutout 变体（含 discard）并绑 baseColor 贴图；
+    //   否则用不透明 program。double_sided 时关背面剔除（薄片资产两面都投影）。
+    // texture_mgr: cutout 变体采样 baseColor 贴图取 alpha 用。
     static void DrawObject3DShadow(const Object3DCommand& cmd,
                                    MeshManager& mesh_mgr,
+                                   TextureManager& texture_mgr,
                                    ShaderManager& shader_mgr,
                                    const float shadow_vp[16],
                                    const float depth_vp[16],
-                                   unsigned int shadow_prog);
+                                   unsigned int shadow_prog,
+                                   unsigned int shadow_prog_cutout);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。

@@ -255,6 +255,8 @@ private:
     unsigned int DrawObject3DProgCutout();
     unsigned int DrawObject3DProgFullCutout();
     unsigned int ShadowProg();
+    // alpha-test（cutout）阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int ShadowProgCutout();
     unsigned int TonemapProg();
     unsigned int PickProg();
     unsigned int BloomPrefilterProg();
@@ -267,6 +269,8 @@ private:
     unsigned int SkinnedMeshProgCutout();
     // 蒙皮阴影 program（kSkinnedShadowVs + SkeletonRenderer::kShadowFs，深度专用）。
     unsigned int SkinnedShadowProg();
+    // alpha-test（cutout）蒙皮阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int SkinnedShadowProgCutout();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
