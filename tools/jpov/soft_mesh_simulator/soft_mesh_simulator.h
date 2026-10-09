@@ -413,13 +413,15 @@ public:
     //   只作用于被选中的顶点（无选区时走全体版 ApplyTranslation/Rotation/Scaling）。
     //   旋转 / 缩放的枢轴由调用方给（clothing tool 用「选区顶点包围盒中心」）。
     //
-    // 与全体 Apply* 的关键差异：**不更新关联邻居表**（neighbors_ / nb_init_dist_）。
-    //   关联动力学（弹簧参考形状 pij(0) 与初始距离分母）只随**全体**操作更新；局部编辑属
-    //   「几何编辑」，若想据此仿真，调用方应**重建仿真器**（重算关联距离 d）——见 clothing
-    //   README 的「用户须知」。这是刻意的简化（Danis：会十分复杂），局部编辑不参与关联动力学。
+    // 与全体 Apply* 的关键差异：**不更新关联邻居表**（neighbors_ / nb_init_dist_），
+    //   也**不改绑定姿态**（力学参照 reference_positions_）。关联动力学（弹簧参考形状 pij(0)
+    //   与初始距离分母）只随**全体**操作更新；局部编辑属「几何编辑」，**不计入**力学参照。
+    //   这是刻意的简化（Danis：会十分复杂）。
     //
-    // 语义：位置与绑定姿态**同步变换**（否则弹簧会把被选顶点拽回旧形状）；旋转时速度同步
-    //   旋转，平移 / 缩放不动速度。变换后立即 ExtractMesh（法线 / 切线由显示层重算）。
+    // 语义：**只改当前位置**（sim_positions_）——旋转时速度同步旋转，平移 / 缩放不动速度；
+    //   变换后立即 ExtractMesh（法线 / 切线由显示层重算）。
+    //   ⚠️ **不改绑定姿态**：力学参照始终 = 原始 mesh + 全体 scale/rotation（见
+    //   reference_positions()），故部分变换不会被弹簧当作新的静止形状。
     // Pre-condition（不满足即 LOG(FATAL)）：已 Init；每个 index < original_point_count()；
     //   数值参数有限（factor > 0）。
     void ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indices,
@@ -439,6 +441,16 @@ public:
 
     // 当前取景包围盒（纯查询）。
     SimBounds Bounds() const;
+
+    // 力学参照位置（“绑定姿态参照”）——仿真力的公式里的 pij(0) / |pij(0)| 用它（见 DESIGN §2）。
+    //   = **原始 mesh**（Init 输入，含长边虚拟点 / 桥接连通点）经**全体**即时操作
+    //   （ApplyTranslation / ApplyRotation / ApplyScaling）变换后的位置；**不含**部分顶点变换
+    //   （ApplyPartial*）与仿真形变。索引 0..original_point_count()-1 = 原始顶点，其后为虚拟点。
+    //   注意：全体平移也会写进本数组，但力公式用相对 offset（pij(0) = 两者之差）⇒ 平移无影响。
+    // 供查看器可视化「力学参照网格」（clothing tool 的蓝色调试点）用。
+    const std::vector<geom::Vec3<float>>& reference_positions() const {
+        return bind_positions_;
+    }
 
     // 回到**启动几何**（Init 时的网格，含长边虚拟点 / 连通性桥接点）并清零时间 / 步数 / 速度。
     // ⭐ 也会把**物理绑定姿态**（bind_positions_ / nb_init_dist_）一并复位回启动几何——

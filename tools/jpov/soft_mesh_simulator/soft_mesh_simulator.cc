@@ -892,9 +892,8 @@ void Simulator::ApplyPartialTranslation(const std::vector<uint32_t>& vertex_indi
             << "ApplyPartialTranslation: 仅接受原始顶点 index，got " << idx
             << "（original_point_count()=" << vertex_count_ << "）";
         sim_positions_[idx] = sim_positions_[idx] + delta;
-        bind_positions_[idx] = bind_positions_[idx] + delta;
     }
-    // 速度不参与平移；关联邻居表**不**更新（见 .h 说明）。
+    // 速度不参与平移；绑定姿态（力学参照）/ 关联邻居表**均不**更新（见 .h 说明）。
     ExtractMesh();
 }
 
@@ -918,9 +917,8 @@ void Simulator::ApplyPartialRotation(const std::vector<uint32_t>& vertex_indices
         sim_positions_[idx] = rotate(sim_positions_[idx]);
         // 速度参与旋转（旋转 ⇒ 角速度），与全体 ApplyRotation 一致。
         sim_velocities_[idx] = geom::RotateVector(q, sim_velocities_[idx]);
-        bind_positions_[idx] = rotate(bind_positions_[idx]);
     }
-    // 关联邻居表**不**更新（见 .h 说明）。
+    // 绑定姿态（力学参照）/ 关联邻居表**均不**更新（见 .h 说明）。
     ExtractMesh();
 }
 
@@ -939,9 +937,8 @@ void Simulator::ApplyPartialScaling(const std::vector<uint32_t>& vertex_indices,
             << "ApplyPartialScaling: 仅接受原始顶点 index，got " << idx
             << "（original_point_count()=" << vertex_count_ << "）";
         sim_positions_[idx] = scale(sim_positions_[idx]);
-        bind_positions_[idx] = scale(bind_positions_[idx]);
     }
-    // 速度不参与缩放；关联邻居表 / nb_init_dist_ **不**更新（见 .h 说明）。
+    // 速度不参与缩放；绑定姿态（力学参照）/ 关联邻居表 / nb_init_dist_ **均不**更新（见 .h）。
     ExtractMesh();
 }
 

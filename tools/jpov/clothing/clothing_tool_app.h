@@ -54,10 +54,12 @@
 //          覆盖的 texel，无选区 → 整图（见 base_color_alpha.h）。「重置衣服」会一并重置该贴图
 //          （后端把 mesh reset 与 material reset 分开：ResetClothMesh / ResetClothMaterial）。
 //       ② 左侧平移/旋转/缩放：画笔有选区时**只作用于被选中的顶点**，旋转/缩放枢轴 = 选区顶点
-//          包围盒中心；无选区时作用于全体（原行为）。选区变换属「几何编辑」，**不更新仿真器
-//          关联邻居表**（关联动力学只随全体 scale/rotation 更新）；若要据此仿真，需**重建**
-//          （重算关联距离 d）——见 README「用户须知」。底层 = soft_mesh_simulator 新增
+//          包围盒中心；无选区时作用于全体（原行为）。选区变换属「几何编辑」——**只改当前位置**，
+//          **不改力学参照**也**不**更新关联邻居表；力的参照 = **原始 mesh + 全体 scale/rotation**
+//          （不含选区变换 / 仿真形变），见 README「用户须知」。底层 = soft_mesh_simulator 新增
 //          ApplyPartial{Translation,Rotation,Scaling}。
+//       ③ 仿真面板新增「显示力学参照网格」勾选：把参照网格（reference_positions()）的原始顶点
+//          用**蓝色 2D 像素**画出（参照响应全体旋转/缩放；平移时参照包围盒中心对齐实际 cloth）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -269,6 +271,11 @@ public:
     float body_buffer_ui_ = Simulator::kDefaultBodyBuffer;
     // 人体排斥的切向速度保留系数（0~1；默认 1.0 = 全保留）。Danis 2026-10-02。
     float body_parallel_damping_ui_ = Simulator::kDefaultBodyParallelDamping;
+    // 「显示力学参照网格」开关（右上面板）：开启后把每个仿真器的**力学参照**
+    // （绑定姿态 reference_positions()，= 原始 mesh + 全体 scale/rotation）的原始顶点用**蓝色
+    // 2D 像素**画出来，用于核对「力参照的网格」（Danis 2026-10-09）。显示位置把参照整体平移，
+    // 使其包围盒中心对齐**实际 cloth 几何**的包围盒中心（平移不参与参照）。
+    bool show_ref_mesh_ = false;
 
     // F 的指数映射：t(0..1) ↔ F(N)。
     static float ForceTToNewton(float t) {
@@ -568,6 +575,9 @@ public:
             }
         }
 
+        // 力学参照网格（蓝色 2D 像素；右上面板开关）。画在面板之下。
+        DrawReferenceMesh(winfo, cmds);
+
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
             DrawPanels(input, winfo, cmds);
@@ -845,8 +855,9 @@ private:
     // 语义（Danis 2026-10-09）：3D 画笔存在选区时，左侧变换只作用于被选中顶点；
     //   旋转 / 缩放的枢轴 = **选区顶点包围盒中心**。各 primitive 各自施于其选中的原始顶点
     //   index（选区本就按 primitive 分组）。空选区的 primitive 是 no-op。
-    // 注意：这些是「几何编辑」——仿真器的关联邻居表**不**更新（父类 ApplyPartial* 的语义，
-    //   见 soft_mesh_simulator.h / README 用户须知）；若要据此仿真，需重建（重算关联距离 d）。
+    // 注意：这些是「几何编辑」——**只改当前位置**，既**不**改力学参照（绑定姿态）也**不**更新
+    //   关联邻居表（父类 ApplyPartial* 的语义）。力始终参照「**原始 mesh + 全体 scale/rotation**」
+    //   （= reference_positions()，可用右上面板「显示力学参照网格」查看），不含选区变换。
 
     // 选区顶点包围盒中心（世界坐标，取当前几何）；无选区返回原点。
     jpov::Vec3f SelectedVertsBoundsCenter() const {
@@ -880,53 +891,31 @@ private:
                            (lo.z() + hi.z()) * 0.5f);
     }
 
-    // 选区顶点平移（各 primitive 各自动作；并同步「重建用启动几何」）。
+    // 选区顶点平移（各 primitive 各自动作）。
     void ApplyPartialTranslationToSelection(const jpov::Vec3f& delta) {
         const size_t prims = std::min(sims_.size(), brush_.primitive_count());
         for (size_t i = 0; i < prims; ++i) {
             sims_[i].ApplyPartialTranslation(brush_.selected(i), delta);
         }
-        SyncSelectionToStartupMesh();
     }
 
-    // 选区顶点旋转（绕 pivot；位置与速度一起转；并同步「重建用启动几何」）。
+    // 选区顶点旋转（绕 pivot；位置与速度一起转）。
     void ApplyPartialRotationToSelection(Axis axis, float degrees,
                                          const jpov::Vec3f& pivot) {
         const size_t prims = std::min(sims_.size(), brush_.primitive_count());
         for (size_t i = 0; i < prims; ++i) {
             sims_[i].ApplyPartialRotation(brush_.selected(i), axis, degrees, pivot);
         }
-        SyncSelectionToStartupMesh();
     }
 
-    // 选区顶点缩放（以 pivot 为中心；速度不参与；并同步「重建用启动几何」）。
+    // 选区顶点缩放（以 pivot 为中心；速度不参与）。
     void ApplyPartialScalingToSelection(float factor, const jpov::Vec3f& pivot) {
         const size_t prims = std::min(sims_.size(), brush_.primitive_count());
         for (size_t i = 0; i < prims; ++i) {
             sims_[i].ApplyPartialScaling(brush_.selected(i), factor, pivot);
         }
-        SyncSelectionToStartupMesh();
     }
 
-    // 选区变换后：把仿真器已变换的选中顶点位置同步回**重建用启动几何**
-    // （sim_startup_mesh_）。这样「重建仿真（重算关联距离 d）」会保留选区变换，使编辑后
-    // 能继续仿真；反之若不重建，仿真的关联邻居表仍是旧的（选区变换不计入关联动力学，
-    // 见 README 用户须知）。⚠️ 「重置衣服」仍回到**启动**几何（sim.Reset 用其内部快照）。
-    void SyncSelectionToStartupMesh() {
-        const size_t prims = std::min(sims_.size(), brush_.primitive_count());
-        for (size_t i = 0; i < prims; ++i) {
-            if (i >= sim_startup_mesh_.size()) {
-                continue;
-            }
-            const std::vector<jpov::Vec3f>& cur = sims_[i].mesh().positions;
-            std::vector<jpov::Vec3f>& rest = sim_startup_mesh_[i].positions;
-            for (uint32_t idx : brush_.selected(i)) {
-                if (idx < cur.size() && idx < rest.size()) {
-                    rest[idx] = cur[idx];
-                }
-            }
-        }
-    }
 
     // 「重置衣服」：所有仿真器 Reset（回**启动时**的绑定姿态），停仿真回到可重调状态。
     // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
@@ -942,6 +931,90 @@ private:
         sim_running_ = false;   // 停机，回到可重调状态
         SyncSimsToCloth();
         LOG(INFO) << "重置衣服：仿真器已回启动姿态（缩放归 1、仿真暂停）";
+    }
+
+    // ==================== 力学参照网格（蓝色 2D 像素可视化）====================
+    //
+    // 用于核对「力参照的网格」（Danis 2026-10-09）：仿真力的参照是「原始 mesh + 全体
+    // scale/rotation」（= 各仿真器 reference_positions()，见 soft_mesh_simulator.h），**不含**
+    // 选区变换与仿真形变。本方法把该参照的原始顶点（前 original_point_count() 个）投到屏幕，
+    // 用 2px 蓝色方块标记。
+    // 显示位置：把参照整体平移 offset = 实际 cloth 包围盒中心 − 参照包围盒中心
+    //（平移不参与参照；这样参照总与 cloth 居中对齐）。
+    // 仅当 show_ref_mesh_ 开（右上面板勾选）时绘制。
+    void DrawReferenceMesh(const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) {
+        if (!show_ref_mesh_ || sims_.empty()) {
+            return;
+        }
+        auto grow = [](jpov::Vec3f* lo, jpov::Vec3f* hi, bool* any, const jpov::Vec3f& p) {
+            if (!*any) {
+                *lo = p;
+                *hi = p;
+                *any = true;
+            } else {
+                *lo = jpov::Vec3f(std::min(lo->x(), p.x()), std::min(lo->y(), p.y()),
+                                  std::min(lo->z(), p.z()));
+                *hi = jpov::Vec3f(std::max(hi->x(), p.x()), std::max(hi->y(), p.y()),
+                                  std::max(hi->z(), p.z()));
+            }
+        };
+
+        // 参照包围盒（各 primitive 的原始顶点）。
+        jpov::Vec3f ref_lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f ref_hi(0.0f, 0.0f, 0.0f);
+        bool any_ref = false;
+        for (const Simulator& s : sims_) {
+            const std::vector<jpov::Vec3f>& rp = s.reference_positions();
+            const size_t n = std::min(s.original_point_count(), rp.size());
+            for (size_t j = 0; j < n; ++j) {
+                grow(&ref_lo, &ref_hi, &any_ref, rp[j]);
+            }
+        }
+        // 实际 cloth 包围盒（当前几何）。
+        jpov::Vec3f cur_lo(0.0f, 0.0f, 0.0f);
+        jpov::Vec3f cur_hi(0.0f, 0.0f, 0.0f);
+        bool any_cur = false;
+        for (const jpov::GltfSaveMesh& m : cloth_current_) {
+            for (const jpov::Vec3f& p : m.mesh.positions) {
+                grow(&cur_lo, &cur_hi, &any_cur, p);
+            }
+        }
+        if (!any_ref || !any_cur) {
+            return;
+        }
+        const jpov::Vec3f ref_c((ref_lo.x() + ref_hi.x()) * 0.5f,
+                                (ref_lo.y() + ref_hi.y()) * 0.5f,
+                                (ref_lo.z() + ref_hi.z()) * 0.5f);
+        const jpov::Vec3f cur_c((cur_lo.x() + cur_hi.x()) * 0.5f,
+                                (cur_lo.y() + cur_hi.y()) * 0.5f,
+                                (cur_lo.z() + cur_hi.z()) * 0.5f);
+        const jpov::Vec3f offset(cur_c.x() - ref_c.x(), cur_c.y() - ref_c.y(),
+                                 cur_c.z() - ref_c.z());
+
+        // 相机基（与渲染相机 / 画笔一致）。
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg, winfo.width,
+                            winfo.height);
+        const jpov::Color kRefBlue{0.20f, 0.55f, 1.0f, 1.0f};
+        const float kMarkSize = 2.0f;
+        for (const Simulator& s : sims_) {
+            const std::vector<jpov::Vec3f>& rp = s.reference_positions();
+            const size_t n = std::min(s.original_point_count(), rp.size());
+            for (size_t j = 0; j < n; ++j) {
+                float px = 0.0f;
+                float py = 0.0f;
+                const jpov::Vec3f p(rp[j].x() + offset.x(), rp[j].y() + offset.y(),
+                                    rp[j].z() + offset.z());
+                if (!ProjectToScreen(basis, p, &px, &py, nullptr)) {
+                    continue;
+                }
+                cmds->DrawRect(
+                    /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                    /*size*/ {kMarkSize, kMarkSize}, kRefBlue);
+            }
+        }
     }
 
     // ==================== 面板（绘制 / UI）====================

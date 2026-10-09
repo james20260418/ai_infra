@@ -455,6 +455,29 @@ TEST(SoftMeshSimulatorTest, PartialTransformEmptySelectionIsNoOp) {
     }
 }
 
+// 部分顶点变换**不**改变力学参照（绑定姿态）——参照只随**全体** scale/rotation 更新。
+//   这是 Danis 2026-10-09 的设计：力参照 = 原始 mesh + 全体 scale/rotation，不含部分变换。
+TEST(SoftMeshSimulatorTest, PartialTransformDoesNotChangeReference) {
+    Simulator sim;
+    sim.Init(MakeAsymmetricMesh());
+    const std::vector<geom::Vec3<float>> ref0 = sim.reference_positions();
+
+    sim.ApplyPartialTranslation({0}, geom::Vec3<float>(5.0f, 5.0f, 5.0f));
+    sim.ApplyPartialRotation({0, 1}, Axis::kY, 45.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    sim.ApplyPartialScaling({2}, 2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+
+    ASSERT_EQ(sim.reference_positions().size(), ref0.size());
+    for (size_t i = 0; i < ref0.size(); ++i) {
+        EXPECT_LT((sim.reference_positions()[i] - ref0[i]).Norm(), 1e-6f)
+            << "力学参照不该被部分变换改变 (点 " << i << ")";
+    }
+
+    // 对照：**全体**缩放确实会改变参照（证明上面的断言不是恒真）。
+    sim.ApplyScaling(2.0f, geom::Vec3<float>(0.0f, 0.0f, 0.0f));
+    EXPECT_GT((sim.reference_positions()[0] - ref0[0]).Norm(), 1e-3f)
+        << "全体缩放应改变参照";
+}
+
 // 未 Init 过就 Reset：幂等 no-op（查看器可无脑调用）。
 TEST(SoftMeshSimulatorTest, ResetBeforeInitIsNoOp) {
     Simulator sim;

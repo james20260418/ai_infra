@@ -60,6 +60,7 @@ struct CliOptions {
     bool  hole_fill = false;      // --hole_fill：headless 出图前跑一次补洞（脚本化验证）
     float hole_perimeter = 0.2f;  // --hole_perimeter 只补周长 ≤ 该值（米）的洞；0 = 不限制
     bool  alpha_normalize = false;  // --alpha_normalize：headless 出图前跑一次 base color alpha 归一
+    bool  show_ref_mesh = false;    // --show_ref_mesh：headless 出图前开启「显示力学参照网格」
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -220,6 +221,8 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.auto_skin = true;
         } else if (arg == "--alpha_normalize") {
             opt.alpha_normalize = true;
+        } else if (arg == "--show_ref_mesh") {
+            opt.show_ref_mesh = true;
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -375,6 +378,8 @@ int main(int argc, char** argv) {
     app.SetHoleFillParams(opt.hole_perimeter, /*refine=*/true, /*fair=*/true);
     app.weld_relative_ui_ = opt.weld_relative;
     app.weld_ratio_ = opt.weld_ratio;
+    // 力学参照网格显示（headless；交互窗口由右上面板勾选驱动）。
+    app.show_ref_mesh_ = opt.show_ref_mesh;
 
     // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
     app.motion_test_enabled_ = opt.motion_enable;

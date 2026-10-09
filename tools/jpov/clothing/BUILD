@@ -24,7 +24,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-09（本 PR）：**base color alpha 归一 + 选区变换**——
 #     ① 蒙皮面板「base color alpha 归一」按钮（base_color_alpha.h）；
 #     ② 左侧平移/旋转/缩放：画笔有选区时只作用于选中顶点（枢轴 = 选区顶点包围盒中心）；
-#        底层 = soft_mesh_simulator 新增 ApplyPartial{Translation,Rotation,Scaling}。
+#        底层 = soft_mesh_simulator 新增 ApplyPartial{Translation,Rotation,Scaling}；
+#        力学参照 = 原始 mesh + 全体 scale/rotation（不含选区变换）。
+#     ③ 仿真面板「显示力学参照网格」勾选：参照网格原始顶点用蓝色 2D 像素画出。
 #     仍不做：穿衣对齐 / 自动贴合。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）

@@ -406,14 +406,14 @@
     // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
     // 这样窗口 resize 时右上角面板始终贴住右上角。
     //
-    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
-    //     + buffer(1) + 切向保留系数(1) + 按钮行(1) + 状态行(2) = 12。
+    // 行：标题(1) + 关联距离(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
+    //     + buffer(1) + 切向保留系数(1) + 显示力学参照网格(1) + 按钮行(1) + 状态行(2) = 14。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
         const float panel_w  = 0.30f * win_w;
         const float panel_x  = win_w - panel_w - kPanelMargin;  // 贴右边缘
         const float panel_y  = kPanelMargin;
-        constexpr int kRows = 13;
+        constexpr int kRows = 14;
         PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
         const float left = frame.left;
         const float row_w = frame.row_w;
@@ -482,6 +482,12 @@
                         Simulator::kMinBodyParallelDamping,
                         Simulator::kMaxBodyParallelDamping,
                         /*decimal_places*/ 2);
+        row_y += step_y;
+
+        // ---- 力学参照网格：开启后用蓝色 2D 像素画出「力参照的网格」
+        //      （= 原始 mesh + 全体 scale/rotation；不含选区变换 / 仿真形变，见 README）。----
+        ui_.Checkbox("显示力学参照网格", &show_ref_mesh_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         row_y += step_y;
 
         // ---- 按钮行：[暂停/继续] [重置衣服] ----
