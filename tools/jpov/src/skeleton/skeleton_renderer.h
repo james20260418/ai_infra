@@ -45,11 +45,26 @@ public:
     // kShadowFs: 蒙皮阴影 pass 的 fragment shader。把蒙皮 VS 输出的线性深度写入颜色 .r。
     // 用 RGBA32F 颜色纹理存深度（而非 GL 深度缓冲），避开 headless/软渲染下
     // depth 纹理采样精度/格式不一致的问题（见 renderer.cc EnsureShadowFBO）。
+    //   ⚠️ 与主 pass 同理分两个 program：不透明变体不含 discard（不降级 early-Z）；
+    //      cutout 变体（宏 JPOV_ALPHA_CUTOUT）按 baseColor 贴图 alpha 做 alpha test，
+    //      使镂空（alphaMode=MASK）蒙皮资产（如蕾丝裙）投出镂空影子。
     static constexpr const char* kShadowFs = R"glsl(
 #version 330 core
 in float vShadowDepth;
 out vec4 FragColor;
+#ifdef JPOV_ALPHA_CUTOUT
+in vec2 vTexCoord;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+uniform float uAlphaCutoff;
+#endif
 void main() {
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test：与蒙皮主 pass 同判据（baseColor 贴图 alpha < 阈值 → discard）。
+    if (uHasBaseColorTex == 1 && texture(uBaseColorTex, vTexCoord).a < uAlphaCutoff) {
+        discard;
+    }
+#endif
     FragColor = vec4(vShadowDepth, 0.0, 0.0, 1.0);
 }
 )glsl";
@@ -533,15 +548,20 @@ void main() {
     // 线性深度到颜色 .r，不光照）。蒙皮在 mesh 局部空间做，再乘光空间 VP*model。
     // shadow_vp:  uShadowMVP = proj*view*model（裁剪）；
     // depth_vp:   uShadowDepthMVP = DepthProj*view*model（输出线性深度）。
+    // 按材质选 program：alpha_mode==kMask 用 cutout 变体（含 discard）并绑 baseColor 贴图；
+    //   否则用不透明 program。double_sided 时关背面剔除（薄片资产两面都投影）。
+    // texture_mgr: cutout 变体采样 baseColor 贴图取 alpha 用。
     static void DrawSkinnedMeshShadow(
         const SkinnedMeshCommand& cmd,
         MeshManager& mesh_mgr,
+        TextureManager& texture_mgr,
         ShaderManager& shader_mgr,
         const SkeletonManager::GpuHandles& gh,
         int pose_count,
         const float shadow_vp[16],
         const float depth_vp[16],
         unsigned int shadow_prog,
+        unsigned int shadow_prog_cutout,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_buf,
         InstanceBuffer& instance_thickness_buf,

@@ -454,7 +454,7 @@ void main() {
 // 阴影 pass 专用：在网格局部空间蒙皮(同 kSkinnedVs)后, 用光空间 VP 裁剪 + 输出线性深度
 // （与 object3d 的 kShadowVs 语义一致：uShadowViewProj=光VP 用于 gl_Position 近远裁剪；
 //   uShadowDepthViewProj=DepthVP 输出的 vShadowDepth 为相对主视锥中心的线性深度, w=1）。
-// 输入/输出与 kShadowVs 完全对齐（vShadowDepth），故 FS 复用 kShadowFs。
+// 输入/输出与 kShadowVs 完全对齐（vShadowDepth；cutout 变体额外有 vTexCoord），故 FS 复用 kShadowFs。
 //
 // 与主 pass 同构：摆放矩阵走 per-instance attribute（loc6..9），光空间 VP 走 uniform。
 // host 侧 uViewProj ← uShadowViewProj。
@@ -500,6 +500,10 @@ uniform int uPartialEnabled;
 uniform sampler2D uPartialBind;
 uniform sampler2D uPartialChannel;
 out float vShadowDepth;
+#ifdef JPOV_ALPHA_CUTOUT
+// cutout 变体：把 UV 传出供 kShadowFs 采样 baseColor 的 alpha（不透明变体不输出）。
+out vec2 vTexCoord;
+#endif
 
 // 同主 pass：关节 index 越界防护（详见主 pass 里的 JointInRange 注释）。
 bool JointInRange(int joint) {
@@ -714,6 +718,9 @@ void main() {
     gl_Position = uShadowViewProj * wp;
     vec4 dpos = uShadowDepthViewProj * wp;
     vShadowDepth = dpos.z / dpos.w;
+#ifdef JPOV_ALPHA_CUTOUT
+    vTexCoord = aTexCoord;
+#endif
 }
 )glsl";
 
