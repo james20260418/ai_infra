@@ -43,6 +43,11 @@
 //   - 2026-10-09：**补洞（推进法）面板**——底部中间新增「执行补洞」按钮 + 细分/平滑
 //       勾选 + 「最大洞周长 (m)」滑条（+ CLI `--hole_fill`/`--hole_perimeter`）。补洞在**建仿真器
 //       （关联邻居表）之前**跑（"关联前先补洞"），把网格破洞/裂缝补上（见 mesh_hole_fill.h）。
+//   - 2026-10-09（本 PR）：**3D 画笔（选区）+ 中键纵向 pan**——顶部中间「3D 画笔」面板
+//       （激活/结束按钮 + 「画笔半径 (px)」滑条 5~200，默认 100）。画笔**激活态**下才有「选区」
+//       概念：鼠标周围画淡黄半透明圆表示尺寸，左键非 UI 区涂抹把靠近鼠标射线的衣服顶点选入
+//       选区（淡黄 2px 方块标记）；ESC / 再点按钮结束并清空选区（见 brush_tool.h /
+//       camera_projection.h）。中键纵向 drag pan 相机注视点（半屏 = 1m，见 VerticalPanDeltaY）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -73,7 +78,10 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/assets/models/models_path.h"
+#include "tools/jpov/clothing/brush_tool.h"
+#include "tools/jpov/clothing/camera_projection.h"
 #include "tools/jpov/clothing/clothing_axis_input.h"
+#include "tools/jpov/clothing/clothing_tool_config.h"
 #include "tools/jpov/clothing/clothing_init.h"
 #include "tools/jpov/clothing/clothing_save.h"
 #include "tools/jpov/clothing/clothing_transform.h"
@@ -97,92 +105,11 @@ using jpov_viewer::ApplyInput;
 using jpov_viewer::DefaultView;
 using jpov_viewer::GroundMaterial;
 using jpov_viewer::MakeGroundQuad;
+using jpov_viewer::VerticalPanDeltaY;
 using jpov_viewer::ViewConfig;
 // 软体仿真器（纯 CPU / GL-free，独立包）。
 using soft_mesh_simulator::Axis;
 using soft_mesh_simulator::Simulator;
-
-// 默认窗口尺寸（= headless 出图尺寸）。⚠️ 这只是**初始**尺寸；运行时窗口可 resize，
-// 实际每帧尺寸以 winfo.width/height 为准（见文件头坐标空间说明）。**不要**拿它当
-// 面板布局的依据（那是"窗口尺寸/分辨率" = winfo 的职责）。
-inline constexpr int kDefaultWindowWidth  = 1280;
-inline constexpr int kDefaultWindowHeight = 720;
-
-// 交互帧率（查看器刷新率，Hz）。仿真步长固定为 Simulator::kDefaultDt（1/60 s）。
-inline constexpr float kViewerFps = 60.0f;
-
-// UI 文本默认字体 = CJK（面板标签显中文）。
-inline constexpr const char* kViewerFontAlias = jpov::kFontBuiltinCJK;
-
-// 未显式指定 --body_reference_path 时的演示用人体 reference。
-// 项目内自带的 Mixamo 男性人体资产（rest/T-pose），便于快速跑通。
-inline constexpr const char* kDefaultBodyReferencePath = jpov::kDefaultCharacterGlb;
-
-// 数值输入框文本容量（含终止符）。填值格式如 "-0.35" / "45"，64 字节足够。
-inline constexpr size_t kAxisInputCapacity = 64;
-
-// 步长 / 系数的初始默认值（Danis 2026-09-30 指定）：平移步长 0.1 米、旋转步长 45 度；
-// 缩放系数区间是 [1.0, 2.0]，取 1.1 作为既能变大又能变小的中性默认。
-inline constexpr float kDefaultTransStep = 0.1f;
-inline constexpr float kDefaultRotStep = 45.0f;
-inline constexpr float kDefaultScaleStep = 1.1f;
-
-// 默认全局速度上限（m/s）。低质量数值失稳的兑底（Danis 2026-10-01：把 M 调小后布料被
-// 甩飞、拉成“淌”状长条）。0 = 不限；实测 25 m/s 能在保留正常下落（~8 m/s）的同时挡住失稳。
-inline constexpr float kDefaultMaxSpeed = 25.0f;
-
-// ── 软布自动蒙皮（weight transfer + 种子生长）参数 ──
-// 种子半径 seed_eps（mm）：衣物顶点到身体最近距离 <= 该值即视为「贴身」→ 生长锚点（种子），
-// 其权重冻结为直接投影权重；> 该值 → 非种子，由生长从种子扩散补出。默认 10mm（1cm，照顾
-// 不那么贴身的衣物）。面板输入框可调。
-inline constexpr float kSkinSeedEpsMm = 10.0f;
-// 每顶点最大影响骨数（与 MeshData 的 4 组 joint/weight 对齐）。
-inline constexpr int kSkinMaxInfluences = 4;
-// 生长迭代上限（内部弱收敛会提前停）；0 = 不生长（只保留逐顶点直接投影权重）。
-inline constexpr int kSkinGrowthPasses = 300;
-// 「焊接容差」面板默认值（mm）：与 weight_transfer.h 的默认焊接阈值单一来源（ = 5mm）。
-// 位置相距 <= 该值的顶点视为「同一缝合点」（导出器在 UV/材质缝合处拆开的重复顶点），
-// 在权重图上焊接成组后再生长/平滑，消除接缝开裂。0 = 关闭焊接。
-inline constexpr float kSkinWeldToleranceMm = kWeldToleranceM * 1000.0f;
-// 「相对局部边长焊接」面板默认比例（× 局部边长）：与 weight_transfer.h 单一来源。
-// 与「绝对距离」并列的另一种焊接判据：与模型缩放 / 局部密度无关，拉伸后无需调参。
-inline constexpr float kSkinWeldRatio = kDefaultLocalEdgeWeldRatio;
-
-// ── 随机摆动测试（2026-10-07 Danis）：主轴相位 / 速度 / 幅度的默认与烘焙布局 ──
-//
-// 骨架注册表已加 ReleaseSkeleton（槽位复用，本 PR）⇒ 面板「随机种子」变更时可按新种子
-// **重烘焙**并替换骨架（见 RebakeMotionPoses）。幅度仍是烘焙维度（19 档一次烘完，
-// 切幅度无需重烘），按 kMotionAmplitudeStepDeg 量化。
-// pose 下标布局：level * kMotionPhasesPerCycle + 相位序号。
-
-// 一个主轴周期内均匀烘焙的相位帧数（足够采样 3 倍频正弦；运行时相邻两帧插值）。
-inline constexpr int kMotionPhasesPerCycle = 60;
-// 幅度档位步长（度）与上限（度）→ 档位数 = 上限/步长 + 1（0,5,…,90 共 19 档）。
-inline constexpr float kMotionAmplitudeStepDeg = 5.0f;
-inline constexpr float kMotionAmplitudeMaxDeg = 90.0f;
-inline constexpr int kMotionAmplitudeLevels =
-    static_cast<int>(kMotionAmplitudeMaxDeg / kMotionAmplitudeStepDeg) + 1;
-// 默认随机种子（0~65535；面板输入框可改，改后按新种子重烘焙姿态集）。
-inline constexpr int kDefaultMotionSeed = 0;
-// 种子上界（含）：面板输入 clamp 到 [0, kMotionSeedMax]。
-inline constexpr int kMotionSeedMax = 65535;
-// 默认关节幅度（度，取 5 的倍数以对齐档位）。
-inline constexpr float kDefaultMotionAmplitudeDeg = 30.0f;
-// 播放推进速度（Hz = 每秒推进的主轴周期数）。固定值 —— 快慢不影响判断蒙皮效果，故不做滑条。
-inline constexpr float kMotionPlaySpeedHz = 0.5f;
-
-// 一个数值输入框的跨帧状态：文本缓冲 + 上一帧聚焦态。
-// 聚焦态用于检测"回车 / 焦点丧失"这一提交边界（InputText 返回的是"帧末是否聚焦"）。
-struct NumberField {
-    char text[kAxisInputCapacity];
-    bool focused_prev = false;
-
-    NumberField() { text[0] = '\0'; }
-    // 从初始数值构造：文本用 "%g" 规范化，保证与默认常量（如 kDefaultRotStep）**单一来源**。
-    explicit NumberField(float init) {
-        snprintf(text, kAxisInputCapacity, "%g", static_cast<double>(init));
-    }
-};
 
 // 穿衣工具渲染核心 App。
 //
@@ -227,6 +154,16 @@ public:
     float scale_step_    = kDefaultScaleStep;
     // 累计缩放系数（相对启动几何），仅用于把整体缩放夹在 [kClothScaleMin, kClothScaleMax]。
     float cloth_scale_   = 1.0f;
+
+    // ── 相机中键纵向 pan：注视点世界 Y 偏移（米）。相机 position 与 target **同步**平移
+    //    该量（朝向不变 = 纯平移）。半屏 pan = 1m（见 VerticalPanDeltaY）。──
+    float cam_target_y_ = 0.0f;
+
+    // ── 3D 画笔（选区）──
+    //   brush_ 存画笔激活态 + 半径 + 选区（衣服各 primitive 的顶点 index）。
+    //   panel_rects_ 每帧收集各面板的屏幕矩形，供「鼠标是否落在 UI 上」判定（画笔用）。
+    BrushTool brush_;
+    std::vector<jpov::UiRect> panel_rects_;
 
     // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
@@ -416,6 +353,8 @@ public:
             cloth_current_[i].mesh = startup_geometry[i].mesh;
             cloth_current_[i].material = startup_geometry[i].material;
         }
+        // 3D 画笔：选区容器对齐衣服 primitive 数（初始为空选区）。
+        brush_.EnsurePrimitives(cloth_current_.size());
 
         // 建仿真器（绑定姿态 = 启动几何）。仿真器的人体排斥匹配器（Step 2）由
         // InitSimulators() 内部统一挂载（见 AttachBodyMatcherToSims；匹配器在 init_ 里，
@@ -455,6 +394,11 @@ public:
         LOG(INFO) << "衣服模型: " << cloth_path_ << "（" << cloth_.size()
                   << " primitives）";
         FitViewToScene();
+    }
+
+    // 相机注视点（叠加中键纵向 pan 的 Y 偏移）。渲染相机与画笔射线/投影都用它，保证一致。
+    jpov::Vec3f CameraTarget() const {
+        return jpov::Vec3f(0.0f, cam_target_y_, 0.0f);
     }
 
     // ⭐ 唯一的渲染体：交互循环与 headless 出图共用（zero 分叉）。
@@ -511,6 +455,12 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+
+            // 中键纵向 pan：平移相机注视点（相机 position 与 target 同步跟随，朝向不变）。
+            // 半屏 pan = 1m（见 jpov_viewer::VerticalPanDeltaY）。
+            if (input.middle.IsDrag()) {
+                cam_target_y_ += VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
         // ── 滑块 / 参数同步到仿真器（每个 primitive 一份）。──
@@ -521,11 +471,12 @@ public:
             StepSimulationOnce();
         }
 
-        // ── 相机：由 view_ 推导 ──
-        cmds->camera.position = view_.Position();
-        cmds->camera.target   = ViewConfig::Target();  // (0,0,0)
+        // ── 相机：由 view_ 推导（叠加中键 pan 的注视点 Y 偏移；position 与 target 同步平移）。──
+        const jpov::Vec3f cam_target = CameraTarget();
+        cmds->camera.position = view_.Position() + cam_target;
+        cmds->camera.target   = cam_target;
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
-        cmds->camera.fov      = 60.0f;
+        cmds->camera.fov      = kCameraFovDeg;
         cmds->camera.near     = 0.05f;
         cmds->camera.far      = 1000.0f;
 
@@ -588,6 +539,9 @@ public:
             DrawPanels(input, winfo, cmds);
             ui_.End();
             ui_.Emit(cmds);
+            // 画笔在面板之后处理（此刻已知本帧面板矩形 + 画笔激活态），并把画笔圆 /
+            // 顶点标记画在面板之上。
+            ProcessBrush(input, winfo, cmds);
         }
     }
 
@@ -849,581 +803,10 @@ private:
         LOG(INFO) << "重置衣服：仿真器已回启动姿态（缩放归 1、仿真暂停）";
     }
 
-    // ==================== 面板 ====================
-
-    // 提交一个数值输入框：解析文本 →（可选）clamp → 写回目标；非法输入不改目标。
-    // 无论成功与否，都把文本框规范化为**最终生效值**（用户可见 clamp 后的结果）。
-    // 返回 true = 目标值发生了变化。
-    // Pre-condition: field != nullptr；target != nullptr。
-    template <typename ClampFn>
-    static bool CommitNumberField(NumberField* field, ClampFn clamp_fn,
-                                  float* target /*inout*/) {
-        CHECK(field != nullptr);
-        CHECK(target != nullptr);
-        const float before = *target;
-        float parsed = 0.0f;
-        if (ParseAxisValue(field->text, &parsed)) {
-            *target = clamp_fn(parsed);
-        }
-        snprintf(field->text, kAxisInputCapacity, "%g",
-                 static_cast<double>(*target));
-        return *target != before;
-    }
-
-    // 画两个面板（左上 = 变换 / 保存 / 地面 / 显示；右上 = 仿真动力学）。
-    // 所有布局都从**本帧窗口尺寸** winfo 推算（见文件头坐标空间说明）。
-    void DrawPanels(const jpov::InputSnapshot& input,
-                    const jpov::WindowInfo& winfo,
-                    jpov::RenderCommandList* cmds) {
-        const float w = winfo.width;
-        const float h = winfo.height;
-
-        jpov::UiTheme theme = jpov::UiTheme::Default(kFontSize);
-        theme.font_alias = kViewerFontAlias;
-        ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
-
-        DrawLeftPanel(cmds, w);
-        DrawRightPanel(cmds, w, h);
-        DrawSkinPanel(cmds, w, h);
-        DrawHoleFillPanel(cmds, w, h);
-        DrawMotionPanel(cmds, w, h);
-    }
-
-    // ---- 底部中间：补洞（推进法）----
-    //
-    // 紧邻右下「软布自动蒙皮」面板的左侧（贴底）。按钮「执行补洞」把网格破洞补上（
-    // 在仿真关联之前）；「最大洞周长」滑条滤掉腰口/下摆这类本来该开的口。
-    // 行：标题(1) + 按钮(1) + 细分(1) + 平滑(1) + 最大周长(1) + 状态(1) = 6。
-    void DrawHoleFillPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 6;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        // 贴底、位于蒙皮面板（贴右）左侧；与左下摆动面板留出间隔。
-        const float panel_x = win_w - 2.0f * panel_w - 2.0f * kMargin;
-        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
-
-        DrawLabel("补洞（推进法）", left, row_w, row_y);
-        row_y += step_y;
-
-        if (ui_.Button("执行补洞", jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
-            RunHoleFill();
-        }
-        row_y += step_y;
-
-        ui_.Checkbox("细分（匹配周围边长）", &hole_refine_ui_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        ui_.Checkbox("平滑（fairing）", &hole_fair_ui_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // 最大洞周长（米）：只补周长 ≤ 该值的环；0 = 不限制（⚠️ 会把腰口/下摆也封上）。
-        ui_.SliderFloat("最大洞周长 (m)", &hole_max_perimeter_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        0.0f, 1.0f, /*decimal_places*/ 3);
-        row_y += step_y;
-
-        if (!hole_fill_msg_.empty()) {
-            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
-            cmds->DrawText(hole_fill_msg_,
-                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
-                           kFontSize, kForeground,
-                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
-        }
-    }
-
-    // ---- 左上角：变换 / 保存 / 地面 / 显示 ----
-    //
-    // 布局（自上而下，行游标）：
-    //   平移表头(轴/步长/步进) + X/Y/Z 三行（步长框 + "<" ">"）
-    //   旋转表头 + RX/RY/RZ 三行
-    //   缩放行（系数框 + "-" "+" + 只读当前）
-    //   保存按钮 + 保存状态
-    //   地面高度滑条
-    //   显示勾选（人体 / 衣服）
-    //   两行只读（人体 / 衣服来源）
-    void DrawLeftPanel(jpov::RenderCommandList* cmds, float win_w) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.32f * win_w;
-        const float panel_x  = kMargin;
-        const float panel_y  = kMargin;
-        // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存1 + 保存状态1
-        //        + 地面1 + 勾选1 + 只读2 = 15。
-        constexpr int kRows = 15;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-
-        const float axis_w = 30.0f;     // "轴"列（X/Y/Z）
-        const float stepbox_w = 72.0f;  // 步长输入框宽
-        const float btn_w = 26.0f;      // "<" / ">" / "−" / "+" 按钮宽
-        const float gap = kSpacing;
-        const float col_axis   = left;
-        const float col_stepbx = col_axis + axis_w + gap;
-        const float col_btn_in = col_stepbx + stepbox_w + gap;   // "<"
-        const float col_btn_in2 = col_btn_in + btn_w + gap;      // ">"
-
-        float row_y = top;
-
-        // ---- 平移表头 ----
-        DrawLabel("轴", col_axis, axis_w, row_y);
-        DrawLabel("步长(米)", col_stepbx, stepbox_w, row_y);
-        DrawLabel("步进", col_btn_in, col_btn_in2 + btn_w - col_btn_in, row_y);
-        row_y += step_y;
-
-        // ---- 平移 X / Y / Z 行（只有步长框 + 步进按钮；无绝对位置）----
-        static const char* const kAxisTags[3] = {"X", "Y", "Z"};
-        for (int axis = 0; axis < 3; ++axis) {
-            DrawLabel(kAxisTags[axis], col_axis, axis_w, row_y);
-            const bool step_focus = ui_.InputText(
-                "", trans_step_field_[axis].text, kAxisInputCapacity,
-                jpov::UiRect{{col_stepbx, row_y}, {stepbox_w, kRowH}});
-            if (trans_step_field_[axis].focused_prev && !step_focus) {
-                CommitNumberField(&trans_step_field_[axis], ClampTransStep,
-                                  &trans_step_[axis]);
-            }
-            trans_step_field_[axis].focused_prev = step_focus;
-
-            if (ui_.Button("<", jpov::UiRect{{col_btn_in, row_y}, {btn_w, kRowH}})) {
-                StepTranslation(axis, -1.0f);
-            }
-            if (ui_.Button(">", jpov::UiRect{{col_btn_in2, row_y}, {btn_w, kRowH}})) {
-                StepTranslation(axis, +1.0f);
-            }
-            row_y += step_y;
-        }
-
-        // ---- 旋转表头 ----
-        DrawLabel("轴", col_axis, axis_w, row_y);
-        DrawLabel("步长(°)", col_stepbx, stepbox_w, row_y);
-        DrawLabel("步进", col_btn_in, col_btn_in2 + btn_w - col_btn_in, row_y);
-        row_y += step_y;
-
-        // ---- 旋转 RX / RY / RZ 行（只有步长框 + 步进按钮）----
-        static const char* const kRotTags[3] = {"RX", "RY", "RZ"};
-        for (int axis = 0; axis < 3; ++axis) {
-            DrawLabel(kRotTags[axis], col_axis, axis_w, row_y);
-            const bool rot_focus = ui_.InputText(
-                "", rot_step_field_[axis].text, kAxisInputCapacity,
-                jpov::UiRect{{col_stepbx, row_y}, {stepbox_w, kRowH}});
-            if (rot_step_field_[axis].focused_prev && !rot_focus) {
-                CommitNumberField(&rot_step_field_[axis], ClampRotStep,
-                                  &rot_step_[axis]);
-            }
-            rot_step_field_[axis].focused_prev = rot_focus;
-
-            if (ui_.Button("<", jpov::UiRect{{col_btn_in, row_y}, {btn_w, kRowH}})) {
-                StepRotation(axis, -1.0f);
-            }
-            if (ui_.Button(">", jpov::UiRect{{col_btn_in2, row_y}, {btn_w, kRowH}})) {
-                StepRotation(axis, +1.0f);
-            }
-            row_y += step_y;
-        }
-
-        // ---- 缩放行：系数输入框 + "−" "+" + 当前累计缩放只读 ----
-        const float scale_lbl_w = 72.0f;
-        DrawLabel("缩放系数", col_axis, scale_lbl_w, row_y);
-        const float scale_bx = col_axis + scale_lbl_w + gap;
-        const bool scale_focus = ui_.InputText(
-            "", scale_step_field_.text, kAxisInputCapacity,
-            jpov::UiRect{{scale_bx, row_y}, {stepbox_w, kRowH}});
-        if (scale_step_field_.focused_prev && !scale_focus) {
-            CommitNumberField(&scale_step_field_, ClampScaleStep, &scale_step_);
-        }
-        scale_step_field_.focused_prev = scale_focus;
-        const float scale_minus_x = scale_bx + stepbox_w + gap;
-        const float scale_plus_x = scale_minus_x + btn_w + gap;
-        if (ui_.Button("-", jpov::UiRect{{scale_minus_x, row_y}, {btn_w, kRowH}})) {
-            StepScale(1.0f / scale_step_);
-        }
-        if (ui_.Button("+", jpov::UiRect{{scale_plus_x, row_y}, {btn_w, kRowH}})) {
-            StepScale(scale_step_);
-        }
-        const float scale_info_x = scale_plus_x + btn_w + gap;
-        DrawLabel(Format("x%.3f", static_cast<double>(cloth_scale_)).c_str(),
-                  scale_info_x, left + row_w - scale_info_x, row_y);
-        row_y += step_y;
-
-        // ---- 保存按钮行 ----
-        const float save_btn_w = 140.0f;
-        const char* save_label =
-            (save_ctrl_.state() == ClothSaveState::kSaving) ? "保存中..."
-                                                            : "保存衣服 glb";
-        if (ui_.Button(save_label,
-                       jpov::UiRect{{left, row_y}, {save_btn_w, kRowH}})) {
-            StartSaveCloth();
-        }
-        row_y += step_y;
-
-        // ---- 保存状态行：单独一行 + 真左对齐（长文案避免压到上一行按钮）。----
-        const std::string& save_msg = save_ctrl_.message();
-        if (!save_msg.empty()) {
-            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
-            cmds->DrawText(save_msg,
-                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
-                           kFontSize, kForeground,
-                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
-        }
-        row_y += step_y;
-
-        // ---- 地面高度（米）：[-3,+3] ----
-        ui_.SliderFloat("地面高度 y", &ground_y_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        -3.0f, 3.0f, /*decimal_places*/2);
-        row_y += step_y;
-
-        // ---- 显示开关（人体参考 / 衣服，各自独立）----
-        const float kCheckW = row_w / 2.0f;
-        ui_.Checkbox("显示人体 reference", &show_body_,
-                     jpov::UiRect{{left, row_y}, {kCheckW, kRowH}});
-        ui_.Checkbox("显示衣服", &show_cloth_,
-                     jpov::UiRect{{left + kCheckW, row_y}, {kCheckW, kRowH}});
-        row_y += step_y;
-
-        // ---- 人体 reference 来源 + primitive 数（只读）----
-        const std::string body_line = Format(
-            "人体：%s（%zu primitives）", BaseNameOf(body_path_).c_str(),
-            body_.size());
-        ui_.Text(body_line.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // ---- 衣服来源 + primitive 数（只读）----
-        const std::string cloth_line = Format(
-            "衣服：%s（%zu primitives）", BaseNameOf(cloth_path_).c_str(),
-            cloth_.size());
-        ui_.Text(cloth_line.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-    }
-
-    // ---- 右上角：仿真动力学 ----
-    //
-    // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
-    // 这样窗口 resize 时右上角面板始终贴住右上角。
-    //
-    // 行：标题(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
-    //     + buffer(1) + 切向保留系数(1) + 按钮行(1) + 状态行(2) = 12。
-    void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        (void)win_h;
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.30f * win_w;
-        const float panel_x  = win_w - panel_w - kMargin;  // 贴右边缘
-        const float panel_y  = kMargin;
-        constexpr int kRows = 13;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
-
-        // ---- 标题 ----
-        DrawLabel("仿真动力学", left, row_w, row_y);
-        row_y += step_y;
-
-        // ---- 关联距离 d（米）：仿真点集合 / 关联邻居表（= 仿真点"缝合"半径）。
-        //      拖它 → 重建仿真点集合（与 soft_mesh_viewer 同语义）。----
-        ui_.SliderFloat("关联距离 d (m)", &bind_distance_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinBindDistance, Simulator::kMaxBindDistance,
-                        /*decimal_places*/3);
-        row_y += step_y;
-
-        // ---- 重力 g ----
-        ui_.SliderFloat("重力 g (m/s²)", &gravity_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinGravity, Simulator::kMaxGravity,
-                        /*decimal_places*/1);
-        row_y += step_y;
-
-        // ---- 总质量 M ----
-        ui_.SliderFloat("总质量 M (kg)", &total_mass_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinTotalMass, Simulator::kMaxTotalMass,
-                        /*decimal_places*/1);
-        row_y += step_y;
-
-        // ---- 力系数 F（指数坐标）：滑条位置 t∈[0,1] 线性，F = min*(max/min)^t。----
-        ui_.SliderFloat("力系数 F (指数)", &force_coeff_t_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        0.0f, 1.0f, /*decimal_places*/2);
-        row_y += step_y;
-
-        // ---- 衰减 k ----
-        ui_.SliderFloat("衰减 k (1/s)", &damping_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinDamping, Simulator::kMaxDamping,
-                        /*decimal_places*/2);
-        row_y += step_y;
-
-        // ---- 全局速度上限（m/s；0 = 不限）----
-        ui_.SliderFloat("速度上限 (m/s, 0=不限)", &max_speed_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        0.0f, 100.0f, /*decimal_places*/0);
-        row_y += step_y;
-
-        // ---- 人体排斥：开关 + buffer（离开体表的最小距离）+ 切向速度保留系数 ----
-        ui_.Checkbox("人体排斥", &body_repulsion_ui_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-        ui_.SliderFloat("排斥 buffer (m)", &body_buffer_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinBodyBuffer, Simulator::kMaxBodyBuffer,
-                        /*decimal_places*/ 3);
-        row_y += step_y;
-        // 切向（平行于表面）速度保留系数：0 = 全消（粘住）/ 1 = 全保留（默认）。
-        ui_.SliderFloat("切向速度保留系数", &body_parallel_damping_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        Simulator::kMinBodyParallelDamping,
-                        Simulator::kMaxBodyParallelDamping,
-                        /*decimal_places*/ 2);
-        row_y += step_y;
-
-        // ---- 按钮行：[暂停/继续] [重置衣服] ----
-        const float kBtnW = (row_w - kSpacing) * 0.5f;
-        const char* pause_label = sim_running_ ? "暂停仿真" : "继续仿真";
-        if (ui_.Button(pause_label, jpov::UiRect{{left, row_y}, {kBtnW, kRowH}})) {
-            sim_running_ = !sim_running_;
-            LOG(INFO) << (sim_running_ ? "仿真：继续" : "仿真：暂停");
-        }
-        if (ui_.Button("重置衣服",
-                       jpov::UiRect{{left + kBtnW + kSpacing, row_y},
-                                    {kBtnW, kRowH}})) {
-            ResetClothMesh();
-        }
-        row_y += step_y;
-
-        // ---- 状态行 1：F 实际牛顿数 + 仿真时间 / 步数 ----
-        const std::string line1 = Format(
-            "F = %.4g N   仿真 t=%.2fs 步=%zu",
-            static_cast<double>(ForceTToNewton(force_coeff_t_ui_)),
-            sims_.empty() ? 0.0 : sims_.front().time(),
-            sims_.empty() ? static_cast<size_t>(0) : sims_.front().step_count());
-        ui_.Text(line1.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // ---- 状态行 2：仿真点计数（原始 + 虚拟 = 合计）----
-        size_t orig = 0;
-        size_t virt = 0;
-        for (const Simulator& s : sims_) {
-            orig += s.original_point_count();
-            virt += s.virtual_point_count();
-        }
-        const std::string line2 = Format(
-            "仿真点 原始 %zu + 虚拟 %zu = %zu", orig, virt, orig + virt);
-        ui_.Text(line2.c_str(), jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-    }
-
-    // ---- 右下角：软布自动蒙皮（一键）----
-    //
-    // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
-    // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
-    //             + 焊接模式勾选(1) + 焊接参数输入(1) + 状态文本(1) = 7。
-    void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 7;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const float panel_x = win_w - panel_w - kMargin;  // 贴右边缘
-        const float panel_y = win_h - panel_h - kMargin;  // 贴底边缘
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
-
-        DrawLabel("软布自动蒙皮", left, row_w, row_y);
-        row_y += step_y;
-
-        // 一键蒙皮按钮：已蒙皮后 RunAutoSkin 自身 no-op（按钮仍可点，文案变明示状态）。
-        const char* btn = skinned_ ? "已蒙皮（已冻结）" : "一键蒙皮";
-        if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
-            RunAutoSkin();
-        }
-        row_y += step_y;
-
-        ui_.Checkbox("权重生长（种子扩散）", &skin_grow_ui_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // 种子半径（mm）：到身体距离 <= 该值的顶点 = 种子（生长锚点，权重冻结）。
-        const float seed_label_w = 96.0f;
-        DrawLabel("种子半径(mm)", left, seed_label_w, row_y);
-        const float seed_box_x = left + seed_label_w + 8.0f;
-        const float seed_box_w = row_w - seed_label_w - 8.0f;
-        const bool seed_focus = ui_.InputText(
-            "", seed_eps_field_.text, kAxisInputCapacity,
-            jpov::UiRect{{seed_box_x, row_y}, {seed_box_w, kRowH}});
-        if (seed_eps_field_.focused_prev && !seed_focus) {
-            CommitNumberField(&seed_eps_field_, ClampSeedEpsMm, &seed_eps_mm_);
-        }
-        seed_eps_field_.focused_prev = seed_focus;
-        row_y += step_y;
-
-        // 焊接判据模式：勾选 = 相对局部边长（比例，与缩放/密度无关）；否则 = 绝对距离（mm）。
-        ui_.Checkbox("焊接用相对局部边长", &weld_relative_ui_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // 焊接参数：相对模式填「比例(×局部边长)」，绝对模式填「容差(mm)」。
-        const float weld_label_w = 96.0f;
-        const char* weld_label =
-            weld_relative_ui_ ? "焊接比例(×边长)" : "焊接容差(mm)";
-        DrawLabel(weld_label, left, weld_label_w, row_y);
-        const float weld_box_x = left + weld_label_w + 8.0f;
-        const float weld_box_w = row_w - weld_label_w - 8.0f;
-        if (weld_relative_ui_) {
-            const bool f = ui_.InputText(
-                "", weld_ratio_field_.text, kAxisInputCapacity,
-                jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
-            if (weld_ratio_field_.focused_prev && !f) {
-                CommitNumberField(&weld_ratio_field_, ClampWeldRatio, &weld_ratio_);
-            }
-            weld_ratio_field_.focused_prev = f;
-        } else {
-            const bool f = ui_.InputText(
-                "", weld_tolerance_field_.text, kAxisInputCapacity,
-                jpov::UiRect{{weld_box_x, row_y}, {weld_box_w, kRowH}});
-            if (weld_tolerance_field_.focused_prev && !f) {
-                CommitNumberField(&weld_tolerance_field_, ClampWeldToleranceMm,
-                                  &weld_tolerance_mm_);
-            }
-            weld_tolerance_field_.focused_prev = f;
-        }
-        row_y += step_y;
-
-        // 状态 / 提示（可能为空）。
-        if (!skin_msg_.empty()) {
-            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
-            cmds->DrawText(skin_msg_,
-                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
-                           kFontSize, kForeground,
-                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
-        }
-    }
-
-    // ---- 左下角：随机摆动测试（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
-    //
-    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）：固定吸附在这个角，
-    // 与左上（变换/保存）、右上（动力学）、右下（蒙皮）互不遮挡。
-    // 行：启用勾选(1) + 播放/暂停(1) + 主轴(1) + 幅度(1) + 随机种子(1) + 状态(1) = 6。
-    void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        // 状态提示（每帧刷新，供面板与出图自检）。
-        if (!has_body_skeleton_) {
-            motion_msg_ = "人体无骨架，无法摆动";
-        } else if (body_skel_id_ == 0) {
-            motion_msg_ = "骨架未注册";
-        } else if (!motion_test_enabled_) {
-            motion_msg_ = "勾选后启用（先蒙皮再播放，衣服才跟随）";
-        } else if (!skinned_) {
-            motion_msg_ = "衣服未蒙皮：动作不带动衣服";
-        } else {
-            motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
-        }
-
-        const float kMargin  = 12.0f;
-        const float kPad     = 10.0f;
-        const float kRowH    = kPanelRowH;
-        const float kSpacing = 5.0f;
-        const float panel_w  = 0.32f * win_w;
-        constexpr int kRows = 6;
-        const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
-        const float panel_x = kMargin;  // 贴左边缘
-        // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
-        const float panel_y = std::max(win_h - panel_h - kMargin, kMargin);
-        const jpov::Color kPanelBg{0.0f, 0.0f, 0.0f, 0.5f};
-        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
-                       kPanelBg);
-
-        const float left = panel_x + kPad;
-        const float top  = panel_y + kPad;
-        const float row_w = panel_w - kPad * 2.0f;
-        const float step_y = kRowH + kSpacing;
-        float row_y = top;
-
-        // 启用勾选（兼作面板标题）。
-        ui_.Checkbox("随机摆动测试（启用）", &motion_test_enabled_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        const char* play_label = motion_playing_ ? "暂停" : "播放";
-        if (ui_.Button(play_label, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
-            motion_playing_ = !motion_playing_;
-        }
-        row_y += step_y;
-
-        // 主轴（相位）：播放时自动推进（速度固定）；暂停时可拖动查看任意时刻的动作。
-        ui_.SliderFloat("主轴（相位）", &motion_phase_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        0.0f, 1.0f, /*decimal_places*/ 3);
-        row_y += step_y;
-
-        // 幅度：按档位量化（幅度是烘焙维度，19 档一次烘完，切档无需重烘）。
-        float amp = motion_amplitude_deg_;
-        ui_.SliderFloat("关节幅度 (°)", &amp,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        0.0f, kMotionAmplitudeMaxDeg, /*decimal_places*/ 0);
-        motion_amplitude_deg_ = SnapAmplitudeDeg(amp);
-        row_y += step_y;
-
-        // 随机种子：输入框（0~65535，失焦/回车提交 → clamp → 变了则重烘焙姿态集）。
-        const float seed_label_w = 96.0f;
-        DrawLabel("随机种子", left, seed_label_w, row_y);
-        const float seed_box_x = left + seed_label_w + 8.0f;
-        const float seed_box_w = row_w - seed_label_w - 8.0f;
-        const bool seed_focus = ui_.InputText(
-            "", motion_seed_field_.text, kAxisInputCapacity,
-            jpov::UiRect{{seed_box_x, row_y}, {seed_box_w, kRowH}});
-        if (motion_seed_field_.focused_prev && !seed_focus) {
-            CommitMotionSeedField();
-        }
-        motion_seed_field_.focused_prev = seed_focus;
-        row_y += step_y;
-
-        const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
-        cmds->DrawText(motion_msg_,
-                       /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
-                       kFontSize, kForeground,
-                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
-    }
+    // ==================== 面板（绘制 / UI）====================
+    // 代码量大（约占本文件 1/3），拆到 `clothing_tool_panels.inc`，用「部分类」写法在**类体内**
+    // #include 展开（仍是同一个 ClothingToolApp，零接口改动）。见该文件头说明。
+    #include "tools/jpov/clothing/clothing_tool_panels.inc"
 
     // 提交「随机种子」输入：解析 → clamp [0, kMotionSeedMax] →（变了则）重烘焙姿态集。
     // 文本框规范化为**最终生效值**（用户可见 clamp 后的结果）。
@@ -1518,6 +901,32 @@ private:
                 body_motion_poses_.push_back(RandomPoseAt(body_skeleton_, phase, params));
             }
         }
+    }
+
+    // 一块面板的公共布局：按 rows 行算高、画半透明黑底、记录屏幕矩形，返回**行游标**。
+    // 各面板只负责自己的锚点（panel_x/panel_y/panel_w）与内容；行游标 f.left/f.row_w/f.row_y
+    // + 每行后 f.Next()。布局常量（kPanelPad/kPanelSpacing/kPanelRowH）集中于此，避免各面板重复。
+    static float PanelHeight(int rows) {
+        return kPanelPad * 2.0f + static_cast<float>(rows) * kPanelRowH +
+               static_cast<float>(rows - 1) * kPanelSpacing;
+    }
+    PanelFrame BeginPanel(jpov::RenderCommandList* cmds, float panel_x, float panel_y,
+                          float panel_w, int rows) {
+        const float panel_h = PanelHeight(rows);
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
+        PanelFrame f;
+        f.left   = panel_x + kPanelPad;
+        f.row_w  = panel_w - kPanelPad * 2.0f;
+        f.step_y = kPanelRowH + kPanelSpacing;
+        f.row_y  = panel_y + kPanelPad;
+        return f;
+    }
+
+    // 记录一块面板的屏幕矩形（画笔判定「鼠标是否落在 UI 上」用；每帧 DrawPanels 先 clear）。
+    void RecordPanel(float x, float y, float w, float h) {
+        panel_rects_.push_back(jpov::UiRect{{x, y}, {w, h}});
     }
 
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。
