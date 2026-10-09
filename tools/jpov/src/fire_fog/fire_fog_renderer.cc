@@ -280,6 +280,10 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     CHECK_GT(params.z_far, params.z_near) << "FireFogParams.z_far 必须 > z_near";
     CHECK_GE(params.sun_phase_g, 0.0f);
     CHECK_LT(params.sun_phase_g, 0.95f) << "FireFogParams.sun_phase_g 必须 ∈ [0, 0.95)";
+    // 超屏存储倍数 k（每轴）：froxel 纹理 = (k·W)×(k·H)；inject/scatter 跑在该尺寸上。
+    const int super_scale = std::min(std::max(params.super_scale, 1), kMaxSuperScale);
+    const int froxel_w = viewport_w * super_scale;
+    const int froxel_h = viewport_h * super_scale;
 
     // 保存调用方状态：composite 要回到调用方的 FBO / viewport 才能就地混合。
     // ⚠️ 必须在本函数内任何可能重绑 FBO 的操作（EnsureFroxelTargets）**之前**取。
@@ -305,8 +309,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         bodies_.push_back(LowerPointFog(fogs[i]));
     }
 
-    // ── CPU 屏幕 tile 剪枝（每 tile ≤K 个团索引；GL-free）──
-    EnsureTileTexture(viewport_w, viewport_h);
+    // ── CPU 屏幕 tile 剪枝（每 tile ≤K 个团索引；GL-free）—— 在 froxel 纹理尺寸上 ──
+    EnsureTileTexture(froxel_w, froxel_h);
     const std::vector<uint8_t> tile_data = BuildTileFogIndexData(
         bodies_, view_proj, grid_w_, grid_h_, kTileSize, kMaxFogsPerTile,
         kTexelsPerTile, kFogIndexSentinel);
@@ -352,7 +356,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     GL_RGBA, GL_FLOAT, body_attr.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    EnsureFroxelTargets(viewport_w, viewport_h);
+    EnsureFroxelTargets(froxel_w, froxel_h);
 
     float inv_vp[16];
     CHECK(Mat4Invert(view_proj, inv_vp))
@@ -360,7 +364,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
 
     // ═══════════ 趟 1：inject（逐 froxel 局部 (τ, S) → inject_tex_）═══════════
     glBindFramebuffer(GL_FRAMEBUFFER, inject_fbo_);
-    glViewport(0, 0, viewport_w, viewport_h);
+    glViewport(0, 0, froxel_w, froxel_h);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -379,7 +383,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZNear"), params.z_near);
     glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZFar"), params.z_far);
     glUniform2f(shader_mgr_->GetUniform(prog_inject_, "uFboSize"),
-                static_cast<float>(viewport_w), static_cast<float>(viewport_h));
+                static_cast<float>(froxel_w), static_cast<float>(froxel_h));
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalFogs"), count);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uSunEnable"),
                 params.sun_enable ? 1 : 0);
@@ -454,7 +458,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
 
     // ═══════════ 趟 2：scatter（沿 z 有序前缀 → scatter_tex_）═══════════
     glBindFramebuffer(GL_FRAMEBUFFER, scatter_fbo_);
-    glViewport(0, 0, viewport_w, viewport_h);
+    glViewport(0, 0, froxel_w, froxel_h);
     glDisable(GL_BLEND);
     glUseProgram(prog_scatter_);
     glActiveTexture(GL_TEXTURE0);
@@ -480,6 +484,8 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                 cam.position.y(), cam.position.z());
     glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZNear"), params.z_near);
     glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uZFar"), params.z_far);
+    glUniform1f(shader_mgr_->GetUniform(prog_composite_, "uSuperScale"),
+                static_cast<float>(super_scale));
 
     // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾像素 → 恒等。
     glEnable(GL_BLEND);

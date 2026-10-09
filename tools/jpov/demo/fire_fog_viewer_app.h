@@ -65,6 +65,9 @@ public:
     float sun_phase_g_ = 0.7f;         // HG 相位各向异性（god ray 强度）
     float sun_gain_ = 2.0f;            // 太阳项增益
 
+    // ── 超屏存储倍数 k（每轴，1 或 2）：k=1 → 16px froxel 单元；k=2 → 8px（纹理 4× 面积）──
+    int super_k_index_ = 0;            // 0 → k=1；1 → k=2（面板下拉）
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
     }
@@ -135,6 +138,7 @@ public:
             ff.sun_enable = sun_enable_;
             ff.sun_phase_g = sun_phase_g_;
             ff.sun_gain = sun_gain_;
+            ff.super_scale = super_k_index_ + 1;   // 0→1, 1→2
             cmds->fire_fog = ff;
         }
 
@@ -190,6 +194,10 @@ private:
             ui_.Combo("衰减剖面", &fog_attenuation_, items, row(0, 5));
         }
         ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 6));
+        {
+            const std::vector<const char*> items = {"超屏 k=1 (16px)", "超屏 k=2 (8px)"};
+            ui_.Combo("超屏存储 k", &super_k_index_, items, row(0, 8));
+        }
 
         // ── 右列：雾色 + 天光主光仰角 + god ray ──
         ui_.SliderFloat("色 R", &fog_color_.r, row(1, 0), 0.0f, 2.0f, 2);

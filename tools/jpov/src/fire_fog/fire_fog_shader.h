@@ -312,6 +312,7 @@ uniform mat4  uInvVP;
 uniform vec3  uCamPos;
 uniform float uZNear;
 uniform float uZFar;
+uniform float uSuperScale;   // 超屏存储倍数 k（每轴）：屏幕像素→froxel 纹理坐标的缩放
 
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
@@ -350,8 +351,8 @@ void main() {
     int grid_cols = tex_sz.x / TILE_SIZE;
     int grid_rows = tex_sz.y / TILE_SIZE;
 
-    // 4 邻 tile（双线性，按 tile 中心对齐）。
-    vec2 px = gl_FragCoord.xy;
+    // 4 邻 tile（双线性，按 tile 中心对齐）。屏幕像素先 ×k 换算到 froxel 纹理坐标。
+    vec2 px = gl_FragCoord.xy * uSuperScale;
     float cu = px.x / float(TILE_SIZE) - 0.5;
     float cv = px.y / float(TILE_SIZE) - 0.5;
     int tx0 = int(floor(cu));

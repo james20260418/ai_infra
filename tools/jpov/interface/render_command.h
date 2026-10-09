@@ -472,7 +472,7 @@ struct PointFog {
 //
 // 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
-// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0。
+// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；super_scale ∈ [1,4]。
 struct FireFogParams {
     // 光照开关（分步验收用）：
     //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
@@ -487,6 +487,11 @@ struct FireFogParams {
     // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/Nz}。near 别设太小（浪费近端）。
     float z_near = 0.1f;
     float z_far = 2000.0f;
+    // 超屏存储倍数 k（**每轴**，与 Nz 解耦）：froxel 纹理 = (k·W)×(k·H)，
+    // 面积/耗时 ×k²，Nxy 每轴 ×k，Nz 不变。k=1：Nxy=屏/16（16px 单元）；
+    // k=2：纹理 2W×2H（4× 面积）、Nxy 每轴翻倍（80×45→160×90，8px 单元）。
+    // 范围 [1, 4]。
+    int super_scale = 1;
 };
 
 // 全局平行光（太阳 Directional Light）。

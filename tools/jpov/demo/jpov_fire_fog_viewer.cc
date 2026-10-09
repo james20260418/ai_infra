@@ -181,6 +181,18 @@ int RunCapture(const std::string& out_dir) {
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("10_big_fog");
 
+    // ── I. 超屏存储 k=1 vs k=2（16px vs 8px froxel 单元）对比 ──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 3.0f;
+    app.fog_intensity_ = 0.6f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+    for (int kidx : {0, 1}) {
+        app.super_k_index_ = kidx;   // 0→k=1, 1→k=2
+        shoot(("30_superk" + std::to_string(kidx + 1)).c_str());
+    }
+    app.super_k_index_ = 0;
+
     // ═══════════ step2：ambient + 太阳×CSM（god ray）——与 step1 对照 ═══════════
     app.sun_enable_ = true;
     app.fog_center_ = jpov::Vec3f(0.0f, 4.0f, 0.0f);

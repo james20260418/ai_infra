@@ -6,7 +6,8 @@
 // **就地**合成到调用方当前绑定的 3D HDR FBO（与 HorizonFogRenderer 同为「其它 3D 之后、
 // HDR 后处理之前」的一次全屏 pass）。
 //
-// 三趟（全部在主 FBO 尺寸；froxel 网格 = 屏幕 kTileSize² tile 为一个柱、柱内 kTileSize² 个 z 切片）：
+// 三趟（inject/scatter 跑在 froxel 纹理上 = 主 FBO × super_scale 每轴；composite 跑在主 FBO）；
+// froxel 网格 = froxel 纹理上 kTileSize² tile 为一个柱、柱内 kTileSize² 个 z 切片：
 //   1. inject（fire_fog_inject）  逐 texel = 某 froxel 的**局部** (τ, S)：tile 中心视线 ×
 //                                [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
 //   2. scatter（fire_fog_scatter）逐 texel = 某 froxel 的**累积** (τ, S)：沿 z 有序前缀。
@@ -57,6 +58,7 @@ public:
     // 16×16 ⇒ Nz=256（高质量档，实测 8×8/Nz=64 的 z 带把颗粒衬得更明显，故用 256）。
     static constexpr int kTileSize = 16;               // tile 边长（像素）
     static constexpr int kNz = kTileSize * kTileSize;  // 每柱 z 切片数（= tile 像素数）
+    static constexpr int kMaxSuperScale = 4;           // 超屏存储倍数 k（每轴）上限
     static constexpr int kMaxFogsPerTile = 8;          // K：每 tile 团上限
     static constexpr int kTexelsPerTile = kMaxFogsPerTile / 4;  // 每 tile 的 RGBA8 texel 数 = 2
     static constexpr int kMaxTotalFogs = 255;          // 全局团上限（uint8 索引，sentinel=255）
