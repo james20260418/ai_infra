@@ -210,6 +210,12 @@ private:
     unsigned int pick_fbo_ = 0, pick_tex_ = 0, pick_depth_rb_ = 0;
     int pick_fbo_w_ = 0, pick_fbo_h_ = 0;
 
+    // 拾取 internal id → 用户 picking_id 的映射表（三大 renderer 分区分表，见
+    // render_command.h 的 kPickIdBase*）。每帧 DrawPickingPass 重建；不开 pick 时保持空。
+    std::vector<uint32_t> pick_table_object3d_;
+    std::vector<uint32_t> pick_table_skinned_;
+    std::vector<uint32_t> pick_table_instanced_;
+
     // 高亮叠加 FBO：color-only 单采样（RGBA16F）。blit 场景 color 到此处后，
     // 在此叠加恒定像素宽边框（CPU 剪影膨胀求边缘环）。
     // 完成后其颜色纹理作为 tone map 的输入。
@@ -282,6 +288,14 @@ private:
     unsigned int InstancedShadowProg();
     // alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int InstancedShadowProgCutout();
+    // 拾取 program：各 renderer 主 VS（定义 JPOV_PICK → 输出 render_internal_id）+ 共享 kPickIdFs。
+    //   三大 renderer 各一对（opaque / cutout）；cutout 追加 JPOV_ALPHA_CUTOUT（镂空 discard）。
+    unsigned int PickObject3DProg();
+    unsigned int PickObject3DCutoutProg();
+    unsigned int PickInstancedProg();
+    unsigned int PickInstancedCutoutProg();
+    unsigned int PickSkinnedProg();
+    unsigned int PickSkinnedCutoutProg();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。

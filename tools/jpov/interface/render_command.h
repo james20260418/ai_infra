@@ -1635,7 +1635,7 @@ struct Object3DCommand {
     // 未发起查询时 picking_id 完全不产生渲染开销。
     uint32_t picking_id = 0;
 
-    // highlight：是否为本物体绘制高亮纯色边框（方法 B：stencil + 顶点外扩）。
+    // highlight：是否为本物体绘制高亮纯色边框（方法 B：CPU 屏幕空间剪影膨胀描边）。
     //   边框颜色/线宽取全局 RenderCommandList::highlight_style（无该值时忽略）。
     //   仅当 highlight_style 有值且本物体 highlight==true 时才多画一个描边 pass；
     //   未开启高亮时零额外开销。
@@ -1662,6 +1662,13 @@ struct Object3DCommand {
 struct InstanceState {
     // 摆放 —— center 平移 + up/front 旋转 + scale（见 InstanceTransform）。
     InstanceTransform transform;
+
+    // 拾取 id（逐实例，uint32）：>0 = 本实例可被拾取；拾取命中它时，
+    //   JPOV::last_pick().picking_id 回传此值。0 = 不可拾取。
+    //   同批各实例可给不同值（支持「点哪株是哪株」）；仅在 PickQuery.enabled 时参与拾取 pass。
+    //   注意：本字段**不作为 per-instance GPU attribute 上传** —— 拾取走
+    //   `render_internal_id = 本命令 base + gl_InstanceID`，再把 internal id 映射回本值（见拾取实现）。
+    uint32_t picking_id = 0;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -1751,6 +1758,22 @@ struct PickResult {
     // hit==false 时此值为 0（背景）。
     uint32_t picking_id = 0;
 };
+
+// ---- 拾取 internal id 分区（三大 3D 渲染器各占一段）----
+// 拾取 pass 写进 pick FBO 的不是用户的 picking_id，而是「本 draw call 的 base + 实例序号」
+// （= render_internal_id，致密、从 0 起累计）；CPU 侧维护 internal id → 用户 uint32 的映射表。
+// 三大 renderer（object3d / 蒙皮 / 实例）**共享同一张 pick FBO**，故各占一段不重叠的 id 区间
+// （base 分区）以免冲突。每段 2^20 ≈ 100 万（draw call/实例总数上限，超出实现应报错）。
+// 3 段合计 3·2^20 < 2^24，恰好塞进 pick FS 的 RGB 三字节编码。
+// 查询：读回 render_internal_id → (id >> kPickIdSegmentBits) 选段 → (id & (size-1)) 查该段表。
+inline constexpr uint32_t kPickIdSegmentBits = 20;
+inline constexpr uint32_t kPickIdSegmentSize = 1u << kPickIdSegmentBits;  // 1,048,576
+inline constexpr uint32_t kPickIdBaseObject3D  = 0u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdBaseSkinned   = 1u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdBaseInstanced = 2u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdMax = 3u * kPickIdSegmentSize;
+static_assert(kPickIdMax <= (1u << 24),
+              "拾取 internal id 必须能塞进 RGB 三字节（<= 2^24）");
 
 // ==================== 渲染指令列表 ====================
 
@@ -1917,7 +1940,7 @@ struct RenderCommandList {
     std::optional<BloomConfig> bloom;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
-    // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
+    // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
     std::optional<HighlightStyle> highlight_style;
 
