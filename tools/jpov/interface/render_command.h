@@ -468,6 +468,41 @@ struct PointFog {
     FogAttenuation attenuation;   // 径向衰减剖面
 };
 
+// Fire-Fog（froxel 体积雾）管线参数。
+//
+// 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
+// 设计见 tools/jpov/docs/jpov_froxel_design.md。
+// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
+//                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
+struct FireFogParams {
+    // 光照开关（分步验收用）：
+    //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
+    //   true  = 叠加 ambient + 太阳×CSM 阴影（step2，god ray）。
+    bool sun_enable = false;
+    // 太阳项散射相位（Henyey-Greenstein 各向异性 g ∈ [0,0.95)；0=各向同性）。
+    // 越大 ⇒ 逆着太阳看时雾越亮（god ray 更明显）；只影响太阳直射项，不影响 ambient。
+    float sun_phase_g = 0.5f;
+    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
+    float sun_gain = 1.0f;
+    // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
+    // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/nz}。near 别设太小（浪费近端）。
+    float z_near = 0.1f;
+    float z_far = 2000.0f;
+    // ── froxel 网格分辨率（两个**独立**自由度）──
+    //   nz      : 每柱 z 切片数。必须是**完全平方**（存储块边长 sblock = √nz，方阵铺砖）。
+    //   tile_px : 每个 Nxy 单元的**屏幕像素**边长（每轴）。
+    //   派生量：
+    //     sblock = √nz；
+    //     Nxy    = ceil(W/tile_px) × ceil(H/tile_px)；
+    //     k（超屏/屏，“每轴”） = sblock/tile_px，面积/耗时 ×k²；
+    //     froxel 纹理 = Nxy.x·sblock × Nxy.y·sblock。
+    //   约束（JPOV 会 CHECK，见 fire_fog_renderer.cc）：
+    //     nz ∈ 完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]；
+    //     派生 froxel 纹理两轴 ≤ kMaxFroxelDim。
+    int nz = 256;
+    int tile_px = 16;
+};
+
 // 全局平行光（太阳 Directional Light）。
 //
 // 与点光源不同：无位置、无衰减、影响所有片元，因此不走 tile culling，
@@ -1730,10 +1765,14 @@ struct RenderCommandList {
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
-    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（屏幕 tile 剪枝 + 逐像素 ZDist），
+    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（froxel 屏幕空间摊销），
     // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
+
+    // Fire-Fog 管线参数（光照开关 / 相位 / 增益）。未设置时用默认值
+    //（sun_enable=false ⇒ 只输出 base 发射）。仅在 point_fogs 非空时生效。
+    std::optional<FireFogParams> fire_fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图

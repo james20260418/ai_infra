@@ -1,6 +1,6 @@
 # JPOV Froxel 体积雾 —— 屏幕空间摊销 Z 轴采样（设计草案）
 
-> 状态：**设计草案（尚未实现）**。作者：James / Danis。日期：2026-10-09。
+> 状态：**已实现（froxel MVP，PR #163）**。作者：James / Danis。日期：2026-10-09（2026-10-10 随实现同步）。
 > 关联：`jpov_fire_fog_design.md`（点状雾 + 逐像素 ZDist）、`jpov_tpz_volumetric_fog_design.md`、`jpov_volumetric_fog_design.md`。
 >
 > 目标：把「沿 z 的体积散射积分」从「**每全屏像素 × 多次深度采样**」摊销到
@@ -19,9 +19,13 @@
 3. **Composite（O(1)）**：全屏像素直接查表 → `L_out = L_scene·T + S`。
 
 froxel 网格 = 视锥对齐 3D：`Nxy`（低分辨率屏幕 tile）× `Nz`（**指数分布**的 z 切片）。
-**MVP 参数（第一轮）：`Nz=256`、`tile=16×16`（k=1）、`near=0.1m`、`far=2000m`**。
-用**「2D 铺砖」**把一个 3D froxel 柱编进**主 FBO 尺寸**的纹理里
-（**不需要真正的 3D 纹理**）：一个 16×16 屏幕 tile 的 256 个像素，正好承载该柱的 256 个 z 切片。
+**MVP 参数（第一轮）：`Nz=256`、`tile=16px`、`near=0.1m`、`far=2000m`**。
+实现里 `Nz` 与 `tile_px` 是**两个独立自由度**（`FireFogParams::nz / tile_px`）：
+`Nxy = ⌈W/tile_px⌉ × ⌈H/tile_px⌉`、每柱边长 `sblock=√nz`、超屏倍数 `k = sblock/tile_px`（每轴）；
+耗时 ∝ `Nxy·Nz` = `k²`（只有加 `k` 才涨，`Nz↔Nxy` 平移免费）。
+用**「2D 铺砖」**把一个 3D froxel 柱编进一块 `sblock×sblock` 纹理区域
+（**不需要真正的 3D 纹理**）：`nz=256`（`sblock=16`）时，一个 16px 屏幕 tile 的
+256 个像素正好承载该柱的 256 个 z 切片（k=1）。
 
 Inject 做成**金字塔** `L1(满) → L2(½) → L3(¼) → L4(⅛)`：每级在 z 方向把上一级 **4 个 cell 合成 1 个**，
 供 Scatter 用「大块跳 + 小块补」实现 **O(log Nz) 的有序前缀**，从而**全分辨率并行**算 Scatter。
@@ -132,6 +136,10 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
   对与**本 froxel 世界体**相交者，累计其 `Δτ` 与 `S_leaf`（§2.2）；
 - 写入本像素 = 该 froxel 的局部 `(τ, S)`。
 - 空 froxel ⇒ 恒等 `(τ=0, S=0)`（`T=1, S=0`）。
+- **实现优化（2026-10-10）**：tile 中心视线（`Nxy×1` 单位向量纹理，`BuildTileRayData`）与
+  z 切片边界表（`(Nz+1)×1`，`z_k`）由 CPU **每 tile / 每切片一次**预算，inject 仅 `texelFetch` ——
+  省掉逐 texel 的两次 MVP 逆乘 + `normalize` + `pow(uR,k)`（整数索引 ⇒ 完美缓存复用）。
+  同时太阳方向在 CPU 归一、HG 的 `pow(denom,1.5)` 改 `denom·√denom`。
 
 ### 4.2 L2 / L3 / L4 inject（金字塔，z 方向归约）
 
@@ -180,7 +188,10 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
 2. ★ **Composite 需要「z 向插值」**（不只是 Nxy 双线性）：像素深度落在两切片之间，
    取相邻两切片的 `(T,S)` 先按 z 插值，再与 Nxy 4 邻域做（合计 2×4=8 采样，或 2×2×2）。
 3. **算子可结合、不可交换** ⇒ 金字塔块合成 / 前缀 / base-4 取块，**一律按 z 序**。
-4. **Nz = tile 像素数**（16×16=256）；改 Nz 要同步改 tile 与铺法。
+4. **`Nz` 与 `tile_px` 是两个独立自由度**（不再是「Nz = tile 像素数」的老约束）：
+   `nz` 须为**4 的幂**（`sblock=√nz` 为 2 的幂，金字塔才能整齐 4 合 1）；`tile_px` 为屏幕像素。
+   超屏倍数 `k = sblock/tile_px`；`k>1` = 过采样、`k<1` = froxel 比屏幕粗。
+   `nz` 与 `tile_px` 各自还有合法范围与派生 froxel 纹理尺寸上限（实现里 `FireFogRenderer` 会 CHECK）。
 5. **L1 inject 用 tile 中心视线**（不是像素自己视线）；froxel = 整柱一个值。
 6. **空 froxel = 恒等**（τ=0,S=0，T=1,S=0）。
 7. **薄/锐介质**（厚玻璃若厚度<切片厚度）：网格表示不了 ⇒ per-object 解析（§7）。
@@ -189,7 +200,7 @@ scatter 把**累积对** `(T_cum(z), S_cum(z))`（**从相机 z=0 到深度 z**�
 
 ## 6. 计算量与并行性
 
-- **Inject**：`Nxy × Nz`（= `(W/16)(H/16) × 256`）次，**全并行**；金字塔附加 `O(Nxy·Nz)` 次合并。
+- **Inject**：`Nxy × Nz` 次（`Nxy=(W/tile_px)(H/tile_px)`），**全并行**；金字塔附加 `O(Nxy·Nz)` 次合并。
 - **Scatter**：`Nxy × Nz` 次，**全并行**，每像素 `O(log Nz)` 次合成（**关键：把串行前缀 log 掉**）。
 - **Composite**：`W×H` 次，每像素 O(1)（8 次采样）。
 - 对比现有逐像素 ZDist：把「每全屏像素 × 深度步数」降到「低分辨率 froxel 一次」。
