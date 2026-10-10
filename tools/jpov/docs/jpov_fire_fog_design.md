@@ -2,6 +2,9 @@
 
 > 日期：2026-10-05 ｜ 线：`ai_infra_3` ｜ 状态：**最终设计（v1 待实现）**
 > **2026-10-06 扩展**：v1 定调「**不做 3D 体积纹理、物理引擎铺开**」；补 §10「统一团模型 + 多类采样器 + box 容器」。
+> **2026-10-10 接口升级**：源项拆**散射(albedo)/自发光(emission)**（去掉 intensity：emission 自带 HDR、sigma 自带 1/m）；
+>   雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling，后者 fire_fog 自持一套 Nxy 网格光源表），
+>   移除「无光照 / base 发射」链路（Danis：既然这么物理，不再提供非物理绘制）。
 > 模块：`tools/jpov/src/fire_fog/`（单一自包含 renderer；早期草案名 `point_fog` / `ball_fog`）
 > 推演史 / 取舍理由见 [`jpov_tpz_volumetric_fog_design.md`](jpov_tpz_volumetric_fog_design.md)。**本文只讲定论。**
 
@@ -173,16 +176,15 @@ enum class FogFieldKind : uint8_t {
 struct FogBody {
     Obb           bound;         // 容器（同时 = 积分区间 [t0,t1] 的界）
     FogFieldKind  kind;          // 采样器种类（唯一分派点）
-    Vec3          color;         // 介质 / 发射色（HDR，可 > 1）
-    float         intensity;     // 总体强度（HDR）
-    float         sigma_scale;   // 消光尺度（1/m）
+    float         sigma;         // 消光系数 σ_t（1/m）
+    Color         albedo;        // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色）
+    Color         emission;      // 自发光系数 ε（HDR 辐射亮度/米）
     float         params[8];     // 采样器参数（超集，按 kind 解释；见 §10.3）
-    Vec3          prebaked_lin;  // 每帧预烘慢变项：ambient + Σ点光（团心）
 };
 ```
 
 - 为何 `params[8]` 取超集而非 union：GL 3.3 + 确定性 + 单一缓冲纹理布局，性价比最高；kind 少时浪费可忽略。若某 kind 参数爆表，再拆二级 `params` buffer。
-- 早期「衰减类型」菜单（§9「用户可配：衰减类型」）落到 `kAnalyticProfile` 的 `params[0]`；**用户仍只配 颜色/尺寸/强度/衰减类型**，其余为 JPOV 锁定内部量。
+- 源项 `J = albedo·L_light + ε/σ_t`（散射 + 自发光）；早期「衰减类型」菜单落到 `kAnalyticProfile` 的 `params[0]`；**用户配 消光σ/散射色albedo/自发光emission/尺寸/衰减类型**，其余为 JPOV 锁定内部量。
 
 ### 10.3 各采样器的字段映射（示意，实现时定稿）
 

@@ -18,9 +18,9 @@
 //   4. composite（fire_fog_composite）全屏：4 邻 tile 双线性 + 像素深度 z 向插值 →
 //                              vec4(S.rgb, T)，配 GL_ONE/GL_SRC_ALPHA 就地混合（S + dst·T）。
 //
-// 分步验收（Danis 2026-10-09 定）：
-//   step1：FireFogParams::sun_enable=false ⇒ 只输出 base 发射（不采样任何光源），看雾团形状；
-//   step2：sun_enable=true ⇒ 叠加 ambient + 太阳×CSM 阴影（god ray）。
+// 分步验收说明（2026-10-10 改）：
+//   雾火**始终开启物理光照**（ambient + 太阳×CSM + 点光源 tile culling）；
+//   「无光照 / base 发射」链路已移除（Danis：既然这么物理，不再提供非物理绘制）。
 //
 // 约束：nz 必须是 **4 的幂**（sblock=√nz 为 2 的幂，金字塔才能整齐 4 合 1）。
 //
@@ -83,6 +83,11 @@ public:
     static constexpr int kTexelsPerTile = kMaxFogsPerTile / 4;  // 每 tile 的 RGBA8 texel 数 = 2
     static constexpr int kMaxTotalFogs = 255;          // 全局团上限（uint8 索引，sentinel=255）
     static constexpr uint8_t kFogIndexSentinel = 255;  // 空槽哨兵
+    // 点光源 tile 索引（fire_fog 自持网格，与团网格同尺寸）：每 Nxy 单元至多 8 个光源
+    //（与最大团数同值），每 texel RGBA 各 1 个 uint8 索引。
+    static constexpr int kMaxLightsPerTile = 8;        // 每 tile 光源上限
+    static constexpr int kLightTexelsPerTile = kMaxLightsPerTile / 4;  // = 2
+    static constexpr int kMaxTotalLights = 255;        // 全局光源上限（与 object3d 一致）
 
     FireFogRenderer() = default;
     ~FireFogRenderer();
@@ -99,17 +104,20 @@ public:
     // froxel 雾火管线（见头文件顶部）：inject/reduce/scatter 在自建 FBO 上跑，composite 回到
     // 调用方当前绑定的 3D HDR FBO **就地**混合（GL_ONE/GL_SRC_ALPHA）。
     //   fogs            : 本帧的点状雾体（命令层 PointFog）。
+    //   point_lights    : 本帧的点光源（命令层 PointLight）——fire_fog 自持一套 tile culling，
+    //                     取 position / color / linear_radius / intensity 做点光源内散射。
     //   cam             : 相机（取世界位置做光线原点 + 每 tile z 范围）。
     //   view_proj       : Proj*View（列主序 16 float）。
     //   viewport_w/h    : 当前 3D FBO 像素尺寸（= froxel 纹理尺寸）。
     //   scene_depth_tex : MRT#1 场景深度（R32F，单采样），composite 按像素深度裁剪；0 = 不裁剪。
-    //   params          : 光照开关 / 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
-    //   light           : 物理光照 + CSM 资源（仅 sun_enable=true 时使用）。
+    //   params          : 相位 / 增益 + froxel z 分布区间（z_near/z_far）。
+    //   light           : 物理光照来源（ambient + 太阳×CSM 资源）。
     // Pre-conditions: Init 已调用；调用方已绑定 HDR FBO 并设好 viewport；场景深度纹理
     //                 **不**是当前 draw FBO 的附件（否则采样↔写入反馈环）。
     // 说明：fogs 为空时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 / viewport /
     //       活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
     void Draw(const std::vector<PointFog>& fogs,
+              const std::vector<PointLight>& point_lights,
               const Camera& cam,
               const float view_proj[16],
               int viewport_w,
@@ -164,6 +172,13 @@ private:
     int tile_tex_h_ = 0;
     int grid_w_ = 0;
     int grid_h_ = 0;
+
+    // 点光源 tile 索引纹理（RGBA8；宽 = grid_w*kLightTexelsPerTile，高 = grid_h）。
+    // fire_fog **自持**一套光源 TC（不共用渲染器的 16px 光表：两网格非整数倍，跨网格查表散乱）。
+    // 尺寸随 Nxy 栅格变化 ⇒ 同样记录尺寸、变化即重建。
+    unsigned int tile_light_tex_ = 0;
+    int tile_light_tex_w_ = 0;
+    int tile_light_tex_h_ = 0;
 
     // 每 tile 保守 z 范围纹理（RG32F；宽 = grid_w，高 = grid_h）。
     // 尺寸随 Nxy 栅格（tile_px）变化，故与 tile_index_tex_ 一样记录尺寸、变化即重建

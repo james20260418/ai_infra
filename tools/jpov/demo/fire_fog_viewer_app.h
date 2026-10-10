@@ -7,8 +7,11 @@
 // 与 skylight viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI 面板约定）：
 //   - 场景资源（地面 mesh / 橡树 glTF）由主程序装配后传入；
 //   - 光照沿用 skylight_scene.h 的 SkyDegrees + MakeSkyLighting（白昼标准天光，单色 ambient）；
-//   - 交互面板暴露**点状雾**的可调参数：中心 x/y/z、半径、强度、颜色、衰减剖面；另加
-//     **光照开关**（step1 base 发射 / step2 ambient+太阳×CSM）与 god ray（相位 / 增益）。
+//   - 交互面板暴露**点状雾**的可调参数：中心 x/y/z、半径、消光 σ、衰减剖面、
+//     散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fire_fog 消费点光源）、
+//     太阳仰角/方位角/浊度，以及 god ray 的相位/增益。
+//
+// ⚠️ 雾火**始终走物理光照**（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放）。
 
@@ -61,13 +64,20 @@ public:
     // ── 点状雾参数（单个团；用户可调）──
     jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // 雾体中心（橡树中段）
     float fog_radius_ = 4.5f;                                  // 半径（米）
-    jpov::Color fog_color_ = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};  // 内散射色 / 介质色
-    float fog_intensity_ = 0.6f;                               // 消光尺度 σ 系数
+    float fog_sigma_ = 0.6f;                                   // 消光系数 σ_t（1/m）
+    jpov::Color fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};    // 散射色（∈[0,1]）
+    jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
-    // ── 光照开关（分步验收）：false = 只输出 base 发射（step1）；true = ambient+太阳×CSM ──
-    bool sun_enable_ = false;
-    float sun_phase_g_ = 0.7f;         // HG 相位各向异性（god ray 强度）
+    // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
+    bool point_light_enable_ = true;
+    jpov::Vec3f point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    jpov::Color point_light_color_ = jpov::Color{1.0f, 0.85f, 0.6f, 1.0f};
+    float point_light_intensity_ = 8.0f;
+    float point_light_radius_ = 12.0f;
+
+    // ── god ray ──
+    float sun_phase_g_ = 0.7f;         // HG 相位各向异性（太阳/点光源共用）
     float sun_gain_ = 2.0f;            // 太阳项增益
 
     // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
@@ -132,18 +142,28 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(oak_, oak_center_, oak_up_, oak_front_, oak_scale_);
 
+        // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
+        if (point_light_enable_) {
+            jpov::PointLight pl;
+            pl.position = point_light_pos_;
+            pl.color = point_light_color_;
+            pl.linear_radius = point_light_radius_;
+            pl.intensity = point_light_intensity_;
+            cmds->point_lights.push_back(pl);
+        }
+
         // 点状雾（走 fire_fog froxel 体积管线）。
         if (show_fog_) {
             jpov::PointFog fog;
             fog.center = fog_center_;
             fog.radius = fog_radius_;
-            fog.color = fog_color_;
-            fog.intensity = fog_intensity_;
+            fog.sigma = fog_sigma_;
+            fog.albedo = fog_albedo_;
+            fog.emission = fog_emission_;
             fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
             cmds->point_fogs.push_back(fog);
 
             jpov::FireFogParams ff;
-            ff.sun_enable = sun_enable_;
             ff.sun_phase_g = sun_phase_g_;
             ff.sun_gain = sun_gain_;
             ff.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
@@ -175,9 +195,10 @@ private:
         const float frame_dt_ms = 1000.0f / kViewerFps;
         ui_.Begin(input, theme, w, h, frame_dt_ms);
 
-        const float slim = 0.42f * w;         // 细滑条（数值调节）
+        const float colw = 0.30f * w;         // 每列滑条宽度
         const float x0 = 0.02f * w;
-        const float x1 = 0.52f * w;
+        const float x1 = 0.35f * w;
+        const float x2 = 0.68f * w;
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
@@ -187,17 +208,17 @@ private:
                            + static_cast<float>(kRows - 1) * kSpacing);
 
         auto row = [&](int col, int i) {
+            const float x = (col == 0) ? x0 : ((col == 1) ? x1 : x2);
             return jpov::UiRect{
-                {col == 0 ? x0 : x1, top + static_cast<float>(i) * (kRowH + kSpacing)},
-                {slim, kRowH}};
+                {x, top + static_cast<float>(i) * (kRowH + kSpacing)}, {colw, kRowH}};
         };
 
-        // ── 左列：雾体几何/强度 + froxel 分辨率 + 光照开关 ──
+        // ── 列 0：雾体几何 + 消光 + froxel 分辨率 ──
         ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
         ui_.SliderFloat("中心 z", &fog_center_.z(), row(0, 2), -10.0f, 10.0f, 2);
         ui_.SliderFloat("半径 m", &fog_radius_, row(0, 3), 0.2f, 10.0f, 2);
-        ui_.SliderFloat("强度 σ", &fog_intensity_, row(0, 4), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, row(0, 4), 0.0f, 4.0f, 3);
         {
             const std::vector<const char*> items = {"Nz=64", "Nz=256"};
             ui_.Combo("z 切片 Nz", &nz_index_, items, row(0, 5));
@@ -206,23 +227,33 @@ private:
             const std::vector<const char*> items = {"tile=8px", "tile=16px", "tile=32px"};
             ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 6));
         }
-        ui_.Checkbox("太阳光照(CSM)", &sun_enable_, row(0, 7));
-        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 8), 50.0f, 4000.0f, 0);
+        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 7), 50.0f, 4000.0f, 0);
 
-        // ── 右列：剖面 + 雾色 + 天光主光仰角 + god ray ──
+        // ── 列 1：剖面 + 散射色 albedo + 自发光 emission + god ray ──
         {
             const std::vector<const char*> items = {
                 "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
             ui_.Combo("衰减剖面", &fog_attenuation_, items, row(1, 0));
         }
-        ui_.SliderFloat("色 R", &fog_color_.r, row(1, 1), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("色 G", &fog_color_.g, row(1, 2), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("色 B", &fog_color_.b, row(1, 3), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(1, 4), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(1, 5), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(1, 6), 0.0f, 8.0f, 1);
+        ui_.SliderFloat("散射 R", &fog_albedo_.r, row(1, 1), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 G", &fog_albedo_.g, row(1, 2), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 B", &fog_albedo_.b, row(1, 3), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("自发光 R", &fog_emission_.r, row(1, 4), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("自发光 G", &fog_emission_.g, row(1, 5), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("自发光 B", &fog_emission_.b, row(1, 6), 0.0f, 4.0f, 2);
         ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 7), 0.0f, 0.9f, 2);
         ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 8), 0.0f, 4.0f, 2);
+
+        // ── 列 2：点光源 + 太阳角度 ──
+        ui_.Checkbox("点光源", &point_light_enable_, row(2, 0));
+        ui_.SliderFloat("点光 x", &point_light_pos_.x(), row(2, 1), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 y", &point_light_pos_.y(), row(2, 2), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 z", &point_light_pos_.z(), row(2, 3), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 亮度", &point_light_intensity_, row(2, 4), 0.0f, 40.0f, 1);
+        ui_.SliderFloat("点光 半径", &point_light_radius_, row(2, 5), 0.5f, 40.0f, 1);
+        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
     }
 
     bool show_panel_ = true;

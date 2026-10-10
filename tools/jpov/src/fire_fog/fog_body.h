@@ -51,11 +51,10 @@ enum class FogFieldKind : uint8_t {
 struct FogBody {
     Obb bound;               // 容器（同时 = 积分区间 [t0,t1] 的界）
     FogFieldKind kind;       // 采样器种类（唯一分派点）
-    Color color;             // 介质 / 发射色（HDR，可 > 1）
-    float intensity;         // 总体强度（HDR）
-    float sigma_scale;       // 消光尺度（1/m）
+    float sigma;             // 消光系数 σ_t（1/m，>= 0）
+    Color albedo;            // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
+    Color emission;          // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
     float params[8];         // 采样器参数（超集，按 kind 解释；见设计文档 §10.3）
-    Vec3f prebaked_lin;      // 每帧预烘慢变项：ambient + Σ点光（团心）
 };
 
 }  // namespace jpov

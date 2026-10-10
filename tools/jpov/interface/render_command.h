@@ -442,7 +442,7 @@ struct PointLight {
 // 点雾体的径向衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
 //
 // 剖面给出半径 r ∈ [0, R] 处的相对消光权重 w(r) ∈ [0,1]；r > R 处 w = 0（球外不贡献）。
-// 实际消光强度由 Fire-Fog 管线结合 intensity / 颜色推出，本字段只定「形状」。
+// 点处的消光系数 = sigma · w(r)（见 PointFog.sigma），本字段只定「形状」。
 enum class FogAttenuation : uint8_t {
     kUniform = 0,      // 均匀：r ≤ R 恒为 1（硬边球）
     kLinear = 1,       // 线性：w = 1 − r/R
@@ -453,38 +453,48 @@ enum class FogAttenuation : uint8_t {
 // 点状雾体（世界空间）—— JPOV 雾火管线的用户级输入（v1：简单点状雾）。
 //
 // 雾体「像点光源一样摆放」：在 center 处放一团半径 radius 的雾，半径内按 attenuation
-// 剖面给出消光密度，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
-// 逐像素 ZDist；见 tools/jpov/docs/jpov_fire_fog_design.md），与 ElevationFogConfig
+// 剖面给出消光，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
+// froxel 摊销；见 tools/jpov/docs/jpov_froxel_design.md），与 ElevationFogConfig
 //（屏幕空间解析雾）是**两条不同的通道**。
 //
-// 字段（按此顺序聚合初始化）：
-//   { center, radius, color, intensity, attenuation }
-// 例: { {0,1,0}, 3.0f, {1.0f,0.6f,0.2f,1.0f}, 1.5f, FogAttenuation::kQuadratic }
+// ── 散射 vs 自发光（辐射传输的源项，二者在此**显式分开**）──
+//   J = σ_s · L_light  +  ε        （每米）
+//       └ 散射：借外光 ┘   └ 自发光：自生 ┘
+//   · 散射（albedo）：依赖外部光照（无光则无贡献），强度 ∝ 消光；把入射光「染色」。
+//   · 自发光（emission）：与光照**无关**（黑屋自亮），独立于密度；颜色/亮度自带（HDR）。
+//   段贡献（长 Δz、光学深度 Δτ = σ_t·w·Δz）：
+//     S_seg = albedo·L_light·(1−e^{−Δτ})  +  (ε/σ_t)·(1−e^{−Δτ})
+//   自发光项薄极限 → ε·Δz，与密度无关（不乘 σ）。
 //
-// Pre-condition: radius > 0
+// 字段（按此顺序聚合初始化）：
+//   { center, radius, sigma, albedo, emission, attenuation }
+// 例: { {0,1,0}, 3.0f, 1.5f, {0.8f,0.8f,0.8f,1.0f}, {0,0,0,1}, FogAttenuation::kQuadratic }
+//
+// Pre-condition: radius > 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0
 struct PointFog {
     Vec3f center;                 // 雾体中心（世界坐标）
     float radius;                 // 半径（米，> 0）；超出该半径的像素不受本团影响
-    Color color;                  // 介质色 / 内散射色（HDR 线性域）
-    float intensity;              // 强度（HDR，可 > 1）
-    FogAttenuation attenuation;   // 径向衰减剖面
+    float sigma;                  // 消光系数 σ_t（1/m，>= 0）—— 物理量纲，非「强度」
+    Color albedo;                 // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
+    Color emission;               // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
+    FogAttenuation attenuation;   // 径向衰减剖面（形状）
 };
 
 // Fire-Fog（froxel 体积雾）管线参数。
 //
-// 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
+// 由雾火查看器暴露以调参；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
+//
+// ⚠️ 雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling）；
+//    「无光照 / base 发射」链路已移除（Danis 2026-10-10：既然这么物理，不再提供非物理绘制）。
+//
 // Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
 //                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
 struct FireFogParams {
-    // 光照开关（分步验收用）：
-    //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
-    //   true  = 叠加 ambient + 太阳×CSM 阴影（step2，god ray）。
-    bool sun_enable = false;
-    // 太阳项散射相位（Henyey-Greenstein 各向异性 g ∈ [0,0.95)；0=各向同性）。
-    // 越大 ⇒ 逆着太阳看时雾越亮（god ray 更明显）；只影响太阳直射项，不影响 ambient。
+    // 所有光源（太阳 + 点光源）内散射的 Henyey-Greenstein 相位各向异性 g ∈ [0,0.95)；
+    // 0=各向同性。越大 ⇒ 迎着光源看时雾越亮（god ray 更明显）。不作用于 ambient（各向同性）。
     float sun_phase_g = 0.5f;
-    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
+    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度；只作用于太阳项。
     float sun_gain = 1.0f;
     // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
     // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/nz}。near 别设太小（浪费近端）。
@@ -1830,8 +1840,7 @@ struct RenderCommandList {
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
 
-    // Fire-Fog 管线参数（光照开关 / 相位 / 增益）。未设置时用默认值
-    //（sun_enable=false ⇒ 只输出 base 发射）。仅在 point_fogs 非空时生效。
+    // Fire-Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
     std::optional<FireFogParams> fire_fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
