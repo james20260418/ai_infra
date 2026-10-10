@@ -7,8 +7,9 @@
 //      （RGBA8；每 tile kTexelsPerTile 个 texel，每 texel RGBA 各 1 个 uint8 团索引）。
 //   3. BuildTileZRangeData：每 tile 的**保守 z 范围**，供 inject 短路「该切片是否可能碰雾」。
 //
-// MVP 约定：只有 kAnalyticProfile；PointFog.intensity 直接作为消光尺度（σ = intensity·profile），
-// 光照明用常量发射色（color）。这些语义在 fire_fog_shader.h 里与之对应。
+// MVP 约定：只有 kAnalyticProfile；PointFog.sigma 为消光系数（点处 σ = sigma·profile），
+// albedo 为散射色（乘光照），emission 为自发光（与密度无关）。这些语义在
+// fire_fog_shader.h 里与之对应（光照始终开启：ambient + 太阳×CSM + 点光源 tile culling）。
 
 #ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
 #define JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
@@ -30,10 +31,21 @@ namespace jpov {
 //
 // 立方 OBB：中心 = fog.center，三轴 = 世界单位轴，三半轴长 = fog.radius（故 box ⊇ 球，
 // 剪枝保守不漏）。kind = kAnalyticProfile；params[0] = attenuation（剖面枚举）。
-// MVP 光照：不采样任何光源，L_in = 常量 = color。sigma_scale 预留未用（置 1）。
-// Pre-condition: fog.radius > 0
+// sigma / albedo / emission 原样映射（散射与自发光分开；光照由 inject shader 始终开启）。
+// Pre-conditions: fog.radius > 0；fog.sigma >= 0；albedo ∈ [0,1]；emission >= 0
 inline FogBody LowerPointFog(const PointFog& fog) {
     CHECK_GT(fog.radius, 0.0f) << "PointFog.radius 必须 > 0";
+    CHECK_GE(fog.sigma, 0.0f) << "PointFog.sigma（消光系数 1/m）必须 >= 0";
+    CHECK_GE(fog.albedo.r, 0.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(fog.albedo.g, 0.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(fog.albedo.b, 0.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(fog.albedo.r, 1.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(fog.albedo.g, 1.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(fog.albedo.b, 1.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(fog.emission.r, 0.0f) << "PointFog.emission 各通道必须 >= 0";
+    CHECK_GE(fog.emission.g, 0.0f) << "PointFog.emission 各通道必须 >= 0";
+    CHECK_GE(fog.emission.b, 0.0f) << "PointFog.emission 各通道必须 >= 0";
+
     FogBody b;
     b.bound.center = fog.center;
     b.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
@@ -41,14 +53,13 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     b.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
     b.bound.half_extent = Vec3f(fog.radius, fog.radius, fog.radius);
     b.kind = FogFieldKind::kAnalyticProfile;
-    b.color = fog.color;
-    b.intensity = fog.intensity;
-    b.sigma_scale = 1.0f;   // MVP 未用（σ 由 intensity 直接给出）
+    b.sigma = fog.sigma;
+    b.albedo = fog.albedo;
+    b.emission = fog.emission;
     for (int i = 0; i < 8; ++i) {
         b.params[i] = 0.0f;
     }
     b.params[0] = static_cast<float>(fog.attenuation);
-    b.prebaked_lin = Vec3f(0.0f, 0.0f, 0.0f);
     return b;
 }
 
@@ -174,6 +185,98 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
                 continue;   // 先到先得
             }
             idx[static_cast<size_t>(t) * max_per_tile + cnt] = static_cast<uint8_t>(bi);
+            ++cnt;
+        }
+    }
+
+    std::vector<uint8_t> packed(static_cast<size_t>(tex_w) * grid_h * 4, sentinel);
+    for (int tr = 0; tr < grid_h; ++tr) {
+        for (int tc = 0; tc < grid_w; ++tc) {
+            const int t = tr * grid_w + tc;
+            for (int k = 0; k < texels_per_tile; ++k) {
+                const int gx = tc * texels_per_tile + k;
+                uint8_t* px = &packed[(static_cast<size_t>(tr) * tex_w + gx) * 4];
+                px[0] = idx[static_cast<size_t>(t) * max_per_tile + k * 4 + 0];
+                px[1] = idx[static_cast<size_t>(t) * max_per_tile + k * 4 + 1];
+                px[2] = idx[static_cast<size_t>(t) * max_per_tile + k * 4 + 2];
+                px[3] = idx[static_cast<size_t>(t) * max_per_tile + k * 4 + 3];
+            }
+        }
+    }
+    return packed;
+}
+
+// 由**点光源列表** + 相机 MVP 生成「每 tile ≤K 个光源索引」的 tile 索引纹理（RGBA8）像素数据。
+//
+// 与 BuildTileFogIndexData **同机制**，只是对象是点光源（影响球）：把光源世界 AABB（球的外接
+// 立方，中心=光源位置、半径=linear_radius）的 8 角投影 → 屏幕凸包 → 覆盖的 tile；
+// 任一角在近平面后 ⇒ 保守覆盖全屏（与雾团剪枝同规则）。先到先得，每 tile 超过 max_per_tile 丢弃多余。
+//
+// 用途：fire_fog inject 的**点光源内散射**按 froxel 的 Nxy 栅格做 tile culling
+//（与雾团 TC **解耦**：光源表用 fire_fog 自己的网格，不共用渲染器的 16px 光表）。
+//
+// 输出布局：宽 = grid_w*texels_per_tile，高 = grid_h；每 tile 的 texels_per_tile 个 texel
+// 依次接排；每 texel 的 RGBA 各放一个 uint8 光索引；空槽填 sentinel。
+// 返回的 vector 可直接 glTexImage2D(..., GL_RGBA, GL_UNSIGNED_BYTE, data)。
+//
+// Pre-conditions: grid_w >= 1, grid_h >= 1, tile_size > 0, max_per_tile == texels_per_tile*4
+inline std::vector<uint8_t> BuildTileLightIndexData(const std::vector<PointLight>& lights,
+                                                    const float mvp[16],
+                                                    int grid_w,
+                                                    int grid_h,
+                                                    int tile_size,
+                                                    int max_per_tile,
+                                                    int texels_per_tile,
+                                                    uint8_t sentinel) {
+    CHECK_GE(grid_w, 1);
+    CHECK_GE(grid_h, 1);
+    CHECK_GT(tile_size, 0);
+    CHECK_EQ(max_per_tile, texels_per_tile * 4);
+
+    const int tex_w = grid_w * texels_per_tile;
+    const int total_tiles = grid_w * grid_h;
+    std::vector<uint8_t> counts(static_cast<size_t>(total_tiles), 0);
+    std::vector<uint8_t> idx(static_cast<size_t>(total_tiles) * max_per_tile, sentinel);
+
+    const int light_count = static_cast<int>(lights.size());
+    for (int li = 0; li < light_count; ++li) {
+        const PointLight& l = lights[li];
+        if (l.linear_radius <= 0.0f) {
+            continue;   // 无效范围，跳过（与雾团 radius > 0 同门）
+        }
+        // 光源影响球 → 外接立方 OBB（各半轴 = linear_radius）。
+        FogBody dummy;
+        dummy.bound.center = l.position;
+        dummy.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
+        dummy.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
+        dummy.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
+        dummy.bound.half_extent = Vec3f(l.linear_radius, l.linear_radius, l.linear_radius);
+
+        std::vector<TileCoord> covered;
+        bool behind = false;
+        AppendBodyCoveredTiles(dummy, mvp, tile_size, grid_w, grid_h, &covered, &behind);
+
+        if (behind) {
+            for (int t = 0; t < total_tiles; ++t) {
+                uint8_t& cnt = counts[t];
+                if (cnt >= static_cast<uint8_t>(max_per_tile)) {
+                    continue;
+                }
+                idx[static_cast<size_t>(t) * max_per_tile + cnt] = static_cast<uint8_t>(li);
+                ++cnt;
+            }
+            continue;
+        }
+        for (const TileCoord& tc : covered) {
+            if (tc.x < 0 || tc.x >= grid_w || tc.y < 0 || tc.y >= grid_h) {
+                continue;
+            }
+            const int t = tc.y * grid_w + tc.x;
+            uint8_t& cnt = counts[t];
+            if (cnt >= static_cast<uint8_t>(max_per_tile)) {
+                continue;   // 先到先得
+            }
+            idx[static_cast<size_t>(t) * max_per_tile + cnt] = static_cast<uint8_t>(li);
             ++cnt;
         }
     }
