@@ -1693,7 +1693,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                fire_fog_renderer_.Draw(cmds.point_fogs, cam, mvp_,
+                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
                                         ff_params, ff_light);
 #ifdef JPOV_WITHOUT_MSAA

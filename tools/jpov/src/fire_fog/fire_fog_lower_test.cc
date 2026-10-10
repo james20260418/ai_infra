@@ -1,7 +1,8 @@
-// FireFogLower 单测 — GL-free CPU 工具：命令层点雾 → 团（FogBody）+ tile 剪枝表。
+// FireFogLower 单测 — GL-free CPU 工具：命令层点雾 → 团（FogBody）+ tile 剪枝表；
+// 以及点光源 tile 索引表（fire_fog 自持的 Nxy 网格光源 culling）。
 //
-// 覆盖：LowerPointFog 字段映射；BuildTileFogIndexData 的空输入 / 居中投影覆盖 /
-// 每 tile cap（先到先得）/ 打包布局 / 近平面后保守全屏。
+// 覆盖：LowerPointFog 字段映射；BuildTileFogIndexData / BuildTileLightIndexData 的空输入 /
+// 居中投影覆盖 / 每 tile cap（先到先得）/ 打包布局 / 近平面后保守全屏；z 范围表；tile 射线。
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
 
@@ -46,12 +47,25 @@ std::vector<int> TileIndices(const std::vector<uint8_t>& packed, int grid_w,
     return out;
 }
 
+// 构造一个「球心 origin、半径 radius」的点雾（只填几何；散射/自发光置中性）。
+PointFog MakeFog(const Vec3f& center, float radius, FogAttenuation atten) {
+    PointFog fog;
+    fog.center = center;
+    fog.radius = radius;
+    fog.sigma = 1.0f;
+    fog.albedo = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    fog.emission = Color{0.0f, 0.0f, 0.0f, 1.0f};
+    fog.attenuation = atten;
+    return fog;
+}
+
 TEST(FireFogLower, LowerPointFogMapsFields) {
     PointFog fog;
     fog.center = Vec3f(1.0f, 2.0f, 3.0f);
     fog.radius = 2.5f;
-    fog.color = Color{0.1f, 0.2f, 0.3f, 1.0f};
-    fog.intensity = 0.75f;
+    fog.sigma = 0.75f;
+    fog.albedo = Color{0.1f, 0.2f, 0.3f, 1.0f};
+    fog.emission = Color{0.4f, 0.5f, 0.6f, 1.0f};
     fog.attenuation = FogAttenuation::kQuadratic;
 
     const FogBody b = LowerPointFog(fog);
@@ -66,10 +80,13 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.bound.axis[0].x(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.axis[1].y(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.axis[2].z(), 1.0f);
-    EXPECT_FLOAT_EQ(b.color.r, 0.1f);
-    EXPECT_FLOAT_EQ(b.color.g, 0.2f);
-    EXPECT_FLOAT_EQ(b.color.b, 0.3f);
-    EXPECT_FLOAT_EQ(b.intensity, 0.75f);
+    EXPECT_FLOAT_EQ(b.sigma, 0.75f);
+    EXPECT_FLOAT_EQ(b.albedo.r, 0.1f);
+    EXPECT_FLOAT_EQ(b.albedo.g, 0.2f);
+    EXPECT_FLOAT_EQ(b.albedo.b, 0.3f);
+    EXPECT_FLOAT_EQ(b.emission.r, 0.4f);
+    EXPECT_FLOAT_EQ(b.emission.g, 0.5f);
+    EXPECT_FLOAT_EQ(b.emission.b, 0.6f);
     // attenuation 落在 params[0]（shader 读 t2.x）。
     EXPECT_FLOAT_EQ(b.params[0], static_cast<float>(FogAttenuation::kQuadratic));
 }
@@ -104,13 +121,8 @@ TEST(FireFogLower, CenteredBodyCoversExpectedTiles) {
 
     // viewport = 64×64。球心在原点、半径 0.15 ⇒ NDC ±0.15 ⇒ 屏幕 [22.4, 41.6]
     // ⇒ 落在 tile 列/行 1..2（tile1=[16,32)、tile2=[32,48)），避开边界。
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 0.0f);
-    fog.radius = 0.15f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
-    std::vector<FogBody> bodies{LowerPointFog(fog)};
+    std::vector<FogBody> bodies{
+        LowerPointFog(MakeFog(Vec3f(0, 0, 0), 0.15f, FogAttenuation::kUniform))};
 
     const std::vector<uint8_t> packed = BuildTileFogIndexData(
         bodies, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
@@ -144,15 +156,10 @@ TEST(FireFogLower, PerTileCapFirstComeFirstServed) {
     constexpr uint8_t kSentinel = 255;
 
     // 10 个团全部覆盖同一区域（同中心/半径）⇒ 每 tile 应只记前 8 个（0..7）。
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 0.0f);
-    fog.radius = 0.15f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
     std::vector<FogBody> bodies;
     for (int i = 0; i < 10; ++i) {
-        bodies.push_back(LowerPointFog(fog));
+        bodies.push_back(
+            LowerPointFog(MakeFog(Vec3f(0, 0, 0), 0.15f, FogAttenuation::kUniform)));
     }
     const std::vector<uint8_t> packed = BuildTileFogIndexData(
         bodies, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
@@ -187,13 +194,8 @@ TEST(FireFogLower, BehindCameraCoversWholeScreen) {
     mvp[11] = -1.0f;   // clip.w = -z
     mvp[15] = 0.0f;
 
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 2.0f);   // z>0 ⇒ w<0
-    fog.radius = 0.1f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
-    std::vector<FogBody> bodies{LowerPointFog(fog)};
+    std::vector<FogBody> bodies{
+        LowerPointFog(MakeFog(Vec3f(0, 0, 2), 0.1f, FogAttenuation::kUniform))};
 
     const std::vector<uint8_t> packed = BuildTileFogIndexData(
         bodies, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
@@ -226,13 +228,8 @@ TEST(FireFogLower, ZRangeCenteredBodyCoversExpectedTiles) {
     constexpr int kGridH = 4;
     constexpr int kTile = 16;
 
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 0.0f);
-    fog.radius = 0.15f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
-    std::vector<FogBody> bodies{LowerPointFog(fog)};
+    std::vector<FogBody> bodies{
+        LowerPointFog(MakeFog(Vec3f(0, 0, 0), 0.15f, FogAttenuation::kUniform))};
 
     // 相机在 (0,0,-10)：团心距相机 d=10，外接球 r=radius*√3（立方 OBB）。
     const std::vector<float> zr = BuildTileZRangeData(
@@ -274,13 +271,8 @@ TEST(FireFogLower, ZRangeBehindCameraCoversWholeScreen) {
     mvp[11] = -1.0f;   // clip.w = -z ⇒ z>0 处 w<0（近平面后）
     mvp[15] = 0.0f;
 
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 2.0f);
-    fog.radius = 0.1f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
-    std::vector<FogBody> bodies{LowerPointFog(fog)};
+    std::vector<FogBody> bodies{
+        LowerPointFog(MakeFog(Vec3f(0, 0, 2), 0.1f, FogAttenuation::kUniform))};
 
     const std::vector<float> zr =
         BuildTileZRangeData(bodies, mvp, Vec3f(0.0f, 0.0f, 0.0f), kGridW, kGridH, kTile,
@@ -336,18 +328,204 @@ TEST(FireFogLower, ZRangeBodyOutsideDepthRangeAllZero) {
     IdentityMvp(mvp);
 
     // 团心距相机 3000m，z_far=2000 ⇒ 完全在 froxel z 区间外 ⇒ 无 tile 命中。
-    PointFog fog;
-    fog.center = Vec3f(0.0f, 0.0f, 3000.0f);
-    fog.radius = 0.15f;
-    fog.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
-    fog.intensity = 1.0f;
-    fog.attenuation = FogAttenuation::kUniform;
-    std::vector<FogBody> bodies{LowerPointFog(fog)};
+    std::vector<FogBody> bodies{
+        LowerPointFog(MakeFog(Vec3f(0, 0, 3000), 0.15f, FogAttenuation::kUniform))};
 
     const std::vector<float> zr =
         BuildTileZRangeData(bodies, mvp, Vec3f(0.0f, 0.0f, 0.0f), 4, 4, 16, 0.1f, 2000.0f);
     for (float v : zr) {
         EXPECT_EQ(v, 0.0f);
+    }
+}
+
+// ── 点光源 tile 索引表（fire_fog 自持网格）──────────────────────────────────
+
+TEST(FireFogLower, LightIndexEmptyAllSentinel) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        {}, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+    const size_t expected = static_cast<size_t>(kGridW * kTexels) * kGridH * 4;
+    ASSERT_EQ(packed.size(), expected);
+    for (uint8_t v : packed) {
+        EXPECT_EQ(v, kSentinel);
+    }
+}
+
+TEST(FireFogLower, LightIndexCenteredCoversExpectedTiles) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    // 光源在原点、影响半径 0.15 ⇒ 屏幕 [22.4,41.6] ⇒ 覆盖 tile 1..2（避开边界）。
+    PointLight light;
+    light.position = Vec3f(0.0f, 0.0f, 0.0f);
+    light.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    light.linear_radius = 0.15f;
+    light.intensity = 1.0f;
+    std::vector<PointLight> lights{light};
+
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        lights, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+
+    int covered = 0;
+    for (int tr = 0; tr < kGridH; ++tr) {
+        for (int tc = 0; tc < kGridW; ++tc) {
+            const std::vector<int> idx = TileIndices(packed, kGridW, kTexels,
+                                                     kSentinel, tc, tr);
+            const bool in_region = (tc >= 1 && tc <= 2 && tr >= 1 && tr <= 2);
+            if (in_region) {
+                ASSERT_EQ(idx.size(), 1u) << "tile(" << tc << "," << tr << ")";
+                EXPECT_EQ(idx[0], 0);
+                ++covered;
+            } else {
+                EXPECT_TRUE(idx.empty()) << "tile(" << tc << "," << tr << ")";
+            }
+        }
+    }
+    EXPECT_EQ(covered, 4);
+}
+
+TEST(FireFogLower, LightIndexPerTileCapFirstComeFirstServed) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    // 10 盏同位置光源 ⇒ 每覆盖 tile 应只记前 8 盏（索引 0..7）。
+    PointLight light;
+    light.position = Vec3f(0.0f, 0.0f, 0.0f);
+    light.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    light.linear_radius = 0.15f;
+    light.intensity = 1.0f;
+    std::vector<PointLight> lights(10, light);
+
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        lights, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+
+    for (int tr = 1; tr <= 2; ++tr) {
+        for (int tc = 1; tc <= 2; ++tc) {
+            const std::vector<int> idx = TileIndices(packed, kGridW, kTexels,
+                                                     kSentinel, tc, tr);
+            ASSERT_EQ(idx.size(), static_cast<size_t>(kMaxPer));
+            for (int i = 0; i < kMaxPer; ++i) {
+                EXPECT_EQ(idx[i], i);   // 先到先得
+            }
+        }
+    }
+}
+
+TEST(FireFogLower, LightIndexZeroRadiusSkipped) {
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    // 影响半径 0 的光源无效 ⇒ 全部 tile 空（sentinel）。
+    PointLight light;
+    light.position = Vec3f(0.0f, 0.0f, 0.0f);
+    light.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    light.linear_radius = 0.0f;
+    light.intensity = 1.0f;
+    std::vector<PointLight> lights{light};
+
+    const std::vector<uint8_t> packed =
+        BuildTileLightIndexData(lights, mvp, 4, 4, 16, kMaxPer, kTexels, kSentinel);
+    for (uint8_t v : packed) {
+        EXPECT_EQ(v, kSentinel);
+    }
+}
+
+TEST(FireFogLower, LightIndexBehindCameraCoversWholeScreen) {
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    float mvp[16];
+    for (int i = 0; i < 16; ++i) {
+        mvp[i] = 0.0f;
+    }
+    mvp[0] = 1.0f;
+    mvp[5] = 1.0f;
+    mvp[11] = -1.0f;   // clip.w = -z ⇒ z>0 处 w<0（近平面后）
+    mvp[15] = 0.0f;
+
+    PointLight light;
+    light.position = Vec3f(0.0f, 0.0f, 2.0f);
+    light.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    light.linear_radius = 0.1f;
+    light.intensity = 1.0f;
+    std::vector<PointLight> lights{light};
+
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        lights, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+
+    for (int tr = 0; tr < kGridH; ++tr) {
+        for (int tc = 0; tc < kGridW; ++tc) {
+            const std::vector<int> idx = TileIndices(packed, kGridW, kTexels,
+                                                     kSentinel, tc, tr);
+            ASSERT_EQ(idx.size(), 1u) << "tile(" << tc << "," << tr << ")";
+            EXPECT_EQ(idx[0], 0);
+        }
+    }
+}
+
+TEST(FireFogLower, LightIndexOverTotalCapDroppedNotWrapped) {
+    // 超过 sentinel 个光源（uint8 索引上限）时，多出的光源必须**被丢弃**
+    //（而非 static_cast<uint8_t> 回绕指到错误光源）。
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    PointLight base;
+    base.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    base.intensity = 1.0f;
+    base.linear_radius = 0.15f;
+    base.position = Vec3f(0.0f, 0.0f, 0.0f);   // 覆盖 tile(1..2,1..2)
+
+    std::vector<PointLight> lights(256, base);
+    // 第 257 个（索引 256）独在 tile(3,3)：若回绕会被当作光源 0（错误）；应被丢弃。
+    PointLight far_light = base;
+    far_light.position = Vec3f(0.85f, 0.85f, 0.0f);   // 屏幕 ≈ (59,59) → tile(3,3)
+    far_light.linear_radius = 0.1f;
+    lights.push_back(far_light);
+
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        lights, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+
+    // tile(3,3) 必须为空（超限光源被丢弃）；若回绕则会出现索引 0。
+    const std::vector<int> t33 = TileIndices(packed, kGridW, kTexels, kSentinel, 3, 3);
+    EXPECT_TRUE(t33.empty()) << "超限光源回绕了（tile(3,3) 出现 "
+                             << (t33.empty() ? -1 : t33[0]) << "）";
+    // 前置区域 tile(1,1) 仍记满前 8 个光源（索引 0..7）。
+    const std::vector<int> t11 = TileIndices(packed, kGridW, kTexels, kSentinel, 1, 1);
+    ASSERT_EQ(t11.size(), static_cast<size_t>(kMaxPer));
+    for (int i = 0; i < kMaxPer; ++i) {
+        EXPECT_EQ(t11[i], i);
     }
 }
 
