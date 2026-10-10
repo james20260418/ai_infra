@@ -215,6 +215,11 @@ for (int i = 0; i < 4; ++i) {
 
 ### 3.5 attribute 槽预算与带宽（Danis 2026-09-23 定：就 2 个 vec4）
 
+> ⚠️ 下表为 2026-09-23 当时的**预算快照**。loc 编号已于 2026-10-10 重排（`aInstModel` 从
+> loc6..9 移到 **loc7..10**，loc6 让给顶点属性 `aRelax`；pose 选择并到 loc11、粗细并到 loc12、
+> 新增 loc13..15）。**现行布局以 `src/instance_buffer.h` 的布局表为准**（见
+> `docs/jpov_instance_attr_lag_design.md` §6）。
+
 | 属性 | 内容 | 字节 |
 |---|---|---|
 | loc6..9 | `aInstModel` 4×vec4 | 64 B |

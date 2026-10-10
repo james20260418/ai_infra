@@ -4,7 +4,13 @@
 > （LAG / secondary motion）**，并为此**重排 per-instance attribute 的 16 个槽**，用「一个槽 = 4 float
 > / 8 short / 16 byte」的三视图约定把信息量压进去。
 >
-> 状态：**设计稿**（2026-10-08 与 Danis 连续推演收敛；本文档只描述设计，尚无实现代码）。
+> 状态：**设计稿**（2026-10-08 与 Danis 连续推演收敛）。
+>
+> **实现进展（2026-10-10）**：per-instance 布局重排（loc0..15）+ glb `_JPOV_RELAX`（VEC2）
+> 链路 + 接口字段（SkinnedInstanceState 的 LAG 状态）**已落地**（branch
+> `feature/20261010-jpov-lag-layout-refactor`）；**VS 内 LAG 消费（mix / 限幅 / 二阶）仍待实现** ——
+> 新槽位（loc6 aRelax / loc14 partial_lag / loc15 pos_lag）已声明 + 上传，但未参与计算。
+> 现有厚度压为 uint8（loc12）、部分旋转压为 half（loc13），由开关保证零回归。
 > 相关：`docs/jpov_crowd_instancing_arch.md`（instancing 架构锚点）、
 > `docs/jpov_dqs_skinning_design.md`（DQS 蒙皮）、`docs/jpov_partial_rotation_design.md`（部位额外旋转）、
 > `docs/jpov_crowd_body_shape_face_design.md` §3（部位粗细）。
@@ -305,6 +311,9 @@ per-instance attribute（divisor=1）:
   - `lag_on = 0` 时：**不 Attach loc14/loc15 的 instance buffer**（`InstanceBufferBinding` 列表按需），
     shader 里 `if (uLagEnabled == 0)` **整段跳过**第二遍 DQS / partial / mix。
   - uniform 分支全批一致，**零 warp 分化代价**；无 lag 模型 **overhead ≈ 一次 uniform 上传**。
+  - **已实现的 host 侧门控（2026-10-10）**：门控量 = `MeshHasFlag(mesh.flags, kRelax)`（网格带 aRelax
+    才需要 LAG）——关时**不打包、不上传、不 Attach** loc14/15（`InstanceBufferBinding` 新增 vector 重载
+    支持可变集合）。**不新增编译期宏**，纯 host 运行时判断；`uLagEnabled` uniform 待 VS 内消费时再加。
 - **数据契约**：`SkinnedInstanceState` 扩展（`pose_a_lag` / `pose_b_lag` / `ratio_lag` /
   `partial_rotations_lag` / `pos_lag`）；越界仍 **LOG(FATAL)/批次剔除**（不静默读 atlas 别人）。
 

@@ -501,6 +501,27 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
     }
 
+    // _JPOV_RELAX —— 布料 LAG 松弛度（**自定义语义**，vec2 float = (lag_ratio, max_lag)）。
+    //   与 POSITION 同坐标系原样透传；长度 != vcount 视为坏资产，忽略该属性（不致命）。
+    auto relax_it = prim.attributes.find("_JPOV_RELAX");
+    if (relax_it != prim.attributes.end()) {
+        std::vector<float> relax_flat;
+        if (ReadFloatAccessor(model, relax_it->second, &relax_flat) &&
+            relax_flat.size() / 2 == vcount) {
+            out_mesh->relaxations.resize(vcount);
+            for (size_t i = 0; i < vcount; ++i) {
+                out_mesh->relaxations[i] = Vec2f(relax_flat[i * 2 + 0],
+                                                 relax_flat[i * 2 + 1]);
+            }
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kRelax));
+        } else {
+            LOG(WARNING) << "LoadGltf: _JPOV_RELAX 存在但类型/长度不符（顶点数 "
+                         << vcount << "），忽略该属性";
+        }
+    }
+
     // ---- 4. 展开索引 ----
     if (prim.indices >= 0) {
         if (!ReadIndexAccessor(model, prim.indices, &out_mesh->indices)) {

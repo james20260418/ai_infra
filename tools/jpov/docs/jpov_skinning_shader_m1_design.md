@@ -76,7 +76,8 @@ renderer: RegisterSkeleton(SkeletonType, poses)→skeleton_id；DrawMeshWithSkel
 - 输入沿用 object3d PBR 完整版：`aPos(0)/aNormal(1)/aTexCoord(2)/aTangent(5)`；
   另读 `aJoint(3, ivec4)`、`aWeight(4, vec4)`（mesh_manager VBO 已备好 loc3/4）。
 - uniform / attribute（**现状**，较 M1 已有 instancing 改造）：`uViewProj`（每帧共享）+ per-instance
-  `aInstModel(loc6..9)`、`aInstPose(loc10 = pose_col_a/pose_col_b/ratio)`；atlas 相关
+  `aInstModel(loc7..10)`、`aInstPoseIds(loc11 = pose.a/pose.b + pose_lag.a/pose_lag.b 平坦起点)`；
+  atlas 相关（2026-10-10 布局重排，现行布局见 instance_buffer.h）
   `uPoseAtlas`(sampler2D RGBA32F)、`uBoneCount`、`uPoseRow`、`uAtlasDim`。
   *M1 当时：* `uMVP/uModel` + `uPoseRow/uPoseCol`（CPU 已 divmod）——现改为传**平坦 texel 起点**，
   VS 内按 `uAtlasDim` 回绕（见 instance_buffer.h 布局表 + skinning_shader.h）。

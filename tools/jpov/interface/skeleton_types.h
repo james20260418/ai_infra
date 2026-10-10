@@ -269,7 +269,7 @@ struct SkinnedInstanceState {
     //   不同 SkeletonManager)严禁放同实例混插 —— 语义无意义且要读两张骨骼纹理。见本文件顶铁律。
 
     // ---- 部位粗细：每实例给每个「关节组」一个横径缩放系数（Divisor=1 的 per-instance
-    // attribute，见 src/instance_buffer.h 的 kInstanceThicknessAttrSpec）----
+    // attribute，见 src/instance_buffer.h 的布局表）----
     // 语义：本组所辖关节上的顶点，其**横径**（垂直于骨长轴的两个方向）按该系数缩放，
     //   沿骨长轴的长度**不变**；1.0 = 原样（默认）。多骨权重混合区的顶点按权重插值
     //   （见 skinning_shader.h 的 shape 段）。
@@ -307,6 +307,22 @@ struct SkinnedInstanceState {
     // Pre-condition: 每项为单位四元数（实现会归一化；NaN/非有限判非法）。
     std::array<geom::Quaternion<float>, kNumPartialRotation> partial_rotations = {
         geom::Quaternion<float>::Identity(), geom::Quaternion<float>::Identity()};
+
+    // ---- LAG（惯性滞后副运动）状态：第二套 pose / partial + 相对坐标 ----
+    // 设计见 docs/jpov_instance_attr_lag_design.md。接口只负责把「当前」（pose / partial）与
+    //   「滞后」（pose_lag / partial_lag / pos_lag）两套状态交给 VS，由**逐顶点松弛度**
+    //   （网格的 aRelax 顶点属性，loc6）做 mix。滞后状态如何演进（纯延迟/一阶/二阶）由用户
+    //   逐帧自行维护（接口对状态演进方式透明）。
+    // ⚠️ 当前**引擎侧尚未消费**（VS 已声明对应槽位、host 已上传，但 mix/限幅留作后续实现）；
+    //   这些字段先作为**接口**存在，默认值 = 与 pose/恒等一致（不使用时零影响）。
+    int    pose_a_lag = 0;   // pose_lag 插值起点：SkeletonManager pose 数组下标（0-based）。
+    int    pose_b_lag = 0;   // pose_lag 插值终点：同上。
+    float  ratio_lag = 0.0f; // [0,1] pose_lag.a→b 的权重。
+    // lag 的部位额外旋转（模型系四元数，同 partial_rotations 语义）。
+    std::array<geom::Quaternion<float>, kNumPartialRotation> partial_rotations_lag = {
+        geom::Quaternion<float>::Identity(), geom::Quaternion<float>::Identity()};
+    // lag 位置相对坐标 (dx,dy,dz)：**模型/锚点系**的小值域偏移（米）——half 存储（§6.6）。
+    Vec3f pos_lag{0.0f, 0.0f, 0.0f};
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。

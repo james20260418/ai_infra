@@ -52,7 +52,7 @@
 - **静态 `DrawInstancedObject`（本 PR）**：新增 `RenderCommandList::DrawInstancedObject(mesh_id,
   material, instances)` + `InstancedObjectCommand`（同一 mesh 摆 N 份 = 一次 instanced draw）。
   参照 `Object3DRenderer` 架构：新增 `kMeshVs3dPBR*Instanced` / `kShadowVsInstanced`（摆放走
-  per-instance attribute loc6..9，复用既有 `InstanceBuffer` 基建）+ 相应 program 与 cutout 变体；
+  per-instance attribute loc7..10，复用既有 `InstanceBuffer` 基建）+ 相应 program 与 cutout 变体；
   主 pass / 阴影 pass 均按 `alpha_mode==kMask` + `double_sided` 处理，逐实例摆放用与
   `DrawObject3D` **同一套** `BuildModelMatrix`。⇒ 植被 / 重复道具的「同模型摆万份」地基已就位。
 - 因此「①透明切孔」这条线在引擎侧的底座已齐：[主 pass cutout（object3d #155 / skeleton #156）] + [阴影 pass cutout（本 PR）]。

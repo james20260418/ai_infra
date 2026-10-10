@@ -1301,8 +1301,8 @@ void Renderer::DrawSkinnedMeshCommand(const SkinnedMeshCommand& cmd,
         cmd, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
         SkinnedMeshProg(), SkinnedMeshProgCutout(),
         skel->gpu_handles(), skel->pose_count(),
-        instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-        instance_partial_buf_);
+        instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+        instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
 }
 
 // 太阳阴影 pass 专用 shader（深度专用，见 kShadowVs/kShadowFs）。
@@ -2377,8 +2377,8 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
                 skel->pose_count(),
                 shadow_vp_[c], shadow_depth_vp_[c], SkinnedShadowProg(),
                 SkinnedShadowProgCutout(),
-                instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-                instance_partial_buf_);
+                instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+                instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
         }
 
         prev_far = far_i;
@@ -2499,8 +2499,8 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
             PickSkinnedProg(), PickSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(),
             &pick_table_skinned_,
-            instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-            instance_partial_buf_);
+            instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+            instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
     }
     for (const auto& io : cmds.instanced_object) {
         bool any_pickable = false;
@@ -2678,8 +2678,8 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
             s, mesh_mgr_, texture_mgr_, mvp,
             HighlightSkinnedProg(), HighlightSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(), nullptr,
-            instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-            instance_partial_buf_);
+            instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+            instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
     }
     for (const auto& io : cmds.instanced_object) {
         if (!io.highlight) continue;
