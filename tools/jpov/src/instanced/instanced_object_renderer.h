@@ -1,0 +1,841 @@
+// JPOV InstancedObjectRenderer — 静态模型批量实例渲染 + 实例阴影（独立子渲染器）
+//
+// 与 Object3DRenderer / SkeletonRenderer 平级、互不依赖。定位：**全盘接管并升级**
+// Object3DRenderer 的静态 PBR 能力为「同 mesh 摆 N 份 = 一次 instanced draw」。
+// 目标场景：植被（叶子卡片 / 树 × 万份）、重复道具（栅栏 / 石头）等「同模型摆很多份」的静态批量。
+//
+// 与 Object3DRenderer 的关系（过渡期约定）：本模块**刻意复制** Object3DRenderer 的 PBR
+//   片元（kMeshFs3dPBR，含 tile culling）与阴影片元（kShadowFs），以及光照/太阳/环境光
+//   uniform 上传（UploadLightData / UploadSunData / UploadAmbient）。
+//   ⚠️ 两份是**各自独立的拷贝**：改本文件的 GLSL / uniform 时，若 Object3DRenderer 仍在用，
+//      必须同步核对那一份（反之亦然），否则两条静态路径的光照/阴影会静默不一致。
+//
+// 与 DrawObject3D 的摆放差异：
+//   Object3DRenderer  —— 单件摆放，走 uModel / uMVP uniform。
+//   本模块            —— **逐实例**摆放，走 per-instance attribute（loc6..9 的 mat4，复用
+//                       InstanceBuffer 基建）+ uniform uViewProj（= proj*view，不含 model）；
+//                       变换约定与 DrawObject3D **逐字一致**（同一套 BuildModelMatrix）。
+//
+// MeshManager / TextureManager / ShaderManager / InstanceBuffer 由 Renderer 持有并传入
+//（本模块不持有所有权）。所有方法均为 stateless static（与 Object3DRenderer 同款）。
+//
+// 用例：
+//   InstancedObjectRenderer::UploadLightData(cmds, shader_mgr, prog, prog_full);
+//   InstancedObjectRenderer::UploadSunData(shader_mgr, prog, prog_full, shadow_fbos,
+//                                          shadow_vp, shadow_depth_vp, texel_world, cfg, sun);
+//   InstancedObjectRenderer::UploadAmbient(shader_mgr, prog, prog_full, ambient);
+//   InstancedObjectRenderer::DrawInstancedObject(cmd, cmds, mesh_mgr, texture_mgr, shader_mgr,
+//       view_proj, prog, prog_full, prog_cutout, prog_full_cutout, tile_index_tex, instance_model_buf);
+//   InstancedObjectRenderer::DrawInstancedObjectShadow(cmd, mesh_mgr, texture_mgr, shader_mgr,
+//       shadow_vp, depth_vp, shadow_prog, shadow_prog_cutout, instance_model_buf);
+
+#ifndef JPOV_INSTANCED_OBJECT_RENDERER_H_
+#define JPOV_INSTANCED_OBJECT_RENDERER_H_
+
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+#include "tools/jpov/interface/render_command.h"
+#include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/instance_buffer.h"
+#include "tools/jpov/src/mesh_manager.h"
+#include "tools/jpov/src/shader_manager.h"
+#include "tools/jpov/src/texture_manager.h"
+
+namespace jpov {
+
+class InstancedObjectRenderer {
+public:
+    InstancedObjectRenderer() = default;
+    ~InstancedObjectRenderer() = default;
+
+    InstancedObjectRenderer(const InstancedObjectRenderer&) = delete;
+    InstancedObjectRenderer& operator=(const InstancedObjectRenderer&) = delete;
+
+    // ---- GLSL shader 源码 ----
+    // 调用方用 ShaderManager 编译（见 renderer.cc 的 DrawInstancedObjectProg* / InstancedShadowProg*）：
+    //   kMeshVs3dPBRInstanced     + kMeshFs3dPBR   → 主 pass（无 UV/tangent 的 mesh）
+    //   kMeshVs3dPBRFullInstanced + kMeshFs3dPBR   → 主 pass（含 UV + tangent）
+    //   kShadowVsInstanced        + kShadowFs      → 阴影 pass（深度专用）
+    // cutout 变体 = 上述各加一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    //
+    // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
+    //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
+    //   （loc6..9）而非 uModel；裁剪走 uniform uViewProj = proj*view。
+    static constexpr const char* kMeshVs3dPBRInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+// per-instance 摆放矩阵（loc6..9 拆 4 列，divisor=1；布局见 instance_buffer.h）。
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+out vec3 vWorldTangent;
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 world_pos = model * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    vWorldNormal = normalize(mat3(transpose(inverse(model))) * aNormal);
+    vTexCoord = vec2(0.0);
+    vWorldTangent = vec3(0.0);
+    gl_Position = uViewProj * world_pos;
+}
+)glsl";
+    // kMeshVs3dPBRFullInstanced: 实例版顶点着色器（含 UV + tangent）。
+    static constexpr const char* kMeshVs3dPBRFullInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 5) in vec3 aTangent;
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vTexCoord;
+out vec3 vWorldTangent;
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 world_pos = model * vec4(aPos, 1.0);
+    vWorldPos = world_pos.xyz;
+    mat3 nrm = mat3(transpose(inverse(model)));
+    vWorldNormal = normalize(nrm * aNormal);
+    vWorldTangent = normalize(nrm * aTangent);
+    vTexCoord = aTexCoord;
+    gl_Position = uViewProj * world_pos;
+}
+)glsl";
+    // kShadowVsInstanced: 实例版阴影 pass 顶点着色器（per-instance 摆放，输出线性深度）。
+    static constexpr const char* kShadowVsInstanced = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 6) in vec4 aInstCol0;
+layout(location = 7) in vec4 aInstCol1;
+layout(location = 8) in vec4 aInstCol2;
+layout(location = 9) in vec4 aInstCol3;
+uniform mat4 uShadowViewProj;
+uniform mat4 uShadowDepthViewProj;
+out float vShadowDepth;
+#ifdef JPOV_ALPHA_CUTOUT
+layout(location = 2) in vec2 aTexCoord;
+out vec2 vTexCoord;
+#endif
+void main() {
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    vec4 wp = model * vec4(aPos, 1.0);
+    gl_Position = uShadowViewProj * wp;
+    vec4 dpos = uShadowDepthViewProj * wp;
+    vShadowDepth = dpos.z / dpos.w;
+#ifdef JPOV_ALPHA_CUTOUT
+    vTexCoord = aTexCoord;
+#endif
+}
+)glsl";
+    // kShadowFs: 阴影 pass 片元（拷贝自 Object3DRenderer::kShadowFs；见文件顶部同步约定）。
+    static constexpr const char* kShadowFs = R"glsl(
+#version 330 core
+in float vShadowDepth;
+out vec4 FragColor;
+#ifdef JPOV_ALPHA_CUTOUT
+in vec2 vTexCoord;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+uniform float uAlphaCutoff;
+#endif
+void main() {
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test：与主 pass 同判据（baseColor 贴图 alpha < 阈值 → discard）。
+    if (uHasBaseColorTex == 1 && texture(uBaseColorTex, vTexCoord).a < uAlphaCutoff) {
+        discard;
+    }
+#endif
+    FragColor = vec4(vShadowDepth, 0.0, 0.0, 1.0);
+}
+)glsl";
+    // kMeshFs3dPBR: 统一 GGX PBR 片元（含 16×16 tile culling，拷贝自 Object3DRenderer）。
+    //   ⚠️ 其 GLSL #define（TILE_SIZE / MAX_LIGHTS_PER_TILE / MAX_TOTAL_LIGHTS /
+    //      LIGHT_INDEX_SENTINEL）与下方 kTileSize16 等主机端常量一一对应，改任一处必须同改另一处。
+    static constexpr const char* kMeshFs3dPBR = R"glsl(
+#version 330 core
+
+#define TILE_SIZE 16
+#define MAX_LIGHTS_PER_TILE 16
+#define MAX_TOTAL_LIGHTS 255
+#define LIGHT_INDEX_SENTINEL 255u
+
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+in vec2 vTexCoord;
+in vec3 vWorldTangent;
+layout(location = 0) out vec4 FragColor;
+// MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）。
+// 不用 varying 传线性深度（llvmpipe 对超大三角形的 varying 插值会退化成 0，实测）；
+// gl_FragCoord.z 由光栅器算出，可靠。输出作 vec4 + alpha=1：3D pass 全局开着
+// alpha 混合，标量 float 输出的缺失 alpha 被 Mesa 当 0 → 写入被丢弃（Blend 实测）。
+layout(location = 1) out vec4 FragSceneDepth;
+
+struct Light {
+    vec3 position;
+    vec3 color;
+    float radius;           // 衰减半径
+    float physicalRadius;   // 光源球体物理半径（0 = 点光源）
+    float intensity;        // 亮度标量（乘 color，见 LIGHT_INTENSITY.md）
+};
+
+uniform Light uLights[MAX_TOTAL_LIGHTS];
+uniform int uTotalLights;
+uniform vec3 uCameraPos;
+uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级联过渡权重用）
+
+uniform vec3  uBaseColor;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+// alpha test 阈值（仅 cutout program 使用；不透明 program 未引用 → location = -1）。
+uniform float uAlphaCutoff;
+uniform float uMetallic;
+uniform sampler2D uMetallicTex;
+uniform int   uHasMetallicTex;
+uniform float uRoughness;
+uniform sampler2D uRoughnessTex;
+uniform int   uHasRoughnessTex;
+uniform vec3  uEmissive;
+uniform sampler2D uEmissiveTex;
+uniform int   uHasEmissiveTex;
+uniform float uAO;
+uniform sampler2D uAoTex;
+uniform int   uHasAoTex;
+uniform sampler2D uNormalTex;
+uniform int   uHasNormalTex;
+uniform float uNormalScale;
+
+uniform sampler2D uTileLightIndices;
+// uTileCulling=1（默认）：片元经 tile 索引纹理只算本 tile 命中的光源（16×16 tile culling）。
+// uTileCulling=0：关闭 tile culling，片元遍历全部点光源（经典前向光照，无 tile 分界线伪影）。
+uniform int uTileCulling;
+
+// 太阳平行光（DirectionalLight）+ 级联阴影（CSM）。
+// uHasSun=1 时施加直射 GGX 光照（diffuse+specular），并按片元距相机距离选级联，
+// 采样对应 uShadowMap[c] 做 PCF 阴影；最后按距相机距离淡出影子强度。
+uniform int   uHasSun;
+uniform vec3  uSunDir;       // 光传播方向（归一化），从光源指向场景
+uniform vec3  uSunColor;     // 光颜色
+uniform float uSunIntensity;
+uniform int   uCascadeCount;          // 级联段数
+uniform float uCascadeRanges[5];      // 各级联 far 距离（严格递增；末项=总阴影距离）
+uniform float uCascadeBlendFraction;   // 级联间混合带宽度（占该级联跨度的比例，见 ShadowConfig::cascade_blend_fraction）
+uniform sampler2D uShadowMap[5];      // 各级联光空间深度贴图（TEXTURE7+i，.r = 线性深度，相对主视锥中心）
+uniform mat4  uShadowVP[5];           // 各级联光空间 ViewProj（用于把 world_pos 投影到 shadow map uv)
+uniform mat4  uShadowDepthVP[5];      // 各级联光空间线性深度矩阵（DepthProj*view，.z = 相对主视锥中心的线深）
+uniform float uShadowTexel[5];        // 各级联 1.0/shadow map 尺寸（PCF 纹素步长）
+uniform int   uShadowBiasOverride;      // 0=自动几何推导（默认）；1=用手工 uShadowBiasCascade
+uniform float uShadowTexelWorld[5];     // 每级联单纹素世界边长（米），自动偏置用
+uniform float uShadowBiasCascade[5];    // override 的等效单纹素世界边长（米），仅 override=1 时用
+
+// ---- PCF 采样核（每帧经 uPcfMode 选择；见 ShadowPcfConfig）----
+// uPcfMode==0：固定规则网格 (2·kGridPcfRadiusT+1)² 点（经典 3×3）。
+// uPcfMode==1：黄金角螺旋 uPcfTapCount 点（等面积布点），采样盘半径 uPcfRadiusTexels 纹素。
+const int   kGridPcfRadiusT   = 1;                                  // 网格核半径（纹素）：3×3 → 1
+const int   kGridPcfTapCountT = (2*kGridPcfRadiusT+1) * (2*kGridPcfRadiusT+1);
+const int   kMaxPcfTaps       = 64;   // == ShadowPcfConfig::kMaxPcfTaps（uPcfOffsets 长度）
+uniform int   uPcfMode;          // 0=规则网格；1=黄金角螺旋
+uniform int   uPcfTapCount;      // 螺旋采样点数 N（仅 mode==1；1..kMaxPcfTaps）
+uniform float uPcfRadiusTexels;  // 采样盘半径 R（纹素，仅 mode==1；>0）——亦用于自动偏置
+uniform float uPcfInvTapCount;   // 1/N（除法→乘倒数；仅 mode==1 用）
+// 黄金角螺旋采点偏移（纹素，已 ×R）：CPU 预算（见 ShadowPcfConfig::GoldenSpiralOffsets）。
+// 仅前 uPcfTapCount 项有效。把 per-tap 的 sqrt/除法/cos/sin 移出 shader。
+uniform vec2  uPcfOffsets[kMaxPcfTaps];
+// ---- 深度偏置与「采样核有效半径」联动（改核半径，偏置自动跟随）----
+const float kBiasSafety    = 1.5;                               // 满径安全裕度
+const float kMinShadowBias = 0.01;                              // 全局兜底（米）
+// 级联权重早退阈值：权重 (wlo·whi) 不大于此值即跳过该级联的 PCF 采样。
+// 与 computeSunShadow 末尾的 `wsum > 1e-5` 同量级——远小于该量的权重对
+// 最终 shadow 的贡献低于浮点有效精度，跳过不改变可见结果。
+const float kShadowWeightEps = 1e-5;
+uniform float uShadowFadeStart;       // 影子淡出起点（距相机）
+uniform float uShadowFadeEnd;         // 影子淡出终点（此距离后无影子）
+
+// 全局环境光（AmbientLight）：无方向、无影子，照亮背阳面。
+uniform vec3  uAmbientColor;      // 环境光色调（RGB）
+uniform float uAmbientIntensity;  // 环境光亮度标量（乘 color）
+// 三色环境光（可选，增量扩展）：uAmbientTricolorEnabled==1 时按片元法线仰角在
+// [天, 天际线, 地] 间插值，**替代** uAmbientColor；==0 时走上面的单色。
+// 顺序固定 [0]=天(N.y=+1) [1]=天际线(N.y=0) [2]=地(N.y=−1)。
+uniform int   uAmbientTricolorEnabled;
+uniform vec3  uAmbientTricolor[3];
+
+const float PI = 3.14159265;
+
+// 阴影因子：对世界坐标在指定级联里采样深度贴图，返回 [0,1]，1=完全受照，0=完全在影子里。
+// shadow map 存的是**相对主视锥中心的原始线性深度**（米，见 kShadowVs）；
+// 主 pass 用 uShadowDepthVP[c]（DepthProj*view）把 world_pos 重投到同一线性深度，
+// 两端同源一致、不经 near/far 归一化。
+// ⚠️ PCF：核由 uPcfMode 选——规则网格 (2·kGridPcfRadiusT+1)²（3×3）或黄金角螺旋
+// uPcfTapCount 点；二者皆“二值比较取均值”的软阴影（参数见 ShadowPcfConfig）。
+// depth bias（自动推导，见 ShadowConfig::cascade_bias）：
+//     bias_c = max(kMinShadowBias, kBiasSafety · 有效半径 · texelW_c · tanθ)
+//     texelW_c = uShadowTexelWorld[c]（该级联单纹素世界边长，米；自动）
+//             或 uShadowBiasCascade[c]（override：手工等效边长）
+//     tanθ = sqrt(1-(N·Ld)²)/max(N·Ld,1e-3)，Ld = 深度轴方向（从 uShadowDepthVP 的 z 行取，
+//            即阴影 pass 实际用的光传播方向的反向 —— 与深度比较同源；不能用 uSunDir，
+//            因为阴影 pass 会对近平行的光方向做偏置以避开 lookAt 退化）
+//   推导：平坦接收面在一个纹素足迹内的光轴深度偏离 = texelWorld·tanθ
+//         （足迹被拉长为 t/cosθ，深度梯度 sinθ，相乘 = t·tanθ）；
+//         PCF 会采到「有效半径」个纹素外，故再乘有效半径（= pcfEffectiveRadiusTexels()）。
+//   ⚠️ 2026-09-17 教训：旧式 bias_base*(1-NdotL) 在垂直光（NdotL→1）下被乘成 0、
+//   退化为 minBias=0.01，而远级联单纹素大（C2 13.2cm/C3 46.6cm/C4 72.6cm），
+//   平坦地面深度误差 texelWorld·tanθ 超过 0.01 → 地面自阴影 acne
+//   （表现为地平线下方一条随级联纹素呈大格子的暗带）。
+// ⚠️ GLSL 330 桌面版禁止非编译期常量的 sampler 数组索引，故各级联必须拆成
+// 独立函数（或 if/else 全展开），不能 shadowFactorCascade(c, ...) 里动态取
+// uShadowMap[c]。这里按 kMaxCascades=5 手写全展开。
+// 阴影因子（单级联 C0）：输出 {shadow, covered}。
+// covered=1 表示世界坐标落在该级联 shadow map 的 uv 覆盖内（有效采样）；
+// covered=0 表示不在（uv 越界）—— 此时不贡献 shadow，由 computeSunShadow
+// 用其他覆盖该片元的级联做 blend，避免“shadow map 边缘被硬裁成无影”。
+// PCF 采样核的「有效半径」（纹素）：采样最远覆盖多少个纹素。自动深度偏置用它。
+// 网格核 = kGridPcfRadiusT；螺旋核 = uPcfRadiusTexels（螺旋最外圈 ≈ R）。
+float pcfEffectiveRadiusTexels() {
+    return (uPcfMode == 1) ? uPcfRadiusTexels : float(kGridPcfRadiusT);
+}
+// PCF 阴影采样：在 shadow_map 的 uv 邻域对 cur（已减偏置的线性深度）做
+// 「cur <= 深度」二值比较并求平均 → [0,1]（1=受照，0=全影）。
+//   uPcfMode==0：固定规则网格 (2R+1)² 点，箱式平均（经典 3×3）。
+//   uPcfMode==1：黄金角螺旋 N 点——采点偏移由 CPU 预算于 uPcfOffsets（公式真值来源见
+//                ShadowPcfConfig::GoldenSpiralOffsets），此处只剩查表 + 乘加。
+float pcfShadow(sampler2D shadow_map, vec2 uv, float cur, float texel_step) {
+    float s = 0.0;
+    if (uPcfMode == 1) {
+        for (int i = 0; i < uPcfTapCount; ++i) {
+            s += (cur <= texture(shadow_map, uv + uPcfOffsets[i] * texel_step).r) ? 1.0 : 0.0;
+        }
+        return s * uPcfInvTapCount;
+    }
+    for (int dy = -kGridPcfRadiusT; dy <= kGridPcfRadiusT; ++dy) {
+        for (int dx = -kGridPcfRadiusT; dx <= kGridPcfRadiusT; ++dx) {
+            s += (cur <= texture(shadow_map, uv + vec2(float(dx), float(dy)) * texel_step).r) ? 1.0 : 0.0;
+        }
+    }
+    return s / float(kGridPcfTapCountT);
+}
+void shadowFactorC0(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
+    vec4 lsp = uShadowVP[0] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[0] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd0 = vec3(uShadowDepthVP[0][0][2], uShadowDepthVP[0][1][2], uShadowDepthVP[0][2][2]);
+    vec3 Ld0 = -normalize(dfwd0);
+    float ndl0 = max(dot(N, Ld0), 1e-3);
+    float tanTheta0 = sqrt(max(1.0 - ndl0*ndl0, 0.0)) / ndl0;
+    float texelW0 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[0]
+                                                 : uShadowTexelWorld[0];
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW0 * tanTheta0);
+    shadow = pcfShadow(uShadowMap[0], uv, cur, uShadowTexel[0]);
+    covered = 1.0;
+}
+void shadowFactorC1(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
+    vec4 lsp = uShadowVP[1] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[1] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd1 = vec3(uShadowDepthVP[1][0][2], uShadowDepthVP[1][1][2], uShadowDepthVP[1][2][2]);
+    vec3 Ld1 = -normalize(dfwd1);
+    float ndl1 = max(dot(N, Ld1), 1e-3);
+    float tanTheta1 = sqrt(max(1.0 - ndl1*ndl1, 0.0)) / ndl1;
+    float texelW1 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[1]
+                                                 : uShadowTexelWorld[1];
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW1 * tanTheta1);
+    shadow = pcfShadow(uShadowMap[1], uv, cur, uShadowTexel[1]);
+    covered = 1.0;
+}
+void shadowFactorC2(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
+    vec4 lsp = uShadowVP[2] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[2] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd2 = vec3(uShadowDepthVP[2][0][2], uShadowDepthVP[2][1][2], uShadowDepthVP[2][2][2]);
+    vec3 Ld2 = -normalize(dfwd2);
+    float ndl2 = max(dot(N, Ld2), 1e-3);
+    float tanTheta2 = sqrt(max(1.0 - ndl2*ndl2, 0.0)) / ndl2;
+    float texelW2 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[2]
+                                                 : uShadowTexelWorld[2];
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW2 * tanTheta2);
+    shadow = pcfShadow(uShadowMap[2], uv, cur, uShadowTexel[2]);
+    covered = 1.0;
+}
+void shadowFactorC3(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
+    vec4 lsp = uShadowVP[3] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[3] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd3 = vec3(uShadowDepthVP[3][0][2], uShadowDepthVP[3][1][2], uShadowDepthVP[3][2][2]);
+    vec3 Ld3 = -normalize(dfwd3);
+    float ndl3 = max(dot(N, Ld3), 1e-3);
+    float tanTheta3 = sqrt(max(1.0 - ndl3*ndl3, 0.0)) / ndl3;
+    float texelW3 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[3]
+                                                 : uShadowTexelWorld[3];
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW3 * tanTheta3);
+    shadow = pcfShadow(uShadowMap[3], uv, cur, uShadowTexel[3]);
+    covered = 1.0;
+}
+void shadowFactorC4(vec3 world_pos, vec3 N, vec3 L, out float shadow, out float covered) {
+    vec4 lsp = uShadowVP[4] * vec4(world_pos, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { shadow = 0.0; covered = 0.0; return; }
+    vec4 dpos = uShadowDepthVP[4] * vec4(world_pos, 1.0);
+    float cur = dpos.z / dpos.w;
+    // 深度偏置（推导见 ShadowConfig::cascade_bias）：自动=几何推导，override=手工等效边长。
+    // 深度轴方向 = uShadowDepthVP 的 z 行（= 阴影 pass 实际用的光传播方向）。
+    // 用它算 tanθ 而非 uSunDir：阴影 pass 在光方向近平行世界 up 时会偏置方向以避开
+    // lookAt 退化，此时深度轴与 uSunDir 不同（平坦地面仍有真实深度梯度）。
+    vec3 dfwd4 = vec3(uShadowDepthVP[4][0][2], uShadowDepthVP[4][1][2], uShadowDepthVP[4][2][2]);
+    vec3 Ld4 = -normalize(dfwd4);
+    float ndl4 = max(dot(N, Ld4), 1e-3);
+    float tanTheta4 = sqrt(max(1.0 - ndl4*ndl4, 0.0)) / ndl4;
+    float texelW4 = (uShadowBiasOverride != 0) ? uShadowBiasCascade[4]
+                                                 : uShadowTexelWorld[4];
+    cur -= max(kMinShadowBias,
+               kBiasSafety * pcfEffectiveRadiusTexels() * texelW4 * tanTheta4);
+    shadow = pcfShadow(uShadowMap[4], uv, cur, uShadowTexel[4]);
+    covered = 1.0;
+}
+
+// 按片元到相机的距离，对**所有级联**加权混合阴影（级联间交叉 fade）。
+// 返回最终阴影因子 [0,1]（1=完全受照无影，0=全影）。
+// 按片元到相机的距离，对“主分级联 + 相邻级联”加权混合阴影（级联间交叉 fade）。
+// 返回最终阴影因子 [0,1]（1=完全受照无影，0=全影）。
+//
+// 级联间 blend：在级联边界附近，相邻级联的权重互补——前级联在远端平滑降、
+// 后级联在近端平滑升（smoothstep 边界重叠区），两者权重和恒≈1，消除不同级联
+// 分辨率造成的硬分界/亮度跳变。片元深度在其主级联区间内，故主级联权重不会归零，
+// 边界处不会出现“影子消失的细缝”。uv 越界（covered=0）的级联不贡献，由覆盖
+// 它的其他级联供影（避免 shadow map 边缘被硬裁成无影）。
+float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
+    if (uCascadeCount <= 0 || uHasSun == 0) return 1.0;
+    if (frag_dist >= uShadowFadeEnd) return 1.0;   // 淡出结束无影子
+
+    float cNear[5]; cNear[0] = uCameraNear;
+    for (int i = 1; i < 5; ++i) cNear[i] = (i <= uCascadeCount) ? uCascadeRanges[i-1] : cNear[i-1];
+
+    float s; float cv;
+    float wsum = 0.0;
+    float wshadow = 0.0;
+
+    // 每个实际声明的级联：近端升 × 远端降的平滑权重（与相邻级联互补）。
+    // blend 宽度 = 该级联跨度 × uCascadeBlendFraction。级联0 近端 / 末级联远端无邻居 → 恒 1。
+    //
+    // ⚠️ 早退（重要）：权重 (wlo·whi) 只依赖 frag_dist，与 shadow map 采样无关。
+    // 绝大多数片元只有 1~2 个级联权重非零（其余权重为 0，对 wsum/wshadow 贡献
+    // 恒为 0）。因此在**调用 shadowFactorCn 之前**先判权重：为 0 则整段跳过，
+    // 省下该级联的 3×3 PCF（9 次纹理采样）。结果与不跳过**完全等价**（跳过的项
+    // 贡献 = 0 · s），仅去掉纯浪费的采样。
+    // 实测（默认 5 级联配置）：片元平均只 1.24 个级联权重非零，跳过约 75% 采样。
+    if (uCascadeCount >= 1) {
+        float n = uCameraNear, f = uCascadeRanges[0]; float b = uCascadeBlendFraction*(f-n);
+        float wlo = (uCascadeCount>=2) ? smoothstep(n - b, n + b, frag_dist) : 1.0;
+        float whi = (uCascadeCount>=2) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        float w0 = wlo * whi;
+        if (w0 > kShadowWeightEps) {
+            shadowFactorC0(world_pos, N, L, s, cv);
+            float cw = w0 * cv; wsum += cw; wshadow += cw * s;
+        }
+    }
+    if (uCascadeCount >= 2) {
+        float n = uCascadeRanges[0], f = uCascadeRanges[1]; float b = uCascadeBlendFraction*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=3) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        float w1 = wlo * whi;
+        if (w1 > kShadowWeightEps) {
+            shadowFactorC1(world_pos, N, L, s, cv);
+            float cw = w1 * cv; wsum += cw; wshadow += cw * s;
+        }
+    }
+    if (uCascadeCount >= 3) {
+        float n = uCascadeRanges[1], f = uCascadeRanges[2]; float b = uCascadeBlendFraction*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=4) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        float w2 = wlo * whi;
+        if (w2 > kShadowWeightEps) {
+            shadowFactorC2(world_pos, N, L, s, cv);
+            float cw = w2 * cv; wsum += cw; wshadow += cw * s;
+        }
+    }
+    if (uCascadeCount >= 4) {
+        float n = uCascadeRanges[2], f = uCascadeRanges[3]; float b = uCascadeBlendFraction*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = (uCascadeCount>=5) ? (1.0 - smoothstep(f - b, f + b, frag_dist)) : 1.0;
+        float w3 = wlo * whi;
+        if (w3 > kShadowWeightEps) {
+            shadowFactorC3(world_pos, N, L, s, cv);
+            float cw = w3 * cv; wsum += cw; wshadow += cw * s;
+        }
+    }
+    if (uCascadeCount >= 5) {
+        float n = uCascadeRanges[3], f = uCascadeRanges[4]; float b = uCascadeBlendFraction*(f-n);
+        float wlo = smoothstep(n - b, n + b, frag_dist);
+        float whi = 1.0;
+        float w4 = wlo * whi;
+        if (w4 > kShadowWeightEps) {
+            shadowFactorC4(world_pos, N, L, s, cv);
+            float cw = w4 * cv; wsum += cw; wshadow += cw * s;
+        }
+    }
+
+    float shadow = (wsum > 1e-5) ? (wshadow / wsum) : 1.0;
+    float fade = 1.0 - clamp((frag_dist - uShadowFadeStart) / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
+    return mix(1.0, shadow, fade);
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+float distributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = PI * denom * denom;
+    return a2 / max(denom, 1e-7);
+}
+
+float geometrySchlickGGX(float NdotX, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
+}
+
+int readTileLights(int tile_col, int tile_row, out uint out_indices[MAX_LIGHTS_PER_TILE]) {
+    int count = 0;
+    for (int t = 0; t < MAX_LIGHTS_PER_TILE / 4; t++) {
+        vec4 px = texelFetch(uTileLightIndices, ivec2(tile_col * (MAX_LIGHTS_PER_TILE / 4) + t, tile_row), 0);
+        uint r = uint(px.r * 255.0 + 0.5) & 0xFFu;
+        uint g = uint(px.g * 255.0 + 0.5) & 0xFFu;
+        uint b = uint(px.b * 255.0 + 0.5) & 0xFFu;
+        uint a = uint(px.a * 255.0 + 0.5) & 0xFFu;
+        if (r != LIGHT_INDEX_SENTINEL && r < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = r; count++;
+        }
+        if (g != LIGHT_INDEX_SENTINEL && g < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = g; count++;
+        }
+        if (b != LIGHT_INDEX_SENTINEL && b < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = b; count++;
+        }
+        if (a != LIGHT_INDEX_SENTINEL && a < uint(uTotalLights) && count < MAX_LIGHTS_PER_TILE) {
+            out_indices[count] = a; count++;
+        }
+    }
+    return count;
+}
+
+// 累积单盏点光源的 diffuse + specular（含 Representative Point 球面光源）。
+// li: 光源在 uLights[] 中的索引。共用于 tile culling 路径与非 cull 路径。
+// 需传入 base_color / metallic / roughness（片元已解析的材质参数）；
+// 通过 inout total_diffuse / total_specular 累加。
+void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
+                         vec3 base_color, float metallic, float roughness,
+                         inout vec3 total_diffuse, inout vec3 total_specular) {
+    vec3 L = uLights[li].position - world_pos;
+    float dist = length(L);
+    if (dist >= uLights[li].radius) return;
+
+    vec3 light_dir = L / dist;
+    float attenuation = 1.0 - (dist / uLights[li].radius);
+
+    // ── Representative Point (Karis 2013) ──
+    // 把点光源当作球面光源，用反射方向上离球最近的点作为 specular
+    // 的有效入射方向。物理半径越大 → 球面积越大 → 更多 micro-facet
+    // 能从不同区域命中镜面 lobe → 金属面不会全黑。
+    // physicalRadius = 0 时退化为原始点光源行为。
+    float sourceRadius = uLights[li].physicalRadius;
+    vec3 spec_dir = light_dir;  // default: same as point light
+    if (sourceRadius > 0.0) {
+        vec3 Rf = reflect(-V, N);
+        vec3 centerToRay = dot(L, Rf) * Rf - L;
+        vec3 closestPt = L + centerToRay *
+            clamp(sourceRadius / max(length(centerToRay), 1e-4), 0.0, 1.0);
+        spec_dir = normalize(closestPt);
+    }
+
+    // ── diffuse：原始 light_dir ──
+    float NdotL = max(dot(N, light_dir), 0.0);
+    if (NdotL > 0.0) {
+        vec3 Hd = normalize(light_dir + V);
+        vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
+                     mix(vec3(0.04), base_color, metallic));
+        vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
+        vec3 diffuse = kD * base_color / PI;
+        total_diffuse += uLights[li].color * uLights[li].intensity * diffuse * NdotL * attenuation;
+    }
+
+    // ── specular：representative point 方向 ──
+    float NdotL_s = max(dot(N, spec_dir), 0.0);
+    if (NdotL_s > 0.0) {
+        vec3 H = normalize(spec_dir + V);
+        float NdotV = max(dot(N, V), 0.0);
+        vec3 F0 = mix(vec3(0.04), base_color, metallic);
+        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+        float D = distributionGGX(N, H, roughness);
+        float G = geometrySmith(N, V, spec_dir, roughness);
+        vec3 spec = (F * D * G) / max(4.0 * NdotL_s * NdotV, 1e-5);
+        total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
+    }
+}
+
+void main() {
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+
+    if (uHasNormalTex == 1) {
+        vec3 tex_normal = texture(uNormalTex, vTexCoord).rgb * 2.0 - 1.0;
+        tex_normal = normalize(tex_normal);
+        tex_normal.xy *= uNormalScale;
+        tex_normal = normalize(tex_normal);
+        vec3 T = normalize(vWorldTangent - dot(vWorldTangent, N) * N);
+        vec3 B = normalize(cross(N, T));
+        mat3 TBN = mat3(T, B, N);
+        N = normalize(TBN * tex_normal);
+    }
+
+    // 双面渲染：背面（gl_FrontFacing==false）法线翻转，否则朝内的背面光照错误。
+    // 与渲染端 glDisable(GL_CULL_FACE) 配套（默认双面）。
+    if (!gl_FrontFacing) {
+        N = -N;
+    }
+
+    vec4 base_texel = (uHasBaseColorTex == 1)
+        ? texture(uBaseColorTex, vTexCoord)
+        : vec4(uBaseColor, 1.0);
+    vec3 base_color = base_texel.rgb;
+
+#ifdef JPOV_ALPHA_CUTOUT
+    // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。
+    // 本段由独立 program（宏 JPOV_ALPHA_CUTOUT）编译，使不透明 program 不含 discard
+    //（否则编译器保守地把 early-Z 的 depth-write 快路径降级）。
+    if (uHasBaseColorTex == 1 && base_texel.a < uAlphaCutoff) {
+        discard;
+    }
+#endif
+
+    float metallic = (uHasMetallicTex == 1)
+        ? texture(uMetallicTex, vTexCoord).r
+        : uMetallic;
+    float roughness = (uHasRoughnessTex == 1)
+        ? texture(uRoughnessTex, vTexCoord).r
+        : uRoughness;
+    vec3 emissive = (uHasEmissiveTex == 1)
+        ? texture(uEmissiveTex, vTexCoord).rgb
+        : uEmissive;
+    float ao = (uHasAoTex == 1)
+        ? texture(uAoTex, vTexCoord).r
+        : uAO;
+    ao = clamp(ao, 0.0, 1.0);
+
+    // uTileCulling=0：跳过 tile 查询，直接遍历全部点光源（经典前向光照）。
+    // uTileCulling=1：16×16 tile culling，只结算本 tile 命中的光源，
+    // 高效但有 tile 边界分界线伪影（相邻 tile 光源取舍不同 → 亮暗跳变）。
+    uint light_indices[MAX_LIGHTS_PER_TILE];
+    int num_lights = 0;
+    bool use_tile = (uTileCulling == 1);
+    if (use_tile) {
+        ivec2 grid = ivec2(textureSize(uTileLightIndices, 0));
+        int grid_cols = grid.x / (MAX_LIGHTS_PER_TILE / 4);
+        int grid_rows = grid.y;
+        int tile_col = clamp(int(gl_FragCoord.x) / TILE_SIZE, 0, grid_cols - 1);
+        int tile_row = clamp(int(gl_FragCoord.y) / TILE_SIZE, 0, grid_rows - 1);
+        num_lights = readTileLights(tile_col, tile_row, light_indices);
+    }
+
+    // 环境光：三色梯度（开关开）或单色（关）。intensity 对两者同样生效。
+    vec3 ambient;
+    if (uAmbientTricolorEnabled == 1) {
+        float ambient_up = clamp(N.y, -1.0, 1.0);
+        vec3 amb3 = (ambient_up >= 0.0)
+            ? mix(uAmbientTricolor[1], uAmbientTricolor[0], ambient_up)    // 天际线→天
+            : mix(uAmbientTricolor[1], uAmbientTricolor[2], -ambient_up);  // 天际线→地
+        ambient = amb3 * uAmbientIntensity;
+    } else {
+        ambient = uAmbientColor * uAmbientIntensity;
+    }
+    vec3 total_diffuse = vec3(0.0);
+    vec3 total_specular = vec3(0.0);
+
+    // ── 太阳平行光（直射 GGX diffuse + specular，× 级联阴影因子）──
+    // 平行光无衰减、方向全局，独立于 tile culling 的点光源循环。
+    if (uHasSun == 1) {
+        vec3 L = normalize(-uSunDir);       // 从片元指向光源
+        float NdotL = max(dot(N, L), 0.0);
+        if (NdotL > 0.0) {
+            float frag_dist = length(uCameraPos - vWorldPos);
+            float shadow = computeSunShadow(vWorldPos, N, L, frag_dist);
+            vec3 light_col = uSunColor * uSunIntensity * shadow;
+
+            // diffuse（Lambert + 菲涅尔去金属部分）
+            vec3 Hd = normalize(L + V);
+            vec3 Fd = fresnelSchlick(max(dot(Hd, V), 0.0),
+                         mix(vec3(0.04), base_color, metallic));
+            vec3 kD = (vec3(1.0) - Fd) * (1.0 - metallic);
+            total_diffuse += light_col * (kD * base_color / PI) * NdotL;
+
+            // specular（GGX Cook-Torrance）
+            vec3 H = normalize(L + V);
+            float NdotV = max(dot(N, V), 0.0);
+            vec3 F0 = mix(vec3(0.04), base_color, metallic);
+            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+            float D = distributionGGX(N, H, roughness);
+            float G = geometrySmith(N, V, L, roughness);
+            vec3 spec = (F * D * G) / max(4.0 * NdotL * NdotV, 1e-5);
+            total_specular += light_col * spec * NdotL;
+        }
+    }
+
+    // 点光源：按 tile_culling 开关分流。
+    //   uTileCulling=1：只结算本 tile 命中的光源（num_lights 已由 readTileLights 填充）。
+    //   uTileCulling=0：遍历全部 uTotalLights（经典前向光照，无分界线）。
+    if (use_tile) {
+        for (int i = 0; i < num_lights; i++) {
+            accumulateOneLight(int(light_indices[i]), N, V, vWorldPos,
+                               base_color, metallic, roughness,
+                               total_diffuse, total_specular);
+        }
+    } else {
+        for (int i = 0; i < uTotalLights; i++) {
+            accumulateOneLight(i, N, V, vWorldPos,
+                               base_color, metallic, roughness,
+                               total_diffuse, total_specular);
+        }
+    }
+
+    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
+    FragColor = vec4(result, 1.0);
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
+}
+)glsl";
+
+    // ---- Tile culling 常量 ----
+    // 与 kMeshFs3dPBR 的 GLSL #define 一一对应，改任一处必须同时改另一处。
+    static constexpr int kTileSize16 = 16;
+    static constexpr int kMaxLightsPerTile = 16;
+    static constexpr int kTexelsPerTile = kMaxLightsPerTile / 4;
+    static constexpr int kMaxTotalLights = 255;
+    static constexpr uint8_t kLightIndexSentinel = 255;
+
+    // ---- UploadLightData ----
+    // 把 cmds.point_lights（至多 kMaxTotalLights 个）上传到实例 PBR 的两个 program
+    // （prog / prog_full）的 uLights[] / uTotalLights / uTileCulling。
+    // 每帧在发起实例 draw 之前调用一次（非逐 object 热路径）。语义同 Object3DRenderer。
+    static void UploadLightData(const RenderCommandList& cmds,
+                                ShaderManager& shader_mgr,
+                                unsigned int prog,
+                                unsigned int prog_full);
+
+    // ---- UploadAmbient ----
+    // 把 AmbientLight（含可选三色）上传到实例 PBR 两个 program 的 uAmbientColor /
+    // uAmbientIntensity（+ 三色开关）。语义同 Object3DRenderer。
+    static void UploadAmbient(ShaderManager& shader_mgr,
+                              unsigned int prog,
+                              unsigned int prog_full,
+                              const AmbientLight& ambient);
+
+    // ---- UploadSunData ----
+    // 把 cmds.sun（DirectionalLight）与级联阴影（CSM）+ PCF 采样核参数上传到实例 PBR 两个 program。
+    // 无 sun 时仅置 uHasSun=0 / uCascadeCount=0。参数语义同 Object3DRenderer::UploadSunData。
+    static void UploadSunData(
+        ShaderManager& shader_mgr,
+        unsigned int prog,
+        unsigned int prog_full,
+        const std::vector<CascadeFBO>& shadow_fbos,
+        const float shadow_vp[][16],
+        const float shadow_depth_vp[][16],
+        const float shadow_texel_world[],
+        const ShadowConfig& cfg,
+        const ShadowPcfConfig& pcf,
+        const std::optional<DirectionalLight>& sun);
+
+    // ---- DrawInstancedObject ----
+    // 把一个 InstancedObjectCommand（同 mesh + N 份摆放）用 **instanced draw** 一次画完。
+    // 与 DrawObject3D 的材质/光照/tile/阴影 uniform 处理逐项对齐，区别仅在：
+    //   ① 摆放走 per-instance attribute（instance_model_buf，loc6..9）而非 uModel；
+    //   ② 裁剪走 uniform uViewProj（= proj*view，不含 model）；③ glDraw*Instanced。
+    // 选 program：any_tex → prog_full*；alpha_mode==kMask → prog_*cutout*；double_sided 关背面剔除。
+    //
+    // GL 状态前置要求同 DrawObject3D（3D FBO 已绑、depth/cull 已设、光照 uniform 已上传给本套 program）。
+    // 内部 glPushAttrib/glPopAttrib 恢复。
+    // Pre-condition: cmd.mesh_id 已注册未释放；cmd.instances 非空。
+    static void DrawInstancedObject(const InstancedObjectCommand& cmd,
+                                    const RenderCommandList& cmds,
+                                    MeshManager& mesh_mgr,
+                                    TextureManager& texture_mgr,
+                                    ShaderManager& shader_mgr,
+                                    const float view_proj[16],
+                                    unsigned int prog,
+                                    unsigned int prog_full,
+                                    unsigned int prog_cutout,
+                                    unsigned int prog_full_cutout,
+                                    unsigned int tile_index_tex,
+                                    InstanceBuffer& instance_model_buf);
+
+    // ---- DrawInstancedObjectShadow ----
+    // 统一批实例的阴影 pass：从太阳正交光空间画进阴影纹理（只写相对主视锥中心的线性深度）。
+    // 与 DrawObject3DShadow 同材质选择（kMask → cutout 变体 + 绑 baseColor、double_sided 关背面剔除），
+    // 区别仅在摆放走 per-instance attribute（instance_model_buf）+ glDraw*Instanced。
+    // shadow_vp: uShadowViewProj = proj*view；depth_vp: uShadowDepthViewProj = DepthProj*view。
+    static void DrawInstancedObjectShadow(const InstancedObjectCommand& cmd,
+                                          MeshManager& mesh_mgr,
+                                          TextureManager& texture_mgr,
+                                          ShaderManager& shader_mgr,
+                                          const float shadow_vp[16],
+                                          const float depth_vp[16],
+                                          unsigned int shadow_prog,
+                                          unsigned int shadow_prog_cutout,
+                                          InstanceBuffer& instance_model_buf);
+};
+
+}  // namespace jpov
+
+#endif  // JPOV_INSTANCED_OBJECT_RENDERER_H_

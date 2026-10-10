@@ -45,10 +45,16 @@
 - **skeleton renderer 接 cutout + 双面**（PR #156）：蒙皮带骨实例此前只走不透明 program，现按
   `alpha_mode==kMask` 选 cutout 变体（`JPOV_ALPHA_CUTOUT`，含 `discard`）、`double_sided` 时关背面
   剔除 + FS 翻法线 —— 与 object3d 对齐。
-- **阴影 pass 接 cutout + 双面**（本 PR）：object3d 与蒙皮**两条阴影路径**都拆出 cutout 变体
+- **阴影 pass 接 cutout + 双面**（PR #162）：object3d 与蒙皮**两条阴影路径**都拆出 cutout 变体
   （同源 + `JPOV_ALPHA_CUTOUT`），按材质选 program + 采样 baseColor 的 alpha 做 `discard`；
   `double_sided` 时关背面剔除（两面都投影）。不透明阴影路径零行为变化。
   ⇒ **叶片 / 蕾丝这类镂空资产的投影不再是实心轮廓。**
+- **静态 `DrawInstancedObject`（本 PR）**：新增 `RenderCommandList::DrawInstancedObject(mesh_id,
+  material, instances)` + `InstancedObjectCommand`（同一 mesh 摆 N 份 = 一次 instanced draw）。
+  参照 `Object3DRenderer` 架构：新增 `kMeshVs3dPBR*Instanced` / `kShadowVsInstanced`（摆放走
+  per-instance attribute loc6..9，复用既有 `InstanceBuffer` 基建）+ 相应 program 与 cutout 变体；
+  主 pass / 阴影 pass 均按 `alpha_mode==kMask` + `double_sided` 处理，逐实例摆放用与
+  `DrawObject3D` **同一套** `BuildModelMatrix`。⇒ 植被 / 重复道具的「同模型摆万份」地基已就位。
 - 因此「①透明切孔」这条线在引擎侧的底座已齐：[主 pass cutout（object3d #155 / skeleton #156）] + [阴影 pass cutout（本 PR）]。
 
 ---
@@ -180,7 +186,7 @@ Danis 猜「纹理的渐变，总不至于是画两遍 Dither 吧」——**方�
 
 | 能力 | 现状 | 植物需要 | 缺口 |
 |---|---|---|---|
-| 静态物体 instancing | ❌ **只有骨架蒙皮 instancing**（`DrawSkinnedMesh`）；**非骨架 `DrawInstancedObject` 未做**（#106 已标注「下一步」） | 同 mesh 万份 | **要补** |
+| 静态物体 instancing | ✅ `DrawInstancedObject(mesh_id, material, instances)`（本 PR；object3d 侧，与 `DrawObject3D` 同套 PBR/cutout/双面/阴影链路） | 同 mesh 万份 | 已补 |
 | Instancing 基建（per-instance buffer/RAII） | ✅ 已有（`instance_buffer.h`，PR #106） | — | 复用即可 |
 | **Alpha cutout 材质** | ❌ **无**（PBR 无 alpha；仅 `kText3D` 有覆盖率 alpha） | 叶子切孔 | **最大缺口，第一块砖** |
 | 双面渲染 / 法线翻转 | ❌ 无 | 叶片双面 | 要补 |
@@ -194,7 +200,7 @@ Danis 猜「纹理的渐变，总不至于是画两遍 Dither 吧」——**方�
 | 撒布 / placement | ❌ 无 | 铺满雨林 | 后续 |
 
 > 注：Danis 说「object3d 引擎目前还没有 instancing 接口」——**基本准确**：
-> 基建（per-instance buffer）已在，但**只接到骨架蒙皮**，静态物体那条 `DrawInstancedObject` 确实还没做。
+> 基建（per-instance buffer）已在；骨架蒙皮 instancing早就有了，静态物体那条 `DrawInstancedObject` 已于 2026-10-09 补上（见 §0.7）。
 
 ---
 
@@ -207,6 +213,9 @@ Danis 猜「纹理的渐变，总不至于是画两遍 Dither 吧」——**方�
    **shadow pass 同步 `discard`**（否则叶子影是方片）。→ 这一步本身就是引擎级升级。
    ✅ **已实现**（2026-10-09）：object3d（#155）/ skeleton（#156）主 pass + 两条阴影 pass（本 PR）均已支持 cutout + 双面，见 §0.6/§0.7。
 2. **静态 `DrawInstancedObject`**：补完 instancing 第二条腿（Danis 在 #106 已点名它是下一步）。
+   ✅ **已实现**（2026-10-09）：`RenderCommandList::DrawInstancedObject(mesh_id, material, instances)`
+   + `InstancedObjectCommand`；object3d 侧，复用 `BuildModelMatrix` 逐实例摆放 + 同一份
+   `kMeshFs3dPBR`（含 cutout/双面）+ 实例化阴影；见 §0.7。
 
 **Step 1 — 第一棵「不丢人」的树**
 3. `VegetationGenerator`（CPU/GL-free）：参数 + seed → 枝干网格 + 叶片卡片实例；单测验确定性。
