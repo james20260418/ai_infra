@@ -17,6 +17,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
+#include "tools/jpov/src/instanced/instanced_object_renderer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
 #include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
@@ -254,6 +255,12 @@ private:
     // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int DrawObject3DProgCutout();
     unsigned int DrawObject3DProgFullCutout();
+    // 静态批量实例 program（InstancedObjectRenderer::kMeshVs3dPBR*Instanced + 同模块 kMeshFs3dPBR）。
+    unsigned int DrawInstancedObjectProg();
+    unsigned int DrawInstancedObjectProgFull();
+    // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int DrawInstancedObjectProgCutout();
+    unsigned int DrawInstancedObjectProgFullCutout();
     unsigned int ShadowProg();
     // alpha-test（cutout）阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int ShadowProgCutout();
@@ -271,6 +278,10 @@ private:
     unsigned int SkinnedShadowProg();
     // alpha-test（cutout）蒙皮阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int SkinnedShadowProgCutout();
+    // 实例版阴影 program（InstancedObjectRenderer::kShadowVsInstanced + 同模块 kShadowFs，深度专用）。
+    unsigned int InstancedShadowProg();
+    // alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
+    unsigned int InstancedShadowProgCutout();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。

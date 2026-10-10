@@ -91,6 +91,8 @@ enum class DrawCommandType : uint8_t {
                         //      GPU 纹理采样 + 矩形面片）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
+    kInstancedObject,   // 3D 静态模型批量实例（世界空间，instancing）
+                        //      同 mesh 摆 N 份 = 一次 instanced draw，每份一份摆放，见 InstancedObjectCommand
     kSkinnedMesh,       // 3D 骨架蒙皮模型（世界空间，instancing）
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
@@ -1630,6 +1632,38 @@ struct Object3DCommand {
     bool highlight = false;
 };
 
+// 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
+//
+// 与 Object3DCommand 的唯一区别：摆放是**逐实例**的（每实例 center/up/front/scale），
+// 一次命令 = 一次 instanced draw（N 份同 mesh）。与 SkinnedMeshCommand 的区别：**不含骨架**
+//   —— 顶点直接经每实例摆放矩阵变换，无蒙皮。定位：植被（叶子卡片 / 树 × 万份）、
+//   重复道具（栅栏 / 石头）等「同模型摆很多份」的静态批量。
+//
+// 变换约定与 Object3DCommand **完全一致**（每实例 local +Y→up、+Z→front、
+//   +X = cross(up,front)、scale 先缩顶点）：v_world = center + R(up,front)·(scale·v_local)
+//   （见 InstanceTransform）；渲染侧用与 DrawObject3D 同一套 BuildModelMatrix 建每实例矩阵。
+//
+// 单个静态实例的运行时状态（一条 InstancedObjectCommand 里的第 k 份）。
+//
+// 目前只有「摆放」，但**刻意包一层结构体**（而非命令里直接放 vector<InstanceTransform>）——
+// 与 SkinnedInstanceState 同一考量：逐实例状态只会越加越多（植被的**风相位** / 四季着色 /
+// LOD 档 / 每实例随机种子 … 都是 per-instance）。先留好这层壳，以后加字段不动接口形状。
+// 摆放走 per-instance attribute(mat4)；后续 per-instance 属性各自走自己的 slot。
+struct InstanceState {
+    // 摆放 —— center 平移 + up/front 旋转 + scale（见 InstanceTransform）。
+    InstanceTransform transform;
+};
+
+// Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
+// Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性。
+// ⚠️ 同批共享同一 mesh_id（GL 顶点几何绑在 VAO 全体共享，不能在一次 instanced draw 里
+//    per-instance 换几何）；换模型 = 另发一个 InstancedObjectCommand。
+struct InstancedObjectCommand {
+    uint32_t mesh_id;      // 已注册的 GPU mesh 句柄（全批共享）
+    PBRMaterial material;  // 该网格的 PBR 材质（同 Object3DCommand.material 语义）
+    std::vector<InstanceState> instances;  // 每实例一份状态（目前只有摆放）
+};
+
 // 3D 骨架蒙皮模型（世界空间，instancing 批）
 //
 // 一批「同一种骨架 + 同 rest mesh」的实例，共用一份蒙皮几何 —— 对应架构文档
@@ -1734,6 +1768,9 @@ struct RenderCommandList {
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
+    // 3D 静态批量实例命令（世界空间, instancing）。存一批 per-instance 摆放，渲染时归成一次
+    // instanced draw。同 mesh 才能同批（见 InstancedObjectCommand）。
+    std::vector<InstancedObjectCommand> instanced_object;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -2071,6 +2108,21 @@ struct RenderCommandList {
                       float scale = 1.0f,
                       bool highlight = false,
                       uint32_t picking_id = 0);
+
+    // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
+    //
+    // 语义：把同一 mesh 按 instances 里每份摆放(center/up/front/scale)各画一份 —— 一次
+    // instanced draw。与 DrawObject3D 的变换约定**逐字一致**（每实例局部 +Y→up、+Z→front、
+    // scale 先缩顶点），差别只在「摆放逐实例」+「一次画 N 份」。定位：植被 / 重复道具。
+    //
+    // material 为该网格的 PBR 材质（同 DrawObject3D 的 mat）；支持纹理通道与 alpha cutout
+    // （alpha_mode==kMask 时走 discard 变体，且阴影 pass 同步镂空）+ double_sided。
+    //
+    // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
+    // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性。
+    // Pre-condition: 每实例 up/front 非零且不平行；scale > 0。
+    void DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
+                             std::vector<InstanceState> instances);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //
