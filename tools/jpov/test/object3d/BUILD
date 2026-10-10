@@ -586,6 +586,23 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 混合拾取：object3d + 蒙皮 + 静态实例同帧共存 → internal id 分区消歧。
+cc_test(
+    name = "jpov_pick_mixed_test",
+    srcs = ["jpov_pick_mixed_test.cc"],
+    data = ["//tools/jpov/assets/models:mixamo_male_glb_data"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # ============================================================================
 # 3D 文本 — 深度测试 + alpha 混合 GOLD（中文字嵌地板）
 #

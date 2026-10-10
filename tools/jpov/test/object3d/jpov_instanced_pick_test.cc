@@ -1,20 +1,16 @@
-// JPOV 实例化拾取测试 —— 验证 InstancedObjectRenderer 的拾取能力：
+// JPOV 实例化拾取测试 —— 验证 InstancedObjectRenderer 拾取 + 三大 renderer 共享的
+// internal-id 映射机制：
 //   ① 逐实例 picking_id（同 mesh 摆 N 份，各给不同 id）；
 //   ② render_internal_id 分区映射（写 FBO 的是致密 internal id，读回再查表得用户 id）；
-//   ③ cutout（alpha_mode=kMask）镂空片元 discard、不写 internal id。
+//   ③ 空间对应：左实例 → 左 id，右实例 → 右 id（不是「只要集合对」）；
+//   ④ 批内 picking_id==0 的实例 → 命中判 miss；
+//   ⑤ cutout（alpha_mode=kMask）镂空片元 discard、不写 internal id（实例 + object3d 两条）。
 //
-// 覆盖：
-//   1. 静态实例批（普通 box，无贴图）：3 份实例，picking_id = 11/12/13。沿屏幕中线扫描，
-//      命中 id 集合应恰为 {11,12,13}；背景点未命中。
-//   2. cutout 实例（带 UV 的四边形 + MASK 材质）：
-//      - baseColor 贴图整片 alpha≈0 → 全片 discard → 拾取**未命中**（镂空不填 id）；
-//      - 换成 alpha=1 的贴图 → 命中该实例 id（21）。
-//
-// 说明：用**均匀 alpha** 的贴图，避免对 UV→屏幕映射做实假设（任何 UV 采到的
-//   alpha 都一样）。llvmpipe 下仅验拾取 id，不做光照像素比对。
+// 说明：cutout 用**均匀 alpha** 贴图，避免对 UV→屏幕映射做实假设。
 
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -55,14 +51,22 @@ jpov::MeshData MakeUvQuad(float half) {
     return m;
 }
 
+// 场景选择。
+enum class Scene {
+    kIds,              // 3 份普通实例，id 11/12/13（验逐实例 id + 空间对应）
+    kZeroInBatch,      // 2 份实例，id 41 / 0（点 id=0 的那份应 miss）
+    kCutoutInstanced,  // 1 份 MASK 四边形实例（DrawInstancedObject + cutout）
+    kCutoutObject3d,   // 1 份 MASK 四边形（DrawObject3D + cutout）
+};
+
 class InstancedPickApp : public JPOV {
 public:
     using JPOV::JPOV;
 
-    uint32_t box_mesh_ = 0;    // 普通 box（实例 id 场景）
-    uint32_t quad_mesh_ = 0;   // 带 UV 四边形（cutout 场景）
+    uint32_t box_mesh_ = 0;    // 普通 box
+    uint32_t quad_mesh_ = 0;   // 带 UV 四边形（cutout）
     jpov::PBRMaterial mask_mat_;
-    bool cutout_scene_ = false;
+    Scene scene_ = Scene::kIds;
     bool pick_enabled = false;
     float pick_x = 0.0f;
     float pick_y = 0.0f;
@@ -87,7 +91,8 @@ public:
         cmds->ambient = jpov::AmbientLight{.color = {1, 1, 1, 1}, .intensity = 0.4f};
         cmds->tone_mapping = true;
 
-        if (!cutout_scene_) {
+        switch (scene_) {
+        case Scene::kIds: {
             std::vector<jpov::InstanceState> insts(3);
             insts[0].transform.center = {-2.0f, 0.0f, 0.0f};
             insts[0].picking_id = 11;
@@ -98,11 +103,36 @@ public:
             cmds->DrawInstancedObject(box_mesh_,
                                       jpov::PBRMaterial::SolidColor(jpov::kColorWhite),
                                       std::move(insts));
-        } else {
+            break;
+        }
+        case Scene::kZeroInBatch: {
+            std::vector<jpov::InstanceState> insts(2);
+            insts[0].transform.center = {-2.0f, 0.0f, 0.0f};
+            insts[0].picking_id = 41;
+            insts[1].transform.center = {2.0f, 0.0f, 0.0f};
+            insts[1].picking_id = 0;   // 不可拾取，但仍是本批一员（占 internal id）
+            cmds->DrawInstancedObject(box_mesh_,
+                                      jpov::PBRMaterial::SolidColor(jpov::kColorWhite),
+                                      std::move(insts));
+            break;
+        }
+        case Scene::kCutoutInstanced: {
             std::vector<jpov::InstanceState> insts(1);
             insts[0].transform.center = {0.0f, 0.0f, 0.0f};
             insts[0].picking_id = 21;
             cmds->DrawInstancedObject(quad_mesh_, mask_mat_, std::move(insts));
+            break;
+        }
+        case Scene::kCutoutObject3d: {
+            cmds->DrawObject3D(quad_mesh_, mask_mat_,
+                               /*center*/ {0.0f, 0.0f, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/  1.0f,
+                               /*highlight*/ false,
+                               /*picking_id*/ 51);
+            break;
+        }
         }
 
         cmds->pick.enabled = pick_enabled;
@@ -126,6 +156,13 @@ int main() {
     app.box_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.8f, 0.8f, 0.8f));
     app.quad_mesh_ = app.RegisterMesh(MakeUvQuad(3.0f));
 
+    const uint32_t tex_trans = app.RegisterTexture(
+        TestDataDir() + "/object3d/instanced_pick_cutout_transparent.png");
+    const uint32_t tex_opaq = app.RegisterTexture(
+        TestDataDir() + "/object3d/instanced_pick_cutout_opaque.png");
+    CHECK_NE(tex_trans, 0u) << "透明贴图注册失败";
+    CHECK_NE(tex_opaq, 0u) << "不透明贴图注册失败";
+
     jpov::WindowInfo winfo;
     winfo.width = 1280.0f;
     winfo.height = 720.0f;
@@ -139,63 +176,84 @@ int main() {
         return app.last_pick();
     };
 
-    // ---- 1) 实例批：逐实例 picking_id ----
+    // ---- 1) 实例批：逐实例 picking_id + 空间对应 ----
     {
-        app.cutout_scene_ = false;
+        app.scene_ = Scene::kIds;
         std::set<uint32_t> found;
-        int hits = 0;
+        std::map<uint32_t, float> first_x;   // id → 首次命中的屏幕 x
         for (float x = 40.0f; x <= 1240.0f; x += 20.0f) {
             const jpov::PickResult r = run_pick(x, 360.0f);
             if (r.hit) {
                 found.insert(r.picking_id);
-                ++hits;
+                if (first_x.find(r.picking_id) == first_x.end()) {
+                    first_x[r.picking_id] = x;
+                }
             }
         }
-        LOG(INFO) << "instanced scan y=360: hits=" << hits
-                  << " distinct ids=" << found.size();
         CHECK_EQ(found.size(), 3u)
             << "沿中线扫描应拾到 3 个不同实例 id，实际 " << found.size();
-        CHECK(found.count(11) && found.count(12) && found.count(13))
-            << "实例 id 集合应为 {11,12,13}（逐实例 id 映射失败）";
+        CHECK_EQ(found.count(11) + found.count(12) + found.count(13), 3u)
+            << "实例 id 集合应为 {11,12,13}";
+        // 空间对应：左实例(x≈-2)→11，中→12，右→13（防「集合对但映射错位」）。
+        CHECK(first_x.count(11) && first_x.count(12) && first_x.count(13));
+        CHECK(first_x[11] < first_x[12] && first_x[12] < first_x[13])
+            << "空间对应错位：first_x(11)=" << first_x[11]
+            << " first_x(12)=" << first_x[12] << " first_x(13)=" << first_x[13]
+            << "（应 11<12<13）";
 
         const jpov::PickResult bg = run_pick(20.0f, 20.0f);
         CHECK(!bg.hit) << "左上角背景点应未命中";
-        LOG(INFO) << "background corner → hit=" << bg.hit;
     }
 
-    // ---- 2) cutout：镂空 discard 不写 internal id ----
+    // ---- 2) 批内 picking_id==0 → miss（但仍是本批一员，占 internal id） ----
     {
-        app.cutout_scene_ = true;
-        const uint32_t tex_trans = app.RegisterTexture(
-            TestDataDir() + "/object3d/instanced_pick_cutout_transparent.png");
-        const uint32_t tex_opaq = app.RegisterTexture(
-            TestDataDir() + "/object3d/instanced_pick_cutout_opaque.png");
-        CHECK_NE(tex_trans, 0u) << "透明贴图注册失败";
-        CHECK_NE(tex_opaq, 0u) << "不透明贴图注册失败";
+        app.scene_ = Scene::kZeroInBatch;
+        std::set<uint32_t> found;
+        for (float x = 40.0f; x <= 1240.0f; x += 20.0f) {
+            const jpov::PickResult r = run_pick(x, 360.0f);
+            if (r.hit) found.insert(r.picking_id);
+        }
+        CHECK_EQ(found.size(), 1u) << "应只拾到 id=41（id=0 的实例不该命中），实际 "
+                                   << found.size() << " 种 id";
+        CHECK_EQ(found.count(41), 1u) << "应拾到 id=41";
+        CHECK_EQ(found.count(0), 0u) << "picking_id=0 的实例不该被命中";
+    }
 
-        // 透明贴图：整片 alpha=0 → 全片被 discard → 拾取未命中。
+    // ---- 3) cutout：镂空 discard 不写 id（实例路径）----
+    {
+        app.scene_ = Scene::kCutoutInstanced;
+        app.mask_mat_ = jpov::PBRMaterial{};
+        app.mask_mat_.base_color_tex = tex_trans;   // 整片 alpha=0
+        app.mask_mat_.alpha_mode = jpov::AlphaMode::kMask;
+        app.mask_mat_.alpha_cutoff = 0.5f;
+        const jpov::PickResult rt = run_pick(640.0f, 360.0f);
+        CHECK(!rt.hit) << "实例 cutout：整片镂空（alpha=0）应 discard，不该命中";
+
+        app.mask_mat_.base_color_tex = tex_opaq;    // 整片 alpha=1
+        const jpov::PickResult ro = run_pick(640.0f, 360.0f);
+        CHECK(ro.hit) << "实例 cutout：不透明片应命中";
+        CHECK_EQ(ro.picking_id, 21u) << "应命中实例 picking_id=21";
+    }
+
+    // ---- 4) cutout：镂空 discard（object3d 路径）----
+    {
+        app.scene_ = Scene::kCutoutObject3d;
         app.mask_mat_ = jpov::PBRMaterial{};
         app.mask_mat_.base_color_tex = tex_trans;
         app.mask_mat_.alpha_mode = jpov::AlphaMode::kMask;
         app.mask_mat_.alpha_cutoff = 0.5f;
         const jpov::PickResult rt = run_pick(640.0f, 360.0f);
-        LOG(INFO) << "cutout(transparent) center → hit=" << rt.hit;
-        CHECK(!rt.hit)
-            << "整片镂空（alpha=0）应被 discard，不该写入 internal id";
+        CHECK(!rt.hit) << "object3d cutout：整片镂空（alpha=0）应 discard，不该命中";
 
-        // 不透明贴图：命中该实例 picking_id=21。
         app.mask_mat_.base_color_tex = tex_opaq;
         const jpov::PickResult ro = run_pick(640.0f, 360.0f);
-        LOG(INFO) << "cutout(opaque) center → hit=" << ro.hit
-                  << " id=" << ro.picking_id;
-        CHECK(ro.hit) << "不透明片应命中";
-        CHECK_EQ(ro.picking_id, 21u) << "应命中该实例的 picking_id=21";
-
-        app.ReleaseTexture(tex_trans);
-        app.ReleaseTexture(tex_opaq);
+        CHECK(ro.hit) << "object3d cutout：不透明片应命中";
+        CHECK_EQ(ro.picking_id, 51u) << "应命中 object3d picking_id=51";
     }
 
+    app.ReleaseTexture(tex_trans);
+    app.ReleaseTexture(tex_opaq);
     app.Finalize();
-    LOG(INFO) << "TEST PASSED: 实例化逐实例拾取 + cutout 镂空 discard 正确";
+    LOG(INFO) << "TEST PASSED: 实例逐实例拾取 + 空间对应 + 批内 id=0 + cutout 镂空 discard 正确";
     return 0;
 }
