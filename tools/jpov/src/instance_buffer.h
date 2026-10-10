@@ -241,6 +241,9 @@ private:
 //   即使将来有人加 pass、改 draw 路径，也不可能「挂上忘了摘」，
 //   从而不可能把 divisor=1 的启用态泄漏给后续普通 draw。
 //
+//   两个构造重载：initializer_list（固定集合）与 vector（**运行时可变集合**，
+//   供「按门控决定要不要挂某些缓冲」的场景——如 LAG 未启用时不挂 loc14/15）。
+//
 //   用法：
 //     {
 //       InstanceBufferBinding bind(mesh->vao, {&model_buf, &pose_buf});
@@ -251,6 +254,8 @@ class InstanceBufferBinding {
 public:
     InstanceBufferBinding(unsigned int vao,
                           std::initializer_list<const InstanceBuffer*> buffers);
+    InstanceBufferBinding(unsigned int vao,
+                          const std::vector<const InstanceBuffer*>& buffers);
     ~InstanceBufferBinding();
 
     InstanceBufferBinding(const InstanceBufferBinding&) = delete;

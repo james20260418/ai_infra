@@ -188,6 +188,7 @@ void SkeletonRenderer::UploadAmbient(ShaderManager& shader_mgr,
 void SkeletonRenderer::UploadSkinningInstanceAttributes(
     const SkinnedMeshCommand& cmd,
     int pose_w,
+    bool include_lag,
     InstanceBuffer& instance_model_buf,
     InstanceBuffer& instance_pose_ids_buf,
     InstanceBuffer& instance_misc_buf,
@@ -259,57 +260,65 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     }
     instance_misc_buf.Upload(misc);
 
-    // 4/5) 部位额外旋转（pose=loc13 / lag=loc14）：各 kNumPartialRotation 个模型系四元数
-    //      （8 half）打包进 4 个 uint32。默认全恒等；非恒等时才由 host 开 uPartialEnabled
-    //      （pose 那路），shader 侧才逐骨前乘。
+    // 4) 部位额外旋转（pose，loc13）：kNumPartialRotation 个模型系四元数（8 half）打包进 4 个
+    //    uint32。默认全恒等；非恒等时才由 host 开 uPartialEnabled，shader 侧才逐骨前乘。
     std::vector<float> partial(n * 4);
-    std::vector<float> partial_lag(n * 4);
     for (size_t k = 0; k < n; ++k) {
         const SkinnedInstanceState& inst = cmd.instances[k];
         float qp[8];
-        float ql[8];
         for (int c = 0; c < kNumPartialRotation; ++c) {
             const geom::Quaternion<float>& q = inst.partial_rotations[static_cast<size_t>(c)];
-            const geom::Quaternion<float>& qlag =
-                inst.partial_rotations_lag[static_cast<size_t>(c)];
             CheckUnitQuat(q, "partial_rotations", c, k);
-            CheckUnitQuat(qlag, "partial_rotations_lag", c, k);
             qp[c * 4 + 0] = q.x;
             qp[c * 4 + 1] = q.y;
             qp[c * 4 + 2] = q.z;
             qp[c * 4 + 3] = q.w;
-            ql[c * 4 + 0] = qlag.x;
-            ql[c * 4 + 1] = qlag.y;
-            ql[c * 4 + 2] = qlag.z;
-            ql[c * 4 + 3] = qlag.w;
         }
         uint32_t packed[4];
         PackHalf8(qp, packed);
         for (int w = 0; w < 4; ++w) {
             std::memcpy(&partial[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
         }
-        PackHalf8(ql, packed);
-        for (int w = 0; w < 4; ++w) {
-            std::memcpy(&partial_lag[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
-        }
     }
     instance_partial_buf.Upload(partial);
-    instance_partial_lag_buf.Upload(partial_lag);
 
-    // 6) lag 相对坐标（loc15）：3 个 half = (dx,dy,dz)（模型/锚点系小值域），第 4 个 half 未用（0）。
-    std::vector<float> pos_lag(n * 4);
-    for (size_t k = 0; k < n; ++k) {
-        const Vec3f& p = cmd.instances[k].pos_lag;
-        CHECK(std::isfinite(p.x()) && std::isfinite(p.y()) && std::isfinite(p.z()))
-            << "pos_lag 含非有限分量 —— 实例 " << k;
-        const float h[8] = {p.x(), p.y(), p.z(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        uint32_t packed[4];
-        PackHalf8(h, packed);
-        for (int w = 0; w < 4; ++w) {
-            std::memcpy(&pos_lag[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
+    // 5/6) LAG 专用（loc14 partial_lag / loc15 pos_lag）—— **门控**：仅当本批需要 LAG
+    //      （网格带 aRelax ⇒ include_lag）才打包+上传。否则整段跳过，省 CPU 打包 + glBufferData
+    //      + 后续的 Attach/Detach（§7.1）。LAG 尚未在 VS 内消费 ⇒ 非松弛网格零额外开销。
+    if (include_lag) {
+        std::vector<float> partial_lag(n * 4);
+        std::vector<float> pos_lag(n * 4);
+        for (size_t k = 0; k < n; ++k) {
+            const SkinnedInstanceState& inst = cmd.instances[k];
+            float ql[8];
+            for (int c = 0; c < kNumPartialRotation; ++c) {
+                const geom::Quaternion<float>& qlag =
+                    inst.partial_rotations_lag[static_cast<size_t>(c)];
+                CheckUnitQuat(qlag, "partial_rotations_lag", c, k);
+                ql[c * 4 + 0] = qlag.x;
+                ql[c * 4 + 1] = qlag.y;
+                ql[c * 4 + 2] = qlag.z;
+                ql[c * 4 + 3] = qlag.w;
+            }
+            uint32_t packed[4];
+            PackHalf8(ql, packed);
+            for (int w = 0; w < 4; ++w) {
+                std::memcpy(&partial_lag[k * 4 + static_cast<size_t>(w)], &packed[w],
+                            sizeof(float));
+            }
+            // lag 相对坐标（loc15）：3 个 half = (dx,dy,dz)，第 4 个 half 未用（0）。
+            const Vec3f& p = inst.pos_lag;
+            CHECK(std::isfinite(p.x()) && std::isfinite(p.y()) && std::isfinite(p.z()))
+                << "pos_lag 含非有限分量 —— 实例 " << k;
+            const float h[8] = {p.x(), p.y(), p.z(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            PackHalf8(h, packed);
+            for (int w = 0; w < 4; ++w) {
+                std::memcpy(&pos_lag[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
+            }
         }
+        instance_partial_lag_buf.Upload(partial_lag);
+        instance_pos_lag_buf.Upload(pos_lag);
     }
-    instance_pos_lag_buf.Upload(pos_lag);
 }
 
 // ==================== DrawSkinnedMesh ====================
@@ -514,9 +523,13 @@ void SkeletonRenderer::DrawSkinnedMesh(
 
     // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
     //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_ids_buf,
-                                     instance_misc_buf, instance_partial_buf,
-                                     instance_partial_lag_buf, instance_pos_lag_buf);
+    // LAG 门控（§7.1）：仅当网格带 aRelax（kRelax）才上传/挂载 loc14/15；否则整段省掉
+    //   （不新增编译期宏，纯 host 运行时判断）。LAG 尚未在 VS 内消费 ⇒ 非松弛网格零额外开销。
+    const bool lag_on = MeshHasFlag(mesh->flags, MeshVertexFlags::kRelax);
+    UploadSkinningInstanceAttributes(cmd, pose_w, lag_on, instance_model_buf,
+                                     instance_pose_ids_buf, instance_misc_buf,
+                                     instance_partial_buf, instance_partial_lag_buf,
+                                     instance_pos_lag_buf);
 
     // ★ 整批 = 一次 instanced draw。这才是 instancing 的意义（N 实例 ≠ N draw call）。
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
@@ -524,10 +537,15 @@ void SkeletonRenderer::DrawSkinnedMesh(
         // RAII：把实例缓冲挂到本 mesh VAO 的 per-instance 槽，出作用域自动摘除。
         //   用守卫而非手写 enable/disable，是为了**结构上**不可能“挂上忘摘”——
         //   残留 divisor=1 的启用态会泄漏给后续普通 draw（见 instance_buffer.h）。
-        InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_ids_buf,
-                                    &instance_misc_buf, &instance_partial_buf,
-                                    &instance_partial_lag_buf, &instance_pos_lag_buf});
+        //   LAG 关时不挂 loc14/15（省两次 Attach/Detach；用可变集合的构造重载）。
+        std::vector<const InstanceBuffer*> bufs = {
+            &instance_model_buf, &instance_pose_ids_buf, &instance_misc_buf,
+            &instance_partial_buf};
+        if (lag_on) {
+            bufs.push_back(&instance_partial_lag_buf);
+            bufs.push_back(&instance_pos_lag_buf);
+        }
+        InstanceBufferBinding bind(mesh->vao, bufs);
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -693,9 +711,12 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
 
     // 实例数据：同一套逐实例缓冲（与主 pass 同源，否则影子与身体错位）。
     //   光空间 VP 走 uniform（全批共享）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_ids_buf,
-                                     instance_misc_buf, instance_partial_buf,
-                                     instance_partial_lag_buf, instance_pos_lag_buf);
+    // LAG 门控（§7.1）：同主 pass——仅当网格带 aRelax 才上传/挂载 loc14/15（省 CPU/带宽）。
+    const bool lag_on = MeshHasFlag(mesh->flags, MeshVertexFlags::kRelax);
+    UploadSkinningInstanceAttributes(cmd, pose_w, lag_on, instance_model_buf,
+                                     instance_pose_ids_buf, instance_misc_buf,
+                                     instance_partial_buf, instance_partial_lag_buf,
+                                     instance_pos_lag_buf);
 
     // 双面（同 DrawSkinnedMesh）：材质声明 double_sided 时关背面剔除，使镂空薄片
     // 蒙皮资产（如蕾丝裙）两面都投出影子；否则保持背面剔除（与旧行为一致）。
@@ -765,11 +786,15 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
 
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
     {
-        // RAII 配对挂载（同主 pass）。
-        InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_ids_buf,
-                                    &instance_misc_buf, &instance_partial_buf,
-                                    &instance_partial_lag_buf, &instance_pos_lag_buf});
+        // RAII 配对挂载（同主 pass）；LAG 关时不挂 loc14/15（`lag_on`）。
+        std::vector<const InstanceBuffer*> bufs = {
+            &instance_model_buf, &instance_pose_ids_buf, &instance_misc_buf,
+            &instance_partial_buf};
+        if (lag_on) {
+            bufs.push_back(&instance_partial_lag_buf);
+            bufs.push_back(&instance_pos_lag_buf);
+        }
+        InstanceBufferBinding bind(mesh->vao, bufs);
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,

@@ -116,11 +116,17 @@ void InstanceBuffer::DetachFromVao(unsigned int vao) const {
 
 InstanceBufferBinding::InstanceBufferBinding(
     unsigned int vao, std::initializer_list<const InstanceBuffer*> buffers)
+    : InstanceBufferBinding(vao,
+                            std::vector<const InstanceBuffer*>(buffers.begin(),
+                                                              buffers.end())) {}
+
+InstanceBufferBinding::InstanceBufferBinding(
+    unsigned int vao, const std::vector<const InstanceBuffer*>& buffers)
     : vao_(vao) {
     CHECK_NE(vao_, 0u) << "InstanceBufferBinding: vao 不能为 0";
     CHECK_GT(buffers.size(), 0u)
         << "InstanceBufferBinding: 至少要挂一个实例缓冲（空守卫没有意义）";
-    buffers_.assign(buffers.begin(), buffers.end());
+    buffers_ = buffers;
     for (const InstanceBuffer* b : buffers_) {
         CHECK(b != nullptr) << "InstanceBufferBinding: 缓冲指针为空";
         b->AttachToVao(vao_);

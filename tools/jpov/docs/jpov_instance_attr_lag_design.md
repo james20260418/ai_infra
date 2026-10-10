@@ -311,6 +311,9 @@ per-instance attribute（divisor=1）:
   - `lag_on = 0` 时：**不 Attach loc14/loc15 的 instance buffer**（`InstanceBufferBinding` 列表按需），
     shader 里 `if (uLagEnabled == 0)` **整段跳过**第二遍 DQS / partial / mix。
   - uniform 分支全批一致，**零 warp 分化代价**；无 lag 模型 **overhead ≈ 一次 uniform 上传**。
+  - **已实现的 host 侧门控（2026-10-10）**：门控量 = `MeshHasFlag(mesh.flags, kRelax)`（网格带 aRelax
+    才需要 LAG）——关时**不打包、不上传、不 Attach** loc14/15（`InstanceBufferBinding` 新增 vector 重载
+    支持可变集合）。**不新增编译期宏**，纯 host 运行时判断；`uLagEnabled` uniform 待 VS 内消费时再加。
 - **数据契约**：`SkinnedInstanceState` 扩展（`pose_a_lag` / `pose_b_lag` / `ratio_lag` /
   `partial_rotations_lag` / `pos_lag`）；越界仍 **LOG(FATAL)/批次剔除**（不静默读 atlas 别人）。
 

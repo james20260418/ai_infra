@@ -665,6 +665,10 @@ void main() {
     //   5) 部位额外旋转（lag）：同构 → instance_partial_lag_buf（loc14 = uvec4）。
     //   6) lag 相对坐标：3 个 half (dx,dy,dz) → instance_pos_lag_buf（loc15 = uvec4）。
     //
+    // include_lag（门控，§7.1）：false 时**跳过 5)、6)**（不打包、不上传 loc14/15）。
+    //   理由：LAG 尚未在 VS 内消费，非松弛网格（无 kRelax）用不到这两条 —— 省 CPU 打包 +
+    //   每次 draw 的 glBufferData + Attach/Detach。**不加编译期宏**，纯 host 运行时判断。
+    //
     // pose_w = gh.bone_count * 2 = 一个 pose 在 atlas 里的**平坦** texel 宽度
     //   （每骨 2 texel：实部 q + 对偶部 t）；
     //   本函数把 pose 下标乘成平坦起点（shader 内按 atlas 宽回绕，与 CPU 烘焙逐 texel 对齐）。
@@ -674,6 +678,7 @@ void main() {
     static void UploadSkinningInstanceAttributes(
         const SkinnedMeshCommand& cmd,
         int pose_w,
+        bool include_lag,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_ids_buf,
         InstanceBuffer& instance_misc_buf,
