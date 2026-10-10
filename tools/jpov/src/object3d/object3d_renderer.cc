@@ -572,7 +572,6 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     glPopAttrib();
 }
 
-
 // ==================== DrawObject3DShadow ====================
 
 void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,

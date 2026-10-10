@@ -91,6 +91,8 @@ enum class DrawCommandType : uint8_t {
                         //      GPU 纹理采样 + 矩形面片）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
+    kInstancedObject,   // 3D 静态模型批量实例（世界空间，instancing）
+                        //      同 mesh 摆 N 份 = 一次 instanced draw，每份一份摆放，见 InstancedObjectCommand
     kSkinnedMesh,       // 3D 骨架蒙皮模型（世界空间，instancing）
                         //      同 mesh+skeleton 的一批实例 = 一次 instanced draw
                         //      每实例在两 pose 间插值，见 SkinnedMeshCommand / DrawMeshWithSkeleton
@@ -466,6 +468,41 @@ struct PointFog {
     Color color;                  // 介质色 / 内散射色（HDR 线性域）
     float intensity;              // 强度（HDR，可 > 1）
     FogAttenuation attenuation;   // 径向衰减剖面
+};
+
+// Fire-Fog（froxel 体积雾）管线参数。
+//
+// 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
+// 设计见 tools/jpov/docs/jpov_froxel_design.md。
+// Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
+//                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
+struct FireFogParams {
+    // 光照开关（分步验收用）：
+    //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
+    //   true  = 叠加 ambient + 太阳×CSM 阴影（step2，god ray）。
+    bool sun_enable = false;
+    // 太阳项散射相位（Henyey-Greenstein 各向异性 g ∈ [0,0.95)；0=各向同性）。
+    // 越大 ⇒ 逆着太阳看时雾越亮（god ray 更明显）；只影响太阳直射项，不影响 ambient。
+    float sun_phase_g = 0.5f;
+    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
+    float sun_gain = 1.0f;
+    // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
+    // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/nz}。near 别设太小（浪费近端）。
+    float z_near = 0.1f;
+    float z_far = 2000.0f;
+    // ── froxel 网格分辨率（两个**独立**自由度）──
+    //   nz      : 每柱 z 切片数。必须是**完全平方**（存储块边长 sblock = √nz，方阵铺砖）。
+    //   tile_px : 每个 Nxy 单元的**屏幕像素**边长（每轴）。
+    //   派生量：
+    //     sblock = √nz；
+    //     Nxy    = ceil(W/tile_px) × ceil(H/tile_px)；
+    //     k（超屏/屏，“每轴”） = sblock/tile_px，面积/耗时 ×k²；
+    //     froxel 纹理 = Nxy.x·sblock × Nxy.y·sblock。
+    //   约束（JPOV 会 CHECK，见 fire_fog_renderer.cc）：
+    //     nz ∈ 完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]；
+    //     派生 froxel 纹理两轴 ≤ kMaxFroxelDim。
+    int nz = 256;
+    int tile_px = 16;
 };
 
 // 全局平行光（太阳 Directional Light）。
@@ -1595,6 +1632,38 @@ struct Object3DCommand {
     bool highlight = false;
 };
 
+// 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
+//
+// 与 Object3DCommand 的唯一区别：摆放是**逐实例**的（每实例 center/up/front/scale），
+// 一次命令 = 一次 instanced draw（N 份同 mesh）。与 SkinnedMeshCommand 的区别：**不含骨架**
+//   —— 顶点直接经每实例摆放矩阵变换，无蒙皮。定位：植被（叶子卡片 / 树 × 万份）、
+//   重复道具（栅栏 / 石头）等「同模型摆很多份」的静态批量。
+//
+// 变换约定与 Object3DCommand **完全一致**（每实例 local +Y→up、+Z→front、
+//   +X = cross(up,front)、scale 先缩顶点）：v_world = center + R(up,front)·(scale·v_local)
+//   （见 InstanceTransform）；渲染侧用与 DrawObject3D 同一套 BuildModelMatrix 建每实例矩阵。
+//
+// 单个静态实例的运行时状态（一条 InstancedObjectCommand 里的第 k 份）。
+//
+// 目前只有「摆放」，但**刻意包一层结构体**（而非命令里直接放 vector<InstanceTransform>）——
+// 与 SkinnedInstanceState 同一考量：逐实例状态只会越加越多（植被的**风相位** / 四季着色 /
+// LOD 档 / 每实例随机种子 … 都是 per-instance）。先留好这层壳，以后加字段不动接口形状。
+// 摆放走 per-instance attribute(mat4)；后续 per-instance 属性各自走自己的 slot。
+struct InstanceState {
+    // 摆放 —— center 平移 + up/front 旋转 + scale（见 InstanceTransform）。
+    InstanceTransform transform;
+};
+
+// Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
+// Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性。
+// ⚠️ 同批共享同一 mesh_id（GL 顶点几何绑在 VAO 全体共享，不能在一次 instanced draw 里
+//    per-instance 换几何）；换模型 = 另发一个 InstancedObjectCommand。
+struct InstancedObjectCommand {
+    uint32_t mesh_id;      // 已注册的 GPU mesh 句柄（全批共享）
+    PBRMaterial material;  // 该网格的 PBR 材质（同 Object3DCommand.material 语义）
+    std::vector<InstanceState> instances;  // 每实例一份状态（目前只有摆放）
+};
+
 // 3D 骨架蒙皮模型（世界空间，instancing 批）
 //
 // 一批「同一种骨架 + 同 rest mesh」的实例，共用一份蒙皮几何 —— 对应架构文档
@@ -1699,6 +1768,9 @@ struct RenderCommandList {
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
     std::vector<Object3DCommand> object3d;
+    // 3D 静态批量实例命令（世界空间, instancing）。存一批 per-instance 摆放，渲染时归成一次
+    // instanced draw。同 mesh 才能同批（见 InstancedObjectCommand）。
+    std::vector<InstancedObjectCommand> instanced_object;
     // 3D 骨架蒙皮批量实例命令（世界空间, instancing）。存一批 per-instance，渲染时归成一次次
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
@@ -1730,10 +1802,14 @@ struct RenderCommandList {
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
-    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（屏幕 tile 剪枝 + 逐像素 ZDist），
+    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（froxel 屏幕空间摊销），
     // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
+
+    // Fire-Fog 管线参数（光照开关 / 相位 / 增益）。未设置时用默认值
+    //（sun_enable=false ⇒ 只输出 base 发射）。仅在 point_fogs 非空时生效。
+    std::optional<FireFogParams> fire_fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图
@@ -2032,6 +2108,21 @@ struct RenderCommandList {
                       float scale = 1.0f,
                       bool highlight = false,
                       uint32_t picking_id = 0);
+
+    // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
+    //
+    // 语义：把同一 mesh 按 instances 里每份摆放(center/up/front/scale)各画一份 —— 一次
+    // instanced draw。与 DrawObject3D 的变换约定**逐字一致**（每实例局部 +Y→up、+Z→front、
+    // scale 先缩顶点），差别只在「摆放逐实例」+「一次画 N 份」。定位：植被 / 重复道具。
+    //
+    // material 为该网格的 PBR 材质（同 DrawObject3D 的 mat）；支持纹理通道与 alpha cutout
+    // （alpha_mode==kMask 时走 discard 变体，且阴影 pass 同步镂空）+ double_sided。
+    //
+    // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
+    // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性。
+    // Pre-condition: 每实例 up/front 非零且不平行；scale > 0。
+    void DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
+                             std::vector<InstanceState> instances);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //

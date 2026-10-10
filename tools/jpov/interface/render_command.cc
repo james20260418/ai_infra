@@ -26,6 +26,7 @@ void RenderCommandList::Clear() {
     arc2d.clear();
     image2d.clear();
     object3d.clear();
+    instanced_object.clear();
     skinned_mesh.clear();
     point_lights.clear();
     point_fogs.clear();
@@ -212,6 +213,19 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
     cmd.highlight = highlight;
     object3d.push_back(cmd);
     order.emplace_back(DrawCommandType::kObject3D, idx);
+}
+
+void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
+                                            std::vector<InstanceState> instances) {
+    CHECK_GT(mesh_id, 0u) << "DrawInstancedObject: mesh_id 必须 > 0";
+    CHECK(!instances.empty()) << "DrawInstancedObject: instances 不能为空";
+    int idx = static_cast<int>(instanced_object.size());
+    InstancedObjectCommand cmd;
+    cmd.mesh_id = mesh_id;
+    cmd.material = mat;
+    cmd.instances = std::move(instances);
+    instanced_object.push_back(std::move(cmd));
+    order.emplace_back(DrawCommandType::kInstancedObject, idx);
 }
 
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,

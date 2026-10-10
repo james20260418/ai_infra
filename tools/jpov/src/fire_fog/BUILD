@@ -1,19 +1,20 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
-# FireFog（雾火）—— 统一体积雾/火子渲染器（屏幕 tile 剪枝 + 逐像素 ZDist）。
+# FireFog（雾火）—— 统一体积雾/火子渲染器（froxel 屏幕空间摊销 Z 轴采样）。
 #
-# 与 object3d / horizon_fog 平级、单一自包含。设计见 tools/jpov/docs/jpov_fire_fog_design.md。
-# 本 PR 只落头文件与框架：数据模型（fog_body.h）+ 渲染器签名（fire_fog_renderer.h）；
-# pass 实现见设计文档 §10.6 的 M1a。
+# 与 object3d / horizon_fog 平级、单一自包含。设计见 tools/jpov/docs/jpov_froxel_design.md。
 cc_library(
     name = "fire_fog_renderer",
     srcs = ["fire_fog_renderer.cc"],
     hdrs = [
         "fire_fog_renderer.h",
+        "fire_fog_shader.h",
+        "fire_fog_lower.h",
         "fog_body.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":convex_hull_tiles",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",
@@ -24,6 +25,35 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# FireFogLower — GL-free CPU 工具（PointFog→FogBody 降维 + 屏幕 tile 剪枝表）。
+cc_library(
+    name = "fire_fog_lower",
+    hdrs = [
+        "fire_fog_lower.h",
+        "fog_body.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":convex_hull_tiles",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# FireFogLower tests（降维 + tile 剪枝表，GL-free）。
+cc_test(
+    name = "fire_fog_lower_test",
+    srcs = ["fire_fog_lower_test.cc"],
+    deps = [
+        ":fire_fog_lower",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
@@ -50,35 +80,4 @@ cc_test(
         "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],
-)
-
-# ZDistFunction — ZDist（逐像素深度函数）的 CPU 参考实现（GL-free）：
-#   z 段加法累加（乱序可加）+ 降采样到 ≤8 控制点（端点保留 ⇒ 总上升量守恒）+ 末端积分
-#   + GPU 纹理布局打包。供 shader 对照 / debug / gold。设计见 docs/jpov_fire_fog_design.md §16。
-cc_library(
-    name = "zdist_function",
-    hdrs = [
-        "zdist_function.h",
-        "zdist_texture_layout.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//geom/math:size_limited_piecewise_linear_function",
-        "//tools/jpov/interface:render_command",
-        "@glog_static//:glog",
-    ],
-    copts = ["-std=c++20"],
-)
-
-# ZDistFunction tests
-cc_test(
-    name = "zdist_function_test",
-    srcs = ["zdist_function_test.cc"],
-    deps = [
-        ":zdist_function",
-        "@glog_static//:glog",
-        "@gtest//:gtest_main",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
 )
