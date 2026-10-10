@@ -522,9 +522,9 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
     }
 }
 
-// ==================== DrawInstancedObjectForPick ====================
+// ==================== DrawInstancedObjectSelected ====================
 
-void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCommand& cmd,
+void InstancedObjectRenderer::DrawInstancedObjectSelected(const InstancedObjectCommand& cmd,
                                                          MeshManager& mesh_mgr,
                                                          TextureManager& texture_mgr,
                                                          const float view_proj[16],
@@ -532,11 +532,10 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
                                                          unsigned int prog_cutout,
                                                          std::vector<uint32_t>* pick_id_map,
                                                          InstanceBuffer& instance_model_buf) {
-    CHECK(pick_id_map != nullptr);
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawInstancedObjectForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK(mesh != nullptr) << "DrawInstancedObjectSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
-    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectForPick: instances 不能为空";
+    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectSelected: instances 不能为空";
 
     const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
     const unsigned int sp = cutout ? prog_cutout : prog;
@@ -548,20 +547,23 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
     }
 
     glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, view_proj);
-    // 本命令占用的 internal id：base .. base+n-1（逐实例 = base + gl_InstanceID）。
+    // pick 模式：本命令占用的 internal id：base .. base+n-1（逐实例 = base + gl_InstanceID）。
+    // highlight 模式（map==nullptr）：不需要 id，跳过。
     const size_t n = cmd.instances.size();
-    const uint32_t base = kPickIdBaseInstanced + static_cast<uint32_t>(pick_id_map->size());
-    CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdMax))
-        << "DrawInstancedObjectForPick: instanced 段 id 溢出（>= " << kPickIdSegmentSize << "）";
-    glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    if (pick_id_map != nullptr) {
+        const uint32_t base = kPickIdBaseInstanced + static_cast<uint32_t>(pick_id_map->size());
+        CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdMax))
+            << "DrawInstancedObjectSelected: instanced 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+        glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    }
 
     if (cutout) {
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
         if (cmd.material.base_color_tex != 0) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawInstancedObjectForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+                << "DrawInstancedObjectSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
             unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectForPick: base_color_tex 未注册";
+            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectSelected: base_color_tex 未注册";
             const int u = kTexUnitMaterialBase + 0;
             glActiveTexture(GL_TEXTURE0 + u);
             glBindTexture(GL_TEXTURE_2D, gl_tex);
@@ -572,9 +574,11 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
         }
     }
 
-    // CPU 侧 id 映射：逐实例追加（含 picking_id==0 的实例，保证 base+i 连续）。
-    for (const InstanceState& inst : cmd.instances) {
-        pick_id_map->push_back(inst.picking_id);
+    // pick 模式：CPU 侧 id 映射，逐实例追加（含 picking_id==0，保证 base+i 连续）。
+    if (pick_id_map != nullptr) {
+        for (const InstanceState& inst : cmd.instances) {
+            pick_id_map->push_back(inst.picking_id);
+        }
     }
 
     std::vector<float> xforms(n * 16);

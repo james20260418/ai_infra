@@ -849,14 +849,14 @@ void main() {
                                           unsigned int shadow_prog_cutout,
                                           InstanceBuffer& instance_model_buf);
 
-    // ---- DrawInstancedObjectForPick ----
+    // ---- DrawInstancedObjectSelected ----
     // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。
     //   逐实例 id = kPickIdBaseInstanced + 本命令 base + gl_InstanceID。
     // 本函数负责 CPU 侧 id 映射：把**逐实例** picking_id 依次追加进 pick_id_map，并上传
     //   uPickIdBase = 段基址 + 追加前的表长。
     // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
     // Pre-condition: pick_id_map != nullptr；cmd.instances 非空。
-    static void DrawInstancedObjectForPick(const InstancedObjectCommand& cmd,
+    static void DrawInstancedObjectSelected(const InstancedObjectCommand& cmd,
                                            MeshManager& mesh_mgr,
                                            TextureManager& texture_mgr,
                                            const float view_proj[16],

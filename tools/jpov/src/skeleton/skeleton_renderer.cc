@@ -720,9 +720,9 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glActiveTexture(GL_TEXTURE0);
 }
 
-// ==================== DrawSkinnedMeshForPick ====================
+// ==================== DrawSkinnedMeshSelected ====================
 
-void SkeletonRenderer::DrawSkinnedMeshForPick(
+void SkeletonRenderer::DrawSkinnedMeshSelected(
     const SkinnedMeshCommand& cmd,
     MeshManager& mesh_mgr,
     TextureManager& texture_mgr,
@@ -736,15 +736,14 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     InstanceBuffer& instance_pose_buf,
     InstanceBuffer& instance_thickness_buf,
     InstanceBuffer& instance_partial_buf) {
-    CHECK(pick_id_map != nullptr);
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawSkinnedMeshForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK(mesh != nullptr) << "DrawSkinnedMeshSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
+        << "DrawSkinnedMeshSelected: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kJoints))
-        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kJoints 属性（蒙皮网格）";
-    CHECK(!cmd.instances.empty()) << "DrawSkinnedMeshForPick instance 数组不能为空";
+        << "DrawSkinnedMeshSelected: mesh_id=" << cmd.mesh_id << " 需要 kJoints 属性（蒙皮网格）";
+    CHECK(!cmd.instances.empty()) << "DrawSkinnedMeshSelected instance 数组不能为空";
 
     const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
     const unsigned int sp = cutout ? prog_cutout : prog;
@@ -759,19 +758,22 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, view_proj);
 
     // 拾取 id 段基址 + 逐实例映射（逐实例 id = base + gl_InstanceID）。
+    // highlight 模式（map==nullptr）：不需要 id，跳过。
     const size_t n = cmd.instances.size();
-    const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
-    CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
-        << "DrawSkinnedMeshForPick: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
-    glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    if (pick_id_map != nullptr) {
+        const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
+        CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
+            << "DrawSkinnedMeshSelected: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+        glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    }
 
     if (cutout) {
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
         if (cmd.material.base_color_tex != 0) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawSkinnedMeshForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+                << "DrawSkinnedMeshSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
             unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshForPick: base_color_tex 未注册";
+            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshSelected: base_color_tex 未注册";
             const int u = kTexUnitMaterialBase + 0;
             glActiveTexture(GL_TEXTURE0 + u);
             glBindTexture(GL_TEXTURE_2D, gl_tex);
@@ -781,9 +783,11 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
             glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
         }
     }
-    // CPU 侧 id 映射：逐实例追加（含 picking_id==0 的实例，保证 base+i 连续）。
-    for (const SkinnedInstanceState& inst : cmd.instances) {
-        pick_id_map->push_back(inst.picking_id);
+    // pick 模式：CPU 侧 id 映射，逐实例追加（含 picking_id==0，保证 base+i 连续）。
+    if (pick_id_map != nullptr) {
+        for (const SkinnedInstanceState& inst : cmd.instances) {
+            pick_id_map->push_back(inst.picking_id);
+        }
     }
 
     // ---- 骨纹理 pose atlas（影响剪影，需与主 pass 一致）----

@@ -167,13 +167,11 @@ private:
     void DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                          float vp_x, float vp_y, float vp_w, float vp_h);
 
-    // 高亮 pass（CPU 屏幕空间回填）：3D 内容全部画完后统一执行的一个独立子步骤
-    // （与 shadow pass / tone map pass 并列）。
-    // 从 fbo_hdr_（MSAA 时自动 resolve）blit color 到 color-only 单采样 hl FBO，
-    // 再把被高亮物体画进独立 mask 纹理（不扩张的单色剪影），CPU 读回 mask、
-    // 做 outline_px 次像素膨胀，膨胀图与原剪影相减得恒定像素宽的边缘环，
-    // 最后用 GL_POINTS 把边框色回填叠加到场景颜色上（hl_color_tex_）。
-    // 返回叠加了高亮的颜色纹理（hl_color_tex_），供 tone map pass 作为输入。
+    // 高亮 pass：3D 内容全部画完后统一执行的一个独立子步骤（与 shadow pass / tone map pass 并列）。
+    // 三大 renderer 的「highlight」命令（per-command 整批高亮）画进独立单采样 R8 mask
+    // （关深度 → 含遮挡的总外包络），blit 场景 color 到 color-only 单采样 hl FBO，
+    // 再用**一个全屏 GPU pass** 做“掩膜方形膨胀 ⊖ 自身 = 边缘环”，把边框色混合叠回
+    // （hl_color_tex_）。返回叠加了高亮的纹理，供 tone map pass 作为输入。
     // 调用前提：use_hdr=true（HDR 3D FBO 已存在），且 cmds.highlight_style 有值。
     unsigned int DrawHighlightPass(const RenderCommandList& cmds,
                                    int fbo_w, int fbo_h);
@@ -217,7 +215,7 @@ private:
     std::vector<uint32_t> pick_table_instanced_;
 
     // 高亮叠加 FBO：color-only 单采样（RGBA16F）。blit 场景 color 到此处后，
-    // 在此叠加恒定像素宽边框（CPU 剪影膨胀求边缘环）。
+    // 在此用全屏 GPU pass 叠加恒定像素宽边框（掩膜膨胀求边缘环）。
     // 完成后其颜色纹理作为 tone map 的输入。
     unsigned int hl_fbo_ = 0, hl_color_tex_ = 0;
     int hl_fbo_w_ = 0, hl_fbo_h_ = 0;
@@ -296,6 +294,15 @@ private:
     unsigned int PickInstancedCutoutProg();
     unsigned int PickSkinnedProg();
     unsigned int PickSkinnedCutoutProg();
+    // 高亮掩膜 program：各 renderer 主 VS（不带 JPOV_PICK）+ 共享 kHighlightFs；各一对（opaque/cutout）。
+    unsigned int HighlightObject3DProg();
+    unsigned int HighlightObject3DCutoutProg();
+    unsigned int HighlightInstancedProg();
+    unsigned int HighlightInstancedCutoutProg();
+    unsigned int HighlightSkinnedProg();
+    unsigned int HighlightSkinnedCutoutProg();
+    // 高亮膨胀+合成（全屏三角形）。
+    unsigned int HighlightCompositeProg();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。

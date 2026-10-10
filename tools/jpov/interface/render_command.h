@@ -1679,6 +1679,9 @@ struct InstancedObjectCommand {
     uint32_t mesh_id;      // 已注册的 GPU mesh 句柄（全批共享）
     PBRMaterial material;  // 该网格的 PBR 材质（同 Object3DCommand.material 语义）
     std::vector<InstanceState> instances;  // 每实例一份状态（目前只有摆放）
+    // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。
+    //   要单独高亮某几株 → 调用方把它们拆成另一条命令（额外一次 draw call，成本可见）。
+    bool highlight = false;
 };
 
 // 3D 骨架蒙皮模型（世界空间，instancing 批）
@@ -1711,6 +1714,8 @@ struct SkinnedMeshCommand {
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
     PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
+    // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
+    bool highlight = false;
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
@@ -2154,7 +2159,8 @@ struct RenderCommandList {
     // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性。
     // Pre-condition: 每实例 up/front 非零且不平行；scale > 0。
     void DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
-                             std::vector<InstanceState> instances);
+                             std::vector<InstanceState> instances,
+                             bool highlight = false);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //
@@ -2198,7 +2204,8 @@ struct RenderCommandList {
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,
-                              std::vector<SkinnedInstanceState> instances);
+                              std::vector<SkinnedInstanceState> instances,
+                              bool highlight = false);
 };
 
 }  // namespace jpov
