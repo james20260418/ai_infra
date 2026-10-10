@@ -62,16 +62,16 @@ public:
     //
     // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
-    //   （loc6..9）而非 uModel；裁剪走 uniform uViewProj = proj*view。
+    //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
     static constexpr const char* kMeshVs3dPBRInstanced = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-// per-instance 摆放矩阵（loc6..9 拆 4 列，divisor=1；布局见 instance_buffer.h）。
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+// per-instance 摆放矩阵（loc7..10 拆 4 列，divisor=1；布局见 instance_buffer.h）。
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uViewProj;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -101,10 +101,10 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uViewProj;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
@@ -132,10 +132,10 @@ void main() {
     static constexpr const char* kShadowVsInstanced = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uShadowViewProj;
 uniform mat4 uShadowDepthViewProj;
 out float vShadowDepth;
@@ -814,7 +814,7 @@ void main() {
     // ---- DrawInstancedObject ----
     // 把一个 InstancedObjectCommand（同 mesh + N 份摆放）用 **instanced draw** 一次画完。
     // 与 DrawObject3D 的材质/光照/tile/阴影 uniform 处理逐项对齐，区别仅在：
-    //   ① 摆放走 per-instance attribute（instance_model_buf，loc6..9）而非 uModel；
+    //   ① 摆放走 per-instance attribute（instance_model_buf，loc7..10）而非 uModel；
     //   ② 裁剪走 uniform uViewProj（= proj*view，不含 model）；③ glDraw*Instanced。
     // 选 program：any_tex → prog_full*；alpha_mode==kMask → prog_*cutout*；double_sided 关背面剔除。
     //
