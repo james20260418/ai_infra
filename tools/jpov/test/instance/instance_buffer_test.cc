@@ -13,6 +13,7 @@
 //   3) RAII：InstanceBufferBinding 出作用域后同样必须全清（结构性保证，无需人手配对）。
 // 第 1 步是必要的「负向参照」—— 没有它，第 2 步可能因为「压根没挂上去」而假通过。
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -82,6 +83,31 @@ public:
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
 
+    // ---- CPU 侧：位打包 codec 往返（设计 §7.3；不依赖 GL）----
+    {
+        // Encode/DecodeThickness：量化误差 ≤ 半步长 (~0.005)。
+        for (float mu : {0.01f, 0.5f, 1.0f, 1.7f, 2.5f}) {
+            const float back = jpov::DecodeThickness(jpov::EncodeThickness(mu));
+            CHECK_LE(std::abs(back - mu), 0.005f) << "thick 往返误差过大: " << mu << " -> " << back;
+        }
+        // Float→half→Float：|v| ≤ 1 的四元数分量，误差 ≤ 1 ulp。
+        for (float v : {0.0f, 0.25f, -0.5f, 0.70710678f, -1.0f}) {
+            const float back = jpov::HalfBitsToFloat(jpov::FloatToHalfBits(v));
+            CHECK_LE(std::abs(back - v), 1e-3f) << "half 往返误差过大: " << v << " -> " << back;
+        }
+        // PackHalf8：8 分量打包进 4×uint32，低 16 位 = 首分量（与 shader UnpackHalf2 对应）。
+        const float src[8] = {0.1f, -0.2f, 0.3f, -0.4f, 0.5f, -0.6f, 0.7f, -0.8f};
+        uint32_t packed[4];
+        jpov::PackHalf8(src, packed);
+        for (int k = 0; k < 4; ++k) {
+            const uint16_t lo = static_cast<uint16_t>(packed[k] & 0xFFFFu);
+            const uint16_t hi = static_cast<uint16_t>(packed[k] >> 16);
+            CHECK_LE(std::abs(jpov::HalfBitsToFloat(lo) - src[k * 2 + 0]), 1e-3f);
+            CHECK_LE(std::abs(jpov::HalfBitsToFloat(hi) - src[k * 2 + 1]), 1e-3f);
+        }
+        LOG(INFO) << "OK: 位打包 codec 往返（thick / half / PackHalf8）";
+    }
+
     JPOV::Config cfg;
     cfg.title = "JPOV InstanceBuffer 不变量测试";
     cfg.headless = true;
@@ -94,10 +120,15 @@ int main(int argc, char** argv) {
         // 实例 1：平移 (5,0,0)
         1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  5, 0, 0, 1,
     };
-    const std::vector<float> pose_k2 = {0, 0, 0,  92, 184, 0.5f};
+    const std::vector<float> pose_k2 = {
+        // 实例 0：pose.a / pose.b / pose_lag.a / pose_lag.b 的平坦起点
+        0, 0, 0, 0,
+        // 实例 1
+        92, 184, 92, 184,
+    };
 
     jpov::InstanceBuffer model_buf(jpov::kInstanceModelAttrSpec);
-    jpov::InstanceBuffer pose_buf(jpov::kInstancePoseAttrSpec);
+    jpov::InstanceBuffer pose_buf(jpov::kInstancePoseIdsAttrSpec);
     model_buf.Upload(model_k2);
     pose_buf.Upload(pose_k2);
     CHECK_EQ(model_buf.instance_count(), 2);
@@ -110,30 +141,30 @@ int main(int argc, char** argv) {
 
     // ---- 前置：空 VAO 上这些槽必须是干净的（否则后面测不出东西）----
     CheckRange(vao, jpov::kInstanceModelAttrSpec, /*expect_enabled=*/false, 0, "前置(未挂)");
-    CheckRange(vao, jpov::kInstancePoseAttrSpec, /*expect_enabled=*/false, 0, "前置(未挂)");
+    CheckRange(vao, jpov::kInstancePoseIdsAttrSpec, /*expect_enabled=*/false, 0, "前置(未挂)");
 
     // ---- 1) 手写 Attach：必须是 enabled + divisor=1（负向参照：证明查询有效）----
     model_buf.AttachToVao(vao);
     pose_buf.AttachToVao(vao);
     CheckRange(vao, jpov::kInstanceModelAttrSpec, /*expect_enabled=*/true, 1, "Attach 后");
-    CheckRange(vao, jpov::kInstancePoseAttrSpec, /*expect_enabled=*/true, 1, "Attach 后");
-    LOG(INFO) << "OK: Attach 后 loc6..10 均已启用且 divisor=1";
+    CheckRange(vao, jpov::kInstancePoseIdsAttrSpec, /*expect_enabled=*/true, 1, "Attach 后");
+    LOG(INFO) << "OK: Attach 后 loc7..11 均已启用且 divisor=1";
 
     // ---- 2) 手写 Detach：必须全部清干净（门禁本体）----
     pose_buf.DetachFromVao(vao);
     model_buf.DetachFromVao(vao);
     CheckRange(vao, jpov::kInstanceModelAttrSpec, /*expect_enabled=*/false, 0, "Detach 后");
-    CheckRange(vao, jpov::kInstancePoseAttrSpec, /*expect_enabled=*/false, 0, "Detach 后");
-    LOG(INFO) << "OK: Detach 后 loc6..10 全部禁用且 divisor 归零（无残留启用态）";
+    CheckRange(vao, jpov::kInstancePoseIdsAttrSpec, /*expect_enabled=*/false, 0, "Detach 后");
+    LOG(INFO) << "OK: Detach 后 loc7..11 全部禁用且 divisor 归零（无残留启用态）";
 
     // ---- 3) RAII 守卫：出作用域必须自动清干净（结构性保证）----
     {
         jpov::InstanceBufferBinding bind(vao, {&model_buf, &pose_buf});
         CheckRange(vao, jpov::kInstanceModelAttrSpec, /*expect_enabled=*/true, 1, "守卫作用域内");
-        CheckRange(vao, jpov::kInstancePoseAttrSpec, /*expect_enabled=*/true, 1, "守卫作用域内");
+        CheckRange(vao, jpov::kInstancePoseIdsAttrSpec, /*expect_enabled=*/true, 1, "守卫作用域内");
     }
     CheckRange(vao, jpov::kInstanceModelAttrSpec, /*expect_enabled=*/false, 0, "守卫出作用域后");
-    CheckRange(vao, jpov::kInstancePoseAttrSpec, /*expect_enabled=*/false, 0, "守卫出作用域后");
+    CheckRange(vao, jpov::kInstancePoseIdsAttrSpec, /*expect_enabled=*/false, 0, "守卫出作用域后");
     LOG(INFO) << "OK: InstanceBufferBinding 出作用域后自动摘除（Attach/Detach 不可能失配）";
 
     glDeleteVertexArrays(1, &vao);

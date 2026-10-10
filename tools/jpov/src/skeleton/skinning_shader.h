@@ -51,12 +51,14 @@ namespace jpov {
 //
 // 「真 instanced draw」的关键：实例间的差异必须走 **per-instance attribute**（divisor=1），
 // 不能走逐实例 uniform —— 后者必须逐实例一次 draw（N 实例 = N 次 draw call）。
-// 属性槽：loc6..9 = aInstModel，loc10 = aInstPose。
-//   布局的**唯一约定点**在 src/instance_buffer.h（kInstanceModelAttrSpec / kInstancePoseAttrSpec）；
+// 布局（2026-10-10 「loc 重排」后定稿，loc0..15 用满）：
+//   顶点属性：0 aPos 1 aNormal 2 aTexCoord 3 aJoint 4 aWeight 5 aTangent 6 aRelax(vec2)
+//   实例属性：7..10 aInstModel | 11 aInstPoseIds(vec4) | 12 aInstMisc(uvec4)
+//             13 aInstPartial(uvec4) | 14 aInstPartialLag(uvec4) | 15 aInstPosLag(uvec4)
+//   布局的**唯一约定点**在 src/instance_buffer.h（kInstance*AttrSpec + 位打包 codec）；
 //   实例数据由渲染器持有的 InstanceBuffer 承载（属于「这次 draw」，不属于 mesh）。
 //
-//   摆放： location 6..9 = aInstModel (mat4，4 个 vec4 slot)
-//          ★ 全批共享 VAO 的**顶点**属性（loc0-5）不变，与普通 draw 完全一致。
+//          ★ 全批共享 VAO 的**顶点**属性（loc0-6）不变，与普通 draw 完全一致。
 //
 // ⚠️ **视图/投影矩阵不入 per-instance attribute**：它全批共享、每帧一张，走 uniform
 //   （uViewProj / uShadowViewProj / uShadowDepthViewProj），满足 minimal surprise ——
@@ -65,7 +67,7 @@ namespace jpov {
 //   **per-instance = 摆放，per-frame = 相机。**
 //
 // 布局与 shader 侧 layout(location=N) 声明一一对应：
-//   loc6 = 第 0 列(vec4)  loc7 = 第 1 列  loc8 = 第 2 列  loc9 = 第 3 列
+//   loc7 = model 第 0 列(vec4) … loc10 = 第 3 列
 //   （列主序，与 BuildModelMatrix 输出一致，见 instance_buffer.h 的布局表）。
 
 // ==================== 蒙皮顶点着色器（DQS） ====================
@@ -82,29 +84,33 @@ layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
 
 uniform mat4 uViewProj;   // proj*view（每帧一张，全批共享）；世界→裁剪。model 走 aInstModel。
-// per-instance 摆放矩阵（location 6..9 拆成 4 列；divisor=1，每实例推进一步）。
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
-// per-instance pose 选择（divisor=1）：vec3(pose_col_a, pose_col_b, ratio)。
-//   .x/.y = 本实例 pose_a / pose_b 在 atlas 里的**平坦 texel 起点**（= pose_idx * bone_count * 2，
-//           CPU 端算好；每骨占 2 texel）
-//   .z    = pose_a→pose_b 插值权重 [0,1]（静态时为 0，短路不读 pose_b）
-//   与 aInstModel 同理：逐实例差异必须走 attribute，不然整批就退化回 N 次 draw。
-//   ⚠️ 统一 float（而非 ivec2 + IPointer）：IPointer 按**原始整数位**解释，float 的位
-//   会被读成天文数字列 → texelFetch 出界、整批塌成空白（踩过）。
-layout(location = 10) in vec3 aInstPose;
-// per-instance 部位粗细系数（divisor=1）：8 个组（kNumThicknessGroup）的横径缩放系数，
-//   打包成 2 个 vec4。.x..w = 组 0..3（loc11）/ 组 4..7（loc12）；1.0 = 原样（默认）。
-//   组号 → 哪些关节 的映射由**骨架级配置**决定（SkeletonManager 构造入参），见 skeleton_types.h。
-layout(location = 11) in vec4 aInstThick0;
-layout(location = 12) in vec4 aInstThick1;
-// per-instance 部位额外旋转（divisor=1）：两个通道的**模型系**四元数（xyzw），默认恒等=不转。
-//   语义见 skeleton_types.h「部位额外旋转」/ skeleton_manager.h 的 partial_rotation_config：
-//   该通道所辖关节的整个子树绕其 bind pivot 旋转（模型系）。两通道嵌套时（腰⊃头）叠加。
-layout(location = 13) in vec4 aInstPartial0;
-layout(location = 14) in vec4 aInstPartial1;
+// 布料 LAG 松弛度（per-**vertex**，divisor=0）：vec2(lag_ratio, max_lag)。
+//   ★ 本次把 loc6 从「per-instance 首槽」腾给顶点属性（model 已挪到 7..10）。
+//   当前**未消费**（LAG 的 mix / 限幅留作后续实现），仅声明以固定 layout。
+layout(location = 6) in vec2 aRelax;
+// per-instance 摆放矩阵（location 7..10 拆成 4 列；divisor=1，每实例推进一步）。
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
+// per-instance pose 选择（divisor=1）：vec4 = pose / pose_lag 两帧的**平坦 texel 起点**。
+//   .x/.y = pose.a / pose.b；.z/.w = pose_lag.a / pose_lag.b（LAG 未用时 .z/.w == .x/.y）。
+//   起点 = pose_idx * bone_count * 2（每骨 2 texel），CPU 端算好；shader 内按 atlas 宽回绕。
+//   ⚠️ 统一 float（而非 IPointer）：见 instance_buffer.h kInstancePoseIdsAttrSpec 注释。
+layout(location = 11) in vec4 aInstPoseIds;
+// per-instance 杂项（divisor=1）：uvec4 = 16 byte 位视图（uint8）。
+//   byte0=ratio(pose)/255，byte1=ratio_lag/255，byte2..9=thick[0..7]（0.01+v/255*2.49），
+//   byte10..12=color0(RGB888)，byte13..15=color1(RGB888)。
+//   解包见 MiscRatio / ThicknessOfChannel；偏移单一来源 instance_buffer.h。
+layout(location = 12) in uvec4 aInstMisc;
+// per-instance 部位额外旋转（pose，divisor=1）：2 个**模型系**四元数（xyzw）→ 8 个 half
+//   打包进 uvec4（低 16 位 = 首分量）。语义见 skeleton_types.h「部位额外旋转」。
+//   解包见 PartialQuatOfChannel（GLSL 330 无 unpackHalf2x16，用手工 HalfToFloat）。
+layout(location = 13) in uvec4 aInstPartial;
+// per-instance 部位额外旋转（lag）：与 loc13 同构，pose_lag 的 2 个模型系四元数。**当前未消费**。
+layout(location = 14) in uvec4 aInstPartialLag;
+// per-instance lag 相对坐标：3 个 half = (dx,dy,dz)（模型/锚点系小值域）。**当前未消费**。
+layout(location = 15) in uvec4 aInstPosLag;
 uniform sampler2D uPoseAtlas;  // RGBA32F 骨骼动画纹理（pose atlas，每骨 2 texel：实部 q + 对偶部 t）
 // 该骨架骨数 —— 也是「合法关节 index」的上界：蒙皮/粗细取址前用它做越界防护（见 JointInRange）。
 uniform int   uBoneCount;
@@ -170,22 +176,28 @@ void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
 //
 // ratio <= 0 时**短路**只取 pose_a：静态/单帧场景（既有 gold 全走这条）取址与插值实现前
 //   完全一致（零回归）。
+// pose 插值权重 ratio（来自 loc12 aInstMisc 的 byte0）。range [0,1]。
+float MiscRatio() {
+    return float(aInstMisc.x & 0xFFu) / 255.0;
+}
+
+// 从 atlas 取第 bone 根骨的对偶四元数。
 void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
     vec4 qa, ta;
-    LoadDualQuatAt(int(aInstPose.x), bone, qa, ta);
-    if (aInstPose.z <= 0.0) {
+    LoadDualQuatAt(int(aInstPoseIds.x), bone, qa, ta);
+    float r = MiscRatio();
+    if (r <= 0.0) {
         q = qa;
         t = ta;
         return;
     }
     vec4 qb, tb;
-    LoadDualQuatAt(int(aInstPose.y), bone, qb, tb);
+    LoadDualQuatAt(int(aInstPoseIds.y), bone, qb, tb);
     // 最短路径：dot < 0 ⇒ q_b 在另一半球，整体取负（(q,t) 同取负 = 同一个刚体变换）。
     if (dot(qa, qb) < 0.0) {
         qb = -qb;
         tb = -tb;
     }
-    float r = aInstPose.z;
     vec4 qm = mix(qa, qb, r);
     vec4 tm = mix(ta, tb, r);
     // 归一化（NLERP）：实部与对偶部**同除 |q|**（只除实部会让平移尺度错，见 dual_quat.h）。
@@ -236,18 +248,21 @@ vec3 RotateByQuatConj(vec4 q, vec3 v) {
 }
 
 // 取第 channel 个组的横径缩放系数；channel 越界 / -1（不受控）→ 1.0 = 不缩放。
-//   写成 if 链而非动态下标：GLSL 3.30 对向量动态下标的保证弱（llvmpipe 上也更慢），
-//   而只有 8 个分支、且被上层「mu==1 早退」挡住，实际几乎不命中。
+//   从 loc12 的 uint8 视图解包：thick[g] 位于 byte (2+g)（见 instance_buffer.h kMiscByteThickBase）。
+//   编码 0.01 + v/255 × 2.49 → [0.01,2.5]。写成 if 链而非动态下标（GLSL 3.30 弱保证）。
+//   ⚠️ 先 & 0xFFu（uint 移位）再转 float，避免高位符号扩展出错。
 float ThicknessOfChannel(int channel) {
-    if (channel == 0) { return aInstThick0.x; }
-    if (channel == 1) { return aInstThick0.y; }
-    if (channel == 2) { return aInstThick0.z; }
-    if (channel == 3) { return aInstThick0.w; }
-    if (channel == 4) { return aInstThick1.x; }
-    if (channel == 5) { return aInstThick1.y; }
-    if (channel == 6) { return aInstThick1.z; }
-    if (channel == 7) { return aInstThick1.w; }
-    return 1.0;
+    uint b = 0u;
+    if (channel == 0) { b = (aInstMisc.x >> 16) & 0xFFu; }
+    else if (channel == 1) { b = (aInstMisc.x >> 24) & 0xFFu; }
+    else if (channel == 2) { b = aInstMisc.y & 0xFFu; }
+    else if (channel == 3) { b = (aInstMisc.y >> 8) & 0xFFu; }
+    else if (channel == 4) { b = (aInstMisc.y >> 16) & 0xFFu; }
+    else if (channel == 5) { b = (aInstMisc.y >> 24) & 0xFFu; }
+    else if (channel == 6) { b = aInstMisc.z & 0xFFu; }
+    else if (channel == 7) { b = (aInstMisc.z >> 8) & 0xFFu; }
+    else { return 1.0; }
+    return 0.01 + float(b) / 255.0 * 2.49;
 }
 
 // 某骨对「顶点 / 法线 / 切线」的粗细算子。返回 false = 该骨**不需要**算
@@ -312,9 +327,40 @@ vec4 QuatMulP(vec4 a, vec4 b) {
                 a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+// 手工解 IEEE 754 binary16 → float（GLSL 3.30 无 unpackHalf2x16；
+//   该函数在 4.20 / GL_ARB_shading_language_packing 才入标准，本工程统一 #version 330 core）。
+//   子正规（exp==0）一律 flush 到 0，与 host 侧 instance_buffer.h::HalfBitsToFloat 同约定。
+float HalfToFloat(uint h) {
+    uint sign = (h >> 15u) & 0x1u;
+    uint exp  = (h >> 10u) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+    float s = (sign == 1u) ? -1.0 : 1.0;
+    if (exp == 0u) {
+        return 0.0;  // 零 / 子正规 → 0（与 host 一致）
+    }
+    if (exp == 31u) {
+        return 0.0;  // Inf / NaN：不应出现，兜底返回 0，避免污染
+    }
+    float f = 1.0 + float(mant) / 1024.0;
+    return s * f * exp2(float(int(exp) - 15));
+}
+
+// 解一个 uint32 里的两个 half（低 16 位 = .x，高 16 位 = .y；与 host PackHalf8 对应）。
+vec2 UnpackHalf2(uint u) {
+    return vec2(HalfToFloat(u & 0xFFFFu), HalfToFloat((u >> 16u) & 0xFFFFu));
+}
+
 // 本实例通道 c 的模型系旋转四元数（c 只可能 0/1；由骨架配置保证）。
+//   从 loc13（aInstPartial，8 half）解包：quat0 = half[0..3]，quat1 = half[4..7]。
 vec4 PartialQuatOfChannel(int c) {
-    return normalize((c == 0) ? aInstPartial0 : aInstPartial1);
+    if (c == 0) {
+        vec2 a = UnpackHalf2(aInstPartial.x);
+        vec2 b = UnpackHalf2(aInstPartial.y);
+        return normalize(vec4(a.x, a.y, b.x, b.y));
+    }
+    vec2 a = UnpackHalf2(aInstPartial.z);
+    vec2 b = UnpackHalf2(aInstPartial.w);
+    return normalize(vec4(a.x, a.y, b.x, b.y));
 }
 
 // 构造通道 c 的额外旋转 G_c 的**对偶四元数**：绕 j_c 当前位置 pos_c、按模型系 R_c 转。
@@ -477,21 +523,22 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in ivec4 aJoint;
 layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
-// per-instance 摆放矩阵（同主 pass：location 6..9 拆 4 列，divisor=1）。
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
-// per-instance pose 选择（divisor=1，同主 pass）：vec3(pose_col_a, pose_col_b, ratio)。
-layout(location = 10) in vec3 aInstPose;
-// per-instance 部位粗细系数（同主 pass，loc11/12；divisor=1）。阴影必须与主 pass 同用一份，
+// per-instance 摆放矩阵（同主 pass：location 7..10 拆 4 列，divisor=1）。
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
+// per-instance pose 选择（divisor=1，同主 pass）：vec4 = pose/pose_lag 两帧的平坦 texel 起点。
+layout(location = 11) in vec4 aInstPoseIds;
+// per-instance 杂项（uint8 位视图，同主 pass；阴影必须用同一份，否则影子错位）。
+layout(location = 12) in uvec4 aInstMisc;
+// per-instance 部位额外旋转（pose，divisor=1，同主 pass，loc13）——阴影必须与主 pass 同用一份，
 //   否则影子与身体错位（同 §「主/阴影公式必须逐字一致」）。
-layout(location = 11) in vec4 aInstThick0;
-layout(location = 12) in vec4 aInstThick1;
-// per-instance 部位额外旋转（divisor=1，同主 pass，loc13/14）——阴影必须与主 pass 同用一份，
-//   否则影子与身体错位（同 §「主/阴影公式必须逐字一致」）。
-layout(location = 13) in vec4 aInstPartial0;
-layout(location = 14) in vec4 aInstPartial1;
+layout(location = 13) in uvec4 aInstPartial;
+// per-instance 部位额外旋转（lag）/ lag 相对坐标：同主 pass 声明（当前未消费）——阴影也一并声明，
+//   保持与主 pass 的 layout 逐字对齐。
+layout(location = 14) in uvec4 aInstPartialLag;
+layout(location = 15) in uvec4 aInstPosLag;
 uniform mat4 uShadowViewProj;       // 光空间 裁剪（proj*view，model 走 aInstModel）
 uniform mat4 uShadowDepthViewProj;  // 光空间 线性深度（DepthProj*view，model 走 aInstModel）
 uniform sampler2D uPoseAtlas;
@@ -524,22 +571,27 @@ void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
     t = texelFetch(uPoseAtlas, ivec2((x0 + 1) % int(uAtlasDim.x), uPoseRow + (x0 + 1) / int(uAtlasDim.x)), 0);
 }
 
+// pose 插值权重 ratio（同主 pass，来自 loc12 byte0）。
+float MiscRatio() {
+    return float(aInstMisc.x & 0xFFu) / 255.0;
+}
+
 // 同主 pass：两帧 NLERP（最短路径 + 归一化），ratio<=0 短路取 pose_a。
 void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
     vec4 qa, ta;
-    LoadDualQuatAt(int(aInstPose.x), bone, qa, ta);
-    if (aInstPose.z <= 0.0) {
+    LoadDualQuatAt(int(aInstPoseIds.x), bone, qa, ta);
+    float r = MiscRatio();
+    if (r <= 0.0) {
         q = qa;
         t = ta;
         return;
     }
     vec4 qb, tb;
-    LoadDualQuatAt(int(aInstPose.y), bone, qb, tb);
+    LoadDualQuatAt(int(aInstPoseIds.y), bone, qb, tb);
     if (dot(qa, qb) < 0.0) {
         qb = -qb;
         tb = -tb;
     }
-    float r = aInstPose.z;
     vec4 qm = mix(qa, qb, r);
     vec4 tm = mix(ta, tb, r);
     float n = length(qm);
@@ -566,15 +618,17 @@ vec3 RotateByQuatS(vec4 q, vec3 v) {
 }
 
 float ThicknessOfChannelS(int channel) {
-    if (channel == 0) { return aInstThick0.x; }
-    if (channel == 1) { return aInstThick0.y; }
-    if (channel == 2) { return aInstThick0.z; }
-    if (channel == 3) { return aInstThick0.w; }
-    if (channel == 4) { return aInstThick1.x; }
-    if (channel == 5) { return aInstThick1.y; }
-    if (channel == 6) { return aInstThick1.z; }
-    if (channel == 7) { return aInstThick1.w; }
-    return 1.0;
+    uint b = 0u;
+    if (channel == 0) { b = (aInstMisc.x >> 16) & 0xFFu; }
+    else if (channel == 1) { b = (aInstMisc.x >> 24) & 0xFFu; }
+    else if (channel == 2) { b = aInstMisc.y & 0xFFu; }
+    else if (channel == 3) { b = (aInstMisc.y >> 8) & 0xFFu; }
+    else if (channel == 4) { b = (aInstMisc.y >> 16) & 0xFFu; }
+    else if (channel == 5) { b = (aInstMisc.y >> 24) & 0xFFu; }
+    else if (channel == 6) { b = aInstMisc.z & 0xFFu; }
+    else if (channel == 7) { b = (aInstMisc.z >> 8) & 0xFFu; }
+    else { return 1.0; }
+    return 0.01 + float(b) / 255.0 * 2.49;
 }
 
 // 返回 false = 该骨不需要算（不属任何组 / 系数为 1）→ 跳过。
@@ -613,8 +667,30 @@ vec4 QuatMulS(vec4 a, vec4 b) {
                 a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+// 同主 pass：手工解 half（GLSL 330 无 unpackHalf2x16；详见主 pass HalfToFloat 注释）。
+float HalfToFloatS(uint h) {
+    uint sign = (h >> 15u) & 0x1u;
+    uint exp  = (h >> 10u) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+    float s = (sign == 1u) ? -1.0 : 1.0;
+    if (exp == 0u || exp == 31u) {
+        return 0.0;
+    }
+    float f = 1.0 + float(mant) / 1024.0;
+    return s * f * exp2(float(int(exp) - 15));
+}
+vec2 UnpackHalf2S(uint u) {
+    return vec2(HalfToFloatS(u & 0xFFFFu), HalfToFloatS((u >> 16u) & 0xFFFFu));
+}
 vec4 PartialQuatOfChannelS(int c) {
-    return normalize((c == 0) ? aInstPartial0 : aInstPartial1);
+    if (c == 0) {
+        vec2 a = UnpackHalf2S(aInstPartial.x);
+        vec2 b = UnpackHalf2S(aInstPartial.y);
+        return normalize(vec4(a.x, a.y, b.x, b.y));
+    }
+    vec2 a = UnpackHalf2S(aInstPartial.z);
+    vec2 b = UnpackHalf2S(aInstPartial.w);
+    return normalize(vec4(a.x, a.y, b.x, b.y));
 }
 
 // 详主 pass 的 BuildPartialGDq（同公式）：绕 j_c 当前位置、按模型系 R_c 转。

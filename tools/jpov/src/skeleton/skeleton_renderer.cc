@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -42,36 +43,40 @@
 
 namespace jpov {
 
-// 编译期钉住 per-instance 粗细的布局约定（三处必须同步：本文件的上传循环、
-// instance_buffer.h 的 kInstanceThicknessAttrSpec、skinning_shader.h 的 loc11/12）。
-// 任一处单改都不会编译报错，而是**静默错位**（读到别人的槽位 / 每实例只传一半数据）
-// ⇒ 在这里做交叉校验，把“三处同步”变成编译期强制。
-static_assert(kNumThicknessGroup == 8, "部位粗细系数按 2 个 vec4 上传 ⇒ kNumThicknessGroup 必须是 8");
-static_assert(kInstanceThicknessAttrSpec.slot_count *
-                      kInstanceThicknessAttrSpec.slot_components ==
-                  kNumThicknessGroup,
-              "kInstanceThicknessAttrSpec 的 (slot_count × slot_components) 必须 == "
-              "kNumThicknessGroup（每实例 8 个组系数）");
-static_assert(kInstanceThicknessAttrSpec.stride_floats == kNumThicknessGroup,
-              "kInstanceThicknessAttrSpec::stride_floats 必须 == 每实例上传的 float 数"
-              "（= kNumThicknessGroup，见 UploadSkinningInstanceAttributes）");
-static_assert(kInstanceThicknessAttrSpec.base_loc ==
-                  kInstancePoseAttrSpec.base_loc + kInstancePoseAttrSpec.slot_count,
-              "粗细系数的 base_loc 必须紧接 pose 选择槽（10 + 1 = 11）");
-static_assert(kInstanceThicknessAttrSpec.base_loc + kInstanceThicknessAttrSpec.slot_count <= 16,
-              "per-instance 槽位总数不得超过 GL_MAX_VERTEX_ATTRIBS 保证的 16");
-// 部位额外旋转：三处同步（instance_buffer.h 的 spec / skinning_shader.h 的 loc13/14 / 本文上传循环）。
-static_assert(kInstancePartialAttrSpec.slot_count * kInstancePartialAttrSpec.slot_components ==
-                  kNumPartialRotation * 4,
-              "kInstancePartialAttrSpec 的 (slot_count × slot_components) 必须 == "
-              "kNumPartialRotation × 4（每实例 2 个四元数 = 8 float）");
-static_assert(kInstancePartialAttrSpec.stride_floats == kNumPartialRotation * 4,
-              "kInstancePartialAttrSpec::stride_floats 必须 == 每实例上传的 float 数"
-              "（= kNumPartialRotation × 4，见 UploadSkinningInstanceAttributes）");
-static_assert(kInstancePartialAttrSpec.base_loc ==
-                  kInstanceThicknessAttrSpec.base_loc + kInstanceThicknessAttrSpec.slot_count,
-              "额外旋转的 base_loc 必须紧接粗细系数槽（11 + 2 = 13）");
-static_assert(kInstancePartialAttrSpec.base_loc + kInstancePartialAttrSpec.slot_count <= 16,
+// 编译期钉住 per-instance 布局约定（三处必须同步：本文件的上传循环、instance_buffer.h 的
+// 布局 spec + codec、skinning_shader.h 的 layout(location=… )）。任一处单改都不会编译报错，
+// 而是**静默错位**（读到别人的槽位 / 每实例只传一半数据）⇒ 在这里做交叉校验，把“同步”
+// 变成编译期强制。
+static_assert(kNumThicknessGroup == 8,
+              "部位粗细系数打包进 loc12 的 byte2..9 ⇒ kNumThicknessGroup 必须是 8");
+static_assert(kNumPartialRotation == 2,
+              "loc13/14 各打包 kNumPartialRotation 个四元数 ⇒ 必须是 2");
+static_assert(kMiscByteThickBase + kNumThicknessGroup <= kMiscByteColor0,
+              "8 个 thick 必须塞进 byte2..9，不与 color0(byte10) 重叠");
+
+// loc7..10 = model（mat4）。
+static_assert(kInstanceModelAttrSpec.base_loc == 7 &&
+                  kInstanceModelAttrSpec.slot_count == 4 &&
+                  kInstanceModelAttrSpec.slot_components == 4 &&
+                  kInstanceModelAttrSpec.stride_floats == 16,
+              "model 必须是 loc7..10 的 mat4（stride 16 float）");
+// loc11 = pose ids（4 float）。
+static_assert(kInstancePoseIdsAttrSpec.base_loc == 11 &&
+                  kInstancePoseIdsAttrSpec.slot_count == 1 &&
+                  kInstancePoseIdsAttrSpec.slot_components == 4 &&
+                  kInstancePoseIdsAttrSpec.stride_floats == 4,
+              "pose ids 必须是 loc11 的 vec4（stride 4 float）");
+// loc12/13/14/15 = uvec4 整数视图（misc / partial / partial_lag / pos_lag）。
+static_assert(kInstanceMiscAttrSpec.base_loc == 12 && kInstanceMiscAttrSpec.integer_view,
+              "misc 必须是 loc12 的 uvec4 整数视图");
+static_assert(kInstancePartialAttrSpec.base_loc == 13 && kInstancePartialAttrSpec.integer_view,
+              "partial 必须是 loc13 的 uvec4 整数视图");
+static_assert(kInstancePartialLagAttrSpec.base_loc == 14 &&
+                  kInstancePartialLagAttrSpec.integer_view,
+              "partial_lag 必须是 loc14 的 uvec4 整数视图");
+static_assert(kInstancePosLagAttrSpec.base_loc == 15 && kInstancePosLagAttrSpec.integer_view,
+              "pos_lag 必须是 loc15 的 uvec4 整数视图");
+static_assert(kInstancePosLagAttrSpec.base_loc + kInstancePosLagAttrSpec.slot_count <= 16,
               "per-instance 槽位总数不得超过 GL_MAX_VERTEX_ATTRIBS 保证的 16");
 
 namespace {
@@ -122,6 +127,15 @@ void BuildModelMatrix(const Vec3f& center,
     model[1] = right.y(); model[5] = upn.y(); model[9]  = frn.y(); model[13] = center.y();
     model[2] = right.z(); model[6] = upn.z(); model[10] = frn.z(); model[14] = center.z();
     model[3] = 0.0f;      model[7] = 0.0f;    model[11] = 0.0f;    model[15] = 1.0f;
+}
+
+// 校验一个四元数契约：分量有限、范数不近 0（否则 shader 的 normalize 出 NaN）。
+void CheckUnitQuat(const geom::Quaternion<float>& q, const char* what, int c, size_t k) {
+    CHECK(std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) &&
+          std::isfinite(q.w))
+        << what << "[" << c << "] 含非有限分量 —— 实例 " << k;
+    const float norm2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    CHECK_GT(norm2, 0.25f) << what << "[" << c << "] 范数过小（应为单位四元数）—— 实例 " << k;
 }
 
 // 本批实例里是否存在「非恒等」的部位额外旋转 —— 用于 host 侧开关 uPartialEnabled。
@@ -175,13 +189,15 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     const SkinnedMeshCommand& cmd,
     int pose_w,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf,
-    InstanceBuffer& instance_partial_buf) {
+    InstanceBuffer& instance_pose_ids_buf,
+    InstanceBuffer& instance_misc_buf,
+    InstanceBuffer& instance_partial_buf,
+    InstanceBuffer& instance_partial_lag_buf,
+    InstanceBuffer& instance_pos_lag_buf) {
     const size_t n = cmd.instances.size();
     CHECK_GT(n, 0u) << "UploadSkinningInstanceAttributes: instances 不能为空";
 
-    // 1) 摆放矩阵：每实例一个列主序 mat4（与 DrawObject3D 同一套 BuildModelMatrix）。
+    // 1) 摆放矩阵（loc7..10）：每实例一个列主序 mat4（与 DrawObject3D 同一套 BuildModelMatrix）。
     std::vector<float> xforms;
     xforms.resize(n * 16);
     for (size_t k = 0; k < n; ++k) {
@@ -194,65 +210,106 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     }
     instance_model_buf.Upload(xforms);
 
-    // 2) pose 选择：每实例 [pose_col_a, pose_col_b, ratio]。
-    //    col = pose_idx * pose_width（一个 pose 在 atlas 里的**平坦** texel 宽度
-    //    = bone_count * 2：每骨 2 texel 存一个对偶四元数），
+    // 2) pose ids（loc11）：[pose.a, pose.b, pose_lag.a, pose_lag.b] 的**平坦** texel 起点。
+    //    col = pose_idx * pose_w（pose_w = bone_count*2：每骨 2 texel 存一个对偶四元数），
     //    shader 内按 atlas 宽度回绕成 (x,y)——与 CPU 行优先平铺逐 texel 对齐。
+    //    LAG 未用时 pose_lag 的两项应等于 pose 的两项（host 写成独立字段，默认各为 0）。
     std::vector<float> poses;
-    poses.resize(n * 3);
+    poses.resize(n * 4);
     for (size_t k = 0; k < n; ++k) {
         const SkinnedInstanceState& inst = cmd.instances[k];
-        poses[k * 3 + 0] = static_cast<float>(inst.pose_a * pose_w);
-        poses[k * 3 + 1] = static_cast<float>(inst.pose_b * pose_w);
-        poses[k * 3 + 2] = inst.ratio;
+        poses[k * 4 + 0] = static_cast<float>(inst.pose_a * pose_w);
+        poses[k * 4 + 1] = static_cast<float>(inst.pose_b * pose_w);
+        poses[k * 4 + 2] = static_cast<float>(inst.pose_a_lag * pose_w);
+        poses[k * 4 + 3] = static_cast<float>(inst.pose_b_lag * pose_w);
     }
-    instance_pose_buf.Upload(poses);
+    instance_pose_ids_buf.Upload(poses);
 
-    // 3) 部位粗细系数：每实例 kNumThicknessGroup 个 float（组号序，2×vec4 = loc11/12）。
-    //    与 pose 选择同样是「这次 draw」的输入；骨架没配粗细时这里传的全是默认 1.0，
-    //    蒙皮 VS 因 uThicknessEnabled=0 整段跳过（不产生任何计算）。
-    std::vector<float> thickness(n * static_cast<size_t>(kNumThicknessGroup));
+    // 3) 杂项（loc12，uint8 视图）：2 ratio + 8 thick + 2 RGB888 = 16 byte 严丝合缝。
+    //    偏移/编码唯一定义处 = instance_buffer.h 的 kMiscByte* / EncodeThickness。
+    std::vector<float> misc(n * 4);
     for (size_t k = 0; k < n; ++k) {
+        const SkinnedInstanceState& inst = cmd.instances[k];
+        unsigned char bytes[16] = {0};
+        const float ratio = std::min(std::max(inst.ratio, 0.0f), 1.0f);
+        const float ratio_lag = std::min(std::max(inst.ratio_lag, 0.0f), 1.0f);
+        bytes[kMiscByteRatio] =
+            static_cast<unsigned char>(std::lround(ratio * 255.0f));
+        bytes[kMiscByteRatioLag] =
+            static_cast<unsigned char>(std::lround(ratio_lag * 255.0f));
         for (int g = 0; g < kNumThicknessGroup; ++g) {
-            const float mu = cmd.instances[k].thickness_scales[static_cast<size_t>(g)];
-            // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0。0/负会把截面压成零面积 /
-            //   翻法线；NaN 也被这一条拦下（NaN 的任何比较都是 false）。不 clamp 成
-            //   “看起来还行”的值 —— 那是把用户的非法输入静默吞掉。
+            const float mu = inst.thickness_scales[static_cast<size_t>(g)];
+            // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0 且有限。0/负会把截面压成
+            //   零面积 / 翻法线；NaN 也被这一条拦下。不 clamp 成“看起来还行”的值。
             CHECK_GT(mu, 0.0f) << "thickness_scales[" << g << "] 必须 > 0（系数为 0/负会把"
                                   "截面压成零面积/翻法线）—— 实例 " << k;
-            // +inf 通过上面的 >0：它会算出 inf/NaN 顶点并污染整条管线（比 0 更隐蔽），
-            //   所以有限性单独判一次（一次批内每实例 8 次浮点比较，可忽略）。
-            CHECK(std::isfinite(mu)) << "thickness_scales[" << g << "] 必须是有限值，got " << mu
-                                     << " —— 实例 " << k;
-            thickness[k * static_cast<size_t>(kNumThicknessGroup) + static_cast<size_t>(g)] = mu;
+            CHECK(std::isfinite(mu)) << "thickness_scales[" << g << "] 必须是有限值，got "
+                                     << mu << " —— 实例 " << k;
+            bytes[kMiscByteThickBase + g] = EncodeThickness(mu);
+        }
+        // byte10..15（color0/color1）暂留 0：S0 不建动态 per-instance 颜色（见 skeleton_types.h）。
+        for (int w = 0; w < 4; ++w) {
+            const uint32_t u =
+                static_cast<uint32_t>(bytes[w * 4 + 0]) |
+                (static_cast<uint32_t>(bytes[w * 4 + 1]) << 8) |
+                (static_cast<uint32_t>(bytes[w * 4 + 2]) << 16) |
+                (static_cast<uint32_t>(bytes[w * 4 + 3]) << 24);
+            std::memcpy(&misc[k * 4 + static_cast<size_t>(w)], &u, sizeof(float));
         }
     }
-    instance_thickness_buf.Upload(thickness);
+    instance_misc_buf.Upload(misc);
 
-    // 4) 部位额外旋转：每实例 kNumPartialRotation(=2) 个模型系四元数（xyzw，2×vec4 = loc13/14）。
-    //    契约：每项为单位四元数（有限、非退化）。默认全恒等；非恒等时才由 host 开开关
-    //    （见 DrawSkinnedMesh 的 uPartialEnabled），shader 侧才逐骨前乘。
-    std::vector<float> partial(n * static_cast<size_t>(kNumPartialRotation) * 4);
+    // 4/5) 部位额外旋转（pose=loc13 / lag=loc14）：各 kNumPartialRotation 个模型系四元数
+    //      （8 half）打包进 4 个 uint32。默认全恒等；非恒等时才由 host 开 uPartialEnabled
+    //      （pose 那路），shader 侧才逐骨前乘。
+    std::vector<float> partial(n * 4);
+    std::vector<float> partial_lag(n * 4);
     for (size_t k = 0; k < n; ++k) {
+        const SkinnedInstanceState& inst = cmd.instances[k];
+        float qp[8];
+        float ql[8];
         for (int c = 0; c < kNumPartialRotation; ++c) {
-            const geom::Quaternion<float>& q =
-                cmd.instances[k].partial_rotations[static_cast<size_t>(c)];
-            CHECK(std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) &&
-                  std::isfinite(q.w))
-                << "partial_rotations[" << c << "] 含非有限分量 —— 实例 " << k;
-            // 范数应 ≈ 1（单位四元数）；范数近 0 会让 shader 的 normalize 出 NaN。
-            const float norm2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
-            CHECK_GT(norm2, 0.25f)
-                << "partial_rotations[" << c << "] 范数过小（应为单位四元数）—— 实例 " << k;
-            const size_t base =
-                (k * static_cast<size_t>(kNumPartialRotation) + static_cast<size_t>(c)) * 4;
-            partial[base + 0] = q.x;
-            partial[base + 1] = q.y;
-            partial[base + 2] = q.z;
-            partial[base + 3] = q.w;
+            const geom::Quaternion<float>& q = inst.partial_rotations[static_cast<size_t>(c)];
+            const geom::Quaternion<float>& qlag =
+                inst.partial_rotations_lag[static_cast<size_t>(c)];
+            CheckUnitQuat(q, "partial_rotations", c, k);
+            CheckUnitQuat(qlag, "partial_rotations_lag", c, k);
+            qp[c * 4 + 0] = q.x;
+            qp[c * 4 + 1] = q.y;
+            qp[c * 4 + 2] = q.z;
+            qp[c * 4 + 3] = q.w;
+            ql[c * 4 + 0] = qlag.x;
+            ql[c * 4 + 1] = qlag.y;
+            ql[c * 4 + 2] = qlag.z;
+            ql[c * 4 + 3] = qlag.w;
+        }
+        uint32_t packed[4];
+        PackHalf8(qp, packed);
+        for (int w = 0; w < 4; ++w) {
+            std::memcpy(&partial[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
+        }
+        PackHalf8(ql, packed);
+        for (int w = 0; w < 4; ++w) {
+            std::memcpy(&partial_lag[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
         }
     }
     instance_partial_buf.Upload(partial);
+    instance_partial_lag_buf.Upload(partial_lag);
+
+    // 6) lag 相对坐标（loc15）：3 个 half = (dx,dy,dz)（模型/锚点系小值域），第 4 个 half 未用（0）。
+    std::vector<float> pos_lag(n * 4);
+    for (size_t k = 0; k < n; ++k) {
+        const Vec3f& p = cmd.instances[k].pos_lag;
+        CHECK(std::isfinite(p.x()) && std::isfinite(p.y()) && std::isfinite(p.z()))
+            << "pos_lag 含非有限分量 —— 实例 " << k;
+        const float h[8] = {p.x(), p.y(), p.z(), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        uint32_t packed[4];
+        PackHalf8(h, packed);
+        for (int w = 0; w < 4; ++w) {
+            std::memcpy(&pos_lag[k * 4 + static_cast<size_t>(w)], &packed[w], sizeof(float));
+        }
+    }
+    instance_pos_lag_buf.Upload(pos_lag);
 }
 
 // ==================== DrawSkinnedMesh ====================
@@ -272,9 +329,11 @@ void SkeletonRenderer::DrawSkinnedMesh(
     const SkeletonManager::GpuHandles& gh,
     int pose_count,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf,
-    InstanceBuffer& instance_partial_buf) {
+    InstanceBuffer& instance_pose_ids_buf,
+    InstanceBuffer& instance_misc_buf,
+    InstanceBuffer& instance_partial_buf,
+    InstanceBuffer& instance_partial_lag_buf,
+    InstanceBuffer& instance_pos_lag_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMesh: mesh_id "
                            << cmd.mesh_id << " 未注册";
@@ -455,8 +514,9 @@ void SkeletonRenderer::DrawSkinnedMesh(
 
     // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
     //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
-                                     instance_thickness_buf, instance_partial_buf);
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_ids_buf,
+                                     instance_misc_buf, instance_partial_buf,
+                                     instance_partial_lag_buf, instance_pos_lag_buf);
 
     // ★ 整批 = 一次 instanced draw。这才是 instancing 的意义（N 实例 ≠ N draw call）。
     const GLsizei n_inst = static_cast<GLsizei>(cmd.instances.size());
@@ -465,8 +525,9 @@ void SkeletonRenderer::DrawSkinnedMesh(
         //   用守卫而非手写 enable/disable，是为了**结构上**不可能“挂上忘摘”——
         //   残留 divisor=1 的启用态会泄漏给后续普通 draw（见 instance_buffer.h）。
         InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_buf,
-                                    &instance_thickness_buf, &instance_partial_buf});
+                                   {&instance_model_buf, &instance_pose_ids_buf,
+                                    &instance_misc_buf, &instance_partial_buf,
+                                    &instance_partial_lag_buf, &instance_pos_lag_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -604,9 +665,11 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     unsigned int shadow_prog,
     unsigned int shadow_prog_cutout,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf,
-    InstanceBuffer& instance_partial_buf) {
+    InstanceBuffer& instance_pose_ids_buf,
+    InstanceBuffer& instance_misc_buf,
+    InstanceBuffer& instance_partial_buf,
+    InstanceBuffer& instance_partial_lag_buf,
+    InstanceBuffer& instance_pos_lag_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -630,8 +693,9 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
 
     // 实例数据：同一套逐实例缓冲（与主 pass 同源，否则影子与身体错位）。
     //   光空间 VP 走 uniform（全批共享）。
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
-                                     instance_thickness_buf, instance_partial_buf);
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_ids_buf,
+                                     instance_misc_buf, instance_partial_buf,
+                                     instance_partial_lag_buf, instance_pos_lag_buf);
 
     // 双面（同 DrawSkinnedMesh）：材质声明 double_sided 时关背面剔除，使镂空薄片
     // 蒙皮资产（如蕾丝裙）两面都投出影子；否则保持背面剔除（与旧行为一致）。
@@ -703,8 +767,9 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     {
         // RAII 配对挂载（同主 pass）。
         InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_buf,
-                                    &instance_thickness_buf, &instance_partial_buf});
+                                   {&instance_model_buf, &instance_pose_ids_buf,
+                                    &instance_misc_buf, &instance_partial_buf,
+                                    &instance_partial_lag_buf, &instance_pos_lag_buf});
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,

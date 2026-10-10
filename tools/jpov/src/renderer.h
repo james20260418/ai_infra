@@ -348,10 +348,12 @@ public:
     //     （见 src/instance_buffer.h 顶部为何不能挂在 GPUMesh 上）。
     //   主 pass 与 shadow pass 共用同一对缓冲：GL draw 是同步提交的，每个 draw 前
     //   紧接一次 Upload，故两 pass 不会互相踩。
-    InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};           // loc6..9  = mat4
-    InstanceBuffer instance_pose_buf_{kInstancePoseAttrSpec};             // loc10    = vec3
-    InstanceBuffer instance_thickness_buf_{kInstanceThicknessAttrSpec};   // loc11..12 = 2×vec4
-    InstanceBuffer instance_partial_buf_{kInstancePartialAttrSpec};       // loc13..14 = 2×vec4
+    InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};             // loc7..10 = mat4
+    InstanceBuffer instance_pose_ids_buf_{kInstancePoseIdsAttrSpec};        // loc11    = vec4(4 float)
+    InstanceBuffer instance_misc_buf_{kInstanceMiscAttrSpec};               // loc12    = uvec4(uint8 视图)
+    InstanceBuffer instance_partial_buf_{kInstancePartialAttrSpec};         // loc13    = uvec4(8 half)
+    InstanceBuffer instance_partial_lag_buf_{kInstancePartialLagAttrSpec};  // loc14    = uvec4(8 half)
+    InstanceBuffer instance_pos_lag_buf_{kInstancePosLagAttrSpec};          // loc15    = uvec4(8 half)
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

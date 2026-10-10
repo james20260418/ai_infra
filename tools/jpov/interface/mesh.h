@@ -1,13 +1,15 @@
 // JPOV MeshData — 顶点级网格数据定义
 //
 // MeshData 是 CPU 端的网格数据载体，描述"这个 mesh 包含哪些顶点属性"
-// （位置 / 法线 / UV / 骨骼蒙皮），每个属性一个独立 vector。
+// （位置 / 法线 / UV / 骨骼蒙皮 / 布料 LAG 松弛度），每个属性一个独立 vector。
 //
 // 设计要点：
 // - flags 位掩码声明 mesh 包含哪些属性，各属性 vector 的长度必须与
 //   positions 一致（Validate() 校验）。
 // - 骨骼蒙皮（kJoints）扩展为每个顶点 4 组 joint 索引 + 4 组权重，
 //   即每顶点至多被 4 个关节影响。
+// - 布料 LAG 副运动（kRelax）：每顶点一对 (lag_ratio, max_lag)，用于蒙皮 VS 里对
+//   「当前 pose」与「滞后 pose」的混合比例 + 位移限幅（见 docs/jpov_instance_attr_lag_design.md）。
 // - GPUMesh（CPU → GPU 上传后的句柄）在 gpumesh.h 中定义，
 //   本文件只关心 CPU 侧数据。
 //
@@ -55,6 +57,7 @@ enum class MeshVertexFlags : uint8_t {
     kUV       = 1 << 2,
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
+    kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
@@ -84,6 +87,11 @@ struct MeshData {
     std::vector<Vec3f> normals;
     std::vector<Vec2f> uvs;
     std::vector<Vec3f> tangents;   // 切向量（逐顶点，法线映射 TBN 用；kTangent 时非空）
+    // 布料 LAG 副运动标注（逐顶点；kRelax 时非空）：
+    //   .x = lag_ratio ∈ [0,1]：该顶点参与滞后副运动的程度（0=完全跟随当前 pose，1=完全滞后）。
+    //   .y = max_lag  ≥ 0    ：该顶点相对当前 pose 的最大允许位移（模型系，米；逐顶点限幅）。
+    // 见 docs/jpov_instance_attr_lag_design.md §4.1 / §4.4。
+    std::vector<Vec2f> relaxations;
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -176,6 +184,10 @@ inline void MeshData::Validate() const {
         CHECK_EQ(tangents.size(), vcount)
             << "MeshData::Validate: tangents.size() != positions.size()";
     }
+    if (!relaxations.empty()) {
+        CHECK_EQ(relaxations.size(), vcount)
+            << "MeshData::Validate: relaxations.size() != positions.size()";
+    }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)
             << "MeshData::Validate: joint_indices.size() != positions.size()";
@@ -213,6 +225,14 @@ inline void MeshData::Validate() const {
     } else {
         CHECK(tangents.empty())
             << "MeshData::Validate: 未声明 kTangent 但 tangents 非空";
+    }
+
+    if (MeshHasFlag(flags, MeshVertexFlags::kRelax)) {
+        CHECK_EQ(relaxations.size(), vcount)
+            << "MeshData::Validate: flags 声明 kRelax 但 relaxations 长度不一致或缺数据";
+    } else {
+        CHECK(relaxations.empty())
+            << "MeshData::Validate: 未声明 kRelax 但 relaxations 非空";
     }
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);

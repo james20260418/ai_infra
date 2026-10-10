@@ -4,7 +4,13 @@
 > （LAG / secondary motion）**，并为此**重排 per-instance attribute 的 16 个槽**，用「一个槽 = 4 float
 > / 8 short / 16 byte」的三视图约定把信息量压进去。
 >
-> 状态：**设计稿**（2026-10-08 与 Danis 连续推演收敛；本文档只描述设计，尚无实现代码）。
+> 状态：**设计稿**（2026-10-08 与 Danis 连续推演收敛）。
+>
+> **实现进展（2026-10-10）**：per-instance 布局重排（loc0..15）+ glb `_JPOV_RELAX`（VEC2）
+> 链路 + 接口字段（SkinnedInstanceState 的 LAG 状态）**已落地**（branch
+> `feature/20261010-jpov-lag-layout-refactor`）；**VS 内 LAG 消费（mix / 限幅 / 二阶）仍待实现** ——
+> 新槽位（loc6 aRelax / loc14 partial_lag / loc15 pos_lag）已声明 + 上传，但未参与计算。
+> 现有厚度压为 uint8（loc12）、部分旋转压为 half（loc13），由开关保证零回归。
 > 相关：`docs/jpov_crowd_instancing_arch.md`（instancing 架构锚点）、
 > `docs/jpov_dqs_skinning_design.md`（DQS 蒙皮）、`docs/jpov_partial_rotation_design.md`（部位额外旋转）、
 > `docs/jpov_crowd_body_shape_face_design.md` §3（部位粗细）。

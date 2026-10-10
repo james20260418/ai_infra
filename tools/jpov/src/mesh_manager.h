@@ -16,6 +16,7 @@
 //   location 3 = joints    (ivec4 int32)  ← vbo_joints， flags 含 kJoints 才有
 //   location 4 = weights   (vec4 float)   ← vbo_weights，flags 含 kJoints 才有
 //   location 5 = tangent   (vec3 float)   ← vbo_tangents，flags 含 kTangent 才有
+//   location 6 = relax     (vec2 float)   ← vbo_relax，   flags 含 kRelax 才有（布料 LAG 松弛度）
 //
 // ⚠️ per-instance attribute（loc6+，Instanced draw 用，divisor=1）**不在本类职责内**：
 //   实例数据是「每次 draw 的输入」，不属于不可变几何，由 InstanceBuffer

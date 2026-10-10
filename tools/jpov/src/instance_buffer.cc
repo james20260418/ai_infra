@@ -25,6 +25,9 @@
 #ifndef GL_FLOAT
 #define GL_FLOAT 0x1406
 #endif
+#ifndef GL_UNSIGNED_INT
+#define GL_UNSIGNED_INT 0x1405
+#endif
 #ifndef GL_FALSE
 #define GL_FALSE 0
 #endif
@@ -79,9 +82,16 @@ void InstanceBuffer::AttachToVao(unsigned int vao) const {
     for (int k = 0; k < spec_.slot_count; ++k) {
         const unsigned int loc = spec_.base_loc + static_cast<unsigned int>(k);
         glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, spec_.slot_components, GL_FLOAT, GL_FALSE, stride_bytes,
-                              reinterpret_cast<const void*>(
-                                  static_cast<size_t>(slot_bytes) * static_cast<size_t>(k)));
+        const void* off = reinterpret_cast<const void*>(
+            static_cast<size_t>(slot_bytes) * static_cast<size_t>(k));
+        if (spec_.integer_view) {
+            // 整数视图：按原始整数位解释（GLSL 侧声明为 uvec4）。用于位打包/半精度视图。
+            glVertexAttribIPointer(loc, spec_.slot_components, GL_UNSIGNED_INT, stride_bytes,
+                                   off);
+        } else {
+            glVertexAttribPointer(loc, spec_.slot_components, GL_FLOAT, GL_FALSE, stride_bytes,
+                                  off);
+        }
         // divisor=1：每实例推进一步（instancing 的核心）。divisor 是 VAO 状态。
         glVertexAttribDivisor(loc, 1);
     }

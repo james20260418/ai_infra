@@ -565,9 +565,11 @@ void main() {
         const SkeletonManager::GpuHandles& gh,
         int pose_count,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf,
-        InstanceBuffer& instance_partial_buf);
+        InstanceBuffer& instance_pose_ids_buf,
+        InstanceBuffer& instance_misc_buf,
+        InstanceBuffer& instance_partial_buf,
+        InstanceBuffer& instance_partial_lag_buf,
+        InstanceBuffer& instance_pos_lag_buf);
 
     // ---- DrawSkinnedMeshShadow ----
     // 阴影 pass：把一批带骨实例从太阳正交光空间画进阴影纹理（只写相对主视锥中心的
@@ -589,9 +591,11 @@ void main() {
         unsigned int shadow_prog,
         unsigned int shadow_prog_cutout,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf,
-        InstanceBuffer& instance_partial_buf);
+        InstanceBuffer& instance_pose_ids_buf,
+        InstanceBuffer& instance_misc_buf,
+        InstanceBuffer& instance_partial_buf,
+        InstanceBuffer& instance_partial_lag_buf,
+        InstanceBuffer& instance_pos_lag_buf);
 
     // ---- DrawSkinnedMeshSelected ----
     // 拾取（color-ID）pass：把一批带骨实例用拾取 program（kSkinnedVs+JPOV_PICK + kPickIdFs）
@@ -649,28 +653,33 @@ void main() {
     // ⚠️ 数据写进的是「调用方（渲染器）持有的可复用缓冲」，**不是** mesh 资源 ——
     //   实例数据属于「这次 draw」而不属于几何（见 instance_buffer.h 顶部说明）。
     //
-    // 传两样：
+    // 传六样（按实例布局 loc7..15 的顺序）：
     //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序）
-    //      → instance_model_buf（loc6..9 = mat4）。
-    //   2) pose 选择：每实例 {pose_a, pose_b, ratio} → instance_pose_buf（loc10 = vec3）。
-    //   3) 部位粗细系数：每实例 {thickness_scales[0..7]} → instance_thickness_buf
-    //      （loc11/12 = 2×vec4；组号 → 系数。骨架没配粗细时全是 1.0，shader 侧被开关跳过）。
-    //   4) 部位额外旋转：每实例 {partial_rotations[0..1]} → instance_partial_buf
-    //      （loc13/14 = 2×vec4；模型系四元数。默认全恒等，shader 侧被开关跳过）。
+    //      → instance_model_buf（loc7..10 = mat4）。
+    //   2) pose 选择：每实例 {pose_a, pose_b, pose_a_lag, pose_b_lag} 的平坦起点
+    //      → instance_pose_ids_buf（loc11 = vec4 float）。
+    //   3) 杂项：ratio / ratio_lag / thickness×8 / color×2 → instance_misc_buf
+    //      （loc12 = uvec4 的 uint8 视图，编码见 instance_buffer.h 的 codec）。
+    //   4) 部位额外旋转（pose）：2 个模型系四元数 → 8 half 打包进
+    //      instance_partial_buf（loc13 = uvec4）。
+    //   5) 部位额外旋转（lag）：同构 → instance_partial_lag_buf（loc14 = uvec4）。
+    //   6) lag 相对坐标：3 个 half (dx,dy,dz) → instance_pos_lag_buf（loc15 = uvec4）。
     //
     // pose_w = gh.bone_count * 2 = 一个 pose 在 atlas 里的**平坦** texel 宽度
     //   （每骨 2 texel：实部 q + 对偶部 t）；
     //   本函数把 pose 下标乘成平坦起点（shader 内按 atlas 宽回绕，与 CPU 烘焙逐 texel 对齐）。
     //
-    // Pre-condition: cmd.instances 非空且 pose_a/pose_b 已校验不越界（调用方先验，
+    // Pre-condition: cmd.instances 非空且各 pose 下标已校验不越界（调用方先验，
     //   因为逐实例上传后一次 draw 里无法中途报错）。
     static void UploadSkinningInstanceAttributes(
         const SkinnedMeshCommand& cmd,
         int pose_w,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf,
-        InstanceBuffer& instance_partial_buf);
+        InstanceBuffer& instance_pose_ids_buf,
+        InstanceBuffer& instance_misc_buf,
+        InstanceBuffer& instance_partial_buf,
+        InstanceBuffer& instance_partial_lag_buf,
+        InstanceBuffer& instance_pos_lag_buf);
 };
 
 }  // namespace jpov
