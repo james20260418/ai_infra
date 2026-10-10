@@ -111,3 +111,17 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 弹层独占自证测试：Combo 下拉（弹出层）覆盖区域内发生的全部鼠标事件
+# 只归拥有者，不击穿到后方控件（2026-10-10 修复的 bug 回归）。
+cc_test(
+    name = "jpov_ui_popup_occlusion_test",
+    srcs = ["jpov_ui_popup_occlusion_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
