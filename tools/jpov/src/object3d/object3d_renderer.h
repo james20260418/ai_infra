@@ -891,19 +891,21 @@ void main() {
                                    unsigned int shadow_prog_cutout);
 
     // ---- DrawObject3DForPick ----
-    // 拾取（color-ID）pass：把一条 Object3DCommand 用拾取 program（主 VS+JPOV_PICK + kPickIdFs）
-    //   画进 pick FBO，只写 render_internal_id（= kPickIdBaseObject3D + 序号）。非实例，序号固定 0。
-    // 本函数负责 CPU 侧 id 映射：把 cmd.picking_id 追加进 pick_id_map，并上传 uPickIdBase =
-    //   kPickIdBaseObject3D + 追加前的表长。
-    // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
-    // Pre-condition: cmd.picking_id > 0（调用方已过滤）；pick_id_map != nullptr。
+    // 拾取/高亮共享的「选中物体栅格化」：把一条 Object3DCommand 用**选中 program**（主 VS +
+    //   kPickIdFs 或 kHighlightFs）画进一张离屏 buffer。
+    // pick 模式（pick_id_map != nullptr）：写 render_internal_id（= kPickIdBaseObject3D + 序号），
+    //   并把 cmd.picking_id 追加进 pick_id_map；非实例，序号固定 0。
+    // highlight 模式（pick_id_map == nullptr）：只画实心掩膜（program 的 FS 自行处理），不填表。
+    // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空 discard 不写。
+    // Pre-condition: pick 模式下 cmd.picking_id > 0（调用方已过滤）；
+    //   highlight 模式无此要求（整批高亮，与 picking_id 无关）。
     static void DrawObject3DForPick(const Object3DCommand& cmd,
                                     MeshManager& mesh_mgr,
                                     TextureManager& texture_mgr,
                                     const float mvp[16],
                                     unsigned int prog,
                                     unsigned int prog_cutout,
-                                    std::vector<uint32_t>* pick_id_map /*output*/);
+                                    std::vector<uint32_t>* pick_id_map /*nullable*/);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。

@@ -296,6 +296,15 @@ private:
     unsigned int PickInstancedCutoutProg();
     unsigned int PickSkinnedProg();
     unsigned int PickSkinnedCutoutProg();
+    // 高亮掩膜 program：各 renderer 主 VS（不带 JPOV_PICK）+ 共享 kHighlightFs；各一对（opaque/cutout）。
+    unsigned int HighlightObject3DProg();
+    unsigned int HighlightObject3DCutoutProg();
+    unsigned int HighlightInstancedProg();
+    unsigned int HighlightInstancedCutoutProg();
+    unsigned int HighlightSkinnedProg();
+    unsigned int HighlightSkinnedCutoutProg();
+    // 高亮膨胀+合成（全屏三角形）。
+    unsigned int HighlightCompositeProg();
 
     // 独立蒙皮子渲染器：蒙皮主 pass / 蒙皮阴影 pass 均委托给它，
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。

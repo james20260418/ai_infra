@@ -736,7 +736,6 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     InstanceBuffer& instance_pose_buf,
     InstanceBuffer& instance_thickness_buf,
     InstanceBuffer& instance_partial_buf) {
-    CHECK(pick_id_map != nullptr);
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshForPick: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
@@ -759,11 +758,14 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, view_proj);
 
     // 拾取 id 段基址 + 逐实例映射（逐实例 id = base + gl_InstanceID）。
+    // highlight 模式（map==nullptr）：不需要 id，跳过。
     const size_t n = cmd.instances.size();
-    const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
-    CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
-        << "DrawSkinnedMeshForPick: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
-    glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    if (pick_id_map != nullptr) {
+        const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
+        CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
+            << "DrawSkinnedMeshForPick: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+        glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    }
 
     if (cutout) {
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
@@ -781,9 +783,11 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
             glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
         }
     }
-    // CPU 侧 id 映射：逐实例追加（含 picking_id==0 的实例，保证 base+i 连续）。
-    for (const SkinnedInstanceState& inst : cmd.instances) {
-        pick_id_map->push_back(inst.picking_id);
+    // pick 模式：CPU 侧 id 映射，逐实例追加（含 picking_id==0，保证 base+i 连续）。
+    if (pick_id_map != nullptr) {
+        for (const SkinnedInstanceState& inst : cmd.instances) {
+            pick_id_map->push_back(inst.picking_id);
+        }
     }
 
     // ---- 骨纹理 pose atlas（影响剪影，需与主 pass 一致）----

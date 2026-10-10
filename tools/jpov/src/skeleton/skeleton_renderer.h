@@ -610,7 +610,7 @@ void main() {
         unsigned int prog_cutout,
         const SkeletonManager::GpuHandles& gh,
         int pose_count,
-        std::vector<uint32_t>* pick_id_map /*output*/,
+        std::vector<uint32_t>* pick_id_map /*nullable: null ⇒ 高亮掩膜模式，不填表*/,
         InstanceBuffer& instance_model_buf,
         InstanceBuffer& instance_pose_buf,
         InstanceBuffer& instance_thickness_buf,
