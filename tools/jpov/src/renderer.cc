@@ -380,6 +380,36 @@ void main() {
 }
 )glsl";
 
+// 拾取（color-ID）pass 的 fragment shader（间接 id 版）：把顶点着色器算好的
+//   render_internal_id（= uPickIdBase + gl_InstanceID，见各 renderer 主 VS 的 JPOV_PICK 段）
+//   编码成 RGB 三字节。与 kPickFs 的区别：id 来自 **flat varying**（每实例一致）而非 uniform，
+//   故三大 renderer 共用本 FS。写回 RGBA8，深度测试照常开（前景优先）。
+//   cutout（JPOV_ALPHA_CUTOUT）：按 baseColor 贴图 alpha 做 alpha test —— **镂空片元 discard，不写 id**，
+//   否则拾取会命中裙摆/叶片的镂空处。（与主 pass / 阴影 pass 同判据。）
+const char* kPickIdFs = R"glsl(
+#version 330 core
+flat in uint vPickId;
+out vec4 FragColor;
+#ifdef JPOV_ALPHA_CUTOUT
+in vec2 vTexCoord;
+uniform sampler2D uBaseColorTex;
+uniform int   uHasBaseColorTex;
+uniform float uAlphaCutoff;
+#endif
+void main() {
+#ifdef JPOV_ALPHA_CUTOUT
+    if (uHasBaseColorTex == 1 && texture(uBaseColorTex, vTexCoord).a < uAlphaCutoff) {
+        discard;
+    }
+#endif
+    uint id = vPickId;
+    float r = float(id & 0xFFu) / 255.0;
+    float g = float((id >> 8) & 0xFFu) / 255.0;
+    float b = float((id >> 16) & 0xFFu) / 255.0;
+    FragColor = vec4(r, g, b, 1.0);
+}
+)glsl";
+
 // 创建 GL atlas 纹理并上传 CPU 像素（初始全黑）
 
 // 构建正交投影矩阵（列主序，OpenGL 右手系）。阴影 pass 用：太阳是平行光，视锥是正交盒。
@@ -1248,6 +1278,34 @@ unsigned int Renderer::InstancedShadowProgCutout() {
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
+// 拾取 program：各 renderer 主 VS（+ JPOV_PICK → 输出 render_internal_id）与共享 kPickIdFs。
+//   object3d：非 full VS（无 UV）配不透明、full VS（含 UV）配 cutout（cutout 需采 baseColor.a）。
+unsigned int Renderer::PickObject3DProg() {
+    return shader_mgr_.GetOrCreate("pick_object3d",
+        {Object3DRenderer::kMeshVs3dPBR, kPickIdFs, {"JPOV_PICK"}});
+}
+unsigned int Renderer::PickObject3DCutoutProg() {
+    return shader_mgr_.GetOrCreate("pick_object3d_cutout",
+        {Object3DRenderer::kMeshVs3dPBRFull, kPickIdFs, {"JPOV_PICK", "JPOV_ALPHA_CUTOUT"}});
+}
+unsigned int Renderer::PickInstancedProg() {
+    return shader_mgr_.GetOrCreate("pick_instanced",
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, kPickIdFs, {"JPOV_PICK"}});
+}
+unsigned int Renderer::PickInstancedCutoutProg() {
+    return shader_mgr_.GetOrCreate("pick_instanced_cutout",
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, kPickIdFs,
+         {"JPOV_PICK", "JPOV_ALPHA_CUTOUT"}});
+}
+unsigned int Renderer::PickSkinnedProg() {
+    return shader_mgr_.GetOrCreate("pick_skinned",
+        {kSkinnedVs, kPickIdFs, {"JPOV_PICK"}});
+}
+unsigned int Renderer::PickSkinnedCutoutProg() {
+    return shader_mgr_.GetOrCreate("pick_skinned_cutout",
+        {kSkinnedVs, kPickIdFs, {"JPOV_PICK", "JPOV_ALPHA_CUTOUT"}});
+}
+
 // 统一后处理 tone map shader（ACES filmic，见 kTonemapVs/kTonemapFs）。
 unsigned int Renderer::TonemapProg() {
     return shader_mgr_.GetOrCreate("tonemap", {kTonemapVs, kTonemapFs});
@@ -1380,6 +1438,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             type == DrawCommandType::kLine3D ||
             type == DrawCommandType::kText3D ||
             type == DrawCommandType::kObject3D ||
+            type == DrawCommandType::kInstancedObject ||
             type == DrawCommandType::kSkinnedMesh) {
             has_3d = true;
             break;
@@ -2248,10 +2307,27 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
 // 读回光标像素解码成 picking_id → last_pick_。
 void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                                float vp_x, float vp_y, float vp_w, float vp_h) {
-    // 没有任何可拾取物体 → 直接判未命中，不建 FBO 不画（零成本）。
+    // 有任何可拾取物体才跑：三大 renderer 里任一有 picking_id>0 即可。
+    //   object3d 看命令级；蒙皮 / 静态实例看逐实例。都没有 → 判未命中，不建 FBO 不画（零成本）。
     bool has_pickable = false;
     for (const auto& o : cmds.object3d) {
         if (o.picking_id > 0) { has_pickable = true; break; }
+    }
+    if (!has_pickable) {
+        for (const auto& s : cmds.skinned_mesh) {
+            for (const auto& inst : s.instances) {
+                if (inst.picking_id > 0) { has_pickable = true; break; }
+            }
+            if (has_pickable) break;
+        }
+    }
+    if (!has_pickable) {
+        for (const auto& io : cmds.instanced_object) {
+            for (const auto& inst : io.instances) {
+                if (inst.picking_id > 0) { has_pickable = true; break; }
+            }
+            if (has_pickable) break;
+        }
     }
     if (!has_pickable) {
         last_pick_.hit = false;
@@ -2260,6 +2336,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     }
 
     // ---- 自管理 pick FBO（RGBA8 颜色 + depth renderbuffer），尺寸 = 3D FBO ----
+    // 单采样（非 MSAA）：拾取写的是整数 id，MSAA resolve 平均会串味，故独立单采样 FBO。
     if (pick_fbo_w_ != fbo_w || pick_fbo_h_ != fbo_h || pick_fbo_ == 0) {
         if (pick_fbo_) {
             glDeleteFramebuffers(1, &pick_fbo_);
@@ -2302,36 +2379,53 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     glFrontFace(GL_CCW);
     glDisable(GL_BLEND);
 
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // 黑 = id 0 = 背景/未命中
+    // 背景 = 白（0xFFFFFF ≥ kPickIdMax，解码后必判「未命中」）。用白而非黑：internal id 从 0 起，
+    // 黑(0) 是**合法 id**（object3d 段第一个可拾取物体），不能当背景。
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     float mvp[16];
     Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
-    const unsigned int pick_prog = PickProg();
-    glUseProgram(pick_prog);
 
+    // 每帧重建三张 internal id → 用户 picking_id 映射表（分区见 render_command.h 的 kPickIdBase*）。
+    pick_table_object3d_.clear();
+    pick_table_skinned_.clear();
+    pick_table_instanced_.clear();
+
+    // ---- 三大 renderer 各画各的（各写自己的 id 段），共享同一张 pick FBO ----
     for (const auto& o : cmds.object3d) {
         if (o.picking_id == 0) continue;   // 不可拾取物体不参与
-        const GPUMesh* mesh = mesh_mgr_.GetMesh(o.mesh_id);
-        CHECK(mesh != nullptr) << "DrawPickingPass: mesh_id " << o.mesh_id << " 未注册";
-        CHECK_GT(mesh->vao, 0u);
-
-        float model[16], final_mvp[16];
-        Primitives3DRenderer::BuildModelMatrix(o.center, o.up, o.front, model, o.scale);
-        Primitives3DRenderer::Mat4Mul(mvp, model, final_mvp);
-
-        glUniformMatrix4fv(glGetUniformLocation(pick_prog, "uMVP"),
-                           1, GL_FALSE, final_mvp);
-        glUniform1i(glGetUniformLocation(pick_prog, "uPickingId"),
-                    static_cast<int>(o.picking_id));
-
-        glBindVertexArray(mesh->vao);
-        if (mesh->index_count > 0)
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
-                           GL_UNSIGNED_INT, nullptr);
-        else
-            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
-        glBindVertexArray(0);
+        Object3DRenderer::DrawObject3DForPick(o, mesh_mgr_, texture_mgr_, mvp,
+                                              PickObject3DProg(), PickObject3DCutoutProg(),
+                                              &pick_table_object3d_);
+    }
+    for (const auto& s : cmds.skinned_mesh) {
+        bool any_pickable = false;
+        for (const auto& inst : s.instances) {
+            if (inst.picking_id > 0) { any_pickable = true; break; }
+        }
+        if (!any_pickable) continue;
+        SkeletonManager* skel = GetSkeleton(s.skeleton_id);
+        CHECK(skel != nullptr) << "DrawPickingPass: skeleton_id " << s.skeleton_id
+                               << " 未注册（需先 RegisterSkeleton）";
+        SkeletonRenderer::DrawSkinnedMeshForPick(
+            s, mesh_mgr_, texture_mgr_, mvp,
+            PickSkinnedProg(), PickSkinnedCutoutProg(),
+            skel->gpu_handles(), skel->pose_count(),
+            &pick_table_skinned_,
+            instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
+            instance_partial_buf_);
+    }
+    for (const auto& io : cmds.instanced_object) {
+        bool any_pickable = false;
+        for (const auto& inst : io.instances) {
+            if (inst.picking_id > 0) { any_pickable = true; break; }
+        }
+        if (!any_pickable) continue;
+        InstancedObjectRenderer::DrawInstancedObjectForPick(
+            io, mesh_mgr_, texture_mgr_, mvp,
+            PickInstancedProg(), PickInstancedCutoutProg(),
+            &pick_table_instanced_, instance_model_buf_);
     }
 
     // ---- 窗口像素坐标 → 3D FBO 像素（GL 左下原点）----
@@ -2347,16 +2441,28 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     py_top = std::clamp(py_top, 0, fbo_h - 1);
     const int py = fbo_h - 1 - py_top;   // 翻转到 GL 左下原点
 
-    unsigned char pix[4] = {0, 0, 0, 0};
+    unsigned char pix[4] = {255, 255, 255, 255};
     glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pix);
 
-    const unsigned int id =
-        static_cast<unsigned int>(pix[0]) |
-        (static_cast<unsigned int>(pix[1]) << 8) |
-        (static_cast<unsigned int>(pix[2]) << 16);
+    const uint32_t internal =
+        static_cast<uint32_t>(pix[0]) |
+        (static_cast<uint32_t>(pix[1]) << 8) |
+        (static_cast<uint32_t>(pix[2]) << 16);
 
-    last_pick_.hit = (id != 0);
-    last_pick_.picking_id = id;
+    // 背景白 / 越界（internal >= kPickIdMax）→ 未命中；否则按分区选表，查回用户 picking_id。
+    //   注意：internal id 是**致密递增**的编号，不是用户 id；hit 取决于表项是否非 0。
+    last_pick_.hit = false;
+    last_pick_.picking_id = 0;
+    if (internal < kPickIdMax) {
+        const uint32_t seg = internal >> kPickIdSegmentBits;
+        const uint32_t local = internal & (kPickIdSegmentSize - 1u);
+        const std::vector<uint32_t>* table =
+            (seg == 0) ? &pick_table_object3d_
+                       : ((seg == 1) ? &pick_table_skinned_ : &pick_table_instanced_);
+        const uint32_t user = (local < table->size()) ? (*table)[local] : 0u;
+        last_pick_.hit = (user != 0);
+        last_pick_.picking_id = user;
+    }
 
     // 恢复 GL 状态
     glDisable(GL_CULL_FACE);

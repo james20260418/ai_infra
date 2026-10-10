@@ -312,6 +312,12 @@ struct SkinnedInstanceState {
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。
     // TODO(2026-09-06): 动态 per-instance 颜色通道(B 决策)延后，S0 不建。
     uint32_t appearance_index = 0;
+
+    // 拾取 id（逐实例，uint32）：>0 = 本实例可被拾取；命中它时 JPOV::last_pick().picking_id
+    //   回传此值。0 = 不可拾取。同批各实例可不同；仅在 PickQuery.enabled 时参与拾取 pass。
+    //   注意：本字段**不作为 per-instance GPU attribute** —— 拾取走
+    //   `render_internal_id = 本命令 base + gl_InstanceID` 再映射回本值（见拾取实现）。
+    uint32_t picking_id = 0;
 };
 
 // ==================== Validate / 派生量 定义 ====================

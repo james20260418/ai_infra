@@ -522,4 +522,88 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
     }
 }
 
+// ==================== DrawInstancedObjectForPick ====================
+
+void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCommand& cmd,
+                                                         MeshManager& mesh_mgr,
+                                                         TextureManager& texture_mgr,
+                                                         const float view_proj[16],
+                                                         unsigned int prog,
+                                                         unsigned int prog_cutout,
+                                                         std::vector<uint32_t>* pick_id_map,
+                                                         InstanceBuffer& instance_model_buf) {
+    CHECK(pick_id_map != nullptr);
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawInstancedObjectForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectForPick: instances 不能为空";
+
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? prog_cutout : prog;
+    glUseProgram(sp);
+
+    glPushAttrib(GL_ENABLE_BIT);
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, view_proj);
+    // 本命令占用的 internal id：base .. base+n-1（逐实例 = base + gl_InstanceID）。
+    const size_t n = cmd.instances.size();
+    const uint32_t base = kPickIdBaseInstanced + static_cast<uint32_t>(pick_id_map->size());
+    CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdMax))
+        << "DrawInstancedObjectForPick: instanced 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+    glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawInstancedObjectForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectForPick: base_color_tex 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+
+    // CPU 侧 id 映射：逐实例追加（含 picking_id==0 的实例，保证 base+i 连续）。
+    for (const InstanceState& inst : cmd.instances) {
+        pick_id_map->push_back(inst.picking_id);
+    }
+
+    std::vector<float> xforms(n * 16);
+    for (size_t k = 0; k < n; ++k) {
+        float model[16];
+        const InstanceTransform& t = cmd.instances[k].transform;
+        BuildModelMatrix(t.center, t.up, t.front, t.scale, model);
+        for (int e = 0; e < 16; ++e) {
+            xforms[k * 16 + static_cast<size_t>(e)] = model[e];
+        }
+    }
+    instance_model_buf.Upload(xforms);
+
+    const GLsizei n_inst = static_cast<GLsizei>(n);
+    {
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
+        } else {
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
+        }
+        glBindVertexArray(0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glPopAttrib();
+}
+
 }  // namespace jpov

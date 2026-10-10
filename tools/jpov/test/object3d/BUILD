@@ -568,6 +568,24 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 实例化拾取测试：逐实例 picking_id + internal id 分区映射 + cutout 镂空 discard。
+cc_test(
+    name = "jpov_instanced_pick_test",
+    srcs = ["jpov_instanced_pick_test.cc"],
+    data = [
+        ":instanced_pick_cutout_opaque.png",
+        ":instanced_pick_cutout_transparent.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # ============================================================================
 # 3D 文本 — 深度测试 + alpha 混合 GOLD（中文字嵌地板）
 #
