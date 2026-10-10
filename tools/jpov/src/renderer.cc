@@ -2678,8 +2678,8 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
             s, mesh_mgr_, texture_mgr_, mvp,
             HighlightSkinnedProg(), HighlightSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(), nullptr,
-            instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-            instance_partial_buf_);
+            instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+            instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
     }
     for (const auto& io : cmds.instanced_object) {
         if (!io.highlight) continue;
