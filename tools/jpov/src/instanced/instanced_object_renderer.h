@@ -12,9 +12,11 @@
 //
 // 与 DrawObject3D 的摆放差异：
 //   Object3DRenderer  —— 单件摆放，走 uModel / uMVP uniform。
-//   本模块            —— **逐实例**摆放，走 per-instance attribute（loc6..9 的 mat4，复用
+//   本模块            —— **逐实例**摆放，走 per-instance attribute（loc7..10 的 mat4，复用
 //                       InstanceBuffer 基建）+ uniform uViewProj（= proj*view，不含 model）；
 //                       变换约定与 DrawObject3D **逐字一致**（同一套 BuildModelMatrix）。
+//                       本路径的 per-instance 属性布局由 **本模块独立拥有**，见
+//                       src/instanced/instanced_object_attrs.h（与蒙皮布局解耦）。
 //
 // MeshManager / TextureManager / ShaderManager / InstanceBuffer 由 Renderer 持有并传入
 //（本模块不持有所有权）。所有方法均为 stateless static（与 Object3DRenderer 同款）。

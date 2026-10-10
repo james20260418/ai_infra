@@ -241,6 +241,7 @@ cc_library(
         ":mesh_manager",
         ":object3d_renderer",
         ":instanced_renderer",
+        ":instanced_object_attrs",
         ":primitives3d_renderer",
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
@@ -315,6 +316,16 @@ cc_library(
     }),
     copts = ["-std=c++20"],
     linkstatic = 1,
+)
+
+# InstancedObjectAttrs — 静态实例渲染器的 per-instance 属性布局 spec（header-only）。
+# 独立于蒙皮布局（instance_buffer.h 的 kInstance*AttrSpec）：绘制端据此构造 InstanceBuffer，
+# 测试据此守住布局自洽。见头文件顶部「为什么单开一套」。
+cc_library(
+    name = "instanced_object_attrs",
+    hdrs = ["instanced/instanced_object_attrs.h"],
+    visibility = ["//visibility:public"],
+    deps = [":instance_buffer"],
 )
 
 # InstancedObjectRenderer — 静态模型批量实例渲染（DrawInstancedObject）+ 实例阴影。
