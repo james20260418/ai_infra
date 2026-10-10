@@ -62,6 +62,10 @@ void Ui::Begin(const InputSnapshot& input, const UiTheme& theme,
     width_ = width;
     height_ = height;
     frame_dt_ms_ = frame_dt_ms;
+    // 弹层独占（全部鼠标事件）：本帧生效的独占矩形 = 上一帧画出的展开下拉
+    // 列表；清空本帧待记录矩形（Combo 展开时重新写入，供下一帧生效）。
+    active_popup_rect_ = open_popup_rect_;
+    open_popup_rect_ = UiRect{};
     // 每帧从零构建：清空上一帧收集的指令（含弹出层）。
     fill_rects_.clear();
     texts_.clear();
@@ -199,7 +203,10 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
     // 命中测试：Ui root 面板默认位于窗口原点 (0,0)（ui.h 约定：若面板位移，
     // 由调用方自行做一次盒偏移）。hovered 决定是否进入悬停态（S2.3）。
     const InputSnapshot& in = *input_;
-    const bool hovered = Hit(b, 0.0f, 0.0f, in);
+    // 弹层独占：指针落在已展开下拉列表上时，本按钮不响应任何鼠标事件
+    // （不悬停、不进入按下态、不响应点击）。
+    const bool pointer_covered = PopupCoversPoint(in.mouse_x, in.mouse_y);
+    const bool hovered = Hit(b, 0.0f, 0.0f, in) && !pointer_covered;
 
     // ---- 按下态（danis 验收 bug#5，一次性 hold 语义）----
     // 与 SliderFloat 一次 drag 同模式：左键在按钮 box 内按下（Drag/Hold）
@@ -219,7 +226,8 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
     const float ly = in.mouse_y;
     const bool mouse_over =
         (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
-        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y()) &&
+        !pointer_covered;
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
     const bool was_pressed = button_press_.IsHeldBy(b);
     const bool pressed_now =
@@ -248,6 +256,9 @@ bool Ui::Button(const char* label, const UiRect& box, bool stretch_w,
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
             const float cy = in.left_clicks[i].y;
+            if (PopupCoversPoint(cx, cy)) {
+                continue;  // 被已展开的下拉弹层独占：不归本按钮。
+            }
             if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
                 cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
                 return true;
@@ -287,6 +298,9 @@ bool Ui::Checkbox(const char* label, bool* value, const UiRect& box,
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
             const float cy = in.left_clicks[i].y;
+            if (PopupCoversPoint(cx, cy)) {
+                continue;  // 被已展开的下拉弹层独占：不翻转本框。
+            }
             if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
                 cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
                 *value = !*value;  // 点击 → 翻转外置状态。
@@ -446,9 +460,11 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
     const float ly = in.mouse_y - 0.0f;   // 同上，鼠标 Y。
     // 命中需同时满足横向 + 纵向都在 box 内：仅判 X 会导致“鼠标在很远
     // 的竖直位置拖动也响应滑条”（danis 验收 bug #14，起始判据仍是它）。
+    // 弹层独占：指针落在已展开下拉列表上时不算"在滑条上"（不起始拖动/按住）。
     const bool mouse_over =
         (lx >= b.pos.x()) && (lx <= b.pos.x() + b.size.x()) &&
-        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y());
+        (ly >= b.pos.y()) && (ly <= b.pos.y() + b.size.y()) &&
+        !PopupCoversPoint(lx, ly);
     const bool left_down = in.left.IsDrag() || in.left.IsHold();
     // 本滑条是否已持有一次正在进行的 drag（跨帧识别同一滑条）。
     const bool was_dragging = slider_drag_.IsHeldBy(b);
@@ -481,6 +497,9 @@ bool Ui::SliderFloat(const char* label, float* value, const UiRect& box,
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
             const float cy2 = in.left_clicks[i].y;
+            if (PopupCoversPoint(cx, cy2)) {
+                continue;  // 被已展开的下拉弹层独占：不写本滑条值。
+            }
             if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
                 cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y()) {
                 const float nx =
@@ -658,15 +677,22 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
 
     // 本帧点击落在 box 内 → 聚焦本框。
     bool clicked_inside = false;
+    bool clicked_outside = false;
     if (in.left.IsClick()) {
         for (int i = 0; i < in.left.click_count(); ++i) {
             const float cx = in.left_clicks[i].x;
             const float cy = in.left_clicks[i].y;
+            if (PopupCoversPoint(cx, cy)) {
+                // 被弹层盖住 = 点别处：不聚焦本框，但算作"点击框外"→ 失焦。
+                clicked_outside = true;
+                continue;
+            }
             if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
                 cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
                 clicked_inside = true;
                 break;
             }
+            clicked_outside = true;
         }
     }
     // 聚焦状态结算（先做，供下方键入判断使用）：
@@ -683,7 +709,7 @@ bool Ui::InputText(const char* label, char* buffer, size_t buffer_size,
         const float click_x = in.left_clicks[0].x - (b.pos.x() + pad) +
                               input_scroll_px_;
         input_caret_ = CaretIndexForX(buffer, text_len, click_x);
-    } else if (in.left.IsClick()) {
+    } else if (clicked_outside) {
         text_focus_.Release(b);  // 仅当本框正是聚焦者时释放；否则无操作。
     }
 
@@ -936,27 +962,34 @@ bool Ui::Combo(const char* label, int* selected,
     if (in.left.IsClick()) {
         const float cx = in.left_clicks[0].x;  // 只取首个 click 位置决定展开行为。
         const float cy2 = in.left_clicks[0].y;
+        // 被【其它】弹层（非本 Combo）独占的点击：本框一律不处理。
+        // 本 Combo 若是当前展开者（was_open）则不受限（它要消费自己列表内的
+        // 选项点击）；否则若该点击落在某个已展开列表内，说明它不属于本框。
+        const bool occluded_by_other = !was_open && PopupCoversPoint(cx, cy2);
         const bool in_box =
             cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
             cy2 >= b.pos.y() && cy2 <= b.pos.y() + b.size.y();
 
-        if (in_box) {
-            // 点击组合框本身：开→关、关→开（点框内不产生选值，仅切换展开态）。
-            open_now = !was_open;
-        } else if (was_open && size > 0) {
-            // 已展开且点框外：检查是否命中某个选项行 → 选中并关闭；
-            // 否则（点空白/别处）→ 关闭不选值（S6.2 点外部关闭）。
-            for (int i = 0; i < size; ++i) {
-                const float row_y = list_top + static_cast<float>(i) * row_h;
-                if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
-                    cy2 >= row_y && cy2 <= row_y + row_h) {
-                    *selected = i;  // 选中写回（唯一改变 *selected 的路径）。
-                    changed = true;
-                    break;
+        if (!occluded_by_other) {
+            if (in_box) {
+                // 点击组合框本身：开→关、关→开（点框内不产生选值，仅切换展开态）。
+                open_now = !was_open;
+            } else if (was_open && size > 0) {
+                // 已展开且点框外：检查是否命中某个选项行 → 选中并关闭；
+                // 否则（点空白/别处）→ 关闭不选值（S6.2 点外部关闭）。
+                for (int i = 0; i < size; ++i) {
+                    const float row_y = list_top + static_cast<float>(i) * row_h;
+                    if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                        cy2 >= row_y && cy2 <= row_y + row_h) {
+                        *selected = i;  // 选中写回（唯一改变 *selected 的路径）。
+                        changed = true;
+                        break;
+                    }
                 }
+                open_now = false;  // 无论命中选项还是点外部空白，点击都关闭下拉。
             }
-            open_now = false;  // 无论命中选项还是点外部空白，点击都关闭下拉。
         }
+        // occluded_by_other：点击属于别的展开列表，本框不处理。
         // was_open == false 且点框外：保持关闭，不改值。
     }
 
@@ -969,6 +1002,12 @@ bool Ui::Combo(const char* label, int* selected,
         combo_open_.Acquire(b);
     } else {
         combo_open_.Release(b);  // 仅当本框正是展开者时释放；否则无操作。
+    }
+
+    // 记录本帧画出的展开列表矩形 → 供【下一帧】做弹层独占判断
+    // （展开态跨帧稳定，故上一帧的矩形即本帧生效的独占区）。
+    if (open_now && size > 0) {
+        open_popup_rect_ = UiRect{{b.pos.x(), list_top}, {b.size.x(), list_h}};
     }
 
     // ---- 绘制（S6.1：当前项 + 下箭头 / 展开时 + 下拉列表）----
@@ -1057,6 +1096,15 @@ bool Ui::Combo(const char* label, int* selected,
 
     // 返回本帧是否发生了选项切换（展开/收起本身不计为选值）。
     return changed;
+}
+
+bool Ui::PopupCoversPoint(float x, float y) const {
+    const UiRect& p = active_popup_rect_;
+    if (p.size.x() <= 0.0f || p.size.y() <= 0.0f) {
+        return false;  // 无弹层（空矩形）：不独占任何点。
+    }
+    return x >= p.pos.x() && x <= p.pos.x() + p.size.x() &&
+           y >= p.pos.y() && y <= p.pos.y() + p.size.y();
 }
 
 bool Ui::Hit(const UiRect& r, float x, float y, const InputSnapshot& in) {
