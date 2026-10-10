@@ -720,9 +720,9 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glActiveTexture(GL_TEXTURE0);
 }
 
-// ==================== DrawSkinnedMeshForPick ====================
+// ==================== DrawSkinnedMeshSelected ====================
 
-void SkeletonRenderer::DrawSkinnedMeshForPick(
+void SkeletonRenderer::DrawSkinnedMeshSelected(
     const SkinnedMeshCommand& cmd,
     MeshManager& mesh_mgr,
     TextureManager& texture_mgr,
@@ -737,13 +737,13 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     InstanceBuffer& instance_thickness_buf,
     InstanceBuffer& instance_partial_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawSkinnedMeshForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK(mesh != nullptr) << "DrawSkinnedMeshSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
+        << "DrawSkinnedMeshSelected: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kJoints))
-        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kJoints 属性（蒙皮网格）";
-    CHECK(!cmd.instances.empty()) << "DrawSkinnedMeshForPick instance 数组不能为空";
+        << "DrawSkinnedMeshSelected: mesh_id=" << cmd.mesh_id << " 需要 kJoints 属性（蒙皮网格）";
+    CHECK(!cmd.instances.empty()) << "DrawSkinnedMeshSelected instance 数组不能为空";
 
     const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
     const unsigned int sp = cutout ? prog_cutout : prog;
@@ -763,7 +763,7 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
     if (pick_id_map != nullptr) {
         const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
         CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
-            << "DrawSkinnedMeshForPick: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+            << "DrawSkinnedMeshSelected: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
         glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
     }
 
@@ -771,9 +771,9 @@ void SkeletonRenderer::DrawSkinnedMeshForPick(
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
         if (cmd.material.base_color_tex != 0) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawSkinnedMeshForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+                << "DrawSkinnedMeshSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
             unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshForPick: base_color_tex 未注册";
+            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshSelected: base_color_tex 未注册";
             const int u = kTexUnitMaterialBase + 0;
             glActiveTexture(GL_TEXTURE0 + u);
             glBindTexture(GL_TEXTURE_2D, gl_tex);

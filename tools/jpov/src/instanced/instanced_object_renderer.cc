@@ -522,9 +522,9 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
     }
 }
 
-// ==================== DrawInstancedObjectForPick ====================
+// ==================== DrawInstancedObjectSelected ====================
 
-void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCommand& cmd,
+void InstancedObjectRenderer::DrawInstancedObjectSelected(const InstancedObjectCommand& cmd,
                                                          MeshManager& mesh_mgr,
                                                          TextureManager& texture_mgr,
                                                          const float view_proj[16],
@@ -533,9 +533,9 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
                                                          std::vector<uint32_t>* pick_id_map,
                                                          InstanceBuffer& instance_model_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawInstancedObjectForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK(mesh != nullptr) << "DrawInstancedObjectSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
-    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectForPick: instances 不能为空";
+    CHECK(!cmd.instances.empty()) << "DrawInstancedObjectSelected: instances 不能为空";
 
     const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
     const unsigned int sp = cutout ? prog_cutout : prog;
@@ -553,7 +553,7 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
     if (pick_id_map != nullptr) {
         const uint32_t base = kPickIdBaseInstanced + static_cast<uint32_t>(pick_id_map->size());
         CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdMax))
-            << "DrawInstancedObjectForPick: instanced 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+            << "DrawInstancedObjectSelected: instanced 段 id 溢出（>= " << kPickIdSegmentSize << "）";
         glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
     }
 
@@ -561,9 +561,9 @@ void InstancedObjectRenderer::DrawInstancedObjectForPick(const InstancedObjectCo
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
         if (cmd.material.base_color_tex != 0) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawInstancedObjectForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+                << "DrawInstancedObjectSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
             unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectForPick: base_color_tex 未注册";
+            CHECK_NE(gl_tex, 0u) << "DrawInstancedObjectSelected: base_color_tex 未注册";
             const int u = kTexUnitMaterialBase + 0;
             glActiveTexture(GL_TEXTURE0 + u);
             glBindTexture(GL_TEXTURE_2D, gl_tex);

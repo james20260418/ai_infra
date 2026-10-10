@@ -1867,8 +1867,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
             // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：
             // 从 fbo_hdr_（MSAA 时自动 resolve）blit color 到单采样 hl FBO，
-            // 在其上做“CPU 剪影膨胀求边缘环”的恒定像素宽描边（见 DrawHighlightPass），
-            // 输出叠加了高亮的颜色纹理，作为 tone map 的唯一输入。
+            // 在其上用**全屏 GPU pass**做“掩膜膨胀 − 自身 = 边缘环”的恒定像素宽描边
+            //（见 DrawHighlightPass），输出叠加了高亮的颜色纹理，作为 tone map 的唯一输入。
             // 有高亮 → 用 hl_color_tex_；无高亮 → 用 resolve/color 原始纹理（零开销）。
             if (cmds.highlight_style.has_value()) {
                 hdr_input_tex = DrawHighlightPass(cmds,
@@ -2094,9 +2094,9 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
                 const Object3DCommand& obj = cmds.object3d[idx];
 
-                // 3D 内容绘制保持纯净：高亮（方法 B：CPU 剪影膨胀描边）由独立的
-                // DrawHighlightPass 在 3D 内容全部画完后统一叠加（见 Render()）。
-                // 此处不掺任何 stencil 状态，DrawObject3D 只负责本体着色。
+                // 3D 内容绘制保持纯净：高亮由独立的 DrawHighlightPass 在 3D 内容全部
+                // 画完后统一叠加（见 Render()）。此处不掺任何 stencil 状态，DrawObject3D
+                // 只负责本体着色。
                 Object3DRenderer::DrawObject3D(obj, cmds,
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawObject3DProg(), DrawObject3DProgFull(),
@@ -2481,7 +2481,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     // ---- 三大 renderer 各画各的（各写自己的 id 段），共享同一张 pick FBO ----
     for (const auto& o : cmds.object3d) {
         if (o.picking_id == 0) continue;   // 不可拾取物体不参与
-        Object3DRenderer::DrawObject3DForPick(o, mesh_mgr_, texture_mgr_, mvp,
+        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
                                               PickObject3DProg(), PickObject3DCutoutProg(),
                                               &pick_table_object3d_);
     }
@@ -2494,7 +2494,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
         SkeletonManager* skel = GetSkeleton(s.skeleton_id);
         CHECK(skel != nullptr) << "DrawPickingPass: skeleton_id " << s.skeleton_id
                                << " 未注册（需先 RegisterSkeleton）";
-        SkeletonRenderer::DrawSkinnedMeshForPick(
+        SkeletonRenderer::DrawSkinnedMeshSelected(
             s, mesh_mgr_, texture_mgr_, mvp,
             PickSkinnedProg(), PickSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(),
@@ -2508,7 +2508,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
             if (inst.picking_id > 0) { any_pickable = true; break; }
         }
         if (!any_pickable) continue;
-        InstancedObjectRenderer::DrawInstancedObjectForPick(
+        InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             PickInstancedProg(), PickInstancedCutoutProg(),
             &pick_table_instanced_, instance_model_buf_);
@@ -2556,8 +2556,6 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     glDisable(GL_STENCIL_TEST);
 }
 
-// 高亮（CPU 屏幕空间回填）：给已画进剪影 mask 的高亮物体，读回 mask 做
-// outline_px 次像素膨胀，求恒定像素宽边缘环。详见 DrawHighlightPass。
 void Renderer::DestroyHighlightFBO() {
     if (hl_fbo_) {
         glDeleteFramebuffers(1, &hl_fbo_);
@@ -2569,7 +2567,7 @@ void Renderer::DestroyHighlightFBO() {
 }
 
 // 高亮剪影 mask FBO：单色（R8）纹理 + 独立 FBO，尺寸与 3D FBO 一致。
-// 存被高亮物体的不扩张剪影（白=物体，黑=背景），供 CPU 读回做像素膨胀。
+// 存被高亮物体的不扩张剪影（白=物体，黑=背景），供随后的 GPU 膨胀 pass 采样。
 // 仅含 color attachment（画剪影时深度测试已关闭、不写深度，无需 depth）。
 void Renderer::DestroyHighlightMaskFBO() {
     if (hl_mask_fbo_) {
@@ -2625,27 +2623,21 @@ void Renderer::EnsureHighlightFBO(int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     hl_fbo_w_ = w; hl_fbo_h_ = h;
 
-    // 同时确保剪影 mask FBO 尺寸匹配（CPU 回填需要它）。
+    // 同时确保剪影 mask FBO 尺寸匹配（GPU 膨胀 pass 需要它）。
     EnsureHighlightMaskFBO(w, h);
 }
 
-// 高亮 pass（CPU 屏幕空间回填）：3D 内容全部画完后执行的一个独立子步骤。
+// 高亮 pass：3D 内容全部画完后执行的一个独立子步骤（与 shadow / tone map 并列）。
 // 入参 fbo_w/fbo_h 为 3D FBO 尺寸。流程：
-//   1) blit 场景 color 从 fbo_hdr_（MSAA 时自动 resolve）到单采样 hl FBO
-//      —— 得到含 PBR 本色的场景底色；
-//   2) 把被高亮物体画成不扩张的单色剪影到独立 mask 纹理（hl_mask_tex_）。
-//      mask = 所有高亮物体的总并集（union）：关闭深度测试与背面裁剪，
-//      被遮挡/背面部分也写 1 → 后续膨胀得到整体外包络，且轮廓透过遮挡；
-//   3) CPU 读回 mask，做 outline_px 次像素膨胀，膨胀图与原剪影相减得
-//      恒定像素宽的边缘环；
-//   4) 用 GL_POINTS 把边缘环屏幕像素以边框色回填叠加到 hl_color_tex_；
-//   5) 返回叠加了高亮的颜色纹理，供 tone map pass 作输入。
-// 取代旧的“模型空间放大副本 + stencil”方案（旧式边框为相对缩放、近大远小；
-// 此方案边框恒定像素宽，且不依赖深度匹配防溢出——剪影边缘天然不溢出）。
-//
-// 纯 CPU 的“剪影膨胀求边缘环”：读回 mask（w*h，白=物体/非0），对物体像素
-// 做 outline_px 次十字膨胀（上下左右±1），像素(膨胀后 && !原剪影)即边缘环。
-// 返回边缘环像素的 NDC 坐标（x,y in [-1,1]，z=0），供 GL_POINTS 直接绘制。
+//   1) 三大 renderer 的「highlight」命令（per-command 整批高亮）画进独立单采样 R8 mask
+//      （hl_mask_tex_），值=1。mask = 所有高亮物体的总并集：关深度测试与背面裁剪，
+//      被遮挡/背面部分也写 1 → 后续膨胀得**整体外包络**，轮廓透过遮挡。
+//   2) blit 场景 color 从 fbo_hdr_（MSAA 时自动 resolve）到单采样 hl FBO，得含 PBR 本色的底色；
+//   3) **一个全屏 GPU pass**：对 mask 做 (2·outline_px+1)² 方形膨胀 ⊖ 自身 = 边缘环，
+//      以边框色混合叠回 hl FBO；
+//   4) 返回叠加了高亮的 hl_color_tex_，供 tone map pass 作输入。
+// 取代旧的“模型空间放大副本 + stencil”方案（旧式边框相对缩放、近大远小），
+// 也取代先前“CPU glReadPixels 读回 + 十字膨胀 + GL_POINTS 回填”的实现（改为纯 GPU）。
 unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
                                          int fbo_w, int fbo_h) {
     if (!cmds.highlight_style.has_value()) return 0;
@@ -2657,7 +2649,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
     // 1) 画「高亮掩膜」：三大 renderer 的「整批 highlight」命令 → 单采样 R8 mask（实心 1）。
     //    语义（与旧实现一致）：关深度测试 → 取「含遮挡的总外包络」（被挡部分也进掩膜）；
     //    关背面剔除 → 开放网格/背面朝向也覆盖，保证包络完整。
-    //    复用「选中物体栅格化」= DrawXxxForPick 的 highlight 模式（pick_id_map=nullptr，
+    //    复用「选中物体栅格化」= DrawXxxSelected 的 highlight 模式（pick_id_map=nullptr，
     //    不填 pick 表），只是 program 换成写常量掩膜的 kHighlightFs。
     glBindFramebuffer(GL_FRAMEBUFFER, hl_mask_fbo_);
     glViewport(0, 0, fbo_w, fbo_h);
@@ -2674,7 +2666,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
     Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
     for (const auto& o : cmds.object3d) {
         if (!o.highlight) continue;
-        Object3DRenderer::DrawObject3DForPick(o, mesh_mgr_, texture_mgr_, mvp,
+        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
             HighlightObject3DProg(), HighlightObject3DCutoutProg(), nullptr);
     }
     for (const auto& s : cmds.skinned_mesh) {
@@ -2682,7 +2674,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         SkeletonManager* skel = GetSkeleton(s.skeleton_id);
         CHECK(skel != nullptr) << "DrawHighlightPass: skeleton_id " << s.skeleton_id
                                << " 未注册（需先 RegisterSkeleton）";
-        SkeletonRenderer::DrawSkinnedMeshForPick(
+        SkeletonRenderer::DrawSkinnedMeshSelected(
             s, mesh_mgr_, texture_mgr_, mvp,
             HighlightSkinnedProg(), HighlightSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(), nullptr,
@@ -2691,7 +2683,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
     }
     for (const auto& io : cmds.instanced_object) {
         if (!io.highlight) continue;
-        InstancedObjectRenderer::DrawInstancedObjectForPick(
+        InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             HighlightInstancedProg(), HighlightInstancedCutoutProg(),
             nullptr, instance_model_buf_);

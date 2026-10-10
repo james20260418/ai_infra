@@ -593,7 +593,7 @@ void main() {
         InstanceBuffer& instance_thickness_buf,
         InstanceBuffer& instance_partial_buf);
 
-    // ---- DrawSkinnedMeshForPick ----
+    // ---- DrawSkinnedMeshSelected ----
     // 拾取（color-ID）pass：把一批带骨实例用拾取 program（kSkinnedVs+JPOV_PICK + kPickIdFs）
     //   画进 pick FBO，只写 render_internal_id（= kPickIdBaseSkinned + 本命令 base + gl_InstanceID）。
     //   蒙皮在本 pass 同样要做（否则镂空/姿态的剪影不对），故上传与主 pass 同一套 per-instance
@@ -601,7 +601,7 @@ void main() {
     // 本函数负责 CPU 侧 id 映射：把逐实例 picking_id 依次追加进 pick_id_map，并上传 uPickIdBase。
     // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
     // Pre-condition: pick_id_map != nullptr；cmd.instances 非空。
-    static void DrawSkinnedMeshForPick(
+    static void DrawSkinnedMeshSelected(
         const SkinnedMeshCommand& cmd,
         MeshManager& mesh_mgr,
         TextureManager& texture_mgr,

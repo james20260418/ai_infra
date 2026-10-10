@@ -890,7 +890,7 @@ void main() {
                                    unsigned int shadow_prog,
                                    unsigned int shadow_prog_cutout);
 
-    // ---- DrawObject3DForPick ----
+    // ---- DrawObject3DSelected ----
     // 拾取/高亮共享的「选中物体栅格化」：把一条 Object3DCommand 用**选中 program**（主 VS +
     //   kPickIdFs 或 kHighlightFs）画进一张离屏 buffer。
     // pick 模式（pick_id_map != nullptr）：写 render_internal_id（= kPickIdBaseObject3D + 序号），
@@ -899,7 +899,7 @@ void main() {
     // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空 discard 不写。
     // Pre-condition: pick 模式下 cmd.picking_id > 0（调用方已过滤）；
     //   highlight 模式无此要求（整批高亮，与 picking_id 无关）。
-    static void DrawObject3DForPick(const Object3DCommand& cmd,
+    static void DrawObject3DSelected(const Object3DCommand& cmd,
                                     MeshManager& mesh_mgr,
                                     TextureManager& texture_mgr,
                                     const float mvp[16],

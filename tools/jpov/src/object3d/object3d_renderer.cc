@@ -651,9 +651,9 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
     glBindVertexArray(0);
 }
 
-// ==================== DrawObject3DForPick ====================
+// ==================== DrawObject3DSelected ====================
 
-void Object3DRenderer::DrawObject3DForPick(const Object3DCommand& cmd,
+void Object3DRenderer::DrawObject3DSelected(const Object3DCommand& cmd,
                                            MeshManager& mesh_mgr,
                                            TextureManager& texture_mgr,
                                            const float mvp[16],
@@ -661,7 +661,7 @@ void Object3DRenderer::DrawObject3DForPick(const Object3DCommand& cmd,
                                            unsigned int prog_cutout,
                                            std::vector<uint32_t>* pick_id_map) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawObject3DForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK(mesh != nullptr) << "DrawObject3DSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
 
     float model[16];
@@ -684,9 +684,9 @@ void Object3DRenderer::DrawObject3DForPick(const Object3DCommand& cmd,
     // highlight 模式（map==nullptr）：不需要 id（program 的 FS 写常量掩膜），跳过。
     if (pick_id_map != nullptr) {
         CHECK_GT(cmd.picking_id, 0u)
-            << "DrawObject3DForPick: pick 模式要求 picking_id > 0";
+            << "DrawObject3DSelected: pick 模式要求 picking_id > 0";
         const uint32_t base = kPickIdBaseObject3D + static_cast<uint32_t>(pick_id_map->size());
-        CHECK_LT(base, kPickIdBaseSkinned) << "DrawObject3DForPick: object3d 段 id 溢出";
+        CHECK_LT(base, kPickIdBaseSkinned) << "DrawObject3DSelected: object3d 段 id 溢出";
         glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
     }
 
@@ -694,9 +694,9 @@ void Object3DRenderer::DrawObject3DForPick(const Object3DCommand& cmd,
         glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
         if (cmd.material.base_color_tex != 0) {
             CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-                << "DrawObject3DForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+                << "DrawObject3DSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
             unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-            CHECK_NE(gl_tex, 0u) << "DrawObject3DForPick: base_color_tex 未注册";
+            CHECK_NE(gl_tex, 0u) << "DrawObject3DSelected: base_color_tex 未注册";
             const int u = kTexUnitMaterialBase + 0;
             glActiveTexture(GL_TEXTURE0 + u);
             glBindTexture(GL_TEXTURE_2D, gl_tex);
