@@ -2113,7 +2113,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
-                    tile_index_tex_, instance_model_buf_);
+                    tile_index_tex_, instanced_object_model_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {
@@ -2365,7 +2365,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             InstancedObjectRenderer::DrawInstancedObjectShadow(
                 io, mesh_mgr_, texture_mgr_, shader_mgr_,
                 shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
-                InstancedShadowProgCutout(), instance_model_buf_);
+                InstancedShadowProgCutout(), instanced_object_model_buf_);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {
@@ -2511,7 +2511,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
         InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             PickInstancedProg(), PickInstancedCutoutProg(),
-            &pick_table_instanced_, instance_model_buf_);
+            &pick_table_instanced_, instanced_object_model_buf_);
     }
 
     // ---- 窗口像素坐标 → 3D FBO 像素（GL 左下原点）----
@@ -2686,7 +2686,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             HighlightInstancedProg(), HighlightInstancedCutoutProg(),
-            nullptr, instance_model_buf_);
+            nullptr, instanced_object_model_buf_);
     }
     glActiveTexture(GL_TEXTURE0);
 

@@ -17,6 +17,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
+#include "tools/jpov/src/instanced/instanced_object_attrs.h"
 #include "tools/jpov/src/instanced/instanced_object_renderer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
@@ -343,17 +344,24 @@ public:
     FontRenderer font_renderer_;
     MeshManager mesh_mgr_;
 
-    // per-instance 数据缓冲（Instanced draw 用）。
+    // per-instance 数据缓冲（Instanced draw 用）。分两组、互不复用：
     //   ★ 由**渲染器持有、跨 draw 复用** —— 实例数据属于「这次 draw」，不属于任何 mesh
     //     （见 src/instance_buffer.h 顶部为何不能挂在 GPUMesh 上）。
-    //   主 pass 与 shadow pass 共用同一对缓冲：GL draw 是同步提交的，每个 draw 前
-    //   紧接一次 Upload，故两 pass 不会互相踩。
+    //   同一 buffer 在主 pass / shadow pass / pick / highlight 间复用：GL draw 同步提交，
+    //   每个 draw 前紧接一次 Upload，故各 pass 不会互相踩。
+    //
+    // —— 蒙皮（skeleton）路径：spec 见 src/instance_buffer.h 的 kInstance*AttrSpec ——
     InstanceBuffer instance_model_buf_{kInstanceModelAttrSpec};             // loc7..10 = mat4
     InstanceBuffer instance_pose_ids_buf_{kInstancePoseIdsAttrSpec};        // loc11    = vec4(4 float)
     InstanceBuffer instance_misc_buf_{kInstanceMiscAttrSpec};               // loc12    = uvec4(uint8 视图)
     InstanceBuffer instance_partial_buf_{kInstancePartialAttrSpec};         // loc13    = uvec4(8 half)
     InstanceBuffer instance_partial_lag_buf_{kInstancePartialLagAttrSpec};  // loc14    = uvec4(8 half)
     InstanceBuffer instance_pos_lag_buf_{kInstancePosLagAttrSpec};          // loc15    = uvec4(8 half)
+    //
+    // —— 静态实例（InstancedObjectRenderer）路径：spec 见 src/instanced/instanced_object_attrs.h ——
+    //   与蒙皮路径**彻底解耦**（各自的 buffer + 各自的 spec），使其布局可独立演进
+    //   （如植被的 per-instance 颜色 / 摆动相位），不被蒙皮布局重排拖累。
+    InstanceBuffer instanced_object_model_buf_{instanced_object::kModelAttrSpec};  // loc7..10 = mat4
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

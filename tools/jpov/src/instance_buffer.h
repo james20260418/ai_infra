@@ -58,6 +58,8 @@ struct InstanceAttrSpec {
 };
 
 // ---- 蒙皮带骨实例的布局（与本目录下 skinning_shader.h 的 layout(location=…) 逐字对应）----
+//   ⚠️ 静态实例路径（InstancedObjectRenderer）**不用本表** —— 它有自己独立的 per-instance
+//      布局 spec（src/instanced/instanced_object_attrs.h），与本表解耦、各自演进。
 //   本表是 2026-10-10 「per-instance attribute 布局重排」后的**定稿布局**（loc0..15 用满）：
 //
 //   顶点属性（每顶点，来自 GPUMesh，见 mesh_manager.h）：
