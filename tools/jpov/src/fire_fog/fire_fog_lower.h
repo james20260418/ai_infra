@@ -14,6 +14,7 @@
 #ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
 #define JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -63,12 +64,12 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     return b;
 }
 
-// 某团 OBB 覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒ *out_behind=true 且 out_tiles 清空，
-// 调用方按「保守全屏」处理。
+// 某 OBB（团容器 / 点光源影响球）覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒
+// *out_behind=true 且 out_tiles 清空，调用方按「保守全屏」处理。
 //
 // 步骤：8 角点投影到屏幕像素 → 屏幕凸包（convex_hull_tiles.h）→ 覆盖的 tile。
 // Pre-conditions: grid_w >= 1, grid_h >= 1, tile_size > 0
-inline void AppendBodyCoveredTiles(const FogBody& b,
+inline void AppendBodyCoveredTiles(const Obb& box,
                                    const float mvp[16],
                                    int tile_size,
                                    int grid_w,
@@ -108,10 +109,10 @@ inline void AppendBodyCoveredTiles(const FogBody& b,
         const float sx = (s & 1) ? 1.0f : -1.0f;
         const float sy = (s & 2) ? 1.0f : -1.0f;
         const float sz = (s & 4) ? 1.0f : -1.0f;
-        Vec3f corner = b.bound.center;
+        Vec3f corner = box.center;
         for (int a = 0; a < 3; ++a) {
             const float sign = (a == 0) ? sx : ((a == 1) ? sy : sz);
-            corner = corner + b.bound.axis[a] * (b.bound.half_extent[a] * sign);
+            corner = corner + box.axis[a] * (box.half_extent[a] * sign);
         }
         float px = 0.0f;
         float py = 0.0f;
@@ -161,7 +162,7 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
     for (int bi = 0; bi < body_count; ++bi) {
         std::vector<TileCoord> covered;
         bool behind = false;
-        AppendBodyCoveredTiles(bodies[bi], mvp, tile_size, grid_w, grid_h, &covered, &behind);
+        AppendBodyCoveredTiles(bodies[bi].bound, mvp, tile_size, grid_w, grid_h, &covered, &behind);
 
         if (behind) {
             // 近平面后 → 保守覆盖全屏。
@@ -212,6 +213,9 @@ inline std::vector<uint8_t> BuildTileFogIndexData(const std::vector<FogBody>& bo
 // 立方，中心=光源位置、半径=linear_radius）的 8 角投影 → 屏幕凸包 → 覆盖的 tile；
 // 任一角在近平面后 ⇒ 保守覆盖全屏（与雾团剪枝同规则）。先到先得，每 tile 超过 max_per_tile 丢弃多余。
 //
+// ⚠️ 索引为 uint8 + sentinel ⇒ **全局至多 sentinel 个光源**（索引 0..sentinel-1）；
+//    超出者直接丢弃（否则 static_cast<uint8_t> 回绕 → 指到错误光源）。
+//
 // 用途：fire_fog inject 的**点光源内散射**按 froxel 的 Nxy 栅格做 tile culling
 //（与雾团 TC **解耦**：光源表用 fire_fog 自己的网格，不共用渲染器的 16px 光表）。
 //
@@ -238,23 +242,24 @@ inline std::vector<uint8_t> BuildTileLightIndexData(const std::vector<PointLight
     std::vector<uint8_t> counts(static_cast<size_t>(total_tiles), 0);
     std::vector<uint8_t> idx(static_cast<size_t>(total_tiles) * max_per_tile, sentinel);
 
-    const int light_count = static_cast<int>(lights.size());
+    const int light_count =
+        std::min(static_cast<int>(lights.size()), static_cast<int>(sentinel));
     for (int li = 0; li < light_count; ++li) {
         const PointLight& l = lights[li];
         if (l.linear_radius <= 0.0f) {
             continue;   // 无效范围，跳过（与雾团 radius > 0 同门）
         }
         // 光源影响球 → 外接立方 OBB（各半轴 = linear_radius）。
-        FogBody dummy;
-        dummy.bound.center = l.position;
-        dummy.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
-        dummy.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
-        dummy.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
-        dummy.bound.half_extent = Vec3f(l.linear_radius, l.linear_radius, l.linear_radius);
+        Obb box;
+        box.center = l.position;
+        box.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
+        box.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
+        box.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
+        box.half_extent = Vec3f(l.linear_radius, l.linear_radius, l.linear_radius);
 
         std::vector<TileCoord> covered;
         bool behind = false;
-        AppendBodyCoveredTiles(dummy, mvp, tile_size, grid_w, grid_h, &covered, &behind);
+        AppendBodyCoveredTiles(box, mvp, tile_size, grid_w, grid_h, &covered, &behind);
 
         if (behind) {
             for (int t = 0; t < total_tiles; ++t) {
@@ -347,7 +352,7 @@ inline std::vector<float> BuildTileZRangeData(const std::vector<FogBody>& bodies
 
         std::vector<TileCoord> covered;
         bool behind = false;
-        AppendBodyCoveredTiles(b, mvp, tile_size, grid_w, grid_h, &covered, &behind);
+        AppendBodyCoveredTiles(b.bound, mvp, tile_size, grid_w, grid_h, &covered, &behind);
 
         const auto merge_tile = [&](int t) {
             zmin[static_cast<size_t>(t)] = std::min(zmin[static_cast<size_t>(t)], zmn);

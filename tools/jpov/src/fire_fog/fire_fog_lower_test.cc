@@ -489,5 +489,45 @@ TEST(FireFogLower, LightIndexBehindCameraCoversWholeScreen) {
     }
 }
 
+TEST(FireFogLower, LightIndexOverTotalCapDroppedNotWrapped) {
+    // 超过 sentinel 个光源（uint8 索引上限）时，多出的光源必须**被丢弃**
+    //（而非 static_cast<uint8_t> 回绕指到错误光源）。
+    float mvp[16];
+    IdentityMvp(mvp);
+    constexpr int kGridW = 4;
+    constexpr int kGridH = 4;
+    constexpr int kTile = 16;
+    constexpr int kMaxPer = 8;
+    constexpr int kTexels = 2;
+    constexpr uint8_t kSentinel = 255;
+
+    PointLight base;
+    base.color = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    base.intensity = 1.0f;
+    base.linear_radius = 0.15f;
+    base.position = Vec3f(0.0f, 0.0f, 0.0f);   // 覆盖 tile(1..2,1..2)
+
+    std::vector<PointLight> lights(256, base);
+    // 第 257 个（索引 256）独在 tile(3,3)：若回绕会被当作光源 0（错误）；应被丢弃。
+    PointLight far_light = base;
+    far_light.position = Vec3f(0.85f, 0.85f, 0.0f);   // 屏幕 ≈ (59,59) → tile(3,3)
+    far_light.linear_radius = 0.1f;
+    lights.push_back(far_light);
+
+    const std::vector<uint8_t> packed = BuildTileLightIndexData(
+        lights, mvp, kGridW, kGridH, kTile, kMaxPer, kTexels, kSentinel);
+
+    // tile(3,3) 必须为空（超限光源被丢弃）；若回绕则会出现索引 0。
+    const std::vector<int> t33 = TileIndices(packed, kGridW, kTexels, kSentinel, 3, 3);
+    EXPECT_TRUE(t33.empty()) << "超限光源回绕了（tile(3,3) 出现 "
+                             << (t33.empty() ? -1 : t33[0]) << "）";
+    // 前置区域 tile(1,1) 仍记满前 8 个光源（索引 0..7）。
+    const std::vector<int> t11 = TileIndices(packed, kGridW, kTexels, kSentinel, 1, 1);
+    ASSERT_EQ(t11.size(), static_cast<size_t>(kMaxPer));
+    for (int i = 0; i < kMaxPer; ++i) {
+        EXPECT_EQ(t11[i], i);
+    }
+}
+
 }  // namespace
 }  // namespace jpov
