@@ -1119,27 +1119,27 @@ unsigned int Renderer::DrawObject3DProgFullCutout() {
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
-// 静态批量实例 program（摆放走 per-instance attribute，见 kMeshVs3dPBR*Instanced）。
+// 静态批量实例 program（摆放走 per-instance attribute，见 InstancedObjectRenderer::kMeshVs3dPBR*Instanced）。
 unsigned int Renderer::DrawInstancedObjectProg() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr",
-        {Object3DRenderer::kMeshVs3dPBRInstanced, Object3DRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, InstancedObjectRenderer::kMeshFs3dPBR});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFull() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full",
-        {Object3DRenderer::kMeshVs3dPBRFullInstanced, Object3DRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, InstancedObjectRenderer::kMeshFs3dPBR});
 }
 
 // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::DrawInstancedObjectProgCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_cutout",
-        {Object3DRenderer::kMeshVs3dPBRInstanced, Object3DRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, InstancedObjectRenderer::kMeshFs3dPBR,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFullCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full_cutout",
-        {Object3DRenderer::kMeshVs3dPBRFullInstanced, Object3DRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, InstancedObjectRenderer::kMeshFs3dPBR,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1235,16 +1235,16 @@ unsigned int Renderer::ShadowProgCutout() {
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
-// 实例版阴影 program：kShadowVsInstanced + 复用 object3d 的 kShadowFs（深度专用）。
+// 实例版阴影 program：InstancedObjectRenderer::kShadowVsInstanced + 同模块 kShadowFs（深度专用）。
 unsigned int Renderer::InstancedShadowProg() {
     return shader_mgr_.GetOrCreate("instanced_shadow",
-        {Object3DRenderer::kShadowVsInstanced, Object3DRenderer::kShadowFs});
+        {InstancedObjectRenderer::kShadowVsInstanced, InstancedObjectRenderer::kShadowFs});
 }
 
 // alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::InstancedShadowProgCutout() {
     return shader_mgr_.GetOrCreate("instanced_shadow_cutout",
-        {Object3DRenderer::kShadowVsInstanced, Object3DRenderer::kShadowFs,
+        {InstancedObjectRenderer::kShadowVsInstanced, InstancedObjectRenderer::kShadowFs,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1501,9 +1501,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
             // 实例 program 同源，也需光照 uniform。
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
+            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout());
             if (cmds.tile_culling) {
                 Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
@@ -1529,11 +1529,11 @@ void Renderer::Render(const RenderCommandList& cmds,
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // 实例 program 同源，也需 sun/阴影 uniform。
-            Object3DRenderer::UploadSunData(shader_mgr_,
+            InstancedObjectRenderer::UploadSunData(shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
-            Object3DRenderer::UploadSunData(shader_mgr_,
+            InstancedObjectRenderer::UploadSunData(shader_mgr_,
                 DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
@@ -1562,9 +1562,9 @@ void Renderer::Render(const RenderCommandList& cmds,
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(), ambient);
             // 实例 program 同源，也需 ambient uniform。
-            Object3DRenderer::UploadAmbient(shader_mgr_,
+            InstancedObjectRenderer::UploadAmbient(shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(), ambient);
-            Object3DRenderer::UploadAmbient(shader_mgr_,
+            InstancedObjectRenderer::UploadAmbient(shader_mgr_,
                 DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(), ambient);
         }
         if (!cmds.skinned_mesh.empty()) {
@@ -1964,7 +1964,7 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_LT(idx, static_cast<int>(cmds.instanced_object.size()));
                 const InstancedObjectCommand& io = cmds.instanced_object[idx];
                 // 摆放走 per-instance attribute，原 mvp_（= proj*view，不含 model）即 uViewProj。
-                Object3DRenderer::DrawInstancedObject(io, cmds,
+                InstancedObjectRenderer::DrawInstancedObject(io, cmds,
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
@@ -2217,7 +2217,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         }
         // 静态实例同样从光空间画深度（instanced shadow program）。
         for (const auto& io : cmds.instanced_object) {
-            Object3DRenderer::DrawInstancedObjectShadow(
+            InstancedObjectRenderer::DrawInstancedObjectShadow(
                 io, mesh_mgr_, texture_mgr_, shader_mgr_,
                 shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
                 InstancedShadowProgCutout(), instance_model_buf_);

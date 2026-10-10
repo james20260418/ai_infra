@@ -240,6 +240,7 @@ cc_library(
         ":primitives2d_renderer",
         ":mesh_manager",
         ":object3d_renderer",
+        ":instanced_renderer",
         ":primitives3d_renderer",
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
@@ -303,7 +304,35 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:camera",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# InstancedObjectRenderer — 静态模型批量实例渲染（DrawInstancedObject）+ 实例阴影。
+# 独立子渲染器，与 Object3DRenderer / SkeletonRenderer 在 renderer 层面平级、互不依赖。
+# 定位：全盘接管并升级 Object3DRenderer 的静态 PBR 能力为「同 mesh 摆 N 份 = 一次
+# instanced draw」；过渡期**刻意复制** Object3DRenderer 的 PBR/阴影片元与光照 uniform
+# 上传（见头文件的过渡期同步约定）。摆放走 per-instance attribute（InstanceBuffer 基建）。
+cc_library(
+    name = "instanced_renderer",
+    srcs = ["instanced/instanced_object_renderer.cc"],
+    hdrs = ["instanced/instanced_object_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
         ":instance_buffer",
+        ":mesh_manager",
+        ":shader_manager",
+        ":texture_manager",
+        ":texture_units",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",
