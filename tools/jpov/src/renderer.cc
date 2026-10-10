@@ -2499,8 +2499,8 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
             PickSkinnedProg(), PickSkinnedCutoutProg(),
             skel->gpu_handles(), skel->pose_count(),
             &pick_table_skinned_,
-            instance_model_buf_, instance_pose_buf_, instance_thickness_buf_,
-            instance_partial_buf_);
+            instance_model_buf_, instance_pose_ids_buf_, instance_misc_buf_,
+            instance_partial_buf_, instance_partial_lag_buf_, instance_pos_lag_buf_);
     }
     for (const auto& io : cmds.instanced_object) {
         bool any_pickable = false;

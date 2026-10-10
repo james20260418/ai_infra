@@ -601,7 +601,7 @@ void main() {
     // 拾取（color-ID）pass：把一批带骨实例用拾取 program（kSkinnedVs+JPOV_PICK + kPickIdFs）
     //   画进 pick FBO，只写 render_internal_id（= kPickIdBaseSkinned + 本命令 base + gl_InstanceID）。
     //   蒙皮在本 pass 同样要做（否则镂空/姿态的剪影不对），故上传与主 pass 同一套 per-instance
-    //   属性（model / pose / thickness / partial）+ pose atlas。
+    //   属性（model / pose_ids / misc / partial）+ pose atlas。
     // 本函数负责 CPU 侧 id 映射：把逐实例 picking_id 依次追加进 pick_id_map，并上传 uPickIdBase。
     // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
     // Pre-condition: pick_id_map != nullptr；cmd.instances 非空。
@@ -616,9 +616,11 @@ void main() {
         int pose_count,
         std::vector<uint32_t>* pick_id_map /*nullable: null ⇒ 高亮掩膜模式，不填表*/,
         InstanceBuffer& instance_model_buf,
-        InstanceBuffer& instance_pose_buf,
-        InstanceBuffer& instance_thickness_buf,
-        InstanceBuffer& instance_partial_buf);
+        InstanceBuffer& instance_pose_ids_buf,
+        InstanceBuffer& instance_misc_buf,
+        InstanceBuffer& instance_partial_buf,
+        InstanceBuffer& instance_partial_lag_buf,
+        InstanceBuffer& instance_pos_lag_buf);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到蒙皮 PBR shader。

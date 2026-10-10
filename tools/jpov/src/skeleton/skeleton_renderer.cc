@@ -823,9 +823,12 @@ void SkeletonRenderer::DrawSkinnedMeshSelected(
     int pose_count,
     std::vector<uint32_t>* pick_id_map,
     InstanceBuffer& instance_model_buf,
-    InstanceBuffer& instance_pose_buf,
-    InstanceBuffer& instance_thickness_buf,
-    InstanceBuffer& instance_partial_buf) {
+    InstanceBuffer& instance_pose_ids_buf,
+    InstanceBuffer& instance_misc_buf,
+    InstanceBuffer& instance_partial_buf,
+    InstanceBuffer& instance_partial_lag_buf,
+    InstanceBuffer& instance_pos_lag_buf) {
+    CHECK(pick_id_map != nullptr);
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawSkinnedMeshSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
@@ -921,14 +924,23 @@ void SkeletonRenderer::DrawSkinnedMeshSelected(
         CHECK_LE(inst.ratio, 1.0f) << "ratio 越界: " << inst.ratio;
     }
 
-    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
-                                     instance_thickness_buf, instance_partial_buf);
+    // LAG 门控（同主 pass）：仅当网格带 aRelax 才上传/挂载 loc14/15。
+    const bool lag_on = MeshHasFlag(mesh->flags, MeshVertexFlags::kRelax);
+    UploadSkinningInstanceAttributes(cmd, pose_w, lag_on, instance_model_buf,
+                                     instance_pose_ids_buf, instance_misc_buf,
+                                     instance_partial_buf, instance_partial_lag_buf,
+                                     instance_pos_lag_buf);
 
     const GLsizei n_inst = static_cast<GLsizei>(n);
     {
-        InstanceBufferBinding bind(mesh->vao,
-                                   {&instance_model_buf, &instance_pose_buf,
-                                    &instance_thickness_buf, &instance_partial_buf});
+        std::vector<const InstanceBuffer*> bufs = {
+            &instance_model_buf, &instance_pose_ids_buf, &instance_misc_buf,
+            &instance_partial_buf};
+        if (lag_on) {
+            bufs.push_back(&instance_partial_lag_buf);
+            bufs.push_back(&instance_pos_lag_buf);
+        }
+        InstanceBufferBinding bind(mesh->vao, bufs);
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
