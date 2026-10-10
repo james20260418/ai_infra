@@ -442,7 +442,7 @@ struct PointLight {
 // 点雾体的径向衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
 //
 // 剖面给出半径 r ∈ [0, R] 处的相对消光权重 w(r) ∈ [0,1]；r > R 处 w = 0（球外不贡献）。
-// 实际消光强度由 Fire-Fog 管线结合 intensity / 颜色推出，本字段只定「形状」。
+// 点处的消光系数 = sigma · w(r)（见 PointFog.sigma），本字段只定「形状」。
 enum class FogAttenuation : uint8_t {
     kUniform = 0,      // 均匀：r ≤ R 恒为 1（硬边球）
     kLinear = 1,       // 线性：w = 1 − r/R
@@ -453,38 +453,48 @@ enum class FogAttenuation : uint8_t {
 // 点状雾体（世界空间）—— JPOV 雾火管线的用户级输入（v1：简单点状雾）。
 //
 // 雾体「像点光源一样摆放」：在 center 处放一团半径 radius 的雾，半径内按 attenuation
-// 剖面给出消光密度，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
-// 逐像素 ZDist；见 tools/jpov/docs/jpov_fire_fog_design.md），与 ElevationFogConfig
+// 剖面给出消光，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
+// froxel 摊销；见 tools/jpov/docs/jpov_froxel_design.md），与 ElevationFogConfig
 //（屏幕空间解析雾）是**两条不同的通道**。
 //
-// 字段（按此顺序聚合初始化）：
-//   { center, radius, color, intensity, attenuation }
-// 例: { {0,1,0}, 3.0f, {1.0f,0.6f,0.2f,1.0f}, 1.5f, FogAttenuation::kQuadratic }
+// ── 散射 vs 自发光（辐射传输的源项，二者在此**显式分开**）──
+//   J = σ_s · L_light  +  ε        （每米）
+//       └ 散射：借外光 ┘   └ 自发光：自生 ┘
+//   · 散射（albedo）：依赖外部光照（无光则无贡献），强度 ∝ 消光；把入射光「染色」。
+//   · 自发光（emission）：与光照**无关**（黑屋自亮），独立于密度；颜色/亮度自带（HDR）。
+//   段贡献（长 Δz、光学深度 Δτ = σ_t·w·Δz）：
+//     S_seg = albedo·L_light·(1−e^{−Δτ})  +  (ε/σ_t)·(1−e^{−Δτ})
+//   自发光项薄极限 → ε·Δz，与密度无关（不乘 σ）。
 //
-// Pre-condition: radius > 0
+// 字段（按此顺序聚合初始化）：
+//   { center, radius, sigma, albedo, emission, attenuation }
+// 例: { {0,1,0}, 3.0f, 1.5f, {0.8f,0.8f,0.8f,1.0f}, {0,0,0,1}, FogAttenuation::kQuadratic }
+//
+// Pre-condition: radius > 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0
 struct PointFog {
     Vec3f center;                 // 雾体中心（世界坐标）
     float radius;                 // 半径（米，> 0）；超出该半径的像素不受本团影响
-    Color color;                  // 介质色 / 内散射色（HDR 线性域）
-    float intensity;              // 强度（HDR，可 > 1）
-    FogAttenuation attenuation;   // 径向衰减剖面
+    float sigma;                  // 消光系数 σ_t（1/m，>= 0）—— 物理量纲，非「强度」
+    Color albedo;                 // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
+    Color emission;               // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
+    FogAttenuation attenuation;   // 径向衰减剖面（形状）
 };
 
 // Fire-Fog（froxel 体积雾）管线参数。
 //
-// 由雾火查看器暴露成开关便于对比；仅在 point_fogs 非空时生效（空则整条管线跳过）。
+// 由雾火查看器暴露以调参；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
+//
+// ⚠️ 雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling）；
+//    「无光照 / base 发射」链路已移除（Danis 2026-10-10：既然这么物理，不再提供非物理绘制）。
+//
 // Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
 //                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
 struct FireFogParams {
-    // 光照开关（分步验收用）：
-    //   false = 只输出 base 发射（不采样任何光源；step1，看雾团形状）；
-    //   true  = 叠加 ambient + 太阳×CSM 阴影（step2，god ray）。
-    bool sun_enable = false;
-    // 太阳项散射相位（Henyey-Greenstein 各向异性 g ∈ [0,0.95)；0=各向同性）。
-    // 越大 ⇒ 逆着太阳看时雾越亮（god ray 更明显）；只影响太阳直射项，不影响 ambient。
+    // 所有光源（太阳 + 点光源）内散射的 Henyey-Greenstein 相位各向异性 g ∈ [0,0.95)；
+    // 0=各向同性。越大 ⇒ 迎着光源看时雾越亮（god ray 更明显）。不作用于 ambient（各向同性）。
     float sun_phase_g = 0.5f;
-    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度。
+    // 太阳项额外增益（1=物理）。用于把 god ray 拉到想要的观感强度；只作用于太阳项。
     float sun_gain = 1.0f;
     // froxel z 分布区间（米）。与相机近远平面**解耦**；切片生长系数只由比值 far/near 定。
     // MVP: near=0.1, far=2000 ⇒ R=(20000)^{1/nz}。near 别设太小（浪费近端）。
@@ -1625,7 +1635,7 @@ struct Object3DCommand {
     // 未发起查询时 picking_id 完全不产生渲染开销。
     uint32_t picking_id = 0;
 
-    // highlight：是否为本物体绘制高亮纯色边框（方法 B：stencil + 顶点外扩）。
+    // highlight：是否为本物体绘制高亮纯色边框（方法 B：CPU 屏幕空间剪影膨胀描边）。
     //   边框颜色/线宽取全局 RenderCommandList::highlight_style（无该值时忽略）。
     //   仅当 highlight_style 有值且本物体 highlight==true 时才多画一个描边 pass；
     //   未开启高亮时零额外开销。
@@ -1652,6 +1662,13 @@ struct Object3DCommand {
 struct InstanceState {
     // 摆放 —— center 平移 + up/front 旋转 + scale（见 InstanceTransform）。
     InstanceTransform transform;
+
+    // 拾取 id（逐实例，uint32）：>0 = 本实例可被拾取；拾取命中它时，
+    //   JPOV::last_pick().picking_id 回传此值。0 = 不可拾取。
+    //   同批各实例可给不同值（支持「点哪株是哪株」）；仅在 PickQuery.enabled 时参与拾取 pass。
+    //   注意：本字段**不作为 per-instance GPU attribute 上传** —— 拾取走
+    //   `render_internal_id = 本命令 base + gl_InstanceID`，再把 internal id 映射回本值（见拾取实现）。
+    uint32_t picking_id = 0;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -1742,6 +1759,22 @@ struct PickResult {
     uint32_t picking_id = 0;
 };
 
+// ---- 拾取 internal id 分区（三大 3D 渲染器各占一段）----
+// 拾取 pass 写进 pick FBO 的不是用户的 picking_id，而是「本 draw call 的 base + 实例序号」
+// （= render_internal_id，致密、从 0 起累计）；CPU 侧维护 internal id → 用户 uint32 的映射表。
+// 三大 renderer（object3d / 蒙皮 / 实例）**共享同一张 pick FBO**，故各占一段不重叠的 id 区间
+// （base 分区）以免冲突。每段 2^20 ≈ 100 万（draw call/实例总数上限，超出实现应报错）。
+// 3 段合计 3·2^20 < 2^24，恰好塞进 pick FS 的 RGB 三字节编码。
+// 查询：读回 render_internal_id → (id >> kPickIdSegmentBits) 选段 → (id & (size-1)) 查该段表。
+inline constexpr uint32_t kPickIdSegmentBits = 20;
+inline constexpr uint32_t kPickIdSegmentSize = 1u << kPickIdSegmentBits;  // 1,048,576
+inline constexpr uint32_t kPickIdBaseObject3D  = 0u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdBaseSkinned   = 1u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdBaseInstanced = 2u * kPickIdSegmentSize;
+inline constexpr uint32_t kPickIdMax = 3u * kPickIdSegmentSize;
+static_assert(kPickIdMax <= (1u << 24),
+              "拾取 internal id 必须能塞进 RGB 三字节（<= 2^24）");
+
 // ==================== 渲染指令列表 ====================
 
 // 帧级输出：有序的绘制指令集合
@@ -1807,8 +1840,7 @@ struct RenderCommandList {
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
 
-    // Fire-Fog 管线参数（光照开关 / 相位 / 增益）。未设置时用默认值
-    //（sun_enable=false ⇒ 只输出 base 发射）。仅在 point_fogs 非空时生效。
+    // Fire-Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
     std::optional<FireFogParams> fire_fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
@@ -1908,7 +1940,7 @@ struct RenderCommandList {
     std::optional<BloomConfig> bloom;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
-    // 给该物体绘制方法 B 纯色边框（stencil + 顶点外扩）。
+    // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
     std::optional<HighlightStyle> highlight_style;
 

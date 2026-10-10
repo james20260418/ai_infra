@@ -720,4 +720,134 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glActiveTexture(GL_TEXTURE0);
 }
 
+// ==================== DrawSkinnedMeshForPick ====================
+
+void SkeletonRenderer::DrawSkinnedMeshForPick(
+    const SkinnedMeshCommand& cmd,
+    MeshManager& mesh_mgr,
+    TextureManager& texture_mgr,
+    const float view_proj[16],
+    unsigned int prog,
+    unsigned int prog_cutout,
+    const SkeletonManager::GpuHandles& gh,
+    int pose_count,
+    std::vector<uint32_t>* pick_id_map,
+    InstanceBuffer& instance_model_buf,
+    InstanceBuffer& instance_pose_buf,
+    InstanceBuffer& instance_thickness_buf,
+    InstanceBuffer& instance_partial_buf) {
+    CHECK(pick_id_map != nullptr);
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawSkinnedMeshForPick: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kJoints))
+        << "DrawSkinnedMeshForPick: mesh_id=" << cmd.mesh_id << " 需要 kJoints 属性（蒙皮网格）";
+    CHECK(!cmd.instances.empty()) << "DrawSkinnedMeshForPick instance 数组不能为空";
+
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? prog_cutout : prog;
+    glUseProgram(sp);
+
+    glPushAttrib(GL_ENABLE_BIT);
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    // 裁剪矩阵：uViewProj = proj*view（摆放走 per-instance attribute）。
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uViewProj"), 1, GL_FALSE, view_proj);
+
+    // 拾取 id 段基址 + 逐实例映射（逐实例 id = base + gl_InstanceID）。
+    const size_t n = cmd.instances.size();
+    const uint32_t base = kPickIdBaseSkinned + static_cast<uint32_t>(pick_id_map->size());
+    CHECK_LE(static_cast<uint64_t>(base) + n, static_cast<uint64_t>(kPickIdBaseInstanced))
+        << "DrawSkinnedMeshForPick: skinned 段 id 溢出（>= " << kPickIdSegmentSize << "）";
+    glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawSkinnedMeshForPick: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u) << "DrawSkinnedMeshForPick: base_color_tex 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+    // CPU 侧 id 映射：逐实例追加（含 picking_id==0 的实例，保证 base+i 连续）。
+    for (const SkinnedInstanceState& inst : cmd.instances) {
+        pick_id_map->push_back(inst.picking_id);
+    }
+
+    // ---- 骨纹理 pose atlas（影响剪影，需与主 pass 一致）----
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPoseAtlas);
+    glBindTexture(GL_TEXTURE_2D, gh.pose_atlas_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPoseAtlas"), kTexUnitPoseAtlas);
+    glUniform1i(glGetUniformLocation(sp, "uBoneCount"), gh.bone_count);
+    glUniform1i(glGetUniformLocation(sp, "uPoseRow"), 0);
+    glUniform2f(glGetUniformLocation(sp, "uAtlasDim"),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim),
+                static_cast<float>(SkeletonManager::kPoseAtlasDim));
+
+    // ---- 部位粗细 / 额外旋转（同样影响剪影）----
+    glUniform1i(glGetUniformLocation(sp, "uThicknessEnabled"),
+                gh.thickness_bind_tex != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitThicknessBind);
+    glBindTexture(GL_TEXTURE_2D, gh.thickness_bind_tex);
+    glUniform1i(glGetUniformLocation(sp, "uThicknessBind"), kTexUnitThicknessBind);
+
+    const int partial_on =
+        (gh.partial_rotation_bind_tex != 0 && gh.partial_rotation_channel_tex != 0 &&
+         AnyNonIdentityPartialRotation(cmd.instances))
+            ? 1 : 0;
+    glUniform1i(glGetUniformLocation(sp, "uPartialEnabled"), partial_on);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationBind);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_bind_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPartialBind"), kTexUnitPartialRotationBind);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPartialRotationChannel);
+    glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_channel_tex);
+    glUniform1i(glGetUniformLocation(sp, "uPartialChannel"), kTexUnitPartialRotationChannel);
+
+    // 越界校验（SkinnedInstanceState 契约：越界 → FATAL）。
+    const int pose_w = gh.bone_count * 2;
+    CHECK_GT(pose_count, 0) << "pose_count 必须 > 0（骨架未注册 pose？）";
+    for (const SkinnedInstanceState& inst : cmd.instances) {
+        CHECK_GE(inst.pose_a, 0) << "pose_a 越界: " << inst.pose_a;
+        CHECK_GE(inst.pose_b, 0) << "pose_b 越界: " << inst.pose_b;
+        CHECK_LT(inst.pose_a, pose_count) << "pose_a 越界: " << inst.pose_a;
+        CHECK_LT(inst.pose_b, pose_count) << "pose_b 越界: " << inst.pose_b;
+        CHECK_GE(inst.ratio, 0.0f) << "ratio 越界: " << inst.ratio;
+        CHECK_LE(inst.ratio, 1.0f) << "ratio 越界: " << inst.ratio;
+    }
+
+    UploadSkinningInstanceAttributes(cmd, pose_w, instance_model_buf, instance_pose_buf,
+                                     instance_thickness_buf, instance_partial_buf);
+
+    const GLsizei n_inst = static_cast<GLsizei>(n);
+    {
+        InstanceBufferBinding bind(mesh->vao,
+                                   {&instance_model_buf, &instance_pose_buf,
+                                    &instance_thickness_buf, &instance_partial_buf});
+        glBindVertexArray(mesh->vao);
+        if (mesh->index_count > 0) {
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(mesh->index_count),
+                                    GL_UNSIGNED_INT, nullptr, n_inst);
+        } else {
+            glDrawArraysInstanced(GL_TRIANGLES, 0,
+                                  static_cast<GLsizei>(mesh->vertex_count), n_inst);
+        }
+        glBindVertexArray(0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glPopAttrib();
+}
+
 }  // namespace jpov

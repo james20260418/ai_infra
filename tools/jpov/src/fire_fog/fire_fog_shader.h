@@ -42,10 +42,17 @@ void main() {
 // 各趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
 inline constexpr const char* kFireFogCommonGlsl = R"glsl(
 
-// ── tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
+// ── 团 tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
 #define MAX_FOGS_PER_TILE    8
 #define TEXELS_PER_TILE      2
 #define FOG_INDEX_SENTINEL   255u
+
+// ── 点光源 tile 索引纹理布局常量（fire_fog 自持；与 fire_fog_renderer.h 对应）──
+// 每个 Nxy 单元至多 8 个光源（与最大团数同值），每 texel RGBA 各 1 个 uint8 索引。
+#define MAX_LIGHTS_PER_TILE    8
+#define LIGHT_TEXELS_PER_TILE  2
+#define MAX_TOTAL_LIGHTS       255
+#define LIGHT_INDEX_SENTINEL   255u
 
 // ── froxel 网格（运行期 uniform；见 FireFogParams.nz / tile_px）──
 //   uNz        每柱 z 切片数（= uBlockSide²）
@@ -93,12 +100,22 @@ uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, z
 uniform sampler2D uFogBodyTex;
 uniform sampler2D uTileRayTex;   // RGBA32F：每 tile 中心视线方向（单位向量，CPU 预算）
 uniform sampler2D uZSlicesTex;   // R32F：z 切片边界 z_0..z_Nz（CPU 预算）
+uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fire_fog 自持网格）
 uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
 uniform int   uTotalFogs;
 
-// ── 光照（step2；step1 时 uSunEnable==0，L_in = col）──
-uniform int   uSunEnable;
+// ── 点光源（tile culling；仅需内散射所需的 position/color/radius/intensity）──
+struct FogLight {
+    vec3 position;
+    vec3 color;
+    float radius;      // 衰减半径（线性，与 object3d 同）
+    float intensity;   // 亮度标量（乘 color）
+};
+uniform FogLight uFogLights[MAX_TOTAL_LIGHTS];
+uniform int uTotalLights;
+
+// ── 光照（**始终开启**；无「无光照 / base 发射」链路）──
 uniform vec3  uAmbientColor;
 uniform float uAmbientIntensity;
 uniform int   uHasSun;
@@ -138,14 +155,16 @@ float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texelW,
     return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
 }
 
-// Henyey-Greenstein 散射相位（相对太阳→视线的散射角）。μ=1 = 朝太阳看（前向散射）。
-// uSunDir 由 CPU 归一、rd 取自已归一的 tile 射线纹理 ⇒ 此处不必再 normalize。
-float SunPhase(vec3 rd) {
-    float mu = clamp(dot(rd, -uSunDir), -1.0, 1.0);
-    float g = clamp(uSunPhaseG, 0.0, 0.95);
+// Henyey-Greenstein 散射相位（相对光→视线方向）。mu=1 = 朝光源看（前向散射）。
+float HgPhase(float mu, float g) {
+    g = clamp(g, 0.0, 0.95);
     float denom = max(1.0 + g * g - 2.0 * g * mu, 1e-4);
-    // denom^1.5 = denom·√denom（省去逐 texel 的 pow 超越函数）。
-    return uSunGain * (1.0 - g * g) / (4.0 * 3.14159265 * denom * sqrt(denom));
+    return (1.0 - g * g) / (4.0 * 3.14159265 * denom * sqrt(denom));
+}
+
+// 太阳项相位（× uSunGain；uSunDir 由 CPU 归一、rd 取自已归一的 tile 射线纹理 ⇒ 不必再 normalize）。
+float SunPhase(vec3 rd) {
+    return uSunGain * HgPhase(clamp(dot(rd, -uSunDir), -1.0, 1.0), uSunPhaseG);
 }
 
 // 原始 CSM（单次采样，无 PCF）：按采样点到相机的距离选主级联，末尾按 fade 淡出。
@@ -230,18 +249,39 @@ void main() {
         }
     }
 
+    // 本 tile 的点光源候选（≤ MAX_LIGHTS_PER_TILE；fire_fog 自持网格，与团的网格同尺寸）。
+    uint light_idx[MAX_LIGHTS_PER_TILE];
+    int nl = 0;
+    for (int t = 0; t < LIGHT_TEXELS_PER_TILE; ++t) {
+        vec4 lpx = texelFetch(uTileLightIndices,
+                              ivec2(tile_col * LIGHT_TEXELS_PER_TILE + t, tile_row), 0);
+        uint lch[4];
+        lch[0] = uint(lpx.r * 255.0 + 0.5) & 255u;
+        lch[1] = uint(lpx.g * 255.0 + 0.5) & 255u;
+        lch[2] = uint(lpx.b * 255.0 + 0.5) & 255u;
+        lch[3] = uint(lpx.a * 255.0 + 0.5) & 255u;
+        for (int e = 0; e < 4; ++e) {
+            if (lch[e] != LIGHT_INDEX_SENTINEL && lch[e] < uint(uTotalLights)
+                && nl < MAX_LIGHTS_PER_TILE) {
+                light_idx[nl] = lch[e];
+                ++nl;
+            }
+        }
+    }
+
     vec4 acc = vec4(0.0);   // 局部 (τ, S)，本 froxel 内多团 over 合成（顺序无关）
     for (int j = 0; j < nf; ++j) {
         int bi = int(fog_idx[j]);
         vec4 t0 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 0, 0), 0);
         vec4 t1 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 1, 0), 0);
         vec4 t2 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 2, 0), 0);
-        vec3  c   = t0.xyz;
-        float rad = t0.w;
-        vec3  col = t1.xyz;
-        float inten = t1.w;
-        int   atten = int(t2.x + 0.5);
-        if (rad <= 0.0 || inten <= 0.0) {
+        vec3  c        = t0.xyz;
+        float rad      = t0.w;
+        float sigma    = t1.x;          // 消光系数 σ_t (1/m)
+        vec3  albedo   = t1.yzw;        // 单散射反照率（散射色，∈[0,1]）
+        int   atten    = int(t2.x + 0.5);
+        vec3  emission = t2.yzw;        // 自发光系数 ε (HDR)
+        if (rad <= 0.0 || sigma <= 0.0) {
             continue;
         }
         // 球 × 光线求交。
@@ -271,17 +311,35 @@ void main() {
         if (wgt <= 0.0) {
             continue;
         }
-        float dtau = inten * wgt * len;
-        // 内散射源 L_in：step1 = base 发射色（不采样任何光源）；
-        // step2 = col·(ambient + 太阳·强度·相位·CSM 阴影)。
-        vec3 Lin = col;
-        if (uSunEnable != 0) {
-            float sh = CsmShadow(p, length(p - ro));
-            float ph = SunPhase(rd);
-            Lin = col * (uAmbientColor * uAmbientIntensity
-                         + uSunColor * uSunIntensity * ph * sh);
+        float dtau = sigma * wgt * len;
+        if (dtau <= 0.0) {
+            continue;
         }
-        vec3 Sleaf = Lin * (1.0 - exp(-dtau));
+        // ── 光照（始终开启）：ambient（各向同性） + 太阳×CSM（×相位，god ray）
+        //    + 本 tile 点光源（×相位）。──
+        vec3 Llight = uAmbientColor * uAmbientIntensity;
+        if (uHasSun != 0) {
+            float sh = CsmShadow(p, length(p - ro));
+            Llight += uSunColor * uSunIntensity * SunPhase(rd) * sh;
+        }
+        for (int k2 = 0; k2 < nl; ++k2) {
+            int li = int(light_idx[k2]);
+            vec3 Lp = uFogLights[li].position - p;
+            float ldist = length(Lp);
+            if (ldist >= uFogLights[li].radius) {
+                continue;
+            }
+            float atten_l = 1.0 - ldist / uFogLights[li].radius;
+            float mu = clamp(dot(rd, Lp / max(ldist, 1e-5)), -1.0, 1.0);
+            Llight += uFogLights[li].color * uFogLights[li].intensity
+                      * atten_l * HgPhase(mu, uSunPhaseG);
+        }
+        float cover = 1.0 - exp(-dtau);
+        // 源项分两块：散射 = albedo⊙L_light×覆盖；自发光 = ε×长度×自吸收
+        //（薄极限 ε·len ⇒ 与密度无关，**不乘 σ**）。
+        vec3 Sleaf = albedo * Llight * cover;
+        float emis_f = (dtau > 1e-6) ? cover / dtau : 1.0;
+        Sleaf += emission * (len * emis_f);
         acc = OverCompose(acc, vec4(dtau, Sleaf));   // over 合成（团无序 ⇒ 可任意序）
     }
     oColor = acc;

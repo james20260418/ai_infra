@@ -77,6 +77,10 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec4 world_pos = model * vec4(aPos, 1.0);
@@ -85,6 +89,9 @@ void main() {
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
     gl_Position = uViewProj * world_pos;
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
     // kMeshVs3dPBRFullInstanced: 实例版顶点着色器（含 UV + tangent）。
@@ -103,6 +110,10 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec4 world_pos = model * vec4(aPos, 1.0);
@@ -112,6 +123,9 @@ void main() {
     vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uViewProj * world_pos;
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
     // kShadowVsInstanced: 实例版阴影 pass 顶点着色器（per-instance 摆放，输出线性深度）。
@@ -834,6 +848,22 @@ void main() {
                                           unsigned int shadow_prog,
                                           unsigned int shadow_prog_cutout,
                                           InstanceBuffer& instance_model_buf);
+
+    // ---- DrawInstancedObjectForPick ----
+    // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。
+    //   逐实例 id = kPickIdBaseInstanced + 本命令 base + gl_InstanceID。
+    // 本函数负责 CPU 侧 id 映射：把**逐实例** picking_id 依次追加进 pick_id_map，并上传
+    //   uPickIdBase = 段基址 + 追加前的表长。
+    // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
+    // Pre-condition: pick_id_map != nullptr；cmd.instances 非空。
+    static void DrawInstancedObjectForPick(const InstancedObjectCommand& cmd,
+                                           MeshManager& mesh_mgr,
+                                           TextureManager& texture_mgr,
+                                           const float view_proj[16],
+                                           unsigned int prog,
+                                           unsigned int prog_cutout,
+                                           std::vector<uint32_t>* pick_id_map /*output*/,
+                                           InstanceBuffer& instance_model_buf);
 };
 
 }  // namespace jpov

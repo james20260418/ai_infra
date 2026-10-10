@@ -4,9 +4,9 @@
 // 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
 // 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
 //
-// 交互面板（见 fire_fog_viewer_app.h）：雾中心 x/y/z、半径、强度 σ、衰减剖面、雾色 RGB、
-// 太阳仰角/方位角/浊度，以及 **光照开关**（step1 base 发射 / step2 ambient+太阳×CSM god ray）
-// 与光柱相位/增益。
+// 交互面板（见 fire_fog_viewer_app.h）：雾中心 x/y/z、半径、消光 σ、衰减剖面、散射色 albedo、
+// 自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
+// ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 //
@@ -107,16 +107,13 @@ int RunCapture(const std::string& out_dir) {
     app.deg_.sun_elev_deg = 18.0f;   // 低太阳 ⇒ 长影、god ray 更明显
     app.deg_.turbidity = 2.0f;
 
-    // ═══════════ step1：只输出 base 发射（不采样光照），看雾团形状 ═══════════
-    app.sun_enable_ = false;
-
-    // ── A. 无雾基线 / 默认雾（对照）──
+    // ── A. 无雾基线 / 默认雾（对照；雾始终走物理光照）──
     app.SetShowFog(false);
     shoot("01_baseline_no_fog");
     app.SetShowFog(true);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 3.0f;
-    app.fog_intensity_ = 0.6f;
+    app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("02_fog_default");
 
@@ -127,12 +124,12 @@ int RunCapture(const std::string& out_dir) {
     }
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
-    // ── C. 强度扫谱（看由透明到浓）──
+    // ── C. 消光 σ 扫谱（1/m；看由透明到浓）──
     for (float s : {0.2f, 0.6f, 1.2f, 2.0f}) {
-        app.fog_intensity_ = s;
-        shoot(("04_intensity_" + std::to_string(static_cast<int>(s * 10))).c_str());
+        app.fog_sigma_ = s;
+        shoot(("04_sigma_" + std::to_string(static_cast<int>(s * 10))).c_str());
     }
-    app.fog_intensity_ = 0.6f;
+    app.fog_sigma_ = 0.6f;
 
     // ── D. 半径扫谱（看球大小；雾贴着树 / 吞掉树）──
     for (float r : {1.0f, 3.0f, 5.0f}) {
@@ -142,9 +139,8 @@ int RunCapture(const std::string& out_dir) {
     app.fog_radius_ = 3.0f;
 
     // ── E. 深度遮挡（3 例，验证场景深度裁剪是否生效）──
-    // 相机正对（theta=0：相机在 +Z 侧、朝 −Z 看），雾与树沿视轴对齐。
     app.fog_radius_ = 2.5f;
-    app.fog_intensity_ = 0.8f;
+    app.fog_sigma_ = 0.8f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     auto head_on = [&]() {
         app.view_ = jpov_viewer::DefaultView();
@@ -152,7 +148,7 @@ int RunCapture(const std::string& out_dir) {
         app.view_.theta = 0.0;    // 相机在 +Z 侧
         app.view_.R     = 13.0;
     };
-    // E1：雾整个在地面之下 ⇒ 应被地面**完全遮挡**（预期画面里几乎看不到雾）。
+    // E1：雾整个在地面之下 ⇒ 应被地面**完全遮挡**。
     head_on();
     app.fog_center_ = jpov::Vec3f(0.0f, -3.0f, 0.0f);
     shoot("06_occlusion_below_ground");
@@ -166,7 +162,7 @@ int RunCapture(const std::string& out_dir) {
     // ── F. 相机环绕（看立体感；雾固定树处）──
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 3.0f;
-    app.fog_intensity_ = 0.6f;
+    app.fog_sigma_ = 0.6f;
     for (int deg : {0, 90, 180, 270}) {
         DefaultView(app);
         app.view_.theta = static_cast<double>(deg) * 3.14159265358979323846 / 180.0;
@@ -177,7 +173,7 @@ int RunCapture(const std::string& out_dir) {
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 8.0f;
-    app.fog_intensity_ = 0.4f;
+    app.fog_sigma_ = 0.4f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("10_big_fog");
 
@@ -185,7 +181,7 @@ int RunCapture(const std::string& out_dir) {
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 3.0f;
-    app.fog_intensity_ = 0.6f;
+    app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     {
         // (Nz index, tile index): (256,16) / (64,8) / (64,16)
@@ -204,7 +200,7 @@ int RunCapture(const std::string& out_dir) {
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_radius_ = 3.0f;
-    app.fog_intensity_ = 0.6f;
+    app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     for (float fz : {200.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f}) {
         app.z_far_ = fz;
@@ -212,20 +208,63 @@ int RunCapture(const std::string& out_dir) {
     }
     app.z_far_ = 2000.0f;
 
-    // ═══════════ step2：ambient + 太阳×CSM（god ray）——与 step1 对照 ═══════════
-    app.sun_enable_ = true;
+    // ── K. albedo（散射色）扫谱：中性灰 → 红 → 蓝 ──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 3.0f;
+    app.fog_sigma_ = 0.8f;
+    app.fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};
+    app.fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};
+    shoot("45_albedo_gray");
+    app.fog_albedo_ = jpov::Color{1.0f, 0.25f, 0.2f, 1.0f};
+    shoot("46_albedo_red");
+    app.fog_albedo_ = jpov::Color{0.2f, 0.35f, 1.0f, 1.0f};
+    shoot("47_albedo_blue");
+    app.fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};
+
+    // ── L. emission（自发光）扫谱：0 → 弱 → 强（验证自发光与光照解耦）──
+    //  先关太阳增益、降 ambient 使自发光主导（用 sun_gain=0 压太阳项）。
+    app.sun_gain_ = 0.0f;
+    for (float e : {0.0f, 0.3f, 1.0f, 3.0f}) {
+        app.fog_emission_ = jpov::Color{e, e * 0.6f, e * 0.3f, 1.0f};
+        shoot(("48_emission_" + std::to_string(static_cast<int>(e * 10))).c_str());
+    }
+    app.fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};
+    app.sun_gain_ = 2.0f;
+
+    // ── M. 点光源（fire_fog 自持 Nxy tile culling）：关/开 + 位置扫谱 ──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 5.0f;
+    app.fog_sigma_ = 0.8f;
+    app.fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};
+    app.deg_.sun_elev_deg = 8.0f;
+    app.point_light_enable_ = false;
+    shoot("50_pl_off");
+    app.point_light_enable_ = true;
+    app.point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    shoot("51_pl_center");
+    app.point_light_pos_ = jpov::Vec3f(4.0f, 3.0f, 0.0f);
+    shoot("52_pl_side");
+    app.point_light_pos_ = jpov::Vec3f(0.0f, 6.0f, 0.0f);
+    shoot("53_pl_top");
+    app.point_light_color_ = jpov::Color{1.0f, 0.3f, 0.2f, 1.0f};
+    shoot("54_pl_red");
+    app.point_light_color_ = jpov::Color{1.0f, 0.85f, 0.6f, 1.0f};
+    app.point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+
+    // ── N. god ray：太阳方位扫谱 + 增益对照（ambient + 太阳×CSM）──
     app.fog_center_ = jpov::Vec3f(0.0f, 4.0f, 0.0f);
     app.fog_radius_ = 10.0f;      // 大雾体：让树影确实切到雾
-    app.fog_intensity_ = 0.5f;
+    app.fog_sigma_ = 0.5f;
     app.sun_phase_g_ = 0.7f;
     app.sun_gain_ = 2.0f;
-    app.deg_.sun_elev_deg = 8.0f;  // 低太阳 ⇒ 长影
+    app.deg_.sun_elev_deg = 8.0f;
     for (int az : {0, 90, 180, 270}) {
         app.deg_.sun_azim_deg = static_cast<float>(az);
         DefaultView(app);
         shoot(("20_godray_az" + std::to_string(az)).c_str());
     }
-    // 对照：同视角/太阳下 太阳项增益 0 vs 2（验证太阳项确实在贡献）。
     app.deg_.sun_azim_deg = 270.0f;
     DefaultView(app);
     app.sun_gain_ = 0.0f;

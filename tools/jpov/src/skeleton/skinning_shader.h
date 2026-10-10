@@ -134,6 +134,10 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 
 // 关节 index 越界防护（所有取址的唯一入口判据）。
 //   为什么需要：aJoint 来自**资产**（JOINTS_0）；坏资产 / 坏导出可能给出越界值（<0 或
@@ -444,6 +448,9 @@ void main() {
     vTexCoord = aTexCoord;
     // 裁剪坐标 = (proj*view) * inst_model * 骨架空间顶点 = uViewProj * world。
     gl_Position = uViewProj * world;
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
 

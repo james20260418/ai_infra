@@ -63,3 +63,50 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 点光源雾散射 gold generator —— 写仓库 gold image（fire_fog_pointlight_1280x720.png）。
+cc_binary(
+    name = "jpov_fire_fog_pointlight_gold_generator",
+    srcs = [
+        "fire_fog_pointlight_gold_generator.cc",
+        "fire_fog_gold_common.h",
+    ],
+    data = ["//tools/jpov/assets/models:oak_tripo_negative_data"],
+    deps = [
+        ":fire_fog_gold_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# 点光源雾散射 gold test —— 渲染 + 与 gold 做 8×8 ROI 平均色比对。
+cc_test(
+    name = "jpov_fire_fog_pointlight_gold_test",
+    srcs = [
+        "jpov_fire_fog_pointlight_gold_test.cc",
+        "fire_fog_gold_common.h",
+    ],
+    data = [
+        "//tools/jpov/assets/models:oak_tripo_negative_data",
+        ":fire_fog_pointlight_1280x720.png",
+    ],
+    deps = [
+        ":fire_fog_gold_common",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

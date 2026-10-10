@@ -47,13 +47,14 @@
 namespace {
 
 constexpr int kBodyTexelsPerFog = 3;   // 每团 3 个 RGBA32F texel
-// inject 的纹理单元：0=tile 索引,1=tile z 范围,2=团属性,3=tile 中心射线,4=z 切片边界；
-// CSM 阴影从 5 起（5..5+kMaxCascades-1）。
-constexpr int kShadowTexUnitBase = 5;
+// inject 的纹理单元：0=团 tile 索引,1=tile z 范围,2=团属性,3=tile 中心射线,4=z 切片边界,
+// 5=点光源 tile 索引；CSM 阴影从 6 起（6..6+kMaxCascades-1）。
+constexpr int kLightIndexTexUnit = 5;
+constexpr int kShadowTexUnitBase = 6;
 
-// Draw() 会触碰的纹理单元数：inject 用 0..4（tile 索引 / z 范围 / 团属性 / tile 射线 /
-// z 切片边界）+ CSM 5..(5+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0/1。
-// 取上界 kShadowTexUnitBase+kMaxCascades（=10，覆盖 0..9；kMaxLevels=5 也含在内）。
+// Draw() 会触碰的纹理单元数：inject 用 0..5（团 tile / z 范围 / 团属性 / tile 射线 /
+// z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0/1。
+// 取上界 kShadowTexUnitBase+kMaxCascades（=11，覆盖 0..10；kMaxLevels=5 也含在内）。
 int TexUnitsTouched() {
     return kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades;
 }
@@ -218,6 +219,12 @@ void FireFogRenderer::Finalize() {
         glDeleteTextures(1, &tile_index_tex_);
         tile_index_tex_ = 0;
     }
+    if (tile_light_tex_ != 0) {
+        glDeleteTextures(1, &tile_light_tex_);
+        tile_light_tex_ = 0;
+    }
+    tile_light_tex_w_ = 0;
+    tile_light_tex_h_ = 0;
     if (tile_zrange_tex_ != 0) {
         glDeleteTextures(1, &tile_zrange_tex_);
         tile_zrange_tex_ = 0;
@@ -322,6 +329,28 @@ void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
         tile_ray_tex_w_ = grid_cols;
         tile_ray_tex_h_ = grid_rows;
     }
+    // 点光源 tile 索引纹理（RGBA8；宽 = grid_cols*kLightTexelsPerTile，高 = grid_rows）——
+    // fire_fog **自持**一套光源 TC（不共用渲染器 16px 光表）；同样随 Nxy 栅格尺寸重建。
+    const int light_tex_w = grid_cols * kLightTexelsPerTile;
+    const bool light_need_rebuild = (tile_light_tex_ == 0) ||
+                                    (light_tex_w != tile_light_tex_w_) ||
+                                    (grid_rows != tile_light_tex_h_);
+    if (light_need_rebuild) {
+        if (tile_light_tex_ != 0) {
+            glDeleteTextures(1, &tile_light_tex_);
+        }
+        glGenTextures(1, &tile_light_tex_);
+        glBindTexture(GL_TEXTURE_2D, tile_light_tex_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, light_tex_w, grid_rows, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        tile_light_tex_w_ = light_tex_w;
+        tile_light_tex_h_ = grid_rows;
+    }
     grid_w_ = grid_cols;
     grid_h_ = grid_rows;
 }
@@ -419,6 +448,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
 }
 
 void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
+                           const std::vector<PointLight>& point_lights,
                            const Camera& cam,
                            const float view_proj[16],
                            int viewport_w,
@@ -517,7 +547,16 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     GL_RG, GL_FLOAT, zrange_data.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // ── 团属性纹理（RGBA32F；每团 3 texel：t0=(center,radius) t1=(color,intensity) t2=(atten,..)）──
+    // ── 点光源 tile 剪枝（fire_fog 自持网格；每 Nxy ≤ kMaxLightsPerTile 个光源）──
+    const std::vector<uint8_t> light_data = BuildTileLightIndexData(
+        point_lights, view_proj, grid_w_, grid_h_, params.tile_px,
+        kMaxLightsPerTile, kLightTexelsPerTile, kFogIndexSentinel);
+    glBindTexture(GL_TEXTURE_2D, tile_light_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tile_light_tex_w_, tile_light_tex_h_,
+                    GL_RGBA, GL_UNSIGNED_BYTE, light_data.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // ── 团属性纹理（RGBA32F；每团 3 texel：t0=(center,radius) t1=(sigma,albedo) t2=(atten,emission)）──
     const int body_tex_w = kMaxTotalFogs * kBodyTexelsPerFog;
     if (fog_body_tex_ == 0) {
         glGenTextures(1, &fog_body_tex_);
@@ -540,14 +579,14 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         t0[1] = b.bound.center.y();
         t0[2] = b.bound.center.z();
         t0[3] = b.bound.half_extent.x();   // 立方 OBB ⇒ 各半轴相同 = 球半径
-        t1[0] = b.color.r;
-        t1[1] = b.color.g;
-        t1[2] = b.color.b;
-        t1[3] = b.intensity;
+        t1[0] = b.sigma;
+        t1[1] = b.albedo.r;
+        t1[2] = b.albedo.g;
+        t1[3] = b.albedo.b;
         t2[0] = b.params[0];               // attenuation 枚举
-        t2[1] = 0.0f;
-        t2[2] = 0.0f;
-        t2[3] = 0.0f;
+        t2[1] = b.emission.r;
+        t2[2] = b.emission.g;
+        t2[3] = b.emission.b;
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count * kBodyTexelsPerFog, 1,
@@ -604,6 +643,10 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, z_slices_tex_);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uZSlicesTex"), 4);
+    glActiveTexture(GL_TEXTURE0 + kLightIndexTexUnit);
+    glBindTexture(GL_TEXTURE_2D, tile_light_tex_);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTileLightIndices"),
+                kLightIndexTexUnit);
     glActiveTexture(GL_TEXTURE0);
     glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
@@ -612,12 +655,10 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uBlockSide"), sblock);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTilePx"), params.tile_px);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalFogs"), count);
-    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uSunEnable"),
-                params.sun_enable ? 1 : 0);
 
-    // ── 物理光照 + CSM 阴影（仅 sun_enable 时 inject shader 使用；否则 uSunEnable=0）──
+    // ── 物理光照 + CSM 阴影（**始终开启**；无「无光照」链路）──
     const int cascade_count =
-        (params.sun_enable && light.sun.has_value())
+        light.sun.has_value()
             ? std::min(light.shadow_cfg.cascade_count, ShadowConfig::kMaxCascades)
             : 0;
     glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uAmbientColor"),
@@ -677,6 +718,24 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         }
         glActiveTexture(GL_TEXTURE0);
     }
+
+    // ── 点光源（tile culling；仅需内散射的 position/color/radius/intensity）──
+    const int light_count =
+        std::min(static_cast<int>(point_lights.size()), kMaxTotalLights);
+    for (int i = 0; i < light_count; ++i) {
+        const PointLight& pl = point_lights[i];
+        const std::string n_pos = "uFogLights[" + std::to_string(i) + "].position";
+        glUniform3f(shader_mgr_->GetUniform(prog_inject_, n_pos.c_str()),
+                    pl.position.x(), pl.position.y(), pl.position.z());
+        const std::string n_col = "uFogLights[" + std::to_string(i) + "].color";
+        glUniform3f(shader_mgr_->GetUniform(prog_inject_, n_col.c_str()),
+                    pl.color.r, pl.color.g, pl.color.b);
+        const std::string n_rad = "uFogLights[" + std::to_string(i) + "].radius";
+        glUniform1f(shader_mgr_->GetUniform(prog_inject_, n_rad.c_str()), pl.linear_radius);
+        const std::string n_int = "uFogLights[" + std::to_string(i) + "].intensity";
+        glUniform1f(shader_mgr_->GetUniform(prog_inject_, n_int.c_str()), pl.intensity);
+    }
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTotalLights"), light_count);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // ═══════════ 趟 2：reduce（金字塔每级：上一级 z 上 4 合 1）═══════════

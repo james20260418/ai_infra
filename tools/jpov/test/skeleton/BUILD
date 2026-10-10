@@ -93,6 +93,23 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
+# 蒙皮实例拾取测试：逐实例 picking_id（kSkinnedVs + JPOV_PICK + 共享 kPickIdFs）。
+cc_test(
+    name = "jpov_skinned_pick_test",
+    srcs = ["jpov_skinned_pick_test.cc"],
+    data = ["//tools/jpov/assets/models:mixamo_male_glb_data"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:gltf_object",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
 # ============================================================================
 # 火柴人（bone mesh）gold —— 标准晴天布景 + identity 位姿红火柴人
 #
