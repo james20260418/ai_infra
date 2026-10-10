@@ -122,8 +122,10 @@ private:
     // 按 (grid_cols, grid_rows, sblock, num_levels)（= Nxy 列/行数 + 每柱边长 + 金字塔级数）
     // 确保 froxel 目标（inject / scatter / 各级金字塔）存在且尺寸匹配（变化则重建）。
     void EnsureTargets(int grid_cols, int grid_rows, int sblock, int num_levels);
-    // 按 (grid_cols, grid_rows) 确保 tile 索引纹理 + z 范围纹理存在且尺寸匹配。
+    // 按 (grid_cols, grid_rows) 确保 tile 索引纹理 + z 范围纹理 + tile 射线纹理存在且尺寸匹配。
     void EnsureTileTexture(int grid_cols, int grid_rows);
+    // 确保 z 切片边界表纹理（R32F，(nz+1)×1）存在且长度匹配。
+    void EnsureZSlices(int nz);
 
     ShaderManager* shader_mgr_ = nullptr;
 
@@ -164,7 +166,22 @@ private:
     int grid_h_ = 0;
 
     // 每 tile 保守 z 范围纹理（RG32F；宽 = grid_w，高 = grid_h）。
+    // 尺寸随 Nxy 栅格（tile_px）变化，故与 tile_index_tex_ 一样记录尺寸、变化即重建
+    //（否则从粗档切到细档时旧尺寸残留 → inject 短路读到错位数据 → 只有旧范围区域有雾）。
     unsigned int tile_zrange_tex_ = 0;
+    int tile_zrange_tex_w_ = 0;
+    int tile_zrange_tex_h_ = 0;
+
+    // 每 tile 中心视线方向纹理（RGBA32F；宽 = grid_w，高 = grid_h；xyz=单位方向, w=1）。
+    // CPU 预算（每 tile 一次）→ inject 不必逐 texel 做两次 MVP 逆乘 + normalize。
+    // 尺寸随 Nxy 栅格变化 ⇒ 同样记录尺寸、变化即重建。
+    unsigned int tile_ray_tex_ = 0;
+    int tile_ray_tex_w_ = 0;
+    int tile_ray_tex_h_ = 0;
+
+    // z 切片边界表 z_k（R32F；(nz+1)×1）→ inject 不必逐 texel pow(uR, k)。
+    unsigned int z_slices_tex_ = 0;
+    int z_slices_count_ = 0;   // 表长度 = nz+1
 
     // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*3，高 = 1；每团 3 texel）。
     unsigned int fog_body_tex_ = 0;

@@ -91,11 +91,10 @@ inline constexpr const char* kFireFogInjectBody = R"glsl(
 uniform sampler2D uTileFogIndices;
 uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, zmax)
 uniform sampler2D uFogBodyTex;
-uniform mat4  uInvVP;
+uniform sampler2D uTileRayTex;   // RGBA32F：每 tile 中心视线方向（单位向量，CPU 预算）
+uniform sampler2D uZSlicesTex;   // R32F：z 切片边界 z_0..z_Nz（CPU 预算）
 uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
-uniform float uR;              // z 生长系数 = (uZFar/uZNear)^(1/uNz)（CPU 预算，见 renderer）
-uniform vec2  uFboSize;        // 主 FBO 像素尺寸（重建 tile 中心视线用）
 uniform int   uTotalFogs;
 
 // ── 光照（step2；step1 时 uSunEnable==0，L_in = col）──
@@ -140,13 +139,13 @@ float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texelW,
 }
 
 // Henyey-Greenstein 散射相位（相对太阳→视线的散射角）。μ=1 = 朝太阳看（前向散射）。
+// uSunDir 由 CPU 归一、rd 取自已归一的 tile 射线纹理 ⇒ 此处不必再 normalize。
 float SunPhase(vec3 rd) {
-    vec3 sd = normalize(uSunDir);
-    float mu = clamp(dot(normalize(rd), -sd), -1.0, 1.0);
+    float mu = clamp(dot(rd, -uSunDir), -1.0, 1.0);
     float g = clamp(uSunPhaseG, 0.0, 0.95);
-    float denom = 1.0 + g * g - 2.0 * g * mu;
-    return uSunGain * (1.0 - g * g)
-           / (4.0 * 3.14159265 * pow(max(denom, 1e-4), 1.5));
+    float denom = max(1.0 + g * g - 2.0 * g * mu, 1e-4);
+    // denom^1.5 = denom·√denom（省去逐 texel 的 pow 超越函数）。
+    return uSunGain * (1.0 - g * g) / (4.0 * 3.14159265 * denom * sqrt(denom));
 }
 
 // 原始 CSM（单次采样，无 PCF）：按采样点到相机的距离选主级联，末尾按 fade 淡出。
@@ -194,9 +193,9 @@ void main() {
     int iy = frag.y - tile_row * uBlockSide;
     int k = iy * uBlockSide + ix;
 
-    // 本 froxel 的 z 区间 [z_k, z_{k+1})（指数分布）。
-    float zk  = uZNear * pow(uR, float(k));
-    float zk1 = zk * uR;
+    // 本 froxel 的 z 区间 [z_k, z_{k+1})（指数分布；边界由 CPU 预表，省去逐 texel pow）。
+    float zk  = texelFetch(uZSlicesTex, ivec2(k, 0), 0).r;
+    float zk1 = texelFetch(uZSlicesTex, ivec2(k + 1, 0), 0).r;
 
     // ★ 短路：本 tile 候选团的保守 z 范围是 [zr.x, zr.y]；切片若完全在其外 ⇒ 局部恒等
     //（省掉下方 ≤8 个团的射线-球求交 + CSM 采样）。空 tile（无候选）zr=(0,0) ⇒ 恒等。
@@ -206,15 +205,10 @@ void main() {
         return;
     }
 
-    // tile 中心视线（froxel = 整柱一个值，用 tile 中心而非像素自身视线）。
-    vec2 center_px = vec2(float(tile_col * uBlockSide) + 0.5 * float(uBlockSide),
-                          float(tile_row * uBlockSide) + 0.5 * float(uBlockSide));
-    vec2 uv = center_px / uFboSize;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pn = uInvVP * vec4(ndc, -1.0, 1.0);
-    vec4 pf = uInvVP * vec4(ndc,  1.0, 1.0);
+    // tile 中心视线（froxel = 整柱一个值，用 tile 中心而非像素自身视线）：
+    // 方向由 CPU 预烘在 tile 射线纹理里（单位向量），省掉每 texel 两次 uInvVP 乘 + normalize。
     vec3 ro = uCamPos;
-    vec3 rd = normalize(pf.xyz / pf.w - ro);
+    vec3 rd = texelFetch(uTileRayTex, ivec2(tile_col, tile_row), 0).xyz;
 
     // 本 tile 的候选雾团索引。
     uint fog_idx[MAX_FOGS_PER_TILE];

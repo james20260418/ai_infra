@@ -274,6 +274,53 @@ inline std::vector<float> BuildTileZRangeData(const std::vector<FogBody>& bodies
     return out;
 }
 
+// 每 tile 的「tile 中心视线方向」（单位向量；RGBA32F，w 填 1），供 inject 用。
+//
+// inject 每个 froxel texel 本要自己算 tile 中心视线（两次 MVP 逆乘 + normalize），
+// 但同一 tile 的 sblock² 个 texel 共享同一条视线 ⇒ 搬到 CPU 每 tile 算一次、
+// 存成 Nxy×1 小纹理，inject 仅 texelFetch。方向求法与 composite 的逐像素 rd 一致
+//（取 far 平面上的点 - 相机位置，再归一）。
+//
+// 输出布局：宽 = grid_w，高 = grid_h，逐行接排，每 tile 4 个 float (rd.x, rd.y, rd.z, 1)。
+// 可直接 glTexImage2D(..., GL_RGBA, GL_FLOAT, data)。
+//
+// Pre-conditions: inv_vp != nullptr, grid_w >= 1, grid_h >= 1
+inline std::vector<float> BuildTileRayData(const float inv_vp[16],
+                                           const Vec3f& cam_pos,
+                                           int grid_w,
+                                           int grid_h) {
+    CHECK(inv_vp != nullptr);
+    CHECK_GE(grid_w, 1);
+    CHECK_GE(grid_h, 1);
+    std::vector<float> out(static_cast<size_t>(grid_w) * grid_h * 4, 0.0f);
+    for (int tr = 0; tr < grid_h; ++tr) {
+        for (int tc = 0; tc < grid_w; ++tc) {
+            // tile 中心 NDC（Nxy 单元中心）。
+            const float nx = ((static_cast<float>(tc) + 0.5f) / static_cast<float>(grid_w))
+                             * 2.0f - 1.0f;
+            const float ny = ((static_cast<float>(tr) + 0.5f) / static_cast<float>(grid_h))
+                             * 2.0f - 1.0f;
+            // far 平面点（ndc_z = 1）→ 世界（列主序 inv_vp）。
+            const float cx = inv_vp[0] * nx + inv_vp[4] * ny + inv_vp[8] + inv_vp[12];
+            const float cy = inv_vp[1] * nx + inv_vp[5] * ny + inv_vp[9] + inv_vp[13];
+            const float cz = inv_vp[2] * nx + inv_vp[6] * ny + inv_vp[10] + inv_vp[14];
+            const float cw = inv_vp[3] * nx + inv_vp[7] * ny + inv_vp[11] + inv_vp[15];
+            const float iw = (std::fabs(cw) > 1e-12f) ? (1.0f / cw) : 1.0f;
+            const float dx = cx * iw - cam_pos.x();
+            const float dy = cy * iw - cam_pos.y();
+            const float dz = cz * iw - cam_pos.z();
+            const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const float inv_len = (len > 1e-12f) ? (1.0f / len) : 0.0f;
+            float* px = &out[(static_cast<size_t>(tr) * grid_w + tc) * 4];
+            px[0] = dx * inv_len;
+            px[1] = dy * inv_len;
+            px[2] = dz * inv_len;
+            px[3] = 1.0f;
+        }
+    }
+    return out;
+}
+
 }  // namespace jpov
 
 #endif  // JPOV_SRC_FIRE_FOG_FIRE_FOG_LOWER_H_

@@ -47,11 +47,13 @@
 namespace {
 
 constexpr int kBodyTexelsPerFog = 3;   // 每团 3 个 RGBA32F texel
-constexpr int kShadowTexUnitBase = 3;  // inject 的 CSM 阴影纹理起始单元（0/1/2 已用）
+// inject 的纹理单元：0=tile 索引,1=tile z 范围,2=团属性,3=tile 中心射线,4=z 切片边界；
+// CSM 阴影从 5 起（5..5+kMaxCascades-1）。
+constexpr int kShadowTexUnitBase = 5;
 
-// Draw() 会触碰的纹理单元数：inject 用 0/1/2 + CSM 3..(3+kMaxCascades-1)；
-// scatter 用 0..kMaxLevels；composite 用 0/1。取上界 3+kMaxCascades。
-// （kMaxLevels=5 < 3+kMaxCascades=8，故 0..7 覆盖全部。）
+// Draw() 会触碰的纹理单元数：inject 用 0..4（tile 索引 / z 范围 / 团属性 / tile 射线 /
+// z 切片边界）+ CSM 5..(5+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0/1。
+// 取上界 kShadowTexUnitBase+kMaxCascades（=10，覆盖 0..9；kMaxLevels=5 也含在内）。
 int TexUnitsTouched() {
     return kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades;
 }
@@ -220,6 +222,19 @@ void FireFogRenderer::Finalize() {
         glDeleteTextures(1, &tile_zrange_tex_);
         tile_zrange_tex_ = 0;
     }
+    tile_zrange_tex_w_ = 0;
+    tile_zrange_tex_h_ = 0;
+    if (tile_ray_tex_ != 0) {
+        glDeleteTextures(1, &tile_ray_tex_);
+        tile_ray_tex_ = 0;
+    }
+    tile_ray_tex_w_ = 0;
+    tile_ray_tex_h_ = 0;
+    if (z_slices_tex_ != 0) {
+        glDeleteTextures(1, &z_slices_tex_);
+        z_slices_tex_ = 0;
+    }
+    z_slices_count_ = 0;
     if (fog_body_tex_ != 0) {
         glDeleteTextures(1, &fog_body_tex_);
         fog_body_tex_ = 0;
@@ -266,7 +281,15 @@ void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
         tile_tex_w_ = tex_w;
         tile_tex_h_ = tex_h;
     }
-    if (tile_zrange_tex_ == 0) {
+    // z 范围纹理尺寸 = Nxy 栅格；tile_px 改变会改栅格 ⇒ 必须随尺寸重建
+    // （原先只在 ==0 时建一次，切到更细的 tile 会残留旧尺寸 → 上传被拒 + 采样错位）。
+    const bool zrange_need_rebuild = (tile_zrange_tex_ == 0) ||
+                                     (grid_cols != tile_zrange_tex_w_) ||
+                                     (grid_rows != tile_zrange_tex_h_);
+    if (zrange_need_rebuild) {
+        if (tile_zrange_tex_ != 0) {
+            glDeleteTextures(1, &tile_zrange_tex_);
+        }
         glGenTextures(1, &tile_zrange_tex_);
         glBindTexture(GL_TEXTURE_2D, tile_zrange_tex_);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -276,9 +299,52 @@ void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, grid_cols, grid_rows, 0,
                      GL_RG, GL_FLOAT, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
+        tile_zrange_tex_w_ = grid_cols;
+        tile_zrange_tex_h_ = grid_rows;
+    }
+    // tile 射线纹理：同样随 Nxy 栅格尺寸重建。（内容每帧在 Draw 里上传。）
+    const bool ray_need_rebuild = (tile_ray_tex_ == 0) ||
+                                  (grid_cols != tile_ray_tex_w_) ||
+                                  (grid_rows != tile_ray_tex_h_);
+    if (ray_need_rebuild) {
+        if (tile_ray_tex_ != 0) {
+            glDeleteTextures(1, &tile_ray_tex_);
+        }
+        glGenTextures(1, &tile_ray_tex_);
+        glBindTexture(GL_TEXTURE_2D, tile_ray_tex_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, grid_cols, grid_rows, 0,
+                     GL_RGBA, GL_FLOAT, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        tile_ray_tex_w_ = grid_cols;
+        tile_ray_tex_h_ = grid_rows;
     }
     grid_w_ = grid_cols;
     grid_h_ = grid_rows;
+}
+
+void FireFogRenderer::EnsureZSlices(int nz) {
+    CHECK_GE(nz, 2);
+    const int count = nz + 1;   // 边界 z_0..z_Nz
+    if (z_slices_tex_ != 0 && z_slices_count_ == count) {
+        return;
+    }
+    if (z_slices_tex_ != 0) {
+        glDeleteTextures(1, &z_slices_tex_);
+        z_slices_tex_ = 0;
+    }
+    glGenTextures(1, &z_slices_tex_);
+    glBindTexture(GL_TEXTURE_2D, z_slices_tex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, count, 1, 0, GL_RED, GL_FLOAT, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    z_slices_count_ = count;
 }
 
 void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
@@ -489,10 +555,31 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glBindTexture(GL_TEXTURE_2D, 0);
 
     EnsureTargets(grid_cols, grid_rows, sblock, num_levels);
+    EnsureZSlices(params.nz);
 
     float inv_vp[16];
     CHECK(Mat4Invert(view_proj, inv_vp))
         << "FireFogRenderer: 相机矩阵不可逆（near/far 非法或退化）";
+
+    // ── 预烘两张小纹理：把 inject 原本**逐 texel** 的昂贵标量运算挪到 CPU / 每 tile 一次 ──
+    //   ① 每 tile 中心视线方向（Nxy×1，单位向量）：省掉 inject 每 texel 两次 uInvVP 乘 + normalize。
+    const std::vector<float> tile_ray =
+        BuildTileRayData(inv_vp, cam.position, grid_w_, grid_h_);
+    glBindTexture(GL_TEXTURE_2D, tile_ray_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, grid_w_, grid_h_,
+                    GL_RGBA, GL_FLOAT, tile_ray.data());
+    //   ② z 切片边界表 z_k（(Nz+1)×1）：省掉 inject 每 texel pow(uR, k)。
+    const float growth = std::pow(params.z_far / params.z_near,
+                                  1.0f / static_cast<float>(params.nz));
+    std::vector<float> z_slices(static_cast<size_t>(params.nz) + 1);
+    z_slices[0] = params.z_near;
+    for (int k = 0; k < params.nz; ++k) {
+        z_slices[static_cast<size_t>(k) + 1] = z_slices[static_cast<size_t>(k)] * growth;
+    }
+    glBindTexture(GL_TEXTURE_2D, z_slices_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, params.nz + 1, 1,
+                    GL_RED, GL_FLOAT, z_slices.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
 
     // ═══════════ 趟 1：inject（逐 froxel 局部 (τ, S) → inject_tex_）═══════════
     glBindFramebuffer(GL_FRAMEBUFFER, inject_fbo_);
@@ -511,16 +598,16 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uFogBodyTex"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, tile_ray_tex_);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTileRayTex"), 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, z_slices_tex_);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uZSlicesTex"), 4);
     glActiveTexture(GL_TEXTURE0);
-    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_inject_, "uInvVP"), 1, GL_FALSE, inv_vp);
     glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
     glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uZNear"), params.z_near);
-    const float growth = std::pow(params.z_far / params.z_near,
-                                  1.0f / static_cast<float>(params.nz));
-    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uR"), growth);
-    glUniform2f(shader_mgr_->GetUniform(prog_inject_, "uFboSize"),
-                static_cast<float>(froxel_w), static_cast<float>(froxel_h));
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uNz"), params.nz);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uBlockSide"), sblock);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTilePx"), params.tile_px);
@@ -546,9 +633,12 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     light.sun->color.r, light.sun->color.g, light.sun->color.b);
         glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uSunIntensity"),
                     light.sun->intensity);
+        // 太阳方向在 CPU 归一：shader 的 HG 相位假设已归一，省掉逐 texel normalize。
+        const Vec3f sd = light.sun->direction;
+        const float sl = std::sqrt(sd.x() * sd.x() + sd.y() * sd.y() + sd.z() * sd.z());
+        CHECK_GT(sl, 1e-8f) << "FireFog: 太阳方向为零向量";
         glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uSunDir"),
-                    light.sun->direction.x(), light.sun->direction.y(),
-                    light.sun->direction.z());
+                    sd.x() / sl, sd.y() / sl, sd.z() / sl);
     } else {
         // 无太阳：清零（防止上一帧残留）。
         glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uSunColor"), 0.0f, 0.0f, 0.0f);

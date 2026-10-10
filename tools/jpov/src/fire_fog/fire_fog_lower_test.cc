@@ -5,6 +5,7 @@
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -290,6 +291,43 @@ TEST(FireFogLower, ZRangeBehindCameraCoversWholeScreen) {
     for (int t = 0; t < kGridW * kGridH; ++t) {
         EXPECT_NEAR(zr[static_cast<size_t>(t * 2 + 0)], zmn, 1e-3f);
         EXPECT_NEAR(zr[static_cast<size_t>(t * 2 + 1)], zmx, 1e-3f);
+    }
+}
+
+TEST(FireFogLower, TileRayDirectionsAreUnitAndCentered) {
+    // 恒等 inv_vp + 相机在原点：tile 中心 NDC 的 far 点方向即 NDC 方向。
+    float inv_vp[16];
+    IdentityMvp(inv_vp);
+    constexpr int kGridW = 2;
+    constexpr int kGridH = 2;
+    const std::vector<float> rays = BuildTileRayData(inv_vp, Vec3f(0, 0, 0), kGridW, kGridH);
+    ASSERT_EQ(rays.size(), static_cast<size_t>(kGridW) * kGridH * 4);
+
+    const auto dir = [&](int tc, int tr) {
+        const float* p = &rays[(static_cast<size_t>(tr) * kGridW + tc) * 4];
+        return std::array<float, 3>{p[0], p[1], p[2]};
+    };
+    // tile(0,0) 中心 NDC = (-0.5,-0.5)，far 点 = (-0.5,-0.5,1) ⇒ 方向 ∝ (-0.5,-0.5,1)。
+    {
+        const std::array<float, 3> d = dir(0, 0);
+        const float n = std::sqrt(0.25f + 0.25f + 1.0f);
+        EXPECT_NEAR(d[0], -0.5f / n, 1e-5f);
+        EXPECT_NEAR(d[1], -0.5f / n, 1e-5f);
+        EXPECT_NEAR(d[2], 1.0f / n, 1e-5f);
+    }
+    // tile(1,0) 中心 NDC = (+0.5,-0.5)。
+    {
+        const std::array<float, 3> d = dir(1, 0);
+        const float n = std::sqrt(0.25f + 0.25f + 1.0f);
+        EXPECT_NEAR(d[0], 0.5f / n, 1e-5f);
+        EXPECT_NEAR(d[1], -0.5f / n, 1e-5f);
+        EXPECT_NEAR(d[2], 1.0f / n, 1e-5f);
+    }
+    // 每个方向必须是单位向量；w 填 1。
+    for (int i = 0; i < kGridW * kGridH; ++i) {
+        const float* p = &rays[static_cast<size_t>(i) * 4];
+        EXPECT_NEAR(std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]), 1.0f, 1e-5f);
+        EXPECT_FLOAT_EQ(p[3], 1.0f);
     }
 }
 
