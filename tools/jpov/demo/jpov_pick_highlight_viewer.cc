@@ -45,13 +45,28 @@ constexpr uint32_t kIdManBase    = 101;  // 101..105
 constexpr uint32_t kIdDressBase  = 201;  // 201..203
 constexpr uint32_t kIdStoolBase  = 301;  // 301..302
 
-std::string AssetPath(const std::string& assets_dir, const std::string& rel) {
-    return assets_dir + "/" + rel;
+// 可选的资产根覆盖（--assets）；空 = 自动解析。
+std::string g_assets_override;
+
+bool Readable(const std::string& p) {
+    FILE* f = std::fopen(p.c_str(), "rb");
+    if (f) { std::fclose(f); return true; }
+    return false;
 }
 
-// 一处 asset 根目录（默认仓库相对；--assets 可覆盖）。
-std::string DefaultAssetsDir() {
-    return jpov::GetProjectRoot() + "tools/jpov/assets/models";
+// 解析资产路径：① --assets 覆盖；② 分发态（exe 旁 models/<rel>）；③ 开发态（仓库相对）。
+std::string AssetPath(const std::string& rel) {
+    if (!g_assets_override.empty()) {
+        return g_assets_override + "/" + rel;
+    }
+    const std::string exe = jpov::GetExeDir();
+    if (!exe.empty()) {
+        const std::string dist = exe + "/models/" + rel;
+        if (Readable(dist)) {
+            return dist;
+        }
+    }
+    return jpov::GetProjectRoot() + "tools/jpov/assets/models/" + rel;
 }
 
 // 求「按目标高度归一」的缩放（bounds 无效 → 1，不静默乱缩）。
@@ -222,10 +237,10 @@ private:
 };
 
 // 装配：加载三类资产并摆位。
-void Install(PickHighlightApp& app, const std::string& assets) {
+void Install(PickHighlightApp& app) {
     const auto load = [&](const std::string& rel) {
-        jpov::GltfObject o = app.LoadGltf(AssetPath(assets, rel));
-        CHECK(!o.empty()) << "LoadGltf failed: " << AssetPath(assets, rel);
+        jpov::GltfObject o = app.LoadGltf(AssetPath(rel));
+        CHECK(!o.empty()) << "LoadGltf failed: " << AssetPath(rel);
         return o;
     };
 
@@ -245,7 +260,7 @@ void Install(PickHighlightApp& app, const std::string& assets) {
         app.man_mat_  = men.primitives[0].material;
         // 骨架（identity pose = T-pose）。
         std::vector<jpov::SkeletonType> skels;
-        CHECK(jpov::LoadGltfSkeleton(AssetPath(assets, "characters/mixamo_male.glb"), &skels));
+        CHECK(jpov::LoadGltfSkeleton(AssetPath("characters/mixamo_male.glb"), &skels));
         CHECK(!skels.empty());
         jpov::SkeletonType type = skels[0];
         type.Validate();
@@ -296,7 +311,7 @@ void Install(PickHighlightApp& app, const std::string& assets) {
             s.center = {xs[i], -scale * min_y, -4.0f};
             s.scale = scale;
             s.id = kIdStoolBase + static_cast<uint32_t>(i);
-            s.obj = app.LoadGltf(AssetPath(assets, "scene/scene_assets/stool.glb"));
+            s.obj = app.LoadGltf(AssetPath("scene/scene_assets/stool.glb"));
             CHECK(!s.obj.empty());
             app.stools_.push_back(std::move(s));
         }
@@ -322,10 +337,10 @@ jpov_viewer::ViewConfig SceneView() {
     return v;
 }
 
-int RunCapture(const std::string& out_dir, const std::string& assets) {
+int RunCapture(const std::string& out_dir) {
     PickHighlightApp app(MakeConfig("JPOV — pick/highlight viewer (capture)", true));
     app.Init();
-    Install(app, assets);
+    Install(app);
 
     jpov::WindowInfo winfo;
     winfo.width = kWidth;
@@ -357,10 +372,10 @@ int RunCapture(const std::string& out_dir, const std::string& assets) {
     return 0;
 }
 
-int RunInteractive(const std::string& assets) {
+int RunInteractive() {
     PickHighlightApp app(MakeConfig("JPOV — 拾取/高亮查看器", false));
     app.Init();
-    Install(app, assets);
+    Install(app);
     app.view_ = SceneView();
     app.Run();
     app.Finalize();
@@ -371,16 +386,15 @@ int RunInteractive(const std::string& assets) {
 
 int main(int argc, char** argv) {
     std::string out_dir;
-    std::string assets = DefaultAssetsDir();
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
-            assets = argv[i + 1];
+            g_assets_override = argv[i + 1];
         }
     }
     if (!out_dir.empty()) {
-        return RunCapture(out_dir, assets);
+        return RunCapture(out_dir);
     }
-    return RunInteractive(assets);
+    return RunInteractive();
 }
