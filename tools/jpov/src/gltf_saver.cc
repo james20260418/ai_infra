@@ -197,6 +197,22 @@ json WritePrimitive(const MeshData& mesh, BinBuilder* bin, json* accessors,
             add_accessor("VEC4", 5126, vcount, o.first, o.second, false);
     }
 
+    // 布料 LAG 松弛度（**自定义语义** _JPOV_RELAX，vec2 float = (lag_ratio, max_lag)）—— 有才写。
+    //   glTF 2.0 规定应用自定义属性语义必须以下划线开头；不认识该语义的查看器/引擎
+    //   会直接忽略（不报错），故对通用资产无害。见 docs/jpov_instance_attr_lag_design.md。
+    if (MeshHasFlag(mesh.flags, MeshVertexFlags::kRelax)) {
+        CHECK_EQ(mesh.relaxations.size(), vcount);
+        std::vector<float> relax;
+        relax.reserve(vcount * 2);
+        for (const Vec2f& r : mesh.relaxations) {
+            relax.push_back(r.x());
+            relax.push_back(r.y());
+        }
+        const std::pair<size_t, size_t> o = AppendFloats(bin, relax);
+        attributes["_JPOV_RELAX"] =
+            add_accessor("VEC2", 5126, vcount, o.first, o.second, false);
+    }
+
     // indices (uint scalar) —— 有才写；无则非索引绘制（loader 支持）
     json primitive = {{"attributes", attributes}, {"mode", 4}};   // 4 = triangles
     if (!mesh.indices.empty()) {

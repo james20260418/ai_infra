@@ -216,7 +216,8 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
 }
 
 void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
-                                            std::vector<InstanceState> instances) {
+                                            std::vector<InstanceState> instances,
+                                            bool highlight) {
     CHECK_GT(mesh_id, 0u) << "DrawInstancedObject: mesh_id 必须 > 0";
     CHECK(!instances.empty()) << "DrawInstancedObject: instances 不能为空";
     int idx = static_cast<int>(instanced_object.size());
@@ -224,6 +225,7 @@ void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial&
     cmd.mesh_id = mesh_id;
     cmd.material = mat;
     cmd.instances = std::move(instances);
+    cmd.highlight = highlight;
     instanced_object.push_back(std::move(cmd));
     order.emplace_back(DrawCommandType::kInstancedObject, idx);
 }
@@ -246,7 +248,8 @@ void RenderCommandList::DrawGltfObject(const GltfObject& obj,
 void RenderCommandList::DrawMeshWithSkeleton(
     uint32_t mesh_id, uint32_t skeleton_id,
     const jpov::PBRMaterial& material,
-    std::vector<SkinnedInstanceState> instances) {
+    std::vector<SkinnedInstanceState> instances,
+    bool highlight) {
     CHECK_GT(mesh_id, 0u) << "DrawMeshWithSkeleton: mesh_id 必须 > 0";
     CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
         << "（先经 JPOV::RegisterSkeleton(SkeletonType, poses) 创建骨架拿到 id）";
@@ -257,6 +260,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     cmd.skeleton_id = skeleton_id;
     cmd.material = material;                 // 蒙皮网格材质（同 Object3DCommand.material）
     cmd.instances = std::move(instances);  // 每实例自己的插值 pose(pose_a/pose_b/ratio)在 instances 里(见 skeleton_types.h)
+    cmd.highlight = highlight;
     skinned_mesh.push_back(cmd);
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
 }

@@ -190,6 +190,24 @@ cc_binary(
     ],
 )
 
+# pick/highlight 查看器：三大 renderer（蒙皮蓝人 ×5 / 连衣裙实例 ×3 / 凳子 object3d ×2）
+# + 统一拾取/高亮交互（左键点选切换高亮，右键轨道 / 滚轮缩放）。
+cc_binary(
+    name = "jpov_pick_highlight_viewer",
+    srcs = ["demo/jpov_pick_highlight_viewer.cc"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # 雾火查看器（fire_fog viewer）— 专门肉眼验收 froxel 体积雾
 # （设计见 docs/jpov_froxel_design.md）。场景 = 灰地面 + 高模橡树；点状雾走

@@ -62,6 +62,10 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     vec4 world_pos = uModel * vec4(aPos, 1.0);
     vWorldPos = world_pos.xyz;
@@ -69,6 +73,9 @@ void main() {
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
     gl_Position = uMVP * vec4(aPos, 1.0);
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
 
@@ -87,6 +94,10 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     vec4 world_pos = uModel * vec4(aPos, 1.0);
     vWorldPos = world_pos.xyz;
@@ -94,6 +105,9 @@ void main() {
     vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uMVP * vec4(aPos, 1.0);
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
 
@@ -875,6 +889,23 @@ void main() {
                                    const float depth_vp[16],
                                    unsigned int shadow_prog,
                                    unsigned int shadow_prog_cutout);
+
+    // ---- DrawObject3DSelected ----
+    // 拾取/高亮共享的「选中物体栅格化」：把一条 Object3DCommand 用**选中 program**（主 VS +
+    //   kPickIdFs 或 kHighlightFs）画进一张离屏 buffer。
+    // pick 模式（pick_id_map != nullptr）：写 render_internal_id（= kPickIdBaseObject3D + 序号），
+    //   并把 cmd.picking_id 追加进 pick_id_map；非实例，序号固定 0。
+    // highlight 模式（pick_id_map == nullptr）：只画实心掩膜（program 的 FS 自行处理），不填表。
+    // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空 discard 不写。
+    // Pre-condition: pick 模式下 cmd.picking_id > 0（调用方已过滤）；
+    //   highlight 模式无此要求（整批高亮，与 picking_id 无关）。
+    static void DrawObject3DSelected(const Object3DCommand& cmd,
+                                    MeshManager& mesh_mgr,
+                                    TextureManager& texture_mgr,
+                                    const float mvp[16],
+                                    unsigned int prog,
+                                    unsigned int prog_cutout,
+                                    std::vector<uint32_t>* pick_id_map /*nullable*/);
 
     // ---- UploadSunData ----
     // 把 cmds.sun（DirectionalLight）与级联阴影贴图参数上传到 PBR shader。

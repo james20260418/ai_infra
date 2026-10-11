@@ -651,6 +651,77 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
     glBindVertexArray(0);
 }
 
+// ==================== DrawObject3DSelected ====================
+
+void Object3DRenderer::DrawObject3DSelected(const Object3DCommand& cmd,
+                                           MeshManager& mesh_mgr,
+                                           TextureManager& texture_mgr,
+                                           const float mvp[16],
+                                           unsigned int prog,
+                                           unsigned int prog_cutout,
+                                           std::vector<uint32_t>* pick_id_map) {
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawObject3DSelected: mesh_id " << cmd.mesh_id << " 未注册";
+    CHECK_GT(mesh->vao, 0u);
+
+    float model[16];
+    float mvp_final[16];
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
+    Mat4Mul(mvp, model, mvp_final);
+
+    const bool cutout = (cmd.material.alpha_mode == AlphaMode::kMask);
+    const unsigned int sp = cutout ? prog_cutout : prog;
+    glUseProgram(sp);
+
+    glPushAttrib(GL_ENABLE_BIT);
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
+    }
+
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uMVP"), 1, GL_FALSE, mvp_final);
+    glUniformMatrix4fv(glGetUniformLocation(sp, "uModel"), 1, GL_FALSE, model);
+    // pick 模式：render_internal_id = 段基址 + 序号（非实例，序号 = 追加前的表长）。
+    // highlight 模式（map==nullptr）：不需要 id（program 的 FS 写常量掩膜），跳过。
+    if (pick_id_map != nullptr) {
+        CHECK_GT(cmd.picking_id, 0u)
+            << "DrawObject3DSelected: pick 模式要求 picking_id > 0";
+        const uint32_t base = kPickIdBaseObject3D + static_cast<uint32_t>(pick_id_map->size());
+        CHECK_LT(base, kPickIdBaseSkinned) << "DrawObject3DSelected: object3d 段 id 溢出";
+        glUniform1i(glGetUniformLocation(sp, "uPickIdBase"), static_cast<int>(base));
+    }
+
+    if (cutout) {
+        glUniform1f(glGetUniformLocation(sp, "uAlphaCutoff"), cmd.material.alpha_cutoff);
+        if (cmd.material.base_color_tex != 0) {
+            CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+                << "DrawObject3DSelected: cutout 且 base_color_tex 非 0 但 mesh 无 kUV";
+            unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+            CHECK_NE(gl_tex, 0u) << "DrawObject3DSelected: base_color_tex 未注册";
+            const int u = kTexUnitMaterialBase + 0;
+            glActiveTexture(GL_TEXTURE0 + u);
+            glBindTexture(GL_TEXTURE_2D, gl_tex);
+            glUniform1i(glGetUniformLocation(sp, "uBaseColorTex"), u);
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(sp, "uHasBaseColorTex"), 0);
+        }
+    }
+    if (pick_id_map != nullptr) {
+        pick_id_map->push_back(cmd.picking_id);
+    }
+
+    glBindVertexArray(mesh->vao);
+    if (mesh->index_count > 0) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                       GL_UNSIGNED_INT, nullptr);
+    } else {
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+    }
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glPopAttrib();
+}
+
 // ==================== UploadSunData ====================
 
 void Object3DRenderer::UploadSunData(

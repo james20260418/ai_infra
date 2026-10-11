@@ -4,7 +4,7 @@
 //   1. GPU color-ID 拾取（Object3DCommand::picking_id + RenderCommandList::pick
 //      + JPOV::last_pick()）
 //   2. 高亮纯色边框（Object3DCommand::highlight + RenderCommandList::highlight_style，
-//      方法 B：stencil + 顶点外扩）
+//      方法 B：CPU 屏幕空间剪影膨胀描边）
 //
 // 场景（y-up 世界，地面 XZ 平面）：
 //   - 中柱：origin 立着的红色 box，picking_id = 1

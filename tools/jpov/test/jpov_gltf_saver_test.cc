@@ -159,6 +159,38 @@ TEST(GltfSaverTest, RoundTripPlainMesh) {
     std::remove(path.c_str());
 }
 
+// ==================== 1b. _JPOV_RELAX（布料 LAG 松弛度）自定义顶点属性 写→读回 ====================
+
+TEST(GltfSaverTest, RoundTripRelaxAttribute) {
+    MeshData m = MakeTriMesh(1.0f);
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) |
+        static_cast<uint8_t>(MeshVertexFlags::kRelax));
+    m.relaxations = {{0.0f, 0.0f}, {0.5f, 0.25f}, {1.0f, 2.0f}};
+    m.Validate();
+
+    GltfSaveAsset asset;
+    asset.name = "relax";
+    asset.meshes.push_back(GltfSaveMesh{m, GltfMaterialInfo{}});
+
+    const std::string path = TmpPath("relax");
+    std::remove(path.c_str());
+    ASSERT_TRUE(WriteGlb(asset, path)) << "WriteGlb 应成功";
+
+    Collect c;
+    ASSERT_TRUE(LoadGltfScene(path, CollectCb, &c)) << "写出的 glb 应能读回";
+    ASSERT_EQ(c.meshes.size(), 1u);
+    const MeshData& got = c.meshes[0];
+    ASSERT_TRUE(MeshHasFlag(got.flags, MeshVertexFlags::kRelax))
+        << "读回的 mesh 应带 kRelax（_JPOV_RELAX 未往返）";
+    ASSERT_EQ(got.relaxations.size(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(got.relaxations[i].x(), m.relaxations[i].x(), 1e-6f);
+        EXPECT_NEAR(got.relaxations[i].y(), m.relaxations[i].y(), 1e-6f);
+    }
+    std::remove(path.c_str());
+}
+
 // 坐坐标映射互逆：save → load → save → load 两次结果应逐位一致
 // （若 saver 漏做逆映射，每次往返会多转 90°，此测试立刻挂）。
 TEST(GltfSaverTest, RoundTripIsStableAcrossTwoCycles) {

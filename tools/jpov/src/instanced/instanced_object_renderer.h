@@ -12,9 +12,11 @@
 //
 // 与 DrawObject3D 的摆放差异：
 //   Object3DRenderer  —— 单件摆放，走 uModel / uMVP uniform。
-//   本模块            —— **逐实例**摆放，走 per-instance attribute（loc6..9 的 mat4，复用
+//   本模块            —— **逐实例**摆放，走 per-instance attribute（loc7..10 的 mat4，复用
 //                       InstanceBuffer 基建）+ uniform uViewProj（= proj*view，不含 model）；
 //                       变换约定与 DrawObject3D **逐字一致**（同一套 BuildModelMatrix）。
+//                       本路径的 per-instance 属性布局由 **本模块独立拥有**，见
+//                       src/instanced/instanced_object_attrs.h（与蒙皮布局解耦）。
 //
 // MeshManager / TextureManager / ShaderManager / InstanceBuffer 由 Renderer 持有并传入
 //（本模块不持有所有权）。所有方法均为 stateless static（与 Object3DRenderer 同款）。
@@ -62,21 +64,25 @@ public:
     //
     // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
-    //   （loc6..9）而非 uModel；裁剪走 uniform uViewProj = proj*view。
+    //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
     static constexpr const char* kMeshVs3dPBRInstanced = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-// per-instance 摆放矩阵（loc6..9 拆 4 列，divisor=1；布局见 instance_buffer.h）。
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+// per-instance 摆放矩阵（loc7..10 拆 4 列，divisor=1；布局见 instance_buffer.h）。
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uViewProj;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec4 world_pos = model * vec4(aPos, 1.0);
@@ -85,6 +91,9 @@ void main() {
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
     gl_Position = uViewProj * world_pos;
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
     // kMeshVs3dPBRFullInstanced: 实例版顶点着色器（含 UV + tangent）。
@@ -94,15 +103,19 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uViewProj;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+#ifdef JPOV_PICK
+uniform int uPickIdBase;
+flat out uint vPickId;
+#endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec4 world_pos = model * vec4(aPos, 1.0);
@@ -112,16 +125,19 @@ void main() {
     vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uViewProj * world_pos;
+#ifdef JPOV_PICK
+    vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
+#endif
 }
 )glsl";
     // kShadowVsInstanced: 实例版阴影 pass 顶点着色器（per-instance 摆放，输出线性深度）。
     static constexpr const char* kShadowVsInstanced = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec4 aInstCol0;
-layout(location = 7) in vec4 aInstCol1;
-layout(location = 8) in vec4 aInstCol2;
-layout(location = 9) in vec4 aInstCol3;
+layout(location = 7) in vec4 aInstCol0;
+layout(location = 8) in vec4 aInstCol1;
+layout(location = 9) in vec4 aInstCol2;
+layout(location = 10) in vec4 aInstCol3;
 uniform mat4 uShadowViewProj;
 uniform mat4 uShadowDepthViewProj;
 out float vShadowDepth;
@@ -800,7 +816,7 @@ void main() {
     // ---- DrawInstancedObject ----
     // 把一个 InstancedObjectCommand（同 mesh + N 份摆放）用 **instanced draw** 一次画完。
     // 与 DrawObject3D 的材质/光照/tile/阴影 uniform 处理逐项对齐，区别仅在：
-    //   ① 摆放走 per-instance attribute（instance_model_buf，loc6..9）而非 uModel；
+    //   ① 摆放走 per-instance attribute（instance_model_buf，loc7..10）而非 uModel；
     //   ② 裁剪走 uniform uViewProj（= proj*view，不含 model）；③ glDraw*Instanced。
     // 选 program：any_tex → prog_full*；alpha_mode==kMask → prog_*cutout*；double_sided 关背面剔除。
     //
@@ -834,6 +850,22 @@ void main() {
                                           unsigned int shadow_prog,
                                           unsigned int shadow_prog_cutout,
                                           InstanceBuffer& instance_model_buf);
+
+    // ---- DrawInstancedObjectSelected ----
+    // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。
+    //   逐实例 id = kPickIdBaseInstanced + 本命令 base + gl_InstanceID。
+    // 本函数负责 CPU 侧 id 映射：把**逐实例** picking_id 依次追加进 pick_id_map，并上传
+    //   uPickIdBase = 段基址 + 追加前的表长。
+    // cutout（alpha_mode==kMask）：绑 baseColor 贴图 + 上传 uAlphaCutoff → 镂空片元 discard 不写 id。
+    // Pre-condition: pick_id_map != nullptr；cmd.instances 非空。
+    static void DrawInstancedObjectSelected(const InstancedObjectCommand& cmd,
+                                           MeshManager& mesh_mgr,
+                                           TextureManager& texture_mgr,
+                                           const float view_proj[16],
+                                           unsigned int prog,
+                                           unsigned int prog_cutout,
+                                           std::vector<uint32_t>* pick_id_map /*output*/,
+                                           InstanceBuffer& instance_model_buf);
 };
 
 }  // namespace jpov
