@@ -4,8 +4,8 @@
 // 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
 // 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
 //
-// 交互面板（见 fire_fog_viewer_app.h）：雾中心 x/y/z、半径、消光 σ、衰减剖面、散射色 albedo、
-// 自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
+// 交互面板（见 fire_fog_viewer_app.h）：雾中心 x/y/z、盒半尺寸、圆角 round、消光 σ、衰减剖面、
+// 散射色 albedo、自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
 // ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
@@ -271,6 +271,19 @@ int RunCapture(const std::string& out_dir) {
     shoot("21_sun_gain0");
     app.sun_gain_ = 2.0f;
     shoot("22_sun_gain2");
+
+    // ── O. kRoundBox：圆角扫谱（uniform 硬边 + 中等尺寸；肉眼区分「盒 ↔ 球」）──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_radius_ = 3.0f;
+    app.fog_sigma_ = 1.5f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kUniform);
+    for (float rnd : {0.05f, 0.35f, 0.7f, 1.0f}) {
+        app.fog_roundness_ = rnd;
+        shoot(("60_roundbox_r" + std::to_string(static_cast<int>(rnd * 100))).c_str());
+    }
+    app.fog_roundness_ = 0.35f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);

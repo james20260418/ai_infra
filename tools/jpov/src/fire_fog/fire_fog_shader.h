@@ -90,6 +90,219 @@ float ProfileAtten(int kind, float u) {
 vec4 OverCompose(vec4 A, vec4 B) {
     return vec4(A.x + B.x, A.yzw + exp(-A.x) * B.yzw);
 }
+
+// ══ 团属性纹理 uFogBodyTex 布局（RGBA32F；每团 FOG_TEXELS_PER_BODY 个 texel）══
+// ⚠️ 与 fog_body.h 的 kFogBodyLayout **逐项一致**（契约单测解析下列标记比对）。改布局两处一起改。
+#define FOG_TEXELS_PER_BODY 10
+//@FOGLAYOUT texel=0 x=kind y=sigma z=albedo_r w=albedo_g
+//@FOGLAYOUT texel=1 x=albedo_b y=emission_r z=emission_g w=emission_b
+//@FOGLAYOUT texel=2 x=center_x y=center_y z=center_z w=half_x
+//@FOGLAYOUT texel=3 x=half_y y=half_z z=axis0_x w=axis0_y
+//@FOGLAYOUT texel=4 x=axis0_z y=axis1_x z=axis1_y w=axis1_z
+//@FOGLAYOUT texel=5 x=axis2_x y=axis2_y z=axis2_z w=roundness
+//@FOGLAYOUT texel=6 x=atten y=reserved z=reserved w=reserved
+
+// 采样器种类（与 fog_body.h 的 FogFieldKind 一致）。
+#define FOG_KIND_ROUNDBOX 0
+
+uniform sampler2D uFogBodyTex;
+
+// 「每团通用数据」d：公共头（所有 kind 含义固定）+ union 区（按 kind 解释）。
+// 含义随 kind 大变（见设计文档 §10.3）；名字按字段而非下标，SampleXXX 里只读自己那段。
+struct FogBodyData {
+    int   kind;
+    float sigma;
+    vec3  albedo;
+    vec3  emission;
+    vec3  center;
+    vec3  axis0;
+    vec3  axis1;
+    vec3  axis2;
+    vec3  half_extent;
+    float roundness;
+    float atten;
+};
+
+// 解码器：按团 index 从 uFogBodyTex 取出该团的通用数据 d。
+// 公共头恒取（texel 0..1）；union 区按 kind 取（kRoundBox = texel 2..6）。未识别 kind 清零。
+FogBodyData DecodeFogBody(int bi) {
+    FogBodyData d;
+    vec4 t0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 0, 0), 0);
+    vec4 t1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 1, 0), 0);
+    d.kind     = int(t0.x + 0.5);
+    d.sigma    = t0.y;
+    d.albedo   = vec3(t0.z, t0.w, t1.x);
+    d.emission = t1.yzw;
+    d.center = vec3(0.0);
+    d.axis0 = vec3(1.0, 0.0, 0.0);
+    d.axis1 = vec3(0.0, 1.0, 0.0);
+    d.axis2 = vec3(0.0, 0.0, 1.0);
+    d.half_extent = vec3(0.0);
+    d.roundness = 0.0;
+    d.atten = 0.0;
+    if (d.kind == FOG_KIND_ROUNDBOX) {
+        vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
+        vec4 g1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 3, 0), 0);
+        vec4 g2 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 4, 0), 0);
+        vec4 g3 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 5, 0), 0);
+        vec4 g4 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 6, 0), 0);
+        d.center      = g0.xyz;
+        d.half_extent = vec3(g0.w, g1.x, g1.y);
+        d.axis0       = vec3(g1.z, g1.w, g2.x);
+        d.axis1       = g2.yzw;
+        d.axis2       = g3.xyz;
+        d.roundness   = g3.w;
+        d.atten       = g4.x;
+    }
+    return d;
+}
+
+// ── 命名访问器（公共层只经这些读 d，避免裸下标散落）──
+int   FogKind(FogBodyData d)       { return d.kind; }
+float FogSigma(FogBodyData d)      { return d.sigma; }
+vec3  FogAlbedo(FogBodyData d)     { return d.albedo; }
+vec3  FogEmission(FogBodyData d)   { return d.emission; }
+vec3  FogCenter(FogBodyData d)     { return d.center; }
+vec3  FogHalfExtent(FogBodyData d) { return d.half_extent; }
+float FogRoundness(FogBodyData d)  { return d.roundness; }
+float FogAtten(FogBodyData d)      { return d.atten; }
+
+// 圆角盒「归一化距离」t：盒局部坐标 u（标称盒 = [-1,1]^3）→ t ∈ [0,1]（团心 0、表面 1；
+// 表面外 t>1 ⇒ ProfileAtten 返回 0）。round ∈ (0,1]：1 → 球（t=|u|），→0 → 纯盒（面平棱硬）。
+float RoundBoxDistance(vec3 u, float round) {
+    float r = clamp(round, 0.02, 1.0);
+    vec3 q = max(abs(u) - (1.0 - r), vec3(0.0));   // 内盒 [-(1-r),1-r] 外的分量
+    float sdf = length(q) - r;                     // 圆角盒 SDF（团心 = -r）
+    return 1.0 + sdf / r;
+}
+
+// 光线 × 团 OBB 容器的 slab 求交（世界空间）→ 区间 [t0,t1]（t 沿单位 rd 的距离）。
+// 无交 → false。容器求交**类型无关**（唯一几何原语）；各采样器共用。
+// Pre-condition: ax0/1/2 正交单位；he 各 > 0。
+bool RayObb(vec3 center, vec3 ax0, vec3 ax1, vec3 ax2, vec3 he,
+            vec3 ro, vec3 rd, out float t0, out float t1) {
+    vec3 oc = ro - center;
+    float lo = -1e30;
+    float hi = 1e30;
+    {
+        float pp = dot(ax0, oc);
+        float dd = dot(ax0, rd);
+        if (abs(dd) < 1e-8) {
+            if (abs(pp) > he.x) { return false; }
+        } else {
+            float ta = (-he.x - pp) / dd;
+            float tb = ( he.x - pp) / dd;
+            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+            lo = max(lo, ta);
+            hi = min(hi, tb);
+        }
+    }
+    {
+        float pp = dot(ax1, oc);
+        float dd = dot(ax1, rd);
+        if (abs(dd) < 1e-8) {
+            if (abs(pp) > he.y) { return false; }
+        } else {
+            float ta = (-he.y - pp) / dd;
+            float tb = ( he.y - pp) / dd;
+            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+            lo = max(lo, ta);
+            hi = min(hi, tb);
+        }
+    }
+    {
+        float pp = dot(ax2, oc);
+        float dd = dot(ax2, rd);
+        if (abs(dd) < 1e-8) {
+            if (abs(pp) > he.z) { return false; }
+        } else {
+            float ta = (-he.z - pp) / dd;
+            float tb = ( he.z - pp) / dd;
+            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+            lo = max(lo, ta);
+            hi = min(hi, tb);
+        }
+    }
+    if (hi < lo) { return false; }
+    t0 = lo;
+    t1 = hi;
+    return true;
+}
+
+// 采样结果（各类型 SampleXXX 的**统一返回**）：段 [t0,t1]（已与本 froxel 段 [zk,zk1] 相交）
+// + 采样点 p + 该点的 (σ, albedo, emission)。命中 = hit 且 t1>t0 且 σ>0。
+// 「3 个返回项」= sigma / albedo / emission（源项拆分，见设计文档 §10.2）。
+struct FogSegment {
+    bool  hit;
+    float t0;
+    float t1;
+    vec3  p;
+    float sigma;
+    vec3  albedo;
+    vec3  emission;
+};
+
+// ── kRoundBox 采样器（唯一分支本体；**严格 O(1)**：求交 + 一次点求值，无循环/无迭代纹理依赖）──
+// 求交（ray-OBB slab，移入采样函数）→ 与本 froxel 段相交 → 段中点采样圆角盒衰减。
+FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
+                          float zk, float zk1, float znear) {
+    FogSegment s;
+    s.hit = false;
+    s.t0 = 0.0;
+    s.t1 = 0.0;
+    s.p = vec3(0.0);
+    s.sigma = 0.0;
+    s.albedo = vec3(0.0);
+    s.emission = vec3(0.0);
+
+    vec3 he = FogHalfExtent(d);
+    if (he.x <= 0.0 || he.y <= 0.0 || he.z <= 0.0) { return s; }
+
+    float o0;
+    float o1;
+    if (!RayObb(FogCenter(d), d.axis0, d.axis1, d.axis2, he, ro, rd, o0, o1)) { return s; }
+
+    float a = max(o0, max(zk, znear));
+    float b = min(o1, zk1);
+    if (b <= a) { return s; }
+
+    vec3 p = ro + (0.5 * (a + b)) * rd;   // 段中点采样
+    vec3 loc = p - FogCenter(d);
+    vec3 u = vec3(dot(d.axis0, loc) / he.x,
+                  dot(d.axis1, loc) / he.y,
+                  dot(d.axis2, loc) / he.z);
+    float tt = RoundBoxDistance(u, FogRoundness(d));
+    float w = ProfileAtten(int(FogAtten(d) + 0.5), tt);
+    float sig = FogSigma(d) * w;
+    if (sig <= 0.0) { return s; }
+
+    s.hit = true;
+    s.t0 = a;
+    s.t1 = b;
+    s.p = p;
+    s.sigma = sig;
+    s.albedo = FogAlbedo(d);
+    s.emission = FogEmission(d);
+    return s;
+}
+
+// 唯一 kind 分派入口：按 d.kind 选采样器（GLSL330 无函数指针，用 if 链展开）。
+// 加一个 kind = 加一个分支（不动 L1/L2/ZDist，见设计文档 §10.4）。
+FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
+                            float zk, float zk1, float znear) {
+    if (FogKind(d) == FOG_KIND_ROUNDBOX) {
+        return SampleRoundBox(d, ro, rd, zk, zk1, znear);
+    }
+    FogSegment s;
+    s.hit = false;
+    s.t0 = 0.0;
+    s.t1 = 0.0;
+    s.p = vec3(0.0);
+    s.sigma = 0.0;
+    s.albedo = vec3(0.0);
+    s.emission = vec3(0.0);
+    return s;
+}
 )glsl";
 
 // ── 趟 1：inject —— 逐 froxel 局部 (τ, S) ──
@@ -97,7 +310,6 @@ inline constexpr const char* kFireFogInjectBody = R"glsl(
 
 uniform sampler2D uTileFogIndices;
 uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, zmax)
-uniform sampler2D uFogBodyTex;
 uniform sampler2D uTileRayTex;   // RGBA32F：每 tile 中心视线方向（单位向量，CPU 预算）
 uniform sampler2D uZSlicesTex;   // R32F：z 切片边界 z_0..z_Nz（CPU 预算）
 uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fire_fog 自持网格）
@@ -272,49 +484,19 @@ void main() {
     vec4 acc = vec4(0.0);   // 局部 (τ, S)，本 froxel 内多团 over 合成（顺序无关）
     for (int j = 0; j < nf; ++j) {
         int bi = int(fog_idx[j]);
-        vec4 t0 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 0, 0), 0);
-        vec4 t1 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 1, 0), 0);
-        vec4 t2 = texelFetch(uFogBodyTex, ivec2(bi * 3 + 2, 0), 0);
-        vec3  c        = t0.xyz;
-        float rad      = t0.w;
-        float sigma    = t1.x;          // 消光系数 σ_t (1/m)
-        vec3  albedo   = t1.yzw;        // 单散射反照率（散射色，∈[0,1]）
-        int   atten    = int(t2.x + 0.5);
-        vec3  emission = t2.yzw;        // 自发光系数 ε (HDR)
-        if (rad <= 0.0 || sigma <= 0.0) {
+        // 解码器：按团 index 取「每团通用数据 d」（公共头 + 按 kind 的 union 区）。
+        FogBodyData d = DecodeFogBody(bi);
+        // 唯一 kind 分派：求交 + 点求值（皆移入采样函数），返回段 + (σ, albedo, emission)。
+        FogSegment seg = SampleFogSegment(d, ro, rd, zk, zk1, uZNear);
+        if (!seg.hit) {
             continue;
         }
-        // 球 × 光线求交。
-        vec3 oc = ro - c;
-        float bq = dot(oc, rd);
-        float cc = dot(oc, oc) - rad * rad;
-        float disc = bq * bq - cc;
-        if (disc < 0.0) {
-            continue;
-        }
-        float sq = sqrt(disc);
-        float cs0 = max(-bq - sq, uZNear);
-        float cs1 = -bq + sq;
-        if (cs1 <= cs0) {
-            continue;
-        }
-        // 与本 froxel 的 z 段 [zk, zk1] 求交。
-        float a = max(cs0, zk);
-        float b = min(cs1, zk1);
-        if (b <= a) {
-            continue;
-        }
-        float len = b - a;
-        vec3  p = ro + (0.5 * (a + b)) * rd;   // 段中点采样剖面
-        float rr = length(p - c);
-        float wgt = ProfileAtten(atten, rr / rad);
-        if (wgt <= 0.0) {
-            continue;
-        }
-        float dtau = sigma * wgt * len;
+        float len = seg.t1 - seg.t0;
+        float dtau = seg.sigma * len;
         if (dtau <= 0.0) {
             continue;
         }
+        vec3 p = seg.p;   // 段中点采样点
         // ── 光照（始终开启）：ambient（各向同性） + 太阳×CSM（×相位，god ray）
         //    + 本 tile 点光源（×相位）。──
         vec3 Llight = uAmbientColor * uAmbientIntensity;
@@ -337,9 +519,9 @@ void main() {
         float cover = 1.0 - exp(-dtau);
         // 源项分两块：散射 = albedo⊙L_light×覆盖；自发光 = ε×长度×自吸收
         //（薄极限 ε·len ⇒ 与密度无关，**不乘 σ**）。
-        vec3 Sleaf = albedo * Llight * cover;
+        vec3 Sleaf = seg.albedo * Llight * cover;
         float emis_f = (dtau > 1e-6) ? cover / dtau : 1.0;
-        Sleaf += emission * (len * emis_f);
+        Sleaf += seg.emission * (len * emis_f);
         acc = OverCompose(acc, vec4(dtau, Sleaf));   // over 合成（团无序 ⇒ 可任意序）
     }
     oColor = acc;

@@ -198,7 +198,8 @@ private:
     unsigned int z_slices_tex_ = 0;
     int z_slices_count_ = 0;   // 表长度 = nz+1
 
-    // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*3，高 = 1；每团 3 texel）。
+    // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*fog_layout::kTexelsPerBody，高 = 1）。
+    // 每团 texel 布局见 fog_body.h kFogBodyLayout（公共头 + 按 kind 的 union 区）。
     unsigned int fog_body_tex_ = 0;
 
     // 1×1 R32F 哑元深度纹理（值 = 1.0）：调用方传 scene_depth_tex==0 时使用，

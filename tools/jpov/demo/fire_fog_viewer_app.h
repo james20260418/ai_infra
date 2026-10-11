@@ -63,7 +63,8 @@ public:
 
     // ── 点状雾参数（单个团；用户可调）──
     jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // 雾体中心（橡树中段）
-    float fog_radius_ = 4.5f;                                  // 半径（米）
+    float fog_radius_ = 4.5f;                                  // 盒半尺寸（米）
+    float fog_roundness_ = 0.35f;                              // 圆角分数（1=球，→0=纯盒）
     float fog_sigma_ = 0.6f;                                   // 消光系数 σ_t（1/m）
     jpov::Color fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};    // 散射色（∈[0,1]）
     jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
@@ -161,6 +162,7 @@ public:
             fog.albedo = fog_albedo_;
             fog.emission = fog_emission_;
             fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
+            fog.roundness = fog_roundness_;
             cmds->point_fogs.push_back(fog);
 
             jpov::FireFogParams ff;
@@ -217,7 +219,7 @@ private:
         ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
         ui_.SliderFloat("中心 z", &fog_center_.z(), row(0, 2), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("半径 m", &fog_radius_, row(0, 3), 0.2f, 10.0f, 2);
+        ui_.SliderFloat("box 半尺寸 m", &fog_radius_, row(0, 3), 0.2f, 10.0f, 2);
         ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, row(0, 4), 0.0f, 4.0f, 3);
         {
             const std::vector<const char*> items = {"Nz=64", "Nz=256"};
@@ -228,6 +230,7 @@ private:
             ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 6));
         }
         ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 7), 50.0f, 4000.0f, 0);
+        ui_.SliderFloat("圆角 round", &fog_roundness_, row(0, 8), 0.05f, 1.0f, 2);
 
         // ── 列 1：剖面 + 散射色 albedo + 自发光 emission + god ray ──
         {

@@ -67,9 +67,10 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     fog.albedo = Color{0.1f, 0.2f, 0.3f, 1.0f};
     fog.emission = Color{0.4f, 0.5f, 0.6f, 1.0f};
     fog.attenuation = FogAttenuation::kQuadratic;
+    fog.roundness = 0.25f;
 
     const FogBody b = LowerPointFog(fog);
-    EXPECT_EQ(b.kind, FogFieldKind::kAnalyticProfile);
+    EXPECT_EQ(b.kind, FogFieldKind::kRoundBox);
     EXPECT_FLOAT_EQ(b.bound.center.x(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.center.y(), 2.0f);
     EXPECT_FLOAT_EQ(b.bound.center.z(), 3.0f);
@@ -87,8 +88,10 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.emission.r, 0.4f);
     EXPECT_FLOAT_EQ(b.emission.g, 0.5f);
     EXPECT_FLOAT_EQ(b.emission.b, 0.6f);
-    // attenuation 落在 params[0]（shader 读 t2.x）。
+    // attenuation 落在 params[0]（shader 读 union texel6.x）。
     EXPECT_FLOAT_EQ(b.params[0], static_cast<float>(FogAttenuation::kQuadratic));
+    // roundness 落在 params[1]（shader 读 union texel5.w）。
+    EXPECT_FLOAT_EQ(b.params[1], 0.25f);
 }
 
 TEST(FireFogLower, EmptyBodiesAllSentinel) {

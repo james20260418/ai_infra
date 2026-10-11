@@ -81,3 +81,26 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+# FireFog shader 源码（header-only；只有 GLSL 字符串常量，无 GL 依赖）。
+# 单拎成 lib 供契约单测读取 GLSL 里的布局标记。
+cc_library(
+    name = "fire_fog_shader",
+    hdrs = ["fire_fog_shader.h"],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
+# 布局契约单测：解析 fire_fog_shader.h 的 //@FOGLAYOUT 标记 / #define，
+# 与 fog_body.h 的 kFogBodyLayout / fog_layout 常量逐项比对（防 CPU-GLSL 静默漂移）。
+cc_test(
+    name = "fire_fog_contract_test",
+    srcs = ["fire_fog_contract_test.cc"],
+    deps = [
+        ":fire_fog_lower",
+        ":fire_fog_shader",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

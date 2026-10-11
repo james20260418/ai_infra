@@ -439,10 +439,11 @@ struct PointLight {
     float effective_range() const { return linear_radius; }
 };
 
-// 点雾体的径向衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
+// 点雾体的衰减剖面（v1 先给常见几种；更丰富的剖面后续按需扩）。
 //
-// 剖面给出半径 r ∈ [0, R] 处的相对消光权重 w(r) ∈ [0,1]；r > R 处 w = 0（球外不贡献）。
-// 点处的消光系数 = sigma · w(r)（见 PointFog.sigma），本字段只定「形状」。
+// 剖面给出归一化距离 t ∈ [0,1] 处的相对消光权重 w(t) ∈ [0,1]；t > 1 处 w = 0（盒外不贡献）。
+// t 的定义由团的 kind 给出（kRoundBox：t = 圆角盒距离，团心 0、盒面 1）。
+// 点处的消光系数 = sigma · w(t)（见 PointFog.sigma），本字段只定「形状」。
 enum class FogAttenuation : uint8_t {
     kUniform = 0,      // 均匀：r ≤ R 恒为 1（硬边球）
     kLinear = 1,       // 线性：w = 1 − r/R
@@ -467,17 +468,21 @@ enum class FogAttenuation : uint8_t {
 //   自发光项薄极限 → ε·Δz，与密度无关（不乘 σ）。
 //
 // 字段（按此顺序聚合初始化）：
-//   { center, radius, sigma, albedo, emission, attenuation }
+//   { center, radius, sigma, albedo, emission, attenuation, roundness }
 // 例: { {0,1,0}, 3.0f, 1.5f, {0.8f,0.8f,0.8f,1.0f}, {0,0,0,1}, FogAttenuation::kQuadratic }
 //
 // Pre-condition: radius > 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0
 struct PointFog {
     Vec3f center;                 // 雾体中心（世界坐标）
-    float radius;                 // 半径（米，> 0）；超出该半径的像素不受本团影响
+    float radius;                 // 盒半尺寸（米，> 0）：立方 OBB 三半轴长；超出该盒的像素不受本团影响
     float sigma;                  // 消光系数 σ_t（1/m，>= 0）—— 物理量纲，非「强度」
     Color albedo;                 // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
     Color emission;               // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
-    FogAttenuation attenuation;   // 径向衰减剖面（形状）
+    FogAttenuation attenuation;   // 衰减剖面（形状）
+
+    // 圆角分数 round ∈ (0,1]：1 → 球（圆角盒退化），→0 → 纯盒（面平棱硬）。
+    // 仅 kRoundBox 采样器使用（写入后端团 params[1]）。默认 0.35（= fog_body.h kRoundBoxDefaultRoundness）。
+    float roundness = 0.35f;
 };
 
 // Fire-Fog（froxel 体积雾）管线参数。
