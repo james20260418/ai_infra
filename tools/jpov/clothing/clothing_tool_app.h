@@ -63,6 +63,11 @@
 //       ④ **仿真焊接（方案 B）**：把位置重合的顶点在仿真里并成**一个质点**（容差默认 0.1mm，
 //          CLI --weld_tolerance），Step 后写回组内所有顶点 ⇒ 缝合缝不裂（修“碎了裂缝”）。
 //          输出 mesh 顶点数/拓扑/属性不变 ⇒ 法线/UV/蒙皮权重仍合法。
+//   - 2026-10-11（本 PR）：**布料 LAG 松弛度（由固定点自动推导）**——顶部中间（画笔面板下方）
+//       新增「布料 LAG 松弛度」面板：用 3D 画笔涂抹**固定点**（如腰口）后点「由固定点推导松弛度」，
+//       按**测地距离**（见 relax_derive.h）自动推导逐顶点 lag_ratio（固定点 0 → 远处 1，
+//       Laplacian 平滑），另配全局 max_lag；勾选「显示松弛度场」（蓝→红 2D 像素）核对；保存 glb
+//       时写入自定义顶点属性 _JPOV_RELAX（VEC2）。底层 VS 尚未消费 aRelax（#169），故不改变渲染外观。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -84,11 +89,13 @@
 #define JPOV_CLOTHING_CLOTHING_TOOL_APP_H_
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <glog/logging.h>
@@ -104,6 +111,7 @@
 #include "tools/jpov/clothing/clothing_transform.h"
 #include "tools/jpov/clothing/mesh_hole_fill.h"
 #include "tools/jpov/clothing/random_pose_driver.h"
+#include "tools/jpov/clothing/relax_derive.h"
 #include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
@@ -235,6 +243,24 @@ public:
     std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
     std::string motion_msg_;            // 面板状态提示（每帧刷新）
 
+    // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
+    //
+    // 在衣物上涂抹「固定点」（如腰口；松弛度 = 0），用 relax_derive.h 按测地距离自动推导
+    // 其余顶点的松弛度 lag_ratio ∈ [0,1]，并配上全局 max_lag。结果存在**本工具内**
+    // （relax_lag_ratio_），**保存 glb 时**才注入 mesh 的 kRelax 属性（_JPOV_RELAX）—— 底层
+    // VS 尚未消费 aRelax（见 #169），故不在编辑期改动 GPU mesh 布局。
+    //
+    // 固定点来源：3D 画笔选区（各 primitive） ∪ 可选的「高度带」（CLI headless 用）。
+    std::vector<std::vector<float>> relax_lag_ratio_;  // 每 primitive 逐顶点 lag_ratio（空 = 未推）
+    float relax_max_lag_ui_ = kRelaxDefaultMaxLagM;    // 逐顶点 max_lag（米；填给所有顶点）
+    float relax_radius_ui_ = kRelaxRadiusAuto;         // 松弛度饱和半径（米；0 = 自动定标）
+    bool show_relax_field_ = false;                    // 勾选：用 2D 像素画出松弛度场
+    std::string relax_msg_;                            // 面板状态提示
+    // 可选的「高度带」固定点（世界 Y ∈ [ymin, ymax]；CLI headless 用；与画笔选区取并集）。
+    bool relax_anchor_band_set_ = false;
+    float relax_anchor_ymin_ = 0.0f;
+    float relax_anchor_ymax_ = 0.0f;
+
     // ══════════════ 软体仿真（Step 1）══════════════
     //
     // 每 clothes primitive 一个仿真器（多为单 primitive）。生命周期：
@@ -306,6 +332,44 @@ public:
 
     // 供 headless / 脚本用：立即执行补洞（等价面板「执行补洞」按钮）。
     void RunHoleFillNow() { RunHoleFill(); }
+
+    // 供 headless / 脚本用：立即执行「由固定点推导松弛度」（等价面板按钮）。
+    void RunDeriveRelaxNow() { RunDeriveRelax(); }
+
+    // 供 headless / 脚本用：立即发起「保存衣服 glb」并阻塞至完成（返回是否成功）。
+    // 等价面板按钮；用于脚本化验证 _JPOV_RELAX 落盘。
+    bool SaveClothNowBlocking() {
+        StartSaveCloth();
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        while (save_ctrl_.state() == ClothSaveState::kSaving) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                LOG(ERROR) << "保存超时";
+                return false;
+            }
+            save_ctrl_.Tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        LOG(INFO) << save_ctrl_.message();
+        return save_ctrl_.state() == ClothSaveState::kDone;
+    }
+
+    // 供 headless / 脚本用：设置「高度带」固定点（世界 Y ∈ [ymin, ymax]；与画笔选区并集）。
+    void SetRelaxAnchorBand(float ymin, float ymax) {
+        CHECK_LE(ymin, ymax);
+        relax_anchor_band_set_ = true;
+        relax_anchor_ymin_ = ymin;
+        relax_anchor_ymax_ = ymax;
+    }
+
+    // 供 headless / CLI 设置松弛度推导参数（在 RunDeriveRelaxNow 前设好）。
+    void SetRelaxParams(float radius_m, float max_lag_m) {
+        relax_radius_ui_ = radius_m;
+        relax_max_lag_ui_ = max_lag_m;
+    }
+
+    // 供 headless / CLI 开启松弛度场显示。
+    void SetShowRelaxField(bool show) { show_relax_field_ = show; }
 
     // 供 headless / 脚本用：立即执行 base color alpha 归一（等价面板按钮）。
     void RunAlphaNormalizeNow() { RunAlphaNormalize(); }
@@ -584,6 +648,9 @@ public:
 
         // 力学参照网格（蓝色 2D 像素；右上面板开关）。画在面板之下。
         DrawReferenceMesh(winfo, cmds);
+
+        // 松弛度场（蓝→红 2D 像素；松弛度面板开关）。画在面板之下。
+        DrawRelaxField(winfo, cmds);
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
@@ -1024,6 +1091,49 @@ private:
         }
     }
 
+    // ==================== 松弛度场可视化（蓝→红 2D 像素）====================
+    //
+    // 把已推导的逐顶点松弛度 lag_ratio ∈ [0,1] 投到屏幕，用 2px 方块标记：
+    //   0（固定点）= 蓝，1（全自由）= 红，中间线性过渡。
+    // 仅当 show_relax_field_ 开（松弛度面板勾选）且该 primitive 已推导、顶点数匹配时绘制。
+    void DrawRelaxField(const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) {
+        if (!show_relax_field_ || relax_lag_ratio_.empty()) {
+            return;
+        }
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg, winfo.width,
+                            winfo.height);
+        const float kMarkSize = 2.0f;
+        // 固定（0）= 蓝；自由（1）= 红。
+        const jpov::Vec3f kBlue(0.25f, 0.50f, 1.0f);
+        const jpov::Vec3f kRed(1.0f, 0.20f, 0.12f);
+        const size_t prims =
+            std::min(cloth_current_.size(), relax_lag_ratio_.size());
+        for (size_t i = 0; i < prims; ++i) {
+            const std::vector<jpov::Vec3f>& pos = cloth_current_[i].mesh.positions;
+            const std::vector<float>& lag = relax_lag_ratio_[i];
+            if (lag.size() != pos.size()) {
+                continue;  // 几何顶点数已变（如补洞）→ 该 primitive 的推导结果已失效
+            }
+            for (size_t v = 0; v < pos.size(); ++v) {
+                float px = 0.0f;
+                float py = 0.0f;
+                if (!ProjectToScreen(basis, pos[v], &px, &py, nullptr)) {
+                    continue;
+                }
+                const float t = std::clamp(lag[v], 0.0f, 1.0f);
+                const jpov::Vec3f c(kBlue.x() + (kRed.x() - kBlue.x()) * t,
+                                    kBlue.y() + (kRed.y() - kBlue.y()) * t,
+                                    kBlue.z() + (kRed.z() - kBlue.z()) * t);
+                cmds->DrawRect(
+                    /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                    /*size*/ {kMarkSize, kMarkSize}, jpov::Color{c.x(), c.y(), c.z(), 1.0f});
+            }
+        }
+    }
+
     // ==================== 面板（绘制 / UI）====================
     // 代码量大（约占本文件 1/3），拆到 `clothing_tool_panels.inc`，用「部分类」写法在**类体内**
     // #include 展开（仍是同一个 ClothingToolApp，零接口改动）。见该文件头说明。
@@ -1173,6 +1283,8 @@ private:
 
     // 发起保存：把当前衣服几何快照交给保存控制器（按值快照，之后改动不影响本次）。
     // 已自动蒙皮时带上骨架（写 glb 的 skin + inverseBindMatrices）。
+    // 已推导松弛度时，把逐顶点 (lag_ratio, max_lag) 注入快照 mesh 的 kRelax 属性
+    //（_JPOV_RELAX；顶点数不匹配的 primitive 跳过 = 推导结果已失效）。
     void StartSaveCloth() {
         if (cloth_current_.empty()) {
             LOG(WARNING) << "保存被忽略：衣服几何尚未就绪";
@@ -1182,7 +1294,24 @@ private:
         if (skinned_ && has_body_skeleton_) {
             skin = body_skeleton_;
         }
-        save_ctrl_.Start(cloth_current_, std::move(skin), cloth_path_, "cloth");
+        // 注入松弛度（copy-on-write：不改 cloth_current_，只改交给保存器的快照）。
+        std::vector<jpov::GltfSaveMesh> meshes = cloth_current_;
+        size_t relax_prims = 0;
+        for (size_t i = 0; i < meshes.size(); ++i) {
+            if (i >= relax_lag_ratio_.size() || relax_lag_ratio_[i].empty()) {
+                continue;
+            }
+            // ApplyRelaxToMesh 在顶点数不匹配（推导结果已过期）时返回 false 并不动 mesh。
+            if (ApplyRelaxToMesh(relax_lag_ratio_[i], relax_max_lag_ui_,
+                                 &meshes[i].mesh)) {
+                ++relax_prims;
+            }
+        }
+        if (relax_prims > 0) {
+            LOG(INFO) << "保存：写入 _JPOV_RELAX（" << relax_prims << " 个 primitive，max_lag="
+                      << relax_max_lag_ui_ << " m）";
+        }
+        save_ctrl_.Start(std::move(meshes), std::move(skin), cloth_path_, "cloth");
     }
 
     // 补洞（推进法，见 mesh_hole_fill.h）：对每个衣物 primitive 跑补洞，把网格里的破洞 /
@@ -1295,6 +1424,81 @@ private:
             weld_relative_ui_ ? "(相对局部边长)" : "(绝对距离)", total_weld,
             max_growth);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
+    }
+
+    // 求某 primitive 的固定点顶点 index（升序去重）：画笔选区 ∪ 可选「高度带」。
+    // 高度带未设时只取画笔选区。越界下标跳过。
+    std::vector<uint32_t> RelaxAnchorsForPrimitive(
+        size_t prim, const std::vector<jpov::Vec3f>& positions) const {
+        std::vector<uint32_t> out;
+        if (prim < brush_.primitive_count()) {
+            for (uint32_t idx : brush_.selected(prim)) {
+                if (idx < positions.size()) {
+                    out.push_back(idx);
+                }
+            }
+        }
+        if (relax_anchor_band_set_) {
+            for (size_t i = 0; i < positions.size(); ++i) {
+                const float y = positions[i].y();
+                if (y >= relax_anchor_ymin_ && y <= relax_anchor_ymax_) {
+                    out.push_back(static_cast<uint32_t>(i));
+                }
+            }
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
+    // 由固定点自动推导布料的逐顶点松弛度（relax_derive.h）。固定点 = 画笔选区（各 primitive）
+    // ∪ 可选「高度带」；每个有固定点的 primitive 各自推导，无固定点的 primitive 跳过。
+    // 结果存 relax_lag_ratio_（本工具内）；**保存 glb 时**才注入 mesh 的 kRelax（见 StartSaveCloth）。
+    // 注：变换 / 仿真不改顶点 index ⇒ 推导结果持续有效；补洞等**改顶点数**的操作会使某
+    //     primitive 失效（顶点数不匹配时自动跳过，可用面板重新推导）。
+    void RunDeriveRelax() {
+        if (cloth_current_.empty()) {
+            relax_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        SyncSimsToCloth();  // 以当前几何为准（顶点 index 与预测的 positions 对齐）
+        std::vector<std::vector<float>> result(cloth_current_.size());
+        size_t prims_done = 0;
+        size_t total_anchor = 0;
+        size_t total_verts = 0;
+        size_t total_unreach = 0;
+        float max_geo = 0.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const std::vector<jpov::Vec3f>& positions = cloth_current_[i].mesh.positions;
+            const std::vector<uint32_t> anchors =
+                RelaxAnchorsForPrimitive(i, positions);
+            if (anchors.empty()) {
+                continue;  // 该 primitive 无固定点：不动
+            }
+            RelaxDeriveStats stats;
+            result[i] = DeriveLagRatioFromAnchors(
+                cloth_current_[i].mesh, anchors, sim_weld_tolerance_, relax_radius_ui_,
+                kRelaxDeriveSmoothPasses, &stats);
+            ++prims_done;
+            total_anchor += stats.anchor_count;
+            total_verts += stats.vertex_count;
+            total_unreach += stats.unreachable_count;
+            max_geo = std::max(max_geo, stats.max_geodesic_m);
+        }
+        if (prims_done == 0) {
+            relax_lag_ratio_.clear();
+            relax_msg_ =
+                "无固定点：先用 3D 画笔涂抹固定点（或设高度带），再推导";
+            LOG(WARNING) << "松弛度推导：" << relax_msg_;
+            return;
+        }
+        relax_lag_ratio_ = std::move(result);
+        relax_msg_ = Format(
+            "松弛度：%zu/%zu primitive，固定点 %zu，顶点 %zu（不连通 %zu），"
+            "max测地 %.3f m（平滑 %d 轮）",
+            prims_done, cloth_current_.size(), total_anchor, total_verts, total_unreach,
+            static_cast<double>(max_geo), kRelaxDeriveSmoothPasses);
+        LOG(INFO) << relax_msg_;
     }
 
     // base color alpha 一键归一（面板按钮，见 base_color_alpha.h）：把贴图 alpha 置 1（不透明）。

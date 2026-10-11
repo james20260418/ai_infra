@@ -6,8 +6,8 @@
 //    原文件 1/3）拆出来，避免单头文件无限膨胀。不要单独 include；不要在别处复制这些方法。
 //
 // 覆盖：CommitNumberField / DrawPanels / DrawBrushPanel / ProcessBrush / DrawBrushMarkers /
-//       MouseOverUi / DrawHoleFillPanel / DrawLeftPanel / DrawRightPanel / DrawSkinPanel /
-//       DrawMotionPanel。
+//       MouseOverUi / DrawRelaxPanel / DrawHoleFillPanel / DrawLeftPanel / DrawRightPanel /
+//       DrawSkinPanel / DrawMotionPanel。
 
     // ==================== 面板 ====================
 
@@ -46,6 +46,7 @@
         DrawLeftPanel(cmds, w);
         DrawRightPanel(cmds, w, h);
         DrawBrushPanel(cmds, w, h);
+        DrawRelaxPanel(cmds, w, h);
         DrawSkinPanel(cmds, w, h);
         DrawHoleFillPanel(cmds, w, h);
         DrawMotionPanel(cmds, w, h);
@@ -96,6 +97,61 @@
         cmds->DrawText(status, /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                        kFontSize, kForeground, jpov::TextAlignment::kTopLeft,
                        kViewerFontAlias);
+    }
+
+    // ---- 顶部中间（画笔面板下方）：布料 LAG 松弛度 ----
+    //
+    // 由「固定点」（3D 画笔选区）自动推导逐顶点松弛度（relax_derive.h）。固定点 = 画笔选区
+    // ∪ 可选高度带；离固定点越远松弛度越大（测地距离），Laplacian 平滑去拐角。
+    // 推导结果存本工具内；**保存 glb 时**写入 _JPOV_RELAX。
+    // 行：标题(1) + 推导按钮(1) + 半径滑条(1) + max_lag 滑条(1) + 显示勾选(1) + 状态(1) = 6。
+    void DrawRelaxPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+        (void)win_h;
+        const float panel_w  = 0.30f * win_w;
+        const float panel_x = (win_w - panel_w) * 0.5f;  // 顶部居中，与画笔面板同列
+        // 紧接画笔面板（4 行）下方。
+        const float panel_y = kPanelMargin + PanelHeight(/*rows=*/4) + kPanelSpacing;
+        constexpr int kRows = 6;
+        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
+
+        DrawLabel("布料 LAG 松弛度", left, row_w, row_y);
+        row_y += step_y;
+
+        if (ui_.Button("由固定点推导松弛度",
+                       jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            RunDeriveRelax();
+        }
+        row_y += step_y;
+
+        // 松弛度饱和（升到 1）的测地距离（米）：0 = 自动（用到最远顶点的测地距离定标）。
+        ui_.SliderFloat("松弛度半径 (m, 0=自动)", &relax_radius_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        kRelaxRadiusMin, kRelaxRadiusMax, /*decimal_places*/ 3);
+        row_y += step_y;
+
+        // 逐顶点最大滞后位移 max_lag（米；相对当前 pose 的位移上限，防时间性拉伸）。
+        ui_.SliderFloat("最大滞后位移 max_lag (m)", &relax_max_lag_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        kRelaxMaxLagMin, kRelaxMaxLagMax, /*decimal_places*/ 3);
+        row_y += step_y;
+
+        // 松弛度场可视化（2D 像素：蓝 = 固定(0)，红 = 自由(1)）。
+        ui_.Checkbox("显示松弛度场（蓝=固定 红=自由）", &show_relax_field_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        if (!relax_msg_.empty()) {
+            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+            cmds->DrawText(relax_msg_,
+                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, kForeground,
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
     }
 
     // ---- 3D 画笔：每帧处理（在面板之后调用；可用本帧面板矩形）----

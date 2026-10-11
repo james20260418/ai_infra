@@ -111,6 +111,23 @@ struct NumberField {
 };
 
 
+// ── 布料 LAG 松弛度（由固定点自动推导，relax_derive.h；2026-10-11）──
+// 用户在衣物上涂抹「固定点」（如腰口），工具按**测地距离**自动推导其余顶点的松弛度
+// lag_ratio ∈ [0,1]（0 = 完全跟随当前 pose，1 = 完全滞后），参考
+// docs/jpov_instance_attr_lag_design.md §4.4。
+//
+// Laplacian 平滑轮数（去掉测地脊线的拐角，满足 §4.4 的低频要求）——固定值，不做滑条。
+inline constexpr int kRelaxDeriveSmoothPasses = 20;
+// 松弛度饱和（升到 1.0）的测地距离（米）；0 = 自动（用到最远顶点的测地距离定标）。
+inline constexpr float kRelaxRadiusAuto = 0.0f;
+inline constexpr float kRelaxRadiusMin  = 0.0f;
+inline constexpr float kRelaxRadiusMax  = 1.0f;
+// 逐顶点 max_lag（相对当前 pose 的最大允许位移，模型系米）默认值；全局一个值填给所有顶点。
+// 参考 §4.4 的逐顶点限幅（防时间性拉伸）。面板滑条可调。
+inline constexpr float kRelaxDefaultMaxLagM = 0.05f;
+inline constexpr float kRelaxMaxLagMin = 0.0f;
+inline constexpr float kRelaxMaxLagMax = 0.5f;
+
 // ── 面板布局（各面板共用；配合 ClothingToolApp::BeginPanel 使用）──
 inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间距
 inline constexpr float kPanelPad     = 10.0f;   // 面板内边距
