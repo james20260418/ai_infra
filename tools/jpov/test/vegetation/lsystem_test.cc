@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include "tools/jpov/src/vegetation/branch_mesh.h"
 #include "tools/jpov/src/vegetation/lsystem.h"
 
 namespace jpov {
@@ -239,6 +240,104 @@ TEST(DragonClawTest, TrunkGrowsUpwardBeforeBranches) {
     ASSERT_FALSE(sk.segments.empty());
     // 第一段（主干底部）应沿 +Y 向上。
     EXPECT_GT(sk.segments[0].end.y(), sk.segments[0].start.y());
+}
+
+// ============================ 枝链（polylines） ============================
+
+TEST(SkeletonPolylineTest, ContinuousForwardFormsOneChain) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)&(10)F(1)&(10)F(1)");
+    LSystem sys = b.Build();
+    TurtleConfig cfg;
+    Skeleton sk = GenerateSkeleton(sys, cfg, 0, 0);
+    ASSERT_EQ(sk.polylines.size(), 1u);
+    EXPECT_EQ(sk.polylines[0].points.size(), 4u);   // 3 段 → 4 个点
+    EXPECT_EQ(sk.polylines[0].radii.size(), 4u);
+}
+
+TEST(SkeletonPolylineTest, BracketsBreakChains) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)[F(1)]F(1)");
+    LSystem sys = b.Build();
+    TurtleConfig cfg;
+    Skeleton sk = GenerateSkeleton(sys, cfg, 0, 0);
+    // 主干首段 / 子枝 / 主干续段 = 3 条链。
+    EXPECT_EQ(sk.polylines.size(), 3u);
+}
+
+// ============================ 枝干管网格 ============================
+
+TEST(BranchMeshTest, EmptySkeletonGivesEmptyMesh) {
+    Skeleton sk;
+    const jpov::MeshData m = BuildBranchMesh(sk, BranchMeshConfig{});
+    EXPECT_TRUE(m.positions.empty());
+}
+
+TEST(BranchMeshTest, SingleChainVertexAndIndexCounts) {
+    // 一条 3 点的直链，8 边环。
+    Skeleton sk;
+    Polyline pl;
+    pl.points = {Vec3f(0, 0, 0), Vec3f(0, 1, 0), Vec3f(0, 2, 0)};
+    pl.radii = {0.2f, 0.15f, 0.1f};
+    sk.polylines.push_back(pl);
+
+    BranchMeshConfig cfg;
+    cfg.ring_edges = 8;
+    const jpov::MeshData m = BuildBranchMesh(sk, cfg);
+    // 顶点 = 3 点 × (8+1)。索引 = 2 段 × 8 环缝 × 6。
+    EXPECT_EQ(m.positions.size(), 3u * 9u);
+    EXPECT_EQ(m.indices.size(), 2u * 8u * 6u);
+    EXPECT_TRUE(jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kNormal));
+    EXPECT_TRUE(jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kUV));
+    m.Validate();
+}
+
+TEST(BranchMeshTest, NormalsAreUnitAndUvInRange) {
+    Skeleton sk;
+    Polyline pl;
+    pl.points = {Vec3f(0, 0, 0), Vec3f(0.3f, 1, 0.2f), Vec3f(0.1f, 2, -0.4f)};
+    pl.radii = {0.2f, 0.15f, 0.1f};
+    sk.polylines.push_back(pl);
+    BranchMeshConfig cfg;
+    cfg.ring_edges = 6;
+    const jpov::MeshData m = BuildBranchMesh(sk, cfg);
+    for (const Vec3f& n : m.normals) {
+        const float len = std::sqrt(n.x() * n.x() + n.y() * n.y() + n.z() * n.z());
+        EXPECT_NEAR(len, 1.0f, 1.0e-4f);
+    }
+    for (const jpov::Vec2f& uv : m.uvs) {
+        EXPECT_GE(uv.x(), 0.0f);
+        EXPECT_LE(uv.x(), 1.0f);
+        EXPECT_GE(uv.y(), 0.0f);
+        EXPECT_TRUE(std::isfinite(uv.y()));
+    }
+}
+
+TEST(BranchMeshTest, DragonClawBuildsNonEmptyMesh) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig tcfg;
+    Skeleton sk = GenerateSkeleton(sys, tcfg, 25, 0);
+    ASSERT_FALSE(sk.polylines.empty());
+    BranchMeshConfig bcfg;
+    const jpov::MeshData m = BuildBranchMesh(sk, bcfg);
+    EXPECT_GT(m.positions.size(), 100u);
+    EXPECT_EQ(m.indices.size() % 3u, 0u);
+    for (const Vec3f& p : m.positions) {
+        EXPECT_TRUE(std::isfinite(p.x()) && std::isfinite(p.y()) &&
+                    std::isfinite(p.z()));
+    }
+}
+
+TEST(BranchMeshTest, DeterministicAcrossRuns) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig tcfg;
+    BranchMeshConfig bcfg;
+    Skeleton a = GenerateSkeleton(sys, tcfg, 25, 7);
+    Skeleton b = GenerateSkeleton(sys, tcfg, 25, 7);
+    const jpov::MeshData ma = BuildBranchMesh(a, bcfg);
+    const jpov::MeshData mb = BuildBranchMesh(b, bcfg);
+    ASSERT_EQ(ma.positions.size(), mb.positions.size());
+    EXPECT_FLOAT_EQ(ma.positions.back().y(), mb.positions.back().y());
 }
 
 }  // namespace

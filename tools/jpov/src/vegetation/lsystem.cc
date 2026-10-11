@@ -541,6 +541,9 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
 
     Skeleton skel;
     std::vector<TurtleState> stack;
+    // 当前正在累积的枝链下标（-1 = 无）；分叉 `[`/`]` 与空移 `f` 会切断枝链。
+    int cur_polyline = -1;
+    const auto finish_polyline = [&cur_polyline]() { cur_polyline = -1; };
 
     for (const Module& m : modules) {
         switch (m.symbol) {
@@ -551,14 +554,25 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 Orthonormalize(&st);
                 const Vec3f end = VAdd(st.pos, VScale(st.H, len));
                 PushSegment(st, end, &skel);
+                // 枝链：续接当前链，或起一条新链（起点 = 当前位姿 + 当前半径）。
+                if (cur_polyline < 0) {
+                    skel.polylines.push_back(Polyline{});
+                    cur_polyline = static_cast<int>(skel.polylines.size()) - 1;
+                    skel.polylines[cur_polyline].points.push_back(st.pos);
+                    skel.polylines[cur_polyline].radii.push_back(st.radius);
+                }
+                const float new_radius = std::max(
+                    cfg.min_radius, st.radius * cfg.radius_taper_per_segment);
+                skel.polylines[cur_polyline].points.push_back(end);
+                skel.polylines[cur_polyline].radii.push_back(new_radius);
                 st.pos = end;
-                st.radius = std::max(cfg.min_radius,
-                                     st.radius * cfg.radius_taper_per_segment);
+                st.radius = new_radius;
                 break;
             }
             case 'f': {
                 const float len_units = m.params.empty() ? 1.0f : m.params[0];
                 Orthonormalize(&st);
+                finish_polyline();   // 空移切断枝链（不画）
                 st.pos = VAdd(st.pos, VScale(st.H, len_units * cfg.length_scale));
                 break;
             }
@@ -598,12 +612,14 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 st.L = RotateAround(st.L, st.U, kPi);
                 break;
             case '[':
+                finish_polyline();   // 分支点切断母枝链
                 stack.push_back(st);
                 st.radius = std::max(cfg.min_radius,
                                      st.radius * cfg.radius_taper_per_branch);
                 break;
             case ']':
                 CHECK(!stack.empty()) << "龟图遇到 ']' 但栈为空（括号不配对）";
+                finish_polyline();   // 出分支后母枝继续，需起新链
                 st = stack.back();
                 stack.pop_back();
                 break;

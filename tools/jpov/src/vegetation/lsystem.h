@@ -188,9 +188,20 @@ struct Segment {
     float radius = 0.0f;
 };
 
-// 拓扑树骨架 = 一串可独立绘制的线段（已展平，不含分支拓扑，但保留几何）。
+// 一条「枝链」：连续前进画出的一串点 + 逐点半径（供管状 mesher 扫掠用）。
+// 分叉（`[`/`]`）与空移（`f`）会切断枝链——故每段枝链是「从上一个分叉点到下一个分叉点」
+// 的连通折线。
+struct Polyline {
+    std::vector<Vec3f> points;   // 至少 2 个点
+    std::vector<float> radii;    // 与 points 等长（逐点管半径）
+};
+
+// 拓扑树骨架：
+//   · segments  —— 展平后的每一根棒（可视化/统计，逐 F 一段）
+//   · polylines —— 连通枝链（管状 mesher 的输入，保证连续扫掠平滑）
 struct Skeleton {
     std::vector<Segment> segments;
+    std::vector<Polyline> polylines;
 };
 
 // 由 L-System 生成骨架：Expand → 龟图解释。

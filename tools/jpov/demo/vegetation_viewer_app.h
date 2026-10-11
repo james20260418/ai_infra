@@ -31,6 +31,7 @@
 #include "tools/jpov/demo/viewer_app.h"   // kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/ui.h"
+#include "tools/jpov/src/vegetation/branch_mesh.h"
 #include "tools/jpov/src/vegetation/lsystem.h"
 
 namespace jpov_vegetation {
@@ -116,6 +117,11 @@ public:
     float base_radius_  = 0.06f;    // 主干半径（米）
     int   seed_         = 0;        // 随机种子（确定性语法下无视觉影响）
 
+    // ── 枝干网格表示 ──
+    bool  use_tube_    = true;      // true=管状（BuildBranchMesh）；false=棒棒（拓扑预览）
+    int   ring_edges_  = 8;         // 管截面边数
+    float uv_tile_len_ = 1.0f;      // bark 纹理沿枝循环长度（米）
+
     // ── 场景资源 ──
     uint32_t ground_mesh_ = 0;
     jpov::PBRMaterial tree_mat_;    // 枝干材质（棕、粗糙）
@@ -150,6 +156,8 @@ public:
         prev_length_scale_ = length_scale_;
         prev_base_radius_  = base_radius_;
         prev_seed_         = seed_;
+        prev_use_tube_     = use_tube_;
+        prev_ring_edges_   = ring_edges_;
     }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用。
@@ -176,12 +184,16 @@ public:
             if (generations_ != prev_generations_ ||
                 length_scale_ != prev_length_scale_ ||
                 base_radius_ != prev_base_radius_ ||
-                seed_ != prev_seed_) {
+                seed_ != prev_seed_ ||
+                use_tube_ != prev_use_tube_ ||
+                ring_edges_ != prev_ring_edges_) {
                 RebuildTree();
                 prev_generations_  = generations_;
                 prev_length_scale_ = length_scale_;
                 prev_base_radius_  = base_radius_;
                 prev_seed_         = seed_;
+                prev_use_tube_     = use_tube_;
+                prev_ring_edges_   = ring_edges_;
             }
         }
 
@@ -252,7 +264,15 @@ private:
         if (segment_count_ == 0) {
             return;   // 无线段（代数太小）→ 保持不画，不构造空网格
         }
-        const jpov::MeshData mesh = BuildSkeletonMesh(skel);
+        jpov::MeshData mesh;
+        if (use_tube_) {
+            jpov::vegetation::BranchMeshConfig bcfg;
+            bcfg.ring_edges = ring_edges_;
+            bcfg.uv_tile_length = uv_tile_len_;
+            mesh = jpov::vegetation::BuildBranchMesh(skel, bcfg);
+        } else {
+            mesh = BuildSkeletonMesh(skel);   // 拓扑预览用（盒棒）
+        }
         if (mesh.positions.empty()) {
             return;
         }
@@ -275,7 +295,7 @@ private:
         const float kSpace  = 12.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 5;
+        const int   kRows   = 7;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -296,10 +316,15 @@ private:
             seed_ = static_cast<int>(seed_f + 0.5f);
         }
         // 状态行：线段数（= 拓扑树的边数）+ 树种名。
+        ui_.Checkbox("枝干：管状 (取消=棒棒拓扑)", &use_tube_, row(4));
+        float edges_f = static_cast<float>(ring_edges_);
+        if (ui_.SliderFloat("管截面边数", &edges_f, row(5), 3.0f, 16.0f, /*dec*/0)) {
+            ring_edges_ = static_cast<int>(edges_f + 0.5f);
+        }
         char info[96];
         std::snprintf(info, sizeof(info), "龙爪槐  |  线段 %zu",
                       segment_count_);
-        ui_.Text(info, row(4));
+        ui_.Text(info, row(6));
     }
 
     bool show_panel_ = true;
@@ -311,6 +336,8 @@ private:
     float prev_length_scale_ = 0.0f;
     float prev_base_radius_  = 0.0f;
     int   prev_seed_         = -1;
+    bool  prev_use_tube_     = true;
+    int   prev_ring_edges_   = 8;
 
     static constexpr float kSliderFontSize = 16.0f;
 };

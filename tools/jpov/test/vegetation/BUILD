@@ -5,6 +5,7 @@ cc_test(
     name = "lsystem_test",
     srcs = ["lsystem_test.cc"],
     deps = [
+        "//tools/jpov/src/vegetation:branch_mesh",
         "//tools/jpov/src/vegetation:lsystem",
         "@glog_static//:glog",
         "@gtest//:gtest_main",

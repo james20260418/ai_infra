@@ -14,3 +14,18 @@ cc_library(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# 枝干管网格 —— 把骨架枝链扫成管状 mesh（GL-free、确定性、可单测）。
+cc_library(
+    name = "branch_mesh",
+    srcs = ["branch_mesh.cc"],
+    hdrs = ["branch_mesh.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lsystem",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
