@@ -802,6 +802,19 @@ private:
     void SyncSimsToCloth() {
         for (size_t i = 0; i < sims_.size(); ++i) {
             jpov::MeshData m = sims_[i].mesh();
+            // 仿真器只持有**几何**，不持有顶点**注释**（蒙皮 JOINTS/WEIGHTS ⇒ kJoints）。
+            // 若当前快照已带蒙皮且顶点数一致，就把它**挪回来**（否则会把蒙皮写没，并与已注册
+            // GPU mesh 的 flags 不一致 → UpdateMesh CHECK 崩）。蒙皮后几何已冻结、本不该走到
+            // 这里；这是**防御**（详见 RunDeriveRelax 的注释）。
+            const jpov::MeshData& prev = cloth_current_[i].mesh;
+            if (jpov::MeshHasFlag(prev.flags, jpov::MeshVertexFlags::kJoints) &&
+                prev.joint_indices.size() == m.positions.size()) {
+                m.joint_indices = prev.joint_indices;
+                m.joint_weights = prev.joint_weights;
+                m.flags = static_cast<jpov::MeshVertexFlags>(
+                    static_cast<uint8_t>(m.flags) |
+                    static_cast<uint8_t>(jpov::MeshVertexFlags::kJoints));
+            }
             // 顶点被物理改过 / 被即时变换过 → 法线须重算，否则着色停留在旧姿态。
             RecomputeVertexNormals(&m);
             UpdateMesh(cloth_.primitives[i].mesh_id, m);
@@ -1461,7 +1474,10 @@ private:
             relax_msg_ = "衣服几何尚未就绪";
             return;
         }
-        SyncSimsToCloth();  // 以当前几何为准（顶点 index 与预测的 positions 对齐）
+        // ⚠️ **不要**在这里 SyncSimsToCloth()：几何以 cloth_current_ 为准（每次仿真 / 变换后
+        //   都已同步到它），而仿真器的网格是**蒙皮前**的副本、不含 JOINTS/WEIGHTS —— 若在蒙皮
+        //   后回拉几何会把蒙皮清掉（并与已注册 GPU mesh 的 flags 冲突 → UpdateMesh CHECK 崩）。
+        //   松弛度是**逐顶点标注**，只读 positions，无需回拉几何。
         std::vector<std::vector<float>> result(cloth_current_.size());
         size_t prims_done = 0;
         size_t total_anchor = 0;
