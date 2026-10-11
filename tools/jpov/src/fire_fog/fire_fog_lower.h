@@ -72,6 +72,64 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     return b;
 }
 
+// 命令层火焰 → 后端统一团（**kFlame** 燃料盒包裹燃烧）。
+//
+// 容器 OBB（CPU 剪枝 / z 范围用）= 燃料盒**沿 up 外扩 plume、各向再外扩 shell** 的保守包围，
+// 轴对齐（MVP）。与 GLSL `SampleFlame` 用**同一公式**（两边必须一致，否则剪枝漏火）。kind = kFlame；
+// params[0..2] = up（单位向量）、params[3] = shell、params[4] = plume、params[5] = vigor。
+// 燃料盒本身（center / box_half）不入 params —— 由 bound（容器）+ up/shell/plume 在**打包时**反解
+//（与 kRoundBox「bound = 外沿容器，内部尺寸反解」同套路）。
+// Pre-conditions: size 各分量 > 0；up 非零；shell > 0；plume >= 0；vigor >= 0；sigma >= 0；
+//                 albedo ∈ [0,1]；emission >= 0
+inline FogBody LowerFlameFog(const FlameFog& f) {
+    CHECK_GT(f.size.x(), 0.0f) << "FlameFog.size 各分量必须 > 0";
+    CHECK_GT(f.size.y(), 0.0f) << "FlameFog.size 各分量必须 > 0";
+    CHECK_GT(f.size.z(), 0.0f) << "FlameFog.size 各分量必须 > 0";
+    CHECK_GT(f.shell, 0.0f) << "FlameFog.shell（包裹壳厚）必须 > 0";
+    CHECK_GE(f.plume, 0.0f) << "FlameFog.plume（羽流段长）必须 >= 0";
+    CHECK_GE(f.vigor, 0.0f) << "FlameFog.vigor（旺盛度）必须 >= 0";
+    CHECK_GE(f.sigma, 0.0f) << "FlameFog.sigma（消光系数 1/m）必须 >= 0";
+    CHECK_GE(f.albedo.r, 0.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(f.albedo.g, 0.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(f.albedo.b, 0.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(f.albedo.r, 1.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(f.albedo.g, 1.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(f.albedo.b, 1.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(f.emission.r, 0.0f) << "FlameFog.emission 各通道必须 >= 0";
+    CHECK_GE(f.emission.g, 0.0f) << "FlameFog.emission 各通道必须 >= 0";
+    CHECK_GE(f.emission.b, 0.0f) << "FlameFog.emission 各通道必须 >= 0";
+
+    const float up_norm = f.up.Norm();
+    CHECK_GT(up_norm, 1.0e-6f) << "FlameFog.up 必须是非零向量";
+    const Vec3f up = f.up * (1.0f / up_norm);
+
+    const Vec3f box_half = f.size * 0.5f;   // 燃料盒半尺寸
+    FogBody b;
+    b.kind = FogFieldKind::kFlame;
+    b.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
+    b.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
+    b.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
+    // 容器 = 盒 ⊞「各向 shell + 沿 up plume/2 偏移外扩」（与 SampleFlame 一致，保守不漏）。
+    b.bound.center = f.center + up * (0.5f * f.plume);
+    b.bound.half_extent = Vec3f(
+        box_half.x() + f.shell + 0.5f * f.plume * std::abs(up.x()),
+        box_half.y() + f.shell + 0.5f * f.plume * std::abs(up.y()),
+        box_half.z() + f.shell + 0.5f * f.plume * std::abs(up.z()));
+    b.sigma = f.sigma;
+    b.albedo = f.albedo;
+    b.emission = f.emission;
+    for (int i = 0; i < 8; ++i) {
+        b.params[i] = 0.0f;
+    }
+    b.params[0] = up.x();
+    b.params[1] = up.y();
+    b.params[2] = up.z();
+    b.params[3] = f.shell;
+    b.params[4] = f.plume;
+    b.params[5] = f.vigor;
+    return b;
+}
+
 // 某 OBB（团容器 / 点光源影响球）覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒
 // *out_behind=true 且 out_tiles 清空，调用方按「保守全屏」处理。
 //

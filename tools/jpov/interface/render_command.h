@@ -485,6 +485,31 @@ struct PointFog {
     FogAttenuation attenuation;   // 圆角外壳的衰减剖面（形状）
 };
 
+// 燃料盒包裹燃烧（FlameFog）—— 命令层**火焰**子 command，降维成后端 kFlame 团。
+//
+// 语义：一个**燃料盒**（center + size；MVP 轴对齐）被火焰包裹燃烧。火焰「形」（MVP，暂不含 3D 纹理）：
+//   · **包裹壳**：燃料盒**表面外侧**厚 shell 的一层自发光（盒内 = 固体燃料，不发光/不消光）；
+//   · **浮力羽流**：盒顶沿 up 方向伸出的一段上升柱（长 plume）。
+// 火焰**方向**由 up 给出（默认世界 +Y =「火苗朝上」）；旺盛度 vigor 放大自发光 emission。
+//
+// 源项与 PointFog 同规则（J = albedo·L_light + ε），走**同一条** froxel 体积管线。
+//
+// 字段（按此顺序聚合初始化）：{ center, size, up, shell, plume, vigor, sigma, albedo, emission }
+//
+// Pre-condition: size 各分量 > 0；up 非零向量（会被归一化）；shell > 0；plume >= 0；
+//                vigor >= 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0。
+struct FlameFog {
+    Vec3f center;    // 燃料盒中心（世界坐标）
+    Vec3f size;      // 燃料盒长宽高（米，各 > 0）
+    Vec3f up;        // 火苗主方向（浮力方向，世界系；默认 {0,1,0}）—— 归一化后使用
+    float shell;     // 包裹外壳厚度（米，> 0）：盒表面外侧的自发光层
+    float plume;     // 盒顶上方浮力羽流段长度（米，>= 0）
+    float vigor;     // 旺盛程度（>= 0）：自发光（emission）的整体放大系数
+    float sigma;     // 消光系数 σ_t（1/m，>= 0）
+    Color albedo;    // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
+    Color emission;  // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
+};
+
 // Fire-Fog（froxel 体积雾）管线参数。
 //
 // 由雾火查看器暴露以调参；仅在 point_fogs 非空时生效（空则整条管线跳过）。
@@ -1849,6 +1874,10 @@ struct RenderCommandList {
     // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
     // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
     std::vector<PointFog> point_fogs;
+
+    // 燃料盒包裹燃烧列表（世界空间）。与 point_fogs 走**同一条** Fire-Fog 体积管线（降维成
+    // 后端 kFlame 团，与 kRoundBox 团在同一 inject pass 内 over 合成）。空列表时零开销跳过。
+    std::vector<FlameFog> flame_fogs;
 
     // Fire-Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
     std::optional<FireFogParams> fire_fog;

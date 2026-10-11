@@ -92,7 +92,7 @@ cc_library(
 )
 
 # 布局契约单测：解析 fire_fog_shader.h 的 //@FOGLAYOUT 标记 / #define，
-# 与 fog_body.h 的 kFogBodyLayout / fog_layout 常量逐项比对（防 CPU-GLSL 静默漂移）。
+# 与 fog_body.h 的按作用域布局表（kFogBodyCommonLayout + 各 kind union）/ fog_layout 常量逐项比对（防 CPU-GLSL 静默漂移）。
 cc_test(
     name = "fire_fog_contract_test",
     srcs = ["fire_fog_contract_test.cc"],

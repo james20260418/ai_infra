@@ -34,13 +34,14 @@ struct Obb {
 
 // 采样器种类（「多种类」的核心，唯一 kind 分派点）。
 //
-// ⚠️ v1 只实现 kRoundBox；其余是**扩展点**（语义与字段映射见设计文档 §10.3），
-// 加一个 kind 不动 tile 剪枝 / ZDist（只加一个 SampleField 分支）。
+// ⚠️ 已实现 kRoundBox（圆角盒）、kFlame（燃料盒包裹燃烧）；其余是**扩展点**（语义与字段映射
+// 见设计文档 §10.3），加一个 kind 不动 tile 剪枝 / ZDist（只加一个 SampleXXX 分支）。
 enum class FogFieldKind : uint8_t {
     kRoundBox        = 0,  // 圆角盒：OBB 容器 + 盒内按「圆角盒距离」衰减（替换早期点雾/球）
     kHeightSlab      = 1,  // 贴地垂直 slab + 2D 域扭曲滚动（地表薄雾）
     kNoiseVolume     = 2,  // fbm/curl 调制「密度 × 发射」（火 / 烟 / 蘑菇云）
     kShell           = 3,  // 薄壳（冲击波 / 爆燃环）
+    kFlame           = 4,  // 燃料盒包裹燃烧（盒壳自发光 + 沿 up 的浮力羽流；MVP 无 3D 纹理）
 };
 
 // 后端唯一「团」记录（POD；预定进缓冲纹理，texelFetch 随机访问）。
@@ -79,18 +80,32 @@ inline constexpr int kTexelsPerBody = 10;   // 每团 texel 数（公共头 2 + 
 inline constexpr int kCommonTexels = 2;     // 公共头 texel 数（所有 kind 含义固定）
 }  // namespace fog_layout
 
-// 公共头 + 当前唯一 kind（kRoundBox）的 union 字段表。字段名即 //@FOGLAYOUT 的 token。
-inline constexpr FogBodyLayoutEntry kFogBodyLayout[] = {
-    // ── 公共头（所有 kind）──
+// 字段表按**作用域**拆：公共头（所有 kind 含义固定）+ 各 kind 的 union 区（占同一段 texel，
+// 按 kind 解释）。字段名即 //@FOGLAYOUT 的 token（GLSL 侧带 scope 前缀）。
+
+// ── 公共头（所有 kind；texel 0..1）──
+inline constexpr FogBodyLayoutEntry kFogBodyCommonLayout[] = {
     {0, 0, "kind"},      {0, 1, "sigma"},     {0, 2, "albedo_r"},  {0, 3, "albedo_g"},
     {1, 0, "albedo_b"},  {1, 1, "emission_r"},{1, 2, "emission_g"},{1, 3, "emission_b"},
-    // ── union：kRoundBox 几何 + 形状（texel 2..6）──
-    //   bound_h* = 容器半尺寸（内盒半 size/2 + radius）；radius = 外侧圆角壳厚度；atten = 壳剖面
+};
+
+// ── union：kRoundBox 几何 + 形状（texel 2..6）──
+//   bound_h* = 容器半尺寸（内盒半 size/2 + radius）；radius = 外侧圆角壳厚度；atten = 壳剖面
+inline constexpr FogBodyLayoutEntry kRoundBoxUnionLayout[] = {
     {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"},  {2, 3, "bound_hx"},
     {3, 0, "bound_hy"},  {3, 1, "bound_hz"},  {3, 2, "axis0_x"},   {3, 3, "axis0_y"},
     {4, 0, "axis0_z"},   {4, 1, "axis1_x"},   {4, 2, "axis1_y"},   {4, 3, "axis1_z"},
     {5, 0, "axis2_x"},   {5, 1, "axis2_y"},   {5, 2, "axis2_z"},   {5, 3, "radius"},
     {6, 0, "atten"},     {6, 1, "reserved"},  {6, 2, "reserved"},  {6, 3, "reserved"},
+};
+
+// ── union：kFlame 燃料盒包裹燃烧（texel 2..4）──
+//   center/box_h = 燃料盒中心 / 半尺寸（世界单位，MVP 轴对齐）；up = 火苗主方向（单位向量）；
+//   shell = 包裹壳厚；plume = 羽流段长；vigor = 旺盛度（自发光放大）。
+inline constexpr FogBodyLayoutEntry kFlameUnionLayout[] = {
+    {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"},  {2, 3, "box_hx"},
+    {3, 0, "box_hy"},    {3, 1, "box_hz"},    {3, 2, "up_x"},      {3, 3, "up_y"},
+    {4, 0, "up_z"},      {4, 1, "shell"},     {4, 2, "plume"},     {4, 3, "vigor"},
 };
 
 }  // namespace jpov

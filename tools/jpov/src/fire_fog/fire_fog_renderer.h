@@ -117,6 +117,7 @@ public:
     // 说明：fogs 为空时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 / viewport /
     //       活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
     void Draw(const std::vector<PointFog>& fogs,
+              const std::vector<FlameFog>& flame_fogs,
               const std::vector<PointLight>& point_lights,
               const Camera& cam,
               const float view_proj[16],
@@ -199,7 +200,7 @@ private:
     int z_slices_count_ = 0;   // 表长度 = nz+1
 
     // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*fog_layout::kTexelsPerBody，高 = 1）。
-    // 每团 texel 布局见 fog_body.h kFogBodyLayout（公共头 + 按 kind 的 union 区）。
+    // 每团 texel 布局见 fog_body.h 的按作用域布局表（公共头 + 按 kind 的 union 区）。
     unsigned int fog_body_tex_ = 0;
 
     // 1×1 R32F 哑元深度纹理（值 = 1.0）：调用方传 scene_depth_tex==0 时使用，

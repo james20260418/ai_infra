@@ -4,8 +4,8 @@
 // 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
 // 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
 //
-// 交互面板（见 fire_fog_viewer_app.h）：box 中心 x/y/z、长宽高、外侧圆角半径、消光 σ、衰减剖面、
-// 散射色 albedo、自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
+// 交互面板（见 fire_fog_viewer_app.h）：**顶栏**团类型下拉（圆角盒 / 火焰）；**左下** per-团类型
+// 调参面板（随团类型切换）；**右下** 光照面板（点光源 / 太阳 / god ray / froxel 分辨率，全局共享）。
 // ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
@@ -104,6 +104,7 @@ int RunCapture(const std::string& out_dir) {
     };
 
     DefaultView(app);
+    app.fog_kind_index_ = static_cast<int>(jpov_fire_fog::FogKindChoice::kRoundBox);  // A–O 段用圆角盒
     app.deg_.sun_elev_deg = 18.0f;   // 低太阳 ⇒ 长影、god ray 更明显
     app.deg_.turbidity = 2.0f;
 
@@ -285,12 +286,42 @@ int RunCapture(const std::string& out_dir) {
     app.fog_radius_ = 1.0f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
+    // ── P. kFlame：燃料盒包裹燃烧「形」（MVP 无 3D 纹理）──
+    DefaultView(app);
+    app.fog_kind_index_ = static_cast<int>(jpov_fire_fog::FogKindChoice::kFlame);
+    app.deg_.sun_elev_deg = 14.0f;
+    app.deg_.turbidity = 2.0f;
+    app.flame_center_ = jpov::Vec3f(0.0f, 2.0f, 0.0f);
+    app.flame_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
+    app.flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
+    app.flame_shell_ = 0.6f;
+    app.flame_plume_ = 3.0f;
+    app.flame_vigor_ = 3.0f;
+    app.flame_sigma_ = 1.2f;
+    app.flame_emission_ = jpov::Color{1.0f, 0.45f, 0.12f, 1.0f};
+    shoot("70_flame_default");
+    for (float pl : {0.0f, 2.0f, 5.0f}) {
+        app.flame_plume_ = pl;
+        shoot(("71_flame_plume" + std::to_string(static_cast<int>(pl))).c_str());
+    }
+    app.flame_plume_ = 3.0f;
+    for (float sh : {0.3f, 0.8f, 1.6f}) {
+        app.flame_shell_ = sh;
+        shoot(("72_flame_shell" + std::to_string(static_cast<int>(sh * 10))).c_str());
+    }
+    app.flame_shell_ = 0.6f;
+    // 火苗方向（box 倾斜 / 风）：up 倾侧 ⇒ 羽流跟随。
+    app.flame_up_ = jpov::Vec3f(0.7f, 1.0f, 0.0f);
+    shoot("73_flame_tilt");
+    app.flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();
     app.SetShowPanel(true);
     app.SetShowFog(false);
     shoot("98_panel_nofog");
+    app.fog_kind_index_ = static_cast<int>(jpov_fire_fog::FogKindChoice::kFlame);
     app.SetShowFog(true);
     shoot("99_panel_ui");
 

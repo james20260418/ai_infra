@@ -448,6 +448,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
 }
 
 void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
+                           const std::vector<FlameFog>& flame_fogs,
                            const std::vector<PointLight>& point_lights,
                            const Camera& cam,
                            const float view_proj[16],
@@ -457,7 +458,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            const FireFogParams& params,
                            const FireFogLighting& light) {
     CHECK(shader_mgr_ != nullptr) << "FireFogRenderer::Init 未调用";
-    if (fogs.empty()) {
+    if (fogs.empty() && flame_fogs.empty()) {
         return;   // 零开销
     }
     CHECK_GT(viewport_w, 0);
@@ -518,17 +519,23 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     }
     glActiveTexture(GL_TEXTURE0);
 
-    // ── 命令层点雾 → 后端统一团（FogBody）──
-    int count = static_cast<int>(fogs.size());
+    // ── 命令层雾体（圆角盒 + 火焰）→ 后端统一团（FogBody）──
+    //   两种子 command 先各自降维，再**合并**进同一份团列表（同一 inject pass over 合成）。
+    const int round_count = static_cast<int>(fogs.size());
+    const int flame_count = static_cast<int>(flame_fogs.size());
+    int count = round_count + flame_count;
     if (count > kMaxTotalFogs) {
-        LOG(WARNING) << "point_fogs 数量 " << count << " 超过上限 " << kMaxTotalFogs
+        LOG(WARNING) << "point_fogs + flame_fogs 数量 " << count << " 超过上限 " << kMaxTotalFogs
                      << "，仅前 " << kMaxTotalFogs << " 个生效";
         count = kMaxTotalFogs;
     }
     bodies_.clear();
     bodies_.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        bodies_.push_back(LowerPointFog(fogs[i]));
+    for (int i = 0; i < round_count && static_cast<int>(bodies_.size()) < count; ++i) {
+        bodies_.push_back(LowerPointFog(fogs[static_cast<size_t>(i)]));
+    }
+    for (int i = 0; i < flame_count && static_cast<int>(bodies_.size()) < count; ++i) {
+        bodies_.push_back(LowerFlameFog(flame_fogs[static_cast<size_t>(i)]));
     }
 
     // ── CPU 屏幕 tile 剪枝（每 tile ≤K 个团索引）+ 每 tile 保守 z 范围（GL-free）──
@@ -556,7 +563,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     GL_RGBA, GL_UNSIGNED_BYTE, light_data.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // ── 团属性纹理（RGBA32F；每团 kBodyTexelsPerFog texel，见 fog_body.h kFogBodyLayout）──
+    // ── 团属性纹理（RGBA32F；每团 kBodyTexelsPerFog texel，见 fog_body.h 的按作用域布局表）──
     //    布局：t0=(kind,sigma,albedo.r,albedo.g) t1=(albedo.b,emission.rgb)
     //          t2..t6 = kRoundBox union（容器 center/bound_half/axes/radius/atten）
     const int body_tex_w = kMaxTotalFogs * kBodyTexelsPerFog;
@@ -577,11 +584,6 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         const size_t base = static_cast<size_t>(i) * kBodyTexelsPerFog * 4;
         float* t0 = &body_attr[base + 0 * 4];
         float* t1 = &body_attr[base + 1 * 4];
-        float* t2 = &body_attr[base + 2 * 4];
-        float* t3 = &body_attr[base + 3 * 4];
-        float* t4 = &body_attr[base + 4 * 4];
-        float* t5 = &body_attr[base + 5 * 4];
-        float* t6 = &body_attr[base + 6 * 4];
         t0[0] = static_cast<float>(static_cast<uint8_t>(b.kind));   // kind
         t0[1] = b.sigma;
         t0[2] = b.albedo.r;
@@ -590,23 +592,57 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         t1[1] = b.emission.r;
         t1[2] = b.emission.g;
         t1[3] = b.emission.b;
-        t2[0] = b.bound.center.x();
-        t2[1] = b.bound.center.y();
-        t2[2] = b.bound.center.z();
-        t2[3] = b.bound.half_extent.x();
-        t3[0] = b.bound.half_extent.y();
-        t3[1] = b.bound.half_extent.z();
-        t3[2] = b.bound.axis[0].x();
-        t3[3] = b.bound.axis[0].y();
-        t4[0] = b.bound.axis[0].z();
-        t4[1] = b.bound.axis[1].x();
-        t4[2] = b.bound.axis[1].y();
-        t4[3] = b.bound.axis[1].z();
-        t5[0] = b.bound.axis[2].x();
-        t5[1] = b.bound.axis[2].y();
-        t5[2] = b.bound.axis[2].z();
-        t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
-        t6[0] = b.params[0];               // attenuation 枚举
+        if (b.kind == FogFieldKind::kRoundBox) {
+            float* t2 = &body_attr[base + 2 * 4];
+            float* t3 = &body_attr[base + 3 * 4];
+            float* t4 = &body_attr[base + 4 * 4];
+            float* t5 = &body_attr[base + 5 * 4];
+            float* t6 = &body_attr[base + 6 * 4];
+            t2[0] = b.bound.center.x();
+            t2[1] = b.bound.center.y();
+            t2[2] = b.bound.center.z();
+            t2[3] = b.bound.half_extent.x();
+            t3[0] = b.bound.half_extent.y();
+            t3[1] = b.bound.half_extent.z();
+            t3[2] = b.bound.axis[0].x();
+            t3[3] = b.bound.axis[0].y();
+            t4[0] = b.bound.axis[0].z();
+            t4[1] = b.bound.axis[1].x();
+            t4[2] = b.bound.axis[1].y();
+            t4[3] = b.bound.axis[1].z();
+            t5[0] = b.bound.axis[2].x();
+            t5[1] = b.bound.axis[2].y();
+            t5[2] = b.bound.axis[2].z();
+            t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
+            t6[0] = b.params[0];               // attenuation 枚举
+        } else if (b.kind == FogFieldKind::kFlame) {
+            // bound = 容器（盒沿 up 外扩 plume、各向再外扩 shell）；反解燃料盒 center / box_half
+            //（与 LowerFlameFog / GLSL SampleFlame 同一公式）。打包字段 → flame union（t2..t4）。
+            const Vec3f up(b.params[0], b.params[1], b.params[2]);
+            const float shell = b.params[3];
+            const float plume = b.params[4];
+            const float vigor = b.params[5];
+            const Vec3f fuel_center = b.bound.center - up * (0.5f * plume);
+            const Vec3f box_half(
+                b.bound.half_extent.x() - shell - 0.5f * plume * std::abs(up.x()),
+                b.bound.half_extent.y() - shell - 0.5f * plume * std::abs(up.y()),
+                b.bound.half_extent.z() - shell - 0.5f * plume * std::abs(up.z()));
+            float* t2 = &body_attr[base + 2 * 4];
+            float* t3 = &body_attr[base + 3 * 4];
+            float* t4 = &body_attr[base + 4 * 4];
+            t2[0] = fuel_center.x();
+            t2[1] = fuel_center.y();
+            t2[2] = fuel_center.z();
+            t2[3] = box_half.x();
+            t3[0] = box_half.y();
+            t3[1] = box_half.z();
+            t3[2] = up.x();
+            t3[3] = up.y();
+            t4[0] = up.z();
+            t4[1] = shell;
+            t4[2] = plume;
+            t4[3] = vigor;
+        }
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count * kBodyTexelsPerFog, 1,

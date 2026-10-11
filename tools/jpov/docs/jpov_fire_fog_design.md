@@ -205,7 +205,9 @@ struct FogBody {
 | 0 | `kind` | `sigma` | `albedo.r` | `albedo.g` |
 | 1 | `albedo.b` | `emission.r` | `emission.g` | `emission.b` |
 
-union 区（当前唯一 kind `kRoundBox`，texel 2..6）：
+union 区（**按 kind 分作用域**，占同一段 texel、按 kind 解释）。当前两种 kind：
+
+`kRoundBox`（texel 2..6）：
 
 | texel | x | y | z | w |
 |---|---|---|---|---|
@@ -215,13 +217,25 @@ union 区（当前唯一 kind `kRoundBox`，texel 2..6）：
 | 5 | `axis2_x` | `axis2_y` | `axis2_z` | `radius` |
 | 6 | `atten` | `reserved` | `reserved` | `reserved` |
 
+`kFlame`（texel 2..4；燃料盒包裹燃烧，MVP）：
+
+| texel | x | y | z | w |
+|---|---|---|---|---|
+| 2 | `center_x` | `center_y` | `center_z` | `box_hx` |
+| 3 | `box_hy` | `box_hz` | `up_x` | `up_y` |
+| 4 | `up_z` | `shell` | `plume` | `vigor` |
+
 （texel 7..9 预留，供将来的复杂 kind —— 如噪声火。尺寸选值依据：最坏 kind 的解析参数 ≈ 36 float
 + 公共头 8 ⇒ 落在第 9 个 texel；故开 10、留一档。stride 是全局常量，改它动所有 kind，一次开够。）
 
-**契约（防 CPU/GLSL 静默漂移）**：布局是两侧**单一来源** —— `fog_body.h` 的 `kFogBodyLayout`
-（C++ 表：字段名 + texel + 分量）与 `fire_fog_shader.h` 的 GLSL（`//@FOGLAYOUT` 标记行 +
+**契约（防 CPU/GLSL 静默漂移）**：布局是两侧**单一来源** —— `fog_body.h` 的按作用域字段表
+（`kFogBodyCommonLayout` 公共头 + `kRoundBoxUnionLayout` / `kFlameUnionLayout` 各 kind union；
+C++ 表：字段名 + texel + 分量）与 `fire_fog_shader.h` 的 GLSL（`//@FOGLAYOUT <scope> ...` 标记行 +
 `#define FOG_TEXELS_PER_BODY`）必须逐项一致。**契约单测** `fire_fog_contract_test.cc` 解析 GLSL
-字符串里的标记/宏与 C++ 表比对；改布局两处一起改，漏改即红。
+字符串里各 scope 的标记/宏与对应 C++ 表比对；改布局两处一起改，漏改即红。
+
+> 注：CPU 侧打包器（`fire_fog_renderer.cc`）**不在契约单测覆盖内**（手写 texel 偏移）—— 加字段/
+> 加 kind 时这里要人肉同步，是唯一需额外小心的裸点。
 
 **求交也移入采样函数**：`OBB → TC`（CPU 剪枝）保持**类型无关**；而逐团的**光线求交与点求值都在
 `SampleXXX` 里**（容器原语由 kind 定：`kRoundBox` = ray-OBB slab）。CPU 侧按 kind 构造容器
@@ -244,6 +258,22 @@ albedo / emission）；主入口 `SampleFogSegment` 按 kind 分派（GLSL330 �
 - **外壳归一化距离** `t`：盒内（`d ≤ 0`）→ `t = 0`（**无衰减，w = 1**）；盒外 `t = d/radius ∈ (0,1]`；`radius = 0` → 硬边盒。
 - 消光 `σ = sigma · w(t)`，`w` = `FogAttenuation` 剖面（**只作用于圆角壳区**）。
 - 用户可配：`PointFog{ center, size(长宽高), radius(外侧圆角壳厚度), sigma, albedo, emission, attenuation }`。
+
+### 10.3.2 `kFlame` —— 燃料盒包裹燃烧「形」（2026-10-11，MVP：无 3D 纹理）
+
+**一个团**实现「燃料盒被火焰包裹燃烧」的**几何形**（不含噪声细节，后续再加 3D 火纹理）。
+
+- **域**：燃料盒（`center` + `size`，MVP 轴对齐）的 SDF；**盒内不着火**（盒 = 固体燃料，σ=0）。
+- **包裹壳**：盒**表面外侧**厚 `shell` 的一层；`w_shell = 1 − d/shell`（`d` = 盒 SDF，`d ∈ (0, shell)`），
+  密度从表面向外线性衰减。
+- **浮力羽流**：盒顶沿 `up` 方向长 `plume` 的上升柱；半高 = 支撑函数 `Σ|upᵢ|·box_hᵢ`，柱半径随高度
+  外扩（`max(box_h) + h`）、密度随高度衰减。`w = max(w_shell, w_plume)`。
+- **容器 OBB**（求交 / CPU 剪枝）= 盒沿 `up` 外扩 `plume`、各向再外扩 `shell`（保守不漏）；CPU 与 GLSL
+  用**同一公式**，燃料盒由容器 + `up`/`shell`/`plume` **反解**（同 kRoundBox 的 bound=外沿套路）。
+- `σ = sigma · w`；`emission = emission_color · vigor · w`（`vigor` = 旺盛度，自发光放大）。
+- 用户可配：`FlameFog{ center, size(长宽高), up(火苗方向), shell(壳厚), plume(羽流高), vigor(旺盛度),
+  sigma, albedo, emission }`。
+- **后续（待议）**：`up` 的**主+lag**双方向、`q → 共享 3D 火纹理 UV` 的映射、燃尽前沿等。
 
 ### 10.4 统一采样契约 —— 唯一 kind 分支点
 

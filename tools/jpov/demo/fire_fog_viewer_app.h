@@ -1,15 +1,15 @@
 // JPOV 雾火查看器（fire_fog viewer）— 渲染核心 App（场景渲染体 + 交互面板宿主）
 //
-// 目的：**肉眼验收 froxel 体积雾**（设计见 tools/jpov/docs/jpov_froxel_design.md）的最小测试场。
-// 场景 = 灰色地面 + 一棵高模橡树（oak），点状雾默认摆在橡树处（便于观察雾与实体的深度关系：
-// 雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
+// 目的：**肉眼验收 froxel 体积雾 / 火**（设计见 tools/jpov/docs/jpov_froxel_design.md）的最小测试场。
+// 场景 = 灰色地面 + 一棵高模橡树（oak），雾/火默认摆在橡树处（便于观察与实体的深度关系：
+// 火在树前正常叠加，树前的火被场景深度裁剪，树后的火被树遮挡）。
 //
-// 与 skylight viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI 面板约定）：
-//   - 场景资源（地面 mesh / 橡树 glTF）由主程序装配后传入；
-//   - 光照沿用 skylight_scene.h 的 SkyDegrees + MakeSkyLighting（白昼标准天光，单色 ambient）；
-//   - 交互面板暴露**雾体 box** 的可调参数：box 中心 x/y/z、长宽高（size）、外侧圆角壳半径（radius）、
-//     消光 σ、衰减剖面（作用于圆角壳）、散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fire_fog 消费点光源）、
-//     太阳仰角/方位角/浊度，以及 god ray 的相位/增益。
+// 与 skylight viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI 面板约定）。
+//
+// ── 面板布局（Danis 2026-10-11 约定）──
+//   · **顶栏**：`团类型` 下拉（round box / flame）。
+//   · **左下**：**per-团类型** 调参面板 —— 团类型切换时整块跟着换（各型一套滑块）。
+//   · **右下**：**光照** 面板 —— **全局共享**（点光源 / 太阳 / god ray / froxel 分辨率），不随团类型变。
 //
 // ⚠️ 雾火**始终走物理光照**（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
@@ -18,6 +18,7 @@
 #ifndef JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 #define JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,12 @@ using jpov_viewer::kViewerFontAlias;
 // nz 必须是完全平方（见 FireFogParams 约束）。
 inline constexpr int kNzChoices[] = {64, 256};
 inline constexpr int kTilePxChoices[] = {8, 16, 32};
+
+// 团类型（顶栏下拉；决定左下角显示哪套 per-团面板、以及本帧发射哪种子 command）。
+enum class FogKindChoice : int {
+    kRoundBox = 0,   // 圆角盒雾（PointFog）
+    kFlame = 1,      // 燃料盒包裹燃烧（FlameFog，MVP：只有「形」，无 3D 纹理）
+};
 
 // 点状雾查看器渲染核心 App。
 class FireFogApp : public JPOV {
@@ -61,7 +68,10 @@ public:
     // ── 光照自由度（沿用 skylight_scene.h；本查看器只固定用白昼值）──
     jpov_skylight::SkyDegrees deg_;
 
-    // ── 点状雾参数（单个团；用户可调）──
+    // ── 团类型（顶栏下拉；索引 = FogKindChoice）──
+    int fog_kind_index_ = static_cast<int>(FogKindChoice::kFlame);
+
+    // ── 圆角盒雾参数（团类型 = kRoundBox 时生效）──
     jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // box 空间位置（橡树中段）
     jpov::Vec3f fog_size_ = jpov::Vec3f(6.0f, 6.0f, 6.0f);    // box 长宽高（米）
     float fog_radius_ = 1.0f;                                  // box 外侧圆角壳厚度（米）
@@ -69,6 +79,17 @@ public:
     jpov::Color fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};    // 散射色（∈[0,1]）
     jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+
+    // ── 火焰参数（团类型 = kFlame 时生效）──
+    jpov::Vec3f flame_center_ = jpov::Vec3f(0.0f, 1.5f, 0.0f);  // 燃料盒中心
+    jpov::Vec3f flame_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);    // 燃料盒长宽高（米）
+    jpov::Vec3f flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);      // 火苗主方向（默认朝上）
+    float flame_shell_ = 0.6f;                                   // 包裹壳厚（米）
+    float flame_plume_ = 3.0f;                                   // 羽流段长（米）
+    float flame_vigor_ = 3.0f;                                   // 旺盛度（自发光放大）
+    float flame_sigma_ = 1.2f;                                   // 消光系数 σ_t（1/m）
+    jpov::Color flame_albedo_ = jpov::Color{0.6f, 0.25f, 0.1f, 1.0f};   // 散射色（∈[0,1]）
+    jpov::Color flame_emission_ = jpov::Color{1.0f, 0.45f, 0.12f, 1.0f}; // 自发光颜色（HDR，rad/m）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -94,7 +115,7 @@ public:
     // 交互窗口是否绘制面板（headless 拍摄=false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
 
-    // 是否绘制雾（headless 拍“无雾基线”时置 false）。
+    // 是否绘制雾/火（headless 拍“无雾基线”时置 false）。
     void SetShowFog(bool show) { show_fog_ = show; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
@@ -153,25 +174,39 @@ public:
             cmds->point_lights.push_back(pl);
         }
 
-        // 点状雾（走 fire_fog froxel 体积管线）。
+        // 雾/火（走 fire_fog froxel 体积管线）：按团类型发射对应子 command。
         if (show_fog_) {
-            jpov::PointFog fog;
-            fog.center = fog_center_;
-            fog.size = fog_size_;
-            fog.radius = fog_radius_;
-            fog.sigma = fog_sigma_;
-            fog.albedo = fog_albedo_;
-            fog.emission = fog_emission_;
-            fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
-            cmds->point_fogs.push_back(fog);
+            if (fog_kind_index_ == static_cast<int>(FogKindChoice::kRoundBox)) {
+                jpov::PointFog fog;
+                fog.center = fog_center_;
+                fog.size = fog_size_;
+                fog.radius = fog_radius_;
+                fog.sigma = fog_sigma_;
+                fog.albedo = fog_albedo_;
+                fog.emission = fog_emission_;
+                fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
+                cmds->point_fogs.push_back(fog);
+            } else {
+                jpov::FlameFog ff;
+                ff.center = flame_center_;
+                ff.size = flame_size_;
+                ff.up = flame_up_;
+                ff.shell = flame_shell_;
+                ff.plume = flame_plume_;
+                ff.vigor = flame_vigor_;
+                ff.sigma = flame_sigma_;
+                ff.albedo = flame_albedo_;
+                ff.emission = flame_emission_;
+                cmds->flame_fogs.push_back(ff);
+            }
 
-            jpov::FireFogParams ff;
-            ff.sun_phase_g = sun_phase_g_;
-            ff.sun_gain = sun_gain_;
-            ff.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
-            ff.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
-            ff.z_far = z_far_;
-            cmds->fire_fog = ff;
+            jpov::FireFogParams params;
+            params.sun_phase_g = sun_phase_g_;
+            params.sun_gain = sun_gain_;
+            params.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
+            params.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
+            params.z_far = z_far_;
+            cmds->fire_fog = params;
         }
 
         if (show_panel_) {
@@ -197,68 +232,117 @@ private:
         const float frame_dt_ms = 1000.0f / kViewerFps;
         ui_.Begin(input, theme, w, h, frame_dt_ms);
 
-        const float colw = 0.30f * w;         // 每列滑条宽度
-        const float x0 = 0.02f * w;
-        const float x1 = 0.35f * w;
-        const float x2 = 0.68f * w;
+        // ── 布局常量 ──
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 11;
-        const float top = h - kBottom
-                        - (static_cast<float>(kRows) * kRowH
-                           + static_cast<float>(kRows - 1) * kSpacing);
+        const float colw = 0.22f * w;
+        const float gap = 8.0f;
+        const float right_x = w - (2.0f * colw + gap) - 20.0f;
 
-        auto row = [&](int col, int i) {
-            const float x = (col == 0) ? x0 : ((col == 1) ? x1 : x2);
-            return jpov::UiRect{
-                {x, top + static_cast<float>(i) * (kRowH + kSpacing)}, {colw, kRowH}};
+        // 底部锚定的网格单元：给定面板左上 x / 行数 / 列 / 行 → 控件矩形。
+        auto cell = [&](float x0, int nrows, int col, int i) -> jpov::UiRect {
+            const float top = h - kBottom
+                            - (static_cast<float>(nrows) * kRowH
+                               + static_cast<float>(nrows - 1) * kSpacing);
+            const float x = x0 + static_cast<float>(col) * (colw + gap);
+            return jpov::UiRect{{x, top + static_cast<float>(i) * (kRowH + kSpacing)},
+                                {colw, kRowH}};
         };
 
-        // ── 列 0：box 几何（位置 + 长宽高 + 圆角壳厚度）+ 消光 + froxel 分辨率 ──
-        ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
-        ui_.SliderFloat("中心 z", &fog_center_.z(), row(0, 2), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("尺寸 x m", &fog_size_.x(), row(0, 3), 0.2f, 12.0f, 2);
-        ui_.SliderFloat("尺寸 y m", &fog_size_.y(), row(0, 4), 0.2f, 12.0f, 2);
-        ui_.SliderFloat("尺寸 z m", &fog_size_.z(), row(0, 5), 0.2f, 12.0f, 2);
-        ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, row(0, 6), 0.0f, 4.0f, 3);
-        ui_.SliderFloat("圆角半径 m", &fog_radius_, row(0, 7), 0.0f, 6.0f, 2);
+        // ── 顶栏：团类型下拉 ──
         {
-            const std::vector<const char*> items = {"Nz=64", "Nz=256"};
-            ui_.Combo("z 切片 Nz", &nz_index_, items, row(0, 8));
+            const std::vector<const char*> items = {"圆角盒 RoundBox", "火焰 Flame"};
+            ui_.Combo("团类型", &fog_kind_index_, items, jpov::UiRect{{20.0f, 12.0f}, {300.0f, 28.0f}});
         }
-        {
-            const std::vector<const char*> items = {"tile=8px", "tile=16px", "tile=32px"};
-            ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 9));
-        }
-        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 10), 50.0f, 4000.0f, 0);
 
-        // ── 列 1：剖面 + 散射色 albedo + 自发光 emission + god ray ──
+        // ── 左下：per-团类型 面板 ──
+        if (fog_kind_index_ == static_cast<int>(FogKindChoice::kRoundBox)) {
+            DrawRoundBoxPanel(cell);
+        } else {
+            DrawFlamePanel(cell);
+        }
+
+        // ── 右下：光照（全局共享）──
+        DrawLightingPanel(cell, right_x);
+    }
+
+    // 左下：圆角盒雾 per-团面板（8 行 × 2 列）。
+    template <typename CellFn>
+    void DrawRoundBoxPanel(const CellFn& cell) {
+        const float x0 = 20.0f;
+        const int kRows = 8;
+        ui_.SliderFloat("中心 x", &fog_center_.x(), cell(x0, kRows, 0, 0), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 y", &fog_center_.y(), cell(x0, kRows, 0, 1), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 z", &fog_center_.z(), cell(x0, kRows, 0, 2), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("尺寸 x m", &fog_size_.x(), cell(x0, kRows, 0, 3), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 y m", &fog_size_.y(), cell(x0, kRows, 0, 4), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 z m", &fog_size_.z(), cell(x0, kRows, 0, 5), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("圆角半径 m", &fog_radius_, cell(x0, kRows, 0, 6), 0.0f, 6.0f, 2);
+        ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, cell(x0, kRows, 0, 7), 0.0f, 4.0f, 3);
         {
             const std::vector<const char*> items = {
                 "均匀 kUniform", "线性 kLinear", "二次 kQuadratic", "指数 kExponential"};
-            ui_.Combo("衰减剖面", &fog_attenuation_, items, row(1, 0));
+            ui_.Combo("衰减剖面", &fog_attenuation_, items, cell(x0, kRows, 1, 0));
         }
-        ui_.SliderFloat("散射 R", &fog_albedo_.r, row(1, 1), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("散射 G", &fog_albedo_.g, row(1, 2), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("散射 B", &fog_albedo_.b, row(1, 3), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("自发光 R", &fog_emission_.r, row(1, 4), 0.0f, 4.0f, 2);
-        ui_.SliderFloat("自发光 G", &fog_emission_.g, row(1, 5), 0.0f, 4.0f, 2);
-        ui_.SliderFloat("自发光 B", &fog_emission_.b, row(1, 6), 0.0f, 4.0f, 2);
-        ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, row(1, 7), 0.0f, 0.9f, 2);
-        ui_.SliderFloat("光柱 增益", &sun_gain_, row(1, 8), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("散射 R", &fog_albedo_.r, cell(x0, kRows, 1, 1), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 G", &fog_albedo_.g, cell(x0, kRows, 1, 2), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 B", &fog_albedo_.b, cell(x0, kRows, 1, 3), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("自发光 R", &fog_emission_.r, cell(x0, kRows, 1, 4), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("自发光 G", &fog_emission_.g, cell(x0, kRows, 1, 5), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("自发光 B", &fog_emission_.b, cell(x0, kRows, 1, 6), 0.0f, 4.0f, 2);
+    }
 
-        // ── 列 2：点光源 + 太阳角度 ──
-        ui_.Checkbox("点光源", &point_light_enable_, row(2, 0));
-        ui_.SliderFloat("点光 x", &point_light_pos_.x(), row(2, 1), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("点光 y", &point_light_pos_.y(), row(2, 2), 0.0f, 10.0f, 2);
-        ui_.SliderFloat("点光 z", &point_light_pos_.z(), row(2, 3), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("点光 亮度", &point_light_intensity_, row(2, 4), 0.0f, 40.0f, 1);
-        ui_.SliderFloat("点光 半径", &point_light_radius_, row(2, 5), 0.5f, 40.0f, 1);
-        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
+    // 左下：火焰 per-团面板（10 行 × 2 列）。
+    template <typename CellFn>
+    void DrawFlamePanel(const CellFn& cell) {
+        const float x0 = 20.0f;
+        const int kRows = 10;
+        ui_.SliderFloat("中心 x", &flame_center_.x(), cell(x0, kRows, 0, 0), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 y", &flame_center_.y(), cell(x0, kRows, 0, 1), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 z", &flame_center_.z(), cell(x0, kRows, 0, 2), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("尺寸 x m", &flame_size_.x(), cell(x0, kRows, 0, 3), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 y m", &flame_size_.y(), cell(x0, kRows, 0, 4), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 z m", &flame_size_.z(), cell(x0, kRows, 0, 5), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("火苗 x", &flame_up_.x(), cell(x0, kRows, 0, 6), -1.0f, 1.0f, 2);
+        ui_.SliderFloat("火苗 y", &flame_up_.y(), cell(x0, kRows, 0, 7), -1.0f, 1.0f, 2);
+        ui_.SliderFloat("火苗 z", &flame_up_.z(), cell(x0, kRows, 0, 8), -1.0f, 1.0f, 2);
+        ui_.SliderFloat("壳厚 m", &flame_shell_, cell(x0, kRows, 0, 9), 0.05f, 3.0f, 2);
+        ui_.SliderFloat("羽流高 m", &flame_plume_, cell(x0, kRows, 1, 0), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("旺盛度", &flame_vigor_, cell(x0, kRows, 1, 1), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("消光 σ 1/m", &flame_sigma_, cell(x0, kRows, 1, 2), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("散射 R", &flame_albedo_.r, cell(x0, kRows, 1, 3), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 G", &flame_albedo_.g, cell(x0, kRows, 1, 4), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 B", &flame_albedo_.b, cell(x0, kRows, 1, 5), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("自发光 R", &flame_emission_.r, cell(x0, kRows, 1, 6), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("自发光 G", &flame_emission_.g, cell(x0, kRows, 1, 7), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("自发光 B", &flame_emission_.b, cell(x0, kRows, 1, 8), 0.0f, 8.0f, 2);
+    }
+
+    // 右下：光照面板（全局共享；7 行 × 2 列）。
+    template <typename CellFn>
+    void DrawLightingPanel(const CellFn& cell, float x0) {
+        const int kRows = 7;
+        ui_.Checkbox("点光源", &point_light_enable_, cell(x0, kRows, 0, 0));
+        ui_.SliderFloat("点光 x", &point_light_pos_.x(), cell(x0, kRows, 0, 1), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 y", &point_light_pos_.y(), cell(x0, kRows, 0, 2), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 z", &point_light_pos_.z(), cell(x0, kRows, 0, 3), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("点光 亮度", &point_light_intensity_, cell(x0, kRows, 0, 4), 0.0f, 40.0f, 1);
+        ui_.SliderFloat("点光 半径", &point_light_radius_, cell(x0, kRows, 0, 5), 0.5f, 40.0f, 1);
+        ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, cell(x0, kRows, 0, 6), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, cell(x0, kRows, 1, 0), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, cell(x0, kRows, 1, 1), 0.0f, 8.0f, 1);
+        ui_.SliderFloat("光柱 相位 g", &sun_phase_g_, cell(x0, kRows, 1, 2), 0.0f, 0.9f, 2);
+        ui_.SliderFloat("光柱 增益", &sun_gain_, cell(x0, kRows, 1, 3), 0.0f, 4.0f, 2);
+        {
+            const std::vector<const char*> items = {"Nz=64", "Nz=256"};
+            ui_.Combo("z 切片 Nz", &nz_index_, items, cell(x0, kRows, 1, 4));
+        }
+        {
+            const std::vector<const char*> items = {"tile=8px", "tile=16px", "tile=32px"};
+            ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, cell(x0, kRows, 1, 5));
+        }
+        ui_.SliderFloat("z 远端 far(m)", &z_far_, cell(x0, kRows, 1, 6), 50.0f, 4000.0f, 0);
     }
 
     bool show_panel_ = true;
