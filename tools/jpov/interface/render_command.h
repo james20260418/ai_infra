@@ -445,17 +445,17 @@ struct PointLight {
 // t 的定义由团的 kind 给出（kRoundBox：t = 圆角盒距离，团心 0、盒面 1）。
 // 点处的消光系数 = sigma · w(t)（见 PointFog.sigma），本字段只定「形状」。
 enum class FogAttenuation : uint8_t {
-    kUniform = 0,      // 均匀：r ≤ R 恒为 1（硬边球）
-    kLinear = 1,       // 线性：w = 1 − r/R
-    kQuadratic = 2,    // 二次（穹顶/平滑）：w = 1 − (r/R)²
-    kExponential = 3,  // 指数（归一化到边缘为 0）：w = (e^{−k·r/R} − e^{−k}) / (1 − e^{−k})，k = 4
+    kUniform = 0,      // 均匀：t ≤ 1 恒为 1（硬边）
+    kLinear = 1,       // 线性：w = 1 − t
+    kQuadratic = 2,    // 二次（穹顶/平滑）：w = 1 − t²
+    kExponential = 3,  // 指数（归一化到边缘为 0）：w = (e^{−k·t} − e^{−k}) / (1 − e^{−k})，k = 4
 };
 
 // 点状雾体（世界空间）—— JPOV 雾火管线的用户级输入（v1：简单点状雾）。
 //
-// 雾体「像点光源一样摆放」：在 center 处放一团半径 radius 的雾，半径内按 attenuation
-// 剖面给出消光，超出 radius 贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
-// froxel 摊销；见 tools/jpov/docs/jpov_froxel_design.md），与 ElevationFogConfig
+// 雾体「像点光源一样摆放」：在 center 处放一团**立方盒**（半尺寸 radius）的**圆角盒**雾，
+// 盒内按 attenuation 剖面给出消光，超出盒贡献为 0。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
+// froxel 摊销；见 tools/jpov/docs/jpov_fire_fog_design.md），与 ElevationFogConfig
 //（屏幕空间解析雾）是**两条不同的通道**。
 //
 // ── 散射 vs 自发光（辐射传输的源项，二者在此**显式分开**）──
@@ -469,9 +469,10 @@ enum class FogAttenuation : uint8_t {
 //
 // 字段（按此顺序聚合初始化）：
 //   { center, radius, sigma, albedo, emission, attenuation, roundness }
-// 例: { {0,1,0}, 3.0f, 1.5f, {0.8f,0.8f,0.8f,1.0f}, {0,0,0,1}, FogAttenuation::kQuadratic }
+// 例: { {0,1,0}, 3.0f, 1.5f, {0.8f,0.8f,0.8f,1.0f}, {0,0,0,1}, FogAttenuation::kQuadratic, 0.35f }
 //
-// Pre-condition: radius > 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0
+// Pre-condition: radius > 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0；
+//                roundness ∈ (0,1]
 struct PointFog {
     Vec3f center;                 // 雾体中心（世界坐标）
     float radius;                 // 盒半尺寸（米，> 0）：立方 OBB 三半轴长；超出该盒的像素不受本团影响
@@ -481,7 +482,7 @@ struct PointFog {
     FogAttenuation attenuation;   // 衰减剖面（形状）
 
     // 圆角分数 round ∈ (0,1]：1 → 球（圆角盒退化），→0 → 纯盒（面平棱硬）。
-    // 仅 kRoundBox 采样器使用（写入后端团 params[1]）。默认 0.35（= fog_body.h kRoundBoxDefaultRoundness）。
+    // 仅 kRoundBox 采样器使用（写入后端团 params[1]）。默认 0.35。
     float roundness = 0.35f;
 };
 

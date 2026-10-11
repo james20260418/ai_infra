@@ -176,6 +176,24 @@ float RoundBoxDistance(vec3 u, float round) {
     return 1.0 + sdf / r;
 }
 
+// 单轴 slab 裁剪：p = dot(axis, ro−center)、dd = dot(axis, rd)。无交 → false。
+// 光线与该轴平行（|dd| 极小）时：在板外 ⇒ 无交；在板内 ⇒ 该轴不约束。
+bool SlabAxis(float p, float dd, float he, inout float lo, inout float hi) {
+    if (abs(dd) < 1e-8) {
+        return abs(p) <= he;
+    }
+    float ta = (-he - p) / dd;
+    float tb = ( he - p) / dd;
+    if (ta > tb) {
+        float tmp = ta;
+        ta = tb;
+        tb = tmp;
+    }
+    lo = max(lo, ta);
+    hi = min(hi, tb);
+    return true;
+}
+
 // 光线 × 团 OBB 容器的 slab 求交（世界空间）→ 区间 [t0,t1]（t 沿单位 rd 的距离）。
 // 无交 → false。容器求交**类型无关**（唯一几何原语）；各采样器共用。
 // Pre-condition: ax0/1/2 正交单位；he 各 > 0。
@@ -184,45 +202,9 @@ bool RayObb(vec3 center, vec3 ax0, vec3 ax1, vec3 ax2, vec3 he,
     vec3 oc = ro - center;
     float lo = -1e30;
     float hi = 1e30;
-    {
-        float pp = dot(ax0, oc);
-        float dd = dot(ax0, rd);
-        if (abs(dd) < 1e-8) {
-            if (abs(pp) > he.x) { return false; }
-        } else {
-            float ta = (-he.x - pp) / dd;
-            float tb = ( he.x - pp) / dd;
-            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
-            lo = max(lo, ta);
-            hi = min(hi, tb);
-        }
-    }
-    {
-        float pp = dot(ax1, oc);
-        float dd = dot(ax1, rd);
-        if (abs(dd) < 1e-8) {
-            if (abs(pp) > he.y) { return false; }
-        } else {
-            float ta = (-he.y - pp) / dd;
-            float tb = ( he.y - pp) / dd;
-            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
-            lo = max(lo, ta);
-            hi = min(hi, tb);
-        }
-    }
-    {
-        float pp = dot(ax2, oc);
-        float dd = dot(ax2, rd);
-        if (abs(dd) < 1e-8) {
-            if (abs(pp) > he.z) { return false; }
-        } else {
-            float ta = (-he.z - pp) / dd;
-            float tb = ( he.z - pp) / dd;
-            if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
-            lo = max(lo, ta);
-            hi = min(hi, tb);
-        }
-    }
+    if (!SlabAxis(dot(ax0, oc), dot(ax0, rd), he.x, lo, hi)) { return false; }
+    if (!SlabAxis(dot(ax1, oc), dot(ax1, rd), he.y, lo, hi)) { return false; }
+    if (!SlabAxis(dot(ax2, oc), dot(ax2, rd), he.z, lo, hi)) { return false; }
     if (hi < lo) { return false; }
     t0 = lo;
     t1 = hi;
@@ -242,10 +224,8 @@ struct FogSegment {
     vec3  emission;
 };
 
-// ── kRoundBox 采样器（唯一分支本体；**严格 O(1)**：求交 + 一次点求值，无循环/无迭代纹理依赖）──
-// 求交（ray-OBB slab，移入采样函数）→ 与本 froxel 段相交 → 段中点采样圆角盒衰减。
-FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
-                          float zk, float zk1, float znear) {
+// 未命中段（恒等）：各采样器的提前返回 / 未知 kind 的兵底。
+FogSegment FogNoHit() {
     FogSegment s;
     s.hit = false;
     s.t0 = 0.0;
@@ -254,10 +234,19 @@ FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
     s.sigma = 0.0;
     s.albedo = vec3(0.0);
     s.emission = vec3(0.0);
+    return s;
+}
+
+// ── kRoundBox 采样器（唯一分支本体；**严格 O(1)**：求交 + 一次点求值，无循环/无迭代纹理依赖）──
+// 求交（ray-OBB slab，移入采样函数）→ 与本 froxel 段相交 → 段中点采样圆角盒衰减。
+FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
+                          float zk, float zk1, float znear) {
+    FogSegment s = FogNoHit();
 
     vec3 he = FogHalfExtent(d);
     if (he.x <= 0.0 || he.y <= 0.0 || he.z <= 0.0) { return s; }
 
+    // 求交用 OBB（立方）区间：盒 ⊇ 圆角场，四角无场处（t>1）由点求值吸收 ⇒ 安全。
     float o0;
     float o1;
     if (!RayObb(FogCenter(d), d.axis0, d.axis1, d.axis2, he, ro, rd, o0, o1)) { return s; }
@@ -293,15 +282,7 @@ FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
     if (FogKind(d) == FOG_KIND_ROUNDBOX) {
         return SampleRoundBox(d, ro, rd, zk, zk1, znear);
     }
-    FogSegment s;
-    s.hit = false;
-    s.t0 = 0.0;
-    s.t1 = 0.0;
-    s.p = vec3(0.0);
-    s.sigma = 0.0;
-    s.albedo = vec3(0.0);
-    s.emission = vec3(0.0);
-    return s;
+    return FogNoHit();
 }
 )glsl";
 
