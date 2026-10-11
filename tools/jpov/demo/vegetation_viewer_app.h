@@ -32,6 +32,7 @@
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/src/vegetation/branch_mesh.h"
+#include "tools/jpov/src/vegetation/leaf_cards.h"
 #include "tools/jpov/src/vegetation/lsystem.h"
 
 namespace jpov_vegetation {
@@ -114,34 +115,74 @@ public:
     // ── 生成参数（跨帧持有；改动 → 重建骨架）──
     int   generations_  = 25;       // 展开代数
     float length_scale_ = 0.05f;    // F 的单位长度（米/单位）
-    float base_radius_  = 0.06f;    // 主干半径（米）
+    float base_radius_  = 0.09f;    // 主干半径（米）
     int   seed_         = 0;        // 随机种子（确定性语法下无视觉影响）
 
     // ── 枝干网格表示 ──
     bool  use_tube_    = true;      // true=管状（BuildBranchMesh）；false=棒棒（拓扑预览）
     int   ring_edges_  = 8;         // 管截面边数
-    float uv_tile_len_ = 1.0f;      // bark 纹理沿枝循环长度（米）
+    float bark_tile_   = 0.5f;      // 树皮瓦长 v（米）；u 瓦长 = v × 贴图长宽比(2)
+
+    // ── 叶片卡片 ──
+    bool  show_leaves_ = true;
+    float leaf_length_ = 0.12f;     // 基准叶长（米）
+    float leaf_growth_ = 1.0f;      // 生长因子 [0,1] → 叶大小
+    int   leaves_per_site_ = 10;    // 每叶位叶片数（叶丛密度）
 
     // ── 场景资源 ──
     uint32_t ground_mesh_ = 0;
-    jpov::PBRMaterial tree_mat_;    // 枝干材质（棕、粗糙）
+    uint32_t bark_tex_ = 0;         // 树皮纹理（repeat+mipmap）
+    uint32_t leaf_tex_ = 0;         // 叶片贴图（白底抠孔，RGBA）
+    uint32_t tree_mesh_ = 0;        // 枝干管/棒 mesh
+    uint32_t leaf_mesh_ = 0;        // 叶片卡片 mesh
+    jpov::PBRMaterial tree_mat_;    // 枝干材质（bark 贴图）
+    jpov::PBRMaterial leaf_mat_;    // 叶片 cutout 材质
     jpov::PBRMaterial ground_mat_;  // 灰色地面
 
     // 最近一次生成的统计（面板显示 + 测试）。
     size_t segment_count_ = 0;
+    size_t leaf_count_ = 0;
 
-    // 装配：注册地面 + 首次生成树。Init() 后调用一次。
+    // 装配：注册地面 + 纹理 + 首次生成树。Init() 后调用一次。
     void InstallScene() {
         ground_mesh_ = RegisterMesh(jpov_viewer::MakeGroundQuad(/*y=*/0.0f));
         ground_mat_ = jpov_viewer::GroundMaterial();
+
+        bark_tex_ = RegisterTexture("textures/bark_dragonclaw.png",
+                                    jpov::TextureOptions{/*mipmap=*/true,
+                                                         /*repeat=*/true});
+        leaf_tex_ = RegisterTexture("textures/leaf_dragonclaw_1.png");
+
         tree_mat_ = jpov::PBRMaterial::SolidColorMR(
-            /*color*/ {0.36f, 0.22f, 0.12f, 1.0f},
+            /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
             /*metallic*/ 0.0f, /*roughness*/ 0.85f);
+        tree_mat_.base_color_tex = bark_tex_;
+
+        leaf_mat_ = jpov::PBRMaterial::SolidColorMR(
+            /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
+            /*metallic*/ 0.0f, /*roughness*/ 0.7f);
+        leaf_mat_.base_color_tex = leaf_tex_;
+        leaf_mat_.alpha_mode = jpov::AlphaMode::kMask;
+        leaf_mat_.alpha_cutoff = 0.5f;
+        leaf_mat_.double_sided = true;
+
         RebuildTree();
+        SyncPrev();
+    }
+
+    // 同步“上一帧参数”（用于变化检测）。
+    void SyncPrev() {
         prev_generations_  = generations_;
         prev_length_scale_ = length_scale_;
         prev_base_radius_  = base_radius_;
         prev_seed_         = seed_;
+        prev_use_tube_     = use_tube_;
+        prev_ring_edges_   = ring_edges_;
+        prev_bark_tile_    = bark_tile_;
+        prev_show_leaves_  = show_leaves_;
+        prev_leaf_length_  = leaf_length_;
+        prev_leaf_growth_  = leaf_growth_;
+        prev_leaves_per_site_ = leaves_per_site_;
     }
 
     void InstallTextMeasure() {
@@ -152,12 +193,7 @@ public:
     // 立即按当前参数重建骨架（headless 拍摄用；交互模式由 OneIteration 检测参数变化自动触发）。
     void RegenerateNow() {
         RebuildTree();
-        prev_generations_  = generations_;
-        prev_length_scale_ = length_scale_;
-        prev_base_radius_  = base_radius_;
-        prev_seed_         = seed_;
-        prev_use_tube_     = use_tube_;
-        prev_ring_edges_   = ring_edges_;
+        SyncPrev();
     }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用。
@@ -186,14 +222,14 @@ public:
                 base_radius_ != prev_base_radius_ ||
                 seed_ != prev_seed_ ||
                 use_tube_ != prev_use_tube_ ||
-                ring_edges_ != prev_ring_edges_) {
+                ring_edges_ != prev_ring_edges_ ||
+                bark_tile_ != prev_bark_tile_ ||
+                show_leaves_ != prev_show_leaves_ ||
+                leaf_length_ != prev_leaf_length_ ||
+                leaf_growth_ != prev_leaf_growth_ ||
+                leaves_per_site_ != prev_leaves_per_site_) {
                 RebuildTree();
-                prev_generations_  = generations_;
-                prev_length_scale_ = length_scale_;
-                prev_base_radius_  = base_radius_;
-                prev_seed_         = seed_;
-                prev_use_tube_     = use_tube_;
-                prev_ring_edges_   = ring_edges_;
+                SyncPrev();
             }
         }
 
@@ -216,6 +252,12 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f});
         if (tree_mesh_ != 0 && segment_count_ > 0) {
             cmds->DrawObject3D(tree_mesh_, tree_mat_,
+                               /*center*/ {0.0f, 0.0f, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f});
+        }
+        if (show_leaves_ && leaf_mesh_ != 0 && leaf_count_ > 0) {
+            cmds->DrawObject3D(leaf_mesh_, leaf_mat_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
                                /*front*/  {0.0f, 0.0f, 1.0f});
@@ -257,29 +299,51 @@ private:
         }
         LOG(INFO) << "vegetation: generations=" << generations_
                   << " segments=" << segment_count_
+                  << " leaves=" << skel.leaf_sites.size()
                   << " bbox=(" << (mx[0] - mn[0]) << ", " << (mx[1] - mn[1])
                   << ", " << (mx[2] - mn[2]) << ")"
                   << " length_scale=" << length_scale_
                   << " base_radius=" << base_radius_;
-        if (segment_count_ == 0) {
-            return;   // 无线段（代数太小）→ 保持不画，不构造空网格
+
+        // ── 枝干 mesh（管/棒）──
+        if (segment_count_ > 0) {
+            jpov::MeshData mesh;
+            if (use_tube_) {
+                jpov::vegetation::BranchMeshConfig bcfg;
+                bcfg.ring_edges = ring_edges_;
+                bcfg.bark_tile_v_meters = bark_tile_;
+                bcfg.bark_tile_u_meters = bark_tile_ * 2.0f;   // 贴图 2:1
+                mesh = jpov::vegetation::BuildBranchMesh(skel, bcfg);
+            } else {
+                mesh = BuildSkeletonMesh(skel);   // 拓扑预览用（盒棒）
+            }
+            if (!mesh.positions.empty()) {
+                if (tree_mesh_ == 0) {
+                    tree_mesh_ = RegisterMesh(mesh);
+                } else {
+                    UpdateMesh(tree_mesh_, mesh);
+                }
+            }
         }
-        jpov::MeshData mesh;
-        if (use_tube_) {
-            jpov::vegetation::BranchMeshConfig bcfg;
-            bcfg.ring_edges = ring_edges_;
-            bcfg.uv_tile_length = uv_tile_len_;
-            mesh = jpov::vegetation::BuildBranchMesh(skel, bcfg);
-        } else {
-            mesh = BuildSkeletonMesh(skel);   // 拓扑预览用（盒棒）
-        }
-        if (mesh.positions.empty()) {
-            return;
-        }
-        if (tree_mesh_ == 0) {
-            tree_mesh_ = RegisterMesh(mesh);
-        } else {
-            UpdateMesh(tree_mesh_, mesh);
+
+        // ── 叶片卡片 mesh ──
+        leaf_count_ = skel.leaf_sites.size();
+        if (show_leaves_ && leaf_count_ > 0) {
+            jpov::vegetation::LeafCardConfig lcfg;
+            lcfg.leaf_length = leaf_length_;
+            lcfg.aspect = 0.6f;
+            lcfg.growth = leaf_growth_;
+            lcfg.leaves_per_site = leaves_per_site_;
+            lcfg.seed = static_cast<uint64_t>(seed_);
+            const jpov::MeshData lmesh =
+                jpov::vegetation::BuildLeafCardsMesh(skel, lcfg);
+            if (!lmesh.positions.empty()) {
+                if (leaf_mesh_ == 0) {
+                    leaf_mesh_ = RegisterMesh(lmesh);
+                } else {
+                    UpdateMesh(leaf_mesh_, lmesh);
+                }
+            }
         }
     }
 
@@ -295,7 +359,7 @@ private:
         const float kSpace  = 12.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 7;
+        const int   kRows   = 12;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -306,7 +370,7 @@ private:
 
         // 展开代数用 float 滑条（整数步），再取整回 int。
         float gen_f = static_cast<float>(generations_);
-        if (ui_.SliderFloat("展开代数", &gen_f, row(0), 0.0f, 40.0f, /*dec*/0)) {
+        if (ui_.SliderFloat("展开代数（生长）", &gen_f, row(0), 0.0f, 40.0f, /*dec*/0)) {
             generations_ = static_cast<int>(gen_f + 0.5f);
         }
         ui_.SliderFloat("长度缩放", &length_scale_, row(1), 0.01f, 0.20f, 3);
@@ -315,20 +379,26 @@ private:
         if (ui_.SliderFloat("随机种子", &seed_f, row(3), 0.0f, 255.0f, /*dec*/0)) {
             seed_ = static_cast<int>(seed_f + 0.5f);
         }
-        // 状态行：线段数（= 拓扑树的边数）+ 树种名。
         ui_.Checkbox("枝干：管状 (取消=棒棒拓扑)", &use_tube_, row(4));
         float edges_f = static_cast<float>(ring_edges_);
         if (ui_.SliderFloat("管截面边数", &edges_f, row(5), 3.0f, 16.0f, /*dec*/0)) {
             ring_edges_ = static_cast<int>(edges_f + 0.5f);
         }
-        char info[96];
-        std::snprintf(info, sizeof(info), "龙爪槐  |  线段 %zu",
-                      segment_count_);
-        ui_.Text(info, row(6));
+        ui_.SliderFloat("树皮瓦长(高) m", &bark_tile_, row(6), 0.1f, 2.0f, 3);
+        ui_.Checkbox("显示叶片", &show_leaves_, row(7));
+        ui_.SliderFloat("叶长 m", &leaf_length_, row(8), 0.02f, 0.40f, 3);
+        ui_.SliderFloat("叶片生长 [0,1]", &leaf_growth_, row(9), 0.0f, 1.0f, 2);
+        float lps_f = static_cast<float>(leaves_per_site_);
+        if (ui_.SliderFloat("每叶丛叶片数", &lps_f, row(10), 1.0f, 24.0f, /*dec*/0)) {
+            leaves_per_site_ = static_cast<int>(lps_f + 0.5f);
+        }
+        char info[128];
+        std::snprintf(info, sizeof(info), "龙爪槐  |  枝段 %zu  叶 %zu 片",
+                      segment_count_, leaf_count_);
+        ui_.Text(info, row(11));
     }
 
     bool show_panel_ = true;
-    uint32_t tree_mesh_ = 0;
     jpov::Ui ui_;
 
     // 上一帧参数（检测变化 → 重建）。
@@ -338,6 +408,11 @@ private:
     int   prev_seed_         = -1;
     bool  prev_use_tube_     = true;
     int   prev_ring_edges_   = 8;
+    float prev_bark_tile_    = 0.5f;
+    bool  prev_show_leaves_  = true;
+    float prev_leaf_length_  = 0.15f;
+    float prev_leaf_growth_  = 1.0f;
+    int   prev_leaves_per_site_ = 3;
 
     static constexpr float kSliderFontSize = 16.0f;
 };

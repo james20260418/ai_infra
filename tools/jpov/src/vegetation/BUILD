@@ -29,3 +29,18 @@ cc_library(
     copts = ["-std=c++20"],
     linkstatic = 1,
 )
+
+# 叶片卡片网格 —— 把叶位摆成十字卡片（GL-free、确定性、可单测）。
+cc_library(
+    name = "leaf_cards",
+    srcs = ["leaf_cards.cc"],
+    hdrs = ["leaf_cards.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lsystem",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)

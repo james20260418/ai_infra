@@ -98,6 +98,16 @@ int RunCapture(const std::string& out_dir) {
         shoot(std::string("dragon_claw_") + va.name);
     }
 
+    // ── C. 叶片生长扫谱（代数 25，叶大小随 growth 张开；同机位）──
+    app.view_.phi   = 0.12f;
+    app.view_.theta = kPi / 4.0;
+    app.view_.R     = 8.0f;
+    for (float g : {0.15f, 0.4f, 0.7f, 1.0f}) {
+        app.leaf_growth_ = g;
+        app.RegenerateNow();
+        shoot("leafgrowth_" + std::to_string(static_cast<int>(g * 100)));
+    }
+
     app.Finalize();
     return 0;
 }

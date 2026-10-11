@@ -62,7 +62,8 @@ Vec3f AnyPerp(const Vec3f& t) {
 
 jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg) {
     CHECK_GE(cfg.ring_edges, 3) << "ring_edges 至少 3";
-    CHECK_GT(cfg.uv_tile_length, 0.0f) << "uv_tile_length 必须 > 0";
+    CHECK_GT(cfg.bark_tile_u_meters, 0.0f) << "bark_tile_u_meters 必须 > 0";
+    CHECK_GT(cfg.bark_tile_v_meters, 0.0f) << "bark_tile_v_meters 必须 > 0";
 
     const int edges = cfg.ring_edges;
     const int ring_verts = edges + 1;   // 缝处重复一个顶点（u=1）以便纹理循环
@@ -123,7 +124,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
         const uint32_t base = static_cast<uint32_t>(mesh.positions.size());
         for (size_t i = 0; i < n; ++i) {
             const float r = std::max(pl.radii[i], 1.0e-4f);
-            const float v = arc[i] / cfg.uv_tile_length;
+            const float v = arc[i] / cfg.bark_tile_v_meters;
             for (int j = 0; j < ring_verts; ++j) {
                 const float theta =
                     kTwoPi * static_cast<float>(j) / static_cast<float>(edges);
@@ -132,8 +133,9 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                 const Vec3f p = VAdd(pl.points[i], VScale(dir, r));
                 mesh.positions.push_back(p);
                 mesh.normals.push_back(VNorm(dir));
-                mesh.uvs.push_back(jpov::Vec2f(
-                    static_cast<float>(j) / static_cast<float>(edges), v));
+                // u = 周向弧长 / u 瓦长（随半径变）；v = 沿枝弧长 / v 瓦长。
+                const float u = theta * r / cfg.bark_tile_u_meters;
+                mesh.uvs.push_back(jpov::Vec2f(u, v));
             }
         }
         for (size_t i = 0; i + 1 < n; ++i) {
@@ -149,6 +151,34 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                 mesh.indices.push_back(a);
                 mesh.indices.push_back(d);
                 mesh.indices.push_back(c);
+            }
+        }
+        // 端盖（三角扇）：枝尖封口，避免露"平切"空洞。
+        if (cfg.cap_ends) {
+            // 末端（法线 +tan[n-1]）。
+            {
+                const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
+                mesh.positions.push_back(pl.points[n - 1]);
+                mesh.normals.push_back(tan[n - 1]);
+                mesh.uvs.push_back(jpov::Vec2f(0.5f, arc[n - 1] / cfg.bark_tile_v_meters));
+                const uint32_t rb = base + static_cast<uint32_t>((n - 1) * ring_verts);
+                for (int j = 0; j < edges; ++j) {
+                    mesh.indices.push_back(cbase);
+                    mesh.indices.push_back(rb + static_cast<uint32_t>(j));
+                    mesh.indices.push_back(rb + static_cast<uint32_t>(j + 1));
+                }
+            }
+            // 起始端（法线 -tan[0]）。
+            {
+                const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
+                mesh.positions.push_back(pl.points[0]);
+                mesh.normals.push_back(VScale(tan[0], -1.0f));
+                mesh.uvs.push_back(jpov::Vec2f(0.5f, 0.0f));
+                for (int j = 0; j < edges; ++j) {
+                    mesh.indices.push_back(cbase);
+                    mesh.indices.push_back(base + static_cast<uint32_t>(j + 1));
+                    mesh.indices.push_back(base + static_cast<uint32_t>(j));
+                }
             }
         }
     }

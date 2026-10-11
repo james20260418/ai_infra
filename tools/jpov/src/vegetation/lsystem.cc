@@ -523,6 +523,9 @@ float AngleParam(const Module& m) {
     return m.params[0] * kDeg2Rad;
 }
 
+// 龟图符号 → 几何：`F f + - & ^ \ / | [ ]` 如上；另：
+//   `l` = 记录一个叶位（LeafSite，挂在当前位姿），不画几何（叶朝向：axis=H / normal=L）。
+//   其余字母（非终结符残留）忽略。
 Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) {
     CHECK_GT(cfg.length_scale, 0.0f);
     CHECK_GT(cfg.base_radius, 0.0f);
@@ -623,8 +626,18 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 st = stack.back();
                 stack.pop_back();
                 break;
+            case 'l': {
+                // 叶位标记：记录着生点与朝向（轴向 = 前进方向 H，法线 = L 与 H 垂直）。
+                Orthonormalize(&st);
+                LeafSite site;
+                site.position = st.pos;
+                site.axis = st.H;
+                site.normal = st.L;
+                skel.leaf_sites.push_back(site);
+                break;
+            }
             default:
-                // 非终结符残留（无规则可改写）或叶标记 → 龟图不动作。
+                // 非终结符残留（无规则可改写）或未识别字母 → 龟图不动作。
                 break;
         }
     }
@@ -717,14 +730,14 @@ LSystem BuildDragonClawPagodaTree() {
               "[\\(n * 137 + 180)&(55)B(0)]A(n + 1)");
     // 侧枝「外张相」：先向外铺开骨架。
     b.AddRule("B(s) : s < 5 -> F(3)&(10)B(s + 1)");
-    // 侧枝「龙爪相」：持续下垂 + 每步扭转 ⇒ 末端卷曲成龙爪（本树种签名）。
-    b.AddRule("B(s) : s < 18 -> F(3)&(4)\\(22)B(s + 1)");
+    // 侧枝「龙爪相」：持续下垂 + 每步扭转 ⇒ 末端卷曲成龙爪（本树种签名）；沿枝挂叶位 `l`。
+    b.AddRule("B(s) : s < 18 -> F(3)&(4)\\(22)l B(s + 1)");
     // 末梢：分小杈并挂叶枝。
     b.AddRule("B(s) : s < 24 -> F(2)[+(35)&(45)L][-(35)&(45)L]B(s + 1)");
     // 收尾。
     b.AddRule("B(s) : s >= 24 -> F(1)L");
-    // 叶枝（MVP 画成短枝；后续换叶片卡片）。
-    b.AddRule("L -> F(1)");
+    // 叶枝（MVP 画成短枝 + 末梢一个叶位 `l`）。
+    b.AddRule("L -> F(1)l");
     return b.Build();
 }
 

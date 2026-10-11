@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "tools/jpov/src/vegetation/branch_mesh.h"
+#include "tools/jpov/src/vegetation/leaf_cards.h"
 #include "tools/jpov/src/vegetation/lsystem.h"
 
 namespace jpov {
@@ -23,16 +24,6 @@ std::string Symbols(const std::vector<Module>& mods) {
         s.push_back(m.symbol);
     }
     return s;
-}
-
-// 找出首个某符号的模块的参数序列（找不到返回空）。
-std::vector<float> FirstParams(const std::vector<Module>& mods, char sym) {
-    for (const Module& m : mods) {
-        if (m.symbol == sym) {
-            return m.params;
-        }
-    }
-    return {};
 }
 
 // ============================ RNG ============================
@@ -284,9 +275,9 @@ TEST(BranchMeshTest, SingleChainVertexAndIndexCounts) {
     BranchMeshConfig cfg;
     cfg.ring_edges = 8;
     const jpov::MeshData m = BuildBranchMesh(sk, cfg);
-    // 顶点 = 3 点 × (8+1)。索引 = 2 段 × 8 环缝 × 6。
-    EXPECT_EQ(m.positions.size(), 3u * 9u);
-    EXPECT_EQ(m.indices.size(), 2u * 8u * 6u);
+    // 顶点 = 3 点 × (8+1) + 2 端盖中心点。索引 = 2 段 × 8 环缝 × 6 + 两盖 × 8 × 3。
+    EXPECT_EQ(m.positions.size(), 3u * 9u + 2u);
+    EXPECT_EQ(m.indices.size(), 2u * 8u * 6u + 2u * 8u * 3u);
     EXPECT_TRUE(jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kNormal));
     EXPECT_TRUE(jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kUV));
     m.Validate();
@@ -306,8 +297,7 @@ TEST(BranchMeshTest, NormalsAreUnitAndUvInRange) {
         EXPECT_NEAR(len, 1.0f, 1.0e-4f);
     }
     for (const jpov::Vec2f& uv : m.uvs) {
-        EXPECT_GE(uv.x(), 0.0f);
-        EXPECT_LE(uv.x(), 1.0f);
+        EXPECT_GE(uv.x(), 0.0f);   // u 为物理弧长/瓦长，可 > 1（纹理循环）
         EXPECT_GE(uv.y(), 0.0f);
         EXPECT_TRUE(std::isfinite(uv.y()));
     }
@@ -338,6 +328,73 @@ TEST(BranchMeshTest, DeterministicAcrossRuns) {
     const jpov::MeshData mb = BuildBranchMesh(b, bcfg);
     ASSERT_EQ(ma.positions.size(), mb.positions.size());
     EXPECT_FLOAT_EQ(ma.positions.back().y(), mb.positions.back().y());
+}
+
+// ============================ 叶位 / 叶片卡片 ============================
+
+TEST(LeafSiteTest, LeafMarkerRecordsSite) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)&(90)l");
+    LSystem sys = b.Build();
+    Skeleton sk = GenerateSkeleton(sys, TurtleConfig{}, 0, 0);
+    ASSERT_EQ(sk.leaf_sites.size(), 1u);
+    // 叶位轴向应与该处前进方向一致（非零）。
+    const Vec3f& ax = sk.leaf_sites[0].axis;
+    EXPECT_GT(std::sqrt(ax.x() * ax.x() + ax.y() * ax.y() + ax.z() * ax.z()),
+              0.5f);
+}
+
+TEST(LeafCardsTest, EmptyWhenNoSites) {
+    Skeleton sk;
+    const jpov::MeshData m = BuildLeafCardsMesh(sk, LeafCardConfig{});
+    EXPECT_TRUE(m.positions.empty());
+}
+
+TEST(LeafCardsTest, OneSiteGivesTwoQuads) {
+    Skeleton sk;
+    LeafSite s;
+    s.position = Vec3f(0, 0, 0);
+    s.axis = Vec3f(0, 1, 0);
+    s.normal = Vec3f(1, 0, 0);
+    sk.leaf_sites.push_back(s);
+    LeafCardConfig cfg;
+    cfg.size_jitter = 0.0f;
+    cfg.roll_jitter = 0.0f;
+    cfg.leaves_per_site = 1;
+    const jpov::MeshData m = BuildLeafCardsMesh(sk, cfg);
+    // 十字卡片 = 2 quad = 8 顶点 / 12 索引。
+    EXPECT_EQ(m.positions.size(), 8u);
+    EXPECT_EQ(m.indices.size(), 12u);
+    m.Validate();
+}
+
+TEST(LeafCardsTest, GrowthZeroProducesNothing) {
+    Skeleton sk;
+    LeafSite s;
+    s.position = Vec3f(0, 0, 0);
+    s.axis = Vec3f(0, 1, 0);
+    s.normal = Vec3f(1, 0, 0);
+    sk.leaf_sites.push_back(s);
+    LeafCardConfig cfg;
+    cfg.growth = 0.0f;
+    const jpov::MeshData m = BuildLeafCardsMesh(sk, cfg);
+    EXPECT_TRUE(m.positions.empty());
+}
+
+TEST(LeafCardsTest, DeterministicGreaterAndSizesScaleWithGrowth) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    Skeleton sk = GenerateSkeleton(sys, TurtleConfig{}, 25, 3);
+    ASSERT_FALSE(sk.leaf_sites.empty());
+    LeafCardConfig cfg;
+    cfg.growth = 1.0f;
+    const jpov::MeshData a = BuildLeafCardsMesh(sk, cfg);
+    const jpov::MeshData b = BuildLeafCardsMesh(sk, cfg);
+    ASSERT_EQ(a.positions.size(), b.positions.size());
+    EXPECT_FLOAT_EQ(a.positions[0].y(), b.positions[0].y());
+    for (const Vec3f& n : a.normals) {
+        const float len = std::sqrt(n.x() * n.x() + n.y() * n.y() + n.z() * n.z());
+        EXPECT_NEAR(len, 1.0f, 1.0e-4f);
+    }
 }
 
 }  // namespace

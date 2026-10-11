@@ -196,12 +196,21 @@ struct Polyline {
     std::vector<float> radii;    // 与 points 等长（逐点管半径）
 };
 
+// 一条「叶位」：叶卡片要摆在哪 + 该处朝向。龟图遇到叶标记符号 `l` 时记录一个。
+struct LeafSite {
+    Vec3f position;   // 叶柄着生点（世界）
+    Vec3f axis;       // 叶主轴方向（卡片局部 +Y）
+    Vec3f normal;     // 叶面法线（卡片局部 +Z），与 axis 垂直
+};
+
 // 拓扑树骨架：
 //   · segments  —— 展平后的每一根棒（可视化/统计，逐 F 一段）
 //   · polylines —— 连通枝链（管状 mesher 的输入，保证连续扫掠平滑）
+//   · leaf_sites—— 叶片卡片的着生点（叶标记 `l` 处；管网格忽略之）
 struct Skeleton {
     std::vector<Segment> segments;
     std::vector<Polyline> polylines;
+    std::vector<LeafSite> leaf_sites;
 };
 
 // 由 L-System 生成骨架：Expand → 龟图解释。

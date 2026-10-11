@@ -420,6 +420,7 @@ cc_library(
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src/vegetation:branch_mesh",
+        "//tools/jpov/src/vegetation:leaf_cards",
         "//tools/jpov/src/vegetation:lsystem",
     ],
     copts = ["-std=c++20"],

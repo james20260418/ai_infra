@@ -16,7 +16,9 @@
 - 引擎 `src/vegetation/lsystem.{h,cc}`（**GL-free、确定性、可单测**）：参数化符号 `F(6)`、条件产生式 `A(n) : n < 7 -> ...`、表达式四则、随机加权择一；龟图 `F f + - & ^ \ / | [ ]` → `Skeleton`（线段列表）。
 - 单测 `test/vegetation/lsystem_test.cc`（16 例：RNG 确定性 / 改写 / 条件 / 龟图几何 / 龙爪槐端到端确定性）。
 - viewer `demo/vegetation_viewer_app.h` + `demo/jpov_vegetation_viewer.cc` + `build_jpov_vegetation_viewer.sh`（**仿 skylight viewer**）：把骨架展平成「盒棒」一次 draw；面板 4 knob（代数 / 长度缩放 / 粗细 / 种子）；headless `--capture` 出生长扫谱 + 成品三视角。
-- **枝干管网格** `src/vegetation/branch_mesh.{h,cc}`（GL-free、可单测）：枝链扫圆环（默认 8 边）+ **平行传输标架**防扭转；半径逐点递减→锥度；**分叉靠子枝插进母枝重叠盖住**（不焊接、无端盖）；UV u 绕环 / v=弧长。viewer 可「管/棒」一键切换、截面边数可调。
+- **枝干管网格** `src/vegetation/branch_mesh.{h,cc}`（GL-free、可单测）：枝链扫圆环（默认 8 边）+ **平行传输标架**防扭转；半径逐点递减→锥度；**分叉靠子枝插进母枝重叠盖住**（不焊接）；**两端三角扇封盖**（枝尖不露平切）；UV 按物理弧长 / 各自瓦长（u、v 瓦长按贴图长宽比给，避免拉伸）。viewer 可「管/棒」一键切换、截面边数可调。
+- **叶片卡片** `src/vegetation/leaf_cards.{h,cc}`（GL-free、可单测）：每个叶位发 K 片（**叶丛**密度可调）**十字卡片（X-card）**；叶柄在着生点、叶片沿叶轴向外；大小 = 基准叶长 × 生长因子 × 随机抖动；绕叶轴随机 roll + 叶丛随机张开。
+- **纹理资产** `assets/vegetation/`：白底抠孔叶（3 张羽状复叶 → RGBA，含去水印/暗角/去白边/叶脉扶正）+ 树皮（降采样）。纹理只当"外观"，不从图反推几何。viewer 接 bark（repeat+mipmap）/叶（cutout 双面）；面板加 树皮瓦长 / 显示叶片 / 叶长 / 生长 / 叶丛密度 等 knob。
 - 内置树种 **龙爪槐**（`BuildDragonClawPagodaTree`）：矮伞形 + 枝条下垂 + 末梢每步扭转 ⇒ 卷爪。
 
 **存储认知（本 PR 确立）**：引擎的**真值 = 规则 + 参数 + seed**（程序），骨架/网格都是派生物。故将来「配方文件」存程序（类比 SpeedTree `.spm`），不存展开结果；交换仍走 GLB。
