@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "tools/common/utils.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // kViewerWidth/Height/Fps/FontAlias
@@ -41,6 +42,25 @@ using jpov_viewer::kViewerWidth;
 using jpov_viewer::kViewerHeight;
 using jpov_viewer::kViewerFps;
 using jpov_viewer::kViewerFontAlias;
+
+// 解析植被纹理路径：先按分发态/开发态常规位置找（textures/），再回退源码资产目录
+// （tools/jpov/assets/vegetation/，使 `bazel run` 从工程根启动时也能直接命中）。
+// 都找不到时返回常规路径，交回 loader 报它自己的错。
+inline std::string ResolveVegetationTexture(const char* name) {
+    const std::string candidates[] = {
+        std::string("textures/") + name,
+        std::string("tools/jpov/assets/vegetation/") + name,
+    };
+    for (const std::string& c : candidates) {
+        const std::string resolved = jpov::ResolveResourcePath(c);
+        FILE* fp = std::fopen(resolved.c_str(), "rb");
+        if (fp != nullptr) {
+            std::fclose(fp);
+            return resolved;
+        }
+    }
+    return candidates[0];
+}
 
 // 把拓扑骨架展平成一个可一次 DrawObject3D 的网格：每根线段 → 一根沿其朝向的细长盒。
 // GL-free 纯函数（便于单测 / 复用）。
@@ -148,10 +168,13 @@ public:
         ground_mesh_ = RegisterMesh(jpov_viewer::MakeGroundQuad(/*y=*/0.0f));
         ground_mat_ = jpov_viewer::GroundMaterial();
 
-        bark_tex_ = RegisterTexture("textures/bark_dragonclaw.png",
-                                    jpov::TextureOptions{/*mipmap=*/true,
-                                                         /*repeat=*/true});
-        leaf_tex_ = RegisterTexture("textures/leaf_dragonclaw_1.png");
+        // 纹理路径走 ResolveResourcePath（先 exe 旁 → 再 cwd → TEST_SRCDIR），
+        // 与模型/字体同一套分发布置纪律——不论从哪儿启动都能找到。
+        bark_tex_ = RegisterTexture(
+            ResolveVegetationTexture("bark_dragonclaw.png"),
+            jpov::TextureOptions{/*mipmap=*/true, /*repeat=*/true});
+        leaf_tex_ = RegisterTexture(
+            ResolveVegetationTexture("leaf_dragonclaw_1.png"));
 
         tree_mat_ = jpov::PBRMaterial::SolidColorMR(
             /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},

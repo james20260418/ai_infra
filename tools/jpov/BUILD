@@ -414,6 +414,7 @@ cc_library(
     hdrs = ["demo/vegetation_viewer_app.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tools/common:utils",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
         "//tools/jpov/include/jpov:jpov",
