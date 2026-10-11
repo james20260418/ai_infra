@@ -4,8 +4,8 @@
 // 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
 // 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
 //
-// 交互面板（见 fire_fog_viewer_app.h）：雾中心 x/y/z、半径、消光 σ、衰减剖面、散射色 albedo、
-// 自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
+// 交互面板（见 fire_fog_viewer_app.h）：box 中心 x/y/z、长宽高、外侧圆角半径、消光 σ、衰减剖面、
+// 散射色 albedo、自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
 // ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
@@ -112,7 +112,7 @@ int RunCapture(const std::string& out_dir) {
     shoot("01_baseline_no_fog");
     app.SetShowFog(true);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
     app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("02_fog_default");
@@ -133,13 +133,13 @@ int RunCapture(const std::string& out_dir) {
 
     // ── D. 半径扫谱（看球大小；雾贴着树 / 吞掉树）──
     for (float r : {1.0f, 3.0f, 5.0f}) {
-        app.fog_radius_ = r;
+        app.fog_size_ = jpov::Vec3f(r, r, r);
         shoot(("05_radius_" + std::to_string(static_cast<int>(r))).c_str());
     }
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
 
     // ── E. 深度遮挡（3 例，验证场景深度裁剪是否生效）──
-    app.fog_radius_ = 2.5f;
+    app.fog_size_ = jpov::Vec3f(2.5f, 2.5f, 2.5f);
     app.fog_sigma_ = 0.8f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     auto head_on = [&]() {
@@ -161,7 +161,7 @@ int RunCapture(const std::string& out_dir) {
 
     // ── F. 相机环绕（看立体感；雾固定树处）──
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
     app.fog_sigma_ = 0.6f;
     for (int deg : {0, 90, 180, 270}) {
         DefaultView(app);
@@ -172,7 +172,7 @@ int RunCapture(const std::string& out_dir) {
     // ── G. 大雾体（覆盖树与地面交界的深度范围）──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 8.0f;
+    app.fog_size_ = jpov::Vec3f(8.0f, 8.0f, 8.0f);
     app.fog_sigma_ = 0.4f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     shoot("10_big_fog");
@@ -180,7 +180,7 @@ int RunCapture(const std::string& out_dir) {
     // ── I. froxel 分辨率对比：Nz/tile 组合 ──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
     app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     {
@@ -199,7 +199,7 @@ int RunCapture(const std::string& out_dir) {
     // ── J. z 远端扫谱（range ↔ 分层带）──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
     app.fog_sigma_ = 0.6f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
     for (float fz : {200.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f}) {
@@ -211,7 +211,7 @@ int RunCapture(const std::string& out_dir) {
     // ── K. albedo（散射色）扫谱：中性灰 → 红 → 蓝 ──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 3.0f;
+    app.fog_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
     app.fog_sigma_ = 0.8f;
     app.fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};
     app.fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};
@@ -235,7 +235,7 @@ int RunCapture(const std::string& out_dir) {
     // ── M. 点光源（fire_fog 自持 Nxy tile culling）：关/开 + 位置扫谱 ──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
-    app.fog_radius_ = 5.0f;
+    app.fog_size_ = jpov::Vec3f(5.0f, 5.0f, 5.0f);
     app.fog_sigma_ = 0.8f;
     app.fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};
     app.deg_.sun_elev_deg = 8.0f;
@@ -255,7 +255,7 @@ int RunCapture(const std::string& out_dir) {
 
     // ── N. god ray：太阳方位扫谱 + 增益对照（ambient + 太阳×CSM）──
     app.fog_center_ = jpov::Vec3f(0.0f, 4.0f, 0.0f);
-    app.fog_radius_ = 10.0f;      // 大雾体：让树影确实切到雾
+    app.fog_size_ = jpov::Vec3f(10.0f, 10.0f, 10.0f);      // 大雾体：让树影确实切到雾
     app.fog_sigma_ = 0.5f;
     app.sun_phase_g_ = 0.7f;
     app.sun_gain_ = 2.0f;
@@ -271,6 +271,19 @@ int RunCapture(const std::string& out_dir) {
     shoot("21_sun_gain0");
     app.sun_gain_ = 2.0f;
     shoot("22_sun_gain2");
+
+    // ── O. kRoundBox：外侧圆角壳半径扫谱（uniform + 固定 box 尺寸；看「硬边盒 → 圆角盒」）──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_size_ = jpov::Vec3f(4.0f, 4.0f, 4.0f);
+    app.fog_sigma_ = 1.5f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kUniform);
+    for (float rr : {0.0f, 0.5f, 1.5f, 3.0f}) {
+        app.fog_radius_ = rr;
+        shoot(("60_roundbox_r" + std::to_string(static_cast<int>(rr * 10))).c_str());
+    }
+    app.fog_radius_ = 1.0f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);

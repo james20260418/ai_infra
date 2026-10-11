@@ -7,8 +7,8 @@
 // 与 skylight viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI 面板约定）：
 //   - 场景资源（地面 mesh / 橡树 glTF）由主程序装配后传入；
 //   - 光照沿用 skylight_scene.h 的 SkyDegrees + MakeSkyLighting（白昼标准天光，单色 ambient）；
-//   - 交互面板暴露**点状雾**的可调参数：中心 x/y/z、半径、消光 σ、衰减剖面、
-//     散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fire_fog 消费点光源）、
+//   - 交互面板暴露**雾体 box** 的可调参数：box 中心 x/y/z、长宽高（size）、外侧圆角壳半径（radius）、
+//     消光 σ、衰减剖面（作用于圆角壳）、散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fire_fog 消费点光源）、
 //     太阳仰角/方位角/浊度，以及 god ray 的相位/增益。
 //
 // ⚠️ 雾火**始终走物理光照**（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
@@ -62,8 +62,9 @@ public:
     jpov_skylight::SkyDegrees deg_;
 
     // ── 点状雾参数（单个团；用户可调）──
-    jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // 雾体中心（橡树中段）
-    float fog_radius_ = 4.5f;                                  // 半径（米）
+    jpov::Vec3f fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);  // box 空间位置（橡树中段）
+    jpov::Vec3f fog_size_ = jpov::Vec3f(6.0f, 6.0f, 6.0f);    // box 长宽高（米）
+    float fog_radius_ = 1.0f;                                  // box 外侧圆角壳厚度（米）
     float fog_sigma_ = 0.6f;                                   // 消光系数 σ_t（1/m）
     jpov::Color fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};    // 散射色（∈[0,1]）
     jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
@@ -156,6 +157,7 @@ public:
         if (show_fog_) {
             jpov::PointFog fog;
             fog.center = fog_center_;
+            fog.size = fog_size_;
             fog.radius = fog_radius_;
             fog.sigma = fog_sigma_;
             fog.albedo = fog_albedo_;
@@ -202,7 +204,7 @@ private:
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 9;
+        const int kRows = 11;
         const float top = h - kBottom
                         - (static_cast<float>(kRows) * kRowH
                            + static_cast<float>(kRows - 1) * kSpacing);
@@ -213,21 +215,24 @@ private:
                 {x, top + static_cast<float>(i) * (kRowH + kSpacing)}, {colw, kRowH}};
         };
 
-        // ── 列 0：雾体几何 + 消光 + froxel 分辨率 ──
+        // ── 列 0：box 几何（位置 + 长宽高 + 圆角壳厚度）+ 消光 + froxel 分辨率 ──
         ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
         ui_.SliderFloat("中心 z", &fog_center_.z(), row(0, 2), -10.0f, 10.0f, 2);
-        ui_.SliderFloat("半径 m", &fog_radius_, row(0, 3), 0.2f, 10.0f, 2);
-        ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, row(0, 4), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("尺寸 x m", &fog_size_.x(), row(0, 3), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 y m", &fog_size_.y(), row(0, 4), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("尺寸 z m", &fog_size_.z(), row(0, 5), 0.2f, 12.0f, 2);
+        ui_.SliderFloat("消光 σ 1/m", &fog_sigma_, row(0, 6), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("圆角半径 m", &fog_radius_, row(0, 7), 0.0f, 6.0f, 2);
         {
             const std::vector<const char*> items = {"Nz=64", "Nz=256"};
-            ui_.Combo("z 切片 Nz", &nz_index_, items, row(0, 5));
+            ui_.Combo("z 切片 Nz", &nz_index_, items, row(0, 8));
         }
         {
             const std::vector<const char*> items = {"tile=8px", "tile=16px", "tile=32px"};
-            ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 6));
+            ui_.Combo("Nxy 单元 tile", &tile_px_index_, items, row(0, 9));
         }
-        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 7), 50.0f, 4000.0f, 0);
+        ui_.SliderFloat("z 远端 far(m)", &z_far_, row(0, 10), 50.0f, 4000.0f, 0);
 
         // ── 列 1：剖面 + 散射色 albedo + 自发光 emission + god ray ──
         {

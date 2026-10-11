@@ -5,6 +5,9 @@
 > **2026-10-10 接口升级**：源项拆**散射(albedo)/自发光(emission)**（去掉 intensity：emission 自带 HDR、sigma 自带 1/m）；
 >   雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling，后者 fire_fog 自持一套 Nxy 网格光源表），
 >   移除「无光照 / base 发射」链路（Danis：既然这么物理，不再提供非物理绘制）。
+> **2026-10-11 采样器重构**：`uFogBodyTex` 改**定长 tagged union + 解码器 + 命名访问器**（§10.3）；
+>   第一种 kind 改为 **`kRoundBox`（圆角盒，替换早期点雾/球）**；**求交移入采样函数**（OBB→TC 仍类型无关）；
+>   采样器**严格 O(1)**；加**布局契约单测**防 CPU/GLSL 漂移。
 > 模块：`tools/jpov/src/fire_fog/`（单一自包含 renderer；早期草案名 `point_fog` / `ball_fog`）
 > 推演史 / 取舍理由见 [`jpov_tpz_volumetric_fog_design.md`](jpov_tpz_volumetric_fog_design.md)。**本文只讲定论。**
 
@@ -166,7 +169,7 @@ struct Obb {
 
 // ── 采样器种类（「多种类」的核心；可扩展）──
 enum class FogFieldKind : uint8_t {
-    kAnalyticProfile = 0,  // 闭式衰减剖面（承接 kDome/kSharp/kUniform/kCoreRamp）
+    kRoundBox        = 0,  // 圆角盒：OBB 容器 + 盒内按「圆角盒距离」衰减（替换早期点雾/球）
     kHeightSlab      = 1,  // 贴地垂直 slab + 2D 域扭曲滚动（地表薄雾）
     kNoiseVolume     = 2,  // fbm/curl 调制「密度 × 发射」（火 / 烟 / 蘑菇云）
     kShell           = 3,  // 薄壳（冲击波 / 爆燃环）
@@ -183,51 +186,101 @@ struct FogBody {
 };
 ```
 
-- 为何 `params[8]` 取超集而非 union：GL 3.3 + 确定性 + 单一缓冲纹理布局，性价比最高；kind 少时浪费可忽略。若某 kind 参数爆表，再拆二级 `params` buffer。
-- 源项 `J = albedo·L_light + ε/σ_t`（散射 + 自发光）；早期「衰减类型」菜单落到 `kAnalyticProfile` 的 `params[0]`；**用户配 消光σ/散射色albedo/自发光emission/尺寸/衰减类型**，其余为 JPOV 锁定内部量。
+- 为何 `params[8]` 取超集而非逐 kind union（C++ 侧）：GL 3.3 + 确定性 + 单一缓冲纹理布局，性价比最高；kind 少时浪费可忽略。若某 kind 参数爆表，再拆二级 `params` buffer。
+  **（2026-10-11）GPU 侧定案**：`uFogBodyTex` 改为**定长 tagged union**（公共头 + union 区，见 §10.3），GPU 侧不再自造“超集数组”，而是按 `d.kind` switch 到各自的 `SampleXXX`——零未用字段、可读性高。
+- 源项 `J = albedo·L_light + ε/σ_t`（散射 + 自发光）；早期「衰减类型」菜单落到 `kRoundBox` 的 `d.atten`；**用户配 消光σ/散射色albedo/自发光emission/尺寸/衰减类型/圆角**，其余为 JPOV 锁定内部量。
 
-### 10.3 各采样器的字段映射（示意，实现时定稿）
+### 10.3 采样器字段映射 + `uFogBodyTex` 布局契约（2026-10-11 定稿）
 
-| kind | 语义 | `params` 映射（示意） |
-|---|---|---|
-| `kAnalyticProfile` | 闭式剖面 | `[0]`=profile 枚举，`[1]`=内部形状尺度，`[2..]` 预留 |
-| `kHeightSlab` | 贴地薄雾 | `[0]`底高 `[1]`厚度 `[2]`垂直衰减形态 `[3]`noise 频率 `[4]`滚动速度 `[5]`风向方位角 |
-| `kNoiseVolume` | 火 / 烟 | `[0]`noise 频率 `[1]`fbm 倍频 `[2]`锐度/阈值 `[3]`竖向拉伸 `[4]`湍流强度 `[5]`色带参数 |
-| `kShell` | 冲击波 | `[0]`半径 `[1]`壳厚 `[2]`膨胀相位 |
+后端把每个团打包进一张 RGBA32F 一维条带纹理 `uFogBodyTex`（texelFetch 随机访问）。
+**定长 tagged union**：每团占 `fog_layout::kTexelsPerBody = 10` 个 texel（stride 对所有 kind 一致）；
+前 2 个 texel 是**公共头**（所有 kind 含义固定），其后是 **union 区**（按 kind 解释）。
+**第一个字段 = kind**（类型判别子）。GLSL 侧写一个**解码器** `DecodeFogBody(idx) → FogBodyData d`
+（“每团通用数据”）；公共层只经**命名访问器**（`FogCenter(d)` / `FogSigma(d)` …）读 `d`，禁止裸下标。
+
+公共头（前 2 texel，所有 kind）：
+
+| texel | x | y | z | w |
+|---|---|---|---|---|
+| 0 | `kind` | `sigma` | `albedo.r` | `albedo.g` |
+| 1 | `albedo.b` | `emission.r` | `emission.g` | `emission.b` |
+
+union 区（当前唯一 kind `kRoundBox`，texel 2..6）：
+
+| texel | x | y | z | w |
+|---|---|---|---|---|
+| 2 | `center_x` | `center_y` | `center_z` | `bound_hx` |
+| 3 | `bound_hy` | `bound_hz` | `axis0_x` | `axis0_y` |
+| 4 | `axis0_z` | `axis1_x` | `axis1_y` | `axis1_z` |
+| 5 | `axis2_x` | `axis2_y` | `axis2_z` | `radius` |
+| 6 | `atten` | `reserved` | `reserved` | `reserved` |
+
+（texel 7..9 预留，供将来的复杂 kind —— 如噪声火。尺寸选值依据：最坏 kind 的解析参数 ≈ 36 float
++ 公共头 8 ⇒ 落在第 9 个 texel；故开 10、留一档。stride 是全局常量，改它动所有 kind，一次开够。）
+
+**契约（防 CPU/GLSL 静默漂移）**：布局是两侧**单一来源** —— `fog_body.h` 的 `kFogBodyLayout`
+（C++ 表：字段名 + texel + 分量）与 `fire_fog_shader.h` 的 GLSL（`//@FOGLAYOUT` 标记行 +
+`#define FOG_TEXELS_PER_BODY`）必须逐项一致。**契约单测** `fire_fog_contract_test.cc` 解析 GLSL
+字符串里的标记/宏与 C++ 表比对；改布局两处一起改，漏改即红。
+
+**求交也移入采样函数**：`OBB → TC`（CPU 剪枝）保持**类型无关**；而逐团的**光线求交与点求值都在
+`SampleXXX` 里**（容器原语由 kind 定：`kRoundBox` = ray-OBB slab）。CPU 侧按 kind 构造容器
+（`kRoundBox`：立方 OBB + 圆角）。
+
+各采样器返回**统一的 `FogSegment{hit,t0,t1,p,sigma,albedo,emission}`**（“3 个返回项” = sigma /
+albedo / emission）；主入口 `SampleFogSegment` 按 kind 分派（GLSL330 无函数指针 ⇒ if 链展开；
+加 kind = 加一个分支，不动 L1 / L2 / ZDist）。
+
+**采样器严格 O(1)**：`SampleXXX` 内**无循环、无迭代、无依赖纹理迭代**（fbm 若用，固定 octave 上限，
+仍是 O(1)）；解码器只 fetch 该分支用到的 texel（stride 只是上界，热循环带宽不受连累）。
+
+### 10.3.1 `kRoundBox` —— 第一种采样器（2026-10-11，10-11 晚修订）
+
+**高自由度 box**：用户直接配 box 的**位置 + 长宽高**；box **外侧**再包一层厚度 = `radius` 的**球面圆角外壳**。
+
+- 容器：OBB（轴 = 世界轴）；**容器半尺寸 = 内盒半 (size/2) + radius**（= 内盒 ⊕ 球 的外沿，剪枝 / z 范围保守不漏）。
+  求交 = ray-OBB slab（容器）。
+- 局部坐标 `q = Rᵀ(p−c)`（世界单位）。盒 SDF：`d = ‖max(|q|−half, 0)‖ + min(maxᵢ(|qᵢ|−halfᵢ), 0)`。
+- **外壳归一化距离** `t`：盒内（`d ≤ 0`）→ `t = 0`（**无衰减，w = 1**）；盒外 `t = d/radius ∈ (0,1]`；`radius = 0` → 硬边盒。
+- 消光 `σ = sigma · w(t)`，`w` = `FogAttenuation` 剖面（**只作用于圆角壳区**）。
+- 用户可配：`PointFog{ center, size(长宽高), radius(外侧圆角壳厚度), sigma, albedo, emission, attenuation }`。
 
 ### 10.4 统一采样契约 —— 唯一 kind 分支点
 
-多类采样器**只在「点求值」处分叉**；几何 / 采样 / 合成全部 kind 无关：
+多类采样器**只在一个地方分叉**：`SampleFogSegment`（按 `d.kind` 分派）；`OBB→TC` 剪枝 / 分段 / 合成全
+kind 无关。**光线求交也移入各 `SampleXXX`**（容器原语随 kind），但**返回结构与调用约定统一**：
 
 ```glsl
-// 唯一 kind 相关：点求值。返回该点 L_in 的介质分量（RGB），并写出消光 σ。
-vec3 SampleField(int kind, FogBody b, vec3 p_world, out float sigma);
+// 统一返回：命中段 [t0,t1]（已与本 froxel 段相交）+ 采样点 + 该点 (σ, albedo, emission)。
+struct FogSegment { bool hit; float t0, t1; vec3 p; float sigma; vec3 albedo, emission; };
 
-// —— 以下每条 kind 共享（§3 / §4 已定）——
-for (int j = 0; j < tile_count; ++j) {
-    FogBody b = bodies[tile[j]];
-    vec2 tt = RayObb(b.bound, ray);                        // slab 求交 → 区间 [t0,t1]
-    if (tt.y <= tt.x) {
-        continue;
-    }
-    for (int k = 0; k < M; ++k) {
-        float t  = tt.x + (float(k) + Jitter(px, j, k)) * (tt.y - tt.x) / float(M);
-        vec3  p  = ray.o + t * ray.d;
-        float sigma;
-        vec3  emis = SampleField(b.kind, b, p, sigma);
-        if (sigma <= kSigmaEps) {
-            continue;                                      // 空场早退
-        }
-        vec3 L_in = emis + b.prebaked_lin + SunShadowCSM(p);   // 共享光照（§6）
-        ZDistAccumulate(/*dτ=*/sigma * dseg,               // 加法叠进 (τd, Ed)
-                        /*dE=*/sigma * L_in * dseg);
-    }
+// 唯一 kind 相关：解码 d → 求交（容器随 kind）→ 段中点一次点求值。**严格 O(1)**。
+FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd, float zk, float zk1, float znear);
+
+// 唯一分派入口（GLSL330 无函数指针 ⇒ if 链）：
+FogSegment SampleFogSegment(FogBodyData d, ...) {
+    if (FogKind(d) == FOG_KIND_ROUNDBOX) { return SampleRoundBox(d, ...); }
+    // 加 kind = 加一个分支
+}
+
+// —— 以下每条 kind 共享（inject 里；§3 / §4 已定）——
+for (int j = 0; j < nf; ++j) {
+    FogBodyData d = DecodeFogBody(fog_idx[j]);            // 解码器（§10.3）
+    FogSegment seg = SampleFogSegment(d, ro, rd, zk, zk1, uZNear);
+    if (!seg.hit) { continue; }
+    float len = seg.t1 - seg.t0;
+    float dtau = seg.sigma * len;
+    if (dtau <= 0.0) { continue; }
+    vec3 Llight = ambient + sun·CSM + Σ点光;              // 共享光照（§6）
+    vec3 Sleaf = seg.albedo * Llight * (1 - exp(-dtau));
+    Sleaf += seg.emission * (len * (dtau > 1e-6 ? (1 - exp(-dtau)) / dtau : 1.0));
+    acc = OverCompose(acc, vec4(dtau, Sleaf));            // over 合成（团无序）
 }
 ```
 
-- **`M` 段、分层抖动、CSM、ZDist 累加 = 全 kind 共享**（§3 / §4）。
-- **加一个 kind 不动 L1 / L2 / ZDist**，只加一个 `SampleField` 分支 ⇒ 这正是「团结构本身包含各类特效可能」的落地方式。
-- **光照也共享**：`L_in = 介质发射(emis) + 慢变预烘(prebaked_lin) + sun·shadow(CSM)`。各 kind 只决定「介质分量」怎么算。
+- **解码器 / 命名访问器 / 布局契约 / 严格 O(1** 见 §10.3。
+- **加一个 kind 不动 L1 / L2 / ZDist**，只加一个 `SampleXXX` + `SampleFogSegment` 一个分支 ⇒ 这正是「团结构本身包含各类特效可能」的落地方式。
+- **光照共享**：`L_in = ambient + sun·shadow(CSM) + Σ点光源`；各 kind 只决定「介质分量」怎么算。
 
 ### 10.5 容器 = 3D box（OBB）：紧密性 ↔ 剪枝算力
 
@@ -245,7 +298,7 @@ for (int j = 0; j < tile_count; ++j) {
 
 ### 10.6 里程碑补充（承接 §8）
 
-- **M1a**：模块骨架（`tools/jpov/src/fire_fog/`）+ `FogBody` / `Obb` / `FogFieldKind` + **单一 kind `kAnalyticProfile`** + box L1 剪枝（8 角投影）+ ZDist 累加 + 末端积分 + **无 TAA gold**。
+- **M1a**：模块骨架（`tools/jpov/src/fire_fog/`）+ `FogBody` / `Obb` / `FogFieldKind` + **单一 kind `kRoundBox`** + box L1 剪枝（8 角投影）+ ZDist 累加 + 末端积分 + **无 TAA gold**。
 - **M1b**：依次加 `kNoiseVolume`（火焰）、`kHeightSlab`（贴地薄雾）、`kShell`（冲击波）——**每加一个不动 L1 / L2 / ZDist**。
 - 验收（承 §8）：无 TAA 不闪 + 可 gold（确定）。
 

@@ -47,11 +47,12 @@ std::vector<int> TileIndices(const std::vector<uint8_t>& packed, int grid_w,
     return out;
 }
 
-// 构造一个「球心 origin、半径 radius」的点雾（只填几何；散射/自发光置中性）。
-PointFog MakeFog(const Vec3f& center, float radius, FogAttenuation atten) {
+// 构造一个「容器半尺寸 = half」的 kRoundBox 雾（size=2·half、radius=0；只填几何，散射/自发光中性）。
+PointFog MakeFog(const Vec3f& center, float half, FogAttenuation atten) {
     PointFog fog;
     fog.center = center;
-    fog.radius = radius;
+    fog.size = Vec3f(half * 2.0f, half * 2.0f, half * 2.0f);
+    fog.radius = 0.0f;
     fog.sigma = 1.0f;
     fog.albedo = Color{1.0f, 1.0f, 1.0f, 1.0f};
     fog.emission = Color{0.0f, 0.0f, 0.0f, 1.0f};
@@ -62,21 +63,22 @@ PointFog MakeFog(const Vec3f& center, float radius, FogAttenuation atten) {
 TEST(FireFogLower, LowerPointFogMapsFields) {
     PointFog fog;
     fog.center = Vec3f(1.0f, 2.0f, 3.0f);
-    fog.radius = 2.5f;
+    fog.size = Vec3f(2.0f, 4.0f, 6.0f);       // 长宽高（各轴不等 ⇒ 验半尺寸换算）
+    fog.radius = 0.5f;                         // 外侧圆角壳厚度
     fog.sigma = 0.75f;
     fog.albedo = Color{0.1f, 0.2f, 0.3f, 1.0f};
     fog.emission = Color{0.4f, 0.5f, 0.6f, 1.0f};
     fog.attenuation = FogAttenuation::kQuadratic;
 
     const FogBody b = LowerPointFog(fog);
-    EXPECT_EQ(b.kind, FogFieldKind::kAnalyticProfile);
+    EXPECT_EQ(b.kind, FogFieldKind::kRoundBox);
     EXPECT_FLOAT_EQ(b.bound.center.x(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.center.y(), 2.0f);
     EXPECT_FLOAT_EQ(b.bound.center.z(), 3.0f);
-    // 立方 OBB：各半轴 = 半径；三轴为单位轴。
-    EXPECT_FLOAT_EQ(b.bound.half_extent.x(), 2.5f);
-    EXPECT_FLOAT_EQ(b.bound.half_extent.y(), 2.5f);
-    EXPECT_FLOAT_EQ(b.bound.half_extent.z(), 2.5f);
+    // 容器半尺寸 = 内盒半 (size/2) + radius；三轴为单位轴。
+    EXPECT_FLOAT_EQ(b.bound.half_extent.x(), 1.0f + 0.5f);
+    EXPECT_FLOAT_EQ(b.bound.half_extent.y(), 2.0f + 0.5f);
+    EXPECT_FLOAT_EQ(b.bound.half_extent.z(), 3.0f + 0.5f);
     EXPECT_FLOAT_EQ(b.bound.axis[0].x(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.axis[1].y(), 1.0f);
     EXPECT_FLOAT_EQ(b.bound.axis[2].z(), 1.0f);
@@ -87,8 +89,10 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.emission.r, 0.4f);
     EXPECT_FLOAT_EQ(b.emission.g, 0.5f);
     EXPECT_FLOAT_EQ(b.emission.b, 0.6f);
-    // attenuation 落在 params[0]（shader 读 t2.x）。
+    // attenuation 落在 params[0]（shader 读 union texel6.x）。
     EXPECT_FLOAT_EQ(b.params[0], static_cast<float>(FogAttenuation::kQuadratic));
+    // radius（外侧圆角壳厚度）落在 params[1]（shader 读 union texel5.w）。
+    EXPECT_FLOAT_EQ(b.params[1], 0.5f);
 }
 
 TEST(FireFogLower, EmptyBodiesAllSentinel) {

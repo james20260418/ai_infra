@@ -46,7 +46,7 @@
 
 namespace {
 
-constexpr int kBodyTexelsPerFog = 3;   // 每团 3 个 RGBA32F texel
+constexpr int kBodyTexelsPerFog = jpov::fog_layout::kTexelsPerBody;   // 每团 texel 数（见 fog_body.h 布局契约）
 // inject 的纹理单元：0=团 tile 索引,1=tile z 范围,2=团属性,3=tile 中心射线,4=z 切片边界,
 // 5=点光源 tile 索引；CSM 阴影从 6 起（6..6+kMaxCascades-1）。
 constexpr int kLightIndexTexUnit = 5;
@@ -556,7 +556,9 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                     GL_RGBA, GL_UNSIGNED_BYTE, light_data.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // ── 团属性纹理（RGBA32F；每团 3 texel：t0=(center,radius) t1=(sigma,albedo) t2=(atten,emission)）──
+    // ── 团属性纹理（RGBA32F；每团 kBodyTexelsPerFog texel，见 fog_body.h kFogBodyLayout）──
+    //    布局：t0=(kind,sigma,albedo.r,albedo.g) t1=(albedo.b,emission.rgb)
+    //          t2..t6 = kRoundBox union（容器 center/bound_half/axes/radius/atten）
     const int body_tex_w = kMaxTotalFogs * kBodyTexelsPerFog;
     if (fog_body_tex_ == 0) {
         glGenTextures(1, &fog_body_tex_);
@@ -569,24 +571,42 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                      GL_RGBA, GL_FLOAT, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
-    std::vector<float> body_attr(static_cast<size_t>(count) * kBodyTexelsPerFog * 4);
+    std::vector<float> body_attr(static_cast<size_t>(count) * kBodyTexelsPerFog * 4, 0.0f);
     for (int i = 0; i < count; ++i) {
         const FogBody& b = bodies_[i];
-        float* t0 = &body_attr[(static_cast<size_t>(i) * 3 + 0) * 4];
-        float* t1 = &body_attr[(static_cast<size_t>(i) * 3 + 1) * 4];
-        float* t2 = &body_attr[(static_cast<size_t>(i) * 3 + 2) * 4];
-        t0[0] = b.bound.center.x();
-        t0[1] = b.bound.center.y();
-        t0[2] = b.bound.center.z();
-        t0[3] = b.bound.half_extent.x();   // 立方 OBB ⇒ 各半轴相同 = 球半径
-        t1[0] = b.sigma;
-        t1[1] = b.albedo.r;
-        t1[2] = b.albedo.g;
-        t1[3] = b.albedo.b;
-        t2[0] = b.params[0];               // attenuation 枚举
-        t2[1] = b.emission.r;
-        t2[2] = b.emission.g;
-        t2[3] = b.emission.b;
+        const size_t base = static_cast<size_t>(i) * kBodyTexelsPerFog * 4;
+        float* t0 = &body_attr[base + 0 * 4];
+        float* t1 = &body_attr[base + 1 * 4];
+        float* t2 = &body_attr[base + 2 * 4];
+        float* t3 = &body_attr[base + 3 * 4];
+        float* t4 = &body_attr[base + 4 * 4];
+        float* t5 = &body_attr[base + 5 * 4];
+        float* t6 = &body_attr[base + 6 * 4];
+        t0[0] = static_cast<float>(static_cast<uint8_t>(b.kind));   // kind
+        t0[1] = b.sigma;
+        t0[2] = b.albedo.r;
+        t0[3] = b.albedo.g;
+        t1[0] = b.albedo.b;
+        t1[1] = b.emission.r;
+        t1[2] = b.emission.g;
+        t1[3] = b.emission.b;
+        t2[0] = b.bound.center.x();
+        t2[1] = b.bound.center.y();
+        t2[2] = b.bound.center.z();
+        t2[3] = b.bound.half_extent.x();
+        t3[0] = b.bound.half_extent.y();
+        t3[1] = b.bound.half_extent.z();
+        t3[2] = b.bound.axis[0].x();
+        t3[3] = b.bound.axis[0].y();
+        t4[0] = b.bound.axis[0].z();
+        t4[1] = b.bound.axis[1].x();
+        t4[2] = b.bound.axis[1].y();
+        t4[3] = b.bound.axis[1].z();
+        t5[0] = b.bound.axis[2].x();
+        t5[1] = b.bound.axis[2].y();
+        t5[2] = b.bound.axis[2].z();
+        t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
+        t6[0] = b.params[0];               // attenuation 枚举
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count * kBodyTexelsPerFog, 1,
