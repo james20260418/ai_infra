@@ -1,0 +1,246 @@
+// L-System 引擎 + 龟图 —— 单元测试（GL-free、纯 CPU）。
+//
+// 覆盖：RNG 确定性、表达式/条件/算术改写、括号栈、龟图几何、龙爪槐端到端确定性。
+// 设计见 tools/jpov/docs/jpov_vegetation_design.md。
+
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "tools/jpov/src/vegetation/lsystem.h"
+
+namespace jpov {
+namespace vegetation {
+namespace {
+
+// 把模块序列的符号拼成字符串（忽略参数），便于断言结构。
+std::string Symbols(const std::vector<Module>& mods) {
+    std::string s;
+    for (const Module& m : mods) {
+        s.push_back(m.symbol);
+    }
+    return s;
+}
+
+// 找出首个某符号的模块的参数序列（找不到返回空）。
+std::vector<float> FirstParams(const std::vector<Module>& mods, char sym) {
+    for (const Module& m : mods) {
+        if (m.symbol == sym) {
+            return m.params;
+        }
+    }
+    return {};
+}
+
+// ============================ RNG ============================
+
+TEST(LSystemRngTest, DeterministicSameSeed) {
+    Rng a(12345);
+    Rng b(12345);
+    for (int i = 0; i < 16; ++i) {
+        EXPECT_EQ(a.NextU64(), b.NextU64());
+    }
+}
+
+TEST(LSystemRngTest, DifferentSeedsDiffer) {
+    Rng a(1);
+    Rng b(2);
+    EXPECT_NE(a.NextU64(), b.NextU64());
+}
+
+TEST(LSystemRngTest, FloatInUnitInterval) {
+    Rng a(99);
+    for (int i = 0; i < 1000; ++i) {
+        const float v = a.NextFloat01();
+        EXPECT_GE(v, 0.0f);
+        EXPECT_LT(v, 1.0f);
+    }
+}
+
+// ============================ 改写（无参） ============================
+
+TEST(LSystemRewriteTest, ClassicBranching) {
+    LSystemBuilder b;
+    b.SetAxiom("A");
+    b.AddRule("A -> F[+A][-A]");
+    LSystem sys = b.Build();
+
+    EXPECT_EQ(Symbols(sys.Expand(0, 0)), "A");
+    EXPECT_EQ(Symbols(sys.Expand(1, 0)), "F[+A][-A]");
+    // 第 2 代：A 各自再展开一次。
+    EXPECT_EQ(Symbols(sys.Expand(2, 0)),
+              "F[+F[+A][-A]][-F[+A][-A]]");
+}
+
+TEST(LSystemRewriteTest, UnknownSymbolStaysPut) {
+    LSystemBuilder b;
+    b.SetAxiom("A");
+    b.AddRule("A -> AB");   // B 无规则
+    LSystem sys = b.Build();
+    EXPECT_EQ(Symbols(sys.Expand(3, 0)), "ABBB");
+}
+
+// ============================ 参数 / 条件 / 算术 ============================
+
+TEST(LSystemParamTest, ConditionSelectsByParam) {
+    LSystemBuilder b;
+    b.SetAxiom("A(0)");
+    b.AddRule("A(n) : n < 3 -> F(n)A(n + 1)");
+    LSystem sys = b.Build();
+
+    // 3 代后：n=0,1,2 依次展开出 F，n=3 不再命中（原地保留为 A(3)）。
+    std::vector<Module> out = sys.Expand(5, 0);
+    EXPECT_EQ(Symbols(out), "FFFA");
+    // F 的参数应是 0,1,2；末尾 A 保留参数 3。
+    ASSERT_EQ(out.size(), 4u);
+    EXPECT_FLOAT_EQ(out[0].params[0], 0.0f);
+    EXPECT_FLOAT_EQ(out[1].params[0], 1.0f);
+    EXPECT_FLOAT_EQ(out[2].params[0], 2.0f);
+    EXPECT_EQ(out[3].symbol, 'A');
+    EXPECT_FLOAT_EQ(out[3].params[0], 3.0f);
+}
+
+TEST(LSystemParamTest, MultiArgAndArithmetic) {
+    LSystemBuilder b;
+    b.SetAxiom("A(2, 3)");
+    b.AddRule("A(a, b) -> F(a + b) F(a * 2)");
+    LSystem sys = b.Build();
+    std::vector<Module> out = sys.Expand(1, 0);
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_FLOAT_EQ(out[0].params[0], 5.0f);
+    EXPECT_FLOAT_EQ(out[1].params[0], 4.0f);
+}
+
+TEST(LSystemParamTest, GeConditionAndScaledGrowth) {
+    LSystemBuilder b;
+    b.SetAxiom("S(8)");
+    b.AddRule("S(v) : v > 2 -> F(v)S(v / 2)");
+    LSystem sys = b.Build();
+    std::vector<Module> out = sys.Expand(2, 0);
+    // 第一代：F(8) S(4)；第二代：F(8) F(4) S(2)。
+    EXPECT_EQ(Symbols(out), "FFS");
+    EXPECT_FLOAT_EQ(out[0].params[0], 8.0f);
+    EXPECT_FLOAT_EQ(out[1].params[0], 4.0f);
+}
+
+// ============================ 随机规则（可选路径） ============================
+
+TEST(LSystemStochasticTest, SameSeedSameResult) {
+    LSystemBuilder b;
+    b.SetAxiom("A");
+    b.AddRule("A -> F", 1.0f);
+    b.AddRule("A -> FF", 1.0f);
+    LSystem sys = b.Build();
+    EXPECT_EQ(Symbols(sys.Expand(4, 7)), Symbols(sys.Expand(4, 7)));
+}
+
+// ============================ 龟图几何 ============================
+
+TEST(LSystemTurtleTest, SingleForwardSegment) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)");
+    LSystem sys = b.Build();
+    TurtleConfig cfg;
+    cfg.length_scale = 2.0f;
+    cfg.base_radius = 0.5f;
+
+    Skeleton sk = GenerateSkeleton(sys, cfg, /*generations=*/0, 0);
+    ASSERT_EQ(sk.segments.size(), 1u);
+    const Segment& s = sk.segments[0];
+    EXPECT_FLOAT_EQ(s.start.x(), 0.0f);
+    EXPECT_FLOAT_EQ(s.start.y(), 0.0f);
+    EXPECT_FLOAT_EQ(s.end.x(), 0.0f);
+    EXPECT_FLOAT_EQ(s.end.y(), 2.0f);   // F(1) * length_scale(2)
+    EXPECT_FLOAT_EQ(s.radius, 0.5f);
+}
+
+TEST(LSystemTurtleTest, BracketProducesTwoBranches) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)[&(90)F(1)][&(-90)F(1)]");
+    LSystem sys = b.Build();
+    TurtleConfig cfg;
+    cfg.length_scale = 1.0f;
+
+    Skeleton sk = GenerateSkeleton(sys, cfg, 0, 0);
+    ASSERT_EQ(sk.segments.size(), 3u);   // 主干 + 两侧枝
+    // 主干沿 +Y。
+    EXPECT_FLOAT_EQ(sk.segments[0].end.y(), 1.0f);
+    // 两条侧枝末端 y 应低于起点（向下/向侧面），且长度非零。
+    for (size_t i = 1; i < sk.segments.size(); ++i) {
+        const Segment& s = sk.segments[i];
+        const float dx = s.end.x() - s.start.x();
+        const float dy = s.end.y() - s.start.y();
+        const float dz = s.end.z() - s.start.z();
+        EXPECT_GT(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0e-4f);
+    }
+}
+
+TEST(LSystemTurtleTest, BranchTaperReducesRadius) {
+    LSystemBuilder b;
+    b.SetAxiom("F(1)[F(1)]");
+    LSystem sys = b.Build();
+    TurtleConfig cfg;
+    cfg.base_radius = 1.0f;
+    cfg.radius_taper_per_branch = 0.5f;
+
+    Skeleton sk = GenerateSkeleton(sys, cfg, 0, 0);
+    ASSERT_EQ(sk.segments.size(), 2u);
+    // 主干半径 1.0；画完主干后先按 segment taper 衰减（×0.94），
+    // 再入栈按 branch taper 衰减（×0.5）→ 子枝 0.47。
+    const float seg_taper = cfg.radius_taper_per_segment;   // 默认 0.94
+    EXPECT_FLOAT_EQ(sk.segments[0].radius, 1.0f);
+    EXPECT_FLOAT_EQ(sk.segments[1].radius, 1.0f * seg_taper * 0.5f);
+}
+
+TEST(LSystemTurtleTest, AllSegmentsFinite) {
+    // 合法配置下生成不应产生 NaN/Inf（防御式回归）。
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig cfg;
+    Skeleton sk = GenerateSkeleton(sys, cfg, 25, 0);
+    for (const Segment& s : sk.segments) {
+        EXPECT_TRUE(std::isfinite(s.start.x()) && std::isfinite(s.start.y()) &&
+                    std::isfinite(s.start.z()));
+        EXPECT_TRUE(std::isfinite(s.end.x()) && std::isfinite(s.end.y()) &&
+                    std::isfinite(s.end.z()));
+    }
+}
+
+// ============================ 龙爪槐端到端 ============================
+
+TEST(DragonClawTest, ProducesBranchingSkeleton) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig cfg;
+    Skeleton sk = GenerateSkeleton(sys, cfg, /*generations=*/25, /*seed=*/0);
+    EXPECT_GT(sk.segments.size(), 100u) << "龙爪槐骨架线段过少，规则可能没展开";
+    for (const Segment& s : sk.segments) {
+        EXPECT_GE(s.radius, cfg.min_radius - 1.0e-6f);
+    }
+}
+
+TEST(DragonClawTest, DeterministicAcrossRuns) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig cfg;
+    Skeleton a = GenerateSkeleton(sys, cfg, 25, 42);
+    Skeleton b = GenerateSkeleton(sys, cfg, 25, 42);
+    ASSERT_EQ(a.segments.size(), b.segments.size());
+    for (size_t i = 0; i < a.segments.size(); ++i) {
+        EXPECT_FLOAT_EQ(a.segments[i].start.x(), b.segments[i].start.x());
+        EXPECT_FLOAT_EQ(a.segments[i].end.y(), b.segments[i].end.y());
+        EXPECT_FLOAT_EQ(a.segments[i].radius, b.segments[i].radius);
+    }
+}
+
+TEST(DragonClawTest, TrunkGrowsUpwardBeforeBranches) {
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig cfg;
+    Skeleton sk = GenerateSkeleton(sys, cfg, 25, 0);
+    ASSERT_FALSE(sk.segments.empty());
+    // 第一段（主干底部）应沿 +Y 向上。
+    EXPECT_GT(sk.segments[0].end.y(), sk.segments[0].start.y());
+}
+
+}  // namespace
+}  // namespace vegetation
+}  // namespace jpov

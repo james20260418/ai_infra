@@ -403,3 +403,38 @@ cc_binary(
 )
 
 # 见 //tools/jpov/test:BUILD — gold generator + gold test 均移至 test/BUILD 管理
+
+# ============================================================================
+# 植被查看器（vegetation viewer）— 肉眼验收 L-System 生成的植被拓扑骨架
+# （MVP：每根枝画成一根空间棒棒）。树种 = 内置「龙爪槐」。
+# 设计见 docs/jpov_vegetation_design.md；引擎在 //tools/jpov/src/vegetation:lsystem。
+# ============================================================================
+cc_library(
+    name = "vegetation_viewer_app",
+    hdrs = ["demo/vegetation_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:ui",
+        "//tools/jpov/src/vegetation:lsystem",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_vegetation_viewer",
+    srcs = ["demo/jpov_vegetation_viewer.cc"],
+    deps = [
+        "//tools/jpov:vegetation_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src/vegetation:lsystem",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

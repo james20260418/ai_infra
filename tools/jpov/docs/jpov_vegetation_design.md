@@ -1,10 +1,30 @@
 # JPOV 植被（植物大作战）设计调查
 
 > 日期：2026-10-08
-> 状态：**调查 / 认知文档**（未定稿、未实现）。给 Danis 看方向，等拍板。
+> 状态：**调查 / 认知文档**（方向已定；生成层 L-System MVP 已落地，见 §〇.4；渲染层 cutout/instancing 已就绪，见 §〇.6）。
 > 动机：引擎要能处理「大雨林」量级的植物，不重蹈 Tripo 单图重建橡树（`assets/models/samples/oak_negative/`）
 > 的覆辙——那棵树本质是「一堆朝向随机的离散面片」，透空率高、充满塑料碎纸感。
 > Danis 定调：**植物不求厉害细节，但求量大可靠。**
+
+---
+
+## 〇.4、L-System MVP 已落地（2026-10-11，PR `feature/20261011-jpov-vegetation-lsystem`）
+
+**范围**：从「生成层」最基础的一步起步 —— 跑通 **L-System（参数化 + 条件 + 可随机）→ 龟图 → 拓扑骨架**，并把骨架可视化（每根枝 = 一根空间棒棒）。**不含**叶片卡片 / cutout / 风 / 四季（后续 PR）。
+
+**新增**：
+- 引擎 `src/vegetation/lsystem.{h,cc}`（**GL-free、确定性、可单测**）：参数化符号 `F(6)`、条件产生式 `A(n) : n < 7 -> ...`、表达式四则、随机加权择一；龟图 `F f + - & ^ \ / | [ ]` → `Skeleton`（线段列表）。
+- 单测 `test/vegetation/lsystem_test.cc`（16 例：RNG 确定性 / 改写 / 条件 / 龟图几何 / 龙爪槐端到端确定性）。
+- viewer `demo/vegetation_viewer_app.h` + `demo/jpov_vegetation_viewer.cc` + `build_jpov_vegetation_viewer.sh`（**仿 skylight viewer**）：把骨架展平成「盒棒」一次 draw；面板 4 knob（代数 / 长度缩放 / 粗细 / 种子）；headless `--capture` 出生长扫谱 + 成品三视角。
+- 内置树种 **龙爪槐**（`BuildDragonClawPagodaTree`）：矮伞形 + 枝条下垂 + 末梢每步扭转 ⇒ 卷爪。
+
+**存储认知（本 PR 确立）**：引擎的**真值 = 规则 + 参数 + seed**（程序），骨架/网格都是派生物。故将来「配方文件」存程序（类比 SpeedTree `.spm`），不存展开结果；交换仍走 GLB。
+
+**认知校正**：`tile culling` 治光源（非 overdraw）；风是**无状态 VS 动画**（非物理）；四季是**参数 lerp**（非 dither）——dither 的正业是 **LOD 交叉淡入**。
+
+**待调参**：龙爪槐的角度常量目前是「形似」初值（下垂/卷爪方向已对），逼真需对着照片迭代。
+
+**踩坑（2D 扇面）**：初版侧枝方位用 `^`（绕 L pitch），致所有侧枝落在同一平面，长成 2D 扇面（bbox X:Z ≈ 1:6）。修正：绕主干轴分发方位必须用 `\`（绕 H roll）——先 roll 把 L 绕主干轴转，再 `&` 斜出；且**不能用 `+`（绕 U yaw）**，因主干 U=+Z 不是主干轴，`+` 是把主干本身扳歪。修后 bbox (4.84, 3.08, 5.12)，冠幅 X/Z 对称、比高度还宽（垂枝伞形）。
 
 ---
 
