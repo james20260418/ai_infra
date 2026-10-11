@@ -85,10 +85,11 @@ inline constexpr FogBodyLayoutEntry kFogBodyLayout[] = {
     {0, 0, "kind"},      {0, 1, "sigma"},     {0, 2, "albedo_r"},  {0, 3, "albedo_g"},
     {1, 0, "albedo_b"},  {1, 1, "emission_r"},{1, 2, "emission_g"},{1, 3, "emission_b"},
     // ── union：kRoundBox 几何 + 形状（texel 2..6）──
-    {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"},  {2, 3, "half_x"},
-    {3, 0, "half_y"},    {3, 1, "half_z"},    {3, 2, "axis0_x"},   {3, 3, "axis0_y"},
+    //   bound_h* = 容器半尺寸（内盒半 size/2 + radius）；radius = 外侧圆角壳厚度；atten = 壳剖面
+    {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"},  {2, 3, "bound_hx"},
+    {3, 0, "bound_hy"},  {3, 1, "bound_hz"},  {3, 2, "axis0_x"},   {3, 3, "axis0_y"},
     {4, 0, "axis0_z"},   {4, 1, "axis1_x"},   {4, 2, "axis1_y"},   {4, 3, "axis1_z"},
-    {5, 0, "axis2_x"},   {5, 1, "axis2_y"},   {5, 2, "axis2_z"},   {5, 3, "roundness"},
+    {5, 0, "axis2_x"},   {5, 1, "axis2_y"},   {5, 2, "axis2_z"},   {5, 3, "radius"},
     {6, 0, "atten"},     {6, 1, "reserved"},  {6, 2, "reserved"},  {6, 3, "reserved"},
 };
 

@@ -209,10 +209,10 @@ union 区（当前唯一 kind `kRoundBox`，texel 2..6）：
 
 | texel | x | y | z | w |
 |---|---|---|---|---|
-| 2 | `center_x` | `center_y` | `center_z` | `half_x` |
-| 3 | `half_y` | `half_z` | `axis0_x` | `axis0_y` |
+| 2 | `center_x` | `center_y` | `center_z` | `bound_hx` |
+| 3 | `bound_hy` | `bound_hz` | `axis0_x` | `axis0_y` |
 | 4 | `axis0_z` | `axis1_x` | `axis1_y` | `axis1_z` |
-| 5 | `axis2_x` | `axis2_y` | `axis2_z` | `roundness` |
+| 5 | `axis2_x` | `axis2_y` | `axis2_z` | `radius` |
 | 6 | `atten` | `reserved` | `reserved` | `reserved` |
 
 （texel 7..9 预留，供将来的复杂 kind —— 如噪声火。尺寸选值依据：最坏 kind 的解析参数 ≈ 36 float
@@ -234,15 +234,16 @@ albedo / emission）；主入口 `SampleFogSegment` 按 kind 分派（GLSL330 �
 **采样器严格 O(1)**：`SampleXXX` 内**无循环、无迭代、无依赖纹理迭代**（fbm 若用，固定 octave 上限，
 仍是 O(1)）；解码器只 fetch 该分支用到的 texel（stride 只是上界，热循环带宽不受连累）。
 
-### 10.3.1 `kRoundBox` —— 第一种采样器（2026-10-11 实现）
+### 10.3.1 `kRoundBox` —— 第一种采样器（2026-10-11，10-11 晚修订）
 
-- 容器：OBB（立方：`half_extent = (radius,radius,radius)`，轴 = 世界轴）；求交 = ray-OBB slab。
-- 归一化局部坐标 `u = Rᵀ(p−c) ⊘ half_extent`（标称盒 = [-1,1]³）。
-- **圆角盒距离** `t`（团心 0、盒面 1；盒外 t>1）：圆角盒 SDF 归一化 ——
-  `q = max(|u| − (1−round), 0)`，`sdf = ‖q‖ − round`，`t = 1 + sdf/round`。
-  `round=1` → 球（`t=‖u‖`）；`round→0` → 纯盒（面平棱硬）。默认 `round=0.35`。
-- 消光 `σ = sigma · w(t)`，`w` = `FogAttenuation` 剖面（uniform / linear / quadratic / exponential）。
-- 用户可配：`PointFog{ center, radius(=盒半尺寸), sigma, albedo, emission, attenuation, roundness }`。
+**高自由度 box**：用户直接配 box 的**位置 + 长宽高**；box **外侧**再包一层厚度 = `radius` 的**球面圆角外壳**。
+
+- 容器：OBB（轴 = 世界轴）；**容器半尺寸 = 内盒半 (size/2) + radius**（= 内盒 ⊕ 球 的外沿，剪枝 / z 范围保守不漏）。
+  求交 = ray-OBB slab（容器）。
+- 局部坐标 `q = Rᵀ(p−c)`（世界单位）。盒 SDF：`d = ‖max(|q|−half, 0)‖ + min(maxᵢ(|qᵢ|−halfᵢ), 0)`。
+- **外壳归一化距离** `t`：盒内（`d ≤ 0`）→ `t = 0`（**无衰减，w = 1**）；盒外 `t = d/radius ∈ (0,1]`；`radius = 0` → 硬边盒。
+- 消光 `σ = sigma · w(t)`，`w` = `FogAttenuation` 剖面（**只作用于圆角壳区**）。
+- 用户可配：`PointFog{ center, size(长宽高), radius(外侧圆角壳厚度), sigma, albedo, emission, attenuation }`。
 
 ### 10.4 统一采样契约 —— 唯一 kind 分支点
 

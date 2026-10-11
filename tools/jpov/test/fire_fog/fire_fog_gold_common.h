@@ -49,7 +49,8 @@ inline constexpr float kViewFar    = 1000.0f;
 // ── 场景 A（god ray）：点雾 kLinear 剖面、σ=1.0、albedo (0.25,0.25,0.25)、无自发光。──
 // （旧模型 L_in = color·光照；新模型散射 = albedo·光照 ⇒ albedo=旧 color、emission=0 时逐像素等价。）
 inline constexpr float kFogCenter[3] = {0.0f, 3.0f, 0.0f};
-inline constexpr float kFogRadius    = 4.5f;
+inline constexpr float kFogSize      = 6.0f;   // box 长宽高（内盒）
+inline constexpr float kFogRound     = 1.5f;   // 外侧圆角壳厚度
 inline constexpr float kFogSigma     = 1.0f;
 inline constexpr float kFogAlbedo    = 0.25f;
 
@@ -59,7 +60,8 @@ inline constexpr float kSunGain   = 2.0f;
 
 // ── 场景 B（点光源驱动雾散射）：点雾 + 一盏暖色点光偏置在雾内一侧。──
 inline constexpr float kPlFogCenter[3] = {0.0f, 3.0f, 0.0f};
-inline constexpr float kPlFogRadius    = 4.5f;
+inline constexpr float kPlFogSize      = 6.0f;   // box 长宽高（内盒）
+inline constexpr float kPlFogRound     = 1.5f;   // 外侧圆角壳厚度
 inline constexpr float kPlFogSigma     = 1.0f;
 inline constexpr float kPlFogAlbedo    = 0.25f;              // 与 god ray gold 同（唯一差异 = 点光源）
 inline constexpr float kPlPos[3]       = {2.5f, 3.0f, 1.5f};   // 点光位置（雾内偏一侧 ⇒ 不对称散射）
@@ -177,7 +179,8 @@ protected:
     void EmitFogAndLighting(jpov::RenderCommandList* cmds) override {
         jpov::PointFog fog;
         fog.center = {kFogCenter[0], kFogCenter[1], kFogCenter[2]};
-        fog.radius = kFogRadius;
+        fog.size = {kFogSize, kFogSize, kFogSize};
+        fog.radius = kFogRound;
         fog.sigma = kFogSigma;
         fog.albedo = {kFogAlbedo, kFogAlbedo, kFogAlbedo, 1.0f};
         fog.emission = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -200,7 +203,8 @@ protected:
     void EmitFogAndLighting(jpov::RenderCommandList* cmds) override {
         jpov::PointFog fog;
         fog.center = {kPlFogCenter[0], kPlFogCenter[1], kPlFogCenter[2]};
-        fog.radius = kPlFogRadius;
+        fog.size = {kPlFogSize, kPlFogSize, kPlFogSize};
+        fog.radius = kPlFogRound;
         fog.sigma = kPlFogSigma;
         fog.albedo = {kPlFogAlbedo, kPlFogAlbedo, kPlFogAlbedo, 1.0f};
         fog.emission = {0.0f, 0.0f, 0.0f, 1.0f};

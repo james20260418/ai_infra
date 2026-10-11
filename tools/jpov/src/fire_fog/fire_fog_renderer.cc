@@ -558,7 +558,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
 
     // ── 团属性纹理（RGBA32F；每团 kBodyTexelsPerFog texel，见 fog_body.h kFogBodyLayout）──
     //    布局：t0=(kind,sigma,albedo.r,albedo.g) t1=(albedo.b,emission.rgb)
-    //          t2..t6 = kRoundBox union（center/axes/half_extent/roundness/atten）
+    //          t2..t6 = kRoundBox union（容器 center/bound_half/axes/radius/atten）
     const int body_tex_w = kMaxTotalFogs * kBodyTexelsPerFog;
     if (fog_body_tex_ == 0) {
         glGenTextures(1, &fog_body_tex_);
@@ -605,7 +605,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         t5[0] = b.bound.axis[2].x();
         t5[1] = b.bound.axis[2].y();
         t5[2] = b.bound.axis[2].z();
-        t5[3] = b.params[1];               // roundness
+        t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
         t6[0] = b.params[0];               // attenuation 枚举
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);

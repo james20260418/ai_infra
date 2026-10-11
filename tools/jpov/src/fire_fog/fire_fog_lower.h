@@ -28,15 +28,18 @@
 
 namespace jpov {
 
-// 命令层点雾 → 后端统一团（**kRoundBox** 圆角盒）。
+// 命令层雾体 → 后端统一团（**kRoundBox** 圆角盒）。
 //
-// 立方 OBB：中心 = fog.center，三轴 = 世界单位轴，三半轴长 = fog.radius（故 box ⊇ 球，
-// 剪枝保守不漏）。kind = kRoundBox；params[0] = attenuation（剖面枚举）、
-// params[1] = roundness（圆角分数 ∈(0,1]）。
+// 容器 OBB：中心 = fog.center，三轴 = 世界单位轴，三半轴长 = 内盒半尺寸(size/2) + 外侧圆角壳
+// 厚度 radius（= box ⊕ 球 的外沿，剪枝 / z 范围保守不漏）。kind = kRoundBox；
+// params[0] = attenuation（外壳剖面枚举）、params[1] = radius（外侧圆角壳厚度）。
 // sigma / albedo / emission 原样映射（散射与自发光分开；光照由 inject shader 始终开启）。
-// Pre-conditions: fog.radius > 0；fog.sigma >= 0；albedo ∈ [0,1]；emission >= 0
+// Pre-conditions: fog.size 各分量 > 0；fog.radius >= 0；fog.sigma >= 0；albedo ∈ [0,1]；emission >= 0
 inline FogBody LowerPointFog(const PointFog& fog) {
-    CHECK_GT(fog.radius, 0.0f) << "PointFog.radius 必须 > 0";
+    CHECK_GT(fog.size.x(), 0.0f) << "PointFog.size 各分量必须 > 0";
+    CHECK_GT(fog.size.y(), 0.0f) << "PointFog.size 各分量必须 > 0";
+    CHECK_GT(fog.size.z(), 0.0f) << "PointFog.size 各分量必须 > 0";
+    CHECK_GE(fog.radius, 0.0f) << "PointFog.radius（外侧圆角壳厚度）必须 >= 0";
     CHECK_GE(fog.sigma, 0.0f) << "PointFog.sigma（消光系数 1/m）必须 >= 0";
     CHECK_GE(fog.albedo.r, 0.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
     CHECK_GE(fog.albedo.g, 0.0f) << "PointFog.albedo 各通道必须 ∈ [0,1]";
@@ -47,15 +50,16 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     CHECK_GE(fog.emission.r, 0.0f) << "PointFog.emission 各通道必须 >= 0";
     CHECK_GE(fog.emission.g, 0.0f) << "PointFog.emission 各通道必须 >= 0";
     CHECK_GE(fog.emission.b, 0.0f) << "PointFog.emission 各通道必须 >= 0";
-    CHECK_GT(fog.roundness, 0.0f) << "PointFog.roundness 必须 ∈ (0,1]";
-    CHECK_LE(fog.roundness, 1.0f) << "PointFog.roundness 必须 ∈ (0,1]";
 
     FogBody b;
     b.bound.center = fog.center;
     b.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
     b.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
     b.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
-    b.bound.half_extent = Vec3f(fog.radius, fog.radius, fog.radius);
+    // 容器半尺寸 = 内盒半 (size/2) + 外侧圆角壳厚度 radius（culling/z 范围用外沿，保守不漏）。
+    b.bound.half_extent = Vec3f(fog.size.x() * 0.5f + fog.radius,
+                                fog.size.y() * 0.5f + fog.radius,
+                                fog.size.z() * 0.5f + fog.radius);
     b.kind = FogFieldKind::kRoundBox;
     b.sigma = fog.sigma;
     b.albedo = fog.albedo;
@@ -64,7 +68,7 @@ inline FogBody LowerPointFog(const PointFog& fog) {
         b.params[i] = 0.0f;
     }
     b.params[0] = static_cast<float>(fog.attenuation);
-    b.params[1] = fog.roundness;   // 圆角分数（∈(0,1]；shader 内再 clamp 到 [0.02,1]）
+    b.params[1] = fog.radius;   // 外侧圆角壳厚度
     return b;
 }
 

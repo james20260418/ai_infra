@@ -96,10 +96,10 @@ vec4 OverCompose(vec4 A, vec4 B) {
 #define FOG_TEXELS_PER_BODY 10
 //@FOGLAYOUT texel=0 x=kind y=sigma z=albedo_r w=albedo_g
 //@FOGLAYOUT texel=1 x=albedo_b y=emission_r z=emission_g w=emission_b
-//@FOGLAYOUT texel=2 x=center_x y=center_y z=center_z w=half_x
-//@FOGLAYOUT texel=3 x=half_y y=half_z z=axis0_x w=axis0_y
+//@FOGLAYOUT texel=2 x=center_x y=center_y z=center_z w=bound_hx
+//@FOGLAYOUT texel=3 x=bound_hy y=bound_hz z=axis0_x w=axis0_y
 //@FOGLAYOUT texel=4 x=axis0_z y=axis1_x z=axis1_y w=axis1_z
-//@FOGLAYOUT texel=5 x=axis2_x y=axis2_y z=axis2_z w=roundness
+//@FOGLAYOUT texel=5 x=axis2_x y=axis2_y z=axis2_z w=radius
 //@FOGLAYOUT texel=6 x=atten y=reserved z=reserved w=reserved
 
 // 采样器种类（与 fog_body.h 的 FogFieldKind 一致）。
@@ -118,8 +118,8 @@ struct FogBodyData {
     vec3  axis0;
     vec3  axis1;
     vec3  axis2;
-    vec3  half_extent;
-    float roundness;
+    vec3  bound_half;    // 容器半尺寸（= 内盒半 size/2 + radius）
+    float radius;        // 外侧球面圆角壳厚度
     float atten;
 };
 
@@ -137,8 +137,8 @@ FogBodyData DecodeFogBody(int bi) {
     d.axis0 = vec3(1.0, 0.0, 0.0);
     d.axis1 = vec3(0.0, 1.0, 0.0);
     d.axis2 = vec3(0.0, 0.0, 1.0);
-    d.half_extent = vec3(0.0);
-    d.roundness = 0.0;
+    d.bound_half = vec3(0.0);
+    d.radius = 0.0;
     d.atten = 0.0;
     if (d.kind == FOG_KIND_ROUNDBOX) {
         vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
@@ -147,11 +147,11 @@ FogBodyData DecodeFogBody(int bi) {
         vec4 g3 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 5, 0), 0);
         vec4 g4 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 6, 0), 0);
         d.center      = g0.xyz;
-        d.half_extent = vec3(g0.w, g1.x, g1.y);
+        d.bound_half  = vec3(g0.w, g1.x, g1.y);
         d.axis0       = vec3(g1.z, g1.w, g2.x);
         d.axis1       = g2.yzw;
         d.axis2       = g3.xyz;
-        d.roundness   = g3.w;
+        d.radius      = g3.w;
         d.atten       = g4.x;
     }
     return d;
@@ -163,17 +163,22 @@ float FogSigma(FogBodyData d)      { return d.sigma; }
 vec3  FogAlbedo(FogBodyData d)     { return d.albedo; }
 vec3  FogEmission(FogBodyData d)   { return d.emission; }
 vec3  FogCenter(FogBodyData d)     { return d.center; }
-vec3  FogHalfExtent(FogBodyData d) { return d.half_extent; }
-float FogRoundness(FogBodyData d)  { return d.roundness; }
+vec3  FogBoundHalf(FogBodyData d) { return d.bound_half; }    // 容器半尺寸（内盒半 + radius）
+float FogRadius(FogBodyData d)     { return d.radius; }        // 外侧圆角壳厚度
 float FogAtten(FogBodyData d)      { return d.atten; }
 
-// 圆角盒「归一化距离」t：盒局部坐标 u（标称盒 = [-1,1]^3）→ t ∈ [0,1]（团心 0、表面 1；
-// 表面外 t>1 ⇒ ProfileAtten 返回 0）。round ∈ (0,1]：1 → 球（t=|u|），→0 → 纯盒（面平棱硬）。
-float RoundBoxDistance(vec3 u, float round) {
-    float r = clamp(round, 0.02, 1.0);
-    vec3 q = max(abs(u) - (1.0 - r), vec3(0.0));   // 内盒 [-(1-r),1-r] 外的分量
-    float sdf = length(q) - r;                     // 圆角盒 SDF（团心 = -r）
-    return 1.0 + sdf / r;
+// 圆角盒「外壳归一化距离」t：q = p 的盒局部坐标（世界单位，沿 OBB 轴）。
+//   · 内盒内（各轴 |qᵢ| ≤ box_hᵢ）→ t = 0（无衰减，w = 1）。
+//   · 内盒外、圆角壳半径 radius 内：t = d(到盒面距离)/radius ∈ (0,1]。
+//   · radius = 0（硬边盒）：盒内 t=0、盒外 t=2（≥1 ⇒ w=0）。
+// d = 盒 SDF = length(max(|q|−box_h, 0)) + min(maxᵢ(|qᵢ|−box_hᵢ), 0)。
+float RoundBoxShellT(vec3 q, vec3 box_h, float radius) {
+    vec3 e = abs(q) - box_h;
+    float d = length(max(e, vec3(0.0))) + min(max(e.x, max(e.y, e.z)), 0.0);
+    if (radius <= 1e-6) {
+        return (d <= 0.0) ? 0.0 : 2.0;
+    }
+    return max(d, 0.0) / radius;
 }
 
 // 单轴 slab 裁剪：p = dot(axis, ro−center)、dd = dot(axis, rd)。无交 → false。
@@ -238,18 +243,21 @@ FogSegment FogNoHit() {
 }
 
 // ── kRoundBox 采样器（唯一分支本体；**严格 O(1)**：求交 + 一次点求值，无循环/无迭代纹理依赖）──
-// 求交（ray-OBB slab，移入采样函数）→ 与本 froxel 段相交 → 段中点采样圆角盒衰减。
+// 容器 = 内盒 ⊕ 球(radius)（保守 OBB）；内盒无衰减，圆角壳区由 attenuation 塑形。
 FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
                           float zk, float zk1, float znear) {
     FogSegment s = FogNoHit();
 
-    vec3 he = FogHalfExtent(d);
-    if (he.x <= 0.0 || he.y <= 0.0 || he.z <= 0.0) { return s; }
+    vec3 bh = FogBoundHalf(d);       // 容器半尺寸（内盒半 + radius）
+    float rad = FogRadius(d);        // 外侧圆角壳厚度
+    // 内盒半尺寸 = 容器半 − radius；须 > 0。
+    if (bh.x <= rad || bh.y <= rad || bh.z <= rad || rad < 0.0) { return s; }
+    vec3 box_h = bh - vec3(rad);
 
-    // 求交用 OBB（立方）区间：盒 ⊇ 圆角场，四角无场处（t>1）由点求值吸收 ⇒ 安全。
+    // 求交用容器 OBB：内盒 ⊕ 球(radius) ⊂ 该 OBB，壳外无场处由点求值吸收。
     float o0;
     float o1;
-    if (!RayObb(FogCenter(d), d.axis0, d.axis1, d.axis2, he, ro, rd, o0, o1)) { return s; }
+    if (!RayObb(FogCenter(d), d.axis0, d.axis1, d.axis2, bh, ro, rd, o0, o1)) { return s; }
 
     float a = max(o0, max(zk, znear));
     float b = min(o1, zk1);
@@ -257,10 +265,8 @@ FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
 
     vec3 p = ro + (0.5 * (a + b)) * rd;   // 段中点采样
     vec3 loc = p - FogCenter(d);
-    vec3 u = vec3(dot(d.axis0, loc) / he.x,
-                  dot(d.axis1, loc) / he.y,
-                  dot(d.axis2, loc) / he.z);
-    float tt = RoundBoxDistance(u, FogRoundness(d));
+    vec3 q = vec3(dot(d.axis0, loc), dot(d.axis1, loc), dot(d.axis2, loc));  // 世界单位局部坐标
+    float tt = RoundBoxShellT(q, box_h, rad);
     float w = ProfileAtten(int(FogAtten(d) + 0.5), tt);
     float sig = FogSigma(d) * w;
     if (sig <= 0.0) { return s; }
