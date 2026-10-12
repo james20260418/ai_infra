@@ -142,21 +142,22 @@ jpov::MeshData BuildLeafCardsMesh(const Skeleton& skel, const LeafCardConfig& cf
             const Vec3f c = site.position;                  // 叶柄着生点（卡片底边）
             const Vec3f topv = VAdd(c, VScale(up, length)); // 叶尖（沿叶轴向外）
             const Vec3f uW = VScale(right, half_w);
+            // UV：v=0 采样贴图**顶**（＝叶柄，“根部”），对准着生点 c；v=1 采样贴图**底**（＝叶尖）在远端 topv。
             // quad A：位于 (up, right) 平面，法线 = nrm。
             {
-                const Vtx a{VAdd(topv, uW), nrm, jpov::Vec2f(1.0f, 0.0f)};
-                const Vtx b{VAdd(topv, VScale(uW, -1.0f)), nrm, jpov::Vec2f(0.0f, 0.0f)};
-                const Vtx cc{VAdd(c, VScale(uW, -1.0f)), nrm, jpov::Vec2f(0.0f, 1.0f)};
-                const Vtx d{VAdd(c, uW), nrm, jpov::Vec2f(1.0f, 1.0f)};
+                const Vtx a{VAdd(topv, uW), nrm, jpov::Vec2f(1.0f, 1.0f)};
+                const Vtx b{VAdd(topv, VScale(uW, -1.0f)), nrm, jpov::Vec2f(0.0f, 1.0f)};
+                const Vtx cc{VAdd(c, VScale(uW, -1.0f)), nrm, jpov::Vec2f(0.0f, 0.0f)};
+                const Vtx d{VAdd(c, uW), nrm, jpov::Vec2f(1.0f, 0.0f)};
                 AppendQuad(&mesh, a, b, cc, d);
             }
             // quad B：位于 (up, nrm) 平面，法线 = right（与 A 正交）。
             {
                 const Vec3f wN = VScale(nrm, half_w);
-                const Vtx a{VAdd(topv, wN), right, jpov::Vec2f(1.0f, 0.0f)};
-                const Vtx b{VAdd(topv, VScale(wN, -1.0f)), right, jpov::Vec2f(0.0f, 0.0f)};
-                const Vtx cc{VAdd(c, VScale(wN, -1.0f)), right, jpov::Vec2f(0.0f, 1.0f)};
-            const Vtx d{VAdd(c, wN), right, jpov::Vec2f(1.0f, 1.0f)};
+                const Vtx a{VAdd(topv, wN), right, jpov::Vec2f(1.0f, 1.0f)};
+                const Vtx b{VAdd(topv, VScale(wN, -1.0f)), right, jpov::Vec2f(0.0f, 1.0f)};
+                const Vtx cc{VAdd(c, VScale(wN, -1.0f)), right, jpov::Vec2f(0.0f, 0.0f)};
+                const Vtx d{VAdd(c, wN), right, jpov::Vec2f(1.0f, 0.0f)};
                 AppendQuad(&mesh, a, b, cc, d);
             }
         }

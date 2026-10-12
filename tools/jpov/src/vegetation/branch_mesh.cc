@@ -124,7 +124,9 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
         const uint32_t base = static_cast<uint32_t>(mesh.positions.size());
         for (size_t i = 0; i < n; ++i) {
             const float r = std::max(pl.radii[i], 1.0e-4f);
-            const float v = arc[i] / cfg.bark_tile_v_meters;
+            // u = 沿枝弧长 / u 瓦长：纹理的「长向」（贴图 X）顺枝干轴走，
+            //     故树皮的纵向纹理沿枝、横向纹理绕枝（见本文件头 UV 约定）。
+            const float u = arc[i] / cfg.bark_tile_u_meters;
             for (int j = 0; j < ring_verts; ++j) {
                 const float theta =
                     kTwoPi * static_cast<float>(j) / static_cast<float>(edges);
@@ -133,8 +135,8 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                 const Vec3f p = VAdd(pl.points[i], VScale(dir, r));
                 mesh.positions.push_back(p);
                 mesh.normals.push_back(VNorm(dir));
-                // u = 周向弧长 / u 瓦长（随半径变）；v = 沿枝弧长 / v 瓦长。
-                const float u = theta * r / cfg.bark_tile_u_meters;
+                // v = 周向弧长 / v 瓦长（随半径变）：绕枝一圈。
+                const float v = theta * r / cfg.bark_tile_v_meters;
                 mesh.uvs.push_back(jpov::Vec2f(u, v));
             }
         }
@@ -160,7 +162,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                 const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
                 mesh.positions.push_back(pl.points[n - 1]);
                 mesh.normals.push_back(tan[n - 1]);
-                mesh.uvs.push_back(jpov::Vec2f(0.5f, arc[n - 1] / cfg.bark_tile_v_meters));
+                mesh.uvs.push_back(jpov::Vec2f(arc[n - 1] / cfg.bark_tile_u_meters, 0.5f));
                 const uint32_t rb = base + static_cast<uint32_t>((n - 1) * ring_verts);
                 for (int j = 0; j < edges; ++j) {
                     mesh.indices.push_back(cbase);
@@ -173,7 +175,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                 const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
                 mesh.positions.push_back(pl.points[0]);
                 mesh.normals.push_back(VScale(tan[0], -1.0f));
-                mesh.uvs.push_back(jpov::Vec2f(0.5f, 0.0f));
+                mesh.uvs.push_back(jpov::Vec2f(0.0f, 0.5f));
                 for (int j = 0; j < edges; ++j) {
                     mesh.indices.push_back(cbase);
                     mesh.indices.push_back(base + static_cast<uint32_t>(j + 1));
