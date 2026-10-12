@@ -68,6 +68,12 @@
 //       按**测地距离**（见 relax_derive.h）自动推导逐顶点 lag_ratio（固定点 0 → 远处 1，
 //       Laplacian 平滑），另配全局 max_lag；勾选「显示松弛度场」（蓝→红 2D 像素）核对；保存 glb
 //       时写入自定义顶点属性 _JPOV_RELAX（VEC2）。底层 VS 尚未消费 aRelax（#169），故不改变渲染外观。
+//   - 2026-10-12（本 PR）：**展示态与操作解耦**（Danis）——① 载入的 glb 若**自带**蒙皮
+//       （JOINTS/WEIGHTS）或松弛度（_JPOV_RELAX），开图时即读回（见 LoadExistingMeshState）⇒
+//       随机摆动可带动衣服、松弛度场可直接显示，**不再要求**本会话先「一键蒙皮 / 由固定点推导」；
+//       ② 去掉「蒙皮后冻结几何」——不跑仿真几何本就是静止的，禁用只会带来 surprise。改判据为
+//       **按 mesh 内容现判**（ClothMeshHasSkin()），仅用于展示 / 保存，**不再禁用任何编辑**
+//       （平移/旋转/缩放/仿真/重置/补洞 全可用）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -82,6 +88,18 @@
 //     ⇒ 面板布局**必须**从 winfo 推算（不能用常量），否则窗口一变面板就飘。
 //   - 3D 场景渲染到 **3D FBO**（cmds->camera.fbo_3d_width_/height_）。本工具让它
 //     **跟随窗口尺寸**（同 model_editor 的做法），避免 resize 时 3D 被拉伸。
+//
+// 状态模型（读代码前先看这里，别把「内容」与「操作」搞混）：
+//   - geometry：cloth_current_（每 primitive 的当前 CPU 几何 + 材质）= 显示 / 仿真 / 保存的
+//     唯一真相。仿真 / 变换改它后经 SyncSimsToCloth 推上 GPU；sims_ 只是驱动它的软体仿真器。
+//   - skin（蒙皮）：**记在 mesh 上**（flags 带 kJoints + joint_indices/weights）。「是否带蒙皮」
+//     用 ClothMeshHasSkin() **现判**（不设状态位）；蒙皮可来自本会话「一键蒙皮」或载入自带。
+//   - relax（松弛度）：推导结果存**工具内** relax_lag_ratio_（本会话推导或载入读回）；**仅在
+//     保存时**注入 mesh 的 kRelax（_JPOV_RELAX）—— 底层 VS 尚未消费，故编辑期不改 GPU 布局。
+//   - 展示功能（随机摆动带动衣服 / 显示松弛度场）**只认「当前 mesh / 工具里有没有」**，
+//     不绑定「本会话点没点过按钮」。
+//   - 改顶点数的只有**补洞**：它会给新增顶点插值 JOINTS/WEIGHTS/_JPOV_RELAX，故蒙皮 / 松弛后
+//     仍可补洞（其余操作都保顶点数 ⇒ 权重↔顶点对应不破坏）。
 //
 // 命名空间 jpov::clothing、文件夹 tools/jpov/clothing/ 均为**独立**的一整套。
 
@@ -1537,9 +1555,9 @@ private:
             max_geo = std::max(max_geo, stats.max_geodesic_m);
         }
         if (prims_done == 0) {
-            relax_lag_ratio_.clear();
+            // 无固定点 = 没得推。**保留**已有的推导 / 载入结果（误点一次按钮不该丢数据），只提示。
             relax_msg_ =
-                "无固定点：先用 3D 画笔涂抹固定点（或设高度带），再推导";
+                "无固定点：先用 3D 画笔涂抹固定点（或设高度带），再推导（已有结果保留）";
             LOG(WARNING) << "松弛度推导：" << relax_msg_;
             return;
         }

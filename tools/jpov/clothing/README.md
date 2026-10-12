@@ -10,6 +10,19 @@
 ## 1. 一句话流程
 **打开（人体 + 衣服）→ 对齐贴合 → 一键蒙皮 → 保存 glb。**
 
+## 1.1 工具行为模型（状态与约定，读前必看）
+- **几何真相**：`cloth_current_`（每 primitive 的当前 CPU 几何 + 材质）= 显示 / 仿真 / 保存的
+  唯一真相；仿真 / 变换改它后推上 GPU，`sims_` 只是**驱动它**的软体仿真器。
+- **蒙皮（skin）**：状态**记在 mesh 上**（`JOINTS_0/WEIGHTS_0`）。「有没有蒙皮」**现判 mesh
+  内容**（本会话「一键蒙皮」或载入 glb 自带皆算）；它只影响「随机摆动是否带动衣服 / 保存是否写
+  skin」，**不禁用任何编辑**。
+- **松弛度（relax）**：结果存**工具内**（本会话「由固定点推导」或载入 glb 自带的 `_JPOV_RELAX`），
+  **仅在保存时**写入 mesh 的 `_JPOV_RELAX`。勾「显示松弛度场」即可看——**只要当前有就有**，
+  不要求本会话推导过。
+- **只有「补洞」会改顶点数**：它会给新增顶点一并插值 `JOINTS/WEIGHTS/_JPOV_RELAX`；其余操作
+  （平移 / 旋转 / 缩放 / 仿真 / 重置）都保顶点数 ⇒ 蒙皮 / 松弛后仍可继续编辑。
+- **不做**：穿衣自动对齐 / 贴合（其余功能已接）。
+
 ## 2. 编译
 ```bash
 cd <repo 根>
@@ -135,6 +148,8 @@ output/jpov_clothing_tool/jpov_clothing_tool \
   它的作用是产出「带松弛度标注的资产」，等 LAG 渲染上线即可用。
 - **重开自带数据**：载入的 glb 若**自带** `_JPOV_RELAX`（`kRelax`），工具直接读回 ——
   勾 **显示松弛度场** 即可看，**无需**本次会话重新推导（展示只认「当前 mesh 里有没有」）。
+- **误点无害**：无固定点（画笔无选区且未设高度带）时点「由固定点推导松弛度」**不改变**已有
+  结果（只提示），避免误点丢掉载入 / 已推导的松弛度。
 
 ## 5. 推荐操作顺序
 1. 运行（§3）。
@@ -193,7 +208,7 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 （不蒙皮、只给 `--motion_phase` 时：人体会摆、衣服保持静止——正是「衣服没蒙皮则不用动」的预期行为。）
 
 ## 8. 成品样例（成功典范，已入库）
-三个「对齐 → 蒙皮 → 保存」的**标准成品**（带 skin / 24 骨），作「正确结果」参考与回归对照：
+**标准成品**，作「正确结果」参考与回归对照（前三个带 skin；第四个 = 蒙皮 + 松弛度）：
 - `tools/jpov/assets/models/clothing/harness_vest/harness_vest_skinned_sample.glb`
   —— 战术背心，对齐到 mixamo_male。
 - `tools/jpov/assets/models/clothing/yoga_pants/yoga_pants_skinned_sample.glb`
@@ -202,6 +217,10 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 - `tools/jpov/assets/models/clothing/lace_skirt/lace_skirt_skinned_sample.glb`
   —— 薄纱蕾丝裙（cutout）：源 = `samples/lace_skirt/lace_skirt_cutout.glb`（alphaMode=MASK + 双面），
   对齐 mixamo_male + 一键蒙皮（焊接用相对局部边长 0.3）产出；**仿真焊接**下缝合缝不裂（见 §4 用户须知 ③）。
+- `tools/jpov/assets/models/clothing/lace_skirt/lace_skirt_skinned_relaxed_sample.glb`
+  —— 上一个（蒙皮）再**由固定点推导松弛度**（腰口作固定点）后保存：同时含 skin（`JOINTS_0`/
+  `WEIGHTS_0`）与自定义顶点属性 `_JPOV_RELAX`（逐顶点 `(lag_ratio, max_lag)`；lag 0~0.96，
+  max_lag ≈ 0.1 m）。用于验证 ① LAG 副运动资产的产出，② 「重开自带数据可直接展示」（见 §4.5 / §7）。
 
 查看（任选一个成品）：
 ```bash

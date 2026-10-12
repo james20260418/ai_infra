@@ -100,9 +100,10 @@ TEST(RelaxDeriveTest, GrowsWithGeodesicDistance) {
         EXPECT_GE(v, 0.0f);
         EXPECT_LE(v, 1.0f);
     }
-    // 网格无对角线边 ⇒ 测地距离 = 曼哈顿距离。自动定标（最远 = (4,4)，距离 8 → 1.0）。
-    EXPECT_NEAR(r[12], 0.5f, 1e-4f);  // (i=2,j=2) 距离 4
-    EXPECT_NEAR(r[24], 1.0f, 1e-4f);  // (i=4,j=4) 距离 8（最远）
+    // 每格三角化后含对角线边，但 Dijkstra 距离仍对称。自动定标：最远点 (4,4) = 1.0。
+    // (i=2,j=2) 到 (0,0) 距离恰为最远点的一半 → 0.5（无论走对角线 2√2 还是曼哈顿 4）。
+    EXPECT_NEAR(r[12], 0.5f, 1e-4f);  // (i=2,j=2)
+    EXPECT_NEAR(r[24], 1.0f, 1e-4f);  // (i=4,j=4)（最远）
     // 近 < 远。
     EXPECT_LT(r[12], r[24]);
     EXPECT_LT(r[0], r[12]);

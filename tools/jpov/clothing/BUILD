@@ -33,6 +33,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-11（本 PR）：**布料 LAG 松弛度（由固定点自动推导）**——新增 relax_derive.h
 #     （纯函数：测地距离 + Laplacian 平滑）+ 顶部中间面板（由固定点推导松弛度 / 显示松弛度场）；
 #     保存 glb 时写入自定义顶点属性 _JPOV_RELAX（VEC2）。（底层 VS 尚未消费 aRelax，见 #169。）
+#   - 2026-10-12（本 PR）：载入 glb **自带**的蒙皮 / 松弛度开图即读回（随机摆动 / 松弛度场
+#     可直接用）；去掉「蒙皮后冻结几何」，蒙皮判定改为按 mesh 内容现判（ClothMeshHasSkin()），
+#     仅用于展示 / 保存，不再禁用编辑；补洞给新增顶点插值 _JPOV_RELAX。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
