@@ -53,9 +53,12 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 | `--relax_max_lag <m>` | 逐顶点最大滞后位移 max_lag（米，默认 0.05）。 |
 | `--show_relax_field` | 开启松弛度场可视化（headless 出图验证用）。 |
 | `--save_cloth` | headless 出图前保存一次衣服 glb（脚本化验证 `_JPOV_RELAX` 落盘）。 |
-| `--lag_enable` | 启用布料 **LAG**（副运动纯延迟；等价左下角「开启 LAG」勾选，见 §7.1）。 |
-| `--lag_delay_ms <ms>` | LAG 延迟（毫秒，默认 100；范围 0~500）。 |
-| `--lag_warmup_frames <n>` | headless 出图前先推进 N 帧（填 PoseCache，使单帧出图能看出滞后）。 |
+| `--lag_enable` | 启用布料 **LAG**（整体平动的一阶/二阶延迟；等价左下角「开启 LAG」，见 §7.1）。 |
+| `--lag_second_order` | 用**二阶**延迟（否则一阶）。 |
+| `--lag_rise_ms <ms>` | 延迟追踪的上升时间（毫秒，默认 150）。 |
+| `--lag_overshoot <frac>` | 二阶超调量（默认 0.2；仅二阶）。 |
+| `--body_trans <x> <y> <z>` | 整体平动（世界 m；人体 + 衣服）。 |
+| `--lag_warmup_frames <n>` | headless 出图前先推进 N 帧并把平动 ramp 到目标（让 tracker 起滞后）。 |
 
 交互：**右键 drag 旋转视角、滚轮 zoom、中键 drag 纵向平移（pan）**。
 
@@ -199,16 +202,21 @@ output/jpov_clothing_tool/jpov_clothing_tool \
   （重烘焙该种子的姿态集）。
 - 播放速度固定（不做滑条）——快慢不影响判断蒙皮效果。
 
-## 7.1 布料 LAG（副运动，纯延迟；2026-10-12）
-左下角「随机摆动测试」面板新增 **开启 LAG（布料滞后）** 勾选 + **LAG 延迟 (ms)** 滑条：
-勾上后，**布料**（不是人体）用「**滞后**姿态」蒙皮 —— 相位落后 `延迟` 的那一帧（**纯延迟**，
-`interface/pose_cache.h` 存主动作历史，DT 驱动），配合网格自带的逐顶点 `_JPOV_RELAX` 松弛度，
-蒙皮 VS 做 `mix(当前, 滞后)` ⇒ 裙摆/下摆带惯性拖尾。
-- 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0，mix 恒等 ⇒ 无变化）。用 §4.5 推导
-  松弛度后保存，或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。
-- 关 LAG 时布料 `pose_lag` = 当前姿态 ⇒ mix 恒等、**视觉零变化**。
-- 一阶/二阶「弹/过冲」延迟**不在本工具**（纯延迟只给拖尾）：那类连续化交给 per-instance 里
-  可动态改的维度（`pos_lag` / `partial_lag`）；通用 util 见 `interface/skeleton_motion_lag.h`。
+## 7.1 布料 LAG（副运动 = 整体平动的一阶/二阶延迟；2026-10-12）
+> **v2 方向（Danis）**：**不做 pose 的 lag** —— pose 差值脱离不了动作幅度、裙子会匀速飘很诡异、
+> 用户难用。先做**用户能用的维度**：整体**平动（translation）** / **partial rotation** 的延迟。
+
+左下角「随机摆动测试」面板新增：
+- **整体平动 X/Y/Z (m，±2)**：人体 + 衣服的**世界平移**（先让人体能动起来）。
+- **开启 LAG（平动滞后）**：布料按「整体平动」的**一阶/二阶延迟**滞后 —— 用 `SkeletonPose.root_offset`
+  承载平动、跑 `interface/skeleton_motion_lag.h` 的 tracker，滞后量 → 布料 per-instance `pos_lag`，
+  蒙皮 VS 按 `_JPOV_RELAX` 松弛度 `mix` ⇒ 松的部分拖尾、贴身部分跟随。
+  **一阶**（`FirstOrderLagTracker`，rising time）无过冲；**二阶**（`SecondOrderLagTracker`，rising time
+  + overshoot）有摆动/过冲。
+- 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，
+  或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。
+
+> 另：`interface/pose_cache.h`（PoseCache 纯延迟回放）保留为 util（暂未接入工具，Danis 先不搞 pose lag）。
 
 **为什么不需要重定向**：不同 Mixamo 源的 bind 姿态（T-pose/A-pose）、骨轴 roll、层级都可能不同，
 导入**外部动画**才需要重定向；本方案在**目标骨架自己的关节局部空间**里直接生成姿态
