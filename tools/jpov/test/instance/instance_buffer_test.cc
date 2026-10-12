@@ -121,10 +121,10 @@ int main(int argc, char** argv) {
         1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  5, 0, 0, 1,
     };
     const std::vector<float> pose_k2 = {
-        // 实例 0：pose.a / pose.b / pose_lag.a / pose_lag.b 的平坦起点
-        0, 0, 0, 0,
+        // 实例 0：pose.a / pose.b 的平坦起点
+        0, 0,
         // 实例 1
-        92, 184, 92, 184,
+        92, 184,
     };
 
     jpov::InstanceBuffer model_buf(jpov::kInstanceModelAttrSpec);

@@ -272,19 +272,14 @@ public:
     //（VS 按 _JPOV_RELAX 松弛度 mix 到滞后位置）。布料网格自带 kRelax 时渲染器才走 LAG 路径。
     // 平动用 SkeletonPose 的 root_offset 承载（`TransPose`），直接复用 tracker（root_offset 一并滞后）。
     float body_trans_ui_[3] = {0.0f, 0.0f, 0.0f};  // 整体平动（世界 m；±2；面板只给 X/Y）
-    float body_twist_deg_ui_ = 0.0f;      // 下半身额外扭转（度，±90；partial rotation 通道 0 = 骨盆）
-    float body_upper_twist_deg_ui_ = 0.0f; // 上半身额外扭转（度，±90；通道 1 = 脊椎；验证**子树语义**）
-    bool lag_enabled_ui_ = false;         // 勾选：布料按滞后维度（平动/扭转）滞后
+    bool lag_enabled_ui_ = false;         // 勾选：布料按滞后平动（pos_lag）滞后
     bool lag_second_order_ui_ = false;    // 勾选：二阶（否则一阶）
     float lag_rise_ms_ui_ = kLagRiseMsDefault;      // 上升时间（ms）
     float lag_overshoot_ui_ = kLagOvershootDefault; // 超调量（仅二阶）
     float lag_rise_applied_ = -1.0f;      // 上次 Configure 用过的上升时间（ms）
     float lag_overshoot_applied_ = -1.0f; // 上次 Configure 用过的超调量
-    // **独立滤波器**：平动（pos_lag）与 扭转（partial_lag）各一对（一阶 + 二阶）。
-    jpov::FirstOrderLagTracker lag_first_;           // 平动·一阶
-    jpov::SecondOrderLagTracker lag_second_;         // 平动·二阶
-    jpov::FirstOrderLagTracker lag_first_partial_;   // 扭转·一阶
-    jpov::SecondOrderLagTracker lag_second_partial_; // 扭转·二阶
+    jpov::FirstOrderLagTracker lag_first_;   // 平动 LAG·一阶
+    jpov::SecondOrderLagTracker lag_second_; // 平动 LAG·二阶
 
     // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
     //
@@ -541,8 +536,7 @@ public:
         // 骨架注册表无释放接口）。
         if (has_body_skeleton_) {
             BakeMotionPoses();
-            body_skel_id_ =
-                RegisterSkeleton(body_skeleton_, body_motion_poses_, {}, BodyPartialConfig());
+            body_skel_id_ = RegisterSkeleton(body_skeleton_, body_motion_poses_);
             CHECK_NE(body_skel_id_, 0u) << "随机摆动测试：RegisterSkeleton 失败";
             LOG(INFO) << "随机摆动测试：已注册骨架 skeleton_id=" << body_skel_id_
                       << "，预烘焙 pose " << body_motion_poses_.size() << " 帧（"
@@ -663,33 +657,21 @@ public:
         // 整体平动（世界 translation）由面板 3 滑条给，人体 / 衣服都用它；布料另按 tracker 滞后。
         const bool motion_active = MotionTestActive();
         const jpov::Vec3f trans(body_trans_ui_[0], body_trans_ui_[1], 0.0f);
-        const geom::Quaternion<float> twist = geom::Quaternion<float>::FromAxisAngle(
-            jpov::Vec3f(0.0f, 1.0f, 0.0f), body_twist_deg_ui_ * kMotionPi / 180.0f);
-        const geom::Quaternion<float> twist_upper = geom::Quaternion<float>::FromAxisAngle(
-            jpov::Vec3f(0.0f, 1.0f, 0.0f), body_upper_twist_deg_ui_ * kMotionPi / 180.0f);
         jpov::SkinnedInstanceState motion_inst;
         jpov::Vec3f cloth_pos_lag(0.0f, 0.0f, 0.0f);
-        geom::Quaternion<float> cloth_twist_lag = twist;  // 关 LAG 时 = 当前（mix 恒等）
         if (motion_active) {
             motion_inst = MotionInstanceState();
             motion_inst.transform.center = trans;
-            motion_inst.partial_rotations[0] = twist;        // 骨盆（下半身）
-            motion_inst.partial_rotations[1] = twist_upper;  // 脊椎（上半身）——无 lag（验子树语义）
             if (lag_enabled_ui_) {
-                // 对「整体平动」与「下半身扭转」各跑**独立**的一阶/二阶 tracker（→ 布料
-                // pos_lag / partial_lag）。两个维度是独立的滤波器（Danis 2026-10-12）。
+                // 对「整体平动」跑一阶/二阶 tracker：滞后量 = tracked − 当前（→ 布料 pos_lag）。
                 SyncLagTracker();
                 const float dt = 1.0f / kViewerFps;
                 if (lag_second_order_ui_) {
                     lag_second_.Update(TransPose(trans), dt);
                     cloth_pos_lag = lag_second_.tracked().root_offset - trans;
-                    lag_second_partial_.Update(TwistPose(twist), dt);
-                    cloth_twist_lag = lag_second_partial_.tracked().joint_rotation[0];
                 } else {
                     lag_first_.Update(TransPose(trans), dt);
                     cloth_pos_lag = lag_first_.tracked().root_offset - trans;
-                    lag_first_partial_.Update(TwistPose(twist), dt);
-                    cloth_twist_lag = lag_first_partial_.tracked().joint_rotation[0];
                 }
             }
         }
@@ -715,12 +697,7 @@ public:
                 // 布料：与他人同 pose（**不做 pose 的 lag**，Danis 2026-10-12）；只做**平动滞后**：
                 // pos_lag = tracker(整体平动) 的滞后量，VS 按 _JPOV_RELAX 松弛度 mix → 松的部分拖尾。
                 jpov::SkinnedInstanceState cloth_inst = motion_inst;
-                cloth_inst.pose_a_lag = motion_inst.pose_a;   // pose_lag = 当前（无 pose lag）
-                cloth_inst.pose_b_lag = motion_inst.pose_b;
-                cloth_inst.ratio_lag = motion_inst.ratio;
-                cloth_inst.pos_lag = cloth_pos_lag;
-                cloth_inst.partial_rotations_lag[0] = cloth_twist_lag;  // 下半身扭转滞后（partial lag）
-                cloth_inst.partial_rotations_lag[1] = twist_upper;       // 上半身扭转（无 lag）
+                cloth_inst.pos_lag = cloth_pos_lag;  // 平动滞后（pose lag 机制已移除）
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
                                                prim.material, {cloth_inst});
@@ -1298,8 +1275,7 @@ private:
         }
         BakeMotionPoses();
         ReleaseSkeleton(body_skel_id_);
-        body_skel_id_ =
-            RegisterSkeleton(body_skeleton_, body_motion_poses_, {}, BodyPartialConfig());
+        body_skel_id_ = RegisterSkeleton(body_skeleton_, body_motion_poses_);
         CHECK_NE(body_skel_id_, 0u) << "随机摆动测试：RegisterSkeleton 失败";
         LOG(INFO) << "随机摆动测试：种子=" << motion_seed_ << "，重烘焙 pose "
                   << body_motion_poses_.size() << " 帧（skeleton_id=" << body_skel_id_
@@ -1357,54 +1333,18 @@ private:
         return p;
     }
 
-    // 用「单关节旋转」承载一个四元数（下半身扭转）→ 复用 tracker 的逐关节追踪。
-    static jpov::SkeletonPose TwistPose(const geom::Quaternion<float>& q) {
-        jpov::SkeletonPose p;
-        p.bone_count = 1;
-        p.joint_rotation = {q};  // tracker 逐关节 SLERP/积分 ⇒ 得到滞后四元数
-        return p;
-    }
-
-    // 人体骨架的「部位额外旋转」通道配置：通道 0 = 骨盆（下半身）、通道 1 = 脊椎（上半身）。
-    // ⚠️ 只在**骨架确实有**该关节名时才配（否则 SkeletonManager 会 LOG(FATAL)）；非 mixamo 资产
-    //   自动退化为「未配置」并告警，不影响工具在别的资产上跑。
-    std::array<std::string, jpov::kNumPartialRotation> BodyPartialConfig() const {
-        std::array<std::string, jpov::kNumPartialRotation> cfg = {"", ""};
-        const auto has = [this](const std::string& nm) {
-            for (const jpov::SkeletonJoint& j : body_skeleton_.joints) {
-                if (j.name == nm) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        if (has(kPartialRotChannelJoint)) {
-            cfg[0] = kPartialRotChannelJoint;
-        } else {
-            LOG(WARNING) << "人体骨架无关节 " << kPartialRotChannelJoint
-                         << "：下半身扭转通道未配置";
-        }
-        if (has(kPartialRotChannelUpperJoint)) {
-            cfg[1] = kPartialRotChannelUpperJoint;
-        }
-        return cfg;
-    }
-
     // 按面板参数配置 tracker（参数变了才重配；二阶 Configure 含数值标定，别每帧跑）。
-    // 平动与扭转是**独立的滤波器**（各自一对 1/2 阶），但共用同一套上升时间/超调量配置。
     void SyncLagTracker() {
         const float rise_s = std::max(lag_rise_ms_ui_ * 0.001f, 1.0f / 1000.0f);
         if (lag_second_order_ui_) {
             if (lag_rise_applied_ != lag_rise_ms_ui_ ||
                 lag_overshoot_applied_ != lag_overshoot_ui_) {
                 lag_second_.Configure(rise_s, lag_overshoot_ui_);
-                lag_second_partial_.Configure(rise_s, lag_overshoot_ui_);
                 lag_rise_applied_ = lag_rise_ms_ui_;
                 lag_overshoot_applied_ = lag_overshoot_ui_;
             }
         } else if (lag_rise_applied_ != lag_rise_ms_ui_) {
             lag_first_.Configure(rise_s);
-            lag_first_partial_.Configure(rise_s);
             lag_rise_applied_ = lag_rise_ms_ui_;
         }
     }

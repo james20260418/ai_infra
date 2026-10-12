@@ -135,12 +135,6 @@ inline constexpr float kRelaxMaxLagMax = 0.5f;
 //（VS 按 _JPOV_RELAX 松弛度 mix）。partial rotation 的 lag 同理（后续）。
 //   整体平动滑条范围：±2m（面板只给 X/Y，去掉 Z）。
 inline constexpr float kBodyTransMaxM = 2.0f;
-// 部位额外旋转（partial rotation）通道名：0 = 骨盆（下半身 / 裙摆所在）、1 = 脊椎（上半身）。
-// 资产无对应关节名时该通道**自动退化为未配置**（见 ClothingToolApp::BodyPartialConfig）。
-inline constexpr const char* kPartialRotChannelJoint = "mixamorig:Hips";
-inline constexpr const char* kPartialRotChannelUpperJoint = "mixamorig:Spine";
-// 下半身额外扭转滑条范围（度，±）。
-inline constexpr float kBodyTwistMaxDeg = 90.0f;
 // 平动 LAG 的 tracker 参数：上升时间（ms）/ 超调量（仅二阶）。
 inline constexpr float kLagRiseMsMin = 0.0f;
 inline constexpr float kLagRiseMsMax = 1000.0f;

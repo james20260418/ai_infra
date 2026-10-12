@@ -36,9 +36,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-12（本 PR）：载入 glb **自带**的蒙皮 / 松弛度开图即读回（随机摆动 / 松弛度场
 #     可直接用）；去掉「蒙皮后冻结几何」，蒙皮判定改为按 mesh 内容现判（ClothMeshHasSkin()），
 #     仅用于展示 / 保存，不再禁用编辑；补洞给新增顶点插值 _JPOV_RELAX。
-#   - 2026-10-12（布料 LAG PR）：左下角「开启 LAG」——整体平动 XY 滑条（±2m）+ 下半身扭转滑条（±90°）
-#     + 一阶/二阶 tracker（skeleton_motion_lag.h，平动与扭转独立滤波器）→ 布料 pos_lag / partial_lag；
-#     蒙皮 VS 按逐顶点 _JPOV_RELAX 松弛度 mix。
+#   - 2026-10-12（布料 LAG PR）：左下角「开启 LAG」——整体平动 XY 滑条（±2m）+ 一阶/二阶 tracker
+#     （skeleton_motion_lag.h）→ 布料 pos_lag；蒙皮 VS 按逐顶点 _JPOV_RELAX 松弛度 mix（裙摆飘起）。
+#     gold 回归：test/clothing/clothing_lag_gold_test。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）

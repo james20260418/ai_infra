@@ -26,8 +26,9 @@
 > clothing tool 已接**整体平动的一阶/二阶延迟**：3 个 XYZ 平移滑条（±2m，人体+衣服世界平移）→
 > tracker（`skeleton_motion_lag.h`）滞后 → 布料 per-instance `pos_lag`，VS 按 `_JPOV_RELAX` 松弛度 mix。
 > `pose_cache.h`（PoseCache 纯延迟回放）保留为 util、**暂未接入**工具。
-> 已加**下半身扭转（±90°）**滑块 → partial rotation 通道 0（骨盆），验证 **partial lag** 链路：
-> 平动与扭转用**独立滤波器**（各一对 1/2 阶，共用 rising time / overshoot）。
+> 2026-10-12 收尾（Danis）：**pose 的 lag 机制移除**（含 loc11 pose_lag id、`SkinnedInstanceState`
+> 的 `pose_*_lag`/`ratio_lag`）；clothing tool 加 **整体平动 X/Y 滑条 + 平动 LAG（一/二阶）**（partial
+> **未**接入工具）；新增 gold test 给「**裙摆飘起**」加回归保护（`test/clothing/clothing_lag_gold_test`）。
 > 相关：`docs/jpov_crowd_instancing_arch.md`（instancing 架构锚点）、
 > `docs/jpov_dqs_skinning_design.md`（DQS 蒙皮）、`docs/jpov_partial_rotation_design.md`（部位额外旋转）、
 > `docs/jpov_crowd_body_shape_face_design.md` §3（部位粗细）。
@@ -259,14 +260,15 @@ per-instance attribute（divisor=1）:
   15    aInstPosLag   (8 half，用 3)            8×half        = 16 B  ← lag 相对坐标 (dx,dy,dz)
 ```
 
-### 6.2 loc11：4 个 flat id（float32）
+### 6.2 loc11：2 个 flat id（float32）
+
+> **2026-10-12 变更**：`pose lag` 机制移除（Danis），loc11 由 4 float 缩为 **2 float**（仅 pose.a/pose.b）；
+> `.z/.w` 的 pose_lag id 删除（`SkinnedInstanceState.pose_*_lag` / `ratio_lag` 同步删）。
 
 | 分量 | 含义 |
 |---|---|
 | `.x` | `pose.a` 的 flat id |
 | `.y` | `pose.b` 的 flat id |
-| `.z` | `pose_lag.a` 的 flat id |
-| `.w` | `pose_lag.b` 的 flat id |
 
 - **flat id = `pose_idx × bone_count × 2`**（pose 在 atlas 的**平坦 texel 起点**，见
   `skinning_shader.h` / `skeleton_manager.cc` L233）。
@@ -281,7 +283,7 @@ per-instance attribute（divisor=1）:
 | 偏移(byte) | 字段 | 编码 |
 |---|---|---|
 | 0 | `ratio` (pose) | `uint8`，`/255` → [0,1] |
-| 1 | `ratio_lag` (pose_lag) | `uint8`，`/255` → [0,1] |
+| 1 | **保留**（原 `ratio_lag`） | —（pose-lag 机制已移除，字节保留） |
 | 2–9 | `thick[0..7]` | `uint8`，`0.01 + v/255 × 2.49` → [0.01, 2.5]，**步长 ~0.0097** |
 | 10–12 | `color0` (RGB888) | R,G,B 各 1 byte |
 | 13–15 | `color1` (RGB888) | R,G,B 各 1 byte |
@@ -331,8 +333,8 @@ per-instance attribute（divisor=1）:
   - **已实现的 host 侧门控（2026-10-10）**：门控量 = `MeshHasFlag(mesh.flags, kRelax)`（网格带 aRelax
     才需要 LAG）——关时**不打包、不上传、不 Attach** loc14/15（`InstanceBufferBinding` 新增 vector 重载
     支持可变集合）。**不新增编译期宏**，纯 host 运行时判断；`uLagEnabled` uniform 待 VS 内消费时再加。
-- **数据契约**：`SkinnedInstanceState` 扩展（`pose_a_lag` / `pose_b_lag` / `ratio_lag` /
-  `partial_rotations_lag` / `pos_lag`）；越界仍 **LOG(FATAL)/批次剔除**（不静默读 atlas 别人）。
+- **数据契约**：`SkinnedInstanceState` 扩展（`partial_rotations_lag` / `pos_lag`；**pose_lag 机制已移除**）；
+  越界仍 **LOG(FATAL)/批次剔除**（不静默读 atlas 别人）。
 
 ### 7.2 shader 侧（`skinning_shader.h`）
 

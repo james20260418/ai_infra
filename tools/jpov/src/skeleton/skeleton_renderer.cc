@@ -60,12 +60,12 @@ static_assert(kInstanceModelAttrSpec.base_loc == 7 &&
                   kInstanceModelAttrSpec.slot_components == 4 &&
                   kInstanceModelAttrSpec.stride_floats == 16,
               "model 必须是 loc7..10 的 mat4（stride 16 float）");
-// loc11 = pose ids（4 float）。
+// loc11 = pose ids（2 float：pose.a/pose.b）。
 static_assert(kInstancePoseIdsAttrSpec.base_loc == 11 &&
                   kInstancePoseIdsAttrSpec.slot_count == 1 &&
-                  kInstancePoseIdsAttrSpec.slot_components == 4 &&
-                  kInstancePoseIdsAttrSpec.stride_floats == 4,
-              "pose ids 必须是 loc11 的 vec4（stride 4 float）");
+                  kInstancePoseIdsAttrSpec.slot_components == 2 &&
+                  kInstancePoseIdsAttrSpec.stride_floats == 2,
+              "pose ids 必须是 loc11 的 vec2（stride 2 float）");
 // loc12/13/14/15 = uvec4 整数视图（misc / partial / partial_lag / pos_lag）。
 static_assert(kInstanceMiscAttrSpec.base_loc == 12 && kInstanceMiscAttrSpec.integer_view,
               "misc 必须是 loc12 的 uvec4 整数视图");
@@ -211,33 +211,28 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
     }
     instance_model_buf.Upload(xforms);
 
-    // 2) pose ids（loc11）：[pose.a, pose.b, pose_lag.a, pose_lag.b] 的**平坦** texel 起点。
+    // 2) pose ids（loc11）：[pose.a, pose.b] 的**平坦** texel 起点。
     //    col = pose_idx * pose_w（pose_w = bone_count*2：每骨 2 texel 存一个对偶四元数），
     //    shader 内按 atlas 宽度回绕成 (x,y)——与 CPU 行优先平铺逐 texel 对齐。
-    //    LAG 未用时 pose_lag 的两项应等于 pose 的两项（host 写成独立字段，默认各为 0）。
     std::vector<float> poses;
-    poses.resize(n * 4);
+    poses.resize(n * 2);
     for (size_t k = 0; k < n; ++k) {
         const SkinnedInstanceState& inst = cmd.instances[k];
-        poses[k * 4 + 0] = static_cast<float>(inst.pose_a * pose_w);
-        poses[k * 4 + 1] = static_cast<float>(inst.pose_b * pose_w);
-        poses[k * 4 + 2] = static_cast<float>(inst.pose_a_lag * pose_w);
-        poses[k * 4 + 3] = static_cast<float>(inst.pose_b_lag * pose_w);
+        poses[k * 2 + 0] = static_cast<float>(inst.pose_a * pose_w);
+        poses[k * 2 + 1] = static_cast<float>(inst.pose_b * pose_w);
     }
     instance_pose_ids_buf.Upload(poses);
 
-    // 3) 杂项（loc12，uint8 视图）：2 ratio + 8 thick + 2 RGB888 = 16 byte 严丝合缝。
+    // 3) 杂项（loc12，uint8 视图）：ratio + 保留 + 8 thick + 2 RGB888 = 16 byte 严丝合缝。
     //    偏移/编码唯一定义处 = instance_buffer.h 的 kMiscByte* / EncodeThickness。
     std::vector<float> misc(n * 4);
     for (size_t k = 0; k < n; ++k) {
         const SkinnedInstanceState& inst = cmd.instances[k];
         unsigned char bytes[16] = {0};
         const float ratio = std::min(std::max(inst.ratio, 0.0f), 1.0f);
-        const float ratio_lag = std::min(std::max(inst.ratio_lag, 0.0f), 1.0f);
         bytes[kMiscByteRatio] =
             static_cast<unsigned char>(std::lround(ratio * 255.0f));
-        bytes[kMiscByteRatioLag] =
-            static_cast<unsigned char>(std::lround(ratio_lag * 255.0f));
+        // byte1（kMiscByteReserved1，原 ratio_lag）保留为 0：pose-lag 机制已移除。
         for (int g = 0; g < kNumThicknessGroup; ++g) {
             const float mu = inst.thickness_scales[static_cast<size_t>(g)];
             // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0 且有限。0/负会把截面压成

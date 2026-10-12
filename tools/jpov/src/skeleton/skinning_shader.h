@@ -93,13 +93,12 @@ layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
 layout(location = 9) in vec4 aInstCol2;
 layout(location = 10) in vec4 aInstCol3;
-// per-instance pose 选择（divisor=1）：vec4 = pose / pose_lag 两帧的**平坦 texel 起点**。
-//   .x/.y = pose.a / pose.b；.z/.w = pose_lag.a / pose_lag.b（LAG 未用时 .z/.w == .x/.y）。
+// per-instance pose 选择（divisor=1）：vec2 = pose 两帧的**平坦 texel 起点**（.x=pose.a/.y=pose.b）。
 //   起点 = pose_idx * bone_count * 2（每骨 2 texel），CPU 端算好；shader 内按 atlas 宽回绕。
 //   ⚠️ 统一 float（而非 IPointer）：见 instance_buffer.h kInstancePoseIdsAttrSpec 注释。
-layout(location = 11) in vec4 aInstPoseIds;
+layout(location = 11) in vec2 aInstPoseIds;
 // per-instance 杂项（divisor=1）：uvec4 = 16 byte 位视图（uint8）。
-//   byte0=ratio(pose)/255，byte1=ratio_lag/255，byte2..9=thick[0..7]（0.01+v/255*2.49），
+//   byte0=ratio(pose)/255，byte1=保留，byte2..9=thick[0..7]（0.01+v/255*2.49），
 //   byte10..12=color0(RGB888)，byte13..15=color1(RGB888)。
 //   解包见 MiscRatio / ThicknessOfChannel；偏移单一来源 instance_buffer.h。
 layout(location = 12) in uvec4 aInstMisc;
@@ -220,11 +219,6 @@ void LoadBoneDualQuatAt(int pose_col_a, int pose_col_b, float ratio, int bone,
 // 「当前」pose（loc11 .x/.y + loc12 byte0 ratio）下的骨对偶四元数（partial 通道定位用）。
 void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
     LoadBoneDualQuatAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(), bone, q, t);
-}
-
-// 本实例 lag pose 的插值权重 ratio_lag（loc12 byte1；偏移单一来源 instance_buffer.h）。
-float MiscRatioLag() {
-    return float((aInstMisc.x >> 8) & 0xFFu) / 255.0;
 }
 
 // 对偶四元数变换点（q/t 视为已归一）：
@@ -525,16 +519,14 @@ void main() {
         if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
             BuildPartialGDqAt(1, PartialQuatOfChannel(1), pa, pb, r, cGq1, cGt1);
         }
-        // lag 的 G 只在 uLagEnabled 时算（否则 loc14 未 Attach，读它是 UB）。
+        // lag 的 G 只在 uLagEnabled 时算（否则 loc14 未 Attach，读它是 UB）；**同一 pose**，
+        // 仅部位额外旋转取滞后值（loc14）。
         if (uLagEnabled != 0) {
-            int la = int(aInstPoseIds.z);
-            int lb = int(aInstPoseIds.w);
-            float lr = MiscRatioLag();
             if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-                BuildPartialGDqAt(0, PartialQuatOfChannelLag(0), la, lb, lr, lGq0, lGt0);
+                BuildPartialGDqAt(0, PartialQuatOfChannelLag(0), pa, pb, r, lGq0, lGt0);
             }
             if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-                BuildPartialGDqAt(1, PartialQuatOfChannelLag(1), la, lb, lr, lGq1, lGt1);
+                BuildPartialGDqAt(1, PartialQuatOfChannelLag(1), pa, pb, r, lGq1, lGt1);
             }
         }
     }
@@ -547,7 +539,8 @@ void main() {
     // ── LAG：uLagEnabled=0 时整段跳过 ⇒ 与无 LAG **逐字节一致** ──
     if (uLagEnabled != 0) {
         vec3 lp; vec3 ln2; vec3 lt;
-        SkinVertexAt(int(aInstPoseIds.z), int(aInstPoseIds.w), MiscRatioLag(),
+        // **同一 pose**（pose lag 机制已移除），仅部位额外旋转取滞后值（lG = loc14）+ 相对平移。
+        SkinVertexAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
                      lGq0, lGt0, lGq1, lGt1, aPos, aNormal, aTangent, lp, ln2, lt);
         lp += UnpackPosLag();                       // 位置滞后：模型系小偏移（设计 §6.6）
         float relax = clamp(aRelax.x, 0.0, 1.0);    // 逐顶点松弛度（loc6 .x）
@@ -607,8 +600,8 @@ layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
 layout(location = 9) in vec4 aInstCol2;
 layout(location = 10) in vec4 aInstCol3;
-// per-instance pose 选择（divisor=1，同主 pass）：vec4 = pose/pose_lag 两帧的平坦 texel 起点。
-layout(location = 11) in vec4 aInstPoseIds;
+// per-instance pose 选择（divisor=1，同主 pass）：vec2 = pose 两帧的平坦 texel 起点。
+layout(location = 11) in vec2 aInstPoseIds;
 // per-instance 杂项（uint8 位视图，同主 pass；阴影必须用同一份，否则影子错位）。
 layout(location = 12) in uvec4 aInstMisc;
 // per-instance 部位额外旋转（pose，divisor=1，同主 pass，loc13）——阴影必须与主 pass 同用一份，
@@ -655,11 +648,6 @@ void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
 // pose 插值权重 ratio（同主 pass，来自 loc12 byte0）。
 float MiscRatio() {
     return float(aInstMisc.x & 0xFFu) / 255.0;
-}
-
-// lag 的插值权重 ratio_lag（loc12 byte1；同主 pass）。
-float MiscRatioLag() {
-    return float((aInstMisc.x >> 8) & 0xFFu) / 255.0;
 }
 
 // 同主 pass：两帧 NLERP（最短路径 + 归一化），ratio<=0 短路取 pose_a。**参数化**供 LAG 复用。
@@ -914,14 +902,11 @@ void main() {
             BuildPartialGDqAtS(1, PartialQuatOfChannelS(1), pa, pb, r, cGq1, cGt1);
         }
         if (uLagEnabled != 0) {
-            int la = int(aInstPoseIds.z);
-            int lb = int(aInstPoseIds.w);
-            float lr = MiscRatioLag();
             if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-                BuildPartialGDqAtS(0, PartialQuatOfChannelLagS(0), la, lb, lr, lGq0, lGt0);
+                BuildPartialGDqAtS(0, PartialQuatOfChannelLagS(0), pa, pb, r, lGq0, lGt0);
             }
             if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-                BuildPartialGDqAtS(1, PartialQuatOfChannelLagS(1), la, lb, lr, lGq1, lGt1);
+                BuildPartialGDqAtS(1, PartialQuatOfChannelLagS(1), pa, pb, r, lGq1, lGt1);
             }
         }
     }
@@ -932,7 +917,7 @@ void main() {
 
     // LAG：与主 pass **同公式** mix（否则影子与身体错位）。
     if (uLagEnabled != 0) {
-        vec3 lp = SkinVertexAtS(int(aInstPoseIds.z), int(aInstPoseIds.w), MiscRatioLag(),
+        vec3 lp = SkinVertexAtS(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
                                 lGq0, lGt0, lGq1, lGt1, aPos);
         lp += UnpackPosLagS();
         float relax = clamp(aRelax.x, 0.0, 1.0);
