@@ -58,7 +58,6 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 | `--lag_rise_ms <ms>` | 延迟追踪的上升时间（毫秒，默认 150）。 |
 | `--lag_overshoot <frac>` | 二阶超调量（默认 0.2；仅二阶）。 |
 | `--body_trans <x> <y>` | 整体平动（世界 m；人体 + 衣服）。 |
-| `--body_twist_deg <deg>` | 下半身额外扭转（度，±90；partial rotation 通道 0）。 |
 | `--lag_warmup_frames <n>` | headless 出图前先推进 N 帧并把平动 ramp 到目标（让 tracker 起滞后）。 |
 
 交互：**右键 drag 旋转视角、滚轮 zoom、中键 drag 纵向平移（pan）**。
@@ -209,15 +208,17 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 
 左下角「随机摆动测试」面板新增：
 - **整体平动 X/Y (m，±2)**：人体 + 衣服的**世界平移**（先让人体能动起来）。
-- **下半身扭转 (°，±90)**：partial rotation **通道 0（骨盆）**额外扭转 —— 验证 **partial lag** 链路。
-- **上半身扭转 (°，±90)**：partial rotation **通道 1（脊椎）**额外扭转 —— 验证**子树语义**（上半身转、腿/裙摆不动）。
-  （非 mixamo 资产无这两个骨名时，通道**自动退化为未配置**、不影响运行。）
-- **开启 LAG**：布料按「整体平动 / 下半身扭转」的**一阶/二阶延迟**滞后（两个维度是**独立的滤波器**）——
-  平动用 `SkeletonPose.root_offset`、扭转用单关节四元数承载，各跑 `interface/skeleton_motion_lag.h` 的
-  tracker，滞后量 → 布料 per-instance `pos_lag` / `partial_lag`，蒙皮 VS 按 `_JPOV_RELAX` 松弛度 `mix`
-  ⇒ 松的部分拖尾、贴身部分跟随。
+- **开启 LAG**：布料按「整体平动」的**一阶/二阶延迟**滞后 —— 用 `SkeletonPose.root_offset` 承载平动、
+  跑 `interface/skeleton_motion_lag.h` 的 tracker，滞后量 → 布料 per-instance `pos_lag`，蒙皮 VS 按
+  `_JPOV_RELAX` 松弛度 `mix` ⇒ 松的部分拖尾（**裙摆「飘起」**）、贴身部分跟随。
   **一阶**（`FirstOrderLagTracker`，rising time）无过冲；**二阶**（`SecondOrderLagTracker`，rising time
   + overshoot）有摆动/过冲。
+- 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，
+  或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。
+
+> **pose 的 lag 机制已移除**（Danis 2026-10-12：pose 差值脱离不了动作幅度、用户难用）；**partial rotation
+> 的 lag 也未接入工具**（引擎保留 loc14 `partial_rotations_lag`，供后续 / 用户）。`interface/pose_cache.h`
+> （PoseCache 纯延迟回放）保留为 util、暂未接入。
 - 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，
   或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。
 

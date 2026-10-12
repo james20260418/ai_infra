@@ -308,16 +308,11 @@ struct SkinnedInstanceState {
     std::array<geom::Quaternion<float>, kNumPartialRotation> partial_rotations = {
         geom::Quaternion<float>::Identity(), geom::Quaternion<float>::Identity()};
 
-    // ---- LAG（惯性滞后副运动）状态：第二套 pose / partial + 相对坐标 ----
-    // 设计见 docs/jpov_instance_attr_lag_design.md。接口只负责把「当前」（pose / partial）与
-    //   「滞后」（pose_lag / partial_lag / pos_lag）两套状态交给 VS，由**逐顶点松弛度**
-    //   （网格的 aRelax 顶点属性，loc6）做 mix。滞后状态如何演进（纯延迟/一阶/二阶）由用户
-    //   逐帧自行维护（接口对状态演进方式透明）。
-    // ⚠️ 当前**引擎侧尚未消费**（VS 已声明对应槽位、host 已上传，但 mix/限幅留作后续实现）；
-    //   这些字段先作为**接口**存在，默认值 = 与 pose/恒等一致（不使用时零影响）。
-    int    pose_a_lag = 0;   // pose_lag 插值起点：SkeletonManager pose 数组下标（0-based）。
-    int    pose_b_lag = 0;   // pose_lag 插值终点：同上。
-    float  ratio_lag = 0.0f; // [0,1] pose_lag.a→b 的权重。
+    // ---- LAG（惯性滞后副运动）状态：滞后 partial + 相对坐标 ----
+    // 设计见 docs/jpov_instance_attr_lag_design.md。LAG = 同一 pose 下，把**部位额外旋转**与
+    //   **相对平移**取「滞后值」，由**逐顶点松弛度**（网格的 aRelax 顶点属性，loc6）对「当前」与
+    //   「滞后」两套蒙皮结果做 mix。**pose 的 lag 机制已移除**（Danis 2026-10-12：pose 差值脱离
+    //   不了动作幅度、用户难用）；滞后状态如何演进（一阶/二阶滤波器）由用户逐帧维护。
     // lag 的部位额外旋转（模型系四元数，同 partial_rotations 语义）。
     std::array<geom::Quaternion<float>, kNumPartialRotation> partial_rotations_lag = {
         geom::Quaternion<float>::Identity(), geom::Quaternion<float>::Identity()};

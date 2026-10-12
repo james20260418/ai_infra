@@ -658,9 +658,9 @@ void main() {
     // 传六样（按实例布局 loc7..15 的顺序）：
     //   1) 摆放矩阵：每实例 build 一个 model（BuildModelMatrix，列主序）
     //      → instance_model_buf（loc7..10 = mat4）。
-    //   2) pose 选择：每实例 {pose_a, pose_b, pose_a_lag, pose_b_lag} 的平坦起点
-    //      → instance_pose_ids_buf（loc11 = vec4 float）。
-    //   3) 杂项：ratio / ratio_lag / thickness×8 / color×2 → instance_misc_buf
+    //   2) pose 选择：每实例 {pose_a, pose_b} 的平坦起点
+    //      → instance_pose_ids_buf（loc11 = vec2 float）。
+    //   3) 杂项：ratio / （保留字节） / thickness×8 / color×2 → instance_misc_buf
     //      （loc12 = uvec4 的 uint8 视图，编码见 instance_buffer.h 的 codec）。
     //   4) 部位额外旋转（pose）：2 个模型系四元数 → 8 half 打包进
     //      instance_partial_buf（loc13 = uvec4）。

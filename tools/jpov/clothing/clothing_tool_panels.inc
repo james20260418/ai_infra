@@ -691,8 +691,8 @@
     // ---- 左下角：随机摆动测试 + 整体平动 + 平动 LAG（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
     //
     // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）。
-    // 行：启用(1) + 播放(1) + 主轴(1) + 幅度(1) + 种子(1) + 平动 XY(2) + 下半身扭转(1) + 上半身扭转(1)
-    //     + LAG(1) + 二阶(1) + 上升时间(1) + 超调量(1) + 状态(1) = 14。
+    // 行：启用(1) + 播放(1) + 主轴(1) + 幅度(1) + 种子(1) + 平动 XY(2) + LAG(1) + 二阶(1)
+    //     + 上升时间(1) + 超调量(1) + 状态(1) = 12。
     void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         // 状态提示（每帧刷新，供面板与出图自检）。
         if (!has_body_skeleton_) {
@@ -711,7 +711,7 @@
         }
 
         const float panel_w  = 0.32f * win_w;
-        constexpr int kRows = 14;
+        constexpr int kRows = 12;
         const float panel_x = kPanelMargin;  // 贴左边缘
         // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
         const float panel_y =
@@ -770,17 +770,6 @@
                             -kBodyTransMaxM, kBodyTransMaxM, /*decimal_places*/ 2);
             row_y += step_y;
         }
-        // 下半身额外扭转（±90°）：partial rotation 通道 0（骨盆）→ 验证 partial lag 链路。
-        ui_.SliderFloat("下半身扭转 (°)", &body_twist_deg_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        -kBodyTwistMaxDeg, kBodyTwistMaxDeg, /*decimal_places*/ 1);
-        row_y += step_y;
-        // 上半身额外扭转（±90°）：通道 1（脊椎）→ 验证**子树语义**（上半身转、腿/裙摆不动）。
-        ui_.SliderFloat("上半身扭转 (°)", &body_upper_twist_deg_ui_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        -kBodyTwistMaxDeg, kBodyTwistMaxDeg, /*decimal_places*/ 1);
-        row_y += step_y;
-
         // LAG：布料按「整体平动」的一阶/二阶延迟滞后（→ pos_lag；需网格自带 _JPOV_RELAX）。
         ui_.Checkbox("开启 LAG（平动滞后）", &lag_enabled_ui_,
                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
