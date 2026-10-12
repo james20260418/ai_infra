@@ -217,6 +217,7 @@ inline bool FillMeshHoles(const MeshData& in, const HoleFillOptions& opts,
     const bool has_uv = MeshHasFlag(in.flags, MeshVertexFlags::kUV);
     const bool has_tangent = MeshHasFlag(in.flags, MeshVertexFlags::kTangent);
     const bool has_joints = MeshHasFlag(in.flags, MeshVertexFlags::kJoints);
+    const bool has_relax = MeshHasFlag(in.flags, MeshVertexFlags::kRelax);
 
     // 顶点工作区（0..n0-1 = 原始；n0.. = 新 Steiner）。位置用 double。
     std::vector<V3d> vpos(n0);
@@ -228,6 +229,7 @@ inline bool FillMeshHoles(const MeshData& in, const HoleFillOptions& opts,
     std::vector<Vec3f> vtan(has_tangent ? n0 : 0);
     std::vector<std::array<int32_t, 4>> vjidx(has_joints ? n0 : 0);
     std::vector<std::array<float, 4>> vjw(has_joints ? n0 : 0);
+    std::vector<Vec2f> vrelax(has_relax ? n0 : 0);
     for (size_t i = 0; i < n0; ++i) {
         if (has_normal) {
             vnorm[i] = in.normals[i];
@@ -241,6 +243,9 @@ inline bool FillMeshHoles(const MeshData& in, const HoleFillOptions& opts,
         if (has_joints) {
             vjidx[i] = in.joint_indices[i];
             vjw[i] = in.joint_weights[i];
+        }
+        if (has_relax) {
+            vrelax[i] = in.relaxations[i];
         }
     }
 
@@ -424,6 +429,10 @@ inline bool FillMeshHoles(const MeshData& in, const HoleFillOptions& opts,
             }
             vjw.push_back(w);
         }
+        if (has_relax) {
+            // lag_ratio 取端点平均；max_lag 取端点 A（同一资产内通常恒为同一常量）。
+            vrelax.push_back(Vec2f((vrelax[a].x() + vrelax[b].x()) * 0.5f, vrelax[a].y()));
+        }
         return id;
     };
 
@@ -535,6 +544,9 @@ inline bool FillMeshHoles(const MeshData& in, const HoleFillOptions& opts,
         if (has_joints) {
             out->joint_indices.push_back(vjidx[v]);
             out->joint_weights.push_back(vjw[v]);
+        }
+        if (has_relax) {
+            out->relaxations.push_back(vrelax[v]);
         }
     };
     if (!out->indices.empty()) {

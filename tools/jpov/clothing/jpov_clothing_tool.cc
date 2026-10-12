@@ -62,6 +62,15 @@ struct CliOptions {
     float hole_perimeter = 0.2f;  // --hole_perimeter 只补周长 ≤ 该值（米）的洞；0 = 不限制
     bool  alpha_normalize = false;  // --alpha_normalize：headless 出图前跑一次 base color alpha 归一
     bool  show_ref_mesh = false;    // --show_ref_mesh：headless 出图前开启「显示力学参照网格」
+    // 布料 LAG 松弛度（由固定点自动推导；headless / 脚本化验证）。
+    bool  derive_relax = false;      // --derive_relax：出图前跑一次「由固定点推导松弛度」
+    bool  has_relax_band = false;    // 是否给了 --relax_anchor_band
+    float relax_anchor_ymin = 0.0f;  // --relax_anchor_band ymin ymax（世界 Y 固定点高度带）
+    float relax_anchor_ymax = 0.0f;
+    float relax_radius = jpov::clothing::kRelaxRadiusAuto;   // --relax_radius（m；0=自动）
+    float relax_max_lag = jpov::clothing::kRelaxDefaultMaxLagM;  // --relax_max_lag（m）
+    bool  show_relax_field = false;  // --show_relax_field：开启松弛度场可视化
+    bool  save_cloth = false;        // --save_cloth：出图前保存一次衣服 glb（脚本化验证落盘）
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -233,6 +242,42 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.alpha_normalize = true;
         } else if (arg == "--show_ref_mesh") {
             opt.show_ref_mesh = true;
+        } else if (arg == "--derive_relax") {
+            opt.derive_relax = true;
+        } else if (arg == "--relax_anchor_band") {
+            if (i + 2 < argc) {
+                opt.relax_anchor_ymin = static_cast<float>(std::atof(argv[++i]));
+                opt.relax_anchor_ymax = static_cast<float>(std::atof(argv[++i]));
+                if (opt.relax_anchor_ymin > opt.relax_anchor_ymax) {
+                    LOG(FATAL) << "--relax_anchor_band 要求 ymin <= ymax，got "
+                               << opt.relax_anchor_ymin << " > " << opt.relax_anchor_ymax;
+                }
+                opt.has_relax_band = true;
+            } else {
+                LOG(WARNING) << "--relax_anchor_band 需要 2 个数值（ymin ymax），忽略";
+            }
+        } else if (arg == "--relax_radius") {
+            if (i + 1 < argc) {
+                opt.relax_radius = static_cast<float>(std::atof(argv[++i]));
+                if (opt.relax_radius < 0.0f) {
+                    LOG(FATAL) << "--relax_radius 必须 >= 0，got " << opt.relax_radius;
+                }
+            } else {
+                LOG(WARNING) << "--relax_radius 缺少数值参数，忽略";
+            }
+        } else if (arg == "--relax_max_lag") {
+            if (i + 1 < argc) {
+                opt.relax_max_lag = static_cast<float>(std::atof(argv[++i]));
+                if (opt.relax_max_lag < 0.0f) {
+                    LOG(FATAL) << "--relax_max_lag 必须 >= 0，got " << opt.relax_max_lag;
+                }
+            } else {
+                LOG(WARNING) << "--relax_max_lag 缺少数值参数，忽略";
+            }
+        } else if (arg == "--show_relax_field") {
+            opt.show_relax_field = true;
+        } else if (arg == "--save_cloth") {
+            opt.save_cloth = true;
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -391,6 +436,12 @@ int main(int argc, char** argv) {
     app.weld_ratio_ = opt.weld_ratio;
     // 力学参照网格显示（headless；交互窗口由右上面板勾选驱动）。
     app.show_ref_mesh_ = opt.show_ref_mesh;
+    // 松弛度推导参数（headless；交互窗口由画笔下方的「布料 LAG 松弛度」面板驱动）。
+    app.SetRelaxParams(opt.relax_radius, opt.relax_max_lag);
+    app.SetShowRelaxField(opt.show_relax_field);
+    if (opt.has_relax_band) {
+        app.SetRelaxAnchorBand(opt.relax_anchor_ymin, opt.relax_anchor_ymax);
+    }
 
     // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
     app.motion_test_enabled_ = opt.motion_enable;
@@ -436,6 +487,16 @@ int main(int argc, char** argv) {
         // 可选：出图前跑一次一键蒙皮（脚本化验证焊接模式等；交互窗口由按钮驱动）。
         if (opt.auto_skin) {
             app.RunAutoSkinNow();
+        }
+        // 可选：出图前由固定点（画笔选区 ∪ --relax_anchor_band）推导松弛度。
+        if (opt.derive_relax) {
+            app.RunDeriveRelaxNow();
+        }
+        // 可选：出图前保存一次衣服 glb（脚本化验证 _JPOV_RELAX 落盘）。
+        if (opt.save_cloth) {
+            if (!app.SaveClothNowBlocking()) {
+                LOG(FATAL) << "--save_cloth：保存失败";
+            }
         }
         // 可选：出图前推进 N 步仿真（验证下坠 / 落地；交互窗口由「继续仿真」按钮驱动）。
         if (opt.sim_steps > 0) {

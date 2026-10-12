@@ -30,6 +30,12 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #     ④ 仿真焊接（方案 B）：重合顶点在仿真里并成一个质点（soft_mesh_simulator::Init 新增
 #        weld_tolerance 参数），Step 后写回组内所有顶点 ⇒ 缝合缝不裂。
 #     仍不做：穿衣对齐 / 自动贴合。
+#   - 2026-10-11（本 PR）：**布料 LAG 松弛度（由固定点自动推导）**——新增 relax_derive.h
+#     （纯函数：测地距离 + Laplacian 平滑）+ 顶部中间面板（由固定点推导松弛度 / 显示松弛度场）；
+#     保存 glb 时写入自定义顶点属性 _JPOV_RELAX（VEC2）。（底层 VS 尚未消费 aRelax，见 #169。）
+#   - 2026-10-12（本 PR）：载入 glb **自带**的蒙皮 / 松弛度开图即读回（随机摆动 / 松弛度场
+#     可直接用）；去掉「蒙皮后冻结几何」，蒙皮判定改为按 mesh 内容现判（ClothMeshHasSkin()），
+#     仅用于展示 / 保存，不再禁用编辑；补洞给新增顶点插值 _JPOV_RELAX。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
@@ -82,6 +88,20 @@ cc_library(
     deps = [
         "//geom/3d:triangle_3",
         "//geom/3d:triangle_matcher_3d",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# 由「固定点」自动推导布料 LAG 松弛度（relax_derive.h）—— header-only 纯函数，无 GL。
+# 复用 weight_transfer.h 的焊接工具；供 clothing_tool_app 调用，可纯单测。
+cc_library(
+    name = "relax_derive",
+    hdrs = ["relax_derive.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":weight_transfer",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
     ],
@@ -153,6 +173,7 @@ cc_library(
         ":clothing_transform",
         ":mesh_hole_fill",
         ":random_pose_driver",
+        ":relax_derive",
         ":weight_transfer",
         "//geom/3d:triangle_3",
         "//geom/3d:triangle_matcher_3d",
@@ -245,6 +266,23 @@ cc_test(
     srcs = ["base_color_alpha_test.cc"],
     deps = [
         ":base_color_alpha",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 由固定点推导松弛度纯函数单测（测地距离 / 半径饱和 / 焊接缝合 / 不连通 / 平滑；无 GL）。
+cc_test(
+    name = "relax_derive_test",
+    srcs = ["relax_derive_test.cc"],
+    deps = [
+        ":relax_derive",
         "//tools/jpov/interface:mesh",
         "@glog_static//:glog",
         "@gtest//:gtest_main",

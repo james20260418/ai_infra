@@ -63,6 +63,17 @@
 //       ④ **仿真焊接（方案 B）**：把位置重合的顶点在仿真里并成**一个质点**（容差默认 0.1mm，
 //          CLI --weld_tolerance），Step 后写回组内所有顶点 ⇒ 缝合缝不裂（修“碎了裂缝”）。
 //          输出 mesh 顶点数/拓扑/属性不变 ⇒ 法线/UV/蒙皮权重仍合法。
+//   - 2026-10-11（本 PR）：**布料 LAG 松弛度（由固定点自动推导）**——顶部中间（画笔面板下方）
+//       新增「布料 LAG 松弛度」面板：用 3D 画笔涂抹**固定点**（如腰口）后点「由固定点推导松弛度」，
+//       按**测地距离**（见 relax_derive.h）自动推导逐顶点 lag_ratio（固定点 0 → 远处 1，
+//       Laplacian 平滑），另配全局 max_lag；勾选「显示松弛度场」（蓝→红 2D 像素）核对；保存 glb
+//       时写入自定义顶点属性 _JPOV_RELAX（VEC2）。底层 VS 尚未消费 aRelax（#169），故不改变渲染外观。
+//   - 2026-10-12（本 PR）：**展示态与操作解耦**（Danis）——① 载入的 glb 若**自带**蒙皮
+//       （JOINTS/WEIGHTS）或松弛度（_JPOV_RELAX），开图时即读回（见 LoadExistingMeshState）⇒
+//       随机摆动可带动衣服、松弛度场可直接显示，**不再要求**本会话先「一键蒙皮 / 由固定点推导」；
+//       ② 去掉「蒙皮后冻结几何」——不跑仿真几何本就是静止的，禁用只会带来 surprise。改判据为
+//       **按 mesh 内容现判**（ClothMeshHasSkin()），仅用于展示 / 保存，**不再禁用任何编辑**
+//       （平移/旋转/缩放/仿真/重置/补洞 全可用）。
 //   仍不做：**穿衣对齐 / 自动贴合**（其余功能已接）。
 //
 // 与 soft_mesh_viewer 的关键差异：
@@ -78,17 +89,31 @@
 //   - 3D 场景渲染到 **3D FBO**（cmds->camera.fbo_3d_width_/height_）。本工具让它
 //     **跟随窗口尺寸**（同 model_editor 的做法），避免 resize 时 3D 被拉伸。
 //
+// 状态模型（读代码前先看这里，别把「内容」与「操作」搞混）：
+//   - geometry：cloth_current_（每 primitive 的当前 CPU 几何 + 材质）= 显示 / 仿真 / 保存的
+//     唯一真相。仿真 / 变换改它后经 SyncSimsToCloth 推上 GPU；sims_ 只是驱动它的软体仿真器。
+//   - skin（蒙皮）：**记在 mesh 上**（flags 带 kJoints + joint_indices/weights）。「是否带蒙皮」
+//     用 ClothMeshHasSkin() **现判**（不设状态位）；蒙皮可来自本会话「一键蒙皮」或载入自带。
+//   - relax（松弛度）：推导结果存**工具内** relax_lag_ratio_（本会话推导或载入读回）；**仅在
+//     保存时**注入 mesh 的 kRelax（_JPOV_RELAX）—— 底层 VS 尚未消费，故编辑期不改 GPU 布局。
+//   - 展示功能（随机摆动带动衣服 / 显示松弛度场）**只认「当前 mesh / 工具里有没有」**，
+//     不绑定「本会话点没点过按钮」。
+//   - 改顶点数的只有**补洞**：它会给新增顶点插值 JOINTS/WEIGHTS/_JPOV_RELAX，故蒙皮 / 松弛后
+//     仍可补洞（其余操作都保顶点数 ⇒ 权重↔顶点对应不破坏）。
+//
 // 命名空间 jpov::clothing、文件夹 tools/jpov/clothing/ 均为**独立**的一整套。
 
 #ifndef JPOV_CLOTHING_CLOTHING_TOOL_APP_H_
 #define JPOV_CLOTHING_CLOTHING_TOOL_APP_H_
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <glog/logging.h>
@@ -104,6 +129,7 @@
 #include "tools/jpov/clothing/clothing_transform.h"
 #include "tools/jpov/clothing/mesh_hole_fill.h"
 #include "tools/jpov/clothing/random_pose_driver.h"
+#include "tools/jpov/clothing/relax_derive.h"
 #include "tools/jpov/clothing/weight_transfer.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
@@ -198,8 +224,10 @@ public:
     // 人体 reference 的骨架：蒙皮产出的权重按该骨架的关节序索引，保存时写进 glb 的 skin。
     jpov::SkeletonType body_skeleton_;
     bool has_body_skeleton_ = false;   // body_skeleton_ 是否有效（人体 glb 带 skin）
-    // 已自动蒙皮：此后**冻结几何**（禁变换/禁仿真/禁重置），否则权重↔顶点对应被破坏。
-    bool skinned_ = false;
+    // 衣服「是否带蒙皮」不用状态位记录，而是每帧按 **mesh 内容**判定（ClothMeshHasSkin()）——
+    // 本次会话点过「一键蒙皮」**或**载入 glb 自带蒙皮（JOINTS/WEIGHTS ⇒ kJoints）皆算。展示
+    //（随机摆动带动衣服）与保存（写 skin）据此走；**不**再因此禁用任何编辑
+    //（Danis 2026-10-12：冻结几何这个保护不需要 —— 不跑仿真几何本来就是静止的）。
     std::string skin_msg_;             // 蒙皮结果 / 失败提示（面板显示）
     bool skin_grow_ui_ = true;         // 「权重生长」勾选（默认开；关掉 = 只留直接投影权重）
     float seed_eps_mm_ = kSkinSeedEpsMm;  // 种子半径（mm）
@@ -234,6 +262,24 @@ public:
     uint32_t body_skel_id_ = 0;         // 人体骨架句柄（RegisterSkeleton 产物；0 = 未注册）
     std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
     std::string motion_msg_;            // 面板状态提示（每帧刷新）
+
+    // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
+    //
+    // 在衣物上涂抹「固定点」（如腰口；松弛度 = 0），用 relax_derive.h 按测地距离自动推导
+    // 其余顶点的松弛度 lag_ratio ∈ [0,1]，并配上全局 max_lag。结果存在**本工具内**
+    // （relax_lag_ratio_），**保存 glb 时**才注入 mesh 的 kRelax 属性（_JPOV_RELAX）—— 底层
+    // VS 尚未消费 aRelax（见 #169），故不在编辑期改动 GPU mesh 布局。
+    //
+    // 固定点来源：3D 画笔选区（各 primitive） ∪ 可选的「高度带」（CLI headless 用）。
+    std::vector<std::vector<float>> relax_lag_ratio_;  // 每 primitive 逐顶点 lag_ratio（空 = 未推）
+    float relax_max_lag_ui_ = kRelaxDefaultMaxLagM;    // 逐顶点 max_lag（米；填给所有顶点）
+    float relax_radius_ui_ = kRelaxRadiusAuto;         // 松弛度饱和半径（米；0 = 自动定标）
+    bool show_relax_field_ = false;                    // 勾选：用 2D 像素画出松弛度场
+    std::string relax_msg_;                            // 面板状态提示
+    // 可选的「高度带」固定点（世界 Y ∈ [ymin, ymax]；CLI headless 用；与画笔选区取并集）。
+    bool relax_anchor_band_set_ = false;
+    float relax_anchor_ymin_ = 0.0f;
+    float relax_anchor_ymax_ = 0.0f;
 
     // ══════════════ 软体仿真（Step 1）══════════════
     //
@@ -307,6 +353,44 @@ public:
     // 供 headless / 脚本用：立即执行补洞（等价面板「执行补洞」按钮）。
     void RunHoleFillNow() { RunHoleFill(); }
 
+    // 供 headless / 脚本用：立即执行「由固定点推导松弛度」（等价面板按钮）。
+    void RunDeriveRelaxNow() { RunDeriveRelax(); }
+
+    // 供 headless / 脚本用：立即发起「保存衣服 glb」并阻塞至完成（返回是否成功）。
+    // 等价面板按钮；用于脚本化验证 _JPOV_RELAX 落盘。
+    bool SaveClothNowBlocking() {
+        StartSaveCloth();
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        while (save_ctrl_.state() == ClothSaveState::kSaving) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                LOG(ERROR) << "保存超时";
+                return false;
+            }
+            save_ctrl_.Tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        LOG(INFO) << save_ctrl_.message();
+        return save_ctrl_.state() == ClothSaveState::kDone;
+    }
+
+    // 供 headless / 脚本用：设置「高度带」固定点（世界 Y ∈ [ymin, ymax]；与画笔选区并集）。
+    void SetRelaxAnchorBand(float ymin, float ymax) {
+        CHECK_LE(ymin, ymax);
+        relax_anchor_band_set_ = true;
+        relax_anchor_ymin_ = ymin;
+        relax_anchor_ymax_ = ymax;
+    }
+
+    // 供 headless / CLI 设置松弛度推导参数（在 RunDeriveRelaxNow 前设好）。
+    void SetRelaxParams(float radius_m, float max_lag_m) {
+        relax_radius_ui_ = radius_m;
+        relax_max_lag_ui_ = max_lag_m;
+    }
+
+    // 供 headless / CLI 开启松弛度场显示。
+    void SetShowRelaxField(bool show) { show_relax_field_ = show; }
+
     // 供 headless / 脚本用：立即执行 base color alpha 归一（等价面板按钮）。
     void RunAlphaNormalizeNow() { RunAlphaNormalize(); }
 
@@ -334,9 +418,9 @@ public:
     }
 
     // 把衣服整体平移 delta（等价于面板平移一次）。供 headless 预摆位 / 脚本用。
-    // 场景未就绪（sims_ 空）或已蒙皮（几何已冻结）时 no-op。
+    // 场景未就绪（sims_ 空）时 no-op。
     void TranslateCloth(const jpov::Vec3f& delta) {
-        if (skinned_ || sims_.empty()) {
+        if (sims_.empty()) {
             return;
         }
         for (Simulator& sim : sims_) {
@@ -394,6 +478,10 @@ public:
         }
         // 3D 画笔：选区容器对齐衣服 primitive 数（初始为空选区）。
         brush_.EnsurePrimitives(cloth_current_.size());
+
+        // 展示态：载入的 glb 若**自带**蒙皮 / 松弛度，直接反映到状态（与本次会话操作无关）。
+        // 这样「随机摆动看效果 / 显示松弛度场」是**只要当前 mesh 里有就生效**的展示功能。
+        LoadExistingMeshState();
 
         // 记录 base color 贴图的**原始**来源与 GPU 句柄（「重置」的材料重置据此恢复）。
         alpha_orig_ref_.resize(cloth_current_.size());
@@ -566,10 +654,10 @@ public:
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
         }
-        // 衣服：静态绘制用恒等放置（顶点已含变换 / 仿真形变）；摆动测试 + 已蒙皮时用
+        // 衣服：静态绘制用恒等放置（顶点已含变换 / 仿真形变）；摆动测试 + 衣服带蒙皮时用
         // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
-            if (motion_active && skinned_) {
+            if (motion_active && ClothMeshHasSkin()) {
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
                                                prim.material, {motion_inst});
@@ -584,6 +672,9 @@ public:
 
         // 力学参照网格（蓝色 2D 像素；右上面板开关）。画在面板之下。
         DrawReferenceMesh(winfo, cmds);
+
+        // 松弛度场（蓝→红 2D 像素；松弛度面板开关）。画在面板之下。
+        DrawRelaxField(winfo, cmds);
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
@@ -603,6 +694,59 @@ private:
         ClothingToolApp* app = static_cast<ClothingToolApp*>(userdata);
         return app->MeasureTextWidth(/*alias=*/std::string(),
                                      /*text=*/text ? text : "", font_size);
+    }
+
+    // ==================== 载入资产自带的展示态 ====================
+
+    // 衣服当前几何是否**带蒙皮**（JOINTS/WEIGHTS ⇒ kJoints）：逐 primitive 看 mesh 内容。
+    // 与「本次会话是否点过一键蒙皮」无关 —— 载入自带蒙皮的 glb 也为真。用途：随机摆动带动
+    // 衣服（展示）+ 保存时写 skin。**不**用于禁用任何编辑（见文件头 / Danis 2026-10-12）。
+    bool ClothMeshHasSkin() const {
+        for (const jpov::GltfSaveMesh& c : cloth_current_) {
+            if (jpov::MeshHasFlag(c.mesh.flags, jpov::MeshVertexFlags::kJoints)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 从**载入的衣服几何**读回展示所需的逐顶点数据（与本次会话操作无关，只认 mesh 内容）：
+    //   - 自带松弛度（_JPOV_RELAX ⇒ kRelax）→ 读进 relax_lag_ratio_ / relax_max_lag_ui_
+    //     （勾选「显示松弛度场」即可显示）。
+    //   - 自带蒙皮（kJoints）无需搬数据（用 ClothMeshHasSkin() 现判），只给面板一句状态。
+    // 背景（Danis 2026-10-12）：本工具原本只靠自己会话内「一键蒙皮 / 由固定点推导」置位状态，
+    // 重开一个**自带**蒙皮 + 松弛度的 glb 时两者都读不出来 —— 展示功能不该耦合操作状态。
+    void LoadExistingMeshState() {
+        relax_lag_ratio_.assign(cloth_current_.size(), {});
+        size_t relax_prims = 0;
+        size_t relax_verts = 0;
+        float loaded_max_lag = 0.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const jpov::MeshData& m = cloth_current_[i].mesh;
+            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kRelax) ||
+                m.relaxations.size() != m.positions.size()) {
+                continue;
+            }
+            std::vector<float>& lag = relax_lag_ratio_[i];
+            lag.resize(m.relaxations.size());
+            for (size_t v = 0; v < m.relaxations.size(); ++v) {
+                lag[v] = m.relaxations[v].x();
+                loaded_max_lag = std::max(loaded_max_lag, m.relaxations[v].y());
+            }
+            ++relax_prims;
+            relax_verts += lag.size();
+        }
+        if (ClothMeshHasSkin()) {
+            skin_msg_ = "载入的 glb 已含蒙皮：可直接随机摆动看效果 / 保存";
+            LOG(INFO) << skin_msg_;
+        }
+        if (relax_prims > 0) {
+            relax_max_lag_ui_ = loaded_max_lag;
+            relax_msg_ = Format(
+                "载入的 glb 已含松弛度（%zu primitive / %zu 顶点）：勾选「显示松弛度场」即可查看",
+                relax_prims, relax_verts);
+            LOG(INFO) << relax_msg_;
+        }
     }
 
     // ==================== 仿真器接线 ====================
@@ -629,7 +773,7 @@ private:
     // 用当前 d 滑条值**重建**所有仿真器（从启动几何出发，丢弃仿真/变换带来的形变）。
     // 与 soft_mesh_viewer 的 ReinitSimulation 同语义：d 变了 ⇒ 仿真点集合与邻居表都变，
     // 只能重建。重建后回到启动姿态（缩放归 1、仿真暂停），再推 GPU。
-    // Pre-condition: 已 InitSimulators；未蒙皮（蒙皮后几何冻结，禁止重建）。
+    // Pre-condition: 已 InitSimulators。
     void ReinitSimulators() {
         CHECK_EQ(sims_.size(), sim_startup_mesh_.size());
         for (size_t i = 0; i < sims_.size(); ++i) {
@@ -675,14 +819,9 @@ private:
     // 每帧把滑条镜像值同步到所有仿真器（值没变则跳过，避免无谓 setter）。
     void SyncSimParams() {
         // 关联距离 d 不是逐点 setter：它决定仿真点集合与邻居表，变了必须重建。
-        // 已蒙皮时几何冻结：忽略并回写滑条镜像值（保持面板与实际一致）。
         if (!sims_.empty() && bind_distance_ui_ != sims_.front().bind_distance()) {
-            if (skinned_) {
-                bind_distance_ui_ = sims_.front().bind_distance();
-            } else {
-                ReinitSimulators();
-                return;  // 重建已同步了全部状态
-            }
+            ReinitSimulators();
+            return;  // 重建已同步了全部状态
         }
         for (Simulator& sim : sims_) {
             if (sim.gravity() != gravity_ui_) {
@@ -717,9 +856,8 @@ private:
     }
 
     // 推进一个外部步（1/60 s）：每个 primitive 各自 Step，然后同步到显示 / 快照。
-    // 已蒙皮后冻结（冻几何）：直接 no-op，避免破坏权重↔顶点对应。
     void StepSimulationOnce() {
-        if (skinned_ || sims_.empty()) {
+        if (sims_.empty()) {
             return;
         }
         for (Simulator& sim : sims_) {
@@ -735,6 +873,19 @@ private:
     void SyncSimsToCloth() {
         for (size_t i = 0; i < sims_.size(); ++i) {
             jpov::MeshData m = sims_[i].mesh();
+            // 仿真器只持有**几何**，不持有顶点**注释**（蒙皮 JOINTS/WEIGHTS ⇒ kJoints）。
+            // 若当前快照已带蒙皮且顶点数一致，就把它**挪回来**（否则会把蒙皮写没，并与已注册
+            // GPU mesh 的 flags 不一致 → UpdateMesh CHECK 崩）。仿真 / 变换只改几何、不带顶点
+            // 注释，故凡快照带 kJoints 的（本次会话蒙皮或载入自带）都要在此保住外层蒙皮。
+            const jpov::MeshData& prev = cloth_current_[i].mesh;
+            if (jpov::MeshHasFlag(prev.flags, jpov::MeshVertexFlags::kJoints) &&
+                prev.joint_indices.size() == m.positions.size()) {
+                m.joint_indices = prev.joint_indices;
+                m.joint_weights = prev.joint_weights;
+                m.flags = static_cast<jpov::MeshVertexFlags>(
+                    static_cast<uint8_t>(m.flags) |
+                    static_cast<uint8_t>(jpov::MeshVertexFlags::kJoints));
+            }
             // 顶点被物理改过 / 被即时变换过 → 法线须重算，否则着色停留在旧姿态。
             RecomputeVertexNormals(&m);
             UpdateMesh(cloth_.primitives[i].mesh_id, m);
@@ -786,13 +937,10 @@ private:
 
     // 平移步进：有画笔选区时**只平移选中的顶点**（其余不动）；无选区时平移全体
     // （所有仿真器状态沿 axis 轴平移 direction * trans_step_[axis]，速度不变）。
-    // Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
+    // Pre-condition: 0 <= axis < 3。
     void StepTranslation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
-        if (skinned_) {
-            return;
-        }
         const float d = direction * trans_step_[axis];
         const jpov::Vec3f delta(axis == 0 ? d : 0.0f, axis == 1 ? d : 0.0f,
                                 axis == 2 ? d : 0.0f);
@@ -808,13 +956,10 @@ private:
 
     // 旋转步进：有画笔选区时**只旋转选中的顶点**，枢轴 = 选区顶点包围盒中心；无选区时
     // 绕全体合并中心、绕 axis 轴逆时针转 direction * rot_step_[axis] 度
-    // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。已蒙皮后冻结（no-op）。
+    // （位置与**速度**一起转）。Pre-condition: 0 <= axis < 3。
     void StepRotation(int axis, float direction) {
         CHECK_GE(axis, 0);
         CHECK_LT(axis, 3);
-        if (skinned_) {
-            return;
-        }
         const float deg = direction * rot_step_[axis];
         if (brush_.HasSelection()) {
             ApplyPartialRotationToSelection(ToSimAxis(axis), deg,
@@ -833,12 +978,9 @@ private:
     // [kClothScaleMin, kClothScaleMax]（超界则本次不生效）。**速度**不参与缩放。
     // 说明：cloth_scale_（累计整体缩放镜像）只统计**全体**缩放；选区缩放是「几何编辑」，
     //   不改变该镜像（因此也不受其上下界限制）。
-    // Pre-condition: factor > 0。已蒙皮后冻结（no-op）。
+    // Pre-condition: factor > 0。
     void StepScale(float factor) {
         CHECK_GT(factor, 0.0f);
-        if (skinned_) {
-            return;
-        }
         if (brush_.HasSelection()) {
             ApplyPartialScalingToSelection(factor, SelectedVertsBoundsCenter());
             SyncSimsToCloth();
@@ -927,10 +1069,6 @@ private:
     // 「重置衣服」：所有仿真器 Reset（回**启动时**的绑定姿态），停仿真回到可重调状态。
     // （Danis：重置按钮把 mesh 重置回 clothing tool 启动时的样子。）
     void ResetClothMesh() {
-        if (skinned_) {
-            LOG(WARNING) << "已蒙皮，重置被忽略（几何已冻结）";
-            return;
-        }
         for (Simulator& sim : sims_) {
             sim.Reset();
         }
@@ -1024,6 +1162,49 @@ private:
         }
     }
 
+    // ==================== 松弛度场可视化（蓝→红 2D 像素）====================
+    //
+    // 把已推导的逐顶点松弛度 lag_ratio ∈ [0,1] 投到屏幕，用 2px 方块标记：
+    //   0（固定点）= 蓝，1（全自由）= 红，中间线性过渡。
+    // 仅当 show_relax_field_ 开（松弛度面板勾选）且该 primitive 已推导、顶点数匹配时绘制。
+    void DrawRelaxField(const jpov::WindowInfo& winfo, jpov::RenderCommandList* cmds) {
+        if (!show_relax_field_ || relax_lag_ratio_.empty()) {
+            return;
+        }
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg, winfo.width,
+                            winfo.height);
+        const float kMarkSize = 2.0f;
+        // 固定（0）= 蓝；自由（1）= 红。
+        const jpov::Vec3f kBlue(0.25f, 0.50f, 1.0f);
+        const jpov::Vec3f kRed(1.0f, 0.20f, 0.12f);
+        const size_t prims =
+            std::min(cloth_current_.size(), relax_lag_ratio_.size());
+        for (size_t i = 0; i < prims; ++i) {
+            const std::vector<jpov::Vec3f>& pos = cloth_current_[i].mesh.positions;
+            const std::vector<float>& lag = relax_lag_ratio_[i];
+            if (lag.size() != pos.size()) {
+                continue;  // 几何顶点数已变（如补洞）→ 该 primitive 的推导结果已失效
+            }
+            for (size_t v = 0; v < pos.size(); ++v) {
+                float px = 0.0f;
+                float py = 0.0f;
+                if (!ProjectToScreen(basis, pos[v], &px, &py, nullptr)) {
+                    continue;
+                }
+                const float t = std::clamp(lag[v], 0.0f, 1.0f);
+                const jpov::Vec3f c(kBlue.x() + (kRed.x() - kBlue.x()) * t,
+                                    kBlue.y() + (kRed.y() - kBlue.y()) * t,
+                                    kBlue.z() + (kRed.z() - kBlue.z()) * t);
+                cmds->DrawRect(
+                    /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                    /*size*/ {kMarkSize, kMarkSize}, jpov::Color{c.x(), c.y(), c.z(), 1.0f});
+            }
+        }
+    }
+
     // ==================== 面板（绘制 / UI）====================
     // 代码量大（约占本文件 1/3），拆到 `clothing_tool_panels.inc`，用「部分类」写法在**类体内**
     // #include 展开（仍是同一个 ClothingToolApp，零接口改动）。见该文件头说明。
@@ -1069,7 +1250,7 @@ private:
         return clamped * kMotionAmplitudeStepDeg;
     }
 
-    // 随机摆动测试是否生效（启用 + 有已注册骨架）。衣服是否跟随由 skinned_ 另行判定。
+    // 随机摆动测试是否生效（启用 + 有已注册骨架）。衣服是否跟随由 ClothMeshHasSkin() 判定。
     bool MotionTestActive() const {
         return motion_test_enabled_ && body_skel_id_ != 0;
     }
@@ -1173,26 +1354,41 @@ private:
 
     // 发起保存：把当前衣服几何快照交给保存控制器（按值快照，之后改动不影响本次）。
     // 已自动蒙皮时带上骨架（写 glb 的 skin + inverseBindMatrices）。
+    // 已推导松弛度时，把逐顶点 (lag_ratio, max_lag) 注入快照 mesh 的 kRelax 属性
+    //（_JPOV_RELAX；顶点数不匹配的 primitive 跳过 = 推导结果已失效）。
     void StartSaveCloth() {
         if (cloth_current_.empty()) {
             LOG(WARNING) << "保存被忽略：衣服几何尚未就绪";
             return;
         }
         std::optional<jpov::SkeletonType> skin;
-        if (skinned_ && has_body_skeleton_) {
+        if (ClothMeshHasSkin() && has_body_skeleton_) {
             skin = body_skeleton_;
         }
-        save_ctrl_.Start(cloth_current_, std::move(skin), cloth_path_, "cloth");
+        // 注入松弛度（copy-on-write：不改 cloth_current_，只改交给保存器的快照）。
+        std::vector<jpov::GltfSaveMesh> meshes = cloth_current_;
+        size_t relax_prims = 0;
+        for (size_t i = 0; i < meshes.size(); ++i) {
+            if (i >= relax_lag_ratio_.size() || relax_lag_ratio_[i].empty()) {
+                continue;
+            }
+            // ApplyRelaxToMesh 在顶点数不匹配（推导结果已过期）时返回 false 并不动 mesh。
+            if (ApplyRelaxToMesh(relax_lag_ratio_[i], relax_max_lag_ui_,
+                                 &meshes[i].mesh)) {
+                ++relax_prims;
+            }
+        }
+        if (relax_prims > 0) {
+            LOG(INFO) << "保存：写入 _JPOV_RELAX（" << relax_prims << " 个 primitive，max_lag="
+                      << relax_max_lag_ui_ << " m）";
+        }
+        save_ctrl_.Start(std::move(meshes), std::move(skin), cloth_path_, "cloth");
     }
 
     // 补洞（推进法，见 mesh_hole_fill.h）：对每个衣物 primitive 跑补洞，把网格里的破洞 /
     // 裂缝补上。补洞在**建仿真器（关联邻居表）之前**做（"关联前先补洞"）：补完把结果当作
-    // 新的启动姿态，重建仿真器 + 推 GPU（重算法线）。已蒙皮后几何冻结 → no-op。
+    // 新的启动姿态，重建仿真器 + 推 GPU（重算法线）。
     void RunHoleFill() {
-        if (skinned_) {
-            hole_fill_msg_ = "已蒙皮（几何已冻结），补洞被忽略";
-            return;
-        }
         if (cloth_current_.empty()) {
             hole_fill_msg_ = "衣服几何尚未就绪";
             return;
@@ -1229,14 +1425,14 @@ private:
     }
 
     // 一键：软布自动蒙皮（weight transfer，见 weight_transfer.h）。成功后就地给每个
-    // 衣物 primitive 写入 JOINTS_0/WEIGHTS_0（并在 flags 置 kJoints），随后**冻结几何**
-    // （禁变换 / 禁仿真 / 禁重置），保证权重↔顶点对应不被破坏。
+    // 衣物 primitive 写入 JOINTS_0/WEIGHTS_0（并在 flags 置 kJoints）。之后仍可继续变换 /
+    // 仿真（都保顶点数 ⇒ 权重↔顶点对应不破坏）；仅补洞这类改顶点数的操作需注意。
     //
     // 全程主线程同步：顶点数万量级、最近三角形查询近 O(1)，实测亚秒级。
     // Pre-condition: 场景就绪（gpu_uploaded_）。
     void RunAutoSkin() {
-        if (skinned_) {
-            skin_msg_ = "已蒙皮（几何已冻结，可保存）";
+        if (ClothMeshHasSkin()) {
+            skin_msg_ = "已蒙皮（可保存）";
             return;
         }
         if (!has_body_skeleton_) {
@@ -1279,7 +1475,6 @@ private:
             max_growth = std::max(max_growth, s.growth_passes);
             max_body_dist_m = std::max(max_body_dist_m, s.max_body_distance_m);
         }
-        skinned_ = true;
         sim_running_ = false;
         // 衣服几何现在带上 JOINTS/WEIGHTS（kJoints）→ 换成**可蒙皮**的 GPU mesh：先释放原
         // 静态 mesh，再用带骨几何重注册。静止外观不变；摆动测试时按骨架蒙皮绘制。
@@ -1295,6 +1490,84 @@ private:
             weld_relative_ui_ ? "(相对局部边长)" : "(绝对距离)", total_weld,
             max_growth);
         LOG(INFO) << "软布自动蒙皮完成：" << skin_msg_;
+    }
+
+    // 求某 primitive 的固定点顶点 index（升序去重）：画笔选区 ∪ 可选「高度带」。
+    // 高度带未设时只取画笔选区。越界下标跳过。
+    std::vector<uint32_t> RelaxAnchorsForPrimitive(
+        size_t prim, const std::vector<jpov::Vec3f>& positions) const {
+        std::vector<uint32_t> out;
+        if (prim < brush_.primitive_count()) {
+            for (uint32_t idx : brush_.selected(prim)) {
+                if (idx < positions.size()) {
+                    out.push_back(idx);
+                }
+            }
+        }
+        if (relax_anchor_band_set_) {
+            for (size_t i = 0; i < positions.size(); ++i) {
+                const float y = positions[i].y();
+                if (y >= relax_anchor_ymin_ && y <= relax_anchor_ymax_) {
+                    out.push_back(static_cast<uint32_t>(i));
+                }
+            }
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
+    // 由固定点自动推导布料的逐顶点松弛度（relax_derive.h）。固定点 = 画笔选区（各 primitive）
+    // ∪ 可选「高度带」；每个有固定点的 primitive 各自推导，无固定点的 primitive 跳过。
+    // 结果存 relax_lag_ratio_（本工具内）；**保存 glb 时**才注入 mesh 的 kRelax（见 StartSaveCloth）。
+    // 注：变换 / 仿真不改顶点 index ⇒ 推导结果持续有效；补洞等**改顶点数**的操作会使某
+    //     primitive 失效（顶点数不匹配时自动跳过，可用面板重新推导）。
+    void RunDeriveRelax() {
+        if (cloth_current_.empty()) {
+            relax_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        // ⚠️ **不要**在这里 SyncSimsToCloth()：几何以 cloth_current_ 为准（每次仿真 / 变换后
+        //   都已同步到它），而仿真器的网格是**蒙皮前**的副本、不含 JOINTS/WEIGHTS —— 若在蒙皮
+        //   后回拉几何会把蒙皮清掉（并与已注册 GPU mesh 的 flags 冲突 → UpdateMesh CHECK 崩）。
+        //   松弛度是**逐顶点标注**，只读 positions，无需回拉几何。
+        std::vector<std::vector<float>> result(cloth_current_.size());
+        size_t prims_done = 0;
+        size_t total_anchor = 0;
+        size_t total_verts = 0;
+        size_t total_unreach = 0;
+        float max_geo = 0.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const std::vector<jpov::Vec3f>& positions = cloth_current_[i].mesh.positions;
+            const std::vector<uint32_t> anchors =
+                RelaxAnchorsForPrimitive(i, positions);
+            if (anchors.empty()) {
+                continue;  // 该 primitive 无固定点：不动
+            }
+            RelaxDeriveStats stats;
+            result[i] = DeriveLagRatioFromAnchors(
+                cloth_current_[i].mesh, anchors, sim_weld_tolerance_, relax_radius_ui_,
+                kRelaxDeriveSmoothPasses, &stats);
+            ++prims_done;
+            total_anchor += stats.anchor_count;
+            total_verts += stats.vertex_count;
+            total_unreach += stats.unreachable_count;
+            max_geo = std::max(max_geo, stats.max_geodesic_m);
+        }
+        if (prims_done == 0) {
+            // 无固定点 = 没得推。**保留**已有的推导 / 载入结果（误点一次按钮不该丢数据），只提示。
+            relax_msg_ =
+                "无固定点：先用 3D 画笔涂抹固定点（或设高度带），再推导（已有结果保留）";
+            LOG(WARNING) << "松弛度推导：" << relax_msg_;
+            return;
+        }
+        relax_lag_ratio_ = std::move(result);
+        relax_msg_ = Format(
+            "松弛度：%zu/%zu primitive，固定点 %zu，顶点 %zu（不连通 %zu），"
+            "max测地 %.3f m（平滑 %d 轮）",
+            prims_done, cloth_current_.size(), total_anchor, total_verts, total_unreach,
+            static_cast<double>(max_geo), kRelaxDeriveSmoothPasses);
+        LOG(INFO) << relax_msg_;
     }
 
     // base color alpha 一键归一（面板按钮，见 base_color_alpha.h）：把贴图 alpha 置 1（不透明）。
@@ -1387,7 +1660,7 @@ private:
     }
 
     // 「重置衣服」按钮：几何重置（ResetClothMesh）+ 材料重置（ResetClothMaterial）。两者分开
-    // 实现（后端可各自单独调用）；材质重置不受蒙皮冻结约束（贴图与权重无关）。
+    // 实现（后端可各自单独调用）；材质重置与蒙皮无关（贴图与权重无关）。
     void ResetCloth() {
         ResetClothMesh();
         ResetClothMaterial();
