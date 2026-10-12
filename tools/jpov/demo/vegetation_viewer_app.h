@@ -227,24 +227,24 @@ public:
     }
 
     // 预实验用：按名字选用内置树型（同时给对应尺度），随后重建。
-    //   "dragonclaw"（默认）| "recursive" | "recursive_tropism" | "recursive_stochastic"
+    //   "dragonclaw"（默认）| "recursive" | "recursive_stochastic"
     void SelectTree(const std::string& name) {
         if (name == "recursive") {
             lsystem_ = jpov::vegetation::BuildRecursiveTree();
-        } else if (name == "recursive_tropism") {
-            lsystem_ = jpov::vegetation::BuildRecursiveTreeTropism();
         } else if (name == "recursive_stochastic") {
             lsystem_ = jpov::vegetation::BuildRecursiveTreeStochastic();
         } else {
             lsystem_ = jpov::vegetation::BuildDragonClawPagodaTree();
         }
-        // recursive 系列的 F(s) 带 0<s≦1 的比例参，需要更大的单位长度与不同代数。
+        // recursive 系列的 F(s) 带 0<s≦1 的比例参，需要更大的单位长度与不同代数；
+        // 且默认把向性打开（重力下垂 e=0.5）⇒ 三件套「自相似+向性+随机」开箱即用。
         if (name.rfind("recursive", 0) == 0) {
             length_scale_   = 0.9f;
             base_radius_    = 0.05f;
             generations_    = 16;
             leaves_per_site_ = 3;
             leaf_length_    = 0.08f;
+            tropism_        = 0.5f;
         }
         RebuildTree();
         SyncPrev();

@@ -134,10 +134,11 @@ int RunTopologyCapture(const std::string& out_dir) {
     winfo.height = kHeight;
     const jpov::InputSnapshot input{};
 
-    const char* kTrees[] = {"dragonclaw", "recursive", "recursive_tropism",
-                            "recursive_stochastic"};
+    const char* kTrees[] = {"dragonclaw", "recursive", "recursive_stochastic"};
     for (const char* name : kTrees) {
         app.SelectTree(name);
+        app.tropism_ = 0.0f;   // 纯拓扑：关向性
+        app.RegenerateNow();
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = 0.12;
         app.view_.theta = kPi / 4.0;
@@ -197,12 +198,83 @@ int RunIngredientStudy(const std::string& out_dir) {
     return 0;
 }
 
+// 生长扫谱（预实验用）：对指定树型 + 向性 + seed，按「展开代数」递增出图，
+// 让 Danis 在固定机位下看骨架从主干长成完整冠。
+int RunGrowthCapture(const std::string& out_dir, const std::string& tree,
+                     float tropism, int seed) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被生长扫谱（预实验）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_    = true;    // 管状枝干
+    app.show_leaves_ = false;   // 纯拓扑生长（不纠结叶/纹理）
+    app.Init();
+    app.InstallScene();
+    app.SelectTree(tree);
+    if (tropism > 0.0f) {
+        app.tropism_ = tropism;   // 未显式给则用 SelectTree 默认（recursive 系列 = 0.5）
+    }
+    app.seed_ = seed;
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.12f;
+    app.view_.theta = kPi / 4.0;
+    app.view_.R     = 9.0f;
+
+    const bool recursive = tree.rfind("recursive", 0) == 0;
+    static const int kGensRecursive[] = {1, 2, 3, 4, 6, 8, 11, 14, 16};
+    static const int kGensDefault[]   = {2, 5, 8, 12, 16, 20, 25};
+    const int* kGens = recursive ? kGensRecursive : kGensDefault;
+    const int  n     = recursive ? 9 : 7;
+    for (int i = 0; i < n; ++i) {
+        app.generations_ = kGens[i];
+        app.RegenerateNow();
+        const std::string path =
+            out_dir + "/grow_" + tree + "_gen" + std::to_string(kGens[i]) + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "growth capture: " << path;
+    }
+    // 成品大图（同机位，最大代数）。
+    app.generations_ = kGens[n - 1];
+    app.RegenerateNow();
+    struct ViewAngle { const char* name; float phi; float theta; float R; };
+    const ViewAngle kFinal[] = {
+        {"final",  0.12f, 0.7853982f, 6.0f},
+        {"front",  0.05f, 0.0f,        6.0f},
+        {"side",   0.05f, 1.5707963f,  6.0f},
+        {"top",    1.35f, 0.7853982f,  6.0f},
+    };
+    for (const ViewAngle& va : kFinal) {
+        app.view_.phi   = va.phi;
+        app.view_.theta = va.theta;
+        app.view_.R     = va.R;
+        app.RunOnce(input, winfo,
+                    (out_dir + "/grow_" + tree + "_" + va.name + ".png").c_str());
+    }
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string out_dir;
     std::string topo_dir;
     std::string study_dir;
+    std::string growth_dir;
+    std::string tree = "dragonclaw";
+    float tropism = 0.0f;
+    int   seed    = 0;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -210,10 +282,21 @@ int main(int argc, char** argv) {
             topo_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--study") == 0 && i + 1 < argc) {
             study_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--growth") == 0 && i + 1 < argc) {
+            growth_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--tree") == 0 && i + 1 < argc) {
+            tree = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--tropism") == 0 && i + 1 < argc) {
+            tropism = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            seed = std::atoi(argv[i + 1]);
         }
     }
     if (!study_dir.empty()) {
         return RunIngredientStudy(study_dir);
+    }
+    if (!growth_dir.empty()) {
+        return RunGrowthCapture(growth_dir, tree, tropism, seed);
     }
     if (!topo_dir.empty()) {
         return RunTopologyCapture(topo_dir);
@@ -237,6 +320,16 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
     app.InstallScene();
+
+    // --tree/--tropism/--seed 也作用于交互模式（便于直接拖「展开代数」滑条看生长）。
+    if (tree != "dragonclaw") {
+        app.SelectTree(tree);
+    }
+    if (tropism > 0.0f) {
+        app.tropism_ = tropism;
+    }
+    app.seed_ = seed;
+    app.RegenerateNow();
 
     app.view_ = jpov_viewer::DefaultView();
     app.view_.phi   = 0.12;

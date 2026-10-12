@@ -272,11 +272,10 @@ LSystem BuildDragonClawPagodaTree();
 //   · 递归 + 「穷人向性」：每段前插一个固定俯角 `&(k)`，近似 gravity/phototropism。
 //   · 递归 + 随机：同符号多条加权规则 → 个体差异（现有引擎已支持）。
 // 真正的向性（α = e·(H×T)）与管道模型粗细等**尚未实现**，见预实验报告。
+// 注：向性不进规则，是龟图级参数（`TurtleConfig.tropism`），由 viewer 滑条/CLI 控制。
 
-// 递归自相似树（Honda/ABOP 式）。无向性。
+// 递归自相似树（Honda/ABOP 式）。每节绕干滚 137°（黄金角）使分枝填满 3D。
 LSystem BuildRecursiveTree();
-// 递归自相似树 + 穷人向性（每段固定俯 `&(4)`）。
-LSystem BuildRecursiveTreeTropism();
 // 递归自相似树 + 随机（同符号加权择一）。
 LSystem BuildRecursiveTreeStochastic();
 

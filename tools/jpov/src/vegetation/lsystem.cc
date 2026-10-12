@@ -777,22 +777,14 @@ LSystem BuildDragonClawPagodaTree() {
 // ============================ 预实验：参比树型 ============================
 
 LSystem BuildRecursiveTree() {
-    // Honda/ABOP 式：母枝→两子枝，长度按收缩比缩短（0.72 / 0.58），黄金角 137.5° 绕干。
+    // Honda/ABOP 式：母枝→两子枝，长度按收缩比缩短（0.74 / 0.60）；
+    // 每节先绕干滚 137°（黄金角）再分叉 ⇒ 分枝平面逐层旋转、填满 3D（否则像 Honda 原型那样退化成平面）。
     // 走到阈值（0.06）后只挂一个叶位。自相似 ⇒ 越往末梢越细越密的分形层次。
+    // 向性由 TurtleConfig 控制（非本规则），见 BuildRecursiveTree 上方注释。
     LSystemBuilder b;
     b.SetAxiom("A(1)");
-    b.AddRule("A(s) : s > 0.06 -> F(s)[\\(0)&(34)A(s * 0.72)]"
-              "[\\(137)&(34)A(s * 0.58)]");
-    b.AddRule("A(s) : s <= 0.06 -> F(s)l");
-    return b.Build();
-}
-
-LSystem BuildRecursiveTreeTropism() {
-    // 同上，但每段前插一个固定俯角 `&(4)`（近似重力/向光；真正向性 α=e·(H×T) 未实现）。
-    LSystemBuilder b;
-    b.SetAxiom("A(1)");
-    b.AddRule("A(s) : s > 0.06 -> &(4)F(s)[\\(0)&(30)A(s * 0.72)]"
-              "[\\(137)&(30)A(s * 0.58)]");
+    b.AddRule("A(s) : s > 0.06 -> \\(137)F(s)[\\(0)&(30)A(s * 0.74)]"
+              "[\\(137)&(30)A(s * 0.60)]");
     b.AddRule("A(s) : s <= 0.06 -> F(s)l");
     return b.Build();
 }
@@ -801,10 +793,10 @@ LSystem BuildRecursiveTreeStochastic() {
     // 同上，但每个节点按权重随机二选一（两种分叉姿态）→ 个体差异（现有引擎的加权随机）。
     LSystemBuilder b;
     b.SetAxiom("A(1)");
-    b.AddRule("A(s) : s > 0.07 -> F(s)[\\(0)&(32)A(s * 0.72)]"
-              "[\\(137)&(32)A(s * 0.58)]", /*weight=*/1.0f);
-    b.AddRule("A(s) : s > 0.07 -> F(s)[\\(20)&(45)A(s * 0.66)]"
-              "[\\(160)&(22)A(s * 0.64)]", /*weight=*/1.0f);
+    b.AddRule("A(s) : s > 0.07 -> \\(137)F(s)[\\(0)&(30)A(s * 0.74)]"
+              "[\\(137)&(30)A(s * 0.60)]", /*weight=*/1.0f);
+    b.AddRule("A(s) : s > 0.07 -> \\(95)F(s)[\\(25)&(42)A(s * 0.68)]"
+              "[\\(165)&(22)A(s * 0.66)]", /*weight=*/1.0f);
     b.AddRule("A(s) : s <= 0.07 -> F(s)l");
     return b.Build();
 }

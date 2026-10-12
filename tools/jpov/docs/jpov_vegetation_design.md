@@ -44,6 +44,8 @@ Danis：「不纠结纹理与 mesh，利用已有东西，把 L-System 拓扑能
 - 验证脚手架：viewer 加 `--topo`（四树纯拓扑）/ `--study`（三件套对照）/ 面板「向性 e」滑条；三个参比树 `BuildRecursiveTree{,Tropism,Stochastic}`。
 - 验证：**30 项单测全绿**（新增 `TropismTest.{GravityPullsTipsDown,ZeroStrengthIsNoOp}`）；headless 出图肉眼确认（递归有层次 / 向性见效 / 两个 seed 不同）。
 - **认知**：现有引擎的拓扑天花板 ≈ [自相似递归 + 粗糙下垂 + 随机差异]；再上一阶需 **管道模型粗细（da Vinci）**、**命名参数表**、**条件区间糖**，以及另一条主路 **空间殖民 Space Colonization**。
+- **成品（三 buff 齐开）**：`BuildRecursiveTreeStochastic`（自相似 + 每节绕干滚 137° 使分枝填满 3D）+ 向性 e=0.5（97% 叶尖朝下，强垂枝）+ seed 随机。viewer 加 `--tree <name>` / `--tropism <e>` / `--seed <n>` / `--growth <dir>`（生长扫谱 1→16 代 + 成品四视角）。交互模式下拖「展开代数」滑条即看生长。
+- ⚠️ **tune 坑**：我 Python 复刻器一开始向性用了简写 `H+e·(H×T)`（方向错、只偏航不下垂），与 C++ 的**绕轴旋转**不一致；改正后 Python 与 C++ 逐位对齐（e=0.5 均 H=2.70 / 97% 朝下）。
 
 ---
 
