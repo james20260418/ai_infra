@@ -1717,6 +1717,7 @@ struct SkinnedMeshCommand {
                              // 由 renderer 经 IdAllocator 分配；0 = 无效（实现应 LOG(FATAL)/忽略）。
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
+                             // 若 rest mesh 带 kRelax，实例还可给 pos_lag / partial_rotations_lag（LAG）。
     PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
@@ -1724,16 +1725,15 @@ struct SkinnedMeshCommand {
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
-// 当前实现（CPU 屏幕空间回填）：GPU 把被高亮物体画成不扩张的剪影（单色 mask），
-// CPU 读回 mask 做 outline_px 次像素膨胀，膨胀图与原 mask 相减得到边缘环，
-// 再在屏幕空间用 GL_POINTS 回填边框色。边框为**恒定像素宽**，不随物体大小/
-// 远近变化。
+// 当前实现（**纯 GPU**，2026-10-10 起，取代更早的 CPU 读回方案）：三大 3D renderer 各写一张
+//   「被高亮物体」掩膜（关深度 ⇒ 取**含遮挡的外包络**），再一个全屏 pass 对掩膜做
+//   `(2·outline_px+1)²` 的**方形膨胀**、连同「⊖ 自身（掩膜）」得**边缘环**，混合叠回原图。
+//   边框为**恒定像素宽**，不随物体大小/远近变化，且**无 CPU 读回**（无 glReadPixels 同步）。
 struct HighlightStyle {
     Color color = {1.0f, 0.85f, 0.3f, 1.0f};  // 边框颜色（金黄，经统一 tone map）
 
     // 边框宽度：屏幕空间**像素**（恒定线宽，不随物体大小/远近变化）。
-    //   实现：对物体剪影 mask 做 outline_px 次十字膨胀（上下左右±1），
-    //   膨胀图与原点集相减得到边缘环，回填为边框色。
+    //   实现：对高亮掩膜做 `(2·outline_px+1)²` 方形膨胀，再减自身掩膜 = 边缘环。
     //   例：outline_px = 2 → 边框约 2 像素宽（上下左右各伸 2 像素）。
     // 取代旧的“模型空间放大副本”方案（旧式边框为相对缩放、近大远小、
     // 大物体边框粗；且对细长/复杂网格会走形）。
@@ -2195,17 +2195,15 @@ struct RenderCommandList {
     //   实现里程碑（见命令体注释 / skeleton_manager.h TODO）。
     //
     // 用同一份 skeleton_id + mesh 但想体现“换部位网格”(肉体/小臂/头…)/装备 → 那是另一批
-    // 各自不同 mesh_id 的 SkinnedMeshCommand；层/重要性/LOD 归用户。S0 目标“肉体高低模各
-    // 一批”就是两次 DrawMeshWithSkeleton 各带不同 mesh_id。
+    // 各自不同 mesh_id 的 SkinnedMeshCommand；层/重要性/LOD 归用户。
     //
-    // 语义：一个【带骨的 Object3D】—— 同一 rest mesh(mesh_id) 被同一种骨架(skeleton_id)
-    // 蒙皮的一组实例；material 为该蒙皮网格的 PBR 材质（同 Object3DCommand.material）。
+    // **LAG（惯性滞后副运动）**：若 rest mesh 带 `kRelax`（逐顶点松弛度 aRelax），VS 会对每个
+    //   实例额外读 `SkinnedInstanceState::pos_lag`（相对平移）/ `partial_rotations_lag`（部位额外
+    //   旋转），按松弛度把「贴身」与「滞后」两套蒙皮结果 mix（shadow / highlight pass 同公式）
+    //   ⇒ 布料自由部分拖尾（裙摆飘起）。**不带 kRelax 的 mesh 整段跳过、零开销**（见设计
+    //   tools/jpov/docs/jpov_instance_attr_lag_design.md）。
     //
     // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
-    // TODO(2026-09-06): 首个实现 = 静态蒙皮(S0 零动画退化门)：某实例 pose_a==pose_b 时等价于
-    //   只查一个 pose（不插值）把 rest 顶点蒙过去,是现有“不带蒙皮 VS”的自然扩展。真正的
-    //   pose atlas 查表 + 两帧对偶四元数插值 + instanced divisor 上传已落地（见
-    //   src/skeleton/skinning_shader.h）。
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,

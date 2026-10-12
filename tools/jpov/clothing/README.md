@@ -203,26 +203,22 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 - 播放速度固定（不做滑条）——快慢不影响判断蒙皮效果。
 
 ## 7.1 布料 LAG（副运动 = 整体平动的一阶/二阶延迟；2026-10-12）
-> **v2 方向（Danis）**：**不做 pose 的 lag** —— pose 差值脱离不了动作幅度、裙子会匀速飘很诡异、
-> 用户难用。先做**用户能用的维度**：整体**平动（translation）** / **partial rotation** 的延迟。
+> **方向（Danis）**：**不做 pose 的 lag**（pose 差值脱离不了动作幅度、裙子会匀速飘很诡异、用户难用）；
+> 先做**用户能用的维度**：整体**平动（translation）**（partial rotation 的 lag 引擎保留、**未接入工具**）。
 
-左下角「随机摆动测试」面板新增：
+左下角「随机摆动测试」面板：
 - **整体平动 X/Y (m，±2)**：人体 + 衣服的**世界平移**（先让人体能动起来）。
 - **开启 LAG**：布料按「整体平动」的**一阶/二阶延迟**滞后 —— 用 `SkeletonPose.root_offset` 承载平动、
   跑 `interface/skeleton_motion_lag.h` 的 tracker，滞后量 → 布料 per-instance `pos_lag`，蒙皮 VS 按
   `_JPOV_RELAX` 松弛度 `mix` ⇒ 松的部分拖尾（**裙摆「飘起」**）、贴身部分跟随。
   **一阶**（`FirstOrderLagTracker`，rising time）无过冲；**二阶**（`SecondOrderLagTracker`，rising time
   + overshoot）有摆动/过冲。
-- 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，
-  或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。
+- **需布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，或直接用
+  `lace_skirt_skinned_relaxed_sample.glb`（§8）。**关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。**
 
-> **pose 的 lag 机制已移除**（Danis 2026-10-12：pose 差值脱离不了动作幅度、用户难用）；**partial rotation
-> 的 lag 也未接入工具**（引擎保留 loc14 `partial_rotations_lag`，供后续 / 用户）。`interface/pose_cache.h`
-> （PoseCache 纯延迟回放）保留为 util、暂未接入。
-- 需**布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，
-  或直接用 `lace_skirt_skinned_relaxed_sample.glb`（§8）。关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。
-
-> 另：`interface/pose_cache.h`（PoseCache 纯延迟回放）保留为 util（暂未接入工具，Danis 先不搞 pose lag）。
+> 引擎侧：`SkinnedInstanceState` 的 `pos_lag`(loc15) / `partial_rotations_lag`(loc14) 由蒙皮 VS 在
+> **mesh 带 `kRelax`** 时消费；**pose 的 lag 机制已移除**（不再有 `pose_*_lag` / loc11 的 pose_lag id）。
+> `interface/pose_cache.h`（PoseCache 纯延迟回放）保留为 util、**暂未接入**工具。
 
 **为什么不需要重定向**：不同 Mixamo 源的 bind 姿态（T-pose/A-pose）、骨轴 roll、层级都可能不同，
 导入**外部动画**才需要重定向；本方案在**目标骨架自己的关节局部空间**里直接生成姿态
