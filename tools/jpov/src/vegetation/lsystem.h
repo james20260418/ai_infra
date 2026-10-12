@@ -203,6 +203,10 @@ struct Segment {
 struct Polyline {
     std::vector<Vec3f> points;   // 至少 2 个点
     std::vector<float> radii;    // 与 points 等长（逐点管半径）
+
+    // 分叉领口（branch collar）缝合用：本链是某母枝的子枝时，记录**分叉点处母枝的半径**
+    // （母管粗、子管细，直接相接会有硬台阶）。0 = 非子枝（根链或母链续段），不缝合。
+    float attach_radius = 0.0f;
 };
 
 // 一条「叶位」：叶卡片要摆在哪 + 该处朝向。龟图遇到叶标记符号 `l` 时记录一个。
@@ -278,6 +282,10 @@ LSystem BuildDragonClawPagodaTree();
 LSystem BuildRecursiveTree();
 // 递归自相似树 + 随机（同符号加权择一）。
 LSystem BuildRecursiveTreeStochastic();
+
+// 分叉缝合的单点测试场景（无规则，直接龟图解释 axiom）：
+//   树干 F(10) → 在干中点抽一支 40° 侧枝 → 干继续 F(10)。
+LSystem BuildJunctionTestTree();
 
 }  // namespace vegetation
 }  // namespace jpov

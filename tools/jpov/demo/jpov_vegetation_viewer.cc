@@ -261,6 +261,53 @@ int RunGrowthCapture(const std::string& out_dir, const std::string& tree,
         app.RunOnce(input, winfo,
                     (out_dir + "/grow_" + tree + "_" + va.name + ".png").c_str());
     }
+    // 分叉特写（抬高注视点 + 拉近）——看领口缝合。
+    app.view_.phi = 0.12f;
+    app.view_.theta = 0.7853982f;
+    app.view_.R = 1.1f;
+    for (float ay : {0.8f, 1.3f, 1.8f}) {
+        app.aim_y_ = ay;
+        app.RunOnce(input, winfo,
+                    (out_dir + "/macro_" + tree + "_y" +
+                     std::to_string(static_cast<int>(ay * 100)) + ".png").c_str());
+    }
+    app.aim_y_ = 0.0f;
+    app.Finalize();
+    return 0;
+}
+
+// 分叉缝合的单点对照：粗干 + 一条侧枝，分别用 junction_blend = 0 / 1 / 2.5 近拍。
+int RunJunctionStudy(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 分叉缝合（junction）";
+    cfg.width = kWidth;
+    cfg.height = kHeight;
+    cfg.headless = true;
+    cfg.fonts = ViewerFonts();
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_ = true;
+    app.show_leaves_ = false;
+    app.Init();
+    app.InstallScene();
+    app.SelectTree("junction");
+    jpov::WindowInfo winfo;
+    winfo.width = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+    struct Blend { float v; const char* tag; };
+    const Blend kBlends[] = {{0.0f, "off"}, {2.0f, "b2"}, {4.0f, "b4"}};
+    for (const Blend& bl : kBlends) {
+        app.junction_blend_ = bl.v;
+        app.RegenerateNow();
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = 0.10f;
+        app.view_.theta = 0.7853982f;
+        app.view_.R = 1.3f;
+        app.aim_y_ = 2.0f;   // 侧枝起点（干中点 = F(10)=2m）
+        app.RunOnce(input, winfo,
+                    (out_dir + "/junction_" + bl.tag + ".png").c_str());
+    }
     app.Finalize();
     return 0;
 }
@@ -272,6 +319,7 @@ int main(int argc, char** argv) {
     std::string topo_dir;
     std::string study_dir;
     std::string growth_dir;
+    std::string junction_dir;
     std::string tree = "dragonclaw";
     float tropism = 0.0f;
     int   seed    = 0;
@@ -284,6 +332,8 @@ int main(int argc, char** argv) {
             study_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--growth") == 0 && i + 1 < argc) {
             growth_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--junction") == 0 && i + 1 < argc) {
+            junction_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--tree") == 0 && i + 1 < argc) {
             tree = argv[i + 1];
         } else if (std::strcmp(argv[i], "--tropism") == 0 && i + 1 < argc) {
@@ -291,6 +341,9 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = std::atoi(argv[i + 1]);
         }
+    }
+    if (!junction_dir.empty()) {
+        return RunJunctionStudy(junction_dir);
     }
     if (!study_dir.empty()) {
         return RunIngredientStudy(study_dir);

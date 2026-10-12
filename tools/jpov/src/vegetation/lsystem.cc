@@ -567,6 +567,9 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
     std::vector<TurtleState> stack;
     // 当前正在累积的枝链下标（-1 = 无）；分叉 `[`/`]` 与空移 `f` 会切断枝链。
     int cur_polyline = -1;
+    // 分叉领口：`[` 时记下的母枝半径；供「下一条新建的枝链」作为子枝缝合参考。
+    // -1 = 无（根链或母链续段，不缝合）。
+    float pending_attach_radius = -1.0f;
     const auto finish_polyline = [&cur_polyline]() { cur_polyline = -1; };
 
     for (const Module& m : modules) {
@@ -582,6 +585,11 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 if (cur_polyline < 0) {
                     skel.polylines.push_back(Polyline{});
                     cur_polyline = static_cast<int>(skel.polylines.size()) - 1;
+                    // 若是刚 `[` 出来的子枝，记下母枝半径供分叉领口缝合。
+                    if (pending_attach_radius > 0.0f) {
+                        skel.polylines[cur_polyline].attach_radius = pending_attach_radius;
+                        pending_attach_radius = -1.0f;
+                    }
                     skel.polylines[cur_polyline].points.push_back(st.pos);
                     skel.polylines[cur_polyline].radii.push_back(st.radius);
                 }
@@ -598,6 +606,7 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 const float len_units = m.params.empty() ? 1.0f : m.params[0];
                 Orthonormalize(&st);
                 finish_polyline();   // 空移切断枝链（不画）
+                pending_attach_radius = -1.0f;
                 st.pos = VAdd(st.pos, VScale(st.H, len_units * cfg.length_scale));
                 break;
             }
@@ -639,6 +648,7 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
             case '[':
                 finish_polyline();   // 分支点切断母枝链
                 stack.push_back(st);
+                pending_attach_radius = st.radius;   // 母枝半径（供子枝领口缝合）
                 st.radius = std::max(cfg.min_radius,
                                      st.radius * cfg.radius_taper_per_branch);
                 break;
@@ -647,6 +657,7 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 finish_polyline();   // 出分支后母枝继续，需起新链
                 st = stack.back();
                 stack.pop_back();
+                pending_attach_radius = -1.0f;
                 break;
             case 'l': {
                 // 叶位标记：记录着生点与朝向（轴向 = 前进方向 H，法线 = L 与 H 垂直）。
@@ -798,6 +809,13 @@ LSystem BuildRecursiveTreeStochastic() {
     b.AddRule("A(s) : s > 0.07 -> \\(95)F(s)[\\(25)&(42)A(s * 0.68)]"
               "[\\(165)&(22)A(s * 0.66)]", /*weight=*/1.0f);
     b.AddRule("A(s) : s <= 0.07 -> F(s)l");
+    return b.Build();
+}
+
+LSystem BuildJunctionTestTree() {
+    // 无规则；axiom 直接交给龟图。在干中点 `[` 抽一条 40° 侧枝再 `]` 回干继续。
+    LSystemBuilder b;
+    b.SetAxiom("F(10)[&(40)F(8)]F(10)");
     return b.Build();
 }
 

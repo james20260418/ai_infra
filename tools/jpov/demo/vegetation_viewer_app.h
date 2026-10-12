@@ -131,6 +131,7 @@ public:
 
     // ── 视角 ──
     jpov_viewer::ViewConfig view_;
+    float aim_y_ = 0.0f;   // 相机注视点高度（0 = 树基/默认；拍摄分叉特写时抬高）
 
     // ── 生成参数（跨帧持有；改动 → 重建骨架）──
     int   generations_  = 25;       // 展开代数
@@ -143,6 +144,7 @@ public:
     bool  use_tube_    = true;      // true=管状（BuildBranchMesh）；false=棒棒（拓扑预览）
     int   ring_edges_  = 8;         // 管截面边数
     float bark_tile_   = 0.5f;      // 树皮瓦长 v（米）；u 瓦长 = v × 贴图长宽比(2)
+    float junction_blend_ = 4.0f;   // 分叉领口缝合强度（0=关；见 BranchMeshConfig）
 
     // ── 叶片卡片 ──
     bool  show_leaves_ = true;
@@ -233,8 +235,18 @@ public:
             lsystem_ = jpov::vegetation::BuildRecursiveTree();
         } else if (name == "recursive_stochastic") {
             lsystem_ = jpov::vegetation::BuildRecursiveTreeStochastic();
+        } else if (name == "junction") {
+            lsystem_ = jpov::vegetation::BuildJunctionTestTree();
         } else {
             lsystem_ = jpov::vegetation::BuildDragonClawPagodaTree();
+        }
+        if (name == "junction") {
+            // 单点分叉测试场景：粗干 + 一条侧枝，尺度便于近看领口。
+            length_scale_ = 0.2f;
+            base_radius_  = 0.12f;
+            generations_  = 0;
+            tropism_      = 0.0f;
+            use_tube_     = true;
         }
         // recursive 系列的 F(s) 带 0<s≦1 的比例参，需要更大的单位长度与不同代数；
         // 且默认把向性打开（重力下垂 e=0.5）⇒ 三件套「自相似+向性+随机」开箱即用。
@@ -289,7 +301,7 @@ public:
         }
 
         cmds->camera.position = view_.Position();
-        cmds->camera.target   = jpov_viewer::ViewConfig::Target();
+        cmds->camera.target   = {0.0f, aim_y_, 0.0f};
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
@@ -370,6 +382,7 @@ private:
                 bcfg.ring_edges = ring_edges_;
                 bcfg.bark_tile_v_meters = bark_tile_;
                 bcfg.bark_tile_u_meters = bark_tile_ * 2.0f;   // 贴图 2:1
+                bcfg.junction_blend = junction_blend_;
                 mesh = jpov::vegetation::BuildBranchMesh(skel, bcfg);
             } else {
                 mesh = BuildSkeletonMesh(skel);   // 拓扑预览用（盒棒）

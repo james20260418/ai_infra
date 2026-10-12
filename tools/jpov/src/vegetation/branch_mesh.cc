@@ -75,22 +75,65 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
         static_cast<uint8_t>(jpov::MeshVertexFlags::kUV));
 
     for (const Polyline& pl : skel.polylines) {
-        const size_t n = pl.points.size();
-        if (n < 2) {
+        if (pl.points.size() < 2) {
             continue;
         }
-        CHECK_EQ(pl.radii.size(), n) << "枝链点与半径数量不一致";
+        CHECK_EQ(pl.radii.size(), pl.points.size()) << "枝链点与半径数量不一致";
+
+        // 0) 分叉领口（branch collar）：子枝起点半径从**母枝半径**平滑收细到子枝自身
+        //    半径（smoothstep），过渡长度 = junction_blend × 母枝半径；过渡区内按需
+        //    细分（圈数足够→肉饱满）。子管于是从母管上"领口"渐缩长出，而非硬台阶。
+        //    junction_blend<=0 或非子枝（attach_radius==0）→ 原样（零回归）。
+        std::vector<Vec3f> pts = pl.points;
+        std::vector<float> radii = pl.radii;
+        if (cfg.junction_blend > 0.0f && pl.attach_radius > 0.0f) {
+            const float blend_len = cfg.junction_blend * pl.attach_radius;
+            const float target = std::max(1.0e-4f, blend_len / 6.0f);   // 细分粒度
+            const size_t m = pl.points.size();
+            pts.clear();
+            radii.clear();
+            pts.push_back(pl.points[0]);
+            radii.push_back(pl.attach_radius);
+            float acc = 0.0f;
+            for (size_t i = 1; i < m; ++i) {
+                const Vec3f seg = VSub(pl.points[i], pl.points[i - 1]);
+                const float seg_len = VLen(seg);
+                int pieces = 1;
+                if (acc < blend_len && seg_len > 1.0e-6f) {
+                    pieces = std::min(16, static_cast<int>(
+                        std::ceil(seg_len / target) + 0.5f));
+                }
+                for (int s = 1; s <= pieces; ++s) {
+                    const float u = static_cast<float>(s) /
+                                    static_cast<float>(pieces);
+                    pts.push_back(VAdd(pl.points[i - 1], VScale(seg, u)));
+                    const float r_child = pl.radii[i - 1] +
+                        (pl.radii[i] - pl.radii[i - 1]) * u;
+                    const float arc_here = acc + seg_len * u;
+                    float r = r_child;
+                    if (arc_here < blend_len) {
+                        const float t = arc_here / blend_len;
+                        const float sm = t * t * (3.0f - 2.0f * t);   // smoothstep
+                        r = pl.attach_radius * (1.0f - sm) + r_child * sm;
+                    }
+                    radii.push_back(r);
+                }
+                acc += seg_len;
+            }
+        }
+
+        const size_t n = pts.size();
 
         // 1) 逐点切线（中间点用前后差分，端点用单侧差分的切线）。
         std::vector<Vec3f> tan(n);
         for (size_t i = 0; i < n; ++i) {
             Vec3f dir;
             if (i == 0) {
-                dir = VSub(pl.points[1], pl.points[0]);
+                dir = VSub(pts[1], pts[0]);
             } else if (i == n - 1) {
-                dir = VSub(pl.points[n - 1], pl.points[n - 2]);
+                dir = VSub(pts[n - 1], pts[n - 2]);
             } else {
-                dir = VSub(pl.points[i + 1], pl.points[i - 1]);
+                dir = VSub(pts[i + 1], pts[i - 1]);
             }
             const float l = VLen(dir);
             tan[i] = (l > 1.0e-9f) ? VScale(dir, 1.0f / l)
@@ -117,13 +160,13 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
         // 3) 沿链的弧长（供 UV 的 v）。
         std::vector<float> arc(n, 0.0f);
         for (size_t i = 1; i < n; ++i) {
-            arc[i] = arc[i - 1] + VLen(VSub(pl.points[i], pl.points[i - 1]));
+            arc[i] = arc[i - 1] + VLen(VSub(pts[i], pts[i - 1]));
         }
 
         // 4) 发顶点（每点一圈 ring_verts 个） + 缝合相邻两圈。
         const uint32_t base = static_cast<uint32_t>(mesh.positions.size());
         for (size_t i = 0; i < n; ++i) {
-            const float r = std::max(pl.radii[i], 1.0e-4f);
+            const float r = std::max(radii[i], 1.0e-4f);
             // u = 沿枝弧长 / u 瓦长：纹理的「长向」（贴图 X）顺枝干轴走，
             //     故树皮的纵向纹理沿枝、横向纹理绕枝（见本文件头 UV 约定）。
             const float u = arc[i] / cfg.bark_tile_u_meters;
@@ -132,7 +175,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
                     kTwoPi * static_cast<float>(j) / static_cast<float>(edges);
                 const Vec3f dir = VAdd(VScale(nrm[i], std::cos(theta)),
                                        VScale(bin[i], std::sin(theta)));
-                const Vec3f p = VAdd(pl.points[i], VScale(dir, r));
+                const Vec3f p = VAdd(pts[i], VScale(dir, r));
                 mesh.positions.push_back(p);
                 mesh.normals.push_back(VNorm(dir));
                 // v = 周向弧长 / v 瓦长（随半径变）：绕枝一圈。
@@ -160,7 +203,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
             // 末端（法线 +tan[n-1]）。
             {
                 const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
-                mesh.positions.push_back(pl.points[n - 1]);
+                mesh.positions.push_back(pts[n - 1]);
                 mesh.normals.push_back(tan[n - 1]);
                 mesh.uvs.push_back(jpov::Vec2f(arc[n - 1] / cfg.bark_tile_u_meters, 0.5f));
                 const uint32_t rb = base + static_cast<uint32_t>((n - 1) * ring_verts);
@@ -173,7 +216,7 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
             // 起始端（法线 -tan[0]）。
             {
                 const uint32_t cbase = static_cast<uint32_t>(mesh.positions.size());
-                mesh.positions.push_back(pl.points[0]);
+                mesh.positions.push_back(pts[0]);
                 mesh.normals.push_back(VScale(tan[0], -1.0f));
                 mesh.uvs.push_back(jpov::Vec2f(0.0f, 0.5f));
                 for (int j = 0; j < edges; ++j) {

@@ -433,6 +433,50 @@ TEST(TropismTest, ZeroStrengthIsNoOp) {
     }
 }
 
+TEST(BranchMeshTest, JunctionCollarBlendsBaseRadius) {
+    // 子枝领口缝合：首圈半径应从「母枝半径」平滑收细（而非直接子枝细半径）。
+    Skeleton sk;
+    Polyline pl;
+    pl.points = {Vec3f(0, 0, 0), Vec3f(0, 0.5f, 0), Vec3f(0, 1.0f, 0)};
+    pl.radii = {0.05f, 0.05f, 0.05f};
+    pl.attach_radius = 0.2f;   // 母枝半径
+    sk.polylines.push_back(pl);
+    BranchMeshConfig cfg;
+    cfg.ring_edges = 8;
+    cfg.cap_ends = false;
+    const jpov::MeshData m = BuildBranchMesh(sk, cfg);
+    ASSERT_EQ(m.positions.size() % 9u, 0u);
+    const size_t rings = m.positions.size() / 9u;
+    EXPECT_GE(rings, 3u) << "领口应细分首段（圈数 > 原 3 点）";
+    auto ring_max_r = [&](size_t ring) {
+        float mx = 0.0f;
+        for (int j = 0; j < 9; ++j) {
+            const Vec3f& p = m.positions[ring * 9 + static_cast<size_t>(j)];
+            mx = std::max(mx, std::sqrt(p.x() * p.x() + p.z() * p.z()));
+        }
+        return mx;
+    };
+    EXPECT_NEAR(ring_max_r(0), 0.2f, 1.0e-3f);            // 首圈 = 母枝半径
+    EXPECT_NEAR(ring_max_r(rings - 1), 0.05f, 1.0e-3f);   // 末圈 = 子枝自身半径
+}
+
+TEST(BranchMeshTest, JunctionBlendOffKeepsChildRadius) {
+    // junction_blend=0 → 不做领口，首圈仍为子枝细半径（零回归）。
+    Skeleton sk;
+    Polyline pl;
+    pl.points = {Vec3f(0, 0, 0), Vec3f(0, 1.0f, 0)};
+    pl.radii = {0.05f, 0.05f};
+    pl.attach_radius = 0.2f;
+    sk.polylines.push_back(pl);
+    BranchMeshConfig cfg;
+    cfg.ring_edges = 8;
+    cfg.cap_ends = false;
+    cfg.junction_blend = 0.0f;
+    const jpov::MeshData m = BuildBranchMesh(sk, cfg);
+    const Vec3f& p = m.positions[0];
+    EXPECT_NEAR(std::sqrt(p.x() * p.x() + p.z() * p.z()), 0.05f, 1.0e-3f);
+}
+
 }  // namespace
 }  // namespace vegetation
 }  // namespace jpov

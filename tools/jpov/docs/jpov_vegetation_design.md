@@ -47,6 +47,17 @@ Danis：「不纠结纹理与 mesh，利用已有东西，把 L-System 拓扑能
 - **成品（三 buff 齐开）**：`BuildRecursiveTreeStochastic`（自相似 + 每节绕干滚 137° 使分枝填满 3D）+ 向性 e=0.5（97% 叶尖朝下，强垂枝）+ seed 随机。viewer 加 `--tree <name>` / `--tropism <e>` / `--seed <n>` / `--growth <dir>`（生长扫谱 1→16 代 + 成品四视角）。交互模式下拖「展开代数」滑条即看生长。
 - ⚠️ **tune 坑**：我 Python 复刻器一开始向性用了简写 `H+e·(H×T)`（方向错、只偏航不下垂），与 C++ 的**绕轴旋转**不一致；改正后 Python 与 C++ 逐位对齐（e=0.5 均 H=2.70 / 97% 朝下）。
 
+### 分叉缝合（branch collar）—— 2026-10-12 晚
+Danis：「树干 mesh 连接处明显粗细突变，需要算法缝合」——根因：子枝起点半径直接砍到母枝 0.6×，
+子管硬戳在母管上，交接处是硬台阶/硬交线。
+- **做法**：`Skeleton::Polyline` 增 `attach_radius`（`[` 时龟图记下**母枝半径**，赋给子枝链）；
+  `branch_mesh` 在子枝起点把半径从**母枝半径**沿 smoothstep 平滑收细到子枝自身半径，
+  过渡长度 = `junction_blend` × 母枝半径，过渡区内**自适应细分**（肉饱满）⇒ 子管从母管上"领口"渐缩长出。
+  默认 `junction_blend=4`；`0` = 关（零回归）。
+- viewer 加 `--junction <dir>`（粗干+一侧枝单点测试，拍 0/2/4 对照）与相机抬高度 `aim_y_`（分叉特写）。
+- 验证：**32 项单测全绿**（新增 `JunctionCollarBlendsBaseRadius` / `JunctionBlendOffKeepsChildRadius`）；
+  单点测试 0→4 能看到硬台阶→平滑领口。⚠️ 视觉模型对这类微差不可靠（曾把 0 与 1 说成“明显不同”，实际逐像素相同）——**以 ground-truth 数值/对照为准**。
+
 ---
 
 ## 〇.5、锁定决策（2026-10-08 Danis 拍板）
