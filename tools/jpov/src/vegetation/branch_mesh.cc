@@ -4,6 +4,7 @@
 
 #include "tools/jpov/src/vegetation/branch_mesh.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -56,6 +57,55 @@ Vec3f AnyPerp(const Vec3f& t) {
     const Vec3f ref = (std::abs(t.x()) < 0.9f) ? Vec3f(1.0f, 0.0f, 0.0f)
                                                : Vec3f(0.0f, 1.0f, 0.0f);
     return VNorm(VCross(t, ref));
+}
+
+// 由世界坐标确定性派生一个 [0, 2π) 相位（不同枝链相位不同 ⇒ 虬曲/噪声不整齐划一）。
+float ChainPhase(float x, float y, float z) {
+    uint64_t h = 1469598103934665603ULL;   // FNV offset basis
+    const auto mix = [&h](float v) {
+        const int32_t q = static_cast<int32_t>(std::lround(v * 1000.0f));
+        h ^= static_cast<uint64_t>(static_cast<uint32_t>(q));
+        h *= 1099511628211ULL;
+    };
+    mix(x);
+    mix(y);
+    mix(z);
+    return static_cast<float>((h >> 11) * 0x1.0p-53) * kTwoPi;
+}
+
+// 逐点切线（中间点前后差分，端点单侧差分）+ 平行传输标架（rotation-minimizing，防扭转）。
+void ComputeTangentFrame(const std::vector<Vec3f>& p, std::vector<Vec3f>* tan,
+                         std::vector<Vec3f>* nrm, std::vector<Vec3f>* bin) {
+    const size_t n = p.size();
+    tan->assign(n, Vec3f(0.0f, 1.0f, 0.0f));
+    for (size_t i = 0; i < n; ++i) {
+        Vec3f dir;
+        if (i == 0) {
+            dir = VSub(p[1], p[0]);
+        } else if (i == n - 1) {
+            dir = VSub(p[n - 1], p[n - 2]);
+        } else {
+            dir = VSub(p[i + 1], p[i - 1]);
+        }
+        const float l = VLen(dir);
+        (*tan)[i] = (l > 1.0e-9f) ? VScale(dir, 1.0f / l) : Vec3f(0.0f, 1.0f, 0.0f);
+    }
+    nrm->resize(n);
+    bin->resize(n);
+    (*nrm)[0] = AnyPerp((*tan)[0]);
+    (*bin)[0] = VNorm(VCross((*tan)[0], (*nrm)[0]));
+    for (size_t i = 1; i < n; ++i) {
+        const Vec3f axis = VCross((*tan)[i - 1], (*tan)[i]);
+        const float s = VLen(axis);
+        const float c = VDot((*tan)[i - 1], (*tan)[i]);
+        if (s > 1.0e-9f) {
+            (*nrm)[i] = RotateAround((*nrm)[i - 1], VScale(axis, 1.0f / s),
+                                     std::atan2(s, c));
+        } else {
+            (*nrm)[i] = (*nrm)[i - 1];   // 切线近共线 → 不变
+        }
+        (*bin)[i] = VNorm(VCross((*tan)[i], (*nrm)[i]));
+    }
 }
 
 }  // namespace
@@ -124,44 +174,58 @@ jpov::MeshData BuildBranchMesh(const Skeleton& skel, const BranchMeshConfig& cfg
 
         const size_t n = pts.size();
 
-        // 1) 逐点切线（中间点用前后差分，端点用单侧差分的切线）。
-        std::vector<Vec3f> tan(n);
-        for (size_t i = 0; i < n; ++i) {
-            Vec3f dir;
-            if (i == 0) {
-                dir = VSub(pts[1], pts[0]);
-            } else if (i == n - 1) {
-                dir = VSub(pts[n - 1], pts[n - 2]);
-            } else {
-                dir = VSub(pts[i + 1], pts[i - 1]);
-            }
-            const float l = VLen(dir);
-            tan[i] = (l > 1.0e-9f) ? VScale(dir, 1.0f / l)
-                                   : Vec3f(0.0f, 1.0f, 0.0f);
-        }
-
-        // 2) 平行传输标架（rotation-minimizing）：把初始法线沿切线最小旋转地推进。
-        std::vector<Vec3f> nrm(n), bin(n);
-        nrm[0] = AnyPerp(tan[0]);
-        bin[0] = VNorm(VCross(tan[0], nrm[0]));
-        for (size_t i = 1; i < n; ++i) {
-            const Vec3f axis = VCross(tan[i - 1], tan[i]);
-            const float s = VLen(axis);
-            const float c = VDot(tan[i - 1], tan[i]);
-            if (s > 1.0e-9f) {
-                const float ang = std::atan2(s, c);
-                nrm[i] = RotateAround(nrm[i - 1], VScale(axis, 1.0f / s), ang);
-            } else {
-                nrm[i] = nrm[i - 1];   // 切线近共线 → 不变
-            }
-            bin[i] = VNorm(VCross(tan[i], nrm[i]));
-        }
-
-        // 3) 沿链的弧长（供 UV 的 v）。
+        // 弧长（供 taper / 噪声 / 虬曲 与 UV 的 u）。
         std::vector<float> arc(n, 0.0f);
         for (size_t i = 1; i < n; ++i) {
             arc[i] = arc[i - 1] + VLen(VSub(pts[i], pts[i - 1]));
         }
+        const float arc_total = arc[n - 1];
+
+        // ③ 幂律 taper：在首末端半径之间按 (1−t)^p 重塑（t = 弧长占比）。
+        if (cfg.taper_power > 0.0f && n >= 2 && arc_total > 1.0e-6f) {
+            const float r_start = radii[0];
+            const float r_end   = radii[n - 1];
+            for (size_t i = 0; i < n; ++i) {
+                const float t = arc[i] / arc_total;
+                const float shaped =
+                    std::pow(std::max(0.0f, 1.0f - t), cfg.taper_power);
+                radii[i] = r_end + (r_start - r_end) * shaped;
+            }
+        }
+
+        // ② 半径噪声：沿枝低频噪声乘半径（±比例），破"定半径"的规整感。
+        if (cfg.radius_noise > 0.0f && arc_total > 1.0e-6f &&
+            cfg.radius_noise_wavelength > 0.0f) {
+            const float phase = ChainPhase(pts[0].x(), pts[0].y(), pts[0].z());
+            for (size_t i = 0; i < n; ++i) {
+                const float u = arc[i] / cfg.radius_noise_wavelength;
+                const float nz = 0.6f * std::sin(kTwoPi * u + phase) +
+                                 0.4f * std::sin(kTwoPi * 2.3f * u + phase * 1.7f);
+                radii[i] *= (1.0f + cfg.radius_noise * nz);
+            }
+        }
+
+        std::vector<Vec3f> tan, nrm, bin;
+        ComputeTangentFrame(pts, &tan, &nrm, &bin);
+
+        // ① 中心线虬曲：沿枝低频正弦横向扰动（破"直管"）；基部锚定（不撕裂领口）。
+        if (cfg.centerline_gnarl > 0.0f && arc_total > 1.0e-6f &&
+            cfg.gnarl_wavelength > 0.0f) {
+            const float phase = ChainPhase(pts[0].x(), pts[0].y(), pts[0].z());
+            std::vector<Vec3f> moved(n);
+            for (size_t i = 0; i < n; ++i) {
+                const float u = arc[i] / cfg.gnarl_wavelength;
+                const float anchor =
+                    std::min(1.0f, arc[i] / (0.25f * arc_total));
+                const float g =
+                    cfg.centerline_gnarl * std::sin(kTwoPi * u + phase) * anchor;
+                moved[i] = VAdd(pts[i], VScale(nrm[i], g));
+            }
+            pts = moved;
+            ComputeTangentFrame(pts, &tan, &nrm, &bin);
+        }
+
+        // 4) 发顶点（每点一圈 ring_verts 个） + 缝合相邻两圈。
 
         // 4) 发顶点（每点一圈 ring_verts 个） + 缝合相邻两圈。
         const uint32_t base = static_cast<uint32_t>(mesh.positions.size());

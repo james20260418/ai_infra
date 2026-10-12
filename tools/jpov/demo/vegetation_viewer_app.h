@@ -156,6 +156,13 @@ public:
     float bark_tile_   = 0.5f;      // 树皮瓦长 v（米）；u 瓦长 = v × 贴图长宽比(2)
     float junction_blend_ = 4.0f;   // 分叉领口缝合强度（0=关；见 BranchMeshConfig）
 
+    // ── 枝干"去圆柱感"（直接透传给 BranchMeshConfig；0=关）──
+    float gnarl_ = 0.02f;            // 中心线虬曲振幅（米）
+    float radius_noise_ = 0.06f;     // 半径噪声比例
+    float taper_power_ = 0.7f;       // 幂律 taper 指数（<1 基部急收=自然；0=关）
+    float gnarl_wavelength_ = 0.6f;  // 虬曲波长（米，不开滑条）
+    float radius_noise_wavelength_ = 0.5f;   // 半径噪声波长（米，不开滑条）
+
     // ── 叶片卡片 ──
     bool  show_leaves_ = true;
     float leaf_length_ = 0.12f;     // 基准叶长（米）
@@ -231,7 +238,7 @@ public:
             const jpov::vegetation::Skeleton sk =
                 jpov::vegetation::GenerateSkeleton(sys, tc, gens, 0);
             jpov::vegetation::BranchMeshConfig bc;
-            bc.junction_blend = junction_blend_;
+            ApplyBranchKnobs(&bc);
             AppendMesh(jpov::vegetation::BuildBranchMesh(sk, bc), dx, &tree);
             jpov::vegetation::LeafCardConfig lc;
             lc.leaf_length = 0.11f;
@@ -270,7 +277,7 @@ public:
             const jpov::vegetation::Skeleton sk =
                 jpov::vegetation::Colonize(it.cfg);
             jpov::vegetation::BranchMeshConfig bc;
-            bc.junction_blend = junction_blend_;
+            ApplyBranchKnobs(&bc);
             AppendMesh(jpov::vegetation::BuildBranchMesh(sk, bc), it.dx, &tree);
             jpov::vegetation::LeafCardConfig lc;
             lc.leaf_length = 0.18f;
@@ -297,6 +304,16 @@ public:
         dst->flags = src.flags;
     }
 
+    // 把「去圆柱感 + 领口」这组枝干旋钮透传给 BranchMeshConfig（三个使用点共用）。
+    void ApplyBranchKnobs(jpov::vegetation::BranchMeshConfig* b) const {
+        b->junction_blend = junction_blend_;
+        b->centerline_gnarl = gnarl_;
+        b->gnarl_wavelength = gnarl_wavelength_;
+        b->radius_noise = radius_noise_;
+        b->radius_noise_wavelength = radius_noise_wavelength_;
+        b->taper_power = taper_power_;
+    }
+
     // 同步“上一帧参数”（用于变化检测）。
     void SyncPrev() {
         prev_generations_  = generations_;
@@ -307,6 +324,9 @@ public:
         prev_use_tube_     = use_tube_;
         prev_ring_edges_   = ring_edges_;
         prev_bark_tile_    = bark_tile_;
+        prev_gnarl_        = gnarl_;
+        prev_radius_noise_ = radius_noise_;
+        prev_taper_power_  = taper_power_;
         prev_show_leaves_  = show_leaves_;
         prev_leaf_length_  = leaf_length_;
         prev_leaf_growth_  = leaf_growth_;
@@ -417,6 +437,9 @@ public:
                 use_tube_ != prev_use_tube_ ||
                 ring_edges_ != prev_ring_edges_ ||
                 bark_tile_ != prev_bark_tile_ ||
+                gnarl_ != prev_gnarl_ ||
+                radius_noise_ != prev_radius_noise_ ||
+                taper_power_ != prev_taper_power_ ||
                 show_leaves_ != prev_show_leaves_ ||
                 leaf_length_ != prev_leaf_length_ ||
                 leaf_growth_ != prev_leaf_growth_ ||
@@ -520,7 +543,7 @@ private:
                 bcfg.ring_edges = ring_edges_;
                 bcfg.bark_tile_v_meters = bark_tile_;
                 bcfg.bark_tile_u_meters = bark_tile_ * 2.0f;   // 贴图 2:1
-                bcfg.junction_blend = junction_blend_;
+                ApplyBranchKnobs(&bcfg);
                 mesh = jpov::vegetation::BuildBranchMesh(skel, bcfg);
             } else {
                 mesh = BuildSkeletonMesh(skel);   // 拓扑预览用（盒棒）
@@ -567,7 +590,7 @@ private:
         const float kSpace  = 12.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 13;
+        const int   kRows   = 16;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -601,10 +624,13 @@ private:
             leaves_per_site_ = static_cast<int>(lps_f + 0.5f);
         }
         ui_.SliderFloat("向性 e（重力下垂）", &tropism_, row(11), 0.0f, 0.5f, 3);
+        ui_.SliderFloat("中心线虬曲 m", &gnarl_, row(12), 0.0f, 0.08f, 3);
+        ui_.SliderFloat("枝干半径噪声", &radius_noise_, row(13), 0.0f, 0.3f, 3);
+        ui_.SliderFloat("taper 幂指数", &taper_power_, row(14), 0.0f, 2.0f, 2);
         char info[128];
         std::snprintf(info, sizeof(info), "龙爪槐  |  枝段 %zu  叶 %zu 片",
                       segment_count_, leaf_count_);
-        ui_.Text(info, row(12));
+        ui_.Text(info, row(15));
     }
 
     bool show_panel_ = true;
@@ -619,6 +645,9 @@ private:
     bool  prev_use_tube_     = true;
     int   prev_ring_edges_   = 8;
     float prev_bark_tile_    = 0.5f;
+    float prev_gnarl_        = 0.02f;
+    float prev_radius_noise_ = 0.06f;
+    float prev_taper_power_  = 0.7f;
     bool  prev_show_leaves_  = true;
     float prev_leaf_length_  = 0.15f;
     float prev_leaf_growth_  = 1.0f;

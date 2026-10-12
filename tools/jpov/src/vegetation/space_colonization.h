@@ -75,10 +75,12 @@ struct SpaceColonizationConfig {
     // 向性强度 e（建议 0.05 ~ 0.30）。
     float tropism_strength = 0.0f;
 
-    // ── 粗细（管道模型 / 达芬奇定律）──
-    // 半径 = min_radius + (base_radius − min_radius) · (w / w_root)^(1/radius_power)，
-    // 其中 w = 该节点子树的末梢数（w_root = 全树末梢数）⇒ 越靠主干越粗。
-    //   · radius_power = 2 即 r ∝ √w（面积守恒，达芬奇）；越大主干越细。
+    // ── 粗细（管道模型，按**子树枝长**）──
+    // 半径 = min_radius + (base_radius − min_radius) · (sub_len / sub_len_root)^(1/radius_power)，
+    // 其中 sub_len = 该节点**子树的枝长总和**（sub_len_root = 全树）。
+    // 用「枝长」而非「末梢数」：单子链内末梢数恒定 ⇒ 半径恒定 ⇒ 每段都是圆柱；
+    // 按枝长则沿枝单调递减 ⇒ **枝链自然收细**（不再像水管）。越靠主干越粗。
+    //   · radius_power = 2 即 r ∝ √枝长；越大主干越细。
     // Pre-condition: base_radius > 0；min_radius > 0；base_radius >= min_radius；radius_power > 0
     float base_radius = 0.05f;
     float min_radius = 0.004f;

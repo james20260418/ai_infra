@@ -257,29 +257,30 @@ Skeleton Colonize(const SpaceColonizationConfig& cfg) {
             attractors.end());
     }
 
-    // ── 后处理 A：子节点表 + 子树末梢数（管道模型粗细）──
+    // ── 后处理 A：子节点表 + 子树**枝长**（管道模型粗细）──
+    //    用"子树枝长"而非"末梢数"：单子链内末梢数恒定 ⇒ 半径恒定 ⇒ 每段都是圆柱；
+    //    按枝长则沿枝单调递减 ⇒ **枝链自然收细**，不再像水管。
     const size_t n_nodes = nodes.size();
     std::vector<std::vector<int>> children(n_nodes);
     for (size_t i = 1; i < n_nodes; ++i) {
         children[nodes[i].parent].push_back(static_cast<int>(i));
     }
-    // 逆序递推：w[node] = 无子 ? 1 : Σ w[child]（父下标恒小于子 ⇒ 逆序安全）。
-    std::vector<int> w(n_nodes, 0);
+    // 逆序递推：sub_len[node] = 本段长 + Σ sub_len[child]（父下标恒小于子 ⇒ 逆序安全）。
+    std::vector<float> sub_len(n_nodes, 0.0f);
     for (size_t i = n_nodes; i-- > 0;) {
-        if (children[i].empty()) {
-            w[i] = 1;
-        } else {
-            int s = 0;
-            for (int c : children[i]) {
-                s += w[c];
-            }
-            w[i] = s;
+        float s = 0.0f;
+        for (int c : children[i]) {
+            s += sub_len[c];
         }
+        if (i != 0) {   // 加上"父→本节点"这段的长度（根没有入边）
+            s += VLen(VSub(nodes[i].pos, nodes[nodes[i].parent].pos));
+        }
+        sub_len[i] = s;
     }
-    const int w_root = std::max(1, w[0]);
+    const float sub_len_root = std::max(1.0e-6f, sub_len[0]);
     std::vector<float> radius(n_nodes, cfg.min_radius);
     for (size_t i = 0; i < n_nodes; ++i) {
-        const float frac = static_cast<float>(w[i]) / static_cast<float>(w_root);
+        const float frac = sub_len[i] / sub_len_root;
         radius[i] = cfg.min_radius +
                     (cfg.base_radius - cfg.min_radius) *
                         std::pow(frac, 1.0f / cfg.radius_power);
