@@ -137,6 +137,9 @@ inline constexpr float kLagDelayMinS = 0.0f;
 inline constexpr float kLagDelayMaxS = 0.5f;
 // 历史环形缓冲容量：@60Hz 最大 0.5s ≈ 30 条，取 64 留余量。
 inline constexpr size_t kLagCacheCapacity = 64;
+// 延迟「渐入」窗口（秒）：LAG 从 0 平滑升到目标延迟。窗口 > 最大延迟 ⇒ 裙子「显示时刻」始终
+//   前进（不回退到最老样本），避免启动时「停在原地等一会再追上」的突变感。
+inline constexpr float kLagRampSeconds = 0.8f;
 
 // ── 面板布局（各面板共用；配合 ClothingToolApp::BeginPanel 使用）──
 inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间距
