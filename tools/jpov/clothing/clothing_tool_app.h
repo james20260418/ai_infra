@@ -272,7 +272,8 @@ public:
     //（VS 按 _JPOV_RELAX 松弛度 mix 到滞后位置）。布料网格自带 kRelax 时渲染器才走 LAG 路径。
     // 平动用 SkeletonPose 的 root_offset 承载（`TransPose`），直接复用 tracker（root_offset 一并滞后）。
     float body_trans_ui_[3] = {0.0f, 0.0f, 0.0f};  // 整体平动（世界 m；±2；面板只给 X/Y）
-    float body_twist_deg_ui_ = 0.0f;      // 下半身额外扭转（度，±90；partial rotation 通道 0）
+    float body_twist_deg_ui_ = 0.0f;      // 下半身额外扭转（度，±90；partial rotation 通道 0 = 骨盆）
+    float body_upper_twist_deg_ui_ = 0.0f; // 上半身额外扭转（度，±90；通道 1 = 脊椎；验证**子树语义**）
     bool lag_enabled_ui_ = false;         // 勾选：布料按滞后维度（平动/扭转）滞后
     bool lag_second_order_ui_ = false;    // 勾选：二阶（否则一阶）
     float lag_rise_ms_ui_ = kLagRiseMsDefault;      // 上升时间（ms）
@@ -664,13 +665,16 @@ public:
         const jpov::Vec3f trans(body_trans_ui_[0], body_trans_ui_[1], 0.0f);
         const geom::Quaternion<float> twist = geom::Quaternion<float>::FromAxisAngle(
             jpov::Vec3f(0.0f, 1.0f, 0.0f), body_twist_deg_ui_ * kMotionPi / 180.0f);
+        const geom::Quaternion<float> twist_upper = geom::Quaternion<float>::FromAxisAngle(
+            jpov::Vec3f(0.0f, 1.0f, 0.0f), body_upper_twist_deg_ui_ * kMotionPi / 180.0f);
         jpov::SkinnedInstanceState motion_inst;
         jpov::Vec3f cloth_pos_lag(0.0f, 0.0f, 0.0f);
         geom::Quaternion<float> cloth_twist_lag = twist;  // 关 LAG 时 = 当前（mix 恒等）
         if (motion_active) {
             motion_inst = MotionInstanceState();
             motion_inst.transform.center = trans;
-            motion_inst.partial_rotations[0] = twist;
+            motion_inst.partial_rotations[0] = twist;        // 骨盆（下半身）
+            motion_inst.partial_rotations[1] = twist_upper;  // 脊椎（上半身）——无 lag（验子树语义）
             if (lag_enabled_ui_) {
                 // 对「整体平动」与「下半身扭转」各跑**独立**的一阶/二阶 tracker（→ 布料
                 // pos_lag / partial_lag）。两个维度是独立的滤波器（Danis 2026-10-12）。
@@ -715,7 +719,8 @@ public:
                 cloth_inst.pose_b_lag = motion_inst.pose_b;
                 cloth_inst.ratio_lag = motion_inst.ratio;
                 cloth_inst.pos_lag = cloth_pos_lag;
-                cloth_inst.partial_rotations_lag[0] = cloth_twist_lag;  // 扭转滞后（partial lag）
+                cloth_inst.partial_rotations_lag[0] = cloth_twist_lag;  // 下半身扭转滞后（partial lag）
+                cloth_inst.partial_rotations_lag[1] = twist_upper;       // 上半身扭转（无 lag）
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
                                                prim.material, {cloth_inst});
@@ -1360,9 +1365,29 @@ private:
         return p;
     }
 
-    // 人体骨架的「部位额外旋转」通道配置：通道 0 = 骨盆（下半身）；通道 1 未用。
-    static std::array<std::string, jpov::kNumPartialRotation> BodyPartialConfig() {
-        return {std::string(kPartialRotChannelJoint), std::string()};
+    // 人体骨架的「部位额外旋转」通道配置：通道 0 = 骨盆（下半身）、通道 1 = 脊椎（上半身）。
+    // ⚠️ 只在**骨架确实有**该关节名时才配（否则 SkeletonManager 会 LOG(FATAL)）；非 mixamo 资产
+    //   自动退化为「未配置」并告警，不影响工具在别的资产上跑。
+    std::array<std::string, jpov::kNumPartialRotation> BodyPartialConfig() const {
+        std::array<std::string, jpov::kNumPartialRotation> cfg = {"", ""};
+        const auto has = [this](const std::string& nm) {
+            for (const jpov::SkeletonJoint& j : body_skeleton_.joints) {
+                if (j.name == nm) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (has(kPartialRotChannelJoint)) {
+            cfg[0] = kPartialRotChannelJoint;
+        } else {
+            LOG(WARNING) << "人体骨架无关节 " << kPartialRotChannelJoint
+                         << "：下半身扭转通道未配置";
+        }
+        if (has(kPartialRotChannelUpperJoint)) {
+            cfg[1] = kPartialRotChannelUpperJoint;
+        }
+        return cfg;
     }
 
     // 按面板参数配置 tracker（参数变了才重配；二阶 Configure 含数值标定，别每帧跑）。

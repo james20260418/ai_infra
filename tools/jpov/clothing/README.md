@@ -209,7 +209,9 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 
 左下角「随机摆动测试」面板新增：
 - **整体平动 X/Y (m，±2)**：人体 + 衣服的**世界平移**（先让人体能动起来）。
-- **下半身扭转 (°，±90)**：partial rotation **通道 0（骨盆）**的额外扭转 —— 用于验证 **partial lag** 链路。
+- **下半身扭转 (°，±90)**：partial rotation **通道 0（骨盆）**额外扭转 —— 验证 **partial lag** 链路。
+- **上半身扭转 (°，±90)**：partial rotation **通道 1（脊椎）**额外扭转 —— 验证**子树语义**（上半身转、腿/裙摆不动）。
+  （非 mixamo 资产无这两个骨名时，通道**自动退化为未配置**、不影响运行。）
 - **开启 LAG**：布料按「整体平动 / 下半身扭转」的**一阶/二阶延迟**滞后（两个维度是**独立的滤波器**）——
   平动用 `SkeletonPose.root_offset`、扭转用单关节四元数承载，各跑 `interface/skeleton_motion_lag.h` 的
   tracker，滞后量 → 布料 per-instance `pos_lag` / `partial_lag`，蒙皮 VS 按 `_JPOV_RELAX` 松弛度 `mix`
