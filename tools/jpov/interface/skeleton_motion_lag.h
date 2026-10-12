@@ -103,8 +103,6 @@ public:
     }
 
     const SkeletonPose& tracked() const { return tracked_; }
-    bool initialized() const { return initialized_; }
-    float rising_time_s() const { return rising_time_s_; }
 
 private:
     float rising_time_s_ = 0.0f;
@@ -258,11 +256,7 @@ public:
     }
 
     const SkeletonPose& tracked() const { return tracked_; }
-    bool initialized() const { return initialized_; }
-    float rising_time_s() const { return rising_time_s_; }
-    float overshoot() const { return overshoot_; }
-    float damping_ratio() const { return zeta_; }
-    float natural_frequency() const { return omega_; }
+    float damping_ratio() const { return zeta_; }  // 由 overshoot 反解（观测用；测试断言）
 
 private:
     float rising_time_s_ = 0.0f;

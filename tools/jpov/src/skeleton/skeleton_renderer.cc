@@ -232,7 +232,7 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
         const float ratio = std::min(std::max(inst.ratio, 0.0f), 1.0f);
         bytes[kMiscByteRatio] =
             static_cast<unsigned char>(std::lround(ratio * 255.0f));
-        // byte1（kMiscByteReserved1，原 ratio_lag）保留为 0：pose-lag 机制已移除。
+        // byte1（原 ratio_lag）保留为 0：pose-lag 机制已移除。
         for (int g = 0; g < kNumThicknessGroup; ++g) {
             const float mu = inst.thickness_scales[static_cast<size_t>(g)];
             // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0 且有限。0/负会把截面压成
