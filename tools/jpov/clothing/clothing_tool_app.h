@@ -274,6 +274,7 @@ public:
     float lag_delay_s_ui_ = kLagDefaultDelayS; // 延迟时长（秒）
     jpov::PoseCache lag_cache_{kLagCacheCapacity};  // 主动作历史（{a,b,ratio} + 时间戳）
     float motion_time_s_ = 0.0f;               // 随机动作时间轴（秒；motion_active 时逐帧 += 1/fps）
+    float lag_ramp_ = 0.0f;                    // 延迟渐入因子 [0,1]（见 OneIteration 注释）
 
     // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
     //
@@ -654,6 +655,11 @@ public:
             motion_inst = MotionInstanceState();
             // 时间轴推进 + 把本帧主动作压入历史（供布料 LAG 纯延迟回放）。
             motion_time_s_ += 1.0f / kViewerFps;
+            // LAG 延迟「渐入」：从 0 平滑升到目标延迟。否则一开始向 PoseCache 要的历史不够
+            //（target < 最老样本）→ QueryDelayed 回退到最老样本 ⇒ 裙子「冻结在原地 delay 那么久
+            // 再追上」的突变感（2026-10-12 Danis 实测）。渐入使「显示时刻」始终前进、不回退。
+            lag_ramp_ = std::min(1.0f, lag_ramp_ +
+                                          (1.0f / kViewerFps) / kLagRampSeconds);
             lag_cache_.Push(motion_inst.pose_a, motion_inst.pose_b, motion_inst.ratio,
                             motion_time_s_);
         }
@@ -680,9 +686,9 @@ public:
                 // （关 LAG 也要把 pose_lag 写成与当前一致 ⇒ VS 的 mix 为恒等、视觉零变化。）
                 jpov::SkinnedInstanceState cloth_inst = motion_inst;
                 if (lag_enabled_ui_ && !lag_cache_.empty()) {
-                    bool exact = false;
+                    const float eff_delay = lag_delay_s_ui_ * lag_ramp_;  // 渐入后的延迟
                     const jpov::PoseSample s =
-                        lag_cache_.QueryDelayed(motion_time_s_, lag_delay_s_ui_, &exact);
+                        lag_cache_.QueryDelayed(motion_time_s_, eff_delay, nullptr);
                     cloth_inst.pose_a_lag = s.pose_a;
                     cloth_inst.pose_b_lag = s.pose_b;
                     cloth_inst.ratio_lag = s.ratio;
