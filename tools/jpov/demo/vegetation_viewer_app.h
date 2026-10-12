@@ -35,6 +35,7 @@
 #include "tools/jpov/src/vegetation/branch_mesh.h"
 #include "tools/jpov/src/vegetation/leaf_cards.h"
 #include "tools/jpov/src/vegetation/lsystem.h"
+#include "tools/jpov/src/vegetation/space_colonization.h"
 
 namespace jpov_vegetation {
 
@@ -128,6 +129,11 @@ public:
 
     // ── 树种（L-System）：构造时建一次，之后只读 ──
     jpov::vegetation::LSystem lsystem_ = jpov::vegetation::BuildDragonClawPagodaTree();
+
+    // ── 树种（空间殖民 SC）：sc_mode_ = true 时用 sc_cfg_ 生成，忽略 lsystem_ ──
+    bool sc_mode_ = false;
+    jpov::vegetation::SpaceColonizationConfig sc_cfg_ =
+        jpov::vegetation::FirConfig();
 
     // ── 视角 ──
     jpov_viewer::ViewConfig view_;
@@ -238,6 +244,40 @@ public:
         else { UpdateMesh(leaf_mesh_, leaf); }
     }
 
+    // 「花园」SC 版：杉/松/龙爪槐/灌木（用空间殖民生成）并排在同一场景。
+    // 与 L-System 版 SelectGarden 同构，只是生成器换成 Colonize。
+    void SelectScGarden() {
+        sc_mode_ = true;
+        struct Item {
+            jpov::vegetation::SpaceColonizationConfig cfg;
+            float dx;
+        };
+        const Item items[] = {
+            {jpov::vegetation::FirConfig(),        -4.8f},   // 杉（高窄锥）
+            {jpov::vegetation::PineConfig(),       -1.6f},   // 松（裸干+圆冠）
+            {jpov::vegetation::DragonClawConfig(),  1.6f},   // 龙爪槐（伞盖+下垂）
+            {jpov::vegetation::ShrubConfig(),       4.8f},   // 灌木（矮宽丛）
+        };
+        jpov::MeshData tree, leaf;
+        for (const Item& it : items) {
+            const jpov::vegetation::Skeleton sk =
+                jpov::vegetation::Colonize(it.cfg);
+            jpov::vegetation::BranchMeshConfig bc;
+            bc.junction_blend = junction_blend_;
+            AppendMesh(jpov::vegetation::BuildBranchMesh(sk, bc), it.dx, &tree);
+            jpov::vegetation::LeafCardConfig lc;
+            lc.leaf_length = 0.18f;
+            lc.leaves_per_site = 12;
+            AppendMesh(jpov::vegetation::BuildLeafCardsMesh(sk, lc), it.dx, &leaf);
+        }
+        segment_count_ = tree.positions.size() / 9u;
+        leaf_count_    = leaf.positions.size() / 8u;
+        if (tree_mesh_ == 0) { tree_mesh_ = RegisterMesh(tree); }
+        else { UpdateMesh(tree_mesh_, tree); }
+        if (leaf_mesh_ == 0) { leaf_mesh_ = RegisterMesh(leaf); }
+        else { UpdateMesh(leaf_mesh_, leaf); }
+    }
+
     // 把 src 几何按 x 偏移 dx 追加到 dst（合并多棵到一个 mesh）。
     static void AppendMesh(const jpov::MeshData& src, float dx, jpov::MeshData* dst) {
         const uint32_t base = static_cast<uint32_t>(dst->positions.size());
@@ -279,11 +319,36 @@ public:
 
     // 预实验用：按名字选用内置树型（同时给对应尺度），随后重建。
     //   "dragonclaw"（默认）| "recursive" | "recursive_stochastic"
+    //   | "sc_fir" / "sc_pine" / "sc_shrub" / "sc_dragonclaw"（空间殖民）| "sc_garden"
     void SelectTree(const std::string& name) {
         if (name == "garden") {
             SelectGarden();
             return;
         }
+        if (name == "sc_garden") {
+            SelectScGarden();
+            return;
+        }
+        if (name.rfind("sc_", 0) == 0) {
+            // 空间殖民树种：换 sc_cfg_ 后重建（tropism_ 面板滑条改为控制在用的向性）。
+            sc_mode_ = true;
+            if (name == "sc_pine") {
+                sc_cfg_ = jpov::vegetation::PineConfig();
+            } else if (name == "sc_shrub") {
+                sc_cfg_ = jpov::vegetation::ShrubConfig();
+            } else if (name == "sc_dragonclaw") {
+                sc_cfg_ = jpov::vegetation::DragonClawConfig();
+            } else {
+                sc_cfg_ = jpov::vegetation::FirConfig();   // sc_fir / 默认
+            }
+            tropism_ = sc_cfg_.tropism_strength;
+            leaf_length_ = 0.20f;      // SC 树的叶卡片略大，冠更饱满
+            leaves_per_site_ = 14;
+            RebuildTree();
+            SyncPrev();
+            return;
+        }
+        sc_mode_ = false;   // 非 sc_* → 回到 L-System 树
         if (name == "recursive") {
             lsystem_ = jpov::vegetation::BuildRecursiveTree();
         } else if (name == "recursive_stochastic") {
@@ -400,14 +465,20 @@ private:
 
     // 生成骨架 → 展平成盒棒网格 → 上传/更新 GPU mesh。
     void RebuildTree() {
-        jpov::vegetation::TurtleConfig cfg;
-        cfg.length_scale = length_scale_;
-        cfg.base_radius  = base_radius_;
-        cfg.tropism          = jpov::Vec3f(0.0f, -1.0f, 0.0f);   // 重力向下
-        cfg.tropism_strength = tropism_;
-        const jpov::vegetation::Skeleton skel =
-            jpov::vegetation::GenerateSkeleton(lsystem_, cfg, generations_,
-                                         static_cast<uint64_t>(seed_));
+        jpov::vegetation::Skeleton skel;
+        if (sc_mode_) {
+            // 空间殖民：面板「向性 e」滑条控制当前树种的向性强度（物种配置自带方向）。
+            sc_cfg_.tropism_strength = tropism_;
+            skel = jpov::vegetation::Colonize(sc_cfg_);
+        } else {
+            jpov::vegetation::TurtleConfig cfg;
+            cfg.length_scale = length_scale_;
+            cfg.base_radius  = base_radius_;
+            cfg.tropism          = jpov::Vec3f(0.0f, -1.0f, 0.0f);   // 重力向下
+            cfg.tropism_strength = tropism_;
+            skel = jpov::vegetation::GenerateSkeleton(
+                lsystem_, cfg, generations_, static_cast<uint64_t>(seed_));
+        }
         segment_count_ = skel.segments.size();
         // 量一下骨架包围盒（判断是否为平面结构：某一轴跨度远小于另两轴）。
         float mn[3] = {1e30f, 1e30f, 1e30f};

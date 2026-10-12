@@ -349,6 +349,84 @@ int RunGardenCapture(const std::string& out_dir) {
     return 0;
 }
 
+// 单棵空间殖民树多视角出图（验收/调参用）。tree ∈ {fir,pine,shrub,dragonclaw}。
+int RunScTreeCapture(const std::string& out_dir, const std::string& tree) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 空间殖民单树";
+    cfg.width = kWidth;
+    cfg.height = kHeight;
+    cfg.headless = true;
+    cfg.fonts = ViewerFonts();
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_ = true;
+    app.show_leaves_ = true;
+    app.Init();
+    app.InstallScene();
+    app.SelectTree("sc_" + tree);
+    jpov::WindowInfo winfo;
+    winfo.width = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+    app.aim_y_ = 1.2f;
+    struct V { const char* name; float phi; float theta; float R; };
+    const V kViews[] = {
+        {"hero",    0.12f, 0.7853982f, 7.0f},
+        {"front",   0.05f, 0.0f,       7.0f},
+        {"top",     1.30f, 0.7853982f, 7.0f},
+        {"closeup", 0.05f, 0.7853982f, 3.0f},
+    };
+    for (const V& v : kViews) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = v.phi;
+        app.view_.theta = v.theta;
+        app.view_.R = v.R;
+        app.RunOnce(input, winfo,
+                    (out_dir + "/sc_" + tree + "_" + v.name + ".png").c_str());
+    }
+    app.Finalize();
+    return 0;
+}
+
+// 「花园」SC 版：杉/松/龙爪槐/灌木 四棵（用空间殖民生成）并排出图。
+int RunScGardenCapture(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 预实验花园（空间殖民 SC，4 棵）";
+    cfg.width = kWidth;
+    cfg.height = kHeight;
+    cfg.headless = true;
+    cfg.fonts = ViewerFonts();
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_ = true;
+    app.show_leaves_ = true;
+    app.Init();
+    app.InstallScene();
+    app.SelectScGarden();
+    jpov::WindowInfo winfo;
+    winfo.width = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+    app.aim_y_ = 1.4f;
+    struct V { const char* name; float phi; float theta; float R; };
+    const V kViews[] = {
+        {"hero",  0.14f, 0.7853982f, 12.0f},
+        {"front", 0.10f, 0.0f,        12.0f},
+    };
+    for (const V& v : kViews) {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi = v.phi;
+        app.view_.theta = v.theta;
+        app.view_.R = v.R;
+        app.RunOnce(input, winfo,
+                    (out_dir + "/sc_garden_" + v.name + ".png").c_str());
+        LOG(INFO) << "sc garden capture: " << out_dir << "/sc_garden_" << v.name
+                  << ".png";
+    }
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -358,6 +436,8 @@ int main(int argc, char** argv) {
     std::string growth_dir;
     std::string junction_dir;
     std::string garden_dir;
+    std::string sc_garden_dir;
+    std::string sc_tree;
     std::string tree = "dragonclaw";
     float tropism = 0.0f;
     int   seed    = 0;
@@ -374,6 +454,10 @@ int main(int argc, char** argv) {
             junction_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--garden") == 0 && i + 1 < argc) {
             garden_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--sc-garden") == 0 && i + 1 < argc) {
+            sc_garden_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--sc-tree") == 0 && i + 1 < argc) {
+            sc_tree = argv[i + 1];
         } else if (std::strcmp(argv[i], "--tree") == 0 && i + 1 < argc) {
             tree = argv[i + 1];
         } else if (std::strcmp(argv[i], "--tropism") == 0 && i + 1 < argc) {
@@ -384,6 +468,12 @@ int main(int argc, char** argv) {
     }
     if (!garden_dir.empty()) {
         return RunGardenCapture(garden_dir);
+    }
+    if (!sc_garden_dir.empty()) {
+        return RunScGardenCapture(sc_garden_dir);
+    }
+    if (!sc_tree.empty()) {
+        return RunScTreeCapture(out_dir.empty() ? std::string(".") : out_dir, sc_tree);
     }
     if (!junction_dir.empty()) {
         return RunJunctionStudy(junction_dir);
@@ -425,8 +515,8 @@ int main(int argc, char** argv) {
         app.tropism_ = tropism;
     }
     app.seed_ = seed;
-    if (tree != "garden") {
-        app.RegenerateNow();   // garden 已在 SelectTree 里建好，不能再重建
+    if (tree != "garden" && tree != "sc_garden") {
+        app.RegenerateNow();   // garden/sc_garden 已在 SelectTree 里建好，不能再重建
     }
 
     app.view_ = jpov_viewer::DefaultView();

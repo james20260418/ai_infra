@@ -69,6 +69,25 @@ Danis：「我给出植物名，AI 能否生成它的 L 语法；4 棵：杉/松
 认知：**给一个植物名，可以手写出一套「形状签名」规则**（锥形比例、裸干高度、垂枝、丛生），
 拓扑层面已可区分；叶/纹理密度是另一档旋钮。
 
+### 空间殖民（Space Colonization，SC）—— 第二条主路（2026-10-13）
+
+**背景**：L-System 是**语法驱动**（手写规则，形状被写出来）；SC（Runions 2007）是**空间/竞争驱动**（树自下而上从吸引点云里长出来，分叉涌现）。Danis 让「继续 SC 算法的树生成试验」。
+
+**新增** `src/vegetation/space_colonization.{h,cc}`（**GL-free、确定性、可单测**）：
+- **四步循环**：撒吸引点 → 每个吸引点认领最近节点（距离 < `influence_radius`）→ 每个有吸引点的节点朝平均方向长一步（`step`，可叠加向性）→ 吞噬（`kill_radius`）内的吸引点。分叉：某节点跨多轮仍是某些吸引点的最近节点 ⇒ 长出第二条子枝。
+- **裸干预置**：从根沿 +Y 预置一段直干到 `trunk_height`。否则（松/龙爪槐）树冠云离根远于影响距离、根认领不到任何吸引点 ⇒ 树长不起来。
+- **包络形状**（区分树型的最大杠杆）：`kCone`（锥/台）、`kDome`（椭球穹顶）、`kEllipsoid`（竖椭球，中部最胖）。
+- **向性 tropism**：生长向 = normalize(平均向 + e·normalize(T))；T=(0,−1,0) 重力下垂、T=(0,+1,0) 向光上挺；e=0 关（零回归）。
+- **管道模型粗细**（达芬奇）：`r = min_radius + (base_radius−min_radius)·(w/w_root)^(1/power)`，w=子树末梢数（power=2 即 r∝√w）。
+- **输出与 L-System 完全相同的 `Skeleton`**（segments/polylines/leaf_sites）⇒ 下游的管网格（branch_mesh）与叶片卡片（leaf_cards）**完全复用、不区分来源**。子链带 `attach_radius` ⇒ 同一套分叉领口缝合。
+- **叶位**：铺在**末梢枝**（未分叉的外围细枝：从最后分叉点到枝尖的整条链）的每个节点上，让外围铺满叶（针叶树的主梢也挂叶，不像光杆）。
+
+**4 树种**（只改可解释旋钮：包络形状/尺寸 + SC 参数 + 向性）：`FirConfig`（高窄锥）、`PineConfig`（裸干+圆冠）、`ShrubConfig`（矮宽丛）、`DragonClawConfig`（矮干+宽扁伞盖+下垂）。
+**viewer**：`--sc-garden <dir>`（4 棵并排）、`--capture <dir> --sc-tree <fir|pine|shrub|dragonclaw>`（单棵多视角）；交互 `--tree sc_fir|sc_pine|sc_shrub|sc_dragonclaw|sc_garden`。
+**单测** `space_colonization_test.cc`（10 例：确定性 / 收敛 / 枝链覆盖全部边 / 领口标记 / 叶位朝向 / 粗细范围 / 向性方向 / 树种比例）。
+
+**认知**：SC 与 L-System 是**两条独立主路**，共同点是都只产出**拓扑骨架**（真值 = 程序：参数 + seed，mesh 是派生物）；「L-system 骨 + SC 填冠」的混合是二期的"加一层"，不是一期地基（见 §五.3）。
+
 ---
 
 ## 〇.5、锁定决策（2026-10-08 Danis 拍板）

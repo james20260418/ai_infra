@@ -15,6 +15,22 @@ cc_library(
     linkstatic = 1,
 )
 
+# 空间殖民（Space Colonization）—— 植被程序化生成的第二条主路（与 L-System 并列）。
+# 输出与 L-System 同样的 Skeleton，下游（管网格/叶片）不区分来源。GL-free、确定性、可单测。
+cc_library(
+    name = "space_colonization",
+    srcs = ["space_colonization.cc"],
+    hdrs = ["space_colonization.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lsystem",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # 枝干管网格 —— 把骨架枝链扫成管状 mesh（GL-free、确定性、可单测）。
 cc_library(
     name = "branch_mesh",

@@ -423,6 +423,7 @@ cc_library(
         "//tools/jpov/src/vegetation:branch_mesh",
         "//tools/jpov/src/vegetation:leaf_cards",
         "//tools/jpov/src/vegetation:lsystem",
+        "//tools/jpov/src/vegetation:space_colonization",
     ],
     copts = ["-std=c++20"],
 )
@@ -435,6 +436,7 @@ cc_binary(
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src/vegetation:lsystem",
+        "//tools/jpov/src/vegetation:space_colonization",
     ],
     target_compatible_with = [
         "@platforms//os:linux",
