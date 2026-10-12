@@ -218,7 +218,6 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 
 > 引擎侧：`SkinnedInstanceState` 的 `pos_lag`(loc15) / `partial_rotations_lag`(loc14) 由蒙皮 VS 在
 > **mesh 带 `kRelax`** 时消费；**pose 的 lag 机制已移除**（不再有 `pose_*_lag` / loc11 的 pose_lag id）。
-> `interface/pose_cache.h`（PoseCache 纯延迟回放）保留为 util、**暂未接入**工具。
 
 **为什么不需要重定向**：不同 Mixamo 源的 bind 姿态（T-pose/A-pose）、骨轴 roll、层级都可能不同，
 导入**外部动画**才需要重定向；本方案在**目标骨架自己的关节局部空间**里直接生成姿态

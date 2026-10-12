@@ -504,7 +504,6 @@ int main(int argc, char** argv) {
     if (opt.has_body_trans) {
         app.body_trans_ui_[0] = opt.body_trans[0];
         app.body_trans_ui_[1] = opt.body_trans[1];
-        app.body_trans_ui_[2] = 0.0f;  // 面板去掉 Z；保留数组第 3 位为 0
     }
 
     app.motion_test_enabled_ = opt.motion_enable;

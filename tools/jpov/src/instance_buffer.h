@@ -120,8 +120,8 @@ inline constexpr InstanceAttrSpec kInstancePosLagAttrSpec{/*base_loc*/ 15, /*slo
 //   “天才代码”降级为普通代码的关键）。
 
 // --- loc12（aInstMisc）uint8 视图的 byte 偏移（单一来源）---
-inline constexpr int kMiscByteRatio     = 0;  // ratio(pose) /255
-inline constexpr int kMiscByteReserved1 = 1;  // 保留（原 ratio_lag；pose-lag 机制已移除）
+inline constexpr int kMiscByteRatio = 0;  // ratio(pose) /255
+// byte1 保留（原 ratio_lag；pose-lag 机制已移除）—— 未用到具体偏移，故不设命名常量。
 inline constexpr int kMiscByteThickBase = 2;  // thick[0..7]   占 byte 2..9
 inline constexpr int kMiscByteColor0   = 10;  // color0 RGB888 占 byte 10..12
 inline constexpr int kMiscByteColor1   = 13;  // color1 RGB888 占 byte 13..15

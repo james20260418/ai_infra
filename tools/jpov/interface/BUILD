@@ -135,30 +135,6 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
-# PoseCache — 「主动作 {pose_a,pose_b,ratio} + 时间戳」历史环形缓冲 + 纯时间延迟查询（GL-free）。
-# 供布料 LAG 的 pose_lag 纯延迟回放（见 docs/jpov_instance_attr_lag_design.md §4.2）。
-cc_library(
-    name = "pose_cache",
-    hdrs = ["pose_cache.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@glog_static//:glog",
-    ],
-    copts = ["-std=c++20"],
-)
-
-# PoseCache 纯 CPU 单测（单调时间戳 / 纯延迟查询 / 环形覆盖；无 GL）。
-cc_test(
-    name = "pose_cache_test",
-    srcs = ["pose_cache_test.cc"],
-    deps = [
-        ":pose_cache",
-        "@glog_static//:glog",
-        "@gtest//:gtest_main",
-    ],
-    copts = ["-std=c++20"],
-)
-
 # Mixamo23Skeleton — Mixamo 官方 23 骨骨架工厂（程序化生成，无资产）。
 # 数据从官方 FBX 实测反推（见 header 头注）。纯 CPU/GL-free。
 cc_library(

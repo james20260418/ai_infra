@@ -14,18 +14,15 @@
 >
 > **实现进展（2026-10-12）**：**VS 内 LAG 消费已落地**（branch `feature/20261012-jpov-clothing-lag`）——
 > 主 pass（`kSkinnedVs`）与 shadow pass（`kSkinnedShadowVs`）新增 `uLagEnabled` 开关：置 1 时读
-> loc6 `aRelax` / loc11 `.z/.w`(pose_lag) / loc14 `aPartialLag` / loc15 `aPosLag`，对 `当前` 与
-> `滞后` 两套蒙皮结果按逐顶点`松弛度` 做 `mix`（位置带 `max_lag` 位移限幅 §4.4）；置 0（网格无 `kRelax`）
-> **整段跳过** ⇒ 既有 gold 逐字节零回归。历史回放的纯延迟工具 = `interface/pose_cache.h`（`PoseCache`，
-> 存主动作 `{a,b,ratio}`+`t`，单调时间校验，纯延迟查询）；一/二阶延迟 util =
-> `interface/skeleton_motion_lag.h`（`SkeletonPoseLerp` + 一/二阶 tracker，root_offset 一并滞后）。
-> clothing tool 已接纯延迟（左下角「开启 LAG」）验收。
+> loc6 `aRelax` / loc14 `aPartialLag` / loc15 `aPosLag`，对 `当前` 与 `滞后` 两套蒙皮结果按逐顶点
+> `松弛度` 做 `mix`（位置带 `max_lag` 位移限幅 §4.4）；置 0（网格无 `kRelax`）**整段跳过** ⇒ 既有
+> gold 逐字节零回归。一/二阶延迟 util = `interface/skeleton_motion_lag.h`（`SkeletonPoseLerp` +
+> 一/二阶 tracker，root_offset 一并滞后）。
 >
 > **v2（2026-10-12 下午，Danis 调整）**：**暂不做 pose 的 lag** —— pose 差值脱离不了动作幅度、
 > 裙子会匀速飘很诡异、用户难用；改用**用户可用维度**的延迟：**整体平动（translation）/ partial rotation**。
 > clothing tool 已接**整体平动的一阶/二阶延迟**：3 个 XYZ 平移滑条（±2m，人体+衣服世界平移）→
 > tracker（`skeleton_motion_lag.h`）滞后 → 布料 per-instance `pos_lag`，VS 按 `_JPOV_RELAX` 松弛度 mix。
-> `pose_cache.h`（PoseCache 纯延迟回放）保留为 util、**暂未接入**工具。
 > 2026-10-12 收尾（Danis）：**pose 的 lag 机制移除**（含 loc11 pose_lag id、`SkinnedInstanceState`
 > 的 `pose_*_lag`/`ratio_lag`）；clothing tool 加 **整体平动 X/Y 滑条 + 平动 LAG（一/二阶）**（partial
 > **未**接入工具）；新增 gold test 给「**裙摆飘起**」加回归保护（`test/clothing/clothing_lag_gold_test`）。

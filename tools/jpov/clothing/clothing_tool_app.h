@@ -271,7 +271,7 @@ public:
     //（±2m，人体 + 衣服世界平移），对平动跑 tracker，滞后量 → 布料 per-instance 的 `pos_lag`
     //（VS 按 _JPOV_RELAX 松弛度 mix 到滞后位置）。布料网格自带 kRelax 时渲染器才走 LAG 路径。
     // 平动用 SkeletonPose 的 root_offset 承载（`TransPose`），直接复用 tracker（root_offset 一并滞后）。
-    float body_trans_ui_[3] = {0.0f, 0.0f, 0.0f};  // 整体平动（世界 m；±2；面板只给 X/Y）
+    float body_trans_ui_[2] = {0.0f, 0.0f};  // 整体平动（世界 m；±2；X/Y）
     bool lag_enabled_ui_ = false;         // 勾选：布料按滞后平动（pos_lag）滞后
     bool lag_second_order_ui_ = false;    // 勾选：二阶（否则一阶）
     float lag_rise_ms_ui_ = kLagRiseMsDefault;      // 上升时间（ms）
