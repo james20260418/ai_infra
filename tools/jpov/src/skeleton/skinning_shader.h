@@ -184,19 +184,21 @@ float MiscRatio() {
     return float(aInstMisc.x & 0xFFu) / 255.0;
 }
 
-// 从 atlas 取第 bone 根骨的对偶四元数（在两帧 pose_col_a / pose_col_b 间 NLERP，ratio∈[0,1]）。
-//   ratio<=0 短路取 pose_a（静态/单帧零回归）。**参数化**：LAG 可用另一套 (pa,pb,ratio)。
-void LoadBoneDualQuatAt(int pose_col_a, int pose_col_b, float ratio, int bone,
-                        out vec4 q, out vec4 t) {
+// 本实例这一帧第 bone 根骨的对偶四元数：在 pose_a/pose_b（loc11）间按 ratio（loc12 byte0）NLERP。
+//   ratio<=0 短路取 pose_a（静态/单帧零回归）。
+//   （历史：本函数曾参数化 (pa,pb,ratio) 供 pose_lag；pose-lag 机制已移除 ⇒ 固定用本实例 pose。
+//    第 2 个参数 pose 的另一用途（LAG 第二遍蒙皮）也只在**部位额外旋转**上不同，见 SkinVertexAt。）
+void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
     vec4 qa, ta;
-    LoadDualQuatAt(pose_col_a, bone, qa, ta);
+    LoadDualQuatAt(int(aInstPoseIds.x), bone, qa, ta);
+    float ratio = MiscRatio();
     if (ratio <= 0.0) {
         q = qa;
         t = ta;
         return;
     }
     vec4 qb, tb;
-    LoadDualQuatAt(pose_col_b, bone, qb, tb);
+    LoadDualQuatAt(int(aInstPoseIds.y), bone, qb, tb);
     // 最短路径：dot < 0 ⇒ q_b 在另一半球，整体取负（(q,t) 同取负 = 同一个刚体变换）。
     if (dot(qa, qb) < 0.0) {
         qb = -qb;
@@ -214,11 +216,6 @@ void LoadBoneDualQuatAt(int pose_col_a, int pose_col_b, float ratio, int bone,
     }
     q = qm;
     t = tm;
-}
-
-// 「当前」pose（loc11 .x/.y + loc12 byte0 ratio）下的骨对偶四元数（partial 通道定位用）。
-void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
-    LoadBoneDualQuatAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(), bone, q, t);
 }
 
 // 对偶四元数变换点（q/t 视为已归一）：
@@ -393,14 +390,13 @@ vec3 UnpackPosLag() {
 
 // 构造通道 c 的额外旋转 G_c 的**对偶四元数**：绕 j_c 当前位置 pos_c、按模型系 R_c 转。
 //   Pre: 该通道已配置（uPartialChannel 的骨号 >= 0）。顶点级常量（与骨无关）。
-// 构造通道 c 的额外旋转 G_c 的 DQ：绕 j_c 在**指定 pose 选择**下的当前位置、按模型系 Qg 转。
-//   （current 传 loc13 的 Qg + 当前 (pa,pb,ratio)；lag 传 loc14 的 Qg + lag (pa,pb,ratio)。）
-void BuildPartialGDqAt(int c, vec4 Qg, int pose_col_a, int pose_col_b, float ratio,
-                       out vec4 gq, out vec4 gt) {
+// 构造通道 c 的额外旋转 G_c 的 DQ：绕 j_c **当前 pose 位置**、按模型系 Qg 转。
+//   （current 传 loc13 的 Qg、lag 传 loc14 的 Qg；两者 pose 相同、只差 Qg。）
+void BuildPartialGDq(int c, vec4 Qg, out vec4 gq, out vec4 gt) {
     vec4 chd = texelFetch(uPartialChannel, ivec2(c, 0), 0);
     int joint = int(chd.w);
     vec4 qj, tj;
-    LoadBoneDualQuatAt(pose_col_a, pose_col_b, ratio, joint, qj, tj);
+    LoadBoneDualQuat(joint, qj, tj);
     vec3 pos = DualQuatTransformPoint(qj, tj, chd.xyz);       // pos_c = final(j_c)·p_c
     vec3 vg = pos - RotateByQuat(Qg, pos);                    // F 的平移部 = pos − R·pos
     gq = Qg;
@@ -433,14 +429,13 @@ void ApplyPartialRotation(int bone, vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
     t = bt;
 }
 
-// 对一个 (pose 选择 + 两通道 partial G) 求「骨架空间」的蒙皮结果（含 thickness + partial）。
-//   pose_col_a/pose_col_b/ratio 选两帧；gq0/gt0/gq1/gt1 = 两通道的 partial G（未配置传单位 DQ）。
+// 对「本实例 pose + 两通道 partial G」求「骨架空间」的蒙皮结果（含 thickness + partial）。
+//   gq0/gt0/gq1/gt1 = 两通道的 partial G（未配置传单位 DQ；current 用 loc13、lag 用 loc14）。
 //   ⚠️ 与阴影 pass 的 SkinVertexAtS **逐字同公式**（主/阴影分叉 ⇒ 影子错位，PR #104 教训）。
-void SkinVertexAt(int pose_col_a, int pose_col_b, float ratio,
-                  vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
+void SkinVertexAt(vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
                   vec3 v, vec3 n, vec3 t,
                   out vec3 sp, out vec3 sn, out vec3 st) {
-    // ── ① 逐骨取本帧对偶四元数（两帧插值在 LoadBoneDualQuatAt 内完成）──
+    // ── ① 逐骨取本帧对偶四元数（两帧插值在 LoadBoneDualQuat 内完成）──
     vec4 qs[4];
     vec4 ts[4];
     float ws[4];
@@ -458,7 +453,7 @@ void SkinVertexAt(int pose_col_a, int pose_col_b, float ratio,
         if (!JointInRange(aJoint[i])) {
             continue;  // 越界骨：当它不存在（防 texelFetch 越界 UB）
         }
-        LoadBoneDualQuatAt(pose_col_a, pose_col_b, ratio, aJoint[i], qs[i], ts[i]);
+        LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
         // 部位额外旋转（乙）：混合前把该骨对偶四元数前乘 G_b（逐骨 ⇒ 边界权重混合区平滑）。
         if (uPartialEnabled != 0) {
             ApplyPartialRotation(aJoint[i], gq0, gt0, gq1, gt1, qs[i], ts[i]);
@@ -510,38 +505,38 @@ void main() {
     vec4 lGq1 = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 lGt1 = vec4(0.0);
     if (uPartialEnabled != 0) {
-        int pa = int(aInstPoseIds.x);
-        int pb = int(aInstPoseIds.y);
-        float r = MiscRatio();
         if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-            BuildPartialGDqAt(0, PartialQuatOfChannel(0), pa, pb, r, cGq0, cGt0);
+            BuildPartialGDq(0, PartialQuatOfChannel(0), cGq0, cGt0);
         }
         if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-            BuildPartialGDqAt(1, PartialQuatOfChannel(1), pa, pb, r, cGq1, cGt1);
+            BuildPartialGDq(1, PartialQuatOfChannel(1), cGq1, cGt1);
         }
         // lag 的 G 只在 uLagEnabled 时算（否则 loc14 未 Attach，读它是 UB）；**同一 pose**，
         // 仅部位额外旋转取滞后值（loc14）。
         if (uLagEnabled != 0) {
             if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-                BuildPartialGDqAt(0, PartialQuatOfChannelLag(0), pa, pb, r, lGq0, lGt0);
+                BuildPartialGDq(0, PartialQuatOfChannelLag(0), lGq0, lGt0);
             }
             if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-                BuildPartialGDqAt(1, PartialQuatOfChannelLag(1), pa, pb, r, lGq1, lGt1);
+                BuildPartialGDq(1, PartialQuatOfChannelLag(1), lGq1, lGt1);
             }
         }
     }
 
     // ── 「当前」姿势蒙皮 ──
     vec3 sp; vec3 sn; vec3 st;
-    SkinVertexAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
-                 cGq0, cGt0, cGq1, cGt1, aPos, aNormal, aTangent, sp, sn, st);
+    SkinVertexAt(cGq0, cGt0, cGq1, cGt1, aPos, aNormal, aTangent, sp, sn, st);
 
     // ── LAG：uLagEnabled=0 时整段跳过 ⇒ 与无 LAG **逐字节一致** ──
     if (uLagEnabled != 0) {
         vec3 lp; vec3 ln2; vec3 lt;
-        // **同一 pose**（pose lag 机制已移除），仅部位额外旋转取滞后值（lG = loc14）+ 相对平移。
-        SkinVertexAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
-                     lGq0, lGt0, lGq1, lGt1, aPos, aNormal, aTangent, lp, ln2, lt);
+        if (uPartialEnabled != 0) {
+            // 部位额外旋转取滞后值（lG = loc14）⇒ 第二遍蒙皮。
+            SkinVertexAt(lGq0, lGt0, lGq1, lGt1, aPos, aNormal, aTangent, lp, ln2, lt);
+        } else {
+            // 无 partial ⇒ 滞后与当前**同一姿势**（只差 pos_lag）⇒ 省掉第二遍蒙皮（性能）。
+            lp = sp; ln2 = sn; lt = st;
+        }
         lp += UnpackPosLag();                       // 位置滞后：模型系小偏移（设计 §6.6）
         float relax = clamp(aRelax.x, 0.0, 1.0);    // 逐顶点松弛度（loc6 .x）
         float maxlen = aRelax.y;                    // max_lag（loc6 .y）位移限幅（§4.4）
@@ -650,18 +645,18 @@ float MiscRatio() {
     return float(aInstMisc.x & 0xFFu) / 255.0;
 }
 
-// 同主 pass：两帧 NLERP（最短路径 + 归一化），ratio<=0 短路取 pose_a。**参数化**供 LAG 复用。
-void LoadBoneDualQuatAt(int pose_col_a, int pose_col_b, float ratio, int bone,
-                        out vec4 q, out vec4 t) {
+// 同主 pass：本实例 pose_a/pose_b 两帧 NLERP（最短路径 + 归一化），ratio<=0 短路取 pose_a。
+void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
     vec4 qa, ta;
-    LoadDualQuatAt(pose_col_a, bone, qa, ta);
+    LoadDualQuatAt(int(aInstPoseIds.x), bone, qa, ta);
+    float ratio = MiscRatio();
     if (ratio <= 0.0) {
         q = qa;
         t = ta;
         return;
     }
     vec4 qb, tb;
-    LoadDualQuatAt(pose_col_b, bone, qb, tb);
+    LoadDualQuatAt(int(aInstPoseIds.y), bone, qb, tb);
     if (dot(qa, qb) < 0.0) {
         qb = -qb;
         tb = -tb;
@@ -675,11 +670,6 @@ void LoadBoneDualQuatAt(int pose_col_a, int pose_col_b, float ratio, int bone,
     }
     q = qm;
     t = tm;
-}
-
-// 「当前」pose 下的骨对偶四元数（partial 通道定位用）。
-void LoadBoneDualQuat(int bone, out vec4 q, out vec4 t) {
-    LoadBoneDualQuatAt(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(), bone, q, t);
 }
 
 // 同主 pass：对偶四元数变换点。
@@ -792,12 +782,11 @@ vec3 UnpackPosLagS() {
 }
 
 // 详主 pass 的 BuildPartialGDq（同公式）：绕 j_c 当前位置、按模型系 R_c 转。
-void BuildPartialGDqAtS(int c, vec4 Qg, int pose_col_a, int pose_col_b, float ratio,
-                        out vec4 gq, out vec4 gt) {
+void BuildPartialGDqS(int c, vec4 Qg, out vec4 gq, out vec4 gt) {
     vec4 chd = texelFetch(uPartialChannel, ivec2(c, 0), 0);
     int joint = int(chd.w);
     vec4 qj, tj;
-    LoadBoneDualQuatAt(pose_col_a, pose_col_b, ratio, joint, qj, tj);
+    LoadBoneDualQuat(joint, qj, tj);
     vec3 pos = DualQuatTransformPoint(qj, tj, chd.xyz);
     vec3 vg = pos - RotateByQuatS(Qg, pos);
     gq = Qg;
@@ -827,10 +816,9 @@ void ApplyPartialRotationS(int bone, vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1,
     t = bt;
 }
 
-// 对一个 (pose 选择 + 两通道 partial G) 求骨架空间蒙皮位置（阴影只需位置）。
+// 对「本实例 pose + 两通道 partial G」求骨架空间蒙皮位置（阴影只需位置）。
 //   ⚠️ 与主 pass 的 SkinVertexAt **逐字同公式**（否则影子错位，PR #104 教训）。
-vec3 SkinVertexAtS(int pose_col_a, int pose_col_b, float ratio,
-                   vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1, vec3 v) {
+vec3 SkinVertexAtS(vec4 gq0, vec4 gt0, vec4 gq1, vec4 gt1, vec3 v) {
     vec4 qs[4];
     vec4 ts[4];
     float ws[4];
@@ -848,7 +836,7 @@ vec3 SkinVertexAtS(int pose_col_a, int pose_col_b, float ratio,
         if (!JointInRange(aJoint[i])) {
             continue;  // 越界骨：同主 pass（防 texelFetch 越界 UB）
         }
-        LoadBoneDualQuatAt(pose_col_a, pose_col_b, ratio, aJoint[i], qs[i], ts[i]);
+        LoadBoneDualQuat(aJoint[i], qs[i], ts[i]);
         if (uPartialEnabled != 0) {  // 同主 pass（否则影子错位）
             ApplyPartialRotationS(aJoint[i], gq0, gt0, gq1, gt1, qs[i], ts[i]);
         }
@@ -892,33 +880,33 @@ void main() {
     vec4 lGq1 = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 lGt1 = vec4(0.0);
     if (uPartialEnabled != 0) {
-        int pa = int(aInstPoseIds.x);
-        int pb = int(aInstPoseIds.y);
-        float r = MiscRatio();
         if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-            BuildPartialGDqAtS(0, PartialQuatOfChannelS(0), pa, pb, r, cGq0, cGt0);
+            BuildPartialGDqS(0, PartialQuatOfChannelS(0), cGq0, cGt0);
         }
         if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-            BuildPartialGDqAtS(1, PartialQuatOfChannelS(1), pa, pb, r, cGq1, cGt1);
+            BuildPartialGDqS(1, PartialQuatOfChannelS(1), cGq1, cGt1);
         }
         if (uLagEnabled != 0) {
             if (int(texelFetch(uPartialChannel, ivec2(0, 0), 0).w) >= 0) {
-                BuildPartialGDqAtS(0, PartialQuatOfChannelLagS(0), pa, pb, r, lGq0, lGt0);
+                BuildPartialGDqS(0, PartialQuatOfChannelLagS(0), lGq0, lGt0);
             }
             if (int(texelFetch(uPartialChannel, ivec2(1, 0), 0).w) >= 0) {
-                BuildPartialGDqAtS(1, PartialQuatOfChannelLagS(1), pa, pb, r, lGq1, lGt1);
+                BuildPartialGDqS(1, PartialQuatOfChannelLagS(1), lGq1, lGt1);
             }
         }
     }
 
     // 当前姿势蒙皮位置。
-    vec3 sp = SkinVertexAtS(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
-                            cGq0, cGt0, cGq1, cGt1, aPos);
+    vec3 sp = SkinVertexAtS(cGq0, cGt0, cGq1, cGt1, aPos);
 
     // LAG：与主 pass **同公式** mix（否则影子与身体错位）。
     if (uLagEnabled != 0) {
-        vec3 lp = SkinVertexAtS(int(aInstPoseIds.x), int(aInstPoseIds.y), MiscRatio(),
-                                lGq0, lGt0, lGq1, lGt1, aPos);
+        vec3 lp;
+        if (uPartialEnabled != 0) {
+            lp = SkinVertexAtS(lGq0, lGt0, lGq1, lGt1, aPos);
+        } else {
+            lp = sp;  // 无 partial ⇒ 滞后 = 当前（只差 pos_lag）⇒ 省第二遍蒙皮
+        }
         lp += UnpackPosLagS();
         float relax = clamp(aRelax.x, 0.0, 1.0);
         float maxlen = aRelax.y;
