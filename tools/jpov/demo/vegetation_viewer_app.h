@@ -201,6 +201,55 @@ public:
         SyncPrev();
     }
 
+    // 预实验最后一砖：「花园」—— 4 棵（杉/松/龙爪槐/灌木）按手写 L 语法并排在同一场景。
+    // 各自用自己的 TurtleConfig（尺度/粗细/向性），几何直接烘进同一个 mesh（按 x 偏移）。
+    void SelectGarden() {
+        jpov::vegetation::LSystem fir   = jpov::vegetation::BuildFirTree();
+        jpov::vegetation::LSystem pine  = jpov::vegetation::BuildPineTree();
+        jpov::vegetation::LSystem pag   = jpov::vegetation::BuildDragonClawPagodaTree();
+        jpov::vegetation::LSystem shrub = jpov::vegetation::BuildShrub();
+        jpov::MeshData tree, leaf;
+        auto place = [&](const jpov::vegetation::LSystem& sys, int gens,
+                         float ls, float br, float trop, float dx) {
+            jpov::vegetation::TurtleConfig tc;
+            tc.length_scale = ls;
+            tc.base_radius  = br;
+            tc.tropism = jpov::Vec3f(0.0f, -1.0f, 0.0f);
+            tc.tropism_strength = trop;
+            const jpov::vegetation::Skeleton sk =
+                jpov::vegetation::GenerateSkeleton(sys, tc, gens, 0);
+            jpov::vegetation::BranchMeshConfig bc;
+            bc.junction_blend = junction_blend_;
+            AppendMesh(jpov::vegetation::BuildBranchMesh(sk, bc), dx, &tree);
+            jpov::vegetation::LeafCardConfig lc;
+            lc.leaf_length = 0.11f;
+            lc.leaves_per_site = 6;
+            AppendMesh(jpov::vegetation::BuildLeafCardsMesh(sk, lc), dx, &leaf);
+        };
+        place(fir,   30, 0.05f, 0.08f, 0.06f, -4.8f);   // 杉树（高窄锥）
+        place(pine,  22, 0.05f, 0.09f, 0.10f, -1.6f);   // 松树（裸干+轮生冠）
+        place(pag,   25, 0.05f, 0.09f, 0.00f,  1.6f);   // 龙爪槐
+        place(shrub, 16, 0.05f, 0.03f, 0.05f,  4.8f);   // 灌木
+        segment_count_ = tree.positions.size() / 9u;
+        leaf_count_    = leaf.positions.size() / 8u;
+        if (tree_mesh_ == 0) { tree_mesh_ = RegisterMesh(tree); }
+        else { UpdateMesh(tree_mesh_, tree); }
+        if (leaf_mesh_ == 0) { leaf_mesh_ = RegisterMesh(leaf); }
+        else { UpdateMesh(leaf_mesh_, leaf); }
+    }
+
+    // 把 src 几何按 x 偏移 dx 追加到 dst（合并多棵到一个 mesh）。
+    static void AppendMesh(const jpov::MeshData& src, float dx, jpov::MeshData* dst) {
+        const uint32_t base = static_cast<uint32_t>(dst->positions.size());
+        for (const jpov::Vec3f& p : src.positions) {
+            dst->positions.push_back(jpov::Vec3f(p.x() + dx, p.y(), p.z()));
+        }
+        for (const auto& n : src.normals) { dst->normals.push_back(n); }
+        for (const auto& uv : src.uvs) { dst->uvs.push_back(uv); }
+        for (uint32_t idx : src.indices) { dst->indices.push_back(base + idx); }
+        dst->flags = src.flags;
+    }
+
     // 同步“上一帧参数”（用于变化检测）。
     void SyncPrev() {
         prev_generations_  = generations_;
@@ -231,6 +280,10 @@ public:
     // 预实验用：按名字选用内置树型（同时给对应尺度），随后重建。
     //   "dragonclaw"（默认）| "recursive" | "recursive_stochastic"
     void SelectTree(const std::string& name) {
+        if (name == "garden") {
+            SelectGarden();
+            return;
+        }
         if (name == "recursive") {
             lsystem_ = jpov::vegetation::BuildRecursiveTree();
         } else if (name == "recursive_stochastic") {

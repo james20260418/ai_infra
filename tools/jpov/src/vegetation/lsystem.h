@@ -287,6 +287,17 @@ LSystem BuildRecursiveTreeStochastic();
 //   树干 F(10) → 在干中点抽一支 40° 侧枝 → 干继续 F(10)。
 LSystem BuildJunctionTestTree();
 
+// ============================ 预实验最后一砖：常见植物手写 L 语法 ============================
+//
+// Danis：「我给出植物名， AI 能否生成/搞到它的 L 语法」——这里手写 3 套（龙爪槐见上）：
+//   · 杉树（Fir）：高窄锥形，通体轮生侧枝、枝长随高度递减（锥），枝微垂。
+//   · 松树（Pine）：下部裸干，上部几层轮生大枝、冠圆/伞，枝上挂针簇。
+//   · 灌木（Shrub）：几乎无主干，基部放射多枝、短节宽角，成密丛。
+// 均用现有引擎（参数化符号 + 条件 + 龟图），非新算法。
+LSystem BuildFirTree();
+LSystem BuildPineTree();
+LSystem BuildShrub();
+
 }  // namespace vegetation
 }  // namespace jpov
 

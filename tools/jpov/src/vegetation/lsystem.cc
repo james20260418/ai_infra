@@ -819,5 +819,45 @@ LSystem BuildJunctionTestTree() {
     return b.Build();
 }
 
+// 杉树：高窄锥形。主干 A 逐段上升；每个高度一圈 6 条侧枝 E，枝长随高度递减（14-n）
+// ⇒ 锥形；侧枝每段微俯 4°（微垂）。
+LSystem BuildFirTree() {
+    LSystemBuilder b;
+    b.SetAxiom("A(0)");
+    b.AddRule("A(n) : n < 14 -> F(6)[\\(0)&(82)E(14 - n)][\\(60)&(82)E(14 - n)]"
+              "[\\(120)&(82)E(14 - n)][\\(180)&(82)E(14 - n)]"
+              "[\\(240)&(82)E(14 - n)][\\(300)&(82)E(14 - n)]A(n + 1)");
+    b.AddRule("A(n) : n >= 14 -> F(4)F(4)F(4)l");
+    b.AddRule("E(m) : m > 1 -> F(3)&(4)lE(m - 1)");
+    b.AddRule("E(m) : m <= 1 -> F(3)l");
+    return b.Build();
+}
+
+// 松树：下部裸干（8 段无枝）→ 上部 6 层轮生大枝 C（每层 6 条 G）→ 冠圆/伞；枝上挂针簇 l。
+LSystem BuildPineTree() {
+    LSystemBuilder b;
+    b.SetAxiom("A(0)");
+    b.AddRule("A(n) : n < 8 -> F(7)A(n + 1)");
+    b.AddRule("A(n) : n >= 8 -> C(0)");
+    b.AddRule("C(n) : n < 6 -> F(5)[\\(0)&(74)G(6)][\\(60)&(74)G(6)][\\(120)&(74)G(6)]"
+              "[\\(180)&(74)G(6)][\\(240)&(74)G(6)][\\(300)&(74)G(6)]C(n + 1)");
+    b.AddRule("C(n) : n >= 6 -> F(5)l");
+    b.AddRule("G(m) : m > 0 -> F(4)&(2)\\(25)lG(m - 1)");
+    b.AddRule("G(m) : m <= 0 -> F(2)l");
+    return b.Build();
+}
+
+// 灌木：几乎无主干（1 段）→ 基部放射 6 条枝 S → 每条反复二叉、短节宽角、沿枝挂叶 → 密丛。
+LSystem BuildShrub() {
+    LSystemBuilder b;
+    b.SetAxiom("A(0)");
+    b.AddRule("A(n) : n < 1 -> F(3)A(n + 1)");
+    b.AddRule("A(n) : n >= 1 -> [\\(0)&(42)S(0)][\\(64)&(52)S(0)][\\(128)&(34)S(0)]"
+              "[\\(196)&(50)S(0)][\\(256)&(40)S(0)][\\(316)&(46)S(0)]");
+    b.AddRule("S(s) : s < 7 -> F(4)[\\(0)&(30)S(s + 1)][\\(128)&(38)S(s + 1)]l");
+    b.AddRule("S(s) : s >= 7 -> F(3)l");
+    return b.Build();
+}
+
 }  // namespace vegetation
 }  // namespace jpov
