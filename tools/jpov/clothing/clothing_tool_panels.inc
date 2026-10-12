@@ -688,11 +688,11 @@
         }
     }
 
-    // ---- 左下角：随机摆动测试（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
+    // ---- 左下角：随机摆动测试 + 整体平动 + 平动 LAG（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
     //
-    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）：固定吸附在这个角，
-    // 与左上（变换/保存）、右上（动力学）、右下（蒙皮）互不遮挡。
-    // 行：启用勾选(1) + 播放/暂停(1) + 主轴(1) + 幅度(1) + 随机种子(1) + 状态(1) = 6。
+    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）。
+    // 行：启用(1) + 播放(1) + 主轴(1) + 幅度(1) + 种子(1) + 平动 XYZ(3) + LAG(1) + 二阶(1)
+    //     + 上升时间(1) + 超调量(1) + 状态(1) = 13。
     void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         // 状态提示（每帧刷新，供面板与出图自检）。
         if (!has_body_skeleton_) {
@@ -704,14 +704,14 @@
         } else if (!ClothMeshHasSkin()) {
             motion_msg_ = "衣服未蒙皮：动作不带动衣服";
         } else if (lag_enabled_ui_) {
-            motion_msg_ = Format("人体 + 衣服同步摆动（LAG 滞后 %.0f ms）",
-                                 static_cast<double>(lag_delay_s_ui_ * 1000.0f));
+            motion_msg_ = Format("人体 + 衣服同步摆动（%s LAG 平动滞后）",
+                                 lag_second_order_ui_ ? "二阶" : "一阶");
         } else {
             motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
         }
 
         const float panel_w  = 0.32f * win_w;
-        constexpr int kRows = 8;
+        constexpr int kRows = 13;
         const float panel_x = kPanelMargin;  // 贴左边缘
         // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
         const float panel_y =
@@ -762,16 +762,30 @@
         motion_seed_field_.focused_prev = seed_focus;
         row_y += step_y;
 
-        // LAG：布料按历史 pose 滞后（纯延迟回放；需布料网格自带 _JPOV_RELAX 才有效果）。
-        ui_.Checkbox("开启 LAG（布料滞后）", &lag_enabled_ui_,
+        // 整体平动（世界 m，±2）：人体 + 衣服的世界平移；LAG 时衣服按 tracker 滞后。
+        static const char* const kTransLabels[3] = {"整体平动 X (m)", "整体平动 Y (m)",
+                                                    "整体平动 Z (m)"};
+        for (int a = 0; a < 3; ++a) {
+            ui_.SliderFloat(kTransLabels[a], &body_trans_ui_[a],
+                            jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                            -kBodyTransMaxM, kBodyTransMaxM, /*decimal_places*/ 2);
+            row_y += step_y;
+        }
+
+        // LAG：布料按「整体平动」的一阶/二阶延迟滞后（→ pos_lag；需网格自带 _JPOV_RELAX）。
+        ui_.Checkbox("开启 LAG（平动滞后）", &lag_enabled_ui_,
                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         row_y += step_y;
-        float lag_delay_ms = lag_delay_s_ui_ * 1000.0f;
-        ui_.SliderFloat("LAG 延迟 (ms)", &lag_delay_ms,
+        ui_.Checkbox("二阶延迟（勾=二阶，否则一阶）", &lag_second_order_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+        ui_.SliderFloat("上升时间 (ms)", &lag_rise_ms_ui_,
                         jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        kLagDelayMinS * 1000.0f, kLagDelayMaxS * 1000.0f,
-                        /*decimal_places*/ 0);
-        lag_delay_s_ui_ = lag_delay_ms * 0.001f;
+                        kLagRiseMsMin, kLagRiseMsMax, /*decimal_places*/ 0);
+        row_y += step_y;
+        ui_.SliderFloat("超调量（仅二阶）", &lag_overshoot_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        kLagOvershootMin, kLagOvershootMax, /*decimal_places*/ 2);
         row_y += step_y;
 
         const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};

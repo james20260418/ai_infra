@@ -128,18 +128,20 @@ inline constexpr float kRelaxDefaultMaxLagM = 0.05f;
 inline constexpr float kRelaxMaxLagMin = 0.0f;
 inline constexpr float kRelaxMaxLagMax = 0.5f;
 
-// ── 布料 LAG（副运动）纯延迟：随机动作面板「开启 LAG」──
-// 用 PoseCache 存主动作历史，pose_lag = 相位落后 delay 的那一帧（历史回放，DT 驱动；见
-// interface/pose_cache.h）。布料网格自带 _JPOV_RELAX（kRelax）时 VS 打开 LAG mix。
-//   延迟时长（秒）：默认 0.1s（@0.5Hz 周期 ≈ 0.05 相位）；范围 [0,0.5]。
-inline constexpr float kLagDefaultDelayS = 0.10f;
-inline constexpr float kLagDelayMinS = 0.0f;
-inline constexpr float kLagDelayMaxS = 0.5f;
-// 历史环形缓冲容量：@60Hz 最大 0.5s ≈ 30 条，取 64 留余量。
-inline constexpr size_t kLagCacheCapacity = 64;
-// 延迟「渐入」窗口（秒）：LAG 从 0 平滑升到目标延迟。窗口 > 最大延迟 ⇒ 裙子「显示时刻」始终
-//   前进（不回退到最老样本），避免启动时「停在原地等一会再追上」的突变感。
-inline constexpr float kLagRampSeconds = 0.8f;
+// ── 布料 LAG（副运动 v2）：整体平动的一阶/二阶延迟（2026-10-12 Danis）──
+// Danis 定：**先不做 pose 的 lag**（pose 差值无法脱离动作幅度、裙子匀速飘很诡异、用户难用）；
+// 先做**整体平动（世界 translation）的一阶/二阶延迟** —— 用 SkeletonPose 的 root_offset 承载平移，
+// 复用 interface/skeleton_motion_lag.h 的 tracker；滞后量 → 布料 per-instance 的 pos_lag
+//（VS 按 _JPOV_RELAX 松弛度 mix）。partial rotation 的 lag 同理（后续）。
+//   整体平动滑条范围：±2m。
+inline constexpr float kBodyTransMaxM = 2.0f;
+// 平动 LAG 的 tracker 参数：上升时间（ms）/ 超调量（仅二阶）。
+inline constexpr float kLagRiseMsMin = 0.0f;
+inline constexpr float kLagRiseMsMax = 1000.0f;
+inline constexpr float kLagRiseMsDefault = 150.0f;
+inline constexpr float kLagOvershootMin = 0.0f;
+inline constexpr float kLagOvershootMax = 0.9f;
+inline constexpr float kLagOvershootDefault = 0.2f;
 
 // ── 面板布局（各面板共用；配合 ClothingToolApp::BeginPanel 使用）──
 inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间距

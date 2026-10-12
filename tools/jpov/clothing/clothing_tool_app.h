@@ -131,7 +131,7 @@
 #include "tools/jpov/clothing/random_pose_driver.h"
 #include "tools/jpov/clothing/relax_derive.h"
 #include "tools/jpov/clothing/weight_transfer.h"
-#include "tools/jpov/interface/pose_cache.h"
+#include "tools/jpov/interface/skeleton_motion_lag.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
@@ -264,17 +264,22 @@ public:
     std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
     std::string motion_msg_;            // 面板状态提示（每帧刷新）
 
-    // ══════════════ 布料 LAG（副运动，纯延迟；2026-10-12）══════════════
+    // ══════════════ 整体平动 + 布料 LAG（副运动 v2；2026-10-12 Danis）══════════════
     //
-    // 随机动作是烘焙的 pose 序列 ⇒ 布料「滞后」= 用 PoseCache 回放**相位落后 delay** 的那一帧
-    // 主动作 {a,b,ratio}（历史回放，无需增机制；见 interface/pose_cache.h）。布料网格自带
-    // _JPOV_RELAX（kRelax）时，渲染器开 uLagEnabled ⇒ VS 按逐顶点松弛度 mix(当前, 滞后)。
-    // 「直接用 OneIteration 的时间驱动」：motion_time_s_ 逐帧 += 1/fps，作为时间轴推入 PoseCache。
-    bool lag_enabled_ui_ = false;              // 勾选：布料按历史 pose 滞后
-    float lag_delay_s_ui_ = kLagDefaultDelayS; // 延迟时长（秒）
-    jpov::PoseCache lag_cache_{kLagCacheCapacity};  // 主动作历史（{a,b,ratio} + 时间戳）
-    float motion_time_s_ = 0.0f;               // 随机动作时间轴（秒；motion_active 时逐帧 += 1/fps）
-    float lag_ramp_ = 0.0f;                    // 延迟渐入因子 [0,1]（见 OneIteration 注释）
+    // Danis 定：**先不做 pose 的 lag**（pose 差值脱离不了动作幅度、裙子匀速飘很诡异、用户难用）；
+    // 先做**整体平动（世界 translation）的一阶/二阶延迟**：随机动作面板给 XYZ 整体平动 3 滑条
+    //（±2m，人体 + 衣服世界平移），对平动跑 tracker，滞后量 → 布料 per-instance 的 `pos_lag`
+    //（VS 按 _JPOV_RELAX 松弛度 mix 到滞后位置）。布料网格自带 kRelax 时渲染器才走 LAG 路径。
+    // 平动用 SkeletonPose 的 root_offset 承载（`TransPose`），直接复用 tracker（root_offset 一并滞后）。
+    float body_trans_ui_[3] = {0.0f, 0.0f, 0.0f};  // 整体平动（世界 m；±2）
+    bool lag_enabled_ui_ = false;         // 勾选：布料按滞后平动（pos_lag）
+    bool lag_second_order_ui_ = false;    // 勾选：二阶（否则一阶）
+    float lag_rise_ms_ui_ = kLagRiseMsDefault;      // 上升时间（ms）
+    float lag_overshoot_ui_ = kLagOvershootDefault; // 超调量（仅二阶）
+    float lag_rise_applied_ = -1.0f;      // 上次 Configure 用过的上升时间（ms）
+    float lag_overshoot_applied_ = -1.0f; // 上次 Configure 用过的超调量
+    jpov::FirstOrderLagTracker lag_first_;   // 一阶（rising time）
+    jpov::SecondOrderLagTracker lag_second_; // 二阶（rising time + overshoot）
 
     // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
     //
@@ -649,22 +654,30 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f});
 
         // 随机摆动测试生效时：人体 / 衣服共用**同一份**实例状态（摆放 + pose），故逐帧同步。
+        // 整体平动（世界 translation）由面板 3 滑条给，人体 / 衣服都用它；布料另按 tracker 滞后。
         const bool motion_active = MotionTestActive();
+        const jpov::Vec3f trans(body_trans_ui_[0], body_trans_ui_[1], body_trans_ui_[2]);
         jpov::SkinnedInstanceState motion_inst;
+        jpov::Vec3f cloth_pos_lag(0.0f, 0.0f, 0.0f);
         if (motion_active) {
             motion_inst = MotionInstanceState();
-            // 时间轴推进 + 把本帧主动作压入历史（供布料 LAG 纯延迟回放）。
-            motion_time_s_ += 1.0f / kViewerFps;
-            // LAG 延迟「渐入」：从 0 平滑升到目标延迟。否则一开始向 PoseCache 要的历史不够
-            //（target < 最老样本）→ QueryDelayed 回退到最老样本 ⇒ 裙子「冻结在原地 delay 那么久
-            // 再追上」的突变感（2026-10-12 Danis 实测）。渐入使「显示时刻」始终前进、不回退。
-            lag_ramp_ = std::min(1.0f, lag_ramp_ +
-                                          (1.0f / kViewerFps) / kLagRampSeconds);
-            lag_cache_.Push(motion_inst.pose_a, motion_inst.pose_b, motion_inst.ratio,
-                            motion_time_s_);
+            motion_inst.transform.center = trans;
+            if (lag_enabled_ui_) {
+                // 对「整体平动」跑一阶/二阶 tracker：滞后量 = tracked − 当前（→ 布料 pos_lag）。
+                SyncLagTracker();
+                const jpov::SkeletonPose target = TransPose(trans);
+                const float dt = 1.0f / kViewerFps;
+                if (lag_second_order_ui_) {
+                    lag_second_.Update(target, dt);
+                    cloth_pos_lag = lag_second_.tracked().root_offset - trans;
+                } else {
+                    lag_first_.Update(target, dt);
+                    cloth_pos_lag = lag_first_.tracked().root_offset - trans;
+                }
+            }
         }
 
-        // 人体 reference 固定画在原点（不参与衣服调节）。
+        // 人体 reference（固定 + 整体平动；不参与衣服调节）。
         if (show_body_) {
             if (motion_active) {
                 for (const jpov::GltfPrimitive& prim : body_.primitives) {
@@ -673,7 +686,7 @@ public:
                 }
             } else {
                 cmds->DrawGltfObject(body_,
-                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*center*/ {trans.x(), trans.y(), trans.z()},
                                      /*up*/     {0.0f, 1.0f, 0.0f},
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
@@ -682,28 +695,20 @@ public:
         // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
             if (motion_active && ClothMeshHasSkin()) {
-                // 布料实例：默认与人体同姿态（不滞后）；开启 LAG 时用 PoseCache 纯延迟回放。
-                // （关 LAG 也要把 pose_lag 写成与当前一致 ⇒ VS 的 mix 为恒等、视觉零变化。）
+                // 布料：与他人同 pose（**不做 pose 的 lag**，Danis 2026-10-12）；只做**平动滞后**：
+                // pos_lag = tracker(整体平动) 的滞后量，VS 按 _JPOV_RELAX 松弛度 mix → 松的部分拖尾。
                 jpov::SkinnedInstanceState cloth_inst = motion_inst;
-                if (lag_enabled_ui_ && !lag_cache_.empty()) {
-                    const float eff_delay = lag_delay_s_ui_ * lag_ramp_;  // 渐入后的延迟
-                    const jpov::PoseSample s =
-                        lag_cache_.QueryDelayed(motion_time_s_, eff_delay, nullptr);
-                    cloth_inst.pose_a_lag = s.pose_a;
-                    cloth_inst.pose_b_lag = s.pose_b;
-                    cloth_inst.ratio_lag = s.ratio;
-                } else {
-                    cloth_inst.pose_a_lag = motion_inst.pose_a;
-                    cloth_inst.pose_b_lag = motion_inst.pose_b;
-                    cloth_inst.ratio_lag = motion_inst.ratio;
-                }
+                cloth_inst.pose_a_lag = motion_inst.pose_a;   // pose_lag = 当前（无 pose lag）
+                cloth_inst.pose_b_lag = motion_inst.pose_b;
+                cloth_inst.ratio_lag = motion_inst.ratio;
+                cloth_inst.pos_lag = cloth_pos_lag;
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
                                                prim.material, {cloth_inst});
                 }
             } else {
                 cmds->DrawGltfObject(cloth_,
-                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*center*/ {trans.x(), trans.y(), trans.z()},
                                      /*up*/     {0.0f, 1.0f, 0.0f},
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
@@ -1322,6 +1327,30 @@ private:
         inst.pose_b = level * total + b;
         inst.ratio = frac;
         return inst;
+    }
+
+    // 用「只带 root_offset 的 pose」承载整体平动 → 复用动作延迟 tracker（root_offset 一并滞后）。
+    static jpov::SkeletonPose TransPose(const jpov::Vec3f& t) {
+        jpov::SkeletonPose p;
+        p.bone_count = 1;
+        p.root_offset = t;  // joint_rotation 留空 ⇒ tracker 只追踪 root_offset
+        return p;
+    }
+
+    // 按面板参数配置平动 tracker（参数变了才重配；二阶 Configure 含数值标定，别每帧跑）。
+    void SyncLagTracker() {
+        const float rise_s = std::max(lag_rise_ms_ui_ * 0.001f, 1.0f / 1000.0f);
+        if (lag_second_order_ui_) {
+            if (lag_rise_applied_ != lag_rise_ms_ui_ ||
+                lag_overshoot_applied_ != lag_overshoot_ui_) {
+                lag_second_.Configure(rise_s, lag_overshoot_ui_);
+                lag_rise_applied_ = lag_rise_ms_ui_;
+                lag_overshoot_applied_ = lag_overshoot_ui_;
+            }
+        } else if (lag_rise_applied_ != lag_rise_ms_ui_) {
+            lag_first_.Configure(rise_s);
+            lag_rise_applied_ = lag_rise_ms_ui_;
+        }
     }
 
     // 预烘焙「一个主轴周期」的姿态序列（幅度档 × 相位），交给 RegisterSkeleton。
