@@ -603,8 +603,8 @@
         DrawLabel("软布自动蒙皮", left, row_w, row_y);
         row_y += step_y;
 
-        // 一键蒙皮按钮：已蒙皮后 RunAutoSkin 自身 no-op（按钮仍可点，文案变明示状态）。
-        const char* btn = skinned_ ? "已蒙皮（已冻结）" : "一键蒙皮";
+        // 一键蒙皮按钮：衣服带蒙皮后 RunAutoSkin 自身 no-op（按钮仍可点，文案变明示状态）。
+        const char* btn = ClothMeshHasSkin() ? "已蒙皮" : "一键蒙皮";
         if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
             RunAutoSkin();
         }
@@ -701,7 +701,7 @@
             motion_msg_ = "骨架未注册";
         } else if (!motion_test_enabled_) {
             motion_msg_ = "勾选后启用（先蒙皮再播放，衣服才跟随）";
-        } else if (!skinned_) {
+        } else if (!ClothMeshHasSkin()) {
             motion_msg_ = "衣服未蒙皮：动作不带动衣服";
         } else {
             motion_msg_ = "人体 + 已蒙皮衣服同步摆动";

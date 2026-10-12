@@ -148,6 +148,29 @@ TEST(MeshHoleFillTest, InterpolatesUvForNewVertices) {
     out.Validate();
 }
 
+// 松弛度属性（_JPOV_RELAX ⇒ kRelax）长度对齐 + 新顶点插值：
+// 补洞后 relaxations.size()==positions.size()（否则 MeshData::Validate / 保存 CHECK 会崩）。
+TEST(MeshHoleFillTest, InterpolatesRelaxForNewVertices) {
+    MeshData m = MakeCube();
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) | static_cast<uint8_t>(MeshVertexFlags::kRelax));
+    m.relaxations.assign(m.positions.size(), Vec2f(0.25f, 0.05f));
+    // 挖掉 +Z 的整块四边形（前 6 个 index）→ 4 边洞，补丁含内部对角线，可细分出新顶点。
+    m.indices.erase(m.indices.begin(), m.indices.begin() + 6);
+    HoleFillOptions o;
+    o.refine = true;
+    o.refine_ratio = 0.01f;  // 强制拆补丁内部边 → 新增 Steiner 顶点
+    o.fair = false;
+    MeshData out;
+    HoleFillStats st;
+    ASSERT_TRUE(FillMeshHoles(m, o, &out, &st));
+    EXPECT_GT(st.vertices_added, 0u) << "refine 应新增顶点（才能验证插值）";
+    EXPECT_EQ(out.relaxations.size(), out.positions.size())
+        << "新增顶点的松弛度必须一并补出，否则长度不对齐";
+    EXPECT_TRUE(MeshHasFlag(out.flags, MeshVertexFlags::kRelax));
+    out.Validate();
+}
+
 // 焊接：两块三角形各自带一份"缝合重复顶点"沿共享边拼在一起 → weld 后共享边是内部边。
 // 没有 weld 时 6 条三角形边全是边界边（索引对全不同）；weld 后共享边并入 → 只剩外沿 4 条。
 TEST(MeshHoleFillTest, WeldMakesCoincidentSeamInteriorNotHole) {
