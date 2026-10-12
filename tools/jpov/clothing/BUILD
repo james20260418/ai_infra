@@ -36,6 +36,8 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 #   - 2026-10-12（本 PR）：载入 glb **自带**的蒙皮 / 松弛度开图即读回（随机摆动 / 松弛度场
 #     可直接用）；去掉「蒙皮后冻结几何」，蒙皮判定改为按 mesh 内容现判（ClothMeshHasSkin()），
 #     仅用于展示 / 保存，不再禁用编辑；补洞给新增顶点插值 _JPOV_RELAX。
+#   - 2026-10-12（布料 LAG PR）：左下角「开启 LAG（布料滞后）」——用 PoseCache 纯延迟回放滞后
+#     姿态（主动作 {a,b,ratio}+t，DT 驱动），蒙皮 VS 按逐顶点 _JPOV_RELAX 松弛度 mix(当前, 滞后)。
 #
 #   clothing_tool_app : 渲染核心 App（场景 + 面板宿主 + 唯一 OneIteration）
 #   jpov_clothing_tool: 主程序（CLI 装配 + 交互/headless 分发）
@@ -183,6 +185,7 @@ cc_library(
         "//tools/jpov/assets/models:models_path",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:pose_cache",
         "//tools/jpov/interface:skeleton_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:gltf_loader",

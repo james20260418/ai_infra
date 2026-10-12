@@ -703,12 +703,15 @@
             motion_msg_ = "勾选后启用（先蒙皮再播放，衣服才跟随）";
         } else if (!ClothMeshHasSkin()) {
             motion_msg_ = "衣服未蒙皮：动作不带动衣服";
+        } else if (lag_enabled_ui_) {
+            motion_msg_ = Format("人体 + 衣服同步摆动（LAG 滞后 %.0f ms）",
+                                 static_cast<double>(lag_delay_s_ui_ * 1000.0f));
         } else {
             motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
         }
 
         const float panel_w  = 0.32f * win_w;
-        constexpr int kRows = 6;
+        constexpr int kRows = 8;
         const float panel_x = kPanelMargin;  // 贴左边缘
         // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
         const float panel_y =
@@ -757,6 +760,18 @@
             CommitMotionSeedField();
         }
         motion_seed_field_.focused_prev = seed_focus;
+        row_y += step_y;
+
+        // LAG：布料按历史 pose 滞后（纯延迟回放；需布料网格自带 _JPOV_RELAX 才有效果）。
+        ui_.Checkbox("开启 LAG（布料滞后）", &lag_enabled_ui_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+        float lag_delay_ms = lag_delay_s_ui_ * 1000.0f;
+        ui_.SliderFloat("LAG 延迟 (ms)", &lag_delay_ms,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        kLagDelayMinS * 1000.0f, kLagDelayMaxS * 1000.0f,
+                        /*decimal_places*/ 0);
+        lag_delay_s_ui_ = lag_delay_ms * 0.001f;
         row_y += step_y;
 
         const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
