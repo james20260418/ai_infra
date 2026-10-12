@@ -177,6 +177,15 @@ struct TurtleConfig {
 
     // 粗细下限（米）：避免远端趋零。Pre-condition: > 0
     float min_radius = 0.002f;
+
+    // ── 向性 tropism（2026-10-12 新增）──
+    // 每画完一段 F/G 后，把前进方向 H 朝 T 微偏一点，模拟重力/向光对枝条的持续弯折。
+    // ABOP：绕轴 k=(H×T) 旋转，转角 ∝ strength·|H×T|（H 与 T 平行时不弯）。
+    //   · 重力（垂枝型如龙爪槐）：T = (0, -1, 0)，枝条不断向下掉；
+    //   · 向光（挺拔型）：T = (0, +1, 0)。
+    // tropism_strength == 0（默认）或 tropism 为零向量 → **关闭**（零回归）。
+    geom::Vec3<float> tropism = {0.0f, 0.0f, 0.0f};   // T 方向（需非零向量才生效）
+    float tropism_strength = 0.0f;                    // e（敏感度），建议 0.10 ~ 0.40
 };
 
 // ============================ 骨架（拓扑树） ============================
@@ -254,6 +263,22 @@ Skeleton GenerateSkeleton(const LSystem& sys, const TurtleConfig& cfg,
 //    否则引擎按权重**随机**择一，相位变骰子、树形不再确定（旧版即踩此坑）。
 // 注：角度常量是**待调参**的初值（形似龙爪槐即可），逼真靠后续对着照片迭代。
 LSystem BuildDragonClawPagodaTree();
+
+// ============================ 预实验：参比树型（现有引擎即可表达）============================
+//
+// 目的（2026-10-12 Danis「预实验」）：只用现有 L-System 引擎（规则文本，不新增算法），
+// 把「拓扑能长成啥样」跑出来看看，作为「还需哪些算法」的对照。三个参比：
+//   · 递归自相似（Honda/ABOP 式）：母枝→两子枝，长度按收缩比缩短、黄金角 137.5° 绕干。
+//   · 递归 + 「穷人向性」：每段前插一个固定俯角 `&(k)`，近似 gravity/phototropism。
+//   · 递归 + 随机：同符号多条加权规则 → 个体差异（现有引擎已支持）。
+// 真正的向性（α = e·(H×T)）与管道模型粗细等**尚未实现**，见预实验报告。
+
+// 递归自相似树（Honda/ABOP 式）。无向性。
+LSystem BuildRecursiveTree();
+// 递归自相似树 + 穷人向性（每段固定俯 `&(4)`）。
+LSystem BuildRecursiveTreeTropism();
+// 递归自相似树 + 随机（同符号加权择一）。
+LSystem BuildRecursiveTreeStochastic();
 
 }  // namespace vegetation
 }  // namespace jpov

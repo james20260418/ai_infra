@@ -136,7 +136,8 @@ public:
     int   generations_  = 25;       // 展开代数
     float length_scale_ = 0.05f;    // F 的单位长度（米/单位）
     float base_radius_  = 0.09f;    // 主干半径（米）
-    int   seed_         = 0;        // 随机种子（确定性语法下无视觉影响）
+    int   seed_         = 0;        // 随机种子（随机规则择一；确定性语法下无影响）
+    float tropism_      = 0.0f;     // 向性敏感度 e（0=关；重力方向固定朝下）
 
     // ── 枝干网格表示 ──
     bool  use_tube_    = true;      // true=管状（BuildBranchMesh）；false=棒棒（拓扑预览）
@@ -156,6 +157,7 @@ public:
     uint32_t tree_mesh_ = 0;        // 枝干管/棒 mesh
     uint32_t leaf_mesh_ = 0;        // 叶片卡片 mesh
     jpov::PBRMaterial tree_mat_;    // 枝干材质（bark 贴图）
+    jpov::PBRMaterial tree_mat_solid_;  // 枝干纯色（无 UV 的棒棒拓扑用）
     jpov::PBRMaterial leaf_mat_;    // 叶片 cutout 材质
     jpov::PBRMaterial ground_mat_;  // 灰色地面
 
@@ -180,6 +182,10 @@ public:
             /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
             /*metallic*/ 0.0f, /*roughness*/ 0.85f);
         tree_mat_.base_color_tex = bark_tex_;
+        // 无 UV 的棒棒（拓扑预览）不能带贴图材质，否则 DrawObject3D 的 UV 校验 crash。
+        tree_mat_solid_ = jpov::PBRMaterial::SolidColorMR(
+            /*color*/ {0.42f, 0.28f, 0.17f, 1.0f},
+            /*metallic*/ 0.0f, /*roughness*/ 0.85f);
 
         leaf_mat_ = jpov::PBRMaterial::SolidColorMR(
             /*color*/ {1.0f, 1.0f, 1.0f, 1.0f},
@@ -199,6 +205,7 @@ public:
         prev_length_scale_ = length_scale_;
         prev_base_radius_  = base_radius_;
         prev_seed_         = seed_;
+        prev_tropism_      = tropism_;
         prev_use_tube_     = use_tube_;
         prev_ring_edges_   = ring_edges_;
         prev_bark_tile_    = bark_tile_;
@@ -215,6 +222,30 @@ public:
 
     // 立即按当前参数重建骨架（headless 拍摄用；交互模式由 OneIteration 检测参数变化自动触发）。
     void RegenerateNow() {
+        RebuildTree();
+        SyncPrev();
+    }
+
+    // 预实验用：按名字选用内置树型（同时给对应尺度），随后重建。
+    //   "dragonclaw"（默认）| "recursive" | "recursive_tropism" | "recursive_stochastic"
+    void SelectTree(const std::string& name) {
+        if (name == "recursive") {
+            lsystem_ = jpov::vegetation::BuildRecursiveTree();
+        } else if (name == "recursive_tropism") {
+            lsystem_ = jpov::vegetation::BuildRecursiveTreeTropism();
+        } else if (name == "recursive_stochastic") {
+            lsystem_ = jpov::vegetation::BuildRecursiveTreeStochastic();
+        } else {
+            lsystem_ = jpov::vegetation::BuildDragonClawPagodaTree();
+        }
+        // recursive 系列的 F(s) 带 0<s≦1 的比例参，需要更大的单位长度与不同代数。
+        if (name.rfind("recursive", 0) == 0) {
+            length_scale_   = 0.9f;
+            base_radius_    = 0.05f;
+            generations_    = 16;
+            leaves_per_site_ = 3;
+            leaf_length_    = 0.08f;
+        }
         RebuildTree();
         SyncPrev();
     }
@@ -244,6 +275,7 @@ public:
                 length_scale_ != prev_length_scale_ ||
                 base_radius_ != prev_base_radius_ ||
                 seed_ != prev_seed_ ||
+                tropism_ != prev_tropism_ ||
                 use_tube_ != prev_use_tube_ ||
                 ring_edges_ != prev_ring_edges_ ||
                 bark_tile_ != prev_bark_tile_ ||
@@ -274,7 +306,7 @@ public:
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
         if (tree_mesh_ != 0 && segment_count_ > 0) {
-            cmds->DrawObject3D(tree_mesh_, tree_mat_,
+            cmds->DrawObject3D(tree_mesh_, use_tube_ ? tree_mat_ : tree_mat_solid_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
                                /*front*/  {0.0f, 0.0f, 1.0f});
@@ -306,6 +338,8 @@ private:
         jpov::vegetation::TurtleConfig cfg;
         cfg.length_scale = length_scale_;
         cfg.base_radius  = base_radius_;
+        cfg.tropism          = jpov::Vec3f(0.0f, -1.0f, 0.0f);   // 重力向下
+        cfg.tropism_strength = tropism_;
         const jpov::vegetation::Skeleton skel =
             jpov::vegetation::GenerateSkeleton(lsystem_, cfg, generations_,
                                          static_cast<uint64_t>(seed_));
@@ -382,7 +416,7 @@ private:
         const float kSpace  = 12.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 12;
+        const int   kRows   = 13;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -415,10 +449,11 @@ private:
         if (ui_.SliderFloat("每叶丛叶片数", &lps_f, row(10), 1.0f, 24.0f, /*dec*/0)) {
             leaves_per_site_ = static_cast<int>(lps_f + 0.5f);
         }
+        ui_.SliderFloat("向性 e（重力下垂）", &tropism_, row(11), 0.0f, 0.5f, 3);
         char info[128];
         std::snprintf(info, sizeof(info), "龙爪槐  |  枝段 %zu  叶 %zu 片",
                       segment_count_, leaf_count_);
-        ui_.Text(info, row(11));
+        ui_.Text(info, row(12));
     }
 
     bool show_panel_ = true;
@@ -429,6 +464,7 @@ private:
     float prev_length_scale_ = 0.0f;
     float prev_base_radius_  = 0.0f;
     int   prev_seed_         = -1;
+    float prev_tropism_      = 0.0f;
     bool  prev_use_tube_     = true;
     int   prev_ring_edges_   = 8;
     float prev_bark_tile_    = 0.5f;

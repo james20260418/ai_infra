@@ -515,6 +515,27 @@ void PushSegment(const TurtleState& st, const Vec3f& end, Skeleton* out) {
     out->segments.push_back(seg);
 }
 
+// 向性：把朝向 H 朝 T 轻微弯折（含 L/U 同转，保持标架正交）。
+// 转角 = strength·|H×T|（H 与 T 平行时不弯）；强度/方向为零则不动。
+void ApplyTropism(TurtleState* st, const TurtleConfig& cfg) {
+    const float e = cfg.tropism_strength;
+    const float tlen = VLen(cfg.tropism);
+    if (e <= 0.0f || tlen <= 1.0e-9f) {
+        return;
+    }
+    const Vec3f T = VScale(cfg.tropism, 1.0f / tlen);
+    const Vec3f axis = VCross(st->H, T);
+    const float s = VLen(axis);
+    if (s <= 1.0e-9f) {
+        return;   // H 已与 T 共线 → 无可弯
+    }
+    const Vec3f k = VScale(axis, 1.0f / s);
+    const float ang = e * s;
+    st->H = RotateAround(st->H, k, ang);
+    st->L = RotateAround(st->L, k, ang);
+    st->U = RotateAround(st->U, k, ang);
+}
+
 // 取一个「转向角」参数（度→弧度）。缺参数视为 0（不转），避免误 crash。
 float AngleParam(const Module& m) {
     if (m.params.empty()) {
@@ -570,6 +591,7 @@ Skeleton Interpret(const std::vector<Module>& modules, const TurtleConfig& cfg) 
                 skel.polylines[cur_polyline].radii.push_back(new_radius);
                 st.pos = end;
                 st.radius = new_radius;
+                ApplyTropism(&st, cfg);   // 向性：每段后微调朝向
                 break;
             }
             case 'f': {
@@ -749,6 +771,41 @@ LSystem BuildDragonClawPagodaTree() {
     b.AddRule("P(s) : s >= 5 -> Q(0)");
     b.AddRule("Q(s) : s < 4 -> F(3)&(14)\\(26)lQ(s + 1)");
     b.AddRule("Q(s) : s >= 4 -> F(2)&(16)\\(20)l");
+    return b.Build();
+}
+
+// ============================ 预实验：参比树型 ============================
+
+LSystem BuildRecursiveTree() {
+    // Honda/ABOP 式：母枝→两子枝，长度按收缩比缩短（0.72 / 0.58），黄金角 137.5° 绕干。
+    // 走到阈值（0.06）后只挂一个叶位。自相似 ⇒ 越往末梢越细越密的分形层次。
+    LSystemBuilder b;
+    b.SetAxiom("A(1)");
+    b.AddRule("A(s) : s > 0.06 -> F(s)[\\(0)&(34)A(s * 0.72)]"
+              "[\\(137)&(34)A(s * 0.58)]");
+    b.AddRule("A(s) : s <= 0.06 -> F(s)l");
+    return b.Build();
+}
+
+LSystem BuildRecursiveTreeTropism() {
+    // 同上，但每段前插一个固定俯角 `&(4)`（近似重力/向光；真正向性 α=e·(H×T) 未实现）。
+    LSystemBuilder b;
+    b.SetAxiom("A(1)");
+    b.AddRule("A(s) : s > 0.06 -> &(4)F(s)[\\(0)&(30)A(s * 0.72)]"
+              "[\\(137)&(30)A(s * 0.58)]");
+    b.AddRule("A(s) : s <= 0.06 -> F(s)l");
+    return b.Build();
+}
+
+LSystem BuildRecursiveTreeStochastic() {
+    // 同上，但每个节点按权重随机二选一（两种分叉姿态）→ 个体差异（现有引擎的加权随机）。
+    LSystemBuilder b;
+    b.SetAxiom("A(1)");
+    b.AddRule("A(s) : s > 0.07 -> F(s)[\\(0)&(32)A(s * 0.72)]"
+              "[\\(137)&(32)A(s * 0.58)]", /*weight=*/1.0f);
+    b.AddRule("A(s) : s > 0.07 -> F(s)[\\(20)&(45)A(s * 0.66)]"
+              "[\\(160)&(22)A(s * 0.64)]", /*weight=*/1.0f);
+    b.AddRule("A(s) : s <= 0.07 -> F(s)l");
     return b.Build();
 }
 

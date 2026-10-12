@@ -397,6 +397,42 @@ TEST(LeafCardsTest, DeterministicGreaterAndSizesScaleWithGrowth) {
     }
 }
 
+// ============================ 向性（tropism） ============================
+
+TEST(TropismTest, GravityPullsTipsDown) {
+    // 先抬头 60° 再连画 5 段；带重力向性的末梢应比不带时更低（y 更小）。
+    LSystemBuilder b;
+    b.SetAxiom("&(60)F(1)F(1)F(1)F(1)F(1)");
+    LSystem sys = b.Build();
+    TurtleConfig base;
+    base.length_scale = 1.0f;
+    TurtleConfig trop = base;
+    trop.tropism = Vec3f(0.0f, -1.0f, 0.0f);
+    trop.tropism_strength = 0.3f;
+    const Skeleton a = GenerateSkeleton(sys, base, 0, 0);
+    const Skeleton c = GenerateSkeleton(sys, trop, 0, 0);
+    ASSERT_FALSE(a.segments.empty());
+    ASSERT_EQ(a.segments.size(), c.segments.size());
+    EXPECT_LT(c.segments.back().end.y(), a.segments.back().end.y());
+}
+
+TEST(TropismTest, ZeroStrengthIsNoOp) {
+    // 强度为 0（默认）→ 与完全不设向性逐位相同（零回归）。
+    LSystem sys = BuildDragonClawPagodaTree();
+    TurtleConfig base;
+    TurtleConfig off = base;
+    off.tropism = Vec3f(0.0f, -1.0f, 0.0f);
+    off.tropism_strength = 0.0f;
+    const Skeleton a = GenerateSkeleton(sys, base, 25, 0);
+    const Skeleton b = GenerateSkeleton(sys, off, 25, 0);
+    ASSERT_EQ(a.segments.size(), b.segments.size());
+    for (size_t i = 0; i < a.segments.size(); ++i) {
+        EXPECT_FLOAT_EQ(a.segments[i].end.x(), b.segments[i].end.x());
+        EXPECT_FLOAT_EQ(a.segments[i].end.y(), b.segments[i].end.y());
+        EXPECT_FLOAT_EQ(a.segments[i].end.z(), b.segments[i].end.z());
+    }
+}
+
 }  // namespace
 }  // namespace vegetation
 }  // namespace jpov

@@ -112,14 +112,111 @@ int RunCapture(const std::string& out_dir) {
     return 0;
 }
 
+// 预实验：把几个内置树型的「纯拓扑」各出一张 3/4 视图（棒棒、无叶），
+// 用来对照「现有 L-System 拓扑能长成啥样」。
+int RunTopologyCapture(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被预实验（拓扑）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_    = false;   // 纯拓扑：棒棒
+    app.show_leaves_ = false;   // 不要叶
+    app.Init();
+    app.InstallScene();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+
+    const char* kTrees[] = {"dragonclaw", "recursive", "recursive_tropism",
+                            "recursive_stochastic"};
+    for (const char* name : kTrees) {
+        app.SelectTree(name);
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.12;
+        app.view_.theta = kPi / 4.0;
+        app.view_.R     = 9.0;
+        const std::string path = out_dir + "/topo_" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "topo capture: " << path;
+    }
+    app.Finalize();
+    return 0;
+}
+
+// 预实验（验收三件套）：① 递归自相似 ② 向性 ③ 随机差异。
+// 用现有引擎，仅改规则与向性参数，出一组对照图（管状、无叶）。
+int RunIngredientStudy(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被预实验（三件套）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationApp app(cfg);
+    app.SetShowPanel(false);
+    app.use_tube_    = true;    // 管状枝干（比棒棒好看）
+    app.show_leaves_ = false;   // 纯拓扑：不要叶
+    app.Init();
+    app.InstallScene();
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+
+    struct Scenario { const char* label; const char* tree; float tropism; int seed; };
+    const Scenario kScenarios[] = {
+        {"1_recursive",         "recursive",            0.00f, 0},
+        {"2_recursive+tropism", "recursive",            0.30f, 0},
+        {"3_stoch_seed1",       "recursive_stochastic", 0.00f, 1},
+        {"4_stoch_seed2",       "recursive_stochastic", 0.00f, 2},
+        {"5_stoch+tropism",     "recursive_stochastic", 0.30f, 1},
+    };
+    for (const Scenario& sc : kScenarios) {
+        app.SelectTree(sc.tree);
+        app.tropism_ = sc.tropism;
+        app.seed_    = sc.seed;
+        app.RegenerateNow();
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.12f;
+        app.view_.theta = kPi / 4.0;
+        app.view_.R     = 9.0f;
+        const std::string path = out_dir + "/ing_" + sc.label + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "ingredient capture: " << path;
+    }
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string out_dir;
+    std::string topo_dir;
+    std::string study_dir;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--topo") == 0 && i + 1 < argc) {
+            topo_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--study") == 0 && i + 1 < argc) {
+            study_dir = argv[i + 1];
         }
+    }
+    if (!study_dir.empty()) {
+        return RunIngredientStudy(study_dir);
+    }
+    if (!topo_dir.empty()) {
+        return RunTopologyCapture(topo_dir);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir);
