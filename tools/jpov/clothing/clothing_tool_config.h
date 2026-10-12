@@ -133,8 +133,13 @@ inline constexpr float kRelaxMaxLagMax = 0.5f;
 // 先做**整体平动（世界 translation）的一阶/二阶延迟** —— 用 SkeletonPose 的 root_offset 承载平移，
 // 复用 interface/skeleton_motion_lag.h 的 tracker；滞后量 → 布料 per-instance 的 pos_lag
 //（VS 按 _JPOV_RELAX 松弛度 mix）。partial rotation 的 lag 同理（后续）。
-//   整体平动滑条范围：±2m。
+//   整体平动滑条范围：±2m（面板只给 X/Y，去掉 Z）。
 inline constexpr float kBodyTransMaxM = 2.0f;
+// 部位额外旋转（partial rotation）**通道 0** 的关节名：骨盆（下半身 / 裙摆所在）；通道 1 未用。
+// 资产无此关节名时该通道不生效（partial 关闭、零影响）。
+inline constexpr const char* kPartialRotChannelJoint = "mixamorig:Hips";
+// 下半身额外扭转滑条范围（度，±）。
+inline constexpr float kBodyTwistMaxDeg = 90.0f;
 // 平动 LAG 的 tracker 参数：上升时间（ms）/ 超调量（仅二阶）。
 inline constexpr float kLagRiseMsMin = 0.0f;
 inline constexpr float kLagRiseMsMax = 1000.0f;

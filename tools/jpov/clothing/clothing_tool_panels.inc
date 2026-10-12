@@ -763,14 +763,18 @@
         row_y += step_y;
 
         // 整体平动（世界 m，±2）：人体 + 衣服的世界平移；LAG 时衣服按 tracker 滞后。
-        static const char* const kTransLabels[3] = {"整体平动 X (m)", "整体平动 Y (m)",
-                                                    "整体平动 Z (m)"};
-        for (int a = 0; a < 3; ++a) {
+        static const char* const kTransLabels[2] = {"整体平动 X (m)", "整体平动 Y (m)"};
+        for (int a = 0; a < 2; ++a) {
             ui_.SliderFloat(kTransLabels[a], &body_trans_ui_[a],
                             jpov::UiRect{{left, row_y}, {row_w, kRowH}},
                             -kBodyTransMaxM, kBodyTransMaxM, /*decimal_places*/ 2);
             row_y += step_y;
         }
+        // 下半身额外扭转（±90°）：partial rotation 通道 0（骨盆）→ 验证 partial lag 链路。
+        ui_.SliderFloat("下半身扭转 (°)", &body_twist_deg_ui_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
+                        -kBodyTwistMaxDeg, kBodyTwistMaxDeg, /*decimal_places*/ 1);
+        row_y += step_y;
 
         // LAG：布料按「整体平动」的一阶/二阶延迟滞后（→ pos_lag；需网格自带 _JPOV_RELAX）。
         ui_.Checkbox("开启 LAG（平动滞后）", &lag_enabled_ui_,

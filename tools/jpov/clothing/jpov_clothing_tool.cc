@@ -77,7 +77,9 @@ struct CliOptions {
     float lag_rise_ms = -1.0f;       // --lag_rise_ms：上升时间（ms；<0 = 默认）
     float lag_overshoot = -1.0f;     // --lag_overshoot：超调量（仅二阶；<0 = 默认）
     bool  has_body_trans = false;    // 是否给了 --body_trans
-    float body_trans[3] = {0.0f, 0.0f, 0.0f};  // --body_trans x y z（整体平动，世界 m）
+    float body_trans[2] = {0.0f, 0.0f};  // --body_trans x y（整体平动，世界 m）
+    float body_twist_deg = 0.0f;     // --body_twist_deg：下半身额外扭转（度，±90）
+    bool  has_body_twist = false;    // 是否给了 --body_twist_deg
     int   lag_warmup_frames = 0;     // --lag_warmup_frames：headless 出图前先推进 N 帧（让 tracker 起滞后）
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
@@ -309,13 +311,19 @@ CliOptions ParseCli(int argc, char** argv) {
                 LOG(WARNING) << "--lag_overshoot 缺少数值参数，忽略";
             }
         } else if (arg == "--body_trans") {
-            if (i + 3 < argc) {
+            if (i + 2 < argc) {
                 opt.body_trans[0] = static_cast<float>(std::atof(argv[++i]));
                 opt.body_trans[1] = static_cast<float>(std::atof(argv[++i]));
-                opt.body_trans[2] = static_cast<float>(std::atof(argv[++i]));
                 opt.has_body_trans = true;
             } else {
-                LOG(WARNING) << "--body_trans 需要 3 个数值（x y z），忽略";
+                LOG(WARNING) << "--body_trans 需要 2 个数值（x y），忽略";
+            }
+        } else if (arg == "--body_twist_deg") {
+            if (i + 1 < argc) {
+                opt.body_twist_deg = static_cast<float>(std::atof(argv[++i]));
+                opt.has_body_twist = true;
+            } else {
+                LOG(WARNING) << "--body_twist_deg 缺少数值参数，忽略";
             }
         } else if (arg == "--lag_warmup_frames") {
             if (i + 1 < argc) {
@@ -505,7 +513,10 @@ int main(int argc, char** argv) {
     if (opt.has_body_trans) {
         app.body_trans_ui_[0] = opt.body_trans[0];
         app.body_trans_ui_[1] = opt.body_trans[1];
-        app.body_trans_ui_[2] = opt.body_trans[2];
+        app.body_trans_ui_[2] = 0.0f;  // 面板去掉 Z；保留数组第 3 位为 0
+    }
+    if (opt.has_body_twist) {
+        app.body_twist_deg_ui_ = opt.body_twist_deg;
     }
 
     app.motion_test_enabled_ = opt.motion_enable;
@@ -586,13 +597,13 @@ int main(int argc, char** argv) {
         if (opt.lag_warmup_frames > 0) {
             const float tx = app.body_trans_ui_[0];
             const float ty = app.body_trans_ui_[1];
-            const float tz = app.body_trans_ui_[2];
+            const float tw = app.body_twist_deg_ui_;
             for (int i = 1; i <= opt.lag_warmup_frames; ++i) {
                 const float f = static_cast<float>(i) /
                                 static_cast<float>(opt.lag_warmup_frames);
                 app.body_trans_ui_[0] = tx * f;
                 app.body_trans_ui_[1] = ty * f;
-                app.body_trans_ui_[2] = tz * f;
+                app.body_twist_deg_ui_ = tw * f;
                 app.RunOnce(jpov::InputSnapshot(), winfo, "/tmp/jpov_lag_warmup.png");
             }
         }
