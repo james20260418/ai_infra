@@ -26,6 +26,8 @@
 > clothing tool 已接**整体平动的一阶/二阶延迟**：3 个 XYZ 平移滑条（±2m，人体+衣服世界平移）→
 > tracker（`skeleton_motion_lag.h`）滞后 → 布料 per-instance `pos_lag`，VS 按 `_JPOV_RELAX` 松弛度 mix。
 > `pose_cache.h`（PoseCache 纯延迟回放）保留为 util、**暂未接入**工具。
+> 已加**下半身扭转（±90°）**滑块 → partial rotation 通道 0（骨盆），验证 **partial lag** 链路：
+> 平动与扭转用**独立滤波器**（各一对 1/2 阶，共用 rising time / overshoot）。
 > 相关：`docs/jpov_crowd_instancing_arch.md`（instancing 架构锚点）、
 > `docs/jpov_dqs_skinning_design.md`（DQS 蒙皮）、`docs/jpov_partial_rotation_design.md`（部位额外旋转）、
 > `docs/jpov_crowd_body_shape_face_design.md` §3（部位粗细）。
