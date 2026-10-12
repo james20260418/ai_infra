@@ -165,22 +165,35 @@ TEST(SpaceColonizationTest, RadiiSpanBaseToMin) {
 // ============================ 向性 ============================
 
 TEST(SpaceColonizationTest, TropismBendsGrowthTowardItsDirection) {
+    // 用无裸干的配置：向性直接作用于整棵树的生长方向（有裸干时高度被固定直干支配，测不出）。
     SpaceColonizationConfig down = SmallConfig();
+    down.trunk_height = 0.0f;
+    down.crown_height = 2.5f;
     down.tropism = Vec3f(0.0f, -1.0f, 0.0f);
     down.tropism_strength = 0.35f;
-    SpaceColonizationConfig up = SmallConfig();
+    SpaceColonizationConfig up = down;
     up.tropism = Vec3f(0.0f, 1.0f, 0.0f);
-    up.tropism_strength = 0.35f;
-    SpaceColonizationConfig none = SmallConfig();
+    SpaceColonizationConfig none = down;
     none.tropism = Vec3f(0.0f, -1.0f, 0.0f);
     none.tropism_strength = 0.0f;   // 关闭 → 与无向性同
 
-    const float h_down = BBoxSize(Colonize(down)).y();
-    const float h_up = BBoxSize(Colonize(up)).y();
-    // 上挺应比下垂高；且强度 0 时下垂配置应与"纯平均方向"（用 up 配置关掉）无关地确定。
-    EXPECT_GT(h_up, h_down) << "向光上挺的树应比重力下垂的树高";
-    // 关闭向性 = 零回归：与另一份"名义有向量但强度 0"完全一致。
-    SpaceColonizationConfig none2 = SmallConfig();
+    const Skeleton sk_down = Colonize(down);
+    const Skeleton sk_up = Colonize(up);
+    // 向性的本质是"每段生长方向的竖直分量"。量每段 Δy 的均值（=净向上/向下的偏置）：
+    // 上挺应明显偏正，下垂应接近 0 或偏负。（总高度受包络支配，不是好指标。）
+    auto mean_dy = [](const Skeleton& s) {
+        float sum = 0.0f;
+        for (const Segment& seg : s.segments) {
+            sum += seg.end.y() - seg.start.y();
+        }
+        return sum / static_cast<float>(s.segments.size());
+    };
+    EXPECT_GT(mean_dy(sk_up), mean_dy(sk_down))
+        << "向光上挺的每段竖直分量应高于重力下垂";
+    EXPECT_GT(mean_dy(sk_up), 0.0f) << "上挺：净向上";
+    EXPECT_LT(mean_dy(sk_down), mean_dy(sk_up));
+    // 关闭向性 = 零回归：与另一份"名义有向量但强度 0"完全一致（方向不参与）。
+    SpaceColonizationConfig none2 = down;
     none2.tropism = Vec3f(0.0f, 1.0f, 0.0f);
     none2.tropism_strength = 0.0f;
     EXPECT_TRUE(SameSkeleton(Colonize(none), Colonize(none2)));

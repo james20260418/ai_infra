@@ -82,19 +82,30 @@ float CrownRadiusAt(CrownEnvelope env, float t, float base_radius,
 }
 
 // 按包络形状撒 attractor_count 个吸引点（确定性：消耗给定的 rng）。
+// 用**边界盒拒绝采样**保证点云**体积均匀**（关键：若按高度均匀采样，锥顶半径小 ⇒ 顶部点
+// 密度 ∝ 1/r² 反而高，会把生长全往上拉 ⇒ "树枝往上冒"）。
 std::vector<Vec3f> SampleAttractors(const SpaceColonizationConfig& cfg,
                                     Rng* rng) {
     std::vector<Vec3f> pts;
     pts.reserve(static_cast<size_t>(cfg.attractor_count));
-    for (int i = 0; i < cfg.attractor_count; ++i) {
+    const float rmax = cfg.crown_radius;
+    if (rmax <= 1.0e-6f) {   // 退化为纯竖直轴（无冠幅）
+        for (int i = 0; i < cfg.attractor_count; ++i) {
+            pts.push_back(Vec3f(0.0f,
+                cfg.trunk_height + rng->NextFloat01() * cfg.crown_height, 0.0f));
+        }
+        return pts;
+    }
+    while (static_cast<int>(pts.size()) < cfg.attractor_count) {
+        const float x = (rng->NextFloat01() * 2.0f - 1.0f) * rmax;
+        const float z = (rng->NextFloat01() * 2.0f - 1.0f) * rmax;
         const float t = rng->NextFloat01();   // 冠内高度占比
-        const float y = cfg.trunk_height + t * cfg.crown_height;
-        const float r_max = CrownRadiusAt(cfg.envelope, t, cfg.crown_radius,
+        const float r_lim = CrownRadiusAt(cfg.envelope, t, cfg.crown_radius,
                                           cfg.crown_top_radius);
-        // 在该高度的圆盘内**均匀**取点：半径按 √u 采样（面积均匀）。
-        const float rr = r_max * std::sqrt(rng->NextFloat01());
-        const float ang = kTwoPi * rng->NextFloat01();
-        pts.push_back(Vec3f(rr * std::cos(ang), y, rr * std::sin(ang)));
+        if (x * x + z * z <= r_lim * r_lim) {   // 在包络内 → 接受
+            pts.push_back(
+                Vec3f(x, cfg.trunk_height + t * cfg.crown_height, z));
+        }
     }
     return pts;
 }
@@ -356,16 +367,16 @@ SpaceColonizationConfig FirConfig() {
     SpaceColonizationConfig c;
     c.envelope = CrownEnvelope::kCone;
     c.attractor_count = 4000;
-    c.trunk_height = 0.15f;
-    c.crown_height = 2.7f;
-    c.crown_radius = 0.55f;
+    c.trunk_height = 0.75f;
+    c.crown_height = 2.1f;
+    c.crown_radius = 0.80f;
     c.crown_top_radius = 0.10f;
     c.influence_radius = 0.30f;
-    c.kill_radius = 0.14f;
-    c.step = 0.085f;
+    c.kill_radius = 0.15f;
+    c.step = 0.09f;
     c.max_nodes = 4500;
-    c.tropism = Vec3f(0.0f, 1.0f, 0.0f);
-    c.tropism_strength = 0.04f;
+    c.tropism = Vec3f(0.0f, -1.0f, 0.0f);   // 轻微重力：侧枝平展/微垂（不要向光上挺—那会让枝"往上冒"）
+    c.tropism_strength = 0.05f;
     c.base_radius = 0.05f;
     c.min_radius = 0.003f;
     c.radius_power = 2.0f;
@@ -379,12 +390,12 @@ SpaceColonizationConfig PineConfig() {
     SpaceColonizationConfig c;
     c.envelope = CrownEnvelope::kDome;
     c.attractor_count = 2800;
-    c.trunk_height = 1.1f;
-    c.crown_height = 1.4f;
-    c.crown_radius = 0.9f;
+    c.trunk_height = 0.7f;
+    c.crown_height = 1.5f;
+    c.crown_radius = 0.95f;
     c.crown_top_radius = 0.0f;   // 穹顶不用
-    c.influence_radius = 0.40f;
-    c.kill_radius = 0.19f;
+    c.influence_radius = 0.38f;
+    c.kill_radius = 0.18f;
     c.step = 0.11f;
     c.max_nodes = 4500;
     c.tropism = Vec3f(0.0f, 1.0f, 0.0f);

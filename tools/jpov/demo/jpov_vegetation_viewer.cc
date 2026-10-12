@@ -350,7 +350,9 @@ int RunGardenCapture(const std::string& out_dir) {
 }
 
 // 单棵空间殖民树多视角出图（验收/调参用）。tree ∈ {fir,pine,shrub,dragonclaw}。
-int RunScTreeCapture(const std::string& out_dir, const std::string& tree) {
+// with_leaves=false 时只出**枝干拓扑**（关叶片），便于看清分枝走向（不被叶遮住）。
+int RunScTreeCapture(const std::string& out_dir, const std::string& tree,
+                     bool with_leaves) {
     JPOV::Config cfg;
     cfg.title = "JPOV — 空间殖民单树";
     cfg.width = kWidth;
@@ -360,7 +362,7 @@ int RunScTreeCapture(const std::string& out_dir, const std::string& tree) {
     VegetationApp app(cfg);
     app.SetShowPanel(false);
     app.use_tube_ = true;
-    app.show_leaves_ = true;
+    app.show_leaves_ = with_leaves;
     app.Init();
     app.InstallScene();
     app.SelectTree("sc_" + tree);
@@ -438,6 +440,7 @@ int main(int argc, char** argv) {
     std::string garden_dir;
     std::string sc_garden_dir;
     std::string sc_tree;
+    bool no_leaves = false;
     std::string tree = "dragonclaw";
     float tropism = 0.0f;
     int   seed    = 0;
@@ -458,6 +461,8 @@ int main(int argc, char** argv) {
             sc_garden_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--sc-tree") == 0 && i + 1 < argc) {
             sc_tree = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--no-leaves") == 0) {
+            no_leaves = true;
         } else if (std::strcmp(argv[i], "--tree") == 0 && i + 1 < argc) {
             tree = argv[i + 1];
         } else if (std::strcmp(argv[i], "--tropism") == 0 && i + 1 < argc) {
@@ -473,7 +478,8 @@ int main(int argc, char** argv) {
         return RunScGardenCapture(sc_garden_dir);
     }
     if (!sc_tree.empty()) {
-        return RunScTreeCapture(out_dir.empty() ? std::string(".") : out_dir, sc_tree);
+        return RunScTreeCapture(out_dir.empty() ? std::string(".") : out_dir,
+                                sc_tree, !no_leaves);
     }
     if (!junction_dir.empty()) {
         return RunJunctionStudy(junction_dir);

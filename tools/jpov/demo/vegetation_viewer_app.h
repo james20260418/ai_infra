@@ -135,6 +135,10 @@ public:
     jpov::vegetation::SpaceColonizationConfig sc_cfg_ =
         jpov::vegetation::FirConfig();
 
+    // 花园模式：1 = L-System 花园，2 = SC 花园，0 = 单棵。花园里改滑条必须**整片重建**，
+    // 否则 RebuildTree 会拿单棵替换掉并排的 4 棵（后 3 棵"消失"）。
+    int garden_mode_ = 0;
+
     // ── 视角 ──
     jpov_viewer::ViewConfig view_;
     float aim_y_ = 0.0f;   // 相机注视点高度（0 = 树基/默认；拍摄分叉特写时抬高）
@@ -210,6 +214,8 @@ public:
     // 预实验最后一砖：「花园」—— 4 棵（杉/松/龙爪槐/灌木）按手写 L 语法并排在同一场景。
     // 各自用自己的 TurtleConfig（尺度/粗细/向性），几何直接烘进同一个 mesh（按 x 偏移）。
     void SelectGarden() {
+        garden_mode_ = 1;
+        sc_mode_ = false;
         jpov::vegetation::LSystem fir   = jpov::vegetation::BuildFirTree();
         jpov::vegetation::LSystem pine  = jpov::vegetation::BuildPineTree();
         jpov::vegetation::LSystem pag   = jpov::vegetation::BuildDragonClawPagodaTree();
@@ -247,6 +253,7 @@ public:
     // 「花园」SC 版：杉/松/龙爪槐/灌木（用空间殖民生成）并排在同一场景。
     // 与 L-System 版 SelectGarden 同构，只是生成器换成 Colonize。
     void SelectScGarden() {
+        garden_mode_ = 2;
         sc_mode_ = true;
         struct Item {
             jpov::vegetation::SpaceColonizationConfig cfg;
@@ -349,6 +356,7 @@ public:
             return;
         }
         sc_mode_ = false;   // 非 sc_* → 回到 L-System 树
+        garden_mode_ = 0;   // 单棵模式（非花园）
         if (name == "recursive") {
             lsystem_ = jpov::vegetation::BuildRecursiveTree();
         } else if (name == "recursive_stochastic") {
@@ -413,7 +421,13 @@ public:
                 leaf_length_ != prev_leaf_length_ ||
                 leaf_growth_ != prev_leaf_growth_ ||
                 leaves_per_site_ != prev_leaves_per_site_) {
-                RebuildTree();
+                if (garden_mode_ == 2) {
+                    SelectScGarden();   // 花园：整片重建，保住 4 棵
+                } else if (garden_mode_ == 1) {
+                    SelectGarden();
+                } else {
+                    RebuildTree();
+                }
                 SyncPrev();
             }
         }
