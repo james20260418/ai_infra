@@ -524,8 +524,10 @@ void SkeletonRenderer::DrawSkinnedMesh(
     // 实例数据：传进**渲染器持有的**实例缓冲（不写 mesh 资源）。
     //   pose 起点 = pose_idx * pose_width（平坦 texel 起点，shader 内按 atlas 宽回绕）。
     // LAG 门控（§7.1）：仅当网格带 aRelax（kRelax）才上传/挂载 loc14/15；否则整段省掉
-    //   （不新增编译期宏，纯 host 运行时判断）。LAG 尚未在 VS 内消费 ⇒ 非松弛网格零额外开销。
+    //   （不新增编译期宏，纯 host 运行时判断）。uLagEnabled 与之同源：0 时 VS 整段跳过 LAG
+    //   （非松弛网格零额外开销、逐字节零回归）。
     const bool lag_on = MeshHasFlag(mesh->flags, MeshVertexFlags::kRelax);
+    glUniform1i(glGetUniformLocation(sp, "uLagEnabled"), lag_on ? 1 : 0);
     UploadSkinningInstanceAttributes(cmd, pose_w, lag_on, instance_model_buf,
                                      instance_pose_ids_buf, instance_misc_buf,
                                      instance_partial_buf, instance_partial_lag_buf,
@@ -778,6 +780,8 @@ void SkeletonRenderer::DrawSkinnedMeshShadow(
     glBindTexture(GL_TEXTURE_2D, gh.partial_rotation_channel_tex);
     glUniform1i(glGetUniformLocation(sp, "uPartialChannel"),
                 kTexUnitPartialRotationChannel);
+    // LAG：与主 pass **同一开关**（`lag_on`）—— 否则影子与身体错位（LAG mix 须两侧一致）。
+    glUniform1i(glGetUniformLocation(sp, "uLagEnabled"), lag_on ? 1 : 0);
     // 光空间 VP 走 uniform（不含 model）。
     glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowViewProj"),
                        1, GL_FALSE, shadow_vp);
@@ -926,6 +930,8 @@ void SkeletonRenderer::DrawSkinnedMeshSelected(
 
     // LAG 门控（同主 pass）：仅当网格带 aRelax 才上传/挂载 loc14/15。
     const bool lag_on = MeshHasFlag(mesh->flags, MeshVertexFlags::kRelax);
+    // 高亮/拾取 pass 用同一 kSkinnedVs → 必须与主 pass 同开关（否则掩膜几何与主 pass 错位）。
+    glUniform1i(glGetUniformLocation(sp, "uLagEnabled"), lag_on ? 1 : 0);
     UploadSkinningInstanceAttributes(cmd, pose_w, lag_on, instance_model_buf,
                                      instance_pose_ids_buf, instance_misc_buf,
                                      instance_partial_buf, instance_partial_lag_buf,

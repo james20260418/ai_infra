@@ -128,6 +128,16 @@ inline constexpr float kRelaxDefaultMaxLagM = 0.05f;
 inline constexpr float kRelaxMaxLagMin = 0.0f;
 inline constexpr float kRelaxMaxLagMax = 0.5f;
 
+// ── 布料 LAG（副运动）纯延迟：随机动作面板「开启 LAG」──
+// 用 PoseCache 存主动作历史，pose_lag = 相位落后 delay 的那一帧（历史回放，DT 驱动；见
+// interface/pose_cache.h）。布料网格自带 _JPOV_RELAX（kRelax）时 VS 打开 LAG mix。
+//   延迟时长（秒）：默认 0.1s（@0.5Hz 周期 ≈ 0.05 相位）；范围 [0,0.5]。
+inline constexpr float kLagDefaultDelayS = 0.10f;
+inline constexpr float kLagDelayMinS = 0.0f;
+inline constexpr float kLagDelayMaxS = 0.5f;
+// 历史环形缓冲容量：@60Hz 最大 0.5s ≈ 30 条，取 64 留余量。
+inline constexpr size_t kLagCacheCapacity = 64;
+
 // ── 面板布局（各面板共用；配合 ClothingToolApp::BeginPanel 使用）──
 inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间距
 inline constexpr float kPanelPad     = 10.0f;   // 面板内边距

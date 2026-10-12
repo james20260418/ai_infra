@@ -11,6 +11,15 @@
 > `feature/20261010-jpov-lag-layout-refactor`）；**VS 内 LAG 消费（mix / 限幅 / 二阶）仍待实现** ——
 > 新槽位（loc6 aRelax / loc14 partial_lag / loc15 pos_lag）已声明 + 上传，但未参与计算。
 > 现有厚度压为 uint8（loc12）、部分旋转压为 half（loc13），由开关保证零回归。
+>
+> **实现进展（2026-10-12）**：**VS 内 LAG 消费已落地**（branch `feature/20261012-jpov-clothing-lag`）——
+> 主 pass（`kSkinnedVs`）与 shadow pass（`kSkinnedShadowVs`）新增 `uLagEnabled` 开关：置 1 时读
+> loc6 `aRelax` / loc11 `.z/.w`(pose_lag) / loc14 `aPartialLag` / loc15 `aPosLag`，对 `当前` 与
+> `滞后` 两套蒙皮结果按逐顶点`松弛度` 做 `mix`（位置带 `max_lag` 位移限幅 §4.4）；置 0（网格无 `kRelax`）
+> **整段跳过** ⇒ 既有 gold 逐字节零回归。历史回放的纯延迟工具 = `interface/pose_cache.h`（`PoseCache`，
+> 存主动作 `{a,b,ratio}`+`t`，单调时间校验，纯延迟查询）；一/二阶延迟 util =
+> `interface/skeleton_motion_lag.h`（`SkeletonPoseLerp` + 一/二阶 tracker，root_offset 一并滞后）。
+> clothing tool 已接纯延迟（左下角「开启 LAG」）验收。
 > 相关：`docs/jpov_crowd_instancing_arch.md`（instancing 架构锚点）、
 > `docs/jpov_dqs_skinning_design.md`（DQS 蒙皮）、`docs/jpov_partial_rotation_design.md`（部位额外旋转）、
 > `docs/jpov_crowd_body_shape_face_design.md` §3（部位粗细）。

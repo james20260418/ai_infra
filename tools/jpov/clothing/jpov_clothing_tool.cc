@@ -71,6 +71,10 @@ struct CliOptions {
     float relax_max_lag = jpov::clothing::kRelaxDefaultMaxLagM;  // --relax_max_lag（m）
     bool  show_relax_field = false;  // --show_relax_field：开启松弛度场可视化
     bool  save_cloth = false;        // --save_cloth：出图前保存一次衣服 glb（脚本化验证落盘）
+    // 布料 LAG（副运动，纯延迟；headless / 脚本化验证）。
+    bool  lag_enable = false;        // --lag_enable：启用「开启 LAG（布料滞后）」
+    float lag_delay_ms = -1.0f;      // --lag_delay_ms：LAG 延迟（毫秒；<0 = 用默认值）
+    int   lag_warmup_frames = 0;     // --lag_warmup_frames：headless 出图前先推进 N 帧（填 PoseCache）
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -278,6 +282,27 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.show_relax_field = true;
         } else if (arg == "--save_cloth") {
             opt.save_cloth = true;
+        } else if (arg == "--lag_enable") {
+            opt.lag_enable = true;
+        } else if (arg == "--lag_delay_ms") {
+            if (i + 1 < argc) {
+                opt.lag_delay_ms = static_cast<float>(std::atof(argv[++i]));
+                if (opt.lag_delay_ms < 0.0f) {
+                    LOG(FATAL) << "--lag_delay_ms 必须 >= 0，got " << opt.lag_delay_ms;
+                }
+            } else {
+                LOG(WARNING) << "--lag_delay_ms 缺少数值参数，忽略";
+            }
+        } else if (arg == "--lag_warmup_frames") {
+            if (i + 1 < argc) {
+                opt.lag_warmup_frames = std::atoi(argv[++i]);
+                if (opt.lag_warmup_frames < 0) {
+                    LOG(FATAL) << "--lag_warmup_frames 必须 >= 0，got "
+                               << opt.lag_warmup_frames;
+                }
+            } else {
+                LOG(WARNING) << "--lag_warmup_frames 缺少数值参数，忽略";
+            }
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -444,6 +469,12 @@ int main(int argc, char** argv) {
     }
 
     // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
+    // 布料 LAG（headless；交互窗口由左下角「开启 LAG」勾选 + 延迟滑条驱动）。
+    app.lag_enabled_ui_ = opt.lag_enable;
+    if (opt.lag_delay_ms >= 0.0f) {
+        app.lag_delay_s_ui_ = opt.lag_delay_ms * 0.001f;
+    }
+
     app.motion_test_enabled_ = opt.motion_enable;
     if (opt.motion_phase >= 0.0f) {
         app.motion_test_enabled_ = true;  // 给了相位即启用（便于 headless 出图）
@@ -517,6 +548,14 @@ int main(int argc, char** argv) {
         const std::string out_dir =
             opt.output_dir.empty() ? std::string(".") : opt.output_dir;
         const std::string out_path = out_dir + "/clothing_tool_ui.png";
+        // 可选：先推进 N 帧（填充 PoseCache），使 LAG 纯延迟在单帧出图里可见。
+        //   需相位真的推进（否则 pose 静止、看不出滞后）⇒ warmup 时打开播放。
+        if (opt.lag_warmup_frames > 0) {
+            app.motion_playing_ = true;
+        }
+        for (int i = 0; i < opt.lag_warmup_frames; ++i) {
+            app.RunOnce(jpov::InputSnapshot(), winfo, "/tmp/jpov_lag_warmup.png");
+        }
         app.RunOnce(jpov::InputSnapshot(), winfo, out_path.c_str());
         LOG(INFO) << "UI 自检图已写入: " << out_path;
     } else {

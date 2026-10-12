@@ -131,6 +131,7 @@
 #include "tools/jpov/clothing/random_pose_driver.h"
 #include "tools/jpov/clothing/relax_derive.h"
 #include "tools/jpov/clothing/weight_transfer.h"
+#include "tools/jpov/interface/pose_cache.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
@@ -262,6 +263,17 @@ public:
     uint32_t body_skel_id_ = 0;         // 人体骨架句柄（RegisterSkeleton 产物；0 = 未注册）
     std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
     std::string motion_msg_;            // 面板状态提示（每帧刷新）
+
+    // ══════════════ 布料 LAG（副运动，纯延迟；2026-10-12）══════════════
+    //
+    // 随机动作是烘焙的 pose 序列 ⇒ 布料「滞后」= 用 PoseCache 回放**相位落后 delay** 的那一帧
+    // 主动作 {a,b,ratio}（历史回放，无需增机制；见 interface/pose_cache.h）。布料网格自带
+    // _JPOV_RELAX（kRelax）时，渲染器开 uLagEnabled ⇒ VS 按逐顶点松弛度 mix(当前, 滞后)。
+    // 「直接用 OneIteration 的时间驱动」：motion_time_s_ 逐帧 += 1/fps，作为时间轴推入 PoseCache。
+    bool lag_enabled_ui_ = false;              // 勾选：布料按历史 pose 滞后
+    float lag_delay_s_ui_ = kLagDefaultDelayS; // 延迟时长（秒）
+    jpov::PoseCache lag_cache_{kLagCacheCapacity};  // 主动作历史（{a,b,ratio} + 时间戳）
+    float motion_time_s_ = 0.0f;               // 随机动作时间轴（秒；motion_active 时逐帧 += 1/fps）
 
     // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
     //
@@ -637,8 +649,14 @@ public:
 
         // 随机摆动测试生效时：人体 / 衣服共用**同一份**实例状态（摆放 + pose），故逐帧同步。
         const bool motion_active = MotionTestActive();
-        const jpov::SkinnedInstanceState motion_inst =
-            motion_active ? MotionInstanceState() : jpov::SkinnedInstanceState();
+        jpov::SkinnedInstanceState motion_inst;
+        if (motion_active) {
+            motion_inst = MotionInstanceState();
+            // 时间轴推进 + 把本帧主动作压入历史（供布料 LAG 纯延迟回放）。
+            motion_time_s_ += 1.0f / kViewerFps;
+            lag_cache_.Push(motion_inst.pose_a, motion_inst.pose_b, motion_inst.ratio,
+                            motion_time_s_);
+        }
 
         // 人体 reference 固定画在原点（不参与衣服调节）。
         if (show_body_) {
@@ -658,9 +676,24 @@ public:
         // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
             if (motion_active && ClothMeshHasSkin()) {
+                // 布料实例：默认与人体同姿态（不滞后）；开启 LAG 时用 PoseCache 纯延迟回放。
+                // （关 LAG 也要把 pose_lag 写成与当前一致 ⇒ VS 的 mix 为恒等、视觉零变化。）
+                jpov::SkinnedInstanceState cloth_inst = motion_inst;
+                if (lag_enabled_ui_ && !lag_cache_.empty()) {
+                    bool exact = false;
+                    const jpov::PoseSample s =
+                        lag_cache_.QueryDelayed(motion_time_s_, lag_delay_s_ui_, &exact);
+                    cloth_inst.pose_a_lag = s.pose_a;
+                    cloth_inst.pose_b_lag = s.pose_b;
+                    cloth_inst.ratio_lag = s.ratio;
+                } else {
+                    cloth_inst.pose_a_lag = motion_inst.pose_a;
+                    cloth_inst.pose_b_lag = motion_inst.pose_b;
+                    cloth_inst.ratio_lag = motion_inst.ratio;
+                }
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
-                                               prim.material, {motion_inst});
+                                               prim.material, {cloth_inst});
                 }
             } else {
                 cmds->DrawGltfObject(cloth_,
