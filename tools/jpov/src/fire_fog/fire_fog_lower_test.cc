@@ -95,6 +95,54 @@ TEST(FireFogLower, LowerPointFogMapsFields) {
     EXPECT_FLOAT_EQ(b.params[1], 0.5f);
 }
 
+// kFlame：字段映射 + 容器包含性 + 风→截面平移的保守扩张。
+TEST(FireFogLower, LowerFlameFogMapsShapeAndWind) {
+    FlameFog f;
+    f.center = Vec3f(0.0f, 2.0f, 0.0f);
+    f.size = Vec3f(3.0f, 3.0f, 3.0f);
+    f.shell = 0.6f;
+    f.plume = 3.0f;
+    f.expand = 0.5f;
+    f.decay = 1.5f;
+    f.wind = Vec3f(0.0f, 0.0f, 0.0f);
+    f.vigor = 3.0f;
+    f.sigma = 1.2f;
+    f.albedo = Color{0.6f, 0.25f, 0.1f, 1.0f};
+    f.emission = Color{1.0f, 0.45f, 0.12f, 1.0f};
+
+    const FogBody b = LowerFlameFog(f);
+    EXPECT_EQ(b.kind, FogFieldKind::kFlame);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kCenterX], 0.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kCenterY], 2.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kCenterZ], 0.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kBoxHx], 1.5f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kBoxHy], 1.5f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kBoxHz], 1.5f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kShell], 0.6f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kPlume], 3.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kExpand], 0.5f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kDecay], 1.5f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kVigor], 3.0f);
+    // 无风 ⇒ 水平方向 0、lean/bend 0。
+    EXPECT_FLOAT_EQ(b.params[flame_param::kWindX], 0.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kWindZ], 0.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kLean], 0.0f);
+    EXPECT_FLOAT_EQ(b.params[flame_param::kBend], 0.0f);
+    // 容器 y 范围必须包含 [燃料盒下界−shell, 盒顶+plume]：盒 y∈[0.5,3.5]，⊕shell ⇒ [-0.1,4.1]；
+    // 羽流到 y=3.5+3=6.5 ⇒ 容器 y 上界 ≥ 6.5。
+    EXPECT_GE(b.bound.center.y() + b.bound.half_extent.y(), 6.5f - 1.0e-4f);
+    EXPECT_LE(b.bound.center.y() - b.bound.half_extent.y(), -0.1f + 1.0e-4f);
+
+    // 风 (+x)：只取水平分量；竖直分量被忽略。方向单位化，lean/bend 按 kFlameWind* 折算。
+    f.wind = Vec3f(5.0f, 9.0f, 0.0f);
+    const FogBody bw = LowerFlameFog(f);
+    EXPECT_FLOAT_EQ(bw.params[flame_param::kWindX], 1.0f);
+    EXPECT_FLOAT_EQ(bw.params[flame_param::kWindZ], 0.0f);
+    EXPECT_NEAR(bw.params[flame_param::kLean], kFlameWindLean * 5.0f, 1.0e-5f);
+    EXPECT_NEAR(bw.params[flame_param::kBend], kFlameWindBend * std::pow(5.0f, 1.3f), 1.0e-4f);
+    EXPECT_GT(bw.bound.center.x(), b.bound.center.x());   // 截面顺风 ⇒ 容器中心下风偏
+}
+
 TEST(FireFogLower, EmptyBodiesAllSentinel) {
     float mvp[16];
     IdentityMvp(mvp);

@@ -616,32 +616,35 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
             t5[3] = b.params[1];               // radius（外侧圆角壳厚度）
             t6[0] = b.params[0];               // attenuation 枚举
         } else if (b.kind == FogFieldKind::kFlame) {
-            // bound = 容器（盒沿 up 外扩 plume、各向再外扩 shell）；反解燃料盒 center / box_half
-            //（与 LowerFlameFog / GLSL SampleFlame 同一公式）。打包字段 → flame union（t2..t4）。
-            const Vec3f up(b.params[0], b.params[1], b.params[2]);
-            const float shell = b.params[3];
-            const float plume = b.params[4];
-            const float vigor = b.params[5];
-            const Vec3f fuel_center = b.bound.center - up * (0.5f * plume);
-            const Vec3f box_half(
-                b.bound.half_extent.x() - shell - 0.5f * plume * std::abs(up.x()),
-                b.bound.half_extent.y() - shell - 0.5f * plume * std::abs(up.y()),
-                b.bound.half_extent.z() - shell - 0.5f * plume * std::abs(up.z()));
+            // 字段 → flame union（t2..t7，见 fog_body.h 的按作用域布局表 / flame_param）。
+            const float* fp = b.params;
             float* t2 = &body_attr[base + 2 * 4];
             float* t3 = &body_attr[base + 3 * 4];
             float* t4 = &body_attr[base + 4 * 4];
-            t2[0] = fuel_center.x();
-            t2[1] = fuel_center.y();
-            t2[2] = fuel_center.z();
-            t2[3] = box_half.x();
-            t3[0] = box_half.y();
-            t3[1] = box_half.z();
-            t3[2] = up.x();
-            t3[3] = up.y();
-            t4[0] = up.z();
-            t4[1] = shell;
-            t4[2] = plume;
-            t4[3] = vigor;
+            float* t5 = &body_attr[base + 5 * 4];
+            float* t6 = &body_attr[base + 6 * 4];
+            float* t7 = &body_attr[base + 7 * 4];
+            t2[0] = fp[flame_param::kContX];
+            t2[1] = fp[flame_param::kContY];
+            t2[2] = fp[flame_param::kContZ];
+            t2[3] = fp[flame_param::kContHx];
+            t3[0] = fp[flame_param::kContHy];
+            t3[1] = fp[flame_param::kContHz];
+            t3[2] = fp[flame_param::kCenterX];
+            t3[3] = fp[flame_param::kCenterY];
+            t4[0] = fp[flame_param::kCenterZ];
+            t4[1] = fp[flame_param::kBoxHx];
+            t4[2] = fp[flame_param::kBoxHy];
+            t4[3] = fp[flame_param::kBoxHz];
+            t5[0] = fp[flame_param::kWindX];
+            t5[1] = fp[flame_param::kWindZ];
+            t5[2] = fp[flame_param::kLean];
+            t5[3] = fp[flame_param::kBend];
+            t6[0] = fp[flame_param::kShell];
+            t6[1] = fp[flame_param::kPlume];
+            t6[2] = fp[flame_param::kVigor];
+            t6[3] = fp[flame_param::kExpand];
+            t7[0] = fp[flame_param::kDecay];
         }
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);

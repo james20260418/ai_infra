@@ -48,15 +48,49 @@ enum class FogFieldKind : uint8_t {
 //
 // 采样契约：SampleXXX(kind, params, world_pos) → (σ, albedo, emission)。几何 / 分段 / 抖动 /
 // 光照 / ZDist 累加全部 kind 无关（见设计文档 §10.4）。params 是**超集**：按 kind 解释，
-// 未用到的位为 0（若某 kind 参数爆表，再拆二级 params buffer）。
+// 未用到的位为 0（kFlame 的参数较多，params 已扩到 32；字段下标见下方 flame_param）。
 struct FogBody {
     Obb bound;               // 容器（同时 = 积分区间 [t0,t1] 的界）
     FogFieldKind kind;       // 采样器种类（唯一分派点）
     float sigma;             // 消光系数 σ_t（1/m，>= 0）
     Color albedo;            // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）
     Color emission;          // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
-    float params[8];         // 采样器参数（超集，按 kind 解释；见设计文档 §10.3）
+    float params[32];        // 采样器参数（超集，按 kind 解释；kFlame 字段下标见 flame_param）
 };
+
+// ── kFlame 在 FogBody.params[] 里的字段下标（CPU 打包 / 解码的单一来源）──
+//   cont_*  = 容器 AABB（CPU 在 LowerFlameFog 里保守算出；GLSL 直接拿来求交，不再重算公式）；
+//   center/box_* = 燃料盒中心 / 半尺寸；wind = 风【水平】方向（单位，2D）；
+//   lean/bend = 由水平风速推得、已折算系数的截面顺风平移量（m）；shell/plume/vigor/expand/decay 见命令层。
+namespace flame_param {
+inline constexpr int kContX = 0;
+inline constexpr int kContY = 1;
+inline constexpr int kContZ = 2;
+inline constexpr int kContHx = 3;
+inline constexpr int kContHy = 4;
+inline constexpr int kContHz = 5;
+inline constexpr int kCenterX = 6;
+inline constexpr int kCenterY = 7;
+inline constexpr int kCenterZ = 8;
+inline constexpr int kBoxHx = 9;
+inline constexpr int kBoxHy = 10;
+inline constexpr int kBoxHz = 11;
+inline constexpr int kWindX = 12;   // 风【水平】方向（x 分量，单位；风速为 0 时全 0）
+inline constexpr int kWindZ = 13;   // 风【水平】方向（z 分量，单位）
+inline constexpr int kLean = 14;    // 截面顺风线性平移量（m）
+inline constexpr int kBend = 15;    // 截面顺风二次平移量（m）
+inline constexpr int kShell = 16;
+inline constexpr int kPlume = 17;
+inline constexpr int kVigor = 18;
+inline constexpr int kExpand = 19;
+inline constexpr int kDecay = 20;
+}  // namespace flame_param
+
+// 风（水平）→ 截面平移系数（kFlame）：lean = kFlameWindLean·|W_h|、bend = kFlameWindBend·|W_h|^1.3。
+// 量纲：m per (m/s) / m per (m/s)^1.3；将来可对齐消防工程的 flame tilt / drag 相关式
+//（AGA / Moorhouse）校准。CPU（容器）与 GLSL（场）只经**已折算的 lean/bend** 消费，不各自持常量。
+inline constexpr float kFlameWindLean = 0.15f;
+inline constexpr float kFlameWindBend = 0.10f;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 团属性纹理（uFogBodyTex）布局契约 —— CPU 打包 / GLSL 解码的**单一来源**
@@ -99,13 +133,17 @@ inline constexpr FogBodyLayoutEntry kRoundBoxUnionLayout[] = {
     {6, 0, "atten"},     {6, 1, "reserved"},  {6, 2, "reserved"},  {6, 3, "reserved"},
 };
 
-// ── union：kFlame 燃料盒包裹燃烧（texel 2..4）──
-//   center/box_h = 燃料盒中心 / 半尺寸（世界单位，MVP 轴对齐）；up = 火苗主方向（单位向量）；
-//   shell = 包裹壳厚；plume = 羽流段长；vigor = 旺盛度（自发光放大）。
+// ── union：kFlame 燃料盒包裹燃烧（texel 2..7）──
+//   cont_*  = 容器 AABB 中心/半尺寸（world-axis；CPU 保守算出，GLSL 直接求交）；
+//   center/box_* = 燃料盒中心/半尺寸；wind = 风【水平】方向（单位 2D）；
+//   lean/bend = 截面顺风平移（m）；shell/plume/vigor/expand/decay = 形状参数。
 inline constexpr FogBodyLayoutEntry kFlameUnionLayout[] = {
-    {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"},  {2, 3, "box_hx"},
-    {3, 0, "box_hy"},    {3, 1, "box_hz"},    {3, 2, "up_x"},      {3, 3, "up_y"},
-    {4, 0, "up_z"},      {4, 1, "shell"},     {4, 2, "plume"},     {4, 3, "vigor"},
+    {2, 0, "cont_cx"},  {2, 1, "cont_cy"},  {2, 2, "cont_cz"},  {2, 3, "cont_hx"},
+    {3, 0, "cont_hy"},  {3, 1, "cont_hz"},  {3, 2, "center_x"}, {3, 3, "center_y"},
+    {4, 0, "center_z"}, {4, 1, "box_hx"},   {4, 2, "box_hy"},   {4, 3, "box_hz"},
+    {5, 0, "wind_x"},   {5, 1, "wind_z"},   {5, 2, "lean"},     {5, 3, "bend"},
+    {6, 0, "shell"},    {6, 1, "plume"},    {6, 2, "vigor"},    {6, 3, "expand"},
+    {7, 0, "decay"},    {7, 1, "reserved"}, {7, 2, "reserved"}, {7, 3, "reserved"},
 };
 
 }  // namespace jpov

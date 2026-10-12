@@ -83,13 +83,15 @@ public:
     // ── 火焰参数（团类型 = kFlame 时生效）──
     jpov::Vec3f flame_center_ = jpov::Vec3f(0.0f, 1.5f, 0.0f);  // 燃料盒中心
     jpov::Vec3f flame_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);    // 燃料盒长宽高（米）
-    jpov::Vec3f flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);      // 火苗主方向（默认朝上）
     float flame_shell_ = 0.6f;                                   // 包裹壳厚（米）
     float flame_plume_ = 3.0f;                                   // 羽流段长（米）
     float flame_vigor_ = 3.0f;                                   // 旺盛度（自发光放大）
     float flame_sigma_ = 1.2f;                                   // 消光系数 σ_t（1/m）
     jpov::Color flame_albedo_ = jpov::Color{0.6f, 0.25f, 0.1f, 1.0f};   // 散射色（∈[0,1]）
     jpov::Color flame_emission_ = jpov::Color{1.0f, 0.45f, 0.12f, 1.0f}; // 自发光颜色（HDR，rad/m）
+    float flame_expand_ = 0.5f;                                  // 羽流半径微扩系数（0 = 纯柱）
+    float flame_decay_ = 1.5f;                                   // 羽流强度衰减指数（越大顶端越软）
+    jpov::Vec3f flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);     // 风（m/s）：把 spine 顺风倾斜+弯曲
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -190,9 +192,11 @@ public:
                 jpov::FlameFog ff;
                 ff.center = flame_center_;
                 ff.size = flame_size_;
-                ff.up = flame_up_;
                 ff.shell = flame_shell_;
                 ff.plume = flame_plume_;
+                ff.expand = flame_expand_;
+                ff.decay = flame_decay_;
+                ff.wind = flame_wind_;
                 ff.vigor = flame_vigor_;
                 ff.sigma = flame_sigma_;
                 ff.albedo = flame_albedo_;
@@ -293,24 +297,26 @@ private:
         ui_.SliderFloat("自发光 B", &fog_emission_.b, cell(x0, kRows, 1, 6), 0.0f, 4.0f, 2);
     }
 
-    // 左下：火焰 per-团面板（10 行 × 2 列）。
+    // 左下：火焰 per-团面板（12 行 × 2 列）。
     template <typename CellFn>
     void DrawFlamePanel(const CellFn& cell) {
         const float x0 = 20.0f;
-        const int kRows = 10;
+        const int kRows = 12;
         ui_.SliderFloat("中心 x", &flame_center_.x(), cell(x0, kRows, 0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &flame_center_.y(), cell(x0, kRows, 0, 1), 0.0f, 10.0f, 2);
         ui_.SliderFloat("中心 z", &flame_center_.z(), cell(x0, kRows, 0, 2), -10.0f, 10.0f, 2);
         ui_.SliderFloat("尺寸 x m", &flame_size_.x(), cell(x0, kRows, 0, 3), 0.2f, 12.0f, 2);
         ui_.SliderFloat("尺寸 y m", &flame_size_.y(), cell(x0, kRows, 0, 4), 0.2f, 12.0f, 2);
         ui_.SliderFloat("尺寸 z m", &flame_size_.z(), cell(x0, kRows, 0, 5), 0.2f, 12.0f, 2);
-        ui_.SliderFloat("火苗 x", &flame_up_.x(), cell(x0, kRows, 0, 6), -1.0f, 1.0f, 2);
-        ui_.SliderFloat("火苗 y", &flame_up_.y(), cell(x0, kRows, 0, 7), -1.0f, 1.0f, 2);
-        ui_.SliderFloat("火苗 z", &flame_up_.z(), cell(x0, kRows, 0, 8), -1.0f, 1.0f, 2);
-        ui_.SliderFloat("壳厚 m", &flame_shell_, cell(x0, kRows, 0, 9), 0.05f, 3.0f, 2);
-        ui_.SliderFloat("羽流高 m", &flame_plume_, cell(x0, kRows, 1, 0), 0.0f, 10.0f, 2);
-        ui_.SliderFloat("旺盛度", &flame_vigor_, cell(x0, kRows, 1, 1), 0.0f, 8.0f, 2);
-        ui_.SliderFloat("消光 σ 1/m", &flame_sigma_, cell(x0, kRows, 1, 2), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("壳厚 m", &flame_shell_, cell(x0, kRows, 0, 6), 0.05f, 3.0f, 2);
+        ui_.SliderFloat("羽流高 m", &flame_plume_, cell(x0, kRows, 0, 7), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("横向微扩", &flame_expand_, cell(x0, kRows, 0, 8), 0.0f, 3.0f, 2);
+        ui_.SliderFloat("强度衰减", &flame_decay_, cell(x0, kRows, 0, 9), 0.0f, 4.0f, 2);
+        ui_.SliderFloat("旺盛度", &flame_vigor_, cell(x0, kRows, 0, 10), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("消光 σ 1/m", &flame_sigma_, cell(x0, kRows, 0, 11), 0.0f, 4.0f, 3);
+        ui_.SliderFloat("风 x m/s", &flame_wind_.x(), cell(x0, kRows, 1, 0), -20.0f, 20.0f, 1);
+        ui_.SliderFloat("风 y m/s", &flame_wind_.y(), cell(x0, kRows, 1, 1), -20.0f, 20.0f, 1);
+        ui_.SliderFloat("风 z m/s", &flame_wind_.z(), cell(x0, kRows, 1, 2), -20.0f, 20.0f, 1);
         ui_.SliderFloat("散射 R", &flame_albedo_.r, cell(x0, kRows, 1, 3), 0.0f, 1.0f, 2);
         ui_.SliderFloat("散射 G", &flame_albedo_.g, cell(x0, kRows, 1, 4), 0.0f, 1.0f, 2);
         ui_.SliderFloat("散射 B", &flame_albedo_.b, cell(x0, kRows, 1, 5), 0.0f, 1.0f, 2);

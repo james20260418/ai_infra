@@ -293,9 +293,11 @@ int RunCapture(const std::string& out_dir) {
     app.deg_.turbidity = 2.0f;
     app.flame_center_ = jpov::Vec3f(0.0f, 2.0f, 0.0f);
     app.flame_size_ = jpov::Vec3f(3.0f, 3.0f, 3.0f);
-    app.flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
     app.flame_shell_ = 0.6f;
     app.flame_plume_ = 3.0f;
+    app.flame_expand_ = 0.5f;
+    app.flame_decay_ = 1.5f;
+    app.flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
     app.flame_vigor_ = 3.0f;
     app.flame_sigma_ = 1.2f;
     app.flame_emission_ = jpov::Color{1.0f, 0.45f, 0.12f, 1.0f};
@@ -310,10 +312,22 @@ int RunCapture(const std::string& out_dir) {
         shoot(("72_flame_shell" + std::to_string(static_cast<int>(sh * 10))).c_str());
     }
     app.flame_shell_ = 0.6f;
-    // 火苗方向（box 倾斜 / 风）：up 倾侧 ⇒ 羽流跟随。
-    app.flame_up_ = jpov::Vec3f(0.7f, 1.0f, 0.0f);
-    shoot("73_flame_tilt");
-    app.flame_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
+    // 半径微扩 expand 扫谱（验证 纯柱 → 喇叭）。
+    for (float ex : {0.0f, 0.6f, 1.4f}) {
+        app.flame_expand_ = ex;
+        shoot(("75_flame_expand" + std::to_string(static_cast<int>(ex * 10))).c_str());
+    }
+    app.flame_expand_ = 0.5f;
+    // 风：spine 顺风【倾斜 + 弯曲】扫谱（验证风把整体形状吹偏）。
+    for (float w : {0.0f, 5.0f, 12.0f}) {
+        app.flame_wind_ = jpov::Vec3f(w, 0.0f, 0.0f);
+        shoot(("74_flame_wind" + std::to_string(static_cast<int>(w))).c_str());
+    }
+    app.flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
+    // 强风（把羽流柱吹倒，压力测试侧向平移）。
+    app.flame_wind_ = jpov::Vec3f(20.0f, 0.0f, 0.0f);
+    shoot("76_flame_wind_strong");
+    app.flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
 
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);

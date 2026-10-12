@@ -102,9 +102,12 @@ vec4 OverCompose(vec4 A, vec4 B) {
 //@FOGLAYOUT roundbox texel=4 x=axis0_z y=axis1_x z=axis1_y w=axis1_z
 //@FOGLAYOUT roundbox texel=5 x=axis2_x y=axis2_y z=axis2_z w=radius
 //@FOGLAYOUT roundbox texel=6 x=atten y=reserved z=reserved w=reserved
-//@FOGLAYOUT flame texel=2 x=center_x y=center_y z=center_z w=box_hx
-//@FOGLAYOUT flame texel=3 x=box_hy y=box_hz z=up_x w=up_y
-//@FOGLAYOUT flame texel=4 x=up_z y=shell z=plume w=vigor
+//@FOGLAYOUT flame texel=2 x=cont_cx y=cont_cy z=cont_cz w=cont_hx
+//@FOGLAYOUT flame texel=3 x=cont_hy y=cont_hz z=center_x w=center_y
+//@FOGLAYOUT flame texel=4 x=center_z y=box_hx z=box_hy w=box_hz
+//@FOGLAYOUT flame texel=5 x=wind_x y=wind_z z=lean w=bend
+//@FOGLAYOUT flame texel=6 x=shell y=plume z=vigor w=expand
+//@FOGLAYOUT flame texel=7 x=decay y=reserved z=reserved w=reserved
 
 // 采样器种类（与 fog_body.h 的 FogFieldKind 一致）。
 #define FOG_KIND_ROUNDBOX 0
@@ -126,11 +129,18 @@ struct FogBodyData {
     vec3  bound_half;    // kRoundBox：容器半尺寸（= 内盒半 size/2 + radius）
     float radius;        // kRoundBox：外侧球面圆角壳厚度
     float atten;         // kRoundBox：壳剖面枚举
+    vec3  cont_center;   // kFlame：容器 AABB 中心（CPU 保守算出后打包）
+    vec3  cont_half;     // kFlame：容器 AABB 半尺寸
+    vec3  fuel_center;   // kFlame：燃料盒中心
     vec3  box_half;      // kFlame：燃料盒半尺寸（世界单位，MVP 轴对齐）
-    vec3  up;            // kFlame：火苗主方向（单位向量）
+    vec2  wind_dir;      // kFlame：风【水平】方向（单位；无风时 0）
+    float lean;          // kFlame：截面顺风线性平移量（m）
+    float bend;          // kFlame：截面顺风二次平移量（m）
     float shell;         // kFlame：包裹壳厚（米）
-    float plume;         // kFlame：羽流段长（米）
+    float plume;         // kFlame：羽流柱长（米）
     float vigor;         // kFlame：旺盛度（自发光放大）
+    float expand;        // kFlame：羽流半径微扩系数
+    float decay;         // kFlame：羽流强度衰减指数
 };
 
 // 解码器：按团 index 从 uFogBodyTex 取出该团的通用数据 d。
@@ -150,11 +160,18 @@ FogBodyData DecodeFogBody(int bi) {
     d.bound_half = vec3(0.0);
     d.radius = 0.0;
     d.atten = 0.0;
+    d.cont_center = vec3(0.0);
+    d.cont_half = vec3(0.0);
+    d.fuel_center = vec3(0.0);
     d.box_half = vec3(0.0);
-    d.up = vec3(0.0, 1.0, 0.0);
+    d.wind_dir = vec2(0.0);
+    d.lean = 0.0;
+    d.bend = 0.0;
     d.shell = 0.0;
     d.plume = 0.0;
     d.vigor = 0.0;
+    d.expand = 0.0;
+    d.decay = 0.0;
     if (d.kind == FOG_KIND_ROUNDBOX) {
         vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
         vec4 g1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 3, 0), 0);
@@ -172,16 +189,21 @@ FogBodyData DecodeFogBody(int bi) {
         vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
         vec4 g1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 3, 0), 0);
         vec4 g2 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 4, 0), 0);
-        d.center   = g0.xyz;
-        d.box_half = vec3(g0.w, g1.x, g1.y);
-        d.up       = vec3(g1.z, g1.w, g2.x);
-        d.shell    = g2.y;
-        d.plume    = g2.z;
-        d.vigor    = g2.w;
-        // kFlame 轴对齐存储（MVP）：采样器需要的容器轴 = 世界轴，故在此给出，屏蔽无关字段。
-        d.axis0 = vec3(1.0, 0.0, 0.0);
-        d.axis1 = vec3(0.0, 1.0, 0.0);
-        d.axis2 = vec3(0.0, 0.0, 1.0);
+        vec4 g3 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 5, 0), 0);
+        vec4 g4 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 6, 0), 0);
+        vec4 g5 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 7, 0), 0);
+        d.cont_center = g0.xyz;
+        d.cont_half   = vec3(g0.w, g1.x, g1.y);
+        d.fuel_center = vec3(g1.z, g1.w, g2.x);
+        d.box_half    = vec3(g2.y, g2.z, g2.w);
+        d.wind_dir    = vec2(g3.x, g3.y);
+        d.lean        = g3.z;
+        d.bend        = g3.w;
+        d.shell       = g4.x;
+        d.plume       = g4.y;
+        d.vigor       = g4.z;
+        d.expand      = g4.w;
+        d.decay       = g5.x;
     }
     return d;
 }
@@ -195,11 +217,18 @@ vec3  FogCenter(FogBodyData d)     { return d.center; }
 vec3  FogBoundHalf(FogBodyData d) { return d.bound_half; }    // 容器半尺寸（内盒半 + radius）
 float FogRadius(FogBodyData d)     { return d.radius; }        // 外侧圆角壳厚度
 float FogAtten(FogBodyData d)      { return d.atten; }
+vec3  FogContCenter(FogBodyData d) { return d.cont_center; }    // kFlame：容器 AABB 中心
+vec3  FogContHalf(FogBodyData d)   { return d.cont_half; }      // kFlame：容器 AABB 半尺寸
+vec3  FogFuelCenter(FogBodyData d) { return d.fuel_center; }    // kFlame：燃料盒中心
 vec3  FogBoxHalf(FogBodyData d)    { return d.box_half; }       // kFlame：燃料盒半尺寸
-vec3  FogUp(FogBodyData d)         { return d.up; }             // kFlame：火苗主方向
+vec2  FogWindDir(FogBodyData d)     { return d.wind_dir; }        // kFlame：风【水平】方向（单位）
+float FogLean(FogBodyData d)       { return d.lean; }           // kFlame：截面平移量（m）
+float FogBend(FogBodyData d)       { return d.bend; }           // kFlame：截面平移量（m）
 float FogShell(FogBodyData d)      { return d.shell; }          // kFlame：包裹壳厚
-float FogPlume(FogBodyData d)      { return d.plume; }          // kFlame：羽流段长
+float FogPlume(FogBodyData d)      { return d.plume; }          // kFlame：羽流柱长
 float FogVigor(FogBodyData d)      { return d.vigor; }          // kFlame：旺盛度
+float FogExpand(FogBodyData d)     { return d.expand; }         // kFlame：半径微扩系数
+float FogDecay(FogBodyData d)      { return d.decay; }          // kFlame：强度衰减指数
 
 // 圆角盒「外壳归一化距离」t：q = p 的盒局部坐标（世界单位，沿 OBB 轴）。
 //   · 内盒内（各轴 |qᵢ| ≤ box_hᵢ）→ t = 0（无衰减，w = 1）。
@@ -315,39 +344,38 @@ FogSegment SampleRoundBox(FogBodyData d, vec3 ro, vec3 rd,
     return s;
 }
 
-// ── kFlame 采样器（燃料盒包裹燃烧「形」；**严格 O(1)**，MVP 不含 3D 纹理）──
-// 场 = max(包裹壳, 浮力羽流)：
-//   · 包裹壳：燃料盒**表面外侧** [0, shell] 的一层，密度从表面 (w=1) 向外线性衰减到 0；盒内不着火。
-//   · 浮力羽流：盒顶沿 up 方向 [0, plume] 的上升柱，半径随高度外扩、密度随高度衰减。
-// 容器 OBB（求交 / CPU 剪枝）= 燃料盒沿 up 外扩 plume、各向再外扩 shell（保守，轴对齐）。
+// ── kFlame 采样器（燃料盒包裹燃烧；**严格 O(1)**，不含 3D 纹理）──
+// 「低频形」= max(包裹壳, 羽流柱)：
+//   · 包裹壳：燃料盒**整个表面外侧** [0, shell] 的一层，密度从表面 (w=1) 向外线性衰减到 0；盒内不着火。
+//   · 羽流柱：盒沿**世界 +Y**（浮力恒向上）挤出——盒顶面以上 [0, plume] 的柱；横向随高度微扩 expand；
+//     **风**把截面顺【水平风向】随高度平移（lean·s+bend·s²）；强度 (1−s)^decay 软顶。
+//     浮力固定 +Y；火焰倾斜只由 wind 驱动（见命令层 FlameFog）。
+// 容器 AABB = CPU 在 LowerFlameFog 里保守算出并打包（= 剪枝用同值）；此处仅求交，不重算公式。
 FogSegment SampleFlame(FogBodyData d, vec3 ro, vec3 rd,
                        float zk, float zk1, float znear) {
     FogSegment s = FogNoHit();
     vec3 box_h = FogBoxHalf(d);
-    float ul = length(FogUp(d));
-    vec3 up = (ul > 1e-6) ? (FogUp(d) / ul) : vec3(0.0, 1.0, 0.0);   // 防零向量
+    vec3 fuel_c = FogFuelCenter(d);
     float shell = FogShell(d);
     float plume = FogPlume(d);
+    float expand = FogExpand(d);
+    float decay = FogDecay(d);
     if (box_h.x <= 0.0 || box_h.y <= 0.0 || box_h.z <= 0.0 || shell <= 0.0) { return s; }
-
-    vec3 up_abs = abs(up);
-    vec3 cont_center = FogCenter(d) + 0.5 * plume * up;
-    vec3 cont_half = box_h + vec3(shell) + 0.5 * plume * up_abs;
 
     float o0;
     float o1;
-    if (!RayObb(cont_center, vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0),
-                cont_half, ro, rd, o0, o1)) {
+    if (!RayObb(FogContCenter(d), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0),
+                FogContHalf(d), ro, rd, o0, o1)) {
         return s;
     }
     float a = max(o0, max(zk, znear));
     float b = min(o1, zk1);
     if (b <= a) { return s; }
 
-    vec3 p = ro + (0.5 * (a + b)) * rd;
-    vec3 q = p - FogCenter(d);   // 燃料盒局部坐标（MVP 轴对齐 ⇒ 即 world 轴）
+    vec3 p = ro + (0.5 * (a + b)) * rd;   // 段中点采样
+    vec3 q = p - fuel_c;                   // 燃料盒局部坐标（= 世界轴：盒轴对齐）
 
-    // 包裹壳：盒 SDF ∈ (0, shell) 处线性衰减；盒内 (dbox<0) 不着火。
+    // 包裹壳：盒表面外侧 [0,shell] 线性衰减（盒内不着火）；整块燃料完整包裹。
     vec3 e = abs(q) - box_h;
     float dbox = length(max(e, vec3(0.0))) + min(max(e.x, max(e.y, e.z)), 0.0);
     float w_shell = 0.0;
@@ -355,16 +383,20 @@ FogSegment SampleFlame(FogBodyData d, vec3 ro, vec3 rd,
         w_shell = 1.0 - dbox / shell;
     }
 
-    // 浮力羽流：盒顶沿 up（半高 = 支撑函数）。
+    // 羽流柱：盒沿世界 +Y 挤出（盒顶面以上的柱；横向随高度微扩 + 顺风水平平移）。
     float w_plume = 0.0;
     if (plume > 0.0) {
-        float support = up_abs.x * box_h.x + up_abs.y * box_h.y + up_abs.z * box_h.z;
-        float along = dot(q, up);
-        float h = along - support;
+        float h = q.y - box_h.y;              // 盒顶以上的高度（沿世界 +Y）
         if (h > 0.0 && h < plume) {
-            float rho = length(q - along * up);
-            float rmax = max(box_h.x, max(box_h.y, box_h.z)) + h;   // 锥形外扩
-            w_plume = max(0.0, 1.0 - rho / rmax) * (1.0 - h / plume);
+            float ss = h / plume;
+            float bh_min = min(box_h.x, min(box_h.y, box_h.z));
+            float delta = expand * ss * bh_min;                                   // 横向随高度微扩
+            vec2 off = FogWindDir(d) * (FogLean(d) * ss + FogBend(d) * ss * ss);  // 顺风平移
+            vec2 pq = vec2(q.x, q.z) - off;
+            float viol = max(abs(pq.x) - (box_h.x + delta), abs(pq.y) - (box_h.z + delta));
+            float feather = 0.35 * bh_min;
+            float soft = clamp(1.0 - max(viol, 0.0) / max(feather, 1e-4), 0.0, 1.0);
+            w_plume = soft * pow(max(1.0 - ss, 1e-6), decay);
         }
     }
 

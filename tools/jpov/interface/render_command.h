@@ -487,23 +487,29 @@ struct PointFog {
 
 // 燃料盒包裹燃烧（FlameFog）—— 命令层**火焰**子 command，降维成后端 kFlame 团。
 //
-// 语义：一个**燃料盒**（center + size；MVP 轴对齐）被火焰包裹燃烧。火焰「形」（MVP，暂不含 3D 纹理）：
-//   · **包裹壳**：燃料盒**表面外侧**厚 shell 的一层自发光（盒内 = 固体燃料，不发光/不消光）；
-//   · **浮力羽流**：盒顶沿 up 方向伸出的一段上升柱（长 plume）。
-// 火焰**方向**由 up 给出（默认世界 +Y =「火苗朝上」）；旺盛度 vigor 放大自发光 emission。
+// 语义：一个**燃料盒**（center + size；轴对齐世界系）被火焰包裹燃烧。火焰「低频形」：
+//   · **包裹壳**：燃料盒**整个表面外侧**厚 shell 的一层自发光（盒内 = 固体燃料，不发光/不消光）；
+//   · **浮力羽流柱**：从燃料盒**顶面**沿**世界 +Y**（浮力恒向上）升起的柱（长 plume）——横向随高度微扩
+//     （expand），强度沿高度按 (1−s)^decay 衰减（软顶）。这是**集合尺度**（一大块燃料）的低频外形；
+//     「很多火苗」属高频细节（将来的噪声），见 tools/jpov/docs/jpov_fire_fog_design.md。
+// **浮力方向固定为世界 +Y**（不做 per-团输入；要“歪的燃料”以后旋转盒本身）；**风**（wind）把羽流柱截面
+// 沿**水平风向**随高度平移（物理 = flame tilt / drag），是火焰倾斜的**唯一**来源。
 //
 // 源项与 PointFog 同规则（J = albedo·L_light + ε），走**同一条** froxel 体积管线。
 //
-// 字段（按此顺序聚合初始化）：{ center, size, up, shell, plume, vigor, sigma, albedo, emission }
+// 字段（按此顺序聚合初始化）：{ center, size, shell, plume, expand, decay, wind, vigor, sigma,
+//                              albedo, emission }
 //
-// Pre-condition: size 各分量 > 0；up 非零向量（会被归一化）；shell > 0；plume >= 0；
+// Pre-condition: size 各分量 > 0；shell > 0；plume >= 0；expand >= 0；decay >= 0；wind 任意；
 //                vigor >= 0；sigma >= 0；albedo 各通道 ∈ [0,1]；emission 各通道 >= 0。
 struct FlameFog {
     Vec3f center;    // 燃料盒中心（世界坐标）
     Vec3f size;      // 燃料盒长宽高（米，各 > 0）
-    Vec3f up;        // 火苗主方向（浮力方向，世界系；默认 {0,1,0}）—— 归一化后使用
     float shell;     // 包裹外壳厚度（米，> 0）：盒表面外侧的自发光层
-    float plume;     // 盒顶上方浮力羽流段长度（米，>= 0）
+    float plume;     // 盒顶上方浮力羽流柱长度（米，>= 0）
+    float expand;    // 羽流横向微扩系数（>= 0）：半宽 = 盒半宽·(1 + expand·s)；0 = 纯柱
+    float decay;     // 羽流强度衰减指数（>= 0）：I(s) = (1−s)^decay；越大顶端越软
+    Vec3f wind;      // 风速（m/s，世界系；只用**水平分量**）：把羽流截面顺风随高度平移（{0,0,0} = 无风）
     float vigor;     // 旺盛程度（>= 0）：自发光（emission）的整体放大系数
     float sigma;     // 消光系数 σ_t（1/m，>= 0）
     Color albedo;    // 单散射反照率 a = σ_s/σ_t ∈ [0,1]（散射色，逐通道）

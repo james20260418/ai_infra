@@ -64,7 +64,7 @@ inline FogBody LowerPointFog(const PointFog& fog) {
     b.sigma = fog.sigma;
     b.albedo = fog.albedo;
     b.emission = fog.emission;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 32; ++i) {   // 零掉整个参数区（params 已扩到 32；未用位保持 0）
         b.params[i] = 0.0f;
     }
     b.params[0] = static_cast<float>(fog.attenuation);
@@ -74,12 +74,14 @@ inline FogBody LowerPointFog(const PointFog& fog) {
 
 // 命令层火焰 → 后端统一团（**kFlame** 燃料盒包裹燃烧）。
 //
-// 容器 OBB（CPU 剪枝 / z 范围用）= 燃料盒**沿 up 外扩 plume、各向再外扩 shell** 的保守包围，
-// 轴对齐（MVP）。与 GLSL `SampleFlame` 用**同一公式**（两边必须一致，否则剪枝漏火）。kind = kFlame；
-// params[0..2] = up（单位向量）、params[3] = shell、params[4] = plume、params[5] = vigor。
-// 燃料盒本身（center / box_half）不入 params —— 由 bound（容器）+ up/shell/plume 在**打包时**反解
-//（与 kRoundBox「bound = 外沿容器，内部尺寸反解」同套路）。
-// Pre-conditions: size 各分量 > 0；up 非零；shell > 0；plume >= 0；vigor >= 0；sigma >= 0；
+// 「低频形」= 燃料盒**表面外侧壳**（shell，完整包裹） + **盒沿世界 +Y 挤出**的羽流柱（长 plume；
+// 横向随高度微扩 expand、强度按 (1−s)^decay 软顶）；**风**（只取水平分量）把截面顺风平移 lean·s+bend·s²。
+// 浮力固定 +Y；无接缝；侧向为“充气轮廓”软边。
+// 容器 AABB（CPU 剪枝 / z 范围）= 上式的**保守** world-轴 AABB（燃料盒⊕shell ∪ 羽流柱，含充气与剪切）；
+// 容器与**已折算的** lean/bend（由风速推得，见 fog_body.h kFlameWind*）一并**打包**——GLSL 直接
+// 消费，不各自持常量 / 不重算公式（单一来源）。燃料盒 center/box_half **直接打包**。
+// params 字段 → 见 fog_body.h flame_param。
+// Pre-conditions: size 各分量 > 0；up 非零；shell > 0；plume/expand/decay/vigor/sigma >= 0；
 //                 albedo ∈ [0,1]；emission >= 0
 inline FogBody LowerFlameFog(const FlameFog& f) {
     CHECK_GT(f.size.x(), 0.0f) << "FlameFog.size 各分量必须 > 0";
@@ -87,6 +89,8 @@ inline FogBody LowerFlameFog(const FlameFog& f) {
     CHECK_GT(f.size.z(), 0.0f) << "FlameFog.size 各分量必须 > 0";
     CHECK_GT(f.shell, 0.0f) << "FlameFog.shell（包裹壳厚）必须 > 0";
     CHECK_GE(f.plume, 0.0f) << "FlameFog.plume（羽流段长）必须 >= 0";
+    CHECK_GE(f.expand, 0.0f) << "FlameFog.expand（半径微扩系数）必须 >= 0";
+    CHECK_GE(f.decay, 0.0f) << "FlameFog.decay（强度衰减指数）必须 >= 0";
     CHECK_GE(f.vigor, 0.0f) << "FlameFog.vigor（旺盛度）必须 >= 0";
     CHECK_GE(f.sigma, 0.0f) << "FlameFog.sigma（消光系数 1/m）必须 >= 0";
     CHECK_GE(f.albedo.r, 0.0f) << "FlameFog.albedo 各通道必须 ∈ [0,1]";
@@ -99,34 +103,76 @@ inline FogBody LowerFlameFog(const FlameFog& f) {
     CHECK_GE(f.emission.g, 0.0f) << "FlameFog.emission 各通道必须 >= 0";
     CHECK_GE(f.emission.b, 0.0f) << "FlameFog.emission 各通道必须 >= 0";
 
-    const float up_norm = f.up.Norm();
-    CHECK_GT(up_norm, 1.0e-6f) << "FlameFog.up 必须是非零向量";
-    const Vec3f up = f.up * (1.0f / up_norm);
+    const Vec3f box_half = f.size * 0.5f;
 
-    const Vec3f box_half = f.size * 0.5f;   // 燃料盒半尺寸
+    // 风（只取【水平】分量）→ 截面平移（已折算）：只有水平单位方向 + 两个标量进 GPU。
+    const float wx = f.wind.x();
+    const float wz = f.wind.z();
+    const float wind_speed = std::sqrt(wx * wx + wz * wz);
+    float wind_x = 0.0f;
+    float wind_z = 0.0f;
+    float lean = 0.0f;
+    float bend = 0.0f;
+    if (wind_speed > 1.0e-6f) {
+        wind_x = wx / wind_speed;
+        wind_z = wz / wind_speed;
+        lean = kFlameWindLean * wind_speed;
+        bend = kFlameWindBend * std::pow(wind_speed, 1.3f);
+    }
+
+    // 容器 AABB（保守）：燃料盒 ⊕ shell ∪ 羽流柱（盒顶沿 +Y，含横向充气 delta 与顺风剪切 shear）。
+    Vec3f lo = f.center - box_half - Vec3f(f.shell, f.shell, f.shell);
+    Vec3f hi = f.center + box_half + Vec3f(f.shell, f.shell, f.shell);
+    if (f.plume > 0.0f) {
+        const float ref_len = std::min(box_half.x(), std::min(box_half.y(), box_half.z()));
+        const float delta = f.expand * ref_len;   // 横向充气上限（s=1）
+        const float shear = lean + bend;           // 顺风剪切上限（s=1）
+        const float hx = box_half.x() + delta;
+        const float hz = box_half.z() + delta;
+        const float sx = wind_x * shear;
+        const float sz = wind_z * shear;
+        lo = Vec3f(std::min(lo.x(), std::min(f.center.x() - hx, f.center.x() + sx - hx)),
+                   std::min(lo.y(), f.center.y() + box_half.y()),
+                   std::min(lo.z(), std::min(f.center.z() - hz, f.center.z() + sz - hz)));
+        hi = Vec3f(std::max(hi.x(), std::max(f.center.x() + hx, f.center.x() + sx + hx)),
+                   std::max(hi.y(), f.center.y() + box_half.y() + f.plume),
+                   std::max(hi.z(), std::max(f.center.z() + hz, f.center.z() + sz + hz)));
+    }
+
     FogBody b;
     b.kind = FogFieldKind::kFlame;
     b.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
     b.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
     b.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
-    // 容器 = 盒 ⊞「各向 shell + 沿 up plume/2 偏移外扩」（与 SampleFlame 一致，保守不漏）。
-    b.bound.center = f.center + up * (0.5f * f.plume);
-    b.bound.half_extent = Vec3f(
-        box_half.x() + f.shell + 0.5f * f.plume * std::abs(up.x()),
-        box_half.y() + f.shell + 0.5f * f.plume * std::abs(up.y()),
-        box_half.z() + f.shell + 0.5f * f.plume * std::abs(up.z()));
+    b.bound.center = (lo + hi) * 0.5f;
+    b.bound.half_extent = (hi - lo) * 0.5f;
     b.sigma = f.sigma;
     b.albedo = f.albedo;
     b.emission = f.emission;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 32; ++i) {
         b.params[i] = 0.0f;
     }
-    b.params[0] = up.x();
-    b.params[1] = up.y();
-    b.params[2] = up.z();
-    b.params[3] = f.shell;
-    b.params[4] = f.plume;
-    b.params[5] = f.vigor;
+    b.params[flame_param::kContX] = b.bound.center.x();
+    b.params[flame_param::kContY] = b.bound.center.y();
+    b.params[flame_param::kContZ] = b.bound.center.z();
+    b.params[flame_param::kContHx] = b.bound.half_extent.x();
+    b.params[flame_param::kContHy] = b.bound.half_extent.y();
+    b.params[flame_param::kContHz] = b.bound.half_extent.z();
+    b.params[flame_param::kCenterX] = f.center.x();
+    b.params[flame_param::kCenterY] = f.center.y();
+    b.params[flame_param::kCenterZ] = f.center.z();
+    b.params[flame_param::kBoxHx] = box_half.x();
+    b.params[flame_param::kBoxHy] = box_half.y();
+    b.params[flame_param::kBoxHz] = box_half.z();
+    b.params[flame_param::kWindX] = wind_x;
+    b.params[flame_param::kWindZ] = wind_z;
+    b.params[flame_param::kLean] = lean;
+    b.params[flame_param::kBend] = bend;
+    b.params[flame_param::kShell] = f.shell;
+    b.params[flame_param::kPlume] = f.plume;
+    b.params[flame_param::kVigor] = f.vigor;
+    b.params[flame_param::kExpand] = f.expand;
+    b.params[flame_param::kDecay] = f.decay;
     return b;
 }
 
