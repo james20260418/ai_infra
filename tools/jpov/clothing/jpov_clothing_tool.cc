@@ -80,6 +80,8 @@ struct CliOptions {
     float body_trans[2] = {0.0f, 0.0f};  // --body_trans x y（整体平动，世界 m）
     float body_twist_deg = 0.0f;     // --body_twist_deg：下半身额外扭转（度，±90）
     bool  has_body_twist = false;    // 是否给了 --body_twist_deg
+    float upper_twist_deg = 0.0f;    // --upper_twist_deg：上半身额外扭转（度，±90）
+    bool  has_upper_twist = false;   // 是否给了 --upper_twist_deg
     int   lag_warmup_frames = 0;     // --lag_warmup_frames：headless 出图前先推进 N 帧（让 tracker 起滞后）
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
@@ -325,6 +327,13 @@ CliOptions ParseCli(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--body_twist_deg 缺少数值参数，忽略";
             }
+        } else if (arg == "--upper_twist_deg") {
+            if (i + 1 < argc) {
+                opt.upper_twist_deg = static_cast<float>(std::atof(argv[++i]));
+                opt.has_upper_twist = true;
+            } else {
+                LOG(WARNING) << "--upper_twist_deg 缺少数值参数，忽略";
+            }
         } else if (arg == "--lag_warmup_frames") {
             if (i + 1 < argc) {
                 opt.lag_warmup_frames = std::atoi(argv[++i]);
@@ -518,6 +527,9 @@ int main(int argc, char** argv) {
     if (opt.has_body_twist) {
         app.body_twist_deg_ui_ = opt.body_twist_deg;
     }
+    if (opt.has_upper_twist) {
+        app.body_upper_twist_deg_ui_ = opt.upper_twist_deg;
+    }
 
     app.motion_test_enabled_ = opt.motion_enable;
     if (opt.motion_phase >= 0.0f) {
@@ -598,12 +610,14 @@ int main(int argc, char** argv) {
             const float tx = app.body_trans_ui_[0];
             const float ty = app.body_trans_ui_[1];
             const float tw = app.body_twist_deg_ui_;
+            const float uw = app.body_upper_twist_deg_ui_;
             for (int i = 1; i <= opt.lag_warmup_frames; ++i) {
                 const float f = static_cast<float>(i) /
                                 static_cast<float>(opt.lag_warmup_frames);
                 app.body_trans_ui_[0] = tx * f;
                 app.body_trans_ui_[1] = ty * f;
                 app.body_twist_deg_ui_ = tw * f;
+                app.body_upper_twist_deg_ui_ = uw * f;
                 app.RunOnce(jpov::InputSnapshot(), winfo, "/tmp/jpov_lag_warmup.png");
             }
         }
