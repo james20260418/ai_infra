@@ -47,7 +47,8 @@ tools/jpov/tools/vegetation/
 ├── README.md            # 本文档（依赖 + 工作流 + 渲染步骤）
 ├── build_tree.py        # 【核心】Blender headless 脚本：树种预设 → 带纹理 GLB
 ├── render_hero.py       # Blender Cycles 出片（大图 hero shot）
-└── fetch_textures.sh    # 下载 CC0 贴图（ambientCG）
+├── fetch_textures.sh    # 下载 CC0 贴图（ambientCG）
+└── samples/             # 【范本】产物样例 + 过程动作记录（照着做用），见 samples/README.md
 ```
 
 ---
