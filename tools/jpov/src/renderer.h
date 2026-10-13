@@ -55,6 +55,11 @@ struct Renderer {
     TextureManager& GetTextureManager() { return texture_mgr_; }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
 
+    // SetFireVolume：读取 .jpovvol 体积文件（见 fire_volume.h）并上传为 fire_fog 的**共享 3D 火纹理**
+    //（kVolumeTex 团采样）。全局一张；重复调用替换。
+    // Pre-conditions: Init 已调用；path 非空；文件格式合法（否则 LOG(FATAL)）。
+    void SetFireVolume(const std::string& path);
+
     // 上一次拾取查询的结果（方法甲：渲染时填入 last_pick_，下帧读取）。
     const PickResult& last_pick() const { return last_pick_; }
 

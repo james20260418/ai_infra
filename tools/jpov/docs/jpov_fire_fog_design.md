@@ -275,6 +275,21 @@ albedo / emission）；主入口 `SampleFogSegment` 按 kind 分派（GLSL330 �
   sigma, albedo, emission }`。
 - **后续（待议）**：`up` 的**主+lag**双方向、`q → 共享 3D 火纹理 UV` 的映射、燃尽前沿等。
 
+### 10.3.3 `kVolumeTex` —— 共享 3D 火纹理体积（2026-10-13）
+
+**一个团**把一张**共享 3D 火纹理**（离线烘的 fire VDB：R=density、G=temperature，均 ∈[0,1]）按盒映射进体积管线。
+
+- **域**：体积盒（OBB，MVP 轴对齐）；盒直接映射到纹理 `[0,1]³`（`uvw = q/(2·half) + 0.5`，盒外不采样 ⇒ 无场）。
+- **采样**：`σ = sigma · density^density_pow`（`density_pow ≥ 1` 收薄）；`emission = emission_color · temperature · temp_scale`。
+- **严格 O(1)**：求交 + 一次 `texture(sampler3D)`（无循环/无迭代）。
+- 纹理**全局一张**：由 `FireFogRenderer::SetFireVolume(FireVolume)`（经 `Renderer::SetFireVolume` / `JPOV::SetFireVolume(path)`）上传；
+  文件格式 `.jpovvol`（见 `fire_volume.h`），由离线转换器 `tools/jpov/tools/vdb_to_jpovvol.py`（pyopenvdb）从 VDB 生成。
+- 用户可配：`VolumeFog{ center, size(长宽高), sigma, density_pow, temp_scale, albedo, emission }`。
+- ⚠️ **已知**：froxel 管线每 tile 用**一条中心射线 + 每 z 段一次点采样** → 特写单个体积时横向分辨率≈tile_px，
+  细节弱于逐像素 raymarch；换细 `tile_px` / 高 `nz` 可改善（llvmpipe 上更慢）。
+  - ⚠️ **拉远断裂**：远处火焰占的 tile 变少，很多 tile 的中心射线打不到细火柱 → 中部空洞。
+  - ⇒ **主角近景火**改用**逐像素 raymarch 渲染器**：设计与资产见 `/james_pm/fire_hero/`（`DESIGN.md`）。
+
 ### 10.4 统一采样契约 —— 唯一 kind 分支点
 
 多类采样器**只在一个地方分叉**：`SampleFogSegment`（按 `d.kind` 分派）；`OBB→TC` 剪枝 / 分段 / 合成全

@@ -516,6 +516,22 @@ struct FlameFog {
     Color emission;  // 自发光系数 ε（HDR 辐射亮度/米，>= 0）；与密度无关
 };
 
+// 共享 3D 火纹理体积（VolumeFog）—— 命令层**体积火**子 command，降维成后端 kVolumeTex 团。
+//
+// 盒（世界空间 OBB，MVP 轴对齐）映射到一张**共享** 3D 火纹理（density + temperature，均 ∈[0,1]）：
+//   · 该点消光 σ = sigma · density^density_pow（盒外无场）；
+//   · 自发光 = emission · temperature · temp_scale（HDR）。
+// 共享纹理由 FireFogRenderer 经 SetFireVolume 上传一次（见 renderer.h）；本 command 只描述摆放与缩放。
+struct VolumeFog {
+    Vec3f center;       // 体积盒中心（世界坐标）
+    Vec3f size;         // 体积盒长宽高（米，各 > 0）—— 映射到纹理 [0,1]^3
+    float sigma;        // 密度→消光比例 σ_t（1/m，>= 0）
+    float density_pow;  // 密度幂（>= 1，收薄；1 = 线性）
+    float temp_scale;   // 温度→自发光整体放大（>= 0）
+    Color albedo;       // 单散射反照率 a ∈ [0,1]（散射色，逐通道）
+    Color emission;     // 自发光色（HDR 辐射亮度/米，>= 0）
+};
+
 // Fire-Fog（froxel 体积雾）管线参数。
 //
 // 由雾火查看器暴露以调参；仅在 point_fogs 非空时生效（空则整条管线跳过）。
@@ -549,6 +565,8 @@ struct FireFogParams {
     //     派生 froxel 纹理两轴 ≤ kMaxFroxelDim。
     int nz = 256;
     int tile_px = 16;
+    // 共享 3D 火纹理的播放时间（单位：帧，含小数；调用方按 fps 推进并自环）。仅对 kVolumeTex 团生效。
+    float volume_time = 0.0f;
 };
 
 // 全局平行光（太阳 Directional Light）。
@@ -1884,6 +1902,10 @@ struct RenderCommandList {
     // 燃料盒包裹燃烧列表（世界空间）。与 point_fogs 走**同一条** Fire-Fog 体积管线（降维成
     // 后端 kFlame 团，与 kRoundBox 团在同一 inject pass 内 over 合成）。空列表时零开销跳过。
     std::vector<FlameFog> flame_fogs;
+
+    // 共享 3D 火纹理体积列表（世界空间）。与 point_fogs / flame_fogs 走**同一条** Fire-Fog 体积管线
+    //（降维成后端 kVolumeTex 团）。需先经 FireFogRenderer::SetFireVolume 上传共享纹理，否则采样为 0。
+    std::vector<VolumeFog> volume_fogs;
 
     // Fire-Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
     std::optional<FireFogParams> fire_fog;

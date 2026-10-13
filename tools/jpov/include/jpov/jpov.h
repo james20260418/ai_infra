@@ -285,6 +285,13 @@ public:
     // Pre-condition: Init() 已调用
     void ReleaseGltf(const jpov::GltfObject& gltf);
 
+    // SetFireVolume: 上传 fire_fog 的**共享 3D 火纹理**（命令层 VolumeFog / 后端 kVolumeTex 团采样）。
+    // 读 .jpovvol 体积文件（格式见 src/fire_fog/fire_volume.h）；全局一张，重复调用替换。
+    //
+    // Pre-condition: Init() 已调用；path 非空
+    // 文件不存在 / 格式非法 → LOG(FATAL)（不静默回退）
+    void SetFireVolume(const std::string& path);
+
     // 上一次拾取查询的结果（方法甲：渲染时填入，供下帧 OneIteration 读取）。
     //
     // 用户在 OneIteration 里发起拾取查询（设 cmds->pick.enabled=true + 屏幕坐标），

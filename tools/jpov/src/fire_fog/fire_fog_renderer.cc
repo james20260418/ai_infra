@@ -51,12 +51,16 @@ constexpr int kBodyTexelsPerFog = jpov::fog_layout::kTexelsPerBody;   // 每团 
 // 5=点光源 tile 索引；CSM 阴影从 6 起（6..6+kMaxCascades-1）。
 constexpr int kLightIndexTexUnit = 5;
 constexpr int kShadowTexUnitBase = 6;
+// 共享 3D 火纹理单元（sampler2DArray uFireVolTex）。取阴影级联之后、不与任何现有单元冲突。
+constexpr int kFireVolTexUnit = kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades;   // = 11
+// 共享火纹理 2D 数组的图层数上限（layers = nz*nframes；GL 常见上限 2048，llvmpipe 亦然）。
+constexpr int kMaxFireVolLayers = 2048;
 
 // Draw() 会触碰的纹理单元数：inject 用 0..5（团 tile / z 范围 / 团属性 / tile 射线 /
-// z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1)；scatter 用 0..kMaxLevels；composite 用 0/1。
-// 取上界 kShadowTexUnitBase+kMaxCascades（=11，覆盖 0..10；kMaxLevels=5 也含在内）。
+// z 切片边界 / 光源 tile）+ CSM 6..(6+kMaxCascades-1) + 共享 3D 火纹理（kFireVolTexUnit）；
+// scatter 用 0..kMaxLevels；composite 用 0/1。
 int TexUnitsTouched() {
-    return kShadowTexUnitBase + jpov::ShadowConfig::kMaxCascades;
+    return kFireVolTexUnit + 1;   // 覆盖 0..kFireVolTexUnit
 }
 
 // 4x4 列主序求逆（Gauss-Jordan + 部分主元）。无法求逆返回 false。
@@ -180,6 +184,17 @@ void FireFogRenderer::Init(ShaderManager* shader_mgr) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, 1, 1, 0, GL_RED, GL_FLOAT, &one);
     glBindTexture(GL_TEXTURE_2D, 0);
+
+    // 1×1×1 RG8 哑元 2D 数组纹理（值 0）：未上传共享火纹理时绑定，采样退化为「无场」。
+    const unsigned char zero_rg[2] = {0, 0};
+    glGenTextures(1, &dummy_vol_tex_);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, dummy_vol_tex_);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG8, 1, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, zero_rg);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 }
 
 void FireFogRenderer::Finalize() {
@@ -250,6 +265,18 @@ void FireFogRenderer::Finalize() {
         glDeleteTextures(1, &dummy_depth_tex_);
         dummy_depth_tex_ = 0;
     }
+    if (fire_vol_tex_ != 0) {
+        glDeleteTextures(1, &fire_vol_tex_);
+        fire_vol_tex_ = 0;
+    }
+    fire_vol_nx_ = 0;
+    fire_vol_ny_ = 0;
+    fire_vol_nz_ = 0;
+    fire_vol_frames_ = 0;
+    if (dummy_vol_tex_ != 0) {
+        glDeleteTextures(1, &dummy_vol_tex_);
+        dummy_vol_tex_ = 0;
+    }
     froxel_w_ = 0;
     froxel_h_ = 0;
     tile_tex_w_ = 0;
@@ -262,6 +289,48 @@ void FireFogRenderer::Finalize() {
     prog_scatter_ = 0;
     prog_composite_ = 0;
     shader_mgr_ = nullptr;
+}
+
+void FireFogRenderer::SetFireVolume(const FireVolume& vol) {
+    CHECK(!vol.empty()) << "SetFireVolume: 体积数据为空";
+    CHECK_GT(vol.nx, 0) << "SetFireVolume: nx 必须 > 0";
+    CHECK_GT(vol.ny, 0) << "SetFireVolume: ny 必须 > 0";
+    CHECK_GT(vol.nz, 0) << "SetFireVolume: nz 必须 > 0";
+    CHECK_GE(vol.nframes, 1) << "SetFireVolume: nframes 必须 >= 1";
+    CHECK_EQ(vol.channels, 2) << "SetFireVolume: 只支持 2 通道（R=density, G=temperature）";
+
+    const size_t want = static_cast<size_t>(vol.nx) * vol.ny * vol.nz * vol.nframes * vol.channels;
+    CHECK_EQ(vol.uint8 ? vol.bytes.size() : vol.data.size(), want)
+        << "SetFireVolume: 数据长度与维数×通道不符";
+
+    if (fire_vol_tex_ == 0) {
+        glGenTextures(1, &fire_vol_tex_);
+    }
+    // 2D 数组：layer = 帧；每层 = nx×(ny*nz)（行 = z*ny + y，行内 x 最快）。layers = nframes。
+    const int layers = vol.nframes;
+    CHECK_LE(layers, kMaxFireVolLayers) << "SetFireVolume: 帧数 " << layers
+                                        << " 超过数组层上限 " << kMaxFireVolLayers;
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, fire_vol_tex_);
+    // 层内 x/y 双线性（z 与帧的插值在采样器里手写）；边缘 clamp。
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const int layer_h = vol.ny * vol.nz;
+    if (vol.uint8) {
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG8, vol.nx, layer_h, layers, 0,
+                     GL_RG, GL_UNSIGNED_BYTE, vol.bytes.data());
+    } else {
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG32F, vol.nx, layer_h, layers, 0,
+                     GL_RG, GL_FLOAT, vol.data.data());
+    }
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    fire_vol_nx_ = vol.nx;
+    fire_vol_ny_ = vol.ny;
+    fire_vol_nz_ = vol.nz;
+    fire_vol_frames_ = vol.nframes;
 }
 
 void FireFogRenderer::EnsureTileTexture(int grid_cols, int grid_rows) {
@@ -449,6 +518,7 @@ void FireFogRenderer::EnsureTargets(int grid_cols, int grid_rows, int sblock,
 
 void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            const std::vector<FlameFog>& flame_fogs,
+                           const std::vector<VolumeFog>& volume_fogs,
                            const std::vector<PointLight>& point_lights,
                            const Camera& cam,
                            const float view_proj[16],
@@ -458,7 +528,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            const FireFogParams& params,
                            const FireFogLighting& light) {
     CHECK(shader_mgr_ != nullptr) << "FireFogRenderer::Init 未调用";
-    if (fogs.empty() && flame_fogs.empty()) {
+    if (fogs.empty() && flame_fogs.empty() && volume_fogs.empty()) {
         return;   // 零开销
     }
     CHECK_GT(viewport_w, 0);
@@ -517,16 +587,22 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex_binding[static_cast<size_t>(u)]);
     }
+    // 共享 3D 火纹理绑定点（2D-array 绑定与 2D 分开，单独存取复原）。
+    GLint prev_vol_binding = 0;
+    glActiveTexture(GL_TEXTURE0 + kFireVolTexUnit);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &prev_vol_binding);
     glActiveTexture(GL_TEXTURE0);
 
-    // ── 命令层雾体（圆角盒 + 火焰）→ 后端统一团（FogBody）──
-    //   两种子 command 先各自降维，再**合并**进同一份团列表（同一 inject pass over 合成）。
+    // ── 命令层雾体（圆角盒 + 火焰 + 体积火）→ 后端统一团（FogBody）──
+    //   三种子 command 先各自降维，再**合并**进同一份团列表（同一 inject pass over 合成）。
     const int round_count = static_cast<int>(fogs.size());
     const int flame_count = static_cast<int>(flame_fogs.size());
-    int count = round_count + flame_count;
+    const int vol_count = static_cast<int>(volume_fogs.size());
+    int count = round_count + flame_count + vol_count;
     if (count > kMaxTotalFogs) {
-        LOG(WARNING) << "point_fogs + flame_fogs 数量 " << count << " 超过上限 " << kMaxTotalFogs
-                     << "，仅前 " << kMaxTotalFogs << " 个生效";
+        LOG(WARNING) << "point_fogs + flame_fogs + volume_fogs 数量 " << count
+                     << " 超过上限 " << kMaxTotalFogs << "，仅前 " << kMaxTotalFogs
+                     << " 个生效";
         count = kMaxTotalFogs;
     }
     bodies_.clear();
@@ -536,6 +612,9 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     }
     for (int i = 0; i < flame_count && static_cast<int>(bodies_.size()) < count; ++i) {
         bodies_.push_back(LowerFlameFog(flame_fogs[static_cast<size_t>(i)]));
+    }
+    for (int i = 0; i < vol_count && static_cast<int>(bodies_.size()) < count; ++i) {
+        bodies_.push_back(LowerVolumeFog(volume_fogs[static_cast<size_t>(i)]));
     }
 
     // ── CPU 屏幕 tile 剪枝（每 tile ≤K 个团索引）+ 每 tile 保守 z 范围（GL-free）──
@@ -645,6 +724,32 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
             t6[2] = fp[flame_param::kVigor];
             t6[3] = fp[flame_param::kExpand];
             t7[0] = fp[flame_param::kDecay];
+        } else if (b.kind == FogFieldKind::kVolumeTex) {
+            // 字段 → volumetex union（t2..t6，见 fog_body.h 的按作用域布局表 / volume_param）。
+            // 盒为轴对齐（MVP）：轴取单位基，几何进 center/bound_h*。
+            const float* vp = b.params;
+            float* t2 = &body_attr[base + 2 * 4];
+            float* t3 = &body_attr[base + 3 * 4];
+            float* t4 = &body_attr[base + 4 * 4];
+            float* t5 = &body_attr[base + 5 * 4];
+            float* t6 = &body_attr[base + 6 * 4];
+            t2[0] = vp[volume_param::kCenterX];
+            t2[1] = vp[volume_param::kCenterY];
+            t2[2] = vp[volume_param::kCenterZ];
+            t2[3] = vp[volume_param::kHalfX];
+            t3[0] = vp[volume_param::kHalfY];
+            t3[1] = vp[volume_param::kHalfZ];
+            t3[2] = 1.0f;   // axis0_x
+            t3[3] = 0.0f;   // axis0_y
+            t4[0] = 0.0f;   // axis0_z
+            t4[1] = 0.0f;   // axis1_x
+            t4[2] = 1.0f;   // axis1_y
+            t4[3] = 0.0f;   // axis1_z
+            t5[0] = 0.0f;   // axis2_x
+            t5[1] = 0.0f;   // axis2_y
+            t5[2] = 1.0f;   // axis2_z
+            t5[3] = vp[volume_param::kDensityPow];
+            t6[0] = vp[volume_param::kTempScale];
         }
     }
     glBindTexture(GL_TEXTURE_2D, fog_body_tex_);
@@ -706,6 +811,15 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glBindTexture(GL_TEXTURE_2D, tile_light_tex_);
     glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uTileLightIndices"),
                 kLightIndexTexUnit);
+    // 共享 3D 火纹理（kVolumeTex 团采样；未上传则绑 1×1×1 哑元 ⇒ 采样为 0）。
+    glActiveTexture(GL_TEXTURE0 + kFireVolTexUnit);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, fire_vol_tex_ != 0 ? fire_vol_tex_ : dummy_vol_tex_);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uFireVolTex"), kFireVolTexUnit);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uVolumeNY"), fire_vol_ny_ > 0 ? fire_vol_ny_ : 1);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uVolumeNZ"), fire_vol_nz_ > 0 ? fire_vol_nz_ : 1);
+    glUniform1i(shader_mgr_->GetUniform(prog_inject_, "uVolumeFrames"),
+                fire_vol_frames_ > 0 ? fire_vol_frames_ : 1);
+    glUniform1f(shader_mgr_->GetUniform(prog_inject_, "uVolumeTime"), params.volume_time);
     glActiveTexture(GL_TEXTURE0);
     glUniform3f(shader_mgr_->GetUniform(prog_inject_, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
@@ -876,6 +990,9 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
         glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prev_tex_binding[static_cast<size_t>(u)]));
     }
+    // 复原共享火纹理单元的 2D-array 绑定（本趟在此单元绑过 2D 数组纹理）。
+    glActiveTexture(GL_TEXTURE0 + kFireVolTexUnit);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, static_cast<GLuint>(prev_vol_binding));
     glActiveTexture(static_cast<GLenum>(prev_active_tex));
 }
 

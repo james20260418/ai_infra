@@ -11,6 +11,7 @@ cc_library(
         "fire_fog_shader.h",
         "fire_fog_lower.h",
         "fog_body.h",
+        "fire_volume.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -35,6 +36,7 @@ cc_library(
     hdrs = [
         "fire_fog_lower.h",
         "fog_body.h",
+        "fire_volume.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -99,6 +101,19 @@ cc_test(
     deps = [
         ":fire_fog_lower",
         ":fire_fog_shader",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# FireVolume（.jpovvol）读取器单测（GL-free）。
+cc_test(
+    name = "fire_volume_test",
+    srcs = ["fire_volume_test.cc"],
+    deps = [
+        ":fire_fog_lower",
+        "@glog_static//:glog",
         "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],

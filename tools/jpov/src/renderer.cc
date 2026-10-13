@@ -1805,7 +1805,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
             //    只读 MRT#1 场景深度做 z 裁剪；靠 GL_ONE/GL_SRC_ALPHA 混合与帧缓冲已有
             //    颜色合成（不采样场景颜色）。见 docs/jpov_froxel_design.md。
-            if (!cmds.point_fogs.empty() || !cmds.flame_fogs.empty()) {
+            if (!cmds.point_fogs.empty() || !cmds.flame_fogs.empty()
+                || !cmds.volume_fogs.empty()) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
                 // 只写颜色附件0；雾不碰场景深度附件。
@@ -1838,7 +1839,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.flame_fogs, cmds.point_lights, cam,
+                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.flame_fogs, cmds.volume_fogs,
+                                        cmds.point_lights, cam,
                                         mvp_, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
                                         ff_params, ff_light);
 #ifdef JPOV_WITHOUT_MSAA
@@ -2041,6 +2043,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 break;
         }
     }
+}
+
+void Renderer::SetFireVolume(const std::string& path) {
+    CHECK(!path.empty()) << "Renderer::SetFireVolume: path 为空";
+    const jpov::FireVolume vol = jpov::LoadFireVolumeFile(path);
+    fire_fog_renderer_.SetFireVolume(vol);
+    LOG(INFO) << "SetFireVolume: " << path << "  dims=" << vol.nx << "x" << vol.ny << "x"
+              << vol.nz << " channels=" << vol.channels;
 }
 
 void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {

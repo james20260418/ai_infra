@@ -108,12 +108,25 @@ vec4 OverCompose(vec4 A, vec4 B) {
 //@FOGLAYOUT flame texel=5 x=wind_x y=wind_z z=lean w=bend
 //@FOGLAYOUT flame texel=6 x=shell y=plume z=vigor w=expand
 //@FOGLAYOUT flame texel=7 x=decay y=reserved z=reserved w=reserved
+//@FOGLAYOUT volumetex texel=2 x=center_x y=center_y z=center_z w=bound_hx
+//@FOGLAYOUT volumetex texel=3 x=bound_hy y=bound_hz z=axis0_x w=axis0_y
+//@FOGLAYOUT volumetex texel=4 x=axis0_z y=axis1_x z=axis1_y w=axis1_z
+//@FOGLAYOUT volumetex texel=5 x=axis2_x y=axis2_y z=axis2_z w=density_pow
+//@FOGLAYOUT volumetex texel=6 x=temp_scale y=reserved z=reserved w=reserved
 
 // 采样器种类（与 fog_body.h 的 FogFieldKind 一致）。
 #define FOG_KIND_ROUNDBOX 0
 #define FOG_KIND_FLAME 4
+#define FOG_KIND_VOLUMETEX 5
 
 uniform sampler2D uFogBodyTex;
+// 共享 3D 火纹理（帧序列；R=density, G=temperature，均 ∈[0,1]）。kVolumeTex 采样它。
+// 存储为 2D 数组纹理：layer = frame*nz + z；每层 = nx×(ny 行) 的一张 z 切片（行内 x 最快）。
+uniform sampler2DArray uFireVolTex;
+uniform int   uVolumeNY;      // 体积 y 维数
+uniform int   uVolumeNZ;      // 体积 z 维数（每帧 z 切片数）
+uniform int   uVolumeFrames;  // 帧数
+uniform float uVolumeTime;    // 播放时间（单位：帧，含小数；调用方按 fps 推进）
 
 // 「每团通用数据」d：公共头（所有 kind 含义固定）+ union 区（按 kind 解释）。
 // 含义随 kind 大变（见设计文档 §10.3）；名字按字段而非下标，SampleXXX 里只读自己那段。
@@ -141,6 +154,8 @@ struct FogBodyData {
     float vigor;         // kFlame：旺盛度（自发光放大）
     float expand;        // kFlame：羽流半径微扩系数
     float decay;         // kFlame：羽流强度衰减指数
+    float density_pow;   // kVolumeTex：密度幂（>= 1，收薄）
+    float temp_scale;    // kVolumeTex：温度→自发光整体放大
 };
 
 // 解码器：按团 index 从 uFogBodyTex 取出该团的通用数据 d。
@@ -172,6 +187,8 @@ FogBodyData DecodeFogBody(int bi) {
     d.vigor = 0.0;
     d.expand = 0.0;
     d.decay = 0.0;
+    d.density_pow = 1.0;
+    d.temp_scale = 0.0;
     if (d.kind == FOG_KIND_ROUNDBOX) {
         vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
         vec4 g1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 3, 0), 0);
@@ -204,6 +221,19 @@ FogBodyData DecodeFogBody(int bi) {
         d.vigor       = g4.z;
         d.expand      = g4.w;
         d.decay       = g5.x;
+    } else if (d.kind == FOG_KIND_VOLUMETEX) {
+        vec4 g0 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 2, 0), 0);
+        vec4 g1 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 3, 0), 0);
+        vec4 g2 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 4, 0), 0);
+        vec4 g3 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 5, 0), 0);
+        vec4 g4 = texelFetch(uFogBodyTex, ivec2(bi * FOG_TEXELS_PER_BODY + 6, 0), 0);
+        d.center      = g0.xyz;
+        d.bound_half  = vec3(g0.w, g1.x, g1.y);
+        d.axis0       = vec3(g1.z, g1.w, g2.x);
+        d.axis1       = g2.yzw;
+        d.axis2       = g3.xyz;
+        d.density_pow = g3.w;
+        d.temp_scale  = g4.x;
     }
     return d;
 }
@@ -229,6 +259,8 @@ float FogPlume(FogBodyData d)      { return d.plume; }          // kFlame：羽�
 float FogVigor(FogBodyData d)      { return d.vigor; }          // kFlame：旺盛度
 float FogExpand(FogBodyData d)     { return d.expand; }         // kFlame：半径微扩系数
 float FogDecay(FogBodyData d)      { return d.decay; }          // kFlame：强度衰减指数
+float FogDensityPow(FogBodyData d) { return d.density_pow; }   // kVolumeTex：密度幂
+float FogTempScale(FogBodyData d)  { return d.temp_scale; }    // kVolumeTex：温度→自发光放大
 
 // 圆角盒「外壳归一化距离」t：q = p 的盒局部坐标（世界单位，沿 OBB 轴）。
 //   · 内盒内（各轴 |qᵢ| ≤ box_hᵢ）→ t = 0（无衰减，w = 1）。
@@ -414,6 +446,66 @@ FogSegment SampleFlame(FogBodyData d, vec3 ro, vec3 rd,
     return s;
 }
 
+// ── kVolumeTex 采样器（共享 3D 火纹理；**严格 O(1)**：求交 + 一次 texture 3D 采样）──
+// 盒（OBB）映射到纹理 [0,1]^3：density(tex.r)→消光、temperature(tex.g)→自发光。
+// 盒外 / 数值越界不采样（视为 0）。
+FogSegment SampleVolumeTex(FogBodyData d, vec3 ro, vec3 rd,
+                           float zk, float zk1, float znear) {
+    FogSegment s = FogNoHit();
+    vec3 he = FogBoundHalf(d);
+    if (he.x <= 0.0 || he.y <= 0.0 || he.z <= 0.0) { return s; }
+
+    float o0;
+    float o1;
+    if (!RayObb(FogCenter(d), d.axis0, d.axis1, d.axis2, he, ro, rd, o0, o1)) { return s; }
+    float a = max(o0, max(zk, znear));
+    float b = min(o1, zk1);
+    if (b <= a) { return s; }
+
+    vec3 p = ro + (0.5 * (a + b)) * rd;   // 段中点采样
+    vec3 loc = p - FogCenter(d);
+    vec3 q = vec3(dot(d.axis0, loc), dot(d.axis1, loc), dot(d.axis2, loc));
+    vec3 uvw = q / (2.0 * he) + vec3(0.5);   // 盒 → 纹理 [0,1]^3
+
+    vec2 tex = vec2(0.0);
+    if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
+        // 帧插值（时间 → 两帧线性混合，循环）。
+        float nf = float(max(uVolumeFrames, 1));
+        float ft = uVolumeTime - floor(uVolumeTime / nf) * nf;
+        int f0 = int(floor(ft));
+        float tf = ft - float(f0);
+        int f1 = (f0 + 1) - (f0 + 1 >= max(uVolumeFrames, 1) ? max(uVolumeFrames, 1) : 0);
+        // z 切片插值（相邻两个 z → 两个图层）。
+        int nz = max(uVolumeNZ, 1);
+        int ny = max(uVolumeNY, 1);
+        float zf = clamp(uvw.z, 0.0, 1.0) * float(max(nz - 1, 1));
+        int z0 = int(floor(zf));
+        int z1 = min(z0 + 1, max(nz - 1, 1));
+        float tz = zf - float(z0);
+        float vy = clamp(uvw.y, 0.0, 1.0) * float(max(ny - 1, 1));
+        float inv_row = 1.0 / float(ny * nz);
+        float v0 = (float(z0) * float(ny) + vy + 0.5) * inv_row;
+        float v1 = (float(z1) * float(ny) + vy + 0.5) * inv_row;
+        vec2 d0 = texture(uFireVolTex, vec3(uvw.x, v0, float(f0))).rg;
+        vec2 d1 = texture(uFireVolTex, vec3(uvw.x, v1, float(f0))).rg;
+        vec2 e0 = texture(uFireVolTex, vec3(uvw.x, v0, float(f1))).rg;
+        vec2 e1 = texture(uFireVolTex, vec3(uvw.x, v1, float(f1))).rg;
+        tex = mix(mix(d0, d1, tz), mix(e0, e1, tz), tf);
+    }
+    float dens = pow(clamp(tex.r, 0.0, 1.0), max(FogDensityPow(d), 1.0));
+    float sig = FogSigma(d) * dens;
+    if (sig <= 0.0) { return s; }
+
+    s.hit = true;
+    s.t0 = a;
+    s.t1 = b;
+    s.p = p;
+    s.sigma = sig;
+    s.albedo = FogAlbedo(d);
+    s.emission = FogEmission(d) * tex.g * max(FogTempScale(d), 0.0);
+    return s;
+}
+
 // 唯一 kind 分派入口：按 d.kind 选采样器（GLSL330 无函数指针，用 if 链展开）。
 // 加一个 kind = 加一个分支（不动 L1/L2/ZDist，见设计文档 §10.4）。
 FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
@@ -423,6 +515,9 @@ FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
     }
     if (FogKind(d) == FOG_KIND_FLAME) {
         return SampleFlame(d, ro, rd, zk, zk1, znear);
+    }
+    if (FogKind(d) == FOG_KIND_VOLUMETEX) {
+        return SampleVolumeTex(d, ro, rd, zk, zk1, znear);
     }
     return FogNoHit();
 }

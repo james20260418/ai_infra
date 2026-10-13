@@ -287,6 +287,12 @@ void JPOV::ReleaseGltf(const jpov::GltfObject& gltf) {
     renderer_->ReleaseGltf(gltf);
 }
 
+void JPOV::SetFireVolume(const std::string& path) {
+    CHECK(renderer_ != nullptr);
+    CHECK(!path.empty()) << "SetFireVolume: path is empty";
+    renderer_->SetFireVolume(path);
+}
+
 // ========== 文本宽度测量（UI 光标等需要与渲染层一致宽度） ==========
 
 float JPOV::MeasureTextWidth(const std::string& alias, const std::string& text,

@@ -171,6 +171,8 @@ TEST(FireFogContract, DefineConstantsMatchCpp) {
               static_cast<int>(FogFieldKind::kRoundBox));
     EXPECT_EQ(ParseDefineInt(kFireFogCommonGlsl, "FOG_KIND_FLAME"),
               static_cast<int>(FogFieldKind::kFlame));
+    EXPECT_EQ(ParseDefineInt(kFireFogCommonGlsl, "FOG_KIND_VOLUMETEX"),
+              static_cast<int>(FogFieldKind::kVolumeTex));
 }
 
 // GLSL 各 scope 的 //@FOGLAYOUT 字段表与 fog_body.h 对应表逐项一致。
@@ -179,14 +181,17 @@ TEST(FireFogContract, LayoutMarkersMatchCppTable) {
     ExpectScopeMatches(parsed, "head", kFogBodyCommonLayout, ArrayN(kFogBodyCommonLayout));
     ExpectScopeMatches(parsed, "roundbox", kRoundBoxUnionLayout, ArrayN(kRoundBoxUnionLayout));
     ExpectScopeMatches(parsed, "flame", kFlameUnionLayout, ArrayN(kFlameUnionLayout));
+    ExpectScopeMatches(parsed, "volumetex", kVolumeTexUnionLayout,
+                       ArrayN(kVolumeTexUnionLayout));
 }
 
 // 所有字段表不越界：texel ∈ [0, kTexelsPerBody)、comp ∈ [0,3]；公共头 texel 数自洽。
 TEST(FireFogContract, LayoutWithinBudget) {
     const FogBodyLayoutEntry* tables[] = {
-        kFogBodyCommonLayout, kRoundBoxUnionLayout, kFlameUnionLayout};
+        kFogBodyCommonLayout, kRoundBoxUnionLayout, kFlameUnionLayout, kVolumeTexUnionLayout};
     const size_t table_n[] = {
-        ArrayN(kFogBodyCommonLayout), ArrayN(kRoundBoxUnionLayout), ArrayN(kFlameUnionLayout)};
+        ArrayN(kFogBodyCommonLayout), ArrayN(kRoundBoxUnionLayout), ArrayN(kFlameUnionLayout),
+        ArrayN(kVolumeTexUnionLayout)};
     for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); ++t) {
         for (size_t i = 0; i < table_n[t]; ++i) {
             EXPECT_GE(tables[t][i].texel, 0);

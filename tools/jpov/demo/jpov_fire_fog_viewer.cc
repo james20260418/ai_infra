@@ -73,7 +73,8 @@ void DefaultView(jpov_fire_fog::FireFogApp& app) {
 }
 
 // headless 拍摄：一组确定性视图/参数，写到 out_dir。
-int RunCapture(const std::string& out_dir) {
+// volume_path 非空时：先上传共享 3D 火纹理（供 kVolumeTex 段用）。
+int RunCapture(const std::string& out_dir, const std::string& volume_path) {
     JPOV::Config cfg;
     cfg.title  = "JPOV — 雾火查看器（headless capture）";
     cfg.width  = jpov_fire_fog::kViewerWidth;
@@ -88,6 +89,9 @@ int RunCapture(const std::string& out_dir) {
     app.SetShowPanel(false);   // 纯 3D 截图（无面板）
     app.Init();
     InstallScene(app);
+    if (!volume_path.empty()) {
+        app.SetFireVolume(volume_path);
+    }
 
     jpov::WindowInfo winfo;
     winfo.width  = jpov_fire_fog::kViewerWidth;
@@ -329,6 +333,71 @@ int RunCapture(const std::string& out_dir) {
     shoot("76_flame_wind_strong");
     app.flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
 
+    // ── Q. kVolumeTex：共享 3D 火纹理体积（采样离线烘的 fire VDB）──
+    if (!volume_path.empty()) {
+        DefaultView(app);
+        app.deg_.sun_elev_deg = 14.0f;
+        app.deg_.turbidity = 2.0f;
+        app.fog_kind_index_ = static_cast<int>(jpov_fire_fog::FogKindChoice::kVolumeTex);
+        app.vol_center_ = jpov::Vec3f(0.0f, 3.5f, 0.0f);
+        app.vol_size_ = jpov::Vec3f(3.0f, 7.0f, 3.0f);
+        app.vol_sigma_ = 1.5f;
+        app.vol_density_pow_ = 2.0f;
+        app.vol_temp_scale_ = 4.0f;
+        shoot("80_volume_default");
+        // 消光 σ 扫谱（看由透明到浓）
+        for (float s : {0.4f, 1.0f, 3.0f}) {
+            app.vol_sigma_ = s;
+            shoot(("81_volume_sigma" + std::to_string(static_cast<int>(s * 10))).c_str());
+        }
+        app.vol_sigma_ = 1.5f;
+        // 密度幂扫谱（收薄：底部实心火 → 上部碎火苗）
+        for (float p : {1.0f, 3.0f, 5.0f}) {
+            app.vol_density_pow_ = p;
+            shoot(("82_volume_pow" + std::to_string(static_cast<int>(p))).c_str());
+        }
+        app.vol_density_pow_ = 2.0f;
+        // 环绕（看立体感）
+        for (int deg : {0, 90, 180, 270}) {
+            DefaultView(app);
+            app.view_.theta = static_cast<double>(deg) * 3.14159265358979323846 / 180.0;
+            shoot(("83_volume_orbit" + std::to_string(deg)).c_str());
+        }
+        // 带 UI 面板（验证 2D/UI 不被体积火破坏）
+        DefaultView(app);
+        app.InstallTextMeasure();
+        app.SetShowPanel(true);
+        shoot("84_volume_panel");
+        app.SetShowPanel(false);
+
+        // 落地篝火特写（相机拉近；tile=8px 提高横向分辨率，看火苗形状）。
+        DefaultView(app);
+        app.view_.R = 9.0;
+        app.view_.phi = 0.16;
+        app.view_.theta = 0.5;
+        app.deg_.sun_elev_deg = 10.0f;
+        app.vol_center_ = jpov::Vec3f(0.0f, 2.2f, 0.0f);
+        app.vol_size_ = jpov::Vec3f(2.4f, 4.6f, 2.4f);
+        app.vol_sigma_ = 2.0f;
+        app.vol_temp_scale_ = 5.0f;
+        app.tile_px_index_ = 0;   // 8px（更细的横向分辨率）
+        shoot("85_volume_bonfire_tile8");
+        app.tile_px_index_ = 1;
+
+        // 动画：手动 scrubbing 不同帧（验证序列采样 + 帧插值）。
+        app.vol_play_ = false;
+        app.vol_center_ = jpov::Vec3f(0.0f, 3.5f, 0.0f);
+        app.vol_size_ = jpov::Vec3f(3.0f, 7.0f, 3.0f);
+        app.vol_sigma_ = 1.6f;
+        app.vol_density_pow_ = 2.0f;
+        app.vol_temp_scale_ = 4.0f;
+        for (int t : {0, 16, 32, 48}) {
+            app.vol_time_ = static_cast<float>(t);
+            shoot(("86_volume_t" + std::to_string(t)).c_str());
+        }
+        app.vol_play_ = true;
+    }
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();
@@ -346,15 +415,18 @@ int RunCapture(const std::string& out_dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // ── headless 拍摄分支：--capture <out_dir> ──
+    // ── headless 拍摄分支：--capture <out_dir>；可选 --volume <path> ──
     std::string out_dir;
+    std::string volume_path;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--volume") == 0 && i + 1 < argc) {
+            volume_path = argv[i + 1];
         }
     }
     if (!out_dir.empty()) {
-        return RunCapture(out_dir);
+        return RunCapture(out_dir, volume_path);
     }
 
     // ── 交互模式 ──
@@ -376,6 +448,9 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
     InstallScene(app);
+    if (!volume_path.empty()) {
+        app.SetFireVolume(volume_path);
+    }
 
     // 初始视角：橡树斜前方。
     DefaultView(app);

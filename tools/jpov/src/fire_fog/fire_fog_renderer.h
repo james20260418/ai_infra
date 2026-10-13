@@ -46,6 +46,7 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/render_command.h"
+#include "tools/jpov/src/fire_fog/fire_volume.h"
 #include "tools/jpov/src/fire_fog/fog_body.h"
 #include "tools/jpov/src/shader_manager.h"
 
@@ -101,6 +102,11 @@ public:
     // 释放 Init 申请的全部 GPU 资源（与 Init 对称，可重复调用）。
     void Finalize();
 
+    // SetFireVolume：上传**共享 3D 火纹理**（kVolumeTex 团用；R=density, G=temperature，均 ∈[0,1]）。
+    // 全局**一张**：重复调用会替换当前纹理。上传前 GL context 必须已激活。
+    // Pre-conditions: Init 已调用；vol 非空（nx/ny/nz > 0，channels >= 1）。
+    void SetFireVolume(const FireVolume& vol);
+
     // froxel 雾火管线（见头文件顶部）：inject/reduce/scatter 在自建 FBO 上跑，composite 回到
     // 调用方当前绑定的 3D HDR FBO **就地**混合（GL_ONE/GL_SRC_ALPHA）。
     //   fogs            : 本帧的点状雾体（命令层 PointFog）。
@@ -118,6 +124,7 @@ public:
     //       活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
     void Draw(const std::vector<PointFog>& fogs,
               const std::vector<FlameFog>& flame_fogs,
+              const std::vector<VolumeFog>& volume_fogs,
               const std::vector<PointLight>& point_lights,
               const Camera& cam,
               const float view_proj[16],
@@ -202,6 +209,16 @@ private:
     // 团属性纹理（RGBA32F；宽 = kMaxTotalFogs*fog_layout::kTexelsPerBody，高 = 1）。
     // 每团 texel 布局见 fog_body.h 的按作用域布局表（公共头 + 按 kind 的 union 区）。
     unsigned int fog_body_tex_ = 0;
+
+    // 共享 3D 火纹理（帧序列）：**2D 数组纹理**（layer = 帧；每层 = nx×(ny*nz) 堆叠的 z 切片）。
+    // RG8（uint8，R=density G=temperature）或 RG32F。0 = 未上传；采样回退到 1×1×1 哑元。
+    unsigned int fire_vol_tex_ = 0;
+    int fire_vol_nx_ = 0;
+    int fire_vol_ny_ = 0;
+    int fire_vol_nz_ = 0;
+    int fire_vol_frames_ = 0;
+    // 1×1×1 RG8 哑元 2D 数组纹理（值 0）：未上传火纹理时绑定，使采样退化为「无场」。
+    unsigned int dummy_vol_tex_ = 0;
 
     // 1×1 R32F 哑元深度纹理（值 = 1.0）：调用方传 scene_depth_tex==0 时使用，
     // 使 composite 退化为「不打裁剪」（像素深度取远平面）。

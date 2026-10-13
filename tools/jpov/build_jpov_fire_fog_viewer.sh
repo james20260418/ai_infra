@@ -51,6 +51,24 @@ echo ""
 echo "==> 4. 拷贝模型资源到 output/jpov_fire_fog_viewer/models/"
 mkdir -p "$OUTPUT_DIR/models"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
+
+# 共享 3D 火纹理体积（.jpovvol）：优先拷“稳定版”（fire_stable.jpovvol）→ 序列版 → 单帧版。
+# 生成：见 tools/jpov/tools/npzseq_to_jpovvol.py（Mantaflow 火仿真 → .jpovvol 序列）。
+STABLE_SRC="$PROJECT_DIR/data/fire_vdb/fire_stable.jpovvol"
+SEQ_SRC="$PROJECT_DIR/data/fire_vdb/fire_seq.jpovvol"
+ONE_SRC="$PROJECT_DIR/data/fire_vdb/fire.jpovvol"
+if [ -f "$STABLE_SRC" ]; then
+  cp -v "$STABLE_SRC" "$OUTPUT_DIR/models/fire.jpovvol"
+  echo "   （火纹理：稳定版）"
+elif [ -f "$SEQ_SRC" ]; then
+  cp -v "$SEQ_SRC" "$OUTPUT_DIR/models/fire.jpovvol"
+  echo "   （火纹理：序列版）"
+elif [ -f "$ONE_SRC" ]; then
+  cp -v "$ONE_SRC" "$OUTPUT_DIR/models/fire.jpovvol"
+  echo "   （火纹理：单帧版）"
+else
+  echo "   （跳过火纹理：$STABLE_SRC / $SEQ_SRC / $ONE_SRC 均不存在）"
+fi
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"
 
 echo ""
@@ -60,6 +78,10 @@ echo "============================================"
 echo ""
 echo "📂 产物位置："
 echo "   $OUTPUT_DIR/jpov_fire_fog_viewer       (Linux ELF)"
+echo ""
+echo "🔥 体积火（可选）：--volume models/fire.jpovvol （先在面板顶栏选「体积火 VolumeTex」）"
+echo "   若 models/fire.jpovvol 存在，可直接："
+echo "       $OUTPUT_DIR/jpov_fire_fog_viewer --volume models/fire.jpovvol"
 echo ""
 echo "🧪 用法："
 echo "   交互窗口（需 DISPLAY/WSLg）："

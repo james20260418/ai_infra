@@ -176,6 +176,52 @@ inline FogBody LowerFlameFog(const FlameFog& f) {
     return b;
 }
 
+// 把命令层 VolumeFog（共享 3D 火纹理体积）降维成后端统一团 FogBody（kind = kVolumeTex）。
+//
+// 容器 OBB = 体积盒本身（MVP 轴对齐）；盒直接映射到纹理 [0,1]^3。几何进 params（volume_param
+// 下标）；渲染器打包时再写入 union 的 center/bound_h* + density_pow/temp_scale。
+inline FogBody LowerVolumeFog(const VolumeFog& v) {
+    CHECK_GT(v.size.x(), 0.0f) << "VolumeFog.size 各分量必须 > 0";
+    CHECK_GT(v.size.y(), 0.0f) << "VolumeFog.size 各分量必须 > 0";
+    CHECK_GT(v.size.z(), 0.0f) << "VolumeFog.size 各分量必须 > 0";
+    CHECK_GE(v.sigma, 0.0f) << "VolumeFog.sigma（消光系数 1/m）必须 >= 0";
+    CHECK_GE(v.density_pow, 1.0f) << "VolumeFog.density_pow（密度幂）必须 >= 1";
+    CHECK_GE(v.temp_scale, 0.0f) << "VolumeFog.temp_scale（温度→自发光放大）必须 >= 0";
+    CHECK_GE(v.albedo.r, 0.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(v.albedo.g, 0.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(v.albedo.b, 0.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(v.albedo.r, 1.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(v.albedo.g, 1.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_LE(v.albedo.b, 1.0f) << "VolumeFog.albedo 各通道必须 ∈ [0,1]";
+    CHECK_GE(v.emission.r, 0.0f) << "VolumeFog.emission 各通道必须 >= 0";
+    CHECK_GE(v.emission.g, 0.0f) << "VolumeFog.emission 各通道必须 >= 0";
+    CHECK_GE(v.emission.b, 0.0f) << "VolumeFog.emission 各通道必须 >= 0";
+
+    const Vec3f half = v.size * 0.5f;
+    FogBody b;
+    b.kind = FogFieldKind::kVolumeTex;
+    b.bound.axis[0] = Vec3f(1.0f, 0.0f, 0.0f);
+    b.bound.axis[1] = Vec3f(0.0f, 1.0f, 0.0f);
+    b.bound.axis[2] = Vec3f(0.0f, 0.0f, 1.0f);
+    b.bound.center = v.center;
+    b.bound.half_extent = half;
+    b.sigma = v.sigma;
+    b.albedo = v.albedo;
+    b.emission = v.emission;
+    for (int i = 0; i < 32; ++i) {
+        b.params[i] = 0.0f;
+    }
+    b.params[volume_param::kCenterX] = v.center.x();
+    b.params[volume_param::kCenterY] = v.center.y();
+    b.params[volume_param::kCenterZ] = v.center.z();
+    b.params[volume_param::kHalfX] = half.x();
+    b.params[volume_param::kHalfY] = half.y();
+    b.params[volume_param::kHalfZ] = half.z();
+    b.params[volume_param::kDensityPow] = v.density_pow;
+    b.params[volume_param::kTempScale] = v.temp_scale;
+    return b;
+}
+
 // 某 OBB（团容器 / 点光源影响球）覆盖的屏幕 tile（凸包）。近平面后（任一角 w≤0）⇒
 // *out_behind=true 且 out_tiles 清空，调用方按「保守全屏」处理。
 //

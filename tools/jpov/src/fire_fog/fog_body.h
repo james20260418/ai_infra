@@ -42,6 +42,7 @@ enum class FogFieldKind : uint8_t {
     kNoiseVolume     = 2,  // fbm/curl 调制「密度 × 发射」（火 / 烟 / 蘑菇云）
     kShell           = 3,  // 薄壳（冲击波 / 爆燃环）
     kFlame           = 4,  // 燃料盒包裹燃烧（盒壳自发光 + 沿 up 的浮力羽流；MVP 无 3D 纹理）
+    kVolumeTex       = 5,  // 共享 3D 火纹理体积（盒映射到纹理 [0,1]^3；density→σ、temperature→自发光）
 };
 
 // 后端唯一「团」记录（POD；预定进缓冲纹理，texelFetch 随机访问）。
@@ -85,6 +86,19 @@ inline constexpr int kVigor = 18;
 inline constexpr int kExpand = 19;
 inline constexpr int kDecay = 20;
 }  // namespace flame_param
+
+// ── kVolumeTex 在 FogBody.params[] 里的字段下标（CPU 打包 / 解码的单一来源）──
+//   盒几何（center/half）经 union 的 center/bound_h* 进 GPU；density_pow/temp_scale 一并打包。
+namespace volume_param {
+inline constexpr int kCenterX = 0;
+inline constexpr int kCenterY = 1;
+inline constexpr int kCenterZ = 2;
+inline constexpr int kHalfX = 3;
+inline constexpr int kHalfY = 4;
+inline constexpr int kHalfZ = 5;
+inline constexpr int kDensityPow = 6;
+inline constexpr int kTempScale = 7;
+}  // namespace volume_param
 
 // 风（水平）→ 截面平移系数（kFlame）：lean = kFlameWindLean·|W_h|、bend = kFlameWindBend·|W_h|^1.3。
 // 量纲：m per (m/s) / m per (m/s)^1.3；将来可对齐消防工程的 flame tilt / drag 相关式
@@ -144,6 +158,18 @@ inline constexpr FogBodyLayoutEntry kFlameUnionLayout[] = {
     {5, 0, "wind_x"},   {5, 1, "wind_z"},   {5, 2, "lean"},     {5, 3, "bend"},
     {6, 0, "shell"},    {6, 1, "plume"},    {6, 2, "vigor"},    {6, 3, "expand"},
     {7, 0, "decay"},    {7, 1, "reserved"}, {7, 2, "reserved"}, {7, 3, "reserved"},
+};
+
+// ── union：kVolumeTex 共享 3D 火纹理体积（texel 2..7）──
+//   center/bound_h* = 体积盒中心 / 半尺寸（盒映射到纹理 [0,1]^3）；axis0..2 = 盒正交轴；
+//   density_pow = 密度幂（>= 1，收薄）；temp_scale = 温度→自发光整体放大。
+//   纹理采样经 uniform sampler3D uFireVolTex：R=density、G=temperature（均 ∈[0,1]）。
+inline constexpr FogBodyLayoutEntry kVolumeTexUnionLayout[] = {
+    {2, 0, "center_x"},  {2, 1, "center_y"},  {2, 2, "center_z"}, {2, 3, "bound_hx"},
+    {3, 0, "bound_hy"},  {3, 1, "bound_hz"},  {3, 2, "axis0_x"},  {3, 3, "axis0_y"},
+    {4, 0, "axis0_z"},   {4, 1, "axis1_x"},   {4, 2, "axis1_y"},  {4, 3, "axis1_z"},
+    {5, 0, "axis2_x"},   {5, 1, "axis2_y"},   {5, 2, "axis2_z"},  {5, 3, "density_pow"},
+    {6, 0, "temp_scale"},{6, 1, "reserved"},  {6, 2, "reserved"}, {6, 3, "reserved"},
 };
 
 }  // namespace jpov

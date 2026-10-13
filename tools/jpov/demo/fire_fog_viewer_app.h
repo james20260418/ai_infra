@@ -44,6 +44,7 @@ inline constexpr int kTilePxChoices[] = {8, 16, 32};
 enum class FogKindChoice : int {
     kRoundBox = 0,   // 圆角盒雾（PointFog）
     kFlame = 1,      // 燃料盒包裹燃烧（FlameFog，MVP：只有「形」，无 3D 纹理）
+    kVolumeTex = 2,  // 共享 3D 火纹理体积（VolumeFog，采样离线烘的 fire VDB）
 };
 
 // 点状雾查看器渲染核心 App。
@@ -92,6 +93,19 @@ public:
     float flame_expand_ = 0.5f;                                  // 羽流半径微扩系数（0 = 纯柱）
     float flame_decay_ = 1.5f;                                   // 羽流强度衰减指数（越大顶端越软）
     jpov::Vec3f flame_wind_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);     // 风（m/s）：把 spine 顺风倾斜+弯曲
+
+    // ── 体积火参数（团类型 = kVolumeTex 时生效；采样共享 3D 火纹理）──
+    jpov::Vec3f vol_center_ = jpov::Vec3f(0.0f, 3.5f, 0.0f);  // 体积盒中心
+    jpov::Vec3f vol_size_ = jpov::Vec3f(3.0f, 7.0f, 3.0f);    // 体积盒长宽高（米）
+    float vol_sigma_ = 1.5f;                                  // 密度→消光 σ_t（1/m）
+    float vol_density_pow_ = 2.0f;                            // 密度幂（>= 1，收薄）
+    float vol_temp_scale_ = 4.0f;                             // 温度→自发光放大
+    jpov::Color vol_albedo_ = jpov::Color{0.5f, 0.15f, 0.05f, 1.0f};   // 散射色
+    jpov::Color vol_emission_ = jpov::Color{1.0f, 0.35f, 0.08f, 1.0f}; // 自发光色（HDR）
+    // 播放（火纹理序列动画）：play/pause + 速度 + 当前时间（帧）。
+    bool  vol_play_ = true;
+    float vol_fps_ = 12.0f;      // 播放速度（帧/秒）
+    float vol_time_ = 0.0f;      // 当前播放时间（单位：帧，含小数）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -178,6 +192,9 @@ public:
 
         // 雾/火（走 fire_fog froxel 体积管线）：按团类型发射对应子 command。
         if (show_fog_) {
+            if (fog_kind_index_ == static_cast<int>(FogKindChoice::kVolumeTex) && vol_play_) {
+                vol_time_ += vol_fps_ / static_cast<float>(kViewerFps);
+            }
             if (fog_kind_index_ == static_cast<int>(FogKindChoice::kRoundBox)) {
                 jpov::PointFog fog;
                 fog.center = fog_center_;
@@ -188,6 +205,16 @@ public:
                 fog.emission = fog_emission_;
                 fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
                 cmds->point_fogs.push_back(fog);
+            } else if (fog_kind_index_ == static_cast<int>(FogKindChoice::kVolumeTex)) {
+                jpov::VolumeFog vf;
+                vf.center = vol_center_;
+                vf.size = vol_size_;
+                vf.sigma = vol_sigma_;
+                vf.density_pow = vol_density_pow_;
+                vf.temp_scale = vol_temp_scale_;
+                vf.albedo = vol_albedo_;
+                vf.emission = vol_emission_;
+                cmds->volume_fogs.push_back(vf);
             } else {
                 jpov::FlameFog ff;
                 ff.center = flame_center_;
@@ -210,6 +237,7 @@ public:
             params.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
             params.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
             params.z_far = z_far_;
+            params.volume_time = vol_time_;
             cmds->fire_fog = params;
         }
 
@@ -256,13 +284,15 @@ private:
 
         // ── 顶栏：团类型下拉 ──
         {
-            const std::vector<const char*> items = {"圆角盒 RoundBox", "火焰 Flame"};
+            const std::vector<const char*> items = {"圆角盒 RoundBox", "火焰 Flame", "体积火 VolumeTex"};
             ui_.Combo("团类型", &fog_kind_index_, items, jpov::UiRect{{20.0f, 12.0f}, {300.0f, 28.0f}});
         }
 
         // ── 左下：per-团类型 面板 ──
         if (fog_kind_index_ == static_cast<int>(FogKindChoice::kRoundBox)) {
             DrawRoundBoxPanel(cell);
+        } else if (fog_kind_index_ == static_cast<int>(FogKindChoice::kVolumeTex)) {
+            DrawVolumePanel(cell);
         } else {
             DrawFlamePanel(cell);
         }
@@ -323,6 +353,31 @@ private:
         ui_.SliderFloat("自发光 R", &flame_emission_.r, cell(x0, kRows, 1, 6), 0.0f, 8.0f, 2);
         ui_.SliderFloat("自发光 G", &flame_emission_.g, cell(x0, kRows, 1, 7), 0.0f, 8.0f, 2);
         ui_.SliderFloat("自发光 B", &flame_emission_.b, cell(x0, kRows, 1, 8), 0.0f, 8.0f, 2);
+    }
+
+    // 左下：体积火 per-团面板（采样共享 3D 火纹理；8 行 × 2 列）。
+    template <typename CellFn>
+    void DrawVolumePanel(const CellFn& cell) {
+        const float x0 = 20.0f;
+        const int kRows = 10;
+        ui_.Checkbox("播放", &vol_play_, cell(x0, kRows, 0, 0));
+        ui_.SliderFloat("速度 帧/s", &vol_fps_, cell(x0, kRows, 0, 1), 0.0f, 48.0f, 1);
+        ui_.SliderFloat("时间 帧", &vol_time_, cell(x0, kRows, 0, 2), 0.0f, 200.0f, 1);
+        ui_.SliderFloat("中心 x", &vol_center_.x(), cell(x0, kRows, 0, 3), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 y", &vol_center_.y(), cell(x0, kRows, 0, 4), 0.0f, 10.0f, 2);
+        ui_.SliderFloat("中心 z", &vol_center_.z(), cell(x0, kRows, 0, 5), -10.0f, 10.0f, 2);
+        ui_.SliderFloat("尺寸 x m", &vol_size_.x(), cell(x0, kRows, 0, 6), 0.2f, 20.0f, 2);
+        ui_.SliderFloat("尺寸 y m", &vol_size_.y(), cell(x0, kRows, 0, 7), 0.2f, 20.0f, 2);
+        ui_.SliderFloat("尺寸 z m", &vol_size_.z(), cell(x0, kRows, 0, 8), 0.2f, 20.0f, 2);
+        ui_.SliderFloat("消光 σ 1/m", &vol_sigma_, cell(x0, kRows, 0, 9), 0.0f, 6.0f, 3);
+        ui_.SliderFloat("密度幂", &vol_density_pow_, cell(x0, kRows, 1, 0), 1.0f, 6.0f, 2);
+        ui_.SliderFloat("温度放大", &vol_temp_scale_, cell(x0, kRows, 1, 1), 0.0f, 12.0f, 2);
+        ui_.SliderFloat("散射 R", &vol_albedo_.r, cell(x0, kRows, 1, 2), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 G", &vol_albedo_.g, cell(x0, kRows, 1, 3), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("散射 B", &vol_albedo_.b, cell(x0, kRows, 1, 4), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("自发光 R", &vol_emission_.r, cell(x0, kRows, 1, 5), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("自发光 G", &vol_emission_.g, cell(x0, kRows, 1, 6), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("自发光 B", &vol_emission_.b, cell(x0, kRows, 1, 7), 0.0f, 8.0f, 2);
     }
 
     // 右下：光照面板（全局共享；7 行 × 2 列）。
