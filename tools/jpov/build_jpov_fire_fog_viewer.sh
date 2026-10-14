@@ -57,6 +57,8 @@ mkdir -p "$OUTPUT_DIR/textures"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/fire_flipbook.png"  "$OUTPUT_DIR/textures/"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/smoke_flipbook.png" "$OUTPUT_DIR/textures/"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/cc0_fire_64.png"    "$OUTPUT_DIR/textures/"
+mkdir -p "$OUTPUT_DIR/textures/candidates"
+cp -v "$PROJECT_DIR"/tools/jpov/assets/fire/candidates/*.png "$OUTPUT_DIR/textures/candidates/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/" "$OUTPUT_DIR/textures/"
 
 echo ""

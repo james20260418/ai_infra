@@ -18,6 +18,7 @@
 #ifndef JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 #define JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 
+#include <array>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -126,6 +127,28 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     return c;
 }
 
+// ff viewer 可选火纹理（下拉切换）：索引 0 = 程序化 puff；其余 = CC0 火纹理 flipbook。
+struct FireTexEntry {
+    const char* label;
+    const char* file;   // 相对 textures/ 的路径；空 = 程序化 puff
+    int tx;
+    int ty;
+};
+inline const FireTexEntry kFireTexes[] = {
+    {"程序化 puff",       "",                              8,  8},
+    {"火#1  ben1",        "candidates/cand01_ben1.png",    10, 6},
+    {"火#2  ben2",        "candidates/cand02_ben2.png",    10, 6},
+    {"火#3  ben3",        "candidates/cand03_ben3.png",    10, 6},
+    {"火#4  ben4",        "candidates/cand04_ben4.png",    10, 6},
+    {"火#5  ben5(原CC0)", "candidates/cand05_ben5.png",    10, 6},
+    {"火#6  ben6",        "candidates/cand06_ben6.png",    10, 6},
+    {"火#7  ben7",        "candidates/cand07_ben7.png",    10, 6},
+    {"火#8  ben8",        "candidates/cand08_ben8.png",    10, 6},
+    {"火#9  hw5x5",       "candidates/cand09_hw5x5.png",   5,  5},
+    {"火#10 hwrow",       "candidates/cand10_hwrow.png",   25, 1},
+};
+inline constexpr int kFireTexCount = static_cast<int>(sizeof(kFireTexes) / sizeof(kFireTexes[0]));
+
 // 点状雾查看器渲染核心 App。
 class FireFogApp : public JPOV {
 public:
@@ -201,10 +224,10 @@ public:
     uint32_t soft_fire_tex_ = 0;
     uint32_t soft_smoke_tex_ = 0;
     jpov::particles::Rng sub_rng_{20261015u};   // 子发射器概率（确定性）
-    // CC0 真火 flipbook（BenHickling "Animated Fire"，CC0，64×64，10×6=60 帧）vs 程序化 puff。
-    // toggle 对比：use_cc0_fire_ 开 = 用 CC0 真火贴图；关 = 用我们的 puff flipbook。
-    bool use_cc0_fire_ = true;    // 默认用 CC0 真火（好看）；可取消回到程序化 puff 对比
-    uint32_t cc0_fire_tex_ = 0;
+    // 可选火纹理（面板下拉「火焰纹理」切换）：fire_choice_ 索引 kFireTexes
+    //（0=程序化 puff；1..10=CC0 火纹理 flipbook）。
+    int fire_choice_ = 10;   // 默认 #10（我评的 top1）
+    std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     // 临时：用外部指定纹理渲染（候选火纹理评估；env: JPOV_FIRETEX / JPOV_FIRETX / JPOV_FIRETY）。
     bool ov_fire_ = false;
     std::string ov_fire_path_;
@@ -353,14 +376,17 @@ public:
                 smoke_texture_id_ = fire_texture_id_;
             }
         }
-        // CC0 真火纹理（可选；toggle 对比）。
-        if (cc0_fire_tex_ == 0) {
-            const std::string cc0_path = FindTexture("textures/cc0_fire_64.png");
-            if (!cc0_path.empty()) {
-                cc0_fire_tex_ = RegisterTexture(cc0_path);
-                LOG(INFO) << "[particle_fire] cc0 fire texture = " << cc0_path;
+        // 选中的火 flipbook 纹理（懒加载 + 缓存）。
+        if (fire_choice_ >= 0 && fire_choice_ < kFireTexCount &&
+            kFireTexes[fire_choice_].file[0] != '\0' &&
+            fire_choice_tex_[fire_choice_] == 0) {
+            const std::string rel = std::string("textures/") + kFireTexes[fire_choice_].file;
+            const std::string p = FindTexture(rel.c_str());
+            if (!p.empty()) {
+                fire_choice_tex_[fire_choice_] = RegisterTexture(p);
+                LOG(INFO) << "[particle_fire] fire choice tex = " << p;
             } else {
-                LOG(WARNING) << "[particle_fire] textures/cc0_fire_64.png 未找到";
+                LOG(WARNING) << "[particle_fire] 未找到 " << rel << "（回退程序化 puff）";
             }
         }
         // 临时覆盖纹理（候选评估）。
@@ -394,6 +420,10 @@ public:
         std::vector<jpov::ParticleInstance> finst;
         const float dt = 1.0f / static_cast<float>(kViewerFps);
         const bool do_fire = (scene_index_ == 1 && fire_enable_);
+        // 是否用「选中的 flipbook」（而非程序化 puff / 外部覆盖）。
+        const bool choice_flip =
+            !ov_fire_ && fire_choice_ >= 0 && fire_choice_ < kFireTexCount &&
+            kFireTexes[fire_choice_].file[0] != '\0';
         if (do_fire) {
             // 面板影子标量 → 配置（RangeF 两端一起设，避免 min>max）。
             fire_cfg_.rate = ui_fire_rate_;
@@ -409,7 +439,7 @@ public:
             // 加法层无顺序依赖不排序；半透明层需背→前排序。
             fire_cfg_.sort = (ui_fire_blend_ == 0) ? jpov::SortMode::kNone
                                                    : jpov::SortMode::kByDepth;
-            // 贴图/帧设置：外部覆盖 / CC0 真火 / 我们的 puff。
+            // 贴图/帧设置：外部覆盖 / 选中的 flipbook（kFps 随机相位） / 程序化 puff（kLifetime）。
             if (ov_fire_) {
                 fire_cfg_.tiles_x = ov_fire_tx_;
                 fire_cfg_.tiles_y = ov_fire_ty_;
@@ -417,9 +447,9 @@ public:
                 fire_cfg_.sheet_fps = 24.0f;
                 fire_cfg_.start_frame_random = true;
                 fire_cfg_.sheet_cycles = 1.0f;
-            } else if (use_cc0_fire_) {
-                fire_cfg_.tiles_x = 10;
-                fire_cfg_.tiles_y = 6;
+            } else if (choice_flip) {
+                fire_cfg_.tiles_x = kFireTexes[fire_choice_].tx;
+                fire_cfg_.tiles_y = kFireTexes[fire_choice_].ty;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
                 fire_cfg_.sheet_fps = 24.0f;
                 fire_cfg_.start_frame_random = true;
@@ -481,7 +511,7 @@ public:
             jpov::ParticleRenderCommand pc;
             pc.particles = std::move(finst);
             pc.texture_id = ov_fire_ ? ov_fire_tex_
-                          : (use_cc0_fire_ ? cc0_fire_tex_
+                          : (choice_flip ? fire_choice_tex_[fire_choice_]
                           : (debug_soft_tex_ ? soft_fire_tex_ : fire_texture_id_));
             pc.tiles_x = fire_cfg_.tiles_x;
             pc.tiles_y = fire_cfg_.tiles_y;
@@ -674,7 +704,14 @@ private:
             ui_.SliderFloat("黑烟尺寸 m", &ui_smoke_size_, row(1, 6), 0.2f, 2.5f, 2);
             ui_.SliderFloat("烟概率", &ui_smoke_prob_, row(1, 7), 0.0f, 1.0f, 2);
             ui_.Checkbox("软贴图(debug)", &debug_soft_tex_, row(1, 8));
-            ui_.Checkbox("CC0真火纹理", &use_cc0_fire_, row(1, 9));
+            {
+                std::vector<const char*> items;
+                items.reserve(static_cast<size_t>(kFireTexCount));
+                for (int i = 0; i < kFireTexCount; ++i) {
+                    items.push_back(kFireTexes[i].label);
+                }
+                ui_.Combo("火焰纹理", &fire_choice_, items, row(1, 9));
+            }
         }
     }
 
