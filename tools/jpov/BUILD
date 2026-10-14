@@ -403,3 +403,39 @@ cc_binary(
 )
 
 # 见 //tools/jpov/test:BUILD — gold generator + gold test 均移至 test/BUILD 管理
+
+# 粒子查看器（广告牌粒子 → WBO 分级纹理验证场）。
+cc_library(
+    name = "particle_viewer_app",
+    hdrs = [
+        "demo/particle_viewer_app.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:particle_types",
+        "//tools/jpov/interface:ui",
+        "//tools/jpov/src/particles:particle_system",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_particle_viewer",
+    srcs = ["demo/jpov_particle_viewer.cc"],
+    deps = [
+        "//tools/jpov:particle_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
