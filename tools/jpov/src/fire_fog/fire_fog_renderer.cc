@@ -842,7 +842,7 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    // ── 复原状态（调用方随后做 resolve / highlight / bloom / tone map / 2D，均自设状态）──
+    // ── 复原状态（调用方随后做 highlight / bloom / tone map / 2D，均自设状态）──
     // enable 位（blend/depth/cull）由调用方 glPushAttrib(GL_ENABLE_BIT) 兜底；此处仍显式关掉。
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);

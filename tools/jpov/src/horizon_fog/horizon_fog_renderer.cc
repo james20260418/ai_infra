@@ -148,7 +148,7 @@ void HorizonFogRenderer::Draw(const ElevationFogConfig& cfg,
 
     glDrawArrays(GL_TRIANGLES, 0, 3);   // 全屏三角形（无 VAO/VBO，用 gl_VertexID）
 
-    // 复原：调用方（Renderer）随后要做 resolve / highlight / bloom，均自设状态；
+    // 复原：调用方（Renderer）随后要做 highlight / bloom，均自设状态；
     // 这里统一关掉本 pass 打开的混合/深度/剔除，并解绑纹理。
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);

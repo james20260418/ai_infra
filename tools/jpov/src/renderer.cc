@@ -44,10 +44,9 @@
 // Windows/MinGW: use function pointers loaded at runtime via wglGetProcAddress
 // Linux/Mesa: use standard GL symbols (exported directly by libGL)
 //
-// 注意：MinGW 的 GL 库不导出 renderbuffer / MSAA 的 GL 3.x 核心函数，
-// 因此 Windows 下 3D FBO 不使用 MSAA（带 #define JPOV_WITHOUT_MSAA）。
+// 注：3D 渲染目标统一为单采样（1×）。历史上 Linux 走 4× MSAA、Windows 关闭；
+// 2026-10-14 起完整移除 MSAA（详见 renderer.h 中 Renderer 的说明），两平台走同一单采样路径。
 #ifdef _WIN32
-#define JPOV_WITHOUT_MSAA
 #include "third_party/gl_loader-mingw/gl_loader.h"
 // glXxx→gl_Xxx 别名宏已集成在 gl_loader.h 中，本文件不再重复定义。
 
@@ -589,9 +588,7 @@ Renderer::~Renderer() {
     DestroyFBO();
     DestroyOutputFBO();
     Destroy3DFBO();
-    Destroy3DResolveFBO();
     DestroyHDRFBO();
-    DestroyHDRResolveFBO();
     DestroyShadowFBO();
     DestroyHighlightFBO();
     DestroyBloomChain();
@@ -646,33 +643,15 @@ void Renderer::Destroy3DFBO() {
     if (fbo_3d_) {
         glDeleteFramebuffers(1, &fbo_3d_);
         glDeleteTextures(1, &color_tex_3d_);
-#ifndef JPOV_WITHOUT_MSAA
-        if (depth_rb_3d_) {
-            glDeleteRenderbuffers(1, &depth_rb_3d_);
-        }
-#else
         if (depth_tex_3d_) {
             glDeleteTextures(1, &depth_tex_3d_);
         }
-#endif
         fbo_3d_ = 0;
         color_tex_3d_ = 0;
-        depth_rb_3d_ = 0;
         depth_tex_3d_ = 0;
     }
     fbo_3d_w_ = 0;
     fbo_3d_h_ = 0;
-}
-
-void Renderer::Destroy3DResolveFBO() {
-    if (resolve_fbo_3d_) {
-        glDeleteFramebuffers(1, &resolve_fbo_3d_);
-        glDeleteTextures(1, &resolve_tex_3d_);
-        resolve_fbo_3d_ = 0;
-        resolve_tex_3d_ = 0;
-    }
-    resolve_fbo_3d_w_ = 0;
-    resolve_fbo_3d_h_ = 0;
 }
 
 void Renderer::DestroyHDRFBO() {
@@ -682,38 +661,16 @@ void Renderer::DestroyHDRFBO() {
         if (scene_depth_tex_hdr_) {
             glDeleteTextures(1, &scene_depth_tex_hdr_);
         }
-#ifndef JPOV_WITHOUT_MSAA
-        if (depth_rb_hdr_) {
-            glDeleteRenderbuffers(1, &depth_rb_hdr_);
-        }
-#else
         if (depth_tex_hdr_) {
             glDeleteTextures(1, &depth_tex_hdr_);
         }
-#endif
         fbo_hdr_ = 0;
         color_tex_hdr_ = 0;
         scene_depth_tex_hdr_ = 0;
-        depth_rb_hdr_ = 0;
         depth_tex_hdr_ = 0;
     }
     fbo_hdr_w_ = 0;
     fbo_hdr_h_ = 0;
-}
-
-void Renderer::DestroyHDRResolveFBO() {
-    if (resolve_fbo_hdr_) {
-        glDeleteFramebuffers(1, &resolve_fbo_hdr_);
-        glDeleteTextures(1, &resolve_tex_hdr_);
-        if (resolve_scene_depth_tex_) {
-            glDeleteTextures(1, &resolve_scene_depth_tex_);
-        }
-        resolve_fbo_hdr_ = 0;
-        resolve_tex_hdr_ = 0;
-        resolve_scene_depth_tex_ = 0;
-    }
-    resolve_fbo_hdr_w_ = 0;
-    resolve_fbo_hdr_h_ = 0;
 }
 
 // ==================== 透明玻璃 FBO（Weighted Blended OIT） ====================
@@ -996,12 +953,9 @@ void Renderer::Ensure3DFBO(int width, int height) {
     CHECK_LE(height, kMaxFboDim);
 
     Destroy3DFBO();
-    Destroy3DResolveFBO();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
 
-#ifdef JPOV_WITHOUT_MSAA
-    // 非 MSAA 路径（Windows/MinGW 下 GL 不导出 MSAA 函数）
-    // 直接用普通 2D 纹理 + 深度纹理
+    // 单采样（1×）3D 目标：普通 2D 颜色纹理 + 普通 2D 深度纹理。
     glGenTextures(1, &color_tex_3d_);
     glBindTexture(GL_TEXTURE_2D, color_tex_3d_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
@@ -1031,75 +985,8 @@ void Renderer::Ensure3DFBO(int width, int height) {
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "3D FBO (non-MSAA) failed, status=" << status;
+        << "3D FBO failed, status=" << status;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    // 非 MSAA 路径不需要 separate resolve FBO（直接用 fbo_3d_ blit）
-    resolve_fbo_3d_ = 0;
-    resolve_tex_3d_ = 0;
-    resolve_fbo_3d_w_ = 0;
-    resolve_fbo_3d_h_ = 0;
-#else
-    // === 4x MSAA 颜色纹理 ===
-    glGenTextures(1, &color_tex_3d_);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_);
-    // 已知问题（2026-08-14 定位）: 在 llvmpipe（Mesa 软渲染，headless/Xvfb）下，
-    // glTexImage2DMultisample 会产生一个非致命 GL_INVALID_OPERATION (1280)。
-    // 它不破坏渲染（后续 resolve blit 仍能正确出图，gold 测试逐字节匹配通过），
-    // 但因 glGetError 返回“第一个未清错误”，会一直残留到 DrawObject3D 后的
-    // 检查才被捕获，表现为看似来自 draw 的 1280 警告。已用打桩验证：此错误
-    // 精确源于本调用（深度 MSAA renderbuffer 探针干净），与 draw 无关。
-    // 因 llvmpipe 不支持 MSAA 且当前 gold 图均基于 MSAA 路径生成，
-    // 暂不改动（改非 MSAA 会改变输出字节）。详见 PR #50。
-    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
-                            width, height, GL_TRUE);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
-
-    // === 深度 renderbuffer（MSAA 需要） ===
-    glGenRenderbuffers(1, &depth_rb_3d_);
-    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_3d_);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24,
-                                     width, height);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-    // === FBO 对象 ===
-    glGenFramebuffers(1, &fbo_3d_);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D_MULTISAMPLE, color_tex_3d_, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                              GL_RENDERBUFFER, depth_rb_3d_);
-
-    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "3D MSAA FBO failed, status=" << status;
-
-    // === 中间 non-MSAA resolve FBO（同尺寸，用于 resolve + 缩放 blit） ===
-    glGenTextures(1, &resolve_tex_3d_);
-    glBindTexture(GL_TEXTURE_2D, resolve_tex_3d_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    glGenFramebuffers(1, &resolve_fbo_3d_);
-    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_3d_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D, resolve_tex_3d_, 0);
-
-    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "3D resolve FBO failed, status=" << status;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    resolve_fbo_3d_w_ = width;
-    resolve_fbo_3d_h_ = height;
-#endif
 
     fbo_3d_w_ = width;
     fbo_3d_h_ = height;
@@ -1119,10 +1006,8 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     CHECK_LE(height, kMaxFboDim);
 
     DestroyHDRFBO();
-    DestroyHDRResolveFBO();
 
-#ifdef JPOV_WITHOUT_MSAA
-    // 非 MSAA 路径（Windows/MinGW）：普通 2D 浮点纹理 + 深度纹理
+    // 单采样（1×）HDR 目标：普通 2D 浮点纹理 + 普通 2D 深度纹理。
     glGenTextures(1, &color_tex_hdr_);
     glBindTexture(GL_TEXTURE_2D, color_tex_hdr_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
@@ -1176,102 +1061,8 @@ void Renderer::EnsureHDRFBO(int width, int height) {
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "HDR FBO (non-MSAA) failed, status=" << status;
+        << "HDR FBO failed, status=" << status;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    resolve_fbo_hdr_ = 0;
-    resolve_tex_hdr_ = 0;
-    resolve_fbo_hdr_w_ = 0;
-    resolve_fbo_hdr_h_ = 0;
-#else
-    // === 4x MSAA 浮点颜色纹理（RGBA16F） ===
-    // 注意：浮点 MSAA renderbuffer 在某些软渲染（llvmpipe）下可能不支持；
-    // 若 gold 测试在 headless 下 resolve 异常，需回退非 MSAA 路径（见 PR 讨论）。
-    glGenTextures(1, &color_tex_hdr_);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_);
-    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA16F,
-                            width, height, GL_TRUE);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
-
-    glGenRenderbuffers(1, &depth_rb_hdr_);
-    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb_hdr_);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24,
-                                     width, height);
-    glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-    // MRT #1：场景深度（R32F 多重采样纹理）。最终由 glBlitFramebuffer 平均 resolve
-    // 到 resolve_scene_depth_tex_（同颜色附件一致）。
-    glGenTextures(1, &scene_depth_tex_hdr_);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, scene_depth_tex_hdr_);
-    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_R32F,
-                            width, height, GL_TRUE);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
-
-    glGenFramebuffers(1, &fbo_hdr_);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D_MULTISAMPLE, color_tex_hdr_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
-                           GL_TEXTURE_2D_MULTISAMPLE, scene_depth_tex_hdr_, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                              GL_RENDERBUFFER, depth_rb_hdr_);
-    {
-        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-        glDrawBuffers(2, bufs);
-    }
-    // 注意：不在 MSAA HDR FBO 上附加 stencil —— MSAA stencil renderbuffer 在
-    //   llvmpipe（headless 软渲染）下导致 FBO 不完整（GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT）。
-    //   高亮描边在 MSAA 路径走另一条路：统一由 DrawHighlightPass 在单采样
-    //   color-only hl FBO 上做 CPU 剪影膨胀描边（见 DrawHighlightPass）。
-
-    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "HDR MSAA FBO failed, status=" << status;
-
-    // === 中间 non-MSAA resolve FBO（MRT：RGBA16F 颜色 + R32F 场景深度） ===
-    glGenTextures(1, &resolve_tex_hdr_);
-    glBindTexture(GL_TEXTURE_2D, resolve_tex_hdr_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
-                 GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    glGenTextures(1, &resolve_scene_depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, resolve_scene_depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0,
-                 GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    glGenFramebuffers(1, &resolve_fbo_hdr_);
-    glBindFramebuffer(GL_FRAMEBUFFER, resolve_fbo_hdr_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D, resolve_tex_hdr_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
-                           GL_TEXTURE_2D, resolve_scene_depth_tex_, 0);
-    {
-        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-        glDrawBuffers(2, bufs);
-    }
-
-    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE)
-        << "HDR resolve FBO failed, status=" << status;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    resolve_fbo_hdr_w_ = width;
-    resolve_fbo_hdr_h_ = height;
-#endif
 
     fbo_hdr_w_ = width;
     fbo_hdr_h_ = height;
@@ -1909,40 +1700,23 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 第二步：MSAA resolve + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
+        // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
 
         if (use_hdr) {
-            // ---- HDR 路径：把 HDR 内容 resolve/blit 到同尺寸 non-MSAA 浮点纹理，
-            //      作为后续后处理（雾 / highlight / bloom / tone map）的输入。
+            // ---- HDR 路径：HDR FBO 本身即单采样浮点纹理，直接作为后续后处理
+            //      （雾 / highlight / bloom / tone map）的输入。
             // hdr_scene_depth_tex 与 hdr_input_tex 并行传递：MRT#1 场景深度（单采样）。
-            // 只此一处判定要不要起雾；下方 resolve 顺序与它就配合。
+            // 只此一处判定要不要起雾；下方雾 pass 的先后顺序与它配合。
             const bool horizon_fog_enabled =
                 cmds.elevation_fog.has_value() && cmds.elevation_fog->enabled;
             // 天空色只在「本帧画了天空」时才有效：无 sky 指令时 sky_tex_ 可能是上一帧
             // 残留，当 0 处理（否则雾会拿旧天空色当收敛色）。
             const unsigned int sky_color_tex = cmds.sky.has_value() ? sky_tex_ : 0;
-#ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：3D FBO 本身即单采样浮点纹理，直接作为输入（雾也叠在这张上）。
+            // 3D FBO（单采样）本身即浮点纹理，直接作为输入（雾也叠在这张上）。
             unsigned int hdr_input_tex = color_tex_hdr_;
             unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
-#else
-            // MSAA 路径：先 resolve 场景深度（雾要单采样深度）——放在颜色之前，这样
-            // 「雾就地叠进 fbo_hdr_」之后，再统一 resolve 颜色（开雾时含雾）。
-            //   ⚠️ glBlitFramebuffer 一次只处理 read/draw buffer 各一个；用 glReadBuffer/
-            //   glDrawBuffer 选择附件。
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            glReadBuffer(GL_COLOR_ATTACHMENT1);
-            glDrawBuffer(GL_COLOR_ATTACHMENT1);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            unsigned int hdr_input_tex = resolve_tex_hdr_;
-            unsigned int hdr_scene_depth_tex = resolve_scene_depth_tex_;
-#endif
 
             // 是否运行体积雾合成：有雾、或有透明玻璃（玻璃需与雾一起按深度合成）。
             const bool run_fog = !cmds.point_fogs.empty() || has_glass;
@@ -1989,18 +1763,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 只写颜色附件；雾不碰场景深度附件。
                 const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
                 glDrawBuffers(1, fog_draw_buf);
-#ifdef JPOV_WITHOUT_MSAA
-                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
                 // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
-#endif
                 HorizonFogRenderer::Draw(*cmds.elevation_fog, hdr_scene_depth_tex,
                                          sky_color_tex, mvp_, cam, shader_mgr_);
-#ifdef JPOV_WITHOUT_MSAA
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
-#endif
                 const GLenum mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs);
             }
@@ -2015,12 +1785,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 只写颜色附件0；雾不碰场景深度附件。
                 const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
                 glDrawBuffers(1, fog_draw_buf);
-#ifdef JPOV_WITHOUT_MSAA
-                // 非 MSAA：所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
                 // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
-#endif
                 // 物理光照：内散射源 = 天光单色 ambient + 太阳经 CSM 阴影
                 // （god ray 来自后者）。ambient 走 sky 的单色推导函数。
                 const FireFogParams ff_params = cmds.fire_fog.value_or(FireFogParams{});
@@ -2045,35 +1813,19 @@ void Renderer::Render(const RenderCommandList& cmds,
                 fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
                                         ff_params, ff_light, &glass_input);
-#ifdef JPOV_WITHOUT_MSAA
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
-#endif
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
                                                GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_ff);
             }
 
-#ifndef JPOV_WITHOUT_MSAA
-            // resolve 颜色：若开雾，此时 fbo_hdr_ 里已经含雾。
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_hdr_);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_hdr_w_, resolve_fbo_hdr_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-#endif
-
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
             // 高亮作为 3D 渲染管线里的一个独立子步骤（与 shadow / tone map 并列）：
-            // 从 fbo_hdr_（MSAA 时自动 resolve）blit color 到单采样 hl FBO，
+            // 从 fbo_hdr_ blit color 到单采样 hl FBO，
             // 在其上用**全屏 GPU pass**做“掩膜膨胀 − 自身 = 边缘环”的恒定像素宽描边
             //（见 DrawHighlightPass），输出叠加了高亮的颜色纹理，作为 tone map 的唯一输入。
-            // 有高亮 → 用 hl_color_tex_；无高亮 → 用 resolve/color 原始纹理（零开销）。
+            // 有高亮 → 用 hl_color_tex_；无高亮 → 用 color 原始纹理（零开销）。
             if (cmds.highlight_style.has_value()) {
                 hdr_input_tex = DrawHighlightPass(cmds,
                                                   fbo_3d_w, fbo_3d_h);
@@ -2142,8 +1894,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindTexture(GL_TEXTURE_2D, 0);
         } else {
             // ---- LDR 路径（旧行为，字节兼容） ----
-#ifdef JPOV_WITHOUT_MSAA
-            // 非 MSAA 路径：从 3D FBO 直接 blit 到主 FBO
+            // 从 3D FBO 直接 blit 到主 FBO
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
             glBlitFramebuffer(
@@ -2153,26 +1904,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                 static_cast<int>(cam.viewport_x + cam.viewport_width),
                 static_cast<int>(cam.viewport_y + cam.viewport_height),
                 GL_COLOR_BUFFER_BIT, GL_LINEAR);
-#else
-            // 先 MSAA resolve 到中间非 MSAA FBO（同尺寸 resolve）
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_3d_);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolve_fbo_3d_);
-            glBlitFramebuffer(
-                0, 0, fbo_3d_w, fbo_3d_h,
-                0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-            // 再从中间 FBO 缩放 blit 到主 FBO（按 viewport）
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo_3d_);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_);
-            glBlitFramebuffer(
-                0, 0, resolve_fbo_3d_w_, resolve_fbo_3d_h_,
-                static_cast<int>(cam.viewport_x),
-                static_cast<int>(cam.viewport_y),
-                static_cast<int>(cam.viewport_x + cam.viewport_width),
-                static_cast<int>(cam.viewport_y + cam.viewport_height),
-                GL_COLOR_BUFFER_BIT, GL_LINEAR);
-#endif
         }
 
         // ---- 恢复 GL 状态（回到 2D 绘制前的状态）----
@@ -2636,7 +2367,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     }
 
     // ---- 自管理 pick FBO（RGBA8 颜色 + depth renderbuffer），尺寸 = 3D FBO ----
-    // 单采样（非 MSAA）：拾取写的是整数 id，MSAA resolve 平均会串味，故独立单采样 FBO。
+    // 单采样 1×：拾取写的是整数 id，不能被过滤/平均（会串味），故独立单采样 FBO。
     if (pick_fbo_w_ != fbo_w || pick_fbo_h_ != fbo_h || pick_fbo_ == 0) {
         if (pick_fbo_) {
             glDeleteFramebuffers(1, &pick_fbo_);
@@ -2847,7 +2578,7 @@ void Renderer::EnsureHighlightFBO(int w, int h) {
 //   1) 三大 renderer 的「highlight」命令（per-command 整批高亮）画进独立单采样 R8 mask
 //      （hl_mask_tex_），值=1。mask = 所有高亮物体的总并集：关深度测试与背面裁剪，
 //      被遮挡/背面部分也写 1 → 后续膨胀得**整体外包络**，轮廓透过遮挡。
-//   2) blit 场景 color 从 fbo_hdr_（MSAA 时自动 resolve）到单采样 hl FBO，得含 PBR 本色的底色；
+//   2) blit 场景 color 从 fbo_hdr_ 到单采样 hl FBO，得含 PBR 本色的底色；
 //   3) **一个全屏 GPU pass**：对 mask 做 (2·outline_px+1)² 方形膨胀 ⊖ 自身 = 边缘环，
 //      以边框色混合叠回 hl FBO；
 //   4) 返回叠加了高亮的 hl_color_tex_，供 tone map pass 作输入。

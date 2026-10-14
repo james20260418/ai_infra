@@ -4,7 +4,7 @@
 //   - Camera (1,1,1) 看向原点
 //   - Strip3DCommand 构造的环状条带，半径 0.5，宽度 0.2，中心原点，不封口
 //   - 纯色渲染，无光照
-//   - 渲染分辨率 1280x720（主 FBO 的 2x，MSAA 抗锯齿）
+//   - 渲染分辨率 1280x720（单采样，无抗锯齿）
 //
 // 输出: tools/jpov/test/primitives3d/strip3d_ring_1280x720.png
 

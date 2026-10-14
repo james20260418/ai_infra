@@ -7,7 +7,7 @@
 //   - PBRMaterial.normal_tex 指向法线贴图，走 GGX PBR 光照 + TBN 法线扰动
 //   - 单点光源从前上方照亮，让法线扰动的明暗变化清晰可见
 //   - Camera (1.9, 1.3, 1.9) 看向立方体中心
-//   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
+//   - 渲染分辨率 1280x720（单采样，无抗锯齿）
 //
 // 输出: tools/jpov/test/object3d/pbr_cube_normal_mr_ea_1280x720.png
 // 用途: 法线映射 TBN 链路验证 + 供 leader 肉眼判断材质观感。

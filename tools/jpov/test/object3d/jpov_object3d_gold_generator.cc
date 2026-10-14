@@ -4,7 +4,7 @@
 //   - 从 OBJ 文件加载 beetle 模型 → LoadObj → MeshData → RegisterMesh
 //   - DrawObject3D 纯色渲染（texture_id=0），center=原点，up=(0,1,0)，front=(0,0,1)
 //   - Camera (1, 1, 1) 看向原点，透视投影
-//   - 渲染分辨率 1280x720（主 FBO 2x，MSAA 抗锯齿）
+//   - 渲染分辨率 1280x720（单采样，无抗锯齿）
 //
 // 输出: tools/jpov/test/object3d_beetle_1280x720.png
 

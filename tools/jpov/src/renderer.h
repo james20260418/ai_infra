@@ -35,6 +35,9 @@ struct GLFWwindow;
 
 namespace jpov {
 
+// 3D 渲染目标全部为单采样（1×）：曾用 4× MSAA（仅 Linux），2026-10-14 起完整移除
+//（MSAA 的非颜色附件 resolve 在拾取 id / 场景深度 / 玻璃上引入过多坑）。当前不做
+// 任何抗锯齿；后续如需 AA 走纯后处理（如 SMAA），不侵入渲染目标。
 struct Renderer {
     static constexpr int kMaxFboDim = 4096;
     static constexpr int kMaxStreamVertices = 120000;
@@ -106,16 +109,12 @@ private:
     unsigned int out_fbo_ = 0, out_color_tex_ = 0;
     int out_w_ = 0, out_h_ = 0;
 
-    unsigned int fbo_3d_ = 0, color_tex_3d_ = 0, depth_rb_3d_ = 0, depth_tex_3d_ = 0;
+    unsigned int fbo_3d_ = 0, color_tex_3d_ = 0, depth_tex_3d_ = 0;
     int fbo_3d_w_ = 0, fbo_3d_h_ = 0;
-
-    unsigned int resolve_fbo_3d_ = 0, resolve_tex_3d_ = 0;
-    int resolve_fbo_3d_w_ = 0, resolve_fbo_3d_h_ = 0;
 
     // HDR 3D FBO（MRT：颜色 RGBA16F + 场景深度 R32F，另挂 depth buffer）：3D 内容
     // （天空 + object3d + primitives3d + 蒙皮 + 3D 文本）统一渲染目标，可存 >1.0 的
     // HDR 亮度。渲染完成后由统一后处理 pass（tone map）压缩到 LDR。
-    // MSAA 路径下保留 separate resolve FBO。
     //
     // ⭐ 第二颜色附件（COLOR_ATTACHMENT1，R32F）= 「场景深度」：值 = gl_FragCoord.z
     //   （窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景；需线性深度用相机 near/far 反算）。
@@ -123,15 +122,12 @@ private:
     //   EnsureShadowFBO 的 2026-08-17 踩坑注释）——直接把场景深度当普通颜色附件写出，
     //   供后续 pass（体积雾深度裁剪 / 软粒子 / DOF）用普通 texture() 采样，绕开该坑。
     //   每个写入本 FBO 的 3D shader 都必须写该附件（否则其像素深度未定义）。
-    unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_rb_hdr_ = 0, depth_tex_hdr_ = 0;
-    unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（MSAA 时为多重采样纹理）
+    unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_tex_hdr_ = 0;
+    unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
-    unsigned int resolve_fbo_hdr_ = 0, resolve_tex_hdr_ = 0;
-    unsigned int resolve_scene_depth_tex_ = 0;  // MSAA resolve 后的单采样场景深度
-    int resolve_fbo_hdr_w_ = 0, resolve_fbo_hdr_h_ = 0;
 
     // 透明玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
-    // 尺寸 = 3D FBO（**1×、非 MSAA**；结构化数据不能 MSAA resolve）。
+    // 尺寸 = 3D FBO（1× 单采样；结构化数据不能被过滤/平均）。
     //   COLOR0 accum (RGBA16F)：blend(ONE, ONE)——Σ(预乘色×w, α×w)；
     //   COLOR1 reveal (R16F) ：blend(ZERO, ONE_MINUS_SRC_COLOR)——Π(1−α)；
     //   COLOR2 depth  (R32F) ：blend(ONE, ONE)——Σ(z_view×α×w)（代表深度）。
@@ -165,9 +161,7 @@ private:
     void DestroyFBO();
     void DestroyOutputFBO();
     void Destroy3DFBO();
-    void Destroy3DResolveFBO();
     void DestroyHDRFBO();
-    void DestroyHDRResolveFBO();
     void DestroyShadowFBO();
     void CompileShaders();
     void CreateStreamVBO();
