@@ -124,6 +124,7 @@ uniform int uTilesX;
 uniform int uTilesY;
 uniform int uFlipbook;
 uniform int uFrameBlend;
+uniform int uAdditive;   // 1 = 加法（黑底无 alpha）→ 用亮度当覆盖
 uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;   // 本 pass 的像素尺寸（1/2 分辨率）
 uniform float uNear;
@@ -168,6 +169,10 @@ void main() {
     }
     vec4 col = vColor * tex;
     float a = col.a;
+    if (uAdditive == 1) {
+        // 加性火纹理常无 alpha 语义（黑底=透明）→ 用亮度当覆盖；否则黑会变“黑板”。
+        a = clamp(max(max(col.rgb.r, col.rgb.g), col.rgb.b), 0.0, 1.0);
+    }
     if (a <= 1.0 / 255.0) {
         discard;
     }

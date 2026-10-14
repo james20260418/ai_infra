@@ -409,7 +409,6 @@ cc_library(
     name = "particle_viewer_app",
     hdrs = [
         "demo/particle_viewer_app.h",
-        "demo/particle_fire.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -420,7 +419,6 @@ cc_library(
         "//tools/jpov/interface:particle_types",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src/particles:particle_system",
-        "//third_party/stb:stb_image_write",
     ],
     copts = ["-std=c++20"],
 )

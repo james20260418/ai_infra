@@ -19,7 +19,6 @@
 #endif
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/demo/particle_fire.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"
@@ -42,7 +41,6 @@ struct FireTexEntry {
     int ty;
 };
 inline const FireTexEntry kFireTexes[] = {
-    {"程序化 puff",       "",                              8,  8},
     {"火#1  ben1",        "candidates/cand01_ben1.png",    10, 6},
     {"火#2  ben2",        "candidates/cand02_ben2.png",    10, 6},
     {"火#3  ben3",        "candidates/cand03_ben3.png",    10, 6},
@@ -148,7 +146,7 @@ public:
     jpov::particles::ParticleEmitter smoke_emitter_;
     bool fire_needs_reset_ = true;
     bool smoke_needs_reset_ = true;
-    int fire_choice_ = 10;
+    int fire_choice_ = 9;   // 默认 火#10 hwrow
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     uint32_t smoke_texture_id_ = 0;
     bool frame_blend_ = true;
@@ -214,23 +212,16 @@ public:
         // ── 火焰（先推进，拿死亡位置给烟的子发射器）──
         std::vector<jpov::Vec3f> flame_deaths;
         std::vector<jpov::ParticleInstance> finst;
-        const bool choice_flip = fire_choice_ >= 0 && fire_choice_ < kFireTexCount &&
-                                 kFireTexes[fire_choice_].file[0] != '\0';
+        const int fc = (fire_choice_ < 0) ? 0
+                     : ((fire_choice_ >= kFireTexCount) ? kFireTexCount - 1 : fire_choice_);
         if (fire_enable_) {
             fire_cfg_.rate = ui_fire_rate_;
             fire_cfg_.size_start = {ui_fire_size_ * 0.6f, ui_fire_size_};
-            if (choice_flip) {
-                fire_cfg_.tiles_x = kFireTexes[fire_choice_].tx;
-                fire_cfg_.tiles_y = kFireTexes[fire_choice_].ty;
-                fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
-                fire_cfg_.sheet_fps = ui_fire_tex_fps_;
-                fire_cfg_.start_frame_random = true;
-            } else {
-                fire_cfg_.tiles_x = 8;
-                fire_cfg_.tiles_y = 8;
-                fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kLifetime;
-                fire_cfg_.start_frame_random = false;
-            }
+            fire_cfg_.tiles_x = kFireTexes[fc].tx;
+            fire_cfg_.tiles_y = kFireTexes[fc].ty;
+            fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
+            fire_cfg_.sheet_fps = ui_fire_tex_fps_;
+            fire_cfg_.start_frame_random = true;
             if (fire_needs_reset_) {
                 fire_emitter_.SetConfig(fire_cfg_);
                 fire_emitter_.Reset(20261014u);
@@ -255,7 +246,7 @@ public:
             }
             std::vector<jpov::ParticleInstance> sinst;
             smoke_emitter_.Update(dt, &sinst);
-            if (!sinst.empty()) {
+            if (!sinst.empty() && smoke_texture_id_ != 0) {
                 jpov::ParticleRenderCommand spc;
                 spc.particles = std::move(sinst);
                 spc.texture_id = smoke_texture_id_;
@@ -269,10 +260,11 @@ public:
                 cmds->DrawParticles(std::move(spc));
             }
         }
-        if (fire_enable_ && !finst.empty()) {
+        const uint32_t fire_tex = fire_choice_tex_[fc];
+        if (fire_enable_ && !finst.empty() && fire_tex != 0) {
             jpov::ParticleRenderCommand pc;
             pc.particles = std::move(finst);
-            pc.texture_id = choice_flip ? fire_choice_tex_[fire_choice_] : 0;
+            pc.texture_id = fire_tex;
             pc.tiles_x = fire_cfg_.tiles_x;
             pc.tiles_y = fire_cfg_.tiles_y;
             pc.flipbook = fire_cfg_.flipbook;
@@ -360,10 +352,6 @@ private:
         ui_.SliderFloat("发射率 /s", &ui_fire_rate_, row(1), 0.0f, 300.0f, 0);
         ui_.SliderFloat("尺寸 m", &ui_fire_size_, row(2), 0.1f, 3.0f, 2);
         ui_.SliderFloat("火纹理帧率 fps", &ui_fire_tex_fps_, row(3), 6.0f, 60.0f, 0);
-        {
-            const float cx2 = 0.30f * w;
-            (void)cx2;
-        }
         ui_.Checkbox("黑烟", &smoke_enable_, row(4));
     }
 

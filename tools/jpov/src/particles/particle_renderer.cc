@@ -230,6 +230,8 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uTilesY"), cmd.tiles_y);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFlipbook"), cmd.flipbook ? 1 : 0);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFrameBlend"), cmd.frame_blend ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uAdditive"),
+                cmd.blend == BlendMode::kAdditive ? 1 : 0);
     glUniform2f(shader_mgr_->GetUniform(prog_draw_, "uViewport"), static_cast<float>(hw),
                 static_cast<float>(hh));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);

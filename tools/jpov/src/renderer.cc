@@ -1668,7 +1668,7 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
-    bool has_3d = cmds.sky.has_value();
+    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -1966,6 +1966,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
             //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
             if (!cmds.particles.empty()) {
+                CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 for (const ParticleRenderCommand& pc : cmds.particles) {
                     particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
