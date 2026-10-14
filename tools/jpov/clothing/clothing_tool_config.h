@@ -145,6 +145,7 @@ inline constexpr float kLagOvershootDefault = 0.2f;
 
 // ── 面板布局（各面板共用；配合 ClothingToolApp::BeginPanel 使用）──
 inline constexpr float kPanelMargin  = 12.0f;   // 面板到窗口边缘的间距
+inline constexpr float kPanelWidth   = 400.0f;  // 面板固定宽（像素；不随窗口宽缩放，2026-10-14 Danis）
 inline constexpr float kPanelPad     = 10.0f;   // 面板内边距
 inline constexpr float kPanelSpacing = 5.0f;    // 行间距
 
@@ -154,6 +155,14 @@ struct PanelFrame {
     float row_w  = 0.0f;   // 控件可用宽
     float step_y = 0.0f;   // 行高 + 行间距
     float row_y  = 0.0f;   // 首行 y
+};
+
+// 一块「可折叠（Accordion）面板」的绘制结果（BeginAccordionPanel 返回）。
+// 折叠时面板只剩标题栏（1 行）；展开时 = 标题栏 + content_rows 行内容。
+struct AccordionFrame {
+    PanelFrame frame;     // 内容首行的游标（折叠时无内容，调用方不读）
+    bool expanded = false;  // 本帧展开态（调用方据以决定是否画内容）
+    float height = 0.0f;    // 面板总高（像素；供相邻面板定位）
 };
 
 }  // namespace clothing

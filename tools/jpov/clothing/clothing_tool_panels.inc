@@ -8,6 +8,9 @@
 // 覆盖：CommitNumberField / DrawPanels / DrawBrushPanel / ProcessBrush / DrawBrushMarkers /
 //       MouseOverUi / DrawRelaxPanel / DrawHoleFillPanel / DrawLeftPanel / DrawRightPanel /
 //       DrawSkinPanel / DrawMotionPanel。
+//
+// 折叠：除左上「变换 / 保存 / 场景」面板（DrawLeftPanel，常驻）外，其余面板均用
+//   BeginAccordionPanel 绘制 —— 点标题栏展开/收起，收起时仅留标题栏（见该方法注释）。
 
     // ==================== 面板 ====================
 
@@ -30,7 +33,8 @@
         return *target != before;
     }
 
-    // 画两个面板（左上 = 变换 / 保存 / 地面 / 显示；右上 = 仿真动力学）。
+    // 画各面板。除「平移/旋转/保存 glb」的左上角面板（DrawLeftPanel）保持原样外，其余
+    // 面板均为可折叠（Accordion）面板：折叠时只显示标题栏，展开时显示标题栏 + 内容。
     // 所有布局都从**本帧窗口尺寸** winfo 推算（见文件头坐标空间说明）。
     void DrawPanels(const jpov::InputSnapshot& input,
                     const jpov::WindowInfo& winfo,
@@ -43,35 +47,41 @@
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
         panel_rects_.clear();   // 重新收集本帧面板矩形（画笔「鼠标在 UI 上」判定用）
-        DrawLeftPanel(cmds, w);
+        DrawLeftPanel(cmds);
         DrawRightPanel(cmds, w, h);
-        DrawBrushPanel(cmds, w, h);
-        DrawRelaxPanel(cmds, w, h);
+        // 顶部中间两面板同列堆叠：画笔面板先画，把面板高回传给松弛度面板定位
+        //（任一折叠/展开都会带动下方那个随之上/下移）。
+        const float brush_h = DrawBrushPanel(cmds, w);
+        DrawRelaxPanel(cmds, w, brush_h);
         DrawSkinPanel(cmds, w, h);
         DrawHoleFillPanel(cmds, w, h);
-        DrawMotionPanel(cmds, w, h);
+        DrawMotionPanel(cmds, h);
     }
 
-    // ---- 顶部中间：3D 画笔 ----
+    // ---- 顶部中间：3D 画笔（可折叠）----
     //
     // 「画笔」按钮切换激活态（激活 = 存在选区概念；再点 / ESC = 结束并清空选区）；
     // 「画笔半径 (px)」滑条 5~200（默认 100）。激活态下鼠标周围画淡黄半透明圆表示尺
     // 寸，左键在非 UI 区涂抹把邻近顶点选入选区（见 ProcessBrush）。
-    // 行：标题(1) + 按钮(1) + 半径(1) + 状态(1) = 4。
-    void DrawBrushPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        (void)win_h;
-        const float panel_w  = 0.30f * win_w;
-        const float panel_x = (win_w - panel_w) * 0.5f;  // 顶部居中
+    // 标题栏（折叠时仅此）：3D 画笔。展开内容行：按钮(1) + 半径(1) + 状态(1) = 3。
+    // 返回本帧面板总高（供下方松弛度面板定位）。
+    float DrawBrushPanel(jpov::RenderCommandList* cmds, float win_w) {
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);  // 顶部居中
         const float panel_y = kPanelMargin;
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, /*rows*/ 4);
+        constexpr int kContentRows = 3;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "3D 画笔", &brush_panel_open_,
+            kContentRows);
+        if (!af.expanded) {
+            return af.height;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
-
-        DrawLabel("3D 画笔", left, row_w, row_y);
-        row_y += step_y;
 
         // 激活态按钮：点一次激活，再点一次结束（生命周期）。
         const char* btn =
@@ -97,30 +107,33 @@
         cmds->DrawText(status, /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                        kFontSize, kForeground, jpov::TextAlignment::kTopLeft,
                        kViewerFontAlias);
+        return af.height;
     }
 
-    // ---- 顶部中间（画笔面板下方）：布料 LAG 松弛度 ----
+    // ---- 顶部中间（画笔面板下方）：布料 LAG 松弛度（可折叠）----
     //
     // 由「固定点」（3D 画笔选区）自动推导逐顶点松弛度（relax_derive.h）。固定点 = 画笔选区
     // ∪ 可选高度带；离固定点越远松弛度越大（测地距离），Laplacian 平滑去拐角。
     // 推导结果存本工具内；**保存 glb 时**写入 _JPOV_RELAX。
-    // 行：标题(1) + 推导按钮(1) + 半径滑条(1) + max_lag 滑条(1) + 显示勾选(1) + 状态(1) = 6。
-    void DrawRelaxPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        (void)win_h;
-        const float panel_w  = 0.30f * win_w;
-        const float panel_x = (win_w - panel_w) * 0.5f;  // 顶部居中，与画笔面板同列
-        // 紧接画笔面板（4 行）下方。
-        const float panel_y = kPanelMargin + PanelHeight(/*rows=*/4) + kPanelSpacing;
-        constexpr int kRows = 6;
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+    // above_h = 上方画笔面板的**本帧总高**（定位在其下方；画笔折叠/展开会带动本面板上/下移）。
+    // 标题栏：布料 LAG 松弛度。展开内容行：按钮(1) + 半径(1) + max_lag(1) + 显示(1) + 状态(1) = 5。
+    void DrawRelaxPanel(jpov::RenderCommandList* cmds, float win_w, float above_h) {
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);  // 顶部居中，与画笔面板同列
+        const float panel_y = kPanelMargin + above_h + kPanelSpacing;  // 紧接画笔面板下方
+        constexpr int kContentRows = 5;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "布料 LAG 松弛度",
+            &relax_panel_open_, kContentRows);
+        if (!af.expanded) {
+            return;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
-
-        DrawLabel("布料 LAG 松弛度", left, row_w, row_y);
-        row_y += step_y;
 
         if (ui_.Button("由固定点推导松弛度",
                        jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
@@ -241,27 +254,34 @@
         return false;
     }
 
-    // ---- 底部中间：补洞（推进法）----
+    // ---- 底部中间：补洞（推进法）（可折叠）----
     //
     // 紧邻右下「软布自动蒙皮」面板的左侧（贴底）。按钮「执行补洞」把网格破洞补上（
     // 在仿真关联之前）；「最大洞周长」滑条滤掉腰口/下摆这类本来该开的口。
-    // 行：标题(1) + 按钮(1) + 细分(1) + 平滑(1) + 最大周长(1) + 状态(1) = 6。
+    // 标题栏：补洞（推进法）。展开内容行：按钮(1) + 细分(1) + 平滑(1) + 最大周长(1) + 状态(1) = 5。
     void DrawHoleFillPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 6;
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        constexpr int kContentRows = 5;
         // 贴底、位于蒙皮面板（贴右）左侧；与左下摆动面板留出间隔。
-        const float panel_x = win_w - 2.0f * panel_w - 2.0f * kPanelMargin;
-        const float panel_y =
-            std::max(win_h - PanelHeight(kRows) - kPanelMargin, kPanelMargin);
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float panel_x = std::max(
+            win_w - 2.0f * panel_w - 2.0f * kPanelMargin, kPanelMargin);
+        // 贴底锚定：折叠时面板变矮 逐向上收（y 变大）。
+        const float panel_y = std::max(
+            win_h - AccordionHeight(holefill_panel_open_, kContentRows) -
+                kPanelMargin,
+            kPanelMargin);
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "补洞（推进法）",
+            &holefill_panel_open_, kContentRows);
+        if (!af.expanded) {
+            return;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
-
-        DrawLabel("补洞（推进法）", left, row_w, row_y);
-        row_y += step_y;
 
         if (ui_.Button("执行补洞", jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
             RunHoleFill();
@@ -301,8 +321,8 @@
     //   地面高度滑条
     //   显示勾选（人体 / 衣服）
     //   两行只读（人体 / 衣服来源）
-    void DrawLeftPanel(jpov::RenderCommandList* cmds, float win_w) {
-        const float panel_w  = 0.32f * win_w;
+    void DrawLeftPanel(jpov::RenderCommandList* cmds) {
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
         const float panel_x  = kPanelMargin;
         const float panel_y  = kPanelMargin;
         // 行数：平移表头1 + 平移3 + 旋转表头1 + 旋转3 + 缩放1 + 保存1 + 保存状态1
@@ -457,30 +477,33 @@
         row_y += step_y;
     }
 
-    // ---- 右上角：仿真动力学 ----
+    // ---- 右上角：仿真动力学（可折叠）----
     //
     // 注意：面板**贴右边缘**，x 从**本帧窗口宽度** win_w 反推（不是固定常量），
     // 这样窗口 resize 时右上角面板始终贴住右上角。
     //
-    // 行：标题(1) + 关联距离(1) + 重力/质量/力系数/衰减/速度上限 滑条(5) + 人体排斥开关(1)
-    //     + buffer(1) + 切向保留系数(1) + 显示力学参照网格(1) + 按钮行(1) + 状态行(2) = 14。
+    // 标题栏：仿真动力学。展开内容行：关联距离(1) + 重力/质量/力系数/衰减/速度上限 滑条(5)
+    //     + 人体排斥开关(1) + buffer(1) + 切向保留系数(1) + 显示力学参照网格(1) + 按钮行(1)
+    //     + 状态行(2) = 13。
     void DrawRightPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
         (void)win_h;
-        const float panel_w  = 0.30f * win_w;
-        const float panel_x  = win_w - panel_w - kPanelMargin;  // 贴右边缘
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        const float panel_x  = std::max(win_w - panel_w - kPanelMargin, kPanelMargin);  // 贴右边缘
         const float panel_y  = kPanelMargin;
-        constexpr int kRows = 14;
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        constexpr int kContentRows = 13;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "仿真动力学", &right_panel_open_,
+            kContentRows);
+        if (!af.expanded) {
+            return;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         const float kSpacing = kPanelSpacing;
         float row_y = frame.row_y;
-
-        // ---- 标题 ----
-        DrawLabel("仿真动力学", left, row_w, row_y);
-        row_y += step_y;
 
         // ---- 关联距离 d（米）：仿真点集合 / 关联邻居表（= 仿真点"缝合"半径）。
         //      拖它 → 重建仿真点集合（与 soft_mesh_viewer 同语义）。----
@@ -582,26 +605,34 @@
         row_y += step_y;
     }
 
-    // ---- 右下角：软布自动蒙皮（一键）----
+    // ---- 右下角：软布自动蒙皮（一键）（可折叠）----
     //
     // 贴右下角（x 由窗口宽反推、y 由窗口高反推），与左上（变换/保存）、右上（动力学）
-    // 互不遮挡。行：标题(1) + 一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
+    // 互不遮挡。
+    // 标题栏：软布自动蒙皮。展开内容行：一键蒙皮按钮(1) + 权重生长勾选(1) + 种子半径输入(1)
     //             + 焊接模式勾选(1) + 焊接参数输入(1) + base color alpha 归一按钮(1)
-    //             + 蒙皮状态(1) + alpha 状态(1) = 9。
+    //             + 蒙皮状态(1) + alpha 状态(1) = 8。
     void DrawSkinPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
-        const float panel_w  = 0.30f * win_w;
-        constexpr int kRows = 9;
-        const float panel_x = win_w - panel_w - kPanelMargin;  // 贴右边缘
-        const float panel_y = win_h - PanelHeight(kRows) - kPanelMargin;  // 贴底边缘
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        constexpr int kContentRows = 8;
+        const float panel_x = std::max(win_w - panel_w - kPanelMargin, kPanelMargin);  // 贴右边缘
+        // 贴底锚定：折叠时面板变矮 逐向上收。
+        const float panel_y = std::max(
+            win_h - AccordionHeight(skin_panel_open_, kContentRows) -
+                kPanelMargin,
+            kPanelMargin);
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "软布自动蒙皮", &skin_panel_open_,
+            kContentRows);
+        if (!af.expanded) {
+            return;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
-
-        DrawLabel("软布自动蒙皮", left, row_w, row_y);
-        row_y += step_y;
 
         // 一键蒙皮按钮：衣服带蒙皮后 RunAutoSkin 自身 no-op（按钮仍可点，文案变明示状态）。
         const char* btn = ClothMeshHasSkin() ? "已蒙皮" : "一键蒙皮";
@@ -690,10 +721,10 @@
 
     // ---- 左下角：随机摆动测试 + 整体平动 + 平动 LAG（真骨架蒙皮驱动人体 + 已蒙皮衣服）----
     //
-    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）。
-    // 行：启用(1) + 播放(1) + 主轴(1) + 幅度(1) + 种子(1) + 平动 XY(2) + LAG(1) + 二阶(1)
-    //     + 上升时间(1) + 超调量(1) + 状态(1) = 12。
-    void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_w, float win_h) {
+    // **贴左下角 sticky**（x 贴左、y 由窗口高反推并 clamp 在视口内）。可折叠。
+    // 标题栏：随机摆动测试。展开内容行：启用(1) + 播放(1) + 主轴(1) + 幅度(1) + 种子(1)
+    //     + 平动 XY(2) + LAG(1) + 二阶(1) + 上升时间(1) + 超调量(1) + 状态(1) = 12。
+    void DrawMotionPanel(jpov::RenderCommandList* cmds, float win_h) {
         // 状态提示（每帧刷新，供面板与出图自检）。
         if (!has_body_skeleton_) {
             motion_msg_ = "人体无骨架，无法摆动";
@@ -710,21 +741,29 @@
             motion_msg_ = "人体 + 已蒙皮衣服同步摆动";
         }
 
-        const float panel_w  = 0.32f * win_w;
-        constexpr int kRows = 12;
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        constexpr int kContentRows = 12;
         const float panel_x = kPanelMargin;  // 贴左边缘
-        // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。
-        const float panel_y =
-            std::max(win_h - PanelHeight(kRows) - kPanelMargin, kPanelMargin);
-        PanelFrame frame = BeginPanel(cmds, panel_x, panel_y, panel_w, kRows);
+        // 贴底边缘；窗口过矮时夹到顶边以内（不让面板跑出视口）。折叠时面板变矮 逐向上收。
+        const float panel_y = std::max(
+            win_h - AccordionHeight(motion_panel_open_, kContentRows) -
+                kPanelMargin,
+            kPanelMargin);
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "随机摆动测试", &motion_panel_open_,
+            kContentRows);
+        if (!af.expanded) {
+            return;
+        }
+        const PanelFrame& frame = af.frame;
         const float left = frame.left;
         const float row_w = frame.row_w;
         const float step_y = frame.step_y;
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
 
-        // 启用勾选（兼作面板标题）。
-        ui_.Checkbox("随机摆动测试（启用）", &motion_test_enabled_,
+        // 启用勾选（面板标题已由标题栏承担，这里只做开关）。
+        ui_.Checkbox("启用", &motion_test_enabled_,
                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         row_y += step_y;
 

@@ -209,6 +209,17 @@ public:
     BrushTool brush_;
     std::vector<jpov::UiRect> panel_rects_;
 
+    // ── 面板折叠（Accordion）展开态（2026-10-14 Danis：除「平移/旋转/保存 glb」面板外，
+    //    其余面板一律可折叠；折叠时只显示面板标题栏）。状态外置，跨帧由本工具持有：
+    //    true = 展开（标题栏 + 内容行），false = 折叠（仅标题栏）。
+    //    默认全部折叠（2026-10-14 Danis：开启工具时默认收起）。──
+    bool brush_panel_open_    = false;  // 顶部中间：3D 画笔
+    bool relax_panel_open_    = false;  // 顶部中间：布料 LAG 松弛度
+    bool right_panel_open_    = false;  // 右上：仿真动力学
+    bool skin_panel_open_     = false;  // 右下：软布自动蒙皮
+    bool holefill_panel_open_ = false;  // 底部中间：补洞（推进法）
+    bool motion_panel_open_   = false;  // 左下：随机摆动测试
+
     // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep),
@@ -1393,6 +1404,48 @@ private:
     // 记录一块面板的屏幕矩形（画笔判定「鼠标是否落在 UI 上」用；每帧 DrawPanels 先 clear）。
     void RecordPanel(float x, float y, float w, float h) {
         panel_rects_.push_back(jpov::UiRect{{x, y}, {w, h}});
+    }
+
+    // 「可折叠（Accordion）面板」的总高（像素）：折叠 = 仅标题栏（1 行）；
+    // 展开 = 标题栏 + content_rows 行内容。与 BeginAccordionPanel 的取高一致。
+    static float AccordionHeight(bool expanded, int content_rows) {
+        return PanelHeight(expanded ? content_rows + 1 : 1);
+    }
+
+    // 画一块「可折叠（Accordion）面板」：底板 + 标题栏（点击切换展开态）。
+    //   - content_rows = 展开时的**内容行数**（不含标题栏）。
+    //   - *open 为展开态（in/out，状态外置，由调用方跨帧持有）；点击标题栏翻转。
+    // 返回内容首行游标 + 本帧展开态 + 面板总高（供相邻面板定位）。
+    // 调用方据 expanded 决定是否画内容行（折叠时只画标题栏）。
+    // ⚠️ 底板高度按**进入本函数时**的 *open 取；点击切换下一帧生效（与相邻面板
+    //    定位用同一帧快照一致，不会出现“本面板已缩、相邻面板还没让位”的 1 帧错位）。
+    // Pre-condition: open != nullptr。
+    AccordionFrame BeginAccordionPanel(jpov::RenderCommandList* cmds, float panel_x,
+                                       float panel_y, float panel_w,
+                                       const char* title, bool* open /*inout*/,
+                                       int content_rows) {
+        CHECK(open != nullptr) << "BeginAccordionPanel open pointer must not be null";
+        const bool expanded = *open;  // 进入时快照（点击切换下一帧生效）。
+        const int total_rows = expanded ? content_rows + 1 : 1;
+        const float panel_h = PanelHeight(total_rows);
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
+
+        AccordionFrame af;
+        af.expanded = expanded;
+        af.height   = panel_h;
+        af.frame.left   = panel_x + kPanelPad;
+        af.frame.row_w  = panel_w - kPanelPad * 2.0f;
+        af.frame.step_y = kPanelRowH + kPanelSpacing;
+        af.frame.row_y  = panel_y + kPanelPad;
+
+        // 标题栏 = 第一行：点击切换展开态（三角方向随切换后的 *open 变化，即时反馈）。
+        ui_.AccordionHeader(title, open,
+                            jpov::UiRect{{af.frame.left, af.frame.row_y},
+                                         {af.frame.row_w, kPanelRowH}});
+        af.frame.row_y += af.frame.step_y;  // 游标移到内容首行（折叠时调用方不读）。
+        return af;
     }
 
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。

@@ -125,3 +125,16 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 折叠面板标题栏 AccordionHeader 自证测试（"点击切换展开态 + 指示三角"绘制/交互）。
+cc_test(
+    name = "jpov_ui_accordion_test",
+    srcs = ["jpov_ui_accordion_test.cc"],
+    deps = [
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

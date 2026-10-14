@@ -232,6 +232,23 @@ public:
                const std::vector<const char*>& items, const UiRect& box,
                bool stretch_w = true, bool stretch_h = true);
 
+    // 折叠面板（Accordion）的**标题栏**。
+    //
+    // 用法：折叠面板 = 标题栏（本控件）+ 展开时才绘制的若干内容行。调用方负责
+    // 面板底板与「折叠时只有标题栏、展开时标题栏 + 内容」的高度/布局；本控件只画
+    // 标题栏本身（点击切换展开态）。
+    //
+    // open 为 in/out（状态外置，同 Checkbox）：点击标题栏 → 翻转 *open。
+    // 返回：本帧（可能已翻转的）*open，即「本帧是否展开」——调用方据此决定是否
+    // 绘制内容行。
+    // 绘制：整行填充（悬停=accent 高亮，否则=hover 深色）+ 边框 + 左侧标题文本 +
+    // 右侧展开指示三角（展开 = 朝下 ▾，折叠 = 朝右 ▸，纯几何、不依赖字形）。
+    // 点击属一次性事件（不跨帧记忆）；被已展开弹层独占的点击不处理（同其它控件）。
+    // Pre-condition: open != nullptr。
+    bool AccordionHeader(const char* label, bool* open /*inout*/,
+                         const UiRect& box, bool stretch_w = true,
+                         bool stretch_h = true);
+
     // 颜色显示块：仅展示色值（不可编辑）。
     void ColorSwatch(const char* label, const Color& color, const UiRect& box,
                      bool stretch_w = true, bool stretch_h = true);
