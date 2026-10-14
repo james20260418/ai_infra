@@ -16,6 +16,7 @@
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
+#include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/instanced/instanced_object_attrs.h"
@@ -337,6 +338,8 @@ private:
     // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
     FireFogRenderer fire_fog_renderer_;
     ParticleRenderer particle_renderer_;
+    // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
+    SmaaRenderer smaa_renderer_;
 
 public:
     // ---- 骨架（SkeletonManager）注册 / 取用 ----

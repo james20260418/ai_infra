@@ -636,6 +636,34 @@ struct BloomConfig {
     int levels = 3;
 };
 
+// SMAA（Enhanced Subpixel Morphological Antialiasing，Jimenez 2011）后处理抗锯齿参数。
+//
+// ── 在后处理链中的位置（用户视角）──
+// 它是**整个 3D 后处理链的最后一站**：tone map 把 HDR 压到 LDR 之后运行，
+// 输出即为送屏的最终 LDR 图像。链路：
+//
+//   3D 不透明 pass（MRT：颜色 + 场景深度）
+//     → 雾 → highlight → bloom → tone map(ACES + sRGB)
+//     → 【本 pass：SMAA 1x】→ 2D/UI
+//
+//  · 在**输出（viewport）分辨率**下工作，而不是 3D FBO 分辨率：SMAA 是逐像素的边缘
+//    导向 AA，必须在最终像素栅格上做；而 3D FBO 尺寸与屏幕尺寸可以不同（那一步重采样
+//    正是分辨率改变的地方），在 3D FBO 分辨率下做 AA 再重采样会错位、收益打折。
+//  · 输入是 gamma 空间（sRGB 编码后）的 LDR 颜色 —— 这正是 luma 边检测所需。
+//  · 前置条件：**cmds.tone_mapping 必须为 true**（旧 LDR 直通路径无 HDR/tone map，
+//    不跑 SMAA；Renderer 会 CHECK 报错而非静默失效）。
+//
+// 未启用（默认）时零开销、零回归。
+struct SmaaConfig {
+    // 是否启用。false（默认）时整个 pass 跳过，tone map 照旧直写主 FBO。
+    bool enabled = false;
+
+    // 边缘检测灵敏度（luma 阈值）。越小越敏感、检测到的边越多（也更贵）。
+    // 范围建议 [0.05, 0.5]；0.1 是参考默认（能抓到大多数可见边），
+    // 0.05 是「宁可多抓」的激进值。
+    float threshold = 0.1f;
+};
+
 // 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
 //
 // ── 在后处理链中的位置（用户视角）──
@@ -1984,6 +2012,11 @@ struct RenderCommandList {
     // 高亮区域提取、模糊、加回原图（见 BloomConfig 注释）。
     // 默认无值（等同关闭），零额外开销、零回归。
     std::optional<BloomConfig> bloom;
+
+    // SMAA 后处理抗锯齿。有值且 smaa.enabled==true 时，在 tone map **之后**、
+    // 2D/UI **之前**，在输出分辨率下对最终 LDR 图像做 SMAA 1x（见 SmaaConfig）。
+    // 默认无值（等同关闭），零额外开销、零回归。**需要 tone_mapping=true**。
+    std::optional<SmaaConfig> smaa;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。
