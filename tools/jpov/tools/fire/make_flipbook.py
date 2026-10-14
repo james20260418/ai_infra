@@ -51,6 +51,83 @@ def load_jpovvol(path):
 
 # ---------------- 颜色 ----------------
 
+def _hash01(ix, iy, seed):
+    h = (ix * 374761393 + iy * 668265263 + seed * 2246822519) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 1274126177) & 0xFFFFFFFF
+    h ^= h >> 16
+    return h / 4294967296.0
+
+
+def _value_noise(x, y, seed):
+    ix = int(np.floor(x))
+    iy = int(np.floor(y))
+    fx = x - ix
+    fy = y - iy
+    ux = fx * fx * (3.0 - 2.0 * fx)
+    uy = fy * fy * (3.0 - 2.0 * fy)
+    a = _hash01(ix, iy, seed)
+    b = _hash01(ix + 1, iy, seed)
+    c = _hash01(ix, iy + 1, seed)
+    d = _hash01(ix + 1, iy + 1, seed)
+    return (a + (b - a) * ux) * (1.0 - uy) + (c + (d - c) * ux) * uy
+
+
+def _fbm(x, y, seed, octaves=3):
+    v = 0.0
+    amp = 0.5
+    fx, fy = x, y
+    for i in range(octaves):
+        v += amp * _value_noise(fx, fy, seed + i * 17)
+        fx *= 2.03
+        fy *= 2.11
+        amp *= 0.5
+    return v / 0.875
+
+
+def render_puff(tiles, cell):
+    """烘「经典火舌 puff」flipbook：每格 = 一小团火（不规则软轮廓 + 内部噪声细节 +
+    随帧闪烁演化 + 点火→峰值→熄灭包络）。不需要体数据。"""
+    nframes = tiles * tiles
+    sheet = np.zeros((tiles * cell, tiles * cell, 4), np.float32)
+    xs = (np.arange(cell, dtype=np.float32) + 0.5) / cell
+    ys = (np.arange(cell, dtype=np.float32) + 0.5) / cell
+    U, V = np.meshgrid(xs, ys)          # V: 0=图像顶行
+    FY = 1.0 - V                        # FY: 0=底
+    dx = U - 0.5
+    dyv = FY - 0.40                     # 重心略偏下
+    ang = np.arctan2(dyv, dx)
+    rr = np.sqrt(dx * dx + (dyv * 0.82) ** 2)   # 竖直略拉长（火舌形）
+    for f in range(nframes):
+        t = f / float(max(1, nframes - 1))
+        env = min(t / 0.25, (1.0 - t) / 0.35)
+        env = 0.0 if env < 0.0 else (1.0 if env > 1.0 else env)
+        env = env * env * (3.0 - 2.0 * env)     # smoothstep 点火/熄灭
+        wob = np.vectorize(lambda a_: _fbm(np.cos(a_) * 1.4 + 0.5,
+                                           np.sin(a_) * 1.4 + 0.5,
+                                           int(f) * 13 + 7))(ang)
+        rad = (0.30 + 0.10 * wob) * (0.55 + 0.45 * env)
+        edge = np.clip(1.0 - rr / np.maximum(rad, 1e-4), 0.0, 1.0)
+        a = edge ** 1.25
+        detail = np.vectorize(lambda u_, v_: _fbm(u_ * 4.5, v_ * 4.5 + f * 0.35,
+                                                  int(f) * 29 + 3))(U, FY)
+        a *= (0.45 + 0.75 * detail)
+        a = np.clip(a * env, 0.0, 1.0)
+        R = np.full_like(a, 1.0)
+        G = np.clip(0.25 + 0.72 * np.minimum(1.0, a * 1.25), 0.0, 1.0)
+        B = a * a * a * 0.7
+        cellimg = np.zeros((cell, cell, 4), np.float32)
+        cellimg[..., 0] = R
+        cellimg[..., 1] = G
+        cellimg[..., 2] = B
+        cellimg[..., 3] = a
+        cellimg = box_blur(cellimg, 2, 2)
+        row = f // tiles
+        col = f % tiles
+        sheet[row * cell:(row + 1) * cell, col * cell:(col + 1) * cell, :] = cellimg
+    return (np.clip(sheet, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
 # 可分离盒模糊（(H,W,C) 图像；软化 flipbook 边缘，减“骰子/三角感”）。
 def box_blur(a, r=2, passes=2):
     a = a.astype(np.float32).copy()
@@ -145,13 +222,27 @@ def render_flipbook(vol, mode, tiles):
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         x0, x1 = int(xs.min()), int(xs.max()) + 1
     if mode == "fire":
-        # 收窄到中央：要的是「一缕火舌」，不是一整片火幕。
-        xc = (x0 + x1) // 2
-        half = max(1, int((x1 - x0) * 0.28))
-        x0 = max(0, xc - half)
-        x1 = min(nx, xc + half)
+        # 「小火团」：裁一个**正方形**小块（边长 = 火宽的较小者），竖直放在火焰最亮处。
+        # 每格 = 一小团火（一段火焰），靠大量小粒子叠加成火 —— 而不是每粒一根整火柱。
+        w = x1 - x0
+        h = y1 - y0
+        side = max(16, min(w, h))
+        cx = (x0 + x1) // 2
+        tot = float(any_a.sum())
+        if tot > 0.0:
+            yy = np.arange(ny, dtype=np.float32)[:, None]
+            yc = int((any_a * yy).sum() / tot)
+        else:
+            yc = (y0 + y1) // 2
+        x0 = max(0, cx - side // 2)
+        x1 = min(nx, x0 + side)
+        x0 = max(0, x1 - side)
+        y0 = max(0, yc - side // 2)
+        y1 = min(ny, y0 + side)
+        y0 = max(0, y1 - side)
     ch = y1 - y0
     cw = x1 - x0
+    print("crop x[%d:%d] y[%d:%d] side=%d -> cell %dx%d" % (x0, x1, y0, y1, side if mode == 'fire' else -1, cw, ch))
     cell = int(max(ch, cw) * 1.30) + 2   # cell 含 ~30% 透明内边距
 
     sheet = np.zeros((tiles * cell, tiles * cell, 4), np.float32)
@@ -200,6 +291,13 @@ def main():
     in_path = sys.argv[2]
     out_path = sys.argv[3]
     tiles = int(sys.argv[4]) if len(sys.argv) > 4 else 8
+
+    if mode == "puff":
+        cell = int(sys.argv[2]) if False else 128   # puff 不需要体输入
+        rgba = render_puff(tiles, cell)
+        write_png(out_path, rgba)
+        print("wrote %s (puff, %dx%d)" % (out_path, rgba.shape[1], rgba.shape[0]))
+        return 0
 
     vol = load_jpovvol(in_path)
     print("volume: frames=%d nz=%d ny=%d nx=%d ch=%d" % vol.shape)

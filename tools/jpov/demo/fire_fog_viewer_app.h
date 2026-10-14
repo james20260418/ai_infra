@@ -53,11 +53,11 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.origin = {0.0f, 0.80f, 0.0f};   // 桌面上方
     c.rate = 160.0f;
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.12f;
-    c.cone_half_angle_deg = 14.0f;
+    c.radius = 0.22f;
+    c.cone_half_angle_deg = 26.0f;
     c.lifetime = {0.75f, 1.1f};
     c.speed = {0.7f, 1.3f};
-    c.size_start = {0.22f, 0.36f};
+    c.size_start = {0.28f, 0.5f};
     c.rotation = {0.0f, 6.2831853f};
     c.gravity = {0.0f, 1.9f, 0.0f};
     c.drag = 0.9f;
@@ -179,7 +179,7 @@ public:
     // 面板用影子标量（逐步映射到 fire_cfg_，避免直接改 RangeF 导致 min>max 崩溃）。
     float ui_fire_rate_ = 160.0f;
     float ui_fire_life_ = 1.1f;
-    float ui_fire_size_ = 0.36f;
+    float ui_fire_size_ = 0.5f;
     float ui_fire_speed_ = 1.3f;
     float ui_fire_buoy_ = 1.9f;
     float ui_fire_drag_ = 0.9f;
