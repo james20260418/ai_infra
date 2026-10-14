@@ -250,7 +250,7 @@ uniform int   uHasNormalTex;
 uniform float uNormalScale;
 
 uniform sampler2D uTileLightIndices;
-// 透明混合（仅 blend program 引用）：不透明场景深度纹理（MRT#1 resolve 后，值 = gl_FragCoord.z）。
+// 透明混合（仅 blend program 引用）：不透明场景深度纹理（来自 MRT#1，值 = gl_FragCoord.z）。
 // 透明 pass 无深度缓冲 -> 在 FS 里手动作深度测试，丢弃被不透明场景遮挡的玻璃片元。
 uniform sampler2D uGlassSceneDepth;
 // uTileCulling=1（默认）：片元经 tile 索引纹理只算本 tile 命中的光源（16×16 tile culling）。

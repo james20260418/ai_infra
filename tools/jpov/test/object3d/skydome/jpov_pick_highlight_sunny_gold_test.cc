@@ -143,7 +143,7 @@ int main() {
         }
 
         // 高亮不破坏本体色：stool 中心附近（内圈避边框）应存在非黑像素。
-        // （修复过：MSAA 路径高亮曾把内部覆盖成黑，见 PR67 自查。）
+        // （历史：旧 MSAA 路径高亮曾把内部覆盖成黑，见 PR67 自查。）
         auto count_nonblack = [&](int cx, int cy, int r) {
             int nb = 0;
             for (int y = cy - r; y <= cy + r; ++y)

@@ -127,7 +127,7 @@
   2. **绘制顺序**：先不透明 → 再 cutout 植被**从近到远**（乱序会让早深度失效）；
   3. **LOD / impostor**：远处叶子根本不是几何，是最便宜的一刀；
   4. **减少卡片数与尺寸**（生成器层面：叶密度旋钮）。
-- **可选进阶：Alpha-to-Coverage（A2C）**——用 MSAA 把 alpha 转成采样覆盖率，既不排序又能抗锯齿，是 3A 常用配置。**本引擎有 MSAA 路径**（Linux headless），具备落地条件，但属第二步。
+- **可选进阶：Alpha-to-Coverage（A2C）**——用 MSAA 把 alpha 转成采样覆盖率，既不排序又能抗锯齿，是 3A 常用配置。⚠️ **注意：本引擎已于 2026-10-14 完整移除 MSAA**（3D 目标统一单采样，见 `src/renderer.h`）；A2C 若要落地需重新引入 MSAA（并承担其 resolve 复杂度），故属更远一步。
 - ⚠️ JPOV 特有的清醒认知：**llvmpipe 是软件光栅器**，早深度/HW overdraw 优化的收益模型与真 GPU 不同；JPOV 的首要约束是**确定性**（gold 逐字节可复现），overdraw「优化」更多是**为真 GPU 的前瞻设计**，不是本地 fps 指标。
 
 **对应到引擎的缺口（关键）**：`PBRMaterial` 目前**完全没有 alpha 语义**（无 `discard`、无 `alpha_mode`/`alpha_cutoff`）。
