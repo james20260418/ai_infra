@@ -203,7 +203,7 @@ public:
     jpov::particles::Rng sub_rng_{20261015u};   // 子发射器概率（确定性）
     // CC0 真火 flipbook（BenHickling "Animated Fire"，CC0，64×64，10×6=60 帧）vs 程序化 puff。
     // toggle 对比：use_cc0_fire_ 开 = 用 CC0 真火贴图；关 = 用我们的 puff flipbook。
-    bool use_cc0_fire_ = false;
+    bool use_cc0_fire_ = true;    // 默认用 CC0 真火（好看）；可取消回到程序化 puff 对比
     uint32_t cc0_fire_tex_ = 0;
 
     // ── 场景选择（左上角下拉）──

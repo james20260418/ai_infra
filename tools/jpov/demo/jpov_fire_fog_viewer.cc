@@ -336,6 +336,15 @@ int RunCapture(const std::string& out_dir) {
     app.fire_needs_reset_ = true;
     app.scene_index_ = 0;
 
+    // ── S. 面板（场景=粒子火）—— 便于核对开关布局 ──
+    app.scene_index_ = 1;
+    app.SetShowPanel(true);
+    app.InstallTextMeasure();
+    app.use_cc0_fire_ = true;
+    shoot("73_panel_particle");
+    app.SetShowPanel(false);
+    app.scene_index_ = 0;
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();
