@@ -45,16 +45,16 @@ inline constexpr int kTilePxChoices[] = {8, 16, 32};
 // 广告牌粒子火的默认配置（一根向上冒的火柱；面板可调关键参数）。
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
-    c.origin = {2.5f, 0.05f, 0.0f};
-    c.rate = 45.0f;
+    c.origin = {0.0f, 0.80f, 0.0f};   // 桌面上方
+    c.rate = 55.0f;
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.22f;
-    c.cone_half_angle_deg = 20.0f;
-    c.lifetime = {0.8f, 1.2f};
-    c.speed = {0.8f, 1.5f};
-    c.size_start = {0.55f, 0.9f};
+    c.radius = 0.16f;
+    c.cone_half_angle_deg = 16.0f;
+    c.lifetime = {0.75f, 1.1f};
+    c.speed = {0.7f, 1.3f};
+    c.size_start = {0.45f, 0.7f};
     c.rotation = {0.0f, 6.2831853f};
-    c.gravity = {0.0f, 2.2f, 0.0f};
+    c.gravity = {0.0f, 1.9f, 0.0f};
     c.drag = 0.9f;
     c.noise_enabled = true;
     c.noise_amp = 1.5f;
@@ -67,9 +67,9 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.tiles_x = 8;
     c.tiles_y = 8;
     c.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
-    c.sheet_fps = 16.0f;
+    c.sheet_fps = 20.0f;
     c.start_frame_random = true;
-    c.align = jpov::AlignMode::kVertical;
+    c.align = jpov::AlignMode::kView;   // 朝向相机（Danis 实测：比 vertical 好）
     c.stretched = false;
     c.blend = jpov::BlendMode::kAdditive;
     c.sort = jpov::SortMode::kNone;
@@ -127,15 +127,25 @@ public:
     uint32_t fire_texture_id_ = 0;     // 懒建的程序化 flipbook 纹理
     int fire_tex_tiles_ = 8;           // flipbook 网格边长（8×8=64 帧）
     // 面板用影子标量（逐步映射到 fire_cfg_，避免直接改 RangeF 导致 min>max 崩溃）。
-    float ui_fire_rate_ = 45.0f;
-    float ui_fire_life_ = 1.2f;
-    float ui_fire_size_ = 0.9f;
-    float ui_fire_speed_ = 1.6f;
-    float ui_fire_buoy_ = 2.2f;
+    float ui_fire_rate_ = 55.0f;
+    float ui_fire_life_ = 1.1f;
+    float ui_fire_size_ = 0.7f;
+    float ui_fire_speed_ = 1.3f;
+    float ui_fire_buoy_ = 1.9f;
     float ui_fire_drag_ = 0.9f;
     float ui_fire_noise_ = 1.5f;
     int ui_fire_blend_ = 0;   // 0=加法 1=半透明
-    int ui_fire_align_ = 1;   // 0=view 1=vertical 2=facing 3=velocity
+    int ui_fire_align_ = 0;   // 0=view 1=vertical 2=facing 3=velocity
+
+    // ── 场景选择（左上角下拉）──
+    //   0 = 体积雾（地面+橡树+点状雾，原 fire_fog 验证场）
+    //   1 = 粒子火（一张桌子 + 桌上的广告牌粒子火；光照不变）
+    int scene_index_ = 0;
+
+    // ── 粒子火场景的桌面道具（主程序注册后传入；与地面同材质体系）──
+    uint32_t table_top_mesh_ = 0;   // 桌面盒
+    uint32_t table_leg_mesh_ = 0;   // 桌腿盒
+    jpov::PBRMaterial table_mat_;   // 木色材质
 
     // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
     int nz_index_ = 1;        // 0 → Nz=64，1 → Nz=256
@@ -192,12 +202,19 @@ public:
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;   // fire_fog pass 要求线性 HDR 域
 
-        // 场景：灰色地面 + 橡树。
+        // 场景：灰色地面（两场景共用）。
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
                            /*center*/ {0.0f, 0.0f, 0.0f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
-        cmds->DrawGltfObject(oak_, oak_center_, oak_up_, oak_front_, oak_scale_);
+
+        if (scene_index_ == 1) {
+            // 粒子火场景：一张桌子（桌面 + 四条腿）。
+            DrawTable(cmds);
+        } else {
+            // 体积雾场景：橡树。
+            cmds->DrawGltfObject(oak_, oak_center_, oak_up_, oak_front_, oak_scale_);
+        }
 
         // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
         if (point_light_enable_) {
@@ -209,8 +226,8 @@ public:
             cmds->point_lights.push_back(pl);
         }
 
-        // 点状雾（走 fire_fog froxel 体积管线）。
-        if (show_fog_) {
+        // 点状雾（走 fire_fog froxel 体积管线）。仅体积雾场景。
+        if (scene_index_ == 0 && show_fog_) {
             jpov::PointFog fog;
             fog.center = fog_center_;
             fog.size = fog_size_;
@@ -235,13 +252,13 @@ public:
         if (fire_texture_id_ == 0) {
             const std::vector<unsigned char> png =
                 jpov_particle_fire::MakeFireFlipbookPng(fire_tex_tiles_, fire_tex_tiles_,
-                                                        64, 20261014u);
+                                                        128, 20261014u);
             if (!png.empty()) {
                 fire_texture_id_ =
                     RegisterTextureFromMemory(png, "particle_fire_flipbook");
             }
         }
-        if (fire_enable_) {
+        if (scene_index_ == 1 && fire_enable_) {
             // 面板影子标量 → 配置（RangeF 两端一起设，避免 min>max）。
             fire_cfg_.rate = ui_fire_rate_;
             fire_cfg_.lifetime = {ui_fire_life_ * 0.7f, ui_fire_life_};
@@ -298,6 +315,25 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
+    // 画粒子火场景的桌子（桌面 + 四条腿，均用轴对齐盒 mesh）。
+    // Pre-condition: table_top_mesh_/table_leg_mesh_ 已注册。
+    void DrawTable(jpov::RenderCommandList* cmds) {
+        CHECK(cmds != nullptr);
+        const jpov::Vec3f up = {0.0f, 1.0f, 0.0f};
+        const jpov::Vec3f front = {0.0f, 0.0f, 1.0f};
+        // 桌面（半高 0.04，中心 y=0.74 ⇒ 顶面 y=0.78）。
+        cmds->DrawObject3D(table_top_mesh_, table_mat_,
+                           /*center*/ {0.0f, 0.74f, 0.0f}, up, front);
+        // 四条腿（半高 0.35，中心 y=0.35 ⇒ 0..0.70）。
+        const float lx = 0.70f;
+        const float lz = 0.36f;
+        const float leg[4][2] = {{-lx, -lz}, {lx, -lz}, {-lx, lz}, {lx, lz}};
+        for (int i = 0; i < 4; ++i) {
+            cmds->DrawObject3D(table_leg_mesh_, table_mat_,
+                               /*center*/ {leg[i][0], 0.35f, leg[i][1]}, up, front);
+        }
+    }
+
     void DrawPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
@@ -326,6 +362,14 @@ private:
                 {x, top + static_cast<float>(i) * (kRowH + kSpacing)}, {colw, kRowH}};
         };
 
+        // 左上角：场景选择下拉（不随面板列布局；两场景共用一套光照）。
+        {
+            const std::vector<const char*> items = {"体积雾（橡树）", "粒子火（桌面）"};
+            ui_.Combo("场景", &scene_index_, items,
+                      jpov::UiRect{{x0, 8.0f}, {0.26f * w, 26.0f}});
+        }
+
+        if (scene_index_ == 0) {
         // ── 列 0：box 几何（位置 + 长宽高 + 圆角壳厚度）+ 消光 + froxel 分辨率 ──
         ui_.SliderFloat("中心 x", &fog_center_.x(), row(0, 0), -10.0f, 10.0f, 2);
         ui_.SliderFloat("中心 y", &fog_center_.y(), row(0, 1), 0.0f, 10.0f, 2);
@@ -370,25 +414,28 @@ private:
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
-
-        // ── 列 3：广告牌粒子火（主角火）──
-        ui_.Checkbox("粒子火", &fire_enable_, row(3, 0));
-        ui_.SliderFloat("发射率 /s", &ui_fire_rate_, row(3, 1), 0.0f, 200.0f, 0);
-        ui_.SliderFloat("寿命 s", &ui_fire_life_, row(3, 2), 0.2f, 4.0f, 2);
-        ui_.SliderFloat("尺寸 m", &ui_fire_size_, row(3, 3), 0.1f, 3.0f, 2);
-        ui_.SliderFloat("速度 m/s", &ui_fire_speed_, row(3, 4), 0.0f, 5.0f, 2);
-        ui_.SliderFloat("浮力", &ui_fire_buoy_, row(3, 5), -2.0f, 8.0f, 2);
-        ui_.SliderFloat("阻尼", &ui_fire_drag_, row(3, 6), 0.0f, 4.0f, 2);
-        ui_.Checkbox("湍流", &fire_cfg_.noise_enabled, row(3, 7));
-        ui_.SliderFloat("湍流强度", &ui_fire_noise_, row(3, 8), 0.0f, 5.0f, 2);
-        ui_.Checkbox("flipbook", &fire_cfg_.flipbook, row(3, 9));
-        {
-            const std::vector<const char*> items = {"加法", "半透明"};
-            ui_.Combo("混合", &ui_fire_blend_, items, row(3, 10));
-        }
-        {
-            const std::vector<const char*> items = {"view", "vertical", "facing", "velocity"};
-            ui_.Combo("朝向", &ui_fire_align_, items, row(3, 11));
+        } else {
+            // ── 粒子火场景面板 ──
+            ui_.Checkbox("粒子火", &fire_enable_, row(0, 0));
+            ui_.SliderFloat("发射率 /s", &ui_fire_rate_, row(0, 1), 0.0f, 200.0f, 0);
+            ui_.SliderFloat("寿命 s", &ui_fire_life_, row(0, 2), 0.2f, 4.0f, 2);
+            ui_.SliderFloat("尺寸 m", &ui_fire_size_, row(0, 3), 0.1f, 3.0f, 2);
+            ui_.SliderFloat("速度 m/s", &ui_fire_speed_, row(0, 4), 0.0f, 5.0f, 2);
+            ui_.SliderFloat("浮力", &ui_fire_buoy_, row(0, 5), -2.0f, 8.0f, 2);
+            ui_.SliderFloat("阻尼", &ui_fire_drag_, row(0, 6), 0.0f, 4.0f, 2);
+            ui_.Checkbox("湍流", &fire_cfg_.noise_enabled, row(0, 7));
+            ui_.SliderFloat("湍流强度", &ui_fire_noise_, row(0, 8), 0.0f, 5.0f, 2);
+            ui_.Checkbox("flipbook", &fire_cfg_.flipbook, row(0, 9));
+            {
+                const std::vector<const char*> items = {"加法", "半透明"};
+                ui_.Combo("混合", &ui_fire_blend_, items, row(1, 0));
+            }
+            {
+                const std::vector<const char*> items = {
+                    "view", "vertical", "facing", "velocity"};
+                ui_.Combo("朝向", &ui_fire_align_, items, row(1, 1));
+            }
+            ui_.Checkbox("沿速度拉伸", &fire_cfg_.stretched, row(1, 2));
         }
     }
 

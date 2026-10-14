@@ -1,12 +1,9 @@
-// JPOV 雾火查看器（fire_fog viewer）— 主程序
+// JPOV 效果查看器（effect viewer）— 主程序
 //
-// 用途：一个专门肉眼验收**froxel 体积雾**（设计见 docs/jpov_froxel_design.md）的最小交互工具。
-// 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
-// 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
-//
-// 交互面板（见 fire_fog_viewer_app.h）：box 中心 x/y/z、长宽高、外侧圆角半径、消光 σ、衰减剖面、
-// 散射色 albedo、自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
-// ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
+// 用途：一个专门肉眼验收 JPOV 各类特效的最小交互工具。**左上角下拉切场景**：
+//   ① 体积雾（橡树）—— froxel 体积雾/火（设计见 docs/jpov_froxel_design.md）；
+//   ② 粒子火（桌面）—— 广告牌粒子火（设计见 docs/jpov_particle_fire_design.md），
+//      一张桌子 + 桌上的火柱；两场景共用同一套光照（天光 + 太阳 + 点光源）。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 //
@@ -62,6 +59,12 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
     app.oak_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
     app.oak_front_ = jpov::Vec3f(0.0f, 0.0f, 1.0f);
     app.oak_scale_ = scale;
+
+    // 粒子火场景的桌子（桌面 + 桌腿，轴对齐盒；木色材质）。
+    // MakeBox(front_half_width→+Z, up_half_width→+Y, left_half_width→+X)。
+    app.table_top_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.45f, 0.04f, 0.80f));
+    app.table_leg_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.04f, 0.35f, 0.04f));
+    app.table_mat_ = jpov::PBRMaterial::SolidColor({0.35f, 0.22f, 0.12f, 1.0f});
 }
 
 // 默认视角：橡树（高 6m）斜前方，看全树 + 雾。
@@ -75,7 +78,7 @@ void DefaultView(jpov_fire_fog::FireFogApp& app) {
 // headless 拍摄：一组确定性视图/参数，写到 out_dir。
 int RunCapture(const std::string& out_dir) {
     JPOV::Config cfg;
-    cfg.title  = "JPOV — 雾火查看器（headless capture）";
+    cfg.title  = "JPOV — 效果查看器（headless capture）";
     cfg.width  = jpov_fire_fog::kViewerWidth;
     cfg.height = jpov_fire_fog::kViewerHeight;
     cfg.headless = true;
@@ -285,6 +288,25 @@ int RunCapture(const std::string& out_dir) {
     app.fog_radius_ = 1.0f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
+    // ── P. 粒子火场景（新场景：桌面上方的广告牌粒子火）──
+    app.scene_index_ = 1;
+    app.SetShowFog(false);
+    app.deg_.sun_elev_deg = 18.0f;
+    app.fire_needs_reset_ = true;
+    DefaultView(app);
+    app.view_.phi = 0.22;   // 桌面斜前方近景
+    app.view_.theta = 0.7;
+    app.view_.R = 4.5;
+    // 预热：粒子需时间积累到稳态（丢弃帧）。
+    for (int w = 0; w < 90; ++w) {
+        app.RunOnce(input, winfo, (out_dir + "/_warm.png").c_str());
+    }
+    for (int fr = 0; fr < 4; ++fr) {
+        shoot(("70_particle_" + std::to_string(fr)).c_str());
+    }
+    app.scene_index_ = 0;
+    app.fire_needs_reset_ = true;
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();
@@ -314,7 +336,7 @@ int main(int argc, char** argv) {
 
     // ── 交互模式 ──
     JPOV::Config cfg;
-    cfg.title  = "JPOV — 雾火查看器（fire_fog viewer）";
+    cfg.title  = "JPOV — 效果查看器（effect viewer）";
     cfg.width  = jpov_fire_fog::kViewerWidth;
     cfg.height = jpov_fire_fog::kViewerHeight;
     cfg.resizable  = false;
