@@ -630,6 +630,16 @@ private:
             ui_.Combo("场景", &scene_index_, items,
                       jpov::UiRect{{x0, 8.0f}, {0.26f * w, 26.0f}});
         }
+        // 顶部：火焰纹理下拉（放顶部才有空间展开；仅粒子火场景有意义）。
+        {
+            std::vector<const char*> items;
+            items.reserve(static_cast<size_t>(kFireTexCount));
+            for (int i = 0; i < kFireTexCount; ++i) {
+                items.push_back(kFireTexes[i].label);
+            }
+            ui_.Combo("火焰纹理", &fire_choice_, items,
+                      jpov::UiRect{{x0, 40.0f}, {0.30f * w, 26.0f}});
+        }
 
         if (scene_index_ == 0) {
         // ── 列 0：box 几何（位置 + 长宽高 + 圆角壳厚度）+ 消光 + froxel 分辨率 ──
@@ -704,14 +714,6 @@ private:
             ui_.SliderFloat("黑烟尺寸 m", &ui_smoke_size_, row(1, 6), 0.2f, 2.5f, 2);
             ui_.SliderFloat("烟概率", &ui_smoke_prob_, row(1, 7), 0.0f, 1.0f, 2);
             ui_.Checkbox("软贴图(debug)", &debug_soft_tex_, row(1, 8));
-            {
-                std::vector<const char*> items;
-                items.reserve(static_cast<size_t>(kFireTexCount));
-                for (int i = 0; i < kFireTexCount; ++i) {
-                    items.push_back(kFireTexes[i].label);
-                }
-                ui_.Combo("火焰纹理", &fire_choice_, items, row(1, 9));
-            }
         }
     }
 
