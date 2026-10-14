@@ -78,6 +78,10 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
                             << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
         float s = 1.0f;
         if (man.bounds_valid) {
+            app.glass_man_bcenter_ = jpov::Vec3f(
+                0.5f * (man.bounds_min[0] + man.bounds_max[0]),
+                0.5f * (man.bounds_min[1] + man.bounds_max[1]),
+                0.5f * (man.bounds_min[2] + man.bounds_max[2]));
             const float hgt = man.bounds_max[1] - man.bounds_min[1];
             if (hgt > 1.0e-6f) {
                 s = 1.9f / hgt;

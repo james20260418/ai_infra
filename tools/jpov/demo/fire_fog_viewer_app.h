@@ -102,6 +102,7 @@ public:
     }();
     bool show_glass_man_ = true;
     float glass_man_scale_ = 1.0f;   // Init 时按身高归一
+    jpov::Vec3f glass_man_bcenter_ = {};   // 资产局部包围盒中心（Init 时算，用于对齐到墙中心）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -185,13 +186,22 @@ public:
         }
 
         // 透明弧面体：蓝人（酒瓶绿玻璃），摆在红墙中心 → 红墙分割它（两者都是 kBlend 透明）。
+        // front=(1,0,0)：把人沿 Y 轴转 90°（从默认朝 +Z 转为朝 +X），使红墙从其身体**切割**过去。
         if (show_glass_man_ && !glass_man_.empty()) {
+            // 资产原点未必在包围盒中心 → 把包围盒中心对齐到墙中心。
+            // up=(0,1,0), front=(1,0,0)：局部 (lx,ly,lz) → 世界偏移 s·(lz, ly, -lx)。
+            const float s = glass_man_scale_;
+            const jpov::Vec3f bc = glass_man_bcenter_;
+            const jpov::Vec3f man_center(
+                glass_center_.x() - s * bc.z(),
+                glass_center_.y() - s * bc.y(),
+                glass_center_.z() + s * bc.x());
             for (const jpov::GltfPrimitive& prim : glass_man_.primitives) {
                 cmds->DrawObject3D(prim.mesh_id, glass_man_mat_,
-                                   /*center*/ glass_center_,
+                                   /*center*/ man_center,
                                    /*up*/     {0.0f, 1.0f, 0.0f},
-                                   /*front*/  {0.0f, 0.0f, 1.0f},
-                                   /*scale*/  glass_man_scale_);
+                                   /*front*/  {1.0f, 0.0f, 0.0f},
+                                   /*scale*/  s);
             }
         }
 
