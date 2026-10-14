@@ -70,6 +70,22 @@ public:
     jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
 
+    // ── 透明玻璃墙（kBlend / 加权混合 OIT）—— 验收透明体渲染：树一侧一面浅红色玻璃墙。──
+    //   网格由主程序用 MeshData::MakeBox 注册（薄墙）；材质 alpha_mode=kBlend + double_sided。
+    //   不进主 pass / 不投影，由透明 pass 以 WBO 画进玻璃 FBO，再由体积雾合成。
+    uint32_t glass_mesh_ = 0;                            // MakeBox 薄墙（Init 后注册一次）
+    jpov::PBRMaterial glass_mat_ = [] {
+        jpov::PBRMaterial m;
+        m.base_color = jpov::Color{0.85f, 0.32f, 0.32f, 0.30f};  // 浅红色，α=0.30
+        m.metallic = 0.0f;
+        m.roughness = 0.08f;
+        m.alpha_mode = jpov::AlphaMode::kBlend;
+        m.double_sided = true;   // 薄墙：双面参与 WBO 才有「有厚度」的观感
+        return m;
+    }();
+    bool show_glass_ = true;
+    jpov::Vec3f glass_center_ = jpov::Vec3f(4.0f, 1.6f, 0.0f);  // 树 +X 一侧
+
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
     jpov::Vec3f point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
@@ -142,6 +158,14 @@ public:
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(oak_, oak_center_, oak_up_, oak_front_, oak_scale_);
+
+        // 透明玻璃墙（kBlend）：由 Renderer 的透明 pass（WBO）单独渲染，与雾一起合成。
+        if (show_glass_ && glass_mesh_ != 0) {
+            cmds->DrawObject3D(glass_mesh_, glass_mat_,
+                               /*center*/ glass_center_,
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f});
+        }
 
         // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
         if (point_light_enable_) {
@@ -259,6 +283,11 @@ private:
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
+        ui_.Checkbox("玻璃墙", &show_glass_, row(2, 9));
+
+        // ── 列 1 底部：玻璃墙透明度 + 位置（透明体验收）──
+        ui_.SliderFloat("玻璃 α", &glass_mat_.base_color.a, row(1, 9), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("玻璃 x", &glass_center_.x(), row(1, 10), -10.0f, 10.0f, 2);
     }
 
     bool show_panel_ = true;

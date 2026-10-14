@@ -47,6 +47,11 @@ inline constexpr int kTexUnitPartialRotationBind = 14;
 // 部位额外旋转的「每通道常量」纹理（kNumPartialRotation texel：bind pivot + 关节骨号）。
 inline constexpr int kTexUnitPartialRotationChannel = 15;
 
+// 透明混合 pass（Object3DRenderer::DrawObject3DBlend）使用的不透明场景深度纹理
+//（值 = gl_FragCoord.z）。仅 object3d blend program 使用；主链路其他程序不绑它。
+// 放在已保留区间（0..15）之上，避免与任何主链路单元冲突。
+inline constexpr int kTexUnitGlassSceneDepth = 16;
+
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
 static_assert(kTexUnitMaterialBase + kMaterialTexUnitCount <= kTexUnitShadowMapBase,
               "材质纹理单元区间与 shadow map 区间重叠");

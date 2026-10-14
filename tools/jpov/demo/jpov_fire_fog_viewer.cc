@@ -62,6 +62,13 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
     app.oak_up_ = jpov::Vec3f(0.0f, 1.0f, 0.0f);
     app.oak_front_ = jpov::Vec3f(0.0f, 0.0f, 1.0f);
     app.oak_scale_ = scale;
+
+    // 透明玻璃墙（kBlend / WBO）——薄墙：+X 很薄(0.16m 厚)，+Z 宽 6m，+Y 高 3m。
+    // 由 MakeBox(front_half_width, up_half_width, left_half_width) 构造轴对齐盒。
+    app.glass_mesh_ = app.RegisterMesh(
+        jpov::MeshData::MakeBox(/*front_half_width=*/3.0f,
+                                /*up_half_width=*/1.5f,
+                                /*left_half_width=*/0.08f));
 }
 
 // 默认视角：橡树（高 6m）斜前方，看全树 + 雾。
@@ -284,6 +291,23 @@ int RunCapture(const std::string& out_dir) {
     }
     app.fog_radius_ = 1.0f;
     app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+
+    // ── P. 透明玻璃墙（kBlend / WBO）：雾场景 + 树一侧浅红玻璃墙 ──
+    DefaultView(app);
+    app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
+    app.fog_size_ = jpov::Vec3f(6.0f, 6.0f, 6.0f);
+    app.fog_sigma_ = 0.6f;
+    app.fog_radius_ = 1.0f;
+    app.fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+    app.show_glass_ = false;
+    shoot("70_glass_off");
+    app.show_glass_ = true;
+    shoot("71_glass_on");
+    app.glass_mat_.base_color.a = 0.6f;
+    shoot("72_glass_alpha60");
+    app.glass_mat_.base_color.a = 0.15f;
+    shoot("73_glass_alpha15");
+    app.glass_mat_.base_color.a = 0.30f;
 
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);

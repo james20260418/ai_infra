@@ -68,6 +68,27 @@ struct FireFogLighting {
     float shadow_texel_world[ShadowConfig::kMaxCascades] = {};
 };
 
+// 透明玻璃层的 WBO 解算结果（可选；由 Renderer::DrawTransparentPass 产出）。
+//
+// 三个附件都是主 FBO 尺寸（1× 非 MSAA）的纹理：
+//   accum : RGBA16F，Σ(预乘色×w, α×w) —— 加权平均色 Cavg = accum.rgb / accum.a；
+//   reveal: R16F   ，Π(1−α)            —— 玻璃层透射率 T_g（背景透过率）；
+//   depth : R32F   ，Σ(z_view×α×w)     —— 代表深度 z_g = depth / accum.a。
+//
+// composite 里的合成（正面→背面，与雾一起按深度积分）：
+//   final = S_f + T_f·Cg + Tg·(S_op − S_f) ，a = Tg·T_op
+//   其中 Cg = Cavg·(1−Tg)（预乘），S_f/T_f = fog(0→z_g)，S_op/T_op = fog(0→z_op)。
+// 无玻璃物体时 accum.a = 0 -> composite 退化为「全雾」路径（零回归）。
+struct FireFogGlass {
+    unsigned int accum_tex = 0;
+    unsigned int reveal_tex = 0;
+    unsigned int depth_tex = 0;
+    // 三个纹理都有效才可用。
+    bool valid() const {
+        return accum_tex != 0 && reveal_tex != 0 && depth_tex != 0;
+    }
+};
+
 class FireFogRenderer {
 public:
     // ── 常量 ──
@@ -114,8 +135,10 @@ public:
     //   light           : 物理光照来源（ambient + 太阳×CSM 资源）。
     // Pre-conditions: Init 已调用；调用方已绑定 HDR FBO 并设好 viewport；场景深度纹理
     //                 **不**是当前 draw FBO 的附件（否则采样↔写入反馈环）。
-    // 说明：fogs 为空时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 / viewport /
-    //       活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
+    // 说明：fogs 为空且 glass 无效时零开销直接返回；本函数自行保存/复原调用方 FBO 绑定 /
+    //       viewport / 活动纹理单元 / 使用的纹理单元绑定 / blend func（见头文件顶部「GL 状态机契约」）。
+    //   glass           : 透明玻璃层（WBO 结果；可为空）。非空且有效时，composite 把玻璃层
+    //                     作为一段（预乘色, 透射率）按代表深度与雾一起合成。
     void Draw(const std::vector<PointFog>& fogs,
               const std::vector<PointLight>& point_lights,
               const Camera& cam,
@@ -124,7 +147,8 @@ public:
               int viewport_h,
               unsigned int scene_depth_tex,
               const FireFogParams& params,
-              const FireFogLighting& light);
+              const FireFogLighting& light,
+              const FireFogGlass* glass = nullptr);
 
 private:
     // 按 (grid_cols, grid_rows, sblock, num_levels)（= Nxy 列/行数 + 每柱边长 + 金字塔级数）
