@@ -93,11 +93,12 @@ public:
     jpov::GltfObject glass_man_;
     jpov::PBRMaterial glass_man_mat_ = [] {
         jpov::PBRMaterial m;
-        m.base_color = jpov::Color{0.10f, 0.38f, 0.20f, 0.32f};  // 酒瓶绿，α=0.32
+        // 本轮：改成**实心**（不透），对比看「玻璃墙 × 实体」的遮挡/透过关系。
+        m.base_color = jpov::Color{0.20f, 0.52f, 0.28f, 1.0f};  // 实心绿
         m.metallic = 0.0f;
-        m.roughness = 0.06f;
-        m.alpha_mode = jpov::AlphaMode::kBlend;
-        m.double_sided = true;   // 闭合人体：双面参与 WBO → 有厚度的绿玻璃体
+        m.roughness = 0.5f;
+        m.alpha_mode = jpov::AlphaMode::kOpaque;   // 实心（走主 pass，写深度、投阴影）
+        m.double_sided = false;
         return m;
     }();
     bool show_glass_man_ = true;
