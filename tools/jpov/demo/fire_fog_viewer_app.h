@@ -18,6 +18,7 @@
 #ifndef JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 #define JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -46,13 +47,13 @@ inline constexpr int kTilePxChoices[] = {8, 16, 32};
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.80f, 0.0f};   // 桌面上方
-    c.rate = 55.0f;
+    c.rate = 40.0f;
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.16f;
+    c.radius = 0.15f;
     c.cone_half_angle_deg = 16.0f;
     c.lifetime = {0.75f, 1.1f};
     c.speed = {0.7f, 1.3f};
-    c.size_start = {0.45f, 0.7f};
+    c.size_start = {0.40f, 0.6f};
     c.rotation = {0.0f, 6.2831853f};
     c.gravity = {0.0f, 1.9f, 0.0f};
     c.drag = 0.9f;
@@ -73,6 +74,48 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.stretched = false;
     c.blend = jpov::BlendMode::kAdditive;
     c.sort = jpov::SortMode::kNone;
+    return c;
+}
+
+// 黑烟层的默认配置（引擎标准做法：暗色、半透明、大而慢、寿命长、随寿命膨胀上升）。
+inline jpov::particles::EmitterConfig MakeSmokeConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {0.0f, 0.95f, 0.0f};
+    c.rate = 18.0f;
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.14f;
+    c.cone_half_angle_deg = 20.0f;
+    c.lifetime = {1.8f, 2.6f};
+    c.speed = {0.5f, 0.9f};
+    c.size_start = {0.60f, 0.95f};
+    c.rotation = {0.0f, 6.2831853f};
+    c.gravity = {0.0f, 1.0f, 0.0f};   // 上升比火慢
+    c.drag = 0.7f;
+    c.noise_enabled = true;
+    c.noise_amp = 1.0f;
+    c.noise_freq = 1.2f;
+    c.use_color_over_life = true;
+    // 灰黑烟：色偏暗，不透明度先升后降（fade in/out）。
+    jpov::particles::Gradient g;
+    g.keys = {
+        {0.00f, jpov::Color{0.03f, 0.03f, 0.04f, 0.00f}},
+        {0.25f, jpov::Color{0.04f, 0.04f, 0.05f, 0.70f}},
+        {0.70f, jpov::Color{0.06f, 0.06f, 0.07f, 0.60f}},
+        {1.00f, jpov::Color{0.08f, 0.08f, 0.09f, 0.00f}},
+    };
+    c.color_over_life = g;
+    c.use_size_over_life = true;
+    c.size_curve.keys = {{0.0f, 0.5f}, {1.0f, 1.8f}};   // 随寿命膨胀
+    c.flipbook = true;
+    c.tiles_x = 8;
+    c.tiles_y = 8;
+    c.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
+    c.sheet_fps = 12.0f;
+    c.start_frame_random = true;
+    c.align = jpov::AlignMode::kView;
+    c.stretched = false;
+    c.blend = jpov::BlendMode::kAlpha;      // 半透明
+    c.sort = jpov::SortMode::kByDepth;      // 背→前排序
     return c;
 }
 
@@ -127,15 +170,24 @@ public:
     uint32_t fire_texture_id_ = 0;     // 懒建的程序化 flipbook 纹理
     int fire_tex_tiles_ = 8;           // flipbook 网格边长（8×8=64 帧）
     // 面板用影子标量（逐步映射到 fire_cfg_，避免直接改 RangeF 导致 min>max 崩溃）。
-    float ui_fire_rate_ = 55.0f;
+    float ui_fire_rate_ = 40.0f;
     float ui_fire_life_ = 1.1f;
-    float ui_fire_size_ = 0.7f;
+    float ui_fire_size_ = 0.6f;
     float ui_fire_speed_ = 1.3f;
     float ui_fire_buoy_ = 1.9f;
     float ui_fire_drag_ = 0.9f;
     float ui_fire_noise_ = 1.5f;
     int ui_fire_blend_ = 0;   // 0=加法 1=半透明
     int ui_fire_align_ = 0;   // 0=view 1=vertical 2=facing 3=velocity
+
+    // ── 黑烟层（半透明广告牌；引擎标准做法）──
+    bool smoke_enable_ = true;
+    jpov::particles::EmitterConfig smoke_cfg_ = MakeSmokeConfig();
+    jpov::particles::ParticleEmitter smoke_emitter_;
+    bool smoke_needs_reset_ = true;
+    uint32_t smoke_texture_id_ = 0;
+    float ui_smoke_rate_ = 18.0f;
+    float ui_smoke_size_ = 0.95f;
 
     // ── 场景选择（左上角下拉）──
     //   0 = 体积雾（地面+橡树+点状雾，原 fire_fog 验证场）
@@ -247,17 +299,57 @@ public:
             cmds->fire_fog = ff;
         }
 
-        // ── 广告牌粒子火（主角火）──
-        // 懒建程序化 flipbook 纹理（需 GL 上下文，故在渲染体里首次建）。
+        // ── 广告牌火/烟：懒加载 flipbook 纹理（需 GL 上下文）──
+        // 优先用离线烘的**真火/真烟**纹理（tools/jpov/assets/fire/*.png，build 脚本拷到
+        // textures/）；缺失时回退程序化生成，保证不崩。
         if (fire_texture_id_ == 0) {
-            const std::vector<unsigned char> png =
-                jpov_particle_fire::MakeFireFlipbookPng(fire_tex_tiles_, fire_tex_tiles_,
-                                                        128, 20261014u);
-            if (!png.empty()) {
-                fire_texture_id_ =
-                    RegisterTextureFromMemory(png, "particle_fire_flipbook");
+            if (FileExists("textures/fire_flipbook.png")) {
+                fire_texture_id_ = RegisterTexture("textures/fire_flipbook.png");
+            } else {
+                const std::vector<unsigned char> png =
+                    jpov_particle_fire::MakeFireFlipbookPng(fire_tex_tiles_, fire_tex_tiles_,
+                                                            128, 20261014u);
+                if (!png.empty()) {
+                    fire_texture_id_ =
+                        RegisterTextureFromMemory(png, "particle_fire_flipbook");
+                }
             }
         }
+        if (smoke_texture_id_ == 0) {
+            if (FileExists("textures/smoke_flipbook.png")) {
+                smoke_texture_id_ = RegisterTexture("textures/smoke_flipbook.png");
+            } else {
+                smoke_texture_id_ = fire_texture_id_;   // 回退：复用火纹理（染暗后近似烟）
+            }
+        }
+        // ── 黑烟层（alpha；先画，火在其上加法叠加）──
+        if (scene_index_ == 1 && smoke_enable_) {
+            smoke_cfg_.rate = ui_smoke_rate_;
+            smoke_cfg_.size_start = {ui_smoke_size_ * 0.65f, ui_smoke_size_};
+            if (smoke_needs_reset_) {
+                smoke_emitter_.SetConfig(smoke_cfg_);
+                smoke_emitter_.Reset(20261015u);
+                smoke_needs_reset_ = false;
+            }
+            smoke_emitter_.SetConfig(smoke_cfg_);
+            std::vector<jpov::ParticleInstance> sinst;
+            smoke_emitter_.Update(1.0f / static_cast<float>(kViewerFps), &sinst);
+            if (!sinst.empty()) {
+                jpov::ParticleRenderCommand spc;
+                spc.particles = std::move(sinst);
+                spc.texture_id = smoke_texture_id_;
+                spc.tiles_x = smoke_cfg_.tiles_x;
+                spc.tiles_y = smoke_cfg_.tiles_y;
+                spc.flipbook = smoke_cfg_.flipbook;
+                spc.align = smoke_cfg_.align;
+                spc.stretched = smoke_cfg_.stretched;
+                spc.stretch_scale = smoke_cfg_.stretch_scale;
+                spc.blend = smoke_cfg_.blend;
+                spc.sort = smoke_cfg_.sort;
+                cmds->DrawParticles(std::move(spc));
+            }
+        }
+
         if (scene_index_ == 1 && fire_enable_) {
             // 面板影子标量 → 配置（RangeF 两端一起设，避免 min>max）。
             fire_cfg_.rate = ui_fire_rate_;
@@ -313,6 +405,12 @@ private:
         FireFogApp* app = static_cast<FireFogApp*>(userdata);
         return app->MeasureTextWidth(/*alias=*/std::string(),
                                      /*text=*/text ? text : "", font_size);
+    }
+
+    // 文件是否存在（纹理可选加载的探测；不抛异常）。
+    static bool FileExists(const char* path) {
+        std::ifstream f(path);
+        return f.good();
     }
 
     // 画粒子火场景的桌子（桌面 + 四条腿，均用轴对齐盒 mesh）。
@@ -436,6 +534,10 @@ private:
                 ui_.Combo("朝向", &ui_fire_align_, items, row(1, 1));
             }
             ui_.Checkbox("沿速度拉伸", &fire_cfg_.stretched, row(1, 2));
+            // 黑烟层
+            ui_.Checkbox("黑烟", &smoke_enable_, row(1, 4));
+            ui_.SliderFloat("黑烟率 /s", &ui_smoke_rate_, row(1, 5), 0.0f, 60.0f, 0);
+            ui_.SliderFloat("黑烟尺寸 m", &ui_smoke_size_, row(1, 6), 0.2f, 2.5f, 2);
         }
     }
 
