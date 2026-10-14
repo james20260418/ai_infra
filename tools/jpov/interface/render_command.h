@@ -34,6 +34,7 @@
 #include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/pbr_material.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
 #include "tools/jpov/interface/skeleton_types.h"
@@ -1620,11 +1621,6 @@ inline SkyCommand CreateDefaultSkyCommand(float turbidity,
 // metallic/roughness/emissive/AO 各通道支持常值或纹理（见对应 *_tex 标志）。
 // object_use_default_color == true 时跳过点光源（ambient-only，等价原纯色行为）。
 //
-// 透明：material.alpha_mode == kBlend 时，本物体**不经主 pass**，改由「透明 pass」
-//（加权混合 OIT）渲进离屏玻璃缓冲，再由体积雾合成 pass 与雾一起按深度积分合成
-//（需 tone_mapping=true；见 docs/jpov_transparent_glass_design.md）。此时本物体的
-// picking_id / highlight 被忽略（本版）。kMask/kOpaque 行为不变。
-//
 // Pre-condition: mesh_id 已注册且未释放
 // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性
 // Pre-condition: up、front 均非零且不平行
@@ -1733,6 +1729,37 @@ struct SkinnedMeshCommand {
 // CPU 读回 mask 做 outline_px 次像素膨胀，膨胀图与原 mask 相减得到边缘环，
 // 再在屏幕空间用 GL_POINTS 回填边框色。边框为**恒定像素宽**，不随物体大小/
 // 远近变化。
+// ==================== 广告牌粒子命令 ====================
+
+// 一批广告牌粒子（世界空间）——「主角火」等多发射器分层的渲染载体。
+//
+// 与 object3d/skinned_mesh 的区别：粒子**不做逐帧模拟**（模拟在调用方：
+// src/particles/particle_system.h 产出 ParticleInstance），本命令只描述「这批已解算
+// 好的面片怎么画」。因此一个发射器 = 一条命令（层间顺序 = 命令顺序）。
+//
+// 渲染：单次 instanced draw（VS 里 gl_VertexID 生成面片四角），走独立粒子 pass
+//（不透明 3D 之后），自带混合/深度状态。见 src/particles/particle_renderer.h，
+// 设计 docs/jpov_particle_fire_design.md。
+//
+// 分工约定（Danis）：环境雾/烟/远火 → fire_fog（froxel）；主角燃料火 → 本命令。
+struct ParticleRenderCommand {
+    std::vector<ParticleInstance> particles;  // 本批实例（非空才画）
+
+    // ---- 渲染设置（整批共享）----
+    uint32_t texture_id = 0;      // flipbook 纹理（TextureManager id；0 = 纯色不加纹理）
+    int  tiles_x = 1;             // flipbook 网格列（flipbook=true 时 >= 1）
+    int  tiles_y = 1;             // flipbook 网格行
+    bool flipbook = false;        // 是否按帧号裁 UV
+    bool frame_blend = true;      // 相邻帧交叉混合（减逐帧卡顿/突变；flipbook 有效）
+    jpov::AlignMode align = AlignMode::kVertical;   // 广告牌朝向调制
+    bool stretched = false;       // 沿速度拉伸（align=kVelocity 时有意义）
+    float stretch_scale = 1.0f;   // 拉伸系数（每 m/s）
+    jpov::BlendMode blend = BlendMode::kAdditive;   // 混合模式
+    jpov::SortMode  sort = SortMode::kNone;         // 排序模式
+};
+
+// ==================== 高亮风格 ====================
+
 struct HighlightStyle {
     Color color = {1.0f, 0.85f, 0.3f, 1.0f};  // 边框颜色（金黄，经统一 tone map）
 
@@ -1823,6 +1850,10 @@ struct RenderCommandList {
     // instanced draw。每命令引用的 skeleton_id 由 renderer 注册（含逆绑定+pose atlas 的资源对象
     // SkeletonManager）时经 IdAllocator 分配。
     std::vector<SkinnedMeshCommand> skinned_mesh;
+
+    // 广告牌粒子批（世界空间）。每条命令 = 一层火（多发射器分层 = 多条命令）。
+    // 在**不透明 3D 之后**由独立粒子 pass 渲染（自带混合/深度/排序）。见 ParticleRenderCommand。
+    std::vector<ParticleRenderCommand> particles;
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
     //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
@@ -2139,8 +2170,6 @@ struct RenderCommandList {
     //      （mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色）；
     //      否则各通道取 mat 的常值 fallback（含光照模式下的
     //      metallic / roughness / emissive 恒走常值）。
-    //      mat.alpha_mode：kOpaque（默认）/ kMask（cutout）/ kBlend（半透明——
-    //      见 Object3DCommand 的「透明」说明；需 tone_mapping=true）。
     //
     // center: 模型中心的世界坐标（平移）
     // up:     模型局部 +Y 指向的世界方向（需非零，会被归一化）
@@ -2218,6 +2247,11 @@ struct RenderCommandList {
                               const jpov::PBRMaterial& material,
                               std::vector<SkinnedInstanceState> instances,
                               bool highlight = false);
+
+    // DrawParticles：追加一批广告牌粒子（见 ParticleRenderCommand）。
+    // 只是把命令推入 particles 列表；粒子在 3D 不透明内容之后的独立 pass 渲染。
+    // Pre-condition: cmd.particles 非空。
+    void DrawParticles(ParticleRenderCommand cmd);
 };
 
 }  // namespace jpov

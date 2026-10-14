@@ -598,6 +598,7 @@ Renderer::~Renderer() {
     DestroySkyColorFBO();
     DestroyGlassFBO();
     fire_fog_renderer_.Finalize();
+    particle_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1627,6 +1628,7 @@ void Renderer::Init(
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
     fire_fog_renderer_.Init(&shader_mgr_);
+    particle_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
 }
@@ -1958,6 +1960,23 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glass_input.accum_tex = glass_accum_tex_;
                 glass_input.reveal_tex = glass_reveal_tex_;
                 glass_input.depth_tex = glass_depth_tex_;
+            }
+
+            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与 glass 同套 WBO 代数。
+            //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
+            //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
+            if (!cmds.particles.empty()) {
+                particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                for (const ParticleRenderCommand& pc : cmds.particles) {
+                    particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
+                                            hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                const GLenum pdraw[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, pdraw);
+                particle_renderer_.Composite(fbo_3d_w, fbo_3d_h);
+                const GLenum mrt_bufs_p[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_p);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
