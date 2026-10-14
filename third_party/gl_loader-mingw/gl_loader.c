@@ -98,6 +98,8 @@ int gl_loader_init(void) {
     LOAD_FUNC(gl_GetError,              "glGetError");
     LOAD_FUNC(gl_PushAttrib,            "glPushAttrib");
     LOAD_FUNC(gl_PopAttrib,             "glPopAttrib");
+    LOAD_FUNC(gl_BlendEquation,         "glBlendEquation");
+    LOAD_FUNC(gl_BlendFunci,            "glBlendFunci");
     return 0;
 }
 
@@ -165,3 +167,5 @@ DEFINE_PTR(GL_TexSubImage2D,         gl_TexSubImage2D);
 DEFINE_PTR(GL_GetError,              gl_GetError);
 DEFINE_PTR(GL_PushAttrib,            gl_PushAttrib);
 DEFINE_PTR(GL_PopAttrib,             gl_PopAttrib);
+DEFINE_PTR(GL_BlendEquation,         gl_BlendEquation);
+DEFINE_PTR(GL_BlendFunci,            gl_BlendFunci);
