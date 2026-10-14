@@ -53,7 +53,7 @@ enum class AlphaMode : uint8_t { kOpaque, kMask, kBlend };
 
 ## 3. 玻璃 FBO 与 WBO 趟
 
-`Renderer` 持有 **1×（非 MSAA）玻璃 FBO**（结构化数据不能 MSAA resolve），主 FBO 尺寸，
+`Renderer` 持有 **1× 单采样玻璃 FBO**（结构化数据不能被过滤/平均），主 FBO 尺寸，
 三个颜色附件（无深度缓冲）：
 
 | 附件 | 格式 | Clear | blend func | 写入（FS） |
@@ -110,8 +110,8 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 3D 段内（HDR 路径，`tone_mapping=true`）：
 
 1. 阴影 pass（**跳过** kBlend）；
-2. 不透明主 pass 画进 MSAA HDR FBO（**跳过** kBlend）；
-3. resolve 场景深度（MSAA→1×`resolve_scene_depth_tex_`）；
+2. 不透明主 pass 画进单采样 HDR FBO（**跳过** kBlend）；
+3. 场景深度在 MRT#1（单采样）；下游雾 pass 采样它时临时摘下该附件防反馈环；
 4. **玻璃 pass**（若有 kBlend）：`EnsureGlassFBO` + `ClearGlassFBO`（无玻璃也清空，
    提供恒等层）+ `DrawTransparentPass`；
 5. 远景仰角雾（不变）；
@@ -123,7 +123,7 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 
 ## 6. 关键约定与坑
 
-1. **玻璃 FBO 是 1×**：结构化 MRT 不能 MSAA resolve（同 pick id 的教训）。
+1. **玻璃 FBO 是 1×**：结构化 MRT 不能被过滤/平均（同 pick id 的教训）。
 2. **blend func 属 `GL_COLOR_BUFFER_BIT`**，不在 `glPushAttrib(GL_ENABLE_BIT)` 里
    ——透明 pass 结束必须**显式回写**（对三个 draw buffer 都回写）。
 3. **手动深度测试**取代深度缓冲：本趟无 depth attachment；FS 采样不透明场景深度比较。

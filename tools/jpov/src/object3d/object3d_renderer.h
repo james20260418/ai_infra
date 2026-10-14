@@ -919,7 +919,7 @@ void main() {
     //   tile_index_tex: tile culling 纹理（绑定到 TEXTURE0）。
     //
     // GL 状态前置要求（调用方负责）：
-    //   - 3D MSAA FBO 已绑定，viewport 已设置
+    //   - 3D FBO 已绑定，viewport 已设置
     //   - glEnable(GL_DEPTH_TEST) + GL_CULL_FACE 已设置
     //   - 若有光照：UploadLightData + BuildTileLightIndex 已调用
     //     （需对 opaque 与 cutout 两套 program 都上传）

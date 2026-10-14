@@ -70,7 +70,7 @@ struct FireFogLighting {
 
 // 透明玻璃层的 WBO 解算结果（可选；由 Renderer::DrawTransparentPass 产出）。
 //
-// 三个附件都是主 FBO 尺寸（1× 非 MSAA）的纹理：
+// 三个附件都是主 FBO 尺寸（1× 单采样）的纹理：
 //   accum : RGBA16F，Σ(预乘色×w, α×w) —— 加权平均色 Cavg = accum.rgb / accum.a；
 //   reveal: R16F   ，Π(1−α)            —— 玻璃层透射率 T_g（背景透过率）；
 //   depth : R32F   ，Σ(z_view×α×w)     —— 代表深度 z_g = depth / accum.a。

@@ -596,8 +596,8 @@ struct ColorGrade {
 // 辉光（Bloom）后处理参数——HDR 高亮部分提取→模糊→加回原图的机制。
 //
 // 背景与插入链路（见 src/renderer.cc Render()）：
-//   3D 内容先渲进 HDR FBO（RGBA16F，可存 >1.0 亮度）→ resolve 到单采样
-//   浮点纹理（resolve_tex_hdr_）→ [本 pass：bloom] → 统一 tone map pass。
+//   3D 内容先渲进 HDR FBO（RGBA16F 单采样，可存 >1.0 亮度）→
+//   [本 pass：bloom] → 统一 tone map pass。
 //   bloom 在 tone map **之前**工作：从 HDR 里把超过 threshold 的高亮区域
 //   抠出来，用多级半分辨率降采样 + 上采样叠加成一张"辉光图"，再按
 //   intensity 加回 HDR 原图，之后才进 ACES tone map。这样高亮的"光晕"
@@ -644,7 +644,7 @@ struct BloomConfig {
 //
 //   阴影 pass → 3D 不透明 pass（天空 + object3d…；MRT：颜色 + 场景深度）
 //            → 【本雾 pass】   ← 就地 alpha 混合进已有的 3D HDR FBO（只读 MRT#1 场景深度）
-//            → MSAA resolve → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
+//            → highlight → bloom → tone map(ACES) → sRGB → 2D/UI
 //
 //  · **不持有自己的 FBO**：用固定管线 alpha 混合（SRC_ALPHA, ONE_MINUS_SRC_ALPHA）
 //    把雾**就地**叠到当前 3D HDR FBO 上。雾色作为源、α = 1−e^{−τ}，与帧缓冲里**已有的**
