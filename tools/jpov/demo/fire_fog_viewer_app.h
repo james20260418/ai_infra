@@ -22,6 +22,10 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>   // readlink（定位 exe 所在目录，与 cwd 解耦）
+#endif
+
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/particle_fire.h"
 #include "tools/jpov/demo/skylight_scene.h"   // 复用 SkyDegrees / MakeSkyLighting / 地面材质
@@ -312,9 +316,13 @@ public:
         // 优先用离线烘的**真火/真烟**纹理（tools/jpov/assets/fire/*.png，build 脚本拷到
         // textures/）；缺失时回退程序化生成，保证不崩。
         if (fire_texture_id_ == 0) {
-            if (FileExists("textures/fire_flipbook.png")) {
-                fire_texture_id_ = RegisterTexture("textures/fire_flipbook.png");
+            const std::string fire_path = FindTexture("textures/fire_flipbook.png");
+            if (!fire_path.empty()) {
+                fire_texture_id_ = RegisterTexture(fire_path);
+                LOG(INFO) << "[particle_fire] fire texture = " << fire_path;
             } else {
+                LOG(WARNING) << "[particle_fire] textures/fire_flipbook.png 未找到，"
+                                "回退程序化火贴图";
                 const std::vector<unsigned char> png =
                     jpov_particle_fire::MakeFireFlipbookPng(fire_tex_tiles_, fire_tex_tiles_,
                                                             128, 20261014u);
@@ -325,10 +333,14 @@ public:
             }
         }
         if (smoke_texture_id_ == 0) {
-            if (FileExists("textures/smoke_flipbook.png")) {
-                smoke_texture_id_ = RegisterTexture("textures/smoke_flipbook.png");
+            const std::string smoke_path = FindTexture("textures/smoke_flipbook.png");
+            if (!smoke_path.empty()) {
+                smoke_texture_id_ = RegisterTexture(smoke_path);
+                LOG(INFO) << "[particle_fire] smoke texture = " << smoke_path;
             } else {
-                smoke_texture_id_ = fire_texture_id_;   // 回退：复用火纹理（染暗后近似烟）
+                LOG(WARNING) << "[particle_fire] textures/smoke_flipbook.png 未找到，"
+                                "回退火贴图染暗";
+                smoke_texture_id_ = fire_texture_id_;
             }
         }
         // 调试：超软圆点贴图（绝对无硬边），用于排查三角/片片感来源。
@@ -451,6 +463,38 @@ private:
     static bool FileExists(const char* path) {
         std::ifstream f(path);
         return f.good();
+    }
+
+    // 可执行文件所在目录（与 cwd 解耦：无论从哪个目录启动都能找到 exe 旁 textures/）。
+    static std::string ExeDir() {
+#ifndef _WIN32
+        char buf[4096];
+        const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            const std::string p(buf);
+            const size_t slash = p.find_last_of('/');
+            if (slash != std::string::npos) {
+                return p.substr(0, slash);
+            }
+        }
+#endif
+        return std::string();
+    }
+
+    // 按「exe 旁 → cwd」顺序找一个 flipbook 纹理；找不到返回空串。
+    static std::string FindTexture(const char* rel) {
+        const std::string exe_dir = ExeDir();
+        if (!exe_dir.empty()) {
+            const std::string p = exe_dir + "/" + rel;
+            if (FileExists(p.c_str())) {
+                return p;
+            }
+        }
+        if (FileExists(rel)) {
+            return std::string(rel);
+        }
+        return std::string();
     }
 
     // 画粒子火场景的桌子（桌面 + 四条腿，均用轴对齐盒 mesh）。
