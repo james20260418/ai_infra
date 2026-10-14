@@ -197,8 +197,12 @@ in vec3 vWorldTangent;
 //   accum  (RGBA16F)：blend (ONE, ONE)          —— 累加 预乘色×权重 与 α×权重；
 //   reveal (R16F)   ：blend (ZERO, ONE_MINUS_SRC_COLOR) —— reveal *= (1−α)。
 // 之后由体积雾合成 pass 解算成 (预乘色, 透射率) 并与雾一起按深度积分合成。
+// ⚠️ 三个输出必须**全部写出**：玻璃 FBO 的 draw buffer 声明了 3 个附件，未写附件的
+//   GL 内容**未定义**；若 depth 不写，composite 读它算 z_g/ell_g 会读到垃圾 →
+//   雾与玻璃遮挡合成错位（llvmpipe 下表现为逐帧 tile 闪烁）。
 layout(location = 0) out vec4 FragAccum;
 layout(location = 1) out float FragReveal;
+layout(location = 2) out float FragDepthAccum;   // R32F：Σ z_view×α×权重（代表深度）
 #else
 layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）。
@@ -811,6 +815,7 @@ void main() {
     float w = weight_wbo(z_view, alpha, result);
     FragAccum = vec4(result * alpha, alpha) * w;   // 预乘色 × 权重（累加）
     FragReveal = alpha;                            // reveal *= (1−α)（由混合函数完成）
+    FragDepthAccum = z_view * alpha * w;           // 代表深度累加（z_g = 本值 / accum.a）
 #else
     FragColor = vec4(result, 1.0);
     FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
