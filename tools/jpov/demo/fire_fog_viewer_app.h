@@ -47,13 +47,13 @@ inline constexpr int kTilePxChoices[] = {8, 16, 32};
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.80f, 0.0f};   // 桌面上方
-    c.rate = 110.0f;
+    c.rate = 160.0f;
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.15f;
-    c.cone_half_angle_deg = 16.0f;
+    c.radius = 0.12f;
+    c.cone_half_angle_deg = 14.0f;
     c.lifetime = {0.75f, 1.1f};
     c.speed = {0.7f, 1.3f};
-    c.size_start = {0.28f, 0.45f};
+    c.size_start = {0.22f, 0.36f};
     c.rotation = {0.0f, 6.2831853f};
     c.gravity = {0.0f, 1.9f, 0.0f};
     c.drag = 0.9f;
@@ -67,9 +67,11 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.flipbook = true;
     c.tiles_x = 8;
     c.tiles_y = 8;
-    c.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
-    c.sheet_fps = 20.0f;
-    c.start_frame_random = true;
+    // 经典火舌：按**粒子自身寿命**播一遍（点火→峰值→熄灭），非随机相位、不循环。
+    c.sheet_time_mode = jpov::particles::SheetTimeMode::kLifetime;
+    c.sheet_cycles = 1.0f;
+    c.start_frame_random = false;
+    c.frame_curve = jpov::particles::MakeDefaultLinearFrameCurve();
     c.align = jpov::AlignMode::kView;   // 朝向相机（Danis 实测：比 vertical 好）
     c.stretched = false;
     c.blend = jpov::BlendMode::kAdditive;
@@ -88,7 +90,7 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     c.cone_half_angle_deg = 20.0f;
     c.lifetime = {1.8f, 2.6f};
     c.speed = {0.5f, 0.9f};
-    c.size_start = {0.60f, 0.95f};
+    c.size_start = {0.85f, 1.35f};
     c.rotation = {0.0f, 6.2831853f};
     c.gravity = {0.0f, 1.0f, 0.0f};   // 上升比火慢
     c.drag = 0.7f;
@@ -171,9 +173,9 @@ public:
     uint32_t fire_texture_id_ = 0;     // 懒建的程序化 flipbook 纹理
     int fire_tex_tiles_ = 8;           // flipbook 网格边长（8×8=64 帧）
     // 面板用影子标量（逐步映射到 fire_cfg_，避免直接改 RangeF 导致 min>max 崩溃）。
-    float ui_fire_rate_ = 110.0f;
+    float ui_fire_rate_ = 160.0f;
     float ui_fire_life_ = 1.1f;
-    float ui_fire_size_ = 0.45f;
+    float ui_fire_size_ = 0.36f;
     float ui_fire_speed_ = 1.3f;
     float ui_fire_buoy_ = 1.9f;
     float ui_fire_drag_ = 0.9f;
@@ -188,8 +190,8 @@ public:
     bool smoke_needs_reset_ = true;
     uint32_t smoke_texture_id_ = 0;
     float ui_smoke_rate_ = 0.0f;      // 黑烟基础发射率（走子发射器时保持 0）
-    float ui_smoke_size_ = 0.95f;
-    float ui_smoke_prob_ = 0.5f;      // 子发射器：每次火焰粒子死亡生成烟的概率
+    float ui_smoke_size_ = 1.35f;
+    float ui_smoke_prob_ = 0.7f;      // 子发射器：每次火焰粒子死亡生成烟的概率
     // 调试开关：用「绝对无硬边」软圆点贴图替换火/烟纹理（判断三角/片片感来源）。
     bool debug_soft_tex_ = false;
     uint32_t soft_fire_tex_ = 0;

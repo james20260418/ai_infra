@@ -121,6 +121,15 @@ def render_flipbook(vol, mode, tiles):
         img = np.zeros((ny, nx, 4), np.float32)
         img[..., :3] = np.clip(L, 0.0, 1.0)
         img[..., 3] = alpha
+        if mode == "fire":
+            # 生命包络：点火(t=0 无) → 峰值 → 熄灭(t=1 无)。
+            # 配合引擎端 SheetTimeMode=kLifetime：每粒随自身寿命「烧起来→灭掉」。
+            t = fidx / float(max(1, nframes - 1))
+            env = min(t / 0.28, (1.0 - t) / 0.38)
+            env = 0.0 if env < 0.0 else (1.0 if env > 1.0 else env)
+            env = env * env * (3.0 - 2.0 * env)   # smoothstep
+            img[..., 3] *= env
+            img[..., :3] *= (0.45 + 0.55 * env)   # 熄灭时整体变暗
         img = box_blur(img, 3, 3)   # 软化边缘（减方块感）
         # 图像行 0 = 体积 y 高端（火苗尖朝上）→ 上下翻转一次。
         frames.append(img[::-1, :, :])
@@ -135,6 +144,12 @@ def render_flipbook(vol, mode, tiles):
     else:
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         x0, x1 = int(xs.min()), int(xs.max()) + 1
+    if mode == "fire":
+        # 收窄到中央：要的是「一缕火舌」，不是一整片火幕。
+        xc = (x0 + x1) // 2
+        half = max(1, int((x1 - x0) * 0.28))
+        x0 = max(0, xc - half)
+        x1 = min(nx, xc + half)
     ch = y1 - y0
     cw = x1 - x0
     cell = int(max(ch, cw) * 1.30) + 2   # cell 含 ~30% 透明内边距
