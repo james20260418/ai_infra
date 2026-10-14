@@ -205,6 +205,12 @@ public:
     // toggle 对比：use_cc0_fire_ 开 = 用 CC0 真火贴图；关 = 用我们的 puff flipbook。
     bool use_cc0_fire_ = true;    // 默认用 CC0 真火（好看）；可取消回到程序化 puff 对比
     uint32_t cc0_fire_tex_ = 0;
+    // 临时：用外部指定纹理渲染（候选火纹理评估；env: JPOV_FIRETEX / JPOV_FIRETX / JPOV_FIRETY）。
+    bool ov_fire_ = false;
+    std::string ov_fire_path_;
+    int ov_fire_tx_ = 1;
+    int ov_fire_ty_ = 1;
+    uint32_t ov_fire_tex_ = 0;
 
     // ── 场景选择（左上角下拉）──
     //   0 = 体积雾（地面+橡树+点状雾，原 fire_fog 验证场）
@@ -357,6 +363,13 @@ public:
                 LOG(WARNING) << "[particle_fire] textures/cc0_fire_64.png 未找到";
             }
         }
+        // 临时覆盖纹理（候选评估）。
+        if (ov_fire_ && ov_fire_tex_ == 0 && !ov_fire_path_.empty()) {
+            if (FileExists(ov_fire_path_.c_str())) {
+                ov_fire_tex_ = RegisterTexture(ov_fire_path_);
+                LOG(INFO) << "[particle_fire] override fire tex = " << ov_fire_path_;
+            }
+        }
         // 调试：超软圆点贴图（绝对无硬边），用于排查三角/片片感来源。
         if (debug_soft_tex_) {
             if (soft_fire_tex_ == 0) {
@@ -396,8 +409,15 @@ public:
             // 加法层无顺序依赖不排序；半透明层需背→前排序。
             fire_cfg_.sort = (ui_fire_blend_ == 0) ? jpov::SortMode::kNone
                                                    : jpov::SortMode::kByDepth;
-            // 贴图/帧设置：CC0 真火（60 帧循环，随机相位）或我们的 puff（8×8，随寿命点火/灭）。
-            if (use_cc0_fire_) {
+            // 贴图/帧设置：外部覆盖 / CC0 真火 / 我们的 puff。
+            if (ov_fire_) {
+                fire_cfg_.tiles_x = ov_fire_tx_;
+                fire_cfg_.tiles_y = ov_fire_ty_;
+                fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
+                fire_cfg_.sheet_fps = 24.0f;
+                fire_cfg_.start_frame_random = true;
+                fire_cfg_.sheet_cycles = 1.0f;
+            } else if (use_cc0_fire_) {
                 fire_cfg_.tiles_x = 10;
                 fire_cfg_.tiles_y = 6;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
@@ -460,8 +480,9 @@ public:
         if (do_fire && !finst.empty()) {
             jpov::ParticleRenderCommand pc;
             pc.particles = std::move(finst);
-            pc.texture_id = use_cc0_fire_ ? cc0_fire_tex_
-                          : (debug_soft_tex_ ? soft_fire_tex_ : fire_texture_id_);
+            pc.texture_id = ov_fire_ ? ov_fire_tex_
+                          : (use_cc0_fire_ ? cc0_fire_tex_
+                          : (debug_soft_tex_ ? soft_fire_tex_ : fire_texture_id_));
             pc.tiles_x = fire_cfg_.tiles_x;
             pc.tiles_y = fire_cfg_.tiles_y;
             pc.flipbook = fire_cfg_.flipbook;

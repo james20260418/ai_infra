@@ -358,9 +358,61 @@ int RunCapture(const std::string& out_dir) {
     return 0;
 }
 
+// 候选火纹理评估：用 env 指定的纹理渲染一帧粒子火（近景），写 png。
+int RunCand(const std::string& out_png) {
+    JPOV::Config cfg;
+    cfg.title  = "JPOV - candidate fire";
+    cfg.width  = jpov_fire_fog::kViewerWidth;
+    cfg.height = jpov_fire_fog::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+    jpov_fire_fog::FireFogApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_fire_fog::kViewerWidth;
+    winfo.height = jpov_fire_fog::kViewerHeight;
+    jpov::InputSnapshot input{};
+    app.scene_index_ = 1;
+    app.ov_fire_ = true;
+    const char* fp = std::getenv("JPOV_FIRETEX");
+    app.ov_fire_path_ = fp ? fp : "";
+    const char* tx = std::getenv("JPOV_FIRETX");
+    const char* ty = std::getenv("JPOV_FIRETY");
+    app.ov_fire_tx_ = tx ? std::atoi(tx) : 1;
+    app.ov_fire_ty_ = ty ? std::atoi(ty) : 1;
+    DefaultView(app);
+    app.view_.phi = 0.22;
+    app.view_.theta = 0.7;
+    app.view_.R = 4.5;
+    app.deg_.sun_elev_deg = 18.0f;
+    app.fire_needs_reset_ = true;
+    app.smoke_needs_reset_ = true;
+    for (int w = 0; w < 120; ++w) {
+        app.RunOnce(input, winfo, "/tmp/_cand_warm.png");
+    }
+    app.RunOnce(input, winfo, out_png.c_str());
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // ── 候选火纹理评估：--cand <out.png> ──
+    std::string cand_out;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--cand") == 0 && i + 1 < argc) {
+            cand_out = argv[i + 1];
+        }
+    }
+    if (!cand_out.empty()) {
+        return RunCand(cand_out);
+    }
     // ── headless 拍摄分支：--capture <out_dir> ──
     std::string out_dir;
     for (int i = 1; i < argc; ++i) {
