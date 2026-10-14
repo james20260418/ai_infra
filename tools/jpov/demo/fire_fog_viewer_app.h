@@ -228,6 +228,7 @@ public:
     //（0=程序化 puff；1..10=CC0 火纹理 flipbook）。
     int fire_choice_ = 10;   // 默认 #10（我评的 top1）
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
+    bool frame_blend_ = true;   // flipbook 相邻帧交叉混合（减卡顿/突变）
     // 临时：用外部指定纹理渲染（候选火纹理评估；env: JPOV_FIRETEX / JPOV_FIRETX / JPOV_FIRETY）。
     bool ov_fire_ = false;
     std::string ov_fire_path_;
@@ -502,6 +503,7 @@ public:
                 spc.stretch_scale = smoke_cfg_.stretch_scale;
                 spc.blend = smoke_cfg_.blend;
                 spc.sort = smoke_cfg_.sort;
+                spc.frame_blend = frame_blend_;
                 cmds->DrawParticles(std::move(spc));
             }
         }
@@ -521,6 +523,7 @@ public:
             pc.stretch_scale = fire_cfg_.stretch_scale;
             pc.blend = fire_cfg_.blend;
             pc.sort = fire_cfg_.sort;
+            pc.frame_blend = frame_blend_;
             cmds->DrawParticles(std::move(pc));
         }
 
@@ -714,6 +717,7 @@ private:
             ui_.SliderFloat("黑烟尺寸 m", &ui_smoke_size_, row(1, 6), 0.2f, 2.5f, 2);
             ui_.SliderFloat("烟概率", &ui_smoke_prob_, row(1, 7), 0.0f, 1.0f, 2);
             ui_.Checkbox("软贴图(debug)", &debug_soft_tex_, row(1, 8));
+            ui_.Checkbox("帧混合(减卡顿)", &frame_blend_, row(1, 9));
         }
     }
 

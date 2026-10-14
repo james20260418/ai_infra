@@ -1750,6 +1750,7 @@ struct ParticleRenderCommand {
     int  tiles_x = 1;             // flipbook 网格列（flipbook=true 时 >= 1）
     int  tiles_y = 1;             // flipbook 网格行
     bool flipbook = false;        // 是否按帧号裁 UV
+    bool frame_blend = true;      // 相邻帧交叉混合（减逐帧卡顿/突变；flipbook 有效）
     jpov::AlignMode align = AlignMode::kVertical;   // 广告牌朝向调制
     bool stretched = false;       // 沿速度拉伸（align=kVelocity 时有意义）
     float stretch_scale = 1.0f;   // 拉伸系数（每 m/s）

@@ -116,7 +116,7 @@ void main() {
 }
 )glsl";
 
-    // 片元着色器：flipbook UV 裁剪 + RGBA 乘。
+    // 片元着色器：flipbook UV 裁剪 + **相邻帧交叉混合**（uFrameBlend）+ RGBA 乘。
     static constexpr const char* kParticleFs = R"glsl(
 #version 330 core
 in vec2 vUV;
@@ -127,17 +127,33 @@ uniform int uHasTex;
 uniform int uTilesX;
 uniform int uTilesY;
 uniform int uFlipbook;
+uniform int uFrameBlend;   // 1 = 相邻帧混合（减逐帧卡顿/突变）
 out vec4 FragColor;
+// vFrame（分数帧）→ 某一格的 uv。
+vec2 CellUV(vec2 uv, float f) {
+    float col = mod(f, float(uTilesX));
+    float row = floor(f / float(uTilesX));
+    float vrow = float(uTilesY - 1) - row;   // 第 0 帧在顶行
+    return vec2((uv.x + col) / float(uTilesX), (uv.y + vrow) / float(uTilesY));
+}
 void main() {
-    vec2 uv = vUV;
-    if (uFlipbook == 1 && uTilesX >= 1 && uTilesY >= 1) {
-        float f = floor(vFrame + 0.5);
-        float col = mod(f, float(uTilesX));
-        float row = floor(f / float(uTilesX));
-        float vrow = float(uTilesY - 1) - row;   // 第 0 帧在顶行
-        uv = vec2((uv.x + col) / float(uTilesX), (uv.y + vrow) / float(uTilesY));
+    vec4 tex;
+    if (uHasTex == 0) {
+        tex = vec4(1.0);
+    } else if (uFlipbook == 1 && uTilesX >= 1 && uTilesY >= 1) {
+        float total = float(uTilesX * uTilesY);
+        float f0 = floor(vFrame);
+        vec4 c0 = texture(uTex, CellUV(vUV, f0));
+        if (uFrameBlend == 1) {
+            float f1 = mod(f0 + 1.0, total);
+            vec4 c1 = texture(uTex, CellUV(vUV, f1));
+            tex = mix(c0, c1, vFrame - f0);
+        } else {
+            tex = c0;
+        }
+    } else {
+        tex = texture(uTex, vUV);
     }
-    vec4 tex = (uHasTex == 1) ? texture(uTex, uv) : vec4(1.0);
     FragColor = vColor * tex;
 }
 )glsl";

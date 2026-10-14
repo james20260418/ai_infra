@@ -180,6 +180,7 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glUniform1i(shader_mgr_->GetUniform(prog_, "uTilesX"), cmd.tiles_x);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uTilesY"), cmd.tiles_y);
     glUniform1i(shader_mgr_->GetUniform(prog_, "uFlipbook"), cmd.flipbook ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog_, "uFrameBlend"), cmd.frame_blend ? 1 : 0);
 
     if (cmd.texture_id != 0) {
         const unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.texture_id);

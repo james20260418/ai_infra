@@ -311,7 +311,7 @@ float ParticleEmitter::ResolveFrame(const Particle& p) const {
             break;
         }
     }
-    float frame = std::floor(phase * static_cast<float>(total));
+    float frame = phase * static_cast<float>(total);   // 分数帧：shader 做相邻帧混合（减卡顿/突变）
     if (frame >= static_cast<float>(total)) {
         frame = static_cast<float>(total - 1);
     }
