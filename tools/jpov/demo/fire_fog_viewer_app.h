@@ -229,6 +229,7 @@ public:
     int fire_choice_ = 10;   // 默认 #10（我评的 top1）
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
     bool frame_blend_ = true;   // flipbook 相邻帧交叉混合（减卡顿/突变）
+    float ui_fire_tex_fps_ = 24.0f;   // 火纹理播放帧率（fps；调大=烧得更快）
     // 临时：用外部指定纹理渲染（候选火纹理评估；env: JPOV_FIRETEX / JPOV_FIRETX / JPOV_FIRETY）。
     bool ov_fire_ = false;
     std::string ov_fire_path_;
@@ -445,14 +446,14 @@ public:
                 fire_cfg_.tiles_x = ov_fire_tx_;
                 fire_cfg_.tiles_y = ov_fire_ty_;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
-                fire_cfg_.sheet_fps = 24.0f;
+                fire_cfg_.sheet_fps = ui_fire_tex_fps_;
                 fire_cfg_.start_frame_random = true;
                 fire_cfg_.sheet_cycles = 1.0f;
             } else if (choice_flip) {
                 fire_cfg_.tiles_x = kFireTexes[fire_choice_].tx;
                 fire_cfg_.tiles_y = kFireTexes[fire_choice_].ty;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
-                fire_cfg_.sheet_fps = 24.0f;
+                fire_cfg_.sheet_fps = ui_fire_tex_fps_;
                 fire_cfg_.start_frame_random = true;
                 fire_cfg_.sheet_cycles = 1.0f;
             } else {
@@ -718,6 +719,7 @@ private:
             ui_.SliderFloat("烟概率", &ui_smoke_prob_, row(1, 7), 0.0f, 1.0f, 2);
             ui_.Checkbox("软贴图(debug)", &debug_soft_tex_, row(1, 8));
             ui_.Checkbox("帧混合(减卡顿)", &frame_blend_, row(1, 9));
+            ui_.SliderFloat("火纹理帧率 fps", &ui_fire_tex_fps_, row(2, 0), 6.0f, 60.0f, 0);
         }
     }
 
