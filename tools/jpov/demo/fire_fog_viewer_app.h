@@ -18,6 +18,7 @@
 #ifndef JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 #define JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -202,6 +203,7 @@ public:
             DrawPanel(input);
             ui_.End();
             ui_.Emit(cmds);
+            DrawCameraHud(cmds);   // 相机/玻璃参数 HUD（便于截图定位问题视角）
         }
     }
 
@@ -293,6 +295,30 @@ private:
     bool show_panel_ = true;
     bool show_fog_ = true;
     jpov::Ui ui_;
+
+    // 相机 / 玻璃参数 HUD：画在屏幕左上角（带半透明底），方便用户截图反馈
+    // 「出问题的那一帧」时把精确视角参数一起带上。仅面板可见（交互）时画。
+    void DrawCameraHud(jpov::RenderCommandList* cmds) const {
+        const jpov::Vec3f p = view_.Position();
+        const double kDeg = 180.0 / 3.14159265358979323846;
+        char line1[192];
+        std::snprintf(line1, sizeof(line1),
+            "theta=%.2fdeg(%.4f)  phi=%.2fdeg(%.4f)  R=%.3f",
+            view_.theta * kDeg, view_.theta, view_.phi * kDeg, view_.phi, view_.R);
+        char line2[224];
+        std::snprintf(line2, sizeof(line2),
+            "cam=(%.3f, %.3f, %.3f)  glass=(%.3f, %.3f, %.3f) alpha=%.2f on=%d",
+            p.x(), p.y(), p.z(),
+            glass_center_.x(), glass_center_.y(), glass_center_.z(),
+            glass_mat_.base_color.a, show_glass_ ? 1 : 0);
+        // 半透明黑底，保证白字在亮天上也可读。
+        cmds->DrawRect({6.0f, 6.0f}, {static_cast<float>(kViewerWidth) - 12.0f, 62.0f},
+                       jpov::Color{0.0f, 0.0f, 0.0f, 0.55f});
+        cmds->DrawText(line1, {12.0f, 12.0f}, 20.0f, jpov::kColorWhite,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        cmds->DrawText(line2, {12.0f, 38.0f}, 20.0f, jpov::kColorWhite,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+    }
 
     static constexpr float kSliderFontSize = 15.0f;
 };
