@@ -91,6 +91,12 @@ public:
     // 供肉眼对比：开=由 SkyCommand 推导的三色（AmbientTricolor），关=原来的单色（AmbientColor）。
     void SetTricolorAmbient(bool on) { tricolor_ambient_ = on; }
 
+    // 是否开启 SMAA 后处理抗锯齿（供肉眼 A/B 对比）。headless 拍摄可显式设。
+    void SetSmaa(bool on, float threshold = 0.1f) {
+        smaa_on_ = on;
+        smaa_threshold_ = threshold;
+    }
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
     }
@@ -140,6 +146,14 @@ public:
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
+
+        // SMAA 后处理抗锯齿（可选）：tone map 之后、2D 之前的最后一站。
+        if (smaa_on_) {
+            jpov::SmaaConfig sc;
+            sc.enabled = true;
+            sc.threshold = smaa_threshold_;
+            cmds->smaa = sc;
+        }
 
         // 远景仰角雾（空气透视）：几何属性走滑条；**雾色由天光推导**
         // （SkyCommand::ElevationFogColor() = 地平线附近天光色），使远景收敛到天边。
@@ -235,6 +249,10 @@ private:
         ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 4), 0.0f, 1.0f, 2);
         ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 5), 0.0f, 1.0f, 2);
         ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 6));
+        // SMAA 后处理抗锯齿：与右侧“远景仰角雾”并列，单独对比开关 + 阈值（敏感度）。
+        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 7));
+        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 8),
+                        0.02f, 0.5f, 2);
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
@@ -260,6 +278,8 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
+    bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）
+    float smaa_threshold_ = 0.1f;     // SMAA luma 边缘阈值（越小越敏感）
     jpov::Ui ui_;
 
     static constexpr float kSliderFontSize = 15.0f;

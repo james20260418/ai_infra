@@ -321,16 +321,74 @@ int RunCapture(const std::string& out_dir) {
     return 0;
 }
 
+// SMAA A/B 拍摄：固定机位/光照，只切 SMAA 开关，逐个出图供肉眼对比。
+// 用法：jpov_skylight_viewer --capture-smaa <out_dir> [--smaa-threshold <t>]
+// 出图：smaa_off.png / smaa_on.png（阈值默认 0.1，可由 --smaa-threshold 覆盖）。
+int RunCaptureSmaa(const std::string& out_dir, float threshold) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SMAA A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 固定一组观感：正午侧光，中等距离——方块棱边 / 人形轮廓 / 树叶边缘都入画，
+    // 是观察锯齿最有代表性的机位。
+    app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.22;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 6.5;
+
+    // 关 → 开：同一机位只切 SMAA。
+    app.SetSmaa(false);
+    app.RunOnce(input, winfo, (out_dir + "/smaa_off.png").c_str());
+    app.SetSmaa(true, threshold);
+    app.RunOnce(input, winfo, (out_dir + "/smaa_on.png").c_str());
+
+    LOG(INFO) << "SMAA A/B captured to " << out_dir
+              << " (threshold=" << threshold << ")";
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
     std::string out_dir;
+    std::string smaa_out_dir;
+    float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-smaa") == 0 && i + 1 < argc) {
+            smaa_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
+            smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!smaa_out_dir.empty()) {
+        return RunCaptureSmaa(smaa_out_dir, smaa_threshold);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir);

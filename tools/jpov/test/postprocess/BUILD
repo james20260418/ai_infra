@@ -175,3 +175,25 @@ cc_test(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# SMAA 后处理抗锯齿锚点 test（headless 渲染）。
+# 纯色三角斜边造锯齿；断言：SMAA 生效（有变化）、变化局部（<15%）、
+# 远离边缘的平坦像素完全不变、输出确定。见 jpov_smaa_test.cc。
+# ============================================================================
+cc_test(
+    name = "jpov_smaa_test",
+    srcs = ["jpov_smaa_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+        "//tools/jpov/test:test_utils",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

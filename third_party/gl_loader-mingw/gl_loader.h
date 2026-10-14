@@ -237,6 +237,9 @@ int gl_loader_init(void);
 #ifndef GL_R8
 #define GL_R8 0x8229
 #endif
+#ifndef GL_RG8
+#define GL_RG8 0x822B
+#endif
 #ifndef GL_RED
 #define GL_RED 0x1903
 #endif

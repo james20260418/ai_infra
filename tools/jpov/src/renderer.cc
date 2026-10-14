@@ -596,6 +596,7 @@ Renderer::~Renderer() {
     DestroyGlassFBO();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
+    smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1420,6 +1421,7 @@ void Renderer::Init(
     CompileShaders();
     fire_fog_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
+    smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
 }
@@ -1513,6 +1515,11 @@ void Renderer::Render(const RenderCommandList& cmds,
         CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
             << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
                "tone map 之前）；否则会静默失效";
+        // SMAA 在 tone map 之后、输出分辨率下工作（见 SmaaConfig），只有 HDR 路径有 tone map。
+        const bool use_smaa = cmds.smaa.has_value() && cmds.smaa->enabled;
+        CHECK(!use_smaa || use_hdr)
+            << "smaa 需要 tone_mapping=true（SMAA 在 tone map 之后的输出分辨率下工作）；"
+               "否则会静默失效";
         unsigned int fbo_3d_target = 0;
         if (use_hdr) {
             EnsureHDRFBO(fbo_3d_w, fbo_3d_h);
@@ -1878,11 +1885,15 @@ void Renderer::Render(const RenderCommandList& cmds,
             glUniform3f(shader_mgr_.GetUniform(prog, "uGradePower"),
                         g.power.x(), g.power.y(), g.power.z());
 
-            glViewport(
-                static_cast<int>(cam.viewport_x),
-                static_cast<int>(cam.viewport_y),
-                static_cast<int>(cam.viewport_width),
-                static_cast<int>(cam.viewport_height));
+            const int vp_x = static_cast<int>(cam.viewport_x);
+            const int vp_y = static_cast<int>(cam.viewport_y);
+            const int vp_w = static_cast<int>(cam.viewport_width);
+            const int vp_h = static_cast<int>(cam.viewport_height);
+            if (use_smaa && (vp_w <= 0 || vp_h <= 0)) {
+                LOG(FATAL) << "smaa 需要非空的 viewport 宽高（实际 " << vp_w
+                           << "x" << vp_h << "）";
+            }
+            glViewport(vp_x, vp_y, vp_w, vp_h);
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
 
             // 全屏三角形（无 VAO/VBO，用 gl_VertexID）
@@ -1892,6 +1903,21 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindTexture(GL_TEXTURE_2D, 0);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
+
+            // SMAA：tone map 已把场景写进主 FBO 的 viewport 矩形（输出分辨率）。把它拷进
+            // 本渲染器的 LDR 输入缓冲，在**输出分辨率**下跑三趟 AA，结果写回主 FBO 同一矩形。
+            // 之所以“先 tone map 到主 FBO、再 blit 到 SMAA 输入”而非“tone map 直接写 SMAA 输入”：
+            // 保持 tone map 的输出路径与未开 SMAA 时**字节一致**（零回归），SMAA 只叠加在
+            // 其后再消费。
+            if (use_smaa) {
+                smaa_renderer_.EnsureSceneFBO(vp_w, vp_h);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, smaa_renderer_.scene_fbo());
+                glBlitFramebuffer(vp_x, vp_y, vp_x + vp_w, vp_y + vp_h,
+                                  0, 0, vp_w, vp_h,
+                                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                smaa_renderer_.Apply(cmds.smaa->threshold, vp_w, vp_h, fbo_, vp_x, vp_y);
+            }
         } else {
             // ---- LDR 路径（旧行为，字节兼容） ----
             // 从 3D FBO 直接 blit 到主 FBO
