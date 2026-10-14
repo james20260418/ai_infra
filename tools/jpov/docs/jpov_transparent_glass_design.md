@@ -150,6 +150,20 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 
 ---
 
+## 性能 / Overdraw
+
+透明 pass **无深度缓冲 ⇒ 无 early-Z**：每个透明片元都被完整着色一次（overdraw = 该像素上的透明片元数，
+与「排序后的 alpha-blend 透明」相同；WBO 的价值是**单趟 + 不排序**，不是减片元数）。WBO 特有开销：
+**3 个浮点 MRT 写 + 3 次 blend** / 每片元，且 FS 是整套 PBR。已做的优化：
+1. **深度早退置顶**：被不透明场景遮挡的玻璃片元在 FS 开头就 `discard`（只依赖 `gl_FragCoord.z`
+   + 场景深度），省掉后面整套 PBR。
+2. **无 kBlend 物体时不建/清玻璃 FBO、不跑透明 pass**（composite 的 `uHasGlass=0` 不读玻璃纹理）
+   ⇒ 纯雾帧省掉 3 张全屏浮点纹理的 clear + 采样。
+
+可选的进一步优化（未做，按需）：玻璃用**轻量 FS**（略 CSM PCF / 点光 tile）、无雾时省掉第 3 个附件、远处 LOD/impostor。
+
+---
+
 ## 附：经典 WBO 参数基线（McGuire & Bavoil 2013）
 
 | 附件 | 格式 | Clear | blend func | 片元写入 |

@@ -1946,13 +1946,15 @@ void Renderer::Render(const RenderCommandList& cmds,
             const bool run_fog = !cmds.point_fogs.empty() || has_glass;
             // 透明玻璃 pass：把 kBlend 物体以 WBO 画进玻璃 FBO。无玻璃时也清空
             //（提供恒等层 —— accum.a=0/reveal=1，composite 退化为全雾路径）。
+            // 只有**真有 kBlend 物体**时才建/清玻璃 FBO 并跑透明 pass。
+            // 无玻璃（纯雾）时 glass_input 保持无效 → fire_fog 的 has_glass=false →
+            // uHasGlass=0 → composite 不回读玻璃纹理 ⇒ 三张全屏浮点纹理的每帧 clear
+            // 与采样全免（run_fog 仍可因雾为真）。
             FireFogGlass glass_input;
-            if (run_fog) {
+            if (run_fog && has_glass) {
                 EnsureGlassFBO(fbo_3d_w, fbo_3d_h);
                 ClearGlassFBO();
-                if (has_glass) {
-                    DrawTransparentPass(cmds, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
-                }
+                DrawTransparentPass(cmds, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
                 glass_input.accum_tex = glass_accum_tex_;
                 glass_input.reveal_tex = glass_reveal_tex_;
                 glass_input.depth_tex = glass_depth_tex_;

@@ -681,6 +681,17 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
 }
 
 void main() {
+#ifdef JPOV_ALPHA_BLEND
+    // ★ 早退（overdraw 优化）：本像素被不透明场景遮挡的玻璃片元直接丢弃。
+    //   只依赖 gl_FragCoord.z + 场景深度纹理，放在 FS 最前 → 省掉后面整套 PBR 计算。
+    //  （uGlassSceneDepth 存不透明 gl_FragCoord.z；1.0 = 背景；微偏置防同深度抖动。）
+    {
+        float scene_depth = texelFetch(uGlassSceneDepth, ivec2(gl_FragCoord.xy), 0).r;
+        if (gl_FragCoord.z > scene_depth + 1e-6) {
+            discard;
+        }
+    }
+#endif
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
@@ -807,12 +818,7 @@ void main() {
     vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
 #ifdef JPOV_ALPHA_BLEND
     // ── 加权混合 OIT（Weighted Blended OIT）──
-    // 手动深度测试：本趟无深度缓冲，被场景不透明遮挡的玻璃片元在此丢弃
-    //（uGlassSceneDepth 存不透明 gl_FragCoord.z；1.0 = 背景）。微小偏置防同深度抖动。
-    float scene_depth = texelFetch(uGlassSceneDepth, ivec2(gl_FragCoord.xy), 0).r;
-    if (gl_FragCoord.z > scene_depth + 1e-6) {
-        discard;
-    }
+    // （被不透明遮挡的玻璃已在 main 开头早退丢弃，此处只需算权重/写入。）
     // alpha = base_color.a（常值）× 贴图 alpha（有贴图时）。
     float alpha = clamp(uAlpha * base_texel.a, 0.0, 1.0);
     float z_view = length(uCameraPos - vWorldPos);
