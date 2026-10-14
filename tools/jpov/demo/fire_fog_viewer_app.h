@@ -87,13 +87,21 @@ public:
     bool show_glass_ = true;
     jpov::Vec3f glass_center_ = jpov::Vec3f(4.0f, 1.6f, 0.0f);  // 树 +X 一侧
 
-    // ── 透明「弧面体」（验收更彻底）：蓝人（mixamo_male，静态 bind pose）换成酒瓶绿玻璃，
-    //    摆在红玻璃墙的正中 → 红墙穿过并「分割」它（两者都是 kBlend 透明，一起进玻璃 pass）。
-    //    摆位跟随 glass_center_（始终居中于墙），scale 按目标身高在 Init 时折算。──
-    jpov::GltfObject glass_man_;
-    jpov::PBRMaterial glass_man_mat_ = [] {
+    // ── 蓝人（mixamo_male，静态 bind pose）：**一份 mesh 画两遍**，错开摆在玻璃墙两侧 ──
+    //   ① 玻璃人（kBlend，酒瓶绿，双面→有厚度） ② 实心人（kOpaque）。
+    //   两者都跟随 glass_center_（随墙移动），沿 Z 错开 ±man_stagger_，均被墙穿过。
+    jpov::GltfObject man_;
+    jpov::PBRMaterial man_glass_mat_ = [] {
         jpov::PBRMaterial m;
-        // 本轮：改成**实心**（不透），对比看「玻璃墙 × 实体」的遮挡/透过关系。
+        m.base_color = jpov::Color{0.10f, 0.38f, 0.20f, 0.32f};  // 酒瓶绿
+        m.metallic = 0.0f;
+        m.roughness = 0.06f;
+        m.alpha_mode = jpov::AlphaMode::kBlend;
+        m.double_sided = true;   // 闭合人体：双面参与 WBO → 有厚度的绿玻璃体
+        return m;
+    }();
+    jpov::PBRMaterial man_solid_mat_ = [] {
+        jpov::PBRMaterial m;
         m.base_color = jpov::Color{0.20f, 0.52f, 0.28f, 1.0f};  // 实心绿
         m.metallic = 0.0f;
         m.roughness = 0.5f;
@@ -102,9 +110,10 @@ public:
         return m;
     }();
     bool show_glass_man_ = true;
-    float glass_man_scale_ = 1.0f;   // Init 时按身高归一
-    jpov::Vec3f glass_man_bcenter_ = {};   // 资产局部包围盒中心（Init 时算，用于对齐到墙中心）
-    jpov::Vec3f glass_man_offset_ = {};    // 相对墙中心的世界偏移（默认 0 = 居中在墙上）
+    bool show_solid_man_ = true;
+    float man_scale_ = 1.0f;        // Init 时按身高归一
+    jpov::Vec3f man_bcenter_ = {};  // 资产局部包围盒中心（对齐到墙中心用）
+    float man_stagger_ = 1.3f;      // 两人沿 Z 各错开的半距（米）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -187,24 +196,12 @@ public:
                                /*front*/  {0.0f, 0.0f, 1.0f});
         }
 
-        // 透明弧面体：蓝人（酒瓶绿玻璃），摆在红墙中心 → 红墙分割它（两者都是 kBlend 透明）。
-        // front=(1,0,0)：把人沿 Y 轴转 90°（从默认朝 +Z 转为朝 +X），使红墙从其身体**切割**过去。
-        if (show_glass_man_ && !glass_man_.empty()) {
-            // 资产原点未必在包围盒中心 → 把包围盒中心对齐到墙中心。
-            // up=(0,1,0), front=(1,0,0)：局部 (lx,ly,lz) → 世界偏移 s·(lz, ly, -lx)。
-            const float s = glass_man_scale_;
-            const jpov::Vec3f bc = glass_man_bcenter_;
-            const jpov::Vec3f man_center(
-                glass_center_.x() - s * bc.z() + glass_man_offset_.x(),
-                glass_center_.y() - s * bc.y() + glass_man_offset_.y(),
-                glass_center_.z() + s * bc.x() + glass_man_offset_.z());
-            for (const jpov::GltfPrimitive& prim : glass_man_.primitives) {
-                cmds->DrawObject3D(prim.mesh_id, glass_man_mat_,
-                                   /*center*/ man_center,
-                                   /*up*/     {0.0f, 1.0f, 0.0f},
-                                   /*front*/  {1.0f, 0.0f, 0.0f},
-                                   /*scale*/  s);
-            }
+        // 蓝人（一份 mesh 画两遍）：玻璃人（墙 −Z 侧）+ 实心人（墙 +Z 侧），错开，均被墙穿过。
+        if (show_glass_man_) {
+            DrawMan(cmds, man_glass_mat_, -man_stagger_);
+        }
+        if (show_solid_man_) {
+            DrawMan(cmds, man_solid_mat_, +man_stagger_);
         }
 
         // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
@@ -325,8 +322,8 @@ private:
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
         ui_.Checkbox("玻璃墙", &show_glass_, row(2, 9));
-        ui_.Checkbox("绿玻璃人", &show_glass_man_, row(2, 10));
-        ui_.SliderFloat("绿人偏移x", &glass_man_offset_.x(), row(2, 11), -2.0f, 2.0f, 2);
+        ui_.Checkbox("玻璃人", &show_glass_man_, row(2, 10));
+        ui_.Checkbox("实心人", &show_solid_man_, row(2, 11));
 
         // ── 列 1 底部：玻璃墙透明度 + 位置（透明体验收）──
         ui_.SliderFloat("玻璃 α", &glass_mat_.base_color.a, row(1, 9), 0.0f, 1.0f, 2);
@@ -359,6 +356,28 @@ private:
                        jpov::TextAlignment::kTopLeft, kViewerFontAlias);
         cmds->DrawText(line2, {12.0f, 38.0f}, 20.0f, jpov::kColorWhite,
                        jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+    }
+
+    // 把蓝人 mesh 用给定材质画一遍：包围盒中心对齐到「墙中心 + (0,0,z_off)」。
+    // front=(1,0,0)（绕 Y 转 90°）→ 局部 (lx,ly,lz) → 世界偏移 s·(lz, ly, −lx)；
+    // 资产原点未必在包围盒中心，故用 man_bcenter_ 校正（否则人浮/偏）。
+    void DrawMan(jpov::RenderCommandList* cmds, const jpov::PBRMaterial& mat, float z_off) {
+        if (man_.empty()) {
+            return;
+        }
+        const float s = man_scale_;
+        const jpov::Vec3f bc = man_bcenter_;
+        const jpov::Vec3f c(
+            glass_center_.x() - s * bc.z(),
+            glass_center_.y() - s * bc.y(),
+            glass_center_.z() + s * bc.x() + z_off);
+        for (const jpov::GltfPrimitive& prim : man_.primitives) {
+            cmds->DrawObject3D(prim.mesh_id, mat,
+                               /*center*/ c,
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {1.0f, 0.0f, 0.0f},
+                               /*scale*/  s);
+        }
     }
 
     static constexpr float kSliderFontSize = 15.0f;

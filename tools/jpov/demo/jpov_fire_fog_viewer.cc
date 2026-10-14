@@ -70,15 +70,15 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
                                 /*up_half_width=*/1.5f,
                                 /*left_half_width=*/0.08f));
 
-    // 透明弧面体：蓝人（mixamo_male.glb）作为**静态网格**（bind pose）载入；材质在 app
-    // 侧换成酒瓶绿玻璃（kBlend）。按目标身高 ~1.9m 归一（摆位由 app 跟随红墙中心）。
+    // 蓝人（mixamo_male.glb）作为**静态网格**（bind pose）载入：一份 mesh，app 侧用两种
+    // 材质（玻璃 kBlend / 实心 kOpaque）各画一遍，错开摆在红墙两侧。按 ~1.9m 归一。
     {
         jpov::GltfObject man = app.LoadGltf("models/mixamo_male.glb");
         CHECK(!man.empty()) << "LoadGltf failed: models/mixamo_male.glb"
                             << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
         float s = 1.0f;
         if (man.bounds_valid) {
-            app.glass_man_bcenter_ = jpov::Vec3f(
+            app.man_bcenter_ = jpov::Vec3f(
                 0.5f * (man.bounds_min[0] + man.bounds_max[0]),
                 0.5f * (man.bounds_min[1] + man.bounds_max[1]),
                 0.5f * (man.bounds_min[2] + man.bounds_max[2]));
@@ -91,8 +91,8 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
         } else {
             LOG(WARNING) << "蓝人模型无 bounds，scale 置 1";
         }
-        app.glass_man_ = std::move(man);
-        app.glass_man_scale_ = s;
+        app.man_ = std::move(man);
+        app.man_scale_ = s;
     }
 }
 
