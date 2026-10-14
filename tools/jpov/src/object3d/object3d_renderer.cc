@@ -92,6 +92,179 @@ void BuildModelMatrix(const Vec3f& center,
     model[3] = 0.0f;      model[7] = 0.0f;    model[11] = 0.0f;    model[15] = 1.0f;
 }
 
+// DrawObject3D / DrawObject3DBlend 共用的「材质 + 光照 uniform 绑定、纹理绑定、绘制」。
+// 调用方负责：已 glUseProgram(selected_prog)、已建好 model / mvp_final。
+//   blend=true 时额外上传 uAlpha（= base_color.a）并绑 scene_depth 到 uGlassSceneDepth，
+//   供透明 pass 的 blend 变体 FS 手动作深度测试。其余与不透明路径**完全共用**
+//  （同一份 kMeshFs3dPBR 源，仅 blend 宏改变输出与末尾分支）。
+// Pre-condition: selected_prog 已激活（glUseProgram）；mesh != nullptr；
+//                blend=false -> scene_depth_tex 忽略；blend=true -> scene_depth_tex != 0。
+void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
+                                 const RenderCommandList& cmds,
+                                 const GPUMesh* mesh,
+                                 TextureManager& texture_mgr,
+                                 const float mvp_final[16],
+                                 const float model[16],
+                                 unsigned int selected_prog,
+                                 unsigned int tile_index_tex,
+                                 bool blend,
+                                 unsigned int scene_depth_tex) {
+    CHECK(mesh != nullptr);
+
+    const bool any_tex =
+        (cmd.material.base_color_tex != 0) ||
+        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
+        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
+        (cmd.material.emissive_tex != 0) ||
+        (cmd.material.ao_tex != 0) ||
+        (cmd.material.normal_tex != 0);
+    const bool use_normal_map = (cmd.material.normal_tex != 0);
+
+    glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uMVP"),
+                       1, GL_FALSE, mvp_final);
+    glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uModel"),
+                       1, GL_FALSE, model);
+    glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
+                cmd.material.base_color.r, cmd.material.base_color.g,
+                cmd.material.base_color.b);
+    glUniform1f(glGetUniformLocation(selected_prog, "uMetallic"), cmd.material.metallic);
+    glUniform1f(glGetUniformLocation(selected_prog, "uRoughness"), cmd.material.roughness);
+    glUniform3f(glGetUniformLocation(selected_prog, "uEmissive"),
+                cmd.material.emissive.r, cmd.material.emissive.g,
+                cmd.material.emissive.b);
+    glUniform1f(glGetUniformLocation(selected_prog, "uAO"), cmd.material.ao.r);
+    glUniform3f(glGetUniformLocation(selected_prog, "uCameraPos"),
+                cmds.camera.position.x(), cmds.camera.position.y(),
+                cmds.camera.position.z());
+    glUniform1f(glGetUniformLocation(selected_prog, "uCameraNear"),
+                cmds.camera.near);
+
+    if (any_tex) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
+            << "object3d draw: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
+    }
+    if (use_normal_map) {
+        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
+            << "object3d draw: normal_tex 非 0 但 mesh 无 kTangent 属性，"
+            << "无法构建 TBN（OBJ 加载器已自动推导 tangent）";
+    }
+
+    // ---- baseColor 纹理（TEXTURE1）----
+    if (cmd.material.base_color_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: base_color_tex " << cmd.material.base_color_tex
+            << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 0);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uBaseColorTex"), 1);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 0);
+    }
+
+    // ---- metallic 纹理（TEXTURE2）----
+    if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.metallic_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: metallic_tex " << cmd.material.metallic_tex
+            << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 1);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uMetallicTex"), 2);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 0);
+    }
+
+    // ---- roughness 纹理（TEXTURE3）----
+    if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.roughness_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: roughness_tex " << cmd.material.roughness_tex
+            << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 2);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uRoughnessTex"), 3);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 0);
+    }
+
+    // ---- emissive 纹理（TEXTURE4）----
+    if (cmd.material.emissive_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.emissive_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: emissive_tex " << cmd.material.emissive_tex
+            << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 3);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uEmissiveTex"), 4);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 0);
+    }
+
+    // ---- AO 纹理（TEXTURE5）----
+    if (cmd.material.ao_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.ao_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: ao_tex " << cmd.material.ao_tex << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 4);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uAoTex"), 5);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 1);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 0);
+    }
+
+    // ---- normal 纹理（TEXTURE6，法线映射 TBN）----
+    if (cmd.material.normal_tex != 0) {
+        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.normal_tex);
+        CHECK_NE(gl_tex, 0u)
+            << "object3d draw: normal_tex " << cmd.material.normal_tex << " 未注册";
+        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 5);
+        glBindTexture(GL_TEXTURE_2D, gl_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uNormalTex"), 6);
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 1);
+        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"),
+                    cmd.material.normal_scale);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 0);
+        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
+    }
+
+    // 透明混合：常值 alpha + 不透明场景深度（blend 变体 FS 手动作深度测试用）。
+    if (blend) {
+        CHECK_NE(scene_depth_tex, 0u)
+            << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
+        glUniform1f(glGetUniformLocation(selected_prog, "uAlpha"),
+                    cmd.material.base_color.a);
+        glActiveTexture(GL_TEXTURE0 + kTexUnitGlassSceneDepth);
+        glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uGlassSceneDepth"),
+                    kTexUnitGlassSceneDepth);
+    }
+
+    glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
+    glBindTexture(GL_TEXTURE_2D, tile_index_tex);
+    glUniform1i(glGetUniformLocation(selected_prog, "uTileLightIndices"), kTexUnitTileLightIndex);
+
+    glBindVertexArray(mesh->vao);
+    if (mesh->index_count > 0) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
+                       GL_UNSIGNED_INT, nullptr);
+    } else {
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
+    }
+    glBindVertexArray(0);
+
+    GLenum draw_err = glGetError();
+    if (draw_err != GL_NO_ERROR) {
+        LOG_FIRST_N(WARNING, 1) << "GL error after object3d draw: " << draw_err;
+    }
+}
+
 }  // namespace
 
 // ==================== EnsureTileLighting ====================
@@ -406,7 +579,6 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
         (cmd.material.emissive_tex != 0) ||
         (cmd.material.ao_tex != 0) ||
         (cmd.material.normal_tex != 0);
-    const bool use_normal_map = (cmd.material.normal_tex != 0);
 
     CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
         << "DrawObject3D: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
@@ -435,139 +607,71 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
                     cmd.material.alpha_cutoff);
     }
 
-    glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uMVP"),
-                       1, GL_FALSE, mvp_final);
-    glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uModel"),
-                       1, GL_FALSE, model);
-    glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
-                cmd.material.base_color.r, cmd.material.base_color.g,
-                cmd.material.base_color.b);
-    glUniform1f(glGetUniformLocation(selected_prog, "uMetallic"), cmd.material.metallic);
-    glUniform1f(glGetUniformLocation(selected_prog, "uRoughness"), cmd.material.roughness);
-    glUniform3f(glGetUniformLocation(selected_prog, "uEmissive"),
-                cmd.material.emissive.r, cmd.material.emissive.g,
-                cmd.material.emissive.b);
-    glUniform1f(glGetUniformLocation(selected_prog, "uAO"), cmd.material.ao.r);
-    glUniform3f(glGetUniformLocation(selected_prog, "uCameraPos"),
-                cmds.camera.position.x(), cmds.camera.position.y(),
-                cmds.camera.position.z());
-    glUniform1f(glGetUniformLocation(selected_prog, "uCameraNear"),
-                cmds.camera.near);
+    DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
+                                selected_prog, tile_index_tex,
+                                /*blend=*/false, /*scene_depth_tex=*/0u);
 
-    if (any_tex) {
-        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kUV))
-            << "DrawObject3D: 材质通道带纹理但 mesh 无 kUV 属性，无法纹理采样";
-    }
-    if (use_normal_map) {
-        CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kTangent))
-            << "DrawObject3D: normal_tex 非 0 但 mesh 无 kTangent 属性，"
-            << "无法构建 TBN（OBJ 加载器已自动推导 tangent）";
-    }
+    glPopAttrib();
+}
 
-    // ---- baseColor 纹理（TEXTURE1）----
-    if (cmd.material.base_color_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.base_color_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: base_color_tex " << cmd.material.base_color_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 0);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uBaseColorTex"), 1);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 1);
+// ==================== DrawObject3DBlend ====================
+
+void Object3DRenderer::DrawObject3DBlend(const Object3DCommand& cmd,
+                                         const RenderCommandList& cmds,
+                                         MeshManager& mesh_mgr,
+                                         TextureManager& texture_mgr,
+                                         ShaderManager& shader_mgr,
+                                         const float mvp[16],
+                                         unsigned int prog_blend,
+                                         unsigned int prog_full_blend,
+                                         unsigned int tile_index_tex,
+                                         unsigned int scene_depth_tex) {
+    (void)shader_mgr;   // 与 DrawObject3D 一致：uniform 走 glGetUniformLocation，不经 shader_mgr
+    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
+    CHECK(mesh != nullptr) << "DrawObject3DBlend: mesh_id " << cmd.mesh_id
+                           << " 未注册（DrawObject3DBlend 前需先 RegisterMesh）";
+    CHECK_GT(mesh->vao, 0u);
+    CHECK_NE(scene_depth_tex, 0u)
+        << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
+
+    const float up_len =
+        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
+    const float fr_len =
+        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
+    CHECK_GT(up_len, 1e-8f) << "DrawObject3DBlend: up 向量不能为零";
+    CHECK_GT(fr_len, 1e-8f) << "DrawObject3DBlend: front 向量不能为零";
+
+    float model[16];
+    float mvp_final[16];
+    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
+    Mat4Mul(mvp, model, mvp_final);
+
+    const bool any_tex =
+        (cmd.material.base_color_tex != 0) ||
+        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
+        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
+        (cmd.material.emissive_tex != 0) ||
+        (cmd.material.ao_tex != 0) ||
+        (cmd.material.normal_tex != 0);
+
+    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
+        << "DrawObject3DBlend: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
+
+    glPushAttrib(GL_ENABLE_BIT);
+    // 双面：透明薄片（玻璃墙 / 塑料片）通常需双面参与 WBO 才有「有厚度」的观感。
+    // 单面材质则确保背面剔除（此 pass 无深度缓冲，剔除由光栅器完成）。
+    if (cmd.material.double_sided) {
+        glDisable(GL_CULL_FACE);
     } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasBaseColorTex"), 0);
+        glEnable(GL_CULL_FACE);
     }
 
-    // ---- metallic 纹理（TEXTURE2）----
-    if (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.metallic_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: metallic_tex " << cmd.material.metallic_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 1);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uMetallicTex"), 2);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 1);
-    } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasMetallicTex"), 0);
-    }
+    const unsigned int selected_prog = any_tex ? prog_full_blend : prog_blend;
+    glUseProgram(selected_prog);
 
-    // ---- roughness 纹理（TEXTURE3）----
-    if (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.roughness_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: roughness_tex " << cmd.material.roughness_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 2);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uRoughnessTex"), 3);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 1);
-    } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasRoughnessTex"), 0);
-    }
-
-    // ---- emissive 纹理（TEXTURE4）----
-    if (cmd.material.emissive_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.emissive_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: emissive_tex " << cmd.material.emissive_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 3);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uEmissiveTex"), 4);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 1);
-    } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasEmissiveTex"), 0);
-    }
-
-    // ---- AO 纹理（TEXTURE5）----
-    if (cmd.material.ao_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.ao_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: ao_tex " << cmd.material.ao_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 4);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uAoTex"), 5);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 1);
-    } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasAoTex"), 0);
-    }
-
-    // ---- normal 纹理（TEXTURE6，法线映射 TBN）----
-    if (cmd.material.normal_tex != 0) {
-        unsigned int gl_tex = texture_mgr.GetGLTexture(cmd.material.normal_tex);
-        CHECK_NE(gl_tex, 0u)
-            << "DrawObject3D: normal_tex " << cmd.material.normal_tex
-            << " 未注册";
-        glActiveTexture(GL_TEXTURE0 + kTexUnitMaterialBase + 5);
-        glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uNormalTex"), 6);
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 1);
-        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"),
-                    cmd.material.normal_scale);
-    } else {
-        glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 0);
-        glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
-    }
-
-    glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
-    glBindTexture(GL_TEXTURE_2D, tile_index_tex);
-    glUniform1i(glGetUniformLocation(selected_prog, "uTileLightIndices"), kTexUnitTileLightIndex);
-
-    glBindVertexArray(mesh->vao);
-    if (mesh->index_count > 0) {
-        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->index_count),
-                       GL_UNSIGNED_INT, nullptr);
-    } else {
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh->vertex_count));
-    }
-    glBindVertexArray(0);
-
-    GLenum draw_err = glGetError();
-    if (draw_err != GL_NO_ERROR) {
-        LOG_FIRST_N(WARNING, 1) << "GL error after DrawObject3D: " << draw_err;
-    }
+    DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
+                                selected_prog, tile_index_tex,
+                                /*blend=*/true, scene_depth_tex);
 
     glPopAttrib();
 }

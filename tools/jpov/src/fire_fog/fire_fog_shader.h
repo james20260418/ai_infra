@@ -638,7 +638,7 @@ void main() {
 }
 )glsl";
 
-// ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 → 就地混合 ──
+// ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 + （可选）玻璃层合成 → 就地混合 ──
 inline constexpr const char* kFireFogCompositeBody = R"glsl(
 
 uniform sampler2D uScatter;
@@ -650,6 +650,12 @@ uniform float uZFar;
 uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
 uniform int   uGridCols;   // Nxy 单元列数
 uniform int   uGridRows;   // Nxy 单元行数
+
+// ── 透明玻璃层（WBO 结果；uHasGlass==0 时不采）──
+uniform int       uHasGlass;
+uniform sampler2D uGlassAccum;   // RGBA16F: Σ(预乘色×w, α×w)
+uniform sampler2D uGlassReveal;  // R16F   : Π(1−α) = 透射率
+uniform sampler2D uGlassDepth;   // R32F   : Σ(z_view×α×w) = 代表深度×Σαw
 
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
@@ -670,31 +676,16 @@ void SampleColumn(ivec2 tile_xy, float ell, out float tau, out vec3 S) {
     S   = mix(vlo.yzw, vhi.yzw, fr);
 }
 
-void main() {
-    vec2 uv = vTexCoord;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pf = uInvVP * vec4(ndc, 1.0, 1.0);
-    vec3 ro = uCamPos;
-    vec3 rd = normalize(pf.xyz / pf.w - ro);
-
-    // 像素场景深度 → 沿视线距离 → froxel 连续位置 ℓ。
-    float dndc = texture(uSceneDepthTex, uv).r;
-    vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
-    float z = length(pw.xyz / pw.w - ro);
-    z = clamp(z, uZNear, uZFar);
-    float ell = uZScale * log(z / uZNear);
-
-    // 4 邻 tile（双线性，按 tile 中心对齐）。Nxy 单元在屏幕上是 uTilePx 像素。
-    vec2 px = gl_FragCoord.xy;
+// 屏幕像素位置 px 处的雾累积 (τ, S)：4 邻 tile 双线性（按 tile 中心对齐）。
+void SampleFogBilinear(vec2 px, float ell, out float tau, out vec3 S) {
     float cu = px.x / float(uTilePx) - 0.5;
     float cv = px.y / float(uTilePx) - 0.5;
     int tx0 = int(floor(cu));
     int ty0 = int(floor(cv));
     float fu = cu - float(tx0);
     float fv = cv - float(ty0);
-
-    float tau = 0.0;
-    vec3  S = vec3(0.0);
+    tau = 0.0;
+    S = vec3(0.0);
     for (int dy = 0; dy < 2; ++dy) {
         int ty = clamp(ty0 + dy, 0, uGridRows - 1);
         float wy = (dy == 0) ? (1.0 - fv) : fv;
@@ -709,7 +700,61 @@ void main() {
             S   += w * cS;
         }
     }
-    oColor = vec4(S, exp(-tau));
+}
+
+// 视距 z（米）→ froxel 连续位置 ℓ（clamp 到雾区间）。
+float DepthToEll(float z) {
+    z = clamp(z, uZNear, uZFar);
+    return uZScale * log(z / uZNear);
+}
+
+void main() {
+    vec2 uv = vTexCoord;
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 pf = uInvVP * vec4(ndc, 1.0, 1.0);
+    vec3 ro = uCamPos;
+    vec3 rd = normalize(pf.xyz / pf.w - ro);
+
+    // 像素场景深度 → 沿视线距离 → froxel 连续位置 ℓ_op（不透明场景深度）。
+    float dndc = texture(uSceneDepthTex, uv).r;
+    vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
+    float z_op = length(pw.xyz / pw.w - ro);
+    float ell_op = DepthToEll(z_op);
+
+    // 透明玻璃层（可选）：解算 WBO → (Cg 预乘, Tg) + 代表深度 ℓ_g。
+    // 无玻璃（accum.a≈0）→ Cg=0, Tg=1, ℓ_g=ℓ_op（退化为全雾路径，零回归）。
+    vec3  Cg = vec3(0.0);
+    float Tg = 1.0;
+    float ell_g = ell_op;
+    if (uHasGlass == 1) {
+        vec4 accum = texture(uGlassAccum, uv);
+        if (accum.a > 1e-8) {
+            float reveal = texture(uGlassReveal, uv).r;
+            float z_g = texture(uGlassDepth, uv).r / accum.a;
+            vec3 Cavg = accum.rgb / accum.a;   // 加权平均色
+            Cg = Cavg * (1.0 - reveal);        // 预乘：out = Cg + Tg·behind
+            Tg = clamp(reveal, 0.0, 1.0);
+            ell_g = DepthToEll(z_g);
+        }
+    }
+    ell_g = min(ell_g, ell_op);   // 代表深度不超过不透明场景深度
+
+    // 两处采样：front = 雾(0→z_g)；op = 雾(0→z_op)。
+    float tau_f, tau_op;
+    vec3  S_f,   S_op;
+    SampleFogBilinear(gl_FragCoord.xy, ell_g,  tau_f, S_f);
+    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
+
+    // front-to-back： 雾(0→zg) → 玻璃 → 雾(zg→zop) → 背景(dst)
+    //   out.rgb = S_f + Tf·Cg + Tg·(S_op − S_f)   （Tf=exp(−tau_f)）
+    //   out.a   = Tg·T_op                          （T_op=exp(−tau_op)，Tg=玻璃透射率）
+    // （推导：Tf·Tg·S_b = Tg·(S_op−S_f)；Tf·Tg·Tb = Tg·T_op。无玻璃时退化为 (S, T)。）
+    // GL_ONE/GL_SRC_ALPHA：final = out.rgb + dst·out.a。
+    float Tf  = exp(-tau_f);
+    float Top = exp(-tau_op);
+    vec3 rgb = S_f + Tf * Cg + Tg * (S_op - S_f);
+    float a  = Tg * Top;
+    oColor = vec4(rgb, a);
 }
 )glsl";
 

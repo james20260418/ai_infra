@@ -74,6 +74,10 @@ typedef void (*GL_TexSubImage2D)(unsigned int, int, int, int, int, int, unsigned
 typedef unsigned int (*GL_GetError)(void);
 typedef void (*GL_PushAttrib)(unsigned int);
 typedef void (*GL_PopAttrib)(void);
+// 按 draw buffer 别设 blend（GL 3.0 核心 / ARB_draw_buffers_blend）：加权混合 OIT 的
+//   accum(GL_ONE,GL_ONE) 与 reveal(GL_ZERO,GL_ONE_MINUS_SRC_COLOR) 需按附件用不同 blend func。
+typedef void (*GL_BlendEquation)(unsigned int);
+typedef void (*GL_BlendFunci)(unsigned int, unsigned int, unsigned int);
 
 // Loaded function pointers
 extern GL_GenBuffers             gl_GenBuffers;
@@ -138,6 +142,8 @@ extern GL_TexSubImage2D         gl_TexSubImage2D;
 extern GL_GetError              gl_GetError;
 extern GL_PushAttrib            gl_PushAttrib;
 extern GL_PopAttrib             gl_PopAttrib;
+extern GL_BlendEquation         gl_BlendEquation;
+extern GL_BlendFunci            gl_BlendFunci;
 
 // Load all function pointers. Call once after GL context creation.
 int gl_loader_init(void);
@@ -174,6 +180,8 @@ int gl_loader_init(void);
 #define glGetError               gl_GetError
 #define glPushAttrib             gl_PushAttrib
 #define glPopAttrib              gl_PopAttrib
+#define glBlendEquation          gl_BlendEquation
+#define glBlendFunci             gl_BlendFunci
 #define glBlitFramebuffer        gl_BlitFramebuffer
 #define glDrawBuffers            gl_DrawBuffers
 #define glClearBufferfv          gl_ClearBufferfv
@@ -246,6 +254,9 @@ int gl_loader_init(void);
 #endif
 #ifndef GL_COLOR_BUFFER_BIT
 #define GL_COLOR_BUFFER_BIT 0x00004000
+#endif
+#ifndef GL_FUNC_ADD
+#define GL_FUNC_ADD 0x8006
 #endif
 #ifndef GLsizeiptr
 #define GLsizeiptr ptrdiff_t

@@ -18,6 +18,7 @@
 #ifndef JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 #define JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,50 @@ public:
     jpov::Color fog_albedo_ = jpov::Color{0.9f, 0.9f, 0.9f, 1.0f};    // 散射色（∈[0,1]）
     jpov::Color fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};  // 自发光 ε（HDR，rad/m）
     int fog_attenuation_ = static_cast<int>(jpov::FogAttenuation::kQuadratic);
+
+    // ── 透明玻璃墙（kBlend / 加权混合 OIT）—— 验收透明体渲染：树一侧一面浅红色玻璃墙。──
+    //   网格由主程序用 MeshData::MakeBox 注册（薄墙）；材质 alpha_mode=kBlend + double_sided。
+    //   不进主 pass / 不投影，由透明 pass 以 WBO 画进玻璃 FBO，再由体积雾合成。
+    uint32_t glass_mesh_ = 0;                            // MakeBox 薄墙（Init 后注册一次）
+    jpov::PBRMaterial glass_mat_ = [] {
+        jpov::PBRMaterial m;
+        m.base_color = jpov::Color{0.85f, 0.32f, 0.32f, 0.30f};  // 浅红色，α=0.30
+        m.metallic = 0.0f;
+        m.roughness = 0.08f;
+        m.alpha_mode = jpov::AlphaMode::kBlend;
+        m.double_sided = true;   // 薄墙：双面参与 WBO 才有「有厚度」的观感
+        return m;
+    }();
+    bool show_glass_ = true;
+    jpov::Vec3f glass_center_ = jpov::Vec3f(4.0f, 1.6f, 0.0f);  // 树 +X 一侧
+
+    // ── 蓝人（mixamo_male，静态 bind pose）：**一份 mesh 画两遍**，错开摆在玻璃墙两侧 ──
+    //   ① 玻璃人（kBlend，酒瓶绿，双面→有厚度） ② 实心人（kOpaque）。
+    //   两者都跟随 glass_center_（随墙移动），沿 Z 错开 ±man_stagger_，均被墙穿过。
+    jpov::GltfObject man_;
+    jpov::PBRMaterial man_glass_mat_ = [] {
+        jpov::PBRMaterial m;
+        m.base_color = jpov::Color{0.10f, 0.38f, 0.20f, 0.32f};  // 酒瓶绿
+        m.metallic = 0.0f;
+        m.roughness = 0.06f;
+        m.alpha_mode = jpov::AlphaMode::kBlend;
+        m.double_sided = true;   // 闭合人体：双面参与 WBO → 有厚度的绿玻璃体
+        return m;
+    }();
+    jpov::PBRMaterial man_solid_mat_ = [] {
+        jpov::PBRMaterial m;
+        m.base_color = jpov::Color{0.20f, 0.52f, 0.28f, 1.0f};  // 实心绿
+        m.metallic = 0.0f;
+        m.roughness = 0.5f;
+        m.alpha_mode = jpov::AlphaMode::kOpaque;   // 实心（走主 pass，写深度、投阴影）
+        m.double_sided = false;
+        return m;
+    }();
+    bool show_glass_man_ = true;
+    bool show_solid_man_ = true;
+    float man_scale_ = 1.0f;        // Init 时按身高归一
+    jpov::Vec3f man_bcenter_ = {};  // 资产局部包围盒中心（对齐到墙中心用）
+    float man_stagger_ = 1.3f;      // 两人沿 Z 各错开的半距（米）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -143,6 +188,22 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f});
         cmds->DrawGltfObject(oak_, oak_center_, oak_up_, oak_front_, oak_scale_);
 
+        // 透明玻璃墙（kBlend）：由 Renderer 的透明 pass（WBO）单独渲染，与雾一起合成。
+        if (show_glass_ && glass_mesh_ != 0) {
+            cmds->DrawObject3D(glass_mesh_, glass_mat_,
+                               /*center*/ glass_center_,
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f});
+        }
+
+        // 蓝人（一份 mesh 画两遍）：玻璃人（墙 −Z 侧）+ 实心人（墙 +Z 侧），错开，均被墙穿过。
+        if (show_glass_man_) {
+            DrawMan(cmds, man_glass_mat_, -man_stagger_);
+        }
+        if (show_solid_man_) {
+            DrawMan(cmds, man_solid_mat_, +man_stagger_);
+        }
+
         // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
         if (point_light_enable_) {
             jpov::PointLight pl;
@@ -178,6 +239,7 @@ public:
             DrawPanel(input);
             ui_.End();
             ui_.Emit(cmds);
+            DrawCameraHud(cmds);   // 相机/玻璃参数 HUD（便于截图定位问题视角）
         }
     }
 
@@ -204,7 +266,7 @@ private:
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 11;
+        const int kRows = 12;
         const float top = h - kBottom
                         - (static_cast<float>(kRows) * kRowH
                            + static_cast<float>(kRows - 1) * kSpacing);
@@ -259,11 +321,64 @@ private:
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
+        ui_.Checkbox("玻璃墙", &show_glass_, row(2, 9));
+        ui_.Checkbox("玻璃人", &show_glass_man_, row(2, 10));
+        ui_.Checkbox("实心人", &show_solid_man_, row(2, 11));
+
+        // ── 列 1 底部：玻璃墙透明度 + 位置（透明体验收）──
+        ui_.SliderFloat("玻璃 α", &glass_mat_.base_color.a, row(1, 9), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("玻璃 x", &glass_center_.x(), row(1, 10), -10.0f, 10.0f, 2);
     }
 
     bool show_panel_ = true;
     bool show_fog_ = true;
     jpov::Ui ui_;
+
+    // 相机 / 玻璃参数 HUD：画在屏幕左上角（带半透明底），方便用户截图反馈
+    // 「出问题的那一帧」时把精确视角参数一起带上。仅面板可见（交互）时画。
+    void DrawCameraHud(jpov::RenderCommandList* cmds) const {
+        const jpov::Vec3f p = view_.Position();
+        const double kDeg = 180.0 / 3.14159265358979323846;
+        char line1[192];
+        std::snprintf(line1, sizeof(line1),
+            "theta=%.2fdeg(%.4f)  phi=%.2fdeg(%.4f)  R=%.3f",
+            view_.theta * kDeg, view_.theta, view_.phi * kDeg, view_.phi, view_.R);
+        char line2[224];
+        std::snprintf(line2, sizeof(line2),
+            "cam=(%.3f, %.3f, %.3f)  glass=(%.3f, %.3f, %.3f) alpha=%.2f on=%d",
+            p.x(), p.y(), p.z(),
+            glass_center_.x(), glass_center_.y(), glass_center_.z(),
+            glass_mat_.base_color.a, show_glass_ ? 1 : 0);
+        // 半透明黑底，保证白字在亮天上也可读。
+        cmds->DrawRect({6.0f, 6.0f}, {static_cast<float>(kViewerWidth) - 12.0f, 62.0f},
+                       jpov::Color{0.0f, 0.0f, 0.0f, 0.55f});
+        cmds->DrawText(line1, {12.0f, 12.0f}, 20.0f, jpov::kColorWhite,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        cmds->DrawText(line2, {12.0f, 38.0f}, 20.0f, jpov::kColorWhite,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+    }
+
+    // 把蓝人 mesh 用给定材质画一遍：包围盒中心对齐到「墙中心 + (0,0,z_off)」。
+    // front=(1,0,0)（绕 Y 转 90°）→ 局部 (lx,ly,lz) → 世界偏移 s·(lz, ly, −lx)；
+    // 资产原点未必在包围盒中心，故用 man_bcenter_ 校正（否则人浮/偏）。
+    void DrawMan(jpov::RenderCommandList* cmds, const jpov::PBRMaterial& mat, float z_off) {
+        if (man_.empty()) {
+            return;
+        }
+        const float s = man_scale_;
+        const jpov::Vec3f bc = man_bcenter_;
+        const jpov::Vec3f c(
+            glass_center_.x() - s * bc.z(),
+            glass_center_.y() - s * bc.y(),
+            glass_center_.z() + s * bc.x() + z_off);
+        for (const jpov::GltfPrimitive& prim : man_.primitives) {
+            cmds->DrawObject3D(prim.mesh_id, mat,
+                               /*center*/ c,
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {1.0f, 0.0f, 0.0f},
+                               /*scale*/  s);
+        }
+    }
 
     static constexpr float kSliderFontSize = 15.0f;
 };
