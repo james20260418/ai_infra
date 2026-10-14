@@ -103,6 +103,7 @@ public:
     bool show_glass_man_ = true;
     float glass_man_scale_ = 1.0f;   // Init 时按身高归一
     jpov::Vec3f glass_man_bcenter_ = {};   // 资产局部包围盒中心（Init 时算，用于对齐到墙中心）
+    jpov::Vec3f glass_man_offset_ = {};    // 相对墙中心的世界偏移（默认 0 = 居中在墙上）
 
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
@@ -193,9 +194,9 @@ public:
             const float s = glass_man_scale_;
             const jpov::Vec3f bc = glass_man_bcenter_;
             const jpov::Vec3f man_center(
-                glass_center_.x() - s * bc.z(),
-                glass_center_.y() - s * bc.y(),
-                glass_center_.z() + s * bc.x());
+                glass_center_.x() - s * bc.z() + glass_man_offset_.x(),
+                glass_center_.y() - s * bc.y() + glass_man_offset_.y(),
+                glass_center_.z() + s * bc.x() + glass_man_offset_.z());
             for (const jpov::GltfPrimitive& prim : glass_man_.primitives) {
                 cmds->DrawObject3D(prim.mesh_id, glass_man_mat_,
                                    /*center*/ man_center,
@@ -267,7 +268,7 @@ private:
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 11;
+        const int kRows = 12;
         const float top = h - kBottom
                         - (static_cast<float>(kRows) * kRowH
                            + static_cast<float>(kRows - 1) * kSpacing);
@@ -324,6 +325,7 @@ private:
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
         ui_.Checkbox("玻璃墙", &show_glass_, row(2, 9));
         ui_.Checkbox("绿玻璃人", &show_glass_man_, row(2, 10));
+        ui_.SliderFloat("绿人偏移x", &glass_man_offset_.x(), row(2, 11), -2.0f, 2.0f, 2);
 
         // ── 列 1 底部：玻璃墙透明度 + 位置（透明体验收）──
         ui_.SliderFloat("玻璃 α", &glass_mat_.base_color.a, row(1, 9), 0.0f, 1.0f, 2);

@@ -567,7 +567,11 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
 float weight_wbo(float z, float alpha, vec3 color) {
     float maxc = max(max(color.r, color.g), color.b);
     float color_factor = max(min(1.0, maxc * alpha), alpha);
-    float depth_factor = clamp(0.03 / (1e-5 + pow(z / 200.0, 4.0)), 1e-2, 3e3);
+    // ⚠️ 原论文的 200 是「世界单位尺度」调参：JPOV 场景以米计、玻璃多在 1~30m，
+    // 用 200 会让 (z/200)^4 ≪ 1e-5 地板 → 权重恒为常数 → 丧失「近处优先」→
+    // 两层透明体（如红墙 × 绿人）前后不分、颜色一样（WBO order-blind）。
+    // 改用 ~5m 尺度（可按场景调），使米级深度段内产生真实的近远权重差。
+    float depth_factor = clamp(0.03 / (1e-5 + pow(z / 5.0, 4.0)), 1e-2, 3e3);
     return color_factor * depth_factor;
 }
 #endif
