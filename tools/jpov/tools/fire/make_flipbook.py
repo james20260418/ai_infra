@@ -85,37 +85,47 @@ def _fbm(x, y, seed, octaves=3):
     return v / 0.875
 
 
-def render_puff(tiles, cell):
-    """烘「经典火舌 puff」flipbook：每格 = 一小团火（不规则软轮廓 + 内部噪声细节 +
-    随帧闪烁演化 + 点火→峰值→熄灭包络）。不需要体数据。"""
+def render_puff(tiles, cell, kind="fire"):
+    """烘 puff flipbook：每格 = 一小团（不规则软轮廓 + 内部噪声细节 + 点火→熄灭包络）。
+    kind="fire"：火色；kind="smoke"：白灰（引擎端染黑）。
+    ★ 帧间连续性：噪声用**固定种子 + 随帧平滑偏移**，不用逐帧变种子（否则纹理高频震颤）。"""
     nframes = tiles * tiles
     sheet = np.zeros((tiles * cell, tiles * cell, 4), np.float32)
     xs = (np.arange(cell, dtype=np.float32) + 0.5) / cell
     ys = (np.arange(cell, dtype=np.float32) + 0.5) / cell
-    U, V = np.meshgrid(xs, ys)          # V: 0=图像顶行
-    FY = 1.0 - V                        # FY: 0=底
+    U, V = np.meshgrid(xs, ys)
+    FY = 1.0 - V
     dx = U - 0.5
-    dyv = FY - 0.40                     # 重心略偏下
+    dyv = FY - 0.40
     ang = np.arctan2(dyv, dx)
-    rr = np.sqrt(dx * dx + (dyv * 0.82) ** 2)   # 竖直略拉长（火舌形）
+    stretch = 0.82 if kind == "fire" else 1.0     # 火舌略拉长；烟更圆
+    rr = np.sqrt(dx * dx + (dyv * stretch) ** 2)
     for f in range(nframes):
         t = f / float(max(1, nframes - 1))
-        env = min(t / 0.25, (1.0 - t) / 0.35)
+        if kind == "fire":
+            env = min(t / 0.25, (1.0 - t) / 0.35)
+        else:
+            env = min(t / 0.35, (1.0 - t) / 0.45)
         env = 0.0 if env < 0.0 else (1.0 if env > 1.0 else env)
-        env = env * env * (3.0 - 2.0 * env)     # smoothstep 点火/熄灭
-        wob = np.vectorize(lambda a_: _fbm(np.cos(a_) * 1.4 + 0.5,
-                                           np.sin(a_) * 1.4 + 0.5,
-                                           int(f) * 13 + 7))(ang)
-        rad = (0.30 + 0.10 * wob) * (0.55 + 0.45 * env)
+        env = env * env * (3.0 - 2.0 * env)
+        # 平滑的帧漂移（小）：轮廓与内部细节都用它随帧缓慢变 → 无高频震颤。
+        fd = f * (0.06 if kind == "fire" else 0.04)
+        wob = np.vectorize(lambda a_: _fbm(np.cos(a_) * 1.3 + 0.5,
+                                           np.sin(a_) * 1.3 + 0.5 + fd, 7))(ang)
+        r0 = 0.30 if kind == "fire" else 0.34
+        rad = (r0 + 0.09 * wob) * (0.55 + 0.45 * env)
         edge = np.clip(1.0 - rr / np.maximum(rad, 1e-4), 0.0, 1.0)
-        a = edge ** 1.25
-        detail = np.vectorize(lambda u_, v_: _fbm(u_ * 4.5, v_ * 4.5 + f * 0.35,
-                                                  int(f) * 29 + 3))(U, FY)
-        a *= (0.45 + 0.75 * detail)
+        a = edge ** (1.25 if kind == "fire" else 1.0)
+        detail = np.vectorize(lambda u_, v_: _fbm(u_ * 3.2, v_ * 3.2 + fd, 3))(U, FY)
+        a *= (0.62 + 0.48 * detail)     # 内部细节（降幅/降频，减“细碎”）
         a = np.clip(a * env, 0.0, 1.0)
-        R = np.full_like(a, 1.0)
-        G = np.clip(0.25 + 0.72 * np.minimum(1.0, a * 1.25), 0.0, 1.0)
-        B = a * a * a * 0.7
+        R = np.full_like(a, 1.0 if kind == "fire" else 0.90)
+        if kind == "fire":
+            G = np.clip(0.25 + 0.72 * np.minimum(1.0, a * 1.25), 0.0, 1.0)
+            B = a * a * a * 0.7
+        else:
+            G = np.full_like(a, 0.90)
+            B = np.full_like(a, 0.92)
         cellimg = np.zeros((cell, cell, 4), np.float32)
         cellimg[..., 0] = R
         cellimg[..., 1] = G
@@ -292,11 +302,11 @@ def main():
     out_path = sys.argv[3]
     tiles = int(sys.argv[4]) if len(sys.argv) > 4 else 8
 
-    if mode == "puff":
-        cell = int(sys.argv[2]) if False else 128   # puff 不需要体输入
-        rgba = render_puff(tiles, cell)
+    if mode in ("puff", "smokepuff"):
+        kind = "smoke" if mode == "smokepuff" else "fire"
+        rgba = render_puff(tiles, 128, kind)
         write_png(out_path, rgba)
-        print("wrote %s (puff, %dx%d)" % (out_path, rgba.shape[1], rgba.shape[0]))
+        print("wrote %s (%s, %dx%d)" % (out_path, kind, rgba.shape[1], rgba.shape[0]))
         return 0
 
     vol = load_jpovvol(in_path)
