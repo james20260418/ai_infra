@@ -597,6 +597,7 @@ Renderer::~Renderer() {
     DestroyBloomChain();
     DestroySkyColorFBO();
     fire_fog_renderer_.Finalize();
+    particle_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1477,6 +1478,7 @@ void Renderer::Init(
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
     fire_fog_renderer_.Init(&shader_mgr_);
+    particle_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
 }
@@ -1516,7 +1518,7 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
-    bool has_3d = cmds.sky.has_value();
+    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -1740,6 +1742,17 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // ---- 第二步之前：广告牌粒子 pass ----
+        // 在不透明 3D 之后（深度缓冲已就绪）、resolve/后处理之前，就地画进 3D FBO。
+        // 自带 blend / depth-mask / sort；mrt=use_hdr 时临时收 draw buffer 只写颜色附件。
+        if (!cmds.particles.empty()) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            for (const ParticleRenderCommand& pc : cmds.particles) {
+                particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_, use_hdr);
+            }
+        }
 
         // ---- 第二步：MSAA resolve + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);

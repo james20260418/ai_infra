@@ -248,6 +248,7 @@ cc_library(
         ":sky_renderer",
         ":horizon_fog_renderer",
         "//tools/jpov/src/fire_fog:fire_fog_renderer",
+        "//tools/jpov/src/particles:particle_renderer",
         ":texture_manager",
         ":gltf_loader",
         ":orm_unpack",

@@ -22,10 +22,13 @@
 #include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/particle_fire.h"
 #include "tools/jpov/demo/skylight_scene.h"   // 复用 SkyDegrees / MakeSkyLighting / 地面材质
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"       // 复用 kViewerWidth/Height/Fps/FontAlias
+#include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/ui.h"
+#include "tools/jpov/src/particles/particle_system.h"
 
 namespace jpov_fire_fog {
 
@@ -38,6 +41,40 @@ using jpov_viewer::kViewerFontAlias;
 // nz 必须是完全平方（见 FireFogParams 约束）。
 inline constexpr int kNzChoices[] = {64, 256};
 inline constexpr int kTilePxChoices[] = {8, 16, 32};
+
+// 广告牌粒子火的默认配置（一根向上冒的火柱；面板可调关键参数）。
+inline jpov::particles::EmitterConfig MakeFireConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {2.5f, 0.05f, 0.0f};
+    c.rate = 45.0f;
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.22f;
+    c.cone_half_angle_deg = 20.0f;
+    c.lifetime = {0.8f, 1.2f};
+    c.speed = {0.8f, 1.5f};
+    c.size_start = {0.55f, 0.9f};
+    c.rotation = {0.0f, 6.2831853f};
+    c.gravity = {0.0f, 2.2f, 0.0f};
+    c.drag = 0.9f;
+    c.noise_enabled = true;
+    c.noise_amp = 1.5f;
+    c.noise_freq = 1.5f;
+    c.use_color_over_life = true;
+    c.color_over_life = jpov::particles::MakeDefaultFireGradient();
+    c.use_size_over_life = true;
+    c.size_curve = jpov::particles::MakeDefaultFireSizeCurve();
+    c.flipbook = true;
+    c.tiles_x = 8;
+    c.tiles_y = 8;
+    c.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
+    c.sheet_fps = 16.0f;
+    c.start_frame_random = true;
+    c.align = jpov::AlignMode::kVertical;
+    c.stretched = false;
+    c.blend = jpov::BlendMode::kAdditive;
+    c.sort = jpov::SortMode::kNone;
+    return c;
+}
 
 // 点状雾查看器渲染核心 App。
 class FireFogApp : public JPOV {
@@ -80,6 +117,25 @@ public:
     // ── god ray ──
     float sun_phase_g_ = 0.7f;         // HG 相位各向异性（太阳/点光源共用）
     float sun_gain_ = 2.0f;            // 太阳项增益
+
+    // ── 广告牌粒子火（主角火；独立于 froxel 雾）──
+    // 模拟内核见 src/particles/particle_system.h；渲染走 Renderer 的独立粒子 pass。
+    bool fire_enable_ = true;
+    jpov::particles::EmitterConfig fire_cfg_ = MakeFireConfig();
+    jpov::particles::ParticleEmitter fire_emitter_;
+    bool fire_needs_reset_ = true;
+    uint32_t fire_texture_id_ = 0;     // 懒建的程序化 flipbook 纹理
+    int fire_tex_tiles_ = 8;           // flipbook 网格边长（8×8=64 帧）
+    // 面板用影子标量（逐步映射到 fire_cfg_，避免直接改 RangeF 导致 min>max 崩溃）。
+    float ui_fire_rate_ = 45.0f;
+    float ui_fire_life_ = 1.2f;
+    float ui_fire_size_ = 0.9f;
+    float ui_fire_speed_ = 1.6f;
+    float ui_fire_buoy_ = 2.2f;
+    float ui_fire_drag_ = 0.9f;
+    float ui_fire_noise_ = 1.5f;
+    int ui_fire_blend_ = 0;   // 0=加法 1=半透明
+    int ui_fire_align_ = 1;   // 0=view 1=vertical 2=facing 3=velocity
 
     // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
     int nz_index_ = 1;        // 0 → Nz=64，1 → Nz=256
@@ -174,6 +230,59 @@ public:
             cmds->fire_fog = ff;
         }
 
+        // ── 广告牌粒子火（主角火）──
+        // 懒建程序化 flipbook 纹理（需 GL 上下文，故在渲染体里首次建）。
+        if (fire_texture_id_ == 0) {
+            const std::vector<unsigned char> png =
+                jpov_particle_fire::MakeFireFlipbookPng(fire_tex_tiles_, fire_tex_tiles_,
+                                                        64, 20261014u);
+            if (!png.empty()) {
+                fire_texture_id_ =
+                    RegisterTextureFromMemory(png, "particle_fire_flipbook");
+            }
+        }
+        if (fire_enable_) {
+            // 面板影子标量 → 配置（RangeF 两端一起设，避免 min>max）。
+            fire_cfg_.rate = ui_fire_rate_;
+            fire_cfg_.lifetime = {ui_fire_life_ * 0.7f, ui_fire_life_};
+            fire_cfg_.size_start = {ui_fire_size_ * 0.75f, ui_fire_size_};
+            fire_cfg_.speed = {ui_fire_speed_ * 0.6f, ui_fire_speed_};
+            fire_cfg_.gravity = {0.0f, ui_fire_buoy_, 0.0f};
+            fire_cfg_.drag = ui_fire_drag_;
+            fire_cfg_.noise_amp = ui_fire_noise_;
+            fire_cfg_.blend = (ui_fire_blend_ == 0) ? jpov::BlendMode::kAdditive
+                                                   : jpov::BlendMode::kAlpha;
+            fire_cfg_.align = static_cast<jpov::AlignMode>(ui_fire_align_);
+            // 加法层无顺序依赖不排序；半透明层需背→前排序。
+            fire_cfg_.sort = (ui_fire_blend_ == 0) ? jpov::SortMode::kNone
+                                                   : jpov::SortMode::kByDepth;
+            fire_cfg_.tiles_x = fire_tex_tiles_;
+            fire_cfg_.tiles_y = fire_tex_tiles_;
+
+            if (fire_needs_reset_) {
+                fire_emitter_.SetConfig(fire_cfg_);
+                fire_emitter_.Reset(20261014u);
+                fire_needs_reset_ = false;
+            }
+            fire_emitter_.SetConfig(fire_cfg_);
+            std::vector<jpov::ParticleInstance> insts;
+            fire_emitter_.Update(1.0f / static_cast<float>(kViewerFps), &insts);
+            if (!insts.empty()) {
+                jpov::ParticleRenderCommand pc;
+                pc.particles = std::move(insts);
+                pc.texture_id = fire_texture_id_;
+                pc.tiles_x = fire_cfg_.tiles_x;
+                pc.tiles_y = fire_cfg_.tiles_y;
+                pc.flipbook = fire_cfg_.flipbook;
+                pc.align = fire_cfg_.align;
+                pc.stretched = fire_cfg_.stretched;
+                pc.stretch_scale = fire_cfg_.stretch_scale;
+                pc.blend = fire_cfg_.blend;
+                pc.sort = fire_cfg_.sort;
+                cmds->DrawParticles(std::move(pc));
+            }
+        }
+
         if (show_panel_) {
             DrawPanel(input);
             ui_.End();
@@ -197,20 +306,22 @@ private:
         const float frame_dt_ms = 1000.0f / kViewerFps;
         ui_.Begin(input, theme, w, h, frame_dt_ms);
 
-        const float colw = 0.30f * w;         // 每列滑条宽度
-        const float x0 = 0.02f * w;
-        const float x1 = 0.35f * w;
-        const float x2 = 0.68f * w;
+        const float colw = 0.235f * w;        // 每列滑条宽度（4 列）
+        const float x0 = 0.01f * w;
+        const float x1 = 0.255f * w;
+        const float x2 = 0.50f * w;
+        const float x3 = 0.745f * w;
         const float kRowH = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom = 16.0f;
-        const int kRows = 11;
+        const int kRows = 12;
         const float top = h - kBottom
                         - (static_cast<float>(kRows) * kRowH
                            + static_cast<float>(kRows - 1) * kSpacing);
 
         auto row = [&](int col, int i) {
-            const float x = (col == 0) ? x0 : ((col == 1) ? x1 : x2);
+            const float x = (col == 0) ? x0
+                          : ((col == 1) ? x1 : ((col == 2) ? x2 : x3));
             return jpov::UiRect{
                 {x, top + static_cast<float>(i) * (kRowH + kSpacing)}, {colw, kRowH}};
         };
@@ -259,6 +370,26 @@ private:
         ui_.SliderFloat("太阳仰角 °", &deg_.sun_elev_deg, row(2, 6), 0.0f, 90.0f, 0);
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
+
+        // ── 列 3：广告牌粒子火（主角火）──
+        ui_.Checkbox("粒子火", &fire_enable_, row(3, 0));
+        ui_.SliderFloat("发射率 /s", &ui_fire_rate_, row(3, 1), 0.0f, 200.0f, 0);
+        ui_.SliderFloat("寿命 s", &ui_fire_life_, row(3, 2), 0.2f, 4.0f, 2);
+        ui_.SliderFloat("尺寸 m", &ui_fire_size_, row(3, 3), 0.1f, 3.0f, 2);
+        ui_.SliderFloat("速度 m/s", &ui_fire_speed_, row(3, 4), 0.0f, 5.0f, 2);
+        ui_.SliderFloat("浮力", &ui_fire_buoy_, row(3, 5), -2.0f, 8.0f, 2);
+        ui_.SliderFloat("阻尼", &ui_fire_drag_, row(3, 6), 0.0f, 4.0f, 2);
+        ui_.Checkbox("湍流", &fire_cfg_.noise_enabled, row(3, 7));
+        ui_.SliderFloat("湍流强度", &ui_fire_noise_, row(3, 8), 0.0f, 5.0f, 2);
+        ui_.Checkbox("flipbook", &fire_cfg_.flipbook, row(3, 9));
+        {
+            const std::vector<const char*> items = {"加法", "半透明"};
+            ui_.Combo("混合", &ui_fire_blend_, items, row(3, 10));
+        }
+        {
+            const std::vector<const char*> items = {"view", "vertical", "facing", "velocity"};
+            ui_.Combo("朝向", &ui_fire_align_, items, row(3, 11));
+        }
     }
 
     bool show_panel_ = true;

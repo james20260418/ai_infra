@@ -15,6 +15,7 @@
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/instanced/instanced_object_attrs.h"
@@ -312,6 +313,7 @@ private:
     // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
     // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
     FireFogRenderer fire_fog_renderer_;
+    ParticleRenderer particle_renderer_;
 
 public:
     // ---- 骨架（SkeletonManager）注册 / 取用 ----

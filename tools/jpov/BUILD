@@ -216,14 +216,20 @@ cc_binary(
 # ============================================================================
 cc_library(
     name = "fire_fog_viewer_app",
-    hdrs = ["demo/fire_fog_viewer_app.h"],
+    hdrs = [
+        "demo/fire_fog_viewer_app.h",
+        "demo/particle_fire.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:particle_types",
         "//tools/jpov/interface:ui",
+        "//tools/jpov/src/particles:particle_system",
+        "//third_party/stb:stb_image_write",
     ],
     copts = ["-std=c++20"],
 )

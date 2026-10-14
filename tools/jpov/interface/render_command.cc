@@ -28,6 +28,7 @@ void RenderCommandList::Clear() {
     object3d.clear();
     instanced_object.clear();
     skinned_mesh.clear();
+    particles.clear();
     point_lights.clear();
     point_fogs.clear();
     object_use_default_color = false;
@@ -228,6 +229,11 @@ void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial&
     cmd.highlight = highlight;
     instanced_object.push_back(std::move(cmd));
     order.emplace_back(DrawCommandType::kInstancedObject, idx);
+}
+
+void RenderCommandList::DrawParticles(ParticleRenderCommand cmd) {
+    CHECK(!cmd.particles.empty()) << "DrawParticles: particles 不能为空";
+    particles.push_back(std::move(cmd));
 }
 
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,
