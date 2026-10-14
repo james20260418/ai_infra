@@ -48,8 +48,8 @@ inline constexpr int kTexUnitPartialRotationBind = 14;
 inline constexpr int kTexUnitPartialRotationChannel = 15;
 
 // 透明混合 pass（Object3DRenderer::DrawObject3DBlend）使用的不透明场景深度纹理
-//（值 = gl_FragCoord.z）。仅 object3d blend program 使用；主链路其他程序不绑它。
-// 放在已保留区间（0..15）之上，避免与任何主链路单元冲突。
+//（值 = gl_FragCoord.z）。玻璃 pass **无深度缓冲**，在 FS 里手动作深度测试时采它。
+// 仅 object3d blend（kBlend）program 使用；主链路其他 program 不绑它。
 inline constexpr int kTexUnitGlassSceneDepth = 16;
 
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
@@ -63,6 +63,8 @@ static_assert(kTexUnitThicknessBind < kTexUnitPartialRotationBind,
               "粗细绑定表与部位额外旋转通道表单元重叠");
 static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
               "部位额外旋转的两张表单元重叠");
+static_assert(kTexUnitPartialRotationChannel < kTexUnitGlassSceneDepth,
+              "部位额外旋转通道表与玻璃场景深度单元重叠");
 
 }  // namespace jpov
 

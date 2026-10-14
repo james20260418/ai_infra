@@ -87,6 +87,22 @@ public:
     bool show_glass_ = true;
     jpov::Vec3f glass_center_ = jpov::Vec3f(4.0f, 1.6f, 0.0f);  // 树 +X 一侧
 
+    // ── 透明「弧面体」（验收更彻底）：蓝人（mixamo_male，静态 bind pose）换成酒瓶绿玻璃，
+    //    摆在红玻璃墙的正中 → 红墙穿过并「分割」它（两者都是 kBlend 透明，一起进玻璃 pass）。
+    //    摆位跟随 glass_center_（始终居中于墙），scale 按目标身高在 Init 时折算。──
+    jpov::GltfObject glass_man_;
+    jpov::PBRMaterial glass_man_mat_ = [] {
+        jpov::PBRMaterial m;
+        m.base_color = jpov::Color{0.10f, 0.38f, 0.20f, 0.32f};  // 酒瓶绿，α=0.32
+        m.metallic = 0.0f;
+        m.roughness = 0.06f;
+        m.alpha_mode = jpov::AlphaMode::kBlend;
+        m.double_sided = true;   // 闭合人体：双面参与 WBO → 有厚度的绿玻璃体
+        return m;
+    }();
+    bool show_glass_man_ = true;
+    float glass_man_scale_ = 1.0f;   // Init 时按身高归一
+
     // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
     jpov::Vec3f point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
@@ -166,6 +182,17 @@ public:
                                /*center*/ glass_center_,
                                /*up*/     {0.0f, 1.0f, 0.0f},
                                /*front*/  {0.0f, 0.0f, 1.0f});
+        }
+
+        // 透明弧面体：蓝人（酒瓶绿玻璃），摆在红墙中心 → 红墙分割它（两者都是 kBlend 透明）。
+        if (show_glass_man_ && !glass_man_.empty()) {
+            for (const jpov::GltfPrimitive& prim : glass_man_.primitives) {
+                cmds->DrawObject3D(prim.mesh_id, glass_man_mat_,
+                                   /*center*/ glass_center_,
+                                   /*up*/     {0.0f, 1.0f, 0.0f},
+                                   /*front*/  {0.0f, 0.0f, 1.0f},
+                                   /*scale*/  glass_man_scale_);
+            }
         }
 
         // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
@@ -286,6 +313,7 @@ private:
         ui_.SliderFloat("太阳方位角 °", &deg_.sun_azim_deg, row(2, 7), 0.0f, 360.0f, 0);
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(2, 8), 0.0f, 8.0f, 1);
         ui_.Checkbox("玻璃墙", &show_glass_, row(2, 9));
+        ui_.Checkbox("绿玻璃人", &show_glass_man_, row(2, 10));
 
         // ── 列 1 底部：玻璃墙透明度 + 位置（透明体验收）──
         ui_.SliderFloat("玻璃 α", &glass_mat_.base_color.a, row(1, 9), 0.0f, 1.0f, 2);

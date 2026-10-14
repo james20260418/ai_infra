@@ -51,6 +51,7 @@ echo ""
 echo "==> 4. 拷贝模型资源到 output/jpov_fire_fog_viewer/models/"
 mkdir -p "$OUTPUT_DIR/models"
 cp -v "$PROJECT_DIR/tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb" "$OUTPUT_DIR/models/"
+cp -v "$PROJECT_DIR/tools/jpov/assets/models/characters/mixamo_male.glb" "$OUTPUT_DIR/models/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/"
 
 echo ""

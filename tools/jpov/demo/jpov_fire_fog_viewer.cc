@@ -69,6 +69,27 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
         jpov::MeshData::MakeBox(/*front_half_width=*/3.0f,
                                 /*up_half_width=*/1.5f,
                                 /*left_half_width=*/0.08f));
+
+    // 透明弧面体：蓝人（mixamo_male.glb）作为**静态网格**（bind pose）载入；材质在 app
+    // 侧换成酒瓶绿玻璃（kBlend）。按目标身高 ~1.9m 归一（摆位由 app 跟随红墙中心）。
+    {
+        jpov::GltfObject man = app.LoadGltf("models/mixamo_male.glb");
+        CHECK(!man.empty()) << "LoadGltf failed: models/mixamo_male.glb"
+                            << "（分发态需 build 脚本把模型拷到 exe 旁 models/）";
+        float s = 1.0f;
+        if (man.bounds_valid) {
+            const float hgt = man.bounds_max[1] - man.bounds_min[1];
+            if (hgt > 1.0e-6f) {
+                s = 1.9f / hgt;
+            } else {
+                LOG(WARNING) << "蓝人模型 Y 向高度≈0，scale 置 1";
+            }
+        } else {
+            LOG(WARNING) << "蓝人模型无 bounds，scale 置 1";
+        }
+        app.glass_man_ = std::move(man);
+        app.glass_man_scale_ = s;
+    }
 }
 
 // 默认视角：橡树（高 6m）斜前方，看全树 + 雾。
