@@ -220,6 +220,9 @@ void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial&
                                             bool highlight) {
     CHECK_GT(mesh_id, 0u) << "DrawInstancedObject: mesh_id 必须 > 0";
     CHECK(!instances.empty()) << "DrawInstancedObject: instances 不能为空";
+    CHECK(mat.alpha_mode != AlphaMode::kBlend)
+        << "DrawInstancedObject: 暂不支持 alpha_mode==kBlend（半透明目前仅 DrawObject3D "
+           "静态 object3d；需先在此接入透明 pass）";
     int idx = static_cast<int>(instanced_object.size());
     InstancedObjectCommand cmd;
     cmd.mesh_id = mesh_id;
@@ -254,6 +257,9 @@ void RenderCommandList::DrawMeshWithSkeleton(
     CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
         << "（先经 JPOV::RegisterSkeleton(SkeletonType, poses) 创建骨架拿到 id）";
     CHECK(!instances.empty()) << "DrawMeshWithSkeleton: instances 不能为空";
+    CHECK(material.alpha_mode != AlphaMode::kBlend)
+        << "DrawMeshWithSkeleton: 暂不支持 alpha_mode==kBlend（半透明目前仅 DrawObject3D "
+           "静态 object3d；需先在此接入透明 pass）";
     int idx = static_cast<int>(skinned_mesh.size());
     SkinnedMeshCommand cmd;
     cmd.mesh_id = mesh_id;

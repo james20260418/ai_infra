@@ -1620,6 +1620,11 @@ inline SkyCommand CreateDefaultSkyCommand(float turbidity,
 // metallic/roughness/emissive/AO 各通道支持常值或纹理（见对应 *_tex 标志）。
 // object_use_default_color == true 时跳过点光源（ambient-only，等价原纯色行为）。
 //
+// 透明：material.alpha_mode == kBlend 时，本物体**不经主 pass**，改由「透明 pass」
+//（加权混合 OIT）渲进离屏玻璃缓冲，再由体积雾合成 pass 与雾一起按深度积分合成
+//（需 tone_mapping=true；见 docs/jpov_transparent_glass_design.md）。此时本物体的
+// picking_id / highlight 被忽略（本版）。kMask/kOpaque 行为不变。
+//
 // Pre-condition: mesh_id 已注册且未释放
 // Pre-condition: base_color_tex == 0，或已注册且 mesh 含 kUV 属性
 // Pre-condition: up、front 均非零且不平行
@@ -2134,6 +2139,8 @@ struct RenderCommandList {
     //      （mesh 需含 kUV + kNormal 属性，采样结果作为 GGX BRDF 的 base 色）；
     //      否则各通道取 mat 的常值 fallback（含光照模式下的
     //      metallic / roughness / emissive 恒走常值）。
+    //      mat.alpha_mode：kOpaque（默认）/ kMask（cutout）/ kBlend（半透明——
+    //      见 Object3DCommand 的「透明」说明；需 tone_mapping=true）。
     //
     // center: 模型中心的世界坐标（平移）
     // up:     模型局部 +Y 指向的世界方向（需非零，会被归一化）
