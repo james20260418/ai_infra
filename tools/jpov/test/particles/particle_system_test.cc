@@ -182,6 +182,35 @@ TEST(ParticleSystemTest, ValidationRejectsBadConfig) {
     EXPECT_DEATH({ ParticleEmitter e(c); (void)e; }, "rate");
 }
 
+TEST(ParticleSystemTest, DeathsReportedAndSpawnAtInjects) {
+    // 死亡上报（子发射器用）
+    EmitterConfig c = BaselineConfig();
+    c.rate = 100.0f;
+    c.lifetime = {0.2f, 0.2f};
+    ParticleEmitter e(c);
+    e.Reset(1u);
+    std::vector<ParticleInstance> out;
+    std::vector<Vec3f> deaths;
+    for (int i = 0; i < 40; ++i) {
+        e.Update(0.01f, &out, &deaths);
+    }
+    EXPECT_GT(deaths.size(), 0u);   // 0.4s 内必有粒子寿终
+
+    // SpawnAt：在指定位置注入一个粒子（不依赖 rate）。
+    EmitterConfig s = BaselineConfig();   // rate=0
+    ParticleEmitter injector(s);
+    injector.Reset(2u);
+    EXPECT_EQ(injector.live_count(), 0);
+    injector.SpawnAt(Vec3f(1.0f, 2.0f, 3.0f));
+    EXPECT_EQ(injector.live_count(), 1);
+    std::vector<ParticleInstance> so;
+    injector.Update(0.001f, &so);
+    ASSERT_EQ(so.size(), 1u);
+    EXPECT_NEAR(so[0].position.x(), 1.0f, 0.01f);
+    EXPECT_NEAR(so[0].position.y(), 2.0f, 0.01f);
+    EXPECT_NEAR(so[0].position.z(), 3.0f, 0.01f);
+}
+
 }  // namespace
 }  // namespace particles
 }  // namespace jpov

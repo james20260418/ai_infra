@@ -51,6 +51,21 @@ def load_jpovvol(path):
 
 # ---------------- 颜色 ----------------
 
+# 可分离盒模糊（(H,W,C) 图像；软化 flipbook 边缘，减“骰子/三角感”）。
+def box_blur(a, r=2, passes=2):
+    a = a.astype(np.float32).copy()
+    if r <= 0:
+        return a
+    for _ in range(passes):
+        pad = np.pad(a, ((0, 0), (r, r), (0, 0)), mode="edge")
+        c = np.cumsum(pad, axis=1)
+        a = (c[:, 2 * r:, :] - c[:, :-2 * r, :]) / (2.0 * r)
+        pad = np.pad(a, ((r, r), (0, 0), (0, 0)), mode="edge")
+        c = np.cumsum(pad, axis=0)
+        a = (c[2 * r:, :, :] - c[:-2 * r, :, :]) / (2.0 * r)
+    return a
+
+
 def blackbody(t):
     """t∈[0,1] → 火色 RGB（暗红→红→橙→黄→白）。t 任意形状。"""
     stops_t = np.array([0.0, 0.18, 0.45, 0.72, 1.0], np.float32)
@@ -75,7 +90,7 @@ def render_flipbook(vol, mode, tiles):
         sigma_scale = 34.0
         emit_gain = 3.0
         temp_scale = 1.15
-        beta = 1.8          # alpha 对比度（去灰雾）
+        beta = 1.3          # alpha 对比度（去灰雾）
     else:  # smoke：只按密度做不透明度，颜色留白（引擎端染黑/灰）
         sigma_scale = 22.0
         emit_gain = 0.0
@@ -106,6 +121,7 @@ def render_flipbook(vol, mode, tiles):
         img = np.zeros((ny, nx, 4), np.float32)
         img[..., :3] = np.clip(L, 0.0, 1.0)
         img[..., 3] = alpha
+        img = box_blur(img, 3, 3)   # 软化边缘（减方块感）
         # 图像行 0 = 体积 y 高端（火苗尖朝上）→ 上下翻转一次。
         frames.append(img[::-1, :, :])
 

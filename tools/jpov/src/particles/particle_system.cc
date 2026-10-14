@@ -256,6 +256,35 @@ ParticleEmitter::Particle ParticleEmitter::Spawn() {
     return p;
 }
 
+ParticleEmitter::Particle ParticleEmitter::MakeParticle(const Vec3f& position,
+                                                        const Vec3f& velocity) {
+    Particle p;
+    p.position = position;
+    p.velocity = velocity;
+    p.lifetime = cfg_.lifetime.Sample(rng_);
+    p.rotation0 = cfg_.rotation.Sample(rng_);
+    p.size0 = cfg_.size_start.Sample(rng_);
+    p.frame_phase = cfg_.start_frame_random ? rng_.Next01() : 0.0f;
+    p.seed = static_cast<uint32_t>(rng_.NextU64());
+    p.age = 0.0f;
+    return p;
+}
+
+void ParticleEmitter::SpawnAt(const Vec3f& position) {
+    if (static_cast<int>(particles_.size()) >= kMaxLiveParticles) {
+        return;
+    }
+    Vec3f dir = cfg_.emit_dir;
+    const float dn = dir.Norm();
+    dir = (dn > 1e-6f) ? Vec3f(dir.x() / dn, dir.y() / dn, dir.z() / dn)
+                       : Vec3f(0.0f, 1.0f, 0.0f);
+    const float sp = cfg_.speed.Sample(rng_);
+    // 少量水平抖动，避免烟柱一条直线。
+    const float jx = (rng_.Next01() - 0.5f) * 0.4f;
+    const float jz = (rng_.Next01() - 0.5f) * 0.4f;
+    particles_.push_back(MakeParticle(position, dir * sp + Vec3f(jx, 0.0f, jz)));
+}
+
 float ParticleEmitter::ResolveFrame(const Particle& p) const {
     if (!cfg_.flipbook) {
         return 0.0f;
@@ -289,7 +318,8 @@ float ParticleEmitter::ResolveFrame(const Particle& p) const {
     return frame;
 }
 
-void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*output*/) {
+void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*output*/,
+                             std::vector<Vec3f>* deaths /*output*/) {
     CHECK(out != nullptr) << "ParticleEmitter::Update: out 不能为空";
     CHECK_GE(dt, 0.0f) << "ParticleEmitter::Update: dt 必须 >= 0";
 
@@ -318,6 +348,9 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
     for (Particle& p : particles_) {
         p.age += dt;
         if (p.age >= p.lifetime) {
+            if (deaths != nullptr) {
+                deaths->push_back(p.position);
+            }
             continue;
         }
 

@@ -145,6 +145,57 @@ inline std::vector<unsigned char> MakeFireFlipbookPng(int tiles_x, int tiles_y,
     return out;
 }
 
+// 生成「绝对无硬边」的软圆点 flipbook（纯径向平滑衰减，无形状/无噪声）。
+// 用途：**调试开关** —— 换掉火焰/烟的有形状贴图，判断「三角形/片片感」到底是来自
+// 贴图本身的形状，还是来自几何/混合（quad 对角线 / alpha 太硬）。
+// alpha = (1 − r²)²（r 归一化到 0.46·cell 为 1），在边界处 C1 归零 ⇒ 无任何硬边。
+// warm=true → 暖色（当火用）；false → 白色（当烟用）。
+inline std::vector<unsigned char> MakeSoftBlobPng(int tiles_x, int tiles_y, int cell,
+                                                  bool warm) {
+    const int width = tiles_x * cell;
+    const int height = tiles_y * cell;
+    std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4, 0);
+    const float cx = 0.5f * static_cast<float>(cell);
+    const float cy = 0.5f * static_cast<float>(cell);
+    const float inv_r = 1.0f / (0.46f * static_cast<float>(cell));
+    const float rr = 1.0f;
+    const float gg = warm ? 0.60f : 1.0f;
+    const float bb = warm ? 0.20f : 1.0f;
+    for (int ty = 0; ty < tiles_y; ++ty) {
+        for (int tx = 0; tx < tiles_x; ++tx) {
+            for (int y = 0; y < cell; ++y) {
+                for (int x = 0; x < cell; ++x) {
+                    const float dx = (static_cast<float>(x) + 0.5f) - cx;
+                    const float dy = (static_cast<float>(y) + 0.5f) - cy;
+                    float r = std::sqrt(dx * dx + dy * dy) * inv_r;
+                    if (r > 1.0f) {
+                        r = 1.0f;
+                    }
+                    const float t = 1.0f - r * r;
+                    const float a = t * t;   // C1 平滑归零，绝对无硬边
+                    const size_t idx =
+                        (static_cast<size_t>(ty * cell + y) * width +
+                         (tx * cell + x)) * 4;
+                    pixels[idx + 0] = static_cast<unsigned char>(rr * 255.0f + 0.5f);
+                    pixels[idx + 1] = static_cast<unsigned char>(gg * 255.0f + 0.5f);
+                    pixels[idx + 2] = static_cast<unsigned char>(bb * 255.0f + 0.5f);
+                    pixels[idx + 3] = static_cast<unsigned char>(a * 255.0f + 0.5f);
+                }
+            }
+        }
+    }
+    std::vector<unsigned char> out;
+    stbi_write_png_to_func(
+        [](void* ctx, void* data, int size) {
+            std::vector<unsigned char>* vec =
+                static_cast<std::vector<unsigned char>*>(ctx);
+            const unsigned char* p = static_cast<const unsigned char*>(data);
+            vec->insert(vec->end(), p, p + size);
+        },
+        &out, width, height, 4, pixels.data(), width * 4);
+    return out;
+}
+
 }  // namespace jpov_particle_fire
 
 #endif  // JPOV_DEMO_PARTICLE_FIRE_H_

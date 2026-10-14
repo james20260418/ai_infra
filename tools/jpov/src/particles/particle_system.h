@@ -179,8 +179,16 @@ public:
 
     // 推进 dt 秒：先在源处补发本帧应生成的粒子，再对全体粒子积分，
     // 回收超寿命者，并把存活的 ParticleInstance **追加**到 out（不清空 out）。
+    // deaths 非空时，把本帧**死亡**粒子的位置追加进去（子发射器 / spawn-on-death 用）。
     // Pre-condition: dt >= 0。
-    void Update(float dt, std::vector<ParticleInstance>* out /*output*/);
+    void Update(float dt, std::vector<ParticleInstance>* out /*output*/,
+                std::vector<Vec3f>* deaths /*output，可空*/ = nullptr);
+
+    // 在指定位置**注入**一个粒子（子发射器用）：位置给定，速度取本发射器的 emit_dir×speed
+    //（+少量水平抖动），其余出生状态（寿命/尺寸/朝向/flipbook 相位/种子）按本配置采样。
+    // 用于「火焰粒子死亡 → 在火苗顶端生成烟」这类 spawn-on-death 子发射器。
+    // 达到存活上限时静默丢弃。
+    void SpawnAt(const Vec3f& position);
 
     int live_count() const { return static_cast<int>(particles_.size()); }
 
@@ -196,8 +204,10 @@ private:
         uint32_t seed = 0;       // 逐粒子种子（噪声相位）
     };
 
-    // 生成一个粒子（出生状态）。
+    // 生成一个粒子（在发射源处，含发射形状/初速）。
     Particle Spawn();
+    // 生成一个粒子（位置/初速由调用方给出；子发射器 SpawnAt 用）。
+    Particle MakeParticle(const Vec3f& position, const Vec3f& velocity);
     // 采样发射位置/方向。
     void SampleEmission(Rng& rng, Vec3f* position /*output*/, Vec3f* direction /*output*/);
     // 解算某粒子当前帧的 flipbook 帧号。

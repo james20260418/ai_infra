@@ -307,6 +307,21 @@ int RunCapture(const std::string& out_dir) {
     app.scene_index_ = 0;
     app.fire_needs_reset_ = true;
 
+    // ── Q. 软贴图调试（绝对无硬边圆点）：判断三角/片片感是来自贴图还是几何/混合 ──
+    app.scene_index_ = 1;
+    app.debug_soft_tex_ = true;
+    app.fire_needs_reset_ = true;
+    app.smoke_needs_reset_ = true;
+    for (int w = 0; w < 60; ++w) {
+        app.RunOnce(input, winfo, (out_dir + "/_warm.png").c_str());
+    }
+    shoot("71_softtex_0");
+    shoot("71_softtex_1");
+    app.debug_soft_tex_ = false;
+    app.scene_index_ = 0;
+    app.fire_needs_reset_ = true;
+    app.smoke_needs_reset_ = true;
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();
