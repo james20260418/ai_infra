@@ -201,6 +201,10 @@ public:
     uint32_t soft_fire_tex_ = 0;
     uint32_t soft_smoke_tex_ = 0;
     jpov::particles::Rng sub_rng_{20261015u};   // 子发射器概率（确定性）
+    // CC0 真火 flipbook（BenHickling "Animated Fire"，CC0，64×64，10×6=60 帧）vs 程序化 puff。
+    // toggle 对比：use_cc0_fire_ 开 = 用 CC0 真火贴图；关 = 用我们的 puff flipbook。
+    bool use_cc0_fire_ = false;
+    uint32_t cc0_fire_tex_ = 0;
 
     // ── 场景选择（左上角下拉）──
     //   0 = 体积雾（地面+橡树+点状雾，原 fire_fog 验证场）
@@ -343,6 +347,16 @@ public:
                 smoke_texture_id_ = fire_texture_id_;
             }
         }
+        // CC0 真火纹理（可选；toggle 对比）。
+        if (cc0_fire_tex_ == 0) {
+            const std::string cc0_path = FindTexture("textures/cc0_fire_64.png");
+            if (!cc0_path.empty()) {
+                cc0_fire_tex_ = RegisterTexture(cc0_path);
+                LOG(INFO) << "[particle_fire] cc0 fire texture = " << cc0_path;
+            } else {
+                LOG(WARNING) << "[particle_fire] textures/cc0_fire_64.png 未找到";
+            }
+        }
         // 调试：超软圆点贴图（绝对无硬边），用于排查三角/片片感来源。
         if (debug_soft_tex_) {
             if (soft_fire_tex_ == 0) {
@@ -382,8 +396,22 @@ public:
             // 加法层无顺序依赖不排序；半透明层需背→前排序。
             fire_cfg_.sort = (ui_fire_blend_ == 0) ? jpov::SortMode::kNone
                                                    : jpov::SortMode::kByDepth;
-            fire_cfg_.tiles_x = fire_tex_tiles_;
-            fire_cfg_.tiles_y = fire_tex_tiles_;
+            // 贴图/帧设置：CC0 真火（60 帧循环，随机相位）或我们的 puff（8×8，随寿命点火/灭）。
+            if (use_cc0_fire_) {
+                fire_cfg_.tiles_x = 10;
+                fire_cfg_.tiles_y = 6;
+                fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
+                fire_cfg_.sheet_fps = 24.0f;
+                fire_cfg_.start_frame_random = true;
+                fire_cfg_.sheet_cycles = 1.0f;
+            } else {
+                fire_cfg_.tiles_x = fire_tex_tiles_;
+                fire_cfg_.tiles_y = fire_tex_tiles_;
+                fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kLifetime;
+                fire_cfg_.start_frame_random = false;
+                fire_cfg_.sheet_cycles = 1.0f;
+                fire_cfg_.frame_curve = jpov::particles::MakeDefaultLinearFrameCurve();
+            }
 
             if (fire_needs_reset_) {
                 fire_emitter_.SetConfig(fire_cfg_);
@@ -432,7 +460,8 @@ public:
         if (do_fire && !finst.empty()) {
             jpov::ParticleRenderCommand pc;
             pc.particles = std::move(finst);
-            pc.texture_id = debug_soft_tex_ ? soft_fire_tex_ : fire_texture_id_;
+            pc.texture_id = use_cc0_fire_ ? cc0_fire_tex_
+                          : (debug_soft_tex_ ? soft_fire_tex_ : fire_texture_id_);
             pc.tiles_x = fire_cfg_.tiles_x;
             pc.tiles_y = fire_cfg_.tiles_y;
             pc.flipbook = fire_cfg_.flipbook;
@@ -624,6 +653,7 @@ private:
             ui_.SliderFloat("黑烟尺寸 m", &ui_smoke_size_, row(1, 6), 0.2f, 2.5f, 2);
             ui_.SliderFloat("烟概率", &ui_smoke_prob_, row(1, 7), 0.0f, 1.0f, 2);
             ui_.Checkbox("软贴图(debug)", &debug_soft_tex_, row(1, 8));
+            ui_.Checkbox("CC0真火纹理", &use_cc0_fire_, row(1, 9));
         }
     }
 

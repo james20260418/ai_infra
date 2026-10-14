@@ -56,6 +56,7 @@ echo "==> 4b. 拷贝火/烟 flipbook 纹理到 output/jpov_fire_fog_viewer/textu
 mkdir -p "$OUTPUT_DIR/textures"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/fire_flipbook.png"  "$OUTPUT_DIR/textures/"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/smoke_flipbook.png" "$OUTPUT_DIR/textures/"
+cp -v "$PROJECT_DIR/tools/jpov/assets/fire/cc0_fire_64.png"    "$OUTPUT_DIR/textures/"
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/models/" "$OUTPUT_DIR/textures/"
 
 echo ""

@@ -322,6 +322,20 @@ int RunCapture(const std::string& out_dir) {
     app.fire_needs_reset_ = true;
     app.smoke_needs_reset_ = true;
 
+    // ── R. CC0 真火纹理（与 puff 对比用）──
+    app.scene_index_ = 1;
+    app.use_cc0_fire_ = true;
+    app.fire_needs_reset_ = true;
+    app.smoke_needs_reset_ = true;
+    for (int w = 0; w < 90; ++w) {
+        app.RunOnce(input, winfo, (out_dir + "/_warm.png").c_str());
+    }
+    shoot("72_cc0_0");
+    shoot("72_cc0_1");
+    app.use_cc0_fire_ = false;
+    app.fire_needs_reset_ = true;
+    app.scene_index_ = 0;
+
     // ── 诊断：带 UI 面板拍两张（验证 2D/UI 是否被雾火管线破坏）——无雾 / 有雾。──
     DefaultView(app);
     app.InstallTextMeasure();

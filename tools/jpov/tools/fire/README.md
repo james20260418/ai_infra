@@ -34,3 +34,8 @@ python3 make_flipbook.py fire  /path/fire_stable.jpovvol ../assets/fire/fire_fli
 - `manta` 必须在其 `waveletNoiseTile.bin` 所在目录运行。
 - flipbook 每格需**透明内边距**（`make_flipbook.py` 的 `cell` 放大系数），否则广告牌露硬边。
 - 颜色：火沿温度→黑体色；烟输出白色 + alpha，由引擎 `color_over_life` 染黑灰。
+
+## CC0 真火 flipbook（对比用）
+`assets/fire/cc0_fire_64.png`：**BenHickling「Animated Fire」**（OpenGameArt，**CC0 / public domain**，
+可选署名，非必需）。64×64、10 列 × 6 行 = **60 帧**循环火焰，透明 PNG。
+来源：https://opengameart.org/content/animated-fire 。viewer 面板「CC0真火纹理」toggle 开关对比。
