@@ -234,7 +234,7 @@ struct SkyDegrees {
     float moon_red = 0.0f;             // ④ 月色变红 [0,1] → moon_season（1=血月）
     float night_blue = 0.0f;           // ⑤ 夜蓝 [0,1] → 夜色两色整体偏蓝（1 最蓝最亮）
     // ⑥ 远景仰角雾（空气透视）几何属性（雾色由天光推导，见 ElevationFogColor）。
-    bool  elev_fog_on = true;          // 开关
+    bool  elev_fog_on = false;         // 开关（默认关：远景雾影响观感，需时手动开）
     float elev_fog_start = 0.5f;       // 起雾距离（米；小场景默认小值使效果可见）
     float elev_fog_full = 12.0f;       // 满雾距离（米）
     float elev_fog_inner_deg = 3.0f;   // 仰角带内边界（度）
