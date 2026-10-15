@@ -54,6 +54,7 @@ public:
     std::vector<std::string> proto_names_;    // 各族名（jet/area/pool/transient）
     // 各族分段帧窗（由 sidecar .jpovvol.json 注入；缺省则退化为整段）。
     std::vector<std::pair<int, int>> proto_ig_, proto_su_, proto_ex_;
+    std::vector<float> proto_voxel_m_;   // 各族真实体素物理尺寸(米)；>0 时按它 1:1 放盒
 
     // 火焰盒（世界 AABB）：块顶 y=1.0 起，向上含整团火。
     jpov::Vec3f fire_min_ = {-0.9f, 1.0f, -0.9f};
@@ -149,6 +150,7 @@ public:
         // 地面（两种模式都画，作尺度参照）。
         cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+        if (show_axes_) { DrawAxes(cmds); }
 
         if (proto_mode_ && !proto_ids_.empty()) {
             // ---- 原型火纹理查看：只渲染选中的原型族（按其自然尺）。----
@@ -252,6 +254,11 @@ public:
                                jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinLatin);
             }
         }
+        if (show_axes_) {
+            cmds->DrawText("axes: +X=red  +Y=green  +Z=blue", {8.0f, 28.0f}, 14.0f,
+                           {0.8f, 0.8f, 0.8f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinLatin);
+        }
     }
 
 private:
@@ -269,7 +276,7 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
         const float colw = 0.26f * w;
         const float cx = 0.02f * w;
-        const float top = h - 16.0f - (10 * 24.0f + 9 * 5.0f);
+        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{cx, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -283,6 +290,7 @@ private:
         ui_.Checkbox("相机信息", &show_cam_info_, row(7));
         ui_.Checkbox("燃料块", &fuel_enable_, row(8));
         ui_.Checkbox("全屏quad(调试)", &fs_debug_, row(9));
+        ui_.Checkbox("坐标轴", &show_axes_, row(10));
 
         // 「原型火纹理」查看模式（面板左上角）：开关 + 下拉选族。
         ui_.Checkbox("原型火纹理", &proto_mode_, jpov::UiRect{{cx, 8.0f}, {colw, 24.0f}});
@@ -297,6 +305,22 @@ private:
             ui_.Combo("播放模式", &proto_play_mode_, mi,
                       jpov::UiRect{{cx, 72.0f}, {colw, 26.0f}});
         }
+    }
+
+    // 画世界坐标轴（红=+X, 绿=+Y, 蓝=+Z），供对齐/旋转参照。
+    void DrawAxes(jpov::RenderCommandList* cmds) {
+        if (axis_x_mesh_ == 0) {
+            axis_x_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.5f, 0.012f, 0.012f));
+            axis_y_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.012f, 0.5f, 0.012f));
+            axis_z_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.012f, 0.012f, 0.5f));
+            axis_x_mat_ = jpov::PBRMaterial::SolidColor({1.0f, 0.1f, 0.1f, 1.0f});
+            axis_y_mat_ = jpov::PBRMaterial::SolidColor({0.1f, 1.0f, 0.1f, 1.0f});
+            axis_z_mat_ = jpov::PBRMaterial::SolidColor({0.2f, 0.4f, 1.0f, 1.0f});
+        }
+        const jpov::Vec3f up{0.0f, 1.0f, 0.0f}, fw{0.0f, 0.0f, 1.0f};
+        cmds->DrawObject3D(axis_x_mesh_, axis_x_mat_, {0.5f, 0.0f, 0.0f}, up, fw);
+        cmds->DrawObject3D(axis_y_mesh_, axis_y_mat_, {0.0f, 0.5f, 0.0f}, up, fw);
+        cmds->DrawObject3D(axis_z_mesh_, axis_z_mat_, {0.0f, 0.0f, 0.5f}, up, fw);
     }
 
     // 原型族下标 clamp 到 [0, size)；无族时返回 -1。
@@ -318,11 +342,19 @@ private:
 
     // 由「体维数 + 目标最大边」推世界 AABB：贴地 y=0，**各轴等比 ⇒ 不拉伸**。
     void ProtoBoxForIndex(int i, jpov::Vec3f* mn, jpov::Vec3f* mx) const {
-        const float nx = static_cast<float>(proto_nx_[static_cast<size_t>(i)]);
-        const float ny = static_cast<float>(proto_ny_[static_cast<size_t>(i)]);
-        const float nz = static_cast<float>(proto_nz_[static_cast<size_t>(i)]);
+        const size_t k = static_cast<size_t>(i);
+        const float nx = static_cast<float>(proto_nx_[k]);
+        const float ny = static_cast<float>(proto_ny_[k]);
+        const float nz = static_cast<float>(proto_nz_[k]);
+        const float vm = (k < proto_voxel_m_.size()) ? proto_voxel_m_[k] : 0.0f;
+        if (vm > 0.0f) {
+            // 真实物理尺度：dims × voxel_m（各轴等比 ⇒ 不拉伸，且与原始尺度 1:1）
+            *mn = {-0.5f * nx * vm, 0.0f, -0.5f * nz * vm};
+            *mx = {0.5f * nx * vm, ny * vm, 0.5f * nz * vm};
+            return;
+        }
         const float maxd = std::max(nx, std::max(ny, nz));
-        const float sc = ProtoTargetMax(proto_names_[static_cast<size_t>(i)]) / std::max(1.0f, maxd);
+        const float sc = ProtoTargetMax(proto_names_[k]) / std::max(1.0f, maxd);
         *mn = {-0.5f * nx * sc, 0.0f, -0.5f * nz * sc};
         *mx = {0.5f * nx * sc, ny * sc, 0.5f * nz * sc};
     }
@@ -365,6 +397,9 @@ private:
     std::vector<uint32_t> proto_ids_;
     std::vector<int> proto_nframes_;
     std::vector<int> proto_nx_, proto_ny_, proto_nz_;
+    uint32_t axis_x_mesh_ = 0, axis_y_mesh_ = 0, axis_z_mesh_ = 0;
+    jpov::PBRMaterial axis_x_mat_, axis_y_mat_, axis_z_mat_;
+    bool show_axes_ = true;
     int  last_proto_index_ = -1;   // 触发「切族→重置+取景」的一次性哨兵
     int  last_proto_mode_ = -1;    // 触发「切模式→重置」的哨兵
     bool proto_registered_ = false;

@@ -108,10 +108,21 @@ bool ParseRangePair(const std::string& s, const std::string& key, int* a, int* b
 }
 
 // 读 <vol>.json 里的三段帧窗；缺省 = 整段 [0,nf]。
+bool ParseFloatVal(const std::string& s, const std::string& key, float* v) {
+    const std::string k = "\"" + key + "\"";
+    size_t p = s.find(k);
+    if (p == std::string::npos) { return false; }
+    p = s.find(':', p);
+    if (p == std::string::npos) { return false; }
+    *v = static_cast<float>(std::atof(s.c_str() + p + 1));
+    return true;
+}
+
 void LoadProtoSegments(const std::string& vol_path, int nf,
                        std::pair<int, int>* ig, std::pair<int, int>* su,
-                       std::pair<int, int>* ex) {
+                       std::pair<int, int>* ex, float* voxel_m) {
     *ig = {0, nf}; *su = {0, nf}; *ex = {0, nf};
+    *voxel_m = 0.0f;
     std::ifstream f(vol_path + ".json", std::ios::binary);
     if (!f) { return; }
     const std::string s((std::istreambuf_iterator<char>(f)),
@@ -120,6 +131,7 @@ void LoadProtoSegments(const std::string& vol_path, int nf,
     if (ParseRangePair(s, "ignite", &a, &b)) { *ig = {a, b}; }
     if (ParseRangePair(s, "sustain", &a, &b)) { *su = {a, b}; }
     if (ParseRangePair(s, "extinct", &a, &b)) { *ex = {a, b}; }
+    ParseFloatVal(s, "voxel_m", voxel_m);
 }
 
 // 扫描原型目录，按固定族序装载存在的 .jpovvol + 分段帧窗。
@@ -127,7 +139,8 @@ void LoadPrototypes(const std::string& dir, std::vector<std::string>* paths,
                     std::vector<std::string>* names,
                     std::vector<std::pair<int, int>>* ig,
                     std::vector<std::pair<int, int>>* su,
-                    std::vector<std::pair<int, int>>* ex) {
+                    std::vector<std::pair<int, int>>* ex,
+                    std::vector<float>* voxel_m) {
     for (int i = 0; i < kProtoFamilyCount; ++i) {
         const std::string p = dir + "/" + kProtoFamilies[i] + ".jpovvol";
         std::FILE* f = std::fopen(p.c_str(), "rb");
@@ -137,8 +150,9 @@ void LoadPrototypes(const std::string& dir, std::vector<std::string>* paths,
         paths->push_back(p);
         const int nf = JpovvolFrames(p);
         std::pair<int, int> a{0, nf}, b{0, nf}, c{0, nf};
-        LoadProtoSegments(p, nf, &a, &b, &c);
-        ig->push_back(a); su->push_back(b); ex->push_back(c);
+        float vm = 0.0f;
+        LoadProtoSegments(p, nf, &a, &b, &c, &vm);
+        ig->push_back(a); su->push_back(b); ex->push_back(c); voxel_m->push_back(vm);
     }
 }
 
@@ -182,12 +196,14 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     // 原型族：装载（若目录可用）。
     std::vector<std::string> proto_paths, proto_names;
     std::vector<std::pair<int, int>> pig, psu, pex;
-    if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex); }
+    std::vector<float> pvm;
+    if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex, &pvm); }
     app.proto_paths_ = proto_paths;
     app.proto_names_ = proto_names;
     app.proto_ig_ = pig;
     app.proto_su_ = psu;
     app.proto_ex_ = pex;
+    app.proto_voxel_m_ = pvm;
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -274,10 +290,12 @@ int RunLoopDump(const std::string& out_dir, const std::string& proto_dir,
     InstallScene(app);
     std::vector<std::string> proto_paths, proto_names;
     std::vector<std::pair<int, int>> pig, psu, pex;
-    LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex);
+    std::vector<float> pvm;
+    LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex, &pvm);
     app.proto_paths_ = proto_paths;
     app.proto_names_ = proto_names;
     app.proto_ig_ = pig; app.proto_su_ = psu; app.proto_ex_ = pex;
+    app.proto_voxel_m_ = pvm;
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
     winfo.height = jpov_viewer::kViewerHeight;
@@ -364,12 +382,14 @@ int main(int argc, char** argv) {
     {
         std::vector<std::string> proto_paths, proto_names;
         std::vector<std::pair<int, int>> pig, psu, pex;
-        if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex); }
+        std::vector<float> pvm;
+        if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex, &pvm); }
         app.proto_paths_ = proto_paths;
         app.proto_names_ = proto_names;
         app.proto_ig_ = pig;
         app.proto_su_ = psu;
         app.proto_ex_ = pex;
+        app.proto_voxel_m_ = pvm;
     }
     DefaultView(app);
     app.Run();
