@@ -49,6 +49,10 @@
 #include "third_party/stb/stb_image.h"
 #include <glog/logging.h>
 
+#include <cstdio>
+
+#include "tools/jpov/src/coverage_mipmap.h"
+
 namespace jpov {
 
 TextureManager::~TextureManager() {
@@ -65,9 +69,17 @@ TextureManager::~TextureManager() {
 std::string TextureManager::MakeDedupKey(const char* kind, const std::string& name,
                                          const TextureOptions& opts) {
     CHECK(kind != nullptr);
-    // 同一「来源 + 名称」不同选项 → 不同纹理，key 附 mip/repeat 位。
-    return std::string(kind) + ":" + name + "#mip=" + (opts.mipmap ? "1" : "0") +
-           ";rep=" + (opts.repeat ? "1" : "0");
+    // 同一「来源 + 名称」不同选项 → 不同纹理，key 附 mip / repeat / 覆盖率位。
+    std::string key = std::string(kind) + ":" + name + "#mip=" +
+                      (opts.mipmap ? "1" : "0") +
+                      ";rep=" + (opts.repeat ? "1" : "0");
+    if (opts.alpha_coverage.enabled) {
+        // 覆盖率 cutoff 进 key（不同 cutoff = 不同 mip 链 = 不同纹理）。
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), ";cov=%.4f", opts.alpha_coverage.cutoff);
+        key += buf;
+    }
+    return key;
 }
 
 unsigned int TextureManager::UploadRgba(const unsigned char* rgba, int width,
@@ -75,11 +87,21 @@ unsigned int TextureManager::UploadRgba(const unsigned char* rgba, int width,
     CHECK(rgba != nullptr);
     CHECK_GT(width, 0);
     CHECK_GT(height, 0);
+    if (opts.alpha_coverage.enabled) {
+        // 覆盖率保持是 mip 生成策略，必须与 mipmap 同时开（否则无 mip 链可保）。
+        CHECK(opts.mipmap) << "TextureManager: alpha_coverage 需 mipmap=true";
+        CHECK_GT(opts.alpha_coverage.cutoff, 0.0f)
+            << "TextureManager: alpha_coverage.cutoff 必须 > 0";
+        CHECK_LT(opts.alpha_coverage.cutoff, 1.0f)
+            << "TextureManager: alpha_coverage.cutoff 必须 < 1";
+    }
 
     GLuint gl_tex = 0;
     glGenTextures(1, &gl_tex);
     CHECK_NE(gl_tex, 0u);
     glBindTexture(GL_TEXTURE_2D, gl_tex);
+
+    // level0：原样上传（近景零回归）。
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, rgba);
 
@@ -93,8 +115,18 @@ unsigned int TextureManager::UploadRgba(const unsigned char* rgba, int width,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
 
-    // mipmap 开：在完整 mip0 上传后生成金字塔链。
-    if (opts.mipmap) {
+    if (opts.alpha_coverage.enabled) {
+        // 覆盖率保持 mip 链：CPU 手写每级（颜色盒式平均 + alpha 按覆盖率二值化），逐级上传。
+        // 不调 glGenerateMipmap（那正是会被把 alpha 平均到 cutoff 以下的那条路）。
+        const std::vector<MipLevel> chain = BuildCoverageMipChain(
+            rgba, width, height, opts.alpha_coverage.cutoff);
+        for (size_t level = 1; level < chain.size(); ++level) {
+            glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA,
+                         chain[level].width, chain[level].height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, chain[level].rgba.data());
+        }
+    } else if (opts.mipmap) {
+        // 普通 mipmap：在完整 mip0 上传后交给 GL 生成金字塔链。
         glGenerateMipmap(GL_TEXTURE_2D);
     }
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -115,7 +147,9 @@ uint32_t TextureManager::RegisterOwned(unsigned int gl_tex, int width, int heigh
     LOG(INFO) << "TextureManager: loaded " << log_name << " " << width << "x" << height
               << " → id=" << id << " gl_tex=" << gl_tex
               << " (mipmap=" << (opts.mipmap ? "on" : "off")
-              << ", repeat=" << (opts.repeat ? "on" : "off") << ")";
+              << ", repeat=" << (opts.repeat ? "on" : "off")
+              << (opts.alpha_coverage.enabled ? ", alpha_coverage" : "")
+              << ")";
     return id;
 }
 

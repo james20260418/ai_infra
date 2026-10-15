@@ -3271,8 +3271,19 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
 
         // baseColor: 有纹理用纹理（白 fallback），否则用常值 baseColorFactor
         if (!mi.base_color_tex.empty()) {
+            // cutout（MASK）材质的 baseColor 贴图走「覆盖率保持的 alpha mip」：
+            // 否则 glGenerateMipmap 的线性平均会把透明背景的 alpha 压到 cutoff 以下 ⇒
+            // 远景镂空资产（叶卡 / 蕾丝）覆盖率缩水、变稀甚至消失。cutoff 用材质自己的。
+            // 非 MASK（OPAQUE/BLEND）保持原样（不加 mipmap）。
+            jpov::TextureOptions base_opts;
+            if (mi.alpha_mode == AlphaMode::kMask && mi.alpha_cutoff > 0.0f &&
+                mi.alpha_cutoff < 1.0f) {
+                base_opts.mipmap = true;
+                base_opts.alpha_coverage = {/*enabled=*/true,
+                                            /*cutoff=*/mi.alpha_cutoff};
+            }
             mat.base_color_tex =
-                ResolveTextureRef(mi.base_color_tex, self->texture_mgr_);
+                ResolveTextureRef(mi.base_color_tex, self->texture_mgr_, base_opts);
             mat.base_color = {1.0f, 1.0f, 1.0f, 1.0f};
         } else {
             mat.base_color = {mi.base_color[0], mi.base_color[1],
