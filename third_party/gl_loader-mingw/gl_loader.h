@@ -42,6 +42,7 @@ typedef void (*GL_GenTextures)(int, unsigned int*);
 typedef void (*GL_DeleteTextures)(int, const unsigned int*);
 typedef void (*GL_BindTexture)(unsigned int, unsigned int);
 typedef void (*GL_TexImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+typedef void (*GL_TexImage3D)(unsigned int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
 typedef void (*GL_TexParameteri)(unsigned int, unsigned int, int);
 typedef void (*GL_GenerateMipmap)(unsigned int);
 typedef void (*GL_BlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
@@ -71,6 +72,7 @@ typedef void (*GL_DrawArraysInstanced)(unsigned int, int, int, int);
 typedef void (*GL_DrawElementsInstanced)(unsigned int, int, unsigned int, const void*, int);
 typedef void (*GL_VertexAttribDivisor)(unsigned int, unsigned int);
 typedef void (*GL_TexSubImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+typedef void (*GL_TexSubImage3D)(unsigned int, int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
 typedef unsigned int (*GL_GetError)(void);
 typedef void (*GL_PushAttrib)(unsigned int);
 typedef void (*GL_PopAttrib)(void);
@@ -114,6 +116,7 @@ extern GL_GenTextures            gl_GenTextures;
 extern GL_DeleteTextures         gl_DeleteTextures;
 extern GL_BindTexture            gl_BindTexture;
 extern GL_TexImage2D             gl_TexImage2D;
+extern GL_TexImage3D             gl_TexImage3D;
 extern GL_TexParameteri          gl_TexParameteri;
 extern GL_GenerateMipmap         gl_GenerateMipmap;
 extern GL_BlitFramebuffer        gl_BlitFramebuffer;
@@ -139,6 +142,7 @@ extern GL_DrawArraysInstanced   gl_DrawArraysInstanced;
 extern GL_DrawElementsInstanced gl_DrawElementsInstanced;
 extern GL_VertexAttribDivisor   gl_VertexAttribDivisor;
 extern GL_TexSubImage2D         gl_TexSubImage2D;
+extern GL_TexSubImage3D         gl_TexSubImage3D;
 extern GL_GetError              gl_GetError;
 extern GL_PushAttrib            gl_PushAttrib;
 extern GL_PopAttrib             gl_PopAttrib;
@@ -177,6 +181,7 @@ int gl_loader_init(void);
 #define glDrawElementsInstanced  gl_DrawElementsInstanced
 #define glVertexAttribDivisor    gl_VertexAttribDivisor
 #define glTexSubImage2D          gl_TexSubImage2D
+#define glTexSubImage3D          gl_TexSubImage3D
 #define glGetError               gl_GetError
 #define glPushAttrib             gl_PushAttrib
 #define glPopAttrib              gl_PopAttrib
@@ -218,6 +223,7 @@ int gl_loader_init(void);
 #define glLinkProgram            gl_LinkProgram
 #define glShaderSource           gl_ShaderSource
 #define glTexImage2D             gl_TexImage2D
+#define glTexImage3D             gl_TexImage3D
 #define glTexParameteri          gl_TexParameteri
 #define glGenerateMipmap         gl_GenerateMipmap
 #define glUniform1i              gl_Uniform1i
