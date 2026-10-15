@@ -35,6 +35,15 @@ cp -v "$PROJECT_DIR/data/fire_vdb/fire_stable.jpovvol" "$OUTPUT_DIR/volumes/" 2>
   || cp -v "/james_pm/fire_hero/assets/fire_stable.jpovvol" "$OUTPUT_DIR/volumes/" || true
 ls -lh "$OUTPUT_DIR/volumes" || true
 
+echo "==> 4. 原型族资产（jet/area/pool/transient）"
+mkdir -p "$OUTPUT_DIR/volumes/prototypes"
+for f in jet area pool transient; do
+  cp -v "$PROJECT_DIR/data/fire_vdb/prototypes/$f.jpovvol" "$OUTPUT_DIR/volumes/prototypes/" 2>/dev/null \
+    || cp -v "/james_pm/fire_hero/assets/prototypes/$f.jpovvol" "$OUTPUT_DIR/volumes/prototypes/" 2>/dev/null \
+    || echo "  (缺 $f.jpovvol，跳过)"
+done
+ls -lh "$OUTPUT_DIR/volumes/prototypes" || true
+
 echo ""
 echo "============================================"
 echo "  完成！"

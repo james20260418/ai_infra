@@ -268,3 +268,66 @@ SurfaceFireEmitter {
 - **风格化火**是否需要独立原型（还是纯 ramp 重映射足够）？
 - **sidecar vs JPVOL 头部扩展**：长期看哪个更利于工具链生态。
 - 与**附件层（烟/火星/热畸变）**的合成次序（在透明累积缓冲内还是外）。
+
+---
+
+## 12. 原型族资产与烘焙（Step 1 实施）
+
+### 12.1 烘焙脚本
+
+`/james_pm/fire_hero/tools/fire_family_scene.py`——**一步烘一族**的参数化 Mantaflow 场景：
+
+```bash
+RES=96 FRAMES=96 FAMILY=<jet|area|pool|transient> OUT=/tmp/fam_<族> \
+  mantaflow/build/manta tools/fire_family_scene.py
+python3 tools/npzseq_to_jpovvol.py /tmp/fam_<族> assets/prototypes/<族>.jpovvol \
+  --skip 32 --frames 32 --blend 8 --scale 2 --dtype u8 --window 0.18   # 稳态族
+python3 tools/npzseq_to_jpovvol.py /tmp/fam_transient assets/prototypes/transient.jpovvol \
+  --skip 0 --frames 32 --blend 0 --scale 2 --dtype u8 --window 0.18     # 瞬态族（不循环）
+```
+
+### 12.2 物理口径（木材着火推演）
+
+| 维度 | 取值 | 说明 |
+|---|---|---|
+| 火焰温度 | **~1400 K** | 黑体 → 橙黄（非白热）；由**引擎侧** `temp_kelvin_scale` 定（资产只存归一化温度） |
+| 浮力 | 热浮力主导 | `BUOY_HEAT` 为主 |
+| 湍流 | 中等涡度 | 气相扩散焰、有烟、非蓝预混 |
+| 时间 | 稳态族源恒定（`timeAnim=0`）⇒ 可无缝循环；`transient` 短脉冲 + 强湍流 | |
+
+### 12.3 每族参数（脚本内 `PARAMS`）
+
+| 族 | 源尺寸(src) | 涡度(vg/vf) | 源帧(burn) | 耗散(diss) | 备注 |
+|---|---|---|---|---|---|
+| jet | 0.06×0.02×0.06 | 0.010/0.020 | 持续 | 0.99 | 细柱、可循环 |
+| area | 0.28×0.02×0.28 | 0.020/0.060 | 持续 | 0.965 | 短焰面火 |
+| pool | 0.82×0.02×0.82 | 0.040/0.120 | 持续 | 0.94 | 大面积、翻滚 |
+| transient | 0.30×0.12×0.30 | 0.150/0.400 | 8 帧 | 0.965 | 生命周期、不循环 |
+
+### 12.4 两个关键坑
+
+1. **`NOISE_SCALE=0` 会把源归零**（`noise.valScale=0`）→ 必须 **>0**（用 1.0）。
+2. **密度饱和填满域 → 渲染成“实心块”**（pool/area 尤甚：源面积大 + 浮力把密度均匀铺满）。
+   治 = **逐帧耗散**（`density/heat.multConst(DISSIP)`）让火随上升变薄变冷 + 烘焙 `--window` 边界淡出。
+
+### 12.5 资产与视图
+
+- 资产：`fire_hero/assets/prototypes/{jet,area,pool,transient}.jpovvol`（**48³×32×2ch×u8 ≈6.8MB**，与既有 `fire_stable.jpovvol` 同分辨率）；入库 `data/fire_vdb/prototypes/`。
+- 查看器：`jpov_volume_fire_viewer` 增 **「原型火纹理」模式**（面板左上勾选框 + **下拉菜单切族**）；非该模式下常规场景零回归。
+- **每族「自然尺」盒**（贴地，覆盖 蜡烛→火盆→1m²→爆炸）：
+
+| 族 | 盒 (m) | 默认 σ (1/m) |
+|---|---|---|
+| jet | 0.12×0.35×0.12 | 20 |
+| area | 0.50×0.70×0.50 | 5 |
+| pool | 1.00×0.90×1.00 | 2.5 |
+| transient | 1.50×1.50×1.50 | 3 |
+
+- 切族时**自动取景**（`R≈1.9·maxdim`）+ **套用该族默认 σ**（密度按自身上限归一化 ⇒ 小火焰需更大 σ 才有可见光深；大族 σ 大则整团不透明变块）。σ 仍是滑条可手调。
+- headless 批量：`--capture <dir>` 额外输出 `70_proto_{jet,area,pool,transient}.png`。
+
+### 12.6 现状 / 待办（Step 1 后续）
+
+- **机制全通**（烘焙→入库→viewer 下拉→渲染）。
+- **拟物性仍待调**：`pool/area` 仍偏“块”，需继续调（耗散强度 / 涡度 / 源分布，或改用 `flame`/`heat` 通道驱动消光）。这是 Step 2 的输入。
+

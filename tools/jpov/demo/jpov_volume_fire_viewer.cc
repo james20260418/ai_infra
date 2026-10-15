@@ -1,13 +1,14 @@
 // JPOV 体积火查看器 — 主程序
 //
 // 场景 = 灰色地面 + 1m³ 燃料块 + 块顶的体积火（逐像素 raymarch → WBO 薄层合成）。
-// headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>]
+// headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>] [--prototypes-dir <dir>]
 // 编译：./tools/jpov/build_volume_fire_viewer.sh
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <glog/logging.h>
 
@@ -54,6 +55,37 @@ std::string ResolveVolumePath(const std::string& arg) {
     return std::string();
 }
 
+// 四大原型族（文件名 = 族名）。
+const char* const kProtoFamilies[] = {"jet", "area", "pool", "transient"};
+const int kProtoFamilyCount = 4;
+
+// 解析原型族目录：--prototypes-dir 优先；否则在 exe 旁 / 数据目录里找含 jet.jpovvol 的目录。
+std::string ResolveProtoDir(const std::string& arg) {
+    std::vector<std::string> cands;
+    if (!arg.empty()) { cands.push_back(arg); }
+    const std::string d = ExeDir();
+    const char* rels[] = {"volumes/prototypes", "prototypes",
+                          "../data/fire_vdb/prototypes", "data/fire_vdb/prototypes"};
+    for (const char* r : rels) {
+        cands.push_back(d.empty() ? std::string(r) : (d + "/" + r));
+    }
+    for (const std::string& c : cands) {
+        std::FILE* f = std::fopen((c + "/jet.jpovvol").c_str(), "rb");
+        if (f != nullptr) { std::fclose(f); return c; }
+    }
+    return std::string();
+}
+
+// 扫描原型目录，按固定族序装载存在的 .jpovvol。
+void LoadPrototypes(const std::string& dir, std::vector<std::string>* paths,
+                    std::vector<std::string>* names) {
+    for (int i = 0; i < kProtoFamilyCount; ++i) {
+        const std::string p = dir + "/" + kProtoFamilies[i] + ".jpovvol";
+        std::FILE* f = std::fopen(p.c_str(), "rb");
+        if (f != nullptr) { std::fclose(f); names->push_back(kProtoFamilies[i]); paths->push_back(p); }
+    }
+}
+
 void InstallScene(jpov_volume_fire::VolumeFireViewerApp& app) {
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
     app.ground_mat_ = jpov_skylight::GroundMaterial();
@@ -72,7 +104,7 @@ void DefaultView(jpov_volume_fire::VolumeFireViewerApp& app) {
 }
 
 int RunCapture(const std::string& out_dir, const std::string& volume_path,
-               const std::string& dump_dir) {
+               const std::string& dump_dir, const std::string& proto_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV - volume fire viewer (capture)";
     cfg.width = jpov_viewer::kViewerWidth;
@@ -90,6 +122,12 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     if (!dump_dir.empty()) {
         app.SetVolumeDebugDump(dump_dir);
     }
+
+    // 原型族：装载（若目录可用）。
+    std::vector<std::string> proto_paths, proto_names;
+    if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names); }
+    app.proto_paths_ = proto_paths;
+    app.proto_names_ = proto_names;
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -137,6 +175,18 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     shoot("99_panel");
+
+    // 原型火纹理查看模式：每个族一张（面板可见，展示下拉）。
+    if (!proto_names.empty()) {
+        app.proto_mode_ = true;
+        for (int i = 0; i < static_cast<int>(proto_names.size()); ++i) {
+            app.proto_index_ = i;
+            for (int w = 0; w < 16; ++w) { app.RunOnce(input, winfo, "/tmp/_vf_warm.png"); }
+            char nm[64];
+            std::snprintf(nm, sizeof(nm), "70_proto_%s", proto_names[i].c_str());
+            shoot(nm);
+        }
+    }
     app.Finalize();
     return 0;
 }
@@ -147,6 +197,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string volume_arg;
     std::string dump_dir;
+    std::string proto_dir_arg;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -154,14 +205,22 @@ int main(int argc, char** argv) {
             volume_arg = argv[i + 1];
         } else if (std::strcmp(argv[i], "--dump-volume") == 0 && i + 1 < argc) {
             dump_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--prototypes-dir") == 0 && i + 1 < argc) {
+            proto_dir_arg = argv[i + 1];
         }
     }
     const std::string volume_path = ResolveVolumePath(volume_arg);
+    const std::string proto_dir = ResolveProtoDir(proto_dir_arg);
+    if (proto_dir.empty()) {
+        LOG(WARNING) << "未找到原型族目录（用 --prototypes-dir 指定；需 jet/area/pool/transient.jpovvol）";
+    } else {
+        LOG(INFO) << "prototypes dir = " << proto_dir;
+    }
     if (volume_path.empty()) {
         LOG(WARNING) << "找不到 .jpovvol 体积文件（用 --volume 指定）";
     }
     if (!out_dir.empty()) {
-        return RunCapture(out_dir, volume_path, dump_dir);
+        return RunCapture(out_dir, volume_path, dump_dir, proto_dir);
     }
 
     JPOV::Config cfg;
@@ -181,6 +240,12 @@ int main(int argc, char** argv) {
     app.InstallTextMeasure();
     InstallScene(app);
     app.volume_path_ = volume_path;
+    {
+        std::vector<std::string> proto_paths, proto_names;
+        if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names); }
+        app.proto_paths_ = proto_paths;
+        app.proto_names_ = proto_names;
+    }
     DefaultView(app);
     app.Run();
     app.Finalize();
