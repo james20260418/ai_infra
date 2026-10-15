@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tools/jpov/include/jpov/jpov.h"
@@ -48,8 +49,11 @@ public:
     // 下拉菜单切换族。常规场景（燃料块+其火）在关闭时不受影响（零回归）。
     bool proto_mode_ = false;                 // 原型查看模式开关
     int  proto_index_ = 0;                    // 当前选中的原型族下标
+    int  proto_play_mode_ = 0;                // 0=循环(1→1) 1=点火(0→1) 2=熄灭(1→0)
     std::vector<std::string> proto_paths_;    // 各族 .jpovvol 路径（由 main 注入）
     std::vector<std::string> proto_names_;    // 各族名（jet/area/pool/transient）
+    // 各族分段帧窗（由 sidecar .jpovvol.json 注入；缺省则退化为整段）。
+    std::vector<std::pair<int, int>> proto_ig_, proto_su_, proto_ex_;
 
     // 火焰盒（世界 AABB）：块顶 y=1.0 起，向上含整团火。
     jpov::Vec3f fire_min_ = {-0.9f, 1.0f, -0.9f};
@@ -150,16 +154,17 @@ public:
             const std::string& fam = proto_names_[static_cast<size_t>(pi)];
             jpov::Vec3f mn, mx;
             ProtoBoxForIndex(pi, &mn, &mx);
-            if (pi != last_proto_index_) {
-                // 切换族：重置播放相位 + 自动取景 + 套用该族的默认消光。
-                // （密度按自身上限归一化 ⇒ 小火焰需要更大的 σ 才有可见光深；
-                //   各族默认值不同，滑条仍可手调。）
+            if (pi != last_proto_index_ || proto_play_mode_ != last_proto_mode_) {
+                // 切换族/播放模式：重置播放相位 + 自动取景 + 套该族默认消光。
                 play_time_ = 0.0f;
-                const float maxdim = std::max(mx.x() - mn.x(),
-                                              std::max(mx.y() - mn.y(), mx.z() - mn.z()));
-                view_.R = std::max(0.6, 1.9 * static_cast<double>(maxdim));
-                sigma_scale_ = ProtoSigmaFor(fam);
+                if (pi != last_proto_index_) {
+                    const float maxdim = std::max(mx.x() - mn.x(),
+                                                  std::max(mx.y() - mn.y(), mx.z() - mn.z()));
+                    view_.R = std::max(0.6, 1.9 * static_cast<double>(maxdim));
+                    sigma_scale_ = ProtoSigmaFor(fam);
+                }
                 last_proto_index_ = pi;
+                last_proto_mode_ = proto_play_mode_;
             }
             const uint32_t vid = proto_ids_[static_cast<size_t>(pi)];
             const int pf = proto_nframes_[static_cast<size_t>(pi)];
@@ -176,7 +181,7 @@ public:
                 vc.steps = static_cast<int>(steps_ + 0.5f);
                 vc.jitter = jitter_;
                 vc.debug_fullscreen = fs_debug_;
-                vc.frame = std::fmod(play_time_ * fps_, static_cast<float>(pf));
+                vc.frame = ProtoFrame(pi, pf);
                 cmds->DrawVolumeFire(std::move(vc));
             }
         } else {
@@ -232,9 +237,11 @@ public:
                 jpov::Vec3f mn, mx;
                 ProtoBoxForIndex(pi, &mn, &mx);
                 char b[256];
+                const char* mode = (proto_play_mode_ == 0) ? "loop 1-1"
+                                 : (proto_play_mode_ == 1) ? "ignite 0-1" : "extinct 1-0";
                 std::snprintf(b, sizeof(b),
-                              "prototype: %s   vol=%dx%dx%d   box=%.2fx%.2fx%.2f m",
-                              proto_names_[static_cast<size_t>(pi)].c_str(),
+                              "prototype: %s  [%s]  vol=%dx%dx%d  box=%.2fx%.2fx%.2f m",
+                              proto_names_[static_cast<size_t>(pi)].c_str(), mode,
                               proto_nx_[static_cast<size_t>(pi)], proto_ny_[static_cast<size_t>(pi)],
                               proto_nz_[static_cast<size_t>(pi)],
                               mx.x() - mn.x(), mx.y() - mn.y(), mx.z() - mn.z());
@@ -282,6 +289,10 @@ private:
             for (const std::string& s : proto_names_) { items.push_back(s.c_str()); }
             ui_.Combo("原型族", &proto_index_, items,
                       jpov::UiRect{{cx, 40.0f}, {colw, 26.0f}});
+            static const char* kModes[] = {"循环 1-1", "点火 0-1", "熄灭 1-0"};
+            std::vector<const char*> mi(kModes, kModes + 3);
+            ui_.Combo("播放模式", &proto_play_mode_, mi,
+                      jpov::UiRect{{cx, 72.0f}, {colw, 26.0f}});
         }
     }
 
@@ -313,6 +324,21 @@ private:
         *mx = {0.5f * nx * sc, ny * sc, 0.5f * nz * sc};
     }
 
+    // 按播放模式取帧：0=循环 sustain（无缝循环）；1=点火（播一次后停末帧）；2=熄灭（同）。
+    float ProtoFrame(int i, int nframes) const {
+        const size_t k = static_cast<size_t>(i);
+        std::pair<int, int> seg{0, nframes};
+        bool loop = false;
+        if (proto_play_mode_ == 0 && k < proto_su_.size()) { seg = proto_su_[k]; loop = true; }
+        else if (proto_play_mode_ == 1 && k < proto_ig_.size()) { seg = proto_ig_[k]; }
+        else if (proto_play_mode_ == 2 && k < proto_ex_.size()) { seg = proto_ex_[k]; }
+        const int a = seg.first, b = seg.second;
+        const int n = std::max(1, b - a);
+        const float t = play_time_ * fps_;
+        if (loop) { return static_cast<float>(a) + std::fmod(t, static_cast<float>(n)); }
+        return static_cast<float>(a) + std::min(t, static_cast<float>(n - 1));
+    }
+
     // 每族「默认消光 σ」(1/m)：密度归一化 ⇒ 小火焰需更大 σ 才有可见光深；
     // 大族（池火）不能太大，否则整团不透明变“实心块”。
     static float ProtoSigmaFor(const std::string& name) {
@@ -331,6 +357,7 @@ private:
     std::vector<int> proto_nframes_;
     std::vector<int> proto_nx_, proto_ny_, proto_nz_;
     int  last_proto_index_ = -1;   // 触发「切族→重置+取景」的一次性哨兵
+    int  last_proto_mode_ = -1;    // 触发「切模式→重置」的哨兵
     bool proto_registered_ = false;
 };
 

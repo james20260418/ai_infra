@@ -7,7 +7,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
@@ -76,13 +79,66 @@ std::string ResolveProtoDir(const std::string& arg) {
     return std::string();
 }
 
-// 扫描原型目录，按固定族序装载存在的 .jpovvol。
+// 读 JPVOL2 头里的 nframes（offset 24，uint32 LE）。
+int JpovvolFrames(const std::string& p) {
+    std::FILE* f = std::fopen(p.c_str(), "rb");
+    if (f == nullptr) { return 0; }
+    unsigned char h[40];
+    const size_t n = std::fread(h, 1, sizeof(h), f);
+    std::fclose(f);
+    if (n < 40) { return 0; }
+    return static_cast<int>(h[24] | (h[25] << 8) | (h[26] << 16) | (h[27] << 24));
+}
+
+// 简易解析 sidecar：找 "key": [a, b]。
+bool ParseRangePair(const std::string& s, const std::string& key, int* a, int* b) {
+    const std::string k = "\"" + key + "\"";
+    size_t p = s.find(k);
+    if (p == std::string::npos) { return false; }
+    p = s.find('[', p);
+    if (p == std::string::npos) { return false; }
+    const size_t q = s.find(']', p);
+    if (q == std::string::npos) { return false; }
+    const std::string inner = s.substr(p + 1, q - p - 1);
+    int va = 0, vb = 0;
+    if (std::sscanf(inner.c_str(), "%d , %d", &va, &vb) != 2 &&
+        std::sscanf(inner.c_str(), "%d,%d", &va, &vb) != 2) { return false; }
+    *a = va; *b = vb;
+    return true;
+}
+
+// 读 <vol>.json 里的三段帧窗；缺省 = 整段 [0,nf]。
+void LoadProtoSegments(const std::string& vol_path, int nf,
+                       std::pair<int, int>* ig, std::pair<int, int>* su,
+                       std::pair<int, int>* ex) {
+    *ig = {0, nf}; *su = {0, nf}; *ex = {0, nf};
+    std::ifstream f(vol_path + ".json", std::ios::binary);
+    if (!f) { return; }
+    const std::string s((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    int a = 0, b = 0;
+    if (ParseRangePair(s, "ignite", &a, &b)) { *ig = {a, b}; }
+    if (ParseRangePair(s, "sustain", &a, &b)) { *su = {a, b}; }
+    if (ParseRangePair(s, "extinct", &a, &b)) { *ex = {a, b}; }
+}
+
+// 扫描原型目录，按固定族序装载存在的 .jpovvol + 分段帧窗。
 void LoadPrototypes(const std::string& dir, std::vector<std::string>* paths,
-                    std::vector<std::string>* names) {
+                    std::vector<std::string>* names,
+                    std::vector<std::pair<int, int>>* ig,
+                    std::vector<std::pair<int, int>>* su,
+                    std::vector<std::pair<int, int>>* ex) {
     for (int i = 0; i < kProtoFamilyCount; ++i) {
         const std::string p = dir + "/" + kProtoFamilies[i] + ".jpovvol";
         std::FILE* f = std::fopen(p.c_str(), "rb");
-        if (f != nullptr) { std::fclose(f); names->push_back(kProtoFamilies[i]); paths->push_back(p); }
+        if (f == nullptr) { continue; }
+        std::fclose(f);
+        names->push_back(kProtoFamilies[i]);
+        paths->push_back(p);
+        const int nf = JpovvolFrames(p);
+        std::pair<int, int> a{0, nf}, b{0, nf}, c{0, nf};
+        LoadProtoSegments(p, nf, &a, &b, &c);
+        ig->push_back(a); su->push_back(b); ex->push_back(c);
     }
 }
 
@@ -125,9 +181,13 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
 
     // 原型族：装载（若目录可用）。
     std::vector<std::string> proto_paths, proto_names;
-    if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names); }
+    std::vector<std::pair<int, int>> pig, psu, pex;
+    if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex); }
     app.proto_paths_ = proto_paths;
     app.proto_names_ = proto_names;
+    app.proto_ig_ = pig;
+    app.proto_su_ = psu;
+    app.proto_ex_ = pex;
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -176,16 +236,20 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     app.InstallTextMeasure();
     shoot("99_panel");
 
-    // 原型火纹理查看模式：每个族一张（面板可见，展示下拉）。
+    // 原型火纹理查看模式：每族 × 三种播放模式（循环/点火/熄灭）各一张。
     if (!proto_names.empty()) {
         app.proto_mode_ = true;
         for (int i = 0; i < static_cast<int>(proto_names.size()); ++i) {
-            app.proto_index_ = i;
-            for (int w = 0; w < 16; ++w) { app.RunOnce(input, winfo, "/tmp/_vf_warm.png"); }
-            app.play_time_ = 45.0f / app.fps_;   // 落在 sustain（循环）段
-            char nm[64];
-            std::snprintf(nm, sizeof(nm), "70_proto_%s", proto_names[i].c_str());
-            shoot(nm);
+            for (int m = 0; m < 3; ++m) {
+                app.proto_index_ = i;
+                app.proto_play_mode_ = m;
+                for (int w = 0; w < 12; ++w) { app.RunOnce(input, winfo, "/tmp/_vf_warm.png"); }
+                const float tf = (m == 0) ? 45.0f : (m == 1) ? 15.0f : 73.0f;
+                app.play_time_ = tf / app.fps_;
+                char nm[80];
+                std::snprintf(nm, sizeof(nm), "70_proto_%s_m%d", proto_names[i].c_str(), m);
+                shoot(nm);
+            }
         }
     }
     app.Finalize();
@@ -243,9 +307,13 @@ int main(int argc, char** argv) {
     app.volume_path_ = volume_path;
     {
         std::vector<std::string> proto_paths, proto_names;
-        if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names); }
+        std::vector<std::pair<int, int>> pig, psu, pex;
+        if (!proto_dir.empty()) { LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex); }
         app.proto_paths_ = proto_paths;
         app.proto_names_ = proto_names;
+        app.proto_ig_ = pig;
+        app.proto_su_ = psu;
+        app.proto_ex_ = pex;
     }
     DefaultView(app);
     app.Run();

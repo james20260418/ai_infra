@@ -373,6 +373,7 @@ python3 tools/npzseq_to_jpovvol.py /tmp/fam_transient assets/prototypes/transien
 
 单条 `.jpovvol` = `[点火 | 持续(循环) | 熄灭]`（**83 帧**：ignite[0,31] sustain[31,63] extinct[63,83]）。
 随附 `<name>.jpovvol.json` 记分段帧窗（供运行时：点火播一次 → 循环 sustain 窗 → 熄灭播一次；切熄灭须在 sustain 入口）。
+查看器提供**「播放模式」下拉**：`循环 1-1` / `点火 0-1` / `熄灭 1-0`（看循环连续性就用循环模式盯接缝）；`--capture` 每族出 3 张 `70_proto_<族>_m{0,1,2}.png`。
 
 ### 13.6 仍未解决 / 待观察
 
