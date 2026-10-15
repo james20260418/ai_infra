@@ -56,6 +56,17 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# VolumeFireTypes — 体积火（raymarch）接口层类型（GL-free，render_command 与 src/volume_fire 共用）
+cc_library(
+    name = "volume_fire_types",
+    hdrs = ["volume_fire_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
@@ -68,6 +79,7 @@ cc_library(
         ":pbr_material",
         ":particle_types",
         ":skeleton_types",
+        ":volume_fire_types",
         "//geom/common:vec",
         "//geom/math:piecewise_linear_function",
         "@glog_static//:glog",

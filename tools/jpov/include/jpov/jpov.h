@@ -200,6 +200,22 @@ public:
     // Pre-condition: Init() 已调用
     void ReleaseTexture(uint32_t texture_id);
 
+    // RegisterVolumeTexture: 从 .jpovvol 文件（JPVOL2）加载**体积纹理**到 GPU。
+    //
+    // 返回体积 id，供 cmds->DrawVolumeFire(VolumeFireCommand{volume_id=...}) 引用。
+    // 同一路径仅加载一次。加载失败 → 返回 0。
+    //
+    // Pre-condition: Init() 已调用
+    // Pre-condition: filepath 非空
+    uint32_t RegisterVolumeTexture(const std::string& filepath);
+
+    // 查询体积纹理的帧数（不存在 → 0）。
+    int VolumeFrameCount(uint32_t volume_id) const;
+
+    // 调试：开启体积火 raymarch 中间结果导出（accum=加权色 L、alpha=覆盖 → PNG）。
+    // 空串 = 关。每帧一对 `<dir>/dump_NNN_accum.png` / `_alpha.png`。
+    void SetVolumeDebugDump(const std::string& dir);
+
     // ---- 网格管理 ----
 
     // RegisterMesh: 将 CPU MeshData 上传为 GPU mesh，返回 mesh_id。

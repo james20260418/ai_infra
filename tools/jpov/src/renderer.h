@@ -16,6 +16,7 @@
 #include "tools/jpov/interface/window_info.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
+#include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
@@ -58,6 +59,17 @@ struct Renderer {
     void SaveScreenshotToBuffer(int win_w, int win_h, std::vector<uint8_t>* out_pixels);
 
     TextureManager& GetTextureManager() { return texture_mgr_; }
+
+    // 加载一个 .jpovvol 体积（JPVOL2）→ 供 cmds->DrawVolumeFire 引用。返回体积 id（0=失败）。
+    uint32_t RegisterVolume(const std::string& path) {
+        return volume_fire_renderer_.RegisterVolume(path);
+    }
+    int VolumeFrameCount(uint32_t volume_id) const {
+        return volume_fire_renderer_.VolumeFrameCount(volume_id);
+    }
+    void SetVolumeDebugDump(const std::string& dir) {
+        volume_fire_renderer_.SetDebugDump(dir);
+    }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
 
     // 上一次拾取查询的结果（方法甲：渲染时填入 last_pick_，下帧读取）。
@@ -338,6 +350,7 @@ private:
     // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
     FireFogRenderer fire_fog_renderer_;
     ParticleRenderer particle_renderer_;
+    VolumeFireRenderer volume_fire_renderer_;
     // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
     SmaaRenderer smaa_renderer_;
 

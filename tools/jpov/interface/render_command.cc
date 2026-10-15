@@ -236,6 +236,11 @@ void RenderCommandList::DrawParticles(ParticleRenderCommand cmd) {
     particles.push_back(std::move(cmd));
 }
 
+void RenderCommandList::DrawVolumeFire(VolumeFireCommand cmd) {
+    CHECK_NE(cmd.volume_id, 0u) << "DrawVolumeFire: volume_id 不能为 0";
+    volume_fires.push_back(std::move(cmd));
+}
+
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,
                                        const Vec3f& center,
                                        const Vec3f& up, const Vec3f& front,
