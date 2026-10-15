@@ -22,6 +22,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/volume_fire_types.h"
 #include "tools/jpov/src/shader_manager.h"
+#include "tools/jpov/src/volume_manager.h"
 
 namespace jpov {
 
@@ -230,21 +231,12 @@ void main() {
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
-    // 加载一个 `.jpovvol`（JPVOL2，u8）→ GL 2D array 纹理（层=帧）。返回体积 id（0=失败）。
-    // 同路径去重。Pre-condition: GL context 已激活。
-    uint32_t RegisterVolume(const std::string& path);
-
-    // 查询体积的帧数（无此 id → 0）。
-    int VolumeFrameCount(uint32_t id) const {
-        const auto it = volumes_.find(id);
-        return (it == volumes_.end()) ? 0 : it->second.nframes;
-    }
-
-    // 帧首：确保 WBO FBO 存在并 clear（accum=0/reveal=1/depth=0）。
+    // 帧首：确保 TAB 存在并 clear（accum=0/reveal=1/depth=0）。
     void Begin(int w, int h);
 
-    // 画一团体积火进 WBO FBO（累加）。Pre-condition: Init 已调用。
-    void Draw(const VolumeFireCommand& cmd, const Camera& camera,
+    // 画一团体积火进 TAB（累加）。体积纹理由 VolumeManager 持有（按 cmd.volume_id 查）。
+    // Pre-condition: Init 已调用。
+    void Draw(const VolumeFireCommand& cmd, VolumeManager& volume_mgr, const Camera& camera,
               const float view_proj[16],
               unsigned int scene_depth_tex, int w, int h);
 
@@ -258,10 +250,6 @@ void main() {
     bool has_content() const { return has_content_; }
 
 private:
-    struct VolumeEntry {
-        unsigned int gl_tex = 0;
-        int nx = 0, ny = 0, nz = 0, nframes = 0;
-    };
     void EnsureWbo(int w, int h);
     void DestroyWbo();
     void DumpWbo(int w, int h);
@@ -277,9 +265,6 @@ private:
     bool initialized_ = false;
     std::string debug_dump_dir_;
     int dump_seq_ = 0;
-    uint32_t next_volume_id_ = 1;
-    std::unordered_map<std::string, uint32_t> path_to_volume_;
-    std::unordered_map<uint32_t, VolumeEntry> volumes_;
 };
 
 }  // namespace jpov

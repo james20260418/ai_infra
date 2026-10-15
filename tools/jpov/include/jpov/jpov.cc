@@ -232,7 +232,7 @@ uint32_t JPOV::RegisterVolumeTexture(const std::string& filepath) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK(!filepath.empty()) << "RegisterVolumeTexture: filepath is empty";
     CHECK(renderer_ != nullptr);
-    return renderer_->RegisterVolume(filepath);
+    return renderer_->GetVolumeManager().LoadFromFile(filepath);
 }
 
 int JPOV::VolumeFrameCount(uint32_t volume_id) const {

@@ -17,6 +17,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
+#include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
@@ -60,12 +61,15 @@ struct Renderer {
 
     TextureManager& GetTextureManager() { return texture_mgr_; }
 
+    // 体积纹理管理器（与 texture_mgr_ 并列）：供 cmds->DrawVolumeFire 引用。
+    VolumeManager& GetVolumeManager() { return volume_mgr_; }
+
     // 加载一个 .jpovvol 体积（JPVOL2）→ 供 cmds->DrawVolumeFire 引用。返回体积 id（0=失败）。
     uint32_t RegisterVolume(const std::string& path) {
-        return volume_fire_renderer_.RegisterVolume(path);
+        return volume_mgr_.LoadFromFile(path);
     }
     int VolumeFrameCount(uint32_t volume_id) const {
-        return volume_fire_renderer_.VolumeFrameCount(volume_id);
+        return volume_mgr_.FrameCount(volume_id);
     }
     void SetVolumeDebugDump(const std::string& dir) {
         volume_fire_renderer_.SetDebugDump(dir);
@@ -139,7 +143,11 @@ private:
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
 
-    // 透明玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
+    // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）—— 玻璃实例 ──
+    // 「TAB」= 一次 OIT 用的 3 附件透明累积缓冲（accum/reveal/depth），被玻璃 / 粒子 / 体积火
+    // 共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
+    // 此处是**玻璃那一份**，也是 froxel 体积雾绑定读的那一份。旧称「玻璃 FBO / WBO 纹理」。
+    // 玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
     // 尺寸 = 3D FBO（1× 单采样；结构化数据不能被过滤/平均）。
     //   COLOR0 accum (RGBA16F)：blend(ONE, ONE)——Σ(预乘色×w, α×w)；
     //   COLOR1 reveal (R16F) ：blend(ZERO, ONE_MINUS_SRC_COLOR)——Π(1−α)；
@@ -351,6 +359,7 @@ private:
     FireFogRenderer fire_fog_renderer_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
+    VolumeManager volume_mgr_;
     // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
     SmaaRenderer smaa_renderer_;
 

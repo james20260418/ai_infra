@@ -38,6 +38,25 @@ cc_library(
     linkstatic = 1,
 )
 
+# VolumeManager — 3D 体积纹理（.jpovvol）加载/去重/释放（与 texture_manager 并列）
+cc_library(
+    name = "volume_manager",
+    srcs = ["volume_manager.cc"],
+    hdrs = ["volume_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:id_allocator",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # MeshManager — CPU MeshData → GPU（VAO + 分离 VBO + EBO）上传/更新/释放
 cc_library(
     name = "mesh_manager",
@@ -252,6 +271,7 @@ cc_library(
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",
+        "//tools/jpov/src:volume_manager",
         ":gltf_loader",
         ":orm_unpack",
         "//tools/common:utils",

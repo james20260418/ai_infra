@@ -7,8 +7,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
-#include <fstream>
 #include <vector>
 
 #include <GL/gl.h>
@@ -88,17 +86,6 @@ bool Invert4(const float m[16], float inv[16]) {
     return true;
 }
 
-// JPVOL2 header（little-endian，40 字节）。
-struct JpovVol2Header {
-    char magic[8];
-    uint32_t version;
-    uint32_t nx, ny, nz;
-    uint32_t nframes;
-    uint32_t channels;
-    uint32_t dtype;   // 0=float32, 1=uint8(归一化)
-    uint32_t reserved;
-};
-
 }  // namespace
 
 VolumeFireRenderer::VolumeFireRenderer() = default;
@@ -117,79 +104,11 @@ void VolumeFireRenderer::Init(ShaderManager* shader_mgr) {
 
 void VolumeFireRenderer::Finalize() {
     DestroyWbo();
-    for (auto& kv : volumes_) {
-        if (kv.second.gl_tex != 0) {
-            glDeleteTextures(1, &kv.second.gl_tex);
-        }
-    }
-    volumes_.clear();
-    path_to_volume_.clear();
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
     initialized_ = false;
-}
-
-uint32_t VolumeFireRenderer::RegisterVolume(const std::string& path) {
-    const auto it = path_to_volume_.find(path);
-    if (it != path_to_volume_.end()) {
-        return it->second;
-    }
-    std::ifstream f(path, std::ios::binary);
-    if (!f.good()) {
-        LOG(WARNING) << "VolumeFireRenderer: 打不开 " << path;
-        return 0;
-    }
-    JpovVol2Header h{};
-    f.read(reinterpret_cast<char*>(&h), sizeof(h));
-    if (std::memcmp(h.magic, "JPVOL2", 6) != 0) {
-        LOG(WARNING) << "VolumeFireRenderer: 非 JPVOL2 文件 " << path;
-        return 0;
-    }
-    CHECK_GT(h.nx, 0u);
-    CHECK_GT(h.ny, 0u);
-    CHECK_GT(h.nz, 0u);
-    CHECK_GE(h.nframes, 1u);
-    CHECK_EQ(h.channels, 2u) << "JPVOL2 期望 2 通道 (R=density, G=temperature)";
-    CHECK(h.dtype == 0u || h.dtype == 1u) << "JPVOL2 dtype 仅支持 0(f32)/1(u8)";
-
-    const size_t per_frame = static_cast<size_t>(h.nx) * h.ny * h.nz * h.channels;
-    const size_t bytes_per_frame = per_frame * (h.dtype == 1u ? 1u : 4u);
-    std::vector<unsigned char> buf(bytes_per_frame);
-    // 数据紧跟 40 字节 header。
-    f.seekg(sizeof(JpovVol2Header), std::ios::beg);
-
-    unsigned int tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-    const GLenum internal = (h.dtype == 1u) ? GL_RG8 : GL_RG16F;
-    const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE : GL_FLOAT;
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal,
-                 static_cast<GLsizei>(h.nx), static_cast<GLsizei>(h.ny * h.nz),
-                 static_cast<GLsizei>(h.nframes), 0, GL_RG, type, nullptr);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    for (uint32_t fr = 0; fr < h.nframes; ++fr) {
-        f.read(reinterpret_cast<char*>(buf.data()),
-               static_cast<std::streamsize>(bytes_per_frame));
-        CHECK(f.good()) << "JPVOL2 数据读取不足: " << path << " frame " << fr;
-        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, static_cast<GLint>(fr),
-                        static_cast<GLsizei>(h.nx), static_cast<GLsizei>(h.ny * h.nz),
-                        1, GL_RG, type, buf.data());
-    }
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-
-    const uint32_t id = next_volume_id_++;
-    volumes_[id] = VolumeEntry{tex, static_cast<int>(h.nx), static_cast<int>(h.ny),
-                               static_cast<int>(h.nz), static_cast<int>(h.nframes)};
-    path_to_volume_[path] = id;
-    LOG(INFO) << "[volume_fire] loaded " << path << " dims=(" << h.nx << "," << h.ny
-              << "," << h.nz << ") frames=" << h.nframes << " dtype=" << h.dtype
-              << " -> id " << id;
-    return id;
 }
 
 void VolumeFireRenderer::EnsureWbo(int w, int h) {
@@ -259,22 +178,22 @@ void VolumeFireRenderer::Begin(int w, int h) {
     has_content_ = false;
 }
 
-void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, const Camera& camera,
+void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volume_mgr,
+                              const Camera& camera,
                               const float view_proj[16],
                               unsigned int scene_depth_tex, int w, int h) {
     CHECK(initialized_) << "VolumeFireRenderer::Draw: 未 Init";
-    const auto vit = volumes_.find(cmd.volume_id);
-    if (vit == volumes_.end()) {
+    VolumeInfo vol;
+    if (!volume_mgr.GetInfo(cmd.volume_id, &vol)) {
         return;
     }
     CHECK_NE(scene_depth_tex, 0u);
-    const VolumeEntry& vol = vit->second;
     EnsureWbo(w, h);
 
     const Vec3f cam_pos = camera.position;
     const Vec3f fwd = NormalizeOr(Sub(camera.target, camera.position), Vec3f(0, 0, -1));
 
-    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
     glViewport(0, 0, w, h);
     glDisable(GL_DEPTH_TEST);
@@ -342,6 +261,7 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, const Camera& camera
     glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE0);   // 归还纹理单元（P8：不留激活单元给后续 pass）
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPopAttrib();
     has_content_ = true;

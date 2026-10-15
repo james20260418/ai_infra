@@ -1769,7 +1769,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK(use_hdr) << "体积火需要 tone_mapping=true（HDR/MRT 场景深度）";
                 volume_fire_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 for (const VolumeFireCommand& vc : cmds.volume_fires) {
-                    volume_fire_renderer_.Draw(vc, cmds.camera, mvp_,
+                    volume_fire_renderer_.Draw(vc, volume_mgr_, cmds.camera, mvp_,
                                                hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
