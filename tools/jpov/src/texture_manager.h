@@ -31,9 +31,25 @@ namespace jpov {
 //                   （三线性），大透视平铺面（如地面）防摩尔纹/闪烁。
 //   repeat: true → WRAP_S/T=GL_REPEAT，纹理平铺（UV 超 [0,1] 周期重复）；
 //                   false → GL_CLAMP_TO_EDGE（默认，UV>1 拉边缘色）。
+//   alpha_coverage: 覆盖率保持的 alpha mipmap（见下），专治 alpha cutout（MASK）贴图
+//                   远景「变稀 / 整片消失」。
 struct TextureOptions {
+    // 覆盖率保持（coverage-preserving）alpha mipmap。
+    //
+    // 仅对 alpha cutout（glTF alphaMode=MASK）贴图有意义：这类贴图的片元保留判据是
+    // 「采样 alpha >= 材质 alpha_cutoff」。GL 的 glGenerateMipmap 线性平均会把透明
+    // 背景的 alpha 拉低 → 高层 mip 的覆盖率低于 mip0 → 远景叶卡变稀/消失。
+    //
+    // enabled: true → mip 链由 CPU 手写（见 coverage_mipmap.h）：颜色照常盒式平均，
+    //   alpha 逐级按覆盖率反解阈值后二值化，令每级覆盖率恒等于 mip0。需 mipmap=true。
+    // cutoff: 覆盖率反解阈值，**必须与材质的 alpha_cutoff 一致**（enabled 时 ∈(0,1)）。
+    struct AlphaCoverage {
+        bool enabled = false;
+        float cutoff = 0.5f;
+    };
     bool mipmap = false;
     bool repeat = false;
+    AlphaCoverage alpha_coverage;
 };
 
 class TextureManager {
@@ -111,7 +127,7 @@ private:
         int width;
         int height;
         bool owned;  // true = TextureManager 负责 glDeleteTextures
-        TextureOptions opts;  // 加载时的采样选项（mipmap / repeat）
+        TextureOptions opts;  // 加载时的采样选项（mipmap / repeat / alpha_coverage）
     };
 
     // 纹理 ID 分配：IdAllocator（freelist/LIFO 复用 + live 集防回绕踩踏）。0 = 无效 id。
@@ -128,7 +144,7 @@ private:
     // gl_tex → id（Register 去重）
     std::unordered_map<uint32_t, uint32_t> gl_tex_to_id_;
 
-    // 像素 → GL 纹理（生成/上传/参数/mipmap）。rgba 指向 w*h*4 字节。
+    // 像素 → GL 纹理（生成/上传/参数/mipmap/覆盖率保持 alpha 链）。rgba 指向 w*h*4 字节。
     // Pre-condition: rgba 非空；w>0；h>0。失败 LOG(FATAL)。
     unsigned int UploadRgba(const unsigned char* rgba, int width, int height,
                             const TextureOptions& opts);

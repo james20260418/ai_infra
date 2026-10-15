@@ -18,6 +18,19 @@ cc_library(
     linkstatic = 1,
 )
 
+# CoverageMipmap — 覆盖率保持的 alpha mip 链生成（GL-free、header-only 纯函数）。
+# 供 TextureManager 生成 alpha cutout 贴图的 mip 链（防远景叶卡变稀/消失）。
+cc_library(
+    name = "coverage_mipmap",
+    hdrs = ["coverage_mipmap.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
 cc_library(
     name = "texture_manager",
@@ -25,6 +38,7 @@ cc_library(
     hdrs = ["texture_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":coverage_mipmap",
         "//third_party/stb:stb_image",
         "//tools/jpov/interface:id_allocator",
         "@glog_static//:glog",
