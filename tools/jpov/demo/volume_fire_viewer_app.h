@@ -65,7 +65,7 @@ public:
     float steps_ = 64.0f;           // 步数
     bool  jitter_ = true;           // 抖动
     float fps_ = 24.0f;             // 播放帧率（旋钮；默认值由物理推导，见注释）
-    float temp_kelvin_scale_ = 2000.0f;  // G(∈[0,1]) → 开尔文
+    float temp_kelvin_scale_ = 2600.0f;  // G(∈[0,1]) → 开尔文
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     bool  fs_debug_ = false;         // 调试：全屏 quad 代替盒光栅化
@@ -120,8 +120,10 @@ public:
         cmds->camera.near = 0.05f;
         cmds->camera.far = 1000.0f;
 
+        jpov_skylight::SkyDegrees sd = deg_;
+        if (proto_mode_) { sd.sun_elev_deg = -9.0f; }   // 原型查看：夜背景，让火“跳出来”
         const jpov_skylight::SkyLighting nl =
-            jpov_skylight::MakeSkyLighting(deg_, /*tricolor_ambient=*/false);
+            jpov_skylight::MakeSkyLighting(sd, /*tricolor_ambient=*/false);
         cmds->sky = nl.sky;
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
@@ -162,6 +164,7 @@ public:
                                                   std::max(mx.y() - mn.y(), mx.z() - mn.z()));
                     view_.R = std::max(0.6, 1.9 * static_cast<double>(maxdim));
                     sigma_scale_ = ProtoSigmaFor(fam);
+                    emission_scale_ = ProtoEmissionFor(fam);
                 }
                 last_proto_index_ = pi;
                 last_proto_mode_ = proto_play_mode_;
@@ -272,7 +275,7 @@ private:
         };
         ui_.Checkbox("体积火", &fire_enable_, row(0));
         ui_.SliderFloat("消光 σ (1/m)", &sigma_scale_, row(1), 0.0f, 150.0f, 2);
-        ui_.SliderFloat("发射强度", &emission_scale_, row(2), 0.0f, 5.0f, 2);
+        ui_.SliderFloat("发射强度", &emission_scale_, row(2), 0.0f, 20.0f, 2);
         ui_.SliderFloat("步数", &steps_, row(3), 8.0f, 256.0f, 0);
         ui_.Checkbox("抖动", &jitter_, row(4));
         ui_.SliderFloat("帧率 fps", &fps_, row(5), 4.0f, 60.0f, 0);
@@ -343,9 +346,15 @@ private:
     // 大族（池火）不能太大，否则整团不透明变“实心块”。
     static float ProtoSigmaFor(const std::string& name) {
         if (name == "jet") { return 30.0f; }    // 蜡烛/细柱：细而密
-        if (name == "area") { return 5.0f; }    // 面火
+        if (name == "area") { return 6.0f; }    // 面火/火盆
         if (name == "pool") { return 2.5f; }    // 池火（大团→低 σ 见结构）
         return 3.0f;                              // transient
+    }
+
+    // 每族「默认发射强度」。
+    static float ProtoEmissionFor(const std::string& name) {
+        if (name == "area") { return 1.6f; }
+        return 1.0f;
     }
 
     bool show_panel_ = true;
