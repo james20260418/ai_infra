@@ -1,0 +1,3 @@
+# 本地编译的 Mantaflow（大二进制；由 env/Dockerfile 或 setup_dev_env.sh 生成，不入库）
+mantaflow/
+__pycache__/

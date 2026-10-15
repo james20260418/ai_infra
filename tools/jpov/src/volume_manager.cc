@@ -25,7 +25,7 @@ namespace jpov {
 
 namespace {
 
-// JPVOL2 header（little-endian，40 字节，与 fire_hero/tools/npzseq_to_jpovvol.py 对应）。
+// JPVOL2 header（little-endian，40 字节，与 tools/jpov/genVolume/jpvol.py 对应）。
 struct JpovVol2Header {
     char magic[8];        // "JPVOL2\0\0"
     uint32_t version;     // == 2
