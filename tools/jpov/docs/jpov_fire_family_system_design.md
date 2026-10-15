@@ -364,10 +364,20 @@ python3 tools/npzseq_to_jpovvol.py /tmp/fam_transient assets/prototypes/transien
 
 ### 13.4 环闭合工具（治循环跳变）
 
-`fire_hero/tools/fire_family_bake.py --loop half-xfade`：
-取持续窗 `S[0..N-1]`，输出 `L[t] = (1−c[t])·S[t] + c[t]·S[(t+N//2) % N]`，`c[t]=0.5+0.5·cos(2π t/N)`
-（`c[0]=c[N]=1` ⇒ 接缝处只留“内部”帧 ⇒ **缝被抹掉**；代价：轻微重影）。
-**验证**：接缝比（接缝差 / 内部帧平均差）**3.05 → 1.10**（≈普通帧间 = 无缝）。
+`fire_hero/tools/fire_family_bake.py --loop half-xfade --loop-frames N`：
+取持续窗 `S[0..N-1]`，输出 `L[t] = (1−c[t])·S[t] + c[t]·S[(t+N//2) % N]`，`c[t]=0.5+0.5·cos(2π t/N)`。
+
+⚠️ **半周期相位对齐（关键坑）**：`half-xfade` 会把**循环入口内容平移 N/2**（`L[0]=S[N/2]`）。
+因此窗口起点必须 = `a0 − N/2`（`a0=S0−1`），使 `L[0]` 内容 == `state[S0]` == 检查点。
+否则「循环内部」无缝、但**循环后一帧（=熄灭段首=检查点）与循环内容对不齐** ⇒ 渲染器在循环末端 lerp 时突变。
+（实测修复前 `|b1−b1-1|≈4×内部帧差`，修复后 `≈1.0–1.2×`。）
+
+**验证指标**（接缝差 / 循环内平均帧差）：修复后 jet/area/pool/transient = **1.13 / 1.01 / 1.13 / 1.14**（≈普通帧间 = 无缝）。
+
+**副则**：循环窗必须落在**稳定段**（避开点火过渡）⇒ `S0=48`。
+
+**另**：best-window（找 `state[N]≈state[0]`）对混沌火**做不到真循环**（实测 ratio 2.9），故用 half-xfade。
+查看器可 `--loop-dump <dir> --loop-family <族>` 导出持续段逐帧（拼 GIF 看连续性）。
 
 ### 13.5 资产与 sidecar
 

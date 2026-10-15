@@ -256,6 +256,53 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     return 0;
 }
 
+// 持续段逐帧输出（供拼 GIF 检查循环连续性）。
+int RunLoopDump(const std::string& out_dir, const std::string& proto_dir,
+                const std::string& family) {
+    JPOV::Config cfg;
+    cfg.title = "loop dump";
+    cfg.width = jpov_viewer::kViewerWidth;
+    cfg.height = jpov_viewer::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+    };
+    jpov_volume_fire::VolumeFireViewerApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    std::vector<std::string> proto_paths, proto_names;
+    std::vector<std::pair<int, int>> pig, psu, pex;
+    LoadPrototypes(proto_dir, &proto_paths, &proto_names, &pig, &psu, &pex);
+    app.proto_paths_ = proto_paths;
+    app.proto_names_ = proto_names;
+    app.proto_ig_ = pig; app.proto_su_ = psu; app.proto_ex_ = pex;
+    jpov::WindowInfo winfo;
+    winfo.width = jpov_viewer::kViewerWidth;
+    winfo.height = jpov_viewer::kViewerHeight;
+    jpov::InputSnapshot input{};
+    DefaultView(app);
+    int idx = 0;
+    for (int i = 0; i < static_cast<int>(proto_names.size()); ++i) {
+        if (proto_names[i] == family) { idx = i; }
+    }
+    app.proto_mode_ = true;
+    app.proto_index_ = idx;
+    app.proto_play_mode_ = 0;   // 循环
+    for (int w = 0; w < 10; ++w) { app.RunOnce(input, winfo, "/tmp/_vf_warm.png"); }
+    const int su0 = app.proto_su_[static_cast<size_t>(idx)].first;
+    const int su1 = app.proto_su_[static_cast<size_t>(idx)].second;
+    for (int f = su0; f < su1; ++f) {
+        app.play_time_ = static_cast<float>(f - su0) / app.fps_;
+        char nm[160];
+        std::snprintf(nm, sizeof(nm), "%s/loop_%03d.png", out_dir.c_str(), f - su0);
+        app.RunOnce(input, winfo, nm);
+    }
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -263,6 +310,8 @@ int main(int argc, char** argv) {
     std::string volume_arg;
     std::string dump_dir;
     std::string proto_dir_arg;
+    std::string loop_dump_dir;
+    std::string loop_family = "jet";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -272,6 +321,10 @@ int main(int argc, char** argv) {
             dump_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--prototypes-dir") == 0 && i + 1 < argc) {
             proto_dir_arg = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--loop-dump") == 0 && i + 1 < argc) {
+            loop_dump_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--loop-family") == 0 && i + 1 < argc) {
+            loop_family = argv[i + 1];
         }
     }
     const std::string volume_path = ResolveVolumePath(volume_arg);
@@ -283,6 +336,9 @@ int main(int argc, char** argv) {
     }
     if (volume_path.empty()) {
         LOG(WARNING) << "找不到 .jpovvol 体积文件（用 --volume 指定）";
+    }
+    if (!loop_dump_dir.empty()) {
+        return RunLoopDump(loop_dump_dir, proto_dir, loop_family);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, volume_path, dump_dir, proto_dir);
