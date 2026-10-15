@@ -96,12 +96,20 @@ void main() {
     vec3 wn = normalize(nrm * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        float b2 = aFlex.x * aFlex.x;
-        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
-        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
-                  0.20 * sin(phi * 3.70 + 4.1);
-        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
-        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));
+        const int kLv = 4;
+        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+        float base = floor(min(sN, float(kLv)));
+        float frac = sN - base;
+        float ssum = 0.0;
+        for (int l = 0; l < kLv; ++l) {
+            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        }
+        p += aInstWind.xyz * ssum;
+        float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -147,12 +155,20 @@ void main() {
     vec3 wn = normalize(nrm * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        float b2 = aFlex.x * aFlex.x;
-        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
-        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
-                  0.20 * sin(phi * 3.70 + 4.1);
-        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
-        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));
+        const int kLv = 4;
+        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+        float base = floor(min(sN, float(kLv)));
+        float frac = sN - base;
+        float ssum = 0.0;
+        for (int l = 0; l < kLv; ++l) {
+            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        }
+        p += aInstWind.xyz * ssum;
+        float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -191,11 +207,18 @@ void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        float b2 = aFlex.x * aFlex.x;
-        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
-        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
-                  0.20 * sin(phi * 3.70 + 4.1);
-        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
+        const int kLv = 4;
+        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+        float base = floor(min(sN, float(kLv)));
+        float frac = sN - base;
+        float ssum = 0.0;
+        for (int l = 0; l < kLv; ++l) {
+            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        }
+        p += aInstWind.xyz * ssum;
     }
     vec4 wp = model * vec4(p, 1.0);
     gl_Position = uShadowViewProj * wp;

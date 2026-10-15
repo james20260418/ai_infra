@@ -3286,8 +3286,9 @@ GltfObject Renderer::LoadGltf(const std::string& path, bool derive_wind_flex) {
 
         const GltfMaterialInfo& mi = entry->material;
         GltfPrimitive prim;
-        if (ctx->wind_params != nullptr) {
-            // 拷贝后派生（entry 只读；MeshData 含骨骼数组不宜反复原位改）
+        if (ctx->wind_params != nullptr &&
+            !MeshHasFlag(entry->mesh.flags, MeshVertexFlags::kWind)) {
+            // 仅当资产**未自带**烘焙风数据（kWind）时才派生；已烘焙的以烘焙为准。
             MeshData wm = entry->mesh;
             DeriveWindFlex(*ctx->wind_params, &wm);
             prim.mesh_id = self->mesh_mgr_.RegisterMesh(wm);

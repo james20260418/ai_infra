@@ -48,6 +48,7 @@ species = argv[0]
 out_path = None
 out_dir = "./out"
 textured = False
+bake_wind = False
 textures_dir = "./textures"
 leaf_atlas = "leaf001"
 overrides = {}
@@ -79,6 +80,8 @@ while i < len(argv):
         i += 1
         k, _, v = argv[i].partition("=")
         overrides[k] = v
+    elif a == "--bake-wind":
+        bake_wind = True
     else:
         raise SystemExit(f"unknown option: {a}")
     i += 1
@@ -202,6 +205,12 @@ def main():
     bpy.ops.curve.tree_add(**cfg)
 
     trunk = next(o for o in bpy.data.objects if o.type == "CURVE")
+    curve_obj = trunk   # 保留曲线对象（convert 后它的数据会被 mesh 取代）
+    wind_polys = None
+    if bake_wind:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import wind_bake
+        wind_polys = wind_bake.sample_source(curve_obj)   # 必须在 convert 前采样
     leaves = next((o for o in bpy.data.objects if o.type == "MESH"), None)
 
     bpy.ops.object.select_all(action="DESELECT")
@@ -250,6 +259,10 @@ def main():
         tag = species + ("_tex" if textured else "")
         out_path = os.path.join(out_dir, tag + ".glb")
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    if bake_wind:
+        mesh_objs = [o for o in (trunk, leaves) if o is not None]
+        wind_bake.bake_meshes(wind_polys, mesh_objs)
+
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.export_scene.gltf(filepath=out_path, export_format="GLB", use_selection=True)
     print("EXPORTED", out_path, os.path.getsize(out_path), "bytes")

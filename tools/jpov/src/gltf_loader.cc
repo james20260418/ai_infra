@@ -501,6 +501,25 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
     }
 
+    // TEXCOORD_1 —— 植被风（**项目约定语义**，vec2 float = (softness, phase)）。
+    //   由 Blender 烘焙管线（tools/vegetation/build_tree.py --bake-wind）写入：
+    //     softness = 沿枝层级的归一化位置（根 0 → 梢 1，连续场）；phase = 按枝常量[0,1)。
+    //   ⚠️ 约定：带第二套 UV 的资产即视为携带植被风数据（与 kRelax 互斥，同占 loc6）。
+    auto wind_it = prim.attributes.find("TEXCOORD_1");
+    if (wind_it != prim.attributes.end()) {
+        std::vector<float> w_flat;
+        if (ReadFloatAccessor(model, wind_it->second, &w_flat) &&
+            w_flat.size() / 2 == vcount) {
+            out_mesh->wind_flex.resize(vcount);
+            for (size_t i = 0; i < vcount; ++i) {
+                out_mesh->wind_flex[i] = Vec2f(w_flat[i * 2 + 0], w_flat[i * 2 + 1]);
+            }
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kWind));
+        }
+    }
+
     // _JPOV_RELAX —— 布料 LAG 松弛度（**自定义语义**，vec2 float = (lag_ratio, max_lag)）。
     //   与 POSITION 同坐标系原样透传；长度 != vcount 视为坏资产，忽略该属性（不致命）。
     auto relax_it = prim.attributes.find("_JPOV_RELAX");
