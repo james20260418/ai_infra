@@ -17,7 +17,8 @@
 //   每顶点（静态路径用到的）—— 0 aPos  1 aNormal  2 aTexCoord  5 aTangent
 //   每顶点（蒙皮路径专属，静态路径不用）—— 3 aJoint  4 aWeight  6 aRelax
 //   每实例（静态路径，本文件定义）—— 7..10 aInstModel（mat4，列主序，4×vec4）
-//   空闲可预留（静态路径未来可用的槽）—— 11 12 13 14 15（蒙皮专属 3/4/6 亦空闲）
+//                                        11 aInstWind（vec4：wind.xyz + phase）
+//   空闲可预留（静态路径未来可用的槽）—— 12 13 14 15（蒙皮专属 3/4/6 亦空闲）
 //   ⚠️ location 编号只在「同一 draw 的同一 program」内有意义。静态与蒙皮是互斥的
 //      program，可各自占用相同的编号而不冲突（二者模型矩阵都落在 7..10 即为例）。
 //      本文件只保证「静态路径自身」不越界、不重叠。
@@ -54,9 +55,17 @@ inline constexpr unsigned int kVertexAttrLocTangent  = 5;  // 仅含 tangent 的
 inline constexpr InstanceAttrSpec kModelAttrSpec{/*base_loc*/ 7, /*slot_count*/ 4,
                                                  /*slot_components*/ 4, /*stride*/ 16};
 
+// 每实例风（vec4：wind.xyz + phase）：loc11，每实例 4 float。
+//   wind.xyz = 风向×风速（世界空间）；phase = 时间偏移（秒）。
+//   与三个实例 VS 的 `layout(location = 11) in vec4 aInstWind` 逐字对应。
+//   仅当 mesh 声明 kWind 时挂载（否则该槽 disabled，读到 (0,0,0,0)）；见
+//   docs/jpov_vegetation_wind_design.md §2。
+inline constexpr InstanceAttrSpec kWindAttrSpec{/*base_loc*/ 11, /*slot_count*/ 1,
+                                                /*slot_components*/ 4, /*stride*/ 4};
+
 // 本路径当前启用的 per-instance spec 清单（绘制端据此挂 buffer；测试据此做全量自检）。
 //   新增字段时把新 spec 追加进来。
-inline constexpr InstanceAttrSpec kActiveAttrSpecs[] = {kModelAttrSpec};
+inline constexpr InstanceAttrSpec kActiveAttrSpecs[] = {kModelAttrSpec, kWindAttrSpec};
 
 // ---- 布局自检谓词（编译期 / 运行期共用；供 static_assert 与测试）----
 
@@ -93,7 +102,9 @@ constexpr bool SpecAvoidsVertexAttrs(const InstanceAttrSpec& s) {
 // ---- 编译期门禁（越界 / 重叠 / stride 不符即编译失败）----
 static_assert(SpecIsValid(kModelAttrSpec), "静态实例模型 spec 非法：越 16 或 stride 不符");
 static_assert(SpecAvoidsVertexAttrs(kModelAttrSpec), "静态实例模型 spec 与顶点属性槽重叠");
-// 新增 spec 时在此追加：static_assert(SpecsDisjoint(kModelAttrSpec, kXxxSpec), "...");
+static_assert(SpecIsValid(kWindAttrSpec), "静态实例风 spec 非法：越 16 或 stride 不符");
+static_assert(SpecAvoidsVertexAttrs(kWindAttrSpec), "静态实例风 spec 与顶点属性槽重叠");
+static_assert(SpecsDisjoint(kModelAttrSpec, kWindAttrSpec), "模型 spec 与风 spec 槽区间重叠");
 
 }  // namespace instanced_object
 }  // namespace jpov

@@ -59,8 +59,16 @@ public:
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 6) in vec2 aFlex;   // 植被风：(bend, phase)；kWind 时有效，否则 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
+// 植被风（见 interface/render_command.h 的 WindCommand + docs/jpov_vegetation_wind_design.md）
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
+uniform vec3  uWindVector;            // 非实例路径：风向×风速；实例路径以 aInstWind 为准
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -70,12 +78,22 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vec3 wn = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;                       // bend^2：基部硬、梢部软
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);             // 多频叠加（Σ振幅=1）
+        p += uWindVector * (uWindAmplitude * b2 * s);       // 主弯
+        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));  // 细节颤
+    }
+    vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vWorldNormal = wn;
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
 #endif
@@ -91,8 +109,15 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
+layout(location = 6) in vec2 aFlex;   // 植被风：(bend, phase)
 uniform mat4 uMVP;
 uniform mat4 uModel;
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
+uniform vec3  uWindVector;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -102,12 +127,23 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    mat3 nrm = mat3(transpose(inverse(uModel)));
+    vec3 wn = normalize(nrm * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);
+        p += uWindVector * (uWindAmplitude * b2 * s);
+        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));
+    }
+    vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
+    vWorldNormal = wn;
+    vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
 #endif
@@ -125,17 +161,33 @@ void main() {
     static constexpr const char* kShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
+layout(location = 6) in vec2 aFlex;   // 植被风：(bend, phase)；与主 pass 同步位移
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
+uniform vec3  uWindVector;
 out float vShadowDepth;
 #ifdef JPOV_ALPHA_CUTOUT
 layout(location = 2) in vec2 aTexCoord;
 out vec2 vTexCoord;
 #endif
 void main() {
-    vec4 clip = uShadowMVP * vec4(aPos, 1.0);
+    // 植被风主弯（与主 pass 同步；阴影 VS 无法线，省去细节颤）。
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);
+        p += uWindVector * (uWindAmplitude * b2 * s);
+    }
+    vec4 clip = uShadowMVP * vec4(p, 1.0);
     gl_Position = clip;
-    vec4 dpos = uShadowDepthMVP * vec4(aPos, 1.0);
+    vec4 dpos = uShadowDepthMVP * vec4(p, 1.0);
     vShadowDepth = dpos.z / dpos.w;   // 线性深度（DepthProj 下 w=1）
 #ifdef JPOV_ALPHA_CUTOUT
     vTexCoord = aTexCoord;
@@ -969,6 +1021,7 @@ void main() {
     //   否则用不透明 program。double_sided 时关背面剔除（薄片资产两面都投影）。
     // texture_mgr: cutout 变体采样 baseColor 贴图取 alpha 用。
     static void DrawObject3DShadow(const Object3DCommand& cmd,
+                                   const RenderCommandList& cmds,
                                    MeshManager& mesh_mgr,
                                    TextureManager& texture_mgr,
                                    ShaderManager& shader_mgr,

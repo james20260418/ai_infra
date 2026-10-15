@@ -225,11 +225,13 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec3f), reinterpret_cast<const void*>(0));
     }
 
-    // ---- 布料 LAG 松弛度（可选，location 6，vec2: lag_ratio, max_lag）----
+    // ---- 次级运动槽（可选，location 6，vec2）----
     //   ★ loc6 是本 PR 从「per-instance 首槽」腾出来给**顶点属性**的槽位（见
     //   instance_buffer.h 的实例布局表：model 已从 6..9 挪到 7..10）。
-    //   属性缺失时该槽在本 VAO 上保持 disabled，蒙皮 VS 读到的 aRelax 为默认值
-    //   （该槽当前未参与蒙皮计算 —— LAG 的 VS 内消费留待后续，见 skinning_shader.h）。
+    //   该槽由两个**互斥**特性共用（MeshData::Validate 保证不会同时声明）：
+    //     - kRelax（布料）：vec2(lag_ratio, max_lag)
+    //     - kWind （植被）：vec2(bend, phase)
+    //   属性缺失时该槽在本 VAO 上保持 disabled，读到的 aFlex 为默认值。
     if (MeshHasFlag(data.flags, MeshVertexFlags::kRelax)) {
         glGenBuffers(1, &mesh.vbo_relax);
         CHECK_NE(mesh.vbo_relax, 0u);
@@ -237,6 +239,17 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
         glBufferData(GL_ARRAY_BUFFER,
                      static_cast<GLsizeiptr>(data.relaxations.size() * sizeof(Vec2f)),
                      data.relaxations.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
+                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
+    }
+    if (MeshHasFlag(data.flags, MeshVertexFlags::kWind)) {
+        glGenBuffers(1, &mesh.vbo_wind);
+        CHECK_NE(mesh.vbo_wind, 0u);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(data.wind_flex.size() * sizeof(Vec2f)),
+                     data.wind_flex.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(6);
         glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
                               sizeof(Vec2f), reinterpret_cast<const void*>(0));
@@ -269,7 +282,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     }
     // 收集所有非 0 VBO + EBO 一次性 delete
     // GPUMesh 至多 7 个属性 VBO + 1 个 EBO = 8 个 GL 缓冲对象
-    static constexpr int kMaxBuffers = 8;
+    // 最多 9 个（pos/normal/uv/joints/weights/tangent/relax-or-wind/ebo；relax 与 wind 互斥
+    // 实际最多 8，留 1 个余量避免任何越界风险）。
+    static constexpr int kMaxBuffers = 9;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -292,6 +307,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     }
     if (mesh->vbo_relax) {
         buffers[n++] = mesh->vbo_relax;
+    }
+    if (mesh->vbo_wind) {
+        buffers[n++] = mesh->vbo_wind;
     }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;

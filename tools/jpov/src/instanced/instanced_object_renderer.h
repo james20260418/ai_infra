@@ -69,12 +69,19 @@ public:
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex：(bend, phase)
 // per-instance 摆放矩阵（loc7..10 拆 4 列，divisor=1；布局见 instance_buffer.h）。
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
 layout(location = 9) in vec4 aInstCol2;
 layout(location = 10) in vec4 aInstCol3;
+layout(location = 11) in vec4 aInstWind;  // 植被风 per-instance：(wind.xyz, phase)
 uniform mat4 uViewProj;
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -85,9 +92,20 @@ flat out uint vPickId;
 #endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 world_pos = model * vec4(aPos, 1.0);
+    mat3 nrm = mat3(transpose(inverse(model)));
+    vec3 wn = normalize(nrm * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);
+        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
+        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));
+    }
+    vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(model))) * aNormal);
+    vWorldNormal = wn;
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
     gl_Position = uViewProj * world_pos;
@@ -103,11 +121,18 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
+layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex：(bend, phase)
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
 layout(location = 9) in vec4 aInstCol2;
 layout(location = 10) in vec4 aInstCol3;
+layout(location = 11) in vec4 aInstWind;  // 植被风 per-instance：(wind.xyz, phase)
 uniform mat4 uViewProj;
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -118,10 +143,20 @@ flat out uint vPickId;
 #endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 world_pos = model * vec4(aPos, 1.0);
-    vWorldPos = world_pos.xyz;
     mat3 nrm = mat3(transpose(inverse(model)));
-    vWorldNormal = normalize(nrm * aNormal);
+    vec3 wn = normalize(nrm * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);
+        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
+        p += wn * (uWindAmplitude * uWindTurbulence * b2 * 0.25 * sin(phi * 4.30));
+    }
+    vec4 world_pos = model * vec4(p, 1.0);
+    vWorldPos = world_pos.xyz;
+    vWorldNormal = wn;
     vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
     gl_Position = uViewProj * world_pos;
@@ -134,12 +169,19 @@ void main() {
     static constexpr const char* kShadowVsInstanced = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
+layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
 layout(location = 9) in vec4 aInstCol2;
 layout(location = 10) in vec4 aInstCol3;
+layout(location = 11) in vec4 aInstWind;  // 植被风 per-instance
 uniform mat4 uShadowViewProj;
 uniform mat4 uShadowDepthViewProj;
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform float uWindTurbulence;
 out float vShadowDepth;
 #ifdef JPOV_ALPHA_CUTOUT
 layout(location = 2) in vec2 aTexCoord;
@@ -147,7 +189,15 @@ out vec2 vTexCoord;
 #endif
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 wp = model * vec4(aPos, 1.0);
+    vec3 p = aPos;
+    if (uWindEnabled == 1) {
+        float b2 = aFlex.x * aFlex.x;
+        float phi = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        float s = 0.50 * sin(phi) + 0.30 * sin(phi * 1.93 + 1.7) +
+                  0.20 * sin(phi * 3.70 + 4.1);
+        p += aInstWind.xyz * (uWindAmplitude * b2 * s);
+    }
+    vec4 wp = model * vec4(p, 1.0);
     gl_Position = uShadowViewProj * wp;
     vec4 dpos = uShadowDepthViewProj * wp;
     vShadowDepth = dpos.z / dpos.w;
@@ -834,7 +884,8 @@ void main() {
                                     unsigned int prog_cutout,
                                     unsigned int prog_full_cutout,
                                     unsigned int tile_index_tex,
-                                    InstanceBuffer& instance_model_buf);
+                                    InstanceBuffer& instance_model_buf,
+                                    InstanceBuffer* instance_wind_buf = nullptr);
 
     // ---- DrawInstancedObjectShadow ----
     // 统一批实例的阴影 pass：从太阳正交光空间画进阴影纹理（只写相对主视锥中心的线性深度）。
@@ -842,6 +893,7 @@ void main() {
     // 区别仅在摆放走 per-instance attribute（instance_model_buf）+ glDraw*Instanced。
     // shadow_vp: uShadowViewProj = proj*view；depth_vp: uShadowDepthViewProj = DepthProj*view。
     static void DrawInstancedObjectShadow(const InstancedObjectCommand& cmd,
+                                          const RenderCommandList& cmds,
                                           MeshManager& mesh_mgr,
                                           TextureManager& texture_mgr,
                                           ShaderManager& shader_mgr,
@@ -849,7 +901,8 @@ void main() {
                                           const float depth_vp[16],
                                           unsigned int shadow_prog,
                                           unsigned int shadow_prog_cutout,
-                                          InstanceBuffer& instance_model_buf);
+                                          InstanceBuffer& instance_model_buf,
+                                          InstanceBuffer* instance_wind_buf = nullptr);
 
     // ---- DrawInstancedObjectSelected ----
     // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。

@@ -654,6 +654,33 @@ struct BloomConfig {
 //  · 前置条件：**cmds.tone_mapping 必须为 true**（旧 LDR 直通路径无 HDR/tone map，
 //    不跑 SMAA；Renderer 会 CHECK 报错而非静默失效）。
 //
+// ==================== 植被风（程序化顶点风）====================
+//
+// 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
+// docs/jpov_vegetation_wind_design.md。
+//
+// 三层驱动：per-vertex (bend, phase) + per-instance (wind, phase) + 本命令的全局标量。
+//   - 本命令供**非实例路径**（object3d）用：位移沿 direction*speed，权重来自顶点 bend；
+//   - 实例路径（DrawInstancedObject）用 per-instance wind（InstanceState.wind）。
+//
+// 位移公式（多频叠加；t/phase 均秒，f 单位 Hz）：
+//   phi = 2π·frequency·(time + phase_inst + phase_vert)
+//   main = wind · amplitude · bend² · Σ_k a_k·sin(phi·r_k + o_k)
+//   p' = aPos + main
+//
+// 确定性：time 必须由**帧号**推（frame_count / fps），不可用 wall-clock，否则 gold 不稳。
+// 未设置（nullopt）→ 不施加任何位移，零开销、零回归。
+struct WindCommand {
+    float time = 0.0f;         // 全局时间（秒）。确定性：由帧号推。
+    float amplitude = 1.0f;    // 主弯振幅（米/单位；沿风方向的位移尺度）
+    float frequency = 1.0f;    // 基频（Hz）
+    float turbulence = 0.0f;   // 细节颤幅度（[0,1]），沿顶点法线的高频小位移
+    // 场景风矢量（方向×风速）—— **仅非实例路径**（object3d/蒙皮）使用；
+    // 实例路径以 per-instance wind 为准。
+    Vec3f direction = {1.0f, 0.0f, 0.0f};
+    float speed = 1.0f;
+};
+
 // 未启用（默认）时零开销、零回归。
 struct SmaaConfig {
     // 是否启用。false（默认）时整个 pass 跳过，tone map 照旧直写主 FBO。
@@ -1704,6 +1731,13 @@ struct InstanceState {
     //   注意：本字段**不作为 per-instance GPU attribute 上传** —— 拾取走
     //   `render_internal_id = 本命令 base + gl_InstanceID`，再把 internal id 映射回本值（见拾取实现）。
     uint32_t picking_id = 0;
+
+    // 植被风（逐实例；仅当 mesh 声明 kWind 时有效）：
+    //   wind       = 风向 × 风速（世界空间；长度即风速）。不同实例可给不同风→「风场」。
+    //   wind_phase = 时间偏移（**秒**），与顶点 phase、全局 time 同单位；去同步各实例。
+    //   上传为 per-instance attribute loc11（vec4: wind.xyz + phase，见 instanced_object_attrs.h）。
+    Vec3f wind = {0.0f, 0.0f, 0.0f};
+    float wind_phase = 0.0f;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -2023,6 +2057,11 @@ struct RenderCommandList {
     // 2D/UI **之前**，在输出分辨率下对最终 LDR 图像做 SMAA 1x（见 SmaaConfig）。
     // 默认无值（等同关闭），零额外开销、零回归。**需要 tone_mapping=true**。
     std::optional<SmaaConfig> smaa;
+
+    // 植被风（程序化顶点风）。有值且 enabled 语义（有值即生效）时，object3d/instanced 两个
+    // 3D 路径的顶点着色器按它施加顶点位移（实例路径另取 per-instance wind）。默认无值 = 零回归。
+    // 见 interface/render_command.h 的 WindCommand + docs/jpov_vegetation_wind_design.md。
+    std::optional<WindCommand> wind;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。

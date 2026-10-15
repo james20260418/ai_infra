@@ -2099,7 +2099,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
-                    tile_index_tex_, instanced_object_model_buf_);
+                    tile_index_tex_, instanced_object_model_buf_,
+                    &instanced_object_wind_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {
@@ -2346,16 +2347,17 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             if (o.material.alpha_mode == AlphaMode::kBlend) {
                 continue;
             }
-            Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
+            Object3DRenderer::DrawObject3DShadow(o, cmds, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog, shadow_prog_cutout);
         }
         // 静态实例同样从光空间画深度（instanced shadow program）。
         for (const auto& io : cmds.instanced_object) {
             InstancedObjectRenderer::DrawInstancedObjectShadow(
-                io, mesh_mgr_, texture_mgr_, shader_mgr_,
+                io, cmds, mesh_mgr_, texture_mgr_, shader_mgr_,
                 shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
-                InstancedShadowProgCutout(), instanced_object_model_buf_);
+                InstancedShadowProgCutout(), instanced_object_model_buf_,
+                &instanced_object_wind_buf_);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {

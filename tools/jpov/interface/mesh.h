@@ -58,6 +58,7 @@ enum class MeshVertexFlags : uint8_t {
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
     kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
+    kWind     = 1 << 6,  // 植被风（wind_flex：每顶点 (bend, phase)）；**与 kRelax 互斥**（同占 loc6）
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
@@ -92,6 +93,11 @@ struct MeshData {
     //   .y = max_lag  ≥ 0    ：该顶点相对当前 pose 的最大允许位移（模型系，米；逐顶点限幅）。
     // 见 docs/jpov_instance_attr_lag_design.md §4.1 / §4.4。
     std::vector<Vec2f> relaxations;
+    // 植被风标注（逐顶点；kWind 时非空）：
+    //   .x = bend  ∈ [0,1]：沿枝归一化位置（0=基部不动、1=梢部最软）；非线性曲线在 VS 里做。
+    //   .y = phase（秒）  ：该顶点的时间偏移（去同步 / 梢部滞后），与 per-instance phase 同单位。
+    // 见 docs/jpov_vegetation_wind_design.md §1。
+    std::vector<Vec2f> wind_flex;
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -188,6 +194,10 @@ inline void MeshData::Validate() const {
         CHECK_EQ(relaxations.size(), vcount)
             << "MeshData::Validate: relaxations.size() != positions.size()";
     }
+    if (!wind_flex.empty()) {
+        CHECK_EQ(wind_flex.size(), vcount)
+            << "MeshData::Validate: wind_flex.size() != positions.size()";
+    }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)
             << "MeshData::Validate: joint_indices.size() != positions.size()";
@@ -234,6 +244,18 @@ inline void MeshData::Validate() const {
         CHECK(relaxations.empty())
             << "MeshData::Validate: 未声明 kRelax 但 relaxations 非空";
     }
+
+    if (MeshHasFlag(flags, MeshVertexFlags::kWind)) {
+        CHECK_EQ(wind_flex.size(), vcount)
+            << "MeshData::Validate: flags 声明 kWind 但 wind_flex 长度不一致或缺数据";
+    } else {
+        CHECK(wind_flex.empty())
+            << "MeshData::Validate: 未声明 kWind 但 wind_flex 非空";
+    }
+    // kRelax 与 kWind **互斥**：二者都占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
+    CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
+            MeshHasFlag(flags, MeshVertexFlags::kWind)))
+        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
     if (joints_declared) {

@@ -412,6 +412,7 @@ public:
     //   与蒙皮路径**彻底解耦**（各自的 buffer + 各自的 spec），使其布局可独立演进
     //   （如植被的 per-instance 颜色 / 摆动相位），不被蒙皮布局重排拖累。
     InstanceBuffer instanced_object_model_buf_{instanced_object::kModelAttrSpec};  // loc7..10 = mat4
+    InstanceBuffer instanced_object_wind_buf_{instanced_object::kWindAttrSpec};    // loc11    = vec4(wind.xyz, phase)
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

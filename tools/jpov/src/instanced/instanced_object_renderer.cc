@@ -265,7 +265,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
                                                    unsigned int prog_cutout,
                                                    unsigned int prog_full_cutout,
                                                    unsigned int tile_index_tex,
-                                                   InstanceBuffer& instance_model_buf) {
+                                                   InstanceBuffer& instance_model_buf,
+                                                   InstanceBuffer* instance_wind_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawInstancedObject: mesh_id " << cmd.mesh_id
                            << " 未注册（DrawInstancedObject 前需先 RegisterMesh）";
@@ -309,6 +310,16 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
     // 摆放走 per-instance attribute（loc6..9），故只传 VP（= proj*view，不含 model）。
     glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uViewProj"),
                        1, GL_FALSE, view_proj);
+    // 植被风：全局标量 uniform（风矢量走 per-instance loc11 aInstWind）。
+    {
+        const bool wind_on = cmds.wind.has_value();
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindEnabled"), wind_on ? 1 : 0);
+        const WindCommand w = wind_on ? *cmds.wind : WindCommand{};
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbulence"), w.turbulence);
+    }
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
                 cmd.material.base_color.b);
@@ -416,11 +427,21 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
         }
     }
     instance_model_buf.Upload(xforms);
+    // per-instance 风（loc11）：wind.xyz + phase（秒）；仅挂载时上传。
+    if (instance_wind_buf != nullptr) {
+        std::vector<float> winds(n * 4);
+        for (size_t k = 0; k < n; ++k) {
+            const InstanceState& st = cmd.instances[k];
+            winds[k * 4 + 0] = st.wind.x();
+            winds[k * 4 + 1] = st.wind.y();
+            winds[k * 4 + 2] = st.wind.z();
+            winds[k * 4 + 3] = st.wind_phase;
+        }
+        instance_wind_buf->Upload(winds);
+    }
 
     const GLsizei n_inst = static_cast<GLsizei>(n);
-    {
-        // RAII 配对挂载 per-instance 矩阵（loc6..9，divisor=1）。
-        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+    auto issue_draw = [&]() {
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -431,6 +452,14 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
                                   static_cast<GLsizei>(mesh->vertex_count), n_inst);
         }
         glBindVertexArray(0);
+    };
+    if (instance_wind_buf != nullptr) {
+        // RAII 配对挂载 per-instance 矩阵（loc7..10）+ 风（loc11），divisor=1。
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf, instance_wind_buf});
+        issue_draw();
+    } else {
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+        issue_draw();
     }
 
     GLenum draw_err = glGetError();
@@ -444,6 +473,7 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
 // ==================== DrawInstancedObjectShadow ====================
 
 void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCommand& cmd,
+                                                         const RenderCommandList& cmds,
                                                          MeshManager& mesh_mgr,
                                                          TextureManager& texture_mgr,
                                                          ShaderManager& shader_mgr,
@@ -451,7 +481,8 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
                                                          const float depth_vp[16],
                                                          unsigned int shadow_prog,
                                                          unsigned int shadow_prog_cutout,
-                                                         InstanceBuffer& instance_model_buf) {
+                                                         InstanceBuffer& instance_model_buf,
+                                                         InstanceBuffer* instance_wind_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawInstancedObjectShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -493,6 +524,16 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
                        1, GL_FALSE, shadow_vp);
     glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthViewProj"),
                        1, GL_FALSE, depth_vp);
+    // 植被风（与主 pass 同步；风矢量走 per-instance loc11）。
+    {
+        const bool wind_on = cmds.wind.has_value();
+        glUniform1i(glGetUniformLocation(sp, "uWindEnabled"), wind_on ? 1 : 0);
+        const WindCommand w = wind_on ? *cmds.wind : WindCommand{};
+        glUniform1f(glGetUniformLocation(sp, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(sp, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(sp, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbulence"), w.turbulence);
+    }
 
     const size_t n = cmd.instances.size();
     std::vector<float> xforms(n * 16);
@@ -505,10 +546,20 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
         }
     }
     instance_model_buf.Upload(xforms);
+    if (instance_wind_buf != nullptr) {
+        std::vector<float> winds(n * 4);
+        for (size_t k = 0; k < n; ++k) {
+            const InstanceState& st = cmd.instances[k];
+            winds[k * 4 + 0] = st.wind.x();
+            winds[k * 4 + 1] = st.wind.y();
+            winds[k * 4 + 2] = st.wind.z();
+            winds[k * 4 + 3] = st.wind_phase;
+        }
+        instance_wind_buf->Upload(winds);
+    }
 
     const GLsizei n_inst = static_cast<GLsizei>(n);
-    {
-        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+    auto issue_draw = [&]() {
         glBindVertexArray(mesh->vao);
         if (mesh->index_count > 0) {
             glDrawElementsInstanced(GL_TRIANGLES,
@@ -519,6 +570,13 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
                                   static_cast<GLsizei>(mesh->vertex_count), n_inst);
         }
         glBindVertexArray(0);
+    };
+    if (instance_wind_buf != nullptr) {
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf, instance_wind_buf});
+        issue_draw();
+    } else {
+        InstanceBufferBinding bind(mesh->vao, {&instance_model_buf});
+        issue_draw();
     }
 }
 

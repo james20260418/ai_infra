@@ -124,6 +124,19 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                        1, GL_FALSE, mvp_final);
     glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uModel"),
                        1, GL_FALSE, model);
+    // 植被风：有 WindCommand 则开启（mesh 无 kWind 时 aFlex=(0,0) → 位移恒 0，天然无害）。
+    {
+        const bool wind_on = cmds.wind.has_value();
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindEnabled"), wind_on ? 1 : 0);
+        const WindCommand w = wind_on ? *cmds.wind : WindCommand{};
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbulence"), w.turbulence);
+        glUniform3f(glGetUniformLocation(selected_prog, "uWindVector"),
+                    w.direction.x() * w.speed, w.direction.y() * w.speed,
+                    w.direction.z() * w.speed);
+    }
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
                 cmd.material.base_color.b);
@@ -679,6 +692,7 @@ void Object3DRenderer::DrawObject3DBlend(const Object3DCommand& cmd,
 // ==================== DrawObject3DShadow ====================
 
 void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
+                                          const RenderCommandList& cmds,
                                           MeshManager& mesh_mgr,
                                           TextureManager& texture_mgr,
                                           ShaderManager& shader_mgr,
@@ -744,6 +758,19 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
                        1, GL_FALSE, shadow_mvp);
     glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthMVP"),
                        1, GL_FALSE, depth_mvp);
+    // 植被风：与主 pass 同步位移（否则树动、影不动）。详见 DrawObject3D 同名段。
+    {
+        const bool wind_on = cmds.wind.has_value();
+        glUniform1i(glGetUniformLocation(sp, "uWindEnabled"), wind_on ? 1 : 0);
+        const WindCommand w = wind_on ? *cmds.wind : WindCommand{};
+        glUniform1f(glGetUniformLocation(sp, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(sp, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(sp, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbulence"), w.turbulence);
+        glUniform3f(glGetUniformLocation(sp, "uWindVector"),
+                    w.direction.x() * w.speed, w.direction.y() * w.speed,
+                    w.direction.z() * w.speed);
+    }
 
     glBindVertexArray(mesh->vao);
     if (mesh->index_count > 0) {
