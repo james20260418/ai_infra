@@ -55,11 +55,11 @@ tools/jpov/genVolume/
 
 ## 3. 依赖
 
-**外部程序（Mantaflow / Blender）请用 `env/` 统一安装/容器管理**，别在裸机到处手工装：
+**外部程序（Mantaflow / Blender）由 `env/` 的 Docker 镜像统一管理**，不在宿主机手装：
 
-- 快速自检：`cat env/README.md`
-- 容器：`docker build -t jpov-genvolume env/`（见 `env/Dockerfile`）
-- 本机安装：`bash env/setup_dev_env.sh`
+- 依赖清单：`env/dependency.txt`
+- 镜像定义 / 用法：`env/Dockerfile` · `env/README.md`
+- 构建：`docker build -t jpov-genvolume tools/jpov/genVolume/env`
 
 最小 Python 依赖：`numpy`（转换器）；`pyopenvdb`（仅 VDB 转换器 + VDB 单测）；`blender`（仅植被工具，见下）。
 

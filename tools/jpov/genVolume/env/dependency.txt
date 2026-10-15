@@ -1,0 +1,24 @@
+# genVolume 外部工具环境 —— 依赖清单
+#
+# 环境由 **Docker 镜像**（env/Dockerfile）管理；本文件只是**清单**，不负责安装。
+# 改依赖请同时改 env/Dockerfile。
+
+[apt]
+build-essential cmake git
+python3 python3-dev python3-numpy
+libopenvdb-dev libtbb-dev zlib1g-dev
+python3-openvdb
+xvfb curl ca-certificates
+blender
+
+[pip]
+# 无（全部走 apt / 源码构建）
+
+[source]
+mantaflow = 0.13      # github.com/tum-pbs/mantaflow（standalone；GUI=OFF OPENVDB=ON TBB=ON NUMPY=ON）
+
+[notes]
+- Ubuntu 24.04：`-lHalf` 已并入 Imath（libImath-3_1.so.29），Mantaflow 0.13 仍链 libHalf → 镜像里建软链。
+- `python3-openvdb` 走 apt（24.04 提供 10.0.1）。
+- `manta` 运行目录必须含 `waveletNoiseTile.bin` → 镜像内提供 `manta-run` 包装器。
+- Blender 仅离线出资产用（GPL 独立应用），**不进运行时 / 产品**。

@@ -1,2 +1,0 @@
-# 不要把本地编译的 Mantaflow 打进 docker 构建上下文（由 Dockerfile 自己编）
-mantaflow/
