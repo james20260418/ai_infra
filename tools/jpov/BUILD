@@ -439,3 +439,37 @@ cc_binary(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# 体积火查看器（逐像素 raymarch → WBO 薄层合成）。
+cc_library(
+    name = "volume_fire_viewer_app",
+    hdrs = [
+        "demo/volume_fire_viewer_app.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
+        "//tools/jpov/interface:volume_fire_types",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_volume_fire_viewer",
+    srcs = ["demo/jpov_volume_fire_viewer.cc"],
+    deps = [
+        "//tools/jpov:volume_fire_viewer_app",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

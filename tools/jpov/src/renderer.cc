@@ -596,6 +596,7 @@ Renderer::~Renderer() {
     DestroyGlassFBO();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
+    volume_fire_renderer_.Finalize();
     smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -1421,6 +1422,7 @@ void Renderer::Init(
     CompileShaders();
     fire_fog_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
+    volume_fire_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
@@ -1461,7 +1463,8 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 注：**天空命令也算 3D 内容**（天空是 3D FBO 的背景层）——否则“只画天空、
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
-    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty();
+    bool has_3d = cmds.sky.has_value() || !cmds.particles.empty() ||
+                  !cmds.volume_fires.empty();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -1759,6 +1762,22 @@ void Renderer::Render(const RenderCommandList& cmds,
                 particle_renderer_.Composite(fbo_3d_w, fbo_3d_h);
                 const GLenum mrt_bufs_p[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_p);
+            }
+
+            // ── 体积火（逐像素 raymarch）—— 与粒子同套 WBO；结果作为薄层 over 合成进 HDR。──
+            if (!cmds.volume_fires.empty()) {
+                CHECK(use_hdr) << "体积火需要 tone_mapping=true（HDR/MRT 场景深度）";
+                volume_fire_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                for (const VolumeFireCommand& vc : cmds.volume_fires) {
+                    volume_fire_renderer_.Draw(vc, volume_mgr_, cmds.camera, mvp_,
+                                               hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                const GLenum vdraw[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, vdraw);
+                volume_fire_renderer_.Composite(fbo_3d_w, fbo_3d_h);
+                const GLenum mrt_bufs_v[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_v);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

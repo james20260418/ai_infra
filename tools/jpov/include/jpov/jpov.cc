@@ -228,6 +228,26 @@ void JPOV::ReleaseTexture(uint32_t texture_id) {
     renderer_->GetTextureManager().Release(texture_id);
 }
 
+uint32_t JPOV::RegisterVolumeTexture(const std::string& filepath) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(!filepath.empty()) << "RegisterVolumeTexture: filepath is empty";
+    CHECK(renderer_ != nullptr);
+    return renderer_->GetVolumeManager().LoadFromFile(filepath);
+}
+
+int JPOV::VolumeFrameCount(uint32_t volume_id) const {
+    if (renderer_ == nullptr) {
+        return 0;
+    }
+    return renderer_->VolumeFrameCount(volume_id);
+}
+
+void JPOV::SetVolumeDebugDump(const std::string& dir) {
+    if (renderer_ != nullptr) {
+        renderer_->SetVolumeDebugDump(dir);
+    }
+}
+
 // ========== 网格管理 ==========
 
 uint32_t JPOV::RegisterMesh(const jpov::MeshData& data) {
