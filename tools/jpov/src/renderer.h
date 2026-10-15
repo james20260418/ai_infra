@@ -102,7 +102,7 @@ struct Renderer {
     //
     // Pre-condition: GL context 已激活（Init 之后）
     // 失败: 返回空 GltfObject（empty()）。
-    GltfObject LoadGltf(const std::string& path);
+    GltfObject LoadGltf(const std::string& path, bool derive_wind_flex = false);
 
     // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
     //

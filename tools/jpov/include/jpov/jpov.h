@@ -294,7 +294,7 @@ public:
     //
     // Pre-condition: Init() 已调用
     // 失败返回空 GltfObject（empty()）。
-    jpov::GltfObject LoadGltf(const std::string& path);
+    jpov::GltfObject LoadGltf(const std::string& path, bool derive_wind_flex = false);
 
     // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
     //

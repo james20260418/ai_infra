@@ -22,6 +22,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/jpov/src/wind_flex.h"
 #include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
@@ -3221,13 +3222,49 @@ uint32_t LoadGltfOcclusion(TextureManager& tex_mgr, const GltfTextureRef& ref,
 
 }  // namespace
 
-GltfObject Renderer::LoadGltf(const std::string& path) {
+GltfObject Renderer::LoadGltf(const std::string& path, bool derive_wind_flex) {
     GltfObject obj;
 
     // 路径解析：允许相对路径（分发态 = exe 旁 resources）。查找顺序 exe 旁 → cwd
     // → TEST_SRCDIR，详见 ResolveResourcePath。先把**已解析**的路径固定下来，
     // 后续所有子资源（贴图 / ORM）都从它的目录出发，避免二次解析不一致。
     const std::string resolved_path = ResolveResourcePath(path);
+
+    // derive_wind_flex（植被风）：先**前置预扫**求整株合并包围盒 → base/scale。
+    //   必须提前算（逐 primitive 共用一份，保证 trunk/leaves 的 bend 一致），
+    //   而基于流的 collect 无法事后回填。失败则退化为不派生（不 crash）。
+    WindFlexParams wind_params;
+    bool wind_ok = false;
+    if (derive_wind_flex) {
+        struct BoundsAcc {
+            bool has = false;
+            Vec3f mn;
+            Vec3f mx;
+        };
+        BoundsAcc acc;
+        GltfMeshEntryCallback bounds_cb = [](const GltfMeshEntry* entry, void* data) {
+            BoundsAcc* a = static_cast<BoundsAcc*>(data);
+            for (const Vec3f& p : entry->mesh.positions) {
+                if (!a->has) {
+                    a->mn = p;
+                    a->mx = p;
+                    a->has = true;
+                } else {
+                    a->mn = Vec3f(std::min(a->mn.x(), p.x()), std::min(a->mn.y(), p.y()),
+                                  std::min(a->mn.z(), p.z()));
+                    a->mx = Vec3f(std::max(a->mx.x(), p.x()), std::max(a->mx.y(), p.y()),
+                                  std::max(a->mx.z(), p.z()));
+                }
+            }
+        };
+        if (jpov::LoadGltfScene(resolved_path, bounds_cb, &acc) && acc.has) {
+            wind_params = WindFlexParamsFromBounds(acc.mn, acc.mx);
+            wind_ok = true;
+        } else {
+            LOG(WARNING) << "Renderer::LoadGltf: derive_wind_flex 预扫包围盒失败，跳过风派生"
+                         << " (" << path << ")";
+        }
+    }
 
     // ORM 贴图按源路径去重缓存（多 primitive 共享同一 arm 图时只拆一次）
     std::unordered_map<std::string, OrmTextureIds> orm_cache;
@@ -3237,6 +3274,7 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         Renderer* self;
         GltfObject* obj;
         std::unordered_map<std::string, OrmTextureIds>* orm_cache;
+        const WindFlexParams* wind_params;   // 非空 → 注册前派生风标注
     };
 
     auto collect = [](const GltfMeshEntry* entry, void* data) {
@@ -3248,7 +3286,14 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
 
         const GltfMaterialInfo& mi = entry->material;
         GltfPrimitive prim;
-        prim.mesh_id = self->mesh_mgr_.RegisterMesh(entry->mesh);
+        if (ctx->wind_params != nullptr) {
+            // 拷贝后派生（entry 只读；MeshData 含骨骼数组不宜反复原位改）
+            MeshData wm = entry->mesh;
+            DeriveWindFlex(*ctx->wind_params, &wm);
+            prim.mesh_id = self->mesh_mgr_.RegisterMesh(wm);
+        } else {
+            prim.mesh_id = self->mesh_mgr_.RegisterMesh(entry->mesh);
+        }
 
         // 合并本 primitive 顶点到位包围盒（loader 输出坐标 = 渲染时模型局部坐标）。
         // 注意：RegisterMesh 把几何上传 GPU 后 CPU positions 不再保留，
@@ -3352,7 +3397,7 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
         obj->primitives.push_back(std::move(prim));
     };
 
-    CollectCtx ctx{this, &obj, &orm_cache};
+    CollectCtx ctx{this, &obj, &orm_cache, wind_ok ? &wind_params : nullptr};
     if (!jpov::LoadGltfScene(resolved_path, collect, &ctx) || obj.primitives.empty()) {
         // 失败或空：释放已注册的资源
         ReleaseGltf(obj);

@@ -190,6 +190,38 @@ cc_binary(
     ],
 )
 
+cc_library(
+    name = "wind_viewer_app",
+    hdrs = ["demo/wind_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/interface:ui",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# 植被风查看器（小柳树 + VS 风）；设计 docs/jpov_vegetation_wind_design.md。
+cc_binary(
+    name = "jpov_wind_viewer",
+    srcs = ["demo/jpov_wind_viewer.cc"],
+    deps = [
+        "//tools/jpov:wind_viewer_app",
+        "//tools/jpov:view_config",
+        "//tools/jpov:viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # pick/highlight 查看器：三大 renderer（蒙皮蓝人 ×5 / 连衣裙实例 ×3 / 凳子 object3d ×2）
 # + 统一拾取/高亮交互（左键点选切换高亮，右键轨道 / 滚轮缩放）。
 cc_binary(

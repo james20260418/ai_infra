@@ -31,6 +31,19 @@ cc_library(
     linkstatic = 1,
 )
 
+# WindFlex — 植被风顶点标注 (bend, phase) 的派生（GL-free、header-only 纯函数）。
+cc_library(
+    name = "wind_flex",
+    hdrs = ["wind_flex.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
 cc_library(
     name = "texture_manager",
@@ -288,6 +301,7 @@ cc_library(
         "//tools/jpov/src:volume_manager",
         ":gltf_loader",
         ":orm_unpack",
+        ":wind_flex",
         "//tools/common:utils",
         "//tools/jpov/src/skeleton:skeleton",
         "//tools/jpov/interface:camera",
