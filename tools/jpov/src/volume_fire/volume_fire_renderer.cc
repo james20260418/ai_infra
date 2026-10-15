@@ -21,6 +21,12 @@
 #include "third_party/gl_loader-mingw/gl_loader.h"
 #endif
 
+#ifdef _WIN32
+// windows.h 的 legacy 宏 `near`/`far` 会搅碎 `camera.near`/`camera.far`（与 particle_renderer.cc 同处理）。
+#undef near
+#undef far
+#endif
+
 #include <glog/logging.h>
 
 namespace jpov {
@@ -286,9 +292,9 @@ void VolumeFireRenderer::DumpWbo(int w, int h) {
                 } else {
                     r = px[s + 0]; g = px[s + 1]; b = px[s + 2];
                 }
-                out[d + 0] = static_cast<unsigned char>(std::min(std::max(r, 0.0f), 1.0f) * 255.0f + 0.5f);
-                out[d + 1] = static_cast<unsigned char>(std::min(std::max(g, 0.0f), 1.0f) * 255.0f + 0.5f);
-                out[d + 2] = static_cast<unsigned char>(std::min(std::max(b, 0.0f), 1.0f) * 255.0f + 0.5f);
+                out[d + 0] = static_cast<unsigned char>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f);
+                out[d + 1] = static_cast<unsigned char>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f);
+                out[d + 2] = static_cast<unsigned char>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f);
                 out[d + 3] = 255;
             }
         }
