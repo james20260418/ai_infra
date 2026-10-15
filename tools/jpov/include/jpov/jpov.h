@@ -212,6 +212,9 @@ public:
     // 查询体积纹理的帧数（不存在 → 0）。
     int VolumeFrameCount(uint32_t volume_id) const;
 
+    // 查询体积纹理的维数/帧数（不存在 → false）。
+    bool VolumeDims(uint32_t volume_id, int* nx, int* ny, int* nz, int* nframes) const;
+
     // 调试：开启体积火 raymarch 中间结果导出（accum=加权色 L、alpha=覆盖 → PNG）。
     // 空串 = 关。每帧一对 `<dir>/dump_NNN_accum.png` / `_alpha.png`。
     void SetVolumeDebugDump(const std::string& dir);

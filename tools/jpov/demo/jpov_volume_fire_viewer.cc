@@ -182,6 +182,7 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
         for (int i = 0; i < static_cast<int>(proto_names.size()); ++i) {
             app.proto_index_ = i;
             for (int w = 0; w < 16; ++w) { app.RunOnce(input, winfo, "/tmp/_vf_warm.png"); }
+            app.play_time_ = 45.0f / app.fps_;   // 落在 sustain（循环）段
             char nm[64];
             std::snprintf(nm, sizeof(nm), "70_proto_%s", proto_names[i].c_str());
             shoot(nm);

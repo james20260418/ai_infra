@@ -42,6 +42,7 @@ for f in jet area pool transient; do
     || cp -v "/james_pm/fire_hero/assets/prototypes/$f.jpovvol" "$OUTPUT_DIR/volumes/prototypes/" 2>/dev/null \
     || echo "  (缺 $f.jpovvol，跳过)"
 done
+cp -v "$PROJECT_DIR/data/fire_vdb/prototypes/"*.json "$OUTPUT_DIR/volumes/prototypes/" 2>/dev/null || true
 ls -lh "$OUTPUT_DIR/volumes/prototypes" || true
 
 echo ""

@@ -71,6 +71,17 @@ struct Renderer {
     int VolumeFrameCount(uint32_t volume_id) const {
         return volume_mgr_.FrameCount(volume_id);
     }
+
+    // 查询体积维数/帧数（不存在 → false）。
+    bool VolumeDims(uint32_t volume_id, int* nx, int* ny, int* nz, int* nframes) const {
+        VolumeInfo info;
+        if (!volume_mgr_.GetInfo(volume_id, &info)) { return false; }
+        if (nx) { *nx = info.nx; }
+        if (ny) { *ny = info.ny; }
+        if (nz) { *nz = info.nz; }
+        if (nframes) { *nframes = info.nframes; }
+        return true;
+    }
     void SetVolumeDebugDump(const std::string& dir) {
         volume_fire_renderer_.SetDebugDump(dir);
     }

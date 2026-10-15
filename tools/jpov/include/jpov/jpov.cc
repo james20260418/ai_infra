@@ -242,6 +242,13 @@ int JPOV::VolumeFrameCount(uint32_t volume_id) const {
     return renderer_->VolumeFrameCount(volume_id);
 }
 
+bool JPOV::VolumeDims(uint32_t volume_id, int* nx, int* ny, int* nz, int* nframes) const {
+    if (renderer_ == nullptr) {
+        return false;
+    }
+    return renderer_->VolumeDims(volume_id, nx, ny, nz, nframes);
+}
+
 void JPOV::SetVolumeDebugDump(const std::string& dir) {
     if (renderer_ != nullptr) {
         renderer_->SetVolumeDebugDump(dir);

@@ -129,8 +129,12 @@ public:
             for (const std::string& p : proto_paths_) {
                 const uint32_t id = RegisterVolumeTexture(p);
                 proto_ids_.push_back(id);
-                const int nf = VolumeFrameCount(id);
+                int nx = 0, ny = 0, nz = 0, nf = 0;
+                if (!VolumeDims(id, &nx, &ny, &nz, &nf)) { nf = VolumeFrameCount(id); }
                 proto_nframes_.push_back(nf > 0 ? nf : 1);
+                proto_nx_.push_back(nx > 0 ? nx : 48);
+                proto_ny_.push_back(ny > 0 ? ny : 48);
+                proto_nz_.push_back(nz > 0 ? nz : 48);
             }
             LOG(INFO) << "[volume_fire_viewer] prototypes registered = "
                       << proto_ids_.size();
@@ -145,7 +149,7 @@ public:
             const int pi = ClampedProtoIndex();
             const std::string& fam = proto_names_[static_cast<size_t>(pi)];
             jpov::Vec3f mn, mx;
-            ProtoBoxFor(fam, &mn, &mx);
+            ProtoBoxForIndex(pi, &mn, &mx);
             if (pi != last_proto_index_) {
                 // 切换族：重置播放相位 + 自动取景 + 套用该族的默认消光。
                 // （密度按自身上限归一化 ⇒ 小火焰需要更大的 σ 才有可见光深；
@@ -221,15 +225,18 @@ public:
                            13.0f, {1.0f, 1.0f, 1.0f, 1.0f},
                            jpov::TextAlignment::kTopRight, jpov::kFontBuiltinLatin);
         }
-        // 原型族标识（左上角）：族名 + 自然尺盒尺寸。
+        // 原型族标识（左上角）：族名 + 体维数 + 显示盒尺寸。
         if (proto_mode_) {
             const int pi = ClampedProtoIndex();
             if (pi >= 0) {
                 jpov::Vec3f mn, mx;
-                ProtoBoxFor(proto_names_[static_cast<size_t>(pi)], &mn, &mx);
+                ProtoBoxForIndex(pi, &mn, &mx);
                 char b[256];
-                std::snprintf(b, sizeof(b), "prototype: %s   box=%.2fx%.2fx%.2f m",
+                std::snprintf(b, sizeof(b),
+                              "prototype: %s   vol=%dx%dx%d   box=%.2fx%.2fx%.2f m",
                               proto_names_[static_cast<size_t>(pi)].c_str(),
+                              proto_nx_[static_cast<size_t>(pi)], proto_ny_[static_cast<size_t>(pi)],
+                              proto_nz_[static_cast<size_t>(pi)],
                               mx.x() - mn.x(), mx.y() - mn.y(), mx.z() - mn.z());
                 cmds->DrawText(b, {8.0f, 8.0f}, 15.0f, {1.0f, 0.95f, 0.8f, 1.0f},
                                jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinLatin);
@@ -287,17 +294,23 @@ private:
         return proto_index_;
     }
 
-    // 每族「自然尺」世界 AABB（贴地 y=0 起）——对应 蜡烛 / 火盆 / 1m² / 爆炸。
-    static void ProtoBoxFor(const std::string& name, jpov::Vec3f* mn, jpov::Vec3f* mx) {
-        if (name == "jet") {             // 蜡烛/火把尺度
-            *mn = {-0.06f, 0.0f, -0.06f}; *mx = {0.06f, 0.35f, 0.06f};
-        } else if (name == "area") {     // 火盆尺度
-            *mn = {-0.25f, 0.0f, -0.25f}; *mx = {0.25f, 0.70f, 0.25f};
-        } else if (name == "pool") {     // 1 m² 级
-            *mn = {-0.50f, 0.0f, -0.50f}; *mx = {0.50f, 0.90f, 0.50f};
-        } else {                          // transient 爆炸 ~1.5m
-            *mn = {-0.75f, 0.0f, -0.75f}; *mx = {0.75f, 1.50f, 0.75f};
-        }
+    // 每族「显示尺度」最大边（米）——仅决定观感大小；**盒比例 = 体维数比例**。
+    static float ProtoTargetMax(const std::string& name) {
+        if (name == "jet") { return 0.50f; }     // 高 0.5m 的细柱
+        if (name == "area") { return 0.80f; }
+        if (name == "pool") { return 1.60f; }
+        return 1.20f;                              // transient
+    }
+
+    // 由「体维数 + 目标最大边」推世界 AABB：贴地 y=0，**各轴等比 ⇒ 不拉伸**。
+    void ProtoBoxForIndex(int i, jpov::Vec3f* mn, jpov::Vec3f* mx) const {
+        const float nx = static_cast<float>(proto_nx_[static_cast<size_t>(i)]);
+        const float ny = static_cast<float>(proto_ny_[static_cast<size_t>(i)]);
+        const float nz = static_cast<float>(proto_nz_[static_cast<size_t>(i)]);
+        const float maxd = std::max(nx, std::max(ny, nz));
+        const float sc = ProtoTargetMax(proto_names_[static_cast<size_t>(i)]) / std::max(1.0f, maxd);
+        *mn = {-0.5f * nx * sc, 0.0f, -0.5f * nz * sc};
+        *mx = {0.5f * nx * sc, ny * sc, 0.5f * nz * sc};
     }
 
     // 每族「默认消光 σ」(1/m)：密度归一化 ⇒ 小火焰需更大 σ 才有可见光深；
@@ -316,6 +329,7 @@ private:
     // 原型族体积的懒加载状态（GL id / 帧数）。
     std::vector<uint32_t> proto_ids_;
     std::vector<int> proto_nframes_;
+    std::vector<int> proto_nx_, proto_ny_, proto_nz_;
     int  last_proto_index_ = -1;   // 触发「切族→重置+取景」的一次性哨兵
     bool proto_registered_ = false;
 };
