@@ -158,8 +158,8 @@
 
 **最终算法**：
 
-1. **资产：3 通道**（`vdbseq_to_jpovvol.py --b-grid density`）——
-   `R=火密度(flames) / G=温度(flames) / B=烟密度(density)`，**各场按自身全局 max 独立归一**
+1. **资产：3 通道**（`vdb_to_jpovvol.py --channel … --channel … --channel …`）——
+   `R=火密度(flames) / G=温度(flames) / B=烟密度(density)`，**各场按自身独立归一**
    （不归一的话 density(≈0.003) 会被 flames(≈1) 淹没）；JPVOL2 头原有 `channels` 字段，
    引擎读取扩到接受 2 或 3 通道（3 通道 = `GL_RGB8`，**必须把 `GL_UNPACK_ALIGNMENT` 设 1**，
    否则每行 3 字节不是 4 的倍数 → 行错位）。
@@ -203,6 +203,30 @@
 
 ---
 
+### 3.4 P2（火色）：温度通道**归一化口径**修复（2026-10-16）
+
+**症状**：火是**一整团均匀橙黄**，没有「红边 / 橙身 / 白热芯」的色阶；A/B 里我们比参考**偏蓝偏灰**
+（R/B 1.42 vs 参考 2.19）。
+
+**根因（量化定位，非猜测）**：温度通道 G 的内容 = 归一化后的 `flames` 场。老转换器用
+`--gnorm 99.5`，即 `np.percentile(flam, 99.5)` —— 但它是在**整块（≈95% 为 0）的稀疏数组**上取分位，
+得到 `div≈0.15`，而该场真实（非零）最大 ≈ 1.07 ⇒ **G 被整体放大 ~7× → 饱和在 [0.65,1.0]**
+⇒ 温度几乎处处一样 ⇒ 颜色必然均匀。（`flames` 的真实分布在非零体素上 p50≈0.10 / p90≈0.27。）
+
+**修法（全在转换侧，**不动渲染 pass**）**：归一化口径改为按**非零体素**统计（默认 `nzmax`）。
+新转换器 `vdb_to_jpovvol.py` 的 `--channel <grid>[:<scale>[:<norm>[:<gamma>]]]`：
+`norm ∈ {max, nzmax(默认), p<X>, nzp<X>}`，可选 `gamma` 幂曲线。
+配套把温度色阶上界 `temp_kelvin_scale` 定标 2000→**3000K**（发射强度 1.0→**1.7**）。
+
+**结果（帧 20 ↔ 官方 80，默认烟开）**：整体色 (51.8,41.1,36.4)→**(65.4,44.1,37.0)**（参考 (62.1,39.6,28.4)）；
+**hue 18.3→15.0**（参考 20.0）、**R/B 1.42→1.77**（参考 2.19）、**R/G 1.26→1.48**（参考 1.57）；
+火区 hue 17.5、sat 0.51（参考 hue 21.8 / sat 0.54）。
+
+**残留**：火**仍缺白热芯**（高的温度体素太少，核到不了黄白）——下一步需要**温度色阶 ramp
+（Tmin + 非线性 / 更宽 K 域）**，或更高温的核心。烟仍略亮/略蓝（hue 250 vs 222）。
+
+---
+
 ## 4. 本 PR 交付（P0 基准台 + 逐帧范式 + P1 加烟）
 
 1. **基准台**：`tools/jpov/tools/campfire_ab/`
@@ -223,9 +247,9 @@
 
 ```bash
 # 1) 资产（本地自烘/转换，CC0 派生；不入库）
-#    python3 tools/jpov/genVolume/vdbseq_to_jpovvol.py '<vdb pattern>' \
+#    python3 tools/jpov/genVolume/vdb_to_jpovvol.py '<vdb pattern>' \
 #      fire_hero/assets/prototypes/campfire.jpovvol --start 60 --end 140 --ds 2 \
-#      --r-grid flames --g-grid flames --b-grid density --b-scale 0.35 --gnorm 99.5 --z-up
+#      --channel flames --channel flames --channel density:0.35 --z-up
 #    → fire_hero/assets/prototypes/campfire.jpovvol  (66×96×66 × 80f × 3ch, u8)
 # 2) 编译 viewer
 bash tools/jpov/build_volume_fire_viewer.sh

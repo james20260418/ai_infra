@@ -48,8 +48,8 @@ public:
     // 旋钮
     // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
     static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
-    static constexpr float kDefaultEmission = 1.0f;      // 发射强度
-    static constexpr float kDefaultTempKelvin = 2000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
+    static constexpr float kDefaultEmission = 1.7f;      // 发射强度（按 A/B 对齐参考亮度定标）
+    static constexpr float kDefaultTempKelvin = 3000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
     static constexpr float kDefaultSmokeScatter = 3.0f;  // 烟散射注入强度（VDB 无此信息，靠它调；Danis 定）
     // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
     // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
