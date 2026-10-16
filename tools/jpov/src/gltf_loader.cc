@@ -561,7 +561,11 @@ bool ParsePrimitive(const tinygltf::Model& model,
         break;
     }
     // 关节下标必须配一张表；表缺失时下标无意义（Validate 会拦下），直接丢弃。
-    if (out_mesh->wind_joints.empty()) {
+    //   ⚠️ 但**必须响警报**：静默丢弃会让枢轴式风悄悄退回平移式（用户看到"枢轴=不开枢轴"），
+    //   实际踩过——烘焙端关节表宽度变了（6→7 float/关节）而资源没同步，就被这里吞掉了。
+    if (out_mesh->wind_joints.empty() && !out_mesh->wind_link.empty()) {
+        LOG(WARNING) << "glTF: 有 TEXCOORD_2（枢轴风链下标）但缺少/形状非法 jpov_wind_joints "
+                     << "（每关节 7 float）⇒ 丢弃，枢轴式风将退回平移式。";
         out_mesh->wind_link.clear();
     }
 
