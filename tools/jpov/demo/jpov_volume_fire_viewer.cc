@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
     std::string volume_arg;
     std::string dump_dir;
     int ab_frame = 0;
-    float ab_box = 1.3f;
+    float ab_box = 1.22f;   // 火盒边长（米）默认 = 官方 campfire 资产最大世界尺寸
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];

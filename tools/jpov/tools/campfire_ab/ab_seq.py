@@ -4,9 +4,13 @@
 资产帧 `k` ↔ 官方帧 `k + OFFSET`（默认 60，见 docs/jpov_campfire_repro_plan.md §1.1）。
 
 产出：
-  * 每帧一行指标（h/w、面积、均值 RGB、近白占比）→ 打印 + CSV；
-  * 拼图 `strip.png`：逐帧 [官方 | 我们] 竖排，一眼看形态随帧的差距；
-  * 可选 `--profile-plot`（无 matplotlib 时跳过）：略。
+  * 每帧一行指标（h/w、面积、均值 RGB）→ 打印 + CSV；
+  * 拼图 `strip.png`：逐帧 [官方 | 我们] 竖排，一眼看形态随帧的差距。
+
+为什么它是「范式」而不只是个脚本：
+  * 纯数值、无 vision 模型 ⇒ 确定性、可无人值守，直接当机制补齐（P1..P6）的**自动验收门禁**；
+  * **只有逐帧才看得见**的问题：闪烁、循环接缝、烟随时间的演化；
+  * 顺带**验证帧对应**（映射错则曲线跳/乱）。
 
 用法::
 
@@ -20,15 +24,19 @@ import argparse
 import os
 import subprocess
 import sys
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
 
 import ab_metrics
 
+# 资产帧 k ↔ 官方帧 k + OFFSET（与 docs/jpov_campfire_repro_plan.md §1.1 一致）。
 OFFICIAL_OFFSET = 60
+# 拼图每行（[官方 | 我们]）统一缩放后的高度（像素）。
 STRIP_CELL_HEIGHT = 200
+# A/B 火盒默认边长（米）= 官方 campfire 资产最大世界尺寸 max(56,61,53)×0.02。
+DEFAULT_BOX_M = 1.22
 
 
 def parse_frames(spec: str) -> List[int]:
@@ -80,19 +88,20 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--refdir", required=True)
     ap.add_argument("--frames", default="0:80:10", help="'0:80:10' 或 '0,10,20'")
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--box", type=float, default=1.22)
-    ap.add_argument("--offset", type=int, default=OFFICIAL_OFFSET)
+    ap.add_argument("--box", type=float, default=DEFAULT_BOX_M, help="A/B 火盒边长（米）")
+    ap.add_argument("--offset", type=int, default=OFFICIAL_OFFSET, help="官方帧偏移")
     args = ap.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)
     frames = parse_frames(args.frames)
 
-    rows: List[Tuple[int, Dict[str, object], Dict[str, object]]] = []
-    strip_rows: List[Image.Image] = []
+    rows: List[Tuple[int, ab_metrics.Metrics, ab_metrics.Metrics]] = []
+    strips: List[Image.Image] = []
     print(f"{'asset_f':>7} {'off_f':>6} | {'GT h/w':>7} {'our h/w':>7} | "
           f"{'GT area%':>8} {'our area%':>9} | {'GT rgb':>14} {'our rgb':>14}")
     for k in frames:
-        ref_path = os.path.join(args.refdir, f"embergen_smallCampfire_f{k + args.offset:04d}.png")
+        ref_path = os.path.join(
+            args.refdir, f"embergen_smallCampfire_f{k + args.offset:04d}.png")
         if not os.path.isfile(ref_path):
             print(f"{k:>7} {k + args.offset:>6} | 跳过：缺参考帧 {ref_path}")
             continue
@@ -105,34 +114,36 @@ def main(argv: List[str]) -> int:
         m_our = ab_metrics.measure(ours_rgb, ab_metrics.DEFAULT_THRESH)
         rows.append((k, m_gt, m_our))
 
-        gt_rgb_s = "(" + ",".join(f"{v:.0f}" for v in m_gt["mean_rgb"]) + ")"  # type: ignore[union-attr]
-        our_rgb_s = "(" + ",".join(f"{v:.0f}" for v in m_our["mean_rgb"]) + ")"  # type: ignore[union-attr]
-        print(f"{k:>7} {k + args.offset:>6} | {m_gt['aspect']:>7.2f} {m_our['aspect']:>7.2f} | "
-              f"{m_gt['area_pct']:>8.2f} {m_our['area_pct']:>9.2f} | {gt_rgb_s:>14} {our_rgb_s:>14}")
+        gt_rgb_s = "(" + ",".join(f"{v:.0f}" for v in m_gt.mean_rgb) + ")"
+        our_rgb_s = "(" + ",".join(f"{v:.0f}" for v in m_our.mean_rgb) + ")"
+        print(f"{k:>7} {k + args.offset:>6} | {m_gt.aspect:>7.2f} {m_our.aspect:>7.2f} | "
+              f"{m_gt.area_pct:>8.2f} {m_our.area_pct:>9.2f} | {gt_rgb_s:>14} {our_rgb_s:>14}")
 
-        strip_rows.append(strip_row(ref_rgb, ab_metrics.foreground_mask(ref_rgb, ab_metrics.DEFAULT_THRESH),
-                                    ours_rgb, ab_metrics.foreground_mask(ours_rgb, ab_metrics.DEFAULT_THRESH)))
+        strips.append(strip_row(
+            ref_rgb, ab_metrics.foreground_mask(ref_rgb, ab_metrics.DEFAULT_THRESH),
+            ours_rgb, ab_metrics.foreground_mask(ours_rgb, ab_metrics.DEFAULT_THRESH)))
 
     csv_path = os.path.join(args.outdir, "ab_seq.csv")
     with open(csv_path, "w", encoding="utf-8") as f:
         f.write("asset_frame,official_frame,gt_aspect,our_aspect,gt_area_pct,our_area_pct,"
                 "gt_r,gt_g,gt_b,our_r,our_g,our_b\n")
         for k, m_gt, m_our in rows:
-            gr, gg, gb = m_gt["mean_rgb"]  # type: ignore[misc]
-            orr, og, ob = m_our["mean_rgb"]  # type: ignore[misc]
-            f.write(f"{k},{k + args.offset},{m_gt['aspect']:.4f},{m_our['aspect']:.4f},"
-                    f"{m_gt['area_pct']:.4f},{m_our['area_pct']:.4f},"
+            gr, gg, gb = m_gt.mean_rgb
+            orr, og, ob = m_our.mean_rgb
+            f.write(f"{k},{k + args.offset},{m_gt.aspect:.4f},{m_our.aspect:.4f},"
+                    f"{m_gt.area_pct:.4f},{m_our.area_pct:.4f},"
                     f"{gr:.2f},{gg:.2f},{gb:.2f},{orr:.2f},{og:.2f},{ob:.2f}\n")
 
-    if strip_rows:
-        width = max(r.width for r in strip_rows)
-        height = sum(r.height + 4 for r in strip_rows) + 24
+    if strips:
+        width = max(r.width for r in strips)
+        height = sum(r.height + 4 for r in strips) + 24
         canvas = Image.new("RGB", (width, height), (14, 14, 18))
+        draw = ImageDraw.Draw(canvas)
         y = 24
-        for k, r in zip([k for k, _, _ in rows], strip_rows):
+        for (k, _, _), r in zip(rows, strips):
+            draw.text((4, y - 14), f"asset f{k}  /  official f{k + args.offset}",
+                      fill=(230, 230, 230))
             canvas.paste(r, (0, y))
-            ImageDraw.Draw(canvas).text((4, y - 14), f"asset f{k}  /  official f{k + args.offset}",
-                                        fill=(230, 230, 230))
             y += r.height + 4
         strip_path = os.path.join(args.outdir, "strip.png")
         canvas.save(strip_path)

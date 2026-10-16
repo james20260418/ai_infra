@@ -13,12 +13,13 @@
     python3 ab_metrics.py --gt <ref.png> --ours <ours.png> \\
         [--out <montage.png>] [--report <report.txt>] [--thresh 12]
 
-退出码：0 = 正常；2 = 参数/图像错误（双方前景为空）。
+退出码：0 = 正常；2 = 双方前景至少一侧为空。
 """
 
 import argparse
+import dataclasses
 import sys
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -33,6 +34,20 @@ NEAR_WHITE = 230.0
 CROP_MARGIN = 40
 # 并排图统一缩放后的高度（像素）。
 MONTAGE_HEIGHT = 560
+
+
+@dataclasses.dataclass
+class Metrics:
+    """单张「孤立火」图的指标。foreground 为空时 empty=True，其余字段无意义。"""
+
+    empty: bool
+    size: Tuple[int, int] = (0, 0)                 # (W, H)，像素
+    bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)  # (x0, y0, x1, y1)，含端点
+    aspect: float = 0.0                            # 前景包围盒高/宽
+    area_pct: float = 0.0                          # 前景像素占全图 %
+    mean_rgb: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    near_white_pct: float = 0.0                    # 前景里三通道均 >230 的占比 %
+    profile: List[float] = dataclasses.field(default_factory=list)  # 底→顶，长度 PROFILE_BANDS
 
 
 def load_rgb(path: str) -> np.ndarray:
@@ -74,10 +89,8 @@ def vertical_profile(rgb: np.ndarray, mask: np.ndarray, bands: int) -> List[floa
     out: List[float] = []
     for b in range(bands):
         # band 0 在底部 → 从 bottom 往上数。
-        lo = bottom - int((b + 1) * span / bands) + 1
-        hi = bottom - int(b * span / bands)
-        lo = max(lo, top)
-        hi = min(hi, bottom + 1)
+        lo = max(top, bottom - int((b + 1) * span / bands) + 1)
+        hi = min(bottom + 1, bottom - int(b * span / bands))
         sub_mask = mask[lo:hi, :]
         if sub_mask.sum() == 0:
             out.append(0.0)
@@ -86,40 +99,40 @@ def vertical_profile(rgb: np.ndarray, mask: np.ndarray, bands: int) -> List[floa
     return out
 
 
-def measure(rgb: np.ndarray, thresh: float) -> Dict[str, object]:
+def measure(rgb: np.ndarray, thresh: float) -> Metrics:
     """对单张图算全部指标。图应为「黑底孤立火」。"""
     mask = foreground_mask(rgb, thresh)
     ys, xs = np.where(mask)
     if len(xs) == 0:
-        return {"empty": True}
+        return Metrics(empty=True, size=(int(rgb.shape[1]), int(rgb.shape[0])))
     w = xs.max() - xs.min() + 1
     h = ys.max() - ys.min() + 1
     fg = rgb[mask]
     near_white = (
         (fg[:, 0] > NEAR_WHITE) & (fg[:, 1] > NEAR_WHITE) & (fg[:, 2] > NEAR_WHITE)
     ).mean() * 100.0
-    return {
-        "empty": False,
-        "bbox": (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())),
-        "size": (int(rgb.shape[1]), int(rgb.shape[0])),
-        "aspect": h / float(w),
-        "area_pct": float(mask.mean() * 100.0),
-        "mean_rgb": (float(fg[:, 0].mean()), float(fg[:, 1].mean()), float(fg[:, 2].mean())),
-        "near_white_pct": float(near_white),
-        "profile": vertical_profile(rgb, mask, PROFILE_BANDS),
-    }
+    return Metrics(
+        empty=False,
+        size=(int(rgb.shape[1]), int(rgb.shape[0])),
+        bbox=(int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())),
+        aspect=h / float(w),
+        area_pct=float(mask.mean() * 100.0),
+        mean_rgb=(float(fg[:, 0].mean()), float(fg[:, 1].mean()), float(fg[:, 2].mean())),
+        near_white_pct=float(near_white),
+        profile=vertical_profile(rgb, mask, PROFILE_BANDS),
+    )
 
 
-def format_metrics(name: str, m: Dict[str, object]) -> str:
+def format_metrics(name: str, m: Metrics) -> str:
     """把指标格式化成多行文本。"""
-    if m.get("empty"):
+    if m.empty:
         return f"[{name}] 前景为空（阈值过滤后无可见像素）"
-    r, g, b = m["mean_rgb"]  # type: ignore[misc]
-    prof = " ".join(f"{v:5.1f}" for v in m["profile"])  # type: ignore[union-attr]
+    r, g, b = m.mean_rgb
+    prof = " ".join(f"{v:5.1f}" for v in m.profile)
     return (
-        f"[{name}] size={m['size']} bbox={m['bbox']}\n"
-        f"    h/w={m['aspect']:.2f}  area={m['area_pct']:.2f}%\n"
-        f"    meanRGB=({r:.1f},{g:.1f},{b:.1f})  nearWhite={m['near_white_pct']:.1f}%\n"
+        f"[{name}] size={m.size} bbox={m.bbox}\n"
+        f"    h/w={m.aspect:.2f}  area={m.area_pct:.2f}%\n"
+        f"    meanRGB=({r:.1f},{g:.1f},{b:.1f})  nearWhite={m.near_white_pct:.1f}%\n"
         f"    profile(bottom->top)={prof}"
     )
 
@@ -170,13 +183,14 @@ def main(argv: List[str]) -> int:
     m_gt = measure(gt_rgb, args.thresh)
     m_ours = measure(ours_rgb, args.thresh)
 
-    lines = [
-        "== Campfire A/B ==",
-        f"thresh={args.thresh}  gt={args.gt}  ours={args.ours}",
-        format_metrics("GT", m_gt),
-        format_metrics("OURS", m_ours),
-    ]
-    text = "\n".join(lines)
+    text = "\n".join(
+        [
+            "== Campfire A/B ==",
+            f"thresh={args.thresh}  gt={args.gt}  ours={args.ours}",
+            format_metrics("GT", m_gt),
+            format_metrics("OURS", m_ours),
+        ]
+    )
     print(text)
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:
@@ -185,9 +199,7 @@ def main(argv: List[str]) -> int:
         make_montage(gt_rgb, gt_mask, ours_rgb, ours_mask, args.out)
         print(f"montage: {args.out}")
 
-    if m_gt.get("empty") or m_ours.get("empty"):
-        return 2
-    return 0
+    return 2 if (m_gt.empty or m_ours.empty) else 0
 
 
 if __name__ == "__main__":

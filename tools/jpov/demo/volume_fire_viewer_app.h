@@ -65,7 +65,7 @@ public:
     // 目的：产出与 EmberGen 官方渲染（同为孤立火 + 黑底）可直接比对的图。
     bool  ab_mode_ = false;
     int   ab_frame_ = 0;            // 钉死的资产帧下标（>=0）
-    float ab_box_m_ = 1.3f;         // A/B 火盒边长（米）= 资产最大世界尺寸
+    float ab_box_m_ = 1.22f;        // A/B 火盒边长（米）；默认仅兜底，调用方按资产最大边传入
 
     void InstallTextMeasure() { ui_.SetTextMeasure(&VolumeFireViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }

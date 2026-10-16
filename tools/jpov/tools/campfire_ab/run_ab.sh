@@ -35,7 +35,7 @@ if [[ ! -x "$VIEWER" ]]; then
   exit 1
 fi
 
-# 火盒边长：优先 AB_BOX；否则从 sidecar 的 dims×voxel_m 取最大边；再否则 1.3。
+# 火盒边长：优先 AB_BOX；否则从 sidecar 的 dims×voxel_m 取最大边；再否则 1.22（campfire 实测值）。
 if [[ -z "${AB_BOX:-}" ]]; then
   SIDECAR="$VOLUME.json"
   AB_BOX="$(python3 - "$SIDECAR" <<'PY'
@@ -45,7 +45,7 @@ try:
     dims, vm = d["dims"], float(d["voxel_m"])
     print(f"{max(dims) * vm:.3f}")
 except Exception:
-    print("1.3")
+    print("1.22")
 PY
 )"
 fi
