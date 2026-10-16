@@ -124,7 +124,7 @@ def main():
     ap.add_argument("--crop", type=float, default=0.0, help="紧裁剪阈值（>0 时按任一场的包围盒裁）")
     ap.add_argument("--palette", default="",
                     help="色谱 JSON（Fire Color Ramp）；设置时把它烘成 <out>.palette.png 并写进 sidecar")
-    ap.add_argument("--dtype", choices=["u8", "f32"], default="u8")
+    ap.add_argument("--dtype", choices=["u8", "f16", "f32"], default="u8")
     args = ap.parse_args()
 
     channels = [parse_channel(c) for c in args.channel]
@@ -161,10 +161,18 @@ def main():
     # 若把所有通道同时堆在内存可达 GB 级，容器限额 6GB 会 OOM）。
     # 每帧：全分辨率读取 →（累计 crop 包围盒）→ **立即降采样** → 存；归一化推迟到整段读完。
     out_chans = []
+    seen = {}   # (grid,scale,norm,gamma) → out_chans 下标（同 spec 必同结果 → 直接复用，省一次读盘+一份内存）
     crop_lo = None
     crop_hi = None
     for ci, (grid, scale, norm, gamma) in enumerate(channels):
-        per_frame = []
+        key = (grid, scale, norm, gamma)
+        if key in seen:
+            out_chans.append(out_chans[seen[key]])
+            print("  channel grid=%-12s == 前面第 %d 路（复用，不重读）" % (grid, seen[key]))
+            continue
+        # 预分配（避免 per_frame 列表 + np.stack 两份全量副本）
+        arr = np.empty((len(files), size[2] // args.ds, size[1] // args.ds, size[0] // args.ds),
+                       dtype=np.float32)
         for i, f in enumerate(files):
             a = read_grid_dense(f, grid, lo, size)
             if args.crop > 0.0:
@@ -177,15 +185,13 @@ def main():
                     crop_lo = b_lo if crop_lo is None else np.minimum(crop_lo, b_lo)
                     crop_hi = b_hi if crop_hi is None else np.maximum(crop_hi, b_hi)
                 del m
-            per_frame.append(jpvol.downsample(a, args.ds))
+            arr[i] = jpvol.downsample(a, args.ds)
             del a
             if ci == 0 and i % 25 == 0:
                 print("  frame %d/%d" % (i, len(files)))
 
         # 各通道**独立归一化**（不同 grid 的绝对量纲可差几个数量级，flames≈1 vs density≈0.003），
         # 归一化口径由 --channel 的 norm 决定（默认按**非零体素**，避免稀疏数组上取分位致饱和）。
-        arr = np.stack(per_frame)
-        per_frame = None
         div = norm_divisor(arr, norm)
         if div <= 0.0:
             print("  [warn] 通道 grid=%s 全为零，跳过归一" % grid)
@@ -209,13 +215,16 @@ def main():
         if scale != 1.0:
             arr *= scale
         np.clip(arr, 0.0, 1.0, out=arr)
-        # u8 输出：**立即量化**，不再保留 f32 副本（大体积下省一半内存）。
+        # u8/half 输出：**立即量化**，不再保留 f32 副本（大体积下省内存）。
         if args.dtype == "u8":
             arr *= 255.0
             arr += 0.5
             out_chans.append(arr.astype(np.uint8))
+        elif args.dtype == "f16":
+            out_chans.append(arr.astype(np.float16))
         else:
             out_chans.append(arr)
+        seen[key] = ci
         del arr
 
     if args.crop > 0.0 and crop_lo is not None:
@@ -253,7 +262,7 @@ def main():
     smoke = out_chans[2] if len(out_chans) > 2 else None
     X, Y, Z, F, nbytes = jpvol.write_jpovvol(
         args.out, dens, temp, smoke=smoke, dtype=args.dtype,
-        pre_quantized=(args.dtype == "u8"))
+        pre_quantized=(args.dtype in ("u8", "f16")))
     print("wrote %s dims=(%d,%d,%d) frames=%d channels=%d dtype=%s bytes=%d"
           % (args.out, X, Y, Z, F, 3 if smoke is not None else 2, args.dtype, nbytes))
 

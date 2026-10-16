@@ -61,6 +61,20 @@ class JpvolFormatTest(unittest.TestCase):
         np.testing.assert_array_equal(back[..., 0], dens)     # f32 应逐字节一致
         np.testing.assert_array_equal(back[..., 1], temp)
 
+    def test_jpovvol2_roundtrip_f16(self):
+        rng = np.random.default_rng(1)
+        dens = rng.random((2, 3, 4, 5), dtype=np.float32)
+        temp = rng.random((2, 3, 4, 5), dtype=np.float32)
+        path = os.path.join(self.tmp, "h.jpovvol")
+        jpvol.write_jpovvol(path, dens, temp, dtype="f16")
+        back = jpvol.read_jpovvol(path)
+        self.assertEqual(back.shape, (2, 3, 4, 5, 2))
+        # half 量化误差 ≲ 1e-3（远优于 u8 的 1/255）
+        np.testing.assert_allclose(back[..., 0], dens, atol=1e-3)
+        np.testing.assert_allclose(back[..., 1], temp, atol=1e-3)
+        # 非恒真：f16 确实没丢很多（与 u8 不同）
+        self.assertFalse(np.array_equal(back[..., 0], np.round(dens * 255) / 255))
+
     def test_jpovvol1_roundtrip(self):
         dens = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) / 24.0
         temp = dens * 0.5

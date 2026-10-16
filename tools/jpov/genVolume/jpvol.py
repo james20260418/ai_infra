@@ -12,6 +12,7 @@
   JPVOL2（ver=2，帧序列）：
     char magic[8]="JPVOL2\\0\\0"; uint32 ver, nx, ny, nz, nframes, channels, dtype, reserved
     数据：nframes*nx*ny*nz*channels
+  dtype：0=f32、1=u8、2=f16(half)。
   体素序（两种都一样）：**每帧内 x 最快 → y → z**，通道交错；JPVOL2 帧间顺序排列（帧最慢）。
   ⇒ 与「每帧一层 2D 数组（宽=nx、高=ny*nz）」的 GPU 上传布局一致。
   通道语义：R=density(火), G=temperature/flames，均归一化 [0,1]；
@@ -33,9 +34,8 @@ def write_jpovvol(path, dens, temp, smoke=None, dtype="u8", pre_quantized=False)
     """写 JPVOL2 帧序列。dens/temp(/smoke): [F][z][y][x]，∈[0,1]。
 
     传 smoke 则写 **3 通道**（R=火密度, G=温度, B=烟密度）；否则写 2 通道。
-    dtype="u8" → 量化成 uint8（dtype code 1）；"f32" → float32（code 0）。
-    pre_quantized=True 时输入已是 uint8(∈[0,255]) → 不再量化（省一次全量 f32 副本，
-    ds=1 大体积下避免瞬时内存翻倍）。
+    dtype="u8" → uint8（code 1）；"f16" → float16（code 2）；"f32" → float32（code 0）。
+    pre_quantized=True 时输入已是目标存储 dtype → 不再量化（省一次全量副本）。
     返回 (nx, ny, nz, nframes, 总字节数)。
     """
     F, Z, Y, X = dens.shape
@@ -43,26 +43,39 @@ def write_jpovvol(path, dens, temp, smoke=None, dtype="u8", pre_quantized=False)
     for c in chans:
         if c.shape != dens.shape:
             raise ValueError("dens/temp/smoke 形状必须一致")
-    data = np.ascontiguousarray(np.stack(chans, axis=-1))   # [F][z][y][x][C]
     if dtype == "u8":
         if pre_quantized:
-            payload = np.clip(data, 0, 255).astype(np.uint8)
+            np_dt, dtype_code, scale = np.uint8, 1, None
         else:
-            payload = (np.clip(data, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-        dtype_code = 1
+            np_dt, dtype_code, scale = np.uint8, 1, 255.0
+    elif dtype == "f16":
+        np_dt, dtype_code, scale = np.float16, 2, None
     elif dtype == "f32":
         if pre_quantized:
-            raise ValueError("pre_quantized 只能用于 dtype='u8'")
-        payload = data.astype(np.float32)
-        dtype_code = 0
+            raise ValueError("pre_quantized 只能用于 dtype='u8'/'f16'")
+        np_dt, dtype_code, scale = np.float32, 0, None
     else:
-        raise ValueError("dtype 必须是 'u8' 或 'f32'，收到 %r" % (dtype,))
+        raise ValueError("dtype 必须是 'u8'/'f16'/'f32'，收到 %r" % (dtype,))
+
+    # half：2 字节/通道，动态范围 ±65504、精度远优于 u8。
+    def frame_payload(i):
+        if scale is None:   # 输入已是目标 dtype（pre_quantized）或 f32
+            fr = np.stack([np.asarray(c[i]) for c in chans], axis=-1)
+            return fr.astype(np_dt, copy=False).tobytes()
+        fr = np.clip(np.stack([np.asarray(c[i]) for c in chans], axis=-1), 0.0, 1.0)
+        return (fr * scale + 0.5).astype(np.uint8).tobytes()
+
+    # **逐帧写**（不拼全量 [F,z,y,x,C] 大数组）——ds=1 f16 下全量可达 GB 级，容器会 OOM。
     with open(path, "wb") as f:
         f.write(MAGIC2)
         f.write(struct.pack("<6I", 2, X, Y, Z, F, len(chans)))
         f.write(struct.pack("<2I", dtype_code, 0))
-        f.write(payload.tobytes())
-    return X, Y, Z, F, 40 + payload.nbytes
+        total = 40
+        for i in range(F):
+            b = frame_payload(i)
+            f.write(b)
+            total += len(b)
+    return X, Y, Z, F, total
 
 
 def write_jpovvol1(path, dens, temp):
@@ -91,10 +104,12 @@ def read_jpovvol(path):
         data = blob[32:]
     else:
         raise ValueError("not a JPVOL file: magic=%r" % (magic,))
-    np_dtype = np.uint8 if dtype == 1 else np.float32
+    np_dtype = np.uint8 if dtype == 1 else (np.float16 if dtype == 2 else np.float32)
     arr = np.frombuffer(data, dtype=np_dtype).reshape(nframes, nz, ny, nx, channels)
     if dtype == 1:
         arr = arr.astype(np.float32) / 255.0
+    elif dtype == 2:
+        arr = arr.astype(np.float32)   # half → float32
     return arr
 
 

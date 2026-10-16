@@ -78,7 +78,7 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     }
     // ── 硬校验（不可信输入）──
     if (h.version != 2u || (h.channels != 2u && h.channels != 3u) ||
-        (h.dtype != 0u && h.dtype != 1u)) {
+        (h.dtype != 0u && h.dtype != 1u && h.dtype != 2u)) {
         LOG(WARNING) << "VolumeManager: 头非法 (ver=" << h.version << " ch=" << h.channels
                      << " dtype=" << h.dtype << ") " << path;
         return 0;
@@ -92,7 +92,7 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     // 用 size_t 逐乘，避免 uint32 溢出；再判总量上限。
     const size_t per_frame = static_cast<size_t>(h.nx) * static_cast<size_t>(h.ny) *
                              static_cast<size_t>(h.nz) * static_cast<size_t>(h.channels);
-    const size_t bytes_per_frame = per_frame * (h.dtype == 1u ? 1u : 4u);
+    const size_t bytes_per_frame = per_frame * (h.dtype == 1u ? 1u : (h.dtype == 2u ? 2u : 4u));
     const size_t total = bytes_per_frame * static_cast<size_t>(h.nframes);
     if (per_frame == 0 || bytes_per_frame == 0 || total == 0 || total > kMaxTotalBytes) {
         LOG(WARNING) << "VolumeManager: 数据量越界 (" << total << " B) " << path;
@@ -139,7 +139,8 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     const GLenum internal = rgb ? (h.dtype == 1u ? GL_RGB8 : GL_RGB16F)
                                 : (h.dtype == 1u ? GL_RG8 : GL_RG16F);
     const GLenum format = rgb ? GL_RGB : GL_RG;
-    const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+    const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE
+                                        : (h.dtype == 2u ? GL_HALF_FLOAT : GL_FLOAT);
     // 3 通道 = 每像素 3 字节，行不是 4 的倍数 ⇒ 必须把解包对齐设为 1，否则行错位。
     GLint prev_align = 4;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
@@ -157,7 +158,8 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         return t;
     };
-    const size_t row_bytes = static_cast<size_t>(h.nx) * h.channels * (h.dtype == 1u ? 1u : 4u);
+    const size_t row_bytes = static_cast<size_t>(h.nx) * h.channels *
+                             (h.dtype == 1u ? 1u : (h.dtype == 2u ? 2u : 4u));
     unsigned int tex = make_tex(chunk0);
     unsigned int tex2 = split ? make_tex(layer_h - chunk0) : 0;
     for (uint32_t fr = 0; fr < h.nframes; ++fr) {
