@@ -52,6 +52,10 @@ inline constexpr int kTexUnitPartialRotationChannel = 15;
 // 仅 object3d blend（kBlend）program 使用；主链路其他 program 不绑它。
 inline constexpr int kTexUnitGlassSceneDepth = 16;
 
+// 枢轴式植被风的「关节表」纹理（每关节 1 texel：pivot.xyz + parent；RGBA32F，N×1）。
+//   仅 instanced 路径的枢轴风（mode=1）使用；主/shadow pass 同号共用（两 pass 不同时活跃）。
+inline constexpr int kTexUnitWindJointTable = 17;
+
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
 static_assert(kTexUnitMaterialBase + kMaterialTexUnitCount <= kTexUnitShadowMapBase,
               "材质纹理单元区间与 shadow map 区间重叠");
@@ -65,6 +69,8 @@ static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
               "部位额外旋转的两张表单元重叠");
 static_assert(kTexUnitPartialRotationChannel < kTexUnitGlassSceneDepth,
               "部位额外旋转通道表与玻璃场景深度单元重叠");
+static_assert(kTexUnitGlassSceneDepth < kTexUnitWindJointTable,
+              "玻璃场景深度单元与枢轴风关节表单元重叠");
 
 }  // namespace jpov
 

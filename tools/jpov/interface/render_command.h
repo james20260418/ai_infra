@@ -679,6 +679,13 @@ struct WindCommand {
     // 实例路径以 per-instance wind 为准。
     Vec3f direction = {1.0f, 0.0f, 0.0f};
     float speed = 1.0f;
+    // 风算法模式：
+    //   0 = 平移式（默认）：本级贡献 = 沿风向的**位移**，直接加到顶点（`p += wind*Σ…`）。
+    //   1 = 枢轴式：把本级贡献当**绕关节枢轴的转角**，由顶点的关节沿 parent 链向根累加
+    //       （`p = Rot(pivot, θ) ∘ … ∘ Rot(pivot, θ)`）。需要 mesh 带关节表
+    //       （MeshData.wind_joints）；无表时自动退回平移式。
+    // 两种模式用**同一套** softness/phase/频率，只为 A/B 对比算法本身（见 wind viewer）。
+    int mode = 0;
 };
 
 // 未启用（默认）时零开销、零回归。

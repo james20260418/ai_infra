@@ -33,11 +33,17 @@ JPOV::Config MakeConfig(const char* title, bool headless) {
     return cfg;
 }
 
-// headless 拍摄：固定机位，先出「关风」参照，再逐秒出「开风」帧。
-int RunWindCapture(const std::string& out_dir, float distance, int frames) {
+// headless 拍摄：固定机位，先出「关风」参照，再逐帧出「开风」帧（帧 i 的时间 = i*dt 秒）。
+int RunWindCapture(const std::string& out_dir, float distance, int frames,
+                   int count, float amplitude, float azimuth_deg, float dt,
+                   bool pivot_mode) {
     jpov_wind::WindViewerApp app(MakeConfig("JPOV — 植被风 A/B（headless）",
                                             /*headless=*/true));
     app.SetShowPanel(false);
+    app.instance_count_ = count;
+    app.amplitude_ = amplitude;
+    app.wind_azimuth_deg_ = azimuth_deg;
+    app.pivot_mode_ = pivot_mode;
     app.Init();
     app.InstallScene();
 
@@ -56,10 +62,10 @@ int RunWindCapture(const std::string& out_dir, float distance, int frames) {
     app.SetFixedTime(0.0f);
     app.RunOnce(input, winfo, (out_dir + "/wind_off.png").c_str());
 
-    // 开风：每秒一帧（确定性 —— 固定时间）。
+    // 开风：逐帧（时间 = f*dt 秒；确定性 —— 固定时间）。
     app.SetWindEnabled(true);
     for (int f = 0; f < frames; ++f) {
-        app.SetFixedTime(static_cast<float>(f));
+        app.SetFixedTime(static_cast<float>(f) * dt);
         char name[512];
         std::snprintf(name, sizeof(name), "%s/wind_on_t%02d.png", out_dir.c_str(), f);
         app.RunOnce(input, winfo, name);
@@ -75,6 +81,11 @@ int main(int argc, char** argv) {
     std::string wind_dir;
     float distance = 12.0f;
     int frames = 4;
+    int count = 5;
+    float amplitude = 0.6f;
+    float azimuth = 35.0f;
+    float dt = 1.0f;
+    bool pivot = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture-wind") == 0 && i + 1 < argc) {
             wind_dir = argv[i + 1];
@@ -82,10 +93,21 @@ int main(int argc, char** argv) {
             distance = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
             frames = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
+            count = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--amplitude") == 0 && i + 1 < argc) {
+            amplitude = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--azimuth") == 0 && i + 1 < argc) {
+            azimuth = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--dt") == 0 && i + 1 < argc) {
+            dt = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--pivot") == 0) {
+            pivot = true;
         }
     }
     if (!wind_dir.empty()) {
-        return RunWindCapture(wind_dir, distance, frames);
+        return RunWindCapture(wind_dir, distance, frames, count, amplitude, azimuth, dt,
+                              pivot);
     }
 
     // ── 交互模式 ──

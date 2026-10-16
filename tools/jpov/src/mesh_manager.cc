@@ -255,6 +255,39 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec2f), reinterpret_cast<const void*>(0));
     }
 
+    // ---- 枢轴风关节下标（可选，location 3，float）----
+    //   逐顶点关节下标（对应 MeshData.wind_joint_id）；仅带关节表的植被资产有。
+    //   loc3 在本 VAO 上平时未用（顶点 loc3/4 是蒙皮的 JOINTS/WEIGHTS，但植被 mesh 不走蒙皮），
+    //   故 PBR instanced / object3d 路径共用它不冲突。
+    if (!data.wind_joint_id.empty()) {
+        glGenBuffers(1, &mesh.vbo_wind_joint);
+        CHECK_NE(mesh.vbo_wind_joint, 0u);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind_joint);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(data.wind_joint_id.size() * sizeof(float)),
+                     data.wind_joint_id.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE,
+                              sizeof(float), reinterpret_cast<const void*>(0));
+    }
+
+    // ---- 枢轴风关节表纹理（可选，RGBA32F，N×1：pivot.xyz + parent）----
+    //   同树全部实例/primitive 共享；VS 用 texelFetch 按 joint_id 取枢轴与父下标。
+    if (!data.wind_joints.empty()) {
+        glGenTextures(1, &mesh.wind_joint_tex);
+        CHECK_NE(mesh.wind_joint_tex, 0u);
+        mesh.wind_joint_count = static_cast<uint32_t>(data.wind_joints.size());
+        glBindTexture(GL_TEXTURE_2D, mesh.wind_joint_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
+                     static_cast<GLsizei>(data.wind_joints.size()), 1, 0,
+                     GL_RGBA, GL_FLOAT, data.wind_joints.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
     // ---- indices（可选，EBO）----
     if (!data.indices.empty()) {
         glGenBuffers(1, &mesh.ebo);
@@ -284,7 +317,7 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     // GPUMesh 至多 7 个属性 VBO + 1 个 EBO = 8 个 GL 缓冲对象
     // 最多 9 个（pos/normal/uv/joints/weights/tangent/relax-or-wind/ebo；relax 与 wind 互斥
     // 实际最多 8，留 1 个余量避免任何越界风险）。
-    static constexpr int kMaxBuffers = 9;
+    static constexpr int kMaxBuffers = 10;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -311,11 +344,17 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     if (mesh->vbo_wind) {
         buffers[n++] = mesh->vbo_wind;
     }
+    if (mesh->vbo_wind_joint) {
+        buffers[n++] = mesh->vbo_wind_joint;
+    }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;
     }
     if (n > 0) {
         glDeleteBuffers(n, buffers);
+    }
+    if (mesh->wind_joint_tex) {
+        glDeleteTextures(1, &mesh->wind_joint_tex);
     }
 
     *mesh = GPUMesh{};

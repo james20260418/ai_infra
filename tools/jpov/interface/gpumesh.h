@@ -39,6 +39,11 @@ struct GPUMesh {
     unsigned int vbo_tangents = 0;  // 0 = 无切线属性（法线映射 TBN）
     unsigned int vbo_relax = 0;     // 0 = 无布料 LAG 松弛度属性（loc6，vec2: lag_ratio, max_lag）
     unsigned int vbo_wind = 0;      // 0 = 无植被风属性（loc6，vec2: bend, phase；与 vbo_relax 互斥）
+    unsigned int vbo_wind_joint = 0;  // 0 = 无枢轴风关节下标属性（loc3，float；wind_joint_id）
+    // 枢轴风关节表纹理（RGBA32F，N×1：每 texel = (pivot.x, pivot.y, pivot.z, parent)）。
+    // 0 = 无关节表（该 mesh 不走枢轴式风）。由 VS 用 texelFetch(uWindJointTex, ivec2(j,0), 0) 取。
+    unsigned int wind_joint_tex = 0;
+    uint32_t wind_joint_count = 0;  // 关节表条目数（0 = 无）
     unsigned int ebo = 0;           // 0 = 无索引（non-indexed mesh）
     uint32_t vertex_count = 0;      // positions 顶点数
     uint32_t index_count = 0;       // indices 数量（0 = non-indexed）

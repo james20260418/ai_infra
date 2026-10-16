@@ -37,6 +37,11 @@ import bpy
 import os
 import sys
 
+# 同目录的 wind_bake 需可被 import（`blender -b --python build_tree.py` 不会自动把脚本目录
+# 加入 sys.path）。在模块级完成，避免函数内 import（general-dev-rules §7.3）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wind_bake
+
 # ---------------------------------------------------------------------------
 # argument parsing (everything after "--")
 # ---------------------------------------------------------------------------
@@ -208,8 +213,6 @@ def main():
     curve_obj = trunk   # 保留曲线对象（convert 后它的数据会被 mesh 取代）
     wind_polys = None
     if bake_wind:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import wind_bake
         wind_polys = wind_bake.sample_source(curve_obj)   # 必须在 convert 前采样
     leaves = next((o for o in bpy.data.objects if o.type == "MESH"), None)
 
@@ -261,10 +264,20 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     if bake_wind:
         mesh_objs = [o for o in (trunk, leaves) if o is not None]
-        wind_bake.bake_meshes(wind_polys, mesh_objs)
+        wind_joints = wind_bake.bake_meshes(wind_polys, mesh_objs,
+                                            card_objs=[leaves] if leaves else [])
+        # 关节表随资产走：作为 trunk 对象的自定义属性导出到 glTF node extras
+        # （export_extras=True）。阶 = 每关节 (pivot.x, pivot.y, pivot.z, parent)；
+        # parent = 父关节下标，-1 = 根。加载器读回 MeshData.wind_joints。
+        flat = []
+        for j in wind_joints:
+            p = j['pivot']
+            flat.extend([float(p.x), float(p.y), float(p.z), float(j['parent'])])
+        trunk["jpov_wind_joints"] = flat
 
     bpy.ops.object.select_all(action="SELECT")
-    bpy.ops.export_scene.gltf(filepath=out_path, export_format="GLB", use_selection=True)
+    bpy.ops.export_scene.gltf(filepath=out_path, export_format="GLB", use_selection=True,
+                              export_extras=True)
     print("EXPORTED", out_path, os.path.getsize(out_path), "bytes")
 
 

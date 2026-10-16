@@ -1,7 +1,7 @@
 // JPOV 植被风查看器 — 渲染核心 App。
 //
 // 用途：肉眼验收 **VS 植被风**（无状态程序化顶点风）。模特 = 小柳树
-//   （tools/vegetation/samples/willow_small_tex.glb，加载时派生 bend/phase）。
+//   （tools/vegetation/samples/willow_wind_tex.glb，Blender 烘焙 softness/phase 进 TEXCOORD_1）。
 //
 // 一帧 = 环境态 `cmds->wind`（time/amplitude/frequency/turbulence）+ 一排柳树实例
 //   （per-instance wind.xyz + phase）。绘制走 **instanced** 路径（per-instance 风场）。
@@ -62,6 +62,7 @@ public:
     float turbulence_ = 0.5f;          // 细节颤幅度 [0,1]
     float time_scale_ = 1.0f;          // 时间缩放（0 = 暂停）
     float model_scale_ = 1.0f;         // 小柳树整体缩放
+    bool  pivot_mode_ = false;         // 风算法：false=平移式（原算法）；true=枢轴式（绕关节旋转）
 
     // ── 风场（每实例扰动）──
     int   instance_count_ = 5;         // 一排几株
@@ -77,8 +78,8 @@ public:
     void InstallScene() {
         ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
         ground_mat_ = jpov_skylight::GroundMaterial();
-        const std::string path = jpov::ResolveResourcePath("willow_small_tex.glb");
-        willow_ = LoadGltf(path, /*derive_wind_flex=*/true);
+        const std::string path = jpov::ResolveResourcePath("willow_wind_tex.glb");
+        willow_ = LoadGltf(path, /*derive_wind_flex=*/false);   // 资产自带烘焙风数据（TEXCOORD_1）
         CHECK(!willow_.empty()) << "WindViewerApp: 小柳树加载失败: " << path;
     }
 
@@ -146,6 +147,7 @@ public:
         wind.turbulence = turbulence_;
         wind.direction = SceneWindDir();
         wind.speed = wind_speed_;
+        wind.mode = pivot_mode_ ? 1 : 0;   // 0=平移式（原）；1=枢轴式（A/B 对比）
         if (wind_enabled_) {
             cmds->wind = wind;
         }
@@ -211,7 +213,7 @@ private:
         const float kSpace  = 10.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 11;
+        const int   kRows   = 12;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -236,10 +238,13 @@ private:
             instance_count_ = static_cast<int>(ic_f + 0.5f);
         }
         ui_.SliderFloat("模型缩放", &model_scale_, row(9), 0.3f, 3.0f, 2);
-        char info[128];
-        std::snprintf(info, sizeof(info), "小柳树 × %d  |  风 VS（%s）",
-                      instance_count_, use_fixed_time_ ? "固定时间" : "实时");
-        ui_.Text(info, row(10));
+        ui_.Checkbox("枢轴式风（对比：绕关节旋转）", &pivot_mode_, row(10));
+        char info[160];
+        std::snprintf(info, sizeof(info), "小柳树 × %d  |  风 VS（%s / %s）",
+                      instance_count_,
+                      use_fixed_time_ ? "固定时间" : "实时",
+                      pivot_mode_ ? "枢轴" : "平移");
+        ui_.Text(info, row(11));
     }
 
     bool show_panel_ = true;

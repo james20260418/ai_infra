@@ -181,6 +181,80 @@ p' = aPos + worldOffset            // 在 MVP 之前位移
 
 ## 9. 边界与后续
 
-- 本版**平移式弯曲**（无 pivot/层级）；真弯曲（保长、枝继承）另开。
+- v1 是**平移式弯曲**（无 pivot/层级）；真弯曲（保长、枝继承）→ 见 §10（已落 level 版）。
 - 阴影 pass 同步施加同一位移（否则树动影不动）——本 PR 一并做。
 - 四季节/落叶：风权重随季节降低（后续，非本 PR）。
+
+---
+
+## 10. Level 版层级风 + 相位连续性修正（2026-10-16）
+
+> 背景：v1 的「平移式弯曲」不真弯曲。Danis 要一步到位 → 升级为**层级风（level 版）**：
+> Blender 烘焙枝层级 → 每顶点 `(softness, phase)` 进 `TEXCOORD_1` → VS 按 `softness` 分档、
+> 各级独立频率/振幅、子级继承父级。
+
+### 10.1 数据模型修正（关键）
+
+原 §1 定「`phase` = 按枝常量」。**实践发现这是撕裂的根因**，改为：
+
+| 量 | 语义 | 为何 |
+|---|---|---|
+| `softness` | 沿枝层级的归一化**弧距**（根 0 → 梢 1，**连续场**） | 跨关节连续 ⇒ 不撕；子级继承父级（关节处软度相等） |
+| `phase` | **位置的连续低频场** `∈[0,1)` 秒（**不是** per-vertex hash，**也不是** per-branch 常量） | 见下 |
+
+**为什么 `phase` 必须连续**：
+- 用 per-vertex **hash**：相邻顶点相位毫不相关 ⇒ 面被直接撕开（本 PR 修掉的灾难级撕裂）。
+- 用 **per-branch 常量**：在**子枝接父枝的缝**上，父枝末梢与子枝根部相位不同 ⇒ 缝处撕裂（
+  叶片挂在细枝上时尤甚：卡整片会被撕成两半）。
+- 用**连续低频场**：`phase(x,y,z) = 0.5 + 0.5·Σ wᵢ·sin(kᵢ·p)（clamp）`。空间去同步（树冠不同区域错拍）
+  但**处处连续** ⇒ 不撕；且叶卡（~0.25）远小于波长（~3-4 单位）⇒ 卡内几近常量 ⇒ 卡保持刚体。
+
+### 10.2 叶片：按卡刚体 + 挂到最近实体顶点
+
+- 叶卡是**独立 mesh**。若逐顶点采骨架，一张卡的 4 角可能落到**不同枝**上 ⇒ 软度/相位不一 ⇒ 卡被剪切/脱离。
+- 做法：叶子**整卡**取一个 `(softness, phase)`，且该值**从最近的实体（树干/枝）顶点拷贝** ——
+  这样卡既不会被软度梯度剪切，也不会与所挂细枝分离。（bake 分两趟：先实体逐顶点，再叶子逐卡就近继承。）
+
+### 10.3 Blender 烘焙（`tools/vegetation/wind_bake.py`）
+
+1. `sample_source(curve_obj)`：在 curve→mesh 转换**之前**采样 Sapling splines 成折线，
+   并**乘 curve 的 `matrix_world` 取世界坐标**（与成品网格顶点同坐标系；否则 base/scale 会错）。
+2. `_build_hierarchy`：按「子样条起点落在父样条上」重建 parent/level；`parent/attach_t` → `hd_start`（沿层级弧距）。
+3. `_nearest`：顶点就近吸附到**最近骨架采样点**（环截面上所有顶点共享同一采样 ⇒ 管环刚体、不被掐）。
+4. 写 UV 层 `"Wind"` = `(softness, phase)`（→ glTF `TEXCOORD_1`）；`build_tree.py --bake-wind` 触发。
+
+### 10.4 着色器（level 累计权重）
+
+```glsl
+const int kLv = 4;
+float sN = clamp(aFlex.x,0,1)*float(kLv);
+float base = floor(min(sN,float(kLv))); float frac = sN - base;
+float ssum = 0.0;
+for (int l=0;l<kLv;++l){
+    float w = (l<base)?1.0:((l==base)?frac:0.0);          // 累计：低层全量、当前层按 frac
+    float amp = uWindAmplitude*(0.40-0.10*float(l));      // 各级增益归一化 Σg=1（梢部总位移 = uWindAmplitude）
+    float fr  = uWindFrequency*(1.0+1.6*float(l));        // 越高频越靠近梢部
+    ssum += w*amp*sin(6.28318531*fr*(uWindTime+aFlex.y));
+}
+p += uWindVector*ssum;                                     // 主弯（平移近似层级旋转）
+```
+
+- `uWindVector` 长度 = 风速；`amplitude` 滑块此时≈**梢部总位移**（量纲清晰）。
+- base=0 时 `ssum=0` ⇒ **根不动**（实测 softness≈0 顶点位移恒 0）。
+- 抖动项（细节颤）仍按 `softness` 线性取权。
+
+### 10.5 验证（本地）
+
+- 几何量（重写 VS 于 Python 逐三角测边长变化）：
+  - 叶片：**max 边长拉伸 1.00×**（整卡刚体、零撕裂）；
+  - 树干：softness≈0 顶点位移 **0.0000**（根固定）；
+  - 叶卡与最近实体顶点位移差 ≈ 0（不再脱离）。
+- 渲染 A/B（`--capture-wind`，固定机位/逐秒）：关↔开约 8% 像素变化、t0↔t3 约 10%（确在动）。
+- 单测 `//tools/jpov/test/wind:all` 8/8；回归 `object3d`/`instance` 除**既有 flake**
+  （`jpov_text3d_depth_alpha_gold_test`）外全绿。
+
+### 10.6 残留
+
+- 仍为**平移近似**（不是绕枢轴的真旋转、不保长）——真保长需 Pivot Painter 式逐枝枢轴，另开。
+- 树干网格上极少数微边（~1.5mm）在接枝处拉伸较大（绝对量 <0.1 单位），肉眼不可见。
+

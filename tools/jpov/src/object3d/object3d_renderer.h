@@ -89,7 +89,7 @@ void main() {
         float ssum = 0.0;
         for (int l = 0; l < kLv; ++l) {
             float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
             float fr = uWindFrequency * (1.0 + 1.6 * float(l));
             ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y));
         }
@@ -148,7 +148,7 @@ void main() {
         float ssum = 0.0;
         for (int l = 0; l < kLv; ++l) {
             float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
             float fr = uWindFrequency * (1.0 + 1.6 * float(l));
             ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y));
         }
@@ -204,7 +204,7 @@ void main() {
         float ssum = 0.0;
         for (int l = 0; l < kLv; ++l) {
             float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
+            float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
             float fr = uWindFrequency * (1.0 + 1.6 * float(l));
             ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y));
         }

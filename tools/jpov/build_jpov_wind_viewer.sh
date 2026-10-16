@@ -40,8 +40,8 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 
 echo ""
 echo "==> 4. 拷贝小柳树 GLB（模特）到 exe 旁"
-cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_small_tex.glb" \
-      "$OUTPUT_DIR/willow_small_tex.glb"
+cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_wind_tex.glb" \
+      "$OUTPUT_DIR/willow_wind_tex.glb"
 
 ls -lh "$OUTPUT_DIR/"
 echo ""

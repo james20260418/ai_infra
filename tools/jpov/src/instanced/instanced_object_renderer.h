@@ -70,6 +70,20 @@ public:
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex：(bend, phase)
+// 枢轴风（mode=1）：逐顶点关节下标 + 关节表采样器。模式/链深/增益 uniform（见 WindCommand.mode）。
+layout(location = 3) in float aWindJoint;
+uniform int   uWindMode;          // 0=平移式（默认）；1=枢轴式
+uniform int   uWindJointCount;    // 关节表条目数（0 = 无表 → 退回平移式）
+uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, parent)
+const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
+const float kWindPivotGain = 0.012;  // 每关节转角系数（弧度 / 振幅单位）：使梢部总弧长 ≈ 振幅（树高~7 / 链深~14）
+// 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
+vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
+    vec3 v = p - o;
+    float c = cos(th);
+    float s = sin(th);
+    return o + v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 // per-instance 摆放矩阵（loc7..10 拆 4 列，divisor=1；布局见 instance_buffer.h）。
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
@@ -96,18 +110,43 @@ void main() {
     vec3 wn = normalize(nrm * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        const int kLv = 4;
-        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
-        float base = floor(min(sN, float(kLv)));
-        float frac = sN - base;
-        float ssum = 0.0;
-        for (int l = 0; l < kLv; ++l) {
-            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
-            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        if (uWindMode == 1 && uWindJointCount > 0) {
+            // 枢轴式：本级贡献当**绕关节的转角**，由顶点关节沿 parent 链向根累加
+            //   （内层 = 自身关节，外层 = 根）。绕枢轴旋转 ⇒ 枢轴点不动（接头不撕）+ 保长。
+            vec3 wd = aInstWind.xyz;
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            float al = length(axis);
+            axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            int j = int(aWindJoint + 0.5);
+            for (int s = 0; s < kMaxWindChain; ++s) {
+                if (j < 0 || j >= uWindJointCount) {
+                    break;
+                }
+                vec4 jd = texelFetch(uWindJointTex, ivec2(j, 0), 0);
+                float fr = uWindFrequency * (1.0 + 0.5 * float(s));
+                float th = uWindAmplitude * kWindPivotGain
+                         * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                p = WindRotAboutAxis(p, jd.xyz, axis, th);
+                j = int(jd.w + 0.5);
+                if (j < 0) {
+                    break;
+                }
+            }
+        } else {
+            const int kLv = 4;
+            float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+            float base = floor(min(sN, float(kLv)));
+            float frac = sN - base;
+            float ssum = 0.0;
+            for (int l = 0; l < kLv; ++l) {
+                float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+                float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
+                float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+            }
+            p += aInstWind.xyz * ssum;
         }
-        p += aInstWind.xyz * ssum;
+        // 细节颤（两模式共用）：沿法线的高频小幅位移。
         float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
     }
@@ -129,6 +168,19 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
+// 枢轴风（mode=1）：逐顶点关节下标 + 关节表采样器（同 kMeshVs3dPBRInstanced）。
+layout(location = 3) in float aWindJoint;
+uniform int   uWindMode;
+uniform int   uWindJointCount;
+uniform sampler2D uWindJointTex;
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.012;
+vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
+    vec3 v = p - o;
+    float c = cos(th);
+    float s = sin(th);
+    return o + v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex：(bend, phase)
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
@@ -155,18 +207,42 @@ void main() {
     vec3 wn = normalize(nrm * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        const int kLv = 4;
-        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
-        float base = floor(min(sN, float(kLv)));
-        float frac = sN - base;
-        float ssum = 0.0;
-        for (int l = 0; l < kLv; ++l) {
-            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
-            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        if (uWindMode == 1 && uWindJointCount > 0) {
+            // 枢轴式（同 kMeshVs3dPBRInstanced）：绕关节枢轴累加转角。
+            vec3 wd = aInstWind.xyz;
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            float al = length(axis);
+            axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            int j = int(aWindJoint + 0.5);
+            for (int s = 0; s < kMaxWindChain; ++s) {
+                if (j < 0 || j >= uWindJointCount) {
+                    break;
+                }
+                vec4 jd = texelFetch(uWindJointTex, ivec2(j, 0), 0);
+                float fr = uWindFrequency * (1.0 + 0.5 * float(s));
+                float th = uWindAmplitude * kWindPivotGain
+                         * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                p = WindRotAboutAxis(p, jd.xyz, axis, th);
+                j = int(jd.w + 0.5);
+                if (j < 0) {
+                    break;
+                }
+            }
+        } else {
+            const int kLv = 4;
+            float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+            float base = floor(min(sN, float(kLv)));
+            float frac = sN - base;
+            float ssum = 0.0;
+            for (int l = 0; l < kLv; ++l) {
+                float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+                float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
+                float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+            }
+            p += aInstWind.xyz * ssum;
         }
-        p += aInstWind.xyz * ssum;
+        // 细节颤（两模式共用）。
         float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
     }
@@ -193,6 +269,19 @@ layout(location = 10) in vec4 aInstCol3;
 layout(location = 11) in vec4 aInstWind;  // 植被风 per-instance
 uniform mat4 uShadowViewProj;
 uniform mat4 uShadowDepthViewProj;
+// 枢轴风（mode=1）：同主 pass（逐顶点关节下标 + 关节表）。
+layout(location = 3) in float aWindJoint;
+uniform int   uWindMode;
+uniform int   uWindJointCount;
+uniform sampler2D uWindJointTex;
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.012;
+vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
+    vec3 v = p - o;
+    float c = cos(th);
+    float s = sin(th);
+    return o + v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
@@ -207,18 +296,40 @@ void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
     vec3 p = aPos;
     if (uWindEnabled == 1) {
-        const int kLv = 4;
-        float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
-        float base = floor(min(sN, float(kLv)));
-        float frac = sN - base;
-        float ssum = 0.0;
-        for (int l = 0; l < kLv; ++l) {
-            float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
-            float amp = uWindAmplitude * (0.30 + 0.35 * float(l));
-            float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-            ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+        if (uWindMode == 1 && uWindJointCount > 0) {
+            vec3 wd = aInstWind.xyz;
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            float al = length(axis);
+            axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            int j = int(aWindJoint + 0.5);
+            for (int s = 0; s < kMaxWindChain; ++s) {
+                if (j < 0 || j >= uWindJointCount) {
+                    break;
+                }
+                vec4 jd = texelFetch(uWindJointTex, ivec2(j, 0), 0);
+                float fr = uWindFrequency * (1.0 + 0.5 * float(s));
+                float th = uWindAmplitude * kWindPivotGain
+                         * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                p = WindRotAboutAxis(p, jd.xyz, axis, th);
+                j = int(jd.w + 0.5);
+                if (j < 0) {
+                    break;
+                }
+            }
+        } else {
+            const int kLv = 4;
+            float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
+            float base = floor(min(sN, float(kLv)));
+            float frac = sN - base;
+            float ssum = 0.0;
+            for (int l = 0; l < kLv; ++l) {
+                float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
+                float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
+                float fr = uWindFrequency * (1.0 + 1.6 * float(l));
+                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+            }
+            p += aInstWind.xyz * ssum;
         }
-        p += aInstWind.xyz * ssum;
     }
     vec4 wp = model * vec4(p, 1.0);
     gl_Position = uShadowViewProj * wp;

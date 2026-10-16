@@ -319,6 +319,19 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
         glUniform1f(glGetUniformLocation(selected_prog, "uWindAmplitude"), w.amplitude);
         glUniform1f(glGetUniformLocation(selected_prog, "uWindFrequency"), w.frequency);
         glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbulence"), w.turbulence);
+        // 枢轴式风（mode=1）：关节表纹理（mesh 级；无表 → count=0，VS 退回平移式）。
+        const bool pivot_on = wind_on && w.mode == 1 && mesh != nullptr &&
+                              mesh->wind_joint_tex != 0;
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindMode"), pivot_on ? 1 : 0);
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindJointCount"),
+                    pivot_on ? static_cast<int>(mesh->wind_joint_count) : 0);
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindJointTex"),
+                    kTexUnitWindJointTable);
+        if (pivot_on) {
+            glActiveTexture(GL_TEXTURE0 + kTexUnitWindJointTable);
+            glBindTexture(GL_TEXTURE_2D, mesh->wind_joint_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
     }
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
@@ -533,6 +546,18 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
         glUniform1f(glGetUniformLocation(sp, "uWindAmplitude"), w.amplitude);
         glUniform1f(glGetUniformLocation(sp, "uWindFrequency"), w.frequency);
         glUniform1f(glGetUniformLocation(sp, "uWindTurbulence"), w.turbulence);
+        // 枢轴式风（mode=1）：关节表纹理（与主 pass 同步；无表 → 退回平移式）。
+        const bool pivot_on = wind_on && w.mode == 1 && mesh != nullptr &&
+                              mesh->wind_joint_tex != 0;
+        glUniform1i(glGetUniformLocation(sp, "uWindMode"), pivot_on ? 1 : 0);
+        glUniform1i(glGetUniformLocation(sp, "uWindJointCount"),
+                    pivot_on ? static_cast<int>(mesh->wind_joint_count) : 0);
+        glUniform1i(glGetUniformLocation(sp, "uWindJointTex"), kTexUnitWindJointTable);
+        if (pivot_on) {
+            glActiveTexture(GL_TEXTURE0 + kTexUnitWindJointTable);
+            glBindTexture(GL_TEXTURE_2D, mesh->wind_joint_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
     }
 
     const size_t n = cmd.instances.size();

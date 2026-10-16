@@ -98,6 +98,14 @@ struct MeshData {
     //   .y = phase（秒）  ：该顶点的时间偏移（去同步 / 梢部滞后），与 per-instance phase 同单位。
     // 见 docs/jpov_vegetation_wind_design.md §1。
     std::vector<Vec2f> wind_flex;
+    // 枢轴式植被风（逐顶点；kWind 且资产带关节表时非空）：
+    //   wind_joint_id[i] = 顶点 i 所属关节在 wind_joints 表中的下标。
+    // VS 由该关节出发、沿 parent 链向根累加**绕枢轴旋转**（取代平移式风）。
+    std::vector<float> wind_joint_id;
+    // 枢轴式植被风关节表（**每 mesh 一份**，来自资产 node extras 的 jpov_wind_joints）：
+    //   每项 = (pivot.x, pivot.y, pivot.z, parent)；parent = 父关节下标，-1 = 根。
+    //   同树的多 primitive（trunk / leaves）共享同一张表。见 wind_bake.py / 设计文档。
+    std::vector<std::array<float, 4>> wind_joints;
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -197,6 +205,18 @@ inline void MeshData::Validate() const {
     if (!wind_flex.empty()) {
         CHECK_EQ(wind_flex.size(), vcount)
             << "MeshData::Validate: wind_flex.size() != positions.size()";
+    }
+    // 枢轴风：逐顶点关节下标须与顶点数对齐；关节表须是 4 项一组。
+    if (!wind_joint_id.empty()) {
+        CHECK_EQ(wind_joint_id.size(), vcount)
+            << "MeshData::Validate: wind_joint_id.size() != positions.size()";
+        CHECK(!wind_joints.empty())
+            << "MeshData::Validate: 有 wind_joint_id 但无 wind_joints 关节表";
+    }
+    for (const float jid : wind_joint_id) {
+        CHECK_GE(jid, 0.0f) << "MeshData::Validate: wind_joint_id 为负";
+        CHECK_LT(static_cast<size_t>(jid), wind_joints.size())
+            << "MeshData::Validate: wind_joint_id 越出关节表";
     }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)
