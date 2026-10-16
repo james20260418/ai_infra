@@ -58,6 +58,15 @@ public:
     float play_time_ = 0.0f;
     int   nframes_ = 64;            // 由 asset 决定（96³×64）
 
+    // ---- A/B 基准模式（P0：钉帧 + 钉相机 + 纯黑背景）----
+    // 打开后：不画地面/燃料块（只留孤立火），天光/日月/夜空归零（纯黑底），
+    // 火盒 = **居中于世界原点**的立方盒（边 ab_box_m_），帧号钉死 ab_frame_。
+    // 相机由调用方（RunAbCapture）钉为正面（+Z 看向原点）。
+    // 目的：产出与 EmberGen 官方渲染（同为孤立火 + 黑底）可直接比对的图。
+    bool  ab_mode_ = false;
+    int   ab_frame_ = 0;            // 钉死的资产帧下标（>=0）
+    float ab_box_m_ = 1.3f;         // A/B 火盒边长（米）= 资产最大世界尺寸
+
     void InstallTextMeasure() { ui_.SetTextMeasure(&VolumeFireViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }
     void SetShowCamInfo(bool show) { show_cam_info_ = show; }
@@ -106,19 +115,29 @@ public:
         cmds->camera.near = 0.05f;
         cmds->camera.far = 1000.0f;
 
-        const jpov_skylight::SkyLighting nl =
+        jpov_skylight::SkyLighting nl =
             jpov_skylight::MakeSkyLighting(deg_, /*tricolor_ambient=*/false);
+        if (ab_mode_) {
+            // A/B 基准：天光/日月/夜空/地色全部归零 → 纯黑背景（与官方参考渲染同底）。
+            MakeBlackBackground(&nl);
+            // 火盒居中于世界原点（孤立火，不带地面/燃料/尺度参照）。
+            const float hh = 0.5f * ab_box_m_;
+            fire_min_ = {-hh, -hh, -hh};
+            fire_max_ = {hh, hh, hh};
+        }
         cmds->sky = nl.sky;
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
-        // 场景：地面 + 1m³ 燃料块。
-        cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-        if (fuel_enable_) {
-            cmds->DrawObject3D(fuel_mesh_, fuel_mat_, {0.0f, 0.5f, 0.0f},
+        // 场景：地面 + 1m³ 燃料块（A/B 模式下不画——只留孤立火）。
+        if (!ab_mode_) {
+            cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            if (fuel_enable_) {
+                cmds->DrawObject3D(fuel_mesh_, fuel_mat_, {0.0f, 0.5f, 0.0f},
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            }
         }
 
         // 懒加载体积。
@@ -144,7 +163,9 @@ public:
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
-            vc.frame = std::fmod(play_time_ * fps_, static_cast<float>(nframes_));
+            // A/B 模式：帧号钉死（可复现）；常规模式：按播放时间推进。
+            vc.frame = ab_mode_ ? static_cast<float>(ab_frame_)
+                                : std::fmod(play_time_ * fps_, static_cast<float>(nframes_));
             cmds->DrawVolumeFire(std::move(vc));
         }
 
@@ -162,6 +183,25 @@ public:
     }
 
 private:
+    // A/B 基准背景：把 SkyCommand 的天光亮度 / 日盘 / 月盘 / 夜色 / 地色全部归零，
+    // 并把主平行光与环境光强度清零 → 画面只剩火自身的自发光（纯黑底）。
+    // 仅 ab_mode_ 调用；常规查看器的天光不受影响。
+    static void MakeBlackBackground(jpov_skylight::SkyLighting* nl /*inout*/) {
+        CHECK_NOTNULL(nl);
+        nl->sky.intensity = 0.0f;
+        nl->sky.sun_radius = 0.0f;
+        nl->sky.sun_brightness = 0.0f;
+        nl->sky.sun_glow = 0.0f;
+        nl->sky.moon_radius = 0.0f;
+        nl->sky.moon_brightness = 0.0f;
+        nl->sky.moon_glow = 0.0f;
+        nl->sky.night_zenith_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->sky.night_horizon_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->sky.ground_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->dir_light.intensity = 0.0f;
+        nl->ambient.intensity = 0.0f;
+    }
+
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
                            void* userdata) {
         VolumeFireViewerApp* app = static_cast<VolumeFireViewerApp*>(userdata);

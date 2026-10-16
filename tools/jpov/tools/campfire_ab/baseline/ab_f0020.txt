@@ -1,0 +1,10 @@
+== Campfire A/B ==
+thresh=12.0  gt=/james_pm/ai_infra_4_campfire_ab/tools/jpov/tools/campfire_ab/reference/embergen_smallCampfire_f0080.png  ours=/tmp/campfire_ab/ours_f0020.png
+[GT] size=(576, 813) bbox=(119, 160, 472, 780)
+    h/w=1.75  area=22.53%
+    meanRGB=(62.1,39.6,28.4)  nearWhite=0.0%
+    profile(bottom->top)= 75.3 108.9  59.2  29.5  21.6  19.4  16.9  17.1  15.2  13.0
+[OURS] size=(1280, 720) bbox=(526, 313, 732, 513)
+    h/w=0.97  area=1.95%
+    meanRGB=(76.8,45.4,1.3)  nearWhite=0.0%
+    profile(bottom->top)= 18.7  32.8  40.3  48.0  49.7  44.5  36.5  22.4  19.3  14.7
