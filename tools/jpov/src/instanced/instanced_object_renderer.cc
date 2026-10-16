@@ -319,6 +319,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
         glUniform1f(glGetUniformLocation(selected_prog, "uWindAmplitude"), w.amplitude);
         glUniform1f(glGetUniformLocation(selected_prog, "uWindFrequency"), w.frequency);
         glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbulence"), w.turbulence);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbAmp"), w.turb_amplitude);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbFreq"), w.turb_frequency);
         // 枢轴式风（mode=1）：关节表纹理（mesh 级；无表 → count=0，VS 退回平移式）。
         const bool pivot_on = wind_on && w.mode == 1 && mesh != nullptr &&
                               mesh->wind_joint_tex != 0;
@@ -546,6 +548,8 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
         glUniform1f(glGetUniformLocation(sp, "uWindAmplitude"), w.amplitude);
         glUniform1f(glGetUniformLocation(sp, "uWindFrequency"), w.frequency);
         glUniform1f(glGetUniformLocation(sp, "uWindTurbulence"), w.turbulence);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbAmp"), w.turb_amplitude);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbFreq"), w.turb_frequency);
         // 枢轴式风（mode=1）：关节表纹理（与主 pass 同步；无表 → 退回平移式）。
         const bool pivot_on = wind_on && w.mode == 1 && mesh != nullptr &&
                               mesh->wind_joint_tex != 0;

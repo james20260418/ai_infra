@@ -77,12 +77,10 @@ uniform int   uWindJointCount;    // 关节表条目数（0 = 无表 → 退回�
 uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, parent)
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
 const float kWindPivotGain = 0.4;
-const float kTurbAmp   = 1.0;   // 平动湍流：**整体幅度系数**（调大小看这里）
-const float kTurbFreq  = 2.5;   // 平动湍流：**整体频率系数**（× 基频 × (1+kTurbLevF·level)）
-const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率
-const float kTurbGustF = 0.35;  // 阵风包络频率（× 基频）：偶发性的快慢
-const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"（大部分时间≈0）；p=1 退化成常开
-const float kTurbBase  = 0.35;  // 平动湍流的基础幅度（× 振幅；再乘 softness·(0.5+0.5·level)·阵风）
+// 平动湍流的**形状**常数（动态幅度/频率由 uWindTurbAmp / uWindTurbFreq 两个独立滑条给）：
+const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率（属性耦合）
+const float kTurbGustF = 0.35;  // 阵风包络频率（× 湍流频率）：偶发性的快慢
+const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"；p=1 退化成常开
 
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
@@ -109,6 +107,8 @@ uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform float uWindTurbulence;
+uniform float uWindTurbAmp;    // 平动湍流幅度（独立滑条）
+uniform float uWindTurbFreq;   // 平动湍流频率（独立滑条）
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -182,14 +182,14 @@ void main() {
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float tph = aFlex.y + aInstWind.w;
-            float tfq = uWindFrequency * kTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
-            float gph = uWindFrequency * kTurbGustF * tph;
+            float gph = uWindTurbFreq * kTurbGustF * tph;           // 包络随湍流频率走
             gph -= floor(gph);
             float gust = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
-            float tamp = uWindAmplitude * uWindTurbulence * kTurbAmp * kTurbBase
-                       * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
+            // 幅度 = **独立滑条** × 属性耦合（softness·(0.5+0.5·level)）× 阵风包络
+            float tamp = uWindTurbAmp * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0) + normalize(wdir) * 0.4
                                   + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
@@ -243,12 +243,10 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
-const float kTurbAmp   = 1.0;   // 平动湍流：**整体幅度系数**（调大小看这里）
-const float kTurbFreq  = 2.5;   // 平动湍流：**整体频率系数**（× 基频 × (1+kTurbLevF·level)）
-const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率
-const float kTurbGustF = 0.35;  // 阵风包络频率（× 基频）：偶发性的快慢
-const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"（大部分时间≈0）；p=1 退化成常开
-const float kTurbBase  = 0.35;  // 平动湍流的基础幅度（× 振幅；再乘 softness·(0.5+0.5·level)·阵风）
+// 平动湍流的**形状**常数（动态幅度/频率由 uWindTurbAmp / uWindTurbFreq 两个独立滑条给）：
+const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率（属性耦合）
+const float kTurbGustF = 0.35;  // 阵风包络频率（× 湍流频率）：偶发性的快慢
+const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"；p=1 退化成常开
 
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -274,6 +272,8 @@ uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform float uWindTurbulence;
+uniform float uWindTurbAmp;    // 平动湍流幅度（独立滑条）
+uniform float uWindTurbFreq;   // 平动湍流频率（独立滑条）
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -347,14 +347,14 @@ void main() {
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float tph = aFlex.y + aInstWind.w;
-            float tfq = uWindFrequency * kTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
-            float gph = uWindFrequency * kTurbGustF * tph;
+            float gph = uWindTurbFreq * kTurbGustF * tph;           // 包络随湍流频率走
             gph -= floor(gph);
             float gust = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
-            float tamp = uWindAmplitude * uWindTurbulence * kTurbAmp * kTurbBase
-                       * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
+            // 幅度 = **独立滑条** × 属性耦合（softness·(0.5+0.5·level)）× 阵风包络
+            float tamp = uWindTurbAmp * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0) + normalize(wdir) * 0.4
                                   + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
@@ -413,12 +413,10 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
-const float kTurbAmp   = 1.0;   // 平动湍流：**整体幅度系数**（调大小看这里）
-const float kTurbFreq  = 2.5;   // 平动湍流：**整体频率系数**（× 基频 × (1+kTurbLevF·level)）
-const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率
-const float kTurbGustF = 0.35;  // 阵风包络频率（× 基频）：偶发性的快慢
-const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"（大部分时间≈0）；p=1 退化成常开
-const float kTurbBase  = 0.35;  // 平动湍流的基础幅度（× 振幅；再乘 softness·(0.5+0.5·level)·阵风）
+// 平动湍流的**形状**常数（动态幅度/频率由 uWindTurbAmp / uWindTurbFreq 两个独立滑条给）：
+const float kTurbLevF  = 0.5;   // 频率 ∝ level 的斜率（属性耦合）
+const float kTurbGustF = 0.35;  // 阵风包络频率（× 湍流频率）：偶发性的快慢
+const float kTurbGustP = 4.0;   // 阵风包络幂律 p：越大越"偶发"；p=1 退化成常开
 
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -437,6 +435,8 @@ uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform float uWindTurbulence;
+uniform float uWindTurbAmp;    // 平动湍流幅度（独立滑条）
+uniform float uWindTurbFreq;   // 平动湍流频率（独立滑条）
 out float vShadowDepth;
 #ifdef JPOV_ALPHA_CUTOUT
 layout(location = 2) in vec2 aTexCoord;
@@ -504,14 +504,14 @@ void main() {
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float tph = aFlex.y + aInstWind.w;
-            float tfq = uWindFrequency * kTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
-            float gph = uWindFrequency * kTurbGustF * tph;
+            float gph = uWindTurbFreq * kTurbGustF * tph;           // 包络随湍流频率走
             gph -= floor(gph);
             float gust = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
-            float tamp = uWindAmplitude * uWindTurbulence * kTurbAmp * kTurbBase
-                       * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
+            // 幅度 = **独立滑条** × 属性耦合（softness·(0.5+0.5·level)）× 阵风包络
+            float tamp = uWindTurbAmp * clamp(aFlex.x, 0.0, 1.0) * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0) + normalize(wdir) * 0.4
                                   + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));

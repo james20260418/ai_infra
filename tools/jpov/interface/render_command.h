@@ -686,6 +686,12 @@ struct WindCommand {
     //       （MeshData.wind_joints）；无表时自动退回平移式。
     // 两种模式用**同一套** softness/phase/频率，只为 A/B 对比算法本身（见 wind viewer）。
     int mode = 0;
+
+    // ---- 枢轴模式的「平动湍流」：**独立参数**（不从 amplitude/frequency 派生）----
+    //   目的是让湍流可被单独观察/调试；与**顶点/关节属性**（softness、level）的耦合仍在
+    //   （幅度 ∝ softness·(0.5+0.5·level)，频率 ∝ (1+kTurbLevF·level)），但那两个系数是常数。
+    float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
+    float turb_frequency = 2.5f;   // 平动湍流频率（Hz）
 };
 
 // 未启用（默认）时零开销、零回归。
