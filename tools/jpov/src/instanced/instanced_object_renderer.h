@@ -185,10 +185,11 @@ void main() {
             p += aInstWind.xyz * ssum;
         }
         // 细节颤（两模式共用）：沿法线的高频小幅位移。
-        float tj = uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        // ⚠️ 归约必须作用在**最终**参数上（含 4.3 倍频）：frac(x)*4.3 != frac(4.3*x)。
+        float tj = 4.3 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         tj -= floor(tj);
         p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
-                   * sin(6.28318531 * tj * 4.3));
+                   * sin(6.28318531 * tj));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -321,10 +322,11 @@ void main() {
             p += aInstWind.xyz * ssum;
         }
         // 细节颤（两模式共用）。
-        float tj = uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        // ⚠️ 归约必须作用在**最终**参数上（含 4.3 倍频）：frac(x)*4.3 != frac(4.3*x)。
+        float tj = 4.3 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         tj -= floor(tj);
         p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
-                   * sin(6.28318531 * tj * 4.3));
+                   * sin(6.28318531 * tj));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
