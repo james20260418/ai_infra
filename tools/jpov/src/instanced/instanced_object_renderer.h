@@ -76,7 +76,7 @@ uniform int   uWindMode;          // 0=平移式（默认）；1=枢轴式
 uniform int   uWindJointCount;    // 关节表条目数（0 = 无表 → 退回平移式）
 uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, parent)
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
-const float kWindPivotGain = 0.4;  // 逐关节角系数（弧度/振幅单位）：梢部累计角 ≈ 振幅×0.4×Σg(level)
+const float kWindPivotGain = 0.4;  // 逐关节角系数（弧度/振幅单位）：amp = A·此值·0.15·level
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -133,19 +133,22 @@ void main() {
             vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             vec3 p_par = p;
             float th_par = 0.0;
-            int j = int(o0.w + 0.5);
+            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
+            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
+            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
+            int j = int(floor(o0.w + 0.5));
             for (int c = 0; c < kMaxWindChain; ++c) {
                 if (j < 0 || j >= uWindJointCount) {
                     break;
                 }
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
-                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
+                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
+                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
                 //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
                 float pjw = fr * (uWindTime + jd1.y);
@@ -153,14 +156,14 @@ void main() {
                 float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
-                j = int(jd0.w + 0.5);
+                j = int(floor(jd0.w + 0.5));
                 if (j < 0) {
                     break;
                 }
             }
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
@@ -270,19 +273,22 @@ void main() {
             vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             vec3 p_par = p;
             float th_par = 0.0;
-            int j = int(o0.w + 0.5);
+            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
+            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
+            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
+            int j = int(floor(o0.w + 0.5));
             for (int c = 0; c < kMaxWindChain; ++c) {
                 if (j < 0 || j >= uWindJointCount) {
                     break;
                 }
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
-                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
+                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
+                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
                 //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
                 float pjw = fr * (uWindTime + jd1.y);
@@ -290,14 +296,14 @@ void main() {
                 float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
-                j = int(jd0.w + 0.5);
+                j = int(floor(jd0.w + 0.5));
                 if (j < 0) {
                     break;
                 }
             }
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
@@ -399,19 +405,22 @@ void main() {
             vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             vec3 p_par = p;
             float th_par = 0.0;
-            int j = int(o0.w + 0.5);
+            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
+            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
+            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
+            int j = int(floor(o0.w + 0.5));
             for (int c = 0; c < kMaxWindChain; ++c) {
                 if (j < 0 || j >= uWindJointCount) {
                     break;
                 }
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
-                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
+                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
+                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
                 //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
                 float pjw = fr * (uWindTime + jd1.y);
@@ -419,14 +428,14 @@ void main() {
                 float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
-                j = int(jd0.w + 0.5);
+                j = int(floor(jd0.w + 0.5));
                 if (j < 0) {
                     break;
                 }
             }
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
