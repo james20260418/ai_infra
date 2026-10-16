@@ -11,6 +11,7 @@
 // headless 拍摄（无窗口，供交付验收 / 自动化核对）：
 //   --capture <out_dir>        昼夜扫谱（天体仰角 +60° → −60°）+ 正午/夜间两个机位
 //   --capture-smaa <out_dir>   固定光照，只切 SMAA 开关（smaa_off / smaa_on）
+//   --capture-ui <out_dir>     面板可见的单帧截图（供验证右下角面板布局）
 //
 // 架构：与 skylight viewer 同构（主程序只做装配 + 事件循环；场景/天光装配在
 // skylight_scene.h，渲染核心 + 面板在 vegetation_viewer_app.h）。
@@ -152,12 +153,43 @@ int RunCaptureSmaa(const std::string& out_dir, const std::string& glb_path,
     return 0;
 }
 
+// UI 截图（供验证面板布局）：面板可见，单帧出图。
+int RunCaptureUi(const std::string& out_dir, const std::string& glb_path) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被查看器（面板截图）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationViewerApp app(cfg);
+    app.SetShowPanel(true);   // 画面板
+    app.Init();
+    app.InstallTextMeasure();
+    app.InstallSceneWithGltf(glb_path);
+    app.deg_.sun_elev_deg = 40.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_.phi   = 0.12;
+    app.view_.theta = kPi / 4.0;
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+    const std::string path = out_dir + "/ui.png";
+    app.RunOnce(input, winfo, path.c_str());
+    LOG(INFO) << "capture(ui): " << path;
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string glb_arg;          // --glb（空 = 用默认植物）
     std::string out_dir;          // --capture
     std::string smaa_dir;         // --capture-smaa
+    std::string ui_dir;           // --capture-ui
     float smaa_threshold = 0.1f;  // --smaa-threshold
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--glb") == 0 && i + 1 < argc) {
@@ -166,6 +198,8 @@ int main(int argc, char** argv) {
             out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-smaa") == 0 && i + 1 < argc) {
             smaa_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ui") == 0 && i + 1 < argc) {
+            ui_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -176,6 +210,9 @@ int main(int argc, char** argv) {
 
     if (!smaa_dir.empty()) {
         return RunCaptureSmaa(smaa_dir, glb_path, smaa_threshold);
+    }
+    if (!ui_dir.empty()) {
+        return RunCaptureUi(ui_dir, glb_path);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, glb_path);
