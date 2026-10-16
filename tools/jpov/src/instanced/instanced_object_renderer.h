@@ -146,7 +146,11 @@ void main() {
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
-                float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
+                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
+                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
+                float pjw = fr * (uWindTime + jd1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(jd0.w + 0.5);
@@ -157,7 +161,9 @@ void main() {
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
             float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
-            float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
+            float pj0 = fr0 * (uWindTime + o1.y);
+            pj0 -= floor(pj0);
+            float th0 = amp0 * sin(6.28318531 * pj0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
             // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
@@ -172,13 +178,17 @@ void main() {
                 float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
                 float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
                 float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                float tw = fr * (uWindTime + aFlex.y + aInstWind.w);
+            tw -= floor(tw);
+            ssum += w * amp * sin(6.28318531 * tw);
             }
             p += aInstWind.xyz * ssum;
         }
         // 细节颤（两模式共用）：沿法线的高频小幅位移。
-        float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
-        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
+        float tj = uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        tj -= floor(tj);
+        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
+                   * sin(6.28318531 * tj * 4.3));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -272,7 +282,11 @@ void main() {
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
-                float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
+                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
+                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
+                float pjw = fr * (uWindTime + jd1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(jd0.w + 0.5);
@@ -283,7 +297,9 @@ void main() {
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
             float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
-            float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
+            float pj0 = fr0 * (uWindTime + o1.y);
+            pj0 -= floor(pj0);
+            float th0 = amp0 * sin(6.28318531 * pj0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
             // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
@@ -298,13 +314,17 @@ void main() {
                 float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
                 float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
                 float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                float tw = fr * (uWindTime + aFlex.y + aInstWind.w);
+            tw -= floor(tw);
+            ssum += w * amp * sin(6.28318531 * tw);
             }
             p += aInstWind.xyz * ssum;
         }
         // 细节颤（两模式共用）。
-        float dph = 6.28318531 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
-        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x * sin(dph * 4.3));
+        float tj = uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
+        tj -= floor(tj);
+        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
+                   * sin(6.28318531 * tj * 4.3));
     }
     vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -390,7 +410,11 @@ void main() {
                 float lev = clamp(jd1.x, 0.0, 3.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
-                float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
+                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
+                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
+                float pjw = fr * (uWindTime + jd1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(jd0.w + 0.5);
@@ -401,7 +425,9 @@ void main() {
             float lev0 = clamp(o1.x, 0.0, 3.0);
             float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
             float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
-            float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
+            float pj0 = fr0 * (uWindTime + o1.y);
+            pj0 -= floor(pj0);
+            float th0 = amp0 * sin(6.28318531 * pj0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
         } else {
@@ -414,7 +440,9 @@ void main() {
                 float w = (float(l) < base) ? 1.0 : ((float(l) == base) ? frac : 0.0);
                 float amp = uWindAmplitude * (0.40 - 0.10 * float(l));  // 各级增益归一化 Σg=1
                 float fr = uWindFrequency * (1.0 + 1.6 * float(l));
-                ssum += w * amp * sin(6.28318531 * fr * (uWindTime + aFlex.y + aInstWind.w));
+                float tw = fr * (uWindTime + aFlex.y + aInstWind.w);
+            tw -= floor(tw);
+            ssum += w * amp * sin(6.28318531 * tw);
             }
             p += aInstWind.xyz * ssum;
         }
