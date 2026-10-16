@@ -35,8 +35,18 @@ struct VolumeFireCommand {
     float sigma_scale = 1.0f;
     // 发射强度尺度（乘到黑体色上）。
     float emission_scale = 1.0f;
-    // 温度通道归一化值 [0,1] → 开尔文 = G × temp_kelvin_scale（默认 2000K）。
-    float temp_kelvin_scale = 2000.0f;
+    // 温度通道归一化值 [0,1] → 开尔文：T = temp_kelvin_min + (temp_kelvin_scale − min)·G。
+    // **必须有下界**：flames 场分布偏低（G 中位数 ~0.1），若 T=G·scale 则绝大多数体素
+    // 落到黑体下限（1000K）→ 整团同温同色、没有“边红芯亮”的层次。
+    float temp_kelvin_scale = 3500.0f;   // 温度上界（G=1 → 此值）
+    float temp_kelvin_min = 1000.0f;     // 温度下界（G=0 → 此值）
+    // 【发射强度随温度】真实黑体辐射亮度 ∝ T⁴（Stefan-Boltzmann）。黑体**色**（Blackbody()）
+    // 被归一化到 [0,1]，只给色相、不给亮度 → 若不自乘一个随温度增长的强度，
+    // 热的芯与冷的边一样亮 → 看起来是一团均匀蜡黄、没有白热芯。
+    //   实际发射 = Blackbody(T) · emission_scale · (T / temp_kelvin_ref) ^ temp_emission_pow
+    // 物理上 pow=4；ref 为归一参考温度（此处强度 = emission_scale）。
+    float temp_emission_pow = 4.0f;
+    float temp_kelvin_ref = 1000.0f;
 
     // 播放帧号（含小数 → 相邻帧线性混合）。范围 [0, nframes)。
     float frame = 0.0f;

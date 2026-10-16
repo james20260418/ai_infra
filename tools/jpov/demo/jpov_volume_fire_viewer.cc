@@ -152,6 +152,9 @@ struct AbParams {
     float sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSigma;
     float emission = jpov_volume_fire::VolumeFireViewerApp::kDefaultEmission;
     float temp = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempKelvin;
+    float temp_min = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempMin;
+    float temp_pow = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempPow;
+    float temp_ref = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempRef;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
     float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;
     jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
@@ -187,6 +190,9 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.sigma_scale_ = p.sigma;
     app.emission_scale_ = p.emission;
     app.temp_kelvin_scale_ = p.temp;
+    app.temp_kelvin_min_ = p.temp_min;
+    app.temp_emission_pow_ = p.temp_pow;
+    app.temp_kelvin_ref_ = p.temp_ref;
     app.smoke_scatter_ = p.smoke;
     app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
@@ -254,6 +260,12 @@ int main(int argc, char** argv) {
             ab.emission = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-temp") == 0 && i + 1 < argc) {
             ab.temp = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-temp-min") == 0 && i + 1 < argc) {
+            ab.temp_min = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-temp-pow") == 0 && i + 1 < argc) {
+            ab.temp_pow = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-temp-ref") == 0 && i + 1 < argc) {
+            ab.temp_ref = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
             ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke-sigma") == 0 && i + 1 < argc) {

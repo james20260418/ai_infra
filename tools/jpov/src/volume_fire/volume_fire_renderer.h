@@ -80,7 +80,10 @@ uniform vec3 uVolDim;          // (nx, ny, nz)
 uniform int  uNFrames;
 uniform float uSigma;          // 消光尺度（1/m）
 uniform float uEmission;       // 发射尺度
-uniform float uTempScale;      // G(∈[0,1]) → 开尔文
+uniform float uTempScale;      // G(∈[0,1]) → 开尔文（上界）
+uniform float uTempMin;        // 温度下界 K（G=0 → 此值）
+uniform float uTempPow;        // 发射强度随温度的幂（物理 = 4；0 = 关闭，回到均匀亮度）
+uniform float uTempRef;        // 归一参考温度 K（此处强度 = uEmission）
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
 uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
@@ -200,7 +203,7 @@ void main() {
         vec4 v = SampleVol(ToLocal(p));
         float fire_dens = v.r;
         float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
-        float tempK = v.g * uTempScale;
+        float tempK = uTempMin + (uTempScale - uTempMin) * clamp(v.g, 0.0, 1.0);
         float sigma_fire = fire_dens * uSigma;
         float sigma_smoke = smoke_dens * uSigma * uSmokeSigma;
         float sigma = sigma_fire + sigma_smoke;
@@ -208,7 +211,11 @@ void main() {
         // 自发光只按**火自己的光深**注入（只有火发光）。不能乘总 a：烟区 G=0，
         // 而 Blackbody() 把色温 clamp 到最低 1000K（防 NaN）⇒ 会把烟染成橙色。
         float a_fire = 1.0 - exp(-sigma_fire * dt);
-        vec3 emis = Blackbody(tempK) * uEmission;
+        // 【发射强度随温度】黑体色只给色相；亮度按 (T/ref)^pow 缩放（物理 pow=4）
+        // ⇒ 热芯远亮于冷边 → 芯被 tone map 顶成白热、边暗成深红。pow=0 关闭（均匀亮度）。
+        float radiance = (uTempPow > 0.0)
+            ? pow(max(tempK, 1.0) / max(uTempRef, 1.0), uTempPow) : 1.0;
+        vec3 emis = Blackbody(tempK) * uEmission * radiance;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
         L += T * a_fire * emis;

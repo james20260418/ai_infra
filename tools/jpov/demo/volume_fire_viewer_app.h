@@ -48,8 +48,11 @@ public:
     // 旋钮
     // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
     static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
-    static constexpr float kDefaultEmission = 1.7f;      // 发射强度（按 A/B 对齐参考亮度定标）
-    static constexpr float kDefaultTempKelvin = 3000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
+    static constexpr float kDefaultEmission = 1.5f;      // 发射强度（按 A/B 对齐参考亮度定标）
+    static constexpr float kDefaultTempKelvin = 2000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
+    static constexpr float kDefaultTempMin = 900.0f;     // 温度下界 K（G=0 → 此值）
+    static constexpr float kDefaultTempPow = 4.0f;       // 发射强度随温度的幂（物理 = 4；0 = 关闭）
+    static constexpr float kDefaultTempRef = 1000.0f;    // 归一参考温度 K（此处强度 = 发射强度）
     static constexpr float kDefaultSmokeScatter = 3.0f;  // 烟散射注入强度（VDB 无此信息，靠它调；Danis 定）
     // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
     // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
@@ -61,7 +64,10 @@ public:
     float steps_ = 64.0f;           // 步数
     bool  jitter_ = true;           // 抖动
     float fps_ = 24.0f;             // 播放帧率（旋钮；默认值由物理推导，见注释）
-    float temp_kelvin_scale_ = kDefaultTempKelvin;  // G(∈[0,1]) → 开尔文
+    float temp_kelvin_scale_ = kDefaultTempKelvin;  // G(∈[0,1]) → 开尔文（上界）
+    float temp_kelvin_min_ = kDefaultTempMin;       // 温度下界 K
+    float temp_emission_pow_ = kDefaultTempPow;     // 发射强度随温度的幂（物理 4；0 = 均匀亮度）
+    float temp_kelvin_ref_ = kDefaultTempRef;       // 归一参考温度 K
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -182,6 +188,9 @@ public:
             vc.sigma_scale = sigma_scale_;
             vc.emission_scale = emission_scale_;
             vc.temp_kelvin_scale = temp_kelvin_scale_;
+            vc.temp_kelvin_min = temp_kelvin_min_;
+            vc.temp_emission_pow = temp_emission_pow_;
+            vc.temp_kelvin_ref = temp_kelvin_ref_;
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
@@ -251,7 +260,9 @@ private:
         ui_.SliderFloat("步数", &steps_, row(3), 8.0f, 256.0f, 0);
         ui_.Checkbox("抖动", &jitter_, row(4));
         ui_.SliderFloat("帧率 fps", &fps_, row(5), 4.0f, 60.0f, 0);
-        ui_.SliderFloat("温度上限 K", &temp_kelvin_scale_, row(6), 800.0f, 4000.0f, 0);
+        ui_.SliderFloat("温度上限 K", &temp_kelvin_scale_, row(6), 800.0f, 6000.0f, 0);
+        ui_.SliderFloat("温度下界 K", &temp_kelvin_min_, row(12), 800.0f, 3000.0f, 0);
+        ui_.SliderFloat("发射∝T^γ", &temp_emission_pow_, row(11), 0.0f, 6.0f, 2);
         ui_.Checkbox("相机信息", &show_cam_info_, row(7));
         ui_.Checkbox("燃料块", &fuel_enable_, row(8));
         ui_.Checkbox("全屏quad(调试)", &fs_debug_, row(9));
