@@ -161,7 +161,7 @@ struct AbParams {
     bool bloom = false;
     float bloom_intensity = 0.6f;
     float bloom_threshold = 1.0f;
-    float sat = 1.0f;
+    float sat = jpov_volume_fire::VolumeFireViewerApp::kDefaultColorSat;
     float smoke_pow = 1.0f;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
     float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;

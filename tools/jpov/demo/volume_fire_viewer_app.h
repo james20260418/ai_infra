@@ -55,14 +55,16 @@ public:
     static constexpr float kDefaultTempRef = 1000.0f;    // 归一参考温度 K（此处强度 = 发射强度）
     static constexpr float kDefaultRampLo = 0.05f;       // 色谱映射区间（G→ramp 坐标）
     static constexpr float kDefaultRampHi = 0.30f;
+    static constexpr float kDefaultColorSat = 1.12f;     // 火发射色饱和度（只作用本团）
     static constexpr float kDefaultSmokeScatter = 3.0f;  // 烟散射注入强度（VDB 无此信息，靠它调；Danis 定）
     // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
     // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
     static constexpr float kDefaultSmokeSigma = 0.05f;
     // 烟的受光色默认（中性偏冷，含强度）；单一来源：成员初始化与 CLI 默认共用。
     static jpov::Vec3f DefaultSmokeLight() { return {0.46f, 0.55f, 0.88f}; }
-    // 色熰（Fire Color Ramp）默认 LUT 路径（仓库内，由 make_palette.py 生成；空串 = 回退黑体）。
-    static const char* DefaultPalette() { return "tools/jpov/genVolume/palettes/fire_clean.png"; }
+    // 色熰（Fire Color Ramp）默认：空串 = **自动用资产旁边的 `<volume>.palette.png`**
+    // （转换器 `--palette` 会把它烘在资产旁边 → 跟资产走，不依赖 cwd）。
+    static const char* DefaultPalette() { return ""; }
     float sigma_scale_ = kDefaultSigma;
     float emission_scale_ = kDefaultEmission;
     float steps_ = 64.0f;           // 步数
@@ -80,8 +82,16 @@ public:
     bool  bloom_enabled_ = false;
     float bloom_intensity_ = 0.6f;
     float bloom_threshold_ = 1.0f;
-    float sat_ = 1.12f;   // 火发射色饱和度（只作用本团；按 A/B 对参考定标）
+    float sat_ = kDefaultColorSat;   // 火发射色饱和度（只作用本团；按 A/B 对参考定标）
     float smoke_pow_ = 1.0f;   // 【实验】烟响应幂律（<1 抬薄烟；生产保持 1.0）
+    // 色熰路径解析缓存（优先 palette_path_，否则资产旁的 <volume>.palette.png）
+    std::string palette_resolved_;
+    std::string palette_resolved_for_;
+
+    static bool FileExists(const std::string& p) {
+        std::ifstream f(p);
+        return f.good();
+    }
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -200,6 +210,18 @@ public:
             LOG(INFO) << "[volume_fire_viewer] volume id = " << volume_id_
                       << " frames = " << nframes_ << " path = " << volume_path_;
         }
+        // 色谱路径解析（随体积变更一次）：优先 palette_path_，否则资产旁的 <volume>.palette.png。
+        if (palette_resolved_for_ != volume_path_) {
+            palette_resolved_for_ = volume_path_;
+            palette_resolved_.clear();
+            if (!palette_path_.empty() && FileExists(palette_path_)) {
+                palette_resolved_ = palette_path_;
+            } else if (!volume_path_.empty() && FileExists(volume_path_ + ".palette.png")) {
+                palette_resolved_ = volume_path_ + ".palette.png";
+            }
+            LOG(INFO) << "[volume_fire_viewer] palette = "
+                      << (palette_resolved_.empty() ? std::string("(none→blackbody)") : palette_resolved_);
+        }
 
         // 体积火（逐像素 raymarch → 薄层写 WBO）。
         if (fire_enable_ && volume_id_ != 0) {
@@ -215,7 +237,7 @@ public:
             vc.temp_kelvin_min = temp_kelvin_min_;
             vc.temp_emission_pow = temp_emission_pow_;
             vc.temp_kelvin_ref = temp_kelvin_ref_;
-            vc.palette_png = palette_path_.empty() ? nullptr : palette_path_.c_str();
+            vc.palette_png = palette_resolved_.empty() ? nullptr : palette_resolved_.c_str();
             vc.palette_ramp_lo = palette_ramp_lo_;
             vc.palette_ramp_hi = palette_ramp_hi_;
             vc.color_sat = sat_;
