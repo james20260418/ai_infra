@@ -76,7 +76,9 @@ uniform int   uWindMode;          // 0=平移式（默认）；1=枢轴式
 uniform int   uWindJointCount;    // 关节表条目数（0 = 无表 → 退回平移式）
 uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, parent)
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
-const float kWindPivotGain = 0.4;  // 逐关节角系数（弧度/振幅单位）：amp = A·此值·0.15·level
+const float kWindPivotGain = 0.4;
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）  // 逐关节角系数（弧度/振幅单位）：amp = A·此值·0.15·level
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -154,6 +156,12 @@ void main() {
                 float pjw = fr * (uWindTime + jd1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
+                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
+                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
+                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                tq2 -= floor(tq2);
+                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
+                      * sin(6.28318531 * tq2);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(floor(jd0.w + 0.5));
@@ -167,8 +175,32 @@ void main() {
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
+            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
+            tq0 -= floor(tq0);
+            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
+                   * sin(6.28318531 * tq0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
+            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
+            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
+            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
+            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
+            {
+                const int kLvS = 4;
+                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
+                float bse = floor(min(sN2, float(kLvS)));
+                float frc = sN2 - bse;
+                float ssum2 = 0.0;
+                for (int l2 = 0; l2 < kLvS; ++l2) {
+                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
+                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
+                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
+                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
+                    tq3 -= floor(tq3);
+                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
+                }
+                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
+            }
             // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
             wn = WindRotVecAxis(wn, axis, th_sum);
         } else {
@@ -191,7 +223,9 @@ void main() {
         // ⚠️ 归约必须作用在**最终**参数上（含 4.3 倍频）：frac(x)*4.3 != frac(4.3*x)。
         float tj = 4.3 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         tj -= floor(tj);
-        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
+        // 枢轴式下湍流已改为关节级高频铰链（见上）⇒ 这里对 mode=1 关掉逐顶点法线位移（会剪切）。
+        float jit = (uWindMode == 1) ? 0.0 : 1.0;
+        p += wn * (jit * uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
                    * sin(6.28318531 * tj));
     }
     vec4 world_pos = model * vec4(p, 1.0);
@@ -219,6 +253,8 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -294,6 +330,12 @@ void main() {
                 float pjw = fr * (uWindTime + jd1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
+                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
+                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
+                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                tq2 -= floor(tq2);
+                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
+                      * sin(6.28318531 * tq2);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(floor(jd0.w + 0.5));
@@ -307,8 +349,32 @@ void main() {
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
+            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
+            tq0 -= floor(tq0);
+            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
+                   * sin(6.28318531 * tq0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
+            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
+            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
+            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
+            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
+            {
+                const int kLvS = 4;
+                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
+                float bse = floor(min(sN2, float(kLvS)));
+                float frc = sN2 - bse;
+                float ssum2 = 0.0;
+                for (int l2 = 0; l2 < kLvS; ++l2) {
+                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
+                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
+                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
+                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
+                    tq3 -= floor(tq3);
+                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
+                }
+                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
+            }
             // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
             wn = WindRotVecAxis(wn, axis, th_sum);
         } else {
@@ -331,7 +397,9 @@ void main() {
         // ⚠️ 归约必须作用在**最终**参数上（含 4.3 倍频）：frac(x)*4.3 != frac(4.3*x)。
         float tj = 4.3 * uWindFrequency * (uWindTime + aFlex.y + aInstWind.w);
         tj -= floor(tj);
-        p += wn * (uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
+        // 枢轴式下湍流已改为关节级高频铰链（见上）⇒ 这里对 mode=1 关掉逐顶点法线位移（会剪切）。
+        float jit = (uWindMode == 1) ? 0.0 : 1.0;
+        p += wn * (jit * uWindAmplitude * uWindTurbulence * 0.25 * aFlex.x
                    * sin(6.28318531 * tj));
     }
     vec4 world_pos = model * vec4(p, 1.0);
@@ -364,6 +432,8 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -426,6 +496,12 @@ void main() {
                 float pjw = fr * (uWindTime + jd1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
+                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
+                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
+                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                tq2 -= floor(tq2);
+                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
+                      * sin(6.28318531 * tq2);
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
                 j = int(floor(jd0.w + 0.5));
@@ -439,8 +515,32 @@ void main() {
             float pj0 = fr0 * (uWindTime + o1.y);
             pj0 -= floor(pj0);
             float th0 = amp0 * sin(6.28318531 * pj0);
+            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
+            tq0 -= floor(tq0);
+            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
+                   * sin(6.28318531 * tq0);
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
+            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
+            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
+            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
+            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
+            {
+                const int kLvS = 4;
+                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
+                float bse = floor(min(sN2, float(kLvS)));
+                float frc = sN2 - bse;
+                float ssum2 = 0.0;
+                for (int l2 = 0; l2 < kLvS; ++l2) {
+                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
+                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
+                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
+                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
+                    tq3 -= floor(tq3);
+                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
+                }
+                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
+            }
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);

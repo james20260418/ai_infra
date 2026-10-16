@@ -165,7 +165,7 @@ def _nearest(polys, cum, hd_start, pt):
 #   每条样条保留 1 + clamp(round(弧长/间距), 1, 上限) 个采样，按下标均匀取。
 #   关节的父 = 同一样条上一个保留采样；样条首采样挂在**父样条最近保留采样**上
 #   （枝条分叉处）；根样条首采样无父（-1）。
-def _build_joints(polys, H, target_spacing=1.5, max_per_spline=6):
+def _build_joints(polys, H):
     """Build the wind joint table.  Returns (joints, kept_idx).
 
     joints[j] = {'pivot': Vector, 'parent': int}  (parent = joint index, -1 = root)
@@ -178,8 +178,15 @@ def _build_joints(polys, H, target_spacing=1.5, max_per_spline=6):
     kept_idx = []
     for i, P in enumerate(polys):
         length = cum[i][-1] if cum[i] else 0.0
+        # 关节密度**按枝的粗细分级**：树干/一级枝（level<=1）粗而少关节（链短 ⇒ 段少、
+        #   残余误差不放大）；细软的下垂枝（level>=2）密关节（多环 ⇒ 能真正弯/下垂，
+        #   而不是整根硬棍）。这是“细枝支棱”的正解：给它自由度，而不是给位移。
+        if H['level'][i] <= 1:
+            target_spacing, cap = 1.5, 6
+        else:
+            target_spacing, cap = 0.5, 8
         m = int(round(length / target_spacing))
-        m = max(1, min(max_per_spline, m))
+        m = max(1, min(cap, m))
         last = len(P) - 1
         idx = sorted({int(round(k * last / m)) for k in range(m + 1)})
         kept_idx.append(idx)
