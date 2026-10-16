@@ -80,7 +80,7 @@ public:
     bool  bloom_enabled_ = false;
     float bloom_intensity_ = 0.6f;
     float bloom_threshold_ = 1.0f;
-    float sat_ = 1.0f;
+    float sat_ = 1.12f;   // 火发射色饱和度（只作用本团；按 A/B 对参考定标）
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -178,7 +178,8 @@ public:
             bc.threshold = bloom_threshold_;
             cmds->bloom = bc;
         }
-        cmds->final_saturation = sat_;
+        // 饱和度：只作用**这团火**（发射源项），不改全局后处理（解耦）。
+        cmds->final_saturation = 1.0f;
 
         // 场景：地面 + 1m³ 燃料块（A/B 模式下不画——只留孤立火）。
         if (!ab_mode_) {
@@ -216,6 +217,7 @@ public:
             vc.palette_png = palette_path_.empty() ? nullptr : palette_path_.c_str();
             vc.palette_ramp_lo = palette_ramp_lo_;
             vc.palette_ramp_hi = palette_ramp_hi_;
+            vc.color_sat = sat_;
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;

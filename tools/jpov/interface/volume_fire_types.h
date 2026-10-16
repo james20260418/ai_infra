@@ -59,6 +59,8 @@ struct VolumeFireCommand {
     // 用 [lo,hi] 把 G 的实际范围对齐到色谱两端。
     float palette_ramp_lo = 0.0f;
     float palette_ramp_hi = 1.0f;
+    // 发射颜色饱和度（**只作用本团体积**：mix(亮度, 色, sat)；1.0 = 不动）。
+    float color_sat = 1.0f;
 
     // 播放帧号（含小数 → 相邻帧线性混合）。范围 [0, nframes)。
     float frame = 0.0f;

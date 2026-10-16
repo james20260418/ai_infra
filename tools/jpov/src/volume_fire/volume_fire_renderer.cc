@@ -320,6 +320,7 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uUsePalette"), pal_tex != 0 ? 1 : 0);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uRampLo"), cmd.palette_ramp_lo);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uRampHi"), cmd.palette_ramp_hi);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uColorSat"), cmd.color_sat);
 
     glBindVertexArray(vao_);
     if (cmd.debug_fullscreen) {

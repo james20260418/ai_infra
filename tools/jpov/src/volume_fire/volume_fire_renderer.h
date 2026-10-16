@@ -88,6 +88,7 @@ uniform sampler2D uPalette;    // 色谱 LUT（宽 N×高 1，sRGB）；色相�
 uniform int   uUsePalette;     // 1 = 用色谱（Fire Color Ramp）；0 = 黑体
 uniform float uRampLo;         // 色谱映射区间 [lo,hi]（作用在温度通道 G 上）
 uniform float uRampHi;
+uniform float uColorSat;       // 发射颜色饱和度（**只作用本团体积**；1.0 = 不动）
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
 uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
@@ -226,6 +227,11 @@ void main() {
             float rc = clamp((v.g - uRampLo) / max(uRampHi - uRampLo, 1e-4), 0.0, 1.0);
             base_color = pow(texture(uPalette, vec2(rc, 0.5)).rgb, vec3(2.2));
         }
+        // 发射颜色饱和度（**只作用这团火**，与全局后处理解耦）：围绕亮度 mix。
+        if (uColorSat != 1.0) {
+            float cl = dot(base_color, vec3(0.2126, 0.7152, 0.0722));
+            base_color = mix(vec3(cl), base_color, uColorSat);
+        }
         vec3 emis = base_color * uEmission * radiance;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
@@ -240,7 +246,9 @@ void main() {
         if (T < 1e-3) { break; }
     }
     float alpha = 1.0 - T;
-    if (alpha <= 1.0 / 255.0) { discard; }
+    // 覆盖度截断：旧值 1/255（≈0.4%）会把**稀薄的烟整体丢弃** → 烟一淡就硬消失（“被量化没了”）。
+    // 降到极小值（不写入无意义覆盖即可），消除这条硬边。
+    if (alpha <= 1e-5) { discard; }
     float z_repr = (den > 1e-9) ? (num / den) : (tn * ray_to_fwd);
     // WBO 覆盖：accum=色·α、A=α（单层权重抵消）；reveal=α；depth=z·α。
     FragAccum = vec4(L, alpha);
