@@ -14,6 +14,7 @@
 // S4 SliderFloat（轨道+句柄+数值，点击跳转/拖动连续写回）；
 // S5 InputText（底框+光标+占位符，点击聚焦+键盘写回 char*、限容量+超长水平滚动）；
 // S6 Combo（当前项+下箭头、点击展开列表选择写回/点外部关闭、跨帧展开态）。
+// AccordionHeader（折叠面板标题栏：点击切换展开态 + 展开指示三角）。
 // 其余控件（集成 demo 等）由后续子步骤（S7+）实现。
 
 #include "tools/jpov/interface/ui.h"
@@ -1096,6 +1097,77 @@ bool Ui::Combo(const char* label, int* selected,
 
     // 返回本帧是否发生了选项切换（展开/收起本身不计为选值）。
     return changed;
+}
+
+bool Ui::AccordionHeader(const char* label, bool* open, const UiRect& box,
+                         bool stretch_w, bool stretch_h) {
+    // 状态外置：展开态由调用方跨帧持有（本接口不跨帧记忆）。
+    CHECK(open != nullptr) << "AccordionHeader open pointer must not be null";
+    const UiRect raw = SanitizeBox(box);
+    if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
+        return *open;  // 越界/零尺寸：不画、不命中，照常回传展开态。
+    }
+    // 布局（C1）：标题栏是宽度控件 → 理想宽 = box 宽（不收缩），高 = 行高。
+    const UiRect b = ResolveBox(raw, raw.size.x(), RowHeight(), stretch_w,
+                                stretch_h);
+    if (OutsideViewport(b)) {
+        return *open;
+    }
+
+    const InputSnapshot& in = *input_;
+    // 点击切换（一次性事件，同 Checkbox）：本帧左键 Click 落在栏内 → 翻转 *open。
+    // 被已展开弹层独占的点击不处理（弹层覆盖区内的事件只归弹层拥有者）。
+    if (in.left.IsClick()) {
+        for (int i = 0; i < in.left.click_count(); ++i) {
+            const float cx = in.left_clicks[i].x;
+            const float cy = in.left_clicks[i].y;
+            if (PopupCoversPoint(cx, cy)) {
+                continue;
+            }
+            if (cx >= b.pos.x() && cx <= b.pos.x() + b.size.x() &&
+                cy >= b.pos.y() && cy <= b.pos.y() + b.size.y()) {
+                *open = !*open;
+                break;
+            }
+        }
+    }
+
+    // 背景：悬停 = 亮色高亮；否则 = 深色（与 Button 的默认态同色，读作「可点」）。
+    // 弹层独占区内不算悬停。
+    const bool hovered =
+        Hit(b, 0.0f, 0.0f, in) && !PopupCoversPoint(in.mouse_x, in.mouse_y);
+    PushFillRect(b, hovered ? theme_.accent : theme_.hover, theme_.border,
+                 theme_.corner_radius_px);
+
+    // 标题文本：左对齐、垂直居中（左缘留 padding，右侧给指示三角留位）。
+    const float pad = theme_.padding_px;
+    const float cy = b.pos.y() + b.size.y() * 0.5f;
+    if (label != nullptr && label[0] != '\0') {
+        PushLabelText(label, b.pos.x() + pad, cy, theme_.foreground);
+    }
+
+    // 展开指示三角（纯几何，不依赖字形，gold 可确定性比对）：
+    // 展开 = 朝下 ▾；折叠 = 朝右 ▸。与 Combo 下箭头同款退化三角形条带
+    //（4 顶点、末点与第 3 点重合使末段退化为 0 面积，成实心三角）。
+    const float arrow_h = std::max(2.0f, std::min(b.size.y() * 0.4f, 10.0f));
+    const float arrow_w = arrow_h;  // 底宽 = 高（等边倾向）
+    const float ar = b.pos.x() + b.size.x() - pad - arrow_w;  // 三角左上 x
+    const float ay = cy - arrow_h * 0.5f;
+    std::vector<Vec2f> tri;
+    if (*open) {
+        tri = {{ar, ay},
+               {ar + arrow_w, ay},
+               {ar + arrow_w * 0.5f, ay + arrow_h},
+               {ar + arrow_w * 0.5f, ay + arrow_h}};
+    } else {
+        tri = {{ar, ay},
+               {ar, ay + arrow_h},
+               {ar + arrow_h, ay + arrow_h * 0.5f},
+               {ar + arrow_h, ay + arrow_h * 0.5f}};
+    }
+    PushStrip(tri, theme_.foreground);
+
+    return *open;
 }
 
 bool Ui::PopupCoversPoint(float x, float y) const {

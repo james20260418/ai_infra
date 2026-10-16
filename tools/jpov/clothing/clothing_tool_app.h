@@ -131,6 +131,7 @@
 #include "tools/jpov/clothing/random_pose_driver.h"
 #include "tools/jpov/clothing/relax_derive.h"
 #include "tools/jpov/clothing/weight_transfer.h"
+#include "tools/jpov/interface/skeleton_motion_lag.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
@@ -208,6 +209,17 @@ public:
     BrushTool brush_;
     std::vector<jpov::UiRect> panel_rects_;
 
+    // ── 面板折叠（Accordion）展开态（2026-10-14 Danis：除「平移/旋转/保存 glb」面板外，
+    //    其余面板一律可折叠；折叠时只显示面板标题栏）。状态外置，跨帧由本工具持有：
+    //    true = 展开（标题栏 + 内容行），false = 折叠（仅标题栏）。
+    //    默认全部折叠（2026-10-14 Danis：开启工具时默认收起）。──
+    bool brush_panel_open_    = false;  // 顶部中间：3D 画笔
+    bool relax_panel_open_    = false;  // 顶部中间：布料 LAG 松弛度
+    bool right_panel_open_    = false;  // 右上：仿真动力学
+    bool skin_panel_open_     = false;  // 右下：软布自动蒙皮
+    bool holefill_panel_open_ = false;  // 底部中间：补洞（推进法）
+    bool motion_panel_open_   = false;  // 左下：随机摆动测试
+
     // 面板数值输入框的跨帧文本 + 聚焦态（初始值来自上面的默认常量，避免字面量分叉）。
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep),
@@ -262,6 +274,23 @@ public:
     uint32_t body_skel_id_ = 0;         // 人体骨架句柄（RegisterSkeleton 产物；0 = 未注册）
     std::vector<jpov::SkeletonPose> body_motion_poses_;  // 预烘焙 pose（幅度档 × 相位）
     std::string motion_msg_;            // 面板状态提示（每帧刷新）
+
+    // ══════════════ 整体平动 + 布料 LAG（副运动 v2；2026-10-12 Danis）══════════════
+    //
+    // Danis 定：**先不做 pose 的 lag**（pose 差值脱离不了动作幅度、裙子匀速飘很诡异、用户难用）；
+    // 先做**整体平动（世界 translation）的一阶/二阶延迟**：随机动作面板给 XYZ 整体平动 3 滑条
+    //（±2m，人体 + 衣服世界平移），对平动跑 tracker，滞后量 → 布料 per-instance 的 `pos_lag`
+    //（VS 按 _JPOV_RELAX 松弛度 mix 到滞后位置）。布料网格自带 kRelax 时渲染器才走 LAG 路径。
+    // 平动用 SkeletonPose 的 root_offset 承载（`TransPose`），直接复用 tracker（root_offset 一并滞后）。
+    float body_trans_ui_[2] = {0.0f, 0.0f};  // 整体平动（世界 m；±2；X/Y）
+    bool lag_enabled_ui_ = false;         // 勾选：布料按滞后平动（pos_lag）滞后
+    bool lag_second_order_ui_ = false;    // 勾选：二阶（否则一阶）
+    float lag_rise_ms_ui_ = kLagRiseMsDefault;      // 上升时间（ms）
+    float lag_overshoot_ui_ = kLagOvershootDefault; // 超调量（仅二阶）
+    float lag_rise_applied_ = -1.0f;      // 上次 Configure 用过的上升时间（ms）
+    float lag_overshoot_applied_ = -1.0f; // 上次 Configure 用过的超调量
+    jpov::FirstOrderLagTracker lag_first_;   // 平动 LAG·一阶
+    jpov::SecondOrderLagTracker lag_second_; // 平动 LAG·二阶
 
     // ══════════════ 布料 LAG 松弛度（由固定点自动推导，2026-10-11）══════════════
     //
@@ -636,11 +665,29 @@ public:
                            /*front*/  {0.0f, 0.0f, 1.0f});
 
         // 随机摆动测试生效时：人体 / 衣服共用**同一份**实例状态（摆放 + pose），故逐帧同步。
+        // 整体平动（世界 translation）由面板 3 滑条给，人体 / 衣服都用它；布料另按 tracker 滞后。
         const bool motion_active = MotionTestActive();
-        const jpov::SkinnedInstanceState motion_inst =
-            motion_active ? MotionInstanceState() : jpov::SkinnedInstanceState();
+        const jpov::Vec3f trans(body_trans_ui_[0], body_trans_ui_[1], 0.0f);
+        jpov::SkinnedInstanceState motion_inst;
+        jpov::Vec3f cloth_pos_lag(0.0f, 0.0f, 0.0f);
+        if (motion_active) {
+            motion_inst = MotionInstanceState();
+            motion_inst.transform.center = trans;
+            if (lag_enabled_ui_) {
+                // 对「整体平动」跑一阶/二阶 tracker：滞后量 = tracked − 当前（→ 布料 pos_lag）。
+                SyncLagTracker();
+                const float dt = 1.0f / kViewerFps;
+                if (lag_second_order_ui_) {
+                    lag_second_.Update(TransPose(trans), dt);
+                    cloth_pos_lag = lag_second_.tracked().root_offset - trans;
+                } else {
+                    lag_first_.Update(TransPose(trans), dt);
+                    cloth_pos_lag = lag_first_.tracked().root_offset - trans;
+                }
+            }
+        }
 
-        // 人体 reference 固定画在原点（不参与衣服调节）。
+        // 人体 reference（固定 + 整体平动；不参与衣服调节）。
         if (show_body_) {
             if (motion_active) {
                 for (const jpov::GltfPrimitive& prim : body_.primitives) {
@@ -649,7 +696,7 @@ public:
                 }
             } else {
                 cmds->DrawGltfObject(body_,
-                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*center*/ {trans.x(), trans.y(), trans.z()},
                                      /*up*/     {0.0f, 1.0f, 0.0f},
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
@@ -658,13 +705,17 @@ public:
         // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
             if (motion_active && ClothMeshHasSkin()) {
+                // 布料：与他人同 pose（**不做 pose 的 lag**，Danis 2026-10-12）；只做**平动滞后**：
+                // pos_lag = tracker(整体平动) 的滞后量，VS 按 _JPOV_RELAX 松弛度 mix → 松的部分拖尾。
+                jpov::SkinnedInstanceState cloth_inst = motion_inst;
+                cloth_inst.pos_lag = cloth_pos_lag;  // 平动滞后（pose lag 机制已移除）
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
-                                               prim.material, {motion_inst});
+                                               prim.material, {cloth_inst});
                 }
             } else {
                 cmds->DrawGltfObject(cloth_,
-                                     /*center*/ {0.0f, 0.0f, 0.0f},
+                                     /*center*/ {trans.x(), trans.y(), trans.z()},
                                      /*up*/     {0.0f, 1.0f, 0.0f},
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
@@ -1285,6 +1336,30 @@ private:
         return inst;
     }
 
+    // 用「只带 root_offset 的 pose」承载整体平动 → 复用动作延迟 tracker（root_offset 一并滞后）。
+    static jpov::SkeletonPose TransPose(const jpov::Vec3f& t) {
+        jpov::SkeletonPose p;
+        p.bone_count = 1;
+        p.root_offset = t;  // joint_rotation 留空 ⇒ tracker 只追踪 root_offset
+        return p;
+    }
+
+    // 按面板参数配置 tracker（参数变了才重配；二阶 Configure 含数值标定，别每帧跑）。
+    void SyncLagTracker() {
+        const float rise_s = std::max(lag_rise_ms_ui_ * 0.001f, 1.0f / 1000.0f);
+        if (lag_second_order_ui_) {
+            if (lag_rise_applied_ != lag_rise_ms_ui_ ||
+                lag_overshoot_applied_ != lag_overshoot_ui_) {
+                lag_second_.Configure(rise_s, lag_overshoot_ui_);
+                lag_rise_applied_ = lag_rise_ms_ui_;
+                lag_overshoot_applied_ = lag_overshoot_ui_;
+            }
+        } else if (lag_rise_applied_ != lag_rise_ms_ui_) {
+            lag_first_.Configure(rise_s);
+            lag_rise_applied_ = lag_rise_ms_ui_;
+        }
+    }
+
     // 预烘焙「一个主轴周期」的姿态序列（幅度档 × 相位），交给 RegisterSkeleton。
     // pose 下标 = level * kMotionPhasesPerCycle + 相位序号。
     // Pre-condition: has_body_skeleton_。
@@ -1329,6 +1404,48 @@ private:
     // 记录一块面板的屏幕矩形（画笔判定「鼠标是否落在 UI 上」用；每帧 DrawPanels 先 clear）。
     void RecordPanel(float x, float y, float w, float h) {
         panel_rects_.push_back(jpov::UiRect{{x, y}, {w, h}});
+    }
+
+    // 「可折叠（Accordion）面板」的总高（像素）：折叠 = 仅标题栏（1 行）；
+    // 展开 = 标题栏 + content_rows 行内容。与 BeginAccordionPanel 的取高一致。
+    static float AccordionHeight(bool expanded, int content_rows) {
+        return PanelHeight(expanded ? content_rows + 1 : 1);
+    }
+
+    // 画一块「可折叠（Accordion）面板」：底板 + 标题栏（点击切换展开态）。
+    //   - content_rows = 展开时的**内容行数**（不含标题栏）。
+    //   - *open 为展开态（in/out，状态外置，由调用方跨帧持有）；点击标题栏翻转。
+    // 返回内容首行游标 + 本帧展开态 + 面板总高（供相邻面板定位）。
+    // 调用方据 expanded 决定是否画内容行（折叠时只画标题栏）。
+    // ⚠️ 底板高度按**进入本函数时**的 *open 取；点击切换下一帧生效（与相邻面板
+    //    定位用同一帧快照一致，不会出现“本面板已缩、相邻面板还没让位”的 1 帧错位）。
+    // Pre-condition: open != nullptr。
+    AccordionFrame BeginAccordionPanel(jpov::RenderCommandList* cmds, float panel_x,
+                                       float panel_y, float panel_w,
+                                       const char* title, bool* open /*inout*/,
+                                       int content_rows) {
+        CHECK(open != nullptr) << "BeginAccordionPanel open pointer must not be null";
+        const bool expanded = *open;  // 进入时快照（点击切换下一帧生效）。
+        const int total_rows = expanded ? content_rows + 1 : 1;
+        const float panel_h = PanelHeight(total_rows);
+        cmds->DrawRect(/*pos*/ {panel_x, panel_y}, /*size*/ {panel_w, panel_h},
+                       jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
+        RecordPanel(panel_x, panel_y, panel_w, panel_h);
+
+        AccordionFrame af;
+        af.expanded = expanded;
+        af.height   = panel_h;
+        af.frame.left   = panel_x + kPanelPad;
+        af.frame.row_w  = panel_w - kPanelPad * 2.0f;
+        af.frame.step_y = kPanelRowH + kPanelSpacing;
+        af.frame.row_y  = panel_y + kPanelPad;
+
+        // 标题栏 = 第一行：点击切换展开态（三角方向随切换后的 *open 变化，即时反馈）。
+        ui_.AccordionHeader(title, open,
+                            jpov::UiRect{{af.frame.left, af.frame.row_y},
+                                         {af.frame.row_w, kPanelRowH}});
+        af.frame.row_y += af.frame.step_y;  // 游标移到内容首行（折叠时调用方不读）。
+        return af;
     }
 
     // 画一个左对齐、垂直居中的标签（不拉伸：内容居中于给定宽度）。

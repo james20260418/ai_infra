@@ -8,6 +8,7 @@
 //   ① 后台线程为两份 glb 建最近邻三角形匹配器（完成后主线程上传 GPU 资产）；
 //   ② 衣服被 soft_mesh_simulator::Simulator 驱动，右上角面板调动力学系数 / 人体排斥 /
 //      暂停 / 重置；左上角面板做平移 / 旋转 / 缩放（**即时**作用于仿真状态）+ 保存 glb。
+//      除左上角面板外，其余面板均为**可折叠（Accordion）**：点标题栏展开/收起，收起时仅留标题栏。
 //   仍不做：穿衣对齐 / 自动贴合。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
@@ -71,6 +72,14 @@ struct CliOptions {
     float relax_max_lag = jpov::clothing::kRelaxDefaultMaxLagM;  // --relax_max_lag（m）
     bool  show_relax_field = false;  // --show_relax_field：开启松弛度场可视化
     bool  save_cloth = false;        // --save_cloth：出图前保存一次衣服 glb（脚本化验证落盘）
+    // 布料 LAG（副运动 v2：整体平动的一阶/二阶延迟；headless / 脚本化验证）。
+    bool  lag_enable = false;        // --lag_enable：启用「开启 LAG（平动滞后）」
+    bool  lag_second_order = false;  // --lag_second_order：二阶（否则一阶）
+    float lag_rise_ms = -1.0f;       // --lag_rise_ms：上升时间（ms；<0 = 默认）
+    float lag_overshoot = -1.0f;     // --lag_overshoot：超调量（仅二阶；<0 = 默认）
+    bool  has_body_trans = false;    // 是否给了 --body_trans
+    float body_trans[2] = {0.0f, 0.0f};  // --body_trans x y（整体平动，世界 m）
+    int   lag_warmup_frames = 0;     // --lag_warmup_frames：headless 出图前先推进 N 帧（让 tracker 起滞后）
     // 随机摆动测试（headless / 脚本化验证；交互窗口由左下角面板驱动）。
     bool  motion_enable = false;  // --motion_enable：启用随机摆动测试
     float motion_phase = -1.0f;   // --motion_phase [0,1]（<0 = 未指定；给了即启用）
@@ -278,6 +287,46 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.show_relax_field = true;
         } else if (arg == "--save_cloth") {
             opt.save_cloth = true;
+        } else if (arg == "--lag_enable") {
+            opt.lag_enable = true;
+        } else if (arg == "--lag_second_order") {
+            opt.lag_second_order = true;
+        } else if (arg == "--lag_rise_ms") {
+            if (i + 1 < argc) {
+                opt.lag_rise_ms = static_cast<float>(std::atof(argv[++i]));
+                if (opt.lag_rise_ms < 0.0f) {
+                    LOG(FATAL) << "--lag_rise_ms 必须 >= 0，got " << opt.lag_rise_ms;
+                }
+            } else {
+                LOG(WARNING) << "--lag_rise_ms 缺少数值参数，忽略";
+            }
+        } else if (arg == "--lag_overshoot") {
+            if (i + 1 < argc) {
+                opt.lag_overshoot = static_cast<float>(std::atof(argv[++i]));
+                if (opt.lag_overshoot < 0.0f) {
+                    LOG(FATAL) << "--lag_overshoot 必须 >= 0，got " << opt.lag_overshoot;
+                }
+            } else {
+                LOG(WARNING) << "--lag_overshoot 缺少数值参数，忽略";
+            }
+        } else if (arg == "--body_trans") {
+            if (i + 2 < argc) {
+                opt.body_trans[0] = static_cast<float>(std::atof(argv[++i]));
+                opt.body_trans[1] = static_cast<float>(std::atof(argv[++i]));
+                opt.has_body_trans = true;
+            } else {
+                LOG(WARNING) << "--body_trans 需要 2 个数值（x y），忽略";
+            }
+        } else if (arg == "--lag_warmup_frames") {
+            if (i + 1 < argc) {
+                opt.lag_warmup_frames = std::atoi(argv[++i]);
+                if (opt.lag_warmup_frames < 0) {
+                    LOG(FATAL) << "--lag_warmup_frames 必须 >= 0，got "
+                               << opt.lag_warmup_frames;
+                }
+            } else {
+                LOG(WARNING) << "--lag_warmup_frames 缺少数值参数，忽略";
+            }
         } else if (arg == "--motion_enable") {
             opt.motion_enable = true;
         } else if (arg == "--motion_phase") {
@@ -444,6 +493,20 @@ int main(int argc, char** argv) {
     }
 
     // 随机摆动测试初值（CLI，可选）：交互窗口由左下角面板驱动。
+    // 布料 LAG（headless；交互窗口由左下角面板驱动）。
+    app.lag_enabled_ui_ = opt.lag_enable;
+    app.lag_second_order_ui_ = opt.lag_second_order;
+    if (opt.lag_rise_ms >= 0.0f) {
+        app.lag_rise_ms_ui_ = opt.lag_rise_ms;
+    }
+    if (opt.lag_overshoot >= 0.0f) {
+        app.lag_overshoot_ui_ = opt.lag_overshoot;
+    }
+    if (opt.has_body_trans) {
+        app.body_trans_ui_[0] = opt.body_trans[0];
+        app.body_trans_ui_[1] = opt.body_trans[1];
+    }
+
     app.motion_test_enabled_ = opt.motion_enable;
     if (opt.motion_phase >= 0.0f) {
         app.motion_test_enabled_ = true;  // 给了相位即启用（便于 headless 出图）
@@ -517,6 +580,19 @@ int main(int argc, char** argv) {
         const std::string out_dir =
             opt.output_dir.empty() ? std::string(".") : opt.output_dir;
         const std::string out_path = out_dir + "/clothing_tool_ui.png";
+        // 可选：先推进 N 帧，让平动 LAG 的 tracker 起滞后（单帧出图 tracker 刚 init、pos_lag=0）。
+        //   把整体平动从 0 **线性 ramp 到目标**，tracker 追踪运动中的目标 ⇒ 末帧 pos_lag≠0。
+        if (opt.lag_warmup_frames > 0) {
+            const float tx = app.body_trans_ui_[0];
+            const float ty = app.body_trans_ui_[1];
+            for (int i = 1; i <= opt.lag_warmup_frames; ++i) {
+                const float f = static_cast<float>(i) /
+                                static_cast<float>(opt.lag_warmup_frames);
+                app.body_trans_ui_[0] = tx * f;
+                app.body_trans_ui_[1] = ty * f;
+                app.RunOnce(jpov::InputSnapshot(), winfo, "/tmp/jpov_lag_warmup.png");
+            }
+        }
         app.RunOnce(jpov::InputSnapshot(), winfo, out_path.c_str());
         LOG(INFO) << "UI 自检图已写入: " << out_path;
     } else {

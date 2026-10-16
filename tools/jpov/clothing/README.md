@@ -53,6 +53,12 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 | `--relax_max_lag <m>` | 逐顶点最大滞后位移 max_lag（米，默认 0.05）。 |
 | `--show_relax_field` | 开启松弛度场可视化（headless 出图验证用）。 |
 | `--save_cloth` | headless 出图前保存一次衣服 glb（脚本化验证 `_JPOV_RELAX` 落盘）。 |
+| `--lag_enable` | 启用布料 **LAG**（整体平动的一阶/二阶延迟；等价左下角「开启 LAG」，见 §7.1）。 |
+| `--lag_second_order` | 用**二阶**延迟（否则一阶）。 |
+| `--lag_rise_ms <ms>` | 延迟追踪的上升时间（毫秒，默认 150）。 |
+| `--lag_overshoot <frac>` | 二阶超调量（默认 0.2；仅二阶）。 |
+| `--body_trans <x> <y>` | 整体平动（世界 m；人体 + 衣服）。 |
+| `--lag_warmup_frames <n>` | headless 出图前先推进 N 帧并把平动 ramp 到目标（让 tracker 起滞后）。 |
 
 交互：**右键 drag 旋转视角、滚轮 zoom、中键 drag 纵向平移（pan）**。
 
@@ -60,6 +66,10 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 > **同步平移**（朝向不变 ⇒ 纯平移，非旋转）。
 
 ## 4. 界面
+
+> 除左上「变换 / 保存 / 场景」面板保持常驻外，其余面板均为**可折叠（Accordion）**：
+> 点面板**标题栏**展开 / 收起，收起时只显示**标题栏**（标题常可见，便于识别）；
+> **启动时默认全部折叠**。所有面板宽固定 **400px**（不随窗口宽缩放），仅按窗口尺寸贴边 / 居中锚定。
 - **顶部中间 — 3D 画笔（选区）**：按钮 **画笔**（点一次 **激活**，再点 / **ESC** 结束）；滑条 **画笔半径 (px)**（5~200，默认 100）。
   **激活态**下鼠标周围画淡黄半透明圆（尺寸）；**左键**在非 UI 区拖 / 点即**涂抹** —— 把鼠标射线附近（半径按屏幕像素 → 世界换算）的衣服顶点选入**选区**（淡黄 2px 方块标记）。
   「鼠标在任一面板上」时画笔不显示、不生效（UI hover 不算画笔）。**激活态结束 = 选区清空**（选区生命周期 = 一次激活）。
@@ -195,6 +205,23 @@ output/jpov_clothing_tool/jpov_clothing_tool \
 - **随机种子**：输入框（**0~65535**，输入完失焦/回车即 clamp），**换一个值 = 换一套随机动作**
   （重烘焙该种子的姿态集）。
 - 播放速度固定（不做滑条）——快慢不影响判断蒙皮效果。
+
+## 7.1 布料 LAG（副运动 = 整体平动的一阶/二阶延迟；2026-10-12）
+> **方向（Danis）**：**不做 pose 的 lag**（pose 差值脱离不了动作幅度、裙子会匀速飘很诡异、用户难用）；
+> 先做**用户能用的维度**：整体**平动（translation）**（partial rotation 的 lag 引擎保留、**未接入工具**）。
+
+左下角「随机摆动测试」面板：
+- **整体平动 X/Y (m，±2)**：人体 + 衣服的**世界平移**（先让人体能动起来）。
+- **开启 LAG**：布料按「整体平动」的**一阶/二阶延迟**滞后 —— 用 `SkeletonPose.root_offset` 承载平动、
+  跑 `interface/skeleton_motion_lag.h` 的 tracker，滞后量 → 布料 per-instance `pos_lag`，蒙皮 VS 按
+  `_JPOV_RELAX` 松弛度 `mix` ⇒ 松的部分拖尾（**裙摆「飘起」**）、贴身部分跟随。
+  **一阶**（`FirstOrderLagTracker`，rising time）无过冲；**二阶**（`SecondOrderLagTracker`，rising time
+  + overshoot）有摆动/过冲。
+- **需布料模型自带 `_JPOV_RELAX`** 才有效果（否则松弛度全 0、mix 恒等）。用 §4.5 推导后保存，或直接用
+  `lace_skirt_skinned_relaxed_sample.glb`（§8）。**关 LAG 时 `pos_lag=0` ⇒ 视觉零变化。**
+
+> 引擎侧：`SkinnedInstanceState` 的 `pos_lag`(loc15) / `partial_rotations_lag`(loc14) 由蒙皮 VS 在
+> **mesh 带 `kRelax`** 时消费；**pose 的 lag 机制已移除**（不再有 `pose_*_lag` / loc11 的 pose_lag id）。
 
 **为什么不需要重定向**：不同 Mixamo 源的 bind 姿态（T-pose/A-pose）、骨轴 roll、层级都可能不同，
 导入**外部动画**才需要重定向；本方案在**目标骨架自己的关节局部空间**里直接生成姿态

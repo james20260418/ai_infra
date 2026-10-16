@@ -129,6 +129,37 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# SkeletonMotionLag — 动作延迟（LAG 副运动）CPU 工具（GL-free, header-only）：
+# SkeletonPoseLerp + 一阶 / 二阶延迟追踪 class（root_offset 一并滞后）。暴露给 JPOV 用户；
+# 供布料 LAG（pose_lag）的逐帧演进（见 docs/jpov_instance_attr_lag_design.md）。
+cc_library(
+    name = "skeleton_motion_lag",
+    hdrs = ["skeleton_motion_lag.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# 动作延迟工具纯 CPU 单测（插值 / 一阶 / 二阶；无 GL）。
+cc_test(
+    name = "skeleton_motion_lag_test",
+    srcs = ["skeleton_motion_lag_test.cc"],
+    deps = [
+        ":skeleton_motion_lag",
+        ":skeleton_types",
+        "//geom/common:quaternion",
+        "//geom/common:vec",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # Mixamo23Skeleton — Mixamo 官方 23 骨骨架工厂（程序化生成，无资产）。
 # 数据从官方 FBX 实测反推（见 header 头注）。纯 CPU/GL-free。
 cc_library(

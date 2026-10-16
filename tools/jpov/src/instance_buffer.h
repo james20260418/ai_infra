@@ -67,7 +67,7 @@ struct InstanceAttrSpec {
 //     6 aRelax（vec2: lag_ratio, max_lag）★ 本次从实例首槽腾出，改作顶点属性
 //   实例属性（divisor=1）：
 //     7..10  aInstModel      mat4（4×vec4，列主序）                  stride 16 float
-//     11     aInstPoseIds    4×float：pose.a/b + pose_lag.a/b（平坦 texel 起点）  stride 4 float
+//     11     aInstPoseIds    vec2：pose.a / pose.b（平坦 texel 起点）         stride 2 float
 //     12     aInstMisc       uvec4（uint8 视图：2 ratio + 8 thick + 2 RGB888） stride 4 float(=16B)
 //     13     aInstPartial    uvec4（8 half：pose 的 2 个 partial 四元数）   stride 4 float(=16B)
 //     14     aInstPartialLag uvec4（8 half：lag  的 2 个 partial 四元数）   stride 4 float(=16B)
@@ -81,14 +81,14 @@ struct InstanceAttrSpec {
 //   解释，把 float 上传后当整数读会得到天文数字（0x42B80000 = 1119354880）→ 取址出界。
 inline constexpr InstanceAttrSpec kInstanceModelAttrSpec{/*base_loc*/ 7,  /*slot_count*/ 4,
                                                         /*slot_components*/ 4, /*stride*/ 16};
-// pose 选择（含 LAG 的两个 flat id）：4×float，loc11。
+// pose 选择：2×float，loc11。
 //   .x/.y = pose.a / pose.b 在 atlas 里的平坦 texel 起点（= pose_idx * bone_count * 2）。
-//   .z/.w = pose_lag.a / pose_lag.b 的平坦 texel 起点（LAG 未用时由 host 写成与 .x/.y 相同）。
 //   ⚠️ 必须 float32：atlas 2048² 的 flat 上限 ~4.19M < 2²⁴，刚好够；压成 int16 会爆。
+//   （原 .z/.w 的 pose_lag id 已随「pose lag 机制」移除，2026-10-12 Danis。）
 inline constexpr InstanceAttrSpec kInstancePoseIdsAttrSpec{/*base_loc*/ 11, /*slot_count*/ 1,
-                                                           /*slot_components*/ 4, /*stride*/ 4};
+                                                           /*slot_components*/ 2, /*stride*/ 2};
 // 杂项：uint8 视图（16 byte 严丝合缝），loc12。
-//   byte0 = ratio(pose) /255；byte1 = ratio_lag /255；
+//   byte0 = ratio(pose) /255；byte1 = **保留**（原 ratio_lag；pose-lag 机制已移除）；
 //   byte2..9 = thick[0..7]，编码 0.01 + v/255 × 2.49 → [0.01,2.5]，步长 ~0.0097；
 //   byte10..12 = color0(RGB888)；byte13..15 = color1(RGB888)。
 //   位序/偏移的单一来源见 docs/jpov_instance_attr_lag_design.md §6.3。
@@ -120,8 +120,8 @@ inline constexpr InstanceAttrSpec kInstancePosLagAttrSpec{/*base_loc*/ 15, /*slo
 //   “天才代码”降级为普通代码的关键）。
 
 // --- loc12（aInstMisc）uint8 视图的 byte 偏移（单一来源）---
-inline constexpr int kMiscByteRatio    = 0;   // ratio(pose)   /255
-inline constexpr int kMiscByteRatioLag = 1;   // ratio_lag     /255
+inline constexpr int kMiscByteRatio = 0;  // ratio(pose) /255
+// byte1 保留（原 ratio_lag；pose-lag 机制已移除）—— 未用到具体偏移，故不设命名常量。
 inline constexpr int kMiscByteThickBase = 2;  // thick[0..7]   占 byte 2..9
 inline constexpr int kMiscByteColor0   = 10;  // color0 RGB888 占 byte 10..12
 inline constexpr int kMiscByteColor1   = 13;  // color1 RGB888 占 byte 13..15
