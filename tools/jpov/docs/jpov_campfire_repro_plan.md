@@ -203,24 +203,30 @@
 
 ---
 
-## 4. P0 交付（本 PR）
+## 4. 本 PR 交付（P0 基准台 + 逐帧范式 + P1 加烟）
 
 1. **基准台**：`tools/jpov/tools/campfire_ab/`
    - `fetch_reference.py` —— 从官方 mp4 抽参考帧（CC0）入库；
    - `reference/` —— 已入库的参考帧（缩略）；
    - `ab_metrics.py` —— 指标 + 并排对照图；
    - `run_ab.sh` —— 端到端：抓 JPOV 孤立火 → 比对。
-2. **viewer 的 A/B 模式**：`--ab-capture <out.png> [--ab-frame N] [--ab-box M]`
-   —— 钉帧 + 钉相机（正面）+ 纯黑背景 + 居中火盒（只留孤立火）。
+2. **viewer 的 A/B 模式**：`--ab-capture <out.png>` + `--ab-frame / --ab-box X,Y,Z / --ab-y-shift`
+   + 旋钮 `--ab-sigma / --ab-emis / --ab-smoke / --ab-smoke-sigma / --ab-light`
+   —— 钉帧 + 钉相机（正面）+ 纯黑背景 + **资产真实尺寸火盒**（只留孤立火）。
 3. **逐帧 A/B 范式**：`tools/jpov/tools/campfire_ab/ab_seq.py`（逐帧 diff 表 + 拼图）。
-4. **基线对照**：`tools/jpov/tools/campfire_ab/baseline/`（P0 时刻的差距快照，单帧 + 逐帧）。
-5. **P1（加烟）**：3 通道多场资产 + 烟受光散射（见 §3.3）；CLI 调参口。
+4. **P1（加烟）**：JPVOL2 **3 通道**（R=火密度 / G=温度 / B=烟密度）+ 引擎 2/3 通道支持
+   + 烟受光散射（自发光只按火自身光深注入）—— 见 §3.3。
+5. **基线对照**：`tools/jpov/tools/campfire_ab/baseline/`
+   （P0 快照 `ab_f0020.*`/`strip.png`/`ab_seq.csv`；P1 快照 `p1_*`）。
 
 ### 4.1 复现
 
 ```bash
-# 1) 准备资产（本地，CC0 派生；不入库）
-#    fire_hero/assets/prototypes/campfire.jpovvol  (56×61×53 × 80f, u8)
+# 1) 资产（本地自烘/转换，CC0 派生；不入库）
+#    python3 tools/jpov/genVolume/vdbseq_to_jpovvol.py '<vdb pattern>' \
+#      fire_hero/assets/prototypes/campfire.jpovvol --start 60 --end 140 --ds 2 \
+#      --r-grid flames --g-grid flames --b-grid density --b-scale 0.35 --gnorm 99.5 --z-up
+#    → fire_hero/assets/prototypes/campfire.jpovvol  (66×96×66 × 80f × 3ch, u8)
 # 2) 编译 viewer
 bash tools/jpov/build_volume_fire_viewer.sh
 # 3) A/B 抓图 + 比对（asset 帧 20 ↔ 官方帧 80）
@@ -230,7 +236,7 @@ bash tools/jpov/tools/campfire_ab/run_ab.sh \
 
 ---
 
-## 5. 已知简化（P0 范围内，不阻塞）
+## 5. 已知简化 / 边界（不阻塞）
 
 - A/B 火盒用**资产真实尺寸（各轴独立）**，**不做等比/立方盒**——立方盒会把非立方资产各向异性
   拉伸（P0 曾把 1.32×1.92×1.32 拉成 1.92³，x/z 放大 1.45× ⇒ 火“偏宽”）；另加取景下移 `--ab-y-shift`
