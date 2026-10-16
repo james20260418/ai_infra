@@ -99,13 +99,23 @@ struct MeshData {
     // 见 docs/jpov_vegetation_wind_design.md §1。
     std::vector<Vec2f> wind_flex;
     // 枢轴式植被风（逐顶点；kWind 且资产带关节表时非空）：
-    //   wind_joint_id[i] = 顶点 i 所属关节在 wind_joints 表中的下标。
-    // VS 由该关节出发、沿 parent 链向根累加**绕枢轴旋转**（取代平移式风）。
-    std::vector<float> wind_joint_id;
-    // 枢轴式植被风关节表（**每 mesh 一份**，来自资产 node extras 的 jpov_wind_joints）：
-    //   每项 = (pivot.x, pivot.y, pivot.z, parent)；parent = 父关节下标，-1 = 根。
+    //   .x = 所属关节（“链”的基关节）在 wind_joints 表中的下标；
+    //   .y = link_w ∈ [0,1]：该顶点在**本链内**的归一化位置（0=链基枢轴，1=下一枢轴/枝末）。
+    // VS 用 link_w 在「父链变换」与「本链变换」间线性混合（两骨平滑蒙皮）
+    //   ⇒ 链边界与分叉焊缝处 C0 连续，不撕裂、不拉伸。
+    std::vector<Vec2f> wind_link;
+    // 枢轴式植被风的关节表（**每 mesh 一份**，来自资产 node extras jpov_wind_joints）：
     //   同树的多 primitive（trunk / leaves）共享同一张表。见 wind_bake.py / 设计文档。
-    std::vector<std::array<float, 4>> wind_joints;
+    //   每个关节是一条**刚性链的一环**：顶点按“沿弧长的段”归属到某关节，段内所有顶点
+    //   共享该关节的链与角度 ⇒ 段内零形变（保长）；θ 只依赖关节自身（level/phase）
+    //   ⇒ 相邻段在枢轴处天然连续。
+    struct WindJoint {
+        float pivot[3];  // 枢轴位置（资产/模型系）
+        float parent;    // 父关节下标；-1 = 根
+        float level;     // 距根的关节数（θ 的频率/增益按此分档；必为关节自身量）
+        float phase;     // 逐关节相位（秒）：连续空间场在枢轴处的取值
+    };
+    std::vector<WindJoint> wind_joints;
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -206,17 +216,19 @@ inline void MeshData::Validate() const {
         CHECK_EQ(wind_flex.size(), vcount)
             << "MeshData::Validate: wind_flex.size() != positions.size()";
     }
-    // 枢轴风：逐顶点关节下标须与顶点数对齐；关节表须是 4 项一组。
-    if (!wind_joint_id.empty()) {
-        CHECK_EQ(wind_joint_id.size(), vcount)
-            << "MeshData::Validate: wind_joint_id.size() != positions.size()";
+    // 枢轴风：逐顶点关节下标/链内权重须与顶点数对齐；关节表须非空。
+    if (!wind_link.empty()) {
+        CHECK_EQ(wind_link.size(), vcount)
+            << "MeshData::Validate: wind_link.size() != positions.size()";
         CHECK(!wind_joints.empty())
-            << "MeshData::Validate: 有 wind_joint_id 但无 wind_joints 关节表";
+            << "MeshData::Validate: 有 wind_link 但无 wind_joints 关节表";
     }
-    for (const float jid : wind_joint_id) {
-        CHECK_GE(jid, 0.0f) << "MeshData::Validate: wind_joint_id 为负";
-        CHECK_LT(static_cast<size_t>(jid), wind_joints.size())
-            << "MeshData::Validate: wind_joint_id 越出关节表";
+    for (const Vec2f& wl : wind_link) {
+        CHECK_GE(wl.x(), 0.0f) << "MeshData::Validate: wind_link 关节下标为负";
+        CHECK_LT(static_cast<size_t>(wl.x()), wind_joints.size())
+            << "MeshData::Validate: wind_link 关节下标越出关节表";
+        CHECK_GE(wl.y(), 0.0f) << "MeshData::Validate: wind_link 链内权重为负";
+        CHECK_LE(wl.y(), 1.0f) << "MeshData::Validate: wind_link 链内权重 > 1";
     }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)

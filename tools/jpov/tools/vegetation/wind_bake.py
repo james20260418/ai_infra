@@ -189,7 +189,8 @@ def _build_joints(polys, H, target_spacing=1.5, max_per_spline=6):
     for i in range(len(polys)):
         for kk in range(len(kept_idx[i])):
             joint_of[(i, kk)] = len(joints)
-            joints.append({'pivot': polys[i][kept_idx[i][kk]], 'parent': -1})
+            joints.append({'pivot': polys[i][kept_idx[i][kk]], 'parent': -1,
+                           'level': 0, 'phase': 0.0})
 
     for i in range(len(polys)):
         for kk in range(len(kept_idx[i])):
@@ -197,31 +198,102 @@ def _build_joints(polys, H, target_spacing=1.5, max_per_spline=6):
             if kk > 0:
                 joints[jid]['parent'] = joint_of[(i, kk - 1)]
             elif i != root:
+                # 父关节 = 父样条上**不超过接点的最后一个保留采样**（floor，与顶点归属同一规则）——
+                #   这样分叉处“子枝的父链”与“母枝同位置的链”取的是同一根链，焊缝才对齐。
                 pj = parent_spline[i]
-                s = polys[i][0]
-                best, bidx = 1e18, 0
+                t_att = H['attach_t'][i]
+                k_att = int(round(t_att * (len(polys[pj]) - 1)))
+                bidx = 0
                 for kk2 in range(len(kept_idx[pj])):
-                    d = (polys[pj][kept_idx[pj][kk2]] - s).length_squared
-                    if d < best:
-                        best, bidx = d, kk2
+                    if kept_idx[pj][kk2] <= k_att:
+                        bidx = kk2
+                    else:
+                        break
                 joints[jid]['parent'] = joint_of[(pj, bidx)]
+
+    # 合并“同位置”的关节：Sapling 把一条枝拆成多条**续接**样条（attach_t>0.98），
+    #   续接处会出现两个同坐标的关节 —— 必须并成一个，否则同一处叠两次铰链，
+    #   且相邻顶点分属不同链 => 焊缝撕裂。canon[j] = 该关节的代表关节。
+    canon = list(range(len(joints)))
+    for j in range(len(joints)):
+        pj = joints[j]['pivot']
+        for k in range(j):
+            if canon[k] != k:
+                continue
+            if (pj - joints[k]['pivot']).length_squared < 1e-6:
+                canon[j] = k
+                break
+    for j in range(len(joints)):
+        par = joints[j]['parent']
+        joints[j]['parent'] = canon[par] if par >= 0 else -1
+    for key in joint_of:
+        joint_of[key] = canon[joint_of[key]]
+
+    # 层级（距根的关节数，非样条 level）：θ 的频率/增益只能依赖**关节自身**的量，
+    #   否则同一关节对不同顶点会给不同角 → 段内不再刚性。
+    # 相位：连续空间场在**该关节枢轴**处的取值 → 逐关节常量（同上，保刚性）。
+    for jid in range(len(joints)):
+        d = 0
+        p = joints[jid]['parent']
+        while p >= 0 and d < 4096:
+            d += 1
+            p = joints[p]['parent']
+        joints[jid]['level'] = d
+        pv = joints[jid]['pivot']
+        joints[jid]['phase'] = _smooth_phase01(pv.x, pv.y, pv.z)
     return joints, kept_idx
 
 
-def _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, pt):
-    """Return (softness_raw, phase, joint_id) for a world point, snapping to the
-    NEAREST **kept** skeleton sample (a joint) -- same rigidity rationale as
-    `_nearest`, plus the joint index the pivot-rotation wind walks from."""
-    best, braw, bjid = 1e18, 0.0, 0
+def _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, level_of, pt, tie_eps=0.05):
+    """Return (softness_raw, phase, joint_id, link_w) for a world point.
+
+    joint_id = the base joint of the **link** the point belongs to (the kept sample
+    with the largest arc <= the nearest sample's arc; floor-by-arc, NOT
+    nearest-joint).  link_w ∈ [0,1] = the point's normalized position within that
+    link (0 at the link's pivot, 1 at the next kept sample / branch end); the shader
+    blends the parent-link and this-link transforms by it (two-bone smooth skinning)
+    => C0-continuous across link boundaries and fork welds.
+
+    tie_eps: among samples within (best_distance + tie_eps) of the point, pick the one
+    whose joint is **closest to the root** (smallest level).  Without this, the fork
+    region (where the trunk and a branch run within a couple of cm of each other)
+    flips arbitrarily between the two chains and adjacent/coincident vertices get
+    different transforms -> torn, stretched triangles.
+    """
+    best, cands = 1e18, []
     for i in range(len(polys)):
         P = polys[i]
-        for kk in range(len(kept_idx[i])):
-            d = (pt - P[kept_idx[i][kk]]).length
+        for k in range(len(P)):
+            d = (pt - P[k]).length
             if d < best:
                 best = d
-                braw = hd_start[i] + cum[i][kept_idx[i][kk]]
-                bjid = joint_of[(i, kk)]
-    return braw, _smooth_phase01(pt.x, pt.y, pt.z), bjid
+            cands.append((d, i, k))
+    # 只留“距离在 best+tie_eps 以内”的候选（不能边扫边留，否则早期远样本会残留）。
+    win = [c for c in cands if c[0] <= best + tie_eps]
+    if not win:
+        win = [(best, 0, 0)]
+
+    def floor_link(i, k):
+        n_kept = len(kept_idx[i])
+        kk = 0
+        for kk2 in range(n_kept):
+            if kept_idx[i][kk2] <= k:
+                kk = kk2
+            else:
+                break
+        a0 = cum[i][kept_idx[i][kk]]
+        a1 = (cum[i][kept_idx[i][kk + 1]] if kk + 1 < len(kept_idx[i]) else cum[i][-1])
+        w = (cum[i][k] - a0) / max(a1 - a0, 1e-9)
+        return joint_of[(i, kk)], max(0.0, min(1.0, w))
+
+    bi, bk, bjid, bw, blev = win[0][1], win[0][2], None, 0.0, None
+    for (_d, i, k) in win:
+        jid, w = floor_link(i, k)
+        lv = level_of.get(jid, 1 << 30)
+        if blev is None or lv < blev:
+            bi, bk, bjid, bw, blev = i, k, jid, w, lv
+    raw = hd_start[bi] + cum[bi][bk]
+    return raw, _smooth_phase01(pt.x, pt.y, pt.z), bjid, bw
 
 
 def sample_source(curve_obj, per_seg=16):
@@ -244,6 +316,7 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
         for kk in range(len(kept_idx[i])):
             joint_of[(i, kk)] = n
             n += 1
+    level_of = {jid: joints[jid]['level'] for jid in range(len(joints))}
     # global max hierarchical distance -> normalize softness to [0,1]
     gmax = 1e-9
     for i in range(len(polys)):
@@ -281,19 +354,42 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
         uv = me.uv_layers.new(name="Wind")
         uvj = me.uv_layers.new(name="WindJoint")
         mw = obj.matrix_world
-        vert_uv = [None] * len(me.vertices)
-        vert_uj = [None] * len(me.vertices)
-        for vi, v in enumerate(me.vertices):
+        # 先算每顶点 (softness, phase, joint, link_w)，再做**同位置一致性**：网格里常有同坐标
+        #   重复顶点（UV 缝 / 焊接），它们必须落到**同一根链**，否则两顶点拿到不同变换 →
+        #   拉裂三角形成“宽薄片”。裁决：取层级（更靠根）最小者。
+        raw_vals = []
+        pos_key = {}
+        for v in me.vertices:
             wp = mw @ v.co
             # softness/phase 取自**全采样**（与旧版一致，平移式风逐字节不变）；
-            # joint_id 取自抽稀后的关节（枢轴式风用）。
+            # joint_id / link_w 取自抽稀后的关节（枢轴式风用）。
             raw, phase = _nearest(polys, cum, hd_start, wp)
-            _, _, jid = _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, wp)
-            s = max(0.0, min(1.0, raw / gmax))
+            _, _, jid, lw = _nearest_joint(polys, cum, hd_start, kept_idx, joint_of,
+                                           level_of, wp)
+            raw_vals.append((wp, max(0.0, min(1.0, raw / gmax)), phase, float(jid), lw))
+            pos_key.setdefault((round(wp.x, 3), round(wp.y, 3), round(wp.z, 3)),
+                               []).append(v.index)
+        n_fix = 0
+        for vids in pos_key.values():
+            if len(vids) < 2:
+                continue
+            rep = min(vids, key=lambda vi: (level_of.get(int(raw_vals[vi][3]), 1 << 30),
+                                            int(raw_vals[vi][3])))
+            rj, rw = raw_vals[rep][3], raw_vals[rep][4]
+            for vi in vids:
+                if raw_vals[vi][3] != rj:
+                    n_fix += 1
+                raw_vals[vi] = (raw_vals[vi][0], raw_vals[vi][1], raw_vals[vi][2], rj, rw)
+        if n_fix:
+            print(f"[wind_bake] 同位置顶点链归一：{n_fix} 个顶点")
+
+        vert_uv = [None] * len(me.vertices)
+        vert_uj = [None] * len(me.vertices)
+        for vi, (wp, s, phase, jid, lw) in enumerate(raw_vals):
             vert_uv[vi] = (s, phase)
-            vert_uj[vi] = (float(jid), 0.0)
+            vert_uj[vi] = (jid, lw)
             solid_pts.append(wp)
-            solid_uv.append((s, phase, float(jid)))
+            solid_uv.append((s, phase, jid, lw))
         for li, loop in enumerate(me.loops):
             uv.data[li].uv = vert_uv[loop.vertex_index]
             uvj.data[li].uv = vert_uj[loop.vertex_index]
@@ -317,14 +413,14 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
             for vi in poly.vertices:
                 c += mw @ me.vertices[vi].co
             c /= len(poly.vertices)
-            best, bsu = 1e18, (0.0, 0.0, 0.0)
+            best, bsu = 1e18, (0.0, 0.0, 0.0, 0.0)
             for j, sp in enumerate(solid_pts):
                 d = (sp - c).length_squared
                 if d < best:
                     best, bsu = d, solid_uv[j]
             for li in poly.loop_indices:
                 uv.data[li].uv = (bsu[0], bsu[1])
-                uvj.data[li].uv = (bsu[2], 0.0)
+                uvj.data[li].uv = (bsu[2], bsu[3])
         print(f"[wind_bake] baked {obj.name!r} verts={len(me.vertices)} "
               f"faces={len(me.polygons)} mode=card")
 

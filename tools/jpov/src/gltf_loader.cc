@@ -520,22 +520,22 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
     }
 
-    // TEXCOORD_2 —— 枢轴式植被风（**项目约定语义**，vec2 float，仅 .x 有意义 = joint_id）。
-    //   由 Blender 烘焙管线（build_tree.py --bake-wind）写入：joint_id = 该顶点所属关节在
-    //   node extras["jpov_wind_joints"] 关节表（见下）中的下标。
+    // TEXCOORD_2 —— 枢轴式植被风（**项目约定语义**，vec2 float = (joint_id, link_w)）。
+    //   由 Blender 烘焙管线（build_tree.py --bake-wind）写入：joint_id = 该顶点所属链的基关节在
+    //   node extras["jpov_wind_joints"] 关节表（见下）中的下标；link_w = 链内归一化位置。
     auto wj_it = prim.attributes.find("TEXCOORD_2");
     if (wj_it != prim.attributes.end()) {
         std::vector<float> wj_flat;
         if (ReadFloatAccessor(model, wj_it->second, &wj_flat) &&
             wj_flat.size() / 2 == vcount) {
-            out_mesh->wind_joint_id.resize(vcount);
+            out_mesh->wind_link.resize(vcount);
             for (size_t i = 0; i < vcount; ++i) {
-                out_mesh->wind_joint_id[i] = wj_flat[i * 2 + 0];
+                out_mesh->wind_link[i] = Vec2f(wj_flat[i * 2 + 0], wj_flat[i * 2 + 1]);
             }
         }
     }
 
-    // 枢轴风关节表：资产用 node extras["jpov_wind_joints"] = [x,y,z,parent, ...] 携带
+    // 枢轴风关节表：资产用 node extras["jpov_wind_joints"] = [px,py,pz,parent,level,phase, ...] 携带
     //   （见 wind_bake.py / build_tree.py）。同文件所有 primitive 共享同一张表（树
     //   trunk/leaves 同一骨架），故每个 primitive 各存一份。表缺失/坏形状 = 不致命，
     //   只是该 mesh 不走枢轴式风（wind_joint_id 随之丢弃，见下）。
@@ -544,21 +544,24 @@ bool ParsePrimitive(const tinygltf::Model& model,
             continue;
         }
         const tinygltf::Value& arr = node.extras.Get("jpov_wind_joints");
-        if (!arr.IsArray() || arr.ArrayLen() == 0 || arr.ArrayLen() % 4 != 0) {
+        if (!arr.IsArray() || arr.ArrayLen() == 0 || arr.ArrayLen() % 6 != 0) {
             break;
         }
-        out_mesh->wind_joints.resize(arr.ArrayLen() / 4);
+        out_mesh->wind_joints.resize(arr.ArrayLen() / 6);
         for (size_t k = 0; k < out_mesh->wind_joints.size(); ++k) {
-            for (size_t e = 0; e < 4; ++e) {
-                out_mesh->wind_joints[k][e] =
-                    static_cast<float>(arr.Get(k * 4 + e).GetNumberAsDouble());
+            MeshData::WindJoint& wj = out_mesh->wind_joints[k];
+            for (size_t e = 0; e < 3; ++e) {
+                wj.pivot[e] = static_cast<float>(arr.Get(k * 6 + e).GetNumberAsDouble());
             }
+            wj.parent = static_cast<float>(arr.Get(k * 6 + 3).GetNumberAsDouble());
+            wj.level  = static_cast<float>(arr.Get(k * 6 + 4).GetNumberAsDouble());
+            wj.phase  = static_cast<float>(arr.Get(k * 6 + 5).GetNumberAsDouble());
         }
         break;
     }
     // 关节下标必须配一张表；表缺失时下标无意义（Validate 会拦下），直接丢弃。
     if (out_mesh->wind_joints.empty()) {
-        out_mesh->wind_joint_id.clear();
+        out_mesh->wind_link.clear();
     }
 
     // _JPOV_RELAX —— 布料 LAG 松弛度（**自定义语义**，vec2 float = (lag_ratio, max_lag)）。

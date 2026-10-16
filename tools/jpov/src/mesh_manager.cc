@@ -255,36 +255,53 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec2f), reinterpret_cast<const void*>(0));
     }
 
-    // ---- 枢轴风关节下标（可选，location 3，float）----
-    //   逐顶点关节下标（对应 MeshData.wind_joint_id）；仅带关节表的植被资产有。
-    //   loc3 在本 VAO 上平时未用（顶点 loc3/4 是蒙皮的 JOINTS/WEIGHTS，但植被 mesh 不走蒙皮），
-    //   故 PBR instanced / object3d 路径共用它不冲突。
-    if (!data.wind_joint_id.empty()) {
+    // ---- 枢轴风链下标/权重（可选，location 3，vec2：joint_id, link_w）----
+    //   逐顶点；仅带关节表的植被资产有。loc3 在本 VAO 上平时未用（顶点 loc3/4 是蒙皮的
+    //   JOINTS/WEIGHTS，但植被 mesh 不走蒙皮），故 PBR instanced / object3d 路径共用不冲突。
+    if (!data.wind_link.empty()) {
         glGenBuffers(1, &mesh.vbo_wind_joint);
         CHECK_NE(mesh.vbo_wind_joint, 0u);
         glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind_joint);
         glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(data.wind_joint_id.size() * sizeof(float)),
-                     data.wind_joint_id.data(), GL_STATIC_DRAW);
+                     static_cast<GLsizeiptr>(data.wind_link.size() * sizeof(Vec2f)),
+                     data.wind_link.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE,
-                              sizeof(float), reinterpret_cast<const void*>(0));
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE,
+                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
     }
 
-    // ---- 枢轴风关节表纹理（可选，RGBA32F，N×1：pivot.xyz + parent）----
-    //   同树全部实例/primitive 共享；VS 用 texelFetch 按 joint_id 取枢轴与父下标。
+    // ---- 枢轴风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
+    //   同树全部实例/primitive 共享；VS 用 texelFetch 按 joint_id 取。
+    //   texel(2j)   = (pivot.xyz, parent)
+    //   texel(2j+1) = (level, phase, 0, 0)
     if (!data.wind_joints.empty()) {
+        const size_t n = data.wind_joints.size();
+        // 纹理宽 = 2n；超过 GL_MAX_TEXTURE_SIZE（常见 16384）会变成不完整纹理，
+        // texelFetch 读到垃圾（静默错）——宁可此刻崩，不静默出错。
+        CHECK_LE(2 * n, 16384u) << "wind_joint 表过大（2N 超纹理宽上限）: N=" << n;
+        std::vector<float> tex(8 * n);
+        for (size_t k = 0; k < n; ++k) {
+            const MeshData::WindJoint& wj = data.wind_joints[k];
+            tex[8 * k + 0] = wj.pivot[0];
+            tex[8 * k + 1] = wj.pivot[1];
+            tex[8 * k + 2] = wj.pivot[2];
+            tex[8 * k + 3] = wj.parent;
+            tex[8 * k + 4] = wj.level;
+            tex[8 * k + 5] = wj.phase;
+            tex[8 * k + 6] = 0.0f;
+            tex[8 * k + 7] = 0.0f;
+        }
         glGenTextures(1, &mesh.wind_joint_tex);
         CHECK_NE(mesh.wind_joint_tex, 0u);
-        mesh.wind_joint_count = static_cast<uint32_t>(data.wind_joints.size());
+        mesh.wind_joint_count = static_cast<uint32_t>(n);
         glBindTexture(GL_TEXTURE_2D, mesh.wind_joint_tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
-                     static_cast<GLsizei>(data.wind_joints.size()), 1, 0,
-                     GL_RGBA, GL_FLOAT, data.wind_joints.data());
+                     static_cast<GLsizei>(2 * n), 1, 0,
+                     GL_RGBA, GL_FLOAT, tex.data());
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
