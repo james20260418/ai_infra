@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""EmberGen VDB 序列 → JPVOL2（R=density, G=flames→色彩驱动），含 Z-up→Y-up 旋转。
+"""EmberGen VDB 序列 → JPVOL2（R=消光场, G=温度代理），含 Z-up→Y-up 旋转。
 
 JangaFX free VDBs（CC0）示例：Small Camp Fire。
 读入 smallCampfire_%04d.vdb，取 density/flames 两格 → 公共稠密盒 → 旋转(z→y) →
 下采样 → 归一化 → 写 .jpovvol。
+
+支持把**烟单独放第 3 通道**：`--b-grid density` ⇒ 写 3 通道
+（R=火密度、G=温度、B=烟密度）。渲染侧据此把「火」（自发光）与「烟」
+（只吸收 + 受光散射）分开处理；各场**独立归一**（flames≈1 vs density≈0.003，
+不归一的话烟会被淹没）。
 
 用法：
   python3 vdbseq_to_jpovvol.py <dir_pattern> <out.jpovvol> [--start N --end N --ds 2 --no-rot]
@@ -53,7 +58,10 @@ def main():
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--end", type=int, default=10 ** 9)
     ap.add_argument("--ds", type=int, default=2)
-    ap.add_argument("--r-grid", default="density", help="消光/散射 channel 用的 grid（官方：density）")
+    ap.add_argument("--r-grid", default="density", help="R（消光/火密度）用的 grid（官方：flames）")
+    ap.add_argument("--b-grid", default="",
+                    help="第 3 通道（B=烟密度）用的 grid（官方：density）；空=不写第 3 通道（2 通道）")
+    ap.add_argument("--b-scale", type=float, default=1.0, help="--b-grid 的强度权重（烟的浓淡）")
     ap.add_argument("--g-grid", default="flames", help="当温度/发射用的 grid（官方：flames）")
     ap.add_argument("--gnorm", type=float, default=0.0, help="flames 按该百分位归一（0=用 max）；如 99.5 使核心→亮")
     ap.add_argument("--g-lo", type=float, default=0.0, help="flames 重映射下限（拉对比，如 0.10）")
@@ -69,11 +77,14 @@ def main():
     if not files:
         raise SystemExit("no vdb frames for pattern " + args.pattern)
 
-    # 公共体素盒 = r_grid 与 g_grid 在**所有帧**上的活动区并集。
-    # （不能只取 r_grid：若 g_grid 有体素落在 r_grid 并集之外，会被 read_grid_dense 静默裁掉。）
+    # 公共体素盒 = 所有参与 grid 在**所有帧**上的活动区并集。
+    # （不能只取 r_grid：若其它 grid 有体素落在其并集之外，会被 read_grid_dense 静默裁掉。）
+    grid_names = [args.r_grid, args.g_grid]
+    if args.b_grid:
+        grid_names.append(args.b_grid)
     lo = None
     hi = None
-    for name in (args.r_grid, args.g_grid):
+    for name in grid_names:
         for f in files:
             try:
                 g = vdb.read(f, name)
@@ -89,32 +100,58 @@ def main():
     size = hi - lo + 1
     print("frames=%d  global bbox size (x,y,z)=%s" % (len(files), size))
 
-    dens, flam = [], []
+    # 逐帧读取 →（全分辨率下累计 crop 包围盒）→ **立即降采样** → 存。
+    # 逐帧降采样是为了**省内存**：整段全分辨率堆叠在大 VDB 盒上可达 GB 级（本机容器限额 6GB，曾 OOM）。
+    # 三个场分开存；归一化推迟到最后（需整段的全局 max，且各场**独立**归一）。
+    r_frames, b_frames, g_frames = [], [], []
+    rmax = 0.0
+    bmax = 0.0
+    crop_lo = None
+    crop_hi = None
     for i, f in enumerate(files):
         d = read_grid_dense(f, args.r_grid, lo, size)
         fl = read_grid_dense(f, args.g_grid, lo, size)
-        dens.append(d)
-        flam.append(fl)
+        s = None
+        if args.b_grid:
+            s = read_grid_dense(f, args.b_grid, lo, size)
+            bmax = max(bmax, float(s.max()))
+        rmax = max(rmax, float(d.max()))
+        if args.crop > 0.0:
+            # crop 包围盒在**全分辨率**上累计（与「先裁后降采样」等价）。
+            m = (d > args.crop) | (fl > args.crop)
+            if s is not None:
+                m = m | (s > args.crop)
+            if m.any():
+                zs, ys, xs = np.where(m)
+                b_lo = np.array([zs.min(), ys.min(), xs.min()], dtype=np.int64)
+                b_hi = np.array([zs.max(), ys.max(), xs.max()], dtype=np.int64)
+                crop_lo = b_lo if crop_lo is None else np.minimum(crop_lo, b_lo)
+                crop_hi = b_hi if crop_hi is None else np.maximum(crop_hi, b_hi)
+            del m
+        r_frames.append(jpvol.downsample(d, args.ds))
+        if s is not None:
+            b_frames.append(jpvol.downsample(s, args.ds))
+        g_frames.append(jpvol.downsample(fl, args.ds))
         if i % 25 == 0:
-            print("  frame %d/%d densmax=%.4f flamemax=%.4f" % (i, len(files), d.max(), fl.max()))
+            print("  frame %d/%d rmax=%.4f bmax=%.4f gmax=%.4f"
+                  % (i, len(files), d.max(), (s.max() if s is not None else 0.0), fl.max()))
 
-    dens = np.stack(dens)   # [F][z][y][x]
-    flam = np.stack(flam)
+    # 各场**独立归一**再存：不同 grid 的绝对量纲可差几个数量级（flames≈1 vs density≈0.003），
+    # 不各自归一的话，小量纲的场（往往是烟）会被淹没。
+    dens = np.stack(r_frames) / max(rmax, 1e-9)      # [F][z][y][x]（已降采样 + 归一）
+    flam = np.stack(g_frames)
+    smoke = (np.stack(b_frames) / max(bmax, 1e-9)) * args.b_scale if b_frames else None
 
-    if args.crop > 0.0:
-        m = (dens.max(axis=0) > args.crop) | (flam.max(axis=0) > args.crop)
-        zs, ys, xs = np.where(m)
-        z0, z1 = int(zs.min()), int(zs.max()) + 1
-        y0, y1 = int(ys.min()), int(ys.max()) + 1
-        x0, x1 = int(xs.min()), int(xs.max()) + 1
+    if args.crop > 0.0 and crop_lo is not None:
+        # 全分辨率包围盒 → 降采样下标（降采样网格 i 覆盖全分辨率 [i*ds, (i+1)*ds)）。
+        z0, y0, x0 = (int(v) for v in crop_lo // args.ds)
+        z1, y1, x1 = (int(v) for v in crop_hi // args.ds + 1)
         print("  crop -> z[%d,%d) y[%d,%d) x[%d,%d)" % (z0, z1, y0, y1, x0, x1))
         dens = dens[:, z0:z1, y0:y1, x0:x1]
         flam = flam[:, z0:z1, y0:y1, x0:x1]
 
     # 注意：旋转必须放在 **降采样之后**（downsample 假定最后三轴是 (z,y,x)，
     # 提前转会把轴揉在一起 → 乱码）。
-    dens = jpvol.downsample(dens, args.ds)
-    flam = jpvol.downsample(flam, args.ds)
 
     # 旋转（在降采样之后）：对 [F,z,y,x] 做轴置换 + 翻转，保持合法体积。
     # 世界轴：x=axis3, y=axis2, z=axis1。
@@ -128,6 +165,8 @@ def main():
     if args.z_up:
         dens = dens.transpose(0, 2, 1, 3)
         flam = flam.transpose(0, 2, 1, 3)
+        if smoke is not None:
+            smoke = smoke.transpose(0, 2, 1, 3)
         print("  z_up applied")
     if args.rot != "none":
         dens = dens.transpose(rot_perm[args.rot])
@@ -136,25 +175,31 @@ def main():
         if f is not None:
             dens = np.flip(dens, axis=f)
             flam = np.flip(flam, axis=f)
+        if smoke is not None:
+            smoke = smoke.transpose(rot_perm[args.rot])
+            if f is not None:
+                smoke = np.flip(smoke, axis=f)
         print("  rot=%s" % args.rot)
 
-    dmax = float(dens.max()) or 1.0
     if args.gnorm > 0.0:
         fmax = float(np.percentile(flam, args.gnorm)) or 1.0
     else:
         fmax = float(flam.max()) or 1.0
-    dn = np.clip(dens / dmax, 0, 1)
+    dn = np.clip(dens, 0, 1)
     if args.g_hi > args.g_lo > 0.0:
         fn = np.clip((flam - args.g_lo) / (args.g_hi - args.g_lo), 0, 1)
     else:
         fn = np.clip(flam / fmax, 0, 1)
-    X, Y, Z, F, nbytes = jpvol.write_jpovvol(args.out, dn, fn, dtype="u8")
-    print("wrote %s dims=(%d,%d,%d) frames=%d bytes=%d" % (args.out, X, Y, Z, F, nbytes))
+    sn = np.clip(smoke, 0, 1) if smoke is not None else None
+    X, Y, Z, F, nbytes = jpvol.write_jpovvol(args.out, dn, fn, smoke=sn, dtype="u8")
+    print("wrote %s dims=(%d,%d,%d) frames=%d channels=%d bytes=%d"
+          % (args.out, X, Y, Z, F, 3 if sn is not None else 2, nbytes))
 
     # sidecar：记录真实物理尺度（voxel_m × dims = 世界盒），供查看器 1:1 摆放。
     voxel_m = args.unit * args.ds
     side = {
         "dims": [X, Y, Z], "frames": F, "voxel_m": voxel_m,
+        "channels": 3 if sn is not None else 2,
         "world_size_m": [X * voxel_m, Y * voxel_m, Z * voxel_m],
         "segments": {"ignite": [0, 0], "sustain": [0, F], "extinct": [F, F]},
         "loopable": True, "emission_axis": "+Y", "note": "vdbseq",

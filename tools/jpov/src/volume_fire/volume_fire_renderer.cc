@@ -238,6 +238,13 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSigma"), cmd.sigma_scale);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uEmission"), cmd.emission_scale);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uTempScale"), cmd.temp_kelvin_scale);
+    glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uSmokeAlbedo"),
+                cmd.smoke_albedo.x(), cmd.smoke_albedo.y(), cmd.smoke_albedo.z());
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSmokeScatter"), cmd.smoke_scatter);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSmokeSigma"), cmd.smoke_sigma_scale);
+    glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uLightColor"),
+                cmd.light_color.x(), cmd.light_color.y(), cmd.light_color.z());
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uChannels"), vol.channels);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFrame"), cmd.frame);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSteps"), cmd.steps);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uJitter"), cmd.jitter ? 1 : 0);

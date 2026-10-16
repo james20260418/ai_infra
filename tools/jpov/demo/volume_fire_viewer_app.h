@@ -46,17 +46,45 @@ public:
     jpov::Vec3f fire_max_ = {0.9f, 3.2f, 0.9f};
 
     // 旋钮
-    float sigma_scale_ = 4.0f;      // 消光 σ = 密度 × 此值 (1/m)
-    float emission_scale_ = 1.0f;   // 发射强度
+    // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
+    static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
+    static constexpr float kDefaultEmission = 1.0f;      // 发射强度
+    static constexpr float kDefaultSmokeScatter = 3.0f;  // 烟散射注入强度（VDB 无此信息，靠它调；Danis 定）
+    // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
+    // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
+    static constexpr float kDefaultSmokeSigma = 0.05f;
+    // 烟的受光色默认（中性偏冷，含强度）；单一来源：成员初始化与 CLI 默认共用。
+    static jpov::Vec3f DefaultSmokeLight() { return {0.46f, 0.55f, 0.88f}; }
+    float sigma_scale_ = kDefaultSigma;
+    float emission_scale_ = kDefaultEmission;
     float steps_ = 64.0f;           // 步数
     bool  jitter_ = true;           // 抖动
     float fps_ = 24.0f;             // 播放帧率（旋钮；默认值由物理推导，见注释）
     float temp_kelvin_scale_ = 2000.0f;  // G(∈[0,1]) → 开尔文
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
+    // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
+    // 见 interface/volume_fire_types.h 的 VolumeFireCommand 注释。
+    float smoke_scatter_ = kDefaultSmokeScatter;
+    float smoke_sigma_scale_ = kDefaultSmokeSigma;   // 烟消光倍数（同时压低烟厚与烟亮）
+    jpov::Vec3f smoke_light_color_ = VolumeFireViewerApp::DefaultSmokeLight();  // 烟的受光色
     bool  fs_debug_ = false;         // 调试：全屏 quad 代替盒光栅化
     float play_time_ = 0.0f;
     int   nframes_ = 64;            // 由 asset 决定（96³×64）
+
+    // ---- A/B 基准模式（P0：钉帧 + 钉相机 + 纯黑背景）----
+    // 打开后：不画地面/燃料块（只留孤立火），天光/日月/夜空归零（纯黑底），
+    // 火盒 = **居中于世界原点**的立方盒（边 ab_box_m_），帧号钉死 ab_frame_。
+    // 相机由调用方（RunAbCapture）钉为正面（+Z 看向原点）。
+    // 目的：产出与 EmberGen 官方渲染（同为孤立火 + 黑底）可直接比对的图。
+    bool  ab_mode_ = false;
+    int   ab_frame_ = 0;            // 钉死的资产帧下标（>=0）
+    // A/B 火盒**各轴独立**（米）= 资产真实尺寸 dims×voxel_m。**不立等比/立方盒**——
+    // 立方盒会把非立方的资产各向异性拉伸（曾把 1.32×1.92×1.32 拉成 1.92³，x/z 放大 1.45×）。
+    jpov::Vec3f ab_size_ = {1.22f, 1.22f, 1.22f};
+    // A/B 取景：把火盒整体下移（米，负值=下移），用于与参考画面的**基线对齐**。
+    // 纯取景偏移，不动资产数据。默认 -0.10 = 对齐 EmberGen 参考（Danis 2026-10-16 定）。
+    float ab_y_shift_ = -0.10f;
 
     void InstallTextMeasure() { ui_.SetTextMeasure(&VolumeFireViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -106,19 +134,31 @@ public:
         cmds->camera.near = 0.05f;
         cmds->camera.far = 1000.0f;
 
-        const jpov_skylight::SkyLighting nl =
+        jpov_skylight::SkyLighting nl =
             jpov_skylight::MakeSkyLighting(deg_, /*tricolor_ambient=*/false);
+        if (ab_mode_) {
+            // A/B 基准：天光/日月/夜空/地色全部归零 → 纯黑背景（与官方参考渲染同底）。
+            MakeBlackBackground(&nl);
+            // 火盒 = 资产**真实尺寸**（各轴独立，不拉伸），整体可下移对齐参考基线。
+            const float hx = 0.5f * ab_size_.x();
+            const float hy = 0.5f * ab_size_.y();
+            const float hz = 0.5f * ab_size_.z();
+            fire_min_ = {-hx, -hy + ab_y_shift_, -hz};
+            fire_max_ = {hx, hy + ab_y_shift_, hz};
+        }
         cmds->sky = nl.sky;
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
-        // 场景：地面 + 1m³ 燃料块。
-        cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-        if (fuel_enable_) {
-            cmds->DrawObject3D(fuel_mesh_, fuel_mat_, {0.0f, 0.5f, 0.0f},
+        // 场景：地面 + 1m³ 燃料块（A/B 模式下不画——只留孤立火）。
+        if (!ab_mode_) {
+            cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            if (fuel_enable_) {
+                cmds->DrawObject3D(fuel_mesh_, fuel_mat_, {0.0f, 0.5f, 0.0f},
+                                   {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            }
         }
 
         // 懒加载体积。
@@ -144,7 +184,12 @@ public:
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
-            vc.frame = std::fmod(play_time_ * fps_, static_cast<float>(nframes_));
+            vc.smoke_scatter = smoke_scatter_;
+            vc.smoke_sigma_scale = smoke_sigma_scale_;
+            vc.light_color = smoke_light_color_;
+            // A/B 模式：帧号钉死（可复现）；常规模式：按播放时间推进。
+            vc.frame = ab_mode_ ? static_cast<float>(ab_frame_)
+                                : std::fmod(play_time_ * fps_, static_cast<float>(nframes_));
             cmds->DrawVolumeFire(std::move(vc));
         }
 
@@ -162,6 +207,25 @@ public:
     }
 
 private:
+    // A/B 基准背景：把 SkyCommand 的天光亮度 / 日盘 / 月盘 / 夜色 / 地色全部归零，
+    // 并把主平行光与环境光强度清零 → 画面只剩火自身的自发光（纯黑底）。
+    // 仅 ab_mode_ 调用；常规查看器的天光不受影响。
+    static void MakeBlackBackground(jpov_skylight::SkyLighting* nl /*inout*/) {
+        CHECK_NOTNULL(nl);
+        nl->sky.intensity = 0.0f;
+        nl->sky.sun_radius = 0.0f;
+        nl->sky.sun_brightness = 0.0f;
+        nl->sky.sun_glow = 0.0f;
+        nl->sky.moon_radius = 0.0f;
+        nl->sky.moon_brightness = 0.0f;
+        nl->sky.moon_glow = 0.0f;
+        nl->sky.night_zenith_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->sky.night_horizon_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->sky.ground_color = {0.0f, 0.0f, 0.0f, 1.0f};
+        nl->dir_light.intensity = 0.0f;
+        nl->ambient.intensity = 0.0f;
+    }
+
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
                            void* userdata) {
         VolumeFireViewerApp* app = static_cast<VolumeFireViewerApp*>(userdata);
@@ -176,7 +240,7 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
         const float colw = 0.26f * w;
         const float cx = 0.02f * w;
-        const float top = h - 16.0f - (10 * 24.0f + 9 * 5.0f);
+        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{cx, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -190,6 +254,7 @@ private:
         ui_.Checkbox("相机信息", &show_cam_info_, row(7));
         ui_.Checkbox("燃料块", &fuel_enable_, row(8));
         ui_.Checkbox("全屏quad(调试)", &fs_debug_, row(9));
+        ui_.SliderFloat("烟散射", &smoke_scatter_, row(10), 0.0f, 20.0f, 2);
     }
 
     bool show_panel_ = true;

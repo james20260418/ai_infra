@@ -49,6 +49,21 @@ struct VolumeFireCommand {
     // 调试：用全屏 quad 代替盒光栅化（每像素自算射线、打不中就 discard）。
     // 用来二分定位「伪影是否来自盒光栅化/剔面」。默认 false。
     bool debug_fullscreen = false;
+
+    // ---- 烟：让「非火」部分在纯黑背景下可见（受光散射）----
+    //
+    // 3 通道体纹理（R=火密度, G=温度, B=烟密度）；2 通道文件则无烟。
+    // 烟只**吸收 + 受光散射**（不自发光）：纯黑背景下不散射就不可见。
+    // 受光近似为**均匀照明**（环境散射光；物理上还有个火光照明的方向性分量，留作后续）：
+    //     L_scatter = smoke_scatter · σ_smoke · albedo · light_color
+    // light_color 取中性偏冷灰（参照官方渲染：烟呈灰蓝，与暖色火焰拉开）。
+    // smoke_scatter = 0 时整条散射路径关闭（**零回归**）。
+    Vec3f smoke_albedo = {0.72f, 0.70f, 0.68f};   // 烟的反照率（中性偏暖灰）
+    float smoke_scatter = 0.0f;                   // 散射强度增益（0 = 关）
+    // 烟消光倍数：只作用于 σ_smoke（= B·sigma_scale·此值）。烟太厚会盖住火；
+    // 散射注入 ∝ σ_smoke，故这一个旋钮同时压低「烟厚」与「烟亮」。0 = 无烟。
+    float smoke_sigma_scale = 1.0f;
+    Vec3f light_color = {0.62f, 0.66f, 0.75f};    // 烟的受光辐射色（中性偏冷，含强度）
 };
 
 }  // namespace jpov
