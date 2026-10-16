@@ -75,7 +75,7 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     }
     // ── 硬校验（不可信输入）──
     if (h.version != 2u || (h.channels != 2u && h.channels != 3u) ||
-        (h.dtype != 0u && h.dtype != 1u)) {
+        (h.dtype != 0u && h.dtype != 1u && h.dtype != 2u)) {
         LOG(WARNING) << "VolumeManager: 头非法 (ver=" << h.version << " ch=" << h.channels
                      << " dtype=" << h.dtype << ") " << path;
         return 0;
@@ -89,7 +89,7 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     // 用 size_t 逐乘，避免 uint32 溢出；再判总量上限。
     const size_t per_frame = static_cast<size_t>(h.nx) * static_cast<size_t>(h.ny) *
                              static_cast<size_t>(h.nz) * static_cast<size_t>(h.channels);
-    const size_t bytes_per_frame = per_frame * (h.dtype == 1u ? 1u : 4u);
+    const size_t bytes_per_frame = per_frame * (h.dtype == 1u ? 1u : (h.dtype == 2u ? 2u : 4u));
     const size_t total = bytes_per_frame * static_cast<size_t>(h.nframes);
     if (per_frame == 0 || bytes_per_frame == 0 || total == 0 || total > kMaxTotalBytes) {
         LOG(WARNING) << "VolumeManager: 数据量越界 (" << total << " B) " << path;
@@ -101,25 +101,39 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         LOG(WARNING) << "VolumeManager: 维数超过 GLsizei " << path;
         return 0;
     }
+    // 体积按 GL_TEXTURE_2D_ARRAY 上传：宽=nx、高=ny*nz（层=帧）。宽/高都受
+    // GL_MAX_TEXTURE_SIZE 限制——超限时 glTexImage3D 会失败、纹理不完整、采样全 0
+    // （渲染成一片黑），**且不会报错**。这里提前拦截 + 明确报出上限（否则静默黑屏）。
+    GLint max_tex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    if (max_tex > 0 && (h.nx > static_cast<uint32_t>(max_tex) ||
+                        layer_h > static_cast<size_t>(max_tex))) {
+        LOG(WARNING) << "VolumeManager: 体积 " << h.nx << "x" << h.ny << "x" << h.nz
+                     << " (2D 层高 ny*nz=" << layer_h << ") 超过 GL_MAX_TEXTURE_SIZE="
+                     << max_tex << "，无法上传：" << path
+                     << "（降分辨率重转，如 --ds 2）";
+        return 0;
+    }
 
     std::vector<unsigned char> buf(bytes_per_frame);
     f.seekg(sizeof(JpovVol2Header), std::ios::beg);
 
-    unsigned int tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
     const bool rgb = (h.channels == 3u);
     const GLenum internal = rgb ? (h.dtype == 1u ? GL_RGB8 : GL_RGB16F)
                                 : (h.dtype == 1u ? GL_RG8 : GL_RG16F);
     const GLenum format = rgb ? GL_RGB : GL_RG;
-    const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+    const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE
+                                        : (h.dtype == 2u ? GL_HALF_FLOAT : GL_FLOAT);
     // 3 通道 = 每像素 3 字节，行不是 4 的倍数 ⇒ 必须把解包对齐设为 1，否则行错位。
     GLint prev_align = 4;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal,
-                 static_cast<GLsizei>(h.nx), static_cast<GLsizei>(layer_h),
-                 static_cast<GLsizei>(h.nframes), 0, format, type, nullptr);
+    unsigned int tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal, static_cast<GLsizei>(h.nx),
+                 static_cast<GLsizei>(layer_h), static_cast<GLsizei>(h.nframes), 0,
+                 format, type, nullptr);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -147,9 +161,14 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         glDeleteTextures(1, &tex);
         return 0;
     }
-    entries_[id] = VolumeInfo{tex, static_cast<int>(h.nx), static_cast<int>(h.ny),
-                              static_cast<int>(h.nz), static_cast<int>(h.nframes),
-                              static_cast<int>(h.channels)};
+    VolumeInfo info;
+    info.gl_tex = tex;
+    info.nx = static_cast<int>(h.nx);
+    info.ny = static_cast<int>(h.ny);
+    info.nz = static_cast<int>(h.nz);
+    info.nframes = static_cast<int>(h.nframes);
+    info.channels = static_cast<int>(h.channels);
+    entries_[id] = info;
     path_to_id_[path] = id;
     LOG(INFO) << "[volume] loaded " << path << " dims=(" << h.nx << "," << h.ny << ","
               << h.nz << ") frames=" << h.nframes << " channels=" << h.channels

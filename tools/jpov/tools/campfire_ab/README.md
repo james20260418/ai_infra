@@ -19,6 +19,40 @@ EmberGen 免费 VDB 套件自带的 `smallCampfire.mp4`（200 帧，黑底孤立
 
 `reference/` 里是缩略后的官方参考帧（`--width 576`），供肉眼对照与仓库体积控制。
 
+## 资产来源与复现（原始 VDB → `.jpovvol`）
+
+**原始 VDB** 同样是 JangaFX EmberGen 免费 VDB 套件的 `smallCampfire`（**CC0，可商用**）：
+
+| 项 | 值 |
+|---|---|
+| 下载页 | <https://jangafx.com/software/embergen/download/free-vdb-animations> |
+| 包名 | `smallCampfire.zip`（内含 `README.txt` / `LICENSE.txt`：CC0） |
+| VDB 序列 | `smallCampfire/smallCampfireVDB/smallCampfire_%04d.vdb`（200 帧） |
+| 本地持久副本 | `/james_pm/fire_hero/assets/vdb_src/`（zip + LICENSE/README；**不入 git**，体积大） |
+
+> ❗ 原始 VDB / `.jpovvol` 都**不入库**（第三方 + 大体量）。只要记住 download 页 + 下面的
+> 复现命令，就不会丢；本地持久副本放在 `fire_hero/assets/vdb_src/`。
+
+**重新复现 `campfire.jpovvol`（= A/B 用的资产）**：
+
+```bash
+unzip smallCampfire.zip -d /tmp/cf         # → /tmp/cf/smallCampfire/smallCampfireVDB/smallCampfire_%04d.vdb
+
+python3 tools/jpov/genVolume/vdb_to_jpovvol.py \
+  '/tmp/cf/smallCampfire/smallCampfireVDB/smallCampfire_%04d.vdb' \
+  /path/to/campfire.jpovvol \
+  --start 60 --end 140 --ds 2 \
+  --channel flames --channel flames --channel density:0.35 \
+  --z-up --dtype f16 \
+  --palette tools/jpov/genVolume/palettes/fire_clean.json
+# （--palette 会把色谱烘成 <out>.palette.png 放在资产旁 → 渲染时自动被读到）
+```
+
+- 帧对应：源帧 **60..139** → 资产帧 **0..79**（⇒ 资产帧 `k` ↔ 官方帧 `60+k`）。
+- `--ds 2` 是当前上限（见计划文档 §3.5「分辨率上限」：ds=1 的 2D 层高超 `GL_MAX_TEXTURE_SIZE`）。
+- 色谱（Fire Color Ramp）源文件在 `tools/jpov/genVolume/palettes/`（**入 git**）；
+  LUT PNG 是烘出来、跟资产走的派生物。
+
 ## 文件
 
 | 文件 | 作用 |

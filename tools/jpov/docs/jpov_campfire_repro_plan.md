@@ -29,6 +29,9 @@
 - 来源：JangaFX EmberGen **免费 VDB（CC0，可商用）**
   `https://jangafx.com/software/embergen/download/free-vdb-animations`
   该套件自带 `.mp4` 官方预览渲染 + `.ember` 工程 + 200 帧 `.vdb` 序列。
+  · 原始 VDB 包 = `smallCampfire.zip`；**不入 git**，本地持久副本在 `/james_pm/fire_hero/assets/vdb_src/`；
+    从原始 VDB 重新复现 `.jpovvol` 的完整命令见 `tools/jpov/tools/campfire_ab/README.md`
+    「资产来源与复现」（防丢失：url + 复现命令已固化）。
 - 它与我们手上的 CC0 VDB 是**同一份资产**，因此是「同一份 VDB 的官方标准渲染」——
   正适合做机器可比对的标准答案。
 
@@ -158,8 +161,8 @@
 
 **最终算法**：
 
-1. **资产：3 通道**（`vdbseq_to_jpovvol.py --b-grid density`）——
-   `R=火密度(flames) / G=温度(flames) / B=烟密度(density)`，**各场按自身全局 max 独立归一**
+1. **资产：3 通道**（`vdb_to_jpovvol.py --channel … --channel … --channel …`）——
+   `R=火密度(flames) / G=温度(flames) / B=烟密度(density)`，**各场按自身独立归一**
    （不归一的话 density(≈0.003) 会被 flames(≈1) 淹没）；JPVOL2 头原有 `channels` 字段，
    引擎读取扩到接受 2 或 3 通道（3 通道 = `GL_RGB8`，**必须把 `GL_UNPACK_ALIGNMENT` 设 1**，
    否则每行 3 字节不是 4 的倍数 → 行错位）。
@@ -203,6 +206,51 @@
 
 ---
 
+### 3.4 P2（火色）：温度通道**归一化口径**修复（2026-10-16）
+
+**症状**：火是**一整团均匀橙黄**，没有「红边 / 橙身 / 白热芯」的色阶；A/B 里我们比参考**偏蓝偏灰**
+（R/B 1.42 vs 参考 2.19）。
+
+**根因（量化定位，非猜测）**：温度通道 G 的内容 = 归一化后的 `flames` 场。老转换器用
+`--gnorm 99.5`，即 `np.percentile(flam, 99.5)` —— 但它是在**整块（≈95% 为 0）的稀疏数组**上取分位，
+得到 `div≈0.15`，而该场真实（非零）最大 ≈ 1.07 ⇒ **G 被整体放大 ~7× → 饱和在 [0.65,1.0]**
+⇒ 温度几乎处处一样 ⇒ 颜色必然均匀。（`flames` 的真实分布在非零体素上 p50≈0.10 / p90≈0.27。）
+
+**修法（全在转换侧，**不动渲染 pass**）**：归一化口径改为按**非零体素**统计（默认 `nzmax`）。
+新转换器 `vdb_to_jpovvol.py` 的 `--channel <grid>[:<scale>[:<norm>[:<gamma>]]]`：
+`norm ∈ {max, nzmax(默认), p<X>, nzp<X>}`，可选 `gamma` 幂曲线。
+
+**结果（帧 20 ↔ 官方 80）**：整体色 (51.8,41.1,36.4)→**(65.4,44.1,37.0)**（参考 (62.1,39.6,28.4)）；
+**R/B 1.42→1.77**（参考 2.19）、**R/G 1.26→1.48**（参考 1.57）。
+
+---
+
+### 3.5 P3（火色/烟/f16）——本 PR 最终交付（2026-10-16 晚）
+
+1. **色谱 = Fire Color Ramp（替代纯黑体）**：EmberGen 用 Color Gradient、Houdini 用 Fire Color
+   Ramp——纯黑体的饱和度与色相绑死，做不出「又亮又橙红」。
+   · 色谱**独立文件** `genVolume/palettes/*.json` + `make_palette.py` → 1D LUT PNG；
+   · **转换期可配**：`vdb_to_jpovvol.py --palette <json>` 把 LUT 烘在资产旁 + 写进 sidecar；
+   · **运行时查表**：体积火 shader 按温度通道采 LUT（缺 LUT 则回退黑体）。
+2. **发射模型补物理**：`T = Tmin + (Tmax−Tmin)·G`（温度**下界**，否则 flames 分布偏低 → 大面积钳到
+   黑体下限）；`emis = 黑体色(T)·emission·(T/ref)^γ`（**γ=4**，物理 Stefan-Boltzmann）——「边红芯亮」。
+3. **饱和度体积专属**：`uColorSat` 作用在发射色上（只动这团火，不动全局后处理）。
+4. **烟**：修 `alpha <= 1/255 discard` 硬截断（烟雾稀薄时「被量化没」）；另留一个**实验性响应幂律**
+   `--ab-smoke-pow`（默认 1.0=线性；抬薄烟的“用户特调”工具，默认素材不用）。
+5. **存储 f16**：`.jpovvol` 新增 `dtype=2`（half），全链路（转换器/读取器/纹理）支持；
+   `--dtype f16`。ds=2 f16 = 0.20 GB（u8 是 96MB）。
+
+**分辨率上限（记录在案，本 PR 不改）**：体积按 `GL_TEXTURE_2D_ARRAY` 上传（宽=nx、高=ny*nz、层=帧）。
+本资产 ds=1 的层高 `193×133=25669 > GL_MAX_TEXTURE_SIZE(16384)` → **上传失败**（现已**明确报错**，
+不再静默黑屏）。⇒ 当前 **ds=2 是上限**；要原生档需改布局/格式（未做）。
+
+**残留**：烟的上部薄层仍不及参考（我们的竖直衰减更快；幂律 γ≈0.5 能补但非物理，故默认不用）——
+待多次散射/体积光照。
+
+**定位**：本 PR 忠实记录**第三方 VDB 在这条逐像素 raymarch 上的适配过程 + 必要工具 + demo MVP**。
+
+---
+
 ## 4. 本 PR 交付（P0 基准台 + 逐帧范式 + P1 加烟）
 
 1. **基准台**：`tools/jpov/tools/campfire_ab/`
@@ -223,9 +271,9 @@
 
 ```bash
 # 1) 资产（本地自烘/转换，CC0 派生；不入库）
-#    python3 tools/jpov/genVolume/vdbseq_to_jpovvol.py '<vdb pattern>' \
+#    python3 tools/jpov/genVolume/vdb_to_jpovvol.py '<vdb pattern>' \
 #      fire_hero/assets/prototypes/campfire.jpovvol --start 60 --end 140 --ds 2 \
-#      --r-grid flames --g-grid flames --b-grid density --b-scale 0.35 --gnorm 99.5 --z-up
+#      --channel flames --channel flames --channel density:0.35 --z-up
 #    → fire_hero/assets/prototypes/campfire.jpovvol  (66×96×66 × 80f × 3ch, u8)
 # 2) 编译 viewer
 bash tools/jpov/build_volume_fire_viewer.sh

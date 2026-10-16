@@ -35,8 +35,32 @@ struct VolumeFireCommand {
     float sigma_scale = 1.0f;
     // 发射强度尺度（乘到黑体色上）。
     float emission_scale = 1.0f;
-    // 温度通道归一化值 [0,1] → 开尔文 = G × temp_kelvin_scale（默认 2000K）。
-    float temp_kelvin_scale = 2000.0f;
+    // 温度通道归一化值 [0,1] → 开尔文：T = temp_kelvin_min + (temp_kelvin_scale − min)·G。
+    // **必须有下界**：flames 场分布偏低（G 中位数 ~0.1），若 T=G·scale 则绝大多数体素
+    // 落到黑体下限（1000K）→ 整团同温同色、没有“边红芯亮”的层次。
+    float temp_kelvin_scale = 3500.0f;   // 温度上界（G=1 → 此值）
+    float temp_kelvin_min = 1000.0f;     // 温度下界（G=0 → 此值）
+    // 【发射强度随温度】真实黑体辐射亮度 ∝ T⁴（Stefan-Boltzmann）。黑体**色**（Blackbody()）
+    // 被归一化到 [0,1]，只给色相、不给亮度 → 若不自乘一个随温度增长的强度，
+    // 热的芯与冷的边一样亮 → 看起来是一团均匀蜡黄、没有白热芯。
+    //   实际发射 = Blackbody(T) · emission_scale · (T / temp_kelvin_ref) ^ temp_emission_pow
+    // 物理上 pow=4；ref 为归一参考温度（此处强度 = emission_scale）。
+    float temp_emission_pow = 4.0f;
+    float temp_kelvin_ref = 1000.0f;
+
+    // 【色谱 / Fire Color Ramp】nullptr 或空 = 用黑体；否则指向一个 1D LUT PNG 的路径
+    // （由「强度/温度→颜色」色谱烘成，见 tools/jpov/genVolume/palettes/ + make_palette.py）。
+    // 与 EmberGen 的 Color Gradient / Houdini 的 Fire Color Ramp 同构：色相来自查表、
+    // 亮度仍由 emission_scale·(T/ref)^pow 控制。LUT 为 sRGB，shader 里转线性后用。
+    // 生命周期：由调用者在 Draw 期间保持有效（通常指向 app 持有的 std::string）。
+    const char* palette_png = nullptr;
+    // 色谱映射区间：ramp 坐标 = clamp((G - lo)/(hi - lo), 0, 1)。默认 [0,1]（G 直接用）。
+    // 参考色带的像素是按「亮度分位」抽的，而 G(flames) 与亮度不严格等价——
+    // 用 [lo,hi] 把 G 的实际范围对齐到色谱两端。
+    float palette_ramp_lo = 0.0f;
+    float palette_ramp_hi = 1.0f;
+    // 发射颜色饱和度（**只作用本团体积**：mix(亮度, 色, sat)；1.0 = 不动）。
+    float color_sat = 1.0f;
 
     // 播放帧号（含小数 → 相邻帧线性混合）。范围 [0, nframes)。
     float frame = 0.0f;
@@ -63,6 +87,9 @@ struct VolumeFireCommand {
     // 烟消光倍数：只作用于 σ_smoke（= B·sigma_scale·此值）。烟太厚会盖住火；
     // 散射注入 ∝ σ_smoke，故这一个旋钮同时压低「烟厚」与「烟亮」。0 = 无烟。
     float smoke_sigma_scale = 1.0f;
+    // 【实验用，非物理】烟响应的幂律：σ_smoke ∝ B^此值（<1 = 抬升薄烟）。
+    // 生产模型保持线性（=1.0）；仅用于验证“抬尾能不能补上那层稀薄烟”。
+    float smoke_pow = 1.0f;
     Vec3f light_color = {0.62f, 0.66f, 0.75f};    // 烟的受光辐射色（中性偏冷，含强度）
 };
 

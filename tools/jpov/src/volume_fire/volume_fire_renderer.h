@@ -78,10 +78,19 @@ uniform vec3 uVolDim;          // (nx, ny, nz)
 uniform int  uNFrames;
 uniform float uSigma;          // 消光尺度（1/m）
 uniform float uEmission;       // 发射尺度
-uniform float uTempScale;      // G(∈[0,1]) → 开尔文
+uniform float uTempScale;      // G(∈[0,1]) → 开尔文（上界）
+uniform float uTempMin;        // 温度下界 K（G=0 → 此值）
+uniform float uTempPow;        // 发射强度随温度的幂（物理 = 4；0 = 关闭，回到均匀亮度）
+uniform float uTempRef;        // 归一参考温度 K（此处强度 = uEmission）
+uniform sampler2D uPalette;    // 色谱 LUT（宽 N×高 1，sRGB）；色相来自查表
+uniform int   uUsePalette;     // 1 = 用色谱（Fire Color Ramp）；0 = 黑体
+uniform float uRampLo;         // 色谱映射区间 [lo,hi]（作用在温度通道 G 上）
+uniform float uRampHi;
+uniform float uColorSat;       // 发射颜色饱和度（**只作用本团体积**；1.0 = 不动）
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
 uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
+uniform float uSmokePow;       // 【实验】σ_smoke ∝ B^uSmokePow（<1 抬薄烟；1=线性）
 uniform vec3  uLightColor;     // 烟的受光辐射色（含强度）
 uniform int   uChannels;       // 体纹理通道数（2 = 无烟；3 = 带 B=烟密度）
 uniform float uFrame;          // 播放帧号（含小数）
@@ -188,7 +197,11 @@ void main() {
         vec4 v = SampleVol(ToLocal(p));
         float fire_dens = v.r;
         float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
-        float tempK = v.g * uTempScale;
+        // 【实验】薄烟抬尾：对密度取幂（<1 抬低值）。uSmokePow=1 时恒等（零回归）。
+        if (uSmokePow != 1.0 && smoke_dens > 0.0) {
+            smoke_dens = pow(smoke_dens, uSmokePow);
+        }
+        float tempK = uTempMin + (uTempScale - uTempMin) * clamp(v.g, 0.0, 1.0);
         float sigma_fire = fire_dens * uSigma;
         float sigma_smoke = smoke_dens * uSigma * uSmokeSigma;
         float sigma = sigma_fire + sigma_smoke;
@@ -196,7 +209,23 @@ void main() {
         // 自发光只按**火自己的光深**注入（只有火发光）。不能乘总 a：烟区 G=0，
         // 而 Blackbody() 把色温 clamp 到最低 1000K（防 NaN）⇒ 会把烟染成橙色。
         float a_fire = 1.0 - exp(-sigma_fire * dt);
-        vec3 emis = Blackbody(tempK) * uEmission;
+        // 【发射强度随温度】黑体色只给色相；亮度按 (T/ref)^pow 缩放（物理 pow=4）
+        // ⇒ 热芯远亮于冷边 → 芯被 tone map 顶成白热、边暗成深红。pow=0 关闭（均匀亮度）。
+        float radiance = (uTempPow > 0.0)
+            ? pow(max(tempK, 1.0) / max(uTempRef, 1.0), uTempPow) : 1.0;
+        // 颜色：黑体（物理）或色谱查表（Fire Color Ramp，同 EmberGen/Houdini）。
+        // 色谱为 sRGB → 转线性后用；亮度仍由 uEmission·radiance 控（色相与亮度解耦）。
+        vec3 base_color = Blackbody(tempK);
+        if (uUsePalette == 1) {
+            float rc = clamp((v.g - uRampLo) / max(uRampHi - uRampLo, 1e-4), 0.0, 1.0);
+            base_color = pow(texture(uPalette, vec2(rc, 0.5)).rgb, vec3(2.2));
+        }
+        // 发射颜色饱和度（**只作用这团火**，与全局后处理解耦）：围绕亮度 mix。
+        if (uColorSat != 1.0) {
+            float cl = dot(base_color, vec3(0.2126, 0.7152, 0.0722));
+            base_color = mix(vec3(cl), base_color, uColorSat);
+        }
+        vec3 emis = base_color * uEmission * radiance;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
         L += T * a_fire * emis;
@@ -210,7 +239,9 @@ void main() {
         if (T < 1e-3) { break; }
     }
     float alpha = 1.0 - T;
-    if (alpha <= 1.0 / 255.0) { discard; }
+    // 覆盖度截断：旧值 1/255（≈0.4%）会把**稀薄的烟整体丢弃** → 烟一淡就硬消失（“被量化没了”）。
+    // 降到极小值（不写入无意义覆盖即可），消除这条硬边。
+    if (alpha <= 1e-5) { discard; }
     float z_repr = (den > 1e-9) ? (num / den) : (tn * ray_to_fwd);
     // WBO 覆盖：accum=色·α、A=α（单层权重抵消）；reveal=α；depth=z·α。
     FragAccum = vec4(L, alpha);
@@ -271,6 +302,8 @@ private:
     void EnsureWbo(int w, int h);
     void DestroyWbo();
     void DumpWbo(int w, int h);
+    // 色谱 LUT 加载（按路径缓存；失败返回 0 → 回退黑体）。
+    unsigned int PaletteTex(const char* path);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
@@ -283,6 +316,7 @@ private:
     bool initialized_ = false;
     std::string debug_dump_dir_;
     int dump_seq_ = 0;
+    std::unordered_map<std::string, unsigned int> palette_tex_;   // 色谱 LUT 缓存
 };
 
 }  // namespace jpov
