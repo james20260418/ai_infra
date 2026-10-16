@@ -2,8 +2,9 @@
 //
 // 场景 = 灰色地面 + 1m³ 燃料块 + 块顶的体积火（逐像素 raymarch → WBO 薄层合成）。
 // headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>]
-// A/B 基准拍摄：--ab-capture <out.png> [--volume <path.jpovvol>] [--ab-frame N] [--ab-box M]
-//               [--ab-sigma S] [--ab-emis E] [--ab-smoke K] [--ab-smoke-sigma N] [--ab-light r,g,b]
+// A/B 基准拍摄：--ab-capture <out.png> [--volume <path.jpovvol>] [--ab-frame N]
+//               [--ab-box X | X,Y,Z] [--ab-y-shift M] [--ab-sigma S] [--ab-emis E]
+//               [--ab-smoke K] [--ab-smoke-sigma N] [--ab-light r,g,b]
 // 编译：./tools/jpov/build_volume_fire_viewer.sh
 
 #include <cstdio>
@@ -146,7 +147,8 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
 // A/B 基准的旋钮（默认 = 查看器的可复现默认；CLI 可覆盖，便于扫参/复现）。
 struct AbParams {
     int frame = 0;
-    float box_m = 1.22f;
+    jpov::Vec3f size = {1.22f, 1.22f, 1.22f};  // 火盒各轴尺寸（米）= 资产 dims×voxel_m
+    float y_shift = -0.10f;                    // 取景下移（米，与参考基线对齐）
     float sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSigma;
     float emission = jpov_volume_fire::VolumeFireViewerApp::kDefaultEmission;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
@@ -162,7 +164,9 @@ struct AbParams {
 int RunAbCapture(const std::string& out_png, const std::string& volume_path,
                  const AbParams& p) {
     CHECK_GE(p.frame, 0) << "--ab-frame 必须 >= 0";
-    CHECK_GT(p.box_m, 0.0f) << "--ab-box 必须 > 0";
+    CHECK_GT(p.size.x(), 0.0f) << "--ab-box X 必须 > 0";
+    CHECK_GT(p.size.y(), 0.0f) << "--ab-box Y 必须 > 0";
+    CHECK_GT(p.size.z(), 0.0f) << "--ab-box Z 必须 > 0";
 
     JPOV::Config cfg;
     cfg.title = "JPOV - volume fire viewer (A/B baseline)";
@@ -185,18 +189,20 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
 
-    // 钉相机：正面看向原点，距离由火盒（居中于原点）自动取景。
-    const float half = 0.5f * p.box_m;
-    const float bounds_min[3] = {-half, -half, -half};
-    const float bounds_max[3] = {half, half, half};
+    // 钉相机：正面看向原点，距离由火盒（各轴真实尺寸 + 取景下移）自动取景。
+    const float bmin[3] = {-0.5f * p.size.x(), -0.5f * p.size.y() + p.y_shift,
+                           -0.5f * p.size.z()};
+    const float bmax[3] = {0.5f * p.size.x(), 0.5f * p.size.y() + p.y_shift,
+                           0.5f * p.size.z()};
     app.view_ = jpov_viewer::ViewConfig{};
     app.view_.phi = 0.0;
     app.view_.theta = 0.0;
-    app.view_.R = jpov_viewer::ViewConfig::FitRadius(bounds_min, bounds_max, /*fov_deg=*/60.0);
+    app.view_.R = jpov_viewer::ViewConfig::FitRadius(bmin, bmax, /*fov_deg=*/60.0);
 
     app.ab_mode_ = true;
     app.ab_frame_ = p.frame;
-    app.ab_box_m_ = p.box_m;
+    app.ab_size_ = p.size;
+    app.ab_y_shift_ = p.y_shift;
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -229,7 +235,17 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--ab-frame") == 0 && i + 1 < argc) {
             ab.frame = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ab-box") == 0 && i + 1 < argc) {
-            ab.box_m = static_cast<float>(std::atof(argv[i + 1]));
+            // "X" = 立方盒；"X,Y,Z" = 各轴独立（推荐：直接给资产真实尺寸，避免拉伸）。
+            float bx = 0.0f, by = 0.0f, bz = 0.0f;
+            if (std::sscanf(argv[i + 1], "%f,%f,%f", &bx, &by, &bz) == 3) {
+                ab.size = {bx, by, bz};
+            } else if (std::sscanf(argv[i + 1], "%f", &bx) == 1) {
+                ab.size = {bx, bx, bx};
+            } else {
+                LOG(WARNING) << "--ab-box 需要 \"X\" 或 \"X,Y,Z\"，已忽略: " << argv[i + 1];
+            }
+        } else if (std::strcmp(argv[i], "--ab-y-shift") == 0 && i + 1 < argc) {
+            ab.y_shift = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-sigma") == 0 && i + 1 < argc) {
             ab.sigma = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-emis") == 0 && i + 1 < argc) {

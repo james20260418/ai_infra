@@ -49,7 +49,7 @@ public:
     // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
     static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
     static constexpr float kDefaultEmission = 1.0f;      // 发射强度
-    static constexpr float kDefaultSmokeScatter = 1.0f;  // 烟散射强度
+    static constexpr float kDefaultSmokeScatter = 2.0f;  // 烟散射强度（2.0：按 Danis 目测对齐参考烟亮）
     // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
     // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
     static constexpr float kDefaultSmokeSigma = 0.05f;
@@ -79,7 +79,12 @@ public:
     // 目的：产出与 EmberGen 官方渲染（同为孤立火 + 黑底）可直接比对的图。
     bool  ab_mode_ = false;
     int   ab_frame_ = 0;            // 钉死的资产帧下标（>=0）
-    float ab_box_m_ = 1.22f;        // A/B 火盒边长（米）；默认仅兜底，调用方按资产最大边传入
+    // A/B 火盒**各轴独立**（米）= 资产真实尺寸 dims×voxel_m。**不立等比/立方盒**——
+    // 立方盒会把非立方的资产各向异性拉伸（曾把 1.32×1.92×1.32 拉成 1.92³，x/z 放大 1.45×）。
+    jpov::Vec3f ab_size_ = {1.22f, 1.22f, 1.22f};
+    // A/B 取景：把火盒整体下移（米，负值=下移），用于与参考画面的**基线对齐**。
+    // 纯取景偏移，不动资产数据。默认 -0.10 = 对齐 EmberGen 参考（Danis 2026-10-16 定）。
+    float ab_y_shift_ = -0.10f;
 
     void InstallTextMeasure() { ui_.SetTextMeasure(&VolumeFireViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -134,10 +139,12 @@ public:
         if (ab_mode_) {
             // A/B 基准：天光/日月/夜空/地色全部归零 → 纯黑背景（与官方参考渲染同底）。
             MakeBlackBackground(&nl);
-            // 火盒居中于世界原点（孤立火，不带地面/燃料/尺度参照）。
-            const float hh = 0.5f * ab_box_m_;
-            fire_min_ = {-hh, -hh, -hh};
-            fire_max_ = {hh, hh, hh};
+            // 火盒 = 资产**真实尺寸**（各轴独立，不拉伸），整体可下移对齐参考基线。
+            const float hx = 0.5f * ab_size_.x();
+            const float hy = 0.5f * ab_size_.y();
+            const float hz = 0.5f * ab_size_.z();
+            fire_min_ = {-hx, -hy + ab_y_shift_, -hz};
+            fire_max_ = {hx, hy + ab_y_shift_, hz};
         }
         cmds->sky = nl.sky;
         cmds->sun = nl.dir_light;

@@ -69,14 +69,17 @@ python3 tools/jpov/tools/campfire_ab/ab_seq.py \
 
 ## viewer 的 A/B 模式（本 PR 新增）
 
-`jpov_volume_fire_viewer --ab-capture <out.png> [--volume <jpovvol>] [--ab-frame N] [--ab-box M]
-[--ab-sigma S] [--ab-emis E] [--ab-smoke K] [--ab-light r,g,b]`
+`jpov_volume_fire_viewer --ab-capture <out.png> [--volume <jpovvol>] [--ab-frame N]
+[--ab-box X | X,Y,Z] [--ab-y-shift M] [--ab-sigma S] [--ab-emis E] [--ab-smoke K]
+[--ab-smoke-sigma N] [--ab-light r,g,b]`
 
 - **钉相机**：正面（phi=0/theta=0，+Z 看向原点），距离由火盒自动取景；
 - **钉帧**：asset 帧下标 = `--ab-frame`（可复现）；
 - **纯黑背景 + 无地面/燃料块**：只留孤立火，与官方渲染同底；
-- **火盒**：居中于世界原点的立方盒，边 = `--ab-box`（默认由 `run_ab.sh` 按
-  sidecar 的 `max(dims)×voxel_m` 推出）；
+- **火盒**：`--ab-box` 接受 `X`（立方盒）或 **`X,Y,Z`（各轴独立，推荐）**；缺省由 `run_ab.sh` /
+  `ab_seq.py` 按 sidecar 的 `dims×voxel_m` **逐轴**推。⚠️ 用立方盒会把非立方资产**各向异性拉伸**
+  （曾把 1.32×1.92×1.32 拉成 1.92³，x/z 放大 1.45×）——所以默认走逐轴。
+- **取景下移** `--ab-y-shift`（米，默认 -0.10）：与参考画面**基线对齐**；纯取景，不动资产。
 - **旋钮覆盖**（默认 = 查看器可复现默认）：`--ab-sigma`（消光 σ 尺度）、
-  `--ab-emis`（发射强度）、`--ab-smoke`（烟散射强度，0 = 关）、
+  `--ab-emis`（发射强度）、`--ab-smoke`（烟散射强度，0 = 关）、`--ab-smoke-sigma`（烟消光倍数）、
   `--ab-light r,g,b`（烟的受光色）。

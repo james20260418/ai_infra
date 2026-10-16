@@ -35,23 +35,26 @@ if [[ ! -x "$VIEWER" ]]; then
   exit 1
 fi
 
-# 火盒边长：优先 AB_BOX；否则从 sidecar 的 dims×voxel_m 取最大边；都没有则报错。
+# 火盒尺寸：优先 AB_BOX（"X,Y,Z" 或 "X"）；否则从 sidecar 的 dims×voxel_m 逐轴推（**各轴独立，不拉伸**）。
 if [[ -z "${AB_BOX:-}" ]]; then
   SIDECAR="$VOLUME.json"
   AB_BOX="$(python3 - "$SIDECAR" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    print(f"{max(d['dims']) * float(d['voxel_m']):.3f}")
+    vm = float(d["voxel_m"])
+    print(",".join(f"{v * vm:.3f}" for v in d["dims"]))
 except Exception:
     print("")
 PY
 )"
 fi
 if [[ -z "$AB_BOX" ]]; then
-  echo "无法从 $VOLUME.json 推火盒边长；请设 AB_BOX=<米> 或补 sidecar" >&2
+  echo "无法从 $VOLUME.json 推火盒尺寸；请设 AB_BOX=X,Y,Z（米）或补 sidecar" >&2
   exit 1
 fi
+# 取景下移（米）：与参考画面基线对齐（默认 -0.10）。
+AB_Y_SHIFT="${AB_Y_SHIFT:--0.10}"
 
 REF_FRAME=$((OFFICIAL_OFFSET + FRAME))
 REF=$(printf "%s/reference/embergen_smallCampfire_f%04d.png" "$SCRIPT_DIR" "$REF_FRAME")
@@ -63,9 +66,9 @@ if [[ ! -f "$REF" ]]; then
   exit 1
 fi
 
-echo "== 1/2 抓 JPOV 孤立火（asset frame=$FRAME, box=${AB_BOX}m）=="
+echo "== 1/2 抓 JPOV 孤立火（asset frame=$FRAME, box=${AB_BOX}m, y_shift=${AB_Y_SHIFT}）=="
 xvfb-run -a "$VIEWER" --ab-capture "$OURS" --volume "$VOLUME" \
-  --ab-frame "$FRAME" --ab-box "$AB_BOX"
+  --ab-frame "$FRAME" --ab-box "$AB_BOX" --ab-y-shift "$AB_Y_SHIFT"
 
 echo "== 2/2 比对（参考帧 $REF_FRAME vs 我们）=="
 python3 "$SCRIPT_DIR/ab_metrics.py" --gt "$REF" --ours "$OURS" \

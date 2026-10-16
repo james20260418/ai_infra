@@ -38,14 +38,15 @@ OFFICIAL_OFFSET = 60
 STRIP_CELL_HEIGHT = 200
 
 
-def derive_box_m(volume: str) -> float:
-    """从 sidecar `<volume>.json` 的 dims×voxel_m 取最大边（米）；缺 sidecar 返回 0。"""
+def derive_box_xyz(volume: str) -> str:
+    """从 sidecar `<volume>.json` 的 dims×voxel_m 推**各轴**尺寸（米）→ "x,y,z"；缺 sidecar 返回 ""。"""
     try:
         with open(volume + ".json", encoding="utf-8") as f:
             side = json.load(f)
-        return max(side["dims"]) * float(side["voxel_m"])
+        vm = float(side["voxel_m"])
+        return ",".join(f"{v * vm:.3f}" for v in side["dims"])
     except Exception:
-        return 0.0
+        return ""
 
 
 def parse_frames(spec: str) -> List[int]:
@@ -60,14 +61,18 @@ def parse_frames(spec: str) -> List[int]:
     return [int(p) for p in spec.split(",") if p != ""]
 
 
-def capture(viewer: str, volume: str, frame: int, box: float, out_png: str) -> None:
-    """headless 抓一帧孤立火（xvfb 包一层，glfwInit 需要 DISPLAY）。"""
+def capture(viewer: str, volume: str, frame: int, box: str, y_shift: float, out_png: str) -> None:
+    """headless 抓一帧孤立火（xvfb 包一层，glfwInit 需要 DISPLAY）。
+
+    box 形如 "x,y,z"（各轴独立，不拉伸资产）；y_shift 为取景下移（米）。
+    """
     cmd = [
         "xvfb-run", "-a", viewer,
         "--ab-capture", out_png,
         "--volume", volume,
         "--ab-frame", str(frame),
-        "--ab-box", f"{box}",
+        "--ab-box", box,
+        "--ab-y-shift", f"{y_shift}",
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -97,14 +102,16 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--refdir", required=True)
     ap.add_argument("--frames", default="0:80:10", help="'0:80:10' 或 '0,10,20'")
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--box", type=float, default=0.0,
-                    help="A/B 火盒边长（米）；<=0 时从 <volume>.json 的 dims×voxel_m 推")
+    ap.add_argument("--box", default="",
+                    help="A/B 火盒 'X,Y,Z'（米）；缺省时从 <volume>.json 的 dims×voxel_m 推")
+    ap.add_argument("--y-shift", type=float, default=-0.10,
+                    help="A/B 取景下移（米），用于与参考画面基线对齐")
     ap.add_argument("--offset", type=int, default=OFFICIAL_OFFSET, help="官方帧偏移")
     args = ap.parse_args(argv)
 
-    box = args.box if args.box > 0.0 else derive_box_m(args.volume)
-    if box <= 0.0:
-        print(f"错误：无法从 {args.volume}.json 推火盒边长，请显式 --box", file=sys.stderr)
+    box = args.box if args.box else derive_box_xyz(args.volume)
+    if not box:
+        print(f"错误：无法从 {args.volume}.json 推火盒尺寸，请显式 --box X,Y,Z", file=sys.stderr)
         return 2
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -114,7 +121,7 @@ def main(argv: List[str]) -> int:
     strips: List[Image.Image] = []
     print(f"{'asset_f':>7} {'off_f':>6} | {'GT h/w':>7} {'our h/w':>7} | "
           f"{'GT area%':>8} {'our area%':>9} | {'GT rgb':>14} {'our rgb':>14}")
-    print(f"(box = {box:.3f} m)")
+    print(f"(box = {box} m, y_shift = {args.y_shift} m)")
     for k in frames:
         ref_path = os.path.join(
             args.refdir, f"embergen_smallCampfire_f{k + args.offset:04d}.png")
@@ -122,7 +129,7 @@ def main(argv: List[str]) -> int:
             print(f"{k:>7} {k + args.offset:>6} | 跳过：缺参考帧 {ref_path}")
             continue
         ours_path = os.path.join(args.outdir, f"ours_f{k:04d}.png")
-        capture(args.viewer, args.volume, k, box, ours_path)
+        capture(args.viewer, args.volume, k, box, args.y_shift, ours_path)
 
         ref_rgb = ab_metrics.load_rgb(ref_path)
         ours_rgb = ab_metrics.load_rgb(ours_path)
