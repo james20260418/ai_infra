@@ -151,6 +151,7 @@ struct AbParams {
     float y_shift = -0.10f;                    // 取景下移（米，与参考基线对齐）
     float sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSigma;
     float emission = jpov_volume_fire::VolumeFireViewerApp::kDefaultEmission;
+    float temp = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempKelvin;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
     float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;
     jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
@@ -185,6 +186,7 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.volume_path_ = volume_path;
     app.sigma_scale_ = p.sigma;
     app.emission_scale_ = p.emission;
+    app.temp_kelvin_scale_ = p.temp;
     app.smoke_scatter_ = p.smoke;
     app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
@@ -250,6 +252,8 @@ int main(int argc, char** argv) {
             ab.sigma = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-emis") == 0 && i + 1 < argc) {
             ab.emission = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-temp") == 0 && i + 1 < argc) {
+            ab.temp = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
             ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke-sigma") == 0 && i + 1 < argc) {
