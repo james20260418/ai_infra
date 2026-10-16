@@ -1997,6 +1997,8 @@ struct RenderCommandList {
     // 默认 contrast=1.0 / brightness=0.0（无调整，全链路等效不加此步）。
     float final_contrast   = 1.0f;
     float final_brightness = 0.0f;
+    // 最终饱和度（tonemap 后、sRGB 域，围绕亮度）：1.0 = 不动，>1 加饱和，<1 去饱和。
+    float final_saturation = 1.0f;
 
     // 曝光（photometric exposure，固定 EV）。作用于 tone map **之前**的 HDR
     // 线性值：exposed_hdr = hdr * exposure，决定“把多大范围 HDR 亮度映射到

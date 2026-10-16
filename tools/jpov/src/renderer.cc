@@ -168,6 +168,8 @@ uniform bool uSrgbEncode;
 // contrast 围绕中灰 0.5 缩放；brightness 整体偏移。默认 1.0/0.0 无调整。
 uniform float uFinalContrast;
 uniform float uFinalBrightness;
+// 最终饱和度（tonemap 后、sRGB 域，围绕 Rec.709 亮度）：c' = mix(vec3(luma), c, sat)。1.0 = 不动。
+uniform float uFinalSaturation;
 // 曝光（fixed EV，作用于 tone map 前的 HDR 值）：exposed = hdr * uExposure。
 // uExposure=1.0（默认 EV=0）无曝光；>1 提亮，<1 压暗。
 uniform float uExposure;
@@ -254,6 +256,11 @@ void main() {
     // 最终亮度/对比度微调：围绕中灰 0.5 缩放对比 + 整体亮度偏移。
     // 对 [0,1] 的最终值操作，输出再 clamp 回 [0,1]（RGBA8 会截断）。
     vec3 tuned = (out_color - 0.5) * uFinalContrast + 0.5 + uFinalBrightness;
+    // 饱和度（sRGB 域，围绕 Rec.709 亮度）；sat=1 时跳过（零回归）
+    if (uFinalSaturation != 1.0) {
+        float luma = dot(tuned, vec3(0.2126, 0.7152, 0.0722));
+        tuned = mix(vec3(luma), tuned, uFinalSaturation);
+    }
     FragColor = vec4(clamp(tuned, 0.0, 1.0), 1.0);
 }
 )glsl";
@@ -1890,6 +1897,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                         cmds.final_contrast);
             glUniform1f(shader_mgr_.GetUniform(prog, "uFinalBrightness"),
                         cmds.final_brightness);
+            glUniform1f(shader_mgr_.GetUniform(prog, "uFinalSaturation"),
+                        cmds.final_saturation);
             // 曝光：默认 1.0（EV=0，无曝光，零回归）。
             glUniform1f(shader_mgr_.GetUniform(prog, "uExposure"),
                         cmds.exposure);

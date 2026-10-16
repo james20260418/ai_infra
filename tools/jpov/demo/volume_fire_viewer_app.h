@@ -76,6 +76,11 @@ public:
     std::string palette_path_ = DefaultPalette();
     float palette_ramp_lo_ = kDefaultRampLo;                 // G → ramp 坐标的映射区间
     float palette_ramp_hi_ = kDefaultRampHi;
+    // 后处理旋钮（A/B 扫参）
+    bool  bloom_enabled_ = false;
+    float bloom_intensity_ = 0.6f;
+    float bloom_threshold_ = 1.0f;
+    float sat_ = 1.0f;
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -165,6 +170,15 @@ public:
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
+        // 后处理旋钮（A/B 扫参用）：辉光 + 最终饱和度。默认关/1.0（零回归）。
+        if (bloom_enabled_) {
+            jpov::BloomConfig bc;
+            bc.enabled = true;
+            bc.intensity = bloom_intensity_;
+            bc.threshold = bloom_threshold_;
+            cmds->bloom = bc;
+        }
+        cmds->final_saturation = sat_;
 
         // 场景：地面 + 1m³ 燃料块（A/B 模式下不画——只留孤立火）。
         if (!ab_mode_) {
