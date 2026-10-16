@@ -13,7 +13,7 @@ JPOV 的这几个 **dev-time 外部工具**（不在运行时/构建里，只在
 |---|---|---|
 | **Mantaflow 0.13** | 火/烟/家族体积仿真（.npz） | `fire_scene*.py` / `smoke_scene.py` / `fire_family_scene.py` |
 | **Blender 4.x + Sapling 插件** | 出植被 GLB | `../vegetation/build_tree.py` / `render_hero.py` |
-| **pyopenvdb** | 读 VDB（EmberGen 等） | `vdbseq_to_jpovvol.py` / `vdb_to_jpovvol.py` |
+| **pyopenvdb** | 读 VDB（EmberGen 等） | `vdb_to_jpovvol.py` |
 | **xvfb** | 无显示器跑 JPOV viewer | 各种 `--capture` |
 
 统一由**一个镜像**提供（版本可复现），不要在宿主机上各自手装。

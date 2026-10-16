@@ -20,8 +20,7 @@ tools/jpov/genVolume/
 │
 ├── # —— 转换器（纯 Python，numpy[/pyopenvdb]，可单测）——
 ├── npzseq_to_jpovvol.py     # Mantaflow npz 序列 → JPVOL2（含无缝循环）
-├── vdbseq_to_jpovvol.py     # OpenVDB 序列 → JPVOL2（含 Z-up→Y-up / 旋转）
-├── vdb_to_jpovvol.py        # 单帧 OpenVDB → JPVOL1
+├── vdb_to_jpovvol.py        # 【通用】OpenVDB（单帧/序列）→ JPVOL2，任意 grid→通道映射
 ├── fire_family_bake.py      # 生命周期三段（点火/循环/熄灭）烘焙 → JPVOL2 + sidecar
 ├── make_flipbook.py         # .jpovvol → flipbook PNG（粒子火/烟纹理）
 │
@@ -49,7 +48,7 @@ tools/jpov/genVolume/
 
 > ⚠️ **pyopenvdb 陷阱**：`grid.copyToArray(a, ijk)` 的 numpy 约定是 **`a[i][j][k] = voxel(i,j,k)`（首轴 = x，
 > 形状须 `(nx,ny,nz)`）**，**不是** `[z][y][x]`。按 `(nz,ny,nx)` 分配会 **x/z 对调 + 在 `nz>nx` 时静默截断 z**。
-> `vdbseq_to_jpovvol.py` / `vdb_to_jpovvol.py` 已修，并被 `test_genvolume.py` 锁住。
+> `vdb_to_jpovvol.py` 已修，并被 `test_genvolume.py` 锁住。
 
 ---
 
@@ -90,14 +89,16 @@ python3 make_flipbook.py smoke /tmp/smoke.jpovvol       /tmp/smoke_flipbook.png 
 ### 4B. OpenVDB（EmberGen 等）→ 体积
 
 ```bash
-# 单帧
-python3 vdb_to_jpovvol.py in.vdb out.jpovvol --density-grid density --temp-grid temperature
-
-# 序列（EmberGen 是 **Z-up**，务必 --z-up；官方 vdb_render 可作方向参照）
-python3 vdbseq_to_jpovvol.py '/path/fire_%04d.vdb' out.jpovvol \
-        --start 60 --end 140 --ds 2 --r-grid flames --g-grid flames --gnorm 99.5 --z-up
+# 通用 VDB → jpovvol：按 --channel 指定「grid→通道」映射（顺序 = R,G,B）。
+# 通道只负责“把场装进通道”，物理语义（消光/温度/散射）由渲染侧材质决定。
+python3 vdb_to_jpovvol.py '/path/fire_%04d.vdb' out.jpovvol \
+        --channel flames --channel flames --channel density:0.35 \
+        --start 60 --end 140 --ds 2 --unit 0.01 --z-up
+#   --channel GRID[:SCALE[:NORM]]：可重复；SCALE 乘性权重；NORM 归一化口径
+#       max / nzmax(默认) / p:X / nzp:X  —— 默认按**非零体素**统计，避免稀疏数组上取分位致通道饱和。
 #   --z-up：VDB 为 Z-up（火沿 +z）时转成引擎的 Y-up。默认不转。
 #   --rot {none,x90,x-90,y90,y-90,z90,z-90}：额外整体旋转（在降采样之后施加）。
+# 单帧：直接给单个 .vdb 文件路径（忽略 --start/--end）→ 写成 nframes=1 的 JPVOL2。
 ```
 
 ### 4C. 四大家族生命周期（点火 / 循环 / 熄灭）

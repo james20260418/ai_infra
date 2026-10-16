@@ -135,7 +135,7 @@ class VdbReadTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="genvol_vdb_")
         self.path = os.path.join(self.tmp, "synthetic.vdb")
-        self.conv = _load("vdbseq_to_jpovvol")
+        self.conv = _load("vdb_to_jpovvol")
 
     def _write_grid(self, name, lo, dims, fn):
         import pyopenvdb as vdb

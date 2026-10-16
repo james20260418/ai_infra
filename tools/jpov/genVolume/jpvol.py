@@ -15,7 +15,7 @@
   体素序（两种都一样）：**每帧内 x 最快 → y → z**，通道交错；JPVOL2 帧间顺序排列（帧最慢）。
   ⇒ 与「每帧一层 2D 数组（宽=nx、高=ny*nz）」的 GPU 上传布局一致。
   通道语义：R=density(火), G=temperature/flames，均归一化 [0,1]；
-  **可选第 3 通道 B = 烟密度**（3 通道文件用于「火/温度/烟」三场分离，见 vdbseq_to_jpovvol.py）。
+  **可选第 3 通道 B = 烟密度**（3 通道文件用于「火/温度/烟」三场分离，见 vdb_to_jpovvol.py）。
   引擎读取器：tools/jpov/src/volume_manager.cc（GL）+ src/fire_fog/fire_volume.h（GL-free）。
 
 numpy 数组约定：本模块一律用 **[F][z][y][x]**（x 最快）表示体积。
