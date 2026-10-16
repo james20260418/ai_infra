@@ -670,9 +670,26 @@ struct SmaaConfig {
 // 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
 // docs/jpov_vegetation_wind_design.md。
 //
-// 两层驱动：per-vertex (joint_id, phase) + per-instance wind（InstanceState.wind，
-// 仅 instanced 路径）+ 本命令的全局标量。本命令供**非实例路径**（object3d，植被查看器
-// 走的是这条）用；位移沿 direction·speed。
+// ── 本版范围（重要）──
+//   **只接 object3d 路径**（DrawObject3D / DrawGltfObject）。instanced / 蒙皮路径**本版不动**。
+//   只有带风数据的 mesh（`MeshData.flags` 含 `kWind`）会被位移；以 **mesh 的关节表是否非空**
+//   为闸（`uWindJointCount>0`）—— 无表 mesh（如地面）完全不受影响。
+//
+// ── 数据（三处，各管一段）──
+//   · **逐顶点 loc6 = vec2(joint_id, phase)**（mesh 带 kWind 时；由 TEXCOORD_1 读入）：
+//       joint_id = 该顶点所属关节在关节表中的下标；phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
+//       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
+//   · **本命令的全局标量**（下列字段）：时间/振幅/频率/风向/湍流/阵风，全场景一份。
+//
+// ── 位移公式（枢轴式 mode=1）──
+//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
+//     q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)     // 位置：完整继承
+//     A_j = θ_j + (1 − soft_j)·A_parent                         // 朝向：按 (1−soft) 打折
+//     p'  = q_own + R(A_own)·(p − pivot_own)
+//     θ_j = uWindAmplitude·kWindPivotGain·(0.15·level)·sin(2π·f0(1+1.6·level)·(t+phase_j))
+//   另有链外**平动湍流**（逐顶点，相位取 loc6.y；幅度 ∝ 关节 soft·(0.5+0.5·level)）。
+//   平移式（mode=0）退化为沿风向的位移，幅度用关节 level 当掩膜（逐顶点 softness 已被省）。
 //
 // 确定性：time 必须由**帧号**推（frame_count / fps），不可用 wall-clock，否则 gold 不稳。
 // 未设置（nullopt）→ 不施加任何位移，零开销、零回归。
