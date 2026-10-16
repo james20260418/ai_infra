@@ -188,15 +188,20 @@ void main() {
         float fire_dens = v.r;
         float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
         float tempK = v.g * uTempScale;
-        float sigma = (fire_dens + smoke_dens) * uSigma;
+        float sigma_fire = fire_dens * uSigma;
+        float sigma_smoke = smoke_dens * uSigma;
+        float sigma = sigma_fire + sigma_smoke;
         float a = 1.0 - exp(-sigma * dt);
+        // 自发光只按**火自己的光深**注入（只有火发光）。不能乘总 a：烟区 G=0，
+        // 而 Blackbody() 把色温 clamp 到最低 1000K（防 NaN）⇒ 会把烟染成橙色。
+        float a_fire = 1.0 - exp(-sigma_fire * dt);
         vec3 emis = Blackbody(tempK) * uEmission;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
-        L += T * a * emis;
-        // 烟受均匀照明单次散射——没有这一项，烟在纯黑底上不可见。
-        if (uSmokeScatter > 0.0 && smoke_dens > 0.0) {
-            L += T * uSmokeScatter * (smoke_dens * uSigma) * uSmokeAlbedo * uLightColor * dt;
+        L += T * a_fire * emis;
+        // 烟受均匀照明单次散射（灰）——没有这一项，烟在纯黑底上不可见。
+        if (uSmokeScatter > 0.0 && sigma_smoke > 0.0) {
+            L += T * uSmokeScatter * sigma_smoke * uSmokeAlbedo * uLightColor * dt;
         }
         num += z_view * wgt;
         den += wgt;
