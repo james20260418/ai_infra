@@ -287,6 +287,7 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
                 cmd.smoke_albedo.x(), cmd.smoke_albedo.y(), cmd.smoke_albedo.z());
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSmokeScatter"), cmd.smoke_scatter);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSmokeSigma"), cmd.smoke_sigma_scale);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSmokePow"), cmd.smoke_pow);
     glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uLightColor"),
                 cmd.light_color.x(), cmd.light_color.y(), cmd.light_color.z());
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uChannels"), vol.channels);

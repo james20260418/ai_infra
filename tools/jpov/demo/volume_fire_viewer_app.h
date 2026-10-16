@@ -81,6 +81,7 @@ public:
     float bloom_intensity_ = 0.6f;
     float bloom_threshold_ = 1.0f;
     float sat_ = 1.12f;   // 火发射色饱和度（只作用本团；按 A/B 对参考定标）
+    float smoke_pow_ = 1.0f;   // 【实验】烟响应幂律（<1 抬薄烟；生产保持 1.0）
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -218,6 +219,7 @@ public:
             vc.palette_ramp_lo = palette_ramp_lo_;
             vc.palette_ramp_hi = palette_ramp_hi_;
             vc.color_sat = sat_;
+            vc.smoke_pow = smoke_pow_;
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;

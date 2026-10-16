@@ -162,6 +162,7 @@ struct AbParams {
     float bloom_intensity = 0.6f;
     float bloom_threshold = 1.0f;
     float sat = 1.0f;
+    float smoke_pow = 1.0f;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
     float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;
     jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
@@ -207,6 +208,7 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.bloom_intensity_ = p.bloom_intensity;
     app.bloom_threshold_ = p.bloom_threshold;
     app.sat_ = p.sat;
+    app.smoke_pow_ = p.smoke_pow;
     app.smoke_scatter_ = p.smoke;
     app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
@@ -294,6 +296,8 @@ int main(int argc, char** argv) {
             ab.bloom_threshold = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-sat") == 0 && i + 1 < argc) {
             ab.sat = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-smoke-pow") == 0 && i + 1 < argc) {
+            ab.smoke_pow = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
             ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke-sigma") == 0 && i + 1 < argc) {

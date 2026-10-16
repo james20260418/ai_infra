@@ -92,6 +92,7 @@ uniform float uColorSat;       // 发射颜色饱和度（**只作用本团体�
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
 uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
+uniform float uSmokePow;       // 【实验】σ_smoke ∝ B^uSmokePow（<1 抬薄烟；1=线性）
 uniform vec3  uLightColor;     // 烟的受光辐射色（含强度）
 uniform int   uChannels;       // 体纹理通道数（2 = 无烟；3 = 带 B=烟密度）
 uniform float uFrame;          // 播放帧号（含小数）
@@ -208,6 +209,10 @@ void main() {
         vec4 v = SampleVol(ToLocal(p));
         float fire_dens = v.r;
         float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
+        // 【实验】薄烟抬尾：对密度取幂（<1 抬低值）。uSmokePow=1 时恒等（零回归）。
+        if (uSmokePow != 1.0 && smoke_dens > 0.0) {
+            smoke_dens = pow(smoke_dens, uSmokePow);
+        }
         float tempK = uTempMin + (uTempScale - uTempMin) * clamp(v.g, 0.0, 1.0);
         float sigma_fire = fire_dens * uSigma;
         float sigma_smoke = smoke_dens * uSigma * uSmokeSigma;

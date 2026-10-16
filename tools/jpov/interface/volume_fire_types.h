@@ -87,6 +87,9 @@ struct VolumeFireCommand {
     // 烟消光倍数：只作用于 σ_smoke（= B·sigma_scale·此值）。烟太厚会盖住火；
     // 散射注入 ∝ σ_smoke，故这一个旋钮同时压低「烟厚」与「烟亮」。0 = 无烟。
     float smoke_sigma_scale = 1.0f;
+    // 【实验用，非物理】烟响应的幂律：σ_smoke ∝ B^此值（<1 = 抬升薄烟）。
+    // 生产模型保持线性（=1.0）；仅用于验证“抬尾能不能补上那层稀薄烟”。
+    float smoke_pow = 1.0f;
     Vec3f light_color = {0.62f, 0.66f, 0.75f};    // 烟的受光辐射色（中性偏冷，含强度）
 };
 
