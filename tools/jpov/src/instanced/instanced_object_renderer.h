@@ -181,7 +181,9 @@ void main() {
             //   幅度 ∝ softness·(0.5+0.5·level) ⇒ 木干≈0、软梢/叶卡最大；
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
-            float tph = aFlex.y + aInstWind.w;
+            // ⚠️ 必须含 uWindTime：漏了它湍流就成"静态位移"，且频率会变成**空间**频率
+            //   （位移场空间波长 = phase场波长/频率 ⇒ 高频时梯度爆炸 ⇒ 关节被扯开）。
+            float tph = uWindTime + aFlex.y + aInstWind.w;
             float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
@@ -346,7 +348,9 @@ void main() {
             //   幅度 ∝ softness·(0.5+0.5·level) ⇒ 木干≈0、软梢/叶卡最大；
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
-            float tph = aFlex.y + aInstWind.w;
+            // ⚠️ 必须含 uWindTime：漏了它湍流就成"静态位移"，且频率会变成**空间**频率
+            //   （位移场空间波长 = phase场波长/频率 ⇒ 高频时梯度爆炸 ⇒ 关节被扯开）。
+            float tph = uWindTime + aFlex.y + aInstWind.w;
             float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
@@ -503,7 +507,9 @@ void main() {
             //   幅度 ∝ softness·(0.5+0.5·level) ⇒ 木干≈0、软梢/叶卡最大；
             //   阵风包络 pow(·,p) 做**偶发性**；方向为"斜上 45°"的固定体轴（不落在风向平面）。
             float lev0 = clamp(own1.x, 0.0, 3.0);
-            float tph = aFlex.y + aInstWind.w;
+            // ⚠️ 必须含 uWindTime：漏了它湍流就成"静态位移"，且频率会变成**空间**频率
+            //   （位移场空间波长 = phase场波长/频率 ⇒ 高频时梯度爆炸 ⇒ 关节被扯开）。
+            float tph = uWindTime + aFlex.y + aInstWind.w;
             float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);   // 独立频率滑条
             float tpj = tfq * tph;
             tpj -= floor(tpj);
