@@ -255,6 +255,94 @@ p += uWindVector*ssum;                                     // 主弯（平移近
 
 ### 10.6 残留
 
-- 仍为**平移近似**（不是绕枢轴的真旋转、不保长）——真保长需 Pivot Painter 式逐枝枢轴，另开。
+- ~~仍为**平移近似**~~ → **已由 §11 的枢轴式（mode=1）落实**（真旋转、保长、接头焊死）；本节描述的是 `mode=0` 平移式基线。
 - 树干网格上极少数微边（~1.5mm）在接枝处拉伸较大（绝对量 <0.1 单位），肉眼不可见。
 
+
+---
+
+## 11. 枢轴式（Pivot Painter 式）+ 平动湍流（2026-10-16，`WindCommand.mode = 1`）
+
+> 本章是**当前推荐**的实现。§3/§10 的「平移式」保留为 `mode = 0`（A/B 对照与基线，逐字节零回归）。
+
+### 11.0 一句话
+
+**Pivot Painter 式逐枝枢轴旋转 + 朝向继承度（硬↔软）+ 链外平动湍流**；关节表由 Blender 自产。
+行业对照：UE Pivot Painter 2.0 / SpeedTree per-bone wind（flexibility·gravity）/ GPU Gems 3 ch.16。
+
+### 11.1 数据模型（相对 §1 的增量）
+
+| 载体 | 内容 | 备注 |
+|---|---|---|
+| **关节表**（资产 node `extras.jpov_wind_joints`）| 每关节 **7 float**：`pivot.xyz, parent, level, phase, soft` | `parent = -1` 表示根 |
+| GPU 纹理（每 mesh 一张）| RGBA32F **2N×1**：`texel(2j)=(pivot.xyz,parent)`、`texel(2j+1)=(level,phase,soft,0)` | 占 `kTexUnitWindJointTable = 12`（**必须留在 0..15**）|
+| 顶点 `loc3 aWindLink`（TEXCOORD_2）| `(joint_id, link_w)` | `link_w` 当前**未使用**（见 11.5）|
+| 顶点 `loc6 aFlex`（TEXCOORD_1）| `(softness, phase)` | 仅平移式使用；平动湍流复用其 `phase` |
+
+**逐关节量必须只依赖关节自身**（`level/phase/soft` 都编在表里）——否则同一关节对不同顶点给出不同 θ ⇒ 段内不再刚性。
+
+### 11.2 烘焙（`tools/vegetation/wind_bake.py` / `build_tree.py`）
+
+- 折线**抽稀**成关节（**按枝粗细分级**：level ≤ 1 用 1.5 单位/≤6 个；level ≥ 2 用 0.5 单位/≤8 个）⇒ 细柳条有足够关节去弯。
+- **合并同位置关节**（Sapling 把一条枝拆成多条**续接**样条，续接处会出现两个同坐标关节 ⇒ 必须并入同一个，否则同处叠两次铰链 + 相邻顶点分属不同链 ⇒ 撕裂）。
+- 顶点归属 = **沿弧长的段**（floor-by-arc，不是最近点）+ ε 容差内优先更靠根的链 + **同位置顶点强制同链**。
+- `soft`（朝向继承度）判据：**根部 z 高于尖部 z（下垂）且管半径中位数 < 0.01** ⇒ `s_spline = clamp(droop/0.5,0,1)`，沿枝渐变 `s_k = s_spline·(弧长/枝全长)`（接头硬、梢部软）。实测：柳条 103/183；树皮顶点 `s>0.25` 占 25%。
+- 关节表随资产走：写进 trunk 对象的自定义属性 + `export_extras=True`（**枢轴要转成导出坐标系**：Blender Z-up → glTF Y-up，`(x,z,-y)`）。
+
+### 11.3 链算法（VS，根→梢递推）
+
+```
+q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)      // 位置：**完整**继承
+A_j = θ_j + (1 − s_j)·A_parent                             // 朝向：按 (1−s) 打折
+p'  = q_own + R(A_own)·(p − pivot_own)                     // 顶点
+θ_j = A · kWindPivotGain · (0.15·level) · sin(2π·f0(1+1.6·level)·(t+phase_j))
+```
+- **每段仍是刚体 ⇒ 保长**；`q_child` 与"父链对 `pivot_child` 的映射"逐点一致 ⇒ **接头焊死**。
+- `s=0` 硬（朝向全继承，木质梁）；`s=1` 软（只随自己的 θ，保持自身下垂姿态）。**根部 level 0 ⇒ 增益 0 ⇒ 固定端不动**（固定支承；这是最初的一个设计错误）。
+- 实现要点：由顶点关节沿 `parent` 收集链（≤ `kMaxWindChain = 16`）后**反向遍历**；父关节解码必须 `int(floor(w+0.5))`（`-1` 哨兵：GLSL `int()` 向零截断会把 `int(-0.5)` 变成 `0` ⇒ 环回 joint 0 ⇒ 整株被扳倒）。
+
+### 11.4 平动湍流（**链外**，逐顶点）
+
+```glsl
+p += tdir · ( amp · sin(2π·f_turb·(t + phase)) )
+amp  = uWindTurbAmp · softness · (0.5 + 0.5·level) · gust      // 属性耦合；两个滑条独立
+f_turb = uWindTurbFreq · (1 + kTurbLevF·level)
+gust = mix(1, pow(max(0, 0.5+0.5·sin(2π·f_gust·(t+phase))), kTurbGustP), uWindGustStr)
+tdir = 固定的"斜上"体轴（不落在风向平面）
+```
+- **为什么逐顶点而不是逐关节常量**：纯平移**不能改变朝向**；逐关节常量会在每个接头拉出 `|δ|` 的**台阶**。用连续 `phase` 场驱动 ⇒ 位移场连续 ⇒ 不撕裂（空间波长 ~3.5 单位 ⇒ 分支尺度上梯度只有毫米级）。
+- **相位必须含 `uWindTime`**（踩过：漏了它 ⇒ 湍流成静态位移，且"频率"退化成**空间**频率 ⇒ 高频时位移场梯度爆炸 ⇒ 关节被扯开）。
+
+### 11.5 参数总表
+
+| 面板滑条 | 默认 | 作用 |
+|---|---|---|
+| 风向方位角 / 风速 | 35° / 1.6 | 风向（弯曲平面 + 噪声扫过方向）；**风速不决定"歪多少"** |
+| 振幅 | 0.6 | 结构角总闸（`θ ∝ 振幅`）|
+| 频率 Hz | 0.9 | 结构基频（各 level 按 `1+1.6·level` 分档）|
+| 湍流（平移式） | 0.5 | **仅平移式**的逐顶点细节颤 |
+| 平动湍流幅度 | 0.15 | **独立**：平动湍流幅度（0 = 关）|
+| 平动湍流频率 Hz | 2.5 | **独立**：抖动快慢（纯时间频率）|
+| 阵风频率 Hz | 0.6 | 多久来一阵 |
+| 阵风强度 0=关 | 0.7 | 起伏深度（0 = 关起伏，湍流恒开）|
+| 枢轴式风（勾选） | 关 | `mode` 0/1 |
+
+常数（shader，集中在 `instanced_object_renderer.h`）：`kWindPivotGain=0.4`、`kMaxWindChain=16`、
+`kTurbLevF=0.5`、`kTurbGustP=4.0`。
+
+### 11.6 验证（本地，GL-free 复刻 + headless 出图）
+
+**四条固定自检**（`output/jpov_wind_viewer/jpov_wind_viewer`，headless 参数齐备）：
+1. **模式 A ≠ B**：枢轴 vs 平移同帧显著不同（`mean|d| ≈ 68`）——曾为 0（资产没同步 ⇒ 静默退回平移式）；
+2. **零振幅（+ 湍流 0）== 静止**：逐像素相同（`mean|d| = 0.0003`）；
+3. **湍流独立生效**：振幅=0 时改"平动湍流幅度"仍显著变化（`mean|d| ≈ 32`）；
+4. **帧间在动**：湍流开启后相邻帧必须不同（冻结类 bug 只有它能抓——踩过）。
+
+几何：叶片三角形面积比恒 **1.000**（逐卡刚体）；树干边（>15cm）最大伸长 ~1.19（a=0.6）。
+
+### 11.7 已知边界 / 后续
+
+- **只改了 instanced 路径**；`object3d` / 蒙皮路径仍只有平移式（两条 GLSL 是各自拷贝，改一处必须查另一处）。
+- `link_w` 在枢轴模式下空闲；`aFlex=(softness,phase)` 也只在平移式 + 湍流相位里用 ⇒ **正好留给 `pos_lag`**（"每关节平移量"与平动湍流同管）。
+- **与 shader 同源的边长/面积单测尚未落地**（本轮因"复刻与实现不同源"量错过两次）——**最高优先级**。
+- 性能：链深 ≤16 × 2 texelFetch/环；本机 llvmpipe，真 GPU 需实测。
