@@ -25,9 +25,10 @@ EmberGen 免费 VDB 套件自带的 `smallCampfire.mp4`（200 帧，黑底孤立
 |---|---|
 | `fetch_reference.py` | 从官方 mp4 抽参考帧入库（CC0） |
 | `ab_metrics.py` | 两张图同口径指标 + 并排图（h/w、面积、均值 RGB、近白占比、竖向亮度剖面） |
+| `ab_seq.py` | **逐帧 A/B**：整段序列每帧抓图 → 与官方对应帧比对 → diff 表（CSV）+ 竖排拼图 |
 | `run_ab.sh` | 端到端：抓 JPOV 孤立火 → 比对（需已编译 viewer + `xvfb-run`） |
 | `reference/` | 官方参考帧（缩略） |
-| `baseline/` | P0 时刻的差距快照（供 review） |
+| `baseline/` | P0 时刻的差距快照（单帧 + 逐帧，供 review） |
 
 ## 用法
 
@@ -42,6 +43,29 @@ bash tools/jpov/build_volume_fire_viewer.sh
 bash tools/jpov/tools/campfire_ab/run_ab.sh \
   /james_pm/fire_hero/assets/prototypes/campfire.jpovvol 20
 ```
+
+### 逐帧 A/B（diff 曲线）
+
+对整个序列每帧抓图 → 与官方对应帧同口径比对，产出 **diff 表（CSV）+ 竖排拼图**：
+
+```bash
+python3 tools/jpov/tools/campfire_ab/ab_seq.py \
+  --volume /james_pm/fire_hero/assets/prototypes/campfire.jpovvol \
+  --viewer ./output/jpov_volume_fire_viewer/jpov_volume_fire_viewer \
+  --refdir tools/jpov/tools/campfire_ab/reference \
+  --frames 0:80:10 --outdir /tmp/ab_seq --box 1.22
+```
+
+**为什么它是「范式」而不只是个脚本**：
+
+1. **纯数值、无需 vision 模型** → 确定性、可无人值守，直接当 **P1..P6 的自动验收门禁**
+   （看各指标是否随机制补齐朝参考单调收敛）。
+2. **只有逐帧才看得见的问题**：闪烁、循环接缝、烟随时间的演化 —— 单帧 A/B 查不出。
+3. **顺带验证帧对应**：`资产帧 k ↔ 官方帧 60+k` 是假设；映射错了曲线会跳/乱，
+   这条工具本身就是验证器。
+
+口径提醒：`h/w` 与**颜色（蓝通道 = 烟）**是**取景无关**的硬指标；`area%` 受取景影响，
+只能同侧自比，不能跨侧直接比。
 
 ## viewer 的 A/B 模式（本 PR 新增）
 
