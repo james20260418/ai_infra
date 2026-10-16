@@ -77,7 +77,9 @@ uniform int   uWindJointCount;    // 关节表条目数（0 = 无表 → 退回�
 uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, parent)
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
 const float kWindPivotGain = 0.4;
-const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
+const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
+const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -90,6 +92,27 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float c = cos(th);
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+// ---- 四元数（湍流要绕**自己的世界空间轴**，故链的累积朝向必须用四元数）----
+vec4 WindQaa(vec3 ax, float ang) {          // 轴角 -> 四元数 (xyz, w)
+    return vec4(ax * sin(ang * 0.5), cos(ang * 0.5));
+}
+vec4 WindQuatMul(vec4 a, vec4 b) {          // a ∘ b
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+vec3 WindQuatRot(vec3 v, vec4 q) {          // 用四元数转向量
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+// 把旋转角缩放到 k 倍（"朝向继承度"就靠它：k = 1-s）
+vec4 WindDamp(vec4 q, float k) {
+    vec4 qq = (q.w < 0.0) ? -q : q;                  // 统一半球
+    float w = clamp(qq.w, -1.0, 1.0);
+    float ang = 2.0 * acos(w);
+    float s2 = sin(ang * 0.5);
+    vec3 ax = (s2 > 1e-5) ? qq.xyz / s2 : vec3(0.0, 1.0, 0.0);
+    float a2 = ang * clamp(k, 0.0, 1.0) * 0.5;
+    return vec4(ax * sin(a2), cos(a2));
 }
 // per-instance 摆放矩阵（loc7..10 拆 4 列，divisor=1；布局见 instance_buffer.h）。
 layout(location = 7) in vec4 aInstCol0;
@@ -118,17 +141,20 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 朝向继承度（硬 ? 软）刚性链：
-            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
-            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
-            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
-            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
-            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
-            vec3 wd = aInstWind.xyz;
-            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            // 刚性链（硬↔软）+ 世界空间湍流：
+            //   q_j = q_parent + R_parent·(pivot_j − pivot_parent)    位置：**完整**继承
+            //   R_j = Hinge_j ∘ Damp(R_parent, 1−s_j)                 朝向：按 (1−s) 缩放转角
+            //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
+            //   p' = q_own + R_own·(p − pivot_own)
+            vec3 wdir = aInstWind.xyz;
+            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
+            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
+            float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
+            float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
             int chain[kMaxWindChain];
             int nc = 0;
@@ -142,39 +168,45 @@ void main() {
                 vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
                 jj = int(floor(ct0.w + 0.5));
             }
-            vec3 q = vec3(0.0);
-            float A = 0.0;
+            vec3 qpos = vec3(0.0);
+            vec4 qrot = vec4(0.0, 0.0, 0.0, 1.0);
             vec3 pp = vec3(0.0);
-            float Ap = 0.0;
+            vec4 prot = vec4(0.0, 0.0, 0.0, 1.0);
             int have_par = 0;
             for (int k = nc - 1; k >= 0; --k) {
                 vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
                 vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
                 float lev = clamp(t1.x, 0.0, 3.0);
                 float sof = clamp(t1.z, 0.0, 1.0);
+                // ---- 结构：绕风向轴，含 DC（风速吹歪）+ 低频振荡 ----
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
-                tq2 -= floor(tq2);
-                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
-                      * sin(6.28318531 * tq2);
+                float th = amp * (dc + sin(6.28318531 * pjw));
+                // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
+                vec3 np = t0.xyz;
+                float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
+                float n2 = sin(1.3 * (dot(np, vec3(-wdirn.z, 0.0, wdirn.x)) * 0.9 + np.y * 0.60)
+                               - scroll * 0.7 + 2.1);
+                float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
+                vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
-                    q = t0.xyz;
-                    A = th;
-                    have_par = 1;
+                    qpos = t0.xyz;
+                    qrot = hinge;
                 } else {
-                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
+                    qpos = qpos + WindQuatRot(t0.xyz - pp, prot);
+                    qrot = WindQuatMul(hinge, WindDamp(prot, 1.0 - sof));
                 }
+                prot = qrot;
                 pp = t0.xyz;
-                Ap = A;
+                have_par = 1;
             }
             vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
-            wn = WindRotVecAxis(wn, axis, A);
+            p = qpos + WindQuatRot(p - own0.xyz, qrot);
+            wn = WindQuatRot(wn, qrot);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
@@ -225,7 +257,9 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
-const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
+const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
+const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -237,6 +271,27 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float c = cos(th);
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+// ---- 四元数（湍流要绕**自己的世界空间轴**，故链的累积朝向必须用四元数）----
+vec4 WindQaa(vec3 ax, float ang) {          // 轴角 -> 四元数 (xyz, w)
+    return vec4(ax * sin(ang * 0.5), cos(ang * 0.5));
+}
+vec4 WindQuatMul(vec4 a, vec4 b) {          // a ∘ b
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+vec3 WindQuatRot(vec3 v, vec4 q) {          // 用四元数转向量
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+// 把旋转角缩放到 k 倍（"朝向继承度"就靠它：k = 1-s）
+vec4 WindDamp(vec4 q, float k) {
+    vec4 qq = (q.w < 0.0) ? -q : q;                  // 统一半球
+    float w = clamp(qq.w, -1.0, 1.0);
+    float ang = 2.0 * acos(w);
+    float s2 = sin(ang * 0.5);
+    vec3 ax = (s2 > 1e-5) ? qq.xyz / s2 : vec3(0.0, 1.0, 0.0);
+    float a2 = ang * clamp(k, 0.0, 1.0) * 0.5;
+    return vec4(ax * sin(a2), cos(a2));
 }
 layout(location = 6) in vec2 aFlex;     // 植被风 per-vertex：(bend, phase)
 layout(location = 7) in vec4 aInstCol0;
@@ -265,17 +320,20 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 朝向继承度（硬 ? 软）刚性链：
-            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
-            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
-            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
-            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
-            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
-            vec3 wd = aInstWind.xyz;
-            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            // 刚性链（硬↔软）+ 世界空间湍流：
+            //   q_j = q_parent + R_parent·(pivot_j − pivot_parent)    位置：**完整**继承
+            //   R_j = Hinge_j ∘ Damp(R_parent, 1−s_j)                 朝向：按 (1−s) 缩放转角
+            //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
+            //   p' = q_own + R_own·(p − pivot_own)
+            vec3 wdir = aInstWind.xyz;
+            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
+            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
+            float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
+            float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
             int chain[kMaxWindChain];
             int nc = 0;
@@ -289,39 +347,45 @@ void main() {
                 vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
                 jj = int(floor(ct0.w + 0.5));
             }
-            vec3 q = vec3(0.0);
-            float A = 0.0;
+            vec3 qpos = vec3(0.0);
+            vec4 qrot = vec4(0.0, 0.0, 0.0, 1.0);
             vec3 pp = vec3(0.0);
-            float Ap = 0.0;
+            vec4 prot = vec4(0.0, 0.0, 0.0, 1.0);
             int have_par = 0;
             for (int k = nc - 1; k >= 0; --k) {
                 vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
                 vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
                 float lev = clamp(t1.x, 0.0, 3.0);
                 float sof = clamp(t1.z, 0.0, 1.0);
+                // ---- 结构：绕风向轴，含 DC（风速吹歪）+ 低频振荡 ----
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
-                tq2 -= floor(tq2);
-                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
-                      * sin(6.28318531 * tq2);
+                float th = amp * (dc + sin(6.28318531 * pjw));
+                // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
+                vec3 np = t0.xyz;
+                float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
+                float n2 = sin(1.3 * (dot(np, vec3(-wdirn.z, 0.0, wdirn.x)) * 0.9 + np.y * 0.60)
+                               - scroll * 0.7 + 2.1);
+                float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
+                vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
-                    q = t0.xyz;
-                    A = th;
-                    have_par = 1;
+                    qpos = t0.xyz;
+                    qrot = hinge;
                 } else {
-                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
+                    qpos = qpos + WindQuatRot(t0.xyz - pp, prot);
+                    qrot = WindQuatMul(hinge, WindDamp(prot, 1.0 - sof));
                 }
+                prot = qrot;
                 pp = t0.xyz;
-                Ap = A;
+                have_par = 1;
             }
             vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
-            wn = WindRotVecAxis(wn, axis, A);
+            p = qpos + WindQuatRot(p - own0.xyz, qrot);
+            wn = WindQuatRot(wn, qrot);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
@@ -377,7 +441,9 @@ uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
-const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
+const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
+const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
+const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -389,6 +455,27 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float c = cos(th);
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+// ---- 四元数（湍流要绕**自己的世界空间轴**，故链的累积朝向必须用四元数）----
+vec4 WindQaa(vec3 ax, float ang) {          // 轴角 -> 四元数 (xyz, w)
+    return vec4(ax * sin(ang * 0.5), cos(ang * 0.5));
+}
+vec4 WindQuatMul(vec4 a, vec4 b) {          // a ∘ b
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+vec3 WindQuatRot(vec3 v, vec4 q) {          // 用四元数转向量
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+// 把旋转角缩放到 k 倍（"朝向继承度"就靠它：k = 1-s）
+vec4 WindDamp(vec4 q, float k) {
+    vec4 qq = (q.w < 0.0) ? -q : q;                  // 统一半球
+    float w = clamp(qq.w, -1.0, 1.0);
+    float ang = 2.0 * acos(w);
+    float s2 = sin(ang * 0.5);
+    vec3 ax = (s2 > 1e-5) ? qq.xyz / s2 : vec3(0.0, 1.0, 0.0);
+    float a2 = ang * clamp(k, 0.0, 1.0) * 0.5;
+    return vec4(ax * sin(a2), cos(a2));
 }
 uniform int   uWindEnabled;
 uniform float uWindTime;
@@ -405,17 +492,20 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 朝向继承度（硬 ? 软）刚性链：
-            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
-            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
-            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
-            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
-            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
-            vec3 wd = aInstWind.xyz;
-            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
+            // 刚性链（硬↔软）+ 世界空间湍流：
+            //   q_j = q_parent + R_parent·(pivot_j − pivot_parent)    位置：**完整**继承
+            //   R_j = Hinge_j ∘ Damp(R_parent, 1−s_j)                 朝向：按 (1−s) 缩放转角
+            //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
+            //   p' = q_own + R_own·(p − pivot_own)
+            vec3 wdir = aInstWind.xyz;
+            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
+            vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
+            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
+            float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
+            float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
             int chain[kMaxWindChain];
             int nc = 0;
@@ -429,38 +519,44 @@ void main() {
                 vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
                 jj = int(floor(ct0.w + 0.5));
             }
-            vec3 q = vec3(0.0);
-            float A = 0.0;
+            vec3 qpos = vec3(0.0);
+            vec4 qrot = vec4(0.0, 0.0, 0.0, 1.0);
             vec3 pp = vec3(0.0);
-            float Ap = 0.0;
+            vec4 prot = vec4(0.0, 0.0, 0.0, 1.0);
             int have_par = 0;
             for (int k = nc - 1; k >= 0; --k) {
                 vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
                 vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
                 float lev = clamp(t1.x, 0.0, 3.0);
                 float sof = clamp(t1.z, 0.0, 1.0);
+                // ---- 结构：绕风向轴，含 DC（风速吹歪）+ 低频振荡 ----
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
-                tq2 -= floor(tq2);
-                th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
-                      * sin(6.28318531 * tq2);
+                float th = amp * (dc + sin(6.28318531 * pjw));
+                // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
+                vec3 np = t0.xyz;
+                float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
+                float n2 = sin(1.3 * (dot(np, vec3(-wdirn.z, 0.0, wdirn.x)) * 0.9 + np.y * 0.60)
+                               - scroll * 0.7 + 2.1);
+                float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
+                vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
-                    q = t0.xyz;
-                    A = th;
-                    have_par = 1;
+                    qpos = t0.xyz;
+                    qrot = hinge;
                 } else {
-                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
+                    qpos = qpos + WindQuatRot(t0.xyz - pp, prot);
+                    qrot = WindQuatMul(hinge, WindDamp(prot, 1.0 - sof));
                 }
+                prot = qrot;
                 pp = t0.xyz;
-                Ap = A;
+                have_par = 1;
             }
             vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
+            p = qpos + WindQuatRot(p - own0.xyz, qrot);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
