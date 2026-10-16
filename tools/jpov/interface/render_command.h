@@ -665,6 +665,38 @@ struct SmaaConfig {
     float threshold = 0.1f;
 };
 
+// ==================== 植被风（程序化顶点风）====================
+//
+// 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
+// docs/jpov_vegetation_wind_design.md。
+//
+// 两层驱动：per-vertex (joint_id, phase) + per-instance wind（InstanceState.wind，
+// 仅 instanced 路径）+ 本命令的全局标量。本命令供**非实例路径**（object3d，植被查看器
+// 走的是这条）用；位移沿 direction·speed。
+//
+// 确定性：time 必须由**帧号**推（frame_count / fps），不可用 wall-clock，否则 gold 不稳。
+// 未设置（nullopt）→ 不施加任何位移，零开销、零回归。
+struct WindCommand {
+    float time = 0.0f;         // 全局时间（秒）。确定性：由帧号推。
+    float amplitude = 1.0f;    // 主弯振幅（米/单位）
+    float frequency = 1.0f;    // 基频（Hz）
+    float turbulence = 0.0f;   // 细节颤幅度（[0,1]）
+    // 场景风矢量（方向×风速）—— **仅非实例路径**（object3d）使用。
+    Vec3f direction = {1.0f, 0.0f, 0.0f};
+    float speed = 1.0f;
+    // 风算法模式：
+    //   0 = 平移式（默认）：本级贡献 = 沿风向的**位移**，直接加到顶点。
+    //   1 = 枢轴式：把本级贡献当**绕关节枢轴的转角**，由顶点的 joint_id 沿 parent 链向根
+    //       累加。需要 mesh 带关节表（MeshData.wind_joints）；无表时自动退回平移式。
+    int mode = 0;
+    // ---- 枢轴模式的「平动湍流」（链外，逐顶点）：独立参数 ----
+    float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
+    float turb_frequency = 2.5f;   // 平动湍流频率（Hz）
+    // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)
+    float gust_frequency = 0.6f;   // 阵风频率（Hz）
+    float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
+};
+
 // 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
 //
 // ── 在后处理链中的位置（用户视角）──
@@ -2023,6 +2055,11 @@ struct RenderCommandList {
     // 2D/UI **之前**，在输出分辨率下对最终 LDR 图像做 SMAA 1x（见 SmaaConfig）。
     // 默认无值（等同关闭），零额外开销、零回归。**需要 tone_mapping=true**。
     std::optional<SmaaConfig> smaa;
+
+    // 植被风（程序化顶点风）。有值时，object3d / instanced 两个 3D 路径的顶点着色器按它施加
+    // 顶点位移（instanced 路径另取 per-instance wind）。默认无值 = 零回归。
+    // 见 WindCommand + docs/jpov_vegetation_wind_design.md。
+    std::optional<WindCommand> wind;
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。

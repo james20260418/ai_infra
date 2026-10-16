@@ -84,8 +84,26 @@ public:
     // 三色环境光（[天, 天际线, 地] 垂直梯度）替代单色 ambient，供肉眼对比。
     bool tricolor_ambient_ = false;
 
+    // ── 植被风（程序化顶点风；仅对带风数据（关节表 + loc6）的资产生效）──
+    bool  wind_on_ = true;          // 默认开（本 viewer 的招牌能力之一）
+    bool  wind_pivot_ = true;       // true=枢轴式（需资产带关节表）；false=平移式
+    float wind_azimuth_deg_ = 35.0f;  // 风向方位角（绕 +Y，度）
+    float wind_amplitude_ = 0.35f;    // 主弯振幅
+    float wind_frequency_ = 0.5f;     // 基频 Hz
+    float wind_turb_amp_ = 0.12f;     // 链外平动湍流幅度（0=关）
+    float wind_turb_freq_ = 2.5f;     // 平动湍流频率 Hz
+    float wind_gust_freq_ = 0.6f;     // 阵风频率 Hz
+    float wind_gust_str_ = 0.7f;      // 阵风强度 [0,1]（0=关起伏）
+    float wind_time_scale_ = 1.0f;    // 时间缩放（0=暂停）
+    bool  wind_use_fixed_time_ = false;   // headless：钉住时间（确定性出图）
+    float wind_fixed_time_ = 0.0f;
+
     // 是否绘制面板（headless 拍摄 = false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
+
+    // headless：固定风时间（秒）+ 开关风。
+    void SetWindFixedTime(float t) { wind_use_fixed_time_ = true; wind_fixed_time_ = t; }
+    void SetWindEnabled(bool on) { wind_on_ = on; }
 
     // SMAA 后处理抗锯齿。**默认开**（本查看器定位“观察 + 出图”，去锯齿是默认期望）。
     void SetSmaa(bool on, float threshold = 0.1f) {
@@ -135,8 +153,6 @@ public:
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)frame_count;
-
         cmds->camera.fbo_3d_width_  = kViewerWidth;
         cmds->camera.fbo_3d_height_ = kViewerHeight;
 
@@ -180,6 +196,28 @@ public:
             sc.enabled = true;
             sc.threshold = smaa_threshold_;
             cmds->smaa = sc;
+        }
+
+        // 植被风：时间由帧号推（确定性；headless 可 SetWindFixedTime 钉住）。
+        if (wind_on_) {
+            const float t = wind_use_fixed_time_
+                                ? wind_fixed_time_
+                                : static_cast<float>(frame_count) /
+                                      kViewerFps * wind_time_scale_;
+            constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+            const float az = wind_azimuth_deg_ * kDeg2Rad;
+            jpov::WindCommand w;
+            w.time = t;
+            w.amplitude = wind_amplitude_;
+            w.frequency = wind_frequency_;
+            w.direction = {std::cos(az), 0.0f, std::sin(az)};
+            w.speed = 1.0f;
+            w.mode = wind_pivot_ ? 1 : 0;
+            w.turb_amplitude = wind_turb_amp_;
+            w.turb_frequency = wind_turb_freq_;
+            w.gust_frequency = wind_gust_freq_;
+            w.gust_strength = wind_gust_str_;
+            cmds->wind = w;
         }
 
         // 场景：灰色地面 + 植物（按包围盒把基座落到地面 y=0、水平居中）。
@@ -233,7 +271,7 @@ private:
         const float kPad    = 12.0f;    // 底板内边距
         const float kRowH   = 26.0f;
         const float kSpace  = 8.0f;
-        const int   kRows   = 7;
+        const int   kRows   = 13;
         const float kMargin = 16.0f;    // 距窗口右/下边距
 
         const float inner_w = kPanelW - 2.0f * kPad;
@@ -263,6 +301,13 @@ private:
         ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(5));
         ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(6),
                         0.02f, 0.5f, 2);
+        // ── 植被风 ──
+        ui_.Checkbox("风 (植被风)", &wind_on_, row(7));
+        ui_.Checkbox("枢轴式 (关=平移式)", &wind_pivot_, row(8));
+        ui_.SliderFloat("风向方位角 °", &wind_azimuth_deg_, row(9), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("风振幅", &wind_amplitude_, row(10), 0.0f, 1.5f, 2);
+        ui_.SliderFloat("风频率 Hz", &wind_frequency_, row(11), 0.05f, 2.0f, 2);
+        ui_.SliderFloat("平动湍流幅度", &wind_turb_amp_, row(12), 0.0f, 0.6f, 3);
     }
 
     bool show_panel_ = true;

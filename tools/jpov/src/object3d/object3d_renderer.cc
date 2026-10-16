@@ -124,6 +124,34 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                        1, GL_FALSE, mvp_final);
     glUniformMatrix4fv(glGetUniformLocation(selected_prog, "uModel"),
                        1, GL_FALSE, model);
+    // 植被风：有 WindCommand 则开启；mesh 无关节表时 uWindJointCount=0 ⇒ VS 不动
+    //   （aFlex=(0,0) 亦无害）。关节表纹理按 mesh 绑到 kTexUnitWindJointTable。
+    if (cmds.wind.has_value()) {
+        const WindCommand& w = *cmds.wind;
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindEnabled"), 1);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbulence"), w.turbulence);
+        glUniform3f(glGetUniformLocation(selected_prog, "uWindVector"),
+                    w.direction.x() * w.speed, w.direction.y() * w.speed,
+                    w.direction.z() * w.speed);
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindMode"), w.mode);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbAmp"), w.turb_amplitude);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindTurbFreq"), w.turb_frequency);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindGustFreq"), w.gust_frequency);
+        glUniform1f(glGetUniformLocation(selected_prog, "uWindGustStr"), w.gust_strength);
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindJointCount"),
+                    static_cast<int>(mesh->wind_joint_count));
+        // 采样器 uniform 总是指到本单元（无表时 VS 也不会 texelFetch，无碍）。
+        glActiveTexture(GL_TEXTURE0 + kTexUnitWindJointTable);
+        glBindTexture(GL_TEXTURE_2D, mesh->wind_joint_tex);
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindJointTex"),
+                    kTexUnitWindJointTable);
+        glActiveTexture(GL_TEXTURE0);
+    } else {
+        glUniform1i(glGetUniformLocation(selected_prog, "uWindEnabled"), 0);
+    }
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
                 cmd.material.base_color.b);
@@ -679,6 +707,7 @@ void Object3DRenderer::DrawObject3DBlend(const Object3DCommand& cmd,
 // ==================== DrawObject3DShadow ====================
 
 void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
+                                          const RenderCommandList& cmds,
                                           MeshManager& mesh_mgr,
                                           TextureManager& texture_mgr,
                                           ShaderManager& shader_mgr,
@@ -744,6 +773,32 @@ void Object3DRenderer::DrawObject3DShadow(const Object3DCommand& cmd,
                        1, GL_FALSE, shadow_mvp);
     glUniformMatrix4fv(glGetUniformLocation(sp, "uShadowDepthMVP"),
                        1, GL_FALSE, depth_mvp);
+
+    // 植被风：与主 pass 同步位移（否则树动、影不动）。见 DrawObject3DMaterialAndDraw 同名段。
+    if (cmds.wind.has_value()) {
+        const WindCommand& w = *cmds.wind;
+        glUniform1i(glGetUniformLocation(sp, "uWindEnabled"), 1);
+        glUniform1f(glGetUniformLocation(sp, "uWindTime"), w.time);
+        glUniform1f(glGetUniformLocation(sp, "uWindAmplitude"), w.amplitude);
+        glUniform1f(glGetUniformLocation(sp, "uWindFrequency"), w.frequency);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbulence"), w.turbulence);
+        glUniform3f(glGetUniformLocation(sp, "uWindVector"),
+                    w.direction.x() * w.speed, w.direction.y() * w.speed,
+                    w.direction.z() * w.speed);
+        glUniform1i(glGetUniformLocation(sp, "uWindMode"), w.mode);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbAmp"), w.turb_amplitude);
+        glUniform1f(glGetUniformLocation(sp, "uWindTurbFreq"), w.turb_frequency);
+        glUniform1f(glGetUniformLocation(sp, "uWindGustFreq"), w.gust_frequency);
+        glUniform1f(glGetUniformLocation(sp, "uWindGustStr"), w.gust_strength);
+        glUniform1i(glGetUniformLocation(sp, "uWindJointCount"),
+                    static_cast<int>(mesh->wind_joint_count));
+        glActiveTexture(GL_TEXTURE0 + kTexUnitWindJointTable);
+        glBindTexture(GL_TEXTURE_2D, mesh->wind_joint_tex);
+        glUniform1i(glGetUniformLocation(sp, "uWindJointTex"), kTexUnitWindJointTable);
+        glActiveTexture(GL_TEXTURE0);
+    } else {
+        glUniform1i(glGetUniformLocation(sp, "uWindEnabled"), 0);
+    }
 
     glBindVertexArray(mesh->vao);
     if (mesh->index_count > 0) {

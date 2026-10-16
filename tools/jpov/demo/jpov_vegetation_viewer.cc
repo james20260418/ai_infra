@@ -183,6 +183,56 @@ int RunCaptureUi(const std::string& out_dir, const std::string& glb_path) {
     return 0;
 }
 
+// 风动拍摄：固定光照/机位，钉住风时间逐帧出图（人看动、AI 看数值），并附 wind_off 对照。
+// 资产需带风数据（关节表 + loc6）；用 --glb plants/willow_wind_tex.glb。
+int RunCaptureWind(const std::string& out_dir, const std::string& glb_path) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被风动（headless）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationViewerApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    app.InstallSceneWithGltf(glb_path);
+
+    app.deg_ = jpov_skylight::SkyDegrees{};
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_.phi   = 0.12;
+    app.view_.theta = kPi / 4.0;
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+
+    auto shoot = [&](const std::string& name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture(wind): " << path;
+    };
+
+    // 关风对照。
+    app.SetWindEnabled(false);
+    shoot("wind_off");
+
+    // 开风：同一帧机位，钉住不同风时间（看摆动幅度/相位随时间变）。
+    app.SetWindEnabled(true);
+    app.SetWindFixedTime(0.0f);
+    for (int k = 0; k < 5; ++k) {
+        app.SetWindFixedTime(static_cast<float>(k) * 0.25f);
+        char nm[32];
+        std::snprintf(nm, sizeof(nm), "wind_t%03d", k * 25);
+        shoot(nm);
+    }
+
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -190,6 +240,7 @@ int main(int argc, char** argv) {
     std::string out_dir;          // --capture
     std::string smaa_dir;         // --capture-smaa
     std::string ui_dir;           // --capture-ui
+    std::string wind_dir;         // --capture-wind
     float smaa_threshold = 0.1f;  // --smaa-threshold
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--glb") == 0 && i + 1 < argc) {
@@ -200,6 +251,8 @@ int main(int argc, char** argv) {
             smaa_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ui") == 0 && i + 1 < argc) {
             ui_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-wind") == 0 && i + 1 < argc) {
+            wind_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -213,6 +266,9 @@ int main(int argc, char** argv) {
     }
     if (!ui_dir.empty()) {
         return RunCaptureUi(ui_dir, glb_path);
+    }
+    if (!wind_dir.empty()) {
+        return RunCaptureWind(wind_dir, glb_path);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, glb_path);
