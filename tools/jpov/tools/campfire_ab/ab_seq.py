@@ -21,6 +21,7 @@
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -35,8 +36,16 @@ import ab_metrics
 OFFICIAL_OFFSET = 60
 # 拼图每行（[官方 | 我们]）统一缩放后的高度（像素）。
 STRIP_CELL_HEIGHT = 200
-# A/B 火盒默认边长（米）= 官方 campfire 资产最大世界尺寸 max(56,61,53)×0.02。
-DEFAULT_BOX_M = 1.22
+
+
+def derive_box_m(volume: str) -> float:
+    """从 sidecar `<volume>.json` 的 dims×voxel_m 取最大边（米）；缺 sidecar 返回 0。"""
+    try:
+        with open(volume + ".json", encoding="utf-8") as f:
+            side = json.load(f)
+        return max(side["dims"]) * float(side["voxel_m"])
+    except Exception:
+        return 0.0
 
 
 def parse_frames(spec: str) -> List[int]:
@@ -88,9 +97,15 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--refdir", required=True)
     ap.add_argument("--frames", default="0:80:10", help="'0:80:10' 或 '0,10,20'")
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--box", type=float, default=DEFAULT_BOX_M, help="A/B 火盒边长（米）")
+    ap.add_argument("--box", type=float, default=0.0,
+                    help="A/B 火盒边长（米）；<=0 时从 <volume>.json 的 dims×voxel_m 推")
     ap.add_argument("--offset", type=int, default=OFFICIAL_OFFSET, help="官方帧偏移")
     args = ap.parse_args(argv)
+
+    box = args.box if args.box > 0.0 else derive_box_m(args.volume)
+    if box <= 0.0:
+        print(f"错误：无法从 {args.volume}.json 推火盒边长，请显式 --box", file=sys.stderr)
+        return 2
 
     os.makedirs(args.outdir, exist_ok=True)
     frames = parse_frames(args.frames)
@@ -99,6 +114,7 @@ def main(argv: List[str]) -> int:
     strips: List[Image.Image] = []
     print(f"{'asset_f':>7} {'off_f':>6} | {'GT h/w':>7} {'our h/w':>7} | "
           f"{'GT area%':>8} {'our area%':>9} | {'GT rgb':>14} {'our rgb':>14}")
+    print(f"(box = {box:.3f} m)")
     for k in frames:
         ref_path = os.path.join(
             args.refdir, f"embergen_smallCampfire_f{k + args.offset:04d}.png")
@@ -106,7 +122,7 @@ def main(argv: List[str]) -> int:
             print(f"{k:>7} {k + args.offset:>6} | 跳过：缺参考帧 {ref_path}")
             continue
         ours_path = os.path.join(args.outdir, f"ours_f{k:04d}.png")
-        capture(args.viewer, args.volume, k, args.box, ours_path)
+        capture(args.viewer, args.volume, k, box, ours_path)
 
         ref_rgb = ab_metrics.load_rgb(ref_path)
         ours_rgb = ab_metrics.load_rgb(ours_path)

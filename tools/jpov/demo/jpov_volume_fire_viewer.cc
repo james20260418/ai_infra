@@ -3,6 +3,7 @@
 // 场景 = 灰色地面 + 1m³ 燃料块 + 块顶的体积火（逐像素 raymarch → WBO 薄层合成）。
 // headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>]
 // A/B 基准拍摄：--ab-capture <out.png> [--volume <path.jpovvol>] [--ab-frame N] [--ab-box M]
+//               [--ab-sigma S] [--ab-emis E] [--ab-smoke K] [--ab-light r,g,b]
 // 编译：./tools/jpov/build_volume_fire_viewer.sh
 
 #include <cstdio>
@@ -142,15 +143,25 @@ int RunCapture(const std::string& out_dir, const std::string& volume_path,
     return 0;
 }
 
+// A/B 基准的旋钮（默认 = 查看器的可复现默认；CLI 可覆盖，便于扫参/复现）。
+struct AbParams {
+    int frame = 0;
+    float box_m = 1.22f;
+    float sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSigma;
+    float emission = jpov_volume_fire::VolumeFireViewerApp::kDefaultEmission;
+    float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
+    jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
+};
+
 // A/B 基准拍摄（P0）：产出与 EmberGen 官方渲染可直接比对的**孤立火**图。
 //   - 钉相机：正面（phi=0/theta=0，+Z 看向原点），R 由火盒自动取景（FitRadius）。
-//   - 钉帧：asset 帧下标固定为 frame（可复现；与官方视频帧的对应见 docs 计划文档）。
+//   - 钉帧：asset 帧下标固定为 p.frame（可复现；与官方视频帧的对应见 docs 计划文档）。
 //   - 纯黑背景 + 无地面/燃料块（只留火本体）。
 // 输出：out_png（完整文件路径，目录需已存在）。
 int RunAbCapture(const std::string& out_png, const std::string& volume_path,
-                 int frame, float box_m) {
-    CHECK_GE(frame, 0) << "--ab-frame 必须 >= 0";
-    CHECK_GT(box_m, 0.0f) << "--ab-box 必须 > 0";
+                 const AbParams& p) {
+    CHECK_GE(p.frame, 0) << "--ab-frame 必须 >= 0";
+    CHECK_GT(p.box_m, 0.0f) << "--ab-box 必须 > 0";
 
     JPOV::Config cfg;
     cfg.title = "JPOV - volume fire viewer (A/B baseline)";
@@ -167,9 +178,13 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.Init();
     InstallScene(app);
     app.volume_path_ = volume_path;
+    app.sigma_scale_ = p.sigma;
+    app.emission_scale_ = p.emission;
+    app.smoke_scatter_ = p.smoke;
+    app.smoke_light_color_ = p.light;
 
     // 钉相机：正面看向原点，距离由火盒（居中于原点）自动取景。
-    const float half = 0.5f * box_m;
+    const float half = 0.5f * p.box_m;
     const float bounds_min[3] = {-half, -half, -half};
     const float bounds_max[3] = {half, half, half};
     app.view_ = jpov_viewer::ViewConfig{};
@@ -178,8 +193,8 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.view_.R = jpov_viewer::ViewConfig::FitRadius(bounds_min, bounds_max, /*fov_deg=*/60.0);
 
     app.ab_mode_ = true;
-    app.ab_frame_ = frame;
-    app.ab_box_m_ = box_m;
+    app.ab_frame_ = p.frame;
+    app.ab_box_m_ = p.box_m;
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -203,17 +218,29 @@ int main(int argc, char** argv) {
     std::string ab_out;
     std::string volume_arg;
     std::string dump_dir;
-    int ab_frame = 0;
-    float ab_box = 1.22f;   // 火盒边长（米）默认 = 官方 campfire 资产最大世界尺寸
+    AbParams ab;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ab-capture") == 0 && i + 1 < argc) {
             ab_out = argv[i + 1];
         } else if (std::strcmp(argv[i], "--ab-frame") == 0 && i + 1 < argc) {
-            ab_frame = std::atoi(argv[i + 1]);
+            ab.frame = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--ab-box") == 0 && i + 1 < argc) {
-            ab_box = static_cast<float>(std::atof(argv[i + 1]));
+            ab.box_m = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-sigma") == 0 && i + 1 < argc) {
+            ab.sigma = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-emis") == 0 && i + 1 < argc) {
+            ab.emission = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
+            ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-light") == 0 && i + 1 < argc) {
+            float lr = 0.0f, lg = 0.0f, lb = 0.0f;
+            if (std::sscanf(argv[i + 1], "%f,%f,%f", &lr, &lg, &lb) == 3) {
+                ab.light = {lr, lg, lb};
+            } else {
+                LOG(WARNING) << "--ab-light 需要 \"r,g,b\"，已忽略: " << argv[i + 1];
+            }
         } else if (std::strcmp(argv[i], "--volume") == 0 && i + 1 < argc) {
             volume_arg = argv[i + 1];
         } else if (std::strcmp(argv[i], "--dump-volume") == 0 && i + 1 < argc) {
@@ -225,7 +252,7 @@ int main(int argc, char** argv) {
         LOG(WARNING) << "找不到 .jpovvol 体积文件（用 --volume 指定）";
     }
     if (!ab_out.empty()) {
-        return RunAbCapture(ab_out, volume_path, ab_frame, ab_box);
+        return RunAbCapture(ab_out, volume_path, ab);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, volume_path, dump_dir);

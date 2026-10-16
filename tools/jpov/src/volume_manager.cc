@@ -31,7 +31,7 @@ struct JpovVol2Header {
     uint32_t version;     // == 2
     uint32_t nx, ny, nz;
     uint32_t nframes;
-    uint32_t channels;    // == 2（R=density, G=temperature）
+    uint32_t channels;    // 2 = (R=火密度, G=温度)；3 = 再带 B=烟密度
     uint32_t dtype;       // 0=float32, 1=uint8(归一化)
     uint32_t reserved;
 };
@@ -74,7 +74,8 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         return 0;
     }
     // ── 硬校验（不可信输入）──
-    if (h.version != 2u || h.channels != 2u || (h.dtype != 0u && h.dtype != 1u)) {
+    if (h.version != 2u || (h.channels != 2u && h.channels != 3u) ||
+        (h.dtype != 0u && h.dtype != 1u)) {
         LOG(WARNING) << "VolumeManager: 头非法 (ver=" << h.version << " ch=" << h.channels
                      << " dtype=" << h.dtype << ") " << path;
         return 0;
@@ -107,11 +108,18 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     unsigned int tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-    const GLenum internal = (h.dtype == 1u) ? GL_RG8 : GL_RG16F;
+    const bool rgb = (h.channels == 3u);
+    const GLenum internal = rgb ? (h.dtype == 1u ? GL_RGB8 : GL_RGB16F)
+                                : (h.dtype == 1u ? GL_RG8 : GL_RG16F);
+    const GLenum format = rgb ? GL_RGB : GL_RG;
     const GLenum type = (h.dtype == 1u) ? GL_UNSIGNED_BYTE : GL_FLOAT;
+    // 3 通道 = 每像素 3 字节，行不是 4 的倍数 ⇒ 必须把解包对齐设为 1，否则行错位。
+    GLint prev_align = 4;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal,
                  static_cast<GLsizei>(h.nx), static_cast<GLsizei>(layer_h),
-                 static_cast<GLsizei>(h.nframes), 0, GL_RG, type, nullptr);
+                 static_cast<GLsizei>(h.nframes), 0, format, type, nullptr);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -123,13 +131,15 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
             LOG(WARNING) << "VolumeManager: 数据不足（帧 " << fr << "）" << path;
             glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
             glDeleteTextures(1, &tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
             return 0;
         }
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, static_cast<GLint>(fr),
                         static_cast<GLsizei>(h.nx), static_cast<GLsizei>(layer_h),
-                        1, GL_RG, type, buf.data());
+                        1, format, type, buf.data());
     }
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);   // 复原全局解包对齐（不污染后续上传）
 
     const uint32_t id = id_alloc_.Acquire();
     if (id == 0u) {
@@ -138,11 +148,12 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         return 0;
     }
     entries_[id] = VolumeInfo{tex, static_cast<int>(h.nx), static_cast<int>(h.ny),
-                              static_cast<int>(h.nz), static_cast<int>(h.nframes)};
+                              static_cast<int>(h.nz), static_cast<int>(h.nframes),
+                              static_cast<int>(h.channels)};
     path_to_id_[path] = id;
     LOG(INFO) << "[volume] loaded " << path << " dims=(" << h.nx << "," << h.ny << ","
-              << h.nz << ") frames=" << h.nframes << " dtype=" << h.dtype
-              << " -> id " << id;
+              << h.nz << ") frames=" << h.nframes << " channels=" << h.channels
+              << " dtype=" << h.dtype << " -> id " << id;
     return id;
 }
 

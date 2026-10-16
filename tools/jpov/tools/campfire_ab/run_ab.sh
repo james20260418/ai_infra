@@ -35,19 +35,22 @@ if [[ ! -x "$VIEWER" ]]; then
   exit 1
 fi
 
-# 火盒边长：优先 AB_BOX；否则从 sidecar 的 dims×voxel_m 取最大边；再否则 1.22（campfire 实测值）。
+# 火盒边长：优先 AB_BOX；否则从 sidecar 的 dims×voxel_m 取最大边；都没有则报错。
 if [[ -z "${AB_BOX:-}" ]]; then
   SIDECAR="$VOLUME.json"
   AB_BOX="$(python3 - "$SIDECAR" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    dims, vm = d["dims"], float(d["voxel_m"])
-    print(f"{max(dims) * vm:.3f}")
+    print(f"{max(d['dims']) * float(d['voxel_m']):.3f}")
 except Exception:
-    print("1.22")
+    print("")
 PY
 )"
+fi
+if [[ -z "$AB_BOX" ]]; then
+  echo "无法从 $VOLUME.json 推火盒边长；请设 AB_BOX=<米> 或补 sidecar" >&2
+  exit 1
 fi
 
 REF_FRAME=$((OFFICIAL_OFFSET + FRAME))

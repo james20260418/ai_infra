@@ -46,14 +46,24 @@ public:
     jpov::Vec3f fire_max_ = {0.9f, 3.2f, 0.9f};
 
     // 旋钮
-    float sigma_scale_ = 4.0f;      // 消光 σ = 密度 × 此值 (1/m)
-    float emission_scale_ = 1.0f;   // 发射强度
+    // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
+    static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
+    static constexpr float kDefaultEmission = 1.0f;      // 发射强度
+    static constexpr float kDefaultSmokeScatter = 1.0f;  // 烟散射强度
+    // 烟的受光色默认（中性偏冷，含强度）；单一来源：成员初始化与 CLI 默认共用。
+    static jpov::Vec3f DefaultSmokeLight() { return {0.62f, 0.66f, 0.75f}; }
+    float sigma_scale_ = kDefaultSigma;
+    float emission_scale_ = kDefaultEmission;
     float steps_ = 64.0f;           // 步数
     bool  jitter_ = true;           // 抖动
     float fps_ = 24.0f;             // 播放帧率（旋钮；默认值由物理推导，见注释）
     float temp_kelvin_scale_ = 2000.0f;  // G(∈[0,1]) → 开尔文
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
+    // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
+    // 见 interface/volume_fire_types.h 的 VolumeFireCommand 注释。
+    float smoke_scatter_ = kDefaultSmokeScatter;
+    jpov::Vec3f smoke_light_color_ = VolumeFireViewerApp::DefaultSmokeLight();  // 烟的受光色
     bool  fs_debug_ = false;         // 调试：全屏 quad 代替盒光栅化
     float play_time_ = 0.0f;
     int   nframes_ = 64;            // 由 asset 决定（96³×64）
@@ -163,6 +173,8 @@ public:
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
+            vc.smoke_scatter = smoke_scatter_;
+            vc.light_color = smoke_light_color_;
             // A/B 模式：帧号钉死（可复现）；常规模式：按播放时间推进。
             vc.frame = ab_mode_ ? static_cast<float>(ab_frame_)
                                 : std::fmod(play_time_ * fps_, static_cast<float>(nframes_));
@@ -216,7 +228,7 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
         const float colw = 0.26f * w;
         const float cx = 0.02f * w;
-        const float top = h - 16.0f - (10 * 24.0f + 9 * 5.0f);
+        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{cx, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -230,6 +242,7 @@ private:
         ui_.Checkbox("相机信息", &show_cam_info_, row(7));
         ui_.Checkbox("燃料块", &fuel_enable_, row(8));
         ui_.Checkbox("全屏quad(调试)", &fs_debug_, row(9));
+        ui_.SliderFloat("烟散射", &smoke_scatter_, row(10), 0.0f, 20.0f, 2);
     }
 
     bool show_panel_ = true;

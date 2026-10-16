@@ -14,7 +14,8 @@
     数据：nframes*nx*ny*nz*channels
   体素序（两种都一样）：**每帧内 x 最快 → y → z**，通道交错；JPVOL2 帧间顺序排列（帧最慢）。
   ⇒ 与「每帧一层 2D 数组（宽=nx、高=ny*nz）」的 GPU 上传布局一致。
-  通道语义：R=density, G=temperature/flames，均归一化 [0,1]。
+  通道语义：R=density(火), G=temperature/flames，均归一化 [0,1]；
+  **可选第 3 通道 B = 烟密度**（3 通道文件用于「火/温度/烟」三场分离，见 vdbseq_to_jpovvol.py）。
   引擎读取器：tools/jpov/src/volume_manager.cc（GL）+ src/fire_fog/fire_volume.h（GL-free）。
 
 numpy 数组约定：本模块一律用 **[F][z][y][x]**（x 最快）表示体积。
@@ -28,15 +29,19 @@ MAGIC1 = b"JPVOL1\x00\x00"
 MAGIC2 = b"JPVOL2\x00\x00"
 
 
-def write_jpovvol(path, dens, temp, dtype="u8"):
-    """写 JPVOL2 帧序列。dens/temp: [F][z][y][x]，∈[0,1]。
+def write_jpovvol(path, dens, temp, smoke=None, dtype="u8"):
+    """写 JPVOL2 帧序列。dens/temp(/smoke): [F][z][y][x]，∈[0,1]。
 
+    传 smoke 则写 **3 通道**（R=火密度, G=温度, B=烟密度）；否则写 2 通道。
     dtype="u8" → 量化成 uint8（dtype code 1）；"f32" → float32（code 0）。
     返回 (nx, ny, nz, nframes, 总字节数)。
     """
     F, Z, Y, X = dens.shape
-    assert temp.shape == dens.shape, "dens/temp 形状必须一致"
-    data = np.ascontiguousarray(np.stack([dens, temp], axis=-1))   # [F][z][y][x][2]
+    chans = [dens, temp] if smoke is None else [dens, temp, smoke]
+    for c in chans:
+        if c.shape != dens.shape:
+            raise ValueError("dens/temp/smoke 形状必须一致")
+    data = np.ascontiguousarray(np.stack(chans, axis=-1))   # [F][z][y][x][C]
     if dtype == "u8":
         payload = (np.clip(data, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
         dtype_code = 1
@@ -47,7 +52,7 @@ def write_jpovvol(path, dens, temp, dtype="u8"):
         raise ValueError("dtype 必须是 'u8' 或 'f32'，收到 %r" % (dtype,))
     with open(path, "wb") as f:
         f.write(MAGIC2)
-        f.write(struct.pack("<6I", 2, X, Y, Z, F, 2))
+        f.write(struct.pack("<6I", 2, X, Y, Z, F, len(chans)))
         f.write(struct.pack("<2I", dtype_code, 0))
         f.write(payload.tobytes())
     return X, Y, Z, F, 40 + payload.nbytes

@@ -26,6 +26,7 @@ struct VolumeInfo {
     unsigned int gl_tex = 0;   // GL_TEXTURE_2D_ARRAY（层=帧）
     int nx = 0, ny = 0, nz = 0;
     int nframes = 0;
+    int channels = 2;          // 2 = (R=火密度, G=温度)；3 = 再带 B=烟密度
 };
 
 class VolumeManager {

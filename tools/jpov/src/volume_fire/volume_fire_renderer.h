@@ -79,6 +79,10 @@ uniform int  uNFrames;
 uniform float uSigma;          // 消光尺度（1/m）
 uniform float uEmission;       // 发射尺度
 uniform float uTempScale;      // G(∈[0,1]) → 开尔文
+uniform vec3  uSmokeAlbedo;    // 烟的反照率
+uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
+uniform vec3  uLightColor;     // 烟的受光辐射色（含强度）
+uniform int   uChannels;       // 体纹理通道数（2 = 无烟；3 = 带 B=烟密度）
 uniform float uFrame;          // 播放帧号（含小数）
 uniform int  uSteps;
 uniform int  uJitter;
@@ -110,6 +114,9 @@ float Hash12(vec2 p) {
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
+
+// 「火」与「烟」由**独立通道**区分：R=火密度（自发光）、B=烟密度（只吸收 + 受光散射）。
+// 2 通道文件（无 B）⇒ 视为无烟。
 
 // 世界点 → 体局部 [0,1]^3。
 vec3 ToLocal(vec3 p) {
@@ -178,14 +185,19 @@ void main() {
         float t = tn + (float(k) + jit) * dt;
         vec3 p = o + t * rd;
         vec4 v = SampleVol(ToLocal(p));
-        float dens = v.r;
+        float fire_dens = v.r;
+        float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
         float tempK = v.g * uTempScale;
-        float sigma = dens * uSigma;
+        float sigma = (fire_dens + smoke_dens) * uSigma;
         float a = 1.0 - exp(-sigma * dt);
         vec3 emis = Blackbody(tempK) * uEmission;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
         L += T * a * emis;
+        // 烟受均匀照明单次散射——没有这一项，烟在纯黑底上不可见。
+        if (uSmokeScatter > 0.0 && smoke_dens > 0.0) {
+            L += T * uSmokeScatter * (smoke_dens * uSigma) * uSmokeAlbedo * uLightColor * dt;
+        }
         num += z_view * wgt;
         den += wgt;
         T *= (1.0 - a);
