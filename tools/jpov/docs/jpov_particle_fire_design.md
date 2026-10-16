@@ -311,7 +311,7 @@ struct ParticleEmitter {
 - `InstanceBuffer`（per-instance 布局 spec + Attach/Detach 配对）与既有 instancing 链路。
 - HDR / bloom / MRT 场景深度（软粒子用）/ 混合状态机约定（fire_fog 同款）。
 - viewer 框架（`demo/*_viewer_app.h`、`jpov_*_viewer.cc`、build 脚本模式）。
-- **Mantaflow 烘焙管线**（`/james_pm/fire_hero/tools` + `mantaflow/`）→ 出 flipbook 序列帧。
+- **Mantaflow 烘焙管线**（`tools/jpov/genVolume/` + `env/`）→ 出 flipbook 序列帧。
 
 **分工**：
 - **环境雾 / 烟 / 远景火** → `fire_fog`（froxel，已实现）。
