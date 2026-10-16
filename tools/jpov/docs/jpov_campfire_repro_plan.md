@@ -29,6 +29,9 @@
 - 来源：JangaFX EmberGen **免费 VDB（CC0，可商用）**
   `https://jangafx.com/software/embergen/download/free-vdb-animations`
   该套件自带 `.mp4` 官方预览渲染 + `.ember` 工程 + 200 帧 `.vdb` 序列。
+  · 原始 VDB 包 = `smallCampfire.zip`；**不入 git**，本地持久副本在 `/james_pm/fire_hero/assets/vdb_src/`；
+    从原始 VDB 重新复现 `.jpovvol` 的完整命令见 `tools/jpov/tools/campfire_ab/README.md`
+    「资产来源与复现」（防丢失：url + 复现命令已固化）。
 - 它与我们手上的 CC0 VDB 是**同一份资产**，因此是「同一份 VDB 的官方标准渲染」——
   正适合做机器可比对的标准答案。
 
