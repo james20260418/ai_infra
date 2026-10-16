@@ -36,7 +36,6 @@ namespace {
 
 constexpr int kSceneDepthUnit = 0;
 constexpr int kVolumeUnit = 1;
-constexpr int kVolumeUnit2 = 2;   // 【hack】层高切分的第二块体积纹理
 constexpr int kPaletteUnit = 3;   // 色谱 LUT（1D，宽 N×高 1）
 
 Vec3f Sub(const Vec3f& a, const Vec3f& b) {
@@ -308,11 +307,6 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     glActiveTexture(GL_TEXTURE0 + kVolumeUnit);
     glBindTexture(GL_TEXTURE_2D_ARRAY, vol.gl_tex);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uVol"), kVolumeUnit);
-    // 【临时 hack】层高超过 GL_MAX_TEXTURE_SIZE 时体积切成两块；未切分时 uVolSplit=1、绑定同块。
-    glActiveTexture(GL_TEXTURE0 + kVolumeUnit2);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, vol.gl_tex2 != 0 ? vol.gl_tex2 : vol.gl_tex);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uVol2"), kVolumeUnit2);
-    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uVolSplit"), vol.chunk_split);
     // 【色谱】Fire Color Ramp LUT（可选）：色相来自查表，失败/未配置时回退黑体。
     unsigned int pal_tex = PaletteTex(cmd.palette_png);
     glActiveTexture(GL_TEXTURE0 + kPaletteUnit);

@@ -74,8 +74,6 @@ uniform mat4 uInvViewProj;   // 逆视图投影（从像素反构光线，避免
 uniform vec3 uBoxMin;
 uniform vec3 uBoxMax;
 uniform sampler2DArray uVol;   // 层 = 帧；层内 (u=x, v=(z + y)/nz)
-uniform sampler2DArray uVol2;  // 【hack】层高切分的第二块（仅 uVolSplit<1 时用）
-uniform float uVolSplit;       // 【hack】切分点 v∈[0,1]；1.0 = 未切分（只用 uVol）
 uniform vec3 uVolDim;          // (nx, ny, nz)
 uniform int  uNFrames;
 uniform float uSigma;          // 消光尺度（1/m）
@@ -135,16 +133,6 @@ vec3 ToLocal(vec3 p) {
     return (p - uBoxMin) / max(uBoxMax - uBoxMin, vec3(1e-6));
 }
 
-// 【临时 hack】层高超过 GL_MAX_TEXTURE_SIZE 时，体积被切成两块纹理；
-// v < uVolSplit → uVol（重映射到 [0,1]），否则 → uVol2。uVolSplit==1 时只用 uVol。
-vec4 FetchVol(float u, float v, float frame) {
-    if (uVolSplit < 1.0 && v >= uVolSplit) {
-        return texture(uVol2, vec3(u, (v - uVolSplit) / max(1.0 - uVolSplit, 1e-6), frame));
-    }
-    float vv = (uVolSplit < 1.0) ? (v / uVolSplit) : v;
-    return texture(uVol, vec3(u, vv, frame));
-}
-
 // 体局部采样（trilinear(z) + 帧间 lerp）。p ∈ [0,1]^3。
 vec4 SampleVol(vec3 p) {
     float nz = uVolDim.z;
@@ -157,10 +145,10 @@ vec4 SampleVol(vec3 p) {
     float f0 = floor(uFrame);
     float f1 = mod(f0 + 1.0, float(uNFrames));
     float ff = uFrame - f0;
-    float v0 = (iz0 + y) / nz;
-    float v1 = (iz1 + y) / nz;
-    vec4 zz0 = mix(FetchVol(u, v0, f0), FetchVol(u, v1, f0), fz);
-    vec4 zz1 = mix(FetchVol(u, v0, f1), FetchVol(u, v1, f1), fz);
+    vec2 uv0 = vec2(u, (iz0 + y) / nz);
+    vec2 uv1 = vec2(u, (iz1 + y) / nz);
+    vec4 zz0 = mix(texture(uVol, vec3(uv0, f0)), texture(uVol, vec3(uv1, f0)), fz);
+    vec4 zz1 = mix(texture(uVol, vec3(uv0, f1)), texture(uVol, vec3(uv1, f1)), fz);
     return mix(zz0, zz1, ff);
 }
 

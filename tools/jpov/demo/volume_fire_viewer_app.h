@@ -181,7 +181,7 @@ public:
         cmds->sun = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
-        // 后处理旋钮（A/B 扫参用）：辉光 + 最终饱和度。默认关/1.0（零回归）。
+        // 辉光（扫参用）：默认关。
         if (bloom_enabled_) {
             jpov::BloomConfig bc;
             bc.enabled = true;
@@ -189,8 +189,6 @@ public:
             bc.threshold = bloom_threshold_;
             cmds->bloom = bc;
         }
-        // 饱和度：只作用**这团火**（发射源项），不改全局后处理（解耦）。
-        cmds->final_saturation = 1.0f;
 
         // 场景：地面 + 1m³ 燃料块（A/B 模式下不画——只留孤立火）。
         if (!ab_mode_) {
