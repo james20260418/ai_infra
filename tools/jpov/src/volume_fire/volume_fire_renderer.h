@@ -84,6 +84,10 @@ uniform float uTempScale;      // G(∈[0,1]) → 开尔文（上界）
 uniform float uTempMin;        // 温度下界 K（G=0 → 此值）
 uniform float uTempPow;        // 发射强度随温度的幂（物理 = 4；0 = 关闭，回到均匀亮度）
 uniform float uTempRef;        // 归一参考温度 K（此处强度 = uEmission）
+uniform sampler2D uPalette;    // 色谱 LUT（宽 N×高 1，sRGB）；色相来自查表
+uniform int   uUsePalette;     // 1 = 用色谱（Fire Color Ramp）；0 = 黑体
+uniform float uRampLo;         // 色谱映射区间 [lo,hi]（作用在温度通道 G 上）
+uniform float uRampHi;
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
 uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
@@ -215,7 +219,14 @@ void main() {
         // ⇒ 热芯远亮于冷边 → 芯被 tone map 顶成白热、边暗成深红。pow=0 关闭（均匀亮度）。
         float radiance = (uTempPow > 0.0)
             ? pow(max(tempK, 1.0) / max(uTempRef, 1.0), uTempPow) : 1.0;
-        vec3 emis = Blackbody(tempK) * uEmission * radiance;
+        // 颜色：黑体（物理）或色谱查表（Fire Color Ramp，同 EmberGen/Houdini）。
+        // 色谱为 sRGB → 转线性后用；亮度仍由 uEmission·radiance 控（色相与亮度解耦）。
+        vec3 base_color = Blackbody(tempK);
+        if (uUsePalette == 1) {
+            float rc = clamp((v.g - uRampLo) / max(uRampHi - uRampLo, 1e-4), 0.0, 1.0);
+            base_color = pow(texture(uPalette, vec2(rc, 0.5)).rgb, vec3(2.2));
+        }
+        vec3 emis = base_color * uEmission * radiance;
         float z_view = t * ray_to_fwd;
         float wgt = sigma * T * dt;
         L += T * a_fire * emis;
@@ -290,6 +301,8 @@ private:
     void EnsureWbo(int w, int h);
     void DestroyWbo();
     void DumpWbo(int w, int h);
+    // 色谱 LUT 加载（按路径缓存；失败返回 0 → 回退黑体）。
+    unsigned int PaletteTex(const char* path);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
@@ -302,6 +315,7 @@ private:
     bool initialized_ = false;
     std::string debug_dump_dir_;
     int dump_seq_ = 0;
+    std::unordered_map<std::string, unsigned int> palette_tex_;   // 色谱 LUT 缓存
 };
 
 }  // namespace jpov

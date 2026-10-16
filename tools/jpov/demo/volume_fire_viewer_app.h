@@ -48,17 +48,21 @@ public:
     // 旋钮
     // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
     static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
-    static constexpr float kDefaultEmission = 1.5f;      // 发射强度（按 A/B 对齐参考亮度定标）
+    static constexpr float kDefaultEmission = 3.2f;      // 发射强度（色谱模式定标）
     static constexpr float kDefaultTempKelvin = 2000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
     static constexpr float kDefaultTempMin = 900.0f;     // 温度下界 K（G=0 → 此值）
     static constexpr float kDefaultTempPow = 4.0f;       // 发射强度随温度的幂（物理 = 4；0 = 关闭）
     static constexpr float kDefaultTempRef = 1000.0f;    // 归一参考温度 K（此处强度 = 发射强度）
+    static constexpr float kDefaultRampLo = 0.05f;       // 色谱映射区间（G→ramp 坐标）
+    static constexpr float kDefaultRampHi = 0.30f;
     static constexpr float kDefaultSmokeScatter = 3.0f;  // 烟散射注入强度（VDB 无此信息，靠它调；Danis 定）
     // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
     // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
     static constexpr float kDefaultSmokeSigma = 0.05f;
     // 烟的受光色默认（中性偏冷，含强度）；单一来源：成员初始化与 CLI 默认共用。
     static jpov::Vec3f DefaultSmokeLight() { return {0.46f, 0.55f, 0.88f}; }
+    // 色熰（Fire Color Ramp）默认 LUT 路径（仓库内，由 make_palette.py 生成；空串 = 回退黑体）。
+    static const char* DefaultPalette() { return "tools/jpov/genVolume/palettes/fire_clean.png"; }
     float sigma_scale_ = kDefaultSigma;
     float emission_scale_ = kDefaultEmission;
     float steps_ = 64.0f;           // 步数
@@ -68,6 +72,10 @@ public:
     float temp_kelvin_min_ = kDefaultTempMin;       // 温度下界 K
     float temp_emission_pow_ = kDefaultTempPow;     // 发射强度随温度的幂（物理 4；0 = 均匀亮度）
     float temp_kelvin_ref_ = kDefaultTempRef;       // 归一参考温度 K
+    // 色谱（Fire Color Ramp）：色相查表，亮度仍走 emission_scale·(T/ref)^pow。
+    std::string palette_path_ = DefaultPalette();
+    float palette_ramp_lo_ = kDefaultRampLo;                 // G → ramp 坐标的映射区间
+    float palette_ramp_hi_ = kDefaultRampHi;
     bool  fire_enable_ = true;
     bool  fuel_enable_ = true;      // 燃料块开关（排查伪影用）
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
@@ -191,6 +199,9 @@ public:
             vc.temp_kelvin_min = temp_kelvin_min_;
             vc.temp_emission_pow = temp_emission_pow_;
             vc.temp_kelvin_ref = temp_kelvin_ref_;
+            vc.palette_png = palette_path_.empty() ? nullptr : palette_path_.c_str();
+            vc.palette_ramp_lo = palette_ramp_lo_;
+            vc.palette_ramp_hi = palette_ramp_hi_;
             vc.steps = static_cast<int>(steps_ + 0.5f);
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
@@ -263,6 +274,8 @@ private:
         ui_.SliderFloat("温度上限 K", &temp_kelvin_scale_, row(6), 800.0f, 6000.0f, 0);
         ui_.SliderFloat("温度下界 K", &temp_kelvin_min_, row(12), 800.0f, 3000.0f, 0);
         ui_.SliderFloat("发射∝T^γ", &temp_emission_pow_, row(11), 0.0f, 6.0f, 2);
+        ui_.SliderFloat("色谱 lo", &palette_ramp_lo_, row(13), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("色谱 hi", &palette_ramp_hi_, row(14), 0.0f, 1.0f, 2);
         ui_.Checkbox("相机信息", &show_cam_info_, row(7));
         ui_.Checkbox("燃料块", &fuel_enable_, row(8));
         ui_.Checkbox("全屏quad(调试)", &fs_debug_, row(9));

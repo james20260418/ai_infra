@@ -37,6 +37,7 @@ import numpy as np
 import pyopenvdb as vdb
 
 import jpvol
+import make_palette
 
 
 def read_grid_dense(path, name, lo, size):
@@ -121,6 +122,8 @@ def main():
     ap.add_argument("--rot", default="none",
                     choices=["none", "x90", "x-90", "y90", "y-90", "z90", "z-90"], help="额外整体旋转")
     ap.add_argument("--crop", type=float, default=0.0, help="紧裁剪阈值（>0 时按任一场的包围盒裁）")
+    ap.add_argument("--palette", default="",
+                    help="色谱 JSON（Fire Color Ramp）；设置时把它烘成 <out>.palette.png 并写进 sidecar")
     ap.add_argument("--dtype", choices=["u8", "f32"], default="u8")
     args = ap.parse_args()
 
@@ -263,6 +266,14 @@ def main():
         "segments": {"ignite": [0, 0], "sustain": [0, F], "extinct": [F, F]},
         "loopable": True, "emission_axis": "+Y", "note": "vdb",
     }
+    # 色谱（可选）：把「强度/温度→颜色」的 Fire Color Ramp 烘成 1D LUT PNG 随资产走
+    # （单独文件管理；渲染侧查表）。见 palettes/*.json。
+    if args.palette:
+        lut_png = args.out + ".palette.png"
+        n, nstops = make_palette.write_lut(args.palette, lut_png)
+        print("  palette -> %s (size=%d stops=%d)" % (lut_png, n, nstops))
+        side["palette"] = args.palette
+        side["palette_lut"] = lut_png
     with open(args.out + ".json", "w") as fp:
         json.dump(side, fp, indent=2)
     print("  world_size_m = %.3f x %.3f x %.3f (voxel_m=%.4f)"

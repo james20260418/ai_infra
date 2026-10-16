@@ -155,6 +155,9 @@ struct AbParams {
     float temp_min = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempMin;
     float temp_pow = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempPow;
     float temp_ref = jpov_volume_fire::VolumeFireViewerApp::kDefaultTempRef;
+    std::string palette = jpov_volume_fire::VolumeFireViewerApp::DefaultPalette();
+    float ramp_lo = jpov_volume_fire::VolumeFireViewerApp::kDefaultRampLo;
+    float ramp_hi = jpov_volume_fire::VolumeFireViewerApp::kDefaultRampHi;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
     float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;
     jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
@@ -193,6 +196,9 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.temp_kelvin_min_ = p.temp_min;
     app.temp_emission_pow_ = p.temp_pow;
     app.temp_kelvin_ref_ = p.temp_ref;
+    app.palette_path_ = p.palette;
+    app.palette_ramp_lo_ = p.ramp_lo;
+    app.palette_ramp_hi_ = p.ramp_hi;
     app.smoke_scatter_ = p.smoke;
     app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
@@ -266,6 +272,12 @@ int main(int argc, char** argv) {
             ab.temp_pow = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-temp-ref") == 0 && i + 1 < argc) {
             ab.temp_ref = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-palette") == 0 && i + 1 < argc) {
+            ab.palette = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--ab-ramp-lo") == 0 && i + 1 < argc) {
+            ab.ramp_lo = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-ramp-hi") == 0 && i + 1 < argc) {
+            ab.ramp_hi = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
             ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke-sigma") == 0 && i + 1 < argc) {

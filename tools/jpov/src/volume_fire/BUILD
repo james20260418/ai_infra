@@ -14,6 +14,7 @@ cc_library(
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:volume_manager",
         "@glog_static//:glog",
+        "//third_party/stb:stb_image",
         "//third_party/stb:stb_image_write",
     ] + select({
         "@platforms//os:windows": [

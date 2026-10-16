@@ -13,6 +13,7 @@
 #include <GL/glext.h>
 
 #include "stb_image_write.h"
+#include "third_party/stb/stb_image.h"
 
 #ifdef _WIN32
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
@@ -36,6 +37,7 @@ namespace {
 constexpr int kSceneDepthUnit = 0;
 constexpr int kVolumeUnit = 1;
 constexpr int kVolumeUnit2 = 2;   // 【hack】层高切分的第二块体积纹理
+constexpr int kPaletteUnit = 3;   // 色谱 LUT（1D，宽 N×高 1）
 
 Vec3f Sub(const Vec3f& a, const Vec3f& b) {
     return Vec3f(a.x() - b.x(), a.y() - b.y(), a.z() - b.z());
@@ -115,7 +117,46 @@ void VolumeFireRenderer::Finalize() {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
+    for (auto& kv : palette_tex_) {
+        if (kv.second != 0) {
+            glDeleteTextures(1, &kv.second);
+        }
+    }
+    palette_tex_.clear();
     initialized_ = false;
+}
+
+unsigned int VolumeFireRenderer::PaletteTex(const char* path) {
+    if (path == nullptr || path[0] == '\0') {
+        return 0;
+    }
+    auto it = palette_tex_.find(path);
+    if (it != palette_tex_.end()) {
+        return it->second;
+    }
+    int w = 0, h = 0, ch = 0;
+    unsigned char* data = stbi_load(path, &w, &h, &ch, 3);   // 强制 RGB
+    unsigned int tex = 0;
+    if (data == nullptr) {
+        LOG(WARNING) << "VolumeFireRenderer: 色谱加载失败 " << path << " — " << stbi_failure_reason();
+    } else {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        GLint prev_align = 4;
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        stbi_image_free(data);
+        LOG(INFO) << "VolumeFireRenderer: 色谱 " << path << " (" << w << "x" << h << ") -> tex " << tex;
+    }
+    palette_tex_[path] = tex;
+    return tex;
 }
 
 void VolumeFireRenderer::EnsureWbo(int w, int h) {
@@ -271,6 +312,14 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     glBindTexture(GL_TEXTURE_2D_ARRAY, vol.gl_tex2 != 0 ? vol.gl_tex2 : vol.gl_tex);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uVol2"), kVolumeUnit2);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uVolSplit"), vol.chunk_split);
+    // 【色谱】Fire Color Ramp LUT（可选）：色相来自查表，失败/未配置时回退黑体。
+    unsigned int pal_tex = PaletteTex(cmd.palette_png);
+    glActiveTexture(GL_TEXTURE0 + kPaletteUnit);
+    glBindTexture(GL_TEXTURE_2D, pal_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uPalette"), kPaletteUnit);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uUsePalette"), pal_tex != 0 ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uRampLo"), cmd.palette_ramp_lo);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uRampHi"), cmd.palette_ramp_hi);
 
     glBindVertexArray(vao_);
     if (cmd.debug_fullscreen) {

@@ -48,6 +48,18 @@ struct VolumeFireCommand {
     float temp_emission_pow = 4.0f;
     float temp_kelvin_ref = 1000.0f;
 
+    // 【色谱 / Fire Color Ramp】nullptr 或空 = 用黑体；否则指向一个 1D LUT PNG 的路径
+    // （由「强度/温度→颜色」色谱烘成，见 tools/jpov/genVolume/palettes/ + make_palette.py）。
+    // 与 EmberGen 的 Color Gradient / Houdini 的 Fire Color Ramp 同构：色相来自查表、
+    // 亮度仍由 emission_scale·(T/ref)^pow 控制。LUT 为 sRGB，shader 里转线性后用。
+    // 生命周期：由调用者在 Draw 期间保持有效（通常指向 app 持有的 std::string）。
+    const char* palette_png = nullptr;
+    // 色谱映射区间：ramp 坐标 = clamp((G - lo)/(hi - lo), 0, 1)。默认 [0,1]（G 直接用）。
+    // 参考色带的像素是按「亮度分位」抽的，而 G(flames) 与亮度不严格等价——
+    // 用 [lo,hi] 把 G 的实际范围对齐到色谱两端。
+    float palette_ramp_lo = 0.0f;
+    float palette_ramp_hi = 1.0f;
+
     // 播放帧号（含小数 → 相邻帧线性混合）。范围 [0, nframes)。
     float frame = 0.0f;
 
