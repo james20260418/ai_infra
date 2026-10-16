@@ -65,6 +65,8 @@ public:
     bool  pivot_mode_ = false;         // 风算法：false=平移式（原算法）；true=枢轴式（绕关节旋转）
     float turb_amp_ = 0.15f;           // 平动湍流幅度（**独立**于振幅滑条，便于单独观察）
     float turb_freq_ = 2.5f;           // 平动湍流频率 Hz（**独立**于频率滑条）
+    float gust_freq_ = 0.6f;           // 阵风频率 Hz（多久来一阵）
+    float gust_str_ = 0.7f;            // 阵风强度 0..1（0 = 关掉起伏）
 
     // ── 风场（每实例扰动）──
     int   instance_count_ = 5;         // 一排几株
@@ -152,6 +154,8 @@ public:
         wind.mode = pivot_mode_ ? 1 : 0;   // 0=平移式（原）；1=枢轴式（A/B 对比）
         wind.turb_amplitude = turb_amp_;   // 平动湍流：独立滑条
         wind.turb_frequency = turb_freq_;
+        wind.gust_frequency = gust_freq_;
+        wind.gust_strength = gust_str_;
         if (wind_enabled_) {
             cmds->wind = wind;
         }
@@ -217,7 +221,7 @@ private:
         const float kSpace  = 10.0f;
         const float kBottom = 20.0f;
         const float left    = (w - kWidth) * 0.5f;
-        const int   kRows   = 14;
+        const int   kRows   = 16;
         const float top     = h - kBottom -
                               (static_cast<float>(kRows) * kRowH +
                                static_cast<float>(kRows - 1) * kSpace);
@@ -233,6 +237,8 @@ private:
         ui_.SliderFloat("湍流（平移式）", &turbulence_, row(4), 0.0f, 1.5f, 2);
         ui_.SliderFloat("平动湍流幅度", &turb_amp_, row(10), 0.0f, 1.0f, 3);
         ui_.SliderFloat("平动湍流频率 Hz", &turb_freq_, row(11), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("阵风频率 Hz", &gust_freq_, row(12), 0.0f, 3.0f, 2);
+        ui_.SliderFloat("阵风强度 0=关", &gust_str_, row(13), 0.0f, 1.0f, 2);
         float ts_f = time_scale_;
         if (ui_.SliderFloat("时间缩放（0=暂停）", &ts_f, row(5), 0.0f, 3.0f, 2)) {
             time_scale_ = ts_f;
@@ -244,13 +250,13 @@ private:
             instance_count_ = static_cast<int>(ic_f + 0.5f);
         }
         ui_.SliderFloat("模型缩放", &model_scale_, row(9), 0.3f, 3.0f, 2);
-        ui_.Checkbox("枢轴式风（对比：绕关节旋转）", &pivot_mode_, row(12));
+        ui_.Checkbox("枢轴式风（对比：绕关节旋转）", &pivot_mode_, row(14));
         char info[160];
         std::snprintf(info, sizeof(info), "小柳树 × %d  |  风 VS（%s / %s）",
                       instance_count_,
                       use_fixed_time_ ? "固定时间" : "实时",
                       pivot_mode_ ? "枢轴" : "平移");
-        ui_.Text(info, row(13));
+        ui_.Text(info, row(15));
     }
 
     bool show_panel_ = true;

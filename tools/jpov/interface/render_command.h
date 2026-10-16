@@ -692,6 +692,9 @@ struct WindCommand {
     //   （幅度 ∝ softness·(0.5+0.5·level)，频率 ∝ (1+kTurbLevF·level)），但那两个系数是常数。
     float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
     float turb_frequency = 2.5f;   // 平动湍流频率（Hz）
+    // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)
+    float gust_frequency = 0.6f;   // 阵风频率（Hz）：多久来一阵
+    float gust_strength  = 0.7f;   // 阵风强度 [0,1]：0 = 关掉起伏（湍流恒开）
 };
 
 // 未启用（默认）时零开销、零回归。

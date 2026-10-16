@@ -37,7 +37,7 @@ JPOV::Config MakeConfig(const char* title, bool headless) {
 int RunWindCapture(const std::string& out_dir, float distance, int frames,
                    int count, float amplitude, float azimuth_deg, float dt,
                    bool pivot_mode, float turbulence, float speed,
-                   float turb_amp, float turb_freq) {
+                   float turb_amp, float turb_freq, float gust_freq, float gust_str) {
     jpov_wind::WindViewerApp app(MakeConfig("JPOV — 植被风 A/B（headless）",
                                             /*headless=*/true));
     app.SetShowPanel(false);
@@ -49,6 +49,8 @@ int RunWindCapture(const std::string& out_dir, float distance, int frames,
     app.wind_speed_ = speed;
     app.turb_amp_ = turb_amp;
     app.turb_freq_ = turb_freq;
+    app.gust_freq_ = gust_freq;
+    app.gust_str_ = gust_str;
     app.Init();
     app.InstallScene();
 
@@ -95,6 +97,8 @@ int main(int argc, char** argv) {
     float speed = 1.6f;
     float turb_amp = 0.15f;
     float turb_freq = 2.5f;
+    float gust_freq = 0.6f;
+    float gust_str = 0.7f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture-wind") == 0 && i + 1 < argc) {
             wind_dir = argv[i + 1];
@@ -118,13 +122,17 @@ int main(int argc, char** argv) {
             turb_amp = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--turb-freq") == 0 && i + 1 < argc) {
             turb_freq = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--gust-freq") == 0 && i + 1 < argc) {
+            gust_freq = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--gust-str") == 0 && i + 1 < argc) {
+            gust_str = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--pivot") == 0) {
             pivot = true;
         }
     }
     if (!wind_dir.empty()) {
         return RunWindCapture(wind_dir, distance, frames, count, amplitude, azimuth, dt,
-                              pivot, turbulence, speed, turb_amp, turb_freq);
+                              pivot, turbulence, speed, turb_amp, turb_freq, gust_freq, gust_str);
     }
 
     // ── 交互模式 ──
