@@ -36,7 +36,7 @@ JPOV::Config MakeConfig(const char* title, bool headless) {
 // headless 拍摄：固定机位，先出「关风」参照，再逐帧出「开风」帧（帧 i 的时间 = i*dt 秒）。
 int RunWindCapture(const std::string& out_dir, float distance, int frames,
                    int count, float amplitude, float azimuth_deg, float dt,
-                   bool pivot_mode) {
+                   bool pivot_mode, float turbulence, float speed) {
     jpov_wind::WindViewerApp app(MakeConfig("JPOV — 植被风 A/B（headless）",
                                             /*headless=*/true));
     app.SetShowPanel(false);
@@ -44,6 +44,8 @@ int RunWindCapture(const std::string& out_dir, float distance, int frames,
     app.amplitude_ = amplitude;
     app.wind_azimuth_deg_ = azimuth_deg;
     app.pivot_mode_ = pivot_mode;
+    app.turbulence_ = turbulence;
+    app.wind_speed_ = speed;
     app.Init();
     app.InstallScene();
 
@@ -86,6 +88,8 @@ int main(int argc, char** argv) {
     float azimuth = 35.0f;
     float dt = 1.0f;
     bool pivot = false;
+    float turbulence = 0.5f;
+    float speed = 1.6f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture-wind") == 0 && i + 1 < argc) {
             wind_dir = argv[i + 1];
@@ -101,13 +105,17 @@ int main(int argc, char** argv) {
             azimuth = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--dt") == 0 && i + 1 < argc) {
             dt = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--turbulence") == 0 && i + 1 < argc) {
+            turbulence = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
+            speed = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--pivot") == 0) {
             pivot = true;
         }
     }
     if (!wind_dir.empty()) {
         return RunWindCapture(wind_dir, distance, frames, count, amplitude, azimuth, dt,
-                              pivot);
+                              pivot, turbulence, speed);
     }
 
     // ── 交互模式 ──

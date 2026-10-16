@@ -78,8 +78,6 @@ uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, pare
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
-const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
-const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -147,12 +145,11 @@ void main() {
             //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
             //   p' = q_own + R_own·(p − pivot_own)
             vec3 wdir = aInstWind.xyz;
-            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            float ws = length(wdir);                                  // 风速：只用于噪声扫过速度/方向
             vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
             float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
             float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
@@ -183,7 +180,7 @@ void main() {
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * (dc + sin(6.28318531 * pjw));
+                float th = amp * sin(6.28318531 * pjw);            // 无 DC：风速不再决定"吹歪
                 // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
                 vec3 np = t0.xyz;
                 float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
@@ -191,7 +188,10 @@ void main() {
                                - scroll * 0.7 + 2.1);
                 float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
                 vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
-                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                // 湍流幅度：原来只有 0.15*lev（level0 直接为 0 ⇒ 基本看不见）。改为
+                //   0.15 + 0.15*lev ⇒ 根梢都有、越靠梢越活（level3 时约为结构项的 1.33 倍）。
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter
+                          * (0.15 + 0.15 * lev) * n3;
                 vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
                     qpos = t0.xyz;
@@ -258,8 +258,6 @@ uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
-const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
-const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -326,12 +324,11 @@ void main() {
             //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
             //   p' = q_own + R_own·(p − pivot_own)
             vec3 wdir = aInstWind.xyz;
-            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            float ws = length(wdir);                                  // 风速：只用于噪声扫过速度/方向
             vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
             float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
             float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
@@ -362,7 +359,7 @@ void main() {
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * (dc + sin(6.28318531 * pjw));
+                float th = amp * sin(6.28318531 * pjw);            // 无 DC：风速不再决定"吹歪
                 // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
                 vec3 np = t0.xyz;
                 float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
@@ -370,7 +367,10 @@ void main() {
                                - scroll * 0.7 + 2.1);
                 float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
                 vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
-                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                // 湍流幅度：原来只有 0.15*lev（level0 直接为 0 ⇒ 基本看不见）。改为
+                //   0.15 + 0.15*lev ⇒ 根梢都有、越靠梢越活（level3 时约为结构项的 1.33 倍）。
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter
+                          * (0.15 + 0.15 * lev) * n3;
                 vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
                     qpos = t0.xyz;
@@ -442,8 +442,6 @@ uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数
-const float kWindRef      = 3.0;   // 风速参考值：|wind|/kWindRef = DC 归一（此值≈"满吹歪"）
-const float kWindDc       = 0.55;  // 最大直流偏斜（占振荡幅度的比例）——"吹歪"的量
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -498,12 +496,11 @@ void main() {
             //   Hinge_j = 结构(绕风向轴 θ) ∘ 湍流(绕**世界空间噪声轴** θ_t)
             //   p' = q_own + R_own·(p − pivot_own)
             vec3 wdir = aInstWind.xyz;
-            float ws = length(wdir);                                  // 风速 -> 吹歪多少(DC)
+            float ws = length(wdir);                                  // 风速：只用于噪声扫过速度/方向
             vec3 wdirn = normalize(wdir + vec3(1e-6, 1e-6, 1e-6));
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
-            float dc = clamp(ws / kWindRef, 0.0, 1.0) * kWindDc;
             float tw2 = uWindTime + aInstWind.w;                      // 每实例时间偏移
             float scroll = uWindTime * (0.6 + 0.4 * min(ws, 3.0));    // 噪声随时间**沿风扫过**
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
@@ -534,7 +531,7 @@ void main() {
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
                 float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
-                float th = amp * (dc + sin(6.28318531 * pjw));
+                float th = amp * sin(6.28318531 * pjw);            // 无 DC：风速不再决定"吹歪
                 // ---- 湍流：**世界空间**伪 3D 噪声，按**关节枢轴位置**取样（空间相干！）----
                 vec3 np = t0.xyz;
                 float n1 = sin(2.1 * (dot(np, wdirn) * 0.8 + np.y * 0.30) - scroll);
@@ -542,7 +539,10 @@ void main() {
                                - scroll * 0.7 + 2.1);
                 float n3 = sin(3.1 * (np.y + 0.2 * dot(np, wdirn)) - scroll * 1.6 + 4.2);
                 vec3 taxis = normalize(vec3(n2, n1 * 0.4, n3) + vec3(1e-4, 0.0, 1e-4));
-                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev) * n3;
+                // 湍流幅度：原来只有 0.15*lev（level0 直接为 0 ⇒ 基本看不见）。改为
+                //   0.15 + 0.15*lev ⇒ 根梢都有、越靠梢越活（level3 时约为结构项的 1.33 倍）。
+                float tht = uWindAmplitude * uWindTurbulence * kWindFlutter
+                          * (0.15 + 0.15 * lev) * n3;
                 vec4 hinge = WindQuatMul(WindQaa(axis, th), WindQaa(taxis, tht));
                 if (have_par == 0) {
                     qpos = t0.xyz;
