@@ -29,11 +29,13 @@ MAGIC1 = b"JPVOL1\x00\x00"
 MAGIC2 = b"JPVOL2\x00\x00"
 
 
-def write_jpovvol(path, dens, temp, smoke=None, dtype="u8"):
+def write_jpovvol(path, dens, temp, smoke=None, dtype="u8", pre_quantized=False):
     """写 JPVOL2 帧序列。dens/temp(/smoke): [F][z][y][x]，∈[0,1]。
 
     传 smoke 则写 **3 通道**（R=火密度, G=温度, B=烟密度）；否则写 2 通道。
     dtype="u8" → 量化成 uint8（dtype code 1）；"f32" → float32（code 0）。
+    pre_quantized=True 时输入已是 uint8(∈[0,255]) → 不再量化（省一次全量 f32 副本，
+    ds=1 大体积下避免瞬时内存翻倍）。
     返回 (nx, ny, nz, nframes, 总字节数)。
     """
     F, Z, Y, X = dens.shape
@@ -43,9 +45,14 @@ def write_jpovvol(path, dens, temp, smoke=None, dtype="u8"):
             raise ValueError("dens/temp/smoke 形状必须一致")
     data = np.ascontiguousarray(np.stack(chans, axis=-1))   # [F][z][y][x][C]
     if dtype == "u8":
-        payload = (np.clip(data, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        if pre_quantized:
+            payload = np.clip(data, 0, 255).astype(np.uint8)
+        else:
+            payload = (np.clip(data, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
         dtype_code = 1
     elif dtype == "f32":
+        if pre_quantized:
+            raise ValueError("pre_quantized 只能用于 dtype='u8'")
         payload = data.astype(np.float32)
         dtype_code = 0
     else:

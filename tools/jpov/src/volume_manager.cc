@@ -101,6 +101,19 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         LOG(WARNING) << "VolumeManager: 维数超过 GLsizei " << path;
         return 0;
     }
+    // 体积按 GL_TEXTURE_2D_ARRAY 上传：宽=nx、高=ny*nz（层=帧）。宽/高都受
+    // GL_MAX_TEXTURE_SIZE 限制——超限时 glTexImage3D 会失败、纹理不完整、采样全 0
+    // （渲染成一片黑），**且不会报错**。这里提前拦截 + 明确报出上限（否则静默黑屏）。
+    GLint max_tex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    if (max_tex > 0 && (h.nx > static_cast<uint32_t>(max_tex) ||
+                        layer_h > static_cast<size_t>(max_tex))) {
+        LOG(WARNING) << "VolumeManager: 体积 " << h.nx << "x" << h.ny << "x" << h.nz
+                     << " (2D 层高 ny*nz=" << layer_h << ") 超过 GL_MAX_TEXTURE_SIZE="
+                     << max_tex << "，无法上传：" << path
+                     << "（降分辨率或用 --ds 重转）";
+        return 0;
+    }
 
     std::vector<unsigned char> buf(bytes_per_frame);
     f.seekg(sizeof(JpovVol2Header), std::ios::beg);

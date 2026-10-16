@@ -154,37 +154,35 @@ def main():
     print("frames=%d  channels=%s  global bbox size (x,y,z)=%s"
           % (len(files), grid_names, size))
 
-    # 逐帧读取 →（全分辨率下累计 crop 包围盒）→ **立即降采样** → 存。
-    # 逐帧降采样是为了**省内存**：整段全分辨率堆叠在大 VDB 盒上可达 GB 级（本机容器限额 6GB，曾 OOM）。
-    # 各通道分开存；归一化推迟到最后（需整段的全局统计）。
-    frames = [[] for _ in channels]
+    # 逐通道读取（**通道外层循环**，任意时刻只驻一通道的逐帧数据 → 省内存；ds=1 全分辨率下
+    # 若把所有通道同时堆在内存可达 GB 级，容器限额 6GB 会 OOM）。
+    # 每帧：全分辨率读取 →（累计 crop 包围盒）→ **立即降采样** → 存；归一化推迟到整段读完。
+    out_chans = []
     crop_lo = None
     crop_hi = None
-    for i, f in enumerate(files):
-        ds_per_ch = [read_grid_dense(f, name, lo, size) for name in grid_names]
-        if args.crop > 0.0:
-            # crop 包围盒在**全分辨率**上累计（与「先裁后降采样」等价）。
-            m = np.zeros_like(ds_per_ch[0], dtype=bool)
-            for a in ds_per_ch:
-                m |= (a > args.crop)
-            if m.any():
-                zs, ys, xs = np.where(m)
-                b_lo = np.array([zs.min(), ys.min(), xs.min()], dtype=np.int64)
-                b_hi = np.array([zs.max(), ys.max(), xs.max()], dtype=np.int64)
-                crop_lo = b_lo if crop_lo is None else np.minimum(crop_lo, b_lo)
-                crop_hi = b_hi if crop_hi is None else np.maximum(crop_hi, b_hi)
-            del m
-        for ci, a in enumerate(ds_per_ch):
-            frames[ci].append(jpvol.downsample(a, args.ds))
-        if i % 25 == 0:
-            print("  frame %d/%d  maxima=%s"
-                  % (i, len(files), [round(float(a.max()), 4) for a in ds_per_ch]))
+    for ci, (grid, scale, norm, gamma) in enumerate(channels):
+        per_frame = []
+        for i, f in enumerate(files):
+            a = read_grid_dense(f, grid, lo, size)
+            if args.crop > 0.0:
+                # crop 包围盒在**全分辨率**上累计（与「先裁后降采样」等价）。
+                m = a > args.crop
+                if m.any():
+                    zs, ys, xs = np.where(m)
+                    b_lo = np.array([zs.min(), ys.min(), xs.min()], dtype=np.int64)
+                    b_hi = np.array([zs.max(), ys.max(), xs.max()], dtype=np.int64)
+                    crop_lo = b_lo if crop_lo is None else np.minimum(crop_lo, b_lo)
+                    crop_hi = b_hi if crop_hi is None else np.maximum(crop_hi, b_hi)
+                del m
+            per_frame.append(jpvol.downsample(a, args.ds))
+            del a
+            if ci == 0 and i % 25 == 0:
+                print("  frame %d/%d" % (i, len(files)))
 
-    # 各通道**独立归一化**（不同 grid 的绝对量纲可差几个数量级，flames≈1 vs density≈0.003），
-    # 归一化口径由 --channel 的 norm 决定（默认按**非零体素**，避免稀疏数组上取分位致饱和）。
-    out_chans = []
-    for (grid, scale, norm, gamma), fr in zip(channels, frames):
-        arr = np.stack(fr)
+        # 各通道**独立归一化**（不同 grid 的绝对量纲可差几个数量级，flames≈1 vs density≈0.003），
+        # 归一化口径由 --channel 的 norm 决定（默认按**非零体素**，避免稀疏数组上取分位致饱和）。
+        arr = np.stack(per_frame)
+        per_frame = None
         div = norm_divisor(arr, norm)
         if div <= 0.0:
             print("  [warn] 通道 grid=%s 全为零，跳过归一" % grid)
@@ -195,12 +193,27 @@ def main():
                  np.percentile(nz, 50) if nz.size else 0.0,
                  np.percentile(nz, 90) if nz.size else 0.0,
                  nz.max() if nz.size else 0.0))
+        del nz
         # 归一 → [0,1]；gamma 曲线（<1 抬升中低值，用于把偏低的场拉满动态范围，
         # 如温度通道：flames 场分布偏低，线性映射会让大部分体素落到黑体下限）。
-        normed = np.clip(arr / div, 0.0, 1.0)
+        # **全程 in-place**：ds=1 全分辨率下一个 f32 副本就 ~1GB，容器内存紧。
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32)
+        arr /= div
+        np.clip(arr, 0.0, 1.0, out=arr)
         if gamma != 1.0:
-            normed = np.power(normed, gamma)
-        out_chans.append(normed * scale)
+            np.power(arr, gamma, out=arr)
+        if scale != 1.0:
+            arr *= scale
+        np.clip(arr, 0.0, 1.0, out=arr)
+        # u8 输出：**立即量化**，不再保留 f32 副本（大体积下省一半内存）。
+        if args.dtype == "u8":
+            arr *= 255.0
+            arr += 0.5
+            out_chans.append(arr.astype(np.uint8))
+        else:
+            out_chans.append(arr)
+        del arr
 
     if args.crop > 0.0 and crop_lo is not None:
         # 全分辨率包围盒 → 降采样下标（降采样网格 i 覆盖全分辨率 [i*ds, (i+1)*ds)）。
@@ -235,7 +248,9 @@ def main():
     dens = out_chans[0]
     temp = out_chans[1] if len(out_chans) > 1 else np.zeros_like(dens)
     smoke = out_chans[2] if len(out_chans) > 2 else None
-    X, Y, Z, F, nbytes = jpvol.write_jpovvol(args.out, dens, temp, smoke=smoke, dtype=args.dtype)
+    X, Y, Z, F, nbytes = jpvol.write_jpovvol(
+        args.out, dens, temp, smoke=smoke, dtype=args.dtype,
+        pre_quantized=(args.dtype == "u8"))
     print("wrote %s dims=(%d,%d,%d) frames=%d channels=%d dtype=%s bytes=%d"
           % (args.out, X, Y, Z, F, 3 if smoke is not None else 2, args.dtype, nbytes))
 
