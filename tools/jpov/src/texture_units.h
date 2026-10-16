@@ -52,9 +52,15 @@ inline constexpr int kTexUnitPartialRotationChannel = 15;
 // 仅 object3d blend（kBlend）program 使用；主链路其他 program 不绑它。
 inline constexpr int kTexUnitGlassSceneDepth = 16;
 
-// 枢轴式植被风的「关节表」纹理（每关节 1 texel：pivot.xyz + parent；RGBA32F，N×1）。
-//   仅 instanced 路径的枢轴风（mode=1）使用；主/shadow pass 同号共用（两 pass 不同时活跃）。
-inline constexpr int kTexUnitWindJointTable = 17;
+// 枢轴式植被风的「关节表」纹理（每关节 2 texel：pivot.xyz+parent / level+phase；RGBA32F，2N×1）。
+//   仅 instanced 路径的枢轴风（mode=1）使用。
+//   ⚠️ **故意与蒙皮专用槽 12 同号**：单元 0..11 是 3D 主链路共用槽，12..15 只被
+//   蒙皮路径（pose atlas/粗细/部位旋转）占用，而蒙皮与 instanced 植被**不同时活跃**
+//   （同一条命令不会既是蒙皮又是 instanced 植被）⇒ 同号共用安全。
+//   **必须留在 0..15**：GL 3.3 只保证 MAX_VERTEX_TEXTURE_IMAGE_UNITS ≥ 16，
+//   用 16/17 在部分驱动（集显等）上 glActiveTexture 报 INVALID_ENUM、纹理不绑定，
+//   texelFetch 读垃圾 → 关节 level 爆掉 → 整株被巨大角度搬倒。
+inline constexpr int kTexUnitWindJointTable = 12;
 
 // ---- 编译期互不重叠校验（改分配表时立刻报错）----
 static_assert(kTexUnitMaterialBase + kMaterialTexUnitCount <= kTexUnitShadowMapBase,
@@ -69,8 +75,8 @@ static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
               "部位额外旋转的两张表单元重叠");
 static_assert(kTexUnitPartialRotationChannel < kTexUnitGlassSceneDepth,
               "部位额外旋转通道表与玻璃场景深度单元重叠");
-static_assert(kTexUnitGlassSceneDepth < kTexUnitWindJointTable,
-              "玻璃场景深度单元与枢轴风关节表单元重叠");
+// ⚠️ kTexUnitWindJointTable 故意 = kTexUnitPoseAtlas（12）：蒙皮与 instanced 植被
+// 不同时活跃，同号共用，且必须留在 0..15（见该常量处注释）。故不参与下列顺序断言。
 
 }  // namespace jpov
 

@@ -141,8 +141,11 @@ void main() {
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
                 // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                float fr = uWindFrequency * (1.0 + 1.6 * min(jd1.x, 3.0));
-                float amp = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * jd1.x, 0.1);
+                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
+                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                float lev = clamp(jd1.x, 0.0, 3.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
                 float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
@@ -151,8 +154,9 @@ void main() {
                     break;
                 }
             }
-            float fr0 = uWindFrequency * (1.0 + 1.6 * min(o1.x, 3.0));
-            float amp0 = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * o1.x, 0.1);
+            float lev0 = clamp(o1.x, 0.0, 3.0);
+            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
             float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
@@ -263,8 +267,11 @@ void main() {
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
                 // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                float fr = uWindFrequency * (1.0 + 1.6 * min(jd1.x, 3.0));
-                float amp = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * jd1.x, 0.1);
+                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
+                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                float lev = clamp(jd1.x, 0.0, 3.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
                 float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
@@ -273,8 +280,9 @@ void main() {
                     break;
                 }
             }
-            float fr0 = uWindFrequency * (1.0 + 1.6 * min(o1.x, 3.0));
-            float amp0 = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * o1.x, 0.1);
+            float lev0 = clamp(o1.x, 0.0, 3.0);
+            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
             float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
@@ -377,8 +385,11 @@ void main() {
                 vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
                 vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
                 // 频率/增益按关节**层级**分档（同平移式 4 档：1/2.6/4.2/5.8 Hz，0.4/0.3/0.2/0.1）。
-                float fr = uWindFrequency * (1.0 + 1.6 * min(jd1.x, 3.0));
-                float amp = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * jd1.x, 0.1);
+                //   level 先 clamp 到 [0,3]：即使表纹理取址/内容异常（level 为垃圾大数或负数），
+                //   amp/fr 也不会被放大 => 不可能出现“整株被一个巨大角度扳倒”。
+                float lev = clamp(jd1.x, 0.0, 3.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev);
                 float th = amp * sin(6.28318531 * fr * (uWindTime + jd1.y));
                 p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
                 th_par += th;
@@ -387,8 +398,9 @@ void main() {
                     break;
                 }
             }
-            float fr0 = uWindFrequency * (1.0 + 1.6 * min(o1.x, 3.0));
-            float amp0 = uWindAmplitude * kWindPivotGain * max(0.4 - 0.1 * o1.x, 0.1);
+            float lev0 = clamp(o1.x, 0.0, 3.0);
+            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
+            float amp0 = uWindAmplitude * kWindPivotGain * (0.4 - 0.1 * lev0);
             float th0 = amp0 * sin(6.28318531 * fr0 * (uWindTime + o1.y));
             p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
             float th_sum = th_par + lw * th0;
