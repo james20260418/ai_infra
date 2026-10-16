@@ -81,6 +81,7 @@ uniform float uEmission;       // 发射尺度
 uniform float uTempScale;      // G(∈[0,1]) → 开尔文
 uniform vec3  uSmokeAlbedo;    // 烟的反照率
 uniform float uSmokeScatter;   // 烟散射强度（0 = 关，烟不可见）
+uniform float uSmokeSigma;     // 烟消光倍数（只作用于 σ_smoke；0 = 无烟）
 uniform vec3  uLightColor;     // 烟的受光辐射色（含强度）
 uniform int   uChannels;       // 体纹理通道数（2 = 无烟；3 = 带 B=烟密度）
 uniform float uFrame;          // 播放帧号（含小数）
@@ -189,7 +190,7 @@ void main() {
         float smoke_dens = (uChannels >= 3) ? v.b : 0.0;
         float tempK = v.g * uTempScale;
         float sigma_fire = fire_dens * uSigma;
-        float sigma_smoke = smoke_dens * uSigma;
+        float sigma_smoke = smoke_dens * uSigma * uSmokeSigma;
         float sigma = sigma_fire + sigma_smoke;
         float a = 1.0 - exp(-sigma * dt);
         // 自发光只按**火自己的光深**注入（只有火发光）。不能乘总 a：烟区 G=0，

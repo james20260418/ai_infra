@@ -60,6 +60,9 @@ struct VolumeFireCommand {
     // smoke_scatter = 0 时整条散射路径关闭（**零回归**）。
     Vec3f smoke_albedo = {0.72f, 0.70f, 0.68f};   // 烟的反照率（中性偏暖灰）
     float smoke_scatter = 0.0f;                   // 散射强度增益（0 = 关）
+    // 烟消光倍数：只作用于 σ_smoke（= B·sigma_scale·此值）。烟太厚会盖住火；
+    // 散射注入 ∝ σ_smoke，故这一个旋钮同时压低「烟厚」与「烟亮」。0 = 无烟。
+    float smoke_sigma_scale = 1.0f;
     Vec3f light_color = {0.62f, 0.66f, 0.75f};    // 烟的受光辐射色（中性偏冷，含强度）
 };
 

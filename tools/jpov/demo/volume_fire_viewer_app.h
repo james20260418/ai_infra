@@ -50,8 +50,11 @@ public:
     static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
     static constexpr float kDefaultEmission = 1.0f;      // 发射强度
     static constexpr float kDefaultSmokeScatter = 1.0f;  // 烟散射强度
+    // 烟消光倍数默认：烟太厚会把火盖住；散射注入 ∝ σ_smoke，此值同时压低烟厚与烟亮。
+    // 0.05 是按「上半 ROI 亮度对齐参考」扫出来的初值（见 docs/jpov_campfire_repro_plan.md §3.3）。
+    static constexpr float kDefaultSmokeSigma = 0.05f;
     // 烟的受光色默认（中性偏冷，含强度）；单一来源：成员初始化与 CLI 默认共用。
-    static jpov::Vec3f DefaultSmokeLight() { return {0.62f, 0.66f, 0.75f}; }
+    static jpov::Vec3f DefaultSmokeLight() { return {0.46f, 0.55f, 0.88f}; }
     float sigma_scale_ = kDefaultSigma;
     float emission_scale_ = kDefaultEmission;
     float steps_ = 64.0f;           // 步数
@@ -63,6 +66,7 @@ public:
     // 烟散射强度（0 = 关）：3 通道资产的 B 通道（烟）受均匀照明散射 → 烟在纯黑底下可见。
     // 见 interface/volume_fire_types.h 的 VolumeFireCommand 注释。
     float smoke_scatter_ = kDefaultSmokeScatter;
+    float smoke_sigma_scale_ = kDefaultSmokeSigma;   // 烟消光倍数（同时压低烟厚与烟亮）
     jpov::Vec3f smoke_light_color_ = VolumeFireViewerApp::DefaultSmokeLight();  // 烟的受光色
     bool  fs_debug_ = false;         // 调试：全屏 quad 代替盒光栅化
     float play_time_ = 0.0f;
@@ -174,6 +178,7 @@ public:
             vc.jitter = jitter_;
             vc.debug_fullscreen = fs_debug_;
             vc.smoke_scatter = smoke_scatter_;
+            vc.smoke_sigma_scale = smoke_sigma_scale_;
             vc.light_color = smoke_light_color_;
             // A/B 模式：帧号钉死（可复现）；常规模式：按播放时间推进。
             vc.frame = ab_mode_ ? static_cast<float>(ab_frame_)

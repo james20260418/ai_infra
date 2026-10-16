@@ -3,7 +3,7 @@
 // 场景 = 灰色地面 + 1m³ 燃料块 + 块顶的体积火（逐像素 raymarch → WBO 薄层合成）。
 // headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>]
 // A/B 基准拍摄：--ab-capture <out.png> [--volume <path.jpovvol>] [--ab-frame N] [--ab-box M]
-//               [--ab-sigma S] [--ab-emis E] [--ab-smoke K] [--ab-light r,g,b]
+//               [--ab-sigma S] [--ab-emis E] [--ab-smoke K] [--ab-smoke-sigma N] [--ab-light r,g,b]
 // 编译：./tools/jpov/build_volume_fire_viewer.sh
 
 #include <cstdio>
@@ -150,6 +150,7 @@ struct AbParams {
     float sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSigma;
     float emission = jpov_volume_fire::VolumeFireViewerApp::kDefaultEmission;
     float smoke = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeScatter;
+    float smoke_sigma = jpov_volume_fire::VolumeFireViewerApp::kDefaultSmokeSigma;
     jpov::Vec3f light = jpov_volume_fire::VolumeFireViewerApp::DefaultSmokeLight();
 };
 
@@ -181,6 +182,7 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
     app.sigma_scale_ = p.sigma;
     app.emission_scale_ = p.emission;
     app.smoke_scatter_ = p.smoke;
+    app.smoke_sigma_scale_ = p.smoke_sigma;
     app.smoke_light_color_ = p.light;
 
     // 钉相机：正面看向原点，距离由火盒（居中于原点）自动取景。
@@ -234,6 +236,8 @@ int main(int argc, char** argv) {
             ab.emission = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-smoke") == 0 && i + 1 < argc) {
             ab.smoke = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ab-smoke-sigma") == 0 && i + 1 < argc) {
+            ab.smoke_sigma = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--ab-light") == 0 && i + 1 < argc) {
             float lr = 0.0f, lg = 0.0f, lb = 0.0f;
             if (std::sscanf(argv[i + 1], "%f,%f,%f", &lr, &lg, &lb) == 3) {
