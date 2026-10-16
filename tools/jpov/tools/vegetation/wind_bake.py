@@ -145,7 +145,7 @@ def _nearest(polys, cum, hd_start, pt):
     skeleton sample point (not interpolated along a segment): a tube cross-section
     (ring) is perpendicular to the centreline, so all its vertices share the same
     nearest sample -> identical softness -> the ring stays rigid (no pinching)."""
-    best, braw = 1e18, 0.0
+    best, braw, bsel = 1e18, 0.0, 0
     for i in range(len(polys)):
         P = polys[i]
         for k in range(len(P)):
@@ -153,7 +153,8 @@ def _nearest(polys, cum, hd_start, pt):
             if d < best:
                 best = d
                 braw = hd_start[i] + cum[i][k]
-    return braw, _smooth_phase01(pt.x, pt.y, pt.z)
+                bsel = i
+    return braw, _smooth_phase01(pt.x, pt.y, pt.z), bsel, best
 
 
 # --- 枢轴风（pivot rotation）用的关节表 --------------------------------------
@@ -197,7 +198,8 @@ def _build_joints(polys, H):
         for kk in range(len(kept_idx[i])):
             joint_of[(i, kk)] = len(joints)
             joints.append({'pivot': polys[i][kept_idx[i][kk]], 'parent': -1,
-                           'level': 0, 'phase': 0.0})
+                           'level': 0, 'phase': 0.0, 'spline': i,
+                           'arc': cum[i][kept_idx[i][kk]], 'soft': 0.0})
 
     for i in range(len(polys)):
         for kk in range(len(kept_idx[i])):
@@ -339,6 +341,9 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
             p = joints[p]['parent']
         max_chain = max(max_chain, d)
     print(f"[wind_bake] max_chain_len={max_chain + 1}")
+    sp_cnt = [0] * len(polys)      # 每样条附近的树皮顶点数
+    sp_dsum = [0.0] * len(polys)   # 这些顶点到骨架的距离和（≈管半径×n）
+    jid_hist = {}                  # 关节 -> 树皮顶点数（报告 s_k 覆盖率）
 
     card_names = {o.name for o in card_objs}
     if card_names and not any(o.name not in card_names for o in mesh_objs):
@@ -370,7 +375,9 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
             wp = mw @ v.co
             # softness/phase 取自**全采样**（与旧版一致，平移式风逐字节不变）；
             # joint_id / link_w 取自抽稀后的关节（枢轴式风用）。
-            raw, phase = _nearest(polys, cum, hd_start, wp)
+            raw, phase, sp_i, sp_d = _nearest(polys, cum, hd_start, wp)
+            sp_cnt[sp_i] += 1          # 该样条附近的树皮顶点数
+            sp_dsum[sp_i] += sp_d      # 到骨架的距离 ≈ 该处管半径
             _, _, jid, lw = _nearest_joint(polys, cum, hd_start, kept_idx, joint_of,
                                            level_of, wp)
             raw_vals.append((wp, max(0.0, min(1.0, raw / gmax)), phase, float(jid), lw))
@@ -395,6 +402,7 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
         for vi, (wp, s, phase, jid, lw) in enumerate(raw_vals):
             vert_uv[vi] = (s, phase)
             vert_uj[vi] = (jid, lw)
+            jid_hist[int(jid)] = jid_hist.get(int(jid), 0) + 1
             solid_pts.append(wp)
             solid_uv.append((s, phase, jid, lw))
         for li, loop in enumerate(me.loops):
@@ -431,4 +439,28 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
         print(f"[wind_bake] baked {obj.name!r} verts={len(me.vertices)} "
               f"faces={len(me.polygons)} mode=card")
 
+    # ---- s_k（朝向继承度：0=硬(全继承朝向) / 1=软(只随自己的 θ)）----
+    #   柳条判据（Danis 断言，已在模型里验证）：根部 z 高于尖部 z（下垂）**且** 管半径极细。
+    #   沿枝渐变：接头 s=0（硬）→ 梢部 s=s_spline（软），摆动时"从挂点自然甩出去"。
+    sp_soft = [0.0] * len(polys)
+    n_strand = 0
+    for i in range(len(polys)):
+        arc_len = cum[i][-1] if cum[i] else 0.0
+        droop = polys[i][0].z - polys[i][-1].z
+        radius = (sp_dsum[i] / sp_cnt[i]) if sp_cnt[i] else 0.0
+        if arc_len > 1e-6 and droop > 0.15 and radius < 0.01:
+            sp_soft[i] = max(0.0, min(1.0, droop / 0.5))
+            n_strand += 1
+    for jd in joints:
+        i = jd['spline']
+        arc_len = cum[i][-1] if cum[i] else 0.0
+        jd['soft'] = sp_soft[i] * (jd['arc'] / arc_len if arc_len > 1e-6 else 0.0)
+
+    n_soft = sum(1 for jd in joints if jd['soft'] > 0.05)
+    tot_v = sum(jid_hist.values())
+    v_soft = sum(c for j, c in jid_hist.items() if joints[j]['soft'] > 0.25)
+    v_hard = sum(c for j, c in jid_hist.items() if joints[j]['soft'] <= 0.05)
+    print(f"[wind_bake] 柳条样条={n_strand}/{len(polys)}  关节 s>0.05: {n_soft}/{len(joints)}")
+    print(f"[wind_bake] 树皮顶点覆盖：s>0.25 占 {100.0*v_soft/max(tot_v,1):.0f}%   "
+          f"s<=0.05（硬）占 {100.0*v_hard/max(tot_v,1):.0f}%")
     return joints

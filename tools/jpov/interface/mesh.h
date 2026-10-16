@@ -114,6 +114,7 @@ struct MeshData {
         float parent;    // 父关节下标；-1 = 根
         float level;     // 距根的关节数（θ 的频率/增益按此分档；必为关节自身量）
         float phase;     // 逐关节相位（秒）：连续空间场在枢轴处的取值
+        float soft;      // 朝向继承度 0..1（0=硬/全继承父朝向；1=软/只随自己的 θ）。柳条≈1。
     };
     std::vector<WindJoint> wind_joints;
     std::vector<uint32_t> indices;

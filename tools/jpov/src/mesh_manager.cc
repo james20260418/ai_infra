@@ -273,7 +273,7 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
     // ---- 枢轴风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
     //   同树全部实例/primitive 共享；VS 用 texelFetch 按 joint_id 取。
     //   texel(2j)   = (pivot.xyz, parent)
-    //   texel(2j+1) = (level, phase, 0, 0)
+    //   texel(2j+1) = (level, phase, soft, 0)
     if (!data.wind_joints.empty()) {
         const size_t n = data.wind_joints.size();
         // 纹理宽 = 2n；超过 GL_MAX_TEXTURE_SIZE（常见 16384）会变成不完整纹理，
@@ -288,7 +288,7 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
             tex[8 * k + 3] = wj.parent;
             tex[8 * k + 4] = wj.level;
             tex[8 * k + 5] = wj.phase;
-            tex[8 * k + 6] = 0.0f;
+            tex[8 * k + 6] = wj.soft;
             tex[8 * k + 7] = 0.0f;
         }
         glGenTextures(1, &mesh.wind_joint_tex);

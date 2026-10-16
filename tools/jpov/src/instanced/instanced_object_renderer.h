@@ -78,7 +78,6 @@ uniform sampler2D uWindJointTex;  // RGBA32F N×1：每 texel = (pivot.xyz, pare
 const int   kMaxWindChain  = 16;  // 链深上限（烘焙实测 max_chain ≈ 14）
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
-const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）  // 逐关节角系数（弧度/振幅单位）：amp = A·此值·0.15·level
 // 绕过点 o、轴 axis 的旋转 th（Rodrigues）——枢轴点不动该式恒成立。
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
@@ -119,90 +118,63 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 枢轴式：本级贡献当**绕关节的转角**，由顶点关节沿 parent 链向根累加
-            //   （内层 = 自身关节，外层 = 根）。绕枢轴旋转 ⇒ 枢轴点不动（接头不撕）+ 保长。
-            // 两骨平滑蒙皮：先算**父链**变换（自本关节的父起向根累加各铰链），再叠上本关节这
-            //   一环得本链变换，两者按链内权重 link_w 线性混合。w=0 ⇒ 完全跟父链（分叉/链
-            //   边界处与父级几何逐点对齐 ⇒ 焊缝不裂）；w=1 ⇒ 完全跟本链（段内刚性 ⇒ 保长）。
-            //   theta 只依赖关节自身（level/phase，编在表里）⇒ 无逐顶点扭曲。
+            // 朝向继承度（硬 ? 软）刚性链：
+            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
+            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
+            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
+            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
+            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
             vec3 wd = aInstWind.xyz;
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
-            float lw = clamp(aWindLink.y, 0.0, 1.0);
-            vec4 o0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            vec3 p_par = p;
-            float th_par = 0.0;
-            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
-            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
-            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
-            int j = int(floor(o0.w + 0.5));
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
             for (int c = 0; c < kMaxWindChain; ++c) {
-                if (j < 0 || j >= uWindJointCount) {
+                if (jj < 0 || jj >= uWindJointCount) {
                     break;
                 }
-                vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
-                vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
-                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
-                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
-                float lev = clamp(jd1.x, 0.0, 3.0);
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 q = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
-                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
-                float pjw = fr * (uWindTime + jd1.y);
+                float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
-                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
-                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
-                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
                 tq2 -= floor(tq2);
                 th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
                       * sin(6.28318531 * tq2);
-                p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
-                th_par += th;
-                j = int(floor(jd0.w + 0.5));
-                if (j < 0) {
-                    break;
+                if (have_par == 0) {
+                    q = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
                 }
+                pp = t0.xyz;
+                Ap = A;
             }
-            float lev0 = clamp(o1.x, 0.0, 3.0);
-            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
-            float pj0 = fr0 * (uWindTime + o1.y);
-            pj0 -= floor(pj0);
-            float th0 = amp0 * sin(6.28318531 * pj0);
-            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
-            tq0 -= floor(tq0);
-            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
-                   * sin(6.28318531 * tq0);
-            p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
-            float th_sum = th_par + lw * th0;
-            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
-            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
-            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
-            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
-            {
-                const int kLvS = 4;
-                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
-                float bse = floor(min(sN2, float(kLvS)));
-                float frc = sN2 - bse;
-                float ssum2 = 0.0;
-                for (int l2 = 0; l2 < kLvS; ++l2) {
-                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
-                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
-                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
-                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
-                    tq3 -= floor(tq3);
-                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
-                }
-                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
-            }
-            // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
-            wn = WindRotVecAxis(wn, axis, th_sum);
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
+            wn = WindRotVecAxis(wn, axis, A);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
@@ -254,7 +226,6 @@ uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
-const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -294,89 +265,63 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 枢轴式（同 kMeshVs3dPBRInstanced）：绕关节枢轴累加转角。
-            // 两骨平滑蒙皮：先算**父链**变换（自本关节的父起向根累加各铰链），再叠上本关节这
-            //   一环得本链变换，两者按链内权重 link_w 线性混合。w=0 ⇒ 完全跟父链（分叉/链
-            //   边界处与父级几何逐点对齐 ⇒ 焊缝不裂）；w=1 ⇒ 完全跟本链（段内刚性 ⇒ 保长）。
-            //   theta 只依赖关节自身（level/phase，编在表里）⇒ 无逐顶点扭曲。
+            // 朝向继承度（硬 ? 软）刚性链：
+            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
+            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
+            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
+            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
+            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
             vec3 wd = aInstWind.xyz;
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
-            float lw = clamp(aWindLink.y, 0.0, 1.0);
-            vec4 o0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            vec3 p_par = p;
-            float th_par = 0.0;
-            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
-            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
-            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
-            int j = int(floor(o0.w + 0.5));
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
             for (int c = 0; c < kMaxWindChain; ++c) {
-                if (j < 0 || j >= uWindJointCount) {
+                if (jj < 0 || jj >= uWindJointCount) {
                     break;
                 }
-                vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
-                vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
-                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
-                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
-                float lev = clamp(jd1.x, 0.0, 3.0);
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 q = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
-                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
-                float pjw = fr * (uWindTime + jd1.y);
+                float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
-                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
-                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
-                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
                 tq2 -= floor(tq2);
                 th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
                       * sin(6.28318531 * tq2);
-                p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
-                th_par += th;
-                j = int(floor(jd0.w + 0.5));
-                if (j < 0) {
-                    break;
+                if (have_par == 0) {
+                    q = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
                 }
+                pp = t0.xyz;
+                Ap = A;
             }
-            float lev0 = clamp(o1.x, 0.0, 3.0);
-            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
-            float pj0 = fr0 * (uWindTime + o1.y);
-            pj0 -= floor(pj0);
-            float th0 = amp0 * sin(6.28318531 * pj0);
-            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
-            tq0 -= floor(tq0);
-            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
-                   * sin(6.28318531 * tq0);
-            p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
-            float th_sum = th_par + lw * th0;
-            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
-            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
-            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
-            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
-            {
-                const int kLvS = 4;
-                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
-                float bse = floor(min(sN2, float(kLvS)));
-                float frc = sN2 - bse;
-                float ssum2 = 0.0;
-                for (int l2 = 0; l2 < kLvS; ++l2) {
-                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
-                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
-                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
-                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
-                    tq3 -= floor(tq3);
-                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
-                }
-                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
-            }
-            // 法线按**累计转角**绕同一轴旋转（各铰链同轴 => 累计即绕该轴转 th_sum）。
-            wn = WindRotVecAxis(wn, axis, th_sum);
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
+            wn = WindRotVecAxis(wn, axis, A);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);
@@ -433,7 +378,6 @@ uniform sampler2D uWindJointTex;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kWindFlutter  = 0.35;  // 湍流→关节级高频铰链 角系数（替代逐顶点法线位移）
-const float kSoftGain     = 0.5;   // 软性附加层强度（叶卡/细软下垂部）
 vec3 WindRotAboutAxis(vec3 p, vec3 o, vec3 axis, float th) {
     vec3 v = p - o;
     float c = cos(th);
@@ -461,86 +405,62 @@ void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1) {
         if (uWindMode == 1 && uWindJointCount > 0) {
-            // 两骨平滑蒙皮：先算**父链**变换（自本关节的父起向根累加各铰链），再叠上本关节这
-            //   一环得本链变换，两者按链内权重 link_w 线性混合。w=0 ⇒ 完全跟父链（分叉/链
-            //   边界处与父级几何逐点对齐 ⇒ 焊缝不裂）；w=1 ⇒ 完全跟本链（段内刚性 ⇒ 保长）。
-            //   theta 只依赖关节自身（level/phase，编在表里）⇒ 无逐顶点扭曲。
+            // 朝向继承度（硬 ? 软）刚性链：
+            //   q_j = q_parent + R(A_parent)·(pivot_j ? pivot_parent)   位置：**完整**继承
+            //   A_j = θ_j + (1 − s_j)·A_parent                          朝向：按 (1−s) 打折
+            //   顶点  p' = q_own + R(A_own)·(p ? pivot_own)
+            //   ⇒ 每段仍是刚体（保长）；且 q_child 与"父链对 pivot_child 的映射"一致 ⇒ 接头焊死。
+            //   s=0 硬（刚体臂）/ s=1 软（只随自己的 θ，保持自身下垂姿态）。
             vec3 wd = aInstWind.xyz;
             vec3 axis = cross(vec3(0.0, 1.0, 0.0), wd);
             float al = length(axis);
             axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+            float tw2 = uWindTime + aInstWind.w;      // 每实例时间偏移（去同步）
             int j0 = clamp(int(aWindLink.x + 0.5), 0, uWindJointCount - 1);
-            float lw = clamp(aWindLink.y, 0.0, 1.0);
-            vec4 o0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 o1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            vec3 p_par = p;
-            float th_par = 0.0;
-            // ⚠️ 父关节解码必须用 floor：根的哨兵是 -1，而 GLSL int() 向零截断，
-            //   int(-1.0 + 0.5) == int(-0.5) == 0 ⇒ 会环回 joint 0，把根这一环叠加
-            //   kMaxWindChain 次（整株被扳倒）。floor(-0.5) == -1 才正确。
-            int j = int(floor(o0.w + 0.5));
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
             for (int c = 0; c < kMaxWindChain; ++c) {
-                if (j < 0 || j >= uWindJointCount) {
+                if (jj < 0 || jj >= uWindJointCount) {
                     break;
                 }
-                vec4 jd0 = texelFetch(uWindJointTex, ivec2(2 * j, 0), 0);
-                vec4 jd1 = texelFetch(uWindJointTex, ivec2(2 * j + 1, 0), 0);
-                // 频率/增益按关节**层级**分档：f = f0*(1+1.6·L)（1/2.6/4.2/5.8 Hz），
-                //   角增益 ∝ L（**根 L=0 ⇒ 增益 0，根部刚性不动**——固定端不该转动；
-                //   越靠梢部越软）。level 先 clamp [0,3]（防表异常把 amp 放大）。
-                float lev = clamp(jd1.x, 0.0, 3.0);
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 q = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
                 float fr = uWindFrequency * (1.0 + 1.6 * lev);
                 float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                // 先把圈数归约到 [0,1) 再乘 2π：GLSL 的 sin/cos 对大参数精度不保证
-                //   （uWindTime 逐帧累加 → 参数上百上千 rad，部分驱动会给出近乎随机的角）。
-                float pjw = fr * (uWindTime + jd1.y);
+                float pjw = fr * (tw2 + t1.y);
                 pjw -= floor(pjw);
                 float th = amp * sin(6.28318531 * pjw);
-                // 湍流：改为**关节级高频铰链**（per-joint 常量 ⇒ 段内刚性、不剪切）；强度走
-                //   既有「湍流」滑条；∝ level ⇒ 根=0、越靠梢越活。（原来逐顶点法线位移 = 剪切）
-                float tq2 = 4.3 * uWindFrequency * (uWindTime + jd1.y);
+                float tq2 = 4.3 * uWindFrequency * (tw2 + t1.y);
                 tq2 -= floor(tq2);
                 th += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev)
                       * sin(6.28318531 * tq2);
-                p_par = WindRotAboutAxis(p_par, jd0.xyz, axis, th);
-                th_par += th;
-                j = int(floor(jd0.w + 0.5));
-                if (j < 0) {
-                    break;
+                if (have_par == 0) {
+                    q = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    q = q + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
                 }
+                pp = t0.xyz;
+                Ap = A;
             }
-            float lev0 = clamp(o1.x, 0.0, 3.0);
-            float fr0 = uWindFrequency * (1.0 + 1.6 * lev0);
-            float amp0 = uWindAmplitude * kWindPivotGain * (0.15 * lev0);
-            float pj0 = fr0 * (uWindTime + o1.y);
-            pj0 -= floor(pj0);
-            float th0 = amp0 * sin(6.28318531 * pj0);
-            float tq0 = 4.3 * uWindFrequency * (uWindTime + o1.y);
-            tq0 -= floor(tq0);
-            th0 += uWindAmplitude * uWindTurbulence * kWindFlutter * (0.15 * lev0)
-                   * sin(6.28318531 * tq0);
-            p = mix(p_par, WindRotAboutAxis(p_par, o0.xyz, axis, th0), lw);
-            float th_sum = th_par + lw * th0;
-            // === 软性附加层 kSoft（叶卡 / 细软下垂部）===
-            //   沿用平移式的**平滑位移场**（多频 + per-instance 相位），按顶点 softness 加权叠加
-            //   在刚性链结果之上：木干 softness≈0 ⇒ 几乎不吃（保有刚性）；叶卡=逐卡常量 ⇒
-            //   整卡平移、不变形；细枝梢部 ⇒ 得到可塑的下垂感。
-            {
-                const int kLvS = 4;
-                float sN2 = clamp(aFlex.x, 0.0, 1.0) * float(kLvS);
-                float bse = floor(min(sN2, float(kLvS)));
-                float frc = sN2 - bse;
-                float ssum2 = 0.0;
-                for (int l2 = 0; l2 < kLvS; ++l2) {
-                    float w2 = (float(l2) < bse) ? 1.0 : ((float(l2) == bse) ? frc : 0.0);
-                    float am2 = uWindAmplitude * (0.40 - 0.10 * float(l2));
-                    float fq3 = uWindFrequency * (1.0 + 1.6 * float(l2));
-                    float tq3 = fq3 * (uWindTime + aFlex.y + aInstWind.w);
-                    tq3 -= floor(tq3);
-                    ssum2 += w2 * am2 * sin(6.28318531 * tq3);
-                }
-                p += aInstWind.xyz * (kSoftGain * aFlex.x * ssum2);
-            }
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            p = q + WindRotVecAxis(p - own0.xyz, axis, A);
         } else {
             const int kLv = 4;
             float sN = clamp(aFlex.x, 0.0, 1.0) * float(kLv);

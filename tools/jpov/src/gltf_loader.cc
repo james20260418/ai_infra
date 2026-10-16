@@ -544,18 +544,19 @@ bool ParsePrimitive(const tinygltf::Model& model,
             continue;
         }
         const tinygltf::Value& arr = node.extras.Get("jpov_wind_joints");
-        if (!arr.IsArray() || arr.ArrayLen() == 0 || arr.ArrayLen() % 6 != 0) {
+        if (!arr.IsArray() || arr.ArrayLen() == 0 || arr.ArrayLen() % 7 != 0) {
             break;
         }
-        out_mesh->wind_joints.resize(arr.ArrayLen() / 6);
+        out_mesh->wind_joints.resize(arr.ArrayLen() / 7);
         for (size_t k = 0; k < out_mesh->wind_joints.size(); ++k) {
             MeshData::WindJoint& wj = out_mesh->wind_joints[k];
             for (size_t e = 0; e < 3; ++e) {
-                wj.pivot[e] = static_cast<float>(arr.Get(k * 6 + e).GetNumberAsDouble());
+                wj.pivot[e] = static_cast<float>(arr.Get(k * 7 + e).GetNumberAsDouble());
             }
-            wj.parent = static_cast<float>(arr.Get(k * 6 + 3).GetNumberAsDouble());
-            wj.level  = static_cast<float>(arr.Get(k * 6 + 4).GetNumberAsDouble());
-            wj.phase  = static_cast<float>(arr.Get(k * 6 + 5).GetNumberAsDouble());
+            wj.parent = static_cast<float>(arr.Get(k * 7 + 3).GetNumberAsDouble());
+            wj.level  = static_cast<float>(arr.Get(k * 7 + 4).GetNumberAsDouble());
+            wj.phase  = static_cast<float>(arr.Get(k * 7 + 5).GetNumberAsDouble());
+            wj.soft   = static_cast<float>(arr.Get(k * 7 + 6).GetNumberAsDouble());
         }
         break;
     }
