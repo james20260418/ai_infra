@@ -48,6 +48,9 @@ VolumeManager::~VolumeManager() {
         if (kv.second.gl_tex != 0) {
             glDeleteTextures(1, &kv.second.gl_tex);
         }
+        if (kv.second.gl_tex2 != 0) {
+            glDeleteTextures(1, &kv.second.gl_tex2);
+        }
     }
     entries_.clear();
     path_to_id_.clear();
@@ -102,25 +105,36 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
         return 0;
     }
     // 体积按 GL_TEXTURE_2D_ARRAY 上传：宽=nx、高=ny*nz（层=帧）。宽/高都受
-    // GL_MAX_TEXTURE_SIZE 限制——超限时 glTexImage3D 会失败、纹理不完整、采样全 0
-    // （渲染成一片黑），**且不会报错**。这里提前拦截 + 明确报出上限（否则静默黑屏）。
+    // GL_MAX_TEXTURE_SIZE 限制——超限时 glTexImage3D 失败、纹理不完整、采样全 0
+    // （渲染成一片黑），**且不会报错**。
+    //
+    // 【临时 hack】层高超过上限时，把层高沿 (z+y) 行对半切成 2 张纹理（采样端在 shader
+    //   里按 v 选块）。正式方案应改布局/格式，见 volume_manager.h 注释。
     GLint max_tex = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
-    if (max_tex > 0 && (h.nx > static_cast<uint32_t>(max_tex) ||
-                        layer_h > static_cast<size_t>(max_tex))) {
-        LOG(WARNING) << "VolumeManager: 体积 " << h.nx << "x" << h.ny << "x" << h.nz
-                     << " (2D 层高 ny*nz=" << layer_h << ") 超过 GL_MAX_TEXTURE_SIZE="
-                     << max_tex << "，无法上传：" << path
-                     << "（降分辨率或用 --ds 重转）";
+    if (max_tex > 0 && h.nx > static_cast<uint32_t>(max_tex)) {
+        LOG(WARNING) << "VolumeManager: 宽 " << h.nx << " 超过 GL_MAX_TEXTURE_SIZE="
+                     << max_tex << "，无法上传：" << path;
         return 0;
+    }
+    size_t chunk0 = layer_h;   // 第一块的层高（= 总层高时不切分）
+    bool split = false;
+    if (max_tex > 0 && layer_h > static_cast<size_t>(max_tex)) {
+        if (layer_h > 2u * static_cast<size_t>(max_tex)) {
+            LOG(WARNING) << "VolumeManager: 层高 ny*nz=" << layer_h
+                         << " 超过 2\xd7GL_MAX_TEXTURE_SIZE，临时 hack 只支持切 2 块：" << path;
+            return 0;
+        }
+        split = true;
+        chunk0 = (layer_h + 1u) / 2u;
+        LOG(WARNING) << "VolumeManager: [hack] 层高 ny*nz=" << layer_h
+                     << " 超过 GL_MAX_TEXTURE_SIZE=" << max_tex << "，切成两块 ("
+                     << chunk0 << " + " << (layer_h - chunk0) << ")：" << path;
     }
 
     std::vector<unsigned char> buf(bytes_per_frame);
     f.seekg(sizeof(JpovVol2Header), std::ios::beg);
 
-    unsigned int tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
     const bool rgb = (h.channels == 3u);
     const GLenum internal = rgb ? (h.dtype == 1u ? GL_RGB8 : GL_RGB16F)
                                 : (h.dtype == 1u ? GL_RG8 : GL_RG16F);
@@ -130,13 +144,22 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     GLint prev_align = 4;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal,
-                 static_cast<GLsizei>(h.nx), static_cast<GLsizei>(layer_h),
-                 static_cast<GLsizei>(h.nframes), 0, format, type, nullptr);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    auto make_tex = [&](size_t ch_h) -> unsigned int {
+        unsigned int t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internal, static_cast<GLsizei>(h.nx),
+                     static_cast<GLsizei>(ch_h), static_cast<GLsizei>(h.nframes), 0,
+                     format, type, nullptr);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        return t;
+    };
+    const size_t row_bytes = static_cast<size_t>(h.nx) * h.channels * (h.dtype == 1u ? 1u : 4u);
+    unsigned int tex = make_tex(chunk0);
+    unsigned int tex2 = split ? make_tex(layer_h - chunk0) : 0;
     for (uint32_t fr = 0; fr < h.nframes; ++fr) {
         f.read(reinterpret_cast<char*>(buf.data()),
                static_cast<std::streamsize>(bytes_per_frame));
@@ -144,12 +167,21 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
             LOG(WARNING) << "VolumeManager: 数据不足（帧 " << fr << "）" << path;
             glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
             glDeleteTextures(1, &tex);
+            if (tex2 != 0) { glDeleteTextures(1, &tex2); }
             glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
             return 0;
         }
+        glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, static_cast<GLint>(fr),
-                        static_cast<GLsizei>(h.nx), static_cast<GLsizei>(layer_h),
+                        static_cast<GLsizei>(h.nx), static_cast<GLsizei>(chunk0),
                         1, format, type, buf.data());
+        if (split) {
+            glBindTexture(GL_TEXTURE_2D_ARRAY, tex2);
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, static_cast<GLint>(fr),
+                            static_cast<GLsizei>(h.nx),
+                            static_cast<GLsizei>(layer_h - chunk0), 1, format, type,
+                            buf.data() + chunk0 * row_bytes);
+        }
     }
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);   // 复原全局解包对齐（不污染后续上传）
@@ -158,11 +190,19 @@ uint32_t VolumeManager::LoadFromFile(const std::string& path) {
     if (id == 0u) {
         LOG(WARNING) << "VolumeManager: id 空间耗尽";
         glDeleteTextures(1, &tex);
+        if (tex2 != 0) { glDeleteTextures(1, &tex2); }
         return 0;
     }
-    entries_[id] = VolumeInfo{tex, static_cast<int>(h.nx), static_cast<int>(h.ny),
-                              static_cast<int>(h.nz), static_cast<int>(h.nframes),
-                              static_cast<int>(h.channels)};
+    VolumeInfo info;
+    info.gl_tex = tex;
+    info.nx = static_cast<int>(h.nx);
+    info.ny = static_cast<int>(h.ny);
+    info.nz = static_cast<int>(h.nz);
+    info.nframes = static_cast<int>(h.nframes);
+    info.channels = static_cast<int>(h.channels);
+    info.gl_tex2 = tex2;
+    info.chunk_split = split ? static_cast<float>(chunk0) / static_cast<float>(layer_h) : 1.0f;
+    entries_[id] = info;
     path_to_id_[path] = id;
     LOG(INFO) << "[volume] loaded " << path << " dims=(" << h.nx << "," << h.ny << ","
               << h.nz << ") frames=" << h.nframes << " channels=" << h.channels
@@ -197,6 +237,9 @@ void VolumeManager::Release(uint32_t id) {
     }
     if (it->second.gl_tex != 0) {
         glDeleteTextures(1, &it->second.gl_tex);
+    }
+    if (it->second.gl_tex2 != 0) {
+        glDeleteTextures(1, &it->second.gl_tex2);
     }
     for (auto pit = path_to_id_.begin(); pit != path_to_id_.end();) {
         if (pit->second == id) {

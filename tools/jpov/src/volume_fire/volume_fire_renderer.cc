@@ -35,6 +35,7 @@ namespace {
 
 constexpr int kSceneDepthUnit = 0;
 constexpr int kVolumeUnit = 1;
+constexpr int kVolumeUnit2 = 2;   // 【hack】层高切分的第二块体积纹理
 
 Vec3f Sub(const Vec3f& a, const Vec3f& b) {
     return Vec3f(a.x() - b.x(), a.y() - b.y(), a.z() - b.z());
@@ -262,6 +263,11 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     glActiveTexture(GL_TEXTURE0 + kVolumeUnit);
     glBindTexture(GL_TEXTURE_2D_ARRAY, vol.gl_tex);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uVol"), kVolumeUnit);
+    // 【临时 hack】层高超过 GL_MAX_TEXTURE_SIZE 时体积切成两块；未切分时 uVolSplit=1、绑定同块。
+    glActiveTexture(GL_TEXTURE0 + kVolumeUnit2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, vol.gl_tex2 != 0 ? vol.gl_tex2 : vol.gl_tex);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uVol2"), kVolumeUnit2);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uVolSplit"), vol.chunk_split);
 
     glBindVertexArray(vao_);
     if (cmd.debug_fullscreen) {

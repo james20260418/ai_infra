@@ -27,6 +27,14 @@ struct VolumeInfo {
     int nx = 0, ny = 0, nz = 0;
     int nframes = 0;
     int channels = 2;          // 2 = (R=火密度, G=温度)；3 = 再带 B=烟密度
+
+    // ---- 【临时 hack】体积超过 GL_MAX_TEXTURE_SIZE 时切成两块 ----
+    // 体积按 GL_TEXTURE_2D_ARRAY 上传：宽=nx、**高=ny*nz**。高超过 GL_MAX_TEXTURE_SIZE
+    // （本机 16384）时上传失败→全黑。临时做法：把层高沿 (z+y) 行对半切成 2 张纹理。
+    // 采样时：v < chunk_split 取 gl_tex（映射到 [0,1]），否则取 gl_tex2。
+    // TODO(临时)：正式方案应按“每行 2 个 z-slice”重排（或换压缩格式），见设计讨论。
+    unsigned int gl_tex2 = 0;  // 第二块纹理（0 = 未切分）
+    float chunk_split = 1.0f;  // 切分点（v∈[0,1]）；1.0 = 未切分
 };
 
 class VolumeManager {
