@@ -60,7 +60,8 @@ tools/jpov/genVolume/
 - 镜像定义 / 用法：`env/Dockerfile` · `env/README.md`
 - 构建：`docker build -t jpov-genvolume tools/jpov/genVolume/env`
 
-最小 Python 依赖：`numpy`（转换器）；`pyopenvdb`（仅 VDB 转换器 + VDB 单测）；`blender`（仅植被工具，见下）。
+最小 Python 依赖：`numpy`（转换器）；`pyopenvdb`（仅 VDB 转换器 + VDB 单测）；
+`Pillow`（色谱 LUT `make_palette.py` + flipbook `make_flipbook.py`）；`blender`（仅植被工具，见下）。
 
 ---
 
