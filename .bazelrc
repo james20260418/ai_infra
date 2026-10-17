@@ -31,8 +31,15 @@ build --cxxopt=-std=c++20
 build --copt=-g
 build --copt=-O2
 
-# Parallel builds for faster compilation
-build --jobs=auto
+# Parallel builds and local memory budget.
+# `--jobs=auto` means HOST_CPUS, i.e. 12 here. Every checkout of this repo is
+# built by a separate agent at the same time, so `auto` multiplies into dozens
+# of concurrent compilers and blows past the container memory limit (observed
+# OOM kills). All checkouts share this one file, hence one uniform setting:
+#   jobs=4   2 agents x 4 = 8 concurrent compilers, fits 12 cores / 6G RAM
+#   ram=2048 MB of local action memory Bazel may schedule per checkout
+build --jobs=4
+build --local_ram_resources=2048
 
 # Sandbox for hermetic builds
 build --spawn_strategy=standalone
