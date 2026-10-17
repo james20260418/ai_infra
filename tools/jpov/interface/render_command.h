@@ -684,31 +684,24 @@ struct SmaaConfig {
 //       **每个 Object3DCommand 自带一份** —— 不同树/不同物体可以吹不同的风（方向、
 //       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
 //
-// ── 位移公式（枢轴式 mode=1）──
+// ── 位移公式（枢轴链 + 链外平动湍流）──
 //   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
 //     q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)     // 位置：完整继承
 //     A_j = θ_j + (1 − soft_j)·A_parent                         // 朝向：按 (1−soft) 打折
 //     p'  = q_own + R(A_own)·(p − pivot_own)
 //     θ_j = uWindAmplitude·kWindPivotGain·(0.15·level)·sin(2π·f0(1+1.6·level)·(t+phase_j))
 //   另有链外**平动湍流**（逐顶点，相位取 loc6.y；幅度 ∝ 关节 soft·(0.5+0.5·level)）。
-//   平移式（mode=0）退化为沿风向的位移，幅度用关节 level 当掩膜（逐顶点 softness 已被省）。
+//   ⚠️ 只有这一种算法：没有 mode 开关、没有平移式退化。无关节表的 mesh 不吹风。
 //
 // 确定性：time 必须由**帧号**推（frame_count / fps），不可用 wall-clock，否则 gold 不稳。
 // 未设置（nullopt）→ 不施加任何位移，零开销、零回归。
 struct WindCommand {
     float time = 0.0f;         // 全局时间（秒）。确定性：由帧号推。
-    float amplitude = 1.0f;    // 主弯振幅（米/单位）
+    float amplitude = 1.0f;    // 枢轴风振幅（转角尺度）
     float frequency = 1.0f;    // 基频（Hz）
-    float turbulence = 0.0f;   // 细节颤幅度（[0,1]）
-    // 场景风矢量（方向×风速）—— **仅非实例路径**（object3d）使用。
+    // 风向：**单位向量**（世界空间）。只管方向；风强度由 amplitude 表达。
     Vec3f direction = {1.0f, 0.0f, 0.0f};
-    float speed = 1.0f;
-    // 风算法模式：
-    //   0 = 平移式（默认）：本级贡献 = 沿风向的**位移**，直接加到顶点。
-    //   1 = 枢轴式：把本级贡献当**绕关节枢轴的转角**，由顶点的 joint_id 沿 parent 链向根
-    //       累加。需要 mesh 带关节表（MeshData.wind_joints）；无表时自动退回平移式。
-    int mode = 0;
-    // ---- 枢轴模式的「平动湍流」（链外，逐顶点）：独立参数 ----
+    // ---- 链外「平动湍流」（逐顶点）：独立参数 ----
     float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
     float turb_frequency = 2.5f;   // 平动湍流频率（Hz）
     // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)

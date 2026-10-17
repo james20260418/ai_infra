@@ -68,9 +68,7 @@ uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
-uniform float uWindTurbulence;
-uniform vec3  uWindVector;       // 风向 × 风速（世界空间）
-uniform int   uWindMode;         // 0=平移式；1=枢轴式（有表时）
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
 uniform int   uWindJointCount;   // 关节表条目数（0 = 无表 → 不动）
 uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
 uniform float uWindTurbAmp;
@@ -98,12 +96,11 @@ void main() {
     vec3 wn = normalize(mat3(transpose(inverse(uModel))) * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1 && uWindJointCount > 0) {
-        vec3 wdir = uWindVector;
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        if (uWindMode == 1) {
             // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
             // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
             int chain[kMaxWindChain];
@@ -161,17 +158,8 @@ void main() {
             float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
             float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
-                                  + normalize(wdir) * 0.4 + vec3(1e-4, 0.0, 1e-4));
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
-        } else {
-            // 平移式（mode 0）：逐顶点 softness 已省 ⇒ 用关节 level 当幅度掩膜。
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            float lev0 = clamp(own1.x, 0.0, 3.0);
-            float ph = uWindFrequency * (uWindTime + aFlex.y);
-            ph -= floor(ph);
-            p += uWindVector * (uWindAmplitude * (0.5 + 0.5 * lev0)
-                                * sin(6.28318531 * ph));
-        }
     }
     vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -203,9 +191,7 @@ uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
-uniform float uWindTurbulence;
-uniform vec3  uWindVector;
-uniform int   uWindMode;
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
 uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 uniform float uWindTurbAmp;
@@ -234,12 +220,11 @@ void main() {
     vec3 wn = normalize(nrm * aNormal);
     vec3 p = aPos;
     if (uWindEnabled == 1 && uWindJointCount > 0) {
-        vec3 wdir = uWindVector;
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        if (uWindMode == 1) {
             int chain[kMaxWindChain];
             int nc = 0;
             int jj = j0;
@@ -294,16 +279,8 @@ void main() {
             float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
             float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
-                                  + normalize(wdir) * 0.4 + vec3(1e-4, 0.0, 1e-4));
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
-        } else {
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            float lev0 = clamp(own1.x, 0.0, 3.0);
-            float ph = uWindFrequency * (uWindTime + aFlex.y);
-            ph -= floor(ph);
-            p += uWindVector * (uWindAmplitude * (0.5 + 0.5 * lev0)
-                                * sin(6.28318531 * ph));
-        }
     }
     vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -337,9 +314,7 @@ uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
-uniform float uWindTurbulence;
-uniform vec3  uWindVector;
-uniform int   uWindMode;
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
 uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex;
 uniform float uWindTurbAmp;
@@ -363,12 +338,11 @@ out vec2 vTexCoord;
 void main() {
     vec3 p = aPos;
     if (uWindEnabled == 1 && uWindJointCount > 0) {
-        vec3 wdir = uWindVector;
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        if (uWindMode == 1) {
             int chain[kMaxWindChain];
             int nc = 0;
             int jj = j0;
@@ -422,16 +396,8 @@ void main() {
             float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
             float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
-                                  + normalize(wdir) * 0.4 + vec3(1e-4, 0.0, 1e-4));
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
-        } else {
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            float lev0 = clamp(own1.x, 0.0, 3.0);
-            float ph = uWindFrequency * (uWindTime + aFlex.y);
-            ph -= floor(ph);
-            p += uWindVector * (uWindAmplitude * (0.5 + 0.5 * lev0)
-                                * sin(6.28318531 * ph));
-        }
     }
     gl_Position = uShadowMVP * vec4(p, 1.0);
     vec4 dpos = uShadowDepthMVP * vec4(p, 1.0);

@@ -568,10 +568,10 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
         break;
     }
-    // 有关节下标却缺表 → 下标无意义，必须**响警报**再丢弃（静默会让枢轴风悄悄退回平移式）。
+    // 有关节下标却缺表 → 下标无意义，必须**响警报**再丢弃（静默会让整棵树静悄悄不吹风）。
     if (out_mesh->wind_joints.empty() && !out_mesh->wind_link.empty()) {
         LOG(WARNING) << "glTF: 有风链下标（TEXCOORD_1）但缺少/形状非法 jpov_wind_joints "
-                     << "（每关节 7 float）⇒ 丢弃，枢轴式风将退回平移式。";
+                     << "（每关节 7 float）⇒ 丢弃，该 mesh 不吹风。";
         out_mesh->wind_link.clear();
     }
 

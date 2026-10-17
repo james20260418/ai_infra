@@ -94,7 +94,7 @@ void BuildModelMatrix(const Vec3f& center,
 
 // 上传**本物体**的风参数（主 pass / 阴影 / 拾取·高亮 三条路径共用）。
 //   `cmd.wind` 无值 → uWindEnabled=0（零位移、零开销）；有值 → 全套 uniform +
-//   本 mesh 的关节表纹理（无 kb 表时 uWindJointCount=0，VS 自动退回平移式）。
+//   本 mesh 的关节表纹理（无关节表时 uWindJointCount=0，VS 直接不动）。
 // Pre-condition: prog 已 glUseProgram；mesh != nullptr。
 void UploadObjectWindUniforms(unsigned int prog, const Object3DCommand& cmd,
                               const GPUMesh* mesh) {
@@ -107,11 +107,8 @@ void UploadObjectWindUniforms(unsigned int prog, const Object3DCommand& cmd,
     glUniform1f(glGetUniformLocation(prog, "uWindTime"), w.time);
     glUniform1f(glGetUniformLocation(prog, "uWindAmplitude"), w.amplitude);
     glUniform1f(glGetUniformLocation(prog, "uWindFrequency"), w.frequency);
-    glUniform1f(glGetUniformLocation(prog, "uWindTurbulence"), w.turbulence);
-    glUniform3f(glGetUniformLocation(prog, "uWindVector"),
-                w.direction.x() * w.speed, w.direction.y() * w.speed,
-                w.direction.z() * w.speed);
-    glUniform1i(glGetUniformLocation(prog, "uWindMode"), w.mode);
+    glUniform3f(glGetUniformLocation(prog, "uWindDirection"),
+                w.direction.x(), w.direction.y(), w.direction.z());
     glUniform1f(glGetUniformLocation(prog, "uWindTurbAmp"), w.turb_amplitude);
     glUniform1f(glGetUniformLocation(prog, "uWindTurbFreq"), w.turb_frequency);
     glUniform1f(glGetUniformLocation(prog, "uWindGustFreq"), w.gust_frequency);

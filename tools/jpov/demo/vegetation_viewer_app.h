@@ -86,7 +86,6 @@ public:
 
     // ── 植被风（程序化顶点风；仅对带风数据（关节表 + loc6）的资产生效）──
     bool  wind_on_ = true;          // 默认开（本 viewer 的招牌能力之一）
-    bool  wind_pivot_ = true;       // true=枢轴式（需资产带关节表）；false=平移式
     float wind_azimuth_deg_ = 35.0f;  // 风向方位角（绕 +Y，度）
     float wind_amplitude_ = 0.35f;    // 主弯振幅
     float wind_frequency_ = 0.5f;     // 基频 Hz
@@ -213,8 +212,6 @@ public:
             w.amplitude = wind_amplitude_;
             w.frequency = wind_frequency_;
             w.direction = {std::cos(az), 0.0f, std::sin(az)};
-            w.speed = 1.0f;
-            w.mode = wind_pivot_ ? 1 : 0;
             w.turb_amplitude = wind_turb_amp_;
             w.turb_frequency = wind_turb_freq_;
             w.gust_frequency = wind_gust_freq_;
@@ -311,7 +308,7 @@ private:
 
         // ── 左下角：植被风 ──
         {
-            const int kRows = 7;
+            const int kRows = 6;
             const float inner_h = static_cast<float>(kRows) * kRowH
                                   + static_cast<float>(kRows - 1) * kSpace;
             const float panel_h = inner_h + 2.0f * kPad;
@@ -325,12 +322,11 @@ private:
                     {cx, cy + static_cast<float>(i) * (kRowH + kSpace)},
                     {inner_w, kRowH}};
             };
-            ui_.Checkbox("风（植被风）", &wind_on_, row(0));
-            ui_.SliderFloat("风朝向 °", &wind_azimuth_deg_, row(1), 0.0f, 360.0f, 0);
-            ui_.SliderFloat("pivot 振幅", &wind_amplitude_, row(2), 0.0f, 1.5f, 2);
-            ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, row(3), 0.05f, 2.0f, 2);
-            ui_.SliderFloat("平动湍流 幅度", &wind_turb_amp_, row(4), 0.0f, 0.6f, 3);
-            ui_.SliderFloat("平动湍流 频率 Hz", &wind_turb_freq_, row(5), 0.0f, 8.0f, 2);
+            ui_.SliderFloat("风朝向 °", &wind_azimuth_deg_, row(0), 0.0f, 360.0f, 0);
+            ui_.SliderFloat("pivot 振幅", &wind_amplitude_, row(1), 0.0f, 1.5f, 2);
+            ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, row(2), 0.05f, 2.0f, 2);
+            ui_.SliderFloat("平动湍流 幅度", &wind_turb_amp_, row(3), 0.0f, 0.6f, 3);
+            ui_.SliderFloat("平动湍流 频率 Hz", &wind_turb_freq_, row(4), 0.0f, 8.0f, 2);
             ui_.SliderFloat("湍流随机性 [0,1]", &wind_gust_str_, row(6), 0.0f, 1.0f, 2);
         }
     }
