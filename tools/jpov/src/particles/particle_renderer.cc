@@ -66,7 +66,7 @@ void ParticleRenderer::Init(ShaderManager* shader_mgr) {
 }
 
 void ParticleRenderer::Finalize() {
-    DestroyWbo();
+    wbo_.Destroy();
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
@@ -74,79 +74,13 @@ void ParticleRenderer::Finalize() {
     initialized_ = false;
 }
 
-void ParticleRenderer::EnsureWbo(int w, int h) {
-    if (wbo_fbo_ != 0 && wbo_w_ == w && wbo_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    DestroyWbo();
-
-    glGenTextures(1, &accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // 低分→高分上采样
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &wbo_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                           reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           depth_tex_, 0);
-    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                            GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, bufs);
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "ParticleRenderer WBO FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    wbo_w_ = w;
-    wbo_h_ = h;
-}
-
-void ParticleRenderer::DestroyWbo() {
-    if (wbo_fbo_) { glDeleteFramebuffers(1, &wbo_fbo_); wbo_fbo_ = 0; }
-    if (accum_tex_) { glDeleteTextures(1, &accum_tex_); accum_tex_ = 0; }
-    if (reveal_tex_) { glDeleteTextures(1, &reveal_tex_); reveal_tex_ = 0; }
-    if (depth_tex_) { glDeleteTextures(1, &depth_tex_); depth_tex_ = 0; }
-    wbo_w_ = 0;
-    wbo_h_ = 0;
-}
-
 void ParticleRenderer::Begin(int full_w, int full_h) {
     CHECK(initialized_) << "ParticleRenderer::Begin: 未 Init";
     const int hw = std::max(1, static_cast<int>(full_w * kScale));
     const int hh = std::max(1, static_cast<int>(full_h * kScale));
-    EnsureWbo(hw, hh);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, hw, hh);
-    const GLfloat clr_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_depth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clr_accum);
-    glClearBufferfv(GL_COLOR, 1, clr_reveal);
-    glClearBufferfv(GL_COLOR, 2, clr_depth);
+    wbo_.Ensure(hw, hh);
+    wbo_.BindForDraw();
+    wbo_.Clear();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     has_content_ = false;
 }
@@ -165,7 +99,7 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
 
     const int hw = std::max(1, static_cast<int>(full_w * kScale));
     const int hh = std::max(1, static_cast<int>(full_h * kScale));
-    EnsureWbo(hw, hh);
+    wbo_.Ensure(hw, hh);
 
     // 相机基向量
     const Vec3f cam_pos = camera.position;
@@ -206,15 +140,8 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     vel_buf_.Upload(vel_data);
 
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, hw, hh);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z·α·w
+    // 绑 FBO + viewport + 三 draw buffer + WBO 三路 blend（WboBuffer 统一负责）。
+    wbo_.BindForDraw();
 
     glUseProgram(prog_draw_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE,
@@ -261,9 +188,7 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     }
 
     // 复原 blend（非常规混合必须显式回写；GL_COLOR_BUFFER_BIT 的 pop 不一定覆盖 blend func）。
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    wbo_.RestoreStandardBlend();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPopAttrib();
 
@@ -271,7 +196,7 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
 }
 
 void ParticleRenderer::Composite(int full_w, int full_h) {
-    if (!has_content_ || wbo_fbo_ == 0) {
+    if (!has_content_ || !wbo_.valid()) {
         return;
     }
     glPushAttrib(GL_ENABLE_BIT);
@@ -283,10 +208,10 @@ void ParticleRenderer::Composite(int full_w, int full_h) {
 
     glUseProgram(prog_comp_);
     glActiveTexture(GL_TEXTURE0 + 0);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
+    glBindTexture(GL_TEXTURE_2D, wbo_.layer().accum_tex);
     glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
     glActiveTexture(GL_TEXTURE0 + 1);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
+    glBindTexture(GL_TEXTURE_2D, wbo_.layer().reveal_tex);
     glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
 
     glBindVertexArray(vao_);
@@ -296,6 +221,12 @@ void ParticleRenderer::Composite(int full_w, int full_h) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glPopAttrib();
     has_content_ = false;   // 本帧消费掉
+}
+
+TransparentLayer ParticleRenderer::layer() const {
+    TransparentLayer out = wbo_.layer();
+    out.scale = kScale;
+    return out;
 }
 
 }  // namespace jpov

@@ -1,14 +1,14 @@
-# Fire-Fog（雾火）— TPZ 统一体积雾火 · 最终设计
+# 体积雾（雾火）— TPZ 统一体积雾火 · 最终设计
 
 > 日期：2026-10-05 ｜ 线：`ai_infra_3` ｜ 状态：**最终设计（v1 待实现）**
 > **2026-10-06 扩展**：v1 定调「**不做 3D 体积纹理、物理引擎铺开**」；补 §10「统一团模型 + 多类采样器 + box 容器」。
 > **2026-10-10 接口升级**：源项拆**散射(albedo)/自发光(emission)**（去掉 intensity：emission 自带 HDR、sigma 自带 1/m）；
->   雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling，后者 fire_fog 自持一套 Nxy 网格光源表），
+>   雾火**始终**走物理光照（ambient + 太阳×CSM + 点光源 tile culling，后者 fog 自持一套 Nxy 网格光源表），
 >   移除「无光照 / base 发射」链路（Danis：既然这么物理，不再提供非物理绘制）。
 > **2026-10-11 采样器重构**：`uFogBodyTex` 改**定长 tagged union + 解码器 + 命名访问器**（§10.3）；
 >   第一种 kind 改为 **`kRoundBox`（圆角盒，替换早期点雾/球）**；**求交移入采样函数**（OBB→TC 仍类型无关）；
 >   采样器**严格 O(1)**；加**布局契约单测**防 CPU/GLSL 漂移。
-> 模块：`tools/jpov/src/fire_fog/`（单一自包含 renderer；早期草案名 `point_fog` / `ball_fog`）
+> 模块：`tools/jpov/src/fog/`（单一自包含 renderer；早期草案名 `point_fog` / `ball_fog`）
 > 推演史 / 取舍理由见 [`jpov_tpz_volumetric_fog_design.md`](jpov_tpz_volumetric_fog_design.md)。**本文只讲定论。**
 
 ---
@@ -219,8 +219,8 @@ union 区（当前唯一 kind `kRoundBox`，texel 2..6）：
 + 公共头 8 ⇒ 落在第 9 个 texel；故开 10、留一档。stride 是全局常量，改它动所有 kind，一次开够。）
 
 **契约（防 CPU/GLSL 静默漂移）**：布局是两侧**单一来源** —— `fog_body.h` 的 `kFogBodyLayout`
-（C++ 表：字段名 + texel + 分量）与 `fire_fog_shader.h` 的 GLSL（`//@FOGLAYOUT` 标记行 +
-`#define FOG_TEXELS_PER_BODY`）必须逐项一致。**契约单测** `fire_fog_contract_test.cc` 解析 GLSL
+（C++ 表：字段名 + texel + 分量）与 `fog_shader.h` 的 GLSL（`//@FOGLAYOUT` 标记行 +
+`#define FOG_TEXELS_PER_BODY`）必须逐项一致。**契约单测** `fog_contract_test.cc` 解析 GLSL
 字符串里的标记/宏与 C++ 表比对；改布局两处一起改，漏改即红。
 
 **求交也移入采样函数**：`OBB → TC`（CPU 剪枝）保持**类型无关**；而逐团的**光线求交与点求值都在
@@ -298,7 +298,7 @@ for (int j = 0; j < nf; ++j) {
 
 ### 10.6 里程碑补充（承接 §8）
 
-- **M1a**：模块骨架（`tools/jpov/src/fire_fog/`）+ `FogBody` / `Obb` / `FogFieldKind` + **单一 kind `kRoundBox`** + box L1 剪枝（8 角投影）+ ZDist 累加 + 末端积分 + **无 TAA gold**。
+- **M1a**：模块骨架（`tools/jpov/src/fog/`）+ `FogBody` / `Obb` / `FogFieldKind` + **单一 kind `kRoundBox`** + box L1 剪枝（8 角投影）+ ZDist 累加 + 末端积分 + **无 TAA gold**。
 - **M1b**：依次加 `kNoiseVolume`（火焰）、`kHeightSlab`（贴地薄雾）、`kShell`（冲击波）——**每加一个不动 L1 / L2 / ZDist**。
 - 验收（承 §8）：无 TAA 不闪 + 可 gold（确定）。
 
@@ -306,7 +306,7 @@ for (int j = 0; j < nf; ++j) {
 
 ## 11. ZDist 的 CPU 参考实现 + 纹理布局（2026-10-08）
 
-> 代码：`tools/jpov/src/fire_fog/zdist_function.h` + `zdist_texture_layout.h`（**GL-free、可单测**，12 用例）。
+> 代码：`tools/jpov/src/fog/zdist_function.h` + `zdist_texture_layout.h`（**GL-free、可单测**，12 用例）。
 > 思路（Danis）：**先把 shader 要做的这套操作在 CPU 上实现一遍**，作为 shader 的对照 / gold / debug。
 > 本 PR 只做 CPU 侧（M1a 的一个前哨），不动 GPU pass。
 

@@ -4,7 +4,7 @@
 > 决策人：Danis。
 
 ## 0. 一句话
-新增一个与 `fire_fog` 平级的 `ParticleRenderer`：把广告牌粒子画进**低分辨率（先 1/2）的 WBO 半透明累积纹理**
+新增一个与 `fog` 平级的 `ParticleRenderer`：把广告牌粒子画进**低分辨率（先 1/2）的 WBO 半透明累积纹理**
 （accum/reveal/depth），再**解析合成**进 HDR，随后交给既有 froxel/玻璃合成 → 后处理。
 
 ## 1. 要解决的问题（为什么不能靠 early-Z）
@@ -18,7 +18,7 @@ overdraw 账：**粒子数 × 平均屏幕覆盖 × 分辨率**。只有四条�
 2. **复用 PR #176 的 WBO 代数**（McGuire & Bavoil 2013）：与透明物体同套 accum/reveal/depth 语义，
    **顺序无关 → 免"多层烟"排序**。
 3. **独立 renderer**：粒子有**自己的低分 WBO 目标**（不挤占 1× 玻璃 FBO）。
-4. **密集烟/近景主角火**：将来可换**体渲染**（有界成本，见 fire_fog/fire_hero）。
+4. **密集烟/近景主角火**：将来可换**体渲染**（有界成本，见 fog/fire_hero）。
 5. **VRS 关系**：真 GPU 上 VRS 更省更干净，但 **GL3.3 无 VRS** → 多分辨率缓冲是 GL3.3 的对应正解。
 
 ## 3. 架构 / 数据流

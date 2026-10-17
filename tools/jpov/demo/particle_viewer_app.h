@@ -2,7 +2,7 @@
 //
 // 目的：验证「广告牌粒子 → WBO 半透明分级纹理（1/2）→ 合成 → froxel」这条链的最小测试场。
 // 场景 = 灰色地面 + 一张桌子 + 桌上的「火 + 烟」（火焰走新 ParticleRenderer 的 WBO 路径）。
-// 与 fire_fog viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI）。
+// 与 fog viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI）。
 //
 // 设计：tools/jpov/docs/jpov_fragment_overdraw_design.md（低分半透明粒子 + WBO）。
 

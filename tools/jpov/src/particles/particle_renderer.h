@@ -1,4 +1,4 @@
-// JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fire_fog 平级）
+// JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fog 平级）
 //
 // 定位（Danis 2026-10-14 定）：用户给出粒子的 flipbook + 一票信息（ParticleRenderCommand），
 // 本渲染器把结果画进 **WBO 半透明累积纹理**（accum/reveal/depth），供后续**合成并交给 froxel**。
@@ -18,7 +18,7 @@
 //   weight_wbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176）。
 //
 // 合成：Composite() 全屏把半透 WBO 解析（C=accum.rgb/accum.a，覆盖=1−reveal）并以 over 混合
-//   写进**当前绑定的目标**（HDR），随后由 fire_fog 合成雾+玻璃 → 再后续。
+//   写进**当前绑定的目标**（HDR），随后由 fog 合成雾+玻璃 → 再后续。
 
 #ifndef JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
 #define JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
@@ -28,6 +28,7 @@
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
+#include "tools/jpov/src/wbo_buffer.h"
 
 namespace jpov {
 
@@ -243,18 +244,18 @@ void main() {
     // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无粒子则 no-op。
     void Composite(int full_w, int full_h);
 
+    // 解算结果作为一个透明层交出（供合成器按代表深度与雾/其他层合并）。
+    // 注意：本渲染器仍保留 Composite() 直连路径；两者二选一由调用方决定。
+    TransparentLayer layer() const;
+
     bool has_content() const { return has_content_; }
 
 private:
-    void EnsureWbo(int w, int h);
-    void DestroyWbo();
-
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    unsigned int wbo_fbo_ = 0, accum_tex_ = 0, reveal_tex_ = 0, depth_tex_ = 0;
-    int wbo_w_ = 0, wbo_h_ = 0;
+    WboBuffer wbo_;   // 三附件（accum/reveal/depth）由 WboBuffer 统一管理
     bool has_content_ = false;
 
     InstanceBuffer pos_buf_{kParticlePosSpec};

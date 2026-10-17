@@ -1,6 +1,6 @@
-// FireFog 团属性纹理（uFogBodyTex）布局契约单测。
+// Fog 团属性纹理（uFogBodyTex）布局契约单测。
 //
-// 目的：CPU 打包（fire_fog_renderer.cc）与 GLSL 解码（fire_fog_shader.h）共用同一套
+// 目的：CPU 打包（fog_renderer.cc）与 GLSL 解码（fog_shader.h）共用同一套
 // uFogBodyTex 布局，但分处 C++ 与 GLSL 字符串、无编译器强制 ⇒ 用本单测把两侧钉在一起：
 //   - 解析 GLSL 里的 `//@FOGLAYOUT texel=T <comp>=<name> ...` 标记 → 字段表；
 //   - 与 fog_body.h 的 kFogBodyLayout 逐项（texel/comp/name）比对；
@@ -15,8 +15,8 @@
 
 #include "gtest/gtest.h"
 
-#include "tools/jpov/src/fire_fog/fire_fog_shader.h"
-#include "tools/jpov/src/fire_fog/fog_body.h"
+#include "tools/jpov/src/fog/fog_shader.h"
+#include "tools/jpov/src/fog/fog_body.h"
 
 namespace jpov {
 namespace {
@@ -122,16 +122,16 @@ void SortFields(std::vector<ParsedField>* v) {
 }  // namespace
 
 // GLSL 的 #define 与 C++ 常量一致。
-TEST(FireFogContract, DefineConstantsMatchCpp) {
-    EXPECT_EQ(ParseDefineInt(kFireFogCommonGlsl, "FOG_TEXELS_PER_BODY"),
+TEST(FogContract, DefineConstantsMatchCpp) {
+    EXPECT_EQ(ParseDefineInt(kFogCommonGlsl, "FOG_TEXELS_PER_BODY"),
               fog_layout::kTexelsPerBody);
-    EXPECT_EQ(ParseDefineInt(kFireFogCommonGlsl, "FOG_KIND_ROUNDBOX"),
+    EXPECT_EQ(ParseDefineInt(kFogCommonGlsl, "FOG_KIND_ROUNDBOX"),
               static_cast<int>(FogFieldKind::kRoundBox));
 }
 
 // GLSL 的 //@FOGLAYOUT 字段表与 fog_body.h 的 kFogBodyLayout 逐项一致。
-TEST(FireFogContract, LayoutMarkersMatchCppTable) {
-    std::vector<ParsedField> parsed = ParseFogLayout(kFireFogCommonGlsl);
+TEST(FogContract, LayoutMarkersMatchCppTable) {
+    std::vector<ParsedField> parsed = ParseFogLayout(kFogCommonGlsl);
     SortFields(&parsed);
 
     const size_t expected_n = sizeof(kFogBodyLayout) / sizeof(kFogBodyLayout[0]);
@@ -153,7 +153,7 @@ TEST(FireFogContract, LayoutMarkersMatchCppTable) {
 }
 
 // 字段表不越界：最大 texel < kTexelsPerBody；公共头 texel 数自洽。
-TEST(FireFogContract, LayoutWithinBudget) {
+TEST(FogContract, LayoutWithinBudget) {
     for (size_t i = 0; i < sizeof(kFogBodyLayout) / sizeof(kFogBodyLayout[0]); ++i) {
         EXPECT_GE(kFogBodyLayout[i].texel, 0);
         EXPECT_LT(kFogBodyLayout[i].texel, fog_layout::kTexelsPerBody);

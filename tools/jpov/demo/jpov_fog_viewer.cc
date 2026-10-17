@@ -1,21 +1,21 @@
-// JPOV 雾火查看器（fire_fog viewer）— 主程序
+// JPOV 雾火查看器（fog viewer）— 主程序
 //
 // 用途：一个专门肉眼验收**froxel 体积雾**（设计见 docs/jpov_froxel_design.md）的最小交互工具。
 // 场景 = 灰色地面 + 一棵高模橡树（oak）；点状雾默认摆在橡树中段，便于观察雾与实体的
 // 深度关系（雾在树前正常叠加，树前的雾被场景深度裁剪，树后的雾被树遮挡）。
 //
-// 交互面板（见 fire_fog_viewer_app.h）：box 中心 x/y/z、长宽高、外侧圆角半径、消光 σ、衰减剖面、
+// 交互面板（见 fog_viewer_app.h）：box 中心 x/y/z、长宽高、外侧圆角半径、消光 σ、衰减剖面、
 // 散射色 albedo、自发光 emission，以及一盏点光源、太阳仰角/方位角/浊度，与 god ray 相位/增益。
 // ⚠️ 雾火始终走物理光照（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 //
-// 架构：主程序只做装配 + 事件循环；场景/渲染核心 + 面板在 fire_fog_viewer_app.h。
+// 架构：主程序只做装配 + 事件循环；场景/渲染核心 + 面板在 fog_viewer_app.h。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
-//   bazel run //tools/jpov:jpov_fire_fog_viewer
-//   或 sh 脚本：./tools/jpov/build_jpov_fire_fog_viewer.sh
-//   → output/jpov_fire_fog_viewer/jpov_fire_fog_viewer
+//   bazel run //tools/jpov:jpov_fog_viewer
+//   或 sh 脚本：./tools/jpov/build_jpov_fog_viewer.sh
+//   → output/jpov_fog_viewer/jpov_fog_viewer
 
 #include <chrono>
 #include <cstdio>
@@ -26,7 +26,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/demo/fire_fog_viewer_app.h"
+#include "tools/jpov/demo/fog_viewer_app.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/common/utils.h"
@@ -38,7 +38,7 @@ inline constexpr const char* kOakModelPath = "models/tripo_oak_4k.glb";
 inline constexpr float kOakTargetHeight = 6.0f;   // 归一后的世界高度（米）
 
 // 装配场景静态资源（交互与 headless 共用，避免两处各写一套而分叉）。
-void InstallScene(jpov_fire_fog::FireFogApp& app) {
+void InstallScene(jpov_fog::FogApp& app) {
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
     app.ground_mat_  = jpov_skylight::GroundMaterial();
 
@@ -97,7 +97,7 @@ void InstallScene(jpov_fire_fog::FireFogApp& app) {
 }
 
 // 默认视角：橡树（高 6m）斜前方，看全树 + 雾。
-void DefaultView(jpov_fire_fog::FireFogApp& app) {
+void DefaultView(jpov_fog::FogApp& app) {
     app.view_ = jpov_viewer::DefaultView();
     app.view_.phi   = 0.25;                          // 略俯视（~14°）
     app.view_.theta = 3.14159265358979323846 / 4.0;  // 45° 方位
@@ -108,22 +108,22 @@ void DefaultView(jpov_fire_fog::FireFogApp& app) {
 int RunCapture(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title  = "JPOV — 雾火查看器（headless capture）";
-    cfg.width  = jpov_fire_fog::kViewerWidth;
-    cfg.height = jpov_fire_fog::kViewerHeight;
+    cfg.width  = jpov_fog::kViewerWidth;
+    cfg.height = jpov_fog::kViewerHeight;
     cfg.headless = true;
     cfg.fonts = {
         {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
     };
 
-    jpov_fire_fog::FireFogApp app(cfg);
+    jpov_fog::FogApp app(cfg);
     app.SetShowPanel(false);   // 纯 3D 截图（无面板）
     app.Init();
     InstallScene(app);
 
     jpov::WindowInfo winfo;
-    winfo.width  = jpov_fire_fog::kViewerWidth;
-    winfo.height = jpov_fire_fog::kViewerHeight;
+    winfo.width  = jpov_fog::kViewerWidth;
+    winfo.height = jpov_fog::kViewerHeight;
     jpov::InputSnapshot input{};
 
     auto shoot = [&](const char* name) {
@@ -264,7 +264,7 @@ int RunCapture(const std::string& out_dir) {
     app.fog_emission_ = jpov::Color{0.0f, 0.0f, 0.0f, 1.0f};
     app.sun_gain_ = 2.0f;
 
-    // ── M. 点光源（fire_fog 自持 Nxy tile culling）：关/开 + 位置扫谱 ──
+    // ── M. 点光源（fog 自持 Nxy tile culling）：关/开 + 位置扫谱 ──
     DefaultView(app);
     app.fog_center_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     app.fog_size_ = jpov::Vec3f(5.0f, 5.0f, 5.0f);
@@ -363,9 +363,9 @@ int main(int argc, char** argv) {
 
     // ── 交互模式 ──
     JPOV::Config cfg;
-    cfg.title  = "JPOV — 雾火查看器（fire_fog viewer）";
-    cfg.width  = jpov_fire_fog::kViewerWidth;
-    cfg.height = jpov_fire_fog::kViewerHeight;
+    cfg.title  = "JPOV — 雾火查看器（fog viewer）";
+    cfg.width  = jpov_fog::kViewerWidth;
+    cfg.height = jpov_fog::kViewerHeight;
     cfg.resizable  = false;
     // froxel 管线较重（全分辨率 inject/scatter）⇒ 交互降到 30fps（Danis 2026-10-09）。
     cfg.target_fps = 30;
@@ -375,7 +375,7 @@ int main(int argc, char** argv) {
         {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
     };
 
-    jpov_fire_fog::FireFogApp app(cfg);
+    jpov_fog::FogApp app(cfg);
     app.SetShowPanel(true);
     app.Init();
     app.InstallTextMeasure();

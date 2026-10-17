@@ -30,6 +30,8 @@ cc_library(
         "//tools/jpov/interface:render_command",
         "//tools/jpov/src:instance_buffer",
         "//tools/jpov/src:shader_manager",
+        "//tools/jpov/src:wbo_buffer",
+        "//tools/jpov/src:transparent_layer",
         "//tools/jpov/src:texture_manager",
         "@glog_static//:glog",
     ] + select({

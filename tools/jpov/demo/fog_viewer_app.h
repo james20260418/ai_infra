@@ -1,4 +1,4 @@
-// JPOV 雾火查看器（fire_fog viewer）— 渲染核心 App（场景渲染体 + 交互面板宿主）
+// JPOV 雾火查看器（fog viewer）— 渲染核心 App（场景渲染体 + 交互面板宿主）
 //
 // 目的：**肉眼验收 froxel 体积雾**（设计见 tools/jpov/docs/jpov_froxel_design.md）的最小测试场。
 // 场景 = 灰色地面 + 一棵高模橡树（oak），点状雾默认摆在橡树处（便于观察雾与实体的深度关系：
@@ -8,7 +8,7 @@
 //   - 场景资源（地面 mesh / 橡树 glTF）由主程序装配后传入；
 //   - 光照沿用 skylight_scene.h 的 SkyDegrees + MakeSkyLighting（白昼标准天光，单色 ambient）；
 //   - 交互面板暴露**雾体 box** 的可调参数：box 中心 x/y/z、长宽高（size）、外侧圆角壳半径（radius）、
-//     消光 σ、衰减剖面（作用于圆角壳）、散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fire_fog 消费点光源）、
+//     消光 σ、衰减剖面（作用于圆角壳）、散射色 albedo、自发光 emission；另加**一盏点光源**（演示 fog 消费点光源）、
 //     太阳仰角/方位角/浊度，以及 god ray 的相位/增益。
 //
 // ⚠️ 雾火**始终走物理光照**（ambient + 太阳×CSM + 点光源）；「无光照」链路已移除。
@@ -28,20 +28,20 @@
 #include "tools/jpov/demo/viewer_app.h"       // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
 
-namespace jpov_fire_fog {
+namespace jpov_fog {
 
 using jpov_viewer::kViewerWidth;
 using jpov_viewer::kViewerHeight;
 using jpov_viewer::kViewerFps;
 using jpov_viewer::kViewerFontAlias;
 
-// froxel 分辨率可选档（与 FireFogParams.nz / tile_px 对应，面板下拉的候选值）。
-// nz 必须是完全平方（见 FireFogParams 约束）。
+// froxel 分辨率可选档（与 FogParams.nz / tile_px 对应，面板下拉的候选值）。
+// nz 必须是完全平方（见 FogParams 约束）。
 inline constexpr int kNzChoices[] = {64, 256};
 inline constexpr int kTilePxChoices[] = {8, 16, 32};
 
 // 点状雾查看器渲染核心 App。
-class FireFogApp : public JPOV {
+class FogApp : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -115,7 +115,7 @@ public:
     jpov::Vec3f man_bcenter_ = {};  // 资产局部包围盒中心（对齐到墙中心用）
     float man_stagger_ = 1.3f;      // 两人沿 Z 各错开的半距（米）
 
-    // ── 一盏点光源（演示 fire_fog 消费点光源：自持 Nxy tile culling）──
+    // ── 一盏点光源（演示 fog 消费点光源：自持 Nxy tile culling）──
     bool point_light_enable_ = true;
     jpov::Vec3f point_light_pos_ = jpov::Vec3f(0.0f, 3.0f, 0.0f);
     jpov::Color point_light_color_ = jpov::Color{1.0f, 0.85f, 0.6f, 1.0f};
@@ -126,14 +126,14 @@ public:
     float sun_phase_g_ = 0.7f;         // HG 相位各向异性（太阳/点光源共用）
     float sun_gain_ = 2.0f;            // 太阳项增益
 
-    // ── froxel 分辨率（面板下拉；对应 FireFogParams.nz / tile_px）──
+    // ── froxel 分辨率（面板下拉；对应 FogParams.nz / tile_px）──
     int nz_index_ = 1;        // 0 → Nz=64，1 → Nz=256
     int tile_px_index_ = 1;   // 0 → 8px，1 → 16px，2 → 32px
-    // ── froxel z 分布远端（米）；近端固定 0.1（FireFogParams.z_near 默认）。──
+    // ── froxel z 分布远端（米）；近端固定 0.1（FogParams.z_near 默认）。──
     float z_far_ = 2000.0f;
 
     void InstallTextMeasure() {
-        ui_.SetTextMeasure(&FireFogApp::AppTextWidth, this);
+        ui_.SetTextMeasure(&FogApp::AppTextWidth, this);
     }
 
     // 交互窗口是否绘制面板（headless 拍摄=false，截图即纯 3D 场景）。
@@ -179,7 +179,7 @@ public:
         cmds->sky     = nl.sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
-        cmds->tone_mapping = true;   // fire_fog pass 要求线性 HDR 域
+        cmds->tone_mapping = true;   // fog pass 要求线性 HDR 域
 
         // 场景：灰色地面 + 橡树。
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
@@ -204,7 +204,7 @@ public:
             DrawMan(cmds, man_solid_mat_, +man_stagger_);
         }
 
-        // 点光源（fire_fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
+        // 点光源（fog 消费：自持 Nxy tile culling）——**独立于雾**，稳定场景光照。
         if (point_light_enable_) {
             jpov::PointLight pl;
             pl.position = point_light_pos_;
@@ -214,7 +214,7 @@ public:
             cmds->point_lights.push_back(pl);
         }
 
-        // 点状雾（走 fire_fog froxel 体积管线）。
+        // 点状雾（走 fog froxel 体积管线）。
         if (show_fog_) {
             jpov::PointFog fog;
             fog.center = fog_center_;
@@ -226,13 +226,13 @@ public:
             fog.attenuation = static_cast<jpov::FogAttenuation>(fog_attenuation_);
             cmds->point_fogs.push_back(fog);
 
-            jpov::FireFogParams ff;
+            jpov::FogParams ff;
             ff.sun_phase_g = sun_phase_g_;
             ff.sun_gain = sun_gain_;
             ff.nz = kNzChoices[std::min(std::max(nz_index_, 0), 1)];
             ff.tile_px = kTilePxChoices[std::min(std::max(tile_px_index_, 0), 2)];
             ff.z_far = z_far_;
-            cmds->fire_fog = ff;
+            cmds->fog = ff;
         }
 
         if (show_panel_) {
@@ -246,7 +246,7 @@ public:
 private:
     static float AppTextWidth(const char* text, float font_size,
                               const char* /*font_alias*/, void* userdata) {
-        FireFogApp* app = static_cast<FireFogApp*>(userdata);
+        FogApp* app = static_cast<FogApp*>(userdata);
         return app->MeasureTextWidth(/*alias=*/std::string(),
                                      /*text=*/text ? text : "", font_size);
     }
@@ -383,6 +383,6 @@ private:
     static constexpr float kSliderFontSize = 15.0f;
 };
 
-}  // namespace jpov_fire_fog
+}  // namespace jpov_fog
 
 #endif  // JPOV_DEMO_FIRE_FOG_VIEWER_APP_H_
