@@ -1268,7 +1268,6 @@ void main() {
     //   否则用不透明 program。double_sided 时关背面剔除（薄片资产两面都投影）。
     // texture_mgr: cutout 变体采样 baseColor 贴图取 alpha 用。
     static void DrawObject3DShadow(const Object3DCommand& cmd,
-                                   const RenderCommandList& cmds,
                                    MeshManager& mesh_mgr,
                                    TextureManager& texture_mgr,
                                    ShaderManager& shader_mgr,

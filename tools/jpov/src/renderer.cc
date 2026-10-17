@@ -2346,7 +2346,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             if (o.material.alpha_mode == AlphaMode::kBlend) {
                 continue;
             }
-            Object3DRenderer::DrawObject3DShadow(o, cmds, mesh_mgr_, texture_mgr_, shader_mgr_,
+            Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog, shadow_prog_cutout);
         }

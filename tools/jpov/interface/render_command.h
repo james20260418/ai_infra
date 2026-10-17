@@ -680,7 +680,9 @@ struct SmaaConfig {
 //       joint_id = 该顶点所属关节在关节表中的下标；phase = 逐顶点连续相位场 [0,1)（湍流用）。
 //   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
 //       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
-//   · **本命令的全局标量**（下列字段）：时间/振幅/频率/风向/湍流/阵风，全场景一份。
+//   · **本物体自己的风参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
+//       **每个 Object3DCommand 自带一份** —— 不同树/不同物体可以吹不同的风（方向、
+//       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
 //
 // ── 位移公式（枢轴式 mode=1）──
 //   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
@@ -1724,6 +1726,10 @@ struct Object3DCommand {
     //   仅当 highlight_style 有值且本物体 highlight==true 时才多画一个描边 pass；
     //   未开启高亮时零额外开销。
     bool highlight = false;
+    // 本物体的风参数（可选）：**逐物体**，不是全场景一份 —— 同场景两棵树可以给
+    //   不同风向/相位/强度。仅当 mesh 带 kWind（烘焙过风数据）时生效；无风数据的
+    //   mesh 设了也无效。未设（默认）= 本物体零风、零开销。见 WindCommand。
+    std::optional<WindCommand> wind;
 };
 
 // 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
@@ -2073,10 +2079,8 @@ struct RenderCommandList {
     // 默认无值（等同关闭），零额外开销、零回归。**需要 tone_mapping=true**。
     std::optional<SmaaConfig> smaa;
 
-    // 植被风（程序化顶点风）。有值时，object3d / instanced 两个 3D 路径的顶点着色器按它施加
-    // 顶点位移（instanced 路径另取 per-instance wind）。默认无值 = 零回归。
-    // 见 WindCommand + docs/jpov_vegetation_wind_design.md。
-    std::optional<WindCommand> wind;
+    // 植被风不在 RenderCommandList 上：风是**逐物体**参数，见 Object3DCommand::wind。
+    // （不能要求用户所有物体共用一个风；每棵树的风向/相位/强度都应能独立。）
 
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。
@@ -2278,7 +2282,8 @@ struct RenderCommandList {
                       const Vec3f& up, const Vec3f& front,
                       float scale = 1.0f,
                       bool highlight = false,
-                      uint32_t picking_id = 0);
+                      uint32_t picking_id = 0,
+                      const std::optional<WindCommand>& wind = std::nullopt);
 
     // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
     //
@@ -2310,7 +2315,8 @@ struct RenderCommandList {
                         const Vec3f& up, const Vec3f& front,
                         float scale = 1.0f,
                         bool highlight = false,
-                        uint32_t picking_id = 0);
+                        uint32_t picking_id = 0,
+                        const std::optional<WindCommand>& wind = std::nullopt);
 
     // 3D 骨架蒙皮批量（instancing）—— 「这批人用这套骨架(skeleton_id)，每个人拿该骨架
     // 某两个 pose 之间插值摆出一个姿态」。

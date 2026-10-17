@@ -198,7 +198,9 @@ public:
             cmds->smaa = sc;
         }
 
-        // 植被风：时间由帧号推（确定性；headless 可 SetWindFixedTime 钉住）。
+        // 植被风：逐物体参数（这里整株植物一份；同场景其它物体可各自给不同的风）。
+        //   时间由帧号推（确定性；headless 可 SetWindFixedTime 钉住）。
+        std::optional<jpov::WindCommand> wind;
         if (wind_on_) {
             const float t = wind_use_fixed_time_
                                 ? wind_fixed_time_
@@ -217,7 +219,7 @@ public:
             w.turb_frequency = wind_turb_freq_;
             w.gust_frequency = wind_gust_freq_;
             w.gust_strength = wind_gust_str_;
-            cmds->wind = w;
+            wind = w;
         }
 
         // 场景：灰色地面 + 植物（按包围盒把基座落到地面 y=0、水平居中）。
@@ -235,7 +237,8 @@ public:
             cmds->DrawGltfObject(plant_, /*center*/ {cx, cy, cz},
                                  /*up*/ {0.0f, 1.0f, 0.0f},
                                  /*front*/ {0.0f, 0.0f, 1.0f}, s,
-                                 /*highlight*/ false, /*picking_id*/ 0);
+                                 /*highlight*/ false, /*picking_id*/ 0,
+                                 /*wind*/ wind);
         }
 
         if (show_panel_) {
