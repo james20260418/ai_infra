@@ -46,6 +46,7 @@
 tools/jpov/tools/vegetation/
 ├── README.md            # 本文档（依赖 + 工作流 + 渲染步骤）
 ├── build_tree.py        # 【核心】Blender headless 脚本：树种预设 → 带纹理 GLB
+├── wind_bake.py         # 【核心·风】顶点风信息烘焙（softness/phase + 枢轴关节表）
 ├── render_hero.py       # Blender Cycles 出片（大图 hero shot）
 ├── fetch_textures.sh    # 下载 CC0 贴图（ambientCG）
 └── samples/             # 【范本】产物样例 + 过程动作记录（照着做用），见 samples/README.md
@@ -81,7 +82,7 @@ tools/jpov/tools/vegetation/
 
 ---
 
-## 3. 工作流（四步）
+## 3. 工作流（五步）
 
 ### 步骤 0（一次性）：装 Blender
 
@@ -116,6 +117,20 @@ blender -b --python build_tree.py -- weeping_willow --textured \
 
 > `--set KEY=VALUE` 可覆盖 Sapling 任意参数；数组写成逗号形式，如 `--set curveRes=6,3,2,1`。
 > 叶子密度是 `leaves`（**每枝叶数**，不是总数！设太大面数爆炸）。
+
+### 步骤 2.5（要风吹就加）：烘焙顶点信息
+
+**只有加了 `--bake-wind`，树才会吹风**；不加 = 静态树（风开关打开也不动）。
+它把「枝层级 + 相位 + 枢轴关节表」**烘进同一个 GLB**：
+
+```bash
+blender -b --python build_tree.py -- weeping_willow \
+    --textured --textures ./textures --leaf-atlas leaf001 \
+    --bake-wind \
+    --out samples/willow_wind_tex.glb
+```
+
+完整原理 / 产物格式 / 验收 / 坑 → **§6 顶点信息烘焙（SKILL）**。
 
 ### 步骤 3：用 veg tool 渲染出片
 
@@ -155,6 +170,14 @@ tree    -> POSITION/NORMAL/TEXCOORD_0 -> 材质 Bark   # 枝干（管道 mesh）
 leaves  -> POSITION/NORMAL/TEXCOORD_0 -> 材质 Leaf   # 叶卡实例
 ```
 
+**若用了 `--bake-wind`，还会多这两层（每顶点风数据）：**
+
+| 产物 | 位置 | 语义 |
+|---|---|---|
+| `TEXCOORD_1` | UV 层 `"Wind"` | `(softness, phase)`：沿枝层级归一化弧距 `0→1` + 相位（秒） |
+| `TEXCOORD_2` | UV 层 `"WindJoint"` | `(joint_id, link_w)`：所属刚性链 + 链内归一化位置（枢轴式风） |
+| `jpov_wind_joints` | **trunk 节点 extras** | 关节表，每关节 7 float：`pivot.xyz, parent, level, phase, soft` |
+
 材质：
 - `Leaf`：`alphaMode=MASK`（cutout）+ `doubleSided=true`，baseColor = 叶 atlas（颜色 + alpha 由 Opacity 图烘进 alpha 通道）。
 - `Bark`：baseColor = 树皮贴图。
@@ -175,7 +198,87 @@ JPOV 的 `branch_mesh` + `leaf_cards`。
 
 ---
 
-## 6. 已知坑（踩过，务必复用）
+## 6. 顶点信息烘焙（SKILL：让树能吹风）
+
+> 一句话：**风数据是「烘」进 GLB 的，不是引擎猜的。**
+> 不烘 → 树是死的；烘错 → 树会**撕裂 / 拉长 / 整棵平移**。
+> 引擎侧算法见 `docs/jpov_vegetation_wind_design.md`（§10 平移式基线 / §11 枢轴式，当前推荐）。
+
+### 6.1 烘焙什么（三样东西，全在 GLB 里）
+
+| 产物 | 存放位置 | 语义 |
+|---|---|---|
+| `TEXCOORD_1` | 每条 mesh 的 UV 层 `"Wind"` | `(softness, phase)`：`softness` = 沿枝层级归一化弧距 `0→1`（连续场）；`phase` = 秒 |
+| `TEXCOORD_2` | 每条 mesh 的 UV 层 `"WindJoint"` | `(joint_id, link_w)`：所属刚性链在关节表里的下标 + 链内位置 |
+| `jpov_wind_joints` | **node extras**（trunk 节点） | 关节表，每关节 **7 float**：`pivot.xyz, parent, level, phase, soft` |
+
+- `parent = -1` 是根关节；`level` = 距根的关节数；`soft` = 朝向继承度（`0`=硬/全继承父朝向，`1`=软/只随自己的角）。
+- 关节表**随资产走**；引擎里 `tree` / `leaves` 两个 primitive 共享同一张表。
+- **枢轴坐标已转成 glTF 的 Y-up**（Blender Z-up → `(x, z, -y)`），**不要**手工再转。
+- 对应引擎字段：`MeshData::wind_flex` / `wind_link` / `wind_joints`（`interface/mesh.h`）。
+
+### 6.2 怎么烘（造树时顺手烘）
+
+`--bake-wind` **必须与造树同一次运行** —— 骨架采样发生在 `curve → mesh` 转换**之前**，事后再补采不到。
+
+```bash
+cd tools/jpov/tools/vegetation
+
+blender -b --python build_tree.py -- weeping_willow \
+    --textured --textures ./textures --leaf-atlas leaf001 \
+    --bake-wind \
+    --set scale=6 --set curveRes=4,6,4,1 --set branches=0,16,8,4 \
+    --set leaves=10 --set leafScale=0.25 --set seed=5 \
+    --out samples/willow_wind_tex.glb
+```
+
+除 `--bake-wind` 外，参数与「不烘」完全一样。
+⚠️ **改任何形状参数（species / seed / scale / curveRes / branches / leaves）都必须重烘**：
+属性是按这一版骨架算的，几何变了属性就对不上。
+
+正常输出（小柳树参考值；绝对值会随参数变，**看比例与链长**）：
+
+```
+[wind_bake] splines=183 max_hd=... levels=... joints=692
+[wind_bake] max_chain_len=14
+[wind_bake] 柳条样条=103/183  关节 s>0.05: .../692
+[wind_bake] 树皮顶点覆盖：s>0.25 占 25%   s<=0.05（硬）占 ...
+```
+
+### 6.3 验收（在引擎里确认它真在动）
+
+```bash
+cd /james_pm/ai_infra_1
+./tools/jpov/build_jpov_wind_viewer.sh
+
+# headless：出「关风参照帧 + 开风逐秒帧」
+xvfb-run -a ./output/jpov_wind_viewer/jpov_wind_viewer --capture-wind /tmp/wind_shots
+```
+
+- 交互面板可调：风向方位角 / 风速 / 振幅 / 频率 / 湍流 / 时间缩放 / 株数 / 每株扰动。
+- 勾选「枢轴式风」= `WindCommand.mode=1`（推荐）；不勾 = `mode=0` 平移式基线（A/B 用）。
+- 判据：**关风帧 vs 开风帧差异非零；相邻开风帧也不同；任何一帧都不该出现撕裂/宽薄片**。
+  小柳树上「开↔关」与「相邻秒」的像素变化量级 ≈ **4–5%**。
+
+### 6.4 烘焙正确性红线（都是踩过的坑）
+
+1. **必须 `curve → mesh` 之前采样骨架** —— `build_tree.py --bake-wind` 已处理；别对已导出的 GLB 后补。
+2. **`phase` 必须空间连续**（连续低频场），**不能**用 per-vertex hash 或 per-branch 常量 → 否则接缝必撕裂（设计文档 §10.1）。
+3. **叶卡整卡取一个值**，且从**最近实体顶点**继承 → 卡不会被软度梯度剪切、不会脱离所挂细枝。
+4. **同位置重复顶点必须归一到同一根链**（UV 缝/焊点），否则会拉出宽薄片；`wind_bake` 自动按「更靠根」裁决并打印修复计数。
+5. **关节按枝粗细分级抽稀**：粗枝少关节、细枝密关节；链过长会让枢轴误差放大 —— 看 `max_chain_len`，**>20 要警惕**。
+6. **`TEXCOORD_2` 有、`jpov_wind_joints` 缺失/长度不是 7 的倍数** → loader 告警并**退回平移式**。看到告警 = 资产烘坏了，**重烘，别手改 GLB**。
+7. **`kWind` 与布料 `kRelax` 共用 loc6、互斥** —— 同一 mesh 不能既是植被又是布料。
+8. 体积会变大：小柳树 **2.1 MB → 2.4 MB**（+2 层 UV + 692×7 float），属正常。
+
+### 6.5 最小自检清单（给 AI / 自动化）
+
+- [ ] GLB 有 `tree` / `leaves` 两条 mesh，且**都**带 `TEXCOORD_1` + `TEXCOORD_2`
+- [ ] trunk 节点 `extras.jpov_wind_joints` 存在，长度 `% 7 == 0`
+- [ ] 根关节 `parent == -1`；所有 `parent < 自身下标`（无环）
+- [ ] `--capture-wind` 出图：关风 ≠ 开风；相邻开风帧也不同；无撕裂
+
+## 7. 已知坑（踩过，务必复用）
 
 1. **叶卡贴图 UV 只在 `leafShape ∈ {rect, hex}` 生成** → 贴图必须 `rect`（脚本已默认）。
 2. **Opacity 是灰度 JPG（无 alpha 通道）** → 必须把它接 Principled 的 **Color→Alpha**（脚本 `make_material` 已处理）。
@@ -187,7 +290,7 @@ JPOV 的 `branch_mesh` + `leaf_cards`。
 
 ---
 
-## 7. GPL / 依赖声明（重要）
+## 8. GPL / 依赖声明（重要）
 
 **Blender 是 GPL 的独立应用（不是库）**，本工具只在**离线出资产**时用它：
 

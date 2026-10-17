@@ -6,8 +6,13 @@ Produces, per vertex:
   phase    = a **continuous** low-frequency field in [0,1)  (seconds), a deterministic
              smooth function of the vertex's world position.
 
-Stored as an extra UV layer named "Wind" (-> glTF TEXCOORD_1) on each mesh object,
-so the JPOV loader can read it into the per-vertex wind channel.
+Stored as extra UV layers on each mesh object (glTF has no custom vertex
+attributes, so we use the next free TEXCOORDs):
+  "Wind"      -> TEXCOORD_1 = (softness, phase)
+  "WindJoint" -> TEXCOORD_2 = (joint_id, link_w)
+The pivot joint table travels in the trunk node's glTF extras
+(`jpov_wind_joints`, 7 floats per joint).  All of it is produced by
+`build_tree.py --bake-wind` (user-facing manual: README.md §6).
 
 Why this shape (design: docs/jpov_vegetation_wind_design.md):
   - `softness` is a *continuous field* over the branch hierarchy -> it is equal on both

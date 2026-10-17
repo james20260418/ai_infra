@@ -221,7 +221,8 @@ p' = aPos + worldOffset            // 在 MVP 之前位移
    并**乘 curve 的 `matrix_world` 取世界坐标**（与成品网格顶点同坐标系；否则 base/scale 会错）。
 2. `_build_hierarchy`：按「子样条起点落在父样条上」重建 parent/level；`parent/attach_t` → `hd_start`（沿层级弧距）。
 3. `_nearest`：顶点就近吸附到**最近骨架采样点**（环截面上所有顶点共享同一采样 ⇒ 管环刚体、不被掐）。
-4. 写 UV 层 `"Wind"` = `(softness, phase)`（→ glTF `TEXCOORD_1`）；`build_tree.py --bake-wind` 触发。
+4. 写两层 UV：`"Wind"` = `(softness, phase)`（→ glTF `TEXCOORD_1`）、`"WindJoint"` = `(joint_id, link_w)`（→ glTF `TEXCOORD_2`），并把关节表写进 trunk 节点 `extras.jpov_wind_joints`（每关节 7 float）；全部由 `build_tree.py --bake-wind` 触发。
+   > 最终资产格式与枢轴式烘焙细节见 **§11.1 / §11.2**；面向使用者的完整操作手册（命令 / 输出 / 验收 / 坑）见 `tools/vegetation/README.md §6`。
 
 ### 10.4 着色器（level 累计权重）
 

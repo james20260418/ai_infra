@@ -267,7 +267,7 @@ def main():
         wind_joints = wind_bake.bake_meshes(wind_polys, mesh_objs,
                                             card_objs=[leaves] if leaves else [])
         # 关节表随资产走：作为 trunk 对象的自定义属性导出到 glTF node extras
-        # （export_extras=True）。条目 = (pivot.x, pivot.y, pivot.z, parent, level, phase)：
+        # （export_extras=True）。条目 = (pivot.x, pivot.y, pivot.z, parent, level, phase, soft)：
         #   parent = 父关节下标，-1 = 根；level = 距根的关节数；phase = 逐关节常量（秒）；
         #   soft = 朝向继承度 0..1（0=硬/全继承朝向，1=软/只随自己的 θ；柳条≈1）。
         # ⚠️ 枢轴要转成**导出后的坐标系**：Blender 世界是 Z-up，而 glTF 导出是 Y-up
