@@ -11,7 +11,8 @@
 // 画法：instanced 广告牌（VS 由 gl_VertexID 生成面片四角），per-instance attr loc0..3：
 //   pos(3) / misc(4: 宽,高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
 // FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（WBO 缓冲无深度附件）→ 按语义分两支：
-//   遮挡（烟）：att0 = vec4(色·α, α)·w，att1 = α，att2 = z·α·w（WBO over 代数）。
+//   遮挡（烟）：先做散射光照（假球法线 × ambient + 太阳 + 前向散射，见 ParticleLighting），
+//              再 att0 = vec4(色·α, α)·w，att1 = α，att2 = z·α·w（WBO over 代数）。
 //   加性（火/激光）：att0 = vec4(发射, 发射权重)、att1 不写（cov=0）、att2 = z·发射权重。
 //   weight_wbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176）。
 //
@@ -20,6 +21,8 @@
 
 #ifndef JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
 #define JPOV_SRC_PARTICLES_PARTICLE_RENDERER_H_
+
+#include <optional>
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/render_command.h"
@@ -39,6 +42,19 @@ inline constexpr InstanceAttrSpec kParticleColorSpec{/*base_loc*/ 2, /*slot_coun
                                                      /*slot_components*/ 4, /*stride*/ 4};
 inline constexpr InstanceAttrSpec kParticleVelSpec{/*base_loc*/ 3, /*slot_count*/ 1,
                                                    /*slot_components*/ 3, /*stride*/ 3};
+
+// 粒子光照输入（遮挡类粒子 = 烟/尘 才消费；加性类 = 火/激光 是自发光，忽略）。
+//
+// 只做两件事：① 天光 ambient；② 太阳直射（不含 CSM 阴影、不含点光源 —— 后续再加）。
+// 烟是**散射介质**，不是表面：用 billboard 的 UV 造一个朝向相机的假球法线，
+// 让每个烟团有明暗球感；再加一个前向散射瓣（光从背后穿过烟团时更亮）。
+struct ParticleLighting {
+    Color ambient_color{1.0f, 1.0f, 1.0f, 1.0f};
+    float ambient_intensity = 1.0f;
+    std::optional<DirectionalLight> sun;   // 无 ⇒ 只有 ambient
+    // 前向散射强度（0 = 关；0.3–0.6 是烟的自然区间）。
+    float forward_scatter = 0.12f;
+};
 
 class ParticleRenderer {
 public:
@@ -65,6 +81,7 @@ uniform int  uStretched;
 uniform float uStretchScale;
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vWorld;
 flat out float vFrame;
 void main() {
     vec2 corner = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
@@ -107,6 +124,7 @@ void main() {
         size.y *= (1.0 + length(aVel) * uStretchScale);
     }
     vec3 world = aPos + (corner.x * size.x) * rr + (corner.y * size.y) * uu;
+    vWorld = world;
     gl_Position = uViewProj * vec4(world, 1.0);
 }
 )glsl";
@@ -116,6 +134,7 @@ void main() {
 #version 330 core
 in vec2 vUV;
 in vec4 vColor;
+in vec3 vWorld;
 flat in float vFrame;
 uniform sampler2D uTex;
 uniform int uHasTex;
@@ -128,6 +147,18 @@ uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;   // 本 pass 的像素尺寸（1/2 分辨率）
 uniform float uNear;
 uniform float uFar;
+
+// ── 光照（只对遮挡类 = 烟生效）──
+uniform vec3  uCamRight;
+uniform vec3  uCamUp;
+uniform vec3  uCamPos;
+uniform vec3  uAmbientColor;
+uniform float uAmbientIntensity;
+uniform int   uHasSun;
+uniform vec3  uSunDir;         // **指向光源**的单位向量
+uniform vec3  uSunColor;
+uniform float uSunIntensity;
+uniform float uForwardScatter;
 layout(location = 0) out vec4 FragAccum;
 layout(location = 1) out float FragReveal;
 layout(location = 2) out float FragDepthAccum;
@@ -195,6 +226,20 @@ void main() {
     if (a <= 1.0 / 255.0) {
         discard;
     }
+
+    // 散射光照：billboard UV → 朝向相机的假球法线（让每个烟团有球感明暗）。
+    vec2 p = vUV * 2.0 - 1.0;
+    float rr = min(dot(p, p), 1.0);
+    vec3 toCam = normalize(uCamPos - vWorld);
+    vec3 n = normalize(uCamRight * p.x + uCamUp * p.y + toCam * sqrt(1.0 - rr));
+    vec3 lit = uAmbientColor * uAmbientIntensity;
+    if (uHasSun == 1) {
+        float ndl = max(dot(n, uSunDir), 0.0);
+        // 前向散射：光从背后穿过来时烟团更亮（HG 相位函数的单瓣近似）。
+        float fwd = pow(max(dot(-toCam, uSunDir), 0.0), 6.0);
+        lit += uSunColor * uSunIntensity * (ndl + uForwardScatter * fwd);
+    }
+    col.rgb *= lit;
     float w = WeightWbo(z, a, col.rgb);
     FragAccum = vec4(col.rgb * a, a) * w;
     FragReveal = a;
@@ -221,7 +266,8 @@ void main() {
               const Camera& camera,
               const float view_proj[16],
               unsigned int scene_depth_tex,
-              int full_w, int full_h);
+              int full_w, int full_h,
+              const ParticleLighting& light);
 
     // 把本帧的非空缓冲作为透明层追加到集合（加性层 / 遮挡层各至多一个）。
     // 两层都空 ⇒ 不追加任何东西。顺序无关（合成器按代表深度排序）。

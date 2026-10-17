@@ -276,6 +276,27 @@ struct ParticleEmitter {
 - **GL 状态机**：自行保存/复原 FBO / viewport / 活动纹理单元 / blend func（同 fog 约定；调用方 `glPushAttrib` 兜底）。
 - **集成点**：新 `src/particles/particle_renderer.{h,cc}`（与 object3d / skeleton / fog 平级、单一自包含）；`Renderer` 调它；拾取/高亮 **MVP 不接**（后续再加）。
 
+### 5.3.1 烟的光照（2026-10-17 落）
+
+遮挡类粒子（烟/尘）是**散射介质**，不能只做 `色 × 贴图`（那样只能是黑烟）。
+现在消费 `RenderCommandList.sun` + ambient：
+
+```
+n  = normalize(camRight·px + camUp·py + toCam·√(1−r²))   // billboard UV → 朝向相机的假球法线
+lit = ambientColor·ambientIntensity + sunColor·sunIntensity·(max(n·L,0) + fs·pow(max(−toCam·L,0),6))
+color.rgb *= lit                                          // L = **指向光源**的方向
+```
+
+- `L` = `-DirectionalLight.direction`（该字段是**传播**方向）。
+- `fs`（前向散射）= `ParticleLighting::forward_scatter`，默认 0.12；调大 → 逆光时烟团发亮。
+- 加性类（火/激光）**不参与**着色（自发光），在 FS 里提前 return。
+- **仍未接**：CSM 阴影、点光源。
+
+**⚠️ 与「一层塌缩」的相互作用**：WBO 每个像素只留一个等效层，所以高 overdraw 处
+逐 sprite 的明暗会被**平均掉** ⇒ 光照只改了整体色调，看不出球感；
+密度结构靠 `cov = 1 − Π(1−α)`，**alpha 一旦饱和（≈0.85 且多层）cov 就恒 1，烟变成一块均匀的板**。
+实测：alpha 0.85 → 平板；0.35 → 太淡；**0.65 附近**既有体积感又不过曝。
+
 ### 5.4 资源（flipbook 火序列图）
 
 - **首选：自产**。我们**已有 Mantaflow 烘的 VDB 火**（`/james_pm/fire_hero/assets/`）。写一个离屏渲染器把序列体**渲成序列帧 → 拼成 sheet（如 8×8 / 4×4）**，做无缝循环。优点：可控、免授权、与体积火资产同源。

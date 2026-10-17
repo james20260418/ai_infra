@@ -94,7 +94,8 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
                             const Camera& camera,
                             const float view_proj[16],
                             unsigned int scene_depth_tex,
-                            int full_w, int full_h) {
+                            int full_w, int full_h,
+                            const ParticleLighting& light) {
     CHECK(initialized_) << "ParticleRenderer::Draw: 未 Init";
     if (cmd.particles.empty()) {
         return;
@@ -172,6 +173,26 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
                 static_cast<float>(hh));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFar"), camera.far);
+
+    // ── 光照（只被遮挡类 = 烟消费；加性类在 FS 里提前 return，不会走到着色）──
+    glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uAmbientColor"),
+                light.ambient_color.r, light.ambient_color.g, light.ambient_color.b);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uAmbientIntensity"),
+                light.ambient_intensity);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uHasSun"),
+                light.sun.has_value() ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uForwardScatter"),
+                light.forward_scatter);
+    if (light.sun.has_value()) {
+        // sun.direction = 光的**传播**方向；着色要的是**指向光源**的方向。
+        glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uSunDir"),
+                    -light.sun->direction.x(), -light.sun->direction.y(),
+                    -light.sun->direction.z());
+        glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uSunColor"),
+                    light.sun->color.r, light.sun->color.g, light.sun->color.b);
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSunIntensity"),
+                    light.sun->intensity);
+    }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);

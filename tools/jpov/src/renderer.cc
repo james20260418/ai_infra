@@ -1664,10 +1664,23 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    ⇒ 火在玻璃前 / 后、烟在火前 / 后都按 z̄ 正确排序（旧的直连路径做不到）。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
+                // 粒子光照：遮挡类（烟/尘）按散射介质着色；加性类（火/激光）自发光，忽略。
+                // 与 fog 同源：优先取 sky 的单色 ambient 推导，其次 cmds.ambient。
+                ParticleLighting particle_light;
+                if (cmds.sky.has_value()) {
+                    particle_light.ambient_color = cmds.sky->AmbientColor();
+                    particle_light.ambient_intensity = cmds.sky->AmbientIntensity();
+                } else if (eff_ambient.has_value()) {
+                    particle_light.ambient_color = eff_ambient->color;
+                    particle_light.ambient_intensity = eff_ambient->intensity;
+                }
+                particle_light.sun = eff_sun;
+
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 for (const ParticleRenderCommand& pc : cmds.particles) {
                     particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
-                                            hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                                            hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h,
+                                            particle_light);
                 }
                 // 粒子解算结果**作为透明层**交出（加性 / 遮挡各至多一个），
                 // 不再自己 over 进 HDR —— 由合成趟与雾 / 玻璃统一按代表深度积分。
