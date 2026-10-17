@@ -10,11 +10,9 @@
 //
 // 画法：instanced 广告牌（VS 由 gl_VertexID 生成面片四角），per-instance attr loc0..3：
 //   pos(3) / misc(4: 宽,高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
-// FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（玻璃 FBO 无深度缓冲）→
-//   输出 WBO 三附件（与 #176 object3d blend 同构）：
-//     att0 accum : vec4(色·α, α)·w      （blend ONE,ONE）
-//     att1 reveal: α                    （blend ZERO,ONE_MINUS_SRC_COLOR）
-//     att2 depth : z_view·α·w           （blend ONE,ONE）
+// FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（WBO 缓冲无深度附件）→ 按语义分两支：
+//   遮挡（烟）：att0 = vec4(色·α, α)·w，att1 = α，att2 = z·α·w（WBO over 代数）。
+//   加性（火/激光）：att0 = vec4(发射, 发射权重)、att1 不写（cov=0）、att2 = z·发射权重。
 //   weight_wbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176）。
 //
 // 合成：Composite() 全屏把半透 WBO 解析（C=accum.rgb/accum.a，覆盖=1−reveal）并以 over 混合
@@ -169,55 +167,38 @@ void main() {
         tex = texture(uTex, vUV);
     }
     vec4 col = vColor * tex;
-    float a = col.a;
-    if (uAdditive == 1) {
-        // 加性火纹理常无 alpha 语义（黑底=透明）→ 用亮度当覆盖；否则黑会变“黑板”。
-        a = clamp(max(max(col.rgb.r, col.rgb.g), col.rgb.b), 0.0, 1.0);
-    }
-    if (a <= 1.0 / 255.0) {
-        discard;
-    }
-    // 与不透明场景深度手动作深度测试（被几何遮挡 → 丢弃）。
+
+    // 与不透明场景深度手动作深度测试（被几何遮挡 → 丢弃）。两种语义共用。
     vec2 uv = gl_FragCoord.xy / uViewport;
     float scene_z = ZView(texture(uSceneDepth, uv).r);
     float z = ZView(gl_FragCoord.z);
     if (z > scene_z + 0.02) {
         discard;
     }
+
+    if (uAdditive == 1) {
+        // ── 加性：纯发射，不遮挡 ──
+        // e = 发射（RGB 已含贴图/粒子色）；黑底贴图天然为 0，无需「亮度当 alpha」的近似。
+        vec3 e = col.rgb * col.a;
+        float wgt = max(max(e.r, e.g), e.b);   // 发射权重（供合成端算 z̄）
+        if (wgt <= 1e-5) {
+            discard;
+        }
+        FragAccum = vec4(e, wgt);      // accum.rgb = Σ发射，accum.a = Σ权重（**不归一化**）
+        FragReveal = 1.0;              // att1 混合为 (ZERO, ONE) ⇒ 不改变 reveal（cov=0）
+        FragDepthAccum = z * wgt;
+        return;
+    }
+
+    // ── 遮挡：烟 / 尘（WBO over 累积）──
+    float a = col.a;
+    if (a <= 1.0 / 255.0) {
+        discard;
+    }
     float w = WeightWbo(z, a, col.rgb);
     FragAccum = vec4(col.rgb * a, a) * w;
     FragReveal = a;
     FragDepthAccum = z * a * w;
-}
-)glsl";
-
-    // 合成：全屏把 1/2 WBO 解析并以 over 混合写进当前目标（预乘输出 + ONE,1−SRC_ALPHA）。
-    static constexpr const char* kVsComp = R"glsl(
-#version 330 core
-out vec2 vUV;
-void main() {
-    vec2 c = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
-                  (gl_VertexID >= 2) ? 1.0 : -1.0);
-    vUV = c * 0.5 + 0.5;
-    gl_Position = vec4(c, 0.0, 1.0);
-}
-)glsl";
-    static constexpr const char* kFsComp = R"glsl(
-#version 330 core
-in vec2 vUV;
-out vec4 FragColor;
-uniform sampler2D uAccum;
-uniform sampler2D uReveal;
-void main() {
-    vec4 accum = texture(uAccum, vUV);
-    float reveal = texture(uReveal, vUV).r;
-    if (accum.a <= 1e-7) {
-        FragColor = vec4(0.0);
-        return;
-    }
-    vec3 color = accum.rgb / accum.a;
-    float cov = clamp(1.0 - reveal, 0.0, 1.0);
-    FragColor = vec4(color * cov, cov);   // 预乘；over
 }
 )glsl";
 
@@ -228,11 +209,12 @@ void main() {
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
-    // 帧首：确保 1/2 WBO FBO 存在并 clear（accum=0/reveal=1/depth=0），重置本帧内容标志。
+    // 帧首：确保两张 1/2 WBO FBO（加性 / 遮挡）存在并 clear，重置本帧内容标志。
     // Pre-condition: Init 已调用。调用后方可多次 Draw（累加）。
     void Begin(int full_w, int full_h);
 
-    // 把一批粒子以 WBO **累加**画进本渲染器的 1/2 分辨率 FBO（不 clear）。
+    // 把一批粒子按命令的 blend 语义**累加**进对应的 1/2 缓冲（加性 → wbo_add_，
+    // alpha → wbo_over_；不 clear）。
     // Pre-condition: Init 已调用；cmd.particles 非空（空则 no-op）。
     void Draw(const ParticleRenderCommand& cmd,
               TextureManager& texture_mgr,
@@ -241,22 +223,23 @@ void main() {
               unsigned int scene_depth_tex,
               int full_w, int full_h);
 
-    // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无粒子则 no-op。
-    void Composite(int full_w, int full_h);
+    // 把本帧的非空缓冲作为透明层追加到集合（加性层 / 遮挡层各至多一个）。
+    // 两层都空 ⇒ 不追加任何东西。顺序无关（合成器按代表深度排序）。
+    void AppendLayers(TransparentLayerSet* layers /*output*/) const;
 
-    // 解算结果作为一个透明层交出（供合成器按代表深度与雾/其他层合并）。
-    // 注意：本渲染器仍保留 Composite() 直连路径；两者二选一由调用方决定。
-    TransparentLayer layer() const;
-
-    bool has_content() const { return has_content_; }
+    bool has_content() const { return has_add_ || has_over_; }
 
 private:
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
-    unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    WboBuffer wbo_;   // 三附件（accum/reveal/depth）由 WboBuffer 统一管理
-    bool has_content_ = false;
+    // 两个 1/2 分辨率 WBO 缓冲：加性（发射，不遮挡）与遮挡（烟/尘）。
+    // 分开的理由见 transparent_layer.h：加性合成可交换 ⇒ 一层不丢信息；
+    // 遮挡层有覆盖语义 ⇒ 不能和发射混在同一个 reveal 上。
+    WboBuffer wbo_add_;
+    WboBuffer wbo_over_;
+    bool has_add_ = false;
+    bool has_over_ = false;
 
     InstanceBuffer pos_buf_{kParticlePosSpec};
     InstanceBuffer misc_buf_{kParticleMiscSpec};

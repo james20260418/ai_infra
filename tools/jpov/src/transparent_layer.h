@@ -29,6 +29,17 @@ namespace jpov {
 // 合成器支持的透明层上限（GLSL 里按固定 4 槽展开；空槽不产生深度边界）。
 inline constexpr int kMaxTransparentLayers = 4;
 
+// 层的合成语义。
+//   kOver     = 遮挡 / 吸收（烟、玻璃）：有预乘色 + 覆盖率，会压暗后方。
+//   kAdditive = 发射 / 加法（火焰、激光、火星）：只有发射，**不遮挡**后方（cov 恒为 0）。
+//
+// 加性层为什么可以塌成一层：加性合成是可交换的（Σ c·α 与顺序无关），
+// 内部多少层合并都不丢信息；z̄ 只用于「被前方的遮挡层衰减多少」。
+enum class TransparentLayerKind {
+    kOver = 0,
+    kAdditive = 1,
+};
+
 // 一个已解算的透明层（WBO 三附件的只读引用 + 解算分辨率系数）。
 struct TransparentLayer {
     unsigned int accum_tex = 0;    // RGBA16F
@@ -37,6 +48,8 @@ struct TransparentLayer {
     // 解算分辨率 / 主视口分辨率（1、0.5、0.25 …）。合成时按归一化 uv 采样；
     // 低分层的上采样需要深度感知（见 fog_composite_renderer）。
     float scale = 1.0f;
+    // 合成语义（见 TransparentLayerKind）。加性层走「不归一化、不遮挡」的路径。
+    TransparentLayerKind kind = TransparentLayerKind::kOver;
 
     bool valid() const {
         return accum_tex != 0 && reveal_tex != 0 && depth_tex != 0;

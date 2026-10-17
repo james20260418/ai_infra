@@ -152,6 +152,13 @@ void FogCompositeRenderer::Draw(const FogField& field,
                     unit + 2);
     }
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uLayerCount"), layers.count);
+    // 每槽语义（0 = 遮挡 / 1 = 加性）；空槽填 0，不会被采样。
+    int layer_kind[kMaxTransparentLayers] = {0, 0, 0, 0};
+    for (int slot = 0; slot < layers.count; ++slot) {
+        layer_kind[slot] = layers.layers[slot].kind == TransparentLayerKind::kAdditive ? 1 : 0;
+    }
+    glUniform1iv(shader_mgr_->GetUniform(prog_composite_, "uLayerKind"),
+                 kMaxTransparentLayers, layer_kind);
     glActiveTexture(GL_TEXTURE0);
 
     // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾无层像素 → 恒等。

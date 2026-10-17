@@ -56,12 +56,13 @@ void WboBuffer::Ensure(int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // att2 depth：R32F。NEAREST —— 代表深度不插值（插值会跨轮廓造出假深度）。
+    // att2 depth：R32F。LINEAR —— 低分层升到全分辨率时，代表深度也必须平滑，
+    // 否则「层间按 z 排序」会在 2×2 块边界上翻面 ⇒ 逐块抖动（实测粗糙度 ×3）。
     glGenTextures(1, &depth_tex_);
     glBindTexture(GL_TEXTURE_2D, depth_tex_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -116,6 +117,12 @@ void WboBuffer::BindForDraw() const {
     glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
     glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
     glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z_view×α×w
+}
+
+void WboBuffer::BindForAdditiveDraw() const {
+    BindForDraw();
+    // 加法层不参与遮挡：reveal 保持清空时的 1（cov = 1 − reveal = 0）。
+    glBlendFunci(1, GL_ZERO, GL_ONE);
 }
 
 void WboBuffer::Clear() const {

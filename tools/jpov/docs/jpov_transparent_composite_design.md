@@ -46,14 +46,24 @@ FogCompositeRenderer::Draw(field, scene_depth, camera, params, layers)
 ## 3. 层契约
 
 ```cpp
+enum class TransparentLayerKind { kOver, kAdditive };   // 遮挡/吸收 vs 纯发射
+
 struct TransparentLayer {
-    unsigned int accum_tex;   // RGBA16F  Σ(预乘色×w, α×w)
-    unsigned int reveal_tex;  // R16F     Π(1−α)
-    unsigned int depth_tex;   // R32F     Σ(z_view×α×w)
+    unsigned int accum_tex;   // RGBA16F  Σ(预乘色×w, α×w) 或 加性层：Σ发射
+    unsigned int reveal_tex;  // R16F     Π(1−α)（加性层不写，恒为 1 ⇒ cov=0）
+    unsigned int depth_tex;   // R32F     Σ(z_view×w)
     float scale;              // 解算分辨率 / 主视口分辨率（1 / 0.5 / 0.25）
+    TransparentLayerKind kind;
 };
 inline constexpr int kMaxTransparentLayers = 4;
 ```
+
+**两种语义的解算**：
+
+| kind | accum.rgb | accum.a | cov | 合成 |
+|---|---|---|---|---|
+| `kOver`（烟/玻璃） | Σ(色·α·w) | Σ(α·w) | 1−reveal | `C = accum.rgb/accum.a·cov`，压制后方 |
+| `kAdditive`（火/激光） | Σ(色·α) | Σ(maxRGB·α)（**只用于 z̄**） | 0 | `C = accum.rgb`（**不归一化**，HDR 可 >1） |
 
 解算（GPU 内，逐像素）：
 
@@ -113,7 +123,7 @@ out = L + dst · a                       // GL_ONE / GL_SRC_ALPHA
 |---|---|
 | `WboBuffer` 统一三处拷贝（玻璃 / 粒子 / 体积火） | ✅ 玻璃 + 粒子已改用；体积火在其分支上待接 |
 | 玻璃成为一个层（N=1） | ✅ |
-| 广告牌粒子成为一个层（N=2，1/2 分辨率） | ⬜ 下一步（先做深度感知上采样） |
+| 广告牌粒子拆成两层（加性 / 遮挡，各 1/2 分辨率） | ✅ 已接（粒子 → 2 层，与玻璃共 3 层） |
 | `uHasFog=0` 快路径（无雾只有层） | ✅ 比旧实现更省：整条 froxel 采样跳过 |
 | 低分层深度感知上采样（联合双线性） | ⬜ 现在用 NEAREST 取代表深度 |
 | 加性发射通道（真 additive，不归一化） | ⬜ 见 `jpov_particle_fire_design.md` |
@@ -125,3 +135,11 @@ out = L + dst · a                       // GL_ONE / GL_SRC_ALPHA
 - `bazel build //tools/jpov/...` 绿
 - `fog` 单测 + 2 张 gold：`max-channel-mean-diff = 0`
 - `jpov_transparent_gold_test`：`max-channel-mean-diff = 5.6e-4`（阈值 30）
+- 粒子 viewer A/B（改前 vs 改后）：变化 3.9% 像素，全部落在火/烟区域；火心最亮 0.5% 由 201 → 218（真加性不归一化）；烟柱区域粗糙度 1.66 → 1.56（无新增噪点）
+
+### 踩坑：低分层 depth 必须 LINEAR
+
+1/2 分辨率层的 `depth` 附件原本是 `GL_NEAREST`。合成端按 `z̄` 给层排序时，
+`z̄` 在 2×2 块内是常量 ⇒ **加性层与遮挡层在块边界上反复翻面** ⇒ 烟柱出现逐块抖动
+（实测区域粗糙度 1.66 → **5.07**，肉眼即「噪点/条纹」）。
+改 `GL_LINEAR` 后回到 1.56。**任何参与排序的低分层，其代表深度都不能是块状常量。**

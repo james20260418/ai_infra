@@ -108,6 +108,8 @@ float DepthToEll(float z) {
 // ── 透明层（WBO 解算结果；uLayerCount 个有效槽位，其余不采）──
 // ⚠️ GLSL 330 不允许**采样器数组**动态索引 ⇒ 4 槽显式展开 + if 链取用。
 uniform int       uLayerCount;
+// 每槽的合成语义：0 = 遮挡（over），1 = 加性（只发射、不遮挡）。
+uniform int       uLayerKind[4];
 uniform sampler2D uLayer0Accum;
 uniform sampler2D uLayer0Reveal;
 uniform sampler2D uLayer0Depth;
@@ -124,6 +126,7 @@ uniform sampler2D uLayer3Depth;
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
 // 解析第 i 个透明层 → 预乘色 c、层透射率 t、代表深度 z（视空间米）。
+// 加性槽（uLayerKind=1）返回的是**发射和**而不是预乘平均色，且 t 恒为 1。
 // 返回 false = 该像素上此层为空（accum.a≈0），不产生深度边界。
 bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
     vec4 accum = vec4(0.0);
@@ -152,10 +155,16 @@ bool ResolveLayer(int i, vec2 uv, out vec3 c, out float t, out float z) {
         z = 0.0;
         return false;
     }
+    z = depth_sum / accum.a;           // 代表深度（两种语义都用同一权重）
+    if (uLayerKind[i] == 1) {
+        // 加性：accum.rgb 就是 Σ(c·α) —— **不归一化、不乘覆盖**；不遮挡后方。
+        c = accum.rgb;
+        t = 1.0;
+        return true;
+    }
     float cov = clamp(1.0 - reveal, 0.0, 1.0);
     c = (accum.rgb / accum.a) * cov;   // 预乘：本层贡献的亮度
     t = clamp(reveal, 0.0, 1.0);
-    z = depth_sum / accum.a;           // 代表深度
     return true;
 }
 

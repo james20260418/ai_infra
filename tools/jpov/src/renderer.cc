@@ -1658,9 +1658,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                 layers.Add(glass_layer);
             }
 
-            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与 glass 同套 WBO 代数。
-            //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
-            //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
+            // ── 广告牌粒子（两张 1/2 分辨率 WBO 缓冲：加性 / 遮挡）──
+            //    画完不解算，只把两个层追加进本帧的 TransparentLayerSet；
+            //    由 FogCompositeRenderer 与雾 / 玻璃按代表深度统一多段积分。
+            //    ⇒ 火在玻璃前 / 后、烟在火前 / 后都按 z̄ 正确排序（旧的直连路径做不到）。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
@@ -1668,12 +1669,9 @@ void Renderer::Render(const RenderCommandList& cmds,
                     particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
                                             hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
                 }
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                const GLenum pdraw[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, pdraw);
-                particle_renderer_.Composite(fbo_3d_w, fbo_3d_h);
-                const GLenum mrt_bufs_p[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                glDrawBuffers(2, mrt_bufs_p);
+                // 粒子解算结果**作为透明层**交出（加性 / 遮挡各至多一个），
+                // 不再自己 over 进 HDR —— 由合成趟与雾 / 玻璃统一按代表深度积分。
+                particle_renderer_.AppendLayers(&layers);
             }
 
             // ── 体积火（逐像素 raymarch）—— 与粒子同套 WBO；结果作为薄层 over 合成进 HDR。──

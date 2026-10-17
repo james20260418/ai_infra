@@ -50,6 +50,12 @@ public:
     // Pre-condition: valid()。
     void BindForDraw() const;
 
+    // 绑定为**加性**目标：与 BindForDraw 相同，但 att1(reveal) 的混合改为 (ZERO, ONE)
+    // —— 加法层不写遮挡，reveal 保持 1 ⇒ 合成端 cov 恒为 0。
+    // 其余两个附件语义不变：att0=(发射累积, 亮度权重)、att2=(z·亮度权重)。
+    // Pre-condition: valid()。
+    void BindForAdditiveDraw() const;
+
     // 清空为恒等层：accum=(0,0,0,0)、reveal=1、depth=0。
     // Pre-condition: 已 BindForDraw（作用于当前绑定 FBO 的 draw buffer 0/1/2）。
     void Clear() const;
