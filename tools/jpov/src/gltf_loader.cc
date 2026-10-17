@@ -522,6 +522,59 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
     }
 
+    // ---- 植被风（项目约定语义，单个 UV 层）----
+    //   本版把风信息**只压进 loc6 的 vec2**：(joint_id, phase)。烘焙端（tools/vegetation/
+    //   build_tree.py --bake-wind → wind_bake.py）写一个额外 UV 层 "Wind"（→ glTF TEXCOORD_1）：
+    //     .x = joint_id（该顶点所属关节在关节表中的下标）；
+    //     .y = phase   （逐顶点连续相位场 [0,1) 秒，供热流用）。
+    //   关节表本身见下（node extras jpov_wind_joints）。
+    {
+        auto tex1_it = prim.attributes.find("TEXCOORD_1");
+        std::vector<float> t1;
+        if (tex1_it != prim.attributes.end() &&
+            ReadFloatAccessor(model, tex1_it->second, &t1) &&
+            t1.size() / 2 == vcount) {
+            out_mesh->wind_link.resize(vcount);
+            for (size_t i = 0; i < vcount; ++i) {
+                out_mesh->wind_link[i] = Vec2f(t1[i * 2 + 0],   // joint_id
+                                               t1[i * 2 + 1]);  // phase
+            }
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kWind));
+        }
+    }
+
+    // 植被风关节表：资产用 node extras["jpov_wind_joints"] = [px,py,pz,parent,level,phase,soft, ...]
+    //   携带（每关节 7 float，见 wind_bake.py）。同文件所有 primitive 共享同一张表。
+    for (const tinygltf::Node& node : model.nodes) {
+        if (!node.extras.IsObject() || !node.extras.Has("jpov_wind_joints")) {
+            continue;
+        }
+        const tinygltf::Value& arr = node.extras.Get("jpov_wind_joints");
+        if (!arr.IsArray() || arr.ArrayLen() == 0 || arr.ArrayLen() % 7 != 0) {
+            break;
+        }
+        out_mesh->wind_joints.resize(arr.ArrayLen() / 7);
+        for (size_t k = 0; k < out_mesh->wind_joints.size(); ++k) {
+            MeshData::WindJoint& wj = out_mesh->wind_joints[k];
+            for (size_t e = 0; e < 3; ++e) {
+                wj.pivot[e] = static_cast<float>(arr.Get(k * 7 + e).GetNumberAsDouble());
+            }
+            wj.parent = static_cast<float>(arr.Get(k * 7 + 3).GetNumberAsDouble());
+            wj.level  = static_cast<float>(arr.Get(k * 7 + 4).GetNumberAsDouble());
+            wj.phase  = static_cast<float>(arr.Get(k * 7 + 5).GetNumberAsDouble());
+            wj.soft   = static_cast<float>(arr.Get(k * 7 + 6).GetNumberAsDouble());
+        }
+        break;
+    }
+    // 有关节下标却缺表 → 下标无意义，必须**响警报**再丢弃（静默会让整棵树静悄悄不吹风）。
+    if (out_mesh->wind_joints.empty() && !out_mesh->wind_link.empty()) {
+        LOG(WARNING) << "glTF: 有风链下标（TEXCOORD_1）但缺少/形状非法 jpov_wind_joints "
+                     << "（每关节 7 float）⇒ 丢弃，该 mesh 不吹风。";
+        out_mesh->wind_link.clear();
+    }
+
     // ---- 4. 展开索引 ----
     if (prim.indices >= 0) {
         if (!ReadIndexAccessor(model, prim.indices, &out_mesh->indices)) {

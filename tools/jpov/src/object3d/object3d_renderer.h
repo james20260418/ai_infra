@@ -59,8 +59,31 @@ public:
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
+// ── 植被风（程序化顶点风）—— 见 interface/render_command.h 的 WindCommand ──
+// ⚠️ 本块在 kMeshVs3dPBRFull / kShadowVs 中**逐字重复**（object3d 三份拷贝）；改一处必须同步三处。
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
+uniform int   uWindJointCount;   // 关节表条目数（0 = 无表 → 不动）
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform float uWindTurbAmp;
+uniform float uWindTurbFreq;
+uniform float uWindGustFreq;
+uniform float uWindGustStr;
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.4;
+const float kTurbLevF  = 0.5;
+const float kTurbGustP = 4.0;
+vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
+    float c = cos(th);
+    float s = sin(th);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -70,12 +93,80 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    vec3 wn = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1 && uWindJointCount > 0) {
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+        vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
+        float al = length(axis);
+        axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+        int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
+            // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
+            // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
+            for (int c = 0; c < kMaxWindChain; ++c) {
+                if (jj < 0 || jj >= uWindJointCount) {
+                    break;
+                }
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 qpos = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+                float pjw = fr * (uWindTime + t1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
+                if (have_par == 0) {
+                    qpos = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
+                }
+                pp = t0.xyz;
+                Ap = A;
+            }
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
+            wn = WindRotVecAxis(wn, axis, A);
+            // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
+            float lev0 = clamp(own1.x, 0.0, 3.0);
+            float sof0 = clamp(own1.z, 0.0, 1.0);
+            float tph = uWindTime + aFlex.y;
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tpj = tfq * tph;
+            tpj -= floor(tpj);
+            float gph = uWindGustFreq * tph;
+            gph -= floor(gph);
+            float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+            float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+            float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+            vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
+            p += tdir * (tamp * sin(6.28318531 * tpj));
+    }
+    vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vWorldNormal = wn;
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
 #endif
@@ -91,8 +182,31 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
+// ── 植被风（程序化顶点风）—— 见 interface/render_command.h 的 WindCommand ──
+// ⚠️ 本块在 kMeshVs3dPBR / kShadowVs 中**逐字重复**（object3d 三份拷贝）；改一处必须同步三处。
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
+uniform int   uWindJointCount;
+uniform sampler2D uWindJointTex;
+uniform float uWindTurbAmp;
+uniform float uWindTurbFreq;
+uniform float uWindGustFreq;
+uniform float uWindGustStr;
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.4;
+const float kTurbLevF  = 0.5;
+const float kTurbGustP = 4.0;
+vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
+    float c = cos(th);
+    float s = sin(th);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -102,12 +216,78 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 void main() {
-    vec4 world_pos = uModel * vec4(aPos, 1.0);
+    mat3 nrm = mat3(transpose(inverse(uModel)));
+    vec3 wn = normalize(nrm * aNormal);
+    vec3 p = aPos;
+    if (uWindEnabled == 1 && uWindJointCount > 0) {
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+        vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
+        float al = length(axis);
+        axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+        int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
+            for (int c = 0; c < kMaxWindChain; ++c) {
+                if (jj < 0 || jj >= uWindJointCount) {
+                    break;
+                }
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 qpos = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+                float pjw = fr * (uWindTime + t1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
+                if (have_par == 0) {
+                    qpos = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
+                }
+                pp = t0.xyz;
+                Ap = A;
+            }
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
+            wn = WindRotVecAxis(wn, axis, A);
+            float lev0 = clamp(own1.x, 0.0, 3.0);
+            float sof0 = clamp(own1.z, 0.0, 1.0);
+            float tph = uWindTime + aFlex.y;
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tpj = tfq * tph;
+            tpj -= floor(tpj);
+            float gph = uWindGustFreq * tph;
+            gph -= floor(gph);
+            float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+            float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+            float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+            vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
+            p += tdir * (tamp * sin(6.28318531 * tpj));
+    }
+    vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
-    vWorldTangent = normalize(mat3(transpose(inverse(uModel))) * aTangent);
+    vWorldNormal = wn;
+    vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
-    gl_Position = uMVP * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
 #endif
@@ -125,17 +305,102 @@ void main() {
     static constexpr const char* kShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
+// ── 植被风（与主 pass 同步位移；否则树动、影不动）—— 见 kMeshVs3dPBR 同名块 ──
+// ⚠️ 本块在 kMeshVs3dPBR / kMeshVs3dPBRFull 中**逐字重复**；改一处必须同步三处。
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
+uniform int   uWindJointCount;
+uniform sampler2D uWindJointTex;
+uniform float uWindTurbAmp;
+uniform float uWindTurbFreq;
+uniform float uWindGustFreq;
+uniform float uWindGustStr;
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.4;
+const float kTurbLevF  = 0.5;
+const float kTurbGustP = 4.0;
+vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
+    float c = cos(th);
+    float s = sin(th);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
 out float vShadowDepth;
 #ifdef JPOV_ALPHA_CUTOUT
 layout(location = 2) in vec2 aTexCoord;
 out vec2 vTexCoord;
 #endif
 void main() {
-    vec4 clip = uShadowMVP * vec4(aPos, 1.0);
-    gl_Position = clip;
-    vec4 dpos = uShadowDepthMVP * vec4(aPos, 1.0);
+    vec3 p = aPos;
+    if (uWindEnabled == 1 && uWindJointCount > 0) {
+        vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+        vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
+        float al = length(axis);
+        axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+        int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
+            int chain[kMaxWindChain];
+            int nc = 0;
+            int jj = j0;
+            for (int c = 0; c < kMaxWindChain; ++c) {
+                if (jj < 0 || jj >= uWindJointCount) {
+                    break;
+                }
+                chain[nc] = jj;
+                ++nc;
+                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+                jj = int(floor(ct0.w + 0.5));
+            }
+            vec3 qpos = vec3(0.0);
+            float A = 0.0;
+            vec3 pp = vec3(0.0);
+            float Ap = 0.0;
+            int have_par = 0;
+            for (int k = nc - 1; k >= 0; --k) {
+                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+                float lev = clamp(t1.x, 0.0, 3.0);
+                float sof = clamp(t1.z, 0.0, 1.0);
+                float fr = uWindFrequency * (1.0 + 1.6 * lev);
+                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+                float pjw = fr * (uWindTime + t1.y);
+                pjw -= floor(pjw);
+                float th = amp * sin(6.28318531 * pjw);
+                if (have_par == 0) {
+                    qpos = t0.xyz;
+                    A = th;
+                    have_par = 1;
+                } else {
+                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+                    A = th + (1.0 - sof) * Ap;
+                }
+                pp = t0.xyz;
+                Ap = A;
+            }
+            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
+            float lev0 = clamp(own1.x, 0.0, 3.0);
+            float sof0 = clamp(own1.z, 0.0, 1.0);
+            float tph = uWindTime + aFlex.y;
+            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+            float tpj = tfq * tph;
+            tpj -= floor(tpj);
+            float gph = uWindGustFreq * tph;
+            gph -= floor(gph);
+            float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+            float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+            float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+            vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
+                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
+            p += tdir * (tamp * sin(6.28318531 * tpj));
+    }
+    gl_Position = uShadowMVP * vec4(p, 1.0);
+    vec4 dpos = uShadowDepthMVP * vec4(p, 1.0);
     vShadowDepth = dpos.z / dpos.w;   // 线性深度（DepthProj 下 w=1）
 #ifdef JPOV_ALPHA_CUTOUT
     vTexCoord = aTexCoord;

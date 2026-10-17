@@ -14,6 +14,7 @@
 |---|---|
 | `willow_small_tex.glb` | **带纹理 GLB**，约 **8.8k tri / 2.1 MB**（小体积样例） |
 | `willow_small_hero.png` | 出片（Blender Cycles 渲染） |
+| `willow_wind_tex.glb` | **烘了风数据的版本**（2.3 MB，692 关节）——带 `TEXCOORD_1` + `jpov_wind_joints`，给 `jpov_vegetation_viewer` 当模特 |
 
 > 体积刻意压小：17 MB 的满配柳树不适合入库当样例，这里是「小号」版本。
 
@@ -102,3 +103,31 @@ xvfb-run -a ./output/jpov_model_viewer/jpov_model_viewer \
 - **要换叶形**：换 `--leaf-atlas`。
 - **产物自检**：GLB 是**自包含**的（贴图内嵌），`tree`(Bark) + `leaves`(Leaf) 两条 mesh，
   Leaf 为 `alphaMode=MASK` + `doubleSided` —— 直接喂 JPOV 的 `branch_mesh` + `leaf_cards`。
+
+---
+
+## 8. 风版样例（`willow_wind_tex.glb`）
+
+> 在上一版基础上多一个 `--bake-wind`。**完整烘焙说明见 `../README.md §6`**（顶点信息烘焙 SKILL）。
+
+```bash
+cd tools/jpov/tools/vegetation
+blender -b --python build_tree.py -- weeping_willow \
+    --textured --textures ./textures --leaf-atlas leaf001 \
+    --bake-wind \
+    --set scale=6 --set curveRes=4,6,4,1 --set branches=0,16,8,4 \
+    --set leaves=10 --set leafScale=0.25 --set seed=5 \
+    --out samples/willow_wind_tex.glb
+```
+
+自检（引擎里真在动才叫成）：
+
+```bash
+cd /james_pm/ai_infra_2
+./tools/jpov/build_jpov_vegetation_viewer.sh
+xvfb-run -a ./output/jpov_vegetation_viewer/jpov_vegetation_viewer \
+    --glb tools/jpov/tools/vegetation/samples/willow_wind_tex.glb \
+    --capture-wind /tmp/wind_shots
+```
+
+验收判据：关风帧 ≠ 开风帧；相邻秒也不同；**无撕裂**。小柳树像素变化量级 ≈ 3–5%。

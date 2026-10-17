@@ -56,6 +56,9 @@ echo "==> 4. 拷贝柳树范本 GLB 到 output/jpov_vegetation_viewer/plants/"
 mkdir -p "$OUTPUT_DIR/plants"
 cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_small_tex.glb" \
       "$OUTPUT_DIR/plants/willow_small_tex.glb"
+# 带风数据的柳树范本（关节表 + loc6），供 --capture-wind / 风动观察。
+cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_wind_tex.glb" \
+      "$OUTPUT_DIR/plants/willow_wind_tex.glb"
 ls -lh "$OUTPUT_DIR/plants/"
 
 echo ""
