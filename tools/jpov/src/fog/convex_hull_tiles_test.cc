@@ -11,7 +11,7 @@
 // 注：随机用例里建的栅格必须**盖住**点范围，否则越界坐标会被夹断到边界格，
 //     与参照（只遍历栅格内 tile）口径不一致。
 
-#include "tools/jpov/src/fire_fog/convex_hull_tiles.h"
+#include "tools/jpov/src/fog/convex_hull_tiles.h"
 
 #include <algorithm>
 #include <cmath>

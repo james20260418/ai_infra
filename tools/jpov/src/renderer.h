@@ -14,7 +14,10 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/interface/window_info.h"
-#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/fog/fog_composite_renderer.h"
+#include "tools/jpov/src/fog/fog_renderer.h"
+#include "tools/jpov/src/transparent_layer.h"
+#include "tools/jpov/src/wbo_buffer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
@@ -146,17 +149,11 @@ private:
     // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）—— 玻璃实例 ──
     // 「TAB」= 一次 OIT 用的 3 附件透明累积缓冲（accum/reveal/depth），被玻璃 / 粒子 / 体积火
     // 共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
-    // 此处是**玻璃那一份**，也是 froxel 体积雾绑定读的那一份。旧称「玻璃 FBO / WBO 纹理」。
-    // 玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
-    // 尺寸 = 3D FBO（1× 单采样；结构化数据不能被过滤/平均）。
-    //   COLOR0 accum (RGBA16F)：blend(ONE, ONE)——Σ(预乘色×w, α×w)；
-    //   COLOR1 reveal (R16F) ：blend(ZERO, ONE_MINUS_SRC_COLOR)——Π(1−α)；
-    //   COLOR2 depth  (R32F) ：blend(ONE, ONE)——Σ(z_view×α×w)（代表深度）。
-    // 无深度缓冲：透明 pass 在 FS 里用不透明场景深度手动作深度测试（见 DrawObject3DBlend）。
-    // 由 DrawTransparentPass 写入；由体积雾 composite 与雾一起合成。无玻璃物体时被清空（恒等）。
-    unsigned int glass_fbo_ = 0;
-    unsigned int glass_accum_tex_ = 0, glass_reveal_tex_ = 0, glass_depth_tex_ = 0;
-    int glass_w_ = 0, glass_h_ = 0;
+    // 实现已收拢到 WboBuffer（src/wbo_buffer.h）；此处是**玻璃那一份**，
+    // 由 DrawTransparentPass 写入，作为**一个透明层**交给 FogCompositeRenderer 与雾一起
+    // 按代表深度多段积分（见 transparent_layer.h 的契约）。
+    // 无 kBlend 物体时本帧不建/不清（零开销）。
+    WboBuffer glass_wbo_;
 
     // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
     // 每一级联独立 FBO/深度纹理/尺寸，数量 = ShadowConfig::cascade_count。
@@ -209,15 +206,10 @@ private:
     void DestroyHighlightMaskFBO();
 
     // ---- 透明玻璃 pass（Weighted Blended OIT）----
-    // 1× 玻璃 FBO：accum/reveal/depth 三附件（含尺寸失效重建）。
-    void EnsureGlassFBO(int w, int h);
-    void DestroyGlassFBO();
-    // 清空三附件：accum=(0,0,0,0), reveal=(1,0,0,0), depth=(0,0,0,0)。
-    void ClearGlassFBO();
     // 本帧是否有 alpha_mode==kBlend 的 object3d（决定是否跑透明 pass / 是否唤醒雾合成）。
     static bool HasBlendObjects(const RenderCommandList& cmds);
-    // 把 cmds.object3d 中 alpha_mode==kBlend 者以 WBO 画进 glass FBO（无深度缓冲，
-    // FS 用 scene_depth_tex 手动作深度测试）。调用方需已 EnsureGlassFBO + ClearGlassFBO。
+    // 把 cmds.object3d 中 alpha_mode==kBlend 者以 WBO 画进 glass_wbo_（无深度缓冲，
+    // FS 用 scene_depth_tex 手动作深度测试）。调用方需先 glass_wbo_.Ensure + Clear。
     // Pre-condition: scene_depth_tex ≠ 0（不透明场景深度，值 = gl_FragCoord.z）。
     void DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                              unsigned int scene_depth_tex);
@@ -354,9 +346,11 @@ private:
     // 与 Object3DRenderer 在 renderer 层面平级（互不依赖）。
     SkeletonRenderer skeleton_renderer_;
 
-    // 点状雾火子渲染器（体积雾 + 火；屏幕 tile 剪枝 + 逐像素 ZDist）。
-    // 单一自包含，与 object3d / horizon_fog 平级。见 src/fire_fog/。
-    FireFogRenderer fire_fog_renderer_;
+    // 点状雾子渲染器（体积雾 + 火；froxel 屏幕空间摊销）。见 src/fog/。
+    // 职责切分：FogRenderer 只烘 froxel **场**，FogCompositeRenderer 负责把
+    // 「雾场 + 0..N 个透明层」按深度交替积分（按**趟**分层，不按名词分层）。
+    FogRenderer fog_renderer_;
+    FogCompositeRenderer fog_composite_;
     ParticleRenderer particle_renderer_;
     VolumeFireRenderer volume_fire_renderer_;
     VolumeManager volume_mgr_;

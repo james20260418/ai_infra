@@ -2,7 +2,7 @@
 //
 // 目的：验证「广告牌粒子 → WBO 半透明分级纹理（1/2）→ 合成 → froxel」这条链的最小测试场。
 // 场景 = 灰色地面 + 一张桌子 + 桌上的「火 + 烟」（火焰走新 ParticleRenderer 的 WBO 路径）。
-// 与 fire_fog viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI）。
+// 与 fog viewer 同构（同一套 JPOV::OneIteration 渲染体 + 即时模式 UI）。
 //
 // 设计：tools/jpov/docs/jpov_fragment_overdraw_design.md（低分半透明粒子 + WBO）。
 
@@ -106,10 +106,15 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     c.use_color_over_life = true;
     jpov::particles::Gradient g;
     g.keys = {
-        {0.00f, jpov::Color{0.02f, 0.02f, 0.03f, 0.00f}},
-        {0.22f, jpov::Color{0.02f, 0.02f, 0.03f, 0.85f}},
-        {0.70f, jpov::Color{0.04f, 0.04f, 0.05f, 0.70f}},
-        {1.00f, jpov::Color{0.06f, 0.06f, 0.07f, 0.00f}},
+        // albedo（不是最终色）：颜色由光照决定 —— 天光 + 太阳直射 + 前向散射。
+        // 早前这里是 (0.02,0.02,0.03)（近乎黑），因为那时烟完全不接收光照。
+        // 低 albedo（烟灰 ≈0.1）：亮度交给光照，避免「白乎乎的雾」；
+        // 峰值 alpha 也压到 0.35 —— WBO 只塌成一个等效层，alpha 过饱和会把
+        // 密度结构（cov=1−Π(1−α)）抹平成一块均匀的板。
+        {0.00f, jpov::Color{0.14f, 0.14f, 0.15f, 0.00f}},
+        {0.22f, jpov::Color{0.15f, 0.15f, 0.16f, 0.65f}},
+        {0.70f, jpov::Color{0.16f, 0.16f, 0.17f, 0.50f}},
+        {1.00f, jpov::Color{0.18f, 0.18f, 0.19f, 0.00f}},
     };
     c.color_over_life = g;
     c.use_size_over_life = true;

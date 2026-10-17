@@ -59,14 +59,14 @@ void ParticleRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(!initialized_) << "ParticleRenderer::Init 重复调用";
     shader_mgr_ = shader_mgr;
     prog_draw_ = shader_mgr_->GetOrCreate("particle_wbo_draw", {kVs, kFsWbo});
-    prog_comp_ = shader_mgr_->GetOrCreate("particle_wbo_composite", {kVsComp, kFsComp});
     glGenVertexArrays(1, &vao_);
     CHECK_NE(vao_, 0u);
     initialized_ = true;
 }
 
 void ParticleRenderer::Finalize() {
-    DestroyWbo();
+    wbo_add_.Destroy();
+    wbo_over_.Destroy();
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
@@ -74,81 +74,19 @@ void ParticleRenderer::Finalize() {
     initialized_ = false;
 }
 
-void ParticleRenderer::EnsureWbo(int w, int h) {
-    if (wbo_fbo_ != 0 && wbo_w_ == w && wbo_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    DestroyWbo();
-
-    glGenTextures(1, &accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // 低分→高分上采样
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &wbo_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                           reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           depth_tex_, 0);
-    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                            GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, bufs);
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "ParticleRenderer WBO FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    wbo_w_ = w;
-    wbo_h_ = h;
-}
-
-void ParticleRenderer::DestroyWbo() {
-    if (wbo_fbo_) { glDeleteFramebuffers(1, &wbo_fbo_); wbo_fbo_ = 0; }
-    if (accum_tex_) { glDeleteTextures(1, &accum_tex_); accum_tex_ = 0; }
-    if (reveal_tex_) { glDeleteTextures(1, &reveal_tex_); reveal_tex_ = 0; }
-    if (depth_tex_) { glDeleteTextures(1, &depth_tex_); depth_tex_ = 0; }
-    wbo_w_ = 0;
-    wbo_h_ = 0;
-}
-
 void ParticleRenderer::Begin(int full_w, int full_h) {
     CHECK(initialized_) << "ParticleRenderer::Begin: 未 Init";
     const int hw = std::max(1, static_cast<int>(full_w * kScale));
     const int hh = std::max(1, static_cast<int>(full_h * kScale));
-    EnsureWbo(hw, hh);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, hw, hh);
-    const GLfloat clr_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_depth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clr_accum);
-    glClearBufferfv(GL_COLOR, 1, clr_reveal);
-    glClearBufferfv(GL_COLOR, 2, clr_depth);
+    wbo_add_.Ensure(hw, hh);
+    wbo_over_.Ensure(hw, hh);
+    wbo_add_.BindForDraw();
+    wbo_add_.Clear();
+    wbo_over_.BindForDraw();
+    wbo_over_.Clear();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    has_content_ = false;
+    has_add_ = false;
+    has_over_ = false;
 }
 
 void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
@@ -156,7 +94,8 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
                             const Camera& camera,
                             const float view_proj[16],
                             unsigned int scene_depth_tex,
-                            int full_w, int full_h) {
+                            int full_w, int full_h,
+                            const ParticleLighting& light) {
     CHECK(initialized_) << "ParticleRenderer::Draw: 未 Init";
     if (cmd.particles.empty()) {
         return;
@@ -165,7 +104,9 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
 
     const int hw = std::max(1, static_cast<int>(full_w * kScale));
     const int hh = std::max(1, static_cast<int>(full_h * kScale));
-    EnsureWbo(hw, hh);
+    const bool additive = cmd.blend == BlendMode::kAdditive;
+    WboBuffer& target = additive ? wbo_add_ : wbo_over_;
+    target.Ensure(hw, hh);
 
     // 相机基向量
     const Vec3f cam_pos = camera.position;
@@ -206,15 +147,12 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     vel_buf_.Upload(vel_data);
 
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, hw, hh);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z·α·w
+    // 绑 FBO + viewport + 三 draw buffer + 对应 blend 语义（WboBuffer 统一负责）。
+    if (additive) {
+        target.BindForAdditiveDraw();   // reveal 不写：加性层不遮挡
+    } else {
+        target.BindForDraw();
+    }
 
     glUseProgram(prog_draw_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE,
@@ -230,12 +168,31 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uTilesY"), cmd.tiles_y);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFlipbook"), cmd.flipbook ? 1 : 0);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFrameBlend"), cmd.frame_blend ? 1 : 0);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uAdditive"),
-                cmd.blend == BlendMode::kAdditive ? 1 : 0);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uAdditive"), additive ? 1 : 0);
     glUniform2f(shader_mgr_->GetUniform(prog_draw_, "uViewport"), static_cast<float>(hw),
                 static_cast<float>(hh));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFar"), camera.far);
+
+    // ── 光照（只被遮挡类 = 烟消费；加性类在 FS 里提前 return，不会走到着色）──
+    glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uAmbientColor"),
+                light.ambient_color.r, light.ambient_color.g, light.ambient_color.b);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uAmbientIntensity"),
+                light.ambient_intensity);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uHasSun"),
+                light.sun.has_value() ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uForwardScatter"),
+                light.forward_scatter);
+    if (light.sun.has_value()) {
+        // sun.direction = 光的**传播**方向；着色要的是**指向光源**的方向。
+        glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uSunDir"),
+                    -light.sun->direction.x(), -light.sun->direction.y(),
+                    -light.sun->direction.z());
+        glUniform3f(shader_mgr_->GetUniform(prog_draw_, "uSunColor"),
+                    light.sun->color.r, light.sun->color.g, light.sun->color.b);
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSunIntensity"),
+                    light.sun->intensity);
+    }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
@@ -261,41 +218,31 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     }
 
     // 复原 blend（非常规混合必须显式回写；GL_COLOR_BUFFER_BIT 的 pop 不一定覆盖 blend func）。
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    target.RestoreStandardBlend();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPopAttrib();
 
-    has_content_ = true;
+    if (additive) {
+        has_add_ = true;
+    } else {
+        has_over_ = true;
+    }
 }
 
-void ParticleRenderer::Composite(int full_w, int full_h) {
-    if (!has_content_ || wbo_fbo_ == 0) {
-        return;
+void ParticleRenderer::AppendLayers(TransparentLayerSet* layers /*output*/) const {
+    CHECK(layers != nullptr);
+    if (has_add_ && wbo_add_.valid()) {
+        TransparentLayer add = wbo_add_.layer();
+        add.scale = kScale;
+        add.kind = TransparentLayerKind::kAdditive;
+        layers->Add(add);
     }
-    glPushAttrib(GL_ENABLE_BIT);
-    glViewport(0, 0, full_w, full_h);
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // over（预乘 src）
-
-    glUseProgram(prog_comp_);
-    glActiveTexture(GL_TEXTURE0 + 0);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
-    glActiveTexture(GL_TEXTURE0 + 1);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
-
-    glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glPopAttrib();
-    has_content_ = false;   // 本帧消费掉
+    if (has_over_ && wbo_over_.valid()) {
+        TransparentLayer over = wbo_over_.layer();
+        over.scale = kScale;
+        over.kind = TransparentLayerKind::kOver;
+        layers->Add(over);
+    }
 }
 
 }  // namespace jpov
