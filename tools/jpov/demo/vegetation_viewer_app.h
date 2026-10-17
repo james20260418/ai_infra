@@ -239,10 +239,12 @@ public:
         }
 
         if (show_panel_) {
-            DrawLightPanel(input);
+            DrawPanels(input);
             // 半透明黑底版：在面板控件入队【之前】发出 → 先画，控件叠在其上。
             // （2D 指令按入队顺序绘制：先 DrawRect 再 ui_.Emit。）
             cmds->DrawRect(panel_bg_.pos, panel_bg_.size,
+                           /*color*/ {0.0f, 0.0f, 0.0f, 0.5f});
+            cmds->DrawRect(wind_bg_.pos, wind_bg_.size,
                            /*color*/ {0.0f, 0.0f, 0.0f, 0.5f});
             ui_.End();
             ui_.Emit(cmds);
@@ -257,9 +259,10 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 面板：锚定窗口**右下角**，半透明黑底版 + 单列浓缩天光控件（见 OneIteration 的 DrawRect）。
-    // 已按需求删掉「血月 / 夜空偏蓝」这类花哨项，只留最基本的昼夜观察旋钮。
-    void DrawLightPanel(const jpov::InputSnapshot& input) {
+    // 两个面板（**一次** Ui::Begin/Emit，因为 Ui 每帧只允许一次 Begin）：
+    //   · 右下角 = 天光（浊度/季节/天体仰角+方位/三色 ambient/SMAA）
+    //   · 左下角 = 植被风（开关 + pivot 振幅/频率 + 平动湍流振幅/频率 + 风朝向 + 湍流随机性）
+    void DrawPanels(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
         const float h = static_cast<float>(kViewerHeight);
         jpov::UiTheme theme = jpov::UiTheme::Default(kSliderFontSize);
@@ -271,43 +274,62 @@ private:
         const float kPad    = 12.0f;    // 底板内边距
         const float kRowH   = 26.0f;
         const float kSpace  = 8.0f;
-        const int   kRows   = 13;
-        const float kMargin = 16.0f;    // 距窗口右/下边距
-
+        const float kMargin = 16.0f;    // 距窗口边距
         const float inner_w = kPanelW - 2.0f * kPad;
-        const float inner_h = static_cast<float>(kRows) * kRowH
-                              + static_cast<float>(kRows - 1) * kSpace;
-        const float panel_h = inner_h + 2.0f * kPad;
-        const float panel_x = w - kMargin - kPanelW;    // 贴右下角
-        const float panel_y = h - kMargin - panel_h;
-        panel_bg_ = jpov::UiRect{{panel_x, panel_y}, {kPanelW, panel_h}};
 
-        const float cx = panel_x + kPad;
-        const float cy = panel_y + kPad;
-        auto row = [&](int i) {
-            return jpov::UiRect{
-                {cx, cy + static_cast<float>(i) * (kRowH + kSpace)},
-                {inner_w, kRowH}};
-        };
+        // ── 右下角：天光 ──
+        {
+            const int kRows = 7;
+            const float inner_h = static_cast<float>(kRows) * kRowH
+                                  + static_cast<float>(kRows - 1) * kSpace;
+            const float panel_h = inner_h + 2.0f * kPad;
+            const float panel_x = w - kMargin - kPanelW;
+            const float panel_y = h - kMargin - panel_h;
+            panel_bg_ = jpov::UiRect{{panel_x, panel_y}, {kPanelW, panel_h}};
+            const float cx = panel_x + kPad;
+            const float cy = panel_y + kPad;
+            auto row = [&](int i) {
+                return jpov::UiRect{
+                    {cx, cy + static_cast<float>(i) * (kRowH + kSpace)},
+                    {inner_w, kRowH}};
+            };
+            ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0),
+                            jpov_skylight::kTurbidityMin, jpov_skylight::kTurbidityMax, 1);
+            ui_.SliderFloat("季节色温 日光 (左蓝..右红)", &deg_.daylight_season,
+                            row(1), -1.0f, 1.0f, 2);
+            ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                            row(2), -90.0f, 90.0f, 0);
+            ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(3), 0.0f, 360.0f, 0);
+            ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(4));
+            ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(5));
+            ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(6),
+                            0.02f, 0.5f, 2);
+        }
 
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0),
-                        jpov_skylight::kTurbidityMin, jpov_skylight::kTurbidityMax, 1);
-        ui_.SliderFloat("季节色温 日光 (左蓝..右红)", &deg_.daylight_season,
-                        row(1), -1.0f, 1.0f, 2);
-        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
-                        row(2), -90.0f, 90.0f, 0);
-        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(3), 0.0f, 360.0f, 0);
-        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(4));
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(5));
-        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(6),
-                        0.02f, 0.5f, 2);
-        // ── 植被风 ──
-        ui_.Checkbox("风 (植被风)", &wind_on_, row(7));
-        ui_.Checkbox("枢轴式 (关=平移式)", &wind_pivot_, row(8));
-        ui_.SliderFloat("风向方位角 °", &wind_azimuth_deg_, row(9), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("风振幅", &wind_amplitude_, row(10), 0.0f, 1.5f, 2);
-        ui_.SliderFloat("风频率 Hz", &wind_frequency_, row(11), 0.05f, 2.0f, 2);
-        ui_.SliderFloat("平动湍流幅度", &wind_turb_amp_, row(12), 0.0f, 0.6f, 3);
+        // ── 左下角：植被风 ──
+        {
+            const int kRows = 7;
+            const float inner_h = static_cast<float>(kRows) * kRowH
+                                  + static_cast<float>(kRows - 1) * kSpace;
+            const float panel_h = inner_h + 2.0f * kPad;
+            const float panel_x = kMargin;                 // 贴左下角
+            const float panel_y = h - kMargin - panel_h;
+            wind_bg_ = jpov::UiRect{{panel_x, panel_y}, {kPanelW, panel_h}};
+            const float cx = panel_x + kPad;
+            const float cy = panel_y + kPad;
+            auto row = [&](int i) {
+                return jpov::UiRect{
+                    {cx, cy + static_cast<float>(i) * (kRowH + kSpace)},
+                    {inner_w, kRowH}};
+            };
+            ui_.Checkbox("风（植被风）", &wind_on_, row(0));
+            ui_.SliderFloat("风朝向 °", &wind_azimuth_deg_, row(1), 0.0f, 360.0f, 0);
+            ui_.SliderFloat("pivot 振幅", &wind_amplitude_, row(2), 0.0f, 1.5f, 2);
+            ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, row(3), 0.05f, 2.0f, 2);
+            ui_.SliderFloat("平动湍流 幅度", &wind_turb_amp_, row(4), 0.0f, 0.6f, 3);
+            ui_.SliderFloat("平动湍流 频率 Hz", &wind_turb_freq_, row(5), 0.0f, 8.0f, 2);
+            ui_.SliderFloat("湍流随机性 [0,1]", &wind_gust_str_, row(6), 0.0f, 1.0f, 2);
+        }
     }
 
     bool show_panel_ = true;
@@ -316,7 +338,8 @@ private:
     float base_scale_ = 1.0f;        // 资产→世界 的归一缩放（把 Y 高映射到 kPlantTargetHeight）
     float aim_y_ = 0.0f;             // 相机注视点高度 = 植物竖直中点（世界坐标，米）
     jpov::Ui ui_;
-    jpov::UiRect panel_bg_{};        // 面板底板矩形（本帧 DrawLightPanel 填，供 DrawRect）
+    jpov::UiRect panel_bg_{};        // 右下角天光面板底板（本帧 DrawPanels 填）
+    jpov::UiRect wind_bg_{};         // 左下角风面板底板（本帧 DrawPanels 填）
 
     static constexpr float kSliderFontSize = 15.0f;
 };
