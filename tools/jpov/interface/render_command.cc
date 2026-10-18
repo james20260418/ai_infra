@@ -199,7 +199,8 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       const Vec3f& up, const Vec3f& front,
                                       float scale,
                                       bool highlight,
-                                      uint32_t picking_id) {
+                                      uint32_t picking_id,
+                                      const std::optional<WindCommand>& wind) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
@@ -212,6 +213,7 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
     cmd.scale = scale;
     cmd.picking_id = picking_id;
     cmd.highlight = highlight;
+    cmd.wind = wind;
     object3d.push_back(cmd);
     order.emplace_back(DrawCommandType::kObject3D, idx);
 }
@@ -246,13 +248,14 @@ void RenderCommandList::DrawGltfObject(const GltfObject& obj,
                                        const Vec3f& up, const Vec3f& front,
                                        float scale,
                                        bool highlight,
-                                       uint32_t picking_id) {
+                                       uint32_t picking_id,
+                                       const std::optional<WindCommand>& wind) {
     // 内部就是多个 Object3DCommand，无新命令体。
-    // picking_id/highlight/scale 透传给每个 primitive（整模型统一拾取/高亮/缩放）。
+    // picking_id/highlight/scale/wind 透传给每个 primitive（整模型统一拾取/高亮/缩放/风）。
     for (const GltfPrimitive& prim : obj.primitives) {
         DrawObject3D(prim.mesh_id, prim.material, center, up, front,
                      /*scale=*/scale, /*highlight=*/highlight,
-                     /*picking_id=*/picking_id);
+                     /*picking_id=*/picking_id, /*wind=*/wind);
     }
 }
 

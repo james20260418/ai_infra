@@ -665,6 +665,50 @@ struct SmaaConfig {
     float threshold = 0.1f;
 };
 
+// ==================== 植被风（程序化顶点风）====================
+//
+// 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
+// docs/jpov_vegetation_wind_design.md。
+//
+// ── 本版范围（重要）──
+//   **只接 object3d 路径**（DrawObject3D / DrawGltfObject）。instanced / 蒙皮路径**本版不动**。
+//   只有带风数据的 mesh（`MeshData.flags` 含 `kWind`）会被位移；以 **mesh 的关节表是否非空**
+//   为闸（`uWindJointCount>0`）—— 无表 mesh（如地面）完全不受影响。
+//
+// ── 数据（三处，各管一段）──
+//   · **逐顶点 loc6 = vec2(joint_id, phase)**（mesh 带 kWind 时；由 TEXCOORD_1 读入）：
+//       joint_id = 该顶点所属关节在关节表中的下标；phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
+//       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
+//   · **本物体自己的风参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
+//       **每个 Object3DCommand 自带一份** —— 不同树/不同物体可以吹不同的风（方向、
+//       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
+//
+// ── 位移公式（枢轴链 + 链外平动湍流）──
+//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
+//     q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)     // 位置：完整继承
+//     A_j = θ_j + (1 − soft_j)·A_parent                         // 朝向：按 (1−soft) 打折
+//     p'  = q_own + R(A_own)·(p − pivot_own)
+//     θ_j = uWindAmplitude·kWindPivotGain·(0.15·level)·sin(2π·f0(1+1.6·level)·(t+phase_j))
+//   另有链外**平动湍流**（逐顶点，相位取 loc6.y；幅度 ∝ 关节 soft·(0.5+0.5·level)）。
+//   ⚠️ 只有这一种算法：没有 mode 开关、没有平移式退化。无关节表的 mesh 不吹风。
+//
+// 确定性：time 必须由**帧号**推（frame_count / fps），不可用 wall-clock，否则 gold 不稳。
+// 未设置（nullopt）→ 不施加任何位移，零开销、零回归。
+struct WindCommand {
+    float time = 0.0f;         // 全局时间（秒）。确定性：由帧号推。
+    float amplitude = 1.0f;    // 枢轴风振幅（转角尺度）
+    float frequency = 1.0f;    // 基频（Hz）
+    // 风向：**单位向量**（世界空间）。只管方向；风强度由 amplitude 表达。
+    Vec3f direction = {1.0f, 0.0f, 0.0f};
+    // ---- 链外「平动湍流」（逐顶点）：独立参数 ----
+    float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
+    float turb_frequency = 2.5f;   // 平动湍流频率（Hz）
+    // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)
+    float gust_frequency = 0.6f;   // 阵风频率（Hz）
+    float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
+};
+
 // 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
 //
 // ── 在后处理链中的位置（用户视角）──
@@ -1675,6 +1719,10 @@ struct Object3DCommand {
     //   仅当 highlight_style 有值且本物体 highlight==true 时才多画一个描边 pass；
     //   未开启高亮时零额外开销。
     bool highlight = false;
+    // 本物体的风参数（可选）：**逐物体**，不是全场景一份 —— 同场景两棵树可以给
+    //   不同风向/相位/强度。仅当 mesh 带 kWind（烘焙过风数据）时生效；无风数据的
+    //   mesh 设了也无效。未设（默认）= 本物体零风、零开销。见 WindCommand。
+    std::optional<WindCommand> wind;
 };
 
 // 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
@@ -2024,6 +2072,9 @@ struct RenderCommandList {
     // 默认无值（等同关闭），零额外开销、零回归。**需要 tone_mapping=true**。
     std::optional<SmaaConfig> smaa;
 
+    // 植被风不在 RenderCommandList 上：风是**逐物体**参数，见 Object3DCommand::wind。
+    // （不能要求用户所有物体共用一个风；每棵树的风向/相位/强度都应能独立。）
+
     // 全局高亮样式。有值且某 Object3DCommand::highlight==true 时，
     // 给该物体绘制方法 B 纯色边框（CPU 屏幕空间剪影膨胀，见 HighlightStyle / DrawHighlightPass）。
     // 无值（默认）时不绘制任何高亮，零额外开销。
@@ -2224,7 +2275,8 @@ struct RenderCommandList {
                       const Vec3f& up, const Vec3f& front,
                       float scale = 1.0f,
                       bool highlight = false,
-                      uint32_t picking_id = 0);
+                      uint32_t picking_id = 0,
+                      const std::optional<WindCommand>& wind = std::nullopt);
 
     // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
     //
@@ -2256,7 +2308,8 @@ struct RenderCommandList {
                         const Vec3f& up, const Vec3f& front,
                         float scale = 1.0f,
                         bool highlight = false,
-                        uint32_t picking_id = 0);
+                        uint32_t picking_id = 0,
+                        const std::optional<WindCommand>& wind = std::nullopt);
 
     // 3D 骨架蒙皮批量（instancing）—— 「这批人用这套骨架(skeleton_id)，每个人拿该骨架
     // 某两个 pose 之间插值摆出一个姿态」。

@@ -58,6 +58,7 @@ enum class MeshVertexFlags : uint8_t {
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
     kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
+    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6）
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
@@ -92,6 +93,23 @@ struct MeshData {
     //   .y = max_lag  ≥ 0    ：该顶点相对当前 pose 的最大允许位移（模型系，米；逐顶点限幅）。
     // 见 docs/jpov_instance_attr_lag_design.md §4.1 / §4.4。
     std::vector<Vec2f> relaxations;
+
+    // 植被风标注（逐顶点；kWind 时非空）—— **只存 2 个数**，把此桩“次级运动槽”用到最省：
+    //   .x = joint_id ∈ [0, wind_joints.size())：该顶点所属关节在关节表中的下标；
+    //   .y = phase    ∈ [0,1)（秒）：逐顶点的**连续**相位场（链外平动湍流用；连续⇒不撕裂）。
+    // 其余风力所需量全部不进顶点，而进**关节表**（每关节一份，pivot/parent/level/phase/soft）；
+    // softness 不再逐顶点存（湍流幅度掩膜改由关节表/位置现算）。见 docs/jpov_vegetation_wind_design.md。
+    std::vector<Vec2f> wind_link;
+    // 植被风的关节表（**每 mesh 一份**，来自资产 node extras jpov_wind_joints）：
+    //   同树的多 primitive（trunk / leaves）共享同一张表。每个关节是刚性链的一环。
+    struct WindJoint {
+        float pivot[3];  // 枢轴位置（资产/模型系）
+        float parent;    // 父关节下标；-1 = 根
+        float level;     // 距根的关节数（θ 的频率/增益按此分档）
+        float phase;     // 逐关节相位（秒）：同一刚性段内各顶点共享（否则段内剪切）
+        float soft;      // 朝向继承度 0..1（0=硬/全继承父朝向；1=软/只随自己的 θ）
+    };
+    std::vector<WindJoint> wind_joints;
     std::vector<uint32_t> indices;
 
     // 骨骼专属（flags 包含 kJoints 时才有效）
@@ -188,6 +206,20 @@ inline void MeshData::Validate() const {
         CHECK_EQ(relaxations.size(), vcount)
             << "MeshData::Validate: relaxations.size() != positions.size()";
     }
+    // 植被风：逐顶点 (joint_id, phase) 须与顶点数对齐；有关节下标就一定要有表。
+    if (!wind_link.empty()) {
+        CHECK_EQ(wind_link.size(), vcount)
+            << "MeshData::Validate: wind_link.size() != positions.size()";
+        CHECK(!wind_joints.empty())
+            << "MeshData::Validate: 有 wind_link 但无 wind_joints 关节表";
+    }
+    for (const Vec2f& wl : wind_link) {
+        CHECK_GE(wl.x(), 0.0f) << "MeshData::Validate: wind_link 关节下标为负";
+        CHECK_LT(static_cast<size_t>(wl.x()), wind_joints.size())
+            << "MeshData::Validate: wind_link 关节下标越出关节表";
+        CHECK_GE(wl.y(), 0.0f) << "MeshData::Validate: wind_link 相位为负";
+        CHECK_LT(wl.y(), 1.0f) << "MeshData::Validate: wind_link 相位应落在 [0,1)";
+    }
     if (!joint_indices.empty()) {
         CHECK_EQ(joint_indices.size(), vcount)
             << "MeshData::Validate: joint_indices.size() != positions.size()";
@@ -234,6 +266,18 @@ inline void MeshData::Validate() const {
         CHECK(relaxations.empty())
             << "MeshData::Validate: 未声明 kRelax 但 relaxations 非空";
     }
+
+    if (MeshHasFlag(flags, MeshVertexFlags::kWind)) {
+        CHECK_EQ(wind_link.size(), vcount)
+            << "MeshData::Validate: flags 声明 kWind 但 wind_link 长度不一致或缺数据";
+    } else {
+        CHECK(wind_link.empty())
+            << "MeshData::Validate: 未声明 kWind 但 wind_link 非空";
+    }
+    // kRelax 与 kWind **互斥**：二者同占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
+    CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
+            MeshHasFlag(flags, MeshVertexFlags::kWind)))
+        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
     if (joints_declared) {
