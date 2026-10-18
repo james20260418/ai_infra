@@ -1,32 +1,31 @@
-// JPOV Fire-Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
+// JPOV Fog — GLSL 着色器（froxel 屏幕空间摊销 Z 轴采样）
 //
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。趟（前两趟跑在 froxel 纹理上，最后一趟全屏）：
-//   inject  （fire_fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
+//   inject  （fog_inject）    每个 texel = 某 froxel 的**局部** (τ, S)：按 tile 中心
 //                                  视线，在 [z_k, z_{k+1}) 段内累加候选雾团的 Δτ 与 S_leaf。
-//   reduce  （fire_fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
+//   reduce  （fog_reduce）    金字塔每一级：由上一级沿 z **4 合 1**（over 合成），
 //                                  得到「每块 = 4^j 个切片」的粗粒度块，供 scatter「大块跳」。
-//   scatter （fire_fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
+//   scatter （fog_scatter）   每个 texel = 某 froxel 的**累积** (τ, S)：沿 z 做有序前缀，
 //                                  用金字塔 + **base-4 分解** ⇒ 每 texel **O(log Nz)** 次合成。
-//   composite（fire_fog_composite） 每个像素读 4 邻 tile 的 scatter 列、按像素深度 z 做
-//                                  切片间插值 + 双线性，输出 vec4(S.rgb, T) 就地混合。
+//   （合成趟已迁至 FogCompositeRenderer —— 见 fog_composite_renderer.h。）
 //
 // froxel 网格：每个 Nxy 单元 = froxel 纹理上一块 sblock×sblock texel（sblock=√nz），
 // 承载 nz 个 z 切片（指数分布，近密远疏）；texel 索引 k = iy*uBlockSide + ix（行主序）。
-// 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FireFogParams.nz / tile_px）。
+// 分辨率由运行期 uniform uNz / uBlockSide / uTilePx 给出（见 FogParams.nz / tile_px）。
 //
 // 存储语义（inject / 各级 / scatter 均为 RGBA32F）：RGBA = (τ, S.r, S.g, S.b)。
 //   - inject 存该切片的**局部** (Δτ, S_leaf)，S_leaf = L_in·(1 − exp(−Δτ))。
 //   - reduce 级 j 每个 cell = 上一级 4 个 cell（z 序）的 over 合成，覆盖 4^j 个切片。
 //   - scatter 的 texel k 存**累积**「覆盖 [z_near, z_{k+1})」的 (τ, S)，其自然位置 = z_{k+1}。
-// ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fire_fog_renderer.h 对应。
+// ⚠️ shader 里的 #define（tile 索引布局常量）必须与 fog_renderer.h 对应。
 
-#ifndef JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
-#define JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
+#ifndef JPOV_SRC_FOG_FOG_SHADER_H_
+#define JPOV_SRC_FOG_FOG_SHADER_H_
 
 namespace jpov {
 
 // 全屏三角形 VS（gl_VertexID 覆盖 NDC，无 VAO/VBO；与 horizon_fog 同款）。
-inline constexpr const char* kFireFogVs = R"glsl(
+inline constexpr const char* kFogVs = R"glsl(
 #version 330 core
 out vec2 vTexCoord;
 void main() {
@@ -40,21 +39,21 @@ void main() {
 )glsl";
 
 // 各趟共用的 GLSL 前置（函数库）。各趟 FS = "#version 330 core\n" + 本串 + <趟体>。
-inline constexpr const char* kFireFogCommonGlsl = R"glsl(
+inline constexpr const char* kFogCommonGlsl = R"glsl(
 
-// ── 团 tile 索引纹理布局常量（编译期，与 fire_fog_renderer.h 对应）──
+// ── 团 tile 索引纹理布局常量（编译期，与 fog_renderer.h 对应）──
 #define MAX_FOGS_PER_TILE    8
 #define TEXELS_PER_TILE      2
 #define FOG_INDEX_SENTINEL   255u
 
-// ── 点光源 tile 索引纹理布局常量（fire_fog 自持；与 fire_fog_renderer.h 对应）──
+// ── 点光源 tile 索引纹理布局常量（fog 自持；与 fog_renderer.h 对应）──
 // 每个 Nxy 单元至多 8 个光源（与最大团数同值），每 texel RGBA 各 1 个 uint8 索引。
 #define MAX_LIGHTS_PER_TILE    8
 #define LIGHT_TEXELS_PER_TILE  2
 #define MAX_TOTAL_LIGHTS       255
 #define LIGHT_INDEX_SENTINEL   255u
 
-// ── froxel 网格（运行期 uniform；见 FireFogParams.nz / tile_px）──
+// ── froxel 网格（运行期 uniform；见 FogParams.nz / tile_px）──
 //   uNz        每柱 z 切片数（= uBlockSide²）
 //   uBlockSide 每柱在 froxel 纹理上的 texel 边长（= √uNz）
 //   uTilePx    每个 Nxy 单元对应的**屏幕**像素边长（每轴）
@@ -293,13 +292,13 @@ FogSegment SampleFogSegment(FogBodyData d, vec3 ro, vec3 rd,
 )glsl";
 
 // ── 趟 1：inject —— 逐 froxel 局部 (τ, S) ──
-inline constexpr const char* kFireFogInjectBody = R"glsl(
+inline constexpr const char* kFogInjectBody = R"glsl(
 
 uniform sampler2D uTileFogIndices;
 uniform sampler2D uTileZRange;   // RG32F：每 tile 的保守 z 范围 (zmin, zmax)
 uniform sampler2D uTileRayTex;   // RGBA32F：每 tile 中心视线方向（单位向量，CPU 预算）
 uniform sampler2D uZSlicesTex;   // R32F：z 切片边界 z_0..z_Nz（CPU 预算）
-uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fire_fog 自持网格）
+uniform sampler2D uTileLightIndices;  // RGBA8：每 Nxy 单元的光源索引（fog 自持网格）
 uniform vec3  uCamPos;
 uniform float uZNear;          // froxel z 分布近端（米）
 uniform int   uTotalFogs;
@@ -448,7 +447,7 @@ void main() {
         }
     }
 
-    // 本 tile 的点光源候选（≤ MAX_LIGHTS_PER_TILE；fire_fog 自持网格，与团的网格同尺寸）。
+    // 本 tile 的点光源候选（≤ MAX_LIGHTS_PER_TILE；fog 自持网格，与团的网格同尺寸）。
     uint light_idx[MAX_LIGHTS_PER_TILE];
     int nl = 0;
     for (int t = 0; t < LIGHT_TEXELS_PER_TILE; ++t) {
@@ -517,7 +516,7 @@ void main() {
 
 // ── 趟 2：reduce —— 金字塔一级（每柱边长 uLevelSide，由上一级 4 合 1）──
 // 输出 cell m = 上一级 cell 4m..4m+3（z 序）的 over 合成 = 覆盖 4^level 个切片。
-inline constexpr const char* kFireFogReduceBody = R"glsl(
+inline constexpr const char* kFogReduceBody = R"glsl(
 
 uniform sampler2D uSrcLevel;
 uniform int uLevelSide;   // 本级每柱 texel 边长 S_j
@@ -550,7 +549,7 @@ void main() {
 // 块大小 4^j）。n = k+1（累积覆盖切片 [0, n)）：把 n 按 base-4 分解，
 // 级 j 取块 [ (n>>2j)&~3 , +((n>>2j)&3) )，**从大块到小块按 z 序** over 合成。
 // 每级 ≤3 块 ⇒ 总 ≤3·(uLevelsCount+1) 次合成 = O(log Nz)。
-inline constexpr const char* kFireFogScatterBody = R"glsl(
+inline constexpr const char* kFogScatterBody = R"glsl(
 
 uniform sampler2D uLevels[6];   // [0]=L1（inject），[1..5]=缩减级（块 4^1..4^5）
 uniform int uLevelsCount;        // 缩减级数 = log4(uNz)
@@ -638,126 +637,6 @@ void main() {
 }
 )glsl";
 
-// ── 趟 4：composite —— 全屏查表 + z 向插值 + Nxy 双线性 + （可选）玻璃层合成 → 就地混合 ──
-inline constexpr const char* kFireFogCompositeBody = R"glsl(
-
-uniform sampler2D uScatter;
-uniform sampler2D uSceneDepthTex;
-uniform mat4  uInvVP;
-uniform vec3  uCamPos;
-uniform float uZNear;
-uniform float uZFar;
-uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
-uniform int   uGridCols;   // Nxy 单元列数
-uniform int   uGridRows;   // Nxy 单元行数
-
-// ── 透明玻璃层（WBO 结果；uHasGlass==0 时不采）──
-uniform int       uHasGlass;
-uniform sampler2D uGlassAccum;   // RGBA16F: Σ(预乘色×w, α×w)
-uniform sampler2D uGlassReveal;  // R16F   : Π(1−α) = 透射率
-uniform sampler2D uGlassDepth;   // R32F   : Σ(z_view×α×w) = 代表深度×Σαw
-
-out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
-
-// 读某 tile 的 scatter 列在「位置 ℓ（= Nz·ln(z/near)/ln(far/near)）」处的 (τ, S)。
-// texel t 的自然位置 = t+1（覆盖 [z_near, z_{t+1}））；ℓ<1 与 identity 插值。
-void SampleColumn(ivec2 tile_xy, float ell, out float tau, out vec3 S) {
-    int t_hi = int(floor(ell));
-    float fr = ell - float(t_hi);
-    t_hi = clamp(t_hi, 0, uNz - 1);
-    int t_lo = t_hi - 1;
-    vec4 vhi = texelFetch(uScatter, ivec2(tile_xy.x + (t_hi % uBlockSide),
-                                          tile_xy.y + (t_hi / uBlockSide)), 0);
-    vec4 vlo = (t_lo >= 0)
-        ? texelFetch(uScatter, ivec2(tile_xy.x + (t_lo % uBlockSide),
-                                     tile_xy.y + (t_lo / uBlockSide)), 0)
-        : vec4(0.0);   // identity：τ=0, S=0 ⇒ T=1, S=0
-    tau = mix(vlo.x, vhi.x, fr);
-    S   = mix(vlo.yzw, vhi.yzw, fr);
-}
-
-// 屏幕像素位置 px 处的雾累积 (τ, S)：4 邻 tile 双线性（按 tile 中心对齐）。
-void SampleFogBilinear(vec2 px, float ell, out float tau, out vec3 S) {
-    float cu = px.x / float(uTilePx) - 0.5;
-    float cv = px.y / float(uTilePx) - 0.5;
-    int tx0 = int(floor(cu));
-    int ty0 = int(floor(cv));
-    float fu = cu - float(tx0);
-    float fv = cv - float(ty0);
-    tau = 0.0;
-    S = vec3(0.0);
-    for (int dy = 0; dy < 2; ++dy) {
-        int ty = clamp(ty0 + dy, 0, uGridRows - 1);
-        float wy = (dy == 0) ? (1.0 - fv) : fv;
-        for (int dx = 0; dx < 2; ++dx) {
-            int tx = clamp(tx0 + dx, 0, uGridCols - 1);
-            float wx = (dx == 0) ? (1.0 - fu) : fu;
-            float w = wx * wy;
-            float ctau;
-            vec3  cS;
-            SampleColumn(ivec2(tx * uBlockSide, ty * uBlockSide), ell, ctau, cS);
-            tau += w * ctau;
-            S   += w * cS;
-        }
-    }
-}
-
-// 视距 z（米）→ froxel 连续位置 ℓ（clamp 到雾区间）。
-float DepthToEll(float z) {
-    z = clamp(z, uZNear, uZFar);
-    return uZScale * log(z / uZNear);
-}
-
-void main() {
-    vec2 uv = vTexCoord;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pf = uInvVP * vec4(ndc, 1.0, 1.0);
-    vec3 ro = uCamPos;
-    vec3 rd = normalize(pf.xyz / pf.w - ro);
-
-    // 像素场景深度 → 沿视线距离 → froxel 连续位置 ℓ_op（不透明场景深度）。
-    float dndc = texture(uSceneDepthTex, uv).r;
-    vec4 pw = uInvVP * vec4(ndc, dndc * 2.0 - 1.0, 1.0);
-    float z_op = length(pw.xyz / pw.w - ro);
-    float ell_op = DepthToEll(z_op);
-
-    // 透明玻璃层（可选）：解算 WBO → (Cg 预乘, Tg) + 代表深度 ℓ_g。
-    // 无玻璃（accum.a≈0）→ Cg=0, Tg=1, ℓ_g=ℓ_op（退化为全雾路径，零回归）。
-    vec3  Cg = vec3(0.0);
-    float Tg = 1.0;
-    float ell_g = ell_op;
-    if (uHasGlass == 1) {
-        vec4 accum = texture(uGlassAccum, uv);
-        if (accum.a > 1e-8) {
-            float reveal = texture(uGlassReveal, uv).r;
-            float z_g = texture(uGlassDepth, uv).r / accum.a;
-            vec3 Cavg = accum.rgb / accum.a;   // 加权平均色
-            Cg = Cavg * (1.0 - reveal);        // 预乘：out = Cg + Tg·behind
-            Tg = clamp(reveal, 0.0, 1.0);
-            ell_g = DepthToEll(z_g);
-        }
-    }
-    ell_g = min(ell_g, ell_op);   // 代表深度不超过不透明场景深度
-
-    // 两处采样：front = 雾(0→z_g)；op = 雾(0→z_op)。
-    float tau_f, tau_op;
-    vec3  S_f,   S_op;
-    SampleFogBilinear(gl_FragCoord.xy, ell_g,  tau_f, S_f);
-    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
-
-    // front-to-back： 雾(0→zg) → 玻璃 → 雾(zg→zop) → 背景(dst)
-    //   out.rgb = S_f + Tf·Cg + Tg·(S_op − S_f)   （Tf=exp(−tau_f)）
-    //   out.a   = Tg·T_op                          （T_op=exp(−tau_op)，Tg=玻璃透射率）
-    // （推导：Tf·Tg·S_b = Tg·(S_op−S_f)；Tf·Tg·Tb = Tg·T_op。无玻璃时退化为 (S, T)。）
-    // GL_ONE/GL_SRC_ALPHA：final = out.rgb + dst·out.a。
-    float Tf  = exp(-tau_f);
-    float Top = exp(-tau_op);
-    vec3 rgb = S_f + Tf * Cg + Tg * (S_op - S_f);
-    float a  = Tg * Top;
-    oColor = vec4(rgb, a);
-}
-)glsl";
-
 }  // namespace jpov
 
-#endif  // JPOV_SRC_FIRE_FOG_FIRE_FOG_SHADER_H_
+#endif  // JPOV_SRC_FOG_FOG_SHADER_H_

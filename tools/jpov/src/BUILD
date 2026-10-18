@@ -31,6 +31,44 @@ cc_library(
     linkstatic = 1,
 )
 
+# WboBuffer — 加权混合 OIT（WBO）三附件的唯一实现（玻璃 / 粒子 / 体积火共用）。
+cc_library(
+    name = "wbo_buffer",
+    srcs = ["wbo_buffer.cc"],
+    hdrs = [
+        "wbo_buffer.h",
+        "transparent_layer.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 透明层契约（header-only）：TransparentLayer / TransparentLayerSet。
+cc_library(
+    name = "transparent_layer",
+    hdrs = ["transparent_layer.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@glog_static//:glog"],
+    copts = ["-std=c++20"],
+)
+
+# 矩阵小工具（header-only）。
+cc_library(
+    name = "matrix_util",
+    hdrs = ["matrix_util.h"],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
 # TextureManager — GPU 纹理生命周期管理（PNG 加载/去重/释放）
 cc_library(
     name = "texture_manager",
@@ -280,9 +318,12 @@ cc_library(
         ":shader_manager",
         ":sky_renderer",
         ":horizon_fog_renderer",
-        "//tools/jpov/src/fire_fog:fire_fog_renderer",
+        "//tools/jpov/src/fog:fog_renderer",
+        "//tools/jpov/src/fog:fog_composite_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
+        ":wbo_buffer",
+        ":transparent_layer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",
         "//tools/jpov/src:volume_manager",

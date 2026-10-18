@@ -209,14 +209,14 @@ cc_binary(
 )
 
 # ============================================================================
-# 雾火查看器（fire_fog viewer）— 专门肉眼验收 froxel 体积雾
+# 雾火查看器（fog viewer）— 专门肉眼验收 froxel 体积雾
 # （设计见 docs/jpov_froxel_design.md）。场景 = 灰地面 + 高模橡树；点状雾走
-# fire_fog 体积管线。面板：雾中心/半径/强度/剖面/颜色 + 光照开关（step1 base 发射
+# fog 体积管线。面板：雾中心/半径/强度/剖面/颜色 + 光照开关（step1 base 发射
 # / step2 ambient+太阳×CSM god ray）。视角沿用 model viewer 的 ViewConfig。
 # ============================================================================
 cc_library(
-    name = "fire_fog_viewer_app",
-    hdrs = ["demo/fire_fog_viewer_app.h"],
+    name = "fog_viewer_app",
+    hdrs = ["demo/fog_viewer_app.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:skylight_scene",
@@ -229,10 +229,10 @@ cc_library(
 )
 
 cc_binary(
-    name = "jpov_fire_fog_viewer",
-    srcs = ["demo/jpov_fire_fog_viewer.cc"],
+    name = "jpov_fog_viewer",
+    srcs = ["demo/jpov_fog_viewer.cc"],
     deps = [
-        "//tools/jpov:fire_fog_viewer_app",
+        "//tools/jpov:fog_viewer_app",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",

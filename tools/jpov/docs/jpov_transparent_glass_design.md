@@ -84,7 +84,9 @@ Cg   = Cavg · (1 − Tg)             // 预乘段色
 
 ## 4. 与体积雾联合积分（composite 合并）
 
-`fire_fog_shader.h` 的 `kFireFogCompositeBody`。设：
+`fog_composite_renderer.h` 的 `kFsComposite`（**已从 `fog_shader.h` 迁出**，见
+`jpov_transparent_composite_design.md`：合成器只认「层」，玻璃是它接的第一个层）。
+设：
 
 - `S_f, T_f = fog(0→z_g)`（用 froxel 区间反解，`T_f = exp(−τ_f)`）；
 - `S_op, T_op = fog(0→z_op)`（`z_op` = 不透明场景深度）；
@@ -101,6 +103,9 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 **零回归**：无玻璃时把 `z_g=z_op, C_g=0, T_g=1` 代入 ⇒ `out.rgb=S_op, out.a=T_op`
 ——**逐字等于原全雾路径**（gold 验证 `max-channel-mean-diff = 0`）。
 
+> 2026-10-17 起同一公式被推广为 **N 层通用循环**（层按代表深度排序后逐段积分）；
+> 玻璃 = N=1 的特例，实测与旧闭式同结果（`jpov_transparent_gold_test` 差值 5.6e-4）。
+
 以 `gl_FragCoord.xy` 在两处各做一次 4 邻 tile 双线性采样（`SampleFogBilinear`）。
 
 ---
@@ -112,10 +117,12 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 1. 阴影 pass（**跳过** kBlend）；
 2. 不透明主 pass 画进单采样 HDR FBO（**跳过** kBlend）；
 3. 场景深度在 MRT#1（单采样）；下游雾 pass 采样它时临时摘下该附件防反馈环；
-4. **玻璃 pass**（若有 kBlend）：`EnsureGlassFBO` + `ClearGlassFBO`（无玻璃也清空，
-   提供恒等层）+ `DrawTransparentPass`；
+4. **玻璃 pass**（若有 kBlend）：`glass_wbo_.Ensure` + `BindForDraw` + `Clear`
+   （无玻璃时**不建不清**，省掉三张全屏浮点纹理的每帧开销）+ `DrawTransparentPass`；
+   解算结果作为一个 `TransparentLayer` 放进本帧的 `TransparentLayerSet`；
 5. 远景仰角雾（不变）；
-6. **froxel 体积雾 composite**（唤醒条件 = 有雾**或有玻璃**）：把玻璃段一并合成。
+6. **FogCompositeRenderer**（唤醒条件 = 有雾**或有透明层**）：`FogRenderer::Build` 先烘
+   froxel 场，合成趟把「雾场 + 0..N 层」按深度交替积分（N=0 时整条 froxel 采样都跳过）。
 
 `CHECK(!has_glass || use_hdr)`：kBlend 仅在 HDR 路径支持（否则 crash，不静默失效）。
 
@@ -182,7 +189,7 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 
 ## 8. 验收（本地）
 
-- `fire_fog` 全量单测 + 2 张 gold：**全过**，god ray / pointlight gold `max-channel-mean-diff=0`（零回归）。
+- `fog` 全量单测 + 2 张 gold：**全过**，god ray / pointlight gold `max-channel-mean-diff=0`（零回归）。
 - `object3d` / `ui` / `interface` gold：**全过**（`DrawObject3D` 抽公共 helper 后 opaque/cutout 逐字节不变）。
 - ff viewer headless：round box 雾场景 + 树一侧 **MakeBox 浅红玻璃墙**（`70_glass_off` /
   `71_glass_on` / `72_glass_alpha60` / `73_glass_alpha15`）：树与雾透过玻璃可见，红色吸收

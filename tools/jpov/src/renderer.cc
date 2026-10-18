@@ -19,7 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
-#include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
+#include "tools/jpov/src/fog/fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
 #include "tools/common/utils.h"
@@ -593,8 +593,9 @@ Renderer::~Renderer() {
     DestroyHighlightFBO();
     DestroyBloomChain();
     DestroySkyColorFBO();
-    DestroyGlassFBO();
-    fire_fog_renderer_.Finalize();
+    glass_wbo_.Destroy();
+    fog_renderer_.Finalize();
+    fog_composite_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     smaa_renderer_.Finalize();
@@ -675,87 +676,7 @@ void Renderer::DestroyHDRFBO() {
     fbo_hdr_h_ = 0;
 }
 
-// ==================== 透明玻璃 FBO（Weighted Blended OIT） ====================
-
-void Renderer::EnsureGlassFBO(int w, int h) {
-    if (glass_fbo_ != 0 && glass_w_ == w && glass_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    CHECK_LE(w, kMaxFboDim);
-    CHECK_LE(h, kMaxFboDim);
-    DestroyGlassFBO();
-
-    glGenTextures(1, &glass_accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &glass_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           glass_accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                           glass_reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           glass_depth_tex_, 0);
-    {
-        const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                                GL_COLOR_ATTACHMENT2};
-        glDrawBuffers(3, bufs);
-    }
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "Glass FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glass_w_ = w;
-    glass_h_ = h;
-}
-
-void Renderer::DestroyGlassFBO() {
-    if (glass_fbo_) {
-        glDeleteFramebuffers(1, &glass_fbo_);
-        glass_fbo_ = 0;
-    }
-    if (glass_accum_tex_) { glDeleteTextures(1, &glass_accum_tex_); glass_accum_tex_ = 0; }
-    if (glass_reveal_tex_) { glDeleteTextures(1, &glass_reveal_tex_); glass_reveal_tex_ = 0; }
-    if (glass_depth_tex_) { glDeleteTextures(1, &glass_depth_tex_); glass_depth_tex_ = 0; }
-    glass_w_ = 0;
-    glass_h_ = 0;
-}
-
-void Renderer::ClearGlassFBO() {
-    CHECK(glass_fbo_ != 0) << "ClearGlassFBO: EnsureGlassFBO 未调用";
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    // accum=(0,0,0,0) / reveal=(1,0,0,0) / depth=(0,0,0,0)
-    const GLfloat clear_accum[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_depth[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clear_accum);
-    glClearBufferfv(GL_COLOR, 1, clear_reveal);
-    glClearBufferfv(GL_COLOR, 2, clear_depth);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
+// ==================== 透明玻璃（Weighted Blended OIT） ====================
 
 bool Renderer::HasBlendObjects(const RenderCommandList& cmds) {
     for (const Object3DCommand& o : cmds.object3d) {
@@ -771,22 +692,18 @@ void Renderer::DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int
     if (!HasBlendObjects(cmds)) {
         return;
     }
-    CHECK(glass_fbo_ != 0) << "DrawTransparentPass: EnsureGlassFBO 未调用";
+    CHECK(glass_wbo_.valid()) << "DrawTransparentPass: glass_wbo_.Ensure 未调用";
+    CHECK_EQ(glass_wbo_.width(), fbo_w) << "玻璃 WBO 尺寸与 3D FBO 不一致";
+    CHECK_EQ(glass_wbo_.height(), fbo_h) << "玻璃 WBO 尺寸与 3D FBO 不一致";
     CHECK_NE(scene_depth_tex, 0u)
         << "DrawTransparentPass: scene_depth_tex 不能为 0";
     CHECK_GT(fbo_w, 0);
     CHECK_GT(fbo_h, 0);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glViewport(0, 0, fbo_w, fbo_h);
-
     // 无深度缓冲：关深度测试（在 FS 里用 scene_depth_tex 手动作深度测试，见 blend 变体）。
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z_view×α×w
+    // BindForDraw 一并设好 viewport / 三 draw buffer / WBO 三路 blend；Clear 给恒等初值。
+    glass_wbo_.BindForDraw();
+    glass_wbo_.Clear();
 
     const unsigned int prog_blend = DrawObject3DProgBlend();
     const unsigned int prog_full_blend = DrawObject3DProgFullBlend();
@@ -801,10 +718,7 @@ void Renderer::DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int
 
     // 复原 GL 状态：blend func/equation 属 GL_COLOR_BUFFER_BIT，不在 glPushAttrib(GL_ENABLE_BIT)
     // 里，必须显式回写（对三个 draw buffer 都回写，抹平透趟用过的非常规混合）。
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendEquation(GL_FUNC_ADD);
+    glass_wbo_.RestoreStandardBlend();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1420,7 +1334,8 @@ void Renderer::Init(
     ValidateShadowConfig(shadow_cfg);
     shadow_cfg_ = shadow_cfg;
     CompileShaders();
-    fire_fog_renderer_.Init(&shader_mgr_);
+    fog_renderer_.Init(&shader_mgr_);
+    fog_composite_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
@@ -1728,40 +1643,48 @@ void Renderer::Render(const RenderCommandList& cmds,
             unsigned int hdr_input_tex = color_tex_hdr_;
             unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 
-            // 是否运行体积雾合成：有雾、或有透明玻璃（玻璃需与雾一起按深度合成）。
-            const bool run_fog = !cmds.point_fogs.empty() || has_glass;
-            // 透明玻璃 pass：把 kBlend 物体以 WBO 画进玻璃 FBO。无玻璃时也清空
-            //（提供恒等层 —— accum.a=0/reveal=1，composite 退化为全雾路径）。
-            // 只有**真有 kBlend 物体**时才建/清玻璃 FBO 并跑透明 pass。
-            // 无玻璃（纯雾）时 glass_input 保持无效 → fire_fog 的 has_glass=false →
-            // uHasGlass=0 → composite 不回读玻璃纹理 ⇒ 三张全屏浮点纹理的每帧 clear
-            // 与采样全免（run_fog 仍可因雾为真）。
-            FireFogGlass glass_input;
-            if (run_fog && has_glass) {
-                EnsureGlassFBO(fbo_3d_w, fbo_3d_h);
-                ClearGlassFBO();
+            // 透明层集合：本帧交给合成器的**所有** WBO 解算结果（顺序无关，合成器按
+            // 代表深度排序）。本轮只接玻璃（1×）；粒子目前仍直接 over 进 HDR（见下），
+            // 后续接为第二层（需配深度感知上采样）。
+            TransparentLayerSet layers;
+
+            // 透明玻璃 pass：把 kBlend 物体以 WBO 画进玻璃缓冲。只有**真有 kBlend 物体**
+            // 时才建/清缓冲并跑透明 pass —— 无玻璃时三张全屏浮点纹理的每帧 clear 与采样全免。
+            if (has_glass) {
+                glass_wbo_.Ensure(fbo_3d_w, fbo_3d_h);
                 DrawTransparentPass(cmds, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
-                glass_input.accum_tex = glass_accum_tex_;
-                glass_input.reveal_tex = glass_reveal_tex_;
-                glass_input.depth_tex = glass_depth_tex_;
+                TransparentLayer glass_layer = glass_wbo_.layer();
+                glass_layer.scale = 1.0f;
+                layers.Add(glass_layer);
             }
 
-            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与 glass 同套 WBO 代数。
-            //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
-            //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
+            // ── 广告牌粒子（两张 1/2 分辨率 WBO 缓冲：加性 / 遮挡）──
+            //    画完不解算，只把两个层追加进本帧的 TransparentLayerSet；
+            //    由 FogCompositeRenderer 与雾 / 玻璃按代表深度统一多段积分。
+            //    ⇒ 火在玻璃前 / 后、烟在火前 / 后都按 z̄ 正确排序（旧的直连路径做不到）。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
+                // 粒子光照：遮挡类（烟/尘）按散射介质着色；加性类（火/激光）自发光，忽略。
+                // 与 fog 同源：优先取 sky 的单色 ambient 推导，其次 cmds.ambient。
+                ParticleLighting particle_light;
+                if (cmds.sky.has_value()) {
+                    particle_light.ambient_color = cmds.sky->AmbientColor();
+                    particle_light.ambient_intensity = cmds.sky->AmbientIntensity();
+                } else if (eff_ambient.has_value()) {
+                    particle_light.ambient_color = eff_ambient->color;
+                    particle_light.ambient_intensity = eff_ambient->intensity;
+                }
+                particle_light.sun = eff_sun;
+
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
                 for (const ParticleRenderCommand& pc : cmds.particles) {
                     particle_renderer_.Draw(pc, texture_mgr_, cmds.camera, mvp_,
-                                            hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                                            hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h,
+                                            particle_light);
                 }
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                const GLenum pdraw[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, pdraw);
-                particle_renderer_.Composite(fbo_3d_w, fbo_3d_h);
-                const GLenum mrt_bufs_p[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                glDrawBuffers(2, mrt_bufs_p);
+                // 粒子解算结果**作为透明层**交出（加性 / 遮挡各至多一个），
+                // 不再自己 over 进 HDR —— 由合成趟与雾 / 玻璃统一按代表深度积分。
+                particle_renderer_.AppendLayers(&layers);
             }
 
             // ── 体积火（逐像素 raymarch）—— 与粒子同套 WBO；结果作为薄层 over 合成进 HDR。──
@@ -1805,20 +1728,12 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    渲染之后、HDR 后处理之前」的一次全屏 pass，就地合成到 3D HDR FBO。
             //    只读 MRT#1 场景深度做 z 裁剪；靠 GL_ONE/GL_SRC_ALPHA 混合与帧缓冲已有
             //    颜色合成（不采样场景颜色）。见 docs/jpov_froxel_design.md。
+            const bool run_fog = !cmds.point_fogs.empty() || !layers.empty();
             if (run_fog) {
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-                // 只写颜色附件0；雾不碰场景深度附件。
-                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
-                glDrawBuffers(1, fog_draw_buf);
-                // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
-                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
-                                       GL_TEXTURE_2D, 0, 0);
                 // 物理光照：内散射源 = 天光单色 ambient + 太阳经 CSM 阴影
                 // （god ray 来自后者）。ambient 走 sky 的单色推导函数。
-                const FireFogParams ff_params = cmds.fire_fog.value_or(FireFogParams{});
-                FireFogLighting ff_light;
+                const FogParams ff_params = cmds.fog.value_or(FogParams{});
+                FogLighting ff_light;
                 if (cmds.sky.has_value()) {
                     ff_light.ambient_color = cmds.sky->AmbientColor();
                     ff_light.ambient_intensity = cmds.sky->AmbientIntensity();
@@ -1836,9 +1751,26 @@ void Renderer::Render(const RenderCommandList& cmds,
                     std::memcpy(ff_light.shadow_texel_world, shadow_texel_world_,
                                 sizeof(shadow_texel_world_));
                 }
-                fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
-                                        fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
-                                        ff_params, ff_light, &glass_input);
+                // ① 烘 froxel 场（FogRenderer 不碰调用方 FBO；无雾时 field 无效）。
+                FogField fog_field;
+                if (!cmds.point_fogs.empty()) {
+                    fog_renderer_.Build(cmds.point_fogs, cmds.point_lights, cam, mvp_,
+                                        fbo_3d_w, fbo_3d_h, ff_params, ff_light,
+                                        &fog_field);
+                }
+
+                // ② 合成：雾场 + 透明层交替积分，就地 over 进 HDR。
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件0；合成不碰场景深度附件。
+                const GLenum fog_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, fog_draw_buf);
+                // 所采样的场景深度正是本 FBO 的附件1 → 绘制期间临时摘下，
+                // 避免「采样已绑定的 FBO 附件」形成（未定义的）反馈环。
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+                fog_composite_.Draw(fog_field, hdr_scene_depth_tex, cam, mvp_,
+                                    ff_params, layers);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,

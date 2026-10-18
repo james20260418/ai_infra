@@ -459,8 +459,8 @@ enum class FogAttenuation : uint8_t {
 //
 // **高自由度 box**：用户直接配 box 的**空间位置**（center）+ **长宽高**（size）；box **外侧**
 // 再包一层厚度 = radius 的**球面圆角外壳**。box **内部无衰减**（w = 1）；圆角壳区按 attenuation
-// 剖面从内盒表面（w≈1）衰减到外壳表面（w=0）。渲染走 Fire-Fog 体积管线（屏幕 tile 剪枝 +
-// froxel 摊销；见 tools/jpov/docs/jpov_fire_fog_design.md），与 ElevationFogConfig
+// 剖面从内盒表面（w≈1）衰减到外壳表面（w=0）。渲染走体积雾管线（屏幕 tile 剪枝 +
+// froxel 摊销；见 tools/jpov/docs/jpov_fog_design.md），与 ElevationFogConfig
 //（屏幕空间解析雾）是**两条不同的通道**。
 //
 // ── 散射 vs 自发光（辐射传输的源项，二者在此**显式分开**）──
@@ -487,7 +487,7 @@ struct PointFog {
     FogAttenuation attenuation;   // 圆角外壳的衰减剖面（形状）
 };
 
-// Fire-Fog（froxel 体积雾）管线参数。
+// 体积雾（froxel）管线参数。
 //
 // 由雾火查看器暴露以调参；仅在 point_fogs 非空时生效（空则整条管线跳过）。
 // 设计见 tools/jpov/docs/jpov_froxel_design.md。
@@ -497,7 +497,7 @@ struct PointFog {
 //
 // Pre-conditions: sun_phase_g ∈ [0, 0.95]；sun_gain >= 0；z_far > z_near > 0；
 //                 nz 为完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]。
-struct FireFogParams {
+struct FogParams {
     // 所有光源（太阳 + 点光源）内散射的 Henyey-Greenstein 相位各向异性 g ∈ [0,0.95)；
     // 0=各向同性。越大 ⇒ 迎着光源看时雾越亮（god ray 更明显）。不作用于 ambient（各向同性）。
     float sun_phase_g = 0.5f;
@@ -515,7 +515,7 @@ struct FireFogParams {
     //     Nxy    = ceil(W/tile_px) × ceil(H/tile_px)；
     //     k（超屏/屏，“每轴”） = sblock/tile_px，面积/耗时 ×k²；
     //     froxel 纹理 = Nxy.x·sblock × Nxy.y·sblock。
-    //   约束（JPOV 会 CHECK，见 fire_fog_renderer.cc）：
+    //   约束（JPOV 会 CHECK，见 fog_renderer.cc）：
     //     nz ∈ 完全平方且 ∈ [kMinNz, kMaxNz]；tile_px ∈ [kMinTilePx, kMaxTilePx]；
     //     派生 froxel 纹理两轴 ≤ kMaxFroxelDim。
     int nz = 256;
@@ -1819,7 +1819,7 @@ struct SkinnedMeshCommand {
 //（不透明 3D 之后），自带混合/深度状态。见 src/particles/particle_renderer.h，
 // 设计 docs/jpov_particle_fire_design.md。
 //
-// 分工约定（Danis）：环境雾/烟/远火 → fire_fog（froxel）；主角燃料火 → 本命令。
+// 分工约定（Danis）：环境雾/烟/远火 → fog（froxel）；主角燃料火 → 本命令。
 struct ParticleRenderCommand {
     std::vector<ParticleInstance> particles;  // 本批实例（非空才画）
 
@@ -1963,13 +1963,13 @@ struct RenderCommandList {
     // 某 tile”是保守判定，可能比实际影响范围更宽。
     std::vector<PointLight> point_lights;
 
-    // 点状雾体列表（世界空间）。走 Fire-Fog 体积管线（froxel 屏幕空间摊销），
+    // 点状雾体列表（世界空间）。走体积雾管线（froxel 屏幕空间摊销），
     // 与 ElevationFogConfig（屏幕空间解析雾）是**两条不同的通道**。
-    // 每帧可设置 0~N 个；空列表时 Fire-Fog pass 零开销跳过。
+    // 每帧可设置 0~N 个；空列表时 雾 pass 零开销跳过。
     std::vector<PointFog> point_fogs;
 
-    // Fire-Fog 管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
-    std::optional<FireFogParams> fire_fog;
+    // 体积雾管线参数（相位 / 增益）。未设置时用默认值。仅在 point_fogs 非空时生效。
+    std::optional<FogParams> fog;
 
     // 全局平行光（太阳）。未设置时无方向光（不产生直射高光与影子）。
     // 有值时 Renderer 额外做一次正交 shadow pass，PBR shader 采样阴影贴图

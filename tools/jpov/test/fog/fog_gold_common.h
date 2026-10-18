@@ -1,13 +1,13 @@
-// JPOV Fire-Fog froxel —— gold test 共享场景（generator/test 共用，防分叉）
+// JPOV Fog froxel —— gold test 共享场景（generator/test 共用，防分叉）
 //
-// 目的：给 froxel 体积雾（fire_fog）建**确定性**的肉眼+回归基准。两种场景：
-//   A. god ray  （FireFogGoldApp）：单个点雾 + 太阳×CSM 阴影（god ray），
+// 目的：给 froxel 体积雾（fog）建**确定性**的肉眼+回归基准。两种场景：
+//   A. god ray  （FogGoldApp）：单个点雾 + 太阳×CSM 阴影（god ray），
 //      相机对着树根斜 45° 俯视、方位面冲太阳（θ = sun_azim + 180）。
-//   B. 点光源   （FireFogPointLightGoldApp）：单个点雾 + **一盏点光源**驱动内散射
-//      （验证 fire_fog 自持的点光源 tile culling / 点光内散射链路），
+//   B. 点光源   （FogPointLightGoldApp）：单个点雾 + **一盏点光源**驱动内散射
+//      （验证 fog 自持的点光源 tile culling / 点光内散射链路），
 //      点光偏置在雾内一侧 ⇒ 雾呈**不对称**暖色散射。
 //
-// 两场景共用一套「地面 + 高模橡树 + 相机 + 天光」（基类 FireFogGoldScene）；
+// 两场景共用一套「地面 + 高模橡树 + 相机 + 天光」（基类 FogGoldScene）；
 // 子类只负责「雾 + 光照」。generate（写仓库 gold png）与 test（渲染 + 比对）**共用本文件**，
 // 保证两边逐参数一致，避免各写一套而分叉。
 //
@@ -24,7 +24,7 @@
 #include "tools/jpov/test/test_utils.h"       // GetModelsDir / GetTestDataDir
 #include "tools/common/utils.h"
 
-namespace jpov_fire_fog_gold {
+namespace jpov_fog_gold {
 
 // ── 渲染分辨率 ──
 inline constexpr int kResW = 1280;
@@ -86,7 +86,7 @@ inline std::string OakPath() {
 }
 
 // ── 共享场景基类：地面 + 橡树 + 相机 + 天光；子类只实现 EmitFogAndLighting。──
-class FireFogGoldScene : public JPOV {
+class FogGoldScene : public JPOV {
 public:
     using JPOV::JPOV;
 
@@ -140,7 +140,7 @@ public:
         cmds->sky     = nl.sky;
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
-        cmds->tone_mapping = true;   // fire_fog pass 要求线性 HDR 域
+        cmds->tone_mapping = true;   // fog pass 要求线性 HDR 域
 
         // 场景：灰地面 + 橡树。
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
@@ -166,14 +166,14 @@ protected:
         return d;
     }
 
-    // 子类：填点雾 + 点光源 + FireFogParams。
+    // 子类：填点雾 + 点光源 + FogParams。
     virtual void EmitFogAndLighting(jpov::RenderCommandList* cmds) = 0;
 };
 
 // 场景 A：god ray（单点雾 + 太阳×CSM，无点光源）。
-class FireFogGoldApp : public FireFogGoldScene {
+class FogGoldApp : public FogGoldScene {
 public:
-    using FireFogGoldScene::FireFogGoldScene;
+    using FogGoldScene::FogGoldScene;
 
 protected:
     void EmitFogAndLighting(jpov::RenderCommandList* cmds) override {
@@ -187,17 +187,17 @@ protected:
         fog.attenuation = jpov::FogAttenuation::kLinear;
         cmds->point_fogs.push_back(fog);
 
-        jpov::FireFogParams ff;
+        jpov::FogParams ff;
         ff.sun_phase_g = kSunPhaseG;
         ff.sun_gain = kSunGain;
-        cmds->fire_fog = ff;
+        cmds->fog = ff;
     }
 };
 
 // 场景 B：点光源驱动雾散射（单点雾 + 一盏暖色点光）。
-class FireFogPointLightGoldApp : public FireFogGoldScene {
+class FogPointLightGoldApp : public FogGoldScene {
 public:
-    using FireFogGoldScene::FireFogGoldScene;
+    using FogGoldScene::FogGoldScene;
 
 protected:
     void EmitFogAndLighting(jpov::RenderCommandList* cmds) override {
@@ -218,17 +218,17 @@ protected:
         pl.intensity = kPlIntensity;
         cmds->point_lights.push_back(pl);
 
-        jpov::FireFogParams ff;
+        jpov::FogParams ff;
         ff.sun_phase_g = kSunPhaseG;
         ff.sun_gain = kSunGain;
-        cmds->fire_fog = ff;
+        cmds->fog = ff;
     }
 };
 
 // gold png 文件名（仓库内，供 generator 写 / test 读）。
-inline const char* kGoldPngName = "fire_fog_godray_1280x720.png";
-inline const char* kPointLightGoldPngName = "fire_fog_pointlight_1280x720.png";
+inline const char* kGoldPngName = "fog_godray_1280x720.png";
+inline const char* kPointLightGoldPngName = "fog_pointlight_1280x720.png";
 
-}  // namespace jpov_fire_fog_gold
+}  // namespace jpov_fog_gold
 
 #endif  // JPOV_TEST_FIRE_FOG_FIRE_FOG_GOLD_COMMON_H_
