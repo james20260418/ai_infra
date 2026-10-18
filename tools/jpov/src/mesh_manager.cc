@@ -41,6 +41,15 @@
 #ifndef GL_FALSE
 #define GL_FALSE 0
 #endif
+// 植被风关节表纹理（RGBA32F + 最近邻/边缘夹取）用到的 GL 1.2+ 常量。
+// MinGW 的 GL/gl.h 只到 1.1，未声明；本文件不引 <GL/glext.h>（避免与 gl_loader 的
+// 函数宏别名冲突），故就地补标准值，语义与 glext.h 一致。
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
 // OpenGL 1.5+；gl.glBufferData 的 size 参数类型，MinGW 1.1 头未定义。
 // 用指针宽度的有符号整数（对应 GLsizeiptr 标准语义）。
 #ifndef GLsizeiptr
@@ -225,11 +234,13 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec3f), reinterpret_cast<const void*>(0));
     }
 
-    // ---- 布料 LAG 松弛度（可选，location 6，vec2: lag_ratio, max_lag）----
+    // ---- 次级运动槽（可选，location 6，vec2）----
     //   ★ loc6 是本 PR 从「per-instance 首槽」腾出来给**顶点属性**的槽位（见
     //   instance_buffer.h 的实例布局表：model 已从 6..9 挪到 7..10）。
-    //   属性缺失时该槽在本 VAO 上保持 disabled，蒙皮 VS 读到的 aRelax 为默认值
-    //   （该槽当前未参与蒙皮计算 —— LAG 的 VS 内消费留待后续，见 skinning_shader.h）。
+    //   该槽由两个**互斥**特性共用（MeshData::Validate 保证不会同时声明）：
+    //     - kRelax（布料）：vec2(lag_ratio, max_lag)
+    //     - kWind （植被）：vec2(joint_id, phase)
+    //   属性缺失时该槽在本 VAO 上保持 disabled，读到的 aFlex 为默认值。
     if (MeshHasFlag(data.flags, MeshVertexFlags::kRelax)) {
         glGenBuffers(1, &mesh.vbo_relax);
         CHECK_NE(mesh.vbo_relax, 0u);
@@ -240,6 +251,52 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
         glEnableVertexAttribArray(6);
         glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
                               sizeof(Vec2f), reinterpret_cast<const void*>(0));
+    }
+    if (MeshHasFlag(data.flags, MeshVertexFlags::kWind)) {
+        glGenBuffers(1, &mesh.vbo_wind);
+        CHECK_NE(mesh.vbo_wind, 0u);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(data.wind_link.size() * sizeof(Vec2f)),
+                     data.wind_link.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
+                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
+    }
+
+    // ---- 植被风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
+    //   同树全部 primitive 共享；VS 用 texelFetch 按 joint_id 取。
+    //   texel(2j)   = (pivot.xyz, parent)
+    //   texel(2j+1) = (level, phase, soft, 0)
+    if (!data.wind_joints.empty()) {
+        const size_t n = data.wind_joints.size();
+        // 纹理宽 = 2n；超过 GL_MAX_TEXTURE_SIZE（常见 16384）会变成不完整纹理，
+        // texelFetch 读到垃圾（静默错）——宁可此刻崩，不静默出错。
+        CHECK_LE(2 * n, 16384u) << "wind_joint 表过大（2N 超纹理宽上限）: N=" << n;
+        std::vector<float> tex(8 * n);
+        for (size_t k = 0; k < n; ++k) {
+            const MeshData::WindJoint& wj = data.wind_joints[k];
+            tex[8 * k + 0] = wj.pivot[0];
+            tex[8 * k + 1] = wj.pivot[1];
+            tex[8 * k + 2] = wj.pivot[2];
+            tex[8 * k + 3] = wj.parent;
+            tex[8 * k + 4] = wj.level;
+            tex[8 * k + 5] = wj.phase;
+            tex[8 * k + 6] = wj.soft;
+            tex[8 * k + 7] = 0.0f;
+        }
+        glGenTextures(1, &mesh.wind_joint_tex);
+        CHECK_NE(mesh.wind_joint_tex, 0u);
+        mesh.wind_joint_count = static_cast<uint32_t>(n);
+        glBindTexture(GL_TEXTURE_2D, mesh.wind_joint_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
+                     static_cast<GLsizei>(2 * n), 1, 0,
+                     GL_RGBA, GL_FLOAT, tex.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 
     // ---- indices（可选，EBO）----
@@ -268,8 +325,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete
-    // GPUMesh 至多 7 个属性 VBO + 1 个 EBO = 8 个 GL 缓冲对象
-    static constexpr int kMaxBuffers = 8;
+    // GPUMesh 至多 8 个属性 VBO + 1 个 EBO = 9 个 GL 缓冲对象
+    //（relax 与 wind 互斥，实际最多 8；留余量）。
+    static constexpr int kMaxBuffers = 10;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -293,11 +351,17 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     if (mesh->vbo_relax) {
         buffers[n++] = mesh->vbo_relax;
     }
+    if (mesh->vbo_wind) {
+        buffers[n++] = mesh->vbo_wind;
+    }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;
     }
     if (n > 0) {
         glDeleteBuffers(n, buffers);
+    }
+    if (mesh->wind_joint_tex) {
+        glDeleteTextures(1, &mesh->wind_joint_tex);
     }
 
     *mesh = GPUMesh{};
