@@ -41,6 +41,15 @@
 #ifndef GL_FALSE
 #define GL_FALSE 0
 #endif
+// 植被风关节表纹理（RGBA32F + 最近邻/边缘夹取）用到的 GL 1.2+ 常量。
+// MinGW 的 GL/gl.h 只到 1.1，未声明；本文件不引 <GL/glext.h>（避免与 gl_loader 的
+// 函数宏别名冲突），故就地补标准值，语义与 glext.h 一致。
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
 // OpenGL 1.5+；gl.glBufferData 的 size 参数类型，MinGW 1.1 头未定义。
 // 用指针宽度的有符号整数（对应 GLsizeiptr 标准语义）。
 #ifndef GLsizeiptr
