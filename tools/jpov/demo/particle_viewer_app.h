@@ -152,9 +152,9 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     c.color_over_life = g;
     c.use_size_over_life = true;
     c.size_curve.keys = {{0.0f, 0.90f}, {0.5f, 2.00f}, {1.0f, 3.40f}};
-    c.flipbook = true;                   // 由具体烟类型设置 tiles/play
-    c.tiles_x = 8;
-    c.tiles_y = 8;
+    c.flipbook = true;                   // 由具体烟类型设置 tiles / pair_len
+    c.tiles_x = 12;
+    c.tiles_y = 6;
     c.start_frame_random = true;         // kPairMorph 用它随机选块
     c.align = jpov::AlignMode::kView;
     c.blend = jpov::BlendMode::kAlpha;
