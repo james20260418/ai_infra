@@ -83,14 +83,19 @@ struct SmokeTexEntry {
     float alpha_scale;  // 密度归一化（见下方注释）
 };
 
-// 三种烟纹理。alpha_scale = 密度归一化系数：
-//   先按「整张 atlas 的平均 alpha」归到 0.16，再用 viewer 实际渲染的 ROI 平均变暗量微调
-//   （同一火、同一发射参数，测 y=40..400 / x=430..850 区域相对无烟baseline 的平均差值）。
+// 烟纹理列表。alpha_scale = 密度归一化系数：
+//   先按「整张 atlas 的平均 alpha」估一个初值，再用 viewer 实际渲染的 ROI 平均变暗量
+//   迭代微调（同一火、同一发射参数，测 y=40..400 / x=430..850 相对同帧无烟 baseline）。
 //   不同来源贴图的白度/覆盖率/空间分布不同，不做这一步换烟类型时整体浓淡会突变。
+//   当前实测平均变暗量：web 5.22 / other 5.40 / v7.1 5.22 / danis-rot 5.21 /
+//                        danis-norot 5.32 / danis-s5orig 5.39（差 <4%）。
 inline const SmokeTexEntry kSmokeTexes[] = {
-    {"web_others 8×8",    "smoke/web_others_smoke_8x8.png", 8, 8, SmokePlay::kLifetime, 0, 0.79f},
-    {"火7.1 冒充烟",      "mp/flames_pairs_v71_12x6.png",   12, 6, SmokePlay::kPairMorph, 12, 0.87f},
-    {"danis_smoke_5",     "smoke/danis_smoke_pairs_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.56f},
+    {"web_others 8×8 (原)",     "smoke/web_others_smoke_8x8.png",     8, 8, SmokePlay::kLifetime, 0, 0.79f},
+    {"other 关键帧5 (无旋平)",   "smoke/other_key5_pairs_12x6.png",   12, 6, SmokePlay::kPairMorph, 12, 0.58f},
+    {"火7.1 冒充烟",            "mp/flames_pairs_v71_12x6.png",     12, 6, SmokePlay::kPairMorph, 12, 0.85f},
+    {"danis_smoke_5 (旋平)",     "smoke/danis_smoke_pairs_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.48f},
+    {"danis 无旋平",             "smoke/danis_smoke_norot_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.39f},
+    {"danis S5=原图#5",          "smoke/danis_smoke_s5orig_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.44f},
 };
 inline constexpr int kSmokeTexCount =
     static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
