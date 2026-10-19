@@ -38,7 +38,8 @@ void DefaultView(jpov_particle::ParticleViewerApp& app) {
     app.deg_.turbidity = 2.0f;
 }
 
-int RunCapture(const std::string& out_dir, int fire_idx, int palette) {
+int RunCapture(const std::string& out_dir, int fire_idx, int palette,
+               float count = -1.0f, float size = -1.0f) {
     JPOV::Config cfg;
     cfg.title = "JPOV - particle viewer (capture)";
     cfg.width = jpov_viewer::kViewerWidth;
@@ -59,6 +60,8 @@ int RunCapture(const std::string& out_dir, int fire_idx, int palette) {
     jpov::InputSnapshot input{};
     DefaultView(app);
     if (palette >= 0) { app.ui_palette_ = palette; }
+    if (count >= 0.0f) { app.ui_particle_count_ = count; }
+    if (size > 0.0f) { app.ui_fire_size_ = size; }
 
     auto shoot = [&](const char* name) {
         const std::string path = out_dir + "/" + name + ".png";
@@ -100,6 +103,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     int fire_idx = -1;
     int palette = -1;
+    float count = -1.0f, size = -1.0f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -107,10 +111,14 @@ int main(int argc, char** argv) {
             fire_idx = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--palette") == 0 && i + 1 < argc) {
             palette = std::atoi(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
+            count = std::atof(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            size = std::atof(argv[i + 1]);
         }
     }
     if (!out_dir.empty()) {
-        return RunCapture(out_dir, fire_idx, palette);
+        return RunCapture(out_dir, fire_idx, palette, count, size);
     }
 
     JPOV::Config cfg;

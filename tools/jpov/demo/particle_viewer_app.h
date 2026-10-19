@@ -158,6 +158,7 @@ public:
 
     // ---- 统一滑条（Danis 指定）----
     float ui_particle_count_ = 220.0f;   // 目标粒子数（rate = count / 平均寿命）
+    float ui_fire_size_ = 0.18f;         // 粒子世界尺寸（半宽/半高基准）
     float ui_time_scale_ = 1.0f;         // 时间整体快慢
     bool ui_fuel_enable_ = true;         // 矩形燃料块
     float ui_fuel_x_ = 0.0f;             // 燃料块平移 X
@@ -235,6 +236,7 @@ public:
         std::vector<jpov::ParticleInstance> finst;
         if (fire_enable_) {
             fire_cfg_.rate = ui_particle_count_ / std::max(life_avg, 1e-3f);
+            fire_cfg_.size_start = {ui_fire_size_ * 0.6f, ui_fire_size_};
             fire_cfg_.origin = {ui_fuel_x_, 0.22f, ui_fuel_z_};
             fire_cfg_.tiles_x = kFireTexes[fc].tx;
             fire_cfg_.tiles_y = kFireTexes[fc].ty;
@@ -242,7 +244,12 @@ public:
             if (kFireTexes[fc].play == FirePlay::kPair) {
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
                 fire_cfg_.pair_len = kFireTexes[fc].pair_len;
+                // 这些 atlas 是「RGB=白 / A=形状」的**掩膜**：
+                // additive 模式按亮度算覆盖（max(rgb)），会把形状抹成整块方片；
+                // 所以走 kAlpha（覆盖 = tex.a），形状才对。
+                fire_cfg_.blend = jpov::BlendMode::kAlpha;
             } else {
+                fire_cfg_.blend = jpov::BlendMode::kAdditive;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
                 fire_cfg_.sheet_fps = kFireTexes[fc].fps;
             }
