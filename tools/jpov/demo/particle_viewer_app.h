@@ -96,6 +96,7 @@ inline const SmokeTexEntry kSmokeTexes[] = {
     {"danis_smoke_5 (旋平)",     "smoke/danis_smoke_pairs_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.48f},
     {"danis 无旋平",             "smoke/danis_smoke_norot_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.39f},
     {"danis S5=原图#5",          "smoke/danis_smoke_s5orig_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.44f},
+    {"danis S5=原图 (柔边)",     "smoke/danis_smoke_s5orig_soft_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.56f},
 };
 inline constexpr int kSmokeTexCount =
     static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));

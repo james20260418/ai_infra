@@ -13,6 +13,7 @@ particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理
 | 3 | `danis_smoke_5 (旋平)` | `assets/smoke/danis_smoke_pairs_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 | 4 | `danis 无旋平` | `assets/smoke/danis_smoke_norot_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 | 5 | `danis S5=原图#5` | `assets/smoke/danis_smoke_s5orig_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
+| 6 | `danis S5=原图 (柔边)` | `assets/smoke/danis_smoke_s5orig_soft_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 
 全部为 `AlignMode::kView` + `BlendMode::kAlpha`（over）+ flipbook。
 
@@ -62,13 +63,14 @@ particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理
 4. `S1..S5 = PROFILE(Fi, F(i+1), 0.5)`；
 5. 6 条两段链 × 12 帧。
 
-三个版本的区别：
+四个版本的区别：
 
 | 版本 | 旋转平均 | S5 |
 |---|---|---|
 | 3 `danis_smoke_pairs` | `avg_limited(±15°, σ=8°)` | `PROFILE(F5, F1, 0.5)` |
 | 4 `danis_smoke_norot` | 无 | `PROFILE(F5, F1, 0.5)` |
 | 5 `danis_smoke_s5orig` | 无 | 直接用处理后的**原图 #5**（`F5`） |
+| 6 `danis_smoke_s5orig_soft` | 无 | 同 #5，但径向边缘过渡从 `0.50→0.98` 拉长到 `0.30→1.00`（S 节点 `0.35→1.00`），让浓度衰减更柔和、去掉“整片墙”感 |
 
 ## 烟雾强度归一化
 
@@ -83,6 +85,7 @@ viewer 用 `SmokeTexEntry::alpha_scale` 乘在逐粒子 `color.a` 上：
 | danis 旋平 | 0.48 | 5.21 |
 | danis 无旋平 | 0.39 | 5.32 |
 | danis S5=原图#5 | 0.44 | 5.39 |
+| danis S5=原图 (柔边) | 0.56 | 5.23 |
 
 定标方法：
 
