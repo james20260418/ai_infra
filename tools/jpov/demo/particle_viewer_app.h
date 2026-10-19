@@ -442,27 +442,32 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
         const float x0 = 0.02f * w;
+        const float labw = 52.0f;
+        const float combo_x = x0 + labw + 6.0f;
         {
+            ui_.Text("火焰", jpov::UiRect{{x0, 8.0f}, {labw, 26.0f}});
             std::vector<const char*> items;
             items.reserve(static_cast<size_t>(kFireTexCount));
             for (int i = 0; i < kFireTexCount; ++i) { items.push_back(kFireTexes[i].label); }
             ui_.Combo("火焰纹理", &fire_choice_, items,
-                      jpov::UiRect{{x0, 8.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{combo_x, 8.0f}, {0.30f * w, 26.0f}});
         }
         {
+            ui_.Text("烟", jpov::UiRect{{x0, 42.0f}, {labw, 26.0f}});
             std::vector<const char*> items;
             items.reserve(static_cast<size_t>(kSmokeTexCount));
             for (int i = 0; i < kSmokeTexCount; ++i) { items.push_back(kSmokeTexes[i].label); }
             ui_.Combo("烟纹理", &smoke_choice_, items,
-                      jpov::UiRect{{x0, 42.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{combo_x, 42.0f}, {0.30f * w, 26.0f}});
         }
         {
+            ui_.Text("温度", jpov::UiRect{{x0, 76.0f}, {labw, 26.0f}});
             std::vector<const char*> items;
             for (int i = 0; i < kFirePaletteCount; ++i) {
                 items.push_back(kFirePaletteNames[i]);
             }
             ui_.Combo("温度映射", &ui_palette_, items,
-                      jpov::UiRect{{x0, 76.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{combo_x, 76.0f}, {0.30f * w, 26.0f}});
         }
 
         const float colw = 0.26f * w;
