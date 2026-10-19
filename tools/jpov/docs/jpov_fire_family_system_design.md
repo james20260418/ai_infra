@@ -275,7 +275,7 @@ SurfaceFireEmitter {
 
 ### 12.1 烘焙脚本
 
-`/james_pm/fire_hero/tools/fire_family_scene.py`——**一步烘一族**的参数化 Mantaflow 场景：
+`tools/jpov/genVolume/fire_family_scene.py`——**一步烘一族**的参数化 Mantaflow 场景：
 
 ```bash
 RES=96 FRAMES=96 FAMILY=<jet|area|pool|transient> OUT=/tmp/fam_<族> \
@@ -360,11 +360,11 @@ python3 tools/npzseq_to_jpovvol.py /tmp/fam_transient assets/prototypes/transien
 关键：**在循环入口帧 S0 存检查点**（Mantaflow `grid.save/load` .uni），熄灭段**从检查点重载**跑 ⇒
 **熄灭段第 0 帧 == 循环入口状态** ⇒ 「循环切熄灭」无跳变；而**点火段末帧 == 持续段首帧**（同帧）⇒ 「点火切循环」无跳变。
 
-脚本：`fire_hero/tools/fire_family_scene.py`（一次调用内先跑 main 再跑 ext）。
+脚本：`tools/jpov/genVolume/fire_family_scene.py`（一次调用内先跑 main 再跑 ext）。
 
 ### 13.4 环闭合工具（治循环跳变）
 
-`fire_hero/tools/fire_family_bake.py --loop half-xfade --loop-frames N`：
+`tools/jpov/genVolume/fire_family_bake.py --loop half-xfade --loop-frames N`：
 取持续窗 `S[0..N-1]`，输出 `L[t] = (1−c[t])·S[t] + c[t]·S[(t+N//2) % N]`，`c[t]=0.5+0.5·cos(2π t/N)`。
 
 ⚠️ **半周期相位对齐（关键坑）**：`half-xfade` 会把**循环入口内容平移 N/2**（`L[0]=S[N/2]`）。

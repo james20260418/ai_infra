@@ -5,8 +5,7 @@
 用途：给 `jpov_fire_fog_viewer` 的「粒子火」场景产出**真火纹理**（源自 Mantaflow 烘的
 火体积），或产出**黑烟**用的 puff flipbook。所有重活留在离线；引擎运行期只读 PNG。
 
-体数据格式（JPVOL1/JPVOL2）见 tools/jpov/src/fire_fog/fire_volume.h：
-  帧内 x 最快 → y → z，通道交错；JPVOL2 头 40B（magic8 + 8×uint32），JPVOL1 头 32B。
+体数据格式（JPVOL1/JPVOL2）单一来源见同目录 `jpvol.py`：帧内 x 最快 → y → z，通道交错。
   R=density ∈[0,1]，G=temperature ∈[0,1]。
 
 渲染：沿 z 轴前到后 emission-absorption 积分（每像素一条视线）：
@@ -24,29 +23,7 @@ import zlib
 
 import numpy as np
 
-
-# ---------------- .jpovvol 读取 ----------------
-
-def load_jpovvol(path):
-    with open(path, "rb") as fh:
-        blob = fh.read()
-    magic = blob[:8]
-    if magic[:6] == b"JPVOL2":
-        ver, nx, ny, nz, nframes, channels, dtype, _res = struct.unpack("<8I", blob[8:40])
-        data = blob[40:]
-    elif magic[:6] == b"JPVOL1":
-        ver, nx, ny, nz, channels, dtype = struct.unpack("<6I", blob[8:32])
-        nframes = 1
-        data = blob[32:]
-    else:
-        raise ValueError("not a JPVOL file: %r" % magic[:8])
-    np_dtype = np.uint8 if dtype == 1 else np.float32
-    arr = np.frombuffer(data, dtype=np_dtype)
-    # 帧内 x 最快 → y → z，通道交错 → reshape (frames, nz, ny, nx, channels)
-    arr = arr.reshape(nframes, nz, ny, nx, channels)
-    if dtype == 1:
-        arr = arr.astype(np.float32) / 255.0
-    return arr  # (frames, nz, ny, nx, channels)
+import jpvol
 
 
 # ---------------- 颜色 ----------------
@@ -309,7 +286,7 @@ def main():
         print("wrote %s (%s, %dx%d)" % (out_path, kind, rgba.shape[1], rgba.shape[0]))
         return 0
 
-    vol = load_jpovvol(in_path)
+    vol = jpvol.read_jpovvol(in_path)
     print("volume: frames=%d nz=%d ny=%d nx=%d ch=%d" % vol.shape)
     dens = vol[..., 0]
     print("density: max=%.3f mean=%.4f  nonzero>%.02f: %.2f%%" % (

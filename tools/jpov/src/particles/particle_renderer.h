@@ -9,7 +9,8 @@
 //   将来可扩到多级（1/2、1/4）并按需路由（见 docs/jpov_fragment_overdraw_design.md）。
 //
 // 画法：instanced 广告牌（VS 由 gl_VertexID 生成面片四角），per-instance attr loc0..3：
-//   pos(3) / misc(4: 宽,高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
+//   pos(3) / misc(4: 半宽,半高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
+//   朝向：AlignMode（kVertical 火；kVelocity 局部 Y = 速度 ⇒ stretched 沿速度拉条）。
 // FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（玻璃 FBO 无深度缓冲）→
 //   输出 WBO 三附件（与 #176 object3d blend 同构）：
 //     att0 accum : vec4(色·α, α)·w      （blend ONE,ONE）
@@ -66,6 +67,7 @@ uniform int  uStretched;
 uniform float uStretchScale;
 out vec2 vUV;
 out vec4 vColor;
+out vec3 vWorld;
 flat out float vFrame;
 void main() {
     vec2 corner = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
@@ -92,22 +94,32 @@ void main() {
         right = normalize(r);
         up = normalize(cross(n, right));
     } else {
+        // kVelocity：面片平面**包含**速度向量（局部 Y = 速度），法线朝相机。
+        //   速度 ∥ 视线时 cross(u, toCam) 退化 → 逐级换参考轴（两次几乎同时退化概率可忽略）。
         float sp = length(aVel);
-        vec3 u = (sp > 1e-4) ? (aVel / sp) : uCamUp;
-        vec3 r = cross(u, normalize(toCam));
-        if (length(r) < 1e-4) { r = uCamRight; }
+        vec3 u = (sp > 1e-4) ? (aVel / sp) : uCamUp;   // 局部 Y = 速度方向
+        vec3 r = cross(u, normalize(toCam));           // ⟂ 速度 且 ⟂ 视线
+        if (length(r) < 1e-4) {
+            r = cross(u, uCamRight);
+        }
+        if (length(r) < 1e-4) {
+            r = cross(u, uCamUp);
+        }
         right = normalize(r);
-        up = normalize(cross(right, u));
+        up = u;
     }
     float c = cos(aMisc.z);
     float s = sin(aMisc.z);
     vec3 rr = right * c + up * s;
     vec3 uu = -right * s + up * c;
     vec2 size = aMisc.xy;
+    // 拉伸沿**滚转后的局部 Y**（uu）。kVelocity 下局部 Y = 速度 ⇒ 沿速度拉成条；
+    // 其余对齐模式下局部 Y 是「相机上 / 世界上」，拉出来只是「高个儿 sprite」，不要当物理拉丝用。
     if (uStretched == 1) {
         size.y *= (1.0 + length(aVel) * uStretchScale);
     }
     vec3 world = aPos + (corner.x * size.x) * rr + (corner.y * size.y) * uu;
+    vWorld = world;
     gl_Position = uViewProj * vec4(world, 1.0);
 }
 )glsl";
@@ -117,6 +129,7 @@ void main() {
 #version 330 core
 in vec2 vUV;
 in vec4 vColor;
+in vec3 vWorld;
 flat in float vFrame;
 uniform sampler2D uTex;
 uniform int uHasTex;
@@ -124,7 +137,10 @@ uniform int uTilesX;
 uniform int uTilesY;
 uniform int uFlipbook;
 uniform int uFrameBlend;
-uniform int uAdditive;   // 1 = 加法（黑底无 alpha）→ 用亮度当覆盖
+uniform int uAdditive;      // 1 = 加法（现在也直接用 col.a 当覆盖）
+uniform float uEdgeFeather; // 边缘羽化阈值（0=关闭）
+uniform float uUvDistort;   // 形状扰动幅度（0=关闭）
+uniform float uTime;        // 时间（秒）
 uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;   // 本 pass 的像素尺寸（1/2 分辨率）
 uniform float uNear;
@@ -150,28 +166,40 @@ float WeightWbo(float z, float a, vec3 c) {
     return w * df;
 }
 void main() {
+    // 形状扰动：每粒子相位（用世界坐标哈希）+ 时间 → UV 摆动。
+    // 越靠上（vUV.y 大）扰动越大，火焰尖端会"撕"得更明显；根部基本不动。
+    vec2 suv = vUV;
+    if (uUvDistort > 0.0) {
+        float ph = fract(sin(dot(vWorld.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+        float amp = uUvDistort * (0.35 + 0.65 * suv.y);
+        suv += amp * vec2(
+            sin(suv.y * 7.0 + uTime * 2.6 + ph),
+            cos(suv.x * 5.0 - uTime * 2.1 + ph * 1.3)) * 0.5;
+    }
     vec4 tex;
     if (uHasTex == 0) {
         tex = vec4(1.0);
     } else if (uFlipbook == 1 && uTilesX >= 1 && uTilesY >= 1) {
         float total = float(uTilesX * uTilesY);
         float f0 = floor(vFrame);
-        vec4 c0 = texture(uTex, CellUV(vUV, f0));
+        vec4 c0 = texture(uTex, CellUV(suv, f0));
         if (uFrameBlend == 1) {
             float f1 = mod(f0 + 1.0, total);
-            vec4 c1 = texture(uTex, CellUV(vUV, f1));
+            vec4 c1 = texture(uTex, CellUV(suv, f1));
             tex = mix(c0, c1, vFrame - f0);
         } else {
             tex = c0;
         }
     } else {
-        tex = texture(uTex, vUV);
+        tex = texture(uTex, suv);
     }
     vec4 col = vColor * tex;
+    // **预乘契约**：RGB = 颜色（可 HDR），A = 覆盖。
+    // 加法与半透明都直接用 col.a 当覆盖；黑底贴图由素材把 alpha 写成 0（或走 kAlpha 通道）。
     float a = col.a;
-    if (uAdditive == 1) {
-        // 加性火纹理常无 alpha 语义（黑底=透明）→ 用亮度当覆盖；否则黑会变“黑板”。
-        a = clamp(max(max(col.rgb.r, col.rgb.g), col.rgb.b), 0.0, 1.0);
+    // 边缘羽化（0 = 关闭）：把低 alpha 区做一次软过渡，消掉采样造成的硬边。
+    if (uEdgeFeather > 0.0) {
+        a = smoothstep(0.0, max(uEdgeFeather, 1e-3), a);
     }
     if (a <= 1.0 / 255.0) {
         discard;

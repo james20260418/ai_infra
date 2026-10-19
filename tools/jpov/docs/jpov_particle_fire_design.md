@@ -267,11 +267,11 @@ struct ParticleEmitter {
 - **一个发射器 = 一次 instanced draw**：共享一个**单位四边形** mesh（2 tri，VAO），per-instance attribute 传：
   `center(世界) / size(vec2) / rotation(float) / color(rgba) / subuv(frame, tiles) / flip`。
   复用现有 `InstanceBuffer`（per-instance 布局 spec + Attach/Detach 配对语义，见 `instance_buffer.h`）。
-- **Billboard 朝向**：VS 里按 `align` 构造面片基向量（`kView`=面向相机平面；`kFacing`=朝相机点；`kVelocity`/`stretched`=沿速度）。
-- **Flipbook**：UV 由 `(tiles_x, tiles_y, frame_index)` 裁出子图；可选**相邻帧混合**（UE `PSUVIM_Linear_Blend`）。
+- **Billboard 朝向**：VS 里按 `align` 构造面片基向量（`kView`=面向相机平面；`kFacing`=朝相机点；`kVertical`=绕 Y 轴 roll 锁定；`kVelocity`=**局部 Y = 速度**、面片平面包含速度）。几何定义以 `interface/particle_types.h` 的 `AlignMode` 注释为准。
+- **Flipbook**：UV 由 `(tiles_x, tiles_y, frame_index)` 裁出子图（**行优先、0 行 = 贴图顶行**）；可选**相邻帧混合**（UE `PSUVIM_Linear_Blend`）。
 - **软粒子**：采样 **MRT#1 场景深度**（float 颜色纹理，llvmpipe 不能采 depth texture —— 既有约定）→ 与当前片元深度比较淡化（MVP 可略）。
-- **混合**：`kAdditive` = `(GL_SRC_ALPHA, GL_ONE)`（或预乘 `GL_ONE, GL_ONE`）；`kAlpha` = `(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`。
-- **排序**：`kAlpha` 层按视深**背→前**逐实例排序；`kAdditive` 层**不排**（无顺序依赖，省排序）。层间顺序 = 命令内 emitter 顺序（先烟后焰？错 —— **先画烟、后画焰**让焰压在烟上；加法层通常在 alpha 层之后画）。
+- **混合（已落地实现 ≠ 本节旧描述）**：实际走 **WBO 加权混合**，不再是固定 blend func。`kAdditive` 的覆盖 = **texel 亮度 × color.a**（黑底火图只有亮度可用；color.a 负责淡入/淡出）；`kAlpha` 的覆盖 = `color.a × texel.a`。完整像素公式见 `interface/render_command.h` 的 `ParticleRenderCommand` 头注释。
+- **排序**：**不需要** —— WBO 顺序无关（`SortMode` 当前是惰性字段）。旧描述里的“半透明背→前排序”只适用于逐片混合路线。
 - **HDR**：输出到 3D HDR FBO，可被现有 **bloom** 消费 → 火自动发光。
 - **GL 状态机**：自行保存/复原 FBO / viewport / 活动纹理单元 / blend func（同 fire_fog 约定；调用方 `glPushAttrib` 兜底）。
 - **集成点**：新 `src/particles/particle_renderer.{h,cc}`（与 object3d / skeleton / fire_fog 平级、单一自包含）；`Renderer` 调它；拾取/高亮 **MVP 不接**（后续再加）。
@@ -280,7 +280,7 @@ struct ParticleEmitter {
 
 - **首选：自产**。我们**已有 Mantaflow 烘的 VDB 火**（`/james_pm/fire_hero/assets/`）。写一个离屏渲染器把序列体**渲成序列帧 → 拼成 sheet（如 8×8 / 4×4）**，做无缝循环。优点：可控、免授权、与体积火资产同源。
 - **备选：CC0 包**（Unity《Flame Pack》等 free flipbook；freecutout / ambientCG 的粒子图）。
-- **纹理格式**：建议 `RGBA8`，`RGB = 预乘温度色 / 强度`、`A = 不透明度`（加法用 RGB 强度，alpha 用 A）。约定写进材质/命令注释（单一来源）。
+- **纹理格式**：建议 `RGBA8`。实际约定（见 `ParticleRenderCommand` 注释）：**加法靠 RGB 亮度、半透明靠 A** —— 所以美术交付兼容两种用法：黑底 + alpha 任意 → 只能加法；透明底 + alpha 真实 → 加法/over 都行。
 
 ### 5.5 viewer 面板（调参）
 
@@ -311,7 +311,7 @@ struct ParticleEmitter {
 - `InstanceBuffer`（per-instance 布局 spec + Attach/Detach 配对）与既有 instancing 链路。
 - HDR / bloom / MRT 场景深度（软粒子用）/ 混合状态机约定（fire_fog 同款）。
 - viewer 框架（`demo/*_viewer_app.h`、`jpov_*_viewer.cc`、build 脚本模式）。
-- **Mantaflow 烘焙管线**（`/james_pm/fire_hero/tools` + `mantaflow/`）→ 出 flipbook 序列帧。
+- **Mantaflow 烘焙管线**（`tools/jpov/genVolume/` + `env/`）→ 出 flipbook 序列帧。
 
 **分工**：
 - **环境雾 / 烟 / 远景火** → `fire_fog`（froxel，已实现）。

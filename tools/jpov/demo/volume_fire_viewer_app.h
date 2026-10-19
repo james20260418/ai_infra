@@ -310,9 +310,9 @@ private:
     // 画世界坐标轴（红=+X, 绿=+Y, 蓝=+Z），供对齐/旋转参照。
     void DrawAxes(jpov::RenderCommandList* cmds) {
         if (axis_x_mesh_ == 0) {
-            axis_x_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.5f, 0.012f, 0.012f));
-            axis_y_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.012f, 0.5f, 0.012f));
-            axis_z_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.012f, 0.012f, 0.5f));
+            axis_x_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.6f, 0.045f, 0.045f));
+            axis_y_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.045f, 0.6f, 0.045f));
+            axis_z_mesh_ = RegisterMesh(jpov::MeshData::MakeBox(0.045f, 0.045f, 0.6f));
             axis_x_mat_ = jpov::PBRMaterial::SolidColor({1.0f, 0.1f, 0.1f, 1.0f});
             axis_y_mat_ = jpov::PBRMaterial::SolidColor({0.1f, 1.0f, 0.1f, 1.0f});
             axis_z_mat_ = jpov::PBRMaterial::SolidColor({0.2f, 0.4f, 1.0f, 1.0f});

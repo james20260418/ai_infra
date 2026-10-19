@@ -123,9 +123,11 @@ Color Gradient::Eval(float t) const {
 
 Gradient MakeDefaultFireGradient() {
     Gradient g;
-    // 白热（出生）→ 黄 → 橙 → 红 → 暗红（末段）；alpha 两端低、中段高，末端淡出。
+    // 白热（出生）→ 黄 → 橙 → 红 → 暗红（末段）。
+    // alpha：**全程 1，只在末段淡出到 0**。加法模式下 alpha 是覆盖的乘子（亮度×alpha），
+    //   所以出生给 1.0 才不压暗火核；生命末归 0 让粒子收干净、不留暗红方块。
     g.keys = {
-        {0.00f, Color{1.00f, 0.95f, 0.75f, 0.50f}},
+        {0.00f, Color{1.00f, 0.95f, 0.75f, 1.00f}},
         {0.15f, Color{1.00f, 0.80f, 0.30f, 1.00f}},
         {0.45f, Color{1.00f, 0.45f, 0.08f, 1.00f}},
         {0.75f, Color{0.75f, 0.13f, 0.02f, 0.85f}},
@@ -249,6 +251,8 @@ ParticleEmitter::Particle ParticleEmitter::Spawn() {
     p.velocity = dir * sp;
     p.lifetime = cfg_.lifetime.Sample(rng_);
     p.rotation0 = cfg_.rotation.Sample(rng_);
+    p.rotation = p.rotation0;
+    p.spin0 = cfg_.rotation_speed.Sample(rng_);
     p.size0 = cfg_.size_start.Sample(rng_);
     p.frame_phase = cfg_.start_frame_random ? rng_.Next01() : 0.0f;
     p.seed = static_cast<uint32_t>(rng_.NextU64());
@@ -263,6 +267,8 @@ ParticleEmitter::Particle ParticleEmitter::MakeParticle(const Vec3f& position,
     p.velocity = velocity;
     p.lifetime = cfg_.lifetime.Sample(rng_);
     p.rotation0 = cfg_.rotation.Sample(rng_);
+    p.rotation = p.rotation0;
+    p.spin0 = cfg_.rotation_speed.Sample(rng_);
     p.size0 = cfg_.size_start.Sample(rng_);
     p.frame_phase = cfg_.start_frame_random ? rng_.Next01() : 0.0f;
     p.seed = static_cast<uint32_t>(rng_.NextU64());
@@ -302,6 +308,23 @@ float ParticleEmitter::ResolveFrame(const Particle& p) const {
             const float f = p.age * cfg_.sheet_fps / static_cast<float>(total) +
                             p.frame_phase;
             phase = f - std::floor(f);
+            break;
+        }
+        case SheetTimeMode::kPairMorph: {
+            // atlas 按 [A,B] 或 [A,..,B] 成块排列；每粒子随机选一对/一块，
+            // 寿命内从块首走到块尾（pair_len=2 时就是旧的 A→B 线性混合）。
+            const int plen = std::max(2, cfg_.pair_len);
+            const int pairs = std::max(1, total / plen);
+            int k = static_cast<int>(p.frame_phase * static_cast<float>(pairs));
+            k = (k < 0) ? 0 : (k >= pairs ? pairs - 1 : k);
+            const float f = static_cast<float>(k * plen) +
+                            t * static_cast<float>(plen - 1);
+            const float fmax = static_cast<float>(total - 1);
+            return (f > fmax) ? fmax : f;
+        }
+        case SheetTimeMode::kRandomStatic: {
+            // 每粒子固定一帧：frame_phase 在出生时随机采样
+            phase = p.frame_phase;
             break;
         }
         case SheetTimeMode::kSpeed: {
@@ -375,6 +398,13 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
 
         const float t = Clamp01(p.age / std::max(p.lifetime, 1e-6f));
 
+        // 自旋积分（角速度随寿命线性衰减 → 末端不乱转）
+        {
+            const float ts = Clamp01(p.age / std::max(p.lifetime, 1e-6f));
+            const float spin = p.spin0 * (1.0f - cfg_.rotation_speed_decay * ts);
+            p.rotation += spin * dt;
+        }
+
         float size = p.size0;
         if (cfg_.use_size_over_life) {
             size = p.size0 * cfg_.size_curve.Eval(t);
@@ -393,7 +423,7 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
         inst.velocity = p.velocity;
         inst.width = size;
         inst.height = size;
-        inst.rotation = p.rotation0;
+        inst.rotation = p.rotation;
         inst.color = color;
         inst.frame = ResolveFrame(p);
         out->push_back(inst);

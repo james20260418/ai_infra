@@ -1,6 +1,6 @@
 # VDB 接入手记：EmberGen campfire 在 JPOV 里"躺着/乱码"问题（交接单）
 
-> 2026-10-15 深夜 ｜ 起因：手工烘的火不好看，改用 **JangaFX（EmberGen）免费 CC0 VDB**（Small Camp Fire）。
+> 2026-10-16 更新：**已定位并修复**（见文末 §9）。工具已从 `fire_hero/tools` 迁到 `tools/jpov/genVolume/`（＋单测 & CI）。
 > 目标：把 VDB 序列转成引擎的 `.jpovvol`，在 `jpov_volume_fire_viewer` 的「原型火纹理」模式里**正常立着**渲染。
 > **结论（供接手）**：纹理本身没问题、渲染管线没问题、合成体也没问题，**问题锁定在 VDB→JPVOL2 的转换环节**；本文件汇总代码位置、已证事实、可疑点、复现命令。
 
@@ -18,8 +18,8 @@
 
 | 环节 | 文件 | 关键点 |
 |---|---|---|
-| **VDB → JPVOL2 转换**（可疑核心） | `/james_pm/fire_hero/tools/vdbseq_to_jpovvol.py` | 用 `pyopenvdb` 读 grid → 稠密数组 `[F][z][y][x]` → 下采样 → 旋转/翻转 → 归一化 → 写 JPVOL2 + sidecar |
-| JPVOL2 格式规范 | `/james_pm/fire_hero/tools/npzseq_to_jpovvol.py`（docstring） | 头 40B：magic JPVOL2、ver、nx,ny,nz、nframes、channels、dtype、reserved；数据 = 帧内 **x 最快→y→z**，帧间顺序 |
+| **VDB → JPVOL2 转换**（可疑核心） | `tools/jpov/genVolume/vdbseq_to_jpovvol.py` | 用 `pyopenvdb` 读 grid → 稠密数组 `[F][z][y][x]` → 下采样 → 旋转/翻转 → 归一化 → 写 JPVOL2 + sidecar |
+| JPVOL2 格式规范 | `tools/jpov/genVolume/jpvol.py`（单一来源） | 头 40B：magic JPVOL2、ver、nx,ny,nz、nframes、channels、dtype、reserved；数据 = 帧内 **x 最快→y→z**，帧间顺序 |
 | **JPVOL2 加载到 GL** | `tools/jpov/src/volume_manager.cc` | `GL_TEXTURE_2D_ARRAY`：`width=nx`、`height=ny*nz`、`layers=nframes`、`GL_RG`；逐帧 `glTexSubImage3D` |
 | **体渲染采样** | `tools/jpov/src/volume_fire/volume_fire_renderer.h` | `ToLocal(p)=(p-uBoxMin)/(uBoxMax-uBoxMin)`；`SampleVol(p)`：`V=(iz+y)/nz`，`slice=uFrame` |
 | 原型查看模式 | `tools/jpov/demo/volume_fire_viewer_app.h` | `ProtoBoxForIndex()`：盒 = `dims × voxel_m`（真实尺度）；`DrawAxes()` 画红+X/绿+Y/蓝+Z |
@@ -51,7 +51,7 @@
 
 ```bash
 # 1) 转换（无旋转）
-python3 /james_pm/fire_hero/tools/vdbseq_to_jpovvol.py \
+python3 tools/jpov/genVolume/vdbseq_to_jpovvol.py \
   '/tmp/vdbtry/smallCampfire/smallCampfireVDB/smallCampfire_%04d.vdb' \
   /tmp/cam.jpovvol --start 60 --end 140 --ds 2 --r-grid flames --g-grid flames --gnorm 99.5
 
@@ -75,4 +75,16 @@ vdb_render /tmp/vdbtry/smallCampfire/smallCampfireVDB/smallCampfire_0100.vdb /tm
 
 ## 8. 一句话给接手
 
-> **不是纹理、不是管线、不是引擎轴映射**；请把 `fire_hero/tools/vdbseq_to_jpovvol.py` 的**轴序/reshape/写盘布局**，与 `tools/jpov/src/volume_manager.cc` 的**上传布局** 和 `volume_fire_renderer.h` 的 **`SampleVol` 行/slice 映射**，**三处并排对准**（尤其 `nx/ny/nz` 与 `x最快`、`y==上` 的假设），并用"官方 `vdb_render` 竖着的帧"做端到端对照。合成体（§4.3）可作为"引擎正确"的恒真对照随时复用。
+> **不是纹理、不是管线、不是引擎轴映射**；请把 `tools/jpov/genVolume/vdbseq_to_jpovvol.py` 的**轴序/reshape/写盘布局**，与 `tools/jpov/src/volume_manager.cc` 的**上传布局** 和 `volume_fire_renderer.h` 的 **`SampleVol` 行/slice 映射**，**三处并排对准**（尤其 `nx/ny/nz` 与 `x最快`、`y==上` 的假设），并用"官方 `vdb_render` 竖着的帧"做端到端对照。合成体（§4.3）可作为"引擎正确"的恒真对照随时复用。
+
+---
+
+## 9. 结论（2026-10-16 定位并修复）
+
+**根因 = `read_grid_dense` 的 numpy 形状搞错**（不是纹理/管线/引擎轴映射，§4 的排除都对，但 §4.4 的“往返一致”是**同一份错误代码自我一致**，掩盖了它）。
+
+- `pyopenvdb.copyToArray` 的约定是 **`array[i][j][k] = voxel(i,j,k)`（首轴 = x，形状须 `(nx,ny,nz)`）**；
+  旧代码按 `(nz,ny,nx)`/`[z][y][x]` 分配 → **(a) x/z 轴对调；(b) `nz>nx` 时 z 轴静默截断** → 火“躺着 + 乱码”。
+- **第二因**：EmberGen VDB 是 **Z-up**，不加 `--z-up` 也“躺”（火高大沿世界 Z）。
+- **修法**：读改 `(nx,ny,nz)` 再 `.transpose(2,1,0)`；EmberGen 序列加 `--z-up`。两个转换器（`vdbseq_` / `vdb_to_`）都改了；格式与公共逻辑收进 `jpvol.py`。
+- **防回归**：`tools/jpov/genVolume/test_genvolume.py`（含「旧布局必须给出不同结果」的非恒真护栏）+ CI `genvolume` job。

@@ -1767,24 +1767,102 @@ struct SkinnedMeshCommand {
 // 好的面片怎么画」。因此一个发射器 = 一条命令（层间顺序 = 命令顺序）。
 //
 // 渲染：单次 instanced draw（VS 里 gl_VertexID 生成面片四角），走独立粒子 pass
-//（不透明 3D 之后），自带混合/深度状态。见 src/particles/particle_renderer.h，
-// 设计 docs/jpov_particle_fire_design.md。
+//（不透明 3D 之后），画进 **1/2 分辨率 WBO 加权混合纹理**（顺序无关 ⇒ 不需要排序），
+// 最后 Composite 以预乘 over 合成回 HDR。见 src/particles/particle_renderer.h。
 //
 // 分工约定（Danis）：环境雾/烟/远火 → fire_fog（froxel）；主角燃料火 → 本命令。
+//
+// ============================ 一个像素是怎么算出来的 ============================
+// 片元着色器（particle_renderer.h: kFsWbo）逐步：
+//
+//   1) 采样   tex = flipbook 采样（见下「flipbook 寻址」）；texture_id=0 → tex = (1,1,1,1)
+//   2) 上色   col = ParticleInstance.color × tex                （逐分量相乘）
+//   3) 覆盖   kAdditive: a = max(col.rgb) × col.a   ← 亮度给形状，color.a 给淡入/淡出
+//             kAlpha   : a = col.a                 ← = color.a × texel.a（透明度**就是**它）
+//             a ≤ 1/255 → discard；被不透明场景深度挡住（z > scene_z + 0.02 米）→ discard
+//   4) 累积   accum += vec4(col.rgb·a, a)·w
+//             reveal *= (1 − a)
+//             depth += z_view·a·w
+//             w = max(min(1, maxRGB·a), a) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)
+//   5) 合成   C = accum.rgb / accum.a，cov = 1 − reveal
+//             HDR = C·cov + dst·(1 − cov)            ← 预乘 over
+//
+// 所以「加 / over」只由 blend 一个字段决定，**同一张贴图两种用法都成立**：
+//   * 加法火图（黑底、alpha 全 255）→ blend=kAdditive：黑的地方 max(rgb)=0 自动全透；
+//   * 带 alpha 的烟图 → blend=kAlpha：alpha 直接就是覆盖率。
+//   反过来把 add/over 烘进贴图 = 把渲染语义写进美术资产，改一次要重烘，不要这么做。
+//
+// ============================ flipbook 寻址 ============================
+// 图 = tiles_x 列 × tiles_y 行，帧号 k 按**行优先**取格子：
+//     col = k % tiles_x，row = k / tiles_x（row 0 = 图的**顶行**）
+// 采样时 v 轴翻转（GL 纹理原点在左下）：vrow = tiles_y − 1 − row。
+// 帧号来自 ParticleInstance.frame（可带小数）；frame_blend=true 时与下一帧
+// mix(tex, 1 − frac)，下一帧按 mod(frame+1, tiles_x·tiles_y) 回绕。
+// Pre-condition: tiles_x/tiles_y ≥ 1；每实例 frame ∈ [0, tiles_x·tiles_y)（越界会采样到网格外）。
+//
+// ============================ 这个命令**不**提供 ============================
+//   * 没有整批「整体透明度/淡出」旋钮：要整批淡出就改逐实例 color（或上游梯度曲线）。
+//   * 没有 per-particle 混合：一个粒子只能属于一条命令 = 一种混合模式；要混用发两条命令。
+//   * 没有排序效果（WBO 顺序无关，见 sort 字段）。
+//   * 没有软粒子淡出（只有上面那个 0.02 米的硬深度判定）。
 struct ParticleRenderCommand {
-    std::vector<ParticleInstance> particles;  // 本批实例（非空才画）
+    std::vector<ParticleInstance> particles;  // 本批实例（世界位置/速度/半宽半高/滚转/
+                                              //   RGBA 乘子/帧号，见 particle_types.h）。
+                                              //   空 = 整条命令 no-op（不建 draw call）
 
-    // ---- 渲染设置（整批共享）----
-    uint32_t texture_id = 0;      // flipbook 纹理（TextureManager id；0 = 纯色不加纹理）
-    int  tiles_x = 1;             // flipbook 网格列（flipbook=true 时 >= 1）
-    int  tiles_y = 1;             // flipbook 网格行
-    bool flipbook = false;        // 是否按帧号裁 UV
-    bool frame_blend = true;      // 相邻帧交叉混合（减逐帧卡顿/突变；flipbook 有效）
-    jpov::AlignMode align = AlignMode::kVertical;   // 广告牌朝向调制
-    bool stretched = false;       // 沿速度拉伸（align=kVelocity 时有意义）
-    float stretch_scale = 1.0f;   // 拉伸系数（每 m/s）
-    jpov::BlendMode blend = BlendMode::kAdditive;   // 混合模式
-    jpov::SortMode  sort = SortMode::kNone;         // 排序模式
+    // ---- 渲染设置（整批共享；一次 instanced draw 全部生效）----
+
+    // flipbook 纹理（TextureManager id）。0 = 不用贴图，texel 恒为 (1,1,1,1)
+    //   ⇒ 加法模式下覆盖 = max(color.rgb)，半透明模式下覆盖 = color.a。
+    //   Pre-condition: 非 0 时必须已注册，否则 CHECK 失败（不会静默画白）。
+    uint32_t texture_id = 0;
+
+    // flipbook 网格列数（>= 1）。帧号按行优先排布，见上方「flipbook 寻址」。
+    int  tiles_x = 1;
+    // flipbook 网格行数（>= 1）。第 0 行 = 贴图的顶行。
+    int  tiles_y = 1;
+
+    // true = 按 ParticleInstance.frame 裁子图；false = 整张贴图当一帧（忽略帧号，
+    // 此时 tiles_x/tiles_y 不参与寻址）。
+    bool flipbook = false;
+
+    // 相邻帧交叉混合：tex = mix(帧 k, 帧 k+1, frac(frame))，消掉逐帧硬切。
+    // 只对 flipbook=true 有效；关掉 = 硬切帧（省一次采样）。
+    bool frame_blend = true;
+
+    // 广告牌朝向调制（整批一种）。各模式几何语义见 AlignMode 注释。
+    jpov::AlignMode align = AlignMode::kView;
+
+    // 沿速度拉伸：高度 ×= (1 + |velocity| × stretch_scale)。
+    // **只对 align=kVelocity 有意义**（局部 Y = 速度 ⇒ 沿运动方向拉成条）；
+    // 其它对齐模式下拉长的是「相机上 / 世界上」，出来的是高个儿 sprite，不是拉丝。
+    //   例：stretch_scale = 1，粒子 3 m/s → 高度 ×4。
+    // 注意拉长轴是**滚转后的局部 Y**：实例 rotation ≠ 0 时拉长方向会跟着转开。
+    bool stretched = false;
+    // 拉伸强度（每 m/s 的伸长比例，>= 0）。0 = 即使 stretched=true 也不拉长。
+    float stretch_scale = 1.0f;
+
+    // 混合模式 —— 决定这个像素变成「加法发光」还是「半透明遮挡」，见上方像素公式。
+    // 两种模式下 color.a 都管透明度：加法是「亮度 × a」，半透明直接就是覆盖率。
+    // 整批一种：一个粒子只属于一条命令。
+    jpov::BlendMode blend = BlendMode::kAdditive;
+
+    // 形状扰动（0 = 关闭）：在片元里用「时间 + 每粒子相位」做 UV 扭曲，
+    // 让**同一张静态火舌贴图也能动起来**（边缘摆动/撕裂），不需要烘帧序列。
+    // 建议 0.005 ~ 0.03（UV 单位）。0 = 完全不执行（零开销、零回归）。
+    float uv_distort = 0.0f;
+
+    // 形状扰动用的时间（秒）。由调用方给（一般是应用时钟）。
+    float time_s = 0.0f;
+
+    // 边缘羽化（0 = 关闭）：对片元 alpha 做 smoothstep(0, edge_feather, a)，
+    // 把低 alpha 的半透明区拉开、消掉贴图采样造成的硬边。
+    // 关闭时完全不影响结果（避免潜在 bug）；建议 0.05 ~ 0.25。
+    float edge_feather = 0.0f;
+
+    // ⚠️ **当前不生效**：ParticleRenderer 走 WBO（顺序无关），不读这个字段。
+    //   保留仅为接口占位；写成什么都不会改变画面。
+    jpov::SortMode  sort = SortMode::kNone;
 };
 
 // ==================== 高亮风格 ====================

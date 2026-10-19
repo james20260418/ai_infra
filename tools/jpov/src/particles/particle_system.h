@@ -92,6 +92,8 @@ enum class SheetTimeMode : uint8_t {
     kLifetime = 0,  // 按寿命用 Curve 采样帧（frame_curve）
     kFps = 1,       // 按固定帧率循环
     kSpeed = 2,     // 按粒子速度映射到 [0,total_frames)
+    kRandomStatic = 3,  // 每粒子随机取一帧并保持不变（= 每 instance 不同贴图，用 atlas 实现）
+    kPairMorph = 4,     // 每粒子随机选**一对**相邻格，在寿命内从 A 渐变到 B（atlas 按 [A,B] 成对排列）
 };
 
 // ==================== 发射器配置 ====================
@@ -116,6 +118,10 @@ struct EmitterConfig {
     RangeF speed = {0.6f, 1.0f};         // m/s
     RangeF size_start = {0.35f, 0.5f};   // 出生尺寸（世界米，方形基准，乘 size_curve）
     RangeF rotation = {0.0f, 6.2831853f};  // 出生朝向角（弧度）
+    // 自旋角速度（弧度/秒，可负数）。Astralax 火的做法：粒子一边烧一边自旋，
+    // 且**自旋量随寿命衰减**（末端不乱转）→ 由 rotation_speed_decay 控制。
+    RangeF rotation_speed = {0.0f, 0.0f};
+    float rotation_speed_decay = 0.0f;   // 0=匀速；1=到寿命末端降到 0
     Color color_start = {1.0f, 0.65f, 0.2f, 1.0f};
 
     // ---- 受力 ----
@@ -139,15 +145,19 @@ struct EmitterConfig {
     float sheet_fps = 18.0f;             // kFps 用（帧/秒）
     float sheet_cycles = 1.0f;           // 寿命内循环遍数（kLifetime 用）
     bool start_frame_random = true;      // 每粒子随机起始相位（kFps/kSpeed 用）
+    int pair_len = 2;                    // kPairMorph：每一对占多少帧（2=旧的 A→B 交叉淡化；
+                                         // >2 时 atlas 里是预烘好的 A→…→B 中间帧）
     Curve frame_curve;                   // kLifetime 用：t→[0,1) 帧比例
 
     // ---- 渲染 ----
-    uint32_t texture_id = 0;             // flipbook 纹理（TextureManager id；0=纯色）
-    AlignMode align = AlignMode::kVertical;
-    bool stretched = false;              // 沿速度拉伸（kVelocity 时才有意义）
-    float stretch_scale = 1.0f;          // 拉伸系数（每 m/s）
-    BlendMode blend = BlendMode::kAdditive;
-    SortMode sort = SortMode::kNone;
+    // 这些字段只影响「把产出实例画成什么」，语义以 interface/particle_types.h 为准。
+    uint32_t texture_id = 0;             // flipbook 纹理（TextureManager id；0=纯色 texel=(1,1,1,1)）
+    AlignMode align = AlignMode::kView;       // 广告牌朝向调制（默认 kView；基向量见 AlignMode 注释）
+    bool stretched = false;              // 沿速度拉伸——**仅 align=kVelocity 有意义**
+    float stretch_scale = 1.0f;          // 拉伸系数（每 m/s）：高度 ×= 1 + |v|·scale
+    BlendMode blend = BlendMode::kAdditive;   // kAdditive：覆盖 = texel 亮度 × color.a；
+                                              // kAlpha：覆盖 = color.a × texel.a
+    SortMode sort = SortMode::kNone;     // ⚠️ 惰性字段：粒子 pass 走 WBO（顺序无关），不读它
     float soft_distance = 0.0f;          // 软粒子淡出距离（>0 才生效；MVP 未接）
 
     // Pre-condition: rate>=0；radius>=0；size_start.max>0；tiles_x/y>=1。
@@ -199,6 +209,8 @@ private:
         float age = 0.0f;
         float lifetime = 1.0f;
         float rotation0 = 0.0f;
+        float rotation = 0.0f;   // 当前朝向（含自旋累积）
+        float spin0 = 0.0f;      // 出生自旋角速度
         float size0 = 0.0f;      // 出生尺寸采样
         float frame_phase = 0.0f;  // flipbook 起始相位 [0,1)
         uint32_t seed = 0;       // 逐粒子种子（噪声相位）
