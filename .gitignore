@@ -2,6 +2,9 @@ bazel-*
 bazel-out/
 bazel-bin/
 bazel-testlogs/
+
+# Machine-local bazel options (e.g. a shared --disk_cache); see .bazelrc
+user.bazelrc
 *.pyc
 __pycache__/
 

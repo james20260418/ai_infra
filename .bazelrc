@@ -41,6 +41,20 @@ build --copt=-O2
 build --jobs=4
 build --local_ram_resources=2048
 
+# Machine-local options (host paths, local caches) do NOT belong in this file:
+# CI checks out the same `.bazelrc` on a machine where those paths do not
+# exist, which fails the build. Bazel 5 does not read `user.bazelrc` on its own,
+# so import it explicitly -- `try-import` keeps it optional, which is what makes
+# CI (no such file) work. On a machine with several checkouts of this repo that
+# file typically holds the shared disk cache:
+#     build --disk_cache=/james_pm/.bazel_disk_cache
+# A shared cache is safe: it is content-addressed by the full action key
+# (command line, toolchain, input hashes), so different branches only ever miss,
+# never receive an incompatible result; several bazel servers may read/write it
+# concurrently. It also lives outside every output_base, so `bazel clean` /
+# `--expunge` never wipes it -- prune it manually when it grows.
+try-import %workspace%/user.bazelrc
+
 # Sandbox for hermetic builds
 build --spawn_strategy=standalone
 build --genrule_strategy=standalone
