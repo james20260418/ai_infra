@@ -1,7 +1,7 @@
 // JPOV 粒子查看器（particle viewer）— 渲染核心 App
 //
 // 目的：展示本次试验最终选定的 7 种火焰 puff，并把控制项收敛为一组统一滑条：
-//   粒子数 / 时间整体快慢 / 矩形燃料块（开关+平移+scale）/
+//   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
 //   烟雾（开关+整体照度）/ 火焰温度增益（含 3 套温度→颜色映射）
 //
 // 设计：
@@ -13,6 +13,7 @@
 #ifndef JPOV_DEMO_PARTICLE_VIEWER_APP_H_
 #define JPOV_DEMO_PARTICLE_VIEWER_APP_H_
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <string>
@@ -158,9 +159,9 @@ public:
 
     // ---- 统一滑条（Danis 指定）----
     float ui_particle_count_ = 80.0f;    // 目标粒子数（1..100）
-    float ui_fire_size_ = 0.18f;         // 粒子世界尺寸（半宽/半高基准）
+    float ui_fire_size_ = 0.18f;         // 粒子世界尺寸（size_start 的上界）
     float ui_time_scale_ = 1.0f;         // 时间整体快慢
-    bool ui_fuel_enable_ = true;         // 矩形燃料块
+    bool ui_fuel_enable_ = true;         // 燃料块（正方体，可平移/缩放）
     float ui_fuel_x_ = 0.0f;             // 燃料块平移 X
     float ui_fuel_y_ = 0.0f;             // 燃料块平移 Y（上下）
     float ui_fuel_z_ = 0.0f;             // 燃料块平移 Z
@@ -228,7 +229,6 @@ public:
             if (!p.empty()) { smoke_texture_id_ = RegisterTexture(p); }
         }
 
-        const jpov::particles::EmitterConfig& fe = fire_cfg_;
         const float life_avg = 0.5f * (fire_cfg_.lifetime.min + fire_cfg_.lifetime.max);
         const float dt = (1.0f / static_cast<float>(kViewerFps)) * ui_time_scale_;
 
@@ -263,7 +263,6 @@ public:
             }
             fire_emitter_.SetConfig(fire_cfg_);
             fire_emitter_.Update(dt, &finst, &flame_deaths);
-            (void)fe;
 
             // 温度 → 颜色（统一调色入口）
             for (jpov::ParticleInstance& p : finst) {
