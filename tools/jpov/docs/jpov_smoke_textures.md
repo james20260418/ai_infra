@@ -14,6 +14,7 @@ particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理
 | 4 | `danis 无旋平` | `assets/smoke/danis_smoke_norot_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 | 5 | `danis S5=原图#5` | `assets/smoke/danis_smoke_s5orig_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 | 6 | `danis S5=原图 (柔边)` | `assets/smoke/danis_smoke_s5orig_soft_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
+| 7 | `danis 重绘 S1..S5` | `assets/smoke/danis_repaint_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
 
 全部为 `AlignMode::kView` + `BlendMode::kAlpha`（over）+ flipbook。
 
@@ -72,6 +73,19 @@ particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理
 | 5 `danis_smoke_s5orig` | 无 | 直接用处理后的**原图 #5**（`F5`） |
 | 6 `danis_smoke_s5orig_soft` | 无 | 同 #5，但径向边缘过渡从 `0.50→0.98` 拉长到 `0.30→1.00`（S 节点 `0.35→1.00`），让浓度衰减更柔和、去掉“整片墙”感 |
 
+### 7. `danis_repaint_12x6.png`（Danis 重绘，直接当 S1..S5）
+
+源：`/james_pm/danis/danis_repaint.png`（3840×1092，5 格 768×1092，黑底，
+右下角有「豆包AI生成」水印）。
+
+与其它版本不同：**不再从 F 算 S 中点**，这 5 张重绘图直接作为 **S1..S5** 节点。
+
+1. 切 5 格；水印区域（x>3500, y>1000）置黑；
+2. 每格取 `y=40..1010`，横向补黑到 970×970，缩到 256²（不拉伸）；
+3. `alpha = luminance` 软阈值 `(L-0.02)/0.93`；
+4. 径向边缘衰减 `0.30 → 1.00`（长过渡）；
+5. 6 条两段链 × 12 帧：只在 S 节点之间用 `morph_frames(..., "profile")` 插值。
+
 ## 烟雾强度归一化
 
 不同来源的贴图白度、覆盖率、空间分布不同，直接换类型会「忽浓忽淡」。
@@ -86,6 +100,7 @@ viewer 用 `SmokeTexEntry::alpha_scale` 乘在逐粒子 `color.a` 上：
 | danis 无旋平 | 0.39 | 5.32 |
 | danis S5=原图#5 | 0.44 | 5.39 |
 | danis S5=原图 (柔边) | 0.56 | 5.23 |
+| danis 重绘 S1..S5 | 0.74 | 5.29 |
 
 定标方法：
 

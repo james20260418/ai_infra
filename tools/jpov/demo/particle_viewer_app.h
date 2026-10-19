@@ -88,7 +88,8 @@ struct SmokeTexEntry {
 //   迭代微调（同一火、同一发射参数，测 y=40..400 / x=430..850 相对同帧无烟 baseline）。
 //   不同来源贴图的白度/覆盖率/空间分布不同，不做这一步换烟类型时整体浓淡会突变。
 //   当前实测平均变暗量：web 5.22 / other 5.40 / v7.1 5.22 / danis-rot 5.21 /
-//                        danis-norot 5.32 / danis-s5orig 5.39（差 <4%）。
+//                        danis-norot 5.32 / danis-s5orig 5.39 / danis-soft 5.23 /
+//                        danis-repaint 5.29（差 <4%）。
 inline const SmokeTexEntry kSmokeTexes[] = {
     {"web_others 8×8 (原)",     "smoke/web_others_smoke_8x8.png",     8, 8, SmokePlay::kLifetime, 0, 0.79f},
     {"other 关键帧5 (无旋平)",   "smoke/other_key5_pairs_12x6.png",   12, 6, SmokePlay::kPairMorph, 12, 0.58f},
@@ -97,6 +98,7 @@ inline const SmokeTexEntry kSmokeTexes[] = {
     {"danis 无旋平",             "smoke/danis_smoke_norot_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.39f},
     {"danis S5=原图#5",          "smoke/danis_smoke_s5orig_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.44f},
     {"danis S5=原图 (柔边)",     "smoke/danis_smoke_s5orig_soft_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.56f},
+    {"danis 重绘 S1..S5",        "smoke/danis_repaint_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.74f},
 };
 inline constexpr int kSmokeTexCount =
     static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
