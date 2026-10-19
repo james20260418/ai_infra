@@ -157,13 +157,14 @@ public:
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
-    float ui_particle_count_ = 220.0f;   // 目标粒子数（rate = count / 平均寿命）
+    float ui_particle_count_ = 80.0f;    // 目标粒子数（1..100）
     float ui_fire_size_ = 0.18f;         // 粒子世界尺寸（半宽/半高基准）
     float ui_time_scale_ = 1.0f;         // 时间整体快慢
     bool ui_fuel_enable_ = true;         // 矩形燃料块
     float ui_fuel_x_ = 0.0f;             // 燃料块平移 X
+    float ui_fuel_y_ = 0.0f;             // 燃料块平移 Y（上下）
     float ui_fuel_z_ = 0.0f;             // 燃料块平移 Z
-    float ui_fuel_scale_ = 1.0f;         // 燃料块整体 scale
+    float ui_fuel_scale_ = 0.25f;        // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
@@ -206,7 +207,7 @@ public:
         if (ui_fuel_enable_) {
             const float s = ui_fuel_scale_;
             cmds->DrawObject3D(fuel_mesh_, fuel_mat_,
-                               {ui_fuel_x_, 0.06f * s, ui_fuel_z_},
+                               {ui_fuel_x_, ui_fuel_y_ + 0.5f * s, ui_fuel_z_},
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
                                /*scale=*/s);
         }
@@ -237,7 +238,9 @@ public:
         if (fire_enable_) {
             fire_cfg_.rate = ui_particle_count_ / std::max(life_avg, 1e-3f);
             fire_cfg_.size_start = {ui_fire_size_ * 0.6f, ui_fire_size_};
-            fire_cfg_.origin = {ui_fuel_x_, 0.22f, ui_fuel_z_};
+            const float base_y = ui_fuel_enable_
+                ? (ui_fuel_y_ + ui_fuel_scale_ + 0.01f) : 0.22f;
+            fire_cfg_.origin = {ui_fuel_x_, base_y, ui_fuel_z_};
             fire_cfg_.tiles_x = kFireTexes[fc].tx;
             fire_cfg_.tiles_y = kFireTexes[fc].ty;
             fire_cfg_.start_frame_random = true;
@@ -281,7 +284,9 @@ public:
                 smoke_emitter_.Reset(20261015u);
                 smoke_needs_reset_ = false;
             }
-            smoke_cfg_.origin = {ui_fuel_x_, 0.55f, ui_fuel_z_};
+            const float smoke_y = ui_fuel_enable_
+                ? (ui_fuel_y_ + ui_fuel_scale_ + 0.25f) : 0.55f;
+            smoke_cfg_.origin = {ui_fuel_x_, smoke_y, ui_fuel_z_};
             smoke_emitter_.SetConfig(smoke_cfg_);
             for (const jpov::Vec3f& dp : flame_deaths) {
                 if (sub_rng_.Next01() < 0.55f) { smoke_emitter_.SpawnAt(dp); }
@@ -389,20 +394,21 @@ private:
         }
 
         const float colw = 0.26f * w;
-        const float top = h - 16.0f - (10 * 24.0f + 9 * 5.0f);
+        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
         };
         ui_.Checkbox("粒子火", &fire_enable_, row(0));
-        ui_.SliderFloat("粒子数", &ui_particle_count_, row(1), 20.0f, 800.0f, 0);
+        ui_.SliderFloat("粒子数", &ui_particle_count_, row(1), 1.0f, 100.0f, 0);
         ui_.SliderFloat("时间快慢", &ui_time_scale_, row(2), 0.1f, 2.5f, 2);
-        ui_.Checkbox("矩形燃料块", &ui_fuel_enable_, row(3));
+        ui_.Checkbox("燃料块", &ui_fuel_enable_, row(3));
         ui_.SliderFloat("燃料块 X", &ui_fuel_x_, row(4), -0.8f, 0.8f, 2);
-        ui_.SliderFloat("燃料块 Z", &ui_fuel_z_, row(5), -0.8f, 0.8f, 2);
-        ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(6), 0.3f, 2.0f, 2);
-        ui_.Checkbox("烟雾", &smoke_enable_, row(7));
-        ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(8), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(9), 0.5f, 2.0f, 2);
+        ui_.SliderFloat("燃料块 Y", &ui_fuel_y_, row(5), -0.3f, 0.8f, 2);
+        ui_.SliderFloat("燃料块 Z", &ui_fuel_z_, row(6), -0.8f, 0.8f, 2);
+        ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(7), 0.05f, 0.6f, 2);
+        ui_.Checkbox("烟雾", &smoke_enable_, row(8));
+        ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
+        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(10), 0.5f, 2.0f, 2);
     }
 
     bool show_panel_ = true;

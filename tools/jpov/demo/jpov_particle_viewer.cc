@@ -25,7 +25,7 @@ void InstallScene(jpov_particle::ParticleViewerApp& app) {
     app.ground_mesh_ = app.RegisterMesh(jpov_skylight::MakeGroundQuad());
     app.ground_mat_ = jpov_skylight::GroundMaterial();
     // 矩形燃料块（单位 box，绘制时用 scale 拉成木块）
-    app.fuel_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(0.9f, 0.12f, 0.45f));
+    app.fuel_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(1.0f, 1.0f, 1.0f));
     app.fuel_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.10f, 0.06f, 1.0f});
 }
 
