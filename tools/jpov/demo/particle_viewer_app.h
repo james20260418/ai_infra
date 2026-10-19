@@ -1,8 +1,8 @@
 // JPOV 粒子查看器（particle viewer）— 渲染核心 App
 //
-// 目的：展示本次试验最终选定的 7 种火焰 puff，并把控制项收敛为一组统一滑条：
+// 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
-//   烟雾（开关+整体照度）/ 火焰温度增益（含 3 套温度→颜色映射）
+//   烟雾（类型 / 开关 / 照度 / 浓度）/ 火焰温度增益（含 3 套温度→颜色映射）
 //
 // 设计：
 //   * 纹理：5 张 12×6「成对渐变」atlas（kPairMorph，pair_len=12，一块 = 两段形变）
@@ -67,6 +67,34 @@ inline const FireTexEntry kFireTexes[] = {
 inline constexpr int kFireTexCount =
     static_cast<int>(sizeof(kFireTexes) / sizeof(kFireTexes[0]));
 
+// 烟纹理的采样方式（与火焰类型正交，单独下拉）。
+enum class SmokePlay : uint8_t {
+    kLifetime = 0,   // 每个 puff 从第 0 帧播到末帧（整张 atlas = 一生）
+    kPairMorph = 1,   // 每粒子随机选一块，寿命走完块首→块尾（12×6 形变 atlas）
+};
+
+struct SmokeTexEntry {
+    const char* label;
+    const char* file;
+    int tx;
+    int ty;
+    SmokePlay play;
+    int pair_len;       // kPairMorph 用
+    float alpha_scale;  // 密度归一化（见下方注释）
+};
+
+// 三种烟纹理。alpha_scale = 密度归一化系数：
+//   先按「整张 atlas 的平均 alpha」归到 0.16，再用 viewer 实际渲染的 ROI 平均变暗量微调
+//   （同一火、同一发射参数，测 y=40..400 / x=430..850 区域相对无烟baseline 的平均差值）。
+//   不同来源贴图的白度/覆盖率/空间分布不同，不做这一步换烟类型时整体浓淡会突变。
+inline const SmokeTexEntry kSmokeTexes[] = {
+    {"web_others 8×8",    "smoke/web_others_smoke_8x8.png", 8, 8, SmokePlay::kLifetime, 0, 0.79f},
+    {"火7.1 冒充烟",      "mp/flames_pairs_v71_12x6.png",   12, 6, SmokePlay::kPairMorph, 12, 0.87f},
+    {"danis_smoke_5",     "smoke/danis_smoke_pairs_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.56f},
+};
+inline constexpr int kSmokeTexCount =
+    static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
+
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.22f, 0.0f};
@@ -96,36 +124,39 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     return c;
 }
 
+// 烟：参考备份 PR #196 的发射方式（小火团、慢速上浮、寿命长、尺寸持续放大），
+// 团本身走 flipbook（kAlpha over），不是单张静态贴图。
 inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.55f, 0.0f};
-    c.rate = 0.0f;
+    c.rate = 0.0f;                       // 只在火焰粒子死亡处 spawn
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.12f;
-    c.cone_half_angle_deg = 20.0f;
-    c.lifetime = {1.8f, 2.6f};
-    c.speed = {0.35f, 0.65f};
-    c.size_start = {0.55f, 0.85f};
+    c.radius = 0.10f;
+    c.cone_half_angle_deg = 26.0f;
+    c.lifetime = {2.4f, 3.4f};
+    c.speed = {0.14f, 0.30f};
+    c.size_start = {0.08f, 0.14f};       // 出生小，靠 size_curve 长大
     c.rotation = {0.0f, 6.2831853f};
-    c.gravity = {0.0f, 0.45f, 0.0f};
-    c.drag = 0.8f;
+    c.gravity = {0.0f, 0.30f, 0.0f};
+    c.drag = 0.55f;
     c.noise_enabled = true;
-    c.noise_amp = 0.8f;
+    c.noise_amp = 0.5f;
     c.noise_freq = 1.1f;
     c.use_color_over_life = true;
     jpov::particles::Gradient g;
     g.keys = {
-        {0.00f, jpov::Color{0.05f, 0.05f, 0.06f, 0.00f}},
-        {0.20f, jpov::Color{0.05f, 0.05f, 0.06f, 0.75f}},
-        {0.70f, jpov::Color{0.07f, 0.07f, 0.08f, 0.55f}},
-        {1.00f, jpov::Color{0.09f, 0.09f, 0.10f, 0.00f}},
+        {0.00f, jpov::Color{0.10f, 0.10f, 0.12f, 0.10f}},
+        {0.15f, jpov::Color{0.12f, 0.12f, 0.14f, 0.38f}},
+        {0.60f, jpov::Color{0.16f, 0.16f, 0.18f, 0.26f}},
+        {1.00f, jpov::Color{0.20f, 0.20f, 0.22f, 0.00f}},
     };
     c.color_over_life = g;
     c.use_size_over_life = true;
-    c.size_curve.keys = {{0.0f, 0.55f}, {1.0f, 1.7f}};
-    c.flipbook = false;
-    c.tiles_x = 1;
-    c.tiles_y = 1;
+    c.size_curve.keys = {{0.0f, 0.90f}, {0.5f, 2.00f}, {1.0f, 3.40f}};
+    c.flipbook = true;                   // 由具体烟类型设置 tiles/play
+    c.tiles_x = 8;
+    c.tiles_y = 8;
+    c.start_frame_random = true;         // kPairMorph 用它随机选块
     c.align = jpov::AlignMode::kView;
     c.blend = jpov::BlendMode::kAlpha;
     c.sort = jpov::SortMode::kByDepth;
@@ -153,8 +184,10 @@ public:
     bool fire_needs_reset_ = true;
     bool smoke_needs_reset_ = true;
     int fire_choice_ = 0;
+    int smoke_choice_ = 0;
+    int smoke_choice_applied_ = 0;
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
-    uint32_t smoke_texture_id_ = 0;
+    std::array<uint32_t, kSmokeTexCount> smoke_choice_tex_{};
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
@@ -167,6 +200,7 @@ public:
     float ui_fuel_z_ = 0.0f;             // 燃料块平移 Z
     float ui_fuel_scale_ = 0.25f;        // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
+    float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
@@ -224,9 +258,20 @@ public:
                 LOG(INFO) << "[particle_viewer] fire tex = " << p;
             }
         }
-        if (smoke_texture_id_ == 0) {
-            const std::string p = FindTexture("textures/puffs/smoke_soft.png");
-            if (!p.empty()) { smoke_texture_id_ = RegisterTexture(p); }
+        const int sc = (smoke_choice_ < 0) ? 0
+                     : ((smoke_choice_ >= kSmokeTexCount) ? kSmokeTexCount - 1
+                                                          : smoke_choice_);
+        if (sc != smoke_choice_applied_) {
+            smoke_choice_applied_ = sc;
+            smoke_needs_reset_ = true;   // 换烟类型：清空旧粒子，避免新旧 atlas 混在一帧
+        }
+        if (smoke_choice_tex_[sc] == 0 && kSmokeTexes[sc].file[0] != '\0') {
+            const std::string rel = std::string("textures/") + kSmokeTexes[sc].file;
+            const std::string p = FindTexture(rel.c_str());
+            if (!p.empty()) {
+                smoke_choice_tex_[sc] = RegisterTexture(p);
+                LOG(INFO) << "[particle_viewer] smoke tex = " << p;
+            }
         }
 
         const float life_avg = 0.5f * (fire_cfg_.lifetime.min + fire_cfg_.lifetime.max);
@@ -277,7 +322,21 @@ public:
         }
 
         // ── 烟 ──
+        // 发射逻辑参考备份 PR #196：火焰死亡点概率 spawn，小团慢速上浮，寿命内放大。
         if (smoke_enable_) {
+            smoke_cfg_.tiles_x = kSmokeTexes[sc].tx;
+            smoke_cfg_.tiles_y = kSmokeTexes[sc].ty;
+            smoke_cfg_.flipbook = true;
+            smoke_cfg_.sheet_cycles = 1.0f;
+            if (kSmokeTexes[sc].play == SmokePlay::kPairMorph) {
+                smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
+                smoke_cfg_.pair_len = kSmokeTexes[sc].pair_len;
+                smoke_cfg_.start_frame_random = true;   // 随机选一条形变链
+            } else {
+                smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kLifetime;
+                smoke_cfg_.frame_curve.keys = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+                smoke_cfg_.start_frame_random = false;  // 每个 puff 都从第 0 帧开始
+            }
             if (smoke_needs_reset_) {
                 smoke_emitter_.SetConfig(smoke_cfg_);
                 smoke_emitter_.Reset(20261015u);
@@ -292,18 +351,20 @@ public:
             }
             std::vector<jpov::ParticleInstance> sinst;
             smoke_emitter_.Update(dt, &sinst);
+            const float density = kSmokeTexes[sc].alpha_scale * ui_smoke_density_;
             for (jpov::ParticleInstance& si : sinst) {
                 si.color.r *= ui_smoke_bright_;
                 si.color.g *= ui_smoke_bright_;
                 si.color.b *= ui_smoke_bright_;
+                si.color.a = std::clamp(si.color.a * density, 0.0f, 1.0f);
             }
-            if (!sinst.empty() && smoke_texture_id_ != 0) {
+            if (!sinst.empty() && smoke_choice_tex_[sc] != 0) {
                 jpov::ParticleRenderCommand spc;
                 spc.particles = std::move(sinst);
-                spc.texture_id = smoke_texture_id_;
-                spc.tiles_x = 1;
-                spc.tiles_y = 1;
-                spc.flipbook = false;
+                spc.texture_id = smoke_choice_tex_[sc];
+                spc.tiles_x = smoke_cfg_.tiles_x;
+                spc.tiles_y = smoke_cfg_.tiles_y;
+                spc.flipbook = true;
                 spc.align = smoke_cfg_.align;
                 spc.blend = smoke_cfg_.blend;
                 spc.sort = smoke_cfg_.sort;
@@ -385,15 +446,22 @@ private:
         }
         {
             std::vector<const char*> items;
+            items.reserve(static_cast<size_t>(kSmokeTexCount));
+            for (int i = 0; i < kSmokeTexCount; ++i) { items.push_back(kSmokeTexes[i].label); }
+            ui_.Combo("烟纹理", &smoke_choice_, items,
+                      jpov::UiRect{{x0, 42.0f}, {0.30f * w, 26.0f}});
+        }
+        {
+            std::vector<const char*> items;
             for (int i = 0; i < kFirePaletteCount; ++i) {
                 items.push_back(kFirePaletteNames[i]);
             }
             ui_.Combo("温度映射", &ui_palette_, items,
-                      jpov::UiRect{{x0, 42.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{x0, 76.0f}, {0.30f * w, 26.0f}});
         }
 
         const float colw = 0.26f * w;
-        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
+        const float top = h - 16.0f - (12 * 24.0f + 11 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -407,7 +475,8 @@ private:
         ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(7), 0.05f, 0.6f, 2);
         ui_.Checkbox("烟雾", &smoke_enable_, row(8));
         ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(10), 0.5f, 2.0f, 2);
+        ui_.SliderFloat("烟雾浓度", &ui_smoke_density_, row(10), 0.0f, 3.0f, 2);
+        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(11), 0.5f, 2.0f, 2);
     }
 
     bool show_panel_ = true;
