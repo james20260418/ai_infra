@@ -1,8 +1,9 @@
 // JPOV 粒子查看器（particle viewer）— 渲染核心 App
 //
-// 目的：展示本次试验最终选定的 7 种火焰 puff，并把控制项收敛为一组统一滑条：
+// 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
-//   烟雾（开关+整体照度）/ 火焰温度增益（含 3 套温度→颜色映射）
+//   烟雾（类型 / 开关 / 照度 / 浓度）/ 火星（开关 / 数量 / 大小）/
+//   火焰温度增益（含 3 套温度→颜色映射）
 //
 // 设计：
 //   * 纹理：5 张 12×6「成对渐变」atlas（kPairMorph，pair_len=12，一块 = 两段形变）
@@ -67,6 +68,30 @@ inline const FireTexEntry kFireTexes[] = {
 inline constexpr int kFireTexCount =
     static_cast<int>(sizeof(kFireTexes) / sizeof(kFireTexes[0]));
 
+struct SmokeTexEntry {
+    const char* label;
+    const char* file;
+    int tx;
+    int ty;
+    int pair_len;       // kPairMorph 每块帧数
+    float alpha_scale;  // 密度归一化（见下方注释）
+};
+
+// 烟纹理列表（全部为 12×6 成对形变图集，kPairMorph）。
+// alpha_scale = 密度归一化系数：
+//   先按「整张 atlas 的平均 alpha」估初值，再用 viewer 实际渲染的 ROI 平均变暗量
+//   迭代微调（同一火、同一发射参数，测 y=40..400 / x=430..850 相对同帧无烟 baseline）。
+//   不同来源贴图的白度/覆盖率/空间分布不同，不做这一步换烟类型时整体浓淡会突变。
+//   当前实测平均变暗量（每种类型从同一初始状态起算）：
+//   v7.1 4.59 / danis-soft 4.47 / danis-repaint 4.43（差 <4%）。
+inline const SmokeTexEntry kSmokeTexes[] = {
+    {"火7.1 冒充烟",           "mp/flames_pairs_v71_12x6.png", 12, 6, 12, 0.84f},
+    {"danis S5 柔边",          "smoke/danis_smoke_s5orig_soft_12x6.png", 12, 6, 12, 0.56f},
+    {"danis 重绘 S1..S5",      "smoke/danis_repaint_12x6.png", 12, 6, 12, 0.75f},
+};
+inline constexpr int kSmokeTexCount =
+    static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
+
 inline jpov::particles::EmitterConfig MakeFireConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.22f, 0.0f};
@@ -78,6 +103,8 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.speed = {0.20f, 0.45f};
     c.size_start = {0.15f, 0.21f};
     c.rotation = {0.0f, 6.2831853f};
+    c.rotation_speed = {-1.4f, 1.4f};    // 出生随机自旋（弧度/秒）
+    c.rotation_speed_decay = 0.85f;      // 自旋随寿命衰减，顶部不乱转
     c.gravity = {0.0f, 0.55f, 0.0f};
     c.drag = 1.0f;
     c.noise_enabled = true;
@@ -96,39 +123,79 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     return c;
 }
 
+// 烟：参考备份 PR #196 的发射方式（小火团、慢速上浮、寿命长、尺寸持续放大），
+// 团本身走 flipbook（kAlpha over），不是单张静态贴图。
 inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     jpov::particles::EmitterConfig c;
     c.origin = {0.0f, 0.55f, 0.0f};
-    c.rate = 0.0f;
+    c.rate = 0.0f;                       // 只在火焰粒子死亡处 spawn
     c.shape = jpov::particles::ShapeKind::kCone;
-    c.radius = 0.12f;
-    c.cone_half_angle_deg = 20.0f;
-    c.lifetime = {1.8f, 2.6f};
-    c.speed = {0.35f, 0.65f};
-    c.size_start = {0.55f, 0.85f};
+    c.radius = 0.10f;
+    c.cone_half_angle_deg = 26.0f;
+    c.lifetime = {2.4f, 3.4f};
+    c.speed = {0.14f, 0.30f};
+    c.size_start = {0.08f, 0.14f};       // 出生小，靠 size_curve 长大
     c.rotation = {0.0f, 6.2831853f};
-    c.gravity = {0.0f, 0.45f, 0.0f};
-    c.drag = 0.8f;
+    c.gravity = {0.0f, 0.30f, 0.0f};
+    c.drag = 0.55f;
     c.noise_enabled = true;
-    c.noise_amp = 0.8f;
+    c.noise_amp = 0.5f;
     c.noise_freq = 1.1f;
     c.use_color_over_life = true;
     jpov::particles::Gradient g;
     g.keys = {
-        {0.00f, jpov::Color{0.05f, 0.05f, 0.06f, 0.00f}},
-        {0.20f, jpov::Color{0.05f, 0.05f, 0.06f, 0.75f}},
-        {0.70f, jpov::Color{0.07f, 0.07f, 0.08f, 0.55f}},
-        {1.00f, jpov::Color{0.09f, 0.09f, 0.10f, 0.00f}},
+        {0.00f, jpov::Color{0.10f, 0.10f, 0.12f, 0.10f}},
+        {0.15f, jpov::Color{0.12f, 0.12f, 0.14f, 0.38f}},
+        {0.60f, jpov::Color{0.16f, 0.16f, 0.18f, 0.26f}},
+        {1.00f, jpov::Color{0.20f, 0.20f, 0.22f, 0.00f}},
     };
     c.color_over_life = g;
     c.use_size_over_life = true;
-    c.size_curve.keys = {{0.0f, 0.55f}, {1.0f, 1.7f}};
-    c.flipbook = false;
-    c.tiles_x = 1;
-    c.tiles_y = 1;
+    c.size_curve.keys = {{0.0f, 0.90f}, {0.5f, 2.00f}, {1.0f, 3.40f}};
+    c.flipbook = true;                   // 由具体烟类型设置 tiles / pair_len
+    c.tiles_x = 12;
+    c.tiles_y = 6;
+    c.start_frame_random = true;         // kPairMorph 用它随机选块
     c.align = jpov::AlignMode::kView;
     c.blend = jpov::BlendMode::kAlpha;
     c.sort = jpov::SortMode::kByDepth;
+    return c;
+}
+
+// 火星/余烬：极小、短命的发光点，从火焰上方冒出，受重力回落。
+// 纯色（texture_id=0，texel=(1,1,1,1)），加法混合，无 flipbook。
+inline jpov::particles::EmitterConfig MakeEmberConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {0.0f, 0.40f, 0.0f};
+    c.rate = 20.0f;                      // 由 UI 的「火星数量」重算
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.10f;
+    c.cone_half_angle_deg = 35.0f;
+    c.lifetime = {0.6f, 1.4f};
+    c.speed = {0.25f, 0.70f};
+    c.size_start = {0.006f, 0.010f};     // 由 UI 的「火星大小」重算
+    c.rotation = {0.0f, 6.2831853f};
+    c.gravity = {0.0f, 0.25f, 0.0f};     // 先上升，随后被重力拉回
+    c.drag = 0.70f;
+    c.noise_enabled = true;
+    c.noise_amp = 1.2f;
+    c.noise_freq = 2.2f;
+    c.use_color_over_life = true;
+    jpov::particles::Gradient g;
+    g.keys = {
+        {0.00f, jpov::Color{1.80f, 1.40f, 0.60f, 0.00f}},   // 出生淡入
+        {0.10f, jpov::Color{2.00f, 1.50f, 0.55f, 1.00f}},   // 白热
+        {0.45f, jpov::Color{1.40f, 0.55f, 0.08f, 0.90f}},   // 橙
+        {0.75f, jpov::Color{0.80f, 0.12f, 0.02f, 0.55f}},   // 暗红
+        {1.00f, jpov::Color{0.25f, 0.02f, 0.00f, 0.00f}},   // 熄灭
+    };
+    c.color_over_life = g;
+    c.use_size_over_life = true;
+    c.size_curve.keys = {{0.0f, 0.60f}, {0.30f, 1.00f}, {1.0f, 0.30f}};
+    c.flipbook = false;
+    c.texture_id = 0;
+    c.align = jpov::AlignMode::kView;
+    c.blend = jpov::BlendMode::kAdditive;
     return c;
 }
 
@@ -146,15 +213,21 @@ public:
 
     bool fire_enable_ = true;
     bool smoke_enable_ = true;
+    bool ember_enable_ = true;
     jpov::particles::EmitterConfig fire_cfg_ = MakeFireConfig();
     jpov::particles::EmitterConfig smoke_cfg_ = MakeSmokeConfig();
+    jpov::particles::EmitterConfig ember_cfg_ = MakeEmberConfig();
     jpov::particles::ParticleEmitter fire_emitter_;
     jpov::particles::ParticleEmitter smoke_emitter_;
+    jpov::particles::ParticleEmitter ember_emitter_;
     bool fire_needs_reset_ = true;
     bool smoke_needs_reset_ = true;
+    bool ember_needs_reset_ = true;
     int fire_choice_ = 0;
+    int smoke_choice_ = 0;
+    int smoke_choice_applied_ = 0;
     std::array<uint32_t, kFireTexCount> fire_choice_tex_{};
-    uint32_t smoke_texture_id_ = 0;
+    std::array<uint32_t, kSmokeTexCount> smoke_choice_tex_{};
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
@@ -167,6 +240,9 @@ public:
     float ui_fuel_z_ = 0.0f;             // 燃料块平移 Z
     float ui_fuel_scale_ = 0.25f;        // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
+    float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
+    float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
+    float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
@@ -224,9 +300,20 @@ public:
                 LOG(INFO) << "[particle_viewer] fire tex = " << p;
             }
         }
-        if (smoke_texture_id_ == 0) {
-            const std::string p = FindTexture("textures/puffs/smoke_soft.png");
-            if (!p.empty()) { smoke_texture_id_ = RegisterTexture(p); }
+        const int sc = (smoke_choice_ < 0) ? 0
+                     : ((smoke_choice_ >= kSmokeTexCount) ? kSmokeTexCount - 1
+                                                          : smoke_choice_);
+        if (sc != smoke_choice_applied_) {
+            smoke_choice_applied_ = sc;
+            smoke_needs_reset_ = true;   // 换烟类型：清空旧粒子，避免新旧 atlas 混在一帧
+        }
+        if (smoke_choice_tex_[sc] == 0 && kSmokeTexes[sc].file[0] != '\0') {
+            const std::string rel = std::string("textures/") + kSmokeTexes[sc].file;
+            const std::string p = FindTexture(rel.c_str());
+            if (!p.empty()) {
+                smoke_choice_tex_[sc] = RegisterTexture(p);
+                LOG(INFO) << "[particle_viewer] smoke tex = " << p;
+            }
         }
 
         const float life_avg = 0.5f * (fire_cfg_.lifetime.min + fire_cfg_.lifetime.max);
@@ -277,7 +364,17 @@ public:
         }
 
         // ── 烟 ──
+        // 发射逻辑参考备份 PR #196：火焰死亡点概率 spawn，小团慢速上浮，寿命内放大。
         if (smoke_enable_) {
+            // 烟：全部为 12×6 成对形变图集，每粒子随机选一块，寿命内走完块首→块尾。
+    const SmokeTexEntry& smoke = kSmokeTexes[sc];
+    smoke_cfg_.tiles_x = smoke.tx;
+    smoke_cfg_.tiles_y = smoke.ty;
+    smoke_cfg_.flipbook = true;
+    smoke_cfg_.sheet_cycles = 1.0f;
+    smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
+    smoke_cfg_.pair_len = smoke.pair_len;
+    smoke_cfg_.start_frame_random = true;   // 随机选一条形变链
             if (smoke_needs_reset_) {
                 smoke_emitter_.SetConfig(smoke_cfg_);
                 smoke_emitter_.Reset(20261015u);
@@ -292,18 +389,20 @@ public:
             }
             std::vector<jpov::ParticleInstance> sinst;
             smoke_emitter_.Update(dt, &sinst);
+            const float density = smoke.alpha_scale * ui_smoke_density_;
             for (jpov::ParticleInstance& si : sinst) {
                 si.color.r *= ui_smoke_bright_;
                 si.color.g *= ui_smoke_bright_;
                 si.color.b *= ui_smoke_bright_;
+                si.color.a = std::clamp(si.color.a * density, 0.0f, 1.0f);
             }
-            if (!sinst.empty() && smoke_texture_id_ != 0) {
+            if (!sinst.empty() && smoke_choice_tex_[sc] != 0) {
                 jpov::ParticleRenderCommand spc;
                 spc.particles = std::move(sinst);
-                spc.texture_id = smoke_texture_id_;
-                spc.tiles_x = 1;
-                spc.tiles_y = 1;
-                spc.flipbook = false;
+                spc.texture_id = smoke_choice_tex_[sc];
+                spc.tiles_x = smoke_cfg_.tiles_x;
+                spc.tiles_y = smoke_cfg_.tiles_y;
+                spc.flipbook = true;
                 spc.align = smoke_cfg_.align;
                 spc.blend = smoke_cfg_.blend;
                 spc.sort = smoke_cfg_.sort;
@@ -325,6 +424,35 @@ public:
             pc.sort = fire_cfg_.sort;
             pc.frame_blend = frame_blend_;
             cmds->DrawParticles(std::move(pc));
+        }
+
+        // ── 火星 / 余烬 ──
+        // 简单一层：纯色加法小点，从火焰上方冒出；数量/大小只由 UI 控制。
+        {
+            const float life_avg = 0.5f * (ember_cfg_.lifetime.min + ember_cfg_.lifetime.max);
+            ember_cfg_.rate = ember_enable_
+                ? ui_ember_count_ / std::max(life_avg, 1e-3f) : 0.0f;
+            ember_cfg_.size_start = {ui_ember_size_ * 0.6f, ui_ember_size_};
+            const float base_y = ui_fuel_enable_
+                ? (ui_fuel_y_ + ui_fuel_scale_ + 0.18f) : 0.35f;
+            ember_cfg_.origin = {ui_fuel_x_, base_y, ui_fuel_z_};
+            if (ember_needs_reset_) {
+                ember_emitter_.SetConfig(ember_cfg_);
+                ember_emitter_.Reset(20261019u);
+                ember_needs_reset_ = false;
+            }
+            ember_emitter_.SetConfig(ember_cfg_);
+            std::vector<jpov::ParticleInstance> einst;
+            ember_emitter_.Update(dt, &einst);
+            if (ember_enable_ && !einst.empty()) {
+                jpov::ParticleRenderCommand ec;
+                ec.particles = std::move(einst);
+                ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
+                ec.flipbook = false;
+                ec.align = ember_cfg_.align;
+                ec.blend = ember_cfg_.blend;
+                cmds->DrawParticles(std::move(ec));
+            }
         }
 
         if (show_panel_) {
@@ -376,24 +504,36 @@ private:
         ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
         const float x0 = 0.02f * w;
+        const float labw = 52.0f;
+        const float combo_x = x0 + labw + 6.0f;
         {
+            ui_.Text("火焰", jpov::UiRect{{x0, 8.0f}, {labw, 26.0f}});
             std::vector<const char*> items;
             items.reserve(static_cast<size_t>(kFireTexCount));
             for (int i = 0; i < kFireTexCount; ++i) { items.push_back(kFireTexes[i].label); }
             ui_.Combo("火焰纹理", &fire_choice_, items,
-                      jpov::UiRect{{x0, 8.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{combo_x, 8.0f}, {0.30f * w, 26.0f}});
         }
         {
+            ui_.Text("烟", jpov::UiRect{{x0, 42.0f}, {labw, 26.0f}});
+            std::vector<const char*> items;
+            items.reserve(static_cast<size_t>(kSmokeTexCount));
+            for (int i = 0; i < kSmokeTexCount; ++i) { items.push_back(kSmokeTexes[i].label); }
+            ui_.Combo("烟纹理", &smoke_choice_, items,
+                      jpov::UiRect{{combo_x, 42.0f}, {0.30f * w, 26.0f}});
+        }
+        {
+            ui_.Text("温度", jpov::UiRect{{x0, 76.0f}, {labw, 26.0f}});
             std::vector<const char*> items;
             for (int i = 0; i < kFirePaletteCount; ++i) {
                 items.push_back(kFirePaletteNames[i]);
             }
             ui_.Combo("温度映射", &ui_palette_, items,
-                      jpov::UiRect{{x0, 42.0f}, {0.30f * w, 26.0f}});
+                      jpov::UiRect{{combo_x, 76.0f}, {0.30f * w, 26.0f}});
         }
 
         const float colw = 0.26f * w;
-        const float top = h - 16.0f - (11 * 24.0f + 10 * 5.0f);
+        const float top = h - 16.0f - (15 * 24.0f + 14 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -407,7 +547,11 @@ private:
         ui_.SliderFloat("燃料块 scale", &ui_fuel_scale_, row(7), 0.05f, 0.6f, 2);
         ui_.Checkbox("烟雾", &smoke_enable_, row(8));
         ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(10), 0.5f, 2.0f, 2);
+        ui_.SliderFloat("烟雾浓度", &ui_smoke_density_, row(10), 0.0f, 3.0f, 2);
+        ui_.Checkbox("火星", &ember_enable_, row(11));
+        ui_.SliderFloat("火星数量", &ui_ember_count_, row(12), 0.0f, 80.0f, 0);
+        ui_.SliderFloat("火星大小", &ui_ember_size_, row(13), 0.002f, 0.040f, 3);
+        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
     }
 
     bool show_panel_ = true;

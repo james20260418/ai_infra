@@ -176,6 +176,29 @@ TEST(ParticleSystemTest, SizeOverLifeChangesWithAge) {
     EXPECT_NEAR(out[0].width, 0.5f, 0.01f);
 }
 
+TEST(ParticleSystemTest, SpinAdvancesRotationAndDecays) {
+    EmitterConfig c = BaselineConfig();
+    c.burst = 1;
+    c.lifetime = {2.0f, 2.0f};
+    c.rotation = {0.0f, 0.0f};
+    c.rotation_speed = {2.0f, 2.0f};
+    c.rotation_speed_decay = 0.5f;
+    ParticleEmitter e(c);
+    e.Reset(1u);
+    std::vector<ParticleInstance> out;
+
+    // age=0.5 ⇒ t=0.25；spin = 2·(1−0.5·0.25) = 1.75；rotation = 0.875。
+    e.Update(0.5f, &out);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_NEAR(out[0].rotation, 0.875f, 1e-4f);
+
+    // age=1.0 ⇒ t=0.5；spin = 1.5；rotation = 0.875 + 0.75 = 1.625。
+    out.clear();
+    e.Update(0.5f, &out);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_NEAR(out[0].rotation, 1.625f, 1e-4f);
+}
+
 TEST(ParticleSystemTest, ValidationRejectsBadConfig) {
     EmitterConfig c = BaselineConfig();
     c.rate = -1.0f;

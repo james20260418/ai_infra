@@ -510,3 +510,23 @@ cc_binary(
         "@platforms//cpu:x86_64",
     ],
 )
+
+# ============================================================================
+# 粒子 gold test 资源（火 / 烟图集）
+# ============================================================================
+filegroup(
+    name = "particle_gold_assets",
+    srcs = [
+        "assets/fire/mp/flames_pairs_v71_12x6.png",
+        "assets/smoke/danis_repaint_12x6.png",
+    ],
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
+# 温度→颜色映射（header-only；gold test 与 viewer 共用同一套实现）
+cc_library(
+    name = "fire_palette",
+    hdrs = ["demo/fire_palette.h"],
+    visibility = ["//tools/jpov:__subpackages__"],
+    deps = ["//tools/jpov/include/jpov:jpov"],
+)

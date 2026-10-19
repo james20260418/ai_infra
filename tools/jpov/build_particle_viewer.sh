@@ -30,11 +30,11 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf" "$OUTPUT_DIR/fonts/"
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 
 echo "==> 3. 火/烟 flipbook 纹理"
-mkdir -p "$OUTPUT_DIR/textures/candidates" "$OUTPUT_DIR/textures/mp" "$OUTPUT_DIR/textures/puffs"
+mkdir -p "$OUTPUT_DIR/textures/candidates" "$OUTPUT_DIR/textures/mp" "$OUTPUT_DIR/textures/smoke"
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/"*.png "$OUTPUT_DIR/textures/" 2>/dev/null || true
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/candidates/"*.png "$OUTPUT_DIR/textures/candidates/" 2>/dev/null || true
 cp -v "$PROJECT_DIR/tools/jpov/assets/fire/mp/"*.png "$OUTPUT_DIR/textures/mp/" 2>/dev/null || true
-cp -v "$PROJECT_DIR/tools/jpov/assets/fire/puffs/"*.png "$OUTPUT_DIR/textures/puffs/" 2>/dev/null || true
+cp -v "$PROJECT_DIR/tools/jpov/assets/smoke/"*.png "$OUTPUT_DIR/textures/smoke/" 2>/dev/null || true
 ls -lh "$OUTPUT_DIR/textures"
 
 echo ""
