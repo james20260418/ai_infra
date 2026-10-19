@@ -92,6 +92,8 @@ enum class SheetTimeMode : uint8_t {
     kLifetime = 0,  // 按寿命用 Curve 采样帧（frame_curve）
     kFps = 1,       // 按固定帧率循环
     kSpeed = 2,     // 按粒子速度映射到 [0,total_frames)
+    kRandomStatic = 3,  // 每粒子固定一帧
+    kPairMorph = 4,     // 每粒子随机选一个「块」，寿命内从块首走到块尾（pair_len 帧/块）
 };
 
 // ==================== 发射器配置 ====================
@@ -139,6 +141,7 @@ struct EmitterConfig {
     float sheet_fps = 18.0f;             // kFps 用（帧/秒）
     float sheet_cycles = 1.0f;           // 寿命内循环遍数（kLifetime 用）
     bool start_frame_random = true;      // 每粒子随机起始相位（kFps/kSpeed 用）
+    int pair_len = 2;                    // kPairMorph：每个块占多少帧（>=2）
     Curve frame_curve;                   // kLifetime 用：t→[0,1) 帧比例
 
     // ---- 渲染 ----
