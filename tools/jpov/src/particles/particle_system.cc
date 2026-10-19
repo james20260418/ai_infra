@@ -310,6 +310,16 @@ float ParticleEmitter::ResolveFrame(const Particle& p) const {
             phase = f - std::floor(f);
             break;
         }
+        case SheetTimeMode::kPairMorph: {
+            const int plen = (cfg_.pair_len < 2) ? 2 : cfg_.pair_len;
+            const int pairs = std::max(1, total / plen);
+            int k = static_cast<int>(p.frame_phase * static_cast<float>(pairs));
+            k = (k < 0) ? 0 : (k >= pairs ? pairs - 1 : k);
+            const float f = static_cast<float>(k * plen) +
+                            t * static_cast<float>(plen - 1);
+            const float fmax = static_cast<float>(total - 1);
+            return (f > fmax) ? fmax : f;
+        }
     }
     float frame = phase * static_cast<float>(total);   // 分数帧：shader 做相邻帧混合（减卡顿/突变）
     if (frame >= static_cast<float>(total)) {
@@ -396,6 +406,7 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
         inst.rotation = p.rotation0;
         inst.color = color;
         inst.frame = ResolveFrame(p);
+        inst.age01 = t;
         out->push_back(inst);
 
         alive.push_back(p);

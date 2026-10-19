@@ -409,6 +409,7 @@ cc_library(
     name = "particle_viewer_app",
     hdrs = [
         "demo/particle_viewer_app.h",
+        "demo/fire_palette.h",
     ],
     visibility = ["//visibility:public"],
     deps = [

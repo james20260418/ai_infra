@@ -45,6 +45,7 @@ struct ParticleInstance {
     float rotation = 0.0f;       // 面片平面内滚转角（弧度）
     Color color;                 // RGBA（已含生命期颜色/不透明度）
     float frame = 0.0f;          // flipbook 帧号（已解算，含相位/循环）
+    float age01 = 0.0f;          // 归一化年龄 [0,1]（0=出生，1=死亡）——供温度着色用
 };
 
 }  // namespace jpov
