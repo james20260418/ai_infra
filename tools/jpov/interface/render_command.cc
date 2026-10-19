@@ -220,7 +220,8 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
 
 void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
                                             std::vector<InstanceState> instances,
-                                            bool highlight) {
+                                            bool highlight,
+                                            const std::optional<WindCommand>& wind) {
     CHECK_GT(mesh_id, 0u) << "DrawInstancedObject: mesh_id 必须 > 0";
     CHECK(!instances.empty()) << "DrawInstancedObject: instances 不能为空";
     int idx = static_cast<int>(instanced_object.size());
@@ -229,6 +230,7 @@ void RenderCommandList::DrawInstancedObject(uint32_t mesh_id, const PBRMaterial&
     cmd.material = mat;
     cmd.instances = std::move(instances);
     cmd.highlight = highlight;
+    cmd.wind = wind;
     instanced_object.push_back(std::move(cmd));
     order.emplace_back(DrawCommandType::kInstancedObject, idx);
 }

@@ -497,12 +497,19 @@ cc_library(
 
 cc_binary(
     name = "jpov_vegetation_viewer",
-    srcs = ["demo/jpov_vegetation_viewer.cc"],
+    srcs = [
+        "demo/jpov_vegetation_viewer.cc",
+        "demo/vegetation_mesh_export.cc",
+        "demo/vegetation_mesh_export.h",
+    ],
     deps = [
         "//tools/jpov:vegetation_viewer_app",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:mesh",
+        "//tools/jpov/interface:wind_deform",
+        "//tools/jpov/src:gltf_loader",
         "//tools/common:utils",
     ],
     target_compatible_with = [

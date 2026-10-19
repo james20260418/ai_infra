@@ -1150,24 +1150,24 @@ unsigned int Renderer::DrawObject3DProgFullBlend() {
 // 静态批量实例 program（摆放走 per-instance attribute，见 InstancedObjectRenderer::kMeshVs3dPBR*Instanced）。
 unsigned int Renderer::DrawInstancedObjectProg() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFull() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
 }
 
 // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::DrawInstancedObjectProgCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFullCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1266,13 +1266,13 @@ unsigned int Renderer::ShadowProgCutout() {
 // 实例版阴影 program：InstancedObjectRenderer::kShadowVsInstanced + 同模块 kShadowFs（深度专用）。
 unsigned int Renderer::InstancedShadowProg() {
     return shader_mgr_.GetOrCreate("instanced_shadow",
-        {InstancedObjectRenderer::kShadowVsInstanced, InstancedObjectRenderer::kShadowFs});
+        {InstancedObjectRenderer::kShadowVsInstanced.c_str(), InstancedObjectRenderer::kShadowFs});
 }
 
 // alpha-test（cutout）实例阴影变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::InstancedShadowProgCutout() {
     return shader_mgr_.GetOrCreate("instanced_shadow_cutout",
-        {InstancedObjectRenderer::kShadowVsInstanced, InstancedObjectRenderer::kShadowFs,
+        {InstancedObjectRenderer::kShadowVsInstanced.c_str(), InstancedObjectRenderer::kShadowFs,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1288,11 +1288,11 @@ unsigned int Renderer::PickObject3DCutoutProg() {
 }
 unsigned int Renderer::PickInstancedProg() {
     return shader_mgr_.GetOrCreate("pick_instanced",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, kPickIdFs, {"JPOV_PICK"}});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), kPickIdFs, {"JPOV_PICK"}});
 }
 unsigned int Renderer::PickInstancedCutoutProg() {
     return shader_mgr_.GetOrCreate("pick_instanced_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, kPickIdFs,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), kPickIdFs,
          {"JPOV_PICK", "JPOV_ALPHA_CUTOUT"}});
 }
 unsigned int Renderer::PickSkinnedProg() {
@@ -1316,11 +1316,11 @@ unsigned int Renderer::HighlightObject3DCutoutProg() {
 }
 unsigned int Renderer::HighlightInstancedProg() {
     return shader_mgr_.GetOrCreate("highlight_instanced",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced, kHighlightFs});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), kHighlightFs});
 }
 unsigned int Renderer::HighlightInstancedCutoutProg() {
     return shader_mgr_.GetOrCreate("highlight_instanced_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced, kHighlightFs,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), kHighlightFs,
          {"JPOV_ALPHA_CUTOUT"}});
 }
 unsigned int Renderer::HighlightSkinnedProg() {
@@ -2099,7 +2099,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     mesh_mgr_, texture_mgr_, shader_mgr_, mvp_,
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
-                    tile_index_tex_, instanced_object_model_buf_);
+                    tile_index_tex_, instanced_object_model_buf_,
+                    instanced_object_blow_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {
@@ -2355,7 +2356,8 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
             InstancedObjectRenderer::DrawInstancedObjectShadow(
                 io, mesh_mgr_, texture_mgr_, shader_mgr_,
                 shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
-                InstancedShadowProgCutout(), instanced_object_model_buf_);
+                InstancedShadowProgCutout(), instanced_object_model_buf_,
+                instanced_object_blow_buf_);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {
@@ -2502,7 +2504,8 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
         InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             PickInstancedProg(), PickInstancedCutoutProg(),
-            &pick_table_instanced_, instanced_object_model_buf_);
+            &pick_table_instanced_, instanced_object_model_buf_,
+            instanced_object_blow_buf_);
     }
 
     // ---- 窗口像素坐标 → 3D FBO 像素（GL 左下原点）----
@@ -2678,7 +2681,8 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
         InstancedObjectRenderer::DrawInstancedObjectSelected(
             io, mesh_mgr_, texture_mgr_, mvp,
             HighlightInstancedProg(), HighlightInstancedCutoutProg(),
-            nullptr, instanced_object_model_buf_);
+            nullptr, instanced_object_model_buf_,
+            instanced_object_blow_buf_);
     }
     glActiveTexture(GL_TEXTURE0);
 

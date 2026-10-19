@@ -27,15 +27,18 @@
 //                                          shadow_vp, shadow_depth_vp, texel_world, cfg, sun);
 //   InstancedObjectRenderer::UploadAmbient(shader_mgr, prog, prog_full, ambient);
 //   InstancedObjectRenderer::DrawInstancedObject(cmd, cmds, mesh_mgr, texture_mgr, shader_mgr,
-//       view_proj, prog, prog_full, prog_cutout, prog_full_cutout, tile_index_tex, instance_model_buf);
+//       view_proj, prog, prog_full, prog_cutout, prog_full_cutout, tile_index_tex,
+//       instance_model_buf, instance_blow_buf);
 //   InstancedObjectRenderer::DrawInstancedObjectShadow(cmd, mesh_mgr, texture_mgr, shader_mgr,
-//       shadow_vp, depth_vp, shadow_prog, shadow_prog_cutout, instance_model_buf);
+//       shadow_vp, depth_vp, shadow_prog, shadow_prog_cutout,
+//       instance_model_buf, instance_blow_buf);
 
 #ifndef JPOV_INSTANCED_OBJECT_RENDERER_H_
 #define JPOV_INSTANCED_OBJECT_RENDERER_H_
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
@@ -65,7 +68,149 @@ public:
     // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
     //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
-    static constexpr const char* kMeshVs3dPBRInstanced = R"glsl(
+    // ---- 植被风（实例路径）：枢轴链 + 逐关节吹倒 + 2 关节混合 ----
+    //   顶点属性：
+    //     loc6 vec4 = (j0, phase, L, j1)   j0/j1 = 空间最近的**两个**关节，L = 逐顶点路径长（备用）
+    //     loc3 vec2 = (w0, w1)             两关节混合权重（按 1/距离 归一化）
+    //   每个关节各求一次「链变换（pivot 摇摆 + 吹倒）」，顶点在两次结果间线性混合。
+    //   为什么必须混合：joint 的 lev/soft 是**离散**的，两个相邻顶点被分到不同关节时
+    //   变换不连续 → 撕裂。按距离加权后接缝处是连续过渡（就是蒙皮的标准做法）。
+    //   ⚠️ 吹倒是**逐关节**的 DC 角度（dθ = blow·ds/H·(L/H)^(n−2)），整段刚性、
+    //      不产生剪切；旧版逐顶点平移/旋转会把细长三角形拉成薄片。
+    inline static const std::string kWindBlowGlsl = R"glsl(
+layout(location = 3) in vec2 aWindW;            // (w0, w1)
+layout(location = 11) in float aInstBlowAway;   // 逐实例：吹倒比例（0 = 不吹）
+layout(location = 6) in vec4 aFlex;             // (j0, phase, L, j1)
+uniform int   uWindEnabled;
+uniform float uWindTime;
+uniform float uWindAmplitude;
+uniform float uWindFrequency;
+uniform vec3  uWindDirection;    // 世界系（单位向量）
+uniform int   uWindJointCount;
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform float uWindTurbAmp;
+uniform float uWindTurbFreq;
+uniform float uWindGustFreq;
+uniform float uWindGustStr;
+uniform float uBlowAwayExponent;   // n（per-command）
+uniform float uBlowAwayRefLength;  // H（模型系包围盒高）
+const int   kMaxWindChain  = 16;
+const float kWindPivotGain = 0.4;
+const float kTurbLevF  = 0.5;
+const float kTurbGustP = 4.0;
+vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
+    float c = cos(th);
+    float s = sin(th);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+vec3 JpovWindDirModel(mat4 model, vec3 dir_world) {
+    return normalize(mat3(inverse(model)) * dir_world);
+}
+// 单个关节的完整变换（pivot 链 + 逐关节吹倒 + 湍流）。
+//   输入的是**原始**顶点 p（两个关节各算一次，再混合）。
+vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
+                    vec3 axis, vec3 wdir, vec3 ref_n) {
+    int chain[kMaxWindChain];
+    int nc = 0;
+    int jj = j0;
+    for (int c = 0; c < kMaxWindChain; ++c) {
+        if (jj < 0 || jj >= uWindJointCount) {
+            break;
+        }
+        chain[nc] = jj;
+        ++nc;
+        vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+        jj = int(floor(ct0.w + 0.5));
+    }
+    vec3 qpos = vec3(0.0);
+    float A = 0.0;
+    vec3 pp = vec3(0.0);
+    float Ap = 0.0;
+    int have_par = 0;
+    for (int k = nc - 1; k >= 0; --k) {
+        vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+        vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+        float lev = clamp(t1.x, 0.0, 3.0);
+        float sof = clamp(t1.z, 0.0, 1.0);
+        // 风：θ_j = amp·sin(...)；吹倒：dθ = blow · ds/H · (Lacc/H)^(n−2)（整段刚性）
+        float fr = uWindFrequency * (1.0 + 1.6 * lev);
+        float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+        float pjw = fr * (uWindTime + t1.y);
+        pjw -= floor(pjw);
+        float th = amp * sin(6.28318531 * pjw);
+        if (have_par == 0) {
+            qpos = t0.xyz;
+            A = th;
+            have_par = 1;
+        } else {
+            qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+            A = th + (1.0 - sof) * Ap;   // 风：soft 衰减
+        }
+        pp = t0.xyz;
+        Ap = A;
+    }
+    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
+    vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+    p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
+    wn = WindRotVecAxis(wn, axis, A);
+
+    // 链外平动湍流（逐顶点相位；幅度取本关节 soft/lev）
+    float lev0 = clamp(own1.x, 0.0, 3.0);
+    float sof0 = clamp(own1.z, 0.0, 1.0);
+    float tph = uWindTime + aFlex.y;
+    float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+    float tpj = tfq * tph;
+    tpj -= floor(tpj);
+    float gph = uWindGustFreq * tph;
+    gph -= floor(gph);
+    float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+    float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+    float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+    vec3 tdir = normalize(axis * 0.6 + ref_n * 0.7
+                          + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
+    p += tdir * (tamp * sin(6.28318531 * tpj));
+    return p;
+}
+vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
+    if (uWindEnabled != 1 || uWindJointCount <= 0) {
+        return p;
+    }
+    vec3 wdir_w = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+    vec3 wdir = JpovWindDirModel(model, wdir_w);
+    vec3 axis_w = cross(vec3(0.0, 1.0, 0.0), wdir_w);
+    float al = length(axis_w);
+    vec3 axis = (al > 1e-5) ? JpovWindDirModel(model, axis_w / al)
+                            : JpovWindDirModel(model, vec3(1.0, 0.0, 0.0));
+    int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
+    int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
+    float w1 = clamp(aWindW.y, 0.0, 1.0);
+    vec3 hw = vec3(wdir_w.x, 0.0, wdir_w.z);
+    hw = (length(hw) > 1.0e-5) ? normalize(hw) : vec3(1.0, 0.0, 0.0);
+    vec3 hdir = JpovWindDirModel(model, hw);
+    vec3 n0 = wn;
+    vec3 p0 = JpovApplyJoint(j0, p, n0, model, axis, wdir, vec3(0.0, 1.0, 0.0));
+    if (j1 == j0 || w1 <= 0.0) {
+        wn = n0;
+        return p0;
+    }
+    vec3 n1 = wn;
+    vec3 p1 = JpovApplyJoint(j1, p, n1, model, axis, wdir, vec3(0.0, 1.0, 0.0));
+    float w0 = 1.0 - w1;
+    wn = normalize(n0 * w0 + n1 * w1);
+    vec3 pres = p0 * w0 + p1 * w1;
+    // 吹倒：**平移**（与 soft 无关，不存在关节继承问题）。
+    //   用载入期平滑过的逐顶点 L（aFlex.z）⇒ 空间连续，不会在关节处出现台阶。
+    //   量级：d = ratio · L · (L/H)^(n−1)（梢部 = ratio·H）。
+    if (aInstBlowAway > 0.0 && uBlowAwayRefLength > 1.0e-6 && aFlex.z > 0.0) {
+        float t = clamp(aFlex.z / uBlowAwayRefLength, 0.0, 4.0);
+        pres += hdir * (aInstBlowAway * aFlex.z *
+                        pow(max(t, 1.0e-6), uBlowAwayExponent - 1.0));
+    }
+    return pres;
+}
+)glsl";
+
+    inline static const std::string kMeshVs3dPBRInstanced = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -83,11 +228,17 @@ out vec3 vWorldTangent;
 uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
+)glsl")
+    + kWindBlowGlsl +
+    R"glsl(
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 world_pos = model * vec4(aPos, 1.0);
+    vec3 p = aPos;
+    vec3 wn = aNormal;
+    p = JpovApplyWind(p, wn, model);
+    vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
-    vWorldNormal = normalize(mat3(transpose(inverse(model))) * aNormal);
+    vWorldNormal = normalize(mat3(transpose(inverse(model))) * wn);
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
     gl_Position = uViewProj * world_pos;
@@ -97,7 +248,7 @@ void main() {
 }
 )glsl";
     // kMeshVs3dPBRFullInstanced: 实例版顶点着色器（含 UV + tangent）。
-    static constexpr const char* kMeshVs3dPBRFullInstanced = R"glsl(
+    inline static const std::string kMeshVs3dPBRFullInstanced = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -116,13 +267,20 @@ out vec3 vWorldTangent;
 uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
+)glsl")
+    + kWindBlowGlsl +
+    R"glsl(
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 world_pos = model * vec4(aPos, 1.0);
+    vec3 p = aPos;
+    vec3 wn = aNormal;
+    vec3 wt = aTangent;
+    p = JpovApplyWind(p, wn, model);
+    vec4 world_pos = model * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
     mat3 nrm = mat3(transpose(inverse(model)));
-    vWorldNormal = normalize(nrm * aNormal);
-    vWorldTangent = normalize(nrm * aTangent);
+    vWorldNormal = normalize(nrm * wn);
+    vWorldTangent = normalize(nrm * wt);
     vTexCoord = aTexCoord;
     gl_Position = uViewProj * world_pos;
 #ifdef JPOV_PICK
@@ -131,7 +289,7 @@ void main() {
 }
 )glsl";
     // kShadowVsInstanced: 实例版阴影 pass 顶点着色器（per-instance 摆放，输出线性深度）。
-    static constexpr const char* kShadowVsInstanced = R"glsl(
+    inline static const std::string kShadowVsInstanced = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 7) in vec4 aInstCol0;
@@ -145,9 +303,15 @@ out float vShadowDepth;
 layout(location = 2) in vec2 aTexCoord;
 out vec2 vTexCoord;
 #endif
+)glsl")
+    + kWindBlowGlsl +
+    R"glsl(
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
-    vec4 wp = model * vec4(aPos, 1.0);
+    vec3 p = aPos;
+    vec3 wn = vec3(0.0);
+    p = JpovApplyWind(p, wn, model);
+    vec4 wp = model * vec4(p, 1.0);
     gl_Position = uShadowViewProj * wp;
     vec4 dpos = uShadowDepthViewProj * wp;
     vShadowDepth = dpos.z / dpos.w;
@@ -834,7 +998,8 @@ void main() {
                                     unsigned int prog_cutout,
                                     unsigned int prog_full_cutout,
                                     unsigned int tile_index_tex,
-                                    InstanceBuffer& instance_model_buf);
+                                    InstanceBuffer& instance_model_buf,
+                                    InstanceBuffer& instance_blow_buf);
 
     // ---- DrawInstancedObjectShadow ----
     // 统一批实例的阴影 pass：从太阳正交光空间画进阴影纹理（只写相对主视锥中心的线性深度）。
@@ -849,7 +1014,8 @@ void main() {
                                           const float depth_vp[16],
                                           unsigned int shadow_prog,
                                           unsigned int shadow_prog_cutout,
-                                          InstanceBuffer& instance_model_buf);
+                                          InstanceBuffer& instance_model_buf,
+                                          InstanceBuffer& instance_blow_buf);
 
     // ---- DrawInstancedObjectSelected ----
     // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。
@@ -865,7 +1031,8 @@ void main() {
                                            unsigned int prog,
                                            unsigned int prog_cutout,
                                            std::vector<uint32_t>* pick_id_map /*output*/,
-                                           InstanceBuffer& instance_model_buf);
+                                           InstanceBuffer& instance_model_buf,
+                                           InstanceBuffer& instance_blow_buf);
 };
 
 }  // namespace jpov

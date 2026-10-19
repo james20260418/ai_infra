@@ -707,6 +707,11 @@ struct WindCommand {
     // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)
     float gust_frequency = 0.6f;   // 阵风频率（Hz）
     float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
+    // ---- 实例路径的「吹倒」位移指数（per-command）----
+    //   位移 = InstanceState::blow_away_ratio × L^n，L = 顶点到 root 的父链总长度。
+    //   n=1 线性（越靠梢位移越大）；n=2 二次（梢部加速倒，更接近"整株被压弯"的手感）。
+    //   ⚠️ n≠1 时 ratio 的量纲随 n 变（1/m^(n-1)），只是观感参数，不是物理量。
+    float blow_away_exponent = 2.0f;
 };
 
 // 远景仰角雾（空气透视，horizon fog）—— 全局单层，按「距离 + 视线仰角」淡出远景。
@@ -1752,6 +1757,15 @@ struct InstanceState {
     //   注意：本字段**不作为 per-instance GPU attribute 上传** —— 拾取走
     //   `render_internal_id = 本命令 base + gl_InstanceID`，再把 internal id 映射回本值（见拾取实现）。
     uint32_t picking_id = 0;
+
+    // 风吹倒伏比例（逐实例；loc11）。**平移**（不是角度）——角度会被关节的 soft
+    //   继承模型干扰（软枝不跟风）；平移与 soft 无关。
+    //   本实例每个顶点的位移：
+    //     d = blow_away_ratio × L × (L/H)^(n−1)        // n = WindCommand::blow_away_exponent
+    //   L = 该顶点到 root 的父链总长度（载入期算好并在网格上平滑），
+    //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
+    //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
+    float blow_away_ratio = 0.0f;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -1761,10 +1775,14 @@ struct InstanceState {
 struct InstancedObjectCommand {
     uint32_t mesh_id;      // 已注册的 GPU mesh 句柄（全批共享）
     PBRMaterial material;  // 该网格的 PBR 材质（同 Object3DCommand.material 语义）
-    std::vector<InstanceState> instances;  // 每实例一份状态（目前只有摆放）
+    std::vector<InstanceState> instances;  // 每实例一份状态（摆放 + 拾取 id + 吹倒比例）
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。
     //   要单独高亮某几株 → 调用方把它们拆成另一条命令（额外一次 draw call，成本可见）。
     bool highlight = false;
+    // 植被风（逐命令）：同批实例共享同一个风场（时间 / 风向 / 振幅 / 频率…）。
+    //   每实例的**吹倒比例**另在 InstanceState::blow_away_ratio（逐实例）。
+    //   无值 = 整条命令不吹风（VS 整段跳过，零开销）。
+    std::optional<WindCommand> wind;
 };
 
 // 3D 骨架蒙皮模型（世界空间，instancing 批）
@@ -2292,7 +2310,8 @@ struct RenderCommandList {
     // Pre-condition: 每实例 up/front 非零且不平行；scale > 0。
     void DrawInstancedObject(uint32_t mesh_id, const PBRMaterial& mat,
                              std::vector<InstanceState> instances,
-                             bool highlight = false);
+                             bool highlight = false,
+                             const std::optional<WindCommand>& wind = std::nullopt);
 
     // 便捷：绘制整个 glTF 对象（Renderer::LoadGltf 的产物）。
     //

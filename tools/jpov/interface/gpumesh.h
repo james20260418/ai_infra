@@ -38,7 +38,13 @@ struct GPUMesh {
     unsigned int vbo_weights = 0;   // 0 = 无骨骼权重属性（预留）
     unsigned int vbo_tangents = 0;  // 0 = 无切线属性（法线映射 TBN）
     unsigned int vbo_relax = 0;     // 0 = 无布料 LAG 松弛度属性（loc6，vec2: lag_ratio, max_lag）
-    unsigned int vbo_wind = 0;      // 0 = 无植被风属性（loc6，vec2: joint_id, phase；与 vbo_relax 互斥）
+    // 0 = 无植被风属性（loc6，vec4: j0, phase, L, j1；与 vbo_relax 互斥）。
+    //   L = 到 root 的父链总长度（米），载入期算好并平滑（见 mesh_manager.cc）；
+    //   j1 = 空间第二近的关节。object3d 的 VS 只读 vec2 的前两个分量（GL 允许少读）。
+    unsigned int vbo_wind = 0;
+    // 植被风两关节混合权重（loc3，vec2: w0,w1；仅 kWind mesh 有）。与 vbo_wind 的 (j0,phase,L,j1)
+    // 配对：顶点在 j0/j1 两条链的变换间按 w0/w1 混合（消除 lev/soft 的离散接缝）。
+    unsigned int vbo_wind_w = 0;
     // 植被风关节表纹理（RGBA32F，2N×1：texel(2j)=(pivot.xyz,parent)、texel(2j+1)=(level,phase,soft,0)）。
     // 0 = 无关节表（该 mesh 不走枢轴式风）。VS 用 texelFetch(uWindJointTex, ivec2(...), 0) 取。
     unsigned int wind_joint_tex = 0;
