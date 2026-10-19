@@ -169,6 +169,8 @@ void EmitterConfig::Validate() const {
     CHECK_GE(tiles_y, 1) << "EmitterConfig.tiles_y 必须 >= 1";
     CHECK_GE(cone_half_angle_deg, 0.0f);
     CHECK_LE(cone_half_angle_deg, 90.0f);
+    CHECK_GE(rotation_speed_decay, 0.0f) << "EmitterConfig.rotation_speed_decay 必须 >= 0";
+    CHECK_LE(rotation_speed_decay, 1.0f) << "EmitterConfig.rotation_speed_decay 必须 <= 1";
 }
 
 // ==================== ParticleEmitter ====================
@@ -249,6 +251,8 @@ ParticleEmitter::Particle ParticleEmitter::Spawn() {
     p.velocity = dir * sp;
     p.lifetime = cfg_.lifetime.Sample(rng_);
     p.rotation0 = cfg_.rotation.Sample(rng_);
+    p.rotation = p.rotation0;
+    p.spin0 = cfg_.rotation_speed.Sample(rng_);
     p.size0 = cfg_.size_start.Sample(rng_);
     p.frame_phase = cfg_.start_frame_random ? rng_.Next01() : 0.0f;
     p.seed = static_cast<uint32_t>(rng_.NextU64());
@@ -263,6 +267,8 @@ ParticleEmitter::Particle ParticleEmitter::MakeParticle(const Vec3f& position,
     p.velocity = velocity;
     p.lifetime = cfg_.lifetime.Sample(rng_);
     p.rotation0 = cfg_.rotation.Sample(rng_);
+    p.rotation = p.rotation0;
+    p.spin0 = cfg_.rotation_speed.Sample(rng_);
     p.size0 = cfg_.size_start.Sample(rng_);
     p.frame_phase = cfg_.start_frame_random ? rng_.Next01() : 0.0f;
     p.seed = static_cast<uint32_t>(rng_.NextU64());
@@ -385,6 +391,10 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
 
         const float t = Clamp01(p.age / std::max(p.lifetime, 1e-6f));
 
+        // 自旋积分：角速度随寿命线性衰减（末端不乱转）。
+        const float spin = p.spin0 * (1.0f - cfg_.rotation_speed_decay * t);
+        p.rotation += spin * dt;
+
         float size = p.size0;
         if (cfg_.use_size_over_life) {
             size = p.size0 * cfg_.size_curve.Eval(t);
@@ -403,7 +413,7 @@ void ParticleEmitter::Update(float dt, std::vector<ParticleInstance>* out /*outp
         inst.velocity = p.velocity;
         inst.width = size;
         inst.height = size;
-        inst.rotation = p.rotation0;
+        inst.rotation = p.rotation;
         inst.color = color;
         inst.frame = ResolveFrame(p);
         inst.age01 = t;

@@ -2,7 +2,8 @@
 //
 // 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
-//   烟雾（类型 / 开关 / 照度 / 浓度）/ 火焰温度增益（含 3 套温度→颜色映射）
+//   烟雾（类型 / 开关 / 照度 / 浓度）/ 火星（开关 / 数量 / 大小）/
+//   火焰温度增益（含 3 套温度→颜色映射）
 //
 // 设计：
 //   * 纹理：5 张 12×6「成对渐变」atlas（kPairMorph，pair_len=12，一块 = 两段形变）
@@ -102,6 +103,8 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.speed = {0.20f, 0.45f};
     c.size_start = {0.15f, 0.21f};
     c.rotation = {0.0f, 6.2831853f};
+    c.rotation_speed = {-1.4f, 1.4f};    // 出生随机自旋（弧度/秒）
+    c.rotation_speed_decay = 0.85f;      // 自旋随寿命衰减，顶部不乱转
     c.gravity = {0.0f, 0.55f, 0.0f};
     c.drag = 1.0f;
     c.noise_enabled = true;
@@ -159,6 +162,43 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     return c;
 }
 
+// 火星/余烬：极小、短命的发光点，从火焰上方冒出，受重力回落。
+// 纯色（texture_id=0，texel=(1,1,1,1)），加法混合，无 flipbook。
+inline jpov::particles::EmitterConfig MakeEmberConfig() {
+    jpov::particles::EmitterConfig c;
+    c.origin = {0.0f, 0.40f, 0.0f};
+    c.rate = 20.0f;                      // 由 UI 的「火星数量」重算
+    c.shape = jpov::particles::ShapeKind::kCone;
+    c.radius = 0.10f;
+    c.cone_half_angle_deg = 35.0f;
+    c.lifetime = {0.6f, 1.4f};
+    c.speed = {0.25f, 0.70f};
+    c.size_start = {0.006f, 0.010f};     // 由 UI 的「火星大小」重算
+    c.rotation = {0.0f, 6.2831853f};
+    c.gravity = {0.0f, 0.25f, 0.0f};     // 先上升，随后被重力拉回
+    c.drag = 0.70f;
+    c.noise_enabled = true;
+    c.noise_amp = 1.2f;
+    c.noise_freq = 2.2f;
+    c.use_color_over_life = true;
+    jpov::particles::Gradient g;
+    g.keys = {
+        {0.00f, jpov::Color{1.80f, 1.40f, 0.60f, 0.00f}},   // 出生淡入
+        {0.10f, jpov::Color{2.00f, 1.50f, 0.55f, 1.00f}},   // 白热
+        {0.45f, jpov::Color{1.40f, 0.55f, 0.08f, 0.90f}},   // 橙
+        {0.75f, jpov::Color{0.80f, 0.12f, 0.02f, 0.55f}},   // 暗红
+        {1.00f, jpov::Color{0.25f, 0.02f, 0.00f, 0.00f}},   // 熄灭
+    };
+    c.color_over_life = g;
+    c.use_size_over_life = true;
+    c.size_curve.keys = {{0.0f, 0.60f}, {0.30f, 1.00f}, {1.0f, 0.30f}};
+    c.flipbook = false;
+    c.texture_id = 0;
+    c.align = jpov::AlignMode::kView;
+    c.blend = jpov::BlendMode::kAdditive;
+    return c;
+}
+
 class ParticleViewerApp : public JPOV {
 public:
     using JPOV::JPOV;
@@ -173,12 +213,16 @@ public:
 
     bool fire_enable_ = true;
     bool smoke_enable_ = true;
+    bool ember_enable_ = true;
     jpov::particles::EmitterConfig fire_cfg_ = MakeFireConfig();
     jpov::particles::EmitterConfig smoke_cfg_ = MakeSmokeConfig();
+    jpov::particles::EmitterConfig ember_cfg_ = MakeEmberConfig();
     jpov::particles::ParticleEmitter fire_emitter_;
     jpov::particles::ParticleEmitter smoke_emitter_;
+    jpov::particles::ParticleEmitter ember_emitter_;
     bool fire_needs_reset_ = true;
     bool smoke_needs_reset_ = true;
+    bool ember_needs_reset_ = true;
     int fire_choice_ = 0;
     int smoke_choice_ = 0;
     int smoke_choice_applied_ = 0;
@@ -197,6 +241,8 @@ public:
     float ui_fuel_scale_ = 0.25f;        // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
     float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
+    float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
+    float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
@@ -380,6 +426,35 @@ public:
             cmds->DrawParticles(std::move(pc));
         }
 
+        // ── 火星 / 余烬 ──
+        // 简单一层：纯色加法小点，从火焰上方冒出；数量/大小只由 UI 控制。
+        {
+            const float life_avg = 0.5f * (ember_cfg_.lifetime.min + ember_cfg_.lifetime.max);
+            ember_cfg_.rate = ember_enable_
+                ? ui_ember_count_ / std::max(life_avg, 1e-3f) : 0.0f;
+            ember_cfg_.size_start = {ui_ember_size_ * 0.6f, ui_ember_size_};
+            const float base_y = ui_fuel_enable_
+                ? (ui_fuel_y_ + ui_fuel_scale_ + 0.18f) : 0.35f;
+            ember_cfg_.origin = {ui_fuel_x_, base_y, ui_fuel_z_};
+            if (ember_needs_reset_) {
+                ember_emitter_.SetConfig(ember_cfg_);
+                ember_emitter_.Reset(20261019u);
+                ember_needs_reset_ = false;
+            }
+            ember_emitter_.SetConfig(ember_cfg_);
+            std::vector<jpov::ParticleInstance> einst;
+            ember_emitter_.Update(dt, &einst);
+            if (ember_enable_ && !einst.empty()) {
+                jpov::ParticleRenderCommand ec;
+                ec.particles = std::move(einst);
+                ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
+                ec.flipbook = false;
+                ec.align = ember_cfg_.align;
+                ec.blend = ember_cfg_.blend;
+                cmds->DrawParticles(std::move(ec));
+            }
+        }
+
         if (show_panel_) {
             DrawPanel(input);
             ui_.End();
@@ -458,7 +533,7 @@ private:
         }
 
         const float colw = 0.26f * w;
-        const float top = h - 16.0f - (12 * 24.0f + 11 * 5.0f);
+        const float top = h - 16.0f - (15 * 24.0f + 14 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -473,7 +548,10 @@ private:
         ui_.Checkbox("烟雾", &smoke_enable_, row(8));
         ui_.SliderFloat("烟雾照度", &ui_smoke_bright_, row(9), 0.0f, 3.0f, 2);
         ui_.SliderFloat("烟雾浓度", &ui_smoke_density_, row(10), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(11), 0.5f, 2.0f, 2);
+        ui_.Checkbox("火星", &ember_enable_, row(11));
+        ui_.SliderFloat("火星数量", &ui_ember_count_, row(12), 0.0f, 80.0f, 0);
+        ui_.SliderFloat("火星大小", &ui_ember_size_, row(13), 0.002f, 0.040f, 3);
+        ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
     }
 
     bool show_panel_ = true;

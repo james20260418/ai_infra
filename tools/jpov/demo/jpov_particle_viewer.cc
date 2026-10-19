@@ -1,10 +1,12 @@
 // JPOV 粒子查看器（particle viewer）— 主程序
 //
-// 展示 7 种正式火焰 puff + 3 种烟 puff + 统一滑条（粒子数 / 时间快慢 / 燃料块 /
-// 烟类型 / 烟雾照度 / 烟雾浓度 / 温度增益 + 3 套温度→颜色映射）。
+// 展示 7 种正式火焰 puff + 3 种烟 puff + 火星层 + 统一滑条（粒子数 / 时间快慢 /
+// 燃料块 / 烟类型 / 烟雾照度 / 烟雾浓度 / 火星数量 / 火星大小 / 温度增益
+// + 3 套温度→颜色映射）。
 //
 // headless 拍摄：--capture <out_dir> [--fire N] [--palette N]
 //                [--smoke N]（逐个烟类型扫谱）[--smoke-density F]
+//                [--ember-count N] [--ember-size F]
 // 编译：./tools/jpov/build_particle_viewer.sh
 
 #include <cstdio>
@@ -41,7 +43,8 @@ void DefaultView(jpov_particle::ParticleViewerApp& app) {
 
 int RunCapture(const std::string& out_dir, int fire_idx, int palette,
                int smoke_idx, float count = -1.0f, float size = -1.0f,
-               float smoke_density = -1.0f) {
+               float smoke_density = -1.0f, float ember_count = -1.0f,
+               float ember_size = -1.0f) {
     JPOV::Config cfg;
     cfg.title = "JPOV - particle viewer (capture)";
     cfg.width = jpov_viewer::kViewerWidth;
@@ -65,6 +68,8 @@ int RunCapture(const std::string& out_dir, int fire_idx, int palette,
     if (count >= 0.0f) { app.ui_particle_count_ = count; }
     if (size > 0.0f) { app.ui_fire_size_ = size; }
     if (smoke_density >= 0.0f) { app.ui_smoke_density_ = smoke_density; }
+    if (ember_count >= 0.0f) { app.ui_ember_count_ = ember_count; }
+    if (ember_size > 0.0f) { app.ui_ember_size_ = ember_size; }
 
     auto shoot = [&](const char* name) {
         const std::string path = out_dir + "/" + name + ".png";
@@ -137,6 +142,7 @@ int main(int argc, char** argv) {
     int palette = -1;
     int smoke_idx = -1;
     float count = -1.0f, size = -1.0f, smoke_density = -1.0f;
+    float ember_count = -1.0f, ember_size = -1.0f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -148,6 +154,10 @@ int main(int argc, char** argv) {
             smoke_idx = std::atoi(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--smoke-density") == 0 && i + 1 < argc) {
             smoke_density = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ember-count") == 0 && i + 1 < argc) {
+            ember_count = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--ember-size") == 0 && i + 1 < argc) {
+            ember_size = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
             count = std::atof(argv[i + 1]);
         } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
@@ -156,7 +166,7 @@ int main(int argc, char** argv) {
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, fire_idx, palette, smoke_idx, count, size,
-                          smoke_density);
+                          smoke_density, ember_count, ember_size);
     }
 
     JPOV::Config cfg;

@@ -118,6 +118,10 @@ struct EmitterConfig {
     RangeF speed = {0.6f, 1.0f};         // m/s
     RangeF size_start = {0.35f, 0.5f};   // 出生尺寸（世界米，方形基准，乘 size_curve）
     RangeF rotation = {0.0f, 6.2831853f};  // 出生朝向角（弧度）
+    // 自旋角速度（弧度/秒，可负）。参考 Astralax 火的做法：粒子一边烧一边自旋，
+    // 且自旋量随寿命衰减（末端不乱转）→ 由 rotation_speed_decay 控制。
+    RangeF rotation_speed = {0.0f, 0.0f};
+    float rotation_speed_decay = 0.0f;   // 0=匀速；1=到寿命末端降到 0
     Color color_start = {1.0f, 0.65f, 0.2f, 1.0f};
 
     // ---- 受力 ----
@@ -202,6 +206,8 @@ private:
         float age = 0.0f;
         float lifetime = 1.0f;
         float rotation0 = 0.0f;
+        float rotation = 0.0f;   // 当前朝向（含自旋累积）
+        float spin0 = 0.0f;      // 出生自旋角速度
         float size0 = 0.0f;      // 出生尺寸采样
         float frame_phase = 0.0f;  // flipbook 起始相位 [0,1)
         uint32_t seed = 0;       // 逐粒子种子（噪声相位）
