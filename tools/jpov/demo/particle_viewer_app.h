@@ -67,38 +67,26 @@ inline const FireTexEntry kFireTexes[] = {
 inline constexpr int kFireTexCount =
     static_cast<int>(sizeof(kFireTexes) / sizeof(kFireTexes[0]));
 
-// 烟纹理的采样方式（与火焰类型正交，单独下拉）。
-enum class SmokePlay : uint8_t {
-    kLifetime = 0,   // 每个 puff 从第 0 帧播到末帧（整张 atlas = 一生）
-    kPairMorph = 1,   // 每粒子随机选一块，寿命走完块首→块尾（12×6 形变 atlas）
-};
-
 struct SmokeTexEntry {
     const char* label;
     const char* file;
     int tx;
     int ty;
-    SmokePlay play;
-    int pair_len;       // kPairMorph 用
+    int pair_len;       // kPairMorph 每块帧数
     float alpha_scale;  // 密度归一化（见下方注释）
 };
 
-// 烟纹理列表。alpha_scale = 密度归一化系数：
-//   先按「整张 atlas 的平均 alpha」估一个初值，再用 viewer 实际渲染的 ROI 平均变暗量
+// 烟纹理列表（全部为 12×6 成对形变图集，kPairMorph）。
+// alpha_scale = 密度归一化系数：
+//   先按「整张 atlas 的平均 alpha」估初值，再用 viewer 实际渲染的 ROI 平均变暗量
 //   迭代微调（同一火、同一发射参数，测 y=40..400 / x=430..850 相对同帧无烟 baseline）。
 //   不同来源贴图的白度/覆盖率/空间分布不同，不做这一步换烟类型时整体浓淡会突变。
-//   当前实测平均变暗量：web 5.22 / other 5.40 / v7.1 5.22 / danis-rot 5.21 /
-//                        danis-norot 5.32 / danis-s5orig 5.39 / danis-soft 5.23 /
-//                        danis-repaint 5.29（差 <4%）。
+//   当前实测平均变暗量（每种类型从同一初始状态起算）：
+//   v7.1 4.59 / danis-soft 4.47 / danis-repaint 4.43（差 <4%）。
 inline const SmokeTexEntry kSmokeTexes[] = {
-    {"web_others 8×8 (原)",     "smoke/web_others_smoke_8x8.png",     8, 8, SmokePlay::kLifetime, 0, 0.79f},
-    {"other 关键帧5 (无旋平)",   "smoke/other_key5_pairs_12x6.png",   12, 6, SmokePlay::kPairMorph, 12, 0.58f},
-    {"火7.1 冒充烟",            "mp/flames_pairs_v71_12x6.png",     12, 6, SmokePlay::kPairMorph, 12, 0.85f},
-    {"danis_smoke_5 (旋平)",     "smoke/danis_smoke_pairs_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.48f},
-    {"danis 无旋平",             "smoke/danis_smoke_norot_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.39f},
-    {"danis S5=原图#5",          "smoke/danis_smoke_s5orig_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.44f},
-    {"danis S5=原图 (柔边)",     "smoke/danis_smoke_s5orig_soft_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.56f},
-    {"danis 重绘 S1..S5",        "smoke/danis_repaint_12x6.png", 12, 6, SmokePlay::kPairMorph, 12, 0.74f},
+    {"火7.1 冒充烟",           "mp/flames_pairs_v71_12x6.png", 12, 6, 12, 0.84f},
+    {"danis S5 柔边",          "smoke/danis_smoke_s5orig_soft_12x6.png", 12, 6, 12, 0.56f},
+    {"danis 重绘 S1..S5",      "smoke/danis_repaint_12x6.png", 12, 6, 12, 0.75f},
 };
 inline constexpr int kSmokeTexCount =
     static_cast<int>(sizeof(kSmokeTexes) / sizeof(kSmokeTexes[0]));
@@ -332,19 +320,15 @@ public:
         // ── 烟 ──
         // 发射逻辑参考备份 PR #196：火焰死亡点概率 spawn，小团慢速上浮，寿命内放大。
         if (smoke_enable_) {
-            smoke_cfg_.tiles_x = kSmokeTexes[sc].tx;
-            smoke_cfg_.tiles_y = kSmokeTexes[sc].ty;
-            smoke_cfg_.flipbook = true;
-            smoke_cfg_.sheet_cycles = 1.0f;
-            if (kSmokeTexes[sc].play == SmokePlay::kPairMorph) {
-                smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
-                smoke_cfg_.pair_len = kSmokeTexes[sc].pair_len;
-                smoke_cfg_.start_frame_random = true;   // 随机选一条形变链
-            } else {
-                smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kLifetime;
-                smoke_cfg_.frame_curve.keys = {{0.0f, 0.0f}, {1.0f, 1.0f}};
-                smoke_cfg_.start_frame_random = false;  // 每个 puff 都从第 0 帧开始
-            }
+            // 烟：全部为 12×6 成对形变图集，每粒子随机选一块，寿命内走完块首→块尾。
+    const SmokeTexEntry& smoke = kSmokeTexes[sc];
+    smoke_cfg_.tiles_x = smoke.tx;
+    smoke_cfg_.tiles_y = smoke.ty;
+    smoke_cfg_.flipbook = true;
+    smoke_cfg_.sheet_cycles = 1.0f;
+    smoke_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
+    smoke_cfg_.pair_len = smoke.pair_len;
+    smoke_cfg_.start_frame_random = true;   // 随机选一条形变链
             if (smoke_needs_reset_) {
                 smoke_emitter_.SetConfig(smoke_cfg_);
                 smoke_emitter_.Reset(20261015u);
@@ -359,7 +343,7 @@ public:
             }
             std::vector<jpov::ParticleInstance> sinst;
             smoke_emitter_.Update(dt, &sinst);
-            const float density = kSmokeTexes[sc].alpha_scale * ui_smoke_density_;
+            const float density = smoke.alpha_scale * ui_smoke_density_;
             for (jpov::ParticleInstance& si : sinst) {
                 si.color.r *= ui_smoke_bright_;
                 si.color.g *= ui_smoke_bright_;

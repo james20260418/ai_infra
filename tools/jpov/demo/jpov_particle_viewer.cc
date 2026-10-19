@@ -78,7 +78,10 @@ int RunCapture(const std::string& out_dir, int fire_idx, int palette,
         app.fire_needs_reset_ = true;
         for (int i = 0; i < jpov_particle::kSmokeTexCount; ++i) {
             app.smoke_choice_ = i;
+            // 每种类型都从同一初始状态开始，保证 A/B 只差纹理。
+            app.fire_needs_reset_ = true;
             app.smoke_needs_reset_ = true;
+            app.sub_rng_ = jpov::particles::Rng(20261015u);
             for (int w = 0; w < 180; ++w) {
                 app.RunOnce(input, winfo, "/tmp/_pv_warm.png");
             }

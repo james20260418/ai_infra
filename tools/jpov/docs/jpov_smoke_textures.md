@@ -1,22 +1,17 @@
-# 粒子烟纹理（6 种，用于 A/B）
+# 粒子烟纹理（3 种，已固定）
 
-particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理」单独选择，
+particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟」单独选择，
 发射逻辑共用一套（参考备份 PR #196 的烟）。
 
-## 三种烟（6 个变体）
+## 三种烟
 
-| # | 下拉名 | 文件 | 网格 | 采样方式 |
-|---|---|---|---|---|
-| 0 | `web_others 8×8 (原)` | `assets/smoke/web_others_smoke_8x8.png` | 8×8（64 帧） | `kLifetime`：每个 puff 从第 0 帧播到末帧 |
-| 1 | `other 关键帧5 (无旋平)` | `assets/smoke/other_key5_pairs_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
-| 2 | `火7.1 冒充烟` | `assets/fire/mp/flames_pairs_v71_12x6.png`（复用火焰图集） | 12×6 | `kPairMorph`，`pair_len=12` |
-| 3 | `danis_smoke_5 (旋平)` | `assets/smoke/danis_smoke_pairs_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
-| 4 | `danis 无旋平` | `assets/smoke/danis_smoke_norot_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
-| 5 | `danis S5=原图#5` | `assets/smoke/danis_smoke_s5orig_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
-| 6 | `danis S5=原图 (柔边)` | `assets/smoke/danis_smoke_s5orig_soft_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
-| 7 | `danis 重绘 S1..S5` | `assets/smoke/danis_repaint_12x6.png` | 12×6 | `kPairMorph`，`pair_len=12` |
+| # | 下拉名 | 文件 | 网格 |
+|---|---|---|---|
+| 0 | `火7.1 冒充烟` | `assets/fire/mp/flames_pairs_v71_12x6.png`（复用火焰图集） | 12×6 |
+| 1 | `danis S5 柔边` | `assets/smoke/danis_smoke_s5orig_soft_12x6.png` | 12×6 |
+| 2 | `danis 重绘 S1..S5` | `assets/smoke/danis_repaint_12x6.png` | 12×6 |
 
-全部为 `AlignMode::kView` + `BlendMode::kAlpha`（over）+ flipbook。
+全部为 `AlignMode::kView` + `BlendMode::kAlpha`（over）+ `kPairMorph`（`pair_len=12`）。
 
 ## 发射逻辑（与 PR196 一致）
 
@@ -26,65 +21,33 @@ particle viewer 的烟纹理与火焰纹理**正交**：顶部下拉「烟纹理
 - 浮力 `gravity.y = +0.30`、阻尼 `0.55`、噪声 `amp 0.5 / freq 1.1`。
 - 颜色梯度：灰黑、alpha `0.10 → 0.38 → 0.26 → 0`（淡入/淡出）。
 
-## 图集生成
+## 图集来源与生成
 
-### 0. `web_others_smoke_8x8.png`（原 64 帧）
-
-源：`/james_pm/danis/web_others_smoke.png`（804×805，8×8 共 64 帧，黑底）。
-
-- 按 8×8 固定网格切格（每格约 100×100）；
-- 每格内容缩到 88% 并居中到 100×100 画布，留出采样安全边；
-- `alpha = luminance`，RGB 统一为白（掩膜契约）；
-- 放大到 256²/cell，拼成 2048×2048，按 JPOV 行序翻转写盘。
-
-### 1. `other_key5_pairs_12x6.png`（从 64 帧提 5 帧，无旋转平滑）
-
-由 Danis 反馈：原 64 帧帧间差值小、有对不齐。只取 5 个关键帧走 F5 套路：
-
-- 关键帧按「覆盖率分位」选：`[3, 19, 34, 47, 59]`（覆盖 0.14 → 0.43，近似等间隔）；
-- 每帧沿用 `key_smoke`（亮度软阈值 + 边缘羽化）；
-- **不做旋转平均**；
-- `S1..S5 = PROFILE(Fi, F(i+1), 0.5)`；
-- 6 条两段链 × 12 帧（与火焰 V4 同一套 `CHAINS`）。
-
-### 2. `flames_pairs_v71_12x6.png`
+### 0. `flames_pairs_v71_12x6.png`
 
 直接复用火焰 V7.1 图集，不额外生成。
 
-### 3/4/5. danis_smoke_5 的三个版本
+### 1. `danis_smoke_s5orig_soft_12x6.png`（danis_smoke_5，柔边）
 
 源：`/james_pm/danis/danis_smoke_F5.png`（2825×621，5 张 500×500 烟图）。
 
-公共步骤：
-
-1. 5 张源图各取中心 400×400（去掉被画幅切掉的边缘），缩到 256²；
-2. 亮度按每张 p95 归一 → 软阈值 `(L-0.18)/(0.80-0.18)`；
-3. **径向边缘衰减**（r 从 0.50 到 0.98 平滑到 0）——源图烟充满画幅，
-   不做这一步会渲染成方形卡片；
+1. 5 张源图各取中心 400×400，缩到 256²；
+2. 亮度按每张 p95 归一 → 软阈值 `(L-0.15)/(0.75-0.15)`；
+3. 径向边缘衰减：F 节点 `0.30→1.00`、S 节点 `0.35→1.00`（长过渡，避免“整片墙”）；
 4. `S1..S5 = PROFILE(Fi, F(i+1), 0.5)`；
-5. 6 条两段链 × 12 帧。
+5. S5 直接用处理后的**原图 #5**（不再用 PROFILE 中点）；
+6. 6 条两段链 × 12 帧。
 
-四个版本的区别：
+### 2. `danis_repaint_12x6.png`（Danis 重绘，直接当 S1..S5）
 
-| 版本 | 旋转平均 | S5 |
-|---|---|---|
-| 3 `danis_smoke_pairs` | `avg_limited(±15°, σ=8°)` | `PROFILE(F5, F1, 0.5)` |
-| 4 `danis_smoke_norot` | 无 | `PROFILE(F5, F1, 0.5)` |
-| 5 `danis_smoke_s5orig` | 无 | 直接用处理后的**原图 #5**（`F5`） |
-| 6 `danis_smoke_s5orig_soft` | 无 | 同 #5，但径向边缘过渡从 `0.50→0.98` 拉长到 `0.30→1.00`（S 节点 `0.35→1.00`），让浓度衰减更柔和、去掉“整片墙”感 |
+源：`/james_pm/danis/danis_repaint.png`（3840×1092，5 格 768×1092，黑底）。
 
-### 7. `danis_repaint_12x6.png`（Danis 重绘，直接当 S1..S5）
-
-源：`/james_pm/danis/danis_repaint.png`（3840×1092，5 格 768×1092，黑底，
-右下角有「豆包AI生成」水印）。
-
-与其它版本不同：**不再从 F 算 S 中点**，这 5 张重绘图直接作为 **S1..S5** 节点。
-
-1. 切 5 格；水印区域（x>3500, y>1000）置黑；
+1. 切 5 格；右下角「豆包AI生成」水印区域（x>3500, y>1000）置黑；
 2. 每格取 `y=40..1010`，横向补黑到 970×970，缩到 256²（不拉伸）；
 3. `alpha = luminance` 软阈值 `(L-0.02)/0.93`；
 4. 径向边缘衰减 `0.30 → 1.00`（长过渡）；
-5. 6 条两段链 × 12 帧：只在 S 节点之间用 `morph_frames(..., "profile")` 插值。
+5. 这 5 张重绘图直接作为 **S1..S5**；
+6. 6 条两段链 × 12 帧：只在 S 节点之间用 `morph_frames(..., "profile")` 插值。
 
 ## 烟雾强度归一化
 
@@ -93,14 +56,9 @@ viewer 用 `SmokeTexEntry::alpha_scale` 乘在逐粒子 `color.a` 上：
 
 | 类型 | alpha_scale | 实测平均变暗量 |
 |---|---|---|
-| web_others | 0.79 | 5.22 |
-| other 关键帧5 | 0.58 | 5.40 |
-| 火7.1 冒充烟 | 0.85 | 5.22 |
-| danis 旋平 | 0.48 | 5.21 |
-| danis 无旋平 | 0.39 | 5.32 |
-| danis S5=原图#5 | 0.44 | 5.39 |
-| danis S5=原图 (柔边) | 0.56 | 5.23 |
-| danis 重绘 S1..S5 | 0.74 | 5.29 |
+| 火7.1 冒充烟 | 0.84 | 4.55 |
+| danis S5 柔边 | 0.56 | 4.47 |
+| danis 重绘 S1..S5 | 0.75 | 4.47 |
 
 定标方法：
 
@@ -108,12 +66,11 @@ viewer 用 `SmokeTexEntry::alpha_scale` 乘在逐粒子 `color.a` 上：
 2. 再用 viewer 实际渲染校准：同一火、同一相机、同一帧数，分别在
    `--smoke-density 0`（baseline）与正常密度下拍摄，统计
    `y=40..400, x=430..850` 区域的平均变暗量；
-3. 迭代微调 `alpha_scale`，使 6 种类型的平均变暗量差 < 4%。
+3. 每种类型都先 Reset 火/烟与随机种子，保证只差纹理；迭代微调使平均变暗量差 < 2%。
 
 另有面板滑条「烟雾浓度」（0~3），在上述归一化之上做整体微调。
 
 ## 版权
 
-- `danis_smoke_F5.png`：Danis 提供的手绘/AI 生成素材。
-- `web_others_smoke.png`：来源待确认（第三方现成 flipbook）。
-  **合并进公开仓库前必须确认授权**；若无法确认，建议只在本地实验分支使用。
+- `danis_smoke_F5.png` / `danis_repaint.png`：Danis 提供的手绘/AI 生成素材。
+- 已移除来源不明的 `web_others_smoke` 及其派生图集。
