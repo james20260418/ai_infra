@@ -10,6 +10,7 @@ JPOV 是一个面向 AI 自测输出的、支持流式绘制 + 简单交互的�
 > - **[docs/jpov_effect_pass_design.md](docs/jpov_effect_pass_design.md)** — 粒子特效 pass 设计（火焰 MVP）：并列 primitive3d 的特效通道、简单深度（测而不写）、additive + alpha 两种混合、无 instancing、「照抄式复用」+ 薄公共层策略。做火焰/烟/雨/雪前先读。
 > - **[docs/jpov_volumetric_fog_design.md](docs/jpov_volumetric_fog_design.md)** — 局部体积雾（球形/圆柱）设计：像点光源一样摆放雾体、**闭式积分**（零采样零噪声）、**tile culling 限流**（每像素 overdraw 硬上限 K）、一次全屏 pass 累加 τ/S + 就地合成、HDR/tone map 之前。做局部雾/烟尘/发光体空气光前先读。
 > - **[docs/jpov_instance_attr_lag_design.md](docs/jpov_instance_attr_lag_design.md)** — 人物 instancing per-instance attribute 布局重排 + 布料 LAG（惯性滞后副运动）：双 pose + 双 partial + 逐顶点松弛度 mix；三视图约定（一槽=4 float/8 short/16 int8）；16 槽（loc0..15）定稿布局。做副运动/重排 attribute 前先读。
+> - **[docs/jpov_wbo_target.md](docs/jpov_wbo_target.md)** — WBO 目标（遮掩/发光两集合）的共享件：`WboTarget`（固定槽位、附件按需申请、clear/blend/还原一把抓）+ 共享权重与解析 + 新加 WBO 层必须遵守的 7 条规则。写任何半透明累积层前先读。
 > - **[docs/jpov_strip3d_translucent_design.md](docs/jpov_strip3d_translucent_design.md)** — 半透明 3D 条带（Strip3D）：左右双轨 + 逐点 uv/alpha + 8 段宽度剖面 → 1× WBO 双集合（遮罩 / 发光）。廉价玻璃、流星拖尾、剑气、光环；不动三大 renderer 的 blend。做带状半透明效果前先读。
 > - **[interface/README.md](interface/README.md)** — 渲染接口层说明。
 
