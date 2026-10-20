@@ -825,20 +825,22 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
 
 #ifdef JPOV_ALPHA_BLEND
 // Weighted Blended OIT 权重函数（McGuire & Bavoil 2013, JCGT 2(2)）。
-//   weight = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/200)^4), 1e-2, 3e3)
+//   weight = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)
 // 前半「颜色因子」：亮/不透明片元权重大、暗且稀薄片元权重小（防颜色污染 / firefly）；
 // 后半「深度因子」：近处 z 权重高、远处急速下降（更接近真实 over 的遮挡行为）。
 // z 用视空间距离（米）；本函数不含 α 因子（α 在累加时单独乘，见 main 末尾）。
-float weight_wbo(float z, float alpha, vec3 color) {
-    float maxc = max(max(color.r, color.g), color.b);
-    float color_factor = max(min(1.0, maxc * alpha), alpha);
+//@WBO_WEIGHT_BEGIN
+float WeightWbo(float z, float a, vec3 c) {
+    float mx = max(max(c.r, c.g), c.b);
+    float w = max(min(1.0, mx * a), a);
     // ⚠️ 原论文的 200 是「世界单位尺度」调参：JPOV 场景以米计、玻璃多在 1~30m，
     // 用 200 会让 (z/200)^4 ≪ 1e-5 地板 → 权重恒为常数 → 丧失「近处优先」→
     // 两层透明体（如红墙 × 绿人）前后不分、颜色一样（WBO order-blind）。
     // 改用 ~5m 尺度（可按场景调），使米级深度段内产生真实的近远权重差。
-    float depth_factor = clamp(0.03 / (1e-5 + pow(z / 5.0, 4.0)), 1e-2, 3e3);
-    return color_factor * depth_factor;
+    float df = clamp(0.03 / (1e-5 + pow(z / 5.0, 4.0)), 1e-2, 3e3);
+    return w * df;
 }
+//@WBO_WEIGHT_END
 #endif
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
@@ -1087,7 +1089,7 @@ void main() {
     // alpha = base_color.a（常值）× 贴图 alpha（有贴图时）。
     float alpha = clamp(uAlpha * base_texel.a, 0.0, 1.0);
     float z_view = length(uCameraPos - vWorldPos);
-    float w = weight_wbo(z_view, alpha, result);
+    float w = WeightWbo(z_view, alpha, result);
     FragAccum = vec4(result * alpha, alpha) * w;   // 预乘色 × 权重（累加）
     FragReveal = alpha;                            // reveal *= (1−α)（由混合函数完成）
     FragDepthAccum = z_view * alpha * w;           // 代表深度累加（z_g = 本值 / accum.a）

@@ -2,8 +2,8 @@
 //
 // 定位（tools/jpov/docs/jpov_volumetric_fire_design.md）：
 //   把一团 `.jpovvol`（R=density / G=temperature[K]）沿视线做**体渲染积分**，输出
-//   `(预乘发射 L, 透射率 1−α, 期望深度 z_repr)`，作为**一个薄层**写进本渲染器自持的
-//   WBO 缓冲（accum/reveal/depth），再 Composite 解析 over 到当前目标（HDR）。
+//   `(预乘发射 L, 透射率 1−α)`，作为**一个薄层**写进本渲染器自持的
+//   WBO 缓冲（accum/reveal），再 Composite 解析 over 到当前目标（HDR）。
 //   与 ParticleRenderer / #176 透明玻璃共用同一套 McGuire WBO 代数。
 //
 // 画法：画该团的世界 AABB **盒**（8 角由 gl_VertexID 生成；**剔除正面** → 每像素恰好
@@ -23,6 +23,7 @@
 #include "tools/jpov/interface/volume_fire_types.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/volume_manager.h"
+#include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
 
@@ -64,7 +65,7 @@ void main() {
 }
 )glsl";
 
-    // 片元着色器：raymarch。输出 WBO 三附件（accum/reveal/depth）。
+    // 片元着色器：raymarch。输出 WBO 覆盖集两附件（accum/reveal）。
     static constexpr const char* kFs = R"glsl(
 #version 330 core
 in vec3 vWorld;
@@ -101,9 +102,11 @@ uniform vec2 uViewport;
 uniform float uSeed;           // 每像素抖动种子基
 uniform float uNear;
 uniform float uFar;
+// 覆盖集两路输出（att0/att1）。att2/att3（加法集 / 代表深度）本渲染器不申请：
+//   体积火是单层、权重恒 1，合成只读 accum/reveal。曾有第三个 FragDepth 输出，
+//   但从来没有采样者 —— 纯带宽浪费，已于 2026-10-20 删除（见 docs/jpov_strip3d_translucent_design.md §13）。
 layout(location = 0) out vec4 FragAccum;
 layout(location = 1) out float FragReveal;
-layout(location = 2) out float FragDepth;
 
 // 黑体色（Tanner Helland 近似；与 SkyCommand::ColorTempToLinear 同一条曲线）。
 vec3 Blackbody(float kelvin) {
@@ -189,8 +192,6 @@ void main() {
 
     float T = 1.0;
     vec3 L = vec3(0.0);
-    float num = 0.0;   // ∫ z·σ·T dt
-    float den = 0.0;   // ∫ σ·T dt
     for (int k = 0; k < steps; ++k) {
         float t = tn + (float(k) + jit) * dt;
         vec3 p = o + t * rd;
@@ -226,15 +227,11 @@ void main() {
             base_color = mix(vec3(cl), base_color, uColorSat);
         }
         vec3 emis = base_color * uEmission * radiance;
-        float z_view = t * ray_to_fwd;
-        float wgt = sigma * T * dt;
         L += T * a_fire * emis;
         // 烟受均匀照明单次散射（灰）——没有这一项，烟在纯黑底上不可见。
         if (uSmokeScatter > 0.0 && sigma_smoke > 0.0) {
             L += T * uSmokeScatter * sigma_smoke * uSmokeAlbedo * uLightColor * dt;
         }
-        num += z_view * wgt;
-        den += wgt;
         T *= (1.0 - a);
         if (T < 1e-3) { break; }
     }
@@ -242,45 +239,16 @@ void main() {
     // 覆盖度截断：旧值 1/255（≈0.4%）会把**稀薄的烟整体丢弃** → 烟一淡就硬消失（“被量化没了”）。
     // 降到极小值（不写入无意义覆盖即可），消除这条硬边。
     if (alpha <= 1e-5) { discard; }
-    float z_repr = (den > 1e-9) ? (num / den) : (tn * ray_to_fwd);
-    // WBO 覆盖：accum=色·α、A=α（单层权重抵消）；reveal=α；depth=z·α。
+    // WBO 覆盖：accum=色·α、A=α（单层权重抵消）；reveal=α。
     FragAccum = vec4(L, alpha);
     FragReveal = alpha;
-    FragDepth = z_repr * alpha;
-}
-)glsl";
-
-    // 合成：全屏把 WBO 解析并以预乘 over 写进当前目标（HDR）。
-    static constexpr const char* kVsComp = R"glsl(
-#version 330 core
-out vec2 vUV;
-void main() {
-    vec2 c = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
-                  (gl_VertexID >= 2) ? 1.0 : -1.0);
-    vUV = c * 0.5 + 0.5;
-    gl_Position = vec4(c, 0.0, 1.0);
-}
-)glsl";
-    static constexpr const char* kFsComp = R"glsl(
-#version 330 core
-in vec2 vUV;
-out vec4 FragColor;
-uniform sampler2D uAccum;
-uniform sampler2D uReveal;
-void main() {
-    vec4 accum = texture(uAccum, vUV);
-    float reveal = texture(uReveal, vUV).r;
-    if (accum.a <= 1e-7) { FragColor = vec4(0.0); return; }
-    vec3 color = accum.rgb / accum.a;
-    float cov = clamp(1.0 - reveal, 0.0, 1.0);
-    FragColor = vec4(color * cov, cov);
 }
 )glsl";
 
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
-    // 帧首：确保 TAB 存在并 clear（accum=0/reveal=1/depth=0）。
+    // 帧首：确保目标存在并 clear（accum=0 / reveal=1）。
     void Begin(int w, int h);
 
     // 画一团体积火进 TAB（累加）。体积纹理由 VolumeManager 持有（按 cmd.volume_id 查）。
@@ -299,8 +267,8 @@ void main() {
     bool has_content() const { return has_content_; }
 
 private:
-    void EnsureWbo(int w, int h);
-    void DestroyWbo();
+    // 本渲染器的 WBO 目标规格（1×、覆盖集、无加法集、无深度附件）。只在这一处声明。
+    void EnsureTarget(int w, int h);
     void DumpWbo(int w, int h);
     // 色谱 LUT 加载（按路径缓存；失败返回 0 → 回退黑体）。
     unsigned int PaletteTex(const char* path);
@@ -309,9 +277,7 @@ private:
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    unsigned int wbo_fbo_ = 0;
-    unsigned int accum_tex_ = 0, reveal_tex_ = 0, depth_tex_ = 0;
-    int wbo_w_ = 0, wbo_h_ = 0;
+    WboTarget wbo_;               // 1×、覆盖集（无加法集、无深度附件）
     bool has_content_ = false;
     bool initialized_ = false;
     std::string debug_dump_dir_;

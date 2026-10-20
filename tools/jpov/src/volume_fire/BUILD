@@ -11,6 +11,8 @@ cc_library(
     deps = [
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:volume_fire_types",
+        "//tools/jpov/src/wbo:wbo_shader",
+        "//tools/jpov/src/wbo:wbo_target",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:volume_manager",
         "@glog_static//:glog",

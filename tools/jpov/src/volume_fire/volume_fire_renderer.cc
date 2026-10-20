@@ -4,6 +4,8 @@
 
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 
+#include "tools/jpov/src/wbo/wbo_shader.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -104,14 +106,16 @@ void VolumeFireRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(!initialized_) << "VolumeFireRenderer::Init 重复调用";
     shader_mgr_ = shader_mgr;
     prog_draw_ = shader_mgr_->GetOrCreate("volume_fire_draw", {kVs, kFs});
-    prog_comp_ = shader_mgr_->GetOrCreate("volume_fire_composite", {kVsComp, kFsComp});
+    // 解析 shader 与粒子共用一份（wbo_shader.h）：同一套覆盖集代数，改一处即全改。
+    prog_comp_ = shader_mgr_->GetOrCreate("volume_fire_composite",
+                                          {kWboCompositeVs, kWboCompositeFs});
     glGenVertexArrays(1, &vao_);
     CHECK_NE(vao_, 0u);
     initialized_ = true;
 }
 
 void VolumeFireRenderer::Finalize() {
-    DestroyWbo();
+    wbo_.Destroy();
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
@@ -158,70 +162,15 @@ unsigned int VolumeFireRenderer::PaletteTex(const char* path) {
     return tex;
 }
 
-void VolumeFireRenderer::EnsureWbo(int w, int h) {
-    if (wbo_fbo_ != 0 && wbo_w_ == w && wbo_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    DestroyWbo();
-    glGenTextures(1, &accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenTextures(1, &reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenTextures(1, &depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenFramebuffers(1, &wbo_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, depth_tex_, 0);
-    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, bufs);
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "VolumeFireRenderer WBO FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    wbo_w_ = w;
-    wbo_h_ = h;
-}
-
-void VolumeFireRenderer::DestroyWbo() {
-    if (wbo_fbo_) { glDeleteFramebuffers(1, &wbo_fbo_); wbo_fbo_ = 0; }
-    if (accum_tex_) { glDeleteTextures(1, &accum_tex_); accum_tex_ = 0; }
-    if (reveal_tex_) { glDeleteTextures(1, &reveal_tex_); reveal_tex_ = 0; }
-    if (depth_tex_) { glDeleteTextures(1, &depth_tex_); depth_tex_ = 0; }
-    wbo_w_ = 0;
-    wbo_h_ = 0;
+void VolumeFireRenderer::EnsureTarget(int w, int h) {
+    wbo_.Ensure({w, h, /*with_additive=*/false, /*with_depth=*/false,
+                 /*linear_filter=*/true});
 }
 
 void VolumeFireRenderer::Begin(int w, int h) {
     CHECK(initialized_) << "VolumeFireRenderer::Begin: 未 Init";
-    EnsureWbo(w, h);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, w, h);
-    const GLfloat clr_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_depth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clr_accum);
-    glClearBufferfv(GL_COLOR, 1, clr_reveal);
-    glClearBufferfv(GL_COLOR, 2, clr_depth);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    EnsureTarget(w, h);
+    wbo_.Clear();
     has_content_ = false;
 }
 
@@ -235,26 +184,19 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
         return;
     }
     CHECK_NE(scene_depth_tex, 0u);
-    EnsureWbo(w, h);
+    EnsureTarget(w, h);
 
     const Vec3f cam_pos = camera.position;
     const Vec3f fwd = NormalizeOr(Sub(camera.target, camera.position), Vec3f(0, 0, -1));
 
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT);
-    glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
-    glViewport(0, 0, w, h);
-    glDisable(GL_DEPTH_TEST);
+    wbo_.BindForDraw();
     if (cmd.debug_fullscreen) {
         glDisable(GL_CULL_FACE);   // 全屏 quad 不能被剔
     } else {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_FRONT);   // 只留背面 → 每像素恰好一个盒面 → FS 只跑一次
     }
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 色·α
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z·α
 
     glUseProgram(prog_draw_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE, view_proj);
@@ -325,11 +267,8 @@ void VolumeFireRenderer::Draw(const VolumeFireCommand& cmd, VolumeManager& volum
     }
     glBindVertexArray(0);
 
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    wbo_.EndDraw();                 // 还原 blend + 解绑
     glActiveTexture(GL_TEXTURE0);   // 归还纹理单元（P8：不留激活单元给后续 pass）
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPopAttrib();
     has_content_ = true;
 }
@@ -338,7 +277,7 @@ void VolumeFireRenderer::DumpWbo(int w, int h) {
     const std::string dir = debug_dump_dir_;
     auto dump = [&](GLenum buf, const char* suffix, bool is_alpha) {
         std::vector<float> px(static_cast<size_t>(w) * h * 4);
-        glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, wbo_.fbo());
         glReadBuffer(buf);
         glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, px.data());
         std::vector<unsigned char> out(static_cast<size_t>(w) * h * 4);
@@ -371,7 +310,7 @@ void VolumeFireRenderer::DumpWbo(int w, int h) {
 }
 
 void VolumeFireRenderer::Composite(int w, int h) {
-    if (!has_content_ || wbo_fbo_ == 0) {
+    if (!has_content_ || !wbo_.valid()) {
         return;
     }
     if (!debug_dump_dir_.empty()) {
@@ -384,15 +323,22 @@ void VolumeFireRenderer::Composite(int w, int h) {
     glBlendEquation(GL_FUNC_ADD);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // over（预乘 src）
     glUseProgram(prog_comp_);
+    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
     glActiveTexture(GL_TEXTURE0 + 0);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
+    glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
     glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
     glActiveTexture(GL_TEXTURE0 + 1);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
+    glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
     glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
+    // 共享 FS 里还有 uAdd 采样器（加法集分支）。本渲染器没有加法集，
+    // 但**必须绑一张有效纹理**：编译器可能把采样提到分支之前，绑 0 会读到未定义内容。
+    glActiveTexture(GL_TEXTURE0 + 2);
+    glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
+    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 2);
     glBindVertexArray(vao_);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);   // 归还激活单元（不留 unit 2 给后续 pass）
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glPopAttrib();
     has_content_ = false;
