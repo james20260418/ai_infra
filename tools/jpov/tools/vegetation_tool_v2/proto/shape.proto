@@ -7,7 +7,7 @@
 //   * 单位：**米**（m）；角度用弧度
 //   * 上方向：**+Y**（glTF 约定）。Blender 是 +Z up，导出时必须转：
 //       (x, y, z)_blender -> (x, z, -y)_gltf
-//   * 截面 profile：**归一化**单位多边形（半径 1），逆时针，闭合且首尾不重复
+//   * 截面轮廓：**归一化**（半径的倍数）、逆时针、闭合且首尾不重复、星形
 //
 // 为什么用 proto 而不是 JSON：这个结构对约束要求高（拓扑一致性/引用完整性/正交性），
 // proto 能在编译期挡住字段拼错，并给出确定的默认值语义与向后兼容版本号。
@@ -23,20 +23,21 @@ message Vec3Proto {
   double z = 3;
 }
 
-// 单位化截面上的一个点：位于「垂直于枝条中心线」的平面内，(0,0) 是中心线。
-// 半径 1 时它就是轮廓本身；实际尺寸由 BranchSampleProto.radius 缩放。
+// 截面轮廓上的一个点（**归一化**，单位是「半径的倍数」，不是米）。
+//
+// 所在平面：过该采样点、**垂直于枝条中心线切线 T** 的平面。
+// 原点：该采样点的中心线位置 C。
+// 坐标轴：x 沿 U，y 沿 V。U、V 是与 T 互相垂直的单位向量，(U, V, T) 构成右手系。
+//
+// 世界坐标 = C + radius · ( x·U + y·V )
+//   例：(x=1, y=0) → 落在 U 方向、距中心线恰好 radius 的那个管壁点。
+//   因此 **radius 只负责粗细，profile 只负责形状**，两者正交：
+//   想让树干变粗只改 radius；想让它从圆形变成板根/沟槽只改 profile。
+//
+// 约定：从 +T 方向看是逆时针；闭合且首尾不重复；星形（任意方向只交一次）。
 message ProfilePointProto {
   double x = 1;
   double y = 2;
-}
-
-// 单位化截面轮廓（星形多边形，闭合，首尾不重复）。
-// 全树共用一份：正圆就是单位圆上的 N 个点；椭圆/方形/板根换点即可，下游代码不变。
-message CrossSectionProto {
-  repeated ProfilePointProto points = 1;
-
-  // UV 接缝落在第几个顶点（u=0 从这里开始绕）。必须 < points.size()。
-  uint32 seam_index = 2;
 }
 
 // 枝条中心线上的一个采样点。
@@ -45,10 +46,19 @@ message BranchSampleProto {
   Vec3Proto position = 1;  // 米
 
   // 该点的管半径（米）。逐点给 ⇒ 锥度/收细/领口过渡都是数据，不是算法。
+  // 它同时是下面 profile 的缩放基准（见 ProfilePointProto 的坐标定义）。
   double radius = 2;
 
-  // 截面绕切线的自转角（弧度）。正圆截面下不可见；非圆截面时决定截面朝向。
+  // 截面绕切线的自转角（弧度）。作用于 profile 的 (U, V) 基。
+  // 正圆截面下不可见；非圆截面时它决定截面朝向（例如板根该朝哪一侧）。
   double tilt = 3;
+
+  // 该采样点的截面轮廓（归一化，见 ProfilePointProto）。
+  // **逐点可变** —— 塑形噪音就靠这个（树干越往上越扁、根部鼓出板根等）。
+  // 空 = 未指定 = 正圆。正圆是绝大多数枝条的常态，空着既不丢信息又省体积。
+  //
+  // 非空时：点数即环上的顶点数（BranchProto.ring_count 必须为 0 或等于该点数）。
+  repeated ProfilePointProto profile = 4;
 }
 
 // 一根枝（主干或其分叉之一）。
@@ -65,9 +75,14 @@ message BranchProto {
   // 中心线采样折线，至少 2 个点。
   repeated BranchSampleProto samples = 4;
 
-  // 环细分（绕截面一圈的顶点数）。0 = 用 CrossSectionProto.points 的点数。
+  // 环细分（绕截面一圈的顶点数）。0 = 用 profile 的点数（正圆时也由它决定）。
   // 主干给 16（看不出棱角），末梢枝给 6~8（省面）。
   uint32 ring_count = 5;
+
+  // UV 接缝落在环上的第几个顶点（u = 0 从这里开始绕）。
+  // 放在 branch 级而不是 sample 级：接缝沿枝必须稳定，否则纹理会沿枝拧转。
+  // 必须 < 该枝的环顶点数。
+  uint32 seam_index = 6;
 }
 
 // 一张叶卡。锚点 + 两条正交轴 + 长度即可唯一确定一张卡；
@@ -127,17 +142,14 @@ message ShapeProto {
   // 供人 / agent / 下游工具读取，**永不参与逻辑判断**，可为空。
   string description = 2;
 
-  // 全树共用的单位化截面轮廓。
-  CrossSectionProto profile = 3;
-
   // 所有枝条。至少一根，恰好一根 parent == -1。
-  repeated BranchProto branches = 4;
+  repeated BranchProto branches = 3;
 
   // 叶卡类型表。
-  repeated LeafTypeProto leaf_types = 5;
+  repeated LeafTypeProto leaf_types = 4;
 
   // 所有叶卡（位置已烘死，下游不做分布规则）。
-  repeated LeafCardProto cards = 6;
+  repeated LeafCardProto cards = 5;
 
-  reserved 7 to 15;  // 预留：LOD 层级、材质槽、风参数覆盖等
+  reserved 6 to 15;  // 预留：LOD 层级、材质槽、风参数覆盖等
 }

@@ -1,4 +1,4 @@
-// 植物拓扑结构的实现：proto 转换 + 合法性校验。
+// 植物拓扑结构的实现：proto 转换 + 派生计算 + 合法性校验。
 
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 
@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace jpov {
 namespace vegetation {
@@ -76,12 +77,8 @@ bool IsStarShapedCounterClockwise(const std::vector<ProfilePoint>& points,
   return true;
 }
 
-}  // namespace
-
-double CrossSection::Perimeter() const {
-  if (points.size() < 2) {
-    return 0.0;
-  }
+// 单位轮廓的周长（未乘 radius）。
+double UnitPerimeter(const std::vector<ProfilePoint>& points) {
   double sum = 0.0;
   for (size_t i = 0; i < points.size(); ++i) {
     const ProfilePoint& a = points[i];
@@ -91,23 +88,44 @@ double CrossSection::Perimeter() const {
   return sum;
 }
 
-uint32_t Branch::EffectiveRingCount(const CrossSection& profile) const {
+}  // namespace
+
+std::vector<ProfilePoint> UnitCircleProfile(uint32_t n) {
+  std::vector<ProfilePoint> points;
+  points.reserve(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    const double a = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(n);
+    points.push_back(ProfilePoint{std::cos(a), std::sin(a)});
+  }
+  return points;
+}
+
+double SamplePerimeter(const BranchSample& sample, uint32_t ring_count) {
+  if (!sample.profile.empty()) {
+    return sample.radius * UnitPerimeter(sample.profile);
+  }
+  if (ring_count < 3) {
+    return 0.0;
+  }
+  return sample.radius * UnitPerimeter(UnitCircleProfile(ring_count));
+}
+
+uint32_t Branch::EffectiveRingCount() const {
   if (ring_count > 0) {
     return ring_count;
   }
-  return static_cast<uint32_t>(profile.points.size());
+  for (const BranchSample& s : samples) {
+    if (!s.profile.empty()) {
+      return static_cast<uint32_t>(s.profile.size());
+    }
+  }
+  return 0;
 }
 
 Shape FromProto(const ShapeProto& proto) {
   Shape shape;
   shape.version = proto.version();
   shape.description = proto.description();
-
-  shape.profile.seam_index = proto.profile().seam_index();
-  shape.profile.points.reserve(proto.profile().points_size());
-  for (const ProfilePointProto& p : proto.profile().points()) {
-    shape.profile.points.push_back(ProfilePoint{p.x(), p.y()});
-  }
 
   shape.branches.reserve(proto.branches_size());
   for (const BranchProto& b : proto.branches()) {
@@ -116,11 +134,18 @@ Shape FromProto(const ShapeProto& proto) {
     branch.parent = b.parent();
     branch.level = b.level();
     branch.ring_count = b.ring_count();
+    branch.seam_index = b.seam_index();
     branch.samples.reserve(b.samples_size());
     for (const BranchSampleProto& s : b.samples()) {
-      branch.samples.push_back(
-          BranchSample{Vec3d{s.position().x(), s.position().y(), s.position().z()},
-                       s.radius(), s.tilt()});
+      BranchSample sample;
+      sample.position = Vec3d{s.position().x(), s.position().y(), s.position().z()};
+      sample.radius = s.radius();
+      sample.tilt = s.tilt();
+      sample.profile.reserve(s.profile_size());
+      for (const ProfilePointProto& p : s.profile()) {
+        sample.profile.push_back(ProfilePoint{p.x(), p.y()});
+      }
+      branch.samples.push_back(std::move(sample));
     }
     shape.branches.push_back(std::move(branch));
   }
@@ -166,22 +191,6 @@ bool Validate(const Shape& shape, std::string* error) {
     return fail("version 不能为 0");
   }
 
-  // ── 截面 ──
-  if (shape.profile.points.size() < 3) {
-    return fail(Format("profile 至少 3 个点，实际 %zu", shape.profile.points.size()));
-  }
-  if (shape.profile.seam_index >= shape.profile.points.size()) {
-    return fail(Format("profile.seam_index %u 越界（点数 %zu）",
-                       shape.profile.seam_index, shape.profile.points.size()));
-  }
-  std::string why;
-  if (!IsStarShapedCounterClockwise(shape.profile.points, &why)) {
-    return fail(why);
-  }
-  if (!(shape.profile.Perimeter() > 0.0)) {
-    return fail("profile 周长为 0");
-  }
-
   // ── 枝干拓扑 ──
   if (shape.branches.empty()) {
     return fail("branches 为空");
@@ -206,19 +215,50 @@ bool Validate(const Shape& shape, std::string* error) {
   if (root_count != 1) {
     return fail(Format("恰好需要 1 根根枝（parent=-1），实际 %d", root_count));
   }
+
+  // ── 逐枝逐点 ──
   for (const Branch& b : shape.branches) {
+    if (b.parent >= 0 && ids.count(static_cast<uint32_t>(b.parent)) == 0) {
+      return fail(Format("branch %u: parent %d 不存在", b.id, b.parent));
+    }
     if (b.samples.size() < 2) {
       return fail(Format("branch %u: samples 至少 2 个，实际 %zu",
                          b.id, b.samples.size()));
     }
-    for (size_t i = 0; i < b.samples.size(); ++i) {
-      if (!(b.samples[i].radius > 0.0)) {
-        return fail(Format("branch %u sample %zu: radius 必须 > 0，实际 %g",
-                           b.id, i, b.samples[i].radius));
-      }
+    const uint32_t ring = b.EffectiveRingCount();
+    if (ring < 3) {
+      return fail(Format("branch %u: 无法确定环顶点数（ring_count=0 且没有 profile）",
+                         b.id));
     }
-    if (b.parent >= 0 && ids.count(static_cast<uint32_t>(b.parent)) == 0) {
-      return fail(Format("branch %u: parent %d 不存在", b.id, b.parent));
+    if (b.seam_index >= ring) {
+      return fail(Format("branch %u: seam_index %u 越界（环顶点数 %u）",
+                         b.id, b.seam_index, ring));
+    }
+    for (size_t i = 0; i < b.samples.size(); ++i) {
+      const BranchSample& s = b.samples[i];
+      if (!(s.radius > 0.0)) {
+        return fail(Format("branch %u sample %zu: radius 必须 > 0，实际 %g",
+                           b.id, i, s.radius));
+      }
+      if (s.profile.empty()) {
+        continue;  // 空 = 正圆，由 ring_count 兜底
+      }
+      if (s.profile.size() < 3) {
+        return fail(Format("branch %u sample %zu: profile 至少 3 个点，实际 %zu",
+                           b.id, i, s.profile.size()));
+      }
+      if (s.profile.size() != ring) {
+        // 环点数必须逐点一致，否则扫管时相邻两圈接不上（三角化会错位）。
+        return fail(Format("branch %u sample %zu: profile 点数 %zu != 环顶点数 %u",
+                           b.id, i, s.profile.size(), ring));
+      }
+      std::string why;
+      if (!IsStarShapedCounterClockwise(s.profile, &why)) {
+        return fail(Format("branch %u sample %zu: %s", b.id, i, why.c_str()));
+      }
+      if (!(UnitPerimeter(s.profile) > 0.0)) {
+        return fail(Format("branch %u sample %zu: profile 周长为 0", b.id, i));
+      }
     }
   }
 

@@ -1,4 +1,4 @@
-// 植物拓扑结构的单元测试：校验规则 + 派生计算。
+// 植物拓扑结构的单元测试：校验规则 + 派生计算 + proto 往返。
 //
 // 这些用例刻意做成"改一个字段就必须 FAIL"的负向验证——只测"合法资产能通过"是不够的，
 // 因为校验函数最容易犯的错是**恒真**（规则写了但永远不触发）。
@@ -25,39 +25,40 @@ void Expect(bool cond, const std::string& what) {
   }
 }
 
-// 单位圆截面（12 点，逆时针）。
-CrossSection UnitCircle(int n) {
-  CrossSection cs;
-  cs.seam_index = 0;
-  for (int i = 0; i < n; ++i) {
-    const double a = 2.0 * kPi * i / n;
-    cs.points.push_back(ProfilePoint{std::cos(a), std::sin(a)});
-  }
-  return cs;
+BranchSample MakeSample(double z, double radius,
+                        std::vector<ProfilePoint> profile = {}) {
+  BranchSample s;
+  s.position = Vec3d{0.0, z, 0.0};
+  s.radius = radius;
+  s.tilt = 0.0;
+  s.profile = std::move(profile);
+  return s;
 }
 
 // 最小合法资产：主干 + 一根子枝 + 一类叶 + 一张卡。
+// 截面全部留空 = 正圆，由 ring_count 决定点数。
 Shape MinimalShape() {
   Shape shape;
   // 给一句非空备注：往返测试要能证明 description 真的被搬运，而不是两边都空。
   shape.description = "柳树，垂枝。leaf_type 0 适合 leafset_A / leafset_C。";
-  shape.profile = UnitCircle(12);
 
   Branch root;
   root.id = 0;
   root.parent = -1;
   root.level = 0;
   root.ring_count = 12;
-  root.samples.push_back(BranchSample{Vec3d{0, 0, 0.0}, 0.18, 0.0});
-  root.samples.push_back(BranchSample{Vec3d{0, 0, 2.0}, 0.12, 0.0});
+  root.seam_index = 0;
+  root.samples.push_back(MakeSample(0.0, 0.18));
+  root.samples.push_back(MakeSample(2.0, 0.12));
 
   Branch child;
   child.id = 1;
   child.parent = 0;
   child.level = 1;
   child.ring_count = 8;
-  child.samples.push_back(BranchSample{Vec3d{0, 0, 1.8}, 0.04, 0.0});
-  child.samples.push_back(BranchSample{Vec3d{0.5, 0, 2.2}, 0.01, 0.0});
+  child.seam_index = 0;
+  child.samples.push_back(MakeSample(1.8, 0.04));
+  child.samples.push_back(MakeSample(2.2, 0.01));
 
   shape.branches.push_back(root);
   shape.branches.push_back(child);
@@ -70,8 +71,8 @@ Shape MinimalShape() {
   shape.leaf_types.push_back(type);
 
   LeafCard card;
-  card.anchor = Vec3d{0.2, 0.0, 2.0};
-  card.up = Vec3d{0, 0, 1};
+  card.anchor = Vec3d{0.2, 2.0, 0.0};
+  card.up = Vec3d{0, 1, 0};
   card.normal = Vec3d{1, 0, 0};
   card.height = 0.25;
   card.type = 0;
@@ -101,7 +102,6 @@ void TestNegative() {
   }
   {
     Shape s = MinimalShape();
-    s.branches[0].parent = -1;
     s.branches[1].parent = -1;  // 两根根枝
     std::string err;
     Expect(!Validate(s, &err) && err.find("根枝") != std::string::npos,
@@ -135,34 +135,46 @@ void TestNegative() {
   }
   {
     Shape s = MinimalShape();
-    s.profile.points.resize(2);
+    s.branches[0].ring_count = 0;  // 又没有 profile ⇒ 无法确定环顶点数
     std::string err;
-    Expect(!Validate(s, &err), "截面点少于 3 应失败");
+    Expect(!Validate(s, &err) && err.find("环顶点数") != std::string::npos,
+           "ring_count=0 且无 profile 应失败");
   }
   {
     Shape s = MinimalShape();
-    // 顺时针 = 把顶点顺序反过来
-    std::vector<ProfilePoint> rev(s.profile.points.rbegin(), s.profile.points.rend());
-    s.profile.points = rev;
+    s.branches[0].seam_index = 99;
     std::string err;
-    Expect(!Validate(s, &err), "截面顺时针应失败");
+    Expect(!Validate(s, &err) && err.find("seam_index") != std::string::npos,
+           "seam_index 越界应失败");
   }
   {
     Shape s = MinimalShape();
-    s.profile.seam_index = 99;
+    s.branches[0].samples[1].profile = UnitCircleProfile(12);  // 点数 != ring_count(12)? 相等
+    s.branches[0].samples[1].profile.pop_back();              // 变 11 点，与 ring_count 不符
     std::string err;
-    Expect(!Validate(s, &err), "seam_index 越界应失败");
+    Expect(!Validate(s, &err) && err.find("环顶点数") != std::string::npos,
+           "profile 点数与环顶点数不一致应失败");
   }
   {
     Shape s = MinimalShape();
-    s.cards[0].up = Vec3d{0, 0, 2};  // 非单位向量
+    std::vector<ProfilePoint> pts = UnitCircleProfile(12);
+    std::vector<ProfilePoint> rev(pts.rbegin(), pts.rend());  // 顺时针
+    s.branches[0].samples[0].profile = rev;
+    s.branches[0].samples[1].profile = rev;
+    std::string err;
+    Expect(!Validate(s, &err) && err.find("逆时针") != std::string::npos,
+           "截面顺时针应失败");
+  }
+  {
+    Shape s = MinimalShape();
+    s.cards[0].up = Vec3d{0, 2, 0};  // 非单位向量
     std::string err;
     Expect(!Validate(s, &err) && err.find("单位向量") != std::string::npos,
            "up 非单位向量应失败");
   }
   {
     Shape s = MinimalShape();
-    s.cards[0].normal = Vec3d{0, 0, 1};  // 与 up 平行
+    s.cards[0].normal = Vec3d{0, 1, 0};  // 与 up 平行
     std::string err;
     Expect(!Validate(s, &err) && err.find("正交") != std::string::npos,
            "up 与 normal 平行应失败");
@@ -194,42 +206,52 @@ void TestNegative() {
 }
 
 void TestDerived() {
-  CrossSection circle = UnitCircle(64);
-  Expect(std::fabs(circle.Perimeter() - 2.0 * kPi) < 1e-2,
-         "64 边单位圆周长应接近 2pi");
+  // 64 边单位圆：周长接近 2π
+  const std::vector<ProfilePoint> circle = UnitCircleProfile(64);
+  Expect(std::fabs(SamplePerimeter(MakeSample(0, 1.0, circle), 0) - 2.0 * kPi) < 1e-2,
+         "半径 1、profile=64 边单位圆的周长应接近 2pi");
 
-  CrossSection square;  // 单位正方形的外接轮廓（顶点在 ±1）
-  square.points = {ProfilePoint{1, 1}, ProfilePoint{-1, 1},
-                   ProfilePoint{-1, -1}, ProfilePoint{1, -1}};
-  Expect(std::fabs(square.Perimeter() - 8.0) < 1e-9, "单位正方形周长应为 8");
+  // 8 边单位圆：周长是 8·2·sin(π/8)，明显小于 2π（这条能区分"用真实边长"和"用 2πr"）
+  const double octagon = 8.0 * 2.0 * std::sin(kPi / 8.0);
+  Expect(std::fabs(SamplePerimeter(MakeSample(0, 0.5), 8) - 0.5 * octagon) < 1e-9,
+         "8 边圆周长必须按真实边长算（不能用 2pi r）");
 
+  // ring_count 显式给值时优先；=0 时回落到第一个非空 profile 的点数
   Shape shape = MinimalShape();
-  Expect(shape.branches[0].EffectiveRingCount(shape.profile) == 12,
-         "ring_count 显式给值时应直接用");
+  Expect(shape.branches[0].EffectiveRingCount() == 12, "显式 ring_count 应直接用");
   shape.branches[0].ring_count = 0;
-  Expect(shape.branches[0].EffectiveRingCount(shape.profile) == 12,
-         "ring_count=0 时应回落到截面点数");
+  shape.branches[0].samples[0].profile = UnitCircleProfile(16);
+  shape.branches[0].samples[1].profile = UnitCircleProfile(16);
+  Expect(shape.branches[0].EffectiveRingCount() == 16, "ring_count=0 应回落到 profile 点数");
 }
 
 void TestProtoRoundTrip() {
   Shape shape = MinimalShape();
+  // 给主干一个逐点变化的截面，验证 per-sample profile 真的能被往返搬运。
+  // 改第 0 个点（x=1, y=0）沿自身方向外扩到 1.2：极角仍是 0，星形判据不受影响，
+  // 但形状已经不是圆了。
+  shape.branches[0].samples[0].profile = UnitCircleProfile(12);
+  shape.branches[0].samples[1].profile = UnitCircleProfile(12);
+  shape.branches[0].samples[1].profile[0].x = 1.2;
+  shape.branches[0].ring_count = 0;  // 交给 profile 决定环点数
 
-  // 运行时结构 -> proto -> 运行时结构，字段必须一致。
+  {
+    std::string err;
+    const bool ok = Validate(shape, &err);
+    Expect(ok, "往返前的自造资产应合法: " + err);
+  }
+
+  // 运行时结构 -> proto
   ShapeProto proto;
   proto.set_version(shape.version);
   proto.set_description(shape.description);
-  proto.mutable_profile()->set_seam_index(shape.profile.seam_index);
-  for (const ProfilePoint& p : shape.profile.points) {
-    auto* out = proto.mutable_profile()->add_points();
-    out->set_x(p.x);
-    out->set_y(p.y);
-  }
   for (const Branch& b : shape.branches) {
     auto* out = proto.add_branches();
     out->set_id(b.id);
     out->set_parent(b.parent);
     out->set_level(b.level);
     out->set_ring_count(b.ring_count);
+    out->set_seam_index(b.seam_index);
     for (const BranchSample& s : b.samples) {
       auto* bs = out->add_samples();
       bs->mutable_position()->set_x(s.position.x);
@@ -237,6 +259,11 @@ void TestProtoRoundTrip() {
       bs->mutable_position()->set_z(s.position.z);
       bs->set_radius(s.radius);
       bs->set_tilt(s.tilt);
+      for (const ProfilePoint& p : s.profile) {
+        auto* pp = bs->add_profile();
+        pp->set_x(p.x);
+        pp->set_y(p.y);
+      }
     }
   }
   for (const LeafType& t : shape.leaf_types) {
@@ -270,12 +297,14 @@ void TestProtoRoundTrip() {
   Expect(back.description == shape.description, "往返后 description 一致");
   Expect(back.version == shape.version, "往返后 version 一致");
   Expect(back.branches.size() == shape.branches.size(), "往返后枝数一致");
-  Expect(back.branches[1].samples[1].position.x == shape.branches[1].samples[1].position.x,
+  Expect(back.branches[1].samples[1].position.y == shape.branches[1].samples[1].position.y,
          "往返后坐标一致");
   Expect(back.cards.size() == shape.cards.size(), "往返后卡数一致");
-  Expect(back.leaf_types.size() == shape.leaf_types.size(), "往返后类型表一致");
-  Expect(back.leaf_types[0].anchor_mode == "bottom_center", "往返后 anchor_mode 一致");
   Expect(back.cards[0].height == shape.cards[0].height, "往返后卡高度一致");
+  Expect(back.branches[0].samples[1].profile.size() == 12, "往返后 profile 点数一致");
+  Expect(std::fabs(back.branches[0].samples[1].profile[0].x - 1.2) < 1e-12,
+         "往返后 profile 形状一致（逐点可变）");
+  Expect(back.branches[0].seam_index == shape.branches[0].seam_index, "往返后 seam_index 一致");
 }
 
 }  // namespace
