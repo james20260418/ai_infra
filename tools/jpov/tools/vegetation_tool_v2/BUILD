@@ -56,6 +56,7 @@ cc_binary(
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
         "@com_google_protobuf//:protobuf",
     ],
     target_compatible_with = [

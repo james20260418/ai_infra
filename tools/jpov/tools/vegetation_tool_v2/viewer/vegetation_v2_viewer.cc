@@ -27,6 +27,7 @@
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/interface/ui.h"
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 #include "tools/jpov/tools/vegetation_tool_v2/sweep.h"
 
@@ -52,6 +53,7 @@ struct CliArgs {
   double radius = 0.0;   // 0 = 自动
   bool show_cards = true;
   int max_level = 99;
+  float ground_y = 0.0f;
 };
 
 CliArgs ParseCli(int argc, char** argv) {
@@ -75,6 +77,8 @@ CliArgs ParseCli(int argc, char** argv) {
       CHECK_GT(a.radius, 0.0) << "--cam_r 必须 > 0";
     } else if (arg == "--hide-cards") {
       a.show_cards = false;
+    } else if (arg == "--ground-y" && has_val) {
+      a.ground_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--max-level" && has_val) {
       a.max_level = std::atoi(argv[++i]);
       CHECK_GE(a.max_level, 0) << "--max-level 不能为负";
@@ -188,8 +192,15 @@ class VegetationV2App : public JPOV {
   jpov::PBRMaterial branch_mat_;
   jpov_viewer::ViewConfig view_;
 
+  bool show_panel_ = true;   // 面板只在交互窗口画（headless 出纯 3D）
   bool show_cards_ = true;
   int max_level_ = 99;
+  float max_level_f_ = 99.0f;   // 滑条用（int 版才是真值）
+  float ground_y_ = 0.0f;       // 地面平面高度（米）
+  float cam_target_y_ = 0.0f;   // 中键纵向 pan 的注视点偏移
+  uint32_t ground_mesh_ = 0;
+  jpov::PBRMaterial ground_mat_;
+  jpov::Ui ui_;
   jpov_skylight::SkyDegrees deg_;
 
   std::string CamString() const {
@@ -280,8 +291,14 @@ class VegetationV2App : public JPOV {
     deg_.sun_elev_deg = 55.0f;
     deg_.sun_azim_deg = 35.0f;
 
+    ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
+    ground_mat_ = jpov_skylight::GroundMaterial();
+
+    show_panel_ = !args.capture;   // headless 出图不画面板（与其它 viewer 一致）
     show_cards_ = args.show_cards;
     max_level_ = args.max_level;
+    max_level_f_ = static_cast<float>(args.max_level);
+    ground_y_ = args.ground_y;
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
@@ -315,11 +332,18 @@ class VegetationV2App : public JPOV {
     }
     jpov_viewer::ApplyInput(&view_, dx, dy, input.scroll_delta,
                             static_cast<int>(winfo.width), static_cast<int>(winfo.height));
+    // 中键纵向 drag = 平移注视点（相机位置与 target 同步平移，朝向不变）。
+    // 与 clothing tool 同一套手感：半屏 = 1m（jpov_viewer::VerticalPanDeltaY）。
+    if (input.middle.IsDrag()) {
+      cam_target_y_ += jpov_viewer::VerticalPanDeltaY(input.mouse_dy, winfo.height);
+    }
 
     cmds->camera.fbo_3d_width_ = kViewerWidth;
     cmds->camera.fbo_3d_height_ = kViewerHeight;
-    cmds->camera.position = view_.Position();
-    cmds->camera.target = jpov_viewer::ViewConfig::Target();
+    // 相机整体跟随中键 pan 的 Y 偏移（position 与 target 同加，朝向不变）
+    const jpov::Vec3f cam_pos = view_.Position();
+    cmds->camera.position = {cam_pos.x(), cam_pos.y() + cam_target_y_, cam_pos.z()};
+    cmds->camera.target = {0.0f, cam_target_y_, 0.0f};
     cmds->camera.up = {0.0f, 1.0f, 0.0f};
     cmds->camera.fov = 60.0f;
     cmds->camera.near = 0.02f;
@@ -330,6 +354,10 @@ class VegetationV2App : public JPOV {
     cmds->sun = nl.dir_light;
     cmds->ambient = nl.ambient;
     cmds->tone_mapping = true;
+
+    // 地面：高度可调（默认 0，与树根同面）
+    cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, ground_y_, 0.0f}, {0.0f, 1.0f, 0.0f},
+                       {0.0f, 0.0f, 1.0f});
 
     for (size_t i = 0; i < branch_mesh_.size(); ++i) {
       if (branch_level_[i] > max_level_) {
@@ -351,6 +379,27 @@ class VegetationV2App : public JPOV {
     }
     cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
                    jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+
+    // 交互面板：地面高度 / 最大层级 / 叶卡开关。
+    if (show_panel_) {
+      const float w = static_cast<float>(kViewerWidth);
+      const float h = static_cast<float>(kViewerHeight);
+      jpov::UiTheme theme = jpov::UiTheme::Default(16.0f);
+      theme.font_alias = jpov::kFontBuiltinCJK;
+      ui_.Begin(input, theme, w, h, 1000.0f / 60.0f);
+      const float colw = 0.26f * w;
+      const float cx = 0.02f * w;
+      const float top = h - 16.0f - (3 * 24.0f + 2 * 8.0f);
+      auto row = [&](int i) {
+        return jpov::UiRect{{cx, top + i * 32.0f}, {colw, 24.0f}};
+      };
+      ui_.SliderFloat("地面高度 y (m)", &ground_y_, row(0), -3.0f, 3.0f, 2);
+      ui_.SliderFloat("最大层级", &max_level_f_, row(1), 0.0f, 20.0f, 0);
+      ui_.Checkbox("显示叶卡", &show_cards_, row(2));
+      ui_.End();
+      ui_.Emit(cmds);
+      max_level_ = static_cast<int>(max_level_f_ + 0.5f);
+    }
   }
 };
 
