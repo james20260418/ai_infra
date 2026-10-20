@@ -3,7 +3,7 @@
 // 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
 //   烟雾（类型 / 开关 / 照度 / 浓度）/ 火星（开关 / 数量 / 大小）/
-//   火焰温度增益（含 3 套温度→颜色映射）
+//   火焰温度增益（含 3 套温度→颜色映射）/ 软深度（开关 + 过渡距离，A/B 用）
 //
 // 设计：
 //   * 纹理：5 张 12×6「成对渐变」atlas（kPairMorph，pair_len=12，一块 = 两段形变）
@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -244,12 +245,23 @@ public:
     float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
     float ui_ember_size_ = 0.010f;       // 火星世界尺寸（米，2..40mm）
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
+    bool ui_soft_depth_ = true;          // 软深度开关（关 = 旧 2cm 硬切，便于 A/B）
+    float ui_soft_depth_m_ = 0.08f;      // 软深度淡出过渡距离（视空间米）
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
     jpov::particles::Rng sub_rng_{20261015u};
 
     void InstallTextMeasure() { ui_.SetTextMeasure(&ParticleViewerApp::TextWidth, this); }
     void SetShowPanel(bool show) { show_panel_ = show; }
+
+    // 本帧软深度设置：开着就带过渡距离，关着就 nullopt（= 旧硬判据，零回归）。
+    // 火焰 / 烟 / 火星三层共用同一个 UI 值 —— 验收只关心这一个开关。
+    std::optional<float> SoftDepthForCommand() const {
+        if (!ui_soft_depth_) {
+            return std::nullopt;
+        }
+        return ui_soft_depth_m_;
+    }
 
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
@@ -407,6 +419,7 @@ public:
                 spc.blend = smoke_cfg_.blend;
                 spc.sort = smoke_cfg_.sort;
                 spc.frame_blend = frame_blend_;
+                spc.soft_depth_m = SoftDepthForCommand();
                 cmds->DrawParticles(std::move(spc));
             }
         }
@@ -423,6 +436,7 @@ public:
             pc.blend = fire_cfg_.blend;
             pc.sort = fire_cfg_.sort;
             pc.frame_blend = frame_blend_;
+            pc.soft_depth_m = SoftDepthForCommand();
             cmds->DrawParticles(std::move(pc));
         }
 
@@ -451,6 +465,7 @@ public:
                 ec.flipbook = false;
                 ec.align = ember_cfg_.align;
                 ec.blend = ember_cfg_.blend;
+                ec.soft_depth_m = SoftDepthForCommand();
                 cmds->DrawParticles(std::move(ec));
             }
         }
@@ -533,7 +548,7 @@ private:
         }
 
         const float colw = 0.26f * w;
-        const float top = h - 16.0f - (15 * 24.0f + 14 * 5.0f);
+        const float top = h - 16.0f - (17 * 24.0f + 16 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
         };
@@ -552,6 +567,8 @@ private:
         ui_.SliderFloat("火星数量", &ui_ember_count_, row(12), 0.0f, 80.0f, 0);
         ui_.SliderFloat("火星大小", &ui_ember_size_, row(13), 0.002f, 0.040f, 3);
         ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
+        ui_.Checkbox("软深度", &ui_soft_depth_, row(15));
+        ui_.SliderFloat("软深度距离", &ui_soft_depth_m_, row(16), 0.01f, 0.5f, 3);
     }
 
     bool show_panel_ = true;

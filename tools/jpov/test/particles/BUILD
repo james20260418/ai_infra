@@ -21,6 +21,7 @@ cc_binary(
     srcs = ["particle_gold.cc"],
     data = ["//tools/jpov:particle_gold_assets"],
     deps = [
+        "//third_party/stb:stb_image",
         "//tools/jpov:fire_palette",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src/particles:particle_system",
@@ -38,9 +39,11 @@ cc_test(
     srcs = ["particle_gold.cc"],
     data = [
         ":particle_fire_smoke_ember_1280x720.png",
+        ":particle_fire_smoke_ember_soft_1280x720.png",
         "//tools/jpov:particle_gold_assets",
     ],
     deps = [
+        "//third_party/stb:stb_image",
         "//tools/jpov:fire_palette",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/src/particles:particle_system",
