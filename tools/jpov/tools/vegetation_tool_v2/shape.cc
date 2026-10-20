@@ -100,10 +100,8 @@ uint32_t Branch::EffectiveRingCount(const CrossSection& profile) const {
 
 Shape FromProto(const ShapeProto& proto) {
   Shape shape;
-  shape.format = proto.format();
   shape.version = proto.version();
-  shape.units = proto.units();
-  shape.up_axis = proto.up_axis();
+  shape.description = proto.description();
 
   shape.profile.seam_index = proto.profile().seam_index();
   shape.profile.points.reserve(proto.profile().points_size());
@@ -161,17 +159,9 @@ bool Validate(const Shape& shape, std::string* error) {
     return false;
   };
 
-  // ── 全局约定 ──
-  if (shape.format != "jpov.vegetation") {
-    return fail(Format("format 必须是 jpov.vegetation，实际 \"%s\"",
-                       shape.format.c_str()));
-  }
-  if (shape.units != "meters") {
-    return fail(Format("units 必须是 meters，实际 \"%s\"", shape.units.c_str()));
-  }
-  if (shape.up_axis != "+Z") {
-    return fail(Format("up_axis 必须是 +Z，实际 \"%s\"", shape.up_axis.c_str()));
-  }
+  // ── 版本 ──
+  // 单位（米）与上方向（+Y）是硬编码约定，没有字段可校验；越界值只可能来自
+  // 生成器写错，由下游几何结果暴露（树大 1000 倍 / 树躺倒），故此处只查版本。
   if (shape.version == 0) {
     return fail("version 不能为 0");
   }

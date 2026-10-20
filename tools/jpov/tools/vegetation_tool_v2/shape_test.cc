@@ -39,6 +39,8 @@ CrossSection UnitCircle(int n) {
 // 最小合法资产：主干 + 一根子枝 + 一类叶 + 一张卡。
 Shape MinimalShape() {
   Shape shape;
+  // 给一句非空备注：往返测试要能证明 description 真的被搬运，而不是两边都空。
+  shape.description = "柳树，垂枝。leaf_type 0 适合 leafset_A / leafset_C。";
   shape.profile = UnitCircle(12);
 
   Branch root;
@@ -93,16 +95,9 @@ void TestValid() {
 void TestNegative() {
   {
     Shape s = MinimalShape();
-    s.units = "centimeters";
+    s.version = 0;
     std::string err;
-    Expect(!Validate(s, &err) && err.find("meters") != std::string::npos,
-           "units 非 meters 应失败");
-  }
-  {
-    Shape s = MinimalShape();
-    s.up_axis = "+Y";
-    std::string err;
-    Expect(!Validate(s, &err), "up_axis 非 +Z 应失败");
+    Expect(!Validate(s, &err), "version 为 0 应失败");
   }
   {
     Shape s = MinimalShape();
@@ -221,10 +216,8 @@ void TestProtoRoundTrip() {
 
   // 运行时结构 -> proto -> 运行时结构，字段必须一致。
   ShapeProto proto;
-  proto.set_format(shape.format);
   proto.set_version(shape.version);
-  proto.set_units(shape.units);
-  proto.set_up_axis(shape.up_axis);
+  proto.set_description(shape.description);
   proto.mutable_profile()->set_seam_index(shape.profile.seam_index);
   for (const ProfilePoint& p : shape.profile.points) {
     auto* out = proto.mutable_profile()->add_points();
@@ -274,6 +267,8 @@ void TestProtoRoundTrip() {
   std::string err;
   const bool ok = Validate(back, &err);
   Expect(ok, "往返后的资产应仍然合法: " + err);
+  Expect(back.description == shape.description, "往返后 description 一致");
+  Expect(back.version == shape.version, "往返后 version 一致");
   Expect(back.branches.size() == shape.branches.size(), "往返后枝数一致");
   Expect(back.branches[1].samples[1].position.x == shape.branches[1].samples[1].position.x,
          "往返后坐标一致");

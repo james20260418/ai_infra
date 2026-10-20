@@ -6,9 +6,9 @@
 //   * proto 改字段时，改动集中在本文件的 FromProto 一处；
 //   * 结构体可以带派生计算（周长、环细分等），proto 不能。
 //
-// 约定见 ../docs/vegetation_asset_format.md：
-//   * 单位：米 / 弧度
-//   * up_axis：+Z（Blender 原生）
+// 约定（**硬编码，不做成字段**——多一个字段就多一个能填错的地方）：
+//   * 单位：**米**（m）；角度用弧度
+//   * 上方向：**+Y**（glTF 约定）。Blender 是 +Z up，导出时转 (x,y,z)->(x,z,-y)
 //   * profile：归一化单位多边形（半径 1），逆时针，闭合且首尾不重复
 
 #ifndef JPOV_TOOLS_VEGETATION_TOOL_V2_SHAPE_H_
@@ -89,10 +89,13 @@ struct LeafType {
 
 // 一棵植物的完整拓扑。
 struct Shape {
-  std::string format = "jpov.vegetation";
+  // 格式版本。加字段不升版本；改语义/单位必须升。
   uint32_t version = 1;
-  std::string units = "meters";
-  std::string up_axis = "+Z";
+
+  // 万用备注/提示词：这份 shape 的用途、哪类叶卡该配什么素材、哪些素材可互换。
+  // 供人 / agent / 下游工具读取，**永不参与逻辑判断**，可为空。
+  std::string description;
+
   CrossSection profile;
   std::vector<Branch> branches;
   std::vector<LeafType> leaf_types;
