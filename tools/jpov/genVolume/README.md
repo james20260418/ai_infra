@@ -23,6 +23,8 @@ tools/jpov/genVolume/
 ├── vdb_to_jpovvol.py        # 【通用】OpenVDB（单帧/序列）→ JPVOL2，任意 grid→通道映射
 ├── fire_family_bake.py      # 生命周期三段（点火/循环/熄灭）烘焙 → JPVOL2 + sidecar
 ├── make_flipbook.py         # .jpovvol → flipbook PNG（粒子火/烟纹理）
+├── morph_util.py            # 【2D 形变】FLOW / PROFILE 图像插值（F1→F5 等）
+├── samples/morph/           # 形变样例输入/输出 + 复现说明
 │
 ├── # —— 仿真场景（需 Mantaflow 运行时；见 env/）——
 ├── fire_scene.py            # 火（间歇版；旋钮走环境变量）
@@ -136,7 +138,25 @@ python3 -m unittest discover -s tools/jpov/genVolume -p 'test_*.py' -v
 
 ---
 
-## 7. 来源 / 授权
+## 7. 2D 形变（morph_util.py）
+
+把两张单通道遮罩（同一画布）插值成中间帧，用于做形状补间 flipbook（例如 F1→F5）。
+
+```python
+from morph_util import morph_frames, make_flipbook_sheet
+frames = morph_frames(alpha_a, alpha_b, n_frames=32, method="flow")  # 或 "profile"
+sheet = make_flipbook_sheet(frames, tiles_x=8)   # 8×4 atlas, uint8 RGBA
+```
+
+- **FLOW**：Farneback 稠密光流双向 warp + 融合。无需特征点，通用；形状遮挡时中段可能有轻微双影。
+- **PROFILE**：逐行「中心线 + 宽度」插值后水平仿射采样。真·矢量形变、可解释性最好，适合大致竖直的形状；分叉/多连通块会被并成一根主柱。
+- 输入 `(H,W)` float32 `[0,1]`（uint8 自动 /255）；`t=0/1` **逐像素返回原图**。
+- 帧时间 `t_i=i/(n_frames-1)`（末帧=目标）；推荐 24–32 帧，`fps = n_frames / lifetime`。
+- 样例与复现命令：`samples/morph/`（含 8×4 atlas 与抽样预览）。
+
+---
+
+## 8. 来源 / 授权
 
 - 由本目录脚本烘出的 `.jpovvol` / flipbook PNG 均为**自产衍生资产**。
 - Mantaflow：**Apache-2.0**（`github.com/tum-pbs/mantaflow`，0.13）。
