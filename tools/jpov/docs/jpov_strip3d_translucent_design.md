@@ -159,6 +159,16 @@ WBO 里消光**只由 α 决定**，`max(rgb)` 只进颜色加权平均。
 
 ## 5. WBO 目标与合成
 
+### 5.0 用共享件，不要手抄（2026-10-20 重构后）
+
+WBO 的 FBO / 附件 / clear / 混合 / 还原已经收敛成 `src/wbo/wbo_target.{h,cc}` 的 `WboTarget`，
+权重与解析收敛成 `src/wbo/wbo_shader.h`。**条带必须用它们**，不要复制粘贴一套新的。
+规则见 `docs/jpov_wbo_target.md §3`。要点：
+- 只申请要读的附件（条带 v1：accum/reveal + additive；不要 depth）；
+- `BindForDraw()` / `EndDraw()` 包住绘制；
+- 权重从 `kWboWeightGlsl` 注入；
+- 解析用 `kWboCompositeFs`。
+
 ### 5.1 一个 FBO、三个附件（1×）
 
 ```
@@ -344,7 +354,22 @@ struct TranslucentStrip3DCommand {
    （同时防「根本没生效」和「整屏都变了」）。
 5. **负向**：`left.size() != right.size()` 必须 crash（death test）。
 
-## 13. 与现有代码的关系
+> 另：WBO 权重函数的文本契约测试（`test/wbo:wbo_weight_contract_test`）已随配套 WBO 重构落地，
+> 条带沿用同一份权重，无需额外测试。
+
+## 13. 与现有代码的关系（2026-10-20 重构后已更新）
+
+**已落地（配套 WBO 重构 PR）**：
+- `WboTarget` 接管粒子与体积火的 FBO/clear/blend/还原（`docs/jpov_wbo_target.md`）；
+- 权重函数与全屏解析共享化（`kWboWeightGlsl` / `kWboCompositeFs`），并有文本契约测试守 drift；
+- **体积火的死 depth 附件已删**（`FragDepth` 输出 + 第三附件 + num/den 累积一并移除），gold 逐字节不变；
+- 槽位约定定为 `0=accum / 1=reveal / 2=additive / 3=depth`。
+
+**未迁移（有意）**：
+- 玻璃 FBO 仍由 `Renderer` 手写：它要把 `FragDepthAccum` 挪到槽位 3，且现有 gold 只有
+  「8×8 块平均差 ≤ 30」太松，迁移前得先收紧到逐字节。见 `jpov_wbo_target.md §5`。
+
+**条带接入时（新增内容）**：
 
 - 新增 `src/strip/strip_renderer.{h,cc}`：`Begin()` / `Draw()` / `Composite()`，
   结构对齐 `ParticleRenderer`。
@@ -353,15 +378,12 @@ struct TranslucentStrip3DCommand {
   **合成时必须 `glDrawBuffers(1, {COLOR_ATTACHMENT0})` 再恢复 MRT(2)** ——
   否则 MRT#1 的场景深度附件内容未定义，会出现 PR #176 那个 tile 级逐帧闪烁。
 - 旧 `Strip3DCommand`（纯色调试线）**保留不动**。
-- 顺带清理（可同批、也可单独 PR）：`VolumeFireRenderer` 的 `COLOR_ATTACHMENT2`
-  深度附件**从未被采样**（`volume_fire_renderer.h:249` 写、`kFsComp` 只读 accum/reveal），
-  与粒子当初删掉的死附件是同款反模式。删掉不影响任何输出像素，省一张全屏 R32F 的
-  clear + 带宽；gold 可作证。
 
 ## 14. 里程碑
 
 | 阶段 | 内容 |
-|---|---|
+|---|---|---|
+| M0 | **WBO 准备（已完成，配套 PR）**：`WboTarget` + 共享权重/解析 + 删死 depth + 契约测试 |
 | M1 | 命令 + 几何 + 剖面 + 覆盖集 + Composite + gold（玻璃条纹） |
 | M2 | 加法集 + `additive_gain` + gold（拖尾） |
 | M3 | 软深度 + A/B 断言 |
