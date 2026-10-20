@@ -98,14 +98,26 @@ void ParticleRenderer::EnsureWbo(int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // 加法集（真·加法累积）：独立 RGB 求和，黑底=0 → 天然透明。线性过滤供上采样。
+    glGenTextures(1, &add_tex_);
+    glBindTexture(GL_TEXTURE_2D, add_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
     glGenFramebuffers(1, &wbo_fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            accum_tex_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            reveal_tex_, 0);
-    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+                           add_tex_, 0);
+    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                            GL_COLOR_ATTACHMENT2};
+    glDrawBuffers(3, bufs);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
         << "ParticleRenderer WBO FBO incomplete";
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -118,6 +130,7 @@ void ParticleRenderer::DestroyWbo() {
     if (wbo_fbo_) { glDeleteFramebuffers(1, &wbo_fbo_); wbo_fbo_ = 0; }
     if (accum_tex_) { glDeleteTextures(1, &accum_tex_); accum_tex_ = 0; }
     if (reveal_tex_) { glDeleteTextures(1, &reveal_tex_); reveal_tex_ = 0; }
+    if (add_tex_) { glDeleteTextures(1, &add_tex_); add_tex_ = 0; }
     wbo_w_ = 0;
     wbo_h_ = 0;
 }
@@ -131,10 +144,14 @@ void ParticleRenderer::Begin(int full_w, int full_h) {
     glViewport(0, 0, hw, hh);
     const GLfloat clr_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const GLfloat clr_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    const GLfloat clr_add[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     glClearBufferfv(GL_COLOR, 0, clr_accum);
     glClearBufferfv(GL_COLOR, 1, clr_reveal);
+    glClearBufferfv(GL_COLOR, 2, clr_add);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     has_content_ = false;
+    has_alpha_ = false;
+    has_additive_ = false;
 }
 
 void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
@@ -200,6 +217,7 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glBlendEquation(GL_FUNC_ADD);
     glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
     glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
+    glBlendFunci(2, GL_ONE, GL_ONE);                    // add   += 色·α（真加法求和）
 
     glUseProgram(prog_draw_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE,
@@ -215,8 +233,6 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uTilesY"), cmd.tiles_y);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFlipbook"), cmd.flipbook ? 1 : 0);
     glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uFrameBlend"), cmd.frame_blend ? 1 : 0);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uAdditive"),
-                cmd.blend == BlendMode::kAdditive ? 1 : 0);
     glUniform2f(shader_mgr_->GetUniform(prog_draw_, "uViewport"), static_cast<float>(hw),
                 static_cast<float>(hh));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
@@ -234,6 +250,11 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
         glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 0);
         glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"), 1.0f);
     }
+
+    // 混合路径：0 = α 覆盖集（吸收介质），2 = 加法集（发光介质）。
+    // 老的「1 = 亮度当覆盖的加法近似」已删：发光体就该求和，近似既不物理也不省什么。
+    const int blend_path = cmd.emissive ? 2 : 0;
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uBlendPath"), blend_path);
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
@@ -261,38 +282,62 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     // 复原 blend（非常规混合必须显式回写；GL_COLOR_BUFFER_BIT 的 pop 不一定覆盖 blend func）。
     glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);   // 归位：调用方后续按「unit 0 已激活」写 pass
     glPopAttrib();
 
     has_content_ = true;
+    if (blend_path == 2) {
+        has_additive_ = true;
+    } else {
+        has_alpha_ = true;
+    }
 }
 
 void ParticleRenderer::Composite(int full_w, int full_h) {
     if (!has_content_ || wbo_fbo_ == 0) {
         return;
     }
-    glPushAttrib(GL_ENABLE_BIT);
+    // 本 pass 会改 enable + blend func/equation：两者分属 GL_ENABLE_BIT 与
+    // GL_COLOR_BUFFER_BIT，必须**一起**入栈，否则会把自定义混合泄漏给后续 pass。
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
     glViewport(0, 0, full_w, full_h);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendEquation(GL_FUNC_ADD);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // over（预乘 src）
 
     glUseProgram(prog_comp_);
-    glActiveTexture(GL_TEXTURE0 + 0);
-    glBindTexture(GL_TEXTURE_2D, accum_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
-    glActiveTexture(GL_TEXTURE0 + 1);
-    glBindTexture(GL_TEXTURE_2D, reveal_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
-
     glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
 
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glPopAttrib();
+    // ① 覆盖集：C=accum.rgb/accum.a、cov=1−reveal，预乘 over 进目标。
+    if (has_alpha_) {
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // over（预乘 src）
+        glActiveTexture(GL_TEXTURE0 + 0);
+        glBindTexture(GL_TEXTURE_2D, accum_tex_);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
+        glActiveTexture(GL_TEXTURE0 + 1);
+        glBindTexture(GL_TEXTURE_2D, reveal_tex_);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    // ② 加法集：直接求和到目标之上（加法光不被覆盖集衰减 —— 单层 OIT 的固有近似）。
+    if (has_additive_) {
+        glBlendFunc(GL_ONE, GL_ONE);   // 求和
+        glActiveTexture(GL_TEXTURE0 + 0);
+        glBindTexture(GL_TEXTURE_2D, add_tex_);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 0);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 1);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glPopAttrib();          // 还原 enable / blend（含 equation）
     has_content_ = false;   // 本帧消费掉
+    has_alpha_ = false;
+    has_additive_ = false;
 }
 
 }  // namespace jpov

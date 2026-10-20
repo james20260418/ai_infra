@@ -1850,8 +1850,15 @@ struct ParticleRenderCommand {
     jpov::AlignMode align = AlignMode::kVertical;   // 广告牌朝向调制
     bool stretched = false;       // 沿速度拉伸（align=kVelocity 时有意义）
     float stretch_scale = 1.0f;   // 拉伸系数（每 m/s）
-    jpov::BlendMode blend = BlendMode::kAdditive;   // 混合模式
-    jpov::SortMode  sort = SortMode::kNone;         // 排序模式
+
+    // 这一层是**发光介质**（true，默认）还是**吸收介质**（false）：
+    //   true  = 贡献 col.rgb·col.a 写进**加法集**（求和）：不参与覆盖率、不遮挡背景，
+    //           多层叠加线性变亮 —— 火/火星/爆炸/魔法光该走这条（物理上它们是发射体）。
+    //   false = 走覆盖集（WBO）：加权平均色 + 1−Π(1−α) 覆盖率，会遮挡背景 ——
+    //           烟/尘/雾该走这条（物理上它们是吸收/散射体，不发光）。
+    // 一句话：**发光体求和，吸收体求覆盖**。默认 true 是因为粒子命令的常见用途是火；
+    // 画烟请显式置 false，否则烟会变成"不遮挡背景的发光霾"。
+    bool emissive = true;
 
     // 软深度（soft particles）：nullopt = **关闭**，退回「离遮挡物 2cm 就硬切」的旧判据
     //（与引入本字段前的像素完全一致，可用于 A/B）；有值时启用，值为**淡出过渡距离**。

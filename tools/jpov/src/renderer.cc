@@ -319,19 +319,18 @@ void main() {
 }
 )glsl";
 
-// 上采样累加 pass：从更小一级采样放大回本级，并与本级已有的高亮相加。
-// 自最小一级逐级应用到全分辨率 —— 多尺度辉光累加。
+// 上采样累加 pass：把更小一级的辉光双线性放大到本级尺寸。
+// 累加**不用 shader 做**，而是靠 `glBlendFunc(GL_ONE, GL_ONE)` 加进目标里已有的本级高亮
+// —— 这样每个级别的纹理始终按**它自己的尺寸**整张贴图读写，不需要「在大纹理的某个视口子矩形里
+// 画小图」。后者曾是本 pass 的 bug 来源：乒乓 acc 缓冲按半分辨率分配，却在 1/4、1/8 级用
+// `glViewport` 写进来 → 只写了左下角一块，再按整张 UV 采样回来 = 整屏拉丝状的脏数据。
 const char* kBloomUpsampleFs = R"glsl(
 #version 330 core
 in vec2 vTexCoord;
 out vec4 FragColor;
-uniform sampler2D uLowerTexture;   // 更小一级的辉光（被放大）
-uniform sampler2D uCurrentTexture; // 本级已有的高亮（被相加）
+uniform sampler2D uLowerTexture;   // 更小一级的辉光（被双线性放大）
 void main() {
-    // 双线性放大下一级辉光 + 本级原有高亮 = 多尺度累加。
-    vec3 lower = texture(uLowerTexture, vTexCoord).rgb;
-    vec3 current = texture(uCurrentTexture, vTexCoord).rgb;
-    FragColor = vec4(lower + current, 1.0);
+    FragColor = vec4(texture(uLowerTexture, vTexCoord).rgb, 1.0);
 }
 )glsl";
 
@@ -341,12 +340,13 @@ const char* kBloomCompositeFs = R"glsl(
 in vec2 vTexCoord;
 out vec4 FragColor;
 uniform sampler2D uHdrTexture;      // 原始 HDR（未加辉光）
-uniform sampler2D uBloomTexture;    // 最终辉光图
+uniform sampler2D uBloomTexture;    // 最终辉光图（各级累加，**未归一化**）
 uniform float uIntensity;           // 整体强度
+uniform float uNorm;                // 1/级数：把「n 级各加一遍」归一化成稳定强度
 void main() {
     vec3 hdr = texture(uHdrTexture, vTexCoord).rgb;
     vec3 bloom = texture(uBloomTexture, vTexCoord).rgb;
-    FragColor = vec4(hdr + bloom * uIntensity, 1.0);
+    FragColor = vec4(hdr + bloom * (uIntensity * uNorm), 1.0);
 }
 )glsl";
 
@@ -2750,14 +2750,11 @@ void Renderer::DestroyBloomChain() {
     }
     bloom_level_w_.clear();
     bloom_level_h_.clear();
+    bloom_final_tex_ = 0;   // 指向 bloom_texs_[0]，重建后必须失效
     if (bloom_work_fbo_) { glDeleteFramebuffers(1, &bloom_work_fbo_); bloom_work_fbo_ = 0; }
     if (bloom_work_tex_) { glDeleteTextures(1, &bloom_work_tex_); bloom_work_tex_ = 0; }
     bloom_work_w_ = 0;
     bloom_work_h_ = 0;
-    if (bloom_acc_fbo_a_) { glDeleteFramebuffers(1, &bloom_acc_fbo_a_); bloom_acc_fbo_a_ = 0; }
-    if (bloom_acc_a_) { glDeleteTextures(1, &bloom_acc_a_); bloom_acc_a_ = 0; }
-    if (bloom_acc_fbo_b_) { glDeleteFramebuffers(1, &bloom_acc_fbo_b_); bloom_acc_fbo_b_ = 0; }
-    if (bloom_acc_b_) { glDeleteTextures(1, &bloom_acc_b_); bloom_acc_b_ = 0; }
 }
 
 // 按需构建 bloom 链：levels 级半分辨率 FBO（1/2, 1/4, 1/8, ...）+ 一个
@@ -2834,30 +2831,6 @@ void Renderer::EnsureBloomChain(int full_w, int full_h, int levels) {
         << "bloom work FBO failed, status=" << status;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    // 上采样累加用的两个乒乓缓冲：各取半分辨率尺寸。
-    const int acc_w = std::max(1, full_w / 2);
-    const int acc_h = std::max(1, full_h / 2);
-    auto make_acc = [&](GLuint* tex, GLuint* fbo) {
-        glGenTextures(1, tex);
-        glBindTexture(GL_TEXTURE_2D, *tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, acc_w, acc_h, 0,
-                     GL_RGBA, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glGenFramebuffers(1, fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                               GL_TEXTURE_2D, *tex, 0);
-        GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        CHECK_EQ(st, GL_FRAMEBUFFER_COMPLETE) << "bloom acc FBO failed, status=" << st;
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    };
-    make_acc(&bloom_acc_a_, &bloom_acc_fbo_a_);
-    make_acc(&bloom_acc_b_, &bloom_acc_fbo_b_);
-
     bloom_work_w_ = full_w;
     bloom_work_h_ = full_h;
 }
@@ -2879,12 +2852,23 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
                                      int hdr_w, int hdr_h) {
     (void)cmds;
 
+    // 强度 <= 0 = 无辉光：整条链（含各级 FBO 分配）都不用跑，直接透传。
+    if (cfg.intensity <= 0.0f) {
+        return hdr_input_tex;
+    }
+
     // 需要完整 HDR 尺寸来建 work FBO；但 bloom 链从半分辨率开始。
     // 预过滤阶段直接从 HDR 采样、渲到半分辨率 L0（天然缩小）。
     EnsureBloomChain(hdr_w, hdr_h, cfg.levels);
     const int n = static_cast<int>(bloom_texs_.size());
     CHECK_GT(n, 0);
 
+    // ⚠️ 本 pass 会改 enable / depth-mask / blend 状态，**必须整段保存并还原**。
+    // 曾经的 bug：函数开头 `glDisable(GL_BLEND)` 之后就再没恢复，而它后面的 tone map、
+    // SMAA、以及**所有 2D/UI 绘制**都依赖 `GL_BLEND` 已开（文字/半透明面板靠 alpha 混合）。
+    // 后果不是"UI 被辉光处理"，而是**UI 文字的 alpha 被忽略** → 每个字形四边形整块写成
+    // 不透明纯白 → 面板看起来糊成一坨白块（"UI 也被辉光了"）。
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
@@ -2919,57 +2903,23 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    // ---- Step 3: 上采样累加 —— 自最小一级往回，逐级放大并叠加各级高亮 ----
-    // 用乒乓缓冲（acc_a/acc_b）避免读写同一纹理的 hazard。
-    // acc 初始 = 最小一级 L_{n-1} 的内容；每往上一级：
-    //   new_acc = upsample(acc) + L_i（当前级的冷冻高亮），分辨率随 i 变大。
-    // 循环结束 acc 在 L0（半分辨率），即全链路多尺度辉光。
-    {
-        // 把最小一级 L_{n-1} 拷到 acc_a（作为累加起点）。
-        GLuint src_tex = bloom_texs_[n - 1];
-        GLuint dst_tex = bloom_acc_a_;
-        GLuint dst_fbo = bloom_acc_fbo_a_;
-        glBindFramebuffer(GL_FRAMEBUFFER, dst_fbo);
-        glViewport(0, 0, bloom_level_w_[n - 1], bloom_level_h_[n - 1]);
-        // 用 prefilter shader 的直通模式把源拷入 acc（threshold 设 0 即恒等透传）。
-        {
-            unsigned int prog = BloomPrefilterProg();
-            glUseProgram(prog);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, src_tex);
-            glUniform1i(shader_mgr_.GetUniform(prog, "uHdrTexture"), 0);
-            glUniform1f(shader_mgr_.GetUniform(prog, "uThreshold"), 0.0f);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-        }
-
-        // 从 i = n-2 往 0 逐级上采样累加，写入另一个 acc（乒乓）。
-        for (int i = n - 2; i >= 0; --i) {
-            // 读源 = 上一个 acc（当前累加结果，在更小分辨率）；
-            // 写目标 = 另一个 acc（本轮放大到 L_i 分辨率）。
-            const GLuint read_tex = (dst_tex == bloom_acc_a_) ? bloom_acc_b_ : bloom_acc_a_;
-            if (dst_tex == bloom_acc_a_) {
-                dst_tex = bloom_acc_b_;
-                dst_fbo = bloom_acc_fbo_b_;
-            } else {
-                dst_tex = bloom_acc_a_;
-                dst_fbo = bloom_acc_fbo_a_;
-            }
-
-            unsigned int prog = BloomUpsampleProg();
-            glUseProgram(prog);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, read_tex);
-            glUniform1i(shader_mgr_.GetUniform(prog, "uLowerTexture"), 0);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, bloom_texs_[i]);
-            glUniform1i(shader_mgr_.GetUniform(prog, "uCurrentTexture"), 1);
-            glBindFramebuffer(GL_FRAMEBUFFER, dst_fbo);
-            glViewport(0, 0, bloom_level_w_[i], bloom_level_h_[i]);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-        }
-        // 最终累加结果落在 dst_tex（L0 分辨率 = 半分辨率）。
-        bloom_final_tex_ = dst_tex;
+    // ---- Step 3: 上采样累加 —— 自最小一级往回，把每级放大后用 (ONE,ONE) 加进上一级 ----
+    // 关键：**每级都在自己的纹理/视口上整幅读写**，不做「大纹理里画小图」的视口技巧。
+    // 循环结束后 L0 里就是全链路多尺度辉光（L0 自有高亮 + 各级放大累加）。
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    for (int i = n - 2; i >= 0; --i) {
+        unsigned int prog = BloomUpsampleProg();
+        glUseProgram(prog);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, bloom_texs_[i + 1]);
+        glUniform1i(shader_mgr_.GetUniform(prog, "uLowerTexture"), 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, bloom_fbos_[i]);
+        glViewport(0, 0, bloom_level_w_[i], bloom_level_h_[i]);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
     }
+    glDisable(GL_BLEND);
+    bloom_final_tex_ = bloom_texs_[0];
 
     // ---- Step 4: composite —— 辉光(L0 分辨率) × intensity 加回 HDR 原图 ----
     {
@@ -2982,6 +2932,11 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
         glBindTexture(GL_TEXTURE_2D, bloom_final_tex_);
         glUniform1i(shader_mgr_.GetUniform(prog, "uBloomTexture"), 1);
         glUniform1f(shader_mgr_.GetUniform(prog, "uIntensity"), cfg.intensity);
+        // 上采样是**纯相加**：L0..L_{n-1} 每级各贡献一次 ⇒ 总能量 ∝ 级数。
+        // 归一化后 intensity 才是"与级数无关"的旋钮（否则改 levels 就等于改亮度，
+        // 调参时两件事耦合在一起）。
+        glUniform1f(shader_mgr_.GetUniform(prog, "uNorm"),
+                    1.0f / static_cast<float>(n));
         glBindFramebuffer(GL_FRAMEBUFFER, bloom_work_fbo_);
         glViewport(0, 0, hdr_w, hdr_h);
         glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -2991,6 +2946,7 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
+    glPopAttrib();   // 还原 enable / blend / depth-mask（见函数开头的说明）
 
     // 返回加回辉光后的 HDR 纹理，作为 tone map 输入。
     return bloom_work_tex_;

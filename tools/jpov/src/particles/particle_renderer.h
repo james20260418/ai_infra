@@ -1,7 +1,8 @@
 // JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fire_fog 平级）
 //
 // 定位（Danis 2026-10-14 定）：用户给出粒子的 flipbook + 一票信息（ParticleRenderCommand），
-// 本渲染器把结果画进 **WBO 半透明累积纹理**（accum/reveal），供后续**合成并交给 froxel**。
+// 本渲染器把结果画进 **WBO 半透明累积纹理**（覆盖集 accum/reveal + 加法集 add），
+// 供后续**合成并交给 froxel**。
 // 与内置 object3d 透明（#176，1× 玻璃 FBO）**共用同一套 McGuire WBO 代数**。
 //
 // ⭐ 为什么要 WBO + 分级：半透明 overdraw 在 sprite 栈内**无解**（透明不写深度 → early-Z 失效）。
@@ -11,11 +12,12 @@
 // 画法：instanced 广告牌（VS 由 gl_VertexID 生成面片四角），per-instance attr loc0..3：
 //   pos(3) / misc(4: 宽,高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
 // FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（玻璃 FBO 无深度缓冲）→
-//   输出 WBO 两附件（与 #176 object3d blend 同构）：
+//   输出三个附件（覆盖集两路 + 加法集一路）：
 //     att0 accum : vec4(色·α, α)·w      （blend ONE,ONE）
 //     att1 reveal: α                    （blend ZERO,ONE_MINUS_SRC_COLOR）
+//     att2 add   : 色·α（真加法时）      （blend ONE,ONE）
 //   weight_wbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176）。
-//   （曾有 att2 depth = z_view·α·w，但 Composite 从未采样它 —— 纯带宽浪费，已删。）
+//   （曾有 depth 附件 = z_view·α·w，但 Composite 从未采样它 —— 纯带宽浪费，已删。）
 //
 // 深度判据两种模式（ParticleRenderCommand::soft_depth_m）：
 //   关闭：`z > scene_z + 2cm` 即丢弃 —— 粒子与几何相交处是一条硬切边。
@@ -96,6 +98,21 @@ void main() {
         if (length(r) < 1e-4) { r = uCamRight; }
         right = normalize(r);
         up = normalize(cross(n, right));
+    } else if (uAlign == 4) {
+        // 自适应 kViewVerticalBlend：侧视 ≈ vertical（roll 锁定），俯视 → view。
+        // t = |dot(toCam, world_up)|：0 = 平视、1 = 正俯视；只在俯视 25° 内切换，
+        // 避免过渡区基向量频繁变化导致的抖动。
+        vec3 n = normalize(toCam);
+        float t = abs(dot(n, uWorldUp));
+        float w = smoothstep(0.55, 0.95, t);
+        vec3 r_v = cross(uWorldUp, n);
+        if (length(r_v) < 1e-4) { r_v = uCamRight; }
+        r_v = normalize(r_v);
+        vec3 u_v = normalize(cross(n, r_v));
+        right = normalize(mix(r_v, uCamRight, w));
+        up = normalize(mix(u_v, uCamUp, w));
+        // 混合后 right/up 不再严格垂直 → 去掉 up 的 right 分量（否则卡片被剪切）。
+        up = normalize(up - dot(up, right) * right);
     } else {
         float sp = length(aVel);
         vec3 u = (sp > 1e-4) ? (aVel / sp) : uCamUp;
@@ -117,7 +134,8 @@ void main() {
 }
 )glsl";
 
-    // WBO 片元：flipbook 采样 + 场景深度手动测试（硬判据 / 软深度两模式）+ 两附件输出。
+    // 片元：UV 扰动 + flipbook 采样 + 场景深度手动测试（硬判据 / 软深度）+ 三路输出
+    //   （覆盖集 accum/reveal，加法集 add；三种混合路径由 uBlendPath 选）。
     static constexpr const char* kFsWbo = R"glsl(
 #version 330 core
 in vec2 vUV;
@@ -129,15 +147,16 @@ uniform int uTilesX;
 uniform int uTilesY;
 uniform int uFlipbook;
 uniform int uFrameBlend;
-uniform int uAdditive;   // 1 = 加法（黑底无 alpha）→ 用亮度当覆盖
 uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;   // 本 pass 的像素尺寸（1/2 分辨率）
 uniform float uNear;
 uniform float uFar;
 uniform int uSoftDepthEnabled;   // 1 = 软深度（按场景深度差淡出 α），0 = 旧硬判据
 uniform float uSoftDepthM;       // 淡出过渡距离（视空间米；仅 enabled 时有意义，须 > 0）
-layout(location = 0) out vec4 FragAccum;
-layout(location = 1) out float FragReveal;
+uniform int uBlendPath;          // 0 = α 覆盖 / 1 = 加法近似（亮度当覆盖）/ 2 = 真加法累积
+layout(location = 0) out vec4 FragAccum;   // 覆盖集：Σ(色·α·w, α·w)
+layout(location = 1) out float FragReveal; // 覆盖集：Π(1−α)
+layout(location = 2) out vec4 FragAdd;     // 加法集：Σ(色·α)（黑底=0 → 天然透明）
 vec2 CellUV(vec2 uv, float f) {
     float col = mod(f, float(uTilesX));
     float row = floor(f / float(uTilesX));
@@ -174,31 +193,52 @@ void main() {
         tex = texture(uTex, vUV);
     }
     vec4 col = vColor * tex;
-    float a = col.a;
-    if (uAdditive == 1) {
-        // 加性火纹理常无 alpha 语义（黑底=透明）→ 用亮度当覆盖；否则黑会变“黑板”。
-        a = clamp(max(max(col.rgb.r, col.rgb.g), col.rgb.b), 0.0, 1.0);
+    // 覆盖路径的 α（近似模式下用亮度冒充）；真加法则用「颜色贡献」判空。
+    float a_cov = col.a;
+    vec3 contrib = col.rgb * col.a;
+    if (uBlendPath == 1) {
+        // 旧近似：加性纹理常无 alpha 语义（黑底=透明）→ 用亮度当覆盖；否则黑会变黑板。
+        a_cov = clamp(max(max(col.rgb.r, col.rgb.g), col.rgb.b), 0.0, 1.0);
     }
-    if (a <= 1.0 / 255.0) {
+    if (uBlendPath == 2) {
+        // 真加法：黑底 ⇒ 贡献 0 ⇒ 天然透明，不需要亮度近似。
+        if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
+            discard;
+        }
+    } else if (a_cov <= 1.0 / 255.0) {
         discard;
     }
     // 与不透明场景深度手动作深度测试（玻璃 FBO 无深度缓冲，故用不了 GL depth test）。
     vec2 uv = gl_FragCoord.xy / uViewport;
     float scene_z = ZView(texture(uSceneDepth, uv).r);
     float z = ZView(gl_FragCoord.z);
+    float fade = 1.0;
     if (uSoftDepthEnabled == 1) {
         // 软深度：0 < (scene_z − z) < 过渡距离 内线性淡出，相交处不再是硬切边。
-        // 必须乘在 WeightWbo 之前 → WBO 解析拿到的覆盖率才是衰减后的。
-        a *= clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
-        if (a <= 1.0 / 255.0) {
-            discard;
-        }
+        fade = clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
     } else if (z > scene_z + 0.02) {
         discard;
     }
-    float w = WeightWbo(z, a, col.rgb);
-    FragAccum = vec4(col.rgb * a, a) * w;
-    FragReveal = a;
+    if (uBlendPath == 2) {
+        contrib *= fade;
+        if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
+            discard;
+        }
+        // 只写加法集；覆盖集写恒等值（accum 0 + reveal 0 ⇒ dst 不变）。
+        FragAdd = vec4(contrib, 0.0);
+        FragAccum = vec4(0.0);
+        FragReveal = 0.0;
+    } else {
+        float a = a_cov * fade;
+        if (a <= 1.0 / 255.0) {
+            discard;
+        }
+        // 衰减必须发生在 WeightWbo 之前 → WBO 解析拿到的覆盖率才是衰减后的。
+        float w = WeightWbo(z, a, col.rgb);
+        FragAccum = vec4(col.rgb * a, a) * w;
+        FragReveal = a;
+        FragAdd = vec4(0.0);
+    }
 }
 )glsl";
 
@@ -219,7 +259,13 @@ in vec2 vUV;
 out vec4 FragColor;
 uniform sampler2D uAccum;
 uniform sampler2D uReveal;
+uniform sampler2D uAdd;
+uniform int uAdditive;   // 1 = 加法集求和（blend ONE,ONE）；0 = 覆盖集 over
 void main() {
+    if (uAdditive == 1) {
+        FragColor = vec4(texture(uAdd, vUV).rgb, 0.0);
+        return;
+    }
     vec4 accum = texture(uAccum, vUV);
     float reveal = texture(uReveal, vUV).r;
     if (accum.a <= 1e-7) {
@@ -265,9 +311,11 @@ private:
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    unsigned int wbo_fbo_ = 0, accum_tex_ = 0, reveal_tex_ = 0;
+    unsigned int wbo_fbo_ = 0, accum_tex_ = 0, reveal_tex_ = 0, add_tex_ = 0;
     int wbo_w_ = 0, wbo_h_ = 0;
     bool has_content_ = false;
+    bool has_alpha_ = false;      // 本帧画过覆盖集（走 over 合成）
+    bool has_additive_ = false;   // 本帧画过加法集（走求和合成）
 
     InstanceBuffer pos_buf_{kParticlePosSpec};
     InstanceBuffer misc_buf_{kParticleMiscSpec};

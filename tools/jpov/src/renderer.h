@@ -146,8 +146,8 @@ private:
     // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）—— 玻璃实例 ──
     // 「TAB」= 一次 OIT 用的 3 附件透明累积缓冲（accum/reveal/depth），被玻璃 / 粒子 / 体积火
     // 共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
-    // 注：**粒子渲染器自 2026-10-20 起只保留 accum/reveal 两附件** —— 它的 composite 从未
-    //     采样过代表深度（见 src/particles/particle_renderer.h）。
+    // 注：**粒子渲染器不持有代表深度附件** —— 它的 composite 从未采样过（已删）；它的
+    //     att2 现在放「加法集」（真·加法累积），见 src/particles/particle_renderer.h。
     // 此处是**玻璃那一份**，也是 froxel 体积雾绑定读的那一份。旧称「玻璃 FBO / WBO 纹理」。
     // 玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
     // 尺寸 = 3D FBO（1× 单采样；结构化数据不能被过滤/平均）。
@@ -290,8 +290,6 @@ private:
     // 上采样累加后，最终辉光所在的 acc 纹理（L0 分辨率），供 composite 采样。
     unsigned int bloom_final_tex_ = 0;
     // 上采样累加用的乒乓缓冲（acc_a/acc_b 各半分辨率，随链一起分配）。
-    unsigned int bloom_acc_a_ = 0, bloom_acc_b_ = 0;
-    unsigned int bloom_acc_fbo_a_ = 0, bloom_acc_fbo_b_ = 0;
 
     unsigned int SolidProg();
     unsigned int TextProg();
