@@ -98,25 +98,14 @@ void ParticleRenderer::EnsureWbo(int w, int h) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    glGenTextures(1, &depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     glGenFramebuffers(1, &wbo_fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, wbo_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            accum_tex_, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
                            reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           depth_tex_, 0);
-    const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                            GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(3, bufs);
+    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
     CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
         << "ParticleRenderer WBO FBO incomplete";
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -129,7 +118,6 @@ void ParticleRenderer::DestroyWbo() {
     if (wbo_fbo_) { glDeleteFramebuffers(1, &wbo_fbo_); wbo_fbo_ = 0; }
     if (accum_tex_) { glDeleteTextures(1, &accum_tex_); accum_tex_ = 0; }
     if (reveal_tex_) { glDeleteTextures(1, &reveal_tex_); reveal_tex_ = 0; }
-    if (depth_tex_) { glDeleteTextures(1, &depth_tex_); depth_tex_ = 0; }
     wbo_w_ = 0;
     wbo_h_ = 0;
 }
@@ -143,10 +131,8 @@ void ParticleRenderer::Begin(int full_w, int full_h) {
     glViewport(0, 0, hw, hh);
     const GLfloat clr_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const GLfloat clr_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clr_depth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     glClearBufferfv(GL_COLOR, 0, clr_accum);
     glClearBufferfv(GL_COLOR, 1, clr_reveal);
-    glClearBufferfv(GL_COLOR, 2, clr_depth);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     has_content_ = false;
 }
@@ -214,7 +200,6 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     glBlendEquation(GL_FUNC_ADD);
     glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
     glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z·α·w
 
     glUseProgram(prog_draw_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE,
@@ -236,6 +221,19 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
                 static_cast<float>(hh));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFar"), camera.far);
+
+    // 软深度（soft particles）：nullopt = 关闭（旧 2cm 硬判据），有值 = 按视空间距离淡出。
+    // 关闭时仍给 uSoftDepthM 一个合法值：FS 里虽不取，但避免读未初始化 uniform。
+    if (cmd.soft_depth_m.has_value()) {
+        CHECK_GT(*cmd.soft_depth_m, 0.0f)
+            << "ParticleRenderCommand::soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
+        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 1);
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"),
+                    *cmd.soft_depth_m);
+    } else {
+        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 0);
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"), 1.0f);
+    }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
@@ -263,7 +261,6 @@ void ParticleRenderer::Draw(const ParticleRenderCommand& cmd,
     // 复原 blend（非常规混合必须显式回写；GL_COLOR_BUFFER_BIT 的 pop 不一定覆盖 blend func）。
     glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glPopAttrib();
 

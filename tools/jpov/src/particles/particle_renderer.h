@@ -1,7 +1,7 @@
 // JPOV ParticleRenderer —— 广告牌粒子画进**加权混合 OIT（WBO）分级纹理**（与 fire_fog 平级）
 //
 // 定位（Danis 2026-10-14 定）：用户给出粒子的 flipbook + 一票信息（ParticleRenderCommand），
-// 本渲染器把结果画进 **WBO 半透明累积纹理**（accum/reveal/depth），供后续**合成并交给 froxel**。
+// 本渲染器把结果画进 **WBO 半透明累积纹理**（accum/reveal），供后续**合成并交给 froxel**。
 // 与内置 object3d 透明（#176，1× 玻璃 FBO）**共用同一套 McGuire WBO 代数**。
 //
 // ⭐ 为什么要 WBO + 分级：半透明 overdraw 在 sprite 栈内**无解**（透明不写深度 → early-Z 失效）。
@@ -11,11 +11,16 @@
 // 画法：instanced 广告牌（VS 由 gl_VertexID 生成面片四角），per-instance attr loc0..3：
 //   pos(3) / misc(4: 宽,高,滚转,帧) / color(4) / vel(3)。flipbook 相邻帧混合。
 // FS：采样 flipbook → 与**不透明场景深度**手动作深度测试（玻璃 FBO 无深度缓冲）→
-//   输出 WBO 三附件（与 #176 object3d blend 同构）：
+//   输出 WBO 两附件（与 #176 object3d blend 同构）：
 //     att0 accum : vec4(色·α, α)·w      （blend ONE,ONE）
 //     att1 reveal: α                    （blend ZERO,ONE_MINUS_SRC_COLOR）
-//     att2 depth : z_view·α·w           （blend ONE,ONE）
 //   weight_wbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176）。
+//   （曾有 att2 depth = z_view·α·w，但 Composite 从未采样它 —— 纯带宽浪费，已删。）
+//
+// 深度判据两种模式（ParticleRenderCommand::soft_depth_m）：
+//   关闭：`z > scene_z + 2cm` 即丢弃 —— 粒子与几何相交处是一条硬切边。
+//   开启：按 d = scene_z − z（视空间米）线性淡出 α，d ∈ (0, 过渡距离) 内平滑过渡。
+//   两种模式**都**发生在 WBO 写入之前，故覆盖率解析 1−Π(1−α) 始终自洽。
 //
 // 合成：Composite() 全屏把半透 WBO 解析（C=accum.rgb/accum.a，覆盖=1−reveal）并以 over 混合
 //   写进**当前绑定的目标**（HDR），随后由 fire_fog 合成雾+玻璃 → 再后续。
@@ -112,7 +117,7 @@ void main() {
 }
 )glsl";
 
-    // WBO 片元：flipbook 采样 + 场景深度手动测试 + 三附件输出（同 #176）。
+    // WBO 片元：flipbook 采样 + 场景深度手动测试（硬判据 / 软深度两模式）+ 两附件输出。
     static constexpr const char* kFsWbo = R"glsl(
 #version 330 core
 in vec2 vUV;
@@ -129,9 +134,10 @@ uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;   // 本 pass 的像素尺寸（1/2 分辨率）
 uniform float uNear;
 uniform float uFar;
+uniform int uSoftDepthEnabled;   // 1 = 软深度（按场景深度差淡出 α），0 = 旧硬判据
+uniform float uSoftDepthM;       // 淡出过渡距离（视空间米；仅 enabled 时有意义，须 > 0）
 layout(location = 0) out vec4 FragAccum;
 layout(location = 1) out float FragReveal;
-layout(location = 2) out float FragDepthAccum;
 vec2 CellUV(vec2 uv, float f) {
     float col = mod(f, float(uTilesX));
     float row = floor(f / float(uTilesX));
@@ -176,17 +182,23 @@ void main() {
     if (a <= 1.0 / 255.0) {
         discard;
     }
-    // 与不透明场景深度手动作深度测试（被几何遮挡 → 丢弃）。
+    // 与不透明场景深度手动作深度测试（玻璃 FBO 无深度缓冲，故用不了 GL depth test）。
     vec2 uv = gl_FragCoord.xy / uViewport;
     float scene_z = ZView(texture(uSceneDepth, uv).r);
     float z = ZView(gl_FragCoord.z);
-    if (z > scene_z + 0.02) {
+    if (uSoftDepthEnabled == 1) {
+        // 软深度：0 < (scene_z − z) < 过渡距离 内线性淡出，相交处不再是硬切边。
+        // 必须乘在 WeightWbo 之前 → WBO 解析拿到的覆盖率才是衰减后的。
+        a *= clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
+        if (a <= 1.0 / 255.0) {
+            discard;
+        }
+    } else if (z > scene_z + 0.02) {
         discard;
     }
     float w = WeightWbo(z, a, col.rgb);
     FragAccum = vec4(col.rgb * a, a) * w;
     FragReveal = a;
-    FragDepthAccum = z * a * w;
 }
 )glsl";
 
@@ -253,7 +265,7 @@ private:
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
     unsigned int vao_ = 0;
-    unsigned int wbo_fbo_ = 0, accum_tex_ = 0, reveal_tex_ = 0, depth_tex_ = 0;
+    unsigned int wbo_fbo_ = 0, accum_tex_ = 0, reveal_tex_ = 0;
     int wbo_w_ = 0, wbo_h_ = 0;
     bool has_content_ = false;
 

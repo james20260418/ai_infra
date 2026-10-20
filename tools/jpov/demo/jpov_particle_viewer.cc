@@ -7,6 +7,9 @@
 // headless 拍摄：--capture <out_dir> [--fire N] [--palette N]
 //                [--smoke N]（逐个烟类型扫谱）[--smoke-density F]
 //                [--ember-count N] [--ember-size F]
+//                [--soft-depth F]（软深度过渡距离，单位米；F=0 = 关闭，便于 A/B）
+//                [--fuel-y F] [--fuel-scale F]（燃料块位置/大小；软深度 A/B 用：
+//                   fuel-y 调低可让火焰底部与地面相交，得到大面积的软过渡观察区）
 // 编译：./tools/jpov/build_particle_viewer.sh
 
 #include <cstdio>
@@ -44,7 +47,9 @@ void DefaultView(jpov_particle::ParticleViewerApp& app) {
 int RunCapture(const std::string& out_dir, int fire_idx, int palette,
                int smoke_idx, float count = -1.0f, float size = -1.0f,
                float smoke_density = -1.0f, float ember_count = -1.0f,
-               float ember_size = -1.0f) {
+               float ember_size = -1.0f, float soft_depth = -1.0f,
+               bool has_fuel_y = false, float fuel_y = 0.0f,
+               bool has_fuel_scale = false, float fuel_scale = 0.0f) {
     JPOV::Config cfg;
     cfg.title = "JPOV - particle viewer (capture)";
     cfg.width = jpov_viewer::kViewerWidth;
@@ -70,6 +75,15 @@ int RunCapture(const std::string& out_dir, int fire_idx, int palette,
     if (smoke_density >= 0.0f) { app.ui_smoke_density_ = smoke_density; }
     if (ember_count >= 0.0f) { app.ui_ember_count_ = ember_count; }
     if (ember_size > 0.0f) { app.ui_ember_size_ = ember_size; }
+    if (has_fuel_y) { app.ui_fuel_y_ = fuel_y; }
+    if (has_fuel_scale) { app.ui_fuel_scale_ = fuel_scale; }
+    // 软深度：<0 = 用 App 默认值（开）；0 = 关闭（旧硬判据）；>0 = 开启并指定过渡距离。
+    if (soft_depth == 0.0f) {
+        app.ui_soft_depth_ = false;
+    } else if (soft_depth > 0.0f) {
+        app.ui_soft_depth_ = true;
+        app.ui_soft_depth_m_ = soft_depth;
+    }
 
     auto shoot = [&](const char* name) {
         const std::string path = out_dir + "/" + name + ".png";
@@ -142,7 +156,11 @@ int main(int argc, char** argv) {
     int palette = -1;
     int smoke_idx = -1;
     float count = -1.0f, size = -1.0f, smoke_density = -1.0f;
-    float ember_count = -1.0f, ember_size = -1.0f;
+    float ember_count = -1.0f, ember_size = -1.0f, soft_depth = -1.0f;
+    bool has_fuel_y = false;
+    bool has_fuel_scale = false;
+    float fuel_y = 0.0f;
+    float fuel_scale = 0.0f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
@@ -160,13 +178,25 @@ int main(int argc, char** argv) {
             ember_size = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
             count = std::atof(argv[i + 1]);
+        } else if (std::strcmp(argv[i], "--soft-depth") == 0 && i + 1 < argc) {
+            soft_depth = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--fuel-y") == 0 && i + 1 < argc) {
+            has_fuel_y = true;
+            fuel_y = static_cast<float>(std::atof(argv[i + 1]));
+        } else if (std::strcmp(argv[i], "--fuel-scale") == 0 && i + 1 < argc) {
+            has_fuel_scale = true;
+            fuel_scale = static_cast<float>(std::atof(argv[i + 1]));
         } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
             size = std::atof(argv[i + 1]);
         }
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, fire_idx, palette, smoke_idx, count, size,
-                          smoke_density, ember_count, ember_size);
+                          smoke_density, ember_count, ember_size,
+                          /*soft_depth=*/soft_depth,
+                          /*has_fuel_y=*/has_fuel_y, /*fuel_y=*/fuel_y,
+                          /*has_fuel_scale=*/has_fuel_scale,
+                          /*fuel_scale=*/fuel_scale);
     }
 
     JPOV::Config cfg;

@@ -1852,6 +1852,19 @@ struct ParticleRenderCommand {
     float stretch_scale = 1.0f;   // 拉伸系数（每 m/s）
     jpov::BlendMode blend = BlendMode::kAdditive;   // 混合模式
     jpov::SortMode  sort = SortMode::kNone;         // 排序模式
+
+    // 软深度（soft particles）：nullopt = **关闭**，退回「离遮挡物 2cm 就硬切」的旧判据
+    //（与引入本字段前的像素完全一致，可用于 A/B）；有值时启用，值为**淡出过渡距离**。
+    //
+    // 语义：FS 取该片元到不透明场景的**视空间**距离 d = scene_z − z（米）；
+    //   d <= 0        → 完全被遮挡，丢弃；
+    //   0 < d < 值    → alpha *= d / 值（线性淡出，消除粒子与几何相交处的硬切边）；
+    //   d >= 值       → 不衰减。
+    //
+    // 为什么放在 render 侧而不是调用方：衰减必须发生在 WBO 的权重/覆盖率**写入之前**
+    //（每片元衰减 ⇒ `1−Π(1−a)` 的解析才正确），调用方拿不到片元级信息。
+    // Pre-condition: 有值时必须 > 0（0 或负数无意义 —— 想关闭请置 nullopt）。
+    std::optional<float> soft_depth_m;
 };
 
 // ==================== 高亮风格 ====================

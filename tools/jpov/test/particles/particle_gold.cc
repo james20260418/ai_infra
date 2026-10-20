@@ -11,12 +11,15 @@
 //   * 火焰：12×6 成对形变 atlas（V7.1）+ 自旋 + 温度调色
 //   * 烟：danis 重绘 12×6 图集，火焰死亡点 spawn，kAlpha over
 //   * 火星：纯色加法小点，数量/大小固定
+//   * 软深度：同一场景再渲一张 soft_depth_m=0.08 的 gold；并**断言**它与关闭软深度
+//     的那张确实存在足量像素差 —— 防「uniform 没绑上 / 淡出被短路」时 gold 静默变恒等。
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/src/particles/particle_system.h"
 #include "tools/jpov/test/test_utils.h"
+#include "third_party/stb/stb_image.h"
 
 namespace {
 
@@ -34,6 +38,9 @@ constexpr int kWidth = 1280;
 constexpr int kHeight = 720;
 constexpr float kDt = 1.0f / 60.0f;
 constexpr int kPreRoll = 240;
+// 软深度 gold 用的过渡距离（米）与「必须真的改变像素」的下限。
+constexpr float kSoftDepthM = 0.08f;
+constexpr long kMinSoftDepthChangedPixels = 100;
 
 using jpov::particles::EmitterConfig;
 using jpov::particles::ParticleEmitter;
@@ -147,6 +154,9 @@ class ParticleGoldApp : public JPOV {
 public:
     using JPOV::JPOV;
 
+    // 软深度过渡距离（米）：nullopt = 关闭（旧 2cm 硬判据）。
+    void SetSoftDepth(std::optional<float> soft_depth_m) { soft_depth_m_ = soft_depth_m; }
+
     void Setup() {
         fire_tex_ = RegisterTexture(jpov::ResolveResourcePath(
             "tools/jpov/assets/fire/mp/flames_pairs_v71_12x6.png"));
@@ -227,6 +237,7 @@ public:
             pc.align = jpov::AlignMode::kView;
             pc.blend = jpov::BlendMode::kAlpha;
             pc.frame_blend = true;
+            pc.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(pc));
         }
 
@@ -245,6 +256,7 @@ public:
             sc.align = jpov::AlignMode::kView;
             sc.blend = jpov::BlendMode::kAlpha;
             sc.frame_blend = true;
+            sc.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(sc));
         }
 
@@ -256,6 +268,7 @@ public:
             ec.flipbook = false;
             ec.align = jpov::AlignMode::kView;
             ec.blend = jpov::BlendMode::kAdditive;
+            ec.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(ec));
         }
     }
@@ -292,6 +305,8 @@ private:
     std::vector<ParticleInstance> fire_inst_;
     std::vector<ParticleInstance> smoke_inst_;
     std::vector<ParticleInstance> ember_inst_;
+    // 软深度过渡距离（米）；nullopt = 关闭（旧 2cm 硬判据）。
+    std::optional<float> soft_depth_m_;
 };
 
 std::string GoldPath() {
@@ -299,7 +314,14 @@ std::string GoldPath() {
            "/particles/particle_fire_smoke_ember_1280x720.png";
 }
 
-void RenderTo(const std::string& out_path) {
+// 软深度 gold：同一场景，soft_depth_m = 0.08。
+std::string GoldSoftPath() {
+    return jpov::GetTestDataDir() +
+           "/particles/particle_fire_smoke_ember_soft_1280x720.png";
+}
+
+void RenderTo(const std::string& out_path,
+              std::optional<float> soft_depth_m = std::nullopt) {
     JPOV::Config cfg;
     cfg.title = "JPOV particle gold test";
     cfg.width = kWidth;
@@ -309,6 +331,7 @@ void RenderTo(const std::string& out_path) {
 
     ParticleGoldApp app(cfg);
     app.Init();
+    app.SetSoftDepth(soft_depth_m);
     app.Setup();
 
     jpov::WindowInfo winfo;
@@ -319,38 +342,104 @@ void RenderTo(const std::string& out_path) {
     app.Finalize();
 }
 
+// 读回两张 PNG，逐像素统计「RGB 任一分量差 > 1」的像素数。
+// 仅用于软深度的**非恒真**断言（两张图必须真的不一样），不做 gold 像素容差。
+// 返回 -1 表示解码/尺寸失败。
+long CountDifferingPixels(const std::string& a_path, const std::string& b_path) {
+    int aw = 0;
+    int ah = 0;
+    int ac = 0;
+    int bw = 0;
+    int bh = 0;
+    int bc = 0;
+    unsigned char* a = stbi_load(a_path.c_str(), &aw, &ah, &ac, 3);
+    unsigned char* b = stbi_load(b_path.c_str(), &bw, &bh, &bc, 3);
+    if (a == nullptr || b == nullptr) {
+        stbi_image_free(a);
+        stbi_image_free(b);
+        return -1;
+    }
+    if (aw != bw || ah != bh) {
+        stbi_image_free(a);
+        stbi_image_free(b);
+        return -1;
+    }
+    long count = 0;
+    for (int i = 0; i < aw * ah; ++i) {
+        const int d = std::max(std::abs(int(a[i * 3 + 0]) - int(b[i * 3 + 0])),
+                               std::max(std::abs(int(a[i * 3 + 1]) - int(b[i * 3 + 1])),
+                                        std::abs(int(a[i * 3 + 2]) - int(b[i * 3 + 2]))));
+        if (d > 1) {
+            ++count;
+        }
+    }
+    stbi_image_free(a);
+    stbi_image_free(b);
+    return count;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const bool generate = (argc > 1 && std::strcmp(argv[1], "--generate") == 0);
     if (generate) {
-        const std::string path = GoldPath();
         std::filesystem::create_directories(
-            std::filesystem::path(path).parent_path());
-        RenderTo(path);
-        LOG(INFO) << "gold written: " << path;
+            std::filesystem::path(GoldPath()).parent_path());
+        RenderTo(GoldPath(), std::nullopt);
+        LOG(INFO) << "gold written: " << GoldPath();
+        RenderTo(GoldSoftPath(), kSoftDepthM);
+        LOG(INFO) << "gold (soft depth) written: " << GoldSoftPath();
         return 0;
     }
 
-    const std::string expected_path = GoldPath();
     std::vector<uint8_t> expected;
-    if (!jpov::ReadFileBytes(expected_path, &expected)) {
-        LOG(FATAL) << "missing gold: " << expected_path;
+    if (!jpov::ReadFileBytes(GoldPath(), &expected)) {
+        LOG(FATAL) << "missing gold: " << GoldPath();
+    }
+    std::vector<uint8_t> expected_soft;
+    if (!jpov::ReadFileBytes(GoldSoftPath(), &expected_soft)) {
+        LOG(FATAL) << "missing soft-depth gold: " << GoldSoftPath();
     }
 
     const std::string out_dir = jpov::GetOutputDir() + "jpov_particle_gold_test/";
     const std::string out_path = out_dir + "rendered.png";
-    RenderTo(out_path);
+    const std::string out_soft_path = out_dir + "rendered_soft_depth.png";
+    RenderTo(out_path, std::nullopt);
+    RenderTo(out_soft_path, kSoftDepthM);
 
     std::vector<uint8_t> rendered;
     if (!jpov::ReadFileBytes(out_path, &rendered)) {
         LOG(FATAL) << "missing render: " << out_path;
     }
+    std::vector<uint8_t> rendered_soft;
+    if (!jpov::ReadFileBytes(out_soft_path, &rendered_soft)) {
+        LOG(FATAL) << "missing render: " << out_soft_path;
+    }
     if (rendered != expected) {
-        LOG(ERROR) << "gold mismatch: rendered=" << rendered.size()
+        LOG(ERROR) << "gold mismatch (soft depth off): rendered=" << rendered.size()
                    << " bytes, expected=" << expected.size() << " bytes";
         return 1;
     }
-    LOG(INFO) << "gold match: " << rendered.size() << " bytes";
+    if (rendered_soft != expected_soft) {
+        LOG(ERROR) << "gold mismatch (soft depth on): rendered=" << rendered_soft.size()
+                   << " bytes, expected=" << expected_soft.size() << " bytes";
+        return 1;
+    }
+
+    // 非恒真断言：软深度开关必须真的改变像素。若 uniform 没绑上 / 淡出被短路，
+    // 这两张图会变成逐字节相同，而 gold 本身仍可能「绿」—— 所以单独卡这一条。
+    const long changed = CountDifferingPixels(out_path, out_soft_path);
+    if (changed < 0) {
+        LOG(ERROR) << "failed to decode renders for soft-depth sanity check";
+        return 1;
+    }
+    if (changed < kMinSoftDepthChangedPixels) {
+        LOG(ERROR) << "soft depth had no visible effect: only " << changed
+                   << " pixels changed (expected >= "
+                   << kMinSoftDepthChangedPixels << ")";
+        return 1;
+    }
+    LOG(INFO) << "gold match: " << rendered.size() << " bytes; soft depth changed "
+              << changed << " pixels";
     return 0;
 }
