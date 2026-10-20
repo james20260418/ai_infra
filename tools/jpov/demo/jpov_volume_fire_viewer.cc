@@ -1,8 +1,11 @@
 // JPOV 体积火查看器 — 主程序
 //
 // 场景 = 灰色地面 + 1m³ 燃料块 + 块顶的体积火（逐像素 raymarch → WBO 薄层合成）。
-// headless 拍摄：--capture <out_dir> [--volume <path.jpovvol>]
-// A/B 基准拍摄：--ab-capture <out.png> [--volume <path.jpovvol>] [--ab-frame N]
+// 体积资产：**只有一份篝火样例** `data/fire_vdb/campfire.jpovvol`（构建脚本自动拷到
+//   output/.../volumes/），不再提供 --volume 让用户换纹理 —— 这个 viewer 的定位是
+//   「证明 raymarch 链路通」，不是资产浏览器。
+// headless 拍摄：--capture <out_dir>
+// A/B 基准拍摄：--ab-capture <out.png> [--ab-frame N]
 //               [--ab-box X | X,Y,Z] [--ab-y-shift M] [--ab-sigma S] [--ab-emis E]
 //               [--ab-smoke K] [--ab-smoke-sigma N] [--ab-light r,g,b]
 // 编译：./tools/jpov/build_volume_fire_viewer.sh
@@ -39,13 +42,11 @@ std::string ExeDir() {
 std::string ExeDir() { return std::string(); }
 #endif
 
-std::string ResolveVolumePath(const std::string& arg) {
-    if (!arg.empty()) {
-        return arg;
-    }
+// 唯一体积资产：篝火。查找顺序 = 构建产物目录 → 可执行文件目录 → 仓库 data/。
+std::string ResolveVolumePath() {
     const std::string d = ExeDir();
-    const char* rels[] = {"volumes/fire_stable.jpovvol", "fire_stable.jpovvol",
-                          "../data/fire_vdb/fire_stable.jpovvol"};
+    const char* rels[] = {"volumes/campfire.jpovvol", "campfire.jpovvol",
+                          "../data/fire_vdb/campfire.jpovvol"};
     for (const char* r : rels) {
         const std::string p = d.empty() ? std::string(r) : (d + "/" + r);
         std::FILE* f = std::fopen(p.c_str(), "rb");
@@ -67,9 +68,12 @@ void InstallScene(jpov_volume_fire::VolumeFireViewerApp& app) {
 
 void DefaultView(jpov_volume_fire::VolumeFireViewerApp& app) {
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi = 0.22f;
+    // 相机要**高于燃料块顶面**（块 0..1m、火 1.0..2.1m）：phi 太小会被块挡住火根。
+    app.view_.phi = 0.38f;
     app.view_.theta = 0.7f;
-    app.view_.R = 8.0f;
+    // 篝火盒只有 1.32×1.92×1.32 m（旧样例是 1.8×2.2×1.8 且更高），相机按它重定：
+    // R=8 时火只占屏幕一小块，看不出 raymarch 的细节。
+    app.view_.R = 4.8f;
     app.deg_.sun_elev_deg = 18.0f;
     app.deg_.turbidity = 2.0f;
 }
@@ -248,7 +252,7 @@ int RunAbCapture(const std::string& out_png, const std::string& volume_path,
 int main(int argc, char** argv) {
     std::string out_dir;
     std::string ab_out;
-    std::string volume_arg;
+
     std::string dump_dir;
     AbParams ab;
     for (int i = 1; i < argc; ++i) {
@@ -309,15 +313,14 @@ int main(int argc, char** argv) {
             } else {
                 LOG(WARNING) << "--ab-light 需要 \"r,g,b\"，已忽略: " << argv[i + 1];
             }
-        } else if (std::strcmp(argv[i], "--volume") == 0 && i + 1 < argc) {
-            volume_arg = argv[i + 1];
         } else if (std::strcmp(argv[i], "--dump-volume") == 0 && i + 1 < argc) {
             dump_dir = argv[i + 1];
         }
     }
-    const std::string volume_path = ResolveVolumePath(volume_arg);
+    const std::string volume_path = ResolveVolumePath();
     if (volume_path.empty()) {
-        LOG(WARNING) << "找不到 .jpovvol 体积文件（用 --volume 指定）";
+        LOG(WARNING) << "找不到篝火体积样例 data/fire_vdb/campfire.jpovvol"
+                        "（先跑 ./tools/jpov/build_volume_fire_viewer.sh）";
     }
     if (!ab_out.empty()) {
         return RunAbCapture(ab_out, volume_path, ab);

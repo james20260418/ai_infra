@@ -42,13 +42,18 @@ public:
     std::string volume_path_;
 
     // 火焰盒（世界 AABB）：块顶 y=1.0 起，向上含整团火。
-    jpov::Vec3f fire_min_ = {-0.9f, 1.0f, -0.9f};
-    jpov::Vec3f fire_max_ = {0.9f, 3.2f, 0.9f};
+    // 火盒 = **篝火资产的世界尺寸**（campfire.jpovvol.json: world_size_m = 1.32x1.92x1.32，
+    // emission_axis=+Y，坐地）。以前写死 1.8x2.2x1.8 是对着另一份更大的样例，换成篝火后
+    // 会显得火偏小、且四周留一大圈空盒。
+    jpov::Vec3f fire_min_ = {-0.57f, 1.0f, -0.56f};
+    jpov::Vec3f fire_max_ = {0.57f, 2.14f, 0.56f};
 
     // 旋钮
     // A/B 基准的可复现旋钮默认值（成员初始化与命令行默认共用这一处）。
-    static constexpr float kDefaultSigma = 4.0f;         // 消光 σ = 密度 × 此值 (1/m)
-    static constexpr float kDefaultEmission = 3.2f;      // 发射强度（色谱模式定标）
+    // 这两个默认值是**对着篝火资产**调的（campfire.jpovvol：p99 只有 0.046，体素极稀），
+    // 旧样例（fire_seq 系）密度高得多，用 4.0 就够。换资产要重调。
+    static constexpr float kDefaultSigma = 12.0f;        // 消光 σ = 密度 × 此值 (1/m)
+    static constexpr float kDefaultEmission = 4.0f;      // 发射强度（色谱模式定标）
     static constexpr float kDefaultTempKelvin = 2000.0f; // 温度通道归一值 [0,1] → 开尔文（色阶上界）
     static constexpr float kDefaultTempMin = 900.0f;     // 温度下界 K（G=0 → 此值）
     static constexpr float kDefaultTempPow = 4.0f;       // 发射强度随温度的幂（物理 = 4；0 = 关闭）

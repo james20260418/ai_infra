@@ -31,8 +31,8 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 
 echo "==> 3. 体积火资产"
 mkdir -p "$OUTPUT_DIR/volumes"
-cp -v "$PROJECT_DIR/data/fire_vdb/fire_stable.jpovvol" "$OUTPUT_DIR/volumes/" 2>/dev/null \
-  || cp -v "/james_pm/fire_hero/assets/fire_stable.jpovvol" "$OUTPUT_DIR/volumes/" || true
+# 唯一的体积资产：篝火（离线烘焙好、已入库；重烘见 docs/jpov_volumetric_fire_design.md）
+cp -v "$PROJECT_DIR/data/fire_vdb/campfire.jpovvol" "$OUTPUT_DIR/volumes/"
 ls -lh "$OUTPUT_DIR/volumes" || true
 
 echo ""
