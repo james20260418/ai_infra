@@ -177,7 +177,11 @@ void JPOV::Finalize() {
         waitpid(xvfb_pid_, nullptr, 0);
         xvfb_pid_ = 0;
         started_xvfb_ = false;
-        LOG(INFO) << "JPOV: Xvfb terminated";
+        // ⚠️ 必须把 Init() 里 setenv 的 DISPLAY 撤掉：否则同一进程再 Init() 时
+        // 会走「DISPLAY 已设置 → 重试 glfwInit」分支，而那个 Xvfb 已经被我们杀了
+        // ⇒ 重试必然失败并 LOG(FATAL)。（一个进程里渲两张 gold 就会踩到。）
+        unsetenv("DISPLAY");
+        LOG(INFO) << "JPOV: Xvfb terminated (DISPLAY unset)";
     }
 #endif
 

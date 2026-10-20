@@ -235,7 +235,27 @@ froxel 联编（`jpov_froxel_design.md` §2.3）继续吃这个代表深度即�
   - `demo/volume_fire_viewer_app.h` + `demo/jpov_volume_fire_viewer.cc` + `build_volume_fire_viewer.sh`。
 - **画法**：画火 AABB **盒**（`kVs` 由 `gl_VertexID` 出 8 角，**剔正面**）→ FS：`gl_FragCoord`+逆 VP 反构光线 → ray-AABB → jitter → （三线性 + 帧间 lerp）步进 → emission-absorption → 输出 `(L, 1−α, z_repr)` → 写 TAB → Composite over。
 - ⚠️ **踩坑（务必记住）**：盒索引表 `kIdx` 曾 **三角形绕序不一致**（同面一个 CCW 一个 CW）→ `glCullFace(GL_FRONT)` **剔掉每面一半** → 覆盖缺口 → 火焰里**直边竖缝**。已修：换成**全外绕(CCW)一致**的表。诊断法：**把索引表当数据算每个三角形的法向 vs 外法向**（零运行代码阅读）。
-- **资产**：`.jpovvol`（JPVOL2, u8；R=密度 ∈[0,1]、G=**温度开尔文**[0,2000K]）。入库 `data/fire_vdb/fire_stable.jpovvol` = **48³ × 32 帧 ≈ 6.8MB**（git 友好）。重烘：`npzseq_to_jpovvol.py <npz_dir> <out> --skip 55 --frames 32 --scale 2 --dtype u8`。
+- **资产（只有一份：篝火）**：`data/fire_vdb/campfire.jpovvol`，JPVOL2 / u8 / **3 通道**
+  （R=火密度、G=温度、B=烟密度），**28³ × 32 帧 ≈ 2.1MB**。构建脚本
+  `build_volume_fire_viewer.sh` 自动把它拷到 `output/.../volumes/`，viewer 不再接受
+  `--volume` —— 这个 viewer 的定位是「证明 raymarch 链路通」，不是资产浏览器。
+- **世界尺寸 / 盒子**：资产 `jpovvol.json` 记的是 `world_size_m = 1.32×1.92×1.32`、
+  `emission_axis=+Y`；烘焙时按密度 bbox 裁过（火焰只占方盒下半），裁后世界尺寸
+  ≈**1.14×1.14×1.12 m**，viewer 的火盒就按它坐落在燃料块顶面（y=1.0）。
+- **默认参数是**对着这份资产调的**：σ=12、发射=4.0（篝火 p99 密度只有 0.046，比旧样例稀得多，
+  用 4.0 会几乎看不见）；烟的消光默认保持 0.05（调大会把火自己吸没）。
+- **重烘**：
+  ```bash
+  cd tools/jpov/genVolume
+  python3 resample_jpovvol.py /path/to/campfire.jpovvol \
+      ../../../data/fire_vdb/campfire.jpovvol \
+      --crop 0.02 --scale 2 --frames 32 --blend 6 --window 0.10 --dtype u8
+  ```
+  - `--crop` 按密度阈值裁到内容 bbox（不裁的话方盒有一半是空的，火看起来小一半）；
+  - 归一化基准取**降采样之前**的峰值（盒平均削峰，之后再归一化会放大密度 → 火变胖变亮）；
+  - 边界淡出只淡 x/z 与 y 顶、不淡底面。
+- ⚠️ **样例必须「有内容」**：上一版样例是从一份只剩一根竖直细柱的 npz 烘的（95% 体素为 0），
+  raymarch 出来是一根「发光棒」。换源后要读回剖面核对（本资产：密度>10% 体素 ≈1.4%）。
 
 ## 14. 与 froxel（后处理）的绑定
 

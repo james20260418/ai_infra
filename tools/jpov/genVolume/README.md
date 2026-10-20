@@ -81,6 +81,15 @@ RES=96 FRAMES=96 OUT=/tmp/firestable_out manta fire_scene_stable.py
 # 2) npz 序列 → .jpovvol（取稳态段 + 尾部交叉淡化做无缝循环 + u8）
 python3 npzseq_to_jpovvol.py /tmp/firestable_out /tmp/fire_stable.jpovvol \
         --skip 24 --frames 64 --blend 8 --dtype u8
+#   ⚠️ 出炉后**一定看一眼**：如果 npz 里只有一根细柱（dens>0.1 的体素 <1%），
+#     入库后 viewer 就会渲染成"发光棒"。诊断：读 jpovvol 打 y/z 剖面（见 §2b）。
+
+# 2b) 已有大 .jpovvol → 小体积可入库样例（volume fire viewer 的样例 = 这条）
+#     读 → 按密度 bbox 裁剪 → 盒平均降采样 → 取窗口 → 首尾交叉淡化
+#     → 边界淡出 → 归一化 → u8（3 通道原样保留：火/温度/烟）
+python3 resample_jpovvol.py /james_pm/fire_hero/assets/prototypes/campfire.jpovvol \
+        ../../../data/fire_vdb/campfire.jpovvol \
+        --crop 0.02 --scale 2 --frames 32 --blend 6 --window 0.10 --dtype u8
 
 # 3) .jpovvol → flipbook PNG（8×8=64 帧；格内留透明内边距、按 bbox 裁剪）
 python3 make_flipbook.py fire  /tmp/fire_stable.jpovvol /tmp/fire_flipbook.png 8
