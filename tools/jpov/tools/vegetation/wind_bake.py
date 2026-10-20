@@ -257,6 +257,8 @@ def _build_joints(polys, H):
 def _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, level_of, pt, tie_eps=0.05):
     """Return (softness_raw, phase, joint_id, link_w) for a world point.
 
+    ⚠️ `tie_eps` 已废弃（保留形参兼容旧调用）：见下方"只在最近样条上取关节"。
+
     joint_id = the base joint of the **link** the point belongs to (the kept sample
     with the largest arc <= the nearest sample's arc; floor-by-arc, NOT
     nearest-joint).  link_w ∈ [0,1] = the point's normalized position within that
@@ -270,18 +272,19 @@ def _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, level_of, pt, tie_e
     flips arbitrarily between the two chains and adjacent/coincident vertices get
     different transforms -> torn, stretched triangles.
     """
-    best, cands = 1e18, []
+    # ⚠️ 只在**最近的那一条样条**上取关节（2026-10-19 修「跨枝链三角形」）：
+    #   旧版把 best+tie_eps(5cm) 内的所有样条都当候选，再挑 level 最小者。分叉处
+    #   父枝的 level 更小 ⇒ 子枝管壁上的顶点被吸到父链，同一个三角形三个顶点可能
+    #   分属两条**无祖先关系**的枝链，风一吹就各按各的链刚性变换 → 拉成薄片
+    #   （willow 实测 1227/7884 = 15.6% 三角形跨链）。
+    #   最近的样条 = 顶点所在的那根管子；枝与枝在几何上不焊接，各自成链即可。
+    best, bi, bk = 1e18, 0, 0
     for i in range(len(polys)):
         P = polys[i]
         for k in range(len(P)):
             d = (pt - P[k]).length
             if d < best:
-                best = d
-            cands.append((d, i, k))
-    # 只留“距离在 best+tie_eps 以内”的候选（不能边扫边留，否则早期远样本会残留）。
-    win = [c for c in cands if c[0] <= best + tie_eps]
-    if not win:
-        win = [(best, 0, 0)]
+                best, bi, bk = d, i, k
 
     def floor_link(i, k):
         n_kept = len(kept_idx[i])
@@ -296,14 +299,9 @@ def _nearest_joint(polys, cum, hd_start, kept_idx, joint_of, level_of, pt, tie_e
         w = (cum[i][k] - a0) / max(a1 - a0, 1e-9)
         return joint_of[(i, kk)], max(0.0, min(1.0, w))
 
-    bi, bk, bjid, bw, blev = win[0][1], win[0][2], None, 0.0, None
-    for (_d, i, k) in win:
-        jid, w = floor_link(i, k)
-        lv = level_of.get(jid, 1 << 30)
-        if blev is None or lv < blev:
-            bi, bk, bjid, bw, blev = i, k, jid, w, lv
+    jid, bw = floor_link(bi, bk)
     raw = hd_start[bi] + cum[bi][bk]
-    return raw, _smooth_phase01(pt.x, pt.y, pt.z), bjid, bw
+    return raw, _smooth_phase01(pt.x, pt.y, pt.z), jid, bw
 
 
 def sample_source(curve_obj, per_seg=16):
@@ -374,6 +372,7 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
         #   重复顶点（UV 缝 / 焊接），它们必须落到**同一根链**，否则两顶点拿到不同变换 →
         #   拉裂三角形成“宽薄片”。裁决：取层级（更靠根）最小者。
         raw_vals = []
+        sp_of = []          # 每顶点「最近样条」= 它实际所在的那根管子（测地 Voronoi 的种子约束）
         pos_key = {}
         for v in me.vertices:
             wp = mw @ v.co
@@ -385,8 +384,91 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
             _, _, jid, lw = _nearest_joint(polys, cum, hd_start, kept_idx, joint_of,
                                            level_of, wp)
             raw_vals.append((wp, max(0.0, min(1.0, raw / gmax)), phase, float(jid), lw))
-            pos_key.setdefault((round(wp.x, 3), round(wp.y, 3), round(wp.z, 3)),
+            sp_of.append(sp_i)
+            # ⚠️ 同位置一致性只在本样条内做：跨样条的"同坐标"顶点属于两根不同的管子
+            #   （分叉处穿插），强行统一会把标签泄漏到另一根管子上 → 跨枝链三角形。
+            pos_key.setdefault((round(wp.x, 3), round(wp.y, 3), round(wp.z, 3), sp_i),
                                []).append(v.index)
+        # ---- 表面测地 Voronoi：joint 标签沿网格边传播（2026-10-19）----
+        #   只按欧氏距离取最近关节，会让**枝关节泄漏到几米外的干顶点**（实测：一条
+        #   1.35m 长的树干三角形，一个角被标成枝关节 168）⇒ 三角形三个顶点各按
+        #   不同枝链刚性变换 → 吹成薄片。这里以「每个关节的最近顶点」为种子，
+        #   沿**网格表面**做多源 Dijkstra：标签只能顺着管子走，不会跨空跳到别的枝。
+        import heapq
+        nv = len(me.vertices)
+        if nv > 0:
+            wco = [mw @ v.co for v in me.vertices]
+            adj = [[] for _ in range(nv)]
+            for e in me.edges:
+                va, vb = e.vertices
+                w = (wco[va] - wco[vb]).length
+                adj[va].append((vb, w))
+                adj[vb].append((va, w))
+            INF = 1e18
+            dist = [INF] * nv
+            lab = [-1] * nv
+            pq = []
+            # ---- 连通块 → 该块属于哪条样条（多数票）----
+            #   ⚠️ 只按 sp_of（欧氏最近样条）约束种子还不够：分叉处某根管子的顶点
+            #   本身就可能被判到旁边那根样条上。树的树皮是**按管子分块的**（每块
+            #   只属于一条样条），所以先求连通块、给每块定一个样条，再只让该样条的
+            #   关节在这块里播种 —— 标签就绝不会跨块/跨枝。
+            uf = list(range(nv))
+            def _uf(x):
+                while uf[x] != x:
+                    uf[x] = uf[uf[x]]
+                    x = uf[x]
+                return x
+            for va in range(nv):
+                for vb, _w in adj[va]:
+                    ra, rb = _uf(va), _uf(vb)
+                    if ra != rb:
+                        uf[ra] = rb
+            comp_sp = {}
+            for vi in range(nv):
+                root = _uf(vi)
+                comp_sp.setdefault(root, {})
+                comp_sp[root][sp_of[vi]] = comp_sp[root].get(sp_of[vi], 0) + 1
+            comp_best = {r: max(cnt.items(), key=lambda kv: kv[1])[0]
+                         for r, cnt in comp_sp.items()}
+
+            for jid, jj in enumerate(joints):
+                pj = jj['pivot']
+                want = int(round(jj.get('spline', -1)))
+                bi, bd = -1, INF
+                for vi in range(nv):
+                    if want >= 0 and comp_best.get(_uf(vi), -1) != want:
+                        continue
+                    d = (wco[vi] - pj).length
+                    if d < bd:
+                        bd, bi = d, vi
+                if bi < 0:   # 该样条没有连通块（退化）→ 退回全局最近
+                    for vi in range(nv):
+                        d = (wco[vi] - pj).length
+                        if d < bd:
+                            bd, bi = d, vi
+                if bi >= 0 and bd < dist[bi]:
+                    dist[bi] = bd
+                    lab[bi] = jid
+                    heapq.heappush(pq, (bd, bi, jid))
+            while pq:
+                d, vi, jid = heapq.heappop(pq)
+                if jid != lab[vi] or d > dist[vi] + 1e-9:
+                    continue
+                for vb, w in adj[vi]:
+                    nd = d + w
+                    if nd < dist[vb] - 1e-9:
+                        dist[vb] = nd
+                        lab[vb] = jid
+                        heapq.heappush(pq, (nd, vb, jid))
+            for vi in range(nv):
+                if lab[vi] >= 0:
+                    # 只换 joint_id；phase / softness / link_w 仍来自 _nearest 的连续场。
+                    raw_vals[vi] = (raw_vals[vi][0], raw_vals[vi][1], raw_vals[vi][2],
+                                    float(lab[vi]), raw_vals[vi][4])
+            print(f"[wind_bake] 测地 Voronoi 标签：{nv} 顶点 / {len(joints)} 关节")
+
+
         n_fix = 0
         for vids in pos_key.values():
             if len(vids) < 2:
@@ -400,6 +482,37 @@ def bake_meshes(polys, mesh_objs, card_objs=()):
                 raw_vals[vi] = (raw_vals[vi][0], raw_vals[vi][1], raw_vals[vi][2], rj, rw)
         if n_fix:
             print(f"[wind_bake] 同位置顶点链归一：{n_fix} 个顶点")
+
+        # 跨枝链面检查（只报告，不删）：标签已按「关节自己的样条」约束 + 测地传播，
+        #   正常应为 0；若 >0 说明种子约束失效，先别改几何、要查标签。
+        def _is_ancestor(u, v):
+            x = v
+            while x >= 0:
+                if x == u:
+                    return True
+                x = int(round(joints[x]['parent']))
+            return False
+
+        final_lab = [int(round(v[3])) for v in raw_vals]
+        cross = 0
+        for poly in me.polygons:
+            labs = {final_lab[vi] for vi in poly.vertices if final_lab[vi] >= 0}
+            ok = True
+            for u in labs:
+                for v in labs:
+                    if u != v and not _is_ancestor(u, v) and not _is_ancestor(v, u):
+                        ok = False
+            if not ok:
+                cross += 1
+        print(f"[wind_bake] 跨枝链面(祖先口径)：{cross} / {len(me.polygons)}")
+        # 更准确的口径：**跨样条**（不同管子）才算真跨枝；同一管子的兄弟关节是正常的。
+        cross_sp = 0
+        for poly in me.polygons:
+            sps = {int(round(joints[final_lab[vi]].get('spline', -1)))
+                   for vi in poly.vertices if final_lab[vi] >= 0}
+            if len(sps) > 1:
+                cross_sp += 1
+        print(f"[wind_bake] 跨样条面：{cross_sp} / {len(me.polygons)}")
 
         vert_uv = [None] * len(me.vertices)
         for vi, (wp, s, phase, jid, lw) in enumerate(raw_vals):

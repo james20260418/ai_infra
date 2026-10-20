@@ -222,6 +222,25 @@ def main():
     bpy.ops.object.convert(target="MESH")
     trunk = bpy.context.view_layer.objects.active
 
+    # 诊断：转换后的树皮是「按样条分块的多个岛」还是「焊成一整张」。
+    #   跨枝链三角形的根因就在这里：焊成一整张时，任何按关节的刚性变换都会撕。
+    if bake_wind:
+        _me = trunk.data
+        _n = len(_me.vertices)
+        _par = list(range(_n))
+        def _find(x):
+            while _par[x] != x:
+                _par[x] = _par[_par[x]]
+                x = _par[x]
+            return x
+        for _e in _me.edges:
+            _a, _b = _e.vertices
+            _ra, _rb = _find(_a), _find(_b)
+            if _ra != _rb:
+                _par[_ra] = _rb
+        _comps = len({_find(i) for i in range(_n)})
+        print(f"[build_tree] bark verts={_n} polys={len(_me.polygons)} components={_comps}")
+
     if textured:
         # trunk: UV unwrap + bark material
         bpy.ops.object.select_all(action="DESELECT")

@@ -202,7 +202,8 @@ JPOV 的 `branch_mesh` + `leaf_cards`。
 
 > 一句话：**风数据是「烘」进 GLB 的，不是引擎猜的。**
 > 不烘 → 树是死的；烘错 → 树会**撕裂 / 拉长 / 整棵平移**。
-> 本版风只走 **object3d 路径**，且风参数是**逐物体**的（每个物体自己一份，不同树可以吹不同的风）。
+> 两条渲染路径都吹风：**object3d 路径**（逐物体参数）与**静态实例路径**
+> （同 mesh 摆 N 份，`InstancedObjectRenderer`；逐实例 `blow_away_ratio`）。
 
 ### 6.1 烘焙什么（两样东西，全在 GLB 里）
 
@@ -215,6 +216,9 @@ JPOV 的 `branch_mesh` + `leaf_cards`。
 - 关节表**随资产走**；引擎里 `tree` / `leaves` 两个 primitive 共享同一张表。
 - **枢轴坐标已转成 glTF 的 Y-up**（Blender Z-up → `(x, z, -y)`），**不要**手工再转。
 - 引擎字段：`MeshData::wind_link`（每顶点 2 个数）+ `MeshData::wind_joints`（关节表），见 `interface/mesh.h`。
+- **顶点标签算法（2026-10-19）**：表面**测地 Voronoi** —— 种子只取关节自己所属样条上的
+  顶点、按连通块多数票约束，标签沿网格边传播。旧的「空间最近关节」会让枝关节泄漏到
+  几米外的干顶点（一条 1.35m 的树干三角形，一个角被标成枝关节）。
 
 ### 6.2 怎么烘（造树时顺手烘）
 
@@ -242,7 +246,21 @@ blender -b --python build_tree.py -- weeping_willow \
 [wind_bake] max_chain_len=14
 [wind_bake] 柳条样条=103/183  关节 s>0.05: .../692
 [wind_bake] 树皮顶点覆盖：s>0.25 占 25% ...
+[wind_bake] 测地 Voronoi 标签：<顶点数> 顶点 / <关节数> 关节
+[wind_bake] 同位置顶点链归一：<n> 个顶点
+[wind_bake] 跨枝链面(祖先口径)：<n> / <faces>
+[wind_bake] 跨样条面：<n> / <faces>      # ← 真·跨枝；正常应尽量小
 ```
+
+### 6.4 排查工具（`jpov_vegetation_viewer`）
+
+```bash
+# 导出「当前风形态」的网格 + 逐顶点 joint/L + 逐三角形面积比（CPU 同公式，GL-free）
+jpov_vegetation_viewer --glb plants/willow_wind_geo_tex.glb   --save-mesh /tmp/vexp/tree --blow 0.25 --blow-exponent 2 --wind-time 0.35
+# → tree.obj / tree_verts.csv / tree_tris.csv
+```
+
+`willow_wind_geo_tex.glb` 是用新的测地标签重烘的柳树样例（几何不变）。
 
 ### 6.3 验收（在引擎里确认它真在动）
 

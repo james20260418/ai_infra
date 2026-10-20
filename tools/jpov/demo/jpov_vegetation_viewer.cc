@@ -30,6 +30,7 @@
 
 #include "tools/common/utils.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/demo/vegetation_mesh_export.h"
 #include "tools/jpov/demo/vegetation_viewer_app.h"
 #include "tools/jpov/demo/view_config.h"
 
@@ -233,6 +234,89 @@ int RunCaptureWind(const std::string& out_dir, const std::string& glb_path) {
     return 0;
 }
 
+// 吹倒（blow away）A/B 拍摄：固定光照/机位/风相位，只扫「逐实例吹倒比例」。
+//   资产需带风数据（关节表 + loc6）；用 --glb plants/willow_wind_tex.glb。
+int RunCaptureBlow(const std::string& out_dir, const std::string& glb_path) {
+    JPOV::Config cfg;
+    cfg.title    = "JPOV — 植被吹倒比例（headless）";
+    cfg.width    = kWidth;
+    cfg.height   = kHeight;
+    cfg.headless = true;
+    cfg.fonts    = ViewerFonts();
+
+    VegetationViewerApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    app.InstallSceneWithGltf(glb_path);
+
+    app.deg_ = jpov_skylight::SkyDegrees{};
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    app.view_.phi   = 0.12;
+    app.view_.theta = kPi / 4.0;
+
+    jpov::WindowInfo winfo;
+    winfo.width  = kWidth;
+    winfo.height = kHeight;
+    const jpov::InputSnapshot input{};
+
+    // 钉住风时间 ⇒ 三张图只差吹倒比例（pivot 摇摆完全相同）。
+    app.SetWindEnabled(true);
+    app.SetWindFixedTime(0.35f);
+    const float kRatios[] = {0.0f, 0.1f, 0.25f, 0.5f};
+    for (float r : kRatios) {
+        app.SetBlowAwayRatio(r);
+        char nm[64];
+        std::snprintf(nm, sizeof(nm), "blow_%03d", static_cast<int>(r * 100.0f + 0.5f));
+        const std::string path = out_dir + "/" + nm + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture(blow): " << path;
+    }
+
+    // 特写：单株 + 拉近，检查枝条有没有被拉成三角形薄片（接缝 bug 的复查口径）。
+    app.SetBlowAwayExponent(2.0f);
+    app.SetInstanceCount(1);
+    {
+        const float keep_r = app.view_.R;
+        app.view_.R = keep_r * 0.55f;
+        app.SetBlowAwayRatio(0.0f);
+        app.SetWindEnabled(false);
+        app.RunOnce(input, winfo, (out_dir + "/detail_windoff.png").c_str());
+        app.SetWindEnabled(true);
+        app.RunOnce(input, winfo, (out_dir + "/detail_r000.png").c_str());
+        app.SetBlowAwayRatio(0.5f);
+        app.RunOnce(input, winfo, (out_dir + "/detail_r050.png").c_str());
+        app.view_.R = keep_r;
+    }
+
+    // 实例数 A/B：同比例（0.25）下 1 / 4 / 9 株（验证滑条与网格排布）。
+    app.SetBlowAwayRatio(0.25f);
+    app.SetBlowAwayExponent(2.0f);
+    for (int c : {1, 4, 9}) {
+        app.SetInstanceCount(c);
+        char nm[64];
+        std::snprintf(nm, sizeof(nm), "count_%02d", c);
+        const std::string path = out_dir + "/" + nm + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture(blow count): " << path;
+    }
+    app.SetInstanceCount(4);
+
+    // 指数 A/B：同比例（0.5）下 n = 1（线性）/ 2（二次）/ 3。
+    app.SetBlowAwayRatio(0.5f);
+    for (float n : {1.0f, 2.0f, 3.0f}) {
+        app.SetBlowAwayExponent(n);
+        char nm[64];
+        std::snprintf(nm, sizeof(nm), "blow_expo_%03d", static_cast<int>(n * 100.0f + 0.5f));
+        const std::string path = out_dir + "/" + nm + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture(blow expo): " << path;
+    }
+
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -241,6 +325,11 @@ int main(int argc, char** argv) {
     std::string smaa_dir;         // --capture-smaa
     std::string ui_dir;           // --capture-ui
     std::string wind_dir;         // --capture-wind
+    std::string blow_dir;         // --capture-blow
+    std::string save_mesh_prefix; // --save-mesh（导出当前风形态的网格）
+    float save_blow = 0.5f;       // --blow
+    float save_exponent = 2.0f;   // --blow-exponent
+    float save_time = 0.35f;      // --wind-time
     float smaa_threshold = 0.1f;  // --smaa-threshold
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--glb") == 0 && i + 1 < argc) {
@@ -253,6 +342,16 @@ int main(int argc, char** argv) {
             ui_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-wind") == 0 && i + 1 < argc) {
             wind_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-blow") == 0 && i + 1 < argc) {
+            blow_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--save-mesh") == 0 && i + 1 < argc) {
+            save_mesh_prefix = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--blow") == 0 && i + 1 < argc) {
+            save_blow = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--blow-exponent") == 0 && i + 1 < argc) {
+            save_exponent = std::strtof(argv[i + 1], nullptr);
+        } else if (std::strcmp(argv[i], "--wind-time") == 0 && i + 1 < argc) {
+            save_time = std::strtof(argv[i + 1], nullptr);
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
@@ -260,6 +359,23 @@ int main(int argc, char** argv) {
 
     const std::string glb_path = ResolveGlbArg(glb_arg);
     LOG(INFO) << "vegetation: 装载植物 GLB = " << glb_path;
+
+    if (!save_mesh_prefix.empty()) {
+        // 导出当前风形态的网格（CPU 端同公式），供离线核对 joint / 三角形面积。
+        jpov::WindDeformParams p;
+        p.time = save_time;
+        p.amplitude = 0.35f;
+        p.frequency = 0.5f;
+        constexpr float kAz = 35.0f * 3.14159265358979323846f / 180.0f;
+        p.direction = {std::cos(kAz), 0.0f, std::sin(kAz)};
+        p.turb_amplitude = 0.12f;
+        p.turb_frequency = 2.5f;
+        p.gust_frequency = 0.6f;
+        p.gust_strength = 0.7f;
+        p.blow_ratio = save_blow;
+        p.blow_exponent = save_exponent;
+        return jpov_vegetation::SaveDeformedMesh(glb_path, save_mesh_prefix, p) ? 0 : 1;
+    }
 
     if (!smaa_dir.empty()) {
         return RunCaptureSmaa(smaa_dir, glb_path, smaa_threshold);
@@ -269,6 +385,9 @@ int main(int argc, char** argv) {
     }
     if (!wind_dir.empty()) {
         return RunCaptureWind(wind_dir, glb_path);
+    }
+    if (!blow_dir.empty()) {
+        return RunCaptureBlow(blow_dir, glb_path);
     }
     if (!out_dir.empty()) {
         return RunCapture(out_dir, glb_path);

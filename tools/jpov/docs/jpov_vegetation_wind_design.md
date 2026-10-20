@@ -32,15 +32,19 @@
 
 ## 2. 数据模型
 
-### 2.1 逐顶点：只存 2 个数（`loc6 = vec2(joint_id, phase)`）
+### 2.1 逐顶点（实例路径定稿，2026-10-19）
 
-| 分量 | 语义 |
-|---|---|
-| `.x = joint_id` | 该顶点所属关节在关节表中的下标（`∈ [0, wind_joints.size())`） |
-| `.y = phase` | 逐顶点**连续**相位场 `[0,1)`（秒的分数部分；链外平动湍流用）。连续 ⇒ 位移场连续 ⇒ 不撕裂 |
+| attribute | 内容 | 语义 |
+|---|---|---|
+| `loc6 = vec4` | `(j0, phase, L, j1)` | j0/j1 = 空间最近的**两个**关节；phase = 连续相位场 `[0,1)`；L = 到根的父链总长度（米，载入期平滑） |
+| `loc3 = vec2` | `(w0, w1)` | 两关节混合权重（`1/d` 归一化） |
 
-来源：glTF `TEXCOORD_1`（vec2）。**不存 softness**（每关节一份，见下），也不存 bend —— 那些
-要么能从链推，要么属于关节。上一版设计里 `(softness, phase)` / `(joint_id, link_w)` 的方案已废弃。
+- **为什么两个关节**：joint 的 `level/soft` 是**离散**量；硬分配会让相邻顶点分属不同
+  关节（变换不连续 ⇒ 撕裂）。按距离加权后接缝处是连续过渡（蒙皮的标准做法）。
+- 近重合顶点（5mm，UV 缝/硬边）强制共享同一套 `j0/j1/权重`。
+- 来源：glTF `TEXCOORD_1`（vec2 = joint_id, phase）→ MeshManager 载入期算 `j1/权重/L`
+  并打包；**不改资产格式**（老资产自动受益）。
+- 上一版设计里 `(softness, phase)` / `(joint_id, link_w)` 的方案已废弃。
 
 ### 2.2 每 mesh 一份关节表（node extras `jpov_wind_joints`）
 
@@ -120,7 +124,9 @@ tdir = normalize(0.6·axis + 0.7·up + 0.4·wdir)     // 斜上，不在风向�
 
 - 折线抽稀成关节（按枝粗细分级：粗枝 1.5 单位/≤6 个，细枝 0.5 单位/≤8 个）；
 - **合并同位置关节**（续接样条会产生两个同坐标关节 ⇒ 必须并入，否则叠两次铰链 + 相邻顶点分属不同链 ⇒ 撕裂）；
-- 顶点归属用**沿弧长的段**（不是最近点）+ 同位置顶点强制同链。
+- 顶点标签用**表面测地 Voronoi**（2026-10-19）：种子只取关节自己所属样条上的顶点、
+  按连通块多数票约束；标签沿网格边传播 ⇒ 不会跨空跳到旁边那枝；
+- 同位置一致性只在**同一样条内**做（跨样条的同坐标顶点属于两根管子，强行统一会泄漏标签）。
 
 ## 5. 参数（`WindCommand`）
 
@@ -134,6 +140,7 @@ tdir = normalize(0.6·axis + 0.7·up + 0.4·wdir)     // 斜上，不在风向�
 | `turb_frequency` | 2.5 | 平动湍流频率 Hz（纯时间频率） |
 | `gust_frequency` | 0.6 | 阵风频率 Hz |
 | `gust_strength` | 0.7 | 阵风深度；0 = 关起伏 |
+| `blow_away_exponent` | 2.0 | 吹倒曲线指数 n（`d = ratio·L·(L/H)^(n−1)`；仅实例路径） |
 
 shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindChain = 16`、
 `kTurbLevF = 0.5`、`kTurbGustP = 4.0`。
@@ -156,5 +163,63 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
   是容器 Xvfb 多次 Init/Finalize 的环境问题，与风无关——该测试在 main 上单独跑同样挂）。
 - 行为门禁（`--capture-wind` A/B）：开/关差 **3.3%–3.8%** 像素；相邻帧差 **3.8%–4.1%**（证明在动，不是静态位移）。
 - **尚未落地**：引擎侧 gold 单测（当前只有视觉 A/B）。这是本模块最大的验证缺口。
-- 已知边界：instanced 与蒙皮路径还不吹风；链深 >16 的资产会被截断；
+- 已知边界：蒙皮路径还不吹风（布料另议）；链深 >16 的资产会被截断；
   性能未在真 GPU 实测（本机 llvmpipe）。
+
+## 8. 实例化路径（2026-10-19）
+
+植被改走 `InstancedObjectRenderer`：同 mesh 摆 N 份 = 每个 primitive 一次 instanced draw。
+风的公式与 object3d 路径**同源**（同一套枢轴链 + 湍流），区别只有两处：
+
+1. **摆放矩阵来自 per-instance attribute**（loc7..10），不是 `uModel` ⇒ 风向要先从
+   世界系搬进模型系：`normalize(mat3(inverse(instance_model)) * world_horizontal_dir)`。
+   否则每株 yaw 不同时，一片林子会朝各自的局部方向倒（object3d 路径单株看不出这个问题）。
+2. **新增逐实例「吹倒比例」** `InstanceState::blow_away_ratio`（loc11，float）+
+   **逐命令曲线指数** `WindCommand::blow_away_exponent`（默认 2）。
+   2026-10-19 晚定稿：吹倒是**平移**（不是角度）——角度会被 `soft` 的继承模型干扰，
+   软枝（soft≈1）各段只随自己的角度、整枝不跟风，观感诡异；平移与 soft 无关。
+   同时顶点取**空间最近的两个关节**做旋转混合（消除 lev/soft 的离散接缝）：
+   ```
+   旋转（风）：每个关节各求一条链，顶点在最近的两个关节 j0/j1 间 w ∝ 1/d 混合
+   吹倒（平移）：p += dir_h × ratio × L × (L/H)^(n−1)     // L = 平滑后的逐顶点路径长
+   近重合顶点（5mm）：共享同一套 j0/j1/权重
+   H = 本 mesh 模型系包围盒高（uniform uBlowAwayRefLength）
+   ```
+   - **为什么要 H**：n≠1 时 `L^n` 的量纲随 n 变（m^n）。直接 `ratio×L²` 时
+     ratio=0.5 会把树甩出画面十几米，且换一种尺寸的资产观感完全不同。
+     归一化后**梢部（L=H）位移恒为 ratio×H**（与线性一致），只是中段压得更低
+     ⇒ 观感正是"下段直、上段加速压弯"（n=1 线性 / n=2 二次 / n=3 更陡）。
+   - 0 = 不吹（默认）；查看器滑条上限 0.5。
+   - **两个关节而不是一个**：joint 的 lev/soft 是离散量，硬分配会让相邻顶点分属
+     不同关节（变换不连续 → 撕裂）；按 1/d 加权后接缝处连续（蒙皮的标准做法）。
+   - **平移而不是角度**：角度要么走 `soft` 继承（软枝不跟风）要么单独累加（观感诡异）；
+     平移是一个与 soft 无关的向量，直接加在顶点上。
+   - L 用载入期**平滑过**的逐顶点值：空间连续，不会在关节处出现台阶。
+
+三条 pass（主 / 阴影 / 拾取·高亮）共用 `UploadInstancedWindUniforms()` + 同一份
+`kWindBlowGlsl`（std::string 拼接，三个实例 VS 共享，不是三份手抄）⇒ 影子和拾取
+与本体同形变。无 `WindCommand` 或无关节表时 `uWindEnabled=0`，整段跳过、不挂 loc11。
+
+验证：`--capture-blow`（钉住风时间，只扫 0 / 0.1 / 0.25 / 0.5 四档）；四档差异像素
+59k → 66k → 78k，倾斜方向与风向一致；`instanced_object_attrs_test` 与
+`jpov_instanced_object_gold_test` 均绿（后者逐像素零回归）。
+
+## 9. 导出当前风形态的网格（排查用，2026-10-19）
+
+```bash
+jpov_vegetation_viewer --glb plants/willow_wind_tex.glb \
+  --save-mesh /tmp/vexp/tree --blow 0.5 --blow-exponent 2 --wind-time 0.35
+# 产出 tree.obj / tree_verts.csv（prim,vertex,joint,L,x,y,z）
+#      / tree_tris.csv（prim,tri,ja,jb,jc,area_rest,area_deformed,ratio）
+```
+
+CPU 端复刻 GPU 公式（`interface/wind_deform.h`），**不依赖 GL**。
+
+用它查到的结论（willow，blow=0.5 / n=2）：
+
+- 树皮 7884 tris 中约 **10.8% 跨样条面**（早先的 15.56% 口径把同一样条的兄弟关节误算进去了）；
+- 面积放大 >5 倍且变形后 >1cm² 的“板子”数量：
+  逐顶点平移老版 **216** → 2 关节混合 + 逐顶点平移 **25**；
+- ratio 0.1/0.25 目视为自然弯曲、无悬浮碎片；0.5 时梢部位移 = `ratio×H ≈ 3.6m`，属极端值。
+
+（CPU 导出器与 GPU 的公式逐式对应；改任一侧必须同步另一侧。）

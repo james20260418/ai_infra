@@ -13,15 +13,19 @@
 //       + SMAA 抗锯齿（**默认开**）。视角沿用 model viewer 的 ViewConfig
 //       （右键拖拽转视角 / 滚轮缩放）。
 //
-// 边界（本版）：**不含风**（风牵涉 pass 与资产改动，另开 PR）；不加载骨架/蒙皮 ——
-// 植物是静态几何，直接用 DrawGltfObject 画（含 cutout 叶片）。
+// 边界：不加载骨架/蒙皮 —— 植物是静态几何，走 **InstancedObjectRenderer**
+// （同 mesh 摆 N 份 = 一次 instanced draw；含 cutout 叶片、风、阴影、拾取）。
+// 植被风：pivot 链摇摆 + 逐实例「吹倒」（吹倒比例 × 父链总长度）。
 
 #ifndef JPOV_DEMO_VEGETATION_VIEWER_APP_H_
 #define JPOV_DEMO_VEGETATION_VIEWER_APP_H_
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "tools/common/utils.h"
 #include "tools/jpov/include/jpov/jpov.h"
@@ -43,6 +47,12 @@ inline constexpr float kPlantTargetHeight = 3.5f;
 
 // 默认植物资产名（分发态放在 exe 旁 plants/；开发态回退源码资产目录）。
 inline constexpr const char* kDefaultPlantFile = "willow_small_tex.glb";
+
+// 实例化演示：同一种植物摆 kGridN×kGridN 份（每 primitive 一次 instanced draw）。
+//   间距是世界米；目的有二：① 走 InstancedObjectRenderer 这条真实路径；
+//   ② 让「逐实例吹倒比例」有地方可见（每株可给不同值）。
+inline constexpr int   kGridN = 3;
+inline constexpr float kGridSpacing = 2.2f;
 
 // 解析植物 GLB 路径：按顺序试多个候选（分发态 exe 旁 → 开发态源码目录），
 // 命中即返回；都不命中返回第一个候选，交回 loader 报它自己的错。
@@ -96,6 +106,12 @@ public:
     float wind_time_scale_ = 1.0f;    // 时间缩放（0=暂停）
     bool  wind_use_fixed_time_ = false;   // headless：钉住时间（确定性出图）
     float wind_fixed_time_ = 0.0f;
+    // 风吹倒伏比例（逐实例；0 = 不吹，0.5 = 每单位父链长度水平偏移 0.5）。
+    float blow_away_ratio_ = 0.0f;
+    // 吹倒位移指数 n（per-command）：位移 = ratio × L^n。1 = 线性，2 = 二次。
+    float blow_away_exponent_ = 2.0f;
+    // 实例数量（1..kGridN²）：调试用，滑条实时增减实例。
+    float instance_count_ui_ = 4.0f;
 
     // 是否绘制面板（headless 拍摄 = false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -103,6 +119,12 @@ public:
     // headless：固定风时间（秒）+ 开关风。
     void SetWindFixedTime(float t) { wind_use_fixed_time_ = true; wind_fixed_time_ = t; }
     void SetWindEnabled(bool on) { wind_on_ = on; }
+    // headless：钉住吹倒比例 / 指数 / 实例数（A/B 出图用；交互由左下角滑条控制）。
+    void SetBlowAwayRatio(float r) { blow_away_ratio_ = r; }
+    void SetBlowAwayExponent(float n) { blow_away_exponent_ = n; }
+    void SetInstanceCount(int n) {
+        instance_count_ui_ = static_cast<float>(n);
+    }
 
     // SMAA 后处理抗锯齿。**默认开**（本查看器定位“观察 + 出图”，去锯齿是默认期望）。
     void SetSmaa(bool on, float threshold = 0.1f) {
@@ -137,9 +159,14 @@ public:
     void FitViewToPlant() {
         CHECK(plant_.bounds_valid) << "FitViewToPlant: 尚无植物包围盒";
         // 以「竖直中点」为原点构造居中包围盒（世界尺度），喂给 FitRadius。
-        const float ex = base_scale_ * (plant_.bounds_max[0] - plant_.bounds_min[0]);
+        // 实例网格按**最大**规模取景（实例数滑条变化时相机不跳）。
+        // 实例网格也要进画面：x/z 各加 (kGridN-1) 个间距。
+        const float grid_extent = static_cast<float>(kGridN - 1) * kGridSpacing;
+        const float ex = base_scale_ * (plant_.bounds_max[0] - plant_.bounds_min[0])
+                         + grid_extent;
         const float ey = base_scale_ * (plant_.bounds_max[1] - plant_.bounds_min[1]);
-        const float ez = base_scale_ * (plant_.bounds_max[2] - plant_.bounds_min[2]);
+        const float ez = base_scale_ * (plant_.bounds_max[2] - plant_.bounds_min[2])
+                         + grid_extent;
         const float rel_min[3] = {-0.5f * ex, -0.5f * ey, -0.5f * ez};
         const float rel_max[3] = { 0.5f * ex,  0.5f * ey,  0.5f * ez};
         view_ = jpov_viewer::DefaultView();
@@ -216,6 +243,7 @@ public:
             w.turb_frequency = wind_turb_freq_;
             w.gust_frequency = wind_gust_freq_;
             w.gust_strength = wind_gust_str_;
+            w.blow_away_exponent = blow_away_exponent_;
             wind = w;
         }
 
@@ -231,11 +259,38 @@ public:
             const float cz = -0.5f * s *
                              (plant_.bounds_min[2] + plant_.bounds_max[2]);
             const float cy = -s * plant_.bounds_min[1];   // 基座贴地
-            cmds->DrawGltfObject(plant_, /*center*/ {cx, cy, cz},
-                                 /*up*/ {0.0f, 1.0f, 0.0f},
-                                 /*front*/ {0.0f, 0.0f, 1.0f}, s,
-                                 /*highlight*/ false, /*picking_id*/ 0,
-                                 /*wind*/ wind);
+            // 实例数（滑条 1..kGridN²；排成接近正方形的网格，逐实例只差位置 + yaw）。
+            const int want = static_cast<int>(std::lround(instance_count_ui_));
+            const int count = std::max(1, std::min(kGridN * kGridN, want));
+            const int cols = static_cast<int>(
+                std::ceil(std::sqrt(static_cast<float>(count))));
+            const int rows = (count + cols - 1) / cols;
+            std::vector<jpov::InstanceState> instances;
+            instances.reserve(static_cast<size_t>(count));
+            for (int idx = 0; idx < count; ++idx) {
+                const int gx = idx % cols;
+                const int gz = idx / cols;
+                const float ox = (static_cast<float>(gx) -
+                                  0.5f * static_cast<float>(cols - 1)) * kGridSpacing;
+                const float oz = (static_cast<float>(gz) -
+                                  0.5f * static_cast<float>(rows - 1)) * kGridSpacing;
+                // 逐实例 yaw（黄金角）：避免完全同向的"复制粘贴"感，
+                //   同时**顺带验证**「世界风向 → 各实例模型系」的逆变换
+                //   （若漏了那一步，绕 Y 旋转过的树会朝各自的局部方向倒）。
+                const float yaw = static_cast<float>(idx) * 2.39996323f;
+                jpov::InstanceState st;
+                st.transform.center = {cx + ox, cy, cz + oz};
+                st.transform.up     = {0.0f, 1.0f, 0.0f};
+                st.transform.front  = {std::sin(yaw), 0.0f, std::cos(yaw)};
+                st.transform.scale  = s;
+                st.blow_away_ratio  = blow_away_ratio_;
+                instances.push_back(st);
+            }
+            // 一个 glTF 的每个 primitive 各发一条实例命令（同批必须共享 mesh_id）。
+            for (const jpov::GltfPrimitive& prim : plant_.primitives) {
+                cmds->DrawInstancedObject(prim.mesh_id, prim.material, instances,
+                                          /*highlight*/ false, wind);
+            }
         }
 
         if (show_panel_) {
@@ -308,7 +363,7 @@ private:
 
         // ── 左下角：植被风 ──
         {
-            const int kRows = 6;
+            const int kRows = 9;
             const float inner_h = static_cast<float>(kRows) * kRowH
                                   + static_cast<float>(kRows - 1) * kSpace;
             const float panel_h = inner_h + 2.0f * kPad;
@@ -323,11 +378,16 @@ private:
                     {inner_w, kRowH}};
             };
             ui_.SliderFloat("风朝向 °", &wind_azimuth_deg_, row(0), 0.0f, 360.0f, 0);
-            ui_.SliderFloat("pivot 振幅", &wind_amplitude_, row(1), 0.0f, 1.5f, 2);
-            ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, row(2), 0.05f, 2.0f, 2);
-            ui_.SliderFloat("平动湍流 幅度", &wind_turb_amp_, row(3), 0.0f, 0.6f, 3);
-            ui_.SliderFloat("平动湍流 频率 Hz", &wind_turb_freq_, row(4), 0.0f, 8.0f, 2);
-            ui_.SliderFloat("湍流随机性 [0,1]", &wind_gust_str_, row(6), 0.0f, 1.0f, 2);
+            ui_.SliderFloat("实例数 (1..9)", &instance_count_ui_, row(1), 1.0f,
+                            static_cast<float>(kGridN * kGridN), 0);
+            ui_.SliderFloat("pivot 振幅", &wind_amplitude_, row(2), 0.0f, 1.5f, 2);
+            ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, row(3), 0.05f, 2.0f, 2);
+            ui_.SliderFloat("平动湍流 幅度", &wind_turb_amp_, row(4), 0.0f, 0.6f, 3);
+            ui_.SliderFloat("平动湍流 频率 Hz", &wind_turb_freq_, row(5), 0.0f, 8.0f, 2);
+            ui_.SliderFloat("吹倒比例", &blow_away_ratio_, row(6), 0.0f, 0.5f, 3);
+            ui_.SliderFloat("吹倒指数 n (L^n)", &blow_away_exponent_, row(7),
+                            0.5f, 3.0f, 2);
+            ui_.SliderFloat("湍流随机性 [0,1]", &wind_gust_str_, row(8), 0.0f, 1.0f, 2);
         }
     }
 
