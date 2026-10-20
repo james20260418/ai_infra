@@ -52,7 +52,6 @@ struct CliArgs {
   double phi_deg = 12.0;
   double theta_deg = 35.0;
   double radius = 0.0;   // 0 = 自动
-  bool show_cards = true;
   int max_level = 99;
   float ground_y = 0.0f;
 };
@@ -76,8 +75,6 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--cam_r" && has_val) {
       a.radius = std::atof(argv[++i]);
       CHECK_GT(a.radius, 0.0) << "--cam_r 必须 > 0";
-    } else if (arg == "--hide-cards") {
-      a.show_cards = false;
     } else if (arg == "--ground-y" && has_val) {
       a.ground_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--max-level" && has_val) {
@@ -199,7 +196,6 @@ class VegetationV2App : public JPOV {
   bool show_all_card_types_ = true;
   uint32_t type_filter_ = 0;
   char type_buf_[8] = "0";   // InputText 的编辑缓冲（跨帧持有，Ui 需要稳定地址）
-  bool show_cards_ = true;
   int max_level_ = 99;
   float max_level_f_ = 99.0f;   // 滑条用（int 版才是真值）
   float ground_y_ = 0.0f;       // 地面平面高度（米）
@@ -212,10 +208,9 @@ class VegetationV2App : public JPOV {
   std::string CamString() const {
     char buf[160];
     std::snprintf(buf, sizeof(buf),
-                  "cam phi=%.1f theta=%.1f R=%.2f | level<=%d cards=%s types=%s",
+                  "cam phi=%.1f theta=%.1f R=%.2f | level<=%d types=%s",
                   view_.phi * 180.0 / 3.14159265358979323846,
                   view_.theta * 180.0 / 3.14159265358979323846, view_.R, max_level_,
-                  show_cards_ ? "on" : "off",
                   show_all_card_types_ ? "all" : std::to_string(type_filter_).c_str());
     return std::string(buf);
   }
@@ -315,7 +310,6 @@ class VegetationV2App : public JPOV {
     for (const auto& b : shape_.branches) {
       deepest = std::max(deepest, static_cast<int>(b.level));
     }
-    show_cards_ = args.show_cards;
     max_level_ = std::min(args.max_level, deepest);
     max_level_f_ = static_cast<float>(max_level_);
     ground_y_ = args.ground_y;
@@ -327,11 +321,7 @@ class VegetationV2App : public JPOV {
                     const jpov::WindowInfo& winfo,
                     jpov::RenderCommandList* cmds) override {
     (void)frame_count;
-    // 交互：K 切叶卡、[ / ] 调层级、P 打印相机
-    if (input.GetKey(jpov::KeyCode::K).IsClick()) {
-      show_cards_ = !show_cards_;
-      LOG(INFO) << "叶卡: " << (show_cards_ ? "on" : "off");
-    }
+    // 交互：[ / ] 调层级、P 打印相机
     if (input.GetKey(jpov::KeyCode::LeftBracket).IsClick()) {
       max_level_ = std::max(0, max_level_ - 1);
       max_level_f_ = static_cast<float>(max_level_);  // 同步滑条，否则面板每帧覆盖回去
@@ -389,18 +379,16 @@ class VegetationV2App : public JPOV {
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
-    if (show_cards_) {
-      for (size_t t = 0; t < card_mesh_.size(); ++t) {
-        if (card_mesh_[t] == 0) {
-          continue;
-        }
-        // 只看某一类：用于确认"这棵树的某类叶卡到底长在哪、朝向对不对"
-        if (!show_all_card_types_ && t != type_filter_) {
-          continue;
-        }
-        cmds->DrawObject3D(card_mesh_[t], card_mat_[t], {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+    for (size_t t = 0; t < card_mesh_.size(); ++t) {
+      if (card_mesh_[t] == 0) {
+        continue;
       }
+      // 只看某一类：用于确认"这棵树的某类叶卡到底长在哪、朝向对不对"
+      if (!show_all_card_types_ && t != type_filter_) {
+        continue;
+      }
+      cmds->DrawObject3D(card_mesh_[t], card_mat_[t], {0.0f, 0.0f, 0.0f},
+                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
     cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
                    jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
@@ -411,11 +399,10 @@ class VegetationV2App : public JPOV {
       const float h = static_cast<float>(kViewerHeight);
       jpov::UiTheme theme = jpov::UiTheme::Default(16.0f);
       theme.font_alias = jpov::kFontBuiltinCJK;
-      ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
-      // 0.26w 装不下"地面高度 y (m) + 数值"，实测标签会压在滑轨上。
-      const float colw = 0.34f * w;
+
+      // 布局：两组面板都贴左下角，下面是【场景】，上面是【叶卡过滤】。
+      const float colw = 0.34f * w;   // 0.26w 装不下"地面 y (m) + 数值"，标签会压在滑轨上
       const float cx = 0.02f * w;
-      // 两组面板都贴左下角：下面是【场景】，上面是【叶卡过滤】。
       const float scene_top = h - 16.0f - (3 * 32.0f);
       const float leaf_top = scene_top - 12.0f - (2 * 32.0f);
       auto scene_row = [&](int i) {
@@ -425,9 +412,20 @@ class VegetationV2App : public JPOV {
         return jpov::UiRect{{cx, leaf_top + i * 32.0f}, {colw, 24.0f}};
       };
 
+      // 黑底：两组控件压在场景上，浅色地面时白字会糊掉。
+      // 直接推 fillrect2d（在 Emit 之前 → 在向量里更早 → 画在控件下面）。
+      const float panel_top = leaf_top - 10.0f;
+      const float panel_bottom = scene_top + 2 * 32.0f + 24.0f + 10.0f;
+      // 必须走 DrawFillRect：它会同时登记到 cmds->order（渲染器按 order 遍历、
+      // 再用下标回查 fillrect2d）。直接 push fillrect2d 不进 order → 根本不会被画。
+      cmds->DrawFillRect({cx - 10.0f, panel_top}, {colw + 20.0f, panel_bottom - panel_top},
+                         jpov::Color{0.0f, 0.0f, 0.0f, 0.55f},
+                         jpov::Color{0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 6.0f);
+
+      ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
+
       ui_.SliderFloat("地面 y (m)", &ground_y_, scene_row(0), -3.0f, 3.0f, 2);
       ui_.SliderFloat("最大层级", &max_level_f_, scene_row(1), 0.0f, 20.0f, 0);
-      ui_.Checkbox("显示叶卡", &show_cards_, scene_row(2));
 
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
       // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
