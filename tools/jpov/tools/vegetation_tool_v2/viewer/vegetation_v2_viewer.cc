@@ -37,6 +37,7 @@ namespace {
 // 会把整个交互 App 基类拉进来。
 constexpr int kViewerWidth = 1280;
 constexpr int kViewerHeight = 720;
+constexpr float kViewerFps = 60.0f;
 using jpov::vegetation::MeshData;
 using jpov::vegetation::Shape;
 using jpov::vegetation::Vec3d;
@@ -189,10 +190,15 @@ class VegetationV2App : public JPOV {
   std::vector<int> branch_level_;
   std::vector<uint32_t> card_mesh_;     // 每种 type 一个合并盒子 mesh
   std::vector<jpov::PBRMaterial> card_mat_;
-  jpov::PBRMaterial branch_mat_;
+  // 逐层棕色材质缓存：每帧给 183 根枝各造一个 PBRMaterial 纯属浪费。
+  std::vector<jpov::PBRMaterial> level_mats_;
   jpov_viewer::ViewConfig view_;
 
   bool show_panel_ = true;   // 面板只在交互窗口画（headless 出纯 3D）
+  // 叶卡过滤：勾了"显示全部叶子"就全画；否则只画 type_filter_ 这一个下标。
+  bool show_all_card_types_ = true;
+  uint32_t type_filter_ = 0;
+  char type_buf_[8] = "0";   // InputText 的编辑缓冲（跨帧持有，Ui 需要稳定地址）
   bool show_cards_ = true;
   int max_level_ = 99;
   float max_level_f_ = 99.0f;   // 滑条用（int 版才是真值）
@@ -205,10 +211,12 @@ class VegetationV2App : public JPOV {
 
   std::string CamString() const {
     char buf[160];
-    std::snprintf(buf, sizeof(buf), "cam phi=%.1f theta=%.1f R=%.2f | level<=%d cards=%s",
+    std::snprintf(buf, sizeof(buf),
+                  "cam phi=%.1f theta=%.1f R=%.2f | level<=%d cards=%s types=%s",
                   view_.phi * 180.0 / 3.14159265358979323846,
                   view_.theta * 180.0 / 3.14159265358979323846, view_.R, max_level_,
-                  show_cards_ ? "on" : "off");
+                  show_cards_ ? "on" : "off",
+                  show_all_card_types_ ? "all" : std::to_string(type_filter_).c_str());
     return std::string(buf);
   }
 
@@ -291,13 +299,25 @@ class VegetationV2App : public JPOV {
     deg_.sun_elev_deg = 55.0f;
     deg_.sun_azim_deg = 35.0f;
 
+    // 6 档棕色（level 0..5，>=5 饱和）
+    level_mats_.clear();
+    for (int lv = 0; lv <= 5; ++lv) {
+      jpov::PBRMaterial m = jpov::PBRMaterial::SolidColor(BrownForLevel(lv));
+      m.double_sided = true;
+      level_mats_.push_back(m);
+    }
+
     ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
     ground_mat_ = jpov_skylight::GroundMaterial();
 
     show_panel_ = !args.capture;   // headless 出图不画面板（与其它 viewer 一致）
+    int deepest = 0;
+    for (const auto& b : shape_.branches) {
+      deepest = std::max(deepest, static_cast<int>(b.level));
+    }
     show_cards_ = args.show_cards;
-    max_level_ = args.max_level;
-    max_level_f_ = static_cast<float>(args.max_level);
+    max_level_ = std::min(args.max_level, deepest);
+    max_level_f_ = static_cast<float>(max_level_);
     ground_y_ = args.ground_y;
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
@@ -314,10 +334,12 @@ class VegetationV2App : public JPOV {
     }
     if (input.GetKey(jpov::KeyCode::LeftBracket).IsClick()) {
       max_level_ = std::max(0, max_level_ - 1);
+      max_level_f_ = static_cast<float>(max_level_);  // 同步滑条，否则面板每帧覆盖回去
       LOG(INFO) << "max_level = " << max_level_;
     }
     if (input.GetKey(jpov::KeyCode::RightBracket).IsClick()) {
       max_level_ = std::min(99, max_level_ + 1);
+      max_level_f_ = static_cast<float>(max_level_);
       LOG(INFO) << "max_level = " << max_level_;
     }
     if (input.GetKey(jpov::KeyCode::P).IsClick()) {
@@ -363,14 +385,17 @@ class VegetationV2App : public JPOV {
       if (branch_level_[i] > max_level_) {
         continue;
       }
-      jpov::PBRMaterial mat = jpov::PBRMaterial::SolidColor(BrownForLevel(branch_level_[i]));
-      mat.double_sided = true;
-      cmds->DrawObject3D(branch_mesh_[i], mat, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
-                         {0.0f, 0.0f, 1.0f});
+      const int lv = std::min(branch_level_[i], 5);
+      cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
+                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
     if (show_cards_) {
       for (size_t t = 0; t < card_mesh_.size(); ++t) {
         if (card_mesh_[t] == 0) {
+          continue;
+        }
+        // 只看某一类：用于确认"这棵树的某类叶卡到底长在哪、朝向对不对"
+        if (!show_all_card_types_ && t != type_filter_) {
           continue;
         }
         cmds->DrawObject3D(card_mesh_[t], card_mat_[t], {0.0f, 0.0f, 0.0f},
@@ -386,16 +411,46 @@ class VegetationV2App : public JPOV {
       const float h = static_cast<float>(kViewerHeight);
       jpov::UiTheme theme = jpov::UiTheme::Default(16.0f);
       theme.font_alias = jpov::kFontBuiltinCJK;
-      ui_.Begin(input, theme, w, h, 1000.0f / 60.0f);
-      const float colw = 0.26f * w;
+      ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
+      // 0.26w 装不下"地面高度 y (m) + 数值"，实测标签会压在滑轨上。
+      const float colw = 0.34f * w;
       const float cx = 0.02f * w;
-      const float top = h - 16.0f - (3 * 24.0f + 2 * 8.0f);
-      auto row = [&](int i) {
-        return jpov::UiRect{{cx, top + i * 32.0f}, {colw, 24.0f}};
+      // 两组面板都贴左下角：下面是【场景】，上面是【叶卡过滤】。
+      const float scene_top = h - 16.0f - (3 * 32.0f);
+      const float leaf_top = scene_top - 12.0f - (2 * 32.0f);
+      auto scene_row = [&](int i) {
+        return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
       };
-      ui_.SliderFloat("地面高度 y (m)", &ground_y_, row(0), -3.0f, 3.0f, 2);
-      ui_.SliderFloat("最大层级", &max_level_f_, row(1), 0.0f, 20.0f, 0);
-      ui_.Checkbox("显示叶卡", &show_cards_, row(2));
+      auto leaf_row = [&](int i) {
+        return jpov::UiRect{{cx, leaf_top + i * 32.0f}, {colw, 24.0f}};
+      };
+
+      ui_.SliderFloat("地面 y (m)", &ground_y_, scene_row(0), -3.0f, 3.0f, 2);
+      ui_.SliderFloat("最大层级", &max_level_f_, scene_row(1), 0.0f, 20.0f, 0);
+      ui_.Checkbox("显示叶卡", &show_cards_, scene_row(2));
+
+      ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
+      // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
+      // 所以这个下标是【颜色桶下标】，不是原始 type 编号。要按真实 type 过滤，
+      // 得改成逐 type 一个 mesh（面数索引翻 4 倍，暂不做）。
+      // InputText 编辑的是字符串，这里解析成下标并 clamp 到合法范围——
+      // 越界值不静默忽略，而是夹紧，避免"输入 9 却什么都没有"的黑箱。
+      // Ui::InputText 自带的标签在 24px 行高里不显示（实测只剩编辑框），
+      // 所以给它空标签、自己画左侧文字，并把编辑框往右让出标签宽度。
+      const float label_w = 0.11f * w;
+      const jpov::UiRect row1 = leaf_row(1);
+      const jpov::UiRect type_box{{cx + label_w, row1.pos.y()}, {colw - label_w, 24.0f}};
+      cmds->DrawText("叶 type 下标", {cx, row1.pos.y() + 4.0f}, 16.0f,
+                     jpov::Color{0.95f, 0.95f, 0.95f, 1.0f},
+                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+      if (ui_.InputText("", type_buf_, sizeof(type_buf_), type_box)) {
+        const int parsed = std::atoi(type_buf_);
+        const int clamped = std::max(0, std::min(kMaxCardTypes - 1, parsed));
+        type_filter_ = static_cast<uint32_t>(clamped);
+        if (clamped != parsed) {
+          std::snprintf(type_buf_, sizeof(type_buf_), "%d", clamped);
+        }
+      }
       ui_.End();
       ui_.Emit(cmds);
       max_level_ = static_cast<int>(max_level_f_ + 0.5f);
