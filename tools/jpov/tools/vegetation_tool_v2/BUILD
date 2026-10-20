@@ -30,3 +30,17 @@ cc_test(
     srcs = ["shape_test.cc"],
     deps = [":shape"],
 )
+
+# 扫管：Shape -> 网格 + UV。
+cc_library(
+    name = "sweep",
+    srcs = ["sweep.cc"],
+    hdrs = ["sweep.h"],
+    deps = [":shape"],
+)
+
+cc_test(
+    name = "sweep_test",
+    srcs = ["sweep_test.cc"],
+    deps = [":sweep"],
+)
