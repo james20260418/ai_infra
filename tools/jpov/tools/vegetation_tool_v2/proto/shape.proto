@@ -1,0 +1,155 @@
+// 植物拓扑资产格式（texture-independent）。
+//
+// 一棵植物 = ShapeProto（几何） + 树皮材质 + 叶材质。本文件只定义几何部分，
+// **不含任何纹理/UV 信息**。设计说明见 ../docs/vegetation_asset_format.md。
+//
+// 全局约定——**硬编码，不进 schema**（写进 schema 只会多一个能被填错的地方）：
+//   * 单位：**米**（m）；角度用弧度
+//   * 上方向：**+Y**（glTF 约定）。Blender 是 +Z up，导出时必须转：
+//       (x, y, z)_blender -> (x, z, -y)_gltf
+//   * 截面轮廓：**归一化**（半径的倍数）、逆时针、闭合且首尾不重复、星形
+//
+// 为什么用 proto 而不是 JSON：这个结构对约束要求高（拓扑一致性/引用完整性/正交性），
+// proto 能在编译期挡住字段拼错，并给出确定的默认值语义与向后兼容版本号。
+
+syntax = "proto3";
+
+package jpov.vegetation;
+
+// 三维点/向量。单位米。
+message Vec3Proto {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+// 截面轮廓上的一个点（**归一化**，单位是「半径的倍数」，不是米）。
+//
+// 所在平面：过该采样点、**垂直于枝条中心线切线 T** 的平面。
+// 原点：该采样点的中心线位置 C。
+// 坐标轴：x 沿 U，y 沿 V。U、V 是与 T 互相垂直的单位向量，(U, V, T) 构成右手系。
+//
+// 世界坐标 = C + radius · ( x·U + y·V )
+//   例：(x=1, y=0) → 落在 U 方向、距中心线恰好 radius 的那个管壁点。
+//   因此 **radius 只负责粗细，profile 只负责形状**，两者正交：
+//   想让树干变粗只改 radius；想让它从圆形变成板根/沟槽只改 profile。
+//
+// 约定：从 +T 方向看是逆时针；闭合且首尾不重复；星形（任意方向只交一次）。
+message ProfilePointProto {
+  double x = 1;
+  double y = 2;
+}
+
+// 枝条中心线上的一个采样点。
+// 采样折线（而非贝塞尔控制点）是刻意的：曲线形状在导出时已烘平，下游只做线性插值。
+message BranchSampleProto {
+  Vec3Proto position = 1;  // 米
+
+  // 该点的管半径（米）。逐点给 ⇒ 锥度/收细/领口过渡都是数据，不是算法。
+  // 它同时是下面 profile 的缩放基准（见 ProfilePointProto 的坐标定义）。
+  double radius = 2;
+
+  // 截面绕切线的自转角（弧度）。作用于 profile 的 (U, V) 基。
+  // 正圆截面下不可见；非圆截面时它决定截面朝向（例如板根该朝哪一侧）。
+  double tilt = 3;
+
+  // 该采样点的截面轮廓（归一化，见 ProfilePointProto）。
+  // **逐点可变** —— 塑形噪音就靠这个（树干越往上越扁、根部鼓出板根等）。
+  // 空 = 未指定 = 正圆。正圆是绝大多数枝条的常态，空着既不丢信息又省体积。
+  //
+  // 非空时：点数即环上的顶点数（BranchProto.ring_count 必须为 0 或等于该点数）。
+  repeated ProfilePointProto profile = 4;
+}
+
+// 一根枝（主干或其分叉之一）。
+message BranchProto {
+  // 全树唯一。要求 parent < id（拓扑序），从而保证无环。
+  uint32 id = 1;
+
+  // 父枝 id；-1 = 根枝。全树恰好一根根枝。
+  int32 parent = 2;
+
+  // 距根的层级（根 = 0）。冗余字段，便于下游做 LOD/预算统计。
+  uint32 level = 3;
+
+  // 中心线采样折线，至少 2 个点。
+  repeated BranchSampleProto samples = 4;
+
+  // 环细分（绕截面一圈的顶点数）。0 = 用 profile 的点数（正圆时也由它决定）。
+  // 主干给 16（看不出棱角），末梢枝给 6~8（省面）。
+  uint32 ring_count = 5;
+
+  // UV 接缝落在环上的第几个顶点（u = 0 从这里开始绕）。
+  // 放在 branch 级而不是 sample 级：接缝沿枝必须稳定，否则纹理会沿枝拧转。
+  // 必须 < 该枝的环顶点数。
+  uint32 seam_index = 6;
+}
+
+// 一张叶卡。锚点 + 两条正交轴 + 长度即可唯一确定一张卡；
+// 宽度**不存**，由叶材质 atlas 的格子长宽比推导（见格式文档 §4.2）。
+message LeafCardProto {
+  // 贴枝点（米）。含义由所属 LeafTypeProto.anchor_mode 决定。
+  Vec3Proto anchor = 1;
+
+  // 卡片长轴：从根指向梢（单位向量）。
+  Vec3Proto up = 2;
+
+  // 卡面法线（单位向量，需与 up 正交）。双面渲染，但光照朝向靠它。
+  Vec3Proto normal = 3;
+
+  // 沿 up 方向的长度（米）。宽度由材质推导，长宽比不允许被修改。
+  double height = 4;
+
+  // 叶卡类型编号，引用 LeafTypeProto.type。
+  uint32 type = 5;
+
+  // 溯源信息：挂在哪根枝、参数位置 s∈[0,1]。渲染不依赖它，但对风摆绑定、
+  // LOD 归组、调试定位有用。
+  uint32 branch = 6;
+  double s = 7;
+}
+
+// 叶卡类型（一类 = 一套材质绑定 + 一套摆放语义）。
+//
+// 一棵树可以有内容完全不同的多类卡：柳树的柔荑花序、桑树的异形叶、枯叶、花果……
+// 它们的尺寸、数量、atlas 都不同，所以类型是一等公民而不是枚举。
+message LeafTypeProto {
+  // 编号，从 0 开始，必须与 LeafCardProto.type 对应。
+  uint32 type = 1;
+
+  // 自然语言描述（"柳树主冠层叶簇，细长披针形 15×25cm，梢部下垂"）。
+  // 给人/agent 读，**永不参与逻辑判断**。
+  string description = 2;
+
+  // 锚点语义："bottom_center"（叶/叶簇，根部在下）、"top_center"（花序，根在上）、
+  // "center"（落叶）。必须与 atlas 格子的画法一致。
+  string anchor_mode = 3;
+
+  // 期望的卡片长宽比（width/height）。0 = 未指定（装配时取该类型第一套 atlas 的比例）。
+  // 一型绑多套 atlas 时，用它来挑最贴合设计意图的一套，避免轮廓随材质漂移。
+  double preferred_aspect = 4;
+}
+
+// 一棵植物的完整拓扑。
+message ShapeProto {
+  // 格式版本。加字段不升版本；改语义/单位必须升。
+  uint32 version = 1;
+
+  // **万用备注/提示词**：这份 shape 是给谁用的、哪类叶卡该配什么素材、
+  // 哪些素材风格相近可以互换……例如：
+  //   "柳树，垂枝。leaf_type 0（冠层叶簇）适合 leafset_A / leafset_C，两者色系接近；
+  //    leaf_type 1（柔荑花序）只在春季出现，适合 catkin_spring。"
+  // 供人 / agent / 下游工具读取，**永不参与逻辑判断**，可为空。
+  string description = 2;
+
+  // 所有枝条。至少一根，恰好一根 parent == -1。
+  repeated BranchProto branches = 3;
+
+  // 叶卡类型表。
+  repeated LeafTypeProto leaf_types = 4;
+
+  // 所有叶卡（位置已烘死，下游不做分布规则）。
+  repeated LeafCardProto cards = 5;
+
+  reserved 6 to 15;  // 预留：LOD 层级、材质槽、风参数覆盖等
+}
