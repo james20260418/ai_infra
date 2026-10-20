@@ -326,6 +326,37 @@ MeshData SweepBranches(const Shape& shape) {
   return mesh;
 }
 
+std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh) {
+  std::vector<MeshData> out;
+  out.reserve(shape.branches.size());
+  uint32_t cursor = 0;  // 当前枝的起始顶点
+  for (const Branch& branch : shape.branches) {
+    const uint32_t count = static_cast<uint32_t>(branch.samples.size()) *
+                           (branch.EffectiveRingCount() + 1);
+    MeshData part;
+    part.positions.assign(mesh.positions.begin() + cursor * 3,
+                          mesh.positions.begin() + (cursor + count) * 3);
+    part.normals.assign(mesh.normals.begin() + cursor * 3,
+                        mesh.normals.begin() + (cursor + count) * 3);
+    part.uvs.assign(mesh.uvs.begin() + cursor * 2,
+                    mesh.uvs.begin() + (cursor + count) * 2);
+    if (cursor + count <= mesh.VertexCount()) {
+      for (size_t t = 0; t < mesh.indices.size(); t += 3) {
+        const uint32_t i0 = mesh.indices[t];
+        if (i0 < cursor || i0 >= cursor + count) {
+          continue;
+        }
+        part.indices.push_back(i0 - cursor);
+        part.indices.push_back(mesh.indices[t + 1] - cursor);
+        part.indices.push_back(mesh.indices[t + 2] - cursor);
+      }
+    }
+    out.push_back(std::move(part));
+    cursor += count;
+  }
+  return out;
+}
+
 MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_type) {
   MeshData mesh;
   for (const LeafCard& card : shape.cards) {

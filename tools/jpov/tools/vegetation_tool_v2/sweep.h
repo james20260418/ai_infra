@@ -39,6 +39,12 @@ struct MeshData {
 // （环顶点数 >= 3、samples >= 2），因为违反这些的资产连循环都跑不起来。
 MeshData SweepBranches(const Shape& shape);
 
+// 按枝切分（逐枝上色 / 逐枝隐藏用）。返回的每个 MeshData 与 shape.branches 下标一一对应。
+//
+// 实现依赖 SweepBranches 的顶点布局：每枝占 `samples.size() * (ring+1)` 个顶点、
+// 且按 branches 顺序连续排列。两处必须同步修改（同文件内，且有测试钉住）。
+std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh);
+
 // 叶卡：anchor + up + normal + height + 材质给的 width → 四边形。
 //
 // width_by_type：每个 leaf_type 的实际宽度（米）。由叶材质的 atlas 格子长宽比推导：
