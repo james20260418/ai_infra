@@ -73,7 +73,6 @@ EmitterConfig MakeFireConfig() {
     c.pair_len = 12;
     c.start_frame_random = true;
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAlpha;
     return c;
 }
 
@@ -111,7 +110,7 @@ EmitterConfig MakeSmokeConfig() {
     c.pair_len = 12;
     c.start_frame_random = true;
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAlpha;
+    c.emissive = false;   // 烟 = 吸收介质
     return c;
 }
 
@@ -146,7 +145,6 @@ EmitterConfig MakeEmberConfig() {
     c.flipbook = false;
     c.texture_id = 0;
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAdditive;
     return c;
 }
 
@@ -235,7 +233,6 @@ public:
             pc.tiles_y = 6;
             pc.flipbook = true;
             pc.align = jpov::AlignMode::kView;
-            pc.blend = jpov::BlendMode::kAlpha;
             pc.frame_blend = true;
             pc.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(pc));
@@ -254,7 +251,8 @@ public:
             sc.tiles_y = 6;
             sc.flipbook = true;
             sc.align = jpov::AlignMode::kView;
-            sc.blend = jpov::BlendMode::kAlpha;
+            // 烟 = 吸收介质：走覆盖集（会遮挡），不是发光求和。
+            sc.emissive = false;
             sc.frame_blend = true;
             sc.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(sc));
@@ -267,7 +265,6 @@ public:
             ec.texture_id = 0;
             ec.flipbook = false;
             ec.align = jpov::AlignMode::kView;
-            ec.blend = jpov::BlendMode::kAdditive;
             ec.soft_depth_m = soft_depth_m_;
             cmds->DrawParticles(std::move(ec));
         }

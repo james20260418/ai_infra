@@ -7,7 +7,7 @@
 
 粒子 pass 用的是 WBO 半透明目标（`src/particles/particle_renderer.h`）：
 
-- FBO 只有 `accum / reveal` 两个颜色附件，**没有深度附件**；
+- FBO 只有颜色附件（`accum / reveal` 覆盖集 + `add` 加法集），**没有深度附件**；
 - 所以 `glDisable(GL_DEPTH_TEST)`，深度可见性靠 FS 手动作：
 
 ```glsl
@@ -76,8 +76,9 @@ struct ParticleRenderCommand {
 
 ## 5. 顺手删掉的东西
 
-第三个颜色附件 `att2 = z·α·w`（`FragDepthAccum`）从引入起就没被 `Composite` 采样过 ——
-纯带宽浪费（每片元多一个 float 附件 + 每帧 clear）。本次一并删除，WBO 从 3 附件降到 2 附件。
+代表深度附件 `z·α·w`（`FragDepthAccum`）从引入起就没被 `Composite` 采样过 ——
+纯带宽浪费（每片元多一个 float 附件 + 每帧 clear）。本次删除。
+（同一趟里 `att2` 现在由「加法集」占用，见 `jpov_particle_buffs.md §3`。）
 
 ## 6. 已知限制
 

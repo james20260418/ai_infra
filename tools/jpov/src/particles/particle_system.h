@@ -97,7 +97,7 @@ enum class SheetTimeMode : uint8_t {
 };
 
 // ==================== 发射器配置 ====================
-// 广告牌朝向（AlignMode）/ 混合（BlendMode）/ 排序（SortMode）/ 输出实例
+// 广告牌朝向（AlignMode）/ 发光或吸收（emissive）/ 输出实例
 // （ParticleInstance）定义在 interface/particle_types.h（接口层，与渲染命令共用）。
 
 // 一个发射器 = 一层火（核心焰 / 主火舌 / 烟 / 火星 …）。
@@ -153,8 +153,8 @@ struct EmitterConfig {
     AlignMode align = AlignMode::kVertical;
     bool stretched = false;              // 沿速度拉伸（kVelocity 时才有意义）
     float stretch_scale = 1.0f;          // 拉伸系数（每 m/s）
-    BlendMode blend = BlendMode::kAdditive;
-    SortMode sort = SortMode::kNone;
+    // true = 发光体（火/火星，渲染时求和）；false = 吸收体（烟/尘/雾，渲染时求覆盖）。
+    bool emissive = true;
     float soft_distance = 0.0f;          // 软粒子淡出距离（>0 才生效；MVP 未接）
 
     // Pre-condition: rate>=0；radius>=0；size_start.max>0；tiles_x/y>=1。

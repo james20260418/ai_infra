@@ -22,18 +22,13 @@ enum class AlignMode : uint8_t {
     kVertical = 1,  // 竖直/roll 锁定（只绕 Y 轴转向相机）—— 火的关键
     kFacing = 2,    // 面向相机位置（球面 facing）
     kVelocity = 3,  // 沿速度方向对齐（火花/余烬）
-};
 
-// 混合模式。
-enum class BlendMode : uint8_t {
-    kAdditive = 0,  // 加法（发光焰/火花）
-    kAlpha = 1,     // 半透明（烟）
-};
-
-// 排序模式。
-enum class SortMode : uint8_t {
-    kNone = 0,      // 不排序（加法层无顺序依赖）
-    kByDepth = 1,   // 按视深背→前排序（半透明层）
+    // 自适应：侧视 ≈ kVertical（roll 锁定，火苗朝上），俯视 → kView（否则竖直卡
+    // 被看成一条扁线）。按 t = |dot(normalize(toCam), world_up)| 在两者之间插值基向量：
+    //   t=0（平视）→ 纯 kVertical；t→1（正俯视）→ 纯 kView；
+    // 插值区间 smoothstep(0.55, 0.95, t)（俯视 25° 内才开始切换，避开过渡区抖动）。
+    // 用途：一个模式覆盖「侧视好看 + 俯视不穿帮」，代价是过渡区基向量非刚性（已正交化）。
+    kViewVerticalBlend = 4,
 };
 
 // 一个已解算好的广告牌面片（模拟产出，渲染消费）。

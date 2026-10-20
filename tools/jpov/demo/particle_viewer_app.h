@@ -3,7 +3,8 @@
 // 目的：展示本次试验最终选定的 7 种火焰 puff + 3 种烟 puff，并把控制项收敛为一组统一滑条：
 //   粒子数 / 时间整体快慢 / 燃料块（正方体；开关 + X/Y/Z 平移 + scale）/
 //   烟雾（类型 / 开关 / 照度 / 浓度）/ 火星（开关 / 数量 / 大小）/
-//   火焰温度增益（含 3 套温度→颜色映射）/ 软深度（开关 + 过渡距离，A/B 用）
+//   火焰温度增益（含 3 套温度→颜色映射）/ 软深度（开关 + 过渡距离，A/B 用）/
+//   卡片与管线 buff：朝向（view/vertical/facing/自适应）/ 真加性累积 / 火光照明 / 辉光
 //
 // 设计：
 //   * 纹理：5 张 12×6「成对渐变」atlas（kPairMorph，pair_len=12，一块 = 两段形变）
@@ -120,7 +121,6 @@ inline jpov::particles::EmitterConfig MakeFireConfig() {
     c.pair_len = 12;
     c.start_frame_random = true;
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAdditive;
     return c;
 }
 
@@ -158,8 +158,7 @@ inline jpov::particles::EmitterConfig MakeSmokeConfig() {
     c.tiles_y = 6;
     c.start_frame_random = true;         // kPairMorph 用它随机选块
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAlpha;
-    c.sort = jpov::SortMode::kByDepth;
+    c.emissive = false;   // 烟 = 吸收介质（渲染时求覆盖，不是发光求和）
     return c;
 }
 
@@ -196,7 +195,6 @@ inline jpov::particles::EmitterConfig MakeEmberConfig() {
     c.flipbook = false;
     c.texture_id = 0;
     c.align = jpov::AlignMode::kView;
-    c.blend = jpov::BlendMode::kAdditive;
     return c;
 }
 
@@ -232,14 +230,14 @@ public:
     bool frame_blend_ = true;
 
     // ---- 统一滑条（Danis 指定）----
-    float ui_particle_count_ = 80.0f;    // 目标粒子数（1..100）
+    float ui_particle_count_ = 40.0f;    // 目标粒子数（1..100）
     float ui_fire_size_ = 0.18f;         // 粒子世界尺寸（size_start 的上界）
     float ui_time_scale_ = 1.0f;         // 时间整体快慢
     bool ui_fuel_enable_ = true;         // 燃料块（正方体，可平移/缩放）
     float ui_fuel_x_ = 0.0f;             // 燃料块平移 X
     float ui_fuel_y_ = 0.0f;             // 燃料块平移 Y（上下）
     float ui_fuel_z_ = 0.0f;             // 燃料块平移 Z
-    float ui_fuel_scale_ = 0.25f;        // 燃料块整体 scale（正方体边长）
+    float ui_fuel_scale_ = 0.125f;       // 燃料块整体 scale（正方体边长）
     float ui_smoke_bright_ = 1.0f;       // 烟雾整体照度
     float ui_smoke_density_ = 1.0f;      // 烟雾浓度（在 alpha_scale 之外的整体乘子）
     float ui_ember_count_ = 20.0f;       // 火星目标数量（0..80）
@@ -247,6 +245,12 @@ public:
     float ui_temp_gain_ = 1.0f;          // 火焰温度增益
     bool ui_soft_depth_ = true;          // 软深度开关（关 = 旧 2cm 硬切，便于 A/B）
     float ui_soft_depth_m_ = 0.08f;      // 软深度淡出过渡距离（视空间米）
+    int ui_align_mode_ = 0;              // 广告牌朝向：0=view 1=vertical 2=facing 3=自适应 blend
+    bool ui_fire_light_ = false;         // 火光照明（跟随火焰的点光源）
+    float ui_fire_light_intensity_ = 6.0f;  // 火光强度
+    bool ui_bloom_ = false;              // 辉光（tone map 前的高亮提取 + 多级模糊）
+    float ui_bloom_intensity_ = 0.8f;    // 辉光强度
+    float ui_bloom_threshold_ = 0.6f;    // 辉光亮度门槛（HDR 线性；越低越"发光"）
     int ui_palette_ = 1;                 // 0=Blackbody 1=Cinematic 2=Cute
 
     jpov::particles::Rng sub_rng_{20261015u};
@@ -256,6 +260,21 @@ public:
 
     // 本帧软深度设置：开着就带过渡距离，关着就 nullopt（= 旧硬判据，零回归）。
     // 火焰 / 烟 / 火星三层共用同一个 UI 值 —— 验收只关心这一个开关。
+    // 本帧广告牌朝向（火/烟两层共用面板上的「朝向」下拉）。
+    // 火星层是速度对齐的（kVelocity），不受它影响。
+    jpov::AlignMode AlignForCommand() const {
+        switch (ui_align_mode_) {
+            case 1:
+                return jpov::AlignMode::kVertical;
+            case 2:
+                return jpov::AlignMode::kFacing;
+            case 3:
+                return jpov::AlignMode::kViewVerticalBlend;
+            default:
+                return jpov::AlignMode::kView;
+        }
+    }
+
     std::optional<float> SoftDepthForCommand() const {
         if (!ui_soft_depth_) {
             return std::nullopt;
@@ -266,7 +285,6 @@ public:
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
-        (void)frame_count;
         cmds->camera.fbo_3d_width_ = kViewerWidth;
         cmds->camera.fbo_3d_height_ = kViewerHeight;
         if (show_panel_) {
@@ -291,6 +309,14 @@ public:
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
 
+        if (ui_bloom_) {
+            jpov::BloomConfig bc;
+            bc.enabled = true;
+            bc.intensity = ui_bloom_intensity_;
+            bc.threshold = ui_bloom_threshold_;
+            cmds->bloom = bc;
+        }
+
         cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, 0.0f, 0.0f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
         if (ui_fuel_enable_) {
@@ -299,6 +325,24 @@ public:
                                {ui_fuel_x_, ui_fuel_y_ + 0.5f * s, ui_fuel_z_},
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
                                /*scale=*/s);
+        }
+
+        // ── 火光照明：一个跟随火焰的暖色点光源（火焰本身不受光，受光的是地面/燃料块）──
+        // 强度按帧号做轻微闪烁（±8%）+ 位置微抖，避免"死灯"感。
+        if (ui_fire_light_) {
+            const float base_y = ui_fuel_enable_
+                ? (ui_fuel_y_ + ui_fuel_scale_ + 0.12f) : 0.22f;
+            const float ph = static_cast<float>(frame_count) * 0.37f;
+            const float flicker =
+                1.0f + 0.08f * std::sin(ph * 6.1f) + 0.04f * std::sin(ph * 17.3f);
+            jpov::PointLight light;
+            light.position = {ui_fuel_x_ + 0.01f * std::sin(ph * 3.7f),
+                              base_y, ui_fuel_z_ + 0.01f * std::cos(ph * 4.3f)};
+            light.color = {1.0f, 0.52f, 0.18f, 1.0f};
+            light.linear_radius = 2.5f;
+            light.physical_radius = 0.06f;
+            light.intensity = ui_fire_light_intensity_ * flicker;
+            cmds->point_lights.push_back(light);
         }
 
         // ── 懒加载纹理 ──
@@ -346,12 +390,9 @@ public:
             if (kFireTexes[fc].play == FirePlay::kPair) {
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kPairMorph;
                 fire_cfg_.pair_len = kFireTexes[fc].pair_len;
-                // 这些 atlas 是「RGB=白 / A=形状」的**掩膜**：
-                // additive 模式按亮度算覆盖（max(rgb)），会把形状抹成整块方片；
-                // 所以走 kAlpha（覆盖 = tex.a），形状才对。
-                fire_cfg_.blend = jpov::BlendMode::kAlpha;
+                // 火恒为发光体（emissive 默认 true）：贡献 = col.rgb·col.a，
+                // 「RGB=白 / A=形状」的掩膜图集形状照样正确 —— 不再需要按图集类型切混合模式。
             } else {
-                fire_cfg_.blend = jpov::BlendMode::kAdditive;
                 fire_cfg_.sheet_time_mode = jpov::particles::SheetTimeMode::kFps;
                 fire_cfg_.sheet_fps = kFireTexes[fc].fps;
             }
@@ -415,9 +456,9 @@ public:
                 spc.tiles_x = smoke_cfg_.tiles_x;
                 spc.tiles_y = smoke_cfg_.tiles_y;
                 spc.flipbook = true;
-                spc.align = smoke_cfg_.align;
-                spc.blend = smoke_cfg_.blend;
-                spc.sort = smoke_cfg_.sort;
+                spc.align = AlignForCommand();
+                // 烟是**吸收介质**：走覆盖集（会遮挡背景），不是发光求和。
+                spc.emissive = false;
                 spc.frame_blend = frame_blend_;
                 spc.soft_depth_m = SoftDepthForCommand();
                 cmds->DrawParticles(std::move(spc));
@@ -432,9 +473,7 @@ public:
             pc.tiles_x = fire_cfg_.tiles_x;
             pc.tiles_y = fire_cfg_.tiles_y;
             pc.flipbook = fire_cfg_.flipbook;
-            pc.align = fire_cfg_.align;
-            pc.blend = fire_cfg_.blend;
-            pc.sort = fire_cfg_.sort;
+            pc.align = AlignForCommand();
             pc.frame_blend = frame_blend_;
             pc.soft_depth_m = SoftDepthForCommand();
             cmds->DrawParticles(std::move(pc));
@@ -464,7 +503,6 @@ public:
                 ec.texture_id = 0;          // 纯色 texel=(1,1,1,1)
                 ec.flipbook = false;
                 ec.align = ember_cfg_.align;
-                ec.blend = ember_cfg_.blend;
                 ec.soft_depth_m = SoftDepthForCommand();
                 cmds->DrawParticles(std::move(ec));
             }
@@ -547,10 +585,15 @@ private:
                       jpov::UiRect{{combo_x, 76.0f}, {0.30f * w, 26.0f}});
         }
 
-        const float colw = 0.26f * w;
+        // 两列布局：第一列 = 火焰/烟/燃料块/软深度（17 行），第二列 = buff 类开关。
+        const float colw = 0.24f * w;
+        const float col2x = x0 + colw + 14.0f;
         const float top = h - 16.0f - (17 * 24.0f + 16 * 5.0f);
         auto row = [&](int i) {
             return jpov::UiRect{{x0, top + i * 29.0f}, {colw, 24.0f}};
+        };
+        auto row2 = [&](int i) {
+            return jpov::UiRect{{col2x, top + i * 29.0f}, {colw, 24.0f}};
         };
         ui_.Checkbox("粒子火", &fire_enable_, row(0));
         ui_.SliderFloat("粒子数", &ui_particle_count_, row(1), 1.0f, 100.0f, 0);
@@ -569,6 +612,21 @@ private:
         ui_.SliderFloat("温度增益", &ui_temp_gain_, row(14), 0.5f, 2.0f, 2);
         ui_.Checkbox("软深度", &ui_soft_depth_, row(15));
         ui_.SliderFloat("软深度距离", &ui_soft_depth_m_, row(16), 0.01f, 0.5f, 3);
+
+        // ── 第二列：卡片/管线 buff ──
+        {
+            std::vector<const char*> align_items;
+            align_items.push_back("视图 view");
+            align_items.push_back("竖直 vertical");
+            align_items.push_back("面向 facing");
+            align_items.push_back("自适应 blend");
+            ui_.Combo("朝向", &ui_align_mode_, align_items, row2(0));
+        }
+        ui_.Checkbox("火光照明", &ui_fire_light_, row2(1));
+        ui_.SliderFloat("火光强度", &ui_fire_light_intensity_, row2(2), 0.0f, 20.0f, 1);
+        ui_.Checkbox("辉光 Bloom", &ui_bloom_, row2(3));
+        ui_.SliderFloat("辉光强度", &ui_bloom_intensity_, row2(4), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("辉光门槛", &ui_bloom_threshold_, row2(5), 0.2f, 2.0f, 2);
     }
 
     bool show_panel_ = true;
