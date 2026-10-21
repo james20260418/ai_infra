@@ -96,7 +96,8 @@ struct BranchFrame {
 };
 
 // 计算一根枝的逐点帧、tile 与 v。parent 为空表示根枝。
-BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
+BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent,
+                            const SweepOptions& opts) {
   BranchFrame f;
   const size_t n = branch.samples.size();
   const uint32_t ring = branch.EffectiveRingCount();
@@ -154,10 +155,14 @@ BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
 
   // 子枝的 v 从父枝出口接续（+ 接口间距），否则每根枝都从贴图第 0 行开始，
   // 接口处会出现一条横向重复线。取模因为贴图可平铺。
+  //
+  // 非方贴图：v 整体乘 uv_v_scale（等价于把 tile 除以它）。这里必须一起缩，
+  // 否则父子接续项与枝内累计项不在同一个尺度上，接口处会错行。
+  const double vs = opts.uv_v_scale;
   if (parent != nullptr) {
     const V3 entry = FromVec3d(branch.samples[0].position);
     const double gap = Len(Sub(entry, parent->exit_position));
-    const double offset = parent->exit_v_uv + gap / parent->exit_tile;
+    const double offset = parent->exit_v_uv + gap * vs / parent->exit_tile;
     f.v_uv[0] = std::fmod(offset, 1.0);
     if (f.v_uv[0] < 0.0) {
       f.v_uv[0] += 1.0;
@@ -171,7 +176,7 @@ BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
     const V3 b = FromVec3d(branch.samples[i].position);
     const double ds = Len(Sub(b, a));
     const double tile_mid = 0.5 * (f.tile[i - 1] + f.tile[i]);
-    f.v_uv[i] = f.v_uv[i - 1] + ds / tile_mid;
+    f.v_uv[i] = f.v_uv[i - 1] + ds * vs / tile_mid;
   }
 
   const V3 exit = FromVec3d(branch.samples[n - 1].position);
@@ -191,7 +196,11 @@ struct ExitState {
 
 }  // namespace
 
-MeshData SweepBranches(const Shape& shape) {
+MeshData SweepBranches(const Shape& shape, const SweepOptions& opts) {
+  if (!(opts.uv_v_scale > 0.0)) {
+    std::fprintf(stderr, "SweepBranches: uv_v_scale 必须 > 0（0 会让 v 恒定）\n");
+    std::abort();
+  }
   MeshData mesh;
 
   // 按 id 顺序处理（Validate 保证 parent < id），把出口状态记下来给子枝用。
@@ -216,7 +225,7 @@ MeshData SweepBranches(const Shape& shape) {
       parent_frame.exit_v_uv = parent->v_uv;
     }
     const BranchFrame f =
-        BuildBranchFrame(branch, parent == nullptr ? nullptr : &parent_frame);
+        BuildBranchFrame(branch, parent == nullptr ? nullptr : &parent_frame, opts);
 
     const size_t n = branch.samples.size();
     const uint32_t ring = branch.EffectiveRingCount();

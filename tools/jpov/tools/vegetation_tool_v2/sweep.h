@@ -20,6 +20,20 @@
 namespace jpov {
 namespace vegetation {
 
+// 扫管选项。
+struct SweepOptions {
+  // v 方向的 UV 缩放（= 贴图宽/高）。默认 1.0 = 方形贴图。
+  //
+  // 为什么需要它：§3 的规则让 u、v 用同一个 tile（一圈一张图 + 纹素方形），
+  // 但这只在贴图本身是正方形时成立。非方图（例如 512x1024 的 Bark001）若按
+  // 1.0 铺，等于把图硬压进方形：花纹在世界空间被横向拉宽 2×、凸起被压扁，
+  // 法线细节也跟着糊。装配方知道材质，把「宽/高」传进来即可。
+  //
+  // 语义：v' = v × uv_v_scale；等价于把每段的 tile 除以它。
+  // 必须 > 0（0 会让 v 恒定，整根枝退化成一条纹素）。
+  double uv_v_scale = 1.0;
+};
+
 // 分离式顶点缓冲（与 JPOV 的 MeshData 布局一致：positions/normals 各 3 float/顶点，
 // uvs 各 2 float/顶点，indices 为三角形列表）。
 struct MeshData {
@@ -40,7 +54,7 @@ struct MeshData {
 //
 // 前置条件：Shape 已通过 Validate()。函数内部不重复做全量校验，只 CHECK 硬前提
 // （环顶点数 >= 3、samples >= 2），因为违反这些的资产连循环都跑不起来。
-MeshData SweepBranches(const Shape& shape);
+MeshData SweepBranches(const Shape& shape, const SweepOptions& opts = {});
 
 // 按枝切分（逐枝上色 / 逐枝隐藏用）。返回的每个 MeshData 与 shape.branches 下标一一对应。
 //
