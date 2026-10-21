@@ -57,6 +57,8 @@ cc_binary(
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:ui",
+        "//third_party/stb:stb_image",
+        "//third_party/stb:stb_image_write",
         "@com_google_protobuf//:protobuf",
     ],
     target_compatible_with = [

@@ -13,6 +13,10 @@
 //   jpov_vegetation_v2_viewer --shape ... --capture /tmp/shots --cam_phi 10 --cam_r 4
 //   --normal-scale <f>   法线强度（默认 1.5；0~3）
 //   --uv-vscale 0.5      v 方向缩放（默认 0 = 自动取 albedo 宽/高）
+//   --leaf leaf.png      叶卡贴图（整图一格；近乎黑的像素当透明）
+//   --curl 0.5           顶点法线球面化强度 A（0 = 平面法线）
+//   --leaf-normal 1.0    由 alpha 生成的法线贴图强度 B（0 = 关）
+//   --cam-target-y 3.0   注视点高度（配合 --cam_r 0.9 看叶卡细节）
 
 #include <algorithm>
 #include <cmath>
@@ -20,11 +24,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <glog/logging.h>
+#include "third_party/stb/stb_image.h"
+#include "third_party/stb/stb_image_write.h"
 #include <google/protobuf/text_format.h>
 
 #include "tools/jpov/demo/skylight_scene.h"
@@ -49,6 +56,173 @@ using jpov::vegetation::Vec3d;
 
 constexpr int kMaxCardTypes = 4;  // 4 种绿
 constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了看得见朝向
+
+bool ReadFileBytes(const std::string& path, std::vector<unsigned char>* out) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return false;
+  out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  return !out->empty();
+}
+
+std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& rgba, int w, int h) {
+  std::vector<unsigned char> out;
+  stbi_write_png_to_func(
+      [](void* ctx, void* data, int size) {
+        std::vector<unsigned char>* v = static_cast<std::vector<unsigned char>*>(ctx);
+        const unsigned char* p = static_cast<const unsigned char*>(data);
+        v->insert(v->end(), p, p + size);
+      },
+      &out, w, h, 4, rgba.data(), w * 4);
+  return out;
+}
+
+// 只把 RGB 往透明区扩散，**不动 alpha**（alpha 是 cutout 的判据）。
+// 目的：mip / 双线性采样时，叶子边缘不会混到背景的黑色（否则一圈黑边）。
+void DilateRgbIntoTransparent(const std::vector<unsigned char>& alpha_mask,
+                              std::vector<unsigned char>* rgba, int w, int h, int passes) {
+  std::vector<unsigned char> mask = alpha_mask;   // 0/1：该像素有没有"内容"
+  for (int p = 0; p < passes; ++p) {
+    std::vector<unsigned char> next = mask;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        if (mask[idx]) continue;
+        int acc[3] = {0, 0, 0};
+        int n = 0;
+        const int dx[4] = {-1, 1, 0, 0};
+        const int dy[4] = {0, 0, -1, 1};
+        for (int k = 0; k < 4; ++k) {
+          const int nx = x + dx[k];
+          const int ny = y + dy[k];
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const size_t nidx = static_cast<size_t>(ny) * w + nx;
+          if (!mask[nidx]) continue;
+          acc[0] += (*rgba)[nidx * 4 + 0];
+          acc[1] += (*rgba)[nidx * 4 + 1];
+          acc[2] += (*rgba)[nidx * 4 + 2];
+          ++n;
+        }
+        if (n > 0) {
+          (*rgba)[idx * 4 + 0] = static_cast<unsigned char>(acc[0] / n);
+          (*rgba)[idx * 4 + 1] = static_cast<unsigned char>(acc[1] / n);
+          (*rgba)[idx * 4 + 2] = static_cast<unsigned char>(acc[2] / n);
+          next[idx] = 1;
+        }
+      }
+    }
+    mask.swap(next);
+  }
+}
+
+// 由 alpha 生成切线空间法线贴图：alpha 当高度场 → 模糊 → 中央差分。
+// green = +v（OpenGL 约定，与引擎 B = cross(N,T) 一致）；图像 y 向下，所以要取反。
+std::vector<unsigned char> BuildNormalFromAlpha(const std::vector<unsigned char>& rgba,
+                                                int w, int h, float depth) {
+  std::vector<float> height(static_cast<size_t>(w) * h);
+  for (size_t i = 0; i < height.size(); ++i) {
+    // 高度场 = 轮廓(alpha) + 叶面明暗(luma)。
+    //   alpha：给轮廓一圈软倒角（治"剃刀切出来的纸边"）
+    //   luma ：给叶脉/叶面起伏（照片本身的光影被当成凹凸，经典的 emboss 用法）
+    // 只用 alpha 时叶面内部是纯平的，近看仍然是贴纸；加上 luma 才有叶面细节。
+    const float a = rgba[i * 4 + 3] / 255.0f;
+    const float luma = (0.299f * rgba[i * 4 + 0] + 0.587f * rgba[i * 4 + 1] +
+                        0.114f * rgba[i * 4 + 2]) /
+                       255.0f;
+    height[i] = 0.45f * a + 0.55f * luma;
+  }
+  // 两次 3-tap 盒模糊（等效半径 2）：把硬边变成斜坡，法线才有倒角。
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<float> tmp = height;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const int xm = (x == 0) ? 0 : x - 1;
+        const int xp = (x + 1 == w) ? w - 1 : x + 1;
+        tmp[static_cast<size_t>(y) * w + x] =
+            (height[static_cast<size_t>(y) * w + xm] +
+             height[static_cast<size_t>(y) * w + x] +
+             height[static_cast<size_t>(y) * w + xp]) / 3.0f;
+      }
+    }
+    height.swap(tmp);
+    tmp = height;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const int ym = (y == 0) ? 0 : y - 1;
+        const int yp = (y + 1 == h) ? h - 1 : y + 1;
+        tmp[static_cast<size_t>(y) * w + x] =
+            (height[static_cast<size_t>(ym) * w + x] +
+             height[static_cast<size_t>(y) * w + x] +
+             height[static_cast<size_t>(yp) * w + x]) / 3.0f;
+      }
+    }
+    height.swap(tmp);
+  }
+
+  std::vector<unsigned char> out(height.size() * 4);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const size_t i = static_cast<size_t>(y) * w + x;
+      const int xm = (x == 0) ? 0 : x - 1;
+      const int xp = (x + 1 == w) ? w - 1 : x + 1;
+      const int ym = (y == 0) ? 0 : y - 1;
+      const int yp = (y + 1 == h) ? h - 1 : y + 1;
+      const float dx = 0.5f * (height[static_cast<size_t>(y) * w + xp] -
+                               height[static_cast<size_t>(y) * w + xm]);
+      const float dy_img = 0.5f * (height[static_cast<size_t>(yp) * w + x] -
+                                   height[static_cast<size_t>(ym) * w + x]);
+      float nx = -dx * depth;
+      float ny = dy_img * depth;   // +v 与图像 y 反向
+      float nz = 1.0f;
+      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+      nx /= len;
+      ny /= len;
+      nz /= len;
+      out[i * 4 + 0] = static_cast<unsigned char>((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
+      out[i * 4 + 1] = static_cast<unsigned char>((ny * 0.5f + 0.5f) * 255.0f + 0.5f);
+      out[i * 4 + 2] = static_cast<unsigned char>((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
+      out[i * 4 + 3] = 255;
+    }
+  }
+  return out;
+}
+
+// A：顶点法线球面化。卡片本来 4 个顶点法线全等于面法线 → 整卡一个亮度（纸片感）。
+// 按格内 uv 把法线往「叶片中心鼓起」的方向掰：角上法线向外张，中央仍朝面外。
+// k = 0 时逐位等价于原平面法线（零回归）。
+void BendCardNormals(jpov::MeshData* md, float k) {
+  // 注意：jpov::MeshData.positions 是 vector<Vec3f>，size() 已经是顶点数。
+  const size_t nverts = md->positions.size();
+  for (size_t v = 0; v + 3 < nverts; v += 4) {
+    const jpov::Vec3f& p0 = md->positions[v + 0];
+    const jpov::Vec3f& p1 = md->positions[v + 1];
+    const jpov::Vec3f& p3 = md->positions[v + 3];
+    jpov::Vec3f right = p1 - p0;
+    jpov::Vec3f up = p3 - p0;
+    const float rl = std::sqrt(right.x() * right.x() + right.y() * right.y() +
+                               right.z() * right.z());
+    const float ul = std::sqrt(up.x() * up.x() + up.y() * up.y() + up.z() * up.z());
+    if (rl < 1e-9f || ul < 1e-9f) continue;
+    right = right * (1.0f / rl);
+    up = up * (1.0f / ul);
+    jpov::Vec3f n{right.y() * up.z() - right.z() * up.y(),
+                  right.z() * up.x() - right.x() * up.z(),
+                  right.x() * up.y() - right.y() * up.x()};
+    const float nl = std::sqrt(n.x() * n.x() + n.y() * n.y() + n.z() * n.z());
+    if (nl < 1e-9f) continue;
+    n = n * (1.0f / nl);
+
+    for (size_t i = 0; i < 4; ++i) {
+      const jpov::Vec2f& uv = md->uvs[v + i];
+      const float u = uv.x();
+      const float w = uv.y();
+      jpov::Vec3f bent = n + right * ((2.0f * u - 1.0f) * k) + up * ((2.0f * w - 1.0f) * k);
+      const float bl = std::sqrt(bent.x() * bent.x() + bent.y() * bent.y() +
+                                 bent.z() * bent.z());
+      if (bl < 1e-9f) continue;
+      md->normals[v + i] = bent * (1.0f / bl);
+    }
+  }
+}
 
 // 读 PNG 的 IHDR 拿像素尺寸（只为贴图长宽比，不值得为此加一条 stb 依赖）。
 // 非 PNG / 损坏 → 返回 false，调用方回退 1.0。
@@ -83,6 +257,8 @@ struct CliArgs {
   double radius = 0.0;   // 0 = 自动
   int max_level = 99;
   float ground_y = 0.0f;
+  float cam_target_y = 0.0f;   // 相机注视点高度（看树冠/叶卡细节用）
+  bool show_panel = false;     // capture 时也画面板（截图/自检用）
   // 法线贴图强度（uNormalScale）。默认 1.5：同一树皮 A/B 实测
   // 1.0 偏平、3.0 发塑料，1.5 最自然（Skylight + 单平行光下 ambient 占比高，
   // 1.0 的凹凸容易被环境光冲淡）。面板滑条同一量程。
@@ -91,6 +267,12 @@ struct CliArgs {
   // 非方形贴图必须补偿，否则整张图被按正方形铺开：1:2 的图横向拉宽 2×，
   // 凸起在 u 方向被压扁、纹素不再方正（法线细节跟着糊）。
   float uv_vscale = 0.0f;
+
+  // 叶卡（--leaf 给了才启用）。整张图 = 一格；黑底当透明。
+  std::string leaf_path;
+  float leaf_black = 12.0f;   // max(r,g,b) < 此值 → alpha 0（带 0.5x~1.5x 软过渡）
+  float leaf_curl = 0.5f;     // A：顶点法线球面化强度
+  float leaf_normal = 1.0f;   // B：法线贴图强度（uNormalScale）
 };
 
 CliArgs ParseCli(int argc, char** argv) {
@@ -114,12 +296,27 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--cam_r" && has_val) {
       a.radius = std::atof(argv[++i]);
       CHECK_GT(a.radius, 0.0) << "--cam_r 必须 > 0";
+    } else if (arg == "--leaf" && has_val) {
+      a.leaf_path = argv[++i];
+    } else if (arg == "--leaf-black" && has_val) {
+      a.leaf_black = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.leaf_black, 0.0f) << "--leaf-black 不能为负";
+    } else if (arg == "--curl" && has_val) {
+      a.leaf_curl = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.leaf_curl, 0.0f) << "--curl 不能为负";
+    } else if (arg == "--leaf-normal" && has_val) {
+      a.leaf_normal = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.leaf_normal, 0.0f) << "--leaf-normal 不能为负（0 = 关掉法线贴图）";
     } else if (arg == "--normal-scale" && has_val) {
       a.normal_scale = static_cast<float>(std::atof(argv[++i]));
       CHECK_GT(a.normal_scale, 0.0f) << "--normal-scale 必须 > 0";
     } else if (arg == "--uv-vscale" && has_val) {
       a.uv_vscale = static_cast<float>(std::atof(argv[++i]));
       CHECK_GT(a.uv_vscale, 0.0f) << "--uv-vscale 必须 > 0";
+    } else if (arg == "--show-panel") {
+      a.show_panel = true;
+    } else if (arg == "--cam-target-y" && has_val) {
+      a.cam_target_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--ground-y" && has_val) {
       a.ground_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--max-level" && has_val) {
@@ -232,6 +429,16 @@ class VegetationV2App : public JPOV {
   std::vector<int> branch_level_;
   std::vector<uint32_t> card_mesh_;     // 每种 type 一个合并盒子 mesh
   std::vector<jpov::PBRMaterial> card_mat_;
+
+  // ── 叶卡材质（--leaf）──
+  bool has_leaf_ = false;
+  float leaf_aspect_ = 1.0f;          // 单张图 = 一格 → 宽/高
+  float curl_ = 0.5f;                 // A：顶点法线球面化（面板可调）
+  float curl_applied_ = -1.0f;        // 上次烘进 mesh 的值（变了才 UpdateMesh）
+  float leaf_normal_scale_ = 1.0f;    // B：法线贴图强度（面板可调）
+  jpov::PBRMaterial leaf_mat_;
+  std::vector<uint32_t> leaf_mesh_;               // 每 type 一个 mesh
+  std::vector<jpov::MeshData> leaf_mesh_base_;    // 平法线基准（curl 变化时重算）
   // 逐层棕色材质缓存：每帧给 183 根枝各造一个 PBRMaterial 纯属浪费。
   std::vector<jpov::PBRMaterial> level_mats_;
   jpov_viewer::ViewConfig view_;
@@ -319,11 +526,138 @@ class VegetationV2App : public JPOV {
     std::fflush(stdout);
   }
 
+  // 叶卡：黑底 → alpha；由 alpha 生成法线贴图（B）；再建四边形 mesh（A 在 normals 上）。
+  void BuildLeafScene(const CliArgs& args) {
+    std::vector<unsigned char> file;
+    CHECK(ReadFileBytes(args.leaf_path, &file)) << "读不到叶卡图: " << args.leaf_path;
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+    unsigned char* px = stbi_load_from_memory(file.data(), static_cast<int>(file.size()), &w, &h,
+                                              &comp, 4);
+    CHECK(px != nullptr) << "解码失败: " << args.leaf_path;
+    std::vector<unsigned char> rgba(px, px + static_cast<size_t>(w) * h * 4);
+    stbi_image_free(px);
+
+    // 「近乎黑 = 透明」：max(r,g,b) 在 0.5t~1.5t 之间线性过渡，避免硬边锯齿。
+    const float lo = args.leaf_black * 0.5f;
+    const float hi = args.leaf_black * 1.5f;
+    const float span = std::max(1e-3f, hi - lo);
+    std::vector<unsigned char> mask(static_cast<size_t>(w) * h);
+    size_t opaque = 0;
+    for (size_t i = 0; i < mask.size(); ++i) {
+      const float mx = static_cast<float>(std::max(
+          std::max(rgba[i * 4 + 0], rgba[i * 4 + 1]), rgba[i * 4 + 2]));
+      float t = (mx - lo) / span;
+      t = std::min(1.0f, std::max(0.0f, t));
+      const unsigned char a = static_cast<unsigned char>(t * 255.0f + 0.5f);
+      // 素材是「黑底」：观测色 = 叶片色 × 覆盖率。边缘像素直接当颜色用会发黑，
+      // 所以按覆盖率反解（un-premultiply from black）：C = C_obs / a。
+      // 不做这一步，缩放/mip 后叶子轮廓会有一圈黑边。
+      if (t > 0.0f && t < 1.0f) {
+        for (int c = 0; c < 3; ++c) {
+          const float v = rgba[i * 4 + c] / t;
+          rgba[i * 4 + c] = static_cast<unsigned char>(std::min(255.0f, v));
+        }
+      }
+      rgba[i * 4 + 3] = a;
+      mask[i] = a > 0 ? 1 : 0;
+      if (a > 0) ++opaque;
+    }
+    CHECK(opaque > 0) << "叶卡图里没有非黑像素（阈值 --leaf-black " << args.leaf_black << "）";
+    LOG(INFO) << "叶卡: " << args.leaf_path << " " << w << "x" << h << "，不透明 "
+              << (100.0 * static_cast<double>(opaque) / static_cast<double>(mask.size())) << "%";
+    // RGB 往透明区扩散：mip/双线性不会混进背景黑。
+    DilateRgbIntoTransparent(mask, &rgba, w, h, 6);
+    const std::vector<unsigned char> normal_rgba = BuildNormalFromAlpha(rgba, w, h, 4.0f);
+
+    jpov::TextureOptions opts;
+    opts.mipmap = true;
+    opts.repeat = false;
+    // 叶卡是 alpha cutout 且会被 mip 缩小：普通 glGenerateMipmap 会把 alpha 平均到
+    // cutoff 以下 → 远处叶片变稀、出现「一根根细线」。用覆盖率保持的 mip 链。
+    opts.alpha_coverage.enabled = true;
+    opts.alpha_coverage.cutoff = 0.5f;   // 必须与 leaf_mat_.alpha_cutoff 一致
+    leaf_mat_ = jpov::PBRMaterial::SolidColor({1.0f, 1.0f, 1.0f, 1.0f});
+    leaf_mat_.base_color_tex =
+        RegisterTextureFromMemory(EncodePng(rgba, w, h), "leaf_albedo", opts);
+    leaf_mat_.normal_tex =
+        RegisterTextureFromMemory(EncodePng(normal_rgba, w, h), "leaf_normal", opts);
+    leaf_mat_.normal_scale = args.leaf_normal;
+    leaf_mat_.alpha_mode = jpov::AlphaMode::kMask;
+    leaf_mat_.alpha_cutoff = 0.5f;
+    leaf_mat_.double_sided = true;
+    leaf_aspect_ = static_cast<float>(w) / static_cast<float>(h);
+    curl_ = args.leaf_curl;
+    leaf_normal_scale_ = args.leaf_normal;
+    has_leaf_ = true;
+
+    leaf_mesh_.assign(kMaxCardTypes, 0);
+    leaf_mesh_base_.assign(kMaxCardTypes, jpov::MeshData());
+    for (int t = 0; t < kMaxCardTypes; ++t) {
+      Shape subset = shape_;
+      subset.cards.clear();
+      for (const auto& c : shape_.cards) {
+        if (static_cast<int>(c.type % kMaxCardTypes) == t) {
+          subset.cards.push_back(c);
+        }
+      }
+      if (subset.cards.empty()) continue;
+      const std::vector<double> aspect(kMaxCardTypes, static_cast<double>(leaf_aspect_));
+      const MeshData src = jpov::vegetation::BuildLeafCards(subset, aspect);
+
+      jpov::MeshData md;
+      md.flags = static_cast<jpov::MeshVertexFlags>(
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kUV) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kTangent));
+      const size_t nverts = src.positions.size() / 3;
+      for (size_t v = 0; v < nverts; ++v) {
+        md.positions.push_back(jpov::Vec3f{src.positions[v * 3], src.positions[v * 3 + 1],
+                                           src.positions[v * 3 + 2]});
+        md.normals.push_back(jpov::Vec3f{src.normals[v * 3], src.normals[v * 3 + 1],
+                                         src.normals[v * 3 + 2]});
+        md.uvs.push_back(jpov::Vec2f{src.uvs[v * 2], src.uvs[v * 2 + 1]});
+        // 切线 = ∂P/∂u = 卡片的 right（每 4 个顶点一张卡，right 相同）。
+        const size_t c0 = v - (v % 4);
+        const jpov::Vec3f d = md.positions[c0 + 1] - md.positions[c0];
+        const float len = std::sqrt(d.x() * d.x() + d.y() * d.y() + d.z() * d.z());
+        const float inv = (len > 1e-9f) ? 1.0f / len : 0.0f;
+        md.tangents.push_back(jpov::Vec3f{d.x() * inv, d.y() * inv, d.z() * inv});
+      }
+      md.indices = src.indices;
+      leaf_mesh_base_[t] = md;
+
+      jpov::MeshData bent = md;
+      BendCardNormals(&bent, curl_);
+      for (const auto& nn : bent.normals) {
+      }
+      leaf_mesh_[t] = RegisterMesh(bent);
+    }
+    curl_applied_ = curl_;
+    LOG(INFO) << "叶卡材质: 宽/高 = " << leaf_aspect_ << "，curl = " << curl_
+              << "，法线强度 = " << leaf_normal_scale_;
+  }
+
+  // curl 变了才重算法线（位置/UV/切线不变 → UpdateMesh 安全）。
+  void ApplyCurl() {
+    for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
+      if (leaf_mesh_[t] == 0) continue;
+      jpov::MeshData bent = leaf_mesh_base_[t];
+      BendCardNormals(&bent, curl_);
+      UpdateMesh(leaf_mesh_[t], bent);
+    }
+    curl_applied_ = curl_;
+  }
+
   void BuildScene(const CliArgs& args) {
     normal_scale_ = args.normal_scale;
     // v 方向补偿必须在生成 mesh 之前确定：UV 是扫管时烘进去的，不是 shader 里改的。
-    uv_v_scale_ = args.uv_vscale;
-    if (!args.bark_dir.empty() && uv_v_scale_ <= 0.0f) {
+    // 0 = 自动（只对 --bark 有意义）：没有 bark 时必须落回 1.0，
+    // 否则 SweepBranches 会因 uv_v_scale<=0 直接 abort。
+    uv_v_scale_ = (args.uv_vscale > 0.0f) ? args.uv_vscale : 1.0f;
+    if (!args.bark_dir.empty() && args.uv_vscale <= 0.0f) {
       int tw = 0, th = 0;
       const std::string albedo = args.bark_dir + "/albedo.png";
       if (ReadPngSize(albedo, &tw, &th)) {
@@ -369,15 +703,20 @@ class VegetationV2App : public JPOV {
       branch_level_[i] = static_cast<int>(shape_.branches[i].level);
     }
 
-    // 叶卡：按 type 合并成盒子 mesh。宽度这里先给一个占位值（高度 × 0.6），
-    // 真正的宽度来自叶材质 atlas 比例——本工具不接材质，只为看位置/朝向。
+    if (!args.leaf_path.empty()) {
+      BuildLeafScene(args);
+    }
+
+    // 没有叶材质时：按 type 合并成盒子 mesh（只为看位置/朝向；宽度用占位比例 0.6）。
     std::vector<std::vector<float>> pos(kMaxCardTypes);
     std::vector<std::vector<float>> nrm(kMaxCardTypes);
     std::vector<std::vector<uint32_t>> idx(kMaxCardTypes);
-    for (const auto& card : shape_.cards) {
-      const uint32_t t = card.type % kMaxCardTypes;
-      AppendCardBox(shape_, card, static_cast<float>(card.height * 0.6), &pos[t], &nrm[t],
-                    &idx[t]);
+    if (!has_leaf_) {
+      for (const auto& card : shape_.cards) {
+        const uint32_t t = card.type % kMaxCardTypes;
+        AppendCardBox(shape_, card, static_cast<float>(card.height * 0.6), &pos[t], &nrm[t],
+                      &idx[t]);
+      }
     }
     card_mesh_.resize(kMaxCardTypes, 0);
     card_mat_.resize(kMaxCardTypes);
@@ -457,7 +796,7 @@ class VegetationV2App : public JPOV {
     ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
     ground_mat_ = jpov_skylight::GroundMaterial();
 
-    show_panel_ = !args.capture;   // headless 出图不画面板（与其它 viewer 一致）
+    show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
     int deepest = 0;
     for (const auto& b : shape_.branches) {
       deepest = std::max(deepest, static_cast<int>(b.level));
@@ -465,6 +804,7 @@ class VegetationV2App : public JPOV {
     max_level_ = std::min(args.max_level, deepest);
     max_level_f_ = static_cast<float>(max_level_);
     ground_y_ = args.ground_y;
+    cam_target_y_ = args.cam_target_y;
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
@@ -473,6 +813,13 @@ class VegetationV2App : public JPOV {
                     const jpov::WindowInfo& winfo,
                     jpov::RenderCommandList* cmds) override {
     (void)frame_count;
+    // 面板滑条改的是「呈现」参数：curl 要重烘顶点法线，法线强度是材质常量。
+    if (has_leaf_) {
+      if (curl_ != curl_applied_) {
+        ApplyCurl();
+      }
+      leaf_mat_.normal_scale = leaf_normal_scale_;
+    }
     // 交互：[ / ] 调层级、P 打印相机
     if (input.GetKey(jpov::KeyCode::LeftBracket).IsClick()) {
       max_level_ = std::max(0, max_level_ - 1);
@@ -539,6 +886,16 @@ class VegetationV2App : public JPOV {
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
+    if (has_leaf_) {
+      for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
+        if (leaf_mesh_[t] == 0) continue;
+        if (!show_all_card_types_ && t != type_filter_) continue;
+        if (frame_count == 0) {
+        }
+        cmds->DrawObject3D(leaf_mesh_[t], leaf_mat_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+                           {0.0f, 0.0f, 1.0f});
+      }
+    }
     for (size_t t = 0; t < card_mesh_.size(); ++t) {
       if (card_mesh_[t] == 0) {
         continue;
@@ -546,6 +903,8 @@ class VegetationV2App : public JPOV {
       // 只看某一类：用于确认"这棵树的某类叶卡到底长在哪、朝向对不对"
       if (!show_all_card_types_ && t != type_filter_) {
         continue;
+      }
+      if (frame_count == 0) {
       }
       cmds->DrawObject3D(card_mesh_[t], card_mat_[t], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
@@ -565,7 +924,8 @@ class VegetationV2App : public JPOV {
       const float cx = 0.02f * w;
       const int scene_rows = has_bark_ ? 4 : 3;   // 地面/层级/树皮/法线强度
       const float scene_top = h - 16.0f - (scene_rows * 32.0f);
-      const float leaf_top = scene_top - 12.0f - (2 * 32.0f);
+      const int leaf_rows = has_leaf_ ? 4 : 2;   // 全部叶子/type +（球面化/法线强度）
+      const float leaf_top = scene_top - 12.0f - (leaf_rows * 32.0f);
       auto scene_row = [&](int i) {
         return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
       };
@@ -594,6 +954,10 @@ class VegetationV2App : public JPOV {
       }
 
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
+      if (has_leaf_) {
+        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(2), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(3), 0.0f, 3.0f, 2);
+      }
       // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
       // 所以这个下标是【颜色桶下标】，不是原始 type 编号。要按真实 type 过滤，
       // 得改成逐 type 一个 mesh（面数索引翻 4 倍，暂不做）。
