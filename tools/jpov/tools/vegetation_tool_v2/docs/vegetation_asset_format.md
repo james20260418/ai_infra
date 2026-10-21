@@ -278,6 +278,14 @@ width = height × (cell_width / cell_height)
    左右留白会让叶子视觉上变胖
 4. 一型可以绑多个 atlas 变体；装配时按 `|log(实际比例 / preferred_aspect)|` 挑选，
    保证轮廓稳定、同时避免"一眼重复"
+5. **黑底素材**（例如手绘/照片抠图）可以按「近乎黑 = 透明」自动转 alpha：先按
+   `max(r,g,b)` 做软阈值，再按覆盖率反解颜色（`C = C_obs / α`，否则边缘一圈发黑）。
+6. 叶卡的 alpha 是 cutout，且会被 mip 缩小 → **必须用覆盖率保持的 mip 链**
+   （`TextureOptions::alpha_coverage`，cutoff 与材质 `alpha_cutoff` 一致），
+   否则远处叶片变稀、只剩一根根细线。
+7. 叶面细节可以吃「轮廓 alpha + 照片明暗 luma」生成的法线贴图（emboss），
+   再叠加每个卡片顶点的球面化法线（角部向外张）——两者互补：
+   前者管单叶的叶脉/倒角，后者管整卡内部的受光渐变。
 
 ---
 
@@ -303,7 +311,7 @@ width = height × (cell_width / cell_height)
 2. 逐枝扫管：截面 profile + 逐点半径 + 平行传输基 → 顶点/法线/三角形
 3. 生成 UV：§3 的规则（含父子 V 连续、U 相位继承、非方贴图的 uv_v_scale）
 4. 分叉领口：子枝根部按父半径 smoothstep 收细（渲染侧几何处理）
-5. 叶卡：anchor/up/normal/height + 材质给的 width → 四边形；UV = atlas 格子四角
+5. 叶卡：anchor/up/normal/height + 材质给的格子长宽比 → 四边形（width = height × 长宽比）；UV = atlas 格子四角
 6. 材质：树皮接 albedo/normal/roughness；叶子接 atlas + alpha cutout + 双面
 7. 输出：GLB + **resolved manifest**（记录每类卡实际用的 atlas、算出的 width）
 ```

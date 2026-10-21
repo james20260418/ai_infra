@@ -314,7 +314,8 @@ void TestLeafCards() {
   card.s = 0.5;
   shape.cards.push_back(card);
 
-  const double width = 0.1;   // 来自材质：height × 格子宽/高
+  const double aspect = 0.5;  // 来自材质：格子宽/高
+  const double width = card.height * aspect;   // = 0.1
   // 顶点顺序固定：0=(u0,v0) 1=(u1,v0) 2=(u1,v1) 3=(u0,v1)。用双线性插值算
   // 「参数 (au, av) 处的世界坐标」，再要求它等于 anchor —— 这才是 anchor 的定义。
   const auto point_at = [](const MeshData& m, double u, double v) {
@@ -342,7 +343,7 @@ void TestLeafCards() {
 
   for (const auto& c : kCases) {
     shape.leaf_types[0].anchor_mode = c.mode;
-    const MeshData mesh = BuildLeafCards(shape, {width});
+    const MeshData mesh = BuildLeafCards(shape, {aspect});
     Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
     Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
 

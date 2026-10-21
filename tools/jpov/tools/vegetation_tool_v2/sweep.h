@@ -62,13 +62,13 @@ MeshData SweepBranches(const Shape& shape, const SweepOptions& opts = {});
 // 且按 branches 顺序连续排列。两处必须同步修改（同文件内，且有测试钉住）。
 std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh);
 
-// 叶卡：anchor + up + normal + height + 材质给的 width → 四边形。
+// 叶卡：anchor + up + normal + height + 材质给的格子长宽比 → 四边形。
 //
-// width_by_type：每个 leaf_type 的实际宽度（米）。由叶材质的 atlas 格子长宽比推导：
-//   width = height × (cell_width / cell_height)
-// 这里之所以从外部传：**宽度属于材质，不属于拓扑**（拓扑只保证长度）。
-// 每个 type 都必须有 > 0 的宽度，缺失视为调用方 bug（CHECK）。
-MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_type);
+// aspect_by_type：每个 leaf_type 的「格子宽/高」。宽度按**每张卡自己的高度**算：
+//   width = card.height × aspect
+// 这里之所以从外部传：**长宽比属于材质，不属于拓扑**（拓扑只保证长度）。
+// 每个 type 都必须有 > 0 的 aspect，缺失视为调用方 bug（CHECK）。
+MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& aspect_by_type);
 
 }  // namespace vegetation
 }  // namespace jpov
