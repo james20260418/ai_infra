@@ -222,9 +222,13 @@ if leaves_obj is not None:
         nearest_pt = flat_np[nearest]
         which = 0 if len3(sub3(mid_a, nearest_pt)) < len3(sub3(mid_b, nearest_pt)) else 1
         root_mid, tip_mid = (mid_a, mid_b) if which == 0 else (mid_b, mid_a)
-        # Sapling 的叶卡是**居中**放在枝条上的（不是根部贴枝）：卡片中心才在枝上。
-        # 用边中点当锚点会让整张卡外移半个高度（实测 13.6cm），叶子看起来浮空。
-        anchor_pt = centre
+        # Sapling 的叶卡是**居中**放在枝条上的（卡片中心在枝上），而格式里的
+        # bottom_center 语义是「卡片底边中点 = anchor」。两者差半个 height：
+        # 直接把 centre 当 anchor 写进去，整张卡会被抬高 h/2（实测 12.5cm）。
+        # 所以在这里换算：anchor = centre − up·(h/2)，卡片实际位置与 Blender 完全一致。
+        anchor_pt = (centre[0] - up[0] * height * 0.5,
+                     centre[1] - up[1] * height * 0.5,
+                     centre[2] - up[2] * height * 0.5)
 
         up = norm3(sub3(tip_mid, root_mid))
         height = len3(sub3(tip_mid, root_mid))
