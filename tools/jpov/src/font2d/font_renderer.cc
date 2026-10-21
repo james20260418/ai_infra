@@ -470,13 +470,8 @@ void FontRenderer::DrawText3D(const Text3DCommand& cmd,
     Primitives3DRenderer::BuildText3DWorldVerts(cmd, target_px,
                                                  &verts, &scale);
 
-    // 上传新光栅化的字形到 GL atlas（**只传本命令要用的那一层**）。
-    //
-    // 原来这里是 UploadAllDirty：每条 Text3D 命令都可能触发 4096x4096 的全量
-    // glTexSubImage2D（16MB/层，最多 3 层）。一屏几十上百条 3D 文字时，
-    // 新字形/新层级会被反复整层上传 → 明显卡顿（表现为“卡死”）。
-    // 只传 selected_level 是等价的：其它脏层会在各自被使用时再传。
-    UploadAtlas(*slot, selected_level);
+    // 上传新光栅化的字形到 GL atlas（所有脏层）。
+    UploadAllDirty(*slot);
 
     glPushAttrib(GL_ENABLE_BIT);
     // 3D 文本要参与深度测试（被物体遮挡时隐藏）+ 混合（字形边缘抗锯齿）。

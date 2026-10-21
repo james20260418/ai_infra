@@ -828,9 +828,10 @@ class VegetationV2App : public JPOV {
     (void)frame_count;
     // 面板滑条改的是「呈现」参数：curl 要重烘顶点法线，法线强度是材质常量。
     if (has_leaf_) {
-      // 用 epsilon 比较：滑条每帧可能带浮点噪声，精确 != 会导致**每帧**都 UpdateMesh
-      //（4 次 GPU 缓冲重传 + 法线重算），表现为明显卡顿。
-      if (std::fabs(curl_ - curl_applied_) > 1e-3f) {
+      // 精确比较是安全的：Ui::SliderFloat 只在拖动/点击时写 *value，
+      // 空闲帧只做 *value = clamp(*value)（同值写回，位模式不变），不会产生浮点噪声。
+      // 拖动期间本来就是每帧重烘（实时预览），epsilon 也省不掉这笔开销。
+      if (curl_ != curl_applied_) {
         ApplyCurl();
       }
       leaf_mat_.normal_scale = leaf_normal_scale_;
