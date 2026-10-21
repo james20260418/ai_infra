@@ -706,7 +706,8 @@ class VegetationV2App : public JPOV {
       std::vector<float> cpos;
       std::vector<uint32_t> cidx;
       for (const auto& card : shape_.cards) {
-        AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.02, &cpos, &cidx);
+        // 绿卡做得很薄（4mm）：角标比它厚一个量级，才不会出现「面和面抢深度」。
+        AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.004, &cpos, &cidx);
       }
       if (!cpos.empty()) {
         jpov::MeshData md;
@@ -729,7 +730,9 @@ class VegetationV2App : public JPOV {
     // 这样用户一眼就知道素材的四个角该往哪贴；盒子厚度只为"看得见"，不代表卡片有厚度。
     {
       const double kBadge = 1.0 / 8.0;
-      const double kThick = 0.03;
+      // 8cm 厚（远厚于绿卡的 4mm）：角标在卡面前后各凸出 ~3.8cm，
+      // 双面看都完整可见，且与绿卡的面没有任何近共面区域。
+      const double kThick = 0.08;
       const double uv[3][4] = {{0.0, kBadge, 0.0, kBadge},
                                {1.0 - kBadge, 1.0, 1.0 - kBadge, 1.0},
                                {0.0, kBadge, 1.0 - kBadge, 1.0}};
