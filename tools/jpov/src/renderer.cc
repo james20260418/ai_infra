@@ -597,6 +597,7 @@ Renderer::~Renderer() {
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
+    strip_renderer_.Finalize();
     smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -1423,6 +1424,7 @@ void Renderer::Init(
     fire_fog_renderer_.Init(&shader_mgr_);
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
+    strip_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
@@ -1778,6 +1780,24 @@ void Renderer::Render(const RenderCommandList& cmds,
                 volume_fire_renderer_.Composite(fbo_3d_w, fbo_3d_h);
                 const GLenum mrt_bufs_v[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_v);
+            }
+
+            // ── 半透明条带（1× WBO 覆盖集）—— 层序：粒子 → 体积火 → **条带** → 远景雾。
+            //    与体积火不共 FBO：火权重恒 1、条带用 WeightWbo，混一个 accum 会被权重尺度偏置。
+            if (!cmds.translucent_strips.empty()) {
+                CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
+                strip_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
+                    strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
+                                         hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                // 只写颜色附件：MRT#1（场景深度）本 pass 不碰，不摘会与采样形成反馈环。
+                const GLenum sdraw[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, sdraw);
+                strip_renderer_.Composite(fbo_3d_w, fbo_3d_h);
+                const GLenum mrt_bufs_s[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_s);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

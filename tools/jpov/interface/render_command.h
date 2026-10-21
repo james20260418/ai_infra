@@ -35,6 +35,7 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/particle_types.h"
+#include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/interface/volume_fire_types.h"
 #include "tools/jpov/interface/pbr_material.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
@@ -1974,6 +1975,11 @@ struct RenderCommandList {
     // 在不透明 3D 之后由独立体积 pass 渲染：把 (发射, 透射, 期望深度) 作为**薄层**写进
     // WBO 透明纹理再合成。见 VolumeFireCommand / docs/jpov_volumetric_fire_design.md。
     std::vector<VolumeFireCommand> volume_fires;
+
+    // 半透明条带批（世界空间）。每条命令 = 一批「同材质」条带，**一次 draw call**。
+    // 在体积火之后、远景雾之前渲染：写 1× WBO 覆盖集再 over 合成进 HDR。
+    // 见 TranslucentStripBatch / docs/jpov_strip3d_translucent_design.md。
+    std::vector<TranslucentStripBatch> translucent_strips;
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
     //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
@@ -2386,6 +2392,11 @@ struct RenderCommandList {
     // 只是把命令推入 volume_fires 列表；在不透明 3D 之后由体积 pass 渲染。
     // Pre-condition: cmd.volume_id != 0。
     void DrawVolumeFire(VolumeFireCommand cmd);
+
+    // DrawTranslucentStrips：追加一批半透明条带（见 TranslucentStripBatch）。
+    // 只是把命令推入 translucent_strips 列表；整批在条带 pass 里**一次 draw call** 画完。
+    // Pre-condition: cmd.strips 非空。
+    void DrawTranslucentStrips(TranslucentStripBatch cmd);
 };
 
 }  // namespace jpov

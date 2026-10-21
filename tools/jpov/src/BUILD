@@ -284,6 +284,7 @@ cc_library(
         "//tools/jpov/src/fire_fog:fire_fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
+        "//tools/jpov/src/strip:strip_renderer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",
         "//tools/jpov/src:volume_manager",

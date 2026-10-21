@@ -266,47 +266,50 @@ float rim = pow(1.0 - abs(dot(N, normalize(uCamPos - vWorld))), uFresnelPower);
 **一条命令可以同时写两个集合**：覆盖集写「膜」，加法集写「fresnel 边缘反射」。
 不用的附件写恒等值（accum=0、reveal=0、add=0），这也是粒子 FS 的写法。
 
-## 8. 命令与接口
+## 8. 命令与接口（M1 定稿，2026-10-21）
+
+> **方案改变**：原设计是「任意长度双轨 + instancing 上 GPU 展开」。与 Danis 讨论后改为
+> **固定 16 点 + CPU 展开 + 整批一次 draw call**，理由见 §16.1。下面是**实际落地**的接口。
 
 ```cpp
-enum class StripBlend { kCoverage, kEmissive };
-
-struct StripPoint {
-    Vec3f position;
-    Vec2f uv;
-    float alpha;      // 纵向 alpha（0..1）
+// 一条带：16 个采样点的双轨（POD，可整块 memcpy）
+struct Strip16 {
+    std::array<Vec3f, 16> left;    // 左轨（纹理 u = 1）
+    std::array<Vec3f, 16> right;   // 右轨（纹理 u = 0）
+    std::array<float, 16> alpha;   // 纵向 alpha 乘子 [0,1]
+    uint32_t point_count = 0;      // 有效点数 [2,16]，必须显式给
 };
 
-// 宽度方向剖面：knots[k] = 在 w = k/8 处的 alpha 乘子。
-struct StripProfile {
-    std::array<float, 9> knots{1, 1, 1, 1, 1, 1, 1, 1, 1};   // 默认无衰减
-    static StripProfile Plateau(float full_min, float full_max);
+// 一批条带：以下参数整批共享 ⇒ 一次 draw call
+struct TranslucentStripBatch {
+    uint32_t texture_id = 0;               // 0 = 纯色
+    Color tint{1, 1, 1, 1};                // rgb 与纹理相乘；a 全局不透明度
+    std::array<float, 9> width_profile = {1,1,1,1,1,1,1,1,1};   // u = k/8 处乘子
+    std::vector<Strip16> strips;
 };
 
-struct TranslucentStrip3DCommand {
-    std::vector<StripPoint> left;    // 与 right 等长、>= 2
-    std::vector<StripPoint> right;
-    uint32_t   texture_id       = 0;      // 0 = 纯白（按纯色处理）
-    Color      tint             = jpov::kColorWhite;  // 线性 HDR；.a = 全局不透明度乘子
-    StripBlend blend            = StripBlend::kCoverage;
-    StripProfile profile;                 // 默认全 1
-    float      additive_gain    = 1.0f;   // 作用于加法集（发光色 + fresnel）
-    float      fresnel_strength = 0.0f;   // 0 = 关
-    float      fresnel_power    = 4.0f;
-    float      soft_depth_m     = 0.02f;  // 米；必须 > 0
-};
+cmds.DrawTranslucentStrips(std::move(batch));
 ```
+
+**几何约定**（`src/strip/strip_geometry.h` 唯一实现）：
+
+- 每条带展开成 32 顶点 = 16 列 ×（right, left），15 个 quad / 90 索引；
+- `right[i] → uv = (0, i/15)`、`left[i] → uv = (1, i/15)`（u 横跨宽度，v 沿长度）；
+- `point_count < 16` 时，第 `col >= point_count` 列**塌到最后一个有效点**（零面积 → 不产生片元），
+  但 **v 仍按列号**（`col/15`）⇒ 短条带只用纹理前一段，图案不被拉伸；
+- 整批共享一个**静态索引缓冲**（1024 条带/块），超过才分块多次 draw（**不截断**）。
 
 **Pre-condition（绘制前 CHECK，不静默容错）**：
 
-- `left.size() == right.size()` 且 `>= 2`；
-- `2 * N <= kMaxStripVertices`；
-- `profile.knots` 全部 ∈ [0, 1]；
-- `Plateau` 的 `full_min <= full_max`，二者 ∈ [0, 1]；
-- `additive_gain >= 0`、`fresnel_power > 0`、`soft_depth_m > 0`。
+- `strips` 非空；
+- 每条 `point_count ∈ [2, 16]`；
+- 有效点的 left/right 坐标有限（NaN 进 HDR 会污染整条后处理链）；
+- 有效点 `alpha ∈ [0,1]` 且至少一个 > 0（防 `memset(0)` 的整条隐形）；
+- `width_profile` 9 个 knot ∈ `[0,1]` 且至少一个 > 0；
+- `tint` 各分量 ∈ `[0,1]`。
 
-**不加 `picking_id`**：本版不参与拾取（同玻璃现状 `renderer.cc:2476`），
-先不暴露「设了但不生效」的字段。
+**不加 `picking_id`**：本版不参与拾取（同玻璃现状），先不暴露「设了但不生效」的字段。
+M2+ 的字段（`blend` / `additive_gain` / `soft_depth_m` / `fresnel_*`）**等对应里程碑落地时再加**。
 
 ## 9. 四个用途的适配
 
@@ -381,14 +384,14 @@ struct TranslucentStrip3DCommand {
 
 ## 14. 里程碑
 
-| 阶段 | 内容 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | **WBO 准备（已完成，配套 PR）**：`WboTarget` + 共享权重/解析 + 删死 depth + 契约测试 |
-| M1 | 命令 + 几何 + 剖面 + 覆盖集 + Composite + gold（玻璃条纹） |
-| M2 | 加法集 + `additive_gain` + gold（拖尾） |
-| M3 | 软深度 + A/B 断言 |
-| M4 | fresnel |
-| M5 | viewer（四用途同屏）+ 截图 |
+| M0 | WBO 准备：`WboTarget` + 共享权重/解析 + 删死 depth + 契约测试 | ✅ 已进 main（#209） |
+| M1 | 命令 + 几何 + 剖面 + 覆盖集 + Composite + gold + viewer | ✅ 2026-10-21（§16） |
+| M2 | 加法集（`kEmissive`）+ `additive_gain` + gold（拖尾） | ⬜ |
+| M3 | 软深度 + A/B 断言 | ⬜ |
+| M4 | fresnel（导数法线） | ⬜ |
+| M5 | viewer 扩到四用途同屏 | ⬜（M1 已带 3 形状 viewer） |
 
 ## 15. 不在本设计范围
 
@@ -396,3 +399,43 @@ struct TranslucentStrip3DCommand {
 - 多分辨率分级（1/2、1/4）
 - MBOIT / 逐像素深度整合
 - 拾取 / highlight / 阴影 / 光照
+
+## 16. M1 实施记录（2026-10-21）
+
+### 16.1 为什么最终**没有**用 instancing
+
+讨论中曾计划「per-instance 属性 + VS 展开」，结论是**不需要**：
+
+| instancing 声称省的 | 实际情况 |
+|---|---|
+| 每实例的 draw call / uniform / 状态 | ✅ 但「CPU 展开 + 整批一次 draw」同样能省，且少四层机制 |
+| 顶点数据上传量 | ❌ 形状每帧变，数据本来就要传；16 点 vs 32 顶点量级相同 |
+| VS 做展开、CPU 不建顶点 | ❌ 16 点算完写到 32 个顶点是免费操作 |
+
+真正的拦路虎是：**GLSL 顶点属性不支持动态下标** ⇒ 「VS 里按列号取 left[i-1]/left[i+1]」
+必须先有可索引的存储（数据纹理 + `texelFetch`），而法线砍掉后这件事根本不需要做了。
+
+结论：`StripBatch` 是稳定的**语义**边界（同材质 = 同批），内部实现（CPU 展开 / 将来实例化）
+对调用方不可见。
+
+### 16.2 法线：不做顶点法线
+
+条带是平面片，真实法线 = 所在三角形平面法线 = `normalize(cross(dFdx(worldPos), dFdy(worldPos)))`。
+顶点法线反而是"平滑谎言"，会让 fresnel 在轮廓处算错。M1 无 fresnel（M4 再加），
+所以 VS 里连法线都不算。
+
+### 16.3 素材坑：不要给「色带测试卡」开 mipmap
+
+`assets/strip/ribbon_test.png`（1318×158，横向 4 条色带）在条带上 u 方向被压缩上百倍，
+mip 会把**纵向**相邻色带平均成灰色（实测：红/黄/青全被冲淡成灰粉）。
+色带在 u 方向本是常量，关掉 mipmap 后颜色才正确。**换成真正的花纹素材时要重新评估**
+（那时 u 方向有细节，就不能无脑关 mip）。
+
+### 16.4 验收
+
+- `bazel test //tools/jpov/test/strip:all` → 13 cases（含 6 个 `EXPECT_DEATH` 负向用例）；
+- gold `test/strip/strip_demo_1280x720.png`（三条带 + 天光 + 三块参考方块），逐字节；
+- 非恒真断言：带纹理 vs 纯色差异 65,898 px ∈ [20k,120k]；差异区内红 13,798 / 青 14,905 /
+  黄 7,420 px 各自在区间内；柔边 vs 硬边 35,385 px ∈ [5k,80k]；
+- 「一次 draw call」证据：`StripRenderer: strips=3 draw_calls=1` 日志（像素不可测）。
+
