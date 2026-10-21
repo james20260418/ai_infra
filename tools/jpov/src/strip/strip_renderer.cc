@@ -87,17 +87,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(StripVertex),
                           reinterpret_cast<const void*>(3 * sizeof(float)));
 
-    // 静态索引：kMaxStripsPerDraw 个固定块（块 k 的顶点基址 = k * 32）。
-    std::vector<uint32_t> indices;
-    indices.reserve(static_cast<size_t>(kMaxStripsPerDraw) * kStripIndicesPerStrip);
-    for (int block = 0; block < kMaxStripsPerDraw; ++block) {
-        AppendStripIndicesForBlock(
-            static_cast<uint32_t>(block * kStripVerticesPerStrip), &indices);
-    }
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(indices.size() * sizeof(uint32_t)),
-                 indices.data(), GL_STATIC_DRAW);
+    // 索引：先建 kMaxStripsPerDraw 块（块 k 的顶点基址 = k × 32）；条带更多时按需扩容。
+    EnsureIboCapacity(kMaxStripsPerDraw);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -178,16 +169,43 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // 初始只开一小块，运行中按条带数翻倍增长（避免每帧抖动导致反复重建）。
+    GLint max_tex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    smooth_max_rows_ = static_cast<int>(max_tex);
+    smooth_data_rows_ = 64;
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount * 3,
-                 kMaxStripsPerDraw, 0, GL_RGBA, GL_FLOAT, nullptr);
+                 smooth_data_rows_, 0, GL_RGBA, GL_FLOAT, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    smooth_vertices_.reserve(static_cast<size_t>(kMaxStripsPerDraw) *
-                             kStripVerticesPerStrip * 7);
-    smooth_data_.assign(static_cast<size_t>(kMaxStripsPerDraw) *
-                            kStripSampleCount * 12, 0.0f);
+    // 顶点/控制点缓冲按需增长（reserve 只增不减），不预先占满 1024 条带。
+    smooth_vertices_.clear();
+    smooth_data_.clear();
 
     initialized_ = true;
+}
+
+void StripRenderer::EnsureIboCapacity(int strips) {
+    CHECK_GT(strips, 0);
+    if (strips <= ibo_capacity_) {
+        return;
+    }
+    const int cap = std::max(strips, ibo_capacity_ * 2);
+    std::vector<uint32_t> indices;
+    indices.reserve(static_cast<size_t>(cap) * kStripIndicesPerStrip);
+    for (int block = 0; block < cap; ++block) {
+        AppendStripIndicesForBlock(
+            static_cast<uint32_t>(block * kStripVerticesPerStrip), &indices);
+    }
+    // ELEMENT_ARRAY_BUFFER 的绑定属于 VAO：必须先绑一个 VAO 再改（core profile 没有 VAO 0）。
+    // 两个 VAO 共用同一个 ibo_，重传（同一个 buffer 名字）后它们的绑定依然有效。
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(indices.size() * sizeof(uint32_t)),
+                 indices.data(), GL_STATIC_DRAW);
+    glBindVertexArray(0);
+    ibo_capacity_ = cap;
 }
 
 void StripRenderer::Finalize() {
@@ -216,8 +234,15 @@ void StripRenderer::Finalize() {
         glDeleteVertexArrays(1, &smooth_vao_);
         smooth_vao_ = 0;
     }
+    smooth_data_rows_ = 0;
+    smooth_max_rows_ = 0;
+    // ⚠️ 必须复位：否则 Finalize → Init 的第二次 Init 里 EnsureIboCapacity 会因为
+    //    「容量看起来还够」直接返回，而 IBO 已经被删掉 → 后续 draw 索引到已删除的 buffer。
+    ibo_capacity_ = 0;
     initialized_ = false;
     has_content_ = false;
+    has_alpha_ = false;
+    has_additive_ = false;
 }
 
 void StripRenderer::EnsureTarget(int w, int h, bool with_additive) {
@@ -383,7 +408,6 @@ void StripRenderer::DrawSmooth(const TranslucentStripBatch& batch,
     glUniform1f(smooth_uniforms_.far_plane, camera.far);
     glUniform1i(smooth_uniforms_.blend_path, want_additive ? 1 : 0);
     glUniform1f(smooth_uniforms_.seg_count, static_cast<float>(kStripQuads));
-    glUniform1f(smooth_uniforms_.data_rows, static_cast<float>(kMaxStripsPerDraw));
     if (batch.soft_depth_m.has_value()) {
         glUniform1i(smooth_uniforms_.soft_enabled, 1);
         glUniform1f(smooth_uniforms_.soft_m, *batch.soft_depth_m);
@@ -412,171 +436,194 @@ void StripRenderer::DrawSmooth(const TranslucentStripBatch& batch,
     glBindVertexArray(smooth_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, smooth_vbo_);
 
+    // ── 一次性上传整批，再按索引块分次 draw ──
+    // 为什么不逐块上传：逐块会在第 2 块上传时与第 1 块的 draw 形成
+    // 「写一张正在被采样的纹理」的竞争（驱动只能插同步）；整批只上传一次就没有这个坑，
+    // 而且顶点/数据纹理的偏移天然是全局 strip 下标（行号 = strip 下标）。
     const size_t total = batch.strips.size();
-    const int chunks =
-        static_cast<int>((total + kMaxStripsPerDraw - 1) / kMaxStripsPerDraw);
     LOG_FIRST_N(INFO, 3) << "StripRenderer(smooth): strips=" << total
-                         << " draw_calls=" << chunks;
+                         << " draw_calls=1";
 
-    for (size_t begin = 0; begin < total; begin += kMaxStripsPerDraw) {
-        const size_t count = std::min<size_t>(kMaxStripsPerDraw, total - begin);
-
-        smooth_vertices_.clear();
-        for (size_t k = 0; k < count; ++k) {
-            const Strip16& strip = batch.strips[begin + k];
-            const uint32_t last = strip.point_count - 1;
-
-            // ① 控制点：中心 c（Hermite 的过点）与半宽矢量 h（未外扩的真实半宽）。
-            //    尾部塌缩列复制最后一个有效点（与折线 pass 的塌缩规则一致）。
-            Vec3f cen[kStripSampleCount];
-            Vec3f half[kStripSampleCount];
-            for (int col = 0; col < kStripSampleCount; ++col) {
-                const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
-                                         ? static_cast<uint32_t>(col)
-                                         : last;
-                const Vec3f& l = strip.left[src];
-                const Vec3f& r = strip.right[src];
-                cen[col] = Vec3f{0.5f * (l.x() + r.x()), 0.5f * (l.y() + r.y()),
-                                 0.5f * (l.z() + r.z())};
-                half[col] = Vec3f{0.5f * (l.x() - r.x()), 0.5f * (l.y() - r.y()),
-                                  0.5f * (l.z() - r.z())};
-            }
-            // ② 切线：中心差分，端点退到单侧（C1 的来源：相邻段共用同一列切线）。
-            Vec3f tan_c[kStripSampleCount];
-            Vec3f tan_h[kStripSampleCount];
-            for (int col = 0; col < kStripSampleCount; ++col) {
-                const int im = std::max(col - 1, 0);
-                const int ip = std::min(col + 1, kStripSampleCount - 1);
-                tan_c[col] = Vec3f{0.5f * (cen[ip].x() - cen[im].x()),
-                                   0.5f * (cen[ip].y() - cen[im].y()),
-                                   0.5f * (cen[ip].z() - cen[im].z())};
-                tan_h[col] = Vec3f{0.5f * (half[ip].x() - half[im].x()),
-                                   0.5f * (half[ip].y() - half[im].y()),
-                                   0.5f * (half[ip].z() - half[im].z())};
-            }
-
-            // ③ 自动外扩量（**不是参数**）：片元只能削不能补，所以先把多边形按
-            //    「真实曲线相对弦在宽度方向上的最大外凸量」撑大，再由 FS 用 v* 裁回去。
-            //    按**绝对量（米）**算而不是比例：拖尾收窄到 0 的段落，比例会失真。
-            //
-            //    ⚠️ 必须是**整条带一个值**（不能逐列）：外扩被折进了顶点属性 v
-            //    （见 ⑤），而 FS 假定 `position = lerp(c) + (2v−1)·lerp(h)`；
-            //    只有 scale 在整条带上相同时，`lerp(scale·h) == scale·lerp(h)` 才成立，
-            //    映射才精确。逐列不同会在窄处露亚像素缺口（实测可见毛边）。
-            float margin = 0.0f;
-            for (int seg = 0; seg < kStripQuads; ++seg) {
-                const Vec3f& c0 = cen[seg];
-                const Vec3f& c1 = cen[seg + 1];
-                const Vec3f& m0 = tan_c[seg];
-                const Vec3f& m1 = tan_c[seg + 1];
-                const Vec3f& h0 = half[seg];
-                const Vec3f& h1 = half[seg + 1];
-                const Vec3f& n0 = tan_h[seg];
-                const Vec3f& n1 = tan_h[seg + 1];
-                // 等宽条带（拖尾/剑气最常见）：半宽矢量是常量 ⇒ 省掉一次 Hermite。
-                const bool varying_half =
-                    (h1.x() - h0.x()) * (h1.x() - h0.x()) +
-                        (h1.y() - h0.y()) * (h1.y() - h0.y()) +
-                        (h1.z() - h0.z()) * (h1.z() - h0.z()) > 1e-12f;
-                for (int si = 1; si <= 7; ++si) {
-                    const float t = 0.125f * static_cast<float>(si);
-                    const Vec3f lc = Lerp(c0, c1, t);
-                    const Vec3f lh = Lerp(h0, h1, t);
-                    const float len = lh.Norm();
-                    if (len < 1e-5f) {
-                        continue;   // 退化段（宽度为 0）：没有"外侧"可言
-                    }
-                    const Vec3f sc = Hermite(c0, m0, c1, m1, t);
-                    const Vec3f sh = varying_half ? Hermite(h0, n0, h1, n1, t) : h0;
-                    const Vec3f w{lh.x() / len, lh.y() / len, lh.z() / len};
-                    const Vec3f dc{sc.x() - lc.x(), sc.y() - lc.y(), sc.z() - lc.z()};
-                    const Vec3f dh{sh.x() - lh.x(), sh.y() - lh.y(), sh.z() - lh.z()};
-                    // 左轨（v=1）外法向 = +w；右轨（v=0）外法向 = −w。
-                    const float dl = dc.x() * w.x() + dc.y() * w.y() + dc.z() * w.z();
-                    const float dhw = dh.x() * w.x() + dh.y() * w.y() + dh.z() * w.z();
-                    margin = std::max(margin, std::max(dl + dhw, -dl + dhw));
-                }
-            }
-            // 采样是最值近似，再留 2% + 1mm 余量：宁可多撑一点（FS 会裁回去），
-            // 也不要外弯侧漏出一条白边。
-            margin = std::max(margin, 0.0f) * 1.02f + 0.001f;
-
-            // 统一 scale（见上面的 ⚠️）。按**最细**的一列算，保证每一列都撑得住；
-            // 上限 8×：再细的尖（< margin/7，通常已是亚像素）不值得为它铺满屏幕。
-            float min_half = 1e30f;
-            for (int col = 0; col < kStripSampleCount; ++col) {
-                const float hl = half[col].Norm();
-                if (hl > 1e-5f) {
-                    min_half = std::min(min_half, hl);
-                }
-            }
-            const float scale =
-                (min_half < 1e30f) ? std::min(1.0f + margin / min_half, 8.0f) : 1.0f;
-            LOG_FIRST_N(INFO, 6) << "StripSmooth: margin=" << margin
-                                 << " scale=" << scale
-                                 << " (min half width≈" << min_half << ")";
-
-            // ④ 数据纹理：每列 12 float = (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)。
-            float* row = &smooth_data_[(static_cast<size_t>(k) * kStripSampleCount) * 12];
-            for (int col = 0; col < kStripSampleCount; ++col) {
-                float* p = row + col * 12;
-                p[0] = cen[col].x();
-                p[1] = cen[col].y();
-                p[2] = cen[col].z();
-                p[3] = tan_c[col].x();
-                p[4] = tan_c[col].y();
-                p[5] = tan_c[col].z();
-                p[6] = half[col].x();
-                p[7] = half[col].y();
-                p[8] = half[col].z();
-                p[9] = tan_h[col].x();
-                p[10] = tan_h[col].y();
-                p[11] = tan_h[col].z();
-            }
-
-            // ⑤ 顶点：外扩沿半宽矢量（绝对量 margin），并把外扩**折进 v 属性** ——
-            //    这样 FS 不需要任何 widen 参数：插值出来的 v 就是真实参数。
-            for (int col = 0; col < kStripSampleCount; ++col) {
-                const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
-                                         ? static_cast<uint32_t>(col)
-                                         : last;
-                const float u = kStripColumnU.v[col];
-                const float alpha = strip.alpha[src];
-                const Vec3f& c = cen[col];
-                // scale 是整条带统一值（见 ③ 的说明），逐列只差 |h| 本身的长度。
-                // 左右角对应的**真实参数**：右 = 0.5 − scale/2、左 = 0.5 + scale/2。
-                const float v_right = 0.5f - 0.5f * scale;
-                const float v_left = 0.5f + 0.5f * scale;
-                const Vec3f& rp = strip.right[src];
-                const Vec3f& lp = strip.left[src];
-                for (int side = 0; side < 2; ++side) {
-                    const Vec3f& e = (side == 0) ? rp : lp;
-                    smooth_vertices_.push_back(c.x() + (e.x() - c.x()) * scale);
-                    smooth_vertices_.push_back(c.y() + (e.y() - c.y()) * scale);
-                    smooth_vertices_.push_back(c.z() + (e.z() - c.z()) * scale);
-                    smooth_vertices_.push_back(u);
-                    smooth_vertices_.push_back(side == 0 ? v_right : v_left);
-                    smooth_vertices_.push_back(alpha);
-                    smooth_vertices_.push_back(static_cast<float>(k));
-                }
-            }
-        }
-
-        // ⑥ 上传：顶点（orphan 整块重传）+ 数据纹理（只写用到的那几行）。
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(smooth_vertices_.size() * sizeof(float)),
-                     smooth_vertices_.data(), GL_STREAM_DRAW);
+    // 数据纹理按需扩容（容量翻倍增长，避免条带数每帧抖动时反复重建）。
+    if (static_cast<int>(total) > smooth_data_rows_) {
+        const int grown = std::max(static_cast<int>(total), smooth_data_rows_ * 2);
+        CHECK_LE(grown, smooth_max_rows_)
+            << "StripRenderer(smooth): 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
+            << smooth_max_rows_ << "），数据纹理放不下";
+        smooth_data_rows_ = grown;
         glActiveTexture(GL_TEXTURE0 + kStripDataUnit);
         glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kStripSampleCount * 3,
-                        static_cast<GLsizei>(count), GL_RGBA, GL_FLOAT,
-                        smooth_data_.data());
-
-        // ⑦ 整块一次 draw call（≤ kMaxStripsPerDraw 时就是 1 次）。
-        glDrawElements(GL_TRIANGLES,
-                       static_cast<GLsizei>(count) * kStripIndicesPerStrip,
-                       GL_UNSIGNED_INT, reinterpret_cast<const void*>(0));
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount * 3,
+                     smooth_data_rows_, 0, GL_RGBA, GL_FLOAT, nullptr);
     }
+    if (smooth_data_.size() < total * kStripSampleCount * 12) {
+        smooth_data_.resize(total * kStripSampleCount * 12);
+    }
+
+    smooth_vertices_.clear();
+    smooth_vertices_.reserve(total * kStripVerticesPerStrip * 7);   // reserve 只增不减
+    for (size_t k = 0; k < total; ++k) {
+        const Strip16& strip = batch.strips[k];
+        const uint32_t last = strip.point_count - 1;
+
+        // ① 控制点：中心 c（Hermite 的过点）与半宽矢量 h（未外扩的真实半宽）。
+        //    尾部塌缩列复制最后一个有效点（与折线 pass 的塌缩规则一致）。
+        Vec3f cen[kStripSampleCount];
+        Vec3f half[kStripSampleCount];
+        for (int col = 0; col < kStripSampleCount; ++col) {
+            const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
+                                     ? static_cast<uint32_t>(col)
+                                     : last;
+            const Vec3f& l = strip.left[src];
+            const Vec3f& r = strip.right[src];
+            cen[col] = Vec3f{0.5f * (l.x() + r.x()), 0.5f * (l.y() + r.y()),
+                             0.5f * (l.z() + r.z())};
+            half[col] = Vec3f{0.5f * (l.x() - r.x()), 0.5f * (l.y() - r.y()),
+                              0.5f * (l.z() - r.z())};
+        }
+        // ② 切线：中心差分，端点退到单侧（C1 的来源：相邻段共用同一列切线）。
+        Vec3f tan_c[kStripSampleCount];
+        Vec3f tan_h[kStripSampleCount];
+        for (int col = 0; col < kStripSampleCount; ++col) {
+            const int im = std::max(col - 1, 0);
+            const int ip = std::min(col + 1, kStripSampleCount - 1);
+            tan_c[col] = Vec3f{0.5f * (cen[ip].x() - cen[im].x()),
+                               0.5f * (cen[ip].y() - cen[im].y()),
+                               0.5f * (cen[ip].z() - cen[im].z())};
+            tan_h[col] = Vec3f{0.5f * (half[ip].x() - half[im].x()),
+                               0.5f * (half[ip].y() - half[im].y()),
+                               0.5f * (half[ip].z() - half[im].z())};
+        }
+
+        // ③ 自动外扩量（**不是参数**）：片元只能削不能补，所以先把多边形按
+        //    「真实曲线相对弦在宽度方向上的最大外凸量」撑大，再由 FS 用 v* 裁回去。
+        //    按**绝对量（米）**算而不是比例：拖尾收窄到 0 的段落，比例会失真。
+        //
+        //    ⚠️ 必须是**整条带一个值**（不能逐列）：外扩被折进了顶点属性 v（见 ⑤），
+        //    而 FS 假定 `position = lerp(c) + (2v−1)·lerp(h)`；只有 scale 在整条带上
+        //    相同时 `lerp(scale·h) == scale·lerp(h)` 才成立，映射才精确。逐列不同会在
+        //    收窄处露亚像素缺口（P8 review 实测：A/B 图上表现为毛边）。
+        float margin = 0.0f;
+        for (int seg = 0; seg < kStripQuads; ++seg) {
+            const Vec3f& c0 = cen[seg];
+            const Vec3f& c1 = cen[seg + 1];
+            const Vec3f& m0 = tan_c[seg];
+            const Vec3f& m1 = tan_c[seg + 1];
+            const Vec3f& h0 = half[seg];
+            const Vec3f& h1 = half[seg + 1];
+            const Vec3f& n0 = tan_h[seg];
+            const Vec3f& n1 = tan_h[seg + 1];
+            // 等宽条带（拖尾/剑气最常见）：半宽矢量是常量 ⇒ 省掉一次 Hermite。
+            const bool varying_half =
+                (h1.x() - h0.x()) * (h1.x() - h0.x()) +
+                    (h1.y() - h0.y()) * (h1.y() - h0.y()) +
+                    (h1.z() - h0.z()) * (h1.z() - h0.z()) > 1e-12f;
+            for (int si = 1; si <= 7; ++si) {
+                const float t = 0.125f * static_cast<float>(si);
+                const Vec3f lc = Lerp(c0, c1, t);
+                const Vec3f lh = Lerp(h0, h1, t);
+                const float len = lh.Norm();
+                if (len < 1e-5f) {
+                    continue;   // 退化段（宽度为 0）：没有"外侧"可言
+                }
+                const Vec3f sc = Hermite(c0, m0, c1, m1, t);
+                const Vec3f sh = varying_half ? Hermite(h0, n0, h1, n1, t) : h0;
+                const Vec3f w{lh.x() / len, lh.y() / len, lh.z() / len};
+                const Vec3f dc{sc.x() - lc.x(), sc.y() - lc.y(), sc.z() - lc.z()};
+                const Vec3f dh{sh.x() - lh.x(), sh.y() - lh.y(), sh.z() - lh.z()};
+                // 左轨（v=1）外法向 = +w；右轨（v=0）外法向 = −w。
+                const float dl = dc.x() * w.x() + dc.y() * w.y() + dc.z() * w.z();
+                const float dhw = dh.x() * w.x() + dh.y() * w.y() + dh.z() * w.z();
+                margin = std::max(margin, std::max(dl + dhw, -dl + dhw));
+            }
+        }
+        // 采样是最值近似，再留 2% + 1mm 余量：宁可多撑一点（FS 会裁回去），
+        // 也不要外弯侧漏出一条白边。
+        margin = std::max(margin, 0.0f) * 1.02f + 0.001f;
+
+        // 统一 scale（见 ③ 的 ⚠️）。按**最细**的一列算，保证每一列都撑得住；
+        // 上限 8×：再细的尖（< margin/7，通常已是亚像素）不值得为它铺满屏幕。
+        float min_half = 1e30f;
+        for (int col = 0; col < kStripSampleCount; ++col) {
+            const float hl = half[col].Norm();
+            if (hl > 1e-5f) {
+                min_half = std::min(min_half, hl);
+            }
+        }
+        const float scale =
+            (min_half < 1e30f) ? std::min(1.0f + margin / min_half, 8.0f) : 1.0f;
+        LOG_FIRST_N(INFO, 6) << "StripSmooth: margin=" << margin
+                             << " scale=" << scale
+                             << " (min half width≈" << min_half << ")";
+
+        // ④ 数据纹理：每列 12 float = (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)。
+        float* row = &smooth_data_[k * kStripSampleCount * 12];
+        for (int col = 0; col < kStripSampleCount; ++col) {
+            float* p = row + col * 12;
+            p[0] = cen[col].x();
+            p[1] = cen[col].y();
+            p[2] = cen[col].z();
+            p[3] = tan_c[col].x();
+            p[4] = tan_c[col].y();
+            p[5] = tan_c[col].z();
+            p[6] = half[col].x();
+            p[7] = half[col].y();
+            p[8] = half[col].z();
+            p[9] = tan_h[col].x();
+            p[10] = tan_h[col].y();
+            p[11] = tan_h[col].z();
+        }
+
+        // ⑤ 顶点：外扩沿半宽矢量（绝对量 margin），并把外扩**折进 v 属性** ——
+        //    这样 FS 不需要任何 widen 参数：插值出来的 v 就是真实参数。
+        for (int col = 0; col < kStripSampleCount; ++col) {
+            const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
+                                     ? static_cast<uint32_t>(col)
+                                     : last;
+            const float u = kStripColumnU.v[col];
+            const float alpha = strip.alpha[src];
+            const Vec3f& c = cen[col];
+            // scale 是整条带统一值（见 ③ 的说明），逐列只差 |h| 本身的长度。
+            // 左右角对应的**真实参数**：右 = 0.5 − scale/2、左 = 0.5 + scale/2。
+            const float v_right = 0.5f - 0.5f * scale;
+            const float v_left = 0.5f + 0.5f * scale;
+            const Vec3f& rp = strip.right[src];
+            const Vec3f& lp = strip.left[src];
+            for (int side = 0; side < 2; ++side) {
+                const Vec3f& e = (side == 0) ? rp : lp;
+                smooth_vertices_.push_back(c.x() + (e.x() - c.x()) * scale);
+                smooth_vertices_.push_back(c.y() + (e.y() - c.y()) * scale);
+                smooth_vertices_.push_back(c.z() + (e.z() - c.z()) * scale);
+                smooth_vertices_.push_back(u);
+                smooth_vertices_.push_back(side == 0 ? v_right : v_left);
+                smooth_vertices_.push_back(alpha);
+                smooth_vertices_.push_back(static_cast<float>(k));
+            }
+        }
+    }
+
+    // 行号钳位的上界 = 纹理**实际高度**（不是每块条带数）：整批可能远超一块。
+    glUniform1f(smooth_uniforms_.data_rows, static_cast<float>(smooth_data_rows_));
+
+    EnsureIboCapacity(static_cast<int>(total));
+
+    // ⑥ 上传：顶点（orphan 整块重传）+ 数据纹理（整批一次写完，之后只读）。
+    glBindVertexArray(smooth_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, smooth_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(smooth_vertices_.size() * sizeof(float)),
+                 smooth_vertices_.data(), GL_STREAM_DRAW);
+    glActiveTexture(GL_TEXTURE0 + kStripDataUnit);
+    glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kStripSampleCount * 3,
+                    static_cast<GLsizei>(total), GL_RGBA, GL_FLOAT,
+                    smooth_data_.data());
+
+    // ⑦ 整批一次 draw：索引缓冲按需扩到 total 条带（块 j 的顶点基址 = j×32），
+    //    顶点与数据纹理都是整批连续的 ⇒ 一次 glDrawElements 画完，不分块。
+    glDrawElements(GL_TRIANGLES,
+                   static_cast<GLsizei>(total) * kStripIndicesPerStrip,
+                   GL_UNSIGNED_INT, reinterpret_cast<const void*>(0));
     glBindVertexArray(0);
 
     wbo_.EndDraw();

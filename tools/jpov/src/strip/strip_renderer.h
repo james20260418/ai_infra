@@ -401,7 +401,8 @@ private:
     CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点
-    unsigned int ibo_ = 0;   // 静态索引：kMaxStripsPerDraw 个固定块
+    unsigned int ibo_ = 0;   // 索引：块 j = 第 j 条带（基址 j×32），容量按需增长
+    int ibo_capacity_ = 0;   // 当前 IBO 能覆盖多少条带（块数）
     WboTarget wbo_;
     bool initialized_ = false;
     bool has_content_ = false;
@@ -416,8 +417,15 @@ private:
     unsigned int smooth_vao_ = 0;
     unsigned int smooth_vbo_ = 0;
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
+    int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
+    int smooth_max_rows_ = 0;             // GL_MAX_TEXTURE_SIZE（Init 时缓存）
     std::vector<float> smooth_vertices_;  // 7 float/顶点：pos(3), u, v, alpha, strip_id
     std::vector<float> smooth_data_;      // 每列 12 float（c, m, h, n）
+
+    // 索引缓冲按需扩容（块 j = 第 j 条带，顶点基址 j×32）。幂等：够用就直接返回。
+    // 为什么平滑 pass 必须能一次画完整批：它的数据纹理行号 = 全局 strip 下标，
+    // 若分块就要么重传顶点、要么写一张正在被采样的纹理（两者都是坑）。
+    void EnsureIboCapacity(int strips);
 
     // 两个 drawer：同一张 WBO 目标，各自的 program/VAO/数据通道。
     void DrawPolyline(const TranslucentStripBatch& batch, unsigned int gl_tex,
