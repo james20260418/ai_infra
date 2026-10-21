@@ -27,6 +27,14 @@
 //
 //   fresnel（M4）尚未实现 —— 不预留空字段（设了不生效比没有更糟）。
 //
+// ⭐ 两个独立 pass（2026-10-21 Danis 定；统一一个命令接口 StripStyle）：
+//   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
+//   kSmooth   —— SmoothVs / SmoothFsHead / SmoothFsTail：点即控制点，段间是 C1 Hermite，
+//                在 FS 里按真实曲线反解参数并用 discard + fwidth 裁形。
+//                控制点走 RGBA32F 数据纹理（每列 3 texel），顶点只多一个 strip id
+//                ⇒ **整批仍然一次 draw call**；外扩量由 CPU 按局部曲率自动算。
+//   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
+//
 // 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
 //   写进当前绑定的目标（HDR），随后由 horizon fog / froxel 继续。
 
@@ -143,6 +151,171 @@ void main() {
 }
 )glsl";
 
+    // ── 平滑 pass（kSmooth）：C1 Hermite 重建 + 裁形 ──
+    //
+    // 契约：left/right 是插值型控制点，曲线**严格过点**；第 i 列宽度 = |left[i]−right[i]|。
+    //
+    // 每个片元只处理**一个段**（它自己所在的那段）：读该段两列的控制数据（6 texel），
+    // 求值一次三次 Hermite，得到真实中心线 S(t) 与半宽矢量 H(t)，然后把片元的线性参数
+    // (u,v) 一阶反解到真实曲面上 → 纹理/剖面跟着曲线走；v* 出界则 discard（裁形），
+    // 用 fwidth 做 1px 解析 AA。**指令数与采样点数 m 无关（O(1)）**。
+    static constexpr const char* kSmoothVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aUVAlpha;   // (u, v, alpha)；v 已折入外扩（见 CPU 侧）
+layout(location = 2) in float aStripId;  // 本批第几条带 = 数据纹理行号
+uniform mat4 uViewProj;
+out vec3 vUVAlpha;
+out vec3 vWorld;
+flat out float vStripId;
+void main() {
+    vUVAlpha = aUVAlpha;
+    vWorld = aPos;
+    vStripId = aStripId;
+    gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+)glsl";
+
+    static constexpr const char* kSmoothFsHead = R"glsl(
+#version 330 core
+in vec3 vUVAlpha;                 // (u, v, alpha)
+in vec3 vWorld;                   // 线性几何上的片元世界坐标（尚未重建）
+flat in float vStripId;           // 所属条带 = 数据纹理行号
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform vec4 uTint;
+uniform float uProfile[9];
+uniform sampler2D uSceneDepth;
+uniform vec2 uViewport;
+uniform float uNear;
+uniform float uFar;
+uniform int uBlendPath;
+uniform int uSoftDepthEnabled;
+uniform float uSoftDepthM;
+// ── 平滑 pass 专用 ──
+uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
+uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
+// 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
+// 每条带占一行，行号 = vStripId。texelFetch 不做 clamp ⇒ 行列号由 CPU 保证合法。
+uniform sampler2D uStripData;
+layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
+layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
+layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
+float ZView(float d) {
+    float ndc = 2.0 * d - 1.0;
+    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+}
+float WidthProfile(float w) {
+    float x = clamp(w, 0.0, 1.0) * 8.0;
+    int i = int(min(floor(x), 7.0));
+    return mix(uProfile[i], uProfile[i + 1], x - float(i));
+}
+)glsl";
+
+    static constexpr const char* kSmoothFsTail = R"glsl(
+void main() {
+    // u 沿长度、v 横跨宽度；两者都是**真实参数**（CPU 已把保守外扩折进属性 v）。
+    float u = vUVAlpha.x;
+    float v = vUVAlpha.y;
+
+    float segF = clamp(u, 0.0, 1.0) * uSegCount;
+    int seg = int(clamp(floor(segF), 0.0, uSegCount - 1.0));
+    float t = segF - float(seg);
+
+    // 两列 × 3 texel = 6 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
+    // texelFetch 越界是**未定义行为**（不是"返回 0"）：行号必须钳住。
+    int row = int(clamp(vStripId, 0.0, uDataRows - 1.0));
+    int tx = seg * 3;
+    vec4 t0 = texelFetch(uStripData, ivec2(tx + 0, row), 0);
+    vec4 t1 = texelFetch(uStripData, ivec2(tx + 1, row), 0);
+    vec4 t2 = texelFetch(uStripData, ivec2(tx + 2, row), 0);
+    vec4 t3 = texelFetch(uStripData, ivec2(tx + 3, row), 0);
+    vec4 t4 = texelFetch(uStripData, ivec2(tx + 4, row), 0);
+    vec4 t5 = texelFetch(uStripData, ivec2(tx + 5, row), 0);
+
+    // 打包约定（与 CPU 侧逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
+    vec3 c0 = vec3(t0.x, t0.y, t0.z);
+    vec3 m0 = vec3(t0.w, t1.x, t1.y);
+    vec3 h0 = vec3(t1.z, t1.w, t2.x);
+    vec3 n0 = vec3(t2.y, t2.z, t2.w);
+    vec3 c1 = vec3(t3.x, t3.y, t3.z);
+    vec3 m1 = vec3(t3.w, t4.x, t4.y);
+    vec3 h1 = vec3(t4.z, t4.w, t5.x);
+    vec3 n1 = vec3(t5.y, t5.z, t5.w);
+
+    float t2f = t * t;
+    float t3f = t2f * t;
+    float h00 = 2.0 * t3f - 3.0 * t2f + 1.0;
+    float h10 = t3f - 2.0 * t2f + t;
+    float h01 = -2.0 * t3f + 3.0 * t2f;
+    float h11 = t3f - t2f;
+    float g00 = 6.0 * t2f - 6.0 * t;
+    float g10 = 3.0 * t2f - 4.0 * t + 1.0;
+    float g01 = -6.0 * t2f + 6.0 * t;
+    float g11 = 3.0 * t2f - 2.0 * t;
+
+    vec3 S = h00 * c0 + h10 * m0 + h01 * c1 + h11 * m1;   // 真实中心线
+    vec3 dS = g00 * c0 + g10 * m0 + g01 * c1 + g11 * m1;  // dS/dt
+    vec3 Hh = h00 * h0 + h10 * n0 + h01 * h1 + h11 * n1;  // 真实半宽矢量
+    vec3 P = S + (2.0 * v - 1.0) * Hh;                    // 真实曲面点
+
+    // 一阶反解：Linear(u,v) = P + D ⇒ (t*,v*) ≈ (t,v) + J⁻¹D（局部正交近似）。
+    vec3 D = vWorld - P;
+    float dt = dot(D, dS) / max(dot(dS, dS), 1e-8);
+    vec3 Pv = 2.0 * Hh;
+    float dv = dot(D, Pv) / max(dot(Pv, Pv), 1e-8);
+    float uStar = (float(seg) + clamp(t + dt, 0.0, 1.0)) / uSegCount;
+    float vStar = v + dv;
+
+    // 轮廓：落在真实条带之外的片元裁掉；fwidth 做 1px 解析 AA（不做硬切边的锯齿）。
+    float fw = max(fwidth(vStar), 1e-5);
+    float cov = clamp(vStar / fw, 0.0, 1.0) * clamp((1.0 - vStar) / fw, 0.0, 1.0);
+    if (cov <= 1.0 / 255.0) {
+        discard;
+    }
+
+    float vShade = clamp(vStar, 0.0, 1.0);
+    vec2 uv = vec2(clamp(uStar, 0.0, 1.0), vShade);
+    vec3 color = uTint.rgb;
+    float a = uTint.a * vUVAlpha.z;
+    if (uHasTex == 1) {
+        vec4 tex = texture(uTex, uv);
+        color *= tex.rgb;
+        a *= tex.a;
+    }
+    a *= WidthProfile(vShade) * cov;
+    if (a <= 1.0 / 255.0) {
+        discard;
+    }
+    float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
+    float z = ZView(gl_FragCoord.z);
+    float fade = 1.0;
+    if (uSoftDepthEnabled == 1) {
+        fade = clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
+    } else if (z > scene_z + 0.02) {
+        discard;
+    }
+    if (uBlendPath == 1) {
+        vec3 contrib = color * a * fade;
+        if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
+            discard;
+        }
+        FragAdd = vec4(contrib, 0.0);
+        FragAccum = vec4(0.0);
+        FragReveal = 0.0;
+    } else {
+        float aa = a * fade;
+        if (aa <= 1.0 / 255.0) {
+            discard;
+        }
+        float w = WeightWbo(z, aa, color);
+        FragAccum = vec4(color * aa, aa) * w;
+        FragReveal = aa;
+        FragAdd = vec4(0.0);
+    }
+}
+)glsl";
+
     // 初始化：编译 draw / composite 两个 program，建 VAO + 动态 VBO + 静态 IBO。
     void Init(ShaderManager* shader_mgr);
     void Finalize();
@@ -202,6 +375,25 @@ private:
         int additive = -1;
     };
 
+    // 平滑 pass 的 uniform 位置（与 DrawUniforms 同名字段 + 两个专用）。
+    struct SmoothUniforms {
+        int view_proj = -1;
+        int tint = -1;
+        int has_tex = -1;
+        int tex = -1;
+        int profile = -1;
+        int scene_depth = -1;
+        int viewport = -1;
+        int near_plane = -1;
+        int far_plane = -1;
+        int blend_path = -1;
+        int soft_enabled = -1;
+        int soft_m = -1;
+        int seg_count = -1;
+        int data_rows = -1;
+        int strip_data = -1;
+    };
+
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
@@ -217,6 +409,25 @@ private:
     bool has_alpha_ = false;              // 本帧画过覆盖集
     bool has_additive_ = false;           // 本帧画过加法集
     std::vector<StripVertex> vertices_;   // 复用缓冲，避免每帧分配
+
+    // ── 平滑 pass 的资源（kSmooth）──
+    unsigned int prog_smooth_ = 0;
+    SmoothUniforms smooth_uniforms_;
+    unsigned int smooth_vao_ = 0;
+    unsigned int smooth_vbo_ = 0;
+    unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
+    std::vector<float> smooth_vertices_;  // 7 float/顶点：pos(3), u, v, alpha, strip_id
+    std::vector<float> smooth_data_;      // 每列 12 float（c, m, h, n）
+
+    // 两个 drawer：同一张 WBO 目标，各自的 program/VAO/数据通道。
+    void DrawPolyline(const TranslucentStripBatch& batch, unsigned int gl_tex,
+                      bool want_additive, const Camera& camera,
+                      const float view_proj[16], unsigned int scene_depth_tex,
+                      int full_w, int full_h);
+    void DrawSmooth(const TranslucentStripBatch& batch, unsigned int gl_tex,
+                    bool want_additive, const Camera& camera,
+                    const float view_proj[16], unsigned int scene_depth_tex,
+                    int full_w, int full_h);
 };
 
 }  // namespace jpov

@@ -100,6 +100,28 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.soft_depth_ = true;
     shoot("50_soft_depth");
     app.soft_depth_ = false;
+    // 实验（2026-10-21）：拉近看「折线感」—— 默认视角下三条带只占屏幕一小块，
+    // 16 段的折角在远景里看不清，近距离 + 硬边才看得出轮廓是不是多边形。
+    app.view_.R = 2.6;
+    shoot("60_zoom_soft");
+    app.soft_edges_ = false;
+    shoot("65_zoom_hard");
+    app.soft_edges_ = true;
+
+    // 平滑 pass（kSmooth）对照：同一组视角/形状，只切换 style。
+    app.smooth_strips_ = true;
+    shoot("70_smooth_zoom_soft");
+    app.soft_edges_ = false;
+    shoot("75_smooth_zoom_hard");
+    app.soft_edges_ = true;
+    app.view_.R = jpov_strip::kViewDefaults.R;
+    shoot("80_smooth_default");
+    app.view_.R = 2.6;
+    app.soft_edges_ = false;
+    shoot("85_smooth_zoom_hard_alt");
+    app.soft_edges_ = true;
+    app.smooth_strips_ = false;
+    app.view_.R = jpov_strip::kViewDefaults.R;
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     shoot("99_panel");
