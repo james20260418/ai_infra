@@ -451,3 +451,8 @@ mip 会把**纵向**相邻色带平均成灰色（实测：红/黄/青全被冲�
   黄 4,210 px 各自在区间内；柔边 vs 硬边 19,736 px ∈ [5k,80k]；
 - 「一次 draw call」证据：`StripRenderer: strips=3 draw_calls=1` 日志（像素不可测）。
 
+**查看器** `tools/jpov/build_jpov_strip_viewer.sh` → `output/jpov_strip_viewer/jpov_strip_viewer`：
+右键拖拽绕行 / 滚轮推拉；面板可调 太阳仰角、不透明度、条带宽度、波带振幅、螺旋转数、
+弧形开角/朝向、纹理 vs 纯色、柔边/hard、形状动画、自动绕行、SMAA、三条带各自显隐、A/B 显示条带。
+`--capture <dir>` 输出 5 张固定视角对照图（默认 / 无条带 / 纯色 / 硬边 / 面板）。
+
