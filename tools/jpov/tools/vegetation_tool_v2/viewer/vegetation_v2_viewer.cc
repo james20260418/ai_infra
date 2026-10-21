@@ -354,10 +354,13 @@ jpov::Color GreenForType(uint32_t type) {
 }
 
 // 在卡片 UV 子矩形 [u0,u1]×[v0,v1] 上放一个有厚度的盒子（世界坐标）。
-// 角点徽标就用它：把 quad 的某个 UV 角缩成 1/8，**角点本身作为参照点**。
+// 角的**参照点**是该 UV 子矩形的角：缩小时角点不动。
+// 盒子本身用引擎里久经测试的 MeshData::MakeOrientedBox（24 顶点 / 12 三角形 /
+// 每面独立法线），不再手写 8 顶点索引表 —— 手写版会在某些朝向下缺面。
 void AppendUvBox(const Shape& shape, const jpov::vegetation::LeafCard& card, double u0,
                  double u1, double v0, double v1, double thickness,
-                 std::vector<float>* pos, std::vector<uint32_t>* idx) {
+                 std::vector<float>* pos, std::vector<float>* nrm,
+                 std::vector<uint32_t>* idx) {
   const auto norm = [](const Vec3d& q) {
     const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
     return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
@@ -369,7 +372,6 @@ void AppendUvBox(const Shape& shape, const jpov::vegetation::LeafCard& card, dou
   const Vec3d n = norm(card.normal);
   const Vec3d right = norm(cross(up, n));
 
-  // 与 BuildLeafCards 完全相同的 pivot：uv=(au,av) 落在 anchor 上。
   std::string mode = "bottom_center";
   for (const auto& t : shape.leaf_types) {
     if (t.type == card.type) {
@@ -383,29 +385,37 @@ void AppendUvBox(const Shape& shape, const jpov::vegetation::LeafCard& card, dou
     std::fprintf(stderr, "AppendUvBox: anchor_mode \"%s\" 非法\n", mode.c_str());
     std::abort();
   }
-  const auto P = [&](double u, double v, double z) {
-    const double su = (u - au) * card.width;
-    const double sv = (v - av) * card.height;
-    return Vec3d{card.anchor.x + right.x * su + up.x * sv + n.x * z,
-                 card.anchor.y + right.y * su + up.y * sv + n.y * z,
-                 card.anchor.z + right.z * su + up.z * sv + n.z * z};
-  };
-  const double hz = 0.5 * thickness;
-  const Vec3d c[8] = {P(u0, v0, -hz), P(u1, v0, -hz), P(u0, v1, -hz), P(u1, v1, -hz),
-                      P(u0, v0, +hz), P(u1, v0, +hz), P(u0, v1, +hz), P(u1, v1, +hz)};
-  static const int kFaces[12][3] = {{0, 1, 3}, {0, 3, 2}, {4, 6, 7}, {4, 7, 5},
-                                    {0, 4, 5}, {0, 5, 1}, {2, 3, 7}, {2, 7, 6},
-                                    {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
+
+  // 子矩形中心（相对 anchor）与半尺寸。
+  const double cu = 0.5 * (u0 + u1) - au;
+  const double cv = 0.5 * (v0 + v1) - av;
+  const jpov::Vec3f center{static_cast<float>(card.anchor.x + right.x * (cu * card.width) +
+                                              up.x * (cv * card.height)),
+                           static_cast<float>(card.anchor.y + right.y * (cu * card.width) +
+                                              up.y * (cv * card.height)),
+                           static_cast<float>(card.anchor.z + right.z * (cu * card.width) +
+                                              up.z * (cv * card.height))};
+  // MakeOrientedBox：local +Z = front（= 卡面法线）、+Y = up、+X = left(= cross(up,front) = right)。
+  const jpov::MeshData box = jpov::MeshData::MakeOrientedBox(
+      0.5f * static_cast<float>(thickness),
+      0.5f * static_cast<float>((v1 - v0) * card.height),
+      0.5f * static_cast<float>((u1 - u0) * card.width),
+      jpov::Vec3f{static_cast<float>(up.x), static_cast<float>(up.y), static_cast<float>(up.z)},
+      jpov::Vec3f{static_cast<float>(n.x), static_cast<float>(n.y), static_cast<float>(n.z)},
+      center);
+  CHECK(box.positions.size() == box.normals.size());
+
   const uint32_t base = static_cast<uint32_t>(pos->size() / 3);
-  for (const Vec3d& q : c) {
-    pos->push_back(static_cast<float>(q.x));
-    pos->push_back(static_cast<float>(q.y));
-    pos->push_back(static_cast<float>(q.z));
+  for (size_t v = 0; v < box.positions.size(); ++v) {
+    pos->push_back(box.positions[v].x());
+    pos->push_back(box.positions[v].y());
+    pos->push_back(box.positions[v].z());
+    nrm->push_back(box.normals[v].x());
+    nrm->push_back(box.normals[v].y());
+    nrm->push_back(box.normals[v].z());
   }
-  for (const auto& f : kFaces) {
-    idx->push_back(base + f[0]);
-    idx->push_back(base + f[1]);
-    idx->push_back(base + f[2]);
+  for (uint32_t i : box.indices) {
+    idx->push_back(base + i);
   }
 }
 
@@ -704,10 +714,11 @@ class VegetationV2App : public JPOV {
     // 与角标共用同一套 pivot / 同一份 width，保证四者永远对齐。
     {
       std::vector<float> cpos;
+      std::vector<float> cnrm;
       std::vector<uint32_t> cidx;
       for (const auto& card : shape_.cards) {
         // 绿卡做得很薄（4mm）：角标比它厚一个量级，才不会出现「面和面抢深度」。
-        AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.004, &cpos, &cidx);
+        AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.004, &cpos, &cnrm, &cidx);
       }
       if (!cpos.empty()) {
         jpov::MeshData md;
@@ -716,7 +727,7 @@ class VegetationV2App : public JPOV {
             static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
         for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
           md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
-          md.normals.push_back(jpov::Vec3f{0.0f, 1.0f, 0.0f});
+          md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
         }
         md.indices = cidx;
         card_box_mesh_ = RegisterMesh(std::move(md));
@@ -742,10 +753,11 @@ class VegetationV2App : public JPOV {
                                    {0.05f, 0.15f, 0.85f, 1.0f}};
       for (int c = 0; c < 3; ++c) {
         std::vector<float> cpos;
+        std::vector<float> cnrm;
         std::vector<uint32_t> cidx;
         for (const auto& card : shape_.cards) {
           AppendUvBox(shape_, card, uv[c][0], uv[c][1], uv[c][2], uv[c][3], kThick, &cpos,
-                      &cidx);
+                      &cnrm, &cidx);
         }
         if (cpos.empty()) continue;
         jpov::MeshData md;
@@ -754,7 +766,7 @@ class VegetationV2App : public JPOV {
             static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
         for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
           md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
-          md.normals.push_back(jpov::Vec3f{0.0f, 1.0f, 0.0f});
+          md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
         }
         md.indices = cidx;
         corner_mesh_[c] = RegisterMesh(std::move(md));
@@ -762,6 +774,7 @@ class VegetationV2App : public JPOV {
         corner_mat_[c] = jpov::PBRMaterial::SolidColor({0.0f, 0.0f, 0.0f, 1.0f});
         corner_mat_[c].emissive = kCol[c];
         corner_mat_[c].roughness = 1.0f;
+        corner_mat_[c].double_sided = true;
       }
     }
 
