@@ -259,6 +259,8 @@ struct CliArgs {
   float ground_y = 0.0f;
   float cam_target_y = 0.0f;   // 相机注视点高度（看树冠/叶卡细节用）
   bool show_panel = false;     // capture 时也画面板（截图/自检用）
+  bool hide_leaf = false;      // 强制看 debug 盒子（叶卡贴图关）
+  bool hide_bark = false;      // 强制看 level 棕色（树皮关）
   // 法线贴图强度（uNormalScale）。默认 1.5：同一树皮 A/B 实测
   // 1.0 偏平、3.0 发塑料，1.5 最自然（Skylight + 单平行光下 ambient 占比高，
   // 1.0 的凹凸容易被环境光冲淡）。面板滑条同一量程。
@@ -315,6 +317,10 @@ CliArgs ParseCli(int argc, char** argv) {
       CHECK_GT(a.uv_vscale, 0.0f) << "--uv-vscale 必须 > 0";
     } else if (arg == "--show-panel") {
       a.show_panel = true;
+    } else if (arg == "--no-leaf") {
+      a.hide_leaf = true;
+    } else if (arg == "--no-bark") {
+      a.hide_bark = true;
     } else if (arg == "--cam-target-y" && has_val) {
       a.cam_target_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--ground-y" && has_val) {
@@ -362,7 +368,7 @@ void AppendCardBox(const Shape& shape, const jpov::vegetation::LeafCard& card,
   const Vec3d normal = norm(card.normal);
   const Vec3d right = norm(cross(up, normal));
 
-  // anchor_mode 决定盒子从锚点往哪边长
+  // 与 BuildLeafCards 用同一张 anchor 表：盒子中心 = 锚点 + 右/上偏移。
   std::string mode = "bottom_center";
   for (const auto& t : shape.leaf_types) {
     if (t.type == card.type) {
@@ -370,23 +376,26 @@ void AppendCardBox(const Shape& shape, const jpov::vegetation::LeafCard& card,
       break;
     }
   }
-  double base_off = 0.0;
-  if (mode == "top_center") {
-    base_off = -static_cast<double>(card.height);
-  } else if (mode == "center") {
-    base_off = -0.5 * static_cast<double>(card.height);
+  double au = 0.5;
+  double av = 0.0;
+  if (!jpov::vegetation::AnchorModeToUv(mode, &au, &av)) {
+    std::fprintf(stderr, "AppendCardBox: anchor_mode \"%s\" 非法\n", mode.c_str());
+    std::abort();
   }
-
-  const double hw = 0.5 * width;
+  const double hw = 0.5 * static_cast<double>(width);
   const double ht = 0.5 * kCardThickness;
+  // 盒子沿 right 居中（ix=±1），沿 up 是 [0, height]（iy=0/1）：
+  // 要让 (au, av) 落在锚点上，水平中心偏 (0.5-au)·w，垂直起点偏 **−av·h**。
+  const double cx_off = (0.5 - au) * static_cast<double>(width);
+  const double cy_off = -av * static_cast<double>(card.height);
   const double h = card.height;
   Vec3d c[8];
   int k = 0;
   for (int iz = -1; iz <= 1; iz += 2) {
     for (int iy = 0; iy <= 1; ++iy) {
       for (int ix = -1; ix <= 1; ix += 2) {
-        const double ox = ix * hw;
-        const double oy = base_off + iy * h;
+        const double ox = cx_off + ix * hw;
+        const double oy = cy_off + iy * h;
         const double oz = iz * ht;
         c[k++] = Vec3d{card.anchor.x + right.x * ox + up.x * oy + normal.x * oz,
                        card.anchor.y + right.y * ox + up.y * oy + normal.y * oz,
@@ -432,6 +441,7 @@ class VegetationV2App : public JPOV {
 
   // ── 叶卡材质（--leaf）──
   bool has_leaf_ = false;
+  bool show_leaf_ = true;   // 关掉 → 回到 shape debug 的绿色盒子
   float leaf_aspect_ = 1.0f;          // 单张图 = 一格 → 宽/高
   float curl_ = 0.5f;                 // A：顶点法线球面化（面板可调）
   float curl_applied_ = -1.0f;        // 上次烘进 mesh 的值（变了才 UpdateMesh）
@@ -711,12 +721,10 @@ class VegetationV2App : public JPOV {
     std::vector<std::vector<float>> pos(kMaxCardTypes);
     std::vector<std::vector<float>> nrm(kMaxCardTypes);
     std::vector<std::vector<uint32_t>> idx(kMaxCardTypes);
-    if (!has_leaf_) {
-      for (const auto& card : shape_.cards) {
-        const uint32_t t = card.type % kMaxCardTypes;
-        AppendCardBox(shape_, card, static_cast<float>(card.height * 0.6), &pos[t], &nrm[t],
-                      &idx[t]);
-      }
+    for (const auto& card : shape_.cards) {
+      const uint32_t t = card.type % kMaxCardTypes;
+      AppendCardBox(shape_, card, static_cast<float>(card.height * 0.6), &pos[t], &nrm[t],
+                    &idx[t]);
     }
     card_mesh_.resize(kMaxCardTypes, 0);
     card_mat_.resize(kMaxCardTypes);
@@ -804,6 +812,8 @@ class VegetationV2App : public JPOV {
     max_level_ = std::min(args.max_level, deepest);
     max_level_f_ = static_cast<float>(max_level_);
     ground_y_ = args.ground_y;
+    if (args.hide_leaf) show_leaf_ = false;
+    if (args.hide_bark) show_bark_ = false;
     cam_target_y_ = args.cam_target_y;
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
@@ -886,7 +896,7 @@ class VegetationV2App : public JPOV {
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
-    if (has_leaf_) {
+    if (has_leaf_ && show_leaf_) {
       for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
         if (leaf_mesh_[t] == 0) continue;
         if (!show_all_card_types_ && t != type_filter_) continue;
@@ -897,6 +907,7 @@ class VegetationV2App : public JPOV {
       }
     }
     for (size_t t = 0; t < card_mesh_.size(); ++t) {
+      if (has_leaf_ && show_leaf_) break;   // 已用贴图四边形，别再画 debug 盒子
       if (card_mesh_[t] == 0) {
         continue;
       }
@@ -924,7 +935,7 @@ class VegetationV2App : public JPOV {
       const float cx = 0.02f * w;
       const int scene_rows = has_bark_ ? 4 : 3;   // 地面/层级/树皮/法线强度
       const float scene_top = h - 16.0f - (scene_rows * 32.0f);
-      const int leaf_rows = has_leaf_ ? 4 : 2;   // 全部叶子/type +（球面化/法线强度）
+      const int leaf_rows = has_leaf_ ? 5 : 2;   // 全部叶子/type +（贴图/球面化/法线强度）
       const float leaf_top = scene_top - 12.0f - (leaf_rows * 32.0f);
       auto scene_row = [&](int i) {
         return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
@@ -955,8 +966,9 @@ class VegetationV2App : public JPOV {
 
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
       if (has_leaf_) {
-        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(2), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(3), 0.0f, 3.0f, 2);
+        ui_.Checkbox("叶卡贴图", &show_leaf_, leaf_row(2));
+        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(3), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(4), 0.0f, 3.0f, 2);
       }
       // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
       // 所以这个下标是【颜色桶下标】，不是原始 type 编号。要按真实 type 过滤，
