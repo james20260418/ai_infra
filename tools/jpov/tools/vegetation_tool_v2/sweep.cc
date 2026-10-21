@@ -396,20 +396,15 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
   return out;
 }
 
-MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& aspect_by_type) {
+MeshData BuildLeafCards(const Shape& shape) {
   MeshData mesh;
   for (const LeafCard& card : shape.cards) {
-    if (card.type >= aspect_by_type.size()) {
-      std::fprintf(stderr, "BuildLeafCards: card type %u 没有对应长宽比\n", card.type);
+    if (!(card.width > 0.0)) {
+      std::fprintf(stderr, "BuildLeafCards: card type %u 的 width 必须 > 0，实际 %g\n",
+                   card.type, card.width);
       std::abort();
     }
-    const double aspect = aspect_by_type[card.type];
-    if (!(aspect > 0.0)) {
-      std::fprintf(stderr, "BuildLeafCards: type %u 的长宽比必须 > 0，实际 %g\n",
-                   card.type, aspect);
-      std::abort();
-    }
-    const double width = card.height * aspect;
+    const double width = card.width;
 
     const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
     const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});

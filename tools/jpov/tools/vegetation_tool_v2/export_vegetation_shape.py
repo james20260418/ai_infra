@@ -11,7 +11,7 @@
   blender -b --python export_vegetation_shape.py -- \\
       --species weeping_willow --out /tmp/willow.pbtxt \\
       --set scale=6 --set seed=5 --set leaves=10 --set leafScale=0.25 \\
-      --per-seg 6 --leaf-type-desc "柳树冠层叶簇"
+      --per-seg 6 --leaf-type-desc "柳树冠层叶簇" --leaf-aspect 0.6
 """
 import os
 import sys
@@ -36,6 +36,7 @@ species = argv[0] if not argv[0].startswith("--") else "weeping_willow"
 out_path = None
 per_seg = 6
 leaf_desc = "叶簇"
+leaf_aspect = 0.6   # 叶卡 宽/高：装配时 width = height × 这个值
 overrides = {}
 
 i = 0
@@ -55,6 +56,9 @@ while i < len(argv):
     elif a == "--leaf-type-desc":
         i += 1
         leaf_desc = argv[i]
+    elif a == "--leaf-aspect":
+        i += 1
+        leaf_aspect = float(argv[i])
     elif a == "--set":
         i += 1
         k, _, v = argv[i].partition("=")
@@ -301,6 +305,7 @@ for anchor, up, normal, height, branch_id, s_param in cards:
     lines.append("  normal { x: %s y: %s z: %s }"
                  % (fmt(normal[0]), fmt(normal[1]), fmt(normal[2])))
     lines.append("  height: %s" % fmt(height))
+    lines.append("  width: %s" % fmt(height * leaf_aspect))
     lines.append("  type: 0")
     lines.append("  branch: %d" % new_id.get(branch_id, 0))
     lines.append("  s: %s" % fmt(s_param))

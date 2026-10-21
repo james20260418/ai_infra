@@ -65,12 +65,13 @@ struct Branch {
   uint32_t EffectiveRingCount() const;
 };
 
-// 一张叶卡。宽度不在数据结构里——由叶材质 atlas 的格子长宽比推导。
+// 一张叶卡：anchor + up + normal + height + width 唯一确定 quad。
 struct LeafCard {
   Vec3d anchor;         // 贴枝点，语义由 LeafType::anchor_mode 决定
   Vec3d up;             // 长轴，从根指向梢（单位向量）
   Vec3d normal;         // 卡面法线（单位向量，与 up 正交）
   double height = 0.0;  // 沿 up 的长度（米）
+  double width = 0.0;   // 沿 right(width = cross(up, normal)) 的宽度（米），必须 > 0
   uint32_t type = 0;    // 引用 LeafType::type
   uint32_t branch = 0;  // 溯源：所属枝 id（渲染不依赖）
   double s = 0.0;       // 溯源：枝上参数位置 [0,1]

@@ -85,8 +85,9 @@ message BranchProto {
   uint32 seam_index = 6;
 }
 
-// 一张叶卡。锚点 + 两条正交轴 + 长度即可唯一确定一张卡；
-// 宽度**不存**，由叶材质 atlas 的格子长宽比推导（见格式文档 §4.2）。
+// 一张叶卡。锚点 + 两条正交轴（up/normal）+ 长宽即可唯一确定卡片 quad：
+//   P(u,v) = anchor + right·((u−au)·width) + up·((v−av)·height)
+// 宽高都**存在 shape 里**（装配时由材质格子比例算出并写死），运行时不猜。
 message LeafCardProto {
   // 贴枝点（米）。含义由所属 LeafTypeProto.anchor_mode 决定。
   Vec3Proto anchor = 1;
@@ -97,7 +98,7 @@ message LeafCardProto {
   // 卡面法线（单位向量，需与 up 正交）。双面渲染，但光照朝向靠它。
   Vec3Proto normal = 3;
 
-  // 沿 up 方向的长度（米）。宽度由材质推导，长宽比不允许被修改。
+  // 沿 up 方向的长度（米）。
   double height = 4;
 
   // 叶卡类型编号，引用 LeafTypeProto.type。
@@ -107,6 +108,10 @@ message LeafCardProto {
   // LOD 归组、调试定位有用。
   uint32 branch = 6;
   double s = 7;
+
+  // 沿 right 方向的宽度（米）。与 height 一起决定 quad 的大小；
+  // 必须 > 0。装配时 width = height × （atlas 格子宽/高），写进资产后不再随材质变。
+  double width = 8;
 }
 
 // 叶卡类型（一类 = 一套材质绑定 + 一套摆放语义）。

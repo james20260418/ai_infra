@@ -186,6 +186,7 @@ Shape FromProto(const ShapeProto& proto) {
     card.up = Vec3d{c.up().x(), c.up().y(), c.up().z()};
     card.normal = Vec3d{c.normal().x(), c.normal().y(), c.normal().z()};
     card.height = c.height();
+    card.width = c.width();
     card.type = c.type();
     card.branch = c.branch();
     card.s = c.s();
@@ -311,6 +312,9 @@ bool Validate(const Shape& shape, std::string* error) {
     const double dot = c.up.x * c.normal.x + c.up.y * c.normal.y + c.up.z * c.normal.z;
     if (std::fabs(dot) > kDotEps) {
       return fail(Format("card %zu: up·normal = %.6f，需正交", i, dot));
+    }
+    if (!(c.width > 0.0)) {
+      return fail(Format("card %zu: width 必须 > 0（装配时由 height × 格子宽/高 得来）", i));
     }
     if (!(c.height > 0.0)) {
       return fail(Format("card %zu: height 必须 > 0，实际 %g", i, c.height));

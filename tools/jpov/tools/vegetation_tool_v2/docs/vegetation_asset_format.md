@@ -236,6 +236,7 @@ LeafCard {
   up(x,y,z),          // 卡片长轴，从根指向梢
   normal(x,y,z),      // 卡面法线
   height,             // 沿 up 的长度（米）
+  width,              // 沿 right(=up×normal) 的宽度（米）
   type,               // 叶卡类型编号（int，从 0 开始）
   branch, s           // 溯源：挂在哪根枝的哪个参数位置（渲染不依赖）
 }
@@ -257,17 +258,27 @@ LeafType {
 - **`type` 为什么要分类**：一棵树可以有**内容完全不同**的多类卡——桑树的异形叶、柳树的
   柔荑花序、枯叶、花果。它们用不同 atlas、不同尺寸、不同数量。
 
-### 4.2 宽度：**不存，由贴图比例推导**
+### 4.2 宽度：**存进 shape**（装配时算好，运行时不猜）
 
 ```
-width = height × (cell_width / cell_height)
+width = height × (cell_width / cell_height)     // 装配时算，写进 LeafCard.width
 ```
 
-- **height 由拓扑保证**（美术在 Blender 里摆多大就是多大）
-- **width 由叶贴图的比例决定**，且**长宽比绝不允许改变**——卡片是等比缩放的四边形
-- 如果叶子看起来被"撑宽"了：**用户改图，不改拓扑**。引擎不会为了凑形状去拉伸纹理。
+- **anchor + up + normal + height + width 唯一确定卡片 quad**，引擎直接按这五个量铺面，
+  不做任何"拿材质比例反推"的隐式行为（否则同一个 shape 换材质就变形状，无法复现）。
+- `width` 必须 > 0，`Validate` 会拒绝 0/负值。
+- 贴图与 quad 的比例对不上时，呈现是**拉伸**的 —— 这是可见的、可修的：改 shape 的 width，
+  或者改 atlas 格子比例后重新装配。引擎**绝不**为了凑形状去偷偷拉伸纹理。
+- `preferred_aspect` 仍然留在 `LeafType` 上，只用于「一型多 atlas 时挑哪套」，不参与铺面。
 
 （`cell_*` 指的是 atlas **格子**的尺寸，不是整张图的尺寸：`imgW/cols : imgH/rows`。）
+
+### 4.2.1 debug 视图的角标（红/黄/蓝）
+
+shape viewer 在「叶卡贴图关掉」时，会把每张卡的 quad 用三个角标画出来：
+**红 = uv(0,0)、黄 = uv(1,1)、蓝 = uv(0,1)**。每个角标是该角 **1/8 大小、3cm 厚** 的小盒子，
+角点与 quad 角点重合 —— 直接回答"这张卡到底贴在哪、素材四角往哪对"。
+（画的不是整张 quad 的面，太占视线；需要看范围时把 1/8 调大即可。）
 
 ### 4.3 叶材质的约定（写进物料规范，不进 `ShapeProto`）
 
@@ -311,7 +322,7 @@ width = height × (cell_width / cell_height)
 2. 逐枝扫管：截面 profile + 逐点半径 + 平行传输基 → 顶点/法线/三角形
 3. 生成 UV：§3 的规则（含父子 V 连续、U 相位继承、非方贴图的 uv_v_scale）
 4. 分叉领口：子枝根部按父半径 smoothstep 收细（渲染侧几何处理）
-5. 叶卡：anchor/up/normal/height + 材质给的格子长宽比 → 四边形（width = height × 长宽比）；UV = atlas 格子四角
+5. 叶卡：anchor/up/normal/height/width → 四边形（width 在装配时 = height × 格子宽/高，写进资产）；UV = atlas 格子四角
 6. 材质：树皮接 albedo/normal/roughness；叶子接 atlas + alpha cutout + 双面
 7. 输出：GLB + **resolved manifest**（记录每类卡实际用的 atlas、算出的 width）
 ```

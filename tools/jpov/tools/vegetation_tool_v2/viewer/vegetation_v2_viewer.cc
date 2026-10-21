@@ -353,62 +353,23 @@ jpov::Color GreenForType(uint32_t type) {
   return kGreens[type % kMaxCardTypes];
 }
 
-// 卡片上参数 (au, av) 处的世界坐标，**以 anchor 为根部**：
-//   左下角(0,0) = anchor − right·(au·w) − up·(av·h)
-// 与 BuildLeafCards 完全一致（同一套 right/up/anchor 定义）。
-Vec3d CardCorner(const Shape& shape, const jpov::vegetation::LeafCard& card, double width,
-                 double au, double av) {
-  const auto norm = [](const Vec3d& p) {
-    const double l = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-    return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{p.x / l, p.y / l, p.z / l};
+// 在卡片 UV 子矩形 [u0,u1]×[v0,v1] 上放一个有厚度的盒子（世界坐标）。
+// 角点徽标就用它：把 quad 的某个 UV 角缩成 1/8，**角点本身作为参照点**。
+void AppendUvBox(const Shape& shape, const jpov::vegetation::LeafCard& card, double u0,
+                 double u1, double v0, double v1, double thickness,
+                 std::vector<float>* pos, std::vector<uint32_t>* idx) {
+  const auto norm = [](const Vec3d& q) {
+    const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
   };
   const auto cross = [](const Vec3d& a, const Vec3d& b) {
     return Vec3d{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
   };
   const Vec3d up = norm(card.up);
-  const Vec3d nrm = norm(card.normal);
-  const Vec3d right = norm(cross(up, nrm));
-  return Vec3d{card.anchor.x - right.x * (au * width) - up.x * (av * card.height),
-               card.anchor.y - right.y * (au * width) - up.y * (av * card.height),
-               card.anchor.z - right.z * (au * width) - up.z * (av * card.height)};
-}
+  const Vec3d n = norm(card.normal);
+  const Vec3d right = norm(cross(up, n));
 
-// 小八面体（6 顶点 / 8 三角形）：作为「角点标记」，任何角度看都是个圆点。
-void AppendMarker(const Vec3d& c, double r, std::vector<float>* pos,
-                  std::vector<uint32_t>* idx) {
-  const uint32_t base = static_cast<uint32_t>(pos->size() / 3);
-  const Vec3d v[6] = {{c.x + r, c.y, c.z}, {c.x - r, c.y, c.z}, {c.x, c.y + r, c.z},
-                      {c.x, c.y - r, c.z}, {c.x, c.y, c.z + r}, {c.x, c.y, c.z - r}};
-  for (const Vec3d& p : v) {
-    pos->push_back(static_cast<float>(p.x));
-    pos->push_back(static_cast<float>(p.y));
-    pos->push_back(static_cast<float>(p.z));
-  }
-  const uint32_t tri[8][3] = {{0, 4, 2}, {0, 2, 5}, {0, 5, 3}, {0, 3, 4},
-                              {1, 2, 4}, {1, 5, 2}, {1, 3, 5}, {1, 4, 3}};
-  for (const auto& t : tri) {
-    idx->push_back(base + t[0]);
-    idx->push_back(base + t[1]);
-    idx->push_back(base + t[2]);
-  }
-}
-
-// 一张叶卡 → 一个盒子（8 顶点 / 12 三角形），世界坐标，直接烘进 mesh。
-void AppendCardBox(const Shape& shape, const jpov::vegetation::LeafCard& card,
-                   float width, std::vector<float>* pos, std::vector<float>* nrm,
-                   std::vector<uint32_t>* idx) {
-  const auto norm = [](const Vec3d& v) {
-    const double l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-    return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{v.x / l, v.y / l, v.z / l};
-  };
-  const auto cross = [](const Vec3d& a, const Vec3d& b) {
-    return Vec3d{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-  };
-  const Vec3d up = norm(card.up);
-  const Vec3d normal = norm(card.normal);
-  const Vec3d right = norm(cross(up, normal));
-
-  // 与 BuildLeafCards 用同一张 anchor 表：盒子中心 = 锚点 + 右/上偏移。
+  // 与 BuildLeafCards 完全相同的 pivot：uv=(au,av) 落在 anchor 上。
   std::string mode = "bottom_center";
   for (const auto& t : shape.leaf_types) {
     if (t.type == card.type) {
@@ -419,53 +380,32 @@ void AppendCardBox(const Shape& shape, const jpov::vegetation::LeafCard& card,
   double au = 0.5;
   double av = 0.0;
   if (!jpov::vegetation::AnchorModeToUv(mode, &au, &av)) {
-    std::fprintf(stderr, "AppendCardBox: anchor_mode \"%s\" 非法\n", mode.c_str());
+    std::fprintf(stderr, "AppendUvBox: anchor_mode \"%s\" 非法\n", mode.c_str());
     std::abort();
   }
-  const double hw = 0.5 * static_cast<double>(width);
-  const double ht = 0.5 * kCardThickness;
-  // 盒子沿 right 居中（ix=±1），沿 up 是 [0, height]（iy=0/1）：
-  // 要让 (au, av) 落在锚点上，水平中心偏 (0.5-au)·w，垂直起点偏 **−av·h**。
-  const double cx_off = (0.5 - au) * static_cast<double>(width);
-  const double cy_off = -av * static_cast<double>(card.height);
-  const double h = card.height;
-  Vec3d c[8];
-  int k = 0;
-  for (int iz = -1; iz <= 1; iz += 2) {
-    for (int iy = 0; iy <= 1; ++iy) {
-      for (int ix = -1; ix <= 1; ix += 2) {
-        const double ox = cx_off + ix * hw;
-        const double oy = cy_off + iy * h;
-        const double oz = iz * ht;
-        c[k++] = Vec3d{card.anchor.x + right.x * ox + up.x * oy + normal.x * oz,
-                       card.anchor.y + right.y * ox + up.y * oy + normal.y * oz,
-                       card.anchor.z + right.z * ox + up.z * oy + normal.z * oz};
-      }
-    }
-  }
-  // 顶点顺序：k = (iz, iy, ix) 嵌套 → 0:(-,0,-) 1:(+,0,-) 2:(-,1,-) 3:(+,1,-)
-  //                                   4:(-,0,+) 5:(+,0,+) 6:(-,1,+) 7:(+,1,+)
-  static const int kFaces[12][3] = {
-      {0, 1, 3}, {0, 3, 2},  // -Z
-      {4, 6, 7}, {4, 7, 5},  // +Z
-      {0, 4, 5}, {0, 5, 1},  // -Y（根部侧）
-      {2, 3, 7}, {2, 7, 6},  // +Y（梢部侧）
-      {0, 2, 6}, {0, 6, 4},  // -X
-      {1, 5, 7}, {1, 7, 3},  // +X
+  const auto P = [&](double u, double v, double z) {
+    const double su = (u - au) * card.width;
+    const double sv = (v - av) * card.height;
+    return Vec3d{card.anchor.x + right.x * su + up.x * sv + n.x * z,
+                 card.anchor.y + right.y * su + up.y * sv + n.y * z,
+                 card.anchor.z + right.z * su + up.z * sv + n.z * z};
   };
+  const double hz = 0.5 * thickness;
+  const Vec3d c[8] = {P(u0, v0, -hz), P(u1, v0, -hz), P(u0, v1, -hz), P(u1, v1, -hz),
+                      P(u0, v0, +hz), P(u1, v0, +hz), P(u0, v1, +hz), P(u1, v1, +hz)};
+  static const int kFaces[12][3] = {{0, 1, 3}, {0, 3, 2}, {4, 6, 7}, {4, 7, 5},
+                                    {0, 4, 5}, {0, 5, 1}, {2, 3, 7}, {2, 7, 6},
+                                    {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
   const uint32_t base = static_cast<uint32_t>(pos->size() / 3);
-  for (int i = 0; i < 8; ++i) {
-    pos->push_back(static_cast<float>(c[i].x));
-    pos->push_back(static_cast<float>(c[i].y));
-    pos->push_back(static_cast<float>(c[i].z));
-    nrm->push_back(static_cast<float>(normal.x));
-    nrm->push_back(static_cast<float>(normal.y));
-    nrm->push_back(static_cast<float>(normal.z));
+  for (const Vec3d& q : c) {
+    pos->push_back(static_cast<float>(q.x));
+    pos->push_back(static_cast<float>(q.y));
+    pos->push_back(static_cast<float>(q.z));
   }
-  for (int f = 0; f < 12; ++f) {
-    idx->push_back(base + kFaces[f][0]);
-    idx->push_back(base + kFaces[f][1]);
-    idx->push_back(base + kFaces[f][2]);
+  for (const auto& f : kFaces) {
+    idx->push_back(base + f[0]);
+    idx->push_back(base + f[1]);
+    idx->push_back(base + f[2]);
   }
 }
 
@@ -476,11 +416,9 @@ class VegetationV2App : public JPOV {
   Shape shape_;
   std::vector<uint32_t> branch_mesh_;   // 与 shape_.branches 下标对齐
   std::vector<int> branch_level_;
-  std::vector<uint32_t> card_mesh_;     // 每种 type 一个合并盒子 mesh
-  std::vector<jpov::PBRMaterial> card_mat_;
-  // 叶卡左下/右下角点标记（黄 / 红）：用来肉眼校验 anchor 到底落在哪。
-  uint32_t corner_mesh_[2] = {0, 0};
-  jpov::PBRMaterial corner_mat_[2];
+  // UV 角徽标（红/黄/蓝 = uv(0,0)/(1,1)/(0,1)），每个颜色一个合并 mesh。
+  uint32_t corner_mesh_[3] = {0, 0, 0};
+  jpov::PBRMaterial corner_mat_[3];
 
   // ── 叶卡材质（--leaf）──
   bool has_leaf_ = false;
@@ -656,8 +594,7 @@ class VegetationV2App : public JPOV {
         }
       }
       if (subset.cards.empty()) continue;
-      const std::vector<double> aspect(kMaxCardTypes, static_cast<double>(leaf_aspect_));
-      const MeshData src = jpov::vegetation::BuildLeafCards(subset, aspect);
+      const MeshData src = jpov::vegetation::BuildLeafCards(subset);
 
       jpov::MeshData md;
       md.flags = static_cast<jpov::MeshVertexFlags>(
@@ -760,83 +697,41 @@ class VegetationV2App : public JPOV {
       BuildLeafScene(args);
     }
 
-    // 没有叶材质时：按 type 合并成盒子 mesh（只为看位置/朝向；宽度用占位比例 0.6）。
-    std::vector<std::vector<float>> pos(kMaxCardTypes);
-    std::vector<std::vector<float>> nrm(kMaxCardTypes);
-    std::vector<std::vector<uint32_t>> idx(kMaxCardTypes);
-    for (const auto& card : shape_.cards) {
-      const uint32_t t = card.type % kMaxCardTypes;
-      AppendCardBox(shape_, card, static_cast<float>(card.height * 0.6), &pos[t], &nrm[t],
-                    &idx[t]);
-    }
-    card_mesh_.resize(kMaxCardTypes, 0);
-    card_mat_.resize(kMaxCardTypes);
-    for (int t = 0; t < kMaxCardTypes; ++t) {
-      if (pos[t].empty()) {
-        continue;
-      }
-      jpov::MeshData md;
-      // 带上 UV：贴树皮时 PBR 完整版 shader 需要 UV，否则采样不到（mesh 无 kUV 会退回无贴图路径）。
-      md.flags = static_cast<jpov::MeshVertexFlags>(
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kUV));
-      for (size_t v = 0; v < pos[t].size() / 3; ++v) {
-        md.positions.push_back(jpov::Vec3f{pos[t][v * 3], pos[t][v * 3 + 1], pos[t][v * 3 + 2]});
-        md.normals.push_back(jpov::Vec3f{nrm[t][v * 3], nrm[t][v * 3 + 1], nrm[t][v * 3 + 2]});
-        // 盒子顶点的 UV：AppendCardBox 的顶点序是 (iz, iy, ix) ⇒ bit0=ix, bit1=iy。
-        // 现在只是给贴图留位（叶卡仍用纯色），但 MeshData 声明了 kUV 就必须给满。
-        md.uvs.push_back(jpov::Vec2f{(v & 1) ? 1.0f : 0.0f, ((v >> 1) & 1) ? 1.0f : 0.0f});
-      }
-      md.indices = idx[t];
-      card_mesh_[t] = RegisterMesh(std::move(md));
-      card_mat_[t] = jpov::PBRMaterial::SolidColor(GreenForType(static_cast<uint32_t>(t)));
-      card_mat_[t].double_sided = true;  // 盒子本来就朝外，但双面更保险
-    }
-
-    // 角点标记：每张卡的下边两端。黄 = u0（左下）、红 = u1（右下），v 都取 0。
-    // 注意 v=0 是「卡片根端」——top_center 的卡根在上边，它的 v=0 边是**梢端**，
-    // 所以这里画的是「(u,v) 参数空间的底边两端」，与 anchor_mode 无关。
+    // 角点徽标：把 quad 的三个 UV 角各缩成 1/8 的小盒子（厚 3cm），角点作为参照点。
+    //   红 = uv(0,0)   黄 = uv(1,1)   蓝 = uv(0,1)
+    // 这样用户一眼就知道素材的四个角该往哪贴；盒子厚度只为"看得见"，不代表卡片有厚度。
     {
-      std::vector<float> cpos[2];
-      std::vector<uint32_t> cidx[2];
-      const double marker_r = 0.03;   // 3cm：树尺度近看可见
-      for (const auto& card : shape_.cards) {
-        const double width =
-            card.height * (has_leaf_ ? static_cast<double>(leaf_aspect_) : 0.6);
-        // 沿卡面法线往"正面"挪一点：否则标记落在盒子内部（厚 2cm）会被挡掉。
-        const auto norm = [](const Vec3d& q) {
-          const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
-          return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
-        };
-        const Vec3d n = norm(card.normal);
-        const double off = 0.5 * 0.02 + marker_r;   // 盒子半厚 + 半径
-        for (int side = 0; side < 2; ++side) {
-          Vec3d p = CardCorner(shape_, card, width, side == 0 ? 0.0 : 1.0, 0.0);
-          p = Vec3d{p.x + n.x * off, p.y + n.y * off, p.z + n.z * off};
-          AppendMarker(p, marker_r, &cpos[side], &cidx[side]);
+      const double kBadge = 1.0 / 8.0;
+      const double kThick = 0.03;
+      const double uv[3][4] = {{0.0, kBadge, 0.0, kBadge},
+                               {1.0 - kBadge, 1.0, 1.0 - kBadge, 1.0},
+                               {0.0, kBadge, 1.0 - kBadge, 1.0}};
+      // 红别给满：1.0 经 tone map 会压成粉（255,111,111），0.55 反而更像正红。
+      const jpov::Color kCol[3] = {{0.55f, 0.0f, 0.0f, 1.0f},
+                                   {0.95f, 0.85f, 0.05f, 1.0f},
+                                   {0.05f, 0.15f, 0.85f, 1.0f}};
+      for (int c = 0; c < 3; ++c) {
+        std::vector<float> cpos;
+        std::vector<uint32_t> cidx;
+        for (const auto& card : shape_.cards) {
+          AppendUvBox(shape_, card, uv[c][0], uv[c][1], uv[c][2], uv[c][3], kThick, &cpos,
+                      &cidx);
         }
-      }
-      // 红别给满：1.0 在 tone map 后会被压成粉（255,111,111）；0.55 反而更像正红。
-      const jpov::Color kCol[2] = {{0.95f, 0.85f, 0.05f, 1.0f}, {0.55f, 0.0f, 0.0f, 1.0f}};
-      for (int side = 0; side < 2; ++side) {
-        if (cpos[side].empty()) continue;
+        if (cpos.empty()) continue;
         jpov::MeshData md;
         md.flags = static_cast<jpov::MeshVertexFlags>(
             static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
             static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
-        for (size_t v = 0; v + 2 < cpos[side].size(); v += 3) {
-          md.positions.push_back(jpov::Vec3f{cpos[side][v], cpos[side][v + 1],
-                                             cpos[side][v + 2]});
-          md.normals.push_back(jpov::Vec3f{0.0f, 1.0f, 0.0f});   // 未参与光照计算
+        for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
+          md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
+          md.normals.push_back(jpov::Vec3f{0.0f, 1.0f, 0.0f});
         }
-        md.indices = cidx[side];
-        corner_mesh_[side] = RegisterMesh(std::move(md));
-        // 自发光标记：base 取黑，颜色只走 emissive —— 否则 sun+ambient 一叠就发粉/发白，
-        // 黄红分不清（实测纯色 base 出来是 255,125,125）。
-        corner_mat_[side] = jpov::PBRMaterial::SolidColor({0.0f, 0.0f, 0.0f, 1.0f});
-        corner_mat_[side].emissive = kCol[side];
-        corner_mat_[side].roughness = 1.0f;
+        md.indices = cidx;
+        corner_mesh_[c] = RegisterMesh(std::move(md));
+        // base 黑 + emissive：靠自发光上色，不被 sun/ambient 冲淡。
+        corner_mat_[c] = jpov::PBRMaterial::SolidColor({0.0f, 0.0f, 0.0f, 1.0f});
+        corner_mat_[c].emissive = kCol[c];
+        corner_mat_[c].roughness = 1.0f;
       }
     }
 
@@ -987,35 +882,18 @@ class VegetationV2App : public JPOV {
     }
     const bool debug_cards = !(has_leaf_ && show_leaf_);
     if (debug_cards) {
-      for (int side = 0; side < 2; ++side) {
-        if (corner_mesh_[side] == 0) continue;
-        cmds->DrawObject3D(corner_mesh_[side], corner_mat_[side], {0.0f, 0.0f, 0.0f},
+      for (int c = 0; c < 3; ++c) {
+        if (corner_mesh_[c] == 0) continue;
+        cmds->DrawObject3D(corner_mesh_[c], corner_mat_[c], {0.0f, 0.0f, 0.0f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
       }
-    }
-    if (has_leaf_ && show_leaf_) {
+    } else {
       for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
         if (leaf_mesh_[t] == 0) continue;
         if (!show_all_card_types_ && t != type_filter_) continue;
-        if (frame_count == 0) {
-        }
         cmds->DrawObject3D(leaf_mesh_[t], leaf_mat_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
                            {0.0f, 0.0f, 1.0f});
       }
-    }
-    for (size_t t = 0; t < card_mesh_.size(); ++t) {
-      if (!debug_cards) break;   // 已用贴图四边形，别再画 debug 盒子
-      if (card_mesh_[t] == 0) {
-        continue;
-      }
-      // 只看某一类：用于确认"这棵树的某类叶卡到底长在哪、朝向对不对"
-      if (!show_all_card_types_ && t != type_filter_) {
-        continue;
-      }
-      if (frame_count == 0) {
-      }
-      cmds->DrawObject3D(card_mesh_[t], card_mat_[t], {0.0f, 0.0f, 0.0f},
-                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
     cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
                    jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);

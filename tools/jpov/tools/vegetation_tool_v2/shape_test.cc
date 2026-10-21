@@ -75,6 +75,7 @@ Shape MinimalShape() {
   card.up = Vec3d{0, 1, 0};
   card.normal = Vec3d{1, 0, 0};
   card.height = 0.25;
+  card.width = 0.15;
   card.type = 0;
   card.branch = 1;
   card.s = 0.5;
@@ -184,6 +185,12 @@ void TestNegative() {
     s.cards[0].height = 0.0;
     std::string err;
     Expect(!Validate(s, &err), "height 为 0 应失败");
+  }
+  {
+    Shape s = MinimalShape();
+    s.cards[0].width = 0.0;
+    std::string err;
+    Expect(!Validate(s, &err), "width 为 0 应失败");
   }
   // anchor_mode 只接受「根部在哪个角/边」这四个；曾经的 "center"（根部在图正中央）
   // 对造图的人没有意义，已删除 —— 这条防止它被悄悄加回来。
@@ -300,6 +307,7 @@ void TestProtoRoundTrip() {
     out->mutable_normal()->set_y(c.normal.y);
     out->mutable_normal()->set_z(c.normal.z);
     out->set_height(c.height);
+    out->set_width(c.width);
     out->set_type(c.type);
     out->set_branch(c.branch);
     out->set_s(c.s);
@@ -316,6 +324,7 @@ void TestProtoRoundTrip() {
          "往返后坐标一致");
   Expect(back.cards.size() == shape.cards.size(), "往返后卡数一致");
   Expect(back.cards[0].height == shape.cards[0].height, "往返后卡高度一致");
+  Expect(back.cards[0].width == shape.cards[0].width, "往返后卡宽度一致");
   Expect(back.branches[0].samples[1].profile.size() == 12, "往返后 profile 点数一致");
   Expect(std::fabs(back.branches[0].samples[1].profile[0].x - 1.2) < 1e-12,
          "往返后 profile 形状一致（逐点可变）");
