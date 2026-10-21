@@ -90,6 +90,25 @@ double UnitPerimeter(const std::vector<ProfilePoint>& points) {
 
 }  // namespace
 
+bool AnchorModeToUv(const std::string& mode, double* u, double* v) {
+  if (mode == "bottom_left") {
+    *u = 0.0;
+    *v = 0.0;
+  } else if (mode == "bottom_center") {
+    *u = 0.5;
+    *v = 0.0;
+  } else if (mode == "bottom_right") {
+    *u = 1.0;
+    *v = 0.0;
+  } else if (mode == "top_center") {
+    *u = 0.5;
+    *v = 1.0;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 std::vector<ProfilePoint> UnitCircleProfile(uint32_t n) {
   std::vector<ProfilePoint> points;
   points.reserve(n);
@@ -268,10 +287,10 @@ bool Validate(const Shape& shape, std::string* error) {
     if (!type_ids.insert(t.type).second) {
       return fail(Format("leaf_type %u 重复", t.type));
     }
-    if (t.anchor_mode != "bottom_center" && t.anchor_mode != "top_center" &&
-        t.anchor_mode != "center") {
-      return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法", t.type,
-                         t.anchor_mode.c_str()));
+    if (!IsValidAnchorMode(t.anchor_mode)) {
+      return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法"
+                         "（只接受 bottom_left/bottom_center/bottom_right/top_center）",
+                         t.type, t.anchor_mode.c_str()));
     }
     if (t.preferred_aspect < 0.0) {
       return fail(Format("leaf_type %u: preferred_aspect 不能为负", t.type));

@@ -415,10 +415,9 @@ MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_
     const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
     const V3 anchor{card.anchor.x, card.anchor.y, card.anchor.z};
 
-    // anchor_mode 决定四边形相对锚点往哪边长：
-    //   bottom_center → 从锚点向上长（叶/叶簇的根在下）
-    //   top_center    → 从锚点向下长（花序挂在枝下，根在上）
-    //   center        → 上下各半
+    // anchor_mode 只描述「根部落在格子的哪个位置」，由 AnchorModeToUv 统一翻译成
+    // (anchor_u, anchor_v)。四边形永远从根沿 +up 长，所以：
+    //   左下角 = anchor − right·(anchor_u·width) − up·(anchor_v·height)
     std::string mode = "bottom_center";
     for (const LeafType& t : shape.leaf_types) {
       if (t.type == card.type) {
@@ -426,18 +425,20 @@ MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_
         break;
       }
     }
-    double base_offset = 0.0;  // 沿 up 的起点偏移（米）
-    if (mode == "top_center") {
-      base_offset = -card.height;
-    } else if (mode == "center") {
-      base_offset = -0.5 * card.height;
+    double anchor_u = 0.5;
+    double anchor_v = 0.0;
+    if (!AnchorModeToUv(mode, &anchor_u, &anchor_v)) {
+      std::fprintf(stderr, "BuildLeafCards: card type %u 的 anchor_mode \"%s\" 非法\n",
+                   card.type, mode.c_str());
+      std::abort();
     }
 
-    const V3 origin = Add(anchor, Mul(up, base_offset));
-    const V3 half = Mul(right, 0.5 * width);
-    const V3 corner[4] = {Sub(origin, half), Add(origin, half),
-                          Add(Add(origin, half), Mul(up, card.height)),
-                          Add(origin, Mul(up, card.height))};
+    const V3 origin = Sub(Sub(anchor, Mul(right, anchor_u * width)),
+                          Mul(up, anchor_v * card.height));
+    const V3 du = Mul(right, width);
+    const V3 dv = Mul(up, card.height);
+    const V3 corner[4] = {origin, Add(origin, du), Add(Add(origin, du), dv),
+                          Add(origin, dv)};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
 
     const uint32_t base = static_cast<uint32_t>(mesh.VertexCount());

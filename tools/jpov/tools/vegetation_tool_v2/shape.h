@@ -76,7 +76,22 @@ struct LeafCard {
   double s = 0.0;       // 溯源：枝上参数位置 [0,1]
 };
 
-// 叶卡类型。anchor_mode 取 "bottom_center" / "top_center" / "center"。
+// anchor_mode → 根部在图（格子）里的位置，格内归一化：u 向右、v 向上。
+//   合法值（4 个，全是「根在哪个角/边」，用户造图时看一眼就懂）：
+//     bottom_left / bottom_center / bottom_right  —— 叶、叶簇
+//     top_center                                  —— 柔荑花序、垂花（根在上）
+// 只有「根部位置」，没有「卡片往哪长」：卡片永远沿 up 从根到梢。
+// 返回 false = 非法字符串。
+bool AnchorModeToUv(const std::string& mode, double* u, double* v);
+
+// 只判合法、不取值（Validate 用）。
+inline bool IsValidAnchorMode(const std::string& mode) {
+  double u = 0.0;
+  double v = 0.0;
+  return AnchorModeToUv(mode, &u, &v);
+}
+
+// 叶卡类型。
 struct LeafType {
   uint32_t type = 0;
   std::string description;        // 自然语言，永不参与逻辑判断

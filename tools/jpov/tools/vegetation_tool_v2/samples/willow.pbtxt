@@ -21909,7 +21909,7 @@ branches {
 leaf_types {
   type: 0
   description: "叶簇"
-  anchor_mode: "center"
+  anchor_mode: "bottom_center"
   preferred_aspect: 0
 }
 cards {

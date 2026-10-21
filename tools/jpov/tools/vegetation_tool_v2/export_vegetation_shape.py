@@ -290,7 +290,7 @@ for pi in order:
 lines.append("leaf_types {")
 lines.append("  type: 0")
 lines.append('  description: "%s"' % leaf_desc)
-lines.append('  anchor_mode: "center"')
+lines.append('  anchor_mode: "bottom_center"')
 lines.append("  preferred_aspect: 0")
 lines.append("}")
 

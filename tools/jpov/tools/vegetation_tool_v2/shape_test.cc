@@ -185,6 +185,21 @@ void TestNegative() {
     std::string err;
     Expect(!Validate(s, &err), "height 为 0 应失败");
   }
+  // anchor_mode 只接受「根部在哪个角/边」这四个；曾经的 "center"（根部在图正中央）
+  // 对造图的人没有意义，已删除 —— 这条防止它被悄悄加回来。
+  for (const char* bad : {"center", "top_left", "bottom", ""}) {
+    Shape s = MinimalShape();
+    s.leaf_types[0].anchor_mode = bad;
+    std::string err;
+    Expect(!Validate(s, &err) && err.find("anchor_mode") != std::string::npos,
+           std::string("anchor_mode \"") + bad + "\" 应失败");
+  }
+  for (const char* good : {"bottom_left", "bottom_center", "bottom_right", "top_center"}) {
+    Shape s = MinimalShape();
+    s.leaf_types[0].anchor_mode = good;
+    std::string err;
+    Expect(Validate(s, &err), std::string("anchor_mode \"") + good + "\" 应通过: " + err);
+  }
   {
     Shape s = MinimalShape();
     s.cards[0].type = 7;

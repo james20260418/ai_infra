@@ -284,16 +284,21 @@ class VegetationV2App : public JPOV {
       }
 
       // anchor_mode 的「图里根部在哪」——这是造图时唯一要对齐的东西。
-      // bottom_left/right、top_left/right 目前 Validate() 还不接受（下一步改 anchor_uv
-      // 时一并支持），这里先把语义打印出来，方便对着造图。
-      const char* where = "未知";
-      if (t.anchor_mode == "bottom_center") where = "格子底边中点 (u=0.5, v=0)";
-      else if (t.anchor_mode == "top_center") where = "格子顶边中点 (u=0.5, v=1)";
-      else if (t.anchor_mode == "center") where = "格子正中 (u=0.5, v=0.5)";
-      else if (t.anchor_mode == "bottom_left") where = "格子左下角 (u=0, v=0)";
-      else if (t.anchor_mode == "bottom_right") where = "格子右下角 (u=1, v=0)";
-      else if (t.anchor_mode == "top_left") where = "格子左上角 (u=0, v=1)";
-      else if (t.anchor_mode == "top_right") where = "格子右上角 (u=1, v=1)";
+      double au = 0.0;
+      double av = 0.0;
+      const char* name = "非法 anchor_mode";
+      if (jpov::vegetation::AnchorModeToUv(t.anchor_mode, &au, &av)) {
+        if (t.anchor_mode == "bottom_left") name = "格子左下角";
+        else if (t.anchor_mode == "bottom_center") name = "格子底边中点";
+        else if (t.anchor_mode == "bottom_right") name = "格子右下角";
+        else if (t.anchor_mode == "top_center") name = "格子顶边中点";
+      }
+      char where[96];
+      if (jpov::vegetation::IsValidAnchorMode(t.anchor_mode)) {
+        std::snprintf(where, sizeof(where), "%s (u=%.1f, v=%.1f)", name, au, av);
+      } else {
+        std::snprintf(where, sizeof(where), "%s", name);
+      }
 
       std::printf("\n  type %u   卡数 %zu\n", t.type, cards_of_type);
       std::printf("    anchor_mode = %s\n", t.anchor_mode.c_str());

@@ -314,46 +314,64 @@ void TestLeafCards() {
   card.s = 0.5;
   shape.cards.push_back(card);
 
-  const MeshData mesh = BuildLeafCards(shape, {0.1});
-  Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
-  Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
+  const double width = 0.1;   // 来自材质：height × 格子宽/高
+  // 顶点顺序固定：0=(u0,v0) 1=(u1,v0) 2=(u1,v1) 3=(u0,v1)。用双线性插值算
+  // 「参数 (au, av) 处的世界坐标」，再要求它等于 anchor —— 这才是 anchor 的定义。
+  const auto point_at = [](const MeshData& m, double u, double v) {
+    const P3 c0 = GetPos(m, 0);
+    const P3 c1 = GetPos(m, 1);
+    const P3 c2 = GetPos(m, 2);
+    const P3 c3 = GetPos(m, 3);
+    const double w00 = (1 - u) * (1 - v);
+    const double w10 = u * (1 - v);
+    const double w11 = u * v;
+    const double w01 = (1 - u) * v;
+    return P3{c0.x * w00 + c1.x * w10 + c2.x * w11 + c3.x * w01,
+              c0.y * w00 + c1.y * w10 + c2.y * w11 + c3.y * w01,
+              c0.z * w00 + c1.z * w10 + c2.z * w11 + c3.z * w01};
+  };
 
-  // bottom_center：底边中点在 anchor，顶点向上长 height
-  double min_y = 1e9;
-  double max_y = -1e9;
-  double min_x = 1e9;
-  double max_x = -1e9;
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P3 p = GetPos(mesh, v);
-    min_y = std::fmin(min_y, p.y);
-    max_y = std::fmax(max_y, p.y);
-    min_x = std::fmin(min_x, p.x);
-    max_x = std::fmax(max_x, p.x);
-  }
-  Expect(Near(min_y, 1.0, 1e-6) && Near(max_y, 1.2, 1e-6),
-         "bottom_center：底边贴 anchor，向上长 height");
-  Expect(Near(max_x - min_x, 0.1, 1e-6), "宽度必须来自材质（0.1）");
+  const struct {
+    const char* mode;
+    double u;
+    double v;
+  } kCases[] = {{"bottom_left", 0.0, 0.0},
+                {"bottom_center", 0.5, 0.0},
+                {"bottom_right", 1.0, 0.0},
+                {"top_center", 0.5, 1.0}};
 
-  // UV 四角
-  const float expected_uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P2 uv = GetUV(mesh, v);
-    Expect(Near(uv.u, expected_uv[v][0], 1e-6) && Near(uv.v, expected_uv[v][1], 1e-6),
-           "叶卡 UV 必须是整格四角");
-  }
+  for (const auto& c : kCases) {
+    shape.leaf_types[0].anchor_mode = c.mode;
+    const MeshData mesh = BuildLeafCards(shape, {width});
+    Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
+    Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
 
-  // top_center：整张卡挂在锚点下方
-  shape.leaf_types[0].anchor_mode = "top_center";
-  const MeshData flipped = BuildLeafCards(shape, {0.1});
-  double fy_min = 1e9;
-  double fy_max = -1e9;
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P3 p = GetPos(flipped, v);
-    fy_min = std::fmin(fy_min, p.y);
-    fy_max = std::fmax(fy_max, p.y);
+    const P3 root = point_at(mesh, c.u, c.v);
+    Expect(Near(root.x, card.anchor.x, 1e-6) && Near(root.y, card.anchor.y, 1e-6) &&
+               Near(root.z, card.anchor.z, 1e-6),
+           std::string(c.mode) + "：图里 (u=" + std::to_string(c.u) +
+               ", v=" + std::to_string(c.v) + ") 那一点必须落在 anchor 上");
+
+    // 尺寸与朝向不随 mode 变：宽度来自材质、高度沿 up。
+    double min_x = 1e9, max_x = -1e9, min_y = 1e9, max_y = -1e9;
+    for (uint32_t v = 0; v < 4; ++v) {
+      const P3 p = GetPos(mesh, v);
+      min_x = std::fmin(min_x, p.x);
+      max_x = std::fmax(max_x, p.x);
+      min_y = std::fmin(min_y, p.y);
+      max_y = std::fmax(max_y, p.y);
+    }
+    Expect(Near(max_x - min_x, width, 1e-6), "宽度必须来自材质");
+    Expect(Near(max_y - min_y, card.height, 1e-6), "高度必须沿 up 且等于 card.height");
+
+    // UV 四角（格内 [0,1]；atlas 的格子子矩形由调用方再映射）
+    const float expected_uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (uint32_t v = 0; v < 4; ++v) {
+      const P2 uv = GetUV(mesh, v);
+      Expect(Near(uv.u, expected_uv[v][0], 1e-6) && Near(uv.v, expected_uv[v][1], 1e-6),
+             "叶卡 UV 必须是整格四角");
+    }
   }
-  Expect(Near(fy_max, 1.0, 1e-6) && Near(fy_min, 0.8, 1e-6),
-         "top_center：顶边贴 anchor，向下长 height（花序垂挂）");
 }
 
 }  // namespace

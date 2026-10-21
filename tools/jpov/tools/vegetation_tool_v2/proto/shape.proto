@@ -121,8 +121,10 @@ message LeafTypeProto {
   // 给人/agent 读，**永不参与逻辑判断**。
   string description = 2;
 
-  // 锚点语义："bottom_center"（叶/叶簇，根部在下）、"top_center"（花序，根在上）、
-  // "center"（落叶）。必须与 atlas 格子的画法一致。
+  // 根部落在格子的哪个位置（必须与 atlas 格子的画法一致）：
+  //   bottom_left / bottom_center / bottom_right  —— 叶、叶簇
+  //   top_center                                  —— 柔荑花序、垂花（根在上）
+  // 只有「根部位置」；卡片永远沿 up 从根长到梢。
   string anchor_mode = 3;
 
   // 期望的卡片长宽比（width/height）。0 = 未指定（装配时取该类型第一套 atlas 的比例）。
