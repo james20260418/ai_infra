@@ -449,6 +449,7 @@ class VegetationV2App : public JPOV {
   // ── 叶卡材质（--leaf）──
   bool has_leaf_ = false;
   bool show_leaf_ = true;   // 关掉 → 回到 shape debug 的绿色盒子
+  bool show_labels_ = true; // debug 视图里的 UV 文字标签
   float leaf_aspect_ = 1.0f;          // 单张图 = 一格 → 宽/高
   float curl_ = 0.5f;                 // A：顶点法线球面化（面板可调）
   float curl_applied_ = -1.0f;        // 上次烘进 mesh 的值（变了才 UpdateMesh）
@@ -910,13 +911,10 @@ class VegetationV2App : public JPOV {
       //  正面：左下(0,0) / 右下(1,0) / 右上(1,1) / 左上(0,1)
       //  背面中心：「背面」（face = -normal，从背后看是正的）
       //
-      // 两个必须的裁剪：
-      //   1) 只取最近的 N 张卡 —— 442×4 条文字在 llvmpipe 上会把帧率拖到死（表现为卡死）
-      //   2) 逐**标签点**查深度 > 0.1m —— 卡 anchor 在前方但角点可能已在相机背后，
-      //      Text3D 的 PixelsPerMeterAt 对 depth<=0 直接 CHECK crash
-      const float kLabelMaxDist = 2.5f;
+      // 所有卡片都画（不按距离/数量裁剪）。唯一保留的过滤是「标签点必须在相机前方」：
+      // Text3D 的 PixelsPerMeterAt 对 depth<=0 直接 CHECK crash。
+      if (show_labels_) {
       const float kFaceOffset = 0.004f;
-      const size_t kMaxLabelCards = 16;
       const jpov::Vec3f cam = cmds->camera.position;
       jpov::Vec3f fwd{cmds->camera.target.x() - cam.x(), cmds->camera.target.y() - cam.y(),
                       cmds->camera.target.z() - cam.z()};
@@ -925,30 +923,11 @@ class VegetationV2App : public JPOV {
         fwd = jpov::Vec3f{fwd.x() / fl, fwd.y() / fl, fwd.z() / fl};
       }
 
-      std::vector<std::pair<float, const jpov::vegetation::LeafCard*>> near;
-      near.reserve(shape_.cards.size());
       for (const auto& card : shape_.cards) {
         if (!show_all_card_types_ &&
             static_cast<int>(card.type % kMaxCardTypes) != static_cast<int>(type_filter_)) {
           continue;
         }
-        const float dx = static_cast<float>(card.anchor.x) - cam.x();
-        const float dy = static_cast<float>(card.anchor.y) - cam.y();
-        const float dz = static_cast<float>(card.anchor.z) - cam.z();
-        const float d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > kLabelMaxDist * kLabelMaxDist) continue;
-        if (dx * fwd.x() + dy * fwd.y() + dz * fwd.z() < 0.1f) continue;
-        near.emplace_back(d2, &card);
-      }
-      std::sort(near.begin(), near.end(),
-                [](const std::pair<float, const jpov::vegetation::LeafCard*>& a,
-                   const std::pair<float, const jpov::vegetation::LeafCard*>& b) {
-                  return a.first < b.first;
-                });
-      if (near.size() > kMaxLabelCards) near.resize(kMaxLabelCards);
-
-      for (const auto& item : near) {
-        const jpov::vegetation::LeafCard& card = *item.second;
         const auto norm = [](const Vec3d& q) {
           const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
           return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
@@ -1008,6 +987,7 @@ class VegetationV2App : public JPOV {
         Label("左上", Point(0.0, 1.0, +1), face, jpov::TextAlignment::kTopLeft);
         Label("背面", Point(0.5, 0.5, -1), back, jpov::TextAlignment::kCenter);
       }
+      }   // if (show_labels_)
     } else {
       for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
         if (leaf_mesh_[t] == 0) continue;
@@ -1031,7 +1011,7 @@ class VegetationV2App : public JPOV {
       const float cx = 0.02f * w;
       const int scene_rows = has_bark_ ? 4 : 3;   // 地面/层级/树皮/法线强度
       const float scene_top = h - 16.0f - (scene_rows * 32.0f);
-      const int leaf_rows = has_leaf_ ? 5 : 2;   // 全部叶子/type +（贴图/球面化/法线强度）
+      const int leaf_rows = has_leaf_ ? 6 : 2;   // 全部叶子/type +（贴图/标签/球面化/法线强度）
       const float leaf_top = scene_top - 12.0f - (leaf_rows * 32.0f);
       auto scene_row = [&](int i) {
         return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
@@ -1063,8 +1043,9 @@ class VegetationV2App : public JPOV {
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
       if (has_leaf_) {
         ui_.Checkbox("叶卡贴图", &show_leaf_, leaf_row(2));
-        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(3), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(4), 0.0f, 3.0f, 2);
+        ui_.Checkbox("叶卡标签", &show_labels_, leaf_row(3));
+        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(4), 0.0f, 2.0f, 2);
+        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(5), 0.0f, 3.0f, 2);
       }
       // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
       // 所以这个下标是【颜色桶下标】，不是原始 type 编号。要按真实 type 过滤，
