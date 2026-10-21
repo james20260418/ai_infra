@@ -201,8 +201,16 @@ def len3(a):
 # 叶卡：每 4 个顶点一张卡（Sapling 不焊接）
 # ---------------------------------------------------------------------------
 cards = []
+handedness = {"total": 0, "mirrored": 0, "no_uv": 0}
 if leaves_obj is not None:
     mesh = leaves_obj.data
+    # 叶片的 UV 层：Blender 侧已经按贴图把每个 loop 的 uv 存好了。
+    # 我们**以前只读顶点位置**，所以"哪一边是 uv=0"是丢掉的 —— 手性其实一直拿得到。
+    uv_by_vert = {}
+    if mesh.uv_layers.active is not None:
+        uvs = mesh.uv_layers.active.data
+        for loop in mesh.loops:
+            uv_by_vert[loop.vertex_index] = (uvs[loop.index].uv[0], uvs[loop.index].uv[1])
     vcount = len(mesh.vertices)
     if vcount % 4 != 0:
         raise SystemExit(f"leaves mesh 顶点数 {vcount} 不是 4 的倍数，无法按卡切分")
@@ -222,6 +230,8 @@ if leaves_obj is not None:
         nearest_pt = flat_np[nearest]
         which = 0 if len3(sub3(mid_a, nearest_pt)) < len3(sub3(mid_b, nearest_pt)) else 1
         root_mid, tip_mid = (mid_a, mid_b) if which == 0 else (mid_b, mid_a)
+        up = norm3(sub3(tip_mid, root_mid))
+        height = len3(sub3(tip_mid, root_mid))
         # Sapling 的叶卡是**居中**放在枝条上的（卡片中心在枝上），而格式里的
         # bottom_center 语义是「卡片底边中点 = anchor」。两者差半个 height：
         # 直接把 centre 当 anchor 写进去，整张卡会被抬高 h/2（实测 12.5cm）。
@@ -229,15 +239,28 @@ if leaves_obj is not None:
         anchor_pt = (centre[0] - up[0] * height * 0.5,
                      centre[1] - up[1] * height * 0.5,
                      centre[2] - up[2] * height * 0.5)
-
-        up = norm3(sub3(tip_mid, root_mid))
-        height = len3(sub3(tip_mid, root_mid))
         width_vec = sub3(corners[1], corners[0]) if which == 0 else sub3(corners[3], corners[2])
         normal = norm3(cross3(width_vec, up))
         branch_id = int(flat_branch[nearest])
         s_param = float(flat_local[nearest]) / max(1, int(flat_poly_len[branch_id]) - 1)
         if height <= 1e-6:
             continue
+
+        # ---- 手性：贴图 u 轴在世界里指向哪一侧 ----
+        # 引擎侧 right = cross(up, normal)。若贴图的 +u 与 right 同向 ⇒ 未镜像；
+        # 反向 ⇒ 这张卡是镜像摆放的（叶子左右交替时就会这样）。
+        mirrored = None
+        quv = [uv_by_vert.get(c * 4 + k) for k in range(4)]
+        if all(q is not None for q in quv):
+            i_min = min(range(4), key=lambda k: quv[k][0])
+            i_max = max(range(4), key=lambda k: quv[k][0])
+            u_dir = sub3(corners[i_max], corners[i_min])
+            right = cross3(up, normal)
+            mirrored = dot3(norm3(u_dir), right) < 0.0
+            handedness["total"] += 1
+            handedness["mirrored"] += 1 if mirrored else 0
+        else:
+            handedness["no_uv"] += 1
 
         cards.append((anchor_pt, up, normal, height, branch_id, s_param))
 
@@ -294,6 +317,11 @@ for pi in order:
         lines.append("    tilt: 0")
         lines.append("  }")
     lines.append("}")
+
+print("[export] 叶卡手性：%d 张有 UV，其中镜像 %d 张（%.1f%%），缺 UV %d 张"
+      % (handedness["total"], handedness["mirrored"],
+         100.0 * handedness["mirrored"] / max(1, handedness["total"]),
+         handedness["no_uv"]))
 
 lines.append("leaf_types {")
 lines.append("  type: 0")
