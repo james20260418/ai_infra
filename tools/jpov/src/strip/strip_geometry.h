@@ -30,6 +30,18 @@ inline constexpr int kStripQuads = kStripSampleCount - 1;
 inline constexpr int kStripVerticesPerStrip = 2 * kStripSampleCount;
 inline constexpr int kStripIndicesPerStrip = kStripQuads * 6;
 
+// 每列的 u（沿长度方向）是**常量表**：编译期算好，别在每帧每列做一次除法。
+// （values: 0/15, 1/15, ..., 15/15）
+struct StripColumnU {
+    float v[kStripSampleCount];
+    constexpr StripColumnU() : v{} {
+        for (int i = 0; i < kStripSampleCount; ++i) {
+            v[i] = static_cast<float>(i) / static_cast<float>(kStripQuads);
+        }
+    }
+};
+inline constexpr StripColumnU kStripColumnU{};
+
 // 一个展开后的条带顶点：位置（世界空间）+ 纹理 uv + 纵向 alpha 乘子。
 //
 // **UV 约定（Danis 2026-10-21 定，与素材一致）**：
@@ -130,6 +142,10 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
 // Pre-condition: 调用方已跑过 ValidateStripBatch（本函数不做重复校验）。
 inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* out) {
     CHECK(out != nullptr) << "ExpandStripVertices: out 不能为空";
+    // point_count == 0 会让下面的 point_count - 1 下溢成 4G，属于内存安全边界，
+    // 这里再兜一次（批量路径已由 ValidateStripBatch 保证，本函数是公开入口）。
+    CHECK_GE(strip.point_count, 2u) << "ExpandStripVertices: point_count 至少 2";
+    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
 
     const uint32_t last = strip.point_count - 1;
     for (int col = 0; col < kStripSampleCount; ++col) {
@@ -137,7 +153,7 @@ inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* 
                                  ? static_cast<uint32_t>(col)
                                  : last;
         // u = 沿长度（图片从左到右），v = 横跨宽度（0 = right / 1 = left）。
-        const float u = static_cast<float>(col) / static_cast<float>(kStripQuads);
+        const float u = kStripColumnU.v[col];
         // 先 right（v=0）后 left（v=1）——与索引模式严格对应。
         out->push_back(StripVertex{strip.right[src], u, 0.0f, strip.alpha[src]});
         out->push_back(StripVertex{strip.left[src], u, 1.0f, strip.alpha[src]});

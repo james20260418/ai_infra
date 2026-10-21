@@ -480,3 +480,52 @@ Composite 先 over 覆盖集、再 `(ONE,ONE)` 求和加法集。
 - 场景里特意放了一块「穿过波带的方块」，否则软深度是**空测**（条带不与任何几何相交时
   A/B 完全一致 —— 第一版就是这样，差异 0 px，靠断言才发现的）。
 - 实测：hard vs soft 差异 571 px（集中在穿模处）。
+
+## 17. 性能：每帧成本与「已前置」的运算（P8 review，2026-10-21）
+
+### 17.1 每帧成本结构（按量级）
+
+| 环节 | 复杂度 | 说明 |
+|---|---|---|
+| 校验 `ValidateStripBatch` | O(点数) | 逐点有限性 + α 范围；约 48 次比较/条带 |
+| 展开 `ExpandStripVertices` | O(点数) | 32 顶点 × 24 B = 768 B/条带 写入 |
+| 上传 | O(顶点) | 每个 draw 块一次 `glBufferData`（orphan） |
+| 绘制 | 一次 `glDrawElements` / 块 | ≤ `kMaxStripsPerDraw`(1024) 条带 |
+| 填充 | O(覆盖像素) | **通常是真正的瓶颈**：1× 分辨率 + 加法集重叠 |
+
+1000 条带 × 16 点：约 768 KB 顶点数据/帧、32k 顶点、1 次 draw call。
+
+### 17.2 已经前置的运算
+
+- **索引模式**：`Init` 里按 1024 个固定块（每块 90 索引）一次性建静态 IBO，
+  运行时零索引计算；
+- **每列 UV 的 u**：`kStripColumnU` 编译期常量表（不再每帧每列做除法）；
+- **uniform 位置**：`Init` 时查一次缓存进 `DrawUniforms` / `CompositeUniforms`。
+  之前每批调 12 次 `ShaderManager::GetUniform`，而它对每次调用都**线性扫一遍
+  programs_ 再算一次 std::string 哈希**（`shader_manager.cc:148`）——
+  1000 批就是 12000 次字符串哈希/帧，纯浪费；
+- **顶点缓冲容量**：`vertices_.reserve(kMaxStripsPerDraw × 32)`，
+  避免首帧/扩容时的 vector 重分配（VBO 本身仍每帧重传）。
+- **WBO 附件按需申请**：没有 `kEmissive` 批时根本不建 att2（省一张 1× RGBA16F 的 clear）。
+
+### 17.3 有意**没有**做的优化（及原因）
+
+1. **不用 instancing / 数据纹理**：见 §16.1 —— 在「16 点固定 + 无法线」的前提下，
+   CPU 展开 16 点几乎免费，省下的只有 draw call，而 draw call 已经被「整批一次」解决。
+2. **不用 `glBufferSubData` 复用同一块 VBO**：需要预分配 + 复用；GPU 读上一帧内容时
+   会产生同步等待。`glBufferData` 会 orphan 旧存储，天然规避（代价是每帧一次分配）。
+3. **不给 FS 加纹理/纯色的 program 变体**：`uHasTex` 是**整批一致**的 uniform 分支，
+   没有 divergence；拆变体只省一条分支，换来program 数量翻倍 ⇒ 不划算。
+4. **不做宽度剖面的 LUT 纹理**：9 knot 的动态下标在桌面 GL 上就是常量缓冲寻址，
+   实测没有可观开销；换成纹理反而多一次采样。
+5. **`discard` 保留**：WBO 目标没有深度附件，`discard` 不承担 early-Z 语义，
+   只用来跳过「α≈0」片元的后续计算（写恒等值等价，但 `discard` 更省填充）。
+
+### 17.4 若将来要再提速，优先级
+
+1. **降低 overdraw**（真瓶颈）：按屏幕 tile 剔除、或对加法集做 1/2 分辨率降采样；
+2. **CPU 展开 → 期望式批量写**：把 32 顶点写入改成直接写映射内存（`glMapBufferRange`），
+   省掉 vector→GL 的一次拷贝；
+3. **多材质合批**：同尺寸纹理做 2D array + per-batch layer，把「一材质一 draw」
+   收敛成「一次 draw」。
+

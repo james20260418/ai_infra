@@ -46,15 +46,24 @@ inline constexpr int kStripSampleCount = 16;
 // 只有前 point_count 个点参与绘制；其余列**塌缩到最后一个有效点**（零面积四边形，
 // 不产生片元），因此不足 16 点时不需要调用方补齐。
 struct Strip16 {
-    std::array<Vec3f, kStripSampleCount> left;    // 左轨（纹理 u = 1）
-    std::array<Vec3f, kStripSampleCount> right;   // 右轨（纹理 u = 0）
-    std::array<float, kStripSampleCount> alpha;   // 纵向 alpha 乘子，[0, 1]
+    // 两条轨：right = 中心线 − side·半宽、left = 中心线 + side·半宽
+    // （side = normalize(cross(切向, up))；由调用方决定，本层只管画）。
+    std::array<Vec3f, kStripSampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStripSampleCount> right;   // 右轨（纹理 v = 0）
+    // 纵向（沿长度）alpha **乘子**，不是覆盖率 —— 最终 α 还要 × 纹理 α × 批次 tint.a
+    // × 宽度剖面。拖尾淡出就写这里（头 1 → 尾 0）。范围 [0,1]。
+    std::array<float, kStripSampleCount> alpha;
 
     // 实际有效点数，必须显式给 [2, kStripSampleCount]。
     // 不设默认值：默认 0 会让「忘了填」直接 crash（而不是悄悄画出一条空条带）。
     uint32_t point_count = 0;
 };
 
+// 固定字节数：用户会按序列 memcpy / 一次性上传，尺寸变化必须是显式决策。
+static_assert(sizeof(Strip16) == 2 * kStripSampleCount * sizeof(Vec3f) +
+                                    kStripSampleCount * sizeof(float) +
+                                    sizeof(uint32_t),
+              "Strip16 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
 static_assert(std::is_trivially_copyable_v<Strip16>,
               "Strip16 必须可整块 memcpy（用户会按序列批量处理）");
 static_assert(std::is_standard_layout_v<Strip16>,
@@ -107,11 +116,17 @@ struct TranslucentStripBatch {
 // 等价于 texture_id == 0 + tint == color，这里显式命名——调用方不用猜
 // 「texture_id 给 0 到底是不画还是纯色」。
 // 注意：仍受 width_profile 与逐点 alpha 调制（即纯色也支持柔边与纵向淡出）。
-inline TranslucentStripBatch MakeSolidStripBatch(const Color& color,
-                                                 std::vector<Strip16> strips) {
+// blend / soft_depth_m 一并给，避免「建好纯色批之后忘了设 blend」这种顺序陷阱
+// （纯色批默认仍是覆盖集 + 硬判据）。
+inline TranslucentStripBatch MakeSolidStripBatch(
+    const Color& color, std::vector<Strip16> strips,
+    StripBlend blend = StripBlend::kCoverage,
+    std::optional<float> soft_depth_m = std::nullopt) {
     TranslucentStripBatch batch;
-    batch.texture_id = 0;
+    batch.texture_id = 0;          // 不采样纹理 ⇒ 纯色
     batch.tint = color;
+    batch.blend = blend;
+    batch.soft_depth_m = soft_depth_m;
     batch.strips = std::move(strips);
     return batch;
 }

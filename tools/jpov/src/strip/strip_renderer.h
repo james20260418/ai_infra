@@ -174,9 +174,39 @@ private:
     // 1× 覆盖集（可选加法集）、无深度附件（NEAREST：1× 上插值没有意义）。
     void EnsureTarget(int w, int h, bool with_additive);
 
+    // uniform 位置**只查一次**（Init 里），Draw 里直接用整数。
+    // 为什么不每帧调 ShaderManager::GetUniform：它对每次调用都要线性扫一遍
+    // programs_ 再做一次 std::string 哈希（见 shader_manager.cc:148）；
+    // 本 pass 每批 12 个 uniform，1000 批 = 12000 次字符串哈希/帧，纯浪费。
+    //
+    // ⚠️ 前提：program 创建后不会重建（ShaderManager 按 name 缓存，无重编译路径）。
+    //    若将来加 shader 热重载，必须在这里失效并重查，否则会写到旧 program 上。
+    struct DrawUniforms {
+        int view_proj = -1;
+        int tint = -1;
+        int has_tex = -1;
+        int tex = -1;
+        int profile = -1;
+        int scene_depth = -1;
+        int viewport = -1;
+        int near_plane = -1;
+        int far_plane = -1;
+        int blend_path = -1;
+        int soft_enabled = -1;
+        int soft_m = -1;
+    };
+    struct CompositeUniforms {
+        int accum = -1;
+        int reveal = -1;
+        int add = -1;
+        int additive = -1;
+    };
+
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
+    DrawUniforms draw_uniforms_;
+    CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点
     unsigned int ibo_ = 0;   // 静态索引：kMaxStripsPerDraw 个固定块

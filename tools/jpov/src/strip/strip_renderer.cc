@@ -76,6 +76,29 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    // 顶点缓冲按「一个块」预留容量：避免首帧/扩容时的 vector 重分配。
+    // （VBO 本身仍是每帧 glBufferData 重传 —— 见 Draw 里的注释。）
+    vertices_.reserve(static_cast<size_t>(kMaxStripsPerDraw) * kStripVerticesPerStrip);
+
+    // uniform 位置只查一次（见头文件里的 DrawUniforms 注释）。
+    draw_uniforms_.view_proj = shader_mgr_->GetUniform(prog_draw_, "uViewProj");
+    draw_uniforms_.tint = shader_mgr_->GetUniform(prog_draw_, "uTint");
+    draw_uniforms_.has_tex = shader_mgr_->GetUniform(prog_draw_, "uHasTex");
+    draw_uniforms_.tex = shader_mgr_->GetUniform(prog_draw_, "uTex");
+    draw_uniforms_.profile = shader_mgr_->GetUniform(prog_draw_, "uProfile");
+    draw_uniforms_.scene_depth = shader_mgr_->GetUniform(prog_draw_, "uSceneDepth");
+    draw_uniforms_.viewport = shader_mgr_->GetUniform(prog_draw_, "uViewport");
+    draw_uniforms_.near_plane = shader_mgr_->GetUniform(prog_draw_, "uNear");
+    draw_uniforms_.far_plane = shader_mgr_->GetUniform(prog_draw_, "uFar");
+    draw_uniforms_.blend_path = shader_mgr_->GetUniform(prog_draw_, "uBlendPath");
+    draw_uniforms_.soft_enabled =
+        shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled");
+    draw_uniforms_.soft_m = shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM");
+    comp_uniforms_.accum = shader_mgr_->GetUniform(prog_comp_, "uAccum");
+    comp_uniforms_.reveal = shader_mgr_->GetUniform(prog_comp_, "uReveal");
+    comp_uniforms_.add = shader_mgr_->GetUniform(prog_comp_, "uAdd");
+    comp_uniforms_.additive = shader_mgr_->GetUniform(prog_comp_, "uAdditive");
+
     initialized_ = true;
 }
 
@@ -150,39 +173,35 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
     glDisable(GL_CULL_FACE);   // 条带单层双面可见（关剔除；不是两层几何）
 
     glUseProgram(prog_draw_);
-    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_draw_, "uViewProj"), 1, GL_FALSE,
-                       view_proj);
-    glUniform4f(shader_mgr_->GetUniform(prog_draw_, "uTint"),
-                batch.tint.r, batch.tint.g, batch.tint.b, batch.tint.a);
-    glUniform1fv(shader_mgr_->GetUniform(prog_draw_, "uProfile"), 9,
-                 batch.width_profile.data());
-    glUniform2f(shader_mgr_->GetUniform(prog_draw_, "uViewport"),
-                static_cast<float>(full_w), static_cast<float>(full_h));
-    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
-    glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFar"), camera.far);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uBlendPath"),
-                want_additive ? 1 : 0);
+    glUniformMatrix4fv(draw_uniforms_.view_proj, 1, GL_FALSE, view_proj);
+    glUniform4f(draw_uniforms_.tint, batch.tint.r, batch.tint.g, batch.tint.b,
+                batch.tint.a);
+    glUniform1fv(draw_uniforms_.profile, 9, batch.width_profile.data());
+    glUniform2f(draw_uniforms_.viewport, static_cast<float>(full_w),
+                static_cast<float>(full_h));
+    glUniform1f(draw_uniforms_.near_plane, camera.near);
+    glUniform1f(draw_uniforms_.far_plane, camera.far);
+    glUniform1i(draw_uniforms_.blend_path, want_additive ? 1 : 0);
     if (batch.soft_depth_m.has_value()) {
-        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 1);
-        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"),
-                    *batch.soft_depth_m);
+        glUniform1i(draw_uniforms_.soft_enabled, 1);
+        glUniform1f(draw_uniforms_.soft_m, *batch.soft_depth_m);
     } else {
-        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 0);
+        glUniform1i(draw_uniforms_.soft_enabled, 0);
         // 关闭时也给一个合法值：避免读未初始化 uniform（FS 里该分支不取它）。
-        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"), 1.0f);
+        glUniform1f(draw_uniforms_.soft_m, 1.0f);
     }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
-    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSceneDepth"), kSceneDepthUnit);
+    glUniform1i(draw_uniforms_.scene_depth, kSceneDepthUnit);
 
     if (gl_tex != 0) {
         glActiveTexture(GL_TEXTURE0 + kStripTexUnit);
         glBindTexture(GL_TEXTURE_2D, gl_tex);
-        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uTex"), kStripTexUnit);
-        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uHasTex"), 1);
+        glUniform1i(draw_uniforms_.tex, kStripTexUnit);
+        glUniform1i(draw_uniforms_.has_tex, 1);
     } else {
-        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uHasTex"), 0);
+        glUniform1i(draw_uniforms_.has_tex, 0);
     }
 
     // 一次 draw call 画完整批；超过 kMaxStripsPerDraw 才分块（不截断）。
@@ -202,9 +221,13 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
         for (size_t k = begin; k < begin + count; ++k) {
             ExpandStripVertices(batch.strips[k], &vertices_);
         }
+        // GL_STREAM_DRAW：每帧重写一次（语义比 DYNAMIC 更准，驱动可据此选择
+        // 更适合流式写入的存放方式）。不用 glBufferSubData：那需要预先分配 +
+        // 复用同一块存储，GPU 仍在读上一帧内容时会产生同步等待（stall）；
+        // glBufferData 会 orphan 旧存储，天然避免这个坑。
         glBufferData(GL_ARRAY_BUFFER,
                      static_cast<GLsizeiptr>(vertices_.size() * sizeof(StripVertex)),
-                     vertices_.data(), GL_DYNAMIC_DRAW);
+                     vertices_.data(), GL_STREAM_DRAW);
         // 每块都从索引缓冲的 0 号块开始（顶点数据也从头上传），所以无需 base vertex。
         glDrawElements(GL_TRIANGLES,
                        static_cast<GLsizei>(count) * kStripIndicesPerStrip,
@@ -243,11 +266,11 @@ void StripRenderer::Composite(int full_w, int full_h) {
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glActiveTexture(GL_TEXTURE0 + 0);
         glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
+        glUniform1i(comp_uniforms_.accum, 0);
         glActiveTexture(GL_TEXTURE0 + 1);
         glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
+        glUniform1i(comp_uniforms_.reveal, 1);
+        glUniform1i(comp_uniforms_.additive, 0);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
     // ② 加法集：直接求和到目标之上（发光介质不被覆盖集衰减 —— 单层 OIT 的固有近似）。
@@ -255,8 +278,8 @@ void StripRenderer::Composite(int full_w, int full_h) {
         glBlendFunc(GL_ONE, GL_ONE);
         glActiveTexture(GL_TEXTURE0 + 0);
         glBindTexture(GL_TEXTURE_2D, wbo_.additive_tex());
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 0);
-        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 1);
+        glUniform1i(comp_uniforms_.add, 0);
+        glUniform1i(comp_uniforms_.additive, 1);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 
