@@ -16,6 +16,11 @@
 #define GLOG_NO_ABBREVIATED_SEVERITIES
 #endif
 #include "third_party/gl_loader-mingw/gl_loader.h"
+// windef.h 把 near / far 定义成**空宏**（16 位分段时代的遗留），会让
+// `camera.near` / `camera.far` 直接展开成 `camera.` → 「expected unqualified-id」。
+// 同 particle_renderer.cc 的处理：在这里撤掉。
+#undef near
+#undef far
 #endif
 
 #include <glog/logging.h>
