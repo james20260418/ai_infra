@@ -1786,7 +1786,15 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    与体积火不共 FBO：火权重恒 1、条带用 WeightWbo，混一个 accum 会被权重尺度偏置。
             if (!cmds.translucent_strips.empty()) {
                 CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
-                strip_renderer_.Begin(fbo_3d_w, fbo_3d_h);
+                // 加法集附件按需申请：本帧有 kEmissive 批才建 att2。
+                bool strips_need_additive = false;
+                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
+                    if (sc.blend == StripBlend::kEmissive) {
+                        strips_need_additive = true;
+                        break;
+                    }
+                }
+                strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
                 for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
                     strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
                                          hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);

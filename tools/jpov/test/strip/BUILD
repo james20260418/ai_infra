@@ -40,6 +40,7 @@ cc_test(
     srcs = ["strip_gold.cc"],
     data = [
         ":strip_demo_1280x720.png",
+        ":strip_additive_soft_1280x720.png",
         "//tools/jpov:strip_gold_assets",
     ],
     deps = [

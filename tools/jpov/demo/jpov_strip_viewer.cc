@@ -94,6 +94,12 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.soft_edges_ = false;
     shoot("30_hard_edges");
     app.soft_edges_ = true;
+    app.arc_additive_ = true;
+    shoot("40_arc_additive");
+    app.arc_additive_ = false;
+    app.soft_depth_ = true;
+    shoot("50_soft_depth");
+    app.soft_depth_ = false;
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     shoot("99_panel");

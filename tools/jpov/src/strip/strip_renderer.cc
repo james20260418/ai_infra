@@ -97,18 +97,21 @@ void StripRenderer::Finalize() {
     has_content_ = false;
 }
 
-void StripRenderer::EnsureTarget(int w, int h) {
-    wbo_.Ensure({w, h, /*with_additive=*/false, /*with_depth=*/false,
+void StripRenderer::EnsureTarget(int w, int h, bool with_additive) {
+    wbo_.Ensure({w, h, /*with_additive=*/with_additive, /*with_depth=*/false,
                  /*linear_filter=*/false});
+    target_with_additive_ = with_additive;
 }
 
-void StripRenderer::Begin(int full_w, int full_h) {
+void StripRenderer::Begin(int full_w, int full_h, bool with_additive) {
     CHECK(initialized_) << "StripRenderer::Begin: 未 Init";
     CHECK_GT(full_w, 0);
     CHECK_GT(full_h, 0);
-    EnsureTarget(full_w, full_h);
+    EnsureTarget(full_w, full_h, with_additive);
     wbo_.Clear();
     has_content_ = false;
+    has_alpha_ = false;
+    has_additive_ = false;
 }
 
 void StripRenderer::Draw(const TranslucentStripBatch& batch,
@@ -126,6 +129,13 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
     // 尺寸不一致时会重建目标并把本帧已累积的内容清掉（静默丢内容）。
     CHECK_EQ(wbo_.width(), full_w) << "StripRenderer::Draw: 与 Begin 的宽度不一致";
     CHECK_EQ(wbo_.height(), full_h) << "StripRenderer::Draw: 与 Begin 的高度不一致";
+
+    // 加法批必须有加法集附件（否则 att2 被 GL_NONE 丢弃 → 光静默消失）；
+    // 反过来不成立：目标带加法集时，覆盖批照常写 att0/1、把 att2 写恒等值。
+    const bool want_additive = (batch.blend == StripBlend::kEmissive);
+    CHECK(!want_additive || target_with_additive_)
+        << "StripRenderer::Draw: 本批是 kEmissive，但 Begin(with_additive=false) "
+           "没申请加法集附件（光会被静默丢弃）";
 
     unsigned int gl_tex = 0;
     if (batch.texture_id != 0) {
@@ -150,6 +160,17 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
                 static_cast<float>(full_w), static_cast<float>(full_h));
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uNear"), camera.near);
     glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uFar"), camera.far);
+    glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uBlendPath"),
+                want_additive ? 1 : 0);
+    if (batch.soft_depth_m.has_value()) {
+        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 1);
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"),
+                    *batch.soft_depth_m);
+    } else {
+        glUniform1i(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled"), 0);
+        // 关闭时也给一个合法值：避免读未初始化 uniform（FS 里该分支不取它）。
+        glUniform1f(shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM"), 1.0f);
+    }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
@@ -196,6 +217,11 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
     glPopAttrib();
 
     has_content_ = true;
+    if (want_additive) {
+        has_additive_ = true;
+    } else {
+        has_alpha_ = true;
+    }
 }
 
 void StripRenderer::Composite(int full_w, int full_h) {
@@ -212,24 +238,34 @@ void StripRenderer::Composite(int full_w, int full_h) {
     glUseProgram(prog_comp_);
     glBindVertexArray(vao_);
 
-    // 覆盖集：C = accum.rgb/accum.a、cov = 1−reveal，预乘 over 进目标。
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glActiveTexture(GL_TEXTURE0 + 0);
-    glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
-    glActiveTexture(GL_TEXTURE0 + 1);
-    glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
-    glActiveTexture(GL_TEXTURE0 + 2);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 2);
-    glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // ① 覆盖集：C = accum.rgb/accum.a、cov = 1−reveal，预乘 over 进目标。
+    if (has_alpha_) {
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glActiveTexture(GL_TEXTURE0 + 0);
+        glBindTexture(GL_TEXTURE_2D, wbo_.accum_tex());
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAccum"), 0);
+        glActiveTexture(GL_TEXTURE0 + 1);
+        glBindTexture(GL_TEXTURE_2D, wbo_.reveal_tex());
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uReveal"), 1);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 0);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    // ② 加法集：直接求和到目标之上（发光介质不被覆盖集衰减 —— 单层 OIT 的固有近似）。
+    if (has_additive_) {
+        glBlendFunc(GL_ONE, GL_ONE);
+        glActiveTexture(GL_TEXTURE0 + 0);
+        glBindTexture(GL_TEXTURE_2D, wbo_.additive_tex());
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdd"), 0);
+        glUniform1i(shader_mgr_->GetUniform(prog_comp_, "uAdditive"), 1);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
 
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
     glPopAttrib();          // 还原 enable / blend（含 equation）
     has_content_ = false;   // 本帧消费掉
+    has_alpha_ = false;
+    has_additive_ = false;
 }
 
 }  // namespace jpov

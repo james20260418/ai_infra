@@ -175,6 +175,28 @@ TEST(StripGeometry, RejectsOutOfRangeTint) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "tint");
 }
 
+TEST(StripGeometry, RejectsNonPositiveSoftDepth) {
+    // nullopt = 关闭；给了值就必须 > 0（0 会让淡出表达式除零）。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.soft_depth_m = 0.0f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "soft_depth_m");
+}
+
+TEST(StripGeometry, RejectsIllegalBlendEnum) {
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.blend = static_cast<jpov::StripBlend>(7);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "blend");
+}
+
+TEST(StripGeometry, AcceptsSoftDepthAndEmissive) {
+    // 合法组合必须不崩（执行到这里没 abort 就是通过）。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.blend = jpov::StripBlend::kEmissive;
+    batch.soft_depth_m = 0.15f;
+    jpov::ValidateStripBatch(batch);
+    SUCCEED();
+}
+
 TEST(StripGeometry, RejectsEmptyBatch) {
     jpov::TranslucentStripBatch batch;
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "不能为空");

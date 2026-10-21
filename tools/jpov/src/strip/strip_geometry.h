@@ -69,7 +69,8 @@ inline bool IsFinite(const Vec3f& v) {
 //   * 前 point_count 个点的 left/right 坐标有限（NaN/Inf 一旦进 HDR 会污染整帧后处理）；
 //   * 前 point_count 个 alpha ∈ [0,1]，且至少有一个 > 0（防止 memset(0) 的整条隐形）；
 //   * width_profile 9 个 knot ∈ [0,1]，且至少有一个 > 0；
-//   * tint 的 rgba ∈ [0,1]。
+//   * tint 的 rgba ∈ [0,1]；
+//   * blend 是合法枚举值；soft_depth_m 若启用必须 > 0。
 //
 // Pre-condition: 无（本函数就是拿来校验调用方输入的）。
 inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
@@ -89,6 +90,14 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
         profile_max = std::max(profile_max, knot);
     }
     CHECK_GT(profile_max, 0.0f) << "StripBatch: width_profile 全为 0（整批将不可见）";
+
+    // 枚举防御：别让非法 cast 值落到「两个集合都不写」的静默路径。
+    CHECK(batch.blend == StripBlend::kCoverage || batch.blend == StripBlend::kEmissive)
+        << "StripBatch: blend 非法值 " << static_cast<int>(batch.blend);
+    if (batch.soft_depth_m.has_value()) {
+        CHECK_GT(*batch.soft_depth_m, 0.0f)
+            << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
+    }
 
     for (size_t i = 0; i < batch.strips.size(); ++i) {
         const Strip16& s = batch.strips[i];

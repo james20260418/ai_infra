@@ -289,7 +289,9 @@ struct Strip16 {
 struct TranslucentStripBatch {
     uint32_t texture_id = 0;               // 0 = 纯色
     Color tint{1, 1, 1, 1};                // rgb 与纹理相乘；a 全局不透明度
-    std::array<float, 9> width_profile = {1,1,1,1,1,1,1,1,1};   // u = k/8 处乘子
+    StripBlend blend = StripBlend::kCoverage;   // 覆盖集（吸收）/ 加法集（发光）
+    std::optional<float> soft_depth_m;     // nullopt = 硬判据；有值必须 > 0（米）
+    std::array<float, 9> width_profile = {1,1,1,1,1,1,1,1,1};   // v = k/8 处乘子
     std::vector<Strip16> strips;
 };
 
@@ -314,7 +316,8 @@ cmds.DrawTranslucentStrips(std::move(batch));
 - `tint` 各分量 ∈ `[0,1]`。
 
 **不加 `picking_id`**：本版不参与拾取（同玻璃现状），先不暴露「设了但不生效」的字段。
-M2+ 的字段（`blend` / `additive_gain` / `soft_depth_m` / `fresnel_*`）**等对应里程碑落地时再加**。
+`blend` 与 `soft_depth_m` 已随 M2/M3 落地（见 §16.6/§16.7）；
+`fresnel_*`（M4）**等落地时再加**，不预留空字段。
 
 ## 9. 四个用途的适配
 
@@ -393,8 +396,8 @@ M2+ 的字段（`blend` / `additive_gain` / `soft_depth_m` / `fresnel_*`）**等
 |---|---|---|
 | M0 | WBO 准备：`WboTarget` + 共享权重/解析 + 删死 depth + 契约测试 | ✅ 已进 main（#209） |
 | M1 | 命令 + 几何 + 剖面 + 覆盖集 + Composite + gold + viewer | ✅ 2026-10-21（§16） |
-| M2 | 加法集（`kEmissive`）+ `additive_gain` + gold（拖尾） | ⬜ |
-| M3 | 软深度 + A/B 断言 | ⬜ |
+| M2 | 加法集 `kEmissive` + gold（拖尾） | ✅ 2026-10-21（`additive_gain` 未做：亮度直接由 tint/纹理控制） |
+| M3 | 软深度（per batch `soft_depth_m`）+ A/B 断言 | ✅ 2026-10-21 |
 | M4 | fresnel（导数法线） | ⬜ |
 | M5 | viewer 扩到四用途同屏 | ⬜（M1 已带 3 形状 viewer） |
 
@@ -456,3 +459,24 @@ mip 会把**纵向**相邻色带平均成灰色（实测：红/黄/青全被冲�
 弧形开角/朝向、纹理 vs 纯色、柔边/hard、形状动画、自动绕行、SMAA、三条带各自显隐、A/B 显示条带。
 `--capture <dir>` 输出 5 张固定视角对照图（默认 / 无条带 / 纯色 / 硬边 / 面板）。
 
+### 16.6 加法集（M2）
+
+`StripBlend::kEmissive`：FS 只写加法集 `att2 = 色·α·fade`，覆盖集写恒等值；
+Composite 先 over 覆盖集、再 `(ONE,ONE)` 求和加法集。
+
+- **附件按需申请**：`Begin(w, h, with_additive)` 由 Renderer 扫一遍本帧有没有
+  `kEmissive` 批决定；只有覆盖批时不建 att2（省一张 1× RGBA16F 的 clear）。
+- 覆盖批在「带加法集的目标」上照常画（att2 写 0 = 恒等），所以**两种批可以共存于同一帧**，
+  但因为是不同附件/不同 pass，必须拆成两个 batch（= 两次 draw call）。
+- 断言：加法相对覆盖**只允许变亮**（实测 darkened = 0，差异 5,939 px）——
+  出现变暗像素就说明实现退化成覆盖集或写错了附件。
+
+### 16.7 软深度（M3）
+
+逐 batch 的 `soft_depth_m`：`nullopt` → 硬判据（比场景深 2cm 即丢弃）；
+有值 → `fade = clamp((scene_z − z)/值, 0, 1)`，衰减**发生在写目标之前**，
+所以覆盖率解析仍然自洽。
+
+- 场景里特意放了一块「穿过波带的方块」，否则软深度是**空测**（条带不与任何几何相交时
+  A/B 完全一致 —— 第一版就是这样，差异 0 px，靠断言才发现的）。
+- 实测：hard vs soft 差异 571 px（集中在穿模处）。

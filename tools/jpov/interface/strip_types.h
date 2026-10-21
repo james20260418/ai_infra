@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -59,6 +60,17 @@ static_assert(std::is_trivially_copyable_v<Strip16>,
 static_assert(std::is_standard_layout_v<Strip16>,
               "Strip16 必须是 standard layout");
 
+// 混合集合（对应 WBO 的两套附件）。
+//
+//   kCoverage  —— 吸收介质（玻璃/膜/烟）：写覆盖集 accum/reveal，参与遮挡；
+//   kEmissive  —— 发光介质（拖尾/光环/剑气）：写加法集，**不被遮挡衰减**，
+//                 与背景直接相加（黑底纹理天然透明：贡献 = 色·α = 0）。
+// 同一批只能选一种（附件不同 = 不同 pass），要混用就发两个 batch。
+enum class StripBlend {
+    kCoverage,
+    kEmissive,
+};
+
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
@@ -71,6 +83,14 @@ struct TranslucentStripBatch {
     // 默认白色——写成字面量而不是 kColorWhite：本头是 GL-free 的类型层，
     // 单元测试不该为了一个常量去链接 pbr_material.cc。
     Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+
+    // 混合集合（见 StripBlend）。默认覆盖集 = 吸收介质。
+    StripBlend blend = StripBlend::kCoverage;
+
+    // 软深度过渡距离（视空间米）。nullopt = **关闭**（硬判据：比不透明场景远
+    // 超过 2cm 就丢弃）；有值时必须 > 0，按 `clamp((scene_z − z)/值, 0, 1)`
+    // 线性淡出，消除条带与几何相交处的硬切边。
+    std::optional<float> soft_depth_m;
 
     // 宽度方向的 alpha 剖面：knots[k] = 在 u = k/8 处的乘子（9 个 knot / 8 段）。
     // 默认全 1 = 不衰减（硬边）。要让边缘柔和/单侧渐隐就在 FS 里改这里。

@@ -245,6 +245,9 @@ public:
     bool auto_orbit_ = false;        // 自动绕行（不拖鼠标也能看各角度）
     bool smaa_ = false;              // SMAA 后处理（看边缘质量）
     bool show_strips_ = true;        // false = 不发条带命令（A/B 对照）
+    bool arc_additive_ = false;      // 弧形改用**加法集**（发光拖尾），其余仍走覆盖集
+    bool soft_depth_ = false;        // 条带与几何相交处的软过渡（per batch 选项）
+    float soft_depth_m_ = 0.15f;     // 软深度过渡距离（米）
     float phase_ = 0.0f;             // 当前相位（animate_ 时逐帧推进）
 
     // 装配场景静态资源（Init 之后、Run/RunOnce 之前调用一次）。
@@ -331,22 +334,13 @@ public:
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
         cmds->DrawObject3D(box_mesh_, box_mat_metal_, {2.0f, 0.5f, -2.6f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
+        // 第四块「穿过条带的方块」：波带从它的体积里穿过去，专门用来验收**软深度**
+        // （硬判据 = 相交处一条硬切边；软深度 = 一条按距离淡出的过渡带）。
+        cmds->DrawObject3D(box_mesh_, box_mat_low_gloss_, {0.35f, 0.62f, -0.55f},
+                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.5f);
 
         if (show_strips_) {
-            jpov::TranslucentStripBatch batch;
-            const uint32_t tex = use_texture_ ? ribbon_tex_ : 0;
-            const float opacity = use_texture_ ? opacity_ : 1.0f;
-            if (BuildDemoBatch(shape_, vis_, phase_, width_scale_, opacity, soft_edges_,
-                               tex, &batch)) {
-                if (!use_texture_) {
-                    // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
-                    jpov::Color color = solid_color_;
-                    color.a = opacity_;
-                    std::vector<jpov::Strip16> strips = std::move(batch.strips);
-                    batch = jpov::MakeSolidStripBatch(color, std::move(strips));
-                }
-                cmds->DrawTranslucentStrips(std::move(batch));
-            }
+            EmitStripBatches(cmds);
         }
 
         if (show_panel_) {
@@ -357,6 +351,56 @@ public:
     }
 
 private:
+    // 组装并提交本帧的条带批。
+    //
+    // 覆盖集与加法集是**不同的附件**（不同 pass），所以「弧形用加法」时会把弧
+    // 单独拆成第二个 batch —— 一个 batch 就是一次 draw call，语义边界在材质/混合。
+    void EmitStripBatches(jpov::RenderCommandList* cmds) {
+        const uint32_t tex = use_texture_ ? ribbon_tex_ : 0;
+
+        auto build = [this, tex](const RibbonVisibility& vis) {
+            jpov::TranslucentStripBatch batch;
+            const float opacity = use_texture_ ? opacity_ : 1.0f;
+            if (!BuildDemoBatch(shape_, vis, phase_, width_scale_, opacity, soft_edges_,
+                                tex, &batch)) {
+                return batch;   // strips 为空，调用方跳过
+            }
+            if (!use_texture_) {
+                // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
+                jpov::Color color = solid_color_;
+                color.a = opacity_;
+                std::vector<jpov::Strip16> strips = std::move(batch.strips);
+                batch = jpov::MakeSolidStripBatch(color, std::move(strips));
+            }
+            if (soft_depth_) {
+                batch.soft_depth_m = soft_depth_m_;
+            }
+            return batch;
+        };
+
+        RibbonVisibility coverage_vis = vis_;
+        if (arc_additive_) {
+            coverage_vis.arc = false;
+        }
+        jpov::TranslucentStripBatch coverage = build(coverage_vis);
+        if (!coverage.strips.empty()) {
+            coverage.blend = jpov::StripBlend::kCoverage;
+            cmds->DrawTranslucentStrips(std::move(coverage));
+        }
+
+        if (arc_additive_ && vis_.arc) {
+            RibbonVisibility only_arc;
+            only_arc.wave = false;
+            only_arc.helix = false;
+            only_arc.arc = true;
+            jpov::TranslucentStripBatch additive = build(only_arc);
+            if (!additive.strips.empty()) {
+                additive.blend = jpov::StripBlend::kEmissive;
+                cmds->DrawTranslucentStrips(std::move(additive));
+            }
+        }
+    }
+
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
                            void* userdata) {
         StripViewerApp* app = static_cast<StripViewerApp*>(userdata);
@@ -370,52 +414,68 @@ private:
         theme.font_alias = jpov_viewer::kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / jpov_viewer::kViewerFps);
 
-        const float kPanelW = 0.42f * w;
-        const float kRowH = 30.0f;
+        // 两列布局：控件多（20 个），单列会超出 720 高。
+        const float kColW = 0.30f * w;
+        const float kRowH = 28.0f;
         const float kSpacing = 8.0f;
-        const float left = 24.0f;
-        const float top = 24.0f;
-        int row = 0;
-        auto rect = [&](float extra_rows) {
-            return jpov::UiRect{
-                {left, top + static_cast<float>(row) * (kRowH + kSpacing)},
-                {kPanelW, kRowH + extra_rows * (kRowH + kSpacing)}};
+        const float kLeftX = 20.0f;
+        const float kRightX = kLeftX + kColW + 16.0f;
+        const float kTopY = 20.0f;
+        int row_left = 0;
+        int row_right = 0;
+        auto left_rect = [&]() {
+            const jpov::UiRect r{{kLeftX, kTopY + static_cast<float>(row_left) * (kRowH + kSpacing)},
+                                 {kColW, kRowH}};
+            row_left += 1;
+            return r;
         };
-        auto next = [&]() {
-            const jpov::UiRect r = rect(0.0f);
-            row += 1;
+        auto right_rect = [&]() {
+            const jpov::UiRect r{{kRightX, kTopY + static_cast<float>(row_right) * (kRowH + kSpacing)},
+                                 {kColW, kRowH}};
+            row_right += 1;
             return r;
         };
 
-        ui_.SliderFloat("太阳仰角 °", &(deg_.sun_elev_deg), next(), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("不透明度", &opacity_, next(), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("条带宽度", &width_scale_, next(), 0.2f, 2.5f, 2);
-        ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), next(), 0.0f, 1.2f, 2);
-        ui_.SliderFloat("螺旋转数", &(shape_.helix_turns), next(), 0.5f, 3.0f, 2);
-        ui_.SliderFloat("弧形开角", &(shape_.arc_angle), next(), 0.6f, 2.6f, 2);
-        ui_.SliderFloat("弧形朝向", &(shape_.arc_yaw), next(), -1.6f, 1.6f, 2);
-        ui_.Checkbox("使用纹理（关 = 纯色）", &use_texture_, next());
-        ui_.Checkbox("柔边剖面", &soft_edges_, next());
-        ui_.Checkbox("形状动画", &animate_, next());
-        ui_.Checkbox("自动绕行", &auto_orbit_, next());
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_, next());
-        ui_.Checkbox("显示条带（A/B）", &show_strips_, next());
-        ui_.Checkbox("显示波带", &(vis_.wave), next());
-        ui_.Checkbox("显示螺旋", &(vis_.helix), next());
-        ui_.Checkbox("显示弧形", &(vis_.arc), next());
-        const bool reset_clicked = ui_.Button("重置视角/形状", rect(0.0f));
-        row += 1;   // 布局推进与点击无关（否则点一下面板会跳）
+        // ── 左列：光 / 材质 / 后处理 ──
+        ui_.SliderFloat("太阳仰角 °", &(deg_.sun_elev_deg), left_rect(), 0.0f, 90.0f, 0);
+        ui_.SliderFloat("不透明度", &opacity_, left_rect(), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("条带宽度", &width_scale_, left_rect(), 0.2f, 2.5f, 2);
+        ui_.Checkbox("使用纹理（关 = 纯色）", &use_texture_, left_rect());
+        ui_.Checkbox("柔边剖面", &soft_edges_, left_rect());
+        ui_.Checkbox("SMAA 抗锯齿", &smaa_, left_rect());
+        ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
+        ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
+        ui_.Checkbox("软深度", &soft_depth_, left_rect());
+        ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
+
+        // ── 右列：形状 / 动画 / 显隐 ──
+        ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), right_rect(), 0.0f, 1.2f, 2);
+        ui_.SliderFloat("螺旋转数", &(shape_.helix_turns), right_rect(), 0.5f, 3.0f, 2);
+        ui_.SliderFloat("弧形开角", &(shape_.arc_angle), right_rect(), 0.6f, 2.6f, 2);
+        ui_.SliderFloat("弧形朝向", &(shape_.arc_yaw), right_rect(), -1.6f, 1.6f, 2);
+        ui_.Checkbox("形状动画", &animate_, right_rect());
+        ui_.Checkbox("自动绕行", &auto_orbit_, right_rect());
+        ui_.Checkbox("显示波带", &(vis_.wave), right_rect());
+        ui_.Checkbox("显示螺旋", &(vis_.helix), right_rect());
+        ui_.Checkbox("显示弧形", &(vis_.arc), right_rect());
+        const bool reset_clicked = ui_.Button("重置视角/形状", right_rect());
         if (reset_clicked) {
             ResetViewToDefaults();
             shape_ = RibbonShape{};
             vis_ = RibbonVisibility{};
+            arc_additive_ = false;
+            soft_depth_ = false;
+            soft_depth_m_ = 0.15f;
         }
 
         // 相机信息（右上角）：便于口头描述/复现某个角度。
-        char info[160];
-        std::snprintf(info, sizeof(info), "phi %.2f  theta %.2f  R %.2f",
-                      view_.phi, view_.theta, view_.R);
-        ui_.Text(info, jpov::UiRect{{w - 340.0f, 20.0f}, {300.0f, 24.0f}});
+        char info[192];
+        std::snprintf(info, sizeof(info),
+                      "phi %.2f   theta %.2f   R %.2f   |   blend: %s%s",
+                      view_.phi, view_.theta, view_.R,
+                      arc_additive_ ? "arc=add" : "all=coverage",
+                      soft_depth_ ? "  soft_depth=on" : "");
+        ui_.Text(info, jpov::UiRect{{w - 420.0f, 18.0f}, {400.0f, 24.0f}});
     }
 
     static constexpr float kFontSize = 16.0f;

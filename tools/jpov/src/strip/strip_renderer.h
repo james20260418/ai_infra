@@ -16,13 +16,16 @@
 //
 //   FS：
 //     α = tint.a · vertex_alpha · texture.a · width_profile(v)   （v 是宽度方向）
-//     → 与不透明场景深度手动作深度测试（WBO 目标无深度缓冲）。
-//       **M1 用硬判据**（z > scene_z + 2cm 即丢弃）；软深度是 M3。
-//     → 写覆盖集：att0 = vec4(色·α, α)·w、att1 = α（blend 见 wbo_target）
+//     → 与不透明场景深度手动作深度测试（WBO 目标无深度缓冲）：
+//         soft_depth_m = nullopt → 硬判据（比场景远 2cm 即丢弃）；
+//         有值 → clamp((scene_z − z)/值, 0, 1) 线性淡出（条带与几何相交处无硬切边）。
+//     → 两个集合（StripBlend，逐**批**）：
+//         kCoverage: att0 = vec4(色·α, α)·w、att1 = α（吸收介质，参与遮挡）
+//         kEmissive: att2 = 色·α（发光介质，与背景相加、不被遮挡衰减）
+//        不用的附件写恒等值（同粒子 FS 的写法）。
 //     剖面在**片元**里逐像素求值 ⇒ 4 段几何也能有平滑的宽度方向衰减。
 //
-//   本版（M1）只有覆盖集（吸收介质）。加法集（拖尾/光环）是 M2，
-//   软深度 M3，fresnel M4 —— 都**不预留空字段**（设了不生效比没有更糟）。
+//   fresnel（M4）尚未实现 —— 不预留空字段（设了不生效比没有更糟）。
 //
 // 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
 //   写进当前绑定的目标（HDR），随后由 horizon fog / froxel 继续。
@@ -73,8 +76,12 @@ uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;           // 本 pass 的像素尺寸（1× 时即 3D FBO 尺寸）
 uniform float uNear;
 uniform float uFar;
+uniform int uBlendPath;            // 0 = 覆盖集（吸收）；1 = 加法集（发光）
+uniform int uSoftDepthEnabled;     // 1 = 软深度淡出；0 = 硬判据（2cm）
+uniform float uSoftDepthM;         // 软深度过渡距离（米，仅 enabled 时有效）
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
 layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
+layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
 // 窗口深度 [0,1] → 视空间深度（正，米）。
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
@@ -105,13 +112,34 @@ void main() {
     // WBO 目标没有深度附件：与不透明场景深度手动作深度测试。
     float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
     float z = ZView(gl_FragCoord.z);
-    if (z > scene_z + 0.02) {
+    float fade = 1.0;
+    if (uSoftDepthEnabled == 1) {
+        // 软深度：0 < (scene_z − z) < 过渡距离 内线性淡出，相交处不再是硬切边。
+        // 衰减必须发生在写目标**之前**，否则覆盖率高估（1−Π(1−α) 与画面不一致）。
+        fade = clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
+    } else if (z > scene_z + 0.02) {
         discard;
     }
-    // 权重必须在 α 定稿之后算（否则 WBO 解析拿到的覆盖率与衰减不一致）。
-    float w = WeightWbo(z, a, color);
-    FragAccum = vec4(color * a, a) * w;
-    FragReveal = a;
+    if (uBlendPath == 1) {
+        // 加法集：发光介质直接与背景相加；黑底纹理 → 贡献 0 → 天然透明。
+        vec3 contrib = color * a * fade;
+        if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
+            discard;
+        }
+        FragAdd = vec4(contrib, 0.0);
+        FragAccum = vec4(0.0);
+        FragReveal = 0.0;
+    } else {
+        float aa = a * fade;
+        if (aa <= 1.0 / 255.0) {
+            discard;
+        }
+        // 权重必须在 α 定稿之后算（否则 WBO 解析拿到的覆盖率与衰减不一致）。
+        float w = WeightWbo(z, aa, color);
+        FragAccum = vec4(color * aa, aa) * w;
+        FragReveal = aa;
+        FragAdd = vec4(0.0);
+    }
 }
 )glsl";
 
@@ -120,8 +148,12 @@ void main() {
     void Finalize();
 
     // 帧首：确保 1× WBO 目标存在并清成恒等值，重置「本帧有没有内容」标志。
-    // Pre-condition: Init 已调用。
-    void Begin(int full_w, int full_h);
+    //
+    // with_additive：本帧是否有 kEmissive 批。附件**按需申请**（不要的附件不建），
+    // 所以这个值必须由调用方在 Begin 时就知道（它决定 FBO 的附件数量）。
+    // Pre-condition: Init 已调用；with_additive 必须覆盖本帧所有 Draw 的需求
+    //                （有 kEmissive 批就必须 true；只画覆盖批时 true 也无害）。
+    void Begin(int full_w, int full_h, bool with_additive);
 
     // 把一批条带累加画进本渲染器的 1× WBO 目标（不 clear）。
     // Pre-condition: Init 已调用；batch 满足 ValidateStripBatch；
@@ -139,8 +171,8 @@ void main() {
     bool has_content() const { return has_content_; }
 
 private:
-    // 1× 覆盖集、无加法集、无深度附件（NEAREST：1× 上插值没有意义）。
-    void EnsureTarget(int w, int h);
+    // 1× 覆盖集（可选加法集）、无深度附件（NEAREST：1× 上插值没有意义）。
+    void EnsureTarget(int w, int h, bool with_additive);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
@@ -151,6 +183,9 @@ private:
     WboTarget wbo_;
     bool initialized_ = false;
     bool has_content_ = false;
+    bool target_with_additive_ = false;   // 当前 WBO 目标是否带加法集附件
+    bool has_alpha_ = false;              // 本帧画过覆盖集
+    bool has_additive_ = false;           // 本帧画过加法集
     std::vector<StripVertex> vertices_;   // 复用缓冲，避免每帧分配
 };
 
