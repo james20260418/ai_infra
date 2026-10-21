@@ -30,3 +30,37 @@ cc_test(
     srcs = ["shape_test.cc"],
     deps = [":shape"],
 )
+
+# 扫管：Shape -> 网格 + UV。
+cc_library(
+    name = "sweep",
+    srcs = ["sweep.cc"],
+    hdrs = ["sweep.h"],
+    deps = [":shape"],
+)
+
+cc_test(
+    name = "sweep_test",
+    srcs = ["sweep_test.cc"],
+    deps = [":sweep"],
+)
+
+# 可视化工具：把 ShapeProto（pb.txt）渲染出来看形状。
+# 刻意不接材质——这一阶段要看的是拓扑/UV 尺度/分叉，贴图会干扰判断。
+cc_binary(
+    name = "jpov_vegetation_v2_viewer",
+    srcs = ["viewer/vegetation_v2_viewer.cc"],
+    deps = [
+        ":shape",
+        ":sweep",
+        "//tools/jpov:skylight_scene",
+        "//tools/jpov:view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:ui",
+        "@com_google_protobuf//:protobuf",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

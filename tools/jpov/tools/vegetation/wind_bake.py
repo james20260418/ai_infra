@@ -311,6 +311,43 @@ def sample_source(curve_obj, per_seg=16):
     return [_bezier_polyline(sp, mw, per_seg) for sp in curve_obj.data.splines]
 
 
+def build_hierarchy(polys):
+    """Per-spline parent / level / hd_start（从根沿父链累计的距离）。
+
+    hd_start 沿父链累加，所以 `hd_start + 局部弧长` 在样条断点处连续。
+    UV 需要这个：Sapling 会把一条枝拆成多条样条，若用各自的弧长，v 会在断点归零。
+    """
+    return _build_hierarchy(polys)
+
+
+def sample_source_with_radius(curve_obj, per_seg=16):
+    """同 sample_source，但额外返回每个采样点的管半径（米）。
+
+    mesh 的管半径 = `bezier_point.radius * curve.bevel_depth`。
+    """
+    bevel = float(curve_obj.data.bevel_depth)
+    polys = []
+    radii = []
+    for sp in curve_obj.data.splines:
+        pts = _bezier_polyline(sp, curve_obj.matrix_world, per_seg)
+        if sp.type == "BEZIER":
+            bp = sp.bezier_points
+            rr = []
+            for i in range(len(bp) - 1):
+                for k in range(per_seg):
+                    t = k / per_seg
+                    rr.append((1.0 - t) * bp[i].radius + t * bp[i + 1].radius)
+            rr.append(bp[-1].radius)
+        else:
+            rr = [pt.radius for pt in sp.points]
+        if len(rr) != len(pts):
+            # 防御：长度不一致会让半径整体错位一格，比给个常数更糟。
+            rr = [1.0] * len(pts)
+        polys.append(pts)
+        radii.append([max(0.0, float(x) * bevel) for x in rr])
+    return polys, radii
+
+
 def bake_meshes(polys, mesh_objs, card_objs=()):
     """Bake per-vertex wind UVs on every mesh object, and return the joint table.
 
