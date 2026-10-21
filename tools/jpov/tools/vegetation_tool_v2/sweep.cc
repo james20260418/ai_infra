@@ -253,10 +253,13 @@ MeshData SweepBranches(const Shape& shape) {
         mesh.positions.push_back(static_cast<float>(pos.z));
         mesh.uvs.push_back(static_cast<float>(j == ring ? 1.0 : arc / unit_perimeter));
         mesh.uvs.push_back(static_cast<float>(f.v_uv[i]));
-        // 法线稍后统一算（解析法向在非圆截面下不对），先占位
+        // 法线/切线稍后统一算（解析法向在非圆截面下不对），先占位
         mesh.normals.push_back(0.0f);
         mesh.normals.push_back(0.0f);
         mesh.normals.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
       }
     }
 
@@ -315,6 +318,27 @@ MeshData SweepBranches(const Shape& shape) {
       mesh.normals[v * 3 + 2] = static_cast<float>(nrm.z);
     }
 
+    // 切线 = 沿环方向的差分（就是 ∂P/∂u）。接缝处用环形邻居，避免端点退化。
+    for (size_t i = 0; i < n; ++i) {
+      const uint32_t ring_base = base + static_cast<uint32_t>(i) * stride;
+      for (uint32_t j = 0; j <= ring; ++j) {
+        const uint32_t jm = (j == 0) ? ring - 1 : j - 1;
+        const uint32_t jp = (j == ring) ? 1 : (j == ring - 1 ? 0 : j + 1);
+        const uint32_t vm = ring_base + jm;
+        const uint32_t vp = ring_base + jp;
+        const uint32_t v = ring_base + j;
+        V3 a{mesh.positions[vm * 3], mesh.positions[vm * 3 + 1], mesh.positions[vm * 3 + 2]};
+        V3 b{mesh.positions[vp * 3], mesh.positions[vp * 3 + 1], mesh.positions[vp * 3 + 2]};
+        V3 t = Sub(b, a);
+        V3 nrm{mesh.normals[v * 3], mesh.normals[v * 3 + 1], mesh.normals[v * 3 + 2]};
+        t = Sub(t, Mul(nrm, Dot(t, nrm)));   // 去法线分量，保证 T ⟂ N
+        t = Normalize(t);
+        mesh.tangents[v * 3] = static_cast<float>(t.x);
+        mesh.tangents[v * 3 + 1] = static_cast<float>(t.y);
+        mesh.tangents[v * 3 + 2] = static_cast<float>(t.z);
+      }
+    }
+
     ExitState state;
     state.position = f.exit_position;
     state.axis_u = f.exit_u;
@@ -340,6 +364,12 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
                         mesh.normals.begin() + (cursor + count) * 3);
     part.uvs.assign(mesh.uvs.begin() + cursor * 2,
                     mesh.uvs.begin() + (cursor + count) * 2);
+    // 注意：MeshData 新增逐顶点属性时必须同步这里，否则切分出来的子网格该属性为空，
+    // 下游按下标读会越界（本次加切线时就漏了，直接 SIGSEGV）。
+    if (!mesh.tangents.empty()) {
+      part.tangents.assign(mesh.tangents.begin() + cursor * 3,
+                           mesh.tangents.begin() + (cursor + count) * 3);
+    }
     if (cursor + count <= mesh.VertexCount()) {
       for (size_t t = 0; t < mesh.indices.size(); t += 3) {
         const uint32_t i0 = mesh.indices[t];

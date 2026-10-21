@@ -47,6 +47,7 @@ constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了
 
 struct CliArgs {
   std::string shape_path;
+  std::string bark_dir;   // 空 = 不贴树皮（用 level 棕色）
   bool capture = false;
   std::string out_dir;
   double phi_deg = 12.0;
@@ -61,7 +62,9 @@ CliArgs ParseCli(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     const bool has_val = (i + 1 < argc);
-    if (arg == "--shape" && has_val) {
+    if (arg == "--bark" && has_val) {
+      a.bark_dir = argv[++i];
+    } else if (arg == "--shape" && has_val) {
       a.shape_path = argv[++i];
     } else if (arg == "--capture") {
       a.capture = true;
@@ -200,6 +203,10 @@ class VegetationV2App : public JPOV {
   float max_level_f_ = 99.0f;   // 滑条用（int 版才是真值）
   float ground_y_ = 0.0f;       // 地面平面高度（米）
   float cam_target_y_ = 0.0f;   // 中键纵向 pan 的注视点偏移
+  // 树皮材质（--bark 给了才加载）。tile 由 UV 决定 = 该枝周长，与贴图尺寸无关。
+  bool has_bark_ = false;
+  bool show_bark_ = true;
+  jpov::PBRMaterial bark_mat_;
   uint32_t ground_mesh_ = 0;
   jpov::PBRMaterial ground_mat_;
   jpov::Ui ui_;
@@ -225,9 +232,12 @@ class VegetationV2App : public JPOV {
     CHECK_EQ(parts.size(), shape_.branches.size());
     for (size_t i = 0; i < parts.size(); ++i) {
       jpov::MeshData md;
+      // 带上 UV：贴树皮时 PBR 完整版 shader 需要 UV，否则采样不到（mesh 无 kUV 会退回无贴图路径）。
       md.flags = static_cast<jpov::MeshVertexFlags>(
           static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kUV) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kTangent));
       for (size_t v = 0; v < parts[i].positions.size() / 3; ++v) {
         md.positions.push_back(jpov::Vec3f{parts[i].positions[v * 3],
                                            parts[i].positions[v * 3 + 1],
@@ -235,6 +245,10 @@ class VegetationV2App : public JPOV {
         md.normals.push_back(jpov::Vec3f{parts[i].normals[v * 3],
                                          parts[i].normals[v * 3 + 1],
                                          parts[i].normals[v * 3 + 2]});
+        md.uvs.push_back(jpov::Vec2f{parts[i].uvs[v * 2], parts[i].uvs[v * 2 + 1]});
+        md.tangents.push_back(jpov::Vec3f{parts[i].tangents[v * 3],
+                                          parts[i].tangents[v * 3 + 1],
+                                          parts[i].tangents[v * 3 + 2]});
       }
       md.indices = parts[i].indices;
       branch_mesh_[i] = RegisterMesh(std::move(md));
@@ -258,12 +272,17 @@ class VegetationV2App : public JPOV {
         continue;
       }
       jpov::MeshData md;
+      // 带上 UV：贴树皮时 PBR 完整版 shader 需要 UV，否则采样不到（mesh 无 kUV 会退回无贴图路径）。
       md.flags = static_cast<jpov::MeshVertexFlags>(
           static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kUV));
       for (size_t v = 0; v < pos[t].size() / 3; ++v) {
         md.positions.push_back(jpov::Vec3f{pos[t][v * 3], pos[t][v * 3 + 1], pos[t][v * 3 + 2]});
         md.normals.push_back(jpov::Vec3f{nrm[t][v * 3], nrm[t][v * 3 + 1], nrm[t][v * 3 + 2]});
+        // 盒子顶点的 UV：AppendCardBox 的顶点序是 (iz, iy, ix) ⇒ bit0=ix, bit1=iy。
+        // 现在只是给贴图留位（叶卡仍用纯色），但 MeshData 声明了 kUV 就必须给满。
+        md.uvs.push_back(jpov::Vec2f{(v & 1) ? 1.0f : 0.0f, ((v >> 1) & 1) ? 1.0f : 0.0f});
       }
       md.indices = idx[t];
       card_mesh_[t] = RegisterMesh(std::move(md));
@@ -300,6 +319,24 @@ class VegetationV2App : public JPOV {
       jpov::PBRMaterial m = jpov::PBRMaterial::SolidColor(BrownForLevel(lv));
       m.double_sided = true;
       level_mats_.push_back(m);
+    }
+
+    if (!args.bark_dir.empty()) {
+      // bark_gen.py 的产物约定：albedo.png / normal.png / roughness.png
+      const std::string albedo = args.bark_dir + "/albedo.png";
+      const std::string normal = args.bark_dir + "/normal.png";
+      const std::string rough = args.bark_dir + "/roughness.png";
+      jpov::TextureOptions opts;
+      opts.mipmap = true;   // 树干是透视大平面，不生成 mip 会摩尔纹
+      opts.repeat = true;   // UV 按周长循环：v 会远超 1
+      bark_mat_ = jpov::PBRMaterial::SolidColor({1.0f, 1.0f, 1.0f, 1.0f});
+      bark_mat_.base_color_tex = RegisterTexture(albedo, opts);
+      bark_mat_.normal_tex = RegisterTexture(normal, opts);
+      bark_mat_.has_roughness_tex = true;
+      bark_mat_.roughness_tex = RegisterTexture(rough, opts);
+      bark_mat_.double_sided = true;
+      has_bark_ = true;
+      LOG(INFO) << "树皮材质: " << args.bark_dir;
     }
 
     ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
@@ -375,6 +412,11 @@ class VegetationV2App : public JPOV {
       if (branch_level_[i] > max_level_) {
         continue;
       }
+      if (has_bark_ && show_bark_) {
+        cmds->DrawObject3D(branch_mesh_[i], bark_mat_, {0.0f, 0.0f, 0.0f},
+                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+        continue;
+      }
       const int lv = std::min(branch_level_[i], 5);
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
@@ -403,7 +445,7 @@ class VegetationV2App : public JPOV {
       // 布局：两组面板都贴左下角，下面是【场景】，上面是【叶卡过滤】。
       const float colw = 0.34f * w;   // 0.26w 装不下"地面 y (m) + 数值"，标签会压在滑轨上
       const float cx = 0.02f * w;
-      const float scene_top = h - 16.0f - (3 * 32.0f);
+      const float scene_top = h - 16.0f - (3 * 32.0f);   // 预留 3 行：地面/层级/树皮
       const float leaf_top = scene_top - 12.0f - (2 * 32.0f);
       auto scene_row = [&](int i) {
         return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
@@ -426,6 +468,9 @@ class VegetationV2App : public JPOV {
 
       ui_.SliderFloat("地面 y (m)", &ground_y_, scene_row(0), -3.0f, 3.0f, 2);
       ui_.SliderFloat("最大层级", &max_level_f_, scene_row(1), 0.0f, 20.0f, 0);
+      if (has_bark_) {
+        ui_.Checkbox("树皮纹理", &show_bark_, scene_row(2));
+      }
 
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
       // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，

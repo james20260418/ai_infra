@@ -26,6 +26,9 @@ struct MeshData {
   std::vector<float> positions;
   std::vector<float> normals;
   std::vector<float> uvs;
+  // 切线（3 float/顶点）：法线贴图 TBN 用。方向 = ∂P/∂u（沿截面周长方向），
+  // 解析可得（相邻环顶点差分），不需要从 UV 反推。
+  std::vector<float> tangents;
   std::vector<uint32_t> indices;
 
   size_t VertexCount() const { return positions.size() / 3; }

@@ -136,6 +136,24 @@ void TestCylinderUV() {
   }
 
   TestIsotropy(shape, "等半径圆柱", 0.015);
+
+  // 切线（法线贴图 TBN 用）：必须单位长、与法线正交。这两条不成立时，
+  // 法线贴图会整体偏色或明暗反转，但**画面仍然"有纹理"**，肉眼很难判断。
+  double worst_len = 0.0;
+  double worst_dot = 0.0;
+  for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+    const double tx = mesh.tangents[v * 3];
+    const double ty = mesh.tangents[v * 3 + 1];
+    const double tz = mesh.tangents[v * 3 + 2];
+    const double nx = mesh.normals[v * 3];
+    const double ny = mesh.normals[v * 3 + 1];
+    const double nz = mesh.normals[v * 3 + 2];
+    const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+    worst_len = std::fmax(worst_len, std::fabs(len - 1.0));
+    worst_dot = std::fmax(worst_dot, std::fabs(tx * nx + ty * ny + tz * nz));
+  }
+  Expect(worst_len < 1e-4, "切线必须是单位长，最大偏差 " + std::to_string(worst_len));
+  Expect(worst_dot < 1e-4, "切线必须与法线正交，最大 |T·N| = " + std::to_string(worst_dot));
 }
 
 void TestTaper() {
