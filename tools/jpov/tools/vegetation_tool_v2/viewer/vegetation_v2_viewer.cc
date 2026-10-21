@@ -445,9 +445,6 @@ class VegetationV2App : public JPOV {
   // 绿卡：整张 quad 的盒子（空间覆盖），debug 视图和角标一起显示/隐藏。
   uint32_t card_box_mesh_ = 0;
   jpov::PBRMaterial card_box_mat_;
-  // UV 角徽标（红/黄/蓝 = uv(0,0)/(1,1)/(0,1)），每个颜色一个合并 mesh。
-  uint32_t corner_mesh_[3] = {0, 0, 0};
-  jpov::PBRMaterial corner_mat_[3];
 
   // ── 叶卡材质（--leaf）──
   bool has_leaf_ = false;
@@ -756,48 +753,6 @@ class VegetationV2App : public JPOV {
       }
     }
 
-    // 角点徽标：把 quad 的三个 UV 角各缩成 1/8 的小盒子（厚 3cm），角点作为参照点。
-    //   红 = uv(0,0)   黄 = uv(1,1)   蓝 = uv(0,1)
-    // 这样用户一眼就知道素材的四个角该往哪贴；盒子厚度只为"看得见"，不代表卡片有厚度。
-    {
-      const double kBadge = 1.0 / 8.0;
-      // 8cm 厚（远厚于绿卡的 4mm）：角标在卡面前后各凸出 ~3.8cm，
-      // 双面看都完整可见，且与绿卡的面没有任何近共面区域。
-      const double kThick = 0.08;
-      const double uv[3][4] = {{0.0, kBadge, 0.0, kBadge},
-                               {1.0 - kBadge, 1.0, 1.0 - kBadge, 1.0},
-                               {0.0, kBadge, 1.0 - kBadge, 1.0}};
-      // 红别给满：1.0 经 tone map 会压成粉（255,111,111），0.55 反而更像正红。
-      const jpov::Color kCol[3] = {{0.55f, 0.0f, 0.0f, 1.0f},
-                                   {0.95f, 0.85f, 0.05f, 1.0f},
-                                   {0.05f, 0.15f, 0.85f, 1.0f}};
-      for (int c = 0; c < 3; ++c) {
-        std::vector<float> cpos;
-        std::vector<float> cnrm;
-        std::vector<uint32_t> cidx;
-        for (const auto& card : shape_.cards) {
-          AppendUvBox(shape_, card, uv[c][0], uv[c][1], uv[c][2], uv[c][3], kThick, &cpos,
-                      &cnrm, &cidx);
-        }
-        if (cpos.empty()) continue;
-        jpov::MeshData md;
-        md.flags = static_cast<jpov::MeshVertexFlags>(
-            static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-            static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
-        for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
-          md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
-          md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
-        }
-        md.indices = cidx;
-        corner_mesh_[c] = RegisterMesh(std::move(md));
-        // base 黑 + emissive：靠自发光上色，不被 sun/ambient 冲淡。
-        corner_mat_[c] = jpov::PBRMaterial::SolidColor({0.0f, 0.0f, 0.0f, 1.0f});
-        corner_mat_[c].emissive = kCol[c];
-        corner_mat_[c].roughness = 1.0f;
-        corner_mat_[c].double_sided = true;
-      }
-    }
-
     // 相机：按包围盒自动取景
     float bmin[3] = {1e9f, 1e9f, 1e9f};
     float bmax[3] = {-1e9f, -1e9f, -1e9f};
@@ -949,10 +904,82 @@ class VegetationV2App : public JPOV {
         cmds->DrawObject3D(card_box_mesh_, card_box_mat_, {0.0f, 0.0f, 0.0f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
       }
-      for (int c = 0; c < 3; ++c) {
-        if (corner_mesh_[c] == 0) continue;
-        cmds->DrawObject3D(corner_mesh_[c], corner_mat_[c], {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+      // 三个 UV 角的中文标签，贴在卡**正面**（沿 +normal 抬 4mm：绿卡厚 4mm 的一半 + 2mm，
+      // 避免和卡面 z-fight）。只在相机 2.5m 内的卡上画，否则整棵树 1300+ 条文字糊成一片。
+      const float kLabelMaxDist = 2.5f;
+      const float kFaceOffset = 0.004f;
+      const jpov::Vec3f cam = cmds->camera.position;
+      // DrawText3D 内部按「anchor 的相机空间深度」换算字号，anchor 在背后会 CHECK 崩。
+      jpov::Vec3f fwd{cmds->camera.target.x() - cam.x(), cmds->camera.target.y() - cam.y(),
+                      cmds->camera.target.z() - cam.z()};
+      const float fl = std::sqrt(fwd.x() * fwd.x() + fwd.y() * fwd.y() + fwd.z() * fwd.z());
+      if (fl > 1e-6f) {
+        fwd = jpov::Vec3f{fwd.x() / fl, fwd.y() / fl, fwd.z() / fl};
+      }
+      for (const auto& card : shape_.cards) {
+        if (!show_all_card_types_ &&
+            static_cast<int>(card.type % kMaxCardTypes) != static_cast<int>(type_filter_)) {
+          continue;
+        }
+        const float dx = static_cast<float>(card.anchor.x) - cam.x();
+        const float dy = static_cast<float>(card.anchor.y) - cam.y();
+        const float dz = static_cast<float>(card.anchor.z) - cam.z();
+        if (dx * dx + dy * dy + dz * dz > kLabelMaxDist * kLabelMaxDist) continue;
+        // 必须在相机前方（深度 > 5cm），否则 Text3D 的字号换算无定义。
+        if (dx * fwd.x() + dy * fwd.y() + dz * fwd.z() < 0.05f) continue;
+
+        const auto norm = [](const Vec3d& q) {
+          const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+          return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
+        };
+        const auto cross = [](const Vec3d& a2, const Vec3d& b2) {
+          return Vec3d{a2.y * b2.z - a2.z * b2.y, a2.z * b2.x - a2.x * b2.z,
+                       a2.x * b2.y - a2.y * b2.x};
+        };
+        const Vec3d up = norm(card.up);
+        const Vec3d n = norm(card.normal);
+        const Vec3d right = norm(cross(up, n));
+
+        std::string mode = "bottom_center";
+        for (const auto& t : shape_.leaf_types) {
+          if (t.type == card.type) {
+            mode = t.anchor_mode;
+            break;
+          }
+        }
+        double au = 0.5;
+        double av = 0.0;
+        if (!jpov::vegetation::AnchorModeToUv(mode, &au, &av)) continue;
+
+        const auto Point = [&](double u, double v) {
+          const double su = (u - au) * card.width;
+          const double sv = (v - av) * card.height;
+          return jpov::Vec3f{
+              static_cast<float>(card.anchor.x + right.x * su + up.x * sv + n.x * kFaceOffset),
+              static_cast<float>(card.anchor.y + right.y * su + up.y * sv + n.y * kFaceOffset),
+              static_cast<float>(card.anchor.z + right.z * su + up.z * sv + n.z * kFaceOffset)};
+        };
+        const jpov::Vec3f face{static_cast<float>(n.x), static_cast<float>(n.y),
+                               static_cast<float>(n.z)};
+        const jpov::Vec3f upv{static_cast<float>(up.x), static_cast<float>(up.y),
+                              static_cast<float>(up.z)};
+        const float fh = static_cast<float>(0.125 * card.height);   // 与 1/8 角标同量级
+        const jpov::Color white{1.0f, 1.0f, 1.0f, 1.0f};
+
+        // 注意：要检查的是**标签点**的深度，不是卡片 anchor 的深度 ——
+        // 一张卡可能 center 在前方、某个角已经跑到相机背后，Text3D 会直接 crash。
+        const auto Label = [&](const char* text, double u, double v,
+                               jpov::TextAlignment align) {
+          const jpov::Vec3f p = Point(u, v);
+          const float px = p.x() - cam.x();
+          const float py = p.y() - cam.y();
+          const float pz = p.z() - cam.z();
+          if (px * fwd.x() + py * fwd.y() + pz * fwd.z() < 0.1f) return;
+          cmds->DrawText3D(text, p, face, upv, fh, white, jpov::kFontBuiltinCJK, align);
+        };
+        Label("左下", 0.0, 0.0, jpov::TextAlignment::kBottomLeft);
+        Label("右上", 1.0, 1.0, jpov::TextAlignment::kTopRight);
+        Label("左上", 0.0, 1.0, jpov::TextAlignment::kTopLeft);
       }
     } else {
       for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
