@@ -6,7 +6,7 @@
 //   * 叶卡：用**盒子**表示（不是薄片）—— 盒子能看清朝向与尺寸，薄片侧面看不见
 //   * 类型配色：最多 4 种绿，按 type 取模
 //
-// 交互：K 切换叶卡、[ / ] 调最大显示层级、P 打印相机。
+// 交互：K 切换叶卡、[ / ] 调最大显示层级、P 打印相机、H 打印叶卡帮助。
 //
 // 用法：
 //   jpov_vegetation_v2_viewer --shape /tmp/willow.pbtxt
@@ -41,6 +41,8 @@ namespace {
 constexpr int kViewerWidth = 1280;
 constexpr int kViewerHeight = 720;
 constexpr float kViewerFps = 60.0f;
+using jpov::vegetation::LeafCard;
+using jpov::vegetation::LeafType;
 using jpov::vegetation::MeshData;
 using jpov::vegetation::Shape;
 using jpov::vegetation::Vec3d;
@@ -253,6 +255,7 @@ class VegetationV2App : public JPOV {
   uint32_t ground_mesh_ = 0;
   jpov::PBRMaterial ground_mat_;
   jpov::Ui ui_;
+  std::string shape_path_;   // 只用于帮助打印（H 键）
   jpov_skylight::SkyDegrees deg_;
 
   std::string CamString() const {
@@ -263,6 +266,52 @@ class VegetationV2App : public JPOV {
                   view_.theta * 180.0 / 3.14159265358979323846, view_.R, max_level_,
                   show_all_card_types_ ? "all" : std::to_string(type_filter_).c_str());
     return std::string(buf);
+  }
+
+  // 叶卡帮助：把「造图时需要知道的东西」按类型列出来（控制台里可复制）。
+  // 本 viewer 不读 atlas，所以这里给的是 shape 里声明的推荐值 + 语义解释，
+  // 让造图的人知道根部该画在格子的哪个位置、宽高比该多少。
+  void PrintLeafTypeHelp(const std::string& shape_path) const {
+    std::printf("\n=== 叶卡帮助（造图视角）===\n");
+    std::printf("shape: %s\n", shape_path.c_str());
+    std::printf("%zu 枝 / %zu 卡 / %zu 种叶卡\n", shape_.branches.size(), shape_.cards.size(),
+                shape_.leaf_types.size());
+
+    for (const LeafType& t : shape_.leaf_types) {
+      size_t cards_of_type = 0;
+      for (const LeafCard& c : shape_.cards) {
+        if (c.type == t.type) ++cards_of_type;
+      }
+
+      // anchor_mode 的「图里根部在哪」——这是造图时唯一要对齐的东西。
+      // bottom_left/right、top_left/right 目前 Validate() 还不接受（下一步改 anchor_uv
+      // 时一并支持），这里先把语义打印出来，方便对着造图。
+      const char* where = "未知";
+      if (t.anchor_mode == "bottom_center") where = "格子底边中点 (u=0.5, v=0)";
+      else if (t.anchor_mode == "top_center") where = "格子顶边中点 (u=0.5, v=1)";
+      else if (t.anchor_mode == "center") where = "格子正中 (u=0.5, v=0.5)";
+      else if (t.anchor_mode == "bottom_left") where = "格子左下角 (u=0, v=0)";
+      else if (t.anchor_mode == "bottom_right") where = "格子右下角 (u=1, v=0)";
+      else if (t.anchor_mode == "top_left") where = "格子左上角 (u=0, v=1)";
+      else if (t.anchor_mode == "top_right") where = "格子右上角 (u=1, v=1)";
+
+      std::printf("\n  type %u   卡数 %zu\n", t.type, cards_of_type);
+      std::printf("    anchor_mode = %s\n", t.anchor_mode.c_str());
+      std::printf("    根部位置   = %s\n", where);
+      if (t.preferred_aspect > 0.0) {
+        std::printf("    推荐宽/高  = %.3f（height=H 时 width=%.3f·H；格子宽:高 = %.3f : 1）\n",
+                    t.preferred_aspect, t.preferred_aspect, t.preferred_aspect);
+      } else {
+        std::printf("    推荐宽/高  = 未指定（装配时取该类型第一套 atlas 的格子比例）\n");
+      }
+      if (!t.description.empty()) {
+        std::printf("    描述       = %s\n", t.description.c_str());
+      }
+    }
+
+    std::printf("\n  规则：width = height × (格子宽/格子高)，格子内**内容必须撑满宽度方向**；\n"
+                "  根部按上面的 anchor_mode 对齐，上下可留白。交互时按 H 重新打印。\n\n");
+    std::fflush(stdout);
   }
 
   void BuildScene(const CliArgs& args) {
@@ -432,6 +481,9 @@ class VegetationV2App : public JPOV {
     }
     if (input.GetKey(jpov::KeyCode::P).IsClick()) {
       LOG(INFO) << "[camera] " << CamString();
+    }
+    if (input.GetKey(jpov::KeyCode::H).IsClick()) {
+      PrintLeafTypeHelp(shape_path_);
     }
 
     float dx = 0.0f;
@@ -607,6 +659,8 @@ int main(int argc, char** argv) {
   if (!LoadShape(args.shape_path, &app.shape_)) {
     return 1;
   }
+  app.shape_path_ = args.shape_path;
+  app.PrintLeafTypeHelp(args.shape_path);
   app.BuildScene(args);
 
   if (!args.capture) {

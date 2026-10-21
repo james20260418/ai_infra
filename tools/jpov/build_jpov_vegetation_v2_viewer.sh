@@ -86,7 +86,7 @@ echo "    xvfb-run -a ./jpov_vegetation_v2_viewer --shape shapes/willow.pbtxt --
 echo ""
 echo "  交互说明："
 echo "    左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）"
-echo "    [ ] = 调最大显示层级    P = 打印相机"
+echo "    [ ] = 调最大显示层级    P = 打印相机    H = 打印叶卡帮助（对齐方式/推荐长宽比）"
 echo "    面板：地面 y / 最大层级 / 树皮纹理 / 显示全部叶子 / 叶 type 下标"
 echo ""
 echo "  贴树皮（bark/bark001 已自动生成；也可自己造 albedo/normal/roughness.png）："
