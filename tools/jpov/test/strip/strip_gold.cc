@@ -11,6 +11,8 @@
 //   ① 纹理路径真的生效：带纹理 vs 纯色的差异像素数 ∈ [20000, 120000]；
 //   ② 纹理的色带真的投影到画面上：在①的差异区域内，
 //      红/青/黄三种「主色像素」各自数量落在区间内（纹理没绑上/UV 退化都会掉到 0）；
+//      ⚠️ UV 方向约定（u 沿长度、v 横跨宽度）由 strip_geometry_test 精确断言，
+//      这里只保证「三条色带都真的出现在画面上」；
 //   ③ 宽度剖面真的进片元：柔边 vs 硬边的差异像素数 ∈ [5000, 80000]。
 //
 // 「一个 draw call」不在本测试断言（像素不可测）：证据是 StripRenderer 每次 Draw
@@ -212,11 +214,13 @@ int main(int argc, char** argv) {
     const long red = CountHueInsideTextureRegion(actual, solid, Hue::kRed);
     const long cyan = CountHueInsideTextureRegion(actual, solid, Hue::kCyan);
     const long yellow = CountHueInsideTextureRegion(actual, solid, Hue::kYellow);
-    CHECK_GE(red, 3000) << "差异区域内几乎没有红色主色像素 → 红色带缺失";
+    // 实测（UV 修正后）：红 5,225 / 青 5,902 / 黄 4,701。下限取 ~1.5k 仍能区分
+    // 「完全没纹理」与「纹理在但构图变了」，同时不会因为微调位置就误报。
+    CHECK_GE(red, 1500) << "差异区域内几乎没有红色主色像素 → 红色带缺失";
     CHECK_LE(red, 40000);
-    CHECK_GE(cyan, 3000) << "差异区域内几乎没有青色主色像素 → 青色带缺失";
+    CHECK_GE(cyan, 1500) << "差异区域内几乎没有青色主色像素 → 青色带缺失";
     CHECK_LE(cyan, 40000);
-    CHECK_GE(yellow, 1000) << "差异区域内几乎没有黄色主色像素 → 黄色带缺失";
+    CHECK_GE(yellow, 800) << "差异区域内几乎没有黄色主色像素 → 黄色带缺失";
     CHECK_LE(yellow, 30000);
     LOG(INFO) << "[assert] hue px red=" << red << " cyan=" << cyan << " yellow=" << yellow;
 

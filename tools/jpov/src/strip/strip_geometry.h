@@ -32,6 +32,11 @@ inline constexpr int kStripIndicesPerStrip = kStripQuads * 6;
 
 // 一个展开后的条带顶点：位置（世界空间）+ 纹理 uv + 纵向 alpha 乘子。
 //
+// **UV 约定（Danis 2026-10-21 定，与素材一致）**：
+//   u = 沿条带长度方向的 s（第 col 列的 u = col / 15）→ 图片**从左到右**是 s 增长方向；
+//   v = 横跨宽度：0 = right（图片底边）、1 = left（图片顶边）。
+//   于是四个角对上素材：左下 right0、左上 left0、右下 right15、右上 left15。
+//
 // 内存布局**刻意**是 6 个连续 float（pos.xyz, u, v, alpha），
 // 正好对上着色器的两个属性：loc0 = vec3 位置、loc1 = vec3(u, v, alpha)。
 struct StripVertex {
@@ -110,7 +115,7 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
 //
 // 塌缩规则：列 col 取采样点 src = min(col, point_count-1)。
 // 于是不足 16 点时，尾部列全部坐在最后一个有效点 → 零面积 quad → 不产生片元。
-// 注意塌缩**不改变 UV**：v 恒为 col/15（纹理按 16 格设计），
+// 注意塌缩**不改变 UV**：u 恒为 col/15（纹理由「16 格」约定沿长度等分），
 // 所以短条带只用到纹理前 (point_count-1)/15 的一段（不拉伸图像）。
 //
 // Pre-condition: 调用方已跑过 ValidateStripBatch（本函数不做重复校验）。
@@ -122,10 +127,11 @@ inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* 
         const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
                                  ? static_cast<uint32_t>(col)
                                  : last;
-        const float v = static_cast<float>(col) / static_cast<float>(kStripQuads);
-        // 先 right（u=0）后 left（u=1）——与索引模式严格对应。
-        out->push_back(StripVertex{strip.right[src], 0.0f, v, strip.alpha[src]});
-        out->push_back(StripVertex{strip.left[src], 1.0f, v, strip.alpha[src]});
+        // u = 沿长度（图片从左到右），v = 横跨宽度（0 = right / 1 = left）。
+        const float u = static_cast<float>(col) / static_cast<float>(kStripQuads);
+        // 先 right（v=0）后 left（v=1）——与索引模式严格对应。
+        out->push_back(StripVertex{strip.right[src], u, 0.0f, strip.alpha[src]});
+        out->push_back(StripVertex{strip.left[src], u, 1.0f, strip.alpha[src]});
     }
 }
 

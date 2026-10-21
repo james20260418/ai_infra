@@ -48,18 +48,21 @@ TEST(StripGeometry, ExpandsFixedTopology) {
     EXPECT_EQ(jpov::kStripQuads, 15);
     EXPECT_EQ(jpov::kStripIndicesPerStrip, 90);
 
-    // 第 0 列：先 right（u=0,v=0），再 left（u=1,v=0）。
+    // 第 0 列：先 right（u=0, v=0 = 左下），再 left（u=0, v=1 = 左上）。
+    // UV 约定：u 沿长度（图片从左到右），v 横跨宽度（0=right / 1=left）。
     EXPECT_FLOAT_EQ(verts[0].position.y(), 0.0f);
     EXPECT_FLOAT_EQ(verts[0].u, 0.0f);
     EXPECT_FLOAT_EQ(verts[0].v, 0.0f);
     EXPECT_FLOAT_EQ(verts[1].position.y(), 1.0f);
-    EXPECT_FLOAT_EQ(verts[1].u, 1.0f);
-    EXPECT_FLOAT_EQ(verts[1].v, 0.0f);
+    EXPECT_FLOAT_EQ(verts[1].u, 0.0f);
+    EXPECT_FLOAT_EQ(verts[1].v, 1.0f);
 
-    // 最后一列 col=15：v = 15/15 = 1。
+    // 最后一列 col=15：u = 15/15 = 1（右下 / 右上），v 仍 0 / 1。
     const jpov::StripVertex& last_right = verts[30];
     const jpov::StripVertex& last_left = verts[31];
-    EXPECT_FLOAT_EQ(last_right.v, 1.0f);
+    EXPECT_FLOAT_EQ(last_right.u, 1.0f);
+    EXPECT_FLOAT_EQ(last_right.v, 0.0f);
+    EXPECT_FLOAT_EQ(last_left.u, 1.0f);
     EXPECT_FLOAT_EQ(last_left.v, 1.0f);
     EXPECT_FLOAT_EQ(last_right.position.x(), 15.0f);
 }
@@ -75,8 +78,11 @@ TEST(StripGeometry, CollapsesTailBeyondPointCount) {
     for (int col = 4; col < jpov::kStripSampleCount; ++col) {
         EXPECT_FLOAT_EQ(verts[2 * col].position.x(), 3.0f) << "col=" << col;
         EXPECT_FLOAT_EQ(verts[2 * col + 1].position.x(), 3.0f) << "col=" << col;
-        EXPECT_FLOAT_EQ(verts[2 * col].v,
+        // UV 不塌缩：u 仍按列号走（纹理沿长度等分 16 格，短条带只用到前一段）。
+        EXPECT_FLOAT_EQ(verts[2 * col].u,
                         static_cast<float>(col) / static_cast<float>(jpov::kStripQuads));
+        EXPECT_FLOAT_EQ(verts[2 * col].v, 0.0f);
+        EXPECT_FLOAT_EQ(verts[2 * col + 1].v, 1.0f);
     }
 }
 

@@ -85,6 +85,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     };
 
     shoot("10_default");
+    app.show_strips_ = false;
+    shoot("15_no_strips");
+    app.show_strips_ = true;
     app.use_texture_ = false;
     shoot("20_solid");
     app.use_texture_ = true;

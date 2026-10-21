@@ -11,10 +11,11 @@
 //
 // 坐标系：点一律是**世界空间**，本层不做任何变换（旋转/缩放请调用方自己算进点里）。
 //
-// 顶点与 UV 约定（与共享网格一致，见 src/strip/strip_renderer.h 的索引模式）：
+// 顶点与 UV 约定（Danis 2026-10-21 定，与素材完全对齐）：
 //   每条带展开成 32 个顶点 = 16 列 ×（right, left），列 i 对应第 i 个采样点：
-//     right[i] → uv = (0, i / 15)      left[i] → uv = (1, i / 15)
-//   即 u 横跨条带宽度（右轨 0 → 左轨 1），v 沿长度方向。
+//     right[i] → uv = (i / 15, 0)      left[i] → uv = (i / 15, 1)
+//   即 **u 沿条带长度方向（s，图片从左到右）**、**v 横跨宽度（0 = right 边 / 1 = left 边）**；
+//   四个角对应素材：左下 right0、左上 left0、右下 right15、右上 left15。
 //   相邻两列构成 1 个 quad，共 15 个 quad。
 //
 // 纹理透明：纹理的 alpha 直接当覆盖度用（黑底美术素材应先把黑转成 alpha=0）。
@@ -25,6 +26,7 @@
 #include <array>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "geom/common/vec.h"
@@ -79,6 +81,20 @@ struct TranslucentStripBatch {
     // 本批条带（非空才画）。
     std::vector<Strip16> strips;
 };
+
+// 纯色批：不采样纹理，直接用 color 当条带颜色（color.a = 不透明度乘子）。
+//
+// 等价于 texture_id == 0 + tint == color，这里显式命名——调用方不用猜
+// 「texture_id 给 0 到底是不画还是纯色」。
+// 注意：仍受 width_profile 与逐点 alpha 调制（即纯色也支持柔边与纵向淡出）。
+inline TranslucentStripBatch MakeSolidStripBatch(const Color& color,
+                                                 std::vector<Strip16> strips) {
+    TranslucentStripBatch batch;
+    batch.texture_id = 0;
+    batch.tint = color;
+    batch.strips = std::move(strips);
+    return batch;
+}
 
 }  // namespace jpov
 

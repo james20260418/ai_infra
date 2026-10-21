@@ -11,10 +11,11 @@
 //
 //   顶点拓扑（固定，见 strip_geometry.h）：
 //     16 列 ×（right, left）= 32 顶点，相邻两列 1 个 quad，共 15 quad / 90 索引。
-//     uv：u 横跨宽度（right=0 → left=1），v = col/15（纹理按「16 格」设计）。
+//     uv：**u = 沿长度 s（col/15，图片从左到右）**、**v = 横跨宽度（0=right / 1=left）**；
+//     四个角对应素材的左下 right0 / 左上 left0 / 右下 right15 / 右上 left15。
 //
 //   FS：
-//     α = tint.a · vertex_alpha · texture.a · width_profile(u)
+//     α = tint.a · vertex_alpha · texture.a · width_profile(v)   （v 是宽度方向）
 //     → 与不透明场景深度手动作深度测试（WBO 目标无深度缓冲）。
 //       **M1 用硬判据**（z > scene_z + 2cm 即丢弃）；软深度是 M3。
 //     → 写覆盖集：att0 = vec4(色·α, α)·w、att1 = α（blend 见 wbo_target）
@@ -67,7 +68,7 @@ in vec3 vUVAlpha;                 // (u, v, alpha)
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec4 uTint;
-uniform float uProfile[9];        // u = k/8 处的宽度方向 alpha 乘子
+uniform float uProfile[9];        // 宽度方向（v）= k/8 处的 alpha 乘子
 uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;           // 本 pass 的像素尺寸（1× 时即 3D FBO 尺寸）
 uniform float uNear;
@@ -80,8 +81,9 @@ float ZView(float d) {
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
 }
 // 宽度方向剖面：9 knot / 8 段分段线性，在片元里求值（不是在顶点里插值）。
-float WidthProfile(float u) {
-    float x = clamp(u, 0.0, 1.0) * 8.0;
+// 参数是**宽度方向**的 v（0 = right 边 / 1 = left 边）。
+float WidthProfile(float w) {
+    float x = clamp(w, 0.0, 1.0) * 8.0;
     int i = int(min(floor(x), 7.0));
     return mix(uProfile[i], uProfile[i + 1], x - float(i));
 }
@@ -96,7 +98,7 @@ void main() {
         color *= tex.rgb;
         a *= tex.a;
     }
-    a *= WidthProfile(vUVAlpha.x);
+    a *= WidthProfile(vUVAlpha.y);
     if (a <= 1.0 / 255.0) {
         discard;
     }

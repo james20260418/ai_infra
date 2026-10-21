@@ -45,14 +45,19 @@ L0, R0, L1, R1, L2, R2, ...
 | 属性 | 类型 | 含义 |
 |---|---|---|
 | `position` | vec3 | 世界坐标 |
-| `uv` | vec2 | 纹理坐标（横向 u 由左右点给定，纵向 v 逐点） |
+| `uv` | vec2 | 纹理坐标：**u 沿长度（第 i 个点 = i/(N-1)）**、**v 横跨宽度（0 = right / 1 = left）** |
 | `alpha` | float | **纵向** alpha 采样值（0..1） |
 
 stride = 6 float = 24 B。
 
+**UV 方向（Danis 2026-10-21 定，与素材对齐）**：图片**从左到右是 s（长度）增长方向**，
+**从下到上是 right → left**。四个角因此是：左下 right0、左上 left0、右下 right(N-1)、右上 left(N-1)。
+（早期实现把它写反成「u 横跨宽度」，导致纹理转了 90°，已修正。）
+
 ### 2.2 宽度参数 w
 
 约定（Danis 2026-10-20）：**右端点 `w = 0`，左端点 `w = 1`**。
+`w` 就是上面的纹理 `v`（宽度参数只有一个，别再造第二个名字）。
 
 w 是**参数化坐标**，不是几何距离 —— 用逐顶点常量 0/1 + 硬件插值即可，
 不要在 shader 里按位置反算（那会在条带弯曲/透视时漂）。
@@ -424,18 +429,25 @@ M2+ 的字段（`blend` / `additive_gain` / `soft_depth_m` / `fresnel_*`）**等
 顶点法线反而是"平滑谎言"，会让 fresnel 在轮廓处算错。M1 无 fresnel（M4 再加），
 所以 VS 里连法线都不算。
 
-### 16.3 素材坑：不要给「色带测试卡」开 mipmap
+### 16.3 UV 方向（2026-10-21 修正）
+
+第一版把 UV 写反了（u 横跨宽度、v 沿长度），素材整体转了 90°。
+**正确约定**：u 沿长度（图片从左到右 = s 增长）、v 横跨宽度（0 = right / 1 = left），
+四角 = 左下 right0、左上 left0、右下 right15、右上 left15。
+由 `strip_geometry_test` 的 `ExpandsFixedTopology` / `CollapsesTailBeyondPointCount` 精确断言。
+
+### 16.4 素材坑：不要给「色带测试卡」开 mipmap
 
 `assets/strip/ribbon_test.png`（1318×158，横向 4 条色带）在条带上 u 方向被压缩上百倍，
 mip 会把**纵向**相邻色带平均成灰色（实测：红/黄/青全被冲淡成灰粉）。
 色带在 u 方向本是常量，关掉 mipmap 后颜色才正确。**换成真正的花纹素材时要重新评估**
 （那时 u 方向有细节，就不能无脑关 mip）。
 
-### 16.4 验收
+### 16.5 验收
 
 - `bazel test //tools/jpov/test/strip:all` → 13 cases（含 6 个 `EXPECT_DEATH` 负向用例）；
 - gold `test/strip/strip_demo_1280x720.png`（三条带 + 天光 + 三块参考方块），逐字节；
-- 非恒真断言：带纹理 vs 纯色差异 65,898 px ∈ [20k,120k]；差异区内红 13,798 / 青 14,905 /
-  黄 7,420 px 各自在区间内；柔边 vs 硬边 35,385 px ∈ [5k,80k]；
+- 非恒真断言：带纹理 vs 纯色差异 36,372 px ∈ [20k,120k]；差异区内红 4,410 / 青 4,714 /
+  黄 4,210 px 各自在区间内；柔边 vs 硬边 19,736 px ∈ [5k,80k]；
 - 「一次 draw call」证据：`StripRenderer: strips=3 draw_calls=1` 日志（像素不可测）。
 

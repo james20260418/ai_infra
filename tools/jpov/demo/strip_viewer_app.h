@@ -4,7 +4,8 @@
 //   ① 波带（宽、柔和边缘、带纵向淡出）
 //   ② 螺旋拖尾（窄、绕行进）
 //   ③ 弧形扇面（宽度沿长度变化）
-// 三条在屏幕空间**互相重叠**，用来直观验收「WBO 覆盖集 + over 合成」的混合是否正确。
+// 三条在屏幕空间**部分交叉**（各自形状可辨、交叉处可见覆盖混合）——
+// 用来直观验收「WBO 覆盖集 + over 合成」。
 //
 // 用途：M1 的肉眼验收工具（gold 用同一套生成函数，见 test/strip/strip_gold.cc）。
 // 交互：右键拖拽/滚轮绕行；面板可调不透明度、剖面、纹理开关、形状动画。
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <glog/logging.h>
 
@@ -92,11 +94,11 @@ inline void BuildWaveRibbon(float phase, float width_scale, jpov::Strip16* out) 
     const float kLen = 7.0f;
     auto center = [kLen](float s, float ph) {
         const float x = (s - 0.5f) * kLen;
-        return jpov::Vec3f{x, 0.95f + 0.50f * std::sin(1.9f * s * 3.14159f + ph),
+        return jpov::Vec3f{x, 0.85f + 0.55f * std::sin(1.7f * s * 3.14159f + ph),
                            -0.45f + 0.30f * std::cos(1.1f * s * 3.14159f + ph)};
     };
-    auto half_l = [width_scale](float s) { return (0.70f + 0.16f * s) * width_scale; };
-    auto half_r = [width_scale](float /*s*/) { return 0.70f * width_scale; };
+    auto half_l = [width_scale](float s) { return (0.35f + 0.10f * s) * width_scale; };
+    auto half_r = [width_scale](float /*s*/) { return 0.35f * width_scale; };
     // 尾部淡出：验证「逐点 alpha」这条通路真的进了混合。
     auto alpha = [](float s) {
         const float fade_in = std::min(1.0f, s / 0.08f);
@@ -109,12 +111,12 @@ inline void BuildWaveRibbon(float phase, float width_scale, jpov::Strip16* out) 
 // ② 螺旋拖尾：绕 +Y 上升，宽度恒定（窄）。
 inline void BuildHelixRibbon(float phase, float width_scale, jpov::Strip16* out) {
     auto center = [](float s, float ph) {
-        const float ang = 2.0f * 3.14159f * 1.6f * s + ph;
-        const float r = 1.35f - 0.35f * s;
-        return jpov::Vec3f{r * std::sin(ang), 0.35f + 2.30f * s,
-                           r * std::cos(ang)};
+        const float ang = 2.0f * 3.14159f * 1.5f * s + ph;
+        const float r = 1.05f - 0.25f * s;
+        return jpov::Vec3f{r * std::sin(ang) + 0.2f, 0.30f + 2.20f * s,
+                           r * std::cos(ang) - 0.6f};
     };
-    auto half_w = [width_scale](float /*s*/) { return 0.40f * width_scale; };
+    auto half_w = [width_scale](float /*s*/) { return 0.22f * width_scale; };
     auto alpha = [](float /*s*/) { return 1.0f; };
     BuildRibbon(phase, center, half_w, half_w, alpha, out);
 }
@@ -122,15 +124,23 @@ inline void BuildHelixRibbon(float phase, float width_scale, jpov::Strip16* out)
 // ③ 弧形扇面：在 XZ 平面上扫一段弧，宽度沿弧长张开（剑气式）。
 inline void BuildArcRibbon(float phase, float width_scale, jpov::Strip16* out) {
     auto center = [](float s, float ph) {
-        const float ang = -1.05f + 2.10f * s + ph;
-        const float r = 2.70f;
-        return jpov::Vec3f{r * std::sin(ang), 0.60f + 0.35f * s,
-                           r * std::cos(ang) - 0.9f};
+        const float ang = -1.00f + 1.90f * s + ph;
+        const float r = 2.40f;
+        return jpov::Vec3f{r * std::sin(ang) + 0.5f, 1.30f - 0.90f * s,
+                           r * std::cos(ang) - 1.0f};
     };
-    auto half_l = [width_scale](float s) { return (0.10f + 1.20f * s * s) * width_scale; };
+    auto half_l = [width_scale](float s) { return (0.06f + 0.55f * s * s) * width_scale; };
     auto half_r = [width_scale](float s) { return (0.04f + 0.12f * s) * width_scale; };
     auto alpha = [](float s) { return std::min(1.0f, (1.0f - s) / 0.35f); };
     BuildRibbon(phase, center, half_l, half_r, alpha, out);
+}
+
+// 按条带整体缩放逐点 alpha（用于让多条同色带在重叠处可分辨）。
+inline void ScaleRibbonAlpha(float scale, jpov::Strip16* strip) {
+    CHECK(strip != nullptr) << "ScaleRibbonAlpha: strip 不能为空";
+    for (float& a : strip->alpha) {
+        a *= scale;
+    }
 }
 
 // 三条带装进**一个 batch** → 一次 draw call。
@@ -141,6 +151,11 @@ inline void BuildDemoBatch(float phase, float width_scale, float opacity,
     BuildWaveRibbon(phase, width_scale, &out->strips[0]);
     BuildHelixRibbon(phase, width_scale, &out->strips[1]);
     BuildArcRibbon(phase, width_scale, &out->strips[2]);
+    // 三条同色时重叠处会糊成一团：给不同的不透明度，交叉处就能看出「谁压在谁上面」，
+    // 同时仍然保留形状轮廓（这也是最省的「多色」手段 —— 颜色是整批共享的）。
+    ScaleRibbonAlpha(1.00f, &out->strips[0]);
+    ScaleRibbonAlpha(0.62f, &out->strips[1]);
+    ScaleRibbonAlpha(0.45f, &out->strips[2]);
     out->tint = jpov::Color{1.0f, 1.0f, 1.0f, opacity};
     // 「柔边」= 宽度两端衰减到 0（几何折角被吃掉，视觉上变软）；硬边 = 全 1。
     out->width_profile = soft_edges
@@ -168,9 +183,12 @@ public:
     // 旋钮（面板 / 拍摄共用同一处状态）
     float opacity_ = 0.92f;        // 整批不透明度（tint.a）
     float width_scale_ = 1.0f;     // 条带宽度整体缩放
-    bool use_texture_ = true;      // false = 纯色（tint 白色）
+    bool use_texture_ = true;      // false = 纯色（不采样纹理）
+    // 纯色模式的颜色（线性 HDR）。默认青蓝，和白色/纹理都区分得开。
+    jpov::Color solid_color_ = {0.18f, 0.78f, 0.95f, 1.0f};
     bool soft_edges_ = true;       // 宽度剖面：柔边 / 硬边
     bool animate_ = false;         // 形状动画（gold 用固定 phase=0）
+    bool show_strips_ = true;      // false = 完全不发条带命令（A/B 对照用）
     float phase_ = 0.0f;           // 当前相位（animate_ 时逐帧推进）
 
     // 装配场景静态资源（Init 之后、Run/RunOnce 之前调用一次）。
@@ -240,9 +258,28 @@ public:
         cmds->DrawObject3D(box_mesh_, box_mat_metal_, {2.0f, 0.5f, -2.6f},
                            {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
 
+        if (!show_strips_) {
+            // A/B 对照：不发条带命令，用于把「条带覆盖了哪些像素」精确分离出来。
+            if (show_panel_) {
+                DrawPanel(input);
+                ui_.End();
+                ui_.Emit(cmds);
+            }
+            return;
+        }
+
         jpov::TranslucentStripBatch batch;
-        batch.texture_id = use_texture_ ? ribbon_tex_ : 0;
-        BuildDemoBatch(phase_, width_scale_, opacity_, soft_edges_, &batch);
+        if (use_texture_) {
+            batch.texture_id = ribbon_tex_;
+            BuildDemoBatch(phase_, width_scale_, opacity_, soft_edges_, &batch);
+        } else {
+            // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
+            BuildDemoBatch(phase_, width_scale_, 1.0f, soft_edges_, &batch);
+            jpov::Color color = solid_color_;
+            color.a = opacity_;
+            std::vector<jpov::Strip16> strips = std::move(batch.strips);
+            batch = jpov::MakeSolidStripBatch(color, std::move(strips));
+        }
         cmds->DrawTranslucentStrips(std::move(batch));
 
         if (show_panel_) {
@@ -280,9 +317,10 @@ private:
         ui_.SliderFloat("太阳仰角 °", &(deg_.sun_elev_deg), row_rect(row++), 0.0f, 90.0f, 0);
         ui_.SliderFloat("不透明度", &opacity_, row_rect(row++), 0.0f, 1.0f, 2);
         ui_.SliderFloat("条带宽度", &width_scale_, row_rect(row++), 0.2f, 2.5f, 2);
-        ui_.Checkbox("使用纹理", &use_texture_, row_rect(row++));
+        ui_.Checkbox("使用纹理（关 = 纯色）", &use_texture_, row_rect(row++));
         ui_.Checkbox("柔边剖面", &soft_edges_, row_rect(row++));
         ui_.Checkbox("形状动画", &animate_, row_rect(row++));
+        ui_.Checkbox("显示条带", &show_strips_, row_rect(row++));
     }
 
     static constexpr float kFontSize = 16.0f;
