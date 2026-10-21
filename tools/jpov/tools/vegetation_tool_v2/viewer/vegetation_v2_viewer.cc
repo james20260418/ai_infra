@@ -416,6 +416,9 @@ class VegetationV2App : public JPOV {
   Shape shape_;
   std::vector<uint32_t> branch_mesh_;   // 与 shape_.branches 下标对齐
   std::vector<int> branch_level_;
+  // 绿卡：整张 quad 的盒子（空间覆盖），debug 视图和角标一起显示/隐藏。
+  uint32_t card_box_mesh_ = 0;
+  jpov::PBRMaterial card_box_mat_;
   // UV 角徽标（红/黄/蓝 = uv(0,0)/(1,1)/(0,1)），每个颜色一个合并 mesh。
   uint32_t corner_mesh_[3] = {0, 0, 0};
   jpov::PBRMaterial corner_mat_[3];
@@ -697,6 +700,30 @@ class VegetationV2App : public JPOV {
       BuildLeafScene(args);
     }
 
+    // 绿卡：整张 quad 的盒子（厚度只为"看得见"，不代表卡片有厚度）。
+    // 与角标共用同一套 pivot / 同一份 width，保证四者永远对齐。
+    {
+      std::vector<float> cpos;
+      std::vector<uint32_t> cidx;
+      for (const auto& card : shape_.cards) {
+        AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.02, &cpos, &cidx);
+      }
+      if (!cpos.empty()) {
+        jpov::MeshData md;
+        md.flags = static_cast<jpov::MeshVertexFlags>(
+            static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
+            static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+        for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
+          md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
+          md.normals.push_back(jpov::Vec3f{0.0f, 1.0f, 0.0f});
+        }
+        md.indices = cidx;
+        card_box_mesh_ = RegisterMesh(std::move(md));
+        card_box_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.45f, 0.16f, 1.0f});
+        card_box_mat_.double_sided = true;
+      }
+    }
+
     // 角点徽标：把 quad 的三个 UV 角各缩成 1/8 的小盒子（厚 3cm），角点作为参照点。
     //   红 = uv(0,0)   黄 = uv(1,1)   蓝 = uv(0,1)
     // 这样用户一眼就知道素材的四个角该往哪贴；盒子厚度只为"看得见"，不代表卡片有厚度。
@@ -882,6 +909,10 @@ class VegetationV2App : public JPOV {
     }
     const bool debug_cards = !(has_leaf_ && show_leaf_);
     if (debug_cards) {
+      if (card_box_mesh_ != 0) {
+        cmds->DrawObject3D(card_box_mesh_, card_box_mat_, {0.0f, 0.0f, 0.0f},
+                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+      }
       for (int c = 0; c < 3; ++c) {
         if (corner_mesh_[c] == 0) continue;
         cmds->DrawObject3D(corner_mesh_[c], corner_mat_[c], {0.0f, 0.0f, 0.0f},
