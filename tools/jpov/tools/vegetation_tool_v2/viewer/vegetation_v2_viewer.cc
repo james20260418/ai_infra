@@ -114,6 +114,22 @@ void DilateRgbIntoTransparent(const std::vector<unsigned char>& alpha_mask,
   }
 }
 
+// 上下翻转 RGBA 行。
+// stb_image 解码后第 0 行是**图像顶部**，而 OpenGL 的 v=0 取第 0 行 ⇒ 直接上传时
+// v=0 = 图顶。Blender / glTF 的约定是 v=0 = 图**底**，用户按"根部画在图片底部"做的素材
+// 一旦直传就会整张上下颠倒。所以叶卡贴图在上传前翻一次行，让 uv(0,0) = 图左下。
+void FlipRows(std::vector<unsigned char>* rgba, int w, int h) {
+  const size_t stride = static_cast<size_t>(w) * 4;
+  std::vector<unsigned char> tmp(stride);
+  for (int y = 0; y < h / 2; ++y) {
+    unsigned char* a = rgba->data() + static_cast<size_t>(y) * stride;
+    unsigned char* b = rgba->data() + static_cast<size_t>(h - 1 - y) * stride;
+    std::memcpy(tmp.data(), a, stride);
+    std::memcpy(a, b, stride);
+    std::memcpy(b, tmp.data(), stride);
+  }
+}
+
 // 由 alpha 生成切线空间法线贴图：alpha 当高度场 → 模糊 → 中央差分。
 // green = +v（OpenGL 约定，与引擎 B = cross(N,T) 一致）；图像 y 向下，所以要取反。
 std::vector<unsigned char> BuildNormalFromAlpha(const std::vector<unsigned char>& rgba,
@@ -573,7 +589,11 @@ class VegetationV2App : public JPOV {
               << (100.0 * static_cast<double>(opaque) / static_cast<double>(mask.size())) << "%";
     // RGB 往透明区扩散：mip/双线性不会混进背景黑。
     DilateRgbIntoTransparent(mask, &rgba, w, h, 6);
-    const std::vector<unsigned char> normal_rgba = BuildNormalFromAlpha(rgba, w, h, 4.0f);
+    std::vector<unsigned char> normal_rgba = BuildNormalFromAlpha(rgba, w, h, 4.0f);
+    // 两张图一起翻：albedo 翻行后 v=0 = 图底；法线贴图同步翻行，
+    // 每个像素的 (x,y) 分量相对 +v 的含义不变，所以只需换行序、不改符号。
+    FlipRows(&rgba, w, h);
+    FlipRows(&normal_rgba, w, h);
 
     jpov::TextureOptions opts;
     opts.mipmap = true;
