@@ -11,10 +11,13 @@
 // 用法：
 //   jpov_vegetation_v2_viewer --shape /tmp/willow.pbtxt
 //   jpov_vegetation_v2_viewer --shape ... --capture /tmp/shots --cam_phi 10 --cam_r 4
+//   --normal-scale <f>   法线强度（默认 1.5；0~3）
+//   --uv-vscale 0.5      v 方向缩放（默认 0 = 自动取 albedo 宽/高）
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -45,6 +48,29 @@ using jpov::vegetation::Vec3d;
 constexpr int kMaxCardTypes = 4;  // 4 种绿
 constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了看得见朝向
 
+// 读 PNG 的 IHDR 拿像素尺寸（只为贴图长宽比，不值得为此加一条 stb 依赖）。
+// 非 PNG / 损坏 → 返回 false，调用方回退 1.0。
+bool ReadPngSize(const std::string& path, int* w, int* h) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return false;
+  unsigned char buf[24] = {0};
+  f.read(reinterpret_cast<char*>(buf), sizeof(buf));
+  if (f.gcount() != static_cast<std::streamsize>(sizeof(buf))) return false;
+  static const unsigned char kSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  for (int i = 0; i < 8; ++i) {
+    if (buf[i] != kSig[i]) return false;
+  }
+  const auto be32 = [](const unsigned char* p) {
+    return (static_cast<int>(p[0]) << 24) | (static_cast<int>(p[1]) << 16) |
+           (static_cast<int>(p[2]) << 8) | static_cast<int>(p[3]);
+  };
+  // PNG 规范要求 IHDR 是第一个 chunk：长度(4) + "IHDR"(4) + w(4) + h(4)。
+  if (buf[12] != 'I' || buf[13] != 'H' || buf[14] != 'D' || buf[15] != 'R') return false;
+  *w = be32(buf + 16);
+  *h = be32(buf + 20);
+  return *w > 0 && *h > 0;
+}
+
 struct CliArgs {
   std::string shape_path;
   std::string bark_dir;   // 空 = 不贴树皮（用 level 棕色）
@@ -55,6 +81,14 @@ struct CliArgs {
   double radius = 0.0;   // 0 = 自动
   int max_level = 99;
   float ground_y = 0.0f;
+  // 法线贴图强度（uNormalScale）。默认 1.5：同一树皮 A/B 实测
+  // 1.0 偏平、3.0 发塑料，1.5 最自然（Skylight + 单平行光下 ambient 占比高，
+  // 1.0 的凹凸容易被环境光冲淡）。面板滑条同一量程。
+  float normal_scale = 1.5f;
+  // UV 的 v 方向缩放 = 贴图宽/高。0 = 自动从 albedo 的像素尺寸读。
+  // 非方形贴图必须补偿，否则整张图被按正方形铺开：1:2 的图横向拉宽 2×，
+  // 凸起在 u 方向被压扁、纹素不再方正（法线细节跟着糊）。
+  float uv_vscale = 0.0f;
 };
 
 CliArgs ParseCli(int argc, char** argv) {
@@ -78,6 +112,12 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--cam_r" && has_val) {
       a.radius = std::atof(argv[++i]);
       CHECK_GT(a.radius, 0.0) << "--cam_r 必须 > 0";
+    } else if (arg == "--normal-scale" && has_val) {
+      a.normal_scale = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GT(a.normal_scale, 0.0f) << "--normal-scale 必须 > 0";
+    } else if (arg == "--uv-vscale" && has_val) {
+      a.uv_vscale = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GT(a.uv_vscale, 0.0f) << "--uv-vscale 必须 > 0";
     } else if (arg == "--ground-y" && has_val) {
       a.ground_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--max-level" && has_val) {
@@ -206,6 +246,9 @@ class VegetationV2App : public JPOV {
   // 树皮材质（--bark 给了才加载）。tile 由 UV 决定 = 该枝周长，与贴图尺寸无关。
   bool has_bark_ = false;
   bool show_bark_ = true;
+  float normal_scale_ = 1.5f;   // 面板可调；BuildScene 里来自 --normal-scale
+  // = 贴图宽/高；交给 SweepBranches 烘进 UV（v 方向），不是 shader 里改。
+  float uv_v_scale_ = 1.0f;
   jpov::PBRMaterial bark_mat_;
   uint32_t ground_mesh_ = 0;
   jpov::PBRMaterial ground_mat_;
@@ -223,11 +266,28 @@ class VegetationV2App : public JPOV {
   }
 
   void BuildScene(const CliArgs& args) {
+    normal_scale_ = args.normal_scale;
+    // v 方向补偿必须在生成 mesh 之前确定：UV 是扫管时烘进去的，不是 shader 里改的。
+    uv_v_scale_ = args.uv_vscale;
+    if (!args.bark_dir.empty() && uv_v_scale_ <= 0.0f) {
+      int tw = 0, th = 0;
+      const std::string albedo = args.bark_dir + "/albedo.png";
+      if (ReadPngSize(albedo, &tw, &th)) {
+        uv_v_scale_ = static_cast<float>(tw) / static_cast<float>(th);
+        LOG(INFO) << "UV v 缩放 = " << uv_v_scale_ << "（贴图 " << tw << "x" << th
+                  << "，v *= 宽/高）";
+      } else {
+        uv_v_scale_ = 1.0f;
+        LOG(WARNING) << "读不到 albedo 像素尺寸，uv_v_scale 取 1.0: " << albedo;
+      }
+    }
     branch_mesh_.resize(shape_.branches.size());
     branch_level_.resize(shape_.branches.size());
 
     // 逐枝 mesh：便于逐枝上色 + 逐枝隐藏
-    const MeshData whole = jpov::vegetation::SweepBranches(shape_);
+    jpov::vegetation::SweepOptions sweep_opts;
+    sweep_opts.uv_v_scale = uv_v_scale_;
+    const MeshData whole = jpov::vegetation::SweepBranches(shape_, sweep_opts);
     const std::vector<MeshData> parts = jpov::vegetation::SplitMeshByBranch(shape_, whole);
     CHECK_EQ(parts.size(), shape_.branches.size());
     for (size_t i = 0; i < parts.size(); ++i) {
@@ -322,7 +382,7 @@ class VegetationV2App : public JPOV {
     }
 
     if (!args.bark_dir.empty()) {
-      // bark_gen.py 的产物约定：albedo.png / normal.png / roughness.png
+      // 材质目录约定（make_bark_material.sh 的产物）：albedo/normal/roughness.png
       const std::string albedo = args.bark_dir + "/albedo.png";
       const std::string normal = args.bark_dir + "/normal.png";
       const std::string rough = args.bark_dir + "/roughness.png";
@@ -334,6 +394,7 @@ class VegetationV2App : public JPOV {
       bark_mat_.normal_tex = RegisterTexture(normal, opts);
       bark_mat_.has_roughness_tex = true;
       bark_mat_.roughness_tex = RegisterTexture(rough, opts);
+      bark_mat_.normal_scale = normal_scale_;
       bark_mat_.double_sided = true;
       has_bark_ = true;
       LOG(INFO) << "树皮材质: " << args.bark_dir;
@@ -445,7 +506,8 @@ class VegetationV2App : public JPOV {
       // 布局：两组面板都贴左下角，下面是【场景】，上面是【叶卡过滤】。
       const float colw = 0.34f * w;   // 0.26w 装不下"地面 y (m) + 数值"，标签会压在滑轨上
       const float cx = 0.02f * w;
-      const float scene_top = h - 16.0f - (3 * 32.0f);   // 预留 3 行：地面/层级/树皮
+      const int scene_rows = has_bark_ ? 4 : 3;   // 地面/层级/树皮/法线强度
+      const float scene_top = h - 16.0f - (scene_rows * 32.0f);
       const float leaf_top = scene_top - 12.0f - (2 * 32.0f);
       auto scene_row = [&](int i) {
         return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
@@ -457,7 +519,7 @@ class VegetationV2App : public JPOV {
       // 黑底：两组控件压在场景上，浅色地面时白字会糊掉。
       // 直接推 fillrect2d（在 Emit 之前 → 在向量里更早 → 画在控件下面）。
       const float panel_top = leaf_top - 10.0f;
-      const float panel_bottom = scene_top + 2 * 32.0f + 24.0f + 10.0f;
+      const float panel_bottom = scene_top + (scene_rows - 1) * 32.0f + 24.0f + 10.0f;
       // 必须走 DrawFillRect：它会同时登记到 cmds->order（渲染器按 order 遍历、
       // 再用下标回查 fillrect2d）。直接 push fillrect2d 不进 order → 根本不会被画。
       cmds->DrawFillRect({cx - 10.0f, panel_top}, {colw + 20.0f, panel_bottom - panel_top},
@@ -470,6 +532,8 @@ class VegetationV2App : public JPOV {
       ui_.SliderFloat("最大层级", &max_level_f_, scene_row(1), 0.0f, 20.0f, 0);
       if (has_bark_) {
         ui_.Checkbox("树皮纹理", &show_bark_, scene_row(2));
+        ui_.SliderFloat("法线强度", &normal_scale_, scene_row(3), 0.0f, 3.0f, 2);
+        bark_mat_.normal_scale = normal_scale_;
       }
 
       ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));

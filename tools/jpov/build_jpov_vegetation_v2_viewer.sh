@@ -58,6 +58,21 @@ else
     echo "WARNING: 缺 $TOOL_DIR/samples/willow.pbtxt（先跑 export_vegetation_shape.py）"
 fi
 
+# 树皮材质：把 fetch_textures.sh 下下来的 JPG 转成 viewer 直接能吃的目录。
+# 转换失败不阻断构建（没有 ImageMagick / 没下过贴图都能只跑形状）。
+echo ""
+echo "==> 5. 生成树皮材质 bark/bark001/"
+BARK_SRC="$PROJECT_DIR/tools/jpov/tools/vegetation/textures/bark001"
+if [ -d "$BARK_SRC" ] && command -v convert >/dev/null 2>&1; then
+    if "$TOOL_DIR/make_bark_material.sh" "$BARK_SRC" "$OUTPUT_DIR/bark/bark001" >/dev/null; then
+        echo "OK: $OUTPUT_DIR/bark/bark001"
+    else
+        echo "WARNING: 树皮材质生成失败（见上）"
+    fi
+else
+    echo "SKIP: 缺 $BARK_SRC 或 ImageMagick（fetch_textures.sh 后重跑即可）"
+fi
+
 echo ""
 ls -lh "$OUTPUT_DIR/"
 echo ""
@@ -74,5 +89,6 @@ echo "    左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注�
 echo "    [ ] = 调最大显示层级    P = 打印相机"
 echo "    面板：地面 y / 最大层级 / 树皮纹理 / 显示全部叶子 / 叶 type 下标"
 echo ""
-echo "  贴树皮（材质目录由 bark_gen.py 产出：albedo/normal/roughness.png）："
-echo "    ./jpov_vegetation_v2_viewer --shape shapes/willow.pbtxt --bark <材质目录>"
+echo "  贴树皮（bark/bark001 已自动生成；也可自己造 albedo/normal/roughness.png）："
+echo "    ./jpov_vegetation_v2_viewer --shape shapes/willow.pbtxt --bark bark/bark001"
+echo "    法线强度默认 1.5，面板可调 / --normal-scale <0~3>"
