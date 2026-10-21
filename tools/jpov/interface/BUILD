@@ -67,6 +67,18 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# StripTypes — 半透明条带接口层类型（GL-free：Strip16 / TranslucentStripBatch）
+cc_library(
+    name = "strip_types",
+    hdrs = ["strip_types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pbr_material",
+        "//geom/common:vec",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # RenderCommand — 帧级渲染指令输出
 cc_library(
     name = "render_command",
@@ -79,6 +91,7 @@ cc_library(
         ":pbr_material",
         ":particle_types",
         ":skeleton_types",
+        ":strip_types",
         ":volume_fire_types",
         "//geom/common:vec",
         "//geom/math:piecewise_linear_function",

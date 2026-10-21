@@ -475,6 +475,38 @@ cc_binary(
     ],
 )
 
+# 半透明条带查看器（Strip3D）：一批三条带 = 一次 draw call，验收 WBO 覆盖集混合。
+cc_library(
+    name = "strip_viewer_app",
+    hdrs = ["demo/strip_viewer_app.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":skylight_scene",
+        ":view_config",
+        ":viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:strip_types",
+        "//tools/jpov/interface:ui",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_strip_viewer",
+    srcs = ["demo/jpov_strip_viewer.cc"],
+    deps = [
+        ":strip_viewer_app",
+        ":skylight_scene",
+        ":view_config",
+        "//tools/jpov/include/jpov:jpov",
+        "@glog_static//:glog",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 # ============================================================================
 # 植被查看器（vegetation viewer）— 植物生成链路的最后环节工具。
 # 装载已生成的植物 GLB（--glb <path>），在标准天光（昼夜可调）下观察 + 出图；
@@ -527,6 +559,13 @@ filegroup(
         "assets/fire/mp/flames_pairs_v71_12x6.png",
         "assets/smoke/danis_repaint_12x6.png",
     ],
+    visibility = ["//tools/jpov:__subpackages__"],
+)
+
+# 半透明条带的测试纹理（Danis 手绘；近黑像素已转 alpha=0），gold 与 viewer 共用。
+filegroup(
+    name = "strip_gold_assets",
+    srcs = ["assets/strip/ribbon_test.png"],
     visibility = ["//tools/jpov:__subpackages__"],
 )
 

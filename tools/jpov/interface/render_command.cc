@@ -245,6 +245,11 @@ void RenderCommandList::DrawVolumeFire(VolumeFireCommand cmd) {
     volume_fires.push_back(std::move(cmd));
 }
 
+void RenderCommandList::DrawTranslucentStrips(TranslucentStripBatch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawTranslucentStrips: strips 不能为空";
+    translucent_strips.push_back(std::move(cmd));
+}
+
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,
                                        const Vec3f& center,
                                        const Vec3f& up, const Vec3f& front,
