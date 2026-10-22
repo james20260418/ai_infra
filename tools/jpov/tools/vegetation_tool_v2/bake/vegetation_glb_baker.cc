@@ -520,8 +520,9 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
   }
 
   // ── 5. 写盘 ──
-  if (!meshes.empty() && meshes.size() > 1) {
-    trunk_triangles += static_cast<int>(meshes[1].mesh.indices.size() / 3);
+  // 统计里的三角形数要把**所有**叶卡 bucket 都算上（按 type 分桶后不止一个叶卡 primitive）。
+  for (size_t i = 1; i < meshes.size(); ++i) {
+    trunk_triangles += static_cast<int>(meshes[i].mesh.indices.size() / 3);
   }
   GltfSaveAsset asset;
   asset.name = "vegetation";
