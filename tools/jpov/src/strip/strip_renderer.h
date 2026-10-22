@@ -14,8 +14,10 @@
 //     uv：**u = 沿长度 s（col/15，图片从左到右）**、**v = 横跨宽度（0=right / 1=left）**；
 //     四个角对应素材的左下 right0 / 左上 left0 / 右下 right15 / 右上 left15。
 //
-//   FS：
-//     α = tint.a · vertex_alpha · texture.a · width_profile(v)   （v 是宽度方向）
+//   FS（逐片元）：
+//     point = PointColor(u)                     // 逐点半线性采样 RGBA（rgb 可 HDR，a = 纵向不透明度）
+//     color = point.rgb · texture.rgb           // 有纹理时
+//     α     = point.a · texture.a · width_profile(v)
 //     → 与不透明场景深度手动作深度测试（WBO 目标无深度缓冲）：
 //         soft_depth_m = nullopt → 硬判据（比场景远 2cm 即丢弃）；
 //         有值 → clamp((scene_z − z)/值, 0, 1) 线性淡出（条带与几何相交处无硬切边）。
@@ -23,7 +25,14 @@
 //         kCoverage: att0 = vec4(色·α, α)·w、att1 = α（吸收介质，参与遮挡）
 //         kEmissive: att2 = 色·α（发光介质，与背景相加、不被遮挡衰减）
 //        不用的附件写恒等值（同粒子 FS 的写法）。
-//     剖面在**片元**里逐像素求值 ⇒ 4 段几何也能有平滑的宽度方向衰减。
+//
+//   ⭐ 逐点颜色 + 宽度剖面都在**同一张 per-instance 数据纹理**里（一行 = 一条带，
+//      行宽 25 texel = 16 列颜色 + 9 个剖面 knot）：
+//        · 两段都用硬件双线性 ⇒ 颜色列间 / 剖面 knot 间都是**精确分段线性**；
+//        · 都在片元里按真实参数求值 ⇒ 4 段几何也能有平滑的颜色/宽度过渡；
+//        · 不需要任何逐实例顶点属性（几何 5 float/顶点，平滑 pass 6 float/顶点）。
+//      也没有 batch 级 tint / 逐条带 tint / 加法增益 —— 颜色与 α 只有**一个**来源：
+//      `Strip16::point_color`（见 interface/strip_types.h 的数据分层说明）。
 //
 //   fresnel（M4，2026-10-22）：逐片元 Schlick 边反，参数见 interface/strip_types.h:StripFresnel。
 //     法线来源**与 pass 绑定**（不可单独选）：
@@ -32,7 +41,7 @@
 //     「平滑几何 + 折面法线」这个组合不提供 —— 边反会变成与几何无关的亮带。
 //     开关关闭时片段逐字节等于旧画面。
 //
-// ⭐ 两个独立 pass（2026-10-21 Danis 定；统一一个命令接口 StripStyle）：
+// ⭐ 两个独立 pass（2026-10-21 Danis 定；统一一个命令接口 StripInterpolation）：
 //   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
 //   kSmooth   —— kSmoothVs / kSmoothFsMain：点即控制点，段间是 C1 Hermite，
 //                在 FS 里按真实曲线反解参数并用 discard + fwidth 裁形。
@@ -67,7 +76,7 @@ public:
 
     // ── 着色器分段 ──
     //
-    // 折线与平滑**只在「几何 → (u,v,α)」这一步不同**；之后的深度测试 / 两个集合 /
+    // 折线与平滑**只在「几何 → (u,v)」这一步不同**；之后的深度测试 / 两个集合 /
     // WBO 写入必须逐字一致（那段抄错一处就是「画面悄悄错、gold 未必红」）。
     // 所以拼装顺序固定为：
     //   kCommonFsHead + kWboWeightGlsl + kFsEmit + (kFsMain | kSmoothFsMain)
@@ -78,18 +87,17 @@ public:
     //
     // vStripId 是**免费**的：索引缓冲按「块 j = 顶点基址 j×32」静态生成，
     // 于是 `gl_VertexID / 32` 就是条带下标（索引绘制里 gl_VertexID = 索引值本身）。
-    // 所以 per-instance 颜色**不需要**新增顶点属性（平滑 pass 已经有 aStripId 属性）。
     // 32 = kStripVerticesPerStrip，GLSL 引用不到 C++ 常量，改一处必须同步另一处。
     static constexpr const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aUVAlpha;   // (u, v, alpha)
+layout(location = 1) in vec2 aUV;        // (u = 沿长度, v = 横跨宽度)
 uniform mat4 uViewProj;
-out vec3 vUVAlpha;
+out vec2 vUV;
 out vec3 vWorld;
 flat out float vStripId;
 void main() {
-    vUVAlpha = aUVAlpha;
+    vUV = aUV;
     vWorld = aPos;
     vStripId = float(gl_VertexID / 32);
     gl_Position = uViewProj * vec4(aPos, 1.0);
@@ -99,24 +107,20 @@ void main() {
     // 片元公共段：两个 pass 的 uniform / varying / 工具函数 / 输出声明。
     static constexpr const char* kCommonFsHead = R"glsl(
 #version 330 core
-in vec3 vUVAlpha;                 // (u, v, alpha)
+in vec2 vUV;                      // (u 沿长度, v 横跨宽度)
 in vec3 vWorld;                   // 世界坐标（fresnel 求法线/视线用）
-flat in float vStripId;           // 本片元所属条带（= 逐条带数据的下标）
+flat in float vStripId;           // 本片元所属条带（= per-instance 数据的行号）
 uniform sampler2D uTex;
-uniform sampler2D uStripTint;     // 逐条带 tint：1 texel / 条带（宽 = N，高 = 1），RGBA32F
-uniform int uHasStripTint;        // 0 = 本批没有逐条带颜色（只用 uTint，零取样）
-uniform float uStripTintCount;    // 该纹理**有效**宽度（条带数），用于钳下标
-uniform sampler2D uPointColor;    // 逐点颜色：宽 = 16 列、高 = 条带数，RGBA32F + 双线性
-uniform int uHasPointColor;       // 0 = 本批没有逐点颜色（零取样）
-uniform float uPointColorRows;    // 逐点颜色纹理高度（= 条带数，夹行号用）
-uniform float uAdditiveGain;      // 加法集的 HDR 增益（覆盖集恒 1.0，不参与）
-uniform int uHasTex;
-uniform vec4 uTint;
-uniform float uProfile[9];        // 宽度方向（v）= k/8 处的 alpha 乘子
+// per-instance 数据纹理：一行 = 一条带，行宽 25 texel：
+//   [0..15]  逐点 RGBA（u 方向 16 列，硬件双线性 ⇒ 列间平滑）
+//   [16..24] 宽度剖面 9 个 knot（v = k/8，硬件双线性 ⇒ **精确分段线性**）
+uniform sampler2D uAppearance;
+uniform float uAppearanceRows;    // 该纹理**实际高度**（容量，不一定等于本批条带数）
 uniform sampler2D uSceneDepth;
 uniform vec2 uViewport;           // 本 pass 的像素尺寸（1× 时即 3D FBO 尺寸）
 uniform float uNear;
 uniform float uFar;
+uniform int uHasTex;
 uniform int uBlendPath;            // 0 = 覆盖集（吸收）；1 = 加法集（发光）
 uniform int uSoftDepthEnabled;     // 1 = 软深度淡出；0 = 硬判据（2cm）
 uniform float uSoftDepthM;         // 软深度过渡距离（米，仅 enabled 时有效）
@@ -137,40 +141,28 @@ float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
 }
-// 本片元的最终 tint = 整批材质色 ×（有则）逐条带颜色。
-// 逐条带颜色走**纹理**而不是顶点属性：折线 pass 靠 gl_VertexID/32 免费得到条带下标，
-// 平滑 pass 本来就有 aStripId ⇒ 两条 pass 都不加任何顶点数据。
-// 同一个条带的所有片元读同一个 texel，NEAREST + 整数坐标 ⇒ 精确常量，无插值误差。
-vec4 EffectiveTint() {
-    if (uHasStripTint == 1) {
-        // texelFetch 越界是**未定义行为**（不是"返回 0"），与平滑数据纹理同样处理：
-        // 下标按「本批实际条带数」钳一次。纹理容量（按 2 倍扩容）通常大于条带数。
-        int idx = int(clamp(vStripId, 0.0, uStripTintCount - 1.0));
-        return uTint * texelFetch(uStripTint, ivec2(idx, 0), 0);
-    }
-    return uTint;
+// 本片元所属条带的纹理行坐标（texel **中心** ⇒ 竖直方向权重恰好落在本行，
+// 不会渗到相邻条带）。行号按纹理**实际高度**钳一次：texelFetch/取样越界是 UB。
+float AppearanceRow() {
+    return (clamp(vStripId, 0.0, uAppearanceRows - 1.0) + 0.5) /
+           max(uAppearanceRows, 1.0);
 }
-// 沿长度（u）的**逐点颜色**：16 列 × 每列 1 texel，硬件双线性 ⇒ 列间平滑过渡。
-// 采样坐标刻意落在 texel 正中心（u = col/15 → tx = (col+0.5)/16），
-// 于是列上的颜色是精确的、不掺邻列；两个 texel 之间才走插值。
-// 16 / 15 = kStripSampleCount / kStripQuads（GLSL 引用不到 C++ 常量，改要同步）。
+// 逐点 RGBA：16 列 × 每列 1 texel，硬件双线性 ⇒ 列间平滑过渡。
+// 采样坐标刻意落在 texel 正中心（u = col/15 → tx = (col+0.5)/25），
+// 于是列上的颜色/alpha 是精确的、不掺邻列；两个 texel 之间才走插值。
+// 25 / 15 分别对应 CPU 侧的 kAppearanceTexels / kStripQuads（GLSL 引用不到 C++ 常量）。
 vec4 PointColor(float u) {
-    if (uHasPointColor == 0) {
-        return vec4(1.0);
-    }
-    float tx = (clamp(u, 0.0, 1.0) * 15.0 + 0.5) / 16.0;
-    // 行坐标取 texel 中心 ⇒ 竖直方向权重恰好落在本行（不会渗到相邻条带）。
-    float ty = (vStripId + 0.5) / max(uPointColorRows, 1.0);
+    float tx = (clamp(u, 0.0, 1.0) * 15.0 + 0.5) / 25.0;
     // textureLod(...,0)：这张纹理没有 mipmap，隐式导数只为算 LOD —— 纯浪费；
     // 而且平滑 pass 的 u* 在段边界被 clamp 过，导数本身是脏的。
-    return textureLod(uPointColor, vec2(tx, ty), 0.0);
+    return textureLod(uAppearance, vec2(tx, AppearanceRow()), 0.0);
 }
-// 宽度方向剖面：9 knot / 8 段分段线性，在片元里求值（不是在顶点里插值）。
+// 宽度方向剖面：9 knot / 8 段，在片元里求值（不是在顶点里插值）。
 // 参数是**宽度方向**的 v（0 = right 边 / 1 = left 边）。
+// 9 个 knot 等距 ⇒ 双线性采样得到的就是分段线性函数（knot 上是精确值）。
 float WidthProfile(float w) {
-    float x = clamp(w, 0.0, 1.0) * 8.0;
-    int i = int(min(floor(x), 7.0));
-    return mix(uProfile[i], uProfile[i + 1], x - float(i));
+    float tx = (16.0 + clamp(w, 0.0, 1.0) * 8.0 + 0.5) / 25.0;
+    return textureLod(uAppearance, vec2(tx, AppearanceRow()), 0.0).r;
 }
 // 采样条带纹理并与 (color, α) 相乘（黑底素材天然透明：色×α 仍是 0）。
 void ModulateTexture(vec2 uv, inout vec3 color, inout float a) {
@@ -198,20 +190,21 @@ float FresnelFactor(vec3 N) {
 }
 // 把菲涅耳作用到（尚未定稿的）(color, a) 上：
 //   颜色 → 掠射处趋近 rim_color（反射色）
-//   覆盖度 → 掠射处趋近 graze_alpha × shape_fade（边变实，中心仍然看得穿）
+//   覆盖度 → 掠射处趋近 graze_alpha（边变实，中心仍然看得穿）
 //
-// `shape_fade` = 逐点 alpha × 逐点颜色 alpha，即**沿长度的淡出**（形状边界）。
-// 刻意**不乘** tint.a / 逐条带不透明度 / 纹理 alpha / 剖面 alpha：
-//   前两个是「材质密度」，边反是独立旋钮（薄膜 α=0.12 也该有实心亮边）；
-//   后两个是「贴图内容」，不该把一个几何边挖掉。
+// ⚠️ 刻意**不乘任何 α 乘子**（逐点 alpha / 纹理 alpha / 剖面 alpha 都不乘）：
+//   反射是独立旋钮 —— 薄膜 a=0.12 也该有实心亮边（这正是 fresnel 存在的理由）。
+//   2026-10-22 重构把「不透明度」并进了逐点颜色的 alpha 通道，两者不再可分：
+//   若乘上去，0.12 的玻璃壳亮边也只剩 0.12（等于没有边反），所以这里选择不乘。
+//   代价（已知限制）：开了 fresnel 的条带不要在长度方向做淡出，否则淡出段的边反会保留。
 // 调用位置固定：ModulateTexture 之后、WidthProfile / 裁形 AA 之前（它们是最后一层）。
-void ApplyFresnel(vec3 N, float shape_fade, inout vec3 color, inout float a) {
+void ApplyFresnel(vec3 N, inout vec3 color, inout float a) {
     if (uFresnelEnabled == 0) {
         return;
     }
     float f = FresnelFactor(N);
     color = mix(color, uFresnelRimColor, f);
-    a = mix(a, uFresnelGrazeAlpha * shape_fade, f);
+    a = mix(a, uFresnelGrazeAlpha, f);
 }
 )glsl";
 
@@ -220,6 +213,9 @@ void ApplyFresnel(vec3 N, float shape_fade, inout vec3 color, inout float a) {
     // 必须拼在 kWboWeightGlsl（WeightWbo）之后。
     static constexpr const char* kFsEmit = R"glsl(
 void EmitFragment(vec3 color, float a) {
+    // 早退门槛按**覆盖率**（两个集合同一个门槛）。
+    // 已知边界：颜色允许 HDR 之后，「a 极低但颜色极亮」的片元（注入量 > 1/255）
+    // 也会在这里被丢掉。改它会改画面，留作单独一次改动（要重出 gold），本轮不做。
     if (a <= 1.0 / 255.0) {
         discard;
     }
@@ -236,8 +232,8 @@ void EmitFragment(vec3 color, float a) {
     }
     if (uBlendPath == 1) {
         // 加法集：发光介质直接与背景相加；黑底纹理 → 贡献 0 → 天然透明。
-        // uAdditiveGain 是 HDR 增益（>1 才能吃到 bloom / tone map 的余量）。
-        vec3 contrib = color * a * fade * uAdditiveGain;
+        // 亮度完全由 color（逐点 HDR × 纹理）与 α 决定 —— 没有额外增益旋钮。
+        vec3 contrib = color * a * fade;
         if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
             discard;
         }
@@ -258,18 +254,17 @@ void EmitFragment(vec3 color, float a) {
 }
 )glsl";
 
-    // 折线 pass 的 main：uv/α 直接来自顶点（段间是弦）。
+    // 折线 pass 的 main：uv 直接来自顶点（段间是弦）。
     // 法线只能来自屏幕空间导数（= 所在三角形平面法线，逐折面恒定 ——
     // 16 列折线上会看到一圈圈亮带，要光滑请切 kSmooth）。
     static constexpr const char* kFsMain = R"glsl(
 void main() {
-    vec4 tint = EffectiveTint();
-    vec4 pc = PointColor(vUVAlpha.x);
-    vec3 color = tint.rgb * pc.rgb;
-    float a = tint.a * pc.a * vUVAlpha.z;
-    ModulateTexture(vUVAlpha.xy, color, a);
-    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), vUVAlpha.z * pc.a, color, a);
-    a *= WidthProfile(vUVAlpha.y);
+    vec4 point = PointColor(vUV.x);
+    vec3 color = point.rgb;
+    float a = point.a;
+    ModulateTexture(vUV, color, a);
+    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
+    a *= WidthProfile(vUV.y);
     EmitFragment(color, a);
 }
 )glsl";
@@ -285,14 +280,14 @@ void main() {
     static constexpr const char* kSmoothVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aUVAlpha;   // (u, v, alpha)；v 已折入外扩（见 CPU 侧）
+layout(location = 1) in vec2 aUV;        // (u, v)；v 已折入外扩（见 CPU 侧）
 layout(location = 2) in float aStripId;  // 本批第几条带 = 数据纹理行号
 uniform mat4 uViewProj;
-out vec3 vUVAlpha;
+out vec2 vUV;
 out vec3 vWorld;
 flat out float vStripId;
 void main() {
-    vUVAlpha = aUVAlpha;
+    vUV = aUV;
     vWorld = aPos;
     vStripId = aStripId;
     gl_Position = uViewProj * vec4(aPos, 1.0);
@@ -308,8 +303,8 @@ uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；
 uniform sampler2D uStripData;
 void main() {
     // u 沿长度、v 横跨宽度；两者都是**真实参数**（CPU 已把保守外扩折进属性 v）。
-    float u = vUVAlpha.x;
-    float v = vUVAlpha.y;
+    float u = vUV.x;
+    float v = vUV.y;
 
     float segF = clamp(u, 0.0, 1.0) * uSegCount;
     int seg = int(clamp(floor(segF), 0.0, uSegCount - 1.0));
@@ -371,15 +366,16 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    vec4 tint = EffectiveTint();
-    vec4 pc = PointColor(uStar);
-    vec3 color = tint.rgb * pc.rgb;
-    float a = tint.a * pc.a * vUVAlpha.z;
+    // 颜色/alpha 都按**重建后**的 u* 采样：逐点颜色与不透明度跟着真实曲线走
+    //（折线 pass 的 u 就是真实参数，两者行为一致）。
+    vec4 point = PointColor(uStar);
+    vec3 color = point.rgb;
+    float a = point.a;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
     // 也是平滑 pass 的附带好处：同一份数据已经在手上了，不用额外顶点属性。
-    ApplyFresnel(cross(dS, Hh), vUVAlpha.z * pc.a, color, a);
+    ApplyFresnel(cross(dS, Hh), color, a);
     a *= WidthProfile(vShade) * cov;
     EmitFragment(color, a);
 }
@@ -413,6 +409,11 @@ void main() {
     bool has_content() const { return has_content_; }
 
 private:
+    // per-instance 数据纹理的行宽（texel）：16 列逐点 RGBA + 9 个剖面 knot。
+    // ⚠️ 必须与 kCommonFsHead 里 PointColor / WidthProfile 的 `15.0`/`25.0`/`16.0`
+    //    字面量同步（shader 引用不到 C++ 常量）。
+    static constexpr int kAppearanceTexels = kStripSampleCount + kStripProfileKnots;
+
     // 1× 覆盖集（可选加法集）、无深度附件（NEAREST：1× 上插值没有意义）。
     void EnsureTarget(int w, int h, bool with_additive);
 
@@ -429,10 +430,10 @@ private:
     //（以前 DrawSmooth 把这段连同 soft_depth 分支逐字复制过去，加字段必然会漂移）。
     struct CommonUniforms {
         int view_proj = -1;
-        int tint = -1;
-        int has_tex = -1;
         int tex = -1;
-        int profile = -1;
+        int has_tex = -1;
+        int appearance = -1;
+        int appearance_rows = -1;
         int scene_depth = -1;
         int viewport = -1;
         int near_plane = -1;
@@ -442,13 +443,6 @@ private:
         int soft_m = -1;
         int soft_inv = -1;
         int cam_pos = -1;
-        int strip_tint = -1;
-        int has_strip_tint = -1;
-        int strip_tint_count = -1;
-        int point_color = -1;
-        int has_point_color = -1;
-        int point_color_rows = -1;
-        int additive_gain = -1;
         int fresnel_enabled = -1;
         int fresnel_rim_color = -1;
         int fresnel_f0 = -1;
@@ -471,13 +465,11 @@ private:
         int strip_data = -1;
     };
 
-    // 一次 Draw 的公共上下文：把 8 项挤进结构体，两个 drawer 就不用各带 7 个位置参数
+    // 一次 Draw 的公共上下文：把批级参数挤进结构体，两个 drawer 就不用各带 7 个位置参数
     // （同类型参数一多，抄改时最容易错位）。
     struct BatchDrawContext {
         const TranslucentStripBatch* batch = nullptr;
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
-        bool has_strip_tint = false;        // 本批是否上传了逐条带 tint 纹理
-        bool has_point_color = false;       // 本批是否上传了逐点颜色纹理
         bool want_additive = false;         // 本批走加法集
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
@@ -514,20 +506,24 @@ private:
     SmoothUniforms smooth_uniforms_;
     unsigned int smooth_vao_ = 0;
     unsigned int smooth_vbo_ = 0;
-    unsigned int strip_tint_tex_ = 0;     // RGBA32F：1 texel / 条带（宽 = 条带数，高 = 1）
-    int strip_tint_capacity_ = 0;         // 当前纹理宽度（条带数上限）
-    unsigned int point_color_tex_ = 0;    // RGBA32F：16 × 条带数（每列 1 texel，双线性）
-    int point_color_rows_ = 0;            // 当前纹理高度（条带数上限）
+    // per-instance 数据纹理（两个 pass 共用）：宽 kAppearanceTexels，高 = 条带数。
+    unsigned int appearance_tex_ = 0;
+    int appearance_capacity_ = 0;         // 当前纹理高度（条带数上限）
+    std::vector<float> appearance_data_;  // 复用缓冲：每行 kAppearanceTexels × 4 float
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
-    int smooth_max_rows_ = 0;             // GL_MAX_TEXTURE_SIZE（Init 时缓存）
-    std::vector<float> smooth_vertices_;  // kSmoothFloatsPerVertex/顶点：pos(3),u,v,alpha,strip_id
+    int max_texture_rows_ = 0;            // GL_MAX_TEXTURE_SIZE（Init 时缓存）
+    std::vector<float> smooth_vertices_;  // kSmoothFloatsPerVertex/顶点：pos(3),u,v,strip_id
     std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n
 
     // 索引缓冲按需扩容（块 j = 第 j 条带，顶点基址 j×32）。幂等：够用就直接返回。
     // 为什么平滑 pass 必须能一次画完整批：它的数据纹理行号 = 全局 strip 下标，
     // 若分块就要么重传顶点、要么写一张正在被采样的纹理（两者都是坑）。
     void EnsureIboCapacity(int strips);
+
+    // 逐条带的颜色/剖面 gather 到复用缓冲，并上传为纹理（整批一次）。
+    // 两个 pass 都必须在 ApplyCommonUniforms 之前调用（它负责绑定纹理）。
+    void UploadAppearance(const std::vector<Strip16>& strips);
 
     // 两个 drawer：同一张 WBO 目标，各自的 program/VAO/数据通道。
     void DrawPolyline(const BatchDrawContext& ctx);

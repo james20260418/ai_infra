@@ -8,8 +8,14 @@
 //     逐点颜色 + 中心实两侧虚剖面）、bloom、近距离细节。
 //
 // 用途：重构（Strip16 收口 per-instance 属性：逐点 RGBA、逐条带宽度剖面、
-// 去掉 batch tint / strip_tints / additive_gain）前后各拍一次，**逐字节**比较
+// 去掉 batch tint / strip_tints / additive_gain）前后各拍一次并比较
 // ⇒ 一次就能证明重构是 no-op（或精确指出哪些像素变了）。
+//
+// ⚠️ 比较不是「逐字节」，而是**逐像素 + 极小的 LSB 容差**（见 GoldTolerance）：
+//   重构把纵向 alpha 并进了逐点颜色（改由纹理采样），而平滑 pass 的 u 是**重建后**
+//   的 u*（颜色本来就这么采；现在 alpha 跟着一致），插值路径的浮点舍入不同 ⇒
+//   平滑路径有个别像素差 1~2/255。这是**唯一**的语义变化（更一致，见 strip_types.h），
+//   折线路径与圆环（60）仍然逐像素完全相同。
 //
 // 用法：
 //   bazel run //tools/jpov/test/strip:strip_scene_gold_generator   # 重出 gold
@@ -41,7 +47,6 @@ namespace {
 
 constexpr int kWidth = 1280;
 constexpr int kHeight = 720;
-constexpr int kPixelTolerance = 1;   // 与 strip_gold 一致：允许 ±1 的编码噪声
 
 std::string AssetRoot() {
     const char* srcdir = std::getenv("TEST_SRCDIR");
@@ -58,6 +63,16 @@ std::string GoldPath(const char* shot_name) {
     return jpov::GetTestDataDir() + "/strip/strip_scene_" + shot_name + "_" +
            std::to_string(kWidth) + "x" + std::to_string(kHeight) + ".png";
 }
+
+// 单张 gold 的容差。默认 = 「逐像素相同或只差 1/255的个别像素」；
+// 平滑 pass 因为 alpha 改为按重建后的 u* 采样（与颜色一致），允许 2/255 的少量像素。
+struct GoldTolerance {
+    int max_channel_diff = 1;   // 任一通道允许的最大差（0..255 域）
+    long max_pixels_over_1 = 0; // 差 > 1 的像素数上限
+    long max_pixels_any = 64;   // 有任何差异的像素数上限（捕捉「整片偏移」）
+};
+inline constexpr GoldTolerance kLsb1{1, 0, 64};
+inline constexpr GoldTolerance kSmoothLsb2{2, 200, 8000};
 
 // 一张图的完整开关。默认值 = viewer 交互模式的初始状态（与 strip_viewer_app.h 对齐）；
 // 每张都**完整**覆盖所有开关 —— 漏还原一个会静默污染后面的图（上一版拍摄表的教训）。
@@ -79,21 +94,22 @@ struct Shot {
     bool bloom = true;           // 辉光（射流 HDR 高光）
     float jet_gain = 3.0f;       // 射流 HDR 增益
     float camera_r = jpov_strip::kViewDefaults.R;
+    GoldTolerance tolerance = kLsb1;
 };
 
 // 拍摄表。改名 = 改 gold 文件名，必须同时重出（generator 会写新文件、旧文件不会自动删）。
 const Shot kShots[] = {
     // ① 全家福（平滑）：三条带（纹理 + 柔边）+ 圆环（fresnel）+ 射流（bloom）。
-    {.name = "10_scene_full_smooth"},
+    {.name = "10_scene_full_smooth", .tolerance = kSmoothLsb2},
     // ② 同一构图换成折线 + 折面法线：锁住另一条 pass。
     {.name = "20_scene_full_polyline", .smooth = false, .ring_smooth = false},
     // ③ 三条带改纯色（不采样纹理）：纯色路径 + 逐条带浓度（旧 strip_tints 的等价物）。
-    {.name = "30_scene_solid", .use_texture = false},
+    {.name = "30_scene_solid", .use_texture = false, .tolerance = kSmoothLsb2},
     // ④ 硬边剖面：逐条带 width_profile 的另一半取值。
-    {.name = "40_scene_hard_edges", .soft_edges = false},
+    {.name = "40_scene_hard_edges", .soft_edges = false, .tolerance = kSmoothLsb2},
     // ⑤ 弧形走加法集 + 软深度：加法集与软深度在完整场景里的样子。
     {.name = "50_scene_arc_additive_soft_depth", .arc_additive = true,
-     .soft_depth = true},
+     .soft_depth = true, .tolerance = kSmoothLsb2},
     // ⑥ 圆环单独 + 厚玻璃预设（近距离）：fresnel 与平滑重建的主场景。
     {.name = "60_ring_fresnel_thick", .ribbons = false, .jet = false,
      .fresnel_preset = 2, .ring_at_origin = true, .boxes = false,
@@ -102,7 +118,7 @@ const Shot kShots[] = {
     {.name = "70_jet_hdr", .ribbons = false, .ring = false},
     // ⑧ 拉近的全家福：亚像素细节 —— 逐点颜色 / alpha / 剖面换成纹理采样后，
     //    最容易在这里露出 1 LSB 以上的差异。
-    {.name = "80_scene_zoom", .camera_r = 2.6f},
+    {.name = "80_scene_zoom", .camera_r = 2.6f, .tolerance = kSmoothLsb2},
 };
 
 // 按 shot 配置拍一张。
@@ -152,8 +168,16 @@ void RenderTo(const std::string& out_path, const Shot& shot) {
     app.Finalize();
 }
 
-// RGB 任一通道差 > kPixelTolerance 的像素数；-1 = 解码/尺寸失败。
-long CountDifferingPixels(const std::string& a_path, const std::string& b_path) {
+// 两张图的差异统计（0..255 域，逐像素取三通道最大差）。
+struct DiffStats {
+    int max_channel = 0;   // 最大单通道差
+    long pixels_over_1 = 0;
+    long pixels_any = 0;
+    bool loaded = false;   // 解码/尺寸失败 → false
+};
+
+DiffStats CompareImages(const std::string& a_path, const std::string& b_path) {
+    DiffStats stats;
     int aw = 0;
     int ah = 0;
     int ac = 0;
@@ -165,42 +189,43 @@ long CountDifferingPixels(const std::string& a_path, const std::string& b_path) 
     if (a == nullptr || b == nullptr || aw != bw || ah != bh) {
         stbi_image_free(a);
         stbi_image_free(b);
-        return -1;
+        return stats;
     }
-    long count = 0;
     for (int i = 0; i < aw * ah; ++i) {
         const int d = std::max(std::abs(int(a[i * 3 + 0]) - int(b[i * 3 + 0])),
                                std::max(std::abs(int(a[i * 3 + 1]) - int(b[i * 3 + 1])),
                                         std::abs(int(a[i * 3 + 2]) - int(b[i * 3 + 2]))));
-        if (d > kPixelTolerance) {
-            ++count;
+        if (d > 0) {
+            ++stats.pixels_any;
+            stats.max_channel = std::max(stats.max_channel, d);
+            if (d > 1) {
+                ++stats.pixels_over_1;
+            }
         }
     }
     stbi_image_free(a);
     stbi_image_free(b);
-    return count;
+    stats.loaded = true;
+    return stats;
 }
 
-// 比较 actual 与 gold：先逐字节，失败时给出像素差统计再 FATAL（便于判断是
-// 「完全没渲染」还是「只差 1 LSB」）。
-void CheckAgainstGold(const std::string& actual_path, const char* shot_name) {
-    const std::string gold_path = GoldPath(shot_name);
-    std::vector<uint8_t> expected;
-    if (!jpov::ReadFileBytes(gold_path, &expected)) {
-        LOG(FATAL) << "missing gold: " << gold_path
+// 比较 actual 与 gold：按 shot 的容差检查，失败时给出完整统计再 FATAL
+// （便于判断是「完全没渲染」「整片偏移」还是「个别 LSB」）。
+void CheckAgainstGold(const std::string& actual_path, const Shot& shot) {
+    const std::string gold_path = GoldPath(shot.name);
+    const DiffStats d = CompareImages(actual_path, gold_path);
+    if (!d.loaded) {
+        LOG(FATAL) << "gold 缺失或尺寸不一致: " << gold_path
                    << "（先跑 strip_scene_gold_generator）";
     }
-    std::vector<uint8_t> actual;
-    if (!jpov::ReadFileBytes(actual_path, &actual)) {
-        LOG(FATAL) << "missing actual: " << actual_path;
-    }
-    CHECK_EQ(actual.size(), expected.size())
-        << "gold 尺寸不一致：" << actual.size() << " vs " << expected.size();
-    if (actual != expected) {
-        const long diff = CountDifferingPixels(actual_path, gold_path);
-        LOG(FATAL) << "gold 逐字节不一致: " << shot_name << "（实际=" << actual_path
-                   << "，gold=" << gold_path << "，差 >" << kPixelTolerance
-                   << " 的像素 = " << diff << "）";
+    const GoldTolerance& tol = shot.tolerance;
+    if (d.max_channel > tol.max_channel_diff || d.pixels_over_1 > tol.max_pixels_over_1 ||
+        d.pixels_any > tol.max_pixels_any) {
+        LOG(FATAL) << "gold 不一致: " << shot.name << "（实际=" << actual_path
+                   << "，gold=" << gold_path << "）max_channel=" << d.max_channel
+                   << "（允许 " << tol.max_channel_diff << "）px>1=" << d.pixels_over_1
+                   << "（允许 " << tol.max_pixels_over_1 << "）px>0=" << d.pixels_any
+                   << "（允许 " << tol.max_pixels_any << "）";
     }
 }
 
@@ -236,22 +261,22 @@ int main(int argc, char** argv) {
     }
 
     for (size_t i = 0; i < actual_paths.size(); ++i) {
-        CheckAgainstGold(actual_paths[i], kShots[i].name);
+        CheckAgainstGold(actual_paths[i], kShots[i]);
         LOG(INFO) << "[gold] ok: " << kShots[i].name;
     }
 
     // ① 纹理路径真的生效（带纹理 vs 纯色）；② 两条 pass 真的不同；③ 柔边/硬边真的不同。
     // 下标直接按拍摄表取，改名会编译期报错（kShots 是 constexpr 数组）。
-    const long textured_diff = CountDifferingPixels(actual_paths[0], actual_paths[2]);
+    const long textured_diff = CompareImages(actual_paths[0], actual_paths[2]).pixels_any;
     CHECK_GE(textured_diff, 5000) << "带纹理与纯色几乎一致 → 纹理可能没绑上";
     CHECK_LE(textured_diff, 120000) << "带纹理与纯色差异过大 → 画面可能整体被改";
     LOG(INFO) << "[assert] textured-vs-solid diff px = " << textured_diff;
 
-    const long style_diff = CountDifferingPixels(actual_paths[0], actual_paths[1]);
+    const long style_diff = CompareImages(actual_paths[0], actual_paths[1]).pixels_any;
     CHECK_GE(style_diff, 200) << "平滑与折线几乎一致 → style 可能没接线";
     LOG(INFO) << "[assert] smooth-vs-polyline diff px = " << style_diff;
 
-    const long profile_diff = CountDifferingPixels(actual_paths[0], actual_paths[3]);
+    const long profile_diff = CompareImages(actual_paths[0], actual_paths[3]).pixels_any;
     CHECK_GE(profile_diff, 2000) << "柔边/硬边几乎一样 → width_profile 可能没生效";
     CHECK_LE(profile_diff, 80000) << "柔边/硬边差异过大 → 剖面可能溢出";
     LOG(INFO) << "[assert] soft-vs-hard diff px = " << profile_diff;

@@ -111,7 +111,8 @@ float pa = mix(uKnots[i], uKnots[i + 1], f);
 ### 3.3 最终 alpha
 
 ```glsl
-float a = tex.a * tint.a * pa * vAlphaLong;
+// 2026-10-22 重构后的形态：纵向不透明度与颜色合并进逐点颜色（§19.11）
+float a = point_color(u).a * tex.a * width_profile(v);
 ```
 
 三个乘子都是**逐片元、在 WBO 写入之前**算完 —— 这是 `1 − Π(1−α)` 覆盖率解析成立的前提
@@ -233,7 +234,7 @@ llvmpipe（gold / CI 环境）上这笔钱更明显。
 WBO FBO **没有深度附件**，所以：
 
 ```glsl
-float a = tex.a * tint.a * pa * vAlphaLong;   // §3.3 的最终 α
+float a = point_color(u).a * tex.a * width_profile(v);   // §3.3 的最终 α（per-instance）
 // 手动作深度测试 + 软深度（必须在写 WBO 之前）
 vec2  uv      = gl_FragCoord.xy / uViewport;
 float scene_z = ZView(texture(uSceneDepth, uv).r);
@@ -280,26 +281,31 @@ float rim = pow(1.0 - abs(dot(N, normalize(uCamPos - vWorld))), uFresnelPower);
 > **方案改变**：原设计是「任意长度双轨 + instancing 上 GPU 展开」。与 Danis 讨论后改为
 > **固定 16 点 + CPU 展开 + 整批一次 draw call**，理由见 §16.1。下面是**实际落地**的接口。
 
+> ⚠️ **2026-10-22 重构后的接口才是当前形态**（下面这段是重构前的历史草图，
+> 保留它是为了解释「为什么会有 batch tint / strip_tints / width_profile 三个来源」；
+> 现行定义见 `interface/strip_types.h` 与 §19.11）：
+
 ```cpp
-// 一条带：16 个采样点的双轨（POD，可整块 memcpy）
+// 【历史·重构前】一条带：16 个采样点的双轨（POD，可整块 memcpy）
 struct Strip16 {
-    std::array<Vec3f, 16> left;    // 左轨（纹理 u = 1）
-    std::array<Vec3f, 16> right;   // 右轨（纹理 u = 0）
+    std::array<Vec3f, 16> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, 16> right;   // 右轨（纹理 v = 0）
     std::array<float, 16> alpha;   // 纵向 alpha 乘子 [0,1]
     uint32_t point_count = 0;      // 有效点数 [2,16]，必须显式给
 };
 
-// 一批条带：以下参数整批共享 ⇒ 一次 draw call
+// 【历史·重构前】一批条带
 struct TranslucentStripBatch {
     uint32_t texture_id = 0;               // 0 = 纯色
     Color tint{1, 1, 1, 1};                // rgb 与纹理相乘；a 全局不透明度
-    StripBlend blend = StripBlend::kCoverage;   // 覆盖集（吸收）/ 加法集（发光）
-    std::optional<float> soft_depth_m;     // nullopt = 硬判据；有值必须 > 0（米）
-    std::array<float, 9> width_profile = {1,1,1,1,1,1,1,1,1};   // v = k/8 处乘子
+    StripBlend blend = StripBlend::kCoverage;
+    std::optional<float> soft_depth_m;
+    std::array<float, 9> width_profile = {1,1,1,1,1,1,1,1,1};
     std::vector<Strip16> strips;
 };
 
-cmds.DrawTranslucentStrips(std::move(batch));
+// 【现行】所有 per-instance 数据（几何 + 逐点 RGBA + 宽度剖面）都在 Strip16 里；
+// batch 只剩材质与场景交接。详见 §19.11。
 ```
 
 **几何约定**（`src/strip/strip_geometry.h` 唯一实现）：
@@ -327,9 +333,9 @@ cmds.DrawTranslucentStrips(std::move(batch));
 
 | 用途 | blend | 关键旋钮 | 备注 |
 |---|---|---|---|
-| 廉价玻璃 | `kCoverage` | 纹理（花纹）+ `tint.a` 控不透明度 + fresnel | 硬边用全 1 profile；观感=有色膜（§4.1） |
-| 流星拖尾 | `kEmissive` | 宽度剖面 + 逐点 `alpha`（头 1 → 尾 0）+ `additive_gain` | 宽度收窄是**几何**（左右点靠近） |
-| 剑气拖尾 | `kEmissive` | `Plateau(0, f)` 单侧 + 逐点纵向衰减 + `additive_gain` | 扇形是**几何**（扫角 + 半径） |
+| 廉价玻璃 | `kCoverage` | 纹理（花纹）+ 逐点颜色的 `a` 控不透明度 + fresnel | 硬边用全 1 profile；观感=有色膜（§4.1） |
+| 流星拖尾 | `kEmissive` | 逐条带宽度剖面 + 逐点 `a`（头 1 → 尾 0）+ 逐点 `rgb > 1`（HDR） | 宽度收窄是**几何**（左右点靠近） |
+| 剑气拖尾 | `kEmissive` | 9-knot 单侧剖面 + 逐点纵向衰减 + 逐点 HDR 颜色 | 扇形是**几何**（扫角 + 半径） |
 | 主角光环 | `kEmissive` | 纹理环向 repeat + 径向剖面 + 可选 fresnel | 左右点 = 内/外半径；UV 沿环向 |
 
 ## 10. 限制（写清楚，别让调用方猜）
@@ -767,7 +773,11 @@ color = mix(color, rim_color, F)                  // 掠过视线 → 反射色
   接缝处参数化有一个很小的折点；折线 pass 天然没有这个问题。
 - 圆环只有 15 段：折线 pass 的边反会有可见分面（这是 §19.3 的固有取舍）。
 
-### 19.7 参数归属：per draw call 还是 per instance？（2026-10-22）
+### 19.7 参数归属：per draw call 还是 per instance？（2026-10-22，**已被 §19.11 取代**）
+
+> ⚠️ 下表的「颜色 / 不透明度 = per instance（走 `strip_tints` 平行数组）」「`width_profile` = per draw call」
+> 是当时的结论；§19.11 的重构把两者都收进了 `Strip16`，并删掉了 `strip_tints` 与 batch tint。
+> 保留原文是为了记录推导过程。
 
 Danis 的判定：**「至少玻璃的颜色 / 条带的颜色，应该 per instance」** —— 是对的，
 第一版把所有东西都留在 batch 上属于过粗。修正后的划分：
@@ -823,7 +833,8 @@ Danis 2026-10-22 提问。结论：**生效，且两条 pass 都是逐片元求�
 
 补上 §19.6 里点名的两个缺口（Danis 指定）：
 
-**① `TranslucentStripBatch::additive_gain`（optional，nullopt = 1.0）**
+**① `TranslucentStripBatch::additive_gain`（optional，nullopt = 1.0）** —— ⚠️ 已于 §19.11 删除
+（逐点颜色允许 HDR，增益就是颜色本身；新代码里没有这个字段）
 
 - 为什么必须有：`tint` 被校验限制在 [0,1]、纹理也 ≤ 1 ⇒ 加法集贡献的上限就是 1.0，
   发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量（tone map 之前是 scene-referred，
@@ -895,3 +906,73 @@ gold 锁的始终是 M1~M3 那条三条带路径；本次改完两张 gold 与�
 覆盖度链的每一步与顺序写死（含 fresnel 的 rim 取哪个 α、soft depth 与 additive_gain
 乘在哪一步、两个集合各写哪套附件）。§7 那张「一条命令同时写两个集合」的草图仍然没实现 ——
 现在同一批只能一个集合，要「膜 + 加法高光」还是两个 batch。
+
+### 19.11 收口重构：per-instance 属性全进 `Strip16`（2026-10-22 Danis 定）
+
+**动机（Danis 原话的五个问题）**：同一份颜色有三个乘数（batch `tint` → `strip_tints[i]` →
+`strip_point_colors[i][col]`）、逐条带配置文件与逐点颜色并行、`additive_gain` 与 HDR 颜色重复、
+两个枚举注释太薄。结论是：**per-instance 的东西全部进 `Strip16`，batch 只留材质与场景交接。**
+
+**现在的一条带（680 B，POD，用户按一个 stride memcpy / 存盘）**
+
+```cpp
+struct Strip16 {
+    std::array<Vec3f, 16> left, right;    // 384 B  几何
+    std::array<Color, 16> point_color;    // 256 B  rgb = 线性 HDR 颜色（可 > 1）, a = 纵向不透明度
+    std::array<float, 9> width_profile;   //  36 B  宽度（v）方向剖面
+    uint32_t point_count = 0;             //   4 B
+};
+```
+
+- **颜色只剩一个来源**：`point_color`。「某条带整体偏色/整体更透」= 16 个同色（逐点颜色的退化特例），
+  所以 `strip_tints` 与 batch tint 都删了。
+- **逐点 alpha 并进 `point_color.a`**：它们本来就是两个相乘的标量。副产品是安全 ——
+  「忘了填颜色」= 「忘了填 a」，`ValidateStripBatch` 的 `a > 0` 检查直接抓住
+  （否则 `memset` 出来的条带会变成一条静默的黑色吸光带）。
+- **宽度剖面 9 个数有默认值**（全 1 = 硬边，乘法单位元）：用户不填就是「不改宽度方向」。
+- **没有 batch 级主不透明度**（Danis：一个 batch 里多条带的透明度很难统一，需要的人自己改逐点 a）。
+- **`additive_gain` 删了**：加法集的注入量是 `color·α`，亮度就用 `point_color.rgb > 1` 表达
+  （校验放宽到 `[0, 10000]`）。逐点 HDR 比一个整批倍率严格更强（芯亮/边暗可以自己画）。
+- **`StripStyle` → `StripInterpolation`、字段 `style` → `geometry`**：名字直接说明它控制的是段间插值。
+
+**GPU 侧（CPU stride 与显存布局解耦）**
+
+| 数据 | 走哪条通道 | 每条带字节 |
+|---|---|---|
+| 几何 | 顶点属性：折线 5 float/顶点（pos + u,v）、平滑 6 float/顶点（+ strip_id） | 640 / 768 B |
+| 逐点 RGBA + 9 knot 剖面 | 一张 per-instance 纹理：**一行 = 一条带**，行宽 25 texel（16 颜色 + 9 剖面），RGBA32F + LINEAR | 400 B |
+
+- 采样坐标都落在 texel 正中心：颜色 `tx = (u*15+0.5)/25`、剖面 `tx = (16+v*8+0.5)/25`，
+  行 `ty = (strip+0.5)/行数`（行数是纹理**容量**，不是本批条数）。
+- **9 个等距 knot 的双线性 = 精确分段线性** ⇒ 剖面仍然逐片元求值（plateau 不会被抹成三角形），
+  但只需要 1 次采样（重构前是 9 个 uniform + 一次 `glUniform1fv`/批）。
+- 顶点属性少了一个 alpha（6→5 / 7→6 float），正好抵掉剖面 texel 的带宽：
+  折线路径 1040 B/条带 → 1040 B/条带（320 B 省下 ↔ 128 B 增加，实测基本持平）。
+
+**两条行为变化（有意，且都是「更一致」方向）**
+
+1. **平滑 pass 的纵向 alpha 跟着重建后的 `u*` 走**（以前颜色用 `u*`、alpha 用顶点插值 `u`，
+   两者在弯曲段会错位）。现在一次 `PointColor(u*)` 同时给颜色和 alpha。
+2. **fresnel 不再乘「形状淡出」**：只有一个 alpha 通道后，「不透明度」与「沿长度淡出」不可分；
+   若乘上去，α=0.12 的玻璃壳亮边也只剩 0.12（等于没有边反）—— 而反射本来就不该被介质透过率衰减。
+   代价：开 fresnel 的条带别在长度方向做淡出，否则淡出段仍留边反（写进 `StripFresnel` 注释）。
+
+**验证（gold 作为 no-op 护栏）**
+
+新增 `test/strip:strip_scene_gold_test`：8 张固定构图的「全家福」（`strip_scene_*_1280x720.png`），
+**在重构前用旧代码拍好并入库**，重构后逐像素比较。实测：
+
+| 图 | 最大差 | 差 >1 的像素 | 说明 |
+|---|---|---|---|
+| 20 折线全家福 | 1 | 0（15 px 差 1） | 折线路径的 alpha 从顶点插值改为纹理双线性 ⇒ 纯浮点舍入 |
+| 60 圆环 fresnel | **0** | 0 | 逐像素完全相同（边反/剖面/覆盖集都对上了） |
+| 70 射流 HDR | 1 | 0 | 逐点颜色 + 剖面 + 加法集一致 |
+| 10/30/40/50/80 平滑 | 2 | 18~59 | 上面第 1 条行为变化（`u*`）带来的亚像素差异 |
+
+**这一轮没做、但记下来的**：加法集的早退门槛仍是按覆盖率 `a ≤ 1/255` 丢弃 ——
+颜色允许 HDR 之后，「a 极低但颜色极亮」（注入量 > 1/255）的片元会被丢掉。改成按注入量
+判据会改动画面（实测射流淡边多出 ~100~290 px、最大 9/255），需要重出 gold，留作单独一次。
+
+两张老 gold（`strip_demo` / `strip_additive_soft`）分别差 5 / 6 个像素、最大 1/255。
+因此 gold 比较从「逐字节」改成「逐像素 + ≤1（平滑图 ≤2 且 ≤200 px）的 LSB 容差」，
+并在测试里写清原因 —— **任何可见变化都远超这个容差**。

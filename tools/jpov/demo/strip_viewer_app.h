@@ -139,7 +139,7 @@ inline constexpr int kRimColorPresetCount =
 //
 // center_fn(s, phase) → 世界空间中心点（s ∈ [0,1]）
 // half_left_fn(s) / half_right_fn(s) → 两侧半宽（米）
-// alpha_fn(s) → 纵向 alpha 乘子
+// alpha_fn(s) → 纵向 alpha 乘子（写进逐点颜色的 alpha 通道）
 //
 // 侧向基：side = normalize(cross(tangent, up_hint))；切向取中心差分（端点单侧），
 // 与设计文档 §2.1 一致。up_hint 与切向共线时退到 (0,0,1)（避免 NaN）。
@@ -170,9 +170,23 @@ void BuildRibbon(float phase, CenterFn center_fn, HalfLeftFn half_left_fn,
 
         out->left[static_cast<size_t>(i)] = c + side * half_left_fn(s);
         out->right[static_cast<size_t>(i)] = c - side * half_right_fn(s);
-        out->alpha[static_cast<size_t>(i)] = alpha_fn(s);
+        // rgb 保持默认白（纹理色/纯色再乘），纵向淡出走 alpha 通道。
+        out->point_color[static_cast<size_t>(i)].a = alpha_fn(s);
     }
     out->point_count = static_cast<uint32_t>(n);
+}
+
+// 把逐条带的颜色乘子（rgb + alpha）并进这条带的 16 个点。
+// 这是「旧 strip_tints 的等价物」，但不再是一层独立数据 —— 直接乘进逐点颜色。
+inline void MultiplyStripColor(const jpov::Color& color, jpov::Strip16* strip /*output*/) {
+    CHECK(strip != nullptr) << "MultiplyStripColor: strip 不能为空";
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        jpov::Color& c = strip->point_color[static_cast<size_t>(i)];
+        c.r *= color.r;
+        c.g *= color.g;
+        c.b *= color.b;
+        c.a *= color.a;
+    }
 }
 
 // ① 波带：沿 +X 前进，Y 方向正弦起伏，带内轻微前后摆动。
@@ -235,40 +249,55 @@ inline constexpr std::array<float, 9> kHardWidthProfile = {
     1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
 // 三条带装进**一个 batch** → 一次 draw call。
+//
+// base_color：材质基色（rgb 乘到逐点颜色上）+ **整批主 alpha**（只写进每条带的
+// 逐点颜色，不是 batch 上的字段 —— 2026-10-22 重构后 batch 不再持有颜色）。
+// 每条带的不同浓度由 instance_alpha 表达，同样并进逐点颜色。
 // 返回 false 表示三条都被关掉了（调用方不要发空 batch）。
 inline bool BuildDemoBatch(const RibbonShape& shape, const RibbonVisibility& vis,
-                           float phase, float width_scale, float opacity,
+                           float phase, float width_scale,
+                           const jpov::Color& base_color,
                            bool soft_edges, uint32_t texture_id,
                            jpov::TranslucentStripBatch* out) {
     CHECK(out != nullptr) << "BuildDemoBatch: out 不能为空";
     out->strips.clear();
-    // 三条带各自的不透明度走**逐条带 tint**（per instance），而不是改写逐点 alpha：
-    // 重叠处要能分辨、又不想为每条带单独发一次 draw call，这正是那个通道的用途。
+    const std::array<float, jpov::kStripProfileKnots> profile =
+        soft_edges ? kSoftWidthProfile : kHardWidthProfile;
+
+    // 三条带各自的不透明度走**逐条带颜色**（per instance，乘进逐点颜色），
+    // 而不是改写逐点 alpha：重叠处要能分辨、又不想为每条带单独发一次 draw call。
+    // （重构前这是 strip_tints 通道；现在它就是逐点颜色的一个特例。）
+    auto push = [&out, &profile](const jpov::Strip16& strip, const jpov::Color& color) {
+        jpov::Strip16 colored = strip;
+        MultiplyStripColor(color, &colored);
+        colored.width_profile = profile;
+        out->strips.push_back(colored);
+    };
+    auto instance_color = [&base_color](float instance_alpha) {
+        jpov::Color c = base_color;
+        c.a *= instance_alpha;
+        return c;
+    };
+
     if (vis.wave) {
         jpov::Strip16 strip;
         BuildWaveRibbon(phase, width_scale, shape.wave_amplitude, &strip);
-        out->strips.push_back(strip);
-        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 1.00f});
+        push(strip, instance_color(1.00f));
     }
     if (vis.helix) {
         jpov::Strip16 strip;
         BuildHelixRibbon(phase, width_scale, shape.helix_turns, &strip);
-        out->strips.push_back(strip);
-        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.62f});
+        push(strip, instance_color(0.62f));
     }
     if (vis.arc) {
         jpov::Strip16 strip;
         BuildArcRibbon(phase, width_scale, shape.arc_angle, shape.arc_yaw, &strip);
-        out->strips.push_back(strip);
-        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.45f});
+        push(strip, instance_color(0.45f));
     }
     if (out->strips.empty()) {
         return false;
     }
     out->texture_id = texture_id;
-    out->tint = jpov::Color{1.0f, 1.0f, 1.0f, opacity};
-    // 「柔边」= 宽度两端衰减到 0（几何折角被吃掉，视觉上变软）；硬边 = 全 1。
-    out->width_profile = soft_edges ? kSoftWidthProfile : kHardWidthProfile;
     return true;
 }
 
@@ -314,11 +343,10 @@ inline jpov::Color JetColorAt(float s) {
     return kStops[sizeof(kStops) / sizeof(kStops[0]) - 1].c;
 }
 
-// 沿中心线 + 侧向半宽生成一条射流条带，同时填逐点颜色。
+// 沿中心线 + 侧向半宽生成一条射流条带，同时填逐点颜色（rgb）+ 逐点 alpha。
 inline void BuildJetStrip(const JetShape& shape, const jpov::Vec3f& side,
-                          jpov::Strip16* out, jpov::StripPointColors* colors) {
+                          jpov::Strip16* out) {
     CHECK(out != nullptr) << "BuildJetStrip: out 不能为空";
-    CHECK(colors != nullptr) << "BuildJetStrip: colors 不能为空";
     const jpov::Vec3f dir = NormalizeOr(shape.dir, {0.0f, -1.0f, 0.0f});
     for (int i = 0; i < jpov::kStripSampleCount; ++i) {
         const size_t k = static_cast<size_t>(i);
@@ -328,16 +356,21 @@ inline void BuildJetStrip(const JetShape& shape, const jpov::Vec3f& side,
         const float half = shape.width0 + (shape.width1 - shape.width0) * std::pow(s, 0.8f);
         out->left[k] = center + side * half;
         out->right[k] = center - side * half;
-        // 逐点 alpha：前 15% 满，之后线性淡出到 0（尾部消失而不是被截断）。
-        out->alpha[k] = std::min(1.0f, (1.0f - s) / 0.85f);
-        (*colors)[k] = JetColorAt(s);
+        // 逐点颜色：白热 → 暖白 → 橙 → 红 → 暗红；alpha = 尾部淡出（形状淡出）。
+        out->point_color[k] = JetColorAt(s);
+        out->point_color[k].a = std::min(1.0f, (1.0f - s) / 0.85f);
     }
     out->point_count = static_cast<uint32_t>(jpov::kStripSampleCount);
 }
 
 // 射流批：两条交叉条带（同一个 batch ⇒ 一次 draw call），加法集 + HDR 增益 + 中心实两侧虚剖面。
+//
+// HDR 增益不再是一个 batch 旋钮：它**乘进逐点颜色**（rgb）。加法集的注入量是
+// `color·α`，所以「亮度」本来就应该由颜色表达 —— 这也让每条射流内部可以自己决定
+// 哪一段更亮（旧 additive_gain 只能整批同倍率）。
 inline jpov::TranslucentStripBatch BuildJetBatch(const JetShape& shape, float gain,
-                                                 jpov::StripStyle style) {
+                                                 jpov::StripInterpolation geometry) {
+    CHECK(gain > 0.0f) << "BuildJetBatch: gain 必须 > 0";
     const jpov::Vec3f dir = NormalizeOr(shape.dir, {0.0f, -1.0f, 0.0f});
     // 与 dir 不平行的辅助向量（dir 接近竖直时用 +X，否则用 +Y）⇒ 两条侧向互相垂直。
     const jpov::Vec3f helper =
@@ -347,19 +380,17 @@ inline jpov::TranslucentStripBatch BuildJetBatch(const JetShape& shape, float ga
     const jpov::Vec3f side_b = NormalizeOr(Cross(dir, side_a), {0.0f, 0.0f, 1.0f});
 
     jpov::TranslucentStripBatch batch;
-    batch.texture_id = 0;
-    batch.tint = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};   // 颜色全在逐点颜色里
+    batch.texture_id = 0;   // 颜色全在逐点颜色里
     batch.blend = jpov::StripBlend::kEmissive;
-    batch.additive_gain = gain;
-    batch.style = style;
-    // 中心实、两侧虚：射流的横截面自然衰减（逐片元求值，15 段也不会有阶梯）。
-    batch.width_profile = kSoftWidthProfile;
+    batch.geometry = geometry;
+    const jpov::Color gain_color{gain, gain, gain, 1.0f};   // 只放大 rgb，不动 α
     for (const jpov::Vec3f& side : {side_a, side_b}) {
         jpov::Strip16 strip;
-        jpov::StripPointColors colors{};
-        BuildJetStrip(shape, side, &strip, &colors);
+        BuildJetStrip(shape, side, &strip);
+        MultiplyStripColor(gain_color, &strip);
+        // 中心实、两侧虚：射流的横截面自然衰减（逐片元求值，15 段也不会有阶梯）。
+        strip.width_profile = kSoftWidthProfile;
         batch.strips.push_back(strip);
-        batch.strip_point_colors.push_back(colors);
     }
     return batch;
 }
@@ -495,7 +526,7 @@ public:
             cmds->smaa->enabled = true;
         }
         if (bloom_) {
-            // 阈值 1.0 = 只让「超过白点」的 HDR 部分发光（射流靠 additive_gain 超过它）。
+            // 阈值 1.0 = 只让「超过白点」的 HDR 部分发光（射流靠逐点颜色 > 1 超过它）。
             cmds->bloom = jpov::BloomConfig{};
             cmds->bloom->enabled = true;
             cmds->bloom->intensity = 0.8f;
@@ -545,26 +576,19 @@ private:
 
         auto build = [this, tex](const RibbonVisibility& vis) {
             jpov::TranslucentStripBatch batch;
-            const float opacity = use_texture_ ? opacity_ : 1.0f;
-            if (!BuildDemoBatch(shape_, vis, phase_, width_scale_, opacity, soft_edges_,
+            // 颜色只有一个来源：逐点颜色。
+            //   纹理模式：基色纯白（让纹理决定颜色）；
+            //   纯色模式：基色 = solid_color_；
+            // 两种模式的整批主 alpha 都是 opacity_（逐条带浓度在 BuildDemoBatch 里乘进去）。
+            // 重构前这里是「batch tint + strip_tints + 改绑 MakeSolidStripBatch」三件套，
+            // 漏搬一个就把纯色路径的颜色/浓度/剖面搞错（曾真实发生过）。
+            jpov::Color base = use_texture_
+                                   ? jpov::Color{1.0f, 1.0f, 1.0f, opacity_}
+                                   : jpov::Color{solid_color_.r, solid_color_.g,
+                                                 solid_color_.b, opacity_};
+            if (!BuildDemoBatch(shape_, vis, phase_, width_scale_, base, soft_edges_,
                                 tex, &batch)) {
                 return batch;   // strips 为空，调用方跳过
-            }
-            if (!use_texture_) {
-                // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
-                // MakeSolidStripBatch 会**重建整个 batch**（只保留颜色与条带），所以
-                // 「逐条带浓度」和「宽度剖面」这两项必须显式搬过去 —— 否则：
-                //   * 漏搬 strip_tints ⇒ 三条带又变回同样不透明；
-                //   * 漏搬 width_profile ⇒ 面板上「柔边剖面」明明勾着，一切纯色就变硬边。
-                // （这两项都是 viewer 侧的状态，不属于 MakeSolidStripBatch 的语义。）
-                jpov::Color color = solid_color_;
-                color.a = opacity_;
-                std::vector<jpov::Strip16> strips = std::move(batch.strips);
-                std::vector<jpov::Color> tints = std::move(batch.strip_tints);
-                const std::array<float, 9> profile = batch.width_profile;
-                batch = jpov::MakeSolidStripBatch(color, std::move(strips));
-                batch.strip_tints = std::move(tints);
-                batch.width_profile = profile;
             }
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;
@@ -572,8 +596,8 @@ private:
             // 边反（fresnel）**只给玻璃圆环**：它是"玻璃材质"的观感参数，
             // 三条带/射流是发光拖尾，套上边反只会让拖尾边缘发白（Danis 2026-10-22 指出）。
             // 库层面 StripFresnel 仍是批级参数（谁想用谁设），这里是 viewer 的取舍。
-            batch.style = smooth_strips_ ? jpov::StripStyle::kSmooth
-                                         : jpov::StripStyle::kPolyline;
+            batch.geometry = smooth_strips_ ? jpov::StripInterpolation::kSmooth
+                                            : jpov::StripInterpolation::kPolyline;
             return batch;
         };
 
@@ -605,8 +629,8 @@ private:
         if (jet_visible_) {
             cmds->DrawTranslucentStrips(
                 BuildJetBatch(jet_shape_, jet_gain_,
-                              smooth_strips_ ? jpov::StripStyle::kSmooth
-                                             : jpov::StripStyle::kPolyline));
+                              smooth_strips_ ? jpov::StripInterpolation::kSmooth
+                                             : jpov::StripInterpolation::kPolyline));
         }
     }
 
@@ -623,19 +647,24 @@ private:
         const std::array<jpov::Strip16, jpov::kStripRingPartCount> parts =
             jpov::MakeStripRing(shape);
         jpov::TranslucentStripBatch ring;
-        ring.texture_id = 0;   // 纯色
-        ring.tint = jpov::Color{ring_color_.x(), ring_color_.y(), ring_color_.z(),
-                                ring_opacity_};
+        ring.texture_id = 0;   // 纯色（颜色全在逐点颜色里）
         ring.blend = jpov::StripBlend::kCoverage;
-        ring.style = ring_smooth_ ? jpov::StripStyle::kSmooth
-                                  : jpov::StripStyle::kPolyline;
+        ring.geometry = ring_smooth_ ? jpov::StripInterpolation::kSmooth
+                                     : jpov::StripInterpolation::kPolyline;
         if (fresnel_enabled_) {
             ring.fresnel = fresnel_;
         }
         if (soft_depth_) {
             ring.soft_depth_m = soft_depth_m_;
         }
+        // 四条带颜色相同（玻璃膜色 + 薄膜不透明度）；宽度剖面用默认硬边 ——
+        // 玻璃壳的轮廓就是硬的，柔边会把边反直接抹平。
+        const jpov::Color ring_color{ring_color_.x(), ring_color_.y(), ring_color_.z(),
+                                     ring_opacity_};
         ring.strips.assign(parts.begin(), parts.end());
+        for (jpov::Strip16& strip : ring.strips) {
+            strip.point_color.fill(ring_color);
+        }
         cmds->DrawTranslucentStrips(std::move(ring));
     }
 
