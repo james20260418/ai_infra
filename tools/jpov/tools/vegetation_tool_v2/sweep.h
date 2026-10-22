@@ -83,6 +83,13 @@ struct CardFrame {
   double av = 0.0;   // 素材里贴到 anchor 的 v
 };
 
+// 把切线 t 对法线 n 做 Gram-Schmidt（去掉法线分量再归一化）。
+// 退化（t 与 n 几乎平行 / t 为零）时返回 fallback（通常是卡片的 +u 方向）。
+//
+// 为什么需要：叶卡的「法线球面化」（curl）只改法线不改切线时，T·N ≠ 0，
+// shader 里 `B = normalize(cross(N, T))` 会得到斜切的 TBN ⇒ 法线贴图方向/强度都不对。
+Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback);
+
 // 计算一张卡的姿态 + UV 锚点。
 //
 // 前置条件：`shape` 已通过 Validate()（`card.type` 必须存在于 leaf_types，

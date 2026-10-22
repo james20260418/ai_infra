@@ -301,6 +301,34 @@ void TestJunctionVContinuity() {
 //   1) (au, av) 与 AnchorModeToUv 一致（4 种 mode 全覆盖）；
 //   2) (right, up, normal) 是右手系单位正交基 —— 三处调用方（真实叶卡 / 绿卡 / 标签）
 //      全靠它，任何一处算错都会让叶子整体错位或翻面。
+// OrthogonalizeTangent：curl（法线球面化）之后重建切线用的正交化。
+// 钉住三件事：结果与法线正交、单位长、退化输入走 fallback（不产生 NaN/零向量）。
+void TestOrthogonalizeTangent() {
+  const Vec3d n{0.0, 0.0, 1.0};
+  {
+    // 切线带法线分量（curl 后的典型状态）⇒ 正交化后 T·N == 0 且仍是单位向量
+    const Vec3d t = OrthogonalizeTangent(Vec3d{1.0, 0.0, 0.45}, n, Vec3d{1.0, 0.0, 0.0});
+    const double dot = t.x * n.x + t.y * n.y + t.z * n.z;
+    const double len = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
+    Expect(Near(dot, 0.0, 1e-12), "正交化后 T·N 必须为 0");
+    Expect(Near(len, 1.0, 1e-12), "正交化后切线必须是单位向量");
+    Expect(t.x > 0.99 && std::fabs(t.y) < 1e-12, "正交化只能去掉法线分量，不能改变方向");
+  }
+  {
+    // 退化：切线平行法线 ⇒ 用 fallback，而不是 0 向量/NaN
+    const Vec3d fb{0.0, 1.0, 0.0};
+    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 2.0}, n, fb);
+    Expect(Near(t.x, fb.x, 1e-12) && Near(t.y, fb.y, 1e-12) && Near(t.z, fb.z, 1e-12),
+           "切线平行法线时必须返回 fallback");
+  }
+  {
+    // 零切线同样走 fallback
+    const Vec3d fb{0.0, 1.0, 0.0};
+    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 0.0}, n, fb);
+    Expect(Near(t.y, 1.0, 1e-12), "零切线必须返回 fallback");
+  }
+}
+
 void TestCardFrame() {
   Shape shape = StraightBranch(2, 0.1, 1.0, 8);
   LeafType type;
@@ -443,6 +471,7 @@ int main() {
   jpov::vegetation::TestUvVScale();
   jpov::vegetation::TestNonCircularProfile();
   jpov::vegetation::TestJunctionVContinuity();
+  jpov::vegetation::TestOrthogonalizeTangent();
   jpov::vegetation::TestCardFrame();
   jpov::vegetation::TestLeafCards();
   if (jpov::vegetation::g_failures != 0) {

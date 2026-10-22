@@ -211,9 +211,14 @@ MeshData SweepBranches(const Shape& shape, const SweepOptions& opts) {
     std::unordered_map<uint32_t, ExitState>::const_iterator it;
     if (branch.parent >= 0) {
       it = exits.find(static_cast<uint32_t>(branch.parent));
-      if (it != exits.end()) {
-        parent = &it->second;
+      if (it == exits.end()) {
+        // Validate 保证 parent < id（父枝一定先处理过），走到这里说明资产/调用顺序坏了。
+        // 静默当根枝会让子枝丢掉 UV 接续与相位继承（接口处出重复线），所以直接中止。
+        std::fprintf(stderr, "SweepBranches: branch %u 找不到父枝 %d 的出口状态\n",
+                     branch.id, branch.parent);
+        std::abort();
       }
+      parent = &it->second;
     }
 
     // 复用 BuildBranchFrame 需要 BranchFrame 形状的父状态：拷贝一份即可。
@@ -366,6 +371,14 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
   for (const Branch& branch : shape.branches) {
     const uint32_t count = static_cast<uint32_t>(branch.samples.size()) *
                            (branch.EffectiveRingCount() + 1);
+    if (cursor + count > mesh.VertexCount()) {
+      // 越界必须在 assign 之前拦：assign 越界是 UB（旧代码只挡了索引拷贝）。
+      std::fprintf(stderr,
+                   "SplitMeshByBranch: 顶点布局与 shape 不一致（branch %u 需要到 %u，"
+                   "mesh 只有 %zu）\n",
+                   branch.id, cursor + count, mesh.VertexCount());
+      std::abort();
+    }
     MeshData part;
     part.positions.assign(mesh.positions.begin() + cursor * 3,
                           mesh.positions.begin() + (cursor + count) * 3);
@@ -379,21 +392,32 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
       part.tangents.assign(mesh.tangents.begin() + cursor * 3,
                            mesh.tangents.begin() + (cursor + count) * 3);
     }
-    if (cursor + count <= mesh.VertexCount()) {
-      for (size_t t = 0; t < mesh.indices.size(); t += 3) {
-        const uint32_t i0 = mesh.indices[t];
-        if (i0 < cursor || i0 >= cursor + count) {
-          continue;
-        }
-        part.indices.push_back(i0 - cursor);
-        part.indices.push_back(mesh.indices[t + 1] - cursor);
-        part.indices.push_back(mesh.indices[t + 2] - cursor);
+    for (size_t t = 0; t < mesh.indices.size(); t += 3) {
+      const uint32_t i0 = mesh.indices[t];
+      if (i0 < cursor || i0 >= cursor + count) {
+        continue;
       }
+      part.indices.push_back(i0 - cursor);
+      part.indices.push_back(mesh.indices[t + 1] - cursor);
+      part.indices.push_back(mesh.indices[t + 2] - cursor);
     }
     out.push_back(std::move(part));
     cursor += count;
   }
   return out;
+}
+
+Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback) {
+  const double dot = t.x * n.x + t.y * n.y + t.z * n.z;
+  Vec3d o{t.x - n.x * dot, t.y - n.y * dot, t.z - n.z * dot};
+  const double l = std::sqrt(o.x * o.x + o.y * o.y + o.z * o.z);
+  if (l < 1e-6) {
+    return fallback;
+  }
+  o.x /= l;
+  o.y /= l;
+  o.z /= l;
+  return o;
 }
 
 CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card) {

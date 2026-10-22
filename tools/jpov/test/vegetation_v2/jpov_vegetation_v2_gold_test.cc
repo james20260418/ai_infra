@@ -28,16 +28,18 @@ namespace {
 
 // 几何锁：实测噪声 0（连续 6 次），给 0.5 留一点跨机器余量。
 constexpr double kCardsMaxRoiDiff = 0.5;
-// 材质烟雾报警：实测噪声上界 ~27（叶子 cutout 的 llvmpipe 状态跳变），
-// 已知回归下限 ~46（没贴树皮）。给 35。
-constexpr double kLeafMaxRoiDiff = 35.0;
-constexpr int kRoiRows = 8;
-constexpr int kRoiCols = 8;
+constexpr int kCardsRoi = 8;
+
+// 材质烟雾报警：叶子 cutout 在 llvmpipe 下会落几种离散状态，**格越细越容易被单块抖动主导**
+// （实测 8×8 时噪声最大 26、只有 3/64 格超 10）。改用 4×4 后同一对图的噪声 9.8，
+// 而真回归仍然很大：没贴树皮 25.8、叶子被杀 20.5、没贴叶图 41.5。给 15。
+constexpr double kLeafMaxRoiDiff = 15.0;
+constexpr int kLeafRoi = 4;
 
 std::string GoldDir() { return jpov::GetTestDataDir() + "/vegetation_v2/"; }
 
 // 渲染 + 比对一张，返回是否通过（先把 gold 存在性、分辨率、非全黑都查掉）。
-bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed,
+bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed, int roi,
               const std::string& outdir) {
   const std::string gold = GoldDir() + gold_name;
   {
@@ -67,11 +69,11 @@ bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed,
   stbi_image_free(px);
   CHECK_GT(ratio, 0.10) << gold_name << ": 画面几乎全黑，渲染链路可能整体挂了";
 
-  const double max_diff =
-      jpov::CompareLightMeanRoiPng(gold, rendered, kRoiRows, kRoiCols);
+  const double max_diff = jpov::CompareLightMeanRoiPng(gold, rendered, roi, roi);
   CHECK_GE(max_diff, 0.0) << gold_name << ": 两张图尺寸不一致";
-  LOG(INFO) << gold_name << ": 8x8 ROI 最大通道均值差 = " << max_diff << "（阈值 "
-            << max_diff_allowed << "），非黑占比 " << ratio * 100.0 << "%";
+  LOG(INFO) << gold_name << ": " << roi << "x" << roi << " ROI 最大通道均值差 = "
+            << max_diff << "（阈值 " << max_diff_allowed << "），非黑占比 "
+            << ratio * 100.0 << "%";
   if (max_diff > max_diff_allowed) {
     LOG(ERROR) << "GOLD COMPARE FAILED: " << gold_name << " diff=" << max_diff
                << " > " << max_diff_allowed << "\n  渲染结果: " << rendered
@@ -89,9 +91,9 @@ int main() {
   std::system(("mkdir -p " + outdir).c_str());
 
   const bool cards_ok = CheckOne(vegv2::goldtest::kCardsGold, /*with_leaf=*/false,
-                                 kCardsMaxRoiDiff, outdir);
+                                 kCardsMaxRoiDiff, kCardsRoi, outdir);
   const bool leaf_ok = CheckOne(vegv2::goldtest::kLeafGold, /*with_leaf=*/true,
-                                kLeafMaxRoiDiff, outdir);
+                                kLeafMaxRoiDiff, kLeafRoi, outdir);
   if (!cards_ok || !leaf_ok) {
     return 1;
   }

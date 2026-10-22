@@ -46,6 +46,11 @@ using jpov::vegetation::Vec3d;
 constexpr int kMaxCardTypes = 4;  // 4 种绿
 constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了看得见朝向
 
+// 叶卡 alpha 的裁切阈值。**必须只有一处**：TextureOptions.alpha_coverage.cutoff（覆盖率
+// 保持 mip 的二值化阈值）与 PBRMaterial.alpha_cutoff（片元保留判据）必须相等，
+// 否则远景叶子会忽多忽少（mip 按 0.5 二值化、裁切却用另一个值）。
+constexpr float kLeafAlphaCutoff = 0.5f;
+
 bool ReadFileBytes(const std::string& path, std::vector<unsigned char>* out) {
   std::ifstream f(path, std::ios::binary);
   if (!f) return false;
@@ -224,7 +229,22 @@ void BendCardNormals(jpov::MeshData* md, float k) {
       const float bl = std::sqrt(bent.x() * bent.x() + bent.y() * bent.y() +
                                  bent.z() * bent.z());
       if (bl < 1e-9f) continue;
-      md->normals[v + i] = bent * (1.0f / bl);
+      const jpov::Vec3f nb = bent * (1.0f / bl);
+      md->normals[v + i] = nb;
+
+      // 切线必须跟着重建：法线弯了而切线还是平面 +u，T·N ≠ 0，shader 里
+      // `B = normalize(cross(N, T)); TBN` 会被斜切 ⇒ 法线贴图的方向与强度都不对
+      // （curl 默认 0.5 时卡角最大偏离 ~26°，T·N 可达 0.45）。
+      // 做法：去掉切线在法线上的分量再归一化；退化（切线几乎平行法线）时退回卡片 +u。
+      if (v + i < md->tangents.size()) {
+        const jpov::Vec3f t = md->tangents[v + i];
+        const jpov::vegetation::Vec3d o = jpov::vegetation::OrthogonalizeTangent(
+            jpov::vegetation::Vec3d{t.x(), t.y(), t.z()},
+            jpov::vegetation::Vec3d{nb.x(), nb.y(), nb.z()},
+            jpov::vegetation::Vec3d{right.x(), right.y(), right.z()});
+        md->tangents[v + i] = jpov::Vec3f{static_cast<float>(o.x), static_cast<float>(o.y),
+                                          static_cast<float>(o.z)};
+      }
     }
   }
 }
@@ -487,7 +507,7 @@ class VegetationV2App : public JPOV {
     opts.mipmap = true;
     opts.repeat = false;
     opts.alpha_coverage.enabled = true;
-    opts.alpha_coverage.cutoff = 0.5f;
+    opts.alpha_coverage.cutoff = kLeafAlphaCutoff;
     *out = jpov::PBRMaterial::SolidColor({1.0f, 1.0f, 1.0f, 1.0f});
     out->base_color_tex =
         RegisterTextureFromMemory(EncodePng(rgba, w, h), "leaf_albedo:" + path, opts);
@@ -495,7 +515,7 @@ class VegetationV2App : public JPOV {
         RegisterTextureFromMemory(EncodePng(normal_rgba, w, h), "leaf_normal:" + path, opts);
     out->normal_scale = leaf_normal_scale_;
     out->alpha_mode = jpov::AlphaMode::kMask;
-    out->alpha_cutoff = 0.5f;
+    out->alpha_cutoff = kLeafAlphaCutoff;
     out->double_sided = true;
   }
 
@@ -722,10 +742,17 @@ class VegetationV2App : public JPOV {
     ground_y_ = args.ground_y;
     if (args.only_type >= 0) {
       show_all_card_types_ = false;
-      type_filter_ = static_cast<uint32_t>(args.only_type);
+      // 过滤的是**颜色桶下标**（= card.type % kMaxCardTypes），不是原始 type 编号：
+      // 本工具只有 4 个桶，type 与桶不是一一对应。直接拿 type 当桶会画到别的类型上
+      // （例：types {0,1,2,3,5}，--only-type 5 会被夹到 3 → 显示 type 3）。
+      type_filter_ = static_cast<uint32_t>(args.only_type) % kMaxCardTypes;
+      if (static_cast<uint32_t>(args.only_type) != type_filter_) {
+        LOG(WARNING) << "--only-type " << args.only_type << " 按颜色桶取模 → 桶 "
+                     << type_filter_ << "（type % " << kMaxCardTypes << "）";
+      }
       if (type_filter_ >= leaf_type_count_) {
-        LOG(WARNING) << "--only-type " << args.only_type << " 超出实际 type 数 "
-                     << leaf_type_count_ << "，夹到 " << (leaf_type_count_ - 1);
+        LOG(WARNING) << "--only-type " << args.only_type << " 对应的桶 " << type_filter_
+                     << " 在 shape 里没有叶子，夹到 " << (leaf_type_count_ - 1);
         type_filter_ = static_cast<uint32_t>(leaf_type_count_ - 1);
       }
     }

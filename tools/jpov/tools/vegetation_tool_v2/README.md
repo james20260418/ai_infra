@@ -73,8 +73,9 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 
 - **视觉**：跑上面的 `--capture`，用 `--cam-target-y 3 --cam_r 1.6` 看叶卡贴在枝上的位置。
 - **gold test**：`bazel test //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_test`
-  - `vegetation_v2_cards_1280x720.png`（debug 绿卡）：不透明盒子，阈值 **0.5**，精确锁叶卡摆放；
-  - `vegetation_v2_leaf_1280x720.png`（贴叶+树皮）：alpha cutout 在 llvmpipe 下会跳状态，阈值 **35** 当烟雾报警。
+  - `vegetation_v2_cards_1280x720.png`（debug 绿卡）：不透明盒子，8×8 ROI 阈值 **0.5**，精确锁叶卡摆放；
+  - `vegetation_v2_leaf_1280x720.png`（贴叶+树皮）：alpha cutout 在 llvmpipe 下会跳状态，
+    用 **4×4** ROI（更粗的块摊平抖动）+ 阈值 **15** 当烟雾报警（没贴树皮 25.8 / 叶子被杀 20.5 / 没贴叶图 41.5）。
   - 两张 gold **都由查看器二进制本身**跑出来（subprocess），保证和用户看到的是同一张图。
     改观感后重生成：`bazel run //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_generator`。
 - **单测**：`bazel test //tools/jpov/tools/vegetation_tool_v2:all`
