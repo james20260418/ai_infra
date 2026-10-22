@@ -1,13 +1,13 @@
 // JPOV 半透明条带 Gold Test —— 覆盖集（M1）+ 加法集（M2）+ 软深度（M3）
 //
 // 固定场景（天光 + 地面 + 三块参考方块 + 一批三条带）、固定相机、1280×720，
-// 与 git 管理的 PNG 做**逐字节**比较。
+// 与 git 管理的 PNG 做**逐像素**比较（允许单通道 ±1 的浮点舍入，见 CheckGoldPixels）。
 //
 // 用法：
 //   bazel run //tools/jpov/test/strip:strip_gold_generator   # 重出 gold
 //   bazel test //tools/jpov/test/strip:strip_gold_test       # 回归
 //
-// 除逐字节之外的三组**非恒真**断言（防止「参数退化 + 重出 gold」一起绿）：
+// 除 gold 之外的三组**非恒真**断言（防止「参数退化 + 重出 gold」一起绿）：
 //   ① 纹理路径真的生效：带纹理 vs 纯色的差异像素数 ∈ [20000, 120000]；
 //   ② 纹理的色带真的投影到画面上：在①的差异区域内，
 //      红/青/黄三种「主色像素」各自数量落在区间内（纹理没绑上/UV 退化都会掉到 0）；
@@ -71,7 +71,7 @@ struct ShotConfig {
     //     改一次预设就要重出一张图；它的几何由 strip_geometry_test 的 StripRing
     //     用例锁定，画面由 viewer --capture 的 100~170 对照图验收。
     //   * fresnel：同理，参数还在实验期（见 docs §19）。
-    // 所以这里显式关掉，保证两张 gold 与本功能加入前**逐字节一致**。
+    // 所以这里显式关掉，保证两张 gold 与本功能加入前的画面一致（±1/255）。
     bool ring = false;
     bool fresnel = false;
     // 射流（加法集 + HDR 增益 + 逐点颜色）同样不进 gold：它是新加的演示物，
@@ -183,6 +183,47 @@ long CountDarkenedPixels(const std::string& a_path, const std::string& b_path) {
     return count;
 }
 
+// gold 比较：**逐像素**，允许单个通道 ±1 的浮点舍入差（不再是逐字节）。
+//
+// 为什么要放宽这 1 LSB（2026-10-22 重构）：纵向 alpha 从顶点属性并进了逐点颜色
+// （由 FS 从 per-instance 纹理采样），alpha 的插值路径从「顶点重心插值」变成
+// 「纹理双线性」—— 数学上同一个线性函数，浮点舍入不同。实测两张 gold 各差 5/6 个
+// 像素、最大 1/255。任何**可见**的变化都会超过 1，所以这条容差不掩盖真实回归。
+//
+// 返回 false 表示解码失败/尺寸不一致（调用方 FATAL）；超过容差直接 CHECK 崩。
+bool CheckGoldPixels(const std::string& actual_path, const std::string& gold_path) {
+    int aw = 0;
+    int ah = 0;
+    int ac = 0;
+    int bw = 0;
+    int bh = 0;
+    int bc = 0;
+    unsigned char* a = stbi_load(actual_path.c_str(), &aw, &ah, &ac, 3);
+    unsigned char* b = stbi_load(gold_path.c_str(), &bw, &bh, &bc, 3);
+    if (a == nullptr || b == nullptr || aw != bw || ah != bh) {
+        stbi_image_free(a);
+        stbi_image_free(b);
+        return false;
+    }
+    int max_diff = 0;
+    long over_one = 0;
+    for (int i = 0; i < aw * ah; ++i) {
+        const int d = std::max(std::abs(int(a[i * 3 + 0]) - int(b[i * 3 + 0])),
+                               std::max(std::abs(int(a[i * 3 + 1]) - int(b[i * 3 + 1])),
+                                        std::abs(int(a[i * 3 + 2]) - int(b[i * 3 + 2]))));
+        max_diff = std::max(max_diff, d);
+        if (d > 1) {
+            ++over_one;
+        }
+    }
+    stbi_image_free(a);
+    stbi_image_free(b);
+    CHECK_LE(max_diff, 1) << "gold 差异超过 1/255: " << actual_path << " vs " << gold_path
+                          << "（max=" << max_diff << "，差>1 的像素=" << over_one << "）";
+    LOG(INFO) << "[gold] ok: " << actual_path << "（max diff = " << max_diff << "）";
+    return true;
+}
+
 // 统计「纹理 vs 纯色」差异区域内满足颜色判据的像素数。
 // 判据（都在 0..255 域）：
 //   kRed    : r > g+25 且 r > b+25
@@ -251,12 +292,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // 主 gold（带纹理 + 柔边）与加法+软深度 gold：都先确认存在，再逐像素比较。
     std::vector<uint8_t> expected;
     if (!jpov::ReadFileBytes(GoldPath(), &expected)) {
         LOG(FATAL) << "missing gold: " << GoldPath();
     }
-
-    // 主 gold（带纹理 + 柔边）到临时文件后逐字节比较。
     std::vector<uint8_t> expected_add;
     if (!jpov::ReadFileBytes(GoldAdditiveSoftPath(), &expected_add)) {
         LOG(FATAL) << "missing gold: " << GoldAdditiveSoftPath();
@@ -290,13 +330,7 @@ int main(int argc, char** argv) {
     RenderTo(soft, soft_cfg);
     RenderTo(add_soft, add_soft_cfg);
 
-    std::vector<uint8_t> actual_bytes;
-    if (!jpov::ReadFileBytes(actual, &actual_bytes)) {
-        LOG(FATAL) << "missing actual: " << actual;
-    }
-    CHECK_EQ(actual_bytes.size(), expected.size())
-        << "gold 尺寸不一致：" << actual_bytes.size() << " vs " << expected.size();
-    CHECK(actual_bytes == expected) << "gold 逐字节不一致: " << actual;
+    CHECK(CheckGoldPixels(actual, GoldPath())) << "gold 缺失/尺寸不一致: " << GoldPath();
 
     // ① 纹理路径生效。
     const long textured_diff = CountDifferingPixels(actual, solid);
@@ -340,13 +374,9 @@ int main(int argc, char** argv) {
     CHECK_LE(soft_diff, 5000) << "软深度差异过大 → 过渡距离可能异常";
     LOG(INFO) << "[assert] soft-depth diff px = " << soft_diff;
 
-    // ⑥ 第二张 gold：加法 + 软深度合并态，逐字节。
-    std::vector<uint8_t> add_soft_bytes;
-    if (!jpov::ReadFileBytes(add_soft, &add_soft_bytes)) {
-        LOG(FATAL) << "missing actual: " << add_soft;
-    }
-    CHECK_EQ(add_soft_bytes.size(), expected_add.size());
-    CHECK(add_soft_bytes == expected_add) << "gold(加法+软深度) 逐字节不一致: " << add_soft;
+    // ⑥ 第二张 gold：加法 + 软深度合并态。
+    CHECK(CheckGoldPixels(add_soft, GoldAdditiveSoftPath()))
+        << "gold(加法+软深度) 缺失/尺寸不一致: " << GoldAdditiveSoftPath();
 
     LOG(INFO) << "strip gold test passed";
     return 0;

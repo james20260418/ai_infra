@@ -37,10 +37,8 @@ constexpr int kStripTexUnit = 1;
 // 平滑 pass 的控制点数据纹理（RGBA32F）。**pass-local**：本 pass 与其他 pass 不同时活跃，
 // 所以不占 texture_units.h 的跨 pass 区间（那张表里 unit 2 是材质 roughness）。
 constexpr int kSmoothDataUnit = 2;
-// 逐条带 tint（RGBA32F，1 texel / 条带）。同样 pass-local。
-constexpr int kStripTintUnit = 3;
-// 逐点颜色（RGBA32F，16 列 × 条带数）。同样 pass-local。
-constexpr int kPointColorUnit = 4;
+// per-instance 数据纹理（逐点 RGBA + 宽度剖面，RGBA32F）。同样 pass-local。
+constexpr int kAppearanceUnit = 3;
 
 }  // namespace
 
@@ -63,14 +61,15 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     CHECK_NE(vbo_, 0u);
     CHECK_NE(ibo_, 0u);
 
-    // 顶点布局固定为 StripVertex（6 个连续 float）；VBO 每帧重传，但绑定关系不变。
+    // 顶点布局固定为 StripVertex（5 个连续 float：pos.xyz + u + v）；VBO 每帧重传，
+    // 但绑定关系不变。
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(StripVertex),
                           reinterpret_cast<const void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(StripVertex),
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(StripVertex),
                           reinterpret_cast<const void*>(3 * sizeof(float)));
 
     // 索引：先建 kMaxStripsPerDraw 块（块 k 的顶点基址 = k × 32）；条带更多时按需扩容。
@@ -107,46 +106,40 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     CHECK_NE(smooth_vbo_, 0u);
     glBindVertexArray(smooth_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, smooth_vbo_);
-    // kSmoothFloatsPerVertex float/顶点：pos(3) + (u, v, alpha) + strip_id(1)
+    // kSmoothFloatsPerVertex float/顶点：pos(3) + (u, v) + strip_id(1)
     const GLsizei smooth_stride =
         static_cast<GLsizei>(kSmoothFloatsPerVertex * sizeof(float));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, smooth_stride,
                           reinterpret_cast<const void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, smooth_stride,
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, smooth_stride,
                           reinterpret_cast<const void*>(3 * sizeof(float)));
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, smooth_stride,
-                          reinterpret_cast<const void*>(6 * sizeof(float)));
+                          reinterpret_cast<const void*>(5 * sizeof(float)));
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);   // 与折线 pass 共用静态索引
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // 逐条带 tint：宽 = 条带数、高 = 1。NEAREST + CLAMP（texelFetch 本来就不走过滤）。
-    glGenTextures(1, &strip_tint_tex_);
-    CHECK_NE(strip_tint_tex_, 0u);
-    glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    strip_tint_capacity_ = 64;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, strip_tint_capacity_, 1, 0, GL_RGBA,
-                 GL_FLOAT, nullptr);
+    GLint max_tex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+    max_texture_rows_ = static_cast<int>(max_tex);
 
-    // 逐点颜色：宽 = 16 列（= kStripSampleCount）、高 = 条带数。
-    // **LINEAR**（这是唯一需要过滤的条带纹理：列与列之间要平滑过渡）+ CLAMP_TO_EDGE。
-    glGenTextures(1, &point_color_tex_);
-    CHECK_NE(point_color_tex_, 0u);
-    glBindTexture(GL_TEXTURE_2D, point_color_tex_);
+    // per-instance 数据纹理：一行 = 一条带：
+    //   [0..15]  逐点 RGBA（沿长度 16 列，**LINEAR**：列间要平滑过渡）
+    //   [16..24] 宽度剖面 9 个 knot（**LINEAR**：9 个等距 knot 的双线性 = 精确分段线性）
+    // NEAREST 会让颜色变成 16 段台阶、剖面变成 8 段台阶 —— 这两条都必须过滤。
+    glGenTextures(1, &appearance_tex_);
+    CHECK_NE(appearance_tex_, 0u);
+    glBindTexture(GL_TEXTURE_2D, appearance_tex_);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    point_color_rows_ = 64;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount, point_color_rows_, 0,
-                 GL_RGBA, GL_FLOAT, nullptr);
+    appearance_capacity_ = 64;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kAppearanceTexels, appearance_capacity_,
+                 0, GL_RGBA, GL_FLOAT, nullptr);
 
     glGenTextures(1, &smooth_data_tex_);
     CHECK_NE(smooth_data_tex_, 0u);
@@ -158,9 +151,6 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     // 初始只开一小块，运行中按条带数翻倍增长（避免每帧抖动导致反复重建）。
-    GLint max_tex = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
-    smooth_max_rows_ = static_cast<int>(max_tex);
     smooth_data_rows_ = 64;
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
                  kStripSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
@@ -172,7 +162,7 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
 
     // 关闭态的默认 uniform **只在 Init 写一次**：uniform 状态是 per-program 的，
     // 而 FS 里这些值只在对应开关打开时才会被读，所以每批重复上传纯属浪费
-    // （1000 批 × 7 次 glUniform = 7000 次驱动调用/帧）。开关字段本身仍然每批设置。
+    // （1000 批 × 每次 glUniform = 数千次驱动调用/帧）。开关字段本身仍然每批设置。
     auto init_disabled_uniforms = [this](unsigned int program, const CommonUniforms& u) {
         glUseProgram(program);
         glUniform1f(u.soft_m, 1.0f);
@@ -183,21 +173,19 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
         glUniform1f(u.fresnel_power, 5.0f);
         glUniform1f(u.fresnel_strength, 1.0f);
         glUniform1f(u.fresnel_graze_alpha, 1.0f);
-        glUniform1f(u.strip_tint_count, 1.0f);
-        glUniform1f(u.point_color_rows, 1.0f);
-        glUniform1f(u.additive_gain, 1.0f);
         glUseProgram(0);
     };
     init_disabled_uniforms(prog_draw_, draw_uniforms_);
     init_disabled_uniforms(prog_smooth_, smooth_uniforms_.common);
 
-    // GLSL 里硬编码了三个拓扑常量（顶点属性/条带 = 32、采样点数 = 16、段数 = 15）：
-    // 折线 pass 的 `gl_VertexID / 32` 与逐点颜色的 `tx = (u*15+0.5)/16` 都依赖它们。
-    // 改 C++ 常量却忘了改 shader，是**静默错色/错条带**（不崩、不出图像错误提示），
-    // 所以在这里拦住。
+    // GLSL 里硬编码了拓扑常量（顶点属性/条带 = 32、采样点数 = 16、段数 = 15、
+    // per-instance 行宽 = 25）：折线 pass 的 `gl_VertexID / 32` 与 PointColor/
+    // WidthProfile 的 `15.0 / 25.0 / 16.0` 都依赖它们。改 C++ 常量却忘了改 shader，
+    // 是**静默错色/错条带**（不崩、不出图像错误提示），所以在这里拦住。
     CHECK_EQ(kStripVerticesPerStrip, 32) << "kVs 里 gl_VertexID/32 必须同步";
     CHECK_EQ(kStripSampleCount, 16) << "PointColor 里的 16 个 texel 必须同步";
     CHECK_EQ(kStripQuads, 15) << "PointColor 里的 15 段必须同步";
+    CHECK_EQ(kAppearanceTexels, 25) << "shader 里 PointColor/WidthProfile 的 25.0 必须同步";
 
     initialized_ = true;
 }
@@ -208,10 +196,10 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     // 名字表**只在这里出现一次**：两个 pass 用同名 uniform（同一个 kCommonFsHead）。
     // 抄错/漏改一个名字只会让 GetUniform 返回 -1（静默无效），出图很难定位。
     out->view_proj = shader_mgr_->GetUniform(program, "uViewProj");
-    out->tint = shader_mgr_->GetUniform(program, "uTint");
-    out->has_tex = shader_mgr_->GetUniform(program, "uHasTex");
     out->tex = shader_mgr_->GetUniform(program, "uTex");
-    out->profile = shader_mgr_->GetUniform(program, "uProfile");
+    out->has_tex = shader_mgr_->GetUniform(program, "uHasTex");
+    out->appearance = shader_mgr_->GetUniform(program, "uAppearance");
+    out->appearance_rows = shader_mgr_->GetUniform(program, "uAppearanceRows");
     out->scene_depth = shader_mgr_->GetUniform(program, "uSceneDepth");
     out->viewport = shader_mgr_->GetUniform(program, "uViewport");
     out->near_plane = shader_mgr_->GetUniform(program, "uNear");
@@ -221,13 +209,6 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->soft_m = shader_mgr_->GetUniform(program, "uSoftDepthM");
     out->soft_inv = shader_mgr_->GetUniform(program, "uSoftDepthInv");
     out->cam_pos = shader_mgr_->GetUniform(program, "uCamPos");
-    out->strip_tint = shader_mgr_->GetUniform(program, "uStripTint");
-    out->has_strip_tint = shader_mgr_->GetUniform(program, "uHasStripTint");
-    out->strip_tint_count = shader_mgr_->GetUniform(program, "uStripTintCount");
-    out->point_color = shader_mgr_->GetUniform(program, "uPointColor");
-    out->has_point_color = shader_mgr_->GetUniform(program, "uHasPointColor");
-    out->point_color_rows = shader_mgr_->GetUniform(program, "uPointColorRows");
-    out->additive_gain = shader_mgr_->GetUniform(program, "uAdditiveGain");
     out->fresnel_enabled = shader_mgr_->GetUniform(program, "uFresnelEnabled");
     out->fresnel_rim_color = shader_mgr_->GetUniform(program, "uFresnelRimColor");
     out->fresnel_f0 = shader_mgr_->GetUniform(program, "uFresnelF0");
@@ -273,16 +254,11 @@ void StripRenderer::Finalize() {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
-    if (strip_tint_tex_ != 0) {
-        glDeleteTextures(1, &strip_tint_tex_);
-        strip_tint_tex_ = 0;
+    if (appearance_tex_ != 0) {
+        glDeleteTextures(1, &appearance_tex_);
+        appearance_tex_ = 0;
     }
-    strip_tint_capacity_ = 0;
-    if (point_color_tex_ != 0) {
-        glDeleteTextures(1, &point_color_tex_);
-        point_color_tex_ = 0;
-    }
-    point_color_rows_ = 0;
+    appearance_capacity_ = 0;
     if (smooth_data_tex_ != 0) {
         glDeleteTextures(1, &smooth_data_tex_);
         smooth_data_tex_ = 0;
@@ -296,7 +272,7 @@ void StripRenderer::Finalize() {
         smooth_vao_ = 0;
     }
     smooth_data_rows_ = 0;
-    smooth_max_rows_ = 0;
+    max_texture_rows_ = 0;
     // ⚠️ 必须复位：否则 Finalize → Init 的第二次 Init 里 EnsureIboCapacity 会因为
     //    「容量看起来还够」直接返回，而 IBO 已经被删掉 → 后续 draw 索引到已删除的 buffer。
     ibo_capacity_ = 0;
@@ -321,6 +297,52 @@ void StripRenderer::Begin(int full_w, int full_h, bool with_additive) {
     has_content_ = false;
     has_alpha_ = false;
     has_additive_ = false;
+}
+
+void StripRenderer::UploadAppearance(const std::vector<Strip16>& strips) {
+    const int count = static_cast<int>(strips.size());
+    CHECK_GT(count, 0) << "UploadAppearance: strips 不能为空";
+    CHECK_LE(count, max_texture_rows_)
+        << "StripRenderer::UploadAppearance: 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
+        << max_texture_rows_ << "），per-instance 数据纹理放不下";
+
+    if (count > appearance_capacity_) {
+        const int grown = std::max(count, appearance_capacity_ * 2);
+        CHECK_LE(grown, max_texture_rows_)
+            << "StripRenderer::UploadAppearance: 扩容后高度超过 GL_MAX_TEXTURE_SIZE（"
+            << max_texture_rows_ << "）";
+        appearance_capacity_ = grown;
+        glBindTexture(GL_TEXTURE_2D, appearance_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kAppearanceTexels,
+                     appearance_capacity_, 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
+
+    // 逐条带 gather 成「每行 25 texel」的连续块（CPU stride 与 GPU 行布局解耦：
+    // 用户面对的是一个 Strip16，纹理只看颜色/剖面这两段）。
+    appearance_data_.clear();
+    appearance_data_.reserve(static_cast<size_t>(count) * kAppearanceTexels * 4);
+    for (const Strip16& strip : strips) {
+        for (int k = 0; k < kStripSampleCount; ++k) {
+            const Color& c = strip.point_color[static_cast<size_t>(k)];
+            appearance_data_.push_back(c.r);
+            appearance_data_.push_back(c.g);
+            appearance_data_.push_back(c.b);
+            appearance_data_.push_back(c.a);
+        }
+        for (int k = 0; k < kStripProfileKnots; ++k) {
+            appearance_data_.push_back(strip.width_profile[static_cast<size_t>(k)]);
+            appearance_data_.push_back(0.0f);
+            appearance_data_.push_back(0.0f);
+            appearance_data_.push_back(0.0f);
+        }
+    }
+
+    // unit 0 归位再绑：上传不该依赖上一个 pass 留下的 active unit
+    //（本 pass 的约定同样是「进来时 unit 0 已激活」）。
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, appearance_tex_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kAppearanceTexels, count, GL_RGBA,
+                    GL_FLOAT, appearance_data_.data());
 }
 
 void StripRenderer::Draw(const TranslucentStripBatch& batch,
@@ -360,53 +382,11 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
                                  << " 未注册";
     }
 
-    // 逐条带 tint（可选）：整批一次上传（宽 = 条带数、高 = 1）。
-    // 放在两个 drawer 之前：它是**批级**数据，两条 pass 用同一个采样器。
-    if (!batch.strip_tints.empty()) {
-        const int count = static_cast<int>(batch.strip_tints.size());
-        if (count > strip_tint_capacity_) {
-            const int grown = std::max(count, strip_tint_capacity_ * 2);
-            CHECK_LE(grown, smooth_max_rows_)
-                << "StripRenderer::Draw: 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
-                << smooth_max_rows_ << "），逐条带 tint 放不下";
-            strip_tint_capacity_ = grown;
-            glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, strip_tint_capacity_, 1, 0,
-                         GL_RGBA, GL_FLOAT, nullptr);
-        }
-        // unit 0 归位再绑：上传不该依赖上一个 pass 留下的 active unit
-        //（本 pass 的约定同样是「进来时 unit 0 已激活」）。
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
-        // Color 是紧凑的 4 float（见 strip_types.h 的 static_assert），可直接上传。
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count, 1, GL_RGBA, GL_FLOAT,
-                        batch.strip_tints.data());
-        ctx.has_strip_tint = true;
-    }
-
-    // 逐点颜色（可选）：每条带一行 16 texel，整批一次上传。
-    if (!batch.strip_point_colors.empty()) {
-        const int count = static_cast<int>(batch.strip_point_colors.size());
-        if (count > point_color_rows_) {
-            const int grown = std::max(count, point_color_rows_ * 2);
-            CHECK_LE(grown, smooth_max_rows_)
-                << "StripRenderer::Draw: 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
-                << smooth_max_rows_ << "），逐点颜色纹理放不下";
-            point_color_rows_ = grown;
-            glBindTexture(GL_TEXTURE_2D, point_color_tex_);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount,
-                         point_color_rows_, 0, GL_RGBA, GL_FLOAT, nullptr);
-        }
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, point_color_tex_);
-        // 一行 = 16 个 Color（16×4 float），整块连续（见 strip_types.h 的 static_assert）。
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kStripSampleCount, count, GL_RGBA,
-                        GL_FLOAT, batch.strip_point_colors.data());
-        ctx.has_point_color = true;
-    }
+    // 逐条带的颜色/剖面：整批一次上传（两个 pass 共用同一张纹理）。
+    UploadAppearance(batch.strips);
 
     // 两个独立 drawer，写同一张 WBO 目标（命令顺序 = 前后顺序）。
-    if (batch.style == StripStyle::kSmooth) {
+    if (batch.geometry == StripInterpolation::kSmooth) {
         DrawSmooth(ctx);
     } else {
         DrawPolyline(ctx);
@@ -428,8 +408,6 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     const TranslucentStripBatch& batch = *ctx.batch;
 
     glUniformMatrix4fv(uniforms.view_proj, 1, GL_FALSE, ctx.view_proj);
-    glUniform4f(uniforms.tint, batch.tint.r, batch.tint.g, batch.tint.b, batch.tint.a);
-    glUniform1fv(uniforms.profile, 9, batch.width_profile.data());
     glUniform2f(uniforms.viewport, static_cast<float>(ctx.full_w),
                 static_cast<float>(ctx.full_h));
     glUniform1f(uniforms.near_plane, ctx.camera->near);
@@ -447,32 +425,12 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     glBindTexture(GL_TEXTURE_2D, ctx.scene_depth_tex);
     glUniform1i(uniforms.scene_depth, kSceneDepthUnit);
 
-    // 逐条带 tint：没有就置 0，FS 走「只用 uTint」的分支（一次取样都不做）。
-    if (ctx.has_strip_tint) {
-        glActiveTexture(GL_TEXTURE0 + kStripTintUnit);
-        glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
-        glUniform1i(uniforms.strip_tint, kStripTintUnit);
-        glUniform1i(uniforms.has_strip_tint, 1);
-        glUniform1f(uniforms.strip_tint_count,
-                    static_cast<float>(ctx.batch->strip_tints.size()));
-    } else {
-        glUniform1i(uniforms.has_strip_tint, 0);
-    }
-    if (ctx.has_point_color) {
-        glActiveTexture(GL_TEXTURE0 + kPointColorUnit);
-        glBindTexture(GL_TEXTURE_2D, point_color_tex_);
-        glUniform1i(uniforms.point_color, kPointColorUnit);
-        glUniform1i(uniforms.has_point_color, 1);
-        // 行号钳位用**实际纹理高度**（不是条带数）：整批一次性上传，两者在扩容后不同。
-        glUniform1f(uniforms.point_color_rows, static_cast<float>(point_color_rows_));
-    } else {
-        glUniform1i(uniforms.has_point_color, 0);
-    }
-    // HDR 增益：只有加法集才需要改（覆盖集用 Init 写的 1.0）。
-    if (batch.blend == StripBlend::kEmissive) {
-        glUniform1f(uniforms.additive_gain,
-                    batch.additive_gain.has_value() ? *batch.additive_gain : 1.0f);
-    }
+    // per-instance 数据纹理：行号钳位用**实际纹理高度**（不是本批条带数 ——
+    // 扩容后两者不同，用条带数会让行坐标落错 texel）。
+    glActiveTexture(GL_TEXTURE0 + kAppearanceUnit);
+    glBindTexture(GL_TEXTURE_2D, appearance_tex_);
+    glUniform1i(uniforms.appearance, kAppearanceUnit);
+    glUniform1f(uniforms.appearance_rows, static_cast<float>(appearance_capacity_));
 
     // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
     // uniform 是无法排查的隐患）；开启时按批取值。
@@ -554,7 +512,8 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     ApplyCommonUniforms(smooth_uniforms_.common, ctx);
     glUniform1f(smooth_uniforms_.seg_count, static_cast<float>(kStripQuads));
 
-    // 数据纹理占 kSmoothDataUnit（unit0 = 场景深度、unit1 = 条带纹理）。
+    // 数据纹理占 kSmoothDataUnit（unit0 = 场景深度、unit1 = 条带纹理、
+    // unit3 = per-instance 数据）。
     glActiveTexture(GL_TEXTURE0 + kSmoothDataUnit);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
     glUniform1i(smooth_uniforms_.strip_data, kSmoothDataUnit);
@@ -567,9 +526,9 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     // 数据纹理按需扩容（容量翻倍增长，避免条带数每帧抖动时反复重建）。
     if (static_cast<int>(total) > smooth_data_rows_) {
         const int grown = std::max(static_cast<int>(total), smooth_data_rows_ * 2);
-        CHECK_LE(grown, smooth_max_rows_)
+        CHECK_LE(grown, max_texture_rows_)
             << "StripRenderer(smooth): 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
-            << smooth_max_rows_ << "），数据纹理放不下";
+            << max_texture_rows_ << "），数据纹理放不下";
         smooth_data_rows_ = grown;
         glActiveTexture(GL_TEXTURE0 + kSmoothDataUnit);
         glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);

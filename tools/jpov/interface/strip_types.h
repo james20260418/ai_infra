@@ -19,6 +19,14 @@
 //   相邻两列构成 1 个 quad，共 15 个 quad。
 //
 // 纹理透明：纹理的 alpha 直接当覆盖度用（黑底美术素材应先把黑转成 alpha=0）。
+//
+// ⭐ 数据分两层（2026-10-22 Danis 定，重构后）：
+//   * **per instance**：几何 + 逐点 RGBA + 宽度剖面 —— 全在 `Strip16` 里，一个自洽 POD，
+//     用户按一个 stride 序列化 / memcpy 即可；
+//   * **per batch**：材质（纹理 / 混合集合 / fresnel）+ 场景交接（软深度）—— 「同一材质
+//     × 上千实例」才是 batch 的意义，跨实例不同的东西一律在 Strip16 里。
+//   这也是为什么**没有** batch 级 tint / 逐条带 tint / 加法增益：它们都是逐实例量的
+//   退化特例，留着只会让「同一个颜色有三个来源」这种问题重新长出来。
 
 #ifndef JPOV_INTERFACE_STRIP_TYPES_H_
 #define JPOV_INTERFACE_STRIP_TYPES_H_
@@ -27,7 +35,6 @@
 #include <cstdint>
 #include <optional>
 #include <type_traits>
-#include <utility>
 #include <vector>
 
 #include "geom/common/vec.h"
@@ -37,27 +44,36 @@ namespace jpov {
 
 using Vec3f = geom::Vec3<float>;
 
-// 条带的两种绘制风格（Danis 2026-10-21 定：**两个独立 pass，统一一个命令接口**）。
+// 条带的**段间插值方式**（2026-10-22 从 StripStyle 改名：名字要说明它控制的是几何）。
 //
 //   kPolyline（默认）：left/right 是**顶点** —— 相邻两列之间是**直线（弦）**，
-//                       折角处能看出多边形。最便宜，适合辅助线 / 硬边。
+//                       折角处能看出多边形（15 段就是 15 段）。最便宜，适合辅助线 / 硬边。
 //   kSmooth：          left/right 是**插值型控制点（knot）** —— 相邻两列之间是
 //                       **C1 Hermite 曲线**，边缘按真实曲线裁形（fwidth 解析 AA）。
 //
-// **两种风格的物理契约完全相同**，用户不需要为切换做任何事：
+// **两种方式的物理契约完全相同**，切换不需要调用方做任何事：
 //   ① 曲线/折线**严格经过**每一个 left[i] / right[i]；
 //   ② 第 i 列的宽度**严格等于** |left[i] − right[i]|；段间由半宽矢量插值决定；
 //   ③ 想改宽窄 → **移点**（不存在 width 参数）。
 //
+// 怎么选：
+//   * 硬边辅助线 / 极细条带 / 只需要「一条带」→ kPolyline（更快，且细条带上两者看不出差别）；
+//   * 闭合曲面（玻璃圆环）、长而弯的拖尾、开 fresnel 的东西 → kSmooth
+//     （折线 pass 的边反会沿 15 段露出分面亮带，见下方法线绑定）。
+//
+// 代价（kSmooth）：多一张控制点数据纹理（每列 3 texel）+ CPU 端算切线/外扩量；
+//   **FS 成本与采样点数无关（O(1)）**，所以点数不是它的问题。
+//
 // kSmooth 内部会按局部曲率把多边形**保守外扩**再由 FS 裁回去（片元只能削不能补），
 // 外扩量是渲染器从几何自动算的**实现细节**：不暴露参数、也不改变上面两条契约。
+// 已知边界：外扩上限 8×（按最细一列算），比这更细的尖端可能缺一条亚像素。
 //
-// ⭐ 法线来源**与风格绑定**（2026-10-22 Danis 定，契约、没有独立开关）：
+// ⭐ 法线来源**与插值方式绑定**（2026-10-22 Danis 定，契约、没有独立开关）：
 //   kPolyline ⇒ 真折角：fresnel 用折面法线（屏幕导数 dFdx/dFdy，逐三角形恒定）；
 //   kSmooth   ⇒ 真柔和：fresnel 用**重建曲面的解析法线**（dS × H，无折面）。
 //   「几何柔和 + 法线折角」这种混搭**不提供** —— 它只会让边反出现与几何无关的亮带
 //   （也就是 15 段圆环上那圈竖条），没有任何一种使用意图对应它。
-enum class StripStyle {
+enum class StripInterpolation {
     kPolyline = 0,
     kSmooth = 1,
 };
@@ -65,28 +81,70 @@ enum class StripStyle {
 // 每条带的采样点数（= 段数 + 1）。改这个值 = 改所有素材的「格数」约定，不要随意动。
 inline constexpr int kStripSampleCount = 16;
 
-// 一条条带的 per-instance 数据（纯 POD：可整块 memcpy，用户可自行管理序列）。
+// 宽度（v）方向剖面的 knot 数：knots[k] 是 v = k/8 处的乘子（8 段 / 9 个 knot）。
+inline constexpr int kStripProfileKnots = 9;
+
+// 逐点颜色的**上限**（线性 HDR）。不是物理约束，是防御：超过它基本可以断定是单位搞错
+// （比如把 0..255 的 8bit 颜色直接塞进来），而不是艺术意图。
+inline constexpr float kMaxStripColorValue = 10000.0f;
+
+// 逐点颜色的默认值 = 恒等乘子（白 + 不透明）。
+// 这不是「特殊值语义」，而是乘法单位元：没填颜色时条带就是「纹理原色 / 纯白」，
+// 与重构前 tint = 白色、alpha = 1 的行为一致。
+inline constexpr std::array<Color, kStripSampleCount> kDefaultStripPointColors = [] {
+    std::array<Color, kStripSampleCount> out{};
+    for (int i = 0; i < kStripSampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+// 宽度剖面默认值 = 全 1（硬边）。同样是乘法单位元：不填就是「不改宽度方向」。
+inline constexpr std::array<float, kStripProfileKnots> kFlatWidthProfile = {
+    1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
+// 一条条带的**全部 per-instance 数据**（纯 POD：可整块 memcpy，用户可自行管理序列）。
 //
-// 三个数组**下标语义一致**：下标 i 同时表示 left[i] / right[i] / alpha[i]。
+// 三个数组**下标语义一致**：下标 i 同时表示 left[i] / right[i] / point_color[i]。
 // 只有前 point_count 个点参与绘制；其余列**塌缩到最后一个有效点**（零面积四边形，
 // 不产生片元），因此不足 16 点时不需要调用方补齐。
+//
+// 为什么颜色/剖面也在这里（2026-10-22 重构）：
+//   它们是「这个实例长什么样」的一部分，和几何同源、同生命周期。以前放在 batch 上
+//   （颜色还分成 batch tint + 逐条带 tint + 逐点颜色三层）导致同一个颜色有三个乘数，
+//   用户必须同时记住三个地方；现在只有一层：**逐点 RGBA**。
 struct Strip16 {
     // 两条轨：right = 中心线 − side·半宽、left = 中心线 + side·半宽
     // （side = normalize(cross(切向, up))；由调用方决定，本层只管画）。
     std::array<Vec3f, kStripSampleCount> left;    // 左轨（纹理 v = 1）
     std::array<Vec3f, kStripSampleCount> right;   // 右轨（纹理 v = 0）
-    // 纵向（沿长度）alpha **乘子**，不是覆盖率 —— 最终 α 还要 × 纹理 α × 批次 tint.a
-    // × 宽度剖面。拖尾淡出就写这里（头 1 → 尾 0）。范围 [0,1]。
-    std::array<float, kStripSampleCount> alpha;
+
+    // **逐点 RGBA**（下标 = 第几列，与 left/right 对齐）：
+    //   rgb = 线性 HDR 颜色乘子：与纹理色、fresnel 边反色相乘。
+    //         **允许 > 1**（scene-referred）：加法集（发光）靠它拿到 bloom / tone map
+    //         的 HDR 余量 —— 不需要额外的「增益」旋钮（见 TranslucentStripBatch 的说明）。
+    //   a   = 沿长度（u）方向的不透明度乘子（不是纹理 alpha）：最终 α 还要 × 纹理 α
+    //         × 宽度剖面。拖尾淡出就写这里（头 1 → 尾 0）。范围 [0,1]。
+    // 默认 = 白 + 不透明（乘法单位元，见 kDefaultStripPointColors）。
+    std::array<Color, kStripSampleCount> point_color = kDefaultStripPointColors;
+
+    // **宽度（v）方向**的 alpha 剖面：knots[k] = 在 v = k/8 处的乘子（9 knot / 8 段）。
+    // 默认全 1 = 不衰减（硬边）。要让边缘柔和 / 单侧渐隐就改这里，例如
+    // `{0, .35, .8, 1, 1, 1, .8, .35, 0}` = 两个软边 + 实心芯。
+    // 在**片元**里逐像素求值（不是顶点插值），所以 4 段几何也能有平滑剖面；
+    // 每个 knot ∈ [0,1]（至少一个 > 0，否则整条不可见 → Validate 崩）。
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
 
     // 实际有效点数，必须显式给 [2, kStripSampleCount]。
     // 不设默认值：默认 0 会让「忘了填」直接 crash（而不是悄悄画出一条空条带）。
     uint32_t point_count = 0;
 };
 
-// 固定字节数：用户会按序列 memcpy / 一次性上传，尺寸变化必须是显式决策。
+// 固定字节数（384 + 256 + 36 + 4 = 680）：用户会按序列 memcpy / 一次性上传，
+// 尺寸变化必须是显式决策 —— 改这个 assert 之前先问「用户存的盘要不要迁移」。
 static_assert(sizeof(Strip16) == 2 * kStripSampleCount * sizeof(Vec3f) +
-                                    kStripSampleCount * sizeof(float) +
+                                    kStripSampleCount * sizeof(Color) +
+                                    kStripProfileKnots * sizeof(float) +
                                     sizeof(uint32_t),
               "Strip16 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
 static_assert(std::is_trivially_copyable_v<Strip16>,
@@ -94,22 +152,33 @@ static_assert(std::is_trivially_copyable_v<Strip16>,
 static_assert(std::is_standard_layout_v<Strip16>,
               "Strip16 必须是 standard layout");
 
-// 一条带的逐点（沿长度）颜色：16 个 RGBA 乘子（下标 = 第几列，与 left/right 对齐）。
+// 混合集合（对应 WBO 的两套附件）。**这是一个 batch 的物理材质属性**，不是开关：
+// 选错 = 东西的物理行为错了，而不只是"差点颜色"。
 //
-// 为什么是 `std::array` 而不是加进 Strip16：Strip16 是固定 POD（用户按 stride memcpy），
-// 加字段 = 破坏契约；逐点颜色只在"要渐变"时才需要，做成可选的平行数组更便宜。
-using StripPointColors = std::array<Color, kStripSampleCount>;
-
-// 上传路径直接把整块当 float 数组传给 GL（16×4 float，RGBA32F 一行），布局不能变。
-static_assert(sizeof(StripPointColors) == kStripSampleCount * 4 * sizeof(float),
-              "StripPointColors 必须是 16×4 个连续 float");
-
-// 混合集合（对应 WBO 的两套附件）。
+//   kCoverage —— **吸收 / 遮挡介质**（玻璃、薄膜、烟雾、花纹屏）。
+//       · 写覆盖集（accum + reveal），**参与遮挡**：背后的东西会被这层按 α 混掉；
+//       · 逐片元 α（覆盖率）**同时**决定「注入多少颜色」与「挡掉多少背景」：
+//           accum += color·α·w ，reveal *= (1−α)
+//           解析：C = Σ(color·α·w)/Σ(α·w) ，cov = 1 − Π(1−α)
+//           单层时退化成标准 over：out = color·α + dst·(1−α)
+//         （物理解释：一层薄片的等效光学厚度 τ = −ln(1−α) ≈ α（薄片极限），
+//           多层 T = Π(1−αᵢ)。**没有独立的 sigma 参数**，α 就是全部。）
+//       · color.rgb > 1 在这里表示「膜本身是 HDR 亮的」（会被 bloom 捡到），
+//         **不改变遮挡量**；多层叠加时它会经 WBO 权重函数影响层间相对权重（单层无影响）。
+//       · 选它：正对视线时"看得穿、有颜色"、掠射时变实 —— 也就是玻璃/膜的观感。
 //
-//   kCoverage  —— 吸收介质（玻璃/膜/烟）：写覆盖集 accum/reveal，参与遮挡；
-//   kEmissive  —— 发光介质（拖尾/光环/剑气）：写加法集，**不被遮挡衰减**，
-//                 与背景直接相加（黑底纹理天然透明：贡献 = 色·α = 0）。
-// 同一批只能选一种（附件不同 = 不同 pass），要混用就发两个 batch。
+//   kEmissive —— **发光介质**（拖尾、光环、剑气、火焰射流）。
+//       · 写加法集：`add += color·α·fade`，最终 `out = dst + add`，**不被遮挡衰减**；
+//       · α 在这里只是"注入量的一个乘子"（形状淡出 / 纹理 alpha 仍然要靠它），
+//         纯亮度可以直接用 color.rgb > 1 表达，**不需要额外的增益旋钮**；
+//       · 黑底纹理天然透明：color·α = 0（所以素材把黑色转成 alpha=0 即可）；
+//       · 选它：它**照亮**背景而不是挡住背景。把它误设成 kCoverage，画面会变成
+//         "一层有颜色的膜"（暗、且挡后面的东西）；把玻璃误设成 kEmissive 会失去遮挡、
+//         整块玻璃浮在物体前面发光 —— 两个方向都是明显错误，但不是崩溃。
+//
+// 集合内部**与绘制顺序无关**（accum 是加法、reveal 是乘法）；集合之间固定
+// **先覆盖集、后加法集** ⇒ 加法光不被遮罩衰减（这是单层 OIT 的固有近似，见 docs §4.2）。
+// 一个 batch 只能选一种集合；「玻璃 + 加法高光」要发**两个** batch。
 enum class StripBlend {
     kCoverage,
     kEmissive,
@@ -117,7 +186,7 @@ enum class StripBlend {
 
 // 菲涅耳「廉价玻璃边反」参数（**批次级**，整批共享）。
 //
-// 为什么需要它：条带本来是不受光的纯色片（§7 有意为之），单靠 tint 只会像一层
+// 为什么需要它：条带本来是不受光的纯色片（§7 有意为之），单靠颜色只会像一层
 // 有色薄膜 —— 正对视线时几乎看不见、掠射时应该有强反光，这个差别只有菲涅耳能给。
 //
 // 公式（Schlick 近似，逐片元求值）：
@@ -125,11 +194,15 @@ enum class StripBlend {
 //   F    = F0 + (1 − F0)·(1 − cosθ)^power
 //   F    = clamp(F · strength, 0, 1)
 //   color = mix(color, rim_color, F)          // 边 → 反射色
-//   α     = mix(α, graze_alpha·形状淡出, F)    // 边 → 不透明（中心保持看得穿）
-//   其中「形状淡出」= 逐点 alpha × 逐点颜色 alpha（沿长度的淡出）；
-//   整批/逐条带的**不透明度乘子不进这里** —— 边反是独立旋钮（薄膜 α=0.12 也该有实心亮边）。
+//   α     = mix(α, graze_alpha, F)            // 边 → 不透明（中心保持看得穿）
 //
-// 法线 N 的来源**由 batch.style 决定**（见 StripStyle 的绑定契约），
+// ⚠️ 边反**不乘任何 α 乘子**（逐点 alpha / 纹理 alpha / 剖面 alpha）：反射是独立旋钮 ——
+//   薄膜 α=0.12 也该有实心亮边，这正是 fresnel 存在的理由。
+//   2026-10-22 重构后「不透明度」与「沿长度淡出」共用逐点颜色的 alpha 通道，两者不可分；
+//   乘上去会让 0.12 的玻璃壳完全没有亮边。代价（已知限制）：开 fresnel 的条带不要在
+//   长度方向做淡出，否则淡出段的边反会保留。
+//
+// 法线 N 的来源**由 batch.geometry 决定**（见 StripInterpolation 的绑定契约），
 // 本结构里**没有**法线模式字段 —— 也不该有：「柔和/折角」是同一个使用意图。
 //
 // 没有任何字段带「特殊值语义」：不想开就**不设** optional（与 soft_depth_m 同一写法）。
@@ -148,23 +221,23 @@ struct StripFresnel {
 
 // ── 一条条带的最终像素（本节是**唯一权威**，FS 与设计文档都以它为准）──
 //
-// 逐片元输入：(u, v, alpha_pt) 由几何插值得到；N 由 `style` 决定（见 StripStyle 的绑定契约）。
+// 逐片元输入：(u, v) 由几何插值得到；(rgb, alpha_pt) 由逐点颜色按 u 采样得到
+// （16 列硬件双线性，列上是精确值）；N 由 `geometry` 决定（见 StripInterpolation）。
 //
-//   color = tint.rgb
-//         × strip_tints[i].rgb              （逐条带，可选）
-//         × point_colors[i][col].rgb        （逐点/沿长度，可选）
-//         × texture(uTex, uv).rgb           （有纹理时）
+//   color = point_color(u).rgb                    （逐点颜色，允许 HDR）
+//         × texture(uTex, uv).rgb                 （有纹理时）
 //
-//   a     = tint.a × strip_tints[i].a × point_colors[i][col].a × alpha_pt
-//         × texture.a                        （有纹理时）
-//         → [fresnel]  a = mix(a, graze_alpha × alpha_pt × point_colors[i][col].a, F)
-//         → a *= width_profile(v)            （9 knot，**逐片元**求值）
-//         → a *= 裁形覆盖度                  （仅 kSmooth：解析 AA）
+//   a     = point_color(u).a                      （逐点纵向不透明度）
+//         × texture.a                             （有纹理时）
+//         → [fresnel]  a = mix(a, graze_alpha, F)   （不乘任何 α，见 StripFresnel）
+//         → a *= width_profile(v)                 （9 knot，**逐片元**求值）
+//         → a *= 裁形覆盖度                        （仅 kSmooth：解析 AA）
 //         → [soft depth] a *= clamp((scene_z − z)/m, 0, 1)；
 //           未开软深度时 z 比 scene_z 远超过 2cm 直接 discard
 //
-//   混合集合：kCoverage 写覆盖集（`accum += color·a·w`、`reveal = a`，WBO 解析后 over 合成）；
-//            kEmissive  写加法集（`add += color·a·fade·additive_gain`，不被覆盖集衰减）。
+//   混合集合（见 StripBlend，公式里的注入量**逐字**对应 FS 的写入）：
+//     kCoverage: accum += color·a·w 、reveal = a        （解析后 over 合成）
+//     kEmissive: add   += color·a·fade                  （直接求和，不衰减背景）
 //
 // 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（fresnel / profile /
 // 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
@@ -172,15 +245,10 @@ struct StripFresnel {
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
-// 想给不同条带不同纹理/颜色 → 发多个 batch（每个 batch 一次 draw）。
+// 想给不同条带不同纹理/混合集合 → 发多个 batch（每个 batch 一次 draw）。
 struct TranslucentStripBatch {
-    // 纹理（TextureManager id）。0 = 不采样纹理，纯色（tint）条带。
+    // 纹理（TextureManager id）。0 = 不采样纹理，颜色完全由逐点颜色决定。
     uint32_t texture_id = 0;
-
-    // 整批颜色（线性 HDR）。rgb 与纹理相乘；a 是全局不透明度乘子。
-    // 默认白色——写成字面量而不是 kColorWhite：本头是 GL-free 的类型层，
-    // 单元测试不该为了一个常量去链接 pbr_material.cc。
-    Color tint{1.0f, 1.0f, 1.0f, 1.0f};
 
     // 混合集合（见 StripBlend）。默认覆盖集 = 吸收介质。
     StripBlend blend = StripBlend::kCoverage;
@@ -190,84 +258,21 @@ struct TranslucentStripBatch {
     // 线性淡出，消除条带与几何相交处的硬切边。
     std::optional<float> soft_depth_m;
 
-    // **宽度方向（v）**的 alpha 剖面：knots[k] = 在 v = k/8 处的乘子（9 个 knot / 8 段）。
-    // （§16.3 修正 UV 约定后，u 是长度方向、v 才是宽度方向；这里的注释在修正前写成了 u。）
-    // 默认全 1 = 不衰减（硬边）。要让边缘柔和/单侧渐隐就在 FS 里改这里。
-    // 在**片元**里逐像素求值（不是顶点插值），所以 4 段几何也能有平滑剖面。
-    std::array<float, 9> width_profile = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-                                          1.0f, 1.0f, 1.0f, 1.0f};
-
-    // 本批条带（非空才画）。
-    std::vector<Strip16> strips;
-
-    // 加法集的 **HDR 亮度增益**。nullopt = 1.0（原样，逐字节不变）。
-    //
-    // 为什么需要它：`tint` 各分量被校验限制在 [0,1]，纹理也 ≤ 1，所以没有这个旋钮时
-    // 加法集贡献的上限就是 1.0 —— 发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量
-    // （tone map 之前的世界是 scene-referred，亮部该能到几倍）。
-    // 只对 `blend == kEmissive` 有意义：给覆盖集设它会崩（"设了不生效"比没有更糟）。
-    // 乘在**加法集贡献的最后一步**：`add += color · α · fade · gain`
-    // （fade = 软深度衰减；覆盖集/剖面/边反都已经算进 color 与 α）。
-    std::optional<float> additive_gain;
-
-    // 走哪个 pass（见 StripStyle）。同一帧可混用；两者写进同一张 WBO 覆盖集目标，
+    // 走哪条 pass（见 StripInterpolation）。同一帧可混用；两者写进同一张 WBO 目标，
     // 所以**命令顺序 = 前后顺序**，最后只 Composite 一次。
-    StripStyle style = StripStyle::kPolyline;
+    StripInterpolation geometry = StripInterpolation::kPolyline;
 
     // 菲涅耳（见 StripFresnel）。nullopt = 关闭 —— 画面逐字节等于没有这个功能。
     std::optional<StripFresnel> fresnel;
 
-    // **逐条带（per instance）颜色/不透明度乘子**。空 = 整批用 tint（默认，零开销）。
-    //
-    // 语义是**相乘**：某条带的最终色 = tint × strip_tints[i]，
-    // 于是 tint 仍是「材质色 + 整批不透明度」，这里是「这个实例偏什么色、多透」。
-    // 这也让「同一批里每条拖尾颜色不同」不必拆成多个 draw call。
-    //
-    // 为什么是**平行数组**而不是往 Strip16 里加字段：Strip16 是固定 POD
-    // （用户按 stride memcpy / 存盘），加字段 = 破坏契约；平行数组对它是零侵入。
-    //
-    // 非空时必须与 strips 等长（ValidateStripBatch 会检查，长度不匹配 = 静默错色）。
-    // 与 `Strip16` 的下标一一对应：strip_tints[i] 作用于 strips[i]。
-    std::vector<Color> strip_tints;
-
-    // **逐点（沿长度）颜色**：每条带 16 个 RGBA 乘子。空 = 不用（默认，零开销）。
-    //
-    // 与 `Strip16::alpha`（逐点淡出）互补：那个管"多透"，这个管"什么颜色"。
-    // 一起用才做得出「白 → 黄 → 红、同时尾部淡出」的射流/拖尾。
-    //
-    // 语义与约束（都要满足，否则 ValidateStripBatch 崩）：
-    //   * 非空时必须与 strips 等长；下标 = 条带，元素内下标 = 列（与 left/right 对齐）；
-    //   * 各分量 ∈ [0,1]（线性空间，乘法叠加；HDR 亮度请用 additive_gain）；
-    //   * 列与列之间由硬件**双线性**插值过渡（列上是精确值），所以 16 个点之外不需要更多；
-    //   * `point_count < 16` 的条带，只有前 point_count 列会被画出来（其余列塌缩成零面积），
-    //     这些列的颜色不会被采样 —— 不用给。
-    std::vector<StripPointColors> strip_point_colors;
+    // 本批条带（非空才画）。每条带的颜色/不透明度/宽度剖面都在 Strip16 里 ——
+    // 同一批里每条拖尾颜色不同、边缘软硬不同，都不需要拆成多个 draw call。
+    std::vector<Strip16> strips;
 };
 
-// 上传路径直接把 Color 当 4 个 float 传给 GL（RGBA32F 纹理），布局不能变。
-static_assert(sizeof(Color) == 4 * sizeof(float), "Color 必须是紧凑的 4 float");
-
-// 纯色批：不采样纹理，直接用 color 当条带颜色（color.a = 不透明度乘子）。
-//
-// 等价于 texture_id == 0 + tint == color，这里显式命名——调用方不用猜
-// 「texture_id 给 0 到底是不画还是纯色」。
-// 注意：仍受 width_profile 与逐点 alpha 调制（即纯色也支持柔边与纵向淡出）。
-// blend / soft_depth_m / style 一并给，避免「建好纯色批之后忘了设」这种顺序陷阱
-// （纯色批默认仍是覆盖集 + 折线 pass + 硬判据）。
-inline TranslucentStripBatch MakeSolidStripBatch(
-    const Color& color, std::vector<Strip16> strips,
-    StripBlend blend = StripBlend::kCoverage,
-    std::optional<float> soft_depth_m = std::nullopt,
-    StripStyle style = StripStyle::kPolyline) {
-    TranslucentStripBatch batch;
-    batch.texture_id = 0;          // 不采样纹理 ⇒ 纯色
-    batch.tint = color;
-    batch.blend = blend;
-    batch.soft_depth_m = soft_depth_m;
-    batch.style = style;
-    batch.strips = std::move(strips);
-    return batch;
-}
+// 纯色批：texture_id 给 0，再把每条带的逐点颜色全填成同一个值
+// （`strip.point_color.fill(color)`）—— 逐点颜色就是唯一颜色来源，没有第二层 tint。
+// 注意：仍受该条带 width_profile 调制（纯色也支持柔边与纵向淡出）。
 
 }  // namespace jpov
 

@@ -3,9 +3,9 @@
 // 覆盖点：
 //   * 展开出的顶点数量/顺序（right 先、left 后）与 uv 约定（u=0/1、v=col/15）；
 //   * 不足 16 点时的**尾部塌缩**（多余列坐在最后一个有效点上，且 uv 不跟着改）；
-//   * 逐点 alpha 正确地带到两侧顶点；
+//   * 顶点**不再带 alpha**（已并进逐点颜色，由 FS 采样）；`Strip16{}` 的默认值是乘法单位元；
 //   * 索引模式：每 quad 6 个索引、共 90 个、全部落在本块 [base, base+32) 内；
-//   * ValidateStripBatch 的负向用例（point_count / alpha / profile / tint / NaN / style）必须崩 ——
+//   * ValidateStripBatch 的负向用例（point_count / point_color / profile / NaN / geometry）必须崩 ——
 //     这些是「用户忘了填」的唯一防线，不能静默通过；
 //   * **平滑 pass（kSmooth）的 CPU 前端**：切线（两端必须是完整单侧差分）、
 //     自动外扩量（必须覆盖真实外凸量）、数据纹理打包顺序、顶点外扩与 v 的一致。
@@ -34,7 +34,6 @@ jpov::Strip16 MakeStrip(uint32_t point_count) {
         const float f = static_cast<float>(i);
         s.left[i] = jpov::Vec3f{f, 1.0f, 0.0f};
         s.right[i] = jpov::Vec3f{f, 0.0f, 0.0f};
-        s.alpha[i] = 1.0f;
     }
     return s;
 }
@@ -94,19 +93,28 @@ TEST(StripGeometry, CollapsesTailBeyondPointCount) {
     }
 }
 
-TEST(StripGeometry, CarriesPerPointAlpha) {
-    jpov::Strip16 strip = MakeStrip(16);
-    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
-        strip.alpha[i] = static_cast<float>(i) / 15.0f;
+TEST(StripGeometry, DefaultsAreIdentityMultipliers) {
+    // `Strip16 s{}` 必须直接可用（2026-10-22 Danis 定）：逐点颜色 = 白 + 不透明、
+    // 宽度剖面 = 全 1。这不是「特殊值语义」，是乘法单位元 ——
+    // 改掉它就是让「不填」变成不可见，而不是「原样」。
+    const jpov::Strip16 s{};
+    for (const jpov::Color& c : s.point_color) {
+        EXPECT_FLOAT_EQ(c.r, 1.0f);
+        EXPECT_FLOAT_EQ(c.g, 1.0f);
+        EXPECT_FLOAT_EQ(c.b, 1.0f);
+        EXPECT_FLOAT_EQ(c.a, 1.0f);
     }
-    std::vector<jpov::StripVertex> verts;
-    jpov::ExpandStripVertices(strip, &verts);
+    for (float knot : s.width_profile) {
+        EXPECT_FLOAT_EQ(knot, 1.0f);
+    }
+    EXPECT_EQ(s.point_count, 0u);   // 只有这个是「必须显式填」的
+}
 
-    for (int col = 0; col < jpov::kStripSampleCount; ++col) {
-        const float want = static_cast<float>(col) / 15.0f;
-        EXPECT_FLOAT_EQ(verts[2 * col].alpha, want) << "col=" << col;
-        EXPECT_FLOAT_EQ(verts[2 * col + 1].alpha, want) << "col=" << col;
-    }
+TEST(StripGeometry, VertexLayoutCarriesNoAlpha) {
+    // 逐点 alpha 已并进逐点颜色（由 FS 从 per-instance 纹理采样），
+    // 顶点只剩 pos + (u, v)：5 float / 顶点。
+    EXPECT_EQ(sizeof(jpov::StripVertex), 5 * sizeof(float));
+    EXPECT_EQ(jpov::kSmoothFloatsPerVertex, 6);   // + strip_id
 }
 
 TEST(StripGeometry, IndexPatternMatchesQuads) {
@@ -156,18 +164,18 @@ TEST(StripGeometry, RejectsTooManyPoints) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "point_count");
 }
 
-TEST(StripGeometry, RejectsAllZeroAlpha) {
-    // 典型误用：整块 memset 0 之后忘了填 alpha → 整批隐形。必须崩。
+TEST(StripGeometry, RejectsAllZeroPointAlpha) {
+    // 典型误用：整块 memset 0 之后忘了填颜色/alpha → 整批隐形。必须崩。
     jpov::TranslucentStripBatch batch = MakeBatch(16);
-    for (float& a : batch.strips[0].alpha) {
-        a = 0.0f;
+    for (jpov::Color& c : batch.strips[0].point_color) {
+        c.a = 0.0f;
     }
-    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "alpha");
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "point_color.a");
 }
 
 TEST(StripGeometry, RejectsAllZeroProfile) {
     jpov::TranslucentStripBatch batch = MakeBatch(16);
-    batch.width_profile.fill(0.0f);
+    batch.strips[0].width_profile.fill(0.0f);
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "width_profile");
 }
 
@@ -177,10 +185,35 @@ TEST(StripGeometry, RejectsNonFinitePosition) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "非有限值");
 }
 
-TEST(StripGeometry, RejectsOutOfRangeTint) {
+TEST(StripGeometry, RejectsOutOfRangePointColor) {
+    // rgb 允许 HDR（> 1），但 a 仍是覆盖率（≤ 1）、rgb 不能为负也不能超过防御上限。
+    jpov::TranslucentStripBatch alpha = MakeBatch(16);
+    alpha.strips[0].point_color[0].a = 1.5f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(alpha), "point_color");
+
+    jpov::TranslucentStripBatch negative = MakeBatch(16);
+    negative.strips[0].point_color[0].r = -0.01f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(negative), "point_color");
+
+    jpov::TranslucentStripBatch nan = MakeBatch(16);
+    nan.strips[0].point_color[0].g = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_DEATH(jpov::ValidateStripBatch(nan), "point_color");
+
+    jpov::TranslucentStripBatch too_bright = MakeBatch(16);
+    too_bright.strips[0].point_color[0].b = jpov::kMaxStripColorValue + 1.0f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(too_bright), "point_color");
+}
+
+TEST(StripGeometry, AcceptsHdrPointColor) {
+    // 加法集的亮度靠逐点颜色 > 1 表达（旧的 additive_gain 旋钮已删除）：
+    // 这里必须**不崩**，否则「HDR 发光」这条路就被校验堵死了。
     jpov::TranslucentStripBatch batch = MakeBatch(16);
-    batch.tint.a = 1.5f;
-    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "tint");
+    batch.blend = jpov::StripBlend::kEmissive;
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        batch.strips[0].point_color[static_cast<size_t>(i)].r = 6.0f;
+    }
+    jpov::ValidateStripBatch(batch);
+    SUCCEED();
 }
 
 TEST(StripGeometry, RejectsNonPositiveSoftDepth) {
@@ -196,11 +229,11 @@ TEST(StripGeometry, RejectsIllegalBlendEnum) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "blend");
 }
 
-TEST(StripGeometry, RejectsIllegalStyleEnum) {
-    // style 非法 cast 值不许静默走折线 pass。
+TEST(StripGeometry, RejectsIllegalGeometryEnum) {
+    // geometry 非法 cast 值不许静默走折线 pass。
     jpov::TranslucentStripBatch batch = MakeBatch(16);
-    batch.style = static_cast<jpov::StripStyle>(9);
-    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "style");
+    batch.geometry = static_cast<jpov::StripInterpolation>(9);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "geometry");
 }
 
 TEST(StripGeometry, AcceptsSoftDepthAndEmissive) {
@@ -237,7 +270,6 @@ jpov::Strip16 MakeStraightStrip(const std::vector<float>& half_by_col,
         const float half = half_by_col[i];
         s.left[i] = jpov::Vec3f{x, half, 0.0f};
         s.right[i] = jpov::Vec3f{x, -half, 0.0f};
-        s.alpha[i] = 1.0f;
     }
     return s;
 }
@@ -399,7 +431,6 @@ TEST(StripSmooth, DataPackingMatchesShaderLayout) {
         const float f = static_cast<float>(i);
         s.left[i] = jpov::Vec3f{f, f + 0.25f, -f};
         s.right[i] = jpov::Vec3f{f, f - 0.25f, -f};
-        s.alpha[i] = 1.0f;
     }
     jpov::SmoothStripCompute c;
     jpov::ComputeSmoothStrip(s, &c);
@@ -445,7 +476,7 @@ TEST(StripSmooth, VerticesWidenAlongHalfVectorAndFoldIntoV) {
     const float* left0 = &verts[jpov::kSmoothFloatsPerVertex];
     EXPECT_FLOAT_EQ(right0[1], -0.3f * c.scale);   // center.y = 0
     EXPECT_FLOAT_EQ(right0[4], 0.5f - 0.5f * c.scale);
-    EXPECT_FLOAT_EQ(right0[6], 7.0f);              // strip_id
+    EXPECT_FLOAT_EQ(right0[5], 7.0f);              // strip_id
     EXPECT_FLOAT_EQ(left0[1], 0.3f * c.scale);
     EXPECT_FLOAT_EQ(left0[4], 0.5f + 0.5f * c.scale);
     EXPECT_FLOAT_EQ(left0[3], 0.0f);               // u = 0/15
@@ -462,7 +493,7 @@ TEST(StripSmooth, CollapsedTailMatchesLastRealColumn) {
         static_cast<size_t>(2) * jpov::kSmoothFloatsPerVertex;   // 每列 right+left
     for (size_t col = 5; col < static_cast<size_t>(jpov::kStripSampleCount); ++col) {
         for (size_t j = 0; j < col_stride; ++j) {
-            // 位置/alpha 相同；u 与 v 按列号变（与折线 pass 的塌缩规则一致）。
+            // 位置/v/strip_id 相同；u 按列号变（与折线 pass 的塌缩规则一致）。
             const size_t idx = col * col_stride + j;
             const size_t ref = 4 * col_stride + j;
             const size_t in_vertex = j % jpov::kSmoothFloatsPerVertex;
@@ -548,8 +579,12 @@ TEST(StripRing, StripsPairRailsAsDocumented) {
     for (const jpov::Strip16& s : strips) {
         // 每条带都要 16 点（圆环的「一圈」不能少于 16 列）。
         EXPECT_EQ(s.point_count, static_cast<uint32_t>(jpov::kStripSampleCount));
-        for (float a : s.alpha) {
-            EXPECT_FLOAT_EQ(a, 1.0f);
+        // 形状本身不带淡出/染色：默认逐点颜色（白 + 不透明）。
+        for (const jpov::Color& c : s.point_color) {
+            EXPECT_FLOAT_EQ(c.r, 1.0f);
+            EXPECT_FLOAT_EQ(c.g, 1.0f);
+            EXPECT_FLOAT_EQ(c.b, 1.0f);
+            EXPECT_FLOAT_EQ(c.a, 1.0f);
         }
     }
 
@@ -651,71 +686,3 @@ TEST(StripGeometry, RejectsBadFresnelParams) {
     EXPECT_DEATH(jpov::ValidateStripBatch(rim), "fresnel.rim_color");
 }
 
-TEST(StripGeometry, StripTintsArePerInstanceAndMustMatchCount) {
-    // 逐条带颜色是 per instance 通道：长度不匹配会让某些条带用错颜色（或读越界），
-    // 而画面只会「颜色不对」，不会崩 —— 所以必须在这里拦住。
-    jpov::TranslucentStripBatch ok = MakeBatch(16);
-    ok.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.62f});
-    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
-
-    jpov::TranslucentStripBatch empty = MakeBatch(16);
-    empty.strip_tints.clear();      // 空 = 全部用 tint（默认行为）
-    jpov::ValidateStripBatch(empty);
-
-    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
-    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 1.0f});
-    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.5f});
-    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
-
-    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
-    out_of_range.strip_tints.push_back(jpov::Color{1.5f, 1.0f, 1.0f, 1.0f});
-    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_tints");
-}
-
-TEST(StripGeometry, AdditiveGainRequiresEmissiveAndPositive) {
-    // 加法集 HDR 增益：只在 kEmissive 上有意义。给覆盖集设它必须崩 ——
-    // 覆盖集没有加法附件，静默忽略会让用户以为亮度已经加上去了。
-    jpov::TranslucentStripBatch ok = MakeBatch(16);
-    ok.blend = jpov::StripBlend::kEmissive;
-    ok.additive_gain = 3.0f;
-    jpov::ValidateStripBatch(ok);
-
-    jpov::TranslucentStripBatch coverage = MakeBatch(16);
-    coverage.additive_gain = 3.0f;   // blend 仍是 kCoverage
-    EXPECT_DEATH(jpov::ValidateStripBatch(coverage), "additive_gain");
-
-    jpov::TranslucentStripBatch zero = MakeBatch(16);
-    zero.blend = jpov::StripBlend::kEmissive;
-    zero.additive_gain = 0.0f;       // 0 = 全黑，没意义（想关闭请置 nullopt）
-    EXPECT_DEATH(jpov::ValidateStripBatch(zero), "additive_gain");
-
-    jpov::TranslucentStripBatch negative = MakeBatch(16);
-    negative.blend = jpov::StripBlend::kEmissive;
-    negative.additive_gain = -2.0f;
-    EXPECT_DEATH(jpov::ValidateStripBatch(negative), "additive_gain");
-}
-
-TEST(StripGeometry, PointColorsMustMatchCountAndRange) {
-    jpov::StripPointColors colors{};
-    for (jpov::Color& c : colors) {
-        c = jpov::Color{1.0f, 0.5f, 0.25f, 1.0f};
-    }
-
-    jpov::TranslucentStripBatch ok = MakeBatch(16);
-    ok.strip_point_colors.push_back(colors);
-    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
-
-    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
-    mismatch.strip_point_colors.push_back(colors);
-    mismatch.strip_point_colors.push_back(colors);   // 2 != 1
-    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
-
-    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
-    jpov::StripPointColors bad{};
-    for (jpov::Color& c : bad) {
-        c = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
-    }
-    bad[7].g = 1.5f;   // 第 7 列越界
-    out_of_range.strip_point_colors.push_back(bad);
-    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_point_colors");
-}
