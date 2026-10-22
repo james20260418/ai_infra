@@ -76,6 +76,7 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.ref_unit = argv[++i];
             } else {
                 LOG(WARNING) << "--reference_unit 缺少参数，忽略";
+            }
         } else if (arg == "--save_after_stitch") {
             opt.save_after_stitch = true;
         } else if (arg == "--target_scale") {
