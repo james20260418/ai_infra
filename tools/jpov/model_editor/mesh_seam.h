@@ -44,7 +44,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -554,48 +553,6 @@ inline void BestCyclicCorrespondence(const std::vector<jpov::Vec3f>& P,
     *reversed = best_rev;
 }
 
-// 多源 Dijkstra（沿网格边）求到断面环的测地距离。
-inline std::vector<float> GeodesicFromLoop(const jpov::MeshData& mesh,
-                                           const SeamLoop& loop) {
-    const float kInf = std::numeric_limits<float>::max();
-    std::vector<float> dist(mesh.positions.size(), kInf);
-    std::vector<std::vector<std::pair<uint32_t, float>>> adj(
-        mesh.positions.size());
-    const size_t tris = TriangleCount(mesh);
-    for (size_t t = 0; t < tris; ++t) {
-        const auto tri = TriangleAt(mesh, t);
-        for (int e = 0; e < 3; ++e) {
-            const uint32_t a = tri[e];
-            const uint32_t b = tri[(e + 1) % 3];
-            const float len = (mesh.positions[b] - mesh.positions[a]).Norm();
-            adj[a].push_back({b, len});
-            adj[b].push_back({a, len});
-        }
-    }
-    // 固定大小的二叉堆（std::priority_queue 足够；规模是几千顶点）。
-    using Item = std::pair<float, uint32_t>;
-    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> heap;
-    for (uint32_t v : loop.verts) {
-        dist[v] = 0.0f;
-        heap.push({0.0f, v});
-    }
-    while (!heap.empty()) {
-        const auto [d, v] = heap.top();
-        heap.pop();
-        if (d > dist[v]) {
-            continue;
-        }
-        for (const auto& [nb, w] : adj[v]) {
-            const float nd = d + w;
-            if (nd < dist[nb]) {
-                dist[nb] = nd;
-                heap.push({nd, nb});
-            }
-        }
-    }
-    return dist;
-}
-
 // 影响带权重：1 在断面上，余弦衰减到 0（d = H）。
 inline float FalloffWeight(float d, float H) {
     if (!(H > 1e-9f) || d >= H) {
@@ -606,69 +563,14 @@ inline float FalloffWeight(float d, float H) {
 
 // ==================== 形变求解 ====================
 
-// 影响带图：自由顶点 + 邻接（cotangent 权重）。
+// 影响带图：自由顶点 + 邻接（cotangent 权重）。索引空间可以是「顶点」也可以是「焊接组」
+// （现在生产路径只用组级；求解函数对索引空间无感）。
 struct BandGraph {
     std::vector<uint8_t> is_free;  // 参与求解（不含断面环、不含冻结锚点）
     std::vector<float> dist;       // 到断面的测地距离
     float band_height = 0.0f;
-    // 只含「至少一个端点在带内」的边。
     std::vector<std::vector<std::pair<uint32_t, float>>> nbr;
 };
-
-// 构建影响带。is_loop 标记断面环顶点。
-inline BandGraph BuildBandGraph(const jpov::MeshData& mesh,
-                                const std::vector<uint8_t>& is_loop,
-                                const std::vector<float>& dist, float H) {
-    BandGraph g;
-    g.dist = dist;
-    g.band_height = H;
-    const size_t vcount = mesh.positions.size();
-    g.is_free.assign(vcount, 0);
-    g.nbr.assign(vcount, {});
-    for (size_t v = 0; v < vcount; ++v) {
-        g.is_free[v] = (!is_loop[v] && dist[v] <= H) ? 1 : 0;
-    }
-
-    // 每条边累加 cotangent 权重（非流形边只取前两个三角形）。
-    const size_t tris = TriangleCount(mesh);
-    std::unordered_map<uint64_t, float> weights;
-    weights.reserve(tris * 3);
-    for (size_t t = 0; t < tris; ++t) {
-        const auto tri = TriangleAt(mesh, t);
-        for (int e = 0; e < 3; ++e) {
-            const uint32_t i = tri[e];
-            const uint32_t j = tri[(e + 1) % 3];
-            const uint32_t k = tri[(e + 2) % 3];
-            const jpov::Vec3f u = mesh.positions[i] - mesh.positions[k];
-            const jpov::Vec3f v = mesh.positions[j] - mesh.positions[k];
-            const float cross = u.Cross(v).Norm();
-            if (cross < 1e-12f) {
-                continue;
-            }
-            const float cot = u.Dot(v) / cross;
-            weights[EdgeKey(i, j)] += 0.5f * std::max(cot, 0.0f);
-        }
-    }
-    for (const auto& kv : weights) {
-        const uint32_t a = static_cast<uint32_t>(kv.first >> 32);
-        const uint32_t b = static_cast<uint32_t>(kv.first & 0xffffffffu);
-        const bool in_a = is_loop[a] || g.is_free[a];
-        const bool in_b = is_loop[b] || g.is_free[b];
-        if (!in_a || !in_b) {
-            continue;
-        }
-        // 权重下限：避免退化成「无邻居」。
-        const float w = std::max(kv.second, 1e-4f);
-        g.nbr[a].push_back({b, w});
-        g.nbr[b].push_back({a, w});
-    }
-    for (size_t v = 0; v < vcount; ++v) {
-        if (g.is_free[v] && g.nbr[v].empty()) {
-            g.is_free[v] = 0;  // 选不到邻居的孤立顶点不参与（保持原位）
-        }
-    }
-    return g;
-}
 
 // 位置焊接分组：同一位置的多个顶点（UV 缝 / 导出器拆点）归成一组。
 //
@@ -960,7 +862,6 @@ inline size_t SolveArap(const jpov::MeshData& mesh, const BandGraph& g,
                         const std::vector<jpov::Vec3f>& orig,
                         const std::vector<jpov::Vec3f>& goal, int outer_iters,
                         int inner_iters, std::vector<jpov::Vec3f>* cur /*inout*/) {
-    (void)mesh;
     // 注意：顶点数取 g.is_free.size()（组级求解时这里是组数，不是 mesh 顶点数）。
     const size_t vcount = g.is_free.size();
     std::vector<std::array<double, 9>> rot(vcount);
@@ -1280,7 +1181,6 @@ inline std::vector<uint32_t> InsertRingAtPlane(MeshData* mesh, int axis, float p
         return ring;
     }
     std::vector<jpov::Vec3f>& pos = mesh->positions;
-    const size_t vcount_before = pos.size();
     std::unordered_map<uint64_t, uint32_t> edge_vertex;  // 无序边 → 新顶点
     std::vector<uint32_t> new_indices;
     new_indices.reserve(mesh->indices.size() + 32);
@@ -1388,7 +1288,6 @@ inline std::vector<uint32_t> InsertRingAtPlane(MeshData* mesh, int axis, float p
         }
     }
     mesh->indices = std::move(new_indices);
-    (void)vcount_before;
     return ring;
 }
 
@@ -1511,6 +1410,11 @@ inline bool RebuildLoopToReference(
         const uint32_t b = v;
         const size_t ja = assign[lu];
         const size_t jb = assign[lv];
+        if (ja == jb) {
+            // 分配必须是双射；重复说明 M>N 或分配逻辑退化，继续会绕整圈插入 N 个点。
+            *error = "环重建失败：相邻断面顶点被分配到同一个 reference 顶点";
+            return false;
+        }
         // 插入点 = 从 ja 沿**对应方向 σ** 走到 jb 之间夹着的 reference 顶点。
         // （相邻分配相差 round(N/M) 步，所以按 σ 走一定能走到 jb；用物理边方向判断是错的 ——
         //   UV 缝的同组边、以及反向对应都会走反。）
@@ -1657,18 +1561,6 @@ inline float DistanceToLoop(const jpov::Vec3f& p, const jpov::MeshData& mesh,
     return best;
 }
 
-// 网格里被 1 个三角形引用的边数（= 开口边总数；用来对比缝合前后有没有新增洞）。
-inline size_t CountOpenEdges(const jpov::MeshData& mesh) {
-    const auto map = seam_internal::BuildEdgeTriangles(mesh);
-    size_t n = 0;
-    for (const auto& kv : map) {
-        if (kv.second.size() == 1) {
-            ++n;
-        }
-    }
-    return n;
-}
-
 // 主入口：把 target 的底口雕成 reference 的顶口。
 //
 // 输入 target / reference 都是**未切**的完整网格（本函数内部各切一刀，同一个 plane）。
@@ -1740,18 +1632,6 @@ inline bool StitchSeam(const jpov::MeshData& target,
 
     const std::vector<jpov::Vec3f> goal =
         ComputeLoopGoals(tcut, tloop, rcut, rloop, shift, reversed, kCorrSamples);
-    if (const char* dbg = std::getenv("JPOV_SEAM_DEBUG")) {
-        (void)dbg;
-        LOG(INFO) << "SEAMDBG shift=" << shift << " rev=" << reversed
-                  << " tgt_loop=" << tloop.verts.size()
-                  << " ref_loop=" << rloop.verts.size();
-        for (size_t i = 0; i < tloop.verts.size(); ++i) {
-            const jpov::Vec3f& a = tcut.positions[tloop.verts[i]];
-            const jpov::Vec3f& b = goal[tloop.verts[i]];
-            LOG(INFO) << "  i=" << i << " p=(" << a.x() << "," << a.z() << ") -> ("
-                      << b.x() << "," << b.z() << ")";
-        }
-    }
 
     // 4) 影响带（**按位置焊接后的组**算：UV 缝两侧是两套顶点，按顶点解会把缝撕开）。
     const float eq_radius = tloop.perimeter / (2.0f * 3.14159265358979323846f);
@@ -1979,6 +1859,18 @@ inline bool StitchSeam(const jpov::MeshData& target,
 }
 
 }  // namespace seam_internal
+
+// 网格里被 1 个三角形引用的边数（= 开口边总数；上层用来对比缝合前后有没有新增洞）。
+inline size_t CountOpenEdges(const jpov::MeshData& mesh) {
+    const auto map = seam_internal::BuildEdgeTriangles(mesh);
+    size_t n = 0;
+    for (const auto& kv : map) {
+        if (kv.second.size() == 1) {
+            ++n;
+        }
+    }
+    return n;
+}
 
 // 公开入口：把 target 的底口雕成 reference 的顶口（详见文件头）。
 // 失败返回 false 并写 *error；成功写 *target_out（以及 *stats）。

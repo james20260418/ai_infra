@@ -291,6 +291,9 @@ public:
     // ══════════════ 缝合（2026-10-22）══════════════
     // reference 的 CPU 几何（bind pose，只读）：断面的形状来源。GPU 侧 reference_ 不动。
     jpov::MeshData reference_cpu_;
+    // reference 各 primitive 注册到 GPU 时的 flags：UpdateMesh 要求新数据 flags 与注册时
+    // 完全一致（否则 CHECK abort）。切断面做显示前先比对，避免崩溃。
+    std::vector<jpov::MeshVertexFlags> reference_gpu_flags_;
     float seam_plane_ = 0.0f;        // 同一个水平面（y）同时切 target 与 reference
     bool show_seam_plane_ = true;    // 显示缝合面（半透明 quad）
     float seam_step_ = kDefaultPlaneStep;              // 缝合面坐标步长（米）
@@ -538,6 +541,8 @@ public:
     void ShowReferenceCut(bool cut) {
         if (!has_reference_ || reference_cpu_.positions.empty() ||
             reference_.size() != 1) {
+            LOG_FIRST_N(WARNING, 1)
+                << "reference 断面显示：只支持单 primitive 的 reference，已跳过";
             return;
         }
         if (cut) {
@@ -545,6 +550,13 @@ public:
             ClipStats cs;
             if (!ClipMeshByAxis(reference_cpu_, 1, seam_plane_, ClipKeepSide::kLess,
                                 &ref_cut, &cs)) {
+                return;
+            }
+            // UpdateMesh 要求 flags 与注册时一致（否则 CHECK abort）——先比对。
+            if (reference_gpu_flags_.size() == 1 &&
+                ref_cut.flags != reference_gpu_flags_[0]) {
+                LOG_FIRST_N(WARNING, 1)
+                    << "reference 断面显示：切后 flags 与注册时不符，已跳过（仅影响显示）";
                 return;
             }
             UpdateMesh(reference_.primitives[0].mesh_id, ref_cut);
@@ -616,14 +628,14 @@ public:
         jpov::model_editor::SeamStats st;
         std::string err;
         const size_t open_before =
-            jpov::model_editor::seam_internal::CountOpenEdges(target_current_[prim].mesh);
+            jpov::model_editor::CountOpenEdges(target_current_[prim].mesh);
         if (!jpov::model_editor::StitchSeam(target_current_[prim].mesh,
                                            reference_cpu_, opt, &out, &st, &err)) {
             seam_msg_ = "缝合失败：" + err;
             LOG(WARNING) << "缝合被拒绝：" << err;
             return;
         }
-        const size_t open_after = jpov::model_editor::seam_internal::CountOpenEdges(out);
+        const size_t open_after = jpov::model_editor::CountOpenEdges(out);
         LOG(INFO) << "缝合前后开口边：" << open_before << " → " << open_after
                   << "（delta=" << static_cast<long long>(open_after) -
                                          static_cast<long long>(open_before)
