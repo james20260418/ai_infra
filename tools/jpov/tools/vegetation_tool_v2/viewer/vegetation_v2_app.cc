@@ -778,14 +778,15 @@ class VegetationV2App : public JPOV {
   }
 
   // 载入 glb 并切到展示态（失败保留原材料态）。
-  void LoadGlbFile(const std::string& path) {
+  // 返回 false = 载入失败（调用方据此决定是否继续：命令行给了 --glb 却打不开 ⇒ 退出码 1）。
+  bool LoadGlbFile(const std::string& path) {
     ReleaseGlb();
     jpov::GltfObject obj = LoadGltf(path);
     if (obj.empty()) {
       bake_ok_ = false;
       bake_msg_ = "glb 载入失败: " + path;
       LOG(ERROR) << bake_msg_;
-      return;
+      return false;
     }
     glb_ = std::move(obj);
     glb_loaded_ = true;
@@ -803,6 +804,7 @@ class VegetationV2App : public JPOV {
     }
     mode_ = Mode::kGlb;
     LOG(INFO) << "进入 glb 展示态: " << path << "（" << glb_.size() << " 个 primitive）";
+    return true;
   }
 
   void ReleaseGlb() {
@@ -1260,7 +1262,10 @@ int RunViewer(const CliArgs& args) {
   }
   // 直接进 glb 展示态（已有产物时跳过原材料态）。
   if (!args.glb_path.empty()) {
-    app.LoadGlbFile(args.glb_path);
+    if (!app.LoadGlbFile(args.glb_path)) {
+      LOG(ERROR) << "打不开 --glb 指定的文件: " << args.glb_path;
+      return 1;
+    }
   }
 
   if (!args.capture) {
