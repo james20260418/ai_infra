@@ -234,6 +234,9 @@ public:
     uint32_t axis_frame_mesh_ = 0;
 
     ViewConfig view_;
+    // 中键纵向 pan：相机注视点世界 Y 偏移（相机 position 与 target 同步平移，朝向不变）。
+    // 半屏 pan = 1m（jpov_viewer::VerticalPanDeltaY，与穿衣工具一致）。
+    float cam_pan_y_ = 0.0f;
 
     bool show_reference_ = true;
     bool show_target_ = true;
@@ -609,12 +612,19 @@ public:
         jpov::MeshData out;
         jpov::model_editor::SeamStats st;
         std::string err;
+        const size_t open_before =
+            jpov::model_editor::seam_internal::CountOpenEdges(target_current_[prim].mesh);
         if (!jpov::model_editor::StitchSeam(target_current_[prim].mesh,
                                            reference_cpu_, opt, &out, &st, &err)) {
             seam_msg_ = "缝合失败：" + err;
             LOG(WARNING) << "缝合被拒绝：" << err;
             return;
         }
+        const size_t open_after = jpov::model_editor::seam_internal::CountOpenEdges(out);
+        LOG(INFO) << "缝合前后开口边：" << open_before << " → " << open_after
+                  << "（delta=" << static_cast<long long>(open_after) -
+                                         static_cast<long long>(open_before)
+                  << "）";
         target_current_[prim].mesh = std::move(out);
         seam_stats_ = st;
         if (show_reference_cut_) {
@@ -626,11 +636,11 @@ public:
         SyncTargetToGpu();
         seam_msg_ = Format(
             "缝合完成（%s%s）：带 %zu 顶点，断面误差 %.3fmm，法线均值 %.1f°/最大 %.1f°，"
-            "翻面 %zu",
+            "翻面 %zu，额外开口边 %zu",
             jpov::model_editor::SeamAlgoName(opt.algo),
             st.loop_rebuilt ? "，环已重建" : "，环未重建",
             st.band_vertices, st.loop_hausdorff_m * 1000.0f, st.normal_angle_mean_deg,
-            st.normal_angle_max_deg, st.flipped_triangles);
+            st.normal_angle_max_deg, st.flipped_triangles, st.unexpected_open_edges);
         LOG(INFO) << seam_msg_;
     }
 
@@ -673,11 +683,16 @@ public:
             }
             ApplyInput(&view_, dx, dy, scroll, static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+            // 中键纵向 pan（同穿衣工具）：平移注视点，相机 position 同步跟随。
+            if (input.middle.IsDrag()) {
+                cam_pan_y_ += jpov_viewer::VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
-        // 相机。
-        cmds->camera.position = view_.Position();
-        cmds->camera.target = ViewConfig::Target();
+        // 相机（叠加中键 pan 的 Y 偏移：position 与 target 同步平移，朝向不变）。
+        const jpov::Vec3f pan(0.0f, cam_pan_y_, 0.0f);
+        cmds->camera.position = view_.Position() + pan;
+        cmds->camera.target = ViewConfig::Target() + pan;
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 60.0f;
         cmds->camera.near = 0.05f;
@@ -1423,11 +1438,12 @@ private:
 
         std::vector<std::string> lines;
         lines.push_back(Format(
-            "CAMERA pos(%.3f,%.3f,%.3f) R=%.3f phi=%.1fdeg theta=%.1fdeg",
+            "CAMERA pos(%.3f,%.3f,%.3f) R=%.3f phi=%.1fdeg theta=%.1fdeg panY=%.3f",
             static_cast<double>(cam.x()), static_cast<double>(cam.y()),
             static_cast<double>(cam.z()), static_cast<double>(view_.R),
             static_cast<double>(view_.phi * 180.0 / kPi),
-            static_cast<double>(view_.theta * 180.0 / kPi)));
+            static_cast<double>(view_.theta * 180.0 / kPi),
+            static_cast<double>(cam_pan_y_)));
         lines.push_back(Format(
             "  target(%.3f,%.3f,%.3f) fov=60 near=0.05 far=1000 aspect=%.3f",
             static_cast<double>(tgt.x()), static_cast<double>(tgt.y()),
@@ -1545,6 +1561,7 @@ private:
             return;
         }
         view_.R = ViewConfig::FitRadius(bmin, bmax, /*fov_deg*/ 60.0);
+        cam_pan_y_ = 0.0f;
     }
 
     static std::string BaseNameOf(const std::string& path) {

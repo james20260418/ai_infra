@@ -157,6 +157,9 @@ struct SeamStats {
     float normal_angle_max_deg = 0.0f;
 
     size_t flipped_triangles = 0;  // 带内翻面三角形数（0 才正常）
+    // 输出网格里「不在缝合面上」的开口边数（被 1 个三角形引用的边）。
+    // 0 = 除了断面本身没有任何洞；>0 说明重建/形变漏了面。
+    size_t unexpected_open_edges = 0;
     bool loop_rebuilt = false;     // 是否成功把边界换成 reference 环（可 1:1 焊）
     size_t inserted_vertices = 0;  // 环重建插入的顶点数（断面被细分到 reference 环）
 };
@@ -1369,6 +1372,18 @@ inline float DistanceToLoop(const jpov::Vec3f& p, const jpov::MeshData& mesh,
     return best;
 }
 
+// 网格里被 1 个三角形引用的边数（= 开口边总数；用来对比缝合前后有没有新增洞）。
+inline size_t CountOpenEdges(const jpov::MeshData& mesh) {
+    const auto map = seam_internal::BuildEdgeTriangles(mesh);
+    size_t n = 0;
+    for (const auto& kv : map) {
+        if (kv.second.size() == 1) {
+            ++n;
+        }
+    }
+    return n;
+}
+
 // 主入口：把 target 的底口雕成 reference 的顶口。
 //
 // 输入 target / reference 都是**未切**的完整网格（本函数内部各切一刀，同一个 plane）。
@@ -1546,6 +1561,26 @@ inline bool StitchSeam(const jpov::MeshData& target,
     if (!tcut.tangents.empty()) {
         tcut.tangents.clear();
         tcut.tangents.resize(tcut.positions.size(), MakeVec(1.0f, 0.0f, 0.0f));
+    }
+
+    // 7.5) 拓扑自检：除了断面（平面附近的开口）之外，还有没有别的开口边。
+    {
+        const auto edge_tris = BuildEdgeTriangles(tcut);
+        for (const auto& kv : edge_tris) {
+            if (kv.second.size() != 1) {
+                continue;
+            }
+            const uint32_t a = static_cast<uint32_t>(kv.first >> 32);
+            const uint32_t b = static_cast<uint32_t>(kv.first & 0xffffffffu);
+            const bool on_plane =
+                std::fabs(seam_internal::Component(tcut.positions[a], opt.axis) - opt.plane) <=
+                    1e-4f &&
+                std::fabs(seam_internal::Component(tcut.positions[b], opt.axis) - opt.plane) <=
+                    1e-4f;
+            if (!on_plane) {
+                ++st.unexpected_open_edges;
+            }
+        }
     }
 
     // 8) 指标：断面重合度 + 法线夹角。
