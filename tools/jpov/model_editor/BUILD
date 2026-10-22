@@ -26,6 +26,7 @@ cc_library(
     name = "model_mesh_ops",
     hdrs = [
         "mesh_clip.h",
+        "mesh_seam.h",
         "model_transform.h",
     ],
     visibility = ["//visibility:public"],
@@ -121,6 +122,23 @@ cc_test(
 cc_test(
     name = "model_transform_test",
     srcs = ["model_transform_test.cc"],
+    deps = [
+        ":model_mesh_ops",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# 断面缝合纯函数单测（三种形变算法 + 环重建 + 拒收路径）。
+cc_test(
+    name = "mesh_seam_test",
+    srcs = ["mesh_seam_test.cc"],
     deps = [
         ":model_mesh_ops",
         "//tools/jpov/interface:mesh",

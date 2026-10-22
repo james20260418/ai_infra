@@ -37,6 +37,7 @@
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/model_editor/mesh_clip.h"
+#include "tools/jpov/model_editor/mesh_seam.h"
 #include "tools/jpov/model_editor/model_save.h"
 #include "tools/jpov/model_editor/model_transform.h"
 #include "tools/jpov/model_editor/number_input.h"
@@ -80,6 +81,121 @@ inline constexpr float kModelScaleMax = 10.0f;
 
 // 裁剪面半透明颜色（浅蓝）。
 inline constexpr jpov::Color kClipPlaneColor{0.20f, 0.60f, 1.0f, 0.28f};
+// 缝合面用另一个色（绿），和裁剪面区分开。
+inline constexpr jpov::Color kSeamPlaneColor{0.25f, 1.0f, 0.45f, 0.25f};
+// 半透明面相对 target AABB 的外扩系数（留一点边，别让模型从面里穿出去看不见）。
+inline constexpr float kPlaneQuadMargin = 1.05f;
+// 平面坐标步进默认步长（米）/ 合法范围。
+inline constexpr float kDefaultPlaneStep = 0.01f;
+inline constexpr float kPlaneStepMin = 1e-4f;
+inline constexpr float kPlaneStepMax = 10.0f;
+
+// ==================== 4x4 矩阵 / HUD ====================
+
+// 行主序 4x4（列向量约定 p' = M·p）。
+struct Mat4 {
+    float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+};
+
+inline Mat4 Mat4Mul(const Mat4& a, const Mat4& b) {
+    Mat4 r;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            float acc = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                acc += a.m[i * 4 + k] * b.m[k * 4 + j];
+            }
+            r.m[i * 4 + j] = acc;
+        }
+    }
+    return r;
+}
+
+inline Mat4 Mat4Translate(const jpov::Vec3f& t) {
+    Mat4 r;
+    r.m[3] = t.x();
+    r.m[7] = t.y();
+    r.m[11] = t.z();
+    return r;
+}
+
+inline Mat4 Mat4ScaleUniform(float s) {
+    Mat4 r;
+    r.m[0] = s;
+    r.m[5] = s;
+    r.m[10] = s;
+    return r;
+}
+
+// 与世界轴 axis 的旋转（与 model_transform.h::RotateMesh 同一套右手约定）。
+inline Mat4 Mat4RotateAxis(int axis, float deg) {
+    constexpr float kPi = 3.14159265358979323846f;
+    const float rad = deg * kPi / 180.0f;
+    const float c = std::cos(rad);
+    const float s = std::sin(rad);
+    Mat4 r;
+    switch (axis) {
+        case 0:  // 绕 X
+            r.m[5] = c;
+            r.m[6] = -s;
+            r.m[9] = s;
+            r.m[10] = c;
+            break;
+        case 1:  // 绕 Y
+            r.m[0] = c;
+            r.m[2] = s;
+            r.m[8] = -s;
+            r.m[10] = c;
+            break;
+        default:  // 绕 Z
+            r.m[0] = c;
+            r.m[1] = -s;
+            r.m[4] = s;
+            r.m[5] = c;
+            break;
+    }
+    return r;
+}
+
+// 绕 pivot 的旋转 / 缩放（= T(p)·R·T(-p)）。
+inline Mat4 Mat4RotateAbout(int axis, float deg, const jpov::Vec3f& pivot) {
+    return Mat4Mul(Mat4Mul(Mat4Translate(pivot), Mat4RotateAxis(axis, deg)),
+                   Mat4Translate(jpov::Vec3f(-pivot.x(), -pivot.y(), -pivot.z())));
+}
+inline Mat4 Mat4ScaleAbout(float factor, const jpov::Vec3f& pivot) {
+    return Mat4Mul(Mat4Mul(Mat4Translate(pivot), Mat4ScaleUniform(factor)),
+                   Mat4Translate(jpov::Vec3f(-pivot.x(), -pivot.y(), -pivot.z())));
+}
+
+inline Mat4 Mat4LookAt(const jpov::Vec3f& eye, const jpov::Vec3f& center,
+                       const jpov::Vec3f& up) {
+    const jpov::Vec3f f = (center - eye).Unit();
+    const jpov::Vec3f s = f.Cross(up).Unit();
+    const jpov::Vec3f u = s.Cross(f);
+    Mat4 r;
+    r.m[0] = s.x();  r.m[1] = s.y();  r.m[2] = s.z();   r.m[3] = -s.Dot(eye);
+    r.m[4] = u.x();  r.m[5] = u.y();  r.m[6] = u.z();   r.m[7] = -u.Dot(eye);
+    r.m[8] = -f.x(); r.m[9] = -f.y(); r.m[10] = -f.z(); r.m[11] = f.Dot(eye);
+    r.m[12] = 0.0f;  r.m[13] = 0.0f;  r.m[14] = 0.0f;   r.m[15] = 1.0f;
+    return r;
+}
+
+inline Mat4 Mat4Perspective(float fov_deg, float aspect, float znear,
+                            float zfar) {
+    constexpr float kPi = 3.14159265358979323846f;
+    const float f = 1.0f / std::tan(fov_deg * kPi / 360.0f);
+    Mat4 r;
+    for (float& v : r.m) {
+        v = 0.0f;
+    }
+    r.m[0] = f / std::max(aspect, 1e-6f);
+    r.m[5] = f;
+    r.m[10] = (zfar + znear) / (znear - zfar);
+    r.m[11] = 2.0f * zfar * znear / (znear - zfar);
+    r.m[14] = -1.0f;
+    return r;
+}
+
 
 // 一个数值输入框的跨帧状态（文本缓冲 + 上一帧聚焦态）。
 struct NumberField {
@@ -118,6 +234,9 @@ public:
     uint32_t axis_frame_mesh_ = 0;
 
     ViewConfig view_;
+    // 中键纵向 pan：相机注视点世界 Y 偏移（相机 position 与 target 同步平移，朝向不变）。
+    // 半屏 pan = 1m（jpov_viewer::VerticalPanDeltaY，与穿衣工具一致）。
+    float cam_pan_y_ = 0.0f;
 
     bool show_reference_ = true;
     bool show_target_ = true;
@@ -143,6 +262,14 @@ public:
     float scale_step_ = kDefaultScaleStep;
     float model_scale_ = 1.0f;  // 累计缩放系数，夹在 [kModelScaleMin, kModelScaleMax]。
 
+    // 累计「用户变换」矩阵（行主序，列向量约定 p' = M·p）：把所有平移/旋转/缩放按烘焙
+    // 顺序左乘累积起来。用途 = HUD 诊断：截图里能读出「这个结果是哪一组变换做出来的」。
+    // 注意裁剪/缝合是就地改几何，不改这个矩阵（它只描述用户摆位）。
+    Mat4 target_xform_;
+    // 用户层累计平移（= 所有平移按钮 / --target_move 的和）。矩阵里的平移项是
+    // 「原点被搬到哪」，绕 pivot 缩放/旋转也会改变它，看代码时容易误读，所以单独记一份。
+    jpov::Vec3f user_move_;
+
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep)};
@@ -157,7 +284,29 @@ public:
     float clip_min_[3] = {-1.0f, -1.0f, -1.0f};  // 各轴滑块下界（= target 启动包围盒 min）
     float clip_max_[3] = {1.0f, 1.0f, 1.0f};     // 各轴滑块上界（= target 启动包围盒 max）
     bool show_clip_plane_ = true;
+    float clip_step_ = kDefaultPlaneStep;              // 裁剪面坐标步长（米）
+    NumberField clip_step_field_ = NumberField(kDefaultPlaneStep);
     std::string clip_msg_;     // 裁剪结果 / 错误提示
+
+    // ══════════════ 缝合（2026-10-22）══════════════
+    // reference 的 CPU 几何（bind pose，只读）：断面的形状来源。GPU 侧 reference_ 不动。
+    jpov::MeshData reference_cpu_;
+    // reference 各 primitive 注册到 GPU 时的 flags：UpdateMesh 要求新数据 flags 与注册时
+    // 完全一致（否则 CHECK abort）。切断面做显示前先比对，避免崩溃。
+    std::vector<jpov::MeshVertexFlags> reference_gpu_flags_;
+    float seam_plane_ = 0.0f;        // 同一个水平面（y）同时切 target 与 reference
+    bool show_seam_plane_ = true;    // 显示缝合面（半透明 quad）
+    float seam_step_ = kDefaultPlaneStep;              // 缝合面坐标步长（米）
+    NumberField seam_step_field_ = NumberField(kDefaultPlaneStep);
+    int seam_algo_ = 0;              // 0=harmonic / 1=arap / 2=tps
+    float seam_band_scale_ = 2.0f;   // 影响带高度 = 该系数 × 断面等效半径
+    float seam_y_span_ = 0.0f;       // 最大形变区高度（米；0 = 自动）。>0 时在
+                                     // plane+y_span 插一圈顶点当硬边界，环以上完全隔离。
+    float seam_offset_deg_ = 0.0f;   // 环对应旋转偏移（度）
+    bool show_reference_cut_ = true;  // 显示时把 reference 也切到缝合面（否则接头被挡住）
+    bool reference_is_cut_ = false;   // reference 的 GPU 几何当前是否是切过的版本
+    std::string seam_msg_;           // 缝合结果 / 错误提示
+    jpov::model_editor::SeamStats seam_stats_;
 
     ModelSaveController save_ctrl_;
 
@@ -210,6 +359,24 @@ public:
         target_current_ = startup_geometry;
         target_prim_enabled_.assign(target_current_.size(), true);
 
+        // reference 的 CPU 几何（缝合时取断面形状）。reference 只读，多 primitive 直接合并。
+        if (has_reference_) {
+            std::vector<jpov::GltfSaveMesh> ref_geometry;
+            struct RefCollector {
+                std::vector<jpov::GltfSaveMesh>* out;
+            } ref_collector{&ref_geometry};
+            const auto ref_cb = [](const jpov::GltfMeshEntry* entry, void* user) {
+                RefCollector* c = static_cast<RefCollector*>(user);
+                jpov::GltfSaveMesh sm;
+                sm.mesh = entry->mesh;
+                sm.material = entry->material;
+                c->out->push_back(std::move(sm));
+            };
+            if (jpov::LoadGltfScene(reference_path_, ref_cb, &ref_collector)) {
+                reference_cpu_ = MergePrimitivesForSeam(ref_geometry);
+            }
+        }
+
         // target 自带骨架（可选）。
         std::vector<jpov::SkeletonType> skins;
         if (jpov::LoadGltfSkeleton(target_path_, &skins, load_options) &&
@@ -231,6 +398,8 @@ public:
                 }
             }
             clip_coord_ = (clip_min_[clip_axis_] + clip_max_[clip_axis_]) * 0.5f;
+            // 缝合面初值 = 同一个高度（用户再按步进取值；不要默认 0 让他从底下一路点上来）。
+            seam_plane_ = (clip_min_[1] + clip_max_[1]) * 0.5f;
         }
 
         // 地面。
@@ -264,6 +433,232 @@ public:
     }
     void SetClipCoord(float coord) { clip_coord_ = coord; }
     void ApplyClip(ClipKeepSide keep) { DoClip(keep); }
+
+    // ==================== 缝合（2026-10-22）====================
+
+    // 把多个 primitive 合成一个 MeshData（reference 只读，合并安全）。
+    // 属性只在「所有非空 primitive 都有」时才带上（否则 Validate 会因长度不一致 crash）。
+    static jpov::MeshData MergePrimitivesForSeam(
+        const std::vector<jpov::GltfSaveMesh>& prims) {
+        jpov::MeshData out;
+        bool has_normal = true;
+        bool has_uv = true;
+        bool has_joints = true;
+        bool has_tangent = true;
+        size_t non_empty = 0;
+        for (const auto& p : prims) {
+            if (p.mesh.positions.empty()) {
+                continue;
+            }
+            ++non_empty;
+            has_normal = has_normal && !p.mesh.normals.empty();
+            has_uv = has_uv && !p.mesh.uvs.empty();
+            has_joints = has_joints && !p.mesh.joint_indices.empty();
+            has_tangent = has_tangent && !p.mesh.tangents.empty();
+        }
+        if (non_empty == 0) {
+            return out;
+        }
+        uint8_t flags = static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition);
+        if (has_normal) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+        }
+        if (has_uv) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kUV));
+        }
+        if (has_joints) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kJoints));
+        }
+        if (has_tangent) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kTangent));
+        }
+        out.flags = static_cast<jpov::MeshVertexFlags>(flags);
+        for (const auto& p : prims) {
+            if (p.mesh.positions.empty()) {
+                continue;
+            }
+            const uint32_t base = static_cast<uint32_t>(out.positions.size());
+            out.positions.insert(out.positions.end(), p.mesh.positions.begin(),
+                                 p.mesh.positions.end());
+            if (has_normal) {
+                out.normals.insert(out.normals.end(), p.mesh.normals.begin(),
+                                   p.mesh.normals.end());
+            }
+            if (has_uv) {
+                out.uvs.insert(out.uvs.end(), p.mesh.uvs.begin(), p.mesh.uvs.end());
+            }
+            if (has_joints) {
+                out.joint_indices.insert(out.joint_indices.end(),
+                                         p.mesh.joint_indices.begin(),
+                                         p.mesh.joint_indices.end());
+                out.joint_weights.insert(out.joint_weights.end(),
+                                         p.mesh.joint_weights.begin(),
+                                         p.mesh.joint_weights.end());
+            }
+            if (has_tangent) {
+                out.tangents.insert(out.tangents.end(), p.mesh.tangents.begin(),
+                                    p.mesh.tangents.end());
+            }
+            if (p.mesh.indices.empty()) {
+                for (uint32_t i = 0; i < p.mesh.positions.size(); ++i) {
+                    out.indices.push_back(base + i);
+                }
+            } else {
+                for (uint32_t idx : p.mesh.indices) {
+                    out.indices.push_back(base + idx);
+                }
+            }
+        }
+        out.Validate();
+        return out;
+    }
+
+    // headless 用：target 绕包围盒中心缩放，再整体平移（便于脚本摆位）。
+    void ScaleAndMoveTarget(float scale, const jpov::Vec3f& offset) {
+        if (scale > 0.0f && scale != 1.0f) {
+            StepScale(scale);
+        }
+        if (offset.Norm() > 0.0f) {
+            for (size_t i = 0; i < target_current_.size(); ++i) {
+                if (target_prim_enabled_[i]) {
+                    TranslateMesh(&target_current_[i].mesh, offset);
+                }
+            }
+            target_xform_ = Mat4Mul(Mat4Translate(offset), target_xform_);
+            user_move_ = user_move_ + offset;
+            SyncTargetToGpu();
+        }
+        FitViewToScene();  // 摆位后重新取景（否则 headless 图里模型在画面外/太小）
+    }
+
+    // 显示层：reference 也按缝合面切一刀（保下）。不切的话，接缝会被 reference 自己
+    // 的几何挡住（例：蓝人的头），根本看不出"焊上去"的效果。
+    // 只支持单 primitive 的 reference（多 primitive 合并后的几何与 GPU primitive 不是一对一）。
+    void ShowReferenceCut(bool cut) {
+        if (!has_reference_ || reference_cpu_.positions.empty() ||
+            reference_.size() != 1) {
+            LOG_FIRST_N(WARNING, 1)
+                << "reference 断面显示：只支持单 primitive 的 reference，已跳过";
+            return;
+        }
+        if (cut) {
+            jpov::MeshData ref_cut;
+            ClipStats cs;
+            if (!ClipMeshByAxis(reference_cpu_, 1, seam_plane_, ClipKeepSide::kLess,
+                                &ref_cut, &cs)) {
+                return;
+            }
+            // UpdateMesh 要求 flags 与注册时一致（否则 CHECK abort）——先比对。
+            if (reference_gpu_flags_.size() == 1 &&
+                ref_cut.flags != reference_gpu_flags_[0]) {
+                LOG_FIRST_N(WARNING, 1)
+                    << "reference 断面显示：切后 flags 与注册时不符，已跳过（仅影响显示）";
+                return;
+            }
+            UpdateMesh(reference_.primitives[0].mesh_id, ref_cut);
+            reference_is_cut_ = true;
+        } else {
+            UpdateMesh(reference_.primitives[0].mesh_id, reference_cpu_);
+            reference_is_cut_ = false;
+        }
+    }
+
+    // 执行缝合：同一个 y 平面切 target（保上）与 reference（保下），
+    // 再把 target 的底口雕成 reference 的顶口。
+    // 只支持「恰好一个 primitive 有断面」：多个 primitive 同时被切到时断面可能跨部件，
+    // 暂不处理（拒绝并提示）。
+    void ApplyStitch() {
+        seam_msg_.clear();
+        seam_stats_ = jpov::model_editor::SeamStats{};
+        if (!has_reference_ || reference_cpu_.positions.empty()) {
+            seam_msg_ = "缝合需要 reference（--reference_path）";
+            return;
+        }
+        const MeshBounds tb = TargetBounds();
+        if (tb.valid) {
+            LOG(INFO) << "缝合：plane y=" << seam_plane_ << "，target 包围盒 y=["
+                      << tb.min.y() << "," << tb.max.y() << "] x=["
+                      << tb.min.x() << "," << tb.max.x() << "] z=["
+                      << tb.min.z() << "," << tb.max.z() << "]";
+        }
+        int prim = -1;
+        for (size_t i = 0; i < target_current_.size(); ++i) {
+            if (!target_prim_enabled_[i]) {
+                continue;
+            }
+            jpov::MeshData cut;
+            ClipStats cs;
+            const bool cut_ok = ClipMeshByAxis(target_current_[i].mesh, 1, seam_plane_,
+                                               ClipKeepSide::kGreater, &cut, &cs);
+            if (!cut_ok) {
+                LOG(INFO) << "  prim " << i << "：切空（完全在平面下方）";
+                continue;
+            }
+            jpov::model_editor::SeamLoop loop;
+            std::string loop_err;
+            if (!jpov::model_editor::seam_internal::ExtractCutLoop(
+                    cut, 1, seam_plane_, 1e-5f, &loop, &loop_err)) {
+                LOG(INFO) << "  prim " << i << "：无断面 — " << loop_err;
+                continue;  // 没有断面（整个在平面上方 / 断面不合法）
+            }
+            LOG(INFO) << "  prim " << i << "：断面 " << loop.verts.size() << " 顶点";
+            if (prim >= 0) {
+                seam_msg_ = Format("有多个 primitive 的断面（%d 与 %zu），暂不支持", prim, i);
+                return;
+            }
+            prim = static_cast<int>(i);
+        }
+        if (prim < 0) {
+            seam_msg_ = "切平面没有切出合法断面（检查 y 是否穿过模型）";
+            return;
+        }
+
+        jpov::model_editor::SeamOptions opt;
+        opt.axis = 1;
+        opt.plane = seam_plane_;
+        opt.algo = static_cast<jpov::model_editor::SeamAlgo>(seam_algo_);
+        opt.band_scale = seam_band_scale_;
+        opt.y_span = seam_y_span_;
+        opt.offset_deg = seam_offset_deg_;
+        jpov::MeshData out;
+        jpov::model_editor::SeamStats st;
+        std::string err;
+        const size_t open_before =
+            jpov::model_editor::CountOpenEdges(target_current_[prim].mesh);
+        if (!jpov::model_editor::StitchSeam(target_current_[prim].mesh,
+                                           reference_cpu_, opt, &out, &st, &err)) {
+            seam_msg_ = "缝合失败：" + err;
+            LOG(WARNING) << "缝合被拒绝：" << err;
+            return;
+        }
+        const size_t open_after = jpov::model_editor::CountOpenEdges(out);
+        LOG(INFO) << "缝合前后开口边：" << open_before << " → " << open_after
+                  << "（delta=" << static_cast<long long>(open_after) -
+                                         static_cast<long long>(open_before)
+                  << "）";
+        target_current_[prim].mesh = std::move(out);
+        seam_stats_ = st;
+        if (show_reference_cut_) {
+            ShowReferenceCut(true);  // 让接缝露出来
+        }
+        if (!st.message.empty()) {
+            LOG(INFO) << "缝合细节：" << st.message;
+        }
+        SyncTargetToGpu();
+        seam_msg_ = Format(
+            "缝合完成（%s%s）：带 %zu 顶点，断面误差 %.3fmm，法线均值 %.1f°/最大 %.1f°，"
+            "翻面 %zu，额外开口边 %zu",
+            jpov::model_editor::SeamAlgoName(opt.algo),
+            st.loop_rebuilt ? "，环已重建" : "，环未重建",
+            st.band_vertices, st.loop_hausdorff_m * 1000.0f, st.normal_angle_mean_deg,
+            st.normal_angle_max_deg, st.flipped_triangles, st.unexpected_open_edges);
+        LOG(INFO) << seam_msg_;
+    }
+
     // 供 headless / CLI 用：阻塞等待上一次保存完成。
     void WaitForSave() {
         while (save_ctrl_.state() == ModelSaveState::kSaving) {
@@ -303,11 +698,16 @@ public:
             }
             ApplyInput(&view_, dx, dy, scroll, static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+            // 中键纵向 pan（同穿衣工具）：平移注视点，相机 position 同步跟随。
+            if (input.middle.IsDrag()) {
+                cam_pan_y_ += jpov_viewer::VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
-        // 相机。
-        cmds->camera.position = view_.Position();
-        cmds->camera.target = ViewConfig::Target();
+        // 相机（叠加中键 pan 的 Y 偏移：position 与 target 同步平移，朝向不变）。
+        const jpov::Vec3f pan(0.0f, cam_pan_y_, 0.0f);
+        cmds->camera.position = view_.Position() + pan;
+        cmds->camera.target = ViewConfig::Target() + pan;
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 60.0f;
         cmds->camera.near = 0.05f;
@@ -364,6 +764,9 @@ public:
         if (show_clip_plane_) {
             DrawClipPlane(cmds);
         }
+        if (show_seam_plane_) {
+            DrawSeamPlane(cmds);
+        }
 
         // 面板。
         if (show_panel_) {
@@ -371,6 +774,9 @@ public:
             ui_.End();
             ui_.Emit(cmds);
         }
+
+        // 诊断 HUD（相机 / 配置 / 累积变换 / MVP）：始终画，截图就能复现配置。
+        DrawHud(cmds, winfo);
     }
 
 private:
@@ -438,6 +844,9 @@ private:
                 TranslateMesh(&target_current_[i].mesh, delta);
             }
         }
+        // HUD：记录累积变换（左乘，与烘焙顺序一致）。
+        target_xform_ = Mat4Mul(Mat4Translate(delta), target_xform_);
+        user_move_ = user_move_ + delta;
         SyncTargetToGpu();
     }
 
@@ -452,6 +861,7 @@ private:
                 RotateMesh(&target_current_[i].mesh, axis, deg, pivot);
             }
         }
+        target_xform_ = Mat4Mul(Mat4RotateAbout(axis, deg, pivot), target_xform_);
         SyncTargetToGpu();
     }
 
@@ -469,6 +879,7 @@ private:
                 ScaleMesh(&target_current_[i].mesh, applied, pivot);
             }
         }
+        target_xform_ = Mat4Mul(Mat4ScaleAbout(applied, pivot), target_xform_);
         model_scale_ = target;
         SyncTargetToGpu();
     }
@@ -478,6 +889,8 @@ private:
         target_current_ = target_startup_;
         target_prim_enabled_.assign(target_current_.size(), true);
         model_scale_ = 1.0f;
+        target_xform_ = Mat4{};
+        user_move_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
         clip_msg_.clear();
         SyncTargetToGpu();
         LOG(INFO) << "重置 target：几何回到加载时状态";
@@ -544,25 +957,28 @@ private:
                   << "）：" << clip_msg_;
     }
 
-    // 画裁剪面：一块与 target 包围盒**同样大小**的半透明 quad，位于所选轴上 clip_coord_ 处。
-    void DrawClipPlane(jpov::RenderCommandList* cmds) {
-        const MeshBounds b = TargetBounds();
+    // 画一块半透明平面 quad。尺寸 = **本帧实时求出的 target AABB**（面内两轴） × margin，
+    // 中心 = 该 AABB 的面内中心 —— 所以 target 平移 / 缩放 / 裁剪 / 缝合之后，
+    // 平面会跟着一起变大小和位置（2026-10-22 Danis：之前没联动）。
+    void DrawPlaneQuad(jpov::RenderCommandList* cmds, int axis, float coord,
+                       const jpov::Color& color) {
+        const MeshBounds b = TargetBounds();  // 每帧现算（当前 CPU 几何）
         if (!b.valid) {
             return;
         }
-        const int a = clip_axis_;
+        const int a = axis;
         const int u = (a + 1) % 3;  // 面内两轴
         const int v = (a + 2) % 3;
         const float bmin[3] = {b.min.x(), b.min.y(), b.min.z()};
         const float bmax[3] = {b.max.x(), b.max.y(), b.max.z()};
         const float cu = (bmin[u] + bmax[u]) * 0.5f;
         const float cv = (bmin[v] + bmax[v]) * 0.5f;
-        // quad 边长 = 包围盒在另两轴的尺寸（即「同 bounding box 大小」）；退化轴给极小兜底。
-        const float hu = std::max((bmax[u] - bmin[u]) * 0.5f, 1e-3f);
-        const float hv = std::max((bmax[v] - bmin[v]) * 0.5f, 1e-3f);
+        // 退化轴（零厚度）给极小兜底，避免 quad 变成一条线。
+        const float hu = std::max((bmax[u] - bmin[u]) * 0.5f * kPlaneQuadMargin, 1e-3f);
+        const float hv = std::max((bmax[v] - bmin[v]) * 0.5f * kPlaneQuadMargin, 1e-3f);
         const auto point = [&](float du, float dv) {
             float p[3] = {0.0f, 0.0f, 0.0f};
-            p[a] = clip_coord_;
+            p[a] = coord;
             p[u] = cu + du;
             p[v] = cv + dv;
             return jpov::Vec3f(p[0], p[1], p[2]);
@@ -572,8 +988,31 @@ private:
         const jpov::Vec3f p10 = point(+hu, -hv);
         const jpov::Vec3f p11 = point(+hu, +hv);
         // 一个 quad = 两条 4 顶点 strip（相反绕序），保证从两侧都可见。
-        cmds->DrawStrip3D({p00, p01, p10, p11}, kClipPlaneColor);
-        cmds->DrawStrip3D({p00, p10, p01, p11}, kClipPlaneColor);
+        cmds->DrawStrip3D({p00, p01, p10, p11}, color);
+        cmds->DrawStrip3D({p00, p10, p01, p11}, color);
+    }
+
+    // 裁剪面（沿 clip_axis_，位置 clip_coord_）。
+    void DrawClipPlane(jpov::RenderCommandList* cmds) {
+        DrawPlaneQuad(cmds, clip_axis_, clip_coord_, kClipPlaneColor);
+    }
+
+    // 缝合面（恒为 Y 平面，位置 seam_plane_）。
+    void DrawSeamPlane(jpov::RenderCommandList* cmds) {
+        DrawPlaneQuad(cmds, 1, seam_plane_, kSeamPlaneColor);
+    }
+
+    // 步进平面坐标（不夹在启动包围盒里 —— 这正是换掉滑条的原因）。
+    void StepClipCoord(float direction) {
+        clip_coord_ += direction * clip_step_;
+    }
+
+    void StepSeamPlane(float direction) {
+        seam_plane_ += direction * seam_step_;
+        // 已经显示 reference 断面的话，跟着刷新（否则面动了、断面还停在旧位置）。
+        if (reference_is_cut_) {
+            ShowReferenceCut(true);
+        }
     }
 
     // ==================== 保存 ====================
@@ -831,8 +1270,10 @@ private:
         const float panel_w = 0.30f * win_w;
         const float panel_x = win_w - panel_w - kMargin;
         const float panel_y = kMargin;
-        // 标题1 + 轴选择1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7。
-        constexpr int kRows = 7;
+        // 裁剪：标题1 + 轴1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7；
+        // 缝合：标题1 + 算法1 + y 步进1 + 影响带1 + 形变区1 + 旋转偏移1 + 按钮1
+        //       + 显示 ref 断面1 + 显示缝合面1 + 消息1 = 10；合计 7 + 10 = 17。
+        constexpr int kRows = 17;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         cmds->DrawRect({panel_x, panel_y}, {panel_w, panel_h},
                        jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
@@ -856,10 +1297,16 @@ private:
         }
         row_y += step_y;
 
-        ui_.SliderFloat(Format("裁剪面 %c (米)", AxisTag()).c_str(), &clip_coord_,
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        clip_min_[clip_axis_], clip_max_[clip_axis_],
-                        /*decimal_places*/ 3);
+        {
+            const std::string clip_value = Format("%.3f", static_cast<double>(clip_coord_));
+            const std::string clip_label = Format("裁剪面 %c(米)", AxisTag());
+            const int dir = DrawPlaneStepRow(clip_label.c_str(), clip_value.c_str(),
+                                             &clip_step_, &clip_step_field_, left, row_w,
+                                             row_y);
+            if (dir != 0) {
+                StepClipCoord(static_cast<float>(dir));
+            }
+        }
         row_y += step_y;
 
         // 两个裁剪按钮：删除「坐标小的一侧」/「坐标大的一侧」。
@@ -898,6 +1345,205 @@ private:
         ui_.Text(Format("target 三角形：%zu", tri_count).c_str(),
                  jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         row_y += step_y;
+
+        // ---- 缝合 ----
+        DrawLabel("缝合（同一个 y 平面切两个模型）", left, row_w, row_y);
+        row_y += step_y;
+
+        {
+            static const std::vector<const char*> kAlgoItems = {"harmonic", "arap",
+                                                                "tps"};
+            ui_.Combo("算法", &seam_algo_, kAlgoItems,
+                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        }
+        row_y += step_y;
+
+        {
+            const std::string seam_value = Format("%.3f", static_cast<double>(seam_plane_));
+            const int dir = DrawPlaneStepRow("缝合面 y(米)", seam_value.c_str(), &seam_step_,
+                                             &seam_step_field_, left, row_w, row_y);
+            if (dir != 0) {
+                StepSeamPlane(static_cast<float>(dir));
+            }
+        }
+        row_y += step_y;
+
+        ui_.SliderFloat("影响带 ×半径", &seam_band_scale_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, 0.2f, 6.0f,
+                        /*decimal_places*/ 1);
+        row_y += step_y;
+
+        ui_.SliderFloat("形变区 y_span(米, 0=自动)", &seam_y_span_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, 0.0f, 1.0f,
+                        /*decimal_places*/ 2);
+        row_y += step_y;
+
+        ui_.SliderFloat("对应旋转 (°)", &seam_offset_deg_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, -180.0f, 180.0f,
+                        /*decimal_places*/ 0);
+        row_y += step_y;
+
+        if (ui_.Button("执行缝合（底口 → reference 顶口）",
+                       jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            ApplyStitch();
+        }
+        row_y += step_y;
+
+        if (ui_.Checkbox("reference 也切到缝合面", &show_reference_cut_,
+                         jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            ShowReferenceCut(show_reference_cut_);
+        }
+        row_y += step_y;
+
+        ui_.Checkbox("显示缝合面", &show_seam_plane_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        if (!seam_msg_.empty()) {
+            cmds->DrawText(seam_msg_, {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, jpov::Color{0.92f, 0.93f, 0.95f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
+        row_y += step_y;
+    }
+
+    // ==================== HUD ====================
+
+    // 把累积矩阵拆成 (T, 欧拉角°, 均匀缩放)，只用于 HUD 显示。
+    void DecomposeXform(jpov::Vec3f* t, jpov::Vec3f* euler_deg, float* scale) const {
+        const Mat4& M = target_xform_;
+        *t = jpov::Vec3f(M.m[3], M.m[7], M.m[11]);
+        const jpov::Vec3f c0(M.m[0], M.m[4], M.m[8]);
+        const jpov::Vec3f c1(M.m[1], M.m[5], M.m[9]);
+        const jpov::Vec3f c2(M.m[2], M.m[6], M.m[10]);
+        const float s0 = std::max(c0.Norm(), 1e-9f);
+        const float s1 = std::max(c1.Norm(), 1e-9f);
+        const float s2 = std::max(c2.Norm(), 1e-9f);
+        *scale = (s0 + s1 + s2) / 3.0f;
+        const float r00 = M.m[0] / s0, r10 = M.m[4] / s0, r20 = M.m[8] / s0;
+        const float r01 = M.m[1] / s1, r11 = M.m[5] / s1, r21 = M.m[9] / s1;
+        const float r02 = M.m[2] / s2, r12 = M.m[6] / s2, r22 = M.m[10] / s2;
+        // R = Rz·Ry·Rx（显示用）。
+        const float sy = std::sqrt(r00 * r00 + r10 * r10);
+        float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+        if (sy > 1e-5f) {
+            rx = std::atan2(r21, r22);
+            ry = std::atan2(-r20, sy);
+            rz = std::atan2(r10, r00);
+        } else {
+            rx = std::atan2(-r12, r11);
+            ry = std::atan2(-r20, sy);
+        }
+        constexpr float kRad2Deg = 180.0f / 3.14159265358979323846f;
+        *euler_deg = jpov::Vec3f(rx * kRad2Deg, ry * kRad2Deg, rz * kRad2Deg);
+    }
+
+    // 诊断 HUD：相机姿态 + 当前配置 + 用户累计变换 + 模型矩阵 M + MVP。
+    // 放在视口上方中间（左右面板之间），截图里一定能读到 —— 用来复现"出问题的配置"。
+    void DrawHud(jpov::RenderCommandList* cmds, const jpov::WindowInfo& winfo) {
+        constexpr float kPi = 3.14159265358979323846f;
+        const float kFont = 11.0f;
+        const float kLineH = 13.0f;
+        const float kPad = 8.0f;
+        const float x0 = 0.305f * winfo.width;
+        const float y0 = 8.0f;
+
+        const jpov::Vec3f cam = view_.Position();
+        const jpov::Vec3f tgt = ViewConfig::Target();
+        const Mat4 view_m = Mat4LookAt(cam, tgt, jpov::Vec3f(0.0f, 1.0f, 0.0f));
+        const Mat4 proj_m =
+            Mat4Perspective(60.0f, winfo.width / std::max(winfo.height, 1.0f), 0.05f,
+                            1000.0f);
+        const Mat4 mvp = Mat4Mul(Mat4Mul(proj_m, view_m), target_xform_);
+
+        std::vector<std::string> lines;
+        lines.push_back(Format(
+            "CAMERA pos(%.3f,%.3f,%.3f) R=%.3f phi=%.1fdeg theta=%.1fdeg panY=%.3f",
+            static_cast<double>(cam.x()), static_cast<double>(cam.y()),
+            static_cast<double>(cam.z()), static_cast<double>(view_.R),
+            static_cast<double>(view_.phi * 180.0 / kPi),
+            static_cast<double>(view_.theta * 180.0 / kPi),
+            static_cast<double>(cam_pan_y_)));
+        lines.push_back(Format(
+            "  target(%.3f,%.3f,%.3f) fov=60 near=0.05 far=1000 aspect=%.3f",
+            static_cast<double>(tgt.x()), static_cast<double>(tgt.y()),
+            static_cast<double>(tgt.z()),
+            static_cast<double>(winfo.width / std::max(winfo.height, 1.0f))));
+        lines.push_back(Format(
+            "STATE clip=%c%.3f seamY=%.3f algo=%s band=%.2f off=%.1f refCut=%d",
+            AxisTag(), static_cast<double>(clip_coord_),
+            static_cast<double>(seam_plane_),
+            jpov::model_editor::SeamAlgoName(
+                static_cast<jpov::model_editor::SeamAlgo>(seam_algo_)),
+            static_cast<double>(seam_band_scale_),
+            static_cast<double>(seam_offset_deg_), reference_is_cut_ ? 1 : 0));
+        lines.push_back(Format(
+            "MOVE   t(%.3f,%.3f,%.3f)  scale=%.4f  (用户累计：平移 + 缩放系数)",
+            static_cast<double>(user_move_.x()), static_cast<double>(user_move_.y()),
+            static_cast<double>(user_move_.z()), static_cast<double>(model_scale_)));
+        for (int row = 0; row < 4; ++row) {
+            lines.push_back(Format(
+                "%s[%9.4f %9.4f %9.4f %9.4f]", row == 0 ? "M    " : "     ",
+                static_cast<double>(target_xform_.m[row * 4 + 0]),
+                static_cast<double>(target_xform_.m[row * 4 + 1]),
+                static_cast<double>(target_xform_.m[row * 4 + 2]),
+                static_cast<double>(target_xform_.m[row * 4 + 3])));
+        }
+        for (int row = 0; row < 4; ++row) {
+            lines.push_back(Format(
+                "%s[%9.4f %9.4f %9.4f %9.4f]", row == 0 ? "MVP  " : "     ",
+                static_cast<double>(mvp.m[row * 4 + 0]),
+                static_cast<double>(mvp.m[row * 4 + 1]),
+                static_cast<double>(mvp.m[row * 4 + 2]),
+                static_cast<double>(mvp.m[row * 4 + 3])));
+        }
+
+        const float h = kPad * 2.0f + kLineH * static_cast<float>(lines.size());
+        const float w = 452.0f;
+        cmds->DrawRect({x0, y0}, {w, h}, jpov::Color{0.0f, 0.0f, 0.0f, 0.62f});
+        float y = y0 + kPad;
+        for (const std::string& line : lines) {
+            cmds->DrawText(line, {x0 + kPad, y}, kFont,
+                           jpov::Color{0.92f, 0.95f, 1.0f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+            y += kLineH;
+        }
+    }
+
+    // 「平面坐标」一行：[标签] [步长输入] [<] [>] [当前值]。
+    // 返回 -1 / 0 / +1（用户点了 < / 没点 / 点了 >），由调用方真正应用步进
+    // （裁剪面和缝合面各有自己的后处理）。
+    int DrawPlaneStepRow(const char* label, const char* value_text, float* step,
+                         NumberField* step_field, float left, float row_w,
+                         float row_y) {
+        const float kRowH = kPanelRowH;
+        const float lbl_w = 96.0f;
+        const float step_w = 64.0f;
+        const float btn_w = 26.0f;
+        const float gap = 6.0f;
+        DrawLabel(label, left, lbl_w, row_y);
+        const float sx = left + lbl_w;
+        const bool focus = ui_.InputText("", step_field->text, kNumberInputCapacity,
+                                         jpov::UiRect{{sx, row_y}, {step_w, kRowH}});
+        if (step_field->focused_prev && !focus) {
+            CommitNumberField(
+                step_field,
+                [](float v) { return std::clamp(v, kPlaneStepMin, kPlaneStepMax); },
+                step);
+        }
+        step_field->focused_prev = focus;
+        const float b1 = sx + step_w + gap;
+        const float b2 = b1 + btn_w + gap;
+        int dir = 0;
+        if (ui_.Button("<", jpov::UiRect{{b1, row_y}, {btn_w, kRowH}})) {
+            dir = -1;
+        }
+        if (ui_.Button(">", jpov::UiRect{{b2, row_y}, {btn_w, kRowH}})) {
+            dir = +1;
+        }
+        const float vx = b2 + btn_w + gap;
+        DrawLabel(value_text, vx, std::max(0.0f, left + row_w - vx), row_y);
+        return dir;
     }
 
     void DrawLabel(const char* text, float x, float width, float y) {
@@ -935,6 +1581,7 @@ private:
             return;
         }
         view_.R = ViewConfig::FitRadius(bmin, bmax, /*fov_deg*/ 60.0);
+        cam_pan_y_ = 0.0f;
     }
 
     static std::string BaseNameOf(const std::string& path) {
