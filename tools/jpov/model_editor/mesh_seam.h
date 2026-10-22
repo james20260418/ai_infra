@@ -94,7 +94,14 @@ struct SeamOptions {
 
     // 影响带高度 H = band_scale × 断面等效半径（等效半径 = 周长 / 2π）。
     // 必须 > 0：给 0 会让带退化成一条线（形变直接塌）。上层用滑条给，默认 2.0。
+    // ⚠️ y_span > 0 时以 y_span 为准（见下），band_scale 只作兜底。
     float band_scale = 2.0f;
+
+    // **最大形变区高度（米，> 0 才启用；2026-10-22 Danis 定）**：
+    //   在 y = plane + y_span 处给 target 插一圈顶点（切一刀但不删面，会确实增加顶点），
+    //   只有 plane ~ plane+y_span 之间的顶点参与形变，该环及更上方**完全隔离**。
+    //   这样形变有明确的硬边界（环 = 锚点），不会把焊缝拉到很远的地方。
+    float y_span = 0.0f;
 
     // 环对应的旋转偏移（度）：用户手动修「扭麻花」的逃生口。
     float offset_deg = 0.0f;
@@ -663,6 +670,156 @@ inline BandGraph BuildBandGraph(const jpov::MeshData& mesh,
     return g;
 }
 
+// 位置焊接分组：同一位置的多个顶点（UV 缝 / 导出器拆点）归成一组。
+//
+// 为什么形变必须按组算（2026-10-22 Danis 要求复查）：Laplace / ARAP 解的是**顶点邻接图**。
+// 缝两侧是两套独立顶点、邻居不同 ⇒ 同一位置会被解出两个不同位移 ⇒ 缝裂开。
+// 做法：按组求解，再把「组位移」原样加到每个成员上（成员各自的微小位置差保持不变）。
+struct WeldGroups {
+    std::vector<uint32_t> rep;     // 顶点 → 组号
+    std::vector<uint32_t> leader;  // 组号 → 代表顶点
+};
+
+inline WeldGroups BuildWeldGroups(const jpov::MeshData& mesh) {
+    WeldGroups wg;
+    const size_t n = mesh.positions.size();
+    wg.rep.resize(n);
+    // 用 float 位模式做键：glb 里 UV 缝的重复顶点是**逐位相同**的，不需要容差。
+    struct KeyHash {
+        size_t operator()(const std::array<uint32_t, 3>& k) const {
+            size_t h = k[0] * 73856093u;
+            h ^= k[1] * 19349663u;
+            h ^= k[2] * 83492791u;
+            return h;
+        }
+    };
+    std::unordered_map<std::array<uint32_t, 3>, uint32_t, KeyHash> map;
+    map.reserve(n);
+    for (size_t v = 0; v < n; ++v) {
+        const jpov::Vec3f& p = mesh.positions[v];
+        std::array<uint32_t, 3> key{};
+        std::memcpy(&key[0], &p.x(), sizeof(float));
+        std::memcpy(&key[1], &p.y(), sizeof(float));
+        std::memcpy(&key[2], &p.z(), sizeof(float));
+        auto it = map.find(key);
+        if (it == map.end()) {
+            const uint32_t g = static_cast<uint32_t>(wg.leader.size());
+            map.emplace(key, g);
+            wg.leader.push_back(static_cast<uint32_t>(v));
+            wg.rep[v] = g;
+        } else {
+            wg.rep[v] = it->second;
+        }
+    }
+    return wg;
+}
+
+// 组间多源 Dijkstra（沿网格边，长度用代表顶点位置算）。
+inline std::vector<float> GeodesicOnGroups(const jpov::MeshData& mesh,
+                                           const WeldGroups& wg,
+                                           const SeamLoop& loop) {
+    const size_t gn = wg.leader.size();
+    const float kInf = std::numeric_limits<float>::max();
+    std::vector<float> dist(gn, kInf);
+    std::vector<std::vector<std::pair<uint32_t, float>>> adj(gn);
+    const size_t tris = TriangleCount(mesh);
+    for (size_t t = 0; t < tris; ++t) {
+        const auto tri = TriangleAt(mesh, t);
+        for (int e = 0; e < 3; ++e) {
+            const uint32_t a = tri[e];
+            const uint32_t b = tri[(e + 1) % 3];
+            const uint32_t ga = wg.rep[a];
+            const uint32_t gb = wg.rep[b];
+            if (ga == gb) {
+                continue;
+            }
+            const float len = (mesh.positions[b] - mesh.positions[a]).Norm();
+            adj[ga].push_back({gb, len});
+            adj[gb].push_back({ga, len});
+        }
+    }
+    using Item = std::pair<float, uint32_t>;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> heap;
+    for (uint32_t v : LoopPhysicalVerts(loop)) {
+        const uint32_t g = wg.rep[v];
+        if (dist[g] > 0.0f) {
+            dist[g] = 0.0f;
+            heap.push({0.0f, g});
+        }
+    }
+    while (!heap.empty()) {
+        const auto [d, g] = heap.top();
+        heap.pop();
+        if (d > dist[g]) {
+            continue;
+        }
+        for (const auto& [nb, w] : adj[g]) {
+            const float nd = d + w;
+            if (nd < dist[nb]) {
+                dist[nb] = nd;
+                heap.push({nd, nb});
+            }
+        }
+    }
+    return dist;
+}
+
+// 组级影响带图（cotangent 权重按三角形累加到组边上）。
+inline BandGraph BuildBandGraphGrouped(const jpov::MeshData& mesh, const WeldGroups& wg,
+                                       const std::vector<uint8_t>& g_is_loop,
+                                       const std::vector<float>& g_dist, float H,
+                                       const std::vector<uint8_t>& anchored) {
+    BandGraph g;
+    g.dist = g_dist;
+    g.band_height = H;
+    const size_t gn = wg.leader.size();
+    g.is_free.assign(gn, 0);
+    g.nbr.assign(gn, {});
+    for (size_t gi = 0; gi < gn; ++gi) {
+        const bool blocked = (!anchored.empty() && gi < anchored.size() && anchored[gi]);
+        g.is_free[gi] = (!g_is_loop[gi] && !blocked && g_dist[gi] <= H) ? 1 : 0;
+    }
+    std::unordered_map<uint64_t, float> weights;
+    const size_t tris = TriangleCount(mesh);
+    for (size_t t = 0; t < tris; ++t) {
+        const auto tri = TriangleAt(mesh, t);
+        for (int e = 0; e < 3; ++e) {
+            const uint32_t i = tri[e];
+            const uint32_t j = tri[(e + 1) % 3];
+            const uint32_t k = tri[(e + 2) % 3];
+            const jpov::Vec3f u = mesh.positions[i] - mesh.positions[k];
+            const jpov::Vec3f v = mesh.positions[j] - mesh.positions[k];
+            const float cross = u.Cross(v).Norm();
+            if (cross < 1e-12f) {
+                continue;
+            }
+            const float cot = u.Dot(v) / cross;
+            weights[EdgeKey(wg.rep[i], wg.rep[j])] += 0.5f * std::max(cot, 0.0f);
+        }
+    }
+    for (const auto& kv : weights) {
+        const uint32_t a = static_cast<uint32_t>(kv.first >> 32);
+        const uint32_t b = static_cast<uint32_t>(kv.first & 0xffffffffu);
+        if (a == b) {
+            continue;
+        }
+        const bool in_a = g_is_loop[a] || g.is_free[a];
+        const bool in_b = g_is_loop[b] || g.is_free[b];
+        if (!in_a || !in_b) {
+            continue;
+        }
+        const float w = std::max(kv.second, 1e-4f);
+        g.nbr[a].push_back({b, w});
+        g.nbr[b].push_back({a, w});
+    }
+    for (size_t gi = 0; gi < gn; ++gi) {
+        if (g.is_free[gi] && g.nbr[gi].empty()) {
+            g.is_free[gi] = 0;
+        }
+    }
+    return g;
+}
+
 // 单个顶点在给定位置数组下的取值：断面环用目标位，自由顶点用当前位，其余用原位。
 inline jpov::Vec3f PositionOf(uint32_t v, const std::vector<uint8_t>& is_loop,
                               const std::vector<jpov::Vec3f>& goal,
@@ -803,7 +960,9 @@ inline size_t SolveArap(const jpov::MeshData& mesh, const BandGraph& g,
                         const std::vector<jpov::Vec3f>& orig,
                         const std::vector<jpov::Vec3f>& goal, int outer_iters,
                         int inner_iters, std::vector<jpov::Vec3f>* cur /*inout*/) {
-    const size_t vcount = mesh.positions.size();
+    (void)mesh;
+    // 注意：顶点数取 g.is_free.size()（组级求解时这里是组数，不是 mesh 顶点数）。
+    const size_t vcount = g.is_free.size();
     std::vector<std::array<double, 9>> rot(vcount);
     for (size_t v = 0; v < vcount; ++v) {
         rot[v] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -941,13 +1100,13 @@ inline bool SolveDense(std::vector<double> A, std::vector<double> B, int n,
 // 必须在**断面平面内**做 2D：断面所有点共面，若直接拿 3D 的 φ(r)=r + 线性项 [1,x,y,z]，
 // 由于所有中心的 y 相同，y 那一列与常数列线性相关 ⇒ 系统奇异（实测直接求解失败）。
 // 平面内 2D 薄板样条是良态的，而且断面本来就是平面上的曲线，物理意义也更对。
-inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
-                     const std::vector<uint8_t>& is_loop,
+inline bool SolveTps(const std::vector<jpov::Vec3f>& pos,
+                     const BandGraph& g, const std::vector<uint8_t>& is_loop,
                      const std::vector<jpov::Vec3f>& orig,
                      const std::vector<jpov::Vec3f>& goal, int axis,
                      std::vector<jpov::Vec3f>* cur /*inout*/, size_t* iters) {
     std::vector<uint32_t> centers;
-    for (size_t v = 0; v < mesh.positions.size(); ++v) {
+    for (size_t v = 0; v < pos.size(); ++v) {
         if (is_loop[v]) {
             centers.push_back(static_cast<uint32_t>(v));
         }
@@ -961,7 +1120,7 @@ inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
     // 归一化尺度（米）：用断面尺寸，保证 φ 数值不爆。
     float scale = 0.0f;
     for (int i = 1; i < K; ++i) {
-        const jpov::Vec3f d = mesh.positions[centers[i]] - mesh.positions[centers[0]];
+        const jpov::Vec3f d = pos[centers[i]] - pos[centers[0]];
         scale = std::max(scale, d.Norm());
     }
     if (scale < 1e-9f) {
@@ -974,9 +1133,9 @@ inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
         return (r > 1e-9) ? (r * r * std::log(r)) : 0.0;
     };
     for (int i = 0; i < K; ++i) {
-        const jpov::Vec3f& ci = mesh.positions[centers[i]];
+        const jpov::Vec3f& ci = pos[centers[i]];
         for (int j = 0; j < K; ++j) {
-            const jpov::Vec3f d = mesh.positions[centers[j]] - ci;
+            const jpov::Vec3f d = pos[centers[j]] - ci;
             const double r = std::sqrt(static_cast<double>(d.x() * d.x() +
                                                            d.y() * d.y() +
                                                            d.z() * d.z())) /
@@ -985,9 +1144,9 @@ inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
         }
         A[static_cast<size_t>(i) * n + i] += 1e-8;  // 正则
         const double du =
-            (mesh.positions[centers[i]][iu] - mesh.positions[centers[0]][iu]) / scale;
+            (pos[centers[i]][iu] - pos[centers[0]][iu]) / scale;
         const double dv =
-            (mesh.positions[centers[i]][iv] - mesh.positions[centers[0]][iv]) / scale;
+            (pos[centers[i]][iv] - pos[centers[0]][iv]) / scale;
         A[static_cast<size_t>(i) * n + (K + 0)] = 1.0;
         A[static_cast<size_t>(i) * n + (K + 1)] = du;
         A[static_cast<size_t>(i) * n + (K + 2)] = dv;
@@ -1002,8 +1161,8 @@ inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
     if (!SolveDense(A, B, n, 2, &X)) {
         return false;
     }
-    const float cx = mesh.positions[centers[0]][iu];
-    const float cz = mesh.positions[centers[0]][iv];
+    const float cx = pos[centers[0]][iu];
+    const float cz = pos[centers[0]][iv];
     for (uint32_t v = 0; v < g.is_free.size(); ++v) {
         if (!g.is_free[v]) {
             continue;
@@ -1016,7 +1175,7 @@ inline bool SolveTps(const jpov::MeshData& mesh, const BandGraph& g,
         double out_v = X[(K + 0) * 2 + 1] + X[(K + 1) * 2 + 1] * du +
                        X[(K + 2) * 2 + 1] * dv;
         for (int i = 0; i < K; ++i) {
-            const jpov::Vec3f d = p - mesh.positions[centers[i]];
+            const jpov::Vec3f d = p - pos[centers[i]];
             const double r =
                 std::sqrt(static_cast<double>(d.x() * d.x() + d.y() * d.y() +
                                               d.z() * d.z())) /
@@ -1105,6 +1264,132 @@ inline void ResizeVertexArrays(MeshData* mesh, size_t new_count) {
         mesh->joint_indices.resize(new_count, {0, 0, 0, 0});
         mesh->joint_weights.resize(new_count, {1.0f, 0.0f, 0.0f, 0.0f});
     }
+}
+
+// 在平面 y=plane 处给网格**插一圈顶点**：跨面的三角形被切成上下两半、共享新顶点，
+// 但**不删任何面**（与 ClipMeshByAxis 的区别）。
+//
+// 用途（2026-10-22 Danis）：y_span 形变区需要一个明确的硬边界 —— 环上顶点当锚点，
+// 环以上完全不动。没有这一圈的话，锚点落在三角形中间，最后一行三角形会被拉成长条。
+//
+// 返回新插入的顶点下标（调用方把它们当锚点）。失败（网格不是索引化）返回空。
+inline std::vector<uint32_t> InsertRingAtPlane(MeshData* mesh, int axis, float plane,
+                                               float eps) {
+    std::vector<uint32_t> ring;
+    if (mesh->indices.empty()) {
+        return ring;
+    }
+    std::vector<jpov::Vec3f>& pos = mesh->positions;
+    const size_t vcount_before = pos.size();
+    std::unordered_map<uint64_t, uint32_t> edge_vertex;  // 无序边 → 新顶点
+    std::vector<uint32_t> new_indices;
+    new_indices.reserve(mesh->indices.size() + 32);
+
+    auto coord = [axis](const jpov::Vec3f& p) {
+        return (axis == 0) ? p.x() : ((axis == 1) ? p.y() : p.z());
+    };
+    auto lerp_vertex = [&](uint32_t a, uint32_t b, float t) {
+        const uint64_t key = EdgeKey(a, b);
+        auto it = edge_vertex.find(key);
+        if (it != edge_vertex.end()) {
+            return it->second;
+        }
+        const uint32_t nv = static_cast<uint32_t>(pos.size());
+        ResizeVertexArrays(mesh, pos.size() + 1);
+        const jpov::Vec3f p = Lerp(mesh->positions[a], mesh->positions[b], t);
+        mesh->positions[nv] = p;
+        if (!mesh->uvs.empty()) {
+            const jpov::Vec2f& ua = mesh->uvs[a];
+            const jpov::Vec2f& ub = mesh->uvs[b];
+            mesh->uvs[nv] = jpov::Vec2f(ua.x() + (ub.x() - ua.x()) * t,
+                                        ua.y() + (ub.y() - ua.y()) * t);
+        }
+        if (!mesh->joint_indices.empty()) {
+            if (mesh->joint_weights[a][0] >= mesh->joint_weights[b][0]) {
+                mesh->joint_indices[nv] = mesh->joint_indices[a];
+                mesh->joint_weights[nv] = mesh->joint_weights[a];
+            } else {
+                mesh->joint_indices[nv] = mesh->joint_indices[b];
+                mesh->joint_weights[nv] = mesh->joint_weights[b];
+            }
+        }
+        edge_vertex[key] = nv;
+        ring.push_back(nv);
+        return nv;
+    };
+
+    const size_t tri_count = mesh->indices.size() / 3;
+    for (size_t t = 0; t < tri_count; ++t) {
+        const uint32_t v[3] = {mesh->indices[3 * t], mesh->indices[3 * t + 1],
+                               mesh->indices[3 * t + 2]};
+        const float d[3] = {coord(pos[v[0]]) - plane, coord(pos[v[1]]) - plane,
+                            coord(pos[v[2]]) - plane};
+        int below = 0;
+        int above = 0;
+        int on = 0;
+        for (int k = 0; k < 3; ++k) {
+            if (std::fabs(d[k]) <= eps) {
+                ++on;
+            } else if (d[k] > 0.0f) {
+                ++above;
+            } else {
+                ++below;
+            }
+        }
+        if (below == 0 || above == 0) {
+            // 整块在一边（含贴面）→ 原样保留。
+            for (int k = 0; k < 3; ++k) {
+                new_indices.push_back(v[k]);
+            }
+            continue;
+        }
+        // 跨面：找两条「跨面边」，在交点上插顶点（按无序边去重，相邻三角形共点）。
+        std::vector<uint32_t> poly_below;
+        std::vector<uint32_t> poly_above;
+        // 先按绕序把每个顶点/交点写进上下两个多边形。
+        for (int k = 0; k < 3; ++k) {
+            const int k2 = (k + 1) % 3;
+            const bool cur_above = d[k] > eps;
+            const bool cur_below = d[k] < -eps;
+            const bool nxt_above = d[k2] > eps;
+            const bool nxt_below = d[k2] < -eps;
+            // 当前顶点归它的那一侧（在面上的点两边都收）。
+            if (!cur_above) {
+                poly_below.push_back(v[k]);
+            }
+            if (!cur_below) {
+                poly_above.push_back(v[k]);
+            }
+            // 跨面边 → 交点（两边都收）。
+            if ((cur_above && nxt_below) || (cur_below && nxt_above)) {
+                const float t_lerp = d[k] / (d[k] - d[k2]);
+                const uint32_t nv = lerp_vertex(v[k], v[k2], t_lerp);
+                poly_below.push_back(nv);
+                poly_above.push_back(nv);
+            }
+        }
+        auto fan = [&new_indices](const std::vector<uint32_t>& poly) {
+            for (size_t k = 1; k + 1 < poly.size(); ++k) {
+                new_indices.push_back(poly[0]);
+                new_indices.push_back(poly[k]);
+                new_indices.push_back(poly[k + 1]);
+            }
+        };
+        if (poly_below.size() >= 3) {
+            fan(poly_below);
+        }
+        if (poly_above.size() >= 3) {
+            fan(poly_above);
+        }
+        if (poly_below.size() < 3 && poly_above.size() < 3) {
+            for (int k = 0; k < 3; ++k) {
+                new_indices.push_back(v[k]);
+            }
+        }
+    }
+    mesh->indices = std::move(new_indices);
+    (void)vcount_before;
+    return ring;
 }
 
 // 把 target 的断面环换成 reference 环的**顶点序列**（逐点一一对应 ⇒ 可 1:1 焊接）。
@@ -1420,6 +1705,13 @@ inline bool StitchSeam(const jpov::MeshData& target,
         return false;
     }
 
+    // 1.5) y_span：在 plane + y_span 处插一圈顶点（不删面），给形变区一个硬边界。
+    std::vector<uint32_t> ring_vertices;
+    if (opt.y_span > 0.0f) {
+        ring_vertices = InsertRingAtPlane(&tcut, opt.axis, opt.plane + opt.y_span,
+                                         plane_eps);
+    }
+
     // 2) 断面环 + 合法性。
     SeamLoop tloop;
     SeamLoop rloop;
@@ -1461,14 +1753,21 @@ inline bool StitchSeam(const jpov::MeshData& target,
         }
     }
 
-    // 4) 影响带（测地距离）。
-    //    高度下界 = 断面外侧**最长一条边**的 1.5 倍：粗网格上一个环间距就可能大于
-    //    band_scale×等效半径，若不加这个下界，带里一个自由顶点都没有（形变无处过渡，
-    //    只剩一圈三角形被硬拉）。细网格上仍然是 band_scale×等效半径生效。
+    // 4) 影响带（**按位置焊接后的组**算：UV 缝两侧是两套顶点，按顶点解会把缝撕开）。
     const float eq_radius = tloop.perimeter / (2.0f * 3.14159265358979323846f);
-    std::vector<uint8_t> is_loop(tcut.positions.size(), 0);
+    const WeldGroups wg = BuildWeldGroups(tcut);
+    const size_t gn = wg.leader.size();
+    std::vector<jpov::Vec3f> orig(gn);
+    for (size_t g = 0; g < gn; ++g) {
+        orig[g] = tcut.positions[wg.leader[g]];
+    }
+    std::vector<uint8_t> g_is_loop(gn, 0);
     for (uint32_t v : LoopPhysicalVerts(tloop)) {
-        is_loop[v] = 1;
+        g_is_loop[wg.rep[v]] = 1;
+    }
+    std::vector<uint8_t> g_anchored(gn, 0);
+    for (uint32_t v : ring_vertices) {
+        g_anchored[wg.rep[v]] = 1;  // y_span 环 = 硬锚点
     }
     float max_edge_near_loop = 0.0f;
     {
@@ -1478,7 +1777,7 @@ inline bool StitchSeam(const jpov::MeshData& target,
             for (int e = 0; e < 3; ++e) {
                 const uint32_t a = tri[e];
                 const uint32_t b = tri[(e + 1) % 3];
-                if (!is_loop[a] && !is_loop[b]) {
+                if (!g_is_loop[wg.rep[a]] && !g_is_loop[wg.rep[b]]) {
                     continue;
                 }
                 max_edge_near_loop = std::max(
@@ -1486,19 +1785,27 @@ inline bool StitchSeam(const jpov::MeshData& target,
             }
         }
     }
-    const float band_h =
-        std::max(opt.band_scale * eq_radius, 1.5f * max_edge_near_loop);
-    const std::vector<float> dist = GeodesicFromLoop(tcut, tloop);
-    const BandGraph band = BuildBandGraph(tcut, is_loop, dist, band_h);
-    for (size_t v = 0; v < band.is_free.size(); ++v) {
-        if (band.is_free[v]) {
+    // y_span 给了就以它为准（明确的"最大形变区"），否则退回自适应。
+    const float band_h = (opt.y_span > 0.0f)
+                             ? opt.y_span
+                             : std::max(opt.band_scale * eq_radius,
+                                        1.5f * max_edge_near_loop);
+    const std::vector<float> g_dist = GeodesicOnGroups(tcut, wg, tloop);
+    const BandGraph band = BuildBandGraphGrouped(tcut, wg, g_is_loop, g_dist, band_h,
+                                                 g_anchored);
+    for (size_t g = 0; g < band.is_free.size(); ++g) {
+        if (band.is_free[g]) {
             ++st.band_vertices;
         }
     }
+    // 环的目标位置（组级）。
+    std::vector<jpov::Vec3f> g_goal = orig;
+    for (uint32_t v : LoopPhysicalVerts(tloop)) {
+        g_goal[wg.rep[v]] = goal[v];
+    }
 
-    // 5) 分步形变（continuation）+ 每个算法。
-    std::vector<jpov::Vec3f> cur = tcut.positions;
-    const std::vector<jpov::Vec3f> orig = tcut.positions;
+    // 5) 分步形变（continuation）+ 每个算法。全部在**组空间**求解。
+    std::vector<jpov::Vec3f> cur = orig;
     const int steps = std::max(1, opt.steps);
     const int inner_iters = (opt.algo == SeamAlgo::kArap)
                                 ? std::min(opt.max_iterations / 4, 60)
@@ -1506,35 +1813,45 @@ inline bool StitchSeam(const jpov::MeshData& target,
     for (int s = 1; s <= steps; ++s) {
         const float t = static_cast<float>(s) / static_cast<float>(steps);
         std::vector<jpov::Vec3f> step_goal = orig;
-        for (uint32_t v : LoopPhysicalVerts(tloop)) {
-            step_goal[v] = Lerp(orig[v], goal[v], t);
+        for (size_t g = 0; g < gn; ++g) {
+            if (g_is_loop[g]) {
+                step_goal[g] = Lerp(orig[g], g_goal[g], t);
+            }
         }
         if (opt.algo == SeamAlgo::kHarmonic) {
-            st.iterations += SolveHarmonic(band, is_loop, step_goal, inner_iters, &cur);
+            st.iterations += SolveHarmonic(band, g_is_loop, step_goal, inner_iters, &cur);
         } else if (opt.algo == SeamAlgo::kArap) {
-            st.iterations += SolveArap(tcut, band, is_loop, orig, step_goal, 4,
+            st.iterations += SolveArap(tcut, band, g_is_loop, orig, step_goal, 4,
                                        inner_iters, &cur);
         } else {
             size_t it = 0;
-            if (!SolveTps(tcut, band, is_loop, orig, step_goal, opt.axis, &cur, &it)) {
+            if (!SolveTps(orig, band, g_is_loop, orig, step_goal, opt.axis, &cur, &it)) {
                 *error = "TPS 求解失败（断面点共面 / 退化）";
                 return false;
             }
             st.iterations += it;
         }
-        // 硬约束：断面环永远落在目标位（TPS 的衰减会把它拉回来，这里兜底）。
-        for (uint32_t v : LoopPhysicalVerts(tloop)) {
-            cur[v] = step_goal[v];
+        // 硬约束：断面环永远落在目标位。
+        for (size_t g = 0; g < gn; ++g) {
+            if (g_is_loop[g]) {
+                cur[g] = step_goal[g];
+            }
         }
+    }
+    // 组位移 → 逐顶点（成员各自的微小位置差保留，缝不裂）。
+    std::vector<jpov::Vec3f> new_pos(tcut.positions.size());
+    for (size_t v = 0; v < tcut.positions.size(); ++v) {
+        const uint32_t g = wg.rep[v];
+        new_pos[v] = tcut.positions[v] + (cur[g] - orig[g]);
     }
     {
         std::vector<uint8_t> touch(tcut.positions.size(), 0);
         for (size_t v = 0; v < touch.size(); ++v) {
-            touch[v] = (is_loop[v] || band.is_free[v]) ? 1 : 0;
+            touch[v] = (g_is_loop[wg.rep[v]] || band.is_free[wg.rep[v]]) ? 1 : 0;
         }
-        st.flipped_triangles = CountFlipped(tcut, orig, cur, touch);
+        st.flipped_triangles = CountFlipped(tcut, tcut.positions, new_pos, touch);
     }
-    tcut.positions = cur;
+    tcut.positions = new_pos;
 
     // 6) 环重建（可选，保证 1:1 可焊）。
     if (opt.rebuild_loop) {

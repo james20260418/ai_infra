@@ -297,6 +297,8 @@ public:
     NumberField seam_step_field_ = NumberField(kDefaultPlaneStep);
     int seam_algo_ = 0;              // 0=harmonic / 1=arap / 2=tps
     float seam_band_scale_ = 2.0f;   // 影响带高度 = 该系数 × 断面等效半径
+    float seam_y_span_ = 0.0f;       // 最大形变区高度（米；0 = 自动）。>0 时在
+                                     // plane+y_span 插一圈顶点当硬边界，环以上完全隔离。
     float seam_offset_deg_ = 0.0f;   // 环对应旋转偏移（度）
     bool show_reference_cut_ = true;  // 显示时把 reference 也切到缝合面（否则接头被挡住）
     bool reference_is_cut_ = false;   // reference 的 GPU 几何当前是否是切过的版本
@@ -608,6 +610,7 @@ public:
         opt.plane = seam_plane_;
         opt.algo = static_cast<jpov::model_editor::SeamAlgo>(seam_algo_);
         opt.band_scale = seam_band_scale_;
+        opt.y_span = seam_y_span_;
         opt.offset_deg = seam_offset_deg_;
         jpov::MeshData out;
         jpov::model_editor::SeamStats st;
@@ -1256,9 +1259,9 @@ private:
         const float panel_x = win_w - panel_w - kMargin;
         const float panel_y = kMargin;
         // 裁剪：标题1 + 轴1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7；
-        // 缝合：标题1 + 算法1 + y 步进1 + 影响带1 + 旋转偏移1 + 按钮1 + 显示 ref 断面1
-        //       + 显示缝合面1 + 消息1 = 9；合计 7 + 9 = 16。
-        constexpr int kRows = 16;
+        // 缝合：标题1 + 算法1 + y 步进1 + 影响带1 + 形变区1 + 旋转偏移1 + 按钮1
+        //       + 显示 ref 断面1 + 显示缝合面1 + 消息1 = 10；合计 7 + 10 = 17。
+        constexpr int kRows = 17;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         cmds->DrawRect({panel_x, panel_y}, {panel_w, panel_h},
                        jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
@@ -1356,6 +1359,11 @@ private:
         ui_.SliderFloat("影响带 ×半径", &seam_band_scale_,
                         jpov::UiRect{{left, row_y}, {row_w, kRowH}}, 0.2f, 6.0f,
                         /*decimal_places*/ 1);
+        row_y += step_y;
+
+        ui_.SliderFloat("形变区 y_span(米, 0=自动)", &seam_y_span_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, 0.0f, 1.0f,
+                        /*decimal_places*/ 2);
         row_y += step_y;
 
         ui_.SliderFloat("对应旋转 (°)", &seam_offset_deg_,

@@ -53,6 +53,7 @@ struct CliOptions {
     std::string stitch_algo = "harmonic";  // --stitch_algo harmonic|arap|tps
     float stitch_offset_deg = 0.0f;     // --stitch_offset_deg：环对应旋转
     float stitch_band = 2.0f;           // --stitch_band：影响带 × 断面等效半径
+    float stitch_span = 0.0f;           // --stitch_span：最大形变区高度（米，0=自动）
     bool save_after_stitch = false;     // --save_after_stitch
 };
 
@@ -111,6 +112,12 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.stitch_algo = v;
             } else {
                 LOG(WARNING) << "--stitch_algo 缺少参数，忽略";
+            }
+        } else if (arg == "--stitch_span") {
+            if (i + 1 < argc) {
+                opt.stitch_span = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--stitch_span 缺少数值参数，忽略";
             }
         } else if (arg == "--stitch_offset_deg") {
             if (i + 1 < argc) {
@@ -302,6 +309,7 @@ int main(int argc, char** argv) {
             }
             app.seam_offset_deg_ = opt.stitch_offset_deg;
             app.seam_band_scale_ = opt.stitch_band;
+            app.seam_y_span_ = opt.stitch_span;
             app.ApplyStitch();
             LOG(INFO) << "headless 缝合：" << app.seam_msg_;
         }
