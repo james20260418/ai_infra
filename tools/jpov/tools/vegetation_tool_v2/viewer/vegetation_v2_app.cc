@@ -721,8 +721,10 @@ class VegetationV2App : public JPOV {
     if (args.radius > 0.0) {
       view_.R = args.radius;
     }
-    LOG(INFO) << "纯 glb 查看模式：没有 shape（" << args.shape_path
-              << "），只有 glb 展示态（不能回到原材料态/不能烘焙）";
+    LOG(INFO) << "纯 glb 查看模式"
+              << (args.glb_only ? "（--glb-only：故意不加载 shape）"
+                                : "（shape 不存在：" + args.shape_path + "）")
+              << "：只有 glb 展示态，不能回到原材料态/不能烘焙";
   }
 
   // 一个 leaf type 的 debug 绘制单元：绿卡 + 卡面 UV 标签。
@@ -1238,7 +1240,8 @@ int RunViewer(const CliArgs& args) {
   VegetationV2App app(cfg);
   app.has_fonts_ = !cfg.fonts.empty();
   app.Init();
-  const bool has_shape_file = std::ifstream(args.shape_path).good();
+  // 纯 glb 查看模式：显式 `--glb-only`，或给了 `--glb` 但 shape 文件根本不存在。
+  const bool has_shape_file = std::ifstream(args.shape_path).good() && !args.glb_only;
   if (has_shape_file) {
     std::string err;
     if (!jpov::vegetation::LoadShapeFile(args.shape_path, &app.shape_, &err)) {

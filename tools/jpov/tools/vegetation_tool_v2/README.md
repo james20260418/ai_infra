@@ -48,10 +48,12 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 
 # 纯 glb 查看模式：**没有 shape 也能开**（别人发来一个 glb，只想看看它长什么样）
 cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
+# 在打包目录里（shapes/ 存在）想强制纯查看：加 --glb-only
+./jpov_vegetation_v2_viewer --glb some.glb --glb-only
 ```
 
-**纯 glb 查看模式**（2026-10-22 加）：给了 `--glb` 且 **shape 文件找不到**（默认的
-`shapes/willow.pbtxt` 也不在 cwd）时只开 glb 展示态 —— 有地面、有风、有风调试面板，**没有**原材料态：面板上不会出现
+**纯 glb 查看模式**（2026-10-22 加）：`--glb-only`，或给了 `--glb` 且 **shape 文件找不到**
+（默认的 `shapes/willow.pbtxt` 也不在 cwd）时只开 glb 展示态 —— 有地面、有风、有风调试面板，**没有**原材料态：面板上不会出现
 「回到原材料态」，也不能烘焙（两者都需要 shape）。相机默认按 glb 包围盒自动取景。
 渲染结果与「shape + glb」逐像素一致（同一机位实测 0 差异），只是少了回退能力。
 
@@ -64,6 +66,7 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 | 参数 | 说明 |
 |---|---|
 | `--shape <pbtxt>` | 拓扑；省略 = `shapes/willow.pbtxt`。**给了 `--glb` 时可省略/允许缺失**（纯 glb 查看模式） |
+| `--glb <glb>` / `--glb-only` | 直接进 glb 展示态；`--glb-only` = 强制纯查看（不加载 shape，不能烘焙/回退） |
 | `--bark <dir>` | 树皮材质目录；省略 = level 棕色 |
 | `--leaf <png>` / `--leaf2 <png>` | 叶卡素材；`leaf2` 给**镜像手性**的 leaf type 1。少给 `leaf2` 会 WARNING 回退 |
 | `--leaf-black <f>` | 黑底阈值（见上） |
