@@ -54,11 +54,13 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 echo ""
 echo "==> 4. 拷贝范本拓扑到 shapes/"
 mkdir -p "$OUTPUT_DIR/shapes"
-if [ -f "$TOOL_DIR/samples/willow.pbtxt" ]; then
-    cp -v "$TOOL_DIR/samples/willow.pbtxt" "$OUTPUT_DIR/shapes/willow.pbtxt"
-else
-    echo "WARNING: 缺 $TOOL_DIR/samples/willow.pbtxt（先跑 export_vegetation_shape.py）"
-fi
+for f in willow.pbtxt willow_two_types.pbtxt; do
+    if [ -f "$TOOL_DIR/samples/$f" ]; then
+        cp -v "$TOOL_DIR/samples/$f" "$OUTPUT_DIR/shapes/$f"
+    else
+        echo "WARNING: 缺 $TOOL_DIR/samples/$f（先跑 export_vegetation_shape.py）"
+    fi
+done
 
 # 样例材质资产：入库的现成资产（叶卡图 + 转换好的树皮），clone 下来即可用。
 # 树皮 png 入库的理由：转换要 ImageMagick，不该让使用者为「跑起来看看」装依赖。
@@ -96,7 +98,7 @@ echo "    cd $OUTPUT_DIR"
 echo "    ./jpov_vegetation_v2_viewer                          # 只渲染 shape（不贴树皮/叶图）"
 echo "    ./jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 \\"
 echo "        --bark bark/bark001                              # 完整组合：shape + 树皮 + 叶卡"
-echo "    （shape 省略时默认 shapes/willow.pbtxt；双叶型范本用 --shape <仓库内 willow_two_types.pbtxt>）"
+echo "    （shape 省略时默认 shapes/willow.pbtxt；双叶型范本 --shape shapes/willow_two_types.pbtxt --leaf2 leaf/willow_leaf_flip.png）"
 echo ""
 echo "  出图（无窗口）："
 echo "    xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \\"
