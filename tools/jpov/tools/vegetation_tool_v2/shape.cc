@@ -5,9 +5,14 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include <google/protobuf/text_format.h>
 
 namespace jpov {
 namespace vegetation {
@@ -17,10 +22,45 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;  // 不依赖 M_PI（MinGW 下未定义）
 constexpr double kUnitEps = 1e-3;   // 单位向量/正交性的容差
 constexpr double kDotEps = 2e-3;    // up·normal 的容差
+// anchor 必须落在所属枝条上的容差（米）：叶柄可以插进管壁一点、导出用的采样折线
+// 也可能比真实曲面低几毫米，所以给「枝半径 + 1cm」。**不是**给「随便偏一点也行」——
+// 曾经的 bug 是 anchor 偏出 13cm（整卡被抬了 h/2），这条校验就是拦它的。
+constexpr double kAnchorSlackMeters = 0.01;
 
 double Length(const Vec3d& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
 
 bool NearlyEqual(double a, double b, double eps) { return std::fabs(a - b) <= eps; }
+
+// 点到折线的最近距离，同时给出最近点处的插值半径。
+// 返回距离；*radius 写入最近点所在段的插值半径（samples 至少 2 个）。
+double DistanceToPolyline(const Vec3d& p, const std::vector<BranchSample>& samples,
+                          double* radius) {
+  double best = 1e300;
+  for (size_t i = 0; i + 1 < samples.size(); ++i) {
+    const Vec3d& a = samples[i].position;
+    const Vec3d& b = samples[i + 1].position;
+    const double abx = b.x - a.x;
+    const double aby = b.y - a.y;
+    const double abz = b.z - a.z;
+    const double len2 = abx * abx + aby * aby + abz * abz;
+    double t = 0.0;
+    if (len2 > 0.0) {
+      t = ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / len2;
+      t = (t < 0.0) ? 0.0 : (t > 1.0 ? 1.0 : t);
+    }
+    const double dx = p.x - (a.x + abx * t);
+    const double dy = p.y - (a.y + aby * t);
+    const double dz = p.z - (a.z + abz * t);
+    const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < best) {
+      best = d;
+      if (radius != nullptr) {
+        *radius = samples[i].radius + (samples[i + 1].radius - samples[i].radius) * t;
+      }
+    }
+  }
+  return best;
+}
 
 std::string Format(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -89,6 +129,25 @@ double UnitPerimeter(const std::vector<ProfilePoint>& points) {
 }
 
 }  // namespace
+
+bool AnchorModeToUv(const std::string& mode, double* u, double* v) {
+  if (mode == "bottom_left") {
+    *u = 0.0;
+    *v = 0.0;
+  } else if (mode == "bottom_center") {
+    *u = 0.5;
+    *v = 0.0;
+  } else if (mode == "bottom_right") {
+    *u = 1.0;
+    *v = 0.0;
+  } else if (mode == "top_center") {
+    *u = 0.5;
+    *v = 1.0;
+  } else {
+    return false;
+  }
+  return true;
+}
 
 std::vector<ProfilePoint> UnitCircleProfile(uint32_t n) {
   std::vector<ProfilePoint> points;
@@ -167,6 +226,7 @@ Shape FromProto(const ShapeProto& proto) {
     card.up = Vec3d{c.up().x(), c.up().y(), c.up().z()};
     card.normal = Vec3d{c.normal().x(), c.normal().y(), c.normal().z()};
     card.height = c.height();
+    card.width = c.width();
     card.type = c.type();
     card.branch = c.branch();
     card.s = c.s();
@@ -174,6 +234,34 @@ Shape FromProto(const ShapeProto& proto) {
   }
 
   return shape;
+}
+
+bool LoadShapeFile(const std::string& path, Shape* out, std::string* error) {
+  auto fail = [error](const std::string& why) {
+    if (error != nullptr) {
+      *error = why;
+    }
+    return false;
+  };
+  if (out == nullptr) {
+    return fail("LoadShapeFile: out 不能为空");
+  }
+  std::ifstream in(path);
+  if (!in) {
+    return fail("打不开 shape 文件: " + path);
+  }
+  std::stringstream ss;
+  ss << in.rdbuf();
+  ShapeProto proto;
+  if (!google::protobuf::TextFormat::ParseFromString(ss.str(), &proto)) {
+    return fail("解析 ShapeProto 文本失败（字段名/括号与 proto/shape.proto 对不上？）: " + path);
+  }
+  *out = FromProto(proto);
+  std::string why;
+  if (!Validate(*out, &why)) {
+    return fail("shape 校验失败: " + why + "（文件: " + path + "）");
+  }
+  return true;
 }
 
 bool Validate(const Shape& shape, std::string* error) {
@@ -268,10 +356,10 @@ bool Validate(const Shape& shape, std::string* error) {
     if (!type_ids.insert(t.type).second) {
       return fail(Format("leaf_type %u 重复", t.type));
     }
-    if (t.anchor_mode != "bottom_center" && t.anchor_mode != "top_center" &&
-        t.anchor_mode != "center") {
-      return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法", t.type,
-                         t.anchor_mode.c_str()));
+    if (!IsValidAnchorMode(t.anchor_mode)) {
+      return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法"
+                         "（只接受 bottom_left/bottom_center/bottom_right/top_center）",
+                         t.type, t.anchor_mode.c_str()));
     }
     if (t.preferred_aspect < 0.0) {
       return fail(Format("leaf_type %u: preferred_aspect 不能为负", t.type));
@@ -279,6 +367,11 @@ bool Validate(const Shape& shape, std::string* error) {
   }
 
   // ── 叶卡 ──
+  // 需要按 id 取枝条几何来校验 anchor 落在枝上，这里建一次索引（枝数远小于卡数）。
+  std::unordered_map<uint32_t, const Branch*> branch_by_id;
+  for (const Branch& b : shape.branches) {
+    branch_by_id.emplace(b.id, &b);
+  }
   for (size_t i = 0; i < shape.cards.size(); ++i) {
     const LeafCard& c = shape.cards[i];
     const double up_len = Length(c.up);
@@ -293,6 +386,9 @@ bool Validate(const Shape& shape, std::string* error) {
     if (std::fabs(dot) > kDotEps) {
       return fail(Format("card %zu: up·normal = %.6f，需正交", i, dot));
     }
+    if (!(c.width > 0.0)) {
+      return fail(Format("card %zu: width 必须 > 0（装配时由 height × 格子宽/高 得来）", i));
+    }
     if (!(c.height > 0.0)) {
       return fail(Format("card %zu: height 必须 > 0，实际 %g", i, c.height));
     }
@@ -301,6 +397,19 @@ bool Validate(const Shape& shape, std::string* error) {
     }
     if (ids.count(c.branch) == 0) {
       return fail(Format("card %zu: branch %u 不存在", i, c.branch));
+    }
+    // anchor 的语义是「叶子与枝条的连接点」，**必须真的落在所属枝条上**。
+    // 否则 anchor + anchor_mode 推出来的 UV 锚点会落在卡片中间，素材再怎么画都不可能贴枝
+    // （历史 bug：导出把 anchor 写成「根边中点 = 卡片中心 − up·h/2」，442 张卡全偏 12~18cm）。
+    {
+      double radius = 0.0;
+      const double dist = DistanceToPolyline(c.anchor, branch_by_id.at(c.branch)->samples,
+                                             &radius);
+      if (dist > radius + kAnchorSlackMeters) {
+        return fail(Format("card %zu: anchor 不在所属枝条 %u 上（到中心线 %.4f m，"
+                           "枝半径 %.4f m，容差 %.4f m）—— anchor 必须是叶子与枝条的连接点",
+                           i, c.branch, dist, radius, radius + kAnchorSlackMeters));
+      }
     }
     if (!(c.s >= 0.0 && c.s <= 1.0)) {
       return fail(Format("card %zu: s 必须落在 [0,1]，实际 %g", i, c.s));

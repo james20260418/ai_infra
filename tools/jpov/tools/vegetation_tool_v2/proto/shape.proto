@@ -85,10 +85,22 @@ message BranchProto {
   uint32 seam_index = 6;
 }
 
-// 一张叶卡。锚点 + 两条正交轴 + 长度即可唯一确定一张卡；
-// 宽度**不存**，由叶材质 atlas 的格子长宽比推导（见格式文档 §4.2）。
+// 一张叶卡。锚点 + 两条正交轴（up/normal）+ 长宽即可唯一确定卡片 quad：
+//   P(u,v) = anchor + right·((u−au)·width) + up·((v−av)·height)
+// 宽高都**存在 shape 里**（装配时由材质格子比例算出并写死），运行时不猜。
 message LeafCardProto {
-  // 贴枝点（米）。含义由所属 LeafTypeProto.anchor_mode 决定。
+  // **叶子与枝条的连接点**（米）。这是合同，不是提示：
+  //
+  //   1) anchor 必须落在所属枝条（branch 指向的那根）上 —— 到该枝中心线的距离
+  //      ≤ 该处 radius + 1cm（叶柄可以插进管壁，但绝不允许悬空）。Validate 强制。
+  //   2) 渲染侧由 `anchor + LeafTypeProto.anchor_mode` 唯一推导 UV：
+  //      格子里的 (au, av) 那一点贴到 anchor，卡片沿 +up 长、沿 right(=up×normal) 变宽，
+  //      即 quad 四角 = anchor + right·(u−au)·width + up·(v−av)·height。
+  //      ⇒ 引擎**不会**为任何素材做「补偿性偏移」；素材根部画在 (au, av)，逻辑才对得上。
+  //
+  // 反例（历史 bug，2026-10-22）：导出把 anchor 写成「根边中点 = 卡片中心 − up·h/2」，
+  // 442 张卡全部偏出枝条 12~18cm，于是真正压在枝上的是卡片中心，
+  // 无论 4 种 anchor_mode 怎么选都贴不上枝。anchor 一旦离枝，资产必然是错的。
   Vec3Proto anchor = 1;
 
   // 卡片长轴：从根指向梢（单位向量）。
@@ -97,7 +109,7 @@ message LeafCardProto {
   // 卡面法线（单位向量，需与 up 正交）。双面渲染，但光照朝向靠它。
   Vec3Proto normal = 3;
 
-  // 沿 up 方向的长度（米）。宽度由材质推导，长宽比不允许被修改。
+  // 沿 up 方向的长度（米）。
   double height = 4;
 
   // 叶卡类型编号，引用 LeafTypeProto.type。
@@ -107,6 +119,10 @@ message LeafCardProto {
   // LOD 归组、调试定位有用。
   uint32 branch = 6;
   double s = 7;
+
+  // 沿 right 方向的宽度（米）。与 height 一起决定 quad 的大小；
+  // 必须 > 0。装配时 width = height × （atlas 格子宽/高），写进资产后不再随材质变。
+  double width = 8;
 }
 
 // 叶卡类型（一类 = 一套材质绑定 + 一套摆放语义）。
@@ -121,8 +137,13 @@ message LeafTypeProto {
   // 给人/agent 读，**永不参与逻辑判断**。
   string description = 2;
 
-  // 锚点语义："bottom_center"（叶/叶簇，根部在下）、"top_center"（花序，根在上）、
-  // "center"（落叶）。必须与 atlas 格子的画法一致。
+  // 根部落在格子的哪个位置（必须与 atlas 格子的画法一致）：
+  //   bottom_left / bottom_center / bottom_right  —— 叶、叶簇
+  //   top_center                                  —— 柔荑花序、垂花（根在上）
+  // 只有「根部位置」；卡片永远沿 up 从根长到梢。
+  //
+  // 它同时就是**素材 → 世界的 UV 锚点**：对应 (au, av) ∈ {(0,0), (0.5,0), (1,0), (0.5,1)}
+  // 的那一点贴到 LeafCardProto.anchor（见那边的合同）。没有第五种取值。
   string anchor_mode = 3;
 
   // 期望的卡片长宽比（width/height）。0 = 未指定（装配时取该类型第一套 atlas 的比例）。

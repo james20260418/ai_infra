@@ -2,7 +2,7 @@
 //
 // 这里刻意不比对像素或截图，只查可证伪的几何不变量：
 //   * 等距性：同一个三角形里，两条边的「UV 长度 / 世界长度」必须相等（格子保持方形）
-//   * v 沿枝单调、且 dv/ds = 1/tile
+//   * v 沿枝单调、且 dv/ds = 1/tile（非方贴图时再乘 uv_v_scale）
 //   * 每圈的 u 恰好覆盖 [0,1]（一圈一张图，接缝在 u=1 处闭合）
 //   * 子枝入口 v 从父枝出口接续（接口处没有横向重复线）
 //   * 叶卡：4 顶点 / 2 三角形 / UV 四角 / 宽度来自材质
@@ -136,6 +136,24 @@ void TestCylinderUV() {
   }
 
   TestIsotropy(shape, "等半径圆柱", 0.015);
+
+  // 切线（法线贴图 TBN 用）：必须单位长、与法线正交。这两条不成立时，
+  // 法线贴图会整体偏色或明暗反转，但**画面仍然"有纹理"**，肉眼很难判断。
+  double worst_len = 0.0;
+  double worst_dot = 0.0;
+  for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+    const double tx = mesh.tangents[v * 3];
+    const double ty = mesh.tangents[v * 3 + 1];
+    const double tz = mesh.tangents[v * 3 + 2];
+    const double nx = mesh.normals[v * 3];
+    const double ny = mesh.normals[v * 3 + 1];
+    const double nz = mesh.normals[v * 3 + 2];
+    const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+    worst_len = std::fmax(worst_len, std::fabs(len - 1.0));
+    worst_dot = std::fmax(worst_dot, std::fabs(tx * nx + ty * ny + tz * nz));
+  }
+  Expect(worst_len < 1e-4, "切线必须是单位长，最大偏差 " + std::to_string(worst_len));
+  Expect(worst_dot < 1e-4, "切线必须与法线正交，最大 |T·N| = " + std::to_string(worst_dot));
 }
 
 void TestTaper() {
@@ -166,6 +184,47 @@ void TestTaper() {
   }
 }
 
+// 非方形贴图：v 乘 uv_v_scale（等价于 tile 除以它），u 完全不受影响。
+// 这条钉住的是「贴图长宽比补偿只动 v」——若哪天顺手把 u 也缩了，
+// 接缝就不再闭合（u 到不了 1），而且一圈不再是一张图。
+void TestUvVScale() {
+  const double radius = 0.15;
+  const uint32_t ring = 12;
+  Shape shape = StraightBranch(5, radius, 2.0, ring);
+  const double unit_perimeter = ring * 2.0 * std::sin(kPi / ring);
+  const double tile = radius * unit_perimeter;
+
+  const MeshData base = SweepBranches(shape);
+  SweepOptions scaled_opts;
+  scaled_opts.uv_v_scale = 0.5;   // 例：512x1024 的贴图
+  const MeshData scaled = SweepBranches(shape, scaled_opts);
+
+  Expect(base.VertexCount() == scaled.VertexCount() && base.indices == scaled.indices,
+         "uv_v_scale 不应改变几何/拓扑");
+  for (size_t i = 0; i < base.uvs.size(); i += 2) {
+    Expect(Near(base.uvs[i], scaled.uvs[i], 1e-9), "uv_v_scale 不能改 u（只有 v 缩放）");
+  }
+
+  // v 方向：dv/ds 按 1/uv_v_scale 放大（= tile 缩小同样的倍数）
+  for (size_t i = 1; i < 5; ++i) {
+    const double ds = Dist3(GetPos(base, i * (ring + 1)), GetPos(base, (i - 1) * (ring + 1)));
+    const double dv_base = GetUV(base, i * (ring + 1)).v - GetUV(base, (i - 1) * (ring + 1)).v;
+    const double dv_scaled =
+        GetUV(scaled, i * (ring + 1)).v - GetUV(scaled, (i - 1) * (ring + 1)).v;
+    Expect(Near(dv_base / ds, 1.0 / tile, 1e-6), "基准：dv/ds = 1/tile");
+    Expect(Near(dv_scaled / ds, 0.5 / tile, 1e-6),
+           "uv_v_scale=0.5：dv/ds = 0.5/tile（一比一，不是 2/tile）");
+    Expect(Near(dv_scaled, dv_base * 0.5, 1e-9), "v 应整体等比缩放");
+  }
+
+  // 接缝：u 仍然是 0..1 且环末显式 1.0（否则接缝不闭合）
+  for (uint32_t j = 0; j <= ring; ++j) {
+    const double u = GetUV(scaled, j).u;
+    Expect(u >= -1e-9 && u <= 1.0 + 1e-9, "缩 v 后 u 仍必须在 [0,1]");
+  }
+  Expect(Near(GetUV(scaled, ring).u, 1.0, 1e-9), "缩 v 后接缝顶点 u 仍必须是 1.0");
+}
+
 void TestNonCircularProfile() {
   // 椭圆截面（x 拉长 1.5 倍）：等距性仍须成立，且 u 仍覆盖 [0,1]。
   Shape shape = StraightBranch(4, 0.2, 1.0, 12);
@@ -188,40 +247,139 @@ void TestNonCircularProfile() {
 }
 
 void TestJunctionVContinuity() {
-  // 父：竖直 2m，半径 0.15；子：从父的末端附近长出去，半径 0.05。
-  Shape shape;
-  Branch parent;
-  parent.id = 0;
-  parent.parent = -1;
-  parent.ring_count = 12;
-  parent.seam_index = 0;
-  parent.samples.push_back(BranchSample{Vec3d{0, 0, 0}, 0.15, 0.0, {}});
-  parent.samples.push_back(BranchSample{Vec3d{0, 2, 0}, 0.15, 0.0, {}});
+  // 父：竖直 2m，半径 0.15；子：从父末端（或末端上方 gap 米）长出去，半径 0.05。
+  // 同时覆盖 gap=0 与 gap>0：后者的接续项带 uv_v_scale，漏乘在 gap=0 时查不出来。
+  const auto build = [](double child_y) {
+    Shape shape;
+    Branch parent;
+    parent.id = 0;
+    parent.parent = -1;
+    parent.ring_count = 12;
+    parent.seam_index = 0;
+    parent.samples.push_back(BranchSample{Vec3d{0, 0, 0}, 0.15, 0.0, {}});
+    parent.samples.push_back(BranchSample{Vec3d{0, 2, 0}, 0.15, 0.0, {}});
 
-  Branch child;
-  child.id = 1;
-  child.parent = 0;
-  child.ring_count = 8;
-  child.seam_index = 0;
-  child.samples.push_back(BranchSample{Vec3d{0, 2, 0}, 0.05, 0.0, {}});
-  child.samples.push_back(BranchSample{Vec3d{1, 2, 0}, 0.05, 0.0, {}});
+    Branch child;
+    child.id = 1;
+    child.parent = 0;
+    child.ring_count = 8;
+    child.seam_index = 0;
+    child.samples.push_back(BranchSample{Vec3d{0, child_y, 0}, 0.05, 0.0, {}});
+    child.samples.push_back(BranchSample{Vec3d{1, child_y, 0}, 0.05, 0.0, {}});
 
-  shape.branches.push_back(parent);
-  shape.branches.push_back(child);
-
-  const MeshData mesh = SweepBranches(shape);
+    shape.branches.push_back(parent);
+    shape.branches.push_back(child);
+    return shape;
+  };
 
   const double parent_tile = 0.15 * 12 * 2.0 * std::sin(kPi / 12);
-  const uint32_t parent_verts = 2 * (12 + 1);
-  // 父枝出口 v 在最后一圈的第 0 个顶点
-  const double parent_v_exit = GetUV(mesh, parent_verts - 1).v;
-  // 子枝入口 v 在紧接着的第一圈
-  const double child_v_entry = GetUV(mesh, parent_verts).v;
+  const uint32_t parent_verts = 2 * (12 + 1);   // 2 圈 × (ring+1)
 
-  const double expected = std::fmod(parent_v_exit + 0.0 / parent_tile, 1.0);  // 间距 0
-  Expect(Near(child_v_entry, expected, 1e-6),
-         "子枝入口 v 必须从父枝出口接续（间距为 0 时应相等）");
-  Expect(child_v_entry < 1.0 && child_v_entry >= 0.0, "接续后的 v 必须在 [0,1)");
+  const double scales[2] = {1.0, 0.5};
+  const double gaps[2] = {0.0, 0.5};
+  for (double scale : scales) {
+    for (double gap : gaps) {
+      SweepOptions opts;
+      opts.uv_v_scale = scale;
+      const MeshData mesh = SweepBranches(build(2.0 + gap), opts);
+
+      const double parent_v_exit = GetUV(mesh, parent_verts - 1).v;
+      const double child_v_entry = GetUV(mesh, parent_verts).v;
+      // 接续项必须与枝内累计项用同一个 uv_v_scale（见 sweep.cc）。
+      const double expected =
+          std::fmod(parent_v_exit + gap * scale / parent_tile, 1.0);
+      Expect(Near(child_v_entry, expected, 1e-6),
+             "子枝入口 v 必须从父枝出口接续（gap=" + std::to_string(gap) +
+                 "，uv_v_scale=" + std::to_string(scale) + "）");
+      Expect(child_v_entry < 1.0 && child_v_entry >= 0.0, "接续后的 v 必须在 [0,1)");
+    }
+  }
+}
+
+// ComputeCardFrame：把 anchor + anchor_mode 翻译成姿态与 UV 锚点的**唯一**入口。
+// 这里钉住两件事：
+//   1) (au, av) 与 AnchorModeToUv 一致（4 种 mode 全覆盖）；
+//   2) (right, up, normal) 是右手系单位正交基 —— 三处调用方（真实叶卡 / 绿卡 / 标签）
+//      全靠它，任何一处算错都会让叶子整体错位或翻面。
+// OrthogonalizeTangent：curl（法线球面化）之后重建切线用的正交化。
+// 钉住三件事：结果与法线正交、单位长、退化输入走 fallback（不产生 NaN/零向量）。
+void TestOrthogonalizeTangent() {
+  const Vec3d n{0.0, 0.0, 1.0};
+  {
+    // 切线带法线分量（curl 后的典型状态）⇒ 正交化后 T·N == 0 且仍是单位向量
+    const Vec3d t = OrthogonalizeTangent(Vec3d{1.0, 0.0, 0.45}, n, Vec3d{1.0, 0.0, 0.0});
+    const double dot = t.x * n.x + t.y * n.y + t.z * n.z;
+    const double len = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
+    Expect(Near(dot, 0.0, 1e-12), "正交化后 T·N 必须为 0");
+    Expect(Near(len, 1.0, 1e-12), "正交化后切线必须是单位向量");
+    Expect(t.x > 0.99 && std::fabs(t.y) < 1e-12, "正交化只能去掉法线分量，不能改变方向");
+  }
+  {
+    // 退化：切线平行法线 ⇒ 用 fallback，而不是 0 向量/NaN
+    const Vec3d fb{0.0, 1.0, 0.0};
+    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 2.0}, n, fb);
+    Expect(Near(t.x, fb.x, 1e-12) && Near(t.y, fb.y, 1e-12) && Near(t.z, fb.z, 1e-12),
+           "切线平行法线时必须返回 fallback");
+  }
+  {
+    // 零切线同样走 fallback
+    const Vec3d fb{0.0, 1.0, 0.0};
+    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 0.0}, n, fb);
+    Expect(Near(t.y, 1.0, 1e-12), "零切线必须返回 fallback");
+  }
+}
+
+void TestCardFrame() {
+  Shape shape = StraightBranch(2, 0.1, 1.0, 8);
+  LeafType type;
+  type.type = 0;
+  type.anchor_mode = "bottom_center";
+  shape.leaf_types.push_back(type);
+
+  LeafCard card;
+  card.anchor = Vec3d{0.0, 1.0, 0.0};
+  card.up = Vec3d{0, 1, 0};
+  card.normal = Vec3d{0, 0, 2};   // 故意不归一化：ComputeCardFrame 必须自己归一
+  card.height = 0.2;
+  card.width = 0.1;
+  card.type = 0;
+
+  const struct {
+    const char* mode;
+    double u;
+    double v;
+  } kCases[] = {{"bottom_left", 0.0, 0.0},
+                {"bottom_center", 0.5, 0.0},
+                {"bottom_right", 1.0, 0.0},
+                {"top_center", 0.5, 1.0}};
+
+  for (const auto& c : kCases) {
+    shape.leaf_types[0].anchor_mode = c.mode;
+    const CardFrame f = ComputeCardFrame(shape, card);
+    Expect(Near(f.au, c.u, 1e-12) && Near(f.av, c.v, 1e-12),
+           std::string(c.mode) + "：UV 锚点应为 (" + std::to_string(c.u) + ", " +
+               std::to_string(c.v) + ")");
+    const double lu = std::sqrt(f.up.x * f.up.x + f.up.y * f.up.y + f.up.z * f.up.z);
+    const double ln = std::sqrt(f.normal.x * f.normal.x + f.normal.y * f.normal.y +
+                                f.normal.z * f.normal.z);
+    const double lr = std::sqrt(f.right.x * f.right.x + f.right.y * f.right.y +
+                                f.right.z * f.right.z);
+    Expect(Near(lu, 1.0, 1e-9) && Near(ln, 1.0, 1e-9) && Near(lr, 1.0, 1e-9),
+           std::string(c.mode) + "：right/up/normal 必须都是单位向量");
+    const double du = f.right.x * f.up.x + f.right.y * f.up.y + f.right.z * f.up.z;
+    const double dn = f.right.x * f.normal.x + f.right.y * f.normal.y +
+                      f.right.z * f.normal.z;
+    const double un = f.up.x * f.normal.x + f.up.y * f.normal.y + f.up.z * f.normal.z;
+    Expect(Near(du, 0.0, 1e-9) && Near(dn, 0.0, 1e-9) && Near(un, 0.0, 1e-9),
+           std::string(c.mode) + "：right/up/normal 必须两两正交");
+    // right = cross(up, normal) ⇒ right × up = normal（右手系，不翻面）
+    const double cx = f.right.y * f.up.z - f.right.z * f.up.y;
+    const double cy = f.right.z * f.up.x - f.right.x * f.up.z;
+    const double cz = f.right.x * f.up.y - f.right.y * f.up.x;
+    Expect(Near(cx, f.normal.x, 1e-9) && Near(cy, f.normal.y, 1e-9) &&
+               Near(cz, f.normal.z, 1e-9),
+           std::string(c.mode) + "：right × up 必须等于 normal（右手系）");
+  }
 }
 
 void TestLeafCards() {
@@ -232,56 +390,75 @@ void TestLeafCards() {
   type.anchor_mode = "bottom_center";
   shape.leaf_types.push_back(type);
 
+  const double width = 0.1;   // 现在存在 shape 里（装配时 = height × 格子宽/高）
+
   LeafCard card;
   card.anchor = Vec3d{0.0, 1.0, 0.0};
   card.up = Vec3d{0, 1, 0};
   card.normal = Vec3d{0, 0, 1};
   card.height = 0.2;
+  card.width = width;
   card.type = 0;
   card.branch = 0;
   card.s = 0.5;
   shape.cards.push_back(card);
+  // 顶点顺序固定：0=(u0,v0) 1=(u1,v0) 2=(u1,v1) 3=(u0,v1)。用双线性插值算
+  // 「参数 (au, av) 处的世界坐标」，再要求它等于 anchor —— 这才是 anchor 的定义。
+  const auto point_at = [](const MeshData& m, double u, double v) {
+    const P3 c0 = GetPos(m, 0);
+    const P3 c1 = GetPos(m, 1);
+    const P3 c2 = GetPos(m, 2);
+    const P3 c3 = GetPos(m, 3);
+    const double w00 = (1 - u) * (1 - v);
+    const double w10 = u * (1 - v);
+    const double w11 = u * v;
+    const double w01 = (1 - u) * v;
+    return P3{c0.x * w00 + c1.x * w10 + c2.x * w11 + c3.x * w01,
+              c0.y * w00 + c1.y * w10 + c2.y * w11 + c3.y * w01,
+              c0.z * w00 + c1.z * w10 + c2.z * w11 + c3.z * w01};
+  };
 
-  const MeshData mesh = BuildLeafCards(shape, {0.1});
-  Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
-  Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
+  const struct {
+    const char* mode;
+    double u;
+    double v;
+  } kCases[] = {{"bottom_left", 0.0, 0.0},
+                {"bottom_center", 0.5, 0.0},
+                {"bottom_right", 1.0, 0.0},
+                {"top_center", 0.5, 1.0}};
 
-  // bottom_center：底边中点在 anchor，顶点向上长 height
-  double min_y = 1e9;
-  double max_y = -1e9;
-  double min_x = 1e9;
-  double max_x = -1e9;
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P3 p = GetPos(mesh, v);
-    min_y = std::fmin(min_y, p.y);
-    max_y = std::fmax(max_y, p.y);
-    min_x = std::fmin(min_x, p.x);
-    max_x = std::fmax(max_x, p.x);
+  for (const auto& c : kCases) {
+    shape.leaf_types[0].anchor_mode = c.mode;
+    const MeshData mesh = BuildLeafCards(shape);
+    Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
+    Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
+
+    const P3 root = point_at(mesh, c.u, c.v);
+    Expect(Near(root.x, card.anchor.x, 1e-6) && Near(root.y, card.anchor.y, 1e-6) &&
+               Near(root.z, card.anchor.z, 1e-6),
+           std::string(c.mode) + "：图里 (u=" + std::to_string(c.u) +
+               ", v=" + std::to_string(c.v) + ") 那一点必须落在 anchor 上");
+
+    // 尺寸与朝向不随 mode 变：宽度来自材质、高度沿 up。
+    double min_x = 1e9, max_x = -1e9, min_y = 1e9, max_y = -1e9;
+    for (uint32_t v = 0; v < 4; ++v) {
+      const P3 p = GetPos(mesh, v);
+      min_x = std::fmin(min_x, p.x);
+      max_x = std::fmax(max_x, p.x);
+      min_y = std::fmin(min_y, p.y);
+      max_y = std::fmax(max_y, p.y);
+    }
+    Expect(Near(max_x - min_x, width, 1e-6), "宽度必须来自材质");
+    Expect(Near(max_y - min_y, card.height, 1e-6), "高度必须沿 up 且等于 card.height");
+
+    // UV 四角（格内 [0,1]；atlas 的格子子矩形由调用方再映射）
+    const float expected_uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (uint32_t v = 0; v < 4; ++v) {
+      const P2 uv = GetUV(mesh, v);
+      Expect(Near(uv.u, expected_uv[v][0], 1e-6) && Near(uv.v, expected_uv[v][1], 1e-6),
+             "叶卡 UV 必须是整格四角");
+    }
   }
-  Expect(Near(min_y, 1.0, 1e-6) && Near(max_y, 1.2, 1e-6),
-         "bottom_center：底边贴 anchor，向上长 height");
-  Expect(Near(max_x - min_x, 0.1, 1e-6), "宽度必须来自材质（0.1）");
-
-  // UV 四角
-  const float expected_uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P2 uv = GetUV(mesh, v);
-    Expect(Near(uv.u, expected_uv[v][0], 1e-6) && Near(uv.v, expected_uv[v][1], 1e-6),
-           "叶卡 UV 必须是整格四角");
-  }
-
-  // top_center：整张卡挂在锚点下方
-  shape.leaf_types[0].anchor_mode = "top_center";
-  const MeshData flipped = BuildLeafCards(shape, {0.1});
-  double fy_min = 1e9;
-  double fy_max = -1e9;
-  for (uint32_t v = 0; v < 4; ++v) {
-    const P3 p = GetPos(flipped, v);
-    fy_min = std::fmin(fy_min, p.y);
-    fy_max = std::fmax(fy_max, p.y);
-  }
-  Expect(Near(fy_max, 1.0, 1e-6) && Near(fy_min, 0.8, 1e-6),
-         "top_center：顶边贴 anchor，向下长 height（花序垂挂）");
 }
 
 }  // namespace
@@ -291,8 +468,11 @@ void TestLeafCards() {
 int main() {
   jpov::vegetation::TestCylinderUV();
   jpov::vegetation::TestTaper();
+  jpov::vegetation::TestUvVScale();
   jpov::vegetation::TestNonCircularProfile();
   jpov::vegetation::TestJunctionVContinuity();
+  jpov::vegetation::TestOrthogonalizeTangent();
+  jpov::vegetation::TestCardFrame();
   jpov::vegetation::TestLeafCards();
   if (jpov::vegetation::g_failures != 0) {
     std::printf("%d failure(s)\n", jpov::vegetation::g_failures);

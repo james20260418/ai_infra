@@ -20,12 +20,29 @@
 namespace jpov {
 namespace vegetation {
 
+// 扫管选项。
+struct SweepOptions {
+  // v 方向的 UV 缩放（= 贴图宽/高）。默认 1.0 = 方形贴图。
+  //
+  // 为什么需要它：§3 的规则让 u、v 用同一个 tile（一圈一张图 + 纹素方形），
+  // 但这只在贴图本身是正方形时成立。非方图（例如 512x1024 的 Bark001）若按
+  // 1.0 铺，等于把图硬压进方形：花纹在世界空间被横向拉宽 2×、凸起被压扁，
+  // 法线细节也跟着糊。装配方知道材质，把「宽/高」传进来即可。
+  //
+  // 语义：v' = v × uv_v_scale；等价于把每段的 tile 除以它。
+  // 必须 > 0（0 会让 v 恒定，整根枝退化成一条纹素）。
+  double uv_v_scale = 1.0;
+};
+
 // 分离式顶点缓冲（与 JPOV 的 MeshData 布局一致：positions/normals 各 3 float/顶点，
 // uvs 各 2 float/顶点，indices 为三角形列表）。
 struct MeshData {
   std::vector<float> positions;
   std::vector<float> normals;
   std::vector<float> uvs;
+  // 切线（3 float/顶点）：法线贴图 TBN 用。方向 = ∂P/∂u（沿截面周长方向），
+  // 解析可得（相邻环顶点差分），不需要从 UV 反推。
+  std::vector<float> tangents;
   std::vector<uint32_t> indices;
 
   size_t VertexCount() const { return positions.size() / 3; }
@@ -35,9 +52,15 @@ struct MeshData {
 // 扫出所有枝条。不生成端盖：枝条两端要么插在父枝体内、要么是末梢细尖，
 // 端盖看不见，加了只是浪费面。
 //
+// 确定性（可以直接拿网格做 gold 比对）：
+//   * 根枝的初始 U 由 `AnyPerpendicular(tangent)`（固定 seed 规则）给出，
+//     子枝继承父枝出口的 U ⇒ 同一份 shape 必得同一份网格，无随机、不依赖遍历顺序；
+//   * **改这条规则会改变根枝的 u 相位**（视觉上树皮纹路整体绕枝旋转），
+//     属于会破坏既有资产观感 / gold 的改动，不要随手换。
+//
 // 前置条件：Shape 已通过 Validate()。函数内部不重复做全量校验，只 CHECK 硬前提
 // （环顶点数 >= 3、samples >= 2），因为违反这些的资产连循环都跑不起来。
-MeshData SweepBranches(const Shape& shape);
+MeshData SweepBranches(const Shape& shape, const SweepOptions& opts = {});
 
 // 按枝切分（逐枝上色 / 逐枝隐藏用）。返回的每个 MeshData 与 shape.branches 下标一一对应。
 //
@@ -45,13 +68,40 @@ MeshData SweepBranches(const Shape& shape);
 // 且按 branches 顺序连续排列。两处必须同步修改（同文件内，且有测试钉住）。
 std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh);
 
-// 叶卡：anchor + up + normal + height + 材质给的 width → 四边形。
+// 一张叶卡的姿态 + UV 锚点。**唯一**一处把 `anchor + anchor_mode` 翻译成几何。
 //
-// width_by_type：每个 leaf_type 的实际宽度（米）。由叶材质的 atlas 格子长宽比推导：
-//   width = height × (cell_width / cell_height)
-// 这里之所以从外部传：**宽度属于材质，不属于拓扑**（拓扑只保证长度）。
-// 每个 type 都必须有 > 0 的宽度，缺失视为调用方 bug（CHECK）。
-MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_type);
+// 约定（与 docs/vegetation_asset_format.md §4.1 同一份约定）：
+//   right = cross(up, normal)（右手系，单位向量）；(au, av) = 素材里要贴到 anchor 的点，
+//   格内归一化（u 向右、v 向上）。quad 四角：
+//     corner(u,v) = anchor + right·(u − au)·width + up·(v − av)·height
+//   ⇒ u=au, v=av 那一点恒等于 anchor（这正是 anchor 的定义：叶-枝连接点）。
+struct CardFrame {
+  Vec3d up;          // 单位向量，根 → 梢
+  Vec3d normal;      // 单位向量，卡面法线（与 up 正交）
+  Vec3d right;       // 单位向量，= cross(up, normal)
+  double au = 0.5;   // 素材里贴到 anchor 的 u
+  double av = 0.0;   // 素材里贴到 anchor 的 v
+};
+
+// 把切线 t 对法线 n 做 Gram-Schmidt（去掉法线分量再归一化）。
+// 退化（t 与 n 几乎平行 / t 为零）时返回 fallback（通常是卡片的 +u 方向）。
+//
+// 为什么需要：叶卡的「法线球面化」（curl）只改法线不改切线时，T·N ≠ 0，
+// shader 里 `B = normalize(cross(N, T))` 会得到斜切的 TBN ⇒ 法线贴图方向/强度都不对。
+Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback);
+
+// 计算一张卡的姿态 + UV 锚点。
+//
+// 前置条件：`shape` 已通过 Validate()（`card.type` 必须存在于 leaf_types，
+// `anchor_mode` 必须是 4 个合法值之一）。违反直接 abort —— 这类资产连循环都
+// 跑不起来，静默回退成 bottom_center 只会让"素材怎么都贴不上枝"变成玄学。
+CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card);
+
+// 叶卡：anchor + up + normal + height + width → 四边形（顶点 = 参考 quad 的四角）。
+// 宽高都存在 shape 里（装配时算好），这里不做任何推导/拉伸。
+// 姿态与 UV 锚点由 ComputeCardFrame 统一决定（见上）；UV = 整格 (0,0)..(1,1)，
+// atlas 的格子子矩形由调用方再映射。
+MeshData BuildLeafCards(const Shape& shape);
 
 }  // namespace vegetation
 }  // namespace jpov

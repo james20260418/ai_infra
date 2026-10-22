@@ -65,23 +65,58 @@ struct Branch {
   uint32_t EffectiveRingCount() const;
 };
 
-// 一张叶卡。宽度不在数据结构里——由叶材质 atlas 的格子长宽比推导。
+// 一张叶卡：anchor + up + normal + height + width 唯一确定 quad。
+//
+// 核心约定（与 proto 注释、docs §4.1 同一份）：
+//   * `anchor` 是**叶子与枝条的连接点**，必须落在所属枝条上（Validate 强制，
+//     到枝中心线 ≤ 该处 radius + 1cm）；
+//   * `anchor_mode` 只决定**素材里哪个点贴到 anchor**（4 种，没有第五种）；
+//   * quad 四角：`corner(u,v) = anchor + right·(u−au)·width + up·(v−av)·height`，
+//     其中 `right = cross(up, normal)`。引擎**不做任何补偿性偏移**——
+//     素材根部画在 (au, av)，逻辑才对得上。唯一实现在 ComputeCardFrame（sweep.h）。
 struct LeafCard {
-  Vec3d anchor;         // 贴枝点，语义由 LeafType::anchor_mode 决定
+  Vec3d anchor;         // 叶-枝连接点（**必须在所属枝条上**）
   Vec3d up;             // 长轴，从根指向梢（单位向量）
   Vec3d normal;         // 卡面法线（单位向量，与 up 正交）
   double height = 0.0;  // 沿 up 的长度（米）
+  double width = 0.0;   // 沿 right（= cross(up, normal)）的宽度（米），必须 > 0
   uint32_t type = 0;    // 引用 LeafType::type
   uint32_t branch = 0;  // 溯源：所属枝 id（渲染不依赖）
   double s = 0.0;       // 溯源：枝上参数位置 [0,1]
 };
 
-// 叶卡类型。anchor_mode 取 "bottom_center" / "top_center" / "center"。
+// anchor_mode → 根部在图（格子）里的位置，格内归一化：u 向右、v 向上。
+//   合法值（4 个，全是「根在哪个角/边」，用户造图时看一眼就懂）：
+//     bottom_left / bottom_center / bottom_right  —— 叶、叶簇
+//     top_center                                  —— 柔荑花序、垂花（根在上）
+// 只有「根部位置」，没有「卡片往哪长」：卡片永远沿 up 从根到梢。
+// 返回 false = 非法字符串。
+bool AnchorModeToUv(const std::string& mode, double* u, double* v);
+
+// 只判合法、不取值（Validate 用）。
+inline bool IsValidAnchorMode(const std::string& mode) {
+  double u = 0.0;
+  double v = 0.0;
+  return AnchorModeToUv(mode, &u, &v);
+}
+
+// 叶卡类型。
 struct LeafType {
   uint32_t type = 0;
-  std::string description;        // 自然语言，永不参与逻辑判断
+
+  // 自然语言（"柳树主冠层叶簇，细长披针形 15×25cm"）。给人和 agent 读，
+  // **永不参与逻辑判断**。
+  std::string description;
+
+  // 素材根部画在格子的哪个位置 —— 见上面的 AnchorModeToUv。
+  // 它同时就是 UV 锚点：`(au, av)` 那一点贴到 `LeafCard::anchor`。
+  // 4 个合法值：bottom_left / bottom_center / bottom_right / top_center。
   std::string anchor_mode;
-  double preferred_aspect = 0.0;  // width/height；0 = 未指定
+
+  // 预留字段：width/height 的推荐值，供「一型多 atlas 时挑哪套」使用。
+  // **当前没有任何装配/选图逻辑消费它**，只有查看器的叶卡帮助会打印。
+  // 0 = 未指定。
+  double preferred_aspect = 0.0;
 };
 
 // 一棵植物的完整拓扑。
@@ -108,8 +143,16 @@ double SamplePerimeter(const BranchSample& sample, uint32_t ring_count);
 // proto -> 运行时结构。不做校验（校验请显式调用 Validate）。
 Shape FromProto(const ShapeProto& proto);
 
+// 读一个 ShapeProto 的**文本格式**（pb.txt）文件 → FromProto → Validate，一次做完。
+// 成功返回 true；失败返回 false 并把原因写进 *error（读不到文件 / 解析失败 / 校验不过）。
+//
+// 为什么放在格式层：pbtxt 是资产格式的一部分（导出脚本写的、`protoc --decode` 也认），
+// 不该让每个 consumer（查看器、测试、将来的装配工具）自己拼一遍 TextFormat + Validate。
+bool LoadShapeFile(const std::string& path, Shape* out, std::string* error);
+
 // 校验资产合法性。返回 false 时 *error 填具体原因（含定位信息）。
-// 校验项见 docs/vegetation_asset_format.md §6；任何一条不过都算失败，不做兜底。
+// 校验项见 docs/vegetation_asset_format.md §6（**表与实现必须同步**）；
+// 任何一条不过都算失败，不做兜底。
 bool Validate(const Shape& shape, std::string* error);
 
 }  // namespace vegetation

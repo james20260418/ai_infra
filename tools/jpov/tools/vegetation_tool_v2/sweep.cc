@@ -96,7 +96,8 @@ struct BranchFrame {
 };
 
 // 计算一根枝的逐点帧、tile 与 v。parent 为空表示根枝。
-BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
+BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent,
+                            const SweepOptions& opts) {
   BranchFrame f;
   const size_t n = branch.samples.size();
   const uint32_t ring = branch.EffectiveRingCount();
@@ -154,10 +155,14 @@ BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
 
   // 子枝的 v 从父枝出口接续（+ 接口间距），否则每根枝都从贴图第 0 行开始，
   // 接口处会出现一条横向重复线。取模因为贴图可平铺。
+  //
+  // 非方贴图：v 整体乘 uv_v_scale（等价于把 tile 除以它）。这里必须一起缩，
+  // 否则父子接续项与枝内累计项不在同一个尺度上，接口处会错行。
+  const double vs = opts.uv_v_scale;
   if (parent != nullptr) {
     const V3 entry = FromVec3d(branch.samples[0].position);
     const double gap = Len(Sub(entry, parent->exit_position));
-    const double offset = parent->exit_v_uv + gap / parent->exit_tile;
+    const double offset = parent->exit_v_uv + gap * vs / parent->exit_tile;
     f.v_uv[0] = std::fmod(offset, 1.0);
     if (f.v_uv[0] < 0.0) {
       f.v_uv[0] += 1.0;
@@ -171,7 +176,7 @@ BranchFrame BuildBranchFrame(const Branch& branch, const BranchFrame* parent) {
     const V3 b = FromVec3d(branch.samples[i].position);
     const double ds = Len(Sub(b, a));
     const double tile_mid = 0.5 * (f.tile[i - 1] + f.tile[i]);
-    f.v_uv[i] = f.v_uv[i - 1] + ds / tile_mid;
+    f.v_uv[i] = f.v_uv[i - 1] + ds * vs / tile_mid;
   }
 
   const V3 exit = FromVec3d(branch.samples[n - 1].position);
@@ -191,7 +196,11 @@ struct ExitState {
 
 }  // namespace
 
-MeshData SweepBranches(const Shape& shape) {
+MeshData SweepBranches(const Shape& shape, const SweepOptions& opts) {
+  if (!(opts.uv_v_scale > 0.0)) {
+    std::fprintf(stderr, "SweepBranches: uv_v_scale 必须 > 0（0 会让 v 恒定）\n");
+    std::abort();
+  }
   MeshData mesh;
 
   // 按 id 顺序处理（Validate 保证 parent < id），把出口状态记下来给子枝用。
@@ -202,9 +211,14 @@ MeshData SweepBranches(const Shape& shape) {
     std::unordered_map<uint32_t, ExitState>::const_iterator it;
     if (branch.parent >= 0) {
       it = exits.find(static_cast<uint32_t>(branch.parent));
-      if (it != exits.end()) {
-        parent = &it->second;
+      if (it == exits.end()) {
+        // Validate 保证 parent < id（父枝一定先处理过），走到这里说明资产/调用顺序坏了。
+        // 静默当根枝会让子枝丢掉 UV 接续与相位继承（接口处出重复线），所以直接中止。
+        std::fprintf(stderr, "SweepBranches: branch %u 找不到父枝 %d 的出口状态\n",
+                     branch.id, branch.parent);
+        std::abort();
       }
+      parent = &it->second;
     }
 
     // 复用 BuildBranchFrame 需要 BranchFrame 形状的父状态：拷贝一份即可。
@@ -216,7 +230,7 @@ MeshData SweepBranches(const Shape& shape) {
       parent_frame.exit_v_uv = parent->v_uv;
     }
     const BranchFrame f =
-        BuildBranchFrame(branch, parent == nullptr ? nullptr : &parent_frame);
+        BuildBranchFrame(branch, parent == nullptr ? nullptr : &parent_frame, opts);
 
     const size_t n = branch.samples.size();
     const uint32_t ring = branch.EffectiveRingCount();
@@ -253,10 +267,13 @@ MeshData SweepBranches(const Shape& shape) {
         mesh.positions.push_back(static_cast<float>(pos.z));
         mesh.uvs.push_back(static_cast<float>(j == ring ? 1.0 : arc / unit_perimeter));
         mesh.uvs.push_back(static_cast<float>(f.v_uv[i]));
-        // 法线稍后统一算（解析法向在非圆截面下不对），先占位
+        // 法线/切线稍后统一算（解析法向在非圆截面下不对），先占位
         mesh.normals.push_back(0.0f);
         mesh.normals.push_back(0.0f);
         mesh.normals.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
+        mesh.tangents.push_back(0.0f);
       }
     }
 
@@ -315,6 +332,27 @@ MeshData SweepBranches(const Shape& shape) {
       mesh.normals[v * 3 + 2] = static_cast<float>(nrm.z);
     }
 
+    // 切线 = 沿环方向的差分（就是 ∂P/∂u）。接缝处用环形邻居，避免端点退化。
+    for (size_t i = 0; i < n; ++i) {
+      const uint32_t ring_base = base + static_cast<uint32_t>(i) * stride;
+      for (uint32_t j = 0; j <= ring; ++j) {
+        const uint32_t jm = (j == 0) ? ring - 1 : j - 1;
+        const uint32_t jp = (j == ring) ? 1 : (j == ring - 1 ? 0 : j + 1);
+        const uint32_t vm = ring_base + jm;
+        const uint32_t vp = ring_base + jp;
+        const uint32_t v = ring_base + j;
+        V3 a{mesh.positions[vm * 3], mesh.positions[vm * 3 + 1], mesh.positions[vm * 3 + 2]};
+        V3 b{mesh.positions[vp * 3], mesh.positions[vp * 3 + 1], mesh.positions[vp * 3 + 2]};
+        V3 t = Sub(b, a);
+        V3 nrm{mesh.normals[v * 3], mesh.normals[v * 3 + 1], mesh.normals[v * 3 + 2]};
+        t = Sub(t, Mul(nrm, Dot(t, nrm)));   // 去法线分量，保证 T ⟂ N
+        t = Normalize(t);
+        mesh.tangents[v * 3] = static_cast<float>(t.x);
+        mesh.tangents[v * 3 + 1] = static_cast<float>(t.y);
+        mesh.tangents[v * 3 + 2] = static_cast<float>(t.z);
+      }
+    }
+
     ExitState state;
     state.position = f.exit_position;
     state.axis_u = f.exit_u;
@@ -333,6 +371,14 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
   for (const Branch& branch : shape.branches) {
     const uint32_t count = static_cast<uint32_t>(branch.samples.size()) *
                            (branch.EffectiveRingCount() + 1);
+    if (cursor + count > mesh.VertexCount()) {
+      // 越界必须在 assign 之前拦：assign 越界是 UB（旧代码只挡了索引拷贝）。
+      std::fprintf(stderr,
+                   "SplitMeshByBranch: 顶点布局与 shape 不一致（branch %u 需要到 %u，"
+                   "mesh 只有 %zu）\n",
+                   branch.id, cursor + count, mesh.VertexCount());
+      std::abort();
+    }
     MeshData part;
     part.positions.assign(mesh.positions.begin() + cursor * 3,
                           mesh.positions.begin() + (cursor + count) * 3);
@@ -340,16 +386,20 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
                         mesh.normals.begin() + (cursor + count) * 3);
     part.uvs.assign(mesh.uvs.begin() + cursor * 2,
                     mesh.uvs.begin() + (cursor + count) * 2);
-    if (cursor + count <= mesh.VertexCount()) {
-      for (size_t t = 0; t < mesh.indices.size(); t += 3) {
-        const uint32_t i0 = mesh.indices[t];
-        if (i0 < cursor || i0 >= cursor + count) {
-          continue;
-        }
-        part.indices.push_back(i0 - cursor);
-        part.indices.push_back(mesh.indices[t + 1] - cursor);
-        part.indices.push_back(mesh.indices[t + 2] - cursor);
+    // 注意：MeshData 新增逐顶点属性时必须同步这里，否则切分出来的子网格该属性为空，
+    // 下游按下标读会越界（本次加切线时就漏了，直接 SIGSEGV）。
+    if (!mesh.tangents.empty()) {
+      part.tangents.assign(mesh.tangents.begin() + cursor * 3,
+                           mesh.tangents.begin() + (cursor + count) * 3);
+    }
+    for (size_t t = 0; t < mesh.indices.size(); t += 3) {
+      const uint32_t i0 = mesh.indices[t];
+      if (i0 < cursor || i0 >= cursor + count) {
+        continue;
       }
+      part.indices.push_back(i0 - cursor);
+      part.indices.push_back(mesh.indices[t + 1] - cursor);
+      part.indices.push_back(mesh.indices[t + 2] - cursor);
     }
     out.push_back(std::move(part));
     cursor += count;
@@ -357,48 +407,75 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
   return out;
 }
 
-MeshData BuildLeafCards(const Shape& shape, const std::vector<double>& width_by_type) {
+Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback) {
+  const double dot = t.x * n.x + t.y * n.y + t.z * n.z;
+  Vec3d o{t.x - n.x * dot, t.y - n.y * dot, t.z - n.z * dot};
+  const double l = std::sqrt(o.x * o.x + o.y * o.y + o.z * o.z);
+  if (l < 1e-6) {
+    return fallback;
+  }
+  o.x /= l;
+  o.y /= l;
+  o.z /= l;
+  return o;
+}
+
+CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card) {
+  const std::string* mode = nullptr;
+  for (const LeafType& t : shape.leaf_types) {
+    if (t.type == card.type) {
+      mode = &t.anchor_mode;
+      break;
+    }
+  }
+  if (mode == nullptr) {
+    std::fprintf(stderr,
+                 "ComputeCardFrame: card type %u 不在 leaf_types 里"
+                 "（Shape 必须先过 Validate）\n",
+                 card.type);
+    std::abort();
+  }
+  CardFrame f;
+  const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
+  const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});
+  const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
+  if (!AnchorModeToUv(*mode, &f.au, &f.av)) {
+    std::fprintf(stderr, "ComputeCardFrame: card type %u 的 anchor_mode \"%s\" 非法\n",
+                 card.type, mode->c_str());
+    std::abort();
+  }
+  f.up = Vec3d{up.x, up.y, up.z};
+  f.normal = Vec3d{nrm.x, nrm.y, nrm.z};
+  f.right = Vec3d{right.x, right.y, right.z};
+  return f;
+}
+
+MeshData BuildLeafCards(const Shape& shape) {
   MeshData mesh;
   for (const LeafCard& card : shape.cards) {
-    if (card.type >= width_by_type.size()) {
-      std::fprintf(stderr, "BuildLeafCards: card type %u 没有对应宽度\n", card.type);
+    if (!(card.width > 0.0)) {
+      std::fprintf(stderr, "BuildLeafCards: card type %u 的 width 必须 > 0，实际 %g\n",
+                   card.type, card.width);
       std::abort();
     }
-    const double width = width_by_type[card.type];
-    if (!(width > 0.0)) {
-      std::fprintf(stderr, "BuildLeafCards: type %u 的宽度必须 > 0，实际 %g\n",
-                   card.type, width);
-      std::abort();
-    }
+    const double width = card.width;
 
-    const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
-    const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});
-    const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
+    // 姿态 + UV 锚点只有一份来源（ComputeCardFrame）：绿卡、角标、真实叶卡都用它，
+    // 否则三者会各自漂移（历史上「绿卡和角标对不上」就是这么来的）。
+    const CardFrame frame = ComputeCardFrame(shape, card);
+    const V3 up{frame.up.x, frame.up.y, frame.up.z};
+    const V3 nrm{frame.normal.x, frame.normal.y, frame.normal.z};
+    const V3 right{frame.right.x, frame.right.y, frame.right.z};
     const V3 anchor{card.anchor.x, card.anchor.y, card.anchor.z};
+    const double anchor_u = frame.au;
+    const double anchor_v = frame.av;
 
-    // anchor_mode 决定四边形相对锚点往哪边长：
-    //   bottom_center → 从锚点向上长（叶/叶簇的根在下）
-    //   top_center    → 从锚点向下长（花序挂在枝下，根在上）
-    //   center        → 上下各半
-    std::string mode = "bottom_center";
-    for (const LeafType& t : shape.leaf_types) {
-      if (t.type == card.type) {
-        mode = t.anchor_mode;
-        break;
-      }
-    }
-    double base_offset = 0.0;  // 沿 up 的起点偏移（米）
-    if (mode == "top_center") {
-      base_offset = -card.height;
-    } else if (mode == "center") {
-      base_offset = -0.5 * card.height;
-    }
-
-    const V3 origin = Add(anchor, Mul(up, base_offset));
-    const V3 half = Mul(right, 0.5 * width);
-    const V3 corner[4] = {Sub(origin, half), Add(origin, half),
-                          Add(Add(origin, half), Mul(up, card.height)),
-                          Add(origin, Mul(up, card.height))};
+    const V3 origin = Sub(Sub(anchor, Mul(right, anchor_u * width)),
+                          Mul(up, anchor_v * card.height));
+    const V3 du = Mul(right, width);
+    const V3 dv = Mul(up, card.height);
+    const V3 corner[4] = {origin, Add(origin, du), Add(Add(origin, du), dv),
+                          Add(origin, dv)};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
 
     const uint32_t base = static_cast<uint32_t>(mesh.VertexCount());

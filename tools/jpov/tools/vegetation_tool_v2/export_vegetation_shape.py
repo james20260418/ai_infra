@@ -11,7 +11,8 @@
   blender -b --python export_vegetation_shape.py -- \\
       --species weeping_willow --out /tmp/willow.pbtxt \\
       --set scale=6 --set seed=5 --set leaves=10 --set leafScale=0.25 \\
-      --per-seg 6 --leaf-type-desc "柳树冠层叶簇"
+      --per-seg 6 --leaf-type-desc "柳树冠层叶簇" --leaf-aspect 0.6 \
+      --anchor-mode bottom_center
 """
 import os
 import sys
@@ -36,6 +37,10 @@ species = argv[0] if not argv[0].startswith("--") else "weeping_willow"
 out_path = None
 per_seg = 6
 leaf_desc = "叶簇"
+leaf_aspect = 0.6   # 叶卡 宽/高：装配时 width = height × 这个值
+# 叶卡素材的根部画在格子哪个位置（= 写进 asset 的 anchor_mode）。
+# 素材根部画在哪就写哪个；它与 anchor 一起决定 UV，导出侧不做任何补偿性偏移。
+anchor_mode = "bottom_center"
 overrides = {}
 
 i = 0
@@ -55,6 +60,14 @@ while i < len(argv):
     elif a == "--leaf-type-desc":
         i += 1
         leaf_desc = argv[i]
+    elif a == "--leaf-aspect":
+        i += 1
+        leaf_aspect = float(argv[i])
+    elif a == "--anchor-mode":
+        i += 1
+        anchor_mode = argv[i]
+        if anchor_mode not in ("bottom_left", "bottom_center", "bottom_right", "top_center"):
+            raise SystemExit("--anchor-mode 只接受 bottom_left/bottom_center/bottom_right/top_center")
     elif a == "--set":
         i += 1
         k, _, v = argv[i].partition("=")
@@ -197,8 +210,16 @@ def len3(a):
 # 叶卡：每 4 个顶点一张卡（Sapling 不焊接）
 # ---------------------------------------------------------------------------
 cards = []
+handedness = {"total": 0, "mirrored": 0, "no_uv": 0}
 if leaves_obj is not None:
     mesh = leaves_obj.data
+    # 叶片的 UV 层：Blender 侧已经按贴图把每个 loop 的 uv 存好了。
+    # 我们**以前只读顶点位置**，所以"哪一边是 uv=0"是丢掉的 —— 手性其实一直拿得到。
+    uv_by_vert = {}
+    if mesh.uv_layers.active is not None:
+        uvs = mesh.uv_layers.active.data
+        for loop in mesh.loops:
+            uv_by_vert[loop.vertex_index] = (uvs[loop.index].uv[0], uvs[loop.index].uv[1])
     vcount = len(mesh.vertices)
     if vcount % 4 != 0:
         raise SystemExit(f"leaves mesh 顶点数 {vcount} 不是 4 的倍数，无法按卡切分")
@@ -218,12 +239,16 @@ if leaves_obj is not None:
         nearest_pt = flat_np[nearest]
         which = 0 if len3(sub3(mid_a, nearest_pt)) < len3(sub3(mid_b, nearest_pt)) else 1
         root_mid, tip_mid = (mid_a, mid_b) if which == 0 else (mid_b, mid_a)
-        # Sapling 的叶卡是**居中**放在枝条上的（不是根部贴枝）：卡片中心才在枝上。
-        # 用边中点当锚点会让整张卡外移半个高度（实测 13.6cm），叶子看起来浮空。
-        anchor_pt = centre
-
         up = norm3(sub3(tip_mid, root_mid))
         height = len3(sub3(tip_mid, root_mid))
+        # anchor 的语义是**叶子与枝条的连接点**，必须落在枝上（资产格式合同，
+        # Validate 会强制）。最近骨架点就在枝条中心线上，天然满足。
+        #
+        # 【不要】写回 anchor = centre − up·(h/2)：Sapling 的叶卡是以**卡片中心**
+        # 贴在枝上的，那样写出来的点会离枝 h/2（实测 12.5cm），于是真正压在枝上的
+        # 变成卡片中心，4 种 anchor_mode 怎么选都贴不上枝。
+        # 素材的 UV 偏移由 anchor_mode 表达，**不能靠挪 anchor 来凑**。
+        anchor_pt = (nearest_pt[0], nearest_pt[1], nearest_pt[2])
         width_vec = sub3(corners[1], corners[0]) if which == 0 else sub3(corners[3], corners[2])
         normal = norm3(cross3(width_vec, up))
         branch_id = int(flat_branch[nearest])
@@ -231,7 +256,59 @@ if leaves_obj is not None:
         if height <= 1e-6:
             continue
 
-        cards.append((anchor_pt, up, normal, height, branch_id, s_param))
+        # ---- 手性：贴图 u 轴在世界里指向哪一侧 ----
+        # 引擎侧 right = cross(up, normal)。若贴图的 +u 与 right 同向 ⇒ 未镜像；
+        # 反向 ⇒ 这张卡是镜像摆放的（叶子左右交替时就会这样）。
+        mirrored = None
+        quv = [uv_by_vert.get(c * 4 + k) for k in range(4)]
+        if all(q is not None for q in quv):
+            i_min = min(range(4), key=lambda k: quv[k][0])
+            i_max = max(range(4), key=lambda k: quv[k][0])
+            u_dir = sub3(corners[i_max], corners[i_min])
+            right = cross3(up, normal)
+            mirrored = dot3(norm3(u_dir), right) < 0.0
+            handedness["total"] += 1
+            handedness["mirrored"] += 1 if mirrored else 0
+        else:
+            handedness["no_uv"] += 1
+
+        cards.append((anchor_pt, up, normal, height, branch_id, s_param,
+                      bool(mirrored) if mirrored is not None else False))
+
+# ---------------------------------------------------------------------------
+# 合同校验：anchor 必须是「叶子与枝条的连接点」，即落在所属枝条上
+# ---------------------------------------------------------------------------
+# 资产格式规定 anchor 到该枝中心线的距离 ≤ 此处枝半径 + 1cm。
+# 这里在导出侧再查一遍（C++ Validate 是最后一道闸）：一旦有人把 anchor 挪出枝条
+# （历史上就是因为「补偿卡片抬高 h/2」把 442 张卡全挪出去 12~18cm），立刻失败，
+# 而不是等到 viewer 里发现叶子贴不上枝。
+ANCHOR_SLACK = 0.01
+bad = 0
+for ci, (ap, _up, _nrm, _h, bid, _s, _mir) in enumerate(cards):
+    poly = polys[bid]
+    best = 1e300
+    best_r = 0.0
+    for k in range(len(poly) - 1):
+        a = to_up(poly[k])
+        b = to_up(poly[k + 1])
+        ab = sub3(b, a)
+        ap3 = sub3(ap, a)
+        denom = dot3(ab, ab)
+        t = 0.0 if denom == 0 else max(0.0, min(1.0, dot3(ap3, ab) / denom))
+        d = len3(sub3(ap3, mul3(ab, t)))
+        if d < best:
+            best = d
+            r0 = radii[bid][k] if k < len(radii[bid]) else radii[bid][-1]
+            r1 = radii[bid][k + 1] if k + 1 < len(radii[bid]) else radii[bid][-1]
+            best_r = r0 + (r1 - r0) * t
+    if best > best_r + ANCHOR_SLACK:
+        bad += 1
+        if bad <= 5:
+            print("[export] card %d anchor 离枝 %.4f m（枝半径 %.4f m）" % (ci, best, best_r))
+if bad:
+    raise SystemExit(f"[export] {bad} 张叶卡的 anchor 不在所属枝条上 —— "
+                     "anchor 必须是叶子与枝条的连接点，不能靠它做 UV 补偿")
+print("[export] anchor 合同校验通过：%d 张卡全部落在所属枝条上" % len(cards))
 
 # ---------------------------------------------------------------------------
 # 写文本 proto
@@ -287,21 +364,46 @@ for pi in order:
         lines.append("  }")
     lines.append("}")
 
-lines.append("leaf_types {")
-lines.append("  type: 0")
-lines.append('  description: "%s"' % leaf_desc)
-lines.append('  anchor_mode: "center"')
-lines.append("  preferred_aspect: 0")
-lines.append("}")
+mirrored_count = sum(1 for c in cards if c[6])
+plain_count = len(cards) - mirrored_count
+type_of = {}
+if plain_count:
+    type_of[False] = 0
+if mirrored_count:
+    type_of[True] = 1 if plain_count else 0
 
-for anchor, up, normal, height, branch_id, s_param in cards:
+print("[export] 叶卡手性：未镜像 %d 张 → type %s，镜像 %d 张 → type %s"
+      % (plain_count, type_of.get(False, "-"), mirrored_count, type_of.get(True, "-")))
+print("[export] 原始统计：%d 张有 UV，镜像 %d 张（%.1f%%），缺 UV %d 张"
+      % (handedness["total"], handedness["mirrored"],
+         100.0 * handedness["mirrored"] / max(1, handedness["total"]),
+         handedness["no_uv"]))
+
+# 手性 → 两个 leaf type。
+# 一种 leaf type 只对应一种对齐方式（Danis 定）：Blender 里 UV 镜像的那批卡
+# 单独成一个 type，由用户提供一张**左右翻转**后的素材；引擎不做运行时镜像。
+for flipped in (False, True):
+    if flipped not in type_of:
+        continue
+    lines.append("leaf_types {")
+    lines.append("  type: %d" % type_of[flipped])
+    if flipped:
+        lines.append('  description: "%s（镜像手性：请把素材左右翻转后使用）"' % leaf_desc)
+    else:
+        lines.append('  description: "%s"' % leaf_desc)
+    lines.append('  anchor_mode: "%s"' % anchor_mode)
+    lines.append("  preferred_aspect: 0")
+    lines.append("}")
+
+for anchor, up, normal, height, branch_id, s_param, flipped in cards:
     lines.append("cards {")
     lines.append("  anchor { x: %s y: %s z: %s }" % (fmt(anchor[0]), fmt(anchor[1]), fmt(anchor[2])))
     lines.append("  up { x: %s y: %s z: %s }" % (fmt(up[0]), fmt(up[1]), fmt(up[2])))
     lines.append("  normal { x: %s y: %s z: %s }"
                  % (fmt(normal[0]), fmt(normal[1]), fmt(normal[2])))
     lines.append("  height: %s" % fmt(height))
-    lines.append("  type: 0")
+    lines.append("  width: %s" % fmt(height * leaf_aspect))
+    lines.append("  type: %d" % type_of[flipped])
     lines.append("  branch: %d" % new_id.get(branch_id, 0))
     lines.append("  s: %s" % fmt(s_param))
     lines.append("}")
