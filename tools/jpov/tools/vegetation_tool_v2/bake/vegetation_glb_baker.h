@@ -24,51 +24,11 @@
 
 #include <string>
 
+#include "tools/jpov/tools/vegetation_tool_v2/bake/bake_options.h"
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 
 namespace jpov {
 namespace vegetation {
-
-// 烘焙参数（面板上全部可调；默认值 = 柳树实测可用的一组）。
-struct GlbBakeOptions {
-  // ── 关节密度 ──
-  // 粗枝（level <= thick_level_max）关节少而长（链短、残余误差不放大）；
-  // 细而下垂的枝关节密（多环才弯得动，而不是整根硬棍）。
-  double thick_spacing = 1.5;   // 米/关节（粗枝）
-  double thin_spacing = 0.5;    // 米/关节（细枝）
-  int thick_level_max = 1;      // level <= 这个值算"粗枝"
-  int max_joints_per_branch = 8;
-
-  // ── 朝向继承度 soft（0 = 硬/全继承父朝向，1 = 软/只随自己的 θ）──
-  // 判定「下垂细枝」：枝首比枝尾高 droop_min 米以上、且平均半径 < strand_radius_max，
-  // 该枝 soft 随弧长从 0 渐变到 droop/droop_scale（v1 的判据，实测对柳条有效）。
-  double droop_min = 0.15;
-  double strand_radius_max = 0.01;
-  double droop_scale = 0.5;
-
-  // ── 相位场 ──
-  // 逐顶点/逐关节的连续相位（平动湍流用）。phase_scale 缩放空间频率：
-  // 1.0 = v1 波长（树 ~6m 时树冠去同步、单张卡内几乎不变）。
-  double phase_scale = 1.0;
-
-  // ── 材质 ──
-  std::string bark_dir;      // 含 albedo.png/normal.png/roughness.png；空 = 纯色树干
-  std::string leaf_png;      // 黑底叶卡图（type 0）；空 = 不烘叶子
-  std::string leaf2_png;     // type 1（镜像手性）素材；空 = 回退 leaf_png
-  double leaf_black = 30.0;  // 黑底阈值（软过档 [0.5t, 1.5t]）
-  double leaf_normal = 1.0;  // 由 alpha+luma 生成的法线强度
-  double normal_scale = 1.5;  // 树皮法线强度
-  double uv_v_scale = 0.0;   // 0 = 按树皮 albedo 像素尺寸自动（宽/高）
-};
-
-struct GlbBakeStats {
-  int joints = 0;
-  int trunk_vertices = 0;
-  int leaf_vertices = 0;
-  int triangles = 0;
-  double milliseconds = 0.0;
-  std::string path;
-};
 
 // 烘焙并写出 GLB。失败返回 false，*error 填原因（读不到贴图 / 没有可烘的几何 / 写盘失败）。
 bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,

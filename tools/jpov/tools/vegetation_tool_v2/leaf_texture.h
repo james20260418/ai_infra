@@ -41,6 +41,13 @@ bool LoadLeafTextureFromPng(const std::string& path, float black, int dilate_pas
 // 只依赖 CPU，确定性（同一输入必得同一输出，gold 友好）。
 std::vector<unsigned char> BuildLeafNormalMap(const LeafTexture& tex, float depth);
 
+// 只读 PNG 的像素尺寸（不解码像素）。
+//
+// 用途：树皮 UV 的 v 方向补偿 = 贴图宽/高（非方形贴图必须补偿，否则纹素不方正）。
+// 查看器与烘焙各需要一次，只留这一处实现。
+// 返回 false = 读不到文件 / 不是可识别的图片格式。
+bool ReadPngSize(const std::string& path, int* width, int* height);
+
 // RGBA8 → PNG 字节（内存内，不落盘）。
 bool EncodePng(const std::vector<unsigned char>& rgba, int w, int h,
                std::vector<unsigned char>* out);

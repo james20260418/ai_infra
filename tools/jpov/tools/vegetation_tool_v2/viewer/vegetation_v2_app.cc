@@ -117,30 +117,6 @@ void BendCardNormals(jpov::MeshData* md, float k) {
   }
 }
 
-// 读 PNG 的 IHDR 拿像素尺寸（只为贴图长宽比，不值得为此加一条 stb 依赖）。
-// 非 PNG / 损坏 → 返回 false，调用方回退 1.0。
-bool ReadPngSize(const std::string& path, int* w, int* h) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  unsigned char buf[24] = {0};
-  f.read(reinterpret_cast<char*>(buf), sizeof(buf));
-  if (f.gcount() != static_cast<std::streamsize>(sizeof(buf))) return false;
-  static const unsigned char kSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-  for (int i = 0; i < 8; ++i) {
-    if (buf[i] != kSig[i]) return false;
-  }
-  const auto be32 = [](const unsigned char* p) {
-    return (static_cast<int>(p[0]) << 24) | (static_cast<int>(p[1]) << 16) |
-           (static_cast<int>(p[2]) << 8) | static_cast<int>(p[3]);
-  };
-  // PNG 规范要求 IHDR 是第一个 chunk：长度(4) + "IHDR"(4) + w(4) + h(4)。
-  if (buf[12] != 'I' || buf[13] != 'H' || buf[14] != 'D' || buf[15] != 'R') return false;
-  *w = be32(buf + 16);
-  *h = be32(buf + 20);
-  return *w > 0 && *h > 0;
-}
-
-
 namespace {
 
 // 层级 → 棕色（level 0 最深）。超过 5 层饱和，避免深树整片发白。
@@ -363,12 +339,6 @@ class VegetationV2App : public JPOV {
       std::printf("\n  type %u   卡数 %zu\n", t.type, cards_of_type);
       std::printf("    anchor_mode = %s\n", t.anchor_mode.c_str());
       std::printf("    根部位置   = %s\n", where);
-      if (t.preferred_aspect > 0.0) {
-        std::printf("    推荐宽/高  = %.3f（height=H 时 width=%.3f·H；格子宽:高 = %.3f : 1）\n",
-                    t.preferred_aspect, t.preferred_aspect, t.preferred_aspect);
-      } else {
-        std::printf("    推荐宽/高  = 未指定（装配时取该类型第一套 atlas 的格子比例）\n");
-      }
       if (!t.description.empty()) {
         std::printf("    描述       = %s\n", t.description.c_str());
       }
@@ -550,7 +520,7 @@ class VegetationV2App : public JPOV {
     if (!args.bark_dir.empty() && args.uv_vscale <= 0.0f) {
       int tw = 0, th = 0;
       const std::string albedo = args.bark_dir + "/albedo.png";
-      if (ReadPngSize(albedo, &tw, &th)) {
+      if (jpov::vegetation::ReadPngSize(albedo, &tw, &th)) {
         uv_v_scale_ = static_cast<float>(tw) / static_cast<float>(th);
         LOG(INFO) << "UV v 缩放 = " << uv_v_scale_ << "（贴图 " << tw << "x" << th
                   << "，v *= 宽/高）";

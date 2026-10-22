@@ -159,16 +159,6 @@ std::vector<ProfilePoint> UnitCircleProfile(uint32_t n) {
   return points;
 }
 
-double SamplePerimeter(const BranchSample& sample, uint32_t ring_count) {
-  if (!sample.profile.empty()) {
-    return sample.radius * UnitPerimeter(sample.profile);
-  }
-  if (ring_count < 3) {
-    return 0.0;
-  }
-  return sample.radius * UnitPerimeter(UnitCircleProfile(ring_count));
-}
-
 uint32_t Branch::EffectiveRingCount() const {
   if (ring_count > 0) {
     return ring_count;
@@ -215,7 +205,6 @@ Shape FromProto(const ShapeProto& proto) {
     type.type = t.type();
     type.description = t.description();
     type.anchor_mode = t.anchor_mode();
-    type.preferred_aspect = t.preferred_aspect();
     shape.leaf_types.push_back(std::move(type));
   }
 
@@ -360,9 +349,6 @@ bool Validate(const Shape& shape, std::string* error) {
       return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法"
                          "（只接受 bottom_left/bottom_center/bottom_right/top_center）",
                          t.type, t.anchor_mode.c_str()));
-    }
-    if (t.preferred_aspect < 0.0) {
-      return fail(Format("leaf_type %u: preferred_aspect 不能为负", t.type));
     }
   }
 

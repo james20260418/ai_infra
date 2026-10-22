@@ -57,15 +57,49 @@ cc_library(
     ],
 )
 
+# 烘焙参数（GlbBakeOptions / GlbBakeStats）：baker 与关节构造共用，避免循环 include。
+cc_library(
+    name = "bake_options",
+    hdrs = ["bake/bake_options.h"],
+)
+
+# 植被风关节表构造（GL-free，纯几何）：烘焙与单测共用。
+cc_library(
+    name = "vegetation_glb_joints",
+    srcs = ["bake/vegetation_glb_joints.cc"],
+    hdrs = ["bake/vegetation_glb_joints.h"],
+    deps = [
+        ":bake_options",
+        ":shape",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+)
+
+cc_test(
+    name = "vegetation_glb_joints_test",
+    srcs = ["bake/vegetation_glb_joints_test.cc"],
+    deps = [
+        ":bake_options",
+        ":vegetation_glb_joints",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # GLB 烘焙器：shape（+bark 材质 + 叶卡素材）→ 自洽 .glb（含风链 TEXCOORD_1 + 关节表）。
 cc_library(
     name = "vegetation_glb_baker",
     srcs = ["bake/vegetation_glb_baker.cc"],
     hdrs = ["bake/vegetation_glb_baker.h"],
     deps = [
+        ":bake_options",
         ":leaf_texture",
         ":shape",
         ":sweep",
+        ":vegetation_glb_joints",
         "//tools/jpov/src:gltf_saver",
         "//third_party/stb:stb_image",
         "@glog_static//:glog",

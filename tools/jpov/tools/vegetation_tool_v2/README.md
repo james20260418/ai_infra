@@ -91,15 +91,24 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
 | `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树） |
 | `docs/vegetation_asset_format.md` | **格式规范**：约定、扫管、UV、叶卡、装配、校验、验收、版本 |
+| `bake/bake_options.h` | 烘焙参数/统计（baker 与关节构造共用，避免循环 include） |
+| `bake/vegetation_glb_joints.{h,cc}` | **关节构造**（GL-free 纯几何）：抽稀 / soft / 父子链 / 相位场；烘焙与单测共用 |
+| `bake/vegetation_glb_baker.{h,cc}` | 关节 → 树干/叶卡 primitive → 内嵌贴图 → 写 glb |
 
 ## 验收与回归
 
 - **视觉**：跑上面的 `--capture`，用 `--cam-target-y 3 --cam_r 1.6` 看叶卡贴在枝上的位置。
 - **gold test**：`bazel test //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_test`
   - `vegetation_v2_cards_1280x720.png`（debug 绿卡）：不透明盒子，8×8 ROI 阈值 **0.5**，精确锁叶卡摆放；
-  - `vegetation_v2_leaf_1280x720.png`（贴叶+树皮）：alpha cutout 在 llvmpipe 下会跳状态，
-    用 **4×4** ROI（更粗的块摊平抖动）+ 阈值 **15** 当烟雾报警（没贴树皮 25.8 / 叶子被杀 20.5 / 没贴叶图 41.5）。
-  - 两张 gold **都由查看器二进制本身**跑出来（subprocess），保证和用户看到的是同一张图。
+  - `vegetation_v2_leaf_1280x720.png`（贴叶+树皮）：alpha cutout 在 llvmpipe 下会**整块**跳到
+    另一种离散状态（实测同一二进制两次渲染，4×4 ROI 最大差能到 124，约 0.08% 像素翻面），
+    所以主判据改成**显著变化像素占比 < 2%**（真回归：去掉叶图 21.9%），ROI 只打印作诊断；
+  - `vegetation_v2_glb_1280x720.png`（**glb 展示态**）：先 `--bake` 出 glb，再 `--glb` 载入、
+    固定 `--wind-time 0.8` 出图。判据 ROI ≤ 2 **且** 显著像素 < 1% —— 认关节表算错、风没生效
+    （实测关风 6.3%）、贴图没内嵌、顶点挂错枝；
+  - 三张 gold **都由查看器二进制本身**跑出来（subprocess），保证和用户看到的是同一张图。
+    渲染参数（`--normal-scale` / `--uv-vscale` / `--leaf-normal` / 风时间 / 相机）**全部显式钉住**，
+    不许吃 app 默认值 —— 否则改默认值就会悄悄改写 gold，报警能力就没了。
     改观感后重生成：`bazel run //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_generator`。
 - **烘焙/风**：`--bake` 后看日志（关节数 / 顶点数 / 叶卡到所属环的最大距离应 ≈ 1e-6 m）；
   再 `--glb <产物>` 用左下角面板调风，或 `--wind-time 0 / 1.2` 出两帧对比（同机位）。
@@ -107,4 +116,6 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
   逐顶点关节归属**按采样环精确给出**（树干按环下标 floor、叶卡按 anchor 的最近环），
   所以不存在 v1 那套 Voronoi 标签的跨链误判。
 - **单测**：`bazel test //tools/jpov/tools/vegetation_tool_v2:all`
-  （`shape_test` 校验合同含 anchor 离枝负例；`sweep_test` 含 4 种 `anchor_mode` 的 UV 锚点与 `ComputeCardFrame` 右手系断言）。
+  （`shape_test` 校验合同含 anchor 离枝负例；`sweep_test` 含 4 种 `anchor_mode` 的 UV 锚点与
+  `ComputeCardFrame` 右手系断言；`vegetation_glb_joints_test` 钉住关节表的三条不变式：
+  `parent < id`、枝首枝尾必有枢轴、覆盖下标随采样单调 —— 每条都带负向对照）。

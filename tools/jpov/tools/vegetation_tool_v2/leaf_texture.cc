@@ -211,6 +211,23 @@ std::vector<unsigned char> BuildLeafNormalMap(const LeafTexture& tex, float dept
   return BuildLeafNormalMapImpl(tex.rgba, tex.width, tex.height, depth);
 }
 
+bool ReadPngSize(const std::string& path, int* width, int* height) {
+  CHECK(width != nullptr);
+  CHECK(height != nullptr);
+  int w = 0;
+  int h = 0;
+  int comp = 0;
+  if (!stbi_info(path.c_str(), &w, &h, &comp)) {
+    return false;
+  }
+  if (w <= 0 || h <= 0) {
+    return false;
+  }
+  *width = w;
+  *height = h;
+  return true;
+}
+
 bool EncodePng(const std::vector<unsigned char>& rgba, int w, int h,
                std::vector<unsigned char>* out) {
   if (out == nullptr) {

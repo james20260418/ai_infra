@@ -21910,7 +21910,6 @@ leaf_types {
   type: 0
   description: "叶簇（素材根部画在格子左下角）"
   anchor_mode: "bottom_left"
-  preferred_aspect: 0
 }
 cards {
     anchor { x: 1.17457 y: 1.85798 z: -0.908909 }

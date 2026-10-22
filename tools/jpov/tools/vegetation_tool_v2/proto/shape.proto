@@ -146,9 +146,11 @@ message LeafTypeProto {
   // 的那一点贴到 LeafCardProto.anchor（见那边的合同）。没有第五种取值。
   string anchor_mode = 3;
 
-  // 期望的卡片长宽比（width/height）。0 = 未指定（装配时取该类型第一套 atlas 的比例）。
-  // 一型绑多套 atlas 时，用它来挑最贴合设计意图的一套，避免轮廓随材质漂移。
-  double preferred_aspect = 4;
+  // 4 号曾用于 `preferred_aspect`（"一型多 atlas 时挑哪套"的期望宽高比）。
+  // 2026-10-22 删除：装配层从来没实现，全仓库没有任何消费方 —— 留着只会让导出脚本
+  // 和文档假装有这个能力。编号保留，防止将来有人复用后与旧资产语义撞车。
+  reserved 4;
+  reserved "preferred_aspect";
 }
 
 // 一棵植物的完整拓扑。
