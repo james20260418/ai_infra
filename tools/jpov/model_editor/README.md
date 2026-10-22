@@ -79,6 +79,18 @@ output/jpov_model_editor/jpov_model_editor --ui_shot --output_dir ../out \
     --stitch_y 0.88 --stitch_algo arap
 ```
 
+## 诊断 HUD（截图复现配置）
+
+视口上方中间常驻一块半透明 HUD（`DrawHud`），内容：
+
+- `CAMERA pos(...) R=... phi=... theta=...` + `target(...) fov/aspect` —— 相机姿态；
+- `STATE clip=Y0.130 seamY=0.870 algo=arap band=2.00 off=0.0 refCut=1` —— 当前裁剪/缝合配置；
+- `MOVE t(...) scale=...` —— 用户累计平移 / 缩放系数；
+- `M`（4 行）—— 累积模型矩阵（行主序，p' = M·p；平移/旋转/缩放按烘焙顺序左乘累积）；
+- `MVP`（4 行）—— P·V·M（fov 60、near 0.05、far 1000、aspect = 窗口宽高比）。
+
+用途：出问题时截图即可复现"是哪一组变换 / 哪个相机"。
+
 ## 裁剪语义（`mesh_clip.h`）
 
 沿所选坐标轴（`X` / `Y` / `Z`）的平面把网格切成两半，**保留一侧、删除另一侧**；

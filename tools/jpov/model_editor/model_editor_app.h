@@ -90,6 +90,113 @@ inline constexpr float kDefaultPlaneStep = 0.01f;
 inline constexpr float kPlaneStepMin = 1e-4f;
 inline constexpr float kPlaneStepMax = 10.0f;
 
+// ==================== 4x4 矩阵 / HUD ====================
+
+// 行主序 4x4（列向量约定 p' = M·p）。
+struct Mat4 {
+    float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+};
+
+inline Mat4 Mat4Mul(const Mat4& a, const Mat4& b) {
+    Mat4 r;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            float acc = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                acc += a.m[i * 4 + k] * b.m[k * 4 + j];
+            }
+            r.m[i * 4 + j] = acc;
+        }
+    }
+    return r;
+}
+
+inline Mat4 Mat4Translate(const jpov::Vec3f& t) {
+    Mat4 r;
+    r.m[3] = t.x();
+    r.m[7] = t.y();
+    r.m[11] = t.z();
+    return r;
+}
+
+inline Mat4 Mat4ScaleUniform(float s) {
+    Mat4 r;
+    r.m[0] = s;
+    r.m[5] = s;
+    r.m[10] = s;
+    return r;
+}
+
+// 与世界轴 axis 的旋转（与 model_transform.h::RotateMesh 同一套右手约定）。
+inline Mat4 Mat4RotateAxis(int axis, float deg) {
+    constexpr float kPi = 3.14159265358979323846f;
+    const float rad = deg * kPi / 180.0f;
+    const float c = std::cos(rad);
+    const float s = std::sin(rad);
+    Mat4 r;
+    switch (axis) {
+        case 0:  // 绕 X
+            r.m[5] = c;
+            r.m[6] = -s;
+            r.m[9] = s;
+            r.m[10] = c;
+            break;
+        case 1:  // 绕 Y
+            r.m[0] = c;
+            r.m[2] = s;
+            r.m[8] = -s;
+            r.m[10] = c;
+            break;
+        default:  // 绕 Z
+            r.m[0] = c;
+            r.m[1] = -s;
+            r.m[4] = s;
+            r.m[5] = c;
+            break;
+    }
+    return r;
+}
+
+// 绕 pivot 的旋转 / 缩放（= T(p)·R·T(-p)）。
+inline Mat4 Mat4RotateAbout(int axis, float deg, const jpov::Vec3f& pivot) {
+    return Mat4Mul(Mat4Mul(Mat4Translate(pivot), Mat4RotateAxis(axis, deg)),
+                   Mat4Translate(jpov::Vec3f(-pivot.x(), -pivot.y(), -pivot.z())));
+}
+inline Mat4 Mat4ScaleAbout(float factor, const jpov::Vec3f& pivot) {
+    return Mat4Mul(Mat4Mul(Mat4Translate(pivot), Mat4ScaleUniform(factor)),
+                   Mat4Translate(jpov::Vec3f(-pivot.x(), -pivot.y(), -pivot.z())));
+}
+
+inline Mat4 Mat4LookAt(const jpov::Vec3f& eye, const jpov::Vec3f& center,
+                       const jpov::Vec3f& up) {
+    const jpov::Vec3f f = (center - eye).Unit();
+    const jpov::Vec3f s = f.Cross(up).Unit();
+    const jpov::Vec3f u = s.Cross(f);
+    Mat4 r;
+    r.m[0] = s.x();  r.m[1] = s.y();  r.m[2] = s.z();   r.m[3] = -s.Dot(eye);
+    r.m[4] = u.x();  r.m[5] = u.y();  r.m[6] = u.z();   r.m[7] = -u.Dot(eye);
+    r.m[8] = -f.x(); r.m[9] = -f.y(); r.m[10] = -f.z(); r.m[11] = f.Dot(eye);
+    r.m[12] = 0.0f;  r.m[13] = 0.0f;  r.m[14] = 0.0f;   r.m[15] = 1.0f;
+    return r;
+}
+
+inline Mat4 Mat4Perspective(float fov_deg, float aspect, float znear,
+                            float zfar) {
+    constexpr float kPi = 3.14159265358979323846f;
+    const float f = 1.0f / std::tan(fov_deg * kPi / 360.0f);
+    Mat4 r;
+    for (float& v : r.m) {
+        v = 0.0f;
+    }
+    r.m[0] = f / std::max(aspect, 1e-6f);
+    r.m[5] = f;
+    r.m[10] = (zfar + znear) / (znear - zfar);
+    r.m[11] = 2.0f * zfar * znear / (znear - zfar);
+    r.m[14] = -1.0f;
+    return r;
+}
+
+
 // 一个数值输入框的跨帧状态（文本缓冲 + 上一帧聚焦态）。
 struct NumberField {
     char text[kNumberInputCapacity];
@@ -151,6 +258,14 @@ public:
     float rot_step_[3] = {kDefaultRotStep, kDefaultRotStep, kDefaultRotStep};
     float scale_step_ = kDefaultScaleStep;
     float model_scale_ = 1.0f;  // 累计缩放系数，夹在 [kModelScaleMin, kModelScaleMax]。
+
+    // 累计「用户变换」矩阵（行主序，列向量约定 p' = M·p）：把所有平移/旋转/缩放按烘焙
+    // 顺序左乘累积起来。用途 = HUD 诊断：截图里能读出「这个结果是哪一组变换做出来的」。
+    // 注意裁剪/缝合是就地改几何，不改这个矩阵（它只描述用户摆位）。
+    Mat4 target_xform_;
+    // 用户层累计平移（= 所有平移按钮 / --target_move 的和）。矩阵里的平移项是
+    // 「原点被搬到哪」，绕 pivot 缩放/旋转也会改变它，看代码时容易误读，所以单独记一份。
+    jpov::Vec3f user_move_;
 
     NumberField trans_step_field_[3] = {NumberField(kDefaultTransStep),
                                         NumberField(kDefaultTransStep),
@@ -405,6 +520,8 @@ public:
                     TranslateMesh(&target_current_[i].mesh, offset);
                 }
             }
+            target_xform_ = Mat4Mul(Mat4Translate(offset), target_xform_);
+            user_move_ = user_move_ + offset;
             SyncTargetToGpu();
         }
         FitViewToScene();  // 摆位后重新取景（否则 headless 图里模型在画面外/太小）
@@ -627,6 +744,9 @@ public:
             ui_.End();
             ui_.Emit(cmds);
         }
+
+        // 诊断 HUD（相机 / 配置 / 累积变换 / MVP）：始终画，截图就能复现配置。
+        DrawHud(cmds, winfo);
     }
 
 private:
@@ -694,6 +814,9 @@ private:
                 TranslateMesh(&target_current_[i].mesh, delta);
             }
         }
+        // HUD：记录累积变换（左乘，与烘焙顺序一致）。
+        target_xform_ = Mat4Mul(Mat4Translate(delta), target_xform_);
+        user_move_ = user_move_ + delta;
         SyncTargetToGpu();
     }
 
@@ -708,6 +831,7 @@ private:
                 RotateMesh(&target_current_[i].mesh, axis, deg, pivot);
             }
         }
+        target_xform_ = Mat4Mul(Mat4RotateAbout(axis, deg, pivot), target_xform_);
         SyncTargetToGpu();
     }
 
@@ -725,6 +849,7 @@ private:
                 ScaleMesh(&target_current_[i].mesh, applied, pivot);
             }
         }
+        target_xform_ = Mat4Mul(Mat4ScaleAbout(applied, pivot), target_xform_);
         model_scale_ = target;
         SyncTargetToGpu();
     }
@@ -734,6 +859,8 @@ private:
         target_current_ = target_startup_;
         target_prim_enabled_.assign(target_current_.size(), true);
         model_scale_ = 1.0f;
+        target_xform_ = Mat4{};
+        user_move_ = jpov::Vec3f(0.0f, 0.0f, 0.0f);
         clip_msg_.clear();
         SyncTargetToGpu();
         LOG(INFO) << "重置 target：几何回到加载时状态";
@@ -1243,6 +1370,108 @@ private:
                            jpov::TextAlignment::kTopLeft, kViewerFontAlias);
         }
         row_y += step_y;
+    }
+
+    // ==================== HUD ====================
+
+    // 把累积矩阵拆成 (T, 欧拉角°, 均匀缩放)，只用于 HUD 显示。
+    void DecomposeXform(jpov::Vec3f* t, jpov::Vec3f* euler_deg, float* scale) const {
+        const Mat4& M = target_xform_;
+        *t = jpov::Vec3f(M.m[3], M.m[7], M.m[11]);
+        const jpov::Vec3f c0(M.m[0], M.m[4], M.m[8]);
+        const jpov::Vec3f c1(M.m[1], M.m[5], M.m[9]);
+        const jpov::Vec3f c2(M.m[2], M.m[6], M.m[10]);
+        const float s0 = std::max(c0.Norm(), 1e-9f);
+        const float s1 = std::max(c1.Norm(), 1e-9f);
+        const float s2 = std::max(c2.Norm(), 1e-9f);
+        *scale = (s0 + s1 + s2) / 3.0f;
+        const float r00 = M.m[0] / s0, r10 = M.m[4] / s0, r20 = M.m[8] / s0;
+        const float r01 = M.m[1] / s1, r11 = M.m[5] / s1, r21 = M.m[9] / s1;
+        const float r02 = M.m[2] / s2, r12 = M.m[6] / s2, r22 = M.m[10] / s2;
+        // R = Rz·Ry·Rx（显示用）。
+        const float sy = std::sqrt(r00 * r00 + r10 * r10);
+        float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+        if (sy > 1e-5f) {
+            rx = std::atan2(r21, r22);
+            ry = std::atan2(-r20, sy);
+            rz = std::atan2(r10, r00);
+        } else {
+            rx = std::atan2(-r12, r11);
+            ry = std::atan2(-r20, sy);
+        }
+        constexpr float kRad2Deg = 180.0f / 3.14159265358979323846f;
+        *euler_deg = jpov::Vec3f(rx * kRad2Deg, ry * kRad2Deg, rz * kRad2Deg);
+    }
+
+    // 诊断 HUD：相机姿态 + 当前配置 + 用户累计变换 + 模型矩阵 M + MVP。
+    // 放在视口上方中间（左右面板之间），截图里一定能读到 —— 用来复现"出问题的配置"。
+    void DrawHud(jpov::RenderCommandList* cmds, const jpov::WindowInfo& winfo) {
+        constexpr float kPi = 3.14159265358979323846f;
+        const float kFont = 11.0f;
+        const float kLineH = 13.0f;
+        const float kPad = 8.0f;
+        const float x0 = 0.305f * winfo.width;
+        const float y0 = 8.0f;
+
+        const jpov::Vec3f cam = view_.Position();
+        const jpov::Vec3f tgt = ViewConfig::Target();
+        const Mat4 view_m = Mat4LookAt(cam, tgt, jpov::Vec3f(0.0f, 1.0f, 0.0f));
+        const Mat4 proj_m =
+            Mat4Perspective(60.0f, winfo.width / std::max(winfo.height, 1.0f), 0.05f,
+                            1000.0f);
+        const Mat4 mvp = Mat4Mul(Mat4Mul(proj_m, view_m), target_xform_);
+
+        std::vector<std::string> lines;
+        lines.push_back(Format(
+            "CAMERA pos(%.3f,%.3f,%.3f) R=%.3f phi=%.1fdeg theta=%.1fdeg",
+            static_cast<double>(cam.x()), static_cast<double>(cam.y()),
+            static_cast<double>(cam.z()), static_cast<double>(view_.R),
+            static_cast<double>(view_.phi * 180.0 / kPi),
+            static_cast<double>(view_.theta * 180.0 / kPi)));
+        lines.push_back(Format(
+            "  target(%.3f,%.3f,%.3f) fov=60 near=0.05 far=1000 aspect=%.3f",
+            static_cast<double>(tgt.x()), static_cast<double>(tgt.y()),
+            static_cast<double>(tgt.z()),
+            static_cast<double>(winfo.width / std::max(winfo.height, 1.0f))));
+        lines.push_back(Format(
+            "STATE clip=%c%.3f seamY=%.3f algo=%s band=%.2f off=%.1f refCut=%d",
+            AxisTag(), static_cast<double>(clip_coord_),
+            static_cast<double>(seam_plane_),
+            jpov::model_editor::SeamAlgoName(
+                static_cast<jpov::model_editor::SeamAlgo>(seam_algo_)),
+            static_cast<double>(seam_band_scale_),
+            static_cast<double>(seam_offset_deg_), reference_is_cut_ ? 1 : 0));
+        lines.push_back(Format(
+            "MOVE   t(%.3f,%.3f,%.3f)  scale=%.4f  (用户累计：平移 + 缩放系数)",
+            static_cast<double>(user_move_.x()), static_cast<double>(user_move_.y()),
+            static_cast<double>(user_move_.z()), static_cast<double>(model_scale_)));
+        for (int row = 0; row < 4; ++row) {
+            lines.push_back(Format(
+                "%s[%9.4f %9.4f %9.4f %9.4f]", row == 0 ? "M    " : "     ",
+                static_cast<double>(target_xform_.m[row * 4 + 0]),
+                static_cast<double>(target_xform_.m[row * 4 + 1]),
+                static_cast<double>(target_xform_.m[row * 4 + 2]),
+                static_cast<double>(target_xform_.m[row * 4 + 3])));
+        }
+        for (int row = 0; row < 4; ++row) {
+            lines.push_back(Format(
+                "%s[%9.4f %9.4f %9.4f %9.4f]", row == 0 ? "MVP  " : "     ",
+                static_cast<double>(mvp.m[row * 4 + 0]),
+                static_cast<double>(mvp.m[row * 4 + 1]),
+                static_cast<double>(mvp.m[row * 4 + 2]),
+                static_cast<double>(mvp.m[row * 4 + 3])));
+        }
+
+        const float h = kPad * 2.0f + kLineH * static_cast<float>(lines.size());
+        const float w = 452.0f;
+        cmds->DrawRect({x0, y0}, {w, h}, jpov::Color{0.0f, 0.0f, 0.0f, 0.62f});
+        float y = y0 + kPad;
+        for (const std::string& line : lines) {
+            cmds->DrawText(line, {x0 + kPad, y}, kFont,
+                           jpov::Color{0.92f, 0.95f, 1.0f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+            y += kLineH;
+        }
     }
 
     // 「平面坐标」一行：[标签] [步长输入] [<] [>] [当前值]。
