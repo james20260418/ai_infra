@@ -185,6 +185,20 @@ std::vector<unsigned char> BuildOrmPngBytes(const std::string& roughness_png,
   return png;
 }
 
+// 内嵌贴图的内容哈希（saver 用它做"同一张图只落一份"的去重键）。
+// 用常量键（如 "mem:leaf:albedo"）在当前只烘一种叶子时看不出问题，但一旦将来多套叶卡
+// 共用同一份 bake，saver 会把不同像素去重成同一张图 —— 所以键必须跟内容走。
+std::string ContentKey(const char* tag, const std::vector<unsigned char>& bytes) {
+  uint32_t h = 2166136261u;   // FNV-1a
+  for (unsigned char c : bytes) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%s_%08x", tag, h);
+  return buf;
+}
+
 bool ReadPngSize(const std::string& path, int* w, int* h) {
   int comp = 0;
   if (!stbi_info(path.c_str(), w, h, &comp)) {
@@ -384,7 +398,7 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
       return false;
     }
     bark_mi.metallic_roughness_tex.bytes = orm;
-    bark_mi.metallic_roughness_tex.key = "mem:orm:bark";
+    bark_mi.metallic_roughness_tex.key = ContentKey("bark_orm", orm);
   } else {
     // 纯色树干（没有材质贴图时给个中性棕，和查看器 debug 配色接近）。
     bark_mi.base_color[0] = 0.32f;
@@ -459,11 +473,11 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
     if (!EncodePng(albedo_rgba, tex.width, tex.height, &leaf_mi.base_color_tex.bytes)) {
       return fail("叶卡 albedo 编码失败");
     }
-    leaf_mi.base_color_tex.key = "mem:leaf:albedo";
+    leaf_mi.base_color_tex.key = ContentKey("leaf_albedo", leaf_mi.base_color_tex.bytes);
     if (!EncodePng(normal_rgba, tex.width, tex.height, &leaf_mi.normal_tex.bytes)) {
       return fail("叶卡法线编码失败");
     }
-    leaf_mi.normal_tex.key = "mem:leaf:normal";
+    leaf_mi.normal_tex.key = ContentKey("leaf_normal", leaf_mi.normal_tex.bytes);
     leaf_mi.normal_scale = static_cast<float>(opts.leaf_normal);
     leaf_mi.alpha_mode = AlphaMode::kMask;
     leaf_mi.alpha_cutoff = kLeafAlphaCutoff;
