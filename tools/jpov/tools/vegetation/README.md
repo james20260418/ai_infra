@@ -6,6 +6,12 @@
 > 产出一棵**带纹理的 GLB**（枝干 + 叶卡），供 JPOV 直接加载。
 >
 > 一句话：**Blender 是出厂的机床，GLB 是机床的产品，JPOV 是用产品的下游。**
+>
+> ⚠️ **2026-10-22 起有了第二条烘焙路径**：`tools/jpov/tools/vegetation_tool_v2/bake/`
+> （v2 查看器里「烘焙 glb」面板 / `--bake` CLI）直接吃 **ShapeProto**（不经过 Blender），
+> 产出同样带 `TEXCOORD_1` + `jpov_wind_joints` 的自洽 GLB。两者**不要并行演化**：
+> 关节/相位/软度的语义改动必须同步；新树的默认路径走 v2，本目录保留给"从 Blender 导出
+> 资产"的场景（`wind_bake.py` 是 Blender 侧的实现）。
 
 ---
 
