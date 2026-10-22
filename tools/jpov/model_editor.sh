@@ -76,6 +76,6 @@ echo "       [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_hig
 echo "       → /tmp/ui/model_editor_ui.png"
 echo ""
 echo "🖐  交互：右键 drag = 相机环绕；滚轮 = 缩放。"
-echo "    左上角面板：target 平移/旋转/缩放（步进式）+ 保存 + 地面 + 显示开关 + 重置。"
+echo "    左上角面板：target 平移/旋转/缩放（步进式）+ 保存 + 地面 + 显示开关（含坐标轴）+ 重置。"
 echo "    右侧面板：裁剪轴选择 X/Y/Z + 裁剪面坐标滑条 + [删除 < 侧] + [删除 > 侧] + 显示裁剪面开关。"
 echo ""
