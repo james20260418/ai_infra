@@ -96,12 +96,19 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   std::system(("rm -rf '" + shot_dir + "'").c_str());
 
   // 相机与材质参数和 `build_jpov_vegetation_v2_viewer.sh` 打印的完整组合命令一致。
+  //
+  // ⚠️ **所有会影响像素的渲染参数都必须在这里显式钉住**，不能吃 app 的默认值：
+  //    2026-10-22 只是把树皮法线强度默认值从 1.5 改成 0.75（Danis 要求），
+  //    两张 gold 就整体变了、必须重新生成 —— 而 gold 是「有没有回归」的唯一依据，
+  //    它跟着默认值漂移就等于失去报警能力。
+  //    `--uv-vscale 0.5` = 树皮 albedo 512x1024 的自动值（宽/高），钉住以免改自动公式时漂移。
   std::string cmd = "'" + ViewerBinary() + "'";
   cmd += " --shape '" + dir + "/samples/willow.pbtxt'";
   cmd += " --bark '" + dir + "/assets/bark/bark001'";
+  cmd += " --normal-scale 0.75 --uv-vscale 0.5";
   if (with_leaf) {
     // 这批样例叶卡背景是 ≈10~13 的灰噪、内容 ≥44 ⇒ 软过档 [0.5t, 1.5t] 取 t=30 得 [15,45]。
-    cmd += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30";
+    cmd += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30 --leaf-normal 1.0";
   } else {
     cmd += " --no-leaf";
   }
