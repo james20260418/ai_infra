@@ -56,7 +56,10 @@ std::string ResolveTexturePath() {
     return std::string();
 }
 
-// headless 拍摄：固定视角/相位，输出三张（默认 / 无纹理 / 硬边）便于对照。
+// headless 拍摄：固定视角/相位，按下面的**拍摄表**逐张出图（A/B 对照用）。
+//
+// 每行只写「与默认值不同的开关」—— 不写增量、也不用手动还原，
+// 漏还原一个开关会静默污染后面所有图（这正是上一版的问题）。
 int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     JPOV::Config cfg;
     cfg.title = "JPOV - strip viewer (capture)";
@@ -84,47 +87,51 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         LOG(INFO) << "capture: " << path;
     };
 
-    shoot("10_default");
-    app.show_strips_ = false;
-    shoot("15_no_strips");
-    app.show_strips_ = true;
-    app.use_texture_ = false;
-    shoot("20_solid");
-    app.use_texture_ = true;
-    app.soft_edges_ = false;
-    shoot("30_hard_edges");
-    app.soft_edges_ = true;
-    app.arc_additive_ = true;
-    shoot("40_arc_additive");
-    app.arc_additive_ = false;
-    app.soft_depth_ = true;
-    shoot("50_soft_depth");
-    app.soft_depth_ = false;
-    // 实验（2026-10-21）：拉近看「折线感」—— 默认视角下三条带只占屏幕一小块，
-    // 16 段的折角在远景里看不清，近距离 + 硬边才看得出轮廓是不是多边形。
-    app.view_.R = 2.6;
-    shoot("60_zoom_soft");
-    app.soft_edges_ = false;
-    shoot("65_zoom_hard");
-    app.soft_edges_ = true;
+    // 一张图的完整开关；默认值 = 交互模式的初始状态（只写差异，读起来就是"这张在测什么"）。
+    struct Shot {
+        const char* name;
+        bool show_strips = true;     // false = 不发条带命令（A/B 对照）
+        bool use_texture = true;     // false = 纯色（不看纹理）
+        bool soft_edges = true;      // 宽度剖面：柔边 / 硬边
+        bool arc_additive = false;   // 弧形改走加法集（发光拖尾）
+        bool soft_depth = false;     // 条带与几何相交处软过渡
+        bool smooth = false;         // false = 折线 pass；true = 平滑 pass（kSmooth）
+        float camera_r = jpov_strip::kViewDefaults.R;
+    };
+    const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
+    const Shot kShots[] = {
+        {.name = "10_default"},
+        {.name = "15_no_strips", .show_strips = false},
+        {.name = "20_solid", .use_texture = false},
+        {.name = "30_hard_edges", .soft_edges = false},
+        {.name = "40_arc_additive", .arc_additive = true},
+        {.name = "50_soft_depth", .soft_depth = true},
+        {.name = "60_zoom_soft", .camera_r = kZoomR},
+        {.name = "65_zoom_hard", .soft_edges = false, .camera_r = kZoomR},
+        // 平滑 pass：同一组视角/开关，只换 style（与 60/65/10 一一对应）。
+        {.name = "70_smooth_zoom_soft", .smooth = true, .camera_r = kZoomR},
+        {.name = "75_smooth_zoom_hard", .soft_edges = false, .smooth = true,
+         .camera_r = kZoomR},
+        {.name = "80_smooth_default", .smooth = true},
+    };
+    for (const Shot& shot : kShots) {
+        app.show_strips_ = shot.show_strips;
+        app.use_texture_ = shot.use_texture;
+        app.soft_edges_ = shot.soft_edges;
+        app.arc_additive_ = shot.arc_additive;
+        app.soft_depth_ = shot.soft_depth;
+        app.smooth_strips_ = shot.smooth;
+        app.view_.R = shot.camera_r;
+        shoot(shot.name);
+    }
 
-    // 平滑 pass（kSmooth）对照：同一组视角/形状，只切换 style。
-    app.smooth_strips_ = true;
-    shoot("70_smooth_zoom_soft");
-    app.soft_edges_ = false;
-    shoot("75_smooth_zoom_hard");
-    app.soft_edges_ = true;
-    app.view_.R = jpov_strip::kViewDefaults.R;
-    shoot("80_smooth_default");
-    app.view_.R = 2.6;
-    app.soft_edges_ = false;
-    shoot("85_smooth_zoom_hard_alt");
-    app.soft_edges_ = true;
-    app.smooth_strips_ = false;
-    app.view_.R = jpov_strip::kViewDefaults.R;
+    // 面板单独一张（HUD 文案能证明当前是哪个 pass）：字体必须先量好。
     app.SetShowPanel(true);
     app.InstallTextMeasure();
+    app.smooth_strips_ = false;
+    app.view_.R = jpov_strip::kViewDefaults.R;
     shoot("99_panel");
+
     app.Finalize();
     return 0;
 }

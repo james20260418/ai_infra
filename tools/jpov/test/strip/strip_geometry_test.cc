@@ -192,6 +192,13 @@ TEST(StripGeometry, RejectsIllegalBlendEnum) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "blend");
 }
 
+TEST(StripGeometry, RejectsIllegalStyleEnum) {
+    // style 非法 cast 值不许静默走折线 pass。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.style = static_cast<jpov::StripStyle>(9);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "style");
+}
+
 TEST(StripGeometry, AcceptsSoftDepthAndEmissive) {
     // 合法组合必须不崩（执行到这里没 abort 就是通过）。
     jpov::TranslucentStripBatch batch = MakeBatch(16);
@@ -265,10 +272,8 @@ float ScanRequiredMargin(const jpov::SmoothStripCompute& c, int samples_per_segm
                     : jpov::smooth_internal::Hermite(c.half[seg], c.half_tan[seg],
                                                      c.half[seg + 1],
                                                      c.half_tan[seg + 1], t);
-            const float dl = jpov::smooth_internal::Dot(
-                jpov::smooth_internal::Sub(sc, lc), w);
-            const float dhw = jpov::smooth_internal::Dot(
-                jpov::smooth_internal::Sub(sh, lh), w);
+            const float dl = (sc - lc).Dot(w);
+            const float dhw = (sh - lh).Dot(w);
             margin = std::max(margin, std::max(dl + dhw, -dl + dhw));
         }
     }
@@ -277,11 +282,11 @@ float ScanRequiredMargin(const jpov::SmoothStripCompute& c, int samples_per_segm
 
 // 旧实现的切线：两端也乘 0.5（= 半个单侧差分）。
 void HalveEndTangents(jpov::SmoothStripCompute* c) {
-    c->center_tan[0] = jpov::smooth_internal::Scale(c->center_tan[0], 0.5f);
-    c->half_tan[0] = jpov::smooth_internal::Scale(c->half_tan[0], 0.5f);
+    c->center_tan[0] = c->center_tan[0] * 0.5f;
+    c->half_tan[0] = c->half_tan[0] * 0.5f;
     const int last = jpov::kStripSampleCount - 1;
-    c->center_tan[last] = jpov::smooth_internal::Scale(c->center_tan[last], 0.5f);
-    c->half_tan[last] = jpov::smooth_internal::Scale(c->half_tan[last], 0.5f);
+    c->center_tan[last] = c->center_tan[last] * 0.5f;
+    c->half_tan[last] = c->half_tan[last] * 0.5f;
 }
 
 }  // namespace
@@ -383,7 +388,7 @@ TEST(StripSmooth, MarginCoversTrueBulge_EquiWidthShortcutFails) {
 }
 
 TEST(StripSmooth, DataPackingMatchesShaderLayout) {
-    // 每列 12 float 的顺序必须与 kSmoothFsTail 的解包逐字对应：c.xyz, m.xyz, h.xyz, n.xyz。
+    // 每列 12 float 的顺序必须与 kSmoothFsMain 的解包逐字对应：c.xyz, m.xyz, h.xyz, n.xyz。
     jpov::Strip16 s;
     s.point_count = 3;
     for (uint32_t i = 0; i < jpov::kStripSampleCount; ++i) {
@@ -465,12 +470,5 @@ TEST(StripSmooth, CollapsedTailMatchesLastRealColumn) {
                 << "col=" << col << " j=" << j;
         }
     }
-}
-
-TEST(StripGeometry, RejectsIllegalStyleEnum) {
-    // style 非法 cast 值不许静默走折线 pass。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
-    batch.style = static_cast<jpov::StripStyle>(9);
-    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "style");
 }
 

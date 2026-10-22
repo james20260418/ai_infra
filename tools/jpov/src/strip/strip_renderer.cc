@@ -47,7 +47,7 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
 
     // 权重函数必须来自共享件（wbo_shader.h）—— 与粒子/体积火/玻璃是同一份数学。
     const std::string fs_draw =
-        std::string(kFsHead) + kWboWeightGlsl + kFsTail;
+        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kFsMain;
     prog_draw_ = shader_mgr_->GetOrCreate("strip_wbo_draw", {kVs, fs_draw.c_str()});
     prog_comp_ = shader_mgr_->GetOrCreate("strip_wbo_composite",
                                           {kWboCompositeVs, kWboCompositeFs});
@@ -78,20 +78,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // （VBO 本身仍是每帧 glBufferData 重传 —— 见 Draw 里的注释。）
     vertices_.reserve(static_cast<size_t>(kMaxStripsPerDraw) * kStripVerticesPerStrip);
 
-    // uniform 位置只查一次（见头文件里的 DrawUniforms 注释）。
-    draw_uniforms_.view_proj = shader_mgr_->GetUniform(prog_draw_, "uViewProj");
-    draw_uniforms_.tint = shader_mgr_->GetUniform(prog_draw_, "uTint");
-    draw_uniforms_.has_tex = shader_mgr_->GetUniform(prog_draw_, "uHasTex");
-    draw_uniforms_.tex = shader_mgr_->GetUniform(prog_draw_, "uTex");
-    draw_uniforms_.profile = shader_mgr_->GetUniform(prog_draw_, "uProfile");
-    draw_uniforms_.scene_depth = shader_mgr_->GetUniform(prog_draw_, "uSceneDepth");
-    draw_uniforms_.viewport = shader_mgr_->GetUniform(prog_draw_, "uViewport");
-    draw_uniforms_.near_plane = shader_mgr_->GetUniform(prog_draw_, "uNear");
-    draw_uniforms_.far_plane = shader_mgr_->GetUniform(prog_draw_, "uFar");
-    draw_uniforms_.blend_path = shader_mgr_->GetUniform(prog_draw_, "uBlendPath");
-    draw_uniforms_.soft_enabled =
-        shader_mgr_->GetUniform(prog_draw_, "uSoftDepthEnabled");
-    draw_uniforms_.soft_m = shader_mgr_->GetUniform(prog_draw_, "uSoftDepthM");
+    // uniform 位置只查一次（见头文件里的 CommonUniforms 注释）。
+    QueryCommonUniforms(prog_draw_, &draw_uniforms_);
     comp_uniforms_.accum = shader_mgr_->GetUniform(prog_comp_, "uAccum");
     comp_uniforms_.reveal = shader_mgr_->GetUniform(prog_comp_, "uReveal");
     comp_uniforms_.add = shader_mgr_->GetUniform(prog_comp_, "uAdd");
@@ -101,24 +89,10 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // 与折线 pass 完全独立：另一个 program、另一套顶点布局、另一条数据通道；
     // 只共享 WBO 目标与静态索引。
     const std::string fs_smooth =
-        std::string(kSmoothFsHead) + kWboWeightGlsl + kSmoothFsTail;
+        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSmoothFsMain;
     prog_smooth_ = shader_mgr_->GetOrCreate("strip_wbo_smooth",
                                             {kSmoothVs, fs_smooth.c_str()});
-    smooth_uniforms_.common.view_proj = shader_mgr_->GetUniform(prog_smooth_, "uViewProj");
-    smooth_uniforms_.common.tint = shader_mgr_->GetUniform(prog_smooth_, "uTint");
-    smooth_uniforms_.common.has_tex = shader_mgr_->GetUniform(prog_smooth_, "uHasTex");
-    smooth_uniforms_.common.tex = shader_mgr_->GetUniform(prog_smooth_, "uTex");
-    smooth_uniforms_.common.profile = shader_mgr_->GetUniform(prog_smooth_, "uProfile");
-    smooth_uniforms_.common.scene_depth =
-        shader_mgr_->GetUniform(prog_smooth_, "uSceneDepth");
-    smooth_uniforms_.common.viewport = shader_mgr_->GetUniform(prog_smooth_, "uViewport");
-    smooth_uniforms_.common.near_plane = shader_mgr_->GetUniform(prog_smooth_, "uNear");
-    smooth_uniforms_.common.far_plane = shader_mgr_->GetUniform(prog_smooth_, "uFar");
-    smooth_uniforms_.common.blend_path =
-        shader_mgr_->GetUniform(prog_smooth_, "uBlendPath");
-    smooth_uniforms_.common.soft_enabled =
-        shader_mgr_->GetUniform(prog_smooth_, "uSoftDepthEnabled");
-    smooth_uniforms_.common.soft_m = shader_mgr_->GetUniform(prog_smooth_, "uSoftDepthM");
+    QueryCommonUniforms(prog_smooth_, &smooth_uniforms_.common);
     smooth_uniforms_.seg_count = shader_mgr_->GetUniform(prog_smooth_, "uSegCount");
     smooth_uniforms_.data_rows = shader_mgr_->GetUniform(prog_smooth_, "uDataRows");
     smooth_uniforms_.strip_data = shader_mgr_->GetUniform(prog_smooth_, "uStripData");
@@ -129,8 +103,9 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     CHECK_NE(smooth_vbo_, 0u);
     glBindVertexArray(smooth_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, smooth_vbo_);
-    // 7 float/顶点：pos(3) + (u, v, alpha) + strip_id(1)
-    const GLsizei smooth_stride = static_cast<GLsizei>(7 * sizeof(float));
+    // kSmoothFloatsPerVertex float/顶点：pos(3) + (u, v, alpha) + strip_id(1)
+    const GLsizei smooth_stride =
+        static_cast<GLsizei>(kSmoothFloatsPerVertex * sizeof(float));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, smooth_stride,
                           reinterpret_cast<const void*>(0));
@@ -158,15 +133,34 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
     smooth_max_rows_ = static_cast<int>(max_tex);
     smooth_data_rows_ = 64;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount * 3,
-                 smooth_data_rows_, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
+                 kStripSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // 顶点/控制点缓冲按需增长（reserve 只增不减），不预先占满 1024 条带。
-    smooth_vertices_.clear();
-    smooth_data_.clear();
+    // 顶点/控制点缓冲按需增长（reserve 只增不减），不预先占满 1024 条带；
+    // 每次 DrawSmooth 都会先 clear 再填，所以这里不需要重置。
 
     initialized_ = true;
+}
+
+void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* out) {
+    CHECK(program != 0u) << "QueryCommonUniforms: program 不能为 0";
+    CHECK(out != nullptr) << "QueryCommonUniforms: out 不能为空";
+    // 名字表**只在这里出现一次**：两个 pass 用同名 uniform（同一个 kCommonFsHead）。
+    // 抄错/漏改一个名字只会让 GetUniform 返回 -1（静默无效），出图很难定位。
+    out->view_proj = shader_mgr_->GetUniform(program, "uViewProj");
+    out->tint = shader_mgr_->GetUniform(program, "uTint");
+    out->has_tex = shader_mgr_->GetUniform(program, "uHasTex");
+    out->tex = shader_mgr_->GetUniform(program, "uTex");
+    out->profile = shader_mgr_->GetUniform(program, "uProfile");
+    out->scene_depth = shader_mgr_->GetUniform(program, "uSceneDepth");
+    out->viewport = shader_mgr_->GetUniform(program, "uViewport");
+    out->near_plane = shader_mgr_->GetUniform(program, "uNear");
+    out->far_plane = shader_mgr_->GetUniform(program, "uFar");
+    out->blend_path = shader_mgr_->GetUniform(program, "uBlendPath");
+    out->soft_enabled = shader_mgr_->GetUniform(program, "uSoftDepthEnabled");
+    out->soft_m = shader_mgr_->GetUniform(program, "uSoftDepthM");
 }
 
 void StripRenderer::EnsureIboCapacity(int strips) {

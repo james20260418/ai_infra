@@ -593,16 +593,20 @@ shader 里连 `m−1` 都换成 uniform `uSegCount`）。
   若用户给的两轨形状差异极大（比如一侧有尖锐折角），平滑 pass 会把折角也磨圆 —— 这是
   选择 kSmooth 的固有语义。
 - 内弯侧会**比折线 pass 略窄**：折线 pass 的弦在真实轨道外侧（画胖了），平滑 pass 裁回真实宽度。
+- 外扩倍数有 **8× 上限**：一个条带上「最弯处的外凸量 / 最细一列的半宽」超过 7 时撑不满，
+  极细的弯尖外侧仍可能缺一条（亚像素级）。这是**有意的取舍**（为一条亚像素的尖把整条带
+  撑到屏幕外没有意义），不告警。
 - 法线来自屏幕空间导数（`dFdx/dFdy`），条带极细时 fresnel（M4）可能闪 —— 与本节无关。
 
 ### 18.6 viewer 验收
 
 `jpov_strip_viewer` 面板新增「平滑条带（C1 重建）」勾选框，实时切换两个 pass；
-`--capture` 会额外输出 `70/75/80/85_smooth_*` 四张对照图（同一视角/形状，只换 style）。
+`--capture` 会额外输出 `70/75/80_smooth_*` 三张对照图（同一视角/开关，只换 style），
+与 `60_zoom_soft` / `65_zoom_hard` / `10_default` 一一对应。
 
 ### 18.7 复核修正（2026-10-22）
 
-第二轮 review 后修的三处（都会造成「出图看不出来、但确实在漏画/变淡」的问题）：
+第三轮 review 后修的三处（都会造成「出图看不出来、但确实在漏画/变淡」的问题）：
 
 1. **外扩量不能再按「本段等宽就跳过 Hermite」简化**。FS 恒算完整 Hermite
    （含 `h10·n0 + h11·n1`），而切线只看相邻列 —— 局部等宽、隔壁列在收窄（"肩部"）时
@@ -619,3 +623,14 @@ shader 里连 `m−1` 都换成 uniform `uSegCount`）。
 `AppendSmoothStripData` / `AppendSmoothStripVertices`，GL-free），
 `test/strip/strip_geometry_test.cc` 有 10 条断言，其中 3 条是**负向对照**
 （把旧实现算回来必须失败），防止「参数退化 + 断言恒真」一起绿。
+
+**结构收口**（同一轮，纯重构，出图逐像素不变）：
+
+- 片元着色器拆成 `kCommonFsHead`（uniform / varying / 工具函数）+ `kWboWeightGlsl` +
+  `kFsEmit`（深度测试 / 两个集合 / WBO 写入）+ `kFsMain` | `kSmoothFsMain`。
+  两个 pass 的「最后一公里」从此只有一份 —— 此前是逐字复制的两段。
+- C++ 侧：`QueryCommonUniforms(program, out)` 是公共 uniform **名字表**的唯一一份，
+  `ApplyCommonUniforms(uniforms, ctx)` 是**上传**的唯一一份，
+  `BatchDrawContext` 把 drawer 原先的 7 个位置参数收成一个结构体。
+- viewer 的 `--capture` 改成**拍摄表**（每行只写与默认值不同的开关），删掉手动还原；
+  同时删掉一张与 `75_smooth_zoom_hard` 完全相同的重复图（`85_smooth_zoom_hard_alt`）。

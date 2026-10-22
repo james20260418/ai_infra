@@ -29,10 +29,11 @@
 //
 // ⭐ 两个独立 pass（2026-10-21 Danis 定；统一一个命令接口 StripStyle）：
 //   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
-//   kSmooth   —— SmoothVs / SmoothFsHead / SmoothFsTail：点即控制点，段间是 C1 Hermite，
+//   kSmooth   —— kSmoothVs / kSmoothFsMain：点即控制点，段间是 C1 Hermite，
 //                在 FS 里按真实曲线反解参数并用 discard + fwidth 裁形。
 //                控制点走 RGBA32F 数据纹理（每列 3 texel），顶点只多一个 strip id
 //                ⇒ **整批仍然一次 draw call**；外扩量由 CPU 按局部曲率自动算。
+//                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
 //   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
 //
 // 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
@@ -41,7 +42,6 @@
 #ifndef JPOV_SRC_STRIP_STRIP_RENDERER_H_
 #define JPOV_SRC_STRIP_STRIP_RENDERER_H_
 
-#include <cstdint>
 #include <vector>
 
 #include "tools/jpov/interface/camera.h"
@@ -60,7 +60,15 @@ public:
     // 平滑 pass 不分块：它整批一次上传 + 一次 draw，上限是数据纹理行数（GL_MAX_TEXTURE_SIZE）。
     static constexpr int kMaxStripsPerDraw = 1024;
 
-    // 顶点着色器：位置/uv 已由 CPU 展开好，这里只做 MVP。
+    // ── 着色器分段 ──
+    //
+    // 折线与平滑**只在「几何 → (u,v,α)」这一步不同**；之后的深度测试 / 两个集合 /
+    // WBO 写入必须逐字一致（那段抄错一处就是「画面悄悄错、gold 未必红」）。
+    // 所以拼装顺序固定为：
+    //   kCommonFsHead + kWboWeightGlsl + kFsEmit + (kFsMain | kSmoothFsMain)
+    // 谁的着色器都一样 —— 公共段只有一份，不可能漂移。
+
+    // 顶点着色器（折线 pass）：位置/uv 已由 CPU 展开好，这里只做 MVP。
     static constexpr const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -73,8 +81,8 @@ void main() {
 }
 )glsl";
 
-    // 片元着色器头（权重函数由 wbo_shader.h 注入到 head/tail 之间）。
-    static constexpr const char* kFsHead = R"glsl(
+    // 片元公共段：两个 pass 的 uniform / varying / 工具函数 / 输出声明。
+    static constexpr const char* kCommonFsHead = R"glsl(
 #version 330 core
 in vec3 vUVAlpha;                 // (u, v, alpha)
 uniform sampler2D uTex;
@@ -103,18 +111,21 @@ float WidthProfile(float w) {
     int i = int(min(floor(x), 7.0));
     return mix(uProfile[i], uProfile[i + 1], x - float(i));
 }
-)glsl";
-
-    static constexpr const char* kFsTail = R"glsl(
-void main() {
-    vec3 color = uTint.rgb;
-    float a = uTint.a * vUVAlpha.z;
+// 采样条带纹理并与 (color, α) 相乘（黑底素材天然透明：色×α 仍是 0）。
+void ModulateTexture(vec2 uv, inout vec3 color, inout float a) {
     if (uHasTex == 1) {
-        vec4 tex = texture(uTex, vUVAlpha.xy);
+        vec4 tex = texture(uTex, uv);
         color *= tex.rgb;
         a *= tex.a;
     }
-    a *= WidthProfile(vUVAlpha.y);
+}
+)glsl";
+
+    // 片元公共段（第二段）：深度测试 → 两个集合 → 写 WBO 附件。
+    // 入参必须是**最终**的 color 与覆盖率 a（平滑 pass 已把裁形 AA 乘进 a）。
+    // 必须拼在 kWboWeightGlsl（WeightWbo）之后。
+    static constexpr const char* kFsEmit = R"glsl(
+void EmitFragment(vec3 color, float a) {
     if (a <= 1.0 / 255.0) {
         discard;
     }
@@ -152,6 +163,17 @@ void main() {
 }
 )glsl";
 
+    // 折线 pass 的 main：uv/α 直接来自顶点（段间是弦）。
+    static constexpr const char* kFsMain = R"glsl(
+void main() {
+    vec3 color = uTint.rgb;
+    float a = uTint.a * vUVAlpha.z;
+    ModulateTexture(vUVAlpha.xy, color, a);
+    a *= WidthProfile(vUVAlpha.y);
+    EmitFragment(color, a);
+}
+)glsl";
+
     // ── 平滑 pass（kSmooth）：C1 Hermite 重建 + 裁形 ──
     //
     // 契约：left/right 是插值型控制点，曲线**严格过点**；第 i 列宽度 = |left[i]−right[i]|。
@@ -177,44 +199,15 @@ void main() {
 }
 )glsl";
 
-    static constexpr const char* kSmoothFsHead = R"glsl(
-#version 330 core
-in vec3 vUVAlpha;                 // (u, v, alpha)
+    static constexpr const char* kSmoothFsMain = R"glsl(
 in vec3 vWorld;                   // 线性几何上的片元世界坐标（尚未重建）
 flat in float vStripId;           // 所属条带 = 数据纹理行号
-uniform sampler2D uTex;
-uniform int uHasTex;
-uniform vec4 uTint;
-uniform float uProfile[9];
-uniform sampler2D uSceneDepth;
-uniform vec2 uViewport;
-uniform float uNear;
-uniform float uFar;
-uniform int uBlendPath;
-uniform int uSoftDepthEnabled;
-uniform float uSoftDepthM;
-// ── 平滑 pass 专用 ──
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
 // 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
 // 每条带占一行，行号 = vStripId。texelFetch 越界是**未定义行为**（不是返回 0）⇒
 // 行号在这里按 uDataRows 钳一次（列号由 seg 的 clamp 保证）。
 uniform sampler2D uStripData;
-layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
-layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
-layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
-float ZView(float d) {
-    float ndc = 2.0 * d - 1.0;
-    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
-}
-float WidthProfile(float w) {
-    float x = clamp(w, 0.0, 1.0) * 8.0;
-    int i = int(min(floor(x), 7.0));
-    return mix(uProfile[i], uProfile[i + 1], x - float(i));
-}
-)glsl";
-
-    static constexpr const char* kSmoothFsTail = R"glsl(
 void main() {
     // u 沿长度、v 横跨宽度；两者都是**真实参数**（CPU 已把保守外扩折进属性 v）。
     float u = vUVAlpha.x;
@@ -225,6 +218,7 @@ void main() {
     float t = segF - float(seg);
 
     // 两列 × 3 texel = 6 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
+    // 这里的 3 = CPU 侧 kSmoothTexelsPerColumn（shader 里没法引用 C++ 常量，改要同步）。
     // texelFetch 越界是**未定义行为**（不是"返回 0"）：行号必须钳住。
     int row = int(clamp(vStripId, 0.0, uDataRows - 1.0));
     int tx = seg * 3;
@@ -235,7 +229,7 @@ void main() {
     vec4 t4 = texelFetch(uStripData, ivec2(tx + 4, row), 0);
     vec4 t5 = texelFetch(uStripData, ivec2(tx + 5, row), 0);
 
-    // 打包约定（与 CPU 侧逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
+    // 打包约定（与 CPU 侧 AppendSmoothStripData 逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
     vec3 c0 = vec3(t0.x, t0.y, t0.z);
     vec3 m0 = vec3(t0.w, t1.x, t1.y);
     vec3 h0 = vec3(t1.z, t1.w, t2.x);
@@ -279,44 +273,11 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    vec2 uv = vec2(clamp(uStar, 0.0, 1.0), vShade);
     vec3 color = uTint.rgb;
     float a = uTint.a * vUVAlpha.z;
-    if (uHasTex == 1) {
-        vec4 tex = texture(uTex, uv);
-        color *= tex.rgb;
-        a *= tex.a;
-    }
+    ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
     a *= WidthProfile(vShade) * cov;
-    if (a <= 1.0 / 255.0) {
-        discard;
-    }
-    float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
-    float z = ZView(gl_FragCoord.z);
-    float fade = 1.0;
-    if (uSoftDepthEnabled == 1) {
-        fade = clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
-    } else if (z > scene_z + 0.02) {
-        discard;
-    }
-    if (uBlendPath == 1) {
-        vec3 contrib = color * a * fade;
-        if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
-            discard;
-        }
-        FragAdd = vec4(contrib, 0.0);
-        FragAccum = vec4(0.0);
-        FragReveal = 0.0;
-    } else {
-        float aa = a * fade;
-        if (aa <= 1.0 / 255.0) {
-            discard;
-        }
-        float w = WeightWbo(z, aa, color);
-        FragAccum = vec4(color * aa, aa) * w;
-        FragReveal = aa;
-        FragAdd = vec4(0.0);
-    }
+    EmitFragment(color, a);
 }
 )glsl";
 
@@ -354,13 +315,14 @@ private:
     // uniform 位置**只查一次**（Init 里），Draw 里直接用整数。
     // 为什么不每帧调 ShaderManager::GetUniform：它对每次调用都要线性扫一遍
     // programs_ 再做一次 std::string 哈希（见 shader_manager.cc:148）；
-    // 本 pass 每批 12 个 uniform，1000 批 = 12000 次字符串哈希/帧，纯浪费。
+    // 本 pass 每批 15 个 uniform，1000 批 = 15000 次字符串哈希/帧，纯浪费。
     //
     // ⚠️ 前提：program 创建后不会重建（ShaderManager 按 name 缓存，无重编译路径）。
     //    若将来加 shader 热重载，必须在这里失效并重查，否则会写到旧 program 上。
-    // **两个 pass 共用的**逐批 uniform：只在这里定义一次、只由 ApplyCommonUniforms 上传，
-    // 免得两条路径各抄一遍（以前 DrawSmooth 把这段连同 soft_depth 分支逐字复制过去，
-    // 将来给其中一个加字段必然会漂移）。
+    //
+    // 下面是**两个 pass 共用**的逐批 uniform：字段只定义一次、名字只在
+    // QueryCommonUniforms 里出现一次、上传只在 ApplyCommonUniforms 里出现一次
+    //（以前 DrawSmooth 把这段连同 soft_depth 分支逐字复制过去，加字段必然会漂移）。
     struct CommonUniforms {
         int view_proj = -1;
         int tint = -1;
@@ -403,7 +365,10 @@ private:
         int full_h = 0;
     };
 
-    // 两个 pass 共用的 uniform 上传（**唯一实现**：改这里两边同时生效）。
+    // 公共 uniform 的**名字表**（唯一一份）：查一次位置，Draw 里直接用整数。
+    void QueryCommonUniforms(unsigned int program, CommonUniforms* out /*output*/);
+
+    // 公共 uniform 的**上传**（唯一实现：改这里两个 pass 同时生效）。
     void ApplyCommonUniforms(const CommonUniforms& uniforms, const BatchDrawContext& ctx);
 
     ShaderManager* shader_mgr_ = nullptr;

@@ -215,29 +215,14 @@ inline constexpr float kSmoothMaxWidenScale = 8.0f;
 
 namespace smooth_internal {
 
-inline Vec3f Add(const Vec3f& a, const Vec3f& b) {
-    return Vec3f{a.x() + b.x(), a.y() + b.y(), a.z() + b.z()};
-}
-
-inline Vec3f Sub(const Vec3f& a, const Vec3f& b) {
-    return Vec3f{a.x() - b.x(), a.y() - b.y(), a.z() - b.z()};
-}
-
-inline Vec3f Scale(const Vec3f& a, float s) {
-    return Vec3f{a.x() * s, a.y() * s, a.z() * s};
-}
-
-inline float Dot(const Vec3f& a, const Vec3f& b) {
-    return a.x() * b.x() + a.y() * b.y() + a.z() * b.z();
-}
-
+// 加减/数乘/点积用 geom::Vec3 自带的运算符与 Dot() 成员，这里只补 Hermite 需要的两个。
 inline Vec3f Lerp(const Vec3f& a, const Vec3f& b, float t) {
     return Vec3f{a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
                  a.z() + (b.z() - a.z()) * t};
 }
 
 // 三次 Hermite（m0/m1 是 ∂P/∂t，t ∈ [0,1]）。
-// **必须与 kSmoothFsTail 里的求值逐项一致**：CPU 用它算外扩量，FS 用它重建曲面。
+// **必须与 kSmoothFsMain 里的求值逐项一致**：CPU 用它算外扩量，FS 用它重建曲面。
 inline Vec3f Hermite(const Vec3f& p0, const Vec3f& m0, const Vec3f& p1,
                      const Vec3f& m1, float t) {
     const float t2 = t * t;
@@ -281,8 +266,8 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
         const uint32_t src = std::min(static_cast<uint32_t>(col), last_real);
         const Vec3f& l = strip.left[src];
         const Vec3f& r = strip.right[src];
-        out->center[col] = smooth_internal::Scale(smooth_internal::Add(l, r), 0.5f);
-        out->half[col] = smooth_internal::Scale(smooth_internal::Sub(l, r), 0.5f);
+        out->center[col] = (l + r) * 0.5f;
+        out->half[col] = (l - r) * 0.5f;
     }
 
     // ② 切线：内部用中心差分（相邻段共用同一列切线 ⇒ C1 的来源），
@@ -297,10 +282,8 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
         const int im = std::max(c - 1, 0);
         const int ip = std::min(c + 1, last_real_i);
         const float w = (ip - im == 2) ? 0.5f : 1.0f;
-        out->center_tan[col] = smooth_internal::Scale(
-            smooth_internal::Sub(out->center[ip], out->center[im]), w);
-        out->half_tan[col] = smooth_internal::Scale(
-            smooth_internal::Sub(out->half[ip], out->half[im]), w);
+        out->center_tan[col] = (out->center[ip] - out->center[im]) * w;
+        out->half_tan[col] = (out->half[ip] - out->half[im]) * w;
     }
 
     // ③ 自动外扩量：真实曲线相对弦在**宽度方向上**的最大外凸量，按**绝对量（米）**算
@@ -322,15 +305,15 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
             if (len < 1e-5f) {
                 continue;   // 退化段（宽度为 0）：没有"外侧"可言
             }
-            const Vec3f w{lh.x() / len, lh.y() / len, lh.z() / len};
+            const Vec3f w = lh * (1.0f / len);
             const Vec3f sc = smooth_internal::Hermite(
                 out->center[seg], out->center_tan[seg], out->center[seg + 1],
                 out->center_tan[seg + 1], t);
             const Vec3f sh = smooth_internal::Hermite(
                 out->half[seg], out->half_tan[seg], out->half[seg + 1],
                 out->half_tan[seg + 1], t);
-            const float dl = smooth_internal::Dot(smooth_internal::Sub(sc, lc), w);
-            const float dhw = smooth_internal::Dot(smooth_internal::Sub(sh, lh), w);
+            const float dl = (sc - lc).Dot(w);
+            const float dhw = (sh - lh).Dot(w);
             // 左轨（v=1）外法向 = +w；右轨（v=0）外法向 = −w。
             margin = std::max(margin, std::max(dl + dhw, -dl + dhw));
         }
@@ -356,7 +339,7 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
 
 // 追加一条条带的数据纹理行：kStripSampleCount × 12 float。
 //
-// 打包约定（**与 kSmoothFsTail 的解包逐字对应**，改一边必须改另一边）：
+// 打包约定（**与 kSmoothFsMain 的解包逐字对应**，改一边必须改另一边）：
 //   每列 12 float = c.xyz, m.xyz, h.xyz, n.xyz
 //   → 每 3 个 texel 一组：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
 inline void AppendSmoothStripData(const SmoothStripCompute& computed,
