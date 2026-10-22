@@ -280,6 +280,12 @@ inline void MeshData::Validate() const {
         << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
+    // kWind 与 kJoints **互斥**：两者抢同一组顶点属性槽（loc3：蒙皮 `aJoint` vs
+    // 风的两关节权重 `aWindW`）。VAO 里只能绑一个，绑定顺序错了就是「权静默错位」——
+    // 看到的是模型变形怪异，而不是报错。这一条以前只写在 mesh_manager.cc 的注释里
+    // （「植被 mesh 不会被蒙皮路径绘制」），属于靠约定守着；放到 Validate 才是硬约束。
+    CHECK(!(joints_declared && MeshHasFlag(flags, MeshVertexFlags::kWind)))
+        << "MeshData::Validate: kWind 与 kJoints 互斥（同占 loc3：aWindW vs aJoint）";
     if (joints_declared) {
         // 5. 骨骼 flag 时 joint_indices / joint_weights 必须成对存在且对齐
         CHECK_EQ(joint_indices.size(), vcount)

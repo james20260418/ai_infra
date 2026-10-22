@@ -393,6 +393,35 @@ TEST(GltfSaverTest, WrittenInverseBindAccessorCountMatchesBones) {
 
 // ==================== 4. 负面 ====================
 
+// 风（kWind）与蒙皮（kJoints）互斥：两者抢 loc3（aWindW vs aJoint），
+// 同时声明会让「权重绑到哪个属性」取决于绑定顺序 —— 静默错位，必须当场崩。
+TEST(GltfSaverTest, WindAndSkinFlagsAreMutuallyExclusive) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = -1.0f;
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "kWind 与 kJoints 互斥");
+}
+
+// 负向对照：只留风、拆掉蒙皮数组并清掉 kJoints 位 ⇒ 同一个 mesh 必须能过。
+TEST(GltfSaverTest, WindWithoutSkinValidates) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = -1.0f;
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    m.Validate();   // 不崩即通过
+}
+
 TEST(GltfSaverTest, EmptyAssetCrashes) {
     GltfSaveAsset asset;   // 无 mesh
     EXPECT_DEATH(WriteGlb(asset, TmpPath("empty")), "没有任何 primitive");
