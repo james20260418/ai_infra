@@ -75,6 +75,11 @@ public:
 
     // 顶点着色器（折线 pass）：位置/uv 已由 CPU 展开好，这里只做 MVP。
     // vWorld 只为 fresnel 服务（导数法线必须拿到**世界空间**位置）。
+    //
+    // vStripId 是**免费**的：索引缓冲按「块 j = 顶点基址 j×32」静态生成，
+    // 于是 `gl_VertexID / 32` 就是条带下标（索引绘制里 gl_VertexID = 索引值本身）。
+    // 所以 per-instance 颜色**不需要**新增顶点属性（平滑 pass 已经有 aStripId 属性）。
+    // 32 = kStripVerticesPerStrip，GLSL 引用不到 C++ 常量，改一处必须同步另一处。
     static constexpr const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -82,9 +87,11 @@ layout(location = 1) in vec3 aUVAlpha;   // (u, v, alpha)
 uniform mat4 uViewProj;
 out vec3 vUVAlpha;
 out vec3 vWorld;
+flat out float vStripId;
 void main() {
     vUVAlpha = aUVAlpha;
     vWorld = aPos;
+    vStripId = float(gl_VertexID / 32);
     gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )glsl";
@@ -94,7 +101,10 @@ void main() {
 #version 330 core
 in vec3 vUVAlpha;                 // (u, v, alpha)
 in vec3 vWorld;                   // 世界坐标（fresnel 求法线/视线用）
+flat in float vStripId;           // 本片元所属条带（= 逐条带数据的下标）
 uniform sampler2D uTex;
+uniform sampler2D uStripTint;     // 逐条带 tint：1 texel / 条带（宽 = N，高 = 1），RGBA32F
+uniform int uHasStripTint;        // 0 = 本批没有逐条带颜色（只用 uTint，零取样）
 uniform int uHasTex;
 uniform vec4 uTint;
 uniform float uProfile[9];        // 宽度方向（v）= k/8 处的 alpha 乘子
@@ -119,6 +129,16 @@ layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+}
+// 本片元的最终 tint = 整批材质色 ×（有则）逐条带颜色。
+// 逐条带颜色走**纹理**而不是顶点属性：折线 pass 靠 gl_VertexID/32 免费得到条带下标，
+// 平滑 pass 本来就有 aStripId ⇒ 两条 pass 都不加任何顶点数据。
+// 同一个条带的所有片元读同一个 texel，NEAREST + 整数坐标 ⇒ 精确常量，无插值误差。
+vec4 EffectiveTint() {
+    if (uHasStripTint == 1) {
+        return uTint * texelFetch(uStripTint, ivec2(int(vStripId), 0), 0);
+    }
+    return uTint;
 }
 // 宽度方向剖面：9 knot / 8 段分段线性，在片元里求值（不是在顶点里插值）。
 // 参数是**宽度方向**的 v（0 = right 边 / 1 = left 边）。
@@ -209,8 +229,9 @@ void EmitFragment(vec3 color, float a) {
     // 16 列折线上会看到一圈圈亮带，要光滑请切 kSmooth）。
     static constexpr const char* kFsMain = R"glsl(
 void main() {
-    vec3 color = uTint.rgb;
-    float a = uTint.a * vUVAlpha.z;
+    vec4 tint = EffectiveTint();
+    vec3 color = tint.rgb;
+    float a = tint.a * vUVAlpha.z;
     ModulateTexture(vUVAlpha.xy, color, a);
     ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
     a *= WidthProfile(vUVAlpha.y);
@@ -244,7 +265,6 @@ void main() {
 )glsl";
 
     static constexpr const char* kSmoothFsMain = R"glsl(
-flat in float vStripId;           // 所属条带 = 数据纹理行号（vWorld 已在公共头声明）
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
 // 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
@@ -316,8 +336,9 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    vec3 color = uTint.rgb;
-    float a = uTint.a * vUVAlpha.z;
+    vec4 tint = EffectiveTint();
+    vec3 color = tint.rgb;
+    float a = tint.a * vUVAlpha.z;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
@@ -384,6 +405,8 @@ private:
         int soft_enabled = -1;
         int soft_m = -1;
         int cam_pos = -1;
+        int strip_tint = -1;
+        int has_strip_tint = -1;
         int fresnel_enabled = -1;
         int fresnel_rim_color = -1;
         int fresnel_f0 = -1;
@@ -411,6 +434,7 @@ private:
     struct BatchDrawContext {
         const TranslucentStripBatch* batch = nullptr;
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
+        bool has_strip_tint = false;        // 本批是否上传了逐条带 tint 纹理
         bool want_additive = false;         // 本批走加法集
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
@@ -447,6 +471,8 @@ private:
     SmoothUniforms smooth_uniforms_;
     unsigned int smooth_vao_ = 0;
     unsigned int smooth_vbo_ = 0;
+    unsigned int strip_tint_tex_ = 0;     // RGBA32F：1 texel / 条带（宽 = 条带数，高 = 1）
+    int strip_tint_capacity_ = 0;         // 当前纹理宽度（条带数上限）
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
     int smooth_max_rows_ = 0;             // GL_MAX_TEXTURE_SIZE（Init 时缓存）

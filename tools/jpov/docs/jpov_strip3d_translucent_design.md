@@ -764,33 +764,54 @@ color = mix(color, rim_color, F)                  // 掠过视线 → 反射色
   接缝处参数化有一个很小的折点；折线 pass 天然没有这个问题。
 - 圆环只有 15 段：折线 pass 的边反会有可见分面（这是 §19.3 的固有取舍）。
 
-### 19.7 菲涅耳参数：per draw call 还是 per instance？（2026-10-22 讨论）
+### 19.7 参数归属：per draw call 还是 per instance？（2026-10-22）
 
-结论：**全部留在 per draw call（batch），不引入 per-instance。** 依据是现有不变式
-「一个 batch = 一种材质 = 一次 draw call」：`texture_id / tint / blend / soft_depth_m /
-width_profile / style` 已经在 batch 上，fresnel 跟它们是同一层的材质属性。
+Danis 的判定：**「至少玻璃的颜色 / 条带的颜色，应该 per instance」** —— 是对的，
+第一版把所有东西都留在 batch 上属于过粗。修正后的划分：
 
-| 参数 | 归属 | 理由 |
+| 数据 | 归属 | 说明 |
 |---|---|---|
-| `power`（Schlick 指数） | **batch**（实际可视作渲染器常量） | 它是「用几阶近似」的模型参数，不是材质；一个场景里不该有两种 |
-| `f0`（正入射反射率） | **batch** | 折射率 = 材质属性。换玻璃 = 换材质 = 换 batch |
-| `rim_color` | **batch** | 反射/染色 = 材质属性（同 tint） |
-| `strength` | **batch** | 美术夸张系数，跟着材质走 |
-| `graze_alpha` | **batch**，但**已有 per-strip 通道** | 边缘实心度是「这层壳多实」。fresnel 里是 `mix(α, graze_alpha·逐点α, F)` ⇒ **缩放逐点 alpha 就能逐条带调边反浓度**（`Strip16::alpha` 本来就是 per-strip 数据） |
+| **颜色 / 不透明度（tint）** | **per instance** | 同一批里每条拖尾/每片玻璃偏什么色、多透，是实例属性。这是 `strip_tints` 通道的用途 |
+| `f0`（正入射反射率） | per draw call | 折射率 = 材质。换玻璃 = 换材质 = 换 batch |
+| `power`（Schlick 指数） | per draw call（实际可视作渲染器常量） | 「用几阶近似」是模型参数，一个场景不该有两种 |
+| `rim_color`（边反颜色） | per draw call | 它是**反射到的环境色**的替身，不是物体色；同一环境里所有玻璃共用 |
+| `strength` | per draw call | 美术夸张系数，跟着材质走 |
+| `graze_alpha` | per draw call | 边「多实」是材质厚度感；逐实例的浓度已可被 `strip_tints[i].a` 整体缩放 |
+| `width_profile` | per draw call | 剖面是材质（柔边/硬边），不是实例 |
 
-为什么不做 per-instance（以及将来真要做的话该放哪）：
+**per-instance 是近乎零成本的**（这也是为什么值得做）：
 
-1. **两条 pass 的代价不对称。** kSmooth 已经有「每条带一行」的数据纹理（每列 3 texel，
-   12 float 用满），加一个 per-strip 值要么每列多 1 texel（+33% 该纹理带宽），
-   要么另开一张 1 texel/条带 的小纹理（便宜，但要新增绑定 + 单元 + 生命周期）。
-   kPolyline **没有任何 per-strip 通道**（顶点就是 6 float），加它要新增顶点属性 +
-   每顶点打包 —— 那条路径本来是「最便宜」的卖点。
-2. **一个 batch 已经是一种材质。** 要「同场景里不同玻璃」就发多个 batch（每个一次
-   draw call）；几个玻璃物体多几次 draw call 在这个量级上不是问题。
-   真正需要 per-instance 的场景是「同材质 × 上千实例」，而条带目前不做 instancing。
-3. **per-strip 的 alpha 已经覆盖了唯一合理的 per-object 差异**（边反浓度）。
+- **拿条带下标不要钱**：折线 pass 的索引缓冲按「块 j = 顶点基址 j×32」静态生成，
+  所以 VS 里 `gl_VertexID / 32` 就是条带下标（索引绘制里 `gl_VertexID` = 索引值本身）
+  ⇒ **不新增任何顶点属性**；平滑 pass 本来就有 `aStripId`。
+- 逐条带 tint 走一张 **RGBA32F、1 texel / 条带** 的小纹理（16 B/条带）+ 1 次 `texelFetch`。
+  1024 条带 = 16 KB，纹理按需翻倍扩容。
+- `Strip16`（固定 POD，用户按 stride memcpy）**一个字节都没动**：tint 是
+  `TranslucentStripBatch::strip_tints` 这个**平行数组**（空 = 全用 `tint`，零开销）。
+- 语义是**相乘**：`最终色 = tint × strip_tints[i]`。于是 `tint` 仍是「材质色 + 整批不透明度」，
+  逐实例只做偏移/浓度。三条带 demo 也顺势把原来的「改写逐点 alpha」换成了这条通道
+  （`ScaleRibbonAlpha` 删掉）：gold 的 7 个 A/B 数值与改前**逐位相同**，
+  只有 2 个像素差 1 LSB —— 反向证明了乘法语义与旧实现等价。
 
-将来若真的需要在同一 batch 里区分玻璃种类（例如为了省 draw call），推荐做法：
-**另开一张「1 texel/条带」的小纹理**（`kSmooth` 与 `kPolyline` 各加一个 strip id 属性 /
-复用 `flat` 传入），而不是把 per-column 的数据纹理撑胖，也不要给 `Strip16` 加字段
-（它是固定 POD，用户按 stride memcpy）。
+不把 fresnel 的 `f0 / rim_color` 做成 per-instance 的理由：batch 已经是一种材质的边界
+（`texture_id / blend / soft_depth_m / width_profile / style` 都在 batch 上）。真要在同一
+batch 里区分玻璃种类，正确做法是**发多个 batch**；per-instance 的价值在「同材质 × 上千实例」，
+而条带目前不做 instancing。
+
+### 19.8 复核：`width_profile`（横向 9 个 knot）真的生效吗？
+
+Danis 2026-10-22 提问。结论：**生效，且两条 pass 都是逐片元求值**（不是顶点插值，
+所以 15 段的条带也能有平滑的宽度衰减）。证据：
+
+- 代码路径：折线 `a *= WidthProfile(vUVAlpha.y)`、平滑 `a *= WidthProfile(vShade) * cov`
+  （`v` = 宽度方向，0 = right 轨 / 1 = left 轨；平滑 pass 用的是**重建后**的 `v*`）。
+- 定量：gold 的「柔边 vs 硬边」A/B = **15,980 px 差异**（区间断言 5,000~80,000）。
+- 定向实验（临时把圆环剖面改成「只有 v=0.5 一个峰」/「只有 v=0 边」）：
+  - 峰值剖面 ⇒ 只剩**沿条带长度的中缝横带**（立壁腰部一圈 + 顶面中间一个椭圆）；
+  - 只留 v=0 边 ⇒ 只剩**立壁下沿 + 顶面内圈**（= `right` 轨 = `down_outer` / `up_inner`）。
+  两种结果都是「沿宽度方向削」，不是「沿长度方向削」，且平滑 pass 与折线 pass 表现一致。
+
+**顺带修掉一个真 bug（注释）**：`strip_types.h` 的 `width_profile` 注释还写着
+「knots[k] = 在 **u** = k/8 处的乘子」—— 那是 §16.3 修正 UV 约定**之前**的写法
+（当时 u 是宽度）。实际代码用的是 v（宽度）。已改正并注明历史原因：
+这种过期注释会让人合理怀疑「横向调制到底有没有生效」，也就是这次提问的来源。

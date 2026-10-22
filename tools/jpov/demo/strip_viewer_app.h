@@ -175,14 +175,6 @@ void BuildRibbon(float phase, CenterFn center_fn, HalfLeftFn half_left_fn,
     out->point_count = static_cast<uint32_t>(n);
 }
 
-// 按条带整体缩放逐点 alpha（让多条同色带在重叠处可分辨）。
-inline void ScaleRibbonAlpha(float scale, jpov::Strip16* strip) {
-    CHECK(strip != nullptr) << "ScaleRibbonAlpha: strip 不能为空";
-    for (float& a : strip->alpha) {
-        a *= scale;
-    }
-}
-
 // ① 波带：沿 +X 前进，Y 方向正弦起伏，带内轻微前后摆动。
 inline void BuildWaveRibbon(float phase, float width_scale, float amplitude,
                             jpov::Strip16* out) {
@@ -243,23 +235,25 @@ inline bool BuildDemoBatch(const RibbonShape& shape, const RibbonVisibility& vis
                            jpov::TranslucentStripBatch* out) {
     CHECK(out != nullptr) << "BuildDemoBatch: out 不能为空";
     out->strips.clear();
+    // 三条带各自的不透明度走**逐条带 tint**（per instance），而不是改写逐点 alpha：
+    // 重叠处要能分辨、又不想为每条带单独发一次 draw call，这正是那个通道的用途。
     if (vis.wave) {
         jpov::Strip16 strip;
         BuildWaveRibbon(phase, width_scale, shape.wave_amplitude, &strip);
-        ScaleRibbonAlpha(1.00f, &strip);
         out->strips.push_back(strip);
+        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 1.00f});
     }
     if (vis.helix) {
         jpov::Strip16 strip;
         BuildHelixRibbon(phase, width_scale, shape.helix_turns, &strip);
-        ScaleRibbonAlpha(0.62f, &strip);
         out->strips.push_back(strip);
+        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.62f});
     }
     if (vis.arc) {
         jpov::Strip16 strip;
         BuildArcRibbon(phase, width_scale, shape.arc_angle, shape.arc_yaw, &strip);
-        ScaleRibbonAlpha(0.45f, &strip);
         out->strips.push_back(strip);
+        out->strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.45f});
     }
     if (out->strips.empty()) {
         return false;
@@ -442,10 +436,14 @@ private:
             }
             if (!use_texture_) {
                 // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
+                // 逐条带浓度要被**搬过去**：MakeSolidStripBatch 会重建整个 batch，
+                // 漏搬 = 三条带又变成同样不透明（gold 的加法集/剖面断言会跟着漂）。
                 jpov::Color color = solid_color_;
                 color.a = opacity_;
                 std::vector<jpov::Strip16> strips = std::move(batch.strips);
+                std::vector<jpov::Color> tints = std::move(batch.strip_tints);
                 batch = jpov::MakeSolidStripBatch(color, std::move(strips));
+                batch.strip_tints = std::move(tints);
             }
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;

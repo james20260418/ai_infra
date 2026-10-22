@@ -118,6 +118,17 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
         CHECK_GT(*batch.soft_depth_m, 0.0f)
             << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
     }
+    if (!batch.strip_tints.empty()) {
+        // 长度不匹配 = 某些条带会用错颜色（或读到数组外），必须崩而不是静默容忍。
+        CHECK_EQ(batch.strip_tints.size(), batch.strips.size())
+            << "StripBatch: strip_tints 非空时必须与 strips 等长";
+        for (size_t i = 0; i < batch.strip_tints.size(); ++i) {
+            const Color& c = batch.strip_tints[i];
+            CHECK(c.r >= 0.0f && c.r <= 1.0f && c.g >= 0.0f && c.g <= 1.0f &&
+                  c.b >= 0.0f && c.b <= 1.0f && c.a >= 0.0f && c.a <= 1.0f)
+                << "StripBatch: strip_tints[" << i << "] 各分量必须在 [0,1]";
+        }
+    }
     if (batch.fresnel.has_value()) {
         const StripFresnel& f = *batch.fresnel;
         CHECK(f.f0 >= 0.0f && f.f0 <= 1.0f)

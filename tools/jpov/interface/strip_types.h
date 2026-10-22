@@ -155,7 +155,8 @@ struct TranslucentStripBatch {
     // 线性淡出，消除条带与几何相交处的硬切边。
     std::optional<float> soft_depth_m;
 
-    // 宽度方向的 alpha 剖面：knots[k] = 在 u = k/8 处的乘子（9 个 knot / 8 段）。
+    // **宽度方向（v）**的 alpha 剖面：knots[k] = 在 v = k/8 处的乘子（9 个 knot / 8 段）。
+    // （§16.3 修正 UV 约定后，u 是长度方向、v 才是宽度方向；这里的注释在修正前写成了 u。）
     // 默认全 1 = 不衰减（硬边）。要让边缘柔和/单侧渐隐就在 FS 里改这里。
     // 在**片元**里逐像素求值（不是顶点插值），所以 4 段几何也能有平滑剖面。
     std::array<float, 9> width_profile = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
@@ -170,7 +171,22 @@ struct TranslucentStripBatch {
 
     // 菲涅耳（见 StripFresnel）。nullopt = 关闭 —— 画面逐字节等于没有这个功能。
     std::optional<StripFresnel> fresnel;
+
+    // **逐条带（per instance）颜色/不透明度乘子**。空 = 整批用 tint（默认，零开销）。
+    //
+    // 语义是**相乘**：某条带的最终色 = tint × strip_tints[i]，
+    // 于是 tint 仍是「材质色 + 整批不透明度」，这里是「这个实例偏什么色、多透」。
+    // 这也让「同一批里每条拖尾颜色不同」不必拆成多个 draw call。
+    //
+    // 为什么是**平行数组**而不是往 Strip16 里加字段：Strip16 是固定 POD
+    // （用户按 stride memcpy / 存盘），加字段 = 破坏契约；平行数组对它是零侵入。
+    //
+    // 非空时必须与 strips 等长（ValidateStripBatch 会检查，长度不匹配 = 静默错色）。
+    std::vector<Color> strip_tints;
 };
+
+// 上传路径直接把 Color 当 4 个 float 传给 GL（RGBA32F 纹理），布局不能变。
+static_assert(sizeof(Color) == 4 * sizeof(float), "Color 必须是紧凑的 4 float");
 
 // 纯色批：不采样纹理，直接用 color 当条带颜色（color.a = 不透明度乘子）。
 //

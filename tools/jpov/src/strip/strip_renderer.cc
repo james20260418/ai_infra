@@ -37,6 +37,8 @@ constexpr int kStripTexUnit = 1;
 // 平滑 pass 的控制点数据纹理（RGBA32F）。**pass-local**：本 pass 与其他 pass 不同时活跃，
 // 所以不占 texture_units.h 的跨 pass 区间（那张表里 unit 2 是材质 roughness）。
 constexpr int kSmoothDataUnit = 2;
+// 逐条带 tint（RGBA32F，1 texel / 条带）。同样 pass-local。
+constexpr int kStripTintUnit = 3;
 
 }  // namespace
 
@@ -119,6 +121,18 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    // 逐条带 tint：宽 = 条带数、高 = 1。NEAREST + CLAMP（texelFetch 本来就不走过滤）。
+    glGenTextures(1, &strip_tint_tex_);
+    CHECK_NE(strip_tint_tex_, 0u);
+    glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    strip_tint_capacity_ = 64;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, strip_tint_capacity_, 1, 0, GL_RGBA,
+                 GL_FLOAT, nullptr);
+
     glGenTextures(1, &smooth_data_tex_);
     CHECK_NE(smooth_data_tex_, 0u);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
@@ -162,6 +176,8 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->soft_enabled = shader_mgr_->GetUniform(program, "uSoftDepthEnabled");
     out->soft_m = shader_mgr_->GetUniform(program, "uSoftDepthM");
     out->cam_pos = shader_mgr_->GetUniform(program, "uCamPos");
+    out->strip_tint = shader_mgr_->GetUniform(program, "uStripTint");
+    out->has_strip_tint = shader_mgr_->GetUniform(program, "uHasStripTint");
     out->fresnel_enabled = shader_mgr_->GetUniform(program, "uFresnelEnabled");
     out->fresnel_rim_color = shader_mgr_->GetUniform(program, "uFresnelRimColor");
     out->fresnel_f0 = shader_mgr_->GetUniform(program, "uFresnelF0");
@@ -207,6 +223,11 @@ void StripRenderer::Finalize() {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
+    if (strip_tint_tex_ != 0) {
+        glDeleteTextures(1, &strip_tint_tex_);
+        strip_tint_tex_ = 0;
+    }
+    strip_tint_capacity_ = 0;
     if (smooth_data_tex_ != 0) {
         glDeleteTextures(1, &smooth_data_tex_);
         smooth_data_tex_ = 0;
@@ -284,6 +305,30 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
                                  << " 未注册";
     }
 
+    // 逐条带 tint（可选）：整批一次上传（宽 = 条带数、高 = 1）。
+    // 放在两个 drawer 之前：它是**批级**数据，两条 pass 用同一个采样器。
+    if (!batch.strip_tints.empty()) {
+        const int count = static_cast<int>(batch.strip_tints.size());
+        if (count > strip_tint_capacity_) {
+            const int grown = std::max(count, strip_tint_capacity_ * 2);
+            CHECK_LE(grown, smooth_max_rows_)
+                << "StripRenderer::Draw: 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
+                << smooth_max_rows_ << "），逐条带 tint 放不下";
+            strip_tint_capacity_ = grown;
+            glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, strip_tint_capacity_, 1, 0,
+                         GL_RGBA, GL_FLOAT, nullptr);
+        }
+        // unit 0 归位再绑：上传不该依赖上一个 pass 留下的 active unit
+        //（本 pass 的约定同样是「进来时 unit 0 已激活」）。
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
+        // Color 是紧凑的 4 float（见 strip_types.h 的 static_assert），可直接上传。
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, count, 1, GL_RGBA, GL_FLOAT,
+                        batch.strip_tints.data());
+        ctx.has_strip_tint = true;
+    }
+
     // 两个独立 drawer，写同一张 WBO 目标（命令顺序 = 前后顺序）。
     if (batch.style == StripStyle::kSmooth) {
         DrawSmooth(ctx);
@@ -326,6 +371,16 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, ctx.scene_depth_tex);
     glUniform1i(uniforms.scene_depth, kSceneDepthUnit);
+
+    // 逐条带 tint：没有就置 0，FS 走「只用 uTint」的分支（一次取样都不做）。
+    if (ctx.has_strip_tint) {
+        glActiveTexture(GL_TEXTURE0 + kStripTintUnit);
+        glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
+        glUniform1i(uniforms.strip_tint, kStripTintUnit);
+        glUniform1i(uniforms.has_strip_tint, 1);
+    } else {
+        glUniform1i(uniforms.has_strip_tint, 0);
+    }
 
     // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
     // uniform 是无法排查的隐患）；开启时按批取值。

@@ -650,3 +650,24 @@ TEST(StripGeometry, RejectsBadFresnelParams) {
     rim.fresnel->rim_color = jpov::Vec3f{-0.1f, 0.0f, 0.0f};
     EXPECT_DEATH(jpov::ValidateStripBatch(rim), "fresnel.rim_color");
 }
+
+TEST(StripGeometry, StripTintsArePerInstanceAndMustMatchCount) {
+    // 逐条带颜色是 per instance 通道：长度不匹配会让某些条带用错颜色（或读越界），
+    // 而画面只会「颜色不对」，不会崩 —— 所以必须在这里拦住。
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.62f});
+    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
+
+    jpov::TranslucentStripBatch empty = MakeBatch(16);
+    empty.strip_tints.clear();      // 空 = 全部用 tint（默认行为）
+    jpov::ValidateStripBatch(empty);
+
+    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
+    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 1.0f});
+    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.5f});
+    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
+
+    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
+    out_of_range.strip_tints.push_back(jpov::Color{1.5f, 1.0f, 1.0f, 1.0f});
+    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_tints");
+}
