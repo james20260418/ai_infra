@@ -671,3 +671,51 @@ TEST(StripGeometry, StripTintsArePerInstanceAndMustMatchCount) {
     out_of_range.strip_tints.push_back(jpov::Color{1.5f, 1.0f, 1.0f, 1.0f});
     EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_tints");
 }
+
+TEST(StripGeometry, AdditiveGainRequiresEmissiveAndPositive) {
+    // 加法集 HDR 增益：只在 kEmissive 上有意义。给覆盖集设它必须崩 ——
+    // 覆盖集没有加法附件，静默忽略会让用户以为亮度已经加上去了。
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.blend = jpov::StripBlend::kEmissive;
+    ok.additive_gain = 3.0f;
+    jpov::ValidateStripBatch(ok);
+
+    jpov::TranslucentStripBatch coverage = MakeBatch(16);
+    coverage.additive_gain = 3.0f;   // blend 仍是 kCoverage
+    EXPECT_DEATH(jpov::ValidateStripBatch(coverage), "additive_gain");
+
+    jpov::TranslucentStripBatch zero = MakeBatch(16);
+    zero.blend = jpov::StripBlend::kEmissive;
+    zero.additive_gain = 0.0f;       // 0 = 全黑，没意义（想关闭请置 nullopt）
+    EXPECT_DEATH(jpov::ValidateStripBatch(zero), "additive_gain");
+
+    jpov::TranslucentStripBatch negative = MakeBatch(16);
+    negative.blend = jpov::StripBlend::kEmissive;
+    negative.additive_gain = -2.0f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(negative), "additive_gain");
+}
+
+TEST(StripGeometry, PointColorsMustMatchCountAndRange) {
+    jpov::StripPointColors colors{};
+    for (jpov::Color& c : colors) {
+        c = jpov::Color{1.0f, 0.5f, 0.25f, 1.0f};
+    }
+
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.strip_point_colors.push_back(colors);
+    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
+
+    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
+    mismatch.strip_point_colors.push_back(colors);
+    mismatch.strip_point_colors.push_back(colors);   // 2 != 1
+    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
+
+    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
+    jpov::StripPointColors bad{};
+    for (jpov::Color& c : bad) {
+        c = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    bad[7].g = 1.5f;   // 第 7 列越界
+    out_of_range.strip_point_colors.push_back(bad);
+    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_point_colors");
+}

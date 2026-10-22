@@ -39,6 +39,8 @@ constexpr int kStripTexUnit = 1;
 constexpr int kSmoothDataUnit = 2;
 // 逐条带 tint（RGBA32F，1 texel / 条带）。同样 pass-local。
 constexpr int kStripTintUnit = 3;
+// 逐点颜色（RGBA32F，16 列 × 条带数）。同样 pass-local。
+constexpr int kPointColorUnit = 4;
 
 }  // namespace
 
@@ -133,6 +135,19 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, strip_tint_capacity_, 1, 0, GL_RGBA,
                  GL_FLOAT, nullptr);
 
+    // 逐点颜色：宽 = 16 列（= kStripSampleCount）、高 = 条带数。
+    // **LINEAR**（这是唯一需要过滤的条带纹理：列与列之间要平滑过渡）+ CLAMP_TO_EDGE。
+    glGenTextures(1, &point_color_tex_);
+    CHECK_NE(point_color_tex_, 0u);
+    glBindTexture(GL_TEXTURE_2D, point_color_tex_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    point_color_rows_ = 64;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount, point_color_rows_, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+
     glGenTextures(1, &smooth_data_tex_);
     CHECK_NE(smooth_data_tex_, 0u);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
@@ -178,6 +193,10 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->cam_pos = shader_mgr_->GetUniform(program, "uCamPos");
     out->strip_tint = shader_mgr_->GetUniform(program, "uStripTint");
     out->has_strip_tint = shader_mgr_->GetUniform(program, "uHasStripTint");
+    out->point_color = shader_mgr_->GetUniform(program, "uPointColor");
+    out->has_point_color = shader_mgr_->GetUniform(program, "uHasPointColor");
+    out->point_color_rows = shader_mgr_->GetUniform(program, "uPointColorRows");
+    out->additive_gain = shader_mgr_->GetUniform(program, "uAdditiveGain");
     out->fresnel_enabled = shader_mgr_->GetUniform(program, "uFresnelEnabled");
     out->fresnel_rim_color = shader_mgr_->GetUniform(program, "uFresnelRimColor");
     out->fresnel_f0 = shader_mgr_->GetUniform(program, "uFresnelF0");
@@ -228,6 +247,11 @@ void StripRenderer::Finalize() {
         strip_tint_tex_ = 0;
     }
     strip_tint_capacity_ = 0;
+    if (point_color_tex_ != 0) {
+        glDeleteTextures(1, &point_color_tex_);
+        point_color_tex_ = 0;
+    }
+    point_color_rows_ = 0;
     if (smooth_data_tex_ != 0) {
         glDeleteTextures(1, &smooth_data_tex_);
         smooth_data_tex_ = 0;
@@ -329,6 +353,27 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
         ctx.has_strip_tint = true;
     }
 
+    // 逐点颜色（可选）：每条带一行 16 texel，整批一次上传。
+    if (!batch.strip_point_colors.empty()) {
+        const int count = static_cast<int>(batch.strip_point_colors.size());
+        if (count > point_color_rows_) {
+            const int grown = std::max(count, point_color_rows_ * 2);
+            CHECK_LE(grown, smooth_max_rows_)
+                << "StripRenderer::Draw: 单批条带数超过 GL_MAX_TEXTURE_SIZE（"
+                << smooth_max_rows_ << "），逐点颜色纹理放不下";
+            point_color_rows_ = grown;
+            glBindTexture(GL_TEXTURE_2D, point_color_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripSampleCount,
+                         point_color_rows_, 0, GL_RGBA, GL_FLOAT, nullptr);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, point_color_tex_);
+        // 一行 = 16 个 Color（16×4 float），整块连续（见 strip_types.h 的 static_assert）。
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kStripSampleCount, count, GL_RGBA,
+                        GL_FLOAT, batch.strip_point_colors.data());
+        ctx.has_point_color = true;
+    }
+
     // 两个独立 drawer，写同一张 WBO 目标（命令顺序 = 前后顺序）。
     if (batch.style == StripStyle::kSmooth) {
         DrawSmooth(ctx);
@@ -381,6 +426,22 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     } else {
         glUniform1i(uniforms.has_strip_tint, 0);
     }
+    if (ctx.has_point_color) {
+        glActiveTexture(GL_TEXTURE0 + kPointColorUnit);
+        glBindTexture(GL_TEXTURE_2D, point_color_tex_);
+        glUniform1i(uniforms.point_color, kPointColorUnit);
+        glUniform1i(uniforms.has_point_color, 1);
+        // 行号钳位用**实际纹理高度**（不是条带数）：整批一次性上传，两者在扩容后不同。
+        glUniform1f(uniforms.point_color_rows, static_cast<float>(point_color_rows_));
+    } else {
+        glUniform1i(uniforms.has_point_color, 0);
+        glUniform1f(uniforms.point_color_rows, 1.0f);
+    }
+    // HDR 增益：覆盖集恒 1.0（FS 里那个分支不取它，但别读未初始化的 uniform）。
+    glUniform1f(uniforms.additive_gain,
+                (batch.blend == StripBlend::kEmissive && batch.additive_gain.has_value())
+                    ? *batch.additive_gain
+                    : 1.0f);
 
     // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
     // uniform 是无法排查的隐患）；开启时按批取值。

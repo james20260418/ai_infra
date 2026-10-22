@@ -129,6 +129,27 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
                 << "StripBatch: strip_tints[" << i << "] 各分量必须在 [0,1]";
         }
     }
+    if (batch.additive_gain.has_value()) {
+        // 覆盖集没有加法附件：设了增益只会被静默忽略 —— 崩掉，别让用户以为它生效了。
+        CHECK(batch.blend == StripBlend::kEmissive)
+            << "StripBatch: additive_gain 只在 blend == kEmissive 时有意义";
+        const float gain = *batch.additive_gain;
+        CHECK(gain > 0.0f && gain <= 1000.0f)
+            << "StripBatch: additive_gain 必须在 (0,1000]（想关闭请置 nullopt），当前=" << gain;
+    }
+    if (!batch.strip_point_colors.empty()) {
+        CHECK_EQ(batch.strip_point_colors.size(), batch.strips.size())
+            << "StripBatch: strip_point_colors 非空时必须与 strips 等长";
+        for (size_t i = 0; i < batch.strip_point_colors.size(); ++i) {
+            for (int k = 0; k < kStripSampleCount; ++k) {
+                const Color& c = batch.strip_point_colors[i][static_cast<size_t>(k)];
+                CHECK(c.r >= 0.0f && c.r <= 1.0f && c.g >= 0.0f && c.g <= 1.0f &&
+                      c.b >= 0.0f && c.b <= 1.0f && c.a >= 0.0f && c.a <= 1.0f)
+                    << "StripBatch: strip_point_colors[" << i << "][" << k
+                    << "] 各分量必须在 [0,1]";
+            }
+        }
+    }
     if (batch.fresnel.has_value()) {
         const StripFresnel& f = *batch.fresnel;
         CHECK(f.f0 >= 0.0f && f.f0 <= 1.0f)

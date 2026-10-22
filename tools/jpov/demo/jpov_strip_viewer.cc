@@ -105,10 +105,15 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         int fresnel_preset = 0;      // kFresnelPresets 下标（fresnel=false 时不生效）
         bool ring_at_origin = false; // 圆环挪到原点：只看圆环时居中
         bool boxes = true;           // 背景参考方块（只看圆环时关掉，免得透过玻璃挡住环体）
+        bool jet = true;             // 火箭射流（加法集 + HDR 增益 + 逐点颜色）
+        float jet_gain = 3.0f;       // 射流 HDR 增益
+        bool bloom = true;           // 辉光（HDR 高亮够亮才看得出来）
         float camera_r = jpov_strip::kViewDefaults.R;
     };
     const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
     const float kRingR = 3.6f;   // 只看圆环时的机位（充满画面又不贴脸）
+    // 注意 10~50 是**折线 pass** 的基线（M1~M3 的特性验收）；viewer 交互模式的默认
+    // 现在是平滑 pass（80 / 200 / 220 是平滑版本），折线仍可用面板切回来做 A/B。
     const Shot kShots[] = {
         {.name = "10_default"},
         {.name = "15_no_strips", .show_strips = false},
@@ -145,6 +150,15 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         // 默认场景（三条带 + 圆环同屏）：看边反在完整场景里的观感。
         {.name = "180_scene_with_ring"},
         {.name = "185_scene_smooth_ring", .smooth = true},
+        // 射流：同时验「加法集 HDR 增益 + 逐点颜色（白→红）+ 中心实两侧虚剖面」。
+        // 200 平滑 / 205 折线是同一机位的 style A/B（射流没有大折角，差别主要在软边上）。
+        {.name = "200_jet_smooth", .ribbons = false, .ring = false, .smooth = true},
+        {.name = "205_jet_polyline", .ribbons = false, .ring = false},
+        {.name = "210_jet_no_bloom", .ribbons = false, .ring = false, .smooth = true,
+         .bloom = false},
+        {.name = "215_jet_gain8", .ribbons = false, .ring = false, .smooth = true,
+         .jet_gain = 8.0f},
+        {.name = "220_scene_with_jet", .smooth = true},
     };
     for (const Shot& shot : kShots) {
         CHECK(shot.fresnel_preset >= 0 && shot.fresnel_preset < jpov_strip::kFresnelPresetCount)
@@ -153,6 +167,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         app.vis_ = jpov_strip::RibbonVisibility{shot.ribbons, shot.ribbons, shot.ribbons};
         app.ring_visible_ = shot.ring;
         app.boxes_visible_ = shot.boxes;
+        app.jet_visible_ = shot.jet;
+        app.jet_gain_ = shot.jet_gain;
+        app.bloom_ = shot.bloom;
         app.use_texture_ = shot.use_texture;
         app.soft_edges_ = shot.soft_edges;
         app.arc_additive_ = shot.arc_additive;
@@ -181,6 +198,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.fresnel_enabled_ = true;
     app.fresnel_preset_ = 0;
     app.ring_shape_ = jpov_strip::MakeSceneRingShape();
+    app.jet_visible_ = true;
+    app.jet_gain_ = 3.0f;
+    app.bloom_ = true;
     app.view_.R = jpov_strip::kViewDefaults.R;
     shoot("99_panel");
 

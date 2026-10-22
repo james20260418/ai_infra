@@ -105,6 +105,10 @@ flat in float vStripId;           // 本片元所属条带（= 逐条带数据�
 uniform sampler2D uTex;
 uniform sampler2D uStripTint;     // 逐条带 tint：1 texel / 条带（宽 = N，高 = 1），RGBA32F
 uniform int uHasStripTint;        // 0 = 本批没有逐条带颜色（只用 uTint，零取样）
+uniform sampler2D uPointColor;    // 逐点颜色：宽 = 16 列、高 = 条带数，RGBA32F + 双线性
+uniform int uHasPointColor;       // 0 = 本批没有逐点颜色（零取样）
+uniform float uPointColorRows;    // 逐点颜色纹理高度（= 条带数，夹行号用）
+uniform float uAdditiveGain;      // 加法集的 HDR 增益（覆盖集恒 1.0，不参与）
 uniform int uHasTex;
 uniform vec4 uTint;
 uniform float uProfile[9];        // 宽度方向（v）= k/8 处的 alpha 乘子
@@ -139,6 +143,19 @@ vec4 EffectiveTint() {
         return uTint * texelFetch(uStripTint, ivec2(int(vStripId), 0), 0);
     }
     return uTint;
+}
+// 沿长度（u）的**逐点颜色**：16 列 × 每列 1 texel，硬件双线性 ⇒ 列间平滑过渡。
+// 采样坐标刻意落在 texel 正中心（u = col/15 → tx = (col+0.5)/16），
+// 于是列上的颜色是精确的、不掺邻列；两个 texel 之间才走插值。
+// 16 / 15 = kStripSampleCount / kStripQuads（GLSL 引用不到 C++ 常量，改要同步）。
+vec4 PointColor(float u) {
+    if (uHasPointColor == 0) {
+        return vec4(1.0);
+    }
+    float tx = (clamp(u, 0.0, 1.0) * 15.0 + 0.5) / 16.0;
+    // 行坐标取 texel 中心 ⇒ 竖直方向权重恰好落在本行（不会渗到相邻条带）。
+    float ty = (vStripId + 0.5) / max(uPointColorRows, 1.0);
+    return texture(uPointColor, vec2(tx, ty));
 }
 // 宽度方向剖面：9 knot / 8 段分段线性，在片元里求值（不是在顶点里插值）。
 // 参数是**宽度方向**的 v（0 = right 边 / 1 = left 边）。
@@ -203,7 +220,8 @@ void EmitFragment(vec3 color, float a) {
     }
     if (uBlendPath == 1) {
         // 加法集：发光介质直接与背景相加；黑底纹理 → 贡献 0 → 天然透明。
-        vec3 contrib = color * a * fade;
+        // uAdditiveGain 是 HDR 增益（>1 才能吃到 bloom / tone map 的余量）。
+        vec3 contrib = color * a * fade * uAdditiveGain;
         if (max(max(contrib.r, contrib.g), contrib.b) <= 1.0 / 255.0) {
             discard;
         }
@@ -230,8 +248,9 @@ void EmitFragment(vec3 color, float a) {
     static constexpr const char* kFsMain = R"glsl(
 void main() {
     vec4 tint = EffectiveTint();
-    vec3 color = tint.rgb;
-    float a = tint.a * vUVAlpha.z;
+    vec4 pc = PointColor(vUVAlpha.x);
+    vec3 color = tint.rgb * pc.rgb;
+    float a = tint.a * pc.a * vUVAlpha.z;
     ModulateTexture(vUVAlpha.xy, color, a);
     ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
     a *= WidthProfile(vUVAlpha.y);
@@ -337,8 +356,9 @@ void main() {
 
     float vShade = clamp(vStar, 0.0, 1.0);
     vec4 tint = EffectiveTint();
-    vec3 color = tint.rgb;
-    float a = tint.a * vUVAlpha.z;
+    vec4 pc = PointColor(uStar);
+    vec3 color = tint.rgb * pc.rgb;
+    float a = tint.a * pc.a * vUVAlpha.z;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
@@ -407,6 +427,10 @@ private:
         int cam_pos = -1;
         int strip_tint = -1;
         int has_strip_tint = -1;
+        int point_color = -1;
+        int has_point_color = -1;
+        int point_color_rows = -1;
+        int additive_gain = -1;
         int fresnel_enabled = -1;
         int fresnel_rim_color = -1;
         int fresnel_f0 = -1;
@@ -435,6 +459,7 @@ private:
         const TranslucentStripBatch* batch = nullptr;
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
         bool has_strip_tint = false;        // 本批是否上传了逐条带 tint 纹理
+        bool has_point_color = false;       // 本批是否上传了逐点颜色纹理
         bool want_additive = false;         // 本批走加法集
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
@@ -473,6 +498,8 @@ private:
     unsigned int smooth_vbo_ = 0;
     unsigned int strip_tint_tex_ = 0;     // RGBA32F：1 texel / 条带（宽 = 条带数，高 = 1）
     int strip_tint_capacity_ = 0;         // 当前纹理宽度（条带数上限）
+    unsigned int point_color_tex_ = 0;    // RGBA32F：16 × 条带数（每列 1 texel，双线性）
+    int point_color_rows_ = 0;            // 当前纹理高度（条带数上限）
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
     int smooth_max_rows_ = 0;             // GL_MAX_TEXTURE_SIZE（Init 时缓存）

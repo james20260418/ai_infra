@@ -815,3 +815,46 @@ Danis 2026-10-22 提问。结论：**生效，且两条 pass 都是逐片元求�
 「knots[k] = 在 **u** = k/8 处的乘子」—— 那是 §16.3 修正 UV 约定**之前**的写法
 （当时 u 是宽度）。实际代码用的是 v（宽度）。已改正并注明历史原因：
 这种过期注释会让人合理怀疑「横向调制到底有没有生效」，也就是这次提问的来源。
+
+### 19.9 加法集 HDR 增益 + 逐点颜色 + 射流验收（2026-10-22）
+
+补上 §19.6 里点名的两个缺口（Danis 指定）：
+
+**① `TranslucentStripBatch::additive_gain`（optional，nullopt = 1.0）**
+
+- 为什么必须有：`tint` 被校验限制在 [0,1]、纹理也 ≤ 1 ⇒ 加法集贡献的上限就是 1.0，
+  发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量（tone map 之前是 scene-referred，
+  亮部本该能到几倍）。
+- 语义：`contrib = color · α · fade · gain`，只对 `kEmissive` 有意义 ——
+  **给覆盖集设它会 CHECK 崩**（覆盖集没有加法附件，静默忽略等于骗人）。
+- 校验：`(0, 1000]`；0 没有意义（想关闭请置 nullopt）。
+
+**② `TranslucentStripBatch::strip_point_colors`（`vector<StripPointColors>`，空 = 不用）**
+
+- `StripPointColors = std::array<Color, 16>`：**沿长度**的逐列颜色乘子，与
+  `Strip16::alpha`（逐点淡出）互补 —— 一个管"什么颜色"，一个管"多透"。
+- 实现：一张 **16 × 条带数** 的 RGBA32F 纹理，**双线性**过滤（这是唯一需要过滤的条带纹理）。
+  采样坐标刻意落在 texel 正中心（`u = col/15 → tx = (col+0.5)/16`），列上是精确值、
+  列间才插值；`ty = (vStripId+0.5)/rows` 保证不渗到相邻条带。
+- **两条 pass 都是 1 次采样、零顶点属性**：折线 pass 的 `vStripId` 来自
+  `gl_VertexID/32`（§19.7 已有），平滑 pass 用 `aStripId`；`u` 分别取插值 u 与重建的 `u*`。
+- 为什么不进顶点属性：那要给折线 pass 加 3 float/顶点（6→9，+50% 带宽），
+  而纹理一行才 16×16 B = 256 B/条带，且两条 pass 行为完全一致。
+
+**③ viewer：火箭射流（`JetShape` / `BuildJetBatch`）**
+
+一条射流同时验三件事：白热 → 橙 → 暗红的**逐点颜色**、尾部淡出的**逐点 alpha**、
+中心实两侧虚的 **9-knot 剖面**，再叠 **加法集 + HDR 增益 + bloom**。
+用**两条交叉的条带**（同一个 batch）：单条带是平面、侧看会消失，交叉后各角度都像个射流。
+
+- 位置：喷口 (2.55, 2.35, 0.85)，方向 (0.18, −1, 0.10)，长 2.05 m，半宽 0.10 → 0.34。
+- 面板：中列「显示射流 / 射流 HDR 增益(1~8，默认 3)」，左列「Bloom 辉光（HDR）」。
+- `--capture` 新增：`200_jet_smooth` / `205_jet_polyline`（style A/B）、
+  `210_jet_no_bloom`（辉光 A/B：实测 17,456 px 差异）、`215_jet_gain8`（增益 A/B）、
+  `220_scene_with_jet`（默认场景）。折线/平滑在射流上只差 ~2,100 px（它是直筒状，差别在软边）。
+
+**④ viewer 默认改成平滑 pass（`smooth_strips_ = true`）**
+
+理由：圆环边反与射流软边只有 kSmooth 才是最终观感（§19.3）。gold **显式钉住折线**
+（`app.smooth_strips_ = false`）并显式关掉 ring / fresnel / jet / bloom ——
+gold 锁的始终是 M1~M3 那条三条带路径；本次改完两张 gold 与改前**逐字节一致**（0 px 差异）。

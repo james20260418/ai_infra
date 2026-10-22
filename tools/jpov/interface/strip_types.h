@@ -94,6 +94,16 @@ static_assert(std::is_trivially_copyable_v<Strip16>,
 static_assert(std::is_standard_layout_v<Strip16>,
               "Strip16 必须是 standard layout");
 
+// 一条带的逐点（沿长度）颜色：16 个 RGBA 乘子（下标 = 第几列，与 left/right 对齐）。
+//
+// 为什么是 `std::array` 而不是加进 Strip16：Strip16 是固定 POD（用户按 stride memcpy），
+// 加字段 = 破坏契约；逐点颜色只在"要渐变"时才需要，做成可选的平行数组更便宜。
+using StripPointColors = std::array<Color, kStripSampleCount>;
+
+// 上传路径直接把整块当 float 数组传给 GL（16×4 float，RGBA32F 一行），布局不能变。
+static_assert(sizeof(StripPointColors) == kStripSampleCount * 4 * sizeof(float),
+              "StripPointColors 必须是 16×4 个连续 float");
+
 // 混合集合（对应 WBO 的两套附件）。
 //
 //   kCoverage  —— 吸收介质（玻璃/膜/烟）：写覆盖集 accum/reveal，参与遮挡；
@@ -165,6 +175,14 @@ struct TranslucentStripBatch {
     // 本批条带（非空才画）。
     std::vector<Strip16> strips;
 
+    // 加法集的 **HDR 亮度增益**。nullopt = 1.0（原样，逐字节不变）。
+    //
+    // 为什么需要它：`tint` 各分量被校验限制在 [0,1]，纹理也 ≤ 1，所以没有这个旋钮时
+    // 加法集贡献的上限就是 1.0 —— 发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量
+    // （tone map 之前的世界是 scene-referred，亮部该能到几倍）。
+    // 只对 `blend == kEmissive` 有意义：给覆盖集设它会崩（"设了不生效"比没有更糟）。
+    std::optional<float> additive_gain;
+
     // 走哪个 pass（见 StripStyle）。同一帧可混用；两者写进同一张 WBO 覆盖集目标，
     // 所以**命令顺序 = 前后顺序**，最后只 Composite 一次。
     StripStyle style = StripStyle::kPolyline;
@@ -183,6 +201,13 @@ struct TranslucentStripBatch {
     //
     // 非空时必须与 strips 等长（ValidateStripBatch 会检查，长度不匹配 = 静默错色）。
     std::vector<Color> strip_tints;
+
+    // **逐点（沿长度）颜色**：每条带 16 个 RGBA 乘子。空 = 不用（默认，零开销）。
+    //
+    // 与 `Strip16::alpha`（逐点淡出）互补：那个管"多透"，这个管"什么颜色"。
+    // 一起用才做得出「白 → 黄 → 红、同时尾部淡出」的射流/拖尾。
+    // 非空时必须与 strips 等长；列与列之间由硬件的双线性插值平滑过渡。
+    std::vector<StripPointColors> strip_point_colors;
 };
 
 // 上传路径直接把 Color 当 4 个 float 传给 GL（RGBA32F 纹理），布局不能变。

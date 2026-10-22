@@ -269,6 +269,98 @@ inline bool BuildDemoBatch(const RibbonShape& shape, const RibbonVisibility& vis
     return true;
 }
 
+// ── ④ 火箭射流（模拟推进器）：锥形发光条带 ──
+//
+// 这条带一次演示三件东西：
+//   ① 加法集 + **HDR 增益**：亮度可以超过 1，才吃得到 bloom / tone map 的余量；
+//   ② **逐点颜色**（沿长度）：白 → 暖白 → 橙 → 红 → 暗红，尾部同时按逐点 alpha 淡出；
+//   ③ **9-knot 宽度剖面**：中心实、两侧虚（射流的横向软边）。
+// 用**两条交叉的条带**（同一个 batch）：单条带是平面，侧看会消失，交叉之后各角度都像个射流。
+struct JetShape {
+    jpov::Vec3f nozzle{2.55f, 2.35f, 0.85f};   // 喷口位置
+    jpov::Vec3f dir{0.18f, -1.0f, 0.10f};      // 喷射方向（内部归一化）
+    float length = 2.05f;                      // 射流长度（米）
+    float width0 = 0.10f;                      // 喷口处半宽
+    float width1 = 0.34f;                      // 尾部半宽（扩散）
+};
+
+// 射流颜色：s = 0（喷口）→ 1（尾端）。白热 → 暖白 → 橙 → 红 → 暗红。
+inline jpov::Color JetColorAt(float s) {
+    struct Stop {
+        float s;
+        jpov::Color c;
+    };
+    static constexpr Stop kStops[] = {
+        {0.00f, {1.00f, 1.00f, 1.00f, 1.0f}},
+        {0.18f, {1.00f, 0.93f, 0.66f, 1.0f}},
+        {0.45f, {1.00f, 0.55f, 0.12f, 1.0f}},
+        {0.75f, {0.85f, 0.17f, 0.05f, 1.0f}},
+        {1.00f, {0.30f, 0.03f, 0.02f, 1.0f}},
+    };
+    const float t = std::clamp(s, 0.0f, 1.0f);
+    for (size_t i = 1; i < sizeof(kStops) / sizeof(kStops[0]); ++i) {
+        if (t <= kStops[i].s) {
+            const Stop& a = kStops[i - 1];
+            const Stop& b = kStops[i];
+            const float f = (t - a.s) / (b.s - a.s);
+            return jpov::Color{a.c.r + (b.c.r - a.c.r) * f,
+                               a.c.g + (b.c.g - a.c.g) * f,
+                               a.c.b + (b.c.b - a.c.b) * f, 1.0f};
+        }
+    }
+    return kStops[sizeof(kStops) / sizeof(kStops[0]) - 1].c;
+}
+
+// 沿中心线 + 侧向半宽生成一条射流条带，同时填逐点颜色。
+inline void BuildJetStrip(const JetShape& shape, const jpov::Vec3f& side,
+                          jpov::Strip16* out, jpov::StripPointColors* colors) {
+    CHECK(out != nullptr) << "BuildJetStrip: out 不能为空";
+    CHECK(colors != nullptr) << "BuildJetStrip: colors 不能为空";
+    const jpov::Vec3f dir = NormalizeOr(shape.dir, {0.0f, -1.0f, 0.0f});
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        const float s = static_cast<float>(i) / static_cast<float>(jpov::kStripSampleCount - 1);
+        const jpov::Vec3f center = shape.nozzle + dir * (shape.length * s);
+        // 扩散：s^0.8 让喷口附近收得更紧（视觉上更像被挤压出来的射流）。
+        const float half = shape.width0 + (shape.width1 - shape.width0) * std::pow(s, 0.8f);
+        out->left[k] = center + side * half;
+        out->right[k] = center - side * half;
+        // 逐点 alpha：前 15% 满，之后线性淡出到 0（尾部消失而不是被截断）。
+        out->alpha[k] = std::min(1.0f, (1.0f - s) / 0.85f);
+        (*colors)[k] = JetColorAt(s);
+    }
+    out->point_count = static_cast<uint32_t>(jpov::kStripSampleCount);
+}
+
+// 射流批：两条交叉条带（同一个 batch ⇒ 一次 draw call），加法集 + HDR 增益 + 中心实两侧虚剖面。
+inline jpov::TranslucentStripBatch BuildJetBatch(const JetShape& shape, float gain,
+                                                 jpov::StripStyle style) {
+    const jpov::Vec3f dir = NormalizeOr(shape.dir, {0.0f, -1.0f, 0.0f});
+    // 与 dir 不平行的辅助向量（dir 接近竖直时用 +X，否则用 +Y）⇒ 两条侧向互相垂直。
+    const jpov::Vec3f helper =
+        (std::fabs(dir.y()) > 0.9f) ? jpov::Vec3f{1.0f, 0.0f, 0.0f}
+                                    : jpov::Vec3f{0.0f, 1.0f, 0.0f};
+    const jpov::Vec3f side_a = NormalizeOr(Cross(dir, helper), {1.0f, 0.0f, 0.0f});
+    const jpov::Vec3f side_b = NormalizeOr(Cross(dir, side_a), {0.0f, 0.0f, 1.0f});
+
+    jpov::TranslucentStripBatch batch;
+    batch.texture_id = 0;
+    batch.tint = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};   // 颜色全在逐点颜色里
+    batch.blend = jpov::StripBlend::kEmissive;
+    batch.additive_gain = gain;
+    batch.style = style;
+    // 中心实、两侧虚：射流的横截面自然衰减（逐片元求值，15 段也不会有阶梯）。
+    batch.width_profile = {0.0f, 0.35f, 0.80f, 1.0f, 1.0f, 1.0f, 0.80f, 0.35f, 0.0f};
+    for (const jpov::Vec3f& side : {side_a, side_b}) {
+        jpov::Strip16 strip;
+        jpov::StripPointColors colors{};
+        BuildJetStrip(shape, side, &strip, &colors);
+        batch.strips.push_back(strip);
+        batch.strip_point_colors.push_back(colors);
+    }
+    return batch;
+}
+
 class StripViewerApp : public JPOV {
 public:
     using JPOV::JPOV;
@@ -297,7 +389,10 @@ public:
     bool smaa_ = false;              // SMAA 后处理（看边缘质量）
     bool show_strips_ = true;        // false = 不发条带命令（A/B 对照）
     bool boxes_visible_ = true;      // 背景参考方块（只看圆环时可关掉，免得挡住环体）
-    bool smooth_strips_ = false;     // true = 走平滑 pass（kSmooth）；false = 折线 pass
+    // true = 平滑 pass（kSmooth：C1 重建 + **解析法线**）；false = 折线 pass（弦 + 折面法线）。
+    // 默认平滑：圆环边反与射流软边都只有在这条 pass 上才是最终观感；
+    // 折线 pass 仍然可切（A/B 用，gold 也锁的是它）。
+    bool smooth_strips_ = true;
     bool arc_additive_ = false;      // 弧形改用**加法集**（发光拖尾），其余仍走覆盖集
     bool soft_depth_ = false;        // 条带与几何相交处的软过渡（per batch 选项）
     float soft_depth_m_ = 0.15f;     // 软深度过渡距离（米）
@@ -308,6 +403,12 @@ public:
     bool ring_visible_ = true;              // 四条带 = 顶/底环面 + 内/外立壁
     jpov::Vec3f ring_color_{0.70f, 0.85f, 1.00f};   // 玻璃膜的颜色（线性 HDR）
     float ring_opacity_ = 0.12f;            // 薄膜的不透明度（边反由 fresnel 抬起来）
+
+    // ── 火箭射流（加法集 + HDR 增益 + 逐点颜色 + 中心实两侧虚剖面）──
+    JetShape jet_shape_;
+    bool jet_visible_ = true;
+    float jet_gain_ = 3.0f;                 // HDR 增益（>1 才有 bloom 余量）
+    bool bloom_ = true;                     // 辉光（把 HDR 高亮模糊加回）
 
     // ── 菲涅耳（玻璃边反）──
     // 默认开：这个 viewer 现在的主场景就是那块玻璃圆环，不开就只是层淡蓝膜。
@@ -385,6 +486,14 @@ public:
         if (smaa_) {
             cmds->smaa = jpov::SmaaConfig{};
             cmds->smaa->enabled = true;
+        }
+        if (bloom_) {
+            // 阈值 1.0 = 只让「超过白点」的 HDR 部分发光（射流靠 additive_gain 超过它）。
+            cmds->bloom = jpov::BloomConfig{};
+            cmds->bloom->enabled = true;
+            cmds->bloom->intensity = 0.8f;
+            cmds->bloom->threshold = 1.0f;
+            cmds->bloom->levels = 4;
         }
 
         cmds->DrawObject3D(ground_mesh_, ground_mat_,
@@ -481,6 +590,12 @@ private:
         if (ring_visible_) {
             EmitRingBatch(cmds);
         }
+        if (jet_visible_) {
+            cmds->DrawTranslucentStrips(
+                BuildJetBatch(jet_shape_, jet_gain_,
+                              smooth_strips_ ? jpov::StripStyle::kSmooth
+                                             : jpov::StripStyle::kPolyline));
+        }
     }
 
     // 圆环（玻璃壳）：四组点 → 四条带 → **一个批**（一次 draw call）。
@@ -562,8 +677,9 @@ private:
         ui_.Checkbox("使用纹理（关 = 纯色）", &use_texture_, left_rect());
         ui_.Checkbox("柔边剖面", &soft_edges_, left_rect());
         ui_.Checkbox("SMAA 抗锯齿", &smaa_, left_rect());
+        ui_.Checkbox("Bloom 辉光（HDR）", &bloom_, left_rect());
         ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
-        ui_.Checkbox("平滑条带（C1 重建）", &smooth_strips_, left_rect());
+        ui_.Checkbox("平滑条带（C1 + 解析法线）", &smooth_strips_, left_rect());
         ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
@@ -578,6 +694,8 @@ private:
         ui_.Checkbox("显示波带", &(vis_.wave), mid_rect());
         ui_.Checkbox("显示螺旋", &(vis_.helix), mid_rect());
         ui_.Checkbox("显示弧形", &(vis_.arc), mid_rect());
+        ui_.Checkbox("显示射流（火箭推进器）", &jet_visible_, mid_rect());
+        ui_.SliderFloat("射流 HDR 增益", &jet_gain_, mid_rect(), 1.0f, 8.0f, 2);
         ui_.Checkbox("显示圆环（玻璃壳）", &ring_visible_, mid_rect());
         ui_.Checkbox("显示参考方块", &boxes_visible_, mid_rect());
         ui_.SliderFloat("圆环外半径 m", &(ring_shape_.outer_radius), mid_rect(), 0.2f, 2.5f, 2);
@@ -595,6 +713,9 @@ private:
             soft_depth_m_ = 0.15f;
             ring_visible_ = true;
             boxes_visible_ = true;
+            jet_visible_ = true;
+            jet_gain_ = 3.0f;
+            bloom_ = true;
             ring_opacity_ = 0.12f;
             fresnel_enabled_ = true;
             fresnel_preset_ = 0;
@@ -632,13 +753,14 @@ private:
         char info[256];
         std::snprintf(info, sizeof(info),
                       "phi %.2f  theta %.2f  R %.2f   |   %s   blend: %s%s   |   "
-                      "fresnel: %s   ring: %s",
+                      "fresnel: %s   ring: %s   jet: %s",
                       view_.phi, view_.theta, view_.R,
                       smooth_strips_ ? "smooth" : "polyline",
                       arc_additive_ ? "arc=add" : "all=coverage",
                       soft_depth_ ? "  soft_depth=on" : "",
                       fresnel_enabled_ ? kFresnelPresets[preset_idx].name : "off",
-                      ring_visible_ ? "on" : "off");
+                      ring_visible_ ? "on" : "off",
+                      jet_visible_ ? (bloom_ ? "on+bloom" : "on") : "off");
         ui_.Text(info, jpov::UiRect{{kLeftX, h - 46.0f}, {w - 40.0f, 24.0f}});
     }
 
