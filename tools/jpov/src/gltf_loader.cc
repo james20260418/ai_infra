@@ -23,9 +23,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -733,10 +735,22 @@ void Mat3MulMat3(const Mat3& a, const Mat3& b, Mat3& c) {
         }
 }
 
-// 把 node 的 TRS 转成 3x3 矩阵（旋转部分 × 缩放）。
+// 把 node 的 TRS / matrix 转成 3x3 矩阵（旋转 × 缩放；平移不在此处理）。
 void NodeTRS2Mat3(const tinygltf::Node& node, Mat3& m) {
     for (int i = 0; i < 9; ++i) m.m[i] = 0;
     m.m[0] = m.m[4] = m.m[8] = 1.0f;
+
+    // glTF 允许 node 用 `matrix`（4x4，**列主序**）代替 TRS，二者互斥。
+    // 2026-10-22 补：此前完全忽略 matrix ⇒ 用 matrix 导出的资产（如 catapult.glb，
+    // 缩放 1.3623）会既丢单位又丢朝向。这里只取线性部分（平移仍由调用方定位）。
+    if (node.matrix.size() == 16) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                m.m[r * 3 + c] = static_cast<float>(node.matrix[c * 4 + r]);
+            }
+        }
+        return;
+    }
 
     float sx = 1.0f, sy = 1.0f, sz = 1.0f;
     if (node.scale.size() >= 3) { sx = node.scale[0]; sy = node.scale[1]; sz = node.scale[2]; }
@@ -794,11 +808,61 @@ void BuildMeshTransforms(const tinygltf::Model& model,
     }
 }
 
+float ParseGltfUnitMeters(const std::string& unit) {
+    std::string s;
+    s.reserve(unit.size());
+    for (const char c : unit) {
+        s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (s == "m" || s == "meter" || s == "meters") return 1.0f;
+    if (s == "mm" || s == "millimeter" || s == "millimeters") return 0.001f;
+    if (s == "cm" || s == "centimeter" || s == "centimeters") return 0.01f;
+    if (s == "km") return 1000.0f;
+    if (s == "in" || s == "inch" || s == "inches") return 0.0254f;
+    if (s == "ft" || s == "foot" || s == "feet") return 0.3048f;
+    // 纯数字 = 直接当系数。
+    char* end = nullptr;
+    const double v = std::strtod(s.c_str(), &end);
+    if (end != s.c_str() && *end == '\0' && v > 0.0) {
+        return static_cast<float>(v);
+    }
+    return 0.0f;
+}
+
+// 决定本次加载的「源单位 → 米」系数。显式 options 优先，其次看 asset.extras 自述。
+float ResolveUnitMeters(const tinygltf::Model& model,
+                        const GltfLoadOptions& options) {
+    if (options.unit_meters > 0.0f) {
+        return options.unit_meters;
+    }
+    if (model.asset.extras.IsObject()) {
+        for (const char* key : {"jpov_unit", "unit", "units"}) {
+            if (!model.asset.extras.Has(key)) {
+                continue;
+            }
+            const tinygltf::Value& v = model.asset.extras.Get(key);
+            if (v.IsString()) {
+                const float m = ParseGltfUnitMeters(v.Get<std::string>());
+                if (m > 0.0f) {
+                    return m;
+                }
+            } else if (v.IsNumber()) {
+                const double d = v.Get<double>();
+                if (d > 0.0) {
+                    return static_cast<float>(d);
+                }
+            }
+        }
+    }
+    return 1.0f;  // 规范默认：米
+}
+
 // 解析 glTF 文件 → 场景中所有 primitive，通过 cb 逐条交付。
 // 返回 false 表示文件无法加载或解析失败。
 bool LoadGltfImpl(const std::string& path,
                   GltfMeshEntryCallback cb,
-                  void* user_data) {
+                  void* user_data,
+                  const GltfLoadOptions& options) {
     CHECK(!path.empty());
 
     // ---- 1. 解析 glTF 文件 ----
@@ -836,6 +900,13 @@ bool LoadGltfImpl(const std::string& path,
     // 先于 primitive 遍历构建，供下面应用到顶点。
     std::vector<Mat3> mesh_trans;
     BuildMeshTransforms(model, &mesh_trans);
+
+    // ---- 单位：源单位 → 米 ----
+    const float unit_meters = ResolveUnitMeters(model, options);
+    if (unit_meters != 1.0f) {
+        LOG(INFO) << "LoadGltf: " << path << " 源单位换算 ×" << unit_meters
+                  << "（进 JPOV 后为米）";
+    }
 
     // ---- 3. 遍历所有 mesh → 所有 primitive ----
     bool delivered_any = false;
@@ -890,6 +961,14 @@ bool LoadGltfImpl(const std::string& path,
                     }
                 }
             }
+            // ---- 单位换算：源单位 → 米（2026-10-22 Danis 定：进 JPOV 一律米）----
+            // 放在节点变换之后：节点变换承载的是「合规导出的单位」（如 cm 场景的 0.01），
+            // 这里再乘调用方给的「不合规资产」单位系数；两者相乘 = 最终米制。
+            if (unit_meters != 1.0f) {
+                for (jpov::Vec3f& p : entry.mesh.positions) {
+                    p = p * unit_meters;
+                }
+            }
             if (cb) {
                 cb(&entry, user_data);
             }
@@ -906,14 +985,16 @@ bool LoadGltfImpl(const std::string& path,
 
 bool LoadGltfScene(const std::string& path,
                    GltfMeshEntryCallback cb,
-                   void* user_data) {
+                   void* user_data,
+                   const GltfLoadOptions& options) {
     CHECK(cb != nullptr);
-    return LoadGltfImpl(path, cb, user_data);
+    return LoadGltfImpl(path, cb, user_data, options);
 }
 
 bool LoadGltf(const std::string& path,
               MeshData* out_mesh,
-              GltfMaterialInfo* out_mat) {
+              GltfMaterialInfo* out_mat,
+              const GltfLoadOptions& options) {
     CHECK(out_mesh != nullptr);
     CHECK(out_mat != nullptr);
 
@@ -932,7 +1013,7 @@ bool LoadGltf(const std::string& path,
             *c->mat = entry->material;
         }
     };
-    if (!LoadGltfImpl(path, first_cb, &cap) || !cap.got) {
+    if (!LoadGltfImpl(path, first_cb, &cap, options) || !cap.got) {
         return false;
     }
     return true;
@@ -949,7 +1030,8 @@ bool LoadGltf(const std::string& path,
 //
 // 骨架的“joints 顺序”与 JOINTS_0 的分量序一致(skin.joints 即关节表)。多 skin 全读出。
 bool LoadGltfSkeleton(const std::string& path,
-                      std::vector<SkeletonType>* out_skins) {
+                      std::vector<SkeletonType>* out_skins,
+                      const GltfLoadOptions& options) {
     CHECK(path.empty() == false);
     CHECK(out_skins != nullptr);
 
@@ -970,6 +1052,9 @@ bool LoadGltfSkeleton(const std::string& path,
         LOG(ERROR) << "LoadGltfSkeleton: 无法加载 " << path << " — " << err;
         return false;
     }
+
+    // 单位：源单位 → 米。骨架骨长必须和顶点同尺度，否则蒙皮错位。
+    const float unit_meters = ResolveUnitMeters(model, options);
 
     const int n_nodes = static_cast<int>(model.nodes.size());
 
@@ -1013,10 +1098,11 @@ bool LoadGltfSkeleton(const std::string& path,
             // rest_offset：node.translation（相对父平移）。缺省 0。
             jt.rest_offset = Vec3f(0.0f, 0.0f, 0.0f);
             if (node.translation.size() >= 3) {
+                // 骨长同样换算成米（2026-10-22 单位铁律）。
                 jt.rest_offset = Vec3f(
-                    static_cast<float>(node.translation[0]),
-                    static_cast<float>(node.translation[1]),
-                    static_cast<float>(node.translation[2]));
+                    static_cast<float>(node.translation[0]) * unit_meters,
+                    static_cast<float>(node.translation[1]) * unit_meters,
+                    static_cast<float>(node.translation[2]) * unit_meters);
             }
 
             // parent：沿 node 链向上找第一个同为“本 skin 关节”者（在 skin 表的下标）

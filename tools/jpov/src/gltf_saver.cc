@@ -350,7 +350,11 @@ json BuildRoot(const GltfSaveAsset& asset, const SaveContext& ctx,
     CHECK(!asset.meshes.empty()) << "gltf_saver: 资产没有任何 primitive";
 
     json root;
-    root["asset"] = {{"version", "2.0"}, {"generator", "JPOV gltf_saver"}};
+    // 单位铁律（2026-10-22 Danis）：我们写出去的坐标**一律是米**，并在 asset.extras
+    // 里自述单位，回读时（gltf_loader 的 ResolveUnitMeters）自动按米消费。
+    root["asset"] = {{"version", "2.0"},
+                     {"generator", "JPOV gltf_saver"},
+                     {"extras", {{"jpov_unit", "m"}}}};
     root["scene"] = 0;
     root["scenes"] = json::array({json{{"nodes", json::array()}}});
     root["nodes"] = json::array();

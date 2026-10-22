@@ -40,6 +40,9 @@ struct CliOptions {
         jpov::model_editor::ClipKeepSide::kGreater;  // --clip_side 删除哪侧
     bool save_after_clip = false;  // --save_after_clip：出图前把（裁剪后）target 存盘
     std::string save_format = "glb";  // --save_format glb|gltf（gltf = 外置纹理）
+    // ── 单位（2026-10-22）：源文件长度单位 → 米 ──
+    std::string unit = "auto";          // --unit auto|mm|cm|m|<scale>（target 源单位）
+    std::string ref_unit = "auto";      // --reference_unit（reference 源单位，默认 auto）
 };
 
 // 解析 CLI：标志可任意位置；未知标志 WARNING 忽略。
@@ -51,6 +54,18 @@ CliOptions ParseCli(int argc, char** argv) {
             opt.ui_shot = true;
         } else if (arg == "--save_after_clip") {
             opt.save_after_clip = true;
+        } else if (arg == "--unit") {
+            if (i + 1 < argc) {
+                opt.unit = argv[++i];
+            } else {
+                LOG(WARNING) << "--unit 缺少参数（auto|mm|cm|m|<scale>），忽略";
+            }
+        } else if (arg == "--reference_unit") {
+            if (i + 1 < argc) {
+                opt.ref_unit = argv[++i];
+            } else {
+                LOG(WARNING) << "--reference_unit 缺少参数，忽略";
+            }
         } else if (arg == "--save_format") {
             if (i + 1 < argc) {
                 const std::string v = argv[++i];
@@ -183,6 +198,23 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
 
+    if (opt.unit != "auto") {
+        const float unit_m = jpov::ParseGltfUnitMeters(opt.unit);
+        if (!(unit_m > 0.0f)) {
+            LOG(FATAL) << "--unit 无法识别: " << opt.unit
+                       << "（可用 auto|mm|cm|m|km|in|ft|<系数>）";
+        }
+        app.unit_meters_ = unit_m;
+        LOG(INFO) << "源单位 " << opt.unit << " → ×" << unit_m << " 米";
+    }
+    if (opt.ref_unit != "auto") {
+        const float unit_m = jpov::ParseGltfUnitMeters(opt.ref_unit);
+        if (!(unit_m > 0.0f)) {
+            LOG(FATAL) << "--reference_unit 无法识别: " << opt.ref_unit;
+        }
+        app.reference_unit_meters_ = unit_m;
+        LOG(INFO) << "reference 源单位 " << opt.ref_unit << " → ×" << unit_m << " 米";
+    }
     app.target_path_ = opt.target_path;
     app.reference_path_ = opt.reference_path;
     app.has_reference_ = !opt.reference_path.empty();
