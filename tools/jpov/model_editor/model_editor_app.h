@@ -33,6 +33,7 @@
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
+#include "tools/jpov/interface/axis_frame.h"
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/model_editor/mesh_clip.h"
@@ -113,10 +114,14 @@ public:
     uint32_t ground_mesh_ = 0;
     jpov::PBRMaterial ground_mat_;
 
+    // 坐标架：三根轴杆共用一份网格（见 interface/axis_frame.h）。
+    uint32_t axis_frame_mesh_ = 0;
+
     ViewConfig view_;
 
     bool show_reference_ = true;
     bool show_target_ = true;
+    bool show_axis_frame_ = true;
 
     float ground_y_ = -3.0f;
 
@@ -233,6 +238,9 @@ public:
         ground_mesh_ = RegisterMesh(MakeGroundQuad(ground_y_));
         ground_y_last_built_ = ground_y_;
 
+        // 坐标架轴杆（三根轴共用一个 MakeBox 网格）。
+        axis_frame_mesh_ = RegisterMesh(jpov::axis_frame::MakeAxisFrameBarMesh());
+
         // 初始视角（用命令行给的 phi）。
         view_ = DefaultView();
         view_.phi = view_phi_rad_;
@@ -343,6 +351,13 @@ public:
                                    /*up*/ {0.0f, 1.0f, 0.0f},
                                    /*front*/ {0.0f, 0.0f, 1.0f});
             }
+        }
+
+        // 坐标架（轴杆 + X/Y/Z 标签）。
+        if (show_axis_frame_) {
+            jpov::axis_frame::DrawAxisFrame(cmds, axis_frame_mesh_,
+                                /*origin*/ {0.0f, 0.0f, 0.0f},
+                                jpov::kFontBuiltinLatin);
         }
 
         // 裁剪面（半透明，画在最后；双面绕序以应对背面剔除）。
@@ -757,12 +772,34 @@ private:
                         /*decimal_places*/ 2);
         row_y += step_y;
 
-        // 显示开关。
-        const float kCheckW = row_w / 2.0f;
+        // 显示开关：三个 toggle 同一行。
+        //
+        // 每格宽度 = 方框 + 标签实测宽 + Ui padding（再留 24px 间距），各格按此
+        // 排 —— 等分会让「显示 reference」溢出到下一格；而 Checkbox 在
+        // 「理想宽 < box」时整体居中，box 给宽了同样是标签右溢。故 box 直接
+        // 给「理想宽」，且不拉伸（拉伸会把方框推到格子中间）。
+        // 前提：一行总宽 ≈ 370px，默认 1280 窗口的左边栏（390px）可容纳；
+        // 窗口更窄时这一行会变挤（Ui 不缩放字号）。
+        const jpov::UiTheme toggle_theme = jpov::UiTheme::Default(kFontSize);
+        const auto toggle_width = [&](const char* label) {
+            return kRowH +
+                   MeasureTextWidth(/*alias=*/std::string(), label, kFontSize) +
+                   toggle_theme.padding_px + 24.0f;
+        };
+        const float kToggleRefW = toggle_width("显示 reference");
+        const float kToggleTargetW = toggle_width("显示 target");
+        const float kToggleAxisW = toggle_width("显示坐标轴");
         ui_.Checkbox("显示 reference", &show_reference_,
-                     jpov::UiRect{{left, row_y}, {kCheckW, kRowH}});
+                     jpov::UiRect{{left, row_y}, {kToggleRefW, kRowH}},
+                     /*stretch_w=*/false, /*stretch_h=*/false);
         ui_.Checkbox("显示 target", &show_target_,
-                     jpov::UiRect{{left + kCheckW, row_y}, {kCheckW, kRowH}});
+                     jpov::UiRect{{left + kToggleRefW, row_y},
+                                  {kToggleTargetW, kRowH}},
+                     /*stretch_w=*/false, /*stretch_h=*/false);
+        ui_.Checkbox("显示坐标轴", &show_axis_frame_,
+                     jpov::UiRect{{left + kToggleRefW + kToggleTargetW, row_y},
+                                  {kToggleAxisW, kRowH}},
+                     /*stretch_w=*/false, /*stretch_h=*/false);
         row_y += step_y;
 
         // 只读来源。

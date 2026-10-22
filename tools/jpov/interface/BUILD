@@ -250,6 +250,37 @@ cc_library(
     copts = ["-std=c++20"],
 )
 
+# AxisFrame — 坐标架小插件（0.02m 见方 × 1m 的三根实体盒 + X/Y/Z 3D 标签）。
+# 纯命令装配（MakeBox 几何 + 三色材质 + DrawText3D），零 GL、无编辑器状态：
+# 任何工具都能用一份 mesh 摆出世界坐标架，不绑在某个 demo 上。
+cc_library(
+    name = "axis_frame",
+    hdrs = ["axis_frame.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mesh",
+        ":pbr_material",
+        ":render_command",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "axis_frame_test",
+    srcs = ["axis_frame_test.cc"],
+    deps = [
+        ":axis_frame",
+        ":mesh",
+        ":pbr_material",
+        ":render_command",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # AxisGizmo — 世界坐标轴辅助几何（1m X/Y/Z 三色条带，宽 5cm，alpha 0.2）。
 # 纯几何构造（3D 条带顶点，零 GL、零编辑器状态），与 skeleton_mesh 同层：
 # 任何工具想做"画个坐标架"都能复用，不绑在某个 demo 上。
