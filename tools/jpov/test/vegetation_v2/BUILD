@@ -38,6 +38,7 @@ cc_test(
     ],
     data = [
         "vegetation_v2_cards_1280x720.png",
+        "vegetation_v2_glb_1280x720.png",
         "vegetation_v2_leaf_1280x720.png",
         "//tools/jpov/tools/vegetation_tool_v2:jpov_vegetation_v2_viewer",
         "//tools/jpov/tools/vegetation_tool_v2:sample_assets",
