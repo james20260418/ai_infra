@@ -298,11 +298,12 @@ void JPOV::ReleaseSkeleton(uint32_t skeleton_id) {
 
 // ========== glTF 模型加载 ==========
 
-jpov::GltfObject JPOV::LoadGltf(const std::string& path) {
+jpov::GltfObject JPOV::LoadGltf(const std::string& path,
+                                const jpov::GltfLoadOptions& options) {
     CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
     CHECK(!path.empty());
     CHECK(renderer_ != nullptr);
-    return renderer_->LoadGltf(path);
+    return renderer_->LoadGltf(path, options);
 }
 
 void JPOV::ReleaseGltf(const jpov::GltfObject& gltf) {

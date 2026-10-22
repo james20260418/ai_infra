@@ -13,6 +13,7 @@
 
 #include "tools/jpov/interface/input_snapshot.h"
 #include "tools/jpov/interface/gltf_object.h"
+#include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/interface/mesh.h"
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/window_info.h"
@@ -294,7 +295,9 @@ public:
     //
     // Pre-condition: Init() 已调用
     // 失败返回空 GltfObject（empty()）。
-    jpov::GltfObject LoadGltf(const std::string& path);
+    // options.unit_meters：源文件长度单位 → 米（<=0 = 按文件自述 / 规范默认米）。
+    jpov::GltfObject LoadGltf(const std::string& path,
+                              const jpov::GltfLoadOptions& options = {});
 
     // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
     //

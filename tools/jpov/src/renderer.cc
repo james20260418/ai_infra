@@ -3207,7 +3207,8 @@ uint32_t LoadGltfOcclusion(TextureManager& tex_mgr, const GltfTextureRef& ref,
 
 }  // namespace
 
-GltfObject Renderer::LoadGltf(const std::string& path) {
+GltfObject Renderer::LoadGltf(const std::string& path,
+                              const GltfLoadOptions& options) {
     GltfObject obj;
 
     // 路径解析：允许相对路径（分发态 = exe 旁 resources）。查找顺序 exe 旁 → cwd
@@ -3339,7 +3340,7 @@ GltfObject Renderer::LoadGltf(const std::string& path) {
     };
 
     CollectCtx ctx{this, &obj, &orm_cache};
-    if (!jpov::LoadGltfScene(resolved_path, collect, &ctx) || obj.primitives.empty()) {
+    if (!jpov::LoadGltfScene(resolved_path, collect, &ctx, options) || obj.primitives.empty()) {
         // 失败或空：释放已注册的资源
         ReleaseGltf(obj);
         LOG(ERROR) << "Renderer::LoadGltf: 加载失败 " << path;

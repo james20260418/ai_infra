@@ -24,6 +24,7 @@
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/instanced/instanced_object_attrs.h"
 #include "tools/jpov/src/instanced/instanced_object_renderer.h"
+#include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/object3d/object3d_renderer.h"
 #include "tools/jpov/src/primitives2d/primitives2d_renderer.h"
@@ -103,7 +104,9 @@ struct Renderer {
     //
     // Pre-condition: GL context 已激活（Init 之后）
     // 失败: 返回空 GltfObject（empty()）。
-    GltfObject LoadGltf(const std::string& path);
+    // options.unit_meters：源文件长度单位 → 米（<=0 = 按文件自述 / 规范默认米）。
+    // 2026-10-22：进 JPOV 一律米，详见 gltf_loader.h 的「单位铁律」。
+    GltfObject LoadGltf(const std::string& path, const GltfLoadOptions& options = {});
 
     // ReleaseGltf: 释放一个 GltfObject 占用的全部 GPU 资源。
     //

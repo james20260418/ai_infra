@@ -103,6 +103,13 @@ public:
     std::string target_path_;     // target 来源路径（面板显示 + 保存定位）
     bool has_reference_ = false;
 
+    // 源文件长度单位 → 米（2026-10-22：glb 里的单位要消费，进 JPOV 一律米）。
+    // <= 0 = 自动（读 asset.extras.jpov_unit / node scale）；> 0 = 显式覆盖（cm=0.01）。
+    // target 与 reference 是**两个独立资产**，单位可以不同（例：cm 模型焊到米制人体），
+    // 所以分两个系数，互不影响。
+    float unit_meters_ = 0.0f;           // target
+    float reference_unit_meters_ = 0.0f;  // reference
+
     uint32_t ground_mesh_ = 0;
     jpov::PBRMaterial ground_mat_;
 
@@ -160,13 +167,19 @@ public:
     // 骨架，建地面，自适应相机。Init() 后调用一次（仅主线程 / GL 上下文）。
     // Pre-condition: target_path_ 非空，且指向可加载的 glb/gltf。
     void LoadScene() {
+        // 单位：每个资产各自换算到米（进 JPOV 后同处米制空间）。
+        jpov::GltfLoadOptions load_options;
+        load_options.unit_meters = unit_meters_;
+        jpov::GltfLoadOptions ref_load_options;
+        ref_load_options.unit_meters = reference_unit_meters_;
+
         // target GPU 资产。
-        target_ = LoadGltf(target_path_);
+        target_ = LoadGltf(target_path_, load_options);
         CHECK(!target_.empty()) << "target 加载失败或为空: " << target_path_;
 
         // reference GPU 资产（可选）。
         if (has_reference_) {
-            reference_ = LoadGltf(reference_path_);
+            reference_ = LoadGltf(reference_path_, ref_load_options);
             CHECK(!reference_.empty()) << "reference 加载失败或为空: " << reference_path_;
         }
 
@@ -182,7 +195,7 @@ public:
             sm.material = entry->material;
             c->out->push_back(std::move(sm));
         };
-        CHECK(jpov::LoadGltfScene(target_path_, cb, &collector))
+        CHECK(jpov::LoadGltfScene(target_path_, cb, &collector, load_options))
             << "target CPU 几何加载失败: " << target_path_;
         CHECK_EQ(startup_geometry.size(), target_.size())
             << "target CPU 几何与 GPU primitive 数量不一致："
@@ -194,7 +207,8 @@ public:
 
         // target 自带骨架（可选）。
         std::vector<jpov::SkeletonType> skins;
-        if (jpov::LoadGltfSkeleton(target_path_, &skins) && !skins.empty()) {
+        if (jpov::LoadGltfSkeleton(target_path_, &skins, load_options) &&
+            !skins.empty()) {
             skins[0].Validate();
             target_skeleton_ = skins[0];
         }

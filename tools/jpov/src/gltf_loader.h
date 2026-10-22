@@ -121,6 +121,33 @@ struct GltfMaterialInfo {
     bool double_sided = false;
 };
 
+// ==================== 单位（长度）铁律 ====================
+//
+// 2026-10-22 Danis：**glb 里的单位要消费，进 JPOV 一律换成米；存的也一律是米。**
+//
+// glTF 规范规定长度单位是米，但真实资产常来自 cm / mm 场景，单位信息有两种承载方式：
+//   ① 合规导出：单位体现在 node 的 scale / matrix 上（Blender cm 场景 → 根节点
+//      scale 0.01；FBX2glTF → 100）。本 loader 会把这些变换乘进顶点，所以自动就是米。
+//   ② 不合规导出：文件里**没有任何** scale/matrix（按 cm 建好模、坐标直接烘进去），
+//      此时文件本身不含单位信息，只能由调用方显式告知（`GltfLoadOptions::unit_meters`
+//      = 0.01 表示源文件是 cm）。
+// 另外，本仓库自己写出的 glb 会在 `asset.extras.jpov_unit` 写 "m"，回读时自动 1.0。
+//
+// 换算应用在「场景节点变换之后」：positions × unit_meters；法线/切线不受均匀缩放影响。
+// 骨架（LoadGltfSkeleton）的 rest_offset 同样 × unit_meters —— inverse_bind 是派生量
+// （SkeletonType::ComputeInverseBind），所以只要骨长和顶点同尺度，蒙皮天然一致。
+
+// 源文件长度单位 → 米的换算系数。
+struct GltfLoadOptions {
+    // <= 0：自动（读 asset.extras.jpov_unit / unit；没有则按 glTF 规范当米 = 1.0）。
+    // >  0：以此为准（显式覆盖，例：cm 资产传 0.01）。
+    float unit_meters = 0.0f;
+};
+
+// 解析单位字符串："mm"/"cm"/"m"/"km"/"in"/"ft" 或纯数字（直接当系数）。
+// 无法识别返回 0（调用方据此忽略）。
+float ParseGltfUnitMeters(const std::string& unit);
+
 // 加载 glTF 2.0 (.gltf 或 .glb) 文件中的第一个 mesh/primitve。
 //
 // 成功: 返回 true。out_mesh 填充顶点数据（positions/normals/uvs + tangents +
@@ -130,7 +157,8 @@ struct GltfMaterialInfo {
 // Pre-condition: path 非空，指向有效的 .gltf 或 .glb 文件
 bool LoadGltf(const std::string& path,
               MeshData* out_mesh,
-              GltfMaterialInfo* out_mat);
+              GltfMaterialInfo* out_mat,
+              const GltfLoadOptions& options = {});
 
 // 一个 glTF scene 中的单个 primitive：一份 CPU 几何 + 一份材质贴图路径。
 // LoadGltfScene 会为场景中每个 (mesh, primitive) 产出一条。
@@ -176,7 +204,8 @@ using GltfMeshEntryCallback = void (*)(const GltfMeshEntry* entry,
 //
 // 返回 true 表示文件解析成功（至少 0 个 skin 也算成功，out 可为空）；false 表示无法加载。
 bool LoadGltfSkeleton(const std::string& path,
-                      std::vector<SkeletonType>* out_skins);
+                      std::vector<SkeletonType>* out_skins,
+                      const GltfLoadOptions& options = {});
 
 // 加载 glTF 2.0 场景中【所有】mesh/primitive（多 mesh 支持）。
 //
@@ -188,7 +217,8 @@ bool LoadGltfSkeleton(const std::string& path,
 // 返回 true 表示解析成功（至少交付了一条）；false 表示失败。
 bool LoadGltfScene(const std::string& path,
                    GltfMeshEntryCallback cb,
-                   void* user_data);
+                   void* user_data,
+                   const GltfLoadOptions& options = {});
 
 }  // namespace jpov
 

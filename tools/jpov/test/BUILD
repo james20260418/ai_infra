@@ -205,3 +205,21 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# glTF 长度单位消费（2026-10-22）：源单位 → 米；node.matrix 必须被消费；saver 自述米。
+cc_test(
+    name = "gltf_unit_test",
+    srcs = ["gltf_unit_test.cc"],
+    data = [
+        "//tools/jpov/assets/models:clothing_data",
+    ],
+    deps = [
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/src:gltf_saver",
+        "//tools/jpov/interface:mesh",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
