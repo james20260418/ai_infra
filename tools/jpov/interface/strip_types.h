@@ -37,6 +37,25 @@ namespace jpov {
 
 using Vec3f = geom::Vec3<float>;
 
+// 条带的两种绘制风格（Danis 2026-10-21 定：**两个独立 pass，统一一个命令接口**）。
+//
+//   kPolyline（默认）：left/right 是**顶点** —— 相邻两列之间是**直线（弦）**，
+//                       折角处能看出多边形。最便宜，适合辅助线 / 硬边。
+//   kSmooth：          left/right 是**插值型控制点（knot）** —— 相邻两列之间是
+//                       **C1 Hermite 曲线**，边缘按真实曲线裁形（fwidth 解析 AA）。
+//
+// **两种风格的物理契约完全相同**，用户不需要为切换做任何事：
+//   ① 曲线/折线**严格经过**每一个 left[i] / right[i]；
+//   ② 第 i 列的宽度**严格等于** |left[i] − right[i]|；段间由半宽矢量插值决定；
+//   ③ 想改宽窄 → **移点**（不存在 width 参数）。
+//
+// kSmooth 内部会按局部曲率把多边形**保守外扩**再由 FS 裁回去（片元只能削不能补），
+// 外扩量是渲染器从几何自动算的**实现细节**：不暴露参数、也不改变上面两条契约。
+enum class StripStyle {
+    kPolyline = 0,
+    kSmooth = 1,
+};
+
 // 每条带的采样点数（= 段数 + 1）。改这个值 = 改所有素材的「格数」约定，不要随意动。
 inline constexpr int kStripSampleCount = 16;
 
@@ -109,6 +128,10 @@ struct TranslucentStripBatch {
 
     // 本批条带（非空才画）。
     std::vector<Strip16> strips;
+
+    // 走哪个 pass（见 StripStyle）。同一帧可混用；两者写进同一张 WBO 覆盖集目标，
+    // 所以**命令顺序 = 前后顺序**，最后只 Composite 一次。
+    StripStyle style = StripStyle::kPolyline;
 };
 
 // 纯色批：不采样纹理，直接用 color 当条带颜色（color.a = 不透明度乘子）。
@@ -116,17 +139,19 @@ struct TranslucentStripBatch {
 // 等价于 texture_id == 0 + tint == color，这里显式命名——调用方不用猜
 // 「texture_id 给 0 到底是不画还是纯色」。
 // 注意：仍受 width_profile 与逐点 alpha 调制（即纯色也支持柔边与纵向淡出）。
-// blend / soft_depth_m 一并给，避免「建好纯色批之后忘了设 blend」这种顺序陷阱
-// （纯色批默认仍是覆盖集 + 硬判据）。
+// blend / soft_depth_m / style 一并给，避免「建好纯色批之后忘了设」这种顺序陷阱
+// （纯色批默认仍是覆盖集 + 折线 pass + 硬判据）。
 inline TranslucentStripBatch MakeSolidStripBatch(
     const Color& color, std::vector<Strip16> strips,
     StripBlend blend = StripBlend::kCoverage,
-    std::optional<float> soft_depth_m = std::nullopt) {
+    std::optional<float> soft_depth_m = std::nullopt,
+    StripStyle style = StripStyle::kPolyline) {
     TranslucentStripBatch batch;
     batch.texture_id = 0;          // 不采样纹理 ⇒ 纯色
     batch.tint = color;
     batch.blend = blend;
     batch.soft_depth_m = soft_depth_m;
+    batch.style = style;
     batch.strips = std::move(strips);
     return batch;
 }

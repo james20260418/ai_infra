@@ -245,6 +245,7 @@ public:
     bool auto_orbit_ = false;        // 自动绕行（不拖鼠标也能看各角度）
     bool smaa_ = false;              // SMAA 后处理（看边缘质量）
     bool show_strips_ = true;        // false = 不发条带命令（A/B 对照）
+    bool smooth_strips_ = false;     // true = 走平滑 pass（kSmooth）；false = 折线 pass
     bool arc_additive_ = false;      // 弧形改用**加法集**（发光拖尾），其余仍走覆盖集
     bool soft_depth_ = false;        // 条带与几何相交处的软过渡（per batch 选项）
     float soft_depth_m_ = 0.15f;     // 软深度过渡距离（米）
@@ -375,6 +376,8 @@ private:
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;
             }
+            batch.style = smooth_strips_ ? jpov::StripStyle::kSmooth
+                                         : jpov::StripStyle::kPolyline;
             return batch;
         };
 
@@ -444,6 +447,7 @@ private:
         ui_.Checkbox("柔边剖面", &soft_edges_, left_rect());
         ui_.Checkbox("SMAA 抗锯齿", &smaa_, left_rect());
         ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
+        ui_.Checkbox("平滑条带（C1 重建）", &smooth_strips_, left_rect());
         ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
@@ -464,6 +468,7 @@ private:
             shape_ = RibbonShape{};
             vis_ = RibbonVisibility{};
             arc_additive_ = false;
+            smooth_strips_ = false;
             soft_depth_ = false;
             soft_depth_m_ = 0.15f;
         }
@@ -471,8 +476,9 @@ private:
         // 相机信息（右上角）：便于口头描述/复现某个角度。
         char info[192];
         std::snprintf(info, sizeof(info),
-                      "phi %.2f   theta %.2f   R %.2f   |   blend: %s%s",
+                      "phi %.2f   theta %.2f   R %.2f   |   %s  blend: %s%s",
                       view_.phi, view_.theta, view_.R,
+                      smooth_strips_ ? "smooth" : "polyline",
                       arc_additive_ ? "arc=add" : "all=coverage",
                       soft_depth_ ? "  soft_depth=on" : "");
         ui_.Text(info, jpov::UiRect{{w - 420.0f, 18.0f}, {400.0f, 24.0f}});
