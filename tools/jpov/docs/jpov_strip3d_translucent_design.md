@@ -579,8 +579,10 @@ shader 里连 `m−1` 都换成 uniform `uSegCount`）。
 ### 18.4 数据通道与代价
 
 - 控制点走 **RGBA32F 数据纹理**：每列 3 texel = 12 float `(c.xyz,m.x)(m.yz,h.xy)(h.z,n.xyz)`，
-  每条带占一行；顶点只多一个 `aStripId`（7 float，28 B）⇒ **整批仍是一次 draw call**。
-- 1000 条带/帧：顶点 896 KB + 纹理 768 KB，draw call 仍是 `ceil(N/1024)`。
+  每条带占一行；顶点只多一个 `aStripId`（7 float，28 B）⇒ **整批一次 draw call**。
+- 1000 条带/帧：顶点 896 KB + 纹理 768 KB，**draw call 恒为 1**（不分块：
+  数据行号 = 全局 strip 下标，分块就要么重传顶点、要么写一张正在被采样的纹理）。
+  单批上限是数据纹理行数（`GL_MAX_TEXTURE_SIZE`，常见 16384），超了直接 CHECK 崩。
 - FS：6 次 `texelFetch`（每片元 96 B）+ ~140 ALU，无分支发散。
 - 与「每条带一套 uniform」的早期版本**逐像素一致**（6 张 capture maxdiff=0），
   但 draw call 从 N 次回到 1 次。
@@ -597,3 +599,23 @@ shader 里连 `m−1` 都换成 uniform `uSegCount`）。
 
 `jpov_strip_viewer` 面板新增「平滑条带（C1 重建）」勾选框，实时切换两个 pass；
 `--capture` 会额外输出 `70/75/80/85_smooth_*` 四张对照图（同一视角/形状，只换 style）。
+
+### 18.7 复核修正（2026-10-22）
+
+第二轮 review 后修的三处（都会造成「出图看不出来、但确实在漏画/变淡」的问题）：
+
+1. **外扩量不能再按「本段等宽就跳过 Hermite」简化**。FS 恒算完整 Hermite
+   （含 `h10·n0 + h11·n1`），而切线只看相邻列 —— 局部等宽、隔壁列在收窄（"肩部"）时
+   `n ≠ 0`，简化会让 margin 低估。实测：半宽 0.2 的直条带、末列收到 0，两侧各缺 4.25 mm。
+   现在 CPU 恒用完整 Hermite（成本可忽略），并由单测做「margin ≥ 密采样真实外凸量」断言。
+2. **两端切线用完整单侧差分**（`p1 − p0`），不是 `0.5·(p1 − p0)`。后者会让每段条带的
+   首/末段参数化被压缩（16 点直条带端段偏 5.5% 段长、2 点条带偏 4%），纹理被不均匀拉伸，
+   而且「2 点 kSmooth == kPolyline」这个数学事实不成立。
+3. **边缘 AA 的覆盖度是「到最近边的距离」**：`cov = clamp(0.5 + min(v*,1−v*)/fwidth(v*), 0, 1)`。
+   旧写法把两个边各自的 0..1 覆盖度**相乘**，条带整宽 < 2px 时中段被平方衰减
+   （1px 宽只剩 0.25）⇒ 掠射角/远处提前淡出。
+
+配套：这些数学全部搬进 `strip_geometry.h`（`ComputeSmoothStrip` /
+`AppendSmoothStripData` / `AppendSmoothStripVertices`，GL-free），
+`test/strip/strip_geometry_test.cc` 有 10 条断言，其中 3 条是**负向对照**
+（把旧实现算回来必须失败），防止「参数退化 + 断言恒真」一起绿。

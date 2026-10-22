@@ -7,6 +7,10 @@
 //
 // 为什么把展开抽出来：这是整条链路里唯一有分支语义的地方（点数塌缩、UV 约定、
 // 索引绕序）。放进渲染器就只能靠出图肉眼验；抽出来可以纯 CPU 单测。
+//
+// 2026-10-22 追加：平滑 pass（kSmooth）的 CPU 前端也放在本文件
+// （ComputeSmoothStrip / AppendSmoothStripData / AppendSmoothStripVertices）——
+// 同样是纯数学，同样必须能单测（外扩量算少了只表现为「外侧缺一条亚像素」，出图看不出）。
 
 #ifndef JPOV_SRC_STRIP_STRIP_GEOMETRY_H_
 #define JPOV_SRC_STRIP_STRIP_GEOMETRY_H_
@@ -82,7 +86,7 @@ inline bool IsFinite(const Vec3f& v) {
 //   * 前 point_count 个 alpha ∈ [0,1]，且至少有一个 > 0（防止 memset(0) 的整条隐形）；
 //   * width_profile 9 个 knot ∈ [0,1]，且至少有一个 > 0；
 //   * tint 的 rgba ∈ [0,1]；
-//   * blend 是合法枚举值；soft_depth_m 若启用必须 > 0。
+//   * blend / style 是合法枚举值；soft_depth_m 若启用必须 > 0。
 //
 // Pre-condition: 无（本函数就是拿来校验调用方输入的）。
 inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
@@ -106,6 +110,9 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
     // 枚举防御：别让非法 cast 值落到「两个集合都不写」的静默路径。
     CHECK(batch.blend == StripBlend::kCoverage || batch.blend == StripBlend::kEmissive)
         << "StripBatch: blend 非法值 " << static_cast<int>(batch.blend);
+    // style 同理：非法 cast 值会静默走折线 pass（用户以为开了平滑却不生效）。
+    CHECK(batch.style == StripStyle::kPolyline || batch.style == StripStyle::kSmooth)
+        << "StripBatch: style 非法值 " << static_cast<int>(batch.style);
     if (batch.soft_depth_m.has_value()) {
         CHECK_GT(*batch.soft_depth_m, 0.0f)
             << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
@@ -177,6 +184,235 @@ inline void AppendStripIndicesForBlock(uint32_t base_vertex, std::vector<uint32_
         out->push_back(l0);
         out->push_back(l1);
         out->push_back(r1);
+    }
+}
+
+// ────────────────── 平滑 pass（kSmooth）的 CPU 前端 ──────────────────
+//
+// 折线 pass 把 left/right 当**顶点**（段间是弦）；平滑 pass 把它们当**插值控制点**
+// （段间是 C1 Hermite，FS 里按真实曲线反解参数并裁形）。设计见
+// docs/jpov_strip3d_translucent_design.md §18。本段只放**纯数学**（GL-free）：
+//   ① ComputeSmoothStrip        —— 中心/半宽矢量 + 切线 + 自动外扩量（整条带统一 scale）；
+//   ② AppendSmoothStripData     —— 数据纹理的一行（每列 12 float）；
+//   ③ AppendSmoothStripVertices —— 顶点（每顶点 7 float）。
+// 渲染器只负责上传与 draw。
+//
+// 为什么必须能单测：外扩量算少了只表现为「弯的外侧缺一条亚像素」，出图肉眼看不出来
+// （现有 demo 的三条带恰好都没走到会出问题的那种分支）。
+
+// 平滑 pass 的顶点：pos(3) + u + v + alpha + strip_id。
+inline constexpr int kSmoothFloatsPerVertex = 7;
+
+// 控制点数据纹理：每列 3 个 RGBA32F texel = 12 float。
+inline constexpr int kSmoothTexelsPerColumn = 3;
+inline constexpr int kSmoothFloatsPerColumn = 4 * kSmoothTexelsPerColumn;
+
+// 每段用来求「最大外凸量」的采样点数（t = i/(n+1)，i = 1..n）：最值近似 + 末尾余量。
+inline constexpr int kSmoothMarginSamplesPerSegment = 7;
+
+// 外扩倍数上限（相对最细一列的半宽）。再细的尖通常已是亚像素，不值得为它铺满屏幕。
+inline constexpr float kSmoothMaxWidenScale = 8.0f;
+
+namespace smooth_internal {
+
+inline Vec3f Add(const Vec3f& a, const Vec3f& b) {
+    return Vec3f{a.x() + b.x(), a.y() + b.y(), a.z() + b.z()};
+}
+
+inline Vec3f Sub(const Vec3f& a, const Vec3f& b) {
+    return Vec3f{a.x() - b.x(), a.y() - b.y(), a.z() - b.z()};
+}
+
+inline Vec3f Scale(const Vec3f& a, float s) {
+    return Vec3f{a.x() * s, a.y() * s, a.z() * s};
+}
+
+inline float Dot(const Vec3f& a, const Vec3f& b) {
+    return a.x() * b.x() + a.y() * b.y() + a.z() * b.z();
+}
+
+inline Vec3f Lerp(const Vec3f& a, const Vec3f& b, float t) {
+    return Vec3f{a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
+                 a.z() + (b.z() - a.z()) * t};
+}
+
+// 三次 Hermite（m0/m1 是 ∂P/∂t，t ∈ [0,1]）。
+// **必须与 kSmoothFsTail 里的求值逐项一致**：CPU 用它算外扩量，FS 用它重建曲面。
+inline Vec3f Hermite(const Vec3f& p0, const Vec3f& m0, const Vec3f& p1,
+                     const Vec3f& m1, float t) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+    const float h10 = t3 - 2.0f * t2 + t;
+    const float h01 = -2.0f * t3 + 3.0f * t2;
+    const float h11 = t3 - t2;
+    return Vec3f{h00 * p0.x() + h10 * m0.x() + h01 * p1.x() + h11 * m1.x(),
+                 h00 * p0.y() + h10 * m0.y() + h01 * p1.y() + h11 * m1.y(),
+                 h00 * p0.z() + h10 * m0.z() + h01 * p1.z() + h11 * m1.z()};
+}
+
+}  // namespace smooth_internal
+
+// 一条条带的平滑前端结果（纯数据）。
+//
+// 下标 col ∈ [0, kStripSampleCount)：不足 16 点时，尾部列与折线 pass 一样**塌缩**
+// 到最后一个有效点（重复的列 = 零面积 quad，不产生片元）。
+struct SmoothStripCompute {
+    Vec3f center[kStripSampleCount];      // 过点（该列 left/right 的中点）
+    Vec3f half[kStripSampleCount];        // 半宽矢量（**未外扩**，指向 left 一侧）
+    Vec3f center_tan[kStripSampleCount];  // ∂center/∂t
+    Vec3f half_tan[kStripSampleCount];    // ∂half/∂t
+    float margin = 0.0f;                  // 需要外扩的绝对量（米），含 2% + 1mm 余量
+    float scale = 1.0f;                   // 顶点外扩倍数（整条带统一，≥ 1）
+};
+
+// 计算一条条带的中心线 / 半宽矢量 / 切线与自动外扩倍数。
+//
+// Pre-condition: point_count ∈ [2, kStripSampleCount]（ValidateStripBatch 已保证）。
+inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*output*/) {
+    CHECK(out != nullptr) << "ComputeSmoothStrip: out 不能为空";
+    CHECK_GE(strip.point_count, 2u) << "ComputeSmoothStrip: point_count 至少 2";
+    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount))
+        << "ComputeSmoothStrip: point_count 不得大于 " << kStripSampleCount;
+
+    // ① 控制点：中心 c（Hermite 的过点）与半宽矢量 h（未外扩）。
+    const uint32_t last_real = strip.point_count - 1;
+    for (int col = 0; col < kStripSampleCount; ++col) {
+        const uint32_t src = std::min(static_cast<uint32_t>(col), last_real);
+        const Vec3f& l = strip.left[src];
+        const Vec3f& r = strip.right[src];
+        out->center[col] = smooth_internal::Scale(smooth_internal::Add(l, r), 0.5f);
+        out->half[col] = smooth_internal::Scale(smooth_internal::Sub(l, r), 0.5f);
+    }
+
+    // ② 切线：内部用中心差分（相邻段共用同一列切线 ⇒ C1 的来源），
+    //    **两端用完整的单侧差分**（权重 1）。
+    //
+    //    两端若也按 0.5 写，2 点条带的 Hermite 会被砍成"半速"参数化：曲线仍是直线，
+    //    但 u 沿长度被不均匀拉伸（实测 16 点直条带端段偏 5.5% 段长、2 点条带偏 4%），
+    //    而且「2 点 kSmooth == kPolyline」这个数学事实不成立了。
+    const int last_real_i = static_cast<int>(last_real);
+    for (int col = 0; col < kStripSampleCount; ++col) {
+        const int c = std::min(col, last_real_i);   // 尾部塌缩列与最后一个有效列同切线
+        const int im = std::max(c - 1, 0);
+        const int ip = std::min(c + 1, last_real_i);
+        const float w = (ip - im == 2) ? 0.5f : 1.0f;
+        out->center_tan[col] = smooth_internal::Scale(
+            smooth_internal::Sub(out->center[ip], out->center[im]), w);
+        out->half_tan[col] = smooth_internal::Scale(
+            smooth_internal::Sub(out->half[ip], out->half[im]), w);
+    }
+
+    // ③ 自动外扩量：真实曲线相对弦在**宽度方向上**的最大外凸量，按**绝对量（米）**算
+    //    （拖尾收窄到 0 的段落用比例会失真）。片元只能削不能补 ⇒ 撑不够就少一条边。
+    //
+    //    ⚠️ 这里必须用**完整 Hermite** 求 sh，不能因为「本段 h0 == h1」就简化成常数 h0：
+    //    FS 那边恒算完整 Hermite（含 h10·n0 + h11·n1），而 n 只看相邻列 ——
+    //    局部等宽、但隔壁列在收窄（"肩部"）时 n ≠ 0，简化的 margin 会低估外凸量，
+    //    收窄处外侧就缺一条（实测：半宽 0.2 的直条带、末列收到 0，两侧各缺 4.25 mm）。
+    float margin = 0.0f;
+    for (int seg = 0; seg < kStripQuads; ++seg) {
+        for (int si = 1; si <= kSmoothMarginSamplesPerSegment; ++si) {
+            const float t = static_cast<float>(si) /
+                            static_cast<float>(kSmoothMarginSamplesPerSegment + 1);
+            const Vec3f lc =
+                smooth_internal::Lerp(out->center[seg], out->center[seg + 1], t);
+            const Vec3f lh = smooth_internal::Lerp(out->half[seg], out->half[seg + 1], t);
+            const float len = lh.Norm();
+            if (len < 1e-5f) {
+                continue;   // 退化段（宽度为 0）：没有"外侧"可言
+            }
+            const Vec3f w{lh.x() / len, lh.y() / len, lh.z() / len};
+            const Vec3f sc = smooth_internal::Hermite(
+                out->center[seg], out->center_tan[seg], out->center[seg + 1],
+                out->center_tan[seg + 1], t);
+            const Vec3f sh = smooth_internal::Hermite(
+                out->half[seg], out->half_tan[seg], out->half[seg + 1],
+                out->half_tan[seg + 1], t);
+            const float dl = smooth_internal::Dot(smooth_internal::Sub(sc, lc), w);
+            const float dhw = smooth_internal::Dot(smooth_internal::Sub(sh, lh), w);
+            // 左轨（v=1）外法向 = +w；右轨（v=0）外法向 = −w。
+            margin = std::max(margin, std::max(dl + dhw, -dl + dhw));
+        }
+    }
+    // 采样是最值近似，再留 2% + 1 mm 余量：宁可多撑一点（FS 会裁回去）。
+    margin = std::max(margin, 0.0f) * 1.02f + 0.001f;
+
+    // 统一 scale：按**最细**的一列算，保证每一列都撑得住；上限 kSmoothMaxWidenScale。
+    // 为什么必须整条带统一（不能逐列）：FS 假定 position = lerp(c) + (2v−1)·lerp(h)，
+    // 只有 scale 恒定才有 lerp(scale·h) == scale·lerp(h)；逐列不同会在收窄处露出缺口。
+    float min_half = 1e30f;
+    for (int col = 0; col < kStripSampleCount; ++col) {
+        const float hl = out->half[col].Norm();
+        if (hl > 1e-5f) {
+            min_half = std::min(min_half, hl);
+        }
+    }
+    out->margin = margin;
+    out->scale = (min_half < 1e30f)
+                     ? std::min(1.0f + margin / min_half, kSmoothMaxWidenScale)
+                     : 1.0f;
+}
+
+// 追加一条条带的数据纹理行：kStripSampleCount × 12 float。
+//
+// 打包约定（**与 kSmoothFsTail 的解包逐字对应**，改一边必须改另一边）：
+//   每列 12 float = c.xyz, m.xyz, h.xyz, n.xyz
+//   → 每 3 个 texel 一组：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
+inline void AppendSmoothStripData(const SmoothStripCompute& computed,
+                                  std::vector<float>* out /*output*/) {
+    CHECK(out != nullptr) << "AppendSmoothStripData: out 不能为空";
+    for (int col = 0; col < kStripSampleCount; ++col) {
+        const Vec3f& c = computed.center[col];
+        const Vec3f& m = computed.center_tan[col];
+        const Vec3f& h = computed.half[col];
+        const Vec3f& n = computed.half_tan[col];
+        out->push_back(c.x());
+        out->push_back(c.y());
+        out->push_back(c.z());
+        out->push_back(m.x());
+        out->push_back(m.y());
+        out->push_back(m.z());
+        out->push_back(h.x());
+        out->push_back(h.y());
+        out->push_back(h.z());
+        out->push_back(n.x());
+        out->push_back(n.y());
+        out->push_back(n.z());
+    }
+}
+
+// 追加一条条带的顶点：kStripVerticesPerStrip × 7 float，列内**先 right 后 left**
+// （与 ExpandStripVertices 的顶点顺序严格一致 —— 两个 pass 共用同一份静态索引）。
+//
+// 外扩沿半宽矢量做，并把外扩量**折进属性 v**（右 = 0.5 − scale/2、左 = 0.5 + scale/2），
+// 于是 FS 里插值出来的 v 就是真实参数：position = lerp(c) + (2v−1)·lerp(h)。
+inline void AppendSmoothStripVertices(const Strip16& strip,
+                                      const SmoothStripCompute& computed,
+                                      float strip_id,
+                                      std::vector<float>* out /*output*/) {
+    CHECK(out != nullptr) << "AppendSmoothStripVertices: out 不能为空";
+    CHECK_GE(strip.point_count, 2u) << "AppendSmoothStripVertices: point_count 至少 2";
+    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
+
+    const uint32_t last_real = strip.point_count - 1;
+    const float v_right = 0.5f - 0.5f * computed.scale;
+    const float v_left = 0.5f + 0.5f * computed.scale;
+    for (int col = 0; col < kStripSampleCount; ++col) {
+        const uint32_t src = std::min(static_cast<uint32_t>(col), last_real);
+        const float u = kStripColumnU.v[col];
+        const float alpha = strip.alpha[src];
+        const Vec3f& center = computed.center[col];
+        for (int side = 0; side < 2; ++side) {
+            const Vec3f& edge = (side == 0) ? strip.right[src] : strip.left[src];
+            out->push_back(center.x() + (edge.x() - center.x()) * computed.scale);
+            out->push_back(center.y() + (edge.y() - center.y()) * computed.scale);
+            out->push_back(center.z() + (edge.z() - center.z()) * computed.scale);
+            out->push_back(u);
+            out->push_back(side == 0 ? v_right : v_left);
+            out->push_back(alpha);
+            out->push_back(strip_id);
+        }
     }
 }
 

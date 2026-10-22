@@ -139,17 +139,19 @@ struct TranslucentStripBatch {
 // 等价于 texture_id == 0 + tint == color，这里显式命名——调用方不用猜
 // 「texture_id 给 0 到底是不画还是纯色」。
 // 注意：仍受 width_profile 与逐点 alpha 调制（即纯色也支持柔边与纵向淡出）。
-// blend / soft_depth_m 一并给，避免「建好纯色批之后忘了设 blend」这种顺序陷阱
-// （纯色批默认仍是覆盖集 + 硬判据）。
+// blend / soft_depth_m / style 一并给，避免「建好纯色批之后忘了设」这种顺序陷阱
+// （纯色批默认仍是覆盖集 + 折线 pass + 硬判据）。
 inline TranslucentStripBatch MakeSolidStripBatch(
     const Color& color, std::vector<Strip16> strips,
     StripBlend blend = StripBlend::kCoverage,
-    std::optional<float> soft_depth_m = std::nullopt) {
+    std::optional<float> soft_depth_m = std::nullopt,
+    StripStyle style = StripStyle::kPolyline) {
     TranslucentStripBatch batch;
     batch.texture_id = 0;          // 不采样纹理 ⇒ 纯色
     batch.tint = color;
     batch.blend = blend;
     batch.soft_depth_m = soft_depth_m;
+    batch.style = style;
     batch.strips = std::move(strips);
     return batch;
 }

@@ -55,8 +55,9 @@ namespace jpov {
 
 class StripRenderer {
 public:
-    // 单次 draw call 最多多少条带（受静态索引缓冲尺寸约束）。
+    // **折线 pass** 单次 draw call 最多多少条带（受静态索引缓冲尺寸约束）。
     // 超出时**分成多次 draw**（不是静默截断 —— 旧 DrawStrip3D 的 3000 顶点截断是反面教材）。
+    // 平滑 pass 不分块：它整批一次上传 + 一次 draw，上限是数据纹理行数（GL_MAX_TEXTURE_SIZE）。
     static constexpr int kMaxStripsPerDraw = 1024;
 
     // 顶点着色器：位置/uv 已由 CPU 展开好，这里只做 MVP。
@@ -196,7 +197,8 @@ uniform float uSoftDepthM;
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
 // 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
-// 每条带占一行，行号 = vStripId。texelFetch 不做 clamp ⇒ 行列号由 CPU 保证合法。
+// 每条带占一行，行号 = vStripId。texelFetch 越界是**未定义行为**（不是返回 0）⇒
+// 行号在这里按 uDataRows 钳一次（列号由 seg 的 clamp 保证）。
 uniform sampler2D uStripData;
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
 layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
@@ -268,8 +270,10 @@ void main() {
     float vStar = v + dv;
 
     // 轮廓：落在真实条带之外的片元裁掉；fwidth 做 1px 解析 AA（不做硬切边的锯齿）。
+    // ⚠️ 覆盖度是「到最近边的距离」，**不能两个 clamp 相乘**：那是两个边各自 0..1 的
+    //    乘积，条带整宽 < 2px 时中段会被平方衰减（1px 宽只剩 0.25），掠射角提前淡出。
     float fw = max(fwidth(vStar), 1e-5);
-    float cov = clamp(vStar / fw, 0.0, 1.0) * clamp((1.0 - vStar) / fw, 0.0, 1.0);
+    float cov = clamp(0.5 + min(vStar, 1.0 - vStar) / fw, 0.0, 1.0);
     if (cov <= 1.0 / 255.0) {
         discard;
     }
@@ -354,7 +358,10 @@ private:
     //
     // ⚠️ 前提：program 创建后不会重建（ShaderManager 按 name 缓存，无重编译路径）。
     //    若将来加 shader 热重载，必须在这里失效并重查，否则会写到旧 program 上。
-    struct DrawUniforms {
+    // **两个 pass 共用的**逐批 uniform：只在这里定义一次、只由 ApplyCommonUniforms 上传，
+    // 免得两条路径各抄一遍（以前 DrawSmooth 把这段连同 soft_depth 分支逐字复制过去，
+    // 将来给其中一个加字段必然会漂移）。
+    struct CommonUniforms {
         int view_proj = -1;
         int tint = -1;
         int has_tex = -1;
@@ -375,29 +382,34 @@ private:
         int additive = -1;
     };
 
-    // 平滑 pass 的 uniform 位置（与 DrawUniforms 同名字段 + 两个专用）。
+    // 平滑 pass = 公共项 + 三个专用（段数 / 数据纹理行数 / 数据纹理采样器）。
     struct SmoothUniforms {
-        int view_proj = -1;
-        int tint = -1;
-        int has_tex = -1;
-        int tex = -1;
-        int profile = -1;
-        int scene_depth = -1;
-        int viewport = -1;
-        int near_plane = -1;
-        int far_plane = -1;
-        int blend_path = -1;
-        int soft_enabled = -1;
-        int soft_m = -1;
+        CommonUniforms common;
         int seg_count = -1;
         int data_rows = -1;
         int strip_data = -1;
     };
 
+    // 一次 Draw 的公共上下文：把 8 项挤进结构体，两个 drawer 就不用各带 7 个位置参数
+    // （同类型参数一多，抄改时最容易错位）。
+    struct BatchDrawContext {
+        const TranslucentStripBatch* batch = nullptr;
+        unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
+        bool want_additive = false;         // 本批走加法集
+        const Camera* camera = nullptr;
+        const float* view_proj = nullptr;   // column-major 16 个 float
+        unsigned int scene_depth_tex = 0;   // 不透明场景深度（值 = gl_FragCoord.z）
+        int full_w = 0;
+        int full_h = 0;
+    };
+
+    // 两个 pass 共用的 uniform 上传（**唯一实现**：改这里两边同时生效）。
+    void ApplyCommonUniforms(const CommonUniforms& uniforms, const BatchDrawContext& ctx);
+
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
-    DrawUniforms draw_uniforms_;
+    CommonUniforms draw_uniforms_;
     CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点
@@ -419,8 +431,8 @@ private:
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
     int smooth_max_rows_ = 0;             // GL_MAX_TEXTURE_SIZE（Init 时缓存）
-    std::vector<float> smooth_vertices_;  // 7 float/顶点：pos(3), u, v, alpha, strip_id
-    std::vector<float> smooth_data_;      // 每列 12 float（c, m, h, n）
+    std::vector<float> smooth_vertices_;  // kSmoothFloatsPerVertex/顶点：pos(3),u,v,alpha,strip_id
+    std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n
 
     // 索引缓冲按需扩容（块 j = 第 j 条带，顶点基址 j×32）。幂等：够用就直接返回。
     // 为什么平滑 pass 必须能一次画完整批：它的数据纹理行号 = 全局 strip 下标，
@@ -428,14 +440,8 @@ private:
     void EnsureIboCapacity(int strips);
 
     // 两个 drawer：同一张 WBO 目标，各自的 program/VAO/数据通道。
-    void DrawPolyline(const TranslucentStripBatch& batch, unsigned int gl_tex,
-                      bool want_additive, const Camera& camera,
-                      const float view_proj[16], unsigned int scene_depth_tex,
-                      int full_w, int full_h);
-    void DrawSmooth(const TranslucentStripBatch& batch, unsigned int gl_tex,
-                    bool want_additive, const Camera& camera,
-                    const float view_proj[16], unsigned int scene_depth_tex,
-                    int full_w, int full_h);
+    void DrawPolyline(const BatchDrawContext& ctx);
+    void DrawSmooth(const BatchDrawContext& ctx);
 };
 
 }  // namespace jpov
