@@ -67,7 +67,6 @@ Shape MinimalShape() {
   type.type = 0;
   type.description = "柳叶簇";
   type.anchor_mode = "bottom_center";
-  type.preferred_aspect = 0.6;
   shape.leaf_types.push_back(type);
 
   LeafCard card;
@@ -251,15 +250,8 @@ void TestNegative() {
 }
 
 void TestDerived() {
-  // 64 边单位圆：周长接近 2π
-  const std::vector<ProfilePoint> circle = UnitCircleProfile(64);
-  Expect(std::fabs(SamplePerimeter(MakeSample(0, 1.0, circle), 0) - 2.0 * kPi) < 1e-2,
-         "半径 1、profile=64 边单位圆的周长应接近 2pi");
-
-  // 8 边单位圆：周长是 8·2·sin(π/8)，明显小于 2π（这条能区分"用真实边长"和"用 2πr"）
-  const double octagon = 8.0 * 2.0 * std::sin(kPi / 8.0);
-  Expect(std::fabs(SamplePerimeter(MakeSample(0, 0.5), 8) - 0.5 * octagon) < 1e-9,
-         "8 边圆周长必须按真实边长算（不能用 2pi r）");
+  // 说明：原先这里用 SamplePerimeter 校验"周长按真实边长算"，该函数 2026-10-22 删除
+  // （唯一调用方是测试）。周长的真实消费方是 sweep 的 tile 尺寸，那个由 sweep_test 覆盖。
 
   // ring_count 显式给值时优先；=0 时回落到第一个非空 profile 的点数
   Shape shape = MinimalShape();
@@ -316,7 +308,6 @@ void TestProtoRoundTrip() {
     out->set_type(t.type);
     out->set_description(t.description);
     out->set_anchor_mode(t.anchor_mode);
-    out->set_preferred_aspect(t.preferred_aspect);
   }
   for (const LeafCard& c : shape.cards) {
     auto* out = proto.add_cards();

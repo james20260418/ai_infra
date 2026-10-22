@@ -369,6 +369,28 @@ GltfTextureRef ResolveImageRef(const tinygltf::Model& model, int image_index,
     return ref;
 }
 
+// 按 **texture 下标**解析：先读 sampler 的 wrap（决定 repeat/clamp），再取 image。
+// glTF 里 sampler 是 texture 的属性（image 没有），所以必须从 texture 进。
+GltfTextureRef ResolveTextureRefOf(const tinygltf::Model& model, int texture_index,
+                                   const std::string& base_dir) {
+    GltfTextureRef ref;
+    if (texture_index < 0 || texture_index >= static_cast<int>(model.textures.size())) {
+        return ref;
+    }
+    const tinygltf::Texture& tex = model.textures[texture_index];
+    if (tex.source < 0) {
+        return ref;
+    }
+    ref = ResolveImageRef(model, tex.source, base_dir);
+    if (tex.sampler >= 0 && tex.sampler < static_cast<int>(model.samplers.size())) {
+        const tinygltf::Sampler& sm = model.samplers[tex.sampler];
+        // 33071 = CLAMP_TO_EDGE；其它（REPEAT/MIRRORED_REPEAT）按重复处理。
+        ref.wrap_repeat = (sm.wrapS != 33071) && (sm.wrapT != 33071);
+    }
+    return ref;
+}
+
+
 // 解析单个 primitive → CPU MeshData + 材质贴图来源。
 //
 // 内部共享逻辑：LoadGltf（取第一个）与 LoadGltfScene（取全部）共用。
@@ -617,43 +639,28 @@ bool ParsePrimitive(const tinygltf::Model& model,
 
         // baseColorTexture
         if (mat.pbrMetallicRoughness.baseColorTexture.index >= 0) {
-            const tinygltf::Texture& tex =
-                model.textures[mat.pbrMetallicRoughness.baseColorTexture.index];
-            if (tex.source >= 0) {
-                out_mat->base_color_tex =
-                    ResolveImageRef(model, tex.source, base_dir);
-            }
+            out_mat->base_color_tex =
+                ResolveTextureRefOf(model, mat.pbrMetallicRoughness.baseColorTexture.index,
+                                    base_dir);
         }
 
         // normalTexture
         if (mat.normalTexture.index >= 0) {
-            const tinygltf::Texture& tex =
-                model.textures[mat.normalTexture.index];
-            if (tex.source >= 0) {
-                out_mat->normal_tex =
-                    ResolveImageRef(model, tex.source, base_dir);
-                out_mat->normal_scale = mat.normalTexture.scale;
-            }
+            out_mat->normal_tex =
+                ResolveTextureRefOf(model, mat.normalTexture.index, base_dir);
+            out_mat->normal_scale = mat.normalTexture.scale;
         }
 
         // metallicRoughnessTexture (ORM 三合一打包)
         if (mat.pbrMetallicRoughness.metallicRoughnessTexture.index >= 0) {
-            const tinygltf::Texture& tex =
-                model.textures[mat.pbrMetallicRoughness.metallicRoughnessTexture.index];
-            if (tex.source >= 0) {
-                out_mat->metallic_roughness_tex =
-                    ResolveImageRef(model, tex.source, base_dir);
-            }
+            out_mat->metallic_roughness_tex = ResolveTextureRefOf(
+                model, mat.pbrMetallicRoughness.metallicRoughnessTexture.index, base_dir);
         }
 
         // occlusionTexture
         if (mat.occlusionTexture.index >= 0) {
-            const tinygltf::Texture& tex =
-                model.textures[mat.occlusionTexture.index];
-            if (tex.source >= 0) {
-                out_mat->occlusion_tex =
-                    ResolveImageRef(model, tex.source, base_dir);
-            }
+            out_mat->occlusion_tex =
+                ResolveTextureRefOf(model, mat.occlusionTexture.index, base_dir);
             // glTF 规范: ao = mix(1.0, R, occlusionStrength)。
             // strength 在渲染前烘焙进 AO 像素（renderer.cc LoadGltfOcclusion），
             // 渲染管线/PRBMaterial 保持不动。默认 1.0（全强度）。
@@ -663,12 +670,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
 
         // emissiveTexture
         if (mat.emissiveTexture.index >= 0) {
-            const tinygltf::Texture& tex =
-                model.textures[mat.emissiveTexture.index];
-            if (tex.source >= 0) {
-                out_mat->emissive_tex =
-                    ResolveImageRef(model, tex.source, base_dir);
-            }
+            out_mat->emissive_tex =
+                ResolveTextureRefOf(model, mat.emissiveTexture.index, base_dir);
         }
 
         // 常值 fallback

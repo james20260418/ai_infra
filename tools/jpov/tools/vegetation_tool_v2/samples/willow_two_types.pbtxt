@@ -50824,13 +50824,11 @@ leaf_types {
   type: 0
   description: "叶簇（素材根部画在格子左下角）"
   anchor_mode: "bottom_left"
-  preferred_aspect: 0
 }
 leaf_types {
   type: 1
   description: "叶簇（镜像手性：素材左右翻转后使用，根部在格子右下角）"
   anchor_mode: "bottom_right"
-  preferred_aspect: 0
 }
 cards {
   anchor { x: 0.245753 y: 1.64839 z: -0.177508 }

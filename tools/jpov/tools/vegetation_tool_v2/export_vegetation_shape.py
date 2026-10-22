@@ -392,7 +392,6 @@ for flipped in (False, True):
     else:
         lines.append('  description: "%s"' % leaf_desc)
     lines.append('  anchor_mode: "%s"' % anchor_mode)
-    lines.append("  preferred_aspect: 0")
     lines.append("}")
 
 for anchor, up, normal, height, branch_id, s_param, flipped in cards:

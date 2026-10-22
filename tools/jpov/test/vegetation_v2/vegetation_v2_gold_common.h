@@ -85,6 +85,12 @@ constexpr int kHeight = 720;
 // 出图文件（相对 gold 目录 / output 目录）。
 constexpr const char* kCardsGold = "vegetation_v2_cards_1280x720.png";
 constexpr const char* kLeafGold = "vegetation_v2_leaf_1280x720.png";
+// glb 展示态（烘焙 → 重新载入 → 带风渲染）。锁住整条烘焙链路：
+// 关节表 / 逐顶点 (joint,phase) / 内嵌贴图 / 两关节混合 / 吹歪。
+constexpr const char* kGlbGold = "vegetation_v2_glb_1280x720.png";
+
+// 风时间（秒）：**必须钉住**，否则每帧累加导致两次渲染必不相同。
+constexpr float kGlbWindTime = 0.8f;
 
 // 跑一遍 gold 场景，把 front 视角的图拷到 out_png。返回 false = 失败。
 //
@@ -96,12 +102,19 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   std::system(("rm -rf '" + shot_dir + "'").c_str());
 
   // 相机与材质参数和 `build_jpov_vegetation_v2_viewer.sh` 打印的完整组合命令一致。
+  //
+  // ⚠️ **所有会影响像素的渲染参数都必须在这里显式钉住**，不能吃 app 的默认值：
+  //    2026-10-22 只是把树皮法线强度默认值从 1.5 改成 0.75（Danis 要求），
+  //    两张 gold 就整体变了、必须重新生成 —— 而 gold 是「有没有回归」的唯一依据，
+  //    它跟着默认值漂移就等于失去报警能力。
+  //    `--uv-vscale 0.5` = 树皮 albedo 512x1024 的自动值（宽/高），钉住以免改自动公式时漂移。
   std::string cmd = "'" + ViewerBinary() + "'";
   cmd += " --shape '" + dir + "/samples/willow.pbtxt'";
   cmd += " --bark '" + dir + "/assets/bark/bark001'";
+  cmd += " --normal-scale 0.75 --uv-vscale 0.5";
   if (with_leaf) {
     // 这批样例叶卡背景是 ≈10~13 的灰噪、内容 ≥44 ⇒ 软过档 [0.5t, 1.5t] 取 t=30 得 [15,45]。
-    cmd += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30";
+    cmd += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30 --leaf-normal 1.0";
   } else {
     cmd += " --no-leaf";
   }
@@ -126,7 +139,73 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   return true;
 }
 
+// 跑一遍 **glb 展示态** gold：先烘焙一份 glb，再用查看器 `--glb` 载入并出图。
+//
+// 为什么不 in-process 烘焙：gold 必须等于用户看到的那张图。烘焙也用**同一个查看器
+// 二进制**的 `--bake`（与用户在面板上点「烘焙 glb」走同一份代码），所以整条链——
+// 关节构造 → 写 glb → 重新载入 → 两关节混合蒙皮 → 风/吹歪——都在基准图里。
+//
+// 确定性：风时间用 `--wind-time` 钉住（否则每帧累加），实测同一二进制多次渲染 md5 相同。
+inline bool RenderGlbGolden(const std::string& out_png) {
+  const std::string dir = SampleAssetDir();
+  const std::string shot_dir = out_png + ".shots";
+  const std::string glb = out_png + ".glb";
+  std::system(("rm -rf '" + shot_dir + "'").c_str());
+
+  // 1) 烘焙（与面板默认参数一致：normal-scale 0.75、uv 自动=0.5、叶黑阈 30）。
+  std::string bake = "'" + ViewerBinary() + "'";
+  bake += " --shape '" + dir + "/samples/willow.pbtxt'";
+  bake += " --bark '" + dir + "/assets/bark/bark001'";
+  bake += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30";
+  bake += " --normal-scale 0.75 --uv-vscale 0.5";
+  bake += " --bake '" + glb + "'";
+  bake += " > /dev/null 2>&1";
+  const int bake_rc = std::system(bake.c_str());
+  if (bake_rc != 0) {
+    LOG(ERROR) << "烘焙 glb 失败（返回 " << bake_rc << "）：" << bake;
+    return false;
+  }
+  {
+    FILE* f = std::fopen(glb.c_str(), "rb");
+    if (f == nullptr) {
+      LOG(ERROR) << "烘焙没有产出 glb: " << glb;
+      return false;
+    }
+    std::fclose(f);
+  }
+
+  // 2) glb 展示态出图（相机用自动取景：与用户 `--glb` 打开时看到的一致）。
+  const std::string wind = std::to_string(kGlbWindTime);
+  std::string cmd = "'" + ViewerBinary() + "'";
+  // **故意不给 --shape**：gold 走「纯 glb 查看模式」（runfiles 的 cwd 里没有
+  // shapes/willow.pbtxt，缺 shape 即进入该模式）。这样这张 gold 同时守住了
+  // 「只拿一个 glb 也能打开」这条路径 —— 它与"shape + glb"渲染逐像素一致（实测 0 差异）。
+  cmd += " --glb '" + glb + "'";
+  cmd += " --wind-time " + wind;
+  // 相机**固定**（自动取景 R=17.88 太远，叶子只剩几个像素，回归看不出来）。
+  // 这组参数把整棵树放进画面、同时让叶卡有十几像素宽 —— 风/吹歪看枝条摆幅，
+  // 叶子看 cutout 与贴图。改这里 = 换构图，必须重出 gold。
+  cmd += " --cam_phi 15 --cam_theta 25 --cam_r 8 --cam-target-y 4.5";
+  cmd += " --no-hud";   // HUD 是文字，且含相机字符串，不进基准图
+  cmd += " --capture '" + shot_dir + "'";
+  cmd += " > /dev/null 2>&1";
+  const int rc = std::system(cmd.c_str());
+  if (rc != 0) {
+    LOG(ERROR) << "查看器返回 " << rc << "：" << cmd;
+    return false;
+  }
+  const std::string front = shot_dir + "/veg_v2_front.png";
+  const int cp = std::system(("cp '" + front + "' '" + out_png + "'").c_str());
+  if (cp != 0) {
+    LOG(ERROR) << "没拿到 front 图: " << front;
+    return false;
+  }
+  std::system(("rm -rf '" + shot_dir + "'").c_str());
+  std::system(("rm -f '" + glb + "'").c_str());
+  LOG(INFO) << "glb gold 场景已渲染（烘焙 + 载入 + 风）: " << out_png;
+  return true;
+}
+
 }  // namespace goldtest
 }  // namespace vegv2
-
 #endif  // JPOV_TOOLS_VEGETATION_TOOL_V2_GOLD_COMMON_H_

@@ -30,17 +30,38 @@ namespace {
 constexpr double kCardsMaxRoiDiff = 0.5;
 constexpr int kCardsRoi = 8;
 
-// 材质烟雾报警：叶子 cutout 在 llvmpipe 下会落几种离散状态，**格越细越容易被单块抖动主导**
-// （实测 8×8 时噪声最大 26、只有 3/64 格超 10）。改用 4×4 后同一对图的噪声 9.8，
-// 而真回归仍然很大：没贴树皮 25.8、叶子被杀 20.5、没贴叶图 41.5。给 15。
-constexpr double kLeafMaxRoiDiff = 15.0;
-constexpr int kLeafRoi = 4;
+// 材质图不用 ROI 做主判据 —— 2026-10-22 实测：叶子 cutout 在 llvmpipe 下会**整块**
+// 落到另一种离散状态，同一份源码、同一个二进制，两次渲染 4×4 ROI 最大差就能到 124
+// （≈0.08% 的像素翻面），阈值 15 的 ROI 判据会随机变红；而真回归大得多（去掉叶图
+// 21.9% 像素变化）。所以这里改用**显著变化像素占比**：
+//   * 状态翻转：实测 5 次里 4 次 0.085%、1 次 1.23%（另一种翻面更大）
+//   * 叶子整片没了：21.9%
+// 阈值 5% 卡在中间（对实测最坏 1.23% 留 4 倍余量，对真回归留 4 倍灵敏度）。
+// 早期试过 2%，离实测抖动只有 1.6 倍余量，太险。ROI 值仍然打印（诊断用）。
+constexpr double kLeafMaxChangedRatio = 0.05;
+
+// glb 展示态：风时间已钉死、烘焙产物逐字节可复现（实测两次 bake md5 相同、三次渲染
+// md5 相同）。但烘焙 + cutout 仍可能撞上那种整块离散状态，所以双判据：
+//   ROI ≤ 2.0（8×8）**且** 显著变化像素 ≤ 1%。
+// 能抓住：关节表算错（枝条乱扭/炸开）、风没生效（树纹丝不动）、贴图没内嵌（全白/全黑）、
+// 顶点挂错枝（整根枝飞走）。
+constexpr double kGlbMaxRoiDiff = 2.0;
+constexpr int kGlbRoi = 8;
+constexpr double kGlbMaxChangedRatio = 0.01;
+
+// 逐像素「显著变化」的判据（单像素 RGB 三通道差的最大值）—— 与 kLeaf/kGlb 的
+// changed_ratio 配套使用。
+constexpr int kPixelThreshold = 8;
 
 std::string GoldDir() { return jpov::GetTestDataDir() + "/vegetation_v2/"; }
 
 // 渲染 + 比对一张，返回是否通过（先把 gold 存在性、分辨率、非全黑都查掉）。
-bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed, int roi,
-              const std::string& outdir) {
+// mode：0 = debug 绿卡、1 = 贴叶图 + 树皮、2 = glb 展示态（烘焙→载入→带风）。
+// 判据（两项都要过）：
+//   roi        —— ROI 均值最大通道差上限（大范围亮度/颜色漂移）
+//   ratio      —— 显著变化像素占比上限（局部结构变化）；< 0 = 不看这一项
+bool CheckOne(const char* gold_name, int mode, double max_diff_allowed, int roi,
+              double max_changed_ratio, const std::string& outdir) {
   const std::string gold = GoldDir() + gold_name;
   {
     FILE* f = std::fopen(gold.c_str(), "rb");
@@ -49,7 +70,10 @@ bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed, in
     std::fclose(f);
   }
   const std::string rendered = outdir + gold_name;
-  CHECK(vegv2::goldtest::RenderGolden(with_leaf, rendered)) << "gold 场景渲染失败";
+  const bool rendered_ok = (mode == 2)
+                               ? vegv2::goldtest::RenderGlbGolden(rendered)
+                               : vegv2::goldtest::RenderGolden(/*with_leaf=*/mode == 1, rendered);
+  CHECK(rendered_ok) << "gold 场景渲染失败";
 
   // 健全性：分辨率对、画面不是全黑（防「渲染全黑但均值差为 0」的假绿）。
   int w = 0;
@@ -74,14 +98,30 @@ bool CheckOne(const char* gold_name, bool with_leaf, double max_diff_allowed, in
   LOG(INFO) << gold_name << ": " << roi << "x" << roi << " ROI 最大通道均值差 = "
             << max_diff << "（阈值 " << max_diff_allowed << "），非黑占比 "
             << ratio * 100.0 << "%";
-  if (max_diff > max_diff_allowed) {
-    LOG(ERROR) << "GOLD COMPARE FAILED: " << gold_name << " diff=" << max_diff
-               << " > " << max_diff_allowed << "\n  渲染结果: " << rendered
+  bool ok = (max_diff <= max_diff_allowed);
+
+  double changed = -1.0;
+  if (max_changed_ratio >= 0.0) {
+    const jpov::PixelChangeReport rep =
+        jpov::ComparePixelChangePng(gold, rendered, kPixelThreshold);
+    changed = rep.changed_ratio;
+    LOG(INFO) << gold_name << ": 显著变化像素（|Δ|>" << kPixelThreshold
+              << "）= " << rep.changed << " / " << rep.opaque << " = "
+              << changed * 100.0 << "%（阈值 " << max_changed_ratio * 100.0 << "%）";
+    if (changed > max_changed_ratio) {
+      ok = false;
+    }
+  }
+
+  if (!ok) {
+    LOG(ERROR) << "GOLD COMPARE FAILED: " << gold_name << " roi_diff=" << max_diff
+               << "（阈值 " << max_diff_allowed << "）changed=" << changed
+               << "（阈值 " << max_changed_ratio
+               << "）\n  渲染结果: " << rendered
                << "\n  gold:     " << gold
                << "\n  若观感变化是有意的，重跑 generator 并提交新 gold。";
-    return false;
   }
-  return true;
+  return ok;
 }
 
 }  // namespace
@@ -90,13 +130,19 @@ int main() {
   const std::string outdir = jpov::GetOutputDir() + "vegetation_v2_gold/";
   std::system(("mkdir -p " + outdir).c_str());
 
-  const bool cards_ok = CheckOne(vegv2::goldtest::kCardsGold, /*with_leaf=*/false,
-                                 kCardsMaxRoiDiff, kCardsRoi, outdir);
-  const bool leaf_ok = CheckOne(vegv2::goldtest::kLeafGold, /*with_leaf=*/true,
-                                kLeafMaxRoiDiff, kLeafRoi, outdir);
-  if (!cards_ok || !leaf_ok) {
+  // cards 只信 ROI（几何锁，噪声 0）；leaf 以显著像素占比为主（cutout 会整块翻面）；
+  // glb 两者都看（烘焙确定，但 cutout 状态仍可能翻）。
+  const bool cards_ok = CheckOne(vegv2::goldtest::kCardsGold, /*mode=*/0,
+                                 kCardsMaxRoiDiff, kCardsRoi, /*max_changed_ratio=*/-1.0,
+                                 outdir);
+  const bool leaf_ok = CheckOne(vegv2::goldtest::kLeafGold, /*mode=*/1,
+                                /*max_diff_allowed=*/1e9, /*roi=*/4,
+                                kLeafMaxChangedRatio, outdir);
+  const bool glb_ok = CheckOne(vegv2::goldtest::kGlbGold, /*mode=*/2,
+                               kGlbMaxRoiDiff, kGlbRoi, kGlbMaxChangedRatio, outdir);
+  if (!cards_ok || !leaf_ok || !glb_ok) {
     return 1;
   }
-  LOG(INFO) << "GOLD COMPARE PASSED（cards + leaf）";
+  LOG(INFO) << "GOLD COMPARE PASSED（cards + leaf + glb）";
   return 0;
 }

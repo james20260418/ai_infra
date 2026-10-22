@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <optional>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -18,10 +20,13 @@
 #include "third_party/stb/stb_image.h"
 #include "third_party/stb/stb_image_write.h"
 
+#include "tools/common/utils.h"
 #include "tools/jpov/demo/skylight_scene.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/ui.h"
+#include "tools/jpov/tools/vegetation_tool_v2/bake/vegetation_glb_baker.h"
+#include "tools/jpov/tools/vegetation_tool_v2/leaf_texture.h"
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 #include "tools/jpov/tools/vegetation_tool_v2/sweep.h"
 
@@ -46,155 +51,18 @@ using jpov::vegetation::Vec3d;
 constexpr int kMaxCardTypes = 4;  // 4 种绿
 constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了看得见朝向
 
-// 叶卡 alpha 的裁切阈值。**必须只有一处**：TextureOptions.alpha_coverage.cutoff（覆盖率
-// 保持 mip 的二值化阈值）与 PBRMaterial.alpha_cutoff（片元保留判据）必须相等，
-// 否则远景叶子会忽多忽少（mip 按 0.5 二值化、裁切却用另一个值）。
-constexpr float kLeafAlphaCutoff = 0.5f;
 
-bool ReadFileBytes(const std::string& path, std::vector<unsigned char>* out) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  return !out->empty();
-}
-
-std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& rgba, int w, int h) {
-  std::vector<unsigned char> out;
-  stbi_write_png_to_func(
-      [](void* ctx, void* data, int size) {
-        std::vector<unsigned char>* v = static_cast<std::vector<unsigned char>*>(ctx);
-        const unsigned char* p = static_cast<const unsigned char*>(data);
-        v->insert(v->end(), p, p + size);
-      },
-      &out, w, h, 4, rgba.data(), w * 4);
-  return out;
-}
 
 // 只把 RGB 往透明区扩散，**不动 alpha**（alpha 是 cutout 的判据）。
 // 目的：mip / 双线性采样时，叶子边缘不会混到背景的黑色（否则一圈黑边）。
-void DilateRgbIntoTransparent(const std::vector<unsigned char>& alpha_mask,
-                              std::vector<unsigned char>* rgba, int w, int h, int passes) {
-  std::vector<unsigned char> mask = alpha_mask;   // 0/1：该像素有没有"内容"
-  for (int p = 0; p < passes; ++p) {
-    std::vector<unsigned char> next = mask;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const size_t idx = static_cast<size_t>(y) * w + x;
-        if (mask[idx]) continue;
-        int acc[3] = {0, 0, 0};
-        int n = 0;
-        const int dx[4] = {-1, 1, 0, 0};
-        const int dy[4] = {0, 0, -1, 1};
-        for (int k = 0; k < 4; ++k) {
-          const int nx = x + dx[k];
-          const int ny = y + dy[k];
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-          const size_t nidx = static_cast<size_t>(ny) * w + nx;
-          if (!mask[nidx]) continue;
-          acc[0] += (*rgba)[nidx * 4 + 0];
-          acc[1] += (*rgba)[nidx * 4 + 1];
-          acc[2] += (*rgba)[nidx * 4 + 2];
-          ++n;
-        }
-        if (n > 0) {
-          (*rgba)[idx * 4 + 0] = static_cast<unsigned char>(acc[0] / n);
-          (*rgba)[idx * 4 + 1] = static_cast<unsigned char>(acc[1] / n);
-          (*rgba)[idx * 4 + 2] = static_cast<unsigned char>(acc[2] / n);
-          next[idx] = 1;
-        }
-      }
-    }
-    mask.swap(next);
-  }
-}
 
 // 上下翻转 RGBA 行。
 // stb_image 解码后第 0 行是**图像顶部**，而 OpenGL 的 v=0 取第 0 行 ⇒ 直接上传时
 // v=0 = 图顶。Blender / glTF 的约定是 v=0 = 图**底**，用户按"根部画在图片底部"做的素材
 // 一旦直传就会整张上下颠倒。所以叶卡贴图在上传前翻一次行，让 uv(0,0) = 图左下。
-void FlipRows(std::vector<unsigned char>* rgba, int w, int h) {
-  const size_t stride = static_cast<size_t>(w) * 4;
-  std::vector<unsigned char> tmp(stride);
-  for (int y = 0; y < h / 2; ++y) {
-    unsigned char* a = rgba->data() + static_cast<size_t>(y) * stride;
-    unsigned char* b = rgba->data() + static_cast<size_t>(h - 1 - y) * stride;
-    std::memcpy(tmp.data(), a, stride);
-    std::memcpy(a, b, stride);
-    std::memcpy(b, tmp.data(), stride);
-  }
-}
 
 // 由 alpha 生成切线空间法线贴图：alpha 当高度场 → 模糊 → 中央差分。
 // green = +v（OpenGL 约定，与引擎 B = cross(N,T) 一致）；图像 y 向下，所以要取反。
-std::vector<unsigned char> BuildNormalFromAlpha(const std::vector<unsigned char>& rgba,
-                                                int w, int h, float depth) {
-  std::vector<float> height(static_cast<size_t>(w) * h);
-  for (size_t i = 0; i < height.size(); ++i) {
-    // 高度场 = 轮廓(alpha) + 叶面明暗(luma)。
-    //   alpha：给轮廓一圈软倒角（治"剃刀切出来的纸边"）
-    //   luma ：给叶脉/叶面起伏（照片本身的光影被当成凹凸，经典的 emboss 用法）
-    // 只用 alpha 时叶面内部是纯平的，近看仍然是贴纸；加上 luma 才有叶面细节。
-    const float a = rgba[i * 4 + 3] / 255.0f;
-    const float luma = (0.299f * rgba[i * 4 + 0] + 0.587f * rgba[i * 4 + 1] +
-                        0.114f * rgba[i * 4 + 2]) /
-                       255.0f;
-    height[i] = 0.45f * a + 0.55f * luma;
-  }
-  // 两次 3-tap 盒模糊（等效半径 2）：把硬边变成斜坡，法线才有倒角。
-  for (int pass = 0; pass < 2; ++pass) {
-    std::vector<float> tmp = height;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const int xm = (x == 0) ? 0 : x - 1;
-        const int xp = (x + 1 == w) ? w - 1 : x + 1;
-        tmp[static_cast<size_t>(y) * w + x] =
-            (height[static_cast<size_t>(y) * w + xm] +
-             height[static_cast<size_t>(y) * w + x] +
-             height[static_cast<size_t>(y) * w + xp]) / 3.0f;
-      }
-    }
-    height.swap(tmp);
-    tmp = height;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const int ym = (y == 0) ? 0 : y - 1;
-        const int yp = (y + 1 == h) ? h - 1 : y + 1;
-        tmp[static_cast<size_t>(y) * w + x] =
-            (height[static_cast<size_t>(ym) * w + x] +
-             height[static_cast<size_t>(y) * w + x] +
-             height[static_cast<size_t>(yp) * w + x]) / 3.0f;
-      }
-    }
-    height.swap(tmp);
-  }
-
-  std::vector<unsigned char> out(height.size() * 4);
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      const size_t i = static_cast<size_t>(y) * w + x;
-      const int xm = (x == 0) ? 0 : x - 1;
-      const int xp = (x + 1 == w) ? w - 1 : x + 1;
-      const int ym = (y == 0) ? 0 : y - 1;
-      const int yp = (y + 1 == h) ? h - 1 : y + 1;
-      const float dx = 0.5f * (height[static_cast<size_t>(y) * w + xp] -
-                               height[static_cast<size_t>(y) * w + xm]);
-      const float dy_img = 0.5f * (height[static_cast<size_t>(yp) * w + x] -
-                                   height[static_cast<size_t>(ym) * w + x]);
-      float nx = -dx * depth;
-      float ny = dy_img * depth;   // +v 与图像 y 反向
-      float nz = 1.0f;
-      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-      nx /= len;
-      ny /= len;
-      nz /= len;
-      out[i * 4 + 0] = static_cast<unsigned char>((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 1] = static_cast<unsigned char>((ny * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 2] = static_cast<unsigned char>((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 3] = 255;
-    }
-  }
-  return out;
-}
 
 // A：顶点法线球面化。卡片本来 4 个顶点法线全等于面法线 → 整卡一个亮度（纸片感）。
 // 按格内 uv 把法线往「叶片中心鼓起」的方向掰：角上法线向外张，中央仍朝面外。
@@ -248,30 +116,6 @@ void BendCardNormals(jpov::MeshData* md, float k) {
     }
   }
 }
-
-// 读 PNG 的 IHDR 拿像素尺寸（只为贴图长宽比，不值得为此加一条 stb 依赖）。
-// 非 PNG / 损坏 → 返回 false，调用方回退 1.0。
-bool ReadPngSize(const std::string& path, int* w, int* h) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  unsigned char buf[24] = {0};
-  f.read(reinterpret_cast<char*>(buf), sizeof(buf));
-  if (f.gcount() != static_cast<std::streamsize>(sizeof(buf))) return false;
-  static const unsigned char kSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-  for (int i = 0; i < 8; ++i) {
-    if (buf[i] != kSig[i]) return false;
-  }
-  const auto be32 = [](const unsigned char* p) {
-    return (static_cast<int>(p[0]) << 24) | (static_cast<int>(p[1]) << 16) |
-           (static_cast<int>(p[2]) << 8) | static_cast<int>(p[3]);
-  };
-  // PNG 规范要求 IHDR 是第一个 chunk：长度(4) + "IHDR"(4) + w(4) + h(4)。
-  if (buf[12] != 'I' || buf[13] != 'H' || buf[14] != 'D' || buf[15] != 'R') return false;
-  *w = be32(buf + 16);
-  *h = be32(buf + 20);
-  return *w > 0 && *h > 0;
-}
-
 
 namespace {
 
@@ -345,7 +189,60 @@ class VegetationV2App : public JPOV {
  public:
   using JPOV::JPOV;
 
+  // 释放 glb 的 GPU 资源。**必须在 Finalize() 之前调**（Finalize 之后 GL 上下文已销毁，
+  // ReleaseGltf 会崩），所以 RunViewer 统一走 Shutdown()。
+  void Shutdown() {
+    ReleaseGlb();
+    Finalize();
+  }
+
+  // ── 状态机：原材料态（shape/leaf/bark 现搭）↔ glb 展示态（烘焙产物 + 风）──
+  enum class Mode { kRaw, kGlb };
+
   Shape shape_;
+  bool has_shape_ = false;        // 有没有原材料（纯 glb 查看模式下为 false）
+  float args_radius_ = 0.0f;      // --cam_r（0 = 自动：按包围盒 fit）
+  Mode mode_ = Mode::kRaw;
+  jpov::GltfObject glb_;          // glb 展示态的资源（独占，切回原材料态要 Release）
+  bool glb_loaded_ = false;
+  std::string glb_path_;
+  // 烘焙参数（面板可调）
+  float bake_thick_spacing_ = 1.5f;
+  float bake_thin_spacing_ = 0.5f;
+  float bake_max_joints_f_ = 8.0f;
+  float bake_phase_scale_ = 1.0f;
+  float bake_droop_scale_ = 0.5f;
+  float bake_leaf_black_ = 30.0f;
+  float bake_leaf_normal_ = 1.0f;
+  float bake_normal_scale_ = 0.75f;
+  // 烘焙结果（面板显示）
+  std::string bake_msg_;
+  bool bake_ok_ = false;
+  float bake_ms_ = 0.0f;
+  // 风（glb 展示态）
+  bool wind_on_ = true;
+  float wind_azimuth_deg_ = 35.0f;
+  float wind_amplitude_ = 0.1167f;   // = 旧默认 0.35 的 1/3（2026-10-22 Danis）
+  float wind_frequency_ = 0.5f;
+  float wind_turb_amp_ = 0.04f;     // = 旧默认 0.12 的 1/3
+  float wind_turb_freq_ = 2.5f;
+  float wind_gust_freq_ = 0.6f;
+  float wind_gust_str_ = 0.7f;
+  float wind_time_scale_ = 1.0f;
+  float wind_blow_ratio_ = 0.0f;   // 吹歪比例（0 = 关；随指数变量纲，是观感参数）
+  float wind_blow_exp_ = 2.0f;     // 吹歪指数 n（1 = 线性，2 = 梢部加速）
+  float scene_height_ = 1.0f;      // 参考高度 H（米）：shape/glb 的 Y 向包围盒高
+  bool wind_paused_ = false;
+  float wind_time_ = 0.0f;        // 秒；由帧号推（确定性）
+  // 面板折叠状态
+  // 面板点击**不能当帧**就释放/重建 GPU 资源：本帧的绘制命令已经带着旧 mesh_id 入队了，
+  // 立刻 Release 会让渲染器拿到已释放的 id。所以只记一个待办，下一帧开头执行。
+  enum class Pending { kNone, kBake, kBackToRaw };
+  Pending pending_ = Pending::kNone;
+  bool bake_panel_open_ = true;
+  bool wind_panel_open_ = true;
+  bool scene_panel_open_ = true;
+  bool leaf_panel_open_ = true;
   std::vector<uint32_t> branch_mesh_;   // 与 shape_.branches 下标对齐
   std::vector<int> branch_level_;
   // 绿卡：整张 quad 的盒子（空间覆盖），**每个 leaf type 一个 mesh**，
@@ -384,7 +281,7 @@ class VegetationV2App : public JPOV {
   // 树皮材质（--bark 给了才加载）。tile 由 UV 决定 = 该枝周长，与贴图尺寸无关。
   bool has_bark_ = false;
   bool show_bark_ = true;
-  float normal_scale_ = 1.5f;   // 面板可调；BuildScene 里来自 --normal-scale
+  float normal_scale_ = 0.75f;  // 面板可调；BuildScene 里来自 --normal-scale（默认 = 旧 1.5 的 1/2）
   // = 贴图宽/高；交给 SweepBranches 烘进 UV（v 方向），不是 shader 里改。
   float uv_v_scale_ = 1.0f;
   jpov::PBRMaterial bark_mat_;
@@ -392,6 +289,11 @@ class VegetationV2App : public JPOV {
   jpov::PBRMaterial ground_mat_;
   jpov::Ui ui_;
   std::string shape_path_;   // 只用于帮助打印（H 键）
+  std::string bark_dir_;     // 烘焙用（原材料态加载时记下）
+  std::string leaf_path_;    // 同上
+  std::string leaf2_path_;   // type 1（镜像手性）素材
+  std::string bake_out_path_;  // 非空 = 烘焙输出固定到这个路径（--bake）
+  float args_uv_vscale_ = 0.0f;  // --uv-vscale（0 = 自动）
   jpov_skylight::SkyDegrees deg_;
 
   std::string CamString() const {
@@ -439,12 +341,6 @@ class VegetationV2App : public JPOV {
       std::printf("\n  type %u   卡数 %zu\n", t.type, cards_of_type);
       std::printf("    anchor_mode = %s\n", t.anchor_mode.c_str());
       std::printf("    根部位置   = %s\n", where);
-      if (t.preferred_aspect > 0.0) {
-        std::printf("    推荐宽/高  = %.3f（height=H 时 width=%.3f·H；格子宽:高 = %.3f : 1）\n",
-                    t.preferred_aspect, t.preferred_aspect, t.preferred_aspect);
-      } else {
-        std::printf("    推荐宽/高  = 未指定（装配时取该类型第一套 atlas 的格子比例）\n");
-      }
       if (!t.description.empty()) {
         std::printf("    描述       = %s\n", t.description.c_str());
       }
@@ -459,63 +355,47 @@ class VegetationV2App : public JPOV {
   // 一张叶卡贴图 → PBR 材质（黑底转 alpha、由 alpha+luma 生成法线、覆盖率 mip）。
   // key 用路径本身：同路径重复调用会被 TextureManager 去重。
   void LoadLeafMaterial(const std::string& path, jpov::PBRMaterial* out) {
-    std::vector<unsigned char> file;
-    CHECK(ReadFileBytes(path, &file)) << "读不到叶卡图: " << path;
-    int w = 0;
-    int h = 0;
-    int comp = 0;
-    unsigned char* px = stbi_load_from_memory(file.data(), static_cast<int>(file.size()), &w, &h,
-                                              &comp, 4);
-    CHECK(px != nullptr) << "解码失败: " << path;
-    std::vector<unsigned char> rgba(px, px + static_cast<size_t>(w) * h * 4);
-    stbi_image_free(px);
-
-    // 「近乎黑 = 透明」：max(r,g,b) 在 0.5t~1.5t 之间线性过渡。
-    const float lo = leaf_black_ * 0.5f;
-    const float hi = leaf_black_ * 1.5f;
-    const float span = std::max(1e-3f, hi - lo);
-    std::vector<unsigned char> mask(static_cast<size_t>(w) * h);
+    // 与 GLB 烘焙共用同一份 CPU 流水线（leaf_texture）：用户看到的叶子与写进 glb 的叶子
+    // 必须是同一批像素，否则「预览↔产物」迟早漂移。
+    jpov::vegetation::LeafTexture tex;
+    std::string err;
+    CHECK(jpov::vegetation::LoadLeafTextureFromPng(path, leaf_black_, /*dilate_passes=*/6, &tex,
+                                                   &err))
+        << err;
     size_t opaque = 0;
-    for (size_t i = 0; i < mask.size(); ++i) {
-      const float mx = static_cast<float>(std::max(
-          std::max(rgba[i * 4 + 0], rgba[i * 4 + 1]), rgba[i * 4 + 2]));
-      float t = (mx - lo) / span;
-      t = std::min(1.0f, std::max(0.0f, t));
-      const unsigned char a = static_cast<unsigned char>(t * 255.0f + 0.5f);
-      // 黑底素材：观测色 = 叶片色 × 覆盖率，边缘要按覆盖率反解，否则发黑。
-      if (t > 0.0f && t < 1.0f) {
-        for (int c = 0; c < 3; ++c) {
-          rgba[i * 4 + c] =
-              static_cast<unsigned char>(std::min(255.0f, rgba[i * 4 + c] / t));
-        }
+    for (size_t i = 0; i < static_cast<size_t>(tex.width) * tex.height; ++i) {
+      if (tex.rgba[i * 4 + 3] > 0) {
+        ++opaque;
       }
-      rgba[i * 4 + 3] = a;
-      mask[i] = a > 0 ? 1 : 0;
-      if (a > 0) ++opaque;
     }
-    CHECK(opaque > 0) << "叶卡图里没有非黑像素（阈值 --leaf-black " << leaf_black_ << "）: "
-                      << path;
-    LOG(INFO) << "叶卡: " << path << " " << w << "x" << h << "，不透明 "
-              << (100.0 * static_cast<double>(opaque) / static_cast<double>(mask.size())) << "%";
-    DilateRgbIntoTransparent(mask, &rgba, w, h, 6);
-    std::vector<unsigned char> normal_rgba = BuildNormalFromAlpha(rgba, w, h, 4.0f);
-    // albedo 与法线一起翻行：v=0 = 图底（Blender/glTF 约定）。
-    FlipRows(&rgba, w, h);
-    FlipRows(&normal_rgba, w, h);
+    LOG(INFO) << "叶卡: " << path << " " << tex.width << "x" << tex.height << "，不透明 "
+              << (100.0 * static_cast<double>(opaque) /
+                  static_cast<double>(static_cast<size_t>(tex.width) * tex.height))
+              << "%";
+
+    std::vector<unsigned char> albedo = tex.rgba;
+    std::vector<unsigned char> normal_rgba = jpov::vegetation::BuildLeafNormalMap(tex, 4.0f);
+    // albedo 与法线一起翻行：v=0 = 图底（glTF 约定）。
+    jpov::vegetation::FlipRows(&albedo, tex.width, tex.height);
+    jpov::vegetation::FlipRows(&normal_rgba, tex.width, tex.height);
 
     jpov::TextureOptions opts;
     opts.mipmap = true;
     opts.repeat = false;
     opts.alpha_coverage.enabled = true;
-    opts.alpha_coverage.cutoff = kLeafAlphaCutoff;
+    opts.alpha_coverage.cutoff = jpov::vegetation::kLeafAlphaCutoff;
     *out = jpov::PBRMaterial::SolidColor({1.0f, 1.0f, 1.0f, 1.0f});
+    std::vector<unsigned char> albedo_png;
+    std::vector<unsigned char> normal_png;
+    CHECK(jpov::vegetation::EncodePng(albedo, tex.width, tex.height, &albedo_png));
+    CHECK(jpov::vegetation::EncodePng(normal_rgba, tex.width, tex.height, &normal_png));
     out->base_color_tex =
-        RegisterTextureFromMemory(EncodePng(rgba, w, h), "leaf_albedo:" + path, opts);
+        RegisterTextureFromMemory(albedo_png, "leaf_albedo:" + path, opts);
     out->normal_tex =
-        RegisterTextureFromMemory(EncodePng(normal_rgba, w, h), "leaf_normal:" + path, opts);
+        RegisterTextureFromMemory(normal_png, "leaf_normal:" + path, opts);
     out->normal_scale = leaf_normal_scale_;
     out->alpha_mode = jpov::AlphaMode::kMask;
-    out->alpha_cutoff = kLeafAlphaCutoff;
+    out->alpha_cutoff = jpov::vegetation::kLeafAlphaCutoff;
     out->double_sided = true;
   }
 
@@ -592,8 +472,43 @@ class VegetationV2App : public JPOV {
     curl_applied_ = curl_;
   }
 
-  void BuildScene(const CliArgs& args) {
+  // 与 shape **无关**的公共状态（纯 glb 查看模式也要有）：材质/烘焙命令行的继承、
+  // 风的覆盖参数、UV v 缩放、面板/HUD/相机的开关。
+  //
+  // 为什么单独一层：`--glb` 可以不配 `--shape`（纯查看模式），那条路径没有 shape、没有
+  // 扫管/叶卡，但仍然要能调风、要能画面板、要继承 --normal-scale 之类的参数。
+  void ApplyCommonArgs(const CliArgs& args) {
     normal_scale_ = args.normal_scale;
+    args_uv_vscale_ = args.uv_vscale;
+    args_radius_ = static_cast<float>(args.radius);
+    bark_dir_ = args.bark_dir;
+    leaf_path_ = args.leaf_path;
+    leaf2_path_ = args.leaf2_path;
+    // 烘焙默认参数**继承命令行**：否则 --leaf-black 50 只影响预览、产物还是 30，
+    // 预览与产物会悄悄不一致（这正是「同一份数据两条流水线」的经典坑）。
+    bake_leaf_black_ = args.leaf_black;
+    bake_leaf_normal_ = args.leaf_normal;
+    bake_normal_scale_ = args.normal_scale;
+    bake_out_path_ = args.bake_glb_path;
+    if (args.wind_off) {
+      wind_on_ = false;
+    }
+    if (args.wind_amp >= 0.0f) {
+      wind_amplitude_ = args.wind_amp;
+    }
+    if (args.wind_turb >= 0.0f) {
+      wind_turb_amp_ = args.wind_turb;
+    }
+    if (args.wind_blow >= 0.0f) {
+      wind_blow_ratio_ = args.wind_blow;
+    }
+    if (args.wind_blow_exp >= 0.0f) {
+      wind_blow_exp_ = args.wind_blow_exp;
+    }
+    if (args.wind_time >= 0.0f) {
+      wind_paused_ = true;
+      wind_time_ = args.wind_time;
+    }
     // v 方向补偿必须在生成 mesh 之前确定：UV 是扫管时烘进去的，不是 shader 里改的。
     // 0 = 自动（只对 --bark 有意义）：没有 bark 时必须落回 1.0，
     // 否则 SweepBranches 会因 uv_v_scale<=0 直接 abort。
@@ -601,7 +516,7 @@ class VegetationV2App : public JPOV {
     if (!args.bark_dir.empty() && args.uv_vscale <= 0.0f) {
       int tw = 0, th = 0;
       const std::string albedo = args.bark_dir + "/albedo.png";
-      if (ReadPngSize(albedo, &tw, &th)) {
+      if (jpov::vegetation::ReadPngSize(albedo, &tw, &th)) {
         uv_v_scale_ = static_cast<float>(tw) / static_cast<float>(th);
         LOG(INFO) << "UV v 缩放 = " << uv_v_scale_ << "（贴图 " << tw << "x" << th
                   << "，v *= 宽/高）";
@@ -609,6 +524,38 @@ class VegetationV2App : public JPOV {
         uv_v_scale_ = 1.0f;
         LOG(WARNING) << "读不到 albedo 像素尺寸，uv_v_scale 取 1.0: " << albedo;
       }
+    }
+    show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
+    cam_target_y_ = args.cam_target_y;
+    // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
+    // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
+    // **面板也是文字**（标题/滑条标签）⇒ 没字体时必须连面板一起关，否则
+    // `--show-panel` 在无字体环境直接崩（颜色块没法代替标签，关掉才是合理降级）。
+    if (!has_fonts_) {
+      show_hud_ = false;
+      show_labels_ = false;
+      show_panel_ = false;
+    }
+    deg_.sun_elev_deg = 55.0f;
+    deg_.sun_azim_deg = 35.0f;
+  }
+
+  // 原材料态：shape/leaf/bark 现搭。纯 glb 查看模式不会调它。
+  void BuildScene(const CliArgs& args) {
+    has_shape_ = true;
+    ApplyCommonArgs(args);
+    // 吹歪的参考高度 H：树高（Y 向包围盒）。每帧重算太浪费，这里算一次。
+    // （纯 glb 模式没有 shape，H 在 LoadGlbFile 里按 glb 包围盒补。）
+    {
+      float ymin = 1e30f;
+      float ymax = -1e30f;
+      for (const jpov::vegetation::Branch& b : shape_.branches) {
+        for (const jpov::vegetation::BranchSample& smp : b.samples) {
+          ymin = std::min(ymin, static_cast<float>(smp.position.y));
+          ymax = std::max(ymax, static_cast<float>(smp.position.y));
+        }
+      }
+      scene_height_ = (ymax > ymin) ? (ymax - ymin) : 1.0f;
     }
     branch_mesh_.resize(shape_.branches.size());
     branch_level_.resize(shape_.branches.size());
@@ -694,9 +641,6 @@ class VegetationV2App : public JPOV {
     if (args.radius > 0.0) {
       view_.R = args.radius;
     }
-    deg_.sun_elev_deg = 55.0f;
-    deg_.sun_azim_deg = 35.0f;
-
     // 6 档棕色（level 0..5，>=5 饱和）
     level_mats_.clear();
     for (int lv = 0; lv <= 5; ++lv) {
@@ -727,7 +671,6 @@ class VegetationV2App : public JPOV {
     ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
     ground_mat_ = jpov_skylight::GroundMaterial();
 
-    show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
     int deepest = 0;
     for (const auto& b : shape_.branches) {
       deepest = std::max(deepest, static_cast<int>(b.level));
@@ -759,19 +702,149 @@ class VegetationV2App : public JPOV {
     if (args.hide_leaf) show_leaf_ = false;
     if (args.hide_bark) show_bark_ = false;
     if (args.hide_hud) show_hud_ = false;
-    cam_target_y_ = args.cam_target_y;
-    // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
-    // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
-    if (!has_fonts_) {
-      show_hud_ = false;
-      show_labels_ = false;
-    }
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
 
+  // 纯 glb 查看模式：**没有 shape**，只画 glb + 地面 + 面板。
+  //
+  // 触发条件见 RunViewer：给了 `--glb` 但找不到 shape 文件（典型是"别人发来一个 glb，
+  // 我只想看看它长什么样"）。此时没有原材料态可回，也就没有烘焙/扫管/叶卡相关的一切。
+  void BuildGlbOnlyScene(const CliArgs& args) {
+    has_shape_ = false;
+    ApplyCommonArgs(args);
+    ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
+    ground_mat_ = jpov_skylight::GroundMaterial();
+    view_ = jpov_viewer::DefaultView();
+    view_.phi = args.phi_deg * 3.14159265358979323846 / 180.0;
+    view_.theta = args.theta_deg * 3.14159265358979323846 / 180.0;
+    if (args.radius > 0.0) {
+      view_.R = args.radius;
+    }
+    LOG(INFO) << "纯 glb 查看模式"
+              << (args.glb_only ? "（--glb-only：故意不加载 shape）"
+                                : "（shape 不存在：" + args.shape_path + "）")
+              << "：只有 glb 展示态，不能回到原材料态/不能烘焙";
+  }
+
   // 一个 leaf type 的 debug 绘制单元：绿卡 + 卡面 UV 标签。
   // 两者用同一个 type 下标、同一份 shape 数据，所以永远不会"绿卡画了、标签没画"。
+  // 烘焙一份 glb 并（成功后）切到 glb 展示态。
+  void BakeNow() {
+    if (!has_shape_) {
+      bake_ok_ = false;
+      bake_msg_ = "纯 glb 模式：没有 shape，无处烘焙";
+      LOG(WARNING) << bake_msg_;
+      return;
+    }
+    jpov::vegetation::GlbBakeOptions o;
+    o.thick_spacing = bake_thick_spacing_;
+    o.thin_spacing = bake_thin_spacing_;
+    o.max_joints_per_branch = static_cast<int>(bake_max_joints_f_ + 0.5f);
+    o.phase_scale = bake_phase_scale_;
+    o.droop_scale = bake_droop_scale_;
+    o.bark_dir = bark_dir_;
+    o.leaf_png = leaf_path_;
+    o.leaf2_png = leaf2_path_;
+    o.leaf_black = bake_leaf_black_;
+    o.leaf_normal = bake_leaf_normal_;
+    o.normal_scale = bake_normal_scale_;
+    o.uv_v_scale = args_uv_vscale_;   // 与预览一致（0 = 自动按树皮 albedo 尺寸）
+
+    const std::string path = BakeOutputPath();
+    std::string err;
+    jpov::vegetation::GlbBakeStats stats;
+    const bool ok = jpov::vegetation::BakeVegetationGlb(shape_, path, o, &stats, &err);
+    bake_ok_ = ok;
+    bake_ms_ = static_cast<float>(stats.milliseconds);
+    if (!ok) {
+      bake_msg_ = "失败: " + err;
+      LOG(ERROR) << "烘焙 glb 失败: " << err;
+      return;
+    }
+    bake_msg_ = "关节 " + std::to_string(stats.joints) + " / 树干 " +
+                std::to_string(stats.trunk_vertices) + " v / 叶 " +
+                std::to_string(stats.leaf_vertices) + " v";
+    LOG(INFO) << "烘焙 glb 成功: " << path << "（" << bake_msg_ << "，" << bake_ms_ << " ms）";
+    LoadGlbFile(path);
+  }
+
+  // 烘焙产物路径：优先命令行给的，否则写到 output/vegetation_v2/。
+  std::string BakeOutputPath() const {
+    if (!bake_out_path_.empty()) {
+      return bake_out_path_;
+    }
+    const std::string dir = jpov::GetOutputDir() + "vegetation_v2";
+    std::system(("mkdir -p '" + dir + "'").c_str());
+    return dir + "/baked_vegetation.glb";
+  }
+
+  // 载入 glb 并切到展示态（失败保留原材料态）。
+  // 返回 false = 载入失败（调用方据此决定是否继续：命令行给了 --glb 却打不开 ⇒ 退出码 1）。
+  bool LoadGlbFile(const std::string& path) {
+    ReleaseGlb();
+    jpov::GltfObject obj = LoadGltf(path);
+    if (obj.empty()) {
+      bake_ok_ = false;
+      bake_msg_ = "glb 载入失败: " + path;
+      LOG(ERROR) << bake_msg_;
+      return false;
+    }
+    glb_ = std::move(obj);
+    glb_loaded_ = true;
+    glb_path_ = path;
+    if (glb_.bounds_valid) {
+      const float h = glb_.bounds_max[1] - glb_.bounds_min[1];
+      if (h > 1e-3f) {
+        scene_height_ = h;
+      }
+      // 纯 glb 模式没有 shape 可供取景（BuildScene 里那段 fit），这里按 glb 包围盒补。
+      // 有 shape 时不覆盖：那是原材料的构图，用户已经"看过一眼"了。
+      if (!has_shape_ && args_radius_ <= 0.0f) {
+        view_.R = jpov_viewer::ViewConfig::FitRadius(glb_.bounds_min, glb_.bounds_max, 60.0);
+      }
+    }
+    mode_ = Mode::kGlb;
+    LOG(INFO) << "进入 glb 展示态: " << path << "（" << glb_.size() << " 个 primitive）";
+    return true;
+  }
+
+  void ReleaseGlb() {
+    if (glb_loaded_) {
+      ReleaseGltf(glb_);
+      glb_ = jpov::GltfObject();
+      glb_loaded_ = false;
+    }
+  }
+
+  void BackToRaw() {
+    if (!has_shape_) {
+      LOG(WARNING) << "纯 glb 模式：没有原材料态可回";
+      return;
+    }
+    ReleaseGlb();
+    mode_ = Mode::kRaw;
+    LOG(INFO) << "回到原材料态（shape/leaf/bark 现搭）";
+  }
+
+  // 当前风参数 → WindCommand（时间由帧号推，确定性）。
+  jpov::WindCommand MakeWind() const {
+    jpov::WindCommand w;
+    w.time = wind_time_;
+    w.amplitude = wind_amplitude_;
+    w.frequency = wind_frequency_;
+    const float az = wind_azimuth_deg_ * 3.14159265358979323846f / 180.0f;
+    w.direction = jpov::Vec3f{std::cos(az), 0.0f, std::sin(az)};
+    w.turb_amplitude = wind_turb_amp_;
+    w.turb_frequency = wind_turb_freq_;
+    w.gust_frequency = wind_gust_freq_;
+    w.gust_strength = wind_gust_str_;
+    w.blow_ratio = wind_blow_ratio_;
+    w.blow_away_exponent = wind_blow_exp_;
+    w.blow_ref_length = (scene_height_ > 1e-3f) ? scene_height_ : 1.0f;
+    return w;
+  }
+
   void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
     if (type_index < debug_card_mesh_.size() && debug_card_mesh_[type_index] != 0) {
       cmds->DrawObject3D(debug_card_mesh_[type_index], card_box_mat_, {0.0f, 0.0f, 0.0f},
@@ -841,6 +914,21 @@ class VegetationV2App : public JPOV {
   void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                     const jpov::WindowInfo& winfo,
                     jpov::RenderCommandList* cmds) override {
+    // 面板待办（烘焙 / 回原材料态）：**在入队绘制命令之前**执行，避免释放本帧还在用的资源。
+    if (pending_ == Pending::kBake) {
+      pending_ = Pending::kNone;
+      BakeNow();
+    } else if (pending_ == Pending::kBackToRaw) {
+      pending_ = Pending::kNone;
+      BackToRaw();
+    }
+
+    // 风时间：**累加**而不是「帧号 × 缩放」——后者在拖动「时间缩放」滑条时会按比例
+    // 跳变（时间倒退/前跳，树会瞬移）。固定步长 1/fps × 缩放 ⇒ 改缩放只改速度。
+    // 暂停时冻结；headless 用 --wind-time 直接钉住初值（同样可复现）。
+    if (!wind_paused_) {
+      wind_time_ += (1.0f / kViewerFps) * wind_time_scale_;
+    }
     (void)frame_count;
     // 面板滑条改的是「呈现」参数：curl 要重烘顶点法线，法线强度是材质常量。
     if (has_leaf_) {
@@ -907,7 +995,16 @@ class VegetationV2App : public JPOV {
     cmds->DrawObject3D(ground_mesh_, ground_mat_, {0.0f, ground_y_, 0.0f}, {0.0f, 1.0f, 0.0f},
                        {0.0f, 0.0f, 1.0f});
 
-    for (size_t i = 0; i < branch_mesh_.size(); ++i) {
+    if (mode_ == Mode::kGlb && glb_loaded_) {
+      // glb 展示态：整份产物一次画出（树干 + 叶卡两个 primitive），带风。
+      std::optional<jpov::WindCommand> wind;
+      if (wind_on_) {
+        wind = MakeWind();
+      }
+      cmds->DrawGltfObject(glb_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
+                           /*scale=*/1.0f, /*highlight=*/false, /*picking_id=*/0, wind);
+    }
+    for (size_t i = 0; mode_ == Mode::kRaw && i < branch_mesh_.size(); ++i) {
       if (branch_level_[i] > max_level_) {
         continue;
       }
@@ -920,10 +1017,10 @@ class VegetationV2App : public JPOV {
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
-    const bool debug_cards = !(has_leaf_ && show_leaf_);
+    const bool debug_cards = mode_ == Mode::kRaw && !(has_leaf_ && show_leaf_);
     // 一个 type 一个绘制单元：type 过滤对「贴图 / 绿卡 / 标签」同时生效，
     // 不会再出现「绿卡还在、标签已经按 type 过滤掉」这种不一致。
-    for (size_t t = 0; t < leaf_type_count_; ++t) {
+    for (size_t t = 0; mode_ == Mode::kRaw && t < leaf_type_count_; ++t) {
       if (!show_all_card_types_ && t != type_filter_) continue;
       if (debug_cards) {
         DrawLeafDebugForType(t, cmds);
@@ -939,75 +1036,176 @@ class VegetationV2App : public JPOV {
                      jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
     }
 
-    // 交互面板：地面高度 / 最大层级 / 叶卡开关。
+    // ── 面板 ──
+    // 左列（自底向上）：场景 /［原材料态］叶卡过滤 /［glb 态］风调试
+    // 右列（自底向上）：烘焙 glb
     if (show_panel_) {
       const float w = static_cast<float>(kViewerWidth);
       const float h = static_cast<float>(kViewerHeight);
       jpov::UiTheme theme = jpov::UiTheme::Default(16.0f);
       theme.font_alias = jpov::kFontBuiltinCJK;
-
-      // 布局：两组面板都贴左下角，下面是【场景】，上面是【叶卡过滤】。
-      const float colw = 0.34f * w;   // 0.26w 装不下"地面 y (m) + 数值"，标签会压在滑轨上
-      const float cx = 0.02f * w;
-      const int scene_rows = has_bark_ ? 4 : 3;   // 地面/层级/树皮/法线强度
-      const float scene_top = h - 16.0f - (scene_rows * 32.0f);
-      const int leaf_rows = has_leaf_ ? 6 : 2;   // 全部叶子/type +（贴图/标签/球面化/法线强度）
-      const float leaf_top = scene_top - 12.0f - (leaf_rows * 32.0f);
-      auto scene_row = [&](int i) {
-        return jpov::UiRect{{cx, scene_top + i * 32.0f}, {colw, 24.0f}};
-      };
-      auto leaf_row = [&](int i) {
-        return jpov::UiRect{{cx, leaf_top + i * 32.0f}, {colw, 24.0f}};
-      };
-
-      // 黑底：两组控件压在场景上，浅色地面时白字会糊掉。
-      // 直接推 fillrect2d（在 Emit 之前 → 在向量里更早 → 画在控件下面）。
-      const float panel_top = leaf_top - 10.0f;
-      const float panel_bottom = scene_top + (scene_rows - 1) * 32.0f + 24.0f + 10.0f;
-      // 必须走 DrawFillRect：它会同时登记到 cmds->order（渲染器按 order 遍历、
-      // 再用下标回查 fillrect2d）。直接 push fillrect2d 不进 order → 根本不会被画。
-      cmds->DrawFillRect({cx - 10.0f, panel_top}, {colw + 20.0f, panel_bottom - panel_top},
-                         jpov::Color{0.0f, 0.0f, 0.0f, 0.55f},
-                         jpov::Color{0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 6.0f);
-
       ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
 
-      ui_.SliderFloat("地面 y (m)", &ground_y_, scene_row(0), -3.0f, 3.0f, 2);
-      ui_.SliderFloat("最大层级", &max_level_f_, scene_row(1), 0.0f, 20.0f, 0);
-      if (has_bark_) {
-        ui_.Checkbox("树皮纹理", &show_bark_, scene_row(2));
-        ui_.SliderFloat("法线强度", &normal_scale_, scene_row(3), 0.0f, 3.0f, 2);
-        bark_mat_.normal_scale = normal_scale_;
+      const float colw = 0.34f * w;
+      const float xl = 0.02f * w;
+      const float xr = w - 0.02f * w - colw;
+      const bool raw = (mode_ == Mode::kRaw);
+
+      // 一个面板 = 标题栏（可折叠）+ 展开时的 N 行；整列自底向上排。
+      // draw_row(i, rect) 画第 i 行（24px 高、行距 32px）。
+      auto panel = [&](float x, float* y_top, const char* title, bool* open, int rows,
+                       const std::function<void(int, const jpov::UiRect&)>& draw_row) {
+        // 自底向上排：-y_top 是这一块的**底边**，标题栏在最上面、展开行在它下面。
+        const float hdr = 24.0f;
+        const float body_h = *open ? (rows * 32.0f) : 0.0f;
+        const float top = *y_top - (hdr + body_h);
+        // 半透明底板：面板压在场景上，浅色地面时白字会糊掉。
+        cmds->DrawFillRect({x - 8.0f, top - 6.0f}, {colw + 16.0f, hdr + body_h + 12.0f},
+                           jpov::Color{0.0f, 0.0f, 0.0f, 0.55f},
+                           jpov::Color{0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 6.0f);
+        ui_.AccordionHeader(title, open, {{x, top}, {colw, hdr}});
+        if (*open) {
+          for (int i = 0; i < rows; ++i) {
+            draw_row(i, {{x, top + hdr + i * 32.0f}, {colw, 24.0f}});
+          }
+        }
+        *y_top = top - 10.0f;
+      };
+
+      // ── 左列 ──
+      float yl = h - 16.0f;
+      const int scene_rows = raw ? (has_bark_ ? 4 : 2) : 1;
+      panel(xl, &yl, "场景", &scene_panel_open_, scene_rows,
+            [&](int i, const jpov::UiRect& r) {
+              if (i == 0) {
+                ui_.SliderFloat("地面 y (m)", &ground_y_, r, -3.0f, 3.0f, 2);
+              } else if (i == 1) {
+                ui_.SliderFloat("最大层级", &max_level_f_, r, 0.0f, 20.0f, 0);
+              } else if (i == 2) {
+                ui_.Checkbox("树皮纹理", &show_bark_, r);
+              } else {
+                ui_.SliderFloat("法线强度", &normal_scale_, r, 0.0f, 3.0f, 2);
+                bark_mat_.normal_scale = normal_scale_;
+              }
+            });
+
+      if (raw) {
+        panel(xl, &yl, "叶卡", &leaf_panel_open_, 6, [&](int i, const jpov::UiRect& r) {
+          if (i == 0) {
+            ui_.Checkbox("显示全部叶子", &show_all_card_types_, r);
+          } else if (i == 1) {
+            // 下标是【颜色桶】(type % kMaxCardTypes)，不是原始 type 编号（面板/HUD 一致）。
+            const float label_w = 0.28f * colw;
+            const jpov::UiRect box{{r.pos.x() + label_w, r.pos.y()},
+                                   {r.size.x() - label_w, 24.0f}};
+            cmds->DrawText("叶 type 桶", {r.pos.x(), r.pos.y() + 4.0f}, 16.0f,
+                           jpov::Color{0.95f, 0.95f, 0.95f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+            if (ui_.InputText("", type_buf_, sizeof(type_buf_), box)) {
+              const int parsed = std::atoi(type_buf_);
+              const int clamped =
+                  std::max(0, std::min(static_cast<int>(leaf_type_count_) - 1, parsed));
+              type_filter_ = static_cast<uint32_t>(clamped);
+              if (clamped != parsed) {
+                std::snprintf(type_buf_, sizeof(type_buf_), "%d", clamped);
+              }
+            }
+          } else if (i == 2) {
+            ui_.Checkbox("叶卡贴图", &show_leaf_, r);
+          } else if (i == 3) {
+            ui_.Checkbox("叶卡标签", &show_labels_, r);
+          } else if (i == 4) {
+            ui_.SliderFloat("叶法线球面化", &curl_, r, 0.0f, 2.0f, 2);
+          } else {
+            ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, r, 0.0f, 3.0f, 2);
+          }
+        });
+      } else {
+        // 风调试（glb 展示态）：参考 v1 wind viewer，精简到 10 行、近似方形。
+        panel(xl, &yl, "风调试", &wind_panel_open_, 12,
+              [&](int i, const jpov::UiRect& r) {
+                if (i == 0) {
+                  ui_.Checkbox("启用风", &wind_on_, r);
+                } else if (i == 1) {
+                  ui_.SliderFloat("风向 °", &wind_azimuth_deg_, r, 0.0f, 360.0f, 0);
+                } else if (i == 2) {
+                  ui_.SliderFloat("pivot 振幅", &wind_amplitude_, r, 0.0f, 1.5f, 2);
+                } else if (i == 3) {
+                  ui_.SliderFloat("pivot 频率 Hz", &wind_frequency_, r, 0.05f, 2.0f, 2);
+                } else if (i == 4) {
+                  ui_.SliderFloat("平湍 幅度", &wind_turb_amp_, r, 0.0f, 0.6f, 3);
+                } else if (i == 5) {
+                  ui_.SliderFloat("平湍 频率 Hz", &wind_turb_freq_, r, 0.0f, 8.0f, 2);
+                } else if (i == 6) {
+                  ui_.SliderFloat("阵风 频率 Hz", &wind_gust_freq_, r, 0.0f, 2.0f, 2);
+                } else if (i == 7) {
+                  ui_.SliderFloat("阵风 强度", &wind_gust_str_, r, 0.0f, 1.0f, 2);
+                } else if (i == 8) {
+                  ui_.SliderFloat("吹歪比例", &wind_blow_ratio_, r, 0.0f, 0.5f, 3);
+                } else if (i == 9) {
+                  ui_.SliderFloat("吹歪指数 n", &wind_blow_exp_, r, 1.0f, 4.0f, 1);
+                } else if (i == 10) {
+                  ui_.SliderFloat("时间缩放", &wind_time_scale_, r, 0.0f, 2.0f, 2);
+                } else {
+                  ui_.Checkbox("暂停", &wind_paused_, r);
+                }
+              });
       }
 
-      ui_.Checkbox("显示全部叶子", &show_all_card_types_, leaf_row(0));
-      if (has_leaf_) {
-        ui_.Checkbox("叶卡贴图", &show_leaf_, leaf_row(2));
-        ui_.Checkbox("叶卡标签", &show_labels_, leaf_row(3));
-        ui_.SliderFloat("叶法线球面化", &curl_, leaf_row(4), 0.0f, 2.0f, 2);
-        ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, leaf_row(5), 0.0f, 3.0f, 2);
-      }
-      // 注：本工具只有 4 个颜色桶，卡片的 type 按 `type % kMaxCardTypes` 归桶，
-      // 所以这个下标是【颜色桶下标】，不是原始 type 编号。要按真实 type 过滤，
-      // 得改成逐 type 一个 mesh（面数索引翻 4 倍，暂不做）。
-      // InputText 编辑的是字符串，这里解析成下标并 clamp 到合法范围——
-      // 越界值不静默忽略，而是夹紧，避免"输入 9 却什么都没有"的黑箱。
-      // Ui::InputText 自带的标签在 24px 行高里不显示（实测只剩编辑框），
-      // 所以给它空标签、自己画左侧文字，并把编辑框往右让出标签宽度。
-      const float label_w = 0.11f * w;
-      const jpov::UiRect row1 = leaf_row(1);
-      const jpov::UiRect type_box{{cx + label_w, row1.pos.y()}, {colw - label_w, 24.0f}};
-      cmds->DrawText("叶 type 下标", {cx, row1.pos.y() + 4.0f}, 16.0f,
-                     jpov::Color{0.95f, 0.95f, 0.95f, 1.0f},
-                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
-      if (ui_.InputText("", type_buf_, sizeof(type_buf_), type_box)) {
-        const int parsed = std::atoi(type_buf_);
-        const int clamped = std::max(0, std::min(static_cast<int>(leaf_type_count_) - 1, parsed));
-        type_filter_ = static_cast<uint32_t>(clamped);
-        if (clamped != parsed) {
-          std::snprintf(type_buf_, sizeof(type_buf_), "%d", clamped);
-        }
-      }
+      // ── 右列：烘焙 glb ──
+      float yr = h - 16.0f;
+      const int bake_rows = 11;
+      panel(xr, &yr, "烘焙 glb", &bake_panel_open_, bake_rows,
+            [&](int i, const jpov::UiRect& r) {
+              if (i == 0) {
+                ui_.SliderFloat("粗枝关节间距 m", &bake_thick_spacing_, r, 0.5f, 4.0f, 2);
+              } else if (i == 1) {
+                ui_.SliderFloat("细枝关节间距 m", &bake_thin_spacing_, r, 0.1f, 2.0f, 2);
+              } else if (i == 2) {
+                ui_.SliderFloat("每枝最多关节", &bake_max_joints_f_, r, 1.0f, 16.0f, 0);
+              } else if (i == 3) {
+                ui_.SliderFloat("相位空间频率", &bake_phase_scale_, r, 0.2f, 3.0f, 2);
+              } else if (i == 4) {
+                ui_.SliderFloat("下垂软度", &bake_droop_scale_, r, 0.1f, 2.0f, 2);
+              } else if (i == 5) {
+                ui_.SliderFloat("叶卡黑阈", &bake_leaf_black_, r, 0.0f, 80.0f, 0);
+              } else if (i == 6) {
+                ui_.SliderFloat("叶法线强度", &bake_leaf_normal_, r, 0.0f, 3.0f, 2);
+              } else if (i == 7) {
+                ui_.SliderFloat("树皮法线强度", &bake_normal_scale_, r, 0.0f, 3.0f, 2);
+              } else if (i == 8) {
+                if (!has_shape_) {
+                  // 纯 glb 模式没有 shape 可烘：给一行说明，不给按钮（点了也只能报错）。
+                  cmds->DrawText("纯 glb 模式：无 shape，不能烘焙",
+                                 {r.pos.x(), r.pos.y() + 4.0f}, 15.0f,
+                                 jpov::Color{0.72f, 0.72f, 0.72f, 1.0f},
+                                 jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+                } else if (ui_.Button(glb_loaded_ ? "重新烘焙 glb" : "烘焙 glb", r)) {
+                  pending_ = Pending::kBake;
+                }
+              } else if (i == 9) {
+                if (glb_loaded_ && has_shape_) {   // 纯 glb 模式没有原材料态可回
+                  if (ui_.Button("回到原材料态", r)) {
+                    pending_ = Pending::kBackToRaw;
+                  }
+                }
+              } else {
+                // 状态行：一行、短文本（长路径不放进来，日志/控制台里有）。
+                char buf[160];
+                if (bake_msg_.empty()) {
+                  std::snprintf(buf, sizeof(buf), "%s",
+                                glb_loaded_ ? "glb 已就绪（风调试在左下）" : "未烘焙");
+                } else {
+                  std::snprintf(buf, sizeof(buf), "%s · %.0f ms", bake_msg_.c_str(),
+                                bake_ms_);
+                }
+                cmds->DrawText(buf, {r.pos.x(), r.pos.y() + 4.0f}, 15.0f,
+                               bake_ok_ ? jpov::Color{0.75f, 1.0f, 0.75f, 1.0f}
+                                        : jpov::Color{1.0f, 0.85f, 0.7f, 1.0f},
+                               jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+              }
+            });
+
       ui_.End();
       ui_.Emit(cmds);
       max_level_ = static_cast<int>(max_level_f_ + 0.5f);
@@ -1023,7 +1221,8 @@ int RunViewer(const CliArgs& args) {
   cfg.title = "JPOV - vegetation v2 viewer";
   cfg.width = kViewerWidth;
   cfg.height = kViewerHeight;
-  cfg.headless = args.capture;
+  // 烘焙 / capture 都不需要可见窗口（烘焙其实连 GL 都不用）。
+  cfg.headless = args.capture || !args.bake_glb_path.empty();
   // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
   // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
   const JPOV::FontEntry kWantFonts[] = {
@@ -1041,18 +1240,40 @@ int RunViewer(const CliArgs& args) {
   VegetationV2App app(cfg);
   app.has_fonts_ = !cfg.fonts.empty();
   app.Init();
-  std::string err;
-  if (!jpov::vegetation::LoadShapeFile(args.shape_path, &app.shape_, &err)) {
-    LOG(ERROR) << "shape 加载失败: " << err;
-    return 1;
+  // 纯 glb 查看模式：显式 `--glb-only`，或给了 `--glb` 但 shape 文件根本不存在。
+  const bool has_shape_file = std::ifstream(args.shape_path).good() && !args.glb_only;
+  if (has_shape_file) {
+    std::string err;
+    if (!jpov::vegetation::LoadShapeFile(args.shape_path, &app.shape_, &err)) {
+      LOG(ERROR) << "shape 加载失败: " << err;
+      return 1;
+    }
+    app.shape_path_ = args.shape_path;
+    app.PrintLeafTypeHelp(args.shape_path);
+    app.BuildScene(args);
+  } else {
+    // 纯 glb 查看模式（只有 --glb 才会走到这里；ParseCli 已经挡掉"既没 shape 又没 glb"）。
+    app.BuildGlbOnlyScene(args);
   }
-  app.shape_path_ = args.shape_path;
-  app.PrintLeafTypeHelp(args.shape_path);
-  app.BuildScene(args);
+
+  // 只烘焙：一条命令跑完就退出（CI / 批量用）。
+  if (!args.bake_glb_path.empty()) {
+    app.BakeNow();
+    const bool ok = app.bake_ok_;
+    app.Shutdown();
+    return ok ? 0 : 1;
+  }
+  // 直接进 glb 展示态（已有产物时跳过原材料态）。
+  if (!args.glb_path.empty()) {
+    if (!app.LoadGlbFile(args.glb_path)) {
+      LOG(ERROR) << "打不开 --glb 指定的文件: " << args.glb_path;
+      return 1;
+    }
+  }
 
   if (!args.capture) {
     app.Run();
-    app.Finalize();
+    app.Shutdown();
     return 0;
   }
 
@@ -1074,7 +1295,7 @@ int RunViewer(const CliArgs& args) {
     app.RunOnce(input, winfo, path.c_str());
     LOG(INFO) << "capture: " << path;
   }
-  app.Finalize();
+  app.Shutdown();
   return 0;
 }
 

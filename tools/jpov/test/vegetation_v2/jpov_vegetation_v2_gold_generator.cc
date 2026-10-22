@@ -26,6 +26,12 @@ int main() {
     std::fprintf(stderr, "leaf gold 生成失败\n");
     return 1;
   }
-  std::printf("gold images:\n  %s\n  %s\n", cards.c_str(), leaf.c_str());
+  const std::string glb = dir + vegv2::goldtest::kGlbGold;
+  if (!vegv2::goldtest::RenderGlbGolden(glb)) {
+    std::fprintf(stderr, "glb gold 生成失败\n");
+    return 1;
+  }
+  std::printf("gold images:\n  %s\n  %s\n  %s\n", cards.c_str(), leaf.c_str(),
+              glb.c_str());
   return 0;
 }

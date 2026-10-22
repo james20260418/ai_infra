@@ -35,7 +35,7 @@ struct CliArgs {
   // 法线贴图强度（uNormalScale）。默认 1.5：同一树皮 A/B 实测
   // 1.0 偏平、3.0 发塑料，1.5 最自然（Skylight + 单平行光下 ambient 占比高，
   // 1.0 的凹凸容易被环境光冲淡）。面板滑条同一量程。
-  float normal_scale = 1.5f;
+  float normal_scale = 0.75f;   // 树皮法线强度（2026-10-22 起默认 = 旧 1.5 的 1/2）
   // UV 的 v 方向缩放 = 贴图宽/高。0 = 自动从 albedo 的像素尺寸读。
   // 非方形贴图必须补偿，否则整张图被按正方形铺开：1:2 的图横向拉宽 2×、
   // 凸起在 u 方向被压扁，纹素不再方正（法线细节跟着糊）。
@@ -47,6 +47,21 @@ struct CliArgs {
   float leaf_black = 12.0f;   // max(r,g,b) < 此值 → alpha 0（带 0.5x~1.5x 软过渡）
   float leaf_curl = 0.5f;     // A：顶点法线球面化强度
   float leaf_normal = 1.0f;   // B：法线贴图强度（uNormalScale）
+
+  // ── GLB 烘焙（面板「烘焙 glb」用；也支持 headless 一条命令跑完）──
+  std::string bake_glb_path;   // 非空 = 只烘焙这一次然后退出（CI / 命令行）
+  // true = 强制纯 glb 查看模式（不加载 shape，即使文件存在）。必须配 --glb。
+  bool glb_only = false;
+  // 非空 = 启动即进「glb 展示态」（跳过原材料态）。
+  // **shape_path 找不到时这就是"纯 glb 查看模式"**：没有原材料态、不能烘焙、
+  // 面板上不出现「回到原材料态」，相机按 glb 包围盒自动取景。
+  std::string glb_path;
+  bool wind_off = false;       // 关掉 wind（A/B 用）
+  float wind_time = -1.0f;     // >=0 = 钉住风时间（headless 确定性出图）
+  float wind_amp = -1.0f;      // >=0 = 覆盖 pivot 振幅（A/B 用）
+  float wind_turb = -1.0f;     // >=0 = 覆盖平动湍流幅度（A/B 用）
+  float wind_blow = -1.0f;     // >=0 = 覆盖吹歪比例（A/B 用）
+  float wind_blow_exp = -1.0f; // >=0 = 覆盖吹歪指数
 };
 
 // 跑查看器：`capture=false` 开交互窗口；`capture=true` 无窗口出三张图到 out_dir。

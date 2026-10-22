@@ -112,11 +112,6 @@ struct LeafType {
   // 它同时就是 UV 锚点：`(au, av)` 那一点贴到 `LeafCard::anchor`。
   // 4 个合法值：bottom_left / bottom_center / bottom_right / top_center。
   std::string anchor_mode;
-
-  // 预留字段：width/height 的推荐值，供「一型多 atlas 时挑哪套」使用。
-  // **当前没有任何装配/选图逻辑消费它**，只有查看器的叶卡帮助会打印。
-  // 0 = 未指定。
-  double preferred_aspect = 0.0;
 };
 
 // 一棵植物的完整拓扑。
@@ -135,10 +130,6 @@ struct Shape {
 
 // 生成 n 点的单位正圆轮廓（n >= 3）。从 +U 方向起、逆时针。
 std::vector<ProfilePoint> UnitCircleProfile(uint32_t n);
-
-// 该采样点截面的**真实周长**（已乘 radius）：tile 尺寸就用它。
-// profile 为空时按 ring_count 点的正圆计算。
-double SamplePerimeter(const BranchSample& sample, uint32_t ring_count);
 
 // proto -> 运行时结构。不做校验（校验请显式调用 Validate）。
 Shape FromProto(const ShapeProto& proto);

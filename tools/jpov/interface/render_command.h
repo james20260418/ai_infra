@@ -708,6 +708,15 @@ struct WindCommand {
     // 阵风包络（偶发性）：g = mix(1, pow(max(0,0.5+0.5·sin), kTurbGustP), strength)
     float gust_frequency = 0.6f;   // 阵风频率（Hz）
     float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
+    // ---- 吹歪（blow-away，曲线位移）----
+    // 位移 = blow_ratio × L × (L / blow_ref_length)^(exponent−1)，沿**水平风向**。
+    //   L = 该顶点到根的父链总长度（MeshManager 载入期算好，loc6.z）。
+    //   与枢轴风/湍流**独立叠加**：枢轴风保长、吹歪是纯平移（像整株被风压弯）。
+    //   blow_ratio 的量纲随指数变（1/m^(n−1)），只是观感参数，不是物理量。
+    //   0 = 关闭（默认），非零时才有 uniform 上传开销。
+    float blow_ratio = 0.0f;
+    float blow_ref_length = 1.0f;   // 参考高度 H（米）：通常给树高
+
     // ---- 实例路径的「吹倒」位移指数（per-command）----
     //   位移 = InstanceState::blow_away_ratio × L^n，L = 顶点到 root 的父链总长度。
     //   n=1 线性（越靠梢位移越大）；n=2 二次（梢部加速倒，更接近"整株被压弯"的手感）。

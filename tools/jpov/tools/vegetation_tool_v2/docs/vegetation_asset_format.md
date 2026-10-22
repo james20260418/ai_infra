@@ -242,7 +242,7 @@ LeafCard {
 }
 
 LeafType {
-  type, description, anchor_mode, preferred_aspect
+  type, description, anchor_mode
 }
 ```
 
@@ -293,9 +293,9 @@ width = height × (cell_width / cell_height)     // 装配时算，写进 LeafCa
 - `width` 必须 > 0，`Validate` 会拒绝 0/负值。
 - 贴图与 quad 的比例对不上时，呈现是**拉伸**的 —— 这是可见的、可修的：改 shape 的 width，
   或者改 atlas 格子比例后重新装配。引擎**绝不**为了凑形状去偷偷拉伸纹理。
-- `preferred_aspect` 仍然留在 `LeafType` 上，只用于「一型多 atlas 时挑哪套」，不参与铺面。
-  **注意：这套「一型多 atlas 挑一套」的装配逻辑目前尚未实现** —— 现在只有查看器的
-  叶卡帮助会打印它，导出脚本一律写 `0`。真要使用时再补实现，别以为它已经在起作用。
+- 曾有一个 `preferred_aspect`（"一型多 atlas 时挑哪套"的期望宽高比），2026-10-22 **删除**：
+  装配层从未实现，全仓库没有消费方，留着只会让文档和导出脚本假装具备该能力。
+  proto 里 `reserved 4`，编号不复用。真要实现"挑 atlas"时，按当时的真实需求重新设计字段。
 
 （`cell_*` 指的是 atlas **格子**的尺寸，不是整张图的尺寸：`imgW/cols : imgH/rows`。）
 
@@ -317,8 +317,8 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
    与 §4.1 的四个取值一一对应；卡片 pivot 就落在那里
 3. **内容必须撑满格子的宽度方向**（上下可以留白）。因为 `width` 由格子比例推导，
    左右留白会让叶子视觉上变胖
-4. 一型可以绑多个 atlas 变体；装配时按 `|log(实际比例 / preferred_aspect)|` 挑选，
-   保证轮廓稳定、同时避免"一眼重复"
+4. 一型将来可以绑多个 atlas 变体（**装配层尚未实现**）；真做的时候再决定按什么挑，
+   现在没有 `preferred_aspect` 这类字段了（见 §4.1 的删除说明）
 5. **黑底素材**（例如手绘/照片抠图）可以按「近乎黑 = 透明」自动转 alpha：先按
    `max(r,g,b)` 做软阈值，再按覆盖率反解颜色（`C = C_obs / α`，否则边缘一圈发黑）。
 6. 叶卡的 alpha 是 cutout，且会被 mip 缩小 → **必须用覆盖率保持的 mip 链**
@@ -380,7 +380,7 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
 | 每枝能确定环顶点数（`ring_count > 0` 或存在非空 profile） | 否则无法扫管 |
 | 非空 profile：点数 ≥ 3、等于环顶点数、逆时针星形、周长 > 0 | 截面合法且逐圈一致 |
 | `seam_index < 环顶点数` | UV 接缝 |
-| 每个 `leaf_type`：`anchor_mode` ∈ 4 个合法值、`preferred_aspect >= 0` | 没有第五种对齐 |
+| 每个 `leaf_type`：`anchor_mode` ∈ 4 个合法值 | 没有第五种对齐 |
 | 每张卡 `|up| ≈ 1`、`|normal| ≈ 1`、`up·normal ≈ 0` | 姿态合法 |
 | 每张卡 `height > 0`、**`width > 0`**、`type` 在 `leaf_types` 里 | 引用完整、尺寸可铺面 |
 | 卡片的 `branch` 存在，`s ∈ [0,1]` | 溯源完整 |
