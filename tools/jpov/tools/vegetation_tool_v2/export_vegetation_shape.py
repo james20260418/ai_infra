@@ -11,7 +11,8 @@
   blender -b --python export_vegetation_shape.py -- \\
       --species weeping_willow --out /tmp/willow.pbtxt \\
       --set scale=6 --set seed=5 --set leaves=10 --set leafScale=0.25 \\
-      --per-seg 6 --leaf-type-desc "柳树冠层叶簇" --leaf-aspect 0.6
+      --per-seg 6 --leaf-type-desc "柳树冠层叶簇" --leaf-aspect 0.6 \
+      --anchor-mode bottom_center
 """
 import os
 import sys
@@ -37,6 +38,9 @@ out_path = None
 per_seg = 6
 leaf_desc = "叶簇"
 leaf_aspect = 0.6   # 叶卡 宽/高：装配时 width = height × 这个值
+# 叶卡素材的根部画在格子哪个位置（= 写进 asset 的 anchor_mode）。
+# 素材根部画在哪就写哪个；它与 anchor 一起决定 UV，导出侧不做任何补偿性偏移。
+anchor_mode = "bottom_center"
 overrides = {}
 
 i = 0
@@ -59,6 +63,11 @@ while i < len(argv):
     elif a == "--leaf-aspect":
         i += 1
         leaf_aspect = float(argv[i])
+    elif a == "--anchor-mode":
+        i += 1
+        anchor_mode = argv[i]
+        if anchor_mode not in ("bottom_left", "bottom_center", "bottom_right", "top_center"):
+            raise SystemExit("--anchor-mode 只接受 bottom_left/bottom_center/bottom_right/top_center")
     elif a == "--set":
         i += 1
         k, _, v = argv[i].partition("=")
@@ -232,13 +241,14 @@ if leaves_obj is not None:
         root_mid, tip_mid = (mid_a, mid_b) if which == 0 else (mid_b, mid_a)
         up = norm3(sub3(tip_mid, root_mid))
         height = len3(sub3(tip_mid, root_mid))
-        # Sapling 的叶卡是**居中**放在枝条上的（卡片中心在枝上），而格式里的
-        # bottom_center 语义是「卡片底边中点 = anchor」。两者差半个 height：
-        # 直接把 centre 当 anchor 写进去，整张卡会被抬高 h/2（实测 12.5cm）。
-        # 所以在这里换算：anchor = centre − up·(h/2)，卡片实际位置与 Blender 完全一致。
-        anchor_pt = (centre[0] - up[0] * height * 0.5,
-                     centre[1] - up[1] * height * 0.5,
-                     centre[2] - up[2] * height * 0.5)
+        # anchor 的语义是**叶子与枝条的连接点**，必须落在枝上（资产格式合同，
+        # Validate 会强制）。最近骨架点就在枝条中心线上，天然满足。
+        #
+        # 【不要】写回 anchor = centre − up·(h/2)：Sapling 的叶卡是以**卡片中心**
+        # 贴在枝上的，那样写出来的点会离枝 h/2（实测 12.5cm），于是真正压在枝上的
+        # 变成卡片中心，4 种 anchor_mode 怎么选都贴不上枝。
+        # 素材的 UV 偏移由 anchor_mode 表达，**不能靠挪 anchor 来凑**。
+        anchor_pt = (nearest_pt[0], nearest_pt[1], nearest_pt[2])
         width_vec = sub3(corners[1], corners[0]) if which == 0 else sub3(corners[3], corners[2])
         normal = norm3(cross3(width_vec, up))
         branch_id = int(flat_branch[nearest])
@@ -264,6 +274,41 @@ if leaves_obj is not None:
 
         cards.append((anchor_pt, up, normal, height, branch_id, s_param,
                       bool(mirrored) if mirrored is not None else False))
+
+# ---------------------------------------------------------------------------
+# 合同校验：anchor 必须是「叶子与枝条的连接点」，即落在所属枝条上
+# ---------------------------------------------------------------------------
+# 资产格式规定 anchor 到该枝中心线的距离 ≤ 此处枝半径 + 1cm。
+# 这里在导出侧再查一遍（C++ Validate 是最后一道闸）：一旦有人把 anchor 挪出枝条
+# （历史上就是因为「补偿卡片抬高 h/2」把 442 张卡全挪出去 12~18cm），立刻失败，
+# 而不是等到 viewer 里发现叶子贴不上枝。
+ANCHOR_SLACK = 0.01
+bad = 0
+for ci, (ap, _up, _nrm, _h, bid, _s, _mir) in enumerate(cards):
+    poly = polys[bid]
+    best = 1e300
+    best_r = 0.0
+    for k in range(len(poly) - 1):
+        a = to_up(poly[k])
+        b = to_up(poly[k + 1])
+        ab = sub3(b, a)
+        ap3 = sub3(ap, a)
+        denom = dot3(ab, ab)
+        t = 0.0 if denom == 0 else max(0.0, min(1.0, dot3(ap3, ab) / denom))
+        d = len3(sub3(ap3, mul3(ab, t)))
+        if d < best:
+            best = d
+            r0 = radii[bid][k] if k < len(radii[bid]) else radii[bid][-1]
+            r1 = radii[bid][k + 1] if k + 1 < len(radii[bid]) else radii[bid][-1]
+            best_r = r0 + (r1 - r0) * t
+    if best > best_r + ANCHOR_SLACK:
+        bad += 1
+        if bad <= 5:
+            print("[export] card %d anchor 离枝 %.4f m（枝半径 %.4f m）" % (ci, best, best_r))
+if bad:
+    raise SystemExit(f"[export] {bad} 张叶卡的 anchor 不在所属枝条上 —— "
+                     "anchor 必须是叶子与枝条的连接点，不能靠它做 UV 补偿")
+print("[export] anchor 合同校验通过：%d 张卡全部落在所属枝条上" % len(cards))
 
 # ---------------------------------------------------------------------------
 # 写文本 proto
@@ -346,7 +391,7 @@ for flipped in (False, True):
         lines.append('  description: "%s（镜像手性：请把素材左右翻转后使用）"' % leaf_desc)
     else:
         lines.append('  description: "%s"' % leaf_desc)
-    lines.append('  anchor_mode: "bottom_center"')
+    lines.append('  anchor_mode: "%s"' % anchor_mode)
     lines.append("  preferred_aspect: 0")
     lines.append("}")
 

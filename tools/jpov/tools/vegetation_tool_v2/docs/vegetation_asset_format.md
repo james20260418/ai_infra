@@ -246,6 +246,18 @@ LeafType {
 }
 ```
 
+- **`anchor` 是「叶子与枝条的连接点」，必须落在所属枝条上**（合同，不是提示）：
+  到 `branch` 那根枝中心线的距离 ≤ 该处 `radius + 1cm`（叶柄允许插进管壁，但不许悬空）。
+  `Validate` 强制这一条。
+  - **反例（历史 bug，2026-10-22）**：导出曾把 anchor 写成「根边中点 = 卡片中心 − up·h/2」，
+    442 张卡全部偏出枝条 12~18cm。结果真正压在枝上的是**卡片中心**，
+    4 种 `anchor_mode` 怎么选都贴不上枝 —— 素材画得再准也没用。
+- **`anchor + anchor_mode` 唯一推导 UV**：格子里的 `(au, av)` 那一点贴到 `anchor`，
+  卡片沿 `+up` 长、沿 `right(=up×normal)` 变宽：
+  ```
+  quad 角点(u,v) = anchor + right·(u − au)·width + up·(v − av)·height
+  ```
+  引擎**不做任何补偿性偏移**：素材根部画在 `(au, av)`，逻辑就对得上。
 - **anchor + up + normal** 三者唯一确定卡片姿态。只有 `up` 不够（卡面还能绕长轴自转）。
 - **`anchor_mode`**（每类一份）：**只描述「根部落在格子的哪个位置」**，卡片永远沿 `up` 从根长到梢。
   - `bottom_left` / `bottom_center` / `bottom_right`：根部在下边 —— 叶、叶簇（叶簇卡常偏左下/右下）

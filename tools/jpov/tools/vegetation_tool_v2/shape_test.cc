@@ -71,7 +71,8 @@ Shape MinimalShape() {
   shape.leaf_types.push_back(type);
 
   LeafCard card;
-  card.anchor = Vec3d{0.2, 2.0, 0.0};
+  // anchor 必须落在所属枝条上（合同）：子枝是 x=z=0 的竖线，这里取 y=2.0 处的枝上点。
+  card.anchor = Vec3d{0.0, 2.0, 0.0};
   card.up = Vec3d{0, 1, 0};
   card.normal = Vec3d{1, 0, 0};
   card.height = 0.25;
@@ -212,6 +213,28 @@ void TestNegative() {
     s.cards[0].type = 7;
     std::string err;
     Expect(!Validate(s, &err), "card 引用不存在的 type 应失败");
+  }
+  // anchor 的语义是「叶子与枝条的连接点」，离枝必须失败。
+  // 负向基准：历史上导出曾把 anchor 写成「卡片中心 − up·h/2」，442 张卡全偏 12~18cm。
+  {
+    Shape s = MinimalShape();
+    s.cards[0].anchor = Vec3d{0.2, 2.0, 0.0};   // 子枝中心线在 x=0
+    std::string err;
+    Expect(!Validate(s, &err) && err.find("anchor") != std::string::npos,
+           "anchor 离枝 0.2m 应失败（容差只有枝半径 + 1cm）");
+  }
+  {
+    // 容差边界内侧：子枝在 y=2.0 处半径 0.025，容差 = 0.025 + 0.01 = 0.035。
+    // 偏 0.03 仍合法（叶柄插进管壁），偏 0.04 必须失败 —— 这条同时钉住「容差真的在查」。
+    Shape ok = MinimalShape();
+    ok.cards[0].anchor = Vec3d{0.03, 2.0, 0.0};
+    std::string err;
+    Expect(Validate(ok, &err), std::string("anchor 偏 3cm（容差 3.5cm）应通过: ") + err);
+
+    Shape bad = MinimalShape();
+    bad.cards[0].anchor = Vec3d{0.04, 2.0, 0.0};
+    std::string err2;
+    Expect(!Validate(bad, &err2), "anchor 偏 4cm（超容差 3.5cm）应失败");
   }
   {
     Shape s = MinimalShape();
