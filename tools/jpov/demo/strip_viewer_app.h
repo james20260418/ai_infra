@@ -227,6 +227,13 @@ inline void BuildArcRibbon(float phase, float width_scale, float angle, float ya
     BuildRibbon(phase, center, half_l, half_r, alpha, out);
 }
 
+// 宽度方向的 alpha 剖面（9 knot）：柔边 = 两端衰减到 0；硬边 = 全 1。
+// 抽成常量：三条带 / 射流 / 纯色批的「搬移」都从这里取，避免同一组数字散在三个地方漂移。
+inline constexpr std::array<float, 9> kSoftWidthProfile = {
+    0.0f, 0.35f, 0.80f, 1.0f, 1.0f, 1.0f, 0.80f, 0.35f, 0.0f};
+inline constexpr std::array<float, 9> kHardWidthProfile = {
+    1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
 // 三条带装进**一个 batch** → 一次 draw call。
 // 返回 false 表示三条都被关掉了（调用方不要发空 batch）。
 inline bool BuildDemoBatch(const RibbonShape& shape, const RibbonVisibility& vis,
@@ -261,11 +268,7 @@ inline bool BuildDemoBatch(const RibbonShape& shape, const RibbonVisibility& vis
     out->texture_id = texture_id;
     out->tint = jpov::Color{1.0f, 1.0f, 1.0f, opacity};
     // 「柔边」= 宽度两端衰减到 0（几何折角被吃掉，视觉上变软）；硬边 = 全 1。
-    out->width_profile = soft_edges
-                             ? std::array<float, 9>{0.0f, 0.35f, 0.80f, 1.0f, 1.0f,
-                                                    1.0f, 0.80f, 0.35f, 0.0f}
-                             : std::array<float, 9>{1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-                                                    1.0f, 1.0f, 1.0f, 1.0f};
+    out->width_profile = soft_edges ? kSoftWidthProfile : kHardWidthProfile;
     return true;
 }
 
@@ -350,7 +353,7 @@ inline jpov::TranslucentStripBatch BuildJetBatch(const JetShape& shape, float ga
     batch.additive_gain = gain;
     batch.style = style;
     // 中心实、两侧虚：射流的横截面自然衰减（逐片元求值，15 段也不会有阶梯）。
-    batch.width_profile = {0.0f, 0.35f, 0.80f, 1.0f, 1.0f, 1.0f, 0.80f, 0.35f, 0.0f};
+    batch.width_profile = kSoftWidthProfile;
     for (const jpov::Vec3f& side : {side_a, side_b}) {
         jpov::Strip16 strip;
         jpov::StripPointColors colors{};
@@ -545,14 +548,19 @@ private:
             }
             if (!use_texture_) {
                 // 纯色接口：不采样纹理，颜色 = solid_color_（alpha 由 opacity_ 控）。
-                // 逐条带浓度要被**搬过去**：MakeSolidStripBatch 会重建整个 batch，
-                // 漏搬 = 三条带又变成同样不透明（gold 的加法集/剖面断言会跟着漂）。
+                // MakeSolidStripBatch 会**重建整个 batch**（只保留颜色与条带），所以
+                // 「逐条带浓度」和「宽度剖面」这两项必须显式搬过去 —— 否则：
+                //   * 漏搬 strip_tints ⇒ 三条带又变回同样不透明；
+                //   * 漏搬 width_profile ⇒ 面板上「柔边剖面」明明勾着，一切纯色就变硬边。
+                // （这两项都是 viewer 侧的状态，不属于 MakeSolidStripBatch 的语义。）
                 jpov::Color color = solid_color_;
                 color.a = opacity_;
                 std::vector<jpov::Strip16> strips = std::move(batch.strips);
                 std::vector<jpov::Color> tints = std::move(batch.strip_tints);
+                const std::array<float, 9> profile = batch.width_profile;
                 batch = jpov::MakeSolidStripBatch(color, std::move(strips));
                 batch.strip_tints = std::move(tints);
+                batch.width_profile = profile;
             }
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;
