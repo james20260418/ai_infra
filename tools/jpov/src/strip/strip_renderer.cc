@@ -161,6 +161,13 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->blend_path = shader_mgr_->GetUniform(program, "uBlendPath");
     out->soft_enabled = shader_mgr_->GetUniform(program, "uSoftDepthEnabled");
     out->soft_m = shader_mgr_->GetUniform(program, "uSoftDepthM");
+    out->cam_pos = shader_mgr_->GetUniform(program, "uCamPos");
+    out->fresnel_enabled = shader_mgr_->GetUniform(program, "uFresnelEnabled");
+    out->fresnel_rim_color = shader_mgr_->GetUniform(program, "uFresnelRimColor");
+    out->fresnel_f0 = shader_mgr_->GetUniform(program, "uFresnelF0");
+    out->fresnel_power = shader_mgr_->GetUniform(program, "uFresnelPower");
+    out->fresnel_strength = shader_mgr_->GetUniform(program, "uFresnelStrength");
+    out->fresnel_graze_alpha = shader_mgr_->GetUniform(program, "uFresnelGrazeAlpha");
 }
 
 void StripRenderer::EnsureIboCapacity(int strips) {
@@ -319,6 +326,28 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
     glBindTexture(GL_TEXTURE_2D, ctx.scene_depth_tex);
     glUniform1i(uniforms.scene_depth, kSceneDepthUnit);
+
+    // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
+    // uniform 是无法排查的隐患）；开启时按批取值。
+    glUniform3f(uniforms.cam_pos, ctx.camera->position.x(), ctx.camera->position.y(),
+                ctx.camera->position.z());
+    if (batch.fresnel.has_value()) {
+        const StripFresnel& f = *batch.fresnel;
+        glUniform1i(uniforms.fresnel_enabled, 1);
+        glUniform3f(uniforms.fresnel_rim_color, f.rim_color.x(), f.rim_color.y(),
+                    f.rim_color.z());
+        glUniform1f(uniforms.fresnel_f0, f.f0);
+        glUniform1f(uniforms.fresnel_power, f.power);
+        glUniform1f(uniforms.fresnel_strength, f.strength);
+        glUniform1f(uniforms.fresnel_graze_alpha, f.graze_alpha);
+    } else {
+        glUniform1i(uniforms.fresnel_enabled, 0);
+        glUniform3f(uniforms.fresnel_rim_color, 1.0f, 1.0f, 1.0f);
+        glUniform1f(uniforms.fresnel_f0, 0.04f);
+        glUniform1f(uniforms.fresnel_power, 5.0f);
+        glUniform1f(uniforms.fresnel_strength, 1.0f);
+        glUniform1f(uniforms.fresnel_graze_alpha, 1.0f);
+    }
 
     if (ctx.gl_tex != 0) {
         glActiveTexture(GL_TEXTURE0 + kStripTexUnit);

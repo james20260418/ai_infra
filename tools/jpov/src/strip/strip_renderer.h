@@ -25,7 +25,9 @@
 //        不用的附件写恒等值（同粒子 FS 的写法）。
 //     剖面在**片元**里逐像素求值 ⇒ 4 段几何也能有平滑的宽度方向衰减。
 //
-//   fresnel（M4）尚未实现 —— 不预留空字段（设了不生效比没有更糟）。
+//   fresnel（M4，2026-10-22）：逐片元 Schlick 边反，参数见 interface/strip_types.h:StripFresnel。
+//     法线来源两条路：折线 pass 用屏幕导数 dFdx/dFdy，平滑 pass 用重建曲面的 dS × H
+//     （解析法线，无折面）。开关关闭时片段逐字节等于旧画面。
 //
 // ⭐ 两个独立 pass（2026-10-21 Danis 定；统一一个命令接口 StripStyle）：
 //   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
@@ -69,14 +71,17 @@ public:
     // 谁的着色器都一样 —— 公共段只有一份，不可能漂移。
 
     // 顶点着色器（折线 pass）：位置/uv 已由 CPU 展开好，这里只做 MVP。
+    // vWorld 只为 fresnel 服务（导数法线必须拿到**世界空间**位置）。
     static constexpr const char* kVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aUVAlpha;   // (u, v, alpha)
 uniform mat4 uViewProj;
 out vec3 vUVAlpha;
+out vec3 vWorld;
 void main() {
     vUVAlpha = aUVAlpha;
+    vWorld = aPos;
     gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )glsl";
@@ -85,6 +90,7 @@ void main() {
     static constexpr const char* kCommonFsHead = R"glsl(
 #version 330 core
 in vec3 vUVAlpha;                 // (u, v, alpha)
+in vec3 vWorld;                   // 世界坐标（fresnel 求法线/视线用）
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec4 uTint;
@@ -96,6 +102,13 @@ uniform float uFar;
 uniform int uBlendPath;            // 0 = 覆盖集（吸收）；1 = 加法集（发光）
 uniform int uSoftDepthEnabled;     // 1 = 软深度淡出；0 = 硬判据（2cm）
 uniform float uSoftDepthM;         // 软深度过渡距离（米，仅 enabled 时有效）
+uniform vec3 uCamPos;              // 世界空间相机位置（fresnel 的 V）
+uniform int uFresnelEnabled;       // 1 = 开（否则这一段全部跳过）
+uniform vec3 uFresnelRimColor;
+uniform float uFresnelF0;
+uniform float uFresnelPower;
+uniform float uFresnelStrength;
+uniform float uFresnelGrazeAlpha;
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
 layout(location = 1) out float FragReveal;  // 覆盖集：Π(1−α)
 layout(location = 2) out vec4 FragAdd;      // 加法集：Σ(色·α)
@@ -118,6 +131,31 @@ void ModulateTexture(vec2 uv, inout vec3 color, inout float a) {
         color *= tex.rgb;
         a *= tex.a;
     }
+}
+// Schlick 菲涅耳：F = f0 + (1−f0)·(1−|N·V|)^power，再乘 strength 并 clamp。
+// 用 |N·V| 而不是 max(N·V,0)：条带是**单层片**，两面都要有反光（法线朝向无意义）。
+// N 长度退化（叉积≈ 0，比如投影退化/极细条带）时当作正对视线（只剩 f0），
+// 不返回 NaN —— NaN 进 accum 会污染整帧后处理。
+float FresnelFactor(vec3 N) {
+    vec3 V = normalize(uCamPos - vWorld);
+    float nl = length(N);
+    // d 必须 clamp 到 [0,1]：浮点误差会让 |N·V| 冒到 1+eps，pow(负数, k) = NaN。
+    float d = (nl > 1e-6) ? clamp(abs(dot(N / nl, V)), 0.0, 1.0) : 1.0;
+    float f = uFresnelF0 + (1.0 - uFresnelF0) * pow(1.0 - d, uFresnelPower);
+    return clamp(f * uFresnelStrength, 0.0, 1.0);
+}
+// 把菲涅耳作用到（尚未定稿的）(color, a) 上：
+//   颜色 → 掠射处趋近 rim_color（反射色）
+//   覆盖度 → 掠射处趋近 graze_alpha × 逐点 alpha（边变实，中心仍然看得穿）
+// 刻意**不乘**纹理/剖面 alpha：边反是「几何边」的属性，不该被贴图的透明区挖掉。
+// 调用位置固定：在 ModulateTexture 之后、WidthProfile 之前（剖面与 AA 仍是最后一层）。
+void ApplyFresnel(vec3 N, inout vec3 color, inout float a) {
+    if (uFresnelEnabled == 0) {
+        return;
+    }
+    float f = FresnelFactor(N);
+    color = mix(color, uFresnelRimColor, f);
+    a = mix(a, uFresnelGrazeAlpha * vUVAlpha.z, f);
 }
 )glsl";
 
@@ -164,11 +202,14 @@ void EmitFragment(vec3 color, float a) {
 )glsl";
 
     // 折线 pass 的 main：uv/α 直接来自顶点（段间是弦）。
+    // 法线只能来自屏幕空间导数（= 所在三角形平面法线，逐折面恒定 ——
+    // 16 列折线上会看到一圈圈亮带，要光滑请切 kSmooth）。
     static constexpr const char* kFsMain = R"glsl(
 void main() {
     vec3 color = uTint.rgb;
     float a = uTint.a * vUVAlpha.z;
     ModulateTexture(vUVAlpha.xy, color, a);
+    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
     a *= WidthProfile(vUVAlpha.y);
     EmitFragment(color, a);
 }
@@ -200,8 +241,7 @@ void main() {
 )glsl";
 
     static constexpr const char* kSmoothFsMain = R"glsl(
-in vec3 vWorld;                   // 线性几何上的片元世界坐标（尚未重建）
-flat in float vStripId;           // 所属条带 = 数据纹理行号
+flat in float vStripId;           // 所属条带 = 数据纹理行号（vWorld 已在公共头声明）
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
 // 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
@@ -276,6 +316,10 @@ void main() {
     vec3 color = uTint.rgb;
     float a = uTint.a * vUVAlpha.z;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
+    // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
+    // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
+    // 也是平滑 pass 的附带好处：同一份数据已经在手上了，不用额外顶点属性。
+    ApplyFresnel(cross(dS, Hh), color, a);
     a *= WidthProfile(vShade) * cov;
     EmitFragment(color, a);
 }
@@ -336,6 +380,13 @@ private:
         int blend_path = -1;
         int soft_enabled = -1;
         int soft_m = -1;
+        int cam_pos = -1;
+        int fresnel_enabled = -1;
+        int fresnel_rim_color = -1;
+        int fresnel_f0 = -1;
+        int fresnel_power = -1;
+        int fresnel_strength = -1;
+        int fresnel_graze_alpha = -1;
     };
     struct CompositeUniforms {
         int accum = -1;

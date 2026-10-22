@@ -1,15 +1,18 @@
 // JPOV 半透明条带查看器（strip viewer）— 渲染核心 App
 //
-// 场景 = 天光 + 灰色地面 + 三块不同材质参考方块 + **一批三条带（一次 draw call）**：
+// 场景 = 天光 + 灰色地面 + 四块参考方块 + **一批三条带（一次 draw call）**
+//        + **玻璃圆环（四组点 → 四条带，另一个 batch）**：
 //   ① 波带（宽、柔和边缘、带纵向淡出）
 //   ② 螺旋拖尾（窄、绕行进）
 //   ③ 弧形扇面（宽度沿长度张开）
+//   ④ 圆环：上下环面 + 内外立壁，带菲涅耳边反（玻璃质感）
 //
-// 三条在屏幕空间部分交叉（交叉处能看出不同不透明度叠加），用来验收
-// 「WBO 覆盖集 + over 合成」；三块参考方块用来验收「天光真的照在物体上」。
+// 三条带在屏幕空间部分交叉（交叉处能看出不透明度叠加），用来验收
+// 「WBO 覆盖集 + over 合成」；三块参考方块用来验收「天光真的照在物体上」；
+// 圆环用来验收 fresnel（参数／预设见 §19 与 kFresnelPresets）。
 //
 // 交互：右键拖拽 = 绕行、滚轮 = 推拉；面板可调视角外的一切（形状/材质/剖面/开关）。
-// 拍摄：--capture <dir>（固定视角与相位，输出 5 张对照图）。
+// 拍摄：--capture <dir>（固定视角与相位，逐张对比图）。
 
 #ifndef JPOV_DEMO_STRIP_VIEWER_APP_H_
 #define JPOV_DEMO_STRIP_VIEWER_APP_H_
@@ -75,6 +78,60 @@ struct ViewDefaults {
 };
 
 inline constexpr ViewDefaults kViewDefaults{};
+
+// 圆环在场景里的默认位置：让开三块参考方块与三条带。
+// 放原点会被螺旋条带穿过、波带也从环体里斜穿过去（能看，但看不清边反）。
+inline jpov::StripRingShape MakeSceneRingShape() {
+    jpov::StripRingShape shape;
+    shape.center_x = -1.70f;
+    shape.center_y = 1.20f;
+    shape.center_z = 1.00f;
+    return shape;
+}
+
+// ── 菲涅耳预设（实验用的几种参数配置）──
+//
+// 面板 Combo 与 --capture 共用这一份表：避免「截图里是 A、面板上写着 B」。
+// 每项只改数值、不改公式 —— 公式见 interface/strip_types.h:StripFresnel 的头注释。
+struct FresnelPreset {
+    const char* name;
+    jpov::StripFresnel params;
+};
+
+inline constexpr FresnelPreset kFresnelPresets[] = {
+    {"物理玻璃 f0=0.04 pow5",
+     {.f0 = 0.04f, .power = 5.0f, .strength = 1.0f, .graze_alpha = 1.0f,
+      .rim_color = {0.85f, 0.93f, 1.00f}}},
+    {"柔边塑料 f0=0.04 pow2",
+     {.f0 = 0.04f, .power = 2.0f, .strength = 1.0f, .graze_alpha = 0.85f,
+      .rim_color = {1.00f, 1.00f, 1.00f}}},
+    {"厚玻璃 f0=0.10 pow4 x1.4",
+     {.f0 = 0.10f, .power = 4.0f, .strength = 1.4f, .graze_alpha = 1.0f,
+      .rim_color = {0.72f, 0.88f, 1.00f}}},
+    {"镜面边 f0=0.16 pow6 x2.2",
+     {.f0 = 0.16f, .power = 6.0f, .strength = 2.2f, .graze_alpha = 1.0f,
+      .rim_color = {1.00f, 1.00f, 1.00f}}},
+    {"窄边反 f0=0.03 pow8 x1.2",
+     {.f0 = 0.03f, .power = 8.0f, .strength = 1.2f, .graze_alpha = 0.95f,
+      .rim_color = {0.90f, 0.96f, 1.00f}}},
+};
+inline constexpr int kFresnelPresetCount =
+    static_cast<int>(sizeof(kFresnelPresets) / sizeof(kFresnelPresets[0]));
+
+// 边反颜色预设（面板 Combo）。冷白/纯白/暖白/冰蓝/金 —— 都是线性 HDR 值。
+struct RimColorPreset {
+    const char* name;
+    jpov::Vec3f rgb;
+};
+inline constexpr RimColorPreset kRimColorPresets[] = {
+    {"冷白", {0.85f, 0.93f, 1.00f}},
+    {"纯白", {1.00f, 1.00f, 1.00f}},
+    {"暖白", {1.00f, 0.93f, 0.82f}},
+    {"冰蓝", {0.62f, 0.85f, 1.00f}},
+    {"金",   {1.00f, 0.78f, 0.35f}},
+};
+inline constexpr int kRimColorPresetCount =
+    static_cast<int>(sizeof(kRimColorPresets) / sizeof(kRimColorPresets[0]));
 
 // ── 条带生成（纯函数，gold 与 viewer 共用同一份实现，避免"看起来差不多"）──
 
@@ -245,11 +302,25 @@ public:
     bool auto_orbit_ = false;        // 自动绕行（不拖鼠标也能看各角度）
     bool smaa_ = false;              // SMAA 后处理（看边缘质量）
     bool show_strips_ = true;        // false = 不发条带命令（A/B 对照）
+    bool boxes_visible_ = true;      // 背景参考方块（只看圆环时可关掉，免得挡住环体）
     bool smooth_strips_ = false;     // true = 走平滑 pass（kSmooth）；false = 折线 pass
     bool arc_additive_ = false;      // 弧形改用**加法集**（发光拖尾），其余仍走覆盖集
     bool soft_depth_ = false;        // 条带与几何相交处的软过渡（per batch 选项）
     float soft_depth_m_ = 0.15f;     // 软深度过渡距离（米）
     float phase_ = 0.0f;             // 当前相位（animate_ 时逐帧推进）
+
+    // ── 圆环（玻璃壳）──
+    jpov::StripRingShape ring_shape_ = MakeSceneRingShape();
+    bool ring_visible_ = true;              // 四条带 = 顶/底环面 + 内/外立壁
+    jpov::Vec3f ring_color_{0.70f, 0.85f, 1.00f};   // 玻璃膜的颜色（线性 HDR）
+    float ring_opacity_ = 0.12f;            // 薄膜的不透明度（边反由 fresnel 抬起来）
+
+    // ── 菲涅耳（玻璃边反）──
+    // 默认开：这个 viewer 现在的主场景就是那块玻璃圆环，不开就只是层淡蓝膜。
+    bool fresnel_enabled_ = true;
+    int fresnel_preset_ = 0;                // kFresnelPresets 下标
+    int rim_color_preset_ = 0;              // kRimColorPresets 下标
+    jpov::StripFresnel fresnel_ = kFresnelPresets[0].params;
 
     // 装配场景静态资源（Init 之后、Run/RunOnce 之前调用一次）。
     void Setup(const std::string& texture_path);
@@ -264,6 +335,7 @@ public:
         deg_.sun_azim_deg = kViewDefaults.sun_azim_deg;
         deg_.turbidity = kViewDefaults.turbidity;
         phase_ = 0.0f;
+        ring_shape_ = MakeSceneRingShape();
     }
 
     void SetShowPanel(bool show) { show_panel_ = show; }
@@ -329,16 +401,18 @@ public:
 
         // 背景三块参考方块（低反/高光/金属）：让「天光真的照在物体上」可验，
         // 同时为条带提供可对照的前后遮挡——条带在半透明的同时仍吃场景深度。
-        cmds->DrawObject3D(box_mesh_, box_mat_low_gloss_, {-2.0f, 0.5f, -2.6f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
-        cmds->DrawObject3D(box_mesh_, box_mat_high_gloss_, {0.0f, 0.5f, -2.6f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
-        cmds->DrawObject3D(box_mesh_, box_mat_metal_, {2.0f, 0.5f, -2.6f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
-        // 第四块「穿过条带的方块」：波带从它的体积里穿过去，专门用来验收**软深度**
-        // （硬判据 = 相交处一条硬切边；软深度 = 一条按距离淡出的过渡带）。
-        cmds->DrawObject3D(box_mesh_, box_mat_low_gloss_, {0.35f, 0.62f, -0.55f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.5f);
+        if (boxes_visible_) {
+            cmds->DrawObject3D(box_mesh_, box_mat_low_gloss_, {-2.0f, 0.5f, -2.6f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
+            cmds->DrawObject3D(box_mesh_, box_mat_high_gloss_, {0.0f, 0.5f, -2.6f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
+            cmds->DrawObject3D(box_mesh_, box_mat_metal_, {2.0f, 0.5f, -2.6f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
+            // 第四块「穿过条带的方块」：波带从它的体积里穿过去，专门用来验收**软深度**
+            // （硬判据 = 相交处一条硬切边；软深度 = 一条按距离淡出的过渡带）。
+            cmds->DrawObject3D(box_mesh_, box_mat_low_gloss_, {0.35f, 0.62f, -0.55f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.5f);
+        }
 
         if (show_strips_) {
             EmitStripBatches(cmds);
@@ -376,6 +450,9 @@ private:
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;
             }
+            if (fresnel_enabled_) {
+                batch.fresnel = fresnel_;
+            }
             batch.style = smooth_strips_ ? jpov::StripStyle::kSmooth
                                          : jpov::StripStyle::kPolyline;
             return batch;
@@ -402,6 +479,39 @@ private:
                 cmds->DrawTranslucentStrips(std::move(additive));
             }
         }
+
+        if (ring_visible_) {
+            EmitRingBatch(cmds);
+        }
+    }
+
+    // 圆环（玻璃壳）：四组点 → 四条带 → **一个批**（一次 draw call）。
+    //
+    // 用纯色（不采样条带纹理）：贴图上的彩色横条会把边反盖成花纹，看不出玻璃；
+    // 宽度剖面也用硬边（默认全 1）—— 玻璃壳的轮廓就是硬的，柔边会把边反直接抹平。
+    void EmitRingBatch(jpov::RenderCommandList* cmds) {
+        // 面板上「外半径」与「壁厚」是两个独立滑条，任何时刻都可能出现 wall ≥ outer
+        // （形状校验会 CHECK 崩）。所以在**使用处**夹一次；形状层的校验仍然严格 ——
+        // 不把非法输入合法化，只是不让滑条的瞬时状态把 viewer 崩掉。
+        jpov::StripRingShape shape = ring_shape_;
+        shape.wall_thickness = std::min(shape.wall_thickness, shape.outer_radius * 0.95f);
+        const std::array<jpov::Strip16, jpov::kStripRingPartCount> parts =
+            jpov::MakeStripRing(shape);
+        jpov::TranslucentStripBatch ring;
+        ring.texture_id = 0;   // 纯色
+        ring.tint = jpov::Color{ring_color_.x(), ring_color_.y(), ring_color_.z(),
+                                ring_opacity_};
+        ring.blend = jpov::StripBlend::kCoverage;
+        ring.style = smooth_strips_ ? jpov::StripStyle::kSmooth
+                                    : jpov::StripStyle::kPolyline;
+        if (fresnel_enabled_) {
+            ring.fresnel = fresnel_;
+        }
+        if (soft_depth_) {
+            ring.soft_depth_m = soft_depth_m_;
+        }
+        ring.strips.assign(parts.begin(), parts.end());
+        cmds->DrawTranslucentStrips(std::move(ring));
     }
 
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
@@ -417,19 +527,27 @@ private:
         theme.font_alias = jpov_viewer::kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / jpov_viewer::kViewerFps);
 
-        // 两列布局：控件多（20 个），单列会超出 720 高。
-        const float kColW = 0.30f * w;
+        // 三列布局：控件已到 30 个，两列会超出 720 高。
+        const float kColW = 0.28f * w;
         const float kRowH = 28.0f;
         const float kSpacing = 8.0f;
         const float kLeftX = 20.0f;
-        const float kRightX = kLeftX + kColW + 16.0f;
+        const float kMidX = kLeftX + kColW + 16.0f;
+        const float kRightX = kMidX + kColW + 16.0f;
         const float kTopY = 20.0f;
         int row_left = 0;
+        int row_mid = 0;
         int row_right = 0;
         auto left_rect = [&]() {
             const jpov::UiRect r{{kLeftX, kTopY + static_cast<float>(row_left) * (kRowH + kSpacing)},
                                  {kColW, kRowH}};
             row_left += 1;
+            return r;
+        };
+        auto mid_rect = [&]() {
+            const jpov::UiRect r{{kMidX, kTopY + static_cast<float>(row_mid) * (kRowH + kSpacing)},
+                                 {kColW, kRowH}};
+            row_mid += 1;
             return r;
         };
         auto right_rect = [&]() {
@@ -452,17 +570,23 @@ private:
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
 
-        // ── 右列：形状 / 动画 / 显隐 ──
-        ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), right_rect(), 0.0f, 1.2f, 2);
-        ui_.SliderFloat("螺旋转数", &(shape_.helix_turns), right_rect(), 0.5f, 3.0f, 2);
-        ui_.SliderFloat("弧形开角", &(shape_.arc_angle), right_rect(), 0.6f, 2.6f, 2);
-        ui_.SliderFloat("弧形朝向", &(shape_.arc_yaw), right_rect(), -1.6f, 1.6f, 2);
-        ui_.Checkbox("形状动画", &animate_, right_rect());
-        ui_.Checkbox("自动绕行", &auto_orbit_, right_rect());
-        ui_.Checkbox("显示波带", &(vis_.wave), right_rect());
-        ui_.Checkbox("显示螺旋", &(vis_.helix), right_rect());
-        ui_.Checkbox("显示弧形", &(vis_.arc), right_rect());
-        const bool reset_clicked = ui_.Button("重置视角/形状", right_rect());
+        // ── 中列：形状 / 动画 / 显隐 / 圆环 ──
+        ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), mid_rect(), 0.0f, 1.2f, 2);
+        ui_.SliderFloat("螺旋转数", &(shape_.helix_turns), mid_rect(), 0.5f, 3.0f, 2);
+        ui_.SliderFloat("弧形开角", &(shape_.arc_angle), mid_rect(), 0.6f, 2.6f, 2);
+        ui_.SliderFloat("弧形朝向", &(shape_.arc_yaw), mid_rect(), -1.6f, 1.6f, 2);
+        ui_.Checkbox("形状动画", &animate_, mid_rect());
+        ui_.Checkbox("自动绕行", &auto_orbit_, mid_rect());
+        ui_.Checkbox("显示波带", &(vis_.wave), mid_rect());
+        ui_.Checkbox("显示螺旋", &(vis_.helix), mid_rect());
+        ui_.Checkbox("显示弧形", &(vis_.arc), mid_rect());
+        ui_.Checkbox("显示圆环（玻璃壳）", &ring_visible_, mid_rect());
+        ui_.Checkbox("显示参考方块", &boxes_visible_, mid_rect());
+        ui_.SliderFloat("圆环外半径 m", &(ring_shape_.outer_radius), mid_rect(), 0.2f, 2.5f, 2);
+        ui_.SliderFloat("圆环壁厚 m", &(ring_shape_.wall_thickness), mid_rect(), 0.02f, 0.60f, 2);
+        ui_.SliderFloat("圆环高度 m", &(ring_shape_.height), mid_rect(), 0.20f, 3.00f, 2);
+        ui_.SliderFloat("圆环不透明度", &ring_opacity_, mid_rect(), 0.0f, 1.0f, 2);
+        const bool reset_clicked = ui_.Button("重置视角/形状", mid_rect());
         if (reset_clicked) {
             ResetViewToDefaults();
             shape_ = RibbonShape{};
@@ -471,17 +595,53 @@ private:
             smooth_strips_ = false;
             soft_depth_ = false;
             soft_depth_m_ = 0.15f;
+            ring_visible_ = true;
+            boxes_visible_ = true;
+            ring_opacity_ = 0.12f;
+            fresnel_enabled_ = true;
+            fresnel_preset_ = 0;
+            rim_color_preset_ = 0;
+            fresnel_ = kFresnelPresets[0].params;
         }
 
-        // 相机信息（右上角）：便于口头描述/复现某个角度。
-        char info[192];
+        // ── 右列：菲涅耳（玻璃边反）──
+        ui_.Checkbox("菲涅耳边反", &fresnel_enabled_, right_rect());
+        std::vector<const char*> preset_names;
+        preset_names.reserve(static_cast<size_t>(kFresnelPresetCount));
+        for (const FresnelPreset& p : kFresnelPresets) {
+            preset_names.push_back(p.name);
+        }
+        if (ui_.Combo("预设", &fresnel_preset_, preset_names, right_rect())) {
+            // 选预设 = 整组参数覆盖（含边反颜色）；之后再拖滑条就进入自定义态。
+            fresnel_ = kFresnelPresets[fresnel_preset_].params;
+        }
+        ui_.SliderFloat("F0 正入射反射", &(fresnel_.f0), right_rect(), 0.0f, 0.30f, 2);
+        ui_.SliderFloat("掠射指数", &(fresnel_.power), right_rect(), 0.5f, 8.0f, 1);
+        ui_.SliderFloat("边反强度", &(fresnel_.strength), right_rect(), 0.0f, 3.0f, 2);
+        ui_.SliderFloat("掠射不透明度", &(fresnel_.graze_alpha), right_rect(), 0.0f, 1.0f, 2);
+        std::vector<const char*> rim_names;
+        rim_names.reserve(static_cast<size_t>(kRimColorPresetCount));
+        for (const RimColorPreset& p : kRimColorPresets) {
+            rim_names.push_back(p.name);
+        }
+        if (ui_.Combo("边反颜色", &rim_color_preset_, rim_names, right_rect())) {
+            fresnel_.rim_color = kRimColorPresets[rim_color_preset_].rgb;
+        }
+
+        // 相机/当前形态信息（底部一行）：便于口头描述/复现某个角度。
+        // 下标先钳一次：Combo 只保证本帧之后的 fresnel_preset_ 合法，别赌它。
+        const int preset_idx = std::clamp(fresnel_preset_, 0, kFresnelPresetCount - 1);
+        char info[256];
         std::snprintf(info, sizeof(info),
-                      "phi %.2f   theta %.2f   R %.2f   |   %s  blend: %s%s",
+                      "phi %.2f  theta %.2f  R %.2f   |   %s   blend: %s%s   |   "
+                      "fresnel: %s   ring: %s",
                       view_.phi, view_.theta, view_.R,
                       smooth_strips_ ? "smooth" : "polyline",
                       arc_additive_ ? "arc=add" : "all=coverage",
-                      soft_depth_ ? "  soft_depth=on" : "");
-        ui_.Text(info, jpov::UiRect{{w - 420.0f, 18.0f}, {400.0f, 24.0f}});
+                      soft_depth_ ? "  soft_depth=on" : "",
+                      fresnel_enabled_ ? kFresnelPresets[preset_idx].name : "off",
+                      ring_visible_ ? "on" : "off");
+        ui_.Text(info, jpov::UiRect{{kLeftX, h - 46.0f}, {w - 40.0f, 24.0f}});
     }
 
     static constexpr float kFontSize = 16.0f;

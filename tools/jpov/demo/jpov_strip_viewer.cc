@@ -1,7 +1,8 @@
 // JPOV 半透明条带查看器 — 主程序
 //
-// 场景 = 天光 + 灰色地面 + 一批三条带（**一次 draw call**，互有重叠以验收混合）。
-// 条带纹理：assets/strip/ribbon_test.png（Danis 手绘；近黑像素已转 alpha=0）。
+// 场景 = 天光 + 灰色地面 + 参考方块 + 一批三条带（**一次 draw call**）+ 玻璃圆环
+//（四组点 → 四条带，另一个 batch）。条带纹理：assets/strip/ribbon_test.png
+//（Danis 手绘；近黑像素已转 alpha=0）。
 //
 // 交互（需 DISPLAY / WSLg）： ./output/jpov_strip_viewer/jpov_strip_viewer
 // headless 拍摄：           ... /jpov_strip_viewer --capture <out_dir>
@@ -56,10 +57,11 @@ std::string ResolveTexturePath() {
     return std::string();
 }
 
-// headless 拍摄：固定视角/相位，按下面的**拍摄表**逐张出图（A/B 对照用）。
+// headless 拍摄：固定视角/相位，按下面的**拍摄表**逐张出图（AB/预设对照用）。
 //
 // 每行只写「与默认值不同的开关」—— 不写增量、也不用手动还原，
 // 漏还原一个开关会静默污染后面所有图（这正是上一版的问题）。
+// 圆环 + 菲涅耳的对照图：100（无边反基线）~ 150（五个预设）、160/170（折线 vs 平滑）。
 int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     JPOV::Config cfg;
     cfg.title = "JPOV - strip viewer (capture)";
@@ -88,17 +90,25 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     };
 
     // 一张图的完整开关；默认值 = 交互模式的初始状态（只写差异，读起来就是"这张在测什么"）。
+    // 每一行都**完整**覆盖所有开关（不靠上一张的残留状态）：漏还原一个开关会把后面所有图静默污染。
     struct Shot {
         const char* name;
         bool show_strips = true;     // false = 不发条带命令（A/B 对照）
+        bool ribbons = true;         // 三条带（波/螺旋/弧）
+        bool ring = true;            // 玻璃圆环（四组点 → 四条带）
         bool use_texture = true;     // false = 纯色（不看纹理）
-        bool soft_edges = true;      // 宽度剖面：柔边 / 硬边
+        bool soft_edges = true;      // 宽度剖面：柔边 / 硬边（圆环不受它影响，见 EmitRingBatch）
         bool arc_additive = false;   // 弧形改走加法集（发光拖尾）
         bool soft_depth = false;     // 条带与几何相交处软过渡
         bool smooth = false;         // false = 折线 pass；true = 平滑 pass（kSmooth）
+        bool fresnel = true;         // 菲涅耳边反开关
+        int fresnel_preset = 0;      // kFresnelPresets 下标（fresnel=false 时不生效）
+        bool ring_at_origin = false; // 圆环挪到原点：只看圆环时居中
+        bool boxes = true;           // 背景参考方块（只看圆环时关掉，免得透过玻璃挡住环体）
         float camera_r = jpov_strip::kViewDefaults.R;
     };
     const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
+    const float kRingR = 3.6f;   // 只看圆环时的机位（充满画面又不贴脸）
     const Shot kShots[] = {
         {.name = "10_default"},
         {.name = "15_no_strips", .show_strips = false},
@@ -113,22 +123,64 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         {.name = "75_smooth_zoom_hard", .soft_edges = false, .smooth = true,
          .camera_r = kZoomR},
         {.name = "80_smooth_default", .smooth = true},
+        // 圆环 + 菲涅耳：只看圆环（隐藏三条带、圆环居中），逐个预设出图对比。
+        // 100 是"没有边反"的基线：同一机位下的淡蓝薄膜，后面每张只差 fresnel 参数。
+        {.name = "100_ring_no_fresnel", .ribbons = false, .fresnel = false,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        {.name = "110_fresnel_physical", .ribbons = false, .fresnel_preset = 0,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        {.name = "120_fresnel_plastic", .ribbons = false, .fresnel_preset = 1,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        {.name = "130_fresnel_thick", .ribbons = false, .fresnel_preset = 2,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        {.name = "140_fresnel_mirror", .ribbons = false, .fresnel_preset = 3,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        {.name = "150_fresnel_narrow", .ribbons = false, .fresnel_preset = 4,
+         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
+        // 平滑 pass 的解析法线（无折面）vs 折线 pass 的导数法线（逐折面亮带）
+        {.name = "160_fresnel_polyline_near", .ribbons = false, .fresnel_preset = 0,
+         .ring_at_origin = true, .boxes = false, .camera_r = 2.4f},
+        {.name = "170_fresnel_smooth_near", .ribbons = false, .smooth = true,
+         .fresnel_preset = 0, .ring_at_origin = true, .boxes = false, .camera_r = 2.4f},
+        // 默认场景（三条带 + 圆环同屏）：看边反在完整场景里的观感。
+        {.name = "180_scene_with_ring"},
+        {.name = "185_scene_smooth_ring", .smooth = true},
     };
     for (const Shot& shot : kShots) {
+        CHECK(shot.fresnel_preset >= 0 && shot.fresnel_preset < jpov_strip::kFresnelPresetCount)
+            << "拍摄表的 fresnel_preset 越界: " << shot.fresnel_preset;
         app.show_strips_ = shot.show_strips;
+        app.vis_ = jpov_strip::RibbonVisibility{shot.ribbons, shot.ribbons, shot.ribbons};
+        app.ring_visible_ = shot.ring;
+        app.boxes_visible_ = shot.boxes;
         app.use_texture_ = shot.use_texture;
         app.soft_edges_ = shot.soft_edges;
         app.arc_additive_ = shot.arc_additive;
         app.soft_depth_ = shot.soft_depth;
         app.smooth_strips_ = shot.smooth;
+        app.fresnel_enabled_ = shot.fresnel;
+        app.fresnel_preset_ = shot.fresnel_preset;
+        app.fresnel_ = jpov_strip::kFresnelPresets[shot.fresnel_preset].params;
+        app.ring_shape_ = jpov_strip::MakeSceneRingShape();
+        if (shot.ring_at_origin) {
+            app.ring_shape_.center_x = 0.0f;
+            app.ring_shape_.center_z = 0.0f;
+            // 抬到参考方块之上（方块顶 0.995）：居中看圆环时不想让方块从环体里穿过去。
+            app.ring_shape_.center_y = 1.75f;
+        }
         app.view_.R = shot.camera_r;
         shoot(shot.name);
     }
 
-    // 面板单独一张（HUD 文案能证明当前是哪个 pass）：字体必须先量好。
+    // 面板单独一张（HUD 文案能证明当前是哪个 pass / 哪套 fresnel 参数）：字体必须先量好。
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     app.smooth_strips_ = false;
+    app.vis_ = jpov_strip::RibbonVisibility{};
+    app.ring_visible_ = true;
+    app.fresnel_enabled_ = true;
+    app.fresnel_preset_ = 0;
+    app.ring_shape_ = jpov_strip::MakeSceneRingShape();
     app.view_.R = jpov_strip::kViewDefaults.R;
     shoot("99_panel");
 

@@ -64,6 +64,16 @@ struct ShotConfig {
     bool soft_edges = true;
     bool arc_additive = false;   // 弧形走加法集（发光）
     bool soft_depth = false;     // 条带与几何相交处软过渡
+
+    // viewer 的默认场景已经带上了玻璃圆环 + 菲涅耳（那是新功能的主场景），但**本 gold
+    // 锁定的是 M1~M3 的条带路径**（纹理 / 剖面 / 加法集 / 软深度）：
+    //   * 圆环：把一张新图锁进来只会把「实验期的 fresnel 参数」焊死在 gold 里，
+    //     改一次预设就要重出一张图；它的几何由 strip_geometry_test 的 StripRing
+    //     用例锁定，画面由 viewer --capture 的 100~170 对照图验收。
+    //   * fresnel：同理，参数还在实验期（见 docs §19）。
+    // 所以这里显式关掉，保证两张 gold 与本功能加入前**逐字节一致**。
+    bool ring = false;
+    bool fresnel = false;
 };
 
 void RenderTo(const std::string& out_path, const ShotConfig& shot) {
@@ -83,6 +93,8 @@ void RenderTo(const std::string& out_path, const ShotConfig& shot) {
     app.soft_edges_ = shot.soft_edges;
     app.arc_additive_ = shot.arc_additive;
     app.soft_depth_ = shot.soft_depth;
+    app.ring_visible_ = shot.ring;
+    app.fresnel_enabled_ = shot.fresnel;
 
     jpov::WindowInfo winfo;
     winfo.width = static_cast<float>(kWidth);

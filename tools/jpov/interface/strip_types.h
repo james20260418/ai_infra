@@ -99,6 +99,36 @@ enum class StripBlend {
     kEmissive,
 };
 
+// 菲涅耳「廉价玻璃边反」参数（**批次级**，整批共享）。
+//
+// 为什么需要它：条带本来是不受光的纯色片（§7 有意为之），单靠 tint 只会像一层
+// 有色薄膜 —— 正对视线时几乎看不见、掠射时应该有强反光，这个差别只有菲涅耳能给。
+//
+// 公式（Schlick 近似，逐片元求值）：
+//   cosθ = |N · V|                      // 双面：法线朝里朝外都成立
+//   F    = F0 + (1 − F0)·(1 − cosθ)^power
+//   F    = clamp(F · strength, 0, 1)
+//   color = mix(color, rim_color, F)    // 边 → 反射色
+//   α     = mix(α, graze_alpha·逐点α, F) // 边 → 不透明（中心保持看得穿）
+//
+// 法线 N 的来源（实现细节，调用方不用管）：
+//   kSmooth   —— 从重建曲面的 ∂P/∂t 与半宽矢量叉积得到**解析法线**（无折面）。
+//   kPolyline —— 屏幕上 dFdx/dFdy 叉积（= 所在三角形平面法线，逐折面恒定）。
+//
+// 没有任何字段带「特殊值语义」：不想开就**不设** optional（与 soft_depth_m 同一写法）。
+struct StripFresnel {
+    // Schlick 正入射反射率。玻璃 ≈ 0.04；水 ≈ 0.02；厚水晶/亚克力可给到 0.08~0.12。
+    float f0 = 0.04f;
+    // Schlick 指数：5 = 物理值；越小「反光边」越宽（偏塑料），越大越只在极掠射发亮。
+    float power = 5.0f;
+    // 强度乘子（1 = 物理量）。> 1 让边比物理更亮 —— 廉价玻璃的常见夸张手法。
+    float strength = 1.0f;
+    // 掠射处的目标覆盖率（0..1）。1 = 边完全实心；0.6 = 边也只是更亮一点。
+    float graze_alpha = 1.0f;
+    // 边的反射色（线性 HDR，通常略偏冷/偏亮）。F 越大越靠近它。
+    Vec3f rim_color{0.85f, 0.93f, 1.0f};
+};
+
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
@@ -132,6 +162,9 @@ struct TranslucentStripBatch {
     // 走哪个 pass（见 StripStyle）。同一帧可混用；两者写进同一张 WBO 覆盖集目标，
     // 所以**命令顺序 = 前后顺序**，最后只 Composite 一次。
     StripStyle style = StripStyle::kPolyline;
+
+    // 菲涅耳（见 StripFresnel）。nullopt = 关闭 —— 画面逐字节等于没有这个功能。
+    std::optional<StripFresnel> fresnel;
 };
 
 // 纯色批：不采样纹理，直接用 color 当条带颜色（color.a = 不透明度乘子）。
