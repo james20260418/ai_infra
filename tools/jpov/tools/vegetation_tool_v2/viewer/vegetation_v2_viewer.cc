@@ -22,6 +22,9 @@
 //   --no-leaf / --no-bark / --no-hud                         关叶图（看 debug 绿卡）/ 关树皮 / 关 HUD
 //   --show-panel                                              capture 时也画 UI 面板
 //   --capture <dir>                                          无窗口出图（front/three_quarter/side）
+//   --bake <out.glb>                                         烘焙一份 glb 后退出（CI 用）
+//   --glb <in.glb>                                           启动即进 glb 展示态（带风调试面板）
+//   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
 
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +87,18 @@ CliArgs ParseCli(int argc, char** argv) {
       CHECK_GE(a.only_type, 0) << "--only-type 不能为负";
     } else if (arg == "--no-leaf") {
       a.hide_leaf = true;
+    } else if (arg == "--bake" && has_val) {
+      a.bake_glb_path = argv[++i];
+    } else if (arg == "--glb" && has_val) {
+      a.glb_path = argv[++i];
+    } else if (arg == "--no-wind") {
+      a.wind_off = true;
+    } else if (arg == "--wind-time" && has_val) {
+      a.wind_time = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--wind-amp" && has_val) {
+      a.wind_amp = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--wind-turb" && has_val) {
+      a.wind_turb = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--no-hud") {
       a.hide_hud = true;
     } else if (arg == "--no-bark") {

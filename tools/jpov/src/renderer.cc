@@ -3157,8 +3157,10 @@ OrmTextureIds LoadOrmTextures(TextureManager& tex_mgr, const GltfTextureRef& ref
     for (int i = 0; i < 2; ++i) {
         std::vector<unsigned char> rgba =
             ExtractChannelToRgba(orm_pixels, ow, oh, kChannels[i].channel);
+        jpov::TextureOptions oo;
+        oo.repeat = ref.wrap_repeat;   // 树皮沿周长平铺：UV 超 1 必须 wrap
         ids[i] = tex_mgr.FromPixels(rgba.data(), ow, oh,
-                                    ref.key + kChannels[i].suffix);
+                                    ref.key + kChannels[i].suffix, oo);
     }
     stbi_image_free(orm_pixels);
 
@@ -3202,7 +3204,9 @@ uint32_t LoadGltfOcclusion(TextureManager& tex_mgr, const GltfTextureRef& ref,
     }
     stbi_image_free(px);
 
-    return tex_mgr.FromPixels(rgba.data(), ow, oh, ref.key + "/ao");
+    jpov::TextureOptions ao_opts;
+    ao_opts.repeat = ref.wrap_repeat;
+    return tex_mgr.FromPixels(rgba.data(), ow, oh, ref.key + "/ao", ao_opts);
 }
 
 }  // namespace
@@ -3265,6 +3269,9 @@ GltfObject Renderer::LoadGltf(const std::string& path,
             // 远景镂空资产（叶卡 / 蕾丝）覆盖率缩水、变稀甚至消失。cutoff 用材质自己的。
             // 非 MASK（OPAQUE/BLEND）保持原样（不加 mipmap）。
             jpov::TextureOptions base_opts;
+            // UV 会超出 [0,1] 的资产（树皮沿周长平铺）必须 repeat，否则 v 被 clamp
+            // 成一条纹理 ⇒ 竖条纹。wrap 从 glTF sampler 读，规范默认 REPEAT。
+            base_opts.repeat = mi.base_color_tex.wrap_repeat;
             if (mi.alpha_mode == AlphaMode::kMask && mi.alpha_cutoff > 0.0f &&
                 mi.alpha_cutoff < 1.0f) {
                 base_opts.mipmap = true;
@@ -3284,13 +3291,16 @@ GltfObject Renderer::LoadGltf(const std::string& path,
         mat.emissive = {mi.emissive_factor[0], mi.emissive_factor[1],
                         mi.emissive_factor[2], 1.0f};
         if (!mi.emissive_tex.empty()) {
+            jpov::TextureOptions eo;
+            eo.repeat = mi.emissive_tex.wrap_repeat;
             mat.emissive_tex =
-                ResolveTextureRef(mi.emissive_tex, self->texture_mgr_);
+                ResolveTextureRef(mi.emissive_tex, self->texture_mgr_, eo);
         }
         // normal
         if (!mi.normal_tex.empty()) {
-            mat.normal_tex =
-                ResolveTextureRef(mi.normal_tex, self->texture_mgr_);
+            jpov::TextureOptions no;
+            no.repeat = mi.normal_tex.wrap_repeat;
+            mat.normal_tex = ResolveTextureRef(mi.normal_tex, self->texture_mgr_, no);
             mat.normal_scale = mi.normal_scale;
         }
         // 透明模式（alpha test / cutout）：从 loader 的 alphaMode 透传到 PBRMaterial。

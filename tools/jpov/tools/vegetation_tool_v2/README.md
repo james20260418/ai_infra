@@ -3,6 +3,17 @@
 把 `shape`（拓扑）+ `bark`（树皮材质）+ `leaf`（叶卡素材）组合成植物并渲染出来。
 **人和 AI 都用它做资产验收**：三样给几样就渲染几样。
 
+**两个状态**（右下「烘焙 glb」面板一键切换）：
+
+| 状态 | 在画什么 | 用途 |
+|---|---|---|
+| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡 quad） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐 |
+| **glb 展示态** | 刚烘焙出来的 `.glb`（树干 + 叶卡两个 primitive，带风链数据） | 看最终资产：树皮贴图、叶卡 alpha、**风**（左下「风调试」面板） |
+
+烘焙产物是一份**自洽 .glb**：几何 + 内嵌贴图（树皮 albedo/normal/ORM、叶卡 albedo/normal）
++ 逐顶点 `(joint_id, phase)`（glTF `TEXCOORD_1`）+ 关节表（`node.extras.jpov_wind_joints`，
+每关节 `pivot.xyz/parent/level/phase/soft`）。引擎 `LoadGltf` 读回即可直接吹风。
+
 ```
 shape.pbtxt ──┐
 bark/        ──┼─→ jpov_vegetation_v2_viewer ─→ 交互窗口 / 三张 capture PNG
@@ -29,6 +40,11 @@ cd output/jpov_vegetation_v2_viewer
     --bark bark/bark001                           # 完整组合（交互窗口，需 DISPLAY/WSLg）
 xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
     --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001   # 无窗口出图
+
+# 烘焙一份 glb（不开窗口，CI 可用）→ 再直接打开它看风
+./jpov_vegetation_v2_viewer --bake output/veg.glb \
+    --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --bark bark/bark001
+./jpov_vegetation_v2_viewer --glb output/veg.glb            # 交互：左下角风调试面板
 ```
 
 - 打包目录里必须有 `fonts/` 才能画文字；**没有字体不会崩**，只是不画 HUD/标签。
@@ -52,6 +68,10 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 | `--no-leaf` / `--no-bark` / `--no-hud` | 关叶图（看 debug 绿卡）/ 关树皮 / 关左上角相机 HUD |
 | `--show-panel` | capture 时也画 UI 面板 |
 | `--capture <dir>` | 无窗口出图：`veg_v2_front / _three_quarter / _side.png`（1280×720） |
+| `--bake <out.glb>` | 烘焙一份 glb 后退出（headless；CI 的入口） |
+| `--glb <in.glb>` | 启动即进 glb 展示态（带风调试面板） |
+| `--no-wind` / `--wind-time <s>` | 关风 / 钉住风时间（A/B、可复现出图） |
+| `--wind-amp <f>` / `--wind-turb <f>` | 覆盖 pivot 振幅 / 平动湍流幅度（A/B） |
 
 交互：左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）；
 `[` `]` 调最大层级、`P` 打印相机、`H` 打印叶卡帮助（各 type 的 `anchor_mode` / 推荐宽高比）。
@@ -63,6 +83,8 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 | `proto/shape.proto` | 资产格式（序列化边界）；`shape.h/.cc` 是运行时结构 + `Validate` + `LoadShapeFile` |
 | `sweep.h/.cc` | 扫管（几何 + UV）与 `BuildLeafCards` / `ComputeCardFrame`（**anchor + anchor_mode → 姿态与 UV 的唯一实现**） |
 | `viewer/` | `vegetation_v2_app.h` = 库接口（`RunViewer`）；`.cc` = 场景/渲染/交互；`vegetation_v2_viewer.cc` = 只有 CLI |
+| `bake/` | **GLB 烘焙器**：shape(+bark+leaf) → 自洽 .glb（关节表 + 逐顶点 `(joint_id, phase)` + 内嵌贴图） |
+| `leaf_texture.h/.cc` | 叶卡贴图 CPU 流水线（黑底→alpha / 法线 / PNG 编解码）——查看器与烘焙共用同一份像素 |
 | `export_vegetation_shape.py` | Blender/Sapling → `ShapeProto` 文本（含 `--anchor-mode`、导出侧的 anchor 上枝校验） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
@@ -78,5 +100,10 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
     用 **4×4** ROI（更粗的块摊平抖动）+ 阈值 **15** 当烟雾报警（没贴树皮 25.8 / 叶子被杀 20.5 / 没贴叶图 41.5）。
   - 两张 gold **都由查看器二进制本身**跑出来（subprocess），保证和用户看到的是同一张图。
     改观感后重生成：`bazel run //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_generator`。
+- **烘焙/风**：`--bake` 后看日志（关节数 / 顶点数 / 叶卡到所属环的最大距离应 ≈ 1e-6 m）；
+  再 `--glb <产物>` 用左下角面板调风，或 `--wind-time 0 / 1.2` 出两帧对比（同机位）。
+  烘焙器不依赖 Blender：关节由 shape 的枝折线按弧长抽稀（粗枝 1.5m/细枝 0.5m、每枝 ≤8 个），
+  逐顶点关节归属**按采样环精确给出**（树干按环下标 floor、叶卡按 anchor 的最近环），
+  所以不存在 v1 那套 Voronoi 标签的跨链误判。
 - **单测**：`bazel test //tools/jpov/tools/vegetation_tool_v2:all`
   （`shape_test` 校验合同含 anchor 离枝负例；`sweep_test` 含 4 种 `anchor_mode` 的 UV 锚点与 `ComputeCardFrame` 右手系断言）。

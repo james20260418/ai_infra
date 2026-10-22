@@ -167,6 +167,24 @@ json WritePrimitive(const MeshData& mesh, BinBuilder* bin, json* accessors,
             add_accessor("VEC2", 5126, vcount, o.first, o.second, false);
     }
 
+    // TEXCOORD_1 (vec2 float) —— 植被风：**项目约定语义** (joint_id, phase)。
+    //   与 loader 对称：`TEXCOORD_1` 在带 `kWind` 的 mesh 上被读成 `MeshData::wind_link`。
+    //   不写这个属性，glb 回读后就没有风链下标 ⇒ 整棵树静悄悄不吹风（loader 会 WARNING
+    //   "有关节下标却缺表"，但反过来"有表没下标"是静默的，所以这里必须成对写）。
+    if (MeshHasFlag(mesh.flags, MeshVertexFlags::kWind)) {
+        CHECK_EQ(mesh.wind_link.size(), vcount)
+            << "WritePrimitive: kWind 但 wind_link 顶点数不符";
+        std::vector<float> wl;
+        wl.reserve(vcount * 2);
+        for (const Vec2f& w : mesh.wind_link) {
+            wl.push_back(w.x());
+            wl.push_back(w.y());
+        }
+        const std::pair<size_t, size_t> o = AppendFloats(bin, wl);
+        attributes["TEXCOORD_1"] =
+            add_accessor("VEC2", 5126, vcount, o.first, o.second, false);
+    }
+
     // JOINTS_0 (vec4 ushort) + WEIGHTS_0 (vec4 float) —— 有才写
     if (MeshHasFlag(mesh.flags, MeshVertexFlags::kJoints)) {
         CHECK_EQ(mesh.joint_indices.size(), vcount);
@@ -508,6 +526,24 @@ json BuildRoot(const GltfSaveAsset& asset, const SaveContext& ctx,
                      {"mesh", mesh_index}};
         if (asset.skin.has_value()) {
             node["skin"] = 0;
+        }
+        // 植被风关节表：**项目约定语义** node extras["jpov_wind_joints"]，每关节 7 float
+        //   [pivot.xyz, parent, level, phase, soft]（见 MeshData::WindJoint 与
+        //   docs/jpov_vegetation_wind_design.md §2.2）。同树多个 primitive 各写一份
+        //   （loader 按 mesh 存，值相同，代价是几 KB JSON）。
+        if (!mesh.wind_joints.empty()) {
+            std::vector<double> flat;
+            flat.reserve(mesh.wind_joints.size() * 7);
+            for (const MeshData::WindJoint& wj : mesh.wind_joints) {
+                flat.push_back(wj.pivot[0]);
+                flat.push_back(wj.pivot[1]);
+                flat.push_back(wj.pivot[2]);
+                flat.push_back(wj.parent);
+                flat.push_back(wj.level);
+                flat.push_back(wj.phase);
+                flat.push_back(wj.soft);
+            }
+            node["extras"] = {{"jpov_wind_joints", flat}};
         }
         const int node_index = static_cast<int>(root["nodes"].size());
         root["nodes"].push_back(node);

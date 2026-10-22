@@ -47,6 +47,14 @@ struct CliArgs {
   float leaf_black = 12.0f;   // max(r,g,b) < 此值 → alpha 0（带 0.5x~1.5x 软过渡）
   float leaf_curl = 0.5f;     // A：顶点法线球面化强度
   float leaf_normal = 1.0f;   // B：法线贴图强度（uNormalScale）
+
+  // ── GLB 烘焙（面板「烘焙 glb」用；也支持 headless 一条命令跑完）──
+  std::string bake_glb_path;   // 非空 = 只烘焙这一次然后退出（CI / 命令行）
+  std::string glb_path;        // 非空 = 启动即进「glb 展示态」（跳过原材料态）
+  bool wind_off = false;       // 关掉 wind（A/B 用）
+  float wind_time = -1.0f;     // >=0 = 钉住风时间（headless 确定性出图）
+  float wind_amp = -1.0f;      // >=0 = 覆盖 pivot 振幅（A/B 用）
+  float wind_turb = -1.0f;     // >=0 = 覆盖平动湍流幅度（A/B 用）
 };
 
 // 跑查看器：`capture=false` 开交互窗口；`capture=true` 无窗口出三张图到 out_dir。

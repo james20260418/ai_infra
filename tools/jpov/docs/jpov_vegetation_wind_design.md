@@ -166,6 +166,22 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
 - 已知边界：蒙皮路径还不吹风（布料另议）；链深 >16 的资产会被截断；
   性能未在真 GPU 实测（本机 llvmpipe）。
 
+## 7.1 object3d 路径改为「两关节混合」（2026-10-22）
+
+**问题**：object3d 的 VS 只用 `aFlex.x` 一个关节（硬指派）。`MeshManager` 载入时算出的
+`j0/j1/权重` 只在 instanced 路径被消费 ⇒ 链接边界相邻顶点可能被劈到两条链上，
+管子/叶卡被拉成薄片（"风吹树皮扯开"）。
+
+**修法**：object3d 的三份 VS（主 / 全量 / 阴影）都改成与 instanced 同一套语义：
+`p = mix(apply(j0), apply(j1), w1)`、法线同样 `mix` 后归一化；阴影 pass 不用法线，
+用哑法线走同一个 `ObjectWindApplyJoint()` 保证位移逐点一致（否则"树动、影不动"）。
+属性侧 `aFlex` 由 vec2 变 vec4（`(j0, phase, L, j1)`），并新增 `aWindW`(loc3) 读 `(w0,w1)`；
+非风 mesh 该属性未启用 → GL 默认 `(0,0,0,1)` ⇒ `w1=0`，行为与旧版逐字节一致。
+
+**烘焙侧的配合**（`vegetation_tool_v2/bake/`）：关节由 shape 的枝折线按弧长抽稀；
+逐顶点归属按**采样环**精确给出（树干按环下标 floor、叶卡挂到 anchor 所在环的关节），
+因此 v1 里"分叉处跨链三角形 15.6%"那类问题从根上不存在。
+
 ## 8. 实例化路径（2026-10-19）
 
 植被改走 `InstancedObjectRenderer`：同 mesh 摆 N 份 = 每个 primitive 一次 instanced draw。

@@ -70,6 +70,9 @@ struct GltfTextureRef {
     std::string uri;                   // 外部文件路径（已并 base_dir）；内嵌时为空
     std::vector<unsigned char> bytes;  // 内嵌图原始编码字节（PNG/JPEG…）；外部时为空
     std::string key;                    // 去重身份（外部=uri；内嵌=内容哈希）；空=无贴图
+    // 采样器 wrap：glTF 规范默认 REPEAT(10497)；只有显式 CLAMP_TO_EDGE(33071) 才是 clamp。
+    // 树叶/树皮这类「UV 会超出 [0,1]」的资产必须 repeat，否则纹理会拉成竖条（实测过）。
+    bool wrap_repeat = true;
 
     bool empty() const { return key.empty(); }
     bool is_embedded() const { return !bytes.empty(); }

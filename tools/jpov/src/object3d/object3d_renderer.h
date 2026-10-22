@@ -59,7 +59,8 @@ public:
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
+layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
 // ── 植被风（程序化顶点风）—— 见 interface/render_command.h 的 WindCommand ──
@@ -84,6 +85,51 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
+    // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
+    // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
+    int chain[kMaxWindChain];
+    int nc = 0;
+    int jj = jstart;
+    for (int c = 0; c < kMaxWindChain; ++c) {
+        if (jj < 0 || jj >= uWindJointCount) {
+            break;
+        }
+        chain[nc] = jj;
+        ++nc;
+        vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+        jj = int(floor(ct0.w + 0.5));
+    }
+    vec3 qpos = vec3(0.0);
+    float A = 0.0;
+    vec3 pp = vec3(0.0);
+    float Ap = 0.0;
+    int have_par = 0;
+    for (int k = nc - 1; k >= 0; --k) {
+        vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+        vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+        float lev = clamp(t1.x, 0.0, 3.0);
+        float sof = clamp(t1.z, 0.0, 1.0);
+        float fr = uWindFrequency * (1.0 + 1.6 * lev);
+        float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+        float pjw = fr * (uWindTime + t1.y);
+        pjw -= floor(pjw);
+        float th = amp * sin(6.28318531 * pjw);
+        if (have_par == 0) {
+            qpos = t0.xyz;
+            A = th;
+            have_par = 1;
+        } else {
+            qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+            A = th + (1.0 - sof) * Ap;
+        }
+        pp = t0.xyz;
+        Ap = A;
+    }
+    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
+    n_in = WindRotVecAxis(n_in, axis, A);
+    return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
+}
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -101,50 +147,27 @@ void main() {
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-            // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
-            // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
-            int chain[kMaxWindChain];
-            int nc = 0;
-            int jj = j0;
-            for (int c = 0; c < kMaxWindChain; ++c) {
-                if (jj < 0 || jj >= uWindJointCount) {
-                    break;
-                }
-                chain[nc] = jj;
-                ++nc;
-                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
-                jj = int(floor(ct0.w + 0.5));
+        // 两关节混合（与 instanced 路径同一套语义）：单关节硬指派会在链接边界把相邻顶点
+        // 劈到两条链上 —— 管子被拉成薄片（"撕皮"）。MeshManager 载入时已按「最近两个关节 +
+        // 1/d 权重 + 5mm 焊接」算好 j0/j1/w（loc6.xyz=..., loc3=权重），这里按权重 lerp。
+        int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
+        float wblend1 = clamp(aWindW.y, 0.0, 1.0);
+        {
+            vec3 p_rest = p;
+            vec3 n_rest = wn;
+            vec3 n_j0 = n_rest;
+            vec3 p_j0 = ObjectWindApplyJoint(j0, p_rest, n_j0, axis);
+            if (j1 == j0 || wblend1 <= 0.0) {
+                p = p_j0;
+                wn = n_j0;
+            } else {
+                vec3 n_j1 = n_rest;
+                vec3 p_j1 = ObjectWindApplyJoint(j1, p_rest, n_j1, axis);
+                p = mix(p_j0, p_j1, wblend1);
+                wn = normalize(mix(n_j0, n_j1, wblend1));
             }
-            vec3 qpos = vec3(0.0);
-            float A = 0.0;
-            vec3 pp = vec3(0.0);
-            float Ap = 0.0;
-            int have_par = 0;
-            for (int k = nc - 1; k >= 0; --k) {
-                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
-                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
-                float lev = clamp(t1.x, 0.0, 3.0);
-                float sof = clamp(t1.z, 0.0, 1.0);
-                float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                float pjw = fr * (uWindTime + t1.y);
-                pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                if (have_par == 0) {
-                    qpos = t0.xyz;
-                    A = th;
-                    have_par = 1;
-                } else {
-                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
-                }
-                pp = t0.xyz;
-                Ap = A;
-            }
-            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
-            wn = WindRotVecAxis(wn, axis, A);
+        }
+        vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float sof0 = clamp(own1.z, 0.0, 1.0);
@@ -182,7 +205,8 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
+layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
 // ── 植被风（程序化顶点风）—— 见 interface/render_command.h 的 WindCommand ──
@@ -207,6 +231,51 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
+    // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
+    // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
+    int chain[kMaxWindChain];
+    int nc = 0;
+    int jj = jstart;
+    for (int c = 0; c < kMaxWindChain; ++c) {
+        if (jj < 0 || jj >= uWindJointCount) {
+            break;
+        }
+        chain[nc] = jj;
+        ++nc;
+        vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+        jj = int(floor(ct0.w + 0.5));
+    }
+    vec3 qpos = vec3(0.0);
+    float A = 0.0;
+    vec3 pp = vec3(0.0);
+    float Ap = 0.0;
+    int have_par = 0;
+    for (int k = nc - 1; k >= 0; --k) {
+        vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+        vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+        float lev = clamp(t1.x, 0.0, 3.0);
+        float sof = clamp(t1.z, 0.0, 1.0);
+        float fr = uWindFrequency * (1.0 + 1.6 * lev);
+        float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+        float pjw = fr * (uWindTime + t1.y);
+        pjw -= floor(pjw);
+        float th = amp * sin(6.28318531 * pjw);
+        if (have_par == 0) {
+            qpos = t0.xyz;
+            A = th;
+            have_par = 1;
+        } else {
+            qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+            A = th + (1.0 - sof) * Ap;
+        }
+        pp = t0.xyz;
+        Ap = A;
+    }
+    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
+    n_in = WindRotVecAxis(n_in, axis, A);
+    return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
+}
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
@@ -225,48 +294,27 @@ void main() {
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-            int chain[kMaxWindChain];
-            int nc = 0;
-            int jj = j0;
-            for (int c = 0; c < kMaxWindChain; ++c) {
-                if (jj < 0 || jj >= uWindJointCount) {
-                    break;
-                }
-                chain[nc] = jj;
-                ++nc;
-                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
-                jj = int(floor(ct0.w + 0.5));
+        // 两关节混合（与 instanced 路径同一套语义）：单关节硬指派会在链接边界把相邻顶点
+        // 劈到两条链上 —— 管子被拉成薄片（"撕皮"）。MeshManager 载入时已按「最近两个关节 +
+        // 1/d 权重 + 5mm 焊接」算好 j0/j1/w（loc6.xyz=..., loc3=权重），这里按权重 lerp。
+        int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
+        float wblend1 = clamp(aWindW.y, 0.0, 1.0);
+        {
+            vec3 p_rest = p;
+            vec3 n_rest = wn;
+            vec3 n_j0 = n_rest;
+            vec3 p_j0 = ObjectWindApplyJoint(j0, p_rest, n_j0, axis);
+            if (j1 == j0 || wblend1 <= 0.0) {
+                p = p_j0;
+                wn = n_j0;
+            } else {
+                vec3 n_j1 = n_rest;
+                vec3 p_j1 = ObjectWindApplyJoint(j1, p_rest, n_j1, axis);
+                p = mix(p_j0, p_j1, wblend1);
+                wn = normalize(mix(n_j0, n_j1, wblend1));
             }
-            vec3 qpos = vec3(0.0);
-            float A = 0.0;
-            vec3 pp = vec3(0.0);
-            float Ap = 0.0;
-            int have_par = 0;
-            for (int k = nc - 1; k >= 0; --k) {
-                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
-                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
-                float lev = clamp(t1.x, 0.0, 3.0);
-                float sof = clamp(t1.z, 0.0, 1.0);
-                float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                float pjw = fr * (uWindTime + t1.y);
-                pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                if (have_par == 0) {
-                    qpos = t0.xyz;
-                    A = th;
-                    have_par = 1;
-                } else {
-                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
-                }
-                pp = t0.xyz;
-                Ap = A;
-            }
-            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
-            wn = WindRotVecAxis(wn, axis, A);
+        }
+        vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float sof0 = clamp(own1.z, 0.0, 1.0);
             float tph = uWindTime + aFlex.y;
@@ -305,7 +353,8 @@ void main() {
     static constexpr const char* kShadowVs = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
+layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
 // ── 植被风（与主 pass 同步位移；否则树动、影不动）—— 见 kMeshVs3dPBR 同名块 ──
@@ -330,6 +379,51 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
+    // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
+    // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
+    int chain[kMaxWindChain];
+    int nc = 0;
+    int jj = jstart;
+    for (int c = 0; c < kMaxWindChain; ++c) {
+        if (jj < 0 || jj >= uWindJointCount) {
+            break;
+        }
+        chain[nc] = jj;
+        ++nc;
+        vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
+        jj = int(floor(ct0.w + 0.5));
+    }
+    vec3 qpos = vec3(0.0);
+    float A = 0.0;
+    vec3 pp = vec3(0.0);
+    float Ap = 0.0;
+    int have_par = 0;
+    for (int k = nc - 1; k >= 0; --k) {
+        vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
+        vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
+        float lev = clamp(t1.x, 0.0, 3.0);
+        float sof = clamp(t1.z, 0.0, 1.0);
+        float fr = uWindFrequency * (1.0 + 1.6 * lev);
+        float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
+        float pjw = fr * (uWindTime + t1.y);
+        pjw -= floor(pjw);
+        float th = amp * sin(6.28318531 * pjw);
+        if (have_par == 0) {
+            qpos = t0.xyz;
+            A = th;
+            have_par = 1;
+        } else {
+            qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+            A = th + (1.0 - sof) * Ap;
+        }
+        pp = t0.xyz;
+        Ap = A;
+    }
+    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
+    n_in = WindRotVecAxis(n_in, axis, A);
+    return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
+}
 out float vShadowDepth;
 #ifdef JPOV_ALPHA_CUTOUT
 layout(location = 2) in vec2 aTexCoord;
@@ -343,47 +437,23 @@ void main() {
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-            int chain[kMaxWindChain];
-            int nc = 0;
-            int jj = j0;
-            for (int c = 0; c < kMaxWindChain; ++c) {
-                if (jj < 0 || jj >= uWindJointCount) {
-                    break;
-                }
-                chain[nc] = jj;
-                ++nc;
-                vec4 ct0 = texelFetch(uWindJointTex, ivec2(2 * jj, 0), 0);
-                jj = int(floor(ct0.w + 0.5));
+        // 两关节混合（与主 pass 同一套语义；阴影 pass 不需要法线，用哑法线走同一函数，
+        // 保证位移与主 pass 逐点一致 —— 否则会看到"树动、影不动"）。
+        int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
+        float wblend1 = clamp(aWindW.y, 0.0, 1.0);
+        {
+            vec3 p_rest = p;
+            vec3 n_dummy = vec3(0.0, 1.0, 0.0);
+            vec3 p_j0 = ObjectWindApplyJoint(j0, p_rest, n_dummy, axis);
+            if (j1 != j0 && wblend1 > 0.0) {
+                vec3 n_dummy1 = vec3(0.0, 1.0, 0.0);
+                vec3 p_j1 = ObjectWindApplyJoint(j1, p_rest, n_dummy1, axis);
+                p = mix(p_j0, p_j1, wblend1);
+            } else {
+                p = p_j0;
             }
-            vec3 qpos = vec3(0.0);
-            float A = 0.0;
-            vec3 pp = vec3(0.0);
-            float Ap = 0.0;
-            int have_par = 0;
-            for (int k = nc - 1; k >= 0; --k) {
-                vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
-                vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
-                float lev = clamp(t1.x, 0.0, 3.0);
-                float sof = clamp(t1.z, 0.0, 1.0);
-                float fr = uWindFrequency * (1.0 + 1.6 * lev);
-                float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-                float pjw = fr * (uWindTime + t1.y);
-                pjw -= floor(pjw);
-                float th = amp * sin(6.28318531 * pjw);
-                if (have_par == 0) {
-                    qpos = t0.xyz;
-                    A = th;
-                    have_par = 1;
-                } else {
-                    qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-                    A = th + (1.0 - sof) * Ap;
-                }
-                pp = t0.xyz;
-                Ap = A;
-            }
-            vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
-            vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
+        }
+        vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
             float lev0 = clamp(own1.x, 0.0, 3.0);
             float sof0 = clamp(own1.z, 0.0, 1.0);
             float tph = uWindTime + aFlex.y;

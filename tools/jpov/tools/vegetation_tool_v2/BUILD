@@ -45,6 +45,33 @@ cc_test(
     deps = [":sweep"],
 )
 
+# 叶卡贴图的 CPU 流水线（黑底→alpha / 法线贴图 / PNG 编解码）：查看器与 GLB 烘焙共用。
+cc_library(
+    name = "leaf_texture",
+    srcs = ["leaf_texture.cc"],
+    hdrs = ["leaf_texture.h"],
+    deps = [
+        "//third_party/stb:stb_image",
+        "//third_party/stb:stb_image_write",
+        "@glog_static//:glog",
+    ],
+)
+
+# GLB 烘焙器：shape（+bark 材质 + 叶卡素材）→ 自洽 .glb（含风链 TEXCOORD_1 + 关节表）。
+cc_library(
+    name = "vegetation_glb_baker",
+    srcs = ["bake/vegetation_glb_baker.cc"],
+    hdrs = ["bake/vegetation_glb_baker.h"],
+    deps = [
+        ":leaf_texture",
+        ":shape",
+        ":sweep",
+        "//tools/jpov/src:gltf_saver",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+)
+
 # 植物组合查看器：给我 shape / bark / leaf，我把植物画出来。
 #   * shape 省略 → 打包目录里的 shapes/willow.pbtxt
 #   * bark / leaf 省略 → 只渲染拓扑（树干按 level 上棕色 + debug 绿卡）
@@ -58,8 +85,10 @@ cc_library(
     srcs = ["viewer/vegetation_v2_app.cc"],
     hdrs = ["viewer/vegetation_v2_app.h"],
     deps = [
+        ":leaf_texture",
         ":shape",
         ":sweep",
+        ":vegetation_glb_baker",
         "//tools/jpov:skylight_scene",
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
