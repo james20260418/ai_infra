@@ -53,7 +53,8 @@ struct GlbBakeOptions {
 
   // ── 材质 ──
   std::string bark_dir;      // 含 albedo.png/normal.png/roughness.png；空 = 纯色树干
-  std::string leaf_png;      // 黑底叶卡图；空 = 不烘叶子
+  std::string leaf_png;      // 黑底叶卡图（type 0）；空 = 不烘叶子
+  std::string leaf2_png;     // type 1（镜像手性）素材；空 = 回退 leaf_png
   double leaf_black = 30.0;  // 黑底阈值（软过档 [0.5t, 1.5t]）
   double leaf_normal = 1.0;  // 由 alpha+luma 生成的法线强度
   double normal_scale = 1.5;  // 树皮法线强度

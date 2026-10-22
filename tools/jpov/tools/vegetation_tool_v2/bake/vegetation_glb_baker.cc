@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,8 @@ namespace vegetation {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+// 与查看器一致：最多 4 个叶卡颜色桶（`type % 4`）。烘焙按桶出 primitive。
+constexpr int kLeafBuckets = 4;
 
 // 逐关节相位：**连续**低空间频率场（与 v1 wind_bake.py 同一条公式）。
 // 不连续（哈希 / 逐枝常量）会让相邻顶点位移不一致 ⇒ 网格被撕开。
@@ -410,83 +413,110 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
   }
   meshes.push_back(GltfSaveMesh{std::move(trunk), bark_mi});
 
-  // ── 4. 叶卡网格 + 材质 ──
+  // ── 4. 叶卡网格 + 材质（**逐 leaf type 一个 primitive**）──
+  // 一棵树可以有内容完全不同的多类卡（叶簇 / 柔荑花序 / 枯叶），它们绑不同 atlas。
+  // 只烘一类的做法会让 2-type 资产静默用同一张贴图（镜像手性也白拆），所以按
+  // `type % kMaxCardTypes` 分桶、每桶一个 primitive + 一份材质。
   int leaf_vertices = 0;
   if (!opts.leaf_png.empty()) {
-    LeafTexture tex;
-    if (!LoadLeafTextureFromPng(opts.leaf_png, static_cast<float>(opts.leaf_black), 6, &tex,
-                                error)) {
-      return false;
+    // 素材：type 0 用 leaf_png，type 1 用 leaf2_png（缺省回退）——与查看器一致。
+    std::string paths[kLeafBuckets];
+    for (int b = 0; b < kLeafBuckets; ++b) {
+      paths[b] = (b == 1 && !opts.leaf2_png.empty()) ? opts.leaf2_png : opts.leaf_png;
     }
-    MeshData leaves_raw = BuildLeafCards(shape);
-    AddCardTangents(&leaves_raw);
-    std::vector<Vec2f> leaf_wind(leaves_raw.VertexCount());
-    for (size_t c = 0, v = 0; c < shape.cards.size(); ++c, v += 4) {
-      const LeafCard& card = shape.cards[c];
-      // 卡片挂到「**全局**最近关节」：整张卡共用同一 joint/phase ⇒ 刚性、不会被软度梯度
-      // 剪开，也不会脱离挂点。
-      // 为什么不按 card.branch 查：branch/s 在格式里只是**溯源**（渲染不依赖），导出的
-      // 最近骨架点可能落在相邻的枝上；一旦信它，个别卡会挂到别的枝链上，风一吹就飞到
-      // 别处（实测：一张卡被吹成天上的一条细线）。按距离找关节不依赖那份溯源信息。
-      int jid = 0;
-      double phase = 0.0;
-      {
-        // 找**最近的枝条采样点**（= 这张卡实际挂在哪根管子的哪一环），再用该环的
-        // 覆盖关节。这样卡片与它旁边那一圈顶点**用同一条链**，风里不会各转各的
-        // （离得最近的「关节 pivot」可能属于隔壁那一节，卡片会因此绕错支点、飘走）。
-        double best = 1e300;
-        size_t best_bi = 0;
-        uint32_t best_si = 0;
-        for (size_t bi = 0; bi < shape.branches.size(); ++bi) {
-          const Branch& b = shape.branches[bi];
-          for (size_t si = 0; si < b.samples.size(); ++si) {
-            const double d = Distance(b.samples[si].position, card.anchor);
-            if (d < best) {
-              best = d;
-              best_bi = bi;
-              best_si = static_cast<uint32_t>(si);
+    // 每种素材只处理一次（内存/时间都省；同素材的桶共用一份 PNG 字节）。
+    std::map<std::string, jpov::GltfMaterialInfo> mat_by_path;
+
+    for (int bucket = 0; bucket < kLeafBuckets; ++bucket) {
+      Shape subset = shape;
+      subset.cards.clear();
+      for (const LeafCard& c : shape.cards) {
+        if (static_cast<int>(c.type % kLeafBuckets) == bucket) {
+          subset.cards.push_back(c);
+        }
+      }
+      if (subset.cards.empty()) {
+        continue;
+      }
+
+      MeshData leaves_raw = BuildLeafCards(subset);
+      AddCardTangents(&leaves_raw);
+      std::vector<Vec2f> leaf_wind(leaves_raw.VertexCount());
+      double card_attach_max_bucket = 0.0;
+      for (size_t c = 0, v = 0; c < subset.cards.size(); ++c, v += 4) {
+        const LeafCard& card = subset.cards[c];
+        // 卡片挂到「最近的枝条采样点」（它实际挂在哪根管子的哪一环），再用该环的
+        // 覆盖关节。这样卡片与它旁边那一圈顶点**用同一条链**，风里不会各转各的。
+        int jid = 0;
+        double phase = 0.0;
+        {
+          double best = 1e300;
+          size_t best_bi = 0;
+          uint32_t best_si = 0;
+          for (size_t bi = 0; bi < shape.branches.size(); ++bi) {
+            const Branch& b = shape.branches[bi];
+            for (size_t si = 0; si < b.samples.size(); ++si) {
+              const double d = Distance(b.samples[si].position, card.anchor);
+              if (d < best) {
+                best = d;
+                best_bi = bi;
+                best_si = static_cast<uint32_t>(si);
+              }
             }
           }
+          jid = JointCoveringSample(map.per_branch[best_bi], map.joint_of_kept[best_bi],
+                                    best_si);
+          const Vec3d& pv = shape.branches[best_bi].samples[best_si].position;
+          phase = SmoothPhase01(pv.x, pv.y, pv.z, opts.phase_scale);
+          card_attach_max_bucket = std::max(card_attach_max_bucket, best);
         }
-        jid = JointCoveringSample(map.per_branch[best_bi], map.joint_of_kept[best_bi], best_si);
-        const Vec3d& pv = shape.branches[best_bi].samples[best_si].position;
-        phase = SmoothPhase01(pv.x, pv.y, pv.z, opts.phase_scale);
-        card_attach_max = std::max(card_attach_max, best);
+        for (size_t k = 0; k < 4; ++k) {
+          leaf_wind[v + k] = Vec2f(static_cast<float>(jid), static_cast<float>(phase));
+        }
       }
-      for (size_t k = 0; k < 4; ++k) {
-        leaf_wind[v + k] = Vec2f(static_cast<float>(jid), static_cast<float>(phase));
+      card_attach_max = std::max(card_attach_max, card_attach_max_bucket);
+
+      jpov::MeshData leaves = ToEngineMesh(leaves_raw, /*with_tangents=*/true);
+      leaves.wind_link = std::move(leaf_wind);
+      leaves.wind_joints = table.joints;
+      leaves.flags = static_cast<jpov::MeshVertexFlags>(
+          static_cast<uint8_t>(leaves.flags) | static_cast<uint8_t>(jpov::MeshVertexFlags::kWind));
+
+      const std::string& png_path = paths[bucket];
+      auto it = mat_by_path.find(png_path);
+      if (it == mat_by_path.end()) {
+        LeafTexture tex;
+        if (!LoadLeafTextureFromPng(png_path, static_cast<float>(opts.leaf_black), 6, &tex,
+                                    error)) {
+          return false;
+        }
+        // 叶卡材质：albedo（黑底→alpha 后、**行翻转**写进 glb）+ 由 alpha/luma 生成的法线。
+        std::vector<unsigned char> albedo_rgba = tex.rgba;
+        std::vector<unsigned char> normal_rgba = BuildLeafNormalMap(tex, 4.0f);
+        FlipRows(&albedo_rgba, tex.width, tex.height);
+        FlipRows(&normal_rgba, tex.width, tex.height);
+
+        GltfMaterialInfo leaf_mi;
+        if (!EncodePng(albedo_rgba, tex.width, tex.height, &leaf_mi.base_color_tex.bytes)) {
+          return fail("叶卡 albedo 编码失败: " + png_path);
+        }
+        leaf_mi.base_color_tex.key = ContentKey("leaf_albedo", leaf_mi.base_color_tex.bytes);
+        if (!EncodePng(normal_rgba, tex.width, tex.height, &leaf_mi.normal_tex.bytes)) {
+          return fail("叶卡法线编码失败: " + png_path);
+        }
+        leaf_mi.normal_tex.key = ContentKey("leaf_normal", leaf_mi.normal_tex.bytes);
+        leaf_mi.normal_scale = static_cast<float>(opts.leaf_normal);
+        leaf_mi.alpha_mode = AlphaMode::kMask;
+        leaf_mi.alpha_cutoff = kLeafAlphaCutoff;
+        leaf_mi.double_sided = true;
+        leaf_mi.metallic_factor = 0.0f;
+        leaf_mi.roughness_factor = 0.85f;
+        it = mat_by_path.emplace(png_path, std::move(leaf_mi)).first;
       }
+      leaf_vertices += static_cast<int>(leaves.VertexCount());
+      meshes.push_back(GltfSaveMesh{std::move(leaves), it->second});
     }
-    jpov::MeshData leaves = ToEngineMesh(leaves_raw, /*with_tangents=*/true);
-    leaves.wind_link = std::move(leaf_wind);
-    leaves.wind_joints = table.joints;
-    leaves.flags = static_cast<jpov::MeshVertexFlags>(
-        static_cast<uint8_t>(leaves.flags) | static_cast<uint8_t>(jpov::MeshVertexFlags::kWind));
-
-    // 叶卡材质：albedo（黑底→alpha 后、**行翻转**写进 glb）+ 由 alpha/luma 生成的法线。
-    std::vector<unsigned char> albedo_rgba = tex.rgba;
-    std::vector<unsigned char> normal_rgba = BuildLeafNormalMap(tex, 4.0f);
-    FlipRows(&albedo_rgba, tex.width, tex.height);
-    FlipRows(&normal_rgba, tex.width, tex.height);
-
-    GltfMaterialInfo leaf_mi;
-    if (!EncodePng(albedo_rgba, tex.width, tex.height, &leaf_mi.base_color_tex.bytes)) {
-      return fail("叶卡 albedo 编码失败");
-    }
-    leaf_mi.base_color_tex.key = ContentKey("leaf_albedo", leaf_mi.base_color_tex.bytes);
-    if (!EncodePng(normal_rgba, tex.width, tex.height, &leaf_mi.normal_tex.bytes)) {
-      return fail("叶卡法线编码失败");
-    }
-    leaf_mi.normal_tex.key = ContentKey("leaf_normal", leaf_mi.normal_tex.bytes);
-    leaf_mi.normal_scale = static_cast<float>(opts.leaf_normal);
-    leaf_mi.alpha_mode = AlphaMode::kMask;
-    leaf_mi.alpha_cutoff = kLeafAlphaCutoff;
-    leaf_mi.double_sided = true;
-    leaf_mi.metallic_factor = 0.0f;
-    leaf_mi.roughness_factor = 0.85f;
-    leaf_vertices = static_cast<int>(leaves.VertexCount());
     LOG(INFO) << "烘焙: 叶卡 anchor→所属环 最大距离 = " << card_attach_max << " m";
-    meshes.push_back(GltfSaveMesh{std::move(leaves), leaf_mi});
   }
 
   // ── 5. 写盘 ──

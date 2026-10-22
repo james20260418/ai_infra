@@ -236,7 +236,7 @@ class VegetationV2App : public JPOV {
   float bake_droop_scale_ = 0.5f;
   float bake_leaf_black_ = 30.0f;
   float bake_leaf_normal_ = 1.0f;
-  float bake_normal_scale_ = 1.5f;
+  float bake_normal_scale_ = 0.75f;
   // 烘焙结果（面板显示）
   std::string bake_msg_;
   bool bake_ok_ = false;
@@ -244,9 +244,9 @@ class VegetationV2App : public JPOV {
   // 风（glb 展示态）
   bool wind_on_ = true;
   float wind_azimuth_deg_ = 35.0f;
-  float wind_amplitude_ = 0.35f;
+  float wind_amplitude_ = 0.1167f;   // = 旧默认 0.35 的 1/3（2026-10-22 Danis）
   float wind_frequency_ = 0.5f;
-  float wind_turb_amp_ = 0.12f;
+  float wind_turb_amp_ = 0.04f;     // = 旧默认 0.12 的 1/3
   float wind_turb_freq_ = 2.5f;
   float wind_gust_freq_ = 0.6f;
   float wind_gust_str_ = 0.7f;
@@ -303,7 +303,7 @@ class VegetationV2App : public JPOV {
   // 树皮材质（--bark 给了才加载）。tile 由 UV 决定 = 该枝周长，与贴图尺寸无关。
   bool has_bark_ = false;
   bool show_bark_ = true;
-  float normal_scale_ = 1.5f;   // 面板可调；BuildScene 里来自 --normal-scale
+  float normal_scale_ = 0.75f;  // 面板可调；BuildScene 里来自 --normal-scale（默认 = 旧 1.5 的 1/2）
   // = 贴图宽/高；交给 SweepBranches 烘进 UV（v 方向），不是 shader 里改。
   float uv_v_scale_ = 1.0f;
   jpov::PBRMaterial bark_mat_;
@@ -313,7 +313,9 @@ class VegetationV2App : public JPOV {
   std::string shape_path_;   // 只用于帮助打印（H 键）
   std::string bark_dir_;     // 烘焙用（原材料态加载时记下）
   std::string leaf_path_;    // 同上
+  std::string leaf2_path_;   // type 1（镜像手性）素材
   std::string bake_out_path_;  // 非空 = 烘焙输出固定到这个路径（--bake）
+  float args_uv_vscale_ = 0.0f;  // --uv-vscale（0 = 自动）
   jpov_skylight::SkyDegrees deg_;
 
   std::string CamString() const {
@@ -500,6 +502,7 @@ class VegetationV2App : public JPOV {
 
   void BuildScene(const CliArgs& args) {
     normal_scale_ = args.normal_scale;
+    args_uv_vscale_ = args.uv_vscale;
     // 吹歪的参考高度 H：树高（Y 向包围盒）。每帧重算太浪费，这里算一次。
     {
       float ymin = 1e30f;
@@ -514,6 +517,7 @@ class VegetationV2App : public JPOV {
     }
     bark_dir_ = args.bark_dir;
     leaf_path_ = args.leaf_path;
+    leaf2_path_ = args.leaf2_path;
     // 烘焙默认参数**继承命令行**：否则 --leaf-black 50 只影响预览、产物还是 30，
     // 预览与产物会悄悄不一致（这正是「同一份数据两条流水线」的经典坑）。
     bake_leaf_black_ = args.leaf_black;
@@ -727,10 +731,11 @@ class VegetationV2App : public JPOV {
     o.droop_scale = bake_droop_scale_;
     o.bark_dir = bark_dir_;
     o.leaf_png = leaf_path_;
+    o.leaf2_png = leaf2_path_;
     o.leaf_black = bake_leaf_black_;
     o.leaf_normal = bake_leaf_normal_;
     o.normal_scale = bake_normal_scale_;
-    o.uv_v_scale = 0.0;   // 自动按树皮 albedo 尺寸
+    o.uv_v_scale = args_uv_vscale_;   // 与预览一致（0 = 自动按树皮 albedo 尺寸）
 
     const std::string path = BakeOutputPath();
     std::string err;
@@ -893,10 +898,13 @@ class VegetationV2App : public JPOV {
       BackToRaw();
     }
 
-    // 风时间：由帧号推（确定性；暂停时冻结）。headless 出图同样可复现。
+    // 风时间：**累加**而不是「帧号 × 缩放」——后者在拖动「时间缩放」滑条时会按比例
+    // 跳变（时间倒退/前跳，树会瞬移）。固定步长 1/fps × 缩放 ⇒ 改缩放只改速度。
+    // 暂停时冻结；headless 用 --wind-time 直接钉住初值（同样可复现）。
     if (!wind_paused_) {
-      wind_time_ = static_cast<float>(frame_count + 1) / kViewerFps * wind_time_scale_;
+      wind_time_ += (1.0f / kViewerFps) * wind_time_scale_;
     }
+    (void)frame_count;
     // 面板滑条改的是「呈现」参数：curl 要重烘顶点法线，法线强度是材质常量。
     if (has_leaf_) {
       // 精确比较是安全的：Ui::SliderFloat 只在拖动/点击时写 *value，
