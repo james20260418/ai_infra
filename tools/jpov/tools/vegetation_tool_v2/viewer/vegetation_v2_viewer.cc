@@ -9,6 +9,7 @@
 // 交互：K 切换叶卡、[ / ] 调最大显示层级、P 打印相机、H 打印叶卡帮助。
 //
 // 用法：
+//   jpov_vegetation_v2_viewer                      # 只渲染默认范本的拓扑
 //   jpov_vegetation_v2_viewer --shape /tmp/willow.pbtxt
 //   jpov_vegetation_v2_viewer --shape ... --capture /tmp/shots --cam_phi 10 --cam_r 4
 //   --normal-scale <f>   法线强度（默认 1.5；0~3）
@@ -356,7 +357,20 @@ CliArgs ParseCli(int argc, char** argv) {
       LOG(WARNING) << "未知参数: " << arg << "（已忽略）";
     }
   }
-  CHECK(!a.shape_path.empty()) << "必须给 --shape <path.pbtxt>";
+  // shape 有默认值（打包目录里的 shapes/willow.pbtxt），叶卡/树皮默认**空**——
+  // 不给就只渲染拓扑（树干棕色 + debug 叶卡），这是「组合查看器」的底座：
+  // 用户提供 shape / bark / leaf 三样，给几样渲染几样。
+  if (a.shape_path.empty()) {
+    a.shape_path = "shapes/willow.pbtxt";
+    LOG(INFO) << "未给 --shape，用默认范本: " << a.shape_path;
+  }
+  if (!std::ifstream(a.shape_path).good()) {
+    LOG(FATAL) << "读不到 shape: " << a.shape_path
+               << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
+               << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
+               << "\n  --shape 省略时用 shapes/willow.pbtxt（打包目录内）"
+               << "\n  --bark / --leaf 省略 = 只渲染 shape（不贴树皮/叶图）";
+  }
   return a;
 }
 
