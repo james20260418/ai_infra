@@ -177,9 +177,9 @@ inline bool RenderGlbGolden(const std::string& out_png) {
   // 2) glb 展示态出图（相机用自动取景：与用户 `--glb` 打开时看到的一致）。
   const std::string wind = std::to_string(kGlbWindTime);
   std::string cmd = "'" + ViewerBinary() + "'";
-  // ⚠️ `--glb` 目前仍要求能找到 shape（「回到原材料态」要用它；缺省会找 cwd 下的
-  // shapes/willow.pbtxt）。测试从 runfiles 跑，cwd 没有那份文件，所以显式给绝对路径。
-  cmd += " --shape '" + dir + "/samples/willow.pbtxt'";
+  // **故意不给 --shape**：gold 走「纯 glb 查看模式」（runfiles 的 cwd 里没有
+  // shapes/willow.pbtxt，缺 shape 即进入该模式）。这样这张 gold 同时守住了
+  // 「只拿一个 glb 也能打开」这条路径 —— 它与"shape + glb"渲染逐像素一致（实测 0 差异）。
   cmd += " --glb '" + glb + "'";
   cmd += " --wind-time " + wind;
   // 相机**固定**（自动取景 R=17.88 太远，叶子只剩几个像素，回归看不出来）。

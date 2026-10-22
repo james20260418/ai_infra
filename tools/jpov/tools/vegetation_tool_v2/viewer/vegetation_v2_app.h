@@ -50,7 +50,10 @@ struct CliArgs {
 
   // ── GLB 烘焙（面板「烘焙 glb」用；也支持 headless 一条命令跑完）──
   std::string bake_glb_path;   // 非空 = 只烘焙这一次然后退出（CI / 命令行）
-  std::string glb_path;        // 非空 = 启动即进「glb 展示态」（跳过原材料态）
+  // 非空 = 启动即进「glb 展示态」（跳过原材料态）。
+  // **shape_path 找不到时这就是"纯 glb 查看模式"**：没有原材料态、不能烘焙、
+  // 面板上不出现「回到原材料态」，相机按 glb 包围盒自动取景。
+  std::string glb_path;
   bool wind_off = false;       // 关掉 wind（A/B 用）
   float wind_time = -1.0f;     // >=0 = 钉住风时间（headless 确定性出图）
   float wind_amp = -1.0f;      // >=0 = 覆盖 pivot 振幅（A/B 用）

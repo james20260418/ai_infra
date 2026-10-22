@@ -200,6 +200,8 @@ class VegetationV2App : public JPOV {
   enum class Mode { kRaw, kGlb };
 
   Shape shape_;
+  bool has_shape_ = false;        // 有没有原材料（纯 glb 查看模式下为 false）
+  float args_radius_ = 0.0f;      // --cam_r（0 = 自动：按包围盒 fit）
   Mode mode_ = Mode::kRaw;
   jpov::GltfObject glb_;          // glb 展示态的资源（独占，切回原材料态要 Release）
   bool glb_loaded_ = false;
@@ -470,21 +472,15 @@ class VegetationV2App : public JPOV {
     curl_applied_ = curl_;
   }
 
-  void BuildScene(const CliArgs& args) {
+  // 与 shape **无关**的公共状态（纯 glb 查看模式也要有）：材质/烘焙命令行的继承、
+  // 风的覆盖参数、UV v 缩放、面板/HUD/相机的开关。
+  //
+  // 为什么单独一层：`--glb` 可以不配 `--shape`（纯查看模式），那条路径没有 shape、没有
+  // 扫管/叶卡，但仍然要能调风、要能画面板、要继承 --normal-scale 之类的参数。
+  void ApplyCommonArgs(const CliArgs& args) {
     normal_scale_ = args.normal_scale;
     args_uv_vscale_ = args.uv_vscale;
-    // 吹歪的参考高度 H：树高（Y 向包围盒）。每帧重算太浪费，这里算一次。
-    {
-      float ymin = 1e30f;
-      float ymax = -1e30f;
-      for (const jpov::vegetation::Branch& b : shape_.branches) {
-        for (const jpov::vegetation::BranchSample& smp : b.samples) {
-          ymin = std::min(ymin, static_cast<float>(smp.position.y));
-          ymax = std::max(ymax, static_cast<float>(smp.position.y));
-        }
-      }
-      scene_height_ = (ymax > ymin) ? (ymax - ymin) : 1.0f;
-    }
+    args_radius_ = static_cast<float>(args.radius);
     bark_dir_ = args.bark_dir;
     leaf_path_ = args.leaf_path;
     leaf2_path_ = args.leaf2_path;
@@ -528,6 +524,38 @@ class VegetationV2App : public JPOV {
         uv_v_scale_ = 1.0f;
         LOG(WARNING) << "读不到 albedo 像素尺寸，uv_v_scale 取 1.0: " << albedo;
       }
+    }
+    show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
+    cam_target_y_ = args.cam_target_y;
+    // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
+    // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
+    // **面板也是文字**（标题/滑条标签）⇒ 没字体时必须连面板一起关，否则
+    // `--show-panel` 在无字体环境直接崩（颜色块没法代替标签，关掉才是合理降级）。
+    if (!has_fonts_) {
+      show_hud_ = false;
+      show_labels_ = false;
+      show_panel_ = false;
+    }
+    deg_.sun_elev_deg = 55.0f;
+    deg_.sun_azim_deg = 35.0f;
+  }
+
+  // 原材料态：shape/leaf/bark 现搭。纯 glb 查看模式不会调它。
+  void BuildScene(const CliArgs& args) {
+    has_shape_ = true;
+    ApplyCommonArgs(args);
+    // 吹歪的参考高度 H：树高（Y 向包围盒）。每帧重算太浪费，这里算一次。
+    // （纯 glb 模式没有 shape，H 在 LoadGlbFile 里按 glb 包围盒补。）
+    {
+      float ymin = 1e30f;
+      float ymax = -1e30f;
+      for (const jpov::vegetation::Branch& b : shape_.branches) {
+        for (const jpov::vegetation::BranchSample& smp : b.samples) {
+          ymin = std::min(ymin, static_cast<float>(smp.position.y));
+          ymax = std::max(ymax, static_cast<float>(smp.position.y));
+        }
+      }
+      scene_height_ = (ymax > ymin) ? (ymax - ymin) : 1.0f;
     }
     branch_mesh_.resize(shape_.branches.size());
     branch_level_.resize(shape_.branches.size());
@@ -613,9 +641,6 @@ class VegetationV2App : public JPOV {
     if (args.radius > 0.0) {
       view_.R = args.radius;
     }
-    deg_.sun_elev_deg = 55.0f;
-    deg_.sun_azim_deg = 35.0f;
-
     // 6 档棕色（level 0..5，>=5 饱和）
     level_mats_.clear();
     for (int lv = 0; lv <= 5; ++lv) {
@@ -646,7 +671,6 @@ class VegetationV2App : public JPOV {
     ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
     ground_mat_ = jpov_skylight::GroundMaterial();
 
-    show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
     int deepest = 0;
     for (const auto& b : shape_.branches) {
       deepest = std::max(deepest, static_cast<int>(b.level));
@@ -678,21 +702,39 @@ class VegetationV2App : public JPOV {
     if (args.hide_leaf) show_leaf_ = false;
     if (args.hide_bark) show_bark_ = false;
     if (args.hide_hud) show_hud_ = false;
-    cam_target_y_ = args.cam_target_y;
-    // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
-    // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
-    if (!has_fonts_) {
-      show_hud_ = false;
-      show_labels_ = false;
-    }
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
+  }
+
+  // 纯 glb 查看模式：**没有 shape**，只画 glb + 地面 + 面板。
+  //
+  // 触发条件见 RunViewer：给了 `--glb` 但找不到 shape 文件（典型是"别人发来一个 glb，
+  // 我只想看看它长什么样"）。此时没有原材料态可回，也就没有烘焙/扫管/叶卡相关的一切。
+  void BuildGlbOnlyScene(const CliArgs& args) {
+    has_shape_ = false;
+    ApplyCommonArgs(args);
+    ground_mesh_ = RegisterMesh(jpov_skylight::MakeGroundQuad());
+    ground_mat_ = jpov_skylight::GroundMaterial();
+    view_ = jpov_viewer::DefaultView();
+    view_.phi = args.phi_deg * 3.14159265358979323846 / 180.0;
+    view_.theta = args.theta_deg * 3.14159265358979323846 / 180.0;
+    if (args.radius > 0.0) {
+      view_.R = args.radius;
+    }
+    LOG(INFO) << "纯 glb 查看模式：没有 shape（" << args.shape_path
+              << "），只有 glb 展示态（不能回到原材料态/不能烘焙）";
   }
 
   // 一个 leaf type 的 debug 绘制单元：绿卡 + 卡面 UV 标签。
   // 两者用同一个 type 下标、同一份 shape 数据，所以永远不会"绿卡画了、标签没画"。
   // 烘焙一份 glb 并（成功后）切到 glb 展示态。
   void BakeNow() {
+    if (!has_shape_) {
+      bake_ok_ = false;
+      bake_msg_ = "纯 glb 模式：没有 shape，无处烘焙";
+      LOG(WARNING) << bake_msg_;
+      return;
+    }
     jpov::vegetation::GlbBakeOptions o;
     o.thick_spacing = bake_thick_spacing_;
     o.thin_spacing = bake_thin_spacing_;
@@ -753,6 +795,11 @@ class VegetationV2App : public JPOV {
       if (h > 1e-3f) {
         scene_height_ = h;
       }
+      // 纯 glb 模式没有 shape 可供取景（BuildScene 里那段 fit），这里按 glb 包围盒补。
+      // 有 shape 时不覆盖：那是原材料的构图，用户已经"看过一眼"了。
+      if (!has_shape_ && args_radius_ <= 0.0f) {
+        view_.R = jpov_viewer::ViewConfig::FitRadius(glb_.bounds_min, glb_.bounds_max, 60.0);
+      }
     }
     mode_ = Mode::kGlb;
     LOG(INFO) << "进入 glb 展示态: " << path << "（" << glb_.size() << " 个 primitive）";
@@ -767,6 +814,10 @@ class VegetationV2App : public JPOV {
   }
 
   void BackToRaw() {
+    if (!has_shape_) {
+      LOG(WARNING) << "纯 glb 模式：没有原材料态可回";
+      return;
+    }
     ReleaseGlb();
     mode_ = Mode::kRaw;
     LOG(INFO) << "回到原材料态（shape/leaf/bark 现搭）";
@@ -1119,11 +1170,17 @@ class VegetationV2App : public JPOV {
               } else if (i == 7) {
                 ui_.SliderFloat("树皮法线强度", &bake_normal_scale_, r, 0.0f, 3.0f, 2);
               } else if (i == 8) {
-                if (ui_.Button(glb_loaded_ ? "重新烘焙 glb" : "烘焙 glb", r)) {
+                if (!has_shape_) {
+                  // 纯 glb 模式没有 shape 可烘：给一行说明，不给按钮（点了也只能报错）。
+                  cmds->DrawText("纯 glb 模式：无 shape，不能烘焙",
+                                 {r.pos.x(), r.pos.y() + 4.0f}, 15.0f,
+                                 jpov::Color{0.72f, 0.72f, 0.72f, 1.0f},
+                                 jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+                } else if (ui_.Button(glb_loaded_ ? "重新烘焙 glb" : "烘焙 glb", r)) {
                   pending_ = Pending::kBake;
                 }
               } else if (i == 9) {
-                if (glb_loaded_) {
+                if (glb_loaded_ && has_shape_) {   // 纯 glb 模式没有原材料态可回
                   if (ui_.Button("回到原材料态", r)) {
                     pending_ = Pending::kBackToRaw;
                   }
@@ -1179,14 +1236,20 @@ int RunViewer(const CliArgs& args) {
   VegetationV2App app(cfg);
   app.has_fonts_ = !cfg.fonts.empty();
   app.Init();
-  std::string err;
-  if (!jpov::vegetation::LoadShapeFile(args.shape_path, &app.shape_, &err)) {
-    LOG(ERROR) << "shape 加载失败: " << err;
-    return 1;
+  const bool has_shape_file = std::ifstream(args.shape_path).good();
+  if (has_shape_file) {
+    std::string err;
+    if (!jpov::vegetation::LoadShapeFile(args.shape_path, &app.shape_, &err)) {
+      LOG(ERROR) << "shape 加载失败: " << err;
+      return 1;
+    }
+    app.shape_path_ = args.shape_path;
+    app.PrintLeafTypeHelp(args.shape_path);
+    app.BuildScene(args);
+  } else {
+    // 纯 glb 查看模式（只有 --glb 才会走到这里；ParseCli 已经挡掉"既没 shape 又没 glb"）。
+    app.BuildGlbOnlyScene(args);
   }
-  app.shape_path_ = args.shape_path;
-  app.PrintLeafTypeHelp(args.shape_path);
-  app.BuildScene(args);
 
   // 只烘焙：一条命令跑完就退出（CI / 批量用）。
   if (!args.bake_glb_path.empty()) {

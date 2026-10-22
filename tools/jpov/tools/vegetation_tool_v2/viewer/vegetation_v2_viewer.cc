@@ -24,6 +24,8 @@
 //   --capture <dir>                                          无窗口出图（front/three_quarter/side）
 //   --bake <out.glb>                                         烘焙一份 glb 后退出（CI 用）
 //   --glb <in.glb>                                           启动即进 glb 展示态（带风调试面板）
+//                                                            **可以不给 --shape**（纯 glb 查看模式，
+//                                                            此时无原材料态：不能烘焙/回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
 
 #include <cstdio>
@@ -125,12 +127,22 @@ CliArgs ParseCli(int argc, char** argv) {
     a.shape_path = "shapes/willow.pbtxt";
     LOG(INFO) << "未给 --shape，用默认范本: " << a.shape_path;
   }
+  // **纯 glb 查看模式**：给了 --glb 就不强求 shape（"别人发我一个 glb，我只想看看"）。
+  // 找不到 shape 时只警告，由 RunViewer 决定走纯 glb 路径；没给 --glb 才 FATAL。
   if (!std::ifstream(a.shape_path).good()) {
-    LOG(FATAL) << "读不到 shape: " << a.shape_path
-               << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
-               << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
-               << "\n  --shape 省略时用 shapes/willow.pbtxt（打包目录内）"
-               << "\n  --bark / --leaf 省略 = 只渲染 shape（不贴树皮/叶图）";
+    if (a.glb_path.empty()) {
+      LOG(FATAL) << "读不到 shape: " << a.shape_path
+                 << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
+                 << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
+                 << "\n    或只看一个 glb: jpov_vegetation_v2_viewer --glb <path.glb>"
+                 << "\n  --shape 省略时用 shapes/willow.pbtxt（打包目录内）"
+                 << "\n  --bark / --leaf 省略 = 只渲染 shape（不贴树皮/叶图）";
+    }
+    LOG(WARNING) << "读不到 shape（" << a.shape_path << "）→ 纯 glb 查看模式："
+                 << "只有 glb 展示态，不能烘焙、不能回到原材料态";
+  }
+  if (!a.bake_glb_path.empty() && !std::ifstream(a.shape_path).good()) {
+    LOG(FATAL) << "--bake 需要 shape（要从拓扑烘出 glb），读不到: " << a.shape_path;
   }
   return a;
 }
