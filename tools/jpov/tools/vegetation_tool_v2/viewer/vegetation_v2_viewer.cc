@@ -276,6 +276,7 @@ struct CliArgs {
   float ground_y = 0.0f;
   float cam_target_y = 0.0f;   // 相机注视点高度（看树冠/叶卡细节用）
   bool show_panel = false;     // capture 时也画面板（截图/自检用）
+  int only_type = -1;          // >=0：只显示该 leaf type（等价于面板取消"显示全部叶子"）
   bool hide_leaf = false;      // 强制看 debug 盒子（叶卡贴图关）
   bool hide_bark = false;      // 强制看 level 棕色（树皮关）
   // 法线贴图强度（uNormalScale）。默认 1.5：同一树皮 A/B 实测
@@ -337,6 +338,9 @@ CliArgs ParseCli(int argc, char** argv) {
       CHECK_GT(a.uv_vscale, 0.0f) << "--uv-vscale 必须 > 0";
     } else if (arg == "--show-panel") {
       a.show_panel = true;
+    } else if (arg == "--only-type" && has_val) {
+      a.only_type = std::atoi(argv[++i]);
+      CHECK_GE(a.only_type, 0) << "--only-type 不能为负";
     } else if (arg == "--no-leaf") {
       a.hide_leaf = true;
     } else if (arg == "--no-bark") {
@@ -446,8 +450,9 @@ class VegetationV2App : public JPOV {
   Shape shape_;
   std::vector<uint32_t> branch_mesh_;   // 与 shape_.branches 下标对齐
   std::vector<int> branch_level_;
-  // 绿卡：整张 quad 的盒子（空间覆盖），debug 视图和角标一起显示/隐藏。
-  uint32_t card_box_mesh_ = 0;
+  // 绿卡：整张 quad 的盒子（空间覆盖），**每个 leaf type 一个 mesh**，
+  // 与同 type 的标签一起画/一起隐藏（type 过滤对两者同时生效）。
+  std::vector<uint32_t> debug_card_mesh_;
   jpov::PBRMaterial card_box_mat_;
 
   // ── 叶卡材质（--leaf）──
@@ -470,6 +475,7 @@ class VegetationV2App : public JPOV {
   // 叶卡过滤：勾了"显示全部叶子"就全画；否则只画 type_filter_ 这一个下标。
   bool show_all_card_types_ = true;
   uint32_t type_filter_ = 0;
+  size_t leaf_type_count_ = 1;   // shape 里实际存在的 leaf type 数（用于循环/下标夹紧）
   char type_buf_[8] = "0";   // InputText 的编辑缓冲（跨帧持有，Ui 需要稳定地址）
   int max_level_ = 99;
   float max_level_f_ = 99.0f;   // 滑条用（int 版才是真值）
@@ -736,30 +742,30 @@ class VegetationV2App : public JPOV {
       BuildLeafScene(args);
     }
 
-    // 绿卡：整张 quad 的盒子（厚度只为"看得见"，不代表卡片有厚度）。
-    // 与角标共用同一套 pivot / 同一份 width，保证四者永远对齐。
-    {
+    // 绿卡：每个 leaf type 一份盒子 mesh（同一 type 的绿卡 + 标签由同一个函数画）。
+    debug_card_mesh_.assign(kMaxCardTypes, 0);
+    card_box_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.45f, 0.16f, 1.0f});
+    card_box_mat_.double_sided = true;
+    for (int t = 0; t < kMaxCardTypes; ++t) {
       std::vector<float> cpos;
       std::vector<float> cnrm;
       std::vector<uint32_t> cidx;
       for (const auto& card : shape_.cards) {
-        // 绿卡做得很薄（4mm）：角标比它厚一个量级，才不会出现「面和面抢深度」。
+        if (static_cast<int>(card.type % kMaxCardTypes) != t) continue;
+        // 绿卡做得很薄（4mm）：与 8cm 的角标不会抢深度。
         AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.004, &cpos, &cnrm, &cidx);
       }
-      if (!cpos.empty()) {
-        jpov::MeshData md;
-        md.flags = static_cast<jpov::MeshVertexFlags>(
-            static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-            static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
-        for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
-          md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
-          md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
-        }
-        md.indices = cidx;
-        card_box_mesh_ = RegisterMesh(std::move(md));
-        card_box_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.45f, 0.16f, 1.0f});
-        card_box_mat_.double_sided = true;
+      if (cpos.empty()) continue;
+      jpov::MeshData md;
+      md.flags = static_cast<jpov::MeshVertexFlags>(
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
+          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+      for (size_t v = 0; v + 2 < cpos.size(); v += 3) {
+        md.positions.push_back(jpov::Vec3f{cpos[v], cpos[v + 1], cpos[v + 2]});
+        md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
       }
+      md.indices = cidx;
+      debug_card_mesh_[t] = RegisterMesh(std::move(md));
     }
 
     // 相机：按包围盒自动取景
@@ -820,14 +826,110 @@ class VegetationV2App : public JPOV {
     for (const auto& b : shape_.branches) {
       deepest = std::max(deepest, static_cast<int>(b.level));
     }
+    leaf_type_count_ = 1;
+    for (const auto& c : shape_.cards) {
+      leaf_type_count_ = std::max(leaf_type_count_,
+                                  static_cast<size_t>(c.type % kMaxCardTypes) + 1);
+    }
     max_level_ = std::min(args.max_level, deepest);
     max_level_f_ = static_cast<float>(max_level_);
     ground_y_ = args.ground_y;
+    if (args.only_type >= 0) {
+      show_all_card_types_ = false;
+      type_filter_ = static_cast<uint32_t>(args.only_type);
+      if (type_filter_ >= leaf_type_count_) {
+        LOG(WARNING) << "--only-type " << args.only_type << " 超出实际 type 数 "
+                     << leaf_type_count_ << "，夹到 " << (leaf_type_count_ - 1);
+        type_filter_ = static_cast<uint32_t>(leaf_type_count_ - 1);
+      }
+    }
     if (args.hide_leaf) show_leaf_ = false;
     if (args.hide_bark) show_bark_ = false;
     cam_target_y_ = args.cam_target_y;
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
+  }
+
+  // 一个 leaf type 的 debug 绘制单元：绿卡 + 卡面 UV 标签。
+  // 两者用同一个 type 下标、同一份 shape 数据，所以永远不会"绿卡画了、标签没画"。
+  void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
+    if (type_index < debug_card_mesh_.size() && debug_card_mesh_[type_index] != 0) {
+      cmds->DrawObject3D(debug_card_mesh_[type_index], card_box_mat_, {0.0f, 0.0f, 0.0f},
+                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+    }
+    if (!show_labels_) return;
+
+    const float kFaceOffset = 0.004f;
+    const jpov::Vec3f cam = cmds->camera.position;
+    jpov::Vec3f fwd{cmds->camera.target.x() - cam.x(), cmds->camera.target.y() - cam.y(),
+                    cmds->camera.target.z() - cam.z()};
+    const float fl = std::sqrt(fwd.x() * fwd.x() + fwd.y() * fwd.y() + fwd.z() * fwd.z());
+    if (fl > 1e-6f) {
+      fwd = jpov::Vec3f{fwd.x() / fl, fwd.y() / fl, fwd.z() / fl};
+    }
+
+    for (const auto& card : shape_.cards) {
+      if (static_cast<size_t>(card.type % kMaxCardTypes) != type_index) continue;
+
+      const auto norm = [](const Vec3d& q) {
+        const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+        return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
+      };
+      const auto cross = [](const Vec3d& a2, const Vec3d& b2) {
+        return Vec3d{a2.y * b2.z - a2.z * b2.y, a2.z * b2.x - a2.x * b2.z,
+                     a2.x * b2.y - a2.y * b2.x};
+      };
+      const Vec3d up = norm(card.up);
+      const Vec3d n = norm(card.normal);
+      const Vec3d right = norm(cross(up, n));
+
+      std::string mode = "bottom_center";
+      for (const auto& t : shape_.leaf_types) {
+        if (t.type == card.type) {
+          mode = t.anchor_mode;
+          break;
+        }
+      }
+      double au = 0.5;
+      double av = 0.0;
+      if (!jpov::vegetation::AnchorModeToUv(mode, &au, &av)) continue;
+
+      const float fh = static_cast<float>(0.125 * card.height);   // 与 1/8 角标同量级
+      const jpov::Color white{1.0f, 1.0f, 1.0f, 1.0f};
+      const jpov::Vec3f face{static_cast<float>(n.x), static_cast<float>(n.y),
+                             static_cast<float>(n.z)};
+      const jpov::Vec3f back{static_cast<float>(-n.x), static_cast<float>(-n.y),
+                             static_cast<float>(-n.z)};
+      const jpov::Vec3f upv{static_cast<float>(up.x), static_cast<float>(up.y),
+                            static_cast<float>(up.z)};
+
+      // side = +1 正面 / -1 背面；文字平面沿 side*normal 抬 kFaceOffset。
+      const auto Point = [&](double u, double v, int side) {
+        const double su = (u - au) * card.width;
+        const double sv = (v - av) * card.height;
+        const double off = side * kFaceOffset;
+        return jpov::Vec3f{
+            static_cast<float>(card.anchor.x + right.x * su + up.x * sv + n.x * off),
+            static_cast<float>(card.anchor.y + right.y * su + up.y * sv + n.y * off),
+            static_cast<float>(card.anchor.z + right.z * su + up.z * sv + n.z * off)};
+      };
+      const auto Inside = [&](const jpov::Vec3f& p) {
+        return (p.x() - cam.x()) * fwd.x() + (p.y() - cam.y()) * fwd.y() +
+                   (p.z() - cam.z()) * fwd.z() >
+               0.1f;
+      };
+      const auto Label = [&](const char* text, const jpov::Vec3f& p, const jpov::Vec3f& f,
+                             jpov::TextAlignment align) {
+        if (!Inside(p)) return;
+        cmds->DrawText3D(text, p, f, upv, fh, white, jpov::kFontBuiltinCJK, align);
+      };
+
+      Label("左下", Point(0.0, 0.0, +1), face, jpov::TextAlignment::kBottomLeft);
+      Label("右下", Point(1.0, 0.0, +1), face, jpov::TextAlignment::kBottomRight);
+      Label("右上", Point(1.0, 1.0, +1), face, jpov::TextAlignment::kTopRight);
+      Label("左上", Point(0.0, 1.0, +1), face, jpov::TextAlignment::kTopLeft);
+      Label("背面", Point(0.5, 0.5, -1), back, jpov::TextAlignment::kCenter);
+    }
   }
 
   void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
@@ -913,98 +1015,15 @@ class VegetationV2App : public JPOV {
                          {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
     }
     const bool debug_cards = !(has_leaf_ && show_leaf_);
-    if (debug_cards) {
-      if (card_box_mesh_ != 0) {
-        cmds->DrawObject3D(card_box_mesh_, card_box_mat_, {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-      }
-      // UV 角标签 + 背面中心标签：贴在卡面上（字面朝向见下）。
-      //  正面：左下(0,0) / 右下(1,0) / 右上(1,1) / 左上(0,1)
-      //  背面中心：「背面」（face = -normal，从背后看是正的）
-      //
-      // 所有卡片都画（不按距离/数量裁剪）。唯一保留的过滤是「标签点必须在相机前方」：
-      // Text3D 的 PixelsPerMeterAt 对 depth<=0 直接 CHECK crash。
-      if (show_labels_) {
-      const float kFaceOffset = 0.004f;
-      const jpov::Vec3f cam = cmds->camera.position;
-      jpov::Vec3f fwd{cmds->camera.target.x() - cam.x(), cmds->camera.target.y() - cam.y(),
-                      cmds->camera.target.z() - cam.z()};
-      const float fl = std::sqrt(fwd.x() * fwd.x() + fwd.y() * fwd.y() + fwd.z() * fwd.z());
-      if (fl > 1e-6f) {
-        fwd = jpov::Vec3f{fwd.x() / fl, fwd.y() / fl, fwd.z() / fl};
-      }
-
-      for (const auto& card : shape_.cards) {
-        if (!show_all_card_types_ &&
-            static_cast<int>(card.type % kMaxCardTypes) != static_cast<int>(type_filter_)) {
-          continue;
-        }
-        const auto norm = [](const Vec3d& q) {
-          const double l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
-          return (l < 1e-12) ? Vec3d{0, 1, 0} : Vec3d{q.x / l, q.y / l, q.z / l};
-        };
-        const auto cross = [](const Vec3d& a2, const Vec3d& b2) {
-          return Vec3d{a2.y * b2.z - a2.z * b2.y, a2.z * b2.x - a2.x * b2.z,
-                       a2.x * b2.y - a2.y * b2.x};
-        };
-        const Vec3d up = norm(card.up);
-        const Vec3d n = norm(card.normal);
-        const Vec3d right = norm(cross(up, n));
-
-        std::string mode = "bottom_center";
-        for (const auto& t : shape_.leaf_types) {
-          if (t.type == card.type) {
-            mode = t.anchor_mode;
-            break;
-          }
-        }
-        double au = 0.5;
-        double av = 0.0;
-        if (!jpov::vegetation::AnchorModeToUv(mode, &au, &av)) continue;
-
-        const float fh = static_cast<float>(0.125 * card.height);   // 与 1/8 角标同量级
-        const jpov::Color white{1.0f, 1.0f, 1.0f, 1.0f};
-        const jpov::Vec3f face{static_cast<float>(n.x), static_cast<float>(n.y),
-                               static_cast<float>(n.z)};
-        const jpov::Vec3f back{static_cast<float>(-n.x), static_cast<float>(-n.y),
-                               static_cast<float>(-n.z)};
-        const jpov::Vec3f upv{static_cast<float>(up.x), static_cast<float>(up.y),
-                              static_cast<float>(up.z)};
-
-        // side = +1 正面 / -1 背面；文字平面沿 side*normal 抬 kFaceOffset。
-        const auto Point = [&](double u, double v, int side) {
-          const double su = (u - au) * card.width;
-          const double sv = (v - av) * card.height;
-          const double off = side * kFaceOffset;
-          return jpov::Vec3f{
-              static_cast<float>(card.anchor.x + right.x * su + up.x * sv + n.x * off),
-              static_cast<float>(card.anchor.y + right.y * su + up.y * sv + n.y * off),
-              static_cast<float>(card.anchor.z + right.z * su + up.z * sv + n.z * off)};
-        };
-        const auto Inside = [&](const jpov::Vec3f& p) {
-          return (p.x() - cam.x()) * fwd.x() + (p.y() - cam.y()) * fwd.y() +
-                     (p.z() - cam.z()) * fwd.z() >
-                 0.1f;
-        };
-        const auto Label = [&](const char* text, const jpov::Vec3f& p,
-                               const jpov::Vec3f& f, jpov::TextAlignment align) {
-          if (!Inside(p)) return;
-          cmds->DrawText3D(text, p, f, upv, fh, white, jpov::kFontBuiltinCJK, align);
-        };
-
-        Label("左下", Point(0.0, 0.0, +1), face, jpov::TextAlignment::kBottomLeft);
-        Label("右下", Point(1.0, 0.0, +1), face, jpov::TextAlignment::kBottomRight);
-        Label("右上", Point(1.0, 1.0, +1), face, jpov::TextAlignment::kTopRight);
-        Label("左上", Point(0.0, 1.0, +1), face, jpov::TextAlignment::kTopLeft);
-        Label("背面", Point(0.5, 0.5, -1), back, jpov::TextAlignment::kCenter);
-      }
-      }   // if (show_labels_)
-    } else {
-      for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
-        if (leaf_mesh_[t] == 0) continue;
-        if (!show_all_card_types_ && t != type_filter_) continue;
-        cmds->DrawObject3D(leaf_mesh_[t], leaf_mat_[t], {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+    // 一个 type 一个绘制单元：type 过滤对「贴图 / 绿卡 / 标签」同时生效，
+    // 不会再出现「绿卡还在、标签已经按 type 过滤掉」这种不一致。
+    for (size_t t = 0; t < leaf_type_count_; ++t) {
+      if (!show_all_card_types_ && t != type_filter_) continue;
+      if (debug_cards) {
+        DrawLeafDebugForType(t, cmds);
+      } else if (t < leaf_mesh_.size() && leaf_mesh_[t] != 0) {
+        cmds->DrawObject3D(leaf_mesh_[t], leaf_mat_[t], {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+                           {0.0f, 0.0f, 1.0f});
       }
     }
     cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
@@ -1073,7 +1092,7 @@ class VegetationV2App : public JPOV {
                      jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
       if (ui_.InputText("", type_buf_, sizeof(type_buf_), type_box)) {
         const int parsed = std::atoi(type_buf_);
-        const int clamped = std::max(0, std::min(kMaxCardTypes - 1, parsed));
+        const int clamped = std::max(0, std::min(static_cast<int>(leaf_type_count_) - 1, parsed));
         type_filter_ = static_cast<uint32_t>(clamped);
         if (clamped != parsed) {
           std::snprintf(type_buf_, sizeof(type_buf_), "%d", clamped);
