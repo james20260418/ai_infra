@@ -708,6 +708,24 @@ color = mix(color, rim_color, F)                  // 掠过视线 → 反射色
 结论：**要看玻璃边反就用 kSmooth**；kPolyline 的边反是「能跑但不是最终观感」。
 两条路都不是"平滑谎言"（顶点法线才是）：一条是精确的折面法线，一条是精确的曲面法线。
 
+**契约（2026-10-22 Danis 定）：法线来源与风格绑定，没有独立开关。**
+
+用户只有两种意图 —— 「柔和/条带」或「真折角」——`StripStyle` 就是这两个意图本身，
+所以法线不该是第三个自由度。**「平滑几何 + 折面法线」这个混搭被明确毙掉**：
+它只会产生与几何无关的亮带（15 段圆环那圈竖条），不对应任何使用意图，
+却要多一个能配错的旋钮。`StripFresnel` 里因此**没有** `normal_mode` 之类的字段。
+
+**算力开销（回答「柔和法线会不会更贵」）**
+
+- **不会，反而更便宜。** 解析法线 = 一次叉积（6 mul + 3 sub）+ 一次 normalize
+  （≈ 15~20 FLOP），而 `dS` / `Hh` **本来就在 FS 里算着**（Hermite 求值用的），
+  纯寄存器复用：不增加顶点属性、不增加 varying、不增加 texelFetch、不增加带宽。
+- 导数法线做的是**同样**一次叉积 + normalize，**外加** dFdx/dFdy 那套
+  （硬件按 2×2 quad 求差分；软件光栅下是真的去取邻居样本）。
+  所以同一份 fresnel 逻辑：解析法线 ≤ 导数法线。
+- fresnel 本身（pow + 两次 mix + 一次 dot）约 30~40 FLOP，是「开不开边反」的固有成本，
+  与法线来源无关。关闭时整段被 `uFresnelEnabled` 短路，画面逐字节等于旧版本。
+
 ### 19.4 实验预设与观感
 
 `demo/strip_viewer_app.h` 的 `kFresnelPresets`（面板 Combo 与 `--capture` **共用同一份表**）：
@@ -745,3 +763,34 @@ color = mix(color, rim_color, F)                  // 掠过视线 → 反射色
 - 圆环接缝（第 15 列 = 第 0 列）在 kSmooth 下两条端点切线不连续（各自单侧差分），
   接缝处参数化有一个很小的折点；折线 pass 天然没有这个问题。
 - 圆环只有 15 段：折线 pass 的边反会有可见分面（这是 §19.3 的固有取舍）。
+
+### 19.7 菲涅耳参数：per draw call 还是 per instance？（2026-10-22 讨论）
+
+结论：**全部留在 per draw call（batch），不引入 per-instance。** 依据是现有不变式
+「一个 batch = 一种材质 = 一次 draw call」：`texture_id / tint / blend / soft_depth_m /
+width_profile / style` 已经在 batch 上，fresnel 跟它们是同一层的材质属性。
+
+| 参数 | 归属 | 理由 |
+|---|---|---|
+| `power`（Schlick 指数） | **batch**（实际可视作渲染器常量） | 它是「用几阶近似」的模型参数，不是材质；一个场景里不该有两种 |
+| `f0`（正入射反射率） | **batch** | 折射率 = 材质属性。换玻璃 = 换材质 = 换 batch |
+| `rim_color` | **batch** | 反射/染色 = 材质属性（同 tint） |
+| `strength` | **batch** | 美术夸张系数，跟着材质走 |
+| `graze_alpha` | **batch**，但**已有 per-strip 通道** | 边缘实心度是「这层壳多实」。fresnel 里是 `mix(α, graze_alpha·逐点α, F)` ⇒ **缩放逐点 alpha 就能逐条带调边反浓度**（`Strip16::alpha` 本来就是 per-strip 数据） |
+
+为什么不做 per-instance（以及将来真要做的话该放哪）：
+
+1. **两条 pass 的代价不对称。** kSmooth 已经有「每条带一行」的数据纹理（每列 3 texel，
+   12 float 用满），加一个 per-strip 值要么每列多 1 texel（+33% 该纹理带宽），
+   要么另开一张 1 texel/条带 的小纹理（便宜，但要新增绑定 + 单元 + 生命周期）。
+   kPolyline **没有任何 per-strip 通道**（顶点就是 6 float），加它要新增顶点属性 +
+   每顶点打包 —— 那条路径本来是「最便宜」的卖点。
+2. **一个 batch 已经是一种材质。** 要「同场景里不同玻璃」就发多个 batch（每个一次
+   draw call）；几个玻璃物体多几次 draw call 在这个量级上不是问题。
+   真正需要 per-instance 的场景是「同材质 × 上千实例」，而条带目前不做 instancing。
+3. **per-strip 的 alpha 已经覆盖了唯一合理的 per-object 差异**（边反浓度）。
+
+将来若真的需要在同一 batch 里区分玻璃种类（例如为了省 draw call），推荐做法：
+**另开一张「1 texel/条带」的小纹理**（`kSmooth` 与 `kPolyline` 各加一个 strip id 属性 /
+复用 `flat` 传入），而不是把 per-column 的数据纹理撑胖，也不要给 `Strip16` 加字段
+（它是固定 POD，用户按 stride memcpy）。

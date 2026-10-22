@@ -51,6 +51,12 @@ using Vec3f = geom::Vec3<float>;
 //
 // kSmooth 内部会按局部曲率把多边形**保守外扩**再由 FS 裁回去（片元只能削不能补），
 // 外扩量是渲染器从几何自动算的**实现细节**：不暴露参数、也不改变上面两条契约。
+//
+// ⭐ 法线来源**与风格绑定**（2026-10-22 Danis 定，契约、没有独立开关）：
+//   kPolyline ⇒ 真折角：fresnel 用折面法线（屏幕导数 dFdx/dFdy，逐三角形恒定）；
+//   kSmooth   ⇒ 真柔和：fresnel 用**重建曲面的解析法线**（dS × H，无折面）。
+//   「几何柔和 + 法线折角」这种混搭**不提供** —— 它只会让边反出现与几何无关的亮带
+//   （也就是 15 段圆环上那圈竖条），没有任何一种使用意图对应它。
 enum class StripStyle {
     kPolyline = 0,
     kSmooth = 1,
@@ -111,9 +117,8 @@ enum class StripBlend {
 //   color = mix(color, rim_color, F)    // 边 → 反射色
 //   α     = mix(α, graze_alpha·逐点α, F) // 边 → 不透明（中心保持看得穿）
 //
-// 法线 N 的来源（实现细节，调用方不用管）：
-//   kSmooth   —— 从重建曲面的 ∂P/∂t 与半宽矢量叉积得到**解析法线**（无折面）。
-//   kPolyline —— 屏幕上 dFdx/dFdy 叉积（= 所在三角形平面法线，逐折面恒定）。
+// 法线 N 的来源**由 batch.style 决定**（见 StripStyle 的绑定契约），
+// 本结构里**没有**法线模式字段 —— 也不该有：「柔和/折角」是同一个使用意图。
 //
 // 没有任何字段带「特殊值语义」：不想开就**不设** optional（与 soft_depth_m 同一写法）。
 struct StripFresnel {
