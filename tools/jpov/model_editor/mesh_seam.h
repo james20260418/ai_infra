@@ -1153,11 +1153,21 @@ inline bool RebuildLoopToReference(
             j0 = j;
         }
     }
+    // 分配：j_i = (j0 + σ·round(i·N/M)) mod N。σ = 对应方向（reversed），
+    // 必须与变形阶段的映射 v = σ·u + s 一致 —— 否则参考环是镜像的，顶点被搬到对侧，
+    // 领口三角形自交（现场表现为「木板扭曲 / 镂空」）。
+    // 用「排名均分」而不是「按弧长找最近点」：目标环顶点常扎堆在倒角上，按弧长找最近点
+    // 会出现两个顶点抢同一个参考顶点（非双射）⇒ 两者之间那条边被当成绕整圈、插入 N 个点
+    // ⇒ 扇形自重叠、边界出现几十条边的非流形顶点（实测顶点 699 有 36 条边）。
+    const int dir_step = reversed ? -1 : 1;
     std::vector<size_t> assign(m, 0);
     for (size_t i = 0; i < m; ++i) {
-        const size_t step = static_cast<size_t>(
+        const long long step = static_cast<long long>(
             std::llround(static_cast<double>(i) * n / static_cast<double>(m)));
-        assign[i] = (j0 + step) % n;
+        const long long j = static_cast<long long>(j0) + dir_step * step;
+        assign[i] = static_cast<size_t>((j % static_cast<long long>(n) +
+                                        static_cast<long long>(n)) %
+                                       static_cast<long long>(n));
     }
 
     // 2) 物理下标 → 逻辑环下标（UV 缝处一个逻辑点可能对应多个物理点）。
@@ -1213,23 +1223,26 @@ inline bool RebuildLoopToReference(
         const uint32_t b = v;
         const size_t ja = assign[lu];
         const size_t jb = assign[lv];
+        // 插入点 = 从 ja 沿**对应方向 σ** 走到 jb 之间夹着的 reference 顶点。
+        // （相邻分配相差 round(N/M) 步，所以按 σ 走一定能走到 jb；用物理边方向判断是错的 ——
+        //   UV 缝的同组边、以及反向对应都会走反。）
         std::vector<size_t> insert_js;
-        if (forward) {
-            size_t cur = (ja + 1) % n;
+        {
+            // 从 ja 到 jb 走**短弧**（相邻分配相差 round(N/M) < N/2，短弧唯一）。
+            // 不能直接用 σ：UV 缝的孪生边物理走向与逻辑序相反，按 σ 走会绕一整圈
+            // （实测会产生自重叠的扇形 ⇒ 边界出现 4 条边的非流形顶点）。
+            const size_t fwd = (jb + n - ja) % n;
+            const size_t bwd = (ja + n - jb) % n;
+            const int step_dir = (fwd <= bwd) ? 1 : -1;
+            const long long stride = static_cast<long long>(n);
+            size_t cur = static_cast<size_t>(
+                (static_cast<long long>(ja) + step_dir + stride) % stride);
             while (cur != jb) {
                 insert_js.push_back(cur);
-                cur = (cur + 1) % n;
+                cur = static_cast<size_t>(
+                    (static_cast<long long>(cur) + step_dir + stride) % stride);
                 if (insert_js.size() > n) {
-                    break;
-                }
-            }
-        } else {
-            size_t cur = (ja + n - 1) % n;
-            while (cur != jb) {
-                insert_js.push_back(cur);
-                cur = (cur + n - 1) % n;
-                if (insert_js.size() > n) {
-                    break;
+                    break;  // 防死循环（分配异常时）
                 }
             }
         }
