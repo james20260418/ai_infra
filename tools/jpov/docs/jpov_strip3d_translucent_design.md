@@ -858,3 +858,37 @@ Danis 2026-10-22 提问。结论：**生效，且两条 pass 都是逐片元求�
 理由：圆环边反与射流软边只有 kSmooth 才是最终观感（§19.3）。gold **显式钉住折线**
 （`app.smooth_strips_ = false`）并显式关掉 ring / fresnel / jet / bloom ——
 gold 锁的始终是 M1~M3 那条三条带路径；本次改完两张 gold 与改前**逐字节一致**（0 px 差异）。
+
+### 19.10 自 review 记录（2026-10-22，Danis 要求「注释写清楚 / 行为确定 / FS 看性能与安全」）
+
+**性能（FS 与每批开销）**
+
+| 问题 | 处理 |
+|---|---|
+| 关闭态的 uniform 每批重传（软深度 2 个、fresnel 6 个、加法增益、纹理行数…）| 改成 **Init 写一次**；每批只上传「开关 + 开启时的取值」。之前每批多 7~8 次 `glUniform`，1000 批 = 数千次驱动调用/帧 |
+| 软深度淡出逐片元 `(scene_z−z)/m` 是除法 | 新增 `uSoftDepthInv = 1/m`，改成乘法（uniform 分母的倒数编译器不保证会提） |
+| 逐点颜色用 `texture()`（隐式导数算 LOD）| 改 `textureLod(...,0)`：这张纹理没有 mipmap；平滑 pass 的 `u*` 在段边界被 clamp，导数本身脏 |
+| `normalize()` 两次 sqrt | 改 `inversesqrt`（V 与 N 各一次） |
+
+**还可以做、但这轮没做**（有意，避免为演示规模的东西加复杂度）：
+- 每帧常量（near/far/viewport/camPos）用 dirty tracking 跳过重传 —— 注意 uniform 状态是
+  **per-program** 的，缓存必须挂在每个 program 上，否则折线/平滑切换会漏传。
+- Schlick 的 `pow` 在 `power == 5` 时用五次乘法特化（uniform 分支，多一条路径）。
+- 逐点颜色纹理由 RGBA32F 降 RGBA16F（省一半带宽，10 bit 尾数对 [0,1] 颜色够用）。
+- 平滑 pass 的逐点颜色其实可以并进「每列 3 texel」的数据纹理（多 1 texel/列 = +33%，
+  但少一次采样 + 少一个纹理绑定）；这轮统一走独立纹理是为了两条 pass 行为完全一致。
+
+**安全**
+
+| 风险 | 处理 |
+|---|---|
+| `texelFetch` 越界是 UB（不是返回 0）| 逐条带 tint 的下标按「本批实际条数」钳位（与 `uDataRows` 一致）|
+| GLSL 里硬编码 32/16/15 与 C++ 常量漂移 | `Init` 里 `CHECK_EQ` 三个常量，忘了同步会直接崩，而不是静默错色 |
+| `normalize(uCamPos − vWorld)` 在相机与片元重合时出 NaN | `d2 > 1e-12` 守卫 + 确定性回退向量 |
+| `pow(1−d, k)` 在 d 冒到 1+eps 时出 NaN | `d` 先 `clamp(0,1)` |
+| 新字段（`additive_gain` / `strip_tints` / `strip_point_colors` / fresnel）非法值 | 全在 `ValidateStripBatch` 拦（NaN 与越界都比较为 false ⇒ CHECK 崩）|
+
+**行为文档**：`interface/strip_types.h` 里新增「一条条带的最终像素」小节，把颜色链 /
+覆盖度链的每一步与顺序写死（含 fresnel 的 rim 取哪个 α、soft depth 与 additive_gain
+乘在哪一步、两个集合各写哪套附件）。§7 那张「一条命令同时写两个集合」的草图仍然没实现 ——
+现在同一批只能一个集合，要「膜 + 加法高光」还是两个 batch。
