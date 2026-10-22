@@ -569,9 +569,9 @@ private:
             if (soft_depth_) {
                 batch.soft_depth_m = soft_depth_m_;
             }
-            if (fresnel_enabled_) {
-                batch.fresnel = fresnel_;
-            }
+            // 边反（fresnel）**只给玻璃圆环**：它是"玻璃材质"的观感参数，
+            // 三条带/射流是发光拖尾，套上边反只会让拖尾边缘发白（Danis 2026-10-22 指出）。
+            // 库层面 StripFresnel 仍是批级参数（谁想用谁设），这里是 viewer 的取舍。
             batch.style = smooth_strips_ ? jpov::StripStyle::kSmooth
                                          : jpov::StripStyle::kPolyline;
             return batch;
@@ -692,10 +692,10 @@ private:
         ui_.Checkbox("Bloom 辉光（HDR）", &bloom_, left_rect());
         ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
         ui_.Checkbox("条带平滑（三条带/射流）", &smooth_strips_, left_rect());
-        ui_.Checkbox("圆环平滑（玻璃壳）", &ring_smooth_, left_rect());
         ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
+        ui_.Checkbox("显示参考方块", &boxes_visible_, left_rect());
 
         // ── 中列：形状 / 动画 / 显隐 / 圆环 ──
         ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), mid_rect(), 0.0f, 1.2f, 2);
@@ -710,7 +710,7 @@ private:
         ui_.Checkbox("显示射流（火箭推进器）", &jet_visible_, mid_rect());
         ui_.SliderFloat("射流 HDR 增益", &jet_gain_, mid_rect(), 1.0f, 8.0f, 2);
         ui_.Checkbox("显示圆环（玻璃壳）", &ring_visible_, mid_rect());
-        ui_.Checkbox("显示参考方块", &boxes_visible_, mid_rect());
+        ui_.Checkbox("圆环平滑（玻璃壳）", &ring_smooth_, mid_rect());
         ui_.SliderFloat("圆环外半径 m", &(ring_shape_.outer_radius), mid_rect(), 0.2f, 2.5f, 2);
         ui_.SliderFloat("圆环壁厚 m", &(ring_shape_.wall_thickness), mid_rect(), 0.02f, 0.60f, 2);
         ui_.SliderFloat("圆环高度 m", &(ring_shape_.height), mid_rect(), 0.20f, 3.00f, 2);
