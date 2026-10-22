@@ -52,6 +52,12 @@ struct MeshData {
 // 扫出所有枝条。不生成端盖：枝条两端要么插在父枝体内、要么是末梢细尖，
 // 端盖看不见，加了只是浪费面。
 //
+// 确定性（可以直接拿网格做 gold 比对）：
+//   * 根枝的初始 U 由 `AnyPerpendicular(tangent)`（固定 seed 规则）给出，
+//     子枝继承父枝出口的 U ⇒ 同一份 shape 必得同一份网格，无随机、不依赖遍历顺序；
+//   * **改这条规则会改变根枝的 u 相位**（视觉上树皮纹路整体绕枝旋转），
+//     属于会破坏既有资产观感 / gold 的改动，不要随手换。
+//
 // 前置条件：Shape 已通过 Validate()。函数内部不重复做全量校验，只 CHECK 硬前提
 // （环顶点数 >= 3、samples >= 2），因为违反这些的资产连循环都跑不起来。
 MeshData SweepBranches(const Shape& shape, const SweepOptions& opts = {});
@@ -62,9 +68,32 @@ MeshData SweepBranches(const Shape& shape, const SweepOptions& opts = {});
 // 且按 branches 顺序连续排列。两处必须同步修改（同文件内，且有测试钉住）。
 std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh);
 
+// 一张叶卡的姿态 + UV 锚点。**唯一**一处把 `anchor + anchor_mode` 翻译成几何。
+//
+// 约定（与 docs/vegetation_asset_format.md §4.1 同一份约定）：
+//   right = cross(up, normal)（右手系，单位向量）；(au, av) = 素材里要贴到 anchor 的点，
+//   格内归一化（u 向右、v 向上）。quad 四角：
+//     corner(u,v) = anchor + right·(u − au)·width + up·(v − av)·height
+//   ⇒ u=au, v=av 那一点恒等于 anchor（这正是 anchor 的定义：叶-枝连接点）。
+struct CardFrame {
+  Vec3d up;          // 单位向量，根 → 梢
+  Vec3d normal;      // 单位向量，卡面法线（与 up 正交）
+  Vec3d right;       // 单位向量，= cross(up, normal)
+  double au = 0.5;   // 素材里贴到 anchor 的 u
+  double av = 0.0;   // 素材里贴到 anchor 的 v
+};
+
+// 计算一张卡的姿态 + UV 锚点。
+//
+// 前置条件：`shape` 已通过 Validate()（`card.type` 必须存在于 leaf_types，
+// `anchor_mode` 必须是 4 个合法值之一）。违反直接 abort —— 这类资产连循环都
+// 跑不起来，静默回退成 bottom_center 只会让"素材怎么都贴不上枝"变成玄学。
+CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card);
+
 // 叶卡：anchor + up + normal + height + width → 四边形（顶点 = 参考 quad 的四角）。
 // 宽高都存在 shape 里（装配时算好），这里不做任何推导/拉伸。
-// UV：整格 (0,0)..(1,1)；atlas 的格子子矩形由调用方再映射。
+// 姿态与 UV 锚点由 ComputeCardFrame 统一决定（见上）；UV = 整格 (0,0)..(1,1)，
+// atlas 的格子子矩形由调用方再映射。
 MeshData BuildLeafCards(const Shape& shape);
 
 }  // namespace vegetation

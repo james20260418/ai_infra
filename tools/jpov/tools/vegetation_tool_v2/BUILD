@@ -49,11 +49,13 @@ cc_test(
 #   * shape 省略 → 打包目录里的 shapes/willow.pbtxt
 #   * bark / leaf 省略 → 只渲染拓扑（树干按 level 上棕色 + debug 绿卡）
 #
-# 场景 + 渲染抽成 cc_library（vegetation_v2_app），CLI 壳和 gold test 共用同一份代码
-# —— 否则「测试渲染的东西」和「用户看到的东西」迟早会分叉。
+# 场景 + 渲染在 cc_library(vegetation_v2_app) 里**只编译一次**（.h 只有接口 + CliArgs）：
+# 曾经是 header-only，每个 consumer 各编译一份实现，叶卡 alpha 覆盖率 mip 的浮点细节
+# 不同 ⇒ gold 与用户所见稳定差 12%。CLI 壳（vegetation_v2_viewer.cc）只调 RunViewer()。
 
 cc_library(
     name = "vegetation_v2_app",
+    srcs = ["viewer/vegetation_v2_app.cc"],
     hdrs = ["viewer/vegetation_v2_app.h"],
     deps = [
         ":shape",

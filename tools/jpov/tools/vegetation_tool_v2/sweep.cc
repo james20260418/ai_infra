@@ -396,6 +396,36 @@ std::vector<MeshData> SplitMeshByBranch(const Shape& shape, const MeshData& mesh
   return out;
 }
 
+CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card) {
+  const std::string* mode = nullptr;
+  for (const LeafType& t : shape.leaf_types) {
+    if (t.type == card.type) {
+      mode = &t.anchor_mode;
+      break;
+    }
+  }
+  if (mode == nullptr) {
+    std::fprintf(stderr,
+                 "ComputeCardFrame: card type %u 不在 leaf_types 里"
+                 "（Shape 必须先过 Validate）\n",
+                 card.type);
+    std::abort();
+  }
+  CardFrame f;
+  const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
+  const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});
+  const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
+  if (!AnchorModeToUv(*mode, &f.au, &f.av)) {
+    std::fprintf(stderr, "ComputeCardFrame: card type %u 的 anchor_mode \"%s\" 非法\n",
+                 card.type, mode->c_str());
+    std::abort();
+  }
+  f.up = Vec3d{up.x, up.y, up.z};
+  f.normal = Vec3d{nrm.x, nrm.y, nrm.z};
+  f.right = Vec3d{right.x, right.y, right.z};
+  return f;
+}
+
 MeshData BuildLeafCards(const Shape& shape) {
   MeshData mesh;
   for (const LeafCard& card : shape.cards) {
@@ -406,28 +436,15 @@ MeshData BuildLeafCards(const Shape& shape) {
     }
     const double width = card.width;
 
-    const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
-    const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});
-    const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
+    // 姿态 + UV 锚点只有一份来源（ComputeCardFrame）：绿卡、角标、真实叶卡都用它，
+    // 否则三者会各自漂移（历史上「绿卡和角标对不上」就是这么来的）。
+    const CardFrame frame = ComputeCardFrame(shape, card);
+    const V3 up{frame.up.x, frame.up.y, frame.up.z};
+    const V3 nrm{frame.normal.x, frame.normal.y, frame.normal.z};
+    const V3 right{frame.right.x, frame.right.y, frame.right.z};
     const V3 anchor{card.anchor.x, card.anchor.y, card.anchor.z};
-
-    // anchor_mode 只描述「根部落在格子的哪个位置」，由 AnchorModeToUv 统一翻译成
-    // (anchor_u, anchor_v)。四边形永远从根沿 +up 长，所以：
-    //   左下角 = anchor − right·(anchor_u·width) − up·(anchor_v·height)
-    std::string mode = "bottom_center";
-    for (const LeafType& t : shape.leaf_types) {
-      if (t.type == card.type) {
-        mode = t.anchor_mode;
-        break;
-      }
-    }
-    double anchor_u = 0.5;
-    double anchor_v = 0.0;
-    if (!AnchorModeToUv(mode, &anchor_u, &anchor_v)) {
-      std::fprintf(stderr, "BuildLeafCards: card type %u 的 anchor_mode \"%s\" 非法\n",
-                   card.type, mode.c_str());
-      std::abort();
-    }
+    const double anchor_u = frame.au;
+    const double anchor_v = frame.av;
 
     const V3 origin = Sub(Sub(anchor, Mul(right, anchor_u * width)),
                           Mul(up, anchor_v * card.height));

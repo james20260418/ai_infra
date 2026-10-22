@@ -296,6 +296,64 @@ void TestJunctionVContinuity() {
   }
 }
 
+// ComputeCardFrame：把 anchor + anchor_mode 翻译成姿态与 UV 锚点的**唯一**入口。
+// 这里钉住两件事：
+//   1) (au, av) 与 AnchorModeToUv 一致（4 种 mode 全覆盖）；
+//   2) (right, up, normal) 是右手系单位正交基 —— 三处调用方（真实叶卡 / 绿卡 / 标签）
+//      全靠它，任何一处算错都会让叶子整体错位或翻面。
+void TestCardFrame() {
+  Shape shape = StraightBranch(2, 0.1, 1.0, 8);
+  LeafType type;
+  type.type = 0;
+  type.anchor_mode = "bottom_center";
+  shape.leaf_types.push_back(type);
+
+  LeafCard card;
+  card.anchor = Vec3d{0.0, 1.0, 0.0};
+  card.up = Vec3d{0, 1, 0};
+  card.normal = Vec3d{0, 0, 2};   // 故意不归一化：ComputeCardFrame 必须自己归一
+  card.height = 0.2;
+  card.width = 0.1;
+  card.type = 0;
+
+  const struct {
+    const char* mode;
+    double u;
+    double v;
+  } kCases[] = {{"bottom_left", 0.0, 0.0},
+                {"bottom_center", 0.5, 0.0},
+                {"bottom_right", 1.0, 0.0},
+                {"top_center", 0.5, 1.0}};
+
+  for (const auto& c : kCases) {
+    shape.leaf_types[0].anchor_mode = c.mode;
+    const CardFrame f = ComputeCardFrame(shape, card);
+    Expect(Near(f.au, c.u, 1e-12) && Near(f.av, c.v, 1e-12),
+           std::string(c.mode) + "：UV 锚点应为 (" + std::to_string(c.u) + ", " +
+               std::to_string(c.v) + ")");
+    const double lu = std::sqrt(f.up.x * f.up.x + f.up.y * f.up.y + f.up.z * f.up.z);
+    const double ln = std::sqrt(f.normal.x * f.normal.x + f.normal.y * f.normal.y +
+                                f.normal.z * f.normal.z);
+    const double lr = std::sqrt(f.right.x * f.right.x + f.right.y * f.right.y +
+                                f.right.z * f.right.z);
+    Expect(Near(lu, 1.0, 1e-9) && Near(ln, 1.0, 1e-9) && Near(lr, 1.0, 1e-9),
+           std::string(c.mode) + "：right/up/normal 必须都是单位向量");
+    const double du = f.right.x * f.up.x + f.right.y * f.up.y + f.right.z * f.up.z;
+    const double dn = f.right.x * f.normal.x + f.right.y * f.normal.y +
+                      f.right.z * f.normal.z;
+    const double un = f.up.x * f.normal.x + f.up.y * f.normal.y + f.up.z * f.normal.z;
+    Expect(Near(du, 0.0, 1e-9) && Near(dn, 0.0, 1e-9) && Near(un, 0.0, 1e-9),
+           std::string(c.mode) + "：right/up/normal 必须两两正交");
+    // right = cross(up, normal) ⇒ right × up = normal（右手系，不翻面）
+    const double cx = f.right.y * f.up.z - f.right.z * f.up.y;
+    const double cy = f.right.z * f.up.x - f.right.x * f.up.z;
+    const double cz = f.right.x * f.up.y - f.right.y * f.up.x;
+    Expect(Near(cx, f.normal.x, 1e-9) && Near(cy, f.normal.y, 1e-9) &&
+               Near(cz, f.normal.z, 1e-9),
+           std::string(c.mode) + "：right × up 必须等于 normal（右手系）");
+  }
+}
+
 void TestLeafCards() {
   Shape shape = StraightBranch(2, 0.1, 1.0, 8);
   LeafType type;
@@ -385,6 +443,7 @@ int main() {
   jpov::vegetation::TestUvVScale();
   jpov::vegetation::TestNonCircularProfile();
   jpov::vegetation::TestJunctionVContinuity();
+  jpov::vegetation::TestCardFrame();
   jpov::vegetation::TestLeafCards();
   if (jpov::vegetation::g_failures != 0) {
     std::printf("%d failure(s)\n", jpov::vegetation::g_failures);

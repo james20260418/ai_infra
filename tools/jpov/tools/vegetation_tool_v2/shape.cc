@@ -5,10 +5,14 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <google/protobuf/text_format.h>
 
 namespace jpov {
 namespace vegetation {
@@ -230,6 +234,34 @@ Shape FromProto(const ShapeProto& proto) {
   }
 
   return shape;
+}
+
+bool LoadShapeFile(const std::string& path, Shape* out, std::string* error) {
+  auto fail = [error](const std::string& why) {
+    if (error != nullptr) {
+      *error = why;
+    }
+    return false;
+  };
+  if (out == nullptr) {
+    return fail("LoadShapeFile: out 不能为空");
+  }
+  std::ifstream in(path);
+  if (!in) {
+    return fail("打不开 shape 文件: " + path);
+  }
+  std::stringstream ss;
+  ss << in.rdbuf();
+  ShapeProto proto;
+  if (!google::protobuf::TextFormat::ParseFromString(ss.str(), &proto)) {
+    return fail("解析 ShapeProto 文本失败（字段名/括号与 proto/shape.proto 对不上？）: " + path);
+  }
+  *out = FromProto(proto);
+  std::string why;
+  if (!Validate(*out, &why)) {
+    return fail("shape 校验失败: " + why + "（文件: " + path + "）");
+  }
+  return true;
 }
 
 bool Validate(const Shape& shape, std::string* error) {

@@ -1,32 +1,32 @@
-// 植被工具 v2 —— 只做一件事：把 ShapeProto（pb.txt）渲染出来看形状对不对。
+// 植被工具 v2 —— **植物组合查看器**的命令行壳（只有参数解析 + `RunViewer`）。
 //
-// 刻意【不接材质】：到这一阶段要判断的是**拓扑/UV 尺度/分叉**，贴图会干扰判断。
-//   * 树干：按格式定义逐枝扫管，**每根枝单独一个 mesh**（便于逐枝上色/逐枝隐藏）
-//   * 层级配色：level 0 深棕 → 越深越浅（一眼看出父子关系）
-//   * 叶卡：用**盒子**表示（不是薄片）—— 盒子能看清朝向与尺寸，薄片侧面看不见
-//   * 类型配色：最多 4 种绿，按 type 取模
+// 定位：把 shape（拓扑）+ bark（树皮材质）+ leaf（叶卡素材）组合成植物渲染出来，
+// 给人和 AI 做资产验收；**三样给几样就渲染几样**。
+// 场景/渲染/交互的实现全在 vegetation_v2_app.cc（只编译一次，gold test 用的是同一个二进制）。
 //
-// 交互：K 切换叶卡、[ / ] 调最大显示层级、P 打印相机、H 打印叶卡帮助。
+// 交互：左键拖 = 转视角、滚轮 = 推拉、中键上下拖 = 平移注视点；
+//       K 切叶卡/绿卡、[ ] 调最大层级、P 打印相机、H 打印叶卡帮助。
 //
-// 用法：
-//   jpov_vegetation_v2_viewer                      # 只渲染默认范本的拓扑
-//   jpov_vegetation_v2_viewer --shape /tmp/willow.pbtxt
-//   jpov_vegetation_v2_viewer --shape ... --capture /tmp/shots --cam_phi 10 --cam_r 4
-//   --normal-scale <f>   法线强度（默认 1.5；0~3）
-//   --uv-vscale 0.5      v 方向缩放（默认 0 = 自动取 albedo 宽/高）
-//   --leaf leaf.png      叶卡贴图（整图一格；近乎黑的像素当透明）
-//   --leaf2 leaf_flip.png  leaf type 1（镜像手性）的素材；缺省回退 --leaf
-//   --curl 0.5           顶点法线球面化强度 A（0 = 平面法线）
-//   --leaf-normal 1.0    由 alpha 生成的法线贴图强度 B（0 = 关）
-//   --cam-target-y 3.0   注视点高度（配合 --cam_r 0.9 看叶卡细节）
-
+// 用法（详细说明见 ../README.md）：
+//   jpov_vegetation_v2_viewer                          # 默认范本 + 只渲染拓扑
+//   jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001
+//   jpov_vegetation_v2_viewer --capture shots/full --leaf ... --bark ...   # 无窗口出三张图
 //
-// 本文件只留 CLI 壳：解析参数 → new VegetationV2App → 交互跑 / headless 出图。
-// 场景与渲染全在 vegetation_v2_app.h（gold test 复用同一份代码）。
+//   --shape <pbtxt>      拓扑（省略 = shapes/willow.pbtxt）
+//   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
+//   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
+//   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
+//   --curl / --leaf-normal / --normal-scale / --uv-vscale   法线与 UV 相关强度
+//   --cam_phi/--cam_theta/--cam_r / --cam-target-y           视角（度/度/米/米）
+//   --max-level <n> / --only-type <n>                        只画前 n 层 / 只画某类叶卡
+//   --no-leaf / --no-bark / --no-hud                         关叶图（看 debug 绿卡）/ 关树皮 / 关 HUD
+//   --show-panel                                              capture 时也画 UI 面板
+//   --capture <dir>                                          无窗口出图（front/three_quarter/side）
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -124,61 +124,5 @@ using namespace vegv2;
 
 
 int main(int argc, char** argv) {
-  const CliArgs args = ParseCli(argc, argv);
-
-  JPOV::Config cfg;
-  cfg.title = "JPOV - vegetation v2 viewer";
-  cfg.width = kViewerWidth;
-  cfg.height = kViewerHeight;
-  cfg.headless = args.capture;
-  // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
-  // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
-  const JPOV::FontEntry kWantFonts[] = {
-      {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
-      {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
-  };
-  for (const JPOV::FontEntry& f : kWantFonts) {
-    if (std::ifstream(f.path).good()) {
-      cfg.fonts.push_back(f);
-    } else {
-      LOG(WARNING) << "缺字体（跳过，不画文字）: " << f.path;
-    }
-  }
-
-  VegetationV2App app(cfg);
-  app.has_fonts_ = !cfg.fonts.empty();
-  app.Init();
-  if (!LoadShape(args.shape_path, &app.shape_)) {
-    return 1;
-  }
-  app.shape_path_ = args.shape_path;
-  app.PrintLeafTypeHelp(args.shape_path);
-  app.BuildScene(args);
-
-  if (!args.capture) {
-    app.Run();
-    app.Finalize();
-    return 0;
-  }
-
-  // headless：先热身几帧（字体/材质上传），再按三个角度各拍一张
-  jpov::WindowInfo winfo;
-  winfo.width = kViewerWidth;
-  winfo.height = kViewerHeight;
-  jpov::InputSnapshot input{};
-  for (int i = 0; i < 3; ++i) {
-    app.RunOnce(input, winfo, "/tmp/_veg_v2_warm.png");
-  }
-  const std::string dir = args.out_dir.empty() ? "/tmp" : args.out_dir;
-  const std::pair<const char*, double> shots[] = {
-      {"front", 0.0}, {"three_quarter", 45.0}, {"side", 90.0}};
-  for (const auto& s : shots) {
-    app.view_.theta = s.second * 3.14159265358979323846 / 180.0;
-    const std::string path = dir + "/veg_v2_" + s.first + ".png";
-    LOG(INFO) << "[camera] " << app.CamString();
-    app.RunOnce(input, winfo, path.c_str());
-    LOG(INFO) << "capture: " << path;
-  }
-  app.Finalize();
-  return 0;
+  return vegv2::RunViewer(ParseCli(argc, argv));
 }
