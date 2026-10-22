@@ -62,6 +62,17 @@ for f in willow.pbtxt willow_two_types.pbtxt; do
     fi
 done
 
+# 入库的样例烘焙产物（samples/*.glb）：用来试「纯 glb 查看模式」，不用先有 shape/素材。
+# 12 MB 左右，是 willow.pbtxt + bark001 + willow_leaf 的一份真实烘焙结果（带风链数据）。
+echo ""
+echo "==> 4c. 拷贝样例 glb 到 samples/"
+mkdir -p "$OUTPUT_DIR/samples"
+if ls "$TOOL_DIR"/samples/*.glb >/dev/null 2>&1; then
+    cp -v "$TOOL_DIR"/samples/*.glb "$OUTPUT_DIR/samples/"
+else
+    echo "（没有 samples/*.glb，跳过：纯 glb 查看模式需要自己先 --bake 一份）"
+fi
+
 # 样例材质资产：入库的现成资产（叶卡图 + 转换好的树皮），clone 下来即可用。
 # 树皮 png 入库的理由：转换要 ImageMagick，不该让使用者为「跑起来看看」装依赖。
 echo ""
@@ -100,17 +111,25 @@ echo "    ./jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 3
 echo "        --bark bark/bark001                              # 完整组合：shape + 树皮 + 叶卡"
 echo "    （shape 省略时默认 shapes/willow.pbtxt；双叶型范本 --shape shapes/willow_two_types.pbtxt --leaf2 leaf/willow_leaf_flip.png）"
 echo ""
+echo "  烘焙一份 glb，再（纯查看模式）打开它："
+echo "    ./jpov_vegetation_v2_viewer --bake output/veg.glb \\"
+echo "        --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --leaf-black 30 \\"
+echo "        --bark bark/bark001"
+echo "    ./jpov_vegetation_v2_viewer --glb output/veg.glb --glb-only   # 左下角是风调试面板"
+echo "    （懒得到处找素材：入库的样例产物 ./jpov_vegetation_v2_viewer --glb samples/willow_baked.glb --glb-only）"
+echo ""
 echo "  出图（无窗口）："
 echo "    xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \\"
 echo "        --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001"
+echo "    （纯 glb 模式也能出图：--glb samples/willow_baked.glb --glb-only --capture shots/glb）"
 echo ""
 echo "  交互说明："
 echo "    左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）"
 echo "    [ ] = 调最大显示层级    P = 打印相机    H = 打印叶卡帮助（对齐方式/推荐长宽比）"
-echo "    面板：地面 y / 最大层级 / 树皮纹理 / 显示全部叶子 / 叶 type 下标"
+echo "    面板：原材料态 = 场景(地面 y/最大层级/树皮/法线) + 叶卡 + 烘焙 glb；glb 态 = 风调试"
 echo ""
 echo "  样例资产（已入库，见 assets/README.md）："
 echo "    leaf/willow_leaf.png       根部在左下角（anchor_mode bottom_left）"
 echo "    leaf/willow_leaf_flip.png  左右翻转版，给镜像手性的 leaf type（bottom_right）"
 echo "    bark/bark001/              albedo + normal(GL) + roughness"
-echo "    法线强度默认 1.5，面板可调 / --normal-scale <0~3>"
+echo "    法线强度默认 0.75，面板可调 / --normal-scale <0~3>"

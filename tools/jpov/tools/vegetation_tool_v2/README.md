@@ -57,6 +57,27 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 「回到原材料态」，也不能烘焙（两者都需要 shape）。相机默认按 glb 包围盒自动取景。
 渲染结果与「shape + glb」逐像素一致（同一机位实测 0 差异），只是少了回退能力。
 
+**不用自己烘也能试**：仓库里带了一份烘焙产物
+`samples/willow_baked.glb`（12 MB，692 关节 / 树干 40837 v / 叶卡 1768 v，内嵌树皮+叶卡贴图）。
+
+```bash
+cd tools/jpov && ./build_jpov_vegetation_v2_viewer.sh
+cd output/jpov_vegetation_v2_viewer
+./jpov_vegetation_v2_viewer --glb samples/willow_baked.glb --glb-only
+```
+
+它就是用本目录的素材、按面板默认参数烘出来的：
+
+```bash
+./jpov_vegetation_v2_viewer --bake output/veg.glb \
+    --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --leaf-black 30 \
+    --bark bark/bark001 --normal-scale 0.75
+```
+
+> 两份产物应当**逐字节相同**（md5 `e1a6a06f71fec3f49e8f2728bb4abb79`）。
+> 若你的 md5 不同：先确认上面命令的参数一字不差（风/关节参数走面板默认值），
+> 再确认 `AI_INFRA` 版本一致 —— 烘焙结果对几何与参数都很敏感。
+
 - 打包目录里必须有 `fonts/` 才能画文字；**没有字体不会崩**，只是不画 HUD/标签。
 - `--leaf-black`：黑底素材的「近乎黑 = 透明」阈值，软过档是 `[0.5t, 1.5t]`。
   入库样例背景是 `≈10~13` 的灰噪、内容 `≥44` ⇒ 给 **30**（`[15,45]`）；默认 12 会把灰噪留成半透明。
@@ -100,7 +121,7 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 | `export_vegetation_shape.py` | Blender/Sapling → `ShapeProto` 文本（含 `--anchor-mode`、导出侧的 anchor 上枝校验） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
-| `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树） |
+| `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树）；**`willow_baked.glb`（12 MB，入库的烘焙产物，见下）** |
 | `docs/vegetation_asset_format.md` | **格式规范**：约定、扫管、UV、叶卡、装配、校验、验收、版本 |
 | `bake/bake_options.h` | 烘焙参数/统计（baker 与关节构造共用，避免循环 include） |
 | `bake/vegetation_glb_joints.{h,cc}` | **关节构造**（GL-free 纯几何）：抽稀 / soft / 父子链 / 相位场；烘焙与单测共用 |
