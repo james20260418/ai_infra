@@ -262,7 +262,8 @@ if leaves_obj is not None:
         else:
             handedness["no_uv"] += 1
 
-        cards.append((anchor_pt, up, normal, height, branch_id, s_param))
+        cards.append((anchor_pt, up, normal, height, branch_id, s_param,
+                      bool(mirrored) if mirrored is not None else False))
 
 # ---------------------------------------------------------------------------
 # 写文本 proto
@@ -318,19 +319,38 @@ for pi in order:
         lines.append("  }")
     lines.append("}")
 
-print("[export] 叶卡手性：%d 张有 UV，其中镜像 %d 张（%.1f%%），缺 UV %d 张"
+mirrored_count = sum(1 for c in cards if c[6])
+plain_count = len(cards) - mirrored_count
+type_of = {}
+if plain_count:
+    type_of[False] = 0
+if mirrored_count:
+    type_of[True] = 1 if plain_count else 0
+
+print("[export] 叶卡手性：未镜像 %d 张 → type %s，镜像 %d 张 → type %s"
+      % (plain_count, type_of.get(False, "-"), mirrored_count, type_of.get(True, "-")))
+print("[export] 原始统计：%d 张有 UV，镜像 %d 张（%.1f%%），缺 UV %d 张"
       % (handedness["total"], handedness["mirrored"],
          100.0 * handedness["mirrored"] / max(1, handedness["total"]),
          handedness["no_uv"]))
 
-lines.append("leaf_types {")
-lines.append("  type: 0")
-lines.append('  description: "%s"' % leaf_desc)
-lines.append('  anchor_mode: "bottom_center"')
-lines.append("  preferred_aspect: 0")
-lines.append("}")
+# 手性 → 两个 leaf type。
+# 一种 leaf type 只对应一种对齐方式（Danis 定）：Blender 里 UV 镜像的那批卡
+# 单独成一个 type，由用户提供一张**左右翻转**后的素材；引擎不做运行时镜像。
+for flipped in (False, True):
+    if flipped not in type_of:
+        continue
+    lines.append("leaf_types {")
+    lines.append("  type: %d" % type_of[flipped])
+    if flipped:
+        lines.append('  description: "%s（镜像手性：请把素材左右翻转后使用）"' % leaf_desc)
+    else:
+        lines.append('  description: "%s"' % leaf_desc)
+    lines.append('  anchor_mode: "bottom_center"')
+    lines.append("  preferred_aspect: 0")
+    lines.append("}")
 
-for anchor, up, normal, height, branch_id, s_param in cards:
+for anchor, up, normal, height, branch_id, s_param, flipped in cards:
     lines.append("cards {")
     lines.append("  anchor { x: %s y: %s z: %s }" % (fmt(anchor[0]), fmt(anchor[1]), fmt(anchor[2])))
     lines.append("  up { x: %s y: %s z: %s }" % (fmt(up[0]), fmt(up[1]), fmt(up[2])))
@@ -338,7 +358,7 @@ for anchor, up, normal, height, branch_id, s_param in cards:
                  % (fmt(normal[0]), fmt(normal[1]), fmt(normal[2])))
     lines.append("  height: %s" % fmt(height))
     lines.append("  width: %s" % fmt(height * leaf_aspect))
-    lines.append("  type: 0")
+    lines.append("  type: %d" % type_of[flipped])
     lines.append("  branch: %d" % new_id.get(branch_id, 0))
     lines.append("  s: %s" % fmt(s_param))
     lines.append("}")

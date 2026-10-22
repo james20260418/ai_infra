@@ -298,7 +298,11 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
 6. 叶卡的 alpha 是 cutout，且会被 mip 缩小 → **必须用覆盖率保持的 mip 链**
    （`TextureOptions::alpha_coverage`，cutoff 与材质 `alpha_cutoff` 一致），
    否则远处叶片变稀、只剩一根根细线。
-7. 叶面细节可以吃「轮廓 alpha + 照片明暗 luma」生成的法线贴图（emboss），
+7. **手性（左右镜像）必须拆成两个 leaf type**：Blender 里叶卡的 UV 可能是镜像的
+   （实测 weeping_willow 预设约 48.7% 的卡是镜像）。一种 leaf type 只对应一种对齐方式，
+   所以导出时按 UV 手性拆成 `type 0`（未镜像）与 `type 1`（镜像），
+   由用户给 type 1 提供一张**左右翻转**后的素材；引擎不做运行时镜像。
+8. 叶面细节可以吃「轮廓 alpha + 照片明暗 luma」生成的法线贴图（emboss），
    再叠加每个卡片顶点的球面化法线（角部向外张）——两者互补：
    前者管单叶的叶脉/倒角，后者管整卡内部的受光渐变。
 
