@@ -175,6 +175,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         app.arc_additive_ = shot.arc_additive;
         app.soft_depth_ = shot.soft_depth;
         app.smooth_strips_ = shot.smooth;
+        // 圆环的平滑开关独立：拍摄表里沿用同一个 shot.smooth，
+        // 于是 100~150 仍是折线、160/170 才是圆环的折线 vs 平滑对照。
+        app.ring_smooth_ = shot.smooth;
         app.fresnel_enabled_ = shot.fresnel;
         app.fresnel_preset_ = shot.fresnel_preset;
         app.fresnel_ = jpov_strip::kFresnelPresets[shot.fresnel_preset].params;
@@ -193,6 +196,7 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     app.smooth_strips_ = false;
+    app.ring_smooth_ = true;
     app.vis_ = jpov_strip::RibbonVisibility{};
     app.ring_visible_ = true;
     app.fresnel_enabled_ = true;

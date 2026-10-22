@@ -396,6 +396,10 @@ public:
     // 默认平滑：圆环边反与射流软边都只有在这条 pass 上才是最终观感；
     // 折线 pass 仍然可切（A/B 用，gold 也锁的是它）。
     bool smooth_strips_ = true;
+    // 圆环（玻璃壳）单独一个平滑开关（Danis 2026-10-22 要求）：
+    // 四条 tube 的观感要和三条带/射流分开 A/B —— 圆环是闭合曲面 + 硬边交接，
+    // 和拖尾那种"该柔"的东西不是同一个判断，绑在一个开关上没法单独满意。
+    bool ring_smooth_ = true;
     bool arc_additive_ = false;      // 弧形改用**加法集**（发光拖尾），其余仍走覆盖集
     bool soft_depth_ = false;        // 条带与几何相交处的软过渡（per batch 选项）
     float soft_depth_m_ = 0.15f;     // 软深度过渡距离（米）
@@ -623,8 +627,8 @@ private:
         ring.tint = jpov::Color{ring_color_.x(), ring_color_.y(), ring_color_.z(),
                                 ring_opacity_};
         ring.blend = jpov::StripBlend::kCoverage;
-        ring.style = smooth_strips_ ? jpov::StripStyle::kSmooth
-                                    : jpov::StripStyle::kPolyline;
+        ring.style = ring_smooth_ ? jpov::StripStyle::kSmooth
+                                  : jpov::StripStyle::kPolyline;
         if (fresnel_enabled_) {
             ring.fresnel = fresnel_;
         }
@@ -687,7 +691,8 @@ private:
         ui_.Checkbox("SMAA 抗锯齿", &smaa_, left_rect());
         ui_.Checkbox("Bloom 辉光（HDR）", &bloom_, left_rect());
         ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
-        ui_.Checkbox("平滑条带（C1 + 解析法线）", &smooth_strips_, left_rect());
+        ui_.Checkbox("条带平滑（三条带/射流）", &smooth_strips_, left_rect());
+        ui_.Checkbox("圆环平滑（玻璃壳）", &ring_smooth_, left_rect());
         ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
@@ -716,7 +721,8 @@ private:
             shape_ = RibbonShape{};
             vis_ = RibbonVisibility{};
             arc_additive_ = false;
-            smooth_strips_ = false;
+            smooth_strips_ = true;
+            ring_smooth_ = true;
             soft_depth_ = false;
             soft_depth_m_ = 0.15f;
             ring_visible_ = true;
@@ -761,14 +767,15 @@ private:
         char info[256];
         std::snprintf(info, sizeof(info),
                       "phi %.2f  theta %.2f  R %.2f   |   %s   blend: %s%s   |   "
-                      "fresnel: %s   ring: %s   jet: %s",
+                      "fresnel: %s   ring: %s   jet: %s   ring_style: %s",
                       view_.phi, view_.theta, view_.R,
                       smooth_strips_ ? "smooth" : "polyline",
                       arc_additive_ ? "arc=add" : "all=coverage",
                       soft_depth_ ? "  soft_depth=on" : "",
                       fresnel_enabled_ ? kFresnelPresets[preset_idx].name : "off",
                       ring_visible_ ? "on" : "off",
-                      jet_visible_ ? (bloom_ ? "on+bloom" : "on") : "off");
+                      jet_visible_ ? (bloom_ ? "on+bloom" : "on") : "off",
+                      ring_smooth_ ? "smooth" : "polyline");
         ui_.Text(info, jpov::UiRect{{kLeftX, h - 46.0f}, {w - 40.0f, 24.0f}});
     }
 
