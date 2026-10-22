@@ -124,8 +124,10 @@ enum class StripBlend {
 //   cosθ = |N · V|                      // 双面：法线朝里朝外都成立
 //   F    = F0 + (1 − F0)·(1 − cosθ)^power
 //   F    = clamp(F · strength, 0, 1)
-//   color = mix(color, rim_color, F)    // 边 → 反射色
-//   α     = mix(α, graze_alpha·逐点α, F) // 边 → 不透明（中心保持看得穿）
+//   color = mix(color, rim_color, F)          // 边 → 反射色
+//   α     = mix(α, graze_alpha·形状淡出, F)    // 边 → 不透明（中心保持看得穿）
+//   其中「形状淡出」= 逐点 alpha × 逐点颜色 alpha（沿长度的淡出）；
+//   整批/逐条带的**不透明度乘子不进这里** —— 边反是独立旋钮（薄膜 α=0.12 也该有实心亮边）。
 //
 // 法线 N 的来源**由 batch.style 决定**（见 StripStyle 的绑定契约），
 // 本结构里**没有**法线模式字段 —— 也不该有：「柔和/折角」是同一个使用意图。
@@ -144,6 +146,29 @@ struct StripFresnel {
     Vec3f rim_color{0.85f, 0.93f, 1.0f};
 };
 
+// ── 一条条带的最终像素（本节是**唯一权威**，FS 与设计文档都以它为准）──
+//
+// 逐片元输入：(u, v, alpha_pt) 由几何插值得到；N 由 `style` 决定（见 StripStyle 的绑定契约）。
+//
+//   color = tint.rgb
+//         × strip_tints[i].rgb              （逐条带，可选）
+//         × point_colors[i][col].rgb        （逐点/沿长度，可选）
+//         × texture(uTex, uv).rgb           （有纹理时）
+//
+//   a     = tint.a × strip_tints[i].a × point_colors[i][col].a × alpha_pt
+//         × texture.a                        （有纹理时）
+//         → [fresnel]  a = mix(a, graze_alpha × alpha_pt × point_colors[i][col].a, F)
+//         → a *= width_profile(v)            （9 knot，**逐片元**求值）
+//         → a *= 裁形覆盖度                  （仅 kSmooth：解析 AA）
+//         → [soft depth] a *= clamp((scene_z − z)/m, 0, 1)；
+//           未开软深度时 z 比 scene_z 远超过 2cm 直接 discard
+//
+//   混合集合：kCoverage 写覆盖集（`accum += color·a·w`、`reveal = a`，WBO 解析后 over 合成）；
+//            kEmissive  写加法集（`add += color·a·fade·additive_gain`，不被覆盖集衰减）。
+//
+// 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（fresnel / profile /
+// 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
+//
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
@@ -181,6 +206,8 @@ struct TranslucentStripBatch {
     // 加法集贡献的上限就是 1.0 —— 发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量
     // （tone map 之前的世界是 scene-referred，亮部该能到几倍）。
     // 只对 `blend == kEmissive` 有意义：给覆盖集设它会崩（"设了不生效"比没有更糟）。
+    // 乘在**加法集贡献的最后一步**：`add += color · α · fade · gain`
+    // （fade = 软深度衰减；覆盖集/剖面/边反都已经算进 color 与 α）。
     std::optional<float> additive_gain;
 
     // 走哪个 pass（见 StripStyle）。同一帧可混用；两者写进同一张 WBO 覆盖集目标，
@@ -200,13 +227,20 @@ struct TranslucentStripBatch {
     // （用户按 stride memcpy / 存盘），加字段 = 破坏契约；平行数组对它是零侵入。
     //
     // 非空时必须与 strips 等长（ValidateStripBatch 会检查，长度不匹配 = 静默错色）。
+    // 与 `Strip16` 的下标一一对应：strip_tints[i] 作用于 strips[i]。
     std::vector<Color> strip_tints;
 
     // **逐点（沿长度）颜色**：每条带 16 个 RGBA 乘子。空 = 不用（默认，零开销）。
     //
     // 与 `Strip16::alpha`（逐点淡出）互补：那个管"多透"，这个管"什么颜色"。
     // 一起用才做得出「白 → 黄 → 红、同时尾部淡出」的射流/拖尾。
-    // 非空时必须与 strips 等长；列与列之间由硬件的双线性插值平滑过渡。
+    //
+    // 语义与约束（都要满足，否则 ValidateStripBatch 崩）：
+    //   * 非空时必须与 strips 等长；下标 = 条带，元素内下标 = 列（与 left/right 对齐）；
+    //   * 各分量 ∈ [0,1]（线性空间，乘法叠加；HDR 亮度请用 additive_gain）；
+    //   * 列与列之间由硬件**双线性**插值过渡（列上是精确值），所以 16 个点之外不需要更多；
+    //   * `point_count < 16` 的条带，只有前 point_count 列会被画出来（其余列塌缩成零面积），
+    //     这些列的颜色不会被采样 —— 不用给。
     std::vector<StripPointColors> strip_point_colors;
 };
 

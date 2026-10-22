@@ -170,6 +170,35 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // 顶点/控制点缓冲按需增长（reserve 只增不减），不预先占满 1024 条带；
     // 每次 DrawSmooth 都会先 clear 再填，所以这里不需要重置。
 
+    // 关闭态的默认 uniform **只在 Init 写一次**：uniform 状态是 per-program 的，
+    // 而 FS 里这些值只在对应开关打开时才会被读，所以每批重复上传纯属浪费
+    // （1000 批 × 7 次 glUniform = 7000 次驱动调用/帧）。开关字段本身仍然每批设置。
+    auto init_disabled_uniforms = [this](unsigned int program, const CommonUniforms& u) {
+        glUseProgram(program);
+        glUniform1f(u.soft_m, 1.0f);
+        glUniform1f(u.soft_inv, 1.0f);
+        // fresnel 的「关闭态」值：uFresnelEnabled=0 时 FS 不会读它们，但留确定值。
+        glUniform3f(u.fresnel_rim_color, 1.0f, 1.0f, 1.0f);
+        glUniform1f(u.fresnel_f0, 0.04f);
+        glUniform1f(u.fresnel_power, 5.0f);
+        glUniform1f(u.fresnel_strength, 1.0f);
+        glUniform1f(u.fresnel_graze_alpha, 1.0f);
+        glUniform1f(u.strip_tint_count, 1.0f);
+        glUniform1f(u.point_color_rows, 1.0f);
+        glUniform1f(u.additive_gain, 1.0f);
+        glUseProgram(0);
+    };
+    init_disabled_uniforms(prog_draw_, draw_uniforms_);
+    init_disabled_uniforms(prog_smooth_, smooth_uniforms_.common);
+
+    // GLSL 里硬编码了三个拓扑常量（顶点属性/条带 = 32、采样点数 = 16、段数 = 15）：
+    // 折线 pass 的 `gl_VertexID / 32` 与逐点颜色的 `tx = (u*15+0.5)/16` 都依赖它们。
+    // 改 C++ 常量却忘了改 shader，是**静默错色/错条带**（不崩、不出图像错误提示），
+    // 所以在这里拦住。
+    CHECK_EQ(kStripVerticesPerStrip, 32) << "kVs 里 gl_VertexID/32 必须同步";
+    CHECK_EQ(kStripSampleCount, 16) << "PointColor 里的 16 个 texel 必须同步";
+    CHECK_EQ(kStripQuads, 15) << "PointColor 里的 15 段必须同步";
+
     initialized_ = true;
 }
 
@@ -190,9 +219,11 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->blend_path = shader_mgr_->GetUniform(program, "uBlendPath");
     out->soft_enabled = shader_mgr_->GetUniform(program, "uSoftDepthEnabled");
     out->soft_m = shader_mgr_->GetUniform(program, "uSoftDepthM");
+    out->soft_inv = shader_mgr_->GetUniform(program, "uSoftDepthInv");
     out->cam_pos = shader_mgr_->GetUniform(program, "uCamPos");
     out->strip_tint = shader_mgr_->GetUniform(program, "uStripTint");
     out->has_strip_tint = shader_mgr_->GetUniform(program, "uHasStripTint");
+    out->strip_tint_count = shader_mgr_->GetUniform(program, "uStripTintCount");
     out->point_color = shader_mgr_->GetUniform(program, "uPointColor");
     out->has_point_color = shader_mgr_->GetUniform(program, "uHasPointColor");
     out->point_color_rows = shader_mgr_->GetUniform(program, "uPointColorRows");
@@ -404,13 +435,12 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     glUniform1f(uniforms.near_plane, ctx.camera->near);
     glUniform1f(uniforms.far_plane, ctx.camera->far);
     glUniform1i(uniforms.blend_path, ctx.want_additive ? 1 : 0);
+    // 关闭态的值已在 Init 写过（见 init_disabled_uniforms）：这里只设开关与**开启时**的值。
+    glUniform1i(uniforms.soft_enabled, batch.soft_depth_m.has_value() ? 1 : 0);
     if (batch.soft_depth_m.has_value()) {
-        glUniform1i(uniforms.soft_enabled, 1);
-        glUniform1f(uniforms.soft_m, *batch.soft_depth_m);
-    } else {
-        glUniform1i(uniforms.soft_enabled, 0);
-        // 关闭时也给一个合法值：避免读未初始化 uniform（FS 里该分支不取它）。
-        glUniform1f(uniforms.soft_m, 1.0f);
+        const float m = *batch.soft_depth_m;
+        glUniform1f(uniforms.soft_m, m);
+        glUniform1f(uniforms.soft_inv, 1.0f / m);
     }
 
     glActiveTexture(GL_TEXTURE0 + kSceneDepthUnit);
@@ -423,6 +453,8 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
         glBindTexture(GL_TEXTURE_2D, strip_tint_tex_);
         glUniform1i(uniforms.strip_tint, kStripTintUnit);
         glUniform1i(uniforms.has_strip_tint, 1);
+        glUniform1f(uniforms.strip_tint_count,
+                    static_cast<float>(ctx.batch->strip_tints.size()));
     } else {
         glUniform1i(uniforms.has_strip_tint, 0);
     }
@@ -435,34 +467,26 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
         glUniform1f(uniforms.point_color_rows, static_cast<float>(point_color_rows_));
     } else {
         glUniform1i(uniforms.has_point_color, 0);
-        glUniform1f(uniforms.point_color_rows, 1.0f);
     }
-    // HDR 增益：覆盖集恒 1.0（FS 里那个分支不取它，但别读未初始化的 uniform）。
-    glUniform1f(uniforms.additive_gain,
-                (batch.blend == StripBlend::kEmissive && batch.additive_gain.has_value())
-                    ? *batch.additive_gain
-                    : 1.0f);
+    // HDR 增益：只有加法集才需要改（覆盖集用 Init 写的 1.0）。
+    if (batch.blend == StripBlend::kEmissive) {
+        glUniform1f(uniforms.additive_gain,
+                    batch.additive_gain.has_value() ? *batch.additive_gain : 1.0f);
+    }
 
     // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
     // uniform 是无法排查的隐患）；开启时按批取值。
     glUniform3f(uniforms.cam_pos, ctx.camera->position.x(), ctx.camera->position.y(),
                 ctx.camera->position.z());
+    glUniform1i(uniforms.fresnel_enabled, batch.fresnel.has_value() ? 1 : 0);
     if (batch.fresnel.has_value()) {
         const StripFresnel& f = *batch.fresnel;
-        glUniform1i(uniforms.fresnel_enabled, 1);
         glUniform3f(uniforms.fresnel_rim_color, f.rim_color.x(), f.rim_color.y(),
                     f.rim_color.z());
         glUniform1f(uniforms.fresnel_f0, f.f0);
         glUniform1f(uniforms.fresnel_power, f.power);
         glUniform1f(uniforms.fresnel_strength, f.strength);
         glUniform1f(uniforms.fresnel_graze_alpha, f.graze_alpha);
-    } else {
-        glUniform1i(uniforms.fresnel_enabled, 0);
-        glUniform3f(uniforms.fresnel_rim_color, 1.0f, 1.0f, 1.0f);
-        glUniform1f(uniforms.fresnel_f0, 0.04f);
-        glUniform1f(uniforms.fresnel_power, 5.0f);
-        glUniform1f(uniforms.fresnel_strength, 1.0f);
-        glUniform1f(uniforms.fresnel_graze_alpha, 1.0f);
     }
 
     if (ctx.gl_tex != 0) {

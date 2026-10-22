@@ -105,6 +105,7 @@ flat in float vStripId;           // 本片元所属条带（= 逐条带数据�
 uniform sampler2D uTex;
 uniform sampler2D uStripTint;     // 逐条带 tint：1 texel / 条带（宽 = N，高 = 1），RGBA32F
 uniform int uHasStripTint;        // 0 = 本批没有逐条带颜色（只用 uTint，零取样）
+uniform float uStripTintCount;    // 该纹理**有效**宽度（条带数），用于钳下标
 uniform sampler2D uPointColor;    // 逐点颜色：宽 = 16 列、高 = 条带数，RGBA32F + 双线性
 uniform int uHasPointColor;       // 0 = 本批没有逐点颜色（零取样）
 uniform float uPointColorRows;    // 逐点颜色纹理高度（= 条带数，夹行号用）
@@ -119,6 +120,8 @@ uniform float uFar;
 uniform int uBlendPath;            // 0 = 覆盖集（吸收）；1 = 加法集（发光）
 uniform int uSoftDepthEnabled;     // 1 = 软深度淡出；0 = 硬判据（2cm）
 uniform float uSoftDepthM;         // 软深度过渡距离（米，仅 enabled 时有效）
+uniform float uSoftDepthInv;       // = 1/uSoftDepthM：逐片元把除法换成乘法（uniform 除法
+                                   //   编译器未必会提倒数的倒数，这里显式给）
 uniform vec3 uCamPos;              // 世界空间相机位置（fresnel 的 V）
 uniform int uFresnelEnabled;       // 1 = 开（否则这一段全部跳过）
 uniform vec3 uFresnelRimColor;
@@ -140,7 +143,10 @@ float ZView(float d) {
 // 同一个条带的所有片元读同一个 texel，NEAREST + 整数坐标 ⇒ 精确常量，无插值误差。
 vec4 EffectiveTint() {
     if (uHasStripTint == 1) {
-        return uTint * texelFetch(uStripTint, ivec2(int(vStripId), 0), 0);
+        // texelFetch 越界是**未定义行为**（不是"返回 0"），与平滑数据纹理同样处理：
+        // 下标按「本批实际条带数」钳一次。纹理容量（按 2 倍扩容）通常大于条带数。
+        int idx = int(clamp(vStripId, 0.0, uStripTintCount - 1.0));
+        return uTint * texelFetch(uStripTint, ivec2(idx, 0), 0);
     }
     return uTint;
 }
@@ -155,7 +161,9 @@ vec4 PointColor(float u) {
     float tx = (clamp(u, 0.0, 1.0) * 15.0 + 0.5) / 16.0;
     // 行坐标取 texel 中心 ⇒ 竖直方向权重恰好落在本行（不会渗到相邻条带）。
     float ty = (vStripId + 0.5) / max(uPointColorRows, 1.0);
-    return texture(uPointColor, vec2(tx, ty));
+    // textureLod(...,0)：这张纹理没有 mipmap，隐式导数只为算 LOD —— 纯浪费；
+    // 而且平滑 pass 的 u* 在段边界被 clamp 过，导数本身是脏的。
+    return textureLod(uPointColor, vec2(tx, ty), 0.0);
 }
 // 宽度方向剖面：9 knot / 8 段分段线性，在片元里求值（不是在顶点里插值）。
 // 参数是**宽度方向**的 v（0 = right 边 / 1 = left 边）。
@@ -177,25 +185,33 @@ void ModulateTexture(vec2 uv, inout vec3 color, inout float a) {
 // N 长度退化（叉积≈ 0，比如投影退化/极细条带）时当作正对视线（只剩 f0），
 // 不返回 NaN —— NaN 进 accum 会污染整帧后处理。
 float FresnelFactor(vec3 N) {
-    vec3 V = normalize(uCamPos - vWorld);
-    float nl = length(N);
+    // V 用逆平方根手算：normalize() 会先 length() 再逐分量除；这里省一次 sqrt，
+    // 同时给「相机与片元重合」√(0) 的情况一个确定性回退（NaN 进 accum 会污染整帧）。
+    vec3 to_cam = uCamPos - vWorld;
+    float d2 = dot(to_cam, to_cam);
+    vec3 V = (d2 > 1e-12) ? to_cam * inversesqrt(d2) : vec3(0.0, 0.0, 1.0);
+    float n2 = dot(N, N);
     // d 必须 clamp 到 [0,1]：浮点误差会让 |N·V| 冒到 1+eps，pow(负数, k) = NaN。
-    float d = (nl > 1e-6) ? clamp(abs(dot(N / nl, V)), 0.0, 1.0) : 1.0;
+    float d = (n2 > 1e-12) ? clamp(abs(dot(N, V) * inversesqrt(n2)), 0.0, 1.0) : 1.0;
     float f = uFresnelF0 + (1.0 - uFresnelF0) * pow(1.0 - d, uFresnelPower);
     return clamp(f * uFresnelStrength, 0.0, 1.0);
 }
 // 把菲涅耳作用到（尚未定稿的）(color, a) 上：
 //   颜色 → 掠射处趋近 rim_color（反射色）
-//   覆盖度 → 掠射处趋近 graze_alpha × 逐点 alpha（边变实，中心仍然看得穿）
-// 刻意**不乘**纹理/剖面 alpha：边反是「几何边」的属性，不该被贴图的透明区挖掉。
-// 调用位置固定：在 ModulateTexture 之后、WidthProfile 之前（剖面与 AA 仍是最后一层）。
-void ApplyFresnel(vec3 N, inout vec3 color, inout float a) {
+//   覆盖度 → 掠射处趋近 graze_alpha × shape_fade（边变实，中心仍然看得穿）
+//
+// `shape_fade` = 逐点 alpha × 逐点颜色 alpha，即**沿长度的淡出**（形状边界）。
+// 刻意**不乘** tint.a / 逐条带不透明度 / 纹理 alpha / 剖面 alpha：
+//   前两个是「材质密度」，边反是独立旋钮（薄膜 α=0.12 也该有实心亮边）；
+//   后两个是「贴图内容」，不该把一个几何边挖掉。
+// 调用位置固定：ModulateTexture 之后、WidthProfile / 裁形 AA 之前（它们是最后一层）。
+void ApplyFresnel(vec3 N, float shape_fade, inout vec3 color, inout float a) {
     if (uFresnelEnabled == 0) {
         return;
     }
     float f = FresnelFactor(N);
     color = mix(color, uFresnelRimColor, f);
-    a = mix(a, uFresnelGrazeAlpha * vUVAlpha.z, f);
+    a = mix(a, uFresnelGrazeAlpha * shape_fade, f);
 }
 )glsl";
 
@@ -214,7 +230,7 @@ void EmitFragment(vec3 color, float a) {
     if (uSoftDepthEnabled == 1) {
         // 软深度：0 < (scene_z − z) < 过渡距离 内线性淡出，相交处不再是硬切边。
         // 衰减必须发生在写目标**之前**，否则覆盖率高估（1−Π(1−α) 与画面不一致）。
-        fade = clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
+        fade = clamp((scene_z - z) * uSoftDepthInv, 0.0, 1.0);
     } else if (z > scene_z + 0.02) {
         discard;
     }
@@ -252,7 +268,7 @@ void main() {
     vec3 color = tint.rgb * pc.rgb;
     float a = tint.a * pc.a * vUVAlpha.z;
     ModulateTexture(vUVAlpha.xy, color, a);
-    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
+    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), vUVAlpha.z * pc.a, color, a);
     a *= WidthProfile(vUVAlpha.y);
     EmitFragment(color, a);
 }
@@ -363,7 +379,7 @@ void main() {
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
     // 也是平滑 pass 的附带好处：同一份数据已经在手上了，不用额外顶点属性。
-    ApplyFresnel(cross(dS, Hh), color, a);
+    ApplyFresnel(cross(dS, Hh), vUVAlpha.z * pc.a, color, a);
     a *= WidthProfile(vShade) * cov;
     EmitFragment(color, a);
 }
@@ -424,9 +440,11 @@ private:
         int blend_path = -1;
         int soft_enabled = -1;
         int soft_m = -1;
+        int soft_inv = -1;
         int cam_pos = -1;
         int strip_tint = -1;
         int has_strip_tint = -1;
+        int strip_tint_count = -1;
         int point_color = -1;
         int has_point_color = -1;
         int point_color_rows = -1;
