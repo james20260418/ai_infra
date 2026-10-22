@@ -131,12 +131,22 @@ int main(int argc, char** argv) {
   cfg.width = kViewerWidth;
   cfg.height = kViewerHeight;
   cfg.headless = args.capture;
-  cfg.fonts = {
+  // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
+  // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
+  const JPOV::FontEntry kWantFonts[] = {
       {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
       {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
   };
+  for (const JPOV::FontEntry& f : kWantFonts) {
+    if (std::ifstream(f.path).good()) {
+      cfg.fonts.push_back(f);
+    } else {
+      LOG(WARNING) << "缺字体（跳过，不画文字）: " << f.path;
+    }
+  }
 
   VegetationV2App app(cfg);
+  app.has_fonts_ = !cfg.fonts.empty();
   app.Init();
   if (!LoadShape(args.shape_path, &app.shape_)) {
     return 1;

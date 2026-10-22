@@ -400,7 +400,8 @@ class VegetationV2App : public JPOV {
   jpov_viewer::ViewConfig view_;
 
   bool show_panel_ = true;   // 面板只在交互窗口画（headless 出纯 3D）
-  bool show_hud_ = true;     // 左上角相机 HUD（要 CJK 字体；gold test 没配字体时关掉）
+  bool show_hud_ = true;     // 左上角相机 HUD（要 CJK 字体；没字体时 BuildScene 会关掉）
+  bool has_fonts_ = true;    // 有没有注册字体图集（没有就不画任何文字）
   // 叶卡过滤：勾了"显示全部叶子"就全画；否则只画 type_filter_ 这一个下标。
   bool show_all_card_types_ = true;
   uint32_t type_filter_ = 0;
@@ -782,6 +783,12 @@ class VegetationV2App : public JPOV {
     if (args.hide_bark) show_bark_ = false;
     if (args.hide_hud) show_hud_ = false;
     cam_target_y_ = args.cam_target_y;
+    // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
+    // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
+    if (!has_fonts_) {
+      show_hud_ = false;
+      show_labels_ = false;
+    }
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
