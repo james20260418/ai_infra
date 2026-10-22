@@ -72,6 +72,7 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 | `--glb <in.glb>` | 启动即进 glb 展示态（带风调试面板） |
 | `--no-wind` / `--wind-time <s>` | 关风 / 钉住风时间（A/B、可复现出图） |
 | `--wind-amp <f>` / `--wind-turb <f>` | 覆盖 pivot 振幅 / 平动湍流幅度（A/B） |
+| `--wind-blow <f>` / `--wind-blow-exp <f>` | 覆盖**吹歪**比例 / 指数（0 = 关） |
 
 交互：左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）；
 `[` `]` 调最大层级、`P` 打印相机、`H` 打印叶卡帮助（各 type 的 `anchor_mode` / 推荐宽高比）。

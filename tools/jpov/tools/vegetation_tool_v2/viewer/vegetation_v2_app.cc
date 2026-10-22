@@ -51,155 +51,18 @@ using jpov::vegetation::Vec3d;
 constexpr int kMaxCardTypes = 4;  // 4 种绿
 constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了看得见朝向
 
-// 叶卡 alpha 的裁切阈值。**必须只有一处**：TextureOptions.alpha_coverage.cutoff（覆盖率
-// 保持 mip 的二值化阈值）与 PBRMaterial.alpha_cutoff（片元保留判据）必须相等，
-// 否则远景叶子会忽多忽少（mip 按 0.5 二值化、裁切却用另一个值）。
-constexpr float kLeafAlphaCutoff = 0.5f;
 
-bool ReadFileBytes(const std::string& path, std::vector<unsigned char>* out) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  return !out->empty();
-}
-
-std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& rgba, int w, int h) {
-  std::vector<unsigned char> out;
-  stbi_write_png_to_func(
-      [](void* ctx, void* data, int size) {
-        std::vector<unsigned char>* v = static_cast<std::vector<unsigned char>*>(ctx);
-        const unsigned char* p = static_cast<const unsigned char*>(data);
-        v->insert(v->end(), p, p + size);
-      },
-      &out, w, h, 4, rgba.data(), w * 4);
-  return out;
-}
 
 // 只把 RGB 往透明区扩散，**不动 alpha**（alpha 是 cutout 的判据）。
 // 目的：mip / 双线性采样时，叶子边缘不会混到背景的黑色（否则一圈黑边）。
-void DilateRgbIntoTransparent(const std::vector<unsigned char>& alpha_mask,
-                              std::vector<unsigned char>* rgba, int w, int h, int passes) {
-  std::vector<unsigned char> mask = alpha_mask;   // 0/1：该像素有没有"内容"
-  for (int p = 0; p < passes; ++p) {
-    std::vector<unsigned char> next = mask;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const size_t idx = static_cast<size_t>(y) * w + x;
-        if (mask[idx]) continue;
-        int acc[3] = {0, 0, 0};
-        int n = 0;
-        const int dx[4] = {-1, 1, 0, 0};
-        const int dy[4] = {0, 0, -1, 1};
-        for (int k = 0; k < 4; ++k) {
-          const int nx = x + dx[k];
-          const int ny = y + dy[k];
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-          const size_t nidx = static_cast<size_t>(ny) * w + nx;
-          if (!mask[nidx]) continue;
-          acc[0] += (*rgba)[nidx * 4 + 0];
-          acc[1] += (*rgba)[nidx * 4 + 1];
-          acc[2] += (*rgba)[nidx * 4 + 2];
-          ++n;
-        }
-        if (n > 0) {
-          (*rgba)[idx * 4 + 0] = static_cast<unsigned char>(acc[0] / n);
-          (*rgba)[idx * 4 + 1] = static_cast<unsigned char>(acc[1] / n);
-          (*rgba)[idx * 4 + 2] = static_cast<unsigned char>(acc[2] / n);
-          next[idx] = 1;
-        }
-      }
-    }
-    mask.swap(next);
-  }
-}
 
 // 上下翻转 RGBA 行。
 // stb_image 解码后第 0 行是**图像顶部**，而 OpenGL 的 v=0 取第 0 行 ⇒ 直接上传时
 // v=0 = 图顶。Blender / glTF 的约定是 v=0 = 图**底**，用户按"根部画在图片底部"做的素材
 // 一旦直传就会整张上下颠倒。所以叶卡贴图在上传前翻一次行，让 uv(0,0) = 图左下。
-void FlipRows(std::vector<unsigned char>* rgba, int w, int h) {
-  const size_t stride = static_cast<size_t>(w) * 4;
-  std::vector<unsigned char> tmp(stride);
-  for (int y = 0; y < h / 2; ++y) {
-    unsigned char* a = rgba->data() + static_cast<size_t>(y) * stride;
-    unsigned char* b = rgba->data() + static_cast<size_t>(h - 1 - y) * stride;
-    std::memcpy(tmp.data(), a, stride);
-    std::memcpy(a, b, stride);
-    std::memcpy(b, tmp.data(), stride);
-  }
-}
 
 // 由 alpha 生成切线空间法线贴图：alpha 当高度场 → 模糊 → 中央差分。
 // green = +v（OpenGL 约定，与引擎 B = cross(N,T) 一致）；图像 y 向下，所以要取反。
-std::vector<unsigned char> BuildNormalFromAlpha(const std::vector<unsigned char>& rgba,
-                                                int w, int h, float depth) {
-  std::vector<float> height(static_cast<size_t>(w) * h);
-  for (size_t i = 0; i < height.size(); ++i) {
-    // 高度场 = 轮廓(alpha) + 叶面明暗(luma)。
-    //   alpha：给轮廓一圈软倒角（治"剃刀切出来的纸边"）
-    //   luma ：给叶脉/叶面起伏（照片本身的光影被当成凹凸，经典的 emboss 用法）
-    // 只用 alpha 时叶面内部是纯平的，近看仍然是贴纸；加上 luma 才有叶面细节。
-    const float a = rgba[i * 4 + 3] / 255.0f;
-    const float luma = (0.299f * rgba[i * 4 + 0] + 0.587f * rgba[i * 4 + 1] +
-                        0.114f * rgba[i * 4 + 2]) /
-                       255.0f;
-    height[i] = 0.45f * a + 0.55f * luma;
-  }
-  // 两次 3-tap 盒模糊（等效半径 2）：把硬边变成斜坡，法线才有倒角。
-  for (int pass = 0; pass < 2; ++pass) {
-    std::vector<float> tmp = height;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const int xm = (x == 0) ? 0 : x - 1;
-        const int xp = (x + 1 == w) ? w - 1 : x + 1;
-        tmp[static_cast<size_t>(y) * w + x] =
-            (height[static_cast<size_t>(y) * w + xm] +
-             height[static_cast<size_t>(y) * w + x] +
-             height[static_cast<size_t>(y) * w + xp]) / 3.0f;
-      }
-    }
-    height.swap(tmp);
-    tmp = height;
-    for (int y = 0; y < h; ++y) {
-      for (int x = 0; x < w; ++x) {
-        const int ym = (y == 0) ? 0 : y - 1;
-        const int yp = (y + 1 == h) ? h - 1 : y + 1;
-        tmp[static_cast<size_t>(y) * w + x] =
-            (height[static_cast<size_t>(ym) * w + x] +
-             height[static_cast<size_t>(y) * w + x] +
-             height[static_cast<size_t>(yp) * w + x]) / 3.0f;
-      }
-    }
-    height.swap(tmp);
-  }
-
-  std::vector<unsigned char> out(height.size() * 4);
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      const size_t i = static_cast<size_t>(y) * w + x;
-      const int xm = (x == 0) ? 0 : x - 1;
-      const int xp = (x + 1 == w) ? w - 1 : x + 1;
-      const int ym = (y == 0) ? 0 : y - 1;
-      const int yp = (y + 1 == h) ? h - 1 : y + 1;
-      const float dx = 0.5f * (height[static_cast<size_t>(y) * w + xp] -
-                               height[static_cast<size_t>(y) * w + xm]);
-      const float dy_img = 0.5f * (height[static_cast<size_t>(yp) * w + x] -
-                                   height[static_cast<size_t>(ym) * w + x]);
-      float nx = -dx * depth;
-      float ny = dy_img * depth;   // +v 与图像 y 反向
-      float nz = 1.0f;
-      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-      nx /= len;
-      ny /= len;
-      nz /= len;
-      out[i * 4 + 0] = static_cast<unsigned char>((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 1] = static_cast<unsigned char>((ny * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 2] = static_cast<unsigned char>((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
-      out[i * 4 + 3] = 255;
-    }
-  }
-  return out;
-}
 
 // A：顶点法线球面化。卡片本来 4 个顶点法线全等于面法线 → 整卡一个亮度（纸片感）。
 // 按格内 uv 把法线往「叶片中心鼓起」的方向掰：角上法线向外张，中央仍朝面外。
@@ -350,6 +213,13 @@ class VegetationV2App : public JPOV {
  public:
   using JPOV::JPOV;
 
+  // 释放 glb 的 GPU 资源。**必须在 Finalize() 之前调**（Finalize 之后 GL 上下文已销毁，
+  // ReleaseGltf 会崩），所以 RunViewer 统一走 Shutdown()。
+  void Shutdown() {
+    ReleaseGlb();
+    Finalize();
+  }
+
   // ── 状态机：原材料态（shape/leaf/bark 现搭）↔ glb 展示态（烘焙产物 + 风）──
   enum class Mode { kRaw, kGlb };
 
@@ -381,6 +251,9 @@ class VegetationV2App : public JPOV {
   float wind_gust_freq_ = 0.6f;
   float wind_gust_str_ = 0.7f;
   float wind_time_scale_ = 1.0f;
+  float wind_blow_ratio_ = 0.0f;   // 吹歪比例（0 = 关；随指数变量纲，是观感参数）
+  float wind_blow_exp_ = 2.0f;     // 吹歪指数 n（1 = 线性，2 = 梢部加速）
+  float scene_height_ = 1.0f;      // 参考高度 H（米）：shape/glb 的 Y 向包围盒高
   bool wind_paused_ = false;
   float wind_time_ = 0.0f;        // 秒；由帧号推（确定性）
   // 面板折叠状态
@@ -508,63 +381,47 @@ class VegetationV2App : public JPOV {
   // 一张叶卡贴图 → PBR 材质（黑底转 alpha、由 alpha+luma 生成法线、覆盖率 mip）。
   // key 用路径本身：同路径重复调用会被 TextureManager 去重。
   void LoadLeafMaterial(const std::string& path, jpov::PBRMaterial* out) {
-    std::vector<unsigned char> file;
-    CHECK(ReadFileBytes(path, &file)) << "读不到叶卡图: " << path;
-    int w = 0;
-    int h = 0;
-    int comp = 0;
-    unsigned char* px = stbi_load_from_memory(file.data(), static_cast<int>(file.size()), &w, &h,
-                                              &comp, 4);
-    CHECK(px != nullptr) << "解码失败: " << path;
-    std::vector<unsigned char> rgba(px, px + static_cast<size_t>(w) * h * 4);
-    stbi_image_free(px);
-
-    // 「近乎黑 = 透明」：max(r,g,b) 在 0.5t~1.5t 之间线性过渡。
-    const float lo = leaf_black_ * 0.5f;
-    const float hi = leaf_black_ * 1.5f;
-    const float span = std::max(1e-3f, hi - lo);
-    std::vector<unsigned char> mask(static_cast<size_t>(w) * h);
+    // 与 GLB 烘焙共用同一份 CPU 流水线（leaf_texture）：用户看到的叶子与写进 glb 的叶子
+    // 必须是同一批像素，否则「预览↔产物」迟早漂移。
+    jpov::vegetation::LeafTexture tex;
+    std::string err;
+    CHECK(jpov::vegetation::LoadLeafTextureFromPng(path, leaf_black_, /*dilate_passes=*/6, &tex,
+                                                   &err))
+        << err;
     size_t opaque = 0;
-    for (size_t i = 0; i < mask.size(); ++i) {
-      const float mx = static_cast<float>(std::max(
-          std::max(rgba[i * 4 + 0], rgba[i * 4 + 1]), rgba[i * 4 + 2]));
-      float t = (mx - lo) / span;
-      t = std::min(1.0f, std::max(0.0f, t));
-      const unsigned char a = static_cast<unsigned char>(t * 255.0f + 0.5f);
-      // 黑底素材：观测色 = 叶片色 × 覆盖率，边缘要按覆盖率反解，否则发黑。
-      if (t > 0.0f && t < 1.0f) {
-        for (int c = 0; c < 3; ++c) {
-          rgba[i * 4 + c] =
-              static_cast<unsigned char>(std::min(255.0f, rgba[i * 4 + c] / t));
-        }
+    for (size_t i = 0; i < static_cast<size_t>(tex.width) * tex.height; ++i) {
+      if (tex.rgba[i * 4 + 3] > 0) {
+        ++opaque;
       }
-      rgba[i * 4 + 3] = a;
-      mask[i] = a > 0 ? 1 : 0;
-      if (a > 0) ++opaque;
     }
-    CHECK(opaque > 0) << "叶卡图里没有非黑像素（阈值 --leaf-black " << leaf_black_ << "）: "
-                      << path;
-    LOG(INFO) << "叶卡: " << path << " " << w << "x" << h << "，不透明 "
-              << (100.0 * static_cast<double>(opaque) / static_cast<double>(mask.size())) << "%";
-    DilateRgbIntoTransparent(mask, &rgba, w, h, 6);
-    std::vector<unsigned char> normal_rgba = BuildNormalFromAlpha(rgba, w, h, 4.0f);
-    // albedo 与法线一起翻行：v=0 = 图底（Blender/glTF 约定）。
-    FlipRows(&rgba, w, h);
-    FlipRows(&normal_rgba, w, h);
+    LOG(INFO) << "叶卡: " << path << " " << tex.width << "x" << tex.height << "，不透明 "
+              << (100.0 * static_cast<double>(opaque) /
+                  static_cast<double>(static_cast<size_t>(tex.width) * tex.height))
+              << "%";
+
+    std::vector<unsigned char> albedo = tex.rgba;
+    std::vector<unsigned char> normal_rgba = jpov::vegetation::BuildLeafNormalMap(tex, 4.0f);
+    // albedo 与法线一起翻行：v=0 = 图底（glTF 约定）。
+    jpov::vegetation::FlipRows(&albedo, tex.width, tex.height);
+    jpov::vegetation::FlipRows(&normal_rgba, tex.width, tex.height);
 
     jpov::TextureOptions opts;
     opts.mipmap = true;
     opts.repeat = false;
     opts.alpha_coverage.enabled = true;
-    opts.alpha_coverage.cutoff = kLeafAlphaCutoff;
+    opts.alpha_coverage.cutoff = jpov::vegetation::kLeafAlphaCutoff;
     *out = jpov::PBRMaterial::SolidColor({1.0f, 1.0f, 1.0f, 1.0f});
+    std::vector<unsigned char> albedo_png;
+    std::vector<unsigned char> normal_png;
+    CHECK(jpov::vegetation::EncodePng(albedo, tex.width, tex.height, &albedo_png));
+    CHECK(jpov::vegetation::EncodePng(normal_rgba, tex.width, tex.height, &normal_png));
     out->base_color_tex =
-        RegisterTextureFromMemory(EncodePng(rgba, w, h), "leaf_albedo:" + path, opts);
+        RegisterTextureFromMemory(albedo_png, "leaf_albedo:" + path, opts);
     out->normal_tex =
-        RegisterTextureFromMemory(EncodePng(normal_rgba, w, h), "leaf_normal:" + path, opts);
+        RegisterTextureFromMemory(normal_png, "leaf_normal:" + path, opts);
     out->normal_scale = leaf_normal_scale_;
     out->alpha_mode = jpov::AlphaMode::kMask;
-    out->alpha_cutoff = kLeafAlphaCutoff;
+    out->alpha_cutoff = jpov::vegetation::kLeafAlphaCutoff;
     out->double_sided = true;
   }
 
@@ -643,8 +500,25 @@ class VegetationV2App : public JPOV {
 
   void BuildScene(const CliArgs& args) {
     normal_scale_ = args.normal_scale;
+    // 吹歪的参考高度 H：树高（Y 向包围盒）。每帧重算太浪费，这里算一次。
+    {
+      float ymin = 1e30f;
+      float ymax = -1e30f;
+      for (const jpov::vegetation::Branch& b : shape_.branches) {
+        for (const jpov::vegetation::BranchSample& smp : b.samples) {
+          ymin = std::min(ymin, static_cast<float>(smp.position.y));
+          ymax = std::max(ymax, static_cast<float>(smp.position.y));
+        }
+      }
+      scene_height_ = (ymax > ymin) ? (ymax - ymin) : 1.0f;
+    }
     bark_dir_ = args.bark_dir;
     leaf_path_ = args.leaf_path;
+    // 烘焙默认参数**继承命令行**：否则 --leaf-black 50 只影响预览、产物还是 30，
+    // 预览与产物会悄悄不一致（这正是「同一份数据两条流水线」的经典坑）。
+    bake_leaf_black_ = args.leaf_black;
+    bake_leaf_normal_ = args.leaf_normal;
+    bake_normal_scale_ = args.normal_scale;
     bake_out_path_ = args.bake_glb_path;
     if (args.wind_off) {
       wind_on_ = false;
@@ -654,6 +528,12 @@ class VegetationV2App : public JPOV {
     }
     if (args.wind_turb >= 0.0f) {
       wind_turb_amp_ = args.wind_turb;
+    }
+    if (args.wind_blow >= 0.0f) {
+      wind_blow_ratio_ = args.wind_blow;
+    }
+    if (args.wind_blow_exp >= 0.0f) {
+      wind_blow_exp_ = args.wind_blow_exp;
     }
     if (args.wind_time >= 0.0f) {
       wind_paused_ = true;
@@ -893,6 +773,12 @@ class VegetationV2App : public JPOV {
     glb_ = std::move(obj);
     glb_loaded_ = true;
     glb_path_ = path;
+    if (glb_.bounds_valid) {
+      const float h = glb_.bounds_max[1] - glb_.bounds_min[1];
+      if (h > 1e-3f) {
+        scene_height_ = h;
+      }
+    }
     mode_ = Mode::kGlb;
     LOG(INFO) << "进入 glb 展示态: " << path << "（" << glb_.size() << " 个 primitive）";
   }
@@ -923,6 +809,9 @@ class VegetationV2App : public JPOV {
     w.turb_frequency = wind_turb_freq_;
     w.gust_frequency = wind_gust_freq_;
     w.gust_strength = wind_gust_str_;
+    w.blow_ratio = wind_blow_ratio_;
+    w.blow_away_exponent = wind_blow_exp_;
+    w.blow_ref_length = (scene_height_ > 1e-3f) ? scene_height_ : 1.0f;
     return w;
   }
 
@@ -1200,7 +1089,7 @@ class VegetationV2App : public JPOV {
         });
       } else {
         // 风调试（glb 展示态）：参考 v1 wind viewer，精简到 10 行、近似方形。
-        panel(xl, &yl, "风调试", &wind_panel_open_, 10,
+        panel(xl, &yl, "风调试", &wind_panel_open_, 12,
               [&](int i, const jpov::UiRect& r) {
                 if (i == 0) {
                   ui_.Checkbox("启用风", &wind_on_, r);
@@ -1219,6 +1108,10 @@ class VegetationV2App : public JPOV {
                 } else if (i == 7) {
                   ui_.SliderFloat("阵风 强度", &wind_gust_str_, r, 0.0f, 1.0f, 2);
                 } else if (i == 8) {
+                  ui_.SliderFloat("吹歪比例", &wind_blow_ratio_, r, 0.0f, 0.5f, 3);
+                } else if (i == 9) {
+                  ui_.SliderFloat("吹歪指数 n", &wind_blow_exp_, r, 1.0f, 4.0f, 1);
+                } else if (i == 10) {
                   ui_.SliderFloat("时间缩放", &wind_time_scale_, r, 0.0f, 2.0f, 2);
                 } else {
                   ui_.Checkbox("暂停", &wind_paused_, r);
@@ -1321,7 +1214,7 @@ int RunViewer(const CliArgs& args) {
   if (!args.bake_glb_path.empty()) {
     app.BakeNow();
     const bool ok = app.bake_ok_;
-    app.Finalize();
+    app.Shutdown();
     return ok ? 0 : 1;
   }
   // 直接进 glb 展示态（已有产物时跳过原材料态）。
@@ -1331,7 +1224,7 @@ int RunViewer(const CliArgs& args) {
 
   if (!args.capture) {
     app.Run();
-    app.Finalize();
+    app.Shutdown();
     return 0;
   }
 
@@ -1353,7 +1246,7 @@ int RunViewer(const CliArgs& args) {
     app.RunOnce(input, winfo, path.c_str());
     LOG(INFO) << "capture: " << path;
   }
-  app.Finalize();
+  app.Shutdown();
   return 0;
 }
 

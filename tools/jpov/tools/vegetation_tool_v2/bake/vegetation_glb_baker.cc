@@ -466,7 +466,7 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
     leaf_mi.normal_tex.key = "mem:leaf:normal";
     leaf_mi.normal_scale = static_cast<float>(opts.leaf_normal);
     leaf_mi.alpha_mode = AlphaMode::kMask;
-    leaf_mi.alpha_cutoff = 0.5f;
+    leaf_mi.alpha_cutoff = kLeafAlphaCutoff;
     leaf_mi.double_sided = true;
     leaf_mi.metallic_factor = 0.0f;
     leaf_mi.roughness_factor = 0.85f;

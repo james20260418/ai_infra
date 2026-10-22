@@ -113,6 +113,9 @@ void UploadObjectWindUniforms(unsigned int prog, const Object3DCommand& cmd,
     glUniform1f(glGetUniformLocation(prog, "uWindTurbFreq"), w.turb_frequency);
     glUniform1f(glGetUniformLocation(prog, "uWindGustFreq"), w.gust_frequency);
     glUniform1f(glGetUniformLocation(prog, "uWindGustStr"), w.gust_strength);
+    glUniform1f(glGetUniformLocation(prog, "uWindBlowRatio"), w.blow_ratio);
+    glUniform1f(glGetUniformLocation(prog, "uWindBlowExponent"), w.blow_away_exponent);
+    glUniform1f(glGetUniformLocation(prog, "uWindBlowRefLength"), w.blow_ref_length);
     glUniform1i(glGetUniformLocation(prog, "uWindJointCount"),
                 static_cast<int>(mesh->wind_joint_count));
     // 采样器 uniform 总是指到本单元（无表时 VS 也不会 texelFetch，无碍）。

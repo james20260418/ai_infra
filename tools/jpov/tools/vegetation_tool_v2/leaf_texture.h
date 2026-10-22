@@ -14,6 +14,11 @@
 namespace jpov {
 namespace vegetation {
 
+// 叶卡 alpha 的裁切阈值。**必须只有一处**：覆盖率 mip 的二值化阈值与材质的
+// `alpha_cutoff`（片元保留判据）必须相等，否则远景叶子会忽多忽少。
+// 查看器（预览）与 GLB 烘焙（产物）都引用它。
+constexpr float kLeafAlphaCutoff = 0.5f;
+
 // 一张 RGBA8 叶卡贴图（行序 = 图片自上而下，与 PNG 文件一致）。
 struct LeafTexture {
   int width = 0;

@@ -76,6 +76,11 @@ uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
 uniform float uWindGustStr;
+// 吹歪（blow-away）：纯平移，沿水平风向；与枢轴风/湍流独立叠加。
+//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（loc6.z，载入期平滑）。
+uniform float uWindBlowRatio;
+uniform float uWindBlowExponent;
+uniform float uWindBlowRefLength;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kTurbLevF  = 0.5;
@@ -183,6 +188,13 @@ void main() {
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
                                   + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
+            // 吹歪：整体向风向压弯（越靠梢位移越大）。L 来自 loc6.z（不是逐关节量，
+            // 所以空间连续，不会在关节处出现台阶）。
+            if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && aFlex.z > 0.0) {
+                float ty = clamp(aFlex.z / uWindBlowRefLength, 0.0, 4.0);
+                p += wdir * (uWindBlowRatio * aFlex.z *
+                             pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
+            }
     }
     vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -222,6 +234,11 @@ uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
 uniform float uWindGustStr;
+// 吹歪（blow-away）：纯平移，沿水平风向；与枢轴风/湍流独立叠加。
+//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（loc6.z，载入期平滑）。
+uniform float uWindBlowRatio;
+uniform float uWindBlowExponent;
+uniform float uWindBlowRefLength;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kTurbLevF  = 0.5;
@@ -329,6 +346,13 @@ void main() {
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
                                   + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
+            // 吹歪：整体向风向压弯（越靠梢位移越大）。L 来自 loc6.z（不是逐关节量，
+            // 所以空间连续，不会在关节处出现台阶）。
+            if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && aFlex.z > 0.0) {
+                float ty = clamp(aFlex.z / uWindBlowRefLength, 0.0, 4.0);
+                p += wdir * (uWindBlowRatio * aFlex.z *
+                             pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
+            }
     }
     vec4 world_pos = uModel * vec4(p, 1.0);
     vWorldPos = world_pos.xyz;
@@ -370,6 +394,11 @@ uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
 uniform float uWindGustStr;
+// 吹歪（blow-away）：纯平移，沿水平风向；与枢轴风/湍流独立叠加。
+//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（loc6.z，载入期平滑）。
+uniform float uWindBlowRatio;
+uniform float uWindBlowExponent;
+uniform float uWindBlowRefLength;
 const int   kMaxWindChain  = 16;
 const float kWindPivotGain = 0.4;
 const float kTurbLevF  = 0.5;
@@ -468,6 +497,13 @@ void main() {
             vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
                                   + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
             p += tdir * (tamp * sin(6.28318531 * tpj));
+            // 吹歪：整体向风向压弯（越靠梢位移越大）。L 来自 loc6.z（不是逐关节量，
+            // 所以空间连续，不会在关节处出现台阶）。
+            if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && aFlex.z > 0.0) {
+                float ty = clamp(aFlex.z / uWindBlowRefLength, 0.0, 4.0);
+                p += wdir * (uWindBlowRatio * aFlex.z *
+                             pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
+            }
     }
     gl_Position = uShadowMVP * vec4(p, 1.0);
     vec4 dpos = uShadowDepthMVP * vec4(p, 1.0);

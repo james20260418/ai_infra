@@ -55,6 +55,8 @@ struct CliArgs {
   float wind_time = -1.0f;     // >=0 = 钉住风时间（headless 确定性出图）
   float wind_amp = -1.0f;      // >=0 = 覆盖 pivot 振幅（A/B 用）
   float wind_turb = -1.0f;     // >=0 = 覆盖平动湍流幅度（A/B 用）
+  float wind_blow = -1.0f;     // >=0 = 覆盖吹歪比例（A/B 用）
+  float wind_blow_exp = -1.0f; // >=0 = 覆盖吹歪指数
 };
 
 // 跑查看器：`capture=false` 开交互窗口；`capture=true` 无窗口出三张图到 out_dir。

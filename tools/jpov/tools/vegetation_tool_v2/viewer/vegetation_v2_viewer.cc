@@ -99,6 +99,10 @@ CliArgs ParseCli(int argc, char** argv) {
       a.wind_amp = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--wind-turb" && has_val) {
       a.wind_turb = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--wind-blow" && has_val) {
+      a.wind_blow = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--wind-blow-exp" && has_val) {
+      a.wind_blow_exp = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--no-hud") {
       a.hide_hud = true;
     } else if (arg == "--no-bark") {
