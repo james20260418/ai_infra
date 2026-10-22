@@ -151,7 +151,8 @@ struct SeamStats {
 
     size_t target_loop_vertices = 0;  // 形变前 target 环顶点数
     size_t ref_loop_vertices = 0;     // reference 环顶点数
-    size_t band_vertices = 0;         // 参与求解的顶点数（不含冻结锚点）
+    // 参与求解的**组数**（按位置焊接后；≈ 去重后的顶点数，不含断面环与冻结锚点）。
+    size_t band_vertices = 0;
     size_t iterations = 0;            // 实际迭代次数（三种算法合计）
 
     // 断面重合度（米）：重建成功时应为 0；降级时是几何偏差。
