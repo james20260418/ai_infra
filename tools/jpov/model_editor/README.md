@@ -47,6 +47,30 @@ output/jpov_model_editor/jpov_model_editor --ui_shot --output_dir /tmp/ui \
   `删除 <轴> < 侧` 与 `删除 <轴> > 侧` 两个按钮；`显示裁剪面` 开关（裁剪面半透明块可能影响
   观感，可直接关掉显示）；结果 / 错误提示；当前三角形数。
 
+## 缝合语义（`mesh_seam.h`，2026-10-22）
+
+用户把 target 与 reference 摆好相对位置，给**一个**水平面 `y`：target 保留上方、reference
+保留下方，各自露出断面；然后把 target 断面附近的顶点做形变雕刻，使它的底口**形状 + 位置**
+严格等于 reference 的顶口，并尽量让法线连续（例：路灯上半截焊到蓝人脖子上）。
+
+- 三种形变算法（面板 `算法` / CLI `--stitch_algo`）：
+  - `harmonic`：带内解 Laplace（位移调和扩散），最稳；
+  - `arap`：As-Rigid-As-Possible，形变大时不易塌陷/翻面；
+  - `tps`：断面平面内 2D 薄板样条（RBF）全局场。
+- 断面环：按位置焊接后只取「落在切平面上」的边界边串环；非单环 / 自交 / 退化**直接拒绝**。
+- 环重建（`rebuild_loop`）：把 target 断面按 reference 环的顶点序列细分（分裂边界边，
+  局部扇形三角化）⇒ 两边顶点一一对应，可直接按索引焊接。要求 target 环顶点数 ≤ reference。
+- 指标：断面 Hausdorff / 法线夹角均值与最大 / 翻面数（面板与日志都会回显）。
+
+headless：
+
+```bash
+output/jpov_model_editor/jpov_model_editor --ui_shot --output_dir ../out \
+    --target_path street_lamp.glb --reference_path mixamo_male.glb \
+    --target_scale 0.1 --target_move -3.441,-11.3344,0 \
+    --stitch_y 0.88 --stitch_algo arap
+```
+
 ## 裁剪语义（`mesh_clip.h`）
 
 沿所选坐标轴（`X` / `Y` / `Z`）的平面把网格切成两半，**保留一侧、删除另一侧**；
@@ -74,6 +98,7 @@ glb 同目录；target 自带骨架时一并写入 skin。后台线程写文件�
 | 文件 | 职责 |
 |---|---|
 | `mesh_clip.h` | 沿 X/Y/Z 坐标平面裁剪三角形（纯函数 / GL-free） |
+| `mesh_seam.h` | 断面缝合：环提取 / 对应 / 三种形变 / 环重建（纯函数 / GL-free） |
 | `model_transform.h` | target 平移 / 旋转 / 缩放（就地改顶点，纯函数） |
 | `number_input.h` | 数值输入解析（纯函数） |
 | `model_save.{h,cc}` | 保存 glb（后台线程 + 状态机） |

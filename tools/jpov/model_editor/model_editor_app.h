@@ -37,6 +37,7 @@
 #include "tools/jpov/interface/skeleton_types.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/model_editor/mesh_clip.h"
+#include "tools/jpov/model_editor/mesh_seam.h"
 #include "tools/jpov/model_editor/model_save.h"
 #include "tools/jpov/model_editor/model_transform.h"
 #include "tools/jpov/model_editor/number_input.h"
@@ -159,6 +160,16 @@ public:
     bool show_clip_plane_ = true;
     std::string clip_msg_;     // 裁剪结果 / 错误提示
 
+    // ══════════════ 缝合（2026-10-22）══════════════
+    // reference 的 CPU 几何（bind pose，只读）：断面的形状来源。GPU 侧 reference_ 不动。
+    jpov::MeshData reference_cpu_;
+    float seam_plane_ = 0.0f;        // 同一个水平面（y）同时切 target 与 reference
+    int seam_algo_ = 0;              // 0=harmonic / 1=arap / 2=tps
+    float seam_band_scale_ = 2.0f;   // 影响带高度 = 该系数 × 断面等效半径
+    float seam_offset_deg_ = 0.0f;   // 环对应旋转偏移（度）
+    std::string seam_msg_;           // 缝合结果 / 错误提示
+    jpov::model_editor::SeamStats seam_stats_;
+
     ModelSaveController save_ctrl_;
 
     void InstallTextMeasure() {
@@ -209,6 +220,24 @@ public:
         target_startup_ = startup_geometry;
         target_current_ = startup_geometry;
         target_prim_enabled_.assign(target_current_.size(), true);
+
+        // reference 的 CPU 几何（缝合时取断面形状）。reference 只读，多 primitive 直接合并。
+        if (has_reference_) {
+            std::vector<jpov::GltfSaveMesh> ref_geometry;
+            struct RefCollector {
+                std::vector<jpov::GltfSaveMesh>* out;
+            } ref_collector{&ref_geometry};
+            const auto ref_cb = [](const jpov::GltfMeshEntry* entry, void* user) {
+                RefCollector* c = static_cast<RefCollector*>(user);
+                jpov::GltfSaveMesh sm;
+                sm.mesh = entry->mesh;
+                sm.material = entry->material;
+                c->out->push_back(std::move(sm));
+            };
+            if (jpov::LoadGltfScene(reference_path_, ref_cb, &ref_collector)) {
+                reference_cpu_ = MergePrimitivesForSeam(ref_geometry);
+            }
+        }
 
         // target 自带骨架（可选）。
         std::vector<jpov::SkeletonType> skins;
@@ -264,6 +293,177 @@ public:
     }
     void SetClipCoord(float coord) { clip_coord_ = coord; }
     void ApplyClip(ClipKeepSide keep) { DoClip(keep); }
+
+    // ==================== 缝合（2026-10-22）====================
+
+    // 把多个 primitive 合成一个 MeshData（reference 只读，合并安全）。
+    // 属性只在「所有非空 primitive 都有」时才带上（否则 Validate 会因长度不一致 crash）。
+    static jpov::MeshData MergePrimitivesForSeam(
+        const std::vector<jpov::GltfSaveMesh>& prims) {
+        jpov::MeshData out;
+        bool has_normal = true;
+        bool has_uv = true;
+        bool has_joints = true;
+        size_t non_empty = 0;
+        for (const auto& p : prims) {
+            if (p.mesh.positions.empty()) {
+                continue;
+            }
+            ++non_empty;
+            has_normal = has_normal && !p.mesh.normals.empty();
+            has_uv = has_uv && !p.mesh.uvs.empty();
+            has_joints = has_joints && !p.mesh.joint_indices.empty();
+        }
+        if (non_empty == 0) {
+            return out;
+        }
+        uint8_t flags = static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition);
+        if (has_normal) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal));
+        }
+        if (has_uv) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kUV));
+        }
+        if (has_joints) {
+            flags = static_cast<uint8_t>(flags |
+                                         static_cast<uint8_t>(jpov::MeshVertexFlags::kJoints));
+        }
+        out.flags = static_cast<jpov::MeshVertexFlags>(flags);
+        for (const auto& p : prims) {
+            if (p.mesh.positions.empty()) {
+                continue;
+            }
+            const uint32_t base = static_cast<uint32_t>(out.positions.size());
+            out.positions.insert(out.positions.end(), p.mesh.positions.begin(),
+                                 p.mesh.positions.end());
+            if (has_normal) {
+                out.normals.insert(out.normals.end(), p.mesh.normals.begin(),
+                                   p.mesh.normals.end());
+            }
+            if (has_uv) {
+                out.uvs.insert(out.uvs.end(), p.mesh.uvs.begin(), p.mesh.uvs.end());
+            }
+            if (has_joints) {
+                out.joint_indices.insert(out.joint_indices.end(),
+                                         p.mesh.joint_indices.begin(),
+                                         p.mesh.joint_indices.end());
+                out.joint_weights.insert(out.joint_weights.end(),
+                                         p.mesh.joint_weights.begin(),
+                                         p.mesh.joint_weights.end());
+            }
+            if (p.mesh.indices.empty()) {
+                for (uint32_t i = 0; i < p.mesh.positions.size(); ++i) {
+                    out.indices.push_back(base + i);
+                }
+            } else {
+                for (uint32_t idx : p.mesh.indices) {
+                    out.indices.push_back(base + idx);
+                }
+            }
+        }
+        out.Validate();
+        return out;
+    }
+
+    // headless 用：target 绕包围盒中心缩放，再整体平移（便于脚本摆位）。
+    void ScaleAndMoveTarget(float scale, const jpov::Vec3f& offset) {
+        if (scale > 0.0f && scale != 1.0f) {
+            StepScale(scale);
+        }
+        if (offset.Norm() > 0.0f) {
+            for (size_t i = 0; i < target_current_.size(); ++i) {
+                if (target_prim_enabled_[i]) {
+                    TranslateMesh(&target_current_[i].mesh, offset);
+                }
+            }
+            SyncTargetToGpu();
+        }
+        FitViewToScene();  // 摆位后重新取景（否则 headless 图里模型在画面外/太小）
+    }
+
+    // 执行缝合：同一个 y 平面切 target（保上）与 reference（保下），
+    // 再把 target 的底口雕成 reference 的顶口。
+    // 只支持「恰好一个 primitive 有断面」：多个 primitive 同时被切到时断面可能跨部件，
+    // 暂不处理（拒绝并提示）。
+    void ApplyStitch() {
+        seam_msg_.clear();
+        seam_stats_ = jpov::model_editor::SeamStats{};
+        if (!has_reference_ || reference_cpu_.positions.empty()) {
+            seam_msg_ = "缝合需要 reference（--reference_path）";
+            return;
+        }
+        const MeshBounds tb = TargetBounds();
+        if (tb.valid) {
+            LOG(INFO) << "缝合：plane y=" << seam_plane_ << "，target 包围盒 y=["
+                      << tb.min.y() << "," << tb.max.y() << "] x=["
+                      << tb.min.x() << "," << tb.max.x() << "] z=["
+                      << tb.min.z() << "," << tb.max.z() << "]";
+        }
+        int prim = -1;
+        for (size_t i = 0; i < target_current_.size(); ++i) {
+            if (!target_prim_enabled_[i]) {
+                continue;
+            }
+            jpov::MeshData cut;
+            ClipStats cs;
+            const bool cut_ok = ClipMeshByAxis(target_current_[i].mesh, 1, seam_plane_,
+                                               ClipKeepSide::kGreater, &cut, &cs);
+            if (!cut_ok) {
+                LOG(INFO) << "  prim " << i << "：切空（完全在平面下方）";
+                continue;
+            }
+            jpov::model_editor::SeamLoop loop;
+            std::string loop_err;
+            if (!jpov::model_editor::seam_internal::ExtractCutLoop(
+                    cut, 1, seam_plane_, 1e-5f, &loop, &loop_err)) {
+                LOG(INFO) << "  prim " << i << "：无断面 — " << loop_err;
+                continue;  // 没有断面（整个在平面上方 / 断面不合法）
+            }
+            LOG(INFO) << "  prim " << i << "：断面 " << loop.verts.size() << " 顶点";
+            if (prim >= 0) {
+                seam_msg_ = Format("有多个 primitive 的断面（%d 与 %zu），暂不支持", prim, i);
+                return;
+            }
+            prim = static_cast<int>(i);
+        }
+        if (prim < 0) {
+            seam_msg_ = "切平面没有切出合法断面（检查 y 是否穿过模型）";
+            return;
+        }
+
+        jpov::model_editor::SeamOptions opt;
+        opt.axis = 1;
+        opt.plane = seam_plane_;
+        opt.algo = static_cast<jpov::model_editor::SeamAlgo>(seam_algo_);
+        opt.band_scale = seam_band_scale_;
+        opt.offset_deg = seam_offset_deg_;
+        jpov::MeshData out;
+        jpov::model_editor::SeamStats st;
+        std::string err;
+        if (!jpov::model_editor::StitchSeam(target_current_[prim].mesh,
+                                           reference_cpu_, opt, &out, &st, &err)) {
+            seam_msg_ = "缝合失败：" + err;
+            LOG(WARNING) << "缝合被拒绝：" << err;
+            return;
+        }
+        target_current_[prim].mesh = std::move(out);
+        seam_stats_ = st;
+        if (!st.message.empty()) {
+            LOG(INFO) << "缝合细节：" << st.message;
+        }
+        SyncTargetToGpu();
+        seam_msg_ = Format(
+            "缝合完成（%s%s）：带 %zu 顶点，断面误差 %.3fmm，法线均值 %.1f°/最大 %.1f°，"
+            "翻面 %zu",
+            jpov::model_editor::SeamAlgoName(opt.algo),
+            st.loop_rebuilt ? "，环已重建" : "，环未重建",
+            st.band_vertices, st.loop_hausdorff_m * 1000.0f, st.normal_angle_mean_deg,
+            st.normal_angle_max_deg, st.flipped_triangles);
+        LOG(INFO) << seam_msg_;
+    }
+
     // 供 headless / CLI 用：阻塞等待上一次保存完成。
     void WaitForSave() {
         while (save_ctrl_.state() == ModelSaveState::kSaving) {
@@ -831,8 +1031,9 @@ private:
         const float panel_w = 0.30f * win_w;
         const float panel_x = win_w - panel_w - kMargin;
         const float panel_y = kMargin;
-        // 标题1 + 轴选择1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7。
-        constexpr int kRows = 7;
+        // 裁剪：标题1 + 轴1 + 坐标滑条1 + 按钮行1 + 显示面1 + 消息1 + 只读1 = 7；
+        // 缝合：标题1 + 算法1 + y 滑条1 + 影响带1 + 旋转偏移1 + 按钮1 + 消息1 = 7。
+        constexpr int kRows = 14;
         const float panel_h = kPad * 2.0f + kRows * kRowH + (kRows - 1) * kSpacing;
         cmds->DrawRect({panel_x, panel_y}, {panel_w, panel_h},
                        jpov::Color{0.0f, 0.0f, 0.0f, 0.5f});
@@ -897,6 +1098,46 @@ private:
         }
         ui_.Text(Format("target 三角形：%zu", tri_count).c_str(),
                  jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        row_y += step_y;
+
+        // ---- 缝合 ----
+        DrawLabel("缝合（同一个 y 平面切两个模型）", left, row_w, row_y);
+        row_y += step_y;
+
+        {
+            static const std::vector<const char*> kAlgoItems = {"harmonic", "arap",
+                                                                "tps"};
+            ui_.Combo("算法", &seam_algo_, kAlgoItems,
+                      jpov::UiRect{{left, row_y}, {row_w, kRowH}});
+        }
+        row_y += step_y;
+
+        ui_.SliderFloat("缝合面 y (米)", &seam_plane_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, clip_min_[1],
+                        clip_max_[1], /*decimal_places*/ 3);
+        row_y += step_y;
+
+        ui_.SliderFloat("影响带 ×半径", &seam_band_scale_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, 0.2f, 6.0f,
+                        /*decimal_places*/ 1);
+        row_y += step_y;
+
+        ui_.SliderFloat("对应旋转 (°)", &seam_offset_deg_,
+                        jpov::UiRect{{left, row_y}, {row_w, kRowH}}, -180.0f, 180.0f,
+                        /*decimal_places*/ 0);
+        row_y += step_y;
+
+        if (ui_.Button("执行缝合（底口 → reference 顶口）",
+                       jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
+            ApplyStitch();
+        }
+        row_y += step_y;
+
+        if (!seam_msg_.empty()) {
+            cmds->DrawText(seam_msg_, {left, row_y + (kRowH - kFontSize) * 0.5f},
+                           kFontSize, jpov::Color{0.92f, 0.93f, 0.95f, 1.0f},
+                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        }
         row_y += step_y;
     }
 

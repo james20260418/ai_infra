@@ -14,6 +14,7 @@
 //   加 [--clip_axis x|y|z --clip_coord V --clip_side delete_low|delete_high]
 //   加 --save_after_clip [--save_format glb|gltf]（默认 glb；gltf = 外置纹理，可编辑）
 
+#include <cstdio>   // sscanf
 #include <cstdlib>  // atof / atoi
 #include <string>
 
@@ -43,6 +44,16 @@ struct CliOptions {
     // ── 单位（2026-10-22）：源文件长度单位 → 米 ──
     std::string unit = "auto";          // --unit auto|mm|cm|m|<scale>（target 源单位）
     std::string ref_unit = "auto";      // --reference_unit（reference 源单位，默认 auto）
+
+    // ── 缝合（2026-10-22）──
+    float target_scale = 0.0f;          // --target_scale：绕包围盒中心缩放（<=0 = 不动）
+    float move_xyz[3] = {0.0f, 0.0f, 0.0f};  // --target_move x,y,z
+    bool has_stitch = false;            // 给了 --stitch_y
+    float stitch_y = 0.0f;              // --stitch_y：同一个水平面（米）
+    std::string stitch_algo = "harmonic";  // --stitch_algo harmonic|arap|tps
+    float stitch_offset_deg = 0.0f;     // --stitch_offset_deg：环对应旋转
+    float stitch_band = 2.0f;           // --stitch_band：影响带 × 断面等效半径
+    bool save_after_stitch = false;     // --save_after_stitch
 };
 
 // 解析 CLI：标志可任意位置；未知标志 WARNING 忽略。
@@ -65,6 +76,52 @@ CliOptions ParseCli(int argc, char** argv) {
                 opt.ref_unit = argv[++i];
             } else {
                 LOG(WARNING) << "--reference_unit 缺少参数，忽略";
+        } else if (arg == "--save_after_stitch") {
+            opt.save_after_stitch = true;
+        } else if (arg == "--target_scale") {
+            if (i + 1 < argc) {
+                opt.target_scale = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--target_scale 缺少数值参数，忽略";
+            }
+        } else if (arg == "--target_move") {
+            if (i + 1 < argc) {
+                const std::string v = argv[++i];
+                if (std::sscanf(v.c_str(), "%f,%f,%f", &opt.move_xyz[0],
+                                &opt.move_xyz[1], &opt.move_xyz[2]) != 3) {
+                    LOG(FATAL) << "--target_move 需要 x,y,z，got " << v;
+                }
+            } else {
+                LOG(WARNING) << "--target_move 缺少参数，忽略";
+            }
+        } else if (arg == "--stitch_y") {
+            if (i + 1 < argc) {
+                opt.stitch_y = static_cast<float>(std::atof(argv[++i]));
+                opt.has_stitch = true;
+            } else {
+                LOG(WARNING) << "--stitch_y 缺少数值参数，忽略";
+            }
+        } else if (arg == "--stitch_algo") {
+            if (i + 1 < argc) {
+                const std::string v = argv[++i];
+                if (v != "harmonic" && v != "arap" && v != "tps") {
+                    LOG(FATAL) << "--stitch_algo 必须是 harmonic|arap|tps，got " << v;
+                }
+                opt.stitch_algo = v;
+            } else {
+                LOG(WARNING) << "--stitch_algo 缺少参数，忽略";
+            }
+        } else if (arg == "--stitch_offset_deg") {
+            if (i + 1 < argc) {
+                opt.stitch_offset_deg = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--stitch_offset_deg 缺少数值参数，忽略";
+            }
+        } else if (arg == "--stitch_band") {
+            if (i + 1 < argc) {
+                opt.stitch_band = static_cast<float>(std::atof(argv[++i]));
+            } else {
+                LOG(WARNING) << "--stitch_band 缺少数值参数，忽略";
             }
         } else if (arg == "--save_format") {
             if (i + 1 < argc) {
@@ -222,8 +279,31 @@ int main(int argc, char** argv) {
                           180.0);
     app.LoadScene();
 
-    // headless 出图前可选：按 CLI 裁一刀 +（可选）存盘，便于脚本化验证。
+    // headless 出图前可选：摆位 → 缝合 → 裁剪 → 存盘，便于脚本化验证。
     if (opt.ui_shot) {
+        if (opt.target_scale > 0.0f || opt.move_xyz[0] != 0.0f ||
+            opt.move_xyz[1] != 0.0f || opt.move_xyz[2] != 0.0f) {
+            app.ScaleAndMoveTarget(
+                opt.target_scale,
+                jpov::Vec3f(opt.move_xyz[0], opt.move_xyz[1], opt.move_xyz[2]));
+            LOG(INFO) << "headless 摆位：scale=" << opt.target_scale
+                      << " move=(" << opt.move_xyz[0] << "," << opt.move_xyz[1] << ","
+                      << opt.move_xyz[2] << ")";
+        }
+        if (opt.has_stitch) {
+            app.seam_plane_ = opt.stitch_y;
+            if (opt.stitch_algo == "arap") {
+                app.seam_algo_ = 1;
+            } else if (opt.stitch_algo == "tps") {
+                app.seam_algo_ = 2;
+            } else {
+                app.seam_algo_ = 0;
+            }
+            app.seam_offset_deg_ = opt.stitch_offset_deg;
+            app.seam_band_scale_ = opt.stitch_band;
+            app.ApplyStitch();
+            LOG(INFO) << "headless 缝合：" << app.seam_msg_;
+        }
         if (opt.has_clip) {
             app.SetClipAxis(opt.clip_axis);
             if (opt.has_clip_coord) {
@@ -236,7 +316,7 @@ int main(int argc, char** argv) {
                                           ? "delete_low(保留大侧)"
                                           : "delete_high(保留小侧)");
         }
-        if (opt.save_after_clip) {
+        if (opt.save_after_clip || opt.save_after_stitch) {
             app.SaveTargetToSourceSync(
                 opt.save_format == "gltf"
                     ? jpov::model_editor::ModelOutputFormat::kGltfExternal
