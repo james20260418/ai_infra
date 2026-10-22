@@ -8,6 +8,8 @@
 
 ## bark/bark001
 
+ambientCG 的素材是 **CC0**（可商用、无需署名）；叶卡图是自有素材。
+
 | 文件 | 来源 | 说明 |
 |------|------|------|
 | `albedo.png` | ambientCG `Bark001_1K-JPG_Color.jpg` | 无 JPEG 色度抽样、无块状噪声 |
@@ -24,6 +26,8 @@ ImageMagick 就能直接跑。原始 JPG 在 `tools/vegetation/textures/bark001/
 ```
 
 ## leaf/
+
+叶卡图是自有素材（非第三方）。
 
 | 文件 | 说明 |
 |------|------|

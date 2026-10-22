@@ -654,6 +654,12 @@ class VegetationV2App : public JPOV {
       }
       if (subset.cards.empty()) continue;
 
+      // type 1 = 镜像手性。少给 --leaf2 时会回退到 --leaf，两种 type 用同一张图，
+      // 手性就白拆了（叶子会朝同一边）——这不是错误数据，是漏参数，所以只警告不中止。
+      if (t == 1 && args.leaf2_path.empty()) {
+        LOG(WARNING) << "shape 有 type 1（镜像手性），但没给 --leaf2：将回退用 --leaf，"
+                        "两种 type 的叶子朝向会一样";
+      }
       const std::string path =
           (t == 1 && !args.leaf2_path.empty()) ? args.leaf2_path : args.leaf_path;
       LoadLeafMaterial(path, &leaf_mat_[t]);
