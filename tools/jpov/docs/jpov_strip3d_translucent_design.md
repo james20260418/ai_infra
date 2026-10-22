@@ -252,6 +252,10 @@ a *= clamp((scene_z - z) / uSoftDepthM, 0.0, 1.0);
 
 ## 7. 着色（unlit）与 fresnel
 
+> 实际落地版本见 **§19**：参数是 `StripFresnel`（批次级 optional），法线按 pass 分两种
+> （kSmooth 用解析法线、kPolyline 用导数法线），且边反作用在覆盖集的**色与 α**上，
+> 不是本节草图里的「另写加法集」。
+
 条带**不受光**（同 `Primitives3DRenderer` 的纯色 shader）：没有 PBR、没有 shadow、
 没有 tile light。这是有意的 —— 目标是廉价。
 
@@ -317,7 +321,7 @@ cmds.DrawTranslucentStrips(std::move(batch));
 
 **不加 `picking_id`**：本版不参与拾取（同玻璃现状），先不暴露「设了但不生效」的字段。
 `blend` 与 `soft_depth_m` 已随 M2/M3 落地（见 §16.6/§16.7）；
-`fresnel_*`（M4）**等落地时再加**，不预留空字段。
+`fresnel_*`（M4）**等落地时再加**，不预留空字段。（→ 已于 2026-10-22 落地，见 §19）
 
 ## 9. 四个用途的适配
 
@@ -398,7 +402,7 @@ cmds.DrawTranslucentStrips(std::move(batch));
 | M1 | 命令 + 几何 + 剖面 + 覆盖集 + Composite + gold + viewer | ✅ 2026-10-21（§16） |
 | M2 | 加法集 `kEmissive` + gold（拖尾） | ✅ 2026-10-21（`additive_gain` 未做：亮度直接由 tint/纹理控制） |
 | M3 | 软深度（per batch `soft_depth_m`）+ A/B 断言 | ✅ 2026-10-21 |
-| M4 | fresnel（导数法线） | ⬜ |
+| M4 | fresnel（+ 条带圆环；法线：kPolyline 导数 / kSmooth 解析） | ✅ 2026-10-22（§19） |
 | M5 | viewer 扩到四用途同屏 | ⬜（M1 已带 3 形状 viewer） |
 
 ## 15. 不在本设计范围
@@ -634,3 +638,260 @@ shader 里连 `m−1` 都换成 uniform `uSegCount`）。
   `BatchDrawContext` 把 drawer 原先的 7 个位置参数收成一个结构体。
 - viewer 的 `--capture` 改成**拍摄表**（每行只写与默认值不同的开关），删掉手动还原；
   同时删掉一张与 `75_smooth_zoom_hard` 完全相同的重复图（`85_smooth_zoom_hard_alt`）。
+
+## 19. M4：菲涅耳「廉价玻璃」+ 条带圆环（2026-10-22）
+
+Danis 的原话：「这次我们做 frensel 那个玻璃质感的事情，首先可以用 strip 围个圆环出来：
+上下各一层圆圈，侧面内外各一圈立着的 strip。就这样，应该就四组点：up_outer, up_inner,
+down_outer, down_inner，一组合就能出这个圆环的 4 个 strip。圆环放在 strip viewer 里。」
+于是 M4 和「一个能看出边反的玻璃壳」一起做。
+
+### 19.1 圆环 = 四组点 → 四条带
+
+16 点拓扑天生就是「一圈」：16 列里第 15 列与第 0 列重合 ⇒ 一圈 15 段，天然闭合。
+所以四组点（上/下 × 内/外，各 16 个）就能拼出圆筒外壳的四条带：
+
+| 带 | left（v=1） | right（v=0） | 长度方向 | 宽度方向 |
+|---|---|---|---|---|
+| 顶环面 | `up_outer` | `up_inner` | 绕圈 | 环宽 |
+| 底环面 | `down_outer` | `down_inner` | 绕圈 | 环宽 |
+| 外立壁 | `up_outer` | `down_outer` | **绕圈** | 高度 |
+| 内立壁 | `up_inner` | `down_inner` | **绕圈** | 高度 |
+
+⚠️ 最容易想错的一处：**立壁的「长度方向」也是绕圈，不是高度**。把高度分 16 段就凑不出
+闭环（四条带的列数也对不上）。这也是为什么四条带能塞进同一个 batch —— 它们共用同一份
+16 列参数化，只是一次 draw call 里的 4×32 个顶点。
+
+实现在 `src/strip/strip_geometry.h`：`StripRingShape`（外半径 + **壁厚** + 高度 + 位置/yaw）
+→ `MakeRing16` → `BuildStripRing`。用壁厚而不是内半径作输入，是因为「玻璃壳的厚薄」才是
+用户想调的参数，且天然保证 `0 < inner < outer`（越界 CHECK 崩）。
+`test/strip/strip_geometry_test.cc` 的 `StripRing.*` 4 条用例把「四组点的高度/半径、
+15 段闭合、哪组点当左轨/右轨（宽度方向是径向还是高度）」全部量化断言 —— 这几项接错时
+画面**仍然是个圈**，只有量坐标才看得见。
+
+### 19.2 菲涅耳参数（批次级）
+
+接口：`StripFresnel`（`interface/strip_types.h`），`TranslucentStripBatch::fresnel`
+是 `optional`：**不设 = 关闭**（与 `soft_depth_m` 同一写法，没有 `enabled` 字段）。
+
+```
+cosθ  = |N · V|                                   // 双面：法线朝里朝外都成立
+F     = clamp((f0 + (1−f0)·(1−cosθ)^power) · strength, 0, 1)
+color = mix(color, rim_color, F)                  // 掠过视线 → 反射色
+α     = mix(α, graze_alpha · 逐点α, F)            // 掠过视线 → 更实（中心仍看得穿）
+```
+
+四个刻意的选择：
+
+1. **用 `|N·V|` 而不是 `max(N·V, 0)`**：条带是单层片，没有「正面」概念，两面都该有边反。
+2. **颜色和覆盖度一起动**：只调色 → 边反在浅色背景上看不见；只调 α → 边反变成灰边。
+   两个一起混才是「边缘更亮且更像实体玻璃」。
+3. **`graze_alpha` 不乘纹理/剖面 alpha，只乘逐点 alpha**：边反是**几何边**的属性，
+   不该被贴图的透明区挖掉；但拖尾的逐点淡出要保留（否则尾巴又被边反拉实）。
+4. **调用顺序固定**：`ModulateTexture` 之后、`WidthProfile`/裁形 AA 之前。剖面与 AA 仍是
+   最后一层调制 —— 否则「柔边」开关会被边反覆盖，掠射处的抗锯齿也会被 α 抬高抵消。
+
+`strength` 只是把 `F` 放大后 clamp，不是另加一项：这样 `strength=1` 就是物理量，
+`>1` 是「比物理更像玻璃」的夸张，语义比「额外加一个高光项」更难被误解。
+
+### 19.3 法线：两条 pass 各自的**精确**来源
+
+§7 当初只写了导数法线（`cross(dFdx, dFdy)`），并预判「条带极细时可能闪」。这次按 pass 分开：
+
+- **kPolyline**：仍然只能用导数法线（顶点里没有法线，VS 也不该为此多算）。它是**逐折面
+  恒定**的 ⇒ 16 列圆环上一圈 15 个折面就是 15 条亮度带（实测 `160_fresnel_polyline_near`
+  能看到竖条带）。
+- **kSmooth**：曲面已经是 `P(t,w) = S(t) + w·H(t)`，法线直接是 `cross(dS, H)` —— **解析、
+  无折面、零额外数据**（这两个量本来就在 FS 里算着）。实测 `170_fresnel_smooth_near`
+  竖条带完全消失。这也顺手解决了 §7 担心的「细条带边反闪」：解析法线不依赖屏幕导数。
+
+结论：**要看玻璃边反就用 kSmooth**；kPolyline 的边反是「能跑但不是最终观感」。
+两条路都不是"平滑谎言"（顶点法线才是）：一条是精确的折面法线，一条是精确的曲面法线。
+
+**契约（2026-10-22 Danis 定）：法线来源与风格绑定，没有独立开关。**
+
+用户只有两种意图 —— 「柔和/条带」或「真折角」——`StripStyle` 就是这两个意图本身，
+所以法线不该是第三个自由度。**「平滑几何 + 折面法线」这个混搭被明确毙掉**：
+它只会产生与几何无关的亮带（15 段圆环那圈竖条），不对应任何使用意图，
+却要多一个能配错的旋钮。`StripFresnel` 里因此**没有** `normal_mode` 之类的字段。
+
+**算力开销（回答「柔和法线会不会更贵」）**
+
+- **不会，反而更便宜。** 解析法线 = 一次叉积（6 mul + 3 sub）+ 一次 normalize
+  （≈ 15~20 FLOP），而 `dS` / `Hh` **本来就在 FS 里算着**（Hermite 求值用的），
+  纯寄存器复用：不增加顶点属性、不增加 varying、不增加 texelFetch、不增加带宽。
+- 导数法线做的是**同样**一次叉积 + normalize，**外加** dFdx/dFdy 那套
+  （硬件按 2×2 quad 求差分；软件光栅下是真的去取邻居样本）。
+  所以同一份 fresnel 逻辑：解析法线 ≤ 导数法线。
+- fresnel 本身（pow + 两次 mix + 一次 dot）约 30~40 FLOP，是「开不开边反」的固有成本，
+  与法线来源无关。关闭时整段被 `uFresnelEnabled` 短路，画面逐字节等于旧版本。
+
+### 19.4 实验预设与观感
+
+`demo/strip_viewer_app.h` 的 `kFresnelPresets`（面板 Combo 与 `--capture` **共用同一份表**）：
+
+| # | 预设 | f0 | power | strength | graze_alpha | 观感 |
+|---|---|---|---|---|---|---|
+| 0 | 物理玻璃 | 0.04 | 5 | 1.0 | 1.00 | 最像玻璃（标准 Schlick） |
+| 1 | 柔边塑料 | 0.04 | 2 | 1.0 | 0.85 | 边很宽很软 ⇒ 亚克力/塑料 |
+| 2 | 厚玻璃 | 0.10 | 4 | 1.4 | 1.00 | 边更亮更宽 ⇒ 厚壁玻璃，也很像 |
+| 3 | 镜面边 | 0.16 | 6 | 2.2 | 1.00 | 过曝白边 ⇒ 像镀铬金属，**不是玻璃** |
+| 4 | 窄边反 | 0.03 | 8 | 1.2 | 0.95 | 极细一条亮线 ⇒ 薄壁/灯泡玻璃 |
+
+`--capture` 输出（都隐藏三条带、圆环居中、关掉参考方块）：
+`100_ring_no_fresnel`（基线，只有淡蓝薄膜）、`110`~`150` 五个预设、
+`160`/`170`（折线 vs 平滑，同一近机位）、`180`/`185`（默认场景 / 平滑 pass）。
+
+### 19.5 viewer 与 gold 策略
+
+- **边反只作用于玻璃圆环**（Danis 2026-10-22 定）：库层面 `StripFresnel` 仍是批级参数，
+  但 viewer 里只给圆环设 `batch.fresnel` —— 三条带/射流是发光拖尾，套边反会让边缘发白。
+  同样，圆环的「是否平滑」也独立成一个开关（`ring_smooth_`），不和条带共用。
+- viewer 新增：中列「显示圆环 / 圆环平滑 / 圆环外半径 / 壁厚 / 高度 / 不透明度」，
+  右列「菲涅耳边反开关 + 预设 + F0 / 掠射指数 / 强度 / 掠射不透明度 + 边反颜色」。
+  面板两列 → **三列**（控件 30 个，两列会超出 720 高），状态行挪到窗口底部。
+- 圆环**始终硬边（全 1 剖面）、始终纯色**：柔边剖面会把边反直接抹平，贴图会把边反盖成花纹。
+  所以面板的「柔边剖面 / 使用纹理」只作用于三条带。
+- **gold 不动**：`strip_gold.cc` 的 `ShotConfig` 显式写 `ring = false; fresnel = false;`。
+  理由：gold 锁的是 M1~M3 的条带路径，把实验期的 fresnel 预设焊进逐字节 gold 只会让
+  每调一次参数就重出一张图；圆环几何由单测锁，画面由 `--capture` 对照。
+  唯一副作用：`strip_demo_1280x720.png` 有 **1 个像素差 1 LSB**（FS 多了 `vWorld` varying、
+  指令重排），已重出；A/B 断言数值与之前完全一致（29419 / 2889 / 3540 / 3347 / 15980 / 5939 / 571）。
+
+### 19.6 已知限制 / 未做
+
+- 边反只作用于**覆盖集**的色与 α，没有独立的加法高光通道（§7 设想的「一条命令同时写两个
+  集合」仍未做 —— 一个 batch 仍是一个集合）。想要「膜 + 加法高光」得发两个 batch。
+- 反射色是常量 `rim_color`，不采样环境（没有 cube map）；亮边与背景无关。
+- 圆环接缝（第 15 列 = 第 0 列）在 kSmooth 下两条端点切线不连续（各自单侧差分），
+  接缝处参数化有一个很小的折点；折线 pass 天然没有这个问题。
+- 圆环只有 15 段：折线 pass 的边反会有可见分面（这是 §19.3 的固有取舍）。
+
+### 19.7 参数归属：per draw call 还是 per instance？（2026-10-22）
+
+Danis 的判定：**「至少玻璃的颜色 / 条带的颜色，应该 per instance」** —— 是对的，
+第一版把所有东西都留在 batch 上属于过粗。修正后的划分：
+
+| 数据 | 归属 | 说明 |
+|---|---|---|
+| **颜色 / 不透明度（tint）** | **per instance** | 同一批里每条拖尾/每片玻璃偏什么色、多透，是实例属性。这是 `strip_tints` 通道的用途 |
+| `f0`（正入射反射率） | per draw call | 折射率 = 材质。换玻璃 = 换材质 = 换 batch |
+| `power`（Schlick 指数） | per draw call（实际可视作渲染器常量） | 「用几阶近似」是模型参数，一个场景不该有两种 |
+| `rim_color`（边反颜色） | per draw call | 它是**反射到的环境色**的替身，不是物体色；同一环境里所有玻璃共用 |
+| `strength` | per draw call | 美术夸张系数，跟着材质走 |
+| `graze_alpha` | per draw call | 边「多实」是材质厚度感；逐实例的浓度已可被 `strip_tints[i].a` 整体缩放 |
+| `width_profile` | per draw call | 剖面是材质（柔边/硬边），不是实例 |
+
+**per-instance 是近乎零成本的**（这也是为什么值得做）：
+
+- **拿条带下标不要钱**：折线 pass 的索引缓冲按「块 j = 顶点基址 j×32」静态生成，
+  所以 VS 里 `gl_VertexID / 32` 就是条带下标（索引绘制里 `gl_VertexID` = 索引值本身）
+  ⇒ **不新增任何顶点属性**；平滑 pass 本来就有 `aStripId`。
+- 逐条带 tint 走一张 **RGBA32F、1 texel / 条带** 的小纹理（16 B/条带）+ 1 次 `texelFetch`。
+  1024 条带 = 16 KB，纹理按需翻倍扩容。
+- `Strip16`（固定 POD，用户按 stride memcpy）**一个字节都没动**：tint 是
+  `TranslucentStripBatch::strip_tints` 这个**平行数组**（空 = 全用 `tint`，零开销）。
+- 语义是**相乘**：`最终色 = tint × strip_tints[i]`。于是 `tint` 仍是「材质色 + 整批不透明度」，
+  逐实例只做偏移/浓度。三条带 demo 也顺势把原来的「改写逐点 alpha」换成了这条通道
+  （`ScaleRibbonAlpha` 删掉）：gold 的 7 个 A/B 数值与改前**逐位相同**，
+  只有 2 个像素差 1 LSB —— 反向证明了乘法语义与旧实现等价。
+
+不把 fresnel 的 `f0 / rim_color` 做成 per-instance 的理由：batch 已经是一种材质的边界
+（`texture_id / blend / soft_depth_m / width_profile / style` 都在 batch 上）。真要在同一
+batch 里区分玻璃种类，正确做法是**发多个 batch**；per-instance 的价值在「同材质 × 上千实例」，
+而条带目前不做 instancing。
+
+### 19.8 复核：`width_profile`（横向 9 个 knot）真的生效吗？
+
+Danis 2026-10-22 提问。结论：**生效，且两条 pass 都是逐片元求值**（不是顶点插值，
+所以 15 段的条带也能有平滑的宽度衰减）。证据：
+
+- 代码路径：折线 `a *= WidthProfile(vUVAlpha.y)`、平滑 `a *= WidthProfile(vShade) * cov`
+  （`v` = 宽度方向，0 = right 轨 / 1 = left 轨；平滑 pass 用的是**重建后**的 `v*`）。
+- 定量：gold 的「柔边 vs 硬边」A/B = **15,980 px 差异**（区间断言 5,000~80,000）。
+- 定向实验（临时把圆环剖面改成「只有 v=0.5 一个峰」/「只有 v=0 边」）：
+  - 峰值剖面 ⇒ 只剩**沿条带长度的中缝横带**（立壁腰部一圈 + 顶面中间一个椭圆）；
+  - 只留 v=0 边 ⇒ 只剩**立壁下沿 + 顶面内圈**（= `right` 轨 = `down_outer` / `up_inner`）。
+  两种结果都是「沿宽度方向削」，不是「沿长度方向削」，且平滑 pass 与折线 pass 表现一致。
+
+**顺带修掉一个真 bug（注释）**：`strip_types.h` 的 `width_profile` 注释还写着
+「knots[k] = 在 **u** = k/8 处的乘子」—— 那是 §16.3 修正 UV 约定**之前**的写法
+（当时 u 是宽度）。实际代码用的是 v（宽度）。已改正并注明历史原因：
+这种过期注释会让人合理怀疑「横向调制到底有没有生效」，也就是这次提问的来源。
+
+### 19.9 加法集 HDR 增益 + 逐点颜色 + 射流验收（2026-10-22）
+
+补上 §19.6 里点名的两个缺口（Danis 指定）：
+
+**① `TranslucentStripBatch::additive_gain`（optional，nullopt = 1.0）**
+
+- 为什么必须有：`tint` 被校验限制在 [0,1]、纹理也 ≤ 1 ⇒ 加法集贡献的上限就是 1.0，
+  发光拖尾/射流永远吃不到 bloom 与 tone map 的 HDR 余量（tone map 之前是 scene-referred，
+  亮部本该能到几倍）。
+- 语义：`contrib = color · α · fade · gain`，只对 `kEmissive` 有意义 ——
+  **给覆盖集设它会 CHECK 崩**（覆盖集没有加法附件，静默忽略等于骗人）。
+- 校验：`(0, 1000]`；0 没有意义（想关闭请置 nullopt）。
+
+**② `TranslucentStripBatch::strip_point_colors`（`vector<StripPointColors>`，空 = 不用）**
+
+- `StripPointColors = std::array<Color, 16>`：**沿长度**的逐列颜色乘子，与
+  `Strip16::alpha`（逐点淡出）互补 —— 一个管"什么颜色"，一个管"多透"。
+- 实现：一张 **16 × 条带数** 的 RGBA32F 纹理，**双线性**过滤（这是唯一需要过滤的条带纹理）。
+  采样坐标刻意落在 texel 正中心（`u = col/15 → tx = (col+0.5)/16`），列上是精确值、
+  列间才插值；`ty = (vStripId+0.5)/rows` 保证不渗到相邻条带。
+- **两条 pass 都是 1 次采样、零顶点属性**：折线 pass 的 `vStripId` 来自
+  `gl_VertexID/32`（§19.7 已有），平滑 pass 用 `aStripId`；`u` 分别取插值 u 与重建的 `u*`。
+- 为什么不进顶点属性：那要给折线 pass 加 3 float/顶点（6→9，+50% 带宽），
+  而纹理一行才 16×16 B = 256 B/条带，且两条 pass 行为完全一致。
+
+**③ viewer：火箭射流（`JetShape` / `BuildJetBatch`）**
+
+一条射流同时验三件事：白热 → 橙 → 暗红的**逐点颜色**、尾部淡出的**逐点 alpha**、
+中心实两侧虚的 **9-knot 剖面**，再叠 **加法集 + HDR 增益 + bloom**。
+用**两条交叉的条带**（同一个 batch）：单条带是平面、侧看会消失，交叉后各角度都像个射流。
+
+- 位置：喷口 (2.55, 2.35, 0.85)，方向 (0.18, −1, 0.10)，长 2.05 m，半宽 0.10 → 0.34。
+- 面板：中列「显示射流 / 射流 HDR 增益(1~8，默认 3)」，左列「Bloom 辉光（HDR）」。
+- `--capture` 新增：`200_jet_smooth` / `205_jet_polyline`（style A/B）、
+  `210_jet_no_bloom`（辉光 A/B：实测 17,456 px 差异）、`215_jet_gain8`（增益 A/B）、
+  `220_scene_with_jet`（默认场景）。折线/平滑在射流上只差 ~2,100 px（它是直筒状，差别在软边）。
+
+**④ viewer 默认改成平滑 pass（`smooth_strips_ = true`）**
+
+理由：圆环边反与射流软边只有 kSmooth 才是最终观感（§19.3）。gold **显式钉住折线**
+（`app.smooth_strips_ = false`）并显式关掉 ring / fresnel / jet / bloom ——
+gold 锁的始终是 M1~M3 那条三条带路径；本次改完两张 gold 与改前**逐字节一致**（0 px 差异）。
+
+### 19.10 自 review 记录（2026-10-22，Danis 要求「注释写清楚 / 行为确定 / FS 看性能与安全」）
+
+**性能（FS 与每批开销）**
+
+| 问题 | 处理 |
+|---|---|
+| 关闭态的 uniform 每批重传（软深度 2 个、fresnel 6 个、加法增益、纹理行数…）| 改成 **Init 写一次**；每批只上传「开关 + 开启时的取值」。之前每批多 7~8 次 `glUniform`，1000 批 = 数千次驱动调用/帧 |
+| 软深度淡出逐片元 `(scene_z−z)/m` 是除法 | 新增 `uSoftDepthInv = 1/m`，改成乘法（uniform 分母的倒数编译器不保证会提） |
+| 逐点颜色用 `texture()`（隐式导数算 LOD）| 改 `textureLod(...,0)`：这张纹理没有 mipmap；平滑 pass 的 `u*` 在段边界被 clamp，导数本身脏 |
+| `normalize()` 两次 sqrt | 改 `inversesqrt`（V 与 N 各一次） |
+
+**还可以做、但这轮没做**（有意，避免为演示规模的东西加复杂度）：
+- 每帧常量（near/far/viewport/camPos）用 dirty tracking 跳过重传 —— 注意 uniform 状态是
+  **per-program** 的，缓存必须挂在每个 program 上，否则折线/平滑切换会漏传。
+- Schlick 的 `pow` 在 `power == 5` 时用五次乘法特化（uniform 分支，多一条路径）。
+- 逐点颜色纹理由 RGBA32F 降 RGBA16F（省一半带宽，10 bit 尾数对 [0,1] 颜色够用）。
+- 平滑 pass 的逐点颜色其实可以并进「每列 3 texel」的数据纹理（多 1 texel/列 = +33%，
+  但少一次采样 + 少一个纹理绑定）；这轮统一走独立纹理是为了两条 pass 行为完全一致。
+
+**安全**
+
+| 风险 | 处理 |
+|---|---|
+| `texelFetch` 越界是 UB（不是返回 0）| 逐条带 tint 的下标按「本批实际条数」钳位（与 `uDataRows` 一致）|
+| GLSL 里硬编码 32/16/15 与 C++ 常量漂移 | `Init` 里 `CHECK_EQ` 三个常量，忘了同步会直接崩，而不是静默错色 |
+| `normalize(uCamPos − vWorld)` 在相机与片元重合时出 NaN | `d2 > 1e-12` 守卫 + 确定性回退向量 |
+| `pow(1−d, k)` 在 d 冒到 1+eps 时出 NaN | `d` 先 `clamp(0,1)` |
+| 新字段（`additive_gain` / `strip_tints` / `strip_point_colors` / fresnel）非法值 | 全在 `ValidateStripBatch` 拦（NaN 与越界都比较为 false ⇒ CHECK 崩）|
+
+**行为文档**：`interface/strip_types.h` 里新增「一条条带的最终像素」小节，把颜色链 /
+覆盖度链的每一步与顺序写死（含 fresnel 的 rim 取哪个 α、soft depth 与 additive_gain
+乘在哪一步、两个集合各写哪套附件）。§7 那张「一条命令同时写两个集合」的草图仍然没实现 ——
+现在同一批只能一个集合，要「膜 + 加法高光」还是两个 batch。

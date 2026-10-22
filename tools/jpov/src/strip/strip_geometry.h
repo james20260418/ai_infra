@@ -16,6 +16,7 @@
 #define JPOV_SRC_STRIP_STRIP_GEOMETRY_H_
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -117,6 +118,54 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
         CHECK_GT(*batch.soft_depth_m, 0.0f)
             << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
     }
+    if (!batch.strip_tints.empty()) {
+        // 长度不匹配 = 某些条带会用错颜色（或读到数组外），必须崩而不是静默容忍。
+        CHECK_EQ(batch.strip_tints.size(), batch.strips.size())
+            << "StripBatch: strip_tints 非空时必须与 strips 等长";
+        for (size_t i = 0; i < batch.strip_tints.size(); ++i) {
+            const Color& c = batch.strip_tints[i];
+            CHECK(c.r >= 0.0f && c.r <= 1.0f && c.g >= 0.0f && c.g <= 1.0f &&
+                  c.b >= 0.0f && c.b <= 1.0f && c.a >= 0.0f && c.a <= 1.0f)
+                << "StripBatch: strip_tints[" << i << "] 各分量必须在 [0,1]";
+        }
+    }
+    if (batch.additive_gain.has_value()) {
+        // 覆盖集没有加法附件：设了增益只会被静默忽略 —— 崩掉，别让用户以为它生效了。
+        CHECK(batch.blend == StripBlend::kEmissive)
+            << "StripBatch: additive_gain 只在 blend == kEmissive 时有意义";
+        const float gain = *batch.additive_gain;
+        CHECK(gain > 0.0f && gain <= 1000.0f)
+            << "StripBatch: additive_gain 必须在 (0,1000]（想关闭请置 nullopt），当前=" << gain;
+    }
+    if (!batch.strip_point_colors.empty()) {
+        CHECK_EQ(batch.strip_point_colors.size(), batch.strips.size())
+            << "StripBatch: strip_point_colors 非空时必须与 strips 等长";
+        for (size_t i = 0; i < batch.strip_point_colors.size(); ++i) {
+            for (int k = 0; k < kStripSampleCount; ++k) {
+                const Color& c = batch.strip_point_colors[i][static_cast<size_t>(k)];
+                CHECK(c.r >= 0.0f && c.r <= 1.0f && c.g >= 0.0f && c.g <= 1.0f &&
+                      c.b >= 0.0f && c.b <= 1.0f && c.a >= 0.0f && c.a <= 1.0f)
+                    << "StripBatch: strip_point_colors[" << i << "][" << k
+                    << "] 各分量必须在 [0,1]";
+            }
+        }
+    }
+    if (batch.fresnel.has_value()) {
+        const StripFresnel& f = *batch.fresnel;
+        CHECK(f.f0 >= 0.0f && f.f0 <= 1.0f)
+            << "StripBatch: fresnel.f0 必须在 [0,1]，当前=" << f.f0;
+        // 上限不是物理约束，是防御：pow(1−cos, 64) 已低到无法在 8bit 输出上看出来，
+        // 再大只会吃掉 pow() 精度（NaN 也会在这里被 finite 检查拦下）。
+        CHECK(f.power > 0.0f && f.power <= 64.0f)
+            << "StripBatch: fresnel.power 必须在 (0,64]，当前=" << f.power;
+        CHECK(f.strength >= 0.0f)
+            << "StripBatch: fresnel.strength 不能为负，当前=" << f.strength;
+        CHECK(f.graze_alpha >= 0.0f && f.graze_alpha <= 1.0f)
+            << "StripBatch: fresnel.graze_alpha 必须在 [0,1]，当前=" << f.graze_alpha;
+        CHECK(strip_internal::IsFinite(f.rim_color) && f.rim_color.x() >= 0.0f &&
+              f.rim_color.y() >= 0.0f && f.rim_color.z() >= 0.0f)
+            << "StripBatch: fresnel.rim_color 必须是有限非负值";
+    }
 
     for (size_t i = 0; i < batch.strips.size(); ++i) {
         const Strip16& s = batch.strips[i];
@@ -185,6 +234,121 @@ inline void AppendStripIndicesForBlock(uint32_t base_vertex, std::vector<uint32_
         out->push_back(l1);
         out->push_back(r1);
     }
+}
+
+// ────────────────── 圆环/圆筒：四组点 → 四条带 ──────────────────
+//
+// 用途：用条带围出一个「玻璃圆筒」（Demo/验收 fresnel 用）。一个圆筒的外壳
+// 正好是 4 条带，**四条带共用同四组点**（the 16 点拓扑天生就是「一圈」）：
+//
+//   up_outer / up_inner / down_outer / down_inner  ← 四组点，每组 16 个（绕一圈，
+//   第 15 列与第 0 列重合 = 闭合，故一圈是 15 段）
+//
+//   ① 顶环面：left = up_outer，  right = up_inner    （u 绕圈，v 跨环宽）
+//   ② 底环面：left = down_outer，right = down_inner
+//   ③ 外立壁：left = up_outer，  right = down_outer  （u 绕圈，v 跨高度）
+//   ④ 内立壁：left = up_inner，  right = down_inner
+//
+// 注意立壁的「长度方向」也是**绕圈**（16 列），宽度方向才是高度 —— 极容易想成
+// 「高度分 16 段」，那样四条带的列数就对不上了（也画不出闭环）。
+
+// 一个圆环的四组点（顺序固定，见上）。
+struct Ring16 {
+    std::array<Vec3f, kStripSampleCount> up_outer;
+    std::array<Vec3f, kStripSampleCount> up_inner;
+    std::array<Vec3f, kStripSampleCount> down_outer;
+    std::array<Vec3f, kStripSampleCount> down_inner;
+};
+
+// 圆环形状参数（米/弧度，世界空间）。
+struct StripRingShape {
+    float outer_radius = 0.95f;   // 外半径
+    float wall_thickness = 0.15f; // 壁厚（必须 0 < 壁厚 < outer_radius）
+    float height = 1.25f;         // 圆筒高度
+    float center_y = 1.05f;       // 圆筒中心的 y
+    float center_x = 0.0f;        // 中心位置的 x/z（便于在场景里挪开）
+    float center_z = 0.0f;
+    float yaw = 0.0f;             // 绕 Y 轴朝向（弧度），不影响几何形状
+};
+
+// 四条带在本文件/调用方之间的固定下标（= BuildStripRing 的输出顺序）。
+enum class StripRingPart : int {
+    kTopFace = 0,
+    kBottomFace = 1,
+    kOuterWall = 2,
+    kInnerWall = 3,
+};
+inline constexpr int kStripRingPartCount = 4;
+
+// 由形状参数生成四组点。
+// Pre-condition: outer_radius > 0、0 < wall_thickness < outer_radius、height > 0（CHECK 崩）。
+inline Ring16 MakeRing16(const StripRingShape& shape) {
+    CHECK_GT(shape.outer_radius, 0.0f) << "MakeRing16: outer_radius 必须 > 0";
+    CHECK_GT(shape.wall_thickness, 0.0f) << "MakeRing16: wall_thickness 必须 > 0";
+    CHECK_LT(shape.wall_thickness, shape.outer_radius)
+        << "MakeRing16: wall_thickness 必须小于 outer_radius（否则内半径 ≤ 0）";
+    CHECK_GT(shape.height, 0.0f) << "MakeRing16: height 必须 > 0";
+
+    const float inner_radius = shape.outer_radius - shape.wall_thickness;
+    Ring16 ring;
+    const float y_up = shape.center_y + 0.5f * shape.height;
+    const float y_down = shape.center_y - 0.5f * shape.height;
+    const float cy = std::cos(shape.yaw);
+    const float sy = std::sin(shape.yaw);
+    for (int i = 0; i < kStripSampleCount; ++i) {
+        // 第 15 列取 2π（= 第 0 列），保证闭合；一圈分 15 段。
+        const float ang = 2.0f * 3.14159265358979323846f * static_cast<float>(i) /
+                          static_cast<float>(kStripQuads);
+        const float c = std::cos(ang);
+        const float s = std::sin(ang);
+        // 先绕 Y 轴转 yaw，再平移到 (center_x, ·, center_z)。
+        auto at = [&](float radius, float y) {
+            const float px = radius * c;
+            const float pz = radius * s;
+            return Vec3f{px * cy + pz * sy + shape.center_x, y,
+                         -px * sy + pz * cy + shape.center_z};
+        };
+        ring.up_outer[static_cast<size_t>(i)] = at(shape.outer_radius, y_up);
+        ring.up_inner[static_cast<size_t>(i)] = at(inner_radius, y_up);
+        ring.down_outer[static_cast<size_t>(i)] = at(shape.outer_radius, y_down);
+        ring.down_inner[static_cast<size_t>(i)] = at(inner_radius, y_down);
+    }
+    return ring;
+}
+
+// 由四组点拼出四条带（下标 = StripRingPart）。逐点 alpha 恒 1（形状本身不带淡出），
+// point_count = kStripSampleCount（整圈都要画）。
+inline std::array<Strip16, kStripRingPartCount> BuildStripRing(const Ring16& ring) {
+    std::array<Strip16, kStripRingPartCount> strips{};
+    for (int part = 0; part < kStripRingPartCount; ++part) {
+        strips[static_cast<size_t>(part)].point_count =
+            static_cast<uint32_t>(kStripSampleCount);
+        for (int i = 0; i < kStripSampleCount; ++i) {
+            strips[static_cast<size_t>(part)].alpha[static_cast<size_t>(i)] = 1.0f;
+        }
+    }
+    for (int i = 0; i < kStripSampleCount; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        Strip16& top = strips[static_cast<size_t>(StripRingPart::kTopFace)];
+        Strip16& bottom = strips[static_cast<size_t>(StripRingPart::kBottomFace)];
+        Strip16& outer = strips[static_cast<size_t>(StripRingPart::kOuterWall)];
+        Strip16& inner = strips[static_cast<size_t>(StripRingPart::kInnerWall)];
+        top.left[k] = ring.up_outer[k];
+        top.right[k] = ring.up_inner[k];
+        bottom.left[k] = ring.down_outer[k];
+        bottom.right[k] = ring.down_inner[k];
+        outer.left[k] = ring.up_outer[k];
+        outer.right[k] = ring.down_outer[k];
+        inner.left[k] = ring.up_inner[k];
+        inner.right[k] = ring.down_inner[k];
+    }
+    return strips;
+}
+
+// 便捷入口：形状 → 四条带。
+inline std::array<Strip16, kStripRingPartCount> MakeStripRing(
+    const StripRingShape& shape) {
+    return BuildStripRing(MakeRing16(shape));
 }
 
 // ────────────────── 平滑 pass（kSmooth）的 CPU 前端 ──────────────────

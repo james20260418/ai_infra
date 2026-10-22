@@ -10,8 +10,12 @@
 //   * **平滑 pass（kSmooth）的 CPU 前端**：切线（两端必须是完整单侧差分）、
 //     自动外扩量（必须覆盖真实外凸量）、数据纹理打包顺序、顶点外扩与 v 的一致。
 //     这组断言专门盯「出图看不出来」的错误，每一项都带**负向对照**（把旧实现算回来必须失败）。
+//   * **圆环（四组点 → 四条带）**：四组点的高度/半径、闭合（15 段）、
+//     「哪组点当左轨/右轨」的硬约定（宽度方向是径向还是高度）；
+//   * **菲涅耳参数**的取值校验（非法值必须崩）。
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -472,3 +476,246 @@ TEST(StripSmooth, CollapsedTailMatchesLastRealColumn) {
     }
 }
 
+
+// ────────────────── 圆环（四组点 → 四条带）──────────────────
+//
+// 这组断言盯的是「出图看着像个圈、其实接错了」的一类错误：
+// 把 up/down 或 inner/outer 接反、把立壁的宽度方向当成径向、忘了闭合成 15 段 ——
+// 画面都仍然是个圆圈，只有量坐标才看得出来。
+
+namespace {
+
+jpov::StripRingShape MakeTestRingShape() {
+    jpov::StripRingShape shape;
+    shape.outer_radius = 1.00f;
+    shape.wall_thickness = 0.20f;
+    shape.height = 1.50f;
+    shape.center_x = 0.30f;
+    shape.center_y = 2.00f;
+    shape.center_z = -0.40f;
+    shape.yaw = 0.0f;
+    return shape;
+}
+
+// 到圆筒轴（竖直、过 center_x/center_z）的水平距离。
+float AxisDistance(const jpov::Vec3f& p, const jpov::StripRingShape& shape) {
+    const float dx = p.x() - shape.center_x;
+    const float dz = p.z() - shape.center_z;
+    return std::sqrt(dx * dx + dz * dz);
+}
+
+}  // namespace
+
+TEST(StripRing, FourPointRingsMatchShape) {
+    const jpov::StripRingShape shape = MakeTestRingShape();
+    const jpov::Ring16 ring = jpov::MakeRing16(shape);
+    const float y_up = shape.center_y + 0.5f * shape.height;
+    const float y_down = shape.center_y - 0.5f * shape.height;
+    const float r_inner = shape.outer_radius - shape.wall_thickness;
+
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        // 高度：上两组在上沿、下两组在下沿（up/down 接反立刻挂）。
+        EXPECT_NEAR(ring.up_outer[k].y(), y_up, 1e-5f);
+        EXPECT_NEAR(ring.up_inner[k].y(), y_up, 1e-5f);
+        EXPECT_NEAR(ring.down_outer[k].y(), y_down, 1e-5f);
+        EXPECT_NEAR(ring.down_inner[k].y(), y_down, 1e-5f);
+        // 半径：outer/inner 各自对得上（内外接反也立刻挂）。
+        EXPECT_NEAR(AxisDistance(ring.up_outer[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(AxisDistance(ring.up_inner[k], shape), r_inner, 1e-5f);
+        EXPECT_NEAR(AxisDistance(ring.down_outer[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(AxisDistance(ring.down_inner[k], shape), r_inner, 1e-5f);
+    }
+
+    // 闭合：第 15 列 = 第 0 列（一圈只有 15 段；漏掉这条会留下一条缝）。
+    EXPECT_NEAR(ring.up_outer[15].x(), ring.up_outer[0].x(), 1e-4f);
+    EXPECT_NEAR(ring.up_outer[15].z(), ring.up_outer[0].z(), 1e-4f);
+    EXPECT_NEAR(ring.down_inner[15].x(), ring.down_inner[0].x(), 1e-4f);
+    EXPECT_NEAR(ring.down_inner[15].z(), ring.down_inner[0].z(), 1e-4f);
+
+    // 第 0 / 15 列重合，但中间列必须真的分开（防止「整圈塌成一个点」也能过）。
+    EXPECT_GT((ring.up_outer[8] - ring.up_outer[0]).Norm(), 1.0f);
+}
+
+TEST(StripRing, StripsPairRailsAsDocumented) {
+    // 四条带的「哪组点当左轨/右轨」是硬约定：顶/底环面的宽度方向是**径向**，
+    // 内外立壁的宽度方向是**高度**。把 width 方向搞错 = 圆环被画成 4 个平面。
+    const jpov::StripRingShape shape = MakeTestRingShape();
+    const std::array<jpov::Strip16, jpov::kStripRingPartCount> strips =
+        jpov::MakeStripRing(shape);
+    ASSERT_EQ(strips.size(), static_cast<size_t>(jpov::kStripRingPartCount));
+
+    for (const jpov::Strip16& s : strips) {
+        // 每条带都要 16 点（圆环的「一圈」不能少于 16 列）。
+        EXPECT_EQ(s.point_count, static_cast<uint32_t>(jpov::kStripSampleCount));
+        for (float a : s.alpha) {
+            EXPECT_FLOAT_EQ(a, 1.0f);
+        }
+    }
+
+    const jpov::Strip16& top = strips[static_cast<size_t>(jpov::StripRingPart::kTopFace)];
+    const jpov::Strip16& bottom =
+        strips[static_cast<size_t>(jpov::StripRingPart::kBottomFace)];
+    const jpov::Strip16& outer =
+        strips[static_cast<size_t>(jpov::StripRingPart::kOuterWall)];
+    const jpov::Strip16& inner =
+        strips[static_cast<size_t>(jpov::StripRingPart::kInnerWall)];
+
+    const float r_inner = shape.outer_radius - shape.wall_thickness;
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        // 顶环面：left = up_outer、right = up_inner ⇒ 宽度 = 环宽。
+        EXPECT_NEAR((top.left[k] - top.right[k]).Norm(), shape.wall_thickness, 1e-5f);
+        EXPECT_NEAR(AxisDistance(top.left[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(AxisDistance(top.right[k], shape), r_inner, 1e-5f);
+        // 底环面同理。
+        EXPECT_NEAR((bottom.left[k] - bottom.right[k]).Norm(), shape.wall_thickness, 1e-5f);
+        // 立壁：宽度方向 = 高度（不是径向！）。
+        EXPECT_NEAR((outer.left[k] - outer.right[k]).Norm(), shape.height, 1e-5f);
+        EXPECT_NEAR((inner.left[k] - inner.right[k]).Norm(), shape.height, 1e-5f);
+        EXPECT_NEAR(AxisDistance(outer.left[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(AxisDistance(outer.right[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(AxisDistance(inner.left[k], shape), r_inner, 1e-5f);
+        EXPECT_NEAR(AxisDistance(inner.right[k], shape), r_inner, 1e-5f);
+        // 立壁的左轨在上、右轨在下（否则法线/纹理 v 的方向整体翻转）。
+        EXPECT_NEAR(outer.left[k].y(), shape.center_y + 0.5f * shape.height, 1e-5f);
+        EXPECT_NEAR(outer.right[k].y(), shape.center_y - 0.5f * shape.height, 1e-5f);
+        EXPECT_NEAR(inner.left[k].y(), shape.center_y + 0.5f * shape.height, 1e-5f);
+        EXPECT_NEAR(inner.right[k].y(), shape.center_y - 0.5f * shape.height, 1e-5f);
+    }
+    // 同一条带的左右轨不能重合（否则宽度为 0，整条带不可见）。
+    EXPECT_GT((top.left[0] - top.right[0]).Norm(), 0.0f);
+    EXPECT_GT((outer.left[0] - outer.right[0]).Norm(), 0.0f);
+}
+
+TEST(StripRing, YawRotatesPointsWithoutChangingShape) {
+    // yaw 只转朝向：半径/高度不变，但第 0 列不再落在 +x 轴上
+    // （漏做旋转或旋转方向写反都会被抓到）。
+    jpov::StripRingShape shape = MakeTestRingShape();
+    const jpov::Ring16 base = jpov::MakeRing16(shape);
+    shape.yaw = 0.7f;
+    const jpov::Ring16 rotated = jpov::MakeRing16(shape);
+
+    for (int i = 0; i < jpov::kStripSampleCount; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        EXPECT_NEAR(AxisDistance(rotated.up_outer[k], shape), shape.outer_radius, 1e-5f);
+        EXPECT_NEAR(rotated.up_outer[k].y(), base.up_outer[k].y(), 1e-5f);
+        EXPECT_GT((rotated.up_outer[k] - base.up_outer[k]).Norm(), 1e-4f);
+    }
+    // 旋转是刚体变换：相邻列间距不变。
+    const float base_step = (base.up_outer[1] - base.up_outer[0]).Norm();
+    const float rot_step = (rotated.up_outer[1] - rotated.up_outer[0]).Norm();
+    EXPECT_NEAR(rot_step, base_step, 1e-5f);
+}
+
+TEST(StripRing, RejectsInvalidShape) {
+    // 壁厚 ≥ 外半径 → 内半径 ≤ 0（几何自交）；高度 0 → 立壁退化成线。
+    jpov::StripRingShape shape = MakeTestRingShape();
+    shape.wall_thickness = shape.outer_radius;
+    EXPECT_DEATH(jpov::MakeRing16(shape), "wall_thickness");
+
+    jpov::StripRingShape flat = MakeTestRingShape();
+    flat.height = 0.0f;
+    EXPECT_DEATH(jpov::MakeRing16(flat), "height");
+}
+
+TEST(StripGeometry, RejectsBadFresnelParams) {
+    // 菲涅耳参数是「设了就要生效」的：非法值必须崩，不能静默画出一个奇怪的边。
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.fresnel = jpov::StripFresnel{};
+    jpov::ValidateStripBatch(ok);   // 合法值不崩
+
+    jpov::TranslucentStripBatch f0 = MakeBatch(16);
+    f0.fresnel = jpov::StripFresnel{};
+    f0.fresnel->f0 = 1.5f;   // 正入射反射率不可能 > 1
+    EXPECT_DEATH(jpov::ValidateStripBatch(f0), "fresnel.f0");
+
+    jpov::TranslucentStripBatch power = MakeBatch(16);
+    power.fresnel = jpov::StripFresnel{};
+    power.fresnel->power = 0.0f;   // 0 次幂 = 恒 1（整面全反），几乎必然是忘填
+    EXPECT_DEATH(jpov::ValidateStripBatch(power), "fresnel.power");
+
+    jpov::TranslucentStripBatch strength = MakeBatch(16);
+    strength.fresnel = jpov::StripFresnel{};
+    strength.fresnel->strength = -0.5f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(strength), "fresnel.strength");
+
+    jpov::TranslucentStripBatch graze = MakeBatch(16);
+    graze.fresnel = jpov::StripFresnel{};
+    graze.fresnel->graze_alpha = 1.2f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(graze), "fresnel.graze_alpha");
+
+    jpov::TranslucentStripBatch rim = MakeBatch(16);
+    rim.fresnel = jpov::StripFresnel{};
+    rim.fresnel->rim_color = jpov::Vec3f{-0.1f, 0.0f, 0.0f};
+    EXPECT_DEATH(jpov::ValidateStripBatch(rim), "fresnel.rim_color");
+}
+
+TEST(StripGeometry, StripTintsArePerInstanceAndMustMatchCount) {
+    // 逐条带颜色是 per instance 通道：长度不匹配会让某些条带用错颜色（或读越界），
+    // 而画面只会「颜色不对」，不会崩 —— 所以必须在这里拦住。
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.62f});
+    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
+
+    jpov::TranslucentStripBatch empty = MakeBatch(16);
+    empty.strip_tints.clear();      // 空 = 全部用 tint（默认行为）
+    jpov::ValidateStripBatch(empty);
+
+    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
+    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 1.0f});
+    mismatch.strip_tints.push_back(jpov::Color{1.0f, 1.0f, 1.0f, 0.5f});
+    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
+
+    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
+    out_of_range.strip_tints.push_back(jpov::Color{1.5f, 1.0f, 1.0f, 1.0f});
+    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_tints");
+}
+
+TEST(StripGeometry, AdditiveGainRequiresEmissiveAndPositive) {
+    // 加法集 HDR 增益：只在 kEmissive 上有意义。给覆盖集设它必须崩 ——
+    // 覆盖集没有加法附件，静默忽略会让用户以为亮度已经加上去了。
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.blend = jpov::StripBlend::kEmissive;
+    ok.additive_gain = 3.0f;
+    jpov::ValidateStripBatch(ok);
+
+    jpov::TranslucentStripBatch coverage = MakeBatch(16);
+    coverage.additive_gain = 3.0f;   // blend 仍是 kCoverage
+    EXPECT_DEATH(jpov::ValidateStripBatch(coverage), "additive_gain");
+
+    jpov::TranslucentStripBatch zero = MakeBatch(16);
+    zero.blend = jpov::StripBlend::kEmissive;
+    zero.additive_gain = 0.0f;       // 0 = 全黑，没意义（想关闭请置 nullopt）
+    EXPECT_DEATH(jpov::ValidateStripBatch(zero), "additive_gain");
+
+    jpov::TranslucentStripBatch negative = MakeBatch(16);
+    negative.blend = jpov::StripBlend::kEmissive;
+    negative.additive_gain = -2.0f;
+    EXPECT_DEATH(jpov::ValidateStripBatch(negative), "additive_gain");
+}
+
+TEST(StripGeometry, PointColorsMustMatchCountAndRange) {
+    jpov::StripPointColors colors{};
+    for (jpov::Color& c : colors) {
+        c = jpov::Color{1.0f, 0.5f, 0.25f, 1.0f};
+    }
+
+    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    ok.strip_point_colors.push_back(colors);
+    jpov::ValidateStripBatch(ok);   // 等长 + 合法值不崩
+
+    jpov::TranslucentStripBatch mismatch = MakeBatch(16);
+    mismatch.strip_point_colors.push_back(colors);
+    mismatch.strip_point_colors.push_back(colors);   // 2 != 1
+    EXPECT_DEATH(jpov::ValidateStripBatch(mismatch), "等长");
+
+    jpov::TranslucentStripBatch out_of_range = MakeBatch(16);
+    jpov::StripPointColors bad{};
+    for (jpov::Color& c : bad) {
+        c = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    bad[7].g = 1.5f;   // 第 7 列越界
+    out_of_range.strip_point_colors.push_back(bad);
+    EXPECT_DEATH(jpov::ValidateStripBatch(out_of_range), "strip_point_colors");
+}
