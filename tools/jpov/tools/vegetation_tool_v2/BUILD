@@ -27,6 +27,12 @@ proto_library(
     srcs = ["proto/generate.proto"],
 )
 
+# C++ 侧读配置用（shape_gen）：TextFormat 解析 + 字段存在性（proto2 optional）。
+cc_proto_library(
+    name = "generate_proto",
+    deps = [":generate_proto_src"],
+)
+
 # 入库的生成配置（输入数据，不是构建产物）。
 filegroup(
     name = "generate_configs",
@@ -178,3 +184,6 @@ filegroup(
         "samples/willow.pbtxt",
     ],
 )
+
+# 导出链的 Blender 侧脚本：只把 Sapling 的曲线 / 叶卡网格倒成 .dump（几何决策在 gen/）。
+exports_files(["dump_sapling_curve.py"])

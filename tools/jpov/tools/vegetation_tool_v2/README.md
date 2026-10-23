@@ -84,30 +84,35 @@ cd output/jpov_vegetation_v2_viewer
 
 ## 从配置生成 shape（Blender 侧）
 
-上文那些 `.pbtxt` 是用 Blender + Sapling 离线长出来的。三步分工：
+上文那些 `.pbtxt` 是用 Blender + Sapling 离线长出来的。两条路，**产物等价**：
 
-```
-configs/pine.pbtxt  ─(generate_shape.py)─→  blender -b --python export_vegetation_shape.py
-                                                    └─→  output/veg_shapes/pine.pbtxt
+| 路径 | 入口 | 说明 | fir（4100 枝） |
+|---|---|---|---|
+| **C++（推荐）** | `gen/shape_gen` | Blender 只把曲线/叶卡网格倒成 `.dump`；采样、父枝、叶卡姿态、拓扑序、写 pbtxt 全在 C++ | **1.5 s** |
+| Python（对照基准） | `generate_shape.py` | 原实现，留作对拍/回归基准 | 132 s |
+
+```bash
+# C++：配置 -> shape.pbtxt（Blender 只负责倒数据）
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
+    --config tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
+    --out output/veg_shapes/pine.pbtxt
+
+# 只看配置有没有写对（不跑 Blender）
+bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 ```
 
 | 层 | 位置 | 说明 |
 |---|---|---|
-| 配置（**输入**） | `configs/*.pbtxt`，schema 见 `proto/generate.proto` | 每个字段都写了含义/单位/效果预期；没写的字段 = 用预设自带值 |
-| 入口 | `generate_shape.py` | 读配置 → 拼命令行 → 调 Blender → **检查产物拓扑序**后报结果 |
-| Blender 侧 | `export_vegetation_shape.py` | 跑在 Blender 自带 python 里（没有 protobuf，所以配置/产物都是文本格式） |
-
-```bash
-python3 tools/jpov/tools/vegetation_tool_v2/generate_shape.py \
-    tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
-    --out output/veg_shapes/pine.pbtxt            # 加 --dry-run 只看命令行
-
-python3 tools/jpov/tools/vegetation_tool_v2/generate_shape_test.py   # 61 条断言，秒级
-```
+| 配置（**输入**） | `configs/*.pbtxt`，schema 见 `proto/generate.proto` | 每个字段都写了含义/单位/效果预期；没写的字段 = 用预设自带值（proto2 optional 的存在性） |
+| C++ 入口 | `gen/shape_gen.cc` | 读配置 → 调 Blender → 建 shape → 自检（唯一根 + 拓扑序）→ 写 pbtxt |
+| C++ 几何 | `gen/shape_builder.cc` | 采样 / 父枝（`tools/util` 的稀疏栅格最近邻）/ 叶卡姿态 / anchor 合同 |
+| Blender 侧 | `dump_sapling_curve.py` | **只做序列化**：建树 + 把曲线控制点和叶卡网格倒成 `.dump`，不做任何几何决策 |
 
 - **Blender 不在仓库里**：它是镜像里的开发期工具（`/usr/bin/blender` 4.0.2），`--blender` 可改路径。
-- **耗时按枝数平方增长**（导出侧给每条 spline 找父枝是 O(n²) 纯 python）：几百枝 ~2 s，
-  4000 枝 ~2 min。要做批量生成先改那里。
+- 单测：`bazel test //tools/jpov/tools/vegetation_tool_v2/gen:all`
+  （dump 解析的容错边界 + 合成 dump 的父枝/层数/环数/叶卡姿态/拓扑序/anchor）。
+- 与 Python 产物的差异：几何逐行一致（实测 93424 行里 0 处结构不同，最大数值差 1e-6 量级），
+  唯一例外是「卡片正好骑在枝上」时根/梢方向在数学上无定义，约 1% 的卡在两种浮点精度下取反。
 - 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
 
 ## 命令行
@@ -146,7 +151,9 @@ python3 tools/jpov/tools/vegetation_tool_v2/generate_shape_test.py   # 61 条断
 | `viewer/` | `vegetation_v2_app.h` = 库接口（`RunViewer`）；`.cc` = 场景/渲染/交互；`vegetation_v2_viewer.cc` = 只有 CLI |
 | `bake/` | **GLB 烘焙器**：shape(+bark+leaf) → 自洽 .glb（关节表 + 逐顶点 `(joint_id, phase)` + 内嵌贴图） |
 | `leaf_texture.h/.cc` | 叶卡贴图 CPU 流水线（黑底→alpha / 法线 / PNG 编解码）——查看器与烘焙共用同一份像素 |
-| `export_vegetation_shape.py` | Blender 侧脚本（跑在 Blender 自带 python 里）：Sapling 曲线 → `ShapeProto` 文本（含 `--anchor-mode`、导出侧的 anchor 上枝校验） |
+| `export_vegetation_shape.py` | **旧** Python 导出链（Blender 侧 python）：Sapling 曲线 → `ShapeProto` 文本；已由 `gen/` 的 C++ 实现取代，保留作对拍基准 |
+| `dump_sapling_curve.py` | Blender 侧**只倒数据**：建树 + 曲线控制点 / 叶卡网格 → `.dump`（几何决策全在 `gen/`） |
+| `gen/` | **导出链 C++ 实现**：`sapling_dump` 解析、`shape_builder` 建 shape、`shape_text` 写 pbtxt、`shape_gen` 入口 |
 | `proto/generate.proto` | **生成配置**的 schema（喂给 Sapling 的参数，逐字段写明含义/单位/效果） |
 | `generate_shape.py` | **命令行入口**：`configs/*.pbtxt` → 调 Blender → 校验产物。纯逻辑可单测 |
 | `generate_shape_test.py` | 上面那层的单测（不需要 Blender，秒级） |

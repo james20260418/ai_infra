@@ -24,7 +24,7 @@
 //
 // 未覆盖的参数用 `extra_set` 逃生口传（见下），不要为了一个冷门参数就改本 schema。
 
-syntax = "proto3";
+syntax = "proto2";
 
 package jpov.vegetation;
 
@@ -32,20 +32,20 @@ package jpov.vegetation;
 message VegetationGenerateConfig {
   // 配置版本。当前 = 1。
   // 改字段**语义/单位**才需要升版本（加字段不用，proto 天然向后兼容）。
-  uint32 version = 1;
+  optional uint32 version = 1;
 
   // 名字，只用于日志与默认产物名（例如 "oak" → oak.pbtxt）。不参与生成。
-  string name = 2;
+  optional string name = 2;
 
   // 自然人可读的说明：这是什么树、想让它长成什么样、为什么这么调。
   // 给人 / 给 agent 看，**永不参与逻辑判断**。
-  string description = 3;
+  optional string description = 3;
 
   // 建树（Blender + Sapling Tree Gen）。
-  SaplingTree tree = 4;
+  optional SaplingTree tree = 4;
 
   // 导出成 ShapeProto 时的采样/叶卡约定。
-  ShapeExport export = 5;
+  optional ShapeExport export = 5;
 }
 
 // Sapling Tree Gen 的建树参数。
@@ -64,7 +64,7 @@ message SaplingTree {
   //
   // 预设文件在 `<blender>/scripts/addons/add_curve_sapling/presets/<name>.py`，
   // 是一个裸 dict，可以直接读出来看每个字段的初值。
-  string preset = 1;
+  optional string preset = 1;
 
   // 逃生口：直接透传给 Sapling 的 `k=v`，绕过下面的强类型字段。
   // 只给「本 schema 没覆盖的冷门参数」用；能用强类型字段就别用它。
@@ -76,16 +76,16 @@ message SaplingTree {
   // 整棵树的尺寸。世界单位（米）量级：主干长度 ≈ length[0] × scale。
   // 只影响大小，不影响比例（比例由各角/长度乘数决定）。
   // Sapling 默认 13。做单棵展示树常用 8~14。
-  float scale = 3;
+  optional float scale = 3;
 
   // 随机种子。**同 seed + 同参数 = 同一棵树**（逐字节可复现）。
   // 换 seed 是「换一棵同风格的树」，不是「改风格」。
-  int32 seed = 4;
+  optional int32 seed = 4;
 
   // 分枝级数：1 = 只有主干，2 = 主干 + 一级枝，3 = 再加二级，4 = 再加三级。
   // 每加一级，枝数和文件体积大致 ×(branches 的均值)，**这是最贵的旋钮**。
   // Sapling 默认 3。
-  int32 levels = 5;
+  optional int32 levels = 5;
 
   // ---- 冠形包络 -------------------------------------------------------------
   // 冠形决定「各级枝的长度沿树干如何分布」，也就是整体轮廓（塔形 / 球形 / 圆柱…）。
@@ -102,11 +102,11 @@ message SaplingTree {
   //   8  = Custom Shape               自定义，参数看 customShape
   //   10 = Inverse Tapered Cylindrical 倒收细圆柱
   // Sapling 默认 7。
-  int32 shape = 6;
+  optional int32 shape = 6;
 
   // 同上，但作用在「单干的分枝上」（Sapling 的 shapeS）。
   // 只在部分预设里有意义；不确定就别写。
-  int32 shapeS = 7;
+  optional int32 shapeS = 7;
 
   // `shape=8`（Custom Shape）时使用的自定义曲线，4 个归一化控制值（0..1 量级）：
   //   [下段宽度, 上段宽度, 上段起点, 下段收窄]
@@ -167,32 +167,32 @@ message SaplingTree {
 
   // 基部分裂数：从树干底部同时长出的主干数（0 = 单干）。
   // 灌木/丛生树用它（配 `baseSize` 很小），乔木保持 0 或 1。
-  int32 baseSplits = 23;
+  optional int32 baseSplits = 23;
 
   // **第一根侧枝出现的高度占主干的比例**（0..1）。**不是树的尺寸！**
   //   0.2  = 下部 20% 光杆，上面全是枝（乔木）
   //   0.05 = 几乎从地面开始分枝（灌木）
   //   >1   = 所有枝挤到树顶（会得到一根「蜡烛」，新手最常踩的坑）
   // Sapling 默认 0.4。
-  float baseSize = 24;
+  optional float baseSize = 24;
 
   // 基部分裂（baseSplits）那几根干的分叉高度比例（0..1）。
-  float baseSize_s = 25;
+  optional float baseSize_s = 25;
 
   // 分裂发生的位置（0..1，沿枝的参数位置）。
-  float splitHeight = 26;
+  optional float splitHeight = 26;
 
   // 分裂在树干上的偏向（-1..1）：往根部聚 or 往梢部聚。
-  float splitBias = 27;
+  optional float splitBias = 27;
 
   // true = 按长度决定是否分裂（长的枝更容易分），false = 按数量。
-  bool splitByLen = 28;
+  optional bool splitByLen = 28;
 
   // 子枝周向排布模式：
   //   "rotate"   = 按 rotate 角度递增（螺旋，最整齐，预设默认）
   //   "original" = 沿用父枝的朝向
   //   "random"   = 完全随机（最自然，但同一 seed 下也可能偏冠）
-  string rMode = 29;
+  optional string rMode = 29;
 
   // ---- 吸引（把枝往某个方向拉，是"树形手感"的主要来源之一） --------------------
   // 向上吸引：正值把枝往上拉（塔形/直立），负值往下压（垂枝/开展）。
@@ -203,18 +203,18 @@ message SaplingTree {
   repeated float attractOut = 31;
 
   // 枝间距系数：侧枝沿父枝的分布疏密（1 = 预设值，>1 更稀）。
-  float branchDist = 32;
+  optional float branchDist = 32;
 
   // 树冠整体收细：>0 让冠部（细枝）相对根部变细，做"头轻脚重"的观感。
-  float taperCrown = 33;
+  optional float taperCrown = 33;
 
   // ---- 半径（粗细） ---------------------------------------------------------
   // 树干底部半径 / 主干长度（无量纲）。0.01 = 细高，0.02 = 常规，0.04+ = 粗壮古树。
   // Sapling 默认 0.015。
-  float ratio = 34;
+  optional float ratio = 34;
 
   // 半径随高度的衰减指数：越大，越往上越细（常见 1.2~1.5）。
-  float ratioPower = 35;
+  optional float ratioPower = 35;
 
   // 每级枝的收细系数（逐级相乘）。
   repeated float taper = 36;
@@ -223,52 +223,52 @@ message SaplingTree {
   repeated float radiusTweak = 37;
 
   // 半径下限（米）：防止末梢细到看不见/退化。
-  float minRadius = 38;
+  optional float minRadius = 38;
 
   // 根部外扩倍数（1 = 不外扩，1.3 = 明显板根）。
-  float rootFlare = 39;
+  optional float rootFlare = 39;
 
   // 枝梢是否收口（true = 封顶）。
-  bool closeTip = 40;
+  optional bool closeTip = 40;
 
   // 是否自动按长度收细半径（一般保持 true，手动 radiusTweak 时才关）。
-  bool autoTaper = 41;
+  optional bool autoTaper = 41;
 
   // ---- 叶卡 -----------------------------------------------------------------
   // 每根末级枝的叶片**上限**（不是精确数量：实际受枝长/密度限制）。
   // 负值 = 另一种沿枝分布算法（Sapling 的 "negative leaves"，做垂枝/藤状用）。
   // 实测参考：`leaves=55` 对 12m 松树够密；`200` 对 7m 阔叶树才有体积感。
-  int32 leaves = 42;
+  optional int32 leaves = 42;
 
   // 叶片在树上的分布包络（0..10，取值同 shape 的枚举）。一般沿用预设。
-  int32 leafDist = 43;
+  optional int32 leafDist = 43;
 
   // 叶卡尺寸（相对树尺度，无量纲）。0.17 ≈ 预设默认；针叶树调小、阔叶树调大。
-  float leafScale = 44;
+  optional float leafScale = 44;
 
   // 叶卡尺寸的随机浮动比例（0..1）。>0 才有层次感，0 = 全部一样大很假。
-  float leafScaleV = 45;
+  optional float leafScaleV = 45;
 
   // 叶卡沿枝的尺寸渐变（负值向下变小，正值向上变小）。
-  float leafScaleT = 46;
+  optional float leafScaleT = 46;
 
   // 叶卡的下垂角（**度**）：0 = 顺着枝，90 = 平展。
-  float leafDownAngle = 47;
+  optional float leafDownAngle = 47;
 
   // 下垂角的随机幅度（**度**）。
-  float leafDownAngleV = 48;
+  optional float leafDownAngleV = 48;
 
   // 叶卡绕枝的旋转角（**度**，黄金角 137.5 是常见值）。
-  float leafRotate = 49;
+  optional float leafRotate = 49;
 
   // 上述旋转角的随机幅度（**度**）。
-  float leafRotateV = 50;
+  optional float leafRotateV = 50;
 
   // true = 叶卡保持水平（避免穿帮），false = 跟随枝的朝向。
-  bool horzLeaves = 51;
+  optional bool horzLeaves = 51;
 
   // 每根枝的横截面环数提示（0 = 用预设/由曲线分辨率决定）。
-  int32 nrings = 52;
+  optional int32 nrings = 52;
 }
 
 // 从 Sapling 曲线导出成 ShapeProto 时的采样与叶卡约定。
@@ -279,17 +279,17 @@ message ShapeExport {
   //   16 = 很顺，文件线性变大
   // 注意这**不是** Sapling 的 curveRes：curveRes 决定骨架本身有几段，
   // per_seg 决定每段再切成几个采样点。两者相乘才是最终采样点数。
-  uint32 per_seg = 1;
+  optional uint32 per_seg = 1;
 
   // 叶卡宽 / 高（无量纲）。写进每张卡的 `width = height × leaf_aspect`。
   // 配合素材的格子比例：细长叶 0.35~0.5，阔叶 0.7~1.0。
-  double leaf_aspect = 2;
+  optional double leaf_aspect = 2;
 
   // 叶卡素材的根部画在格子的哪个角（决定 UV 锚点，见资产格式 §4.1）：
   //   "bottom_left" / "bottom_center" / "bottom_right" / "top_center"
   // 素材怎么画就写哪个，导出侧不做任何补偿性偏移。
-  string anchor_mode = 3;
+  optional string anchor_mode = 3;
 
   // leaf type 的自然语言描述（"柳树叶簇，细长披针形"），写进 shape.pbtxt 供人/agent 读。
-  string leaf_type_desc = 4;
+  optional string leaf_type_desc = 4;
 }
