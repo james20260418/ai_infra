@@ -17,6 +17,28 @@ cc_proto_library(
     deps = [":shape_proto_src"],
 )
 
+# 生成配置（喂给 Blender/Sapling 的那组参数，见 proto/generate.proto）。
+#
+# 只有 python 工具会读它（generate_shape.py 自己解析文本格式：Blender 自带的 python
+# 没有 protobuf runtime，镜像里的系统 python 也没有，和 shape.pbtxt 的选择一致）。
+# 放成 proto_library 只是让构建期用 protoc 校验 schema 本身没写错。
+proto_library(
+    name = "generate_proto_src",
+    srcs = ["proto/generate.proto"],
+)
+
+# C++ 侧读配置用（shape_gen）：TextFormat 解析 + 字段存在性（proto2 optional）。
+cc_proto_library(
+    name = "generate_proto",
+    deps = [":generate_proto_src"],
+)
+
+# 入库的生成配置（输入数据，不是构建产物）。
+filegroup(
+    name = "generate_configs",
+    srcs = glob(["configs/*.pbtxt"]),
+)
+
 # 运行时结构 + 校验。下游只依赖这个 target，不直接依赖 protobuf。
 cc_library(
     name = "shape",
@@ -120,6 +142,7 @@ cc_library(
     hdrs = ["viewer/vegetation_v2_app.h"],
     deps = [
         ":leaf_texture",
+        "//tools/jpov/tools/vegetation_tool_v2/leaf_card:leaf_card_spec",
         ":shape",
         ":sweep",
         ":vegetation_glb_baker",
@@ -162,3 +185,6 @@ filegroup(
         "samples/willow.pbtxt",
     ],
 )
+
+# 导出链的 Blender 侧脚本：只把 Sapling 的曲线 / 叶卡网格倒成 .dump（几何决策在 gen/）。
+exports_files(["dump_sapling_curve.py"])

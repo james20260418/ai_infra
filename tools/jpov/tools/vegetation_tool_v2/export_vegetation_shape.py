@@ -382,16 +382,27 @@ print("[export] 原始统计：%d 张有 UV，镜像 %d 张（%.1f%%），缺 UV
 # 手性 → 两个 leaf type。
 # 一种 leaf type 只对应一种对齐方式（Danis 定）：Blender 里 UV 镜像的那批卡
 # 单独成一个 type，由用户提供一张**左右翻转**后的素材；引擎不做运行时镜像。
+# 镜像手性的素材必须左右翻转后再用，于是「根部画在格子哪个角」也会左右互换。
+# 漏了这一步，type 1 的叶子会整体偏出一整张卡宽（肉眼就是「叶子贴不上枝」）。
+MIRRORED_ANCHOR_MODE = {
+    "bottom_left": "bottom_right",
+    "bottom_right": "bottom_left",
+    "bottom_center": "bottom_center",
+    "top_center": "top_center",
+}
+
 for flipped in (False, True):
     if flipped not in type_of:
         continue
+    mode = MIRRORED_ANCHOR_MODE[anchor_mode] if flipped else anchor_mode
     lines.append("leaf_types {")
     lines.append("  type: %d" % type_of[flipped])
     if flipped:
-        lines.append('  description: "%s（镜像手性：请把素材左右翻转后使用）"' % leaf_desc)
+        lines.append('  description: "%s（镜像手性：素材左右翻转后使用，根部在格子 %s 角）"'
+                     % (leaf_desc, mode))
     else:
         lines.append('  description: "%s"' % leaf_desc)
-    lines.append('  anchor_mode: "%s"' % anchor_mode)
+    lines.append('  anchor_mode: "%s"' % mode)
     lines.append("}")
 
 for anchor, up, normal, height, branch_id, s_param, flipped in cards:
