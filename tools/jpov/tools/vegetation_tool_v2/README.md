@@ -115,6 +115,39 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
   唯一例外是「卡片正好骑在枝上」时根/梢方向在数学上无定义，约 1% 的卡在两种浮点精度下取反。
 - 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
 
+## 生图资产 → 合规素材（叶卡 / 树皮）
+
+生图模型不知道我们的格子/UV 约定，所以**出图之后必须过一道归一化**。两个工具：
+
+```bash
+# 叶卡：任意构图的黑底叶子 → 合规素材（根点落在 anchor 角上 + 内容撑满宽度）
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/leaf_card/jpov_leaf_card \
+    /path/leaf_raw.png output/leaf/willow_leaf_norm.png --anchor bottom_left
+
+# 树皮：一张树皮图 → albedo(无缝) + normal + roughness 三件套
+./tools/jpov/tools/vegetation_tool_v2/make_generated_bark.sh \
+    /path/bark_raw.png output/bark/gen001 1.5 0.15
+```
+
+**叶卡的生图合同**（数字唯一定义在 [`leaf_card/leaf_card_spec.h`](leaf_card/leaf_card_spec.h)）：
+
+| 项 | 要求 | 判据 |
+|---|---|---|
+| 背景 | 纯黑 | `max(r,g,b) <= 16` |
+| 内容 | 叶子颜色**避开黑色** | `max(r,g,b) >= 48` |
+
+提示词里直接抄这两条（叶子画暗了会被判成透明、破洞）。归一化会体检并报出「灰区占比」。
+
+工具做的事（`leaf_card/leaf_card_normalize.h` 有完整说明）：
+1. 按合同切内容 → 2. 找叶柄（主轴两端里**更细**的那端）→
+3. 旋转到「从 anchor 角指向格子内部」（角锚点 45°、边中点 90°）→
+4. 裁剪使**根点正好落在锚点**上，并报出被裁掉的比例（>0 说明这张图不适合该 anchor）。
+
+输出诊断里的 `leaf_aspect` 就是该写进 shape 配置的值（`export.leaf_aspect`，宽/高）。
+
+**树皮的坑**：UV 的 u/v 两向都靠 `GL_REPEAT` 平铺，图不无缝每圈一条硬缝；
+`roughness` 生图给不出来，脚本按「暗 = 更粗糙」从 albedo 推（近似，但比全 0.5 强）。
+
 ## 命令行
 
 | 参数 | 说明 |
@@ -154,6 +187,8 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 | `export_vegetation_shape.py` | **旧** Python 导出链（Blender 侧 python）：Sapling 曲线 → `ShapeProto` 文本；已由 `gen/` 的 C++ 实现取代，保留作对拍基准 |
 | `dump_sapling_curve.py` | Blender 侧**只倒数据**：建树 + 曲线控制点 / 叶卡网格 → `.dump`（几何决策全在 `gen/`） |
 | `gen/` | **导出链 C++ 实现**：`sapling_dump` 解析、`shape_builder` 建 shape、`shape_text` 写 pbtxt、`shape_gen` 入口 |
+| `leaf_card/` | **叶卡归一化**：生图 → 合规素材（根点识别 / 旋转 / 对齐裁剪）+ `leaf_card_spec.h`（生图合同） |
+| `make_generated_bark.sh` | 生图树皮 → albedo(无缝)+normal+roughness（串起 `texture_tool` 的两个工具） |
 | `proto/generate.proto` | **生成配置**的 schema（喂给 Sapling 的参数，逐字段写明含义/单位/效果） |
 | `generate_shape.py` | **命令行入口**：`configs/*.pbtxt` → 调 Blender → 校验产物。纯逻辑可单测 |
 | `generate_shape_test.py` | 上面那层的单测（不需要 Blender，秒级） |
