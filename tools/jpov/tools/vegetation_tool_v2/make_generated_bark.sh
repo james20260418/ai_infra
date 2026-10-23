@@ -8,7 +8,7 @@
 #   <in.png>        生图模型出的树皮（不需要提前做无缝、不需要法线/粗糙度）
 #   <out_dir>       产物目录，viewer 用 --bark <out_dir> 直接吃
 #   normal_scale    法线强度，默认 1.5（和 viewer 的 --normal-scale 默认一致）
-#   blend_ratio     无缝化时的边缘混合带宽（占短边的比例），默认 0.15
+#   blend_percent   无缝化时的边缘混合带宽（占短边的百分比，0~50），默认 15
 #
 # 产物（文件名固定，viewer 硬编码）：
 #   albedo.png     ← 输入图（无变化：顺序是 seamless → normal → roughness）
@@ -29,10 +29,10 @@ set -euo pipefail
 IN="${1:-}"
 DST="${2:-}"
 NORMAL_SCALE="${3:-1.5}"
-BLEND_RATIO="${4:-0.15}"
+BLEND_PERCENT="${4:-15}"
 
 if [ -z "$IN" ] || [ -z "$DST" ]; then
-    echo "用法: $0 <in.png> <out_dir> [normal_scale] [blend_ratio]" >&2
+    echo "用法: $0 <in.png> <out_dir> [normal_scale] [blend_percent]" >&2
     exit 2
 fi
 if [ ! -f "$IN" ]; then
@@ -65,10 +65,14 @@ trap 'rm -rf "$TMP"' EXIT
 echo "==> albedo.png    ← $(basename "$IN")"
 convert "$IN" "$TMP/raw.png"
 
-# 无缝化：带宽按短边比例给（太小仍有缝、太大把花纹糊成一团）。
+# 无缝化：带宽按短边百分比给（太小仍有缝、太大把花纹糊成一团）。
 read -r W H < <(identify -format '%w %h\n' "$TMP/raw.png")
 SHORT=$(( W < H ? W : H ))
-BLEND=$(( SHORT * ${BLEND_RATIO//[^0-9]/} / 100 ))
+if ! [[ "$BLEND_PERCENT" =~ ^[0-9]+$ ]] || [ "$BLEND_PERCENT" -gt 50 ]; then
+    echo "ERROR: blend_percent 必须是 0~50 的整数（百分比），实际: $BLEND_PERCENT" >&2
+    exit 2
+fi
+BLEND=$(( SHORT * BLEND_PERCENT / 100 ))
 [ "$BLEND" -lt 1 ] && BLEND=1
 echo "==> seamless      （${W}x${H}，带宽 ${BLEND}px）"
 "$SEAMLESS" "$TMP/raw.png" "$DST/albedo.png" "$BLEND" blend

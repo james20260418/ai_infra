@@ -8,13 +8,19 @@ package(default_visibility = ["//visibility:public"])
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
+# 生图合同（背景/内容亮度阈值）。**谁都不许再抄一份数字**：
+# 归一化工具、查看器默认参数都引用这里。
+cc_library(
+    name = "leaf_card_spec",
+    hdrs = ["leaf_card_spec.h"],
+    copts = ["-std=c++20"],
+)
+
 cc_library(
     name = "leaf_card_normalize",
     srcs = ["leaf_card_normalize.cc"],
-    hdrs = [
-        "leaf_card_normalize.h",
-        "leaf_card_spec.h",
-    ],
+    hdrs = ["leaf_card_normalize.h"],
+    deps = [":leaf_card_spec"],
     copts = ["-std=c++20"],
 )
 

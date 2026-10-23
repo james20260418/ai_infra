@@ -142,6 +142,7 @@ cc_library(
     hdrs = ["viewer/vegetation_v2_app.h"],
     deps = [
         ":leaf_texture",
+        "//tools/jpov/tools/vegetation_tool_v2/leaf_card:leaf_card_spec",
         ":shape",
         ":sweep",
         ":vegetation_glb_baker",

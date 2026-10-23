@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <limits>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "tools/jpov/tools/vegetation_tool_v2/leaf_card/leaf_card_spec.h"
@@ -331,7 +330,6 @@ bool NormalizeLeafCard(const LeafCardImage& input, const LeafCardNormalizeOption
   std::vector<float> alpha(static_cast<std::size_t>(width) * height, 0.0f);
   std::vector<unsigned char> mask(static_cast<std::size_t>(width) * height, 0);
   long long ambiguous = 0;
-  long long content = 0;
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       const std::size_t index = static_cast<std::size_t>(y) * width + x;
@@ -341,19 +339,18 @@ bool NormalizeLeafCard(const LeafCardImage& input, const LeafCardNormalizeOption
       alpha[index] = static_cast<float>(AlphaFromChannel(pixel[0], pixel[1], pixel[2]));
       if (peak >= kLeafContentMinChannel) {
         mask[index] = 1;
-        ++content;
       } else if (peak > kLeafBackgroundMaxChannel) {
         ++ambiguous;
       }
     }
   }
-  report->ambiguous_fraction = content > 0 ? static_cast<double>(ambiguous) / content : 0.0;
-
   KeepLargeComponents(&mask, width, height);
-  content = 0;
+  long long content = 0;
   for (const unsigned char value : mask) {
     content += value != 0 ? 1 : 0;
   }
+  report->ambiguous_fraction =
+      content > 0 ? static_cast<double>(ambiguous) / static_cast<double>(content) : 0.0;
   if (content < kMinComponentArea) {
     *error = "图里没有识别到叶子内容（max(r,g,b) >= " + std::to_string(kLeafContentMinChannel) +
              "）：背景太亮、或者叶子画得太暗（生图合同见 leaf_card_spec.h）";
