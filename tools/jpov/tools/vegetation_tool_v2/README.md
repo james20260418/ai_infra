@@ -115,38 +115,155 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
   唯一例外是「卡片正好骑在枝上」时根/梢方向在数学上无定义，约 1% 的卡在两种浮点精度下取反。
 - 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
 
-## 生图资产 → 合规素材（叶卡 / 树皮）
+## 工具总览
 
-生图模型不知道我们的格子/UV 约定，所以**出图之后必须过一道归一化**。两个工具：
+| 工具 | 输入 | 输出 | 职责 |
+|---|---|---|---|
+| `gen/shape_gen` | 生成配置（`configs/*.pbtxt`） | `shape.pbtxt` | 建**拓扑**：调 Blender 倒数据 → C++ 采样/父枝/叶卡姿态/拓扑序 |
+| `leaf_card/jpov_leaf_card` | 生图的叶子（黑底） | 合规叶卡（+ 镜像版） | **叶卡**：根点识别 / 旋转对齐 / 裁到锚点 |
+| `make_generated_bark.sh` | 生图的树皮 | `albedo/normal/roughness.png` | **树皮**：无缝化 + 派生法线/粗糙度 |
+| `jpov_vegetation_v2_viewer` | shape + bark + leaf | 窗口 / `--capture` 出图 | **验收**：人眼 + gold |
+
+四者只通过**文件**耦合，没有隐藏状态：任何一步都能单独重跑、单独替换。
+
+---
+
+## 1. `shape_gen` —— 生成拓扑
 
 ```bash
-# 叶卡：任意构图的黑底叶子 → 合规素材（根点落在 anchor 角上 + 内容撑满宽度）
-./bazel-bin/tools/jpov/tools/vegetation_tool_v2/leaf_card/jpov_leaf_card \
-    /path/leaf_raw.png output/leaf/willow_leaf_norm.png --anchor bottom_left
-
-# 树皮：一张树皮图 → albedo(无缝) + normal + roughness 三件套
-./tools/jpov/tools/vegetation_tool_v2/make_generated_bark.sh \
-    /path/bark_raw.png output/bark/gen001 1.5 0.15
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
+    --config tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
+    --out output/veg_shapes/pine.pbtxt
 ```
 
-**叶卡的生图合同**（数字唯一定义在 [`leaf_card/leaf_card_spec.h`](leaf_card/leaf_card_spec.h)）：
+| 参数 | 说明 |
+|---|---|
+| `--config` | 生成配置（schema 见 `proto/generate.proto`，每个字段都写了含义/单位/效果） |
+| `--out` | 产物路径；临时 `.dump` 默认写 `<out>.dump` 并在成功后删除 |
+| `--blender` | blender 可执行文件（默认 PATH 里的；镜像自带 4.0.2） |
+| `--dump <path>` / `--keep-dump` | 保留中间 dump（排查 Blender 侧问题时用） |
+
+输出末尾一行是摘要：`枝数 / 卡数 / 镜像卡比例 / 体积 / 耗时`。
+**失败即退出码非 0**：配置写错（带行号）、Blender 失败、产物拓扑序不合法，都不会落盘半成品。
+
+耗时（含 Blender 启动）：几百枝 ~0.6 s，4100 枝 ~1.5 s。
+
+---
+
+## 2. `jpov_leaf_card` —— 叶卡归一化
+
+```bash
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/leaf_card/jpov_leaf_card \
+    raw_leaf.png out/willow_leaf.png \
+    --anchor bottom_left --also-flip out/willow_leaf_flip.png
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--anchor` | 根部要落在格子的哪个角/边：`bottom_left` / `bottom_center` / `bottom_right` / `top_center` |
+| `--also-flip` | 额外输出左右翻转版（镜像手性 = 第二个 leaf type；`anchor_mode` 会自动换成 `bottom_left ↔ bottom_right`） |
+
+它做四件事：**切内容 → 找叶柄（最细的一端）→ 旋转到"从锚点指向格内"→ 裁到根点正好压住锚点**。
+输出会打印：
+
+```
+叶柄方向 -62.2°，旋转 17.2° → anchor=bottom_left
+根点偏差 du=+0.000 dv=+0.000      ← 必须是 0，否则叶子会悬空
+leaf_aspect = 1.180               ← 直接填进生成配置的 export.leaf_aspect
+⚠ 灰区像素占内容 3.8%             ← 生图没守约定（叶子太暗/边缘太糊）
+```
+
+**生图合同**（数字唯一定义在 [`leaf_card/leaf_card_spec.h`](leaf_card/leaf_card_spec.h)）：
 
 | 项 | 要求 | 判据 |
 |---|---|---|
 | 背景 | 纯黑 | `max(r,g,b) <= 16` |
 | 内容 | 叶子颜色**避开黑色** | `max(r,g,b) >= 48` |
 
-提示词里直接抄这两条（叶子画暗了会被判成透明、破洞）。归一化会体检并报出「灰区占比」。
+判据统一用 **max 通道**（不是求和/亮度加权），因为 `leaf_texture` 的黑底→alpha 就是这么判的。
 
-工具做的事（`leaf_card/leaf_card_normalize.h` 有完整说明）：
-1. 按合同切内容 → 2. 找叶柄（主轴两端里**更细**的那端）→
-3. 旋转到「从 anchor 角指向格子内部」（角锚点 45°、边中点 90°）→
-4. 裁剪使**根点正好落在锚点**上，并报出被裁掉的比例（>0 说明这张图不适合该 anchor）。
+---
 
-输出诊断里的 `leaf_aspect` 就是该写进 shape 配置的值（`export.leaf_aspect`，宽/高）。
+## 3. `make_generated_bark.sh` —— 树皮三件套
 
-**树皮的坑**：UV 的 u/v 两向都靠 `GL_REPEAT` 平铺，图不无缝每圈一条硬缝；
-`roughness` 生图给不出来，脚本按「暗 = 更粗糙」从 albedo 推（近似，但比全 0.5 强）。
+```bash
+./tools/jpov/tools/vegetation_tool_v2/make_generated_bark.sh raw_bark.png out/bark/gen001 1.5 15
+```
+
+| 参数 | 说明 |
+|---|---|
+| 第 1 个 | 生图树皮（任意尺寸） |
+| 第 2 个 | 输出目录（viewer 用 `--bark <dir>` 直接吃） |
+| 第 3 个 | 法线强度，默认 1.5（与 viewer `--normal-scale` 默认一致） |
+| 第 4 个 | 无缝化边缘带宽占短边的**百分比**（0~50 的整数），默认 15 |
+
+顺序是 **seamless（albedo）→ normal（Sobel）→ roughness（1 − 亮度）**。
+为什么不反过来：法线必须从**已经无缝**的 albedo 算，否则接缝处的法线也是错的。
+
+---
+
+## 4. `jpov_vegetation_v2_viewer` —— 验收
+
+```bash
+cd output/jpov_vegetation_v2_viewer
+./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.pbtxt \
+    --bark /tmp/bark_gen --leaf /tmp/leaf.png --leaf2 /tmp/leaf_flip.png --leaf-black 32
+```
+
+`--leaf-black` 的默认值就是 **32**（= `kLeafBlackThreshold`）；只有换素材约定时才需要显式传。
+
+---
+
+## 技能：从一段描述到一棵树
+
+> 这一步不写死脚本 —— 它本来就是"人/agent 判断 → 调工具 → 看图 → 再调"的循环，
+> 每个环节的命令和判据都在上面。下面是一份可以直接照做的清单。
+
+**① 选预设、写配置**（`configs/*.pbtxt` 抄最像的一份）
+钉住：`preset`、`scale`、`seed`、`levels`、`branches`、`leaves`、`leafScale`。
+最常踩的两个坑：`baseSize` 是"第一根侧枝出现的高度**比例**"（不是尺寸，>1 会把枝挤到树顶）；
+角度字段一律写**度**，长 4 的数组下标 = 枝级。
+
+**② 出拓扑**
+
+```bash
+gen/shape_gen --config configs/mytree.pbtxt --out output/veg_shapes/mytree.pbtxt
+```
+看摘要里的枝数/卡数是否合理；不满意就改 ① 的 `seed / branches / leaves` 再来一次（1 秒级）。
+
+**③ 生图（提示词）**
+叶子（**这两条合同必须写进提示词**）：
+> 单张叶簇，居中构图，叶柄垂直朝下，**纯黑背景（背景像素接近 0）**，
+> **叶子颜色明亮，不要有接近黑色的部分**，边缘干净，不要阴影和边框。
+
+树皮：
+> 无缝可平铺的树皮纹理，正面平视，均匀光照，不要透视和暗角。
+
+**④ 归一化**
+
+```bash
+jpov_leaf_card raw_leaf.png out/leaf.png --anchor bottom_left --also-flip out/leaf_flip.png
+make_generated_bark.sh raw_bark.png out/bark 1.5 0.15
+```
+把打印出来的 `leaf_aspect` 填回 ① 的 `export.leaf_aspect`，**再重跑一次 ②**（卡片宽高比在 shape 里）。
+
+**⑤ 验收**
+
+```bash
+viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png --leaf-black 32
+```
+判据：叶子**贴在枝上**（不悬空、不横躺）、树皮**没有横向接缝**、整体不像塑料。
+
+**⑥ 收敛**
+叶卡角度/缩放不对 → 回 ③ 调提示词（构图问题）或 ④ 换 `--anchor`（几何问题）；
+枝形不对 → 回 ① 调参数。**不要**在查看器里"凑"——查看器没有可调项，它只负责如实呈现。
+
+### 几条硬规矩
+
+- `--leaf-black` 必须与 `kLeafBlackThreshold`（32）一致；换值会让同一张素材的透明度变样。
+- 归一化输出是**预乘 alpha**（RGB 已乘覆盖率）：消费方按黑底→alpha 读也等价，别再做一次反预乘。
+- 镜像手性必须**单独出图**（`--also-flip`），引擎不做运行时镜像。
+- 树皮一定要走过 seamless：u 每圈归零、v 沿枝累加，不平铺就会每圈一条硬缝。
 
 ## 命令行
 
