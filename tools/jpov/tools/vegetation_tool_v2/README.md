@@ -82,6 +82,34 @@ cd output/jpov_vegetation_v2_viewer
 - `--leaf-black`：黑底素材的「近乎黑 = 透明」阈值，软过档是 `[0.5t, 1.5t]`。
   入库样例背景是 `≈10~13` 的灰噪、内容 `≥44` ⇒ 给 **30**（`[15,45]`）；默认 12 会把灰噪留成半透明。
 
+## 从配置生成 shape（Blender 侧）
+
+上文那些 `.pbtxt` 是用 Blender + Sapling 离线长出来的。三步分工：
+
+```
+configs/pine.pbtxt  ─(generate_shape.py)─→  blender -b --python export_vegetation_shape.py
+                                                    └─→  output/veg_shapes/pine.pbtxt
+```
+
+| 层 | 位置 | 说明 |
+|---|---|---|
+| 配置（**输入**） | `configs/*.pbtxt`，schema 见 `proto/generate.proto` | 每个字段都写了含义/单位/效果预期；没写的字段 = 用预设自带值 |
+| 入口 | `generate_shape.py` | 读配置 → 拼命令行 → 调 Blender → **检查产物拓扑序**后报结果 |
+| Blender 侧 | `export_vegetation_shape.py` | 跑在 Blender 自带 python 里（没有 protobuf，所以配置/产物都是文本格式） |
+
+```bash
+python3 tools/jpov/tools/vegetation_tool_v2/generate_shape.py \
+    tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
+    --out output/veg_shapes/pine.pbtxt            # 加 --dry-run 只看命令行
+
+python3 tools/jpov/tools/vegetation_tool_v2/generate_shape_test.py   # 61 条断言，秒级
+```
+
+- **Blender 不在仓库里**：它是镜像里的开发期工具（`/usr/bin/blender` 4.0.2），`--blender` 可改路径。
+- **耗时按枝数平方增长**（导出侧给每条 spline 找父枝是 O(n²) 纯 python）：几百枝 ~2 s，
+  4000 枝 ~2 min。要做批量生成先改那里。
+- 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
+
 ## 命令行
 
 | 参数 | 说明 |
@@ -118,7 +146,11 @@ cd output/jpov_vegetation_v2_viewer
 | `viewer/` | `vegetation_v2_app.h` = 库接口（`RunViewer`）；`.cc` = 场景/渲染/交互；`vegetation_v2_viewer.cc` = 只有 CLI |
 | `bake/` | **GLB 烘焙器**：shape(+bark+leaf) → 自洽 .glb（关节表 + 逐顶点 `(joint_id, phase)` + 内嵌贴图） |
 | `leaf_texture.h/.cc` | 叶卡贴图 CPU 流水线（黑底→alpha / 法线 / PNG 编解码）——查看器与烘焙共用同一份像素 |
-| `export_vegetation_shape.py` | Blender/Sapling → `ShapeProto` 文本（含 `--anchor-mode`、导出侧的 anchor 上枝校验） |
+| `export_vegetation_shape.py` | Blender 侧脚本（跑在 Blender 自带 python 里）：Sapling 曲线 → `ShapeProto` 文本（含 `--anchor-mode`、导出侧的 anchor 上枝校验） |
+| `proto/generate.proto` | **生成配置**的 schema（喂给 Sapling 的参数，逐字段写明含义/单位/效果） |
+| `generate_shape.py` | **命令行入口**：`configs/*.pbtxt` → 调 Blender → 校验产物。纯逻辑可单测 |
+| `generate_shape_test.py` | 上面那层的单测（不需要 Blender，秒级） |
+| `configs/` | 入库的生成配置：`pine.pbtxt` / `oak.pbtxt` / `fir.pbtxt`（见其 README） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
 | `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树）；**`willow_baked.glb`（12 MB，入库的烘焙产物，见下）** |
