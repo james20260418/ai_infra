@@ -85,9 +85,10 @@ message BranchProto {
   uint32 seam_index = 6;
 }
 
-// 一张叶卡。锚点 + 两条正交轴（up/normal）+ 长宽即可唯一确定卡片 quad：
-//   P(u,v) = anchor + right·((u−au)·width) + up·((v−av)·height)
+// 一张叶卡。锚点 + 两条正交轴（up/normal）+ 长宽即可唯一确定卡片**面片**：
+//   P(u,v) = anchor + right·((u−au)·width) + up·((v−av)·height) + normal·z(u,v)
 // 宽高都**存在 shape 里**（装配时由材质格子比例算出并写死），运行时不猜。
+// z(u,v) 是叶面弯曲，由所属 LeafTypeProto.bend 解析求得（省略 = 平面，z ≡ 0）。
 message LeafCardProto {
   // **叶子与枝条的连接点**（米）。这是合同，不是提示：
   //
@@ -97,6 +98,8 @@ message LeafCardProto {
   //      格子里的 (au, av) 那一点贴到 anchor，卡片沿 +up 长、沿 right(=up×normal) 变宽，
   //      即 quad 四角 = anchor + right·(u−au)·width + up·(v−av)·height。
   //      ⇒ 引擎**不会**为任何素材做「补偿性偏移」；素材根部画在 (au, av)，逻辑才对得上。
+  //      （z 是叶面弯曲，由 LeafTypeProto.bend 决定；z(anchor) ≡ 0，所以弯曲不会
+  //        把叶柄从枝条上带走。）
   //
   // 反例（历史 bug，2026-10-22）：导出把 anchor 写成「根边中点 = 卡片中心 − up·h/2」，
   // 442 张卡全部偏出枝条 12~18cm，于是真正压在枝上的是卡片中心，
@@ -120,9 +123,45 @@ message LeafCardProto {
   uint32 branch = 6;
   double s = 7;
 
-  // 沿 right 方向的宽度（米）。与 height 一起决定 quad 的大小；
+  // 沿 right 方向的宽度（米）。与 height 一起决定面片的大小；
   // 必须 > 0。装配时 width = height × （atlas 格子宽/高），写进资产后不再随材质变。
   double width = 8;
+}
+
+// 叶卡的解析式弯曲 —— 卡不是平面 quad，而是一张参数曲面。
+//
+// 局部坐标（格子坐标，(u,v) ∈ [0,1]²，u 向右、v 从根到梢）：
+//   e   = 从 anchor 指向格子中心的单位向量（= 叶片长轴方向的近似：
+//         jpov_leaf_card 会把叶柄转到「从锚点角指向格内」）
+//   t   = (p − a)·e / T ∈ [0,1]    沿叶长，anchor 处 = 0
+//   s   = (p − a)⊥e / S ∈ [−1,1]   垂直叶长，中脉线处 = 0
+//   z   = height · ( along·t² + across·s² + crease·ridge(s) )
+//   ridge(s) = sqrt(s² + r²) − r   圆角的「V」：中脉是肉脊，不是折纸的硬棱
+//                                  （硬棱在网格上会出锯齿，正是要避免的折线感）
+//
+// T/S 是格子里可达的最大值（按四个角现算），所以三个系数都是**无量纲**的：
+// 位移 = 系数 × height。12cm 的卡给 0.15 ⇒ 1.8cm。
+//
+// 为什么是解析式：卡是十几厘米的小面片、弯曲量只有几厘米，三个数 + 解析偏导
+// 就能得到**没有折线感**的曲面 —— 顶点按公式精确求值，法线由偏导给出
+// （不是面法线累加、也不做有限差分），细分密度只影响轮廓、不影响光照。
+//
+// 三条硬性质：
+//   1) z(anchor) ≡ 0 ⇒ **叶柄永远不离开枝条**（anchor 合同不受弯曲影响）；
+//   2) s 是点到中脉线的距离 ⇒ 中脉两侧完全对称，镜像手性（type 1）不用改参数；
+//   3) 三个系数全 0 = 平面 ⇒ 旧资产的几何逐字节不变。
+message LeafBendProto {
+  // 长轴抛物线（叶尖相对叶柄的位移）。正 = 朝 +normal 翘，负 = 朝 −normal 垂。
+  // 垂柳这类下垂叶给负；直立叶给 0.05~0.15。
+  double along = 1;
+
+  // 横轴杯状：两缘相对中脉的位移（抛物线）。正 = 两缘朝 +normal 卷成杯。
+  // 阔叶给 0.08~0.2；针状叶给 ~0（杯起来太假）。
+  double across = 2;
+
+  // 中脉折痕：两缘相对中脉的位移（圆角 V）。across 给整体弧度、crease 给一道棱。
+  // 0.1~0.2 就能看出「叶子是折过的」而不是一张卡纸。
+  double crease = 3;
 }
 
 // 叶卡类型（一类 = 一套材质绑定 + 一套摆放语义）。
@@ -151,6 +190,11 @@ message LeafTypeProto {
   // 和文档假装有这个能力。编号保留，防止将来有人复用后与旧资产语义撞车。
   reserved 4;
   reserved "preferred_aspect";
+
+  // 叶面弯曲（见 LeafBendProto）。**按 type 而不是按卡**：同一个 type = 同一套素材
+  // = 同一种叶子，弯曲也该一致；逐卡存只会多一批能被填错的数。
+  // 省略 = 全 0 = 平面 quad（与旧资产逐字节一致）。
+  LeafBendProto bend = 5;
 }
 
 // 一棵植物的完整拓扑。

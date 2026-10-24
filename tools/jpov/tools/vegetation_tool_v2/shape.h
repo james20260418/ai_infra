@@ -65,14 +65,15 @@ struct Branch {
   uint32_t EffectiveRingCount() const;
 };
 
-// 一张叶卡：anchor + up + normal + height + width 唯一确定 quad。
+// 一张叶卡：anchor + up + normal + height + width 唯一确定**面片**（平面或曲面）。
 //
 // 核心约定（与 proto 注释、docs §4.1 同一份）：
 //   * `anchor` 是**叶子与枝条的连接点**，必须落在所属枝条上（Validate 强制，
 //     到枝中心线 ≤ 该处 radius + 1cm）；
 //   * `anchor_mode` 只决定**素材里哪个点贴到 anchor**（4 种，没有第五种）；
-//   * quad 四角：`corner(u,v) = anchor + right·(u−au)·width + up·(v−av)·height`，
-//     其中 `right = cross(up, normal)`。引擎**不做任何补偿性偏移**——
+//   * 面片：`P(u,v) = anchor + right·(u−au)·width + up·(v−av)·height + normal·z(u,v)`，
+//     其中 `right = cross(up, normal)`；z 由所属 LeafType 的 `bend` 解析求得
+//     （平面时 z ≡ 0，就是旧的四角 quad）。引擎**不做任何补偿性偏移**——
 //     素材根部画在 (au, av)，逻辑才对得上。唯一实现在 ComputeCardFrame（sweep.h）。
 struct LeafCard {
   Vec3d anchor;         // 叶-枝连接点（**必须在所属枝条上**）
@@ -100,6 +101,18 @@ inline bool IsValidAnchorMode(const std::string& mode) {
   return AnchorModeToUv(mode, &u, &v);
 }
 
+// 叶面弯曲参数（无量纲，位移单位 = 卡的 height）。语义见 proto/shape.proto 的
+// LeafBendProto 注释；求值实现只有一份（sweep.cc 的 EvaluateCardSurface）。
+struct LeafBend {
+  double along = 0.0;   // 长轴抛物线：>0 叶尖朝 +normal 翘，<0 下垂
+  double across = 0.0;  // 横轴杯状：>0 两缘朝 +normal 卷
+  double crease = 0.0;  // 中脉折痕（圆角 V）：>0 两缘相对中脉抬起
+
+  // 三个都是 0（默认）⇒ 平面卡。BuildLeafCards 据此决定细分：
+  // 平面 1×1（4 顶点，与旧资产逐字节一致），弯曲 4×4。
+  bool IsFlat() const { return along == 0.0 && across == 0.0 && crease == 0.0; }
+};
+
 // 叶卡类型。
 struct LeafType {
   uint32_t type = 0;
@@ -112,6 +125,9 @@ struct LeafType {
   // 它同时就是 UV 锚点：`(au, av)` 那一点贴到 `LeafCard::anchor`。
   // 4 个合法值：bottom_left / bottom_center / bottom_right / top_center。
   std::string anchor_mode;
+
+  // 叶面弯曲（按 type 共享；同一套素材 = 同一种叶子）。
+  LeafBend bend;
 };
 
 // 一棵植物的完整拓扑。

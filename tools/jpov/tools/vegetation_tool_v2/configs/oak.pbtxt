@@ -102,4 +102,8 @@ export {
   leaf_aspect: 0.72
   anchor_mode: "bottom_left"
   leaf_type_desc: "橡树叶簇（大叶、宽椭圆）"
+  # 阔叶：叶面明显成杯、中脉折得出来（0.12 的卡 ≈ 2cm 的弯）。
+  leaf_bend_along: -0.15
+  leaf_bend_across: 0.18
+  leaf_bend_crease: 0.2
 }

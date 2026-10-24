@@ -29,6 +29,8 @@ struct BuildOptions {
   std::string anchor_mode = "bottom_left";  // type 0 的锚角（镜像 type 自动左右换）
   std::string leaf_type_desc;     // 写进 leaf_types 的自然语言
   std::string species;            // 只用于 description 文案
+  // 叶面弯曲（写进每个 leaf type）。全 0 = 平面卡。
+  LeafBend leaf_bend;
 };
 
 struct BuildStats {

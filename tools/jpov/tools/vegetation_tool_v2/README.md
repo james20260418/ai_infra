@@ -7,7 +7,7 @@
 
 | 状态 | 在画什么 | 用途 |
 |---|---|---|
-| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡 quad） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐 |
+| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡**曲面**） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐，弯曲有 3 个滑条 |
 | **glb 展示态** | 刚烘焙出来的 `.glb`（树干 + 叶卡两个 primitive，带风链数据） | 看最终资产：树皮贴图、叶卡 alpha、**风**（左下「风调试」面板） |
 
 烘焙产物是一份**自洽 .glb**：几何 + 内嵌贴图（树皮 albedo/normal/ORM、叶卡 albedo/normal）
@@ -58,7 +58,7 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 渲染结果与「shape + glb」逐像素一致（同一机位实测 0 差异），只是少了回退能力。
 
 **不用自己烘也能试**：仓库里带了一份烘焙产物
-`samples/willow_baked.glb`（12 MB，692 关节 / 树干 40837 v / 叶卡 1768 v，内嵌树皮+叶卡贴图）。
+`samples/willow_baked.glb`（12.9 MB，692 关节 / 树干 40837 v / 叶卡 11050 v，内嵌树皮+叶卡贴图）。
 
 ```bash
 cd tools/jpov && ./build_jpov_vegetation_v2_viewer.sh
@@ -74,7 +74,7 @@ cd output/jpov_vegetation_v2_viewer
     --bark bark/bark001 --normal-scale 0.75
 ```
 
-> 两份产物应当**逐字节相同**（md5 `e1a6a06f71fec3f49e8f2728bb4abb79`）。
+> 两份产物应当**逐字节相同**（md5 `231cacc203e15e53fc9e4c9dc654ad82`）。
 > 若你的 md5 不同：先确认上面命令的参数一字不差（风/关节参数走面板默认值），
 > 再确认 `AI_INFRA` 版本一致 —— 烘焙结果对几何与参数都很敏感。
 
@@ -113,6 +113,8 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
   （dump 解析的容错边界 + 合成 dump 的父枝/层数/环数/叶卡姿态/拓扑序/anchor）。
 - 与 Python 产物的差异：几何逐行一致（实测 93424 行里 0 处结构不同，最大数值差 1e-6 量级），
   唯一例外是「卡片正好骑在枝上」时根/梢方向在数学上无定义，约 1% 的卡在两种浮点精度下取反。
+  另外 C++ 侧会多写一段 `leaf_types.bend`（叶面弯曲，见 docs §4.5）——Python 基准没实现它，
+  所以配置里写了 `export.leaf_bend_*` 时两边产物在这一段上有差异，其余行不受影响。
 - 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
 
 ## 工具总览
@@ -256,7 +258,9 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 
 **⑥ 收敛**
 叶卡角度/缩放不对 → 回 ③ 调提示词（构图问题）或 ④ 换 `--anchor`（几何问题）；
-枝形不对 → 回 ① 调参数。**不要**在查看器里"凑"——查看器没有可调项，它只负责如实呈现。
+枝形不对 → 回 ① 调参数。查看器里能调的只有**呈现/形状参数**（叶面弯曲 3 个滑条、
+法线强度、地面高度、层级）；调好的弯曲要写回 `export.leaf_bend_*` 或 shape 的
+`leaf_types.bend`，否则下次从配置重跑就没了。叶卡的**摆放**（anchor/up/normal）不在这里凑。
 
 ### 几条硬规矩
 
@@ -274,7 +278,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `--bark <dir>` | 树皮材质目录；省略 = level 棕色 |
 | `--leaf <png>` / `--leaf2 <png>` | 叶卡素材；`leaf2` 给**镜像手性**的 leaf type 1。少给 `leaf2` 会 WARNING 回退 |
 | `--leaf-black <f>` | 黑底阈值（见上） |
-| `--curl <f>` | 顶点法线球面化强度 A（0 = 平面法线） |
+| `--leaf-bend <a,b,c>` | 叶面弯曲覆盖：`along`(叶尖翘/垂) `,across`(叶面杯) `,crease`(中脉折痕)，单位 = 卡高；省略 = 用 shape 里 `leaf_types.bend` 的值 |
 | `--leaf-normal <f>` | 由 alpha 生成的法线贴图强度 B（0 = 关） |
 | `--normal-scale <f>` | 树皮法线强度（默认 1.5） |
 | `--cam_phi/--cam_theta/--cam_r` | 视角（度、度、米；`cam_r=0` = 自动取景） |
@@ -297,7 +301,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | 路径 | 内容 |
 |---|---|
 | `proto/shape.proto` | 资产格式（序列化边界）；`shape.h/.cc` 是运行时结构 + `Validate` + `LoadShapeFile` |
-| `sweep.h/.cc` | 扫管（几何 + UV）与 `BuildLeafCards` / `ComputeCardFrame`（**anchor + anchor_mode → 姿态与 UV 的唯一实现**） |
+| `sweep.h/.cc` | 扫管（几何 + UV）与 `BuildLeafCards` / `ComputeCardFrame` / `CardVertexCount`（**anchor + anchor_mode → 姿态与 UV 的唯一实现**；叶卡弯曲也在这里按解析式求位置/法线/切线） |
 | `viewer/` | `vegetation_v2_app.h` = 库接口（`RunViewer`）；`.cc` = 场景/渲染/交互；`vegetation_v2_viewer.cc` = 只有 CLI |
 | `bake/` | **GLB 烘焙器**：shape(+bark+leaf) → 自洽 .glb（关节表 + 逐顶点 `(joint_id, phase)` + 内嵌贴图） |
 | `leaf_texture.h/.cc` | 叶卡贴图 CPU 流水线（黑底→alpha / 法线 / PNG 编解码）——查看器与烘焙共用同一份像素 |
