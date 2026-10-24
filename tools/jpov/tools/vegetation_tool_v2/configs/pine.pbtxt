@@ -1,0 +1,31 @@
+# 松树（Pine）—— 塔形冠 + 裸露主干 + 轮生侧枝。
+#
+# 直接吃 Sapling 自带的 small_pine 预设，只覆盖尺寸/种子/叶量：
+# 预设本身的轮廓（裸干 + 上部轮生枝）就已经很像松，别乱动基部分枝参数。
+version: 1
+name: "pine"
+description: "松树：高裸干、上部轮生侧枝、塔形冠。基于 small_pine 预设，只调尺寸与叶量。"
+
+tree {
+  preset: "small_pine"
+
+  # 12 m 量级：视觉上是一棵成年松，但还没到"巨树"。
+  scale: 12
+  # 3 = 一个侧枝分布较均匀、不偏冠的种子（试过 1/3/5/7/13，3 最正）。
+  seed: 3
+
+  # 松针本身很小，但要靠数量堆出体积：预设的 500 实际上只落几百张卡（很稀），
+  # 55 是"远看有体积、近看还看得出枝"的平衡点。
+  leaves: 55
+  leafScale: 0.42
+  leafScaleV: 0.12
+}
+
+export {
+  # 松树的主干很直很长，8 段/贝塞尔已经看不出折线。
+  per_seg: 8
+  # 针叶细长：卡宽约为高的 0.45。
+  leaf_aspect: 0.45
+  anchor_mode: "bottom_left"
+  leaf_type_desc: "松针簇"
+}

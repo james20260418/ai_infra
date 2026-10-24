@@ -13,6 +13,8 @@
 
 #include <string>
 
+#include "tools/jpov/tools/vegetation_tool_v2/leaf_card/leaf_card_spec.h"
+
 namespace vegv2 {
 
 // 命令行参数（结构与语义见 vegetation_v2_viewer.cc 顶部的用法注释）。
@@ -44,7 +46,10 @@ struct CliArgs {
   // 叶卡（--leaf 给了才启用）。整张图 = 一格；黑底当透明。
   std::string leaf_path;
   std::string leaf2_path;   // leaf type 1（镜像手性）用的素材；空 = 回退 leaf_path
-  float leaf_black = 12.0f;   // max(r,g,b) < 此值 → alpha 0（带 0.5x~1.5x 软过渡）
+  // max(r,g,b) < 此值 → alpha 0（带 0.5x~1.5x 软过渡）。
+  // 默认取生图合同的软过档中心（leaf_card_spec.h），保证归一化工具产出的素材
+  // 在默认参数下就是对的 —— 这里**不再写字面量**，免得两边各写一个数。
+  float leaf_black = jpov::vegetation::kLeafBlackThreshold;
   float leaf_curl = 0.5f;     // A：顶点法线球面化强度
   float leaf_normal = 1.0f;   // B：法线贴图强度（uNormalScale）
 
