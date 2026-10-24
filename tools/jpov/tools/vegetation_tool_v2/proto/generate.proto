@@ -292,4 +292,11 @@ message ShapeExport {
 
   // leaf type 的自然语言描述（"柳树叶簇，细长披针形"），写进 shape.pbtxt 供人/agent 读。
   optional string leaf_type_desc = 4;
+
+  // 叶面弯曲的三个系数（无量纲，位移单位 = 卡的 height）。语义见 shape.proto 的
+  // LeafBendProto：along = 叶尖翘/垂、across = 叶面杯、crease = 中脉折痕。
+  // 不写 = 0 = 平面卡（旧资产行为）。量级参考：12cm 的卡给 0.1~0.2 就是 1~2cm 的弯。
+  optional double leaf_bend_along = 5;
+  optional double leaf_bend_across = 6;
+  optional double leaf_bend_crease = 7;
 }

@@ -31,4 +31,8 @@ export {
   leaf_aspect: 0.4
   anchor_mode: "bottom_left"
   leaf_type_desc: "杉针簇"
+  # 针叶比松针还细长：弯曲幅度再小一点，避免细卡片卷成筒。
+  leaf_bend_along: -0.06
+  leaf_bend_across: 0.04
+  leaf_bend_crease: 0.03
 }

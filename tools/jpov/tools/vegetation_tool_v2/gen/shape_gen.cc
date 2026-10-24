@@ -13,6 +13,7 @@
 //             [--blender /usr/bin/blender] [--keep-dump]
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -173,6 +174,16 @@ int Fail(const std::string& message) {
 
 }  // namespace
 
+// 生成配置 → 叶面弯曲系数。没写 = 0 = 平面卡（proto2 的字段存在性在这里不用查：
+// 三个系数本来就是「0 = 不弯」的合法值，不是「没填」的哨兵）。
+jpov::vegetation::LeafBend MakeLeafBend(const jpov::vegetation::ShapeExport& export_config) {
+  jpov::vegetation::LeafBend bend;
+  bend.along = export_config.leaf_bend_along();
+  bend.across = export_config.leaf_bend_across();
+  bend.crease = export_config.leaf_bend_crease();
+  return bend;
+}
+
 int main(int argc, char** argv) {
   std::string config_path;
   std::string out_path;
@@ -241,6 +252,13 @@ int main(int argc, char** argv) {
   if (export_config.leaf_type_desc().empty()) {
     return Fail("export.leaf_type_desc 必填");
   }
+  // 弯曲系数是「卡的 height 倍数」，Validate 的上限也就是 1.0；写错量级（把厘米当比例）
+  // 会在很长一段时间里表现为「叶子被弯成麻花」，所以在这里先挡一次。
+  const jpov::vegetation::LeafBend bend = MakeLeafBend(export_config);
+  if (!(std::fabs(bend.along) <= 1.0) || !(std::fabs(bend.across) <= 1.0) ||
+      !(std::fabs(bend.crease) <= 1.0)) {
+    return Fail("export.leaf_bend_* 必须在 [-1, 1]（单位是卡的 height）");
+  }
 
   const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
   const std::vector<std::string> overrides = BuildOverrides(config.tree());
@@ -274,6 +292,7 @@ int main(int argc, char** argv) {
   options.anchor_mode = export_config.anchor_mode();
   options.leaf_type_desc = export_config.leaf_type_desc();
   options.species = config.tree().preset();
+  options.leaf_bend = bend;
 
   jpov::vegetation::Shape shape;
   BuildStats stats;

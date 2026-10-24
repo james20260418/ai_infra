@@ -16,7 +16,8 @@
 //   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
 //   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
 //   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
-//   --curl / --leaf-normal / --normal-scale / --uv-vscale   法线与 UV 相关强度
+//   --leaf-bend <a,b,c>  叶面弯曲覆盖（长轴翘垂 / 叶面杯 / 中脉折痕，单位 = 卡高）
+//   --leaf-normal / --normal-scale / --uv-vscale             法线与 UV 相关强度
 //   --cam_phi/--cam_theta/--cam_r / --cam-target-y           视角（度/度/米/米）
 //   --max-level <n> / --only-type <n>                        只画前 n 层 / 只画某类叶卡
 //   --no-leaf / --no-bark / --no-hud                         关叶图（看 debug 绿卡）/ 关树皮 / 关 HUD
@@ -29,6 +30,7 @@
 //                                                            无原材料态：不能烘焙、不能回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,9 +73,34 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--leaf-black" && has_val) {
       a.leaf_black = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_black, 0.0f) << "--leaf-black 不能为负";
-    } else if (arg == "--curl" && has_val) {
-      a.leaf_curl = static_cast<float>(std::atof(argv[++i]));
-      CHECK_GE(a.leaf_curl, 0.0f) << "--curl 不能为负";
+    } else if (arg == "--leaf-bend" && has_val) {
+      // 三个系数一次给全：along,across,crease。少给/写错就报错，不猜。
+      const std::string spec = argv[++i];
+      float values[3] = {0.0f, 0.0f, 0.0f};
+      int count = 0;
+      size_t begin = 0;
+      while (begin <= spec.size() && count < 3) {
+        const size_t comma = spec.find(',', begin);
+        const std::string piece =
+            spec.substr(begin, (comma == std::string::npos) ? std::string::npos : comma - begin);
+        CHECK(!piece.empty()) << "--leaf-bend 需要一个非空的数: " << spec;
+        values[count] = static_cast<float>(std::atof(piece.c_str()));
+        ++count;
+        if (comma == std::string::npos) {
+          break;
+        }
+        begin = comma + 1;
+      }
+      CHECK_EQ(count, 3) << "--leaf-bend 必须是 3 个数：along,across,crease，实际 \"" << spec
+                         << "\"";
+      for (int k = 0; k < 3; ++k) {
+        CHECK_LE(std::fabs(values[k]), 1.0f)
+            << "--leaf-bend 的系数是卡的 height 倍数，必须在 [-1, 1]（实际 " << values[k] << "）";
+      }
+      a.leaf_bend_set = true;
+      a.leaf_bend_along = values[0];
+      a.leaf_bend_across = values[1];
+      a.leaf_bend_crease = values[2];
     } else if (arg == "--leaf-normal" && has_val) {
       a.leaf_normal = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_normal, 0.0f) << "--leaf-normal 不能为负（0 = 关掉法线贴图）";

@@ -242,9 +242,11 @@ LeafCard {
 }
 
 LeafType {
-  type, description, anchor_mode
+  type, description, anchor_mode,
+  bend { along, across, crease }   // 叶面弯曲（见 §4.5；省略 = 平面卡）
 }
 ```
+
 
 - **`anchor` 是「叶子与枝条的连接点」，必须落在所属枝条上**（合同，不是提示）：
   到 `branch` 那根枝中心线的距离 ≤ 该处 `radius + 1cm`（叶柄允许插进管壁，但不许悬空）。
@@ -255,7 +257,7 @@ LeafType {
 - **`anchor + anchor_mode` 唯一推导 UV**：格子里的 `(au, av)` 那一点贴到 `anchor`，
   卡片沿 `+up` 长、沿 `right(=up×normal)` 变宽：
   ```
-  quad 角点(u,v) = anchor + right·(u − au)·width + up·(v − av)·height
+  面片(u,v) = anchor + right·(u − au)·width + up·(v − av)·height + normal·z(u,v)   // z 见 §4.5
   ```
   引擎**不做任何补偿性偏移**：素材根部画在 `(au, av)`，逻辑就对得上。
 - **anchor + up + normal** 三者唯一确定卡片姿态。只有 `up` 不够（卡面还能绕长轴自转）。
@@ -288,8 +290,9 @@ LeafType {
 width = height × (cell_width / cell_height)     // 装配时算，写进 LeafCard.width
 ```
 
-- **anchor + up + normal + height + width 唯一确定卡片 quad**，引擎直接按这五个量铺面，
-  不做任何"拿材质比例反推"的隐式行为（否则同一个 shape 换材质就变形状，无法复现）。
+- **anchor + up + normal + height + width（+ 所属 type 的 `bend`）唯一确定卡片面片**，
+  引擎直接按这几个量铺面，不做任何"拿材质比例反推"的隐式行为（否则同一个 shape 换材质就变形状，
+  无法复现）。`bend` 全 0 时就是平面 quad，见 §4.5。
 - `width` 必须 > 0，`Validate` 会拒绝 0/负值。
 - 贴图与 quad 的比例对不上时，呈现是**拉伸**的 —— 这是可见的、可修的：改 shape 的 width，
   或者改 atlas 格子比例后重新装配。引擎**绝不**为了凑形状去偷偷拉伸纹理。
@@ -328,9 +331,9 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
    （实测 weeping_willow 预设约 48.7% 的卡是镜像）。一种 leaf type 只对应一种对齐方式，
    所以导出时按 UV 手性拆成 `type 0`（未镜像）与 `type 1`（镜像），
    由用户给 type 1 提供一张**左右翻转**后的素材；引擎不做运行时镜像。
-8. 叶面细节可以吃「轮廓 alpha + 照片明暗 luma」生成的法线贴图（emboss），
-   再叠加每个卡片顶点的球面化法线（角部向外张）——两者互补：
-   前者管单叶的叶脉/倒角，后者管整卡内部的受光渐变。
+8. 叶面细节可以吃「轮廓 alpha + 照片明暗 luma」生成的法线贴图（emboss）管叶脉/倒角；
+   整卡的**弯曲**不再靠改法线，而是 `LeafType.bend` 的真实几何（见 §4.5）——
+   旧版「顶点法线球面化」只改法线不改几何、而且烘焙器不认，预览与 glb 资产对不上，已删除。
 
 ---
 
@@ -348,6 +351,39 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
 ```
 
 **它永不参与逻辑判断**，只是给人 / agent / 下游工具读的上下文。可以为空。
+
+### 4.5 叶面弯曲：卡是**曲面**，不是平面 quad
+
+`LeafType.bend` 三个无量纲系数（位移单位 = `height`）：
+
+```
+p = (u,v) ∈ [0,1]²                     // 格子坐标
+e = 从 anchor 指向格子中心的单位向量     // ≈ 叶片长轴（jpov_leaf_card 已把叶柄摆正）
+t = (p − a)·e / T   ∈ [0,1]            // 沿叶长，anchor 处 = 0
+s = (p − a)⊥e / S   ∈ [−1,1]           // 垂直叶长，中脉线处 = 0
+z = height · ( along·t² + across·s² + crease·ridge(s) )
+    ridge(s) = sqrt(s² + r²) − r       // r = 0.25：圆角 V（中脉是肉脊，不是折纸硬棱）
+
+P(u,v) = anchor + right·((u−au)·width) + up·((v−av)·height) + normal·z
+```
+
+| 系数 | 语义 | 典型值（12cm 的卡） |
+|---|---|---|
+| `along` | 叶尖相对叶柄的位移（抛物线）：>0 朝 `+normal` 翘，<0 下垂 | −0.2 ~ +0.15 ⇒ 2.4cm |
+| `across` | 两缘相对中脉的位移（抛物线）⇒ 叶面成杯 | 0.08 ~ 0.2 |
+| `crease` | 两缘相对中脉的位移（圆角 V）⇒ 中脉的一道棱 | 0.1 ~ 0.2 |
+
+**为什么是解析式**（而不是「先摆四个角再想办法弯」）：
+
+- 顶点位置按公式**精确求值**，法线由**解析偏导**给出（不是面法线累加、也不是有限差分），
+  所以细分密度只影响轮廓、不影响光照 —— 没有低模那种折线感；
+- 三条硬性质：`z(anchor) ≡ 0`（叶柄永远不离开枝条，anchor 合同不受影响）、
+  `s` 到中脉线对称（镜像手性 type 1 不用翻符号）、全 0 = 平面（旧资产几何逐字节不变）；
+- 细分自适应：平面 1×1（4 顶点 / 2 三角形）、弯曲 4×4（25 顶点 / 32 三角形）。
+  消费方逐卡步进顶点时**必须**用 `CardVertexCount()`，不能假设恒等于 4。
+
+呈现侧（查看器的 `--leaf-bend along,across,crease` 与面板滑条）只是**覆盖** shape 里的值，
+改动会写回内存里的 shape ⇒ 预览、出图、烘焙进 glb 用的是同一组数（不会「预览弯了、资产没弯」）。
 
 ## 5. 装配流程
 
@@ -381,6 +417,7 @@ shape viewer 在「叶卡贴图关掉」时，会把每张卡画成 **绿卡 + �
 | 非空 profile：点数 ≥ 3、等于环顶点数、逆时针星形、周长 > 0 | 截面合法且逐圈一致 |
 | `seam_index < 环顶点数` | UV 接缝 |
 | 每个 `leaf_type`：`anchor_mode` ∈ 4 个合法值 | 没有第五种对齐 |
+| 每个 `leaf_type`：`|bend.along/across/crease| <= 1` | 系数是卡的 `height` 倍数；弯过自己一整张卡时位置/法线都没有意义 |
 | 每张卡 `|up| ≈ 1`、`|normal| ≈ 1`、`up·normal ≈ 0` | 姿态合法 |
 | 每张卡 `height > 0`、**`width > 0`**、`type` 在 `leaf_types` 里 | 引用完整、尺寸可铺面 |
 | 卡片的 `branch` 存在，`s ∈ [0,1]` | 溯源完整 |

@@ -69,6 +69,15 @@ std::string FormatShapeText(const Shape& shape) {
     out += "  type: " + std::to_string(type.type) + "\n";
     out += "  description: " + QuoteString(type.description) + "\n";
     out += "  anchor_mode: " + QuoteString(type.anchor_mode) + "\n";
+    // 全 0（平面）就不写：proto 的「没写 = 0」在这里是**语义**（旧资产就是这个样），
+    // 写一堆 0 只会让人以为弯曲被显式关掉了。
+    if (!type.bend.IsFlat()) {
+      out += "  bend {\n";
+      out += "    along: " + FormatNumber(type.bend.along) + "\n";
+      out += "    across: " + FormatNumber(type.bend.across) + "\n";
+      out += "    crease: " + FormatNumber(type.bend.crease) + "\n";
+      out += "  }\n";
+    }
     out += "}\n";
   }
 

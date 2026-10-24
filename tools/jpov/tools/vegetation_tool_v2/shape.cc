@@ -205,6 +205,9 @@ Shape FromProto(const ShapeProto& proto) {
     type.type = t.type();
     type.description = t.description();
     type.anchor_mode = t.anchor_mode();
+    type.bend.along = t.bend().along();
+    type.bend.across = t.bend().across();
+    type.bend.crease = t.bend().crease();
     shape.leaf_types.push_back(std::move(type));
   }
 
@@ -349,6 +352,15 @@ bool Validate(const Shape& shape, std::string* error) {
       return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法"
                          "（只接受 bottom_left/bottom_center/bottom_right/top_center）",
                          t.type, t.anchor_mode.c_str()));
+    }
+    // 弯曲系数的量纲是「卡的 height 倍数」。|系数| > 1 等于叶子弯过自己一整张卡，
+    // 位置/法线都没意义了（还会让卡横穿枝条），所以直接判非法而不是无害忽略。
+    const LeafBend& bend = t.bend;
+    if (!(std::fabs(bend.along) <= 1.0) || !(std::fabs(bend.across) <= 1.0) ||
+        !(std::fabs(bend.crease) <= 1.0)) {
+      return fail(Format("leaf_type %u: bend 系数超范围（along=%g across=%g crease=%g，"
+                         "允许 [-1, 1]，单位是 card.height）",
+                         t.type, bend.along, bend.across, bend.crease));
     }
   }
 

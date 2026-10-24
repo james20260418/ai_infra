@@ -28,4 +28,8 @@ export {
   leaf_aspect: 0.45
   anchor_mode: "bottom_left"
   leaf_type_desc: "松针簇"
+  # 针叶细而硬：只给一点点下垂与杯度，中脉折痕几乎不要（折起来像纸片）。
+  leaf_bend_along: -0.08
+  leaf_bend_across: 0.05
+  leaf_bend_crease: 0.04
 }

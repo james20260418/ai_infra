@@ -554,6 +554,7 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.type = 0;
     type.description = options.leaf_type_desc;
     type.anchor_mode = options.anchor_mode;
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
   if (mirrored_count > 0) {
@@ -564,6 +565,8 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.description = options.leaf_type_desc + "（镜像手性：素材左右翻转后使用，根部在格子 " +
                        mode + " 角）";
     type.anchor_mode = mode;
+    // 弯曲与手性无关：s 是到中脉线的距离（左右对称），镜像不用翻符号。
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
 

@@ -109,24 +109,6 @@ jpov::MeshData ToEngineMesh(const MeshData& src, bool with_tangents) {
   return dst;
 }
 
-// 给叶片网格补切线（= 卡片 +u 边，单位化）。BuildLeafCards 只出位置/法线/UV。
-void AddCardTangents(MeshData* mesh) {
-  const size_t vcount = mesh->VertexCount();
-  mesh->tangents.assign(vcount * 3, 0.0f);
-  for (size_t v = 0; v + 3 < vcount; v += 4) {
-    const float ax = mesh->positions[(v + 1) * 3 + 0] - mesh->positions[v * 3 + 0];
-    const float ay = mesh->positions[(v + 1) * 3 + 1] - mesh->positions[v * 3 + 1];
-    const float az = mesh->positions[(v + 1) * 3 + 2] - mesh->positions[v * 3 + 2];
-    const float len = std::sqrt(ax * ax + ay * ay + az * az);
-    const float inv = (len > 1e-9f) ? 1.0f / len : 0.0f;
-    for (size_t i = 0; i < 4; ++i) {
-      mesh->tangents[(v + i) * 3 + 0] = ax * inv;
-      mesh->tangents[(v + i) * 3 + 1] = ay * inv;
-      mesh->tangents[(v + i) * 3 + 2] = az * inv;
-    }
-  }
-}
-
 }  // namespace
 
 bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
@@ -252,12 +234,17 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
         continue;
       }
 
+      // BuildLeafCards 自带切线（∂P/∂u，解析求得）——弯曲卡的切线不是「卡片 +u 边」了，
+      // 差分近似会把曲率吃进去，所以别再自己算。
       MeshData leaves_raw = BuildLeafCards(subset);
-      AddCardTangents(&leaves_raw);
       std::vector<Vec2f> leaf_wind(leaves_raw.VertexCount());
       double card_attach_max_bucket = 0.0;
-      for (size_t c = 0, v = 0; c < subset.cards.size(); ++c, v += 4) {
+      // 每张卡占 (seg+1)² 个顶点，seg 随该 type 的弯曲参数变（平面仍是 4 个顶点）。
+      // 这里必须逐卡问 CardVertexCount，**不能假设恒等于 4**。
+      size_t card_vertex_begin = 0;
+      for (size_t c = 0; c < subset.cards.size(); ++c) {
         const LeafCard& card = subset.cards[c];
+        const uint32_t card_vertices = CardVertexCount(subset, card);
         // 卡片挂到「最近的枝条采样点」（它实际挂在哪根管子的哪一环），再用该环的
         // 覆盖关节。这样卡片与它旁边那一圈顶点**用同一条链**，风里不会各转各的。
         int jid = 0;
@@ -283,9 +270,16 @@ bool BakeVegetationGlb(const Shape& shape, const std::string& out_path,
           phase = SmoothPhase01(pv.x, pv.y, pv.z, opts.phase_scale);
           card_attach_max_bucket = std::max(card_attach_max_bucket, best);
         }
-        for (size_t k = 0; k < 4; ++k) {
-          leaf_wind[v + k] = Vec2f(static_cast<float>(jid), static_cast<float>(phase));
+        for (size_t k = 0; k < card_vertices; ++k) {
+          leaf_wind[card_vertex_begin + k] =
+              Vec2f(static_cast<float>(jid), static_cast<float>(phase));
         }
+        card_vertex_begin += card_vertices;
+      }
+      if (card_vertex_begin != leaves_raw.VertexCount()) {
+        // 顶点数与「逐卡步进」对不上 = 有一方改了布局另一方没跟上（风数据会串到别的卡上）。
+        return fail("叶卡顶点数 " + std::to_string(leaves_raw.VertexCount()) +
+                    " 与逐卡步进累计 " + std::to_string(card_vertex_begin) + " 不一致");
       }
       card_attach_max = std::max(card_attach_max, card_attach_max_bucket);
 

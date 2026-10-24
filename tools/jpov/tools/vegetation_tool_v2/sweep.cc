@@ -2,6 +2,7 @@
 
 #include "tools/jpov/tools/vegetation_tool_v2/sweep.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <unordered_map>
@@ -421,14 +422,14 @@ Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback
 }
 
 CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card) {
-  const std::string* mode = nullptr;
+  const LeafType* type = nullptr;
   for (const LeafType& t : shape.leaf_types) {
     if (t.type == card.type) {
-      mode = &t.anchor_mode;
+      type = &t;
       break;
     }
   }
-  if (mode == nullptr) {
+  if (type == nullptr) {
     std::fprintf(stderr,
                  "ComputeCardFrame: card type %u 不在 leaf_types 里"
                  "（Shape 必须先过 Validate）\n",
@@ -439,15 +440,154 @@ CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card) {
   const V3 up = Normalize(V3{card.up.x, card.up.y, card.up.z});
   const V3 nrm = Normalize(V3{card.normal.x, card.normal.y, card.normal.z});
   const V3 right = Normalize(Cross(up, nrm));  // (right, up, normal) 右手系
-  if (!AnchorModeToUv(*mode, &f.au, &f.av)) {
+  if (!AnchorModeToUv(type->anchor_mode, &f.au, &f.av)) {
     std::fprintf(stderr, "ComputeCardFrame: card type %u 的 anchor_mode \"%s\" 非法\n",
-                 card.type, mode->c_str());
+                 card.type, type->anchor_mode.c_str());
     std::abort();
   }
   f.up = Vec3d{up.x, up.y, up.z};
   f.normal = Vec3d{nrm.x, nrm.y, nrm.z};
   f.right = Vec3d{right.x, right.y, right.z};
+  f.bend = type->bend;
   return f;
+}
+
+namespace {
+
+// ── 叶卡解析式弯曲（语义见 shape.h 的 LeafBend 与 proto/shape.proto 的 LeafBendProto）
+
+// 中脉「脊」的圆角宽度（s 归一化到 [−1,1] 之后的量）。
+// 0.25 ≈ 叶宽的 1/8 是脊的过渡带：再小，圆角比 4 段网格的步长还细 ⇒ 网格上出现锯齿
+// （正是要避免的折线感）；再大，V 折痕会被糊成抛物线，跟 across 项分不出来了。
+constexpr double kCardRidgeRound = 0.25;
+
+// 弯曲卡的细分段数：4 段 ⇒ 12cm 的卡 3cm 一段。法线是解析的（与细分无关），
+// 这里只决定**曲面轮廓**与二次项的形状误差 —— 4 段看不出折线，再多只是浪费顶点。
+constexpr uint32_t kBentCardSegments = 4;
+
+uint32_t CardSegments(const LeafBend& bend) {
+  return bend.IsFlat() ? 1u : kBentCardSegments;
+}
+
+// 叶片局部坐标基：e 沿「anchor → 格子中心」（= jpov_leaf_card 摆正后的叶片长轴），
+// n 垂直它（中脉线就在 s = 0 上）。
+//
+// 归一化分母 T/S = 四个角在 e/n 上的最大投影 ⇒ t ∈ [0,1]、s ∈ [−1,1]，
+// 于是三个弯曲系数与卡的绝对尺寸无关（位移 = 系数 × height）。
+struct CardAxes {
+  double e_u = 0.0;
+  double e_v = 1.0;
+  double n_u = -1.0;
+  double n_v = 0.0;
+  double t_scale = 1.0;
+  double s_scale = 1.0;
+};
+
+CardAxes MakeCardAxes(double au, double av) {
+  CardAxes axes;
+  const double to_centre_u = 0.5 - au;
+  const double to_centre_v = 0.5 - av;
+  const double length = std::hypot(to_centre_u, to_centre_v);
+  if (length > 1e-9) {
+    axes.e_u = to_centre_u / length;
+    axes.e_v = to_centre_v / length;
+  }
+  // 退化（anchor 恰好在格子中心，4 种 anchor_mode 都不会）：取 +v 当长轴。
+  axes.n_u = -axes.e_v;
+  axes.n_v = axes.e_u;
+
+  const double corners[4][2] = {{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
+  double t_max = 0.0;
+  double s_max = 0.0;
+  for (const auto& corner : corners) {
+    const double du = corner[0] - au;
+    const double dv = corner[1] - av;
+    t_max = std::max(t_max, du * axes.e_u + dv * axes.e_v);
+    s_max = std::max(s_max, std::fabs(du * axes.n_u + dv * axes.n_v));
+  }
+  axes.t_scale = std::max(t_max, 1e-9);
+  axes.s_scale = std::max(s_max, 1e-9);
+  return axes;
+}
+
+// 曲面上的一个点：位置 + 解析法线 + ∂P/∂u（TBN 的切线，平面时就是 card 的 +u 方向）。
+struct CardSurfacePoint {
+  V3 position;
+  V3 normal;
+  V3 tangent_u;
+};
+
+// 一张卡的曲面求值器：基与归一化只算一次，逐顶点复用。
+//
+// 曲面定义（p = (u,v) 是格子坐标，a = (au, av)）：
+//   z(p) = height · ( along·t² + across·s² + crease·ridge(s) )
+//   ridge(s) = sqrt(s² + r²) − r
+//   P(p) = anchor + right·((u−au)·width) + up·((v−av)·height) + normal·z(p)
+// z(a) ≡ 0（t = s = 0）⇒ **anchor 点永远不动**，叶柄不会因为弯曲离开枝条。
+class CardEvaluator {
+ public:
+  CardEvaluator(const Vec3d& anchor, const CardFrame& frame, double width, double height)
+      : anchor_(FromVec3d(anchor)),
+        right_(FromVec3d(frame.right)),
+        up_(FromVec3d(frame.up)),
+        normal_(FromVec3d(frame.normal)),
+        width_(width),
+        height_(height),
+        au_(frame.au),
+        av_(frame.av),
+        bend_(frame.bend),
+        axes_(MakeCardAxes(frame.au, frame.av)) {}
+
+  CardSurfacePoint At(double u, double v) const {
+    const double du = u - au_;
+    const double dv = v - av_;
+    const double t = (du * axes_.e_u + dv * axes_.e_v) / axes_.t_scale;
+    const double s = (du * axes_.n_u + dv * axes_.n_v) / axes_.s_scale;
+    const double ridge_root = std::sqrt(s * s + kCardRidgeRound * kCardRidgeRound);
+    const double ridge = ridge_root - kCardRidgeRound;
+    // ridge 对 s 的偏导：s = 0 处 = 0（脊顶是圆的，法线在这里连续 —— 硬棱会出折线感）。
+    const double ridge_ds = s / ridge_root;
+
+    const double z = height_ * (bend_.along * t * t + bend_.across * s * s +
+                                bend_.crease * ridge);
+    // 链式法则：t、s 都是 (u,v) 的线性函数，所以偏导只有这几项。
+    const double dz_dt = height_ * (2.0 * bend_.along * t);
+    const double dz_ds = height_ * (2.0 * bend_.across * s + bend_.crease * ridge_ds);
+    const double dz_du =
+        dz_dt * axes_.e_u / axes_.t_scale + dz_ds * axes_.n_u / axes_.s_scale;
+    const double dz_dv =
+        dz_dt * axes_.e_v / axes_.t_scale + dz_ds * axes_.n_v / axes_.s_scale;
+
+    CardSurfacePoint out;
+    out.position = Add(Add(Add(anchor_, Mul(right_, du * width_)), Mul(up_, dv * height_)),
+                       Mul(normal_, z));
+    const V3 dpos_du = Add(Mul(right_, width_), Mul(normal_, dz_du));
+    const V3 dpos_dv = Add(Mul(up_, height_), Mul(normal_, dz_dv));
+    // cross(∂u, ∂v) 在平面上 = width·height·(right × up) = +normal（见 sweep.h 的右手系）。
+    out.normal = Normalize(Cross(dpos_du, dpos_dv));
+    out.tangent_u = Normalize(dpos_du);
+    return out;
+  }
+
+ private:
+  V3 anchor_;
+  V3 right_;
+  V3 up_;
+  V3 normal_;
+  double width_;
+  double height_;
+  double au_;
+  double av_;
+  LeafBend bend_;
+  CardAxes axes_;
+};
+
+}  // namespace
+
+uint32_t CardVertexCount(const Shape& shape, const LeafCard& card) {
+  const CardFrame frame = ComputeCardFrame(shape, card);
+  const uint32_t stride = CardSegments(frame.bend) + 1;
+  return stride * stride;
 }
 
 MeshData BuildLeafCards(const Shape& shape) {
@@ -458,43 +598,57 @@ MeshData BuildLeafCards(const Shape& shape) {
                    card.type, card.width);
       std::abort();
     }
-    const double width = card.width;
+    if (!(card.height > 0.0)) {
+      // height 是弯曲位移的基准（z = 系数 × height），<= 0 会让整张卡退化成一个点。
+      std::fprintf(stderr, "BuildLeafCards: card type %u 的 height 必须 > 0，实际 %g\n",
+                   card.type, card.height);
+      std::abort();
+    }
 
-    // 姿态 + UV 锚点只有一份来源（ComputeCardFrame）：绿卡、角标、真实叶卡都用它，
+    // 姿态 + UV 锚点 + 弯曲只有一份来源（ComputeCardFrame）：绿卡、角标、真实叶卡都用它，
     // 否则三者会各自漂移（历史上「绿卡和角标对不上」就是这么来的）。
     const CardFrame frame = ComputeCardFrame(shape, card);
-    const V3 up{frame.up.x, frame.up.y, frame.up.z};
-    const V3 nrm{frame.normal.x, frame.normal.y, frame.normal.z};
-    const V3 right{frame.right.x, frame.right.y, frame.right.z};
-    const V3 anchor{card.anchor.x, card.anchor.y, card.anchor.z};
-    const double anchor_u = frame.au;
-    const double anchor_v = frame.av;
-
-    const V3 origin = Sub(Sub(anchor, Mul(right, anchor_u * width)),
-                          Mul(up, anchor_v * card.height));
-    const V3 du = Mul(right, width);
-    const V3 dv = Mul(up, card.height);
-    const V3 corner[4] = {origin, Add(origin, du), Add(Add(origin, du), dv),
-                          Add(origin, dv)};
-    const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
-
+    const CardEvaluator evaluator(card.anchor, frame, card.width, card.height);
+    const uint32_t segments = CardSegments(frame.bend);
+    const uint32_t stride = segments + 1;
     const uint32_t base = static_cast<uint32_t>(mesh.VertexCount());
-    for (int i = 0; i < 4; ++i) {
-      mesh.positions.push_back(static_cast<float>(corner[i].x));
-      mesh.positions.push_back(static_cast<float>(corner[i].y));
-      mesh.positions.push_back(static_cast<float>(corner[i].z));
-      mesh.normals.push_back(static_cast<float>(nrm.x));
-      mesh.normals.push_back(static_cast<float>(nrm.y));
-      mesh.normals.push_back(static_cast<float>(nrm.z));
-      mesh.uvs.push_back(uv[i][0]);
-      mesh.uvs.push_back(uv[i][1]);
+
+    // 顶点：先沿 u 后沿 v（下标 = i·stride + j，u = j/seg、v = i/seg）。
+    // 每张卡独立（不共享顶点）：CU 裁切/双面/风绑定都按卡走，共享只会增加耦合。
+    for (uint32_t i = 0; i <= segments; ++i) {
+      for (uint32_t j = 0; j <= segments; ++j) {
+        const double u = static_cast<double>(j) / static_cast<double>(segments);
+        const double v = static_cast<double>(i) / static_cast<double>(segments);
+        const CardSurfacePoint point = evaluator.At(u, v);
+        mesh.positions.push_back(static_cast<float>(point.position.x));
+        mesh.positions.push_back(static_cast<float>(point.position.y));
+        mesh.positions.push_back(static_cast<float>(point.position.z));
+        mesh.normals.push_back(static_cast<float>(point.normal.x));
+        mesh.normals.push_back(static_cast<float>(point.normal.y));
+        mesh.normals.push_back(static_cast<float>(point.normal.z));
+        mesh.uvs.push_back(static_cast<float>(u));
+        mesh.uvs.push_back(static_cast<float>(v));
+        mesh.tangents.push_back(static_cast<float>(point.tangent_u.x));
+        mesh.tangents.push_back(static_cast<float>(point.tangent_u.y));
+        mesh.tangents.push_back(static_cast<float>(point.tangent_u.z));
+      }
     }
-    mesh.indices.push_back(base + 0);
-    mesh.indices.push_back(base + 1);
-    mesh.indices.push_back(base + 2);
-    mesh.indices.push_back(base + 0);
-    mesh.indices.push_back(base + 2);
-    mesh.indices.push_back(base + 3);
+
+    // 三角形：每格两个，绕序 (a,b,c)/(a,c,d) —— 与扫管同一套约定（b-a 沿 +u、c-a 沿 +v）。
+    for (uint32_t i = 0; i < segments; ++i) {
+      for (uint32_t j = 0; j < segments; ++j) {
+        const uint32_t a = base + i * stride + j;
+        const uint32_t b = a + 1;
+        const uint32_t d = a + stride;
+        const uint32_t c = d + 1;
+        mesh.indices.push_back(a);
+        mesh.indices.push_back(b);
+        mesh.indices.push_back(c);
+        mesh.indices.push_back(a);
+        mesh.indices.push_back(c);
+        mesh.indices.push_back(d);
+      }
+    }
   }
   return mesh;
 }
