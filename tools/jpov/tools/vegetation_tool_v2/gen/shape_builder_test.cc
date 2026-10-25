@@ -195,6 +195,166 @@ TEST(ShapeBuilderTest, FormatsTextProto) {
   EXPECT_NE(text.find("anchor_mode: \"bottom_left\""), std::string::npos);
 }
 
+// ----------------------------- 枝条噪声 -----------------------------
+//
+// 噪声的验收点只有四个，但每个都必须成立，否则树会静默变形：
+//   1) 同 seed + 同参数 ⇒ 逐位相同的几何（可复现）；
+//   2) 尺寸抖动 = 长度与半径乘同一个因子（整体缩放，不是被拉长）；
+//   3) 弯度两端位移为 0（枝根接缝不裂、枝梢叶子不飘），中段确实动了；
+//   4) 噪声之后叶卡的 anchor 仍然落在枝上（不靠"补偿"糊过去）。
+
+namespace {
+// 一根沿 +Z（Blender 坐标）的多段主干，便于观察中段位移。
+SaplingDump MakeLongTrunkDump(int segments) {
+  SaplingDump dump;
+  dump.bevel_depth = 1.0;
+  std::vector<Vec3d> points;
+  for (int i = 0; i <= segments; ++i) {
+    points.push_back(Vec3d{ 0.0, 0.0, 4.0 * static_cast<double>(i) / segments });
+  }
+  dump.splines.push_back(MakePolySpline(points, 0.2));
+  return dump;
+}
+}  // namespace
+
+TEST(ShapeNoiseTest, ZeroNoiseIsIdentity) {
+  const SaplingDump dump = MakeDump(/*child_first=*/false);
+  Shape plain;
+  Shape zeroed;
+  BuildStats stats;
+  std::string error;
+  ASSERT_TRUE(BuildShape(dump, MakeOptions(), &plain, &stats, &error)) << error;
+  BuildOptions options = MakeOptions();
+  options.noise.size_jitter = { 0.0f };
+  options.noise.bend_longitudinal = { 0.0f };
+  options.noise.bend_lateral = { 0.0f };
+  ASSERT_TRUE(BuildShape(dump, options, &zeroed, &stats, &error)) << error;
+  ASSERT_EQ(plain.branches.size(), zeroed.branches.size());
+  for (std::size_t b = 0; b < plain.branches.size(); ++b) {
+    ASSERT_EQ(plain.branches[b].samples.size(), zeroed.branches[b].samples.size());
+    for (std::size_t k = 0; k < plain.branches[b].samples.size(); ++k) {
+      EXPECT_DOUBLE_EQ(plain.branches[b].samples[k].position.x,
+                       zeroed.branches[b].samples[k].position.x);
+      EXPECT_DOUBLE_EQ(plain.branches[b].samples[k].position.y,
+                       zeroed.branches[b].samples[k].position.y);
+      EXPECT_DOUBLE_EQ(plain.branches[b].samples[k].position.z,
+                       zeroed.branches[b].samples[k].position.z);
+      EXPECT_DOUBLE_EQ(plain.branches[b].samples[k].radius,
+                       zeroed.branches[b].samples[k].radius);
+    }
+  }
+}
+
+TEST(ShapeNoiseTest, SizeJitterScalesLengthAndRadiusTogether) {
+  const SaplingDump dump = MakeDump(/*child_first=*/false);
+  BuildOptions options = MakeOptions();
+  options.noise.size_jitter = { 0.2f };  // 只作用于主干（level 0）
+  Shape shape;
+  BuildStats stats;
+  std::string error;
+  ASSERT_TRUE(BuildShape(dump, options, &shape, &stats, &error)) << error;
+
+  // 主干：原来 (0,0,0)→(0,4,0)（glTF 坐标），半径 0.2。
+  const auto& trunk = shape.branches[0];
+  ASSERT_EQ(trunk.samples.size(), 2u);
+  const double length = std::sqrt(
+      std::pow(trunk.samples[1].position.x - trunk.samples[0].position.x, 2) +
+      std::pow(trunk.samples[1].position.y - trunk.samples[0].position.y, 2) +
+      std::pow(trunk.samples[1].position.z - trunk.samples[0].position.z, 2));
+  const double factor = length / 4.0;
+  EXPECT_GT(factor, 0.8);          // 幅度 0.2 ⇒ 因子落在 [0.8, 1.2]
+  EXPECT_LT(factor, 1.2);
+  // 长度与半径乘的是**同一个**因子（整体缩放，不是拉长压扁）。
+  EXPECT_NEAR(trunk.samples[0].radius, 0.2 * factor, 1e-12);
+  EXPECT_NEAR(trunk.samples[1].radius, 0.2 * factor, 1e-12);
+
+  // 子枝跟着父枝走：根点仍在主干上（离主干 ≤ 1e-12），高度随主干缩放。
+  const auto& branch = shape.branches[1];
+  ASSERT_FALSE(branch.samples.empty());
+  const double root_y = branch.samples[0].position.y;
+  EXPECT_NEAR(root_y, 2.0 * factor, 1e-9);
+  EXPECT_NEAR(branch.samples[0].radius, 0.05, 1e-12);  // level 1 没开抖动
+}
+
+TEST(ShapeNoiseTest, BendKeepsEndpointsAndMovesMiddle) {
+  const SaplingDump dump = MakeLongTrunkDump(/*segments=*/8);
+  BuildOptions options = MakeOptions();
+  options.noise.bend_longitudinal = { 0.1f };
+  Shape shape;
+  BuildStats stats;
+  std::string error;
+  ASSERT_TRUE(BuildShape(dump, options, &shape, &stats, &error)) << error;
+
+  const auto& samples = shape.branches[0].samples;
+  ASSERT_EQ(samples.size(), 9u);
+  // 端点恒不动（枝根接缝、枝梢叶子）。
+  EXPECT_NEAR(samples.front().position.x, 0.0, 1e-12);
+  EXPECT_NEAR(samples.front().position.y, 0.0, 1e-12);
+  EXPECT_NEAR(samples.front().position.z, 0.0, 1e-12);
+  EXPECT_NEAR(samples.back().position.x, 0.0, 1e-12);
+  EXPECT_NEAR(samples.back().position.y, 4.0, 1e-12);
+  EXPECT_NEAR(samples.back().position.z, 0.0, 1e-12);
+  // 中段确实被推开了（竖直枝的"纵向"退化成 +Z 方向）。
+  double max_offset = 0.0;
+  for (const auto& sample : samples) {
+    max_offset = std::max(max_offset, std::abs(sample.position.z));
+  }
+  EXPECT_GT(max_offset, 0.05);  // 0.1 × 4m 的幅度，中段应远超 5cm
+  EXPECT_LT(max_offset, 0.4);
+}
+
+TEST(ShapeNoiseTest, SameSeedIsReproducibleAndDifferentSeedDiffers) {
+  const SaplingDump dump = MakeLongTrunkDump(/*segments=*/8);
+  BuildOptions options = MakeOptions();
+  options.noise.size_jitter = { 0.15f };
+  options.noise.bend_longitudinal = { 0.08f };
+  options.noise.bend_lateral = { 0.08f };
+
+  Shape first;
+  Shape second;
+  Shape other_seed;
+  BuildStats stats;
+  std::string error;
+  ASSERT_TRUE(BuildShape(dump, options, &first, &stats, &error)) << error;
+  ASSERT_TRUE(BuildShape(dump, options, &second, &stats, &error)) << error;
+  options.noise.seed = 7;
+  ASSERT_TRUE(BuildShape(dump, options, &other_seed, &stats, &error)) << error;
+
+  for (std::size_t k = 0; k < first.branches[0].samples.size(); ++k) {
+    EXPECT_DOUBLE_EQ(first.branches[0].samples[k].position.x,
+                     second.branches[0].samples[k].position.x);
+    EXPECT_DOUBLE_EQ(first.branches[0].samples[k].position.y,
+                     second.branches[0].samples[k].position.y);
+    EXPECT_DOUBLE_EQ(first.branches[0].samples[k].position.z,
+                     second.branches[0].samples[k].position.z);
+  }
+  bool differs = false;
+  for (std::size_t k = 0; k < first.branches[0].samples.size(); ++k) {
+    if (std::abs(first.branches[0].samples[k].position.x -
+                 other_seed.branches[0].samples[k].position.x) > 1e-6 ||
+        std::abs(first.branches[0].samples[k].position.y -
+                 other_seed.branches[0].samples[k].position.y) > 1e-6) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs) << "换 seed 必须换一棵树，否则噪声等于没接上";
+}
+
+TEST(ShapeNoiseTest, CardsStayAttachedAfterNoise) {
+  const SaplingDump dump = MakeDump(/*child_first=*/false);
+  BuildOptions options = MakeOptions();
+  options.noise.size_jitter = { 0.2f, 0.2f };
+  options.noise.bend_longitudinal = { 0.1f, 0.1f };
+  options.noise.bend_lateral = { 0.1f, 0.1f };
+  Shape shape;
+  BuildStats stats;
+  std::string error;
+  // BuildShape 在 anchor 离枝时会返回 false —— 能过就说明叶子仍然贴在枝上。
+  ASSERT_TRUE(BuildShape(dump, options, &shape, &stats, &error)) << error;
+  EXPECT_FALSE(shape.cards.empty());
+}
+
 }  // namespace
 }  // namespace gen
 }  // namespace vegetation

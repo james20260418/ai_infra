@@ -96,10 +96,22 @@ tree {
   leafDownAngle: 55
 }
 
+noise {
+  # 阔叶树的主干有轻微弓背（0.05 = 7m 干偏 35cm），侧枝比针叶树软。
+  # 尺寸抖动给 0.12~0.2：冠幅边缘不至于齐刷刷一样长。
+  size_jitter: [0.12, 0.20, 0.18]
+  bend_longitudinal: [0.05, 0.10, 0.14]
+  bend_lateral: [0.03, 0.07, 0.12]
+}
+
 export {
   per_seg: 8
   # 阔叶：卡宽约为高的 0.72。
   leaf_aspect: 0.72
   anchor_mode: "bottom_left"
   leaf_type_desc: "橡树叶簇（大叶、宽椭圆）"
+  # 阔叶：叶面明显成杯、中脉折得出来（0.12 的卡 ≈ 2cm 的弯）。
+  leaf_bend_along: -0.15
+  leaf_bend_across: 0.18
+  leaf_bend_crease: 0.2
 }

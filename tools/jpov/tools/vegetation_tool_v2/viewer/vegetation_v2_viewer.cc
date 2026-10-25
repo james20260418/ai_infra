@@ -16,7 +16,7 @@
 //   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
 //   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
 //   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
-//   --curl / --leaf-normal / --normal-scale / --uv-vscale   法线与 UV 相关强度
+//   --leaf-normal / --normal-scale / --uv-vscale             法线与 UV 相关强度
 //   --cam_phi/--cam_theta/--cam_r / --cam-target-y           视角（度/度/米/米）
 //   --max-level <n> / --only-type <n>                        只画前 n 层 / 只画某类叶卡
 //   --no-leaf / --no-bark / --no-hud                         关叶图（看 debug 绿卡）/ 关树皮 / 关 HUD
@@ -29,6 +29,7 @@
 //                                                            无原材料态：不能烘焙、不能回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,9 +72,6 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--leaf-black" && has_val) {
       a.leaf_black = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_black, 0.0f) << "--leaf-black 不能为负";
-    } else if (arg == "--curl" && has_val) {
-      a.leaf_curl = static_cast<float>(std::atof(argv[++i]));
-      CHECK_GE(a.leaf_curl, 0.0f) << "--curl 不能为负";
     } else if (arg == "--leaf-normal" && has_val) {
       a.leaf_normal = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_normal, 0.0f) << "--leaf-normal 不能为负（0 = 关掉法线贴图）";

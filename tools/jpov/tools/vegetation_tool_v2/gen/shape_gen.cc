@@ -13,6 +13,7 @@
 //             [--blender /usr/bin/blender] [--keep-dump]
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -173,6 +174,53 @@ int Fail(const std::string& message) {
 
 }  // namespace
 
+// 生成配置 → 叶面弯曲系数。没写 = 0 = 平面卡（proto2 的字段存在性在这里不用查：
+// 三个系数本来就是「0 = 不弯」的合法值，不是「没填」的哨兵）。
+jpov::vegetation::LeafBend MakeLeafBend(const jpov::vegetation::ShapeExport& export_config) {
+  jpov::vegetation::LeafBend bend;
+  bend.along = export_config.leaf_bend_along();
+  bend.across = export_config.leaf_bend_across();
+  bend.crease = export_config.leaf_bend_crease();
+  return bend;
+}
+
+// 生成配置 → 枝条噪声参数。整块没写 = 全关（与没有这一层时逐字节一致）。
+jpov::vegetation::gen::NoiseOptions MakeNoiseOptions(
+    const jpov::vegetation::VegetationGenerateConfig& config) {
+  jpov::vegetation::gen::NoiseOptions noise;
+  if (!config.has_noise()) {
+    return noise;
+  }
+  const jpov::vegetation::ShapeNoise& source = config.noise();
+  noise.size_jitter.assign(source.size_jitter().begin(), source.size_jitter().end());
+  noise.bend_longitudinal.assign(source.bend_longitudinal().begin(),
+                                 source.bend_longitudinal().end());
+  noise.bend_lateral.assign(source.bend_lateral().begin(), source.bend_lateral().end());
+  noise.seed = config.has_tree() ? config.tree().seed() : 0;
+  return noise;
+}
+
+// 噪声幅度只接受 0..1：它们是「倍数波动」与「枝长比例」，量级写错（把厘米当比例）
+// 会得到一棵扭成麻花的树，而且在很远的地方才看得出来。
+bool ValidateNoise(const jpov::vegetation::ShapeNoise& noise, std::string* error) {
+  const std::pair<const char*, const google::protobuf::RepeatedField<float>*> tables[] = {
+    { "noise.size_jitter", &noise.size_jitter() },
+    { "noise.bend_longitudinal", &noise.bend_longitudinal() },
+    { "noise.bend_lateral", &noise.bend_lateral() },
+  };
+  for (const auto& [name, values] : tables) {
+    for (int i = 0; i < values->size(); ++i) {
+      const float value = values->Get(i);
+      if (!(value >= 0.0f) || value > 1.0f) {
+        *error = std::string(name) + "[" + std::to_string(i) + "] = " + std::to_string(value) +
+                 "，必须在 [0, 1]（0 = 关；1 = 极端）";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 int main(int argc, char** argv) {
   std::string config_path;
   std::string out_path;
@@ -241,6 +289,20 @@ int main(int argc, char** argv) {
   if (export_config.leaf_type_desc().empty()) {
     return Fail("export.leaf_type_desc 必填");
   }
+  // 弯曲系数是「卡的 height 倍数」，Validate 的上限也就是 1.0；写错量级（把厘米当比例）
+  // 会在很长一段时间里表现为「叶子被弯成麻花」，所以在这里先挡一次。
+  const jpov::vegetation::LeafBend bend = MakeLeafBend(export_config);
+  if (!(std::fabs(bend.along) <= 1.0) || !(std::fabs(bend.across) <= 1.0) ||
+      !(std::fabs(bend.crease) <= 1.0)) {
+    return Fail("export.leaf_bend_* 必须在 [-1, 1]（单位是卡的 height）");
+  }
+
+  if (config.has_noise()) {
+    std::string noise_error;
+    if (!ValidateNoise(config.noise(), &noise_error)) {
+      return Fail(noise_error);
+    }
+  }
 
   const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
   const std::vector<std::string> overrides = BuildOverrides(config.tree());
@@ -274,6 +336,8 @@ int main(int argc, char** argv) {
   options.anchor_mode = export_config.anchor_mode();
   options.leaf_type_desc = export_config.leaf_type_desc();
   options.species = config.tree().preset();
+  options.leaf_bend = bend;
+  options.noise = MakeNoiseOptions(config);
 
   jpov::vegetation::Shape shape;
   BuildStats stats;

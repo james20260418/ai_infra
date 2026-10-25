@@ -330,6 +330,262 @@ double DistanceToPolyline(const Vec3d& point, const SampledPolyline& polyline, d
   return best;
 }
 
+// ----------------------------- 枝条噪声 -----------------------------
+// 对应 generate.proto 的 ShapeNoise：尺寸抖动 + 纵向/横向弯度。
+//
+// 全部在资产坐标系（+Y up）里施加，按拓扑序处理（父枝一定先于子枝）：
+//   1) 把枝根挪到「已经噪声过的父枝」上 —— 子枝必须跟着父枝走，否则父枝一弯，
+//      子枝的根就悬在半空；
+//   2) 以枝根为中心整体缩放：长度与半径乘同一个因子（整体变大/变小，不是被拉长）；
+//   3) 沿枝加两个方向的弯曲位移，位移在两端恒为 0（枝根不动 ⇒ 接缝不裂；
+//      枝梢不动 ⇒ 末梢叶子不飘）。
+// 结果直接写回折线；下游取叶卡 anchor、生成管子时读到的就是歪好的几何。
+constexpr double kPi = 3.14159265358979323846;
+
+// 一个采样点的姿态旋转（叶卡跟着枝走用）：把「噪声前的切线」转到「噪声后的切线」。
+struct SampleRotation {
+  Vec3d axis{ 0.0, 1.0, 0.0 };
+  double angle = 0.0;  // 弧度；0 = 不变
+};
+
+// splitmix64：稳定、与平台无关。同 seed + 同枝 + 同用途 ⇒ 同一个数。
+uint64_t MixHash(uint64_t x) {
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+// [-1, 1) 的确定性随机数。salt 区分用途（尺寸因子 / 弯曲相位……）。
+double UnitFromHash(int64_t seed, int branch, uint64_t salt) {
+  const uint64_t mixed =
+      MixHash(static_cast<uint64_t>(seed) ^ MixHash(static_cast<uint64_t>(branch + 1) * salt));
+  return static_cast<double>(mixed >> 11) * (1.0 / 4503599627370496.0) - 1.0;
+}
+
+// 取某一级的值；数组短了 = 该级不启用；负值按 0 处理（语义上只有 0..1）。
+double LevelValue(const std::vector<float>& values, std::size_t level) {
+  if (level >= values.size()) {
+    return 0.0;
+  }
+  return std::max(0.0, static_cast<double>(values[level]));
+}
+
+Vec3d RotateAroundAxis(const Vec3d& v, const Vec3d& axis, double angle) {
+  if (angle == 0.0) {
+    return v;
+  }
+  const Vec3d k = Normalize(axis);
+  const double c = std::cos(angle);
+  const double s = std::sin(angle);
+  return Add(Add(Mul(v, c), Mul(Cross(k, v), s)), Mul(k, Dot(k, v) * (1.0 - c)));
+}
+
+// 子枝挂到父枝上的位置：**用参数保存**，不是保存坐标。
+// 父枝被拉长/弯走之后，按同一个参数重新求点，子枝才会跟着父枝走；
+// 若改用「离父枝最近的点」，直的主干上点根本不会动（参数变了、位置没变）。
+struct Attachment {
+  bool valid = false;
+  std::size_t segment = 0;  // 父枝折线的第几段
+  double t = 0.0;           // 段内参数 [0,1]
+};
+
+Attachment FindAttachment(const Vec3d& point, const SampledPolyline& polyline) {
+  Attachment best;
+  if (polyline.points.size() < 2) {
+    return best;
+  }
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k + 1 < polyline.points.size(); ++k) {
+    const Vec3d a = polyline.points[k];
+    const Vec3d ab = Sub(polyline.points[k + 1], a);
+    const double length_sqr = LenSqr(ab);
+    double t = 0.0;
+    if (length_sqr > 0.0) {
+      t = std::clamp(Dot(Sub(point, a), ab) / length_sqr, 0.0, 1.0);
+    }
+    const double distance = Len(Sub(point, Add(a, Mul(ab, t))));
+    if (distance < best_distance) {
+      best_distance = distance;
+      best.valid = true;
+      best.segment = k;
+      best.t = t;
+    }
+  }
+  return best;
+}
+
+Vec3d EvaluatePolyline(const SampledPolyline& polyline, const Attachment& attachment) {
+  if (polyline.points.empty()) {
+    return Vec3d{ 0.0, 0.0, 0.0 };
+  }
+  const std::size_t segment =
+      std::min(attachment.segment, polyline.points.size() - (polyline.points.size() > 1 ? 2 : 1));
+  const Vec3d& a = polyline.points[segment];
+  if (segment + 1 >= polyline.points.size()) {
+    return a;
+  }
+  return Add(a, Mul(Sub(polyline.points[segment + 1], a), attachment.t));
+}
+
+std::vector<Vec3d> PolylineTangents(const std::vector<Vec3d>& points) {
+  std::vector<Vec3d> tangents(points.size(), Vec3d{ 0.0, 1.0, 0.0 });
+  for (std::size_t k = 0; k < points.size(); ++k) {
+    if (points.size() < 2) {
+      break;
+    }
+    const Vec3d delta = (k + 1 < points.size()) ? Sub(points[k + 1], points[k])
+                                                : Sub(points[k], points[k - 1]);
+    tangents[k] = Normalize(delta);
+  }
+  return tangents;
+}
+
+std::vector<double> NormalizedArclength(const std::vector<Vec3d>& points) {
+  std::vector<double> cumulative(points.size(), 0.0);
+  for (std::size_t k = 1; k < points.size(); ++k) {
+    cumulative[k] = cumulative[k - 1] + Len(Sub(points[k], points[k - 1]));
+  }
+  const double total = cumulative.empty() ? 0.0 : cumulative.back();
+  if (total > 0.0) {
+    for (double& value : cumulative) {
+      value /= total;
+    }
+  }
+  return cumulative;
+}
+
+// 位移：d(t) = 系数 · 枝长 · sin(2π(t + φ)) · sin²(πt)，t = 归一化弧长。
+// 端点窗口 sin² 保证 d(0) = d(1) = 0。
+void ApplyBend(double amplitude_longitudinal, double amplitude_lateral, double phase,
+               SampledPolyline* polyline) {
+  if (polyline->points.size() < 2) {
+    return;
+  }
+  const std::vector<double> t = NormalizedArclength(polyline->points);
+  const double length = t.empty() ? 0.0 : [&] {
+    double total = 0.0;
+    for (std::size_t k = 1; k < polyline->points.size(); ++k) {
+      total += Len(Sub(polyline->points[k], polyline->points[k - 1]));
+    }
+    return total;
+  }();
+  if (length <= 0.0) {
+    return;
+  }
+  const Vec3d tangent = Normalize(Sub(polyline->points[1], polyline->points[0]));
+  // 纵向方向 = 世界竖直方向（+Y）在「垂直于枝」的平面上的投影；
+  // 枝几乎竖直时该投影退化，改用 +Z 的同一投影（左右由 lat = T × long 决定）。
+  const Vec3d world_up{ 0.0, 1.0, 0.0 };
+  Vec3d longitudinal = Sub(world_up, Mul(tangent, Dot(world_up, tangent)));
+  if (Len(longitudinal) < 0.01) {
+    const Vec3d forward{ 0.0, 0.0, 1.0 };
+    longitudinal = Sub(forward, Mul(tangent, Dot(forward, tangent)));
+  }
+  if (Len(longitudinal) < 1e-9) {
+    longitudinal = Vec3d{ 1.0, 0.0, 0.0 };
+  }
+  longitudinal = Normalize(longitudinal);
+  const Vec3d lateral = Normalize(Cross(tangent, longitudinal));
+
+  for (std::size_t k = 0; k < polyline->points.size(); ++k) {
+    const double envelope = std::sin(kPi * t[k]);
+    const double wave = std::sin(2.0 * kPi * (t[k] + phase));
+    const double displacement = wave * envelope * envelope;
+    polyline->points[k] =
+        Add(polyline->points[k],
+            Add(Mul(longitudinal, amplitude_longitudinal * length * displacement),
+                Mul(lateral, amplitude_lateral * length * displacement)));
+  }
+}
+
+// 按拓扑序把噪声施加到每条折线上，并记录每点的姿态旋转（给叶卡用）。
+void ApplyBranchNoise(const NoiseOptions& noise, const Hierarchy& hierarchy,
+                      const std::vector<int>& order, std::vector<SampledPolyline>* polys,
+                      std::vector<std::vector<SampleRotation>>* rotations) {
+  rotations->assign(polys->size(), {});
+
+  // 先用**干净**几何把每根枝的挂接参数记下来（父枝还没被动过）。
+  std::vector<Attachment> attachments(polys->size());
+  for (std::size_t i = 0; i < polys->size(); ++i) {
+    const int parent = hierarchy.parent[i];
+    if (parent >= 0 && static_cast<std::size_t>(parent) < polys->size() &&
+        !(*polys)[i].points.empty()) {
+      attachments[i] = FindAttachment((*polys)[i].points.front(), (*polys)[parent]);
+    }
+  }
+
+  for (const int source : order) {
+    SampledPolyline& polyline = (*polys)[static_cast<std::size_t>(source)];
+    if (polyline.points.size() < 2) {
+      continue;
+    }
+    const std::size_t level = static_cast<std::size_t>(std::max(0, hierarchy.level[source]));
+    const double jitter = LevelValue(noise.size_jitter, level);
+    const double bend_longitudinal = LevelValue(noise.bend_longitudinal, level);
+    const double bend_lateral = LevelValue(noise.bend_lateral, level);
+    const std::vector<Vec3d> tangents_before = PolylineTangents(polyline.points);
+
+    // 1) 跟着父枝走：父枝已经噪声过，按**同一个挂接参数**重算根点并整体平移。
+    const Attachment& attachment = attachments[static_cast<std::size_t>(source)];
+    if (attachment.valid) {
+      const int parent = hierarchy.parent[static_cast<std::size_t>(source)];
+      const Vec3d old_root = polyline.points.front();
+      const Vec3d new_root =
+          EvaluatePolyline((*polys)[static_cast<std::size_t>(parent)], attachment);
+      const Vec3d delta = Sub(new_root, old_root);
+      for (Vec3d& point : polyline.points) {
+        point = Add(point, delta);
+      }
+    }
+
+    // 2) 整体尺寸：长度与半径乘同一个因子（下限 0.2，避免缩成看不见的点）。
+    if (jitter > 0.0) {
+      const double factor =
+          std::max(0.2, 1.0 + UnitFromHash(noise.seed, source, 0x9E3779B1u) * jitter);
+      if (factor != 1.0) {
+        const Vec3d root = polyline.points.front();
+        for (Vec3d& point : polyline.points) {
+          point = Add(root, Mul(Sub(point, root), factor));
+        }
+        for (double& radius : polyline.radii) {
+          radius *= factor;
+        }
+      }
+    }
+
+    // 3) 弯度：每根枝的相位不同（由 seed + 枝编号派生），不会所有枝朝同一侧鼓。
+    if (bend_longitudinal != 0.0 || bend_lateral != 0.0) {
+      const double phase = 0.5 * (UnitFromHash(noise.seed, source, 0x85EBCA6Bu) + 1.0);
+      ApplyBend(bend_longitudinal, bend_lateral, phase, &polyline);
+    }
+
+    // 4) 姿态旋转表：把「噪声前的切线」转到「噪声后的切线」（最短弧）。
+    const std::vector<Vec3d> tangents_after = PolylineTangents(polyline.points);
+    std::vector<SampleRotation>& branch_rotations = (*rotations)[static_cast<std::size_t>(source)];
+    branch_rotations.resize(polyline.points.size());
+    for (std::size_t k = 0; k < branch_rotations.size(); ++k) {
+      const Vec3d& before = tangents_before[k];
+      const Vec3d& after = tangents_after[k];
+      const double cosine = std::clamp(Dot(before, after), -1.0, 1.0);
+      const double angle = std::acos(cosine);
+      if (angle < 1e-9) {
+        branch_rotations[k] = SampleRotation{};  // 恒等
+        continue;
+      }
+      Vec3d axis = Cross(before, after);
+      if (Len(axis) < 1e-9) {
+        // 反向平行：任取一个与切线垂直的轴转 180°（实际不会发生，兜底用）。
+        axis = Cross(before, Vec3d{ 0.0, 1.0, 0.0 });
+        if (Len(axis) < 1e-9) {
+          axis = Cross(before, Vec3d{ 1.0, 0.0, 0.0 });
+        }
+      }
+      branch_rotations[k] = SampleRotation{ Normalize(axis), angle };
+    }
+  }
+}
+
 // 镜像手性的素材必须左右翻转，锚角也跟着左右换。
 std::string MirroredAnchorMode(const std::string& mode) {
   if (mode == "bottom_left") {
@@ -381,6 +637,12 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
   // ---- 层级 + 拓扑序 ----
   const Hierarchy hierarchy = BuildHierarchy(polys);
   const std::vector<int> order = TopologicalOrder(hierarchy.parent);
+
+  // ---- 枝条噪声（只改 polys_up：层级已经在干净几何上算好，避免噪声改变父枝归属）----
+  std::vector<std::vector<SampleRotation>> sample_rotations;
+  if (options.noise.Enabled()) {
+    ApplyBranchNoise(options.noise, hierarchy, order, &polys_up, &sample_rotations);
+  }
   std::vector<int> new_id(hierarchy.parent.size(), -1);
   for (std::size_t position = 0; position < order.size(); ++position) {
     new_id[static_cast<std::size_t>(order[position])] = static_cast<int>(position);
@@ -446,14 +708,14 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
       const bool which = Len(Sub(mid_a, anchor)) < Len(Sub(mid_b, anchor)) ? 0 : 1;
       const Vec3d root_mid = which == 0 ? mid_a : mid_b;
       const Vec3d tip_mid = which == 0 ? mid_b : mid_a;
-      const Vec3d up = Normalize(Sub(tip_mid, root_mid));
+      Vec3d up = Normalize(Sub(tip_mid, root_mid));
       const double height = Len(Sub(tip_mid, root_mid));
       if (height <= kMinCardHeight) {
         continue;
       }
       const Vec3d width_vec =
           which == 0 ? Sub(quad.corner[1], quad.corner[0]) : Sub(quad.corner[3], quad.corner[2]);
-      const Vec3d normal = Normalize(Cross(width_vec, up));
+      Vec3d normal = Normalize(Cross(width_vec, up));
 
       BuiltCard card;
       card.anchor = anchor;
@@ -480,6 +742,22 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
         const Vec3d u_dir = Sub(quad.corner[u_max], quad.corner[u_min]);
         const Vec3d right = Cross(up, normal);
         card.mirrored = Dot(Normalize(u_dir), right) < 0.0;
+      }
+
+      // 叶卡姿态跟着枝走：枝被弯了，卡片也要绕连接点转到新的切线方向上，
+      // 否则叶子仍朝着弯曲前的方向，粗枝上会明显穿进树干。
+      // 注意必须在上面的手性判定**之后**做旋转：手性比的是素材自身的 +u
+      // 与世界 right 的关系，用未旋转的姿态才和 Blender 里看到的一致。
+      if (static_cast<std::size_t>(branch) < sample_rotations.size()) {
+        const std::vector<SampleRotation>& branch_rotations =
+            sample_rotations[static_cast<std::size_t>(branch)];
+        if (static_cast<std::size_t>(local) < branch_rotations.size()) {
+          const SampleRotation& rotation = branch_rotations[static_cast<std::size_t>(local)];
+          if (rotation.angle != 0.0) {
+            up = RotateAroundAxis(up, rotation.axis, rotation.angle);
+            normal = RotateAroundAxis(normal, rotation.axis, rotation.angle);
+          }
+        }
       }
 
       // anchor 合同：必须落在所属枝条上（距离 ≤ 该处半径 + 容差）。
@@ -554,6 +832,7 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.type = 0;
     type.description = options.leaf_type_desc;
     type.anchor_mode = options.anchor_mode;
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
   if (mirrored_count > 0) {
@@ -564,6 +843,8 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.description = options.leaf_type_desc + "（镜像手性：素材左右翻转后使用，根部在格子 " +
                        mode + " 角）";
     type.anchor_mode = mode;
+    // 弯曲与手性无关：s 是到中脉线的距离（左右对称），镜像不用翻符号。
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
 

@@ -14,7 +14,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "tools/jpov/tools/vegetation_tool_v2/gen/sapling_dump.h"
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
@@ -23,12 +25,45 @@ namespace jpov {
 namespace vegetation {
 namespace gen {
 
+// 枝条噪声（对应 generate.proto 的 ShapeNoise）。
+//
+// 三个数组的下标都是**枝级**（0 = 主干，1 = 一级侧枝……），与 SaplingTree 的
+// `length`/`curve`/`branches` 同一套下标。某级超出数组长度、或写 0 = 该级不启用。
+//
+// 语义（结果直接烘进折线，shape 资产里不保存这些参数）：
+//   * size_jitter：每根枝整体放大/缩小的倍数波动，长度与半径乘同一个因子；
+//   * bend_longitudinal：枝中段朝「世界竖直方向在枝法平面上的投影」鼓出去；
+//   * bend_lateral：垂直于上者的方向鼓出去（俯视图里的左右扭）。
+// 两个弯度都以「枝长的比例」给，且两端位移恒为 0（枝根、枝梢不动）。
+struct NoiseOptions {
+  std::vector<float> size_jitter;
+  std::vector<float> bend_longitudinal;
+  std::vector<float> bend_lateral;
+  // SaplingTree.seed：同 seed + 同参数 ⇒ 同一棵歪法；换 seed 才换一棵。
+  int64_t seed = 0;
+
+  bool Enabled() const {
+    for (const std::vector<float>* values : { &size_jitter, &bend_longitudinal, &bend_lateral }) {
+      for (float value : *values) {
+        if (value != 0.0f) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+};
+
 struct BuildOptions {
   uint32_t per_seg = 8;           // 每段贝塞尔的采样点数
   double leaf_aspect = 0.6;       // 叶卡宽/高
   std::string anchor_mode = "bottom_left";  // type 0 的锚角（镜像 type 自动左右换）
   std::string leaf_type_desc;     // 写进 leaf_types 的自然语言
   std::string species;            // 只用于 description 文案
+  // 叶面弯曲（写进每个 leaf type）。全 0 = 平面卡。
+  LeafBend leaf_bend;
+  // 枝条不规整。默认全 0 = 关闭 = 与没有这一层时逐字节一致。
+  NoiseOptions noise;
 };
 
 struct BuildStats {

@@ -50,8 +50,9 @@ struct CliArgs {
   // 默认取生图合同的软过档中心（leaf_card_spec.h），保证归一化工具产出的素材
   // 在默认参数下就是对的 —— 这里**不再写字面量**，免得两边各写一个数。
   float leaf_black = jpov::vegetation::kLeafBlackThreshold;
-  float leaf_curl = 0.5f;     // A：顶点法线球面化强度
-  float leaf_normal = 1.0f;   // B：法线贴图强度（uNormalScale）
+  // 叶面弯曲**没有**命令行覆盖：弯曲是资产（shape 的 leaf type）的一部分，
+  // 查看器只负责显示。要改弯曲就改生成配置重新出 shape。
+  float leaf_normal = 1.0f;        // 法线贴图强度（uNormalScale）
 
   // ── GLB 烘焙（面板「烘焙 glb」用；也支持 headless 一条命令跑完）──
   std::string bake_glb_path;   // 非空 = 只烘焙这一次然后退出（CI / 命令行）

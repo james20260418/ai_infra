@@ -102,6 +102,21 @@ void TestNegative() {
     Expect(!Validate(s, &err), "version 为 0 应失败");
   }
   {
+    // 弯曲系数是「卡的 height 倍数」：1.0 是边界（弯过自己一整张卡），1.2 必须拒收。
+    Shape s = MinimalShape();
+    s.leaf_types[0].bend.crease = 1.0;
+    std::string err;
+    Expect(Validate(s, &err), "bend = 1.0 是合法边界: " + err);
+
+    for (const double bad : {1.2, -1.2}) {
+      Shape t = MinimalShape();
+      t.leaf_types[0].bend.across = bad;
+      std::string bad_err;
+      Expect(!Validate(t, &bad_err) && bad_err.find("bend") != std::string::npos,
+             "bend 超出 [-1, 1] 应失败（实际 " + std::to_string(bad) + "）");
+    }
+  }
+  {
     Shape s = MinimalShape();
     s.branches[1].parent = -1;  // 两根根枝
     std::string err;
@@ -271,6 +286,10 @@ void TestProtoRoundTrip() {
   shape.branches[0].samples[1].profile = UnitCircleProfile(12);
   shape.branches[0].samples[1].profile[0].x = 1.2;
   shape.branches[0].ring_count = 0;  // 交给 profile 决定环点数
+  // 叶面弯曲也要跨过序列化边界（漏搬的话资产「看着有 bend、跑起来是平的」）。
+  shape.leaf_types[0].bend.along = -0.2;
+  shape.leaf_types[0].bend.across = 0.12;
+  shape.leaf_types[0].bend.crease = 0.15;
 
   {
     std::string err;
@@ -308,6 +327,9 @@ void TestProtoRoundTrip() {
     out->set_type(t.type);
     out->set_description(t.description);
     out->set_anchor_mode(t.anchor_mode);
+    out->mutable_bend()->set_along(t.bend.along);
+    out->mutable_bend()->set_across(t.bend.across);
+    out->mutable_bend()->set_crease(t.bend.crease);
   }
   for (const LeafCard& c : shape.cards) {
     auto* out = proto.add_cards();
@@ -343,6 +365,10 @@ void TestProtoRoundTrip() {
   Expect(std::fabs(back.branches[0].samples[1].profile[0].x - 1.2) < 1e-12,
          "往返后 profile 形状一致（逐点可变）");
   Expect(back.branches[0].seam_index == shape.branches[0].seam_index, "往返后 seam_index 一致");
+  Expect(back.leaf_types[0].bend.along == shape.leaf_types[0].bend.along &&
+             back.leaf_types[0].bend.across == shape.leaf_types[0].bend.across &&
+             back.leaf_types[0].bend.crease == shape.leaf_types[0].bend.crease,
+         "往返后 bend 三个系数一致");
 }
 
 }  // namespace
