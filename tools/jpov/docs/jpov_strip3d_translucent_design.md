@@ -1093,3 +1093,63 @@ else                   { falloff = pow(edge, uFresnelPower); }
 - 三个 strip 测试**并行**跑会抢 Xvfb `:99`（`Server is already active for display 99` →
   `XIO: fatal IO error 22`）⇒ `strip_scene_gold_test` 会无故失败。本地/CI 用
   `--local_test_jobs=1` 即可复现为绿。
+
+### 19.13 条带消费天光（over 型玻璃/薄膜）—— 两套 program + 与雾同构的注入（2026-10-25）
+
+Danis 2026-10-25 定：「这个 over 型 strip 消费天光即可，此处和雾的公式应该是类似的：
+① 有个吸收光的项转化为注入；② strip 本身也可以自发光。然后有一点特殊：我希望这个开启
+光照消费的情况**不影响原本 pass 的效率**，这个开关控制。」
+
+**模型（逐片元，接口权威见 `interface/strip_types.h:StripSkyLight`）**
+
+```
+C = point_color.rgb · tex.rgb                 // ② 自发光/表面色 —— 语义与不开光照时**完全相同**
+  + injection · skylight(N)                   // ① 被吸收的背景光按天光补注入
+skylight(N) = tricolor_lerp(N.y) · ambient_scale      // 上→天顶、水平→天际线、下→地
+            + sun_color · sun_intensity · |N·L|       // 薄片双面：两侧都吃太阳
+α = 覆盖率链（一点没改）
+L_out = α·C + (1−α)·L_bg                      // WBO over 合成
+```
+
+- **与雾同构**：雾是 `L_scene·(1−α) + L_fog·α`，这里 `L_fog` 换成了「天光 + 自发光」。
+- **注入量天然随不透明度缩放**（`C` 随后乘 α）⇒ 越厚/越不透明的材料补得越多，越透的补得越少，
+  所以**没有**单独的「吸收系数」：有它会和 α 双重计数。`injection` 的物理含义是**散射率**
+  （薄玻璃几个百分点，乳白/磨砂可以接近 1）。
+- **不许用在加法集**：加法集本身即发光介质（注入量 = 色·α），再叠一套账会让 HDR 语义分裂
+  ⇒ `ValidateStripBatch` 直接 CHECK 崩（不静默忽略）。
+- 法线 N 与 fresnel **共用**：折线 pass 用屏幕导数（折面），平滑 pass 用解析法线 `dS × H`。
+  太阳项取 `|N·L|`（单层双面片，与 fresnel 用 `|N·V|` 同一理由）。
+
+**「不影响原本 pass 的效率」怎么做到的**
+
+- 渲染器现在有 **4 个 program**：`strip_wbo_draw` / `strip_wbo_draw_lit` /
+  `strip_wbo_smooth` / `strip_wbo_smooth_lit`。**主函数只有一份**，两套变体只差
+  `ApplySkyLight()` 的定义：关态是**空函数**（编译器内联成空，指令数零变化），
+  开态才是真注入 ⇒ 不会出现「两份 main 悄悄漂移」。
+- 不用 uniform 分支：那会在每个片元上多一次分支 + 常驻寄存器，而这套东西只对少数批有意义。
+- 证据：8 张 scene gold + 2 张老 gold **全部逐字节不变**（都走关态），40/40 单测绿。
+- 代价：多编译两个 program（Init 时一次）；开天光的批多 8 个 uniform（只在开时上传）。
+
+**验收场景：橡树 + 开口玻璃缸（Danis 指定）**
+
+- 树 = fire-fog viewer 同款 `models/tripo_oak_4k.glb`（归一化到 6m）。
+- 缸 = `MakeStripRing` 的**底面 + 内外立壁**（顶面丢掉 ⇒ 开口缸，树冠从上面冒出来），
+  外半径 2.9m / 壁厚 0.05m / 高 5.4m。缸壁一条批（3 条带），平滑 pass + fresnel。
+- 天光参数**与场景里的地面/方块同源**（同一份 `MakeSkyLighting` 的 `SkyCommand`）：
+  `AmbientTricolor()` / `AmbientIntensity()` / `sun_dir` / `SunDirectionalColor()` /
+  `SunDirectionalIntensity()`。
+- 拍摄四张（**不入 gold**，它们要 4k 贴图 + 大模型，做门禁太重）：
+  `400_tank_unlit`（关）、`405_tank_skylit`（开，太阳 34°）、`410_..._lowsun`（8°）、
+  `415_..._night`（−8°）。实测：405 相对 400 整帧均值 (133,147,165) → (159,169,185)，
+  缸壁顶部/朝阳侧更亮、底部/背阴侧更暗；410 转暖变暗；415 入夜后缸壁变暗而不是发光。
+- **坑**：glb 必须在**首帧之前**加载（`PrepareTankScene()`）。在 `OneIteration` 里懒加载会撞
+  `GL error after mesh upload, code=1282` —— 那时绑定状态属于上一帧的 pass。
+  也刻意**不在 `Setup` 里自动加载**：gold 的 8 张图不用这个场景，不该替它付 4k glb 的代价。
+
+**已知限制（都是有意的）**
+
+- 不采阴影：条带是半透明薄片，CSM 阴影贴图按不透明几何生成，套上去会把玻璃切成硬块；
+  且多一次纹理采样。要「缸壁挡住太阳」的效果请用几何/材质层解决。
+- 天光是**方向无关的近似**（三色 × 法线 y + 太阳项），不是 IBL：没有环境遮蔽、没有
+  方向性漫反射积分，也没有反射方向采样（那属于功能缺口 ④-2，需要 env 图或解析天空）。
+- 缸壁在夜里会显得「偏实」：夜色 ambient 很小但非零，而 α 不变 ⇒ 反差变小，属预期。
