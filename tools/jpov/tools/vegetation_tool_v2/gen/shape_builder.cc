@@ -803,7 +803,14 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
                         : new_id[static_cast<std::size_t>(
                               hierarchy.parent[static_cast<std::size_t>(source)])];
     branch.level = static_cast<uint32_t>(hierarchy.level[static_cast<std::size_t>(source)]);
-    branch.ring_count = branch.level == 0 ? 16u : (branch.level == 1 ? 12u : 8u);
+    {
+      const std::vector<uint32_t>& rings = options.ring_counts;
+      const std::size_t level = static_cast<std::size_t>(branch.level);
+      const uint32_t ring = rings.empty()
+                                ? 8u
+                                : rings[std::min(level, rings.size() - 1)];
+      branch.ring_count = std::max(3u, ring);
+    }
     branch.seam_index = 0;
     branch.samples.reserve(polyline.points.size());
     for (std::size_t k = 0; k < polyline.points.size(); ++k) {

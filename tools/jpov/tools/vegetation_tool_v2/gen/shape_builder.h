@@ -56,6 +56,9 @@ struct NoiseOptions {
 
 struct BuildOptions {
   uint32_t per_seg = 8;           // 每段贝塞尔的采样点数
+  // 每级枝的环顶点数（下标 = 枝级；数组短了 = 最后一项重复用到更深级）。
+  // 只影响管面的圆滑程度：8 已经看不出棱，4 在细枝上足够（细枝本来就只有几个像素）。
+  std::vector<uint32_t> ring_counts = { 16u, 12u, 8u };
   double leaf_aspect = 0.6;       // 叶卡宽/高
   std::string anchor_mode = "bottom_left";  // type 0 的锚角（镜像 type 自动左右换）
   std::string leaf_type_desc;     // 写进 leaf_types 的自然语言

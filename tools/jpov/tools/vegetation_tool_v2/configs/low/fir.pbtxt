@@ -1,0 +1,61 @@
+# ⚠️ 低配版（fir）—— 由 configs/fir.pbtxt 派生，只为把顶点数压到 6 万以下。
+#
+# 改了四处（其余与高配版完全一致）：
+#   leaves      : 叶片数量（决定性因素：每张弯曲卡 9 顶点）
+#   leafScale   : 叶片尺寸放大，用"更少更大的叶子"补回覆盖率
+#   curveRes    : 每根枝的贝塞尔段数（段数 × per_seg = 采样点数）
+#   per_seg     : 每段贝塞尔的采样点数
+# 环顶点数不在配置里，由命令行给：--ring-count 8,6,4
+#
+# 生成命令（环顶点数在命令行给，配置里没有这个字段）：
+#   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
+#     --config tools/jpov/tools/vegetation_tool_v2/configs/low/fir.pbtxt \
+#     --out output/veg_shapes/fir_low.pbtxt --per-seg 1 --ring-count 6,4,3,3
+#
+
+# 杉树（Fir）—— 塔形、下垂枝、四级分枝。
+#
+# 直接吃 Sapling 的 douglas_fir 预设：它自带 4 级分枝 + 下垂枝 + 收尖的塔形冠，
+# 是 9 个预设里最像杉/冷杉的一档，基本不用改形态参数。
+#
+# 注意：这棵树是**枝最密的**一档（约 4100 枝 / 1.26 万张卡），
+# 生成耗时约 2 分钟 —— 慢的原因不在叶卡，而在导出脚本按枝数平方找父枝（见 README）。
+version: 1
+name: "fir"
+description: "杉树：18m 高塔形冠、下垂侧枝、四级分枝。直接基于 douglas_fir 预设，只调尺寸与叶量。"
+
+tree {
+  preset: "douglas_fir"
+
+  # 18 m：预设 scale=35 太夸张，缩到 14 得到 ~18m 的成年杉。
+  scale: 14
+  seed: 5
+
+  # 四级分枝：主干 → 一级 → 二级 → 三级，这也是枝数爆炸的来源。
+  levels: 3
+
+  # 预设默认每枝 25 张卡；12 已经足够密（枝多，不需要每枝太多叶）。
+  leaves: 22
+  # 针叶树的卡理论上是"针叶簇"，这里给 0.55 让远看有体积。
+  leafScale: 0.95
+}
+
+noise {
+  # 杉树枝最密、侧枝最软：弯度按级递增（越细的枝越容易弯）。
+  # 主干保持很直（0.03 = 18m 干只偏 54cm），否则塔形轮廓会歪掉。
+  size_jitter: [0.10, 0.18, 0.16, 0.12]
+  bend_longitudinal: [0.03, 0.07, 0.11, 0.12]
+  bend_lateral: [0.015, 0.04, 0.08, 0.10]
+}
+
+export {
+  per_seg: 1
+  # 针叶：卡明显瘦长。
+  leaf_aspect: 0.4
+  anchor_mode: "bottom_left"
+  leaf_type_desc: "杉针簇"
+  # 针叶比松针还细长：弯曲幅度再小一点，避免细卡片卷成筒。
+  leaf_bend_along: -0.06
+  leaf_bend_across: 0.04
+  leaf_bend_crease: 0.03
+}

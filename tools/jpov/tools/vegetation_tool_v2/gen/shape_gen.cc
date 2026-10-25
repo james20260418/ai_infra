@@ -228,6 +228,8 @@ int main(int argc, char** argv) {
   std::string dump_path;
   std::string dump_script = kDumpScript;
   bool keep_dump = false;
+  std::vector<uint32_t> ring_counts;   // 空 = 用 BuildOptions 的默认（16/12/8）
+  uint32_t per_seg_override = 0;       // 0 = 用配置里的 export.per_seg
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -243,6 +245,32 @@ int main(int argc, char** argv) {
       dump_script = argv[++i];
     } else if (arg == "--keep-dump") {
       keep_dump = true;
+    } else if (arg == "--per-seg" && i + 1 < argc) {
+      per_seg_override = static_cast<uint32_t>(std::atoi(argv[++i]));
+      if (per_seg_override == 0) {
+        return Fail("--per-seg 必须 > 0");
+      }
+    } else if (arg == "--ring-count" && i + 1 < argc) {
+      // 形如 "8,6,4"：下标 = 枝级，最后一项重复用到更深的级。
+      const std::string spec = argv[++i];
+      size_t begin = 0;
+      while (begin <= spec.size()) {
+        const size_t comma = spec.find(',', begin);
+        const std::string piece =
+            spec.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        if (piece.empty()) {
+          return Fail("--ring-count 里不能有空项：" + spec);
+        }
+        const int value = std::atoi(piece.c_str());
+        if (value < 3 || value > 64) {
+          return Fail("--ring-count 的每一项必须在 [3, 64]：" + piece);
+        }
+        ring_counts.push_back(static_cast<uint32_t>(value));
+        if (comma == std::string::npos) {
+          break;
+        }
+        begin = comma + 1;
+      }
     } else {
       return Fail("未知参数: " + arg +
                   "\n用法: shape_gen --config <pbtxt> --out <shape.pbtxt> "
@@ -331,7 +359,10 @@ int main(int argc, char** argv) {
     return Fail("解析 dump 失败：" + error);
   }
   BuildOptions options;
-  options.per_seg = export_config.per_seg();
+  options.per_seg = per_seg_override != 0 ? per_seg_override : export_config.per_seg();
+  if (!ring_counts.empty()) {
+    options.ring_counts = ring_counts;
+  }
   options.leaf_aspect = export_config.leaf_aspect();
   options.anchor_mode = export_config.anchor_mode();
   options.leaf_type_desc = export_config.leaf_type_desc();

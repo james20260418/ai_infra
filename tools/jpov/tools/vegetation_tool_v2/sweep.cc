@@ -461,9 +461,8 @@ namespace {
 // （正是要避免的折线感）；再大，V 折痕会被糊成抛物线，跟 across 项分不出来了。
 constexpr double kCardRidgeRound = 0.25;
 
-// 弯曲卡的细分段数：4 段 ⇒ 12cm 的卡 3cm 一段。法线是解析的（与细分无关），
-// 这里只决定**曲面轮廓**与二次项的形状误差 —— 4 段看不出折线，再多只是浪费顶点。
-constexpr uint32_t kBentCardSegments = 4;
+// 弯曲卡的细分段数见 sweep.h 的 kBentCardSegments（2 段：轮廓与法线都够用，
+// 顶点从 25 降到 9 —— 叶子是整套资产的顶点大头）。
 
 uint32_t CardSegments(const LeafBend& bend) {
   return bend.IsFlat() ? 1u : kBentCardSegments;

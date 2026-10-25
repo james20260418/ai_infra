@@ -116,6 +116,12 @@ MeshData BuildLeafCards(const Shape& shape);
 // 一张卡在网格里占多少个顶点（(seg+1)²）。消费方按「逐卡步进」遍历顶点时必须用它，
 // 不能假设恒等于 4 —— 弯曲卡的顶点数随 leaf type 的 bend 变。
 // Pre-condition: shape 已过 Validate（card.type 必须存在）。
+// 弯曲卡每条边的细分段数（平面卡恒为 1 段 = 4 顶点）。
+// 2 段 ⇒ (2+1)² = 9 顶点 / 8 三角形：实测 2 段 vs 4 段只有 0.37% 像素差 >1/255
+// （4 段 vs 12 段是 0.4%），但卡片顶点从 25 降到 9 —— 叶子是顶点开销的大头。
+// 消费方**必须**用 CardVertexCount() 逐卡步进，不能假设固定值。
+constexpr uint32_t kBentCardSegments = 2;
+
 uint32_t CardVertexCount(const Shape& shape, const LeafCard& card);
 
 }  // namespace vegetation

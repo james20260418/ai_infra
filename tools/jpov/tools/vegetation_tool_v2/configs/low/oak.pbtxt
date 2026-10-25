@@ -1,0 +1,132 @@
+# ⚠️ 低配版（oak）—— 由 configs/oak.pbtxt 派生，只为把顶点数压到 6 万以下。
+#
+# 改了四处（其余与高配版完全一致）：
+#   leaves      : 叶片数量（决定性因素：每张弯曲卡 9 顶点）
+#   leafScale   : 叶片尺寸放大，用"更少更大的叶子"补回覆盖率
+#   curveRes    : 每根枝的贝塞尔段数（段数 × per_seg = 采样点数）
+#   per_seg     : 每段贝塞尔的采样点数
+# 环顶点数不在配置里，由命令行给：--ring-count 8,6,4
+#
+# 生成命令（环顶点数在命令行给，配置里没有这个字段）：
+#   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
+#     --config tools/jpov/tools/vegetation_tool_v2/configs/low/oak.pbtxt \
+#     --out output/veg_shapes/oak_low.pbtxt --per-seg 2 --ring-count 8,6,4
+#
+
+# 橡树（Oak）—— 宽冠阔叶树。Sapling 没有 oak 预设，这份是从 small_maple 改出来的。
+#
+# 三个关键决定：
+#   1) shape=1（球冠）+ downAngle 大 → 枝条横着铺开，得到 9.8m 宽 / 7m 高的冠幅
+#   2) baseSize=0.35 → 下部 35% 光杆，上面才分枝（乔木的基本形；写成 >1 会变"蜡烛"）
+#   3) leaves=200 → 宽冠必须靠叶量撑，少了就剩一副骨架
+#
+# 已知偏差：这棵树更像"老阔叶树/大灌木"，缺少橡树那种「粗短主干 + 三两根大侧枝」的结构。
+# 要更像得靠手调 downAngle/branches，或者换真 oak 模型。
+version: 1
+name: "oak"
+description: "橡树：7m 高、约 10m 宽的宽阔冠幅，粗干，下部 1/3 光杆。无 oak 预设，由 small_maple 改出。"
+
+tree {
+  preset: "small_maple"
+
+  scale: 9
+  seed: 7
+  # 球冠：把各级枝长按球面分布，是阔叶树最省事的起点。
+  shape: 1
+  levels: 3
+
+  # 第一根侧枝出现在 35% 树高处；0.25 是基部分裂的高度比例。
+  # 24 号字段的注释里写着「>1 会把所有枝挤到树顶」—— 这就是那次踩坑的地方。
+  baseSize: 0.35
+  baseSize_s: 0.25
+  # 0.036 = 比预设更粗的干（阔叶树比枫树更壮）。
+  ratio: 0.036
+  ratioPower: 1.4
+
+  # 主干 1 根分裂 + 30 根一级枝，每根 13 个二级、7 个三级 → 约 700 枝。
+  branches: 0
+  branches: 30
+  branches: 13
+  branches: 7
+  baseSplits: 1
+  splitHeight: 0.3
+  splitAngle: 0
+  splitAngle: 34
+  splitAngle: 30
+  splitAngle: 0
+  splitAngleV: 3
+  splitAngleV: 8
+  splitAngleV: 6
+  splitAngleV: 0
+
+  # 主干短一点（0.6·scale≈5.4m），一级枝长（0.8）→ 冠幅撑得开。
+  length: 0.6
+  length: 0.8
+  length: 0.6
+  length: 0.4
+  lengthV: 0
+  lengthV: 0.05
+  lengthV: 0.12
+  lengthV: 0
+
+  # 一级枝 72° = 接近水平外伸；越往下越收（58/48）。
+  downAngle: 90
+  downAngle: 72
+  downAngle: 58
+  downAngle: 48
+  downAngleV: 0
+  downAngleV: 38
+  downAngleV: 18
+  downAngleV: 10
+
+
+  # 轻微正向弯曲 + 轻微外推，制造"自然的不规则"。
+  curve: 0
+  curve: 30
+  curve: 25
+  curve: 0
+  curveV: 40
+  curveV: 90
+  curveV: 90
+  curveV: 0
+  attractUp: 0.05
+  attractUp: -0.1
+  attractUp: 0
+  attractUp: 0
+
+  # 每段枝都有 35%~50% 的概率再分叉 → 冠内细枝密。
+  segSplits: 0.35
+  segSplits: 0.5
+  segSplits: 0.5
+  segSplits: 0
+
+  taperCrown: 0.1
+
+  curveRes: 10
+  curveRes: 6
+  curveRes: 4
+  curveRes: 1
+  leaves: 32
+  leafScale: 0.85
+  leafDownAngle: 55
+}
+
+noise {
+  # 阔叶树的主干有轻微弓背（0.05 = 7m 干偏 35cm），侧枝比针叶树软。
+  # 尺寸抖动给 0.12~0.2：冠幅边缘不至于齐刷刷一样长。
+  size_jitter: [0.12, 0.20, 0.18]
+  bend_longitudinal: [0.05, 0.10, 0.14]
+  bend_lateral: [0.03, 0.07, 0.12]
+}
+
+export {
+  per_seg: 2
+  # 阔叶：卡宽约为高的 0.72。
+  leaf_aspect: 0.72
+  anchor_mode: "bottom_left"
+  leaf_type_desc: "橡树叶簇（大叶、宽椭圆）"
+  # 阔叶：叶面明显成杯、中脉折得出来（0.12 的卡 ≈ 2cm 的弯）。
+  leaf_bend_along: -0.15
+  leaf_bend_across: 0.18
+  leaf_bend_crease: 0.2
+}

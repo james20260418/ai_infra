@@ -5,7 +5,7 @@
 //   * v 沿枝单调、且 dv/ds = 1/tile（非方贴图时再乘 uv_v_scale）
 //   * 每圈的 u 恰好覆盖 [0,1]（一圈一张图，接缝在 u=1 处闭合）
 //   * 子枝入口 v 从父枝出口接续（接口处没有横向重复线）
-//   * 叶卡：平面 4 顶点 / 2 三角形 / UV 四角 / 宽度来自材质；弯曲卡 25 顶点 / 32 三角形，
+//   * 叶卡：平面 4 顶点 / 2 三角形 / UV 四角 / 宽度来自材质；弯曲卡 (kBentCardSegments+1)² 顶点，
 //            anchor 恒不动、法线与切线严格正交、细分只影响轮廓
 
 #include <cmath>
@@ -493,12 +493,14 @@ void TestBentCardGeometry() {
     Shape shape = MakeCardShape(c.mode, bend, &card);
     const MeshData mesh = BuildLeafCards(shape);
 
-    Expect(mesh.VertexCount() == 25, std::string(c.mode) + "：弯曲卡应 4×4 = 25 顶点");
-    Expect(mesh.TriangleCount() == 32, std::string(c.mode) + "：弯曲卡应 32 三角形");
-
-    // 顶点布局与 UV：下标 = i·5 + j，u = j/4、v = i/4
-    constexpr uint32_t kSeg = 4;
+    constexpr uint32_t kSeg = kBentCardSegments;
     constexpr uint32_t kStride = kSeg + 1;
+    Expect(mesh.VertexCount() == kStride * kStride,
+           std::string(c.mode) + "：弯曲卡应有 (段数+1)² 个顶点");
+    Expect(mesh.TriangleCount() == kSeg * kSeg * 2,
+           std::string(c.mode) + "：弯曲卡应有 段数²×2 个三角形");
+
+    // 顶点布局与 UV：下标 = i·stride + j，u = j/段数、v = i/段数
     for (uint32_t i = 0; i <= kSeg; ++i) {
       for (uint32_t j = 0; j <= kSeg; ++j) {
         const uint32_t v = i * kStride + j;
@@ -571,9 +573,11 @@ void TestBentCardDirections() {
     Shape shape = MakeCardShape("bottom_center", bend, &card);
     const MeshData mesh = BuildLeafCards(shape);
     // 叶柄行（v = 0）仍贴着 anchor 高度；叶尖行（v = 1）整体沿 +Z 抬起 0.3 × height
-    const double tip_z = mesh.positions[(4 * 5 + 2) * 3 + 2];   // i=4, j=2 → v=1, u=0.5
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    const double tip_z = mesh.positions[(kSeg * kStride + kSeg / 2) * 3 + 2];   // v=1, u=0.5
     Expect(Near(tip_z, 0.3 * card.height, 1e-6), "along>0：叶尖应朝 +normal 抬起 0.3×height");
-    for (uint32_t j = 0; j <= 4; ++j) {
+    for (uint32_t j = 0; j <= kSeg; ++j) {
       Expect(Near(mesh.positions[j * 3 + 2], 0.0, 1e-9), "along 项不能让叶柄一侧离开卡面");
     }
   }
@@ -584,10 +588,12 @@ void TestBentCardDirections() {
     Shape shape = MakeCardShape("bottom_center", bend, &card);
     const MeshData mesh = BuildLeafCards(shape);
     // 中脉（u = 0.5）不动；两缘（u = 0 / 1）抬高 0.2 × height
-    for (uint32_t i = 0; i <= 4; ++i) {
-      const double mid = mesh.positions[(i * 5 + 2) * 3 + 2];
-      const double left = mesh.positions[(i * 5 + 0) * 3 + 2];
-      const double right = mesh.positions[(i * 5 + 4) * 3 + 2];
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    for (uint32_t i = 0; i <= kSeg; ++i) {
+      const double mid = mesh.positions[(i * kStride + kSeg / 2) * 3 + 2];
+      const double left = mesh.positions[(i * kStride + 0) * 3 + 2];
+      const double right = mesh.positions[(i * kStride + kSeg) * 3 + 2];
       Expect(Near(mid, 0.0, 1e-9), "across 项：中脉线必须停在卡面上");
       Expect(Near(left, 0.2 * card.height, 1e-6) && Near(right, 0.2 * card.height, 1e-6),
              "across>0：两缘应朝 +normal 抬高 0.2×height");
@@ -601,10 +607,12 @@ void TestBentCardDirections() {
     const MeshData mesh = BuildLeafCards(shape);
     // ridge(0) = 0 ⇒ 中脉不动；ridge(1) = sqrt(1 + 0.25²) − 0.25 ≈ 0.7806
     const double ridge_edge = std::sqrt(1.0 + 0.25 * 0.25) - 0.25;
-    const double edge_z = mesh.positions[(0 * 5 + 4) * 3 + 2];
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    const double edge_z = mesh.positions[(0 * kStride + kSeg) * 3 + 2];
     Expect(Near(edge_z, 0.25 * ridge_edge * card.height, 1e-6),
            "crease 项的边缘抬升 = crease × height × ridge(1)");
-    Expect(Near(mesh.positions[(2 * 5 + 2) * 3 + 2], 0.0, 1e-9),
+    Expect(Near(mesh.positions[((kSeg / 2) * kStride + kSeg / 2) * 3 + 2], 0.0, 1e-9),
            "crease 项不能抬中脉");
   }
 }
@@ -620,9 +628,10 @@ void TestCardVertexCount() {
          "平面卡 CardVertexCount 必须是 4");
 
   Shape bent_shape = MakeCardShape("bottom_left", bent, &card);
-  Expect(CardVertexCount(bent_shape, bent_shape.cards[0]) == 25,
-         "弯曲卡 CardVertexCount 必须是 25");
-  Expect(BuildLeafCards(bent_shape).VertexCount() == 25,
+  constexpr uint32_t kBentVertices = (kBentCardSegments + 1) * (kBentCardSegments + 1);
+  Expect(CardVertexCount(bent_shape, bent_shape.cards[0]) == kBentVertices,
+         "弯曲卡 CardVertexCount 必须是 (段数+1)²");
+  Expect(BuildLeafCards(bent_shape).VertexCount() == kBentVertices,
          "CardVertexCount 必须与 BuildLeafCards 的实际顶点数一致");
 }
 
