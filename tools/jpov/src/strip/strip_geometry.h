@@ -105,6 +105,40 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
         CHECK_GT(*batch.soft_depth_m, 0.0f)
             << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
     }
+    if (batch.sky_light.has_value()) {
+        // 加法集本身就是发光介质（注入量 = 色·α，不受阻挡），把「吸收→注入」叠上去只会
+        // 让 HDR 语义变成两套账 ⇒ 直接拒收，而不是偷偷忽略（静默忽略等于骗人）。
+        CHECK(batch.blend == StripBlend::kCoverage)
+            << "StripBatch: sky_light 只支持 kCoverage（加法集本身即发光介质）";
+        const StripSkyLight& s = *batch.sky_light;
+        CHECK(s.injection >= 0.0f && s.injection <= 1.0f)
+            << "StripBatch: sky_light.injection 必须在 [0,1]（想要更亮请放大天光参数），当前="
+            << s.injection;
+        CHECK(s.ambient_scale >= 0.0f)
+            << "StripBatch: sky_light.ambient_scale 不能为负，当前=" << s.ambient_scale;
+        CHECK(s.sun_intensity >= 0.0f)
+            << "StripBatch: sky_light.sun_intensity 不能为负，当前=" << s.sun_intensity;
+        // sun_direction 允许非单位向量（shader 里归一），但必须有限、非零：
+        // 零向量会让 normalize 出 NaN，而 NaN 进 accum 会污染整帧的 WBO 解析。
+        CHECK(strip_internal::IsFinite(s.sun_direction))
+            << "StripBatch: sky_light.sun_direction 非有限值";
+        CHECK(s.sun_direction.Norm() > 1.0e-6f)
+            << "StripBatch: sky_light.sun_direction 不能是零向量（会让 normalize 出 NaN）";
+        CHECK(strip_internal::IsFinite(s.sun_color) && s.sun_color.x() >= 0.0f &&
+              s.sun_color.y() >= 0.0f && s.sun_color.z() >= 0.0f)
+            << "StripBatch: sky_light.sun_color 必须是有限非负值";
+        for (size_t k = 0; k < s.tricolor.size(); ++k) {
+            const Color& c = s.tricolor[k];
+            // 顺序固定 [天, 天际线, 地] —— 这里不校验顺序，只校验数值合法性。
+            CHECK(c.r >= 0.0f && c.g >= 0.0f && c.b >= 0.0f &&
+                  c.r <= kMaxStripColorValue && c.g <= kMaxStripColorValue &&
+                  c.b <= kMaxStripColorValue)
+                << "StripBatch: sky_light.tricolor[" << k << "] 必须在 [0,"
+                << kMaxStripColorValue << "]，当前=(" << c.r << "," << c.g << "," << c.b
+                << ")";
+        }
+    }
+
     if (batch.fresnel.has_value()) {
         const StripFresnel& f = *batch.fresnel;
         CHECK(f.f0 >= 0.0f && f.f0 <= 1.0f)

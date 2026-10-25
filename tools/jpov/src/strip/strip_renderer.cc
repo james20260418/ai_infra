@@ -48,9 +48,17 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     shader_mgr_ = shader_mgr;
 
     // 权重函数必须来自共享件（wbo_shader.h）—— 与粒子/体积火/玻璃是同一份数学。
-    const std::string fs_draw =
-        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kFsMain;
-    prog_draw_ = shader_mgr_->GetOrCreate("strip_wbo_draw", {kVs, fs_draw.c_str()});
+    //
+    // 四个 program = 两个 pass × 两套天光定义（关 / 开）。**主函数只有一份**，
+    // 两者只差 `ApplySkyLight` 的定义（空实现 vs 真注入）⇒ 不会漂移；
+    // 而「不开天光」的那两个 program 二进制上等于改动前（空实现被内联消掉）。
+    const std::string fs_draw_off =
+        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSkyLightOffFs + kFsMain;
+    const std::string fs_draw_lit =
+        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSkyLightFs + kFsMain;
+    prog_draw_ = shader_mgr_->GetOrCreate("strip_wbo_draw", {kVs, fs_draw_off.c_str()});
+    prog_draw_lit_ =
+        shader_mgr_->GetOrCreate("strip_wbo_draw_lit", {kVs, fs_draw_lit.c_str()});
     prog_comp_ = shader_mgr_->GetOrCreate("strip_wbo_composite",
                                           {kWboCompositeVs, kWboCompositeFs});
 
@@ -91,14 +99,22 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // ── 平滑 pass（kSmooth）：program + 独立 VAO/VBO + 控制点数据纹理 ──
     // 与折线 pass 完全独立：另一个 program、另一套顶点布局、另一条数据通道；
     // 只共享 WBO 目标与静态索引。
-    const std::string fs_smooth =
-        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSmoothFsMain;
+    const std::string fs_smooth_off = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
+                                      kSkyLightOffFs + kSmoothFsMain;
+    const std::string fs_smooth_lit = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
+                                      kSkyLightFs + kSmoothFsMain;
     prog_smooth_ = shader_mgr_->GetOrCreate("strip_wbo_smooth",
-                                            {kSmoothVs, fs_smooth.c_str()});
+                                            {kSmoothVs, fs_smooth_off.c_str()});
+    prog_smooth_lit_ = shader_mgr_->GetOrCreate("strip_wbo_smooth_lit",
+                                                {kSmoothVs, fs_smooth_lit.c_str()});
     QueryCommonUniforms(prog_smooth_, &smooth_uniforms_.common);
     smooth_uniforms_.seg_count = shader_mgr_->GetUniform(prog_smooth_, "uSegCount");
     smooth_uniforms_.data_rows = shader_mgr_->GetUniform(prog_smooth_, "uDataRows");
     smooth_uniforms_.strip_data = shader_mgr_->GetUniform(prog_smooth_, "uStripData");
+    QueryCommonUniforms(prog_smooth_lit_, &smooth_lit_uniforms_.common);
+    smooth_lit_uniforms_.seg_count = shader_mgr_->GetUniform(prog_smooth_lit_, "uSegCount");
+    smooth_lit_uniforms_.data_rows = shader_mgr_->GetUniform(prog_smooth_lit_, "uDataRows");
+    smooth_lit_uniforms_.strip_data = shader_mgr_->GetUniform(prog_smooth_lit_, "uStripData");
 
     glGenVertexArrays(1, &smooth_vao_);
     glGenBuffers(1, &smooth_vbo_);
@@ -175,10 +191,23 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
         glUniform1i(u.fresnel_pow5, 1);
         glUniform1f(u.fresnel_strength, 1.0f);
         glUniform1f(u.fresnel_graze_alpha, 1.0f);
+        // 天光：初值全 0（= 零光照，与「不开」视觉一致）；lit program 每次 Draw 都覆盖。
+        glUniform3f(u.sky_zenith, 0.0f, 0.0f, 0.0f);
+        glUniform3f(u.sky_horizon, 0.0f, 0.0f, 0.0f);
+        glUniform3f(u.sky_ground, 0.0f, 0.0f, 0.0f);
+        glUniform1f(u.sky_ambient_scale, 0.0f);
+        glUniform3f(u.sun_dir, 0.0f, 1.0f, 0.0f);
+        glUniform3f(u.sun_color, 1.0f, 1.0f, 1.0f);
+        glUniform1f(u.sun_intensity, 0.0f);
+        glUniform1f(u.sky_injection, 0.0f);
         glUseProgram(0);
     };
     init_disabled_uniforms(prog_draw_, draw_uniforms_);
     init_disabled_uniforms(prog_smooth_, smooth_uniforms_.common);
+    // lit 变体同样给一份关态初值（虽然它们的 FS 一定会读，但留着保证「任何时刻
+    // 读到的 uniform 都是确定的」—— 与上面同一理由）。
+    init_disabled_uniforms(prog_draw_lit_, draw_lit_uniforms_);
+    init_disabled_uniforms(prog_smooth_lit_, smooth_lit_uniforms_.common);
 
     // GLSL 里硬编码了拓扑常量（顶点属性/条带 = 32、采样点数 = 16、段数 = 15、
     // per-instance 行宽 = 25）：折线 pass 的 `gl_VertexID / 32` 与 PointColor/
@@ -220,6 +249,15 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->fresnel_pow5 = shader_mgr_->GetUniform(program, "uFresnelPow5");
     out->fresnel_strength = shader_mgr_->GetUniform(program, "uFresnelStrength");
     out->fresnel_graze_alpha = shader_mgr_->GetUniform(program, "uFresnelGrazeAlpha");
+    // 天光（只存在于 lit program；unlit program 里全为 -1，glUniform 对 -1 是 no-op）。
+    out->sky_zenith = shader_mgr_->GetUniform(program, "uSkyZenith");
+    out->sky_horizon = shader_mgr_->GetUniform(program, "uSkyHorizon");
+    out->sky_ground = shader_mgr_->GetUniform(program, "uSkyGround");
+    out->sky_ambient_scale = shader_mgr_->GetUniform(program, "uSkyAmbientScale");
+    out->sun_dir = shader_mgr_->GetUniform(program, "uSunDir");
+    out->sun_color = shader_mgr_->GetUniform(program, "uSunColor");
+    out->sun_intensity = shader_mgr_->GetUniform(program, "uSunIntensity");
+    out->sky_injection = shader_mgr_->GetUniform(program, "uSkyInjection");
 }
 
 void StripRenderer::EnsureIboCapacity(int strips) {
@@ -376,6 +414,7 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
     BatchDrawContext ctx;
     ctx.batch = &batch;
     ctx.want_additive = want_additive;
+    ctx.want_light = batch.sky_light.has_value();
     ctx.camera = &camera;
     ctx.view_proj = view_proj;
     ctx.scene_depth_tex = scene_depth_tex;
@@ -456,6 +495,23 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
         glUniform1f(uniforms.fresnel_graze_alpha, f.graze_alpha);
     }
 
+    // 天光：只在开启时上传（与 fresnel 同一约定：关态靠 Init 的零值，不逐批重传）。
+    // 注意这组 uniform 在 unlit program 里全是 -1（glUniform 是静默 no-op），所以
+    // 这段代码只在 lit program 上真正生效，不会给不开天光的批增加驱动调用。
+    if (batch.sky_light.has_value()) {
+        const StripSkyLight& s = *batch.sky_light;
+        glUniform3f(uniforms.sky_zenith, s.tricolor[0].r, s.tricolor[0].g, s.tricolor[0].b);
+        glUniform3f(uniforms.sky_horizon, s.tricolor[1].r, s.tricolor[1].g, s.tricolor[1].b);
+        glUniform3f(uniforms.sky_ground, s.tricolor[2].r, s.tricolor[2].g, s.tricolor[2].b);
+        glUniform1f(uniforms.sky_ambient_scale, s.ambient_scale);
+        const float sun_len = s.sun_direction.Norm();
+        glUniform3f(uniforms.sun_dir, s.sun_direction.x() / sun_len,
+                    s.sun_direction.y() / sun_len, s.sun_direction.z() / sun_len);
+        glUniform3f(uniforms.sun_color, s.sun_color.x(), s.sun_color.y(), s.sun_color.z());
+        glUniform1f(uniforms.sun_intensity, s.sun_intensity);
+        glUniform1f(uniforms.sky_injection, s.injection);
+    }
+
     if (ctx.gl_tex != 0) {
         glActiveTexture(GL_TEXTURE0 + kStripTexUnit);
         glBindTexture(GL_TEXTURE_2D, ctx.gl_tex);
@@ -472,8 +528,9 @@ void StripRenderer::DrawPolyline(const BatchDrawContext& ctx) {
     wbo_.BindForDraw();
     glDisable(GL_CULL_FACE);   // 条带单层双面可见（关剔除；不是两层几何）
 
-    glUseProgram(prog_draw_);
-    ApplyCommonUniforms(draw_uniforms_, ctx);
+    // 选 program：开天光走 lit 变体（两套 shader 只差 ApplySkyLight 的定义）。
+    glUseProgram(ctx.want_light ? prog_draw_lit_ : prog_draw_);
+    ApplyCommonUniforms(ctx.want_light ? draw_lit_uniforms_ : draw_uniforms_, ctx);
 
     const std::vector<Strip16>& strips = ctx.batch->strips;
     const size_t total = strips.size();
@@ -517,15 +574,17 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     wbo_.BindForDraw();
     glDisable(GL_CULL_FACE);   // 同上：单层双面可见
 
-    glUseProgram(prog_smooth_);
-    ApplyCommonUniforms(smooth_uniforms_.common, ctx);
-    glUniform1f(smooth_uniforms_.seg_count, static_cast<float>(kStripQuads));
+    // 选 program / uniform 集：开天光走 lit 变体（两套 shader 只差 ApplySkyLight 的定义）。
+    const SmoothUniforms& u = ctx.want_light ? smooth_lit_uniforms_ : smooth_uniforms_;
+    glUseProgram(ctx.want_light ? prog_smooth_lit_ : prog_smooth_);
+    ApplyCommonUniforms(u.common, ctx);
+    glUniform1f(u.seg_count, static_cast<float>(kStripQuads));
 
     // 数据纹理占 kSmoothDataUnit（unit0 = 场景深度、unit1 = 条带纹理、
     // unit3 = per-instance 数据）。
     glActiveTexture(GL_TEXTURE0 + kSmoothDataUnit);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
-    glUniform1i(smooth_uniforms_.strip_data, kSmoothDataUnit);
+    glUniform1i(u.strip_data, kSmoothDataUnit);
 
     const std::vector<Strip16>& strips = ctx.batch->strips;
     const size_t total = strips.size();
@@ -565,7 +624,7 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     }
 
     // 行号钳位的上界 = 纹理**实际高度**（不是每块条带数）：整批可能远超一块。
-    glUniform1f(smooth_uniforms_.data_rows, static_cast<float>(smooth_data_rows_));
+    glUniform1f(u.data_rows, static_cast<float>(smooth_data_rows_));
 
     EnsureIboCapacity(static_cast<int>(total));
 

@@ -49,6 +49,8 @@
 //                顶点只多一个 strip id ⇒ **整批仍然一次 draw call**；
 //                外扩量由 CPU 按局部曲率自动算。
 //                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
+//                ⭐ 2026-10-25 起每个 pass 有**两个 program**（天光关/开），主函数共用、
+//                只差 ApplySkyLight 的定义（见 kSkyLightOffFs / kSkyLightFs）。
 //   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
 //
 // 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
@@ -284,7 +286,11 @@ void main() {
     vec3 color = point.rgb;
     float a = point.a;
     ModulateTexture(vUV, color, a);
-    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
+    // 法线：折线 pass 只能拿屏幕空间导数（= 所在三角形平面法线，逐折面恒定）。
+    // 天光与 fresnel 共用同一个 N；两者都关时它是死代码，编译器会丢掉。
+    vec3 N = cross(dFdx(vWorld), dFdy(vWorld));
+    ApplySkyLight(N, color);
+    ApplyFresnel(N, color, a);
     a *= WidthProfile(vUV.y);
     EmitFragment(color, a);
 }
@@ -404,13 +410,65 @@ void main() {
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
     // 也是平滑 pass 的附带好处：同一份数据已经在手上了，不用额外顶点属性。
-    ApplyFresnel(cross(dS, Hh), color, a);
+    // 天光与 fresnel 共用这个 N（两者都关时它是死代码）。
+    vec3 N = cross(dS, Hh);
+    ApplySkyLight(N, color);
+    ApplyFresnel(N, color, a);
     a *= WidthProfile(vShade) * cov;
     EmitFragment(color, a);
 }
 )glsl";
 
-    // 初始化：编译 draw / composite 两个 program，建 VAO + 动态 VBO + 静态 IBO。
+    // ── 天光消费（sky_light）：**两套定义**，主函数只有一份 ──
+    //
+    // 2026-10-25 Danis 定：「开启光照消费不影响原本 pass 的效率，用开关控制」。
+    // 做法是**两个 program**（折线/平滑各一对），主函数共用，差异只有下面这个函数：
+    //   kSkyLightOffFs → 空实现 ⇒ 编译器把调用点整个消掉，指令数与改动前完全一致；
+    //   kSkyLightFs    → 真正的天光注入。
+    // 不用 uniform 分支的原因：那会在**每条带每个片元**上都多一次分支判断 + 常驻寄存器，
+    // 而这套东西只对少数批（玻璃/薄膜）有意义；用 program 切分 = 不开的人真的零成本。
+    //
+    // 公式（与雾的合成同构，见 interface/strip_types.h:StripSkyLight）：
+    //   skylight(N) = tricolor_lerp(N.y)·ambient_scale + sun_color·sun_intensity·|N·L|
+    //   color      += injection · skylight(N)
+    // 注入量随后会被 α 乘（EmitFragment），所以越不透明补得越多 —— 与雾的 L_fog·α 同一件事。
+    static constexpr const char* kSkyLightOffFs = R"glsl(
+// 不开天光：空实现。GLSL 编译器会把调用点内联成空 ⇒ 零额外指令。
+void ApplySkyLight(vec3 N, inout vec3 color) {
+}
+)glsl";
+
+    static constexpr const char* kSkyLightFs = R"glsl(
+uniform vec3 uSkyZenith;      // 天顶色（法线朝上）
+uniform vec3 uSkyHorizon;     // 天际线色（法线水平）
+uniform vec3 uSkyGround;      // 地反射色（法线朝下）
+uniform float uSkyAmbientScale;
+uniform vec3 uSunDir;         // **指向太阳**的单位向量（CPU 侧已归一）
+uniform vec3 uSunColor;
+uniform float uSunIntensity;
+uniform float uSkyInjection;
+
+// 天光辐亮度（线性 HDR）。N 可以非单位（导数叉积/曲面叉积都有长度）：
+// 先归一拿方向；长度≈ 0（退化片元）时当作「朝上」，不出 NaN。
+vec3 SkyLightRadiance(vec3 N) {
+    float n2 = dot(N, N);
+    vec3 n = (n2 > 1e-12) ? N * inversesqrt(n2) : vec3(0.0, 1.0, 0.0);
+    // N.y 分段线性：上→天顶、水平→天际线、下→地（与 AmbientLight::tricolor 同一约定，
+    // 天际线是中继）。下半球有地色兜底，不会死黑。
+    vec3 ambient = (n.y >= 0.0) ? mix(uSkyHorizon, uSkyZenith, n.y)
+                                : mix(uSkyHorizon, uSkyGround, -n.y);
+    // 太阳：条带是**单层片**，两面都要受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
+    float sun_term = abs(dot(n, uSunDir)) * uSunIntensity;
+    return ambient * uSkyAmbientScale + uSunColor * sun_term;
+}
+
+void ApplySkyLight(vec3 N, inout vec3 color) {
+    color += uSkyInjection * SkyLightRadiance(N);
+}
+)glsl";
+
+    // 初始化：编译 4 个 drawing program（折线/平滑 × 天光关/开）+ 合成 program，
+    // 建 VAO + 动态 VBO + 静态 IBO。
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
@@ -479,6 +537,16 @@ private:
         int fresnel_pow5 = -1;
         int fresnel_strength = -1;
         int fresnel_graze_alpha = -1;
+        // 天光（只有 lit program 有这些 uniform；unlit program 里 GetUniform 返回 -1，
+        // glUniform 对 -1 是 no-op，所以不分支也不会出错）。
+        int sky_zenith = -1;
+        int sky_horizon = -1;
+        int sky_ground = -1;
+        int sky_ambient_scale = -1;
+        int sun_dir = -1;
+        int sun_color = -1;
+        int sun_intensity = -1;
+        int sky_injection = -1;
     };
     struct CompositeUniforms {
         int accum = -1;
@@ -501,6 +569,7 @@ private:
         const TranslucentStripBatch* batch = nullptr;
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
         bool want_additive = false;         // 本批走加法集
+        bool want_light = false;            // 本批消费天光（选 lit program）
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
         unsigned int scene_depth_tex = 0;   // 不透明场景深度（值 = gl_FragCoord.z）
@@ -517,7 +586,12 @@ private:
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
+    // 「开天光」的两个变体（2026-10-25）：不在原 program 里加 uniform 分支，
+    // 而是单独编译 —— 不开天光的批在 GPU 上零额外指令（见 kSkyLightOffFs）。
+    unsigned int prog_draw_lit_ = 0;
+    unsigned int prog_smooth_lit_ = 0;
     CommonUniforms draw_uniforms_;
+    CommonUniforms draw_lit_uniforms_;
     CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点
@@ -534,6 +608,7 @@ private:
     // ── 平滑 pass 的资源（kSmooth）──
     unsigned int prog_smooth_ = 0;
     SmoothUniforms smooth_uniforms_;
+    SmoothUniforms smooth_lit_uniforms_;
     unsigned int smooth_vao_ = 0;
     unsigned int smooth_vbo_ = 0;
     // per-instance 数据纹理（两个 pass 共用）：宽 kAppearanceTexels，高 = 条带数。
