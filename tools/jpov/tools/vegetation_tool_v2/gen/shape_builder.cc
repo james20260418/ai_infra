@@ -1,8 +1,6 @@
 #include "tools/jpov/tools/vegetation_tool_v2/gen/shape_builder.h"
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
