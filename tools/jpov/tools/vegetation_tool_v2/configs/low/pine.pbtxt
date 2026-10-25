@@ -5,13 +5,12 @@
 #   leafScale   : 叶片尺寸放大，用"更少更大的叶子"补回覆盖率
 #   curveRes    : 每根枝的贝塞尔段数（这里留空 = 用预设值；改小会破坏父枝判定，见 README）
 #   per_seg     : 每段贝塞尔的采样点数
-# 环顶点数不在配置里，由命令行给：--ring-count 8,6,4
+# 环顶点数也在配置里（export.ring_count，按枝级给）—— 生成不需要任何命令行参数。
 #
-# 生成命令（环顶点数在命令行给，配置里没有这个字段）：
+# 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/pine.pbtxt \
-#     --out output/veg_shapes/pine_low.pbtxt --per-seg 8 --ring-count 8,6,4
-#
+#     --out output/veg_shapes/pine_low.pbtxt
 
 # 松树（Pine）—— 塔形冠 + 裸露主干 + 轮生侧枝。
 #
@@ -46,7 +45,7 @@ noise {
 
 export {
   # 松树的主干很直很长，8 段/贝塞尔已经看不出折线。
-  per_seg: 2
+  per_seg: 8
   # 针叶细长：卡宽约为高的 0.45。
   leaf_aspect: 0.45
   anchor_mode: "bottom_left"
@@ -55,4 +54,7 @@ export {
   leaf_bend_along: -0.08
   leaf_bend_across: 0.05
   leaf_bend_crease: 0.04
+  ring_count: 8
+  ring_count: 6
+  ring_count: 4
 }

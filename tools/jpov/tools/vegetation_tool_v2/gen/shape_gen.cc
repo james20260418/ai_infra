@@ -325,6 +325,15 @@ int main(int argc, char** argv) {
     return Fail("export.leaf_bend_* 必须在 [-1, 1]（单位是卡的 height）");
   }
 
+  // 环顶点数：3 = 三角管（细枝够用）、16 = 正圆。超出范围一定是把"半径"或"环数"填反了。
+  for (int i = 0; i < export_config.ring_count_size(); ++i) {
+    const uint32_t ring = export_config.ring_count(i);
+    if (ring < 3 || ring > 64) {
+      return Fail("export.ring_count[" + std::to_string(i) + "] = " + std::to_string(ring) +
+                  "，必须在 [3, 64]（一圈至少 3 个顶点；64 以上纯属浪费）");
+    }
+  }
+
   if (config.has_noise()) {
     std::string noise_error;
     if (!ValidateNoise(config.noise(), &noise_error)) {
@@ -360,8 +369,13 @@ int main(int argc, char** argv) {
   }
   BuildOptions options;
   options.per_seg = per_seg_override != 0 ? per_seg_override : export_config.per_seg();
+  options.ring_counts.assign(export_config.ring_count().begin(),
+                             export_config.ring_count().end());
   if (!ring_counts.empty()) {
-    options.ring_counts = ring_counts;
+    options.ring_counts = ring_counts;   // 命令行优先级最高（临时试参数用）
+  }
+  if (options.ring_counts.empty()) {
+    options.ring_counts = { 16u, 12u, 8u };  // 与历史行为一致
   }
   options.leaf_aspect = export_config.leaf_aspect();
   options.anchor_mode = export_config.anchor_mode();

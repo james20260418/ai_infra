@@ -145,7 +145,7 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 | `--blender` | blender 可执行文件（默认 PATH 里的；镜像自带 4.0.2） |
 | `--dump <path>` / `--keep-dump` | 保留中间 dump（排查 Blender 侧问题时用） |
 | `--per-seg <n>` | 覆盖配置里的 `export.per_seg`（每段贝塞尔的采样点数） |
-| `--ring-count 8,6,4` | 每级枝的**环顶点数**（下标 = 枝级，最后一项重复用到更深的级；默认 16,12,8） |
+| `--ring-count 8,6,4` | 临时覆盖每级枝的**环顶点数**（正式的写在配置 `export.ring_count`；命令行优先，试参数用） |
 
 输出末尾一行是摘要：`枝数 / 卡数 / 镜像卡比例 / 体积 / 耗时`。
 **失败即退出码非 0**：配置写错（带行号）、Blender 失败、产物拓扑序不合法，都不会落盘半成品。
@@ -259,7 +259,7 @@ cd output/jpov_vegetation_v2_viewer
 | `leaves` | 每根末级枝的叶片上限（卡数是顶点大头） | 55 → 18 | 200 → 36 | 12 → 22 |
 | `leafScale` | 叶片尺寸（用更少更大的叶子补覆盖率） | 0.42 → 0.80 | 0.42 → 0.85 | 0.55 → 0.95 |
 | `per_seg` | 每段贝塞尔的采样点 | 8 | 8 → 2 | 8 → **1** |
-| `--ring-count` | 每级环顶点数 | 16,12,8 → 8,6,4 | 同左 | 16,12,8 → 6,4,4,4 |
+| `export.ring_count` | 每级环顶点数 | 16,12,8 → 8,6,4 | 同左 | 16,12,8 → 6,4,4,4 |
 
 ⚠️ fir 还把 `levels` 4 → 3：它 4100 根枝，管面本身就 60 万顶点，不降级怎么都进不了 6 万。
 其余两棵结构完全没动（枝数 331 / 703 与高配一致）。
@@ -288,24 +288,24 @@ cd output/jpov_vegetation_v2_viewer
 生成：
 
 ```bash
-gen/shape_gen --config configs/game/pine.pbtxt --out output/veg_shapes/pine_game.pbtxt --per-seg 1 --ring-count 3,3,3
-gen/shape_gen --config configs/game/oak.pbtxt  --out output/veg_shapes/oak_game.pbtxt  --per-seg 1 --ring-count 3,3,3
-gen/shape_gen --config configs/game/fir.pbtxt  --out output/veg_shapes/fir_game.pbtxt  --per-seg 1 --ring-count 3,3,3
+gen/shape_gen --config configs/game/pine.pbtxt --out output/veg_shapes/pine_game.pbtxt
+gen/shape_gen --config configs/game/oak.pbtxt  --out output/veg_shapes/oak_game.pbtxt
+gen/shape_gen --config configs/game/fir.pbtxt  --out output/veg_shapes/fir_game.pbtxt
 ```
 
-生成低配档（环数在命令行给，配置里没有这个字段）：
+生成低配档（**采样密度与环数都在配置里**，命令行不用给任何参数）：
 
 ```bash
-# pine: 50.6k
-gen/shape_gen --config configs/low/pine.pbtxt --out output/veg_shapes/pine_low.pbtxt \
-    --per-seg 8 --ring-count 8,6,4
+# pine: 50.6k 顶点
+gen/shape_gen --config configs/low/pine.pbtxt --out output/veg_shapes/pine_low.pbtxt
 # oak:  53.6k
-gen/shape_gen --config configs/low/oak.pbtxt  --out output/veg_shapes/oak_low.pbtxt  \
-    --per-seg 2 --ring-count 8,6,4
+gen/shape_gen --config configs/low/oak.pbtxt  --out output/veg_shapes/oak_low.pbtxt
 # fir:  57.2k
-gen/shape_gen --config configs/low/fir.pbtxt  --out output/veg_shapes/fir_low.pbtxt  \
-    --per-seg 1 --ring-count 6,4,4,4
+gen/shape_gen --config configs/low/fir.pbtxt  --out output/veg_shapes/fir_low.pbtxt
 ```
+
+三份入库资产（`samples/*_{low,game}.pbtxt`）就是用这些命令生成的：
+**同配置重跑 ⇒ 逐字节相同**（oak_low md5 `8e336879…`）。
 
 钉住：`preset`、`scale`、`seed`、`levels`、`branches`、`leaves`、`leafScale`。
 最常踩的两个坑：`baseSize` 是"第一根侧枝出现的高度**比例**"（不是尺寸，>1 会把枝挤到树顶）；

@@ -5,13 +5,12 @@
 #   leafScale   : 叶片尺寸放大，用"更少更大的叶子"补回覆盖率
 #   curveRes    : 每根枝的贝塞尔段数（段数 × per_seg = 采样点数）
 #   per_seg     : 每段贝塞尔的采样点数
-# 环顶点数不在配置里，由命令行给：--ring-count 8,6,4
+# 环顶点数也在配置里（export.ring_count，按枝级给）—— 生成不需要任何命令行参数。
 #
-# 生成命令（环顶点数在命令行给，配置里没有这个字段）：
+# 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/fir.pbtxt \
-#     --out output/veg_shapes/fir_low.pbtxt --per-seg 1 --ring-count 6,4,3,3
-#
+#     --out output/veg_shapes/fir_low.pbtxt
 
 # 杉树（Fir）—— 塔形、下垂枝、四级分枝。
 #
@@ -58,4 +57,8 @@ export {
   leaf_bend_along: -0.06
   leaf_bend_across: 0.04
   leaf_bend_crease: 0.03
+  ring_count: 6
+  ring_count: 4
+  ring_count: 4
+  ring_count: 4
 }

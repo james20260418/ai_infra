@@ -4,11 +4,11 @@
 #   levels   2   （2 = 主干 + 一级枝；细枝层被砍掉）
 #   leaves   16   （每根末级枝的叶片上限）
 #   leafScale 2.6   （叶子放大 —— 卡少 10 倍时必须靠"更少更大的叶簇"撑体积）
-#   per_seg  1    / ring 3,3,3（都在命令行给）
+#   per_seg  1    / ring 3,3,3（都在配置里：export.per_seg / export.ring_count）
 #
-# 生成：
+# 生成（只读配置，无命令行参数）：
 #   gen/shape_gen --config configs/game/fir.pbtxt \
-#       --out output/veg_shapes/fir_game.pbtxt --per-seg 1 --ring-count 3,3,3
+#       --out output/veg_shapes/fir_game.pbtxt
 #
 # 杉树（Fir）—— 塔形、下垂枝、四级分枝。
 #
@@ -55,4 +55,7 @@ export {
   leaf_bend_along: -0.06
   leaf_bend_across: 0.04
   leaf_bend_crease: 0.03
+  ring_count: 3
+  ring_count: 3
+  ring_count: 3
 }

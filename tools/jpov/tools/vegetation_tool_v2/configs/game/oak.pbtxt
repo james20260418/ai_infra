@@ -4,11 +4,11 @@
 #   levels   2   （2 = 主干 + 一级枝；细枝层被砍掉）
 #   leaves   16   （每根末级枝的叶片上限）
 #   leafScale 2.2   （叶子放大 —— 卡少 10 倍时必须靠"更少更大的叶簇"撑体积）
-#   per_seg  1    / ring 3,3,3（都在命令行给）
+#   per_seg  1    / ring 3,3,3（都在配置里：export.per_seg / export.ring_count）
 #
-# 生成：
+# 生成（只读配置，无命令行参数）：
 #   gen/shape_gen --config configs/game/oak.pbtxt \
-#       --out output/veg_shapes/oak_game.pbtxt --per-seg 1 --ring-count 3,3,3
+#       --out output/veg_shapes/oak_game.pbtxt
 #
 # 橡树（Oak）—— 宽冠阔叶树。Sapling 没有 oak 预设，这份是从 small_maple 改出来的。
 #
@@ -126,4 +126,7 @@ export {
   leaf_bend_along: -0.15
   leaf_bend_across: 0.18
   leaf_bend_crease: 0.2
+  ring_count: 3
+  ring_count: 3
+  ring_count: 3
 }

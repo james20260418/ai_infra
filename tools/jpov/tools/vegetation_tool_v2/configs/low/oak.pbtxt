@@ -5,13 +5,12 @@
 #   leafScale   : 叶片尺寸放大，用"更少更大的叶子"补回覆盖率
 #   curveRes    : 每根枝的贝塞尔段数（段数 × per_seg = 采样点数）
 #   per_seg     : 每段贝塞尔的采样点数
-# 环顶点数不在配置里，由命令行给：--ring-count 8,6,4
+# 环顶点数也在配置里（export.ring_count，按枝级给）—— 生成不需要任何命令行参数。
 #
-# 生成命令（环顶点数在命令行给，配置里没有这个字段）：
+# 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/oak.pbtxt \
-#     --out output/veg_shapes/oak_low.pbtxt --per-seg 2 --ring-count 8,6,4
-#
+#     --out output/veg_shapes/oak_low.pbtxt
 
 # 橡树（Oak）—— 宽冠阔叶树。Sapling 没有 oak 预设，这份是从 small_maple 改出来的。
 #
@@ -129,4 +128,7 @@ export {
   leaf_bend_along: -0.15
   leaf_bend_across: 0.18
   leaf_bend_crease: 0.2
+  ring_count: 8
+  ring_count: 6
+  ring_count: 4
 }
