@@ -105,3 +105,10 @@ uint32_t normal = app.RegisterTexture("grass_normal.png",   opts);
 
 参考 gold test：`//tools/jpov/test/object3d:jpov_repeated_texture_gold_test`
 （10×10 平板 + UV 0~10 重复 + grass 纹理 repeat+mipmap+normal）。
+
+---
+
+## 相关工具
+
+- 只想要**高度场**（把这里的法线积分成 height）或**照片的深度估计**（MoGe-3），
+  见 `../depth_tool/README.md`。该 README 也记录了"单图方法在材质浮雕上的实测上限"。
