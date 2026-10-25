@@ -424,22 +424,28 @@ TEST(StripSmooth, MarginCoversTrueBulge_EquiWidthShortcutFails) {
 }
 
 TEST(StripSmooth, DataPackingMatchesShaderLayout) {
-    // 每列 12 float 的顺序必须与 kSmoothFsMain 的解包逐字对应：c.xyz, m.xyz, h.xyz, n.xyz。
+    // 每列 16 float 的顺序必须与 kSmoothFsMain 的解包逐字对应：
+    //   c.xyz, m.xyz, h.xyz, n.xyz, point_color.rgba
+    // （改成 16 float = 4 texel 的原因：逐点颜色也进数据纹理，省掉平滑 pass 那次过滤采样）
     jpov::Strip16 s;
     s.point_count = 3;
     for (uint32_t i = 0; i < jpov::kStripSampleCount; ++i) {
         const float f = static_cast<float>(i);
         s.left[i] = jpov::Vec3f{f, f + 0.25f, -f};
         s.right[i] = jpov::Vec3f{f, f - 0.25f, -f};
+        // 每列一个**互不相同**的颜色：只验证“有 4 个数”是不够的，
+        // 颜色错列（比如把上一列的颜色打包进来）必须被抓住。
+        s.point_color[i] = jpov::Color{f, f + 0.5f, -f, 0.25f};
     }
     jpov::SmoothStripCompute c;
     jpov::ComputeSmoothStrip(s, &c);
     std::vector<float> data;
-    jpov::AppendSmoothStripData(c, &data);
+    jpov::AppendSmoothStripData(s, c, &data);
 
     ASSERT_EQ(data.size(), static_cast<size_t>(jpov::kStripSampleCount) *
                                jpov::kSmoothFloatsPerColumn);
-    EXPECT_EQ(jpov::kSmoothFloatsPerColumn, 12);
+    EXPECT_EQ(jpov::kSmoothFloatsPerColumn, 16);
+    EXPECT_EQ(jpov::kSmoothTexelsPerColumn, 4);
     EXPECT_EQ(data.size(), static_cast<size_t>(jpov::kStripSampleCount) *
                                jpov::kSmoothTexelsPerColumn * 4);
 
@@ -457,6 +463,23 @@ TEST(StripSmooth, DataPackingMatchesShaderLayout) {
     EXPECT_FLOAT_EQ(data[base + 9], 0.0f);    // n.x
     EXPECT_FLOAT_EQ(data[base + 10], 0.0f);   // n.y
     EXPECT_FLOAT_EQ(data[base + 11], 0.0f);   // n.z
+    // 逐点颜色是本列的（第 1 列）而不是邻列的：rgba = (1, 1.5, -1, 0.25)。
+    EXPECT_FLOAT_EQ(data[base + 12], 1.0f);    // color.r
+    EXPECT_FLOAT_EQ(data[base + 13], 1.5f);    // color.g
+    EXPECT_FLOAT_EQ(data[base + 14], -1.0f);   // color.b
+    EXPECT_FLOAT_EQ(data[base + 15], 0.25f);   // color.a
+
+    // 第 0 列的颜色必须是 (0, 0.5, 0, 0.25)：防止“列号算错一位”整张纹理错色。
+    EXPECT_FLOAT_EQ(data[12], 0.0f);
+    EXPECT_FLOAT_EQ(data[13], 0.5f);
+    EXPECT_FLOAT_EQ(data[14], 0.0f);
+    EXPECT_FLOAT_EQ(data[15], 0.25f);
+
+    // point_count=3 ⇒ 第 3 列起是塔缩列：颜色跟随最后一个有效列（否则后面是未初始化值）。
+    const size_t collapse_base = 3 * jpov::kSmoothFloatsPerColumn;
+    EXPECT_FLOAT_EQ(data[collapse_base + 12], 2.0f);
+    EXPECT_FLOAT_EQ(data[collapse_base + 13], 2.5f);
+    EXPECT_FLOAT_EQ(data[collapse_base + 14], -2.0f);
 }
 
 TEST(StripSmooth, VerticesWidenAlongHalfVectorAndFoldIntoV) {

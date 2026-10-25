@@ -210,6 +210,7 @@ struct StripFresnel {
     // Schlick 正入射反射率。玻璃 ≈ 0.04；水 ≈ 0.02；厚水晶/亚克力可给到 0.08~0.12。
     float f0 = 0.04f;
     // Schlick 指数：5 = 物理值；越小「反光边」越宽（偏塑料），越大越只在极掠射发亮。
+    // 恰好 5 时渲染器走五次乘法特化（不调 pow）；对外语义不变，浮点末位可能差 1 LSB。
     float power = 5.0f;
     // 强度乘子（1 = 物理量）。> 1 让边比物理更亮 —— 廉价玻璃的常见夸张手法。
     float strength = 1.0f;
@@ -222,7 +223,9 @@ struct StripFresnel {
 // ── 一条条带的最终像素（本节是**唯一权威**，FS 与设计文档都以它为准）──
 //
 // 逐片元输入：(u, v) 由几何插值得到；(rgb, alpha_pt) 由逐点颜色按 u 采样得到
-// （16 列硬件双线性，列上是精确值）；N 由 `geometry` 决定（见 StripInterpolation）。
+// （折线 pass 走 per-instance 纹理的硬件双线性，列上是精确值；平滑 pass 直接在控制点
+// 数据纹理里按段内参数 t* 做 mix —— 两者数学等价，见设计文档 §19.12）；
+// N 由 `geometry` 决定（见 StripInterpolation）。
 //
 //   color = point_color(u).rgb                    （逐点颜色，允许 HDR）
 //         × texture(uTex, uv).rgb                 （有纹理时）
@@ -234,6 +237,9 @@ struct StripFresnel {
 //         → a *= 裁形覆盖度                        （仅 kSmooth：解析 AA）
 //         → [soft depth] a *= clamp((scene_z − z)/m, 0, 1)；
 //           未开软深度时 z 比 scene_z 远超过 2cm 直接 discard
+//
+//   早退：**注入量** ≤ 1/255 的片元直接丢弃 —— 覆盖集判 α（a·fade ≤ a ⇒ 等价），
+//         加法集判 色·α（颜色是 HDR 时不能只判 α，否则极亮淡尾会被丢掉）。
 //
 //   混合集合（见 StripBlend，公式里的注入量**逐字**对应 FS 的写入）：
 //     kCoverage: accum += color·a·w 、reveal = a        （解析后 over 合成）

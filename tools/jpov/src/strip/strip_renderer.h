@@ -45,8 +45,9 @@
 //   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
 //   kSmooth   —— kSmoothVs / kSmoothFsMain：点即控制点，段间是 C1 Hermite，
 //                在 FS 里按真实曲线反解参数并用 discard + fwidth 裁形。
-//                控制点走 RGBA32F 数据纹理（每列 3 texel），顶点只多一个 strip id
-//                ⇒ **整批仍然一次 draw call**；外扩量由 CPU 按局部曲率自动算。
+//                控制点走 RGBA32F 数据纹理（每列 4 texel：c/m/h/n + 逐点 rgba），
+//                顶点只多一个 strip id ⇒ **整批仍然一次 draw call**；
+//                外扩量由 CPU 按局部曲率自动算。
 //                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
 //   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
 //
@@ -131,6 +132,7 @@ uniform int uFresnelEnabled;       // 1 = 开（否则这一段全部跳过）
 uniform vec3 uFresnelRimColor;
 uniform float uFresnelF0;
 uniform float uFresnelPower;
+uniform int uFresnelPow5;          // 1 = power 恰好是 5 ⇒ 走五次乘法特化（见 FresnelFactor）
 uniform float uFresnelStrength;
 uniform float uFresnelGrazeAlpha;
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
@@ -185,7 +187,18 @@ float FresnelFactor(vec3 N) {
     float n2 = dot(N, N);
     // d 必须 clamp 到 [0,1]：浮点误差会让 |N·V| 冒到 1+eps，pow(负数, k) = NaN。
     float d = (n2 > 1e-12) ? clamp(abs(dot(N, V) * inversesqrt(n2)), 0.0, 1.0) : 1.0;
-    float f = uFresnelF0 + (1.0 - uFresnelF0) * pow(1.0 - d, uFresnelPower);
+    float edge = 1.0 - d;
+    // 通用 pow 在驱动里是 exp2(y·log2(x))：两个特殊函数 + 若干指令。
+    // power == 5（Schlick 的默认指数，也是绝大多数取值）时用五次乘法替掉它。
+    // 分支条件是 **uniform**（整批同一个值）⇒ 一个 draw 内一致，没有 divergence。
+    // 两条路的浮点结果不逐位相同（pow 的实现精度本来就低于连乘），实测差异只到 LSB。
+    float falloff;
+    if (uFresnelPow5 == 1) {
+        falloff = edge * edge * edge * edge * edge;
+    } else {
+        falloff = pow(edge, uFresnelPower);
+    }
+    float f = uFresnelF0 + (1.0 - uFresnelF0) * falloff;
     return clamp(f * uFresnelStrength, 0.0, 1.0);
 }
 // 把菲涅耳作用到（尚未定稿的）(color, a) 上：
@@ -213,10 +226,18 @@ void ApplyFresnel(vec3 N, inout vec3 color, inout float a) {
     // 必须拼在 kWboWeightGlsl（WeightWbo）之后。
     static constexpr const char* kFsEmit = R"glsl(
 void EmitFragment(vec3 color, float a) {
-    // 早退门槛按**覆盖率**（两个集合同一个门槛）。
-    // 已知边界：颜色允许 HDR 之后，「a 极低但颜色极亮」的片元（注入量 > 1/255）
-    // 也会在这里被丢掉。改它会改画面，留作单独一次改动（要重出 gold），本轮不做。
-    if (a <= 1.0 / 255.0) {
+    // 早退门槛：放在读场景深度**之前**（每个片元最便宜的一道筛子），
+    // 但判据必须按「**注入量**」而不是覆盖率 —— 两个集合注入的东西不同：
+    //   覆盖集：注入量 = 色·(α·fade)，fade ≤ 1 ⇒ α ≤ 1/255 的片元下面怎么都会被丢，
+    //           所以这里直接用 α 判（与旧行为逐位相同，且不必先算 fade）。
+    //   加法集：颜色可以是 HDR（> 1），这时「α 极小但色极亮」的片元注入量可以 ≫ 1/255，
+    //           只按 α 判会把发光拖尾/射流的淡边整条丢掉（实测射流尾部少 100~290 px、
+    //           最大 9/255）。这里乘上颜色，fade 留到下面按精确 contrib 再判一次。
+    if (uBlendPath == 1) {
+        if (max(max(color.r, color.g), color.b) * a <= 1.0 / 255.0) {
+            discard;
+        }
+    } else if (a <= 1.0 / 255.0) {
         discard;
     }
     // WBO 目标没有深度附件：与不透明场景深度手动作深度测试。
@@ -297,7 +318,8 @@ void main() {
     static constexpr const char* kSmoothFsMain = R"glsl(
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
-// 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
+// 控制点数据纹理：每列 4 texel = 16 float，按
+//   (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)(rgba) 打包；
 // 每条带占一行，行号 = vStripId。texelFetch 越界是**未定义行为**（不是返回 0）⇒
 // 行号在这里按 uDataRows 钳一次（列号由 seg 的 clamp 保证）。
 uniform sampler2D uStripData;
@@ -310,27 +332,31 @@ void main() {
     int seg = int(clamp(floor(segF), 0.0, uSegCount - 1.0));
     float t = segF - float(seg);
 
-    // 两列 × 3 texel = 6 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
-    // 这里的 3 = CPU 侧 kSmoothTexelsPerColumn（shader 里没法引用 C++ 常量，改要同步）。
+    // 两列 × 4 texel = 8 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
+    // 这里的 4 = CPU 侧 kSmoothTexelsPerColumn（shader 里没法引用 C++ 常量，改要同步）。
     // texelFetch 越界是**未定义行为**（不是"返回 0"）：行号必须钳住。
     int row = int(clamp(vStripId, 0.0, uDataRows - 1.0));
-    int tx = seg * 3;
+    int tx = seg * 4;
     vec4 t0 = texelFetch(uStripData, ivec2(tx + 0, row), 0);
     vec4 t1 = texelFetch(uStripData, ivec2(tx + 1, row), 0);
     vec4 t2 = texelFetch(uStripData, ivec2(tx + 2, row), 0);
     vec4 t3 = texelFetch(uStripData, ivec2(tx + 3, row), 0);
     vec4 t4 = texelFetch(uStripData, ivec2(tx + 4, row), 0);
     vec4 t5 = texelFetch(uStripData, ivec2(tx + 5, row), 0);
+    vec4 t6 = texelFetch(uStripData, ivec2(tx + 6, row), 0);
+    vec4 t7 = texelFetch(uStripData, ivec2(tx + 7, row), 0);
 
-    // 打包约定（与 CPU 侧 AppendSmoothStripData 逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
+    // 打包约定（与 CPU 侧 AppendSmoothStripData 逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)(rgba)
     vec3 c0 = vec3(t0.x, t0.y, t0.z);
     vec3 m0 = vec3(t0.w, t1.x, t1.y);
     vec3 h0 = vec3(t1.z, t1.w, t2.x);
     vec3 n0 = vec3(t2.y, t2.z, t2.w);
-    vec3 c1 = vec3(t3.x, t3.y, t3.z);
-    vec3 m1 = vec3(t3.w, t4.x, t4.y);
-    vec3 h1 = vec3(t4.z, t4.w, t5.x);
-    vec3 n1 = vec3(t5.y, t5.z, t5.w);
+    vec4 color0 = t3;   // 第 seg 列的逐点 rgba
+    vec3 c1 = vec3(t4.x, t4.y, t4.z);
+    vec3 m1 = vec3(t4.w, t5.x, t5.y);
+    vec3 h1 = vec3(t5.z, t5.w, t6.x);
+    vec3 n1 = vec3(t6.y, t6.z, t6.w);
+    vec4 color1 = t7;   // 第 seg+1 列的逐点 rgba
 
     float t2f = t * t;
     float t3f = t2f * t;
@@ -353,7 +379,9 @@ void main() {
     float dt = dot(D, dS) / max(dot(dS, dS), 1e-8);
     vec3 Pv = 2.0 * Hh;
     float dv = dot(D, Pv) / max(dot(Pv, Pv), 1e-8);
-    float uStar = (float(seg) + clamp(t + dt, 0.0, 1.0)) / uSegCount;
+    // 段内真实参数：u* 与逐点 RGBA 必须用**同一个** t*（否则颜色会顺着重建偏差漂）。
+    float tStar = clamp(t + dt, 0.0, 1.0);
+    float uStar = (float(seg) + tStar) / uSegCount;
     float vStar = v + dv;
 
     // 轮廓：落在真实条带之外的片元裁掉；fwidth 做 1px 解析 AA（不做硬切边的锯齿）。
@@ -366,9 +394,10 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    // 颜色/alpha 都按**重建后**的 u* 采样：逐点颜色与不透明度跟着真实曲线走
-    //（折线 pass 的 u 就是真实参数，两者行为一致）。
-    vec4 point = PointColor(uStar);
+    // 逐点 RGBA 来自**同一行**的控制点数据（每列最后一个 texel）段内 t* 线性插值 ——
+    // 与旧的「去 per-instance 纹理采样」数学等价（那张纹理列间也是硬件双线性），
+    // 而 texelFetch 本来就要取这两列，等于白得一次过滤采样。
+    vec4 point = mix(color0, color1, tStar);
     vec3 color = point.rgb;
     float a = point.a;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
@@ -447,6 +476,7 @@ private:
         int fresnel_rim_color = -1;
         int fresnel_f0 = -1;
         int fresnel_power = -1;
+        int fresnel_pow5 = -1;
         int fresnel_strength = -1;
         int fresnel_graze_alpha = -1;
     };
@@ -510,11 +540,11 @@ private:
     unsigned int appearance_tex_ = 0;
     int appearance_capacity_ = 0;         // 当前纹理高度（条带数上限）
     std::vector<float> appearance_data_;  // 复用缓冲：每行 kAppearanceTexels × 4 float
-    unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
+    unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 4 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
     int max_texture_rows_ = 0;            // GL_MAX_TEXTURE_SIZE（Init 时缓存）
     std::vector<float> smooth_vertices_;  // kSmoothFloatsPerVertex/顶点：pos(3),u,v,strip_id
-    std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n
+    std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n, rgba
 
     // 索引缓冲按需扩容（块 j = 第 j 条带，顶点基址 j×32）。幂等：够用就直接返回。
     // 为什么平滑 pass 必须能一次画完整批：它的数据纹理行号 = 全局 strip 下标，

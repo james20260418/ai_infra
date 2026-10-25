@@ -329,8 +329,8 @@ inline std::array<Strip16, kStripRingPartCount> MakeStripRing(
 // （段间是 C1 Hermite，FS 里按真实曲线反解参数并裁形）。设计见
 // docs/jpov_strip3d_translucent_design.md §18。本段只放**纯数学**（GL-free）：
 //   ① ComputeSmoothStrip        —— 中心/半宽矢量 + 切线 + 自动外扩量（整条带统一 scale）；
-//   ② AppendSmoothStripData     —— 数据纹理的一行（每列 12 float）；
-//   ③ AppendSmoothStripVertices —— 顶点（每顶点 7 float）。
+//   ② AppendSmoothStripData     —— 数据纹理的一行（每列 16 float，含逐点颜色）；
+//   ③ AppendSmoothStripVertices —— 顶点（每顶点 6 float）。
 // 渲染器只负责上传与 draw。
 //
 // 为什么必须能单测：外扩量算少了只表现为「弯的外侧缺一条亚像素」，出图肉眼看不出来
@@ -340,8 +340,13 @@ inline std::array<Strip16, kStripRingPartCount> MakeStripRing(
 // （纵向 alpha 已并进逐点颜色，由 FS 采样；顶点不再带 alpha。）
 inline constexpr int kSmoothFloatsPerVertex = 6;
 
-// 控制点数据纹理：每列 3 个 RGBA32F texel = 12 float。
-inline constexpr int kSmoothTexelsPerColumn = 3;
+// 控制点数据纹理：每列 4 个 RGBA32F texel = 16 float = c.xyz, m.xyz, h.xyz, n.xyz + 逐点 rgba。
+//
+// 为什么把逐点颜色也塞进来（2026-10-25）：平滑 pass 本来就在这同一行里逐段取两次控制点，
+// 把每列的颜色作为第二个 texel 一并取回（同一条 cache line），FS 用段内参数 t* 自己 mix，
+// 于是那一次对 per-instance 纹理的**过滤采样**可以完全去掉（省一次 bilinear + LOD 计算）；
+// 硬件双线性在列间也是线性插值 ⇒ 两条路的数学等价（仅浮点舍入不同）。
+inline constexpr int kSmoothTexelsPerColumn = 4;
 inline constexpr int kSmoothFloatsPerColumn = 4 * kSmoothTexelsPerColumn;
 
 // 每段用来求「最大外凸量」的采样点数（t = i/(n+1)，i = 1..n）：最值近似 + 末尾余量。
@@ -474,19 +479,29 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
                      : 1.0f;
 }
 
-// 追加一条条带的数据纹理行：kStripSampleCount × 12 float。
+// 追加一条条带的数据纹理行：kStripSampleCount × 16 float。
 //
 // 打包约定（**与 kSmoothFsMain 的解包逐字对应**，改一边必须改另一边）：
-//   每列 12 float = c.xyz, m.xyz, h.xyz, n.xyz
-//   → 每 3 个 texel 一组：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
-inline void AppendSmoothStripData(const SmoothStripCompute& computed,
+//   每列 16 float = c.xyz, m.xyz, h.xyz, n.xyz, point_color.rgba
+//   → 每 4 个 texel 一组：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)(rgba)
+//
+// 颜色用塌缩后的列（与几何一致）：尾部列与最后一个有效列同色。这些列构成零面积
+// quad、不产生片元，所以取什么值对画面没影响，但**与几何用同一个 src 下标**可以让
+// 「第 i 列的颜色 = 第 i 列的几何」这个不变量在整张纹理上成立，读代码时不用再分叉。
+inline void AppendSmoothStripData(const Strip16& strip,
+                                  const SmoothStripCompute& computed,
                                   std::vector<float>* out /*output*/) {
     CHECK(out != nullptr) << "AppendSmoothStripData: out 不能为空";
+    CHECK_GE(strip.point_count, 2u) << "AppendSmoothStripData: point_count 至少 2";
+    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
+    const uint32_t last_real = strip.point_count - 1;
     for (int col = 0; col < kStripSampleCount; ++col) {
         const Vec3f& c = computed.center[col];
         const Vec3f& m = computed.center_tan[col];
         const Vec3f& h = computed.half[col];
         const Vec3f& n = computed.half_tan[col];
+        const Color& color =
+            strip.point_color[std::min(static_cast<uint32_t>(col), last_real)];
         out->push_back(c.x());
         out->push_back(c.y());
         out->push_back(c.z());
@@ -499,6 +514,10 @@ inline void AppendSmoothStripData(const SmoothStripCompute& computed,
         out->push_back(n.x());
         out->push_back(n.y());
         out->push_back(n.z());
+        out->push_back(color.r);
+        out->push_back(color.g);
+        out->push_back(color.b);
+        out->push_back(color.a);
     }
 }
 
