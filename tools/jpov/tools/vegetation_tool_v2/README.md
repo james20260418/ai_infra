@@ -7,7 +7,7 @@
 
 | 状态 | 在画什么 | 用途 |
 |---|---|---|
-| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡**曲面**） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐，弯曲有 3 个滑条 |
+| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡**曲面**） | 看资产：拓扑、叶卡曲面、噪声后的枝干；叶卡可用 debug 绿卡看对齐 |
 | **glb 展示态** | 刚烘焙出来的 `.glb`（树干 + 叶卡两个 primitive，带风链数据） | 看最终资产：树皮贴图、叶卡 alpha、**风**（左下「风调试」面板） |
 
 烘焙产物是一份**自洽 .glb**：几何 + 内嵌贴图（树皮 albedo/normal/ORM、叶卡 albedo/normal）
@@ -343,9 +343,9 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 
 **⑥ 收敛**
 叶卡角度/缩放不对 → 回 ③ 调提示词（构图问题）或 ④ 换 `--anchor`（几何问题）；
-枝形不对 → 回 ① 调参数。查看器里能调的只有**呈现/形状参数**（叶面弯曲 3 个滑条、
-法线强度、地面高度、层级）；调好的弯曲要写回 `export.leaf_bend_*` 或 shape 的
-`leaf_types.bend`，否则下次从配置重跑就没了。叶卡的**摆放**（anchor/up/normal）不在这里凑。
+枝形不对 → 回 ① 调参数（含 `noise` 块）。查看器**只负责显示**：面板里能调的是
+呈现参数（法线强度、地面高度、层级、风），**叶面弯曲与枝条噪声都不在面板里** ——
+它们是资产的一部分，改就改配置重新生成，否则预览和最终资产会变成两套真相。
 
 ### 几条硬规矩
 
@@ -401,7 +401,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `configs/` | 入库的生成配置：`pine.pbtxt` / `oak.pbtxt` / `fir.pbtxt`（见其 README） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
-| `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树）；**`willow_baked.glb`（12 MB，入库的烘焙产物，见下）** |
+| `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type）；**三棵树的入库档位**：`{pine,oak,fir}_low.pbtxt`（约 5 万顶点、带噪声，主力档）与 `{pine,oak,fir}_game.pbtxt`（约 5000 三角形，低配小游戏档）；**`willow_baked.glb`（12 MB，烘焙产物，见下）** |
 | `docs/vegetation_asset_format.md` | **格式规范**：约定、扫管、UV、叶卡、装配、校验、验收、版本 |
 | `bake/bake_options.h` | 烘焙参数/统计（baker 与关节构造共用，避免循环 include） |
 | `bake/vegetation_glb_joints.{h,cc}` | **关节构造**（GL-free 纯几何）：抽稀 / soft / 父子链 / 相位场；烘焙与单测共用 |

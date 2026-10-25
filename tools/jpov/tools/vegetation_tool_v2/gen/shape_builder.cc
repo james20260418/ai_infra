@@ -208,24 +208,18 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
   // 可能离它自己**后代**的近路折线更近 ⇒ 父子关系成环（A 的父是 B、B 的父是 A），
   // 拓扑序写不出来，整棵树直接失败（报「枝 N 的父枝排在它后面」）。
   // 处理：把环上的枝重新问一次「最近的其他折线」（排除当前父枝）；实在找不到就挂到根枝。
-  {
-    std::vector<int> stamp(static_cast<std::size_t>(count), -1);
+  for (int pass = 0; pass < 4; ++pass) {
+    bool repaired = false;
     for (int i = 0; i < count; ++i) {
-      // 沿父链往上走，看会不会回到自己（或走回已经走过的点）。
+      // 沿父链往上走，看会不会回到自己。
       int current = i;
       int steps = 0;
-      std::vector<int> chain;
-      while (current >= 0 && steps <= count) {
-        if (current == i && steps > 0) {
-          break;  // 回到自己 = 环
-        }
-        chain.push_back(current);
+      while (current >= 0 && steps <= count && !(current == i && steps > 0)) {
         current = hierarchy.parent[static_cast<std::size_t>(current)];
         ++steps;
       }
-      const bool cycle = current == i && steps > 0;
-      if (!cycle) {
-        continue;
+      if (!(current == i && steps > 0)) {
+        continue;  // 没有环
       }
       const int parent = hierarchy.parent[static_cast<std::size_t>(i)];
       // 先试「第二近」的折线（排除当前父枝）。
@@ -237,9 +231,13 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
         hierarchy.attach[static_cast<std::size_t>(i)] =
             (static_cast<double>(retry->segment) + retry->t) / std::max(1, segment_count);
       } else {
-        hierarchy.parent[static_cast<std::size_t>(i)] = root;  // 最后的兜底：挂到根枝
+        hierarchy.parent[static_cast<std::size_t>(i)] = root;  // 最后兜底：挂到根枝
         hierarchy.attach[static_cast<std::size_t>(i)] = 1.0;
       }
+      repaired = true;
+    }
+    if (!repaired) {
+      break;  // 已经没有环了（正常情况下第一轮就清干净）
     }
   }
 
@@ -509,7 +507,6 @@ std::vector<double> NormalizedArclength(const std::vector<Vec3d>& points) {
 // 一条链共享：同一个缩放因子、同一个弯曲相位、同一段弧长参数化、同一个链根。
 
 struct Chain {
-  int head = -1;                    // 链首样条（下标）
   std::size_t level = 0;            // 噪声参数按链首的枝级取
   double length = 0.0;              // 干净几何上的链总长（米）
   Vec3d root{ 0.0, 0.0, 0.0 };      // 链首放置后的根点（缩放/弯曲之前）
@@ -618,7 +615,6 @@ void ApplyBranchNoise(const NoiseOptions& noise, const Hierarchy& hierarchy,
     chain_of[i] = head;
     Chain& chain = chains[head];
     if (!continuation) {
-      chain.head = i;
       chain.level = static_cast<std::size_t>(std::max(0, hierarchy.level[i]));
       chain.length = 0.0;
     }

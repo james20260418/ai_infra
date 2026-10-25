@@ -402,7 +402,7 @@ class VegetationV2App : public JPOV {
 
     for (int t = 0; t < kMaxCardTypes; ++t) {
       // 子集只保留「这一类卡」：卡网格只需要 cards + leaf_types，枝干（占 99% 内存）
-      // 留在 shape_ 里就够了。滑条重建网格时也就不用再复制一遍整棵树。
+      // 留在 shape_ 里就够了（烘焙/重建网格都直接读 shape_）。
       Shape subset;
       subset.leaf_types = shape_.leaf_types;
       for (const auto& c : shape_.cards) {

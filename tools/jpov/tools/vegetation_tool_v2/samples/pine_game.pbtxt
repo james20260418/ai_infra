@@ -1,0 +1,6591 @@
+version: 1
+description: "small_pine（Blender/Sapling 导出，per_seg=1，62 枝 468 卡）"
+branches {
+  id: 0
+  parent: -1
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0 y: 0 z: 0 }
+    radius: 0.25691
+    tilt: 0
+  }
+  samples {
+    position { x: 0.00836333 y: 1.59161 z: 0.0167267 }
+    radius: 0.226728
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0338059 y: 3.18322 z: 0.0656686 }
+    radius: 0.196546
+    tilt: 0
+  }
+  samples {
+    position { x: 0.096656 y: 4.77451 z: 0.168778 }
+    radius: 0.166364
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0419383 y: 6.36228 z: 0.212553 }
+    radius: 0.136182
+    tilt: 0
+  }
+  samples {
+    position { x: 0.00996124 y: 7.95045 z: 0.365245 }
+    radius: 0.106
+    tilt: 0
+  }
+  samples {
+    position { x: -0.164833 y: 9.52524 z: 0.263163 }
+    radius: 0.0758175
+    tilt: 0
+  }
+  samples {
+    position { x: -0.350113 y: 11.1068 z: 0.291332 }
+    radius: 0.0456354
+    tilt: 0
+  }
+  samples {
+    position { x: -0.664752 y: 12.672 z: 0.0413927 }
+    radius: 0.0154532
+    tilt: 0
+  }
+}
+branches {
+  id: 1
+  parent: 0
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0205497 y: 2.35395 z: 0.0401687 }
+    radius: 0.0804839
+    tilt: 0
+  }
+  samples {
+    position { x: 0.490218 y: 2.23043 z: -0.453784 }
+    radius: 0.0647176
+    tilt: 0
+  }
+  samples {
+    position { x: 0.879195 y: 2.03601 z: -0.98708 }
+    radius: 0.0489513
+    tilt: 0
+  }
+  samples {
+    position { x: 1.38748 y: 2.1349 z: -1.46059 }
+    radius: 0.0331851
+    tilt: 0
+  }
+  samples {
+    position { x: 1.9557 y: 2.63073 z: -1.80311 }
+    radius: 0.0174188
+    tilt: 0
+  }
+  samples {
+    position { x: 2.3634 y: 2.88873 z: -2.27618 }
+    radius: 0.00165248
+    tilt: 0
+  }
+}
+branches {
+  id: 2
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0924719 y: 2.36203 z: 0.185607 }
+    radius: 0.0810821
+    tilt: 0
+  }
+  samples {
+    position { x: -0.70246 y: 2.20864 z: 0.16952 }
+    radius: 0.0651985
+    tilt: 0
+  }
+  samples {
+    position { x: -1.52249 y: 2.18217 z: 0.113218 }
+    radius: 0.049315
+    tilt: 0
+  }
+  samples {
+    position { x: -2.33794 y: 2.2597 z: 0.11794 }
+    radius: 0.0334314
+    tilt: 0
+  }
+  samples {
+    position { x: -3.12938 y: 2.50319 z: 0.0625867 }
+    radius: 0.0175479
+    tilt: 0
+  }
+  samples {
+    position { x: -3.90318 y: 2.78695 z: 0.048444 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 3
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.189751 y: 2.3662 z: -0.378836 }
+    radius: 0.0810938
+    tilt: 0
+  }
+  samples {
+    position { x: -0.383712 y: 2.21415 z: -1.23981 }
+    radius: 0.0652079
+    tilt: 0
+  }
+  samples {
+    position { x: -0.548932 y: 2.17948 z: -2.1187 }
+    radius: 0.049322
+    tilt: 0
+  }
+  samples {
+    position { x: -0.777465 y: 2.16826 z: -2.98104 }
+    radius: 0.0334361
+    tilt: 0
+  }
+  samples {
+    position { x: -0.860094 y: 2.44981 z: -3.79709 }
+    radius: 0.0175502
+    tilt: 0
+  }
+  samples {
+    position { x: -1.41173 y: 2.78069 z: -4.35797 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 4
+  parent: 0
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0895614 y: 4.98038 z: 0.174454 }
+    radius: 0.0647373
+    tilt: 0
+  }
+  samples {
+    position { x: 0.600006 y: 4.87522 z: -0.00465676 }
+    radius: 0.052059
+    tilt: 0
+  }
+  samples {
+    position { x: 1.12879 y: 4.97381 z: 0.0902944 }
+    radius: 0.0393807
+    tilt: 0
+  }
+  samples {
+    position { x: 1.69449 y: 5.30909 z: 0.196442 }
+    radius: 0.0267025
+    tilt: 0
+  }
+  samples {
+    position { x: 2.04588 y: 5.5899 z: 0.369351 }
+    radius: 0.0140242
+    tilt: 0
+  }
+  samples {
+    position { x: 2.48905 y: 5.81508 z: 0.467412 }
+    radius: 0.00134592
+    tilt: 0
+  }
+}
+branches {
+  id: 5
+  parent: 0
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0889327 y: 4.99862 z: 0.174957 }
+    radius: 0.0781368
+    tilt: 0
+  }
+  samples {
+    position { x: -0.63947 y: 4.77739 z: -0.145497 }
+    radius: 0.0628346
+    tilt: 0
+  }
+  samples {
+    position { x: -1.32228 y: 4.87228 z: -0.622033 }
+    radius: 0.0475323
+    tilt: 0
+  }
+  samples {
+    position { x: -2.09789 y: 5.20511 z: -0.744079 }
+    radius: 0.03223
+    tilt: 0
+  }
+  samples {
+    position { x: -2.9034 y: 5.30479 z: -0.685308 }
+    radius: 0.0169277
+    tilt: 0
+  }
+  samples {
+    position { x: -3.678 y: 5.5326 z: -0.573206 }
+    radius: 0.00162538
+    tilt: 0
+  }
+}
+branches {
+  id: 6
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.482716 y: 5.02176 z: -0.977462 }
+    radius: 0.0799525
+    tilt: 0
+  }
+  samples {
+    position { x: -0.235799 y: 4.92293 z: -1.76922 }
+    radius: 0.0642948
+    tilt: 0
+  }
+  samples {
+    position { x: 0.301907 y: 4.85089 z: -2.34404 }
+    radius: 0.0486372
+    tilt: 0
+  }
+  samples {
+    position { x: 0.784801 y: 4.76285 z: -2.9601 }
+    radius: 0.0329796
+    tilt: 0
+  }
+  samples {
+    position { x: 1.15167 y: 4.98133 z: -3.61321 }
+    radius: 0.0173219
+    tilt: 0
+  }
+  samples {
+    position { x: 1.38041 y: 5.09482 z: -4.33503 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 7
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.717349 y: 7.26814 z: -1.18899 }
+    radius: 0.0702733
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0705369 y: 7.28098 z: -0.9628 }
+    radius: 0.0565515
+    tilt: 0
+  }
+  samples {
+    position { x: 0.848861 y: 7.46533 z: -0.714948 }
+    radius: 0.0428297
+    tilt: 0
+  }
+  samples {
+    position { x: 1.6586 y: 7.63611 z: -0.533619 }
+    radius: 0.0291079
+    tilt: 0
+  }
+  samples {
+    position { x: 2.43362 y: 7.92722 z: -0.295174 }
+    radius: 0.0153861
+    tilt: 0
+  }
+  samples {
+    position { x: 3.19497 y: 7.89047 z: -0.558249 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 8
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.545149 y: 7.28612 z: -0.842034 }
+    radius: 0.0701575
+    tilt: 0
+  }
+  samples {
+    position { x: -0.582454 y: 7.23962 z: -0.131889 }
+    radius: 0.0564589
+    tilt: 0
+  }
+  samples {
+    position { x: -0.839386 y: 7.41802 z: 0.481228 }
+    radius: 0.0427602
+    tilt: 0
+  }
+  samples {
+    position { x: -1.01234 y: 7.6703 z: 1.10673 }
+    radius: 0.0290616
+    tilt: 0
+  }
+  samples {
+    position { x: -1.21685 y: 8.0354 z: 1.64509 }
+    radius: 0.0153629
+    tilt: 0
+  }
+  samples {
+    position { x: -1.52875 y: 8.45801 z: 2.03318 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 9
+  parent: 0
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0226943 y: 7.31805 z: 0.304444 }
+    radius: 0.0710874
+    tilt: 0
+  }
+  samples {
+    position { x: -0.692558 y: 7.23535 z: 0.223566 }
+    radius: 0.0572082
+    tilt: 0
+  }
+  samples {
+    position { x: -1.38449 y: 7.31704 z: 0.0540253 }
+    radius: 0.043329
+    tilt: 0
+  }
+  samples {
+    position { x: -2.06332 y: 7.61721 z: -0.225292 }
+    radius: 0.0294497
+    tilt: 0
+  }
+  samples {
+    position { x: -2.69368 y: 7.81872 z: -0.407409 }
+    radius: 0.0155705
+    tilt: 0
+  }
+  samples {
+    position { x: -3.36845 y: 7.96007 z: -0.532704 }
+    radius: 0.0016913
+    tilt: 0
+  }
+}
+branches {
+  id: 10
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.510869 y: 9.25126 z: -0.482247 }
+    radius: 0.0554231
+    tilt: 0
+  }
+  samples {
+    position { x: -0.305232 y: 9.32588 z: -0.944874 }
+    radius: 0.0446713
+    tilt: 0
+  }
+  samples {
+    position { x: 0.102225 y: 9.54748 z: -1.24385 }
+    radius: 0.0339196
+    tilt: 0
+  }
+  samples {
+    position { x: 0.449322 y: 9.77491 z: -1.59564 }
+    radius: 0.0231678
+    tilt: 0
+  }
+  samples {
+    position { x: 0.829076 y: 10.122 z: -1.82226 }
+    radius: 0.0124161
+    tilt: 0
+  }
+  samples {
+    position { x: 0.928384 y: 10.5549 z: -2.13466 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 11
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.351204 y: 9.26299 z: -0.160754 }
+    radius: 0.055322
+    tilt: 0
+  }
+  samples {
+    position { x: 0.179279 y: 9.41421 z: -0.118325 }
+    radius: 0.0445904
+    tilt: 0
+  }
+  samples {
+    position { x: 0.675494 y: 9.64507 z: -0.0813022 }
+    radius: 0.0338589
+    tilt: 0
+  }
+  samples {
+    position { x: 1.16755 y: 9.86404 z: -0.132953 }
+    radius: 0.0231274
+    tilt: 0
+  }
+  samples {
+    position { x: 1.49828 y: 10.2471 z: 0.0698684 }
+    radius: 0.0123958
+    tilt: 0
+  }
+  samples {
+    position { x: 1.94141 y: 10.5396 z: 0.168649 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 12
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.456186 y: 10.8946 z: 0.0254234 }
+    radius: 0.0388336
+    tilt: 0
+  }
+  samples {
+    position { x: -0.288251 y: 11.028 z: 0.340329 }
+    radius: 0.0313997
+    tilt: 0
+  }
+  samples {
+    position { x: -0.149541 y: 11.2305 z: 0.627709 }
+    radius: 0.0239659
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0114256 y: 11.4291 z: 0.903247 }
+    radius: 0.016532
+    tilt: 0
+  }
+  samples {
+    position { x: 0.128505 y: 11.6957 z: 1.1382 }
+    radius: 0.00909815
+    tilt: 0
+  }
+  samples {
+    position { x: 0.296772 y: 11.9555 z: 1.34601 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 13
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.455894 y: 10.9188 z: 0.0322634 }
+    radius: 0.0385764
+    tilt: 0
+  }
+  samples {
+    position { x: -0.153712 y: 11.07 z: 0.152715 }
+    radius: 0.031194
+    tilt: 0
+  }
+  samples {
+    position { x: 0.114842 y: 11.2816 z: 0.260054 }
+    radius: 0.0238116
+    tilt: 0
+  }
+  samples {
+    position { x: 0.393616 y: 11.5011 z: 0.312705 }
+    radius: 0.0164291
+    tilt: 0
+  }
+  samples {
+    position { x: 0.642363 y: 11.7477 z: 0.225615 }
+    radius: 0.00904672
+    tilt: 0
+  }
+  samples {
+    position { x: 0.896226 y: 11.963 z: 0.0838452 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 14
+  parent: 0
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.54119 y: 12.0573 z: 0.139547 }
+    radius: 0.0207944
+    tilt: 0
+  }
+  samples {
+    position { x: -0.528534 y: 12.1838 z: 0.296808 }
+    radius: 0.0169167
+    tilt: 0
+  }
+  samples {
+    position { x: -0.537996 y: 12.3443 z: 0.429821 }
+    radius: 0.013039
+    tilt: 0
+  }
+  samples {
+    position { x: -0.450627 y: 12.426 z: 0.602515 }
+    radius: 0.00916129
+    tilt: 0
+  }
+  samples {
+    position { x: -0.434036 y: 12.6049 z: 0.691642 }
+    radius: 0.00528357
+    tilt: 0
+  }
+  samples {
+    position { x: -0.347833 y: 12.7315 z: 0.817088 }
+    radius: 0.00140586
+    tilt: 0
+  }
+}
+branches {
+  id: 15
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.650922 y: 12.1004 z: -0.0687445 }
+    radius: 0.0240279
+    tilt: 0
+  }
+  samples {
+    position { x: -0.507768 y: 12.2517 z: 0.0588204 }
+    radius: 0.0195551
+    tilt: 0
+  }
+  samples {
+    position { x: -0.396183 y: 12.4282 z: 0.186242 }
+    radius: 0.0150824
+    tilt: 0
+  }
+  samples {
+    position { x: -0.264077 y: 12.6152 z: 0.274273 }
+    radius: 0.0106097
+    tilt: 0
+  }
+  samples {
+    position { x: -0.198659 y: 12.8386 z: 0.3538 }
+    radius: 0.00613701
+    tilt: 0
+  }
+  samples {
+    position { x: -0.0828268 y: 13.0554 z: 0.373826 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 16
+  parent: 0
+  level: 0
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.756954 y: 12.672 z: -0.143011 }
+    radius: 0.0154532
+    tilt: 0
+  }
+  samples {
+    position { x: -0.764434 y: 12.8502 z: -0.148 }
+    radius: 0.0126955
+    tilt: 0
+  }
+  samples {
+    position { x: -0.746041 y: 13.0274 z: -0.142535 }
+    radius: 0.00993766
+    tilt: 0
+  }
+  samples {
+    position { x: -0.716349 y: 13.203 z: -0.150849 }
+    radius: 0.00717987
+    tilt: 0
+  }
+  samples {
+    position { x: -0.721733 y: 13.3799 z: -0.128901 }
+    radius: 0.00442208
+    tilt: 0
+  }
+  samples {
+    position { x: -0.670229 y: 13.5464 z: -0.0917061 }
+    radius: 0.00166429
+    tilt: 0
+  }
+}
+branches {
+  id: 17
+  parent: 2
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.0924719 y: 2.36203 z: 0.185607 }
+    radius: 0.0663367
+    tilt: 0
+  }
+  samples {
+    position { x: 0.58178 y: 2.28529 z: 0.602344 }
+    radius: 0.0533417
+    tilt: 0
+  }
+  samples {
+    position { x: 1.19591 y: 2.24237 z: 0.78655 }
+    radius: 0.0403467
+    tilt: 0
+  }
+  samples {
+    position { x: 1.80319 y: 2.23265 z: 0.988058 }
+    radius: 0.0273517
+    tilt: 0
+  }
+  samples {
+    position { x: 2.25545 y: 2.69735 z: 1.37321 }
+    radius: 0.0143566
+    tilt: 0
+  }
+  samples {
+    position { x: 2.79763 y: 3.00409 z: 1.55629 }
+    radius: 0.00136162
+    tilt: 0
+  }
+}
+branches {
+  id: 18
+  parent: 3
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.189751 y: 2.3662 z: -0.378836 }
+    radius: 0.0727798
+    tilt: 0
+  }
+  samples {
+    position { x: -0.56722 y: 2.27933 z: 0.165566 }
+    radius: 0.0585226
+    tilt: 0
+  }
+  samples {
+    position { x: -1.0485 y: 2.37817 z: 0.675608 }
+    radius: 0.0442654
+    tilt: 0
+  }
+  samples {
+    position { x: -1.27997 y: 2.26651 z: 1.27311 }
+    radius: 0.0300081
+    tilt: 0
+  }
+  samples {
+    position { x: -1.76265 y: 2.35123 z: 1.67339 }
+    radius: 0.0157509
+    tilt: 0
+  }
+  samples {
+    position { x: -2.20178 y: 2.52077 z: 2.18698 }
+    radius: 0.00149361
+    tilt: 0
+  }
+}
+branches {
+  id: 19
+  parent: 3
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.860094 y: 2.44981 z: -3.79709 }
+    radius: 0.0126435
+    tilt: 0
+  }
+  samples {
+    position { x: -0.775641 y: 2.54424 z: -4.36215 }
+    radius: 0.00119899
+    tilt: 0
+  }
+}
+branches {
+  id: 20
+  parent: 4
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.600006 y: 4.87522 z: -0.00465676 }
+    radius: 0.0494561
+    tilt: 0
+  }
+  samples {
+    position { x: 1.1168 y: 4.91829 z: -0.362184 }
+    radius: 0.0374117
+    tilt: 0
+  }
+  samples {
+    position { x: 1.65374 y: 5.15284 z: -0.689059 }
+    radius: 0.0253673
+    tilt: 0
+  }
+  samples {
+    position { x: 1.8785 y: 4.93278 z: -1.36218 }
+    radius: 0.013323
+    tilt: 0
+  }
+  samples {
+    position { x: 2.18347 y: 5.05308 z: -1.88606 }
+    radius: 0.00127862
+    tilt: 0
+  }
+}
+branches {
+  id: 21
+  parent: 4
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 1.69449 y: 5.30909 z: 0.196442 }
+    radius: 0.0253673
+    tilt: 0
+  }
+  samples {
+    position { x: 2.26045 y: 5.53799 z: 0.0635569 }
+    radius: 0.013323
+    tilt: 0
+  }
+  samples {
+    position { x: 2.77746 y: 5.71056 z: -0.251651 }
+    radius: 0.00127862
+    tilt: 0
+  }
+}
+branches {
+  id: 22
+  parent: 5
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.32228 y: 4.87228 z: -0.622033 }
+    radius: 0.0451556
+    tilt: 0
+  }
+  samples {
+    position { x: -1.72392 y: 4.93577 z: -1.27366 }
+    radius: 0.0306185
+    tilt: 0
+  }
+  samples {
+    position { x: -2.3465 y: 4.72543 z: -1.69506 }
+    radius: 0.0160813
+    tilt: 0
+  }
+  samples {
+    position { x: -2.81405 y: 4.8308 z: -2.26184 }
+    radius: 0.00154411
+    tilt: 0
+  }
+}
+branches {
+  id: 23
+  parent: 6
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.482559 y: 5.02169 z: -0.977966 }
+    radius: 0.0759454
+    tilt: 0
+  }
+  samples {
+    position { x: -0.257801 y: 5.03894 z: -0.205502 }
+    radius: 0.0610724
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0367314 y: 5.04133 z: 0.531521 }
+    radius: 0.0461995
+    tilt: 0
+  }
+  samples {
+    position { x: 0.476278 y: 4.87759 z: 1.19821 }
+    radius: 0.0313266
+    tilt: 0
+  }
+  samples {
+    position { x: 0.837969 y: 5.11099 z: 1.89678 }
+    radius: 0.0164536
+    tilt: 0
+  }
+  samples {
+    position { x: 1.28127 y: 5.31319 z: 2.53783 }
+    radius: 0.00158069
+    tilt: 0
+  }
+}
+branches {
+  id: 24
+  parent: 6
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.482716 y: 5.02176 z: -0.977462 }
+    radius: 0.0759548
+    tilt: 0
+  }
+  samples {
+    position { x: -1.12747 y: 4.90649 z: -0.672541 }
+    radius: 0.0610801
+    tilt: 0
+  }
+  samples {
+    position { x: -1.71847 y: 4.7329 z: -0.296391 }
+    radius: 0.0462054
+    tilt: 0
+  }
+  samples {
+    position { x: -2.38453 y: 4.8822 z: 0.00704393 }
+    radius: 0.0313307
+    tilt: 0
+  }
+  samples {
+    position { x: -3.09754 y: 5.22149 z: 0.171942 }
+    radius: 0.0164559
+    tilt: 0
+  }
+  samples {
+    position { x: -3.73914 y: 5.30286 z: 0.455807 }
+    radius: 0.00158122
+    tilt: 0
+  }
+}
+branches {
+  id: 25
+  parent: 6
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.235799 y: 4.92293 z: -1.76922 }
+    radius: 0.0482598
+    tilt: 0
+  }
+  samples {
+    position { x: -0.252061 y: 5.05216 z: -2.36216 }
+    radius: 0.0365071
+    tilt: 0
+  }
+  samples {
+    position { x: -0.460736 y: 5.07617 z: -2.96336 }
+    radius: 0.0247545
+    tilt: 0
+  }
+  samples {
+    position { x: -0.32892 y: 5.5877 z: -3.41548 }
+    radius: 0.0130019
+    tilt: 0
+  }
+  samples {
+    position { x: -0.414907 y: 5.9178 z: -3.91803 }
+    radius: 0.00124922
+    tilt: 0
+  }
+}
+branches {
+  id: 26
+  parent: 6
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.784801 y: 4.76285 z: -2.9601 }
+    radius: 0.022205
+    tilt: 0
+  }
+  samples {
+    position { x: 1.27124 y: 4.76257 z: -3.18057 }
+    radius: 0.0116628
+    tilt: 0
+  }
+  samples {
+    position { x: 1.73717 y: 4.70861 z: -3.42641 }
+    radius: 0.00112056
+    tilt: 0
+  }
+}
+branches {
+  id: 27
+  parent: 7
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.717328 y: 7.26814 z: -1.18899 }
+    radius: 0.0639491
+    tilt: 0
+  }
+  samples {
+    position { x: -0.949014 y: 7.34693 z: -1.75994 }
+    radius: 0.0514624
+    tilt: 0
+  }
+  samples {
+    position { x: -0.930779 y: 7.7077 z: -2.35208 }
+    radius: 0.0389756
+    tilt: 0
+  }
+  samples {
+    position { x: -1.19144 y: 7.80462 z: -2.85456 }
+    radius: 0.0264888
+    tilt: 0
+  }
+  samples {
+    position { x: -1.08976 y: 8.21846 z: -3.22588 }
+    radius: 0.014002
+    tilt: 0
+  }
+  samples {
+    position { x: -1.12694 y: 8.7616 z: -3.62172 }
+    radius: 0.00151519
+    tilt: 0
+  }
+}
+branches {
+  id: 28
+  parent: 7
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 2.43362 y: 7.92722 z: -0.295174 }
+    radius: 0.0137948
+    tilt: 0
+  }
+  samples {
+    position { x: 2.9738 y: 8.14495 z: -0.0696922 }
+    radius: 0.00149217
+    tilt: 0
+  }
+}
+branches {
+  id: 29
+  parent: 8
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.545153 y: 7.28612 z: -0.841958 }
+    radius: 0.0666482
+    tilt: 0
+  }
+  samples {
+    position { x: -0.0115533 y: 7.36139 z: -1.17496 }
+    radius: 0.0536351
+    tilt: 0
+  }
+  samples {
+    position { x: 0.459867 y: 7.35352 z: -1.59907 }
+    radius: 0.040622
+    tilt: 0
+  }
+  samples {
+    position { x: 0.916785 y: 7.4823 z: -2.01547 }
+    radius: 0.0276089
+    tilt: 0
+  }
+  samples {
+    position { x: 1.39185 y: 7.96641 z: -2.25804 }
+    radius: 0.0145958
+    tilt: 0
+  }
+  samples {
+    position { x: 1.71479 y: 8.30813 z: -2.67493 }
+    radius: 0.00158271
+    tilt: 0
+  }
+}
+branches {
+  id: 30
+  parent: 8
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.582454 y: 7.23962 z: -0.131889 }
+    radius: 0.0536359
+    tilt: 0
+  }
+  samples {
+    position { x: -0.442726 y: 7.29091 z: 0.524963 }
+    radius: 0.0406222
+    tilt: 0
+  }
+  samples {
+    position { x: -0.0779933 y: 7.15242 z: 1.12146 }
+    radius: 0.0276085
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0158166 y: 7.39411 z: 1.77352 }
+    radius: 0.0145948
+    tilt: 0
+  }
+  samples {
+    position { x: 0.205242 y: 7.63975 z: 2.38155 }
+    radius: 0.00158108
+    tilt: 0
+  }
+}
+branches {
+  id: 31
+  parent: 8
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.21685 y: 8.0354 z: 1.64509 }
+    radius: 0.0135557
+    tilt: 0
+  }
+  samples {
+    position { x: -1.23916 y: 8.12483 z: 2.25174 }
+    radius: 0.00146851
+    tilt: 0
+  }
+}
+branches {
+  id: 32
+  parent: 10
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.510869 y: 9.25126 z: -0.482247 }
+    radius: 0.0526519
+    tilt: 0
+  }
+  samples {
+    position { x: -0.022219 y: 9.37689 z: -0.0888122 }
+    radius: 0.0424376
+    tilt: 0
+  }
+  samples {
+    position { x: 0.352439 y: 9.67119 z: 0.338795 }
+    radius: 0.0322232
+    tilt: 0
+  }
+  samples {
+    position { x: 0.648347 y: 10.15 z: 0.760648 }
+    radius: 0.0220089
+    tilt: 0
+  }
+  samples {
+    position { x: 1.02364 y: 10.4554 z: 1.11849 }
+    radius: 0.0117945
+    tilt: 0
+  }
+  samples {
+    position { x: 1.20003 y: 10.8679 z: 1.51734 }
+    radius: 0.00158016
+    tilt: 0
+  }
+}
+branches {
+  id: 33
+  parent: 10
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.510718 y: 9.25132 z: -0.482587 }
+    radius: 0.0526444
+    tilt: 0
+  }
+  samples {
+    position { x: -0.769545 y: 9.28121 z: 0.021889 }
+    radius: 0.0424318
+    tilt: 0
+  }
+  samples {
+    position { x: -1.07376 y: 9.48946 z: 0.456263 }
+    radius: 0.0322193
+    tilt: 0
+  }
+  samples {
+    position { x: -1.42238 y: 9.85071 z: 0.831806 }
+    radius: 0.0220067
+    tilt: 0
+  }
+  samples {
+    position { x: -1.58892 y: 9.94848 z: 1.36281 }
+    radius: 0.0117941
+    tilt: 0
+  }
+  samples {
+    position { x: -1.65759 y: 10.1361 z: 1.88979 }
+    radius: 0.0015815
+    tilt: 0
+  }
+}
+branches {
+  id: 34
+  parent: 10
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.305232 y: 9.32588 z: -0.944874 }
+    radius: 0.0359113
+    tilt: 0
+  }
+  samples {
+    position { x: -0.367397 y: 9.34347 z: -1.39824 }
+    radius: 0.027268
+    tilt: 0
+  }
+  samples {
+    position { x: -0.49035 y: 9.37775 z: -1.83882 }
+    radius: 0.0186246
+    tilt: 0
+  }
+  samples {
+    position { x: -0.513393 y: 9.62076 z: -2.25362 }
+    radius: 0.00998128
+    tilt: 0
+  }
+  samples {
+    position { x: -0.752964 y: 9.69729 z: -2.64255 }
+    radius: 0.00133793
+    tilt: 0
+  }
+}
+branches {
+  id: 35
+  parent: 10
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.829076 y: 10.122 z: -1.82226 }
+    radius: 0.0117953
+    tilt: 0
+  }
+  samples {
+    position { x: 1.30419 y: 10.3671 z: -1.97599 }
+    radius: 0.00158108
+    tilt: 0
+  }
+}
+branches {
+  id: 36
+  parent: 11
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.350256 y: 9.26326 z: -0.160678 }
+    radius: 0.0525377
+    tilt: 0
+  }
+  samples {
+    position { x: -0.640621 y: 9.32536 z: -0.541349 }
+    radius: 0.0423465
+    tilt: 0
+  }
+  samples {
+    position { x: -0.958501 y: 9.36822 z: -0.891597 }
+    radius: 0.0321554
+    tilt: 0
+  }
+  samples {
+    position { x: -1.44717 y: 9.27314 z: -1.06358 }
+    radius: 0.0219643
+    tilt: 0
+  }
+  samples {
+    position { x: -1.76777 y: 9.55277 z: -1.34312 }
+    radius: 0.0117731
+    tilt: 0
+  }
+  samples {
+    position { x: -2.18359 y: 9.71491 z: -1.51699 }
+    radius: 0.00158197
+    tilt: 0
+  }
+}
+branches {
+  id: 37
+  parent: 11
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 1.16755 y: 9.86404 z: -0.132953 }
+    radius: 0.0162928
+    tilt: 0
+  }
+  samples {
+    position { x: 1.45653 y: 10.0146 z: -0.340693 }
+    radius: 0.00873261
+    tilt: 0
+  }
+  samples {
+    position { x: 1.70166 y: 10.166 z: -0.596247 }
+    radius: 0.00117246
+    tilt: 0
+  }
+}
+branches {
+  id: 38
+  parent: 12
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.455145 y: 10.8955 z: 0.0273744 }
+    radius: 0.0360178
+    tilt: 0
+  }
+  samples {
+    position { x: -0.185383 y: 11.0795 z: -0.16802 }
+    radius: 0.0291236
+    tilt: 0
+  }
+  samples {
+    position { x: 0.0619146 y: 11.2414 z: -0.390624 }
+    radius: 0.0222294
+    tilt: 0
+  }
+  samples {
+    position { x: 0.312309 y: 11.3949 z: -0.619121 }
+    radius: 0.0153352
+    tilt: 0
+  }
+  samples {
+    position { x: 0.532049 y: 11.7169 z: -0.754145 }
+    radius: 0.00844097
+    tilt: 0
+  }
+  samples {
+    position { x: 0.675323 y: 11.9958 z: -0.971159 }
+    radius: 0.00154675
+    tilt: 0
+  }
+}
+branches {
+  id: 39
+  parent: 13
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.455894 y: 10.9188 z: 0.0322634 }
+    radius: 0.0366476
+    tilt: 0
+  }
+  samples {
+    position { x: -0.740839 y: 10.9764 z: 0.157305 }
+    radius: 0.029634
+    tilt: 0
+  }
+  samples {
+    position { x: -1.02126 y: 11.1713 z: 0.207604 }
+    radius: 0.0226204
+    tilt: 0
+  }
+  samples {
+    position { x: -1.29111 y: 11.2751 z: 0.332414 }
+    radius: 0.0156067
+    tilt: 0
+  }
+  samples {
+    position { x: -1.51563 y: 11.4155 z: 0.408586 }
+    radius: 0.00859312
+    tilt: 0
+  }
+  samples {
+    position { x: -1.68368 y: 11.6415 z: 0.563124 }
+    radius: 0.00157951
+    tilt: 0
+  }
+}
+branches {
+  id: 40
+  parent: 13
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.455394 y: 10.9191 z: 0.0324625 }
+    radius: 0.0355551
+    tilt: 0
+  }
+  samples {
+    position { x: -0.400591 y: 11.0696 z: -0.333903 }
+    radius: 0.028751
+    tilt: 0
+  }
+  samples {
+    position { x: -0.55643 y: 11.0932 z: -0.746152 }
+    radius: 0.021947
+    tilt: 0
+  }
+  samples {
+    position { x: -0.692836 y: 11.2156 z: -1.10258 }
+    radius: 0.0151429
+    tilt: 0
+  }
+  samples {
+    position { x: -0.740377 y: 11.5278 z: -1.37645 }
+    radius: 0.00833881
+    tilt: 0
+  }
+  samples {
+    position { x: -0.987241 y: 11.6633 z: -1.66535 }
+    radius: 0.00153474
+    tilt: 0
+  }
+}
+branches {
+  id: 41
+  parent: 13
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.393616 y: 11.5011 z: 0.312705 }
+    radius: 0.014388
+    tilt: 0
+  }
+  samples {
+    position { x: 0.471935 y: 11.7826 z: 0.482614 }
+    radius: 0.00792279
+    tilt: 0
+  }
+  samples {
+    position { x: 0.52473 y: 12.0746 z: 0.627829 }
+    radius: 0.00145753
+    tilt: 0
+  }
+}
+branches {
+  id: 42
+  parent: 14
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.434036 y: 12.6049 z: 0.691642 }
+    radius: 0.0050194
+    tilt: 0
+  }
+  samples {
+    position { x: -0.471515 y: 12.8065 z: 0.749333 }
+    radius: 0.00133557
+    tilt: 0
+  }
+}
+branches {
+  id: 43
+  parent: 15
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.650922 y: 12.1004 z: -0.0687445 }
+    radius: 0.0203455
+    tilt: 0
+  }
+  samples {
+    position { x: -0.808883 y: 12.1299 z: -0.186176 }
+    radius: 0.0165573
+    tilt: 0
+  }
+  samples {
+    position { x: -0.92981 y: 12.2172 z: -0.318944 }
+    radius: 0.0127692
+    tilt: 0
+  }
+  samples {
+    position { x: -1.02063 y: 12.3752 z: -0.45064 }
+    radius: 0.00898108
+    tilt: 0
+  }
+  samples {
+    position { x: -1.10582 y: 12.4983 z: -0.546138 }
+    radius: 0.00519294
+    tilt: 0
+  }
+  samples {
+    position { x: -1.18545 y: 12.6311 z: -0.651809 }
+    radius: 0.00140481
+    tilt: 0
+  }
+}
+branches {
+  id: 44
+  parent: 15
+  level: 1
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.650571 y: 12.1008 z: -0.0684321 }
+    radius: 0.0192467
+    tilt: 0
+  }
+  samples {
+    position { x: -0.527169 y: 12.2022 z: -0.204751 }
+    radius: 0.0156642
+    tilt: 0
+  }
+  samples {
+    position { x: -0.398007 y: 12.3779 z: -0.27707 }
+    radius: 0.0120817
+    tilt: 0
+  }
+  samples {
+    position { x: -0.293039 y: 12.4863 z: -0.419994 }
+    radius: 0.00849918
+    tilt: 0
+  }
+  samples {
+    position { x: -0.214514 y: 12.5526 z: -0.615251 }
+    radius: 0.00491668
+    tilt: 0
+  }
+  samples {
+    position { x: -0.135414 y: 12.6738 z: -0.766406 }
+    radius: 0.00133419
+    tilt: 0
+  }
+}
+branches {
+  id: 45
+  parent: 17
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.58178 y: 2.28529 z: 0.602344 }
+    radius: 0.0506746
+    tilt: 0
+  }
+  samples {
+    position { x: 0.923031 y: 2.1757 z: 1.18149 }
+    radius: 0.0383294
+    tilt: 0
+  }
+  samples {
+    position { x: 1.5103 y: 1.86554 z: 1.57035 }
+    radius: 0.0259841
+    tilt: 0
+  }
+  samples {
+    position { x: 1.67169 y: 2.2042 z: 2.30985 }
+    radius: 0.0136388
+    tilt: 0
+  }
+  samples {
+    position { x: 2.12954 y: 2.24688 z: 2.81189 }
+    radius: 0.00129354
+    tilt: 0
+  }
+}
+branches {
+  id: 46
+  parent: 18
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.27997 y: 2.26651 z: 1.27311 }
+    radius: 0.0285077
+    tilt: 0
+  }
+  samples {
+    position { x: -1.55239 y: 2.73687 z: 1.78243 }
+    radius: 0.0149633
+    tilt: 0
+  }
+  samples {
+    position { x: -1.92697 y: 2.86305 z: 2.38082 }
+    radius: 0.00141893
+    tilt: 0
+  }
+}
+branches {
+  id: 47
+  parent: 20
+  level: 3
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 1.65374 y: 5.15284 z: -0.689059 }
+    radius: 0.024099
+    tilt: 0
+  }
+  samples {
+    position { x: 2.3615 y: 5.43894 z: -0.827227 }
+    radius: 0.0126568
+    tilt: 0
+  }
+  samples {
+    position { x: 3.01312 y: 5.75861 z: -1.10121 }
+    radius: 0.00121469
+    tilt: 0
+  }
+}
+branches {
+  id: 48
+  parent: 23
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.476278 y: 4.87759 z: 1.19821 }
+    radius: 0.0258186
+    tilt: 0
+  }
+  samples {
+    position { x: 0.205121 y: 5.18741 z: 1.6973 }
+    radius: 0.0135607
+    tilt: 0
+  }
+  samples {
+    position { x: 0.227248 y: 5.24271 z: 2.37056 }
+    radius: 0.00130277
+    tilt: 0
+  }
+}
+branches {
+  id: 49
+  parent: 27
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.949014 y: 7.34693 z: -1.75994 }
+    radius: 0.0488892
+    tilt: 0
+  }
+  samples {
+    position { x: -1.32712 y: 7.50072 z: -2.28417 }
+    radius: 0.0370268
+    tilt: 0
+  }
+  samples {
+    position { x: -1.63938 y: 7.78712 z: -2.83895 }
+    radius: 0.0251643
+    tilt: 0
+  }
+  samples {
+    position { x: -2.10214 y: 7.80682 z: -3.23894 }
+    radius: 0.0133019
+    tilt: 0
+  }
+  samples {
+    position { x: -2.57884 y: 8.20982 z: -3.48326 }
+    radius: 0.00143943
+    tilt: 0
+  }
+}
+branches {
+  id: 50
+  parent: 27
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.19144 y: 7.80462 z: -2.85456 }
+    radius: 0.0251643
+    tilt: 0
+  }
+  samples {
+    position { x: -1.44142 y: 8.25822 z: -3.2869 }
+    radius: 0.0133019
+    tilt: 0
+  }
+  samples {
+    position { x: -2.05204 y: 8.43345 z: -3.59629 }
+    radius: 0.00143943
+    tilt: 0
+  }
+}
+branches {
+  id: 51
+  parent: 32
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 1.02364 y: 10.4554 z: 1.11849 }
+    radius: 0.0112048
+    tilt: 0
+  }
+  samples {
+    position { x: 1.53197 y: 10.6134 z: 1.2153 }
+    radius: 0.00150115
+    tilt: 0
+  }
+}
+branches {
+  id: 52
+  parent: 33
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.42238 y: 9.85071 z: 0.831806 }
+    radius: 0.0202047
+    tilt: 0
+  }
+  samples {
+    position { x: -1.73512 y: 10.2239 z: 0.888046 }
+    radius: 0.0108284
+    tilt: 0
+  }
+  samples {
+    position { x: -2.00881 y: 10.4906 z: 1.21372 }
+    radius: 0.001452
+    tilt: 0
+  }
+}
+branches {
+  id: 53
+  parent: 36
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.958501 y: 9.36822 z: -0.891597 }
+    radius: 0.028154
+    tilt: 0
+  }
+  samples {
+    position { x: -1.08137 y: 9.51673 z: -1.30493 }
+    radius: 0.019231
+    tilt: 0
+  }
+  samples {
+    position { x: -1.36676 y: 9.58143 z: -1.68808 }
+    radius: 0.0103081
+    tilt: 0
+  }
+  samples {
+    position { x: -1.40853 y: 10.0049 z: -1.96682 }
+    radius: 0.00138511
+    tilt: 0
+  }
+}
+branches {
+  id: 54
+  parent: 38
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: 0.312309 y: 11.3949 z: -0.619121 }
+    radius: 0.012989
+    tilt: 0
+  }
+  samples {
+    position { x: 0.387362 y: 11.6846 z: -0.530663 }
+    radius: 0.00714958
+    tilt: 0
+  }
+  samples {
+    position { x: 0.651552 y: 11.8817 z: -0.573978 }
+    radius: 0.00131011
+    tilt: 0
+  }
+}
+branches {
+  id: 55
+  parent: 39
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.51563 y: 11.4155 z: 0.408586 }
+    radius: 0.00716675
+    tilt: 0
+  }
+  samples {
+    position { x: -1.83788 y: 11.4812 z: 0.322446 }
+    radius: 0.00131732
+    tilt: 0
+  }
+}
+branches {
+  id: 56
+  parent: 40
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.400591 y: 11.0696 z: -0.333903 }
+    radius: 0.0247037
+    tilt: 0
+  }
+  samples {
+    position { x: -0.27155 y: 11.2077 z: -0.610053 }
+    radius: 0.0188574
+    tilt: 0
+  }
+  samples {
+    position { x: -0.156607 y: 11.4714 z: -0.776033 }
+    radius: 0.0130112
+    tilt: 0
+  }
+  samples {
+    position { x: 0.00855834 y: 11.7637 z: -0.876125 }
+    radius: 0.00716494
+    tilt: 0
+  }
+  samples {
+    position { x: 0.115771 y: 11.9069 z: -1.16162 }
+    radius: 0.00131869
+    tilt: 0
+  }
+}
+branches {
+  id: 57
+  parent: 43
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.650922 y: 12.1004 z: -0.0687445 }
+    radius: 0.0193282
+    tilt: 0
+  }
+  samples {
+    position { x: -0.506662 y: 12.2264 z: -0.0863161 }
+    radius: 0.015728
+    tilt: 0
+  }
+  samples {
+    position { x: -0.349782 y: 12.3071 z: -0.162878 }
+    radius: 0.0121277
+    tilt: 0
+  }
+  samples {
+    position { x: -0.21693 y: 12.417 z: -0.235229 }
+    radius: 0.00852745
+    tilt: 0
+  }
+  samples {
+    position { x: -0.156028 y: 12.6511 z: -0.167649 }
+    radius: 0.0049272
+    tilt: 0
+  }
+  samples {
+    position { x: -0.0636994 y: 12.8057 z: -0.231046 }
+    radius: 0.00132695
+    tilt: 0
+  }
+}
+branches {
+  id: 58
+  parent: 44
+  level: 2
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.293039 y: 12.4863 z: -0.419994 }
+    radius: 0.00807422
+    tilt: 0
+  }
+  samples {
+    position { x: -0.147232 y: 12.6517 z: -0.378468 }
+    radius: 0.00467085
+    tilt: 0
+  }
+  samples {
+    position { x: 0.00171654 y: 12.7881 z: -0.281074 }
+    radius: 0.00126748
+    tilt: 0
+  }
+}
+branches {
+  id: 59
+  parent: 46
+  level: 3
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -1.55239 y: 2.73687 z: 1.78243 }
+    radius: 0.0140406
+    tilt: 0
+  }
+  samples {
+    position { x: -1.34705 y: 3.23082 z: 2.37028 }
+    radius: 0.00133143
+    tilt: 0
+  }
+}
+branches {
+  id: 60
+  parent: 49
+  level: 3
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -2.10214 y: 7.80682 z: -3.23894 }
+    radius: 0.0126368
+    tilt: 0
+  }
+  samples {
+    position { x: -2.23986 y: 7.94199 z: -3.84918 }
+    radius: 0.00136746
+    tilt: 0
+  }
+}
+branches {
+  id: 61
+  parent: 58
+  level: 3
+  ring_count: 3
+  seam_index: 0
+  samples {
+    position { x: -0.147232 y: 12.6517 z: -0.378468 }
+    radius: 0.00443731
+    tilt: 0
+  }
+  samples {
+    position { x: -0.0686168 y: 12.8599 z: -0.473719 }
+    radius: 0.0012041
+    tilt: 0
+  }
+}
+leaf_types {
+  type: 0
+  description: "松针簇"
+  anchor_mode: "bottom_left"
+  bend {
+    along: -0.08
+    across: 0.05
+    crease: 0.04
+  }
+}
+leaf_types {
+  type: 1
+  description: "松针簇（镜像手性：素材左右翻转后使用，根部在格子 bottom_right 角）"
+  anchor_mode: "bottom_right"
+  bend {
+    along: -0.08
+    across: 0.05
+    crease: 0.04
+  }
+}
+cards {
+  anchor { x: 0.00836333 y: 1.59161 z: 0.0167267 }
+  up { x: -0.742311 y: 2.1055e-07 z: -0.670055 }
+  normal { x: 0.668057 y: 0.0771746 z: -0.740097 }
+  height: 2.26472
+  width: 1.01912
+  type: 1
+  branch: 0
+  s: 0.125
+}
+cards {
+  anchor { x: -0.383712 y: 2.21415 z: -1.23981 }
+  up { x: 0.468332 y: 0.869808 z: 0.155241 }
+  normal { x: 0.821133 y: -0.363608 z: -0.43992 }
+  height: 2.29051
+  width: 1.03073
+  type: 1
+  branch: 3
+  s: 0.2
+}
+cards {
+  anchor { x: 1.19591 y: 2.24237 z: 0.78655 }
+  up { x: -0.061364 y: 0.952824 z: -0.297257 }
+  normal { x: 0.326844 y: -0.262215 z: -0.907974 }
+  height: 2.49162
+  width: 1.12123
+  type: 0
+  branch: 17
+  s: 0.4
+}
+cards {
+  anchor { x: -0.383712 y: 2.21415 z: -1.23981 }
+  up { x: 0.35212 y: -0.805788 z: 0.476149 }
+  normal { x: 0.90014 y: 0.152166 z: -0.408158 }
+  height: 2.34154
+  width: 1.05369
+  type: 0
+  branch: 3
+  s: 0.2
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: 0.518562 y: -0.60825 z: 0.600936 }
+  normal { x: 0.404746 y: -0.444468 z: -0.799143 }
+  height: 2.29024
+  width: 1.03061
+  type: 1
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: 0.581876 y: 0.545696 z: 0.603022 }
+  normal { x: 0.434891 y: 0.417779 z: -0.797704 }
+  height: 2.21339
+  width: 0.996024
+  type: 0
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: 1.38748 y: 2.1349 z: -1.46059 }
+  up { x: -0.192043 y: -0.954071 z: -0.22993 }
+  normal { x: 0.972381 y: -0.153319 z: -0.175978 }
+  height: 2.30006
+  width: 1.03503
+  type: 0
+  branch: 1
+  s: 0.6
+}
+cards {
+  anchor { x: 1.38748 y: 2.1349 z: -1.46059 }
+  up { x: 0.452956 y: -0.78411 z: 0.424267 }
+  normal { x: 0.255637 y: -0.341671 z: -0.904384 }
+  height: 1.95391
+  width: 0.879261
+  type: 1
+  branch: 1
+  s: 0.6
+}
+cards {
+  anchor { x: 1.38748 y: 2.1349 z: -1.46059 }
+  up { x: 0.594119 y: -0.557505 z: 0.579836 }
+  normal { x: 0.788607 y: 0.545746 z: -0.283304 }
+  height: 2.06421
+  width: 0.928894
+  type: 0
+  branch: 1
+  s: 0.6
+}
+cards {
+  anchor { x: 1.9557 y: 2.63073 z: -1.80311 }
+  up { x: -0.708291 y: 0.0263346 z: -0.705429 }
+  normal { x: 0.539142 y: -0.624891 z: -0.564657 }
+  height: 2.29943
+  width: 1.03475
+  type: 0
+  branch: 1
+  s: 0.8
+}
+cards {
+  anchor { x: 1.38748 y: 2.1349 z: -1.46059 }
+  up { x: -0.450924 y: -0.634172 z: -0.628087 }
+  normal { x: 0.111562 y: 0.658126 z: -0.744596 }
+  height: 2.14132
+  width: 0.963593
+  type: 1
+  branch: 1
+  s: 0.6
+}
+cards {
+  anchor { x: 1.9557 y: 2.63073 z: -1.80311 }
+  up { x: -0.207601 y: -0.781708 z: -0.588077 }
+  normal { x: 0.975818 y: -0.207539 z: -0.0686057 }
+  height: 2.24598
+  width: 1.01069
+  type: 0
+  branch: 1
+  s: 0.8
+}
+cards {
+  anchor { x: 1.9557 y: 2.63073 z: -1.80311 }
+  up { x: 0.589684 y: -0.80396 z: 0.0769474 }
+  normal { x: 0.108402 y: -0.0156243 z: -0.993984 }
+  height: 1.95371
+  width: 0.879168
+  type: 1
+  branch: 1
+  s: 0.8
+}
+cards {
+  anchor { x: 1.9557 y: 2.63073 z: -1.80311 }
+  up { x: -0.640061 y: 0.0380639 z: -0.767381 }
+  normal { x: 0.0750917 y: 0.99709 z: -0.0131749 }
+  height: 1.89266
+  width: 0.851696
+  type: 1
+  branch: 1
+  s: 0.8
+}
+cards {
+  anchor { x: 1.9557 y: 2.63073 z: -1.80311 }
+  up { x: -0.467021 y: -0.292263 z: -0.83455 }
+  normal { x: 0.86143 y: -0.363393 z: -0.354801 }
+  height: 2.16056
+  width: 0.972252
+  type: 0
+  branch: 1
+  s: 0.8
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: 0.150623 y: -0.869479 z: -0.470445 }
+  normal { x: -0.311586 y: 0.409866 z: -0.857277 }
+  height: 1.83586
+  width: 0.826135
+  type: 1
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: 0.319347 y: -0.905665 z: -0.278907 }
+  normal { x: 0.924118 y: 0.232462 z: 0.303259 }
+  height: 1.79109
+  width: 0.805991
+  type: 0
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: 0.751825 y: -0.572104 z: 0.327805 }
+  normal { x: 0.0268654 y: -0.470163 z: -0.882171 }
+  height: 1.7485
+  width: 0.786825
+  type: 1
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: -0.559509 y: -0.399783 z: -0.726033 }
+  normal { x: -0.289044 y: 0.915102 z: -0.281144 }
+  height: 1.64521
+  width: 0.740345
+  type: 1
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: -0.388507 y: -0.579748 z: -0.716209 }
+  normal { x: 0.854779 y: -0.517023 z: -0.04516 }
+  height: 1.6704
+  width: 0.751679
+  type: 0
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: -0.383712 y: 2.21415 z: -1.23981 }
+  up { x: -0.212556 y: 0.962959 z: 0.165923 }
+  normal { x: -0.882746 y: -0.262047 z: 0.389987 }
+  height: 2.38493
+  width: 1.07322
+  type: 0
+  branch: 3
+  s: 0.2
+}
+cards {
+  anchor { x: 0.00836333 y: 1.59161 z: 0.0167267 }
+  up { x: 0.039947 y: 0.235371 z: 0.971084 }
+  normal { x: -0.992502 y: 0.121701 z: 0.0113303 }
+  height: 2.52998
+  width: 1.13849
+  type: 1
+  branch: 0
+  s: 0.125
+}
+cards {
+  anchor { x: -1.0485 y: 2.37817 z: 0.675608 }
+  up { x: -0.128991 y: 0.236971 z: -0.962916 }
+  normal { x: -0.83905 y: -0.543634 z: -0.0213889 }
+  height: 2.48619
+  width: 1.11879
+  type: 1
+  branch: 18
+  s: 0.4
+}
+cards {
+  anchor { x: -1.52249 y: 2.18217 z: 0.113218 }
+  up { x: 0.137258 y: -0.74469 z: 0.653143 }
+  normal { x: -0.899246 y: 0.182812 z: 0.397412 }
+  height: 2.16082
+  width: 0.972368
+  type: 1
+  branch: 2
+  s: 0.4
+}
+cards {
+  anchor { x: -1.27997 y: 2.26651 z: 1.27311 }
+  up { x: 0.0443947 y: -0.856738 z: -0.513838 }
+  normal { x: -0.910664 y: 0.176774 z: -0.37342 }
+  height: 2.01746
+  width: 0.907859
+  type: 0
+  branch: 18
+  s: 0.6
+}
+cards {
+  anchor { x: -1.52249 y: 2.18217 z: 0.113218 }
+  up { x: -0.0067567 y: -0.699545 z: -0.714557 }
+  normal { x: -0.826682 y: -0.39814 z: 0.397593 }
+  height: 2.21086
+  width: 0.994887
+  type: 1
+  branch: 2
+  s: 0.4
+}
+cards {
+  anchor { x: -1.52249 y: 2.18217 z: 0.113218 }
+  up { x: 0.06033 y: -0.208376 z: 0.976186 }
+  normal { x: -0.810852 y: 0.560116 z: 0.169674 }
+  height: 2.21425
+  width: 0.99641
+  type: 1
+  branch: 2
+  s: 0.4
+}
+cards {
+  anchor { x: -1.27997 y: 2.26651 z: 1.27311 }
+  up { x: -0.00903936 y: 0.929622 z: -0.368402 }
+  normal { x: -0.861419 y: -0.194335 z: -0.469246 }
+  height: 2.02311
+  width: 0.910401
+  type: 1
+  branch: 18
+  s: 0.6
+}
+cards {
+  anchor { x: -2.33794 y: 2.2597 z: 0.11794 }
+  up { x: -0.146285 y: -0.666806 z: -0.730732 }
+  normal { x: -0.712484 y: -0.441428 z: 0.545443 }
+  height: 1.94812
+  width: 0.876656
+  type: 1
+  branch: 2
+  s: 0.6
+}
+cards {
+  anchor { x: -2.33794 y: 2.2597 z: 0.11794 }
+  up { x: 0.201068 y: 0.449575 z: 0.870319 }
+  normal { x: -0.726199 y: 0.664686 z: -0.17558 }
+  height: 1.93767
+  width: 0.871951
+  type: 1
+  branch: 2
+  s: 0.6
+}
+cards {
+  anchor { x: -2.33794 y: 2.2597 z: 0.11794 }
+  up { x: 0.189829 y: 0.148792 z: 0.970477 }
+  normal { x: -0.771678 y: -0.588513 z: 0.241173 }
+  height: 2.15674
+  width: 0.970533
+  type: 0
+  branch: 2
+  s: 0.6
+}
+cards {
+  anchor { x: -2.33794 y: 2.2597 z: 0.11794 }
+  up { x: 0.112637 y: -0.0728896 z: 0.990959 }
+  normal { x: -0.487704 y: 0.864854 z: 0.119049 }
+  height: 1.86483
+  width: 0.839172
+  type: 1
+  branch: 2
+  s: 0.6
+}
+cards {
+  anchor { x: -3.12938 y: 2.50319 z: 0.0625867 }
+  up { x: -0.100082 y: -0.590089 z: 0.801111 }
+  normal { x: -0.819962 y: -0.40716 z: -0.402347 }
+  height: 2.13517
+  width: 0.960825
+  type: 0
+  branch: 2
+  s: 0.8
+}
+cards {
+  anchor { x: -3.12938 y: 2.50319 z: 0.0625867 }
+  up { x: -0.346968 y: -0.898294 z: -0.269594 }
+  normal { x: -0.579255 y: -0.0208213 z: 0.81488 }
+  height: 1.8325
+  width: 0.824624
+  type: 1
+  branch: 2
+  s: 0.8
+}
+cards {
+  anchor { x: -3.12938 y: 2.50319 z: 0.0625867 }
+  up { x: 0.159936 y: 0.176141 z: 0.971285 }
+  normal { x: -0.237791 y: 0.961851 z: -0.135274 }
+  height: 2.12542
+  width: 0.956437
+  type: 1
+  branch: 2
+  s: 0.8
+}
+cards {
+  anchor { x: -3.12938 y: 2.50319 z: 0.0625867 }
+  up { x: 0.0575258 y: -0.199425 z: 0.978223 }
+  normal { x: -0.787952 y: -0.610754 z: -0.0781747 }
+  height: 2.13232
+  width: 0.959545
+  type: 0
+  branch: 2
+  s: 0.8
+}
+cards {
+  anchor { x: -3.90318 y: 2.78695 z: 0.048444 }
+  up { x: -0.331354 y: -0.922576 z: 0.197633 }
+  normal { x: -0.251436 y: 0.288235 z: 0.923959 }
+  height: 1.83665
+  width: 0.826493
+  type: 1
+  branch: 2
+  s: 1
+}
+cards {
+  anchor { x: -3.90318 y: 2.78695 z: 0.048444 }
+  up { x: 0.40852 y: 0.783661 z: 0.46796 }
+  normal { x: -0.350846 y: 0.608125 z: -0.712103 }
+  height: 1.81084
+  width: 0.814876
+  type: 1
+  branch: 2
+  s: 1
+}
+cards {
+  anchor { x: -3.90318 y: 2.78695 z: 0.048444 }
+  up { x: 0.125247 y: -0.133989 z: 0.983036 }
+  normal { x: -0.715143 y: -0.698966 z: -0.00415516 }
+  height: 1.73371
+  width: 0.780171
+  type: 0
+  branch: 2
+  s: 1
+}
+cards {
+  anchor { x: -3.90318 y: 2.78695 z: 0.048444 }
+  up { x: 0.0224968 y: -0.341805 z: 0.939502 }
+  normal { x: 0.0615039 y: 0.938433 z: 0.339943 }
+  height: 1.64675
+  width: 0.741037
+  type: 1
+  branch: 2
+  s: 1
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: 0.143432 y: 0.967879 z: 0.206488 }
+  normal { x: 0.476316 y: -0.250403 z: 0.842865 }
+  height: 2.26238
+  width: 1.01807
+  type: 1
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: 0.58178 y: 2.28529 z: 0.602344 }
+  up { x: -0.495671 y: -0.482597 z: 0.722087 }
+  normal { x: 0.852536 y: -0.429083 z: 0.298446 }
+  height: 2.05832
+  width: 0.926242
+  type: 1
+  branch: 17
+  s: 0.2
+}
+cards {
+  anchor { x: 1.5103 y: 1.86554 z: 1.57035 }
+  up { x: 0.363842 y: 0.194067 z: -0.91102 }
+  normal { x: 0.677691 y: 0.615839 z: 0.401843 }
+  height: 2.47215
+  width: 1.11247
+  type: 1
+  branch: 45
+  s: 0.5
+}
+cards {
+  anchor { x: 1.80319 y: 2.23265 z: 0.988058 }
+  up { x: 0.365647 y: -0.752292 z: -0.54805 }
+  normal { x: 0.628444 y: -0.23479 z: 0.741574 }
+  height: 2.43312
+  width: 1.09491
+  type: 0
+  branch: 17
+  s: 0.6
+}
+cards {
+  anchor { x: 1.5103 y: 1.86554 z: 1.57035 }
+  up { x: 0.226322 y: -0.884493 z: -0.407984 }
+  normal { x: 0.912712 y: 0.338859 z: -0.228322 }
+  height: 2.05292
+  width: 0.923815
+  type: 1
+  branch: 45
+  s: 0.5
+}
+cards {
+  anchor { x: 1.80319 y: 2.23265 z: 0.988058 }
+  up { x: -0.0533805 y: -0.846995 z: 0.528913 }
+  normal { x: 0.300366 y: 0.49152 z: 0.817428 }
+  height: 2.0653
+  width: 0.929387
+  type: 0
+  branch: 17
+  s: 0.6
+}
+cards {
+  anchor { x: 2.25545 y: 2.69735 z: 1.37321 }
+  up { x: -0.101756 y: -0.623776 z: 0.774951 }
+  normal { x: 0.98051 y: -0.194493 z: -0.0278056 }
+  height: 1.92774
+  width: 0.867482
+  type: 1
+  branch: 17
+  s: 0.8
+}
+cards {
+  anchor { x: 2.79763 y: 3.00409 z: 1.55629 }
+  up { x: -0.361999 y: -0.207486 z: 0.908794 }
+  normal { x: -0.0416133 y: 0.977539 z: 0.206605 }
+  height: 1.89076
+  width: 0.850844
+  type: 0
+  branch: 17
+  s: 1
+}
+cards {
+  anchor { x: 2.79763 y: 3.00409 z: 1.55629 }
+  up { x: 0.548506 y: -0.743981 z: -0.381618 }
+  normal { x: 0.378208 y: -0.186289 z: 0.906783 }
+  height: 2.03827
+  width: 0.917221
+  type: 0
+  branch: 17
+  s: 1
+}
+cards {
+  anchor { x: 2.79763 y: 3.00409 z: 1.55629 }
+  up { x: 0.461103 y: -0.886771 z: 0.0319679 }
+  normal { x: 0.567967 y: 0.267268 z: -0.778448 }
+  height: 1.83855
+  width: 0.827349
+  type: 1
+  branch: 17
+  s: 1
+}
+cards {
+  anchor { x: 2.79763 y: 3.00409 z: 1.55629 }
+  up { x: 0.198833 y: -0.744647 z: 0.637155 }
+  normal { x: -0.177272 y: 0.612084 z: 0.770667 }
+  height: 1.77507
+  width: 0.798781
+  type: 0
+  branch: 17
+  s: 1
+}
+cards {
+  anchor { x: 0.923031 y: 2.1757 z: 1.18149 }
+  up { x: -0.865119 y: -0.284123 z: 0.413333 }
+  normal { x: 0.494711 y: -0.619159 z: 0.609839 }
+  height: 2.41508
+  width: 1.08679
+  type: 1
+  branch: 45
+  s: 0.25
+}
+cards {
+  anchor { x: 1.5103 y: 1.86554 z: 1.57035 }
+  up { x: -0.746469 y: 0.398001 z: 0.533272 }
+  normal { x: 0.664806 y: 0.411667 z: 0.623348 }
+  height: 2.2312
+  width: 1.00404
+  type: 0
+  branch: 45
+  s: 0.5
+}
+cards {
+  anchor { x: 1.80319 y: 2.23265 z: 0.988058 }
+  up { x: 0.0113556 y: -0.989332 z: -0.145233 }
+  normal { x: -0.0055414 y: -0.145302 z: 0.989372 }
+  height: 2.30512
+  width: 1.0373
+  type: 0
+  branch: 17
+  s: 0.6
+}
+cards {
+  anchor { x: 1.67169 y: 2.2042 z: 2.30985 }
+  up { x: -0.16511 y: -0.982093 z: 0.0907265 }
+  normal { x: 0.982103 y: -0.155262 z: 0.106621 }
+  height: 2.30327
+  width: 1.03647
+  type: 1
+  branch: 45
+  s: 0.75
+}
+cards {
+  anchor { x: 1.67169 y: 2.2042 z: 2.30985 }
+  up { x: -0.823537 y: -0.301439 z: 0.480543 }
+  normal { x: 0.0850221 y: 0.771966 z: 0.629953 }
+  height: 1.85733
+  width: 0.8358
+  type: 0
+  branch: 45
+  s: 0.75
+}
+cards {
+  anchor { x: 2.12954 y: 2.24688 z: 2.81189 }
+  up { x: -0.892227 y: 0.078013 z: 0.444797 }
+  normal { x: 0.249383 y: -0.736034 z: 0.629334 }
+  height: 1.82337
+  width: 0.820515
+  type: 1
+  branch: 45
+  s: 1
+}
+cards {
+  anchor { x: 2.12954 y: 2.24688 z: 2.81189 }
+  up { x: 0.4255 y: -0.87237 z: -0.240667 }
+  normal { x: 0.884292 y: 0.45732 z: -0.0942629 }
+  height: 2.12827
+  width: 0.957723
+  type: 1
+  branch: 45
+  s: 1
+}
+cards {
+  anchor { x: 2.12954 y: 2.24688 z: 2.81189 }
+  up { x: -0.428439 y: -0.760214 z: 0.48838 }
+  normal { x: -0.225397 y: 0.613332 z: 0.756981 }
+  height: 2.02042
+  width: 0.90919
+  type: 0
+  branch: 45
+  s: 1
+}
+cards {
+  anchor { x: 2.12954 y: 2.24688 z: 2.81189 }
+  up { x: 0.741275 y: 0.029312 z: -0.670561 }
+  normal { x: 0.292919 y: -0.913017 z: 0.283899 }
+  height: 1.59002
+  width: 0.715507
+  type: 0
+  branch: 45
+  s: 1
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: -0.394205 y: -0.873549 z: 0.285507 }
+  normal { x: -0.451862 y: -0.0862881 z: -0.887905 }
+  height: 2.5292
+  width: 1.13814
+  type: 1
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: -1.52249 y: 2.18217 z: 0.113218 }
+  up { x: 0.062417 y: 0.973011 z: -0.222156 }
+  normal { x: 0.208618 y: -0.230393 z: -0.950472 }
+  height: 2.42849
+  width: 1.09282
+  type: 1
+  branch: 2
+  s: 0.4
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: -0.146597 y: 0.982104 z: -0.118243 }
+  normal { x: -0.557137 y: -0.180746 z: -0.810512 }
+  height: 2.43355
+  width: 1.0951
+  type: 0
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: -0.383712 y: 2.21415 z: -1.23981 }
+  up { x: 0.746224 y: -0.664301 z: -0.0430569 }
+  normal { x: 0.210773 y: 0.297127 z: -0.931284 }
+  height: 2.27181
+  width: 1.02231
+  type: 0
+  branch: 3
+  s: 0.2
+}
+cards {
+  anchor { x: -0.383712 y: 2.21415 z: -1.23981 }
+  up { x: 0.89805 y: 0.425638 z: -0.111074 }
+  normal { x: 0.130179 y: -0.498345 z: -0.85715 }
+  height: 2.02471
+  width: 0.911118
+  type: 1
+  branch: 3
+  s: 0.2
+}
+cards {
+  anchor { x: 0.879195 y: 2.03601 z: -0.98708 }
+  up { x: -0.315285 y: -0.946618 z: 0.0671519 }
+  normal { x: -0.670154 y: 0.171985 z: -0.722021 }
+  height: 2.08269
+  width: 0.937211
+  type: 1
+  branch: 1
+  s: 0.4
+}
+cards {
+  anchor { x: -0.548932 y: 2.17948 z: -2.1187 }
+  up { x: 0.313932 y: -0.949419 z: 0.00713872 }
+  normal { x: 0.404722 y: 0.127015 z: -0.905576 }
+  height: 2.07261
+  width: 0.932675
+  type: 0
+  branch: 3
+  s: 0.4
+}
+cards {
+  anchor { x: -0.548932 y: 2.17948 z: -2.1187 }
+  up { x: 0.844268 y: -0.501406 z: -0.18922 }
+  normal { x: -0.507955 y: -0.636107 z: -0.580818 }
+  height: 2.02865
+  width: 0.912895
+  type: 1
+  branch: 3
+  s: 0.4
+}
+cards {
+  anchor { x: -0.777465 y: 2.16826 z: -2.98104 }
+  up { x: 0.906527 y: 0.393424 z: -0.153059 }
+  normal { x: -0.405074 y: 0.708597 z: -0.577759 }
+  height: 2.30035
+  width: 1.03516
+  type: 0
+  branch: 3
+  s: 0.6
+}
+cards {
+  anchor { x: -0.777465 y: 2.16826 z: -2.98104 }
+  up { x: 0.507865 y: 0.837316 z: 0.20242 }
+  normal { x: 0.644963 y: -0.213827 z: -0.73369 }
+  height: 2.20102
+  width: 0.99046
+  type: 1
+  branch: 3
+  s: 0.6
+}
+cards {
+  anchor { x: -0.777465 y: 2.16826 z: -2.98104 }
+  up { x: 0.194284 y: 0.898655 z: 0.393284 }
+  normal { x: -0.706047 y: 0.406437 z: -0.579919 }
+  height: 1.8858
+  width: 0.848611
+  type: 0
+  branch: 3
+  s: 0.6
+}
+cards {
+  anchor { x: -0.777465 y: 2.16826 z: -2.98104 }
+  up { x: -0.10874 y: 0.879061 z: 0.464142 }
+  normal { x: 0.784547 y: 0.362622 z: -0.502982 }
+  height: 1.84225
+  width: 0.82901
+  type: 1
+  branch: 3
+  s: 0.6
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: -0.135275 y: 0.830766 z: 0.539933 }
+  normal { x: -0.987935 y: -0.0716264 z: -0.13731 }
+  height: 1.91287
+  width: 0.860792
+  type: 0
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: -0.62995 y: 0.0409297 z: 0.775556 }
+  normal { x: 0.0127332 y: 0.99902 z: -0.0423803 }
+  height: 1.80346
+  width: 0.811555
+  type: 1
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: -0.651898 y: -0.39618 z: 0.646584 }
+  normal { x: -0.370586 y: -0.577466 z: -0.727461 }
+  height: 1.74154
+  width: 0.783691
+  type: 0
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: -0.620013 y: -0.77598 z: 0.115929 }
+  normal { x: -0.620912 y: 0.575609 z: 0.532111 }
+  height: 1.77965
+  width: 0.800844
+  type: 1
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: 0.245651 y: 0.949464 z: 0.195379 }
+  normal { x: 0.900914 y: -0.149228 z: -0.407535 }
+  height: 1.92693
+  width: 0.867117
+  type: 1
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: 0.486422 y: -0.870686 z: -0.0728024 }
+  normal { x: -0.7025 y: -0.340193 z: -0.62511 }
+  height: 2.09394
+  width: 0.942273
+  type: 1
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: 0.751795 y: -0.659393 z: 0.00216965 }
+  normal { x: 0.648017 y: 0.738208 z: -0.18741 }
+  height: 1.81173
+  width: 0.815277
+  type: 0
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: -0.860094 y: 2.44981 z: -3.79709 }
+  up { x: 0.989299 y: -0.0197652 z: 0.144554 }
+  normal { x: 0.0539054 y: -0.871159 z: -0.488033 }
+  height: 1.61393
+  width: 0.726268
+  type: 1
+  branch: 3
+  s: 0.8
+}
+cards {
+  anchor { x: 0.00836333 y: 1.59161 z: 0.0167267 }
+  up { x: -0.770573 y: 0.549145 z: -0.323508 }
+  normal { x: -0.349644 y: 0.0601602 z: 0.934949 }
+  height: 2.54598
+  width: 1.14569
+  type: 0
+  branch: 0
+  s: 0.125
+}
+cards {
+  anchor { x: 0.923031 y: 2.1757 z: 1.18149 }
+  up { x: -0.209935 y: 0.976811 z: 0.0420515 }
+  normal { x: -0.829253 y: -0.200677 z: 0.521601 }
+  height: 2.05676
+  width: 0.925543
+  type: 1
+  branch: 45
+  s: 0.25
+}
+cards {
+  anchor { x: -1.52249 y: 2.18217 z: 0.113218 }
+  up { x: 0.191732 y: 0.953191 z: 0.233806 }
+  normal { x: -0.158208 y: -0.205093 z: 0.965871 }
+  height: 2.18737
+  width: 0.984318
+  type: 0
+  branch: 2
+  s: 0.4
+}
+cards {
+  anchor { x: -1.27997 y: 2.26651 z: 1.27311 }
+  up { x: -0.495438 y: -0.784322 z: -0.373337 }
+  normal { x: -0.847694 y: 0.342735 z: 0.404904 }
+  height: 2.12957
+  width: 0.958308
+  type: 0
+  branch: 18
+  s: 0.6
+}
+cards {
+  anchor { x: -1.55239 y: 2.73687 z: 1.78243 }
+  up { x: -0.691994 y: -0.615587 z: -0.37709 }
+  normal { x: -0.0835731 y: -0.45053 z: 0.888841 }
+  height: 2.17513
+  width: 0.978809
+  type: 1
+  branch: 46
+  s: 0.5
+}
+cards {
+  anchor { x: -1.76265 y: 2.35123 z: 1.67339 }
+  up { x: 0.796219 y: -0.365847 z: 0.481862 }
+  normal { x: -0.103188 y: 0.702668 z: 0.703996 }
+  height: 2.06527
+  width: 0.929372
+  type: 1
+  branch: 18
+  s: 0.8
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.484686 y: -0.648623 z: 0.586829 }
+  normal { x: -0.868211 y: -0.438254 z: 0.232688 }
+  height: 2.15399
+  width: 0.969296
+  type: 0
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -1.76265 y: 2.35123 z: 1.67339 }
+  up { x: 0.0720409 y: -0.854712 z: 0.514078 }
+  normal { x: -0.0842661 y: 0.508359 z: 0.857012 }
+  height: 1.90429
+  width: 0.856931
+  type: 1
+  branch: 18
+  s: 0.8
+}
+cards {
+  anchor { x: -2.20178 y: 2.52077 z: 2.18698 }
+  up { x: -0.39085 y: -0.903988 z: -0.173326 }
+  normal { x: -0.852402 y: 0.426537 z: -0.302453 }
+  height: 1.90274
+  width: 0.856232
+  type: 0
+  branch: 18
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: -0.755779 y: -0.425015 z: -0.498157 }
+  normal { x: -0.0744948 y: -0.700002 z: 0.710245 }
+  height: 1.96918
+  width: 0.886133
+  type: 1
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -2.20178 y: 2.52077 z: 2.18698 }
+  up { x: 0.722949 y: -0.412651 z: 0.554133 }
+  normal { x: 0.15297 y: 0.87774 z: 0.454063 }
+  height: 1.88748
+  width: 0.849366
+  type: 1
+  branch: 18
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: 0.503317 y: -0.693946 z: 0.514889 }
+  normal { x: -0.79366 y: -0.606901 z: -0.0421336 }
+  height: 1.679
+  width: 0.755551
+  type: 0
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -2.20178 y: 2.52077 z: 2.18698 }
+  up { x: 0.436472 y: 0.83 z: -0.347265 }
+  normal { x: 0.456285 y: 0.128453 z: 0.880513 }
+  height: 2.10642
+  width: 0.94789
+  type: 0
+  branch: 18
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: 0.948675 y: 0.315552 z: 0.0210522 }
+  normal { x: -0.315974 y: 0.942941 z: 0.10499 }
+  height: 1.79914
+  width: 0.809615
+  type: 1
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.528576 y: -0.607531 z: 0.592885 }
+  normal { x: -0.843729 y: -0.299127 z: 0.445695 }
+  height: 1.84843
+  width: 0.831795
+  type: 0
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: -0.304274 y: -0.936256 z: 0.17562 }
+  normal { x: 0.306186 y: 0.0784527 z: 0.948734 }
+  height: 1.91769
+  width: 0.862961
+  type: 1
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: 0.724142 y: 0.218344 z: 0.654175 }
+  normal { x: -0.232935 y: 0.970251 z: -0.0659914 }
+  height: 1.86526
+  width: 0.839366
+  type: 1
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -1.92697 y: 2.86305 z: 2.38082 }
+  up { x: 0.720671 y: -0.0648067 z: 0.690242 }
+  normal { x: -0.479472 y: -0.765708 z: 0.428717 }
+  height: 1.94187
+  width: 0.873843
+  type: 0
+  branch: 46
+  s: 1
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.908034 y: -0.417542 z: 0.033658 }
+  normal { x: 0.413839 y: 0.881722 z: -0.226504 }
+  height: 2.08835
+  width: 0.939757
+  type: 1
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.715702 y: -0.637364 z: 0.285548 }
+  normal { x: -0.482569 y: -0.155737 z: 0.861901 }
+  height: 1.931
+  width: 0.868951
+  type: 0
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.0301361 y: -0.77042 z: 0.636824 }
+  normal { x: 0.995711 y: 0.0788951 z: 0.0483265 }
+  height: 1.96415
+  width: 0.883868
+  type: 1
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: 0.0338059 y: 3.18322 z: 0.0656686 }
+  up { x: -0.219242 y: 0.245981 z: -0.944154 }
+  normal { x: 0.946535 y: 0.28834 z: -0.144674 }
+  height: 2.31125
+  width: 1.04006
+  type: 1
+  branch: 0
+  s: 0.25
+}
+cards {
+  anchor { x: 1.65374 y: 5.15284 z: -0.689059 }
+  up { x: -0.302148 y: 0.571714 z: 0.762791 }
+  normal { x: 0.834035 y: -0.228946 z: 0.501965 }
+  height: 2.13485
+  width: 0.960682
+  type: 1
+  branch: 20
+  s: 0.5
+}
+cards {
+  anchor { x: 1.69449 y: 5.30909 z: 0.196442 }
+  up { x: 0.19448 y: -0.794061 z: -0.575886 }
+  normal { x: 0.72376 y: 0.512433 z: -0.462151 }
+  height: 2.34391
+  width: 1.05476
+  type: 1
+  branch: 4
+  s: 0.6
+}
+cards {
+  anchor { x: 2.3615 y: 5.43894 z: -0.827227 }
+  up { x: 0.333247 y: -0.824951 z: 0.45651 }
+  normal { x: 0.516319 y: 0.564807 z: 0.643745 }
+  height: 1.89076
+  width: 0.850841
+  type: 0
+  branch: 47
+  s: 0.5
+}
+cards {
+  anchor { x: 2.04588 y: 5.5899 z: 0.369351 }
+  up { x: 0.310025 y: 0.341946 z: -0.887106 }
+  normal { x: 0.948834 y: -0.0524059 z: 0.311398 }
+  height: 1.95272
+  width: 0.878723
+  type: 0
+  branch: 4
+  s: 0.8
+}
+cards {
+  anchor { x: 2.48905 y: 5.81508 z: 0.467412 }
+  up { x: 0.56173 y: -0.582628 z: -0.587371 }
+  normal { x: 0.321837 y: 0.807934 z: -0.493622 }
+  height: 2.10558
+  width: 0.94751
+  type: 1
+  branch: 4
+  s: 1
+}
+cards {
+  anchor { x: 2.77746 y: 5.71056 z: -0.251651 }
+  up { x: 0.320041 y: -0.789233 z: 0.524104 }
+  normal { x: -0.00479846 y: 0.551843 z: 0.833934 }
+  height: 1.77338
+  width: 0.79802
+  type: 0
+  branch: 21
+  s: 1
+}
+cards {
+  anchor { x: 2.48905 y: 5.81508 z: 0.467412 }
+  up { x: 0.241721 y: 0.0509477 z: -0.969007 }
+  normal { x: 0.751747 y: -0.641263 z: 0.153809 }
+  height: 1.80506
+  width: 0.812277
+  type: 0
+  branch: 4
+  s: 1
+}
+cards {
+  anchor { x: 1.1168 y: 4.91829 z: -0.362184 }
+  up { x: -0.451879 y: -0.716201 z: -0.531847 }
+  normal { x: 0.493642 y: 0.295837 z: -0.817801 }
+  height: 2.31948
+  width: 1.04376
+  type: 1
+  branch: 20
+  s: 0.25
+}
+cards {
+  anchor { x: 1.8785 y: 4.93278 z: -1.36218 }
+  up { x: 0.0693334 y: -0.997576 z: -0.00587224 }
+  normal { x: 0.993098 y: 0.069578 z: -0.0944237 }
+  height: 2.1417
+  width: 0.963766
+  type: 0
+  branch: 20
+  s: 0.75
+}
+cards {
+  anchor { x: 2.3615 y: 5.43894 z: -0.827227 }
+  up { x: 0.485819 y: -0.809815 z: 0.328907 }
+  normal { x: 0.150799 y: -0.292999 z: -0.944146 }
+  height: 2.34147
+  width: 1.05366
+  type: 1
+  branch: 47
+  s: 0.5
+}
+cards {
+  anchor { x: 1.8785 y: 4.93278 z: -1.36218 }
+  up { x: -0.76572 y: -0.206091 z: -0.609261 }
+  normal { x: 0.227072 y: 0.799649 z: -0.555877 }
+  height: 1.8226
+  width: 0.820171
+  type: 1
+  branch: 20
+  s: 0.75
+}
+cards {
+  anchor { x: 2.18347 y: 5.05308 z: -1.88606 }
+  up { x: -0.599986 y: -0.678154 z: -0.42441 }
+  normal { x: 0.79749 y: -0.549075 z: -0.250052 }
+  height: 2.06867
+  width: 0.930902
+  type: 0
+  branch: 20
+  s: 1
+}
+cards {
+  anchor { x: 2.18347 y: 5.05308 z: -1.88606 }
+  up { x: 0.0272737 y: -0.994334 z: -0.102738 }
+  normal { x: -0.624849 y: 0.0632652 z: -0.778178 }
+  height: 1.6797
+  width: 0.755866
+  type: 1
+  branch: 20
+  s: 1
+}
+cards {
+  anchor { x: 1.73717 y: 4.70861 z: -3.42641 }
+  up { x: 0.230801 y: -0.973 z: 0.00118774 }
+  normal { x: 0.965769 y: 0.229233 z: 0.121416 }
+  height: 1.79133
+  width: 0.8061
+  type: 0
+  branch: 26
+  s: 1
+}
+cards {
+  anchor { x: 2.77746 y: 5.71056 z: -0.251651 }
+  up { x: 0.249753 y: -0.100349 z: 0.963096 }
+  normal { x: 0.82609 y: -0.496814 z: -0.265989 }
+  height: 2.21668
+  width: 0.997507
+  type: 1
+  branch: 21
+  s: 1
+}
+cards {
+  anchor { x: 2.77746 y: 5.71056 z: -0.251651 }
+  up { x: -0.112705 y: -0.621932 z: -0.774918 }
+  normal { x: 0.0741112 y: 0.772453 z: -0.630733 }
+  height: 1.87118
+  width: 0.84203
+  type: 1
+  branch: 21
+  s: 1
+}
+cards {
+  anchor { x: 3.01312 y: 5.75861 z: -1.10121 }
+  up { x: -0.0045981 y: -0.855017 z: -0.518579 }
+  normal { x: 0.89662 y: -0.233145 z: 0.376452 }
+  height: 1.91229
+  width: 0.860529
+  type: 0
+  branch: 47
+  s: 1
+}
+cards {
+  anchor { x: 3.01312 y: 5.75861 z: -1.10121 }
+  up { x: 0.434242 y: -0.884399 z: 0.171089 }
+  normal { x: -0.0595772 y: -0.217712 z: -0.974193 }
+  height: 1.67124
+  width: 0.752056
+  type: 1
+  branch: 47
+  s: 1
+}
+cards {
+  anchor { x: 2.18347 y: 5.05308 z: -1.88606 }
+  up { x: 0.36659 y: -0.706754 z: 0.605071 }
+  normal { x: 0.512145 y: 0.696238 z: 0.502952 }
+  height: 1.82499
+  width: 0.821246
+  type: 0
+  branch: 20
+  s: 1
+}
+cards {
+  anchor { x: 2.3615 y: 5.43894 z: -0.827227 }
+  up { x: -0.25681 y: 0.00332434 z: -0.966456 }
+  normal { x: 0.804112 y: -0.554014 z: -0.215577 }
+  height: 1.72843
+  width: 0.777793
+  type: 0
+  branch: 47
+  s: 0.5
+}
+cards {
+  anchor { x: 3.01312 y: 5.75861 z: -1.10121 }
+  up { x: -0.130003 y: -0.506027 z: -0.852664 }
+  normal { x: -0.110368 y: 0.862003 z: -0.494742 }
+  height: 1.88568
+  width: 0.848555
+  type: 1
+  branch: 47
+  s: 1
+}
+cards {
+  anchor { x: 3.01312 y: 5.75861 z: -1.10121 }
+  up { x: 0.0438522 y: -0.700162 z: -0.712636 }
+  normal { x: 0.795568 y: -0.406984 z: 0.448816 }
+  height: 1.62084
+  width: 0.729379
+  type: 0
+  branch: 47
+  s: 1
+}
+cards {
+  anchor { x: -0.235799 y: 4.92293 z: -1.76922 }
+  up { x: 0.174244 y: -0.977136 z: 0.121833 }
+  normal { x: -0.974959 y: -0.188557 z: -0.117903 }
+  height: 2.33239
+  width: 1.04958
+  type: 1
+  branch: 6
+  s: 0.2
+}
+cards {
+  anchor { x: 0.0338059 y: 3.18322 z: 0.0656686 }
+  up { x: -0.461314 y: 0.542912 z: 0.701738 }
+  normal { x: -0.722018 y: 0.229944 z: -0.652545 }
+  height: 2.32156
+  width: 1.0447
+  type: 1
+  branch: 0
+  s: 0.25
+}
+cards {
+  anchor { x: -1.12747 y: 4.90649 z: -0.672541 }
+  up { x: 0.601308 y: -0.209554 z: -0.771049 }
+  normal { x: -0.754513 y: -0.466481 z: -0.461633 }
+  height: 2.51032
+  width: 1.12964
+  type: 1
+  branch: 24
+  s: 0.2
+}
+cards {
+  anchor { x: -1.72392 y: 4.93577 z: -1.27366 }
+  up { x: -0.451212 y: -0.683308 z: 0.574019 }
+  normal { x: -0.872103 y: 0.47408 z: -0.121182 }
+  height: 2.21499
+  width: 0.996744
+  type: 1
+  branch: 22
+  s: 0.333333
+}
+cards {
+  anchor { x: -2.38453 y: 4.8822 z: 0.00704393 }
+  up { x: -0.130072 y: -0.96681 z: 0.219908 }
+  normal { x: -0.680153 y: -0.0743763 z: -0.729288 }
+  height: 2.04606
+  width: 0.920725
+  type: 0
+  branch: 24
+  s: 0.6
+}
+cards {
+  anchor { x: -2.09789 y: 5.20511 z: -0.744079 }
+  up { x: -0.182752 y: -0.683798 z: -0.706415 }
+  normal { x: -0.713959 y: -0.401673 z: 0.573516 }
+  height: 1.91498
+  width: 0.861741
+  type: 1
+  branch: 5
+  s: 0.6
+}
+cards {
+  anchor { x: -2.38453 y: 4.8822 z: 0.00704393 }
+  up { x: -0.131964 y: -0.414177 z: -0.900579 }
+  normal { x: -0.552004 y: 0.785323 z: -0.280284 }
+  height: 2.10902
+  width: 0.94906
+  type: 0
+  branch: 24
+  s: 0.6
+}
+cards {
+  anchor { x: -2.9034 y: 5.30479 z: -0.685308 }
+  up { x: -0.151061 y: -0.257999 z: 0.954262 }
+  normal { x: -0.790444 y: -0.548166 z: -0.273334 }
+  height: 2.12898
+  width: 0.95804
+  type: 0
+  branch: 5
+  s: 0.8
+}
+cards {
+  anchor { x: -2.9034 y: 5.30479 z: -0.685308 }
+  up { x: -0.323513 y: -0.867399 z: 0.378098 }
+  normal { x: -0.453113 y: 0.492806 z: 0.742853 }
+  height: 2.11733
+  width: 0.952798
+  type: 1
+  branch: 5
+  s: 0.8
+}
+cards {
+  anchor { x: -3.678 y: 5.5326 z: -0.573206 }
+  up { x: -0.32778 y: -0.938066 z: 0.112215 }
+  normal { x: -0.538259 y: 0.0878114 z: -0.838192 }
+  height: 1.76483
+  width: 0.794175
+  type: 0
+  branch: 5
+  s: 1
+}
+cards {
+  anchor { x: -3.678 y: 5.5326 z: -0.573206 }
+  up { x: -0.37426 y: -0.860442 z: -0.345788 }
+  normal { x: -0.406458 y: -0.182948 z: 0.895166 }
+  height: 1.82018
+  width: 0.819079
+  type: 1
+  branch: 5
+  s: 1
+}
+cards {
+  anchor { x: -3.678 y: 5.5326 z: -0.573206 }
+  up { x: -0.0845362 y: 0.0302678 z: -0.995961 }
+  normal { x: 0.00803109 y: 0.999527 z: 0.0296945 }
+  height: 1.66777
+  width: 0.750496
+  type: 0
+  branch: 5
+  s: 1
+}
+cards {
+  anchor { x: -2.09789 y: 5.20511 z: -0.744079 }
+  up { x: -0.403445 y: -0.822878 z: 0.40013 }
+  normal { x: -0.0728054 y: -0.407043 z: -0.910503 }
+  height: 2.00349
+  width: 0.901572
+  type: 0
+  branch: 5
+  s: 0.6
+}
+cards {
+  anchor { x: -1.72392 y: 4.93577 z: -1.27366 }
+  up { x: -0.149119 y: -0.966944 z: 0.206841 }
+  normal { x: -0.975825 y: 0.110104 z: -0.188791 }
+  height: 2.32057
+  width: 1.04426
+  type: 1
+  branch: 22
+  s: 0.333333
+}
+cards {
+  anchor { x: -2.3465 y: 4.72543 z: -1.69506 }
+  up { x: 0.191507 y: -0.981142 z: -0.0261934 }
+  normal { x: 0.041682 y: 0.0347934 z: -0.998525 }
+  height: 2.25348
+  width: 1.01407
+  type: 0
+  branch: 22
+  s: 0.666667
+}
+cards {
+  anchor { x: -2.81405 y: 4.8308 z: -2.26184 }
+  up { x: 0.621255 y: -0.263741 z: -0.737891 }
+  normal { x: -0.474866 y: -0.875769 z: -0.0867833 }
+  height: 1.86174
+  width: 0.837782
+  type: 1
+  branch: 22
+  s: 1
+}
+cards {
+  anchor { x: -2.81405 y: 4.8308 z: -2.26184 }
+  up { x: -0.52078 y: -0.542199 z: 0.659401 }
+  normal { x: -0.758103 y: 0.648868 z: -0.0651939 }
+  height: 1.73365
+  width: 0.780142
+  type: 1
+  branch: 22
+  s: 1
+}
+cards {
+  anchor { x: -2.81405 y: 4.8308 z: -2.26184 }
+  up { x: -0.0393616 y: -0.984799 z: -0.169178 }
+  normal { x: 0.388119 y: 0.140947 z: -0.910768 }
+  height: 1.84725
+  width: 0.831264
+  type: 0
+  branch: 22
+  s: 1
+}
+cards {
+  anchor { x: -2.81405 y: 4.8308 z: -2.26184 }
+  up { x: 0.501036 y: -0.662451 z: -0.556885 }
+  normal { x: -0.835018 y: -0.539125 z: -0.109952 }
+  height: 1.99786
+  width: 0.899036
+  type: 1
+  branch: 22
+  s: 1
+}
+cards {
+  anchor { x: -2.81405 y: 4.8308 z: -2.26184 }
+  up { x: 0.695659 y: -0.364052 z: -0.619294 }
+  normal { x: 0.169258 y: 0.920873 z: -0.351206 }
+  height: 1.75737
+  width: 0.790816
+  type: 0
+  branch: 22
+  s: 1
+}
+cards {
+  anchor { x: 1.12879 y: 4.97381 z: 0.0902944 }
+  up { x: -0.607998 y: 0.730997 z: 0.309808 }
+  normal { x: 0.092951 y: -0.321995 z: 0.942167 }
+  height: 2.17478
+  width: 0.978649
+  type: 1
+  branch: 4
+  s: 0.4
+}
+cards {
+  anchor { x: 0.0367314 y: 5.04133 z: 0.531521 }
+  up { x: -0.129766 y: -0.991211 z: -0.0257205 }
+  normal { x: 0.67687 y: -0.10751 z: 0.728209 }
+  height: 2.18284
+  width: 0.98228
+  type: 1
+  branch: 23
+  s: 0.4
+}
+cards {
+  anchor { x: 0.476278 y: 4.87759 z: 1.19821 }
+  up { x: -0.845448 y: -0.439133 z: 0.30394 }
+  normal { x: 0.109777 y: 0.414066 z: 0.903603 }
+  height: 2.18432
+  width: 0.982944
+  type: 0
+  branch: 23
+  s: 0.6
+}
+cards {
+  anchor { x: 0.205121 y: 5.18741 z: 1.6973 }
+  up { x: 0.944578 y: -0.0834693 z: -0.317498 }
+  normal { x: 0.25057 y: -0.44154 z: 0.861543 }
+  height: 2.07903
+  width: 0.935565
+  type: 0
+  branch: 48
+  s: 0.5
+}
+cards {
+  anchor { x: 0.205121 y: 5.18741 z: 1.6973 }
+  up { x: 0.339276 y: -0.939924 z: -0.0378774 }
+  normal { x: 0.779834 y: 0.258515 z: 0.570113 }
+  height: 2.21973
+  width: 0.998877
+  type: 1
+  branch: 48
+  s: 0.5
+}
+cards {
+  anchor { x: 0.837969 y: 5.11099 z: 1.89678 }
+  up { x: -0.399901 y: -0.892078 z: 0.21042 }
+  normal { x: -0.263148 y: 0.331658 z: 0.905956 }
+  height: 2.24552
+  width: 1.01048
+  type: 0
+  branch: 23
+  s: 0.8
+}
+cards {
+  anchor { x: 0.837969 y: 5.11099 z: 1.89678 }
+  up { x: -0.922374 y: -0.097787 z: 0.373716 }
+  normal { x: 0.351531 y: -0.613578 z: 0.70707 }
+  height: 2.18609
+  width: 0.983739
+  type: 1
+  branch: 23
+  s: 0.8
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: 0.560713 y: -0.804537 z: -0.195758 }
+  normal { x: 0.813978 y: 0.492243 z: 0.308444 }
+  height: 1.89706
+  width: 0.853678
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: 0.0618711 y: -0.993704 z: 0.0934016 }
+  normal { x: -0.308709 y: 0.0699392 z: 0.948582 }
+  height: 1.96316
+  width: 0.88342
+  type: 0
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: -0.300157 y: -0.880461 z: 0.367006 }
+  normal { x: 0.95322 y: -0.291276 z: 0.080811 }
+  height: 2.01769
+  width: 0.90796
+  type: 1
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: -0.714297 y: -0.378878 z: 0.588414 }
+  normal { x: -0.0308068 y: 0.856988 z: 0.514415 }
+  height: 1.90188
+  width: 0.855848
+  type: 0
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: 0.796436 y: -0.208816 z: -0.567526 }
+  normal { x: 0.229554 y: -0.763847 z: 0.603194 }
+  height: 2.01547
+  width: 0.906959
+  type: 0
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: 0.233463 y: -0.970816 z: 0.0548756 }
+  normal { x: 0.940436 y: 0.211093 z: -0.266496 }
+  height: 1.83851
+  width: 0.827328
+  type: 1
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: -0.0623569 y: -0.961051 z: 0.269243 }
+  normal { x: -0.545113 y: 0.258772 z: 0.797427 }
+  height: 1.69998
+  width: 0.764991
+  type: 0
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: -0.792267 y: -0.602433 z: -0.096891 }
+  normal { x: 0.140765 y: -0.334963 z: 0.931657 }
+  height: 2.10404
+  width: 0.946819
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: 0.914336 y: 0.342901 z: 0.215428 }
+  normal { x: -0.381457 y: 0.907876 z: 0.173927 }
+  height: 2.12163
+  width: 0.954735
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: -0.728836 y: 0.586053 z: -0.354035 }
+  normal { x: -0.665512 y: -0.484849 z: 0.567464 }
+  height: 1.85727
+  width: 0.835772
+  type: 1
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: 0.608353 y: -0.754452 z: 0.246391 }
+  normal { x: 0.660216 y: 0.653353 z: 0.370465 }
+  height: 1.87808
+  width: 0.845135
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 1.28127 y: 5.31319 z: 2.53783 }
+  up { x: 0.434595 y: -0.87491 z: 0.21368 }
+  normal { x: -0.83152 y: -0.298647 z: 0.468385 }
+  height: 1.93878
+  width: 0.872451
+  type: 0
+  branch: 23
+  s: 1
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: -0.597467 y: -0.786612 z: 0.155803 }
+  normal { x: 0.725329 y: -0.44727 z: 0.523304 }
+  height: 1.90037
+  width: 0.855166
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 0.0338059 y: 3.18322 z: 0.0656686 }
+  up { x: -0.936352 y: 0.0363679 z: -0.349173 }
+  normal { x: 0.347625 y: 0.234884 z: -0.907737 }
+  height: 2.11362
+  width: 0.951128
+  type: 1
+  branch: 0
+  s: 0.25
+}
+cards {
+  anchor { x: -0.235799 y: 4.92293 z: -1.76922 }
+  up { x: 0.636491 y: 0.576138 z: 0.51278 }
+  normal { x: 0.771118 y: -0.461579 z: -0.438545 }
+  height: 2.45752
+  width: 1.10589
+  type: 1
+  branch: 6
+  s: 0.2
+}
+cards {
+  anchor { x: 1.1168 y: 4.91829 z: -0.362184 }
+  up { x: -0.211845 y: -0.967466 z: -0.138318 }
+  normal { x: 0.347384 y: 0.0577448 z: -0.935943 }
+  height: 2.22076
+  width: 0.999343
+  type: 1
+  branch: 20
+  s: 0.25
+}
+cards {
+  anchor { x: 0.301907 y: 4.85089 z: -2.34404 }
+  up { x: 0.244173 y: -0.849141 z: 0.468337 }
+  normal { x: 0.964328 y: 0.161706 z: -0.209576 }
+  height: 2.10602
+  width: 0.947709
+  type: 0
+  branch: 6
+  s: 0.4
+}
+cards {
+  anchor { x: 2.18347 y: 5.05308 z: -1.88606 }
+  up { x: 0.623082 y: -0.632588 z: 0.460001 }
+  normal { x: 0.0729673 y: -0.538543 z: -0.839433 }
+  height: 2.10774
+  width: 0.948483
+  type: 1
+  branch: 20
+  s: 1
+}
+cards {
+  anchor { x: 1.73717 y: 4.70861 z: -3.42641 }
+  up { x: 0.836784 y: 0.0599929 z: 0.544236 }
+  normal { x: 0.113036 y: 0.953638 z: -0.27892 }
+  height: 1.8575
+  width: 0.835874
+  type: 0
+  branch: 26
+  s: 1
+}
+cards {
+  anchor { x: 1.27124 y: 4.76257 z: -3.18057 }
+  up { x: 0.786628 y: 0.440559 z: 0.432578 }
+  normal { x: 0.614244 y: -0.629449 z: -0.475919 }
+  height: 2.05453
+  width: 0.924537
+  type: 1
+  branch: 26
+  s: 0.5
+}
+cards {
+  anchor { x: 1.73717 y: 4.70861 z: -3.42641 }
+  up { x: 0.0915206 y: -0.990995 z: -0.0977409 }
+  normal { x: -0.75323 y: -0.0046901 z: -0.657741 }
+  height: 1.7783
+  width: 0.800234
+  type: 1
+  branch: 26
+  s: 1
+}
+cards {
+  anchor { x: 1.73717 y: 4.70861 z: -3.42641 }
+  up { x: 0.682894 y: -0.723443 z: 0.10142 }
+  normal { x: 0.728762 y: 0.684274 z: -0.0259689 }
+  height: 1.96615
+  width: 0.884767
+  type: 0
+  branch: 26
+  s: 1
+}
+cards {
+  anchor { x: 1.1168 y: 4.91829 z: -0.362184 }
+  up { x: -0.882 y: 0.460489 z: 0.10013 }
+  normal { x: -0.221011 y: -0.216543 z: -0.950927 }
+  height: 2.53237
+  width: 1.13957
+  type: 0
+  branch: 20
+  s: 0.25
+}
+cards {
+  anchor { x: 0.301907 y: 4.85089 z: -2.34404 }
+  up { x: -0.979213 y: -0.2026 z: -0.00979375 }
+  normal { x: -0.138646 y: 0.703789 z: -0.696749 }
+  height: 2.33097
+  width: 1.04894
+  type: 1
+  branch: 6
+  s: 0.4
+}
+cards {
+  anchor { x: -0.235799 y: 4.92293 z: -1.76922 }
+  up { x: 0.831228 y: 0.552316 z: -0.0632953 }
+  normal { x: 0.169172 y: -0.359757 z: -0.917581 }
+  height: 1.88287
+  width: 0.847293
+  type: 1
+  branch: 25
+  s: 0
+}
+cards {
+  anchor { x: 0.784801 y: 4.76285 z: -2.9601 }
+  up { x: 0.0730122 y: 0.935034 z: 0.346959 }
+  normal { x: -0.81635 y: 0.255877 z: -0.517783 }
+  height: 2.18328
+  width: 0.982478
+  type: 0
+  branch: 6
+  s: 0.6
+}
+cards {
+  anchor { x: -0.460736 y: 5.07617 z: -2.96336 }
+  up { x: 0.583266 y: -0.667476 z: -0.4629 }
+  normal { x: 0.696021 y: 0.704476 z: -0.13881 }
+  height: 1.98981
+  width: 0.895413
+  type: 0
+  branch: 25
+  s: 0.5
+}
+cards {
+  anchor { x: -0.32892 y: 5.5877 z: -3.41548 }
+  up { x: 0.992609 y: -0.101655 z: -0.0662915 }
+  normal { x: -0.0966391 y: -0.331655 z: -0.938438 }
+  height: 1.81726
+  width: 0.817766
+  type: 1
+  branch: 25
+  s: 0.75
+}
+cards {
+  anchor { x: -0.32892 y: 5.5877 z: -3.41548 }
+  up { x: 0.894005 y: 0.436809 z: 0.0997681 }
+  normal { x: -0.446852 y: 0.885537 z: 0.127072 }
+  height: 1.89467
+  width: 0.852602
+  type: 0
+  branch: 25
+  s: 0.75
+}
+cards {
+  anchor { x: -0.414907 y: 5.9178 z: -3.91803 }
+  up { x: 0.548434 y: 0.739932 z: 0.389512 }
+  normal { x: 0.72532 y: -0.189162 z: -0.661913 }
+  height: 1.63135
+  width: 0.734107
+  type: 1
+  branch: 25
+  s: 1
+}
+cards {
+  anchor { x: 1.8785 y: 4.93278 z: -1.36218 }
+  up { x: 0.186309 y: -0.931588 z: 0.312143 }
+  normal { x: 0.312188 y: -0.245107 z: -0.917857 }
+  height: 1.91345
+  width: 0.86105
+  type: 1
+  branch: 20
+  s: 0.75
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: -0.361425 y: 0.493061 z: -0.791368 }
+  normal { x: 0.723178 y: 0.683976 z: 0.0958676 }
+  height: 1.78139
+  width: 0.801626
+  type: 1
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 2.18347 y: 5.05308 z: -1.88606 }
+  up { x: -0.502143 y: 0.011496 z: -0.864708 }
+  normal { x: 0.240998 y: -0.958439 z: -0.152692 }
+  height: 1.73057
+  width: 0.778757
+  type: 0
+  branch: 20
+  s: 1
+}
+cards {
+  anchor { x: 2.3634 y: 2.88873 z: -2.27618 }
+  up { x: 0.41352 y: 0.738167 z: 0.533021 }
+  normal { x: 0.0292822 y: 0.574334 z: -0.818097 }
+  height: 1.833
+  width: 0.824848
+  type: 0
+  branch: 1
+  s: 1
+}
+cards {
+  anchor { x: 0.476278 y: 4.87759 z: 1.19821 }
+  up { x: 0.114951 y: -0.978115 z: -0.17343 }
+  normal { x: -0.981831 y: -0.138405 z: 0.129815 }
+  height: 2.11677
+  width: 0.952547
+  type: 0
+  branch: 23
+  s: 0.6
+}
+cards {
+  anchor { x: -0.63947 y: 4.77739 z: -0.145497 }
+  up { x: 0.358716 y: 0.300151 z: 0.883874 }
+  normal { x: -0.736732 y: -0.490411 z: 0.465536 }
+  height: 2.17239
+  width: 0.977575
+  type: 0
+  branch: 5
+  s: 0.2
+}
+cards {
+  anchor { x: 0.0338059 y: 3.18322 z: 0.0656686 }
+  up { x: -0.427276 y: 0.431776 z: -0.794358 }
+  normal { x: -0.798842 y: 0.231178 z: 0.555345 }
+  height: 2.12548
+  width: 0.956467
+  type: 0
+  branch: 0
+  s: 0.25
+}
+cards {
+  anchor { x: 0.205121 y: 5.18741 z: 1.6973 }
+  up { x: 0.208875 y: -0.92508 z: 0.317172 }
+  normal { x: -0.974074 y: -0.22562 z: -0.0165761 }
+  height: 2.30053
+  width: 1.03524
+  type: 0
+  branch: 48
+  s: 0.5
+}
+cards {
+  anchor { x: -1.71847 y: 4.7329 z: -0.296391 }
+  up { x: 0.243688 y: 0.713508 z: 0.656904 }
+  normal { x: -0.684171 y: -0.353598 z: 0.63787 }
+  height: 2.44901
+  width: 1.10206
+  type: 0
+  branch: 24
+  s: 0.4
+}
+cards {
+  anchor { x: -1.55239 y: 2.73687 z: 1.78243 }
+  up { x: -0.327053 y: -0.475809 z: -0.816481 }
+  normal { x: -0.873535 y: 0.48183 z: 0.0691167 }
+  height: 2.16529
+  width: 0.974379
+  type: 0
+  branch: 46
+  s: 0.5
+}
+cards {
+  anchor { x: -1.71847 y: 4.7329 z: -0.296391 }
+  up { x: 0.367767 y: -0.227165 z: 0.901745 }
+  normal { x: -0.835208 y: -0.507053 z: 0.212896 }
+  height: 2.07245
+  width: 0.932604
+  type: 0
+  branch: 24
+  s: 0.4
+}
+cards {
+  anchor { x: -2.38453 y: 4.8822 z: 0.00704393 }
+  up { x: 0.0236311 y: -0.988486 z: 0.149454 }
+  normal { x: -0.452745 y: 0.122705 z: 0.883156 }
+  height: 2.3889
+  width: 1.075
+  type: 1
+  branch: 24
+  s: 0.6
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: -0.379667 y: -0.702652 z: -0.601775 }
+  normal { x: -0.876745 y: 0.480882 z: -0.00834507 }
+  height: 2.359
+  width: 1.06155
+  type: 0
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -2.38453 y: 4.8822 z: 0.00704393 }
+  up { x: 0.477661 y: -0.354427 z: 0.803879 }
+  normal { x: -0.782192 y: -0.588191 z: 0.205444 }
+  height: 2.06676
+  width: 0.930042
+  type: 0
+  branch: 24
+  s: 0.6
+}
+cards {
+  anchor { x: -2.38453 y: 4.8822 z: 0.00704393 }
+  up { x: 0.124977 y: -0.898355 z: 0.421117 }
+  normal { x: -0.258137 y: 0.380385 z: 0.888072 }
+  height: 2.29979
+  width: 1.03491
+  type: 1
+  branch: 24
+  s: 0.6
+}
+cards {
+  anchor { x: -1.34705 y: 3.23082 z: 2.37028 }
+  up { x: 0.355808 y: 0.840062 z: 0.409507 }
+  normal { x: -0.804731 y: 0.498202 z: -0.322805 }
+  height: 2.07493
+  width: 0.933718
+  type: 1
+  branch: 59
+  s: 1
+}
+cards {
+  anchor { x: -3.09754 y: 5.22149 z: 0.171942 }
+  up { x: 0.354828 y: -0.0469621 z: 0.933751 }
+  normal { x: -0.77059 y: -0.580244 z: 0.263644 }
+  height: 1.86504
+  width: 0.83927
+  type: 0
+  branch: 24
+  s: 0.8
+}
+cards {
+  anchor { x: -3.09754 y: 5.22149 z: 0.171942 }
+  up { x: 0.0264246 y: -0.66818 z: 0.743531 }
+  normal { x: -0.183134 y: 0.727967 z: 0.660701 }
+  height: 2.21067
+  width: 0.994803
+  type: 1
+  branch: 24
+  s: 0.8
+}
+cards {
+  anchor { x: -3.73914 y: 5.30286 z: 0.455807 }
+  up { x: -0.345125 y: -0.929073 z: -0.133085 }
+  normal { x: -0.71032 y: 0.351241 z: -0.609979 }
+  height: 2.05925
+  width: 0.926663
+  type: 0
+  branch: 24
+  s: 1
+}
+cards {
+  anchor { x: -3.09754 y: 5.22149 z: 0.171942 }
+  up { x: 0.387011 y: 0.759263 z: 0.523204 }
+  normal { x: -0.343329 y: -0.407963 z: 0.845985 }
+  height: 1.73501
+  width: 0.780757
+  type: 0
+  branch: 24
+  s: 0.8
+}
+cards {
+  anchor { x: -3.73914 y: 5.30286 z: 0.455807 }
+  up { x: 0.399314 y: 0.53255 z: 0.746284 }
+  normal { x: -0.473677 y: 0.816776 z: -0.329404 }
+  height: 2.00363
+  width: 0.901636
+  type: 1
+  branch: 24
+  s: 1
+}
+cards {
+  anchor { x: -3.73914 y: 5.30286 z: 0.455807 }
+  up { x: 0.36931 y: 0.0441823 z: 0.928255 }
+  normal { x: -0.52159 y: -0.816843 z: 0.246396 }
+  height: 1.84083
+  width: 0.828374
+  type: 0
+  branch: 24
+  s: 1
+}
+cards {
+  anchor { x: -3.73914 y: 5.30286 z: 0.455807 }
+  up { x: 0.072594 y: -0.821585 z: 0.565445 }
+  normal { x: 0.00191204 y: 0.567054 z: 0.823678 }
+  height: 1.75392
+  width: 0.789263
+  type: 1
+  branch: 24
+  s: 1
+}
+cards {
+  anchor { x: -3.73914 y: 5.30286 z: 0.455807 }
+  up { x: -0.0384485 y: -0.926696 z: 0.373839 }
+  normal { x: -0.686706 y: -0.247274 z: -0.683586 }
+  height: 1.6554
+  width: 0.74493
+  type: 0
+  branch: 24
+  s: 1
+}
+cards {
+  anchor { x: -0.0779933 y: 7.15242 z: 1.12146 }
+  up { x: -0.0583117 y: -0.991709 z: 0.114509 }
+  normal { x: 0.994715 y: -0.0674291 z: -0.077431 }
+  height: 2.22671
+  width: 1.00202
+  type: 1
+  branch: 30
+  s: 0.5
+}
+cards {
+  anchor { x: 1.65374 y: 5.15284 z: -0.689059 }
+  up { x: 0.137601 y: 0.769398 z: -0.623773 }
+  normal { x: 0.810655 y: 0.274376 z: 0.517258 }
+  height: 2.2434
+  width: 1.00953
+  type: 1
+  branch: 20
+  s: 0.5
+}
+cards {
+  anchor { x: 0.00996124 y: 7.95045 z: 0.365245 }
+  up { x: 0.235065 y: 0.143669 z: -0.961303 }
+  normal { x: 0.933866 y: -0.307621 z: 0.182381 }
+  height: 2.40491
+  width: 1.08221
+  type: 0
+  branch: 0
+  s: 0.625
+}
+cards {
+  anchor { x: 2.04588 y: 5.5899 z: 0.369351 }
+  up { x: -0.319926 y: 0.199806 z: 0.926134 }
+  normal { x: 0.70557 y: 0.702624 z: 0.0921481 }
+  height: 2.32872
+  width: 1.04792
+  type: 0
+  branch: 4
+  s: 0.8
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: 0.345232 y: -0.782142 z: -0.518719 }
+  normal { x: 0.748446 y: -0.10403 z: 0.654986 }
+  height: 2.34533
+  width: 1.0554
+  type: 0
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 2.48905 y: 5.81508 z: 0.467412 }
+  up { x: -0.161698 y: 0.961904 z: -0.220442 }
+  normal { x: 0.87924 y: 0.038995 z: -0.474781 }
+  height: 2.16556
+  width: 0.974503
+  type: 0
+  branch: 4
+  s: 1
+}
+cards {
+  anchor { x: 2.48905 y: 5.81508 z: 0.467412 }
+  up { x: 0.0349545 y: 0.366944 z: -0.929586 }
+  normal { x: 0.575818 y: 0.752848 z: 0.318831 }
+  height: 2.04359
+  width: 0.919616
+  type: 1
+  branch: 4
+  s: 1
+}
+cards {
+  anchor { x: 2.43362 y: 7.92722 z: -0.295174 }
+  up { x: -0.202321 y: 0.257373 z: 0.944894 }
+  normal { x: 0.808239 y: -0.500951 z: 0.309511 }
+  height: 1.8942
+  width: 0.852388
+  type: 1
+  branch: 7
+  s: 0.8
+}
+cards {
+  anchor { x: 2.48905 y: 5.81508 z: 0.467412 }
+  up { x: -0.398755 y: 0.916204 z: -0.0395571 }
+  normal { x: 0.769489 y: 0.310812 z: -0.557927 }
+  height: 1.87474
+  width: 0.843635
+  type: 0
+  branch: 4
+  s: 1
+}
+cards {
+  anchor { x: 2.9738 y: 8.14495 z: -0.0696922 }
+  up { x: 0.215278 y: -0.790787 z: 0.572984 }
+  normal { x: 0.144363 y: 0.606066 z: 0.782204 }
+  height: 1.97375
+  width: 0.888187
+  type: 0
+  branch: 28
+  s: 1
+}
+cards {
+  anchor { x: 2.9738 y: 8.14495 z: -0.0696922 }
+  up { x: 0.18767 y: -0.541259 z: 0.819646 }
+  normal { x: 0.638187 y: -0.567143 z: -0.52064 }
+  height: 2.08957
+  width: 0.940305
+  type: 1
+  branch: 28
+  s: 1
+}
+cards {
+  anchor { x: 2.77746 y: 5.71056 z: -0.251651 }
+  up { x: 0.39705 y: -0.316725 z: 0.861416 }
+  normal { x: 0.556325 y: 0.829544 z: 0.0485817 }
+  height: 1.82801
+  width: 0.822607
+  type: 0
+  branch: 21
+  s: 1
+}
+cards {
+  anchor { x: 3.19497 y: 7.89047 z: -0.558249 }
+  up { x: 0.578914 y: 0.178776 z: 0.795549 }
+  normal { x: 0.327741 y: -0.944403 z: -0.0262676 }
+  height: 1.86791
+  width: 0.84056
+  type: 1
+  branch: 7
+  s: 1
+}
+cards {
+  anchor { x: 3.19497 y: 7.89047 z: -0.558249 }
+  up { x: -0.117895 y: -0.984597 z: -0.129114 }
+  normal { x: -0.116104 y: 0.142796 z: -0.982919 }
+  height: 1.9819
+  width: 0.891856
+  type: 1
+  branch: 7
+  s: 1
+}
+cards {
+  anchor { x: 2.9738 y: 8.14495 z: -0.0696922 }
+  up { x: 0.186644 y: -0.891199 z: 0.413434 }
+  normal { x: -0.00775249 y: 0.41948 z: 0.907731 }
+  height: 1.73114
+  width: 0.779013
+  type: 0
+  branch: 28
+  s: 1
+}
+cards {
+  anchor { x: 2.9738 y: 8.14495 z: -0.0696922 }
+  up { x: -0.312484 y: -0.18885 z: 0.930961 }
+  normal { x: 0.709803 y: -0.697729 z: 0.0967131 }
+  height: 1.94877
+  width: 0.876945
+  type: 1
+  branch: 28
+  s: 1
+}
+cards {
+  anchor { x: 2.9738 y: 8.14495 z: -0.0696922 }
+  up { x: -0.396447 y: 0.0334498 z: 0.917448 }
+  normal { x: 0.00660906 y: 0.999414 z: -0.0335824 }
+  height: 1.90302
+  width: 0.856361
+  type: 0
+  branch: 28
+  s: 1
+}
+cards {
+  anchor { x: -1.38449 y: 7.31704 z: 0.0540253 }
+  up { x: 0.669664 y: 0.71004 z: -0.217699 }
+  normal { x: -0.116714 y: -0.188872 z: -0.975041 }
+  height: 2.33875
+  width: 1.05244
+  type: 1
+  branch: 9
+  s: 0.4
+}
+cards {
+  anchor { x: 0.459867 y: 7.35352 z: -1.59907 }
+  up { x: -0.318686 y: 0.855909 z: 0.407258 }
+  normal { x: -0.4975 y: 0.21468 z: -0.84048 }
+  height: 2.28408
+  width: 1.02784
+  type: 0
+  branch: 29
+  s: 0.4
+}
+cards {
+  anchor { x: -0.949014 y: 7.34693 z: -1.75994 }
+  up { x: 0.677114 y: -0.584446 z: -0.447145 }
+  normal { x: 0.198805 y: 0.730326 z: -0.65353 }
+  height: 1.95606
+  width: 0.880228
+  type: 0
+  branch: 27
+  s: 0.2
+}
+cards {
+  anchor { x: -0.930779 y: 7.7077 z: -2.35208 }
+  up { x: 0.933129 y: 0.335352 z: 0.129655 }
+  normal { x: 0.186557 y: -0.14333 z: -0.971933 }
+  height: 2.2469
+  width: 1.01111
+  type: 1
+  branch: 27
+  s: 0.4
+}
+cards {
+  anchor { x: 0.916785 y: 7.4823 z: -2.01547 }
+  up { x: -0.0955239 y: -0.532559 z: -0.840985 }
+  normal { x: -0.581503 y: 0.715558 z: -0.387081 }
+  height: 1.73822
+  width: 0.782198
+  type: 1
+  branch: 29
+  s: 0.6
+}
+cards {
+  anchor { x: -1.08976 y: 8.21846 z: -3.22588 }
+  up { x: -0.394688 y: 0.526345 z: 0.753115 }
+  normal { x: 0.737958 y: 0.669913 z: -0.0814517 }
+  height: 2.01479
+  width: 0.906658
+  type: 1
+  branch: 27
+  s: 0.8
+}
+cards {
+  anchor { x: -0.752964 y: 9.69729 z: -2.64255 }
+  up { x: 0.991674 y: 0.119782 z: -0.0472752 }
+  normal { x: -0.00723212 y: -0.314733 z: -0.949153 }
+  height: 1.7809
+  width: 0.801404
+  type: 1
+  branch: 34
+  s: 1
+}
+cards {
+  anchor { x: -0.717328 y: 7.26814 z: -1.18899 }
+  up { x: -0.454791 y: -0.8589 z: 0.235492 }
+  normal { x: -0.866023 y: 0.364814 z: -0.341927 }
+  height: 2.28802
+  width: 1.02961
+  type: 1
+  branch: 27
+  s: 0
+}
+cards {
+  anchor { x: -2.06332 y: 7.61721 z: -0.225292 }
+  up { x: -0.298298 y: -0.947873 z: 0.112054 }
+  normal { x: -0.111354 y: -0.082037 z: -0.990389 }
+  height: 2.24621
+  width: 1.01079
+  type: 0
+  branch: 9
+  s: 0.6
+}
+cards {
+  anchor { x: -1.32712 y: 7.50072 z: -2.28417 }
+  up { x: 0.375761 y: -0.739461 z: -0.55857 }
+  normal { x: -0.923508 y: -0.248686 z: -0.292041 }
+  height: 1.94928
+  width: 0.877177
+  type: 1
+  branch: 49
+  s: 0.25
+}
+cards {
+  anchor { x: -1.32712 y: 7.50072 z: -2.28417 }
+  up { x: -0.937703 y: -0.321841 z: 0.130888 }
+  normal { x: -0.325881 y: 0.945357 z: -0.0101182 }
+  height: 1.81568
+  width: 0.817058
+  type: 1
+  branch: 49
+  s: 0.25
+}
+cards {
+  anchor { x: -1.32712 y: 7.50072 z: -2.28417 }
+  up { x: -0.622576 y: -0.679233 z: 0.38864 }
+  normal { x: -0.334309 y: -0.218182 z: -0.916861 }
+  height: 1.89397
+  width: 0.852286
+  type: 0
+  branch: 49
+  s: 0.25
+}
+cards {
+  anchor { x: -2.10214 y: 7.80682 z: -3.23894 }
+  up { x: 0.187839 y: 0.717691 z: 0.670549 }
+  normal { x: -0.81851 y: -0.262987 z: 0.510763 }
+  height: 2.00356
+  width: 0.901601
+  type: 0
+  branch: 49
+  s: 0.75
+}
+cards {
+  anchor { x: -1.32712 y: 7.50072 z: -2.28417 }
+  up { x: 0.72124 y: -0.0604936 z: -0.690039 }
+  normal { x: -0.0028125 y: 0.995915 z: -0.0902486 }
+  height: 2.1144
+  width: 0.951481
+  type: 0
+  branch: 49
+  s: 0.25
+}
+cards {
+  anchor { x: -1.63938 y: 7.78712 z: -2.83895 }
+  up { x: -0.576688 y: -0.797939 z: 0.175284 }
+  normal { x: -0.0674345 y: -0.16733 z: -0.983592 }
+  height: 2.02394
+  width: 0.910772
+  type: 0
+  branch: 49
+  s: 0.5
+}
+cards {
+  anchor { x: -1.63938 y: 7.78712 z: -2.83895 }
+  up { x: 0.132582 y: 0.836726 z: 0.53133 }
+  normal { x: -0.868345 y: -0.160419 z: 0.469301 }
+  height: 1.87232
+  width: 0.842546
+  type: 0
+  branch: 49
+  s: 0.5
+}
+cards {
+  anchor { x: -1.63938 y: 7.78712 z: -2.83895 }
+  up { x: 0.882015 y: -0.377089 z: -0.282582 }
+  normal { x: 0.270095 y: 0.89596 z: -0.352567 }
+  height: 1.76107
+  width: 0.792481
+  type: 0
+  branch: 49
+  s: 0.5
+}
+cards {
+  anchor { x: -2.10214 y: 7.80682 z: -3.23894 }
+  up { x: 0.86638 y: 0.491821 z: -0.0865821 }
+  normal { x: 0.349875 y: -0.721517 z: -0.597495 }
+  height: 1.92969
+  width: 0.86836
+  type: 1
+  branch: 49
+  s: 0.75
+}
+cards {
+  anchor { x: -0.692558 y: 7.23535 z: 0.223566 }
+  up { x: 0.258028 y: -0.962777 z: -0.0805053 }
+  normal { x: 0.259002 y: -0.0113452 z: 0.96581 }
+  height: 2.18208
+  width: 0.981935
+  type: 1
+  branch: 9
+  s: 0.2
+}
+cards {
+  anchor { x: 0.205121 y: 5.18741 z: 1.6973 }
+  up { x: 0.609432 y: 0.782375 z: 0.128382 }
+  normal { x: -0.678556 y: 0.430952 z: 0.594846 }
+  height: 2.04683
+  width: 0.921075
+  type: 1
+  branch: 48
+  s: 0.5
+}
+cards {
+  anchor { x: -1.01234 y: 7.6703 z: 1.10673 }
+  up { x: 0.840538 y: 0.0831912 z: 0.535327 }
+  normal { x: -0.509416 y: -0.214911 z: 0.833252 }
+  height: 2.23846
+  width: 1.00731
+  type: 0
+  branch: 8
+  s: 0.6
+}
+cards {
+  anchor { x: -1.01234 y: 7.6703 z: 1.10673 }
+  up { x: 0.518616 y: -0.698885 z: 0.492542 }
+  normal { x: 0.232768 y: 0.669716 z: 0.705194 }
+  height: 2.18323
+  width: 0.982453
+  type: 1
+  branch: 8
+  s: 0.6
+}
+cards {
+  anchor { x: 0.0158166 y: 7.39411 z: 1.77352 }
+  up { x: -0.158754 y: -0.881762 z: 0.444176 }
+  normal { x: -0.904602 y: 0.310158 z: 0.292399 }
+  height: 1.83096
+  width: 0.823934
+  type: 0
+  branch: 30
+  s: 0.75
+}
+cards {
+  anchor { x: -1.21685 y: 8.0354 z: 1.64509 }
+  up { x: -0.871659 y: -0.487121 z: -0.0540761 }
+  normal { x: 0.0247817 y: -0.153998 z: 0.98776 }
+  height: 1.92272
+  width: 0.865224
+  type: 1
+  branch: 8
+  s: 0.8
+}
+cards {
+  anchor { x: -1.23916 y: 8.12483 z: 2.25174 }
+  up { x: 0.401788 y: -0.433258 z: 0.806755 }
+  normal { x: 0.386941 y: 0.878806 z: 0.279243 }
+  height: 1.96534
+  width: 0.884401
+  type: 1
+  branch: 31
+  s: 1
+}
+cards {
+  anchor { x: -1.23916 y: 8.12483 z: 2.25174 }
+  up { x: -0.605389 y: -0.72717 z: 0.323616 }
+  normal { x: -0.736326 y: 0.357294 z: -0.5746 }
+  height: 1.98401
+  width: 0.892803
+  type: 0
+  branch: 31
+  s: 1
+}
+cards {
+  anchor { x: -1.52875 y: 8.45801 z: 2.03318 }
+  up { x: 0.810213 y: 0.352944 z: 0.467958 }
+  normal { x: -0.332143 y: -0.381361 z: 0.862696 }
+  height: 1.87013
+  width: 0.841557
+  type: 0
+  branch: 8
+  s: 1
+}
+cards {
+  anchor { x: 0.205121 y: 5.18741 z: 1.6973 }
+  up { x: -0.964368 y: 0.13809 z: 0.225668 }
+  normal { x: 0.264274 y: 0.462757 z: 0.846177 }
+  height: 2.27842
+  width: 1.02529
+  type: 0
+  branch: 48
+  s: 0.5
+}
+cards {
+  anchor { x: 0.0158166 y: 7.39411 z: 1.77352 }
+  up { x: 0.782847 y: -0.592036 z: -0.191427 }
+  normal { x: -0.103395 y: -0.427156 z: 0.898247 }
+  height: 2.09885
+  width: 0.944482
+  type: 0
+  branch: 30
+  s: 0.75
+}
+cards {
+  anchor { x: 0.0158166 y: 7.39411 z: 1.77352 }
+  up { x: 0.120194 y: -0.992582 z: -0.0182823 }
+  normal { x: 0.874881 y: 0.0972019 z: 0.474484 }
+  height: 2.28408
+  width: 1.02784
+  type: 1
+  branch: 30
+  s: 0.75
+}
+cards {
+  anchor { x: 0.227248 y: 5.24271 z: 2.37056 }
+  up { x: 0.804182 y: 0.468278 z: -0.36607 }
+  normal { x: -0.078832 y: 0.69447 z: 0.71519 }
+  height: 1.86813
+  width: 0.840658
+  type: 1
+  branch: 48
+  s: 1
+}
+cards {
+  anchor { x: 0.205242 y: 7.63975 z: 2.38155 }
+  up { x: 0.955168 y: -0.244507 z: -0.166941 }
+  normal { x: -0.024088 y: -0.626182 z: 0.779305 }
+  height: 2.03936
+  width: 0.917713
+  type: 0
+  branch: 30
+  s: 1
+}
+cards {
+  anchor { x: 0.205242 y: 7.63975 z: 2.38155 }
+  up { x: 0.859364 y: -0.502551 z: -0.094526 }
+  normal { x: 0.510843 y: 0.835357 z: 0.203022 }
+  height: 1.90487
+  width: 0.85719
+  type: 1
+  branch: 30
+  s: 1
+}
+cards {
+  anchor { x: 0.205242 y: 7.63975 z: 2.38155 }
+  up { x: 0.47645 y: -0.868988 z: 0.133625 }
+  normal { x: -0.58626 y: -0.200748 z: 0.784856 }
+  height: 2.09046
+  width: 0.940706
+  type: 0
+  branch: 30
+  s: 1
+}
+cards {
+  anchor { x: 0.205242 y: 7.63975 z: 2.38155 }
+  up { x: -0.544675 y: -0.714554 z: 0.439024 }
+  normal { x: 0.83787 y: -0.486185 z: 0.248191 }
+  height: 1.74222
+  width: 0.783998
+  type: 1
+  branch: 30
+  s: 1
+}
+cards {
+  anchor { x: -1.23916 y: 8.12483 z: 2.25174 }
+  up { x: 0.969368 y: -0.235323 z: 0.0703524 }
+  normal { x: 0.186101 y: 0.890642 z: 0.414877 }
+  height: 1.75799
+  width: 0.791095
+  type: 1
+  branch: 31
+  s: 1
+}
+cards {
+  anchor { x: -1.23916 y: 8.12483 z: 2.25174 }
+  up { x: 0.893504 y: -0.438346 z: 0.0974897 }
+  normal { x: -0.417909 y: -0.732253 z: 0.537734 }
+  height: 1.85755
+  width: 0.835899
+  type: 0
+  branch: 31
+  s: 1
+}
+cards {
+  anchor { x: -1.23916 y: 8.12483 z: 2.25174 }
+  up { x: 0.355919 y: -0.922547 z: 0.149091 }
+  normal { x: 0.865053 y: 0.385602 z: 0.320927 }
+  height: 1.98343
+  width: 0.892546
+  type: 1
+  branch: 31
+  s: 1
+}
+cards {
+  anchor { x: -0.482716 y: 5.02176 z: -0.977462 }
+  up { x: -0.360667 y: 0.803351 z: -0.473863 }
+  normal { x: 0.921541 y: 0.228597 z: -0.313857 }
+  height: 2.08752
+  width: 0.939383
+  type: 1
+  branch: 6
+  s: 0
+}
+cards {
+  anchor { x: 0.848861 y: 7.46533 z: -0.714948 }
+  up { x: 0.557001 y: -0.102212 z: 0.824198 }
+  normal { x: 0.771416 y: -0.303983 z: -0.559028 }
+  height: 2.05252
+  width: 0.923632
+  type: 1
+  branch: 7
+  s: 0.4
+}
+cards {
+  anchor { x: 1.69449 y: 5.30909 z: 0.196442 }
+  up { x: -0.367471 y: -0.613758 z: -0.698761 }
+  normal { x: 0.577407 y: 0.438433 z: -0.688751 }
+  height: 2.4973
+  width: 1.12379
+  type: 1
+  branch: 4
+  s: 0.6
+}
+cards {
+  anchor { x: 0.0705369 y: 7.28098 z: -0.9628 }
+  up { x: -0.0403845 y: -0.910619 z: -0.411268 }
+  normal { x: 0.994827 y: 0.00175508 z: -0.101573 }
+  height: 2.01375
+  width: 0.906187
+  type: 0
+  branch: 7
+  s: 0.2
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: 0.180811 y: -0.966384 z: -0.182779 }
+  normal { x: 0.436866 y: 0.245418 z: -0.865401 }
+  height: 2.11932
+  width: 0.953695
+  type: 1
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 0.459867 y: 7.35352 z: -1.59907 }
+  up { x: 0.452465 y: -0.850083 z: 0.269508 }
+  normal { x: 0.881099 y: 0.472779 z: 0.0120041 }
+  height: 2.08343
+  width: 0.937546
+  type: 0
+  branch: 29
+  s: 0.4
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: -0.636022 y: 0.293605 z: -0.713633 }
+  normal { x: 0.599256 y: -0.394722 z: -0.696482 }
+  height: 1.96318
+  width: 0.883429
+  type: 0
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 2.3615 y: 5.43894 z: -0.827227 }
+  up { x: 0.453562 y: 0.587847 z: 0.669864 }
+  normal { x: 0.225622 y: 0.6514 z: -0.724412 }
+  height: 1.90854
+  width: 0.858844
+  type: 0
+  branch: 47
+  s: 0.5
+}
+cards {
+  anchor { x: 0.916785 y: 7.4823 z: -2.01547 }
+  up { x: -0.0527247 y: -0.923258 z: -0.380546 }
+  normal { x: 0.998597 y: -0.0468342 z: -0.0247292 }
+  height: 1.85437
+  width: 0.834468
+  type: 0
+  branch: 29
+  s: 0.6
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: 0.225011 y: -0.933822 z: -0.278112 }
+  normal { x: -0.00908996 y: 0.283408 z: -0.958956 }
+  height: 1.89552
+  width: 0.852985
+  type: 1
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 0.916785 y: 7.4823 z: -2.01547 }
+  up { x: 0.478134 y: -0.869958 z: -0.120668 }
+  normal { x: 0.850452 y: 0.424277 z: 0.310999 }
+  height: 2.12996
+  width: 0.958484
+  type: 0
+  branch: 29
+  s: 0.6
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: -0.668584 y: 0.168122 z: -0.724383 }
+  normal { x: 0.649604 y: -0.342091 z: -0.678961 }
+  height: 2.10404
+  width: 0.946817
+  type: 0
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: -0.367759 y: -0.402975 z: -0.838072 }
+  normal { x: -0.236811 y: 0.9121 z: -0.334655 }
+  height: 2.00199
+  width: 0.900897
+  type: 1
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 1.39185 y: 7.96641 z: -2.25804 }
+  up { x: 0.113462 y: -0.791718 z: -0.600257 }
+  normal { x: 0.989477 y: 0.0354458 z: 0.140282 }
+  height: 1.9854
+  width: 0.893432
+  type: 0
+  branch: 29
+  s: 0.8
+}
+cards {
+  anchor { x: 1.39185 y: 7.96641 z: -2.25804 }
+  up { x: 0.822609 y: -0.545523 z: 0.160373 }
+  normal { x: -0.01475 y: -0.302422 z: -0.95306 }
+  height: 2.0781
+  width: 0.935145
+  type: 1
+  branch: 29
+  s: 0.8
+}
+cards {
+  anchor { x: 1.39185 y: 7.96641 z: -2.25804 }
+  up { x: 0.806942 y: 0.00531228 z: 0.590607 }
+  normal { x: -0.121533 y: 0.980055 z: 0.157234 }
+  height: 1.64514
+  width: 0.740315
+  type: 0
+  branch: 29
+  s: 0.8
+}
+cards {
+  anchor { x: 1.71479 y: 8.30813 z: -2.67493 }
+  up { x: 0.0995902 y: -0.78928 z: -0.605903 }
+  normal { x: 0.975736 y: -0.0418613 z: 0.214909 }
+  height: 1.9841
+  width: 0.892846
+  type: 0
+  branch: 29
+  s: 1
+}
+cards {
+  anchor { x: -0.717328 y: 7.26814 z: -1.18899 }
+  up { x: 0.0808143 y: -0.967663 z: -0.238952 }
+  normal { x: -0.982947 y: -0.117103 z: 0.141784 }
+  height: 2.48442
+  width: 1.11799
+  type: 1
+  branch: 27
+  s: 0
+}
+cards {
+  anchor { x: -0.63947 y: 4.77739 z: -0.145497 }
+  up { x: -0.164704 y: 0.475219 z: 0.864315 }
+  normal { x: -0.893407 y: 0.299451 z: -0.334892 }
+  height: 2.26842
+  width: 1.02079
+  type: 1
+  branch: 5
+  s: 0.2
+}
+cards {
+  anchor { x: -1.38449 y: 7.31704 z: 0.0540253 }
+  up { x: 0.203028 y: 0.181919 z: -0.962125 }
+  normal { x: -0.886726 y: -0.382618 z: -0.259463 }
+  height: 2.35008
+  width: 1.05753
+  type: 1
+  branch: 9
+  s: 0.4
+}
+cards {
+  anchor { x: -1.12747 y: 4.90649 z: -0.672541 }
+  up { x: 0.220265 y: 0.815477 z: -0.535239 }
+  normal { x: -0.91922 y: 0.357124 z: 0.165823 }
+  height: 2.15345
+  width: 0.969051
+  type: 0
+  branch: 24
+  s: 0.2
+}
+cards {
+  anchor { x: -1.38449 y: 7.31704 z: 0.0540253 }
+  up { x: 0.0377696 y: -0.801128 z: -0.5973 }
+  normal { x: -0.656204 y: 0.430907 z: -0.619448 }
+  height: 2.09445
+  width: 0.942504
+  type: 0
+  branch: 9
+  s: 0.4
+}
+cards {
+  anchor { x: -2.06332 y: 7.61721 z: -0.225292 }
+  up { x: 0.162454 y: -0.432616 z: -0.886821 }
+  normal { x: -0.925982 y: -0.377292 z: 0.0144259 }
+  height: 2.06047
+  width: 0.927212
+  type: 1
+  branch: 9
+  s: 0.6
+}
+cards {
+  anchor { x: -2.09789 y: 5.20511 z: -0.744079 }
+  up { x: 0.22044 y: 0.310116 z: -0.924789 }
+  normal { x: -0.75457 y: 0.655013 z: 0.039785 }
+  height: 2.23073
+  width: 1.00383
+  type: 0
+  branch: 5
+  s: 0.6
+}
+cards {
+  anchor { x: -2.06332 y: 7.61721 z: -0.225292 }
+  up { x: -0.0921771 y: -0.933989 z: 0.345206 }
+  normal { x: -0.665867 y: -0.199947 z: -0.718778 }
+  height: 2.34982
+  width: 1.05742
+  type: 0
+  branch: 9
+  s: 0.6
+}
+cards {
+  anchor { x: -2.06332 y: 7.61721 z: -0.225292 }
+  up { x: -0.0686597 y: -0.988266 z: -0.136444 }
+  normal { x: -0.826996 y: -0.0201156 z: 0.561848 }
+  height: 1.9338
+  width: 0.870212
+  type: 1
+  branch: 9
+  s: 0.6
+}
+cards {
+  anchor { x: -2.9034 y: 5.30479 z: -0.685308 }
+  up { x: -0.0558676 y: 0.614364 z: 0.787043 }
+  normal { x: -0.405879 y: 0.706227 z: -0.58009 }
+  height: 1.83015
+  width: 0.823567
+  type: 1
+  branch: 5
+  s: 0.8
+}
+cards {
+  anchor { x: -2.69368 y: 7.81872 z: -0.407409 }
+  up { x: 0.41368 y: 0.213372 z: -0.885066 }
+  normal { x: -0.75207 y: -0.467785 z: -0.464292 }
+  height: 2.05258
+  width: 0.923663
+  type: 1
+  branch: 9
+  s: 0.8
+}
+cards {
+  anchor { x: -2.69368 y: 7.81872 z: -0.407409 }
+  up { x: -0.51092 y: -0.850048 z: 0.127979 }
+  normal { x: -0.683764 y: 0.492095 z: 0.538804 }
+  height: 1.85384
+  width: 0.834228
+  type: 1
+  branch: 9
+  s: 0.8
+}
+cards {
+  anchor { x: -3.36845 y: 7.96007 z: -0.532704 }
+  up { x: -0.256265 y: -0.874328 z: -0.412164 }
+  normal { x: -0.0909732 y: 0.446327 z: -0.890234 }
+  height: 1.75392
+  width: 0.789263
+  type: 0
+  branch: 9
+  s: 1
+}
+cards {
+  anchor { x: -3.36845 y: 7.96007 z: -0.532704 }
+  up { x: 0.212224 y: -0.183765 z: -0.959787 }
+  normal { x: -0.759096 y: -0.649525 z: -0.0434868 }
+  height: 1.90653
+  width: 0.857937
+  type: 1
+  branch: 9
+  s: 1
+}
+cards {
+  anchor { x: -3.36845 y: 7.96007 z: -0.532704 }
+  up { x: -0.359405 y: -0.742016 z: 0.565897 }
+  normal { x: -0.424921 y: 0.670031 z: 0.608688 }
+  height: 2.04285
+  width: 0.919282
+  type: 1
+  branch: 9
+  s: 1
+}
+cards {
+  anchor { x: -3.36845 y: 7.96007 z: -0.532704 }
+  up { x: -0.180001 y: -0.917362 z: -0.355032 }
+  normal { x: -0.100681 y: 0.376213 z: -0.921047 }
+  height: 1.76489
+  width: 0.794202
+  type: 0
+  branch: 9
+  s: 1
+}
+cards {
+  anchor { x: -3.36845 y: 7.96007 z: -0.532704 }
+  up { x: 0.0493618 y: -0.529941 z: -0.846597 }
+  normal { x: -0.663413 y: -0.651029 z: 0.368842 }
+  height: 1.60128
+  width: 0.720575
+  type: 1
+  branch: 9
+  s: 1
+}
+cards {
+  anchor { x: 0.0226943 y: 7.31805 z: 0.304444 }
+  up { x: -0.698104 y: 0.217153 z: 0.682272 }
+  normal { x: 0.658325 y: 0.569352 z: 0.492389 }
+  height: 2.49161
+  width: 1.12123
+  type: 0
+  branch: 9
+  s: 0
+}
+cards {
+  anchor { x: 0.675494 y: 9.64507 z: -0.0813022 }
+  up { x: 0.674105 y: -0.626996 z: -0.39046 }
+  normal { x: 0.507217 y: 0.00865807 z: 0.861775 }
+  height: 2.42447
+  width: 1.09101
+  type: 0
+  branch: 11
+  s: 0.4
+}
+cards {
+  anchor { x: 0.00996124 y: 7.95045 z: 0.365245 }
+  up { x: -0.242393 y: 0.914566 z: -0.323752 }
+  normal { x: 0.900976 y: 0.335972 z: 0.274528 }
+  height: 2.09853
+  width: 0.944339
+  type: 0
+  branch: 0
+  s: 0.625
+}
+cards {
+  anchor { x: 0.00996124 y: 7.95045 z: 0.365245 }
+  up { x: 0.474381 y: 0.467579 z: -0.745877 }
+  normal { x: 0.143407 y: 0.794916 z: 0.589528 }
+  height: 2.03985
+  width: 0.917932
+  type: 1
+  branch: 0
+  s: 0.625
+}
+cards {
+  anchor { x: 0.648347 y: 10.15 z: 0.760648 }
+  up { x: 0.75139 y: -0.409834 z: -0.517155 }
+  normal { x: 0.508074 y: -0.140749 z: 0.849736 }
+  height: 2.22333
+  width: 1.0005
+  type: 0
+  branch: 32
+  s: 0.6
+}
+cards {
+  anchor { x: 0.205242 y: 7.63975 z: 2.38155 }
+  up { x: -0.595903 y: 0.7972 z: 0.0968126 }
+  normal { x: 0.78399 y: 0.603625 z: -0.144901 }
+  height: 1.9003
+  width: 0.855134
+  type: 0
+  branch: 30
+  s: 1
+}
+cards {
+  anchor { x: 1.49828 y: 10.2471 z: 0.0698684 }
+  up { x: 0.358445 y: -0.843643 z: 0.399729 }
+  normal { x: -0.106305 y: 0.38851 z: 0.915292 }
+  height: 2.03931
+  width: 0.91769
+  type: 0
+  branch: 11
+  s: 0.8
+}
+cards {
+  anchor { x: 1.02364 y: 10.4554 z: 1.11849 }
+  up { x: -0.00130633 y: -0.702254 z: 0.711925 }
+  normal { x: 0.995047 y: 0.0698482 z: 0.0707252 }
+  height: 2.00148
+  width: 0.900665
+  type: 1
+  branch: 32
+  s: 0.8
+}
+cards {
+  anchor { x: 1.53197 y: 10.6134 z: 1.2153 }
+  up { x: -0.731137 y: -0.149056 z: 0.665748 }
+  normal { x: -0.207773 y: 0.978134 z: -0.00918347 }
+  height: 1.80964
+  width: 0.814338
+  type: 0
+  branch: 51
+  s: 1
+}
+cards {
+  anchor { x: 1.53197 y: 10.6134 z: 1.2153 }
+  up { x: 0.913163 y: -0.406138 z: 0.0344201 }
+  normal { x: -0.10874 y: -0.161361 z: 0.980887 }
+  height: 1.96661
+  width: 0.884974
+  type: 0
+  branch: 51
+  s: 1
+}
+cards {
+  anchor { x: 1.20003 y: 10.8679 z: 1.51734 }
+  up { x: 0.288592 y: -0.671065 z: 0.682925 }
+  normal { x: 0.927515 y: 0.372914 z: -0.0255143 }
+  height: 2.03427
+  width: 0.91542
+  type: 1
+  branch: 32
+  s: 1
+}
+cards {
+  anchor { x: 1.20003 y: 10.8679 z: 1.51734 }
+  up { x: -0.158464 y: -0.63188 z: 0.758694 }
+  normal { x: -0.826571 y: 0.505194 z: 0.248111 }
+  height: 1.96891
+  width: 0.88601
+  type: 0
+  branch: 32
+  s: 1
+}
+cards {
+  anchor { x: 1.53197 y: 10.6134 z: 1.2153 }
+  up { x: -0.157437 y: -0.09575 z: 0.982876 }
+  normal { x: 0.723442 y: -0.688659 z: 0.0487931 }
+  height: 1.99711
+  width: 0.898701
+  type: 1
+  branch: 51
+  s: 1
+}
+cards {
+  anchor { x: 1.53197 y: 10.6134 z: 1.2153 }
+  up { x: 0.269311 y: -0.307222 z: -0.912735 }
+  normal { x: 0.198508 y: 0.945108 z: -0.259547 }
+  height: 1.68922
+  width: 0.760149
+  type: 1
+  branch: 51
+  s: 1
+}
+cards {
+  anchor { x: 1.53197 y: 10.6134 z: 1.2153 }
+  up { x: 0.311819 y: -0.513402 z: -0.799492 }
+  normal { x: 0.454372 y: -0.658419 z: 0.600026 }
+  height: 1.97254
+  width: 0.887644
+  type: 0
+  branch: 51
+  s: 1
+}
+cards {
+  anchor { x: 0.848861 y: 7.46533 z: -0.714948 }
+  up { x: 0.455879 y: 0.842038 z: 0.288352 }
+  normal { x: -0.029391 y: 0.338041 z: -0.940672 }
+  height: 2.36687
+  width: 1.06509
+  type: 0
+  branch: 7
+  s: 0.4
+}
+cards {
+  anchor { x: 0.459867 y: 7.35352 z: -1.59907 }
+  up { x: -0.615912 y: 0.761192 z: -0.203072 }
+  normal { x: 0.786711 y: 0.607908 z: -0.107398 }
+  height: 2.11787
+  width: 0.95304
+  type: 1
+  branch: 29
+  s: 0.4
+}
+cards {
+  anchor { x: 1.16755 y: 9.86404 z: -0.132953 }
+  up { x: -0.746159 y: 0.607407 z: -0.272588 }
+  normal { x: 0.22763 y: -0.152007 z: -0.96181 }
+  height: 2.35182
+  width: 1.05832
+  type: 0
+  branch: 11
+  s: 0.6
+}
+cards {
+  anchor { x: 1.39185 y: 7.96641 z: -2.25804 }
+  up { x: -0.825963 y: 0.296877 z: -0.479218 }
+  normal { x: 0.373979 y: 0.924658 z: -0.0717484 }
+  height: 1.88197
+  width: 0.846887
+  type: 1
+  branch: 29
+  s: 0.8
+}
+cards {
+  anchor { x: 0.829076 y: 10.122 z: -1.82226 }
+  up { x: -0.250348 y: -0.354428 z: -0.900948 }
+  normal { x: 0.960391 y: -0.208539 z: -0.184827 }
+  height: 2.12748
+  width: 0.957368
+  type: 0
+  branch: 10
+  s: 0.8
+}
+cards {
+  anchor { x: 1.30419 y: 10.3671 z: -1.97599 }
+  up { x: 0.121153 y: -0.652106 z: -0.748385 }
+  normal { x: -0.792631 y: 0.390299 z: -0.468404 }
+  height: 1.80229
+  width: 0.811032
+  type: 1
+  branch: 35
+  s: 1
+}
+cards {
+  anchor { x: 0.928384 y: 10.5549 z: -2.13466 }
+  up { x: 0.785094 y: -0.471274 z: -0.401905 }
+  normal { x: 0.613522 y: 0.680728 z: 0.400251 }
+  height: 1.98498
+  width: 0.89324
+  type: 0
+  branch: 10
+  s: 1
+}
+cards {
+  anchor { x: -0.305232 y: 9.32588 z: -0.944874 }
+  up { x: 0.998975 y: -0.00919573 z: -0.0443162 }
+  normal { x: -0.0443666 y: -0.392564 z: -0.918654 }
+  height: 1.97093
+  width: 0.886916
+  type: 1
+  branch: 10
+  s: 0.2
+}
+cards {
+  anchor { x: 0.459867 y: 7.35352 z: -1.59907 }
+  up { x: 0.555669 y: 0.831189 z: -0.0188782 }
+  normal { x: -0.656193 y: 0.42451 z: -0.623861 }
+  height: 2.0487
+  width: 0.921915
+  type: 0
+  branch: 29
+  s: 0.4
+}
+cards {
+  anchor { x: -1.36676 y: 9.58143 z: -1.68808 }
+  up { x: -0.3373 y: -0.937244 z: -0.0883357 }
+  normal { x: 0.488436 y: -0.0940167 z: -0.86752 }
+  height: 2.29209
+  width: 1.03144
+  type: 0
+  branch: 53
+  s: 0.666667
+}
+cards {
+  anchor { x: -0.513393 y: 9.62076 z: -2.25362 }
+  up { x: 0.458617 y: -0.804469 z: -0.377491 }
+  normal { x: -0.815134 y: -0.211677 z: -0.539211 }
+  height: 1.77542
+  width: 0.798941
+  type: 1
+  branch: 34
+  s: 0.75
+}
+cards {
+  anchor { x: -1.08976 y: 8.21846 z: -3.22588 }
+  up { x: 0.873715 y: -0.0465746 z: -0.484204 }
+  normal { x: -0.0660957 y: 0.974807 z: -0.21303 }
+  height: 1.7698
+  width: 0.796409
+  type: 0
+  branch: 27
+  s: 0.8
+}
+cards {
+  anchor { x: -0.752964 y: 9.69729 z: -2.64255 }
+  up { x: -0.87704 y: -0.273698 z: 0.39483 }
+  normal { x: -0.0375644 y: -0.780262 z: -0.624324 }
+  height: 1.98907
+  width: 0.895081
+  type: 0
+  branch: 34
+  s: 1
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: 0.329969 y: -0.869812 z: -0.366807 }
+  normal { x: 0.0436961 y: 0.402227 z: -0.914497 }
+  height: 2.06725
+  width: 0.930264
+  type: 1
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 1.30419 y: 10.3671 z: -1.97599 }
+  up { x: 0.514866 y: -0.641267 z: 0.568938 }
+  normal { x: 0.223128 y: 0.74103 z: 0.633316 }
+  height: 1.715
+  width: 0.771751
+  type: 0
+  branch: 35
+  s: 1
+}
+cards {
+  anchor { x: -0.164833 y: 9.52524 z: 0.263163 }
+  up { x: -0.84471 y: 0.119582 z: -0.521694 }
+  normal { x: -0.534884 y: -0.223367 z: 0.814866 }
+  height: 2.36376
+  width: 1.06369
+  type: 1
+  branch: 0
+  s: 0.75
+}
+cards {
+  anchor { x: -2.06332 y: 7.61721 z: -0.225292 }
+  up { x: -0.220395 y: 0.889712 z: -0.399797 }
+  normal { x: -0.100226 y: 0.38705 z: 0.916595 }
+  height: 2.22437
+  width: 1.00097
+  type: 0
+  branch: 9
+  s: 0.6
+}
+cards {
+  anchor { x: -1.21685 y: 8.0354 z: 1.64509 }
+  up { x: 0.404472 y: 0.905436 z: -0.128796 }
+  normal { x: -0.836971 y: 0.423236 z: 0.346918 }
+  height: 2.11243
+  width: 0.950592
+  type: 1
+  branch: 8
+  s: 0.8
+}
+cards {
+  anchor { x: -1.42238 y: 9.85071 z: 0.831806 }
+  up { x: -0.812066 y: -0.506388 z: -0.290035 }
+  normal { x: -0.212884 y: -0.205692 z: 0.955181 }
+  height: 2.38492
+  width: 1.07321
+  type: 1
+  branch: 33
+  s: 0.6
+}
+cards {
+  anchor { x: -1.21685 y: 8.0354 z: 1.64509 }
+  up { x: 0.875315 y: 0.167158 z: 0.453742 }
+  normal { x: -0.334515 y: 0.886909 z: 0.318578 }
+  height: 2.26117
+  width: 1.01752
+  type: 1
+  branch: 8
+  s: 0.8
+}
+cards {
+  anchor { x: -1.58892 y: 9.94848 z: 1.36281 }
+  up { x: 0.807196 y: -0.274776 z: 0.52243 }
+  normal { x: -0.588573 y: -0.441993 z: 0.676923 }
+  height: 1.91777
+  width: 0.862997
+  type: 0
+  branch: 33
+  s: 0.8
+}
+cards {
+  anchor { x: -1.52875 y: 8.45801 z: 2.03318 }
+  up { x: 0.0502531 y: 0.945584 z: -0.321473 }
+  normal { x: 0.515551 y: 0.251119 z: 0.819235 }
+  height: 1.81597
+  width: 0.817188
+  type: 0
+  branch: 8
+  s: 1
+}
+cards {
+  anchor { x: -1.52875 y: 8.45801 z: 2.03318 }
+  up { x: 0.851487 y: 0.52408 z: 0.0176234 }
+  normal { x: -0.523932 y: 0.848905 z: 0.0696838 }
+  height: 2.10675
+  width: 0.948036
+  type: 1
+  branch: 8
+  s: 1
+}
+cards {
+  anchor { x: -1.65759 y: 10.1361 z: 1.88979 }
+  up { x: 0.949936 y: 0.311701 z: -0.0215475 }
+  normal { x: 0.210646 y: -0.587974 z: 0.78097 }
+  height: 1.88582
+  width: 0.848617
+  type: 0
+  branch: 33
+  s: 1
+}
+cards {
+  anchor { x: -1.52875 y: 8.45801 z: 2.03318 }
+  up { x: 0.986781 y: 0.0388843 z: 0.157324 }
+  normal { x: -0.0269816 y: 0.996658 z: -0.0770986 }
+  height: 1.76848
+  width: 0.795816
+  type: 1
+  branch: 8
+  s: 1
+}
+cards {
+  anchor { x: -1.65759 y: 10.1361 z: 1.88979 }
+  up { x: -0.382351 y: -0.676651 z: 0.629246 }
+  normal { x: -0.914613 y: 0.180235 z: -0.361937 }
+  height: 2.23811
+  width: 1.00715
+  type: 0
+  branch: 33
+  s: 1
+}
+cards {
+  anchor { x: -1.42238 y: 9.85071 z: 0.831806 }
+  up { x: -0.668516 y: -0.565934 z: -0.482499 }
+  normal { x: -0.568985 y: -0.0285671 z: 0.821852 }
+  height: 1.87933
+  width: 0.845696
+  type: 1
+  branch: 33
+  s: 0.6
+}
+cards {
+  anchor { x: -1.58892 y: 9.94848 z: 1.36281 }
+  up { x: 0.463432 y: -0.11233 z: 0.878984 }
+  normal { x: 0.232655 y: 0.972558 z: 0.00162364 }
+  height: 1.78199
+  width: 0.801897
+  type: 1
+  branch: 33
+  s: 0.8
+}
+cards {
+  anchor { x: -1.65759 y: 10.1361 z: 1.88979 }
+  up { x: -0.498388 y: 0.304606 z: -0.81168 }
+  normal { x: -0.857589 y: -0.310461 z: 0.410068 }
+  height: 1.7757
+  width: 0.799063
+  type: 1
+  branch: 33
+  s: 1
+}
+cards {
+  anchor { x: -1.65759 y: 10.1361 z: 1.88979 }
+  up { x: 0.206427 y: -0.487042 z: 0.848633 }
+  normal { x: 0.601718 y: 0.747113 z: 0.282413 }
+  height: 1.6301
+  width: 0.733543
+  type: 1
+  branch: 33
+  s: 1
+}
+cards {
+  anchor { x: 0.102225 y: 9.54748 z: -1.24385 }
+  up { x: 0.25186 y: -0.929343 z: -0.269979 }
+  normal { x: 0.927617 y: 0.152309 z: 0.34107 }
+  height: 2.28307
+  width: 1.02738
+  type: 0
+  branch: 10
+  s: 0.4
+}
+cards {
+  anchor { x: 0.00996124 y: 7.95045 z: 0.365245 }
+  up { x: -0.359177 y: 0.931794 z: -0.0524658 }
+  normal { x: 0.849329 y: 0.303054 z: -0.432201 }
+  height: 2.36447
+  width: 1.06401
+  type: 0
+  branch: 0
+  s: 0.625
+}
+cards {
+  anchor { x: 1.6586 y: 7.63611 z: -0.533619 }
+  up { x: -0.235263 y: 0.513799 z: -0.825022 }
+  normal { x: 0.550258 y: 0.770119 z: 0.322696 }
+  height: 2.08732
+  width: 0.939294
+  type: 1
+  branch: 7
+  s: 0.6
+}
+cards {
+  anchor { x: 0.675494 y: 9.64507 z: -0.0813022 }
+  up { x: -0.0649077 y: -0.0246937 z: -0.997586 }
+  normal { x: 0.976692 y: -0.20654 z: -0.0584356 }
+  height: 2.19913
+  width: 0.989606
+  type: 0
+  branch: 11
+  s: 0.4
+}
+cards {
+  anchor { x: 2.43362 y: 7.92722 z: -0.295174 }
+  up { x: -0.197129 y: 0.863622 z: 0.464001 }
+  normal { x: 0.421233 y: 0.501986 z: -0.755363 }
+  height: 2.28722
+  width: 1.02925
+  type: 0
+  branch: 7
+  s: 0.8
+}
+cards {
+  anchor { x: 2.43362 y: 7.92722 z: -0.295174 }
+  up { x: -0.302497 y: 0.540173 z: -0.785308 }
+  normal { x: 0.140598 y: 0.840182 z: 0.523761 }
+  height: 1.87823
+  width: 0.845204
+  type: 1
+  branch: 7
+  s: 0.8
+}
+cards {
+  anchor { x: 1.16755 y: 9.86404 z: -0.132953 }
+  up { x: 0.750072 y: -0.107891 z: -0.652497 }
+  normal { x: 0.649292 y: -0.0674576 z: 0.757542 }
+  height: 1.79648
+  width: 0.808417
+  type: 0
+  branch: 11
+  s: 0.6
+}
+cards {
+  anchor { x: 1.49828 y: 10.2471 z: 0.0698684 }
+  up { x: 0.692283 y: -0.678116 z: -0.246787 }
+  normal { x: 0.384501 y: 0.636023 z: -0.669054 }
+  height: 1.93992
+  width: 0.872962
+  type: 1
+  branch: 11
+  s: 0.8
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: 0.393337 y: -0.770847 z: 0.50108 }
+  normal { x: 0.0408204 y: 0.559116 z: 0.828084 }
+  height: 1.78599
+  width: 0.803697
+  type: 0
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 1.94141 y: 10.5396 z: 0.168649 }
+  up { x: -0.0357688 y: -0.231391 z: 0.972203 }
+  normal { x: 0.817277 y: -0.566636 z: -0.104794 }
+  height: 1.79417
+  width: 0.807377
+  type: 1
+  branch: 11
+  s: 1
+}
+cards {
+  anchor { x: 2.43362 y: 7.92722 z: -0.295174 }
+  up { x: 0.232942 y: 0.574007 z: 0.785019 }
+  normal { x: 0.0402143 y: 0.800849 z: -0.597515 }
+  height: 2.00951
+  width: 0.90428
+  type: 0
+  branch: 7
+  s: 0.8
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: 0.0797865 y: -0.823824 z: -0.561203 }
+  normal { x: 0.969509 y: -0.0667307 z: 0.235794 }
+  height: 1.97176
+  width: 0.887294
+  type: 0
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: 0.305681 y: -0.920314 z: -0.244092 }
+  normal { x: -0.209652 y: 0.185012 z: -0.960113 }
+  height: 1.76805
+  width: 0.79562
+  type: 1
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: 0.788739 y: -0.371988 z: 0.489404 }
+  normal { x: 0.33783 y: 0.927427 z: 0.160465 }
+  height: 1.85076
+  width: 0.83284
+  type: 0
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: -0.738656 y: 0.0307478 z: -0.673381 }
+  normal { x: 0.432975 y: -0.744 z: -0.508918 }
+  height: 1.80676
+  width: 0.813042
+  type: 0
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: -0.0115533 y: 7.36139 z: -1.17496 }
+  up { x: 0.514236 y: 0.738975 z: -0.435289 }
+  normal { x: -0.81325 y: 0.258962 z: -0.521117 }
+  height: 2.26352
+  width: 1.01858
+  type: 0
+  branch: 29
+  s: 0.2
+}
+cards {
+  anchor { x: -1.44717 y: 9.27314 z: -1.06358 }
+  up { x: -0.370638 y: -0.924502 z: 0.0890149 }
+  normal { x: -0.184786 y: -0.0205236 z: -0.982564 }
+  height: 2.19375
+  width: 0.987189
+  type: 0
+  branch: 36
+  s: 0.6
+}
+cards {
+  anchor { x: -0.367397 y: 9.34347 z: -1.39824 }
+  up { x: 0.267258 y: -0.849471 z: -0.454942 }
+  normal { x: -0.936152 y: -0.116952 z: -0.331574 }
+  height: 2.22367
+  width: 1.00065
+  type: 1
+  branch: 34
+  s: 0.25
+}
+cards {
+  anchor { x: -0.949014 y: 7.34693 z: -1.75994 }
+  up { x: -0.434551 y: -0.208532 z: 0.876173 }
+  normal { x: -0.751815 y: 0.619654 z: -0.225395 }
+  height: 2.13118
+  width: 0.95903
+  type: 1
+  branch: 27
+  s: 0.2
+}
+cards {
+  anchor { x: -1.44717 y: 9.27314 z: -1.06358 }
+  up { x: -0.425152 y: -0.808821 z: 0.406268 }
+  normal { x: -0.381712 y: -0.246766 z: -0.890731 }
+  height: 2.05301
+  width: 0.923855
+  type: 0
+  branch: 36
+  s: 0.6
+}
+cards {
+  anchor { x: -1.36676 y: 9.58143 z: -1.68808 }
+  up { x: -0.253316 y: -0.868055 z: -0.426979 }
+  normal { x: -0.95507 y: 0.154214 z: 0.2531 }
+  height: 1.84935
+  width: 0.832206
+  type: 1
+  branch: 53
+  s: 0.666667
+}
+cards {
+  anchor { x: -2.69368 y: 7.81872 z: -0.407409 }
+  up { x: -0.0510236 y: 0.720036 z: 0.692058 }
+  normal { x: -0.0455792 y: 0.69056 z: -0.721837 }
+  height: 1.75454
+  width: 0.789542
+  type: 1
+  branch: 9
+  s: 0.8
+}
+cards {
+  anchor { x: -2.18359 y: 9.71491 z: -1.51699 }
+  up { x: 0.114858 y: -0.564565 z: -0.817358 }
+  normal { x: -0.737841 y: -0.599402 z: 0.310335 }
+  height: 1.72109
+  width: 0.774492
+  type: 1
+  branch: 36
+  s: 1
+}
+cards {
+  anchor { x: -2.18359 y: 9.71491 z: -1.51699 }
+  up { x: 0.269877 y: -0.250675 z: -0.929693 }
+  normal { x: 0.00835858 y: 0.966092 z: -0.258063 }
+  height: 1.69654
+  width: 0.763445
+  type: 0
+  branch: 36
+  s: 1
+}
+cards {
+  anchor { x: -1.08137 y: 9.51673 z: -1.30493 }
+  up { x: -0.964426 y: -0.160476 z: 0.21007 }
+  normal { x: -0.139664 y: -0.365387 z: -0.920319 }
+  height: 2.15416
+  width: 0.969372
+  type: 0
+  branch: 53
+  s: 0.333333
+}
+cards {
+  anchor { x: -0.49035 y: 9.37775 z: -1.83882 }
+  up { x: -0.311778 y: -0.924277 z: -0.220241 }
+  normal { x: -0.865856 y: 0.37183 z: -0.334718 }
+  height: 2.23803
+  width: 1.00711
+  type: 1
+  branch: 34
+  s: 0.5
+}
+cards {
+  anchor { x: -1.76777 y: 9.55277 z: -1.34312 }
+  up { x: 0.0187285 y: -0.950901 z: -0.308929 }
+  normal { x: 0.397947 y: 0.290544 z: -0.870185 }
+  height: 2.23026
+  width: 1.00362
+  type: 0
+  branch: 36
+  s: 0.8
+}
+cards {
+  anchor { x: -0.513393 y: 9.62076 z: -2.25362 }
+  up { x: 0.233374 y: -0.744163 z: -0.625906 }
+  normal { x: -0.961494 y: -0.0805221 z: -0.262764 }
+  height: 1.87721
+  width: 0.844743
+  type: 1
+  branch: 34
+  s: 0.75
+}
+cards {
+  anchor { x: -0.752964 y: 9.69729 z: -2.64255 }
+  up { x: -0.960656 y: -0.0968819 z: 0.260297 }
+  normal { x: 0.0266406 y: 0.900727 z: 0.433568 }
+  height: 1.98098
+  width: 0.891442
+  type: 1
+  branch: 34
+  s: 1
+}
+cards {
+  anchor { x: -1.40853 y: 10.0049 z: -1.96682 }
+  up { x: -0.51745 y: -0.653677 z: -0.552225 }
+  normal { x: 0.673917 y: 0.0863895 z: -0.733739 }
+  height: 1.90544
+  width: 0.857448
+  type: 0
+  branch: 53
+  s: 1
+}
+cards {
+  anchor { x: -1.73512 y: 10.2239 z: 0.888046 }
+  up { x: 0.311997 y: 0.817379 z: -0.484303 }
+  normal { x: 0.710167 y: 0.137981 z: 0.69038 }
+  height: 2.62634
+  width: 1.18185
+  type: 0
+  branch: 52
+  s: 0.5
+}
+cards {
+  anchor { x: 0.352439 y: 9.67119 z: 0.338795 }
+  up { x: -0.617633 y: -0.518688 z: 0.591179 }
+  normal { x: 0.0953133 y: 0.696783 z: 0.710921 }
+  height: 2.49721
+  width: 1.12374
+  type: 0
+  branch: 32
+  s: 0.4
+}
+cards {
+  anchor { x: -0.288251 y: 11.028 z: 0.340329 }
+  up { x: -0.89518 y: -0.0439186 z: 0.443537 }
+  normal { x: 0.440959 y: 0.0575781 z: 0.895679 }
+  height: 2.0113
+  width: 0.905086
+  type: 1
+  branch: 12
+  s: 0.2
+}
+cards {
+  anchor { x: 0.648347 y: 10.15 z: 0.760648 }
+  up { x: -0.868913 y: 0.491903 z: 0.0549726 }
+  normal { x: 0.491003 y: 0.842603 z: 0.221215 }
+  height: 1.96768
+  width: 0.885458
+  type: 0
+  branch: 32
+  s: 0.6
+}
+cards {
+  anchor { x: 0.393616 y: 11.5011 z: 0.312705 }
+  up { x: 0.692612 y: -0.718623 z: 0.0622091 }
+  normal { x: -0.0268772 y: 0.060473 z: 0.997808 }
+  height: 2.29592
+  width: 1.03316
+  type: 0
+  branch: 13
+  s: 0.6
+}
+cards {
+  anchor { x: 0.0114256 y: 11.4291 z: 0.903247 }
+  up { x: -0.232487 y: -0.704493 z: 0.670551 }
+  normal { x: 0.92153 y: 0.0609126 z: 0.3835 }
+  height: 2.15351
+  width: 0.969081
+  type: 1
+  branch: 12
+  s: 0.6
+}
+cards {
+  anchor { x: 1.02364 y: 10.4554 z: 1.11849 }
+  up { x: -0.894619 y: -0.0175265 z: 0.446485 }
+  normal { x: -0.0359905 y: 0.99881 z: -0.0329063 }
+  height: 1.8781
+  width: 0.845146
+  type: 0
+  branch: 32
+  s: 0.8
+}
+cards {
+  anchor { x: 0.0114256 y: 11.4291 z: 0.903247 }
+  up { x: 0.613004 y: -0.625509 z: 0.482664 }
+  normal { x: -0.44248 y: 0.234312 z: 0.865626 }
+  height: 1.74575
+  width: 0.785586
+  type: 0
+  branch: 12
+  s: 0.6
+}
+cards {
+  anchor { x: 0.128505 y: 11.6957 z: 1.1382 }
+  up { x: 0.264181 y: -0.704038 z: 0.659196 }
+  normal { x: 0.960447 y: 0.254427 z: -0.113178 }
+  height: 2.10954
+  width: 0.949295
+  type: 1
+  branch: 12
+  s: 0.8
+}
+cards {
+  anchor { x: 1.20003 y: 10.8679 z: 1.51734 }
+  up { x: -0.299192 y: -0.458412 z: 0.836865 }
+  normal { x: -0.547542 y: 0.800755 z: 0.242877 }
+  height: 1.94569
+  width: 0.875561
+  type: 0
+  branch: 32
+  s: 1
+}
+cards {
+  anchor { x: 0.296772 y: 11.9555 z: 1.34601 }
+  up { x: 0.881564 y: -0.252207 z: -0.399044 }
+  normal { x: 0.281549 y: -0.397603 z: 0.873294 }
+  height: 1.85183
+  width: 0.833324
+  type: 0
+  branch: 12
+  s: 1
+}
+cards {
+  anchor { x: 0.675494 y: 9.64507 z: -0.0813022 }
+  up { x: -0.174787 y: -0.677141 z: -0.714794 }
+  normal { x: 0.379657 y: 0.623479 z: -0.683473 }
+  height: 2.42436
+  width: 1.09096
+  type: 1
+  branch: 11
+  s: 0.4
+}
+cards {
+  anchor { x: -0.55643 y: 11.0932 z: -0.746152 }
+  up { x: 0.348995 y: -0.766135 z: -0.539666 }
+  normal { x: 0.9088 y: 0.417207 z: -0.0045771 }
+  height: 2.06374
+  width: 0.928683
+  type: 0
+  branch: 40
+  s: 0.4
+}
+cards {
+  anchor { x: 0.393616 y: 11.5011 z: 0.312705 }
+  up { x: -0.715821 y: 0.45589 z: -0.528927 }
+  normal { x: 0.598669 y: 0.0107688 z: -0.800924 }
+  height: 2.3845
+  width: 1.07302
+  type: 0
+  branch: 13
+  s: 0.6
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: -0.544304 y: -0.0966762 z: -0.833299 }
+  normal { x: 0.0608046 y: 0.986178 z: -0.15413 }
+  height: 2.10003
+  width: 0.945011
+  type: 1
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 0.115771 y: 11.9069 z: -1.16162 }
+  up { x: 0.118998 y: -0.711714 z: -0.692317 }
+  normal { x: 0.992062 y: 0.113774 z: 0.0535571 }
+  height: 2.13553
+  width: 0.960989
+  type: 0
+  branch: 56
+  s: 1
+}
+cards {
+  anchor { x: 0.532049 y: 11.7169 z: -0.754145 }
+  up { x: 0.841654 y: -0.533109 z: -0.0861037 }
+  normal { x: -0.152163 y: -0.0811374 z: -0.985019 }
+  height: 1.89566
+  width: 0.853045
+  type: 1
+  branch: 38
+  s: 0.8
+}
+cards {
+  anchor { x: 0.928384 y: 10.5549 z: -2.13466 }
+  up { x: 0.864925 y: -0.0379759 z: 0.500462 }
+  normal { x: -0.184735 y: 0.903045 z: 0.387793 }
+  height: 1.64298
+  width: 0.739341
+  type: 0
+  branch: 10
+  s: 1
+}
+cards {
+  anchor { x: 0.532049 y: 11.7169 z: -0.754145 }
+  up { x: 0.730439 y: -0.25528 z: -0.633476 }
+  normal { x: 0.674889 y: 0.12745 z: 0.72683 }
+  height: 2.11332
+  width: 0.950995
+  type: 0
+  branch: 38
+  s: 0.8
+}
+cards {
+  anchor { x: 0.896226 y: 11.963 z: 0.0838452 }
+  up { x: 0.506723 y: -0.584268 z: -0.633927 }
+  normal { x: -0.155445 y: 0.661349 z: -0.733795 }
+  height: 1.78679
+  width: 0.804057
+  type: 1
+  branch: 13
+  s: 1
+}
+cards {
+  anchor { x: 0.532049 y: 11.7169 z: -0.754145 }
+  up { x: 0.716536 y: -0.642853 z: -0.270771 }
+  normal { x: 0.45768 y: 0.140334 z: 0.877973 }
+  height: 1.65526
+  width: 0.744867
+  type: 0
+  branch: 38
+  s: 0.8
+}
+cards {
+  anchor { x: -0.55643 y: 11.0932 z: -0.746152 }
+  up { x: -0.405581 y: -0.664822 z: -0.627309 }
+  normal { x: -0.794292 y: -0.0832796 z: 0.601802 }
+  height: 2.29863
+  width: 1.03438
+  type: 1
+  branch: 40
+  s: 0.4
+}
+cards {
+  anchor { x: -1.07376 y: 9.48946 z: 0.456263 }
+  up { x: 0.456827 y: 0.384995 z: 0.801928 }
+  normal { x: -0.720482 y: 0.688878 z: 0.079709 }
+  height: 2.2778
+  width: 1.02501
+  type: 1
+  branch: 33
+  s: 0.4
+}
+cards {
+  anchor { x: -1.02126 y: 11.1713 z: 0.207604 }
+  up { x: 0.173583 y: -0.389203 z: 0.904649 }
+  normal { x: -0.982562 y: -0.130606 z: 0.132343 }
+  height: 2.10395
+  width: 0.946777
+  type: 0
+  branch: 39
+  s: 0.4
+}
+cards {
+  anchor { x: -1.73512 y: 10.2239 z: 0.888046 }
+  up { x: -0.0406902 y: 0.791313 z: -0.610056 }
+  normal { x: -0.339502 y: 0.563286 z: 0.753292 }
+  height: 2.26964
+  width: 1.02134
+  type: 0
+  branch: 52
+  s: 0.5
+}
+cards {
+  anchor { x: -1.73512 y: 10.2239 z: 0.888046 }
+  up { x: 0.556619 y: 0.816672 z: 0.152386 }
+  normal { x: -0.665041 y: 0.547952 z: -0.507415 }
+  height: 1.96546
+  width: 0.884458
+  type: 1
+  branch: 52
+  s: 0.5
+}
+cards {
+  anchor { x: -1.29111 y: 11.2751 z: 0.332414 }
+  up { x: -0.47162 y: -0.504529 z: -0.723205 }
+  normal { x: -0.855577 y: 0.0632869 z: 0.513792 }
+  height: 2.20547
+  width: 0.992463
+  type: 1
+  branch: 39
+  s: 0.6
+}
+cards {
+  anchor { x: -2.00881 y: 10.4906 z: 1.21372 }
+  up { x: -0.29906 y: 0.269128 z: -0.915496 }
+  normal { x: 0.307648 y: 0.935367 z: 0.174472 }
+  height: 1.97705
+  width: 0.889673
+  type: 0
+  branch: 52
+  s: 1
+}
+cards {
+  anchor { x: -1.68368 y: 11.6415 z: 0.563124 }
+  up { x: 0.179495 y: -0.585983 z: 0.790193 }
+  normal { x: -0.982668 y: -0.144621 z: 0.115969 }
+  height: 2.07222
+  width: 0.932498
+  type: 0
+  branch: 39
+  s: 1
+}
+cards {
+  anchor { x: -1.83788 y: 11.4812 z: 0.322446 }
+  up { x: -0.582632 y: -0.730824 z: 0.355579 }
+  normal { x: 0.399791 y: 0.1232 z: 0.908289 }
+  height: 1.67755
+  width: 0.754896
+  type: 1
+  branch: 55
+  s: 1
+}
+cards {
+  anchor { x: -1.73512 y: 10.2239 z: 0.888046 }
+  up { x: 0.107186 y: -0.55547 z: -0.824599 }
+  normal { x: -0.25155 y: 0.787242 z: -0.563003 }
+  height: 1.86422
+  width: 0.838899
+  type: 0
+  branch: 52
+  s: 0.5
+}
+cards {
+  anchor { x: -1.83788 y: 11.4812 z: 0.322446 }
+  up { x: -0.317921 y: -0.519889 z: 0.792869 }
+  normal { x: -0.43646 y: -0.662127 z: -0.609171 }
+  height: 1.80598
+  width: 0.81269
+  type: 0
+  branch: 55
+  s: 1
+}
+cards {
+  anchor { x: -1.83788 y: 11.4812 z: 0.322446 }
+  up { x: -0.268481 y: -0.912573 z: 0.308428 }
+  normal { x: -0.485464 y: 0.404732 z: 0.77493 }
+  height: 1.86472
+  width: 0.839124
+  type: 1
+  branch: 55
+  s: 1
+}
+cards {
+  anchor { x: 0.449322 y: 9.77491 z: -1.59564 }
+  up { x: -0.436312 y: 0.897234 z: -0.067852 }
+  normal { x: 0.638901 y: 0.36202 z: 0.678783 }
+  height: 2.40332
+  width: 1.08149
+  type: 1
+  branch: 10
+  s: 0.6
+}
+cards {
+  anchor { x: -0.149541 y: 11.2305 z: 0.627709 }
+  up { x: 0.162258 y: -0.620506 z: 0.767232 }
+  normal { x: 0.966119 y: 0.258058 z: 0.00438785 }
+  height: 2.29147
+  width: 1.03116
+  type: 1
+  branch: 12
+  s: 0.4
+}
+cards {
+  anchor { x: 1.16755 y: 9.86404 z: -0.132953 }
+  up { x: -0.158379 y: -0.203293 z: 0.966223 }
+  normal { x: 0.223165 y: 0.945882 z: 0.235594 }
+  height: 2.1547
+  width: 0.969615
+  type: 0
+  branch: 11
+  s: 0.6
+}
+cards {
+  anchor { x: 0.393616 y: 11.5011 z: 0.312705 }
+  up { x: 0.313618 y: -0.361621 z: -0.877995 }
+  normal { x: 0.935592 y: -0.0402727 z: 0.350778 }
+  height: 2.22074
+  width: 0.999331
+  type: 0
+  branch: 13
+  s: 0.6
+}
+cards {
+  anchor { x: 1.94141 y: 10.5396 z: 0.168649 }
+  up { x: -0.462238 y: 0.689378 z: 0.557758 }
+  normal { x: -0.0895945 y: 0.589461 z: -0.802813 }
+  height: 2.10649
+  width: 0.947922
+  type: 0
+  branch: 11
+  s: 1
+}
+cards {
+  anchor { x: 1.70166 y: 10.166 z: -0.596247 }
+  up { x: -0.704015 y: 0.596678 z: -0.385147 }
+  normal { x: 0.33306 y: 0.756379 z: 0.562994 }
+  height: 2.04356
+  width: 0.919602
+  type: 1
+  branch: 37
+  s: 1
+}
+cards {
+  anchor { x: 0.896226 y: 11.963 z: 0.0838452 }
+  up { x: -0.401128 y: -0.0969468 z: -0.910878 }
+  normal { x: 0.786683 y: -0.545887 z: -0.288335 }
+  height: 1.79352
+  width: 0.807083
+  type: 0
+  branch: 13
+  s: 1
+}
+cards {
+  anchor { x: 0.0114256 y: 11.4291 z: 0.903247 }
+  up { x: 0.488502 y: -0.429814 z: 0.759358 }
+  normal { x: 0.773597 y: 0.615899 z: -0.14905 }
+  height: 2.07153
+  width: 0.932187
+  type: 1
+  branch: 12
+  s: 0.6
+}
+cards {
+  anchor { x: 1.20003 y: 10.8679 z: 1.51734 }
+  up { x: 0.141256 y: 0.486615 z: -0.862121 }
+  normal { x: -0.725887 y: 0.643066 z: 0.244037 }
+  height: 1.7782
+  width: 0.800192
+  type: 1
+  branch: 32
+  s: 1
+}
+cards {
+  anchor { x: 0.52473 y: 12.0746 z: 0.627829 }
+  up { x: -0.898931 y: 0.0133858 z: 0.437886 }
+  normal { x: 0.420202 y: -0.256359 z: 0.870465 }
+  height: 1.82655
+  width: 0.821946
+  type: 1
+  branch: 41
+  s: 1
+}
+cards {
+  anchor { x: 0.102225 y: 9.54748 z: -1.24385 }
+  up { x: 0.397192 y: 0.859638 z: 0.321343 }
+  normal { x: -0.343493 y: 0.463948 z: -0.816557 }
+  height: 2.02429
+  width: 0.910929
+  type: 0
+  branch: 10
+  s: 0.4
+}
+cards {
+  anchor { x: -1.08137 y: 9.51673 z: -1.30493 }
+  up { x: -0.139982 y: 0.932933 z: 0.331724 }
+  normal { x: 0.262728 y: 0.35801 z: -0.895993 }
+  height: 2.04141
+  width: 0.918633
+  type: 1
+  branch: 53
+  s: 0.333333
+}
+cards {
+  anchor { x: -0.692836 y: 11.2156 z: -1.10258 }
+  up { x: 0.872715 y: -0.238622 z: -0.425943 }
+  normal { x: -0.488216 y: -0.420039 z: -0.764992 }
+  height: 2.07733
+  width: 0.934797
+  type: 1
+  branch: 40
+  s: 0.6
+}
+cards {
+  anchor { x: -1.40853 y: 10.0049 z: -1.96682 }
+  up { x: 0.970389 y: 0.0095145 z: -0.241361 }
+  normal { x: -0.0240679 y: 0.99806 z: -0.0574211 }
+  height: 1.89903
+  width: 0.854563
+  type: 0
+  branch: 53
+  s: 1
+}
+cards {
+  anchor { x: -0.987241 y: 11.6633 z: -1.66535 }
+  up { x: -0.78237 y: -0.575705 z: 0.237615 }
+  normal { x: 0.0282056 y: -0.413878 z: -0.909895 }
+  height: 2.04272
+  width: 0.919223
+  type: 0
+  branch: 40
+  s: 1
+}
+cards {
+  anchor { x: -1.40853 y: 10.0049 z: -1.96682 }
+  up { x: 0.459023 y: 0.885771 z: 0.0686111 }
+  normal { x: -0.820785 y: 0.393253 z: 0.414323 }
+  height: 1.58463
+  width: 0.713083
+  type: 0
+  branch: 53
+  s: 1
+}
+cards {
+  anchor { x: -1.40853 y: 10.0049 z: -1.96682 }
+  up { x: 0.527359 y: -0.781537 z: -0.333304 }
+  normal { x: 0.773986 y: 0.603714 z: -0.190985 }
+  height: 2.1941
+  width: 0.987346
+  type: 0
+  branch: 53
+  s: 1
+}
+cards {
+  anchor { x: 0.312309 y: 11.3949 z: -0.619121 }
+  up { x: -0.924272 y: 0.380152 z: 0.0347277 }
+  normal { x: -0.0316624 y: 0.0143153 z: -0.999396 }
+  height: 2.24614
+  width: 1.01076
+  type: 0
+  branch: 38
+  s: 0.6
+}
+cards {
+  anchor { x: 0.312309 y: 11.3949 z: -0.619121 }
+  up { x: -0.112092 y: -0.404823 z: -0.907499 }
+  normal { x: -0.389979 y: 0.857907 z: -0.334531 }
+  height: 1.90081
+  width: 0.855367
+  type: 1
+  branch: 38
+  s: 0.6
+}
+cards {
+  anchor { x: -0.740377 y: 11.5278 z: -1.37645 }
+  up { x: 0.350096 y: -0.798801 z: -0.489234 }
+  normal { x: 0.934019 y: 0.337284 z: 0.117681 }
+  height: 1.93867
+  width: 0.872401
+  type: 0
+  branch: 40
+  s: 0.8
+}
+cards {
+  anchor { x: 0.675323 y: 11.9958 z: -0.971159 }
+  up { x: 0.776272 y: -0.622462 z: -0.0997159 }
+  normal { x: -0.326761 y: -0.262036 z: -0.908055 }
+  height: 1.95522
+  width: 0.879848
+  type: 1
+  branch: 38
+  s: 1
+}
+cards {
+  anchor { x: -0.288251 y: 11.028 z: 0.340329 }
+  up { x: -0.967755 y: -0.120651 z: 0.221121 }
+  normal { x: 0.00664058 y: 0.865304 z: 0.501203 }
+  height: 2.21343
+  width: 0.996045
+  type: 0
+  branch: 12
+  s: 0.2
+}
+cards {
+  anchor { x: -0.349782 y: 12.3071 z: -0.162878 }
+  up { x: 0.85541 y: -0.374481 z: 0.357825 }
+  normal { x: -0.261762 y: 0.283571 z: 0.922534 }
+  height: 2.22792
+  width: 1.00256
+  type: 0
+  branch: 57
+  s: 0.4
+}
+cards {
+  anchor { x: -1.68368 y: 11.6415 z: 0.563124 }
+  up { x: -0.00233403 y: -0.778215 z: 0.627994 }
+  normal { x: 0.83689 y: 0.342224 z: 0.427197 }
+  height: 2.11844
+  width: 0.953299
+  type: 1
+  branch: 39
+  s: 1
+}
+cards {
+  anchor { x: 0.128505 y: 11.6957 z: 1.1382 }
+  up { x: -0.900557 y: -0.174507 z: 0.398177 }
+  normal { x: -0.35014 y: 0.834023 z: -0.42639 }
+  height: 1.7633
+  width: 0.793487
+  type: 0
+  branch: 12
+  s: 0.8
+}
+cards {
+  anchor { x: -0.450627 y: 12.426 z: 0.602515 }
+  up { x: 0.909376 y: -0.305978 z: -0.281802 }
+  normal { x: 0.192858 y: -0.290114 z: 0.937358 }
+  height: 1.744
+  width: 0.7848
+  type: 0
+  branch: 14
+  s: 0.6
+}
+cards {
+  anchor { x: 0.296772 y: 11.9555 z: 1.34601 }
+  up { x: -0.271037 y: 0.837454 z: -0.474562 }
+  normal { x: 0.942597 y: 0.131007 z: -0.30716 }
+  height: 1.95181
+  width: 0.878313
+  type: 0
+  branch: 12
+  s: 1
+}
+cards {
+  anchor { x: -0.450627 y: 12.426 z: 0.602515 }
+  up { x: -0.96131 y: -0.105944 z: -0.25428 }
+  normal { x: 0.0993431 y: 0.727635 z: -0.678732 }
+  height: 1.78076
+  width: 0.801342
+  type: 0
+  branch: 14
+  s: 0.6
+}
+cards {
+  anchor { x: -0.434036 y: 12.6049 z: 0.691642 }
+  up { x: -0.631573 y: 0.102503 z: -0.768511 }
+  normal { x: -0.769727 y: 0.0359089 z: 0.637362 }
+  height: 1.85809
+  width: 0.836141
+  type: 1
+  branch: 14
+  s: 0.8
+}
+cards {
+  anchor { x: 0.648347 y: 10.15 z: 0.760648 }
+  up { x: -0.257476 y: 0.612553 z: 0.747318 }
+  normal { x: 0.520672 y: 0.739463 z: -0.426726 }
+  height: 2.45384
+  width: 1.10423
+  type: 0
+  branch: 32
+  s: 0.6
+}
+cards {
+  anchor { x: 0.312309 y: 11.3949 z: -0.619121 }
+  up { x: -0.66408 y: 0.63704 z: -0.391379 }
+  normal { x: 0.496203 y: 0.767091 z: 0.406637 }
+  height: 2.49458
+  width: 1.12256
+  type: 1
+  branch: 38
+  s: 0.6
+}
+cards {
+  anchor { x: -0.506662 y: 12.2264 z: -0.0863161 }
+  up { x: 0.296397 y: -0.0484717 z: 0.953834 }
+  normal { x: 0.94633 y: 0.149668 z: -0.286459 }
+  height: 2.03272
+  width: 0.914723
+  type: 1
+  branch: 57
+  s: 0.2
+}
+cards {
+  anchor { x: 0.642363 y: 11.7477 z: 0.225615 }
+  up { x: 0.559565 y: -0.506073 z: -0.656337 }
+  normal { x: -0.04631 y: 0.771595 z: -0.634426 }
+  height: 2.23596
+  width: 1.00618
+  type: 1
+  branch: 13
+  s: 0.8
+}
+cards {
+  anchor { x: 0.651552 y: 11.8817 z: -0.573978 }
+  up { x: -0.764413 y: 0.383265 z: -0.518441 }
+  normal { x: -0.138077 y: 0.688149 z: 0.71231 }
+  height: 2.009
+  width: 0.904048
+  type: 1
+  branch: 54
+  s: 1
+}
+cards {
+  anchor { x: 0.00171654 y: 12.7881 z: -0.281074 }
+  up { x: 0.854721 y: -0.376807 z: 0.357026 }
+  normal { x: 0.37238 y: -0.0340857 z: -0.927454 }
+  height: 1.85343
+  width: 0.834043
+  type: 1
+  branch: 58
+  s: 1
+}
+cards {
+  anchor { x: 0.651552 y: 11.8817 z: -0.573978 }
+  up { x: 0.264523 y: 0.251045 z: 0.93113 }
+  normal { x: -0.609667 y: 0.791636 z: -0.0402366 }
+  height: 1.60902
+  width: 0.724058
+  type: 0
+  branch: 54
+  s: 1
+}
+cards {
+  anchor { x: -1.68368 y: 11.6415 z: 0.563124 }
+  up { x: 0.536935 y: 0.789207 z: -0.298083 }
+  normal { x: -0.509249 y: 0.021512 z: -0.86035 }
+  height: 2.50388
+  width: 1.12675
+  type: 1
+  branch: 39
+  s: 1
+}
+cards {
+  anchor { x: -0.692836 y: 11.2156 z: -1.10258 }
+  up { x: -0.478193 y: -0.876129 z: -0.061073 }
+  normal { x: -0.853228 y: 0.479924 z: -0.204142 }
+  height: 2.33479
+  width: 1.05066
+  type: 1
+  branch: 40
+  s: 0.6
+}
+cards {
+  anchor { x: -1.83788 y: 11.4812 z: 0.322446 }
+  up { x: -0.351991 y: -0.894549 z: -0.275472 }
+  normal { x: -0.121951 y: 0.335627 z: -0.934068 }
+  height: 2.38717
+  width: 1.07423
+  type: 0
+  branch: 55
+  s: 1
+}
+cards {
+  anchor { x: -0.740377 y: 11.5278 z: -1.37645 }
+  up { x: -0.031002 y: 0.655472 z: 0.754583 }
+  normal { x: -0.986701 y: 0.100449 z: -0.127794 }
+  height: 1.96114
+  width: 0.882513
+  type: 0
+  branch: 40
+  s: 0.8
+}
+cards {
+  anchor { x: -0.987241 y: 11.6633 z: -1.66535 }
+  up { x: -0.894322 y: -0.00561111 z: 0.447389 }
+  normal { x: 0.138454 y: 0.947371 z: 0.288649 }
+  height: 1.82021
+  width: 0.819093
+  type: 1
+  branch: 40
+  s: 1
+}
+cards {
+  anchor { x: -1.10582 y: 12.4983 z: -0.546138 }
+  up { x: -0.712821 y: -0.603568 z: -0.357201 }
+  normal { x: 0.370301 y: 0.108642 z: -0.922537 }
+  height: 1.70253
+  width: 0.766138
+  type: 0
+  branch: 43
+  s: 0.8
+}
+cards {
+  anchor { x: -0.987241 y: 11.6633 z: -1.66535 }
+  up { x: 0.395462 y: 0.66439 z: 0.634189 }
+  normal { x: -0.917442 y: 0.252878 z: 0.307169 }
+  height: 1.75519
+  width: 0.789834
+  type: 0
+  branch: 40
+  s: 1
+}
+cards {
+  anchor { x: 0.312309 y: 11.3949 z: -0.619121 }
+  up { x: 0.0833033 y: -0.693465 z: 0.715659 }
+  normal { x: 0.218835 y: 0.713355 z: 0.66576 }
+  height: 2.45849
+  width: 1.10632
+  type: 0
+  branch: 38
+  s: 0.6
+}
+cards {
+  anchor { x: -0.528534 y: 12.1838 z: 0.296808 }
+  up { x: -0.300305 y: -0.47037 z: 0.829801 }
+  normal { x: 0.802389 y: 0.345808 z: 0.486405 }
+  height: 2.4131
+  width: 1.0859
+  type: 1
+  branch: 14
+  s: 0.2
+}
+cards {
+  anchor { x: 0.393616 y: 11.5011 z: 0.312705 }
+  up { x: -0.485106 y: -0.12909 z: 0.864874 }
+  normal { x: 0.0071072 y: 0.988429 z: 0.151518 }
+  height: 2.02222
+  width: 0.91
+  type: 0
+  branch: 13
+  s: 0.6
+}
+cards {
+  anchor { x: -0.21693 y: 12.417 z: -0.235229 }
+  up { x: 0.862333 y: -0.506121 z: -0.0149394 }
+  normal { x: 0.214271 y: 0.338026 z: 0.91642 }
+  height: 2.02225
+  width: 0.910013
+  type: 0
+  branch: 57
+  s: 0.6
+}
+cards {
+  anchor { x: -0.450627 y: 12.426 z: 0.602515 }
+  up { x: 0.126825 y: -0.372509 z: 0.919322 }
+  normal { x: 0.902094 y: 0.428717 z: 0.0492671 }
+  height: 2.15084
+  width: 0.967878
+  type: 1
+  branch: 14
+  s: 0.6
+}
+cards {
+  anchor { x: 0.896226 y: 11.963 z: 0.0838452 }
+  up { x: -0.352984 y: 0.292885 z: -0.888606 }
+  normal { x: -0.503506 y: 0.741027 z: 0.444252 }
+  height: 2.07973
+  width: 0.935879
+  type: 1
+  branch: 13
+  s: 1
+}
+cards {
+  anchor { x: -0.198659 y: 12.8386 z: 0.3538 }
+  up { x: -0.0359729 y: -0.0841776 z: 0.995801 }
+  normal { x: 0.988962 y: -0.14632 z: 0.023357 }
+  height: 1.738
+  width: 0.7821
+  type: 1
+  branch: 15
+  s: 0.8
+}
+cards {
+  anchor { x: 0.0619146 y: 11.2414 z: -0.390624 }
+  up { x: -0.541328 y: -0.29592 z: -0.787017 }
+  normal { x: 0.254468 y: 0.834464 z: -0.48879 }
+  height: 2.416
+  width: 1.0872
+  type: 1
+  branch: 38
+  s: 0.4
+}
+cards {
+  anchor { x: -0.740377 y: 11.5278 z: -1.37645 }
+  up { x: -0.0494666 y: 0.699548 z: 0.712871 }
+  normal { x: 0.939179 y: 0.275441 z: -0.205123 }
+  height: 2.09256
+  width: 0.94165
+  type: 1
+  branch: 40
+  s: 0.8
+}
+cards {
+  anchor { x: 0.651552 y: 11.8817 z: -0.573978 }
+  up { x: 0.268328 y: -0.823367 z: -0.500067 }
+  normal { x: -0.310619 y: 0.417427 z: -0.853973 }
+  height: 2.09606
+  width: 0.943227
+  type: 1
+  branch: 54
+  s: 1
+}
+cards {
+  anchor { x: 0.115771 y: 11.9069 z: -1.16162 }
+  up { x: 0.813415 y: -0.581127 z: 0.0254552 }
+  normal { x: 0.571229 y: 0.806289 z: 0.153607 }
+  height: 2.09647
+  width: 0.943412
+  type: 0
+  branch: 56
+  s: 1
+}
+cards {
+  anchor { x: 0.115771 y: 11.9069 z: -1.16162 }
+  up { x: -0.805926 y: -0.239863 z: -0.541248 }
+  normal { x: 0.562919 y: -0.593578 z: -0.575141 }
+  height: 1.86424
+  width: 0.838908
+  type: 0
+  branch: 56
+  s: 1
+}
+cards {
+  anchor { x: 0.393616 y: 11.5011 z: 0.312705 }
+  up { x: -0.722468 y: 0.66141 z: -0.201435 }
+  normal { x: 0.631231 y: 0.512102 z: -0.582494 }
+  height: 1.89067
+  width: 0.850804
+  type: 0
+  branch: 13
+  s: 0.6
+}
+cards {
+  anchor { x: 0.651552 y: 11.8817 z: -0.573978 }
+  up { x: 0.106479 y: -0.565517 z: 0.817834 }
+  normal { x: -0.280888 y: 0.7719 z: 0.570326 }
+  height: 1.90809
+  width: 0.85864
+  type: 0
+  branch: 54
+  s: 1
+}
+cards {
+  anchor { x: 0.896226 y: 11.963 z: 0.0838452 }
+  up { x: -0.436531 y: -0.133312 z: 0.889757 }
+  normal { x: 0.784505 y: -0.540551 z: 0.303902 }
+  height: 1.96616
+  width: 0.884772
+  type: 1
+  branch: 13
+  s: 1
+}
+cards {
+  anchor { x: 0.675323 y: 11.9958 z: -0.971159 }
+  up { x: -0.718262 y: -0.0463917 z: -0.694224 }
+  normal { x: -0.360173 y: 0.878474 z: 0.31394 }
+  height: 2.09114
+  width: 0.941012
+  type: 1
+  branch: 38
+  s: 1
+}
+cards {
+  anchor { x: -0.135414 y: 12.6738 z: -0.766406 }
+  up { x: -0.198379 y: -0.344835 z: -0.917461 }
+  normal { x: 0.980062 y: -0.0591819 z: -0.189671 }
+  height: 1.65536
+  width: 0.74491
+  type: 0
+  branch: 44
+  s: 1
+}
+cards {
+  anchor { x: 0.115771 y: 11.9069 z: -1.16162 }
+  up { x: -0.901298 y: -0.00719342 z: -0.43314 }
+  normal { x: -0.181742 y: 0.913894 z: 0.362999 }
+  height: 2.48401
+  width: 1.1178
+  type: 1
+  branch: 56
+  s: 1
+}
+cards {
+  anchor { x: -0.135414 y: 12.6738 z: -0.766406 }
+  up { x: -0.957375 y: 0.144116 z: -0.250325 }
+  normal { x: -0.0262825 y: 0.819579 z: 0.572363 }
+  height: 2.33709
+  width: 1.05169
+  type: 1
+  branch: 44
+  s: 1
+}
+cards {
+  anchor { x: -0.450627 y: 12.426 z: 0.602515 }
+  up { x: 0.949961 y: -0.222328 z: -0.219417 }
+  normal { x: -0.00222643 y: 0.697594 z: -0.71649 }
+  height: 1.95202
+  width: 0.878408
+  type: 1
+  branch: 14
+  s: 0.6
+}
+cards {
+  anchor { x: -0.537996 y: 12.3443 z: 0.429821 }
+  up { x: -0.985764 y: -0.0779886 z: -0.148955 }
+  normal { x: 0.050504 y: 0.707664 z: -0.704742 }
+  height: 1.86114
+  width: 0.837514
+  type: 0
+  branch: 14
+  s: 0.4
+}
+cards {
+  anchor { x: -0.746041 y: 13.0274 z: -0.142535 }
+  up { x: 0.667131 y: -0.00108588 z: -0.744939 }
+  normal { x: 0.727703 y: 0.214822 z: 0.651382 }
+  height: 1.9339
+  width: 0.870255
+  type: 0
+  branch: 16
+  s: 0.4
+}
+cards {
+  anchor { x: -0.198659 y: 12.8386 z: 0.3538 }
+  up { x: -0.868087 y: 0.163737 z: 0.468631 }
+  normal { x: -0.280095 y: 0.617848 z: -0.734718 }
+  height: 1.73801
+  width: 0.782103
+  type: 0
+  branch: 15
+  s: 0.8
+}
