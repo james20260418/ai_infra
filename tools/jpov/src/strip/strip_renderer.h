@@ -394,9 +394,9 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    // 逐点 RGBA 来自**同一行**的控制点数据（每列最后一个 texel）段内 t* 线性插值 ——
-    // 与旧的「去 per-instance 纹理采样」数学等价（那张纹理列间也是硬件双线性），
-    // 而 texelFetch 本来就要取这两列，等于白得一次过滤采样。
+    // 逐点 RGBA 来自**同一行**的控制点数据（每列最后一个 texel），按段内 t* 线性插值：
+    // 与旧的「去 per-instance 纹理采样」数学等价（那张纹理列间也是硬件双线性）——
+    // 换掉的是**一次跨纹理的过滤采样**（少一次 bilinear + LOD），代价是多 2 次同行 texelFetch。
     vec4 point = mix(color0, color1, tStar);
     vec3 color = point.rgb;
     float a = point.a;

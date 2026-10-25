@@ -342,10 +342,14 @@ inline constexpr int kSmoothFloatsPerVertex = 6;
 
 // 控制点数据纹理：每列 4 个 RGBA32F texel = 16 float = c.xyz, m.xyz, h.xyz, n.xyz + 逐点 rgba。
 //
-// 为什么把逐点颜色也塞进来（2026-10-25）：平滑 pass 本来就在这同一行里逐段取两次控制点，
-// 把每列的颜色作为第二个 texel 一并取回（同一条 cache line），FS 用段内参数 t* 自己 mix，
-// 于是那一次对 per-instance 纹理的**过滤采样**可以完全去掉（省一次 bilinear + LOD 计算）；
-// 硬件双线性在列间也是线性插值 ⇒ 两条路的数学等价（仅浮点舍入不同）。
+// 为什么把逐点颜色也塞进来（2026-10-25）：平滑 pass 本来就在这一行里逐段取两列控制点，
+// 而颜色的插值也**只需要这两列**的值 —— 把每列的 rgba 当第 4 个 texel 一起取回，
+// FS 用段内参数 t* 自己 mix，就可以整段抛掉那次对 per-instance 纹理的过滤采样。
+//
+// 代价要说准（不要以为白得）：**texelFetch 从 6 次变 8 次**，换来「少一次 bilinear 采样 +
+// 一次 LOD 推导 + 一个数据源」。8 次都落在同一行相邻 texel（同一 cache line），
+// 而旧路径那次采样是另一张纹理的另一行 ⇒ 实质是「少一次跨纹理访问」，不是少一条指令。
+// 数学等价：硬件双线性在列间也是线性插值（仅浮点舍入不同）。
 inline constexpr int kSmoothTexelsPerColumn = 4;
 inline constexpr int kSmoothFloatsPerColumn = 4 * kSmoothTexelsPerColumn;
 

@@ -408,6 +408,7 @@ public:
     uint32_t ribbon_tex_ = 0;               // 0 = 纹理未加载（退回纯色）
     // 同一张图以 mipmap=on 再注册一份（TextureManager 按「路径 + 选项」去重 ⇒ 两个 ID）。
     // 两个 ID 互换只靠 `texture_mipmap_` 开关，不用重载/重传。
+    // 代价：常驻多一份纹理（~1.1 MB，含 mip 链）；换来的是开关零延迟。
     uint32_t ribbon_tex_mip_ = 0;
 
     jpov_viewer::ViewConfig view_;
@@ -576,7 +577,12 @@ private:
     // 覆盖集与加法集是**不同的附件**（不同 pass），所以「弧形用加法」时会把弧
     // 单独拆成第二个 batch —— 一个 batch 就是一次 draw call，语义边界在材质/混合。
     void EmitStripBatches(jpov::RenderCommandList* cmds) {
-        const uint32_t tex = use_texture_ ? (texture_mipmap_ ? ribbon_tex_mip_ : ribbon_tex_) : 0;
+        // mipmap 开关只换纹理 id（两张都在 Setup 里注册好），不改任何其它状态。
+        // 纹理没加载成功时两个 id 都是 0 ⇒ 静默退回纯色（与「关掉使用纹理」同一条路径）。
+        uint32_t tex = 0;
+        if (use_texture_) {
+            tex = texture_mipmap_ ? ribbon_tex_mip_ : ribbon_tex_;
+        }
 
         auto build = [this, tex](const RibbonVisibility& vis) {
             jpov::TranslucentStripBatch batch;
@@ -837,6 +843,13 @@ inline void StripViewerApp::Setup(const std::string& texture_path) {
         // 混成灰。色带在 u 方向本来就是常量，不需要 mip；关掉后颜色才饱和。
         // 真实素材（带细节的贴图）在远处确实需要 mip，所以面板留了一个开关
         // （`texture_mipmap_`，同一张图以 mipmap=on 另注册一份）做 A/B 对比，谁用谁开。
+        //
+        // 开 mip 的两个已知代价（都不大，但别以为是免费）：
+        //   ① 多一份纹理（~1.1 MB 含 mip 链）+ Setup 时一次 glGenerateMipmap；
+        //   ② 素材是**非预乘 alpha**（黑底转 alpha）：mip 会把透明 texel 的黑色 RGB
+        //      平进来 ⇒ 半透明边缘会偏暗。要真正干净得用预乘 alpha 或 alpha-coverage mip，
+        //      这里不做（它属于素材管线，不是 viewer 的事）。
+        //   另外没开各向异性过滤：掠射角下落 mip 会偏糊。
         opts.mipmap = false;
         opts.repeat = false;
         ribbon_tex_ = RegisterTexture(texture_path, opts);
