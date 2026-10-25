@@ -95,10 +95,12 @@ inline jpov::StripRingShape MakeSceneRingShape() {
 // 壁厚 5cm：足够看出内外两层膜（内外立壁各一条带），又不至于让筒壁发绿。
 inline jpov::StripRingShape MakeTankShape() {
     jpov::StripRingShape shape;
-    shape.outer_radius = 2.90f;
-    shape.wall_thickness = 0.05f;
-    shape.height = 5.40f;
-    shape.center_y = 2.70f;   // 底部落在 y = 0（地面）
+    // 2026-10-25 Danis：「缸默认尺寸再整体小个 20%」⇒ 半径/高/壁厚/中心高**同乘 0.8**
+    //（2.90→2.32、5.40→4.32、0.05→0.04、2.70→2.16），比例不变，底部仍落在 y=0。
+    shape.outer_radius = 2.32f;
+    shape.wall_thickness = 0.04f;
+    shape.height = 4.32f;
+    shape.center_y = 2.16f;   // 底部落在 y = 0（地面）
     shape.center_x = 0.0f;
     shape.center_z = 0.0f;
     return shape;
@@ -431,27 +433,49 @@ public:
     static constexpr int kSceneCount = 3;
     Scene scene_ = Scene::kRibbons;
 
-    // 切场景：只写可见性开关，不动材质/形状参数（用户调过的值保留）。
+    // 切场景：写可见性开关 + **该场景自己的参数回到默认** + 一个合适机位。
+    //
+    // 为什么连参数一起重置（而不是"保留用户调过的值"）：切场景是**换一样东西看**，
+    // 上一个场景的形状/软深度/散射率留在新场景里只会让人困惑（"缸壁上怎么有软深度"）。
+    // 拍摄表也依赖「切场景 = 干净起点」：否则上一张的显式覆盖会污染下一张（真实踩过）。
     void SelectScene(int index) {
         const int i = std::clamp(index, 0, kSceneCount - 1);
         scene_ = static_cast<Scene>(i);
+        // 可见性
         show_strips_ = (i == 0);
         boxes_visible_ = (i == 0);
         jet_visible_ = (i == 1);
         tank_visible_ = (i == 2);
-        ring_visible_ = false;
+        ring_visible_ = false;   // 旧玻璃圆环不在任何场景里（字段保留给 gold）
+        // 场景级参数
+        vis_ = RibbonVisibility{};
         if (i == 0) {
-            vis_ = RibbonVisibility{};   // 三条带全开（① 的默认观感）
+            use_texture_ = true;
+            texture_mipmap_ = false;
+            opacity_ = 0.92f;
+            width_scale_ = 1.0f;
+            soft_edges_ = true;
+            smooth_strips_ = false;   // 场景① 的基线是折线（gold 锁的也是折线）
+            arc_additive_ = false;
+            soft_depth_ = false;
+            soft_depth_m_ = 0.15f;
+            shape_ = RibbonShape{};
+        } else if (i == 1) {
+            smooth_strips_ = true;
+            jet_gain_ = 3.0f;
+            bloom_ = true;
+        } else {
+            smooth_strips_ = true;
+            bloom_ = false;           // 缸景看的是天光/阴影，不需要辉光
+            tank_skylight_ = true;
+            tank_injection_ = 0.20f;
+            tank_opacity_ = 0.26f;
+            tank_shape_ = MakeTankShape();
         }
-        // 默认视角按场景区分：缸景的树 6m 高，用 gold 的相机根本看不到全貌。
-        // （只在**切场景的那一刻**改，之后用户自己拖。）
+        // 机位（只在切场景的那一刻改，之后用户自己拖）
         if (i == 2) {
             view_.R = 9.0f;
             view_.theta = 0.35;
-        } else if (i == 1) {
-            // 射流沿用默认机位（与旧 200 系列拍摄图一致，射流正好在画面右侧）
-            view_.R = kViewDefaults.R;
-            view_.theta = kViewDefaults.theta;
         } else {
             view_.R = kViewDefaults.R;
             view_.theta = kViewDefaults.theta;
@@ -1028,27 +1052,13 @@ private:
         cb("SMAA 抗锯齿", &smaa_);   // 后处理，三个场景通用
     }
 
-    // 面板「重置」：回到本场景的默认观感（不动场景选择本身）。
+    // 面板「重置」：视角 + 当前场景的参数回到默认（不动场景选择本身）。
+    // 复用 SelectScene（它就是「场景的默认值」唯一一份定义），别在这里抄第二份。
     void ResetPanelToDefaults() {
         ResetViewToDefaults();
-        shape_ = RibbonShape{};
-        vis_ = RibbonVisibility{};
-        arc_additive_ = false;
-        smooth_strips_ = true;    // 交互默认平滑（圆环边反/射流软边只有平滑才是最终观感）
-        soft_depth_ = false;
-        soft_depth_m_ = 0.15f;
-        boxes_visible_ = (scene_ == Scene::kRibbons);
-        jet_gain_ = 3.0f;
-        bloom_ = true;
-        opacity_ = 0.92f;
-        width_scale_ = 1.0f;
-        use_texture_ = true;
-        texture_mipmap_ = false;
-        soft_edges_ = true;
-        tank_skylight_ = true;
-        tank_injection_ = 0.20f;
-        tank_opacity_ = 0.26f;
-        tank_shape_ = MakeTankShape();
+        SelectScene(static_cast<int>(scene_));
+        animate_ = false;
+        auto_orbit_ = false;
     }
 
     static constexpr float kFontSize = 16.0f;

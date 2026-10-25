@@ -24,6 +24,7 @@
 
 #include <glog/logging.h>
 
+#include "tools/jpov/src/texture_units.h"
 #include "tools/jpov/src/wbo/wbo_shader.h"
 
 namespace jpov {
@@ -39,6 +40,9 @@ constexpr int kStripTexUnit = 1;
 constexpr int kSmoothDataUnit = 2;
 // per-instance 数据纹理（逐点 RGBA + 宽度剖面，RGBA32F）。同样 pass-local。
 constexpr int kAppearanceUnit = 3;
+// 级联 shadow map：**与主链路同一段槽位**（texture_units.h 的 kTexUnitShadowMapBase = 7），
+// 因为本 pass 与 object3d 不同时活跃，复用同一区间不会撞槽（与 tile/材质同一约定）。
+constexpr int kShadowUnitBase = kTexUnitShadowMapBase;
 
 }  // namespace
 
@@ -258,6 +262,23 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->sun_color = shader_mgr_->GetUniform(program, "uSunColor");
     out->sun_intensity = shader_mgr_->GetUniform(program, "uSunIntensity");
     out->sky_injection = shader_mgr_->GetUniform(program, "uSkyInjection");
+    // CSM（同上天光：unlit program 里全是 -1）。
+    out->has_csm = shader_mgr_->GetUniform(program, "uHasCsm");
+    out->cascade_count = shader_mgr_->GetUniform(program, "uCascadeCount");
+    out->cascade_ranges = shader_mgr_->GetUniform(program, "uCascadeRanges");
+    out->shadow_texel_world = shader_mgr_->GetUniform(program, "uShadowTexelWorld");
+    out->shadow_bias_cascade = shader_mgr_->GetUniform(program, "uShadowBiasCascade");
+    out->shadow_bias_override = shader_mgr_->GetUniform(program, "uShadowBiasOverride");
+    out->shadow_fade_start = shader_mgr_->GetUniform(program, "uShadowFadeStart");
+    out->shadow_fade_end = shader_mgr_->GetUniform(program, "uShadowFadeEnd");
+    // 数组型（sampler / mat4）：逐元素查一次，Draw 里直接用整数。
+    for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+        const std::string idx = "[" + std::to_string(c) + "]";
+        out->shadow_map[c] = shader_mgr_->GetUniform(program, ("uShadowMap" + idx).c_str());
+        out->shadow_vp[c] = shader_mgr_->GetUniform(program, ("uShadowVP" + idx).c_str());
+        out->shadow_depth_vp[c] =
+            shader_mgr_->GetUniform(program, ("uShadowDepthVP" + idx).c_str());
+    }
 }
 
 void StripRenderer::EnsureIboCapacity(int strips) {
@@ -393,6 +414,7 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
                          const Camera& camera,
                          const float view_proj[16],
                          unsigned int scene_depth_tex,
+                         const StripCsmShadow* csm,
                          int full_w, int full_h) {
     CHECK(initialized_) << "StripRenderer::Draw: 未 Init";
     CHECK_NE(scene_depth_tex, 0u) << "StripRenderer::Draw: scene_depth_tex 不能为 0";
@@ -415,6 +437,7 @@ void StripRenderer::Draw(const TranslucentStripBatch& batch,
     ctx.batch = &batch;
     ctx.want_additive = want_additive;
     ctx.want_light = batch.sky_light.has_value();
+    ctx.csm = csm;
     ctx.camera = &camera;
     ctx.view_proj = view_proj;
     ctx.scene_depth_tex = scene_depth_tex;
@@ -510,6 +533,37 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
         glUniform3f(uniforms.sun_color, s.sun_color.x(), s.sun_color.y(), s.sun_color.z());
         glUniform1f(uniforms.sun_intensity, s.sun_intensity);
         glUniform1f(uniforms.sky_injection, s.injection);
+
+        // CSM：与天光**同一个开关**（sky_light 开着就吃阴影）。没有太阳/级联时写 0，
+        // 太阳项退化为完全受照 —— 与「不开天光」的差别只在颜色，不在是否出错。
+        const bool has_csm = ctx.csm != nullptr && ctx.csm->valid();
+        glUniform1i(uniforms.has_csm, has_csm ? 1 : 0);
+        if (has_csm) {
+            const StripCsmShadow& csm = *ctx.csm;
+            const int n = std::min(csm.cfg.cascade_count, ShadowConfig::kMaxCascades);
+            CHECK_GT(n, 0) << "StripCsmShadow: cascade_count 必须 > 0（没有级联就别传 csm）";
+            CHECK_EQ(static_cast<int>(csm.fbos.size()), n)
+                << "StripCsmShadow: fbos.size() 必须等于 cascade_count";
+            glUniform1i(uniforms.cascade_count, n);
+            glUniform1fv(uniforms.cascade_ranges, ShadowConfig::kMaxCascades,
+                         csm.cfg.cascade_ranges);
+            glUniform1fv(uniforms.shadow_texel_world, ShadowConfig::kMaxCascades,
+                         csm.texel_world);
+            glUniform1fv(uniforms.shadow_bias_cascade, ShadowConfig::kMaxCascades,
+                         csm.cfg.cascade_bias);
+            glUniform1i(uniforms.shadow_bias_override,
+                        csm.cfg.override_cascade_bias ? 1 : 0);
+            glUniform1f(uniforms.shadow_fade_start, csm.cfg.fade_start);
+            glUniform1f(uniforms.shadow_fade_end, csm.cfg.fade_end);
+            for (int c = 0; c < n; ++c) {
+                const int unit = kShadowUnitBase + c;
+                glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, csm.fbos[static_cast<size_t>(c)].tex);
+                glUniform1i(uniforms.shadow_map[c], unit);
+                glUniformMatrix4fv(uniforms.shadow_vp[c], 1, GL_FALSE, csm.vp[c]);
+                glUniformMatrix4fv(uniforms.shadow_depth_vp[c], 1, GL_FALSE, csm.depth_vp[c]);
+            }
+        }
     }
 
     if (ctx.gl_tex != 0) {

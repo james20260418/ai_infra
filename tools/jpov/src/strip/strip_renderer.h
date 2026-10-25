@@ -62,6 +62,7 @@
 #include <vector>
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/render_command.h"   // DirectionalLight / ShadowConfig / CascadeFBO（CSM 输入）
 #include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/strip/strip_geometry.h"
@@ -69,6 +70,26 @@
 #include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
+
+// CSM（级联阴影）输入：与 object3d / fire_fog **同一套资源**，由 Renderer 填。
+//
+// 为什么是「外部填」而不是渲染器自己找：阴影 pass 属于主链路（Renderer 持有
+// shadow_fbos_ / 各级联矩阵），条带只是一个 effect pass，不该反过来持有它。
+//
+// 语义：只有 `std::optional<DirectionalLight> sun` 有值、且 fbos 非空时才**可能**有阴影；
+// 具体某批要不要吃阴影由 `TranslucentStripBatch::sky_light` 决定（两者绑定，
+// Danis 2026-10-25：开关和天光消费一起）。
+struct StripCsmShadow {
+    std::optional<DirectionalLight> sun;   // 无 ⇒ 太阳项不衰减（= 完全受照）
+    ShadowConfig cfg{};                    // 级联范围 / 淡出 / 偏置
+    std::vector<CascadeFBO> fbos;          // 长度 = cfg.cascade_count（仅 sun 时有效）
+    float vp[ShadowConfig::kMaxCascades][16] = {};
+    float depth_vp[ShadowConfig::kMaxCascades][16] = {};
+    float texel_world[ShadowConfig::kMaxCascades] = {};
+
+    // 可用 = 有太阳 + 有级联纹理。不可用时调用方传 nullptr 也等价。
+    bool valid() const { return sun.has_value() && !fbos.empty(); }
+};
 
 class StripRenderer {
 public:
@@ -448,6 +469,78 @@ uniform vec3 uSunColor;
 uniform float uSunIntensity;
 uniform float uSkyInjection;
 
+// ── CSM（级联阴影）：**与天光同一个开关** ──
+// 2026-10-25 Danis 定：「本次要求 CSM 被 over 类型 strip 消费，开关和天光消费一起，这俩绑定」。
+// 所以这里没有独立的「阴影开关」：sky_light 开着就采样 CSM 调制**太阳项**（天光项本来就不该
+// 被遮挡 —— 那是环境光；条带自身投不投影仍是没做的事，见设计文档）。
+//
+// 取舍：**单级联单次采样**（无 PCF），按距离选级联 + 末尾 fade —— 与 fire_fog 的雾体阴影
+// 完全同一套写法与理由：条带是薄片、片元多，PCF 的 9~64 次采样换不来可见收益；
+// 而且 shadow map 是按**不透明几何**生成的，对着半透明片做精细 PCF 没有物理意义。
+uniform int   uHasCsm;            // 0 = 不做阴影（无太阳 / 无级联 / 本批没开天光）
+uniform int   uCascadeCount;
+uniform float uCascadeRanges[5];
+uniform sampler2D uShadowMap[5];
+uniform mat4  uShadowVP[5];
+uniform mat4  uShadowDepthVP[5];
+uniform float uShadowTexelWorld[5];
+uniform float uShadowBiasCascade[5];
+uniform int   uShadowBiasOverride;
+uniform float uShadowFadeStart;
+uniform float uShadowFadeEnd;
+
+// 单级联单次采样。返回 1 = 受照、0 = 在影子里（含「不在该级联覆盖内」= 视为受照）。
+// 深度比较用**相对主视锥中心的线性深度**（米），两端同源（见 object3d 的说明）。
+float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texel_w, float bias_val, vec3 wp) {
+    vec4 lsp = vp * vec4(wp, 1.0);
+    vec3 ndc = lsp.xyz / lsp.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return 1.0;
+    }
+    vec4 dpos = dvp * vec4(wp, 1.0);
+    float cur = dpos.z / dpos.w;
+    float tw = (uShadowBiasOverride != 0) ? bias_val : texel_w;
+    // 条带有法线，但薄片的两面法线与阴影深度轴经常近乎正交 ⇒ 用 tanθ=1 的保守偏置
+    //（与雾同一取值）。偏置过大会有 peter-panning，这里宁可少一点悬浮。
+    cur -= max(0.01, 1.5 * tw);
+    return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
+}
+
+// 按片元到相机的距离选主级联，末尾按 fade 淡出（1 = 完全受照）。
+float CsmShadow(vec3 wp, float dist) {
+    if (uHasCsm == 0 || uCascadeCount <= 0) {
+        return 1.0;
+    }
+    int c = uCascadeCount - 1;
+    for (int i = 0; i < 5; ++i) {
+        if (i < uCascadeCount && dist <= uCascadeRanges[i]) {
+            c = i;
+            break;
+        }
+    }
+    float s;
+    if (c == 0) {
+        s = CsmTap(uShadowMap[0], uShadowVP[0], uShadowDepthVP[0], uShadowTexelWorld[0],
+                   uShadowBiasCascade[0], wp);
+    } else if (c == 1) {
+        s = CsmTap(uShadowMap[1], uShadowVP[1], uShadowDepthVP[1], uShadowTexelWorld[1],
+                   uShadowBiasCascade[1], wp);
+    } else if (c == 2) {
+        s = CsmTap(uShadowMap[2], uShadowVP[2], uShadowDepthVP[2], uShadowTexelWorld[2],
+                   uShadowBiasCascade[2], wp);
+    } else if (c == 3) {
+        s = CsmTap(uShadowMap[3], uShadowVP[3], uShadowDepthVP[3], uShadowTexelWorld[3],
+                   uShadowBiasCascade[3], wp);
+    } else {
+        s = CsmTap(uShadowMap[4], uShadowVP[4], uShadowDepthVP[4], uShadowTexelWorld[4],
+                   uShadowBiasCascade[4], wp);
+    }
+    float fade = 1.0 - clamp((dist - uShadowFadeStart)
+                             / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
+    return mix(1.0, s, fade);
+}
+
 // 天光辐亮度（线性 HDR）。N 可以非单位（导数叉积/曲面叉积都有长度）：
 // 先归一拿方向；长度≈ 0（退化片元）时当作「朝上」，不出 NaN。
 vec3 SkyLightRadiance(vec3 N) {
@@ -458,7 +551,9 @@ vec3 SkyLightRadiance(vec3 N) {
     vec3 ambient = (n.y >= 0.0) ? mix(uSkyHorizon, uSkyZenith, n.y)
                                 : mix(uSkyHorizon, uSkyGround, -n.y);
     // 太阳：条带是**单层片**，两面都要受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
-    float sun_term = abs(dot(n, uSunDir)) * uSunIntensity;
+    // 太阳项乘 CSM 阴影因子（天光项不乘：环境光不该被直射光的影子遮住）。
+    float shadow = CsmShadow(vWorld, length(uCamPos - vWorld));
+    float sun_term = abs(dot(n, uSunDir)) * uSunIntensity * shadow;
     return ambient * uSkyAmbientScale + uSunColor * sun_term;
 }
 
@@ -483,11 +578,14 @@ void ApplySkyLight(vec3 N, inout vec3 color) {
     // 把一批条带累加画进本渲染器的 1× WBO 目标（不 clear）。
     // Pre-condition: Init 已调用；batch 满足 ValidateStripBatch；
     //                scene_depth_tex != 0（不透明场景的 MRT#1 深度纹理）。
+    // csm：CSM 资源（框见上）。**只有 sky_light 的批会真的采样**；没有太阳/级联时传
+    //      nullptr（不是"省略"—— 这个参数故意必填，避免「以为传了其实没传」）。
     void Draw(const TranslucentStripBatch& batch,
               TextureManager& texture_mgr,
               const Camera& camera,
               const float view_proj[16],
               unsigned int scene_depth_tex,
+              const StripCsmShadow* csm,
               int full_w, int full_h);
 
     // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无内容则 no-op。
@@ -547,6 +645,20 @@ private:
         int sun_color = -1;
         int sun_intensity = -1;
         int sky_injection = -1;
+        // CSM（同样只在 lit program 里存在；unlit 全是 -1 ⇒ glUniform no-op）。
+        // 数组型 uniform 的**逐元素**位置在 Init 查好（数组 uniform 的首元素位置不保证
+        // 连续可用，object3d 也是逐元素查 + 逐元素 glUniform1i）。
+        int has_csm = -1;
+        int cascade_count = -1;
+        int cascade_ranges = -1;              // float[5]：按基名上传整数组
+        int shadow_map[5] = {-1, -1, -1, -1, -1};
+        int shadow_vp[5] = {-1, -1, -1, -1, -1};
+        int shadow_depth_vp[5] = {-1, -1, -1, -1, -1};
+        int shadow_texel_world = -1;          // float[5]
+        int shadow_bias_cascade = -1;         // float[5]
+        int shadow_bias_override = -1;
+        int shadow_fade_start = -1;
+        int shadow_fade_end = -1;
     };
     struct CompositeUniforms {
         int accum = -1;
@@ -570,6 +682,7 @@ private:
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
         bool want_additive = false;         // 本批走加法集
         bool want_light = false;            // 本批消费天光（选 lit program）
+        const StripCsmShadow* csm = nullptr; // CSM 资源（want_light 时才可能用到）
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
         unsigned int scene_depth_tex = 0;   // 不透明场景深度（值 = gl_FragCoord.z）

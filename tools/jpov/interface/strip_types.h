@@ -229,9 +229,16 @@ struct StripFresnel {
 //   C = point_color.rgb · tex.rgb                     // ① 自发光 / 表面色（语义与不开光照时相同）
 //     + injection · skylight(N)                       // ② 被吸收的背景光按**天光**补注入
 //   skylight(N) = tricolor_lerp(N.y) · ambient_scale  // 上→天、水平→天际线、下→地（N.y 分段线性）
-//               + sun_color · sun_intensity · |N·L|  // 薄片双面：两侧都吃太阳
+//               + sun_color · sun_intensity · |N·L| · csm  // 薄片双面：两侧都吃太阳
+//                                                  ↑ CSM 阴影因子 [0,1]（2026-10-25 加）
 //   α = 覆盖率链（不变）
 //   L_out = α·C + (1−α)·L_bg                          // WBO over 合成（与雾的 L·(1−α)+L_fog·α 同构）
+//
+// **太阳项吃 CSM 阴影，且与天光同一个开关**（Danis 2026-10-25：「CSM 被 over 类型 strip 消费，
+// 开关和天光消费一起，这俩绑定」）：有 `sky_light` 就采样引擎的级联阴影贴图调制太阳项，
+// **没有独立的阴影开关**；天光项（ambient）不乘阴影 —— 环境光不该被直射光的影子遮住。
+// 条带自身**不参与**阴影生成（不写 shadow map）：那需要给半透明片单开一次 shadow pass，
+// 收益与代价不成比例，Danis 明确先不做。采样是**单级联单次采样**（无 PCF，与 fire_fog 同取舍）。
 //
 // 三个关键约定：
 //   * **注入量自然随不透明度缩放**（C 随后要乘 α）⇒ 越不透明补得越多、越透补得越少，

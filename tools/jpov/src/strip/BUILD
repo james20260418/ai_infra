@@ -21,10 +21,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":strip_geometry",
+        "//geom/math:mat4",
+        "//geom/math:piecewise_linear_function",
         "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:render_command",   # DirectionalLight / ShadowConfig / CascadeFBO（CSM 输入）
         "//tools/jpov/interface:strip_types",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",
+        "//tools/jpov/src:texture_units",
         "//tools/jpov/src/wbo:wbo_shader",
         "//tools/jpov/src/wbo:wbo_target",
         "@glog_static//:glog",
