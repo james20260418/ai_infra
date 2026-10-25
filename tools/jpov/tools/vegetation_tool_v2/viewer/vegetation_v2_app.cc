@@ -42,6 +42,8 @@ namespace vegv2 {
 constexpr int kViewerWidth = 1280;
 constexpr int kViewerHeight = 720;
 constexpr float kViewerFps = 60.0f;
+using jpov::vegetation::Branch;
+using jpov::vegetation::BranchSample;
 using jpov::vegetation::LeafCard;
 using jpov::vegetation::LeafType;
 using jpov::vegetation::MeshData;
@@ -245,13 +247,48 @@ class VegetationV2App : public JPOV {
   float args_uv_vscale_ = 0.0f;  // --uv-vscale（0 = 自动）
   jpov_skylight::SkyDegrees deg_;
 
+  // 相机 HUD：**给截图用** —— 报出复现这张图需要的全部数字（角度、距离、相机位置、
+  // 注视点、地面高度），以及资产里树根的位置。对齐类问题（树干没站在原点、树根浮空、
+  // 树干整体偏移）看这两行就能判断是数据错还是相机错。
   std::string CamString() const {
-    char buf[160];
+    char buf[320];
+    const jpov::Vec3f position = view_.Position();
     std::snprintf(buf, sizeof(buf),
-                  "cam phi=%.1f theta=%.1f R=%.2f | level<=%d types=%s",
+                  "cam phi=%.1f theta=%.1f R=%.2f | pos(%.2f, %.2f, %.2f) -> "
+                  "target(%.2f, %.2f, %.2f) | ground_y=%.2f | level<=%d types=%s",
                   view_.phi * 180.0 / 3.14159265358979323846,
-                  view_.theta * 180.0 / 3.14159265358979323846, view_.R, max_level_,
+                  view_.theta * 180.0 / 3.14159265358979323846, view_.R, position.x(),
+                  position.y() + cam_target_y_, position.z(), 0.0f, cam_target_y_, ground_y_,
+                  max_level_,
                   show_all_card_types_ ? "all" : std::to_string(type_filter_).c_str());
+    return std::string(buf);
+  }
+
+  // 第二行：资产侧的关键数字（树根位置 + 包围盒 + 文件名）。
+  // 树干"对齐"出问题时，先看根枝起点是不是 (0,0,0)、包围盒是不是关于原点对称。
+  std::string AssetString() const {
+    if (!has_shape_ || shape_.branches.empty() ||
+        shape_.branches.front().samples.empty()) {
+      return std::string("asset: (无 shape)");
+    }
+    const Branch& root = shape_.branches.front();
+    const Vec3d& base = root.samples.front().position;
+    double low[3] = {base.x, base.y, base.z};
+    double high[3] = {base.x, base.y, base.z};
+    for (const Branch& branch : shape_.branches) {
+      for (const BranchSample& sample : branch.samples) {
+        const double values[3] = {sample.position.x, sample.position.y, sample.position.z};
+        for (int axis = 0; axis < 3; ++axis) {
+          low[axis] = std::min(low[axis], values[axis]);
+          high[axis] = std::max(high[axis], values[axis]);
+        }
+      }
+    }
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "root(%.3f, %.3f, %.3f) | bbox x[%.2f, %.2f] y[%.2f, %.2f] z[%.2f, %.2f] | %s",
+                  base.x, base.y, base.z, low[0], high[0], low[1], high[1], low[2], high[2],
+                  shape_path_.empty() ? "(shape)" : shape_path_.c_str());
     return std::string(buf);
   }
 
@@ -429,6 +466,13 @@ class VegetationV2App : public JPOV {
   // 为什么单独一层：`--glb` 可以不配 `--shape`（纯查看模式），那条路径没有 shape、没有
   // 扫管/叶卡，但仍然要能调风、要能画面板、要继承 --normal-scale 之类的参数。
   void ApplyCommonArgs(const CliArgs& args) {
+    if (args.hide_hud) {
+      // HUD 与叶卡 UV 标签都是 2D 文字覆盖层；gold 要的是纯 3D 画面 ⇒ 一个开关全关。
+      // 必须放在这里（两条建场景路径都经过）：只在原材料态关的话，纯 glb 查看模式
+      // 仍会画出相机 HUD，而 glb gold 正好走那条路。
+      show_hud_ = false;
+      show_labels_ = false;
+    }
     normal_scale_ = args.normal_scale;
     args_uv_vscale_ = args.uv_vscale;
     args_radius_ = static_cast<float>(args.radius);
@@ -652,7 +696,12 @@ class VegetationV2App : public JPOV {
     }
     if (args.hide_leaf) show_leaf_ = false;
     if (args.hide_bark) show_bark_ = false;
-    if (args.hide_hud) show_hud_ = false;
+    if (args.hide_hud) {
+      // HUD 是 2D 文字覆盖层，叶卡上的 UV 标签也是 —— gold 比对要的是纯 3D 画面，
+      // 一个开关全关掉（以前只有 HUD，标签靠"没字体"顺带关掉；字体补上后必须显式关）。
+      show_hud_ = false;
+      show_labels_ = false;
+    }
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
@@ -977,7 +1026,18 @@ class VegetationV2App : public JPOV {
     // 左上角相机 HUD。headless 且没配字体（gold test）时关掉：文字要 CJK 图集，
     // 没有图集就只剩「Known font alias: none」的 CHECK 崩溃，而 gold 保护的是 3D 观感。
     if (show_hud_) {
-      cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
+      // 两行：第一行相机（复现截图用），第二行资产（判断"对齐"是数据问题还是相机问题）。
+      // 深色描边由 DrawText 自己不做，所以用两遍绘制：先暗色偏移 1px 当描边，再画白字。
+      // 天空是浅色时纯白字看不见 —— 这是 HUD 唯一的呈现要求。
+      const jpov::Color shadow{0.0f, 0.0f, 0.0f, 0.85f};
+      const jpov::Color ink{1.0f, 1.0f, 1.0f, 1.0f};
+      cmds->DrawText(CamString(), {9.0f, 9.0f}, 18.0f, shadow,
+                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+      cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, ink,
+                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+      cmds->DrawText(AssetString(), {9.0f, 31.0f}, 16.0f, shadow,
+                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
+      cmds->DrawText(AssetString(), {8.0f, 30.0f}, 16.0f, ink,
                      jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
     }
 
@@ -1168,15 +1228,32 @@ int RunViewer(const CliArgs& args) {
   cfg.headless = args.capture || !args.bake_glb_path.empty();
   // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
   // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
-  const JPOV::FontEntry kWantFonts[] = {
-      {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
-      {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+  // 字体要按顺序找几个位置：从仓库根跑（字体在 tools/jpov/fonts）和从 output 目录跑
+  // （JPOV 会把字体复制到那里）都得找到 —— 否则 HUD 静默消失，截图里就没有相机参数，
+  // 排查「树干对齐」这类问题就没了依据。
+  const struct {
+    const char* label;
+    bool cjk;
+    const char* candidates[3];
+  } kWantFonts[] = {
+      {"fonts/NotoSansCJK-Regular.ttc", true,
+       {"fonts/NotoSansCJK-Regular.ttc", "tools/jpov/fonts/NotoSansCJK-Regular.ttc", nullptr}},
+      {"fonts/DejaVuSans.ttf", false,
+       {"fonts/DejaVuSans.ttf", "tools/jpov/fonts/DejaVuSans.ttf", nullptr}},
   };
-  for (const JPOV::FontEntry& f : kWantFonts) {
-    if (std::ifstream(f.path).good()) {
-      cfg.fonts.push_back(f);
-    } else {
-      LOG(WARNING) << "缺字体（跳过，不画文字）: " << f.path;
+  for (const auto& want : kWantFonts) {
+    bool found = false;
+    for (const char* candidate : want.candidates) {
+      if (candidate == nullptr || !std::ifstream(candidate).good()) {
+        continue;
+      }
+      cfg.fonts.push_back({candidate, 0,
+                           want.cjk ? jpov::kFontBuiltinCJK : jpov::kFontBuiltinLatin});
+      found = true;
+      break;
+    }
+    if (!found) {
+      LOG(WARNING) << "缺字体（跳过，不画文字）: " << want.label;
     }
   }
 
