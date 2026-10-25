@@ -200,6 +200,16 @@ TEST(StripGeometry, RejectsZeroSunDirection) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "sun_direction");
 }
 
+TEST(StripGeometry, RejectsHugeAmbientScale) {
+    // 上界防御：把 lux 直接填进 ambient_scale（例如 20000）是常见单位错误，
+    // 放行会让画面和 bloom 无声爆炸。必须崩。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::StripSkyLight sky;
+    sky.ambient_scale = 20000.0f;
+    batch.sky_light = sky;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "ambient_scale");
+}
+
 TEST(StripGeometry, RejectsNegativeSkyTricolor) {
     jpov::TranslucentStripBatch batch = MakeBatch(16);
     jpov::StripSkyLight sky;

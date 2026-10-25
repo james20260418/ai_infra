@@ -245,7 +245,9 @@ struct StripFresnel {
 // **不开天光的批仍走原来那两个 program，指令数与改动前逐字节相同**（空实现被内联消掉，
 // 由 scene gold 逐字节不变反向证明，见设计文档 §19.13）。
 struct StripSkyLight {
-    // 天光三色，顺序**固定** [天(zenith), 天际线(horizon), 地(ground)]
+    // 天光三色，顺序**固定** [天(zenith), 天际线(horizon), 地(ground)]。
+    // 默认值 = 中性白天天空，**只用于快速试手**；正式使用请显式给（通常就是
+    // `SkyCommand::AmbientTricolor()`），否则「缸壁亮不亮」跟场景天光会脱节。
     // （与 AmbientLight::tricolor 同约定；通常直接取 `SkyCommand::AmbientTricolor()`）。
     // 每项是线性 HDR 颜色；下标含义不能对调。
     std::array<Color, 3> tricolor = {Color{0.45f, 0.58f, 0.85f, 1.0f},

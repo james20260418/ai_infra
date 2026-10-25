@@ -114,10 +114,14 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
         CHECK(s.injection >= 0.0f && s.injection <= 1.0f)
             << "StripBatch: sky_light.injection 必须在 [0,1]（想要更亮请放大天光参数），当前="
             << s.injection;
-        CHECK(s.ambient_scale >= 0.0f)
-            << "StripBatch: sky_light.ambient_scale 不能为负，当前=" << s.ambient_scale;
-        CHECK(s.sun_intensity >= 0.0f)
-            << "StripBatch: sky_light.sun_intensity 不能为负，当前=" << s.sun_intensity;
+        // 上界与逐点颜色同一个防御量级：越界基本可以断定是单位搞错（比如把 lux 直接填进来），
+        // 而不是艺术意图 —— 放行只会让画面（和 bloom）无声爆炸。
+        CHECK(s.ambient_scale >= 0.0f && s.ambient_scale <= kMaxStripColorValue)
+            << "StripBatch: sky_light.ambient_scale 必须在 [0," << kMaxStripColorValue
+            << "]，当前=" << s.ambient_scale;
+        CHECK(s.sun_intensity >= 0.0f && s.sun_intensity <= kMaxStripColorValue)
+            << "StripBatch: sky_light.sun_intensity 必须在 [0," << kMaxStripColorValue
+            << "]，当前=" << s.sun_intensity;
         // sun_direction 允许非单位向量（shader 里归一），但必须有限、非零：
         // 零向量会让 normalize 出 NaN，而 NaN 进 accum 会污染整帧的 WBO 解析。
         CHECK(strip_internal::IsFinite(s.sun_direction))

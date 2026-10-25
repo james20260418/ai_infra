@@ -477,7 +477,8 @@ public:
     bool tank_skylight_ = true;             // 缸体是否消费天光（A/B 的唯一变量）
     float tank_opacity_ = 0.26f;            // 缸体不透明度（要能看清里面的树）
     // 吸收→注入比例 = 材料的**散射率**：薄玻璃几 %；乳白/磨砂可以接近 1。
-    // 演示取 0.40：既看得出「顶部亮、底部暗、随太阳变」，又不至于糊成一块牛奶。
+    // 演示默认 0.20（玻璃感强、里面的树看得清）；拍摄表 420 用 0.40 做对比
+    // （更乳白、亮度更均匀 —— 再高就会糊成一块牛奶）。
     float tank_injection_ = 0.20f;
     jpov::Vec3f tank_color_{0.10f, 0.12f, 0.14f};   // 缸壁的"表面色"（近黑玻璃；亮部交给天光）
     jpov::StripRingShape tank_shape_ = MakeTankShape();
