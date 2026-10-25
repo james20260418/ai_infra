@@ -355,6 +355,73 @@ TEST(ShapeNoiseTest, CardsStayAttachedAfterNoise) {
   EXPECT_FALSE(shape.cards.empty());
 }
 
+// 延续接头（同一根管子被 Sapling 切成几段）在噪声之后必须仍然「对齐」：
+//   * 位置：后一段的起点 == 前一段的终点（不能一边被平移/缩放、另一边没动）；
+//   * 半径：接头两侧半径比保持不变（不能只压前一段或只压后一段 → 出现台阶）。
+// 这是 2026-10-25 Danis 在 oak 上肉眼发现的 bug：噪音按**单根样条**施加时，
+// 接头处半径比从 1.00 变成 1.22，看起来就是「后一级没对准前一级」。
+TEST(ShapeNoiseTest, ContinuationSegmentsStayAligned) {
+  SaplingDump dump;
+  dump.bevel_depth = 1.0;
+  // 同一根主干被切成两段：第二段的起点正好是第一段的终点，半径相同。
+  dump.splines.push_back(MakePolySpline({ Vec3d{ 0.0, 0.0, 0.0 }, Vec3d{ 0.0, 0.0, 2.0 } }, 0.20));
+  dump.splines.push_back(MakePolySpline({ Vec3d{ 0.0, 0.0, 2.0 }, Vec3d{ 0.0, 0.0, 4.0 } }, 0.20));
+  // 一根真正的分叉（半径明显更细）。
+  dump.splines.push_back(
+      MakePolySpline({ Vec3d{ 0.0, 0.0, 3.0 }, Vec3d{ 1.0, 0.0, 3.0 } }, 0.05));
+
+  BuildOptions options = MakeOptions();
+  options.noise.size_jitter = { 0.2f, 0.2f, 0.2f };
+  options.noise.bend_longitudinal = { 0.1f, 0.1f, 0.1f };
+  options.noise.bend_lateral = { 0.1f, 0.1f, 0.1f };
+  options.noise.seed = 3;
+
+  Shape shape;
+  BuildStats stats;
+  std::string error;
+  ASSERT_TRUE(BuildShape(dump, options, &shape, &stats, &error)) << error;
+  ASSERT_EQ(shape.branches.size(), 3u);
+
+  // 拓扑序：两段主干在前（父先子后），分叉在后。
+  const Branch& first = shape.branches[0];
+  const Branch& second = shape.branches[1];
+  ASSERT_FALSE(first.samples.empty());
+  ASSERT_FALSE(second.samples.empty());
+  EXPECT_TRUE(second.parent == 0);
+
+  // 位置：接头严丝合缝（不是「差几毫米」）。
+  const Vec3d& joint_before = first.samples.back().position;
+  const Vec3d& joint_after = second.samples.front().position;
+  EXPECT_NEAR(joint_after.x, joint_before.x, 1e-12);
+  EXPECT_NEAR(joint_after.y, joint_before.y, 1e-12);
+  EXPECT_NEAR(joint_after.z, joint_before.z, 1e-12);
+
+  // 半径：接头两侧比值保持不变（干净几何上就是 1.0）。
+  EXPECT_NEAR(second.samples.front().radius / first.samples.back().radius, 1.0, 1e-12);
+
+  // 分叉那根仍然贴在父枝上（噪声后重新落位，等价于 anchor 合同的枝干版）。
+  const Branch& fork = shape.branches[2];
+  double best = 1e9;
+  for (std::size_t k = 0; k + 1 < second.samples.size(); ++k) {
+    const Vec3d& a = second.samples[k].position;
+    const Vec3d& b = second.samples[k + 1].position;
+    const double abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+    const double length_sqr = abx * abx + aby * aby + abz * abz;
+    double t = 0.0;
+    if (length_sqr > 0.0) {
+      t = ((fork.samples.front().position.x - a.x) * abx +
+           (fork.samples.front().position.y - a.y) * aby +
+           (fork.samples.front().position.z - a.z) * abz) / length_sqr;
+      t = std::clamp(t, 0.0, 1.0);
+    }
+    const double dx = fork.samples.front().position.x - (a.x + abx * t);
+    const double dy = fork.samples.front().position.y - (a.y + aby * t);
+    const double dz = fork.samples.front().position.z - (a.z + abz * t);
+    best = std::min(best, std::sqrt(dx * dx + dy * dy + dz * dz));
+  }
+  EXPECT_LT(best, 1e-9);
+}
+
 }  // namespace
 }  // namespace gen
 }  // namespace vegetation
