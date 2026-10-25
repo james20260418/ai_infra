@@ -76,6 +76,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.SetShowPanel(false);
     app.Init();
     app.Setup(texture_path);
+    // 玻璃缸场景的橡树在**首帧之前**加载（帧中上传 GL 资源会撞 1282）。
+    // 只有拍摄表里用到它时才加载，gold 的 8 张图完全不付这份成本。
+    app.PrepareTankScene();
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -110,6 +113,11 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         float jet_gain = 3.0f;       // 射流 HDR 增益
         bool bloom = true;           // 辉光（HDR 高亮够亮才看得出来）
         float camera_r = jpov_strip::kViewDefaults.R;
+        // 以下是 2026-10-25 新增的「玻璃缸」场景（放在最后：旧拍摄表的指定初始化不用改序）。
+        bool tank = false;           // 橡树 + 玻璃筒（sky_light 验收场景）
+        bool tank_skylight = true;   // 缸壁是否消费天光（A/B 的唯一变量）
+        float sun_elev_deg = jpov_strip::kViewDefaults.sun_elev_deg;   // 看天光响应必调
+        float tank_injection = 0.20f;   // 缸壁的散射率（吸收→注入比例）
     };
     const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
     const float kRingR = 3.6f;   // 只看圆环时的机位（充满画面又不贴脸）
@@ -167,6 +175,26 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
          .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
         {.name = "305_far_tex_mip", .ring = false, .texture_mipmap = true, .smooth = true,
          .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
+        // 玻璃缸（天光消费）：同一机位，**只差「缸壁是否消费天光」**。
+        // 400 的缸壁只剩淡边反 + 暗膜；405 应该能看到筒壁被天光照亮、上半亮下半暗。
+        // 410/415 改太阳仰角（8° / −8° = 黄昏 / 入夜）：缸壁的亮度与色温应该跟着变。
+        {.name = "400_tank_unlit", .ribbons = false, .ring = false, .smooth = true,
+         .fresnel = true, .boxes = false, .jet = false, .bloom = false, .camera_r = 9.0f,
+         .tank = true, .tank_skylight = false},
+        {.name = "405_tank_skylit", .ribbons = false, .ring = false, .smooth = true,
+         .fresnel = true, .boxes = false, .jet = false, .bloom = false, .camera_r = 9.0f,
+         .tank = true, .tank_skylight = true},
+        {.name = "410_tank_skylit_lowsun", .ribbons = false, .ring = false, .smooth = true,
+         .fresnel = true, .boxes = false, .jet = false, .bloom = false, .camera_r = 9.0f,
+         .tank = true, .tank_skylight = true, .sun_elev_deg = 8.0f},
+        {.name = "415_tank_skylit_night", .ribbons = false, .ring = false, .smooth = true,
+         .fresnel = true, .boxes = false, .jet = false, .bloom = false, .camera_r = 9.0f,
+         .tank = true, .tank_skylight = true, .sun_elev_deg = -8.0f},
+        // 散射率对比：420 = 0.40（明显偏乳白）/ 405 = 0.20（玻璃感强）。
+        // 同一个开关下只调这一个旋钮，用来定「玻璃/磨砂」该给多少。
+        {.name = "420_tank_skylit_inj40", .ribbons = false, .ring = false, .smooth = true,
+         .fresnel = true, .boxes = false, .jet = false, .bloom = false, .camera_r = 9.0f,
+         .tank = true, .tank_skylight = true, .tank_injection = 0.40f},
     };
     for (const Shot& shot : kShots) {
         CHECK(shot.fresnel_preset >= 0 && shot.fresnel_preset < jpov_strip::kFresnelPresetCount)
@@ -180,6 +208,10 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         app.bloom_ = shot.bloom;
         app.use_texture_ = shot.use_texture;
         app.texture_mipmap_ = shot.texture_mipmap;
+        app.tank_visible_ = shot.tank;
+        app.tank_skylight_ = shot.tank_skylight;
+        app.deg_.sun_elev_deg = shot.sun_elev_deg;
+        app.tank_injection_ = shot.tank_injection;
         app.soft_edges_ = shot.soft_edges;
         app.arc_additive_ = shot.arc_additive;
         app.soft_depth_ = shot.soft_depth;
@@ -256,6 +288,9 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
     app.Setup(texture_path);
+    // 交互模式同理：必须在 Run() 之前加载（面板上的勾选只是开关，不负责加载）。
+    // 代价 = 启动时多一次 4k glb 解压/上传（约 1s）；换来勾选「显示玻璃缸」零延迟。
+    app.PrepareTankScene();
     jpov_strip::ApplyDefaultView(&app);
     app.Run();
     app.Finalize();

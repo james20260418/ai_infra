@@ -11,6 +11,9 @@
 // 「WBO 覆盖集 + over 合成」；三块参考方块用来验收「天光真的照在物体上」；
 // 圆环用来验收 fresnel（参数／预设见 §19 与 kFresnelPresets）。
 //
+// 2026-10-25 追加「玻璃缸」场景（面板「显示玻璃缸」+ 拍摄表 400~415）：
+// 一棵 6m 橡树罩在开口玻璃筒里，筒壁是条带 —— 用来验收 `StripSkyLight`（条带消费天光）。
+//
 // 交互：右键拖拽 = 绕行、滚轮 = 推拉；面板可调视角外的一切（形状/材质/剖面/开关）。
 // 拍摄：--capture <dir>（固定视角与相位，逐张对比图）。
 
@@ -86,6 +89,20 @@ inline jpov::StripRingShape MakeSceneRingShape() {
     shape.center_x = -1.70f;
     shape.center_y = 1.20f;
     shape.center_z = 1.00f;
+    return shape;
+}
+
+// 玻璃缸（天光消费的验收场景）：把 6m 橡树罩住的开口玻璃筒。
+// 半径比树冠小一圈（树冠会从上面冒出来），筒高 5.4m —— 刚好让"光从上下来"有层次。
+// 壁厚 5cm：足够看出内外两层膜（内外立壁各一条带），又不至于让筒壁发绿。
+inline jpov::StripRingShape MakeTankShape() {
+    jpov::StripRingShape shape;
+    shape.outer_radius = 2.90f;
+    shape.wall_thickness = 0.05f;
+    shape.height = 5.40f;
+    shape.center_y = 2.70f;   // 底部落在 y = 0（地面）
+    shape.center_x = 0.0f;
+    shape.center_z = 0.0f;
     return shape;
 }
 
@@ -453,6 +470,21 @@ public:
     float jet_gain_ = 3.0f;                 // HDR 增益（>1 才有 bloom 余量）
     bool bloom_ = true;                     // 辉光（把 HDR 高亮模糊加回）
 
+    // ── 玻璃缸 + 橡树（2026-10-25：天光消费的验收场景）──
+    // 用 fire-fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
+    // 它会随天光/太阳变亮变暗。**默认关**，所以 gold 的 8 张图完全不受影响。
+    bool tank_visible_ = false;
+    bool tank_skylight_ = true;             // 缸体是否消费天光（A/B 的唯一变量）
+    float tank_opacity_ = 0.26f;            // 缸体不透明度（要能看清里面的树）
+    // 吸收→注入比例 = 材料的**散射率**：薄玻璃几 %；乳白/磨砂可以接近 1。
+    // 演示取 0.40：既看得出「顶部亮、底部暗、随太阳变」，又不至于糊成一块牛奶。
+    float tank_injection_ = 0.20f;
+    jpov::Vec3f tank_color_{0.10f, 0.12f, 0.14f};   // 缸壁的"表面色"（近黑玻璃；亮部交给天光）
+    jpov::StripRingShape tank_shape_ = MakeTankShape();
+    jpov::GltfObject oak_;                  // 橡树（首帧前预加载，见 PrepareTankScene）
+    float oak_scale_ = 1.0f;
+    bool oak_loaded_ = false;               // true = 已尝试加载（失败也置 true，只试一次）
+
     // ── 菲涅耳（玻璃边反）──
     // 默认开：这个 viewer 现在的主场景就是那块玻璃圆环，不开就只是层淡蓝膜。
     bool fresnel_enabled_ = true;
@@ -462,6 +494,14 @@ public:
 
     // 装配场景静态资源（Init 之后、Run/RunOnce 之前调用一次）。
     void Setup(const std::string& texture_path);
+
+    // 预加载玻璃缸场景的资产（橡树 glb）。
+    //
+    // ⚠️ 必须在**任何一帧之前**调（与 Setup 同一时机）：glb 的 mesh/纹理上传会碰 GL
+    // 状态，而 OneIteration 里正处于上一帧遗留的绑定状态（实现在帧中懒加载会直接撞
+    // `GL error after mesh upload, code=1282`）。
+    // 刻意不在 Setup 里自动调：gold 的 8 张图不用这个场景，不该为它付 4k glb 的加载。
+    void PrepareTankScene() { EnsureTankAssets(); }
 
     // 视角/天光回到默认（gold 与面板「重置视角」共用）。
     void ResetViewToDefaults() {
@@ -513,7 +553,7 @@ public:
         cmds->camera.position = view_.Position();
         // 三条带都在 y≈0.3..2.7（离地悬空），所以看向原点会让画面整体偏上；
         // 目标点抬高到 1.15m 才把条带放在画面中央。
-        cmds->camera.target = {0.0f, 1.15f, 0.0f};
+        cmds->camera.target = {0.0f, tank_visible_ ? 2.60f : 1.15f, 0.0f};
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 55.0f;
         cmds->camera.near = 0.05f;
@@ -560,8 +600,20 @@ public:
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.5f);
         }
 
+        // 玻璃缸场景（sky_light 验收）：橡树在缸里，缸壁是条带。
+        // 树的模型由调用方在**首帧之前**用 PrepareTankScene() 加载（帧中上传会撞 GL 1282）。
+        // 没加载成功时 oak_ 为空 ⇒ 只画缸壁，不崩（见 EnsureTankAssets 的警告）。
         if (show_strips_) {
             EmitStripBatches(cmds);
+        }
+        if (tank_visible_ && !oak_.empty()) {
+            cmds->DrawGltfObject(oak_, /*center*/ {0.0f, 0.0f, 0.0f}, /*up*/ {0.0f, 1.0f, 0.0f},
+                                 /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ oak_scale_);
+        }
+        // 缸壁必须**晚于**树进命令表？不需要：条带是独立 pass（不透明之后），
+        // 所以顺序只影响条带之间的前后关系；这里放最后 = 缸壁盖在所有条带之上。
+        if (tank_visible_) {
+            EmitTankBatch(cmds, light);
         }
 
         if (show_panel_) {
@@ -678,6 +730,94 @@ private:
         cmds->DrawTranslucentStrips(std::move(ring));
     }
 
+    // ── 玻璃缸场景（sky_light 的验收）─────────────────────────────────────
+    //
+    // 树 = fire-fog viewer 同款橡树（build 脚本把 glb 拷到 exe 旁 models/）。
+    // 缸 = 四条带围成的**开口**筒（底面 + 内外立壁；顶面丢掉，方便看树冠从上面出来）。
+    //
+    // 懒加载：gold 的 8 张图都不用这个场景，所以**绝不在 Setup 里加载** —— 否则
+    // gold test 每起一个 app 就要白付一次 4k glb 的解码 + 上传。
+    void EnsureTankAssets() {
+        if (oak_loaded_) {
+            return;   // 只尝试一次：失败也不每帧重试（否则交互时会卡成幻灯片）
+        }
+        oak_loaded_ = true;
+        // 查找顺序与条带纹理一致：cwd / 产物目录 → 仓库 assets。
+        const char* kCandidates[] = {
+            "models/tripo_oak_4k.glb",                 // output/ 产物目录（build 脚本拷贝）
+            "../models/tripo_oak_4k.glb",              // 兼容从 exe 目录上层跑
+            "tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb",  // 仓库根
+            "../../tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb",
+        };
+        for (const char* rel : kCandidates) {
+            std::FILE* f = std::fopen(rel, "rb");
+            if (f == nullptr) {
+                continue;
+            }
+            std::fclose(f);
+            oak_ = LoadGltf(rel);
+            break;
+        }
+        if (oak_.empty()) {
+            LOG(WARNING) << "玻璃缸场景：找不到/加载失败橡树 models/tripo_oak_4k.glb"
+                            "（先跑 ./tools/jpov/build_jpov_strip_viewer.sh）；"
+                            "缸壁仍会画，但里面是空的";
+            return;
+        }
+        // 归一化到 6m（与 fire-fog viewer 同一目标高度；bounds 无效则不缩放）。
+        if (oak_.bounds_valid) {
+            const float hgt = oak_.bounds_max[1] - oak_.bounds_min[1];
+            if (hgt > 1.0e-6f) {
+                oak_scale_ = 6.0f / hgt;
+            }
+        }
+        LOG(INFO) << "玻璃缸场景：橡树已加载，scale=" << oak_scale_;
+    }
+
+    // 缸壁批次：天光从与地面/方块**同一份**天光推导（light.sky）⇒ 缸壁的明暗与
+    // 场景里其它物体一致 —— 这正是这个场景要验的事。
+    void EmitTankBatch(jpov::RenderCommandList* cmds,
+                       const jpov_skylight::SkyLighting& light) {
+        jpov::StripRingShape shape = tank_shape_;
+        // 壁厚滑条可能出现 wall ≥ outer（形状层会 CHECK 崩）⇒ 使用处夹一次。
+        shape.wall_thickness = std::min(shape.wall_thickness, shape.outer_radius * 0.5f);
+        const std::array<jpov::Strip16, jpov::kStripRingPartCount> parts =
+            jpov::MakeStripRing(shape);
+
+        jpov::TranslucentStripBatch tank;
+        tank.texture_id = 0;
+        tank.blend = jpov::StripBlend::kCoverage;
+        tank.geometry = jpov::StripInterpolation::kSmooth;   // 闭合曲面：折线会出分面
+        if (fresnel_enabled_) {
+            tank.fresnel = fresnel_;   // 玻璃缸本来就有边反
+        }
+        if (tank_skylight_) {
+            jpov::StripSkyLight sky;
+            // 三色 / 强度 / 太阳全部来自同一份天光推导：缸壁与地面、方块同源。
+            sky.tricolor = light.sky.AmbientTricolor();
+            sky.ambient_scale = light.sky.AmbientIntensity();
+            sky.sun_direction = light.sky.sun_dir;
+            const jpov::Color sun = light.sky.SunDirectionalColor();
+            sky.sun_color = jpov::Vec3f{sun.r, sun.g, sun.b};
+            sky.sun_intensity = light.sky.SunDirectionalIntensity();
+            sky.injection = tank_injection_;
+            tank.sky_light = sky;
+        }
+
+        // 开口缸：底面 + 内外立壁（顶面不要）。
+        const int kParts[] = {static_cast<int>(jpov::StripRingPart::kBottomFace),
+                              static_cast<int>(jpov::StripRingPart::kOuterWall),
+                              static_cast<int>(jpov::StripRingPart::kInnerWall)};
+        const jpov::Color tint{tank_color_.x(), tank_color_.y(), tank_color_.z(),
+                                tank_opacity_};
+        for (int part : kParts) {
+            jpov::Strip16 strip = parts[static_cast<size_t>(part)];
+            strip.point_color.fill(tint);
+            tank.strips.push_back(strip);
+        }
+        cmds->DrawTranslucentStrips(std::move(tank));
+    }
+
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
                            void* userdata) {
         StripViewerApp* app = static_cast<StripViewerApp*>(userdata);
@@ -736,6 +876,10 @@ private:
         ui_.Checkbox("软深度", &soft_depth_, left_rect());
         ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
         ui_.Checkbox("显示参考方块", &boxes_visible_, left_rect());
+        // 玻璃缸场景（sky_light 验收）：橡树 + 玻璃筒。三个控件都只影响这个场景。
+        ui_.Checkbox("显示玻璃缸（橡树）", &tank_visible_, left_rect());
+        ui_.Checkbox("缸壁消费天光", &tank_skylight_, left_rect());
+        ui_.SliderFloat("天光注入比例", &tank_injection_, left_rect(), 0.0f, 1.0f, 2);
 
         // ── 中列：形状 / 动画 / 显隐 / 圆环 ──
         ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), mid_rect(), 0.0f, 1.2f, 2);
