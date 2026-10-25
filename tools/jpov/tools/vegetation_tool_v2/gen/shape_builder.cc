@@ -203,6 +203,46 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
         (static_cast<double>(match->segment) + match->t) / std::max(1, segment_count);
   }
 
+  // 兜底：破环。
+  // 父枝是用「起点最近的折线」判的，采样一稀（低配 per_seg=1~2）时，某根枝的起点
+  // 可能离它自己**后代**的近路折线更近 ⇒ 父子关系成环（A 的父是 B、B 的父是 A），
+  // 拓扑序写不出来，整棵树直接失败（报「枝 N 的父枝排在它后面」）。
+  // 处理：把环上的枝重新问一次「最近的其他折线」（排除当前父枝）；实在找不到就挂到根枝。
+  {
+    std::vector<int> stamp(static_cast<std::size_t>(count), -1);
+    for (int i = 0; i < count; ++i) {
+      // 沿父链往上走，看会不会回到自己（或走回已经走过的点）。
+      int current = i;
+      int steps = 0;
+      std::vector<int> chain;
+      while (current >= 0 && steps <= count) {
+        if (current == i && steps > 0) {
+          break;  // 回到自己 = 环
+        }
+        chain.push_back(current);
+        current = hierarchy.parent[static_cast<std::size_t>(current)];
+        ++steps;
+      }
+      const bool cycle = current == i && steps > 0;
+      if (!cycle) {
+        continue;
+      }
+      const int parent = hierarchy.parent[static_cast<std::size_t>(i)];
+      // 先试「第二近」的折线（排除当前父枝）。
+      const std::optional<jpov::util::NearestPointMatcher3d<double>::Match> retry =
+          matcher.Query(ToGeom(polys[i].points[0]), parent);
+      if (retry.has_value() && retry->polyline != i) {
+        hierarchy.parent[static_cast<std::size_t>(i)] = retry->polyline;
+        const int segment_count = static_cast<int>(polys[retry->polyline].points.size()) - 1;
+        hierarchy.attach[static_cast<std::size_t>(i)] =
+            (static_cast<double>(retry->segment) + retry->t) / std::max(1, segment_count);
+      } else {
+        hierarchy.parent[static_cast<std::size_t>(i)] = root;  // 最后的兜底：挂到根枝
+        hierarchy.attach[static_cast<std::size_t>(i)] = 1.0;
+      }
+    }
+  }
+
   // 层数：BFS 从根往下走；父枝是「延续」（附着点几乎在末端）时层数不变，分叉才 +1。
   std::vector<std::vector<int>> children(static_cast<std::size_t>(count));
   for (int i = 0; i < count; ++i) {

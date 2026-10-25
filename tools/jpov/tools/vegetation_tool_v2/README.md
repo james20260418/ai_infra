@@ -268,6 +268,31 @@ cd output/jpov_vegetation_v2_viewer
 （实测 pine 直接报「枝 187 的父枝排在它后面」，成环），树的结构会坏掉。
 降采样用 `per_seg`，它不改变贝塞尔骨架。
 
+### 游戏档（`configs/game/`）—— 每棵约 5000 三角形
+
+低配小游戏里"玩家会走近的英雄树"大概是 5k~15k 三角形。这一档把三棵树压到 **约 5.1k~5.3k**：
+
+| 树 | 三角形 | 其中枝管 / 叶卡 | 顶点 | 枝 | 卡 |
+|---|---|---|---|---|---|
+| pine_game | 5,118 | 1,374 / 3,744 | 5,085 | 62 | 468 |
+| oak_game | 5,274 | 3,018 / 2,256 | 4,452 | 135 | 282 |
+| fir_game | 5,216 | 1,848 / 3,368 | 5,019 | 102 | 421 |
+
+手段（在低配档基础上继续降）：`levels 2`（砍掉细枝层）、`per_seg 1`、`ring 3,3,3`、
+`leaves` 调回 16~20、`leafScale` 放大到 2.2~2.6 —— **卡少十倍就只能靠"更少更大的叶簇"撑体积**，
+这是低模树的标准做法（远看有体积、近看是纸片）。
+
+⚠️ 这一档砍掉了一级分枝，松树/杉树会偏"长毛的柱子"。要保树形就保 `levels 3`，
+代价是三角数涨到 ~7.5k（仍远低于低配档的 5.7 万）。
+
+生成：
+
+```bash
+gen/shape_gen --config configs/game/pine.pbtxt --out output/veg_shapes/pine_game.pbtxt --per-seg 1 --ring-count 3,3,3
+gen/shape_gen --config configs/game/oak.pbtxt  --out output/veg_shapes/oak_game.pbtxt  --per-seg 1 --ring-count 3,3,3
+gen/shape_gen --config configs/game/fir.pbtxt  --out output/veg_shapes/fir_game.pbtxt  --per-seg 1 --ring-count 3,3,3
+```
+
 生成低配档（环数在命令行给，配置里没有这个字段）：
 
 ```bash

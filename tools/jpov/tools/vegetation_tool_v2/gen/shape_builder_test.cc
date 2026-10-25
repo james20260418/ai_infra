@@ -422,6 +422,36 @@ TEST(ShapeNoiseTest, ContinuationSegmentsStayAligned) {
   EXPECT_LT(best, 1e-9);
 }
 
+// 父枝归属成环时不能直接失败：低配（per_seg=1~2）采样稀，某根枝的起点可能离
+// "自己的后代"更近，A 认 B 当父、B 又认 A 当父。这里造一个必然成环的 dump：
+// 主干在 (0,0,3)，两根枝的起点互为对方最近点。
+// 期望：仍然产出合法拓扑（恰好一根根枝、parent < id），而不是报「父枝排在它后面」。
+TEST(ShapeNoiseTest, CyclicParentFallbackStillBuilds) {
+  SaplingDump dump;
+  dump.bevel_depth = 1.0;
+  dump.splines.push_back(MakePolySpline({ Vec3d{ 0.0, 0.0, 0.0 }, Vec3d{ 0.0, 0.0, 3.0 } }, 0.30));
+  dump.splines.push_back(MakePolySpline({ Vec3d{ 0.2, 0.0, 3.0 }, Vec3d{ 1.2, 0.0, 3.0 } }, 0.08));
+  dump.splines.push_back(MakePolySpline({ Vec3d{ 1.2, 0.0, 3.0 }, Vec3d{ 0.2, 0.0, 3.0 } }, 0.08));
+
+  Shape shape;
+  BuildStats stats;
+  std::string error;
+  const bool ok = BuildShape(dump, MakeOptions(), &shape, &stats, &error);
+  EXPECT_TRUE(ok) << error;
+  if (!ok) {
+    return;
+  }
+  int roots = 0;
+  for (const Branch& branch : shape.branches) {
+    if (branch.parent < 0) {
+      ++roots;
+    } else {
+      EXPECT_LT(static_cast<std::uint32_t>(branch.parent), branch.id);
+    }
+  }
+  EXPECT_EQ(roots, 1);
+}
+
 }  // namespace
 }  // namespace gen
 }  // namespace vegetation
