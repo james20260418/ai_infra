@@ -64,9 +64,12 @@ layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度。天空是背景（全屏三角形，NDC z=1），恒写 1.0（= 最远）。
 // vec4 + alpha=1 保证在全局 alpha 混合下恒等写入。
 layout(location = 1) out vec4 FragSceneDepth;
-// uAtmoOnly > 0 时只输出**大气色**（不含日/月盘与光晕）——用于生成「天空色纹理」供
-// 远景仰角雾当收敛色（盘/晕是光源，不该成为远处收敛色）。分离成单独一趟绘制。
-uniform int uAtmoOnly;
+// uSkyOutput 选择本趟要输出什么（见 SkyOutput）：
+//   0 = 完整天空（含日月盘/光晕）；1 = 只出大气色（收敛色用，下半球用地平线色）；
+//   2 = 环境反射探针（不含日月盘/光晕，下半球用**地色**）。
+// 分离成多趟绘制：日月盘是光源，不该成为远处收敛色，也不该在反射里再算一次
+//（直射高光已由 PBR 的 GGX 给出）。
+uniform int uSkyOutput;
 
 uniform vec2  uResolution;    // 当前 FBO 分辨率（像素），用于 gl_FragCoord→NDC
 uniform mat4  uInvVP;         // 相机 逆(Proj*View)
@@ -421,16 +424,32 @@ void main() {
     //   ⚠️ dir.y 夹到 ≥0：向下看的远处也收敛到**地平线色**，而不是下半球的 ground_color
     //   （天空 shader 在地平线以下填的是 ground_color，直接拿会得到"地色"，见 2026-09-30 反馈）。
     vec3 sky_atmo = vec3(0.0);
-    if (uAtmoOnly > 0) {
+    // 只有 kAtmoOnly / kEnvProbe 需要它：kFull 不算（preethamSky 很贵，
+    // 背景那一趟是全屏的，白算一次会直接翻倍那片元成本）。
+    if (uSkyOutput > 0) {
         vec3 da = normalize(vec3(dir.x, max(dir.y, 0.0) + 1e-5, dir.z));
         vec3 solar_a = preethamSky(da, sun_dir, uTurbidity) * SKY_LUMINANCE_SCALE;
         sky_atmo = mix(vec3(0.0), solar_a, daylight) * uDaylightSeason * uIntensity;
         sky_atmo += nightSkyColor(clamp(da.y, 0.0, 1.0)) * uIntensity * (1.0 - daylight);
     }
-    FragColor = vec4((uAtmoOnly > 0) ? sky_atmo : sky, 1.0);
+    // 环境反射探针：上半球用大气色（不含日月盘），下半球用**地色**（乘以 intensity，
+    //   与完整天空路径里 `sky *= uIntensity` 对地色的缩放一致）——金属球下半部
+    //   应该反射地面而不是地平线色。
+    vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
+    vec3 out_color = (uSkyOutput == 1) ? sky_atmo
+                   : (uSkyOutput == 2) ? sky_env
+                   : sky;
+    FragColor = vec4(out_color, 1.0);
     FragSceneDepth = vec4(1.0, 0.0, 0.0, 1.0);
 }
 )glsl";
+
+    // 本趟输出的内容（DrawSky 的 output 参数）。整数取值与 shader 的 uSkyOutput 一一对应。
+    enum class SkyOutput {
+        kFull = 0,      // 完整天空：含日月盘/光晕（背景垫底用）
+        kAtmoOnly = 1,  // 只出大气色：不含盘/晕，且下半球也用地平线色（远景雾收敛色用）
+        kEnvProbe = 2,  // 环境反射探针：不含盘/晕，下半球用**地色**（IBL 镜面用）
+    };
 
     // ---- DrawSky ----
     // 在**当前绑定 FBO** 上画全屏程序化天光（背景垫底）。
@@ -445,11 +464,39 @@ void main() {
     //   - 目标 FBO 已绑定（天光垫底的 3D FBO），viewport 已设置
     //   - 深度测试已禁用（天空永远垫底，不写深度）
     // Pre-condition: cam.up 非零、target != position
-    //   atmo_only: true 时只输出大气色（不含日月盘/光晕）——用于生成「天空色纹理」，
-    //              供远景仰角雾当收敛色（默认 false = 正常天空，含日月盘）。
+    //   output: 本趟画什么（见 SkyOutput）。kAtmoOnly = 只出大气色（不含日月盘/光晕），
+    //           供远景仰角雾当收敛色；kEnvProbe = 环境反射探针（不含盘/晕，下半球用地色）。
     static void DrawSky(const SkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
-                        ShaderManager& shader_mgr, bool atmo_only = false);
+                        ShaderManager& shader_mgr,
+                        SkyOutput output = SkyOutput::kFull);
+
+    // ---- DrawSkyEnvCube ----
+    // 把程序化天光渲进一张**立方体贴图**（环境镜面 IBL 的反射源）。
+    //
+    // 做法：逐面构造 90° 透视相机（位置=原点、朝±X/±Y/±Z），复用同一份 sky shader
+    // 调 DrawSky(kEnvProbe) 画进 cube face，最后 glGenerateMipmap 生成 mip 链
+    //（粗糙度→mip 级由此近似模糊，见 src/env_specular.h）。
+    //
+    // 面朝向按 GL cubemap 的 s/t 约定定：±X/±Z 面的“上”是 **-Y**，+Y 是 +Z、-Y 是 -Z
+    //（GL 规范表：+X 面 s=-rz/t=-ry，其余同理）。弄错会得到镜像/旋转的天空。
+    //
+    // 算法仅依赖方向，与相机位置无关 ⇒ 探针放在世界原点即可，不需要跟随相机。
+    //
+    // 参数：
+    //   sky_cmd    : 天光参数（与本帧背景同源，色温/昼夜/浊度自然一致）。
+    //   size       : 面边长（像素，建议 128：6×128² ≈ 10 万像素，成本可忽略）。
+    //   cube_tex   : GL_TEXTURE_CUBE_MAP 纹理（已分配 6 面 + mip 空间）。
+    //   face_fbo   : 已创建的 FBO（仅 COLOR_ATTACHMENT0，逐面重挂）。
+    //   shader_mgr : 共享 shader 缓存。
+    //
+    // 返回后 GL 状态：**不绑定任何 FBO**（已解绑到 0，看下面 glGenerateMipmap 的约束）、
+    //   viewport = size×size、深度测试关闭、活动纹理单元 = 0、cube 纹理已解绑。
+    //   ⇒ 调用方必须自己恢复目标 FBO / viewport / 深度状态。
+    // Pre-condition: cube_tex / face_fbo 非 0，size ≥ 1。
+    static void DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
+                               unsigned int cube_tex, unsigned int face_fbo,
+                               ShaderManager& shader_mgr);
 };
 
 }  // namespace jpov

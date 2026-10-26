@@ -15,6 +15,8 @@
 //（两者在地平线 0° 处交接），一条仰角轴即可验收日/月两种主光的强度与颜色。
 //
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
+// 环境镜面 A/B（--capture-env <out_dir>）：固定机位只切“天光消费量”（0 / 0.5 / 1），
+//   验收工件 = 第三方块（金属，metallic=1）—— 关时发黑，开时能看见天光渐变与地色。
 //
 // 架构：与 model viewer 同构（主程序只做装配 + 事件循环；场景/天光装配在
 // skylight_scene.h，渲染核心 + 面板在 skylight_viewer_app.h）。
@@ -370,6 +372,60 @@ int RunCaptureSmaa(const std::string& out_dir, float threshold) {
     return 0;
 }
 
+// 环境镜面 A/B 拍摄：固定机位/光照，只切“天光消费量”。
+// 用法：jpov_skylight_viewer --capture-env <out_dir>
+// 出图：env_off.png（关闭）/ env_half.png（0.5）/ env_on.png（1.0）
+//
+// 为什么用这三个档：
+//   off ↔ on  = 验收“这一块到底做了什么”（金属块从发黑 → 有天空反射）；
+//   half      = 验收“乘子真的是连续可调”，且半量看起来应当位于两者之间。
+int RunCaptureEnv(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 环境镜面 A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 固定观感：正午侧光（让金属块同时照到天空与太阳，反射方向不恰好垂直向下），
+    // 机位拉近到三方块，金属块（右侧）占屏面积够大。
+    app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 40.0f;
+    app.deg_.sun_azim_deg = 30.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.20;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 5.2;
+
+    app.SetEnvSpecular(false);
+    app.RunOnce(input, winfo, (out_dir + "/env_off.png").c_str());
+    app.SetEnvSpecular(true, 0.5f);
+    app.RunOnce(input, winfo, (out_dir + "/env_half.png").c_str());
+    app.SetEnvSpecular(true, 1.0f);
+    app.RunOnce(input, winfo, (out_dir + "/env_on.png").c_str());
+
+    LOG(INFO) << "env specular A/B captured to " << out_dir
+              << " (env_off / env_half / env_on)";
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -377,15 +433,21 @@ int main(int argc, char** argv) {
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
     std::string out_dir;
     std::string smaa_out_dir;
+    std::string env_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
             out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-smaa") == 0 && i + 1 < argc) {
             smaa_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
+            env_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!env_out_dir.empty()) {
+        return RunCaptureEnv(env_out_dir);
     }
     if (!smaa_out_dir.empty()) {
         return RunCaptureSmaa(smaa_out_dir, smaa_threshold);

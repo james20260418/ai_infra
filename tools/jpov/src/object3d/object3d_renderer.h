@@ -22,10 +22,12 @@
 #ifndef JPOV_OBJECT3D_RENDERER_H_
 #define JPOV_OBJECT3D_RENDERER_H_
 
+#include <string>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/texture_manager.h"
@@ -113,7 +115,12 @@ void main() {
     //   下面的 #define 常量与 Object3DRenderer 的 kTileSize16_/
     //   kMaxLightsPerTile_/kMaxTotalLights_/kLightIndexSentinel_ 一一对应：
     //   改任一处必须同时改另一处，否则 tile 编码/解码错位。
-    static constexpr const char* kMeshFs3dPBR = R"glsl(
+    //
+    // ⚠️ 类型是 std::string（而非 const char* 字面量）：源文由「字面量 + 共享片段
+    //    kEnvSpecularGlsl + 字面量」拼成 —— 环境镜面那段被三份 PBR 片元共用，
+    //    各自拷贝必然分叉（见 src/env_specular.h 顶部说明）。传给 ShaderSource 时取
+    //    .c_str()（进程内静态对象，生命周期同 program）。
+    inline static const std::string kMeshFs3dPBR = std::string(R"glsl(
 #version 330 core
 
 #define TILE_SIZE 16
@@ -615,7 +622,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
     }
 }
-
+)glsl") + kEnvSpecularGlsl + R"glsl(
 void main() {
 #ifdef JPOV_ALPHA_BLEND
     // ★ 早退（overdraw 优化）：本像素被不透明场景遮挡的玻璃片元直接丢弃。
@@ -751,7 +758,8 @@ void main() {
         }
     }
 
-    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
+    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular
+                + EnvSpecularTerm(N, V, roughness, metallic, base_color) * ao + emissive;
 #ifdef JPOV_ALPHA_BLEND
     // ── 加权混合 OIT（Weighted Blended OIT）──
     // （被不透明遮挡的玻璃已在 main 开头早退丢弃，此处只需算权重/写入。）

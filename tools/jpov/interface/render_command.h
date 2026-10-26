@@ -573,6 +573,35 @@ struct AmbientLight {
     std::optional<std::array<Color, 3>> tricolor = std::nullopt;
 };
 
+// ==================== 环境镜面反射（IBL 的镜面项）====================
+//
+// PBR 的镜面项由**两半**组成，缺一不可：
+//   ① 直射高光 —— 点光源/太阳的 GGX 项，一直都有（`total_specular`）；
+//   ② 环境镜面 —— 材质对**周围环境**的镜像反射，本结构补的就是这一半。
+//
+// 为什么必须补：metallic=1 的材质没有漫反射，它的“颜色”**完全来自**环境反射。
+// 只有①时，金属除了太阳打出的那一小块高光以外无处取光，呈暗黑块状
+//（demo/skylight_scene.h 的 index 2 那条注释「无漫反射，纯环境反射」描述的正是
+// 这一项 —— 而管线此前从未实现过它）。
+//
+// 光源就是 SkyCommand（**不是**另一份独立配置，避免同一物理量出现两个来源）：
+// Renderer 每帧把天空渲成一张 128² 的 cubemap（6 个面；**只含大气色，不含日月盘/
+// 光晕** —— 日月的直射已由①给出，重复叠加会两倍亮），片元按 `reflect(-V, N)` 采样，
+// 并用 mip 级近似粗糙度带来的模糊。
+//
+// Pre-condition: 本帧必须设置 `cmds.sky`（环境镜面的光就是天光，没有天光就没有反射源）。
+//   缺失时 Renderer 直接 LOG(FATAL)，不静默退化 —— 静默会让“为什么金属是黑的”
+//   这个问题重新变成一个要查代码才能回答的问题。
+struct EnvSpecular {
+    // 天光消费量 [0,1]：1 = 全部消费天光（物理值），0 = 完全不消费（**完全关闭**：
+    // Renderer 不渲探针、不上传 uniform，与未设置该字段等价；不代表“等价但照旧付费”）。
+    //
+    // **全局**旋钮，不是 per-object：per-obstacle 的“这个物体能看见多少天光”
+    //（墙角的金属该暗、开阔处的该亮）计划由更强的体素光场接管，本版不做。
+    // 因此这里只有一个标量，没有任何 per-command 字段。
+    float sky_scale = 1.0f;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -2046,6 +2075,12 @@ struct RenderCommandList {
     // 全局环境光。未设置时使用默认值（中性灰白 × 0.4），后续可由 SkyCommand
     // 自动推导。有值时按用户给定的颜色/强度照亮物体背阳面（无方向、无影子）。
     std::optional<AmbientLight> ambient;
+
+    // 环境镜面反射（IBL specular）：未设置时**零开销零回归**（不渲 cubemap、
+    // shader 里 uEnvEnabled=0 直接返回 0）。设置后所有 PBR 材质（静态 / 实例 / 蒙皮）
+    // 默认消费天光 —— 见 EnvSpecular 与 docs/jpov_env_specular_design.md。
+    // Pre-condition: 设置时必须同时设置 sky（否则 Renderer LOG(FATAL)）。
+    std::optional<EnvSpecular> env_specular;
 
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。

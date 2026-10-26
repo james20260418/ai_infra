@@ -10,12 +10,11 @@
 #include <cmath>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）
-#ifdef _WIN32
-#include <GL/gl.h>
-#else
+// 注：cube map / FBO 的枚举值（GL_TEXTURE_CUBE_MAP* / GL_FRAMEBUFFER /
+//     GL_COLOR_ATTACHMENT0）都超出 GL 1.1，MinGW 的 GL/gl.h 只到 1.1 ⇒
+//     **两个平台都要包含 glext.h**（与 volume_manager.cc 同款）。
 #include <GL/gl.h>
 #include <GL/glext.h>
-#endif
 
 #ifdef _WIN32
 // MinGW: windows.h 定义 ERROR 宏与 glog 冲突，必须在 glog 之前 suppress
@@ -113,7 +112,7 @@ namespace jpov {
 
 void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
-                          ShaderManager& shader_mgr, bool atmo_only) {
+                          ShaderManager& shader_mgr, SkyOutput output) {
     // ---- 构建 相机 逆(Proj*View) ----
     const float aspect = static_cast<float>(fbo_w) / static_cast<float>(std::max(fbo_h,1));
     const float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
@@ -178,12 +177,67 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                 sky_cmd.moon_set_start_angle);
     glUniform1f(shader_mgr.GetUniform(prog, "uMoonSetAngleRatio"),
                 sky_cmd.moon_set_angle_ratio);
-    glUniform1i(shader_mgr.GetUniform(prog, "uAtmoOnly"), atmo_only ? 1 : 0);
+    glUniform1i(shader_mgr.GetUniform(prog, "uSkyOutput"), static_cast<int>(output));
 
     // 画全屏三角形（无 VAO/VBO，用 gl_VertexID 内建变量）
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glUseProgram(0);
+}
+
+void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
+                                 unsigned int cube_tex, unsigned int face_fbo,
+                                 ShaderManager& shader_mgr) {
+    CHECK_GE(size, 1);
+    CHECK_NE(cube_tex, 0u);
+    CHECK_NE(face_fbo, 0u);
+
+    // 六个面的朝向。
+    // “上”向按 GL cubemap 的 s/t 约定取：GL 规范表里 ±X/±Z 面是 t = -ry，
+    // 即贴图的“上”对应 **-Y**；+Y 面 t = +rz（上 = +Z）、-Y 面 t = -rz（上 = -Z）。
+    // 弄錯（例如统一用 (0,1,0)）会得到旋转/镜像的天空，靠肉眼很难描述成“错在哪”。
+    struct Face {
+        Vec3f dir;
+        Vec3f up;
+    };
+    static const Face kFaces[6] = {
+        /*POSITIVE_X*/ {{ 1.0f,  0.0f,  0.0f}, {0.0f, -1.0f,  0.0f}},
+        /*NEGATIVE_X*/ {{-1.0f,  0.0f,  0.0f}, {0.0f, -1.0f,  0.0f}},
+        /*POSITIVE_Y*/ {{ 0.0f,  1.0f,  0.0f}, {0.0f,  0.0f,  1.0f}},
+        /*NEGATIVE_Y*/ {{ 0.0f, -1.0f,  0.0f}, {0.0f,  0.0f, -1.0f}},
+        /*POSITIVE_Z*/ {{ 0.0f,  0.0f,  1.0f}, {0.0f, -1.0f,  0.0f}},
+        /*NEGATIVE_Z*/ {{ 0.0f,  0.0f, -1.0f}, {0.0f, -1.0f,  0.0f}},
+    };
+
+    glBindFramebuffer(GL_FRAMEBUFFER, face_fbo);
+    glViewport(0, 0, size, size);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    for (int face = 0; face < 6; ++face) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, cube_tex, 0);
+        // 90° 透视 = 立方体一面。位置在原点（天空只与方向有关，与位置无关）。
+        Camera face_cam;
+        face_cam.position = {0.0f, 0.0f, 0.0f};
+        face_cam.target   = kFaces[face].dir;
+        face_cam.up       = kFaces[face].up;
+        face_cam.fov      = 90.0f;
+        face_cam.near     = 0.1f;
+        face_cam.far      = 10.0f;
+        DrawSky(sky_cmd, face_cam, size, size, shader_mgr, SkyOutput::kEnvProbe);
+    }
+
+    // mip 链：粗糙度→mip 级的“廉价预滤波”（见 src/env_specular.h）。
+    //
+    // ⚠️ **必须先解绑 FBO**：GL 明确“对仍附着在当前已绑定 FBO 上的纹理调
+    //    glGenerateMipmap”是**未定义行为**（驱动通常容忍，但可能出垃圾或丢 mip）。
+    //    上一轮循环结束时 cube 的最后一面仍挂在 face_fbo 的 COLOR_ATTACHMENT0 上。
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cube_tex);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 }
 
 }  // namespace jpov
