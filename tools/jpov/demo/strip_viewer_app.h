@@ -976,11 +976,13 @@ private:
         batch32.geometry = geometry;
 
         // 四排的 z：以 0 为中心等距排开（间距可调），再整体加面板滑条给的平移量。
+        // **4 点档放在最靠近相机的一端**（+z），往后依次 8 / 16 / 32 ⇒ 从近到远
+        // 正好是「精度逐渐变高」，而最粗的那档在画面上最大、最容易看清折线感。
         const float dz = sampling_row_gap_;
-        const float z4 = sampling_z_shift_ - 1.5f * dz;
-        const float z8 = sampling_z_shift_ - 0.5f * dz;
-        const float z16 = sampling_z_shift_ + 0.5f * dz;
-        const float z32 = sampling_z_shift_ + 1.5f * dz;
+        const float z4 = sampling_z_shift_ + 1.5f * dz;
+        const float z8 = sampling_z_shift_ + 0.5f * dz;
+        const float z16 = sampling_z_shift_ - 0.5f * dz;
+        const float z32 = sampling_z_shift_ - 1.5f * dz;
 
         RibbonSampleSet samples;   // 复用同一个采样缓冲（四档共用，无每帧分配）
         for (int i = 0; i < 3; ++i) {
