@@ -17,7 +17,7 @@
 // skylight_scene.h，渲染核心 + 面板在 vegetation_viewer_app.h）。
 //
 // 编译运行（Linux，需 DISPLAY/WSLg）：
-//   ./tools/jpov/build_jpov_vegetation_viewer.sh
+//   ./tools/jpov/legacy/vegetation_viewer/build_jpov_vegetation_viewer.sh
 //   → output/jpov_vegetation_viewer/jpov_vegetation_viewer [--glb <path>]
 
 #include <cstdio>
@@ -30,8 +30,8 @@
 
 #include "tools/common/utils.h"
 #include "tools/jpov/include/jpov/jpov.h"
-#include "tools/jpov/demo/vegetation_mesh_export.h"
-#include "tools/jpov/demo/vegetation_viewer_app.h"
+#include "tools/jpov/legacy/vegetation_viewer/vegetation_mesh_export.h"
+#include "tools/jpov/legacy/vegetation_viewer/vegetation_viewer_app.h"
 #include "tools/jpov/demo/view_config.h"
 
 namespace {

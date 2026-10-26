@@ -17,11 +17,11 @@ ambientCG 的素材是 **CC0**（可商用、无需署名）；叶卡图是自�
 | `roughness.png` | `Bark001_1K-JPG_Roughness.jpg` | 灰度，引擎只采 `.r` |
 
 PNG 是**转换后入库**的成品（`make_bark_material.sh` 的产物），这样 clone 下来不需要
-ImageMagick 就能直接跑。原始 JPG 在 `tools/vegetation/textures/bark001/`，重做转换：
+ImageMagick 就能直接跑。原始 JPG 在 `tools/jpov/legacy/vegetation/textures/bark001/`（v1 素材，已归档），重做转换：
 
 ```bash
 ./tools/jpov/tools/vegetation_tool_v2/make_bark_material.sh \
-    tools/jpov/tools/vegetation/textures/bark001 \
+    tools/jpov/legacy/vegetation/textures/bark001 \
     tools/jpov/tools/vegetation_tool_v2/assets/bark/bark001
 ```
 

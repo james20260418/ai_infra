@@ -511,49 +511,6 @@ cc_binary(
 )
 
 # ============================================================================
-# 植被查看器（vegetation viewer）— 植物生成链路的最后环节工具。
-# 装载已生成的植物 GLB（--glb <path>），在标准天光（昼夜可调）下观察 + 出图；
-# 光照复用 skylight_scene 的 SkyDegrees/MakeSkyLighting；SMAA 默认开。不含风。
-# ============================================================================
-cc_library(
-    name = "vegetation_viewer_app",
-    hdrs = ["demo/vegetation_viewer_app.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//tools/jpov:skylight_scene",
-        "//tools/jpov:view_config",
-        "//tools/jpov:viewer_app",
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:ui",
-        "//tools/common:utils",
-    ],
-    copts = ["-std=c++20"],
-)
-
-cc_binary(
-    name = "jpov_vegetation_viewer",
-    srcs = [
-        "demo/jpov_vegetation_viewer.cc",
-        "demo/vegetation_mesh_export.cc",
-        "demo/vegetation_mesh_export.h",
-    ],
-    deps = [
-        "//tools/jpov:vegetation_viewer_app",
-        "//tools/jpov:skylight_scene",
-        "//tools/jpov:view_config",
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:wind_deform",
-        "//tools/jpov/src:gltf_loader",
-        "//tools/common:utils",
-    ],
-    target_compatible_with = [
-        "@platforms//os:linux",
-        "@platforms//cpu:x86_64",
-    ],
-)
-
-# ============================================================================
 # 粒子 gold test 资源（火 / 烟图集）
 # ============================================================================
 filegroup(

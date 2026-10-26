@@ -13,7 +13,7 @@
 
 #include <string>
 
-#include "tools/jpov/interface/wind_deform.h"
+#include "tools/jpov/legacy/vegetation_viewer/wind_deform.h"
 
 namespace jpov_vegetation {
 

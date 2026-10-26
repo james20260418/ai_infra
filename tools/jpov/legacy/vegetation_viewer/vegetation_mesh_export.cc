@@ -1,4 +1,4 @@
-#include "tools/jpov/demo/vegetation_mesh_export.h"
+#include "tools/jpov/legacy/vegetation_viewer/vegetation_mesh_export.h"
 
 #include <algorithm>
 #include <cmath>

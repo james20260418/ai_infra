@@ -87,7 +87,7 @@ fi
 # 转换失败不阻断构建（没有 ImageMagick / 没下过贴图都能只跑形状）。
 echo ""
 echo "==> 5. 生成树皮材质 bark/bark001/"
-BARK_SRC="$PROJECT_DIR/tools/jpov/tools/vegetation/textures/bark001"
+BARK_SRC="$PROJECT_DIR/tools/jpov/legacy/vegetation/textures/bark001"
 if [ -d "$OUTPUT_DIR/bark/bark001" ]; then
     echo "SKIP: bark/bark001 来自入库资产"
 elif [ -d "$BARK_SRC" ] && command -v convert >/dev/null 2>&1; then

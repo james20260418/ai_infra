@@ -444,16 +444,6 @@ cc_library(
     ],
 )
 
-# MeshData — CPU 侧网格数据定义（顶点属性位掩码 + 逐属性数组 + 校验）
-# WindDeform — 植被风的 CPU 参考实现（GL-free）：逐顶点 L（含焊接+平滑）与离线变形。
-cc_library(
-    name = "wind_deform",
-    hdrs = ["wind_deform.h"],
-    visibility = ["//visibility:public"],
-    deps = [":mesh"],
-    copts = ["-std=c++20"],
-)
-
 cc_library(
     name = "mesh",
     hdrs = ["mesh.h"],
