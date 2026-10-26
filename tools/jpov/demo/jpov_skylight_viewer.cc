@@ -189,7 +189,8 @@ int RunCapture(const std::string& out_dir) {
     };
 
     jpov_skylight::SkylightApp app(cfg);
-    app.SetShowPanel(false);    // 纯 3D 截图（无面板）
+    app.SetShowPanel(false);
+    app.SetShowHud(false);   // 交付/验收图要干净；HUD 只给交互窗口截图用    // 纯 3D 截图（无面板）
     app.Init();
     InstallScene(app);
     InstallModels(app);
@@ -351,6 +352,7 @@ int RunCaptureSmaa(const std::string& out_dir, float threshold) {
 
     jpov_skylight::SkylightApp app(cfg);
     app.SetShowPanel(false);
+    app.SetShowHud(false);   // 交付/验收图要干净；HUD 只给交互窗口截图用
     app.Init();
     InstallScene(app);
     InstallModels(app);
@@ -404,6 +406,7 @@ int RunCaptureEnv(const std::string& out_dir) {
 
     jpov_skylight::SkylightApp app(cfg);
     app.SetShowPanel(false);
+    app.SetShowHud(false);   // 交付/验收图要干净；HUD 只给交互窗口截图用
     app.Init();
     InstallScene(app);
     InstallModels(app);
@@ -460,6 +463,7 @@ int RunCaptureSsr(const std::string& out_dir) {
 
     jpov_skylight::SkylightApp app(cfg);
     app.SetShowPanel(false);
+    app.SetShowHud(false);   // 交付/验收图要干净；HUD 只给交互窗口截图用   // 交付/验收图要干净；HUD 只给交互窗口截图用
     app.Init();
     InstallScene(app);
     InstallModels(app);

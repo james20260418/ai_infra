@@ -32,6 +32,7 @@
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -142,6 +143,12 @@ public:
 
     // 交互窗口是否绘制光照面板（headless 拍摄=false，截图即纯 3D 场景）。
     void SetShowPanel(bool show) { show_panel_ = show; }
+
+    // 相机 HUD：把**复现这张图所需的全部参数**打在左上角（场景 / 相机 phi·theta·R /
+    // 世界坐标 / fov·near·far / SSR 参数 / 天光）。
+    // 用途：Danis 截图报"某个角度的拉长/瑕疵"时，图里自带参数 ⇒ 我能原样复现。
+    // 与面板**独立**：面板关了（headless 纯 3D 图）HUD 仍可单独开。
+    void SetShowHud(bool show) { show_hud_ = show; }
 
     // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”时置 false，
     // 排除方块遮挡与受光干扰，只留天光背景。
@@ -286,6 +293,15 @@ public:
             DrawLightPanel(input);
             ui_.End();
             ui_.Emit(cmds);
+        } else if (show_hud_) {
+            // 只有 HUD：单独发一次 UI（面板关掉时也要能截到参数）。
+            jpov::UiTheme theme = jpov::UiTheme::Default(kSliderFontSize);
+            theme.font_alias = kViewerFontAlias;
+            ui_.Begin(input, theme, static_cast<float>(kViewerWidth),
+                      static_cast<float>(kViewerHeight), 1000.0f / kViewerFps);
+            EmitHudLines();
+            ui_.End();
+            ui_.Emit(cmds);
         }
     }
 
@@ -380,9 +396,51 @@ private:
                                     std::min(fc.b * deg_.elev_fog_gain, 1.0f), 1.0f};
             ui_.ColorSwatch("雾色推导参考→", shown, row(1, 8));
         }
+
+        if (show_hud_) {
+            EmitHudLines();
+        }
+    }
+
+    // 相机 / 参数 HUD（要求 ui_ 已 Begin）。左上角三行，等宽风格、越小越好读。
+    // 所有数值都按"能抄回去复现"的口径给：角度用度、位置保留 2 位。
+    void EmitHudLines() {
+        const double kRad2Deg = 180.0 / 3.14159265358979323846;
+        const jpov::Vec3f pos = view_.Position();
+        char l1[256];
+        char l2[256];
+        char l3[256];
+        std::snprintf(l1, sizeof(l1),
+                      "场景: %s   SSR: %s  res=%.2f HiZ=%d steps=%d thick=%.2f rough<=%.2f",
+                      scene_ == SceneKind::kMirrorFloor ? "镜面地板" : "三方块",
+                      ssr_on_ ? "ON " : "OFF",
+                      static_cast<double>(ssr_res_scale_),
+                      static_cast<int>(ssr_start_level_ + 0.5f),
+                      static_cast<int>(ssr_max_steps_ + 0.5f),
+                      static_cast<double>(ssr_thickness_),
+                      static_cast<double>(ssr_rough_cutoff_));
+        std::snprintf(l2, sizeof(l2),
+                      "相机: phi=%.1f deg  theta=%.1f deg  R=%.2f  pos=(%.2f, %.2f, %.2f)",
+                      view_.phi * kRad2Deg, view_.theta * kRad2Deg,
+                      static_cast<double>(view_.R),
+                      static_cast<double>(pos.x()), static_cast<double>(pos.y()),
+                      static_cast<double>(pos.z()));
+        std::snprintf(l3, sizeof(l3),
+                      "天光: turb=%.1f  elev=%.1f deg  azim=%.1f deg   env镜面=%s",
+                      static_cast<double>(deg_.turbidity),
+                      static_cast<double>(deg_.sun_elev_deg),
+                      static_cast<double>(deg_.sun_azim_deg),
+                      env_specular_on_ ? "ON" : "OFF");
+        const float kRowH = 20.0f;
+        const float kTop = 6.0f;
+        const float kW = static_cast<float>(kViewerWidth) - 12.0f;
+        ui_.Text(l1, jpov::UiRect{{6.0f, kTop}, {kW, kRowH}});
+        ui_.Text(l2, jpov::UiRect{{6.0f, kTop + kRowH}, {kW, kRowH}});
+        ui_.Text(l3, jpov::UiRect{{6.0f, kTop + 2.0f * kRowH}, {kW, kRowH}});
     }
 
     bool show_panel_ = true;
+    bool show_hud_ = true;     // 相机 HUD 默认开（截图自带参数）
     bool show_scene_ = true;
     SceneKind scene_ = SceneKind::kThreeBoxes;
     int scene_index_ = 0;            // Combo 的 in/out（与 scene_ 同帧同步）
