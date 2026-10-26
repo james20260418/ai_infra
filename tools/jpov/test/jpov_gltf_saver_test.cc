@@ -393,8 +393,8 @@ TEST(GltfSaverTest, WrittenInverseBindAccessorCountMatchesBones) {
 
 // ==================== 4. 负面 ====================
 
-// 风（kWind）与蒙皮（kJoints）互斥：两者抢 loc3（aWindW vs aJoint），
-// 同时声明会让「权重绑到哪个属性」取决于绑定顺序 —— 静默错位，必须当场崩。
+// 风（kWind）与蒙皮（kJoints）互斥：两条特性走两套互不组合的 VS，
+// 同时声明会让「哪条路径画它，另一半特性就静默消失」——必须当场崩。
 TEST(GltfSaverTest, WindAndSkinFlagsAreMutuallyExclusive) {
     MeshData m = MakeQuadSkinnedMesh();
     MeshData::WindJoint j{};

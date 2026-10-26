@@ -548,7 +548,8 @@ bool ParsePrimitive(const tinygltf::Model& model,
 
     // ---- 植被风（项目约定语义，单个 UV 层）----
     //   本版把风信息**只压进 loc6 的 vec2**：(joint_id, phase)。烘焙端（tools/vegetation/
-    //   build_tree.py --bake-wind → wind_bake.py）写一个额外 UV 层 "Wind"（→ glTF TEXCOORD_1）：
+    //   legacy/vegetation/wind_bake.py；现役为 vegetation_tool_v2/bake/）写一个额外 UV 层
+    //   "Wind"（→ glTF TEXCOORD_1）：
     //     .x = joint_id（该顶点所属关节在关节表中的下标）；
     //     .y = phase   （逐顶点连续相位场 [0,1) 秒，供热流用）。
     //   关节表本身见下（node extras jpov_wind_joints）。

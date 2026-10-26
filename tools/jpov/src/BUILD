@@ -102,7 +102,6 @@ cc_library(
         "//tools/jpov/interface:gpumesh",
         "//tools/jpov/interface:id_allocator",
         "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:wind_deform",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

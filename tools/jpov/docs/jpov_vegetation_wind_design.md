@@ -1,6 +1,6 @@
 # JPOV 植被风（vegetation wind）设计文档
 
-> 2026-10-15 起稿，2026-10-18 对齐到最终实现。
+> 2026-10-15 起稿，2026-10-18 对齐到最终实现；**2026-10-26 顶点风单关节化**（§10）。
 > 目标：**无状态程序化顶点风** —— 位移全在顶点着色器里算（不做 CPU 模拟、不做物理解算），
 > 因此确定性、可 gold、可逐物体配置、零帧间状态。
 > 前置阅读：`docs/jpov_vegetation_design.md §方向3`、`docs/jpov_instance_attr_lag_design.md §2.1`（16 槽硬约束）。
@@ -19,7 +19,7 @@
 | 路径 | 本版 |
 |---|---|
 | **object3d**（`DrawObject3D` / `DrawGltfObject`） | ✅ 接入 |
-| instanced 静态实例 | ❌ 不动 |
+| instanced 静态实例 | ✅ 接入（2026-10-19） |
 | 蒙皮 | ❌ 不动 |
 
 - 风参数挂在 **`Object3DCommand::wind`**（`std::optional<WindCommand>`），**逐物体**：
@@ -32,19 +32,18 @@
 
 ## 2. 数据模型
 
-### 2.1 逐顶点（实例路径定稿，2026-10-19）
+### 2.1 逐顶点（2026-10-26 定稿：单关节）
 
 | attribute | 内容 | 语义 |
 |---|---|---|
-| `loc6 = vec4` | `(j0, phase, L, j1)` | j0/j1 = 空间最近的**两个**关节；phase = 连续相位场 `[0,1)`；L = 到根的父链总长度（米，载入期平滑） |
-| `loc3 = vec2` | `(w0, w1)` | 两关节混合权重（`1/d` 归一化） |
+| `loc6 = vec2` | `(joint_id, phase)` | joint_id = 该顶点所属刚性段在关节表里的下标（唯一、无歧义）；phase = 连续相位场 `[0,1)` |
 
-- **为什么两个关节**：joint 的 `level/soft` 是**离散**量；硬分配会让相邻顶点分属不同
-  关节（变换不连续 ⇒ 撕裂）。按距离加权后接缝处是连续过渡（蒙皮的标准做法）。
-- 近重合顶点（5mm，UV 缝/硬边）强制共享同一套 `j0/j1/权重`。
-- 来源：glTF `TEXCOORD_1`（vec2 = joint_id, phase）→ MeshManager 载入期算 `j1/权重/L`
-  并打包；**不改资产格式**（老资产自动受益）。
-- 上一版设计里 `(softness, phase)` / `(joint_id, link_w)` 的方案已废弃。
+- **为什么只需要一个关节**：joint_id 由烘焙端按**拓扑**直接定（同一枝的同一采样环共享一个
+  关节），分叉处的连续过渡靠「环共享关节」保证，不靠空间插值。v1 那套「空间最近的两个关节 +
+  1/距离权重 + 5mm 焊接」是给**只能猜归属**的资产打的补丁，v2 起没有存在理由（§10）。
+- 路径长 `L`（吹倒权重）**不进顶点属性**：VS 沿关节链现算（§10.2），少 4 字节/顶点、
+  也少一次载入期平滑（那平滑同样是为了抹掉 v1 的标签跳变）。
+- 来源：glTF `TEXCOORD_1`（vec2 = joint_id, phase）→ GPU 缓冲原样上传，**载入期不做推断**。
 
 ### 2.2 每 mesh 一份关节表（node extras `jpov_wind_joints`）
 
@@ -113,20 +112,18 @@ tdir = normalize(0.6·axis + 0.7·up + 0.4·wdir)     // 斜上，不在风向�
 
 ## 4. 资产管线
 
-`tools/vegetation/wind_bake.py`（Blender headless）+ `build_tree.py --bake-wind`，
-产物三件套写进 GLB：
+**现役（v2）**：`tools/jpov/tools/vegetation_tool_v2/bake/`。关节由 shape 的枝折线按弧长抽稀
+（`vegetation_glb_joints.cc`），逐顶点归属按**采样环**精确给出（树干按环下标 floor、
+叶卡挂到 anchor 所在环的关节）。产物三件套写进 GLB：
 
 1. `TEXCOORD_1` = `(joint_id, phase)`
 2. node extras `jpov_wind_joints` = 7 float/关节
-3. 关节表坐标系已转成导出坐标系（Blender Z-up → glTF Y-up，`(x, z, −y)`）
+3. 关节表坐标系已转成导出坐标系
 
-烘焙要点（详见 `tools/vegetation/README.md §6`）：
-
-- 折线抽稀成关节（按枝粗细分级：粗枝 1.5 单位/≤6 个，细枝 0.5 单位/≤8 个）；
-- **合并同位置关节**（续接样条会产生两个同坐标关节 ⇒ 必须并入，否则叠两次铰链 + 相邻顶点分属不同链 ⇒ 撕裂）；
-- 顶点标签用**表面测地 Voronoi**（2026-10-19）：种子只取关节自己所属样条上的顶点、
-  按连通块多数票约束；标签沿网格边传播 ⇒ 不会跨空跳到旁边那枝；
-- 同位置一致性只在**同一样条内**做（跨样条的同坐标顶点属于两根管子，强行统一会泄漏标签）。
+**已归档（v1）**：`tools/jpov/legacy/vegetation/wind_bake.py` + `build_tree.py --bake-wind`。
+它的顶点标签靠**表面测地 Voronoi** 推断（种子只取关节自己所属样条上的顶点、按连通块多数票约束；
+标签沿网格边传播 ⇒ 不会跨空跳到旁边那枝）——**这是渲染侧两关节混合的根因**：
+推断出来的归属天然有跨链歧义，只能在 VS 里靠距离加权抹平。
 
 ## 5. 参数（`WindCommand`）
 
@@ -161,26 +158,21 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
 
 - 本地：`bazel build //tools/jpov/...` 绿；object3d 测试 18/19（唯一失败 `jpov_text3d_depth_alpha_gold_test`
   是容器 Xvfb 多次 Init/Finalize 的环境问题，与风无关——该测试在 main 上单独跑同样挂）。
+- **gold 门禁**（2026-10-26 补）：`test/vegetation_wind/` —— instance pass 两张 + object3d 一张
+  逐像素比对（阈值内），且额外要求「开风 vs 关风」差异 ≥ 1%（否则一张完全不动的图也能"通过"）。
 - 行为门禁（`--capture-wind` A/B）：开/关差 **3.3%–3.8%** 像素；相邻帧差 **3.8%–4.1%**（证明在动，不是静态位移）。
-- **尚未落地**：引擎侧 gold 单测（当前只有视觉 A/B）。这是本模块最大的验证缺口。
 - 已知边界：蒙皮路径还不吹风（布料另议）；链深 >16 的资产会被截断；
   性能未在真 GPU 实测（本机 llvmpipe）。
 
-## 7.1 object3d 路径改为「两关节混合」（2026-10-22）
+## 7.1 已移除：object3d 路径的「两关节混合」（2026-10-22 → 2026-10-26）
 
-**问题**：object3d 的 VS 只用 `aFlex.x` 一个关节（硬指派）。`MeshManager` 载入时算出的
-`j0/j1/权重` 只在 instanced 路径被消费 ⇒ 链接边界相邻顶点可能被劈到两条链上，
-管子/叶卡被拉成薄片（"风吹树皮扯开"）。
+2026-10-22 曾把 object3d 的三份 VS 改成 `p = mix(apply(j0), apply(j1), w1)`，属性侧
+`aFlex` 从 vec2 变 vec4 `(j0, phase, L, j1)` 并用 loc3 装权重 —— 为了跟 instanced 路径
+统一（那边先这么做了）。
 
-**修法**：object3d 的三份 VS（主 / 全量 / 阴影）都改成与 instanced 同一套语义：
-`p = mix(apply(j0), apply(j1), w1)`、法线同样 `mix` 后归一化；阴影 pass 不用法线，
-用哑法线走同一个 `ObjectWindApplyJoint()` 保证位移逐点一致（否则"树动、影不动"）。
-属性侧 `aFlex` 由 vec2 变 vec4（`(j0, phase, L, j1)`），并新增 `aWindW`(loc3) 读 `(w0,w1)`；
-非风 mesh 该属性未启用 → GL 默认 `(0,0,0,1)` ⇒ `w1=0`，行为与旧版逐字节一致。
-
-**烘焙侧的配合**（`vegetation_tool_v2/bake/`）：关节由 shape 的枝折线按弧长抽稀；
-逐顶点归属按**采样环**精确给出（树干按环下标 floor、叶卡挂到 anchor 所在环的关节），
-因此 v1 里"分叉处跨链三角形 15.6%"那类问题从根上不存在。
+**2026-10-26 整套移除（§10）**：混合是给「关节归属靠 inference 猜」的 v1 资产打补丁；
+v2 烘焙按拓扑直接定归属后，一个顶点只属于一个刚性段，混合既不必要，又会因为邻关节的
+`θ/soft` 不同而在同一环内引入非刚性形变（最典型的症状是细枝被"抹圆"）。
 
 ## 8. 实例化路径（2026-10-19）
 
@@ -192,13 +184,11 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
    否则每株 yaw 不同时，一片林子会朝各自的局部方向倒（object3d 路径单株看不出这个问题）。
 2. **新增逐实例「吹倒比例」** `InstanceState::blow_away_ratio`（loc11，float）+
    **逐命令曲线指数** `WindCommand::blow_away_exponent`（默认 2）。
-   2026-10-19 晚定稿：吹倒是**平移**（不是角度）——角度会被 `soft` 的继承模型干扰，
-   软枝（soft≈1）各段只随自己的角度、整枝不跟风，观感诡异；平移与 soft 无关。
-   同时顶点取**空间最近的两个关节**做旋转混合（消除 lev/soft 的离散接缝）：
+   吹倒是**平移**（不是角度）—— 角度会被 `soft` 的继承模型干扰，软枝（soft≈1）各段只随自己的角度、
+   整枝不跟风，观感诡异；平移与 soft 无关：
    ```
-   旋转（风）：每个关节各求一条链，顶点在最近的两个关节 j0/j1 间 w ∝ 1/d 混合
-   吹倒（平移）：p += dir_h × ratio × L × (L/H)^(n−1)     // L = 平滑后的逐顶点路径长
-   近重合顶点（5mm）：共享同一套 j0/j1/权重
+   旋转（风）：顶点沿自己那个关节的刚性链变换（单关节，§10）
+   吹倒（平移）：p += dir_h × ratio × L × (L/H)^(n−1)     // L = VS 由关节链现算
    H = 本 mesh 模型系包围盒高（uniform uBlowAwayRefLength）
    ```
    - **为什么要 H**：n≠1 时 `L^n` 的量纲随 n 变（m^n）。直接 `ratio×L²` 时
@@ -206,11 +196,7 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
      归一化后**梢部（L=H）位移恒为 ratio×H**（与线性一致），只是中段压得更低
      ⇒ 观感正是"下段直、上段加速压弯"（n=1 线性 / n=2 二次 / n=3 更陡）。
    - 0 = 不吹（默认）；查看器滑条上限 0.5。
-   - **两个关节而不是一个**：joint 的 lev/soft 是离散量，硬分配会让相邻顶点分属
-     不同关节（变换不连续 → 撕裂）；按 1/d 加权后接缝处连续（蒙皮的标准做法）。
-   - **平移而不是角度**：角度要么走 `soft` 继承（软枝不跟风）要么单独累加（观感诡异）；
-     平移是一个与 soft 无关的向量，直接加在顶点上。
-   - L 用载入期**平滑过**的逐顶点值：空间连续，不会在关节处出现台阶。
+   - L 由关节链现算（只依赖静止几何）⇒ 沿枝单调、不会在关节处出现台阶。
 
 三条 pass（主 / 阴影 / 拾取·高亮）共用 `UploadInstancedWindUniforms()` + 同一份
 `kWindBlowGlsl`（std::string 拼接，三个实例 VS 共享，不是三份手抄）⇒ 影子和拾取
@@ -220,7 +206,10 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
 59k → 66k → 78k，倾斜方向与风向一致；`instanced_object_attrs_test` 与
 `jpov_instanced_object_gold_test` 均绿（后者逐像素零回归）。
 
-## 9. 导出当前风形态的网格（排查用，2026-10-19）
+## 9. 导出当前风形态的网格（**已归档**，2026-10-26）
+
+> 工具随 v1 查看器一起移到了 `tools/jpov/legacy/vegetation_viewer/`（不编译）。
+> 保留本节只作记录：它是当时查"跨链三角形 / 面积放大"用的手段。
 
 ```bash
 jpov_vegetation_viewer --glb plants/willow_wind_tex.glb \
@@ -229,7 +218,8 @@ jpov_vegetation_viewer --glb plants/willow_wind_tex.glb \
 #      / tree_tris.csv（prim,tri,ja,jb,jc,area_rest,area_deformed,ratio）
 ```
 
-CPU 端复刻 GPU 公式（`interface/wind_deform.h`），**不依赖 GL**。
+CPU 端复刻当时那份 GPU 公式（`legacy/vegetation_viewer/wind_deform.h`，含两关节混合），
+**不依赖 GL**。
 
 用它查到的结论（willow，blow=0.5 / n=2）：
 
@@ -238,4 +228,38 @@ CPU 端复刻 GPU 公式（`interface/wind_deform.h`），**不依赖 GL**。
   逐顶点平移老版 **216** → 2 关节混合 + 逐顶点平移 **25**；
 - ratio 0.1/0.25 目视为自然弯曲、无悬浮碎片；0.5 时梢部位移 = `ratio×H ≈ 3.6m`，属极端值。
 
-（CPU 导出器与 GPU 的公式逐式对应；改任一侧必须同步另一侧。）
+（该 CPU 导出器已随 v1 归档，不再与 GPU 同步；上面这段只作历史记录。）
+
+## 10. 单关节化（2026-10-26）—— 移除 v1 时代的三处补丁
+
+**背景**：v2 工具（`vegetation_tool_v2`）成为资产唯一来源后，每个顶点的关节归属在
+**烘焙期就按拓扑定死**（同一枝的同一采样环共享一个关节）。v1 资产靠表面测地 Voronoi
+推断归属，才会出现「相邻顶点分属两条链」的撕裂，渲染侧为此叠了三处补丁：
+① 载入期找**空间最近的两个关节**并按 `1/d` 加权（loc3 = 权重、loc6 = `(j0,phase,L,j1)`）；
+② 近重合顶点（5mm）**焊接**成同一套权重；
+③ 逐顶点路径长 `L` **Laplacian 平滑 20 轮**。
+三处一起删。
+
+**现在的数据通路**（一条直线，没有推断）：
+
+```
+烘焙: 顶点所属采样环 → 关节              → TEXCOORD_1 = (joint_id, phase)
+载入: MeshData::wind_link (Vec2f)        → 直接上传 loc6 (vec2)，不查、不算、不焊
+VS  : joint_id → 关节表 → 父链刚性变换   ；path_len 顺路累加（吹倒权重）
+```
+
+- **路径长 L 在 VS 里现算**：`L = |p − pivot_own| + Σ|pivot_k − pivot_parent(k)|`，
+  在遍历父链的同一个循环里累加（零额外 texelFetch）。只依赖静止几何 ⇒ 逐帧稳定、
+  沿枝单调 ⇒ 不在关节处出现台阶。
+- **属性预算**：loc6 从 vec4 收回 vec2（-4B/顶点），loc3 彻底释放给蒙皮/其他用途，
+  `GPUMesh::vbo_wind_w` 删除。
+- **gold 门禁**：`tools/jpov/test/vegetation_wind/`（instance pass 开风/吹倒 + object3d 开风，
+  共三张 1280×720 基准 + 一条「开风 vs 关风必须显著不同」的对照）。
+- **改造前后实测**（gold 用改造前的代码出，改造后拿同一机位比对，threshold=8/255）：
+  instance 只吹风 **2.19%** 像素变、带吹倒 **2.41%**、object3d **0.70%**；
+  差异全部落在轮廓与极细枝条上（看图确认无撕裂、无缺失枝条）。差异来源是
+  ① 去掉两关节混合后细枝不再被"抹圆"，② L 从平滑值换成链上精确值。
+  gold 已按新语义重出，验收阈值 0.5%（留给"实现变了但语义没变"的抖动）。
+
+**如果将来还要支持 v1 那种"归属靠猜"的资产**：不要恢复渲染侧插值 —— 让烘焙端把归属
+算准（v2 的 `JointCoveringSample` 就是范例），渲染侧保持单一来源。

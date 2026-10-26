@@ -66,7 +66,7 @@ uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
 uniform float uWindGustStr;
 // 吹歪（blow-away）：纯平移，沿水平风向；与枢轴风/湍流独立叠加。
-//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（loc6.z，载入期平滑）。
+//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（由关节链现算，不占顶点属性）。
 uniform float uWindBlowRatio;
 uniform float uWindBlowExponent;
 uniform float uWindBlowRefLength;
@@ -79,7 +79,11 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
-vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
+// 单个关节的刚性链变换。
+//   path_len（出参）= 顶点到根的**静止**父链总长（米，含 |p−pivot_own|）：
+//   吹倒位移按它加权（越高越弯）；只由几何决定、不随 θ 变 ⇒ 不会随风吹抖。
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis,
+                          out float path_len) {
     // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
     // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
     int chain[kMaxWindChain];
@@ -99,6 +103,7 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
     vec3 pp = vec3(0.0);
     float Ap = 0.0;
     int have_par = 0;
+    path_len = 0.0;
     for (int k = nc - 1; k >= 0; --k) {
         vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
         vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
@@ -115,12 +120,14 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
             have_par = 1;
         } else {
             qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
+            path_len += length(t0.xyz - pp);
             A = th + (1.0 - sof) * Ap;
         }
         pp = t0.xyz;
         Ap = A;
     }
     vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
+    path_len += length(p_in - own0.xyz);
     n_in = WindRotVecAxis(n_in, axis, A);
     return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
 }
@@ -130,55 +137,38 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
 vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
     vec3 p = p_in;
     vec3 wn = n_in;
-if (uWindEnabled == 1 && uWindJointCount > 0) {
+    if (uWindEnabled == 1 && uWindJointCount > 0) {
         vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+        // 单关节：顶点只属于一个刚性段（joint_id 是烘焙期按拓扑直接算出来的，
+        // 没有"最近的两个关节"这种歧义）。同一枝的同一环共享关节 ⇒ 环内不会被切开。
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        // 两关节混合（与 instanced 路径同一套语义）：单关节硬指派会在链接边界把相邻顶点
-        // 劈到两条链上 —— 管子被拉成薄片（"撕皮"）。MeshManager 载入时已按「最近两个关节 +
-        // 1/d 权重 + 5mm 焊接」算好 j0/j1/w（loc6.xyz=..., loc3=权重），这里按权重 lerp。
-        int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
-        float wblend1 = clamp(aWindW.y, 0.0, 1.0);
-        {
-            vec3 p_rest = p;
-            vec3 n_rest = wn;
-            vec3 n_j0 = n_rest;
-            vec3 p_j0 = ObjectWindApplyJoint(j0, p_rest, n_j0, axis);
-            if (j1 == j0 || wblend1 <= 0.0) {
-                p = p_j0;
-                wn = n_j0;
-            } else {
-                vec3 n_j1 = n_rest;
-                vec3 p_j1 = ObjectWindApplyJoint(j1, p_rest, n_j1, axis);
-                p = mix(p_j0, p_j1, wblend1);
-                wn = normalize(mix(n_j0, n_j1, wblend1));
-            }
-        }
+        float path_len = 0.0;
+        p = ObjectWindApplyJoint(j0, p, wn, axis, path_len);
         vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
-            float lev0 = clamp(own1.x, 0.0, 3.0);
-            float sof0 = clamp(own1.z, 0.0, 1.0);
-            float tph = uWindTime + aFlex.y;
-            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
-            float tpj = tfq * tph;
-            tpj -= floor(tpj);
-            float gph = uWindGustFreq * tph;
-            gph -= floor(gph);
-            float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
-            float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
-            float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
-            vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
-                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
-            p += tdir * (tamp * sin(6.28318531 * tpj));
-            // 吹歪：整体向风向压弯（越靠梢位移越大）。L 来自 loc6.z（不是逐关节量，
-            // 所以空间连续，不会在关节处出现台阶）。
-            if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && aFlex.z > 0.0) {
-                float ty = clamp(aFlex.z / uWindBlowRefLength, 0.0, 4.0);
-                p += wdir * (uWindBlowRatio * aFlex.z *
-                             pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
-            }
+        // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
+        float lev0 = clamp(own1.x, 0.0, 3.0);
+        float sof0 = clamp(own1.z, 0.0, 1.0);
+        float tph = uWindTime + aFlex.y;
+        float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+        float tpj = tfq * tph;
+        tpj -= floor(tpj);
+        float gph = uWindGustFreq * tph;
+        gph -= floor(gph);
+        float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+        float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+        float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+        vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
+                              + wdir * 0.4 + vec3(1.0e-4, 0.0, 1.0e-4));
+        p += tdir * (tamp * sin(6.28318531 * tpj));
+        // 吹歪：整体向风向压弯（越靠梢位移越大）。path_len 由关节链现算。
+        if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && path_len > 0.0) {
+            float ty = clamp(path_len / uWindBlowRefLength, 0.0, 4.0);
+            p += wdir * (uWindBlowRatio * path_len *
+                         pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
+        }
     }
     n_in = wn;
     return p;
@@ -191,8 +181,7 @@ const std::string& Vs3dPBRText() {
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -229,8 +218,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -265,8 +253,7 @@ const std::string& ShadowVsText() {
     static const std::string text = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
 )glsl") + kObjectWindGlsl + R"glsl(

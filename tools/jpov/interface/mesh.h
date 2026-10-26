@@ -280,12 +280,13 @@ inline void MeshData::Validate() const {
         << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
-    // kWind 与 kJoints **互斥**：两者抢同一组顶点属性槽（loc3：蒙皮 `aJoint` vs
-    // 风的两关节权重 `aWindW`）。VAO 里只能绑一个，绑定顺序错了就是「权静默错位」——
-    // 看到的是模型变形怪异，而不是报错。这一条以前只写在 mesh_manager.cc 的注释里
-    // （「植被 mesh 不会被蒙皮路径绘制」），属于靠约定守着；放到 Validate 才是硬约束。
+    // kWind 与 kJoints **互斥**：两条特性走的是两套互不组合的顶点着色器
+    // （风 VS 只做关节链刚体变换、蒙皮 VS 只做骨骼查表），一个 mesh 同时声明等于
+    // 「哪条路径画它，另一半特性就静默消失」——看到的是变形怪异而不是报错。
+    // （2026-10-26 前这里是 loc3 属性槽冲突；顶点风改成 (joint_id, phase) 后 loc3 已释放，
+    //   互斥的理由变成「渲染路径只能选一条」，约束本身保留。）
     CHECK(!(joints_declared && MeshHasFlag(flags, MeshVertexFlags::kWind)))
-        << "MeshData::Validate: kWind 与 kJoints 互斥（同占 loc3：aWindW vs aJoint）";
+        << "MeshData::Validate: kWind 与 kJoints 互斥（风 VS 与蒙皮 VS 不组合）";
     if (joints_declared) {
         // 5. 骨骼 flag 时 joint_indices / joint_weights 必须成对存在且对齐
         CHECK_EQ(joint_indices.size(), vcount)
