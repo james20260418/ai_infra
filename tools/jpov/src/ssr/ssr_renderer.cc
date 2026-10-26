@@ -5,6 +5,7 @@
 #include "tools/jpov/src/ssr/ssr_renderer.h"
 
 #include <cmath>
+#include <utility>
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前）。
 // cube map / FBO 等枚举超出 GL 1.1，MinGW 的 GL/gl.h 里没有 ⇒ 两平台都要 glext.h。
@@ -82,6 +83,40 @@ void CreateDepthTexture(int w, int h, unsigned int* tex /*output*/) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+// 4×4 列主序求逆（Gauss-Jordan + 部分主元）。SSPH 算单应矩阵需要 VP 的逆。
+bool Mat4Invert(const float m[16], float out[16]) {
+    float a[16];
+    for (int i = 0; i < 16; ++i) { a[i] = m[i]; }
+    float inv[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    for (int col = 0; col < 4; ++col) {
+        int piv = col;
+        float best = std::fabs(a[col * 4 + col]);
+        for (int r = col + 1; r < 4; ++r) {
+            const float v = std::fabs(a[col * 4 + r]);
+            if (v > best) { best = v; piv = r; }
+        }
+        if (best < 1e-12f) { return false; }
+        if (piv != col) {
+            for (int c = 0; c < 4; ++c) {
+                std::swap(a[c * 4 + col], a[c * 4 + piv]);
+                std::swap(inv[c * 4 + col], inv[c * 4 + piv]);
+            }
+        }
+        const float d = a[col * 4 + col];
+        for (int c = 0; c < 4; ++c) { a[c * 4 + col] /= d; inv[c * 4 + col] /= d; }
+        for (int r = 0; r < 4; ++r) {
+            if (r == col) { continue; }
+            const float f = a[col * 4 + r];
+            for (int c = 0; c < 4; ++c) {
+                a[c * 4 + r] -= f * a[c * 4 + col];
+                inv[c * 4 + r] -= f * inv[c * 4 + col];
+            }
+        }
+    }
+    for (int i = 0; i < 16; ++i) { out[i] = inv[i]; }
+    return true;
+}
+
 void BindTex(int unit, unsigned int tex) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -107,6 +142,7 @@ void SsrRenderer::Init(ShaderManager* shader_mgr) {
     HiZProg();
     MarchProg();
     MarchDdaProg();
+    MarchPlanarProg();
     CompositeProg();
 }
 
@@ -117,7 +153,7 @@ void SsrRenderer::Finalize() {
     if (refl_fbo_) { glDeleteFramebuffers(1, &refl_fbo_); refl_fbo_ = 0; }
     if (hiz_shared_fbo_) { glDeleteFramebuffers(1, &hiz_shared_fbo_); hiz_shared_fbo_ = 0; }
     if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         progs_[i] = 0;   // program 归 ShaderManager 所有
     }
     shader_mgr_ = nullptr;
@@ -161,6 +197,14 @@ unsigned int SsrRenderer::MarchDdaProg() {
             {kSsrFullscreenVs, kSsrMarchDdaFs});
     }
     return static_cast<unsigned int>(progs_[5]);
+}
+
+unsigned int SsrRenderer::MarchPlanarProg() {
+    if (progs_[6] == 0) {
+        progs_[6] = shader_mgr_->GetOrCreate("ssr_march_planar",
+            {kSsrFullscreenVs, kSsrMarchPlanarFs});
+    }
+    return static_cast<unsigned int>(progs_[6]);
 }
 
 unsigned int SsrRenderer::CompositeProg() {
@@ -361,7 +405,9 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
                         unsigned int env_cube_tex, float env_max_lod,
                         int fbo_w, int fbo_h) {
     const bool use_dda = (cfg.march_mode == 1);
-    const unsigned int prog = use_dda ? MarchDdaProg() : MarchProg();
+    const bool use_planar = (cfg.march_mode == 2);
+    const unsigned int prog = use_planar ? MarchPlanarProg()
+                            : (use_dda ? MarchDdaProg() : MarchProg());
     glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo_);
     glViewport(0, 0, refl_w_, refl_h_);
     const GLfloat zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -399,6 +445,42 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     }
 
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog, "uProj"), 1, GL_FALSE, proj);
+    if (use_planar) {
+        // SSPH：H = VP · M · VP⁻¹（M = 关于反射平面的镜像矩阵）。
+        // 对平面上的点 M 不改变它 ⇒ 镜面像素与倒影内容之间的映射就是这个 H。
+        float n[3] = {cfg.reflector_plane_n[0], cfg.reflector_plane_n[1],
+                      cfg.reflector_plane_n[2]};
+        const float nlen = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        CHECK_GT(nlen, 1e-6f) << "SsrConfig::reflector_plane_n 不能是零向量";
+        n[0] /= nlen; n[1] /= nlen; n[2] /= nlen;
+        const float dp = cfg.reflector_plane_d;
+
+        float mir[16];
+        for (int c = 0; c < 3; ++c) {
+            for (int r = 0; r < 3; ++r) {
+                mir[c * 4 + r] = (r == c ? 1.0f : 0.0f) - 2.0f * n[r] * n[c];
+            }
+        }
+        mir[3] = 0.0f; mir[7] = 0.0f; mir[11] = 0.0f;
+        mir[12] = 2.0f * dp * n[0];
+        mir[13] = 2.0f * dp * n[1];
+        mir[14] = 2.0f * dp * n[2];
+        mir[15] = 1.0f;
+
+        float vp[16];
+        Mat4Mul(proj, view, vp);
+        float inv_vp[16];
+        CHECK(Mat4Invert(vp, inv_vp)) << "SSR SSPH: VP 不可逆";
+        float tmp[16];
+        float h4[16];
+        Mat4Mul(vp, mir, tmp);
+        Mat4Mul(tmp, inv_vp, h4);
+        // 取 (x,y,w) 三个分量 → 3×3（列主序），作用在 (ndc.x, ndc.y, 1) 上
+        float h3[9] = {h4[0], h4[1], h4[3],
+                       h4[4], h4[5], h4[7],
+                       h4[12], h4[13], h4[15]};
+        glUniformMatrix3fv(shader_mgr_->GetUniform(prog, "uHomography"), 1, GL_FALSE, h3);
+    }
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog, "uView"), 1, GL_FALSE, view);
     glUniform2f(shader_mgr_->GetUniform(prog, "uResolution"),
                 static_cast<float>(refl_w_), static_cast<float>(refl_h_));
@@ -460,7 +542,7 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
     DrawAttributes(cmds, mesh_mgr, texture_mgr, view, vp, fbo_w, fbo_h);
 
     // ② Hi-Z 金字塔（只有真要粗走时才建；DDA 不用金字塔；start_level==0 也跳过）
-    if (cfg.march_mode != 1 && cfg.hiz_start_level > 0) {
+    if (cfg.march_mode == 0 && cfg.hiz_start_level > 0) {
         BuildHiZ(scene_depth_tex, fbo_w, fbo_h);
     }
 

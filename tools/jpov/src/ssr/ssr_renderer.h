@@ -103,6 +103,7 @@ private:
     unsigned int HiZProg();
     unsigned int MarchProg();
     unsigned int MarchDdaProg();
+    unsigned int MarchPlanarProg();
     unsigned int CompositeProg();
 
     ShaderManager* shader_mgr_ = nullptr;
@@ -128,8 +129,8 @@ private:
     unsigned int refl_tex_ = 0;
     int refl_w_ = 0, refl_h_ = 0;
 
-    // 0=attr 1=attr_full 2=hiz 3=march(hiz) 4=composite 5=march(dda)
-    int progs_[6] = {0, 0, 0, 0, 0, 0};
+    // 0=attr 1=attr_full 2=hiz 3=march(hiz) 4=composite 5=march(dda) 6=march(planar)
+    int progs_[7] = {0, 0, 0, 0, 0, 0, 0};
 };
 
 }  // namespace jpov

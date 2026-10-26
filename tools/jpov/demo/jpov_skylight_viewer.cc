@@ -513,6 +513,17 @@ int RunCaptureSsr(const std::string& out_dir) {
     shot("floor_off",      false, 2, 48);
     shot("floor_hiz2_48",  true,  2, 48);
     shot("floor_nohiz_64", true,  0, 64);
+    {   // SSPH（平面单应重投影）：同机位、同权重链，只换行进算法
+        jpov::SsrConfig sc;
+        sc.enabled = true;
+        sc.march_mode = 2;
+        // SSPH 的成本与分辨率无关（一次采样，不发射线）⇒ **直接用全分辨率**，
+        // 半分辨率是给射线类算法省的，对单应重投影只会白白糊掉。
+        sc.resolution_scale = 1.0f;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/floor_ssph.png").c_str());
+        LOG(INFO) << "capture: floor_ssph";
+    }
 
     LOG(INFO) << "SSR presets captured to " << out_dir;
     app.Finalize();
@@ -613,6 +624,13 @@ int RunCaptureCase(const std::string& out_dir) {
         app.SetSsr(sc);
         app.RunOnce(input, winfo, (out_dir + "/graze_dda.png").c_str());
         LOG(INFO) << "capture: graze_dda";
+        jpov::SsrConfig sc2;
+        sc2.enabled = true;
+        sc2.march_mode = 2;
+        sc2.resolution_scale = 1.0f;
+        app.SetSsr(sc2);
+        app.RunOnce(input, winfo, (out_dir + "/graze_ssph.png").c_str());
+        LOG(INFO) << "capture: graze_ssph";
     }
 
     // 同一个 30° 机位走 DDA（这一步是"同权重链、只换行进算法"的关键对照）

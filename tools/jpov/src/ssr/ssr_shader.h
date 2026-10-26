@@ -519,6 +519,94 @@ void main() {
 }
 )glsl";
 
+
+// ---- ③c 射线行进：SSPH（屏幕空间平面单应重投影）----
+// 不发射线。平面镜像是一个**射影变换**：同一块平面在主相机与镜像相机之间诱导出一个
+// 3×3 单应矩阵 H。把镜面像素的 NDC 过一遍 H，就得到"倒影内容在主画面里的位置"，
+// 直接采样已渲染的颜色即可 —— 精确、锐利、分辨率不降、没有任何 marching 误差。
+//
+// 代价（定义边界，不是缺陷）：只能映"主画面里已经可见"的内容。H 把镜面像素映到屏外时
+// 我们**连续地**淡出到探针（oob smoothstep），所以边界是软的、不会出现裂缝。
+inline constexpr const char* kSsrMarchPlanarFs = R"glsl(
+#version 330 core
+layout(location = 0) out vec4 FragColor;
+
+uniform sampler2D uSceneDepth;
+uniform sampler2D uSceneColor;
+uniform samplerCube uEnvCube;
+uniform int   uHasProbe;
+uniform vec3  uProbeFallback;
+uniform float uEnvMaxLod;
+uniform mat4  uView;
+uniform sampler2D uAttr0;
+uniform sampler2D uAttr1;
+uniform mat3  uHomography;      // NDC → NDC（3×3，列主序）
+uniform vec2  uResolution;
+uniform float uNear;
+uniform float uFar;
+uniform float uTanHalfFovY;
+uniform float uAspect;
+uniform float uRoughnessCutoff;
+
+float DistFromNdc(float ndc) {
+    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+}
+
+vec3 ViewPos(vec2 uv, float dist) {
+    float y = (uv.y * 2.0 - 1.0) * dist * uTanHalfFovY;
+    float x = (uv.x * 2.0 - 1.0) * dist * uTanHalfFovY * uAspect;
+    return vec3(x, y, -dist);
+}
+
+void main() {
+    vec2 uv0 = gl_FragCoord.xy / uResolution;
+
+    vec4 attr0 = texture(uAttr0, uv0);
+    vec4 attr1 = texture(uAttr1, uv0);
+    if (attr1.a <= 0.0) {
+        FragColor = vec4(0.0);
+        return;
+    }
+    float roughness = attr0.z;
+
+    float ndc0 = texture(uSceneDepth, uv0).r;
+    if (ndc0 >= 0.99999) {
+        FragColor = vec4(0.0);
+        return;
+    }
+
+    float nz = sqrt(max(1.0 - dot(attr0.xy, attr0.xy), 0.0));
+    vec3 N = normalize(vec3(attr0.xy, nz));
+    vec3 F0 = attr1.rgb;
+    float dist = DistFromNdc(ndc0);
+    vec3 P = ViewPos(uv0, dist);
+    vec3 I = normalize(P);
+    float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
+    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+
+    vec3 Rw = transpose(mat3(uView)) * reflect(I, N);
+    vec3 probe = (uHasProbe != 0)
+        ? textureLod(uEnvCube, Rw, clamp(roughness, 0.0, 1.0) * uEnvMaxLod).rgb
+        : uProbeFallback;
+
+    // ---- 单应重投影 ----
+    vec2 ndc = uv0 * 2.0 - 1.0;
+    vec3 h = uHomography * vec3(ndc, 1.0);
+    vec2 uvRefl = (h.xy / (abs(h.z) < 1e-6 ? 1e-6 : h.z)) * 0.5 + 0.5;
+
+    // 越界 = 屏外，没有内容 ⇒ 连续淡出到探针（不要硬切）
+    vec2 outside = max(vec2(0.0), max(-uvRefl, uvRefl - 1.0));
+    float conf = 1.0 - smoothstep(0.0, 0.04, max(outside.x, outside.y));
+    // 粗糙面：SSPH 给的是锐利镜像，粗糙度越高越该交给（模糊的）探针
+    conf *= 1.0 - smoothstep(uRoughnessCutoff * 0.5, uRoughnessCutoff, roughness);
+    conf = clamp(conf, 0.0, 1.0);
+
+    vec3 mirrored = texture(uSceneColor, clamp(uvRefl, vec2(0.0), vec2(1.0))).rgb;
+    vec3 refl = mix(probe, mirrored, conf);
+    FragColor = vec4(refl * fresnel, conf);
+}
+)glsl";
+
 // ---- ④ 合成：加法叠回 HDR ----
 // 只读反射缓冲、只写目标颜色附件 ⇒ 没有"边读边写同一张纹理"的反馈环。
 // 用 glBlendFunc(GL_ONE, GL_ONE)：反射是**加性光**（打在已有画面上），
@@ -557,7 +645,11 @@ void main() {
     wide += texture(uRefl, uv + vec2(-w.x, w.y)).rgb * 0.08;
 
     // 置信度越低越糊：漏光/裂缝这些"低置信度才出现"的瑕疵因此被摊平。
-    FragColor = vec4(mix(wide, narrow, clamp(center.a, 0.0, 1.0)), 0.0);
+    // 置信度=1（例如 SSPH 的全分辨率单应重投影，数学上精确）时**完全不吃模糊**，
+    // 保证"精确的反射就该是锐的"。
+    float conf = clamp(center.a, 0.0, 1.0);
+    vec3 narrow_lod = mix(narrow, center.rgb, smoothstep(0.80, 1.0, conf));
+    FragColor = vec4(mix(wide, narrow_lod, conf), 0.0);
 }
 )glsl";
 

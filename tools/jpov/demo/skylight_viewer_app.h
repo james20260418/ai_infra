@@ -140,7 +140,7 @@ public:
         ssr_max_steps_ = static_cast<float>(cfg.max_steps);
         ssr_thickness_ = cfg.thickness_m;
         ssr_rough_cutoff_ = cfg.roughness_cutoff;
-        ssr_use_dda_ = (cfg.march_mode == 1);
+        ssr_mode_ = static_cast<float>(cfg.march_mode);
         ssr_grazing_min_ = cfg.grazing_fade_min;
     }
 
@@ -221,7 +221,7 @@ public:
             sc.max_steps = static_cast<int>(ssr_max_steps_ + 0.5f);
             sc.thickness_m = ssr_thickness_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
-            sc.march_mode = ssr_use_dda_ ? 1 : 0;
+            sc.march_mode = static_cast<int>(ssr_mode_ + 0.5f);
             sc.grazing_fade_min = ssr_grazing_min_;
             sc.grazing_fade_max = ssr_grazing_min_ + 0.33f;
             cmds->ssr = sc;
@@ -396,7 +396,9 @@ private:
         ui_.SliderFloat("SSR 粗糙度上限", &ssr_rough_cutoff_, row(0, 17),
                         0.05f, 1.0f, 2);
         // 行进算法二选一：Hi-Z（默认）vs DDA（独立实现，逐像素 + 闭式求交）。
-        ui_.Checkbox("SSR 用 DDA 行进 (独立实现，慢)", &ssr_use_dda_, row(0, 18));
+        // 行进算法：0 = Hi-Z（便宜）/ 1 = DDA（逐像素 + 闭式求交）/ 2 = **SSPH（平面单应）**
+        ui_.SliderFloat("SSR 行进 0=HiZ 1=DDA 2=SSPH", &ssr_mode_, row(0, 18),
+                        0.0f, 2.0f, 0);
         // 「倒影什么时候消失」的阈值：调小 = 更斜的角度也出倒影（但更容易拉丝）。
         ui_.SliderFloat("SSR 掠射阈值 (小=倒影更多)", &ssr_grazing_min_, row(0, 19),
                         0.0f, 0.30f, 3);
@@ -438,7 +440,7 @@ private:
                       "场景: %s   SSR: %s  %s  res=%.2f HiZ=%d steps=%d thick=%.2f rough<=%.2f",
                       scene_ == SceneKind::kMirrorFloor ? "镜面地板" : "三方块",
                       ssr_on_ ? "ON " : "OFF",
-                      ssr_use_dda_ ? "DDA" : "HiZ",
+                      ssr_mode_ < 0.5f ? "HiZ" : (ssr_mode_ < 1.5f ? "DDA" : "SSPH"),
                       static_cast<double>(ssr_res_scale_),
                       static_cast<int>(ssr_start_level_ + 0.5f),
                       static_cast<int>(ssr_max_steps_ + 0.5f),
@@ -482,7 +484,7 @@ private:
     float ssr_thickness_ = 0.6f;
     float ssr_rough_cutoff_ = 0.6f;
     // 默认开 DDA：实测它在裂缝/黑影上明显更好（见提交说明）。Hi-Z 更便宜，可用面板切回。
-    bool  ssr_use_dda_ = true;
+    float ssr_mode_ = 2.0f;           // 0=HiZ 1=DDA 2=SSPH（默认 SSPH，见本轮结论）
     float ssr_grazing_min_ = 0.02f;   // 掠射淡出下界（越小倒影越多）
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）
     float smaa_threshold_ = 0.1f;     // SMAA luma 边缘阈值（越小越敏感）
