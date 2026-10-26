@@ -190,11 +190,11 @@ public:
                       jpov::RenderCommandList* cmds) override {
         (void)frame_count;
         (void)input;
-        (void)winfo;
         CHECK(cmds != nullptr);
 
-        cmds->camera.fbo_3d_width_ = 1280.0f;
-        cmds->camera.fbo_3d_height_ = 720.0f;
+        // 3D FBO 尺寸跟窗口走（gold 都是 1280x720；写成常量会让"换个窗口跑"静默出歪比例）。
+        cmds->camera.fbo_3d_width_ = winfo.width;
+        cmds->camera.fbo_3d_height_ = winfo.height;
         // 相机按树高取景：前方略俯，能同时看到树冠形变与地面投影。
         cmds->camera.position = {0.0f, 0.55f * height_, 1.75f * height_};
         cmds->camera.target = {0.0f, 0.50f * height_, 0.0f};

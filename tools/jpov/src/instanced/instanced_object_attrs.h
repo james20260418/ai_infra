@@ -15,10 +15,13 @@
 //
 // attribute location 预算（0..15；GL 3.3 至少保证 16 个）：
 //   每顶点（静态路径用到的）—— 0 aPos  1 aNormal  2 aTexCoord  5 aTangent
+//                              6 aFlex（植被风 (joint_id, phase)；仅 kWind mesh）
 //   每顶点（蒙皮路径专属，静态路径不用）—— 3 aJoint  4 aWeight  6 aRelax
 //   每实例（静态路径，本文件定义）—— 7..10 aInstModel（mat4，列主序，4×vec4）
 //                                    11     aInstBlowAway（float：风吹倒伏比例）
-//   空闲可预留（静态路径未来可用的槽）—— 12 13 14 15（蒙皮专属 3/4/6 亦空闲）
+//   空闲可预留（静态路径未来可用的槽）—— 3 4 12 13 14 15
+//     · loc3：2026-10-26 前被植被风的两关节权重 (w0,w1) 占着；单关节化后释放。
+//     · loc6：静态路径只有 kWind mesh 用它（布料 kRelax 走蒙皮路径，两者互斥）。
 //   ⚠️ location 编号只在「同一 draw 的同一 program」内有意义。静态与蒙皮是互斥的
 //      program，可各自占用相同的编号而不冲突（二者模型矩阵都落在 7..10 即为例）。
 //      本文件只保证「静态路径自身」不越界、不重叠。
