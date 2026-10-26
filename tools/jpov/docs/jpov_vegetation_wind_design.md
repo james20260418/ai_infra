@@ -22,9 +22,10 @@
 | instanced 静态实例 | ✅ 接入（2026-10-19） |
 | 蒙皮 | ❌ 不动 |
 
-- 风参数挂在 **`Object3DCommand::wind`**（`std::optional<WindCommand>`），**逐物体**：
-  同场景两棵树可以有各自的风向 / 相位 / 强度。**不存在「全场景一份风」的全局命令**
-  （这正是它没有放进 `RenderCommandList` 的原因）。
+- 风参数挂在**命令上**：`Object3DCommand::wind` / `InstancedObjectCommand::wind`
+  （都是 `std::optional<WindCommand>`），**逐物体/逐批**：同场景两棵树可以有各自的风向 /
+  相位 / 强度。**不存在「全场景一份风」的全局命令**（这正是它没有放进 `RenderCommandList`
+  的原因）。实例路径另加逐实例 `InstanceState::blow_away_ratio`。
 - 生效闸 = **两个条件同时满足**：命令里设了 `wind` 且 mesh 带 `MeshVertexFlags::kWind`
   （渲染时体现为 `uWindJointCount > 0`）。无风数据的 mesh（地面、石头、人）加不加 `wind`
   都完全不受影响 ⇒ **未使用 = 零开销、零回归**。
@@ -156,11 +157,12 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
 
 ## 7. 验证与边界
 
-- 本地：`bazel build //tools/jpov/...` 绿；object3d 测试 18/19（唯一失败 `jpov_text3d_depth_alpha_gold_test`
-  是容器 Xvfb 多次 Init/Finalize 的环境问题，与风无关——该测试在 main 上单独跑同样挂）。
+- 本地：`bazel build //...` 绿；`bazel test //tools/jpov/...` **130/130（582 cases）** 绿
+  （2026-10-26 单关节化后实测）。
 - **gold 门禁**（2026-10-26 补）：`test/vegetation_wind/` —— instance pass 两张 + object3d 一张
   逐像素比对（阈值内），且额外要求「开风 vs 关风」差异 ≥ 1%（否则一张完全不动的图也能"通过"）。
-- 行为门禁（`--capture-wind` A/B）：开/关差 **3.3%–3.8%** 像素；相邻帧差 **3.8%–4.1%**（证明在动，不是静态位移）。
+- 历史行为门禁（v1 查看器 `--capture-wind` A/B，工具已归档到 `legacy/`）：开/关差
+  **3.3%–3.8%** 像素；相邻帧差 **3.8%–4.1%**（证明在动，不是静态位移）。现役口径以下面的 gold 为准。
 - 已知边界：蒙皮路径还不吹风（布料另议）；链深 >16 的资产会被截断；
   性能未在真 GPU 实测（本机 llvmpipe）。
 

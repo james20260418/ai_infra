@@ -444,6 +444,7 @@ cc_library(
     ],
 )
 
+# MeshData — CPU 侧网格数据定义（顶点属性位掩码 + 逐属性数组 + 校验）
 cc_library(
     name = "mesh",
     hdrs = ["mesh.h"],

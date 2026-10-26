@@ -743,7 +743,7 @@ struct WindCommand {
     float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
     // ---- 吹歪（blow-away，曲线位移）----
     // 位移 = blow_ratio × L × (L / blow_ref_length)^(exponent−1)，沿**水平风向**。
-    //   L = 该顶点到根的父链总长度（MeshManager 载入期算好，loc6.z）。
+    //   L = 该顶点到根的父链总长度（VS 沿关节表父链现算，不占顶点属性）。
     //   与枢轴风/湍流**独立叠加**：枢轴风保长、吹歪是纯平移（像整株被风压弯）。
     //   blow_ratio 的量纲随指数变（1/m^(n−1)），只是观感参数，不是物理量。
     //   0 = 关闭（默认），非零时才有 uniform 上传开销。
@@ -1805,7 +1805,7 @@ struct InstanceState {
     //   继承模型干扰（软枝不跟风）；平移与 soft 无关。
     //   本实例每个顶点的位移：
     //     d = blow_away_ratio × L × (L/H)^(n−1)        // n = WindCommand::blow_away_exponent
-    //   L = 该顶点到 root 的父链总长度（载入期算好并在网格上平滑），
+    //   L = 该顶点到 root 的父链总长度（VS 现算，静止几何 ⇒ 沿枝单调），
     //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
     //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
     float blow_away_ratio = 0.0f;

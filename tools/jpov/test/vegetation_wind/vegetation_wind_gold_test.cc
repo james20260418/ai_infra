@@ -8,7 +8,6 @@
 // gold 由 vegetation_wind_gold_generator 出（同场景、同顺序，见
 // vegetation_wind_gold_common.h）。阈值口径与实测差见 kExpectations 注释。
 
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>

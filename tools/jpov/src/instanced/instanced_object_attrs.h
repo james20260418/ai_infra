@@ -58,7 +58,7 @@ inline constexpr InstanceAttrSpec kModelAttrSpec{/*base_loc*/ 7, /*slot_count*/ 
 // 风吹倒伏比例（每实例 1 个 float）：loc11，1 slot × 1 分量，stride 1 float。
 //   VS 里 `layout(location = 11) in float aInstBlowAway;`（三个实例 VS 各一份声明）。
 //   位移 = aInstBlowAway × L × (L/H)^(n−1)（n = WindCommand::blow_away_exponent），
-//   方向 = 风向的水平分量；L = 顶点到 root 的父链总长度（载入期平滑）。
+//   方向 = 风向的水平分量；L = 顶点到 root 的父链总长度（VS 沿关节链现算）。
 //   0（默认）= 不吹；无风命令时整段跳过。
 inline constexpr InstanceAttrSpec kBlowAwayAttrSpec{/*base_loc*/ 11, /*slot_count*/ 1,
                                                     /*slot_components*/ 1, /*stride*/ 1};
