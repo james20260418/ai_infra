@@ -12,7 +12,7 @@
 //   jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001
 //   jpov_vegetation_v2_viewer --capture shots/full --leaf ... --bark ...   # 无窗口出三张图
 //
-//   --shape <pbtxt>      拓扑（省略 = shapes/willow.pbtxt）
+//   --shape <pbtxt>      拓扑（省略 = shapes/willow.vegshape）
 //   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
 //   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
 //   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
@@ -121,11 +121,11 @@ CliArgs ParseCli(int argc, char** argv) {
       LOG(WARNING) << "未知参数: " << arg << "（已忽略）";
     }
   }
-  // shape 有默认值（打包目录里的 shapes/willow.pbtxt），叶卡/树皮默认**空**——
+  // shape 有默认值（打包目录里的 shapes/willow.vegshape），叶卡/树皮默认**空**——
   // 不给就只渲染拓扑（树干棕色 + debug 叶卡），这是「组合查看器」的底座：
   // 用户提供 shape / bark / leaf 三样，给几样渲染几样。
   if (a.shape_path.empty()) {
-    a.shape_path = "shapes/willow.pbtxt";
+    a.shape_path = "shapes/willow.vegshape";
     LOG(INFO) << "未给 --shape，用默认范本: " << a.shape_path;
   }
   // **纯 glb 查看模式**：给了 --glb 就不强求 shape（"别人发我一个 glb，我只想看看"）。
@@ -136,7 +136,7 @@ CliArgs ParseCli(int argc, char** argv) {
                  << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
                  << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
                  << "\n    或只看一个 glb: jpov_vegetation_v2_viewer --glb <path.glb>"
-                 << "\n  --shape 省略时用 shapes/willow.pbtxt（打包目录内）"
+                 << "\n  --shape 省略时用 shapes/willow.vegshape（打包目录内）"
                  << "\n  --bark / --leaf 省略 = 只渲染 shape（不贴树皮/叶图）";
     }
     LOG(WARNING) << "读不到 shape（" << a.shape_path << "）→ 纯 glb 查看模式："

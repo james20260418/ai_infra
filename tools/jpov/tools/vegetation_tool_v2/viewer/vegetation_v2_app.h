@@ -1,7 +1,7 @@
 // 植被 v2 查看器 —— **库接口**（实现全在 vegetation_v2_app.cc）。
 //
 // 定位：这是「植物组合查看器」的库入口。给我 shape / bark / leaf，给几样渲染几样：
-//   `--shape` 省略用打包目录里的 shapes/willow.pbtxt；`--bark` / `--leaf` 省略就只渲染拓扑。
+//   `--shape` 省略用打包目录里的 shapes/willow.vegshape；`--bark` / `--leaf` 省略就只渲染拓扑。
 //
 // 为什么接口只剩一个函数：查看器的场景/渲染/交互全在 .cc 里**只编译一次**——
 // 曾经是 header-only，结果同一个实现被 viewer、gold test 各自编译一份，

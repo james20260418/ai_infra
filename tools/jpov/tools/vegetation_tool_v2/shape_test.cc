@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <cstdio>
+
+#include <google/protobuf/text_format.h>
 #include <string>
 #include <vector>
 
@@ -277,6 +279,84 @@ void TestDerived() {
   Expect(shape.branches[0].EffectiveRingCount() == 16, "ring_count=0 应回落到 profile 点数");
 }
 
+// 资产**文件**往返（2026-10-26 约定）：`.vegshape` 是二进制，文本只用于人工查看。
+// 这里钉三件事：
+//   1) SaveShapeBinary → LoadShapeFile 能原样读回（含 per-sample profile / leaf bend）；
+//   2) 文本文件仍然能读（扩展名不是 .vegshape 就走 TextFormat）；
+//   3) 扩展名与内容不符时**报错而不是乱读**（把 pbtxt 改名成 .vegshape 属于常见手误）。
+void TestShapeFileRoundTrip() {
+  Shape shape = MinimalShape();
+  shape.branches[0].samples[0].profile = UnitCircleProfile(12);
+  shape.branches[0].samples[1].profile = UnitCircleProfile(12);
+  shape.branches[0].samples[1].profile[0].x = 1.2;
+  shape.branches[0].ring_count = 0;
+  shape.leaf_types[0].bend.along = -0.2;
+  shape.leaf_types[0].bend.across = 0.12;
+  shape.leaf_types[0].bend.crease = 0.15;
+  shape.cards[0].width = 0.37;
+
+  const std::string binary_path = "shape_file_roundtrip_test.vegshape";
+  const std::string text_path = "shape_file_roundtrip_test.pbtxt";
+  const std::string mismatched_path = "shape_file_roundtrip_test_mismatch.vegshape";
+
+  {
+    std::string err;
+    Expect(SaveShapeBinary(shape, binary_path, &err), "二进制写盘应成功: " + err);
+  }
+
+  Shape loaded;
+  {
+    std::string err;
+    Expect(LoadShapeFile(binary_path, &loaded, &err), "二进制读回应成功: " + err);
+    Expect(loaded.branches.size() == shape.branches.size(), "二进制往返：枝数一致");
+    Expect(loaded.cards.size() == shape.cards.size(), "二进制往返：卡数一致");
+    Expect(loaded.branches[0].samples.size() == shape.branches[0].samples.size(),
+           "二进制往返：采样点数一致");
+    Expect(loaded.branches[0].samples[1].profile.size() == 12u, "二进制往返：profile 点数一致");
+    Expect(std::fabs(loaded.branches[0].samples[1].profile[0].x - 1.2) < 1e-12,
+           "二进制往返：profile 数值一致");
+    Expect(std::fabs(loaded.leaf_types[0].bend.crease - 0.15) < 1e-12,
+           "二进制往返：leaf bend 一致");
+    Expect(std::fabs(loaded.cards[0].width - 0.37) < 1e-12, "二进制往返：卡宽一致");
+  }
+
+  // 文本文件（扩展名不是 .vegshape）仍然要能读 —— 人工改完的中间产物走这条路。
+  {
+    ShapeProto proto = ToProto(shape);
+    std::string text;
+    google::protobuf::TextFormat::PrintToString(proto, &text);
+    FILE* file = std::fopen(text_path.c_str(), "wb");
+    Expect(file != nullptr, "文本临时文件应能写");
+    if (file != nullptr) {
+      std::fwrite(text.data(), 1, text.size(), file);
+      std::fclose(file);
+    }
+    Shape from_text;
+    std::string err;
+    Expect(LoadShapeFile(text_path, &from_text, &err), "文本读回应成功: " + err);
+    Expect(from_text.cards.size() == shape.cards.size(), "文本往返：卡数一致");
+  }
+
+  // 把文本改名成 .vegshape：按扩展名会当二进制解析 → 必须失败（而不是读出半棵树）。
+  {
+    std::string text;
+    google::protobuf::TextFormat::PrintToString(ToProto(shape), &text);
+    FILE* file = std::fopen(mismatched_path.c_str(), "wb");
+    if (file != nullptr) {
+      std::fwrite(text.data(), 1, text.size(), file);
+      std::fclose(file);
+    }
+    Shape bogus;
+    std::string err;
+    const bool ok = LoadShapeFile(mismatched_path, &bogus, &err);
+    Expect(!ok, "扩展名与内容不符（文本内容 + .vegshape 后缀）必须报错");
+  }
+
+  std::remove(binary_path.c_str());
+  std::remove(text_path.c_str());
+  std::remove(mismatched_path.c_str());
+}
+
 void TestProtoRoundTrip() {
   Shape shape = MinimalShape();
   // 给主干一个逐点变化的截面，验证 per-sample profile 真的能被往返搬运。
@@ -380,6 +460,7 @@ int main() {
   jpov::vegetation::TestNegative();
   jpov::vegetation::TestDerived();
   jpov::vegetation::TestProtoRoundTrip();
+  jpov::vegetation::TestShapeFileRoundTrip();
   if (jpov::vegetation::g_failures != 0) {
     std::printf("%d failure(s)\n", jpov::vegetation::g_failures);
     return 1;

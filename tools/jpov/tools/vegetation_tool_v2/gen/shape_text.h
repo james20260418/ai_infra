@@ -1,4 +1,7 @@
-// gen/shape_text.h — Shape 运行时结构 → shape.pbtxt 文本（与资产格式的字段一一对应）。
+// gen/shape_text.h — Shape 运行时结构 → 文本 proto（与资产格式的字段一一对应）。
+//
+// ⚠️ 文本**不是**资产的标准格式（标准是二进制 `.vegshape`，见 shape.h 的 ShapeFileFormat）。
+// 这里只用于：人工查看 / diff / review；以及 `shape_convert` 的"转出文本"那一半。
 //
 // 为什么自己拼文本而不是用 protobuf 的 TextFormat：
 //   * 输出要和 Python 版（export_vegetation_shape.py 手写的那份）**看起来一样**，

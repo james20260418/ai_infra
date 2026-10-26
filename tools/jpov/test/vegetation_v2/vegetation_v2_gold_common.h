@@ -109,7 +109,7 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   //    它跟着默认值漂移就等于失去报警能力。
   //    `--uv-vscale 0.5` = 树皮 albedo 512x1024 的自动值（宽/高），钉住以免改自动公式时漂移。
   std::string cmd = "'" + ViewerBinary() + "'";
-  cmd += " --shape '" + dir + "/samples/willow.pbtxt'";
+  cmd += " --shape '" + dir + "/samples/willow.vegshape'";
   cmd += " --bark '" + dir + "/assets/bark/bark001'";
   cmd += " --normal-scale 0.75 --uv-vscale 0.5";
   if (with_leaf) {
@@ -154,7 +154,7 @@ inline bool RenderGlbGolden(const std::string& out_png) {
 
   // 1) 烘焙（与面板默认参数一致：normal-scale 0.75、uv 自动=0.5、叶黑阈 30）。
   std::string bake = "'" + ViewerBinary() + "'";
-  bake += " --shape '" + dir + "/samples/willow.pbtxt'";
+  bake += " --shape '" + dir + "/samples/willow.vegshape'";
   bake += " --bark '" + dir + "/assets/bark/bark001'";
   bake += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30";
   bake += " --normal-scale 0.75 --uv-vscale 0.5";
@@ -178,7 +178,7 @@ inline bool RenderGlbGolden(const std::string& out_png) {
   const std::string wind = std::to_string(kGlbWindTime);
   std::string cmd = "'" + ViewerBinary() + "'";
   // **故意不给 --shape**：gold 走「纯 glb 查看模式」（runfiles 的 cwd 里没有
-  // shapes/willow.pbtxt，缺 shape 即进入该模式）。这样这张 gold 同时守住了
+  // shapes/willow.vegshape，缺 shape 即进入该模式）。这样这张 gold 同时守住了
   // 「只拿一个 glb 也能打开」这条路径 —— 它与"shape + glb"渲染逐像素一致（实测 0 差异）。
   cmd += " --glb '" + glb + "'";
   cmd += " --wind-time " + wind;

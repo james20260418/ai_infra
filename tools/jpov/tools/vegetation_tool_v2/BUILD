@@ -129,7 +129,7 @@ cc_library(
 )
 
 # 植物组合查看器：给我 shape / bark / leaf，我把植物画出来。
-#   * shape 省略 → 打包目录里的 shapes/willow.pbtxt
+#   * shape 省略 → 打包目录里的 shapes/willow.vegshape
 #   * bark / leaf 省略 → 只渲染拓扑（树干按 level 上棕色 + debug 绿卡）
 #
 # 场景 + 渲染在 cc_library(vegetation_v2_app) 里**只编译一次**（.h 只有接口 + CliArgs）：
@@ -182,7 +182,7 @@ filegroup(
         "assets/bark/bark001/normal.png",
         "assets/bark/bark001/roughness.png",
         "assets/leaf/willow_leaf.png",
-        "samples/willow.pbtxt",
+        "samples/willow.vegshape",
     ],
 )
 

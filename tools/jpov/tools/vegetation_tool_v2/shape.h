@@ -150,11 +150,30 @@ std::vector<ProfilePoint> UnitCircleProfile(uint32_t n);
 // proto -> 运行时结构。不做校验（校验请显式调用 Validate）。
 Shape FromProto(const ShapeProto& proto);
 
-// 读一个 ShapeProto 的**文本格式**（pb.txt）文件 → FromProto → Validate，一次做完。
-// 成功返回 true；失败返回 false 并把原因写进 *error（读不到文件 / 解析失败 / 校验不过）。
+// ── 资产文件格式（2026-10-26 Danis 定）───────────────────────────────
 //
-// 为什么放在格式层：pbtxt 是资产格式的一部分（导出脚本写的、`protoc --decode` 也认），
-// 不该让每个 consumer（查看器、测试、将来的装配工具）自己拼一遍 TextFormat + Validate。
+// **`*.vegshape` = ShapeProto 的二进制**（protobuf wire format），这是资产的标准格式：
+//   三棵树实测 pbtxt 1.2~1.4 MB → 二进制后体积约 1/3，加载也快（不用解析文本）。
+//
+// 文本格式（`.pbtxt` / `.txt`）**只用于人工查看、diff、review**：
+//   要看/改文本就先用 `shape_convert` 转出来，改完再转回去 —— 仓库里不放文本资产。
+//
+// 格式由**扩展名决定**（`.vegshape` → 二进制，其余 → 文本）：一条规则，不猜内容。
+enum class ShapeFileFormat { kBinary, kText };
+
+ShapeFileFormat ShapeFileFormatFromPath(const std::string& path);
+
+// Shape ↔ ShapeProto（序列化边界；proto 依赖不往下游传）。
+ShapeProto ToProto(const Shape& shape);
+
+// 二进制写盘（`*.vegshape`）。成功返回 true，失败写 *error。
+bool SaveShapeBinary(const Shape& shape, const std::string& path, std::string* error);
+
+// 读资产文件 → FromProto → Validate，一次做完。格式按扩展名自动识别。
+// 成功返回 true；失败返回 false 并把原因写进 *error（读不到 / 解析失败 / 校验不过）。
+//
+// 为什么放在格式层：文件格式是资产契约的一部分，不该让每个 consumer（查看器、测试、
+// 装配工具）自己拼一遍解析 + Validate。
 bool LoadShapeFile(const std::string& path, Shape* out, std::string* error);
 
 // 校验资产合法性。返回 false 时 *error 填具体原因（含定位信息）。
