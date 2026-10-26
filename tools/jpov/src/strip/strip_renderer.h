@@ -49,7 +49,7 @@
 //                顶点只多一个 strip id ⇒ **整批仍然一次 draw call**；
 //                外扩量由 CPU 按局部曲率自动算。
 //                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
-//                ⭐ 2026-10-25 起每个 pass 有**两个 program**（天光关/开），主函数共用、
+//                每个 pass 有**两个 program**（天光关/开）：主函数共用，
 //                只差 ApplySkyLight 的定义（见 kSkyLightOffFs / kSkyLightFs）。
 //   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
 //
@@ -77,8 +77,8 @@ namespace jpov {
 // shadow_fbos_ / 各级联矩阵），条带只是一个 effect pass，不该反过来持有它。
 //
 // 语义：只有 `std::optional<DirectionalLight> sun` 有值、且 fbos 非空时才**可能**有阴影；
-// 具体某批要不要吃阴影由 `TranslucentStripBatch::sky_light` 决定（两者绑定，
-// Danis 2026-10-25：开关和天光消费一起）。
+// 具体某批要不要吃阴影由 `TranslucentStripBatch::sky_light` 决定（开关绑定在一起，
+// 没有独立的阴影开关）。
 struct StripCsmShadow {
     std::optional<DirectionalLight> sun;   // 无 ⇒ 太阳项不衰减（= 完全受照）
     ShadowConfig cfg{};                    // 级联范围 / 淡出 / 偏置
@@ -88,7 +88,7 @@ struct StripCsmShadow {
     float texel_world[ShadowConfig::kMaxCascades] = {};
 
     // 可用 = 有太阳 + 有级联纹理。不可用时调用方传 nullptr 也等价。
-    bool valid() const { return sun.has_value() && !fbos.empty(); }
+    bool IsValid() const { return sun.has_value() && !fbos.empty(); }
 };
 
 class StripRenderer {
@@ -442,7 +442,7 @@ void main() {
 
     // ── 天光消费（sky_light）：**两套定义**，主函数只有一份 ──
     //
-    // 2026-10-25 Danis 定：「开启光照消费不影响原本 pass 的效率，用开关控制」。
+    // 需求：开启光照消费**不影响原本 pass 的效率**，用开关控制。
     // 做法是**两个 program**（折线/平滑各一对），主函数共用，差异只有下面这个函数：
     //   kSkyLightOffFs → 空实现 ⇒ 编译器把调用点整个消掉，指令数与改动前完全一致；
     //   kSkyLightFs    → 真正的天光注入。
@@ -469,77 +469,11 @@ uniform vec3 uSunColor;
 uniform float uSunIntensity;
 uniform float uSkyInjection;
 
-// ── CSM（级联阴影）：**与天光同一个开关** ──
-// 2026-10-25 Danis 定：「本次要求 CSM 被 over 类型 strip 消费，开关和天光消费一起，这俩绑定」。
-// 所以这里没有独立的「阴影开关」：sky_light 开着就采样 CSM 调制**太阳项**（天光项本来就不该
-// 被遮挡 —— 那是环境光；条带自身投不投影仍是没做的事，见设计文档）。
-//
-// 取舍：**单级联单次采样**（无 PCF），按距离选级联 + 末尾 fade —— 与 fire_fog 的雾体阴影
-// 完全同一套写法与理由：条带是薄片、片元多，PCF 的 9~64 次采样换不来可见收益；
-// 而且 shadow map 是按**不透明几何**生成的，对着半透明片做精细 PCF 没有物理意义。
-uniform int   uHasCsm;            // 0 = 不做阴影（无太阳 / 无级联 / 本批没开天光）
-uniform int   uCascadeCount;
-uniform float uCascadeRanges[5];
-uniform sampler2D uShadowMap[5];
-uniform mat4  uShadowVP[5];
-uniform mat4  uShadowDepthVP[5];
-uniform float uShadowTexelWorld[5];
-uniform float uShadowBiasCascade[5];
-uniform int   uShadowBiasOverride;
-uniform float uShadowFadeStart;
-uniform float uShadowFadeEnd;
-
-// 单级联单次采样。返回 1 = 受照、0 = 在影子里（含「不在该级联覆盖内」= 视为受照）。
-// 深度比较用**相对主视锥中心的线性深度**（米），两端同源（见 object3d 的说明）。
-float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texel_w, float bias_val, vec3 wp) {
-    vec4 lsp = vp * vec4(wp, 1.0);
-    vec3 ndc = lsp.xyz / lsp.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return 1.0;
-    }
-    vec4 dpos = dvp * vec4(wp, 1.0);
-    float cur = dpos.z / dpos.w;
-    float tw = (uShadowBiasOverride != 0) ? bias_val : texel_w;
-    // 条带有法线，但薄片的两面法线与阴影深度轴经常近乎正交 ⇒ 用 tanθ=1 的保守偏置
-    //（与雾同一取值）。偏置过大会有 peter-panning，这里宁可少一点悬浮。
-    cur -= max(0.01, 1.5 * tw);
-    return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
-}
-
-// 按片元到相机的距离选主级联，末尾按 fade 淡出（1 = 完全受照）。
-float CsmShadow(vec3 wp, float dist) {
-    if (uHasCsm == 0 || uCascadeCount <= 0) {
-        return 1.0;
-    }
-    int c = uCascadeCount - 1;
-    for (int i = 0; i < 5; ++i) {
-        if (i < uCascadeCount && dist <= uCascadeRanges[i]) {
-            c = i;
-            break;
-        }
-    }
-    float s;
-    if (c == 0) {
-        s = CsmTap(uShadowMap[0], uShadowVP[0], uShadowDepthVP[0], uShadowTexelWorld[0],
-                   uShadowBiasCascade[0], wp);
-    } else if (c == 1) {
-        s = CsmTap(uShadowMap[1], uShadowVP[1], uShadowDepthVP[1], uShadowTexelWorld[1],
-                   uShadowBiasCascade[1], wp);
-    } else if (c == 2) {
-        s = CsmTap(uShadowMap[2], uShadowVP[2], uShadowDepthVP[2], uShadowTexelWorld[2],
-                   uShadowBiasCascade[2], wp);
-    } else if (c == 3) {
-        s = CsmTap(uShadowMap[3], uShadowVP[3], uShadowDepthVP[3], uShadowTexelWorld[3],
-                   uShadowBiasCascade[3], wp);
-    } else {
-        s = CsmTap(uShadowMap[4], uShadowVP[4], uShadowDepthVP[4], uShadowTexelWorld[4],
-                   uShadowBiasCascade[4], wp);
-    }
-    float fade = 1.0 - clamp((dist - uShadowFadeStart)
-                             / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
-    return mix(1.0, s, fade);
-}
+// 阴影开关：**与天光同一个开关** —— 有 sky_light 就采样 CSM 调制太阳项，没有独立开关。
+// 天光项（ambient）不乘阴影：环境光不该被直射光的影子遮住。
+// 条带自身仍不参与阴影生成（不写 shadow map，那需要给半透明片单开一次 shadow pass）。
+// 采样是**单级联单次采样、无 PCF**（实现见 csm_shadow_glsl.h，与 fire_fog 共用）。
+uniform int uHasCsm;   // 0 = 不做阴影（无太阳 / 无级联）
 
 // 天光辐亮度（线性 HDR）。N 可以非单位（导数叉积/曲面叉积都有长度）：
 // 先归一拿方向；长度≈ 0（退化片元）时当作「朝上」，不出 NaN。
@@ -550,11 +484,15 @@ vec3 SkyLightRadiance(vec3 N) {
     // 天际线是中继）。下半球有地色兜底，不会死黑。
     vec3 ambient = (n.y >= 0.0) ? mix(uSkyHorizon, uSkyZenith, n.y)
                                 : mix(uSkyHorizon, uSkyGround, -n.y);
-    // 太阳：条带是**单层片**，两面都要受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
-    // 太阳项乘 CSM 阴影因子（天光项不乘：环境光不该被直射光的影子遮住）。
-    float shadow = CsmShadow(vWorld, length(uCamPos - vWorld));
-    float sun_term = abs(dot(n, uSunDir)) * uSunIntensity * shadow;
-    return ambient * uSkyAmbientScale + uSunColor * sun_term;
+    vec3 sky = ambient * uSkyAmbientScale;
+    // 太阳项只在真的给了强度时才算：否则每个片元白付一次 shadow map 采样 + 两次 mat4×vec4
+    // （纯天光 / 入夜就是这条路径）。条件全是 uniform ⇒ 全屏一致，不会有 warp 分歧。
+    // 条带是**单层片**，两面都受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
+    if (uSunIntensity > 0.0) {
+        float shadow = CsmShadow(vWorld, length(uCamPos - vWorld), uHasCsm);
+        sky += uSunColor * (abs(dot(n, uSunDir)) * uSunIntensity * shadow);
+    }
+    return sky;
 }
 
 void ApplySkyLight(vec3 N, inout vec3 color) {
@@ -693,13 +631,17 @@ private:
     // 公共 uniform 的**名字表**（唯一一份）：查一次位置，Draw 里直接用整数。
     void QueryCommonUniforms(unsigned int program, CommonUniforms* out /*output*/);
 
+    // 平滑 pass 特有 uniform（段数 / 数据行数 / 控制点数据纹理）：折线与 lit 变体各查一次，
+    // 但**名字表只有这一份**（以前在 Init 里抄了两遍三段）。
+    void QuerySmoothUniforms(unsigned int program, SmoothUniforms* out /*output*/);
+
     // 公共 uniform 的**上传**（唯一实现：改这里两个 pass 同时生效）。
     void ApplyCommonUniforms(const CommonUniforms& uniforms, const BatchDrawContext& ctx);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
-    // 「开天光」的两个变体（2026-10-25）：不在原 program 里加 uniform 分支，
+    // 「开天光」的两个变体：不在原 program 里加 uniform 分支，
     // 而是单独编译 —— 不开天光的批在 GPU 上零额外指令（见 kSkyLightOffFs）。
     unsigned int prog_draw_lit_ = 0;
     unsigned int prog_smooth_lit_ = 0;

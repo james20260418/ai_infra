@@ -26,6 +26,7 @@ cc_library(
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",   # DirectionalLight / ShadowConfig / CascadeFBO（CSM 输入）
         "//tools/jpov/interface:strip_types",
+        "//tools/jpov/src:csm_shadow_glsl",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",
         "//tools/jpov/src:texture_units",

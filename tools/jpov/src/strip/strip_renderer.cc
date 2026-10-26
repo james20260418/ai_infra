@@ -24,6 +24,7 @@
 
 #include <glog/logging.h>
 
+#include "tools/jpov/src/csm_shadow_glsl.h"
 #include "tools/jpov/src/texture_units.h"
 #include "tools/jpov/src/wbo/wbo_shader.h"
 
@@ -58,8 +59,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // 而「不开天光」的那两个 program 二进制上等于改动前（空实现被内联消掉）。
     const std::string fs_draw_off =
         std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSkyLightOffFs + kFsMain;
-    const std::string fs_draw_lit =
-        std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit + kSkyLightFs + kFsMain;
+    const std::string fs_draw_lit = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
+                                    kCsmSingleTapGlsl + kSkyLightFs + kFsMain;
     prog_draw_ = shader_mgr_->GetOrCreate("strip_wbo_draw", {kVs, fs_draw_off.c_str()});
     prog_draw_lit_ =
         shader_mgr_->GetOrCreate("strip_wbo_draw_lit", {kVs, fs_draw_lit.c_str()});
@@ -106,19 +107,13 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     const std::string fs_smooth_off = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
                                       kSkyLightOffFs + kSmoothFsMain;
     const std::string fs_smooth_lit = std::string(kCommonFsHead) + kWboWeightGlsl + kFsEmit +
-                                      kSkyLightFs + kSmoothFsMain;
+                                      kCsmSingleTapGlsl + kSkyLightFs + kSmoothFsMain;
     prog_smooth_ = shader_mgr_->GetOrCreate("strip_wbo_smooth",
                                             {kSmoothVs, fs_smooth_off.c_str()});
     prog_smooth_lit_ = shader_mgr_->GetOrCreate("strip_wbo_smooth_lit",
                                                 {kSmoothVs, fs_smooth_lit.c_str()});
-    QueryCommonUniforms(prog_smooth_, &smooth_uniforms_.common);
-    smooth_uniforms_.seg_count = shader_mgr_->GetUniform(prog_smooth_, "uSegCount");
-    smooth_uniforms_.data_rows = shader_mgr_->GetUniform(prog_smooth_, "uDataRows");
-    smooth_uniforms_.strip_data = shader_mgr_->GetUniform(prog_smooth_, "uStripData");
-    QueryCommonUniforms(prog_smooth_lit_, &smooth_lit_uniforms_.common);
-    smooth_lit_uniforms_.seg_count = shader_mgr_->GetUniform(prog_smooth_lit_, "uSegCount");
-    smooth_lit_uniforms_.data_rows = shader_mgr_->GetUniform(prog_smooth_lit_, "uDataRows");
-    smooth_lit_uniforms_.strip_data = shader_mgr_->GetUniform(prog_smooth_lit_, "uStripData");
+    QuerySmoothUniforms(prog_smooth_, &smooth_uniforms_);
+    QuerySmoothUniforms(prog_smooth_lit_, &smooth_lit_uniforms_);
 
     glGenVertexArrays(1, &smooth_vao_);
     glGenBuffers(1, &smooth_vbo_);
@@ -279,6 +274,13 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
         out->shadow_depth_vp[c] =
             shader_mgr_->GetUniform(program, ("uShadowDepthVP" + idx).c_str());
     }
+}
+
+void StripRenderer::QuerySmoothUniforms(unsigned int program, SmoothUniforms* out) {
+    QueryCommonUniforms(program, &out->common);
+    out->seg_count = shader_mgr_->GetUniform(program, "uSegCount");
+    out->data_rows = shader_mgr_->GetUniform(program, "uDataRows");
+    out->strip_data = shader_mgr_->GetUniform(program, "uStripData");
 }
 
 void StripRenderer::EnsureIboCapacity(int strips) {
@@ -536,7 +538,7 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
 
         // CSM：与天光**同一个开关**（sky_light 开着就吃阴影）。没有太阳/级联时写 0，
         // 太阳项退化为完全受照 —— 与「不开天光」的差别只在颜色，不在是否出错。
-        const bool has_csm = ctx.csm != nullptr && ctx.csm->valid();
+        const bool has_csm = ctx.csm != nullptr && ctx.csm->IsValid();
         glUniform1i(uniforms.has_csm, has_csm ? 1 : 0);
         if (has_csm) {
             const StripCsmShadow& csm = *ctx.csm;

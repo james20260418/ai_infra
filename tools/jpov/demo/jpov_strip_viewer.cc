@@ -94,9 +94,8 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
 
     // 一张图的完整开关；默认值 = 交互模式的初始状态（只写差异，读起来就是"这张在测什么"）。
     //
-    // 2026-10-25 Danis 重做：场景用下拉切换（见 StripViewerApp::SelectScene），拍摄表也照这个来 ——
-    // 每张先选场景，再写「与场景默认不同的开关」。旧玻璃圆环（ring）已从所有场景移除，
-    // 它的 fresnel/环几何代码仍由 gold（strip_scene_gold.cc）覆盖。
+    // 每张先选场景（见 StripViewerApp::SelectScene），再写「与场景默认不同的开关」。
+    // 玻璃圆环（ring）不在任何场景里，它的 fresnel/环几何代码仍由 gold 覆盖。
     struct Shot {
         const char* name;
         int scene = 0;   // 0 = box+三条带 / 1 = 射流 / 2 = 玻璃缸+树
@@ -183,11 +182,7 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.SetShowPanel(true);
     app.InstallTextMeasure();
     for (int scene = 0; scene < jpov_strip::StripViewerApp::kSceneCount; ++scene) {
-        app.SelectScene(scene);
-        app.show_strips_ = (scene == 0);
-        app.jet_visible_ = (scene == 1);
-        app.tank_visible_ = (scene == 2);
-        app.boxes_visible_ = (scene == 0);
+        app.SelectScene(scene);       // 可见性开关由场景写，这里只改机位
         app.view_.theta = 0.45;
         const std::string name = std::string("98_panel_") + std::to_string(scene);
         shoot(name.c_str());

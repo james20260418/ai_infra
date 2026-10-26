@@ -1820,7 +1820,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
                     strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
                                          hdr_scene_depth_tex,
-                                         strips_csm.valid() ? &strips_csm : nullptr,
+                                         strips_csm.IsValid() ? &strips_csm : nullptr,
                                          fbo_3d_w, fbo_3d_h);
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);

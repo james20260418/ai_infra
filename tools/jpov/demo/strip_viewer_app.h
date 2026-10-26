@@ -1,6 +1,6 @@
 // JPOV 半透明条带查看器（strip viewer）— 渲染核心 App
 //
-// 场景由面板顶部的**下拉**切换（Danis 2026-10-25 重做，仿 particle viewer），共三个：
+// 场景由面板顶部的**下拉**切换（仿 particle viewer），共三个：
 //   ① box + 三条带：灰色地面 + 四块参考方块 + 三条带（波带 / 螺旋 / 弧）
 //        —— 验收 WBO 覆盖集 + over 合成、纹理、宽度剖面、软深度、加法集弧
 //   ② 射流：加法集 + HDR 逐点颜色 + 中心实两侧虚剖面 + bloom
@@ -9,8 +9,8 @@
 // 面板在**左下角**，黑色半透明圆角底板上；**控件随场景动态出现**（射流场景没有缸体滑条、
 // 缸体场景没有波带/弧形参数；关掉纹理就不显示 mipmap，关掉软深度就不显示过渡距离）。
 //
-// 旧的玻璃圆环（ring）已不在任何场景里（Danis 2026-10-25：「原来的玻璃缸不要了」），
-// 但**代码保留**：gold（strip_scene_gold.cc）仍用它锁 fresnel + 环几何 + 折线/平滑两条 pass。
+// 玻璃圆环（ring）不在任何场景里，但**代码保留**：gold（strip_scene_gold.cc）仍用它
+// 锁 fresnel + 环几何 + 折线/平滑两条 pass。
 //
 // 交互：右键拖拽 = 绕行、滚轮 = 推拉；面板可调视角外的一切（形状/材质/剖面/开关）。
 // 拍摄：--capture <dir>（固定视角与相位，逐张对比图）。
@@ -95,8 +95,7 @@ inline jpov::StripRingShape MakeSceneRingShape() {
 // 壁厚 5cm：足够看出内外两层膜（内外立壁各一条带），又不至于让筒壁发绿。
 inline jpov::StripRingShape MakeTankShape() {
     jpov::StripRingShape shape;
-    // 2026-10-25 Danis：「缸默认尺寸再整体小个 20%」⇒ 半径/高/壁厚/中心高**同乘 0.8**
-    //（2.90→2.32、5.40→4.32、0.05→0.04、2.70→2.16），比例不变，底部仍落在 y=0。
+    // 半径 / 高 / 壁厚 / 中心高按同一比例（0.8）取：比例不变 ⇒ 观感不变，底部仍落在 y=0。
     shape.outer_radius = 2.32f;
     shape.wall_thickness = 0.04f;
     shape.height = 4.32f;
@@ -416,7 +415,7 @@ class StripViewerApp : public JPOV {
 public:
     using JPOV::JPOV;
 
-    // ── 场景（2026-10-25 Danis：仿 particle viewer 用下拉切换）──
+    // ── 场景（面板下拉切换）──
     //
     //   kRibbons  box + 三条带（波/螺旋/弧）—— 条带本体、纹理、剖面、软深度
     //   kJet      射流（加法集 + HDR + bloom）
@@ -472,6 +471,12 @@ public:
             tank_opacity_ = 0.26f;
             tank_shape_ = MakeTankShape();
         }
+        // 天光（太阳仰角/方位/浑浊度）也回默认：它是三个场景共享的面板参数，
+        // 不在这里清就会把上一场的角度带进来（拍摄表里 415 设的夜太阳曾一路污染 420/430/435，
+        // 拍出来的「乳白缸」其实是夜景）。
+        deg_.sun_elev_deg = kViewDefaults.sun_elev_deg;
+        deg_.sun_azim_deg = kViewDefaults.sun_azim_deg;
+        deg_.turbidity = kViewDefaults.turbidity;
         // 机位（只在切场景的那一刻改，之后用户自己拖）
         if (i == 2) {
             view_.R = 9.0f;
@@ -536,7 +541,7 @@ public:
     float jet_gain_ = 3.0f;                 // HDR 增益（>1 才有 bloom 余量）
     bool bloom_ = true;                     // 辉光（把 HDR 高亮模糊加回）
 
-    // ── 玻璃缸 + 橡树（2026-10-25：天光消费的验收场景）──
+    // ── 玻璃缸 + 橡树（天光消费的验收场景）──
     // 用 fire-fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
     // 它会随天光/太阳变亮变暗。**默认关**，所以 gold 的 8 张图完全不受影响。
     bool tank_visible_ = false;
@@ -898,7 +903,7 @@ private:
         return app->MeasureTextWidth(std::string(), text ? text : "", font_size);
     }
 
-    // ── 面板（2026-10-25 Danis 重做：左下角 + 黑色半透明底板 + 场景下拉）──
+    // ── 面板（左下角 + 黑色半透明底板 + 场景下拉）──
     //
     // 设计要点：
     //   ① 顶部一个「场景」下拉，仿 particle viewer；切场景时 SelectScene() 写一次可见性开关。
