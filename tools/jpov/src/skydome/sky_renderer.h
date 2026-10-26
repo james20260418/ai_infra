@@ -435,7 +435,11 @@ void main() {
     // 环境反射探针：上半球用大气色（不含日月盘），下半球用**地色**（乘以 intensity，
     //   与完整天空路径里 `sky *= uIntensity` 对地色的缩放一致）——金属球下半部
     //   应该反射地面而不是地平线色。
-    vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
+    // 地平线附近**平滑过渡**：这里原来是硬台阶（y>=0 用天空、否则用地色）。
+    // 探针装的是"全方向的辐亮度"，而镜面地板 + 掠射角会把这条台阶放大成
+    // 横跨地板的一条**脏带**（反射方向连续穿过 y=0）。过渡带宽取 ±2°。
+    float horizon_band = smoothstep(-0.035, 0.035, dir.y);
+    vec3 sky_env = mix(uGroundColor * uIntensity, sky_atmo, horizon_band);
     vec3 out_color = (uSkyOutput == 1) ? sky_atmo
                    : (uSkyOutput == 2) ? sky_env
                    : sky;

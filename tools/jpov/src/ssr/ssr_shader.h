@@ -282,10 +282,17 @@ void main() {
                 continue;
             }
             // level 0：单像素精度，可以判真伪。
-            // 厚度随距离放大：掠射角下光线与表面几乎平行，交叉点附近的深度差
-            // 天然就大，固定厚度会把它们全判成"薄片"而漏掉（表现为条纹/空洞）。
+            //
+            // ⚠️ 两个边界都要判：
+            //   * 上界 = 薄片厚度（超过它就是在穿透薄物体，继续走）；
+            //   * **下界 = 最小穿透深度**。掠射角下（尤其镜面地板）光线几乎**贴着**
+            //     自己的表面飞，`dRay - dScene` 在浮点噪声级别来回摆动 —— 不加下界
+            //     会把一半像素判成"命中自己"，表现为一大片**脏带 + 阶梯状条纹**。
+            //     下界取"随距离增长的相对值"，因为远处深度精度本来就差。
             float dScene = DistFromNdc(ndcCell);
-            if (dRay - dScene <= uThicknessM * (1.0 + dScene * 0.1)) {
+            float pen = dRay - dScene;
+            float min_pen = max(0.02, dScene * 0.004);
+            if (pen > min_pen && pen <= uThicknessM) {
                 hit = true;
                 sHit = sNext;
                 break;
