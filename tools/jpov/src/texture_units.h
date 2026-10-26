@@ -47,6 +47,15 @@ inline constexpr int kTexUnitPartialRotationBind = 14;
 // 部位额外旋转的「每通道常量」纹理（kNumPartialRotation texel：bind pivot + 关节骨号）。
 inline constexpr int kTexUnitPartialRotationChannel = 15;
 
+// 环境镜面（IBL specular）的天空 cubemap（见 src/env_specular.h）。
+//   三份 PBR 片元（object3d / instanced / skinned）共用同一号，因为三者**不同时**着色
+//   同一条命令；且它们都不占用此号。
+//   ⚠️ 13/14/15 不能用：蒙皮路径的粗细绑定表 / 部位旋转表占着（同一时刻活跃）。
+//   本号 > 15 与 kTexUnitGlassSceneDepth 同类：GL 3.3 只**保证** 16 个片元纹理单元
+//   （0..15），实测驱动（含 llvmpipe）给 32，故 16/17 可用；若将来遇到只给 16 的
+//   驱动，需连同 kTexUnitGlassSceneDepth 一起重新分配，不是单点问题。
+inline constexpr int kTexUnitEnvCube = 17;
+
 // 透明混合 pass（Object3DRenderer::DrawObject3DBlend）使用的不透明场景深度纹理
 //（值 = gl_FragCoord.z）。玻璃 pass **无深度缓冲**，在 FS 里手动作深度测试时采它。
 // 仅 object3d blend（kBlend）program 使用；主链路其他 program 不绑它。
@@ -73,6 +82,8 @@ static_assert(kTexUnitPartialRotationBind < kTexUnitPartialRotationChannel,
               "部位额外旋转的两张表单元重叠");
 static_assert(kTexUnitPartialRotationChannel < kTexUnitGlassSceneDepth,
               "部位额外旋转通道表与玻璃场景深度单元重叠");
+static_assert(kTexUnitGlassSceneDepth < kTexUnitEnvCube,
+              "玻璃场景深度与天空 cubemap 单元重叠");
 // ⚠️ kTexUnitWindJointTable 故意 = kTexUnitPoseAtlas（12）：蒙皮与植被风不同时活跃，
 // 同号共用，且必须留在 0..15（见该常量处注释）。故不参与下列顺序断言。
 

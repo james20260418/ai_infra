@@ -19,6 +19,7 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
@@ -59,6 +60,12 @@
 namespace {
 
 using jpov::Vec3f;
+
+// 环境镜面（IBL）天空 cubemap 的面边长（像素）。
+// 6×128² ≈ 10 万像素，相对于一个全屏天空 pass（~200 万）不到 5%。
+// 为什么不再大：天空是极低频渐变，128² 已足够；再大只会多花 Preetham 的逐像素计算。
+// 为什么不再小：mip 链要能表达粗糙度上的模糊（128 → 8 级 mip）。
+constexpr int kSkyEnvCubeSize = 128;
 
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
@@ -593,6 +600,7 @@ Renderer::~Renderer() {
     DestroyHighlightFBO();
     DestroyBloomChain();
     DestroySkyColorFBO();
+    DestroySkyEnvCube();
     DestroyGlassFBO();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
@@ -842,6 +850,47 @@ void Renderer::DestroySkyColorFBO() {
     }
     sky_w_ = 0;
     sky_h_ = 0;
+}
+
+void Renderer::EnsureSkyEnvCube(int size) {
+    CHECK_GE(size, 1);
+    if (sky_env_tex_ != 0 && sky_env_size_ == size) {
+        return;
+    }
+    DestroySkyEnvCube();
+    glGenTextures(1, &sky_env_tex_);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_tex_);
+    for (int face = 0; face < 6; ++face) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA16F,
+                     size, size, 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
+    // mip 链：粗糙度→mip 级的「廉价预滤波」（见 src/env_specular.h）。
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glGenFramebuffers(1, &sky_env_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, sky_env_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_CUBE_MAP_POSITIVE_X, sky_env_tex_, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
+        << "Sky env cubemap FBO incomplete";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sky_env_size_ = size;
+}
+
+void Renderer::DestroySkyEnvCube() {
+    if (sky_env_fbo_) {
+        glDeleteFramebuffers(1, &sky_env_fbo_);
+        sky_env_fbo_ = 0;
+    }
+    if (sky_env_tex_) {
+        glDeleteTextures(1, &sky_env_tex_);
+        sky_env_tex_ = 0;
+    }
+    sky_env_size_ = 0;
 }
 
 
@@ -1104,7 +1153,7 @@ unsigned int Renderer::Text3DProg() {
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
 unsigned int Renderer::DrawObject3DProg() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // DrawObject3D PBR shader — 完整版（mesh 含 kUV+kTangent 时使用）。
@@ -1112,7 +1161,7 @@ unsigned int Renderer::DrawObject3DProg() {
 // 支持纹理采样（baseColor/metallic/roughness/emissive/AO）和 TBN 法线映射。
 unsigned int Renderer::DrawObject3DProgFull() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr_full",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（FS 里含 discard）。
@@ -1121,14 +1170,14 @@ unsigned int Renderer::DrawObject3DProgFull() {
 unsigned int Renderer::DrawObject3DProgCutout() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_cutout",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawObject3DProgFullCutout() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_full_cutout",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
@@ -1137,52 +1186,52 @@ unsigned int Renderer::DrawObject3DProgFullCutout() {
 unsigned int Renderer::DrawObject3DProgBlend() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_blend",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_BLEND"}});
 }
 
 unsigned int Renderer::DrawObject3DProgFullBlend() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_full_blend",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_BLEND"}});
 }
 
 // 静态批量实例 program（摆放走 per-instance attribute，见 InstancedObjectRenderer::kMeshVs3dPBR*Instanced）。
 unsigned int Renderer::DrawInstancedObjectProg() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str()});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFull() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::DrawInstancedObjectProgCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFullCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 // 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
 unsigned int Renderer::SkinnedMeshProg() {
     return shader_mgr_.GetOrCreate("skinned_mesh",
-        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR});
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）蒙皮变体：与 SkinnedMeshProg 同源，仅多一个 JPOV_ALPHA_CUTOUT 宏
 //（FS 里含 discard）。与 object3d 同理单独成 program，避免不透明 program 含 discard 而降级 early-Z。
 unsigned int Renderer::SkinnedMeshProgCutout() {
     return shader_mgr_.GetOrCreate("skinned_mesh_cutout",
-        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR, {"JPOV_ALPHA_CUTOUT"}});
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR.c_str(), {"JPOV_ALPHA_CUTOUT"}});
 }
 
 // 蒙皮阴影 program：蒙皮阴影 VS(kSkinnedShadowVs) + 复用对象3D片元(kShadowFs，只写线性深度)。
@@ -1576,7 +1625,21 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
             SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, /*atmo_only=*/true);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
+
+            // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap（只在开了 env_specular 时）。
+            // 在本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
+            // 返回后绑定仍为 sky_env_fbo_，所以下面必须重新绑回主 3D 目标。
+            if (cmds.env_specular.has_value()) {
+                CHECK_GE(cmds.env_specular->sky_scale, 0.0f)
+                    << "EnvSpecular::sky_scale 必须 >= 0";
+                CHECK_LE(cmds.env_specular->sky_scale, 1.0f)
+                    << "EnvSpecular::sky_scale 必须 <= 1";
+                EnsureSkyEnvCube(kSkyEnvCubeSize);
+                SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
+                                            sky_env_tex_, sky_env_fbo_, shader_mgr_);
+            }
+
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
@@ -1588,6 +1651,11 @@ void Renderer::Render(const RenderCommandList& cmds,
             glCullFace(GL_BACK);
             glFrontFace(GL_CCW);
         }
+
+        // env_specular 的反射源是天空：没有 sky 就没镜面可反射。宁可 crash 也不静默
+        // 退化成“金属块是黑的”——后者要查代码才能回答。
+        CHECK(!cmds.env_specular.has_value() || cmds.sky.has_value())
+            << "env_specular 需要 cmds.sky（环境镜面的光源就是天光）";
 
         // 先用当前 Camera 计算 MVP（Proj * View，不含 Model）。
         // tile culling 投影光源需要它，必须先于 BuildTileLightIndices。
@@ -1689,6 +1757,32 @@ void Renderer::Render(const RenderCommandList& cmds,
                 SkinnedMeshProg(), ambient);
             SkeletonRenderer::UploadAmbient(shader_mgr_,
                 SkinnedMeshProgCutout(), ambient);
+        }
+
+        // 环境镜面（IBL specular）uniform。
+        //
+        // ⚠️ **只要本帧有会用到 PBR 片元的命令就必须上传**（无论开没开）：
+        //   uniform 是 program 状态，上一帧开着而本帧不传 → 继续用旧的（可能已销毁的）cubemap。
+        //   未开时传 enabled=false，shader 里直接 return 0（零成本）。
+        //   两边的 program 列表必须与上面 UploadAmbient 的一致（同一批 PBR 变体）。
+        if (!cmds.object3d.empty() || !cmds.instanced_object.empty() ||
+            !cmds.skinned_mesh.empty()) {
+            const bool env_on = cmds.env_specular.has_value();
+            const float env_scale = env_on ? cmds.env_specular->sky_scale : 0.0f;
+            const float env_max_lod = static_cast<float>(
+                std::log2(static_cast<double>(kSkyEnvCubeSize)));
+            const unsigned int cube = env_on ? sky_env_tex_ : 0u;
+            const unsigned int progs[] = {
+                DrawObject3DProg(), DrawObject3DProgFull(),
+                DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
+                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(),
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+                SkinnedMeshProg(), SkinnedMeshProgCutout(),
+            };
+            for (unsigned int prog : progs) {
+                UploadEnvSpecular(shader_mgr_, prog, cube, env_max_lod, env_scale, env_on);
+            }
         }
 
         // 拾取（color-ID）pass：仅在用户发起了 pick 查询时才跑。
