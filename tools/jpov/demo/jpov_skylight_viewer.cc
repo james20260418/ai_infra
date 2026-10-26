@@ -459,15 +459,19 @@ int RunCaptureSsr(const std::string& out_dir) {
     winfo.height = jpov_skylight::kViewerHeight;
     jpov::InputSnapshot input{};
 
-    // 与 env A/B 同一机位/光照 —— 两组图可以直接对着看。
+    // 光照同 env A/B；机位**抬到 3/4 俯视**：
+    //   平视（phi≈0.2）时方块顶面几乎是刀片，三面里只看得到两个侧面，而正对相机的
+    //   那个侧面按物理必然"反射相机背后"（SSR 无从获取 → 天空兜底）。
+    //   抬高后顶面完整入画：顶面映天、一个侧面映场景（树/地面）、另一个侧面走兜底，
+    //   三面内容天然不同 —— 这正是验收想看的。
     app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
     app.deg_.daylight_season = 0.0f;
     app.deg_.sun_elev_deg = 40.0f;
     app.deg_.sun_azim_deg = 30.0f;
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.20;
+    app.view_.phi   = 0.42;
     app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 5.2;
+    app.view_.R     = 4.6;
 
     auto shot = [&](const char* name, bool on, float scale, int level, int steps) {
         jpov::SsrConfig sc;
