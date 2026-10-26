@@ -29,8 +29,8 @@
 #define JPOV_MESH_H_
 
 #include <array>
-#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <glog/logging.h>
@@ -66,6 +66,17 @@ enum class MeshVertexFlags : uint8_t {
 // 用法：HasFlag(mesh.flags, MeshVertexFlags::kNormal)
 inline bool MeshHasFlag(MeshVertexFlags flags, MeshVertexFlags flag) {
     return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(flag)) != 0;
+}
+
+// 有限性判据（**刻意不用 <cmath> 的 std::isfinite**）。
+//
+// 为什么：mesh.h 被大量 TU 间接包含。一旦这里 include <cmath>，MinGW 上 <math.h>
+// 会在 TU 定义 _USE_MATH_DEFINES 之前就被锁死（include guard），随后 math_util.h /
+// render_command.h 里的 M_PI/M_PI_2 全部“未定义” —— 2026-10-26 的 Windows CI 就是这么挂的。
+// <limits> 不拉 <math.h>，且判据不依赖浮点运算（-ffast-math 下 `v-v==0` 会被优化掉）。
+inline bool WindScalarIsFinite(float v) {
+    return v == v && v != std::numeric_limits<float>::infinity() &&
+           v != -std::numeric_limits<float>::infinity();
 }
 
 // ==================== CPU 侧网格数据 ====================
@@ -284,20 +295,23 @@ inline void MeshData::Validate() const {
     for (size_t i = 0; i < wind_joints.size(); ++i) {
         const WindJoint& j = wind_joints[i];
         for (int a = 0; a < 3; ++a) {
-            CHECK(std::isfinite(j.pivot[a]))
+            CHECK(WindScalarIsFinite(j.pivot[a]))
                 << "MeshData::Validate: wind_joints[" << i << "].pivot 非有限数";
         }
-        CHECK(std::isfinite(j.parent))
-            << "MeshData::Validate: wind_joints[" << i << "].parent 非有限数";
-        const int parent = static_cast<int>(std::lround(j.parent));
-        CHECK(parent == -1 || (parent >= 0 && static_cast<size_t>(parent) < wind_joints.size()))
+        // parent 用 float 存（资产 7 float/关节）但语义是下标：先按范围兜住（NaN/±Inf
+        // 在这里必然为假），再确认是整数值 —— 否则“3.7 这种值”在 VS 里会四舍五入到 4。
+        CHECK(j.parent >= -1.0f && j.parent < static_cast<float>(wind_joints.size()))
             << "MeshData::Validate: wind_joints[" << i << "].parent = " << j.parent
             << " 越出关节表（合法值：-1 或 [0, " << wind_joints.size() << ")）";
-        CHECK(std::isfinite(j.level) && j.level >= 0.0f)
+        const int parent = static_cast<int>(j.parent);   // 已被上式夹进 [-1, N) ⇒ 转换安全
+        CHECK(j.parent == static_cast<float>(parent))
+            << "MeshData::Validate: wind_joints[" << i << "].parent 必须是整数（-1 = 根），当前 "
+            << j.parent;
+        CHECK(WindScalarIsFinite(j.level) && j.level >= 0.0f)
             << "MeshData::Validate: wind_joints[" << i << "].level 必须是非负有限数";
-        CHECK(std::isfinite(j.phase))
+        CHECK(WindScalarIsFinite(j.phase))
             << "MeshData::Validate: wind_joints[" << i << "].phase 非有限数";
-        CHECK(std::isfinite(j.soft) && j.soft >= 0.0f && j.soft <= 1.0f)
+        CHECK(WindScalarIsFinite(j.soft) && j.soft >= 0.0f && j.soft <= 1.0f)
             << "MeshData::Validate: wind_joints[" << i << "].soft 必须落在 [0,1]";
     }
 
