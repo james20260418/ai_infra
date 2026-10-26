@@ -228,8 +228,19 @@ void main() {
         return;
     }
 
-    // 射线长度裁到**近平面前**：朝相机后方时屏幕里没有画面可借（见设计文档 §4.3）。
-    //   注意不要在这里按 R.z>0 直接跳兜底 —— 那会在平面中间拉出一条硬分界线。
+    // 反射方向的"朝屏幕里"分量：R.z 越负越朝屏幕纵深，越可信。
+    //
+    // ⚠️ 这个量必须参与置信度，否则会出现**假的拉长**：俯视镜面时反射线几乎朝相机
+    //    飞回去，它在屏幕上扫过的一切几何都"比它近" ⇒ 命中判定几乎处处成立 ⇒
+    //    物体的倒影会从一个地板像素往外糊成长锥（实测可达植株高度 3~4 倍）。
+    //    朝相机的反射在屏幕空间里本来就无解（映的是眼睛背后），应该交给探针。
+    //    用 smoothstep 而不是硬判断：R.z 穿过 0 时输出是连续的，不会拉出分界线。
+    float forwardness = smoothstep(0.0, 0.25, -R.z);
+    if (forwardness <= 0.0) {
+        FragColor = vec4(probe * fresnel, 1.0);
+        return;
+    }
+
     float rayLen = uMaxDistanceM;
     if (R.z > 0.0) {
         rayLen = clamp((-uNear - P.z) / R.z, 0.0, uMaxDistanceM);
@@ -325,7 +336,7 @@ void main() {
         float edge = min(min(hitUv.x, 1.0 - hitUv.x), min(hitUv.y, 1.0 - hitUv.y));
         float edgeFade = (uFadeEdges != 0) ? smoothstep(0.0, 0.10, edge) : 1.0;
         float roughFade = 1.0 - smoothstep(uRoughnessCutoff * 0.5, uRoughnessCutoff, roughness);
-        ssrConf = clamp(edgeFade * roughFade, 0.0, 1.0);
+        ssrConf = clamp(edgeFade * roughFade * forwardness, 0.0, 1.0);
     }
     vec3 hitColor = hit ? texture(uSceneColor, hitUv).rgb : probe;
     // 混合发生在**反射项内部**（而不是"有就加、没有就不加"）——

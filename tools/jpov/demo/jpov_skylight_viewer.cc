@@ -516,6 +516,68 @@ int RunCaptureSsr(const std::string& out_dir) {
     return 0;
 }
 
+// 复现"俯视角拉长"这一个具体工况（Danis 2026-10-26 截图给的机位）。
+//
+// 机位来自截图 HUD：phi=69.2 theta=1.7 R=9.50（近俯视），SSR = res 0.5 / HiZ 2 /
+// steps 48 / thick 0.60 / rough<=0.40。四档对照用来定位是谁造成的：
+//   case_off     关闭 SSR（纯探针）—— 如果拉长还在，就不是 SSR
+//   case_hiz2    截图原参数
+//   case_res1    同参数但反射缓冲全分辨率 —— 看是不是半分辨率/上采样造成的
+//   case_nohiz   关 Hi-Z + 64 步 —— 看是不是步进/漏检造成的
+int RunCaptureCase(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SSR 典型工况复现（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowHud(false);
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kMirrorFloor);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 截图 HUD 的机位与天光
+    app.deg_.turbidity    = 2.0f;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 45.0f;
+    app.view_.phi   = 69.2 * 3.14159265358979323846 / 180.0;
+    app.view_.theta = 1.7 * 3.14159265358979323846 / 180.0;
+    app.view_.R     = 9.50;
+
+    auto shot = [&](const char* name, bool on, float scale, int level, int steps) {
+        jpov::SsrConfig sc;
+        sc.enabled = on;
+        sc.resolution_scale = scale;
+        sc.hiz_start_level = level;
+        sc.max_steps = steps;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/" + name + ".png").c_str());
+        LOG(INFO) << "capture: " << name;
+    };
+
+    shot("case_off",   false, 0.5f, 2, 48);
+    shot("case_hiz2",  true,  0.5f, 2, 48);
+    shot("case_res1",  true,  1.0f, 2, 48);
+    shot("case_nohiz", true,  0.5f, 0, 64);
+
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -525,6 +587,7 @@ int main(int argc, char** argv) {
     std::string smaa_out_dir;
     std::string env_out_dir;
     std::string ssr_out_dir;
+    std::string case_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -535,9 +598,14 @@ int main(int argc, char** argv) {
             env_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-ssr") == 0 && i + 1 < argc) {
             ssr_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-case") == 0 && i + 1 < argc) {
+            case_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!case_out_dir.empty()) {
+        return RunCaptureCase(case_out_dir);
     }
     if (!ssr_out_dir.empty()) {
         return RunCaptureSsr(ssr_out_dir);
