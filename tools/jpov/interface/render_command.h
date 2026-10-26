@@ -40,6 +40,7 @@
 #include "tools/jpov/interface/pbr_material.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
 #include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/interface/ssr_types.h"
 
 namespace jpov {
 
@@ -1767,6 +1768,17 @@ struct Object3DCommand {
     //   不同风向/相位/强度。仅当 mesh 带 kWind（烘焙过风数据）时生效；无风数据的
     //   mesh 设了也无效。未设（默认）= 本物体零风、零开销。见 WindCommand。
     std::optional<WindCommand> wind;
+
+    // 是否作为**屏幕空间反射（SSR）的反射体**：true 时 SSR pass 会为它额外画一遍
+    //   表面属性（视空间法线 / 粗糙度 / F0）。默认 false = 不参与、零开销。
+    //
+    // 为什么是逐物体标记而不是自动推断：SSR 的成本 ∝ 反射体的屏幕面积，而且"这块
+    //   表面该不该有倒影"是**美术/场景的决定**（大理石地板要、粗糙石灰墙不要）。
+    //   自动按 metallic/roughness 猜会在"光滑但不想反光"的物体上花冤枉钱。
+    // 由 `DrawObject3DReflective()` 置位；直接构造 Object3DCommand 时也可手填。
+    // Pre-condition: 仅支持 alpha_mode == kOpaque（半透明不走本条路径）；
+    //   暂不支持 wind（属性 pass 不施加风位移，与主 pass 会错位）。
+    bool ssr_reflect = false;
 };
 
 // 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
@@ -2105,6 +2117,12 @@ struct RenderCommandList {
     // 未设置 / enabled=false 时零开销。**需要 tone_mapping=true**，否则 CHECK 报错。
     std::optional<ElevationFogConfig> elevation_fog;
 
+    // 屏幕空间反射（SSR）。有值且 enabled=true 时，在**不透明 3D 之后、半透明/雾之前**
+    // 跑一次独立 pass：为标记了 ssr_reflect 的物体算真实倒影并加法叠回 HDR。
+    // 未设置 / enabled=false 时零开销零回归（不建缓冲、不跑任何 pass）。
+    // 见 interface/ssr_types.h 的 SsrConfig 与 docs/jpov_ssr_design.md。
+    std::optional<SsrConfig> ssr;
+
     // 场景深度可视化开关（调试，默认 false）。
     //   HDR 3D pass 用 MRT 把「场景深度」写进第二颜色附件（R32F，值 = gl_FragCoord.z
     //   ∈ [0,1]，1.0=远平面/背景）。本开关为 true 时，统一 tone map pass 把该深度图
@@ -2365,6 +2383,21 @@ struct RenderCommandList {
                       bool highlight = false,
                       uint32_t picking_id = 0,
                       const std::optional<WindCommand>& wind = std::nullopt);
+
+    // 同上，但把该物体标记为 **SSR 反射体**（见 Object3DCommand::ssr_reflect）。
+    //
+    // 为什么不给 DrawObject3D 加第 10 个参数：它已经有 `scale / highlight /
+    // picking_id / wind` 四个尾参，再挂一个 bool 会出现"两个相邻 bool 传反了
+    // 也能编译"的经典事故。单独一个函数名自带语义，调用点一眼可读。
+    //
+    // 与高亮/拾取的关系：本条不提供 highlight / picking_id（反射体通常不需要描边）。
+    // 需要同时高亮或可拾取时，用 DrawObject3D 推两次（同一 mesh 两个命令），
+    // 代价是多一次 draw。
+    // Pre-condition: 同 DrawObject3D；且 mat.alpha_mode == kOpaque。
+    void DrawObject3DReflective(uint32_t mesh_id, const PBRMaterial& mat,
+                                const Vec3f& center,
+                                const Vec3f& up, const Vec3f& front,
+                                float scale = 1.0f);
 
     // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
     //

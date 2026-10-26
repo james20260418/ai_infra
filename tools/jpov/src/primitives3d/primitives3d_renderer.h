@@ -99,6 +99,13 @@ void main() {
     // MVP = Projection * View
     static void BuildMVP(const Camera& cam, int fbo_w, int fbo_h, float mvp[16]);
 
+    // 单独取出 Projection 与 View（列主序，与 BuildMVP 内部同一套约定）。
+    // 需要它们的 pass 用这个，别自己再写一份 lookAt —— 本仓库的 view 是
+    // "行主序书写、列主序存储"的转置布局，自己重写极易整体转置（见 BuildMVP 注释）。
+    // 输出参数在最后（C++ 规则：输入在前、输出在后）。
+    static void BuildProjView(const Camera& cam, int fbo_w, int fbo_h,
+                              float proj[16] /*output*/, float view[16] /*output*/);
+
     // 从 center/up/front 构建 Model 矩阵（列主序，纯 CPU，不碰 GL 矩阵栈）。
     // scale 为整体缩放（先缩放顶点，再 up/front 旋转 + center 平移，见 BuildModelMatrix 实现）。
     static void BuildModelMatrix(const Vec3f& center, const Vec3f& up,

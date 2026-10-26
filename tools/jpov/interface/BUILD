@@ -83,7 +83,11 @@ cc_library(
 cc_library(
     name = "render_command",
     srcs = ["render_command.cc"],
-    hdrs = ["render_command.h"],
+    hdrs = [
+        "render_command.h",
+        # SSR 配置（GL-free 叶子类型，被 render_command 引用）
+        "ssr_types.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",

@@ -17,6 +17,8 @@
 // headless 拍摄（--capture <out_dir>）：无窗口批量出图（供交付验收/自动化核对）。
 // 环境镜面 A/B（--capture-env <out_dir>）：固定机位只切“天光消费量”（0 / 0.5 / 1），
 //   验收工件 = 第三方块（金属，metallic=1）—— 关时发黑，开时能看见天光渐变与地色。
+// SSR 预设（--capture-ssr <out_dir>）：固定机位出 5 张 —— 关 / Hi-Z(2,32) /
+//   Hi-Z(3,16) / 关 Hi-Z(0,64) / 1/4 分辨率，供肉眼对比参数平衡。
 //
 // 架构：与 model viewer 同构（主程序只做装配 + 事件循环；场景/天光装配在
 // skylight_scene.h，渲染核心 + 面板在 skylight_viewer_app.h）。
@@ -426,6 +428,70 @@ int RunCaptureEnv(const std::string& out_dir) {
     return 0;
 }
 
+// SSR 预设拍摄：固定机位/光照，只切 SSR 参数。工件 = 金属方块（反射体）。
+//
+// 为什么是这五档：
+//   off            —— 基准（此时走 env 天光镜面，SSR 一开 env 自动关）
+//   hiz2_32        —— 推荐默认：粗层从 4 像素格子开始，32 步够用
+//   hiz3_16        —— 更省的极端：8 像素格子 + 16 步，看"漏检"有多明显
+//   nohiz_64       —— 关闭 Hi-Z（逐像素细步进）× 64 步 = 质量上限（最慢）
+//   quarter_hiz2   —— 1/4 分辨率：看降采样对倒影清晰度的影响
+int RunCaptureSsr(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SSR 预设对比（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 与 env A/B 同一机位/光照 —— 两组图可以直接对着看。
+    app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 40.0f;
+    app.deg_.sun_azim_deg = 30.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.20;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 5.2;
+
+    auto shot = [&](const char* name, bool on, float scale, int level, int steps) {
+        jpov::SsrConfig sc;
+        sc.enabled = on;
+        sc.resolution_scale = scale;
+        sc.hiz_start_level = level;
+        sc.max_steps = steps;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/" + name + ".png").c_str());
+        LOG(INFO) << "capture: " << name << " (on=" << on << " scale=" << scale
+                  << " hiz=" << level << " steps=" << steps << ")";
+    };
+
+    shot("ssr_off",          false, 0.5f, 2, 32);
+    shot("ssr_hiz2_32",      true,  0.5f, 2, 32);
+    shot("ssr_hiz3_16",      true,  0.5f, 3, 16);
+    shot("ssr_nohiz_64",     true,  0.5f, 0, 64);
+    shot("ssr_quarter_hiz2", true,  0.25f, 2, 32);
+
+    LOG(INFO) << "SSR presets captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -434,6 +500,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string smaa_out_dir;
     std::string env_out_dir;
+    std::string ssr_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -442,9 +509,14 @@ int main(int argc, char** argv) {
             smaa_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
             env_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ssr") == 0 && i + 1 < argc) {
+            ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!ssr_out_dir.empty()) {
+        return RunCaptureSsr(ssr_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);

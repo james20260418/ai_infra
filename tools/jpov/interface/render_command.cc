@@ -286,4 +286,25 @@ void RenderCommandList::DrawMeshWithSkeleton(
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
 }
 
+void RenderCommandList::DrawObject3DReflective(uint32_t mesh_id,
+                                               const PBRMaterial& mat,
+                                               const Vec3f& center,
+                                               const Vec3f& up, const Vec3f& front,
+                                               float scale) {
+    CHECK_GT(mesh_id, 0u);
+    CHECK(mat.alpha_mode == AlphaMode::kOpaque)
+        << "DrawObject3DReflective: SSR 只支持不透明材质（当前 alpha_mode 不是 kOpaque）";
+    int idx = static_cast<int>(object3d.size());
+    Object3DCommand cmd;
+    cmd.mesh_id = mesh_id;
+    cmd.material = mat;
+    cmd.center = center;
+    cmd.up = up;
+    cmd.front = front;
+    cmd.scale = scale;
+    cmd.ssr_reflect = true;
+    object3d.push_back(cmd);
+    order.emplace_back(DrawCommandType::kObject3D, idx);
+}
+
 }  // namespace jpov

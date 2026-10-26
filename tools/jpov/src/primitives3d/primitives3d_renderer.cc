@@ -68,13 +68,13 @@ void Primitives3DRenderer::BuildPerspProj(float fov_y, float aspect, float near,
     out[3]  = 0.0f;        out[7]  = 0.0f;  out[11] = -1.0f;                out[15] = 0.0f;
 }
 
-void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
-                                    float mvp[16]) {
+void Primitives3DRenderer::BuildProjView(const Camera& cam, int fbo_w, int fbo_h,
+                                          float proj[16] /*output*/,
+                                          float view[16] /*output*/) {
     float aspect = static_cast<float>(fbo_w) / static_cast<float>(fbo_h);
     float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
 
     // === 投影矩阵 ===
-    float proj[16];
     BuildPerspProj(fov_rad, aspect, cam.near, cam.far, proj);
 
     // === lookAt 视图矩阵 ===
@@ -111,7 +111,9 @@ void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
     // 若你新写/复制一个 lookAt（例如 shadow pass 的 DrawShadowPass 里），
     // 务必和这里保持同一套布局，否则 view 会整体转置 → 影子/投影的 x/y
     // 对调、depth 映射到错误轴（ndc.z 变成只由 x 决定）。
-    float view[16] = {
+    {
+        // 直接写进输出参数（原来是局部 float view[16]，抽出来后复用同名参数）
+        const float v[16] = {
         side.x(), upv.x(), -fwd.x(), 0.0f,
         side.y(), upv.y(), -fwd.y(), 0.0f,
         side.z(), upv.z(), -fwd.z(), 0.0f,
@@ -119,8 +121,16 @@ void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
         -(upv.x()*cam.position.x() + upv.y()*cam.position.y() + upv.z()*cam.position.z()),
          (fwd.x()*cam.position.x() + fwd.y()*cam.position.y() + fwd.z()*cam.position.z()),
          1.0f
-    };
+        };
+        for (int i = 0; i < 16; ++i) { view[i] = v[i]; }
+    }
+}
 
+void Primitives3DRenderer::BuildMVP(const Camera& cam, int fbo_w, int fbo_h,
+                                    float mvp[16]) {
+    float proj[16];
+    float view[16];
+    BuildProjView(cam, fbo_w, fbo_h, proj, view);
     // MVP = Proj * View
     Mat4Mul(proj, view, mvp);
 }

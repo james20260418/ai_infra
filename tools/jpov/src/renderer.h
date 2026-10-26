@@ -17,6 +17,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
+#include "tools/jpov/src/ssr/ssr_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
@@ -377,6 +378,9 @@ private:
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。
     StripRenderer strip_renderer_;
+    // 屏幕空间反射（独立 pass：不透明 3D 之后、半透明/雾之前）。
+    // 只服务标记了 ssr_reflect 的物体；未开 ssr 命令时零开销。
+    SsrRenderer ssr_renderer_;
     VolumeManager volume_mgr_;
     // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
     SmaaRenderer smaa_renderer_;

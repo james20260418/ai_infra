@@ -20,6 +20,11 @@
 //   ⑦（开关 + 滑条）环境镜面（IBL specular）：开 = 所有材质从天空 cubemap 取镜面反射，
 //      滑条 = 天光消费量 [0,1]（见 interface/render_command.h 的 EnvSpecular）。
 //      验收工件 = 第三方块（金属，metallic=1）—— 关时是发黑的块，开时能看见天光/地色被映上去。
+//   ⑧（开关 + 5 滑条）屏幕空间反射 SSR：开 = 金属方块做**场景内几何**的真倒影
+//      （属性 pass → Hi-Z 金字塔 → 逐像素射线 → 加法合成，见 src/ssr/）。
+//      5 个旋钮 = 分辨率倍率 / Hi-Z 起始层 / 最大步数 / 薄片厚度 / 粗糙度上限。
+//      ⚠️ SSR 自带天空兜底，**开启时自动关掉环境镜面**（两者是同一物理量的两种估计，
+//         同时开会双计 → 画面偏亮）。开关仍然保留，便于单独对比 env 一项。
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
@@ -108,6 +113,16 @@ public:
         env_specular_scale_ = sky_scale;
     }
 
+    // SSR 开关 + 全套参数（headless 预设拍摄用；交互时走面板 ⑧）。
+    void SetSsr(const jpov::SsrConfig& cfg) {
+        ssr_on_ = cfg.enabled;
+        ssr_res_scale_ = cfg.resolution_scale;
+        ssr_start_level_ = static_cast<float>(cfg.hiz_start_level);
+        ssr_max_steps_ = static_cast<float>(cfg.max_steps);
+        ssr_thickness_ = cfg.thickness_m;
+        ssr_rough_cutoff_ = cfg.roughness_cutoff;
+    }
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
     }
@@ -161,10 +176,25 @@ public:
         // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
         // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
         // 三块方块的 index 2（metallic=1, “无漫反射，纯环境反射”）是验收工件。
-        if (env_specular_on_) {
+        //
+        // SSR 开着时**不叠加** env：两者是同一物理量的两种估计（SSR 自带天空兜底），
+        // 同时开会双计 → 金属块比物理上更亮，对比就没有意义了。
+        if (env_specular_on_ && !ssr_on_) {
             jpov::EnvSpecular es;
             es.sky_scale = env_specular_scale_;
             cmds->env_specular = es;
+        }
+
+        // 屏幕空间反射：只服务标记了 ssr_reflect 的物体（本场景 = 金属方块）。
+        if (ssr_on_) {
+            jpov::SsrConfig sc;
+            sc.enabled = true;
+            sc.resolution_scale = ssr_res_scale_;
+            sc.hiz_start_level = static_cast<int>(ssr_start_level_ + 0.5f);
+            sc.max_steps = static_cast<int>(ssr_max_steps_ + 0.5f);
+            sc.thickness_m = ssr_thickness_;
+            sc.roughness_cutoff = ssr_rough_cutoff_;
+            cmds->ssr = sc;
         }
 
         // SMAA 后处理抗锯齿（可选）：tone map 之后、2D 之前的最后一站。
@@ -203,8 +233,9 @@ public:
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
             cmds->DrawObject3D(box_mesh_, mat_high_,  BoxCenter(1),
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
-            cmds->DrawObject3D(box_mesh_, mat_metal_, BoxCenter(2),
-                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+            // 金属块标记为 SSR 反射体（未开 ssr 命令时该标记零开销）。
+            cmds->DrawObject3DReflective(box_mesh_, mat_metal_, BoxCenter(2),
+                                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
             // 额外模型（桌子 / 橡树）：用来看“物体受光”，供夜色标定。
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
@@ -248,7 +279,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 11;
+        const int   kRows    = 17;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -278,6 +309,16 @@ private:
         ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 9));
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
                         0.0f, 1.0f, 2);
+        // ── SSR（⑧）：总开关 + 5 个平衡旋钮 ──
+        // 开关打开会自动关掉环境镜面（见 OneIteration 注释），避免双计。
+        ui_.Checkbox("SSR 屏幕空间反射 (开时关天光镜面)", &ssr_on_, row(0, 11));
+        ui_.SliderFloat("SSR 分辨率倍率", &ssr_res_scale_, row(0, 12), 0.25f, 1.0f, 2);
+        ui_.SliderFloat("SSR Hi-Z 起始层 (0=关)", &ssr_start_level_, row(0, 13),
+                        0.0f, 4.0f, 0);
+        ui_.SliderFloat("SSR 最大步数", &ssr_max_steps_, row(0, 14), 8.0f, 96.0f, 0);
+        ui_.SliderFloat("SSR 薄片厚度 m", &ssr_thickness_, row(0, 15), 0.05f, 2.0f, 2);
+        ui_.SliderFloat("SSR 粗糙度上限", &ssr_rough_cutoff_, row(0, 16),
+                        0.05f, 1.0f, 2);
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
@@ -303,8 +344,17 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
-    bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
+    bool env_specular_on_ = true;     // 环境镜面开关（默认开：PR #228 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
+    // ── SSR ──
+    // 默认**关**：它是逐像素射线 pass，在软件光栅（llvmpipe）上很贵；交互时打开看效果，
+    // 出图验收用 --capture-ssr 的预设。数值默认对齐 SsrConfig 的推荐值。
+    bool  ssr_on_ = false;
+    float ssr_res_scale_ = 0.5f;
+    float ssr_start_level_ = 2.0f;
+    float ssr_max_steps_ = 32.0f;
+    float ssr_thickness_ = 0.6f;
+    float ssr_rough_cutoff_ = 0.4f;
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）
     float smaa_threshold_ = 0.1f;     // SMAA luma 边缘阈值（越小越敏感）
     jpov::Ui ui_;

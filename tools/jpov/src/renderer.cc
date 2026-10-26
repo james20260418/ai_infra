@@ -606,6 +606,7 @@ Renderer::~Renderer() {
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
+    ssr_renderer_.Finalize();
     smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -1474,6 +1475,7 @@ void Renderer::Init(
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
+    ssr_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
@@ -1827,6 +1829,38 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // ---- 屏幕空间反射（SSR）----
+        // 位置：**不透明 3D 之后、半透明/雾之前**。理由是硬的：
+        //   * 它要读"已画完的不透明颜色与深度"；
+        //   * 半透明物体不写场景深度、还会污染颜色，绝不能进反射源。
+        // 只在 HDR 路径跑（需要浮点颜色 + MRT 场景深度）。
+        if (cmds.ssr.has_value() && cmds.ssr->enabled) {
+            CHECK(use_hdr) << "ssr 需要 tone_mapping=true（HDR 路径，"
+                              "反射要在线性 HDR 域叠、且依赖 MRT 场景深度）";
+            float ssr_proj[16];
+            float ssr_view[16];
+            Primitives3DRenderer::BuildProjView(cmds.camera, fbo_3d_w, fbo_3d_h,
+                                               ssr_proj, ssr_view);
+            // 天空色只在"本帧真的画了天空"时有效（同 elevation_fog 的口径）。
+            const unsigned int ssr_sky_tex = cmds.sky.has_value() ? sky_tex_ : 0;
+            ssr_renderer_.Draw(cmds, *cmds.ssr, mesh_mgr_, texture_mgr_, cmds.camera,
+                              ssr_proj, ssr_view,
+                              color_tex_hdr_,        // 命中色
+                              scene_depth_tex_hdr_,  // MRT#1 R32F：march / Hi-Z
+                              depth_tex_hdr_,        // 硬件深度：属性 pass 做遮挡测试
+                              ssr_sky_tex, fbo_3d_w, fbo_3d_h);
+            if (ssr_renderer_.HasResult()) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                // 只写颜色附件 0：MRT#1（场景深度）本 pass 不碰，写它内容会未定义。
+                const GLenum ssr_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, ssr_draw_buf);
+                ssr_renderer_.Composite(fbo_3d_w, fbo_3d_h);
+                const GLenum ssr_mrt_bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, ssr_mrt_bufs);
+            }
+        }
 
         // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
