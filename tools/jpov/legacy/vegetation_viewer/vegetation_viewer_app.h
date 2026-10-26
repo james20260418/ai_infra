@@ -61,7 +61,7 @@ inline constexpr float kGridSpacing = 2.2f;
 inline std::string ResolvePlantPath(const std::string& file_name) {
     const std::string candidates[] = {
         std::string("plants/") + file_name,
-        std::string("tools/jpov/tools/vegetation/samples/") + file_name,
+        std::string("tools/jpov/legacy/vegetation/samples/") + file_name,
     };
     for (const std::string& c : candidates) {
         const std::string resolved = jpov::ResolveResourcePath(c);

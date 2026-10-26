@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build_jpov_vegetation_viewer.sh — 编译 jpov_vegetation_viewer（JPOV 植被查看器）
+# 【已归档 · 不再可运行】build_jpov_vegetation_viewer.sh
 #
-# 用法：
+# 这是 vege v1 查看器的构建脚本。2026-10-26 起 v1 查看器整体移入 jpov/legacy
+# （bazel target `//tools/jpov:jpov_vegetation_viewer` 已从 BUILD 删除），本脚本
+# 保留只为记录当时的构建/分发步骤（字体、范本 glb 的摆放），**不要再指望它跑通**。
+# 想看当前（v2）查看器：`tools/jpov/build_jpov_vegetation_v2_viewer.sh`。
+#
+# 历史用法：
 #   ./tools/jpov/build_jpov_vegetation_viewer.sh
 #
 # 效果：
@@ -49,15 +54,15 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 
 # 拷贝柳树范本 GLB 到 exe 旁 plants/（demo 默认植物路径 "plants/willow_small_tex.glb"）。
-# 范本由植被工具（tools/jpov/tools/vegetation/，PR #175）Blender/Sapling 产出，
+# 范本由植被工具（tools/jpov/legacy/vegetation/，PR #175）Blender/Sapling 产出，
 # 已入库；这里只是搬到分发态 exe 旁。
 echo ""
 echo "==> 4. 拷贝柳树范本 GLB 到 output/jpov_vegetation_viewer/plants/"
 mkdir -p "$OUTPUT_DIR/plants"
-cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_small_tex.glb" \
+cp -v "$PROJECT_DIR/tools/jpov/legacy/vegetation/samples/willow_small_tex.glb" \
       "$OUTPUT_DIR/plants/willow_small_tex.glb"
 # 带风数据的柳树范本（关节表 + loc6），供 --capture-wind / 风动观察。
-cp -v "$PROJECT_DIR/tools/jpov/tools/vegetation/samples/willow_wind_tex.glb" \
+cp -v "$PROJECT_DIR/tools/jpov/legacy/vegetation/samples/willow_wind_tex.glb" \
       "$OUTPUT_DIR/plants/willow_wind_tex.glb"
 ls -lh "$OUTPUT_DIR/plants/"
 

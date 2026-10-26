@@ -700,14 +700,18 @@ struct SmaaConfig {
 // 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
 // docs/jpov_vegetation_wind_design.md。
 //
-// ── 本版范围（重要）──
-//   **只接 object3d 路径**（DrawObject3D / DrawGltfObject）。instanced / 蒙皮路径**本版不动**。
+// ── 范围（重要）──
+//   接两条路径：**object3d**（DrawObject3D / DrawGltfObject）与**静态实例**
+//   （DrawInstancedObject，逐实例吹倒比例见 InstanceState::blow_away_ratio）。
+//   **蒙皮路径本版不动**。
 //   只有带风数据的 mesh（`MeshData.flags` 含 `kWind`）会被位移；以 **mesh 的关节表是否非空**
 //   为闸（`uWindJointCount>0`）—— 无表 mesh（如地面）完全不受影响。
 //
 // ── 数据（三处，各管一段）──
 //   · **逐顶点 loc6 = vec2(joint_id, phase)**（mesh 带 kWind 时；由 TEXCOORD_1 读入）：
-//       joint_id = 该顶点所属关节在关节表中的下标；phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//       joint_id = 该顶点所属**唯一**关节在关节表中的下标（烘焙期按拓扑定，不靠空间推断）；
+//       phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//       路径长 L（吹倒权重）由 VS 沿关节链现算，不占顶点属性。
 //   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
 //       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
 //   · **本物体自己的风参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
@@ -715,7 +719,7 @@ struct SmaaConfig {
 //       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
 //
 // ── 位移公式（枢轴链 + 链外平动湍流）──
-//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
+//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死；单关节，无混合）：
 //     q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)     // 位置：完整继承
 //     A_j = θ_j + (1 − soft_j)·A_parent                         // 朝向：按 (1−soft) 打折
 //     p'  = q_own + R(A_own)·(p − pivot_own)
@@ -739,7 +743,7 @@ struct WindCommand {
     float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
     // ---- 吹歪（blow-away，曲线位移）----
     // 位移 = blow_ratio × L × (L / blow_ref_length)^(exponent−1)，沿**水平风向**。
-    //   L = 该顶点到根的父链总长度（MeshManager 载入期算好，loc6.z）。
+    //   L = 该顶点到根的父链总长度（VS 沿关节表父链现算，不占顶点属性）。
     //   与枢轴风/湍流**独立叠加**：枢轴风保长、吹歪是纯平移（像整株被风压弯）。
     //   blow_ratio 的量纲随指数变（1/m^(n−1)），只是观感参数，不是物理量。
     //   0 = 关闭（默认），非零时才有 uniform 上传开销。
@@ -1801,7 +1805,7 @@ struct InstanceState {
     //   继承模型干扰（软枝不跟风）；平移与 soft 无关。
     //   本实例每个顶点的位移：
     //     d = blow_away_ratio × L × (L/H)^(n−1)        // n = WindCommand::blow_away_exponent
-    //   L = 该顶点到 root 的父链总长度（载入期算好并在网格上平滑），
+    //   L = 该顶点到 root 的父链总长度（VS 现算，静止几何 ⇒ 沿枝单调），
     //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
     //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
     float blow_away_ratio = 0.0f;

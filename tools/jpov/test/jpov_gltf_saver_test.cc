@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -393,8 +394,8 @@ TEST(GltfSaverTest, WrittenInverseBindAccessorCountMatchesBones) {
 
 // ==================== 4. 负面 ====================
 
-// 风（kWind）与蒙皮（kJoints）互斥：两者抢 loc3（aWindW vs aJoint），
-// 同时声明会让「权重绑到哪个属性」取决于绑定顺序 —— 静默错位，必须当场崩。
+// 风（kWind）与蒙皮（kJoints）互斥：两条特性走两套互不组合的 VS，
+// 同时声明会让「哪条路径画它，另一半特性就静默消失」——必须当场崩。
 TEST(GltfSaverTest, WindAndSkinFlagsAreMutuallyExclusive) {
     MeshData m = MakeQuadSkinnedMesh();
     MeshData::WindJoint j{};
@@ -420,6 +421,37 @@ TEST(GltfSaverTest, WindWithoutSkinValidates) {
         static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints) |
         static_cast<uint8_t>(MeshVertexFlags::kWind));
     m.Validate();   // 不崩即通过
+}
+
+// 关节表内容：引擎会拿它算数（载入期 cum 链长；VS 逐 texelFetch），非法值必须当场崩。
+// 三条各挑一个"看起来能过、跑起来静默出错"的配方。
+TEST(GltfSaverTest, WindJointParentOutOfRangeDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = 3.0f;   // 表里只有 1 个关节，parent 指向不存在的下标
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "parent");
+}
+
+TEST(GltfSaverTest, WindJointNonFinitePivotDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = -1.0f;
+    j.pivot[1] = std::numeric_limits<float>::quiet_NaN();   // NaN 会污染整条链
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "pivot");
 }
 
 TEST(GltfSaverTest, EmptyAssetCrashes) {

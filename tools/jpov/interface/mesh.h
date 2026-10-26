@@ -30,6 +30,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <glog/logging.h>
@@ -65,6 +66,17 @@ enum class MeshVertexFlags : uint8_t {
 // 用法：HasFlag(mesh.flags, MeshVertexFlags::kNormal)
 inline bool MeshHasFlag(MeshVertexFlags flags, MeshVertexFlags flag) {
     return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(flag)) != 0;
+}
+
+// 有限性判据（**刻意不用 <cmath> 的 std::isfinite**）。
+//
+// 为什么：mesh.h 被大量 TU 间接包含。一旦这里 include <cmath>，MinGW 上 <math.h>
+// 会在 TU 定义 _USE_MATH_DEFINES 之前就被锁死（include guard），随后 math_util.h /
+// render_command.h 里的 M_PI/M_PI_2 全部“未定义” —— 2026-10-26 的 Windows CI 就是这么挂的。
+// <limits> 不拉 <math.h>，且判据不依赖浮点运算（-ffast-math 下 `v-v==0` 会被优化掉）。
+inline bool WindScalarIsFinite(float v) {
+    return v == v && v != std::numeric_limits<float>::infinity() &&
+           v != -std::numeric_limits<float>::infinity();
 }
 
 // ==================== CPU 侧网格数据 ====================
@@ -274,18 +286,48 @@ inline void MeshData::Validate() const {
         CHECK(wind_link.empty())
             << "MeshData::Validate: 未声明 kWind 但 wind_link 非空";
     }
+    // 关节表内容：**引擎会拿它算数**（载入期算 cum 链长、VS 逐 texelFetch），
+    // 所以非法值必须在注册时就崩，而不是渲染出畸形结果。
+    //   · pivot 必须是有限数（NaN/Inf 会污染整条链的 qpos 和 L）；
+    //   · parent 必须是 -1 或表内下标（越界会让 VS 的链走进垃圾 texel）；
+    //   · level ≥ 0（θ 的增益按 level 分档，负数等于反向拧）、soft ∈ [0,1]。
+    // phase 只查有限性：引擎对它只做 floor 取圈，任何有限值都合法。
+    for (size_t i = 0; i < wind_joints.size(); ++i) {
+        const WindJoint& j = wind_joints[i];
+        for (int a = 0; a < 3; ++a) {
+            CHECK(WindScalarIsFinite(j.pivot[a]))
+                << "MeshData::Validate: wind_joints[" << i << "].pivot 非有限数";
+        }
+        // parent 用 float 存（资产 7 float/关节）但语义是下标：先按范围兜住（NaN/±Inf
+        // 在这里必然为假），再确认是整数值 —— 否则“3.7 这种值”在 VS 里会四舍五入到 4。
+        CHECK(j.parent >= -1.0f && j.parent < static_cast<float>(wind_joints.size()))
+            << "MeshData::Validate: wind_joints[" << i << "].parent = " << j.parent
+            << " 越出关节表（合法值：-1 或 [0, " << wind_joints.size() << ")）";
+        const int parent = static_cast<int>(j.parent);   // 已被上式夹进 [-1, N) ⇒ 转换安全
+        CHECK(j.parent == static_cast<float>(parent))
+            << "MeshData::Validate: wind_joints[" << i << "].parent 必须是整数（-1 = 根），当前 "
+            << j.parent;
+        CHECK(WindScalarIsFinite(j.level) && j.level >= 0.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].level 必须是非负有限数";
+        CHECK(WindScalarIsFinite(j.phase))
+            << "MeshData::Validate: wind_joints[" << i << "].phase 非有限数";
+        CHECK(WindScalarIsFinite(j.soft) && j.soft >= 0.0f && j.soft <= 1.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].soft 必须落在 [0,1]";
+    }
+
     // kRelax 与 kWind **互斥**：二者同占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
     CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
             MeshHasFlag(flags, MeshVertexFlags::kWind)))
         << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
-    // kWind 与 kJoints **互斥**：两者抢同一组顶点属性槽（loc3：蒙皮 `aJoint` vs
-    // 风的两关节权重 `aWindW`）。VAO 里只能绑一个，绑定顺序错了就是「权静默错位」——
-    // 看到的是模型变形怪异，而不是报错。这一条以前只写在 mesh_manager.cc 的注释里
-    // （「植被 mesh 不会被蒙皮路径绘制」），属于靠约定守着；放到 Validate 才是硬约束。
+    // kWind 与 kJoints **互斥**：两条特性走的是两套互不组合的顶点着色器
+    // （风 VS 只做关节链刚体变换、蒙皮 VS 只做骨骼查表），一个 mesh 同时声明等于
+    // 「哪条路径画它，另一半特性就静默消失」——看到的是变形怪异而不是报错。
+    // （2026-10-26 前这里是 loc3 属性槽冲突；顶点风改成 (joint_id, phase) 后 loc3 已释放，
+    //   互斥的理由变成「渲染路径只能选一条」，约束本身保留。）
     CHECK(!(joints_declared && MeshHasFlag(flags, MeshVertexFlags::kWind)))
-        << "MeshData::Validate: kWind 与 kJoints 互斥（同占 loc3：aWindW vs aJoint）";
+        << "MeshData::Validate: kWind 与 kJoints 互斥（风 VS 与蒙皮 VS 不组合）";
     if (joints_declared) {
         // 5. 骨骼 flag 时 joint_indices / joint_weights 必须成对存在且对齐
         CHECK_EQ(joint_indices.size(), vcount)

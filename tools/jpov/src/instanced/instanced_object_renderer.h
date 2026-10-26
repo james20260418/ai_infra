@@ -69,26 +69,23 @@ public:
     // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
     //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
-    // ---- 植被风（实例路径）：枢轴链 + 逐关节吹倒 + 2 关节混合 ----
-    //   顶点属性：
-    //     loc6 vec4 = (j0, phase, L, j1)   j0/j1 = 空间最近的**两个**关节，L = 逐顶点路径长（备用）
-    //     loc3 vec2 = (w0, w1)             两关节混合权重（按 1/距离 归一化）
-    //   每个关节各求一次「链变换（pivot 摇摆 + 吹倒）」，顶点在两次结果间线性混合。
-    //   为什么必须混合：joint 的 lev/soft 是**离散**的，两个相邻顶点被分到不同关节时
-    //   变换不连续 → 撕裂。按距离加权后接缝处是连续过渡（就是蒙皮的标准做法）。
+    // ---- 植被风（实例路径）：单关节刚性链 + 逐实例吹倒 ----
+    //   顶点属性：loc6 vec2 = (joint_id, phase)。
+    //     joint_id = 该顶点所属刚性段在关节表里的下标（烘焙期按拓扑定，唯一且无歧义，
+    //     同一枝同一环共享 ⇒ 环内不会被切开）；phase = 链外湍流的逐顶点连续相位。
+    //   路径长 L（吹倒权重）= 由关节链在 VS 里现算，不占顶点属性。
     //   ⚠️ 吹倒是**逐关节**的 DC 角度（dθ = blow·ds/H·(L/H)^(n−2)），整段刚性、
-    //      不产生剪切；旧版逐顶点平移/旋转会把细长三角形拉成薄片。
+    //      不产生剪切；逐顶点平移/旋转会把细长三角形拉成薄片。
     inline static const std::string kWindBlowGlsl = R"glsl(
-layout(location = 3) in vec2 aWindW;            // (w0, w1)
 layout(location = 11) in float aInstBlowAway;   // 逐实例：吹倒比例（0 = 不吹）
-layout(location = 6) in vec4 aFlex;             // (j0, phase, L, j1)
+layout(location = 6) in vec2 aFlex;             // (joint_id, phase)
 uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform vec3  uWindDirection;    // 世界系（单位向量）
 uniform int   uWindJointCount;
-uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
@@ -107,10 +104,11 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
 vec3 JpovWindDirModel(mat4 model, vec3 dir_world) {
     return normalize(mat3(inverse(model)) * dir_world);
 }
-// 单个关节的完整变换（pivot 链 + 逐关节吹倒 + 湍流）。
-//   输入的是**原始**顶点 p（两个关节各算一次，再混合）。
+// 单个关节的完整变换（pivot 链 + 湍流）。
+//   输入的是**原始**顶点 p；path_len（出参）= 顶点到根的静止链长（米）= 关节表预存的
+//   逐关节 cum + |p − pivot_own|，吹倒位移按它加权（越高越弯）。
 vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
-                    vec3 axis, vec3 wdir, vec3 ref_n) {
+                    vec3 axis, vec3 wdir, vec3 ref_n, out float path_len) {
     int chain[kMaxWindChain];
     int nc = 0;
     int jj = j0;
@@ -152,6 +150,8 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
     }
     vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
     vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+    // 到根的链长 = 关节表里预存的 cum（逐关节量）+ 顶点到自己枢轴的距离。
+    path_len = own1.w + length(p - own0.xyz);
     p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
     wn = WindRotVecAxis(wn, axis, A);
 
@@ -183,31 +183,22 @@ vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
     vec3 axis = (al > 1e-5) ? JpovWindDirModel(model, axis_w / al)
                             : JpovWindDirModel(model, vec3(1.0, 0.0, 0.0));
     int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-    int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
-    float w1 = clamp(aWindW.y, 0.0, 1.0);
     vec3 hw = vec3(wdir_w.x, 0.0, wdir_w.z);
     hw = (length(hw) > 1.0e-5) ? normalize(hw) : vec3(1.0, 0.0, 0.0);
     vec3 hdir = JpovWindDirModel(model, hw);
-    vec3 n0 = wn;
-    vec3 p0 = JpovApplyJoint(j0, p, n0, model, axis, wdir, vec3(0.0, 1.0, 0.0));
-    if (j1 == j0 || w1 <= 0.0) {
-        wn = n0;
-        return p0;
-    }
-    vec3 n1 = wn;
-    vec3 p1 = JpovApplyJoint(j1, p, n1, model, axis, wdir, vec3(0.0, 1.0, 0.0));
-    float w0 = 1.0 - w1;
-    wn = normalize(n0 * w0 + n1 * w1);
-    vec3 pres = p0 * w0 + p1 * w1;
+    float path_len = 0.0;
+    vec3 p0 = JpovApplyJoint(j0, p, wn, model, axis, wdir, vec3(0.0, 1.0, 0.0),
+                             path_len);
     // 吹倒：**平移**（与 soft 无关，不存在关节继承问题）。
-    //   用载入期平滑过的逐顶点 L（aFlex.z）⇒ 空间连续，不会在关节处出现台阶。
+    //   path_len = 关节表预存的 cum + 顶点到自己枢轴的距离（都只依赖静止几何）
+    //   ⇒ 沿枝单调增加，不会在关节处跳变。
     //   量级：d = ratio · L · (L/H)^(n−1)（梢部 = ratio·H）。
-    if (aInstBlowAway > 0.0 && uBlowAwayRefLength > 1.0e-6 && aFlex.z > 0.0) {
-        float t = clamp(aFlex.z / uBlowAwayRefLength, 0.0, 4.0);
-        pres += hdir * (aInstBlowAway * aFlex.z *
-                        pow(max(t, 1.0e-6), uBlowAwayExponent - 1.0));
+    if (aInstBlowAway > 0.0 && uBlowAwayRefLength > 1.0e-6 && path_len > 0.0) {
+        float t = clamp(path_len / uBlowAwayRefLength, 0.0, 4.0);
+        p0 += hdir * (aInstBlowAway * path_len *
+                      pow(max(t, 1.0e-6), uBlowAwayExponent - 1.0));
     }
-    return pres;
+    return p0;
 }
 )glsl";
 

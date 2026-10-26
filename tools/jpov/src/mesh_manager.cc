@@ -10,7 +10,6 @@
 #include <cmath>
 #include <vector>
 
-#include "tools/jpov/interface/wind_deform.h"
 #include "tools/jpov/src/mesh_manager.h"
 
 // GL 头文件必须最先 include（在 MinGW #define 宏替换之前），否则 GL 常量
@@ -78,8 +77,27 @@ typedef long GLsizeiptr;
 
 namespace jpov {
 
+namespace {
 
+// 关节表在资产里用 7 个 float 存（末位 parent 是 float），这里解码回下标。
+int ParentOfJoint(const MeshData::WindJoint& j) {
+    return static_cast<int>(std::lround(j.parent));
+}
 
+// 两枢轴之间的距离（米）。
+float PivotDistance(const float a[3], const float b[3]) {
+    const float dx = a[0] - b[0];
+    const float dy = a[1] - b[1];
+    const float dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// 父链最多走多少**段**。三份 VS 的 `kMaxWindChain = 16` 是**节点**数（含自己），
+// 即最多 15 段；这里按段数对齐 —— 超过上限的段 VS 本来就不参与变换，链长若算进去
+// 就会让吹倒位移和实际旋转的链不一致。
+constexpr int kMaxChainSegments = 15;
+
+}  // namespace
 
 MeshManager::~MeshManager() {
     for (auto& kv : meshes_) {
@@ -265,158 +283,49 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec2f), reinterpret_cast<const void*>(0));
     }
     if (MeshHasFlag(data.flags, MeshVertexFlags::kWind)) {
-        // 3 float/顶点：(joint_id, phase, L)。L 在载入期算好并平滑（见 wind_deform.h）。
-        // ⚠️ stride=12、size=3：object3d 的 VS 仍声明 `vec2 aFlex` —— GL 只取前两个分量，
-        //    完全兼容（改动只在「缓冲变大 4 字节/顶点」）。
-        // 逐顶点：最近的两个关节 + 1/距离归一化权重。
-        //   joint 的 lev/soft 是离散量；硬分配会让相邻顶点分属不同关节 → 变换不连续。
-        //   两个关节按距离加权（LBS）后接缝处连续，且不需要改资产格式。
-        const size_t vn = data.positions.size();
-        const size_t jn = data.wind_joints.size();
-        std::vector<float> wind_data(vn * 4, 0.0f);
-        std::vector<float> wind_w(vn * 2, 0.0f);
-        std::vector<int> vj0(vn, -1);
-        std::vector<int> vj1(vn, -1);
-        std::vector<float> vw0(vn, 0.0f);
-        std::vector<float> vw1(vn, 0.0f);
-        const std::vector<float> path_len = BuildWindPathLengths(data);
-        for (size_t i = 0; i < vn; ++i) {
-            const Vec3f& p = data.positions[i];
-            float d0 = 1e18f;
-            float d1 = 1e18f;
-            int b0 = -1;
-            int b1 = -1;
-            for (size_t j = 0; j < jn; ++j) {
-                const MeshData::WindJoint& wj = data.wind_joints[j];
-                const float dx = p.x() - wj.pivot[0];
-                const float dy = p.y() - wj.pivot[1];
-                const float dz = p.z() - wj.pivot[2];
-                const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (d < d0) {
-                    d1 = d0;
-                    b1 = b0;
-                    d0 = d;
-                    b0 = static_cast<int>(j);
-                } else if (d < d1) {
-                    d1 = d;
-                    b1 = static_cast<int>(j);
-                }
-            }
-            if (b0 < 0) {
-                continue;
-            }
-            if (b1 < 0) {
-                b1 = b0;
-                d1 = d0;
-            }
-            const float inv0 = 1.0f / (d0 + 1.0e-4f);
-            const float inv1 = 1.0f / (d1 + 1.0e-4f);
-            const float wsum = inv0 + inv1;
-            vj0[i] = b0;
-            vj1[i] = b1;
-            vw0[i] = inv0 / wsum;
-            vw1[i] = inv1 / wsum;
-        }
-
-        // 近重合顶点（1~2mm 的 UV 缝/硬边）必须共享同一套关节权重：
-        //   否则 1.5mm 的缝会在吹倒后拉成几厘米的薄片（willow 实测放大 35~83 倍）。
-        //   用空间哈希 + 5mm 邻域把「肉眼同一个点」的顶点归一。
-        {
-            constexpr float kWeld = 0.005f;
-            constexpr float kCell = 0.01f;
-            std::map<std::array<int, 3>, std::vector<uint32_t>> buckets;
-            std::vector<uint32_t> rep(vn);
-            for (size_t i = 0; i < vn; ++i) {
-                const Vec3f& p = data.positions[i];
-                const std::array<int, 3> base{
-                    static_cast<int>(std::floor(p.x() / kCell)),
-                    static_cast<int>(std::floor(p.y() / kCell)),
-                    static_cast<int>(std::floor(p.z() / kCell))};
-                uint32_t found = static_cast<uint32_t>(i);
-                bool merged = false;
-                for (int dx = -1; dx <= 1 && !merged; ++dx) {
-                    for (int dy = -1; dy <= 1 && !merged; ++dy) {
-                        for (int dz = -1; dz <= 1 && !merged; ++dz) {
-                            const auto it = buckets.find(
-                                {base[0] + dx, base[1] + dy, base[2] + dz});
-                            if (it == buckets.end()) {
-                                continue;
-                            }
-                            for (uint32_t cand : it->second) {
-                                const Vec3f& q = data.positions[cand];
-                                const float ddx = p.x() - q.x();
-                                const float ddy = p.y() - q.y();
-                                const float ddz = p.z() - q.z();
-                                if (ddx * ddx + ddy * ddy + ddz * ddz <= kWeld * kWeld) {
-                                    found = cand;
-                                    merged = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                rep[i] = found;
-                if (!merged) {
-                    buckets[base].push_back(static_cast<uint32_t>(i));
-                }
-            }
-            for (size_t i = 0; i < vn; ++i) {
-                const uint32_t r = rep[i];
-                if (r != i && vj0[r] >= 0) {
-                    vj0[i] = vj0[r];
-                    vj1[i] = vj1[r];
-                    vw0[i] = vw0[r];
-                    vw1[i] = vw1[r];
-                }
-            }
-        }
-
-        for (size_t i = 0; i < vn; ++i) {
-            if (vj0[i] < 0) {
-                continue;
-            }
-            wind_data[i * 4 + 0] = static_cast<float>(vj0[i]);  // j0（与权重同源）
-            wind_data[i * 4 + 1] = data.wind_link[i].y();       // phase
-            wind_data[i * 4 + 2] = path_len[i];                 // L（备用）
-            wind_data[i * 4 + 3] = static_cast<float>(vj1[i]);  // j1
-            wind_w[i * 2 + 0] = vw0[i];
-            wind_w[i * 2 + 1] = vw1[i];
-        }
+        // 2 float/顶点：(joint_id, phase)，与 MeshData::wind_link 逐分量一一对应。
+        // 载入期**不做任何推断**：joint_id 由烘焙端按拓扑定死（同一枝同一环共享一个关节，
+        // 分叉处的连续过渡靠"环共享关节"而不是靠空间插值）。路径长 L（吹倒权重）由 VS
+        // 沿关节链现算，不占顶点属性。
+        CHECK_EQ(data.wind_link.size(), data.positions.size())
+            << "MeshManager: kWind 但 wind_link 顶点数不符（MeshData::Validate 应已拦下）";
         glGenBuffers(1, &mesh.vbo_wind);
         CHECK_NE(mesh.vbo_wind, 0u);
         glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind);
         glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(wind_data.size() * sizeof(float)),
-                     wind_data.data(), GL_STATIC_DRAW);
+                     static_cast<GLsizeiptr>(data.wind_link.size() * sizeof(Vec2f)),
+                     data.wind_link.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE,
-                              sizeof(float) * 4, reinterpret_cast<const void*>(0));
-
-        // 两关节混合权重（loc3，vec2）。⚠️ 蒙皮路径把 loc3 用作 aJoint，
-        //   但植被 mesh 不会被蒙皮路径绘制（静态实例专属），同一 VAO 不会同时走两条路径。
-        glGenBuffers(1, &mesh.vbo_wind_w);
-        CHECK_NE(mesh.vbo_wind_w, 0u);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind_w);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(wind_w.size() * sizeof(float)),
-                     wind_w.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE,
-                              sizeof(float) * 2, reinterpret_cast<const void*>(0));
+        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
+                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
     }
 
     // ---- 植被风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
     //   同树全部 primitive 共享；VS 用 texelFetch 按 joint_id 取。
     //   texel(2j)   = (pivot.xyz, parent)
-    //   texel(2j+1) = (level, phase, soft, 0)
+    //   texel(2j+1) = (level, phase, soft, 到根的链长)
     if (!data.wind_joints.empty()) {
         const size_t n = data.wind_joints.size();
         // 纹理宽 = 2n；超过 GL_MAX_TEXTURE_SIZE（常见 16384）会变成不完整纹理，
         // texelFetch 读到垃圾（静默错）——宁可此刻崩，不静默出错。
         CHECK_LE(2 * n, 16384u) << "wind_joint 表过大（2N 超纹理宽上限）: N=" << n;
         std::vector<float> tex(8 * n);
+        // 每个关节「到根的链长」（米）：cum[k] = cum[parent] + |pivot_k − pivot_parent|。
+        // 吹倒位移需要 L = cum[own] + |p − pivot_own|。cum 是**逐关节**的量，在表里算一次
+        // 就够（VS 只多一次 length()）；让每个顶点沿父链重算一遍等于每个 pass 每个顶点
+        // 多次 sqrt。texel(2j+1) 的第 4 分量原本空着（写 0），正好放它。
         for (size_t k = 0; k < n; ++k) {
+            float acc = 0.0f;
+            int cur = static_cast<int>(k);
+            for (int step = 0; step < kMaxChainSegments; ++step) {
+                const int par = ParentOfJoint(data.wind_joints[static_cast<size_t>(cur)]);
+                if (par < 0 || par >= static_cast<int>(n) || par == cur) {
+                    break;
+                }
+                acc += PivotDistance(data.wind_joints[static_cast<size_t>(cur)].pivot,
+                                     data.wind_joints[static_cast<size_t>(par)].pivot);
+                cur = par;
+            }
             const MeshData::WindJoint& wj = data.wind_joints[k];
             tex[8 * k + 0] = wj.pivot[0];
             tex[8 * k + 1] = wj.pivot[1];
@@ -425,7 +334,7 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
             tex[8 * k + 4] = wj.level;
             tex[8 * k + 5] = wj.phase;
             tex[8 * k + 6] = wj.soft;
-            tex[8 * k + 7] = 0.0f;
+            tex[8 * k + 7] = acc;   // 到根的链长（吹倒位移的 L 基数）
         }
         glGenTextures(1, &mesh.wind_joint_tex);
         CHECK_NE(mesh.wind_joint_tex, 0u);
@@ -467,9 +376,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete。
-    // 属性 VBO 最多 9 个（pos/normal/uv/joint/weight/tangent/relax/wind/wind_w）
-    // + 1 个 EBO = 10；relax 与 wind 互斥，实际 ≤9。
-    static constexpr int kMaxBuffers = 10;
+    // 属性 VBO 最多 8 个（pos/normal/uv/joint/weight/tangent/relax/wind）
+    // + 1 个 EBO = 9；relax 与 wind 互斥，实际 ≤8。
+    static constexpr int kMaxBuffers = 9;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
@@ -495,9 +404,6 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     }
     if (mesh->vbo_wind) {
         buffers[n++] = mesh->vbo_wind;
-    }
-    if (mesh->vbo_wind_w) {
-        buffers[n++] = mesh->vbo_wind_w;
     }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;

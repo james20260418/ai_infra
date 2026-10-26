@@ -1,6 +1,11 @@
-# JPOV 植被工具（Vegetation Tool）
+# JPOV 植被工具（Vegetation Tool）—— 【已归档 · v1】
 
-> 位置：`tools/jpov/tools/vegetation/`
+> 位置：`tools/jpov/legacy/vegetation/`
+>
+> ⚠️ **2026-10-26 起整份归档**：v1 生成链被 `tools/jpov/tools/vegetation_tool_v2/` 取代，
+> 这里不参与构建、不接 CI。下游（渲染）也不再为 v1 的「关节归属靠推断」做任何补偿。
+> 目录内的路径写法保留归档时的样子（`tools/jpov/tools/vegetation/...`），照抄跑不通。
+> 归档原因见 `../README.md`。
 >
 > **离线资产生成工具**：用外部参数化生成器出「形状」+ CC0 照片贴图出「外观」，
 > 产出一棵**带纹理的 GLB**（枝干 + 叶卡），供 JPOV 直接加载。
