@@ -128,7 +128,6 @@ layout(location = 0) out vec4 FragColor;   // rgb = 反射色（已乘权重）,
 
 uniform sampler2D uSceneDepth;   // 0 场景深度（gl_FragCoord.z，R32F，NEAREST）
 uniform sampler2D uSceneColor;   // 1 HDR 颜色（不透明 3D 已画完）
-uniform sampler2D uSkyColor;     // 2 大气色天空（兜底）
 uniform sampler2D uAttr0;        // 3 (Nv.xy, roughness, metallic)
 uniform sampler2D uAttr1;        // 4 (F0.rgb, 1)
 uniform sampler2D uHiZ0;         // 5 全分辨率深度（= uSceneDepth）
@@ -150,8 +149,6 @@ uniform float uThicknessM;
 uniform float uMaxDistanceM;
 uniform float uRoughnessCutoff;
 uniform int   uFadeEdges;
-uniform int   uHasSky;           // 0 = 无天空，兜底色用 uSkyFallback
-uniform vec3  uSkyFallback;
 
 float DistFromNdc(float ndc) {
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
@@ -214,18 +211,23 @@ void main() {
     float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
     vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 
-    if (dot(R, N) <= 0.0 || R.z > 0.0) {
-        // 反射朝**相机后方**走（正对着你的镜子映的是你身后）—— 屏幕空间里根本
-        // 没有那块画面。这不是"实现缺陷"，是 SSR 的定义边界。
-        // 处理方式与"没命中"一致：用天空兜底（这就是真实引擎里反射探针占的位置）。
-        vec3 sky = (uHasSky != 0) ? texture(uSkyColor, uv0).rgb : uSkyFallback;
-        vec3 c = sky * fresnel;
-        FragColor = vec4(c, 1.0);
+    if (dot(R, N) <= 0.0) {
+        FragColor = vec4(0.0);      // 数值异常（不该发生）
         return;
     }
 
-    // 终点 → 屏幕线段，并裁到 [0,1]²
-    vec4 clipEnd = uProj * vec4(P + R * uMaxDistanceM, 1.0);
+    // ⚠️ **不要**按 `R.z > 0` 直接分支成"天空兜底"：
+    //    对一块平面来说 N 恒定、I 随位置连续变化 ⇒ R.z 在面上**连续穿过 0**，
+    //    硬分支会在面中间拉出一条笔直的分界线（渲出来是"一半有倒影一半没有"）。
+    //    正确做法：把射线长度裁到"近平面前"，照常 march —— 走不到就自然没命中，
+    //    由下面的"未命中兜底"处理，过渡是连续的。
+    float rayLen = uMaxDistanceM;
+    if (R.z > 0.0) {
+        // 朝相机方向：最多走到近平面前一点（再往后就没有画面了）
+        float t_near = (-uNear - P.z) / R.z;
+        rayLen = clamp(t_near, 0.0, uMaxDistanceM);
+    }
+    vec4 clipEnd = uProj * vec4(P + R * rayLen, 1.0);
     if (clipEnd.w <= 0.0) {
         FragColor = vec4(0.0);
         return;
@@ -243,6 +245,9 @@ void main() {
     vec2 p1 = (uv0 + d2 * tMax) * uResolution;
     vec2 seg = p1 - p0;
     float segLen = length(seg);
+    // 线段太短（射线几乎立刻离开屏幕/近平面前就没了）⇒ 干脆不叠反射。
+    //   这里曾经用"天空色兜底"，结果正对相机的那一面变成一块**发白的平板**，
+    //   与相邻面形成硬边 —— 那正是"一半有倒影一半没有"的观感来源之一。
     if (segLen < 1.0) {
         FragColor = vec4(0.0);
         return;
@@ -250,7 +255,7 @@ void main() {
     vec2 dir = seg / segLen;
 
     // 1/d 沿线段线性 ⇒ 只需要两端的距离
-    float dEnd = -(P + R * (uMaxDistanceM * tMax)).z;
+    float dEnd = -(P + R * (rayLen * tMax)).z;
     dEnd = max(dEnd, 1.0e-2);
 
     bool hit = false;
@@ -305,14 +310,11 @@ void main() {
         hitUv = clamp((p0 + dir * segLen) / uResolution, vec2(0.0), vec2(1.0));
     }
 
-    vec3 refl;
-    if (hit) {
-        refl = texture(uSceneColor, hitUv).rgb;
-    } else if (uHasSky != 0) {
-        refl = texture(uSkyColor, hitUv).rgb;
-    } else {
-        refl = uSkyFallback;
-    }
+    // 未命中时的兜底 = **光线出口处的场景颜色**（而不是贴一张天空）。
+    //   理由：出口点就在光线最后走到的地方，它的内容与命中侧自然连续 ——
+    //   向上走的射线出口在天空区（拿到天空），贴着地面走的出口拿到地面。
+    //   换回"天空纹理"会在命中/未命中的分界上拉出一条明显的硬边。
+    vec3 refl = texture(uSceneColor, hitUv).rgb;
 
     // 权重（逐项可关，便于 A/B 定位"是谁让画面变脏"）
     float w = 1.0;

@@ -61,7 +61,6 @@ public:
     //                    它与 scene_depth_tex 是两张不同的纹理，**不能混用**：
     //                    颜色格式（R32F）不能当 GL_DEPTH_ATTACHMENT 挂。
     //                    传 0 = 不做深度测试（属性缓冲可能被遮挡物覆盖，仅供调试）。
-    //   sky_color_tex  : 大气色天空（未命中时的兜底色）；0 = 无天空。
     //   fbo_w/fbo_h    : 主 3D FBO 尺寸（属性 pass 与深度都在这个分辨率）。
     // Pre-condition: scene_color_tex / scene_depth_tex 均非 0；cfg 参数合法。
     // Pre-condition: 调用返回时**不绑定任何 FBO**（调用方自己恢复）。
@@ -69,8 +68,7 @@ public:
               MeshManager& mesh_mgr, TextureManager& texture_mgr,
               const Camera& cam, const float proj[16], const float view[16],
               unsigned int scene_color_tex, unsigned int scene_depth_tex,
-              unsigned int hw_depth_tex, unsigned int sky_color_tex,
-              int fbo_w, int fbo_h);
+              unsigned int hw_depth_tex, int fbo_w, int fbo_h);
 
     // 把反射加法合成进**当前已绑定的**目标 FBO。
     // 只采样反射缓冲（它不是目标的附件）⇒ 无反馈环；用 GL_ONE/GL_ONE 加性混合。
@@ -94,7 +92,7 @@ private:
     void BuildHiZ(unsigned int scene_depth_tex, int fbo_w, int fbo_h);
     void March(const SsrConfig& cfg, const Camera& cam, const float proj[16],
                unsigned int scene_color_tex, unsigned int scene_depth_tex,
-               unsigned int sky_color_tex, int fbo_w, int fbo_h);
+               int fbo_w, int fbo_h);
 
     unsigned int AttrProg();
     unsigned int AttrFullProg();

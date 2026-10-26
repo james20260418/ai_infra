@@ -40,7 +40,7 @@ struct SsrConfig {
     int hiz_start_level = 2;
 
     // 每条射线的最大步进次数（含粗层步与下探步）。命中质量与成本的主旋钮。
-    int max_steps = 32;
+    int max_steps = 48;
 
     // 命中后二分细化的次数（把命中位置收敛到亚像素）。0 = 直接用粗命中点（会抖）。
     int refine_steps = 4;

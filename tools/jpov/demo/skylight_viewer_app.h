@@ -352,7 +352,7 @@ private:
     bool  ssr_on_ = false;
     float ssr_res_scale_ = 0.5f;
     float ssr_start_level_ = 2.0f;
-    float ssr_max_steps_ = 32.0f;
+    float ssr_max_steps_ = 48.0f;
     float ssr_thickness_ = 0.6f;
     float ssr_rough_cutoff_ = 0.4f;
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）

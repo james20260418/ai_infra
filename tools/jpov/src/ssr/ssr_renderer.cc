@@ -38,10 +38,9 @@ namespace {
 // SSR 跑在独立 pass 里，此刻主链路不持有任何纹理绑定）。
 constexpr int kTexUnitSceneDepth = 0;
 constexpr int kTexUnitSceneColor = 1;
-constexpr int kTexUnitSkyColor = 2;
-constexpr int kTexUnitAttr0 = 3;
-constexpr int kTexUnitAttr1 = 4;
-constexpr int kTexUnitHiZBase = 5;      // 5..9 = level 0..4
+constexpr int kTexUnitAttr0 = 2;
+constexpr int kTexUnitAttr1 = 3;
+constexpr int kTexUnitHiZBase = 4;      // 4..8 = level 0..4
 constexpr int kTexUnitNormalMap = 0;    // 属性 pass 内部用（与上面不同 pass，可复用 0）
 constexpr int kTexUnitRefl = 0;         // 合成 pass
 
@@ -348,7 +347,7 @@ void SsrRenderer::BuildHiZ(unsigned int scene_depth_tex, int fbo_w, int fbo_h) {
 
 void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float proj[16],
                         unsigned int scene_color_tex, unsigned int scene_depth_tex,
-                        unsigned int sky_color_tex, int fbo_w, int fbo_h) {
+                        int fbo_w, int fbo_h) {
     const unsigned int prog = MarchProg();
     glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo_);
     glViewport(0, 0, refl_w_, refl_h_);
@@ -358,7 +357,6 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     glUseProgram(prog);
     BindTex(kTexUnitSceneDepth, scene_depth_tex);
     BindTex(kTexUnitSceneColor, scene_color_tex);
-    BindTex(kTexUnitSkyColor, sky_color_tex);
     BindTex(kTexUnitAttr0, attr_normal_tex_);
     BindTex(kTexUnitAttr1, attr_f0_tex_);
     BindTex(kTexUnitHiZBase + 0, scene_depth_tex);   // level 0 = 全分辨率场景深度
@@ -367,9 +365,9 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     BindTex(kTexUnitHiZBase + 3, hiz_tex_[2]);
     BindTex(kTexUnitHiZBase + 4, hiz_tex_[3]);
 
-    const char* names[] = {"uSceneDepth", "uSceneColor", "uSkyColor", "uAttr0",
+    const char* names[] = {"uSceneDepth", "uSceneColor", "uAttr0",
                            "uAttr1", "uHiZ0", "uHiZ1", "uHiZ2", "uHiZ3", "uHiZ4"};
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 9; ++i) {
         glUniform1i(shader_mgr_->GetUniform(prog, names[i]),
                     kTexUnitSceneDepth + i);
     }
@@ -391,10 +389,6 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     glUniform1f(shader_mgr_->GetUniform(prog, "uRoughnessCutoff"), cfg.roughness_cutoff);
     glUniform1i(shader_mgr_->GetUniform(prog, "uFadeEdges"),
                 cfg.fade_screen_edges ? 1 : 0);
-    glUniform1i(shader_mgr_->GetUniform(prog, "uHasSky"), sky_color_tex != 0 ? 1 : 0);
-    // 无天空时的兜底色：用相机的 ambient 推导不必要，给一个中性灰蓝并让调用方
-    // 通过关闭 SSR 来回避 —— 这里保持简单（有天空的帧不会走到这一支）。
-    glUniform3f(shader_mgr_->GetUniform(prog, "uSkyFallback"), 0.30f, 0.36f, 0.45f);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
@@ -410,8 +404,7 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
                        MeshManager& mesh_mgr, TextureManager& texture_mgr,
                        const Camera& cam, const float proj[16], const float view[16],
                        unsigned int scene_color_tex, unsigned int scene_depth_tex,
-                       unsigned int hw_depth_tex, unsigned int sky_color_tex,
-                       int fbo_w, int fbo_h) {
+                       unsigned int hw_depth_tex, int fbo_w, int fbo_h) {
     CHECK(shader_mgr_ != nullptr) << "SsrRenderer::Init 未调用";
     CHECK_NE(scene_color_tex, 0u);
     CHECK_NE(scene_depth_tex, 0u);
@@ -442,7 +435,7 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
     }
 
     // ③ 射线行进 → 反射缓冲
-    March(cfg, cam, proj, scene_color_tex, scene_depth_tex, sky_color_tex, fbo_w, fbo_h);
+    March(cfg, cam, proj, scene_color_tex, scene_depth_tex, fbo_w, fbo_h);
 }
 
 void SsrRenderer::Composite(int fbo_w, int fbo_h) {
