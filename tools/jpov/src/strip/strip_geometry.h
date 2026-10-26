@@ -136,23 +136,11 @@ inline constexpr int StripLayoutSlotOf(int samples) {
     return -1;
 }
 
-// 第 col 列的 u（沿长度，0..1 等分）。16 点档位仍可用下面的常量表（编译期算好），
-// 4 点档位现算 —— 只有 4 列，一次除法不值得一提。
+// 第 col 列的 u（沿长度，0..1 等分）。四档共用这一个函数：最多 32 列，
+// 逐列一次除法可以忽略（旧版给 16 点档存过一张常量表，四档化后没有意义，已删）。
 inline float StripColumnUAt(int col, const StripLayout& layout) {
     return static_cast<float>(col) / static_cast<float>(layout.quads);
 }
-
-// 每列的 u（沿长度方向）是**常量表**：编译期算好，别在每帧每列做一次除法。
-// （values: 0/15, 1/15, ..., 15/15）
-struct StripColumnU {
-    float v[kStripSampleCount];
-    constexpr StripColumnU() : v{} {
-        for (int i = 0; i < kStripSampleCount; ++i) {
-            v[i] = static_cast<float>(i) / static_cast<float>(kStripQuads);
-        }
-    }
-};
-inline constexpr StripColumnU kStripColumnU{};
 
 // 一个展开后的条带顶点：位置（世界空间）+ 纹理 uv。
 //
