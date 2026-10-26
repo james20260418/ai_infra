@@ -574,6 +574,14 @@ int RunCaptureCase(const std::string& out_dir) {
     shot("case_res1",  true,  1.0f, 2, 48);
     shot("case_nohiz", true,  0.5f, 0, 64);
 
+    // 俯视过渡序列：同一 SSR 参数，只把仰角往上抬。
+    // 用来检查"往俯视走的过程中倒影会不会先被拉长再消失"（那是 transition 期的假命中）。
+    for (int e : {30, 45, 58, 69}) {
+        app.view_.phi = static_cast<double>(e) * 3.14159265358979323846 / 180.0;
+        const std::string name = "tilt_" + std::to_string(e);
+        shot(name.c_str(), true, 0.5f, 2, 48);
+    }
+
     app.Finalize();
     return 0;
 }

@@ -235,7 +235,13 @@ void main() {
     //    物体的倒影会从一个地板像素往外糊成长锥（实测可达植株高度 3~4 倍）。
     //    朝相机的反射在屏幕空间里本来就无解（映的是眼睛背后），应该交给探针。
     //    用 smoothstep 而不是硬判断：R.z 穿过 0 时输出是连续的，不会拉出分界线。
-    float forwardness = smoothstep(0.0, 0.25, -R.z);
+    // 过渡带取 0.08~0.45：**近屏幕平行（|R.z| 很小）这一带直接不 march**。
+    //   * 那里射线几乎与像平面平行，会横扫一大片深度、判据退化成"处处命中" ——
+    //     就是俯视时那条假的拉长尖锥；
+    //   * 之前门开在 0（只在 R.z>0 才跳过），于是**俯视过渡过程**里这些像素还带着
+    //     0.1~0.3 的权重把尖锥渲出来 ⇒ 观感上"倒影先拉长、再缩短消失"。
+    //   把门抬到 0.08 后，这一段权重直接是 0，过渡就是纯粹的 SSR→探针淡出。
+    float forwardness = smoothstep(0.08, 0.45, -R.z);
     if (forwardness <= 0.0) {
         FragColor = vec4(probe * fresnel, 1.0);
         return;
@@ -356,10 +362,20 @@ layout(location = 0) out vec4 FragColor;
 
 uniform sampler2D uRefl;
 uniform vec2 uResolution;
+uniform vec2 uTexel;      // 1/反射缓冲分辨率（模糊半径 = 1 个反射纹素）
 
 void main() {
     vec2 uv = gl_FragCoord.xy / uResolution;
-    FragColor = vec4(texture(uRefl, uv).rgb, 0.0);
+    // 5-tap 十字小模糊（在**反射缓冲**的纹素尺度上，不是屏幕尺度）。
+    // 目的：柔化"倒影里的裂缝"—— 命中/未命中在相邻像素之间硬切换时，会出现一条条
+    //   断裂的缝；半分辨率上采样也会放大这些缝。顺带压掉锯齿。
+    // 代价：低粗糙度镜面会略微变糊（半径只有 1 个反射缓冲纹素）。
+    vec3 c = texture(uRefl, uv).rgb * 0.40;
+    c += texture(uRefl, uv + vec2(uTexel.x, 0.0)).rgb * 0.15;
+    c += texture(uRefl, uv - vec2(uTexel.x, 0.0)).rgb * 0.15;
+    c += texture(uRefl, uv + vec2(0.0, uTexel.y)).rgb * 0.15;
+    c += texture(uRefl, uv - vec2(0.0, uTexel.y)).rgb * 0.15;
+    FragColor = vec4(c, 0.0);
 }
 )glsl";
 

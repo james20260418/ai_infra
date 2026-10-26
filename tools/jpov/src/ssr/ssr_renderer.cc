@@ -465,6 +465,9 @@ void SsrRenderer::Composite(int fbo_w, int fbo_h) {
     glUniform1i(shader_mgr_->GetUniform(prog, "uRefl"), kTexUnitRefl);
     glUniform2f(shader_mgr_->GetUniform(prog, "uResolution"),
                 static_cast<float>(fbo_w), static_cast<float>(fbo_h));
+    glUniform2f(shader_mgr_->GetUniform(prog, "uTexel"),
+                refl_w_ > 0 ? 1.0f / static_cast<float>(refl_w_) : 0.0f,
+                refl_h_ > 0 ? 1.0f / static_cast<float>(refl_h_) : 0.0f);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
