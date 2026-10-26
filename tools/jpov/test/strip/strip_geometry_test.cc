@@ -164,6 +164,60 @@ TEST(StripGeometry, RejectsTooManyPoints) {
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "point_count");
 }
 
+TEST(StripGeometry, AcceptsSkyLightOnCoverage) {
+    // 天光消费：合法用法（覆盖集 + 合法参数）必须**不崩**。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.sky_light = jpov::StripSkyLight{};
+    jpov::ValidateStripBatch(batch);
+    SUCCEED();
+}
+
+TEST(StripGeometry, RejectsSkyLightOnEmissive) {
+    // 加法集本身就是发光介质（注入量 = 色·α）；再叠「吸收→注入」会让 HDR 语义两套账。
+    // 必须**崩**，不能静默忽略 —— 静默忽略等于骗调用方「设了但没生效」。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    batch.blend = jpov::StripBlend::kEmissive;
+    batch.sky_light = jpov::StripSkyLight{};
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "kCoverage");
+}
+
+TEST(StripGeometry, RejectsSkyLightInjectionOutOfRange) {
+    // injection 是**物理比例**（吸收多少补多少）∈ [0,1]；> 1 会把「亮度旋钮」和
+    // 「比例」两件事混在一起（想更亮应当放大天光色/强度）。越界必须崩。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::StripSkyLight sky;
+    sky.injection = 1.5f;
+    batch.sky_light = sky;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "injection");
+}
+
+TEST(StripGeometry, RejectsZeroSunDirection) {
+    // 零向量会让 shader 里的 normalize 出 NaN，而 NaN 进 accum 会污染整帧的 WBO 解析。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::StripSkyLight sky;
+    sky.sun_direction = jpov::Vec3f{0.0f, 0.0f, 0.0f};
+    batch.sky_light = sky;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "sun_direction");
+}
+
+TEST(StripGeometry, RejectsHugeAmbientScale) {
+    // 上界防御：把 lux 直接填进 ambient_scale（例如 20000）是常见单位错误，
+    // 放行会让画面和 bloom 无声爆炸。必须崩。
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::StripSkyLight sky;
+    sky.ambient_scale = 20000.0f;
+    batch.sky_light = sky;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "ambient_scale");
+}
+
+TEST(StripGeometry, RejectsNegativeSkyTricolor) {
+    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::StripSkyLight sky;
+    sky.tricolor[1].r = -0.1f;
+    batch.sky_light = sky;
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "tricolor");
+}
+
 TEST(StripGeometry, RejectsAllZeroPointAlpha) {
     // 典型误用：整块 memset 0 之后忘了填颜色/alpha → 整批隐形。必须崩。
     jpov::TranslucentStripBatch batch = MakeBatch(16);

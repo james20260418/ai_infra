@@ -220,6 +220,59 @@ struct StripFresnel {
     Vec3f rim_color{0.85f, 0.93f, 1.0f};
 };
 
+// 条带「消费天光」—— **覆盖集（over）专用**，批次级参数。
+//
+// 为什么需要它：到这一版为止条带是**完全不受光**的 —— 逐点颜色就是最终色，与天光 / 太阳
+// 无关。玻璃缸、雾里的薄膜这类东西一旦放进真实光照场景，亮度就会不对。
+//
+// 公式（与雾的合成**同构**，逐片元）：
+//   C = point_color.rgb · tex.rgb                     // ① 自发光 / 表面色（语义与不开光照时相同）
+//     + injection · skylight(N)                       // ② 被吸收的背景光按**天光**补注入
+//   skylight(N) = tricolor_lerp(N.y) · ambient_scale  // 上→天、水平→天际线、下→地（N.y 分段线性）
+//               + sun_color · sun_intensity · |N·L| · csm  // 薄片双面：两侧都吃太阳
+//                                                  ↑ CSM 阴影因子 [0,1]
+//   α = 覆盖率链（不变）
+//   L_out = α·C + (1−α)·L_bg                          // WBO over 合成（与雾的 L·(1−α)+L_fog·α 同构）
+//
+// **太阳项吃 CSM 阴影，且与天光同一个开关**：有 `sky_light` 就采样引擎的级联阴影贴图调制太阳项，
+// **没有独立的阴影开关**；天光项（ambient）不乘阴影 —— 环境光不该被直射光的影子遮住。
+// 条带自身**不参与**阴影生成（不写 shadow map）：那需要给半透明片单开一次 shadow pass，
+// 收益与代价不成比例。采样是**单级联单次采样**（无 PCF，与 fire_fog 同一份实现）。
+//
+// 三个关键约定：
+//   * **注入量自然随不透明度缩放**（C 随后要乘 α）⇒ 越不透明补得越多、越透补得越少，
+//     就是雾里的 `L_fog·α`；所以**没有**单独的「吸收系数」参数（有它会与 α 双重计数）。
+//   * `point_color.rgb` 的语义**不变**：以前它是最终色，开天光后它是「自发光 + 表面色」，
+//     天光是**新增**的一项 —— 不想要自发光就把逐点颜色调暗。
+//   * 只允许覆盖集：加法集本身就是发光介质（其注入量已是 色·α），再叠天光会让 HDR 语义混乱
+//     ⇒ `ValidateStripBatch` 对 `kEmissive + sky_light` 直接 CHECK 崩。
+//
+// 代价 / 性能：渲染器为「开天光」多编译一套 program（折线、平滑各一，Init 时各编译一次）。
+// **不开天光的批仍走原来那两个 program**：空实现被编译器内联消掉，画面由 gold 逐字节不变
+// 反向证明；指令数没有做反汇编核对（见设计文档 §19.13）。太阳项在 `sun_intensity == 0`
+// 时整段跳过，不吃 shadow map 采样。
+struct StripSkyLight {
+    // 天光三色，顺序**固定** [天(zenith), 天际线(horizon), 地(ground)]。
+    // 默认值 = 中性白天天空，**只用于快速试手**；正式使用请显式给（通常就是
+    // `SkyCommand::AmbientTricolor()`），否则「缸壁亮不亮」跟场景天光会脱节。
+    // （与 AmbientLight::tricolor 同约定；通常直接取 `SkyCommand::AmbientTricolor()`）。
+    // 每项是线性 HDR 颜色；下标含义不能对调。
+    std::array<Color, 3> tricolor = {Color{0.45f, 0.58f, 0.85f, 1.0f},
+                                     Color{0.75f, 0.82f, 0.92f, 1.0f},
+                                     Color{0.16f, 0.15f, 0.13f, 1.0f}};
+    // 天光整体亮度倍率（≈ `AmbientLight::intensity`；只缩放天光，不碰太阳）。
+    float ambient_scale = 1.0f;
+    // 太阳方向：**指向太阳**的世界空间单位向量（与 `SkyCommand::sun_dir` 同义）。
+    Vec3f sun_direction{0.0f, 1.0f, 0.0f};
+    // 太阳直射色（线性 HDR）。通常取 `SkyCommand::SunDirectionalColor()`。
+    Vec3f sun_color{1.0f, 1.0f, 1.0f};
+    // 太阳直射强度；0 = 无直射（只吃天光）。通常取 `SunDirectionalIntensity()`。
+    float sun_intensity = 0.0f;
+    // 吸收→注入比例（0..1）：0 = 纯吸收（条带只遮挡、自己不亮），1 = 吸收多少补多少。
+    // 它表达的是**物理比例**，不是亮度旋钮 —— 想要更亮就放大 tricolor / ambient_scale。
+    float injection = 1.0f;
+};
+
 // ── 一条条带的最终像素（本节是**唯一权威**，FS 与设计文档都以它为准）──
 //
 // 逐片元输入：(u, v) 由几何插值得到；(rgb, alpha_pt) 由逐点颜色按 u 采样得到
@@ -229,6 +282,8 @@ struct StripFresnel {
 //
 //   color = point_color(u).rgb                    （逐点颜色，允许 HDR）
 //         × texture(uTex, uv).rgb                 （有纹理时）
+//         → [sky_light] color += injection · skylight(N)   （仅覆盖集，见 StripSkyLight）
+//         → [fresnel]   color = mix(color, rim_color, F)
 //
 //   a     = point_color(u).a                      （逐点纵向不透明度）
 //         × texture.a                             （有纹理时）
@@ -245,8 +300,8 @@ struct StripFresnel {
 //     kCoverage: accum += color·a·w 、reveal = a        （解析后 over 合成）
 //     kEmissive: add   += color·a·fade                  （直接求和，不衰减背景）
 //
-// 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（fresnel / profile /
-// 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
+// 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（sky_light / fresnel /
+// profile / 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
 //
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
@@ -270,6 +325,10 @@ struct TranslucentStripBatch {
 
     // 菲涅耳（见 StripFresnel）。nullopt = 关闭 —— 画面逐字节等于没有这个功能。
     std::optional<StripFresnel> fresnel;
+
+    // 天光消费（见 StripSkyLight）。nullopt = 关闭 —— 走原来那两个 program，
+    // **指令数与画面逐字节等于没有这个功能**。只允许 `blend == kCoverage`。
+    std::optional<StripSkyLight> sky_light;
 
     // 本批条带（非空才画）。每条带的颜色/不透明度/宽度剖面都在 Strip16 里 ——
     // 同一批里每条拖尾颜色不同、边缘软硬不同，都不需要拆成多个 draw call。

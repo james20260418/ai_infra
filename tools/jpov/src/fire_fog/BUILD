@@ -15,6 +15,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":convex_hull_tiles",
+        "//tools/jpov/src:csm_shadow_glsl",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:render_command",

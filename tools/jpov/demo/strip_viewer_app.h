@@ -1,15 +1,16 @@
 // JPOV 半透明条带查看器（strip viewer）— 渲染核心 App
 //
-// 场景 = 天光 + 灰色地面 + 四块参考方块 + **一批三条带（一次 draw call）**
-//        + **玻璃圆环（四组点 → 四条带，另一个 batch）**：
-//   ① 波带（宽、柔和边缘、带纵向淡出）
-//   ② 螺旋拖尾（窄、绕行进）
-//   ③ 弧形扇面（宽度沿长度张开）
-//   ④ 圆环：上下环面 + 内外立壁，带菲涅耳边反（玻璃质感）
+// 场景由面板顶部的**下拉**切换（仿 particle viewer），共三个：
+//   ① box + 三条带：灰色地面 + 四块参考方块 + 三条带（波带 / 螺旋 / 弧）
+//        —— 验收 WBO 覆盖集 + over 合成、纹理、宽度剖面、软深度、加法集弧
+//   ② 射流：加法集 + HDR 逐点颜色 + 中心实两侧虚剖面 + bloom
+//   ③ 玻璃缸 + 树：6m 橡树罩在开口玻璃筒里，筒壁是条带 —— 验收 StripSkyLight（消费天光）
 //
-// 三条带在屏幕空间部分交叉（交叉处能看出不透明度叠加），用来验收
-// 「WBO 覆盖集 + over 合成」；三块参考方块用来验收「天光真的照在物体上」；
-// 圆环用来验收 fresnel（参数／预设见 §19 与 kFresnelPresets）。
+// 面板在**左下角**，黑色半透明圆角底板上；**控件随场景动态出现**（射流场景没有缸体滑条、
+// 缸体场景没有波带/弧形参数；关掉纹理就不显示 mipmap，关掉软深度就不显示过渡距离）。
+//
+// 玻璃圆环（ring）不在任何场景里，但**代码保留**：gold（strip_scene_gold.cc）仍用它
+// 锁 fresnel + 环几何 + 折线/平滑两条 pass。
 //
 // 交互：右键拖拽 = 绕行、滚轮 = 推拉；面板可调视角外的一切（形状/材质/剖面/开关）。
 // 拍摄：--capture <dir>（固定视角与相位，逐张对比图）。
@@ -86,6 +87,21 @@ inline jpov::StripRingShape MakeSceneRingShape() {
     shape.center_x = -1.70f;
     shape.center_y = 1.20f;
     shape.center_z = 1.00f;
+    return shape;
+}
+
+// 玻璃缸（天光消费的验收场景）：把 6m 橡树罩住的开口玻璃筒。
+// 半径比树冠小一圈（树冠会从上面冒出来），筒高 5.4m —— 刚好让"光从上下来"有层次。
+// 壁厚 5cm：足够看出内外两层膜（内外立壁各一条带），又不至于让筒壁发绿。
+inline jpov::StripRingShape MakeTankShape() {
+    jpov::StripRingShape shape;
+    // 半径 / 高 / 壁厚 / 中心高按同一比例（0.8）取：比例不变 ⇒ 观感不变，底部仍落在 y=0。
+    shape.outer_radius = 2.32f;
+    shape.wall_thickness = 0.04f;
+    shape.height = 4.32f;
+    shape.center_y = 2.16f;   // 底部落在 y = 0（地面）
+    shape.center_x = 0.0f;
+    shape.center_z = 0.0f;
     return shape;
 }
 
@@ -399,6 +415,78 @@ class StripViewerApp : public JPOV {
 public:
     using JPOV::JPOV;
 
+    // ── 场景（面板下拉切换）──
+    //
+    //   kRibbons  box + 三条带（波/螺旋/弧）—— 条带本体、纹理、剖面、软深度
+    //   kJet      射流（加法集 + HDR + bloom）
+    //   kTank     玻璃缸 + 橡树（天光消费）
+    //
+    // ⚠️ 场景只是「一组可见性预设」：切换时**写一次**开关，之后各开关仍可单独调。
+    //    gold 与 --capture 直接设开关、不经过场景（所以 gold 的 8 张图与本轮无关）。
+    //    旧的玻璃圆环（ring）**不在任何场景里** —— 字段保留只为 gold 锁 fresnel/环几何。
+    enum class Scene {
+        kRibbons = 0,
+        kJet = 1,
+        kTank = 2,
+    };
+    static constexpr int kSceneCount = 3;
+    Scene scene_ = Scene::kRibbons;
+
+    // 切场景：写可见性开关 + **该场景自己的参数回到默认** + 一个合适机位。
+    //
+    // 为什么连参数一起重置（而不是"保留用户调过的值"）：切场景是**换一样东西看**，
+    // 上一个场景的形状/软深度/散射率留在新场景里只会让人困惑（"缸壁上怎么有软深度"）。
+    // 拍摄表也依赖「切场景 = 干净起点」：否则上一张的显式覆盖会污染下一张（真实踩过）。
+    void SelectScene(int index) {
+        const int i = std::clamp(index, 0, kSceneCount - 1);
+        scene_ = static_cast<Scene>(i);
+        // 可见性
+        show_strips_ = (i == 0);
+        boxes_visible_ = (i == 0);
+        jet_visible_ = (i == 1);
+        tank_visible_ = (i == 2);
+        ring_visible_ = false;   // 旧玻璃圆环不在任何场景里（字段保留给 gold）
+        // 场景级参数
+        vis_ = RibbonVisibility{};
+        if (i == 0) {
+            use_texture_ = true;
+            texture_mipmap_ = false;
+            opacity_ = 0.92f;
+            width_scale_ = 1.0f;
+            soft_edges_ = true;
+            smooth_strips_ = false;   // 场景① 的基线是折线（gold 锁的也是折线）
+            arc_additive_ = false;
+            soft_depth_ = false;
+            soft_depth_m_ = 0.15f;
+            shape_ = RibbonShape{};
+        } else if (i == 1) {
+            smooth_strips_ = true;
+            jet_gain_ = 3.0f;
+            bloom_ = true;
+        } else {
+            smooth_strips_ = true;
+            bloom_ = false;           // 缸景看的是天光/阴影，不需要辉光
+            tank_skylight_ = true;
+            tank_injection_ = 0.20f;
+            tank_opacity_ = 0.26f;
+            tank_shape_ = MakeTankShape();
+        }
+        // 天光（太阳仰角/方位/浑浊度）也回默认：它是三个场景共享的面板参数，
+        // 不在这里清就会把上一场的角度带进来（拍摄表里 415 设的夜太阳曾一路污染 420/430/435，
+        // 拍出来的「乳白缸」其实是夜景）。
+        deg_.sun_elev_deg = kViewDefaults.sun_elev_deg;
+        deg_.sun_azim_deg = kViewDefaults.sun_azim_deg;
+        deg_.turbidity = kViewDefaults.turbidity;
+        // 机位（只在切场景的那一刻改，之后用户自己拖）
+        if (i == 2) {
+            view_.R = 9.0f;
+            view_.theta = 0.35;
+        } else {
+            view_.R = kViewDefaults.R;
+            view_.theta = kViewDefaults.theta;
+        }
+    }
+
     uint32_t ground_mesh_ = 0;
     jpov::PBRMaterial ground_mat_;
     uint32_t box_mesh_ = 0;                 // 背景参考物（验收天光用）
@@ -453,6 +541,22 @@ public:
     float jet_gain_ = 3.0f;                 // HDR 增益（>1 才有 bloom 余量）
     bool bloom_ = true;                     // 辉光（把 HDR 高亮模糊加回）
 
+    // ── 玻璃缸 + 橡树（天光消费的验收场景）──
+    // 用 fire-fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
+    // 它会随天光/太阳变亮变暗。**默认关**，所以 gold 的 8 张图完全不受影响。
+    bool tank_visible_ = false;
+    bool tank_skylight_ = true;             // 缸体是否消费天光（A/B 的唯一变量）
+    float tank_opacity_ = 0.26f;            // 缸体不透明度（要能看清里面的树）
+    // 吸收→注入比例 = 材料的**散射率**：薄玻璃几 %；乳白/磨砂可以接近 1。
+    // 演示默认 0.20（玻璃感强、里面的树看得清）；拍摄表 420 用 0.40 做对比
+    // （更乳白、亮度更均匀 —— 再高就会糊成一块牛奶）。
+    float tank_injection_ = 0.20f;
+    jpov::Vec3f tank_color_{0.10f, 0.12f, 0.14f};   // 缸壁的"表面色"（近黑玻璃；亮部交给天光）
+    jpov::StripRingShape tank_shape_ = MakeTankShape();
+    jpov::GltfObject oak_;                  // 橡树（首帧前预加载，见 PrepareTankScene）
+    float oak_scale_ = 1.0f;
+    bool oak_loaded_ = false;               // true = 已尝试加载（失败也置 true，只试一次）
+
     // ── 菲涅耳（玻璃边反）──
     // 默认开：这个 viewer 现在的主场景就是那块玻璃圆环，不开就只是层淡蓝膜。
     bool fresnel_enabled_ = true;
@@ -462,6 +566,14 @@ public:
 
     // 装配场景静态资源（Init 之后、Run/RunOnce 之前调用一次）。
     void Setup(const std::string& texture_path);
+
+    // 预加载玻璃缸场景的资产（橡树 glb）。
+    //
+    // ⚠️ 必须在**任何一帧之前**调（与 Setup 同一时机）：glb 的 mesh/纹理上传会碰 GL
+    // 状态，而 OneIteration 里正处于上一帧遗留的绑定状态（实现在帧中懒加载会直接撞
+    // `GL error after mesh upload, code=1282`）。
+    // 刻意不在 Setup 里自动调：gold 的 8 张图不用这个场景，不该为它付 4k glb 的加载。
+    void PrepareTankScene() { EnsureTankAssets(); }
 
     // 视角/天光回到默认（gold 与面板「重置视角」共用）。
     void ResetViewToDefaults() {
@@ -513,7 +625,7 @@ public:
         cmds->camera.position = view_.Position();
         // 三条带都在 y≈0.3..2.7（离地悬空），所以看向原点会让画面整体偏上；
         // 目标点抬高到 1.15m 才把条带放在画面中央。
-        cmds->camera.target = {0.0f, 1.15f, 0.0f};
+        cmds->camera.target = {0.0f, tank_visible_ ? 2.60f : 1.15f, 0.0f};
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 55.0f;
         cmds->camera.near = 0.05f;
@@ -560,12 +672,27 @@ public:
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.5f);
         }
 
+        // 玻璃缸场景（sky_light 验收）：橡树在缸里，缸壁是条带。
+        // 树的模型由调用方在**首帧之前**用 PrepareTankScene() 加载（帧中上传会撞 GL 1282）。
+        // 没加载成功时 oak_ 为空 ⇒ 只画缸壁，不崩（见 EnsureTankAssets 的警告）。
         if (show_strips_) {
             EmitStripBatches(cmds);
         }
+        if (jet_visible_) {
+            EmitJetBatch(cmds);
+        }
+        if (tank_visible_ && !oak_.empty()) {
+            cmds->DrawGltfObject(oak_, /*center*/ {0.0f, 0.0f, 0.0f}, /*up*/ {0.0f, 1.0f, 0.0f},
+                                 /*front*/ {0.0f, 0.0f, 1.0f}, /*scale*/ oak_scale_);
+        }
+        // 缸壁必须**晚于**树进命令表？不需要：条带是独立 pass（不透明之后），
+        // 所以顺序只影响条带之间的前后关系；这里放最后 = 缸壁盖在所有条带之上。
+        if (tank_visible_) {
+            EmitTankBatch(cmds, light);
+        }
 
         if (show_panel_) {
-            DrawPanel(input);
+            DrawPanel(input, cmds);
             ui_.End();
             ui_.Emit(cmds);
         }
@@ -636,12 +763,16 @@ private:
         if (ring_visible_) {
             EmitRingBatch(cmds);
         }
-        if (jet_visible_) {
-            cmds->DrawTranslucentStrips(
-                BuildJetBatch(jet_shape_, jet_gain_,
-                              smooth_strips_ ? jpov::StripInterpolation::kSmooth
-                                             : jpov::StripInterpolation::kPolyline));
-        }
+    }
+
+    // 射流（场景②的唯一内容）。**不能**放在 EmitStripBatches 里：那个函数被
+    // `show_strips_`（三条带的 A/B 开关）管着，射流场景里 show_strips_ = false，
+    // 结果射流一条都画不出来（第一版就是这个 bug，拍出来只剩地面）。
+    void EmitJetBatch(jpov::RenderCommandList* cmds) {
+        cmds->DrawTranslucentStrips(
+            BuildJetBatch(jet_shape_, jet_gain_,
+                          smooth_strips_ ? jpov::StripInterpolation::kSmooth
+                                         : jpov::StripInterpolation::kPolyline));
     }
 
     // 圆环（玻璃壳）：四组点 → 四条带 → **一个批**（一次 draw call）。
@@ -678,145 +809,261 @@ private:
         cmds->DrawTranslucentStrips(std::move(ring));
     }
 
+    // ── 玻璃缸场景（sky_light 的验收）─────────────────────────────────────
+    //
+    // 树 = fire-fog viewer 同款橡树（build 脚本把 glb 拷到 exe 旁 models/）。
+    // 缸 = 四条带围成的**开口**筒（底面 + 内外立壁；顶面丢掉，方便看树冠从上面出来）。
+    //
+    // 懒加载：gold 的 8 张图都不用这个场景，所以**绝不在 Setup 里加载** —— 否则
+    // gold test 每起一个 app 就要白付一次 4k glb 的解码 + 上传。
+    void EnsureTankAssets() {
+        if (oak_loaded_) {
+            return;   // 只尝试一次：失败也不每帧重试（否则交互时会卡成幻灯片）
+        }
+        oak_loaded_ = true;
+        // 查找顺序与条带纹理一致：cwd / 产物目录 → 仓库 assets。
+        const char* kCandidates[] = {
+            "models/tripo_oak_4k.glb",                 // output/ 产物目录（build 脚本拷贝）
+            "../models/tripo_oak_4k.glb",              // 兼容从 exe 目录上层跑
+            "tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb",  // 仓库根
+            "../../tools/jpov/assets/models/samples/oak_negative/tripo_oak_4k.glb",
+        };
+        for (const char* rel : kCandidates) {
+            std::FILE* f = std::fopen(rel, "rb");
+            if (f == nullptr) {
+                continue;
+            }
+            std::fclose(f);
+            oak_ = LoadGltf(rel);
+            break;
+        }
+        if (oak_.empty()) {
+            LOG(WARNING) << "玻璃缸场景：找不到/加载失败橡树 models/tripo_oak_4k.glb"
+                            "（先跑 ./tools/jpov/build_jpov_strip_viewer.sh）；"
+                            "缸壁仍会画，但里面是空的";
+            return;
+        }
+        // 归一化到 6m（与 fire-fog viewer 同一目标高度；bounds 无效则不缩放）。
+        if (oak_.bounds_valid) {
+            const float hgt = oak_.bounds_max[1] - oak_.bounds_min[1];
+            if (hgt > 1.0e-6f) {
+                oak_scale_ = 6.0f / hgt;
+            }
+        }
+        LOG(INFO) << "玻璃缸场景：橡树已加载，scale=" << oak_scale_;
+    }
+
+    // 缸壁批次：天光从与地面/方块**同一份**天光推导（light.sky）⇒ 缸壁的明暗与
+    // 场景里其它物体一致 —— 这正是这个场景要验的事。
+    void EmitTankBatch(jpov::RenderCommandList* cmds,
+                       const jpov_skylight::SkyLighting& light) {
+        jpov::StripRingShape shape = tank_shape_;
+        // 壁厚滑条可能出现 wall ≥ outer（形状层会 CHECK 崩）⇒ 使用处夹一次。
+        shape.wall_thickness = std::min(shape.wall_thickness, shape.outer_radius * 0.5f);
+        const std::array<jpov::Strip16, jpov::kStripRingPartCount> parts =
+            jpov::MakeStripRing(shape);
+
+        jpov::TranslucentStripBatch tank;
+        tank.texture_id = 0;
+        tank.blend = jpov::StripBlend::kCoverage;
+        tank.geometry = jpov::StripInterpolation::kSmooth;   // 闭合曲面：折线会出分面
+        if (fresnel_enabled_) {
+            tank.fresnel = fresnel_;   // 玻璃缸本来就有边反
+        }
+        if (tank_skylight_) {
+            jpov::StripSkyLight sky;
+            // 三色 / 强度 / 太阳全部来自同一份天光推导：缸壁与地面、方块同源。
+            sky.tricolor = light.sky.AmbientTricolor();
+            sky.ambient_scale = light.sky.AmbientIntensity();
+            sky.sun_direction = light.sky.sun_dir;
+            const jpov::Color sun = light.sky.SunDirectionalColor();
+            sky.sun_color = jpov::Vec3f{sun.r, sun.g, sun.b};
+            sky.sun_intensity = light.sky.SunDirectionalIntensity();
+            sky.injection = tank_injection_;
+            tank.sky_light = sky;
+        }
+
+        // 开口缸：底面 + 内外立壁（顶面不要）。
+        const int kParts[] = {static_cast<int>(jpov::StripRingPart::kBottomFace),
+                              static_cast<int>(jpov::StripRingPart::kOuterWall),
+                              static_cast<int>(jpov::StripRingPart::kInnerWall)};
+        const jpov::Color tint{tank_color_.x(), tank_color_.y(), tank_color_.z(),
+                                tank_opacity_};
+        for (int part : kParts) {
+            jpov::Strip16 strip = parts[static_cast<size_t>(part)];
+            strip.point_color.fill(tint);
+            tank.strips.push_back(strip);
+        }
+        cmds->DrawTranslucentStrips(std::move(tank));
+    }
+
     static float TextWidth(const char* text, float font_size, const char* /*alias*/,
                            void* userdata) {
         StripViewerApp* app = static_cast<StripViewerApp*>(userdata);
         return app->MeasureTextWidth(std::string(), text ? text : "", font_size);
     }
 
-    void DrawPanel(const jpov::InputSnapshot& input) {
+    // ── 面板（左下角 + 黑色半透明底板 + 场景下拉）──
+    //
+    // 设计要点：
+    //   ① 顶部一个「场景」下拉，仿 particle viewer；切场景时 SelectScene() 写一次可见性开关。
+    //   ② **参数按场景动态出现**：只画当前场景用得到的控件（例如射流场景没有缸体滑条、
+    //      缸体场景没有波带/弧形参数）；再叠一层「按值动态」的小规则（关掉纹理就不显示 mipmap，
+    //      关掉软深度就不显示过渡距离）。
+    //   ③ 整块面板压左下角，底板是黑色半透明圆角矩形 —— 场景背景是亮天光，没有底板文字读不清。
+    //   ④ 行数超过一屏时自动分两列（同一条底板内），不靠调用方算。
+    void DrawPanel(const jpov::InputSnapshot& input, jpov::RenderCommandList* cmds) {
+        CHECK(cmds != nullptr) << "DrawPanel: cmds 不能为空";
         const float w = static_cast<float>(jpov_viewer::kViewerWidth);
         const float h = static_cast<float>(jpov_viewer::kViewerHeight);
         jpov::UiTheme theme = jpov::UiTheme::Default(kFontSize);
         theme.font_alias = jpov_viewer::kViewerFontAlias;
         ui_.Begin(input, theme, w, h, 1000.0f / jpov_viewer::kViewerFps);
 
-        // 三列布局：控件已到 30 个，两列会超出 720 高。
-        const float kColW = 0.28f * w;
-        const float kRowH = 28.0f;
-        const float kSpacing = 8.0f;
-        const float kLeftX = 20.0f;
-        const float kMidX = kLeftX + kColW + 16.0f;
-        const float kRightX = kMidX + kColW + 16.0f;
-        const float kTopY = 20.0f;
-        int row_left = 0;
-        int row_mid = 0;
-        int row_right = 0;
-        auto left_rect = [&]() {
-            const jpov::UiRect r{{kLeftX, kTopY + static_cast<float>(row_left) * (kRowH + kSpacing)},
-                                 {kColW, kRowH}};
-            row_left += 1;
-            return r;
+        // ── 行表：只放当前场景用得上的参数 ──
+        std::vector<PanelRow> body;
+        CollectPanelRows(&body);
+
+        constexpr float kRowH = 26.0f;
+        constexpr float kGap = 6.0f;
+        constexpr float kPad = 12.0f;
+        constexpr float kColW = 268.0f;
+        constexpr float kColGap = 16.0f;
+        constexpr float kHintH = 20.0f;
+        // 一列最多 14 行：再多就分两列（保证 720 高放得下）。
+        const int cols = (body.size() > 14) ? 2 : 1;
+        const size_t per_col = (body.size() + static_cast<size_t>(cols) - 1) /
+                               static_cast<size_t>(cols);
+        const float body_h =
+            static_cast<float>(per_col) * (kRowH + kGap) - kGap;
+        const float board_w =
+            kPad * 2.0f + static_cast<float>(cols) * kColW +
+            static_cast<float>(cols - 1) * kColGap;
+        const float board_h = kPad * 2.0f + kRowH + kGap * 2.0f + body_h + kHintH;
+        // 左下角锚定（16px 边距）。底板必须先于 ui_.Emit 进命令表 ⇒ 画在控件下面。
+        const float x0 = 16.0f;
+        const float y0 = h - board_h - 16.0f;
+        cmds->DrawFillRect({x0, y0}, {board_w, board_h},
+                           /*fill*/ {0.02f, 0.02f, 0.03f, 0.55f},
+                           /*border*/ {1.0f, 1.0f, 1.0f, 0.10f},
+                           /*border_width*/ 1.0f, /*radius*/ 10.0f);
+
+        // ── 场景下拉（切换时写一次可见性开关；之后各开关仍可单独调）──
+        int scene_index = static_cast<int>(scene_);
+        if (ui_.Combo("场景", &scene_index, SceneNames(),
+                      jpov::UiRect{{x0 + kPad, y0 + kPad}, {board_w - 2.0f * kPad, kRowH}})) {
+            SelectScene(scene_index);
+        }
+
+        // ── 参数行 ──
+        const float by = y0 + kPad + kRowH + kGap * 2.0f;
+        for (size_t i = 0; i < body.size(); ++i) {
+            const size_t col = i / per_col;
+            const size_t row = i % per_col;
+            const jpov::UiRect r{
+                {x0 + kPad + static_cast<float>(col) * (kColW + kColGap),
+                 by + static_cast<float>(row) * (kRowH + kGap)},
+                {kColW, kRowH}};
+            const PanelRow& spec = body[i];
+            switch (spec.kind) {
+                case PanelRow::Kind::kCheckbox:
+                    ui_.Checkbox(spec.label, spec.flag, r);
+                    break;
+                case PanelRow::Kind::kSlider:
+                    ui_.SliderFloat(spec.label, spec.value, r, spec.vmin, spec.vmax,
+                                    spec.decimals);
+                    break;
+            }
+        }
+
+        // ── 底部：操作提示 + 重置 ──
+        const float hint_y = y0 + board_h - kPad - kHintH;
+        ui_.Text("右键拖动=绕行  滚轮=推拉", jpov::UiRect{{x0 + kPad, hint_y},
+                                                          {board_w - 2.0f * kPad - 96.0f, kHintH}},
+                 /*stretch_w*/ true, /*stretch_h*/ true);
+        if (ui_.Button("重置", jpov::UiRect{{x0 + board_w - kPad - 88.0f, hint_y},
+                                            {88.0f, kHintH}})) {
+            ResetPanelToDefaults();
+        }
+    }
+
+    // 面板行（只描述"怎么画"，状态全部指向成员字段 ⇒ 无跨帧拷贝）。
+    struct PanelRow {
+        enum class Kind { kCheckbox, kSlider } kind = Kind::kCheckbox;
+        const char* label = "";
+        bool* flag = nullptr;      // kCheckbox
+        float* value = nullptr;    // kSlider
+        float vmin = 0.0f;
+        float vmax = 1.0f;
+        int decimals = 2;
+    };
+
+    static const std::vector<const char*>& SceneNames() {
+        static const std::vector<const char*> kNames = {"box + 三条带", "射流", "玻璃缸 + 树"};
+        return kNames;
+    }
+
+    // 按场景收集参数行。规则：
+    //   * 只列**当前场景用得到**的参数（场景没用到的一律不出现）；
+    //   * 再按值做一层裁剪（关纹理 → 不显示 mipmap；关软深度 → 不显示距离）。
+    void CollectPanelRows(std::vector<PanelRow>* rows) {
+        CHECK(rows != nullptr) << "CollectPanelRows: rows 不能为空";
+        rows->clear();
+        // 两个小助手：字段顺序 (kind,label,flag,value,min,max,decimals) 容易写错位，
+        // 全部经它们填，调用处就只写「标签 + 指针 + 范围」。
+        auto cb = [rows](const char* label, bool* flag) {
+            rows->push_back({PanelRow::Kind::kCheckbox, label, flag, nullptr, 0.0f, 0.0f, 0});
         };
-        auto mid_rect = [&]() {
-            const jpov::UiRect r{{kMidX, kTopY + static_cast<float>(row_mid) * (kRowH + kSpacing)},
-                                 {kColW, kRowH}};
-            row_mid += 1;
-            return r;
-        };
-        auto right_rect = [&]() {
-            const jpov::UiRect r{{kRightX, kTopY + static_cast<float>(row_right) * (kRowH + kSpacing)},
-                                 {kColW, kRowH}};
-            row_right += 1;
-            return r;
+        auto sl = [rows](const char* label, float* value, float lo, float hi, int dec) {
+            rows->push_back({PanelRow::Kind::kSlider, label, nullptr, value, lo, hi, dec});
         };
 
-        // ── 左列：光 / 材质 / 后处理 ──
-        ui_.SliderFloat("太阳仰角 °", &(deg_.sun_elev_deg), left_rect(), 0.0f, 90.0f, 0);
-        ui_.SliderFloat("不透明度", &opacity_, left_rect(), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("条带宽度", &width_scale_, left_rect(), 0.2f, 2.5f, 2);
-        ui_.Checkbox("使用纹理（关 = 纯色）", &use_texture_, left_rect());
-        ui_.Checkbox("纹理 mipmap（远处防闪）", &texture_mipmap_, left_rect());
-        ui_.Checkbox("柔边剖面", &soft_edges_, left_rect());
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_, left_rect());
-        ui_.Checkbox("Bloom 辉光（HDR）", &bloom_, left_rect());
-        ui_.Checkbox("显示条带（A/B）", &show_strips_, left_rect());
-        ui_.Checkbox("条带平滑（三条带/射流）", &smooth_strips_, left_rect());
-        ui_.Checkbox("弧形用加法集", &arc_additive_, left_rect());
-        ui_.Checkbox("软深度", &soft_depth_, left_rect());
-        ui_.SliderFloat("软深度距离 m", &soft_depth_m_, left_rect(), 0.005f, 0.30f, 3);
-        ui_.Checkbox("显示参考方块", &boxes_visible_, left_rect());
+        sl("太阳仰角 °", &(deg_.sun_elev_deg), 0.0f, 90.0f, 0);   // 三个场景都用得到
+        if (scene_ == Scene::kRibbons) {
+            cb("使用纹理（关 = 纯色）", &use_texture_);
+            if (use_texture_) {
+                cb("纹理 mipmap（远处防闪）", &texture_mipmap_);   // 按值裁剪
+            }
+            sl("不透明度", &opacity_, 0.0f, 1.0f, 2);
+            sl("条带宽度", &width_scale_, 0.2f, 2.5f, 2);
+            cb("柔边剖面", &soft_edges_);
+            cb("条带平滑", &smooth_strips_);
+            cb("弧形用加法集", &arc_additive_);
+            cb("软深度", &soft_depth_);
+            if (soft_depth_) {
+                sl("软深度距离 m", &soft_depth_m_, 0.005f, 0.30f, 3);   // 按值裁剪
+            }
+            sl("波带振幅", &(shape_.wave_amplitude), 0.0f, 1.2f, 2);
+            sl("螺旋转数", &(shape_.helix_turns), 0.5f, 3.0f, 2);
+            sl("弧形开角", &(shape_.arc_angle), 0.6f, 2.6f, 2);
+            sl("弧形朝向", &(shape_.arc_yaw), -1.6f, 1.6f, 2);
+            cb("显示波带", &(vis_.wave));
+            cb("显示螺旋", &(vis_.helix));
+            cb("显示弧形", &(vis_.arc));
+            cb("形状动画", &animate_);
+            cb("自动绕行", &auto_orbit_);
+            cb("显示参考方块", &boxes_visible_);
+        } else if (scene_ == Scene::kJet) {
+            sl("射流 HDR 增益", &jet_gain_, 1.0f, 8.0f, 2);
+            cb("条带平滑（射流）", &smooth_strips_);
+            cb("Bloom 辉光（HDR）", &bloom_);
+        } else {
+            cb("缸壁消费天光", &tank_skylight_);
+            sl("天光注入比例（散射率）", &tank_injection_, 0.0f, 1.0f, 2);
+            sl("缸壁不透明度", &tank_opacity_, 0.0f, 1.0f, 2);
+            sl("缸体半径 m", &(tank_shape_.outer_radius), 1.2f, 4.0f, 2);
+            sl("缸体高度 m", &(tank_shape_.height), 1.0f, 8.0f, 2);
+        }
+        cb("SMAA 抗锯齿", &smaa_);   // 后处理，三个场景通用
+    }
 
-        // ── 中列：形状 / 动画 / 显隐 / 圆环 ──
-        ui_.SliderFloat("波带振幅", &(shape_.wave_amplitude), mid_rect(), 0.0f, 1.2f, 2);
-        ui_.SliderFloat("螺旋转数", &(shape_.helix_turns), mid_rect(), 0.5f, 3.0f, 2);
-        ui_.SliderFloat("弧形开角", &(shape_.arc_angle), mid_rect(), 0.6f, 2.6f, 2);
-        ui_.SliderFloat("弧形朝向", &(shape_.arc_yaw), mid_rect(), -1.6f, 1.6f, 2);
-        ui_.Checkbox("形状动画", &animate_, mid_rect());
-        ui_.Checkbox("自动绕行", &auto_orbit_, mid_rect());
-        ui_.Checkbox("显示波带", &(vis_.wave), mid_rect());
-        ui_.Checkbox("显示螺旋", &(vis_.helix), mid_rect());
-        ui_.Checkbox("显示弧形", &(vis_.arc), mid_rect());
-        ui_.Checkbox("显示射流（火箭推进器）", &jet_visible_, mid_rect());
-        ui_.SliderFloat("射流 HDR 增益", &jet_gain_, mid_rect(), 1.0f, 8.0f, 2);
-        ui_.Checkbox("显示圆环（玻璃壳）", &ring_visible_, mid_rect());
-        ui_.Checkbox("圆环平滑（玻璃壳）", &ring_smooth_, mid_rect());
-        ui_.SliderFloat("圆环外半径 m", &(ring_shape_.outer_radius), mid_rect(), 0.2f, 2.5f, 2);
-        ui_.SliderFloat("圆环壁厚 m", &(ring_shape_.wall_thickness), mid_rect(), 0.02f, 0.60f, 2);
-        ui_.SliderFloat("圆环高度 m", &(ring_shape_.height), mid_rect(), 0.20f, 3.00f, 2);
-        ui_.SliderFloat("圆环不透明度", &ring_opacity_, mid_rect(), 0.0f, 1.0f, 2);
-        const bool reset_clicked = ui_.Button("重置视角/形状", mid_rect());
-        if (reset_clicked) {
-            ResetViewToDefaults();
-            shape_ = RibbonShape{};
-            vis_ = RibbonVisibility{};
-            arc_additive_ = false;
-            smooth_strips_ = true;
-            ring_smooth_ = true;
-            soft_depth_ = false;
-            soft_depth_m_ = 0.15f;
-            ring_visible_ = true;
-            boxes_visible_ = true;
-            jet_visible_ = true;
-            jet_gain_ = 3.0f;
-            bloom_ = true;
-            ring_opacity_ = 0.12f;
-            fresnel_enabled_ = true;
-            fresnel_preset_ = 0;
-            rim_color_preset_ = 0;
-            fresnel_ = kFresnelPresets[0].params;
-        }
-
-        // ── 右列：菲涅耳（玻璃边反）──
-        ui_.Checkbox("菲涅耳边反", &fresnel_enabled_, right_rect());
-        std::vector<const char*> preset_names;
-        preset_names.reserve(static_cast<size_t>(kFresnelPresetCount));
-        for (const FresnelPreset& p : kFresnelPresets) {
-            preset_names.push_back(p.name);
-        }
-        if (ui_.Combo("预设", &fresnel_preset_, preset_names, right_rect())) {
-            // 选预设 = 整组参数覆盖（含边反颜色）；之后再拖滑条就进入自定义态。
-            fresnel_ = kFresnelPresets[fresnel_preset_].params;
-        }
-        ui_.SliderFloat("F0 正入射反射", &(fresnel_.f0), right_rect(), 0.0f, 0.30f, 2);
-        ui_.SliderFloat("掠射指数", &(fresnel_.power), right_rect(), 0.5f, 8.0f, 1);
-        ui_.SliderFloat("边反强度", &(fresnel_.strength), right_rect(), 0.0f, 3.0f, 2);
-        ui_.SliderFloat("掠射不透明度", &(fresnel_.graze_alpha), right_rect(), 0.0f, 1.0f, 2);
-        std::vector<const char*> rim_names;
-        rim_names.reserve(static_cast<size_t>(kRimColorPresetCount));
-        for (const RimColorPreset& p : kRimColorPresets) {
-            rim_names.push_back(p.name);
-        }
-        if (ui_.Combo("边反颜色", &rim_color_preset_, rim_names, right_rect())) {
-            fresnel_.rim_color = kRimColorPresets[rim_color_preset_].rgb;
-        }
-
-        // 相机/当前形态信息（底部一行）：便于口头描述/复现某个角度。
-        // 下标先钳一次：Combo 只保证本帧之后的 fresnel_preset_ 合法，别赌它。
-        const int preset_idx = std::clamp(fresnel_preset_, 0, kFresnelPresetCount - 1);
-        char info[256];
-        std::snprintf(info, sizeof(info),
-                      "phi %.2f  theta %.2f  R %.2f   |   %s   blend: %s%s   |   "
-                      "fresnel: %s   ring: %s   jet: %s   ring_style: %s",
-                      view_.phi, view_.theta, view_.R,
-                      smooth_strips_ ? "smooth" : "polyline",
-                      arc_additive_ ? "arc=add" : "all=coverage",
-                      soft_depth_ ? "  soft_depth=on" : "",
-                      fresnel_enabled_ ? kFresnelPresets[preset_idx].name : "off",
-                      ring_visible_ ? "on" : "off",
-                      jet_visible_ ? (bloom_ ? "on+bloom" : "on") : "off",
-                      ring_smooth_ ? "smooth" : "polyline");
-        ui_.Text(info, jpov::UiRect{{kLeftX, h - 46.0f}, {w - 40.0f, 24.0f}});
+    // 面板「重置」：视角 + 当前场景的参数回到默认（不动场景选择本身）。
+    // 复用 SelectScene（它就是「场景的默认值」唯一一份定义），别在这里抄第二份。
+    void ResetPanelToDefaults() {
+        ResetViewToDefaults();
+        SelectScene(static_cast<int>(scene_));
+        animate_ = false;
+        auto_orbit_ = false;
     }
 
     static constexpr float kFontSize = 16.0f;
@@ -858,6 +1105,10 @@ inline void StripViewerApp::Setup(const std::string& texture_path) {
         mip_opts.repeat = false;
         ribbon_tex_mip_ = RegisterTexture(texture_path, mip_opts);
     }
+    // 场景开关必须在**首帧之前**对齐一次：字段默认值还留着旧版（ring/jet 都开），
+    // 而面板上写的是场景①「box + 三条带」。不调这一步的话，第一帧画面与面板不一致。
+    // （gold / --capture 在 Setup 之后会自己逐项设开关，所以这一步对它们无害。）
+    SelectScene(static_cast<int>(Scene::kRibbons));
 }
 
 }  // namespace jpov_strip
