@@ -490,7 +490,8 @@ void main() {
     //   face_fbo   : 已创建的 FBO（仅 COLOR_ATTACHMENT0，逐面重挂）。
     //   shader_mgr : 共享 shader 缓存。
     //
-    // 返回后 GL 状态：FBO 绑定仍为 face_fbo，viewport = size×size，深度测试关闭。
+    // 返回后 GL 状态：**不绑定任何 FBO**（已解绑到 0，看下面 glGenerateMipmap 的约束）、
+    //   viewport = size×size、深度测试关闭、活动纹理单元 = 0、cube 纹理已解绑。
     //   ⇒ 调用方必须自己恢复目标 FBO / viewport / 深度状态。
     // Pre-condition: cube_tex / face_fbo 非 0，size ≥ 1。
     static void DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,

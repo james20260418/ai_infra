@@ -229,9 +229,15 @@ void SkyRenderer::DrawSkyEnvCube(const SkyCommand& sky_cmd, int size,
     }
 
     // mip 链：粗糙度→mip 级的“廉价预滤波”（见 src/env_specular.h）。
+    //
+    // ⚠️ **必须先解绑 FBO**：GL 明确“对仍附着在当前已绑定 FBO 上的纹理调
+    //    glGenerateMipmap”是**未定义行为**（驱动通常容忍，但可能出垃圾或丢 mip）。
+    //    上一轮循环结束时 cube 的最后一面仍挂在 face_fbo 的 COLOR_ATTACHMENT0 上。
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cube_tex);
     glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
-    glBindFramebuffer(GL_FRAMEBUFFER, face_fbo);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 }
 
 }  // namespace jpov
