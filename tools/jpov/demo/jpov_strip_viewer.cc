@@ -118,6 +118,8 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         std::optional<bool> tank_skylight;
         std::optional<float> sun_elev_deg;
         std::optional<float> tank_injection;
+        // 采样对比场景
+        std::optional<float> sampling_z;
     };
     const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
     const Shot kShots[] = {
@@ -154,6 +156,13 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         // 边反 A/B（原来由玻璃圆环承担，现在缸壁同样吃 StripFresnel）
         {.name = "430_tank_no_fresnel", .scene = 2, .fresnel = false},
         {.name = "435_tank_fresnel", .scene = 2, .fresnel = true},
+
+        // ── 场景 ④：采样对比（4/8/16/32 四档沿 Z 排开，同曲线同材质）──
+        {.name = "500_sampling_rows", .scene = 3},
+        {.name = "505_sampling_zoom", .scene = 3, .camera_r = 4.2f},
+        {.name = "510_sampling_smooth", .scene = 3, .smooth = true},
+        // 整体 Z 平移（面板滑条 ±5m）：证明「凑近看某一档」这条路真的动了。
+        {.name = "515_sampling_zshift", .scene = 3, .sampling_z = 2.5f},
     };
     for (const Shot& shot : kShots) {
         // 先选场景（写可见性开关 + 该场景的默认视角），再应用**显式覆盖**。
@@ -175,6 +184,7 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         if (shot.tank_skylight) { app.tank_skylight_ = *shot.tank_skylight; }
         if (shot.sun_elev_deg) { app.deg_.sun_elev_deg = *shot.sun_elev_deg; }
         if (shot.tank_injection) { app.tank_injection_ = *shot.tank_injection; }
+        if (shot.sampling_z) { app.sampling_z_shift_ = *shot.sampling_z; }
         shoot(shot.name);
     }
 

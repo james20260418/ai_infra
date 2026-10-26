@@ -1249,3 +1249,142 @@ skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不�
 
 **仍未做（Danis 明确先不搞）**：条带**自身**参与 CSM 生成（写 shadow map）。要做都得给半透明
 片单开一次 shadow pass（或用 alpha-tested 变体），笨重且和「条带是 effect pass」的定位冲突。
+
+### 20. 采样数多态化：4 / 8 / 16 / 32 四档并列（2026-10-26）
+
+需求（Danis）：「16 这个采样数的多态化，draw call 命令上直接体现在接口上（就是
+`DrawStrip16Batch` 这种），上次模板类的实现给搞崩了……这次只做 Strip4，和 Strip16 并列。
+验收用 strip viewer 的新场景做采样对比，Strip4 三个实例、Strip16 也三个实例，纵向错开。」
+随后追加：「补齐 8、32 这两个实现；上下错开不是我的本意，我本意是**沿 Z 轴**
+（y-up 里的 z）错开，**四种配置同屏、精度逐渐变高**，再加个滑条让整体沿 Z 平移 ±5m 便于切换观察。」
+
+**四档 = 四种拓扑，不是四个精度档**
+
+| 档位 | 段数 | 顶点/条 | 索引/条 | 行宽 texel | 典型用途 |
+|---|---|---|---|---|---|
+| 4  | 3  | 8  | 18  | 13 | 雨丝、辅助线、道路标线（数量多、单条短、本来就直） |
+| 8  | 7  | 16 | 42  | 17 | 中短拖尾、光束、简单弧线 |
+| 16 | 15 | 32 | 90  | 25 | 默认主力：普通拖尾、波带、闭合圆环 |
+| 32 | 31 | 64 | 186 | 41 | 长而弯的东西（大回环、飘带、需要极致顺滑的边缘） |
+
+**接口层：四条并列命令、四个类型（不是模板）**
+
+| | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| 条带类型 | `Strip4`（200 B） | `Strip8`（296 B） | `Strip16`（680 B） | `Strip32`（1304 B） |
+| 批类型 | `TranslucentStrip4Batch` | `TranslucentStrip8Batch` | `TranslucentStrip16Batch` | `TranslucentStrip32Batch` |
+| 命令 | `DrawStrip4Batch` | `DrawStrip8Batch` | `DrawStrip16Batch` | `DrawStrip32Batch` |
+
+- 为什么不用模板：模板参数会一路渗透到渲染器、数据纹理、索引缓冲、后处理，
+  任何一处实例化不对都是链接期/运行期的灾难（上一版就是这么崩的）。这里改成
+  **运行期多态**：`StripSamplesView`（左/右轨 + 逐点颜色 + 剖面 + 点数 + 容量）+ `StripLayout`
+  （采样数 / 段数 / 顶点数 / 索引数 / 行宽），两者都是普通 POD。
+- 批级材质抽成 `StripBatchStyle` 并让四个批类型继承它：`batch.blend` / `batch.sky_light`
+  这些字段在四档上写法完全一样，校验也只有一份（`ValidateStripStyle` + `ValidateStripSamples`）。
+- `StripLayoutSlotOf(samples)` 把采样数映射到资源槽位（0..3）；非法采样数返回 -1，
+  调用方 CHECK 崩 —— 不静默画错档位。
+
+**实现：一套 CPU 数学 + 一份 GLSL**
+
+- CPU（`strip_geometry.h`）：`ViewOf(Strip4|8|16|32)` → `StripSamplesView`；
+  `ExpandStripVertices(view, layout, …)` / `ComputeSmoothStrip(view, layout, …)` /
+  `AppendSmoothStripData(view, layout, …, row_stride_floats, …)` /
+  `AppendSmoothStripVertices(view, layout, …)`。四档老签名都保留薄重载（调用点不用改）。
+- 平滑暂存 `SmoothStripCompute` 按**最大档**（32 列）分配，四档共用：只有前 `layout.samples` 项有效。
+- GLSL **只有一份**（没有为每档编译一套 program）：原先写死的 15/25/16/32 换成
+  4 个 uniform（`uPointColorScale/Bias`、`uProfileScale/Bias`）与 `uVerticesPerStrip`，
+  值由 `StripLayout` 现算 —— 16 点档与旧常量逐位等价（gold 逐像素不变，≤1/255）。
+- 资源：per-instance 纹理按档位各一张（行宽 13/17/25/41，列坐标必须按本档行宽归一化）、
+  索引缓冲各一条（18/42/90/186 索引，顶点基址 = 2×采样数），VAO/VBO 共用；
+  平滑 pass 的控制点数据纹理四档共用一张（行跨距按最大档 512 float，小档位行尾补 0）。
+
+**踩到的真坑：索引类数值绝不能走浮点**
+
+`vStripId`（= 本条带的 per-instance 数据行号）最初写成 `float(gl_VertexID) * (1/32)`。
+在 llvmpipe 上浮点除法会给出「**略大于整数**」的结果（如 1.0000001）⇒ `AppearanceRow()`
+落在两行之间 ⇒ 硬件双线性把**相邻两条带**的颜色与剖面混起来：画面表现是「颜色变淡发灰、
+条纹变糊」，既不崩也不报错，gold 直接差 134/255。修法：行号一路用 **int**
+（VS 里 `gl_VertexID / uVerticesPerStrip` 整数除法 + `flat out int`；平滑 pass 的
+`aStripId` 属性同样 `int(aStripId + 0.5)`）。
+
+**验收场景（viewer 场景④「采样对比」）**
+
+- 四条**同样的曲线**（波 / 螺旋 / 弧）、同一份材质（纹理 + 柔边剖面 + 同样的逐条带浓度），
+  只换采样密度：4 / 8 / 16 / 32 各一批（一批 3 条、各一次 draw call）。
+- 排布沿 **Z 轴**（y-up 里的深度轴）等距排开、**精度递增**（4 最近 → 32 最远，
+  间距 `sampling_row_gap` 面板可调）；面板另有 **「整体 Z 平移 m」滑条（−5…+5）**，
+  把四排一起挪，方便在同一机位下凑近看某一档。
+- 为什么每档都是 3 条：draw call 数只与**批数**有关、与条带数无关，一批多条才看得出这一点；
+  而且每条带在四档里各有一个对照，避免把「单条带的差异」误当成材质差异。
+- 拍摄：`500_sampling_rows`（全景）/ `505_sampling_zoom`（近机位）/ `510_sampling_smooth`
+  （四档都走 Hermite）/ `515_sampling_zshift`（整体 Z +2.5m，证明滑条真的在动）。
+  四张都**不进 gold**（图形对比是给人看的，不是回归门禁）。
+- A/B 证明「每一排确实来自它自己的命令」：临时去掉 `DrawStrip4Batch` 重拍，
+  只有 4 点档那一排区域的像素变化。
+
+**性能口径（不要夸大）**
+
+- 顶点/索引随档位线性变化（一条带 8/16/32/64 顶点、18/42/90/186 索引）。
+- **片元成本四档相同**：都走同一份 FS，per-fragment 一样 ⇒ 4 点档**不会**减少片元数
+  （覆盖的像素一样多）。省的是顶点数据带宽与顶点着色，价值在**顶点瓶颈**场景
+  （数量多、单条短：雨丝、辅助线、道路标线），不是「画得更快」。
+  反过来说，32 点档也不便宜：一条带 64 顶点，几千条时顶点/索引量是 4 点档的 8 倍。
+- 没做 frame-time 基准 —— 上面是结构上的必然，不编数字。
+
+### 21. 退化输入（几何数值退化）—— 会不会除零 / 出 NaN
+
+Danis 的问题：「万一 JPOV 用户输入了奇异的数值，JPOV 该不会崩溃吧？NaN 和 Inf 我们可以约定
+用户不会犯傻（render command proto 化时能证据实锤），但**像重叠点这类输入**，会不会让
+renderer 或者内部除以 0？」→ 本节是对**整条 strip 链路**的一遍清扫结果。
+
+**先说结论**
+
+1. **能"合法但退化"的几何（重叠点 / 零宽 / 亚微米段 / 折返 / 沙漏 / 远坐标）不会崩，
+   也不会产生 NaN。** 结构上的原因很硬：这些退化在屏幕上都是**零面积**（四边形的两条边
+   重合成一条线）⇒ 光栅化阶段就没有片元 ⇒ FS 里那些除法根本不会被执行。
+   GPU 端探针实测：把九种退化条带画进画面，**零面积的三类改变 0 个像素**。
+2. 能光栅化出来的退化（沙漏、楔形尖端、折返）确实会走到 FS 的除法，但**每个除法后面都
+   跟着守卫或 clamp**（见下表），所以结果是有限值 —— 要么被裁掉（落到条带轮廓之外），
+   要么画出一条极细的正常条带。
+3. **真正找到并修掉的除零点在"相机"上，不在几何上**：`ZView()` 的
+   `2·near·far / ((far+near) − ndc·(far−near))`，当用户给 `near = 0` 或 `near ≈ far` 时
+   分母会趋近 0（恰在远平面时是 0/0 = NaN）。NaN 一旦写进 1× WBO 就会顺着 composite
+   铺满全屏 —— 这是"一层膜把整张画面拖黑"的典型事故。已在 strip / particles / volume_fire
+   三处**同一段函数**上加了守卫（正常相机下分支永不进入 ⇒ 三者的 gold 全部逐像素不变）。
+
+**逐点清单（strip 链路里所有除法/归一化）**
+
+| 位置 | 表达式 | 退化时靠什么扛住 |
+|---|---|---|
+| `strip_geometry.h` 列 u | `col / layout.quads` | 布局由断言保证 `quads = samples−1 ≥ 3` |
+| `ComputeSmoothStrip` 外扩 | `margin / min_half` | `min_half` 只在 `|h| > 1e-5` 的列里取；全零宽时保持 1e30 ⇒ 回落 `scale = 1` |
+| 同上（单位外法向） | `lh * (1/len)` | `len < 1e-5 ⇒ continue`（该段没有"外侧"） |
+| 平滑 FS 段内参数 | `(D·dS) / max(dS·dS, 1e-8)` | 守卫 + 后面 `tStar = clamp(...)` |
+| 平滑 FS 宽度参数 | `(D·Pv) / max(Pv·Pv, 1e-8)` | 守卫（Pv = 2·Hh，零宽列会让它 → 0） |
+| 平滑 FS 段号 | `(seg + tStar) / uSegCount` | `uSegCount = quads ≥ 3`（uniform 由 layout 给） |
+| 平滑 FS 裁形 AA | `min(v*, 1−v*) / fwidth(v*)` | `fwidth` 有 `max(..., 1e-5)` 地板 |
+| 折线 VS 行号 | `gl_VertexID / uVerticesPerStrip` | **整数除法**（浮点会给"略大于整数"，见 §20）+ CPU 侧 CHECK > 0 |
+| per-instance 行号 | `(row + 0.5) / rows` | `rows = max(int(uAppearanceRows), 1)` |
+| 菲涅耳 | `inversesqrt(d2)` / `inversesqrt(n2)` | `d2 > 1e-12` / `n2 > 1e-12` 分支，否则退化到固定值 |
+| 天光 | `inversesqrt(n2)` | 同上 |
+| 深度线性化 | `2·near·far / ((far+near) − ndc·(far−near))` | **本次新增守卫**：`!(|denom| > 1e-6)` ⇒ 返回 `max(near, 1e-4)` |
+| WBO 解析 | `accum.rgb / accum.a` | `accum.a ≤ 1e-7` ⇒ 直接输出 0（原有守卫） |
+
+**测试（都是可证伪的，不是恒真断言）**
+
+- `strip_degenerate_test`（新，GPU 端，headless）：同机位渲四张图 —— 对照（不发条带）/
+  零面积退化 / 有面积退化 / 有面积退化 + 一条正常条带。断言：
+  ① 零面积那批**改变 0 个像素**；② 有面积那批**条带区域之外逐像素相同**（这是 NaN 的
+  探测器：NaN 泄漏会铺满全屏）；③ 同批的正常条带仍然可见（差异像素数严格变大且 > 500）。
+- `strip_geometry_test` 的 `StripDegenerate.*`（CPU 端，GL-free）：九种退化配方 + "两点重合"
+  + "零宽回落 scale=1" + "圆环壁厚 1e-7"，判据统一是**每个输出都是有限值**、外扩倍数落在
+  `[1, 8]`。
+
+**已知不做 / 边界**
+
+- NaN/Inf 输入不做处理：按约定由 render command proto 化时拦掉（本层只保证"有限值进去 ⇒
+  有限值出来"）。
+- 坐标量级失控（例如 1e30 米）不会被拒绝；外扩量会被 `kSmoothMaxWidenScale = 8` 截断，
+  极端细尖仍可能缺一条亚像素（既有已知限制，与本轮无关）。
+- 退化几何**不报错**是刻意的：零宽 = 一条线、重合点 = 零长度段，都是合法表达手段，
+  在 `ValidateStripBatch` 里拒绝它们等于把用户的合法几何判成非法。

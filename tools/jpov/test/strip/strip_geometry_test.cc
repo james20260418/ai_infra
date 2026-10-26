@@ -38,9 +38,27 @@ jpov::Strip16 MakeStrip(uint32_t point_count) {
     return s;
 }
 
-jpov::TranslucentStripBatch MakeBatch(uint32_t point_count) {
-    jpov::TranslucentStripBatch b;
+jpov::TranslucentStrip16Batch MakeBatch(uint32_t point_count) {
+    jpov::TranslucentStrip16Batch b;
     b.strips.push_back(MakeStrip(point_count));
+    return b;
+}
+
+// 4 采样点档：左轨 y=1、右轨 y=0，x = 列下标（与 MakeStrip 同一约定，便于对比）。
+jpov::Strip4 MakeStrip4(uint32_t point_count) {
+    jpov::Strip4 s;
+    s.point_count = point_count;
+    for (uint32_t i = 0; i < jpov::kStrip4SampleCount; ++i) {
+        const float f = static_cast<float>(i);
+        s.left[i] = jpov::Vec3f{f, 1.0f, 0.0f};
+        s.right[i] = jpov::Vec3f{f, 0.0f, 0.0f};
+    }
+    return s;
+}
+
+jpov::TranslucentStrip4Batch MakeBatch4(uint32_t point_count) {
+    jpov::TranslucentStrip4Batch b;
+    b.strips.push_back(MakeStrip4(point_count));
     return b;
 }
 
@@ -120,7 +138,7 @@ TEST(StripGeometry, VertexLayoutCarriesNoAlpha) {
 TEST(StripGeometry, IndexPatternMatchesQuads) {
     // 第 0 条带（base=0）第 1 条带（base=32）各取一份，验证偏移与三角形组成。
     std::vector<uint32_t> idx;
-    jpov::AppendStripIndicesForBlock(32, &idx);
+    jpov::AppendStripIndicesForBlock(32, jpov::kStripQuads, &idx);
     ASSERT_EQ(idx.size(), static_cast<size_t>(jpov::kStripIndicesPerStrip));
 
     // 第一个 quad：right0(32) left0(33) right1(34) / left0(33) left1(35) right1(34)
@@ -142,14 +160,14 @@ TEST(StripGeometry, IndexPatternMatchesQuads) {
 TEST(StripGeometry, ValidBatchPasses) {
     // 合法输入必须**不崩**：本用例的价值在「执行到这里没 abort」，
     // 不用 EXPECT_NO_FATAL_FAILURE（gtest 捕不到 glog CHECK 的 abort，会给出假的安全感）。
-    const jpov::TranslucentStripBatch batch = MakeBatch(16);
+    const jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     jpov::ValidateStripBatch(batch);
     SUCCEED();
 }
 
 TEST(StripGeometry, RejectsZeroPointCount) {
     // 默认构造 = point_count 0（调用方忘了填）。必须崩，不能静默画一条空条带。
-    jpov::TranslucentStripBatch batch;
+    jpov::TranslucentStrip16Batch batch;
     jpov::Strip16 strip = MakeStrip(16);
     strip.point_count = 0;
     batch.strips.push_back(strip);
@@ -157,7 +175,7 @@ TEST(StripGeometry, RejectsZeroPointCount) {
 }
 
 TEST(StripGeometry, RejectsTooManyPoints) {
-    jpov::TranslucentStripBatch batch;
+    jpov::TranslucentStrip16Batch batch;
     jpov::Strip16 strip = MakeStrip(16);
     strip.point_count = static_cast<uint32_t>(jpov::kStripSampleCount) + 1;
     batch.strips.push_back(strip);
@@ -166,7 +184,7 @@ TEST(StripGeometry, RejectsTooManyPoints) {
 
 TEST(StripGeometry, AcceptsSkyLightOnCoverage) {
     // 天光消费：合法用法（覆盖集 + 合法参数）必须**不崩**。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.sky_light = jpov::StripSkyLight{};
     jpov::ValidateStripBatch(batch);
     SUCCEED();
@@ -175,7 +193,7 @@ TEST(StripGeometry, AcceptsSkyLightOnCoverage) {
 TEST(StripGeometry, RejectsSkyLightOnEmissive) {
     // 加法集本身就是发光介质（注入量 = 色·α）；再叠「吸收→注入」会让 HDR 语义两套账。
     // 必须**崩**，不能静默忽略 —— 静默忽略等于骗调用方「设了但没生效」。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.blend = jpov::StripBlend::kEmissive;
     batch.sky_light = jpov::StripSkyLight{};
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "kCoverage");
@@ -184,7 +202,7 @@ TEST(StripGeometry, RejectsSkyLightOnEmissive) {
 TEST(StripGeometry, RejectsSkyLightInjectionOutOfRange) {
     // injection 是**物理比例**（吸收多少补多少）∈ [0,1]；> 1 会把「亮度旋钮」和
     // 「比例」两件事混在一起（想更亮应当放大天光色/强度）。越界必须崩。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     jpov::StripSkyLight sky;
     sky.injection = 1.5f;
     batch.sky_light = sky;
@@ -193,7 +211,7 @@ TEST(StripGeometry, RejectsSkyLightInjectionOutOfRange) {
 
 TEST(StripGeometry, RejectsZeroSunDirection) {
     // 零向量会让 shader 里的 normalize 出 NaN，而 NaN 进 accum 会污染整帧的 WBO 解析。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     jpov::StripSkyLight sky;
     sky.sun_direction = jpov::Vec3f{0.0f, 0.0f, 0.0f};
     batch.sky_light = sky;
@@ -203,7 +221,7 @@ TEST(StripGeometry, RejectsZeroSunDirection) {
 TEST(StripGeometry, RejectsHugeAmbientScale) {
     // 上界防御：把 lux 直接填进 ambient_scale（例如 20000）是常见单位错误，
     // 放行会让画面和 bloom 无声爆炸。必须崩。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     jpov::StripSkyLight sky;
     sky.ambient_scale = 20000.0f;
     batch.sky_light = sky;
@@ -211,7 +229,7 @@ TEST(StripGeometry, RejectsHugeAmbientScale) {
 }
 
 TEST(StripGeometry, RejectsNegativeSkyTricolor) {
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     jpov::StripSkyLight sky;
     sky.tricolor[1].r = -0.1f;
     batch.sky_light = sky;
@@ -220,7 +238,7 @@ TEST(StripGeometry, RejectsNegativeSkyTricolor) {
 
 TEST(StripGeometry, RejectsAllZeroPointAlpha) {
     // 典型误用：整块 memset 0 之后忘了填颜色/alpha → 整批隐形。必须崩。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     for (jpov::Color& c : batch.strips[0].point_color) {
         c.a = 0.0f;
     }
@@ -228,32 +246,32 @@ TEST(StripGeometry, RejectsAllZeroPointAlpha) {
 }
 
 TEST(StripGeometry, RejectsAllZeroProfile) {
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.strips[0].width_profile.fill(0.0f);
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "width_profile");
 }
 
 TEST(StripGeometry, RejectsNonFinitePosition) {
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.strips[0].left[3] = jpov::Vec3f{std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "非有限值");
 }
 
 TEST(StripGeometry, RejectsOutOfRangePointColor) {
     // rgb 允许 HDR（> 1），但 a 仍是覆盖率（≤ 1）、rgb 不能为负也不能超过防御上限。
-    jpov::TranslucentStripBatch alpha = MakeBatch(16);
+    jpov::TranslucentStrip16Batch alpha = MakeBatch(16);
     alpha.strips[0].point_color[0].a = 1.5f;
     EXPECT_DEATH(jpov::ValidateStripBatch(alpha), "point_color");
 
-    jpov::TranslucentStripBatch negative = MakeBatch(16);
+    jpov::TranslucentStrip16Batch negative = MakeBatch(16);
     negative.strips[0].point_color[0].r = -0.01f;
     EXPECT_DEATH(jpov::ValidateStripBatch(negative), "point_color");
 
-    jpov::TranslucentStripBatch nan = MakeBatch(16);
+    jpov::TranslucentStrip16Batch nan = MakeBatch(16);
     nan.strips[0].point_color[0].g = std::numeric_limits<float>::quiet_NaN();
     EXPECT_DEATH(jpov::ValidateStripBatch(nan), "point_color");
 
-    jpov::TranslucentStripBatch too_bright = MakeBatch(16);
+    jpov::TranslucentStrip16Batch too_bright = MakeBatch(16);
     too_bright.strips[0].point_color[0].b = jpov::kMaxStripColorValue + 1.0f;
     EXPECT_DEATH(jpov::ValidateStripBatch(too_bright), "point_color");
 }
@@ -261,7 +279,7 @@ TEST(StripGeometry, RejectsOutOfRangePointColor) {
 TEST(StripGeometry, AcceptsHdrPointColor) {
     // 加法集的亮度靠逐点颜色 > 1 表达（旧的 additive_gain 旋钮已删除）：
     // 这里必须**不崩**，否则「HDR 发光」这条路就被校验堵死了。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.blend = jpov::StripBlend::kEmissive;
     for (int i = 0; i < jpov::kStripSampleCount; ++i) {
         batch.strips[0].point_color[static_cast<size_t>(i)].r = 6.0f;
@@ -272,27 +290,27 @@ TEST(StripGeometry, AcceptsHdrPointColor) {
 
 TEST(StripGeometry, RejectsNonPositiveSoftDepth) {
     // nullopt = 关闭；给了值就必须 > 0（0 会让淡出表达式除零）。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.soft_depth_m = 0.0f;
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "soft_depth_m");
 }
 
 TEST(StripGeometry, RejectsIllegalBlendEnum) {
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.blend = static_cast<jpov::StripBlend>(7);
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "blend");
 }
 
 TEST(StripGeometry, RejectsIllegalGeometryEnum) {
     // geometry 非法 cast 值不许静默走折线 pass。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.geometry = static_cast<jpov::StripInterpolation>(9);
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "geometry");
 }
 
 TEST(StripGeometry, AcceptsSoftDepthAndEmissive) {
     // 合法组合必须不崩（执行到这里没 abort 就是通过）。
-    jpov::TranslucentStripBatch batch = MakeBatch(16);
+    jpov::TranslucentStrip16Batch batch = MakeBatch(16);
     batch.blend = jpov::StripBlend::kEmissive;
     batch.soft_depth_m = 0.15f;
     jpov::ValidateStripBatch(batch);
@@ -300,7 +318,7 @@ TEST(StripGeometry, AcceptsSoftDepthAndEmissive) {
 }
 
 TEST(StripGeometry, RejectsEmptyBatch) {
-    jpov::TranslucentStripBatch batch;
+    jpov::TranslucentStrip16Batch batch;
     EXPECT_DEATH(jpov::ValidateStripBatch(batch), "不能为空");
 }
 
@@ -733,33 +751,570 @@ TEST(StripRing, RejectsInvalidShape) {
 
 TEST(StripGeometry, RejectsBadFresnelParams) {
     // 菲涅耳参数是「设了就要生效」的：非法值必须崩，不能静默画出一个奇怪的边。
-    jpov::TranslucentStripBatch ok = MakeBatch(16);
+    jpov::TranslucentStrip16Batch ok = MakeBatch(16);
     ok.fresnel = jpov::StripFresnel{};
     jpov::ValidateStripBatch(ok);   // 合法值不崩
 
-    jpov::TranslucentStripBatch f0 = MakeBatch(16);
+    jpov::TranslucentStrip16Batch f0 = MakeBatch(16);
     f0.fresnel = jpov::StripFresnel{};
     f0.fresnel->f0 = 1.5f;   // 正入射反射率不可能 > 1
     EXPECT_DEATH(jpov::ValidateStripBatch(f0), "fresnel.f0");
 
-    jpov::TranslucentStripBatch power = MakeBatch(16);
+    jpov::TranslucentStrip16Batch power = MakeBatch(16);
     power.fresnel = jpov::StripFresnel{};
     power.fresnel->power = 0.0f;   // 0 次幂 = 恒 1（整面全反），几乎必然是忘填
     EXPECT_DEATH(jpov::ValidateStripBatch(power), "fresnel.power");
 
-    jpov::TranslucentStripBatch strength = MakeBatch(16);
+    jpov::TranslucentStrip16Batch strength = MakeBatch(16);
     strength.fresnel = jpov::StripFresnel{};
     strength.fresnel->strength = -0.5f;
     EXPECT_DEATH(jpov::ValidateStripBatch(strength), "fresnel.strength");
 
-    jpov::TranslucentStripBatch graze = MakeBatch(16);
+    jpov::TranslucentStrip16Batch graze = MakeBatch(16);
     graze.fresnel = jpov::StripFresnel{};
     graze.fresnel->graze_alpha = 1.2f;
     EXPECT_DEATH(jpov::ValidateStripBatch(graze), "fresnel.graze_alpha");
 
-    jpov::TranslucentStripBatch rim = MakeBatch(16);
+    jpov::TranslucentStrip16Batch rim = MakeBatch(16);
     rim.fresnel = jpov::StripFresnel{};
     rim.fresnel->rim_color = jpov::Vec3f{-0.1f, 0.0f, 0.0f};
     EXPECT_DEATH(jpov::ValidateStripBatch(rim), "fresnel.rim_color");
 }
 
+
+// ────────────────── 4 采样点档（Strip4）──────────────────
+//
+// 这一组盯的是「同一套算法换一个采样数」有没有走偏：
+//   * 拓扑常量（8 顶点 / 18 索引 / 行宽 13）与 16 点档的对应关系；
+//   * 尾部塌缩、UV 约定与 16 点档**逐字一致**（u = col/quads，v 仍是 0/1）；
+//   * 校验规则与 16 点档相同，只是上限是 4（不是「4 点档可以随便填」）；
+//   * 平滑前端：直线条带在 4 点档下同样不外扩、2 点条带同样退化成折线；
+//   * 数据纹理行：4 点档只写前 4 列，其余补 0 到 16 点档的行跨距。
+
+TEST(Strip4, TopologyConstantsMatchLayout) {
+    EXPECT_EQ(jpov::kStrip4SampleCount, 4);
+    EXPECT_EQ(jpov::kStrip4Quads, 3);
+    EXPECT_EQ(jpov::kStripLayout4.samples, 4);
+    EXPECT_EQ(jpov::kStripLayout4.quads, 3);
+    EXPECT_EQ(jpov::kStripLayout4.vertices_per_strip, 8);
+    EXPECT_EQ(jpov::kStripLayout4.indices_per_strip, 18);
+    EXPECT_EQ(jpov::kStripLayout4.appearance_texels, 13);   // 4 色 + 9 剖面 knot
+    // 与 16 点档的关系：顶点/索引是 1/4，profile 段数不变。
+    EXPECT_EQ(jpov::kStripLayout16.vertices_per_strip,
+              jpov::kStripLayout4.vertices_per_strip * 4);
+    EXPECT_EQ(jpov::kStripLayout16.indices_per_strip,
+              jpov::kStripLayout4.indices_per_strip * 5);   // 90 = 18 × 5（15 段 vs 3 段）
+}
+
+TEST(Strip4, ExpandsFixedTopology) {
+    std::vector<jpov::StripVertex> verts;
+    jpov::ExpandStripVertices(MakeStrip4(4), &verts);
+    ASSERT_EQ(verts.size(), 8u);
+
+    // 第 0 列：先 right（u=0, v=0），再 left（u=0, v=1）——与 16 点档同一顺序。
+    EXPECT_FLOAT_EQ(verts[0].v, 0.0f);
+    EXPECT_FLOAT_EQ(verts[1].v, 1.0f);
+    EXPECT_FLOAT_EQ(verts[0].u, 0.0f);
+    // 第 1 列 u = 1/3，第 3 列 u = 1（纹理沿长度仍是「整段铺满」）。
+    EXPECT_NEAR(verts[2].u, 1.0f / 3.0f, 1e-6f);
+    EXPECT_NEAR(verts[6].u, 1.0f, 1e-6f);
+    // 位置来自各自的 left/right：x = 列下标，左轨 y=1、右轨 y=0。
+    EXPECT_FLOAT_EQ(verts[6].position.x(), 3.0f);
+    EXPECT_FLOAT_EQ(verts[7].position.y(), 1.0f);
+}
+
+TEST(Strip4, CollapsesTailColumns) {
+    // 3 点时第 3 列（最后一列）必须塌缩到第 2 点上，但 **u 不变**（= 1）：
+    // 零面积 quad 不产生片元，同时短条带不会把纹理拉伸。
+    std::vector<jpov::StripVertex> short_strip;
+    jpov::ExpandStripVertices(MakeStrip4(3), &short_strip);
+    ASSERT_EQ(short_strip.size(), 8u);
+    EXPECT_FLOAT_EQ(short_strip[4].position.x(), 2.0f);   // 第 2 列 = 有效点 2
+    EXPECT_FLOAT_EQ(short_strip[6].position.x(), 2.0f);   // 第 3 列塌缩到同一点
+    EXPECT_FLOAT_EQ(short_strip[6].u, 1.0f);              // 但 u 仍是 1
+}
+
+TEST(Strip4, IndexPatternMatchesQuads) {
+    std::vector<uint32_t> idx;
+    jpov::AppendStripIndicesForBlock(8, jpov::kStripLayout4.quads, &idx);
+    ASSERT_EQ(idx.size(), 18u);
+    // 第一个 quad：right0(8) left0(9) right1(10) / left0(9) left1(11) right1(10)
+    EXPECT_EQ(idx[0], 8u);
+    EXPECT_EQ(idx[1], 9u);
+    EXPECT_EQ(idx[2], 10u);
+    EXPECT_EQ(idx[3], 9u);
+    EXPECT_EQ(idx[4], 11u);
+    EXPECT_EQ(idx[5], 10u);
+    for (uint32_t v : idx) {
+        EXPECT_GE(v, 8u);
+        EXPECT_LT(v, 16u);
+    }
+    EXPECT_EQ(idx[17], 14u);   // 最后一个 quad 的 right_{q+1}
+}
+
+TEST(Strip4, ValidBatchPasses) {
+    const jpov::TranslucentStrip4Batch batch = MakeBatch4(4);
+    jpov::ValidateStripBatch(batch);
+    SUCCEED();
+}
+
+TEST(Strip4, RejectsZeroPointCount) {
+    jpov::TranslucentStrip4Batch batch;
+    jpov::Strip4 strip = MakeStrip4(4);
+    strip.point_count = 0;
+    batch.strips.push_back(strip);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "point_count");
+}
+
+TEST(Strip4, RejectsTooManyPoints) {
+    // 上限是**本档位的容量**（4），不是 16：写 5 必须崩 —— 否则会静默读到数组外。
+    jpov::TranslucentStrip4Batch batch;
+    jpov::Strip4 strip = MakeStrip4(4);
+    strip.point_count = 5;
+    batch.strips.push_back(strip);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "point_count");
+}
+
+TEST(Strip4, RejectsAllTransparentStrip) {
+    // 与 16 点档同一条防线：逐点 alpha 全 0 = 这条带永远看不见，必须崩而不是静默。
+    jpov::TranslucentStrip4Batch batch;
+    jpov::Strip4 strip = MakeStrip4(4);
+    for (jpov::Color& c : strip.point_color) {
+        c.a = 0.0f;
+    }
+    batch.strips.push_back(strip);
+    EXPECT_DEATH(jpov::ValidateStripBatch(batch), "a 全为 0");
+}
+
+TEST(Strip4, SmoothStraightStripIsNotWidened) {
+    // 直条带：真实曲线 == 弦 ⇒ 外扩量只剩「2% + 1mm」的固定余量（不是 0），
+    // 于是 scale = 1 + 0.001 / 最细半宽。这里半宽恒为 0.5 ⇒ 1.002。
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(MakeStrip4(4), &c);
+    EXPECT_NEAR(c.margin, 0.001f, 1e-6f);
+    EXPECT_NEAR(c.scale, 1.0f + 0.001f / 0.5f, 1e-5f);
+}
+
+TEST(Strip4, SmoothTwoPointEqualsPolyline) {
+    // 只有 2 个有效点时，3 段里有两段是塌缩的零面积 quad：
+    // 顶点必须落在「折线顶点沿半宽方向外扩 scale 倍」的位置上（FS 会把它裁回真实轮廓），
+    // 也就是「2 点 kSmooth == kPolyline」在浮点意义上成立。
+    const jpov::Strip4 strip = MakeStrip4(2);
+    std::vector<jpov::StripVertex> polyline;
+    jpov::ExpandStripVertices(strip, &polyline);
+
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(strip, &c);
+    std::vector<float> smooth;
+    jpov::AppendSmoothStripVertices(strip, c, 0.0f, &smooth);
+    ASSERT_EQ(smooth.size(), static_cast<size_t>(8 * jpov::kSmoothFloatsPerVertex));
+
+    const float v_right = 0.5f - 0.5f * c.scale;
+    const float v_left = 0.5f + 0.5f * c.scale;
+    for (int col = 0; col < 4; ++col) {
+        for (int side = 0; side < 2; ++side) {
+            const size_t vi = static_cast<size_t>(col * 2 + side);
+            const jpov::StripVertex& p = polyline[vi];
+            // 中心 = 该列 left/right 的中点（这里是 y = 0.5）；外扩沿半宽方向。
+            const float cy = 0.5f;
+            const float expected_y = cy + (p.position.y() - cy) * c.scale;
+            EXPECT_NEAR(smooth[vi * 6 + 0], p.position.x(), 1e-5f);
+            EXPECT_NEAR(smooth[vi * 6 + 1], expected_y, 1e-5f);
+            EXPECT_NEAR(smooth[vi * 6 + 2], p.position.z(), 1e-5f);
+            EXPECT_NEAR(smooth[vi * 6 + 3], p.u, 1e-6f);
+            EXPECT_NEAR(smooth[vi * 6 + 4], side == 0 ? v_right : v_left, 1e-6f);
+        }
+    }
+    // 反向对照：外扩量只有 1mm 级别 ⇒ 与折线顶点的偏差必须 < 2mm，
+    // 若哪天 margin 算成「按曲率的外凸量」忘了回零，这条会立刻红。
+    EXPECT_LT(std::fabs(smooth[1] - polyline[0].position.y()), 0.002f);
+}
+
+TEST(Strip4, SmoothDataRowIsPaddedToSharedStride) {
+    // 两种档位共用一张数据纹理（行跨距按 16 点档 = 256 float）。
+    // 4 点档必须只写前 64 个 float（4 列 × 16），其余补 0 —— 少写会读到上一行的脏数据。
+    const jpov::Strip4 strip = MakeStrip4(4);
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(strip, &c);
+
+    std::vector<float> same_stride;
+    jpov::AppendSmoothStripData(strip, /*row_stride_floats=*/64, c, &same_stride);
+    EXPECT_EQ(same_stride.size(), 64u);   // 恰好一行（4 × 16），没有多余填充
+
+    std::vector<float> padded;
+    jpov::AppendSmoothStripData(strip, /*row_stride_floats=*/256, c, &padded);
+    ASSERT_EQ(padded.size(), 256u);
+    for (size_t i = 64; i < padded.size(); ++i) {
+        EXPECT_FLOAT_EQ(padded[i], 0.0f) << "填充位必须是 0，i=" << i;
+    }
+    // 前 64 个 float 与「不填充」版本逐字相同（填充不该影响有效数据）。
+    for (size_t i = 0; i < 64; ++i) {
+        EXPECT_FLOAT_EQ(padded[i], same_stride[i]);
+    }
+}
+
+TEST(Strip4, SmoothDataRejectsTooSmallStride) {
+    // 行跨距小于本布局需要 = 会覆盖下一行：必须崩，不能静默写坏纹理。
+    const jpov::Strip4 strip = MakeStrip4(4);
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(strip, &c);
+    std::vector<float> out;
+    EXPECT_DEATH(jpov::AppendSmoothStripData(strip, /*row_stride_floats=*/63, c, &out),
+                 "行跨距");
+}
+
+// ────────────────── 四档采样数（4 / 8 / 16 / 32）的统一检查 ──────────────────
+//
+// 只有「档位表」本身值得逐项钉住：其余数学（塌缩 / 切线 / 外扩 / 打包）已经是
+// view + layout 驱动的**同一份实现**，四档走的是同一段代码，分别写四遍测试只会
+// 复制粘贴。这里用 StripSamplesView（运行期视图）把四档串成一张表。
+
+namespace {
+
+// 一张「最大档」的临时采样数据：左轨 y=1、右轨 y=0、x = 列下标（与 MakeStrip 同一约定）。
+struct ScratchStrip {
+    jpov::Vec3f left[jpov::kStripMaxSampleCount];
+    jpov::Vec3f right[jpov::kStripMaxSampleCount];
+    jpov::Color color[jpov::kStripMaxSampleCount];
+    std::array<float, jpov::kStripProfileKnots> profile = jpov::kFlatWidthProfile;
+
+    explicit ScratchStrip(uint32_t point_count) {
+        for (int i = 0; i < jpov::kStripMaxSampleCount; ++i) {
+            const float f = static_cast<float>(i);
+            left[i] = jpov::Vec3f{f, 1.0f, 0.0f};
+            right[i] = jpov::Vec3f{f, 0.0f, 0.0f};
+            color[i] = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
+        }
+        view.point_count = point_count;
+    }
+
+    // capacity 由调用方按档位给（4/8/16/32）：视图本身不知道自己是哪一档。
+    jpov::StripSamplesView View(int capacity) {
+        view.left = left;
+        view.right = right;
+        view.point_color = color;
+        view.width_profile = &profile;
+        view.capacity = static_cast<uint32_t>(capacity);
+        return view;
+    }
+
+private:
+    jpov::StripSamplesView view{};
+};
+
+const jpov::StripLayout kAllLayouts[] = {jpov::kStripLayout4, jpov::kStripLayout8,
+                                         jpov::kStripLayout16, jpov::kStripLayout32};
+
+}  // namespace
+
+TEST(StripVariants, TopologyTableIsConsistent) {
+    // 顶点/索引/行宽必须都能由采样数推出来（渲染器与 shader 的 uniform 全靠这张表）。
+    const int kExpectedSamples[] = {4, 8, 16, 32};
+    const int kExpectedTexels[] = {13, 17, 25, 41};
+    for (size_t i = 0; i < 4; ++i) {
+        const jpov::StripLayout& l = kAllLayouts[i];
+        EXPECT_EQ(l.samples, kExpectedSamples[i]);
+        EXPECT_EQ(l.quads, l.samples - 1);
+        EXPECT_EQ(l.vertices_per_strip, 2 * l.samples);
+        EXPECT_EQ(l.indices_per_strip, l.quads * 6);
+        EXPECT_EQ(l.appearance_texels, kExpectedTexels[i]);
+        EXPECT_EQ(l.appearance_texels, l.samples + jpov::kStripProfileKnots);
+        // 槽位映射与资源数组（四档各一套）必须一一对应。
+        EXPECT_EQ(jpov::StripLayoutSlotOf(l.samples), static_cast<int>(i));
+    }
+    EXPECT_EQ(jpov::StripLayoutSlotOf(7), -1);   // 非法采样数：调用方 CHECK 崩
+}
+
+TEST(StripVariants, ExpandsEveryVariant) {
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        std::vector<jpov::StripVertex> verts;
+        jpov::ExpandStripVertices(scratch.View(layout.samples), layout, &verts);
+        ASSERT_EQ(verts.size(), static_cast<size_t>(layout.vertices_per_strip))
+            << "samples=" << layout.samples;
+        // 每列两个顶点：right（v=0）在前、left（v=1）在后；u = col/quads。
+        for (int col = 0; col < layout.samples; ++col) {
+            const size_t base = static_cast<size_t>(col) * 2;
+            EXPECT_FLOAT_EQ(verts[base].v, 0.0f);
+            EXPECT_FLOAT_EQ(verts[base + 1].v, 1.0f);
+            const float expected_u = static_cast<float>(col) /
+                                     static_cast<float>(layout.samples - 1);
+            EXPECT_NEAR(verts[base].u, expected_u, 1e-6f);
+            EXPECT_NEAR(verts[base + 1].u, expected_u, 1e-6f);
+        }
+        EXPECT_NEAR(verts[verts.size() - 1].u, 1.0f, 1e-6f);   // 末尾列 u 必须是 1
+    }
+}
+
+TEST(StripVariants, IndexPatternCoversEveryVertex) {
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        std::vector<uint32_t> idx;
+        jpov::AppendStripIndicesForBlock(/*base_vertex=*/0, layout.quads, &idx);
+        ASSERT_EQ(idx.size(), static_cast<size_t>(layout.indices_per_strip))
+            << "samples=" << layout.samples;
+        for (uint32_t v : idx) {
+            EXPECT_LT(v, static_cast<uint32_t>(layout.vertices_per_strip));
+        }
+        // 最后一个 quad 的第二个三角形末顶点 = 最后一条「右轨」顶点（2*(quads+1)-2）。
+        EXPECT_EQ(idx.back() + 1u,
+                  static_cast<uint32_t>(layout.vertices_per_strip) - 1u);
+    }
+}
+
+TEST(StripVariants, ValidateAcceptsFullAndCollapsed) {
+    // 满点与塌缩（point_count = 2）都必须通过：塌缩是合法用法（2 点 = 直线）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        for (uint32_t points : {2u, static_cast<uint32_t>(layout.samples)}) {
+            ScratchStrip scratch(points);
+            jpov::ValidateStripSamples(scratch.View(layout.samples), /*index=*/0,
+                                      "Scratch");
+        }
+    }
+    SUCCEED();
+}
+
+TEST(StripVariants, ValidateRejectsOverCapacity) {
+    // 超出**本档容量**一个点就必须崩（写成 32 会让小档位读越界）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples) + 1u);
+        jpov::StripSamplesView view = scratch.View(layout.samples);
+        EXPECT_DEATH(jpov::ValidateStripSamples(view, /*index=*/0, "Scratch"), "point_count")
+            << "samples=" << layout.samples;
+    }
+}
+
+TEST(StripVariants, SmoothStraightStripNotWidenedInEveryVariant) {
+    // 直条带在四档都不该被外扩（只剩固定的 1mm + 2% 余量），
+    // 且平滑前端不能因为档位变大而算错（数组按最大档分配，只有前 layout.samples 项有效）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        jpov::SmoothStripCompute computed;
+        jpov::ComputeSmoothStrip(scratch.View(layout.samples), layout, &computed);
+        EXPECT_NEAR(computed.margin, 0.001f, 1e-6f) << "samples=" << layout.samples;
+        // 半宽恒为 0.5 ⇒ scale = 1 + 0.001/0.5。
+        EXPECT_NEAR(computed.scale, 1.0f + 0.001f / 0.5f, 1e-5f)
+            << "samples=" << layout.samples;
+
+        std::vector<float> verts;
+        jpov::AppendSmoothStripVertices(scratch.View(layout.samples), layout, computed,
+                                        0.0f, &verts);
+        EXPECT_EQ(verts.size(), static_cast<size_t>(layout.vertices_per_strip *
+                                                    jpov::kSmoothFloatsPerVertex))
+            << "samples=" << layout.samples;
+    }
+}
+
+TEST(StripVariants, SmoothDataRowPaddingMatchesStride) {
+    // 四档共用同一张控制点数据纹理（行跨距 = 最大档 512 float）：
+    // 小档位必须补 0 到行尾，且有效区逐字等于「不填充」版本。
+    const int stride = jpov::kStripMaxSampleCount * jpov::kSmoothFloatsPerColumn;
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        jpov::SmoothStripCompute computed;
+        jpov::ComputeSmoothStrip(scratch.View(layout.samples), layout, &computed);
+
+        std::vector<float> tight;
+        jpov::AppendSmoothStripData(scratch.View(layout.samples), layout, computed,
+                                    layout.samples * jpov::kSmoothFloatsPerColumn, &tight);
+        std::vector<float> padded;
+        jpov::AppendSmoothStripData(scratch.View(layout.samples), layout, computed,
+                                    stride, &padded);
+
+        ASSERT_EQ(padded.size(), static_cast<size_t>(stride)) << "samples=" << layout.samples;
+        ASSERT_EQ(tight.size(), static_cast<size_t>(layout.samples * jpov::kSmoothFloatsPerColumn));
+        for (size_t i = 0; i < tight.size(); ++i) {
+            EXPECT_FLOAT_EQ(padded[i], tight[i]) << "samples=" << layout.samples;
+        }
+        for (size_t i = tight.size(); i < padded.size(); ++i) {
+            EXPECT_FLOAT_EQ(padded[i], 0.0f) << "samples=" << layout.samples;
+        }
+    }
+}
+
+// ────────────────── 退化输入（合法但几何退化）──────────────────
+//
+// Danis 的问题：「万一用户输入了奇异数值（不含 NaN/Inf），比如**重叠点**，会不会让
+// renderer 或者内部除以 0？」这些用例就是答案的 CPU 半边：
+// 这些输入**能通过 ValidateStripBatch**（它们不是错误，只是几何退化了），所以每一处
+// 除法/归一化都必须自己扛住。判据统一是「输出有限」+「不崩」，不假设某个具体数值。
+//
+// 为什么不在 ValidateStripBatch 里拒绝它们：重叠点/零宽是**合法的表达手段**
+// （零宽 = 一条线、重合点 = 零长度段），拒绝等于把用户的合法几何判成非法。
+
+namespace {
+
+bool AllFinite(const jpov::Vec3f& v) {
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+// 把一条 16 点条带按「退化配方」填好，然后跑完整条 CPU 前端并检查每个输出都是有限值。
+void CheckDegenerateFinite(const char* name, const jpov::Strip16& strip) {
+    const jpov::StripSamplesView view = jpov::ViewOf(strip);
+    // ① 校验必须**接受**（退化 ≠ 非法）。
+    jpov::ValidateStripSamples(view, 0, name);
+
+    // ② 平滑前端：切线 / 外扩量 / 打包。
+    jpov::SmoothStripCompute computed;
+    jpov::ComputeSmoothStrip(view, jpov::kStripLayout16, &computed);
+    EXPECT_TRUE(std::isfinite(computed.margin)) << name;
+    EXPECT_TRUE(std::isfinite(computed.scale)) << name;
+    EXPECT_GE(computed.scale, 1.0f) << name;
+    EXPECT_LE(computed.scale, jpov::kSmoothMaxWidenScale + 1e-5f) << name;
+    for (int i = 0; i < jpov::kStripLayout16.samples; ++i) {
+        EXPECT_TRUE(AllFinite(computed.center[i])) << name << " center[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.half[i])) << name << " half[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.center_tan[i])) << name << " center_tan[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.half_tan[i])) << name << " half_tan[" << i << "]";
+    }
+
+    // ③ 数据行（控制点纹理）与两种顶点展开。
+    std::vector<float> data;
+    jpov::AppendSmoothStripData(view, jpov::kStripLayout16, computed,
+                                jpov::kStripMaxSampleCount * jpov::kSmoothFloatsPerColumn,
+                                &data);
+    for (float v : data) {
+        EXPECT_TRUE(std::isfinite(v)) << name << " smooth data";
+    }
+    std::vector<float> smooth_verts;
+    jpov::AppendSmoothStripVertices(view, jpov::kStripLayout16, computed, 0.0f,
+                                    &smooth_verts);
+    for (float v : smooth_verts) {
+        EXPECT_TRUE(std::isfinite(v)) << name << " smooth vertex";
+    }
+    std::vector<jpov::StripVertex> poly_verts;
+    jpov::ExpandStripVertices(view, jpov::kStripLayout16, &poly_verts);
+    ASSERT_EQ(poly_verts.size(), static_cast<size_t>(jpov::kStripVerticesPerStrip)) << name;
+    for (const jpov::StripVertex& v : poly_verts) {
+        EXPECT_TRUE(AllFinite(v.position)) << name << " polyline position";
+        EXPECT_TRUE(std::isfinite(v.u) && std::isfinite(v.v)) << name << " polyline uv";
+    }
+}
+
+// 16 点条带的退化配方：按几何关系逐列生成。
+enum class DegenerateKind {
+    kAllIdenticalZeroWidth,  // 所有点重合 + 零宽（退化成一个点）
+    kAllIdenticalFullWidth,  // 所有点重合、但有宽度（退化成一条线段）
+    kDuplicateTail,          // 后半段所有列都坐在同一个点上
+    kZeroWidthCurve,         // 曲线正常、宽度恒为 0（一条线）
+    kHourglass,              // 中间一列宽度为 0
+    kSubMicron,              // 相邻列相距 1e-7 m
+    kFoldBack,               // 180° 折返（后半段沿原路返回）
+    kWedge,                  // 首列宽度 0，往后张开
+    kFarAway,                // 坐标 1e6 m
+};
+
+jpov::Strip16 MakeDegenerate(DegenerateKind kind) {
+    jpov::Strip16 s;
+    constexpr int n = jpov::kStripSampleCount;
+    for (int i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+        jpov::Vec3f left{};
+        jpov::Vec3f right{};
+        switch (kind) {
+            case DegenerateKind::kAllIdenticalZeroWidth:
+                left = jpov::Vec3f{0.0f, 0.0f, 0.0f};
+                right = left;
+                break;
+            case DegenerateKind::kAllIdenticalFullWidth:
+                left = jpov::Vec3f{0.0f, 1.0f, 0.0f};
+                right = jpov::Vec3f{0.0f, 0.0f, 0.0f};
+                break;
+            case DegenerateKind::kDuplicateTail: {
+                const float x = (i < n / 2) ? static_cast<float>(i)
+                                            : static_cast<float>(n / 2);
+                left = jpov::Vec3f{x, 1.0f, 0.0f};
+                right = jpov::Vec3f{x, 0.0f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kZeroWidthCurve: {
+                const float x = -2.0f + 4.0f * t;
+                left = jpov::Vec3f{x, 0.5f + 0.2f * std::sin(3.0f * t), 0.0f};
+                right = left;
+                break;
+            }
+            case DegenerateKind::kHourglass: {
+                const float x = -2.0f + 4.0f * t;
+                const float half = (i == n / 2) ? 0.0f : 0.3f;
+                left = jpov::Vec3f{x, half, 0.0f};
+                right = jpov::Vec3f{x, -half, 0.0f};
+                break;
+            }
+            case DegenerateKind::kSubMicron: {
+                const float x = 1e-7f * static_cast<float>(i);
+                left = jpov::Vec3f{x, 1e-7f, 0.0f};
+                right = jpov::Vec3f{x, -1e-7f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kFoldBack: {
+                const int k = (i < n / 2) ? i : (n - 1 - i);
+                const float x = static_cast<float>(k);
+                left = jpov::Vec3f{x, 0.2f, 0.0f};
+                right = jpov::Vec3f{x, -0.2f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kWedge: {
+                const float x = -2.0f + 2.0f * t;
+                const float half = 0.3f * t;   // t=0 时恰为 0
+                left = jpov::Vec3f{x, half, 0.0f};
+                right = jpov::Vec3f{x, -half, 0.0f};
+                break;
+            }
+            case DegenerateKind::kFarAway: {
+                const float x = 1e6f + static_cast<float>(i);
+                left = jpov::Vec3f{x, 1e6f + 0.2f, 1e6f};
+                right = jpov::Vec3f{x, 1e6f - 0.2f, 1e6f};
+                break;
+            }
+        }
+        s.left[static_cast<size_t>(i)] = left;
+        s.right[static_cast<size_t>(i)] = right;
+    }
+    s.point_count = static_cast<uint32_t>(n);
+    return s;
+}
+
+}  // namespace
+
+TEST(StripDegenerate, AllCpuOutputsStayFinite) {
+    const DegenerateKind kKinds[] = {
+        DegenerateKind::kAllIdenticalZeroWidth, DegenerateKind::kAllIdenticalFullWidth,
+        DegenerateKind::kDuplicateTail,         DegenerateKind::kZeroWidthCurve,
+        DegenerateKind::kHourglass,             DegenerateKind::kSubMicron,
+        DegenerateKind::kFoldBack,              DegenerateKind::kWedge,
+        DegenerateKind::kFarAway,
+    };
+    for (DegenerateKind kind : kKinds) {
+        CheckDegenerateFinite("degenerate", MakeDegenerate(kind));
+    }
+}
+
+TEST(StripDegenerate, TwoIdenticalPointsStayFinite) {
+    // 只给 2 个点、且两点完全重合：塌缩 + Hermite 全都退化，但必须仍然有限。
+    jpov::Strip16 s = MakeDegenerate(DegenerateKind::kAllIdenticalFullWidth);
+    s.point_count = 2;
+    CheckDegenerateFinite("two-identical", s);
+}
+
+TEST(StripDegenerate, AllZeroWidthCollapsesToLine) {
+    // 零宽的曲线：外扩量应退回「只剩固定余量」（没有任何"外侧"可撑），
+    // 且 scale 必须是 1（min_half 全是 0 ⇒ 没有可用的半宽基准）。
+    jpov::Strip16 s = MakeDegenerate(DegenerateKind::kZeroWidthCurve);
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(jpov::ViewOf(s), jpov::kStripLayout16, &c);
+    EXPECT_FLOAT_EQ(c.scale, 1.0f);
+    EXPECT_NEAR(c.margin, 0.001f, 1e-6f);
+}
+
+TEST(StripDegenerate, RingWithTinyWallAndHeightStaysFinite) {
+    // 圆环：壁厚 1e-7、高 1e-6 —— 内外立壁几乎重合，仍是合法形状（只需 wall < outer）。
+    jpov::StripRingShape shape;
+    shape.outer_radius = 1.0f;
+    shape.wall_thickness = 1e-7f;
+    shape.height = 1e-6f;
+    shape.center_y = 0.5f;
+    const std::array<jpov::Strip16, jpov::kStripRingPartCount> ring =
+        jpov::MakeStripRing(shape);
+    for (const jpov::Strip16& strip : ring) {
+        CheckDegenerateFinite("ring", strip);
+    }
+}

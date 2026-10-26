@@ -2016,8 +2016,17 @@ struct RenderCommandList {
 
     // 半透明条带批（世界空间）。每条命令 = 一批「同材质」条带，**一次 draw call**。
     // 在体积火之后、远景雾之前渲染：写 1× WBO 覆盖集再 over 合成进 HDR。
-    // 见 TranslucentStripBatch / docs/jpov_strip3d_translucent_design.md。
-    std::vector<TranslucentStripBatch> translucent_strips;
+    // 见 docs/jpov_strip3d_translucent_design.md。
+    //
+    // 两种采样数各一条队列，**不是一个队列 + 变体**：
+    //   * 数据类型（Strip16 / Strip4）与命令（DrawStrip16Batch / DrawStrip4Batch）在接口处
+    //     就分开，传错在编译期就报；渲染器内部按各自的拓扑批量上传 + 一次 draw。
+    //   * 两条队列之间**顺序无意义**：覆盖集是 accum 加 / reveal 乘，加法集是纯求和，
+    //     集合内部本来就与顺序无关（见 strip_types.h 的 StripBlend 说明）。
+    std::vector<TranslucentStrip4Batch> translucent_strip4s;      // 4  采样点（8 顶点/条）
+    std::vector<TranslucentStrip8Batch> translucent_strip8s;      // 8  采样点（16 顶点/条）
+    std::vector<TranslucentStrip16Batch> translucent_strips;      // 16 采样点（32 顶点/条）
+    std::vector<TranslucentStrip32Batch> translucent_strip32s;    // 32 采样点（64 顶点/条）
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
     //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
@@ -2437,10 +2446,18 @@ struct RenderCommandList {
     // Pre-condition: cmd.volume_id != 0。
     void DrawVolumeFire(VolumeFireCommand cmd);
 
-    // DrawTranslucentStrips：追加一批半透明条带（见 TranslucentStripBatch）。
+    // DrawStrip16Batch：追加一批 16 采样点的半透明条带（见 TranslucentStrip16Batch）。
     // 只是把命令推入 translucent_strips 列表；整批在条带 pass 里**一次 draw call** 画完。
     // Pre-condition: cmd.strips 非空。
-    void DrawTranslucentStrips(TranslucentStripBatch cmd);
+    void DrawStrip16Batch(TranslucentStrip16Batch cmd);
+
+    // DrawStrip4Batch / 8 / 32：与 DrawStrip16Batch **并列的四条命令**，不是同一个命令的参数 ——
+    // 采样数属于「这是哪种拓扑」，是接口层语义，不该藏在运行期字段里。
+    // （条带顶点数 = 2×采样数：4→8 / 8→16 / 16→32 / 32→64。）
+    // Pre-condition: cmd.strips 非空。
+    void DrawStrip4Batch(TranslucentStrip4Batch cmd);
+    void DrawStrip8Batch(TranslucentStrip8Batch cmd);
+    void DrawStrip32Batch(TranslucentStrip32Batch cmd);
 };
 
 }  // namespace jpov

@@ -27,7 +27,7 @@
 
 namespace jpov {
 
-// 拓扑常量（共享网格 = 固定 16 列双轨）。
+// 拓扑常量（16 列双轨 —— 主力档）。
 //   顶点：16 列 ×（right, left）= 32
 //   四边形：相邻两列成 1 个 quad = 15
 //   索引：每个 quad 2 个三角形 = 90
@@ -35,17 +35,112 @@ inline constexpr int kStripQuads = kStripSampleCount - 1;
 inline constexpr int kStripVerticesPerStrip = 2 * kStripSampleCount;
 inline constexpr int kStripIndicesPerStrip = kStripQuads * 6;
 
-// 每列的 u（沿长度方向）是**常量表**：编译期算好，别在每帧每列做一次除法。
-// （values: 0/15, 1/15, ..., 15/15）
-struct StripColumnU {
-    float v[kStripSampleCount];
-    constexpr StripColumnU() : v{} {
-        for (int i = 0; i < kStripSampleCount; ++i) {
-            v[i] = static_cast<float>(i) / static_cast<float>(kStripQuads);
-        }
-    }
+// ── 采样视图 / 拓扑布局：16 点与 4 点共用同一套 CPU 数学 ──────────────────
+//
+// 两种条带的**数据形状不同、算法逐字相同**（塌缩 / 切线 / 外扩 / 打包 / 展开）。
+// 为了不把同一套数学写两遍（写两遍必然漂移，而且出问题只表现为「某种条带的某个角
+// 缺一条亚像素」），CPU 侧把它们统一看成「左轨 + 右轨 + 逐点颜色 + 点数」：
+//
+//   StripSamplesView —— 运行期的指针 + 计数（**不是模板**：模板参数会一路渗透到
+//     渲染器 / 数据纹理 / 索引缓冲，任何一处实例化不对都是链接期或运行期的灾难）。
+//   StripLayout      —— 拓扑常量：每列几个顶点、几段、appearance 纹理多宽。
+//
+// 两者的组合在编译期就固定成两份：kStripLayout16 / kStripLayout4。
+struct StripSamplesView {
+    const Vec3f* left = nullptr;
+    const Vec3f* right = nullptr;
+    const Color* point_color = nullptr;
+    // 宽度剖面也是 per-strip 数据（9 个 knot，与采样数无关）——放在视图里，
+    // 上传/校验就不用再多带一个参数。
+    const std::array<float, kStripProfileKnots>* width_profile = nullptr;
+    uint32_t point_count = 0;   // 实际有效列数 [2, capacity]
+    uint32_t capacity = 0;      // 该类型能容纳的列数（4 或 16）
 };
-inline constexpr StripColumnU kStripColumnU{};
+
+inline StripSamplesView ViewOf(const Strip16& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStripSampleCount)};
+}
+
+inline StripSamplesView ViewOf(const Strip4& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStrip4SampleCount)};
+}
+
+inline StripSamplesView ViewOf(const Strip8& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStrip8SampleCount)};
+}
+
+inline StripSamplesView ViewOf(const Strip32& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStrip32SampleCount)};
+}
+
+struct StripLayout {
+    int samples = 0;              // 采样点数（= 列数）
+    int quads = 0;                // 段数 = samples − 1
+    int vertices_per_strip = 0;   // 2 × samples
+    int indices_per_strip = 0;    // quads × 6
+    int appearance_texels = 0;    // samples + kStripProfileKnots（一行 per-instance 数据的宽度）
+};
+
+struct StripLayoutSlot {
+    static constexpr int k4 = 0;
+    static constexpr int k8 = 1;
+    static constexpr int k16 = 2;
+    static constexpr int k32 = 3;
+    static constexpr int kCount = 4;
+};
+
+inline constexpr StripLayout kStripLayout4{kStrip4SampleCount,
+                                           kStrip4Quads,
+                                           2 * kStrip4SampleCount,
+                                           kStrip4Quads * 6,
+                                           kStrip4SampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout8{kStrip8SampleCount,
+                                           kStrip8Quads,
+                                           2 * kStrip8SampleCount,
+                                           kStrip8Quads * 6,
+                                           kStrip8SampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout16{kStripSampleCount,
+                                            kStripQuads,
+                                            kStripVerticesPerStrip,
+                                            kStripIndicesPerStrip,
+                                            kStripSampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout32{kStrip32SampleCount,
+                                            kStrip32Quads,
+                                            2 * kStrip32SampleCount,
+                                            kStrip32Quads * 6,
+                                            kStrip32SampleCount + kStripProfileKnots};
+
+// 采样数 → 布局槽位（渲染器用它索引「每档一套」的资源：per-instance 纹理 / 索引缓冲）。
+// 非法采样数返回 -1（调用方 CHECK 崩，别静默画错档位）。
+inline constexpr int StripLayoutSlotOf(int samples) {
+    if (samples == kStrip4SampleCount) {
+        return StripLayoutSlot::k4;
+    }
+    if (samples == kStrip8SampleCount) {
+        return StripLayoutSlot::k8;
+    }
+    if (samples == kStripSampleCount) {
+        return StripLayoutSlot::k16;
+    }
+    if (samples == kStrip32SampleCount) {
+        return StripLayoutSlot::k32;
+    }
+    return -1;
+}
+
+// 第 col 列的 u（沿长度，0..1 等分）。四档共用这一个函数：最多 32 列，
+// 逐列一次除法可以忽略（旧版给 16 点档存过一张常量表，四档化后没有意义，已删）。
+inline float StripColumnUAt(int col, const StripLayout& layout) {
+    return static_cast<float>(col) / static_cast<float>(layout.quads);
+}
 
 // 一个展开后的条带顶点：位置（世界空间）+ 纹理 uv。
 //
@@ -91,53 +186,58 @@ inline bool IsFinite(const Vec3f& v) {
 //   * fresnel 各参数在合法范围。
 //
 // Pre-condition: 无（本函数就是拿来校验调用方输入的）。
-inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
-    CHECK(!batch.strips.empty()) << "StripBatch: strips 不能为空";
+//
+// 分两层：`ValidateStripStyle` 管批级材质（两种采样数共用），
+// `ValidateStripSamples` 管一条带自己的采样数据；上面两个 ValidateStripBatch 重载
+// 只是「循环自己的 vector」—— 16 点档与 4 点档的校验规则**逐字相同**，只是列数不同。
+inline void ValidateStripStyle(const StripBatchStyle& batch, size_t strip_count,
+                               const char* what) {
+    CHECK_GT(strip_count, 0u) << what << ": strips 不能为空";
 
     // 枚举防御：别让非法 cast 值落到「两个集合都不写」的静默路径。
     CHECK(batch.blend == StripBlend::kCoverage || batch.blend == StripBlend::kEmissive)
-        << "StripBatch: blend 非法值 " << static_cast<int>(batch.blend);
+        << what << ": blend 非法值 " << static_cast<int>(batch.blend);
     // geometry 同理：非法 cast 值会静默走折线 pass（用户以为开了平滑却不生效）。
     CHECK(batch.geometry == StripInterpolation::kPolyline ||
           batch.geometry == StripInterpolation::kSmooth)
-        << "StripBatch: geometry 非法值 " << static_cast<int>(batch.geometry);
+        << what << ": geometry 非法值 " << static_cast<int>(batch.geometry);
     if (batch.soft_depth_m.has_value()) {
         CHECK_GT(*batch.soft_depth_m, 0.0f)
-            << "StripBatch: soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
+            << what << ": soft_depth_m 若启用必须 > 0（想关闭请置 nullopt）";
     }
     if (batch.sky_light.has_value()) {
         // 加法集本身就是发光介质（注入量 = 色·α，不受阻挡），把「吸收→注入」叠上去只会
         // 让 HDR 语义变成两套账 ⇒ 直接拒收，而不是偷偷忽略（静默忽略等于骗人）。
         CHECK(batch.blend == StripBlend::kCoverage)
-            << "StripBatch: sky_light 只支持 kCoverage（加法集本身即发光介质）";
+            << what << ": sky_light 只支持 kCoverage（加法集本身即发光介质）";
         const StripSkyLight& s = *batch.sky_light;
         CHECK(s.injection >= 0.0f && s.injection <= 1.0f)
-            << "StripBatch: sky_light.injection 必须在 [0,1]（想要更亮请放大天光参数），当前="
+            << what << ": sky_light.injection 必须在 [0,1]（想要更亮请放大天光参数），当前="
             << s.injection;
         // 上界与逐点颜色同一个防御量级：越界基本可以断定是单位搞错（比如把 lux 直接填进来），
         // 而不是艺术意图 —— 放行只会让画面（和 bloom）无声爆炸。
         CHECK(s.ambient_scale >= 0.0f && s.ambient_scale <= kMaxStripColorValue)
-            << "StripBatch: sky_light.ambient_scale 必须在 [0," << kMaxStripColorValue
+            << what << ": sky_light.ambient_scale 必须在 [0," << kMaxStripColorValue
             << "]，当前=" << s.ambient_scale;
         CHECK(s.sun_intensity >= 0.0f && s.sun_intensity <= kMaxStripColorValue)
-            << "StripBatch: sky_light.sun_intensity 必须在 [0," << kMaxStripColorValue
+            << what << ": sky_light.sun_intensity 必须在 [0," << kMaxStripColorValue
             << "]，当前=" << s.sun_intensity;
         // sun_direction 允许非单位向量（shader 里归一），但必须有限、非零：
         // 零向量会让 normalize 出 NaN，而 NaN 进 accum 会污染整帧的 WBO 解析。
         CHECK(strip_internal::IsFinite(s.sun_direction))
-            << "StripBatch: sky_light.sun_direction 非有限值";
+            << what << ": sky_light.sun_direction 非有限值";
         CHECK(s.sun_direction.Norm() > 1.0e-6f)
-            << "StripBatch: sky_light.sun_direction 不能是零向量（会让 normalize 出 NaN）";
+            << what << ": sky_light.sun_direction 不能是零向量（会让 normalize 出 NaN）";
         CHECK(strip_internal::IsFinite(s.sun_color) && s.sun_color.x() >= 0.0f &&
               s.sun_color.y() >= 0.0f && s.sun_color.z() >= 0.0f)
-            << "StripBatch: sky_light.sun_color 必须是有限非负值";
+            << what << ": sky_light.sun_color 必须是有限非负值";
         for (size_t k = 0; k < s.tricolor.size(); ++k) {
             const Color& c = s.tricolor[k];
             // 顺序固定 [天, 天际线, 地] —— 这里不校验顺序，只校验数值合法性。
             CHECK(c.r >= 0.0f && c.g >= 0.0f && c.b >= 0.0f &&
                   c.r <= kMaxStripColorValue && c.g <= kMaxStripColorValue &&
                   c.b <= kMaxStripColorValue)
-                << "StripBatch: sky_light.tricolor[" << k << "] 必须在 [0,"
+                << what << ": sky_light.tricolor[" << k << "] 必须在 [0,"
                 << kMaxStripColorValue << "]，当前=(" << c.r << "," << c.g << "," << c.b
                 << ")";
         }
@@ -146,96 +246,153 @@ inline void ValidateStripBatch(const TranslucentStripBatch& batch) {
     if (batch.fresnel.has_value()) {
         const StripFresnel& f = *batch.fresnel;
         CHECK(f.f0 >= 0.0f && f.f0 <= 1.0f)
-            << "StripBatch: fresnel.f0 必须在 [0,1]，当前=" << f.f0;
+            << what << ": fresnel.f0 必须在 [0,1]，当前=" << f.f0;
         // 上限不是物理约束，是防御：pow(1−cos, 64) 已低到无法在 8bit 输出上看出来，
         // 再大只会吃掉 pow() 精度（NaN 也会在这里被 finite 检查拦下）。
         CHECK(f.power > 0.0f && f.power <= 64.0f)
-            << "StripBatch: fresnel.power 必须在 (0,64]，当前=" << f.power;
+            << what << ": fresnel.power 必须在 (0,64]，当前=" << f.power;
         CHECK(f.strength >= 0.0f)
-            << "StripBatch: fresnel.strength 不能为负，当前=" << f.strength;
+            << what << ": fresnel.strength 不能为负，当前=" << f.strength;
         CHECK(f.graze_alpha >= 0.0f && f.graze_alpha <= 1.0f)
-            << "StripBatch: fresnel.graze_alpha 必须在 [0,1]，当前=" << f.graze_alpha;
+            << what << ": fresnel.graze_alpha 必须在 [0,1]，当前=" << f.graze_alpha;
         CHECK(strip_internal::IsFinite(f.rim_color) && f.rim_color.x() >= 0.0f &&
               f.rim_color.y() >= 0.0f && f.rim_color.z() >= 0.0f)
-            << "StripBatch: fresnel.rim_color 必须是有限非负值";
-    }
-
-    for (size_t i = 0; i < batch.strips.size(); ++i) {
-        const Strip16& s = batch.strips[i];
-        CHECK_GE(s.point_count, 2u)
-            << "Strip16[" << i << "]: point_count 至少 2（未填写时为 0）";
-        CHECK_LE(s.point_count, static_cast<uint32_t>(kStripSampleCount))
-            << "Strip16[" << i << "]: point_count 不得大于 " << kStripSampleCount;
-
-        float alpha_max = 0.0f;
-        for (uint32_t k = 0; k < s.point_count; ++k) {
-            CHECK(strip_internal::IsFinite(s.left[k]) && strip_internal::IsFinite(s.right[k]))
-                << "Strip16[" << i << "]: 第 " << k << " 个采样点坐标非有限值";
-            const Color& c = s.point_color[k];
-            // rgb 允许 HDR（> 1 = 发光/加法集的亮度），但必须有限、非负、不超过
-            // 防御上限；越界比较对 NaN 恒为 false ⇒ NaN 也会在这里被拦下。
-            CHECK(c.r >= 0.0f && c.r <= kMaxStripColorValue && c.g >= 0.0f &&
-                  c.g <= kMaxStripColorValue && c.b >= 0.0f && c.b <= kMaxStripColorValue)
-                << "Strip16[" << i << "]: point_color[" << k << "].rgb 必须在 [0,"
-                << kMaxStripColorValue << "]，当前=(" << c.r << "," << c.g << "," << c.b
-                << ")";
-            CHECK(c.a >= 0.0f && c.a <= 1.0f)
-                << "Strip16[" << i << "]: point_color[" << k << "].a 必须在 [0,1]，当前="
-                << c.a;
-            alpha_max = std::max(alpha_max, c.a);
-        }
-        CHECK_GT(alpha_max, 0.0f)
-            << "Strip16[" << i << "]: 前 point_count 个点的 point_color.a 全为 0"
-               "（该条带不可见）";
-
-        float profile_max = 0.0f;
-        for (int k = 0; k < kStripProfileKnots; ++k) {
-            const float knot = s.width_profile[static_cast<size_t>(k)];
-            CHECK(knot >= 0.0f && knot <= 1.0f)
-                << "Strip16[" << i << "]: width_profile[" << k
-                << "] 必须在 [0,1]，当前=" << knot;
-            profile_max = std::max(profile_max, knot);
-        }
-        CHECK_GT(profile_max, 0.0f)
-            << "Strip16[" << i << "]: width_profile 全为 0（该条带不可见）";
+            << what << ": fresnel.rim_color 必须是有限非负值";
     }
 }
 
-// 把一条 Strip16 展开成 kStripVerticesPerStrip 个顶点，**追加**到 out。
+// 一条带的采样数据校验（左/右轨、逐点颜色、宽度剖面）。
+inline void ValidateStripSamples(const StripSamplesView& s, size_t index,
+                                 const char* what) {
+    CHECK(s.width_profile != nullptr) << what << ": width_profile 不能为空";
+    const std::array<float, kStripProfileKnots>& width_profile = *s.width_profile;
+    CHECK_GE(s.point_count, 2u)
+        << what << "[" << index << "]: point_count 至少 2（未填写时为 0）";
+    CHECK_LE(s.point_count, s.capacity)
+        << what << "[" << index << "]: point_count 不得大于 " << s.capacity;
+
+    float alpha_max = 0.0f;
+    for (uint32_t k = 0; k < s.point_count; ++k) {
+        CHECK(strip_internal::IsFinite(s.left[k]) && strip_internal::IsFinite(s.right[k]))
+            << what << "[" << index << "]: 第 " << k << " 个采样点坐标非有限值";
+        const Color& c = s.point_color[k];
+        // rgb 允许 HDR（> 1 = 发光/加法集的亮度），但必须有限、非负、不超过
+        // 防御上限；越界比较对 NaN 恒为 false ⇒ NaN 也会在这里被拦下。
+        CHECK(c.r >= 0.0f && c.r <= kMaxStripColorValue && c.g >= 0.0f &&
+              c.g <= kMaxStripColorValue && c.b >= 0.0f && c.b <= kMaxStripColorValue)
+            << what << "[" << index << "]: point_color[" << k << "].rgb 必须在 [0,"
+            << kMaxStripColorValue << "]，当前=(" << c.r << "," << c.g << "," << c.b << ")";
+        CHECK(c.a >= 0.0f && c.a <= 1.0f)
+            << what << "[" << index << "]: point_color[" << k << "].a 必须在 [0,1]，当前="
+            << c.a;
+        alpha_max = std::max(alpha_max, c.a);
+    }
+    CHECK_GT(alpha_max, 0.0f)
+        << what << "[" << index << "]: 前 point_count 个点的 point_color.a 全为 0"
+                   "（该条带不可见）";
+
+    float profile_max = 0.0f;
+    for (int k = 0; k < kStripProfileKnots; ++k) {
+        const float knot = width_profile[static_cast<size_t>(k)];
+        CHECK(knot >= 0.0f && knot <= 1.0f)
+            << what << "[" << index << "]: width_profile[" << k << "] 必须在 [0,1]，当前="
+            << knot;
+        profile_max = std::max(profile_max, knot);
+    }
+    CHECK_GT(profile_max, 0.0f)
+        << what << "[" << index << "]: width_profile 全为 0（该条带不可见）";
+}
+
+// 16 采样点的批。
+inline void ValidateStripBatch(const TranslucentStrip16Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip16Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip16");
+    }
+}
+
+// 4 采样点的批（规则与 16 点档逐字相同，只是容量 4）。
+inline void ValidateStripBatch(const TranslucentStrip4Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip4Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip4");
+    }
+}
+
+inline void ValidateStripBatch(const TranslucentStrip8Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip8Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip8");
+    }
+}
+
+inline void ValidateStripBatch(const TranslucentStrip32Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip32Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip32");
+    }
+}
+
+// 把一条带展开成 layout.vertices_per_strip 个顶点，**追加**到 out。
 //
 // 塌缩规则：列 col 取采样点 src = min(col, point_count-1)。
-// 于是不足 16 点时，尾部列全部坐在最后一个有效点 → 零面积 quad → 不产生片元。
-// 注意塌缩**不改变 UV**：u 恒为 col/15（纹理由「16 格」约定沿长度等分），
-// 所以短条带只用到纹理前 (point_count-1)/15 的一段（不拉伸图像）。
+// 于是不足 samples 点时，尾部列全部坐在最后一个有效点 → 零面积 quad → 不产生片元。
+// 注意塌缩**不改变 UV**：u 恒为 col/quads（纹理由「samples 格」约定沿长度等分），
+// 所以短条带只用到纹理前 (point_count-1)/quads 的一段（不拉伸图像）。
 //
 // Pre-condition: 调用方已跑过 ValidateStripBatch（本函数不做重复校验）。
-inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* out) {
+inline void ExpandStripVertices(const StripSamplesView& strip, const StripLayout& layout,
+                                std::vector<StripVertex>* out /*output*/) {
     CHECK(out != nullptr) << "ExpandStripVertices: out 不能为空";
+    CHECK_GE(layout.samples, 2) << "ExpandStripVertices: layout.samples 至少 2";
+    CHECK_EQ(layout.quads, layout.samples - 1) << "ExpandStripVertices: layout 自相矛盾";
+    CHECK_EQ(layout.vertices_per_strip, 2 * layout.samples)
+        << "ExpandStripVertices: layout 自相矛盾";
     // point_count == 0 会让下面的 point_count - 1 下溢成 4G，属于内存安全边界，
     // 这里再兜一次（批量路径已由 ValidateStripBatch 保证，本函数是公开入口）。
     CHECK_GE(strip.point_count, 2u) << "ExpandStripVertices: point_count 至少 2";
-    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
+    CHECK_LE(strip.point_count, strip.capacity) << "ExpandStripVertices: point_count 越界";
 
     const uint32_t last = strip.point_count - 1;
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const uint32_t src = (static_cast<uint32_t>(col) < strip.point_count)
                                  ? static_cast<uint32_t>(col)
                                  : last;
         // u = 沿长度（图片从左到右），v = 横跨宽度（0 = right / 1 = left）。
-        const float u = kStripColumnU.v[col];
+        const float u = StripColumnUAt(col, layout);
         // 先 right（v=0）后 left（v=1）——与索引模式严格对应。
         out->push_back(StripVertex{strip.right[src], u, 0.0f});
         out->push_back(StripVertex{strip.left[src], u, 1.0f});
     }
 }
 
-// 追加**一个条带块**的索引（90 个）；base_vertex = 该条带首个顶点的全局下标。
+// 16 采样点的便捷重载（gold/单测/老调用点用）。
+inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout16, out);
+}
+
+inline void ExpandStripVertices(const Strip4& strip, std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout4, out);
+}
+
+inline void ExpandStripVertices(const Strip8& strip, std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout8, out);
+}
+
+inline void ExpandStripVertices(const Strip32& strip,
+                                std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout32, out);
+}
+
+// 追加**一个条带块**的索引（quads × 6 个）；base_vertex = 该条带首个顶点的全局下标。
 // 绕序：quad q 由顶点 (2q, 2q+1, 2q+2, 2q+3) = (right_q, left_q, right_{q+1}, left_{q+1})
 // 组成，两个三角形 (0,1,2) + (1,3,2)。渲染时关剔除，故绕序不影响可见性，
 // 但保持**一致**才能让将来开剔除时行为可预期。
-inline void AppendStripIndicesForBlock(uint32_t base_vertex, std::vector<uint32_t>* out) {
+inline void AppendStripIndicesForBlock(uint32_t base_vertex, int quads,
+                                       std::vector<uint32_t>* out /*output*/) {
     CHECK(out != nullptr) << "AppendStripIndicesForBlock: out 不能为空";
-    for (int q = 0; q < kStripQuads; ++q) {
+    CHECK_GE(quads, 1) << "AppendStripIndicesForBlock: quads 至少 1";
+    for (int q = 0; q < quads; ++q) {
         const uint32_t r0 = base_vertex + static_cast<uint32_t>(2 * q);
         const uint32_t l0 = r0 + 1;
         const uint32_t r1 = r0 + 2;
@@ -427,10 +584,11 @@ inline Vec3f Hermite(const Vec3f& p0, const Vec3f& m0, const Vec3f& p1,
 // 下标 col ∈ [0, kStripSampleCount)：不足 16 点时，尾部列与折线 pass 一样**塌缩**
 // 到最后一个有效点（重复的列 = 零面积 quad，不产生片元）。
 struct SmoothStripCompute {
-    Vec3f center[kStripSampleCount];      // 过点（该列 left/right 的中点）
-    Vec3f half[kStripSampleCount];        // 半宽矢量（**未外扩**，指向 left 一侧）
-    Vec3f center_tan[kStripSampleCount];  // ∂center/∂t
-    Vec3f half_tan[kStripSampleCount];    // ∂half/∂t
+    // 按**最大档**（32）分配，四档共用同一个暂存结构：只有前 layout.samples 项有效。
+    Vec3f center[kStripMaxSampleCount];      // 过点（该列 left/right 的中点）
+    Vec3f half[kStripMaxSampleCount];        // 半宽矢量（**未外扩**，指向 left 一侧）
+    Vec3f center_tan[kStripMaxSampleCount];  // ∂center/∂t
+    Vec3f half_tan[kStripMaxSampleCount];    // ∂half/∂t
     float margin = 0.0f;                  // 需要外扩的绝对量（米），含 2% + 1mm 余量
     float scale = 1.0f;                   // 顶点外扩倍数（整条带统一，≥ 1）
 };
@@ -438,15 +596,20 @@ struct SmoothStripCompute {
 // 计算一条条带的中心线 / 半宽矢量 / 切线与自动外扩倍数。
 //
 // Pre-condition: point_count ∈ [2, kStripSampleCount]（ValidateStripBatch 已保证）。
-inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*output*/) {
+inline void ComputeSmoothStrip(const StripSamplesView& strip, const StripLayout& layout,
+                               SmoothStripCompute* out /*output*/) {
     CHECK(out != nullptr) << "ComputeSmoothStrip: out 不能为空";
+    CHECK_GE(layout.samples, 2) << "ComputeSmoothStrip: layout.samples 至少 2";
+    CHECK_EQ(layout.quads, layout.samples - 1) << "ComputeSmoothStrip: layout 自相矛盾";
     CHECK_GE(strip.point_count, 2u) << "ComputeSmoothStrip: point_count 至少 2";
-    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount))
-        << "ComputeSmoothStrip: point_count 不得大于 " << kStripSampleCount;
+    CHECK_LE(strip.point_count, strip.capacity) << "ComputeSmoothStrip: point_count 越界";
+    CHECK_LE(layout.samples, kStripMaxSampleCount)
+        << "ComputeSmoothStrip: 布局的采样数超过 SmoothStripCompute 的容量（"
+        << kStripMaxSampleCount << "）";
 
     // ① 控制点：中心 c（Hermite 的过点）与半宽矢量 h（未外扩）。
     const uint32_t last_real = strip.point_count - 1;
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const uint32_t src = std::min(static_cast<uint32_t>(col), last_real);
         const Vec3f& l = strip.left[src];
         const Vec3f& r = strip.right[src];
@@ -461,7 +624,7 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
     //    但 u 沿长度被不均匀拉伸（实测 16 点直条带端段偏 5.5% 段长、2 点条带偏 4%），
     //    而且「2 点 kSmooth == kPolyline」这个数学事实不成立了。
     const int last_real_i = static_cast<int>(last_real);
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const int c = std::min(col, last_real_i);   // 尾部塌缩列与最后一个有效列同切线
         const int im = std::max(c - 1, 0);
         const int ip = std::min(c + 1, last_real_i);
@@ -478,7 +641,7 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
     //    局部等宽、但隔壁列在收窄（"肩部"）时 n ≠ 0，简化的 margin 会低估外凸量，
     //    收窄处外侧就缺一条（实测：半宽 0.2 的直条带、末列收到 0，两侧各缺 4.25 mm）。
     float margin = 0.0f;
-    for (int seg = 0; seg < kStripQuads; ++seg) {
+    for (int seg = 0; seg < layout.quads; ++seg) {
         for (int si = 1; si <= kSmoothMarginSamplesPerSegment; ++si) {
             const float t = static_cast<float>(si) /
                             static_cast<float>(kSmoothMarginSamplesPerSegment + 1);
@@ -509,7 +672,7 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
     // 为什么必须整条带统一（不能逐列）：FS 假定 position = lerp(c) + (2v−1)·lerp(h)，
     // 只有 scale 恒定才有 lerp(scale·h) == scale·lerp(h)；逐列不同会在收窄处露出缺口。
     float min_half = 1e30f;
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const float hl = out->half[col].Norm();
         if (hl > 1e-5f) {
             min_half = std::min(min_half, hl);
@@ -521,6 +684,23 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
                      : 1.0f;
 }
 
+// 16 采样点的便捷重载（gold/单测/老调用点用）。
+inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout16, out);
+}
+
+inline void ComputeSmoothStrip(const Strip4& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout4, out);
+}
+
+inline void ComputeSmoothStrip(const Strip8& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout8, out);
+}
+
+inline void ComputeSmoothStrip(const Strip32& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout32, out);
+}
+
 // 追加一条条带的数据纹理行：kStripSampleCount × 16 float。
 //
 // 打包约定（**与 kSmoothFsMain 的解包逐字对应**，改一边必须改另一边）：
@@ -530,14 +710,19 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
 // 颜色用塌缩后的列（与几何一致）：尾部列与最后一个有效列同色。这些列构成零面积
 // quad、不产生片元，所以取什么值对画面没影响，但**与几何用同一个 src 下标**可以让
 // 「第 i 列的颜色 = 第 i 列的几何」这个不变量在整张纹理上成立，读代码时不用再分叉。
-inline void AppendSmoothStripData(const Strip16& strip,
-                                  const SmoothStripCompute& computed,
+inline void AppendSmoothStripData(const StripSamplesView& strip, const StripLayout& layout,
+                                  const SmoothStripCompute& computed, int row_stride_floats,
                                   std::vector<float>* out /*output*/) {
     CHECK(out != nullptr) << "AppendSmoothStripData: out 不能为空";
     CHECK_GE(strip.point_count, 2u) << "AppendSmoothStripData: point_count 至少 2";
-    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
+    CHECK_LE(strip.point_count, strip.capacity) << "AppendSmoothStripData: point_count 越界";
+    const int row_floats = layout.samples * kSmoothFloatsPerColumn;
+    CHECK_GE(row_stride_floats, row_floats)
+        << "AppendSmoothStripData: 行跨距 " << row_stride_floats << " 小于本布局需要的 "
+        << row_floats << " float";
+
     const uint32_t last_real = strip.point_count - 1;
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const Vec3f& c = computed.center[col];
         const Vec3f& m = computed.center_tan[col];
         const Vec3f& h = computed.half[col];
@@ -561,6 +746,23 @@ inline void AppendSmoothStripData(const Strip16& strip,
         out->push_back(color.b);
         out->push_back(color.a);
     }
+    // 补齐到行跨距：两种布局共用同一张数据纹理（宽 = 16 点档的宽度），
+    // 4 点档的每一行只用前 1/4，其余补 0（FS 只按自己的 seg 索引读，不会碰到）。
+    for (int i = row_floats; i < row_stride_floats; ++i) {
+        out->push_back(0.0f);
+    }
+}
+
+inline void AppendSmoothStripData(const Strip16& strip, const SmoothStripCompute& computed,
+                                  std::vector<float>* out /*output*/) {
+    AppendSmoothStripData(ViewOf(strip), kStripLayout16, computed,
+                          kStripSampleCount * kSmoothFloatsPerColumn, out);
+}
+
+inline void AppendSmoothStripData(const Strip4& strip, int row_stride_floats,
+                                  const SmoothStripCompute& computed,
+                                  std::vector<float>* out /*output*/) {
+    AppendSmoothStripData(ViewOf(strip), kStripLayout4, computed, row_stride_floats, out);
 }
 
 // 追加一条条带的顶点：kStripVerticesPerStrip × 6 float，列内**先 right 后 left**
@@ -568,20 +770,21 @@ inline void AppendSmoothStripData(const Strip16& strip,
 //
 // 外扩沿半宽矢量做，并把外扩量**折进属性 v**（右 = 0.5 − scale/2、左 = 0.5 + scale/2），
 // 于是 FS 里插值出来的 v 就是真实参数：position = lerp(c) + (2v−1)·lerp(h)。
-inline void AppendSmoothStripVertices(const Strip16& strip,
-                                      const SmoothStripCompute& computed,
-                                      float strip_id,
+inline void AppendSmoothStripVertices(const StripSamplesView& strip,
+                                      const StripLayout& layout,
+                                      const SmoothStripCompute& computed, float strip_id,
                                       std::vector<float>* out /*output*/) {
     CHECK(out != nullptr) << "AppendSmoothStripVertices: out 不能为空";
     CHECK_GE(strip.point_count, 2u) << "AppendSmoothStripVertices: point_count 至少 2";
-    CHECK_LE(strip.point_count, static_cast<uint32_t>(kStripSampleCount));
+    CHECK_LE(strip.point_count, strip.capacity)
+        << "AppendSmoothStripVertices: point_count 越界";
 
     const uint32_t last_real = strip.point_count - 1;
     const float v_right = 0.5f - 0.5f * computed.scale;
     const float v_left = 0.5f + 0.5f * computed.scale;
-    for (int col = 0; col < kStripSampleCount; ++col) {
+    for (int col = 0; col < layout.samples; ++col) {
         const uint32_t src = std::min(static_cast<uint32_t>(col), last_real);
-        const float u = kStripColumnU.v[col];
+        const float u = StripColumnUAt(col, layout);
         const Vec3f& center = computed.center[col];
         for (int side = 0; side < 2; ++side) {
             const Vec3f& edge = (side == 0) ? strip.right[src] : strip.left[src];
@@ -593,6 +796,28 @@ inline void AppendSmoothStripVertices(const Strip16& strip,
             out->push_back(strip_id);
         }
     }
+}
+
+inline void AppendSmoothStripVertices(const Strip16& strip,
+                                      const SmoothStripCompute& computed, float strip_id,
+                                      std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout16, computed, strip_id, out);
+}
+
+inline void AppendSmoothStripVertices(const Strip4& strip, const SmoothStripCompute& computed,
+                                      float strip_id, std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout4, computed, strip_id, out);
+}
+
+inline void AppendSmoothStripVertices(const Strip8& strip, const SmoothStripCompute& computed,
+                                      float strip_id, std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout8, computed, strip_id, out);
+}
+
+inline void AppendSmoothStripVertices(const Strip32& strip,
+                                      const SmoothStripCompute& computed, float strip_id,
+                                      std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout32, computed, strip_id, out);
 }
 
 }  // namespace jpov
