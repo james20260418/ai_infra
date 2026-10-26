@@ -73,7 +73,12 @@ public:
     // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
     // person_instances_ 只存 3 个**静态** SkinnedInstanceState（pose_a==pose_b=0 = 恒等 pose
     //   = 骨架 rest = T-pose），每帧拷一份交给 DrawMeshWithSkeleton（一次 instanced draw）。
+    // 镜面地板场景里的"镜面蓝人"：同一个蓝人 mesh，但**静态绘制**（不走蒙皮）
+    // 且材质换成镜面材质 —— 用来看**弯曲金属表面**上的 SSR 表现。
+    // （SSR 的反射体目前只支持 Object3DCommand，蒙皮/实例化还不能标记，见设计文档。）
     uint32_t person_mesh_ = 0;           // 蒙皮 mesh_id（glb 第一个 primitive）
+    float person_scale_ = 1.0f;          // 蓝人归一化后的缩放（InstallPerson 里算）
+    float person_foot_offset_ = 0.0f;    // 让脚底落在 y=0 所需的 center.y 偏移
     uint32_t person_skeleton_id_ = 0;    // RegisterSkeleton 返回的骨架 id
     jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
     jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
@@ -268,6 +273,15 @@ public:
                                {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 0.7f);
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            }
+            // 镜面蓝人：站在地板中央偏前，用镜面材质 ⇒ 弯曲金属表面的倒影。
+            if (person_mesh_ != 0) {
+                cmds->DrawObject3DReflective(
+                    person_mesh_, mat_mirror_,
+                    /*center*/ {0.10f, person_foot_offset_, 1.30f},
+                    /*up*/     {0.0f, 1.0f, 0.0f},
+                    /*front*/  {0.0f, 0.0f, 1.0f},
+                    /*scale*/  person_scale_);
             }
         } else if (show_scene_) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
@@ -464,9 +478,9 @@ private:
     bool  ssr_on_ = false;
     float ssr_res_scale_ = 0.5f;
     float ssr_start_level_ = 2.0f;
-    float ssr_max_steps_ = 48.0f;
+    float ssr_max_steps_ = 128.0f;
     float ssr_thickness_ = 0.6f;
-    float ssr_rough_cutoff_ = 0.4f;
+    float ssr_rough_cutoff_ = 0.6f;
     // 默认开 DDA：实测它在裂缝/黑影上明显更好（见提交说明）。Hi-Z 更便宜，可用面板切回。
     bool  ssr_use_dda_ = true;
     float ssr_grazing_min_ = 0.02f;   // 掠射淡出下界（越小倒影越多）

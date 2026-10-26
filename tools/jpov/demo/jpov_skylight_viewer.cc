@@ -167,6 +167,9 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
         inst.ratio  = 0.0f;
         app.person_instances_.push_back(inst);
     }
+    // 镜面地板场景会复用同一份 mesh 做静态绘制：记下缩放与"脚底对齐"的偏移。
+    app.person_scale_ = scale;
+    app.person_foot_offset_ = -scale * min_y;
     app.person_gltf_ = std::move(obj);   // 资源保活（释放走 Finalize）
 
     LOG(INFO) << "blue-man assembled: mesh_id=" << app.person_mesh_

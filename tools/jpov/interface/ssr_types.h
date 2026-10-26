@@ -40,7 +40,12 @@ struct SsrConfig {
     //               「1/z 线性」的**闭式解**求交点，不做二分、不建金字塔。
     // 为什么留两套：DDA 与 Hi-Z 是两条独立的代码路径。若某个瑕疵只在其中一条出现，
     //   就说明问题在链路里而不是算法的固有限制 —— 这是"冤枉算法"最有效的排除法。
-    int march_mode = 0;
+    // **默认按业界一般配置**（2026-10-26 查证）：
+    //   * UE4/5 的 SSR 默认 `Max Roughness = 0.8`（"works well"）；
+    //   * Unity 后处理的 SSR 暴露 Iteration Count / Step Size / Width Modifier(厚度) / Reflection Blur；
+    //   * McGuire & Mara 2014 的 DDA 论文强调 zThickness 要按**物体实际厚度**给（示例 1~5 m）。
+    // 我们取折中：粗糙度上限 0.6（比 UE 保守一点，因为超过后探针的效果更好）、厚度 0.6 m。
+    int march_mode = 1;
 
     // Hi-Z 起始层（march_mode==1 时忽略）：0 = **关闭 Hi-Z**（全分辨率逐像素细步进，最准最慢）；
     //   1~4 = 从 2^level 像素的格子开始粗走，撞到可能命中的格子就下探一层（推荐 2）。
@@ -50,7 +55,7 @@ struct SsrConfig {
     // 每条射线的最大步进次数（含粗层步与下探步）。命中质量与成本的主旋钮。
     // ⚠️ 两套算法的一步含义不同：Hi-Z 一步 = 2^level 像素；DDA 一步 = **1 像素**，
     //    所以切到 DDA 想看完整行程时，这个值得调大（如 192）。
-    int max_steps = 48;
+    int max_steps = 128;
 
     // 命中后二分细化的次数（把命中位置收敛到亚像素）。0 = 直接用粗命中点（会抖）。
     int refine_steps = 4;
@@ -65,7 +70,7 @@ struct SsrConfig {
 
     // 粗糙度上限：**超过这个粗糙度的像素不做 SSR**（改用天空兜底 / 交给 env 探针）。
     // 物理上粗糙表面的反射是一片模糊，单条射线代表不了，硬做只会得到"脏"的倒影。
-    float roughness_cutoff = 0.4f;
+    float roughness_cutoff = 0.6f;
 
     // 掠射淡出（"倒影什么时候消失"的阈值）：反射方向的"朝屏幕纵深"分量 -R.z 小于
     // grazing_fade_min 时**完全不 march**（只用探针），到 grazing_fade_max 才完全信任 SSR。
