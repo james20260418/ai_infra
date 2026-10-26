@@ -43,6 +43,7 @@
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
@@ -344,7 +345,9 @@ void main() {
     // kMeshFs3dPBR: 统一 GGX PBR 片元（含 16×16 tile culling，拷贝自 Object3DRenderer）。
     //   ⚠️ 其 GLSL #define（TILE_SIZE / MAX_LIGHTS_PER_TILE / MAX_TOTAL_LIGHTS /
     //      LIGHT_INDEX_SENTINEL）与下方 kTileSize16 等主机端常量一一对应，改任一处必须同改另一处。
-    static constexpr const char* kMeshFs3dPBR = R"glsl(
+    //   ⚠️ 类型是 std::string：源文由「字面量 + 共享片段 kEnvSpecularGlsl + 字面量」拼成
+    //（环境镜面那段三份 PBR 片元共用，各自拷贝必然分叉，见 src/env_specular.h）。
+    inline static const std::string kMeshFs3dPBR = std::string(R"glsl(
 #version 330 core
 
 #define TILE_SIZE 16
@@ -806,7 +809,7 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
         total_specular += uLights[li].color * uLights[li].intensity * spec * NdotL_s * attenuation;
     }
 }
-
+)glsl") + kEnvSpecularGlsl + R"glsl(
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -931,7 +934,8 @@ void main() {
         }
     }
 
-    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
+    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular
+                + EnvSpecularTerm(N, V, roughness, metallic, base_color) * ao + emissive;
     FragColor = vec4(result, 1.0);
     FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }

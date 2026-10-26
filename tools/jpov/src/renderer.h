@@ -245,6 +245,13 @@ private:
     void EnsureSkyColorFBO(int w, int h);
     void DestroySkyColorFBO();
 
+    // ---- 环境镜面（IBL specular）的天空 cubemap ----
+    // Renderer 每帧在 cmds.env_specular 有值时把天空渲成一张 size²的 cubemap
+    //（6 个面，只含大气色，下半球用地色），三份 PBR 着色器按 reflect(-V,N) 采样。
+    // 尺寸固定不随窗口变，故不参与分辨率重建，只在首次使用时建一次。
+    void EnsureSkyEnvCube(int size);
+    void DestroySkyEnvCube();
+
     float mvp_[16];
     ShaderManager shader_mgr_;
 
@@ -291,6 +298,11 @@ private:
     // 其内容是未定义的，会被之后画的几何 shader 写成垃圾（实测 NaN）。
     unsigned int sky_fbo_ = 0, sky_tex_ = 0;
     int sky_w_ = 0, sky_h_ = 0;
+
+    // 环境镜面的天空 cubemap（RGBA16F + mip 链）+ 只挂一个颜色附件的逐面 FBO。
+    // 生命周期：首次用到时建（EnsureSkyEnvCube），Finalize 时销毁；不随窗口尺寸重建。
+    unsigned int sky_env_tex_ = 0, sky_env_fbo_ = 0;
+    int sky_env_size_ = 0;
     // 上采样累加后，最终辉光所在的 acc 纹理（L0 分辨率），供 composite 采样。
     unsigned int bloom_final_tex_ = 0;
     // 上采样累加用的乒乓缓冲（acc_a/acc_b 各半分辨率，随链一起分配）。

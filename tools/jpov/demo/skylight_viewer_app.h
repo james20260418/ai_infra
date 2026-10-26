@@ -6,7 +6,8 @@
 //   - 天光 = `CreateDefaultSkyCommand`（其余参数走默认构造；月亮恒取 moon_dir = −sun_dir）；
 //   - 光照 = 由该 SkyCommand **推导**（主平行光 + ambient 色/强），不手配。
 //
-// 交互面板五个自由度（六个滑条）+ 一个环境光开关：
+// 交互面板：五个天光自由度（六个滑条）+ 三色环境光开关 + SMAA 开关/阈值 +
+// 环境镜面开关/天光消费量：
 //   ① 浊度 turb [0,8]
 //   ② 季节色温 日光 [−1,+1]（左=蓝偏 / 右=红偏；只染太阳能通道）
 //   ③ 天体方向：仰角 [−90,+90] + 方位角 [0,360)（两个滑条，属同一个自由度）
@@ -16,6 +17,9 @@
 //   ⑤ 夜空偏蓝 [0,1]（0=出厂夜色，1=梦幻蓝且更亮；夜色两色整体乘子）
 //   ⑥（开关）三色环境光：开 = ambient 按法线仰角在 [天, 天际线, 地] 间插值（AmbientTricolor），
 //      关 = 原单色 ambient（AmbientColor）。供肉眼对比两种环境光。
+//   ⑦（开关 + 滑条）环境镜面（IBL specular）：开 = 所有材质从天空 cubemap 取镜面反射，
+//      滑条 = 天光消费量 [0,1]（见 interface/render_command.h 的 EnvSpecular）。
+//      验收工件 = 第三方块（金属，metallic=1）—— 关时是发黑的块，开时能看见天光/地色被映上去。
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
@@ -97,6 +101,13 @@ public:
         smaa_threshold_ = threshold;
     }
 
+    // 环境镜面（IBL specular）开关 + 天光消费量。headless A/B 拍摄显式设，
+    // 交互时走面板（⑦）。默认开、消费量 1.0（即“所有镜面都消费天光”）。
+    void SetEnvSpecular(bool on, float sky_scale = 1.0f) {
+        env_specular_on_ = on;
+        env_specular_scale_ = sky_scale;
+    }
+
     void InstallTextMeasure() {
         ui_.SetTextMeasure(&SkylightApp::AppTextWidth, this);
     }
@@ -146,6 +157,15 @@ public:
         cmds->sun     = nl.dir_light;
         cmds->ambient = nl.ambient;
         cmds->tone_mapping = true;
+
+        // 环境镜面（IBL specular）：让 metallic 材质从天空 cubemap 取反射。
+        // 没这一项时，金属块只有太阳/点光源的直射高光，其余全黑——
+        // 三块方块的 index 2（metallic=1, “无漫反射，纯环境反射”）是验收工件。
+        if (env_specular_on_) {
+            jpov::EnvSpecular es;
+            es.sky_scale = env_specular_scale_;
+            cmds->env_specular = es;
+        }
 
         // SMAA 后处理抗锯齿（可选）：tone map 之后、2D 之前的最后一站。
         if (smaa_on_) {
@@ -228,7 +248,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 9;
+        const int   kRows    = 11;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -253,6 +273,11 @@ private:
         ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 7));
         ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 8),
                         0.02f, 0.5f, 2);
+        // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
+        // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
+        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 9));
+        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
+                        0.0f, 1.0f, 2);
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
@@ -278,6 +303,8 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
+    bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
+    float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）
     float smaa_threshold_ = 0.1f;     // SMAA luma 边缘阈值（越小越敏感）
     jpov::Ui ui_;

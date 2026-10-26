@@ -22,6 +22,7 @@
 | 月亮落在反日点 | 查看器固定 `moon_dir = −sun_dir`，故不给月亮独立滑条 | `MakeSkyLighting` |
 | 血月 / 蓝夜旋钮 | `moon_season`（月盘+月光）与夜色两色整体乘子，逐条编码在 `MoonSeasonFromSlider` / `NightTintFromSlider` | `skylight_scene.h` |
 | 标准天光（含夜色） | 默认构造即含城市夜色 + 月盘，白天/日落后由 daylight 自动过渡 | `render_command.h` 字段默认值 |
+| **环境镜面（IBL）开关 + 天光消费量**（2026-10-26 新增） | 左列第 10/11 行：开关 + `[0,1]` 滑条 → `cmds.env_specular`；验收工件 = 第三方块（金属）。说明见 `docs/jpov_env_specular_design.md` | `skylight_viewer_app.h` `DrawLightPanel` |
 
 ## 2. 三方块材质（刻意隔离变量）
 

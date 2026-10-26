@@ -18,6 +18,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# EnvSpecular — 环境镜面（IBL specular）的共享 GLSL 片段 + uniform 上传。
+# 三份 PBR 片元（object3d / instanced / skinned）共用同一段 GLSL，避免各自拷贝分叉。
+cc_library(
+    name = "env_specular",
+    srcs = ["env_specular.cc"],
+    hdrs = ["env_specular.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        ":texture_units",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # CoverageMipmap — 覆盖率保持的 alpha mip 链生成（GL-free、header-only 纯函数）。
 # 供 TextureManager 生成 alpha cutout 贴图的 mip 链（防远景叶卡变稀/消失）。
 cc_library(
@@ -288,6 +309,7 @@ cc_library(
         ":shader_manager",
         ":sky_renderer",
         ":horizon_fog_renderer",
+        ":env_specular",
         "//tools/jpov/src/fire_fog:fire_fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
@@ -351,6 +373,7 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",
@@ -390,6 +413,7 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",

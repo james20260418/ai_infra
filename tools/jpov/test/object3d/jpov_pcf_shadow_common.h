@@ -96,6 +96,11 @@ inline float ScaleToHeight(const jpov::GltfObject& o, float target_h) {
 //   灰地面 + 三方块 + 桌子（左，~0.75m）+ 高模橡树（右，~6m）+ 三个 T-pose 蓝人。
 inline void AssembleScene(PcfShadowApp& app) {
     app.SetShowPanel(false);   // 纯 3D（无 UI 面板）
+    // 环境镜面（IBL specular）**在本测试里显式关掉**：
+    //   本测试考的是 PCF 阴影采样核，与镜面项无关。SkylightApp 的交互默认值是“开”
+    //   （那是给人看的）；测试必须把自己不考的自变量钉死，否则两件事的参数混在一起，
+    //   以后调环境镜面就会把阴影 gold 弄红。
+    app.SetEnvSpecular(false);
 
     app.box_mesh_    = app.RegisterMesh(jpov::MeshData::MakeBox(
         jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf, jpov_skylight::kBoxHalf));
