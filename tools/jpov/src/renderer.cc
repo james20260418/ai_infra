@@ -1784,14 +1784,19 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // ── 半透明条带（1× WBO 覆盖集）—— 层序：粒子 → 体积火 → **条带** → 远景雾。
             //    与体积火不共 FBO：火权重恒 1、条带用 WeightWbo，混一个 accum 会被权重尺度偏置。
-            if (!cmds.translucent_strips.empty()) {
+            if (!cmds.translucent_strips.empty() || !cmds.translucent_strip4s.empty()) {
                 CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
                 // 加法集附件按需申请：本帧有 kEmissive 批才建 att2。
                 bool strips_need_additive = false;
-                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
+                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
                     if (sc.blend == StripBlend::kEmissive) {
                         strips_need_additive = true;
                         break;
+                    }
+                }
+                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
+                    if (!strips_need_additive && sc.blend == StripBlend::kEmissive) {
+                        strips_need_additive = true;
                     }
                 }
                 strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
@@ -1799,10 +1804,15 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
                 // StripRenderer::Draw（与 fire_fog 的 FireFogLighting 同一模式）。
                 bool strips_need_csm = false;
-                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
+                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
                     if (sc.sky_light.has_value()) {
                         strips_need_csm = true;
                         break;
+                    }
+                }
+                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
+                    if (!strips_need_csm && sc.sky_light.has_value()) {
+                        strips_need_csm = true;
                     }
                 }
                 StripCsmShadow strips_csm;
@@ -1817,11 +1827,19 @@ void Renderer::Render(const RenderCommandList& cmds,
                         strips_csm.texel_world[c] = shadow_texel_world_[c];
                     }
                 }
-                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
-                    strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
-                                         hdr_scene_depth_tex,
-                                         strips_csm.IsValid() ? &strips_csm : nullptr,
-                                         fbo_3d_w, fbo_3d_h);
+                // 两种采样数各走自己的命令（16 点 / 4 点）；跨队列顺序无意义
+                //（覆盖集是 accum 加 / reveal 乘，加法集是纯求和，集合内部与顺序无关）。
+                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
+                    strip_renderer_.Draw16(sc, texture_mgr_, cmds.camera, mvp_,
+                                           hdr_scene_depth_tex,
+                                           strips_csm.IsValid() ? &strips_csm : nullptr,
+                                           fbo_3d_w, fbo_3d_h);
+                }
+                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
+                    strip_renderer_.Draw4(sc, texture_mgr_, cmds.camera, mvp_,
+                                          hdr_scene_depth_tex,
+                                          strips_csm.IsValid() ? &strips_csm : nullptr,
+                                          fbo_3d_w, fbo_3d_h);
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 // 只写颜色附件：MRT#1（场景深度）本 pass 不碰，不摘会与采样形成反馈环。

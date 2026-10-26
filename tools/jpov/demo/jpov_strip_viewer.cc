@@ -154,6 +154,11 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         // 边反 A/B（原来由玻璃圆环承担，现在缸壁同样吃 StripFresnel）
         {.name = "430_tank_no_fresnel", .scene = 2, .fresnel = false},
         {.name = "435_tank_fresnel", .scene = 2, .fresnel = true},
+
+        // ── 场景 ④：采样对比（上排 Strip16 × 3、下排 Strip4 × 3，同曲线同材质）──
+        {.name = "500_sampling_rows", .scene = 3},
+        {.name = "505_sampling_zoom", .scene = 3, .camera_r = 3.4f},
+        {.name = "510_sampling_smooth", .scene = 3, .smooth = true},
     };
     for (const Shot& shot : kShots) {
         // 先选场景（写可见性开关 + 该场景的默认视角），再应用**显式覆盖**。

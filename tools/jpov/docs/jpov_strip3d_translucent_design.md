@@ -1249,3 +1249,72 @@ skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不�
 
 **仍未做（Danis 明确先不搞）**：条带**自身**参与 CSM 生成（写 shadow map）。要做都得给半透明
 片单开一次 shadow pass（或用 alpha-tested 变体），笨重且和「条带是 effect pass」的定位冲突。
+
+### 20. 采样数多态化：Strip4 与 Strip16 并列（2026-10-26）
+
+需求（Danis）：「16 这个采样数的多态化，draw call 命令上直接体现在接口上（就是
+`DrawStrip16Batch` 这种），上次模板类的实现给搞崩了……这次只做 Strip4，和 Strip16 并列。
+验收用 strip viewer 的新场景做采样对比，Strip4 三个实例、Strip16 也三个实例，纵向错开。」
+
+**接口层：两条命令、两个类型（不是模板）**
+
+| | 16 点档 | 4 点档 |
+|---|---|---|
+| 数据类型 | `Strip16`（680 B） | `Strip4`（200 B） |
+| 批类型 | `TranslucentStrip16Batch` | `TranslucentStrip4Batch` |
+| 命令 | `DrawStrip16Batch` | `DrawStrip4Batch` |
+| 拓扑 | 32 顶点 / 15 段 / 90 索引 | 8 顶点 / 3 段 / 18 索引 |
+| 批级材质 | `StripBatchStyle`（两者共同基类：纹理 / 混合集合 / 软深度 / 插值 / 边反 / 天光） | 同左 |
+
+- 为什么不用模板：模板参数会一路渗透到渲染器、数据纹理、索引缓冲、后处理，
+  任何一处实例化不对都是链接期/运行期的灾难（上一版就是这么崩的）。这里改成
+  **运行期多态**：`StripSamplesView`（左/右轨 + 逐点颜色 + 剖面 + 点数）+ `StripLayout`
+  （拓扑常量），两者都是普通 POD。
+- 批级材质抽成 `StripBatchStyle` 并让两个批类型继承它：`batch.blend` / `batch.sky_light`
+  这些字段在两种批上写法完全一样，校验也只有一份（`ValidateStripStyle`）。
+
+**实现：一套 CPU 数学 + 一套 GLSL**
+
+- CPU（`strip_geometry.h`）：`ViewOf(Strip16|Strip4)` → `StripSamplesView`；
+  `ExpandStripVertices(view, layout, …)` / `ComputeSmoothStrip(view, layout, …)` /
+  `AppendSmoothStripData(view, layout, …, row_stride_floats, …)` /
+  `ExpandStripVertices(view, layout, …)`。16 点档的老签名保留为薄重载（gold/单测不改）。
+- 平滑 pass 的数据纹理**两种档位共用一张**（行跨距按 16 点档 256 float），4 点档每行只写
+  前 64 个 float、其余补 0：`uSegCount` 是 uniform，FS 只按自己的 seg 索引读。
+- GLSL **只有一份**（没有为 4 点档再编译一套 program）：把原先写死的 15/25/16/32 换成
+  4 个 uniform（`uPointColorScale/Bias`、`uProfileScale/Bias`）与 `uVerticesPerStrip`，
+  值由 `StripLayout` 现算 —— 16 点档的数值与旧常量逐位等价（gold 逐像素不变，≤1/255）。
+- 资源：per-instance 纹理按档位各一张（行宽 25 / 13，列坐标必须按本档行宽归一化），
+  索引缓冲各一条（32/90 与 8/18），VAO/VBO 共用。
+
+**踩到的真坑：行号必须是整数**
+
+`vStripId`（= 本条带的 per-instance 数据行号）最初写成 `float(gl_VertexID) * (1/32)`，
+在 llvmpipe 上 `float(gl_VertexID) / 32.0` 这类**浮点除法会给出「略大于整数」的结果**
+（如 1.0000001）⇒ `AppearanceRow()` 落在两行之间 ⇒ 硬件双线性把**相邻两条带**的颜色
+与剖面混起来：画面表现是「颜色变淡发灰、条纹变糊」，既不崩也不报错，
+gold 直接差 134/255。修法：行号一路用 **int**（VS 里 `gl_VertexID / uVerticesPerStrip`
+整数除法，`flat out int`；平滑 pass 的 `aStripId` 属性同样 `int(aStripId + 0.5)`）。
+教训：**索引类数值绝不走浮点**，哪怕除数是 32 这种 2 的幂。
+
+**验收场景（viewer 场景④「采样对比」）**
+
+- 同三条曲线（波 / 螺旋 / 弧）、同一份材质（纹理 + 柔边剖面 + 同样的逐条带浓度），
+  上排 3 条 `Strip16`（`DrawStrip16Batch`）、下排 3 条 `Strip4`（`DrawStrip4Batch`），
+  竖直错开 `sampling_gap`（默认 1.6 m）。
+- 为什么两排各 3 条：draw call 数只与**批数**有关，与条带数无关；一批多条才看得出这一点，
+  而且每条在两档中各有一个对照，避免把「单条带的差异」误当成材质差异。
+- 拍摄：`500_sampling_rows`（全景）/ `505_sampling_zoom`（近机位）/ `510_sampling_smooth`
+  （两档都走 Hermite 平滑）。三条都**不进 gold**（图形对比是给人看的，不是回归门禁）。
+- 肉眼结论：4 点档的波形与弧在弯折处明显呈折线（3 段），螺旋内圈能看出多边形轮廓；
+  16 点档同机位下顺滑。这正是采样密度差异的预期表现。
+
+**性能口径（不要夸大）**
+
+- 顶点/索引：一条带 32→8 顶点、90→18 索引（1/4）；20 条带以内 CPU 展开与上传本来就是
+  微不足道的量（展开是纯内存写，每帧一次 `glBufferData`）。
+- 片元：**两种档位走同一份 FS**，per-fragment 成本相同；4 点档只少了顶点着色与
+  顶点数据带宽，**不会**减少片元数（覆盖的像素一样多）。
+- 所以「Strip4 更省」的前提是**顶点瓶颈**（数量多、单条短），不是「画得快」。
+  对细长条带（雨丝、辅助线、道路标线）才是对的选择。
+- 没做 frame-time 基准 —— 上面是结构上的必然，不编数字。

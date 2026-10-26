@@ -81,6 +81,15 @@ enum class StripInterpolation {
 // 每条带的采样点数（= 段数 + 1）。改这个值 = 改所有素材的「格数」约定，不要随意动。
 inline constexpr int kStripSampleCount = 16;
 
+// 低采样数版本（4 点 / 3 段）。**不是「低精度开关」**，而是另一种拓扑选择：
+//   * 16 点：长度方向能表达弯折/起伏（拖尾、波带、闭合圆环），代价是 32 顶点/条；
+//   * 4 点：只表达「大致走向 + 宽度变化」，8 顶点/条 ⇒ 顶点数与顶点着色成本降到 1/4，
+//     适合数量多、单条短、形状本来就直的东西（硬边辅助线、雨丝、光束、道路标线）。
+// 两者的**像素语义完全相同**（同一套 FS：逐点颜色/纹理/剖面/边反/天光），
+// 差别只在 CPU 端的采样密度与拓扑常量（见 kStrip4Quads / StripLayout）。
+inline constexpr int kStrip4SampleCount = 4;
+inline constexpr int kStrip4Quads = kStrip4SampleCount - 1;
+
 // 宽度（v）方向剖面的 knot 数：knots[k] 是 v = k/8 处的乘子（8 段 / 9 个 knot）。
 inline constexpr int kStripProfileKnots = 9;
 
@@ -122,7 +131,7 @@ struct Strip16 {
     // **逐点 RGBA**（下标 = 第几列，与 left/right 对齐）：
     //   rgb = 线性 HDR 颜色乘子：与纹理色、fresnel 边反色相乘。
     //         **允许 > 1**（scene-referred）：加法集（发光）靠它拿到 bloom / tone map
-    //         的 HDR 余量 —— 不需要额外的「增益」旋钮（见 TranslucentStripBatch 的说明）。
+    //         的 HDR 余量 —— 不需要额外的「增益」旋钮（见 TranslucentStrip16Batch 的说明）。
     //   a   = 沿长度（u）方向的不透明度乘子（不是纹理 alpha）：最终 α 还要 × 纹理 α
     //         × 宽度剖面。拖尾淡出就写这里（头 1 → 尾 0）。范围 [0,1]。
     // 默认 = 白 + 不透明（乘法单位元，见 kDefaultStripPointColors）。
@@ -151,6 +160,44 @@ static_assert(std::is_trivially_copyable_v<Strip16>,
               "Strip16 必须可整块 memcpy（用户会按序列批量处理）");
 static_assert(std::is_standard_layout_v<Strip16>,
               "Strip16 必须是 standard layout");
+
+// 逐点颜色的默认值（4 点版）：同样是恒等乘子，理由见 kDefaultStripPointColors。
+inline constexpr std::array<Color, kStrip4SampleCount> kDefaultStrip4PointColors = [] {
+    std::array<Color, kStrip4SampleCount> out{};
+    for (int i = 0; i < kStrip4SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+// 4 采样点的条带。**与 Strip16 语义逐字相同**，只有列数不同：
+//   下标 i 同时表示 left[i] / right[i] / point_color[i]；只有前 point_count 列参与绘制，
+//   其余列塌缩到最后一个有效点（零面积 quad，不产生片元）。
+//   宽度剖面仍是 9 个 knot —— 它在**片元**里求值，与采样数无关（4 点的条带照样能软边）。
+//
+// 为什么单独一个类型而不是「Strip16 + 采样数字段」：
+//   ① 数组长度是编译期常量 ⇒ 用户按固定 stride memcpy/存盘时不会踩到「按 16 分配只用 4」；
+//   ② 类型本身就是接口处的意图声明（`DrawStrip4Batch` 只收 Strip4，传错编译期就报）。
+//   之前那版用模板把两者合一，模板参数一路渗透到渲染器/数据纹理/索引缓冲，
+//   任何一处实例化不对都是链接期或运行期的灾难 —— 这条链路里**不用模板**。
+struct Strip4 {
+    std::array<Vec3f, kStrip4SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip4SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip4SampleCount> point_color = kDefaultStrip4PointColors;
+    // 宽度（v）方向的 alpha 剖面：与 Strip16 完全同一份语义/同一组 knot 数。
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    // 有效点数，必须显式给 [2, kStrip4SampleCount]（同 Strip16：不设默认值）。
+    uint32_t point_count = 0;
+};
+
+// 固定字节数（96 + 64 + 36 + 4 = 200）。
+static_assert(sizeof(Strip4) == 2 * kStrip4SampleCount * sizeof(Vec3f) +
+                                    kStrip4SampleCount * sizeof(Color) +
+                                    kStripProfileKnots * sizeof(float) +
+                                    sizeof(uint32_t),
+              "Strip4 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip4>, "Strip4 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip4>, "Strip4 必须是 standard layout");
 
 // 混合集合（对应 WBO 的两套附件）。**这是一个 batch 的物理材质属性**，不是开关：
 // 选错 = 东西的物理行为错了，而不只是"差点颜色"。
@@ -307,7 +354,11 @@ struct StripSkyLight {
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
 // 想给不同条带不同纹理/混合集合 → 发多个 batch（每个 batch 一次 draw）。
-struct TranslucentStripBatch {
+//
+// 这一层**与采样点数无关**（纹理/混合集合/软深度/插值方式/边反/天光都是材质属性），
+// 所以它被两种批类型共用：`TranslucentStrip16Batch`（Strip16）与 `TranslucentStrip4Batch`
+// （Strip4）。批类型只差「装哪一种条带」——这正是接口层的多态：两条命令，两个类型。
+struct StripBatchStyle {
     // 纹理（TextureManager id）。0 = 不采样纹理，颜色完全由逐点颜色决定。
     uint32_t texture_id = 0;
 
@@ -330,9 +381,18 @@ struct TranslucentStripBatch {
     // **指令数与画面逐字节等于没有这个功能**。只允许 `blend == kCoverage`。
     std::optional<StripSkyLight> sky_light;
 
+};
+
+// 16 采样点的批：一条带 = 32 顶点 / 15 段。
+struct TranslucentStrip16Batch : StripBatchStyle {
     // 本批条带（非空才画）。每条带的颜色/不透明度/宽度剖面都在 Strip16 里 ——
     // 同一批里每条拖尾颜色不同、边缘软硬不同，都不需要拆成多个 draw call。
     std::vector<Strip16> strips;
+};
+
+// 4 采样点的批：一条带 = 8 顶点 / 3 段。
+struct TranslucentStrip4Batch : StripBatchStyle {
+    std::vector<Strip4> strips;
 };
 
 // 纯色批：texture_id 给 0，再把每条带的逐点颜色全填成同一个值
