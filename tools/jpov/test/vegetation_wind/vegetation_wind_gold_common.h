@@ -28,6 +28,7 @@
 
 #include <glog/logging.h>
 
+#include "tools/common/utils.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/tools/vegetation_tool_v2/bake/vegetation_glb_baker.h"

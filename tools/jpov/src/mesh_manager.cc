@@ -77,8 +77,27 @@ typedef long GLsizeiptr;
 
 namespace jpov {
 
+namespace {
 
+// 关节表在资产里用 7 个 float 存（末位 parent 是 float），这里解码回下标。
+int ParentOfJoint(const MeshData::WindJoint& j) {
+    return static_cast<int>(std::lround(j.parent));
+}
 
+// 两枢轴之间的距离（米）。
+float PivotDistance(const float a[3], const float b[3]) {
+    const float dx = a[0] - b[0];
+    const float dy = a[1] - b[1];
+    const float dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// 父链最多走多少**段**。三份 VS 的 `kMaxWindChain = 16` 是**节点**数（含自己），
+// 即最多 15 段；这里按段数对齐 —— 超过上限的段 VS 本来就不参与变换，链长若算进去
+// 就会让吹倒位移和实际旋转的链不一致。
+constexpr int kMaxChainSegments = 15;
+
+}  // namespace
 
 MeshManager::~MeshManager() {
     for (auto& kv : meshes_) {
@@ -284,14 +303,29 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
     // ---- 植被风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
     //   同树全部 primitive 共享；VS 用 texelFetch 按 joint_id 取。
     //   texel(2j)   = (pivot.xyz, parent)
-    //   texel(2j+1) = (level, phase, soft, 0)
+    //   texel(2j+1) = (level, phase, soft, 到根的链长)
     if (!data.wind_joints.empty()) {
         const size_t n = data.wind_joints.size();
         // 纹理宽 = 2n；超过 GL_MAX_TEXTURE_SIZE（常见 16384）会变成不完整纹理，
         // texelFetch 读到垃圾（静默错）——宁可此刻崩，不静默出错。
         CHECK_LE(2 * n, 16384u) << "wind_joint 表过大（2N 超纹理宽上限）: N=" << n;
         std::vector<float> tex(8 * n);
+        // 每个关节「到根的链长」（米）：cum[k] = cum[parent] + |pivot_k − pivot_parent|。
+        // 吹倒位移需要 L = cum[own] + |p − pivot_own|。cum 是**逐关节**的量，在表里算一次
+        // 就够（VS 只多一次 length()）；让每个顶点沿父链重算一遍等于每个 pass 每个顶点
+        // 多次 sqrt。texel(2j+1) 的第 4 分量原本空着（写 0），正好放它。
         for (size_t k = 0; k < n; ++k) {
+            float acc = 0.0f;
+            int cur = static_cast<int>(k);
+            for (int step = 0; step < kMaxChainSegments; ++step) {
+                const int par = ParentOfJoint(data.wind_joints[static_cast<size_t>(cur)]);
+                if (par < 0 || par >= static_cast<int>(n) || par == cur) {
+                    break;
+                }
+                acc += PivotDistance(data.wind_joints[static_cast<size_t>(cur)].pivot,
+                                     data.wind_joints[static_cast<size_t>(par)].pivot);
+                cur = par;
+            }
             const MeshData::WindJoint& wj = data.wind_joints[k];
             tex[8 * k + 0] = wj.pivot[0];
             tex[8 * k + 1] = wj.pivot[1];
@@ -300,7 +334,7 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
             tex[8 * k + 4] = wj.level;
             tex[8 * k + 5] = wj.phase;
             tex[8 * k + 6] = wj.soft;
-            tex[8 * k + 7] = 0.0f;
+            tex[8 * k + 7] = acc;   // 到根的链长（吹倒位移的 L 基数）
         }
         glGenTextures(1, &mesh.wind_joint_tex);
         CHECK_NE(mesh.wind_joint_tex, 0u);

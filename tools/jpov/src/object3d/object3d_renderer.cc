@@ -60,7 +60,7 @@ uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
 uniform int   uWindJointCount;   // 关节表条目数（0 = 无表 → 不动）
-uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
@@ -79,11 +79,9 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
-// 单个关节的刚性链变换。
-//   path_len（出参）= 顶点到根的**静止**父链总长（米，含 |p−pivot_own|）：
-//   吹倒位移按它加权（越高越弯）；只由几何决定、不随 θ 变 ⇒ 不会随风吹抖。
-vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis,
-                          out float path_len) {
+// 单个关节的刚性链变换。own0 = 该关节的 texel(2j)（pivot.xyz, parent），由调用方取好传进来
+//   —— 调用方算吹倒权重时也要用同一个 texel，传参比各取一次省一次 fetch。
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis, vec4 own0) {
     // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
     // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
     int chain[kMaxWindChain];
@@ -103,7 +101,6 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis,
     vec3 pp = vec3(0.0);
     float Ap = 0.0;
     int have_par = 0;
-    path_len = 0.0;
     for (int k = nc - 1; k >= 0; --k) {
         vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
         vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
@@ -120,14 +117,11 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis,
             have_par = 1;
         } else {
             qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-            path_len += length(t0.xyz - pp);
             A = th + (1.0 - sof) * Ap;
         }
         pp = t0.xyz;
         Ap = A;
     }
-    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
-    path_len += length(p_in - own0.xyz);
     n_in = WindRotVecAxis(n_in, axis, A);
     return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
 }
@@ -145,9 +139,11 @@ vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
         // 单关节：顶点只属于一个刚性段（joint_id 是烘焙期按拓扑直接算出来的，
         // 没有"最近的两个关节"这种歧义）。同一枝的同一环共享关节 ⇒ 环内不会被切开。
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        float path_len = 0.0;
-        p = ObjectWindApplyJoint(j0, p, wn, axis, path_len);
+        vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
         vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
+        // 到根的链长 = 关节表里预存的 cum（逐关节量）+ 顶点到自己枢轴的距离。
+        float path_len = own1.w + length(p - own0.xyz);
+        p = ObjectWindApplyJoint(j0, p, wn, axis, own0);
         // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
         float lev0 = clamp(own1.x, 0.0, 3.0);
         float sof0 = clamp(own1.z, 0.0, 1.0);
@@ -163,10 +159,14 @@ vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
         vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
                               + wdir * 0.4 + vec3(1.0e-4, 0.0, 1.0e-4));
         p += tdir * (tamp * sin(6.28318531 * tpj));
-        // 吹歪：整体向风向压弯（越靠梢位移越大）。path_len 由关节链现算。
+        // 吹歪：整体向风向压弯（越靠梢位移越大）。path_len 见上面（关节表 cum + 本段距离）。
+        //   方向取**水平分量**（与 instanced 路径、与 WindCommand 的文档一致）：
+        //   带仰角的风向只影响摇摆轴/湍流，不该把整株往上抬。
+        vec3 hw = vec3(wdir.x, 0.0, wdir.z);
+        vec3 hdir = (length(hw) > 1.0e-5) ? normalize(hw) : vec3(1.0, 0.0, 0.0);
         if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && path_len > 0.0) {
             float ty = clamp(path_len / uWindBlowRefLength, 0.0, 4.0);
-            p += wdir * (uWindBlowRatio * path_len *
+            p += hdir * (uWindBlowRatio * path_len *
                          pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
         }
     }

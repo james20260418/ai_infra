@@ -29,6 +29,7 @@
 #define JPOV_MESH_H_
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -274,6 +275,32 @@ inline void MeshData::Validate() const {
         CHECK(wind_link.empty())
             << "MeshData::Validate: 未声明 kWind 但 wind_link 非空";
     }
+    // 关节表内容：**引擎会拿它算数**（载入期算 cum 链长、VS 逐 texelFetch），
+    // 所以非法值必须在注册时就崩，而不是渲染出畸形结果。
+    //   · pivot 必须是有限数（NaN/Inf 会污染整条链的 qpos 和 L）；
+    //   · parent 必须是 -1 或表内下标（越界会让 VS 的链走进垃圾 texel）；
+    //   · level ≥ 0（θ 的增益按 level 分档，负数等于反向拧）、soft ∈ [0,1]。
+    // phase 只查有限性：引擎对它只做 floor 取圈，任何有限值都合法。
+    for (size_t i = 0; i < wind_joints.size(); ++i) {
+        const WindJoint& j = wind_joints[i];
+        for (int a = 0; a < 3; ++a) {
+            CHECK(std::isfinite(j.pivot[a]))
+                << "MeshData::Validate: wind_joints[" << i << "].pivot 非有限数";
+        }
+        CHECK(std::isfinite(j.parent))
+            << "MeshData::Validate: wind_joints[" << i << "].parent 非有限数";
+        const int parent = static_cast<int>(std::lround(j.parent));
+        CHECK(parent == -1 || (parent >= 0 && static_cast<size_t>(parent) < wind_joints.size()))
+            << "MeshData::Validate: wind_joints[" << i << "].parent = " << j.parent
+            << " 越出关节表（合法值：-1 或 [0, " << wind_joints.size() << ")）";
+        CHECK(std::isfinite(j.level) && j.level >= 0.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].level 必须是非负有限数";
+        CHECK(std::isfinite(j.phase))
+            << "MeshData::Validate: wind_joints[" << i << "].phase 非有限数";
+        CHECK(std::isfinite(j.soft) && j.soft >= 0.0f && j.soft <= 1.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].soft 必须落在 [0,1]";
+    }
+
     // kRelax 与 kWind **互斥**：二者同占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
     CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
             MeshHasFlag(flags, MeshVertexFlags::kWind)))

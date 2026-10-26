@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -420,6 +421,37 @@ TEST(GltfSaverTest, WindWithoutSkinValidates) {
         static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints) |
         static_cast<uint8_t>(MeshVertexFlags::kWind));
     m.Validate();   // 不崩即通过
+}
+
+// 关节表内容：引擎会拿它算数（载入期 cum 链长；VS 逐 texelFetch），非法值必须当场崩。
+// 三条各挑一个"看起来能过、跑起来静默出错"的配方。
+TEST(GltfSaverTest, WindJointParentOutOfRangeDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = 3.0f;   // 表里只有 1 个关节，parent 指向不存在的下标
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "parent");
+}
+
+TEST(GltfSaverTest, WindJointNonFinitePivotDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = -1.0f;
+    j.pivot[1] = std::numeric_limits<float>::quiet_NaN();   // NaN 会污染整条链
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "pivot");
 }
 
 TEST(GltfSaverTest, EmptyAssetCrashes) {

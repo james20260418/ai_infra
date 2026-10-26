@@ -68,8 +68,11 @@ pivot.xyz  parent  level  phase  soft
 
 ```
 texel(2j)   = (pivot.xyz, parent)
-texel(2j+1) = (level, phase, soft, 0)
+texel(2j+1) = (level, phase, soft, 到根的链长 cum)
 ```
+
+`cum` = 该关节到根的枢轴距离之和（米，载入期按 16 段上限算一次，与 VS 的
+`kMaxWindChain` 对齐）。吹倒位移用它：`L = cum + |p − pivot_own|`。
 
 占 `kTexUnitWindJointTable = 12`；**必须留在 0..15**（GL 3.3 的 texture unit 上限）。
 该槽与 `kTexUnitPoseAtlas` 同号 —— 蒙皮与植被风不同时活跃，故意复用。
@@ -251,9 +254,10 @@ CPU 端复刻当时那份 GPU 公式（`legacy/vegetation_viewer/wind_deform.h`�
 VS  : joint_id → 关节表 → 父链刚性变换   ；path_len 顺路累加（吹倒权重）
 ```
 
-- **路径长 L 在 VS 里现算**：`L = |p − pivot_own| + Σ|pivot_k − pivot_parent(k)|`，
-  在遍历父链的同一个循环里累加（零额外 texelFetch）。只依赖静止几何 ⇒ 逐帧稳定、
-  沿枝单调 ⇒ 不在关节处出现台阶。
+- **路径长 L**：`L = cum + |p − pivot_own|`，其中 `cum`（关节到根的链长）在
+  **载入期按关节算一次**、存进关节表 texel(2j+1).w（那格原本空着写 0）。逐关节的
+  量放关节表 → VS 每个顶点只多一次 `length()`；若让顶点沿父链自己累加，就是
+  每个 pass 每个顶点最多 16 次 sqrt。只依赖静止几何 ⇒ 逐帧稳定、沿枝单调 ⇒ 无台阶。
 - **属性预算**：loc6 从 vec4 收回 vec2（-4B/顶点）；loc3 在植被 mesh 上彻底空出来
   （蒙皮仍按自己的槽位用 loc3，但 `kWind` 与 `kJoints` 本来就互斥），`GPUMesh::vbo_wind_w` 删除。
 - **gold 门禁**：`tools/jpov/test/vegetation_wind/`（instance pass 开风/吹倒 + object3d 开风，

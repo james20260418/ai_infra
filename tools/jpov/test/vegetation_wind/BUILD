@@ -18,6 +18,7 @@ cc_binary(
         "//tools/jpov/tools/vegetation_tool_v2:sample_assets",
     ],
     deps = [
+        "//tools/common:utils",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/test:test_utils",
@@ -46,6 +47,7 @@ cc_test(
         "//tools/jpov/tools/vegetation_tool_v2:sample_assets",
     ],
     deps = [
+        "//tools/common:utils",
         "//tools/jpov/include/jpov:jpov",
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/test:compare_light",

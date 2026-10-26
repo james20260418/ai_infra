@@ -42,7 +42,8 @@ struct GPUMesh {
     //   joint_id = 该顶点所属刚性段在关节表里的下标；phase = 链外湍流的逐顶点相位。
     //   路径长 L（吹倒权重）由 VS 沿关节链现算，不占顶点属性。
     unsigned int vbo_wind = 0;
-    // 植被风关节表纹理（RGBA32F，2N×1：texel(2j)=(pivot.xyz,parent)、texel(2j+1)=(level,phase,soft,0)）。
+    // 植被风关节表纹理（RGBA32F，2N×1：texel(2j)=(pivot.xyz,parent)、
+    // texel(2j+1)=(level,phase,soft,到根的链长 cum)）。
     // 0 = 无关节表（该 mesh 不走枢轴式风）。VS 用 texelFetch(uWindJointTex, ivec2(...), 0) 取。
     unsigned int wind_joint_tex = 0;
     uint32_t wind_joint_count = 0;  // 关节表条目数（0 = 无）

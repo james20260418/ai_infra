@@ -85,7 +85,7 @@ uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform vec3  uWindDirection;    // 世界系（单位向量）
 uniform int   uWindJointCount;
-uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
@@ -105,8 +105,8 @@ vec3 JpovWindDirModel(mat4 model, vec3 dir_world) {
     return normalize(mat3(inverse(model)) * dir_world);
 }
 // 单个关节的完整变换（pivot 链 + 湍流）。
-//   输入的是**原始**顶点 p；path_len（出参）= 顶点到根的静止父链总长（米），
-//   吹倒位移按它加权（越高越弯）。
+//   输入的是**原始**顶点 p；path_len（出参）= 顶点到根的静止链长（米）= 关节表预存的
+//   逐关节 cum + |p − pivot_own|，吹倒位移按它加权（越高越弯）。
 vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
                     vec3 axis, vec3 wdir, vec3 ref_n, out float path_len) {
     int chain[kMaxWindChain];
@@ -126,7 +126,6 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
     vec3 pp = vec3(0.0);
     float Ap = 0.0;
     int have_par = 0;
-    path_len = 0.0;
     for (int k = nc - 1; k >= 0; --k) {
         vec4 t0 = texelFetch(uWindJointTex, ivec2(2 * chain[k], 0), 0);
         vec4 t1 = texelFetch(uWindJointTex, ivec2(2 * chain[k] + 1, 0), 0);
@@ -144,7 +143,6 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
             have_par = 1;
         } else {
             qpos = qpos + WindRotVecAxis(t0.xyz - pp, axis, Ap);
-            path_len += length(t0.xyz - pp);
             A = th + (1.0 - sof) * Ap;   // 风：soft 衰减
         }
         pp = t0.xyz;
@@ -152,7 +150,8 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
     }
     vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
     vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-    path_len += length(p - own0.xyz);
+    // 到根的链长 = 关节表里预存的 cum（逐关节量）+ 顶点到自己枢轴的距离。
+    path_len = own1.w + length(p - own0.xyz);
     p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
     wn = WindRotVecAxis(wn, axis, A);
 
@@ -191,7 +190,8 @@ vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
     vec3 p0 = JpovApplyJoint(j0, p, wn, model, axis, wdir, vec3(0.0, 1.0, 0.0),
                              path_len);
     // 吹倒：**平移**（与 soft 无关，不存在关节继承问题）。
-    //   path_len 由关节链现算（静止几何）⇒ 只会沿枝单调增加，不会在关节处跳变。
+    //   path_len = 关节表预存的 cum + 顶点到自己枢轴的距离（都只依赖静止几何）
+    //   ⇒ 沿枝单调增加，不会在关节处跳变。
     //   量级：d = ratio · L · (L/H)^(n−1)（梢部 = ratio·H）。
     if (aInstBlowAway > 0.0 && uBlowAwayRefLength > 1.0e-6 && path_len > 0.0) {
         float t = clamp(path_len / uBlowAwayRefLength, 0.0, 4.0);
