@@ -152,7 +152,10 @@ wire format，`shape.proto` 里的 `ShapeProto`）。文本 `.pbtxt` **只用于
 ```
 
 - 转换一定过一遍 `LoadShapeFile` 的校验（拓扑、半径、anchor 合同），坏资产转不出去；
-- 文本往返是**逐字节可逆**的（实测 `pbtxt → vegshape → pbtxt` 与原文件 diff 为空）；
+- 六个 `shape_gen` 产出的档位（`{pine,oak,fir}_{low,game}`）实测 `pbtxt → vegshape → pbtxt`
+  **逐字节相同**；两个旧 Python 范本（`willow` / `willow_two_types`）差在格式而不是数值：
+  `-0` 的符号被文本写出成 `0`、卡片字段缩进 4→2 空格 —— 把这些文本再转回二进制，
+  与入库的 `.vegshape` **逐字节一致（0 字节差异）**，即数据一点没丢。
 - `--format text|binary` 可强制格式，但正常不需要（看扩展名就够）。
 
 ## 1. `shape_gen` —— 生成拓扑

@@ -73,4 +73,4 @@ else
 fi
 echo
 echo "运行："
-echo "  ./jpov_vegetation_v2_viewer --shape shapes/willow.pbtxt --bark $DST"
+echo "  ./jpov_vegetation_v2_viewer --shape shapes/willow.vegshape --bark $DST"

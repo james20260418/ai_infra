@@ -92,5 +92,5 @@ fi
 echo
 echo "运行："
 echo "  cd output/jpov_vegetation_v2_viewer"
-echo "  ./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.pbtxt --bark $DST \\"
+echo "  ./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.vegshape --bark $DST \\"
 echo "      --leaf leaf/willow_leaf.png --leaf2 leaf/willow_leaf_flip.png --leaf-black 32"

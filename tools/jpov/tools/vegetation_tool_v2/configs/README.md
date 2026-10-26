@@ -1,10 +1,10 @@
 # configs/ —— 入库的「生成配置」
 
 这里放的是**输入**：一棵树该怎么长（喂给 Blender/Sapling 的那组参数）。
-产物（`shape.pbtxt`）是**输出**，不落在这个目录，也不入 git。
+产物（`shape.vegshape`）是**输出**，不落在这个目录，也不入 git。
 
 - schema + 每个字段的含义/单位/效果：**`../proto/generate.proto`**（要看参数先看它）
-- 生成：`../generate_shape.py`
+- 生成：`../gen/shape_gen`（C++，推荐）；`../generate_shape.py` 留作对拍基准
 
 | 文件 | 树 | 预设 | 规模 | 生成耗时* |
 |---|---|---|---|---|
@@ -12,20 +12,21 @@
 | `oak.pbtxt` | 橡树（宽冠阔叶、粗干） | `small_maple` + 球冠 | 703 枝 / 21k 卡 | ~9 s |
 | `fir.pbtxt` | 杉树（塔形、下垂枝、四级分枝） | `douglas_fir` | 4100 枝 / 12.6k 卡 | ~2 min |
 
-\* 本机实测（Linux 容器、单线程）。耗时**按枝数平方**增长，原因见下面「已知问题」。
+\* 本机实测（Linux 容器、单线程）—— **Python 版**的耗时；C++ 版 `gen/shape_gen` 是 0.6 / 1.3 / 1.5 s（同配置同产物）。
+  耗时**按枝数平方**增长，原因见下面「已知问题」。
 
 ```bash
-# 从仓库根：配置 -> shape.pbtxt
-python3 tools/jpov/tools/vegetation_tool_v2/generate_shape.py \
-    tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
-    --out output/veg_shapes/pine.pbtxt
+# 从仓库根：配置 -> shape.vegshape（Blender 只负责倒数据）
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
+    --config tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
+    --out output/veg_shapes/pine.vegshape
 
 # 只看命令行不真跑
-... generate_shape.py .../configs/pine.pbtxt --out /tmp/x.pbtxt --dry-run
+... gen/shape_gen .../configs/pine.pbtxt --out /tmp/x.vegshape --dry-run
 
 # 用产物出图（在已构建的查看器目录里）
 cd output/jpov_vegetation_v2_viewer
-./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.pbtxt \
+./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.vegshape \
     --bark bark/bark001 --leaf leaf/willow_leaf.png --leaf2 leaf/willow_leaf_flip.png \
     --leaf-black 30 --capture shots/pine
 ```

@@ -2,6 +2,7 @@
 
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -176,8 +177,11 @@ ShapeFileFormat ShapeFileFormatFromPath(const std::string& path) {
   // 不猜内容 —— 猜错一次就是"看起来能读、其实是乱码"的隐性故障。
   const std::size_t dot = path.find_last_of('.');
   if (dot != std::string::npos) {
-    const std::string ext = path.substr(dot);
-    if (ext == ".vegshape" || ext == ".VEGSHAPE") {
+    std::string ext = path.substr(dot);
+    for (char& c : ext) {  // 扩展名大小写不敏感：只认一种拼写会让 .Vegshape 变成文本，太脆
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (ext == ".vegshape") {
       return ShapeFileFormat::kBinary;
     }
   }

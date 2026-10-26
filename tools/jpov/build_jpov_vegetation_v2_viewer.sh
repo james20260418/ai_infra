@@ -63,7 +63,7 @@ for f in willow.vegshape willow_two_types.vegshape; do
 done
 
 # 入库的样例烘焙产物（samples/*.glb）：用来试「纯 glb 查看模式」，不用先有 shape/素材。
-# 12 MB 左右，是 willow.pbtxt + bark001 + willow_leaf 的一份真实烘焙结果（带风链数据）。
+# 13 MB 左右，是 willow.vegshape + bark001 + willow_leaf 的一份真实烘焙结果（带风链数据）。
 echo ""
 echo "==> 4c. 拷贝样例 glb 到 samples/"
 mkdir -p "$OUTPUT_DIR/samples"

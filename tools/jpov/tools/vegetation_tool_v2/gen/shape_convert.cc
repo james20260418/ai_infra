@@ -14,6 +14,7 @@
 // 转换一定会过一遍 LoadShapeFile 的校验（拓扑 / 半径 / anchor 合同），坏资产转不出去。
 
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <string>

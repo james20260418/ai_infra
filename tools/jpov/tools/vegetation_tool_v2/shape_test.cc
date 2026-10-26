@@ -350,6 +350,10 @@ void TestShapeFileRoundTrip() {
     std::string err;
     const bool ok = LoadShapeFile(mismatched_path, &bogus, &err);
     Expect(!ok, "扩展名与内容不符（文本内容 + .vegshape 后缀）必须报错");
+    // 不只断言「失败」：失败也可能是碰巧解析出半个 proto 后被 Validate 拦。这里钉住
+    // 「是二进制解析这一步失败的」——没这条，换个文本内容就可能靠别的原因通过。
+    Expect(err.find("解析二进制") != std::string::npos,
+           "失败原因应该是二进制解析失败，实际: " + err);
   }
 
   std::remove(binary_path.c_str());
