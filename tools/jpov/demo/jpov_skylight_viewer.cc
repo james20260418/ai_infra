@@ -594,6 +594,24 @@ int RunCaptureCase(const std::string& out_dir) {
         const std::string name = "tilt_" + std::to_string(e);
         shot(name.c_str(), true, 0.5f, 2, 48);
     }
+    // Danis 给的"掠射近景"机位（phi=0.6 theta=27.8 R=1.68）：这里最容易漏光/拉丝。
+    // 三档：关 SSR / Hi-Z / DDA，用来确认"漏光"是哪条链路贡献的。
+    {
+        app.view_.phi   = 0.6 * 3.14159265358979323846 / 180.0;
+        app.view_.theta = 27.8 * 3.14159265358979323846 / 180.0;
+        app.view_.R     = 1.68;
+        shot("graze_off", false, 0.5f, 2, 48);
+        shot("graze_hiz", true,  0.5f, 2, 48);
+        jpov::SsrConfig sc;
+        sc.enabled = true;
+        sc.resolution_scale = 0.5f;
+        sc.max_steps = 192;
+        sc.march_mode = 1;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/graze_dda.png").c_str());
+        LOG(INFO) << "capture: graze_dda";
+    }
+
     // 同一个 30° 机位走 DDA（这一步是"同权重链、只换行进算法"的关键对照）
     {
         app.view_.phi = 30.0 * 3.14159265358979323846 / 180.0;

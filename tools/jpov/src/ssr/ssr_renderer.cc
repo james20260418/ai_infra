@@ -414,6 +414,8 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     glUniform1f(shader_mgr_->GetUniform(prog, "uThicknessM"), cfg.thickness_m);
     glUniform1f(shader_mgr_->GetUniform(prog, "uMaxDistanceM"), cfg.max_distance_m);
     glUniform1f(shader_mgr_->GetUniform(prog, "uRoughnessCutoff"), cfg.roughness_cutoff);
+    glUniform2f(shader_mgr_->GetUniform(prog, "uGrazingFade"),
+                cfg.grazing_fade_min, cfg.grazing_fade_max);
     glUniform1i(shader_mgr_->GetUniform(prog, "uFadeEdges"),
                 cfg.fade_screen_edges ? 1 : 0);
 

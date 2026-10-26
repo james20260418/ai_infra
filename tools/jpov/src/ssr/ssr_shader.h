@@ -154,6 +154,7 @@ uniform float uThicknessM;
 uniform float uMaxDistanceM;
 uniform float uRoughnessCutoff;
 uniform int   uFadeEdges;
+uniform vec2  uGrazingFade;      // (min, max)：掠射淡出阈值
 
 float DistFromNdc(float ndc) {
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
@@ -241,9 +242,9 @@ void main() {
     //   * 之前门开在 0（只在 R.z>0 才跳过），于是**俯视过渡过程**里这些像素还带着
     //     0.1~0.3 的权重把尖锥渲出来 ⇒ 观感上"倒影先拉长、再缩短消失"。
     //   把门抬到 0.08 后，这一段权重直接是 0，过渡就是纯粹的 SSR→探针淡出。
-    float forwardness = smoothstep(0.08, 0.45, -R.z);
+    float forwardness = smoothstep(uGrazingFade.x, uGrazingFade.y, -R.z);
     if (forwardness <= 0.0) {
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
 
@@ -253,7 +254,7 @@ void main() {
     }
     vec4 clipEnd = uProj * vec4(P + R * rayLen, 1.0);
     if (clipEnd.w <= 0.0) {
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
 
@@ -272,7 +273,7 @@ void main() {
     vec2 seg = p1 - p0;
     float segLen = length(seg);
     if (segLen < 1.0) {             // 出屏太快：没有可信的屏幕数据
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
     vec2 dir = seg / segLen;
@@ -348,7 +349,9 @@ void main() {
     // 混合发生在**反射项内部**（而不是"有就加、没有就不加"）——
     // 这是消除"一半有一半没有"那条硬边的根本办法。
     vec3 refl = mix(probe, hitColor, ssrConf);
-    FragColor = vec4(refl * fresnel, 1.0);
+    // alpha = **SSR 置信度**：composite 用它决定"要不要多模糊一点"。
+    // 置信度低的像素（掠射/边缘/粗糙）本来就最容易出漏光和裂缝，多糊一点最划算。
+    FragColor = vec4(refl * fresnel, ssrConf);
 }
 )glsl";
 
@@ -390,6 +393,7 @@ uniform float uThicknessM;
 uniform float uMaxDistanceM;
 uniform float uRoughnessCutoff;
 uniform int   uFadeEdges;
+uniform vec2  uGrazingFade;      // (min, max)：掠射淡出阈值
 
 float DistFromNdc(float ndc) {
     return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
@@ -438,9 +442,9 @@ void main() {
         ? textureLod(uEnvCube, Rw, clamp(roughness, 0.0, 1.0) * uEnvMaxLod).rgb
         : uProbeFallback;
 
-    float forwardness = smoothstep(0.08, 0.45, -R.z);
+    float forwardness = smoothstep(uGrazingFade.x, uGrazingFade.y, -R.z);
     if (dot(R, N) <= 0.0 || roughness > uRoughnessCutoff || forwardness <= 0.0) {
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
 
@@ -450,7 +454,7 @@ void main() {
     }
     vec4 clipEnd = uProj * vec4(P + R * rayLen, 1.0);
     if (clipEnd.w <= 0.0) {
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
     vec2 uvEnd = (clipEnd.xy / clipEnd.w) * 0.5 + 0.5;
@@ -467,7 +471,7 @@ void main() {
     // DDA 步数 = 主轴上的像素数（每步正好 1 像素）
     int steps = int(ceil(max(abs(seg.x), abs(seg.y))));
     if (steps < 1) {
-        FragColor = vec4(probe * fresnel, 1.0);
+        FragColor = vec4(probe * fresnel, 0.0);
         return;
     }
     int n = min(steps, uMaxSteps);
@@ -509,7 +513,9 @@ void main() {
     }
     vec3 hitColor = hit ? texture(uSceneColor, hitUv).rgb : probe;
     vec3 refl = mix(probe, hitColor, ssrConf);
-    FragColor = vec4(refl * fresnel, 1.0);
+    // alpha = **SSR 置信度**：composite 用它决定"要不要多模糊一点"。
+    // 置信度低的像素（掠射/边缘/粗糙）本来就最容易出漏光和裂缝，多糊一点最划算。
+    FragColor = vec4(refl * fresnel, ssrConf);
 }
 )glsl";
 
@@ -531,12 +537,27 @@ void main() {
     // 目的：柔化"倒影里的裂缝"—— 命中/未命中在相邻像素之间硬切换时，会出现一条条
     //   断裂的缝；半分辨率上采样也会放大这些缝。顺带压掉锯齿。
     // 代价：低粗糙度镜面会略微变糊（半径只有 1 个反射缓冲纹素）。
-    vec3 c = texture(uRefl, uv).rgb * 0.40;
-    c += texture(uRefl, uv + vec2(uTexel.x, 0.0)).rgb * 0.15;
-    c += texture(uRefl, uv - vec2(uTexel.x, 0.0)).rgb * 0.15;
-    c += texture(uRefl, uv + vec2(0.0, uTexel.y)).rgb * 0.15;
-    c += texture(uRefl, uv - vec2(0.0, uTexel.y)).rgb * 0.15;
-    FragColor = vec4(c, 0.0);
+    // 两级模糊：窄（= 锐）与宽（= 以 2 个反射纹素为半径），按 SSR 置信度插值。
+    vec4 center = texture(uRefl, uv);
+    vec3 narrow = center.rgb * 0.40;
+    narrow += texture(uRefl, uv + vec2(uTexel.x, 0.0)).rgb * 0.15;
+    narrow += texture(uRefl, uv - vec2(uTexel.x, 0.0)).rgb * 0.15;
+    narrow += texture(uRefl, uv + vec2(0.0, uTexel.y)).rgb * 0.15;
+    narrow += texture(uRefl, uv - vec2(0.0, uTexel.y)).rgb * 0.15;
+
+    vec2 w = uTexel * 2.0;   // 宽半径
+    vec3 wide = texture(uRefl, uv).rgb * 0.20;
+    wide += texture(uRefl, uv + vec2(w.x, 0.0)).rgb * 0.12;
+    wide += texture(uRefl, uv - vec2(w.x, 0.0)).rgb * 0.12;
+    wide += texture(uRefl, uv + vec2(0.0, w.y)).rgb * 0.12;
+    wide += texture(uRefl, uv - vec2(0.0, w.y)).rgb * 0.12;
+    wide += texture(uRefl, uv + w).rgb * 0.08;
+    wide += texture(uRefl, uv - w).rgb * 0.08;
+    wide += texture(uRefl, uv + vec2(w.x, -w.y)).rgb * 0.08;
+    wide += texture(uRefl, uv + vec2(-w.x, w.y)).rgb * 0.08;
+
+    // 置信度越低越糊：漏光/裂缝这些"低置信度才出现"的瑕疵因此被摊平。
+    FragColor = vec4(mix(wide, narrow, clamp(center.a, 0.0, 1.0)), 0.0);
 }
 )glsl";
 

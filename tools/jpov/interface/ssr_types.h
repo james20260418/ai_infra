@@ -67,6 +67,14 @@ struct SsrConfig {
     // 物理上粗糙表面的反射是一片模糊，单条射线代表不了，硬做只会得到"脏"的倒影。
     float roughness_cutoff = 0.4f;
 
+    // 掠射淡出（"倒影什么时候消失"的阈值）：反射方向的"朝屏幕纵深"分量 -R.z 小于
+    // grazing_fade_min 时**完全不 march**（只用探针），到 grazing_fade_max 才完全信任 SSR。
+    //   * 调小 → 更斜的视角也有 SSR（倒影更多），但更容易出现拉丝/假命中；
+    //   * 调大 → 更保守，掠射处更早交给探针。
+    // 这两个值是观感旋钮，没有物理含义（是"屏幕空间能表达多少"的经验折中）。
+    float grazing_fade_min = 0.02f;
+    float grazing_fade_max = 0.35f;
+
     // 屏幕边缘淡出：命中点靠屏幕边界时降低权重（那里本来就没有可信数据，
     // 不淡出会看到反射在画面边缘"被切断"）。
     bool fade_screen_edges = true;
