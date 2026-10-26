@@ -1488,6 +1488,62 @@ void Renderer::BeginFrame(int render_w, int render_h) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+namespace {
+
+// 四档条带批（4/8/16/32）共用同一套批级字段（StripBatchStyle），但类型不同 ⇒ 没法塞进
+// 同一个容器。这里把「本帧有没有需要加法集 / 需要 CSM 的批」的四次扫描收成两个函数，
+// 渲染主流程里就只剩一行判断（否则主流程里会出现 8 段几乎逐字相同的循环）。
+bool StripBatchesNeedAdditive(const RenderCommandList& cmds) {
+    for (const TranslucentStrip4Batch& b : cmds.translucent_strip4s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip8Batch& b : cmds.translucent_strip8s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip16Batch& b : cmds.translucent_strips) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip32Batch& b : cmds.translucent_strip32s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 天光消费（= 要采 CSM）同理：四档任一有 sky_light 就得准备阴影资源。
+bool StripBatchesNeedCsm(const RenderCommandList& cmds) {
+    for (const TranslucentStrip4Batch& b : cmds.translucent_strip4s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip8Batch& b : cmds.translucent_strip8s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip16Batch& b : cmds.translucent_strips) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip32Batch& b : cmds.translucent_strip32s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 void Renderer::Render(const RenderCommandList& cmds,
                        const WindowInfo& winfo) {
     glEnable(GL_BLEND);
@@ -1906,37 +1962,12 @@ void Renderer::Render(const RenderCommandList& cmds,
             if (has_strip_batches) {
                 CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
                 // 加法集附件按需申请：本帧有 kEmissive 批才建 att2。
-                // 四档各扫一遍（同一段判定，四种类型没法放进同一个容器 —— 见 strip_types.h）。
-                bool strips_need_additive = false;
-                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
-                    strips_need_additive |= (sc.blend == StripBlend::kEmissive);
-                }
-                for (const TranslucentStrip8Batch& sc : cmds.translucent_strip8s) {
-                    strips_need_additive |= (sc.blend == StripBlend::kEmissive);
-                }
-                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
-                    strips_need_additive |= (sc.blend == StripBlend::kEmissive);
-                }
-                for (const TranslucentStrip32Batch& sc : cmds.translucent_strip32s) {
-                    strips_need_additive |= (sc.blend == StripBlend::kEmissive);
-                }
+                const bool strips_need_additive = StripBatchesNeedAdditive(cmds);
                 strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
                 // CSM 资源：只有「本帧有开天光的条带批」时才整理这份拷贝（几个 POD + ≤5 个
                 // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
                 // StripRenderer::Draw（与 fire_fog 的 FireFogLighting 同一模式）。
-                bool strips_need_csm = false;
-                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
-                    strips_need_csm |= sc.sky_light.has_value();
-                }
-                for (const TranslucentStrip8Batch& sc : cmds.translucent_strip8s) {
-                    strips_need_csm |= sc.sky_light.has_value();
-                }
-                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
-                    strips_need_csm |= sc.sky_light.has_value();
-                }
-                for (const TranslucentStrip32Batch& sc : cmds.translucent_strip32s) {
-                    strips_need_csm |= sc.sky_light.has_value();
-                }
+                const bool strips_need_csm = StripBatchesNeedCsm(cmds);
                 StripCsmShadow strips_csm;
                 if (strips_need_csm && cmds.sun.has_value() && !shadow_fbos_.empty()) {
                     strips_csm.sun = cmds.sun;
