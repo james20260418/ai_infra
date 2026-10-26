@@ -13,8 +13,6 @@
 // 格式由**扩展名**决定（`.vegshape` → 二进制，其余 → 文本），也可以用 --format 强制。
 // 转换一定会过一遍 LoadShapeFile 的校验（拓扑 / 半径 / anchor 合同），坏资产转不出去。
 
-#include <sys/stat.h>
-
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -34,12 +32,13 @@ int Fail(const std::string& message) {
   return 1;
 }
 
+// 用 ifstream 取大小（不用 <sys/stat.h>）：这个工具要在 Linux 和 Windows 交叉编译都能过。
 std::uintmax_t FileSize(const std::string& path) {
-  struct stat info;
-  if (::stat(path.c_str(), &info) != 0) {
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) {
     return 0;
   }
-  return static_cast<std::uintmax_t>(info.st_size);
+  return static_cast<std::uintmax_t>(stream.tellg());
 }
 
 std::string HumanSize(std::uintmax_t bytes) {
