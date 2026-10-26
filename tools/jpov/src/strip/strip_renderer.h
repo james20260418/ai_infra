@@ -542,9 +542,9 @@ void ApplySkyLight(vec3 N, inout vec3 color) {
     //                scene_depth_tex != 0（不透明场景的 MRT#1 深度纹理）。
     // csm：CSM 资源（框见上）。**只有 sky_light 的批会真的采样**；没有太阳/级联时传
     //      nullptr（不是"省略"—— 这个参数故意必填，避免「以为传了其实没传」）。
-    // 两条并列的入口：16 采样点（32 顶点/条）与 4 采样点（8 顶点/条）。
+    // **四条并列的入口**：4 / 8 / 16 / 32 采样点（顶点/条 = 8 / 16 / 32 / 64）。
     // 它们走**同一段** GL 绘制代码（layout 不同而已），材质/特性完全一致 ——
-    // 换句话说「4 点档不是精简版」，只是拓扑不同。
+    // 换句话说「采样数只是拓扑，不是功能档位」。
     void Draw16(const TranslucentStrip16Batch& batch,
                 TextureManager& texture_mgr,
                 const Camera& camera,
@@ -560,6 +560,22 @@ void ApplySkyLight(vec3 N, inout vec3 color) {
                unsigned int scene_depth_tex,
                const StripCsmShadow* csm,
                int full_w, int full_h);
+
+    void Draw8(const TranslucentStrip8Batch& batch,
+               TextureManager& texture_mgr,
+               const Camera& camera,
+               const float view_proj[16],
+               unsigned int scene_depth_tex,
+               const StripCsmShadow* csm,
+               int full_w, int full_h);
+
+    void Draw32(const TranslucentStrip32Batch& batch,
+                TextureManager& texture_mgr,
+                const Camera& camera,
+                const float view_proj[16],
+                unsigned int scene_depth_tex,
+                const StripCsmShadow* csm,
+                int full_w, int full_h);
 
     // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无内容则 no-op。
     void Composite(int full_w, int full_h);
@@ -703,10 +719,10 @@ private:
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点（两种档位共用：顶点布局相同）
     // 索引：拓扑与采样数有关（32 顶点/90 索引 vs 8/18），所以两个档位各一条缓冲。
-    unsigned int ibo_ = 0;    // 16 点档：块 j = 第 j 条带（基址 j×32）
-    int ibo_capacity_ = 0;    // 16 点档 IBO 能覆盖多少条带
-    unsigned int ibo4_ = 0;   // 4 点档：块 j 基址 j×8
-    int ibo4_capacity_ = 0;
+    // 索引缓冲：拓扑随采样数变（每档「块 j = 第 j 条带」的基址是 2×采样数），
+    // 所以四档各一条，按 StripLayoutSlot 索引。
+    std::array<unsigned int, StripLayoutSlot::kCount> ibo_ = {};
+    std::array<int, StripLayoutSlot::kCount> ibo_capacity_ = {};
     WboTarget wbo_;
     bool initialized_ = false;
     bool has_content_ = false;
@@ -725,10 +741,9 @@ private:
     // 宽 = layout.appearance_texels（25 / 13），高 = 条带数。
     // 为什么不在同一张纹理里用不同的行宽：4 点档的列坐标必须按 **13** 归一化，
     // 而 16 点档按 25 —— 一张纹理只能有一个宽度，混用就会把颜色采到隔壁 texel 上。
-    unsigned int appearance_tex_ = 0;      // 16 点档（宽 25）
-    int appearance_capacity_ = 0;          // 当前纹理高度（条带数上限）
-    unsigned int appearance4_tex_ = 0;     // 4 点档（宽 13）
-    int appearance4_capacity_ = 0;
+    // 每档一张（宽 = 采样数 + 9，分别是 13 / 17 / 25 / 41），按 StripLayoutSlot 索引。
+    std::array<unsigned int, StripLayoutSlot::kCount> appearance_tex_ = {};
+    std::array<int, StripLayoutSlot::kCount> appearance_capacity_ = {};   // 高度（条带数上限）
     std::vector<float> appearance_data_;   // 复用缓冲：每行 layout.appearance_texels × 4 float
     unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 4 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
@@ -752,8 +767,10 @@ private:
     void DrawSmooth(const BatchDrawContext& ctx);
 
     // 把两种批类型各自的「取第 i 条带」适配成 ctx.samples_at 需要的函数指针。
-    static StripSamplesView SamplesAt16(const void* owner, size_t index);
     static StripSamplesView SamplesAt4(const void* owner, size_t index);
+    static StripSamplesView SamplesAt8(const void* owner, size_t index);
+    static StripSamplesView SamplesAt16(const void* owner, size_t index);
+    static StripSamplesView SamplesAt32(const void* owner, size_t index);
 
     // 两条 Draw 的公共尾部：尺寸/混合集合/纹理检查、上传 appearance、按 geometry 分派、记账。
     // 传引用是因为它顺手把 want_additive / gl_tex 填进 ctx（那些值由 style 推出来）。

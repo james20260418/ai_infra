@@ -81,14 +81,32 @@ enum class StripInterpolation {
 // 每条带的采样点数（= 段数 + 1）。改这个值 = 改所有素材的「格数」约定，不要随意动。
 inline constexpr int kStripSampleCount = 16;
 
-// 低采样数版本（4 点 / 3 段）。**不是「低精度开关」**，而是另一种拓扑选择：
-//   * 16 点：长度方向能表达弯折/起伏（拖尾、波带、闭合圆环），代价是 32 顶点/条；
-//   * 4 点：只表达「大致走向 + 宽度变化」，8 顶点/条 ⇒ 顶点数与顶点着色成本降到 1/4，
-//     适合数量多、单条短、形状本来就直的东西（硬边辅助线、雨丝、光束、道路标线）。
-// 两者的**像素语义完全相同**（同一套 FS：逐点颜色/纹理/剖面/边反/天光），
-// 差别只在 CPU 端的采样密度与拓扑常量（见 kStrip4Quads / StripLayout）。
+// ── 采样数档位：4 / 8 / 16 / 32 ──────────────────────────────────────────
+//
+// 采样数**不是精度开关**，而是拓扑选择：它决定「沿长度方向能用几个点描述形状」。
+// 四档的**像素语义完全相同**（同一套 FS：逐点颜色 / 纹理 / 剖面 / 边反 / 天光），
+// 差别只在 CPU 端采样密度与拓扑常量（顶点数 = 2×采样数，段数 = 采样数−1，
+// per-instance 行宽 = 采样数 + 9 个剖面 knot）。
+//
+//   | 档位 | 段数 | 顶点/条 | 索引/条 | 行宽 texel | 典型用途 |
+//   |------|------|---------|---------|-----------|---------|
+//   | 4    | 3    | 8       | 18      | 13        | 雨丝、辅助线、道路标线（大量、单条短、本来就直） |
+//   | 8    | 7    | 16      | 42      | 17        | 中短拖尾、光束、简单弧线 |
+//   | 16   | 15   | 32      | 90      | 25        | 默认主力：普通拖尾、波带、闭合圆环 |
+//   | 32   | 31   | 64      | 186     | 41        | 长而弯的东西（大回环、飘带、需要极致顺滑的边缘） |
+//
+// 接口层是**四条并列命令**（DrawStrip4Batch / 8 / 16 / 32），不是「一个命令 + 参数」：
+// 数组长度是编译期常量 ⇒ 用户按固定 stride memcpy/存盘不会踩「按 32 分配只用 4」，
+// 传错档位在编译期就报。这条链路里**不用模板**（模板参数会一路渗透到渲染器 / 数据纹理 /
+// 索引缓冲，任何一处实例化不对都是链接期或运行期的灾难）。
 inline constexpr int kStrip4SampleCount = 4;
+inline constexpr int kStrip8SampleCount = 8;
+inline constexpr int kStrip32SampleCount = 32;
 inline constexpr int kStrip4Quads = kStrip4SampleCount - 1;
+inline constexpr int kStrip8Quads = kStrip8SampleCount - 1;
+inline constexpr int kStrip32Quads = kStrip32SampleCount - 1;
+// 所有档位里最大的采样数（内部缓冲/计算暂存按它分配）。
+inline constexpr int kStripMaxSampleCount = kStrip32SampleCount;
 
 // 宽度（v）方向剖面的 knot 数：knots[k] 是 v = k/8 处的乘子（8 段 / 9 个 knot）。
 inline constexpr int kStripProfileKnots = 9;
@@ -198,6 +216,58 @@ static_assert(sizeof(Strip4) == 2 * kStrip4SampleCount * sizeof(Vec3f) +
               "Strip4 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
 static_assert(std::is_trivially_copyable_v<Strip4>, "Strip4 必须可整块 memcpy");
 static_assert(std::is_standard_layout_v<Strip4>, "Strip4 必须是 standard layout");
+
+// 其余两档（8 / 32）与 Strip4 **逐字相同的布局**，只是数组长度不同：
+// 语义/塌缩规则/剖面 knot 数全部一致，唯一区别是「长度方向能放几个控制点」。
+// 三个类型（4/8/32）是刻意分开写的：每个档位一个类型 = 接口处的意图声明，
+// 也是让数组长度保持编译期常量（见上面 kStrip4SampleCount 处的说明）。
+inline constexpr std::array<Color, kStrip8SampleCount> kDefaultStrip8PointColors = [] {
+    std::array<Color, kStrip8SampleCount> out{};
+    for (int i = 0; i < kStrip8SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+struct Strip8 {
+    std::array<Vec3f, kStrip8SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip8SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip8SampleCount> point_color = kDefaultStrip8PointColors;
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    uint32_t point_count = 0;                      // [2, kStrip8SampleCount]
+};
+
+static_assert(sizeof(Strip8) == 2 * kStrip8SampleCount * sizeof(Vec3f) +
+                                    kStrip8SampleCount * sizeof(Color) +
+                                    kStripProfileKnots * sizeof(float) +
+                                    sizeof(uint32_t),
+              "Strip8 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip8>, "Strip8 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip8>, "Strip8 必须是 standard layout");
+
+inline constexpr std::array<Color, kStrip32SampleCount> kDefaultStrip32PointColors = [] {
+    std::array<Color, kStrip32SampleCount> out{};
+    for (int i = 0; i < kStrip32SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+struct Strip32 {
+    std::array<Vec3f, kStrip32SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip32SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip32SampleCount> point_color = kDefaultStrip32PointColors;
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    uint32_t point_count = 0;                       // [2, kStrip32SampleCount]
+};
+
+static_assert(sizeof(Strip32) == 2 * kStrip32SampleCount * sizeof(Vec3f) +
+                                     kStrip32SampleCount * sizeof(Color) +
+                                     kStripProfileKnots * sizeof(float) +
+                                     sizeof(uint32_t),
+              "Strip32 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip32>, "Strip32 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip32>, "Strip32 必须是 standard layout");
 
 // 混合集合（对应 WBO 的两套附件）。**这是一个 batch 的物理材质属性**，不是开关：
 // 选错 = 东西的物理行为错了，而不只是"差点颜色"。
@@ -393,6 +463,16 @@ struct TranslucentStrip16Batch : StripBatchStyle {
 // 4 采样点的批：一条带 = 8 顶点 / 3 段。
 struct TranslucentStrip4Batch : StripBatchStyle {
     std::vector<Strip4> strips;
+};
+
+// 8 采样点的批：一条带 = 16 顶点 / 7 段。
+struct TranslucentStrip8Batch : StripBatchStyle {
+    std::vector<Strip8> strips;
+};
+
+// 32 采样点的批：一条带 = 64 顶点 / 31 段。
+struct TranslucentStrip32Batch : StripBatchStyle {
+    std::vector<Strip32> strips;
 };
 
 // 纯色批：texture_id 给 0，再把每条带的逐点颜色全填成同一个值

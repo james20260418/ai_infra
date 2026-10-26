@@ -216,32 +216,32 @@ inline void ShapeWidth(RibbonKind kind, const RibbonShape& shape, float s,
     }
 }
 
-// 一条带在某个采样密度下的全部采样点（最多 16，够两档共用）。
+// 一条带在某个采样密度下的全部采样点（按最大档 32 分配，四档共用）。
 struct RibbonSampleSet {
-    jpov::Vec3f center[jpov::kStripSampleCount];
-    jpov::Vec3f side[jpov::kStripSampleCount];   // 单位侧向（right→left 方向）
-    float half_left[jpov::kStripSampleCount] = {};
-    float half_right[jpov::kStripSampleCount] = {};
-    float alpha[jpov::kStripSampleCount] = {};
-    int count = 0;                               // 实际采样点数（4 或 16）
+    jpov::Vec3f center[jpov::kStripMaxSampleCount];
+    jpov::Vec3f side[jpov::kStripMaxSampleCount];   // 单位侧向（right→left 方向）
+    float half_left[jpov::kStripMaxSampleCount] = {};
+    float half_right[jpov::kStripMaxSampleCount] = {};
+    float alpha[jpov::kStripMaxSampleCount] = {};
+    int count = 0;                               // 实际采样点数（4 / 8 / 16 / 32）
 };
 
 // 沿形状等距采样 count 个点。
 //
 // 侧向基：side = normalize(cross(tangent, up))；切向取中心差分（端点单侧），
 // 与设计文档 §2.1 一致。up 与切向共线时退到 (0,0,1)（避免 NaN）。
-// y_offset：整条带在 y 方向平移（采样对比场景把两档上下排开用）。
+// offset：整条带在世界上平移（采样对比场景把四种采样数沿 Z 排开用）。
 inline void SampleRibbonPolyline(RibbonKind kind, const RibbonShape& shape, float phase,
-                                 float width_scale, int count, float y_offset,
+                                 float width_scale, int count, const jpov::Vec3f& offset,
                                  RibbonSampleSet* out /*output*/) {
     CHECK(out != nullptr) << "SampleRibbonPolyline: out 不能为空";
     CHECK_GE(count, 2) << "SampleRibbonPolyline: count 至少 2";
-    CHECK_LE(count, jpov::kStripSampleCount) << "SampleRibbonPolyline: count 超过 16";
+    CHECK_LE(count, jpov::kStripMaxSampleCount)
+        << "SampleRibbonPolyline: count 超过 " << jpov::kStripMaxSampleCount;
     const float ds = 0.5f / static_cast<float>(count - 1);
     for (int i = 0; i < count; ++i) {
         const float s = static_cast<float>(i) / static_cast<float>(count - 1);
-        jpov::Vec3f c = ShapeCenter(kind, shape, phase, s);
-        c = jpov::Vec3f{c.x(), c.y() + y_offset, c.z()};
+        const jpov::Vec3f c = ShapeCenter(kind, shape, phase, s) + offset;
 
         const float s0 = (i == 0) ? s : s - ds;
         const float s1 = (i == count - 1) ? s : s + ds;
@@ -265,6 +265,32 @@ inline void SampleRibbonPolyline(RibbonKind kind, const RibbonShape& shape, floa
 inline void FillStrip16(const RibbonSampleSet& set, jpov::Strip16* out /*output*/) {
     CHECK(out != nullptr) << "FillStrip16: out 不能为空";
     CHECK_EQ(set.count, jpov::kStripSampleCount) << "FillStrip16: 采样点数不是 16";
+    for (int i = 0; i < set.count; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        out->left[k] = set.center[i] + set.side[i] * set.half_left[i];
+        out->right[k] = set.center[i] - set.side[i] * set.half_right[i];
+        out->point_color[k].a = set.alpha[i];
+    }
+    out->point_count = static_cast<uint32_t>(set.count);
+}
+
+// 采样结果 → Strip8（8 点档）。
+inline void FillStrip8(const RibbonSampleSet& set, jpov::Strip8* out /*output*/) {
+    CHECK(out != nullptr) << "FillStrip8: out 不能为空";
+    CHECK_EQ(set.count, jpov::kStrip8SampleCount) << "FillStrip8: 采样点数不是 8";
+    for (int i = 0; i < set.count; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        out->left[k] = set.center[i] + set.side[i] * set.half_left[i];
+        out->right[k] = set.center[i] - set.side[i] * set.half_right[i];
+        out->point_color[k].a = set.alpha[i];
+    }
+    out->point_count = static_cast<uint32_t>(set.count);
+}
+
+// 采样结果 → Strip32（32 点档）。
+inline void FillStrip32(const RibbonSampleSet& set, jpov::Strip32* out /*output*/) {
+    CHECK(out != nullptr) << "FillStrip32: out 不能为空";
+    CHECK_EQ(set.count, jpov::kStrip32SampleCount) << "FillStrip32: 采样点数不是 32";
     for (int i = 0; i < set.count; ++i) {
         const size_t k = static_cast<size_t>(i);
         out->left[k] = set.center[i] + set.side[i] * set.half_left[i];
@@ -311,6 +337,28 @@ inline void MultiplyStripColor(const jpov::Color& color, jpov::Strip4* strip /*o
     }
 }
 
+inline void MultiplyStripColor(const jpov::Color& color, jpov::Strip8* strip /*output*/) {
+    CHECK(strip != nullptr) << "MultiplyStripColor: strip 不能为空";
+    for (int i = 0; i < jpov::kStrip8SampleCount; ++i) {
+        jpov::Color& c = strip->point_color[static_cast<size_t>(i)];
+        c.r *= color.r;
+        c.g *= color.g;
+        c.b *= color.b;
+        c.a *= color.a;
+    }
+}
+
+inline void MultiplyStripColor(const jpov::Color& color, jpov::Strip32* strip /*output*/) {
+    CHECK(strip != nullptr) << "MultiplyStripColor: strip 不能为空";
+    for (int i = 0; i < jpov::kStrip32SampleCount; ++i) {
+        jpov::Color& c = strip->point_color[static_cast<size_t>(i)];
+        c.r *= color.r;
+        c.g *= color.g;
+        c.b *= color.b;
+        c.a *= color.a;
+    }
+}
+
 // ① 波带 / ② 螺旋 / ③ 弧：16 点档的三个入口（gold 与场景① 用）。
 inline void BuildWaveRibbon(float phase, float width_scale, float amplitude,
                            jpov::Strip16* out) {
@@ -318,7 +366,7 @@ inline void BuildWaveRibbon(float phase, float width_scale, float amplitude,
     shape.wave_amplitude = amplitude;
     RibbonSampleSet set;
     SampleRibbonPolyline(RibbonKind::kWave, shape, phase, width_scale,
-                         jpov::kStripSampleCount, /*y_offset=*/0.0f, &set);
+                         jpov::kStripSampleCount, /*offset=*/{0.0f, 0.0f, 0.0f}, &set);
     FillStrip16(set, out);
 }
 
@@ -328,7 +376,7 @@ inline void BuildHelixRibbon(float phase, float width_scale, float turns,
     shape.helix_turns = turns;
     RibbonSampleSet set;
     SampleRibbonPolyline(RibbonKind::kHelix, shape, phase, width_scale,
-                         jpov::kStripSampleCount, /*y_offset=*/0.0f, &set);
+                         jpov::kStripSampleCount, /*offset=*/{0.0f, 0.0f, 0.0f}, &set);
     FillStrip16(set, out);
 }
 
@@ -339,7 +387,7 @@ inline void BuildArcRibbon(float phase, float width_scale, float angle, float ya
     shape.arc_yaw = yaw;
     RibbonSampleSet set;
     SampleRibbonPolyline(RibbonKind::kArc, shape, phase, width_scale,
-                         jpov::kStripSampleCount, /*y_offset=*/0.0f, &set);
+                         jpov::kStripSampleCount, /*offset=*/{0.0f, 0.0f, 0.0f}, &set);
     FillStrip16(set, out);
 }
 
@@ -566,7 +614,8 @@ public:
             opacity_ = 0.95f;
             width_scale_ = 1.0f;
             soft_edges_ = true;
-            sampling_gap_ = 1.9f;     // 两排的竖直间距（米）
+            sampling_row_gap_ = 1.6f;   // 四档沿 Z 的间距（米）
+            sampling_z_shift_ = 0.0f;
             shape_ = RibbonShape{};
         }
         // 天光（太阳仰角/方位/浑浊度）也回默认：它是三个场景共享的面板参数，
@@ -642,9 +691,10 @@ public:
     // ── 玻璃缸 + 橡树（天光消费的验收场景）──
     // 用 fire-fog viewer 同一棵橡树（6m）围一圈玻璃筒：筒壁是条带，开启 sky_light 后
     // 它会随天光/太阳变亮变暗。**默认关**，所以 gold 的 8 张图完全不受影响。
-    // ── 采样对比场景（Strip16 × 3 与 Strip4 × 3，上下两排）──
+    // ── 采样对比场景（4 / 8 / 16 / 32 四档，沿 Z 排开）──
     bool sampling_visible_ = false;
-    float sampling_gap_ = 1.9f;   // 两排条带的竖直间距（米）：16 点在上、4 点在下
+    float sampling_row_gap_ = 1.6f;    // 相邻档位沿 Z 的间距（米）
+    float sampling_z_shift_ = 0.0f;    // 整体沿 Z 平移（±5m）：凑近看某一档用
 
     bool tank_visible_ = false;
     bool tank_skylight_ = true;             // 缸体是否消费天光（A/B 的唯一变量）
@@ -727,13 +777,8 @@ public:
         cmds->camera.position = view_.Position();
         // 三条带都在 y≈0.3..2.7（离地悬空），所以看向原点会让画面整体偏上；
         // 目标点抬高到 1.15m 才把条带放在画面中央。
-        // 采样对比场景的两排条带在 y≈0.3..2.7 与 +gap，取景对准中间。
-        float target_y = 1.15f;
-        if (tank_visible_) {
-            target_y = 2.60f;
-        } else if (sampling_visible_) {
-            target_y = 1.35f + 0.5f * sampling_gap_;
-        }
+        // 缸景看的是高处的缸；采样场景四档都在 y≈0.3..2.7（沿 Z 排开），用默认取景高度。
+        const float target_y = tank_visible_ ? 2.60f : 1.15f;
         cmds->camera.target = {0.0f, target_y, 0.0f};
         cmds->camera.up = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov = 55.0f;
@@ -887,18 +932,17 @@ private:
                                          : jpov::StripInterpolation::kPolyline));
     }
 
-    // ── 采样对比场景：Strip16 × 3 与 Strip4 × 3 ──────────────────────────
+    // ── 采样对比场景：4 / 8 / 16 / 32 四档同屏 ──────────────────────────────
     //
-    // 三条曲线（波 / 螺旋 / 弧）、同一份材质（纹理 + 柔边剖面 + 同样的逐条带浓度），
-    // **只换采样密度**：
-    //   上排：Strip16 × 3（32 顶点/条）→ `DrawStrip16Batch` 一次 draw call
-    //   下排：Strip4  × 3（8  顶点/条）→ `DrawStrip4Batch`  一次 draw call
+    // 四条**同样的曲线**（波 / 螺旋 / 弧）、同一份材质（纹理 + 柔边剖面 + 同样的逐条带浓度），
+    // 只换采样密度：4 / 8 / 16 / 32 点，每个档位一批（一次 draw call）。
     //
-    // 为什么两边都是 3 条：draw call 数只与**批数**有关、与条带数无关，这一点要靠
-    // 「一批多条」才看得出来；同时 3 条（两个 draw call）里每条都在两档中各有一个对照，
-    // 避免「单条带的差异被当成材质差异」。
+    // 排布：沿 **Z 轴**（y-up 里的深度轴）排开，**精度递增**（4 最近、32 最远——
+    // 也可以理解成「从粗到细依次排队」）。整体可用 `sampling_z_shift_` 在 ±5m 内平移，
+    // 方便在同一个机位下逐档凑近看。
     //
-    // 两排只差竖直偏移（上排 +gap、下排原地），曲线完全一样 ⇒ 肉眼差异只可能来自采样密度。
+    // 为什么每档都是 3 条：draw call 数只与**批数**有关、与条带数无关，一批多条才看得出
+    // 这一点；而且每条带在四档里各有一个对照，避免把「单条带的差异」误当成材质差异。
     void EmitSamplingBatches(jpov::RenderCommandList* cmds) {
         uint32_t tex = 0;
         if (use_texture_) {
@@ -910,27 +954,59 @@ private:
                                      ? jpov::Color{1.0f, 1.0f, 1.0f, opacity_}
                                      : jpov::Color{solid_color_.r, solid_color_.g,
                                                    solid_color_.b, opacity_};
+        const jpov::StripInterpolation geometry =
+            smooth_strips_ ? jpov::StripInterpolation::kSmooth
+                           : jpov::StripInterpolation::kPolyline;
         // 每排内三条带各自的浓度：与场景① 完全一致（波形最实、弧最淡）。
         constexpr float kInstanceAlpha[3] = {1.00f, 0.62f, 0.45f};
         constexpr RibbonKind kKinds[3] = {RibbonKind::kWave, RibbonKind::kHelix,
                                           RibbonKind::kArc};
 
-        jpov::TranslucentStrip16Batch batch16;
-        batch16.texture_id = tex;
-        batch16.geometry = smooth_strips_ ? jpov::StripInterpolation::kSmooth
-                                          : jpov::StripInterpolation::kPolyline;
         jpov::TranslucentStrip4Batch batch4;
+        jpov::TranslucentStrip8Batch batch8;
+        jpov::TranslucentStrip16Batch batch16;
+        jpov::TranslucentStrip32Batch batch32;
         batch4.texture_id = tex;
-        batch4.geometry = batch16.geometry;
+        batch8.texture_id = tex;
+        batch16.texture_id = tex;
+        batch32.texture_id = tex;
+        batch4.geometry = geometry;
+        batch8.geometry = geometry;
+        batch16.geometry = geometry;
+        batch32.geometry = geometry;
 
-        // 复用同一个采样缓冲（两档共用一份曲线求值结果的结构，避免每帧分配）。
-        RibbonSampleSet samples;
+        // 四排的 z：以 0 为中心等距排开（间距可调），再整体加面板滑条给的平移量。
+        const float dz = sampling_row_gap_;
+        const float z4 = sampling_z_shift_ - 1.5f * dz;
+        const float z8 = sampling_z_shift_ - 0.5f * dz;
+        const float z16 = sampling_z_shift_ + 0.5f * dz;
+        const float z32 = sampling_z_shift_ + 1.5f * dz;
+
+        RibbonSampleSet samples;   // 复用同一个采样缓冲（四档共用，无每帧分配）
         for (int i = 0; i < 3; ++i) {
             jpov::Color tint = base;
             tint.a *= kInstanceAlpha[i];
 
             SampleRibbonPolyline(kKinds[i], shape_, phase_, width_scale_,
-                                 jpov::kStripSampleCount, /*y_offset=*/sampling_gap_,
+                                 jpov::kStrip4SampleCount, /*offset=*/{0.0f, 0.0f, z4},
+                                 &samples);
+            jpov::Strip4 s4;
+            FillStrip4(samples, &s4);
+            MultiplyStripColor(tint, &s4);
+            s4.width_profile = profile;
+            batch4.strips.push_back(s4);
+
+            SampleRibbonPolyline(kKinds[i], shape_, phase_, width_scale_,
+                                 jpov::kStrip8SampleCount, /*offset=*/{0.0f, 0.0f, z8},
+                                 &samples);
+            jpov::Strip8 s8;
+            FillStrip8(samples, &s8);
+            MultiplyStripColor(tint, &s8);
+            s8.width_profile = profile;
+            batch8.strips.push_back(s8);
+
+            SampleRibbonPolyline(kKinds[i], shape_, phase_, width_scale_,
+                                 jpov::kStripSampleCount, /*offset=*/{0.0f, 0.0f, z16},
                                  &samples);
             jpov::Strip16 s16;
             FillStrip16(samples, &s16);
@@ -939,15 +1015,18 @@ private:
             batch16.strips.push_back(s16);
 
             SampleRibbonPolyline(kKinds[i], shape_, phase_, width_scale_,
-                                 jpov::kStrip4SampleCount, /*y_offset=*/0.0f, &samples);
-            jpov::Strip4 s4;
-            FillStrip4(samples, &s4);
-            MultiplyStripColor(tint, &s4);
-            s4.width_profile = profile;
-            batch4.strips.push_back(s4);
+                                 jpov::kStrip32SampleCount, /*offset=*/{0.0f, 0.0f, z32},
+                                 &samples);
+            jpov::Strip32 s32;
+            FillStrip32(samples, &s32);
+            MultiplyStripColor(tint, &s32);
+            s32.width_profile = profile;
+            batch32.strips.push_back(s32);
         }
-        cmds->DrawStrip16Batch(std::move(batch16));
         cmds->DrawStrip4Batch(std::move(batch4));
+        cmds->DrawStrip8Batch(std::move(batch8));
+        cmds->DrawStrip16Batch(std::move(batch16));
+        cmds->DrawStrip32Batch(std::move(batch32));
     }
 
     // 圆环（玻璃壳）：四组点 → 四条带 → **一个批**（一次 draw call）。
@@ -1175,7 +1254,7 @@ private:
 
     static const std::vector<const char*>& SceneNames() {
         static const std::vector<const char*> kNames = {"box + 三条带", "射流", "玻璃缸 + 树",
-                                                        "采样对比（16 点 / 4 点）"};
+                                                        "采样对比（4/8/16/32）"};
         return kNames;
     }
 
@@ -1239,7 +1318,8 @@ private:
             sl("条带宽度", &width_scale_, 0.2f, 2.5f, 2);
             cb("柔边剖面", &soft_edges_);
             cb("条带平滑（Hermite）", &smooth_strips_);
-            sl("两排间距 m", &sampling_gap_, 0.6f, 4.0f, 2);
+            sl("档位间距 m", &sampling_row_gap_, 0.4f, 3.0f, 2);
+            sl("整体 Z 平移 m", &sampling_z_shift_, -5.0f, 5.0f, 2);
             cb("形状动画", &animate_);
             cb("自动绕行", &auto_orbit_);
         }

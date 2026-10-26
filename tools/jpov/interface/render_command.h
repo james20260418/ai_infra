@@ -1994,8 +1994,10 @@ struct RenderCommandList {
     //     就分开，传错在编译期就报；渲染器内部按各自的拓扑批量上传 + 一次 draw。
     //   * 两条队列之间**顺序无意义**：覆盖集是 accum 加 / reveal 乘，加法集是纯求和，
     //     集合内部本来就与顺序无关（见 strip_types.h 的 StripBlend 说明）。
+    std::vector<TranslucentStrip4Batch> translucent_strip4s;      // 4  采样点（8 顶点/条）
+    std::vector<TranslucentStrip8Batch> translucent_strip8s;      // 8  采样点（16 顶点/条）
     std::vector<TranslucentStrip16Batch> translucent_strips;      // 16 采样点（32 顶点/条）
-    std::vector<TranslucentStrip4Batch> translucent_strip4s;      // 4 采样点（8 顶点/条）
+    std::vector<TranslucentStrip32Batch> translucent_strip32s;    // 32 采样点（64 顶点/条）
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
     //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
@@ -2414,11 +2416,13 @@ struct RenderCommandList {
     // Pre-condition: cmd.strips 非空。
     void DrawStrip16Batch(TranslucentStrip16Batch cmd);
 
-    // DrawStrip4Batch：同上，但条带是 4 采样点（Strip4，8 顶点/条）。
-    // 与 DrawStrip16Batch 是**并列的两条命令**，不是同一个命令的参数 —— 采样数属于
-    // 「这是哪种拓扑」，属于接口层语义，不该藏在运行期字段里。
+    // DrawStrip4Batch / 8 / 32：与 DrawStrip16Batch **并列的四条命令**，不是同一个命令的参数 ——
+    // 采样数属于「这是哪种拓扑」，是接口层语义，不该藏在运行期字段里。
+    // （条带顶点数 = 2×采样数：4→8 / 8→16 / 16→32 / 32→64。）
     // Pre-condition: cmd.strips 非空。
     void DrawStrip4Batch(TranslucentStrip4Batch cmd);
+    void DrawStrip8Batch(TranslucentStrip8Batch cmd);
+    void DrawStrip32Batch(TranslucentStrip32Batch cmd);
 };
 
 }  // namespace jpov

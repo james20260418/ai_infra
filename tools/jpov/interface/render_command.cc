@@ -32,8 +32,10 @@ void RenderCommandList::Clear() {
     point_lights.clear();
     point_fogs.clear();
     object_use_default_color = false;
-    translucent_strips.clear();
     translucent_strip4s.clear();
+    translucent_strip8s.clear();
+    translucent_strips.clear();
+    translucent_strip32s.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -255,6 +257,16 @@ void RenderCommandList::DrawStrip16Batch(TranslucentStrip16Batch cmd) {
 void RenderCommandList::DrawStrip4Batch(TranslucentStrip4Batch cmd) {
     CHECK(!cmd.strips.empty()) << "DrawStrip4Batch: strips 不能为空";
     translucent_strip4s.push_back(std::move(cmd));
+}
+
+void RenderCommandList::DrawStrip8Batch(TranslucentStrip8Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip8Batch: strips 不能为空";
+    translucent_strip8s.push_back(std::move(cmd));
+}
+
+void RenderCommandList::DrawStrip32Batch(TranslucentStrip32Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip32Batch: strips 不能为空";
+    translucent_strip32s.push_back(std::move(cmd));
 }
 
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,

@@ -962,3 +962,171 @@ TEST(Strip4, SmoothDataRejectsTooSmallStride) {
     EXPECT_DEATH(jpov::AppendSmoothStripData(strip, /*row_stride_floats=*/63, c, &out),
                  "行跨距");
 }
+
+// ────────────────── 四档采样数（4 / 8 / 16 / 32）的统一检查 ──────────────────
+//
+// 只有「档位表」本身值得逐项钉住：其余数学（塌缩 / 切线 / 外扩 / 打包）已经是
+// view + layout 驱动的**同一份实现**，四档走的是同一段代码，分别写四遍测试只会
+// 复制粘贴。这里用 StripSamplesView（运行期视图）把四档串成一张表。
+
+namespace {
+
+// 一张「最大档」的临时采样数据：左轨 y=1、右轨 y=0、x = 列下标（与 MakeStrip 同一约定）。
+struct ScratchStrip {
+    jpov::Vec3f left[jpov::kStripMaxSampleCount];
+    jpov::Vec3f right[jpov::kStripMaxSampleCount];
+    jpov::Color color[jpov::kStripMaxSampleCount];
+    std::array<float, jpov::kStripProfileKnots> profile = jpov::kFlatWidthProfile;
+
+    explicit ScratchStrip(uint32_t point_count) {
+        for (int i = 0; i < jpov::kStripMaxSampleCount; ++i) {
+            const float f = static_cast<float>(i);
+            left[i] = jpov::Vec3f{f, 1.0f, 0.0f};
+            right[i] = jpov::Vec3f{f, 0.0f, 0.0f};
+            color[i] = jpov::Color{1.0f, 1.0f, 1.0f, 1.0f};
+        }
+        view.point_count = point_count;
+    }
+
+    // capacity 由调用方按档位给（4/8/16/32）：视图本身不知道自己是哪一档。
+    jpov::StripSamplesView View(int capacity) {
+        view.left = left;
+        view.right = right;
+        view.point_color = color;
+        view.width_profile = &profile;
+        view.capacity = static_cast<uint32_t>(capacity);
+        return view;
+    }
+
+private:
+    jpov::StripSamplesView view{};
+};
+
+const jpov::StripLayout kAllLayouts[] = {jpov::kStripLayout4, jpov::kStripLayout8,
+                                         jpov::kStripLayout16, jpov::kStripLayout32};
+
+}  // namespace
+
+TEST(StripVariants, TopologyTableIsConsistent) {
+    // 顶点/索引/行宽必须都能由采样数推出来（渲染器与 shader 的 uniform 全靠这张表）。
+    const int kExpectedSamples[] = {4, 8, 16, 32};
+    const int kExpectedTexels[] = {13, 17, 25, 41};
+    for (size_t i = 0; i < 4; ++i) {
+        const jpov::StripLayout& l = kAllLayouts[i];
+        EXPECT_EQ(l.samples, kExpectedSamples[i]);
+        EXPECT_EQ(l.quads, l.samples - 1);
+        EXPECT_EQ(l.vertices_per_strip, 2 * l.samples);
+        EXPECT_EQ(l.indices_per_strip, l.quads * 6);
+        EXPECT_EQ(l.appearance_texels, kExpectedTexels[i]);
+        EXPECT_EQ(l.appearance_texels, l.samples + jpov::kStripProfileKnots);
+        // 槽位映射与资源数组（四档各一套）必须一一对应。
+        EXPECT_EQ(jpov::StripLayoutSlotOf(l.samples), static_cast<int>(i));
+    }
+    EXPECT_EQ(jpov::StripLayoutSlotOf(7), -1);   // 非法采样数：调用方 CHECK 崩
+}
+
+TEST(StripVariants, ExpandsEveryVariant) {
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        std::vector<jpov::StripVertex> verts;
+        jpov::ExpandStripVertices(scratch.View(layout.samples), layout, &verts);
+        ASSERT_EQ(verts.size(), static_cast<size_t>(layout.vertices_per_strip))
+            << "samples=" << layout.samples;
+        // 每列两个顶点：right（v=0）在前、left（v=1）在后；u = col/quads。
+        for (int col = 0; col < layout.samples; ++col) {
+            const size_t base = static_cast<size_t>(col) * 2;
+            EXPECT_FLOAT_EQ(verts[base].v, 0.0f);
+            EXPECT_FLOAT_EQ(verts[base + 1].v, 1.0f);
+            const float expected_u = static_cast<float>(col) /
+                                     static_cast<float>(layout.samples - 1);
+            EXPECT_NEAR(verts[base].u, expected_u, 1e-6f);
+            EXPECT_NEAR(verts[base + 1].u, expected_u, 1e-6f);
+        }
+        EXPECT_NEAR(verts[verts.size() - 1].u, 1.0f, 1e-6f);   // 末尾列 u 必须是 1
+    }
+}
+
+TEST(StripVariants, IndexPatternCoversEveryVertex) {
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        std::vector<uint32_t> idx;
+        jpov::AppendStripIndicesForBlock(/*base_vertex=*/0, layout.quads, &idx);
+        ASSERT_EQ(idx.size(), static_cast<size_t>(layout.indices_per_strip))
+            << "samples=" << layout.samples;
+        for (uint32_t v : idx) {
+            EXPECT_LT(v, static_cast<uint32_t>(layout.vertices_per_strip));
+        }
+        // 最后一个 quad 的第二个三角形末顶点 = 最后一条「右轨」顶点（2*(quads+1)-2）。
+        EXPECT_EQ(idx.back() + 1u,
+                  static_cast<uint32_t>(layout.vertices_per_strip) - 1u);
+    }
+}
+
+TEST(StripVariants, ValidateAcceptsFullAndCollapsed) {
+    // 满点与塌缩（point_count = 2）都必须通过：塌缩是合法用法（2 点 = 直线）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        for (uint32_t points : {2u, static_cast<uint32_t>(layout.samples)}) {
+            ScratchStrip scratch(points);
+            jpov::ValidateStripSamples(scratch.View(layout.samples), /*index=*/0,
+                                      "Scratch");
+        }
+    }
+    SUCCEED();
+}
+
+TEST(StripVariants, ValidateRejectsOverCapacity) {
+    // 超出**本档容量**一个点就必须崩（写成 32 会让小档位读越界）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples) + 1u);
+        jpov::StripSamplesView view = scratch.View(layout.samples);
+        EXPECT_DEATH(jpov::ValidateStripSamples(view, /*index=*/0, "Scratch"), "point_count")
+            << "samples=" << layout.samples;
+    }
+}
+
+TEST(StripVariants, SmoothStraightStripNotWidenedInEveryVariant) {
+    // 直条带在四档都不该被外扩（只剩固定的 1mm + 2% 余量），
+    // 且平滑前端不能因为档位变大而算错（数组按最大档分配，只有前 layout.samples 项有效）。
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        jpov::SmoothStripCompute computed;
+        jpov::ComputeSmoothStrip(scratch.View(layout.samples), layout, &computed);
+        EXPECT_NEAR(computed.margin, 0.001f, 1e-6f) << "samples=" << layout.samples;
+        // 半宽恒为 0.5 ⇒ scale = 1 + 0.001/0.5。
+        EXPECT_NEAR(computed.scale, 1.0f + 0.001f / 0.5f, 1e-5f)
+            << "samples=" << layout.samples;
+
+        std::vector<float> verts;
+        jpov::AppendSmoothStripVertices(scratch.View(layout.samples), layout, computed,
+                                        0.0f, &verts);
+        EXPECT_EQ(verts.size(), static_cast<size_t>(layout.vertices_per_strip *
+                                                    jpov::kSmoothFloatsPerVertex))
+            << "samples=" << layout.samples;
+    }
+}
+
+TEST(StripVariants, SmoothDataRowPaddingMatchesStride) {
+    // 四档共用同一张控制点数据纹理（行跨距 = 最大档 512 float）：
+    // 小档位必须补 0 到行尾，且有效区逐字等于「不填充」版本。
+    const int stride = jpov::kStripMaxSampleCount * jpov::kSmoothFloatsPerColumn;
+    for (const jpov::StripLayout& layout : kAllLayouts) {
+        ScratchStrip scratch(static_cast<uint32_t>(layout.samples));
+        jpov::SmoothStripCompute computed;
+        jpov::ComputeSmoothStrip(scratch.View(layout.samples), layout, &computed);
+
+        std::vector<float> tight;
+        jpov::AppendSmoothStripData(scratch.View(layout.samples), layout, computed,
+                                    layout.samples * jpov::kSmoothFloatsPerColumn, &tight);
+        std::vector<float> padded;
+        jpov::AppendSmoothStripData(scratch.View(layout.samples), layout, computed,
+                                    stride, &padded);
+
+        ASSERT_EQ(padded.size(), static_cast<size_t>(stride)) << "samples=" << layout.samples;
+        ASSERT_EQ(tight.size(), static_cast<size_t>(layout.samples * jpov::kSmoothFloatsPerColumn));
+        for (size_t i = 0; i < tight.size(); ++i) {
+            EXPECT_FLOAT_EQ(padded[i], tight[i]) << "samples=" << layout.samples;
+        }
+        for (size_t i = tight.size(); i < padded.size(); ++i) {
+            EXPECT_FLOAT_EQ(padded[i], 0.0f) << "samples=" << layout.samples;
+        }
+    }
+}

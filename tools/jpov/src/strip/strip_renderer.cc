@@ -69,12 +69,12 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
-    glGenBuffers(1, &ibo_);
-    glGenBuffers(1, &ibo4_);
+    glGenBuffers(StripLayoutSlot::kCount, ibo_.data());
     CHECK_NE(vao_, 0u);
     CHECK_NE(vbo_, 0u);
-    CHECK_NE(ibo_, 0u);
-    CHECK_NE(ibo4_, 0u);
+    for (unsigned int id : ibo_) {
+        CHECK_NE(id, 0u);
+    }
 
     // 顶点布局固定为 StripVertex（5 个连续 float：pos.xyz + u + v）；VBO 每帧重传，
     // 但绑定关系不变。
@@ -87,9 +87,13 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(StripVertex),
                           reinterpret_cast<const void*>(3 * sizeof(float)));
 
-    // 索引：两种档位各一条缓冲，先各建 kMaxStripsPerDraw 块；条带更多时按需扩容。
-    EnsureIboCapacity(kMaxStripsPerDraw, kStripLayout16.quads, &ibo_, &ibo_capacity_);
-    EnsureIboCapacity(kMaxStripsPerDraw, kStripLayout4.quads, &ibo4_, &ibo4_capacity_);
+    // 索引：四档各一条缓冲，先各建 kMaxStripsPerDraw 块；条带更多时按需扩容。
+    const StripLayout kLayouts[StripLayoutSlot::kCount] = {
+        kStripLayout4, kStripLayout8, kStripLayout16, kStripLayout32};
+    for (int slot = 0; slot < StripLayoutSlot::kCount; ++slot) {
+        EnsureIboCapacity(kMaxStripsPerDraw, kLayouts[slot].quads, &ibo_[slot],
+                          &ibo_capacity_[slot]);
+    }
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -137,7 +141,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, smooth_stride,
                           reinterpret_cast<const void*>(5 * sizeof(float)));
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);   // 与折线 pass 共用静态索引
+    // 与折线 pass 共用「块 = 一条带」的索引；具体哪一档在 draw 前按 layout 重绑。
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_[StripLayoutSlot::k16]);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -145,32 +150,23 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
     max_texture_rows_ = static_cast<int>(max_tex);
 
-    // per-instance 数据纹理：一行 = 一条带：
-    //   [0..15]  逐点 RGBA（沿长度 16 列，**LINEAR**：列间要平滑过渡）
-    //   [16..24] 宽度剖面 9 个 knot（**LINEAR**：9 个等距 knot 的双线性 = 精确分段线性）
-    // NEAREST 会让颜色变成 16 段台阶、剖面变成 8 段台阶 —— 这两条都必须过滤。
-    glGenTextures(1, &appearance_tex_);
-    CHECK_NE(appearance_tex_, 0u);
-    glBindTexture(GL_TEXTURE_2D, appearance_tex_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    appearance_capacity_ = 64;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripLayout16.appearance_texels,
-                 appearance_capacity_, 0, GL_RGBA, GL_FLOAT, nullptr);
-
-    // 4 点档：同样的过滤方式，只是行宽 13（4 列颜色 + 9 knot）。
-    glGenTextures(1, &appearance4_tex_);
-    CHECK_NE(appearance4_tex_, 0u);
-    glBindTexture(GL_TEXTURE_2D, appearance4_tex_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    appearance4_capacity_ = 64;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kStripLayout4.appearance_texels,
-                 appearance4_capacity_, 0, GL_RGBA, GL_FLOAT, nullptr);
+    // per-instance 数据纹理：一行 = 一条带，行宽 = 采样数 + 9 个剖面 knot。
+    // 四种档位各一张（行宽 13 / 17 / 25 / 41）：列坐标必须按本档行宽归一化，
+    // 一张纹理只能有一个宽度，混用会把颜色采到隔壁 texel 上。
+    // 过滤必须是 LINEAR：逐点颜色要列间平滑、9 个等距 knot 的双线性才等于精确分段线性；
+    // NEAREST 会让颜色变成 N 段台阶、剖面变成 8 段台阶。
+    glGenTextures(StripLayoutSlot::kCount, appearance_tex_.data());
+    for (int slot = 0; slot < StripLayoutSlot::kCount; ++slot) {
+        CHECK_NE(appearance_tex_[slot], 0u);
+        glBindTexture(GL_TEXTURE_2D, appearance_tex_[slot]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        appearance_capacity_[slot] = 64;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, kLayouts[slot].appearance_texels,
+                     appearance_capacity_[slot], 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
 
     glGenTextures(1, &smooth_data_tex_);
     CHECK_NE(smooth_data_tex_, 0u);
@@ -184,7 +180,7 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     // 初始只开一小块，运行中按条带数翻倍增长（避免每帧抖动导致反复重建）。
     smooth_data_rows_ = 64;
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
-                 kStripSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
+                 kStripMaxSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
                  GL_RGBA, GL_FLOAT, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -233,8 +229,10 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     CHECK_EQ(kStripQuads, 15) << "16 点档的段数必须还是 15";
     // 行宽 = 采样点数 + 9 个剖面 knot：16 点档 25、4 点档 13。这两个数不再写进 shader
     // 字面量，而是每批按 StripLayout 上传 scale/bias —— 但仍要保证布局表本身自洽。
-    CHECK_EQ(kStripLayout16.appearance_texels, 25) << "16 点档行宽必须还是 25";
     CHECK_EQ(kStripLayout4.appearance_texels, 13) << "4 点档行宽必须还是 13";
+    CHECK_EQ(kStripLayout8.appearance_texels, 17) << "8 点档行宽必须还是 17";
+    CHECK_EQ(kStripLayout16.appearance_texels, 25) << "16 点档行宽必须还是 25";
+    CHECK_EQ(kStripLayout32.appearance_texels, 41) << "32 点档行宽必须还是 41";
     // 平滑 pass 的 texel 步长：kSmoothFsMain 里 `int tx = seg * 4` 且每列最后一个 texel 是 rgba。
     CHECK_EQ(kSmoothTexelsPerColumn, 4) << "shader 里 kSmoothFsMain 的 seg*4 必须同步";
 
@@ -340,13 +338,11 @@ void StripRenderer::EnsureIboCapacity(int strips, int quads, unsigned int* ibo /
 
 void StripRenderer::Finalize() {
     wbo_.Destroy();
-    if (ibo_ != 0) {
-        glDeleteBuffers(1, &ibo_);
-        ibo_ = 0;
-    }
-    if (ibo4_ != 0) {
-        glDeleteBuffers(1, &ibo4_);
-        ibo4_ = 0;
+    for (unsigned int& id : ibo_) {
+        if (id != 0) {
+            glDeleteBuffers(1, &id);
+            id = 0;
+        }
     }
     if (vbo_ != 0) {
         glDeleteBuffers(1, &vbo_);
@@ -356,16 +352,13 @@ void StripRenderer::Finalize() {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
     }
-    if (appearance_tex_ != 0) {
-        glDeleteTextures(1, &appearance_tex_);
-        appearance_tex_ = 0;
+    for (unsigned int& id : appearance_tex_) {
+        if (id != 0) {
+            glDeleteTextures(1, &id);
+            id = 0;
+        }
     }
-    appearance_capacity_ = 0;
-    if (appearance4_tex_ != 0) {
-        glDeleteTextures(1, &appearance4_tex_);
-        appearance4_tex_ = 0;
-    }
-    appearance4_capacity_ = 0;
+    appearance_capacity_.fill(0);
     if (smooth_data_tex_ != 0) {
         glDeleteTextures(1, &smooth_data_tex_);
         smooth_data_tex_ = 0;
@@ -382,8 +375,7 @@ void StripRenderer::Finalize() {
     max_texture_rows_ = 0;
     // ⚠️ 必须复位：否则 Finalize → Init 的第二次 Init 里 EnsureIboCapacity 会因为
     //    「容量看起来还够」直接返回，而 IBO 已经被删掉 → 后续 draw 索引到已删除的 buffer。
-    ibo_capacity_ = 0;
-    ibo4_capacity_ = 0;
+    ibo_capacity_.fill(0);
     initialized_ = false;
     has_content_ = false;
     has_alpha_ = false;
@@ -419,11 +411,10 @@ void StripRenderer::UploadAppearance(const BatchDrawContext& ctx) {
     // 两种档位的行宽不同（25 / 13）⇒ 各用一张纹理：列坐标必须按「本档的行宽」归一化，
     // 一张纹理只能有一个宽度，混用会把颜色采到隔壁 texel 上。
     const int texels = ctx.layout.appearance_texels;
-    const bool is4 = (ctx.layout.samples == kStrip4SampleCount);
-    CHECK(is4 || ctx.layout.samples == kStripSampleCount)
-        << "UploadAppearance: 未知的采样数 " << ctx.layout.samples;
-    unsigned int tex = is4 ? appearance4_tex_ : appearance_tex_;
-    int* capacity = is4 ? &appearance4_capacity_ : &appearance_capacity_;
+    const int slot = StripLayoutSlotOf(ctx.layout.samples);
+    CHECK_GE(slot, 0) << "UploadAppearance: 未知的采样数 " << ctx.layout.samples;
+    unsigned int tex = appearance_tex_[static_cast<size_t>(slot)];
+    int* capacity = &appearance_capacity_[static_cast<size_t>(slot)];
 
     if (count > *capacity) {
         const int grown = std::max(count, *capacity * 2);
@@ -484,6 +475,20 @@ StripSamplesView StripRenderer::SamplesAt4(const void* owner, size_t index) {
     return ViewOf(batch.strips[index]);
 }
 
+StripSamplesView StripRenderer::SamplesAt8(const void* owner, size_t index) {
+    CHECK(owner != nullptr) << "SamplesAt8: owner 不能为空";
+    const TranslucentStrip8Batch& batch = *static_cast<const TranslucentStrip8Batch*>(owner);
+    CHECK_LT(index, batch.strips.size()) << "SamplesAt8: index 越界";
+    return ViewOf(batch.strips[index]);
+}
+
+StripSamplesView StripRenderer::SamplesAt32(const void* owner, size_t index) {
+    CHECK(owner != nullptr) << "SamplesAt32: owner 不能为空";
+    const TranslucentStrip32Batch& batch = *static_cast<const TranslucentStrip32Batch*>(owner);
+    CHECK_LT(index, batch.strips.size()) << "SamplesAt32: index 越界";
+    return ViewOf(batch.strips[index]);
+}
+
 void StripRenderer::Draw16(const TranslucentStrip16Batch& batch,
                            TextureManager& texture_mgr,
                            const Camera& camera,
@@ -522,6 +527,54 @@ void StripRenderer::Draw4(const TranslucentStrip4Batch& batch,
     ctx.style = &batch;
     ctx.layout = kStripLayout4;
     ctx.samples_at = &StripRenderer::SamplesAt4;
+    ctx.strips_owner = &batch;
+    ctx.strip_count = batch.strips.size();
+    ctx.camera = &camera;
+    ctx.view_proj = view_proj;
+    ctx.scene_depth_tex = scene_depth_tex;
+    ctx.full_w = full_w;
+    ctx.full_h = full_h;
+    ctx.csm = csm;
+    DrawShared(ctx, texture_mgr);
+}
+
+void StripRenderer::Draw8(const TranslucentStrip8Batch& batch,
+                          TextureManager& texture_mgr,
+                          const Camera& camera,
+                          const float view_proj[16],
+                          unsigned int scene_depth_tex,
+                          const StripCsmShadow* csm,
+                          int full_w, int full_h) {
+    ValidateStripBatch(batch);
+
+    BatchDrawContext ctx;
+    ctx.style = &batch;
+    ctx.layout = kStripLayout8;
+    ctx.samples_at = &StripRenderer::SamplesAt8;
+    ctx.strips_owner = &batch;
+    ctx.strip_count = batch.strips.size();
+    ctx.camera = &camera;
+    ctx.view_proj = view_proj;
+    ctx.scene_depth_tex = scene_depth_tex;
+    ctx.full_w = full_w;
+    ctx.full_h = full_h;
+    ctx.csm = csm;
+    DrawShared(ctx, texture_mgr);
+}
+
+void StripRenderer::Draw32(const TranslucentStrip32Batch& batch,
+                           TextureManager& texture_mgr,
+                           const Camera& camera,
+                           const float view_proj[16],
+                           unsigned int scene_depth_tex,
+                           const StripCsmShadow* csm,
+                           int full_w, int full_h) {
+    ValidateStripBatch(batch);
+
+    BatchDrawContext ctx;
+    ctx.style = &batch;
+    ctx.layout = kStripLayout32;
+    ctx.samples_at = &StripRenderer::SamplesAt32;
     ctx.strips_owner = &batch;
     ctx.strip_count = batch.strips.size();
     ctx.camera = &camera;
@@ -612,13 +665,12 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
     // per-instance 数据纹理：行号钳位用**实际纹理高度**（不是本批条带数 ——
     // 扩容后两者不同，用条带数会让行坐标落错 texel）。
     glActiveTexture(GL_TEXTURE0 + kAppearanceUnit);
-    if (ctx.layout.samples == kStrip4SampleCount) {
-        glBindTexture(GL_TEXTURE_2D, appearance4_tex_);
-        glUniform1f(uniforms.appearance_rows, static_cast<float>(appearance4_capacity_));
-    } else {
-        glBindTexture(GL_TEXTURE_2D, appearance_tex_);
-        glUniform1f(uniforms.appearance_rows, static_cast<float>(appearance_capacity_));
-    }
+    const int appearance_slot = StripLayoutSlotOf(ctx.layout.samples);
+    CHECK_GE(appearance_slot, 0)
+        << "ApplyCommonUniforms: 未知的采样数 " << ctx.layout.samples;
+    glBindTexture(GL_TEXTURE_2D, appearance_tex_[static_cast<size_t>(appearance_slot)]);
+    glUniform1f(uniforms.appearance_rows,
+                static_cast<float>(appearance_capacity_[static_cast<size_t>(appearance_slot)]));
     glUniform1i(uniforms.appearance, kAppearanceUnit);
 
     // fresnel：关闭时也把 uniform 写成合法值（FS 里那个分支不取它们，但读未初始化的
@@ -715,14 +767,13 @@ void StripRenderer::DrawPolyline(const BatchDrawContext& ctx) {
     LOG_FIRST_N(INFO, 3) << "StripRenderer(polyline): strips=" << total
                          << " samples=" << ctx.layout.samples
                          << " draw_calls=" << chunks;
-    EnsureIboCapacity(static_cast<int>(total), ctx.layout.quads,
-                      ctx.layout.samples == kStrip4SampleCount ? &ibo4_ : &ibo_,
-                      ctx.layout.samples == kStrip4SampleCount ? &ibo4_capacity_
-                                                               : &ibo_capacity_);
+    const int slot = StripLayoutSlotOf(ctx.layout.samples);
+    CHECK_GE(slot, 0) << "DrawPolyline: 未知的采样数 " << ctx.layout.samples;
+    EnsureIboCapacity(static_cast<int>(total), ctx.layout.quads, &ibo_[static_cast<size_t>(slot)],
+                      &ibo_capacity_[static_cast<size_t>(slot)]);
     glBindVertexArray(vao_);
     // 索引缓冲的绑定属于 VAO ⇒ 每个 draw 前按本档位重绑一次（幂等，代价是一次状态设置）。
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
-                 ctx.layout.samples == kStrip4SampleCount ? ibo4_ : ibo_);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_[static_cast<size_t>(slot)]);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     for (size_t begin = 0; begin < total; begin += kMaxStripsPerDraw) {
         const size_t count = std::min<size_t>(kMaxStripsPerDraw, total - begin);
@@ -782,7 +833,7 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
         glActiveTexture(GL_TEXTURE0 + kSmoothDataUnit);
         glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
-                     kStripSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
+                     kStripMaxSampleCount * kSmoothTexelsPerColumn, smooth_data_rows_, 0,
                      GL_RGBA, GL_FLOAT, nullptr);
     }
 
@@ -793,9 +844,10 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     smooth_vertices_.reserve(total * static_cast<size_t>(ctx.layout.vertices_per_strip) *
                              kSmoothFloatsPerVertex);
     smooth_data_.clear();
-    // 数据纹理的行跨距固定按 16 点档的宽度（一张纹理两档共用），4 点档的行尾补 0。
+    // 数据纹理的行跨距固定按**最大档**（32 点）的宽度，四档共用同一张纹理，
+    // 小档位的行尾补 0（FS 只按自己的 seg 索引读，不会碰到填充区）。
     const size_t row_stride_floats =
-        static_cast<size_t>(kStripSampleCount) * kSmoothFloatsPerColumn;
+        static_cast<size_t>(kStripMaxSampleCount) * kSmoothFloatsPerColumn;
     smooth_data_.reserve(total * row_stride_floats);
     SmoothStripCompute computed;
     for (size_t k = 0; k < total; ++k) {
@@ -813,13 +865,14 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     // 行号钳位的上界 = 纹理**实际高度**（不是每块条带数）：整批可能远超一块。
     glUniform1f(u.data_rows, static_cast<float>(smooth_data_rows_));
 
-    const bool is4 = (ctx.layout.samples == kStrip4SampleCount);
-    EnsureIboCapacity(static_cast<int>(total), ctx.layout.quads,
-                      is4 ? &ibo4_ : &ibo_, is4 ? &ibo4_capacity_ : &ibo_capacity_);
+    const int slot = StripLayoutSlotOf(ctx.layout.samples);
+    CHECK_GE(slot, 0) << "DrawSmooth: 未知的采样数 " << ctx.layout.samples;
+    EnsureIboCapacity(static_cast<int>(total), ctx.layout.quads, &ibo_[static_cast<size_t>(slot)],
+                      &ibo_capacity_[static_cast<size_t>(slot)]);
 
     glBindVertexArray(smooth_vao_);
-    // 索引绑定属于 VAO：按本档位重绑（平滑 pass 与折线 pass 共用同一份"块 = 一条带"的索引）。
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, is4 ? ibo4_ : ibo_);
+    // 索引绑定属于 VAO：按本档位重绑（平滑 pass 与折线 pass 共用同一份「块 = 一条带」的索引）。
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_[static_cast<size_t>(slot)]);
     glBindBuffer(GL_ARRAY_BUFFER, smooth_vbo_);
     glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(smooth_vertices_.size() * sizeof(float)),
@@ -827,7 +880,7 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
     glActiveTexture(GL_TEXTURE0 + kSmoothDataUnit);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                    kStripSampleCount * kSmoothTexelsPerColumn,
+                    kStripMaxSampleCount * kSmoothTexelsPerColumn,
                     static_cast<GLsizei>(total), GL_RGBA, GL_FLOAT,
                     smooth_data_.data());
 

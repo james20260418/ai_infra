@@ -69,6 +69,18 @@ inline StripSamplesView ViewOf(const Strip4& strip) {
                             static_cast<uint32_t>(kStrip4SampleCount)};
 }
 
+inline StripSamplesView ViewOf(const Strip8& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStrip8SampleCount)};
+}
+
+inline StripSamplesView ViewOf(const Strip32& strip) {
+    return StripSamplesView{strip.left.data(), strip.right.data(), strip.point_color.data(),
+                            &strip.width_profile, strip.point_count,
+                            static_cast<uint32_t>(kStrip32SampleCount)};
+}
+
 struct StripLayout {
     int samples = 0;              // 采样点数（= 列数）
     int quads = 0;                // 段数 = samples − 1
@@ -77,16 +89,52 @@ struct StripLayout {
     int appearance_texels = 0;    // samples + kStripProfileKnots（一行 per-instance 数据的宽度）
 };
 
-inline constexpr StripLayout kStripLayout16{kStripSampleCount,
-                                            kStripQuads,
-                                            kStripVerticesPerStrip,
-                                            kStripIndicesPerStrip,
-                                            kStripSampleCount + kStripProfileKnots};
+struct StripLayoutSlot {
+    static constexpr int k4 = 0;
+    static constexpr int k8 = 1;
+    static constexpr int k16 = 2;
+    static constexpr int k32 = 3;
+    static constexpr int kCount = 4;
+};
+
 inline constexpr StripLayout kStripLayout4{kStrip4SampleCount,
                                            kStrip4Quads,
                                            2 * kStrip4SampleCount,
                                            kStrip4Quads * 6,
                                            kStrip4SampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout8{kStrip8SampleCount,
+                                           kStrip8Quads,
+                                           2 * kStrip8SampleCount,
+                                           kStrip8Quads * 6,
+                                           kStrip8SampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout16{kStripSampleCount,
+                                            kStripQuads,
+                                            kStripVerticesPerStrip,
+                                            kStripIndicesPerStrip,
+                                            kStripSampleCount + kStripProfileKnots};
+inline constexpr StripLayout kStripLayout32{kStrip32SampleCount,
+                                            kStrip32Quads,
+                                            2 * kStrip32SampleCount,
+                                            kStrip32Quads * 6,
+                                            kStrip32SampleCount + kStripProfileKnots};
+
+// 采样数 → 布局槽位（渲染器用它索引「每档一套」的资源：per-instance 纹理 / 索引缓冲）。
+// 非法采样数返回 -1（调用方 CHECK 崩，别静默画错档位）。
+inline constexpr int StripLayoutSlotOf(int samples) {
+    if (samples == kStrip4SampleCount) {
+        return StripLayoutSlot::k4;
+    }
+    if (samples == kStrip8SampleCount) {
+        return StripLayoutSlot::k8;
+    }
+    if (samples == kStripSampleCount) {
+        return StripLayoutSlot::k16;
+    }
+    if (samples == kStrip32SampleCount) {
+        return StripLayoutSlot::k32;
+    }
+    return -1;
+}
 
 // 第 col 列的 u（沿长度，0..1 等分）。16 点档位仍可用下面的常量表（编译期算好），
 // 4 点档位现算 —— 只有 4 列，一次除法不值得一提。
@@ -283,6 +331,20 @@ inline void ValidateStripBatch(const TranslucentStrip4Batch& batch) {
     }
 }
 
+inline void ValidateStripBatch(const TranslucentStrip8Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip8Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip8");
+    }
+}
+
+inline void ValidateStripBatch(const TranslucentStrip32Batch& batch) {
+    ValidateStripStyle(batch, batch.strips.size(), "Strip32Batch");
+    for (size_t i = 0; i < batch.strips.size(); ++i) {
+        ValidateStripSamples(ViewOf(batch.strips[i]), i, "Strip32");
+    }
+}
+
 // 把一条带展开成 layout.vertices_per_strip 个顶点，**追加**到 out。
 //
 // 塌缩规则：列 col 取采样点 src = min(col, point_count-1)。
@@ -323,6 +385,15 @@ inline void ExpandStripVertices(const Strip16& strip, std::vector<StripVertex>* 
 
 inline void ExpandStripVertices(const Strip4& strip, std::vector<StripVertex>* out /*output*/) {
     ExpandStripVertices(ViewOf(strip), kStripLayout4, out);
+}
+
+inline void ExpandStripVertices(const Strip8& strip, std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout8, out);
+}
+
+inline void ExpandStripVertices(const Strip32& strip,
+                                std::vector<StripVertex>* out /*output*/) {
+    ExpandStripVertices(ViewOf(strip), kStripLayout32, out);
 }
 
 // 追加**一个条带块**的索引（quads × 6 个）；base_vertex = 该条带首个顶点的全局下标。
@@ -525,10 +596,11 @@ inline Vec3f Hermite(const Vec3f& p0, const Vec3f& m0, const Vec3f& p1,
 // 下标 col ∈ [0, kStripSampleCount)：不足 16 点时，尾部列与折线 pass 一样**塌缩**
 // 到最后一个有效点（重复的列 = 零面积 quad，不产生片元）。
 struct SmoothStripCompute {
-    Vec3f center[kStripSampleCount];      // 过点（该列 left/right 的中点）
-    Vec3f half[kStripSampleCount];        // 半宽矢量（**未外扩**，指向 left 一侧）
-    Vec3f center_tan[kStripSampleCount];  // ∂center/∂t
-    Vec3f half_tan[kStripSampleCount];    // ∂half/∂t
+    // 按**最大档**（32）分配，四档共用同一个暂存结构：只有前 layout.samples 项有效。
+    Vec3f center[kStripMaxSampleCount];      // 过点（该列 left/right 的中点）
+    Vec3f half[kStripMaxSampleCount];        // 半宽矢量（**未外扩**，指向 left 一侧）
+    Vec3f center_tan[kStripMaxSampleCount];  // ∂center/∂t
+    Vec3f half_tan[kStripMaxSampleCount];    // ∂half/∂t
     float margin = 0.0f;                  // 需要外扩的绝对量（米），含 2% + 1mm 余量
     float scale = 1.0f;                   // 顶点外扩倍数（整条带统一，≥ 1）
 };
@@ -543,9 +615,9 @@ inline void ComputeSmoothStrip(const StripSamplesView& strip, const StripLayout&
     CHECK_EQ(layout.quads, layout.samples - 1) << "ComputeSmoothStrip: layout 自相矛盾";
     CHECK_GE(strip.point_count, 2u) << "ComputeSmoothStrip: point_count 至少 2";
     CHECK_LE(strip.point_count, strip.capacity) << "ComputeSmoothStrip: point_count 越界";
-    CHECK_LE(layout.samples, kStripSampleCount)
+    CHECK_LE(layout.samples, kStripMaxSampleCount)
         << "ComputeSmoothStrip: 布局的采样数超过 SmoothStripCompute 的容量（"
-        << kStripSampleCount << "）";
+        << kStripMaxSampleCount << "）";
 
     // ① 控制点：中心 c（Hermite 的过点）与半宽矢量 h（未外扩）。
     const uint32_t last_real = strip.point_count - 1;
@@ -631,6 +703,14 @@ inline void ComputeSmoothStrip(const Strip16& strip, SmoothStripCompute* out /*o
 
 inline void ComputeSmoothStrip(const Strip4& strip, SmoothStripCompute* out /*output*/) {
     ComputeSmoothStrip(ViewOf(strip), kStripLayout4, out);
+}
+
+inline void ComputeSmoothStrip(const Strip8& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout8, out);
+}
+
+inline void ComputeSmoothStrip(const Strip32& strip, SmoothStripCompute* out /*output*/) {
+    ComputeSmoothStrip(ViewOf(strip), kStripLayout32, out);
 }
 
 // 追加一条条带的数据纹理行：kStripSampleCount × 16 float。
@@ -739,6 +819,17 @@ inline void AppendSmoothStripVertices(const Strip16& strip,
 inline void AppendSmoothStripVertices(const Strip4& strip, const SmoothStripCompute& computed,
                                       float strip_id, std::vector<float>* out /*output*/) {
     AppendSmoothStripVertices(ViewOf(strip), kStripLayout4, computed, strip_id, out);
+}
+
+inline void AppendSmoothStripVertices(const Strip8& strip, const SmoothStripCompute& computed,
+                                      float strip_id, std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout8, computed, strip_id, out);
+}
+
+inline void AppendSmoothStripVertices(const Strip32& strip,
+                                      const SmoothStripCompute& computed, float strip_id,
+                                      std::vector<float>* out /*output*/) {
+    AppendSmoothStripVertices(ViewOf(strip), kStripLayout32, computed, strip_id, out);
 }
 
 }  // namespace jpov
