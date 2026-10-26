@@ -13,6 +13,7 @@ JPOV 是一个面向 AI 自测输出的、支持流式绘制 + 简单交互的�
 > - **[docs/jpov_wbo_target.md](docs/jpov_wbo_target.md)** — WBO 目标（遮掩/发光两集合）的共享件：`WboTarget`（固定槽位、附件按需申请、clear/blend/还原一把抓）+ 共享权重与解析 + 新加 WBO 层必须遵守的 7 条规则。写任何半透明累积层前先读。
 > - **[docs/jpov_strip3d_translucent_design.md](docs/jpov_strip3d_translucent_design.md)** — 半透明 3D 条带（Strip3D）：左右双轨 + 逐点 uv/alpha + 8 段宽度剖面 → 1× WBO 双集合（遮罩 / 发光）。廉价玻璃、流星拖尾、剑气、光环；不动三大 renderer 的 blend。做带状半透明效果前先读。
 > - **[interface/README.md](interface/README.md)** — 渲染接口层说明。
+> - **[tools/vegetation_tool_v2/README.md](tools/vegetation_tool_v2/README.md)** — 植被资产链（Blender/Sapling → shape）。**资产一律存二进制 `.vegshape`**（ShapeProto 的 protobuf 二进制），文本 `.pbtxt` 只用于人工查看，用 `gen/shape_convert` 互转；含三棵树的三档顶点预算（5 万顶点 / 5000 三角 / 高配）。
 
 ## 快速开始
 
