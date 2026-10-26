@@ -97,6 +97,7 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         bool ribbons = true;         // 三条带（波/螺旋/弧）
         bool ring = true;            // 玻璃圆环（四组点 → 四条带）
         bool use_texture = true;     // false = 纯色（不看纹理）
+        bool texture_mipmap = false; // 纹理 mipmap（只在 use_texture 时有意义）
         bool soft_edges = true;      // 宽度剖面：柔边 / 硬边（圆环不受它影响，见 EmitRingBatch）
         bool arc_additive = false;   // 弧形改走加法集（发光拖尾）
         bool soft_depth = false;     // 条带与几何相交处软过渡
@@ -159,6 +160,13 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         {.name = "215_jet_gain8", .ribbons = false, .ring = false, .smooth = true,
          .jet_gain = 8.0f},
         {.name = "220_scene_with_jet", .smooth = true},
+        // 远机位纹理 A/B（只留三条带、关掉圆环/射流/方块，免得抢眼）：
+        // 同一机位下「mip 关 ↔ 开」，看远处细纹理的闪烁 vs 模糊。
+        // 两张图都**不进 gold**：这是给人看的对比，不是回归门禁。
+        {.name = "300_far_tex_no_mip", .ring = false, .smooth = true,
+         .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
+        {.name = "305_far_tex_mip", .ring = false, .texture_mipmap = true, .smooth = true,
+         .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
     };
     for (const Shot& shot : kShots) {
         CHECK(shot.fresnel_preset >= 0 && shot.fresnel_preset < jpov_strip::kFresnelPresetCount)
@@ -171,6 +179,7 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         app.jet_gain_ = shot.jet_gain;
         app.bloom_ = shot.bloom;
         app.use_texture_ = shot.use_texture;
+        app.texture_mipmap_ = shot.texture_mipmap;
         app.soft_edges_ = shot.soft_edges;
         app.arc_additive_ = shot.arc_additive;
         app.soft_depth_ = shot.soft_depth;

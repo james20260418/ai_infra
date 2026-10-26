@@ -144,7 +144,7 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     glGenTextures(1, &smooth_data_tex_);
     CHECK_NE(smooth_data_tex_, 0u);
     glBindTexture(GL_TEXTURE_2D, smooth_data_tex_);
-    // 宽度 = 每列 3 texel × 采样点数；高度 = 一个 draw 块最多多少条带。
+    // 宽度 = 每列 4 texel × 采样点数；高度 = 一个 draw 块最多多少条带。
     // 关 mipmap / NEAREST：texelFetch 本来就不走过滤（也避免被 TextureManager 的默认选项污染）。
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -171,6 +171,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
         glUniform3f(u.fresnel_rim_color, 1.0f, 1.0f, 1.0f);
         glUniform1f(u.fresnel_f0, 0.04f);
         glUniform1f(u.fresnel_power, 5.0f);
+        // 与上面的默认 power 成对：5 ⇒ 特化路径（只改 power 不改它会让默认态落到 pow）。
+        glUniform1i(u.fresnel_pow5, 1);
         glUniform1f(u.fresnel_strength, 1.0f);
         glUniform1f(u.fresnel_graze_alpha, 1.0f);
         glUseProgram(0);
@@ -186,6 +188,8 @@ void StripRenderer::Init(ShaderManager* shader_mgr) {
     CHECK_EQ(kStripSampleCount, 16) << "PointColor 里的 16 个 texel 必须同步";
     CHECK_EQ(kStripQuads, 15) << "PointColor 里的 15 段必须同步";
     CHECK_EQ(kAppearanceTexels, 25) << "shader 里 PointColor/WidthProfile 的 25.0 必须同步";
+    // 平滑 pass 的 texel 步长：kSmoothFsMain 里 `int tx = seg * 4` 且每列最后一个 texel 是 rgba。
+    CHECK_EQ(kSmoothTexelsPerColumn, 4) << "shader 里 kSmoothFsMain 的 seg*4 必须同步";
 
     initialized_ = true;
 }
@@ -213,6 +217,7 @@ void StripRenderer::QueryCommonUniforms(unsigned int program, CommonUniforms* ou
     out->fresnel_rim_color = shader_mgr_->GetUniform(program, "uFresnelRimColor");
     out->fresnel_f0 = shader_mgr_->GetUniform(program, "uFresnelF0");
     out->fresnel_power = shader_mgr_->GetUniform(program, "uFresnelPower");
+    out->fresnel_pow5 = shader_mgr_->GetUniform(program, "uFresnelPow5");
     out->fresnel_strength = shader_mgr_->GetUniform(program, "uFresnelStrength");
     out->fresnel_graze_alpha = shader_mgr_->GetUniform(program, "uFresnelGrazeAlpha");
 }
@@ -443,6 +448,10 @@ void StripRenderer::ApplyCommonUniforms(const CommonUniforms& uniforms,
                     f.rim_color.z());
         glUniform1f(uniforms.fresnel_f0, f.f0);
         glUniform1f(uniforms.fresnel_power, f.power);
+        // 恰好 5 ⇒ 走五次乘法特化（FresnelFactor）。这里用**精确相等**：5.0f 是 Schlick 的
+        // 默认指数，也是所有预设的取值；|p−5|<eps 这种近似语义只会让「走哪条路」取决于
+        // 浮点偶然，反而难排查。要特化别的整数指数再另开分支。
+        glUniform1i(uniforms.fresnel_pow5, (f.power == 5.0f) ? 1 : 0);
         glUniform1f(uniforms.fresnel_strength, f.strength);
         glUniform1f(uniforms.fresnel_graze_alpha, f.graze_alpha);
     }
@@ -550,7 +559,7 @@ void StripRenderer::DrawSmooth(const BatchDrawContext& ctx) {
         ComputeSmoothStrip(strips[k], &computed);
         AppendSmoothStripVertices(strips[k], computed, static_cast<float>(k),
                                   &smooth_vertices_);
-        AppendSmoothStripData(computed, &smooth_data_);
+        AppendSmoothStripData(strips[k], computed, &smooth_data_);
         LOG_FIRST_N(INFO, 6) << "StripSmooth: margin=" << computed.margin
                              << " scale=" << computed.scale;
     }
