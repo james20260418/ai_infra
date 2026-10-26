@@ -27,7 +27,7 @@
 //                                                            shape 找不到时自动进纯 glb 查看模式
 //   --glb-only                                               强制纯 glb 查看模式（即使 shape 存在也不加载；
 //                                                            无原材料态：不能烘焙、不能回退）
-//   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
+//   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（两态都生效；A/B、出图可复现）
 
 #include <cstdio>
 #include <cstdlib>
