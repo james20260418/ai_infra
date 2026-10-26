@@ -216,7 +216,9 @@ public:
         if (ssr_on_) {
             jpov::SsrConfig sc;
             sc.enabled = true;
-            sc.resolution_scale = ssr_res_scale_;
+            // SSPH 的成本与分辨率无关（一次采样）⇒ 强制全分辨率。
+            // 之前交互默认是 0.5，切到 SSPH 就变成"半分辨率 + 上采样" ⇒ 一片糊。
+            sc.resolution_scale = (sc.march_mode == 2) ? 1.0f : ssr_res_scale_;
             sc.hiz_start_level = static_cast<int>(ssr_start_level_ + 0.5f);
             sc.max_steps = static_cast<int>(ssr_max_steps_ + 0.5f);
             sc.thickness_m = ssr_thickness_;
@@ -478,7 +480,7 @@ private:
     // 默认**关**：它是逐像素射线 pass，在软件光栅（llvmpipe）上很贵；交互时打开看效果，
     // 出图验收用 --capture-ssr 的预设。数值默认对齐 SsrConfig 的推荐值。
     bool  ssr_on_ = false;
-    float ssr_res_scale_ = 0.5f;
+    float ssr_res_scale_ = 1.0f;   // SSPH 默认全分辨率；HiZ/DDA 想省再往下拖
     float ssr_start_level_ = 2.0f;
     float ssr_max_steps_ = 128.0f;
     float ssr_thickness_ = 0.6f;

@@ -650,6 +650,70 @@ int RunCaptureCase(const std::string& out_dir) {
     return 0;
 }
 
+// ---- 纯 SSPH 场景（最小实验）----
+// 只做一件事：镜面地板 + 几个物体，用 SSPH 一层平面单应重投影出倒影。
+// 不掺 Hi-Z/DDA、不掺探针混合旋钮、不开面板/HUD —— 就是"SSPH 长什么样"。
+//
+// 出两张：ssph_off（完全无反射）/ ssph_on（SSPH，全分辨率）。
+// 想换机位就改下面的 phi/theta/R，或者用交互模式拖动后看 HUD 抄数值。
+int RunCaptureSsph(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 纯 SSPH（平面单应重投影）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.SetShowHud(false);
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kMirrorFloor);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 一个能同时看到地板、三个方块、树和蓝人的 3/4 机位
+    app.deg_.turbidity    = 2.0f;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 45.0f;
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.30;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 7.5;
+
+    // off：**同时关掉天光镜面** ⇒ 地板完全没有反射，只剩自身着色（纯对照组）
+    app.SetEnvSpecular(false);
+    app.SetSsr(jpov::SsrConfig{});
+    app.RunOnce(input, winfo, (out_dir + "/ssph_off.png").c_str());
+
+    // on：纯 SSPH（全分辨率；粗糙度/掠射阈值都置成"不过滤"，只看单应重投影本身）
+    jpov::SsrConfig sc;
+    sc.enabled = true;
+    sc.march_mode = 2;              // SSPH
+    sc.resolution_scale = 1.0f;     // 与分辨率无关 ⇒ 全分辨率
+    sc.roughness_cutoff = 1.0f;     // 不做粗糙度剔除
+    sc.reflector_plane_n[0] = 0.0f; // 平面 y = 0
+    sc.reflector_plane_n[1] = 1.0f;
+    sc.reflector_plane_n[2] = 0.0f;
+    sc.reflector_plane_d = 0.0f;
+    app.SetSsr(sc);
+    app.RunOnce(input, winfo, (out_dir + "/ssph_on.png").c_str());
+
+    LOG(INFO) << "pure SSPH captured to " << out_dir << " (ssph_off / ssph_on)";
+    app.Finalize();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -660,6 +724,7 @@ int main(int argc, char** argv) {
     std::string env_out_dir;
     std::string ssr_out_dir;
     std::string case_out_dir;
+    std::string ssph_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -672,9 +737,14 @@ int main(int argc, char** argv) {
             ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-case") == 0 && i + 1 < argc) {
             case_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ssph") == 0 && i + 1 < argc) {
+            ssph_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!ssph_out_dir.empty()) {
+        return RunCaptureSsph(ssph_out_dir);
     }
     if (!case_out_dir.empty()) {
         return RunCaptureCase(case_out_dir);
