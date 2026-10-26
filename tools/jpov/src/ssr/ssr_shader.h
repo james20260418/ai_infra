@@ -352,6 +352,167 @@ void main() {
 }
 )glsl";
 
+
+// ---- ③b 射线行进：逐像素 DDA（McGuire 式，独立实现）----
+// 与上面的 Hi-Z 版本**刻意完全独立**（连三个小工具函数都各写一份）：这样两条链路
+// 是两个不同的程序，任何一个瑕疵若只在其中一条出现，就说明问题在链路里、
+// 不是算法的固有限制 —— 这是"冤枉算法"最有效的排除法。
+//
+// 与 Hi-Z 版的三个本质差别：
+//   1. **不建金字塔**：直接用全分辨率场景深度；
+//   2. **每步 1 像素**（沿主轴推进），不会一步跨过细特征 ⇒ 细几何不易漏检；
+//   3. 命中用**闭式解**而不是二分：屏幕空间里 1/z 沿直线是线性的，所以
+//        t* = (1/zScene − 1/z0) / (1/z1 − 1/z0)
+//      一步算出交点参数（与二分收敛后等价，但零迭代误差）。
+// 代价：步数按像素算，屏幕对角线要几百步 —— 只适合小面积反射体或离线对比。
+inline constexpr const char* kSsrMarchDdaFs = R"glsl(
+#version 330 core
+layout(location = 0) out vec4 FragColor;   // rgb = 反射色（已乘菲涅耳）, a = 1
+
+uniform sampler2D uSceneDepth;
+uniform sampler2D uSceneColor;
+uniform samplerCube uEnvCube;
+uniform int   uHasProbe;
+uniform vec3  uProbeFallback;
+uniform float uEnvMaxLod;
+uniform mat4  uView;
+uniform sampler2D uAttr0;
+uniform sampler2D uAttr1;
+
+uniform mat4  uProj;
+uniform vec2  uResolution;
+uniform float uNear;
+uniform float uFar;
+uniform float uTanHalfFovY;
+uniform float uAspect;
+uniform int   uMaxSteps;
+uniform float uThicknessM;
+uniform float uMaxDistanceM;
+uniform float uRoughnessCutoff;
+uniform int   uFadeEdges;
+
+float DistFromNdc(float ndc) {
+    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+}
+
+float NdcFromDist(float d) {
+    return ((uFar + uNear) / (uFar - uNear)) - (2.0 * uNear * uFar / (uFar - uNear)) / d;
+}
+
+vec3 ViewPos(vec2 uv, float dist) {
+    float y = (uv.y * 2.0 - 1.0) * dist * uTanHalfFovY;
+    float x = (uv.x * 2.0 - 1.0) * dist * uTanHalfFovY * uAspect;
+    return vec3(x, y, -dist);
+}
+
+void main() {
+    vec2 uv0 = gl_FragCoord.xy / uResolution;
+
+    vec4 attr0 = texture(uAttr0, uv0);
+    vec4 attr1 = texture(uAttr1, uv0);
+    if (attr1.a <= 0.0) {
+        FragColor = vec4(0.0);
+        return;
+    }
+    float roughness = attr0.z;
+
+    float ndc0 = texture(uSceneDepth, uv0).r;
+    if (ndc0 >= 0.99999) {
+        FragColor = vec4(0.0);
+        return;
+    }
+    float dStart = DistFromNdc(ndc0);
+    vec3 P = ViewPos(uv0, dStart);
+    float nz = sqrt(max(1.0 - dot(attr0.xy, attr0.xy), 0.0));
+    vec3 N = normalize(vec3(attr0.xy, nz));
+    P += N * (dStart * 1.0e-3);
+    vec3 I = normalize(P);
+    vec3 R = reflect(I, N);
+
+    vec3 F0 = attr1.rgb;
+    float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
+    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+
+    vec3 Rw = transpose(mat3(uView)) * R;
+    vec3 probe = (uHasProbe != 0)
+        ? textureLod(uEnvCube, Rw, clamp(roughness, 0.0, 1.0) * uEnvMaxLod).rgb
+        : uProbeFallback;
+
+    float forwardness = smoothstep(0.08, 0.45, -R.z);
+    if (dot(R, N) <= 0.0 || roughness > uRoughnessCutoff || forwardness <= 0.0) {
+        FragColor = vec4(probe * fresnel, 1.0);
+        return;
+    }
+
+    float rayLen = uMaxDistanceM;
+    if (R.z > 0.0) {
+        rayLen = clamp((-uNear - P.z) / R.z, 0.0, uMaxDistanceM);
+    }
+    vec4 clipEnd = uProj * vec4(P + R * rayLen, 1.0);
+    if (clipEnd.w <= 0.0) {
+        FragColor = vec4(probe * fresnel, 1.0);
+        return;
+    }
+    vec2 uvEnd = (clipEnd.xy / clipEnd.w) * 0.5 + 0.5;
+    vec2 d2 = uvEnd - uv0;
+    float tMax = 1.0;
+    if (d2.x > 1.0e-6) { tMax = min(tMax, (1.0 - uv0.x) / d2.x); }
+    if (d2.x < -1.0e-6) { tMax = min(tMax, (0.0 - uv0.x) / d2.x); }
+    if (d2.y > 1.0e-6) { tMax = min(tMax, (1.0 - uv0.y) / d2.y); }
+    if (d2.y < -1.0e-6) { tMax = min(tMax, (0.0 - uv0.y) / d2.y); }
+    tMax = clamp(tMax, 0.0, 1.0);
+
+    vec2 p0 = uv0 * uResolution;
+    vec2 seg = (uv0 + d2 * tMax) * uResolution - p0;
+    // DDA 步数 = 主轴上的像素数（每步正好 1 像素）
+    int steps = int(ceil(max(abs(seg.x), abs(seg.y))));
+    if (steps < 1) {
+        FragColor = vec4(probe * fresnel, 1.0);
+        return;
+    }
+    int n = min(steps, uMaxSteps);
+
+    // 1/z 沿屏幕直线线性 ⇒ 两端即可表达全程
+    float invZ0 = 1.0 / dStart;
+    float dEnd = max(-(P + R * (rayLen * tMax)).z, 1.0e-2);
+    float invZ1 = 1.0 / dEnd;
+
+    bool hit = false;
+    vec2 hitUv = uv0;
+    for (int i = 1; i <= n; ++i) {
+        float t = float(i) / float(steps);
+        vec2 uv = (p0 + seg * t) / uResolution;
+        float ndcRay = NdcFromDist(1.0 / mix(invZ0, invZ1, t));
+        float ndcScene = texture(uSceneDepth, uv).r;
+        if (ndcRay > ndcScene) {
+            // 闭式求交：解 1/zScene = mix(1/z0, 1/z1, t*)
+            float invZs = 1.0 / DistFromNdc(ndcScene);
+            float tStar = (invZs - invZ0) / (invZ1 - invZ0);
+            tStar = clamp(tStar, t - 1.0 / float(steps), t);
+            float dRay = 1.0 / mix(invZ0, invZ1, tStar);
+            float pen = dRay - DistFromNdc(ndcScene);
+            float min_pen = max(0.02, dRay * 0.004);
+            if (pen > min_pen && pen <= uThicknessM) {
+                hit = true;
+                hitUv = (p0 + seg * tStar) / uResolution;
+                break;
+            }
+        }
+    }
+
+    float ssrConf = 0.0;
+    if (hit) {
+        float edge = min(min(hitUv.x, 1.0 - hitUv.x), min(hitUv.y, 1.0 - hitUv.y));
+        float edgeFade = (uFadeEdges != 0) ? smoothstep(0.0, 0.10, edge) : 1.0;
+        float roughFade = 1.0 - smoothstep(uRoughnessCutoff * 0.5, uRoughnessCutoff, roughness);
+        ssrConf = clamp(edgeFade * roughFade * forwardness, 0.0, 1.0);
+    }
+    vec3 hitColor = hit ? texture(uSceneColor, hitUv).rgb : probe;
+    vec3 refl = mix(probe, hitColor, ssrConf);
+    FragColor = vec4(refl * fresnel, 1.0);
+}
+)glsl";
+
 // ---- ④ 合成：加法叠回 HDR ----
 // 只读反射缓冲、只写目标颜色附件 ⇒ 没有"边读边写同一张纹理"的反馈环。
 // 用 glBlendFunc(GL_ONE, GL_ONE)：反射是**加性光**（打在已有画面上），

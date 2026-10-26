@@ -574,12 +574,37 @@ int RunCaptureCase(const std::string& out_dir) {
     shot("case_res1",  true,  1.0f, 2, 48);
     shot("case_nohiz", true,  0.5f, 0, 64);
 
+    // DDA 对照（同一机位、同一权重链，只换行进算法）
+    {
+        jpov::SsrConfig sc;
+        sc.enabled = true;
+        sc.resolution_scale = 0.5f;
+        sc.hiz_start_level = 2;
+        sc.max_steps = 192;          // DDA 一步 = 1 像素，想看完整行程要调大
+        sc.march_mode = 1;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/case_dda.png").c_str());
+        LOG(INFO) << "capture: case_dda";
+    }
+
     // 俯视过渡序列：同一 SSR 参数，只把仰角往上抬。
     // 用来检查"往俯视走的过程中倒影会不会先被拉长再消失"（那是 transition 期的假命中）。
     for (int e : {30, 45, 58, 69}) {
         app.view_.phi = static_cast<double>(e) * 3.14159265358979323846 / 180.0;
         const std::string name = "tilt_" + std::to_string(e);
         shot(name.c_str(), true, 0.5f, 2, 48);
+    }
+    // 同一个 30° 机位走 DDA（这一步是"同权重链、只换行进算法"的关键对照）
+    {
+        app.view_.phi = 30.0 * 3.14159265358979323846 / 180.0;
+        jpov::SsrConfig sc;
+        sc.enabled = true;
+        sc.resolution_scale = 0.5f;
+        sc.max_steps = 192;
+        sc.march_mode = 1;
+        app.SetSsr(sc);
+        app.RunOnce(input, winfo, (out_dir + "/tilt_30_dda.png").c_str());
+        LOG(INFO) << "capture: tilt_30_dda";
     }
 
     app.Finalize();

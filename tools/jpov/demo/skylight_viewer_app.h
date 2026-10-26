@@ -135,6 +135,7 @@ public:
         ssr_max_steps_ = static_cast<float>(cfg.max_steps);
         ssr_thickness_ = cfg.thickness_m;
         ssr_rough_cutoff_ = cfg.roughness_cutoff;
+        ssr_use_dda_ = (cfg.march_mode == 1);
     }
 
     void InstallTextMeasure() {
@@ -214,6 +215,7 @@ public:
             sc.max_steps = static_cast<int>(ssr_max_steps_ + 0.5f);
             sc.thickness_m = ssr_thickness_;
             sc.roughness_cutoff = ssr_rough_cutoff_;
+            sc.march_mode = ssr_use_dda_ ? 1 : 0;
             cmds->ssr = sc;
         }
 
@@ -328,7 +330,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 18;
+        const int   kRows    = 19;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -376,6 +378,8 @@ private:
         ui_.SliderFloat("SSR 薄片厚度 m", &ssr_thickness_, row(0, 16), 0.05f, 2.0f, 2);
         ui_.SliderFloat("SSR 粗糙度上限", &ssr_rough_cutoff_, row(0, 17),
                         0.05f, 1.0f, 2);
+        // 行进算法二选一：Hi-Z（默认）vs DDA（独立实现，逐像素 + 闭式求交）。
+        ui_.Checkbox("SSR 用 DDA 行进 (独立实现，慢)", &ssr_use_dda_, row(0, 18));
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
@@ -456,6 +460,8 @@ private:
     float ssr_max_steps_ = 48.0f;
     float ssr_thickness_ = 0.6f;
     float ssr_rough_cutoff_ = 0.4f;
+    // 默认开 DDA：实测它在裂缝/黑影上明显更好（见提交说明）。Hi-Z 更便宜，可用面板切回。
+    bool  ssr_use_dda_ = true;
     bool smaa_on_ = false;            // SMAA 抗锯齿开关（默认关=零回归；交互面板可开）
     float smaa_threshold_ = 0.1f;     // SMAA luma 边缘阈值（越小越敏感）
     jpov::Ui ui_;

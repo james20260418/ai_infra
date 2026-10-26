@@ -106,6 +106,7 @@ void SsrRenderer::Init(ShaderManager* shader_mgr) {
     AttrFullProg();
     HiZProg();
     MarchProg();
+    MarchDdaProg();
     CompositeProg();
 }
 
@@ -116,7 +117,7 @@ void SsrRenderer::Finalize() {
     if (refl_fbo_) { glDeleteFramebuffers(1, &refl_fbo_); refl_fbo_ = 0; }
     if (hiz_shared_fbo_) { glDeleteFramebuffers(1, &hiz_shared_fbo_); hiz_shared_fbo_ = 0; }
     if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         progs_[i] = 0;   // program 归 ShaderManager 所有
     }
     shader_mgr_ = nullptr;
@@ -152,6 +153,14 @@ unsigned int SsrRenderer::MarchProg() {
             {kSsrFullscreenVs, kSsrMarchFs});
     }
     return static_cast<unsigned int>(progs_[3]);
+}
+
+unsigned int SsrRenderer::MarchDdaProg() {
+    if (progs_[5] == 0) {
+        progs_[5] = shader_mgr_->GetOrCreate("ssr_march_dda",
+            {kSsrFullscreenVs, kSsrMarchDdaFs});
+    }
+    return static_cast<unsigned int>(progs_[5]);
 }
 
 unsigned int SsrRenderer::CompositeProg() {
@@ -351,7 +360,8 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
                         unsigned int scene_depth_tex,
                         unsigned int env_cube_tex, float env_max_lod,
                         int fbo_w, int fbo_h) {
-    const unsigned int prog = MarchProg();
+    const bool use_dda = (cfg.march_mode == 1);
+    const unsigned int prog = use_dda ? MarchDdaProg() : MarchProg();
     glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo_);
     glViewport(0, 0, refl_w_, refl_h_);
     const GLfloat zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -447,8 +457,8 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
     Mat4Mul(proj, view, vp);
     DrawAttributes(cmds, mesh_mgr, texture_mgr, view, vp, fbo_w, fbo_h);
 
-    // ② Hi-Z 金字塔（只有真要粗走时才建；start_level==0 = 关 Hi-Z，省掉建塔成本）
-    if (cfg.hiz_start_level > 0) {
+    // ② Hi-Z 金字塔（只有真要粗走时才建；DDA 不用金字塔；start_level==0 也跳过）
+    if (cfg.march_mode != 1 && cfg.hiz_start_level > 0) {
         BuildHiZ(scene_depth_tex, fbo_w, fbo_h);
     }
 
