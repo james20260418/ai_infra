@@ -62,6 +62,11 @@ public:
     jpov::PBRMaterial mat_high_;         // 高光（rough=0.05, metal=0）
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
+    // ── 镜面地板场景（SSR 的"尺子"场景）用 ──
+    jpov::PBRMaterial mat_mirror_;       // 镜面地板（metal=1, rough≈0.05）
+    jpov::PBRMaterial mat_red_;          // 立在镜面地板上的三个彩色方块
+    jpov::PBRMaterial mat_green_;
+    jpov::PBRMaterial mat_blue_;
 
     // ── 蓝人（mixamo_male）：同一份蒙皮 mesh + 骨架，每个方块顶面各一个 T-pose 实例 ──
     // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
@@ -95,6 +100,14 @@ public:
     // ── 天光自由度（跨帧持有；天光与光照全由它们推导）──
     // 滑条值 → SkyCommand 字段的编码见 skylight_scene.h 的 SkyDegrees。
     SkyDegrees deg_;
+
+    // ── 场景切换（交互面板左上角下拉，headless 拍摄可显式设）──
+    //   kThreeBoxes : 原有三方块对照（低反/高光/金属 + 地面 + 蓝人 + 桌子/橡树）。
+    //   kMirrorFloor: **镜面地板** + 三个不同大小的彩色方块 —— 专为看倒影设计：
+    //                 地板是一个完美平面，倒影内容一目了然，也用来看"平面反射真值"。
+    enum class SceneKind { kThreeBoxes = 0, kMirrorFloor = 1 };
+    void SetScene(SceneKind k) { scene_ = k; scene_index_ = static_cast<int>(k); }
+    SceneKind scene() const { return scene_; }
 
     // 是否使用**三色环境光**（[天, 天际线, 地] 垂直梯度）替代单色 ambient。
     // 供肉眼对比：开=由 SkyCommand 推导的三色（AmbientTricolor），关=原来的单色（AmbientColor）。
@@ -224,7 +237,27 @@ public:
 
         // 场景：灰色地面 + 三方块（低反/高光/金属）。
         // show_scene_=false 时整组跳过（headless 拍纯天空用）。
-        if (show_scene_) {
+        if (show_scene_ && scene_ == SceneKind::kMirrorFloor) {
+            // ── 镜面地板场景 ──
+            // 地板 = 唯一的反射体（一个完美平面 ⇒ 倒影最容易判对错）。
+            cmds->DrawObject3DReflective(ground_mesh_, mat_mirror_,
+                                         /*center*/ {0.0f, 0.0f, 0.0f},
+                                         /*up*/     {0.0f, 1.0f, 0.0f},
+                                         /*front*/  {0.0f, 0.0f, 1.0f});
+            // 三个不同大小/颜色的方块站在地板上（中心 y = 半高 = 0.5×scale）。
+            cmds->DrawObject3D(box_mesh_, mat_red_,
+                               /*center*/ {-2.2f, 0.5f, -1.0f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 1.0f);
+            cmds->DrawObject3D(box_mesh_, mat_green_,
+                               /*center*/ {0.9f, 1.0f, -2.4f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 2.0f);
+            cmds->DrawObject3D(box_mesh_, mat_blue_,
+                               /*center*/ {2.8f, 0.35f, 0.9f},
+                               {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale*/ 0.7f);
+            for (const ModelSlot& m : models_) {
+                cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            }
+        } else if (show_scene_) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
@@ -279,7 +312,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 17;
+        const int   kRows    = 18;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -289,35 +322,43 @@ private:
                                 {kColW, kRowH}};
         };
 
+        // ── 左列第 0 行：场景切换（验收用）──
+        {
+            static const std::vector<const char*> kSceneNames = {
+                "场景: 三方块 (PBR 对照)", "场景: 镜面地板 (SSR)"};
+            ui_.Combo("场景", &scene_index_, kSceneNames, row(0, 0));
+            scene_ = (scene_index_ == 0) ? SceneKind::kThreeBoxes
+                                          : SceneKind::kMirrorFloor;
+        }
         // ── 左列：天光自由度 ──
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 0),
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 1),
                         kTurbidityMin, kTurbidityMax, 1);
         ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
-                        row(0, 1), -1.0f, 1.0f, 2);
+                        row(0, 2), -1.0f, 1.0f, 2);
         ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
-                        row(0, 2), -90.0f, 90.0f, 0);
-        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 3), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 4), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 5), 0.0f, 1.0f, 2);
-        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 6));
+                        row(0, 3), -90.0f, 90.0f, 0);
+        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 4), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 5), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 6), 0.0f, 1.0f, 2);
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 7));
         // SMAA 后处理抗锯齿：与右侧“远景仰角雾”并列，单独对比开关 + 阈值（敏感度）。
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 7));
-        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 8),
+        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 8));
+        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 9),
                         0.02f, 0.5f, 2);
         // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
         // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
-        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 9));
-        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
+        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 10));
+        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 11),
                         0.0f, 1.0f, 2);
         // ── SSR（⑧）：总开关 + 5 个平衡旋钮 ──
         // 开关打开会自动关掉环境镜面（见 OneIteration 注释），避免双计。
-        ui_.Checkbox("SSR 屏幕空间反射 (开时关天光镜面)", &ssr_on_, row(0, 11));
-        ui_.SliderFloat("SSR 分辨率倍率", &ssr_res_scale_, row(0, 12), 0.25f, 1.0f, 2);
-        ui_.SliderFloat("SSR Hi-Z 起始层 (0=关)", &ssr_start_level_, row(0, 13),
+        ui_.Checkbox("SSR 屏幕空间反射 (开时关天光镜面)", &ssr_on_, row(0, 12));
+        ui_.SliderFloat("SSR 分辨率倍率", &ssr_res_scale_, row(0, 13), 0.25f, 1.0f, 2);
+        ui_.SliderFloat("SSR Hi-Z 起始层 (0=关)", &ssr_start_level_, row(0, 14),
                         0.0f, 4.0f, 0);
-        ui_.SliderFloat("SSR 最大步数", &ssr_max_steps_, row(0, 14), 8.0f, 96.0f, 0);
-        ui_.SliderFloat("SSR 薄片厚度 m", &ssr_thickness_, row(0, 15), 0.05f, 2.0f, 2);
-        ui_.SliderFloat("SSR 粗糙度上限", &ssr_rough_cutoff_, row(0, 16),
+        ui_.SliderFloat("SSR 最大步数", &ssr_max_steps_, row(0, 15), 8.0f, 96.0f, 0);
+        ui_.SliderFloat("SSR 薄片厚度 m", &ssr_thickness_, row(0, 16), 0.05f, 2.0f, 2);
+        ui_.SliderFloat("SSR 粗糙度上限", &ssr_rough_cutoff_, row(0, 17),
                         0.05f, 1.0f, 2);
 
         // ── 右列：远景仰角雾 ──
@@ -343,6 +384,8 @@ private:
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    SceneKind scene_ = SceneKind::kThreeBoxes;
+    int scene_index_ = 0;            // Combo 的 in/out（与 scene_ 同帧同步）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：PR #228 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）

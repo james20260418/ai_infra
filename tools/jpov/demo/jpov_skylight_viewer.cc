@@ -56,6 +56,16 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.mat_high_   = jpov_skylight::MaterialHighGloss();
     app.mat_metal_  = jpov_skylight::MaterialMetal();
     app.mat_ground_ = jpov_skylight::GroundMaterial();
+    // 镜面地板场景的材质：地板 = 金属 + 极低粗糙度（几乎完美镜面）；
+    // 三个方块用高饱和纯色，倒影里一眼能认出"是谁的倒影"。
+    app.mat_mirror_ = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.62f, 0.64f, 0.66f, 1.0f}, /*metallic*/ 1.0f, /*roughness*/ 0.05f);
+    app.mat_red_ = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.72f, 0.25f, 0.22f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 0.55f);
+    app.mat_green_ = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.22f, 0.55f, 0.30f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 0.50f);
+    app.mat_blue_ = jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.25f, 0.38f, 0.75f, 1.0f}, /*metallic*/ 0.0f, /*roughness*/ 0.45f);
 }
 
 // 额外模型（桌子 / 高模橡树）的**相对路径**（相对 exe 所在目录）。
@@ -428,14 +438,15 @@ int RunCaptureEnv(const std::string& out_dir) {
     return 0;
 }
 
-// SSR 预设拍摄：固定机位/光照，只切 SSR 参数。工件 = 金属方块（反射体）。
+// SSR 预设拍摄：固定光照，两个场景 × 三档参数。
 //
-// 为什么是这五档：
-//   off            —— 基准（此时走 env 天光镜面，SSR 一开 env 自动关）
-//   hiz2_32        —— 推荐默认：粗层从 4 像素格子开始，32 步够用
-//   hiz3_16        —— 更省的极端：8 像素格子 + 16 步，看"漏检"有多明显
-//   nohiz_64       —— 关闭 Hi-Z（逐像素细步进）× 64 步 = 质量上限（最慢）
-//   quarter_hiz2   —— 1/4 分辨率：看降采样对倒影清晰度的影响
+// 为什么两个场景：
+//   * 三方块场景 —— 原验收件（金属方块，三面各映不同内容）。
+//   * **镜面地板场景** —— 专为 SSR 设计的"尺子"：地板是一个**完美平面**，倒影内容
+//     一目了然（彩色方块、橡树、天空各在哪、有没有错位/断层）。以后接"平面反射真值"
+//     也在这个场景里比。
+//
+// 三档：off（走天光镜面探针）/ hiz2_48（推荐默认）/ nohiz_64（质量上限，最慢）。
 int RunCaptureSsr(const std::string& out_dir) {
     JPOV::Config cfg;
     cfg.title = "JPOV — SSR 预设对比（headless）";
@@ -459,37 +470,42 @@ int RunCaptureSsr(const std::string& out_dir) {
     winfo.height = jpov_skylight::kViewerHeight;
     jpov::InputSnapshot input{};
 
-    // 光照同 env A/B；机位**抬到 3/4 俯视**：
-    //   平视（phi≈0.2）时方块顶面几乎是刀片，三面里只看得到两个侧面，而正对相机的
-    //   那个侧面按物理必然"反射相机背后"（SSR 无从获取 → 天空兜底）。
-    //   抬高后顶面完整入画：顶面映天、一个侧面映场景（树/地面）、另一个侧面走兜底，
-    //   三面内容天然不同 —— 这正是验收想看的。
     app.deg_.turbidity    = jpov_skylight::kTurbidityDef;
     app.deg_.daylight_season = 0.0f;
     app.deg_.sun_elev_deg = 40.0f;
     app.deg_.sun_azim_deg = 30.0f;
-    app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.42;
-    app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 4.6;
 
-    auto shot = [&](const char* name, bool on, float scale, int level, int steps) {
+    auto shot = [&](const char* name, bool on, int level, int steps) {
         jpov::SsrConfig sc;
         sc.enabled = on;
-        sc.resolution_scale = scale;
+        sc.resolution_scale = 0.5f;
         sc.hiz_start_level = level;
         sc.max_steps = steps;
         app.SetSsr(sc);
         app.RunOnce(input, winfo, (out_dir + "/" + name + ".png").c_str());
-        LOG(INFO) << "capture: " << name << " (on=" << on << " scale=" << scale
-                  << " hiz=" << level << " steps=" << steps << ")";
+        LOG(INFO) << "capture: " << name << " (on=" << on << " hiz=" << level
+                  << " steps=" << steps << ")";
     };
 
-    shot("ssr_off",          false, 0.5f, 2, 32);
-    shot("ssr_hiz2_32",      true,  0.5f, 2, 32);
-    shot("ssr_hiz3_16",      true,  0.5f, 3, 16);
-    shot("ssr_nohiz_64",     true,  0.5f, 0, 64);
-    shot("ssr_quarter_hiz2", true,  0.25f, 2, 32);
+    // ── 场景 A：三方块（3/4 俯视，三面都入画）──
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kThreeBoxes);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.42;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 4.6;
+    shot("box_off",      false, 2, 48);
+    shot("box_hiz2_48",  true,  2, 48);
+    shot("box_nohiz_64", true,  0, 64);
+
+    // ── 场景 B：镜面地板（低机位，地面占屏大、倒影一目了然）──
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kMirrorFloor);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.30;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 7.5;
+    shot("floor_off",      false, 2, 48);
+    shot("floor_hiz2_48",  true,  2, 48);
+    shot("floor_nohiz_64", true,  0, 64);
 
     LOG(INFO) << "SSR presets captured to " << out_dir;
     app.Finalize();

@@ -128,6 +128,11 @@ layout(location = 0) out vec4 FragColor;   // rgb = 反射色（已乘权重）,
 
 uniform sampler2D uSceneDepth;   // 0 场景深度（gl_FragCoord.z，R32F，NEAREST）
 uniform sampler2D uSceneColor;   // 1 HDR 颜色（不透明 3D 已画完）
+uniform samplerCube uEnvCube;    // 2 天空 cubemap（探针：未命中 / 粗糙面的兜底）
+uniform int   uHasProbe;         //   0 = 无探针（无天空），用 uProbeFallback 常量
+uniform vec3  uProbeFallback;
+uniform float uEnvMaxLod;        //   探针 mip 上限（粗糙度 → 模糊）
+uniform mat4  uView;             //   视图矩阵：视空间反射向量 → 世界（转置乘）
 uniform sampler2D uAttr0;        // 3 (Nv.xy, roughness, metallic)
 uniform sampler2D uAttr1;        // 4 (F0.rgb, 1)
 uniform sampler2D uHiZ0;         // 5 全分辨率深度（= uSceneDepth）
@@ -179,59 +184,63 @@ void main() {
     vec2 uv0 = gl_FragCoord.xy / uResolution;
 
     vec4 attr0 = texture(uAttr0, uv0);
-    vec4 attr1 = texture(uAttr1, uv0);   // rgb = F0, a = 掩码
-    float roughness = attr0.z;
-    // 掩码用 attr1.a：属性 pass 只画反射体，未画过的像素是清屏色（a=0）。
-    // ⚠️ 不能用 attr0 的某通道判空：粗糙度 0 + 金属度 0 的合法反射体（光滑介质）
-    //    会得到全零属性，误判成"没有反射体"。
+    vec4 attr1 = texture(uAttr1, uv0);
+    // 掩码：属性 pass 只画反射体，没画过的像素是清屏色（a=0）。
     if (attr1.a <= 0.0) {
         FragColor = vec4(0.0);
         return;
     }
-    if (roughness > uRoughnessCutoff) {
-        FragColor = vec4(0.0);
-        return;
-    }
+    float roughness = attr0.z;
 
     float ndc0 = texture(uSceneDepth, uv0).r;
-    if (ndc0 >= 0.99999) {          // 背景（远平面）没有可反射的表面
+    if (ndc0 >= 0.99999) {          // 背景没有可反射的表面
         FragColor = vec4(0.0);
         return;
     }
     float dStart = DistFromNdc(ndc0);
     vec3 P = ViewPos(uv0, dStart);
-
-    // 视空间法线：只存了 xy，z 按「可见表面指向相机」重建为 **+sqrt**（z>0）。
+    // 视空间法线：只存 xy，z 按「可见表面指向相机」重建为 **+sqrt**（z>0）。
     float nz = sqrt(max(1.0 - dot(attr0.xy, attr0.xy), 0.0));
     vec3 N = normalize(vec3(attr0.xy, nz));
-
+    // 起点沿法线抬起一点点：掠射角下（尤其大平面）射线会和"自己这块面"的深度
+    // 反复相切，产生一条条横向条纹。抬离表面是标准做法。
+    P += N * (dStart * 1.0e-3);
     vec3 I = normalize(P);          // 眼 → 表面
     vec3 R = reflect(I, N);         // 反射方向（离开表面）
+
     vec3 F0 = attr1.rgb;
     float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
     vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 
-    if (dot(R, N) <= 0.0) {
-        FragColor = vec4(0.0);      // 数值异常（不该发生）
+    // ---- 探针（环境反射）：**永远有**，是 SSR 的兜底，也是粗糙面的近似 ----
+    // cubemap 用世界方向索引 ⇒ 视空间反射向量要转回世界（视图旋转正交，转置即逆）。
+    // mip 级按粗糙度取：越粗糙越模糊 —— 这就是"粗糙度的模糊"最便宜的做法。
+    vec3 Rw = transpose(mat3(uView)) * R;
+    vec3 probe = (uHasProbe != 0)
+        ? textureLod(uEnvCube, Rw, clamp(roughness, 0.0, 1.0) * uEnvMaxLod).rgb
+        : uProbeFallback;
+
+    // 数值异常 / 太粗糙 ⇒ 不打射线，整块给探针。
+    //   粗糙面的真实反射是一片糊，单条射线代表不了；探针的模糊 mip 反而更接近真值。
+    //   这也是"SSR 打不中就退探针"这条回退链的入口。
+    if (dot(R, N) <= 0.0 || roughness > uRoughnessCutoff) {
+        FragColor = vec4(probe * fresnel, 1.0);
         return;
     }
 
-    // ⚠️ **不要**按 `R.z > 0` 直接分支成"天空兜底"：
-    //    对一块平面来说 N 恒定、I 随位置连续变化 ⇒ R.z 在面上**连续穿过 0**，
-    //    硬分支会在面中间拉出一条笔直的分界线（渲出来是"一半有倒影一半没有"）。
-    //    正确做法：把射线长度裁到"近平面前"，照常 march —— 走不到就自然没命中，
-    //    由下面的"未命中兜底"处理，过渡是连续的。
+    // 射线长度裁到**近平面前**：朝相机后方时屏幕里没有画面可借（见设计文档 §4.3）。
+    //   注意不要在这里按 R.z>0 直接跳兜底 —— 那会在平面中间拉出一条硬分界线。
     float rayLen = uMaxDistanceM;
     if (R.z > 0.0) {
-        // 朝相机方向：最多走到近平面前一点（再往后就没有画面了）
-        float t_near = (-uNear - P.z) / R.z;
-        rayLen = clamp(t_near, 0.0, uMaxDistanceM);
+        rayLen = clamp((-uNear - P.z) / R.z, 0.0, uMaxDistanceM);
     }
     vec4 clipEnd = uProj * vec4(P + R * rayLen, 1.0);
     if (clipEnd.w <= 0.0) {
-        FragColor = vec4(0.0);
+        FragColor = vec4(probe * fresnel, 1.0);
         return;
     }
+
+    // 终点 → 屏幕线段，并裁到 [0,1]²
     vec2 uvEnd = (clipEnd.xy / clipEnd.w) * 0.5 + 0.5;
     vec2 d2 = uvEnd - uv0;
     float tMax = 1.0;
@@ -245,18 +254,14 @@ void main() {
     vec2 p1 = (uv0 + d2 * tMax) * uResolution;
     vec2 seg = p1 - p0;
     float segLen = length(seg);
-    // 线段太短（射线几乎立刻离开屏幕/近平面前就没了）⇒ 干脆不叠反射。
-    //   这里曾经用"天空色兜底"，结果正对相机的那一面变成一块**发白的平板**，
-    //   与相邻面形成硬边 —— 那正是"一半有倒影一半没有"的观感来源之一。
-    if (segLen < 1.0) {
-        FragColor = vec4(0.0);
+    if (segLen < 1.0) {             // 出屏太快：没有可信的屏幕数据
+        FragColor = vec4(probe * fresnel, 1.0);
         return;
     }
     vec2 dir = seg / segLen;
 
-    // 1/d 沿线段线性 ⇒ 只需要两端的距离
-    float dEnd = -(P + R * (rayLen * tMax)).z;
-    dEnd = max(dEnd, 1.0e-2);
+    // 1/d 沿线段线性 ⇒ 只需两端距离（透视正确，零误差）
+    float dEnd = max(-(P + R * (rayLen * tMax)).z, 1.0e-2);
 
     bool hit = false;
     float sCur = 0.0;
@@ -276,9 +281,11 @@ void main() {
                 level -= 1;         // 这一格可能相交 → 下探（sCur 不动，重走同一区域）
                 continue;
             }
-            // level 0：单像素精度，可以判真伪
+            // level 0：单像素精度，可以判真伪。
+            // 厚度随距离放大：掠射角下光线与表面几乎平行，交叉点附近的深度差
+            // 天然就大，固定厚度会把它们全判成"薄片"而漏掉（表现为条纹/空洞）。
             float dScene = DistFromNdc(ndcCell);
-            if (dRay - dScene <= uThicknessM) {
+            if (dRay - dScene <= uThicknessM * (1.0 + dScene * 0.1)) {
                 hit = true;
                 sHit = sNext;
                 break;
@@ -289,9 +296,10 @@ void main() {
         ++iter;
     }
 
+    // ---- 命中 → SSR；没命中 → 探针。按置信度混，别硬切 ----
+    float ssrConf = 0.0;
     vec2 hitUv = uv0;
     if (hit) {
-        // 在 [sHit-1, sHit] 之间二分细化（level 0 的一步 = 1 像素）
         float lo = max(sHit - 1.0, 0.0);
         float hi = sHit;
         for (int r = 0; r < uRefineSteps; ++r) {
@@ -305,34 +313,18 @@ void main() {
             else { lo = mid; }
         }
         hitUv = (p0 + dir * hi) / uResolution;
-    } else {
-        // 没命中：用大气色天空兜底（沿最后一段的出口方向 ≈ 该方向的天空）
-        hitUv = clamp((p0 + dir * segLen) / uResolution, vec2(0.0), vec2(1.0));
-    }
 
-    // 未命中时的兜底 = **光线出口处的场景颜色**（而不是贴一张天空）。
-    //   理由：出口点就在光线最后走到的地方，它的内容与命中侧自然连续 ——
-    //   向上走的射线出口在天空区（拿到天空），贴着地面走的出口拿到地面。
-    //   换回"天空纹理"会在命中/未命中的分界上拉出一条明显的硬边。
-    vec3 refl = texture(uSceneColor, hitUv).rgb;
-
-    // 权重（逐项可关，便于 A/B 定位"是谁让画面变脏"）
-    float w = 1.0;
-    w *= 1.0 - smoothstep(uRoughnessCutoff * 0.6, uRoughnessCutoff, roughness);
-    // ⚠️ 距离/位置淡出**只对命中生效**：没命中时用的是天空兜底，那个估计与光线
-    //    走了多远无关，一律淡成 0 会让"整块反射体全黑"（踩过：首版就是这样，
-    //    出图与关掉 SSR 逐像素相同）。
-    if (hit) {
-        w *= 1.0 - 0.6 * smoothstep(0.7, 1.0, sHit / segLen);
-    }
-    if (uFadeEdges != 0) {
+        // 置信度：屏幕边缘不可信；粗糙度接近上限时也不可信（该交给探针）。
         float edge = min(min(hitUv.x, 1.0 - hitUv.x), min(hitUv.y, 1.0 - hitUv.y));
-        w *= smoothstep(0.0, 0.06, edge);
+        float edgeFade = (uFadeEdges != 0) ? smoothstep(0.0, 0.10, edge) : 1.0;
+        float roughFade = 1.0 - smoothstep(uRoughnessCutoff * 0.5, uRoughnessCutoff, roughness);
+        ssrConf = clamp(edgeFade * roughFade, 0.0, 1.0);
     }
-    w = clamp(w, 0.0, 1.0);
-
-    vec3 color = refl * fresnel;
-    FragColor = vec4(color * w, w);
+    vec3 hitColor = hit ? texture(uSceneColor, hitUv).rgb : probe;
+    // 混合发生在**反射项内部**（而不是"有就加、没有就不加"）——
+    // 这是消除"一半有一半没有"那条硬边的根本办法。
+    vec3 refl = mix(probe, hitColor, ssrConf);
+    FragColor = vec4(refl * fresnel, 1.0);
 }
 )glsl";
 

@@ -1646,12 +1646,18 @@ void Renderer::Render(const RenderCommandList& cmds,
             //
             // ⚠️ 区间校验要放在 `> 0` 门**之前**：放到门内的话 `CHECK_GE(...,0)` 恒真，
             //    形同虚设（负值被外层的 `>0` 默默滤掉，用户永远收不到报错）。
-            if (cmds.env_specular.has_value()) {
-                CHECK_GE(cmds.env_specular->sky_scale, 0.0f)
+            // 探针的消费者有两个：环境镜面（材质侧）与 SSR（未命中/粗糙面兜底）。
+            const bool need_env_cube =
+                cmds.env_specular.has_value() ||
+                (cmds.ssr.has_value() && cmds.ssr->enabled);
+            if (need_env_cube) {
+                CHECK_GE(cmds.env_specular.has_value() ? cmds.env_specular->sky_scale : 0.0f,
+                         0.0f)
                     << "EnvSpecular::sky_scale 必须 >= 0";
-                CHECK_LE(cmds.env_specular->sky_scale, 1.0f)
-                    << "EnvSpecular::sky_scale 必须 <= 1";
-                if (cmds.env_specular->sky_scale > 0.0f) {
+                CHECK_LE(cmds.env_specular.has_value() ? cmds.env_specular->sky_scale : 0.0f,
+                         1.0f) << "EnvSpecular::sky_scale 必须 <= 1";
+                if (cmds.env_specular.has_value() && cmds.env_specular->sky_scale > 0.0f ||
+                    (cmds.ssr.has_value() && cmds.ssr->enabled)) {
                     EnsureSkyEnvCube(kSkyEnvCubeSize);
                     SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
                                                 sky_env_tex_, sky_env_fbo_, shader_mgr_);
@@ -1847,6 +1853,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                               color_tex_hdr_,        // 命中色
                               scene_depth_tex_hdr_,  // MRT#1 R32F：march / Hi-Z
                               depth_tex_hdr_,        // 硬件深度：属性 pass 做遮挡测试
+                              sky_env_tex_,          // 探针（未开/无天空时为 0）
+                              std::log2(static_cast<double>(kSkyEnvCubeSize)),
                               fbo_3d_w, fbo_3d_h);
             if (ssr_renderer_.HasResult()) {
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);

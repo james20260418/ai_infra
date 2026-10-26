@@ -55,6 +55,8 @@ public:
     // 参数：
     //   cfg            : SSR 配置（总开关由调用方先判，本函数假定已 enabled）。
     //   proj / view    : 相机的投影 / 视图矩阵（列主序，与主 pass 同一套）。
+    //   env_cube_tex   : 天空 cubemap 探针（未命中 / 粗糙面的兜底）；0 = 无探针。
+    //   env_max_lod    : 探针 mip 上限（= log2(边长)）。
     //   scene_color_tex: 不透明 HDR 颜色（march 采它当命中色）。
     //   scene_depth_tex: 场景深度（**MRT#1 的 R32F**，值 = gl_FragCoord.z），march/Hi-Z 用。
     //   hw_depth_tex   : 硬件深度缓冲纹理（DEPTH_COMPONENT24），属性 pass 挂上做深度测试。
@@ -68,7 +70,8 @@ public:
               MeshManager& mesh_mgr, TextureManager& texture_mgr,
               const Camera& cam, const float proj[16], const float view[16],
               unsigned int scene_color_tex, unsigned int scene_depth_tex,
-              unsigned int hw_depth_tex, int fbo_w, int fbo_h);
+              unsigned int hw_depth_tex, unsigned int env_cube_tex,
+              float env_max_lod, int fbo_w, int fbo_h);
 
     // 把反射加法合成进**当前已绑定的**目标 FBO。
     // 只采样反射缓冲（它不是目标的附件）⇒ 无反馈环；用 GL_ONE/GL_ONE 加性混合。
@@ -91,8 +94,9 @@ private:
                         const float vp[16], int fbo_w, int fbo_h);
     void BuildHiZ(unsigned int scene_depth_tex, int fbo_w, int fbo_h);
     void March(const SsrConfig& cfg, const Camera& cam, const float proj[16],
-               unsigned int scene_color_tex, unsigned int scene_depth_tex,
-               int fbo_w, int fbo_h);
+               const float view[16], unsigned int scene_color_tex,
+               unsigned int scene_depth_tex, unsigned int env_cube_tex,
+               float env_max_lod, int fbo_w, int fbo_h);
 
     unsigned int AttrProg();
     unsigned int AttrFullProg();

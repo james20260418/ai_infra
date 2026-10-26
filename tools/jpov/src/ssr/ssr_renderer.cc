@@ -38,9 +38,10 @@ namespace {
 // SSR 跑在独立 pass 里，此刻主链路不持有任何纹理绑定）。
 constexpr int kTexUnitSceneDepth = 0;
 constexpr int kTexUnitSceneColor = 1;
-constexpr int kTexUnitAttr0 = 2;
-constexpr int kTexUnitAttr1 = 3;
-constexpr int kTexUnitHiZBase = 4;      // 4..8 = level 0..4
+constexpr int kTexUnitEnvCube = 2;      // 天空 cubemap（探针）
+constexpr int kTexUnitAttr0 = 3;
+constexpr int kTexUnitAttr1 = 4;
+constexpr int kTexUnitHiZBase = 5;      // 5..9 = level 0..4
 constexpr int kTexUnitNormalMap = 0;    // 属性 pass 内部用（与上面不同 pass，可复用 0）
 constexpr int kTexUnitRefl = 0;         // 合成 pass
 
@@ -346,7 +347,9 @@ void SsrRenderer::BuildHiZ(unsigned int scene_depth_tex, int fbo_w, int fbo_h) {
 }
 
 void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float proj[16],
-                        unsigned int scene_color_tex, unsigned int scene_depth_tex,
+                        const float view[16], unsigned int scene_color_tex,
+                        unsigned int scene_depth_tex,
+                        unsigned int env_cube_tex, float env_max_lod,
                         int fbo_w, int fbo_h) {
     const unsigned int prog = MarchProg();
     glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo_);
@@ -357,6 +360,8 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     glUseProgram(prog);
     BindTex(kTexUnitSceneDepth, scene_depth_tex);
     BindTex(kTexUnitSceneColor, scene_color_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitEnvCube);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, env_cube_tex);
     BindTex(kTexUnitAttr0, attr_normal_tex_);
     BindTex(kTexUnitAttr1, attr_f0_tex_);
     BindTex(kTexUnitHiZBase + 0, scene_depth_tex);   // level 0 = 全分辨率场景深度
@@ -365,14 +370,26 @@ void SsrRenderer::March(const SsrConfig& cfg, const Camera& cam, const float pro
     BindTex(kTexUnitHiZBase + 3, hiz_tex_[2]);
     BindTex(kTexUnitHiZBase + 4, hiz_tex_[3]);
 
-    const char* names[] = {"uSceneDepth", "uSceneColor", "uAttr0",
-                           "uAttr1", "uHiZ0", "uHiZ1", "uHiZ2", "uHiZ3", "uHiZ4"};
-    for (int i = 0; i < 9; ++i) {
-        glUniform1i(shader_mgr_->GetUniform(prog, names[i]),
-                    kTexUnitSceneDepth + i);
+    // ⚠️ 每个 sampler 的单元号**逐条显式写**，不要用「基址 + 下标」推算：
+    //    中间只要有"非 2D 纹理"或"插入了新纹理"，推算就会整体错位，
+    //    症状是 sampler 绑到不匹配的纹理目标上（本例：sampler2D 绑到 cubemap），
+    //    采样返回 0 ⇒ 属性全空 ⇒ 整块反射体静默没有任何倒影。
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSceneDepth"), kTexUnitSceneDepth);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uSceneColor"), kTexUnitSceneColor);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uEnvCube"), kTexUnitEnvCube);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uHasProbe"), env_cube_tex != 0 ? 1 : 0);
+    glUniform1f(shader_mgr_->GetUniform(prog, "uEnvMaxLod"), env_max_lod);
+    glUniform3f(shader_mgr_->GetUniform(prog, "uProbeFallback"), 0.30f, 0.36f, 0.45f);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uAttr0"), kTexUnitAttr0);
+    glUniform1i(shader_mgr_->GetUniform(prog, "uAttr1"), kTexUnitAttr1);
+    const char* kHiZNames[] = {"uHiZ0", "uHiZ1", "uHiZ2", "uHiZ3", "uHiZ4"};
+    for (int i = 0; i < 5; ++i) {
+        glUniform1i(shader_mgr_->GetUniform(prog, kHiZNames[i]),
+                    kTexUnitHiZBase + i);
     }
 
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog, "uProj"), 1, GL_FALSE, proj);
+    glUniformMatrix4fv(shader_mgr_->GetUniform(prog, "uView"), 1, GL_FALSE, view);
     glUniform2f(shader_mgr_->GetUniform(prog, "uResolution"),
                 static_cast<float>(refl_w_), static_cast<float>(refl_h_));
     glUniform1f(shader_mgr_->GetUniform(prog, "uNear"), cam.near);
@@ -404,7 +421,8 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
                        MeshManager& mesh_mgr, TextureManager& texture_mgr,
                        const Camera& cam, const float proj[16], const float view[16],
                        unsigned int scene_color_tex, unsigned int scene_depth_tex,
-                       unsigned int hw_depth_tex, int fbo_w, int fbo_h) {
+                       unsigned int hw_depth_tex, unsigned int env_cube_tex,
+                       float env_max_lod, int fbo_w, int fbo_h) {
     CHECK(shader_mgr_ != nullptr) << "SsrRenderer::Init 未调用";
     CHECK_NE(scene_color_tex, 0u);
     CHECK_NE(scene_depth_tex, 0u);
@@ -435,7 +453,8 @@ void SsrRenderer::Draw(const RenderCommandList& cmds, const SsrConfig& cfg,
     }
 
     // ③ 射线行进 → 反射缓冲
-    March(cfg, cam, proj, scene_color_tex, scene_depth_tex, fbo_w, fbo_h);
+    March(cfg, cam, proj, view, scene_color_tex, scene_depth_tex,
+          env_cube_tex, env_max_lod, fbo_w, fbo_h);
 }
 
 void SsrRenderer::Composite(int fbo_w, int fbo_h) {
