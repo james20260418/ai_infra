@@ -45,9 +45,12 @@
 //   kPolyline —— 本文件上半部分：顶点即几何，段间是弦，整批一次 draw call。
 //   kSmooth   —— kSmoothVs / kSmoothFsMain：点即控制点，段间是 C1 Hermite，
 //                在 FS 里按真实曲线反解参数并用 discard + fwidth 裁形。
-//                控制点走 RGBA32F 数据纹理（每列 3 texel），顶点只多一个 strip id
-//                ⇒ **整批仍然一次 draw call**；外扩量由 CPU 按局部曲率自动算。
+//                控制点走 RGBA32F 数据纹理（每列 4 texel：c/m/h/n + 逐点 rgba），
+//                顶点只多一个 strip id ⇒ **整批仍然一次 draw call**；
+//                外扩量由 CPU 按局部曲率自动算。
 //                两个 pass 的「深度测试 / 两个集合 / WBO 写入」是同一段代码（kFsEmit）。
+//                每个 pass 有**两个 program**（天光关/开）：主函数共用，
+//                只差 ApplySkyLight 的定义（见 kSkyLightOffFs / kSkyLightFs）。
 //   两者写进**同一张 WBO 目标**（一个 pass），命令顺序 = 前后顺序，最后只 Composite 一次。
 //
 // 合成：Composite() 全屏解析 WBO（C = accum.rgb/accum.a、cov = 1−reveal）并 over
@@ -59,6 +62,7 @@
 #include <vector>
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/render_command.h"   // DirectionalLight / ShadowConfig / CascadeFBO（CSM 输入）
 #include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/src/shader_manager.h"
 #include "tools/jpov/src/strip/strip_geometry.h"
@@ -66,6 +70,26 @@
 #include "tools/jpov/src/wbo/wbo_target.h"
 
 namespace jpov {
+
+// CSM（级联阴影）输入：与 object3d / fire_fog **同一套资源**，由 Renderer 填。
+//
+// 为什么是「外部填」而不是渲染器自己找：阴影 pass 属于主链路（Renderer 持有
+// shadow_fbos_ / 各级联矩阵），条带只是一个 effect pass，不该反过来持有它。
+//
+// 语义：只有 `std::optional<DirectionalLight> sun` 有值、且 fbos 非空时才**可能**有阴影；
+// 具体某批要不要吃阴影由 `TranslucentStripBatch::sky_light` 决定（开关绑定在一起，
+// 没有独立的阴影开关）。
+struct StripCsmShadow {
+    std::optional<DirectionalLight> sun;   // 无 ⇒ 太阳项不衰减（= 完全受照）
+    ShadowConfig cfg{};                    // 级联范围 / 淡出 / 偏置
+    std::vector<CascadeFBO> fbos;          // 长度 = cfg.cascade_count（仅 sun 时有效）
+    float vp[ShadowConfig::kMaxCascades][16] = {};
+    float depth_vp[ShadowConfig::kMaxCascades][16] = {};
+    float texel_world[ShadowConfig::kMaxCascades] = {};
+
+    // 可用 = 有太阳 + 有级联纹理。不可用时调用方传 nullptr 也等价。
+    bool IsValid() const { return sun.has_value() && !fbos.empty(); }
+};
 
 class StripRenderer {
 public:
@@ -131,6 +155,7 @@ uniform int uFresnelEnabled;       // 1 = 开（否则这一段全部跳过）
 uniform vec3 uFresnelRimColor;
 uniform float uFresnelF0;
 uniform float uFresnelPower;
+uniform int uFresnelPow5;          // 1 = power 恰好是 5 ⇒ 走五次乘法特化（见 FresnelFactor）
 uniform float uFresnelStrength;
 uniform float uFresnelGrazeAlpha;
 layout(location = 0) out vec4 FragAccum;    // 覆盖集：Σ(色·α·w, α·w)
@@ -185,7 +210,18 @@ float FresnelFactor(vec3 N) {
     float n2 = dot(N, N);
     // d 必须 clamp 到 [0,1]：浮点误差会让 |N·V| 冒到 1+eps，pow(负数, k) = NaN。
     float d = (n2 > 1e-12) ? clamp(abs(dot(N, V) * inversesqrt(n2)), 0.0, 1.0) : 1.0;
-    float f = uFresnelF0 + (1.0 - uFresnelF0) * pow(1.0 - d, uFresnelPower);
+    float edge = 1.0 - d;
+    // 通用 pow 在驱动里是 exp2(y·log2(x))：两个特殊函数 + 若干指令。
+    // power == 5（Schlick 的默认指数，也是绝大多数取值）时用五次乘法替掉它。
+    // 分支条件是 **uniform**（整批同一个值）⇒ 一个 draw 内一致，没有 divergence。
+    // 两条路的浮点结果不逐位相同（pow 的实现精度本来就低于连乘），实测差异只到 LSB。
+    float falloff;
+    if (uFresnelPow5 == 1) {
+        falloff = edge * edge * edge * edge * edge;
+    } else {
+        falloff = pow(edge, uFresnelPower);
+    }
+    float f = uFresnelF0 + (1.0 - uFresnelF0) * falloff;
     return clamp(f * uFresnelStrength, 0.0, 1.0);
 }
 // 把菲涅耳作用到（尚未定稿的）(color, a) 上：
@@ -213,10 +249,18 @@ void ApplyFresnel(vec3 N, inout vec3 color, inout float a) {
     // 必须拼在 kWboWeightGlsl（WeightWbo）之后。
     static constexpr const char* kFsEmit = R"glsl(
 void EmitFragment(vec3 color, float a) {
-    // 早退门槛按**覆盖率**（两个集合同一个门槛）。
-    // 已知边界：颜色允许 HDR 之后，「a 极低但颜色极亮」的片元（注入量 > 1/255）
-    // 也会在这里被丢掉。改它会改画面，留作单独一次改动（要重出 gold），本轮不做。
-    if (a <= 1.0 / 255.0) {
+    // 早退门槛：放在读场景深度**之前**（每个片元最便宜的一道筛子），
+    // 但判据必须按「**注入量**」而不是覆盖率 —— 两个集合注入的东西不同：
+    //   覆盖集：注入量 = 色·(α·fade)，fade ≤ 1 ⇒ α ≤ 1/255 的片元下面怎么都会被丢，
+    //           所以这里直接用 α 判（与旧行为逐位相同，且不必先算 fade）。
+    //   加法集：颜色可以是 HDR（> 1），这时「α 极小但色极亮」的片元注入量可以 ≫ 1/255，
+    //           只按 α 判会把发光拖尾/射流的淡边整条丢掉（实测射流尾部少 100~290 px、
+    //           最大 9/255）。这里乘上颜色，fade 留到下面按精确 contrib 再判一次。
+    if (uBlendPath == 1) {
+        if (max(max(color.r, color.g), color.b) * a <= 1.0 / 255.0) {
+            discard;
+        }
+    } else if (a <= 1.0 / 255.0) {
         discard;
     }
     // WBO 目标没有深度附件：与不透明场景深度手动作深度测试。
@@ -263,7 +307,11 @@ void main() {
     vec3 color = point.rgb;
     float a = point.a;
     ModulateTexture(vUV, color, a);
-    ApplyFresnel(cross(dFdx(vWorld), dFdy(vWorld)), color, a);
+    // 法线：折线 pass 只能拿屏幕空间导数（= 所在三角形平面法线，逐折面恒定）。
+    // 天光与 fresnel 共用同一个 N；两者都关时它是死代码，编译器会丢掉。
+    vec3 N = cross(dFdx(vWorld), dFdy(vWorld));
+    ApplySkyLight(N, color);
+    ApplyFresnel(N, color, a);
     a *= WidthProfile(vUV.y);
     EmitFragment(color, a);
 }
@@ -297,7 +345,8 @@ void main() {
     static constexpr const char* kSmoothFsMain = R"glsl(
 uniform float uSegCount;          // 段数 = 采样点数 − 1（m 变化不改变本 FS 成本）
 uniform float uDataRows;          // 数据纹理行数（CPU 侧保证够用；这里再钳一次防越界）
-// 控制点数据纹理：每列 3 texel = 12 float，按 (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz) 打包；
+// 控制点数据纹理：每列 4 texel = 16 float，按
+//   (c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)(rgba) 打包；
 // 每条带占一行，行号 = vStripId。texelFetch 越界是**未定义行为**（不是返回 0）⇒
 // 行号在这里按 uDataRows 钳一次（列号由 seg 的 clamp 保证）。
 uniform sampler2D uStripData;
@@ -310,27 +359,31 @@ void main() {
     int seg = int(clamp(floor(segF), 0.0, uSegCount - 1.0));
     float t = segF - float(seg);
 
-    // 两列 × 3 texel = 6 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
-    // 这里的 3 = CPU 侧 kSmoothTexelsPerColumn（shader 里没法引用 C++ 常量，改要同步）。
+    // 两列 × 4 texel = 8 次 texelFetch（同一条带的数据在同一行，命中同一 cache line）。
+    // 这里的 4 = CPU 侧 kSmoothTexelsPerColumn（shader 里没法引用 C++ 常量，改要同步）。
     // texelFetch 越界是**未定义行为**（不是"返回 0"）：行号必须钳住。
     int row = int(clamp(vStripId, 0.0, uDataRows - 1.0));
-    int tx = seg * 3;
+    int tx = seg * 4;
     vec4 t0 = texelFetch(uStripData, ivec2(tx + 0, row), 0);
     vec4 t1 = texelFetch(uStripData, ivec2(tx + 1, row), 0);
     vec4 t2 = texelFetch(uStripData, ivec2(tx + 2, row), 0);
     vec4 t3 = texelFetch(uStripData, ivec2(tx + 3, row), 0);
     vec4 t4 = texelFetch(uStripData, ivec2(tx + 4, row), 0);
     vec4 t5 = texelFetch(uStripData, ivec2(tx + 5, row), 0);
+    vec4 t6 = texelFetch(uStripData, ivec2(tx + 6, row), 0);
+    vec4 t7 = texelFetch(uStripData, ivec2(tx + 7, row), 0);
 
-    // 打包约定（与 CPU 侧 AppendSmoothStripData 逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)
+    // 打包约定（与 CPU 侧 AppendSmoothStripData 逐字一致）：(c.xyz, m.x)(m.yz, h.xy)(h.z, n.xyz)(rgba)
     vec3 c0 = vec3(t0.x, t0.y, t0.z);
     vec3 m0 = vec3(t0.w, t1.x, t1.y);
     vec3 h0 = vec3(t1.z, t1.w, t2.x);
     vec3 n0 = vec3(t2.y, t2.z, t2.w);
-    vec3 c1 = vec3(t3.x, t3.y, t3.z);
-    vec3 m1 = vec3(t3.w, t4.x, t4.y);
-    vec3 h1 = vec3(t4.z, t4.w, t5.x);
-    vec3 n1 = vec3(t5.y, t5.z, t5.w);
+    vec4 color0 = t3;   // 第 seg 列的逐点 rgba
+    vec3 c1 = vec3(t4.x, t4.y, t4.z);
+    vec3 m1 = vec3(t4.w, t5.x, t5.y);
+    vec3 h1 = vec3(t5.z, t5.w, t6.x);
+    vec3 n1 = vec3(t6.y, t6.z, t6.w);
+    vec4 color1 = t7;   // 第 seg+1 列的逐点 rgba
 
     float t2f = t * t;
     float t3f = t2f * t;
@@ -353,7 +406,9 @@ void main() {
     float dt = dot(D, dS) / max(dot(dS, dS), 1e-8);
     vec3 Pv = 2.0 * Hh;
     float dv = dot(D, Pv) / max(dot(Pv, Pv), 1e-8);
-    float uStar = (float(seg) + clamp(t + dt, 0.0, 1.0)) / uSegCount;
+    // 段内真实参数：u* 与逐点 RGBA 必须用**同一个** t*（否则颜色会顺着重建偏差漂）。
+    float tStar = clamp(t + dt, 0.0, 1.0);
+    float uStar = (float(seg) + tStar) / uSegCount;
     float vStar = v + dv;
 
     // 轮廓：落在真实条带之外的片元裁掉；fwidth 做 1px 解析 AA（不做硬切边的锯齿）。
@@ -366,22 +421,87 @@ void main() {
     }
 
     float vShade = clamp(vStar, 0.0, 1.0);
-    // 颜色/alpha 都按**重建后**的 u* 采样：逐点颜色与不透明度跟着真实曲线走
-    //（折线 pass 的 u 就是真实参数，两者行为一致）。
-    vec4 point = PointColor(uStar);
+    // 逐点 RGBA 来自**同一行**的控制点数据（每列最后一个 texel），按段内 t* 线性插值：
+    // 与旧的「去 per-instance 纹理采样」数学等价（那张纹理列间也是硬件双线性）——
+    // 换掉的是**一次跨纹理的过滤采样**（少一次 bilinear + LOD），代价是多 2 次同行 texelFetch。
+    vec4 point = mix(color0, color1, tStar);
     vec3 color = point.rgb;
     float a = point.a;
     ModulateTexture(vec2(clamp(uStar, 0.0, 1.0), vShade), color, a);
     // 解析法线：曲面 P(t,w) = S(t) + w·H(t) ⇒ N = ∂P/∂t × ∂P/∂w = dS × H。
     // 这是**无折面**的真实法线（折线 pass 只能拿导数法线，会随 15 段出亮带），
     // 也是平滑 pass 的附带好处：同一份数据已经在手上了，不用额外顶点属性。
-    ApplyFresnel(cross(dS, Hh), color, a);
+    // 天光与 fresnel 共用这个 N（两者都关时它是死代码）。
+    vec3 N = cross(dS, Hh);
+    ApplySkyLight(N, color);
+    ApplyFresnel(N, color, a);
     a *= WidthProfile(vShade) * cov;
     EmitFragment(color, a);
 }
 )glsl";
 
-    // 初始化：编译 draw / composite 两个 program，建 VAO + 动态 VBO + 静态 IBO。
+    // ── 天光消费（sky_light）：**两套定义**，主函数只有一份 ──
+    //
+    // 需求：开启光照消费**不影响原本 pass 的效率**，用开关控制。
+    // 做法是**两个 program**（折线/平滑各一对），主函数共用，差异只有下面这个函数：
+    //   kSkyLightOffFs → 空实现 ⇒ 编译器把调用点整个消掉，指令数与改动前完全一致；
+    //   kSkyLightFs    → 真正的天光注入。
+    // 不用 uniform 分支的原因：那会在**每条带每个片元**上都多一次分支判断 + 常驻寄存器，
+    // 而这套东西只对少数批（玻璃/薄膜）有意义；用 program 切分 = 不开的人真的零成本。
+    //
+    // 公式（与雾的合成同构，见 interface/strip_types.h:StripSkyLight）：
+    //   skylight(N) = tricolor_lerp(N.y)·ambient_scale + sun_color·sun_intensity·|N·L|
+    //   color      += injection · skylight(N)
+    // 注入量随后会被 α 乘（EmitFragment），所以越不透明补得越多 —— 与雾的 L_fog·α 同一件事。
+    static constexpr const char* kSkyLightOffFs = R"glsl(
+// 不开天光：空实现。GLSL 编译器会把调用点内联成空 ⇒ 零额外指令。
+void ApplySkyLight(vec3 N, inout vec3 color) {
+}
+)glsl";
+
+    static constexpr const char* kSkyLightFs = R"glsl(
+uniform vec3 uSkyZenith;      // 天顶色（法线朝上）
+uniform vec3 uSkyHorizon;     // 天际线色（法线水平）
+uniform vec3 uSkyGround;      // 地反射色（法线朝下）
+uniform float uSkyAmbientScale;
+uniform vec3 uSunDir;         // **指向太阳**的单位向量（CPU 侧已归一）
+uniform vec3 uSunColor;
+uniform float uSunIntensity;
+uniform float uSkyInjection;
+
+// 阴影开关：**与天光同一个开关** —— 有 sky_light 就采样 CSM 调制太阳项，没有独立开关。
+// 天光项（ambient）不乘阴影：环境光不该被直射光的影子遮住。
+// 条带自身仍不参与阴影生成（不写 shadow map，那需要给半透明片单开一次 shadow pass）。
+// 采样是**单级联单次采样、无 PCF**（实现见 csm_shadow_glsl.h，与 fire_fog 共用）。
+uniform int uHasCsm;   // 0 = 不做阴影（无太阳 / 无级联）
+
+// 天光辐亮度（线性 HDR）。N 可以非单位（导数叉积/曲面叉积都有长度）：
+// 先归一拿方向；长度≈ 0（退化片元）时当作「朝上」，不出 NaN。
+vec3 SkyLightRadiance(vec3 N) {
+    float n2 = dot(N, N);
+    vec3 n = (n2 > 1e-12) ? N * inversesqrt(n2) : vec3(0.0, 1.0, 0.0);
+    // N.y 分段线性：上→天顶、水平→天际线、下→地（与 AmbientLight::tricolor 同一约定，
+    // 天际线是中继）。下半球有地色兜底，不会死黑。
+    vec3 ambient = (n.y >= 0.0) ? mix(uSkyHorizon, uSkyZenith, n.y)
+                                : mix(uSkyHorizon, uSkyGround, -n.y);
+    vec3 sky = ambient * uSkyAmbientScale;
+    // 太阳项只在真的给了强度时才算：否则每个片元白付一次 shadow map 采样 + 两次 mat4×vec4
+    // （纯天光 / 入夜就是这条路径）。条件全是 uniform ⇒ 全屏一致，不会有 warp 分歧。
+    // 条带是**单层片**，两面都受光 ⇒ 取 |N·L|（与 fresnel 用 |N·V| 同一理由）。
+    if (uSunIntensity > 0.0) {
+        float shadow = CsmShadow(vWorld, length(uCamPos - vWorld), uHasCsm);
+        sky += uSunColor * (abs(dot(n, uSunDir)) * uSunIntensity * shadow);
+    }
+    return sky;
+}
+
+void ApplySkyLight(vec3 N, inout vec3 color) {
+    color += uSkyInjection * SkyLightRadiance(N);
+}
+)glsl";
+
+    // 初始化：编译 4 个 drawing program（折线/平滑 × 天光关/开）+ 合成 program，
+    // 建 VAO + 动态 VBO + 静态 IBO。
     void Init(ShaderManager* shader_mgr);
     void Finalize();
 
@@ -396,11 +516,14 @@ void main() {
     // 把一批条带累加画进本渲染器的 1× WBO 目标（不 clear）。
     // Pre-condition: Init 已调用；batch 满足 ValidateStripBatch；
     //                scene_depth_tex != 0（不透明场景的 MRT#1 深度纹理）。
+    // csm：CSM 资源（框见上）。**只有 sky_light 的批会真的采样**；没有太阳/级联时传
+    //      nullptr（不是"省略"—— 这个参数故意必填，避免「以为传了其实没传」）。
     void Draw(const TranslucentStripBatch& batch,
               TextureManager& texture_mgr,
               const Camera& camera,
               const float view_proj[16],
               unsigned int scene_depth_tex,
+              const StripCsmShadow* csm,
               int full_w, int full_h);
 
     // 把本帧 WBO 结果解析并 over 合成进**当前绑定的目标**（HDR）。无内容则 no-op。
@@ -447,8 +570,33 @@ private:
         int fresnel_rim_color = -1;
         int fresnel_f0 = -1;
         int fresnel_power = -1;
+        int fresnel_pow5 = -1;
         int fresnel_strength = -1;
         int fresnel_graze_alpha = -1;
+        // 天光（只有 lit program 有这些 uniform；unlit program 里 GetUniform 返回 -1，
+        // glUniform 对 -1 是 no-op，所以不分支也不会出错）。
+        int sky_zenith = -1;
+        int sky_horizon = -1;
+        int sky_ground = -1;
+        int sky_ambient_scale = -1;
+        int sun_dir = -1;
+        int sun_color = -1;
+        int sun_intensity = -1;
+        int sky_injection = -1;
+        // CSM（同样只在 lit program 里存在；unlit 全是 -1 ⇒ glUniform no-op）。
+        // 数组型 uniform 的**逐元素**位置在 Init 查好（数组 uniform 的首元素位置不保证
+        // 连续可用，object3d 也是逐元素查 + 逐元素 glUniform1i）。
+        int has_csm = -1;
+        int cascade_count = -1;
+        int cascade_ranges = -1;              // float[5]：按基名上传整数组
+        int shadow_map[5] = {-1, -1, -1, -1, -1};
+        int shadow_vp[5] = {-1, -1, -1, -1, -1};
+        int shadow_depth_vp[5] = {-1, -1, -1, -1, -1};
+        int shadow_texel_world = -1;          // float[5]
+        int shadow_bias_cascade = -1;         // float[5]
+        int shadow_bias_override = -1;
+        int shadow_fade_start = -1;
+        int shadow_fade_end = -1;
     };
     struct CompositeUniforms {
         int accum = -1;
@@ -471,6 +619,8 @@ private:
         const TranslucentStripBatch* batch = nullptr;
         unsigned int gl_tex = 0;            // 0 = 纯色批（不采样纹理）
         bool want_additive = false;         // 本批走加法集
+        bool want_light = false;            // 本批消费天光（选 lit program）
+        const StripCsmShadow* csm = nullptr; // CSM 资源（want_light 时才可能用到）
         const Camera* camera = nullptr;
         const float* view_proj = nullptr;   // column-major 16 个 float
         unsigned int scene_depth_tex = 0;   // 不透明场景深度（值 = gl_FragCoord.z）
@@ -481,13 +631,22 @@ private:
     // 公共 uniform 的**名字表**（唯一一份）：查一次位置，Draw 里直接用整数。
     void QueryCommonUniforms(unsigned int program, CommonUniforms* out /*output*/);
 
+    // 平滑 pass 特有 uniform（段数 / 数据行数 / 控制点数据纹理）：折线与 lit 变体各查一次，
+    // 但**名字表只有这一份**（以前在 Init 里抄了两遍三段）。
+    void QuerySmoothUniforms(unsigned int program, SmoothUniforms* out /*output*/);
+
     // 公共 uniform 的**上传**（唯一实现：改这里两个 pass 同时生效）。
     void ApplyCommonUniforms(const CommonUniforms& uniforms, const BatchDrawContext& ctx);
 
     ShaderManager* shader_mgr_ = nullptr;
     unsigned int prog_draw_ = 0;
     unsigned int prog_comp_ = 0;
+    // 「开天光」的两个变体：不在原 program 里加 uniform 分支，
+    // 而是单独编译 —— 不开天光的批在 GPU 上零额外指令（见 kSkyLightOffFs）。
+    unsigned int prog_draw_lit_ = 0;
+    unsigned int prog_smooth_lit_ = 0;
     CommonUniforms draw_uniforms_;
+    CommonUniforms draw_lit_uniforms_;
     CompositeUniforms comp_uniforms_;
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;   // 每帧重传的条带顶点
@@ -504,17 +663,18 @@ private:
     // ── 平滑 pass 的资源（kSmooth）──
     unsigned int prog_smooth_ = 0;
     SmoothUniforms smooth_uniforms_;
+    SmoothUniforms smooth_lit_uniforms_;
     unsigned int smooth_vao_ = 0;
     unsigned int smooth_vbo_ = 0;
     // per-instance 数据纹理（两个 pass 共用）：宽 kAppearanceTexels，高 = 条带数。
     unsigned int appearance_tex_ = 0;
     int appearance_capacity_ = 0;         // 当前纹理高度（条带数上限）
     std::vector<float> appearance_data_;  // 复用缓冲：每行 kAppearanceTexels × 4 float
-    unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 3 texel，每条带一行
+    unsigned int smooth_data_tex_ = 0;    // RGBA32F：每列 4 texel，每条带一行
     int smooth_data_rows_ = 0;            // 当前纹理高度（按需翻倍增长）
     int max_texture_rows_ = 0;            // GL_MAX_TEXTURE_SIZE（Init 时缓存）
     std::vector<float> smooth_vertices_;  // kSmoothFloatsPerVertex/顶点：pos(3),u,v,strip_id
-    std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n
+    std::vector<float> smooth_data_;      // kSmoothFloatsPerColumn/列：c, m, h, n, rgba
 
     // 索引缓冲按需扩容（块 j = 第 j 条带，顶点基址 j×32）。幂等：够用就直接返回。
     // 为什么平滑 pass 必须能一次画完整批：它的数据纹理行号 = 全局 strip 下标，

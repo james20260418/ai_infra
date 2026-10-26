@@ -1911,9 +1911,33 @@ void Renderer::Render(const RenderCommandList& cmds,
                     }
                 }
                 strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
+                // CSM 资源：只有「本帧有开天光的条带批」时才整理这份拷贝（几个 POD + ≤5 个
+                // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
+                // StripRenderer::Draw（与 fire_fog 的 FireFogLighting 同一模式）。
+                bool strips_need_csm = false;
+                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
+                    if (sc.sky_light.has_value()) {
+                        strips_need_csm = true;
+                        break;
+                    }
+                }
+                StripCsmShadow strips_csm;
+                if (strips_need_csm && cmds.sun.has_value() && !shadow_fbos_.empty()) {
+                    strips_csm.sun = cmds.sun;
+                    strips_csm.cfg = shadow_cfg_;
+                    strips_csm.fbos = shadow_fbos_;
+                    for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+                        std::memcpy(strips_csm.vp[c], shadow_vp_[c], sizeof(strips_csm.vp[c]));
+                        std::memcpy(strips_csm.depth_vp[c], shadow_depth_vp_[c],
+                                    sizeof(strips_csm.depth_vp[c]));
+                        strips_csm.texel_world[c] = shadow_texel_world_[c];
+                    }
+                }
                 for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
                     strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
-                                         hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                                         hdr_scene_depth_tex,
+                                         strips_csm.IsValid() ? &strips_csm : nullptr,
+                                         fbo_3d_w, fbo_3d_h);
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 // 只写颜色附件：MRT#1（场景深度）本 pass 不碰，不摘会与采样形成反馈环。

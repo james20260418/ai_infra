@@ -122,6 +122,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# CSM 阴影的 GLSL 共享件（单级联单次采样，无 PCF）：雾与条带同一份实现。
+cc_library(
+    name = "csm_shadow_glsl",
+    hdrs = ["csm_shadow_glsl.h"],
+    visibility = ["//visibility:public"],
+)
+
 # InstanceBuffer — 一次 Instanced draw 的 per-instance attribute 数据缓冲。
 # 实例数据属于「这次 draw」（每帧由调用方给），不属于不可变几何（GPUMesh），
 # 故由渲染器持有、跨 draw 复用，draw 前临时挂到 mesh VAO（RAII 配对，见头文件）。

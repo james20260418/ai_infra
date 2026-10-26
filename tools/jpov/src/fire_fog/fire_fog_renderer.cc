@@ -42,6 +42,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
+#include "tools/jpov/src/csm_shadow_glsl.h"
 #include "tools/jpov/src/fire_fog/fire_fog_shader.h"
 
 namespace {
@@ -117,6 +118,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 std::string AssembleFragmentShader(const char* body) {
     std::string s = "#version 330 core\n";
     s += jpov::kFireFogCommonGlsl;
+    s += jpov::kCsmSingleTapGlsl;   // CSM 采样唯一一份实现（与 strip 共用）
     s += body;
     return s;
 }

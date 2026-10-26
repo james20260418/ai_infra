@@ -494,6 +494,9 @@ cc_library(
 cc_binary(
     name = "jpov_strip_viewer",
     srcs = ["demo/jpov_strip_viewer.cc"],
+    # 玻璃缸场景（sky_light 验收）用的橡树：让 `bazel run` 也能找到资源。
+    # 不在 strip_viewer_app 库里，避免给 gold test 拖进一个 4k 模型。
+    data = ["//tools/jpov/assets/models:oak_tripo_negative_data"],
     deps = [
         ":strip_viewer_app",
         ":skylight_scene",

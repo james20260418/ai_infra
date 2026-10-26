@@ -324,36 +324,6 @@ uniform vec3  uSunDir;         // 光传播方向（从太阳指向场景）
 uniform float uSunPhaseG;
 uniform float uSunGain;
 
-// ── CSM 阴影（与 object3d 同一套资源；**原始单次采样，无 PCF**）──
-uniform int   uCascadeCount;
-uniform float uCascadeRanges[5];
-uniform sampler2D uShadowMap[5];
-uniform mat4  uShadowVP[5];
-uniform mat4  uShadowDepthVP[5];
-uniform float uShadowTexelWorld[5];
-uniform float uShadowBiasCascade[5];
-uniform int   uShadowBiasOverride;
-uniform float uShadowFadeStart;
-uniform float uShadowFadeEnd;
-
-out vec4 oColor;   // (τ, S.rgb)
-
-// 单级联单次采样（无 PCF）。因 GLSL 330 禁动态 sampler 索引，调用处按常量索引展开。
-float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texelW,
-             float biasVal, int biasOv, vec3 wp) {
-    vec4 lsp = vp * vec4(wp, 1.0);
-    vec3 ndc = lsp.xyz / lsp.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return 1.0;                        // 不在该级联覆盖内 ⇒ 视为受照
-    }
-    vec4 dpos = dvp * vec4(wp, 1.0);
-    float cur = dpos.z / dpos.w;
-    float tw = (biasOv != 0) ? biasVal : texelW;
-    cur -= max(0.01, 1.5 * tw);            // 雾无表面法线 ⇒ 用 tanθ=1 的保守深度偏置
-    return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
-}
-
 // Henyey-Greenstein 散射相位（相对光→视线方向）。mu=1 = 朝光源看（前向散射）。
 float HgPhase(float mu, float g) {
     g = clamp(g, 0.0, 0.95);
@@ -366,39 +336,7 @@ float SunPhase(vec3 rd) {
     return uSunGain * HgPhase(clamp(dot(rd, -uSunDir), -1.0, 1.0), uSunPhaseG);
 }
 
-// 原始 CSM（单次采样，无 PCF）：按采样点到相机的距离选主级联，末尾按 fade 淡出。
-float CsmShadow(vec3 wp, float dist) {
-    if (uHasSun == 0 || uCascadeCount <= 0) {
-        return 1.0;
-    }
-    int c = uCascadeCount - 1;
-    for (int i = 0; i < 5; ++i) {
-        if (i < uCascadeCount && dist <= uCascadeRanges[i]) {
-            c = i;
-            break;
-        }
-    }
-    float s;
-    if (c == 0) {
-        s = CsmTap(uShadowMap[0], uShadowVP[0], uShadowDepthVP[0], uShadowTexelWorld[0],
-                   uShadowBiasCascade[0], uShadowBiasOverride, wp);
-    } else if (c == 1) {
-        s = CsmTap(uShadowMap[1], uShadowVP[1], uShadowDepthVP[1], uShadowTexelWorld[1],
-                   uShadowBiasCascade[1], uShadowBiasOverride, wp);
-    } else if (c == 2) {
-        s = CsmTap(uShadowMap[2], uShadowVP[2], uShadowDepthVP[2], uShadowTexelWorld[2],
-                   uShadowBiasCascade[2], uShadowBiasOverride, wp);
-    } else if (c == 3) {
-        s = CsmTap(uShadowMap[3], uShadowVP[3], uShadowDepthVP[3], uShadowTexelWorld[3],
-                   uShadowBiasCascade[3], uShadowBiasOverride, wp);
-    } else {
-        s = CsmTap(uShadowMap[4], uShadowVP[4], uShadowDepthVP[4], uShadowTexelWorld[4],
-                   uShadowBiasCascade[4], uShadowBiasOverride, wp);
-    }
-    float fade = 1.0 - clamp((dist - uShadowFadeStart)
-                             / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
-    return mix(1.0, s, fade);
-}
+out vec4 oColor;   // (τ, S.rgb)
 
 void main() {
     ivec2 frag = ivec2(gl_FragCoord.xy);
@@ -488,7 +426,7 @@ void main() {
         //    + 本 tile 点光源（×相位）。──
         vec3 Llight = uAmbientColor * uAmbientIntensity;
         if (uHasSun != 0) {
-            float sh = CsmShadow(p, length(p - ro));
+            float sh = CsmShadow(p, length(p - ro), uHasSun);
             Llight += uSunColor * uSunIntensity * SunPhase(rd) * sh;
         }
         for (int k2 = 0; k2 < nl; ++k2) {
