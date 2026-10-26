@@ -170,7 +170,16 @@ vec2 CellUV(vec2 uv, float f) {
 // 窗口深度 [0,1] → 视空间深度（正，米）。
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
-    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+    float denom = (uFar + uNear) - ndc * (uFar - uNear);
+    // 退化相机守卫（near = 0 / near ≈ far）：分母趋 0 时这一步就是 0/0 = NaN，
+    // 而 NaN 一旦写进 WBO 或 HDR 目标会顺着后处理污染**整帧**（这一层只是膜，
+    // 没有道理把整张画面拖黑）。正常相机下 |denom| ≥ ~2·near（默认 0.05 ⇒ 0.1），
+    // 这个分支永不进入 ⇒ 正常输入的结果逐位不变。
+    // 用 `!(x > eps)` 而不是 `x < eps`：前者同时把 NaN 拦下来。
+    if (!(abs(denom) > 1e-6)) {
+        return max(uNear, 1e-4);
+    }
+    return (2.0 * uNear * uFar) / denom;
 }
 )glsl";
 

@@ -1330,3 +1330,61 @@ skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不�
   （数量多、单条短：雨丝、辅助线、道路标线），不是「画得更快」。
   反过来说，32 点档也不便宜：一条带 64 顶点，几千条时顶点/索引量是 4 点档的 8 倍。
 - 没做 frame-time 基准 —— 上面是结构上的必然，不编数字。
+
+### 21. 退化输入（几何数值退化）—— 会不会除零 / 出 NaN
+
+Danis 的问题：「万一 JPOV 用户输入了奇异的数值，JPOV 该不会崩溃吧？NaN 和 Inf 我们可以约定
+用户不会犯傻（render command proto 化时能证据实锤），但**像重叠点这类输入**，会不会让
+renderer 或者内部除以 0？」→ 本节是对**整条 strip 链路**的一遍清扫结果。
+
+**先说结论**
+
+1. **能"合法但退化"的几何（重叠点 / 零宽 / 亚微米段 / 折返 / 沙漏 / 远坐标）不会崩，
+   也不会产生 NaN。** 结构上的原因很硬：这些退化在屏幕上都是**零面积**（四边形的两条边
+   重合成一条线）⇒ 光栅化阶段就没有片元 ⇒ FS 里那些除法根本不会被执行。
+   GPU 端探针实测：把九种退化条带画进画面，**零面积的三类改变 0 个像素**。
+2. 能光栅化出来的退化（沙漏、楔形尖端、折返）确实会走到 FS 的除法，但**每个除法后面都
+   跟着守卫或 clamp**（见下表），所以结果是有限值 —— 要么被裁掉（落到条带轮廓之外），
+   要么画出一条极细的正常条带。
+3. **真正找到并修掉的除零点在"相机"上，不在几何上**：`ZView()` 的
+   `2·near·far / ((far+near) − ndc·(far−near))`，当用户给 `near = 0` 或 `near ≈ far` 时
+   分母会趋近 0（恰在远平面时是 0/0 = NaN）。NaN 一旦写进 1× WBO 就会顺着 composite
+   铺满全屏 —— 这是"一层膜把整张画面拖黑"的典型事故。已在 strip / particles / volume_fire
+   三处**同一段函数**上加了守卫（正常相机下分支永不进入 ⇒ 三者的 gold 全部逐像素不变）。
+
+**逐点清单（strip 链路里所有除法/归一化）**
+
+| 位置 | 表达式 | 退化时靠什么扛住 |
+|---|---|---|
+| `strip_geometry.h` 列 u | `col / layout.quads` | 布局由断言保证 `quads = samples−1 ≥ 3` |
+| `ComputeSmoothStrip` 外扩 | `margin / min_half` | `min_half` 只在 `|h| > 1e-5` 的列里取；全零宽时保持 1e30 ⇒ 回落 `scale = 1` |
+| 同上（单位外法向） | `lh * (1/len)` | `len < 1e-5 ⇒ continue`（该段没有"外侧"） |
+| 平滑 FS 段内参数 | `(D·dS) / max(dS·dS, 1e-8)` | 守卫 + 后面 `tStar = clamp(...)` |
+| 平滑 FS 宽度参数 | `(D·Pv) / max(Pv·Pv, 1e-8)` | 守卫（Pv = 2·Hh，零宽列会让它 → 0） |
+| 平滑 FS 段号 | `(seg + tStar) / uSegCount` | `uSegCount = quads ≥ 3`（uniform 由 layout 给） |
+| 平滑 FS 裁形 AA | `min(v*, 1−v*) / fwidth(v*)` | `fwidth` 有 `max(..., 1e-5)` 地板 |
+| 折线 VS 行号 | `gl_VertexID / uVerticesPerStrip` | **整数除法**（浮点会给"略大于整数"，见 §20）+ CPU 侧 CHECK > 0 |
+| per-instance 行号 | `(row + 0.5) / rows` | `rows = max(int(uAppearanceRows), 1)` |
+| 菲涅耳 | `inversesqrt(d2)` / `inversesqrt(n2)` | `d2 > 1e-12` / `n2 > 1e-12` 分支，否则退化到固定值 |
+| 天光 | `inversesqrt(n2)` | 同上 |
+| 深度线性化 | `2·near·far / ((far+near) − ndc·(far−near))` | **本次新增守卫**：`!(|denom| > 1e-6)` ⇒ 返回 `max(near, 1e-4)` |
+| WBO 解析 | `accum.rgb / accum.a` | `accum.a ≤ 1e-7` ⇒ 直接输出 0（原有守卫） |
+
+**测试（都是可证伪的，不是恒真断言）**
+
+- `strip_degenerate_test`（新，GPU 端，headless）：同机位渲四张图 —— 对照（不发条带）/
+  零面积退化 / 有面积退化 / 有面积退化 + 一条正常条带。断言：
+  ① 零面积那批**改变 0 个像素**；② 有面积那批**条带区域之外逐像素相同**（这是 NaN 的
+  探测器：NaN 泄漏会铺满全屏）；③ 同批的正常条带仍然可见（差异像素数严格变大且 > 500）。
+- `strip_geometry_test` 的 `StripDegenerate.*`（CPU 端，GL-free）：九种退化配方 + "两点重合"
+  + "零宽回落 scale=1" + "圆环壁厚 1e-7"，判据统一是**每个输出都是有限值**、外扩倍数落在
+  `[1, 8]`。
+
+**已知不做 / 边界**
+
+- NaN/Inf 输入不做处理：按约定由 render command proto 化时拦掉（本层只保证"有限值进去 ⇒
+  有限值出来"）。
+- 坐标量级失控（例如 1e30 米）不会被拒绝；外扩量会被 `kSmoothMaxWidenScale = 8` 截断，
+  极端细尖仍可能缺一条亚像素（既有已知限制，与本轮无关）。
+- 退化几何**不报错**是刻意的：零宽 = 一条线、重合点 = 零长度段，都是合法表达手段，
+  在 `ValidateStripBatch` 里拒绝它们等于把用户的合法几何判成非法。

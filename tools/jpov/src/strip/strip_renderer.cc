@@ -589,6 +589,14 @@ void StripRenderer::Draw32(const TranslucentStrip32Batch& batch,
 // 两条 Draw 的公共尾部：与采样数无关的部分（目标尺寸、混合集合、纹理、上传、分派）。
 void StripRenderer::DrawShared(BatchDrawContext& ctx, TextureManager& texture_mgr) {
     CHECK(ctx.style != nullptr) << "StripRenderer::DrawShared: ctx.style 不能为空";
+    // 布局里的每个数都会被除（或当除数/步长用）：一旦将来加了个自相矛盾的档位，
+    // 宁可在这里 CHECK 崩，也不要在 GPU 上除零/越界 —— 那些在画面上只表现为
+    // 「某处悄悄不对」，排查成本高一个数量级。
+    CHECK_GT(ctx.layout.samples, 1) << "StripRenderer: layout.samples 必须 ≥ 2";
+    CHECK_GT(ctx.layout.quads, 0) << "StripRenderer: layout.quads 必须 > 0";
+    CHECK_GT(ctx.layout.vertices_per_strip, 0) << "StripRenderer: vertices_per_strip 必须 > 0";
+    CHECK_GT(ctx.layout.appearance_texels, ctx.layout.samples)
+        << "StripRenderer: appearance_texels 必须大于采样数（后面还要放 9 个剖面 knot）";
     CHECK_EQ(wbo_.width(), ctx.full_w) << "StripRenderer::DrawShared: 与 Begin 的宽度不一致";
     CHECK_EQ(wbo_.height(), ctx.full_h)
         << "StripRenderer::DrawShared: 与 Begin 的高度不一致";

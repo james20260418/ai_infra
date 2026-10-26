@@ -1130,3 +1130,191 @@ TEST(StripVariants, SmoothDataRowPaddingMatchesStride) {
         }
     }
 }
+
+// ────────────────── 退化输入（合法但几何退化）──────────────────
+//
+// Danis 的问题：「万一用户输入了奇异数值（不含 NaN/Inf），比如**重叠点**，会不会让
+// renderer 或者内部除以 0？」这些用例就是答案的 CPU 半边：
+// 这些输入**能通过 ValidateStripBatch**（它们不是错误，只是几何退化了），所以每一处
+// 除法/归一化都必须自己扛住。判据统一是「输出有限」+「不崩」，不假设某个具体数值。
+//
+// 为什么不在 ValidateStripBatch 里拒绝它们：重叠点/零宽是**合法的表达手段**
+// （零宽 = 一条线、重合点 = 零长度段），拒绝等于把用户的合法几何判成非法。
+
+namespace {
+
+bool AllFinite(const jpov::Vec3f& v) {
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+// 把一条 16 点条带按「退化配方」填好，然后跑完整条 CPU 前端并检查每个输出都是有限值。
+void CheckDegenerateFinite(const char* name, const jpov::Strip16& strip) {
+    const jpov::StripSamplesView view = jpov::ViewOf(strip);
+    // ① 校验必须**接受**（退化 ≠ 非法）。
+    jpov::ValidateStripSamples(view, 0, name);
+
+    // ② 平滑前端：切线 / 外扩量 / 打包。
+    jpov::SmoothStripCompute computed;
+    jpov::ComputeSmoothStrip(view, jpov::kStripLayout16, &computed);
+    EXPECT_TRUE(std::isfinite(computed.margin)) << name;
+    EXPECT_TRUE(std::isfinite(computed.scale)) << name;
+    EXPECT_GE(computed.scale, 1.0f) << name;
+    EXPECT_LE(computed.scale, jpov::kSmoothMaxWidenScale + 1e-5f) << name;
+    for (int i = 0; i < jpov::kStripLayout16.samples; ++i) {
+        EXPECT_TRUE(AllFinite(computed.center[i])) << name << " center[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.half[i])) << name << " half[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.center_tan[i])) << name << " center_tan[" << i << "]";
+        EXPECT_TRUE(AllFinite(computed.half_tan[i])) << name << " half_tan[" << i << "]";
+    }
+
+    // ③ 数据行（控制点纹理）与两种顶点展开。
+    std::vector<float> data;
+    jpov::AppendSmoothStripData(view, jpov::kStripLayout16, computed,
+                                jpov::kStripMaxSampleCount * jpov::kSmoothFloatsPerColumn,
+                                &data);
+    for (float v : data) {
+        EXPECT_TRUE(std::isfinite(v)) << name << " smooth data";
+    }
+    std::vector<float> smooth_verts;
+    jpov::AppendSmoothStripVertices(view, jpov::kStripLayout16, computed, 0.0f,
+                                    &smooth_verts);
+    for (float v : smooth_verts) {
+        EXPECT_TRUE(std::isfinite(v)) << name << " smooth vertex";
+    }
+    std::vector<jpov::StripVertex> poly_verts;
+    jpov::ExpandStripVertices(view, jpov::kStripLayout16, &poly_verts);
+    ASSERT_EQ(poly_verts.size(), static_cast<size_t>(jpov::kStripVerticesPerStrip)) << name;
+    for (const jpov::StripVertex& v : poly_verts) {
+        EXPECT_TRUE(AllFinite(v.position)) << name << " polyline position";
+        EXPECT_TRUE(std::isfinite(v.u) && std::isfinite(v.v)) << name << " polyline uv";
+    }
+}
+
+// 16 点条带的退化配方：按几何关系逐列生成。
+enum class DegenerateKind {
+    kAllIdenticalZeroWidth,  // 所有点重合 + 零宽（退化成一个点）
+    kAllIdenticalFullWidth,  // 所有点重合、但有宽度（退化成一条线段）
+    kDuplicateTail,          // 后半段所有列都坐在同一个点上
+    kZeroWidthCurve,         // 曲线正常、宽度恒为 0（一条线）
+    kHourglass,              // 中间一列宽度为 0
+    kSubMicron,              // 相邻列相距 1e-7 m
+    kFoldBack,               // 180° 折返（后半段沿原路返回）
+    kWedge,                  // 首列宽度 0，往后张开
+    kFarAway,                // 坐标 1e6 m
+};
+
+jpov::Strip16 MakeDegenerate(DegenerateKind kind) {
+    jpov::Strip16 s;
+    constexpr int n = jpov::kStripSampleCount;
+    for (int i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+        jpov::Vec3f left{};
+        jpov::Vec3f right{};
+        switch (kind) {
+            case DegenerateKind::kAllIdenticalZeroWidth:
+                left = jpov::Vec3f{0.0f, 0.0f, 0.0f};
+                right = left;
+                break;
+            case DegenerateKind::kAllIdenticalFullWidth:
+                left = jpov::Vec3f{0.0f, 1.0f, 0.0f};
+                right = jpov::Vec3f{0.0f, 0.0f, 0.0f};
+                break;
+            case DegenerateKind::kDuplicateTail: {
+                const float x = (i < n / 2) ? static_cast<float>(i)
+                                            : static_cast<float>(n / 2);
+                left = jpov::Vec3f{x, 1.0f, 0.0f};
+                right = jpov::Vec3f{x, 0.0f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kZeroWidthCurve: {
+                const float x = -2.0f + 4.0f * t;
+                left = jpov::Vec3f{x, 0.5f + 0.2f * std::sin(3.0f * t), 0.0f};
+                right = left;
+                break;
+            }
+            case DegenerateKind::kHourglass: {
+                const float x = -2.0f + 4.0f * t;
+                const float half = (i == n / 2) ? 0.0f : 0.3f;
+                left = jpov::Vec3f{x, half, 0.0f};
+                right = jpov::Vec3f{x, -half, 0.0f};
+                break;
+            }
+            case DegenerateKind::kSubMicron: {
+                const float x = 1e-7f * static_cast<float>(i);
+                left = jpov::Vec3f{x, 1e-7f, 0.0f};
+                right = jpov::Vec3f{x, -1e-7f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kFoldBack: {
+                const int k = (i < n / 2) ? i : (n - 1 - i);
+                const float x = static_cast<float>(k);
+                left = jpov::Vec3f{x, 0.2f, 0.0f};
+                right = jpov::Vec3f{x, -0.2f, 0.0f};
+                break;
+            }
+            case DegenerateKind::kWedge: {
+                const float x = -2.0f + 2.0f * t;
+                const float half = 0.3f * t;   // t=0 时恰为 0
+                left = jpov::Vec3f{x, half, 0.0f};
+                right = jpov::Vec3f{x, -half, 0.0f};
+                break;
+            }
+            case DegenerateKind::kFarAway: {
+                const float x = 1e6f + static_cast<float>(i);
+                left = jpov::Vec3f{x, 1e6f + 0.2f, 1e6f};
+                right = jpov::Vec3f{x, 1e6f - 0.2f, 1e6f};
+                break;
+            }
+        }
+        s.left[static_cast<size_t>(i)] = left;
+        s.right[static_cast<size_t>(i)] = right;
+    }
+    s.point_count = static_cast<uint32_t>(n);
+    return s;
+}
+
+}  // namespace
+
+TEST(StripDegenerate, AllCpuOutputsStayFinite) {
+    const DegenerateKind kKinds[] = {
+        DegenerateKind::kAllIdenticalZeroWidth, DegenerateKind::kAllIdenticalFullWidth,
+        DegenerateKind::kDuplicateTail,         DegenerateKind::kZeroWidthCurve,
+        DegenerateKind::kHourglass,             DegenerateKind::kSubMicron,
+        DegenerateKind::kFoldBack,              DegenerateKind::kWedge,
+        DegenerateKind::kFarAway,
+    };
+    for (DegenerateKind kind : kKinds) {
+        CheckDegenerateFinite("degenerate", MakeDegenerate(kind));
+    }
+}
+
+TEST(StripDegenerate, TwoIdenticalPointsStayFinite) {
+    // 只给 2 个点、且两点完全重合：塌缩 + Hermite 全都退化，但必须仍然有限。
+    jpov::Strip16 s = MakeDegenerate(DegenerateKind::kAllIdenticalFullWidth);
+    s.point_count = 2;
+    CheckDegenerateFinite("two-identical", s);
+}
+
+TEST(StripDegenerate, AllZeroWidthCollapsesToLine) {
+    // 零宽的曲线：外扩量应退回「只剩固定余量」（没有任何"外侧"可撑），
+    // 且 scale 必须是 1（min_half 全是 0 ⇒ 没有可用的半宽基准）。
+    jpov::Strip16 s = MakeDegenerate(DegenerateKind::kZeroWidthCurve);
+    jpov::SmoothStripCompute c;
+    jpov::ComputeSmoothStrip(jpov::ViewOf(s), jpov::kStripLayout16, &c);
+    EXPECT_FLOAT_EQ(c.scale, 1.0f);
+    EXPECT_NEAR(c.margin, 0.001f, 1e-6f);
+}
+
+TEST(StripDegenerate, RingWithTinyWallAndHeightStaysFinite) {
+    // 圆环：壁厚 1e-7、高 1e-6 —— 内外立壁几乎重合，仍是合法形状（只需 wall < outer）。
+    jpov::StripRingShape shape;
+    shape.outer_radius = 1.0f;
+    shape.wall_thickness = 1e-7f;
+    shape.height = 1e-6f;
+    shape.center_y = 0.5f;
+    const std::array<jpov::Strip16, jpov::kStripRingPartCount> ring =
+        jpov::MakeStripRing(shape);
+    for (const jpov::Strip16& strip : ring) {
+        CheckDegenerateFinite("ring", strip);
+    }
+}
