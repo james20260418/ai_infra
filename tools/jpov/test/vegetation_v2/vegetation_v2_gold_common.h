@@ -119,6 +119,11 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
     cmd += " --no-leaf";
   }
   cmd += " --cam_phi 12 --cam_theta 0 --cam_r 1.6 --cam-target-y 3";
+  // 原材料态从 2026-10-26 起也会吹风（关节表在本地现建）。这两张 gold 锁的是
+  // **叶卡几何 / 贴图 / 树皮**，不是风，而且风位移随帧累加 ⇒ 必须关掉。
+  // 不能靠 `--wind-time 0` 把位移钉成零：θ = amp·sin(2π·f·(t + 关节相位))，
+  // 逐关节相位非零 ⇒ t=0 仍然在吹（实测 cards ROI 差 16.3）。
+  cmd += " --no-wind";
   cmd += " --no-hud";   // HUD 是文字，会跟着相机字符串变，不该进基准图
   cmd += " --capture '" + shot_dir + "'";
   cmd += " > /dev/null 2>&1";

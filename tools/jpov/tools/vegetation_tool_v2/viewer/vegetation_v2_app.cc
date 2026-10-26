@@ -26,6 +26,7 @@
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/tools/vegetation_tool_v2/bake/vegetation_glb_baker.h"
+#include "tools/jpov/tools/vegetation_tool_v2/bake/vegetation_glb_joints.h"
 #include "tools/jpov/tools/vegetation_tool_v2/leaf_texture.h"
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 #include "tools/jpov/tools/vegetation_tool_v2/sweep.h"
@@ -234,10 +235,24 @@ class VegetationV2App : public JPOV {
   float scene_height_ = 1.0f;      // 参考高度 H（米）：shape/glb 的 Y 向包围盒高
   bool wind_paused_ = false;
   float wind_time_ = 0.0f;        // 秒；由帧号推（确定性）
+
+  // ── 原材料态的风链（2026-10-26）──
+  // 原材料态的网格本来没有风数据：joint/phase/level/soft 是**烘焙期**由
+  // `vegetation_glb_joints` 从 shape 拓扑造出来的。这里把同一套构造器提前跑一遍，
+  // 让原材料态也能吹（参数取「烘焙 glb」面板当前值 ⇒ 预览与产物用同一条规则）。
+  jpov::vegetation::JointLayout raw_joints_;
+  float raw_phase_scale_ = 1.0f;   // 建表时用的相位空间频率（逐顶点相位要用同一份）
+  // 逐枝/绿卡的 CPU 侧网格缓存：重建风链时只换 wind_link 再 UpdateMesh，
+  // 不重新扫管、也不让 mesh_id 抖动（本帧已入队的绘制命令还指着旧 id）。
+  std::vector<jpov::MeshData> branch_mesh_base_;
+  std::vector<jpov::MeshData> card_mesh_base_;
+  // 绿卡每张卡的顶点数（[type][卡]）：重建风链时要按卡重新铺一遍 wind_link，
+  // 而盒子顶点数不由卡数据直接给出（AppendUvBox 内部现算）。
+  std::vector<std::vector<uint32_t>> card_counts_;
   // 面板折叠状态
   // 面板点击**不能当帧**就释放/重建 GPU 资源：本帧的绘制命令已经带着旧 mesh_id 入队了，
   // 立刻 Release 会让渲染器拿到已释放的 id。所以只记一个待办，下一帧开头执行。
-  enum class Pending { kNone, kBake, kBackToRaw };
+  enum class Pending { kNone, kBake, kBackToRaw, kRebuildRawWind };
   Pending pending_ = Pending::kNone;
   bool bake_panel_open_ = true;
   bool wind_panel_open_ = true;
@@ -262,6 +277,8 @@ class VegetationV2App : public JPOV {
   std::vector<jpov::PBRMaterial> leaf_mat_;
   std::vector<uint32_t> leaf_mesh_;               // 每 type 一个 mesh
   std::vector<jpov::MeshData> leaf_mesh_base_;    // 平法线基准（curl 变化时重算）
+  // 每个 type 的卡列表（重建风链时要按卡重铺 wind_link，单独存一份比从 shape 重筛清楚）。
+  std::vector<std::vector<LeafCard>> leaf_cards_;
   // 逐层棕色材质缓存：每帧给 183 根枝各造一个 PBRMaterial 纯属浪费。
   std::vector<jpov::PBRMaterial> level_mats_;
   jpov_viewer::ViewConfig view_;
@@ -409,6 +426,7 @@ class VegetationV2App : public JPOV {
     leaf_mat_.assign(kMaxCardTypes, jpov::PBRMaterial());
     leaf_mesh_.assign(kMaxCardTypes, 0);
     leaf_mesh_base_.assign(kMaxCardTypes, jpov::MeshData());
+    leaf_cards_.assign(kMaxCardTypes, std::vector<LeafCard>());
 
     for (int t = 0; t < kMaxCardTypes; ++t) {
       Shape subset = shape_;
@@ -453,6 +471,7 @@ class VegetationV2App : public JPOV {
       }
       md.indices = src.indices;
       leaf_mesh_base_[t] = md;
+      leaf_cards_[t] = subset.cards;
 
       jpov::MeshData bent = md;
       BendCardNormals(&bent, curl_);
@@ -540,6 +559,96 @@ class VegetationV2App : public JPOV {
     deg_.sun_azim_deg = 35.0f;
   }
 
+  // 当前「烘焙 glb」面板参数 → baker 选项。烘焙与原材料态风链**共用这一份**，
+  // 避免「预览一套参数、产物另一套」（这正是本工具之前踩过的坑）。
+  jpov::vegetation::GlbBakeOptions CurrentBakeOptions() const {
+    jpov::vegetation::GlbBakeOptions o;
+    o.thick_spacing = bake_thick_spacing_;
+    o.thin_spacing = bake_thin_spacing_;
+    o.max_joints_per_branch = static_cast<int>(bake_max_joints_f_ + 0.5f);
+    o.phase_scale = bake_phase_scale_;
+    o.droop_scale = bake_droop_scale_;
+    o.bark_dir = bark_dir_;
+    o.leaf_png = leaf_path_;
+    o.leaf2_png = leaf2_path_;
+    o.leaf_black = bake_leaf_black_;
+    o.leaf_normal = bake_leaf_normal_;
+    o.normal_scale = bake_normal_scale_;
+    o.uv_v_scale = args_uv_vscale_;   // 与预览一致（0 = 自动按树皮 albedo 尺寸）
+    return o;
+  }
+
+  // 建原材料态的风关节表。没有 shape（纯 glb 模式）/没有枝条 → 空表 = 原材料态不吹。
+  // Pre-condition: has_shape_ 为 true 时 shape_ 已过 Validate（每枝 samples 非空）。
+  void BuildRawWindJoints() {
+    raw_joints_ = jpov::vegetation::JointLayout();
+    raw_phase_scale_ = bake_phase_scale_;
+    if (!has_shape_ || shape_.branches.empty()) {
+      return;
+    }
+    raw_joints_ = jpov::vegetation::BuildJointLayout(shape_, CurrentBakeOptions());
+    LOG(INFO) << "原材料态风链: " << raw_joints_.joints.size() << " 关节 / "
+              << shape_.branches.size() << " 枝（参数取「烘焙 glb」面板）";
+  }
+
+  // 逐顶点 (joint_id, phase)。顶点布局 = 采样 × (环数+1)，与 SweepBranches 一致；
+  // SplitMeshByBranch 逐枝**保持这个顺序**（同一枝的顶点连续且不重排），所以这里
+  // 可以按同一套步进直接写。关节下标取「覆盖该采样环的那一个」⇒ 一个环不会被切开。
+  // Pre-condition: branch_index < shape_.branches.size()。
+  void FillBranchWind(size_t branch_index, std::vector<jpov::Vec2f>* wind /*output*/) const {
+    CHECK_LT(branch_index, shape_.branches.size());
+    const jpov::vegetation::Branch& b = shape_.branches[branch_index];
+    const uint32_t stride = b.EffectiveRingCount() + 1;
+    wind->assign(b.samples.size() * stride, jpov::Vec2f{0.0f, 0.0f});
+    if (raw_joints_.joints.empty()) {
+      return;
+    }
+    const jpov::vegetation::BranchJoints& bj = raw_joints_.per_branch[branch_index];
+    const std::vector<int>& jok = raw_joints_.joint_of_kept[branch_index];
+    for (size_t s = 0; s < b.samples.size(); ++s) {
+      const int jid = jpov::vegetation::JointCoveringSample(
+          bj, jok, static_cast<uint32_t>(s));
+      const Vec3d& p = b.samples[s].position;
+      const float phase = static_cast<float>(
+          jpov::vegetation::SmoothPhase01(p.x, p.y, p.z, raw_phase_scale_));
+      for (uint32_t k = 0; k < stride; ++k) {
+        (*wind)[s * stride + k] = jpov::Vec2f{static_cast<float>(jid), phase};
+      }
+    }
+  }
+
+  // 一张卡的 (joint_id, phase)：挂到「最近的枝条采样点」，再用该环的覆盖关节。
+  // 与烘焙里叶卡的规则逐字一致 —— 卡片和它旁边那圈顶点同一条链，风里不会各转各的。
+  // Pre-condition: raw_joints_.joints 非空、shape_.branches 非空。
+  jpov::Vec2f CardWind(const LeafCard& card) const {
+    CHECK(!raw_joints_.joints.empty()) << "CardWind: 关节表未建";
+    CHECK(!shape_.branches.empty());
+    double best = 1e300;
+    size_t best_bi = 0;
+    uint32_t best_si = 0;
+    for (size_t bi = 0; bi < shape_.branches.size(); ++bi) {
+      const jpov::vegetation::Branch& b = shape_.branches[bi];
+      for (size_t si = 0; si < b.samples.size(); ++si) {
+        const Vec3d& p = b.samples[si].position;
+        const double dx = p.x - card.anchor.x;
+        const double dy = p.y - card.anchor.y;
+        const double dz = p.z - card.anchor.z;
+        const double d = dx * dx + dy * dy + dz * dz;
+        if (d < best) {
+          best = d;
+          best_bi = bi;
+          best_si = static_cast<uint32_t>(si);
+        }
+      }
+    }
+    const int jid = jpov::vegetation::JointCoveringSample(
+        raw_joints_.per_branch[best_bi], raw_joints_.joint_of_kept[best_bi], best_si);
+    const Vec3d& pv = shape_.branches[best_bi].samples[best_si].position;
+    const float phase = static_cast<float>(
+        jpov::vegetation::SmoothPhase01(pv.x, pv.y, pv.z, raw_phase_scale_));
+    return jpov::Vec2f{static_cast<float>(jid), phase};
+  }
+
   // 原材料态：shape/leaf/bark 现搭。纯 glb 查看模式不会调它。
   void BuildScene(const CliArgs& args) {
     has_shape_ = true;
@@ -557,8 +666,11 @@ class VegetationV2App : public JPOV {
       }
       scene_height_ = (ymax > ymin) ? (ymax - ymin) : 1.0f;
     }
+    // 原材料态的风链（joint/phase/level/soft）—— 与烘焙同一个构造器。
+    BuildRawWindJoints();
     branch_mesh_.resize(shape_.branches.size());
     branch_level_.resize(shape_.branches.size());
+    branch_mesh_base_.assign(shape_.branches.size(), jpov::MeshData());
 
     // 逐枝 mesh：便于逐枝上色 + 逐枝隐藏
     jpov::vegetation::SweepOptions sweep_opts;
@@ -587,7 +699,20 @@ class VegetationV2App : public JPOV {
                                           parts[i].tangents[v * 3 + 2]});
       }
       md.indices = parts[i].indices;
-      branch_mesh_[i] = RegisterMesh(std::move(md));
+      // 风：原材料态也吹（关节表见 BuildRawWindJoints）。逐枝顶点数与 shape 布局
+      // 不一致时 FillBranchWind 的 assign 会给出错的长度 → Validate 立刻炸，
+      // 比「风数据静默错位到别的枝」好得多。
+      if (!raw_joints_.joints.empty()) {
+        FillBranchWind(i, &md.wind_link);
+        CHECK_EQ(md.wind_link.size(), md.positions.size())
+            << "原材料态逐枝风数据与顶点数不一致（枝 " << i << "）";
+        md.wind_joints = raw_joints_.joints;
+        md.flags = static_cast<jpov::MeshVertexFlags>(
+            static_cast<uint8_t>(md.flags) |
+            static_cast<uint8_t>(jpov::MeshVertexFlags::kWind));
+      }
+      branch_mesh_[i] = RegisterMesh(md);
+      branch_mesh_base_[i] = std::move(md);
       branch_level_[i] = static_cast<int>(shape_.branches[i].level);
     }
 
@@ -597,16 +722,26 @@ class VegetationV2App : public JPOV {
 
     // 绿卡：每个 leaf type 一份盒子 mesh（同一 type 的绿卡 + 标签由同一个函数画）。
     debug_card_mesh_.assign(kMaxCardTypes, 0);
+    card_mesh_base_.assign(kMaxCardTypes, jpov::MeshData());
+    card_counts_.assign(kMaxCardTypes, std::vector<uint32_t>());
     card_box_mat_ = jpov::PBRMaterial::SolidColor({0.18f, 0.45f, 0.16f, 1.0f});
     card_box_mat_.double_sided = true;
     for (int t = 0; t < kMaxCardTypes; ++t) {
       std::vector<float> cpos;
       std::vector<float> cnrm;
       std::vector<uint32_t> cidx;
+      std::vector<jpov::Vec2f> cwind;   // 与 cpos 同步：每张卡一组（同卡同关节）
       for (const auto& card : shape_.cards) {
         if (static_cast<int>(card.type % kMaxCardTypes) != t) continue;
+        const size_t before = cpos.size() / 3;
         // 绿卡做得很薄（4mm）：与 8cm 的角标不会抢深度。
         AppendUvBox(shape_, card, 0.0, 1.0, 0.0, 1.0, 0.004, &cpos, &cnrm, &cidx);
+        if (!raw_joints_.joints.empty()) {
+          const jpov::Vec2f w = CardWind(card);
+          const size_t added = cpos.size() / 3 - before;
+          cwind.insert(cwind.end(), added, w);
+          card_counts_[t].push_back(static_cast<uint32_t>(added));
+        }
       }
       if (cpos.empty()) continue;
       jpov::MeshData md;
@@ -618,7 +753,15 @@ class VegetationV2App : public JPOV {
         md.normals.push_back(jpov::Vec3f{cnrm[v], cnrm[v + 1], cnrm[v + 2]});
       }
       md.indices = cidx;
-      debug_card_mesh_[t] = RegisterMesh(std::move(md));
+      if (!cwind.empty()) {
+        md.wind_link = std::move(cwind);
+        md.wind_joints = raw_joints_.joints;
+        md.flags = static_cast<jpov::MeshVertexFlags>(
+            static_cast<uint8_t>(md.flags) |
+            static_cast<uint8_t>(jpov::MeshVertexFlags::kWind));
+      }
+      debug_card_mesh_[t] = RegisterMesh(md);
+      card_mesh_base_[t] = std::move(md);
     }
 
     // 相机：按包围盒自动取景
@@ -737,20 +880,7 @@ class VegetationV2App : public JPOV {
       LOG(WARNING) << bake_msg_;
       return;
     }
-    jpov::vegetation::GlbBakeOptions o;
-    o.thick_spacing = bake_thick_spacing_;
-    o.thin_spacing = bake_thin_spacing_;
-    o.max_joints_per_branch = static_cast<int>(bake_max_joints_f_ + 0.5f);
-    o.phase_scale = bake_phase_scale_;
-    o.droop_scale = bake_droop_scale_;
-    o.bark_dir = bark_dir_;
-    o.leaf_png = leaf_path_;
-    o.leaf2_png = leaf2_path_;
-    o.leaf_black = bake_leaf_black_;
-    o.leaf_normal = bake_leaf_normal_;
-    o.normal_scale = bake_normal_scale_;
-    o.uv_v_scale = args_uv_vscale_;   // 与预览一致（0 = 自动按树皮 albedo 尺寸）
-
+    jpov::vegetation::GlbBakeOptions o = CurrentBakeOptions();
     const std::string path = BakeOutputPath();
     std::string err;
     jpov::vegetation::GlbBakeStats stats;
@@ -817,6 +947,76 @@ class VegetationV2App : public JPOV {
     }
   }
 
+  // 按「烘焙 glb」面板当前参数重建*原材料态*的风链，并刷新三套网格的风属性。
+  // 几何/材质都不动，只换 wind_link/wind_joints ⇒ UpdateMesh（Destroy+Create，
+  // flags 与注册时一致——见 MeshManager::UpdateMesh 的约束）就够。
+  // Pre-condition: has_shape_ 为 true（纯 glb 模式无原材料态可建）。
+  void RebuildRawWind() {
+    if (!has_shape_) {
+      LOG(WARNING) << "纯 glb 模式：没有原材料态的风链可建";
+      return;
+    }
+    BuildRawWindJoints();
+    if (raw_joints_.joints.empty()) {
+      LOG(WARNING) << "原材料态风链为空（shape 无枝条），不重建";
+      return;
+    }
+    for (size_t i = 0; i < branch_mesh_.size(); ++i) {
+      if (branch_mesh_[i] == 0 || branch_mesh_base_[i].wind_link.empty()) {
+        continue;
+      }
+      FillBranchWind(i, &branch_mesh_base_[i].wind_link);
+      branch_mesh_base_[i].wind_joints = raw_joints_.joints;
+      UpdateMesh(branch_mesh_[i], branch_mesh_base_[i]);
+    }
+    // 叶卡：每张 4 个顶点（与建场景时的布局约定一致）。
+    for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
+      if (leaf_mesh_[t] == 0 || leaf_mesh_base_[t].wind_link.empty()) {
+        continue;
+      }
+      const std::vector<LeafCard>& cards = leaf_cards_[t];
+      CHECK_EQ(leaf_mesh_base_[t].wind_link.size(), cards.size() * 4)
+          << "叶卡风数据长度与「4 顶点/卡」不一致（type " << t << "）";
+      for (size_t c = 0; c < cards.size(); ++c) {
+        const jpov::Vec2f w = CardWind(cards[c]);
+        for (int k = 0; k < 4; ++k) {
+          leaf_mesh_base_[t].wind_link[c * 4 + k] = w;
+        }
+      }
+      leaf_mesh_base_[t].wind_joints = raw_joints_.joints;
+      UpdateMesh(leaf_mesh_[t], leaf_mesh_base_[t]);
+    }
+    // 绿卡：每张卡的顶点数在建场景时已记下（盒子顶点数不由卡数据直接给出）。
+    for (size_t t = 0; t < debug_card_mesh_.size(); ++t) {
+      if (debug_card_mesh_[t] == 0 || card_mesh_base_[t].wind_link.empty()) {
+        continue;
+      }
+      size_t cursor = 0;   // 顶点游标
+      size_t card_i = 0;   // card_counts_[t] 的下标（卡序 = shape_.cards 的过滤顺序）
+      for (const LeafCard& card : shape_.cards) {
+        if (static_cast<size_t>(card.type % kMaxCardTypes) != t) {
+          continue;
+        }
+        if (card_i >= card_counts_[t].size()) {
+          LOG(ERROR) << "绿卡顶点数记录不足（type " << t << "），跳过重建";
+          break;
+        }
+        const uint32_t count = card_counts_[t][card_i++];
+        const jpov::Vec2f w = CardWind(card);
+        for (uint32_t k = 0; k < count && cursor + k < card_mesh_base_[t].wind_link.size();
+             ++k) {
+          card_mesh_base_[t].wind_link[cursor + k] = w;
+        }
+        cursor += count;
+      }
+      CHECK_EQ(cursor, card_mesh_base_[t].wind_link.size())
+          << "绿卡顶点游标与 wind_link 长度不一致（type " << t
+          << "）：卡顶点数记录与建场景时不同步";
+      card_mesh_base_[t].wind_joints = raw_joints_.joints;
+      UpdateMesh(debug_card_mesh_[t], card_mesh_base_[t]);
+    }
+  }
+
   void BackToRaw() {
     if (!has_shape_) {
       LOG(WARNING) << "纯 glb 模式：没有原材料态可回";
@@ -845,10 +1045,14 @@ class VegetationV2App : public JPOV {
     return w;
   }
 
-  void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
+  void DrawLeafDebugForType(size_t type_index,
+                            const std::optional<jpov::WindCommand>& wind,
+                            jpov::RenderCommandList* cmds) {
     if (type_index < debug_card_mesh_.size() && debug_card_mesh_[type_index] != 0) {
+      // 绿卡也要一起吹：树干在动、卡不动的话 debug 视图会变成一堆漂在空中的盒子。
       cmds->DrawObject3D(debug_card_mesh_[type_index], card_box_mat_, {0.0f, 0.0f, 0.0f},
-                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale=*/1.0f,
+                         /*highlight=*/false, /*picking_id=*/0, wind);
     }
     if (!show_labels_) return;
 
@@ -914,13 +1118,17 @@ class VegetationV2App : public JPOV {
   void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
                     const jpov::WindowInfo& winfo,
                     jpov::RenderCommandList* cmds) override {
-    // 面板待办（烘焙 / 回原材料态）：**在入队绘制命令之前**执行，避免释放本帧还在用的资源。
+    // 面板待办（烘焙 / 回原材料态 / 重建风链）：**在入队绘制命令之前**执行，
+    // 避免释放本帧还在用的资源。
     if (pending_ == Pending::kBake) {
       pending_ = Pending::kNone;
       BakeNow();
     } else if (pending_ == Pending::kBackToRaw) {
       pending_ = Pending::kNone;
       BackToRaw();
+    } else if (pending_ == Pending::kRebuildRawWind) {
+      pending_ = Pending::kNone;
+      RebuildRawWind();
     }
 
     // 风时间：**累加**而不是「帧号 × 缩放」——后者在拖动「时间缩放」滑条时会按比例
@@ -1004,18 +1212,26 @@ class VegetationV2App : public JPOV {
       cmds->DrawGltfObject(glb_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
                            /*scale=*/1.0f, /*highlight=*/false, /*picking_id=*/0, wind);
     }
+    // 原材料态的风：与 glb 态同一份 WindCommand。原材料态的关节表由
+    // BuildRawWindJoints 提前建好（空表 = 不吹，例如纯 glb 模式）。
+    std::optional<jpov::WindCommand> raw_wind;
+    if (mode_ == Mode::kRaw && wind_on_ && !raw_joints_.joints.empty()) {
+      raw_wind = MakeWind();
+    }
     for (size_t i = 0; mode_ == Mode::kRaw && i < branch_mesh_.size(); ++i) {
       if (branch_level_[i] > max_level_) {
         continue;
       }
       if (has_bark_ && show_bark_) {
         cmds->DrawObject3D(branch_mesh_[i], bark_mat_, {0.0f, 0.0f, 0.0f},
-                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                           {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale=*/1.0f,
+                           /*highlight=*/false, /*picking_id=*/0, raw_wind);
         continue;
       }
       const int lv = std::min(branch_level_[i], 5);
       cmds->DrawObject3D(branch_mesh_[i], level_mats_[lv], {0.0f, 0.0f, 0.0f},
-                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f});
+                         {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, /*scale=*/1.0f,
+                         /*highlight=*/false, /*picking_id=*/0, raw_wind);
     }
     const bool debug_cards = mode_ == Mode::kRaw && !(has_leaf_ && show_leaf_);
     // 一个 type 一个绘制单元：type 过滤对「贴图 / 绿卡 / 标签」同时生效，
@@ -1023,10 +1239,11 @@ class VegetationV2App : public JPOV {
     for (size_t t = 0; mode_ == Mode::kRaw && t < leaf_type_count_; ++t) {
       if (!show_all_card_types_ && t != type_filter_) continue;
       if (debug_cards) {
-        DrawLeafDebugForType(t, cmds);
+        DrawLeafDebugForType(t, raw_wind, cmds);
       } else if (t < leaf_mesh_.size() && leaf_mesh_[t] != 0) {
         cmds->DrawObject3D(leaf_mesh_[t], leaf_mat_[t], {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
-                           {0.0f, 0.0f, 1.0f});
+                           {0.0f, 0.0f, 1.0f}, /*scale=*/1.0f, /*highlight=*/false,
+                           /*picking_id=*/0, raw_wind);
       }
     }
     // 左上角相机 HUD。headless 且没配字体（gold test）时关掉：文字要 CJK 图集，
@@ -1053,20 +1270,24 @@ class VegetationV2App : public JPOV {
 
       // 一个面板 = 标题栏（可折叠）+ 展开时的 N 行；整列自底向上排。
       // draw_row(i, rect) 画第 i 行（24px 高、行距 32px）。
+      // width <= 0 ⇒ 用左列的默认宽度。窄列（风调试）要单独给宽度：它排在左右两列
+      // 之间的空隙里，用 colw 会压到邻居面板上。
       auto panel = [&](float x, float* y_top, const char* title, bool* open, int rows,
-                       const std::function<void(int, const jpov::UiRect&)>& draw_row) {
+                       const std::function<void(int, const jpov::UiRect&)>& draw_row,
+                       float width = -1.0f) {
+        const float pw = (width > 0.0f) ? width : colw;
         // 自底向上排：-y_top 是这一块的**底边**，标题栏在最上面、展开行在它下面。
         const float hdr = 24.0f;
         const float body_h = *open ? (rows * 32.0f) : 0.0f;
         const float top = *y_top - (hdr + body_h);
         // 半透明底板：面板压在场景上，浅色地面时白字会糊掉。
-        cmds->DrawFillRect({x - 8.0f, top - 6.0f}, {colw + 16.0f, hdr + body_h + 12.0f},
+        cmds->DrawFillRect({x - 8.0f, top - 6.0f}, {pw + 16.0f, hdr + body_h + 12.0f},
                            jpov::Color{0.0f, 0.0f, 0.0f, 0.55f},
                            jpov::Color{0.0f, 0.0f, 0.0f, 0.0f}, 0.0f, 6.0f);
-        ui_.AccordionHeader(title, open, {{x, top}, {colw, hdr}});
+        ui_.AccordionHeader(title, open, {{x, top}, {pw, hdr}});
         if (*open) {
           for (int i = 0; i < rows; ++i) {
-            draw_row(i, {{x, top + hdr + i * 32.0f}, {colw, 24.0f}});
+            draw_row(i, {{x, top + hdr + i * 32.0f}, {pw, 24.0f}});
           }
         }
         *y_top = top - 10.0f;
@@ -1120,9 +1341,18 @@ class VegetationV2App : public JPOV {
             ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, r, 0.0f, 3.0f, 2);
           }
         });
-      } else {
-        // 风调试（glb 展示态）：参考 v1 wind viewer，精简到 10 行、近似方形。
-        panel(xl, &yl, "风调试", &wind_panel_open_, 12,
+      }
+      {
+        // 风调试：**两个态都画**。原材料态的关节表在本地现建（BuildRawWindJoints），
+        // 参数取「烘焙 glb」面板当前值；改了那些参数后点最后一行「重建风链」刷新。
+        // 行数：glb 态 12 行，原材料态多一行「重建风链」。
+        //
+        // 位置：glb 态接着左列的「场景」往下排；原材料态左列已有「场景 + 叶卡」
+        // （合计 ~370px），再叠 13 行会顶出屏幕 ⇒ 原材料态把它排进左右两列之间的
+        // 空隙（窄列，宽度 0.26w），从同一高度单独往下排。
+        const float wind_x = raw ? (xl + colw + 12.0f) : xl;
+        float wind_y = h - 16.0f;
+        panel(wind_x, raw ? &wind_y : &yl, "风调试", &wind_panel_open_, raw ? 13 : 12,
               [&](int i, const jpov::UiRect& r) {
                 if (i == 0) {
                   ui_.Checkbox("启用风", &wind_on_, r);
@@ -1146,10 +1376,16 @@ class VegetationV2App : public JPOV {
                   ui_.SliderFloat("吹歪指数 n", &wind_blow_exp_, r, 1.0f, 4.0f, 1);
                 } else if (i == 10) {
                   ui_.SliderFloat("时间缩放", &wind_time_scale_, r, 0.0f, 2.0f, 2);
-                } else {
+                } else if (i == 11) {
                   ui_.Checkbox("暂停", &wind_paused_, r);
+                } else {
+                  // 只在原材料态出现（glb 态的关节表来自产物本身，无可重建）。
+                  if (ui_.Button("重建风链", r)) {
+                    pending_ = Pending::kRebuildRawWind;
+                  }
                 }
-              });
+              },
+              raw ? 0.26f * w : -1.0f);
       }
 
       // ── 右列：烘焙 glb ──

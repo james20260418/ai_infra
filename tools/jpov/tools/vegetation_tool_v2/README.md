@@ -7,8 +7,14 @@
 
 | 状态 | 在画什么 | 用途 |
 |---|---|---|
-| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡 quad） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐 |
+| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡 quad），**也带风** | 调拓扑/素材；叶卡可用 debug 绿卡看对齐；左列有「风调试」面板 |
 | **glb 展示态** | 刚烘焙出来的 `.glb`（树干 + 叶卡两个 primitive，带风链数据） | 看最终资产：树皮贴图、叶卡 alpha、**风**（左下「风调试」面板） |
+
+**两个态都能吹风**（原材料态 2026-10-26 起）：原原材料态的网格没有风数据（joint/phase/level/soft
+是**烘焙期**从 shape 拓扑造出来的），所以查看器在加载 shape 时就把**同一个**关节构造器
+（`bake/vegetation_glb_joints`）跑一遍，逐枝/叶卡/绿卡各写 `(joint_id, phase)`。
+参数取「烘焙 glb」面板当前值，改完点「风调试」面板最后一行的 **`重建风链`** 生效
+（glb 态没有这一行 —— 那一边的风链来自产物本身，要改就重新烘焙）。
 
 烘焙产物是一份**自洽 .glb**：几何 + 内嵌贴图（树皮 albedo/normal/ORM、叶卡 albedo/normal）
 + 逐顶点 `(joint_id, phase)`（glTF `TEXCOORD_1`）+ 关节表（`node.extras.jpov_wind_joints`，
@@ -285,7 +291,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `--capture <dir>` | 无窗口出图：`veg_v2_front / _three_quarter / _side.png`（1280×720） |
 | `--bake <out.glb>` | 烘焙一份 glb 后退出（headless；CI 的入口） |
 | `--glb <in.glb>` | 启动即进 glb 展示态（带风调试面板） |
-| `--no-wind` / `--wind-time <s>` | 关风 / 钉住风时间（A/B、可复现出图） |
+| `--no-wind` / `--wind-time <s>` | 关风 / 钉住风时间（A/B、可复现出图；**两个态都生效**） |
 | `--wind-amp <f>` / `--wind-turb <f>` | 覆盖 pivot 振幅 / 平动湍流幅度（A/B） |
 | `--wind-blow <f>` / `--wind-blow-exp <f>` | 覆盖**吹歪**比例 / 指数（0 = 关） |
 
@@ -335,6 +341,8 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
     改观感后重生成：`bazel run //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_generator`。
 - **烘焙/风**：`--bake` 后看日志（关节数 / 顶点数 / 叶卡到所属环的最大距离应 ≈ 1e-6 m）；
   再 `--glb <产物>` 用左下角面板调风，或 `--wind-time 0 / 1.2` 出两帧对比（同机位）。
+  原材料态也能这么 A/B（关节表在加载 shape 时就建好了，日志会打一行
+  `原材料态风链: N 关节 / M 枝`）。
   烘焙器不依赖 Blender：关节由 shape 的枝折线按弧长抽稀（粗枝 1.5m/细枝 0.5m、每枝 ≤8 个），
   逐顶点关节归属**按采样环精确给出**（树干按环下标 floor、叶卡按 anchor 的最近环），
   所以不存在 v1 那套 Voronoi 标签的跨链误判。
