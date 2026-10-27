@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #ifndef _WIN32
 #include <csignal>
@@ -125,6 +126,17 @@ public:
     void RunOnce(const jpov::InputSnapshot& input,
                  const jpov::WindowInfo& winfo,
                  const char* out_png_path);
+
+    // ---- 水皮（water skin）实验期直连口子 ----
+    //
+    // 有值 ⇒ 本帧在 froxel（点状雾）之后画一次水面 pass：一块水平正方形 quad
+    // + 固定管线 alpha 混合（透射 = out = water·α + dst·(1−α)）；nullopt ⇒ 不画。
+    //
+    // ⚠️ 这**不是**正式接口：水皮还没收进 RenderCommandList（见
+    //    src/water/water_skin_renderer.h）。观感定下来后应改成 `cmds->DrawWater(...)`，
+    //    并把这个方法删掉 —— 否则"水皮参数从哪儿来"会有两处来源。
+    // Pre-condition: Init() 已调用；params.half_extent_m > 0（非法值在渲染时 CHECK 崩）。
+    void SetWaterSkin(std::optional<jpov::WaterSkinParams> params);
 
     // 测量文本以指定字号的绘制宽度（像素），语义与 DrawText2D 的布局推进
     // 完全一致（pen 水平终点 = 光标 X）。委托 Renderer/FontRenderer，用真实

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 #include "tools/jpov/src/particles/particle_renderer.h"
 #include "tools/jpov/src/strip/strip_renderer.h"
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
+#include "tools/jpov/src/water/water_skin_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
@@ -77,6 +79,14 @@ struct Renderer {
         volume_fire_renderer_.SetDebugDump(dir);
     }
     MeshManager& GetMeshManager() { return mesh_mgr_; }
+
+    // 水皮（实验期开关）：有值就本帧在 froxel 之后画一次水面 pass（水平 quad + alpha 混合）。
+    //
+    // ⚠️ 这**不是**正式接口：水皮还没收进 RenderCommandList（见 water_skin_renderer.h）。
+    //    demo 每帧直接调它，想关就把 nullopt 传进来。观感定下来之后应改成
+    //    `cmds->DrawWater(...)`，并把这个口子删掉（否则"参数从哪儿来"会有两处来源）。
+    // Pre-condition: Init() 已调用；params.half_extent_m > 0（非法值在 Draw 时 CHECK 崩）。
+    void SetWaterSkin(std::optional<WaterSkinParams> params) { water_skin_ = params; }
 
     // 上一次拾取查询的结果（方法甲：渲染时填入 last_pick_，下帧读取）。
     const PickResult& last_pick() const { return last_pick_; }
@@ -349,6 +359,9 @@ private:
     VolumeFireRenderer volume_fire_renderer_;
     // 半透明条带（effect pass，与粒子/体积火平级；体积火之后、远景雾之前）。
     StripRenderer strip_renderer_;
+    // 水皮（独立 pass，froxel 之后；实验期直连参数，见 SetWaterSkin）。
+    WaterSkinRenderer water_skin_renderer_;
+    std::optional<WaterSkinParams> water_skin_;
     VolumeManager volume_mgr_;
     // SMAA 后处理抗锯齿子渲染器（tone map 之后、2D 之前的最后一站）。见 src/smaa/。
     SmaaRenderer smaa_renderer_;

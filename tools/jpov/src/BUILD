@@ -272,6 +272,33 @@ cc_library(
     linkstatic = 1,
 )
 
+# WaterSkinRenderer — 水皮（froxel 之后的一次独立 pass）：水平 quad + 固定管线 alpha 混合。
+# 不持有自己的 FBO：就地混合到调用方当前绑定的 3D HDR FBO。
+# 实验期直连 Renderer（不进 RenderCommandList，见 water_skin_renderer.h）。
+cc_library(
+    name = "water_skin_renderer",
+    srcs = ["water/water_skin_renderer.cc"],
+    hdrs = [
+        "water/water_skin_renderer.h",
+        # 水皮的着色器（与 renderer 平级，前缀 water_skin_）
+        "water/water_skin_shader.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        "//tools/jpov/interface:camera",
+        "//tools/jpov/interface:pbr_material",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # GltfSaver — CPU 资产（MeshData + 材质 + 可选骨架）→ 自洽 .glb（GL-free）
 cc_library(
     name = "gltf_saver",
@@ -313,6 +340,7 @@ cc_library(
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
         "//tools/jpov/src/strip:strip_renderer",
+        ":water_skin_renderer",
         "//tools/jpov/src/smaa:smaa_renderer",
         ":texture_manager",
         "//tools/jpov/src:volume_manager",

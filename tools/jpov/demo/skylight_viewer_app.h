@@ -104,6 +104,9 @@ public:
     // 水面开关（headless A/B 用：false = 不画水皮，水下道具就变成"没水"的对照）；
     void SetShowWater(bool show) { show_water_ = show; }
 
+    // 水面用 strip 平铺版还是新水皮 pass（对照用）。默认 false = 走新 pass。
+    void SetWaterUseStrip(bool on) { water_use_strip_ = on; }
+
     // ── 水面场景的透射验证道具（布置常量的单一出处：skylight_water_props.h）──
     // 塔形：水下大 box → 小 box → 桌子 → 桌上的人（布局理由见那个头文件）。
     uint32_t water_big_box_mesh_ = 0;      // 6 × 4 × 6（全在水下）
@@ -228,12 +231,31 @@ public:
             cmds->elevation_fog = ef;
         }
 
+        // ── 水皮（新 pass）──
+        // 直连 Renderer（暂不进 RenderCommandList）：有值 ⇒ 本帧在 froxel 之后画一次水面。
+        // 参数与 strip 版**同源**（同一个头文件的水体色/菲涅耳），两个实现的观感可直接对照。
+        // 只有「水面场景 + 画水 + 不用 strip 版」才开；其余情况显式关。
+        if (show_scene_ && water_scene && show_water_ && !water_use_strip_) {
+            const jpov::Color body = WaterGlassBodyColor();
+            const jpov::StripFresnel fr = WaterGlassFresnel();
+            jpov::WaterSkinParams wp;
+            wp.level_y       = kWaterPlaneY;
+            wp.half_extent_m = 0.5f * WaterQuadSideM();
+            wp.body_color    = body;
+            wp.body_alpha    = body.a;
+            wp.fresnel_f0    = fr.f0;
+            wp.fresnel_power = fr.power;
+            wp.rim_color     = {fr.rim_color.x(), fr.rim_color.y(), fr.rim_color.z(), 1.0f};
+            SetWaterSkin(wp);
+        } else {
+            SetWaterSkin(std::nullopt);
+        }
+
         // 场景：模型场景（灰色地面 + 三方块 + 桌子/橡树 + 蓝人）或水面场景（10 km² 玻璃 quad）。
         // show_scene_=false 时两个场景都跳过（headless 拍纯天空用）。
         if (show_scene_ && water_scene) {
             DrawWaterScene(cmds);
-        } else if (show_scene_) {
-            cmds->DrawObject3D(ground_mesh_, mat_ground_,
+        } else if (show_scene_) {            cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
                                /*front*/  {0.0f, 0.0f, 1.0f});
@@ -289,8 +311,9 @@ private:
             cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
                                        person_material_, water_person_instances_);
         }
-        if (show_water_) {
-            // 整块水皮 = **一次** draw call（16 条 Strip32 平铺）。
+        if (show_water_ && water_use_strip_) {
+            // 对照实现：整块水皮 = **一次** strip draw call（16 条 Strip32 平铺）。
+            // 默认不走——水面由 froxel 之后的水皮 pass 直画（见 OneIteration）。
             cmds->DrawStrip32Batch(MakeWaterQuadBatch());
         }
     }
@@ -345,10 +368,13 @@ private:
             scene_ = static_cast<SceneKind>(scene_index);
         }
 
-        // 水面场景：**本阶段只有下拉 + 一行提示**，天光/雾/环境镜面那些控件全部不画。
+        // 水面场景：**本阶段只有下拉 + 一个对照开关 + 一行提示**，天光/雾/环境镜面那些控件全部不画。
         if (water_scene) {
-            ui_.Text("水面 = strip 平铺 10 km² 玻璃 quad  右键拖动=绕行 滚轮=推拉",
-                     jpov::UiRect{{kColX[0], 16.0f + kRowH + kSpacing},
+            ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
+                         jpov::UiRect{{kColX[0], 16.0f + kRowH + kSpacing},
+                                      {kFullWidth, kRowH}});
+            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉",
+                     jpov::UiRect{{kColX[0], 16.0f + 2.0f * (kRowH + kSpacing)},
                                   {kFullWidth, kRowH}});
             return;
         }
@@ -408,6 +434,7 @@ private:
     bool show_scene_ = true;
     SceneKind scene_ = SceneKind::kModel;   // 默认模型场景（原行为）
     bool show_water_ = true;                // 水面场景是否画水皮（headless A/B 用）
+    bool water_use_strip_ = false;          // 水面用 strip 平铺版（对照）；false = 新水皮 pass
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）

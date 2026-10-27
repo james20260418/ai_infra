@@ -276,10 +276,12 @@ int RunCaptureWater(const std::string& out_dir) {
         double phi;
         double R;
         bool water_scene = true;   // true = 水面场景（含道具塔）
-        bool water_skin = true;    // 只在水面场景有意义：是否画水皮
+        bool water_skin = true;    // 只在水面场景有意义：是否画水面
+        bool use_strip = false;    // true = strip 平铺版（对照）；false = 新水皮 pass
     };
     const Shot shots[] = {
-        {"props_eye", 0.30, 12.0},                                     // 眼高俯视
+        {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
+        {"props_eye_strip", 0.30, 12.0, true, true, /*use_strip=*/true},// 同机位 strip 版
         {"props_eye_nowater", 0.30, 12.0, true, /*water_skin=*/false},
         {"props_top", 0.70, 10.0},                                     // 陡俯视（正对水下）
         {"props_top_nowater", 0.70, 10.0, true, /*water_skin=*/false},
@@ -292,6 +294,7 @@ int RunCaptureWater(const std::string& out_dir) {
         app.SetScene(s.water_scene ? jpov_skylight::SkylightApp::SceneKind::kWater
                                    : jpov_skylight::SkylightApp::SceneKind::kModel);
         app.SetShowWater(s.water_skin);
+        app.SetWaterUseStrip(s.use_strip);
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
         app.view_.theta = 3.14159265358979323846 / 4.0;
@@ -299,6 +302,7 @@ int RunCaptureWater(const std::string& out_dir) {
         shoot(s.name);
     }
     app.SetShowWater(true);
+    app.SetWaterUseStrip(false);
 
     // 面板形态（交互窗口的真实观感）：水面场景只应剩「场景」下拉 + 一行提示，
     // 模型场景仍是原来的满屏滑条 —— 两张对照图就是这条需求的验收工件。

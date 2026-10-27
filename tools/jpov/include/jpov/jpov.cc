@@ -321,6 +321,12 @@ float JPOV::MeasureTextWidth(const std::string& alias, const std::string& text,
     return renderer_->MeasureTextWidth(alias, text, font_size);
 }
 
+void JPOV::SetWaterSkin(std::optional<jpov::WaterSkinParams> params) {
+    CHECK(initialized_) << "JPOV not initialized. Call Init() first.";
+    CHECK(renderer_ != nullptr);
+    renderer_->SetWaterSkin(params);
+}
+
 // ========== 核心渲染步骤 ==========
 
 void JPOV::RunOnceInternal(int64_t frame_count,

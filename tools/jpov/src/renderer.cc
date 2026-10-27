@@ -605,6 +605,7 @@ Renderer::~Renderer() {
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
+    water_skin_renderer_.Finalize();
     smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -1324,6 +1325,7 @@ void Renderer::Init(
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
+    water_skin_renderer_.Init();
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
@@ -1890,6 +1892,29 @@ void Renderer::Render(const RenderCommandList& cmds,
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
                                                GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_ff);
+            }
+
+            // ── 水皮（water skin）—— froxel（点状雾）之后的**一次独立 pass**：
+            //    画一块水平正方形 quad（默认 10 km²），与水之前的帧缓冲颜色做
+            //    **简单 alpha 混合**（out = water·α + dst·(1−α)）= 本版的水面透射。
+            //    与 fog 两条 pass 同一写法（就地合成，不持有自己的 FBO）：只写颜色
+            //    附件 0，绘制期间摘下附件 1（场景深度），避免采样↔写入的反馈环。
+            //    ⚠️ 实验期：开关/参数直连 Renderer（SetWaterSkin），不读 cmds。
+            if (water_skin_.has_value()) {
+                CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR/MRT 场景深度）";
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                const GLenum ws_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
+                glDrawBuffers(1, ws_draw_buf);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, 0, 0);
+                water_skin_renderer_.Draw(*water_skin_, cam, mvp_, hdr_scene_depth_tex,
+                                          fbo_3d_w, fbo_3d_h, shader_mgr_);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                       GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
+                const GLenum mrt_bufs_ws[2] = {GL_COLOR_ATTACHMENT0,
+                                               GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt_bufs_ws);
             }
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。
