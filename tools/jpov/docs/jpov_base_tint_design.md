@@ -28,7 +28,7 @@ uniform 数，**不需要改顶点布局**。
 
 - 只乘 **baseColor**（贴图或常值），不碰 metallic / roughness / normal / AO / emissive。
 - `enabled == false` ⇒ 片元着色器**整段跳过**（不是乘白），供 A/B 对照；引擎默认 false（零成本），
-  两个工具默认 true（颜色全白 = 恒等，改色才可见）。
+  两个工具默认 true 且默认 **Tint 1 = 红 / Tint 2 = 绿**（加载带 tint 的资产立刻能看出分区；两通道都可改色）。
 - 逐顶点 id 用 **flat** 读 ⇒ 一个三角形整体一个色；画笔在三角形边界上左右不一致时，边界由
   provoking vertex 决定（MVP 接受；工具侧只做逐顶点赋值）。
 

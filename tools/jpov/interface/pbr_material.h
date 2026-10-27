@@ -51,10 +51,11 @@ inline constexpr int kNumBaseTintColors = 2;
 // base tint 调色板（**运行期参数，不是资产数据**）。
 //
 // enabled == false ⇒ 片元着色器**完全不做这次乘法**（开关保护，A/B 用）。
-// enabled == true 且颜色全白（默认）⇒ 乘法恒等，观感与不开完全一致。
+// enabled == true 且颜色全白 ⇒ 乘法恒等，观感与不开完全一致。
 //
-// 默认 `enabled = false`：引擎默认零额外成本、也不改变任何既有画面的语义；
-// 需要该功能的工具（model viewer / clothing tool）显式把它打开。
+// 默认 `enabled = false`、颜色全白：引擎默认零额外成本、也不改变任何既有画面的语义；
+// 需要该功能的工具（model viewer / clothing tool）显式打开，并把默认色设成红/绿
+// （加载/刷完立刻能看出两个分区，同时两个通道都可随时改）。
 struct BaseTint {
     bool enabled = false;
     // 索引 i 对应顶点 tint id = i + 1。默认白 = 乘性恒等。

@@ -216,7 +216,9 @@ public:
     // 三个按钮之一（Tint 1 / Tint 2 / 清除）一键刷到这些顶点上（0 = 不换色）。
     // 不再有独立的 tint 涂抹模式（避免多一个画笔态/圆环，2026-10-27 Danis）。
     // 染白不在这里做（建模时涂白更自然）——本工具只写 id，引擎做一次乘法。
-    jpov::BaseTint tint_ui_{true};   // 调色板（白 = 恒等；默认打开，改色才看得出）
+    // 调色板（默认打开；默认红/绿 = 一刷就能看出分区，两个通道都可改色）
+    jpov::BaseTint tint_ui_{true, {{1.0f, 0.0f, 0.0f, 1.0f},
+                                   {0.0f, 1.0f, 0.0f, 1.0f}}};
     bool show_tint_field_ = false;   // 用 2D 像素显示各顶点 id（A/B 通道色）
     std::string tint_msg_;           // 面板状态提示
 

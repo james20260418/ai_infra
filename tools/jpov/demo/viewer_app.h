@@ -65,8 +65,9 @@ public:
     float model_scale_ = 1.0f;       // 模型整体缩放 [0.1,20]
 
     // 顶点 base tint 的调色板（**运行期**参数；glb 里只存逐顶点 id）。
-    // 默认打开：颜色全白 ⇒ 乘法恒等，看不出任何变化；改颜色后才着色。
-    jpov::BaseTint tint_ui_{true};
+    // 默认打开、默认红/绿：加载带 tint 的 glb 立刻能看出分区；两个通道都可随时改色。
+    jpov::BaseTint tint_ui_{true, {{1.0f, 0.0f, 0.0f, 1.0f},
+                                   {0.0f, 1.0f, 0.0f, 1.0f}}};
 
     // 装配交互程序（可选）：注入真实字体文本测量回调（供 UI 内部用）。
     // 仅在 main 建 app 后、Init() 后调用一次；拍摄 headless 模式同样需要，
