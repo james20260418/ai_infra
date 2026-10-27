@@ -122,6 +122,8 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
     CHECK_GT(asset_h, 1.0e-6f) << "蓝人资产 Y 向高度≈0: " << kMaleModelPath;
     const float scale = jpov_skylight::kPersonTargetHeight / asset_h;
     const float min_y = obj.bounds_min[1];
+    app.person_scale_ = scale;
+    app.person_asset_min_y_ = min_y;
 
     app.person_mesh_     = obj.primitives[0].mesh_id;
     app.person_material_ = obj.primitives[0].material;
@@ -163,6 +165,60 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
               << " asset_h=" << asset_h << " scale=" << scale;
 }
 
+// 水面场景的“透射验证”道具：水下大 box → 小 box → 桌子 → 桌上的人。
+// 布局与材质全在 skylight_water_props.h（单一出处）；这里只负责注册 mesh / 加载 glb。
+void InstallWaterProps(jpov_skylight::SkylightApp& app) {
+    app.water_big_box_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
+        /*front_half_width=*/jpov_skylight::kWaterBigBoxHalfXZ,
+        /*up_half_width=*/jpov_skylight::kWaterBigBoxHalfY,
+        /*left_half_width=*/jpov_skylight::kWaterBigBoxHalfXZ));
+    app.water_small_box_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
+        /*front_half_width=*/jpov_skylight::kWaterSmallBoxHalfXZ,
+        /*up_half_width=*/jpov_skylight::kWaterSmallBoxHalfY,
+        /*left_half_width=*/jpov_skylight::kWaterSmallBoxHalfXZ));
+    app.water_big_box_mat_   = jpov_skylight::WaterBigBoxMaterial();
+    app.water_small_box_mat_ = jpov_skylight::WaterSmallBoxMaterial();
+
+    // 桌子：**第二次加载同一份 glb**。不让它复用模型场景那一份 —— glTF 资源按
+    // “每次 LoadGltf 独占”约定（interface/gltf_object.h），共享就得讨论释放权归谁。
+    // 代价只是一张桌子的小网格，换掉一条隐式所有权。
+    jpov::GltfObject table = app.LoadGltf(kTableModelPath);
+    CHECK(!table.empty()) << "LoadGltf failed: " << kTableModelPath;
+    float scale = 1.0f;
+    float min_y = 0.0f;
+    if (table.bounds_valid) {
+        const float h = table.bounds_max[1] - table.bounds_min[1];
+        if (h > 1.0e-6f) {
+            scale = jpov_skylight::kWaterTableHeight / h;
+        }
+        min_y = table.bounds_min[1];
+    }
+    // 桌脚（资产局部 min.y）对齐小 box 顶面：center.y = 顶面 − scale·min.y。
+    app.water_table_center_ = {0.0f, jpov_skylight::kWaterSmallBoxTopY - scale * min_y, 0.0f};
+    app.water_table_scale_  = scale;
+    app.water_table_       = std::move(table);
+}
+
+// 水面场景：一个人站在桌面上（脚 = 桌面高）。复用 InstallPerson 装配好的
+// 同一份蒙皮 mesh / 骨架，只多一组摆放 —— 不多加载一次资产。
+void InstallWaterPerson(jpov_skylight::SkylightApp& app) {
+    CHECK_NE(app.person_mesh_, 0u) << "水面场景的站台人需要先 InstallPerson";
+    CHECK_NE(app.person_skeleton_id_, 0u) << "水面场景的站台人需要先 InstallPerson";
+    jpov::SkinnedInstanceState inst;
+    inst.transform.center = {0.0f,
+                             jpov_skylight::kWaterPersonFeetY
+                                 - app.person_scale_ * app.person_asset_min_y_,
+                             0.0f};
+    inst.transform.up    = {0.0f, 1.0f, 0.0f};
+    inst.transform.front = {0.0f, 0.0f, 1.0f};
+    inst.transform.scale = app.person_scale_;
+    inst.pose_a = 0;   // 唯一一帧 = identity pose（T-pose）
+    inst.pose_b = 0;
+    inst.ratio  = 0.0f;
+    app.water_person_instances_.clear();
+    app.water_person_instances_.push_back(inst);
+}
+
 // headless 拍摄：水面场景（strip 平铺的 10 km² 玻璃 quad）。
 // 用法：jpov_skylight_viewer --capture-water <out_dir>
 //
@@ -189,6 +245,8 @@ int RunCaptureWater(const std::string& out_dir) {
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
+    InstallWaterProps(app);    // 水下大 box / 小 box + 桌子
+    InstallWaterPerson(app);   // 桌上的人
     app.SetScene(jpov_skylight::SkylightApp::SceneKind::kWater);
 
     jpov::WindowInfo winfo;
@@ -210,29 +268,37 @@ int RunCaptureWater(const std::string& out_dir) {
 
     // 机位表：phi 是仰角（弧度）、R 是到原点的距离。注意 headless 直接赋值
     // ⇒ **不受 ViewConfig::kRMax(300 m) 限制**（滚轮才会 clamp）。
+    //
+    // 每个机位都带一对 A/B（开 / 关水皮）：水下两件 box 在两张图里的差别
+    // **就是透射本身的作用** —— 关水前后水下部分一模一样就意味着水皮没盖上去。
     struct Shot {
         const char* name;
         double phi;
         double R;
-        bool water = true;
+        bool water_scene = true;   // true = 水面场景（含道具塔）
+        bool water_skin = true;    // 只在水面场景有意义：是否画水皮
     };
     const Shot shots[] = {
-        {"water_eye_level", 0.06, 25.0},
-        {"water_grazing", 0.02, 25.0},
-        {"water_mid_air", 0.10, 250.0},
-        {"water_high", 0.62, 2600.0},
+        {"props_eye", 0.30, 12.0},                                     // 眼高俯视
+        {"props_eye_nowater", 0.30, 12.0, true, /*water_skin=*/false},
+        {"props_top", 0.70, 10.0},                                     // 陡俯视（正对水下）
+        {"props_top_nowater", 0.70, 10.0, true, /*water_skin=*/false},
+        {"props_grazing", 0.10, 14.0},                                 // 掠射（水线切在桌腿上）
+        {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
-        {"model_scene", 0.25, 9.5, /*water=*/false},
+        {"model_scene", 0.25, 9.5, /*water_scene=*/false},
     };
     for (const Shot& s : shots) {
-        app.SetScene(s.water ? jpov_skylight::SkylightApp::SceneKind::kWater
-                             : jpov_skylight::SkylightApp::SceneKind::kModel);
+        app.SetScene(s.water_scene ? jpov_skylight::SkylightApp::SceneKind::kWater
+                                   : jpov_skylight::SkylightApp::SceneKind::kModel);
+        app.SetShowWater(s.water_skin);
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
         app.view_.theta = 3.14159265358979323846 / 4.0;
         app.view_.R     = s.R;
         shoot(s.name);
     }
+    app.SetShowWater(true);
 
     // 面板形态（交互窗口的真实观感）：水面场景只应剩「场景」下拉 + 一行提示，
     // 模型场景仍是原来的满屏滑条 —— 两张对照图就是这条需求的验收工件。
@@ -240,9 +306,9 @@ int RunCaptureWater(const std::string& out_dir) {
     app.InstallTextMeasure();
     app.SetScene(jpov_skylight::SkylightApp::SceneKind::kWater);
     app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.06;
+    app.view_.phi   = 0.30;
     app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 25.0;
+    app.view_.R     = 12.0;
     shoot("water_ui");
     app.SetScene(jpov_skylight::SkylightApp::SceneKind::kModel);
     app.view_ = jpov_viewer::DefaultView();
@@ -579,6 +645,8 @@ int main(int argc, char** argv) {
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
+    InstallWaterProps(app);
+    InstallWaterPerson(app);
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();

@@ -187,11 +187,23 @@ cc_test(
 )
 
 cc_library(
+    name = "skylight_water_props",
+    hdrs = ["demo/skylight_water_props.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov:skylight_water_quad",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_library(
     name = "skylight_viewer_app",
     hdrs = ["demo/skylight_viewer_app.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_water_props",
         "//tools/jpov:skylight_water_quad",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",

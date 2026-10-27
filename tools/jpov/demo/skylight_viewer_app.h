@@ -39,6 +39,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/skylight_scene.h"
+#include "tools/jpov/demo/skylight_water_props.h"
 #include "tools/jpov/demo/skylight_water_quad.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
@@ -75,6 +76,10 @@ public:
     jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
     jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
     std::vector<jpov::SkinnedInstanceState> person_instances_;
+    // 蓝人的归一结果（装配时由主程序填入）：水面场景要把"同一个人"另摆到桌面上，
+    // 复用同一份 mesh/骨架/身高归一，避免两处各算一套 scale 而分叉。
+    float person_scale_ = 1.0f;
+    float person_asset_min_y_ = 0.0f;   // 资产局部包围盒 min.y（脚底对齐用）
 
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
@@ -95,6 +100,22 @@ public:
     // ── 场景切换（面板下拉；两个场景几何互斥）──
     enum class SceneKind { kModel = 0, kWater = 1 };
     void SetScene(SceneKind kind) { scene_ = kind; }
+
+    // 水面开关（headless A/B 用：false = 不画水皮，水下道具就变成"没水"的对照）；
+    void SetShowWater(bool show) { show_water_ = show; }
+
+    // ── 水面场景的透射验证道具（布置常量的单一出处：skylight_water_props.h）──
+    // 塔形：水下大 box → 小 box → 桌子 → 桌上的人（布局理由见那个头文件）。
+    uint32_t water_big_box_mesh_ = 0;      // 6 × 4 × 6（全在水下）
+    uint32_t water_small_box_mesh_ = 0;    // 2.4 × 0.8 × 2.4（全在水下）
+    jpov::PBRMaterial water_big_box_mat_;
+    jpov::PBRMaterial water_small_box_mat_;
+    // 水面场景的桌子：**另一份 GltfObject**（glTF 资源按加载独占，不与模型场景共享）。
+    jpov::GltfObject water_table_;
+    jpov::Vec3f water_table_center_{0.0f, 0.0f, 0.0f};
+    float water_table_scale_ = 1.0f;
+    // 桌上的人（与模型场景同一份蒙皮 mesh/骨架，这里只有 1 个实例）。
+    std::vector<jpov::SkinnedInstanceState> water_person_instances_;
 
     // ── 视角：沿用 ViewConfig（y-up 球面角 + 右键拖拽/滚轮缩放）──
     jpov_viewer::ViewConfig view_;
@@ -210,8 +231,7 @@ public:
         // 场景：模型场景（灰色地面 + 三方块 + 桌子/橡树 + 蓝人）或水面场景（10 km² 玻璃 quad）。
         // show_scene_=false 时两个场景都跳过（headless 拍纯天空用）。
         if (show_scene_ && water_scene) {
-            // 整块水面 = **一次** draw call（16 条 Strip32 平铺）。
-            cmds->DrawStrip32Batch(MakeWaterQuadBatch());
+            DrawWaterScene(cmds);
         } else if (show_scene_) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
@@ -244,6 +264,37 @@ public:
     }
 
 private:
+    // 水面场景：水下大 box + 小 box + 桌子 + 桌上的人，最后是水皮本身（strip 平铺的 10 km² quad）。
+    //
+    // 为什么水皮**最后**画：水皮是半透明 pass（覆盖集），它要盖在已经画好的不透明几何上；
+    // 条带 pass 本来就在不透明之后，这里放在最后只是让代码读起来与物理顺序一致。
+    void DrawWaterScene(jpov::RenderCommandList* cmds) {
+        // 水下两件 box（都完全在水面以下，验收：隔着水皮能同时看见两件、且褪色一致）。
+        cmds->DrawObject3D(water_big_box_mesh_, water_big_box_mat_,
+                           /*center*/ WaterBigBoxCenter(),
+                           /*up*/     {0.0f, 1.0f, 0.0f},
+                           /*front*/  {0.0f, 0.0f, 1.0f});
+        cmds->DrawObject3D(water_small_box_mesh_, water_small_box_mat_,
+                           /*center*/ WaterSmallBoxCenter(),
+                           /*up*/     {0.0f, 1.0f, 0.0f},
+                           /*front*/  {0.0f, 0.0f, 1.0f});
+        // 桌子（与小 box 顶面对齐；桌腿跨过水线）。
+        if (!water_table_.empty()) {
+            cmds->DrawGltfObject(water_table_, water_table_center_,
+                                 /*up*/ {0.0f, 1.0f, 0.0f}, /*front*/ {0.0f, 0.0f, 1.0f},
+                                 water_table_scale_);
+        }
+        // 桌上的人（脚踩桌面）。
+        if (person_mesh_ != 0 && !water_person_instances_.empty()) {
+            cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                       person_material_, water_person_instances_);
+        }
+        if (show_water_) {
+            // 整块水皮 = **一次** draw call（16 条 Strip32 平铺）。
+            cmds->DrawStrip32Batch(MakeWaterQuadBatch());
+        }
+    }
+
     static float AppTextWidth(const char* text, float font_size,
                               const char* /*font_alias*/, void* userdata) {
         SkylightApp* app = static_cast<SkylightApp*>(userdata);
@@ -356,6 +407,7 @@ private:
     bool show_panel_ = true;
     bool show_scene_ = true;
     SceneKind scene_ = SceneKind::kModel;   // 默认模型场景（原行为）
+    bool show_water_ = true;                // 水面场景是否画水皮（headless A/B 用）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
