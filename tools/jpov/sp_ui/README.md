@@ -114,6 +114,23 @@ ui.MultiPlate(box, skin);
 
 ---
 
+## 单帧仿真 / 多帧回放
+
+`OneIteration` 收的是**纯数据**，所以可以完全伪造：
+
+```cpp
+jpov::InputSnapshot in{};               // 纯 POD，可直接构造
+in.mouse_x = 114; in.mouse_y = 433;
+in.left.raw = -2;                       // Hold（-1=Drag / 0=None / 1..8=Click 次数）
+app.RunOnce(/*frame_count=*/3, in, winfo, "f03.png");   // 帧号原样进 OneIteration
+```
+
+- 多帧 = 逐帧换快照 + 逐张 `RunOnce`；要视频再喂给 ffmpeg。
+- ⚠️ `RunOnce` **不走窗口事件循环** ⇒ `FlushMouseButton` 不会执行，`Click/Hold/Drag`
+  的 `raw` 编码要自己写（见 `interface/input_snapshot.h`）。点按钮 = 先 Hold 再 Click，
+  且 Click 要填 `left_clicks[0]` 的位置。
+- `jpov_sp_ui_demo --script` 就是这套东西的现成样板（悬停→按下→松开→移开）。
+
 ## 我该怎么写自己的面板
 
 1. **状态放结构体，不放 UI**。每个面板一个 `struct`，控件写回它。
@@ -195,7 +212,7 @@ bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY /
 
 | 目标 | 层次 | 钉住什么 |
 |---|---|---|
-| `//tools/jpov/test/sp_ui:sp_ui_gold_test` | 纯 CPU（无 GL） | 文字落在自己控件上（scale 1.0/1.5）、缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入 |
+| `//tools/jpov/test/sp_ui:sp_ui_gold_test` | 纯 CPU（无 GL） | 文字落在自己控件上（scale 1.0/1.5）、缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入、**跨帧交互状态机**（点击释放位置 / 下拉弹层独占 / 一次 drag 语义） |
 | `//tools/jpov/test/plate2d:plate2d_gold_test` | **GPU 像素**（llvmpipe 即可，无需 DISPLAY） | 图集**行序**（帧 0 在左上角）、`fps=0` 的图集静止在第 0 格且整块均匀、两层材质各自采样、边框带取自己的图集 |
 
 两个 GPU 侧的坑（行序倒置 / fps=0 整张显示）CPU 测试一律看不见，都是真出过的 bug，

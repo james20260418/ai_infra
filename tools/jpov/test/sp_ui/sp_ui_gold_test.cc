@@ -432,6 +432,123 @@ void CheckDegenerateInputs() {
     LOG(INFO) << "[PASS] 退化输入：零/负尺寸与越界被剔除，圆角被 clamp";
 }
 
+// ---- 9. 交互状态机（跨帧）----
+//
+// sp_ui 是从 ui.cc 复制来的：控件动线一致，但**这半边一条测试都没有**。
+// 这里用伪造快照跑三件最容易在复制/重构中悄悄失效的事：
+//   a) 点击语义：释放位置在框内才算点击
+//   b) Combo 弹层独占：弹层覆盖区域里的点击不能穿透到下面的控件
+//      （sp_ui 的 PushPopupPlate 改成设备坐标 + 两层材质，最容易在这里出错）
+//   c) 一次 drag 语义：按下发生在滑条内之后，鼠标飘出竖直范围仍继续写值
+
+// 一个最小场景：Combo 在上、Button 故意放在「弹层展开后会盖住」的位置。
+struct MiniScene {
+    SpUi ui;
+    SpTheme theme = MakeTheme();
+    RenderCommandList cmds;
+    int combo_sel = 0;
+    float slider = 0.0f;
+    bool button_hit = false;
+    bool slider_changed = false;
+
+    static const std::vector<const char*>& Items() {
+        static const std::vector<const char*> kItems = {"aa", "bb", "cc"};
+        return kItems;
+    }
+    static SpRect ComboRect() { return {{10.0f, 40.0f}, {200.0f, 26.0f}}; }
+    static SpRect ButtonRect() { return {{10.0f, 90.0f}, {200.0f, 26.0f}}; }
+    static SpRect SliderRect() { return {{10.0f, 150.0f}, {300.0f, 26.0f}}; }
+
+    void Frame(const jpov::InputSnapshot& in, float dt_ms = 0.0f) {
+        cmds.Clear();
+        ui.Begin(in, theme, 400.0f, 400.0f, dt_ms, 0.0f);
+        button_hit = ui.Button("button", ButtonRect());
+        ui.Combo("combo", &combo_sel, Items(), ComboRect());
+        slider_changed = ui.SliderFloat("slider", &slider, SliderRect(), 0.0f, 100.0f);
+        ui.End();
+        ui.Emit(&cmds);
+    }
+};
+
+// 伪造一次「按下后松开」：Hold 帧 + Click 帧（Click 要带坐标）。
+jpov::InputSnapshot MakeHold(float x, float y) {
+    jpov::InputSnapshot in{};
+    in.mouse_x = x;
+    in.mouse_y = y;
+    in.left.raw = -2;
+    return in;
+}
+jpov::InputSnapshot MakeClick(float x, float y) {
+    jpov::InputSnapshot in{};
+    in.mouse_x = x;
+    in.mouse_y = y;
+    in.left.raw = 1;
+    in.left_clicks[0] = {x, y, 0.5f};
+    return in;
+}
+jpov::InputSnapshot MakeDrag(float x, float y) {
+    jpov::InputSnapshot in{};
+    in.mouse_x = x;
+    in.mouse_y = y;
+    in.left.raw = -1;
+    return in;
+}
+
+void CheckInteractionStateMachine() {
+    // ---- a) 点击：释放点落在按钮内才算点中 ----
+    {
+        MiniScene sc;
+        sc.Frame(MakeHold(100.0f, 103.0f));
+        sc.Frame(MakeClick(100.0f, 103.0f));
+        CHECK(sc.button_hit) << "在按钮内按下并松开应返回 true";
+        // 在按钮内按下、飘到框外松开 ⇒ 不算点击。
+        MiniScene sc2;
+        sc2.Frame(MakeHold(100.0f, 103.0f));
+        sc2.Frame(MakeClick(100.0f, 300.0f));
+        CHECK(!sc2.button_hit) << "在框外松开不应算作点击";
+        LOG(INFO) << "[PASS] 点击语义：释放点必须落在按钮内";
+    }
+
+    // ---- b) Combo 弹层独占（点击不能穿透到下面的按钮）----
+    {
+        MiniScene sc;
+        // 先确认（无弹层时）点按钮是能触发的。
+        sc.Frame(MakeHold(100.0f, 103.0f));
+        sc.Frame(MakeClick(100.0f, 103.0f));
+        CHECK(sc.button_hit) << "基线：无弹层时按钮应可点";
+
+        // 点开 Combo（它在上方，弹层向下展开、盖住按钮）。
+        sc.Frame(MakeHold(100.0f, 53.0f));
+        sc.Frame(MakeClick(100.0f, 53.0f));
+        // 现在弹层已展开（本帧画出来，下一帧起独占其覆盖区域）。
+        sc.Frame(jpov::InputSnapshot{});
+        // 在按钮位置点一下 —— 该位置已被弹层盖住，必须**不**触发按钮。
+        sc.Frame(MakeHold(100.0f, 103.0f));
+        sc.Frame(MakeClick(100.0f, 103.0f));
+        CHECK(!sc.button_hit)
+            << "点在被已展开下拉盖住的位置，按钮不该被触发（弹层独占失效）";
+        LOG(INFO) << "[PASS] Combo 弹层独占：被盖住的控件不接收点击";
+    }
+
+    // ---- c) 一次 drag 语义：按下在框内，之后飘出竖直范围仍继续写值 ----
+    {
+        MiniScene sc;
+        sc.slider = 0.0f;
+        // 在滑条内按下（Hold 即可开始 drag）
+        sc.Frame(MakeHold(160.0f, 163.0f));
+        const float after_press = sc.slider;
+        // 拖到很右边、且 y 远在 box 之外
+        sc.Frame(MakeDrag(300.0f, 400.0f));
+        CHECK(sc.slider_changed)
+            << "已经开始的 drag，鼠标飘出 box 竖直范围仍应继续写值";
+        CHECK(sc.slider > after_press)
+            << "往右拖应把值往右推：press=" << after_press
+            << " → drag=" << sc.slider;
+        LOG(INFO) << "[PASS] 一次 drag 语义：飘出竖直范围继续写值（"
+                  << after_press << " → " << sc.slider << "）";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -444,6 +561,7 @@ int main() {
     CheckFlipbookWrap();
     CheckMultiPlate();
     CheckLayerForScaleInvariance();
+    CheckInteractionStateMachine();
     CheckDegenerateInputs();
     LOG(INFO) << "===== sp_ui gold 全部通过 =====";
     return 0;

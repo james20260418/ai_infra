@@ -416,9 +416,9 @@ int main(int argc, char** argv) {
 
     if (opt.script) {
         // ---- 伪造输入 + 多帧输出（单帧仿真）----
-        // 每帧：换一份 InputSnapshot → RunOnce → 一张 PNG。
-        // RunOnce 内部固定把 frame_count 传 0，所以**帧号/时间由调用方自己推进**
-        // （这里每帧 +1/30 秒喂材质）。
+        // 每帧：换一份 InputSnapshot → RunOnce(帧号, …) → 一张 PNG。
+        // 帧号显式传下去（OneIteration 能据此自计时）；材质时间这里仍由本文件推进
+        // （+1/30 秒/帧），因为材质时间轴允许与帧号脱钩（暂停/慢放）。
         const std::string dir = capture_dir.empty() ? "output/shots/sp_ui_script"
                                                     : capture_dir;
         const std::string mk = "mkdir -p '" + dir + "'";

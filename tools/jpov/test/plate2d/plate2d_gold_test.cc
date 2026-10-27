@@ -91,6 +91,23 @@ public:
         cmds->DrawPlate(MakePlate(kSlotE, atlas_, /*fps=*/0.0f, /*time=*/3.7f,
                                   /*border=*/false));
 
+        // G/H：半透明重叠 —— 验证「预乘 alpha + (ONE, ONE_MINUS_SRC_ALPHA)」
+        // 这条混合路径。黑底上一块 alpha=0.5 的白板应得到中间亮度；两块**重叠**
+        // 应更亮（1-(1-0.5)² = 0.75）。若哪里退化成直通 alpha，重叠区会直接变纯白。
+        {
+            const float ax = 520.0f;
+            jpov::Plate2DCommand g;
+            g.pos = {ax, 200.0f};
+            g.size = {100.0f, 60.0f};
+            g.radius = 0.0f;
+            g.fill_color = {1.0f, 1.0f, 1.0f, 0.5f};
+            g.border_width = 0.0f;
+            cmds->DrawPlate(g);
+            jpov::Plate2DCommand h = g;
+            h.pos = {ax + 50.0f, 220.0f};   // 与 G 重叠一半
+            cmds->DrawPlate(h);
+        }
+
         // F：填充层纯黑（texture 0）+ 边框层用同一张图集（帧 0 红）。
         {
             jpov::Plate2DCommand p;
@@ -267,6 +284,27 @@ int main() {
             << static_cast<int>(p[2]) << ")";
     }
     LOG(INFO) << "[PASS] 两层材质独立：填充纯黑、边框来自图集（红）";
+
+    // ---- 4. 半透明重叠：预乘 alpha 混合 ----
+    {
+        // G 独有区域（x≈530）、G∩H 重叠区域（x≈580）
+        const int only_x = 530;
+        const int both_x = 580;
+        const int y = 230;
+        const int only = static_cast<int>(img[(static_cast<size_t>(y) * w + only_x) * 4]);
+        const int both = static_cast<int>(img[(static_cast<size_t>(y) * w + both_x) * 4]);
+        LOG(INFO) << "半透明重叠：单层=" << only << " 双层=" << both;
+        // 单层 = 0.5 alpha 的白盖黑；双层 = 1-(1-0.5)^2 = 0.75。
+        // 断言只用**相对关系**，不锁具体编码（避免被 sRGB/tonemap 细节绊住）：
+        //   单层必须明显灰（不是纯白、也不是纯黑）；双层必须比单层更接近白。
+        CHECK(only > 90 && only < 200)
+            << "单层半透明应得到中间亮度，实际 " << only
+            << "（退化成纯白 = 直通 alpha 混进预乘路径；纯黑 = 板没画）";
+        CHECK(both > only + 30)
+            << "重叠区应更亮：单层 " << only << " → 双层 " << both;
+        CHECK(both < 250) << "重叠区不该直接变纯白（说明 alpha 被吃了），实际 " << both;
+    }
+    LOG(INFO) << "[PASS] 半透明重叠：预乘 alpha 混合正常（单层 < 双层 < 纯白）";
 
     stbi_image_free(img);
     LOG(INFO) << "===== plate2d GPU 像素测试通过 =====";
