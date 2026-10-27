@@ -147,22 +147,12 @@ private:
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
 
-    // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）—— 玻璃实例 ──
-    // 「TAB」= 一次 OIT 用的 3 附件透明累积缓冲（accum/reveal/depth），被玻璃 / 粒子 / 体积火
-    // 共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
-    // 注：**粒子渲染器不持有代表深度附件** —— 它的 composite 从未采样过（已删）；它的
-    //     att2 现在放「加法集」（真·加法累积），见 src/particles/particle_renderer.h。
-    // 此处是**玻璃那一份**，也是 froxel 体积雾绑定读的那一份。旧称「玻璃 FBO / WBO 纹理」。
-    // 玻璃 FBO（加权混合 OIT / Weighted Blended OIT）：核心 = 3 个颜色附件，
-    // 尺寸 = 3D FBO（1× 单采样；结构化数据不能被过滤/平均）。
-    //   COLOR0 accum (RGBA16F)：blend(ONE, ONE)——Σ(预乘色×w, α×w)；
-    //   COLOR1 reveal (R16F) ：blend(ZERO, ONE_MINUS_SRC_COLOR)——Π(1−α)；
-    //   COLOR2 depth  (R32F) ：blend(ONE, ONE)——Σ(z_view×α×w)（代表深度）。
-    // 无深度缓冲：透明 pass 在 FS 里用不透明场景深度手动作深度测试（见 DrawObject3DBlend）。
-    // 由 DrawTransparentPass 写入；由体积雾 composite 与雾一起合成。无玻璃物体时被清空（恒等）。
-    unsigned int glass_fbo_ = 0;
-    unsigned int glass_accum_tex_ = 0, glass_reveal_tex_ = 0, glass_depth_tex_ = 0;
-    int glass_w_ = 0, glass_h_ = 0;
+    // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）──
+    // 「TAB」= 一次 OIT 用的多附件透明累积缓冲（accum/reveal/additive），被粒子 / 体积火 /
+    // 条带共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
+    // ⚠️ `Renderer` **不再持有** TAB：原来的玻璃那一份（`glass_fbo_` + accum/reveal/depth）
+    //   随 object3d 玻璃 pass 一起于 2026-10-27 移除；现在每个使用方（粒子 / 体积火 / 条带）
+    //   自己持有一份 `WboTarget`（见 src/wbo/wbo_target.h），尺寸与附件按需申请。
 
     // 太阳正交阴影 pass 的级联 FBO + 深度贴图（RenderCommandList.sun 有值时创建）。
     // 每一级联独立 FBO/深度纹理/尺寸，数量 = ShadowConfig::cascade_count。
@@ -213,20 +203,6 @@ private:
     void DestroyHighlightFBO();
     void EnsureHighlightMaskFBO(int w, int h);
     void DestroyHighlightMaskFBO();
-
-    // ---- 透明玻璃 pass（Weighted Blended OIT）----
-    // 1× 玻璃 FBO：accum/reveal/depth 三附件（含尺寸失效重建）。
-    void EnsureGlassFBO(int w, int h);
-    void DestroyGlassFBO();
-    // 清空三附件：accum=(0,0,0,0), reveal=(1,0,0,0), depth=(0,0,0,0)。
-    void ClearGlassFBO();
-    // 本帧是否有 alpha_mode==kBlend 的 object3d（决定是否跑透明 pass / 是否唤醒雾合成）。
-    static bool HasBlendObjects(const RenderCommandList& cmds);
-    // 把 cmds.object3d 中 alpha_mode==kBlend 者以 WBO 画进 glass FBO（无深度缓冲，
-    // FS 用 scene_depth_tex 手动作深度测试）。调用方需已 EnsureGlassFBO + ClearGlassFBO。
-    // Pre-condition: scene_depth_tex ≠ 0（不透明场景深度，值 = gl_FragCoord.z）。
-    void DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
-                             unsigned int scene_depth_tex);
 
     // Bloom（辉光）pass：HDR 高亮提取→多级半分辨率降采样模糊→上采样叠加
     // →加回 HDR 原图。确定性后处理，在 tone map **之前**工作。
@@ -317,10 +293,6 @@ private:
     // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
     unsigned int DrawObject3DProgCutout();
     unsigned int DrawObject3DProgFullCutout();
-    // 透明混合（kBlend）变体：与上面同源，多一个 JPOV_ALPHA_BLEND 宏（输出改为
-    // FragAccum/FragReveal + 手动作深度测试 + WBO 权重）。供透明 pass 使用。
-    unsigned int DrawObject3DProgBlend();
-    unsigned int DrawObject3DProgFullBlend();
     // 静态批量实例 program（InstancedObjectRenderer::kMeshVs3dPBR*Instanced + 同模块 kMeshFs3dPBR）。
     unsigned int DrawInstancedObjectProg();
     unsigned int DrawInstancedObjectProgFull();

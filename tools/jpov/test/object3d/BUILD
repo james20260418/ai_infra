@@ -421,46 +421,6 @@ cc_test(
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
 
-# 透明绘制 gold test（AlphaMode::kBlend / 加权混合 OIT）——「透明盒前后遮挡」经典用例。
-# 共享 jpov_transparent_gold_common.h 的场景构建，纯程序化 mesh（无 glTF 资源）。
-# generator 写仓库 gold image (transparent_1280x720.png)。
-
-cc_binary(
-    name = "jpov_transparent_gold_generator",
-    srcs = [
-        "jpov_transparent_gold_generator.cc",
-        "jpov_transparent_gold_common.h",
-    ],
-    deps = [
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/common:utils",
-        "//tools/jpov/test:test_utils",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
-    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-)
-
-cc_test(
-    name = "jpov_transparent_gold_test",
-    srcs = [
-        "jpov_transparent_gold_test.cc",
-        "jpov_transparent_gold_common.h",
-    ],
-    data = [
-        ":transparent_1280x720.png",
-    ],
-    deps = [
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/common:utils",
-        "//third_party/stb:stb_image",
-        "//tools/jpov/test:test_utils",
-        "//tools/jpov/test:compare_light",
-    ],
-    copts = ["-std=c++20"],
-    linkstatic = 1,
-    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
-)
 # 太阳影子（最简版）gold test（DirectionalLight + 正交 shadow map 最小实现）
 # 场景：平板 + 立柱，sun direction=(-1,-1,1)，验证立柱在平板上投影子。
 

@@ -5,7 +5,7 @@
 
 ## 0. 一句话
 新增一个与 `fire_fog` 平级的 `ParticleRenderer`：把广告牌粒子画进**低分辨率（先 1/2）的 WBO 半透明累积纹理**
-（accum/reveal/depth），再**解析合成**进 HDR，随后交给既有 froxel/玻璃合成 → 后处理。
+（accum/reveal/additive），再**解析合成**进 HDR，随后交给既有 froxel 雾 → 后处理。
 
 ## 1. 要解决的问题（为什么不能靠 early-Z）
 半透明多层的 overdraw **在 sprite 栈内无解**：透明片元**不写深度**，所以层与层之间互不遮挡，
@@ -17,18 +17,18 @@ overdraw 账：**粒子数 × 平均屏幕覆盖 × 分辨率**。只有四条�
 1. **引擎原语 = 低分辨率半透明 pass**（成本 ∝ 分辨率²：1/2 → 片元 ÷4；1/4 → ÷16）。本版 **先只 1/2**。
 2. **复用 PR #176 的 WBO 代数**（McGuire & Bavoil 2013）：与透明物体同套 accum/reveal/depth 语义，
    **顺序无关 → 免"多层烟"排序**。
-3. **独立 renderer**：粒子有**自己的低分 WBO 目标**（不挤占 1× 玻璃 FBO）。
+3. **独立 renderer**：粒子有**自己的低分 WBO 目标**（不挤占条带 / 体积火的那两份）。
 4. **密集烟/近景主角火**：将来可换**体渲染**（有界成本，见 fire_fog/fire_hero）。
 5. **VRS 关系**：真 GPU 上 VRS 更省更干净，但 **GL3.3 无 VRS** → 多分辨率缓冲是 GL3.3 的对应正解。
 
 ## 3. 架构 / 数据流
 ```
 opaque 3D → HDR
-  → 透明物体 WBO（#176，1× 玻璃 FBO）
+  → （条带 WBO，1×；原 #176 玻璃那一趟已移除）
   → 【新】粒子低分 WBO（ParticleRenderer，1/2）: accum RGBA16F / reveal R16F / depth R32F（无深度缓冲）
         FS 手动深度测试（对不透明场景深度）；输出 WBO 三附件（同 #176）
   → 【新】解析合成：C=accum.rgb/accum.a，cov=1−reveal；over 混合进 HDR
-  → froxel 雾 + 玻璃合成（#176 路径）
+  → froxel 雾合成
   → bloom → tonemap
 ```
 

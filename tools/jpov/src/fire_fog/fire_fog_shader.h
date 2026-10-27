@@ -589,12 +589,6 @@ uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
 uniform int   uGridCols;   // Nxy 单元列数
 uniform int   uGridRows;   // Nxy 单元行数
 
-// ── 透明玻璃层（WBO 结果；uHasGlass==0 时不采）──
-uniform int       uHasGlass;
-uniform sampler2D uGlassAccum;   // RGBA16F: Σ(预乘色×w, α×w)
-uniform sampler2D uGlassReveal;  // R16F   : Π(1−α) = 透射率
-uniform sampler2D uGlassDepth;   // R32F   : Σ(z_view×α×w) = 代表深度×Σαw
-
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
 // 读某 tile 的 scatter 列在「位置 ℓ（= Nz·ln(z/near)/ln(far/near)）」处的 (τ, S)。
@@ -659,40 +653,13 @@ void main() {
     float z_op = length(pw.xyz / pw.w - ro);
     float ell_op = DepthToEll(z_op);
 
-    // 透明玻璃层（可选）：解算 WBO → (Cg 预乘, Tg) + 代表深度 ℓ_g。
-    // 无玻璃（accum.a≈0）→ Cg=0, Tg=1, ℓ_g=ℓ_op（退化为全雾路径，零回归）。
-    vec3  Cg = vec3(0.0);
-    float Tg = 1.0;
-    float ell_g = ell_op;
-    if (uHasGlass == 1) {
-        vec4 accum = texture(uGlassAccum, uv);
-        if (accum.a > 1e-8) {
-            float reveal = texture(uGlassReveal, uv).r;
-            float z_g = texture(uGlassDepth, uv).r / accum.a;
-            vec3 Cavg = accum.rgb / accum.a;   // 加权平均色
-            Cg = Cavg * (1.0 - reveal);        // 预乘：out = Cg + Tg·behind
-            Tg = clamp(reveal, 0.0, 1.0);
-            ell_g = DepthToEll(z_g);
-        }
-    }
-    ell_g = min(ell_g, ell_op);   // 代表深度不超过不透明场景深度
-
-    // 两处采样：front = 雾(0→z_g)；op = 雾(0→z_op)。
-    float tau_f, tau_op;
-    vec3  S_f,   S_op;
-    SampleFogBilinear(gl_FragCoord.xy, ell_g,  tau_f, S_f);
-    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
-
-    // front-to-back： 雾(0→zg) → 玻璃 → 雾(zg→zop) → 背景(dst)
-    //   out.rgb = S_f + Tf·Cg + Tg·(S_op − S_f)   （Tf=exp(−tau_f)）
-    //   out.a   = Tg·T_op                          （T_op=exp(−tau_op)，Tg=玻璃透射率）
-    // （推导：Tf·Tg·S_b = Tg·(S_op−S_f)；Tf·Tg·Tb = Tg·T_op。无玻璃时退化为 (S, T)。）
+    // 全雾路径：雾(0→z_op) 累积 (S_op, T_op)，再与背景就地合成。
+    //   out.rgb = S_op；out.a = T_op
     // GL_ONE/GL_SRC_ALPHA：final = out.rgb + dst·out.a。
-    float Tf  = exp(-tau_f);
-    float Top = exp(-tau_op);
-    vec3 rgb = S_f + Tf * Cg + Tg * (S_op - S_f);
-    float a  = Tg * Top;
-    oColor = vec4(rgb, a);
+    float tau_op;
+    vec3  S_op;
+    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
+    oColor = vec4(S_op, exp(-tau_op));
 }
 )glsl";
 

@@ -1,6 +1,11 @@
 # JPOV 透明体渲染（无折射「塑料片 / 玻璃片」）—— 加权混合 OIT + 体积雾联编
 
-> 状态：**已实现**（本 PR）。作者：James / Danis。日期：2026-10-14。
+> 状态：**已移除**（2026-10-27）。原实现见 #176；移除原因见文末 §9。
+> 作者：James / Danis。日期：2026-10-14（正文为当初的设计记录，**不代表当前代码**）。
+>
+> ⚠️ 当前代码里**没有** `AlphaMode::kBlend`、没有玻璃 FBO、没有玻璃 pass。
+> 半透明内容只剩一条路径：`TranslucentStripBatch`（Strip3D / 加权混合 OIT）。
+> 本文保留是因为 §1/§4 的「介质段 (C_g, T_g, z_g)」代数仍是水/水下吸收的数学底座。
 > 关联：`jpov_froxel_design.md`（froxel 体积雾；§2.3 区间反解、§7 薄/表面型透明）。
 >
 > 目标：给静态 Object3D 增加一个**半透明**子模式（`AlphaMode::kBlend`），在不影响实心
@@ -187,3 +192,25 @@ composite 以 `GL_ONE / GL_SRC_ALPHA` **就地**混进 HDR FBO：`final = out.rg
 - ff viewer headless：round box 雾场景 + 树一侧 **MakeBox 浅红玻璃墙**（`70_glass_off` /
   `71_glass_on` / `72_glass_alpha60` / `73_glass_alpha15`）：树与雾透过玻璃可见，红色吸收
   随 α 增减，玻璃被后方不透明物体遮挡时正确消失。
+
+---
+
+## 9. 移除记录（2026-10-27）
+
+**决定（Danis）**：移除玻璃 pass ——「目前 strip pass 提供的廉价玻璃够用了」。
+
+同一次改动里删掉的东西：
+
+| 位置 | 内容 |
+|---|---|
+| `interface/pbr_material.h` | `AlphaMode::kBlend` 枚举值 |
+| `src/object3d/object3d_renderer.{h,cc}` | `JPOV_ALPHA_BLEND` 变体（FS 输出/手动作深度测试/WBO 权重）、`uAlpha`、`uGlassSceneDepth`、`DrawObject3DBlend` |
+| `src/renderer.{h,cc}` | 玻璃 FBO（`EnsureGlassFBO`/`ClearGlassFBO`/`DestroyGlassFBO`）、`DrawTransparentPass`、`HasBlendObjects`、两个 blend program、shadow/pick/highlight 里的 kBlend 跳过分支 |
+| `src/fire_fog/*` | `FireFogGlass` 参数与 composite 里的玻璃段积分（回落到纯雾路径） |
+| `src/texture_units.h` | `kTexUnitGlassSceneDepth` |
+| `test/object3d/` | `jpov_transparent_gold_{common.h,generator.cc,test.cc}` + `transparent_1280x720.png` |
+| `test/wbo/` | `wbo_weight_contract_test`（它钉的是「玻璃 shader 的内联权重副本 vs 权威副本」，副本不再存在） |
+| `demo/fire_fog_viewer*` | 玻璃墙 / 玻璃人 / 对应面板与截图档 |
+
+**没变的东西**：条带 / 粒子 / 体积火三条 WBO 路径一个字节没动；`WboTarget` 与
+`kWboWeightGlsl` 保持原样（现在只有一份权重实现，双份契约测试因此失去意义）。
