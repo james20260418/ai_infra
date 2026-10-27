@@ -602,7 +602,6 @@ Renderer::~Renderer() {
     DestroyBloomChain();
     DestroySkyColorFBO();
     DestroySkyEnvCube();
-    DestroyGlassFBO();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
@@ -683,139 +682,6 @@ void Renderer::DestroyHDRFBO() {
     }
     fbo_hdr_w_ = 0;
     fbo_hdr_h_ = 0;
-}
-
-// ==================== 透明玻璃 FBO（Weighted Blended OIT） ====================
-
-void Renderer::EnsureGlassFBO(int w, int h) {
-    if (glass_fbo_ != 0 && glass_w_ == w && glass_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    CHECK_LE(w, kMaxFboDim);
-    CHECK_LE(h, kMaxFboDim);
-    DestroyGlassFBO();
-
-    glGenTextures(1, &glass_accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &glass_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           glass_accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                           glass_reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           glass_depth_tex_, 0);
-    {
-        const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                                GL_COLOR_ATTACHMENT2};
-        glDrawBuffers(3, bufs);
-    }
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "Glass FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glass_w_ = w;
-    glass_h_ = h;
-}
-
-void Renderer::DestroyGlassFBO() {
-    if (glass_fbo_) {
-        glDeleteFramebuffers(1, &glass_fbo_);
-        glass_fbo_ = 0;
-    }
-    if (glass_accum_tex_) { glDeleteTextures(1, &glass_accum_tex_); glass_accum_tex_ = 0; }
-    if (glass_reveal_tex_) { glDeleteTextures(1, &glass_reveal_tex_); glass_reveal_tex_ = 0; }
-    if (glass_depth_tex_) { glDeleteTextures(1, &glass_depth_tex_); glass_depth_tex_ = 0; }
-    glass_w_ = 0;
-    glass_h_ = 0;
-}
-
-void Renderer::ClearGlassFBO() {
-    CHECK(glass_fbo_ != 0) << "ClearGlassFBO: EnsureGlassFBO 未调用";
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    // accum=(0,0,0,0) / reveal=(1,0,0,0) / depth=(0,0,0,0)
-    const GLfloat clear_accum[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_depth[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clear_accum);
-    glClearBufferfv(GL_COLOR, 1, clear_reveal);
-    glClearBufferfv(GL_COLOR, 2, clear_depth);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-bool Renderer::HasBlendObjects(const RenderCommandList& cmds) {
-    for (const Object3DCommand& o : cmds.object3d) {
-        if (o.material.alpha_mode == AlphaMode::kBlend) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void Renderer::DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
-                                   unsigned int scene_depth_tex) {
-    if (!HasBlendObjects(cmds)) {
-        return;
-    }
-    CHECK(glass_fbo_ != 0) << "DrawTransparentPass: EnsureGlassFBO 未调用";
-    CHECK_NE(scene_depth_tex, 0u)
-        << "DrawTransparentPass: scene_depth_tex 不能为 0";
-    CHECK_GT(fbo_w, 0);
-    CHECK_GT(fbo_h, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glViewport(0, 0, fbo_w, fbo_h);
-
-    // 无深度缓冲：关深度测试（在 FS 里用 scene_depth_tex 手动作深度测试，见 blend 变体）。
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z_view×α×w
-
-    const unsigned int prog_blend = DrawObject3DProgBlend();
-    const unsigned int prog_full_blend = DrawObject3DProgFullBlend();
-    for (const Object3DCommand& cmd : cmds.object3d) {
-        if (cmd.material.alpha_mode != AlphaMode::kBlend) {
-            continue;
-        }
-        Object3DRenderer::DrawObject3DBlend(cmd, cmds, mesh_mgr_, texture_mgr_,
-            shader_mgr_, mvp_, prog_blend, prog_full_blend,
-            tile_index_tex_, scene_depth_tex);
-    }
-
-    // 复原 GL 状态：blend func/equation 属 GL_COLOR_BUFFER_BIT，不在 glPushAttrib(GL_ENABLE_BIT)
-    // 里，必须显式回写（对三个 draw buffer 都回写，抹平透趟用过的非常规混合）。
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendEquation(GL_FUNC_ADD);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void Renderer::EnsureSkyColorFBO(int w, int h) {
@@ -1185,22 +1051,6 @@ unsigned int Renderer::DrawObject3DProgFullCutout() {
         "draw_object3d_pbr_full_cutout",
         {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
-}
-
-// 透明混合（kBlend）变体：与两基础版同源，多一个 JPOV_ALPHA_BLEND 宏（FS 输出改为
-// FragAccum/FragReveal + 手动作深度测试 + WBO 权重）。供透明 pass（玻璃）使用。
-unsigned int Renderer::DrawObject3DProgBlend() {
-    return shader_mgr_.GetOrCreate(
-        "draw_object3d_pbr_blend",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str(),
-         {"JPOV_ALPHA_BLEND"}});
-}
-
-unsigned int Renderer::DrawObject3DProgFullBlend() {
-    return shader_mgr_.GetOrCreate(
-        "draw_object3d_pbr_full_blend",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str(),
-         {"JPOV_ALPHA_BLEND"}});
 }
 
 // 静态批量实例 program（摆放走 per-instance attribute，见 InstancedObjectRenderer::kMeshVs3dPBR*Instanced）。
@@ -1632,11 +1482,6 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
-        // 半透明玻璃（kBlend）需要 WBO 浮点累加缓冲 + 体积雾合成 pass，仅在 HDR 路径支持。
-        const bool has_glass = HasBlendObjects(cmds);
-        CHECK(!has_glass || use_hdr)
-            << "alpha_mode==kBlend（透明玻璃）需要 tone_mapping=true（HDR 路径，"
-               "玻璃 FBO + 雾合成）；请开启 tone_mapping 或改用 kOpaque/kMask";
         CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
             << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
                "tone map 之前）；否则会静默失效";
@@ -1747,9 +1592,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             // cutout 变体 program 同源，也需光照 uniform。
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
-            // blend 变体 program 同源，也需光照 uniform（透明 pass 用）。
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend());
             // 实例 program 同源，也需光照 uniform。
             InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
@@ -1776,11 +1618,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             // cutout 变体 program 同源，也需 sun/阴影 uniform。
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
-                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
-            // blend 变体 program 同源，也需 sun/阴影 uniform。
-            Object3DRenderer::UploadSunData(shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // 实例 program 同源，也需 sun/阴影 uniform。
@@ -1816,9 +1653,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(), ambient);
-            // blend 变体 program 同源，也需 ambient uniform。
-            Object3DRenderer::UploadAmbient(shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(), ambient);
             // 实例 program 同源，也需 ambient uniform。
             InstancedObjectRenderer::UploadAmbient(shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(), ambient);
@@ -1855,7 +1689,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             const unsigned int progs[] = {
                 DrawObject3DProg(), DrawObject3DProgFull(),
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(),
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                 DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
             };
@@ -1909,27 +1742,12 @@ void Renderer::Render(const RenderCommandList& cmds,
             unsigned int hdr_input_tex = color_tex_hdr_;
             unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 
-            // 是否运行体积雾合成：有雾、或有透明玻璃（玻璃需与雾一起按深度合成）。
-            const bool run_fog = !cmds.point_fogs.empty() || has_glass;
-            // 透明玻璃 pass：把 kBlend 物体以 WBO 画进玻璃 FBO。无玻璃时也清空
-            //（提供恒等层 —— accum.a=0/reveal=1，composite 退化为全雾路径）。
-            // 只有**真有 kBlend 物体**时才建/清玻璃 FBO 并跑透明 pass。
-            // 无玻璃（纯雾）时 glass_input 保持无效 → fire_fog 的 has_glass=false →
-            // uHasGlass=0 → composite 不回读玻璃纹理 ⇒ 三张全屏浮点纹理的每帧 clear
-            // 与采样全免（run_fog 仍可因雾为真）。
-            FireFogGlass glass_input;
-            if (run_fog && has_glass) {
-                EnsureGlassFBO(fbo_3d_w, fbo_3d_h);
-                ClearGlassFBO();
-                DrawTransparentPass(cmds, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
-                glass_input.accum_tex = glass_accum_tex_;
-                glass_input.reveal_tex = glass_reveal_tex_;
-                glass_input.depth_tex = glass_depth_tex_;
-            }
+            // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
+            const bool run_fog = !cmds.point_fogs.empty();
 
-            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与 glass 同套 WBO 代数。
-            //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
-            //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
+            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
+            //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
+            //    随后雾体按既有路径在 HDR 上继续（粒子会一起被雾影响）。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
@@ -2073,7 +1891,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
                 fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
-                                        ff_params, ff_light, &glass_input);
+                                        ff_params, ff_light);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
@@ -2317,12 +2135,6 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
                 const Object3DCommand& obj = cmds.object3d[idx];
 
-                // 半透明玻璃（kBlend）不进主 3D pass（不写主 FBO / 不写场景深度）；
-                // 由 Render() 的透明 pass（DrawTransparentPass）单独以 WBO 渲进玻璃 FBO。
-                if (obj.material.alpha_mode == AlphaMode::kBlend) {
-                    break;
-                }
-
                 // 3D 内容绘制保持纯净：高亮由独立的 DrawHighlightPass 在 3D 内容全部
                 // 画完后统一叠加（见 Render()）。此处不掺任何 stencil 状态，DrawObject3D
                 // 只负责本体着色。
@@ -2343,7 +2155,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                     tile_index_tex_, instanced_object_model_buf_,
-                    instanced_object_blow_buf_);
+                    instanced_object_blow_buf_, instanced_object_tint0_buf_,
+                    instanced_object_tint1_buf_, instanced_object_tint_enabled_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {
@@ -2586,10 +2399,6 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         for (const auto& o : cmds.object3d) {
-            // 半透明玻璃（kBlend）不参与不透明阴影 pass（不投实心影）。
-            if (o.material.alpha_mode == AlphaMode::kBlend) {
-                continue;
-            }
             Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog, shadow_prog_cutout);
@@ -2716,7 +2525,6 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     // ---- 三大 renderer 各画各的（各写自己的 id 段），共享同一张 pick FBO ----
     for (const auto& o : cmds.object3d) {
         if (o.picking_id == 0) continue;   // 不可拾取物体不参与
-        if (o.material.alpha_mode == AlphaMode::kBlend) continue;  // 半透明玻璃不参与拾取（本版）
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
                                               PickObject3DProg(), PickObject3DCutoutProg(),
                                               &pick_table_object3d_);
@@ -2903,7 +2711,6 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
     Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
     for (const auto& o : cmds.object3d) {
         if (!o.highlight) continue;
-        if (o.material.alpha_mode == AlphaMode::kBlend) continue;  // 半透明玻璃不参与高亮（本版）
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
             HighlightObject3DProg(), HighlightObject3DCutoutProg(), nullptr);
     }

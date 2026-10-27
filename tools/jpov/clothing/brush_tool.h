@@ -61,6 +61,26 @@ inline bool VertexInBrush(const Vec3f& v, const Vec3f& ray_o, const Vec3f& ray_d
     return perp <= world_r;
 }
 
+// 把一组顶点 index 批量覆盖赋值成一个 uint8（tint「一键刷选区」用）。
+//
+// 与「选区」的区别：语义是**覆盖赋值**（含改回 0 = 清除），不是只增不减的集合。
+// 返回本次**值发生变化**的顶点数（已等于 id 的不计）——调用方据此决定是否重传 GPU。
+// Pre-condition: indices 中每个下标 < values->size()；indices 已升序去重（选区保证）。
+inline size_t AssignByteToVertices(const std::vector<uint32_t>& indices, uint8_t id,
+                                   std::vector<uint8_t>* values /*inout*/) {
+    CHECK(values != nullptr);
+    size_t changed = 0;
+    for (uint32_t idx : indices) {
+        CHECK_LT(static_cast<size_t>(idx), values->size())
+            << "AssignByteToVertices: 顶点下标越界（选区与当前 mesh 不一致）";
+        if ((*values)[idx] != id) {
+            (*values)[idx] = id;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
 // 3D 画笔（选区）工具。状态 = 激活态 + 半径（像素）+ 选区（各 primitive 的顶点 index）。
 //
 // 选区按 primitive 分组（衣服是多 primitive glTF）；每组内 index **升序去重**（确定性）。

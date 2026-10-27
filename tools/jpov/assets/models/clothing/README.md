@@ -56,6 +56,18 @@ bash tools/jpov/gen3d_static.sh output/gen3d yoga_pants \
 # 人体 reference 缺省 = tools/jpov/assets/models/characters/mixamo_male.glb
 ```
 
+## Tint 样例（2026-10-27）
+
+`lace_skirt/lace_skirt_tinted_sample.glb` —— 在穿衣工具里对
+`lace_skirt_skinned_relaxed_sample.glb` 用「顶点 Tint 覆盖（刷选区）」刷出两个分区后保存的成品：
+
+- 自定义顶点属性：`_JPOV_RELAX`（原有松弛度）+ **`_JPOV_TINT`**（`UNSIGNED_BYTE SCALAR`，
+  逐顶点 id：0=不换色 / 1=通道1 / 2=通道2），计数 `{0:6899, 1:6306, 2:4289}`（17494 顶点）。
+- 带 skin（JOINTS/WEIGHTS），供静态 object3d / 静态实例 / 蒙皮三条路径的 tint gold 使用
+  （见 `tools/jpov/test/clothing/clothing_tint_gold_*`）。
+- 生成方式：clothing tool → 3D 画笔选区 → 刷 Tint 1/2 → 保存衣服 glb；
+  **不含调色板颜色**（颜色是运行期参数，glb 只存 id）。
+
 ## 成品样例（成功典范，2026-10-05 Danis 定）
 
 `harness_vest/harness_vest_skinned_sample.glb` —— `harness_vest` 对齐到 `mixamo_male`、

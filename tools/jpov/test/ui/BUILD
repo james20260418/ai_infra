@@ -138,3 +138,18 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# base tint 调色板 UI：两个通道的 RGB 滑条必须各自绑定（防串线）。
+cc_test(
+    name = "jpov_tint_ui_test",
+    srcs = ["jpov_tint_ui_test.cc"],
+    deps = [
+        "//tools/jpov/interface:tint_ui",
+        "//tools/jpov/interface:ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+

@@ -137,6 +137,8 @@ cc_library(
     hdrs = ["skeleton_types.h"],
     visibility = ["//visibility:public"],
     deps = [
+        # BaseTint（逐实例调色板）定义在 pbr_material.h。
+        ":pbr_material",
         "//geom/common:quaternion",
         "//geom/common:vec",
         "//geom/math:mat4",
@@ -453,6 +455,8 @@ cc_library(
     hdrs = ["mesh.h"],
     visibility = ["//visibility:public"],
     deps = [
+        # kNumBaseTintColors（tint 索引空间）单一定义在 pbr_material.h。
+        ":pbr_material",
         "//geom/common:vec",
         "@glog_static//:glog",
     ],
@@ -481,6 +485,19 @@ cc_library(
         ":pbr_material",
         ":render_command",
         "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# base tint 调色板 UI（两个通道 RGB + 开关）：model viewer 与 clothing tool 共用。
+cc_library(
+    name = "tint_ui",
+    hdrs = ["tint_ui.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pbr_material",
+        ":ui",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],

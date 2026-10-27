@@ -52,7 +52,11 @@
         // 顶部中间两面板同列堆叠：画笔面板先画，把面板高回传给松弛度面板定位
         //（任一折叠/展开都会带动下方那个随之上/下移）。
         const float brush_h = DrawBrushPanel(cmds, w);
-        DrawRelaxPanel(cmds, w, brush_h);
+        const float tint_h = DrawTintPanel(cmds, w, brush_h);
+        const float tint_palette_h = DrawTintPalettePanel(
+            cmds, w, brush_h + kPanelSpacing + tint_h);
+        DrawRelaxPanel(cmds, w,
+                       brush_h + kPanelSpacing + tint_h + kPanelSpacing + tint_palette_h);
         DrawSkinPanel(cmds, w, h);
         DrawHoleFillPanel(cmds, w, h);
         DrawMotionPanel(cmds, h);
@@ -107,6 +111,98 @@
         cmds->DrawText(status, /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
                        kFontSize, kForeground, jpov::TextAlignment::kTopLeft,
                        kViewerFontAlias);
+        return af.height;
+    }
+
+    // ---- 顶部中间（画笔面板下方）：顶点 Tint 覆盖（一键刷选区，可折叠）----
+    //
+    // 「顶点配置覆盖」编辑：**复用 3D 画笔的选区**。先在画笔面板激活并涂点，再点这里的
+    // 三个按钮之一：Tint 1 / Tint 2 / 清除（id=0）。不做独立涂抹模式（无画笔圆、无第二个半径）。
+    // 染白（让 baseColor 变白）不在这里做 —— 建模侧做。
+    //
+    // 标题栏：顶点 Tint 覆盖（刷选区）。
+    // 展开内容行：三按钮(1) + 状态(1) = 2。
+    // above_h = 上方画笔面板的本帧总高（用于定位）。
+    // 返回本帧面板总高（供下方调色板面板定位）。
+    float DrawTintPanel(jpov::RenderCommandList* cmds, float win_w, float above_h) {
+        const float panel_w  = kPanelWidth;  // 固定宽（像素）
+        const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);  // 顶部居中
+        const float panel_y = kPanelMargin + above_h + kPanelSpacing;
+        constexpr int kContentRows = 2;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "顶点 Tint 覆盖（刷选区）",
+            &tint_panel_open_, kContentRows);
+        if (!af.expanded) {
+            return af.height;
+        }
+        const PanelFrame& frame = af.frame;
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
+
+        // 三按钮并排：Tint 1 / Tint 2 / 清除（0）。一键刷当前选区。
+        constexpr float kBtnGap = 8.0f;
+        const float btn_w = (row_w - kBtnGap * 2.0f) / 3.0f;
+        const char* const labels[3] = {"刷 Tint 1", "刷 Tint 2", "清除 (0)"};
+        const uint8_t ids[3] = {1, 2, 0};
+        for (int k = 0; k < 3; ++k) {
+            const jpov::UiRect r{
+                {left + static_cast<float>(k) * (btn_w + kBtnGap), row_y},
+                {btn_w, kRowH}};
+            if (ui_.Button(labels[k], r)) {
+                ApplyTintToSelection(ids[k]);
+            }
+        }
+        row_y += step_y;
+
+        // 状态：选区点数 / 上一次刷的结果 / 提示。
+        std::string status = tint_msg_;
+        if (status.empty()) {
+            status = brush_.HasSelection()
+                         ? Format("当前选区 %zu 点：点上面按钮一键刷", brush_.selected_count())
+                         : std::string("先在「3D 画笔」面板激活并涂出选区");
+        }
+        const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+        cmds->DrawText(status,
+                       /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                       kFontSize, kForeground,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        return af.height;
+    }
+
+    // ---- 顶部中间（tint 刷色面板下方）：Tint 调色 / 显示（可折叠）----
+    //
+    // 与「刷选区」面板**分开**（Danis 2026-10-27）：这里只调两个通道的颜色乘数 + 开关 +
+    // 显示分区；刷哪个通道由上面那三个按钮决定。
+    // 展开内容行：调色板(5) + 显示 tint 分区(1) = 6。
+    float DrawTintPalettePanel(jpov::RenderCommandList* cmds, float win_w,
+                               float above_h) {
+        const float panel_w  = kPanelWidth;
+        const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);
+        const float panel_y = kPanelMargin + above_h + kPanelSpacing;
+        // 行数 = 调色板行数（单一来源）+ 1 行「显示 tint 分区」；通道数变了自动跟随。
+        constexpr int kContentRows = jpov::kBaseTintPaletteRows + 1;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "Tint 调色 / 显示",
+            &tint_palette_panel_open_, kContentRows);
+        if (!af.expanded) {
+            return af.height;
+        }
+        const PanelFrame& frame = af.frame;
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
+
+        const int palette_rows = jpov::DrawBaseTintPalette(
+            ui_, &tint_ui_, jpov::UiRect{{left, row_y}, {row_w, kRowH}}, step_y);
+        row_y += step_y * static_cast<float>(palette_rows);
+
+        ui_.Checkbox("显示 tint 分区（按调色板色画点）", &show_tint_field_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         return af.height;
     }
 

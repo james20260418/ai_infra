@@ -19,7 +19,10 @@
 //   每顶点（蒙皮路径专属，静态路径不用）—— 3 aJoint  4 aWeight  6 aRelax
 //   每实例（静态路径，本文件定义）—— 7..10 aInstModel（mat4，列主序，4×vec4）
 //                                    11     aInstBlowAway（float：风吹倒伏比例）
-//   空闲可预留（静态路径未来可用的槽）—— 3 4 12 13 14 15
+//                                    12     aInstTint0（vec3：逐实例 color0）
+//                                    13     aInstTint1（vec3：逐实例 color1）
+//                                    14     aInstTintEnabled（float：0/1 开关）
+//   空闲可预留（静态路径未来可用的槽）—— 3 4 15
 //     · loc3：2026-10-26 前被植被风的两关节权重 (w0,w1) 占着；单关节化后释放。
 //     · loc6：静态路径只有 kWind mesh 用它（布料 kRelax 走蒙皮路径，两者互斥）。
 //   ⚠️ location 编号只在「同一 draw 的同一 program」内有意义。静态与蒙皮是互斥的
@@ -66,9 +69,21 @@ inline constexpr InstanceAttrSpec kModelAttrSpec{/*base_loc*/ 7, /*slot_count*/ 
 inline constexpr InstanceAttrSpec kBlowAwayAttrSpec{/*base_loc*/ 11, /*slot_count*/ 1,
                                                     /*slot_components*/ 1, /*stride*/ 1};
 
+// 逐实例 tint 调色板（2026-10-27）：两个 RGB 颜色 + 一个开关，loc12/13/14。
+//   与蒙皮路径的 loc12 misc 里的 RGB888 不同：静态路径有空槽，直接传 float（无量化）。
+//   enabled=0（默认）⇒ 片元整段跳过；颜色分量 [0,1]（host 侧 clamp，与蒙皮路径一致）。
+inline constexpr InstanceAttrSpec kTint0AttrSpec{/*base_loc*/ 12, /*slot_count*/ 1,
+                                                 /*slot_components*/ 3, /*stride*/ 3};
+inline constexpr InstanceAttrSpec kTint1AttrSpec{/*base_loc*/ 13, /*slot_count*/ 1,
+                                                 /*slot_components*/ 3, /*stride*/ 3};
+inline constexpr InstanceAttrSpec kTintEnabledAttrSpec{/*base_loc*/ 14, /*slot_count*/ 1,
+                                                       /*slot_components*/ 1, /*stride*/ 1};
+
 // 本路径当前启用的 per-instance spec 清单（绘制端据此挂 buffer；测试据此做全量自检）。
 //   新增字段时把新 spec 追加进来。
-inline constexpr InstanceAttrSpec kActiveAttrSpecs[] = {kModelAttrSpec, kBlowAwayAttrSpec};
+inline constexpr InstanceAttrSpec kActiveAttrSpecs[] = {
+    kModelAttrSpec, kBlowAwayAttrSpec, kTint0AttrSpec, kTint1AttrSpec,
+    kTintEnabledAttrSpec};
 
 // ---- 布局自检谓词（编译期 / 运行期共用；供 static_assert 与测试）----
 
@@ -110,6 +125,23 @@ static_assert(SpecAvoidsVertexAttrs(kBlowAwayAttrSpec),
               "静态实例吹倒比例 spec 与顶点属性槽重叠");
 static_assert(SpecsDisjoint(kModelAttrSpec, kBlowAwayAttrSpec),
               "静态实例模型 spec 与吹倒比例 spec 槽位重叠");
+static_assert(SpecIsValid(kTint0AttrSpec) && SpecAvoidsVertexAttrs(kTint0AttrSpec),
+              "静态实例 tint0 spec 非法");
+static_assert(SpecIsValid(kTint1AttrSpec) && SpecAvoidsVertexAttrs(kTint1AttrSpec),
+              "静态实例 tint1 spec 非法");
+static_assert(SpecIsValid(kTintEnabledAttrSpec) &&
+                  SpecAvoidsVertexAttrs(kTintEnabledAttrSpec),
+              "静态实例 tint 开关 spec 非法");
+static_assert(SpecsDisjoint(kTint0AttrSpec, kModelAttrSpec) &&
+                  SpecsDisjoint(kTint0AttrSpec, kBlowAwayAttrSpec) &&
+                  SpecsDisjoint(kTint1AttrSpec, kModelAttrSpec) &&
+                  SpecsDisjoint(kTint1AttrSpec, kBlowAwayAttrSpec) &&
+                  SpecsDisjoint(kTint0AttrSpec, kTint1AttrSpec) &&
+                  SpecsDisjoint(kTintEnabledAttrSpec, kTint0AttrSpec) &&
+                  SpecsDisjoint(kTintEnabledAttrSpec, kTint1AttrSpec) &&
+                  SpecsDisjoint(kTintEnabledAttrSpec, kModelAttrSpec) &&
+                  SpecsDisjoint(kTintEnabledAttrSpec, kBlowAwayAttrSpec),
+              "静态实例 tint spec 与既有槽位重叠");
 
 }  // namespace instanced_object
 }  // namespace jpov

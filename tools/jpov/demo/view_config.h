@@ -137,11 +137,30 @@ inline void ApplyInput(ViewConfig* v /*inout*/, float dx, float dy,
 //
 // 用法：调用方自建可平移的注视点 target_y_，每帧
 //   target_y_ += VerticalPanDeltaY(mouse_dy, window_h);
-// 并把相机 position 与 target **同时**平移该量（朝向不变 ⇒ 纯平移而非旋转）。
+// 再把 target_y_ 交给 MakePannedCamera() 得到**同时平移**的 position/target
+//（朝向不变 ⇒ 纯平移而非旋转）。不要在调用处自己分别加偏移，容易只加一边。
 // Pre-condition: window_h > 0。
 inline float VerticalPanDeltaY(float mouse_dy, float window_h) {
     CHECK_GT(window_h, 0.0f);
     return mouse_dy * (2.0f / window_h);
+}
+
+// 由球面视角 + 注视点 Y 偏移得到实际相机位置/目标（中键纵向 pan 用）。
+//
+// **契约**：position 与 target **同时**平移同一个 Y 偏移 ⇒ 视线方向（target-position）
+// 不变，等价于纯平移而不是旋转/俯仰。调用方不需要自己记得「两边都加」——
+// 这正是本函数存在的理由（只加一边会让画面产生俯仰，且很难一眼看出错）。
+struct CameraPlacement {
+    jpov::Vec3f position;
+    jpov::Vec3f target;
+};
+
+// Pre-condition: 无（target_y_offset 任意有限值；inf/NaN 会照常污染，调用方保证）。
+inline CameraPlacement MakePannedCamera(const ViewConfig& view,
+                                        float target_y_offset) {
+    const jpov::Vec3f offset(0.0f, target_y_offset, 0.0f);
+    return CameraPlacement{view.Position() + offset,
+                           ViewConfig::Target() + offset};
 }
 
 // 默认初始视角：目标点 (0,0,0)，方位 45°，仰角 0°，R=√2（单位尺度模型）。

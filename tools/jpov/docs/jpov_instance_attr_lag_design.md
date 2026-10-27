@@ -280,16 +280,19 @@ per-instance attribute（divisor=1）:
 | 偏移(byte) | 字段 | 编码 |
 |---|---|---|
 | 0 | `ratio` (pose) | `uint8`，`/255` → [0,1] |
-| 1 | **保留**（原 `ratio_lag`） | —（pose-lag 机制已移除，字节保留） |
+| 1 | `tint_enabled` | `uint8` 0/1：逐实例 base tint 开关（0=不做乘法） |
 | 2–9 | `thick[0..7]` | `uint8`，`0.01 + v/255 × 2.49` → [0.01, 2.5]，**步长 ~0.0097** |
-| 10–12 | `color0` (RGB888) | R,G,B 各 1 byte |
-| 13–15 | `color1` (RGB888) | R,G,B 各 1 byte |
+| 10–12 | `color0` (RGB888) | 逐实例 tint 通道 1 的 R,G,B（各 1 byte） |
+| 13–15 | `color1` (RGB888) | 逐实例 tint 通道 2 的 R,G,B（各 1 byte） |
 
 - **total = 1 + 1 + 8 + 6 = 16 byte** ✅。
 - **thick 精度写死在注释**：范围 `[0.01, 2.5]`，256 级，步长 ~0.0097，**再大变形由用户自定义
   其它通道 / 不做**（Danis 拍板）。
-- **color = RGB888 真彩**（两个肉眼可辨的配色），**不是** 256 色调色板索引。⚠️ 3 byte/色**跨 uint32
-  边界**，解包位序要写对（`aPack.z/y/x` 组合）。
+- **color = RGB888 真彩**（逐实例的两个 tint 通道颜色），**不是** 256 色调色板索引。⚠️ 3 byte/色
+  **跨 uint32 边界**，解包位序要写对（`aInstMisc.z/y/x` 组合；见 `skinning_shader.h` 的
+  `MiscTintColor0/1`）。
+- tint 只在 mesh 带 `kBaseTint`（顶点 loc6.z 的 id）时才生效；与 `InstanceState::base_tint`
+  （静态实例路径 loc12..14 float）语义一致。
 
 ### 6.4 loc13：pose 的 2 个 partial 四元数（8 half）
 

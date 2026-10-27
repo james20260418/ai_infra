@@ -39,6 +39,8 @@
 #include <string>
 #include <vector>
 
+#include "tools/jpov/interface/pbr_material.h"  // BaseTint（逐实例调色板）
+
 #include <glog/logging.h>
 #include "geom/common/quaternion.h"
 #include "geom/common/vec.h"
@@ -321,8 +323,14 @@ struct SkinnedInstanceState {
 
     // 外观 select：==架构 doc §3== 换外观=换索引/材质变体(非换几何)。S1 才用。
     // S0 全低模统一外观，占位常 0；将来换服饰/肤=在此给 baseColor 变体/texture-array index。
-    // TODO(2026-09-06): 动态 per-instance 颜色通道(B 决策)延后，S0 不建。
     uint32_t appearance_index = 0;
+
+    // ---- 逐实例 base tint 调色板（2026-10-27 接入；与 InstanceState 同构）----
+    //   enabled=false（默认）= 本实例不做 tint 乘法；
+    //   enabled=true 时，mesh 的逐顶点 id 1/2 分别乘 color[0]/color[1]（id 0 不受影响）。
+    //   ⚠️ 需要 mesh 带 kBaseTint；颜色按 [0,1] 处理（蒙皮路径量化成 RGB888，见
+    //   instance_buffer.h 的 kMiscByteColor*）。
+    BaseTint base_tint;
 
     // 拾取 id（逐实例，uint32）：>0 = 本实例可被拾取；命中它时 JPOV::last_pick().picking_id
     //   回传此值。0 = 不可拾取。同批各实例可不同；仅在 PickQuery.enabled 时参与拾取 pass。

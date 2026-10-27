@@ -1,10 +1,10 @@
-// JPOV VolumeFireRenderer —— 逐像素 raymarch 体积火 → 写进 WBO 透明纹理（与粒子/玻璃同套代数）
+// JPOV VolumeFireRenderer —— 逐像素 raymarch 体积火 → 写进 WBO 透明纹理（与粒子/条带同套代数）
 //
 // 定位（tools/jpov/docs/jpov_volumetric_fire_design.md）：
 //   把一团 `.jpovvol`（R=density / G=temperature[K]）沿视线做**体渲染积分**，输出
 //   `(预乘发射 L, 透射率 1−α)`，作为**一个薄层**写进本渲染器自持的
 //   WBO 缓冲（accum/reveal），再 Composite 解析 over 到当前目标（HDR）。
-//   与 ParticleRenderer / #176 透明玻璃共用同一套 McGuire WBO 代数。
+//   与 ParticleRenderer / 条带共用同一套 McGuire WBO 代数。
 //
 // 画法：画该团的世界 AABB **盒**（8 角由 gl_VertexID 生成；**剔除正面** → 每像素恰好
 //   光栅化一个盒面 → FS 只跑一次）。FS：从像素反构世界光线 → 与盒求交 [t_near,t_far] →

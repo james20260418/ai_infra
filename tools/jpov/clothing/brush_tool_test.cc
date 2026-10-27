@@ -195,6 +195,35 @@ TEST(BrushToolTest, EnsurePrimitivesGrowsAndKeepsExisting) {
     EXPECT_EQ(b.primitive_count(), 3u);
 }
 
+// ==================== tint 一键刷选区（覆盖赋值） ====================
+
+TEST(BrushToolTest, AssignByteToVerticesOverwritesSelection) {
+    std::vector<uint8_t> ids = {0, 0, 0, 0};
+    // 选区 = 下标 {0, 2}（画笔保证升序去重）。
+    const std::vector<uint32_t> sel = {0, 2};
+
+    EXPECT_EQ(AssignByteToVertices(sel, /*id=*/2, &ids), 2u);
+    EXPECT_EQ(static_cast<int>(ids[0]), 2);
+    EXPECT_EQ(static_cast<int>(ids[1]), 0) << "选区外顶点不该被改";
+    EXPECT_EQ(static_cast<int>(ids[2]), 2);
+    EXPECT_EQ(static_cast<int>(ids[3]), 0);
+
+    // 再刷同一个 id：没有值变化 → 返回 0（驱动 GPU 重传的判据）。
+    EXPECT_EQ(AssignByteToVertices(sel, /*id=*/2, &ids), 0u);
+
+    // id=0 = 清除：只清选区。
+    EXPECT_EQ(AssignByteToVertices(sel, /*id=*/0, &ids), 2u);
+    EXPECT_EQ(static_cast<int>(ids[0]), 0);
+    EXPECT_EQ(static_cast<int>(ids[2]), 0);
+}
+
+TEST(BrushToolTest, AssignByteToVerticesHandlesEmptySelection) {
+    std::vector<uint8_t> ids = {0, 0};
+    EXPECT_EQ(AssignByteToVertices({}, /*id=*/1, &ids), 0u);
+    EXPECT_EQ(static_cast<int>(ids[0]), 0);
+    EXPECT_EQ(static_cast<int>(ids[1]), 0);
+}
+
 }  // namespace
 }  // namespace clothing
 }  // namespace jpov

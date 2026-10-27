@@ -70,7 +70,7 @@ public:
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
     //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
     // ---- 植被风（实例路径）：单关节刚性链 + 逐实例吹倒 ----
-    //   顶点属性：loc6 vec2 = (joint_id, phase)。
+    //   顶点属性：loc6 vec4 = (joint_id, phase, base tint id, 预留)。
     //     joint_id = 该顶点所属刚性段在关节表里的下标（烘焙期按拓扑定，唯一且无歧义，
     //     同一枝同一环共享 ⇒ 环内不会被切开）；phase = 链外湍流的逐顶点连续相位。
     //   路径长 L（吹倒权重）= 由关节链在 VS 里现算，不占顶点属性。
@@ -78,7 +78,8 @@ public:
     //      不产生剪切；逐顶点平移/旋转会把细长三角形拉成薄片。
     inline static const std::string kWindBlowGlsl = R"glsl(
 layout(location = 11) in float aInstBlowAway;   // 逐实例：吹倒比例（0 = 不吹）
-layout(location = 6) in vec2 aFlex;             // (joint_id, phase)
+// loc6 统一 vec4（顶点属性）：(joint_id, phase, base tint id, 预留)。
+layout(location = 6) in vec4 aFlex;
 uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
@@ -202,6 +203,19 @@ vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
 }
 )glsl";
 
+    // 逐实例 tint（静态路径 loc12..14）：两个 RGB 颜色 + 一个 0/1 开关。
+    //   与蒙皮路径不同：这里直接传 float（无 RGB888 量化）。颜色分量 host 已 clamp 到 [0,1]。
+    //   输出用 flat：逐实例常量，不需要插值；vTintIndex 来自顶点 loc6.z（mesh 的逐顶点 id）。
+    inline static const std::string kInstanceTintGlsl = R"glsl(
+layout(location = 12) in vec3 aInstTint0;
+layout(location = 13) in vec3 aInstTint1;
+layout(location = 14) in float aInstTintEnabled;
+flat out vec3 vInstTint0;
+flat out vec3 vInstTint1;
+flat out int vTintEnabled;
+flat out int vTintIndex;
+)glsl";
+
     inline static const std::string kMeshVs3dPBRInstanced = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -221,7 +235,7 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 )glsl")
-    + kWindBlowGlsl +
+    + kWindBlowGlsl + kInstanceTintGlsl +
     R"glsl(
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
@@ -233,6 +247,10 @@ void main() {
     vWorldNormal = normalize(mat3(transpose(inverse(model))) * wn);
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
+    vInstTint0 = aInstTint0;
+    vInstTint1 = aInstTint1;
+    vTintEnabled = int(aInstTintEnabled + 0.5);
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uViewProj * world_pos;
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -260,7 +278,7 @@ uniform int uPickIdBase;
 flat out uint vPickId;
 #endif
 )glsl")
-    + kWindBlowGlsl +
+    + kWindBlowGlsl + kInstanceTintGlsl +
     R"glsl(
 void main() {
     mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
@@ -274,6 +292,10 @@ void main() {
     vWorldNormal = normalize(nrm * wn);
     vWorldTangent = normalize(nrm * wt);
     vTexCoord = aTexCoord;
+    vInstTint0 = aInstTint0;
+    vInstTint1 = aInstTint1;
+    vTintEnabled = int(aInstTintEnabled + 0.5);
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uViewProj * world_pos;
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -350,6 +372,11 @@ in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
+// 逐实例 tint：flat（逐实例常量 + 逐顶点 flat id）。enabled=0 时 FS 整段跳过。
+flat in vec3 vInstTint0;
+flat in vec3 vInstTint1;
+flat in int vTintEnabled;
+flat in int vTintIndex;
 layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）。
 // 不用 varying 传线性深度（llvmpipe 对超大三角形的 varying 插值会退化成 0，实测）；
@@ -827,6 +854,15 @@ void main() {
         : vec4(uBaseColor, 1.0);
     vec3 base_color = base_texel.rgb;
 
+    // 逐实例 base tint：只乘 baseColor；id 0 不换色，1/2 用实例自己的调色板。
+    if (vTintEnabled == 1) {
+        if (vTintIndex == 1) {
+            base_color *= vInstTint0;
+        } else if (vTintIndex >= 2) {
+            base_color *= vInstTint1;
+        }
+    }
+
 #ifdef JPOV_ALPHA_CUTOUT
     // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。
     // 本段由独立 program（宏 JPOV_ALPHA_CUTOUT）编译，使不透明 program 不含 discard
@@ -977,6 +1013,9 @@ void main() {
     // 与 DrawObject3D 的材质/光照/tile/阴影 uniform 处理逐项对齐，区别仅在：
     //   ① 摆放走 per-instance attribute（instance_model_buf，loc7..10）而非 uModel；
     //   ② 裁剪走 uniform uViewProj（= proj*view，不含 model）；③ glDraw*Instanced。
+    //   逐实例 tint：instance_tint{0,1,enabled}_buf（loc12..14；**全批都关时不上传/不挂载**）。
+    //   ⚠️ tint 颜色来自 `InstanceState::base_tint`，**不读** `material.base_tint`
+    //（后者只服务 object3d 的逐物体路径）。
     // 选 program：any_tex → prog_full*；alpha_mode==kMask → prog_*cutout*；double_sided 关背面剔除。
     //
     // GL 状态前置要求同 DrawObject3D（3D FBO 已绑、depth/cull 已设、光照 uniform 已上传给本套 program）。
@@ -994,7 +1033,10 @@ void main() {
                                     unsigned int prog_full_cutout,
                                     unsigned int tile_index_tex,
                                     InstanceBuffer& instance_model_buf,
-                                    InstanceBuffer& instance_blow_buf);
+                                    InstanceBuffer& instance_blow_buf,
+                                    InstanceBuffer& instance_tint0_buf,
+                                    InstanceBuffer& instance_tint1_buf,
+                                    InstanceBuffer& instance_tint_enabled_buf);
 
     // ---- DrawInstancedObjectShadow ----
     // 统一批实例的阴影 pass：从太阳正交光空间画进阴影纹理（只写相对主视锥中心的线性深度）。

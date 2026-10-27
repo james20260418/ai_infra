@@ -61,6 +61,7 @@ cc_library(
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:tint_ui",
         "//tools/jpov/interface:ui",
     ],
     copts = ["-std=c++20"],

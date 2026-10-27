@@ -188,6 +188,7 @@ cc_library(
         "//tools/jpov/interface:mesh",
         "//tools/jpov/interface:skeleton_motion_lag",
         "//tools/jpov/interface:skeleton_types",
+        "//tools/jpov/interface:tint_ui",
         "//tools/jpov/interface:ui",
         "//tools/jpov/src:gltf_loader",
         "//tools/jpov/src:gltf_saver",
