@@ -53,6 +53,8 @@ static_assert(kNumPartialRotation == 2,
               "loc13/14 各打包 kNumPartialRotation 个四元数 ⇒ 必须是 2");
 static_assert(kMiscByteThickBase + kNumThicknessGroup <= kMiscByteColor0,
               "8 个 thick 必须塞进 byte2..9，不与 color0(byte10) 重叠");
+static_assert(kMiscByteColor1 + 3 <= 16,
+              "color1(RGB888) 必须落在 16 byte 的 loc12 内");
 
 // loc7..10 = model（mat4）。
 static_assert(kInstanceModelAttrSpec.base_loc == 7 &&
@@ -232,7 +234,8 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
         const float ratio = std::min(std::max(inst.ratio, 0.0f), 1.0f);
         bytes[kMiscByteRatio] =
             static_cast<unsigned char>(std::lround(ratio * 255.0f));
-        // byte1（原 ratio_lag）保留为 0：pose-lag 机制已移除。
+        // byte1 = 逐实例 base tint 开关（0=不做乘法；1=做）。
+        bytes[kMiscByteTintEnabled] = inst.base_tint.enabled ? 1u : 0u;
         for (int g = 0; g < kNumThicknessGroup; ++g) {
             const float mu = inst.thickness_scales[static_cast<size_t>(g)];
             // 契约（skeleton_types.h 的 Pre-condition）：每项 > 0 且有限。0/负会把截面压成
@@ -243,7 +246,20 @@ void SkeletonRenderer::UploadSkinningInstanceAttributes(
                                      << mu << " —— 实例 " << k;
             bytes[kMiscByteThickBase + g] = EncodeThickness(mu);
         }
-        // byte10..15（color0/color1）暂留 0：S0 不建动态 per-instance 颜色（见 skeleton_types.h）。
+        // byte10..15 = 逐实例 tint color0/color1（RGB888；[0,1] clamp）。
+        // 只在 enabled 时编码：默认不开 tint 的场景（绝大多数）零额外 CPU 工作。
+        if (inst.base_tint.enabled) {
+            const float rgb0[3] = {inst.base_tint.color[0].r, inst.base_tint.color[0].g,
+                                   inst.base_tint.color[0].b};
+            const float rgb1[3] = {inst.base_tint.color[1].r, inst.base_tint.color[1].g,
+                                   inst.base_tint.color[1].b};
+            for (int c = 0; c < 3; ++c) {
+                CHECK(std::isfinite(rgb0[c])) << "实例 " << k << " tint color0 非有限值";
+                CHECK(std::isfinite(rgb1[c])) << "实例 " << k << " tint color1 非有限值";
+                bytes[kMiscByteColor0 + c] = EncodeTintColor8(rgb0[c]);
+                bytes[kMiscByteColor1 + c] = EncodeTintColor8(rgb1[c]);
+            }
+        }
         for (int w = 0; w < 4; ++w) {
             const uint32_t u =
                 static_cast<uint32_t>(bytes[w * 4 + 0]) |

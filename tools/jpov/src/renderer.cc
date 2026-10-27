@@ -2328,7 +2328,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                     tile_index_tex_, instanced_object_model_buf_,
-                    instanced_object_blow_buf_);
+                    instanced_object_blow_buf_, instanced_object_tint0_buf_,
+                    instanced_object_tint1_buf_, instanced_object_tint_enabled_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {

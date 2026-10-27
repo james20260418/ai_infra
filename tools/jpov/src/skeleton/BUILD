@@ -17,6 +17,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//tools/jpov/interface:pbr_material",
         "//tools/jpov/interface:skeleton_types",
         "//geom/common:quaternion",
         "//geom/math:dual_quat",

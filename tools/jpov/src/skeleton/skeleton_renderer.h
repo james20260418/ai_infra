@@ -84,6 +84,11 @@ in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
+// 逐实例 tint（flat）：颜色来自实例 state 的 BaseTint（misc RGB888），id 来自顶点 loc6.z。
+flat in vec3 vInstTint0;
+flat in vec3 vInstTint1;
+flat in int vTintEnabled;
+flat in int vTintIndex;
 layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度）。vec4 + alpha=1 保证混合恒等写入。
 layout(location = 1) out vec4 FragSceneDepth;
@@ -463,6 +468,15 @@ void main() {
         ? texture(uBaseColorTex, vTexCoord)
         : vec4(uBaseColor, 1.0);
     vec3 base_color = base_texel.rgb;
+
+    // 逐实例 base tint：只乘 baseColor；id 0 不换色，1/2 用本实例自己的调色板。
+    if (vTintEnabled == 1) {
+        if (vTintIndex == 1) {
+            base_color *= vInstTint0;
+        } else if (vTintIndex >= 2) {
+            base_color *= vInstTint1;
+        }
+    }
 
 #ifdef JPOV_ALPHA_CUTOUT
     // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。

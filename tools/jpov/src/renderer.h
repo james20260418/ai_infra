@@ -431,6 +431,10 @@ public:
     //   （如植被的 per-instance 颜色 / 摆动相位），不被蒙皮布局重排拖累。
     InstanceBuffer instanced_object_model_buf_{instanced_object::kModelAttrSpec};  // loc7..10 = mat4
     InstanceBuffer instanced_object_blow_buf_{instanced_object::kBlowAwayAttrSpec};  // loc11 = 吹倒比例
+    // 逐实例 tint 调色板（loc12/13 = vec3 颜色，loc14 = 0/1 开关）；全批关闭时不挂载。
+    InstanceBuffer instanced_object_tint0_buf_{instanced_object::kTint0AttrSpec};
+    InstanceBuffer instanced_object_tint1_buf_{instanced_object::kTint1AttrSpec};
+    InstanceBuffer instanced_object_tint_enabled_buf_{instanced_object::kTintEnabledAttrSpec};
     // 骨架注册表：skeleton_id = vector 下标（M1 单骨架/无释放够用；后续再上 IdAllocator 复用）。
     std::vector<std::unique_ptr<SkeletonManager>> skeleton_managers_;
 };

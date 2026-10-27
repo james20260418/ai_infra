@@ -84,7 +84,8 @@ output/jpov_clothing_tool/jpov_clothing_tool \
   保存 glb 时写入自定义顶点属性 `_JPOV_TINT`（`UNSIGNED_BYTE SCALAR`）。**染白不在本工具做**
   （建模时把该区 baseColor 留白最自然）；渲染 = `baseColor × 调色板色`，开关关掉时**完全不做乘法**。
   详见 `docs/jpov_base_tint_design.md`。
-  ⚠️ MVP 只有 object3d 着色器消费 tint：开启「随机摆动测试」（走蒙皮路径）时 tint 暂不显示。
+  ✅ object3d / 静态实例 / 蒙皮三条路径都消费 tint；「随机摆动测试（lag 检测）」走蒙皮路径时，
+  工具会把当前调色板写进 `SkinnedInstanceState::base_tint`（逐实例），tint 照常显示。
 - **顶部中间（画笔面板下方）— 布料 LAG 松弛度**：按钮 **由固定点推导松弛度**；滑条 **松弛度半径 (m, 0=自动)** / **最大滞后位移 max_lag (m)**；勾选 **显示松弛度场（蓝=固定 红=自由）**。见 §4.5。
 - **左上 — 变换 / 保存 / 场景**
   - 平移 X/Y/Z：步长输入框 + `<` `>` 按钮

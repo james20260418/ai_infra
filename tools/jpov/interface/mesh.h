@@ -118,8 +118,10 @@ struct MeshData {
     //   (lag_ratio, max_lag, tint, 0) 或 (joint_id, phase, tint, 0)。
     // 渲染约定：着色器按 **flat（provoking vertex）** 读 ⇒ 一个三角形整体归属一个色；
     //   画笔在三角形边界上可能左右不一致，边界由 provoking vertex 决定（MVP 接受）。
-    // 消费路径：目前只有 **object3d**（DrawObject3D / DrawGltfObject）着色器读它；
-    //   蒙皮 / 静态实例路径暂未接入（mesh 可以同时带 kJoints + kBaseTint，只是后者不生效）。
+    // 消费路径：三条 3D 路径都读它（索引来自 loc6.z）：
+    //   · object3d：颜色用 `PBRMaterial::base_tint`（逐物体）；
+    //   · 静态实例：颜色用 `InstanceState::base_tint`（逐实例）；
+    //   · 蒙皮：颜色用 `SkinnedInstanceState::base_tint`（逐实例）。
     std::vector<uint8_t> base_tint;
 
     // 植被风标注（逐顶点；kWind 时非空）—— **只存 2 个数**，把此桩“次级运动槽”用到最省：

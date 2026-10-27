@@ -253,3 +253,18 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 蒙皮路径逐实例 base tint（loc12 misc RGB888 → flat varying → FS 乘法）。
+cc_test(
+    name = "jpov_skinned_tint_test",
+    srcs = ["jpov_skinned_tint_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+

@@ -297,6 +297,9 @@ Danis 拍板方向：以**「骨骼动画纹理」（骨骼烘焙蒙皮）**为�
 - 风：**便宜档** ✅(TODO) = per-instance 标量（风速/风向 seed），shader 对蒙皮后顶点做廉价正弦摆动（非真布料）；
   **贵档** = 真实布料/裙摆逐 instance 解算 → 延后。
 - 颜色 / 4 副面孔 / 衣物 → 全走「index/tint select 共享区」，见 §3 表。
+  ✅ 逐实例 tint（2026-10-27）：`InstanceState::base_tint` / `SkinnedInstanceState::base_tint`
+  （两通道 RGB + enable），静态实例 loc12..14、蒙皮 loc12 misc byte1+RGB888；见
+  `jpov_base_tint_design.md`。
 
 ---
 

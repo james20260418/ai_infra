@@ -1809,6 +1809,15 @@ struct InstanceState {
     //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
     //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
     float blow_away_ratio = 0.0f;
+
+    // ---- 逐实例 base tint 调色板（可选）----
+    // 与 `PBRMaterial::base_tint` 同构（enable + 2×RGB），但**逐实例**：同一批实例可各用
+    // 不同颜色（植被四季 / 人群衣服分色）。
+    //   · enabled=false（默认）= 本实例不做 tint 乘法（即使 mesh 有 kBaseTint id）；
+    //   · enabled=true 时，mesh 的逐顶点 id 1/2 分别乘 color[0]/color[1]；id 0 不受影响。
+    //   · 颜色分量按 [0,1] 处理（渲染端 clamp；见 instance_buffer.h / attrs 注释）。
+    // ⚠️ 只有 mesh 带 `kBaseTint` 逐顶点 id 时才有效；本字段不改变几何/其它 PBR 通道。
+    BaseTint base_tint;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -1857,6 +1866,7 @@ struct SkinnedMeshCommand {
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
                              // 若 rest mesh 带 kRelax，实例还可给 pos_lag / partial_rotations_lag（LAG）。
+                             // 逐实例 tint 走 `SkinnedInstanceState::base_tint`（不看 material.base_tint）。
     PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
