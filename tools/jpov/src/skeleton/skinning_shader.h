@@ -54,7 +54,7 @@ namespace jpov {
 // 布局（2026-10-10 「loc 重排」后定稿，loc0..15 用满）：
 //   顶点属性：0 aPos 1 aNormal 2 aTexCoord 3 aJoint 4 aWeight 5 aTangent
 //             6 aFlex(vec4：lag_ratio, max_lag, base tint id, 预留)
-//   实例属性：7..10 aInstModel | 11 aInstPoseIds(vec4) | 12 aInstMisc(uvec4)
+//   实例属性：7..10 aInstModel | 11 aInstPoseIds(vec2) | 12 aInstMisc(uvec4)
 //             13 aInstPartial(uvec4) | 14 aInstPartialLag(uvec4) | 15 aInstPosLag(uvec4)
 //   布局的**唯一约定点**在 src/instance_buffer.h（kInstance*AttrSpec + 位打包 codec）；
 //   实例数据由渲染器持有的 InstanceBuffer 承载（属于「这次 draw」，不属于 mesh）。
@@ -580,9 +580,15 @@ void main() {
     vWorldNormal = normalize(mat3(transpose(inverse(inst_model))) * sn);
     vWorldTangent = normalize(mat3(transpose(inverse(inst_model))) * st);
     vTexCoord = aTexCoord;
-    vInstTint0 = MiscTintColor0();
-    vInstTint1 = MiscTintColor1();
     vTintEnabled = MiscTintEnabled();
+    // 默认（未开 tint）不解码颜色：省 6 次 byte 提取 + 除法；FS 也不会用。
+    if (vTintEnabled == 1) {
+        vInstTint0 = MiscTintColor0();
+        vInstTint1 = MiscTintColor1();
+    } else {
+        vInstTint0 = vec3(0.0);
+        vInstTint1 = vec3(0.0);
+    }
     vTintIndex = int(aFlex.z + 0.5);
     // 裁剪坐标 = (proj*view) * inst_model * 骨架空间顶点 = uViewProj * world。
     gl_Position = uViewProj * world;

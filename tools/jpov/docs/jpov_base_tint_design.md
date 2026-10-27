@@ -21,8 +21,9 @@
 | glb 自定义属性 | `_JPOV_TINT`：`UNSIGNED_BYTE SCALAR`，每顶点一个 id |
 
 **id 语义**：`0` = 不换色（保持 baseColor 原色）；`1..N` = 用第 i 个调色板色乘 baseColor。
-MVP `N = 2`。byte 的值空间是 0..255，扩通道数只需扩 `kNumBaseTintColors` 与 shader 的
-uniform 数，**不需要改顶点布局**。
+MVP `N = 2`。byte 的值空间是 0..255；扩通道数需要同时改 `kNumBaseTintColors`、`BaseTint::color[]`、
+object3d FS 的 uniform/分支、以及实例/蒙皮的打包（静态 loc12..14 / 蒙皮 RGB888），
+但**顶点布局不用动**（id 仍是 loc6.z 的一个 float）。
 
 **为什么共用 loc6**：风（`kWind`）只用 `.xy`，布料松弛度（`kRelax`）只用 `.xy`，所以 `.z` 空出来。
 `kBaseTint` 与两者都可共存（一棵树既能吹风又能按季换色）。`kRelax` 与 `kWind` 仍互斥（同抢 `.xy`）。
@@ -78,3 +79,6 @@ uniform 数，**不需要改顶点布局**。
 - `jpov_instanced_tint_test`（GPU 像素）：同 mesh 多实例分别红/绿/蓝、disabled 白、id2 用 color1 黄。
 - `jpov_skinned_tint_test`（GPU 像素）：1 骨蒙皮 box 三实例红/绿/disabled 白。
 - `instance_buffer_test`：tint RGB888 编解码往返 + 越界 clamp。
+- `clothing_tint_gold_test`（gold 图）：用 `lace_skirt_tinted_sample.glb` 渲 object3d / 静态实例 /
+  蒙皮三条路径（后两者各两个实例、**左右不同调色板**），gold ROI 比对 + tint on/off 变化像素门禁
+  + 左右主导色门禁。gold 生成器：`clothing_tint_gold_generator`。

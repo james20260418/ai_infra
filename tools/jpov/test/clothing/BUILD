@@ -47,3 +47,48 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# ============================================================================
+# 顶点 tint gold —— tinted 裙子资产（_JPOV_TINT）三条路径 + 逐实例颜色
+# ============================================================================
+cc_binary(
+    name = "clothing_tint_gold_generator",
+    srcs = [
+        "clothing_tint_gold_generator.cc",
+        "clothing_tint_gold_common.h",
+    ],
+    data = _DATA,
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/test:test_utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+cc_test(
+    name = "clothing_tint_gold_test",
+    srcs = [
+        "clothing_tint_gold_test.cc",
+        "clothing_tint_gold_common.h",
+    ],
+    data = _DATA + [
+        ":cloth_tint_object3d_640x360.png",
+        ":cloth_tint_instanced_640x360.png",
+        ":cloth_tint_skinned_640x360.png",
+    ],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/src:gltf_loader",
+        "//tools/jpov/test:test_utils",
+        "//tools/jpov/test:compare_light",
+        "//third_party/stb:stb_image",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

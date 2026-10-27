@@ -68,7 +68,7 @@ struct InstanceAttrSpec {
 //   实例属性（divisor=1）：
 //     7..10  aInstModel      mat4（4×vec4，列主序）                  stride 16 float
 //     11     aInstPoseIds    vec2：pose.a / pose.b（平坦 texel 起点）         stride 2 float
-//     12     aInstMisc       uvec4（uint8 视图：2 ratio + 8 thick + 2 RGB888） stride 4 float(=16B)
+//     12     aInstMisc       uvec4（uint8 视图：ratio + tint 开关 + 8 thick + 2 RGB888） stride 4 float(=16B)
 //     13     aInstPartial    uvec4（8 half：pose 的 2 个 partial 四元数）   stride 4 float(=16B)
 //     14     aInstPartialLag uvec4（8 half：lag  的 2 个 partial 四元数）   stride 4 float(=16B)
 //     15     aInstPosLag     uvec4（8 half，用 3：lag 相对坐标 dx,dy,dz）  stride 4 float(=16B)
