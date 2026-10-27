@@ -286,6 +286,8 @@ private:
     unsigned int SolidProg();
     unsigned int TextProg();
     unsigned int ImageProg();
+    // 2D 板材（SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，见 src/plate2d）。
+    unsigned int PlateProg();
     unsigned int Solid3DProg();
     unsigned int Text3DProg();
     unsigned int DrawObject3DProg();

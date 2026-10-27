@@ -301,6 +301,49 @@ cc_binary(
 )
 
 # ============================================================================
+# sp_ui — SDF 板材版 UI（与大理石材质的演示台）
+# 面板从 ui_demo_panel.h 复制而来，控件动线相同，只把底板换成 Plate。
+# ============================================================================
+
+cc_library(
+    name = "sp_ui_demo_panel",
+    hdrs = ["demo/sp_ui_demo_panel.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/sp_ui:sp_ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_sp_ui_demo",
+    srcs = ["demo/sp_ui_demo.cc"],
+    deps = [
+        "//tools/jpov:sp_ui_demo_panel",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_sp_ui_demo.exe",
+    srcs = ["demo/sp_ui_demo.cc"],
+    deps = [
+        "//tools/jpov:sp_ui_demo_panel",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # 示例：Screenshot Demo — 绘制后保存 PNG 截图
 # ============================================================================
 cc_binary(
