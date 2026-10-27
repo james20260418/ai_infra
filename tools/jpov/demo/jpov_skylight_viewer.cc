@@ -296,6 +296,11 @@ int RunCaptureWater(const std::string& out_dir) {
     // 抬头看水面：机位仍在水下，但把注视点抬到水面之上（否则永远只看见海底）。
     app.view_target_ = jpov::Vec3f(0.0f, 9.0f, 0.0f);
     shoot("water_camera_under_lookup");
+    // 对照：把水面当成**理想镜面**（RMS 斜率 0）⇒ 临界角处是纯物理硬边。
+    // 两张图并排就能看出"过渡宽度"到底来自哪：不是调参，是界面粗糙度。
+    app.water_.surface_slope_rms_deg = 0.0f;
+    shoot("water_camera_under_lookup_flat");
+    app.water_.surface_slope_rms_deg = 6.0f;
     app.view_target_.reset();
 
     // ── 4. 高浪（底座验证）：wave_amplitude 4 m，看轮廓/遮挡/反射是否随浪起伏 ──

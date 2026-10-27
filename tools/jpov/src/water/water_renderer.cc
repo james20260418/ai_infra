@@ -382,6 +382,9 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 std::max(0.0f, water.scatter_scale));
     glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uCamUnderwater"),
                 IsCameraUnderwater(water, cam) ? 1 : 0);
+    // 水面 RMS 斜率（度 → 弧度）。0 = 理想镜面（TIR 硬边）。
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSlopeRmsRad"),
+                std::max(0.0f, water.surface_slope_rms_deg) * 3.14159265358979f / 180.0f);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, cap_color_tex_);

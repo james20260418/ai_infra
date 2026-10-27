@@ -118,6 +118,8 @@ uniform float     uRoughness;     // 反射 mip 粗糙度
 uniform vec3      uAbsorption;    // 1/米
 uniform vec3      uScatter;
 uniform float     uScatterScale;
+// 水面 RMS 斜率（弧度）。0 = 理想镜面（TIR 硬边）；见 WaterSurface::surface_slope_rms_deg。
+uniform float     uSlopeRmsRad;
 
 uniform int       uCamUnderwater;
 
@@ -150,10 +152,13 @@ void main() {
         //
         // 几何量：sinθc = n2/n1 = 1/1.333 ⇒ cosθc = 0.6614。
         const float kCosCrit = 0.6614;
-        // 过渡带半宽（cos 空间）。0.12 ≈ 视角 ±9°，对应屏幕上几十像素的渐变。
-        const float kSoft = 0.12;
+        // 过渡带半宽 = 水面斜率分布的投影：cos 空间的宽度 ≈ sinθc · σ（一阶近似）。
+        // σ = 0 时退化成严格物理硬边（smoothstep 两端相等会退化，故单独走 step 分支）。
+        float soft = 0.75 * max(uSlopeRmsRad, 0.0);
         float ci = clamp(abs(dot(N, V)), 1.0e-4, 1.0);
-        float t = smoothstep(kCosCrit - kSoft, kCosCrit + kSoft, ci);   // 0=TIR, 1=窗口
+        float t = (soft > 1.0e-4)
+                    ? smoothstep(kCosCrit - soft, kCosCrit + soft, ci)
+                    : step(kCosCrit, ci);          // 理想镜面：TIR 硬边
 
         // 反射侧：探针下半球（地色）当"水下环境"的低频替身，再掺水体散射色并提亮一点
         //（不这样它会是死黑，整片"水做的天花板"读成一个洞）。
