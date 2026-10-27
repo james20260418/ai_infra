@@ -139,52 +139,55 @@ float ZView(float d) {
 }
 
 // 波浪法线（解析，**不位移几何**）：
-//   h(p) = Σ Aᵢ·sin(kᵢ·dᵢ·p + wᵢ·φ)，法线 = normalize(-∇h, 1)。
-//   5 组方向/波长互不成谐波的正弦叠加（3 组会看出规则"点阵"）；合成后再**限幅**到
-//   uWaveSlopeRad（保证"波幅滑条"的物理含义是"最大斜率"，不是"随便一个乘数"）。
+//   h(p) = Σ Aᵢ·sin(kᵢ·dᵢ·p + ωᵢφ)，法线 = normalize(−∇h, 1)。
 //
-// 远处必须淡出：10 km² 的水面在 1 km 处一个像素覆盖米级面积，解析波就是一片闪烁噪点。
-// 判据用像素足迹（fwidth）⇒ 远景收敛回镜面，正是真实远海的观感。
+// ⭐ **逐八度抗锯齿**（这是"远处为什么不该变平"的关键）：
+//   程序化波浪没有 mip，像素足迹一旦超过某个波长的 Nyquist，那个波长就只能变成闪烁噪点。
+//   但**不能整片一起淡出**（第一版就是这么写的：按最短波长算一个全局 fade ⇒ 50~60 m 外
+//   全平了，看起来像"只有近处有波纹"）。正确做法是**每个八度按自己的波长单独判**：
+//     fadeᵢ = 1 − smoothstep(λᵢ/6, λᵢ/3, footprint)
+//   于是远处先丢掉细波、保留大浪 —— 和法线贴图 mip 一个道理，只是发生在程序化域。
+//   丢掉一部分八度后按**存活权重之和**归一化，所以"波幅滑条 = 最大斜率"在任何距离都成立。
 vec3 WaveNormal(vec3 p) {
     if (uWaveSlopeRad <= 1.0e-5) {
         return vec3(0.0, 1.0, 0.0);
     }
-    // 抗锯齿：波浪是逐像素解析算的、没有 mip ⇒ 频率超过像素 Nyquist 就变闪烁/摩尔纹。
-    // 判据用**该像素在水面上的足迹**（fwidth(world.xz)）而不是"到相机的距离"：
-    // 掠射角下足迹长得极快，距离判据会漏（实测水面远处出现同心圆摩尔纹）。
-    // 足迹 > λ/6 开始淡出、> λ/3 完全平滑（远海本来就该收敛成镜面）。
-    float lam = max(uWaveLengthM, 0.05);
+    // 像素在**水面**上的足迹（掠射角下长得极快，所以不能用"到相机的距离"代替）。
     float footprint = length(fwidth(p.xz));
-    float fade = 1.0 - smoothstep(0.17 * lam, 0.33 * lam, footprint);
-    if (fade <= 0.0) {
-        return vec3(0.0, 1.0, 0.0);
-    }
 
-    // 5 组方向/波长互不成谐波的正弦（+ 深水色散 ω ∝ 1/√λ）：
-    //   少了会出现规则网格/摩尔纹（实测 3 组就是一张"点阵"），多了没必要。
-    //   权重之和 = 1 ⇒ 合成斜率的上界仍是 uWaveSlopeRad（"波幅"滑条含义稳定）。
-    const int   kCount = 5;
-    // 方向/波长都取**不成比例**的值（不用 0/45/90 那种整齐角度）：整齐的组合会在水面上
-    // 拍出"华夫饼"式的规则点阵，远看变成摩尔纹（实测 3 组整齐方向就是这个观感）。
-    const float kAng[kCount]     = float[kCount](0.00, 1.13, 2.41, 3.63, 5.02);
-    const float kLamMul[kCount]  = float[kCount](1.00, 0.63, 1.57, 0.37, 2.31);
-    const float kWeight[kCount]  = float[kCount](0.30, 0.25, 0.19, 0.15, 0.11);
+    // 7 个八度：方向/波长都取不成比例的值（整齐的组合会拍出"华夫饼"点阵 + 摩尔纹）。
+    // 波长跨度 0.37λ … 5λ ⇒ 细节在近处，远处还剩大尺度起伏。
+    const int   kCount = 7;
+    const float kAng[kCount]    = float[kCount](0.00, 1.13, 2.41, 3.63, 5.02, 0.72, 4.31);
+    const float kLamMul[kCount] = float[kCount](1.00, 0.63, 1.57, 0.37, 2.31, 5.00, 0.49);
+    const float kWeight[kCount] = float[kCount](0.22, 0.17, 0.14, 0.10, 0.12, 0.15, 0.10);
 
     vec2 xz = p.xz;
     vec2 grad = vec2(0.0);
+    float wsum = 0.0;
     for (int i = 0; i < kCount; ++i) {
+        float lam = max(uWaveLengthM * kLamMul[i], 0.02);
+        float keep = 1.0 - smoothstep(0.17 * lam, 0.33 * lam, footprint);
+        if (keep <= 0.0) {
+            continue;                       // 这个波长在屏幕上已经亚像素了 ⇒ 丢掉
+        }
+        float w = kWeight[i] * keep;
         float a = uWaveDirRad + kAng[i];
         vec2 d = vec2(cos(a), sin(a));
-        float lam = max(uWaveLengthM * kLamMul[i], 0.02);
         float k = 6.28318530718 / lam;
-        // 色散：短波跑得快（ω ∝ 1/√λ），相位推进因此各不同 —— 波纹不会"整片平移"。
-        float w = inversesqrt(kLamMul[i]);
-        grad += d * (kWeight[i] * cos(k * dot(d, xz) + w * uWavePhase));
+        // 深水色散：短波跑得快（ω ∝ 1/√λ）⇒ 各八度相位推进不同，不会"整片平移"。
+        float omega = inversesqrt(kLamMul[i]);
+        grad += d * (w * cos(k * dot(d, xz) + omega * uWavePhase));
+        wsum += w;
     }
+    if (wsum <= 1.0e-5) {
+        return vec3(0.0, 1.0, 0.0);         // 全都低于 Nyquist（极远/极掠射）
+    }
+    grad /= wsum;                            // 按存活权重归一化 ⇒ 振幅与距离无关
 
     float slope = length(grad);
     if (slope > 1.0e-6) {
-        grad *= min(uWaveSlopeRad, slope * fade) / slope;   // 限幅 + 足迹淡出
+        grad *= min(uWaveSlopeRad, slope) / slope;   // 限幅：最大斜率就是 uWaveSlopeRad
     } else {
         grad = vec2(0.0);
     }

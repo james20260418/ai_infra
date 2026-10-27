@@ -334,6 +334,8 @@ int RunCaptureWater(const std::string& out_dir) {
         {"props_eye_nosky", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 2, 0, 0},
         {"props_eye_notrans", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 2, 0},
         {"props_eye_nosun", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2},
+        // 同机位两个相位：用来量"远处到底还有没有波纹"（近/中/远三条带分别比）。
+        {"props_eye_phaseB", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
         // 太阳高光的机位：相机在**太阳方位**上、俯视 45°（镜像几何 V≈L ⇒ 高光落在画面中心）。
         // 顺带证明"高光不是恒亮的"：换机位它就该消失（那才是菲涅耳反射该有的行为）。
         {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 220.0f},
