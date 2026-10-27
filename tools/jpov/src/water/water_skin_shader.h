@@ -82,6 +82,10 @@ uniform float uIor;              // 水的折射率（水→空气临界角 = as
 uniform float uSlopeRmsRad;      // 水面 RMS 斜率（弧度）；0 = 理想镜面（临界角是硬边）
 uniform samplerCube uEnvCube;    // 天空探针（大气色，不含日月盘；下半球=地色）
 uniform int   uHasEnvCube;       // 0 = 没有探针（退化：不做折射采样）
+uniform sampler2D uSceneColor;   // 本 pass 之前 HDR 颜色的**拷贝**（水上几何的折射查找）
+uniform int   uHasSceneColor;    // 0 = 没有拷贝（只采天空探针）
+uniform mat4  uVP;               // world → clip（与 VS 同一个矩阵，屏幕空间 march 用）
+
 
 // 辐亮度守恒：光由空气进水里，L_water = L_air · (1−R) · (n_w/n_a)²
 // （n² = 1.777 就是"水下的窗口看起来比天上的同一片天更亮"的来源）。
@@ -130,6 +134,46 @@ float ZView(float d) {
     return (2.0 * uNear * uFar) / denom;
 }
 
+// 折射 march 的最远距离（米）。水上几何都在这个范围内；超出就退回天空探针。
+const float kMaxMarchM = 400.0;
+
+// 屏幕空间折射：从入水点 P 沿**折射方向** rdir 走，与不透明场景的深度比，
+// 第一次穿过场景表面就算命中，取那里的颜色（= 水上物体透过水面的像）。
+//
+// 为什么需要它：天空探针里没有**几何**。少了这一步，窗内只有天，站在水上的人/船
+// 不会出现在窗里 —— 而真实的 Snell 窗是把"整个上半世界"（天 + 水上物体）压进锥里。
+//
+// 已知近似：只能查到**当前屏幕内**的东西（离开视锥的物体取不到）；步长是指数增长的，
+// 极细的物体可能被跨过去（此处物体都远大于步长）。
+bool TraceRefracted(vec3 P, vec3 rdir, out vec3 outColor) {
+    float t = 0.05;
+    for (int i = 0; i < 32; ++i) {
+        vec3 X = P + rdir * t;
+        vec4 clip = uVP * vec4(X, 1.0);
+        if (clip.w <= 1.0e-4) {
+            break;
+        }
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            break;
+        }
+        float ray_z = ZView(clip.z / clip.w * 0.5 + 0.5);
+        float scene_z = ZView(texture(uSceneDepth, uv).r);
+        // 穿过（或贴到）场景表面：命中。不做厚度判断 —— 射线是从水面往上走的，
+        // 遇到的第一个不透明面就是它；贴太近（ray_z 略小于 scene_z）也当命中，
+        // 否则薄物体（人形）会被整块漏掉。
+        if (ray_z >= scene_z * 0.98) {
+            outColor = texture(uSceneColor, uv).rgb;
+            return true;
+        }
+        t += max(0.1, t * 0.35);
+        if (t > kMaxMarchM) {
+            break;
+        }
+    }
+    return false;
+}
+
 void main() {
     // 手动深度测试：水面在这块不透明几何后面就整片丢弃（否则水会盖到挡在它前面的东西上）。
     float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
@@ -165,9 +209,17 @@ void main() {
             } else {
                 rdir = normalize(vec3(-V.x, 0.0, -V.z));
             }
-            vec3 sky = textureLod(uEnvCube, rdir, 0.0).rgb;
+            // 先找**水上几何**的折射像（屏幕空间），没命中才退回天空探针。
+            // 两者都是"透过水面看到的东西"，所以都要乘同一个 n² 辐亮度增益。
+            vec3 seen = textureLod(uEnvCube, rdir, 0.0).rgb;
+            if (uHasSceneColor == 1) {
+                vec3 hit_color;
+                if (TraceRefracted(vWorld, rdir, hit_color)) {
+                    seen = hit_color;
+                }
+            }
             // 水面就是该方向最近的面 ⇒ 直接替换（不再与背景 alpha 混合）。
-            color = mix(sky * AirToWaterGain(), uTirColor, clamp(R, 0.0, 1.0));
+            color = mix(seen * AirToWaterGain(), uTirColor, clamp(R, 0.0, 1.0));
             alpha = 1.0;
         } else {
             // 没探针（关掉了环境镜面）：退回"背景透射 + 地色"的近似 —— 窗内看到的

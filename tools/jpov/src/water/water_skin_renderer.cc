@@ -32,6 +32,8 @@ namespace {
 constexpr int kSceneDepthUnit = 0;
 // 天空探针 cubemap（水下折射采样）。pass-local，与 scene depth 不冲突。
 constexpr int kSkyCubeUnit = 1;
+// 抓帧颜色拷贝（水上几何的折射查找）。pass-local。
+constexpr int kSceneColorUnit = 2;
 
 }  // namespace
 
@@ -70,8 +72,8 @@ void WaterSkinRenderer::Finalize() {
 
 void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                              const float view_proj[16], unsigned int scene_depth_tex,
-                             unsigned int sky_env_cube, int width, int height,
-                             ShaderManager& shader_mgr) {
+                             unsigned int sky_env_cube, unsigned int scene_color_tex,
+                             int width, int height, ShaderManager& shader_mgr) {
     CHECK_GT(params.half_extent_m, 0.0f) << "WaterSkinRenderer: half_extent_m 必须 > 0";
     CHECK_NE(scene_depth_tex, 0u) << "WaterSkinRenderer: 缺少场景深度纹理";
     CHECK_NE(vao_, 0u) << "WaterSkinRenderer: 未 Init()";
@@ -118,6 +120,12 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_cube);
     glUniform1i(shader_mgr.GetUniform(prog, "uEnvCube"), kSkyCubeUnit);
     glUniform1i(shader_mgr.GetUniform(prog, "uHasEnvCube"), sky_env_cube != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, scene_color_tex);
+    glUniform1i(shader_mgr.GetUniform(prog, "uSceneColor"), kSceneColorUnit);
+    glUniform1i(shader_mgr.GetUniform(prog, "uHasSceneColor"),
+                scene_color_tex != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0);
     glActiveTexture(GL_TEXTURE0);
 
     // 简易透射 = 固定管线 alpha 混合，dst 就是帧缓冲里已有的场景颜色。
@@ -136,6 +144,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     glActiveTexture(GL_TEXTURE0);

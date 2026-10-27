@@ -111,6 +111,10 @@ public:
     // 0 = 理想镜面（物理硬边）。只为拍图/试手暴露，不进面板。
     void SetWaterSlopeRmsDeg(float deg) { water_slope_rms_deg_ = deg; }
 
+    // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
+    // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
+    void SetWaterIor(float ior) { water_ior_ = ior; }
+
     // 相机注视点覆盖（默认空 = ViewConfig::Target() 原点）。
     // 只有「水下抬头看水面」这种机位需要它（目标点得抬到水面之上），交互面板不暴露。
     std::optional<jpov::Vec3f> view_target_;
@@ -261,6 +265,7 @@ public:
             // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
             wp.tir_color     = nl.sky.ground_color;
             wp.surface_slope_rms_deg = water_slope_rms_deg_;
+            wp.ior           = water_ior_;
             SetWaterSkin(wp);
         } else {
             SetWaterSkin(std::nullopt);
@@ -451,6 +456,7 @@ private:
     bool show_water_ = true;                // 水面场景是否画水皮（headless A/B 用）
     bool water_use_strip_ = false;          // 水面用 strip 平铺版（对照）；false = 新水皮 pass
     float water_slope_rms_deg_ = 0.0f;      // 水面 RMS 斜率（度）：只影响水下看水面的临界角过渡
+    float water_ior_ = 1.333f;              // 水的折射率（1.0 = 关掉折射，A/B 用）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
