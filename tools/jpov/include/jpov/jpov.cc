@@ -157,6 +157,22 @@ void JPOV::Init() {
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
+    // 打印实际拿到的 GL 实现：**这是"卡不卡"的第一信息**。WSLg / 容器里很容易
+    // 静默落到 llvmpipe（纯软件光栅）—— 此时再优化 shader 也只能改善一部分，
+    // 真正的差别在有没有硬件光栅。看到 "llvmpipe" 就说明是软件在跑。
+    const GLubyte* gl_renderer = glGetString(GL_RENDERER);
+    const GLubyte* gl_version = glGetString(GL_VERSION);
+    const GLubyte* gl_vendor = glGetString(GL_VENDOR);
+    LOG(INFO) << "GL: renderer=" << (gl_renderer ? reinterpret_cast<const char*>(gl_renderer)
+                                                 : "?")
+              << " | vendor=" << (gl_vendor ? reinterpret_cast<const char*>(gl_vendor) : "?")
+              << " | version=" << (gl_version ? reinterpret_cast<const char*>(gl_version) : "?")
+              << " | max_vertex_attribs="
+              << [] {
+                     GLint n = 0;
+                     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &n);
+                     return n;
+                 }();
 }
 
 void JPOV::Finalize() {

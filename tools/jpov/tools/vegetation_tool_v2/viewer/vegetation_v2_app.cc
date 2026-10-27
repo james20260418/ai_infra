@@ -247,6 +247,8 @@ class VegetationV2App : public JPOV {
   // 森林模式（glb 展示态）：同 mesh 摆 5×5，逐实例风参数。单株看不出「锁相」，
   // 一片林子才看得出逐实例相位/摆幅有没有生效。
   bool forest_on_ = false;
+  int forest_grid_ = 5;            // 森林边长 N×N（默认 5×5 = 25 棵）
+  float forest_grid_f_ = 5.0f;     // 面板滑条用的浮点镜像（Ui::SliderFloat 只吃 float）
   float forest_spacing_ = 0.0f;    // 树间距（米）；0 = 按 glb 水平尺寸自动
   float forest_saved_radius_ = 0.0f;  // 开森林前的单株取景半径（关掉时还原）
   float forest_saved_target_y_ = 0.0f;  // 同上，注视点高度
@@ -539,6 +541,7 @@ class VegetationV2App : public JPOV {
       wind_time_ = args.wind_time;
     }
     // 逐实例风参数（森林模式验收用）：默认 0/1/1/0 = 逐位无操作。
+    forest_grid_ = args.forest_grid;
     forest_spacing_ = args.forest_spacing;
     wind_phase_span_ = args.wind_phase_span;
     wind_amp_scale_ = args.wind_amp_scale;
@@ -909,15 +912,17 @@ class VegetationV2App : public JPOV {
   //   摆幅/频率/阵风相位：统一用滑条值（逐实例字段，但验收时先看"同一参数下相位去相关"）。
   std::vector<jpov::InstanceState> MakeForestInstances() const {
     const float spacing = ForestSpacing();
+    const int n = std::max(1, forest_grid_);
+    const float half = 0.5f * static_cast<float>(n - 1);
     const float az = wind_azimuth_deg_ * 3.14159265358979323846f / 180.0f;
     std::vector<jpov::InstanceState> instances;
-    instances.reserve(25);
-    for (int iz = 0; iz < 5; ++iz) {
-      for (int ix = 0; ix < 5; ++ix) {
-        const uint32_t k = static_cast<uint32_t>(iz * 5 + ix);
+    instances.reserve(static_cast<size_t>(n) * static_cast<size_t>(n));
+    for (int iz = 0; iz < n; ++iz) {
+      for (int ix = 0; ix < n; ++ix) {
+        const uint32_t k = static_cast<uint32_t>(iz * n + ix);
         jpov::InstanceState st;
-        st.transform.center = {static_cast<float>(ix - 2) * spacing, ground_y_,
-                               static_cast<float>(iz - 2) * spacing};
+        st.transform.center = {static_cast<float>(ix) * spacing - half * spacing, ground_y_,
+                               static_cast<float>(iz) * spacing - half * spacing};
         st.transform.up = {0.0f, 1.0f, 0.0f};
         st.transform.front = {0.0f, 0.0f, 1.0f};
         st.transform.scale = 1.0f;
@@ -950,7 +955,8 @@ class VegetationV2App : public JPOV {
     const float hx = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[0] - glb_.bounds_min[0]) : 0.5f;
     const float hz = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[2] - glb_.bounds_min[2]) : 0.5f;
     const float ymax = glb_.bounds_valid ? glb_.bounds_max[1] : scene_height_;
-    const float ext = 2.0f * spacing;   // 栅格对称：中心到最外一棵的距离
+    // 栅格对称：中心到最外一棵的距离 = (N-1)/2 格。
+    const float ext = 0.5f * static_cast<float>(std::max(1, forest_grid_) - 1) * spacing;
     const double half_x = static_cast<double>(ext + hx);
     const double half_z = static_cast<double>(ext + hz);
     constexpr double kVfovDeg = 60.0;   // 与相机 fov 一致
@@ -1301,7 +1307,7 @@ class VegetationV2App : public JPOV {
       } else {
         // 风调试（glb 展示态）。下半 7 行 = **逐实例**风参数（森林模式验收用）：
         //   相位固定为「森林模式下逐实例随机」，其余四项是统一值（滑条控）。
-        panel(xl, &yl, "风调试", &wind_panel_open_, 19,
+        panel(xl, &yl, "风调试", &wind_panel_open_, 20,
               [&](int i, const jpov::UiRect& r) {
                 if (i == 0) {
                   ui_.Checkbox("启用风", &wind_on_, r);
@@ -1332,14 +1338,19 @@ class VegetationV2App : public JPOV {
                   ui_.Checkbox("森林 5×5（逐实例相位）", &on, r);
                   SetForest(on);   // SetForest 内部做「没变化就返回」，跟着调相机
                 } else if (i == 13) {
-                  ui_.SliderFloat("树间距 m（0=自动）", &forest_spacing_, r, 0.0f, 12.0f, 2);
+                  // N×N 边长：卡顿时先降到 3（9 棵），验证"逐实例"不需要 25 棵。
+                  forest_grid_f_ = static_cast<float>(forest_grid_);
+                  ui_.SliderFloat("森林边长 N", &forest_grid_f_, r, 1.0f, 9.0f, 0);
+                  forest_grid_ = std::max(1, static_cast<int>(forest_grid_f_ + 0.5f));
                 } else if (i == 14) {
-                  ui_.SliderFloat("相位跨度 s", &wind_phase_span_, r, 0.0f, 8.0f, 2);
+                  ui_.SliderFloat("树间距 m（0=自动）", &forest_spacing_, r, 0.0f, 12.0f, 2);
                 } else if (i == 15) {
-                  ui_.SliderFloat("摆幅倍数", &wind_amp_scale_, r, 0.0f, 2.0f, 2);
+                  ui_.SliderFloat("相位跨度 s", &wind_phase_span_, r, 0.0f, 8.0f, 2);
                 } else if (i == 16) {
-                  ui_.SliderFloat("频率倍数", &wind_freq_scale_, r, 0.2f, 2.0f, 2);
+                  ui_.SliderFloat("摆幅倍数", &wind_amp_scale_, r, 0.0f, 2.0f, 2);
                 } else if (i == 17) {
+                  ui_.SliderFloat("频率倍数", &wind_freq_scale_, r, 0.2f, 2.0f, 2);
+                } else if (i == 18) {
                   ui_.SliderFloat("阵风相位", &wind_gust_phase_, r, 0.0f, 1.0f, 2);
                 } else {
                   ui_.SliderFloat("风向抖动 ±°", &wind_dir_jitter_deg_, r, 0.0f, 180.0f, 0);
@@ -1418,6 +1429,12 @@ int RunViewer(const CliArgs& args) {
   cfg.height = kViewerHeight;
   // 烘焙 / capture 都不需要可见窗口（烘焙其实连 GL 都不用）。
   cfg.headless = args.capture || !args.bake_glb_path.empty();
+  // 阴影级联数：每一级都要把整个场景在光空间重画一遍。森林/植被这类"同 mesh 很多份"
+  // 的场景里，级联数是第一性能旋钮（默认 5 ⇒ 主 pass 之外还有 5 趟几何）。
+  if (args.shadow_cascades > 0) {
+    cfg.shadow.cascade_count = args.shadow_cascades;
+    LOG(INFO) << "阴影级联数 = " << cfg.shadow.cascade_count;
+  }
   // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
   // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
   const JPOV::FontEntry kWantFonts[] = {

@@ -110,8 +110,14 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
+// 世界系方向 → 模型系方向。
+//   ⚠️ 这里**不能**写 `mat3(inverse(model))`：本函数每个顶点要调 3 次（风向 / 摇摆轴 /
+//   吹倒方向），而 mat4 求逆在 VS 里非常贵（实测 25 棵 oak ≈ 100 万顶点 × 6 趟 pass
+//   直接决定帧率）。实例矩阵由 BuildModelMatrix 构造 ⇒ 只有"旋转 + 均匀缩放"，
+//   此时 M = s·R ⇒ M⁻¹ = Rᵀ/s ⇒ 方向归一化后等价于 `transpose(mat3(model)) * d`
+//   （只差一个正的常数缩放，normalize 掉）。逐顶点省两次大矩阵求逆、只多 9 次乘加。
 vec3 JpovWindDirModel(mat4 model, vec3 dir_world) {
-    return normalize(mat3(inverse(model)) * dir_world);
+    return normalize(transpose(mat3(model)) * dir_world);
 }
 // 单个关节的完整变换（pivot 链 + 湍流）。
 //   输入的是**原始**顶点 p；path_len（出参）= 顶点到根的静止链长（米）= 关节表预存的

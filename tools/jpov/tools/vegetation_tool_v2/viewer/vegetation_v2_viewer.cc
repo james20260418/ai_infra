@@ -28,7 +28,9 @@
 //   --glb-only                                               强制纯 glb 查看模式（即使 shape 存在也不加载；
 //                                                            无原材料态：不能烘焙、不能回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
+//   --shadow-cascades <1..5>                                  CSM 级联数（默认 5；森林卡顿时先降这个）
 //   --forest / --forest-spacing <米>                          5×5 森林模式（同 mesh 25 份，逐实例风参数）
+//   --forest-grid <N>                                         森林边长 N×N（默认 5；卡顿时试 3）
 //   --wind-phase-span <秒> / --wind-amp-scale <倍数>          逐实例相位随机跨度 / 摆幅倍数
 //   --wind-freq-scale <倍数> / --wind-gust-phase <周期比例>   逐实例频率倍数 / 阵风相位偏移
 //   --wind-dir-jitter <度>                                    逐实例风向抖动 ±（0 = 全批同一风向）
@@ -102,6 +104,10 @@ CliArgs ParseCli(int argc, char** argv) {
       a.glb_path = argv[++i];
     } else if (arg == "--glb-only") {
       a.glb_only = true;
+    } else if (arg == "--shadow-cascades" && has_val) {
+      a.shadow_cascades = std::atoi(argv[++i]);
+      CHECK_GE(a.shadow_cascades, 1) << "--shadow-cascades 至少 1";
+      CHECK_LE(a.shadow_cascades, 5) << "--shadow-cascades 至多 5（ShadowConfig::kMaxCascades）";
     } else if (arg == "--no-wind") {
       a.wind_off = true;
     } else if (arg == "--wind-time" && has_val) {
@@ -116,6 +122,10 @@ CliArgs ParseCli(int argc, char** argv) {
       a.wind_blow_exp = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--forest") {
       a.forest = true;
+    } else if (arg == "--forest-grid" && has_val) {
+      a.forest_grid = std::atoi(argv[++i]);
+      CHECK_GE(a.forest_grid, 1) << "--forest-grid 至少 1";
+      CHECK_LE(a.forest_grid, 9) << "--forest-grid 至多 9（再多就不是验收而是压测了）";
     } else if (arg == "--forest-spacing" && has_val) {
       a.forest_spacing = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.forest_spacing, 0.0f) << "--forest-spacing 不能为负（0 = 自动）";
