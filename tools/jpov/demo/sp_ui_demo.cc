@@ -161,8 +161,11 @@ public:
         theme.border_width_px = plate_opt_.border;
 
         // 板材：一场材质 + 一个剖面。所有控件（含装饰底）都从这里取。
+        // wave_mode 越界直接崩（& 3 会把 4 静默映射回 0，反而更难查）。
+        CHECK_GE(st_.wave_mode, 0) << "SpDemoState::wave_mode 必须 >= 0";
+        CHECK_LE(st_.wave_mode, 3) << "SpDemoState::wave_mode 必须 <= 3";
         theme.plate_texture_id =
-            plate_opt_.no_texture ? 0u : wave_tex_[st_.wave_mode & 3];
+            plate_opt_.no_texture ? 0u : wave_tex_[st_.wave_mode];
         theme.plate_material_px = plate_opt_.material_px;
         theme.plate_flipbook_fps = plate_opt_.flipbook_fps;
         // 边框层：默认与填充同一张图集，但**密度更高、帧率更低**（独立两层）。

@@ -315,8 +315,10 @@ public:
     struct SpPlateSkin {
         PlateLayer fill;            // 核心层
         PlateLayer border;          // 边界层
-        Color fill_tint = kColorWhite;
-        Color border_tint = kColorWhite;
+        // 默认白色（恒等乘）。用字面量而不是 jpov::kColorWhite：后者定义在
+        // src/renderer.cc，引用它会把纯 CPU 的 sp_ui 拖去链接整个渲染器。
+        Color fill_tint = {1.0f, 1.0f, 1.0f, 1.0f};
+        Color border_tint = {1.0f, 1.0f, 1.0f, 1.0f};
         float radius = 0.0f;
         float border_width = 0.0f;
         float border_bump = 0.0f;

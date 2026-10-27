@@ -115,7 +115,8 @@ struct SpDemoState {
     // ---- 全局控件 ----
     float gain = 5.0f;         // 增益滑条 [0, 10]
     bool enable = true;        // 使能复选框
-    // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
+    // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。
+    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
     // 调用方要不要推进那个秒数，引擎侧依然不取自己的时钟。
     bool anim_play = true;
     // 多纹理板材演示用的两个纹理 id（由 app 在 Begin 前填；0 = 纯色）。

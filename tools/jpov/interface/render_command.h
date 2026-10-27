@@ -403,11 +403,13 @@ struct Plate2DCommand {
     float radius = 0.0f;
 
     // ---- 填充区（外轮廓向内 border_width 以内）----
-    Color fill_color = kColorWhite;   // 乘到材质上的 tint（无纹理时即本体色）
+    // 默认色用字面量而不是 jpov::kColorWhite：后者定义在 src/renderer.cc，
+    // 默认成员初始化会 odr-use 它 ⇒ 任何只依赖本头文件的 CPU 侧程序都得链渲染器。
+    Color fill_color = {1.0f, 1.0f, 1.0f, 1.0f};   // tint（无纹理时即本体色）
     PlateLayer fill;
 
     // ---- 边框带（从外轮廓向内 border_width 像素）----
-    Color border_color = kColorWhite;  // 边框基色（剖面在其上做明暗）
+    Color border_color = {1.0f, 1.0f, 1.0f, 1.0f};  // 边框基色（剖面在其上做明暗）
     PlateLayer border;
     float border_width = 0.0f;         // 0 = 无边框
     // 剖面曲率 [0,1]：0 = 平面带（只有常量底，无明暗），1 = 完整圆管剖面（假 3D 银色边）。

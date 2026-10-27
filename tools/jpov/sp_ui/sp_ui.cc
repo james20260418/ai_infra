@@ -228,7 +228,10 @@ void SpUi::ColorSwatch(const char* /*label*/, const Color& color,
 void SpUi::Plate(const SpRect& box, Color fill, float radius, bool textured) {
     // 装饰板材：只是公开的 PushPlateInternal —— 同一份材质/剖面、同一个缓冲、同一个顺序。
     // 边框颜色给 fill 自身（看不见边），符合旧版「背景矩形只填色不描边」的观感。
-    PushPlateInternal(Scaled(box), fill, fill, radius, textured, textured);
+    // ⚠️ radius 是**布局单位**，必须跟着 box 一起缩放；漏了它就会出现
+    //    「1.5 倍面板上圆角还是 1.0 倍的 4px」——gold 测试靠这条抓到过。
+    PushPlateInternal(Scaled(box), fill, fill, radius * ui_scale_, textured,
+                      textured);
 }
 
 bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
@@ -1433,7 +1436,9 @@ PlateLayer SpUi::MakeLayerFor(const SpRect& box, uint32_t tex,
                     std::max(dev.size.y() / px, 1e-4f)};
         l.scroll = {-dev.pos.x() / px, -dev.pos.y() / px};
     } else {
-        l.tiling = theme_.plate_tiling;
+        // material_px == 0 时**不用**主题里 fill 的 tiling：这是通用 helper，
+        // 借用无关字段会让调用方以为密度生效了。取 {1,1}（整张图一块）。
+        l.tiling = {1.0f, 1.0f};
         l.scroll = {0.0f, 0.0f};
     }
     return l;
