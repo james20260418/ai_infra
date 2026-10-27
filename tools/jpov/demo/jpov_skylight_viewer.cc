@@ -286,6 +286,8 @@ int RunCaptureWater(const std::string& out_dir) {
         // 波浪相位（弧度）；nullopt 的斜率 = 用 app 默认（10°），显式 0 = 关掉波纹。
         float wave_phase = 0.0f;
         std::optional<float> wave_slope_deg;
+        // 强制透射下限（0 = 物理）。n 用上面的 ior 字段（0 = 默认 1.333）。
+        float min_transmission = 0.0f;
     };
     const Shot shots[] = {
         {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
@@ -312,6 +314,13 @@ int RunCaptureWater(const std::string& out_dir) {
         // 水上视角：有水纹 / 无水纹。
         {"props_eye_wave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
         {"props_eye_nowave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f},
+        // n 滑条：1.333（物理水）→ 1.20 → 1.05 → 1.00（界面消失，全部透射）。
+        {"props_under_n120", -0.083, 12.0, true, true, false, 12.0f, 1.20f, 0.0f, std::nullopt},
+        {"props_under_n105", -0.083, 12.0, true, true, false, 12.0f, 1.05f, 0.0f, std::nullopt},
+        {"props_under_n100", -0.083, 12.0, true, true, false, 12.0f, 1.00f, 0.0f, std::nullopt},
+        // 最小透射滑条：物理 n 下强制留 20% / 50% 透射 ⇒ 灰区漏出天空。
+        {"props_under_t20", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.20f},
+        {"props_under_t50", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.50f},
         {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
@@ -324,6 +333,7 @@ int RunCaptureWater(const std::string& out_dir) {
         app.SetWaterIor(s.ior > 0.0f ? s.ior : 1.333f);
         app.water_wave_phase_ = s.wave_phase;
         app.water_wave_slope_deg_ = s.wave_slope_deg.value_or(10.0f);
+        app.water_min_transmission_ = s.min_transmission;
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
         app.view_.theta = 3.14159265358979323846 / 4.0;

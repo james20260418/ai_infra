@@ -114,6 +114,8 @@ public:
     float water_wave_length_m_ = 0.5f;     // 主波长（米）：水下 1 m 处只看得到 ~1.5 m 内的水面，
                                            // 所以波长要**亚米级**才有"整片涟漪"的观感
     float water_wave_dir_deg_ = 30.0f;     // 传播方向（度）
+    // 强制透射下限 [0,1]（实验旋钮，非物理）：>0 时灰区（TIR）也会漏出天空。
+    float water_min_transmission_ = 0.0f;
 
     // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
     // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
@@ -269,6 +271,7 @@ public:
             // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
             wp.tir_color     = nl.sky.ground_color;
             wp.ior           = water_ior_;
+            wp.min_transmission = water_min_transmission_;
             wp.wave_phase    = water_wave_phase_;
             wp.wave_slope_deg = water_wave_slope_deg_;
             wp.wave_length_m = water_wave_length_m_;
@@ -405,15 +408,21 @@ private:
             ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
                          water_row(1.0f));
             // 波浪只扰法线（几何仍是平面）：相位滑条就是"让水纹动起来"的那根。
-            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(2.0f),
+            // 界面权重：n 从 1.333 往 1 拉 ⇒ 临界角推向 90°、R 整体下降 ⇒ 灰区逐渐变回透射。
+            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(2.0f),
+                            1.0f, 1.6f, 3);
+            // 实验旋钮：强制保留一部分透射（TIR 区也不再是"全反射"）。
+            ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
+                            water_row(3.0f), 0.0f, 1.0f, 2);
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(4.0f),
                             0.0f, 6.2831853f, 2);
             ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
-                            water_row(3.0f), 0.0f, 20.0f, 1);
-            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(4.0f),
+                            water_row(5.0f), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(6.0f),
                             0.05f, 20.0f, 2);
-            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(5.0f),
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(7.0f),
                             0.0f, 360.0f, 0);
-            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(6.0f));
+            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(8.0f));
             return;
         }
 

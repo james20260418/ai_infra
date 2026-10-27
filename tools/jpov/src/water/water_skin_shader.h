@@ -86,7 +86,8 @@ uniform vec3  uRimColor;         // 掠射处的反射色（线性 HDR）
 uniform float uF0;               // 正入射反射率（水 ≈ 0.02）
 uniform float uPower;            // Schlick 指数（物理值 5）
 uniform vec3  uTirColor;         // 水下视角：临界角外的全内反射色（“地色”，建议 = SkyCommand::ground_color）
-uniform float uIor;              // 水的折射率（水→空气临界角 = asin(1/ior)）
+uniform float uIor;              // 水的折射率（水→空气临界角 = asin(1/ior)）；=1 时界面消失
+uniform float uMinTransmission;  // 强制透射下限 [0,1]：R 被夹到 ≤ 1−它（实验用，非物理）
 // ── 波浪（法线扰动）──
 uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"调相位"就是挪它）
 uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
@@ -192,6 +193,9 @@ void main() {
         // R = 精确 Fresnel（含 TIR）作用于**扰动后的法线** ⇒ 窗缘随波纹起伏；
         // 窗内天空按"视线方向 + 表面斜率"采样（不折射，见文件头），窗外整片地色。
         float R = FresnelFromWater(cos_i, uIor);
+        // 实验旋钮：强制留一部分透射（TIR 区也从"整片地色"变成"能看见一点天"）。
+        // 物理上不存在（全内反射就该 R=1），拉它只是为了看"若透射不被完全掐死会怎样"。
+        R = min(R, 1.0 - clamp(uMinTransmission, 0.0, 1.0));
         if (uHasEnvCube == 1) {
             // 查找方向 = 视线方向被表面斜率**带偏**（法线扰动式查找）。
             // 斜率 8° ⇒ 天光晃 ~8°，足以看出波纹；但它不会像 refract 那样把天空压进锥里。
