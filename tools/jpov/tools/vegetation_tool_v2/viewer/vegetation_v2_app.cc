@@ -253,6 +253,7 @@ class VegetationV2App : public JPOV {
   float forest_saved_radius_ = 0.0f;  // 开森林前的单株取景半径（关掉时还原）
   float forest_saved_target_y_ = 0.0f;  // 同上，注视点高度
   double forest_saved_phi_ = 0.0;       // 同上，相机仰角
+  bool forest_framing_applied_ = false;  // 森林构图是否已套用（防重复保存）
   // 三个「命令行是否显式钉住相机」的开关（森林自动取景只在没钉时生效）。
   bool pin_phi_ = false;
   bool pin_radius_ = false;
@@ -260,7 +261,7 @@ class VegetationV2App : public JPOV {
   float wind_phase_span_ = 2.0f;   // 逐实例相位随机的跨度（秒）
   float wind_amp_scale_ = 1.0f;    // 逐实例摆幅倍数（统一值，滑条控）
   float wind_freq_scale_ = 1.0f;   // 逐实例频率倍数（统一值，滑条控）
-  float wind_gust_phase_ = 0.0f;   // 逐实例阵风相位偏移（周期比例，统一值）
+  float wind_gust_phase_cycles_ = 0.0f;  // 逐实例阵风相位偏移（周期比例，统一值）
   float wind_dir_jitter_deg_ = 0.0f;  // 逐实例风向抖动 ±°（0 = 全批同一风向）
   float scene_height_ = 1.0f;      // 参考高度 H（米）：shape/glb 的 Y 向包围盒高
   bool wind_paused_ = false;
@@ -546,7 +547,7 @@ class VegetationV2App : public JPOV {
     wind_phase_span_ = args.wind_phase_span;
     wind_amp_scale_ = args.wind_amp_scale;
     wind_freq_scale_ = args.wind_freq_scale;
-    wind_gust_phase_ = args.wind_gust_phase;
+    wind_gust_phase_cycles_ = args.wind_gust_phase_cycles;
     wind_dir_jitter_deg_ = args.wind_dir_jitter;
     // v 方向补偿必须在生成 mesh 之前确定：UV 是扫管时烘进去的，不是 shader 里改的。
     // 0 = 自动（只对 --bark 有意义）：没有 bark 时必须落回 1.0，
@@ -847,6 +848,12 @@ class VegetationV2App : public JPOV {
       }
     }
     mode_ = Mode::kGlb;
+    // 烘焙/换 glb 后包围盒变了：森林开着的话要按新尺寸重新取景
+    //   （先还原再套用，`scene_height_` 与 spacing 都要基于新资产）。
+    if (forest_on_) {
+      PopForestFraming();
+      PushForestFraming();
+    }
     LOG(INFO) << "进入 glb 展示态: " << path << "（" << glb_.size() << " 个 primitive）";
     return true;
   }
@@ -929,7 +936,7 @@ class VegetationV2App : public JPOV {
         st.wind_phase = Hash01(k, /*salt*/1) * wind_phase_span_;
         st.wind_amp_scale = wind_amp_scale_;
         st.wind_freq_scale = wind_freq_scale_;
-        st.wind_gust_phase = wind_gust_phase_;
+        st.wind_gust_phase_cycles = wind_gust_phase_cycles_;
         // 抖动为 0 时不写 wind_direction（留 nullopt = 沿用命令风向，语义最直白）。
         if (wind_dir_jitter_deg_ > 0.0f) {
           const float jitter = (Hash01(k, /*salt*/2) - 0.5f) * 2.0f * wind_dir_jitter_deg_;
@@ -987,35 +994,50 @@ class VegetationV2App : public JPOV {
     }
     forest_on_ = on;
     if (mode_ != Mode::kGlb || !glb_loaded_) {
-      return;
+      return;   // 还没进 glb 态：只记标志，等 LoadGlbFile 里再套取景
     }
     if (on) {
-      forest_saved_radius_ = view_.R;
-      forest_saved_target_y_ = cam_target_y_;
-      forest_saved_phi_ = view_.phi;
-      if (!pin_radius_) {
-        view_.R = ForestFitRadius();
-      }
-      if (!pin_target_y_) {
-        cam_target_y_ = 0.45f * scene_height_;
-      }
-      if (!pin_phi_) {
-        view_.phi = 22.0 * 3.14159265358979323846 / 180.0;
-      }
+      PushForestFraming();
     } else {
-      if (!pin_radius_ && forest_saved_radius_ > 0.0) {
-        view_.R = forest_saved_radius_;
-      }
-      if (!pin_target_y_) {
-        cam_target_y_ = forest_saved_target_y_;
-      }
-      if (!pin_phi_ && forest_saved_phi_ > 0.0) {
-        view_.phi = forest_saved_phi_;
-      }
+      PopForestFraming();
     }
-    LOG(INFO) << (on ? "森林模式：5×5（逐实例相位随机）" : "单株模式")
+    LOG(INFO) << (on ? "森林模式（逐实例相位随机）" : "单株模式")
               << "，相机 R = " << view_.R << " target_y = " << cam_target_y_
               << " phi = " << (view_.phi * 180.0 / 3.14159265358979323846) << "°";
+  }
+
+  // 套用/还原森林构图（成对调用）。`forest_framing_applied_` 防重复保存：
+  //   否则「已套用 → 再套用」会把森林的 R 当成"原值"存下来，关森林时还原不回去。
+  void PushForestFraming() {
+    forest_saved_radius_ = view_.R;
+    forest_saved_target_y_ = cam_target_y_;
+    forest_saved_phi_ = view_.phi;
+    forest_framing_applied_ = true;
+    if (!pin_radius_) {
+      view_.R = ForestFitRadius();
+    }
+    if (!pin_target_y_) {
+      cam_target_y_ = 0.45f * scene_height_;
+    }
+    if (!pin_phi_) {
+      view_.phi = 22.0 * 3.14159265358979323846 / 180.0;
+    }
+  }
+
+  void PopForestFraming() {
+    if (!forest_framing_applied_) {
+      return;
+    }
+    if (!pin_radius_ && forest_saved_radius_ > 0.0) {
+      view_.R = forest_saved_radius_;
+    }
+    if (!pin_target_y_) {
+      cam_target_y_ = forest_saved_target_y_;
+    }
+    if (!pin_phi_ && forest_saved_phi_ > 0.0) {
+      view_.phi = forest_saved_phi_;
+    }
+    forest_framing_applied_ = false;
   }
 
   void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
@@ -1351,7 +1373,7 @@ class VegetationV2App : public JPOV {
                 } else if (i == 17) {
                   ui_.SliderFloat("频率倍数", &wind_freq_scale_, r, 0.2f, 2.0f, 2);
                 } else if (i == 18) {
-                  ui_.SliderFloat("阵风相位", &wind_gust_phase_, r, 0.0f, 1.0f, 2);
+                  ui_.SliderFloat("阵风相位(周期)", &wind_gust_phase_cycles_, r, 0.0f, 1.0f, 2);
                 } else {
                   ui_.SliderFloat("风向抖动 ±°", &wind_dir_jitter_deg_, r, 0.0f, 180.0f, 0);
                 }

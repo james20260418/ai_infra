@@ -163,10 +163,10 @@ shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindCha
 | `wind_phase` | 0 | **秒**（可负） | 整条风时间轴平移 τ：`sin(2π f (t + τ))`。摆动/湍流/阵风同时生效 |
 | `wind_amp_scale` | 1 | ≥0 | 受风强度 / 刚度倒数：乘在枢轴摆角与湍流幅度上（0 = 不摇但还能被压弯） |
 | `wind_freq_scale` | 1 | >0 | 摆动快慢：乘在枢轴各 level 分档频率与湍流频率上 |
-| `wind_gust_phase` | 0 | 周期比例 | **只**加在阵风包络相位上，让阵风的峰谷逐株错开（与 `wind_phase` 独立） |
+| `wind_gust_phase_cycles` | 0 | 周期比例 | **只**加在阵风包络相位上，让阵风的峰谷逐株错开（与 `wind_phase` 独立） |
 | `blow_away_ratio` | 0 | ≥0 | 吹倒（静态压弯）比例，见 §8 |
 
-- 三处三角项（枢轴 θ、湍流、阵风）都吃 `wind_phase`；`wind_gust_phase` 只吃阵风 ——
+- 三处三角项（枢轴 θ、湍流、阵风）都吃 `wind_phase`；`wind_gust_phase_cycles` 只吃阵风 ——
   否则「阵风到达」与「摆动相位」会被绑死，全场仍会一起起伏。
 - 默认值（0 / 1 / 1 / 0 / nullopt）在数学上是**逐位无操作**：不填这些字段的命令，
   出图与逐实例属性存在之前**逐像素相同**（现有 gold 即为此把关）。

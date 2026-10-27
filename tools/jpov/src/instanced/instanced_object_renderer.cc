@@ -122,15 +122,23 @@ bool UploadInstancedWindUniforms(unsigned int prog, const InstancedObjectCommand
 
 // 把逐实例风参数上传进两个缓冲（主 / 阴影 / 拾取·高亮 三处都要调，否则"树动影不动"）。
 //   loc11（kWindDirBlowAttrSpec）：(风向.xyz, 吹倒比例)
-//   loc15（kWindParamsAttrSpec）： (相位秒, 摆幅倍数, 频率倍数, 阵风相位)
+//   loc15（kWindParamsAttrSpec）： (相位秒, 摆幅倍数, 频率倍数, 阵风相位周期比例)
 // 风向解析：实例给了 wind_direction 就用它，否则用本命令 WindCommand::direction。
+//
 // Pre-condition: cmd.wind 有值（调用前已由 UploadInstancedWindUniforms 判定 wind_on）。
-// Pre-condition: 两个 buf 的 spec 分别是 kWindDirBlowAttrSpec / kWindParamsAttrSpec；
-//                size 与 instances 等长。
+// Pre-condition: 两个 buf 的 spec 分别是 kWindDirBlowAttrSpec / kWindParamsAttrSpec。
+// Pre-condition: 6 个量都必须是**有限数**且满足各自值域，否则 CHECK 失败（见下）。
+//
+// ⚠️ 性能：本函数每帧每命令会被调 **6 次**（主 pass 1 次 + CSM 5 级各 1 次；拾取/高亮
+//   另算），每次都遍历全部实例 + 两次 glBufferData。**不要"顺手优化"成"只在第一级级联
+//   上传"**：级联循环是「每级遍历所有命令」，同一块 buffer 会被下一条命令覆盖 ⇒ 跳过就会
+//   画出别人的实例数据。要真省必须换循环结构（每命令、级联在内层）或改用参数纹理。
 void UploadInstanceWindAttrs(const InstancedObjectCommand& cmd,
                              InstanceBuffer* instance_wind_dir_blow_buf,
                              InstanceBuffer* instance_wind_params_buf) {
     CHECK(cmd.wind.has_value()) << "UploadInstanceWindAttrs: 本命令没有 wind";
+    CHECK(instance_wind_dir_blow_buf != nullptr);
+    CHECK(instance_wind_params_buf != nullptr);
     const Vec3f& cmd_dir = cmd.wind->direction;
     const size_t n = cmd.instances.size();
     std::vector<float> dir_blow(n * 4);
@@ -138,15 +146,25 @@ void UploadInstanceWindAttrs(const InstancedObjectCommand& cmd,
     for (size_t k = 0; k < n; ++k) {
         const InstanceState& inst = cmd.instances[k];
         const Vec3f dir = inst.wind_direction.value_or(cmd_dir);
+        // 有限性先于值域：NaN 会让下面的 `|len−1| <= 1e-3` 恒 false（消息里看不出根因），
+        // 也会把顶点位置污染成 NaN（深度/阴影/拾取全花屏），所以这里显式拦。
+        CHECK(std::isfinite(dir.x()) && std::isfinite(dir.y()) && std::isfinite(dir.z()))
+            << "wind_direction 含 NaN/Inf（实例 " << k << "）";
         const float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y() +
                                     dir.z() * dir.z());
         // 方向必须是单位向量：长度当强度用会被静默吃掉（强度请走 wind_amp_scale）。
         CHECK(std::fabs(len - 1.0f) <= 1.0e-3f)
             << "InstanceState::wind_direction 必须是单位向量（实例 " << k
             << "，长度=" << len << "）";
+        CHECK(std::isfinite(inst.blow_away_ratio)) << "吹倒比例是 NaN/Inf（实例 " << k << "）";
         CHECK_GE(inst.blow_away_ratio, 0.0f) << "吹倒比例不能为负（实例 " << k << "）";
+        CHECK(std::isfinite(inst.wind_phase)) << "wind_phase 是 NaN/Inf（实例 " << k << "）";
+        CHECK(std::isfinite(inst.wind_amp_scale)) << "摆幅倍数是 NaN/Inf（实例 " << k << "）";
         CHECK_GE(inst.wind_amp_scale, 0.0f) << "摆幅倍数不能为负（实例 " << k << "）";
+        CHECK(std::isfinite(inst.wind_freq_scale)) << "频率倍数是 NaN/Inf（实例 " << k << "）";
         CHECK_GT(inst.wind_freq_scale, 0.0f) << "频率倍数必须 > 0（实例 " << k << "）";
+        CHECK(std::isfinite(inst.wind_gust_phase_cycles))
+            << "wind_gust_phase_cycles 是 NaN/Inf（实例 " << k << "）";
         dir_blow[k * 4 + 0] = dir.x();
         dir_blow[k * 4 + 1] = dir.y();
         dir_blow[k * 4 + 2] = dir.z();
@@ -154,7 +172,7 @@ void UploadInstanceWindAttrs(const InstancedObjectCommand& cmd,
         params[k * 4 + 0] = inst.wind_phase;
         params[k * 4 + 1] = inst.wind_amp_scale;
         params[k * 4 + 2] = inst.wind_freq_scale;
-        params[k * 4 + 3] = inst.wind_gust_phase;
+        params[k * 4 + 3] = inst.wind_gust_phase_cycles;
     }
     instance_wind_dir_blow_buf->Upload(dir_blow);
     instance_wind_params_buf->Upload(params);
@@ -528,7 +546,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
     }
     instance_model_buf.Upload(xforms);
 
-    // 植被风：本批共享风场 uniform；有风时再上传逐实例吹倒比例（loc11）。
+    // 植被风：本批共享**风场**走 uniform；逐实例部分（loc11 风向+吹倒、loc15 相位/摆幅/
+    // 频率/阵风相位）走两个属性缓冲，只在真的有风时上传+挂载。
     const bool wind_on = UploadInstancedWindUniforms(selected_prog, cmd, mesh);
     if (wind_on) {
         UploadInstanceWindAttrs(cmd, &instance_wind_dir_blow_buf,

@@ -99,8 +99,13 @@ inline constexpr InstanceAttrSpec kTintEnabledAttrSpec{/*base_loc*/ 14, /*slot_c
 // 本路径当前启用的 per-instance spec 清单（绘制端据此挂 buffer；测试据此做全量自检）。
 //   新增字段时把新 spec 追加进来。
 inline constexpr InstanceAttrSpec kActiveAttrSpecs[] = {
-    kModelAttrSpec,   kWindDirBlowAttrSpec, kTint0AttrSpec, kTint1AttrSpec,
-    kTintEnabledAttrSpec, kWindParamsAttrSpec};
+    kModelAttrSpec,        // 7..10
+    kWindDirBlowAttrSpec,  // 11
+    kTint0AttrSpec,        // 12
+    kTint1AttrSpec,        // 13
+    kTintEnabledAttrSpec,  // 14
+    kWindParamsAttrSpec,   // 15
+};
 
 // ---- 布局自检谓词（编译期 / 运行期共用；供 static_assert 与测试）----
 

@@ -112,7 +112,7 @@ jpov::InstanceState MakeInstance(int which, Pass pass) {
     st.wind_phase = 0.0f;
     st.wind_amp_scale = 1.0f;
     st.wind_freq_scale = 1.0f;
-    st.wind_gust_phase = 0.0f;
+    st.wind_gust_phase_cycles = 0.0f;
 
     if (which != 1) {
         return st;   // 左实例在所有 pass 里都保持不变（"左侧逐字节不变"断言的依据）
@@ -180,6 +180,23 @@ public:
                                   /*highlight*/ false, w);
     }
 };
+
+// 该半区里「非背景」像素数（任一通道 > 20；本例是纯 ambient 白柱、背景近黑）。
+//   用途：**证明这一半真的画了东西**。没有它，"左半逐字节不变"可能是恒真的
+//   （左边根本没有几何可动）—— 那正是自审要抓的无效断言。
+int CountVisible(const unsigned char* rgb, int x0, int x1) {
+    int c = 0;
+    for (int y = 0; y < kResH; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            const size_t p = (static_cast<size_t>(y) * kResW + x) * 3;
+            const int m = std::max(std::max(rgb[p + 0], rgb[p + 1]), rgb[p + 2]);
+            if (m > 20) {
+                ++c;
+            }
+        }
+    }
+    return c;
+}
 
 // 半区像素差：count = 该半区里任一通道差 > tol 的像素数，mx = 最大单通道差。
 struct HalfDiff {
@@ -268,6 +285,17 @@ int main() {
     }
 
     bool ok = true;
+
+    // ---- 前置：左右两侧**都必须真的画出了柱子** ----
+    //   否则后面「左半不变」就是恒真断言（左边是空白，当然怎么改都不变）。
+    const int vis_left = CountVisible(base.rgb.data(), 0, kSplitX);
+    const int vis_right = CountVisible(base.rgb.data(), kSplitX, kResW);
+    LOG(INFO) << "可见像素: 左半 = " << vis_left << "，右半 = " << vis_right;
+    if (vis_left < 200 || vis_right < 200) {
+        LOG(ERROR) << "两侧柱子没都画出来（左 " << vis_left << " / 右 " << vis_right
+                   << "）⇒ 后面的隔离断言会退化成恒真，测试无意义";
+        ok = false;
+    }
 
     // ---- 0) 确定性：同参两帧必须全图逐字节相同 ----
     //   否则后面的"差异"可能来自噪声，整套断言就失去意义。

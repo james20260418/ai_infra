@@ -15,6 +15,12 @@
 
 #include "jpov.h"
 
+// GL 枚举/函数原型：**MinGW 的 <GL/gl.h> 只到 1.1**，`GL_MAX_VERTEX_ATTRIBS` 等
+// 都在 <GL/glext.h> 里。下面的 GL 信息日志要用它，所以两平台都显式带上
+// （与 volume_fire_renderer.cc 同款；缺这个在 --config=windows 下编译失败）。
+#include <GL/gl.h>
+#include <GL/glext.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <tuple>

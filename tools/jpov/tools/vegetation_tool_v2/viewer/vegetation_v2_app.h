@@ -76,7 +76,7 @@ struct CliArgs {
   float wind_phase_span = 2.0f;   // 逐实例相位随机的跨度（秒）
   float wind_amp_scale = 1.0f;    // 逐实例摆幅倍数（统一值）
   float wind_freq_scale = 1.0f;   // 逐实例频率倍数（统一值）
-  float wind_gust_phase = 0.0f;   // 逐实例阵风相位偏移（周期比例 [0,1)）
+  float wind_gust_phase_cycles = 0.0f;  // 逐实例阵风相位偏移（周期比例 [0,1)）
   float wind_dir_jitter = 0.0f;   // 逐实例风向抖动 ±（度）
 
   // CSM 级联数（0 = 用引擎默认 5）。只影响阴影 pass 的几何趟数：每一级都要把场景

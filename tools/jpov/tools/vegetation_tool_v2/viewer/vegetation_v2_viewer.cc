@@ -139,7 +139,7 @@ CliArgs ParseCli(int argc, char** argv) {
       a.wind_freq_scale = static_cast<float>(std::atof(argv[++i]));
       CHECK_GT(a.wind_freq_scale, 0.0f) << "--wind-freq-scale 必须 > 0";
     } else if (arg == "--wind-gust-phase" && has_val) {
-      a.wind_gust_phase = static_cast<float>(std::atof(argv[++i]));
+      a.wind_gust_phase_cycles = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--wind-dir-jitter" && has_val) {
       a.wind_dir_jitter = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.wind_dir_jitter, 0.0f) << "--wind-dir-jitter 不能为负";

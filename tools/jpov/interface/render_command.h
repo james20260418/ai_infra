@@ -1816,11 +1816,12 @@ struct InstanceState {
     // GPU 属性、VS 整段跳过（零开销）。GPU 侧打包成两个 vec4（见
     // src/instanced/instanced_object_attrs.h）：
     //   loc11 = (wind_direction.xyz, blow_away_ratio)
-    //   loc15 = (wind_phase, wind_amp_scale, wind_freq_scale, wind_gust_phase)
+    //   loc15 = (wind_phase, wind_amp_scale, wind_freq_scale, wind_gust_phase_cycles)
     // 「逐实例 × 逐命令」的分工：时间 / 阵风频率 / 湍流频率 / 吹倒指数 / 参考高度 H
     //   是**风场本身**的属性，留在 WindCommand（逐命令）；下面 6 项是「这一株怎么受风」。
-    // ⚠️ 风向必须**全实例/全链同一份**：关节链的递推只在「全链同一旋转轴」下成立
-    //   （不同轴的旋转不可交换）。不要试图做成逐关节风向。
+    // ⚠️ 风向是**逐实例常量**（不同实例各给各的风向没问题）；约束只在**一条关节链内部**
+    //   必须同一份 —— 关节链的递推只在「全链同一旋转轴」下成立（不同轴的旋转不可交换）。
+    //   所以不要试图做成**逐关节**风向（那需要逐关节四元数，另一个量级）。
 
     // 风向（世界系**单位向量**；可带 Y 分量）。
     //   nullopt（默认）= 沿用本命令 `WindCommand::direction`（常见情形：一片林子共享
@@ -1857,12 +1858,14 @@ struct InstanceState {
     //   物理含义 = 摆动快慢（细枝抖得快）。必须 > 0（渲染端 CHECK）。
     float wind_freq_scale = 1.0f;
 
-    // 阵风包络的相位偏移（**周期比例**，[0,1)）：只加在阵风包络的相位上
-    //   `sin(2π(f_gust·t + wind_gust_phase))`，与 wind_phase 独立。
+    // 阵风包络的相位偏移（**周期比例**，[0,1)，名字里的 cycles 就是量纲）：只加在阵风
+    //   包络的相位上 `sin(2π(f_gust·t + wind_gust_phase_cycles))`，与 wind_phase 独立。
+    //   ⚠️ 与 `wind_phase` **量纲不同**（那是秒、这是整周期的小数部分）—— 名字里带
+    //   `_cycles` 就是为了不再靠注释区分。
     //   用途：让整片林子的阵风错峰 —— 同一时刻有的株在峰值、有的在谷值
     //   （只用 wind_phase 的话阵风与摆动绑死，全场仍会一起起伏）。
     //   0（默认）= 与命令的阵风相位一致；取值按周期比例取小数部分（1.0 等价于 0）。
-    float wind_gust_phase = 0.0f;
+    float wind_gust_phase_cycles = 0.0f;
 
     // ---- 逐实例 base tint 调色板（可选）----
     // 与 `PBRMaterial::base_tint` 同构（enable + 2×RGB），但**逐实例**：同一批实例可各用
