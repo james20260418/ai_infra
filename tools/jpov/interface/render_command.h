@@ -92,6 +92,9 @@ enum class DrawCommandType : uint8_t {
                         //      CPU 三角化后以三角形列表渲染）
     kImage2D,           // 2D 图片（屏幕空间，像素坐标，
                         //      GPU 纹理采样 + 矩形面片）
+    kPlate2D,           // 2D 板材（屏幕空间，像素坐标，
+                        //      SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，
+                        //      见 Plate2DCommand / src/plate2d）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
     kInstancedObject,   // 3D 静态模型批量实例（世界空间，instancing）
@@ -357,6 +360,53 @@ struct FillRect2DCommand {
     Color border_color;
     float border_width;
     float radius;
+};
+
+// 2D 板材（渲染分辨率空间，像素坐标，原点左上角）
+//
+// 一块 UI 底板：圆角矩形轮廓在**片元里用解析距离场**求（不 CPU 三角化），
+// 因此任意尺寸/圆角都有 1px 解析抗锯齿；边框带、渐变消失带、材质平铺/翻书
+// 全部只是对同一个距离 d 做加减 ⇒ 零额外几何、零额外 draw call、交接处不裂。
+// 实现与着色器见 src/plate2d/plate2d_renderer.h。
+//
+// 混合：输出**预乘 alpha**，渲染器内部临时切到 (ONE, ONE_MINUS_SRC_ALPHA)，
+// 退出时恢复 2D 默认 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)。
+//
+// Pre-condition: size 各分量 > 0
+// Pre-condition: radius ∈ [0, min(size)/2]
+// Pre-condition: border_width ∈ [0, min(size)/2]；border_bump ∈ [0,1]；
+//                border_fade ∈ [0, border_width]
+// Pre-condition: tiling 各分量 > 0；tiles_x/tiles_y >= 1；flipbook_fps >= 0
+// Pre-condition: texture_id == 0（纯色）或已注册
+struct Plate2DCommand {
+    Vec2f pos;
+    Vec2f size;
+
+    // 圆角半径（像素）。等于 min(size)/2 时退化成胶囊。
+    float radius = 0.0f;
+
+    // ---- 边框带（从外轮廓向内 border_width 像素）----
+    Color border_color = kColorWhite;  // 边框基色（剖面在其上做明暗）
+    float border_width = 0.0f;         // 0 = 无边框
+    // 剖面曲率 [0,1]：0 = 平面带（只有常量底，无明暗），1 = 完整圆管剖面（假 3D 银色边）。
+    float border_bump = 0.0f;
+    // 渐变消失带宽（像素，[0, border_width]）：靠近内沿 alpha 收到 0，边淡入填充。
+    // 0 = 实心边。
+    float border_fade = 0.0f;
+
+    // ---- 填充 ----
+    Color fill_color = kColorWhite;  // 乘到材质上的 tint（无纹理时即本体色）
+    uint32_t texture_id = 0;         // 0 = 纯色（不采样纹理）
+    Vec2f tiling = {1.0f, 1.0f};     // 每边平铺次数（各分量 > 0）
+    Vec2f scroll = {0.0f, 0.0f};     // UV 平移（单位 = 一整张图）
+
+    // ---- flipbook（texture_id != 0 且 flipbook_fps > 0 时生效）----
+    // 与粒子同一套约定：**GPU 不取时钟**，时间由调用方给（秒，零点调用方自定），
+    // 帧率也给调用方；渲染器只做 time*fps 求分数帧号 + 相邻帧混合。
+    float time_seconds = 0.0f;
+    float flipbook_fps = 0.0f;       // 0 = 静态（整张图当一帧，不裁 UV）
+    int tiles_x = 1;                 // 图集列数
+    int tiles_y = 1;                 // 图集行数（行主序，帧 0 在图片左上角）
 };
 
 // 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
@@ -2000,6 +2050,7 @@ struct RenderCommandList {
     std::vector<Strip2DCommand> strip2d;
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
+    std::vector<Plate2DCommand> plate2d;
     std::vector<Object3DCommand> object3d;
     // 3D 静态批量实例命令（世界空间, instancing）。存一批 per-instance 摆放，渲染时归成一次
     // instanced draw。同 mesh 才能同批（见 InstancedObjectCommand）。
@@ -2328,6 +2379,12 @@ struct RenderCommandList {
     void DrawImage(uint32_t texture_id, const Vec2f& pos,
                    const Vec2f& size,
                    const Color& tint = kColorWhite);
+
+    // 2D 板材（渲染分辨率空间，像素坐标）
+    //
+    // SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，一块板材一次 draw call。
+    // 字段语义与 Pre-condition 见 Plate2DCommand。
+    void DrawPlate(const Plate2DCommand& plate);
 
     // ---- 3D 静态模型 ----------------
 

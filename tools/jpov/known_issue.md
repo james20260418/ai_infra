@@ -175,6 +175,52 @@
 
 ---
 
+## 8. 粒子 flipbook（纹理图集采样）
+
+> 现状分工（`src/particles/particle_renderer.h` 的 `CellUV()`、`src/particles/particle_system.cc`
+> 的 `ResolveFrame()`）：**CPU 算分数帧号 → 逐实例 `misc.w` → VS `flat out` → FS 换 UV**。
+> GPU 不取时钟。图集是 `tiles_x × tiles_y` **行主序网格**，帧 0 在图片**左上角**
+> （`vrow = tiles_y-1-row` 做了 v 翻转）。左→右单行 = `tiles_y = 1` 的退化情况，已支持；
+> `assets/fire/mp/flames_pairs_v4_12x6.png` 用的就是 12×6。
+>
+> 下面三条是同一条采样链在「**透明 + 平铺 + 有帧**」同时成立时才会暴露的缺陷。
+> 火焰走加法集、透明区 RGB≈0、且不做平铺，所以一条都没踩到；sp_ui 的 Plate 三条全踩，
+> 故先记在这里。
+
+### 8.1 `CellUV()` 没有半像素内缩 —— cell 边界会吃到邻居帧
+- **现象**：图集里相邻两帧在 cell 交界处互相渗色。火焰看不出来；透明底 sprite（按钮/图标）
+  会在轮廓上出现**一像素宽的彩边/接缝**，且随帧号变化跳动。
+- **根因**：`(uv + col) / tiles` 在 `uv = 0` 或 `1` 时正好落在 cell 边界上，双线性同时取到
+  相邻 cell 的边缘 texel。当前没有任何 inset。
+- **现状**：未修（粒子侧无可见影响，故不动）。
+- **可能的修法**：按「cell 像素矩形内缩半像素」重映射：
+  `uv_tex = (uv * (cell_px - 2.0) + 1.0 + cell_origin_px) / tex_size`，其中
+  `cell_origin_px = vec2(col, vrow) * cell_px`。图集生成侧也可顺带留 2px 透明 padding。
+- **来源**：2026-10-27 sp_ui 设计讨论（Danis 要求记入本文件）。
+
+### 8.2 平铺（repeat）与 cell 是两次 UV 变换 —— 顺序错 / 导数断会出错
+- **现象**：材质平铺 + flipbook 同时用时，出现「贴图整体错位」或「每个平铺接缝上一条糊带」。
+- **根因**：① 顺序必须**先 `fract` 平铺、再取 cell**：
+  `uv_tex = (fract(uv * tiling + scroll) + vec2(col, vrow)) / tiles`；先除 tiles 再 fract 会把
+  平铺周期与 cell 周期搅在一起。② `fract` 在接缝处导数不连续，`texture()` 自动选 LOD 会在
+  接缝上跳到最粗 mip ⇒ 糊一条线。
+- **现状**：未实现（粒子不做平铺）。
+- **可能的修法**：UI 是 1:1 像素 ⇒ 直接禁用 mip（无 mipmap 的 `GL_LINEAR` 或 `GL_NEAREST`）；
+  要 mip 就用 `textureGrad` 显式传**未取 fract** 的解析导数：`dFdx(uv * tiling) / tiles`。
+- **来源**：同上。
+
+### 8.3 帧间 `mix` 在 straight alpha 下会从透明区漏色
+- **现象**：帧 A / 帧 B 交叉混合后，轮廓外侧渗出一圈本不存在的颜色（往往发白或发脏）。
+- **根因**：`mix(c0, c1, t)` 混的是 RGBA 四通道；透明像素的 RGB 在 PNG 里是**未定义**的
+  （导出工具常留白/留杂色），alpha 为 0 也照样参与 RGB 插值 ⇒ 半透明中间帧带出那种颜色。
+  火焰无感知，因为透明区 RGB≈0 且整体进加法集。
+- **现状**：未修（同 8.1）。
+- **可能的修法**：**图集生成侧**做 color-bleed / dilate（把 RGB 往透明区外扩 4~8px，alpha 保持 0）——
+  推荐这条，引擎侧不用加混合模式；或者整条链走预乘 alpha。
+- **来源**：同上。
+
+---
+
 ## 待补充（Danis 的清单）
 > 以下由 Danis 补：你「打算记着但暂时没时间修」的具体事情。
 

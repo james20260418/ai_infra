@@ -23,6 +23,7 @@
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/jpov/src/plate2d/plate2d_renderer.h"
 #include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
@@ -1137,6 +1138,11 @@ unsigned int Renderer::ImageProg() {
     return shader_mgr_.GetOrCreate("image", {kTexVs, kImageFs});
 }
 
+unsigned int Renderer::PlateProg() {
+    return shader_mgr_.GetOrCreate("plate2d",
+        {Plate2DRenderer::kVs, Plate2DRenderer::kFs});
+}
+
 unsigned int Renderer::Solid3DProg() {
     return shader_mgr_.GetOrCreate("solid3d", {Primitives3DRenderer::kVs3d, Primitives3DRenderer::kFs3d});
 }
@@ -1421,6 +1427,7 @@ void Renderer::CompileShaders() {
     SolidProg();
     TextProg();
     ImageProg();
+    PlateProg();
     Solid3DProg();
     Text3DProg();
     DrawObject3DProg();
@@ -2243,6 +2250,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 CHECK_GE(idx, 0);
                 CHECK_LT(idx, static_cast<int>(cmds.image2d.size()));
                 Primitives2DRenderer::DrawImage2D(cmds.image2d[idx], stream_vbo_, ImageProg(), texture_mgr_, fbo_w_, fbo_h_);
+                break;
+            }
+            case DrawCommandType::kPlate2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.plate2d.size()));
+                Plate2DRenderer::DrawPlate2D(cmds.plate2d[idx], stream_vbo_,
+                                             PlateProg(), texture_mgr_,
+                                             fbo_w_, fbo_h_);
                 break;
             }
             default:
