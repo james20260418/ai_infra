@@ -197,6 +197,13 @@ def main():
                     help="对比度增益（0 = 不处理；默认 8，同关键帧链）")
     ap.add_argument("--gain-target", type=float, default=0.90,
                     help="白平台落到的亮度（默认 0.90）")
+    # 周期性地保证：默认强制开启，不达标直接退出码 1（不给“看着好像还行”的余地）。
+    ap.add_argument("--no-verify", action="store_true",
+                    help="跳过周期性自检（仅调试用；正式烘图必须开着）")
+    # 另一种「首尾字面相等」的烘法：把相位改成 f/(N-1)，于是最后一格与第一格完全一样。
+    # 代价：引擎按 N 格循环，会有一拍停在同一个相位（轻微顿一下）——默认不开。
+    ap.add_argument("--close", action="store_true",
+                    help="首尾格字面相等（f/(N-1) 烘法）；默认关，见 README 的取舍说明")
     args = ap.parse_args()
 
     if args.tiles * args.tiles != args.frames:
@@ -217,13 +224,45 @@ def main():
     sheet = Image.new("RGB", (args.tiles * args.cell, args.tiles * args.cell))
     frames = []
     for f in range(args.frames):
-        phase01 = float(f) / float(args.frames)   # 走满一圈 ⇒ 第 frames 帧回到第 0 帧
+        if args.close:
+            # 相位含端点：[0, 1] 均匀取 N 个 → 最后一格 = 第一格（字面闭环）。
+            phase01 = float(f) / float(args.frames - 1)
+        else:
+            # 相位走半开区间 [0, 1)，第 N 帧回到第 0 帧 ⇒ 动画意义上闭环、无重复帧。
+            phase01 = float(f) / float(args.frames)
         dx, dy = field(xx, yy, float(args.cell), args.amp, args.wavelength, phase01)
         warped = sample_wrap(src, xx + dx, yy + dy)
         frames.append(warped)
         img = Image.fromarray(
             np.clip(warped * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8), "RGB")
         sheet.paste(img, ((f % args.tiles) * args.cell, (f // args.tiles) * args.cell))
+
+    # ---- 周期性硬校验（默认开）----
+    # 检查的不是“末格长得像首格”（那条对循环动画是错的），而是两个真正的不变量：
+    #   ① 位移场 phase=1.0 必须等于 phase=0.0（这才是“周期”的数学定义）；
+    #   ② 回绕那一拍的帧间差不能是离群值（否则循环处会看到一跳）。
+    if not args.no_verify:
+        dx0, dy0 = field(xx, yy, float(args.cell), args.amp, args.wavelength, 0.0)
+        dx1, dy1 = field(xx, yy, float(args.cell), args.amp, args.wavelength, 1.0)
+        field_err = float(max(np.abs(dx0 - dx1).max(), np.abs(dy0 - dy1).max()))
+        diffs = [float(np.abs(frames[(i + 1) % args.frames] - frames[i]).mean() * 255.0)
+                 for i in range(args.frames)]
+        wrap = diffs[-1]
+        others = diffs[:-1]
+        lo, hi = min(others), max(others)
+        print(f"  [verify] 位移场 phase1−phase0 最大偏差 = {field_err:.2e} px")
+        print(f"  [verify] 回绕拍 = {wrap:.2f} / 其余 {lo:.2f}~{hi:.2f}")
+        ok = True
+        if field_err > 1e-3:
+            print(f"  [verify] ✗ 位移场不是周期场（|Δ|={field_err:.3e} > 1e-3）")
+            ok = False
+        # 回绕拍允许落在其余拍的 [0.75, 1.3] 范围（均值/标准差对样本量敏感，用极值更直观）
+        if not (wrap >= lo * 0.75 and wrap <= hi * 1.3):
+            print(f"  [verify] ✗ 回绕拍是离群值：{wrap:.2f} 不在 [{lo:.2f},{hi:.2f}] "
+                  f"的 ±25%/30% 容差内")
+            ok = False
+        if not ok:
+            sys.exit("周期校验失败：不肯输出不闭合的 flipbook（--no-verify 可强制跳过）")
 
     sheet.save(args.out)
 

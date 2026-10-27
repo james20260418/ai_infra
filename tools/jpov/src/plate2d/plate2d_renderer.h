@@ -78,7 +78,12 @@ void main() {
     //
     // flipbook 约定与粒子一致（CPU 定帧、GPU 只换 UV）：时间由调用方给秒数，
     // 本 shader 只做 time*fps 求分数帧号 + 相邻帧混合。图集 tiles_x × tiles_y
-    // 行主序、帧 0 在图片左上角（vrow 翻转）。cell 采样带半像素内缩 + fract 平铺
+    // 行主序、帧 0 在图片左上角。注意这里**不翻转行号**（与粒子那份 CellUV 不同）：
+    // 本 shader 的 uv.y 来自屏幕坐标（向下为正），uv.y=0 对应板材顶部，而
+    // stb + glTexImage2D 把 PNG 第一行放在 v=0 ⇒ 直接用 row 就是「帧 0 = 图片左上」。
+    // 若照抄粒子的 vrow = tilesY-1-row，行序会被整个倒过来：先播最后一行、
+    // 最后才回到第一行 ⇒ 动画在每个行边界处跳一下（看起来就像“不闭合”）。
+    // cell 采样带半像素内缩 + fract 平铺
     // 在取 cell 之前（两处坑见 known_issue.md §8.1/§8.2）。
     static constexpr const char* kFs = R"glsl(
 #version 330 core
@@ -136,13 +141,13 @@ vec3 SampleMaterial(vec2 uv01) {    vec2 uv = fract(uv01 * uTiling + uScroll);
     float col0 = mod(f0, float(uTilesX));
     float row0 = floor(f0 / float(uTilesX));
     // 行号翻转：图集帧 0 在图片左上角，而 GL 纹理 v 向上。
-    vec2 origin0 = vec2(col0, float(uTilesY - 1) - row0) * cell_px;
+    vec2 origin0 = vec2(col0, row0) * cell_px;
     vec3 c0 = texture(uTex, (uv_local + origin0) / uTexSize).rgb;
     // 相邻帧混合（分数帧号），末帧回绕到首帧 ⇒ 循环连续。
     float f1 = mod(f0 + 1.0, total);
     float col1 = mod(f1, float(uTilesX));
     float row1 = floor(f1 / float(uTilesX));
-    vec2 origin1 = vec2(col1, float(uTilesY - 1) - row1) * cell_px;
+    vec2 origin1 = vec2(col1, row1) * cell_px;
     vec3 c1 = texture(uTex, (uv_local + origin1) / uTexSize).rgb;
     return mix(c0, c1, uFrame - f0);
 }
