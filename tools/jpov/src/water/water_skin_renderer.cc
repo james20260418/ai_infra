@@ -7,6 +7,7 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 
+#include <algorithm>
 #ifdef _WIN32
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
 #define GLOG_NO_ABBREVIATED_SEVERITIES
@@ -80,6 +81,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
 
     glUniformMatrix4fv(shader_mgr.GetUniform(prog, "uVP"), 1, GL_FALSE, view_proj);
     glUniform1f(shader_mgr.GetUniform(prog, "uHalfExtent"), params.half_extent_m);
+    // uLevelY 由 VS（展开 quad 高度）与 FS（判相机在水上/水下）**共用**：同一个 program
+    // 里同名 uniform 只需上传一次，两个阶段都能读到。
     glUniform1f(shader_mgr.GetUniform(prog, "uLevelY"), params.level_y);
     glUniform2f(shader_mgr.GetUniform(prog, "uViewport"), static_cast<float>(width),
                 static_cast<float>(height));
@@ -94,6 +97,14 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 params.rim_color.g, params.rim_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uF0"), params.fresnel_f0);
     glUniform1f(shader_mgr.GetUniform(prog, "uPower"), params.fresnel_power);
+    // 水下视角（Snell 窗 / 全内反射）：临界角外的
+    // 全内反射看到的是水下环境，用地色代表。
+    glUniform3f(shader_mgr.GetUniform(prog, "uTirColor"), params.tir_color.r,
+                params.tir_color.g, params.tir_color.b);
+    glUniform1f(shader_mgr.GetUniform(prog, "uIor"), params.ior);
+    constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+    glUniform1f(shader_mgr.GetUniform(prog, "uSlopeRmsRad"),
+                std::max(params.surface_slope_rms_deg, 0.0f) * kDeg2Rad);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);

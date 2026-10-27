@@ -38,6 +38,16 @@ struct WaterSkinParams {
     float fresnel_power = 5.0f;
     // 掠射处收敛到的反射色（本版是常量，不采天空 cubemap）。
     Color rim_color{0.80f, 0.90f, 1.00f, 1.0f};
+
+    // ── 水下视角（相机在 level_y 以下时才生效；判定在 FS 里用 uCamPos.y 自己做）──
+    // 临界角外是全内反射 —— 看到的其实是**水下环境**，本版用这个"地色"代表。
+    // 典型取值 = 天光推导的地色（SkyCommand::AmbientTricolor()[2]），与天光同源。
+    Color tir_color{0.16f, 0.15f, 0.13f, 1.0f};
+    // 水的折射率：临界角 = asin(1 / ior) ≈ 48.6°（1.333）。改它 = 改 Snell 窗的大小。
+    float ior = 1.333f;
+    // 水面 RMS 斜率（度）：> 0 时把**精确 Fresnel** 对斜率分布做平均 ⇒ 临界角从硬边变
+    // 渐变带（浪越大窗边越糊）。0 = 理想镜面（物理硬边）。
+    float surface_slope_rms_deg = 0.0f;
 };
 
 class WaterSkinRenderer {

@@ -278,6 +278,9 @@ int RunCaptureWater(const std::string& out_dir) {
         bool water_scene = true;   // true = 水面场景（含道具塔）
         bool water_skin = true;    // 只在水面场景有意义：是否画水面
         bool use_strip = false;    // true = strip 平铺版（对照）；false = 新水皮 pass
+        // 相机注视点的 y（米）；nullopt = 默认原点。水下抬头看水面时必须抬高，
+        // 否则视线一直是水平的，而 Snell 窗在**头顶**（正上方 ±48.6°）。
+        std::optional<float> target_y;
     };
     const Shot shots[] = {
         {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
@@ -286,6 +289,11 @@ int RunCaptureWater(const std::string& out_dir) {
         {"props_top", 0.70, 10.0},                                     // 陡俯视（正对水下）
         {"props_top_nowater", 0.70, 10.0, true, /*water_skin=*/false},
         {"props_grazing", 0.10, 14.0},                                 // 掠射（水线切在桌腿上）
+        // 水下抬头：相机 y = −1.0（R·sinφ），视线抬到 ~48° / ~74°
+        //   ring：视线切过临界角 ⇒ 窗内（透射）与窗外（地色）同屏；
+        //   up  ：视线更接近竖直 ⇒ 以窗内透射为主。
+        {"props_under_ring", -0.083, 12.0, true, true, false, 12.0f},
+        {"props_under_up", -0.083, 12.0, true, true, false, 40.0f},
         {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
@@ -299,8 +307,14 @@ int RunCaptureWater(const std::string& out_dir) {
         app.view_.phi   = s.phi;
         app.view_.theta = 3.14159265358979323846 / 4.0;
         app.view_.R     = s.R;
+        if (s.target_y.has_value()) {
+            app.view_target_ = jpov::Vec3f(0.0f, *s.target_y, 0.0f);
+        } else {
+            app.view_target_.reset();
+        }
         shoot(s.name);
     }
+    app.view_target_.reset();
     app.SetShowWater(true);
     app.SetWaterUseStrip(false);
 

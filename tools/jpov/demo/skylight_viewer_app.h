@@ -107,6 +107,14 @@ public:
     // 水面用 strip 平铺版还是新水皮 pass（对照用）。默认 false = 走新 pass。
     void SetWaterUseStrip(bool on) { water_use_strip_ = on; }
 
+    // 水面的 RMS 斜率（度）：影响**水下**看水面时临界角那条边是硬边还是渐变带。
+    // 0 = 理想镜面（物理硬边）。只为拍图/试手暴露，不进面板。
+    void SetWaterSlopeRmsDeg(float deg) { water_slope_rms_deg_ = deg; }
+
+    // 相机注视点覆盖（默认空 = ViewConfig::Target() 原点）。
+    // 只有「水下抬头看水面」这种机位需要它（目标点得抬到水面之上），交互面板不暴露。
+    std::optional<jpov::Vec3f> view_target_;
+
     // ── 水面场景的透射验证道具（布置常量的单一出处：skylight_water_props.h）──
     // 塔形：水下大 box → 小 box → 桌子 → 桌上的人（布局理由见那个头文件）。
     uint32_t water_big_box_mesh_ = 0;      // 6 × 4 × 6（全在水下）
@@ -182,7 +190,9 @@ public:
         // 用模型场景的 1000 m 会把水面远端切掉、露出背景天空；模型场景保持原值（零回归）。
         const bool water_scene = (scene_ == SceneKind::kWater);
         cmds->camera.position = view_.Position();
-        cmds->camera.target   = jpov_viewer::ViewConfig::Target();
+        cmds->camera.target   = view_target_.has_value()
+                                    ? *view_target_
+                                    : jpov_viewer::ViewConfig::Target();
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
@@ -246,6 +256,9 @@ public:
             wp.fresnel_f0    = fr.f0;
             wp.fresnel_power = fr.power;
             wp.rim_color     = {fr.rim_color.x(), fr.rim_color.y(), fr.rim_color.z(), 1.0f};
+            // 水下视角：临界角外用**天光的地色**补齐（与天光同源，不另配一份颜色）。
+            wp.tir_color     = nl.sky.AmbientTricolor()[2];
+            wp.surface_slope_rms_deg = water_slope_rms_deg_;
             SetWaterSkin(wp);
         } else {
             SetWaterSkin(std::nullopt);
@@ -435,6 +448,7 @@ private:
     SceneKind scene_ = SceneKind::kModel;   // 默认模型场景（原行为）
     bool show_water_ = true;                // 水面场景是否画水皮（headless A/B 用）
     bool water_use_strip_ = false;          // 水面用 strip 平铺版（对照）；false = 新水皮 pass
+    float water_slope_rms_deg_ = 0.0f;      // 水面 RMS 斜率（度）：只影响水下看水面的临界角过渡
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
