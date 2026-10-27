@@ -186,5 +186,19 @@ filegroup(
     ],
 )
 
+# 「真树」范本拓扑（2026-10-27 入库）：松 / 橡 / 杉，各 1.8k~4.7k 张叶卡。
+#   willow.pbtxt 是 442 卡的小苗，只够验拓扑/叶卡；要看**风力/实例化**这类
+#   「树冠越大越明显」的观感必须用这三棵。为什么单开一个 filegroup：
+#   ~4 MB，不想让只需要 willow 的 gold test 把它们一起拖进 runfiles。
+#   生成方式见 samples/README.md（configs/*.pbtxt → generate_shape.py）。
+filegroup(
+    name = "sample_trees",
+    srcs = [
+        "samples/fir_low.pbtxt",
+        "samples/oak_low.pbtxt",
+        "samples/pine_low.pbtxt",
+    ],
+)
+
 # 导出链的 Blender 侧脚本：只把 Sapling 的曲线 / 叶卡网格倒成 .dump（几何决策在 gen/）。
 exports_files(["dump_sapling_curve.py"])
