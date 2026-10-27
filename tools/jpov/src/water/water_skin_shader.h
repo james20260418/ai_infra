@@ -16,14 +16,15 @@
 //   ── 相机在水下（抬头看水面）──
 //     界面反射率 R 仍是**精确未极化 Fresnel（水→空气）**，临界角 θc = asin(1/ior) ≈ 48.6°：
 //       θ ≥ θc ⇒ R = 1（全内反射）⇒ 整片是"地色"（水面变成一面暗镜）
-//       θ <  θc ⇒ 0.02 ≤ R < 1，窗内采天空探针（按表面斜率**轻带偏**方向）× n²
-//     合成：color = skyProbe(tiltedDir) · (n_w/n_a)² · (1−R) + tirColor · R，**α = 1**
+//       θ <  θc ⇒ 0.02 ≤ R < 1，窗内**原样透出背景**（真实场景：天空 + 水上物体）
+//     合成：out = tirColor·R + 背景·(1−R)　（固定管线 alpha 混合，不需要抓帧/探针）
 //
 // ⚠️ **不做折射**（Danis 2026-10-27 定：按"简单游戏引擎"的做法）。
 //    之前用 refract() 把整个 0..90° 天空压进 0..48.6° 锥（物理正确，但观感"很怪"，
 //    而且任何在此基础上采"水上几何"的屏幕空间做法都必然在锥缘拉条）。现在改为：
 //    天空按**视线方向 + 表面斜率**采样（法线扰动的查找），只保留 Fresnel/TIR 这个界面权重。
 //    代价（已知）：窗内的天不会被压扁、地平线不会贴在锥缘 —— 换来的是干净、可调、可控。
+//    n 滑条拉到 1.0 时界面在物理上消失（R≡0）⇒ 整片原样透出背景（含水上人物）。
 
 // ⭐ 波浪 = **只扰法线，不动几何**（Danis：先看波纹，几何起伏以后再说）。
 //    法线扰动同时喂三个消费者：① Fresnel/TIR 的权重（窗缘随波纹起伏）、
@@ -93,12 +94,10 @@ uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"�
 uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
 uniform float uWaveLengthM;      // 主波长（米）
 uniform float uWaveDirRad;       // 传播方向（世界 XZ 平面，弧度）
-uniform samplerCube uEnvCube;    // 天空探针（大气色，不含日月盘；下半球=地色）
-uniform int   uHasEnvCube;       // 0 = 没有探针（退化：不做折射采样）
-
-// 辐亮度守恒：光由空气进水里，L_water = L_air · (1−R) · (n_w/n_a)²
-// （n² = 1.777 就是"水下的窗口看起来比天上的同一片天更亮"的来源）。
-float AirToWaterGain() { return uIor * uIor; }
+// 透射侧 = **帧缓冲里已经画好的东西**（也就是这个 pass 正在混合的背景）：
+// 固定管线 alpha 混合天然给出 out = tirColor·R + 背景·(1−R)，不需要抓帧、不需要探针。
+// ⭐ 这一点决定了"水上物体能不能透过水面看到"：透射的是**真实场景**（人、桌子、天空），
+//    不是"只含天空的探针" —— 后者在 n→1 时也看不到人（2026-10-27 Danis 抓到）。
 float FresnelFromWater(float cos_i, float eta) {
     float sin2t = eta * eta * (1.0 - cos_i * cos_i);
     if (sin2t >= 1.0) {
@@ -189,27 +188,15 @@ void main() {
     vec3 color;
     float alpha;
     if (uCamPos.y < uLevelY) {
-        // ── 水下抬头看水面 ──
-        // R = 精确 Fresnel（含 TIR）作用于**扰动后的法线** ⇒ 窗缘随波纹起伏；
-        // 窗内天空按"视线方向 + 表面斜率"采样（不折射，见文件头），窗外整片地色。
+        // ── 水下抬头看水面：界面权重 R（精确 Fresnel + TIR，法线被波浪扰动）
+        //    out = 地色·R + **背景**·(1−R)
+        //    R→0（正上方 / n→1）⇒ 原样透出背景：天空**和水上的物体**都在；
+        //    R→1（掠过临界角 / 窗外）⇒ 整片地色（本版不做镜像）。
         float R = FresnelFromWater(cos_i, uIor);
-        // 实验旋钮：强制留一部分透射（TIR 区也从"整片地色"变成"能看见一点天"）。
-        // 物理上不存在（全内反射就该 R=1），拉它只是为了看"若透射不被完全掐死会怎样"。
+        // 实验旋钮：强制留一部分透射（TIR 区也不再是"全反射"）。物理上不存在。
         R = min(R, 1.0 - clamp(uMinTransmission, 0.0, 1.0));
-        if (uHasEnvCube == 1) {
-            // 查找方向 = 视线方向被表面斜率**带偏**（法线扰动式查找）。
-            // 斜率 8° ⇒ 天光晃 ~8°，足以看出波纹；但它不会像 refract 那样把天空压进锥里。
-            vec3 rdir = normalize(-V + vec3(N.x, 0.0, N.z));
-            vec3 seen = textureLod(uEnvCube, rdir, 0.0).rgb;
-            // 水面就是该方向最近的面 ⇒ 直接替换（不再与背景 alpha 混合）。
-            color = mix(seen * AirToWaterGain(), uTirColor, clamp(R, 0.0, 1.0));
-            alpha = 1.0;
-        } else {
-            // 没有探针（关掉了环境镜面）：退回纯 alpha 混合 —— 窗内看到的是**背景本身**
-            // （= 该方向已经画好的天空），窗外地色。没有波纹查找，但也不会造假。
-            color = uTirColor;
-            alpha = clamp(R, 0.0, 1.0);
-        }
+        color = uTirColor;
+        alpha = clamp(R, 0.0, 1.0);
     } else {
         // ── 水上俯视/平视 ──
         float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_i, uPower);

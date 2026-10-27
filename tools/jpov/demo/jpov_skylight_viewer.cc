@@ -321,6 +321,9 @@ int RunCaptureWater(const std::string& out_dir) {
         // 最小透射滑条：物理 n 下强制留 20% / 50% 透射 ⇒ 灰区漏出天空。
         {"props_under_t20", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.20f},
         {"props_under_t50", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.50f},
+        // 判"透射到底透的是什么"：n=1（界面消失）应当 ≈ 完全不画水面（= 原样场景）。
+        {"props_under_wide_n100", -0.083, 12.0, true, true, false, 6.0f, 1.00f, 0.0f, std::nullopt},
+        {"props_under_wide_nowater", -0.083, 12.0, true, false, false, 6.0f, 0.0f, 0.0f, std::nullopt},
         {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},

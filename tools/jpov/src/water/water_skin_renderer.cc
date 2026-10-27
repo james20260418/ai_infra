@@ -30,8 +30,6 @@ namespace {
 // 本 pass 是独立 pass（不透明 3D + 粒子/雾/条带之后），与 strip pass 同样的划分：
 // 单元 0 = 场景深度。pass-local，不占 texture_units.h 的跨 pass 区间。
 constexpr int kSceneDepthUnit = 0;
-// 天空探针 cubemap（水下折射采样）。pass-local，与 scene depth 不冲突。
-constexpr int kSkyCubeUnit = 1;
 
 }  // namespace
 
@@ -70,8 +68,7 @@ void WaterSkinRenderer::Finalize() {
 
 void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                              const float view_proj[16], unsigned int scene_depth_tex,
-                             unsigned int sky_env_cube, int width, int height,
-                             ShaderManager& shader_mgr) {
+                             int width, int height, ShaderManager& shader_mgr) {
     CHECK_GT(params.half_extent_m, 0.0f) << "WaterSkinRenderer: half_extent_m 必须 > 0";
     CHECK_NE(scene_depth_tex, 0u) << "WaterSkinRenderer: 缺少场景深度纹理";
     CHECK_NE(vao_, 0u) << "WaterSkinRenderer: 未 Init()";
@@ -121,12 +118,6 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
     glUniform1i(shader_mgr.GetUniform(prog, "uSceneDepth"), kSceneDepthUnit);
 
-    // 天空探针（水下折射采样用）。没有探针时置 0 ⇒ FS 走退化分支（不做折射）。
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_cube);
-    glUniform1i(shader_mgr.GetUniform(prog, "uEnvCube"), kSkyCubeUnit);
-    glUniform1i(shader_mgr.GetUniform(prog, "uHasEnvCube"), sky_env_cube != 0 ? 1 : 0);
-    glActiveTexture(GL_TEXTURE0);
 
     // 简易透射 = 固定管线 alpha 混合，dst 就是帧缓冲里已有的场景颜色。
     // 深度测试关闭：HDR 目标没有深度附件，FS 里手动比 MRT#1 场景深度。
@@ -144,9 +135,6 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
-    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 

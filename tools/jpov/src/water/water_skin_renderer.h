@@ -76,14 +76,12 @@ public:
     //   view_proj         : 相机 Proj*View（列主序 16 float）。
     //   scene_depth_tex   : MRT#1 场景深度（R32F 单采样）。必须**不**是当前 draw FBO 的
     //                       附件（否则形成采样↔写入的反馈环）。
-    //   sky_env_cube      : 天空探针 cubemap（大气色、不含日月盘；下半球=地色）。
-    //                       0 = 没有探针 ⇒ 水下分支退化成"背景透射 + 地色"（不做折射采样）。
     //   width / height    : 3D FBO 尺寸（把 gl_FragCoord 换成 [0,1] uv）。
     // Pre-condition: params.half_extent_m > 0；scene_depth_tex != 0。
     // 返回后 GL_BLEND / GL_DEPTH_TEST / GL_CULL_FACE 均为关（与 3D pass 结束后的状态一致）。
     void Draw(const WaterSkinParams& params, const Camera& cam, const float view_proj[16],
-              unsigned int scene_depth_tex, unsigned int sky_env_cube,
-              int width, int height, ShaderManager& shader_mgr);
+              unsigned int scene_depth_tex, int width, int height,
+              ShaderManager& shader_mgr);
 
 private:
     unsigned int vao_ = 0;
