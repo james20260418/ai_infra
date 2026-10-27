@@ -363,15 +363,17 @@ private:
         ui_.SliderFloat("天光反射量 [0,1]", &water_.sky_scale, row(0, 14),
                         0.0f, 1.0f, 2);
 
-        // ── 右列下半（11~14）：水体光学（吸收逐通道 + 散射强度）──
-        ui_.SliderFloat("吸收 σ 红 (1/m)", &water_.absorption.x(), row(1, 11),
+        // ── 右列下半（11~14）：水体光学 ──
+        // σa 逐通道（吸收谱，红光死得最快 ⇒ 越深越蓝）；σs 近中性 1/m；
+        // g_sun 决定"朝太阳看"的光晕强弱（水是强前向散射）。
+        ui_.SliderFloat("吸收 σa 红 (1/m)", &water_.absorption.x(), row(1, 11),
                         0.0f, 1.2f, 3);
-        ui_.SliderFloat("吸收 σ 绿 (1/m)", &water_.absorption.y(), row(1, 12),
+        ui_.SliderFloat("吸收 σa 绿 (1/m)", &water_.absorption.y(), row(1, 12),
                         0.0f, 1.2f, 3);
-        ui_.SliderFloat("吸收 σ 蓝 (1/m)", &water_.absorption.z(), row(1, 13),
+        ui_.SliderFloat("吸收 σa 蓝 (1/m)", &water_.absorption.z(), row(1, 13),
                         0.0f, 1.2f, 3);
-        ui_.SliderFloat("散射强度", &water_.scatter_scale, row(1, 14),
-                        0.0f, 3.0f, 2);
+        ui_.SliderFloat("散射 σs (1/m)", &water_.scattering.x(), row(1, 14),
+                        0.0f, 0.5f, 3);
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));

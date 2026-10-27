@@ -1757,6 +1757,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
                 sky_env_tex_,
                 static_cast<float>(std::log2(static_cast<double>(kSkyEnvCubeSize))),
+                eff_sun.has_value() ? &*eff_sun : nullptr,
                 mvp_);
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
@@ -1882,7 +1883,9 @@ void Renderer::Render(const RenderCommandList& cmds,
                 water_renderer_.DrawUnderwaterMedium(
                     *cmds.water, cam, fbo_3d_w, fbo_3d_h,
                     fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
-                    sky_env_tex_, mvp_);
+                    sky_env_tex_,
+                    eff_sun.has_value() ? &*eff_sun : nullptr,
+                    mvp_);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

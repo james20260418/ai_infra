@@ -296,6 +296,17 @@ int RunCaptureWater(const std::string& out_dir) {
     // 抬头看水面：机位仍在水下，但把注视点抬到水面之上（否则永远只看见海底）。
     app.view_target_ = jpov::Vec3f(0.0f, 9.0f, 0.0f);
     shoot("water_camera_under_lookup");
+    // 朝太阳方向看（水下）：太阳的折射像应当出现在 Snell 窗里，且随方位角明显变化。
+    // 相机在 (+X,+Z) 看向原点 ⇒ 视线方位 225°；把太阳放到 225° 就"正对着"它。
+    app.deg_.sun_elev_deg = 60.0f;
+    app.deg_.sun_azim_deg = 225.0f;
+    app.view_target_ = jpov::Vec3f(0.0f, 30.0f, 0.0f);
+    shoot("water_camera_under_sun");
+    app.deg_.sun_azim_deg = 45.0f;                 // 太阳转到相机背后 ⇒ 窗里不该有亮斑
+    shoot("water_camera_under_sun_behind");
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 40.0f;
+
     // 对照：把水面当成**理想镜面**（RMS 斜率 0）⇒ 临界角处是纯物理硬边。
     // 两张图并排就能看出"过渡宽度"到底来自哪：不是调参，是界面粗糙度。
     app.water_.surface_slope_rms_deg = 0.0f;

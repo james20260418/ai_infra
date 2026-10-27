@@ -28,7 +28,7 @@
 #define JPOV_SRC_WATER_WATER_RENDERER_H_
 
 #include "tools/jpov/interface/camera.h"
-#include "tools/jpov/interface/render_command.h"   // WaterSurface
+#include "tools/jpov/interface/render_command.h"   // WaterSurface / DirectionalLight
 #include "tools/jpov/src/shader_manager.h"
 
 namespace jpov {
@@ -61,6 +61,7 @@ public:
                      unsigned int fbo_hdr,
                      unsigned int color_tex, unsigned int scene_depth_tex,
                      unsigned int env_cube, float env_max_lod,
+                     const DirectionalLight* sun,
                      const float view_proj[16]);
 
     // ---- ② 整屏介质 pass（仅相机在水下时调用）----
@@ -72,6 +73,7 @@ public:
                               unsigned int fbo_hdr,
                               unsigned int color_tex, unsigned int scene_depth_tex,
                               unsigned int env_cube,
+                              const DirectionalLight* sun,
                               const float view_proj[16]);
 
 private:

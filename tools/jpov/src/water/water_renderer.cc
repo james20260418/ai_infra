@@ -95,6 +95,92 @@ void InvertMat4(const float m[16], float out[16]) {
     }
 }
 
+// 太阳进水的三个量：折射后的传播方向、|cosθw|、水面之下的辐照度。
+//   · 方向：sinθw = sinθi / 1.333 ⇒ 水下天顶角永远 ≤ 48.6°（水下的"光柱"几乎竖直）；
+//   · 辐照度：E_below = E_above · T(θi) · cosθi/cosθw
+//     （折射后光束截面变大 cosθi → cosθw，辐照度按面积比下降；T 是 Fresnel 透射率）。
+struct SunUnderwater {
+    bool valid = false;
+    float dir[3] = {0.0f, -1.0f, 0.0f};
+    float irradiance[3] = {0.0f, 0.0f, 0.0f};
+};
+
+SunUnderwater ComputeSunUnderwater(const jpov::DirectionalLight& sun) {
+    SunUnderwater out;
+    const float len = std::sqrt(sun.direction.x() * sun.direction.x()
+                              + sun.direction.y() * sun.direction.y()
+                              + sun.direction.z() * sun.direction.z());
+    if (len < 1.0e-6f) {
+        return out;
+    }
+    const float dx = sun.direction.x() / len;
+    const float dy = sun.direction.y() / len;
+    const float dz = sun.direction.z() / len;
+    // 光传播方向的 y 分量必须为负（从天上往下）。太阳在地平线以下 ⇒ 水下没有直射光。
+    const float cos_i = -dy;
+    if (cos_i <= 1.0e-4f) {
+        return out;
+    }
+    const float n_water = 1.333f;
+    const float eta = 1.0f / n_water;
+    const float sin2_i = 1.0f - cos_i * cos_i;
+    const float sin2_t = eta * eta * sin2_i;
+    if (sin2_t >= 1.0f) {
+        return out;   // 空气→水不会发生全内反射；防御式返回"无直射光"
+    }
+    const float cos_t = std::sqrt(1.0f - sin2_t);
+    // 折射方向：eta·d + (eta·cos_i − cos_t)·N
+    const float k = eta * cos_i - cos_t;
+    const float rx = eta * dx;
+    const float ry = eta * dy + k;
+    const float rz = eta * dz;
+    const float rlen = std::sqrt(rx * rx + ry * ry + rz * rz);
+    if (rlen < 1.0e-6f) {
+        return out;
+    }
+    out.dir[0] = rx / rlen;
+    out.dir[1] = ry / rlen;
+    out.dir[2] = rz / rlen;
+
+    // Fresnel（空气→水，未极化精确式）
+    const float rs = (cos_i - n_water * cos_t) / (cos_i + n_water * cos_t);
+    const float rp = (cos_t - n_water * cos_i) / (cos_t + n_water * cos_i);
+    const float T = 1.0f - 0.5f * (rs * rs + rp * rp);
+    // 面积因子：折射后光束截面变大 ⇒ 辐照度按 cosθi/cosθw 下降
+    const float area = cos_i / std::max(cos_t, 1.0e-4f);
+    const float gain = T * area * std::max(0.0f, sun.intensity);
+    out.irradiance[0] = sun.color.r * gain;
+    out.irradiance[1] = sun.color.g * gain;
+    out.irradiance[2] = sun.color.b * gain;
+    out.valid = true;
+    return out;
+}
+
+// 介质与光源的公共 uniform（水面 FS 与介质 FS 用同一套）。
+void UploadMediumAndLights(jpov::ShaderManager& shader_mgr, unsigned int prog,
+                           const jpov::WaterSurface& water,
+                           const SunUnderwater& sun) {
+    glUseProgram(prog);
+    glUniform3f(shader_mgr.GetUniform(prog, "uSigmaA"),
+                std::max(0.0f, water.absorption.x()),
+                std::max(0.0f, water.absorption.y()),
+                std::max(0.0f, water.absorption.z()));
+    glUniform3f(shader_mgr.GetUniform(prog, "uSigmaS"),
+                std::max(0.0f, water.scattering.x()),
+                std::max(0.0f, water.scattering.y()),
+                std::max(0.0f, water.scattering.z()));
+    glUniform1f(shader_mgr.GetUniform(prog, "uPhaseGSun"),
+                std::max(0.0f, std::min(0.99f, water.phase_g_sun)));
+    glUniform1f(shader_mgr.GetUniform(prog, "uPhaseGAmb"),
+                std::max(0.0f, std::min(0.99f, water.phase_g_amb)));
+    glUniform3f(shader_mgr.GetUniform(prog, "uSunIrradiance"),
+                sun.irradiance[0], sun.irradiance[1], sun.irradiance[2]);
+    glUniform3f(shader_mgr.GetUniform(prog, "uSunDirWater"),
+                sun.dir[0], sun.dir[1], sun.dir[2]);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSkyScale"),
+                std::max(0.0f, water.sky_scale));
+}
+
 }  // namespace
 
 namespace jpov {
@@ -102,8 +188,8 @@ namespace jpov {
 void WaterRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(shader_mgr != nullptr);
     shader_mgr_ = shader_mgr;
-    prog_surface_ = shader_mgr_->GetOrCreate("water_surface", {kWaterVs, kWaterSurfaceFs});
-    prog_medium_ = shader_mgr_->GetOrCreate("water_medium", {kWaterMediumVs, kWaterMediumFs});
+    prog_surface_ = shader_mgr_->GetOrCreate("water_surface", {kWaterVs, kWaterSurfaceFs.c_str()});
+    prog_medium_ = shader_mgr_->GetOrCreate("water_medium", {kWaterMediumVs, kWaterMediumFs.c_str()});
 
     // 全屏三角形用的空 VAO（core profile 下没有绑 VAO 的 draw 非法）。两个 pass 共用。
     if (fs_vao_ == 0) {
@@ -207,6 +293,7 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                                 unsigned int fbo_hdr,
                                 unsigned int color_tex, unsigned int scene_depth_tex,
                                 unsigned int env_cube, float env_max_lod,
+                                const DirectionalLight* sun,
                                 const float view_proj[16]) {
     CHECK(shader_mgr_ != nullptr) << "WaterRenderer::Init 未调用";
     CHECK_GT(fbo_w, 0);
@@ -255,16 +342,9 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 std::max(0.0f, water.sky_scale));
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uF0"), water.f0);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uRoughness"), water.roughness);
-    glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uAbsorption"),
-                std::max(0.0f, water.absorption.x()),
-                std::max(0.0f, water.absorption.y()),
-                std::max(0.0f, water.absorption.z()));
-    glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uScatter"),
-                std::max(0.0f, water.scatter.x()),
-                std::max(0.0f, water.scatter.y()),
-                std::max(0.0f, water.scatter.z()));
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uScatterScale"),
-                std::max(0.0f, water.scatter_scale));
+    // 介质 + 两条光源（与介质 pass 共用同一份上传代码）
+    const SunUnderwater sun_u = sun ? ComputeSunUnderwater(*sun) : SunUnderwater{};
+    UploadMediumAndLights(*shader_mgr_, prog_surface_, water, sun_u);
     glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uCamUnderwater"),
                 IsCameraUnderwater(water, cam) ? 1 : 0);
     // 空气→水的辐亮度增益 (n_w/n_a)²：水下看到的天空要 ×1.777（Snell 窗"刺眼"的物理来源）。
@@ -272,6 +352,8 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
     // 水面 RMS 斜率（度 → 弧度）。0 = 理想镜面（TIR 硬边）。
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSlopeRmsRad"),
                 std::max(0.0f, water.surface_slope_rms_deg) * 3.14159265358979f / 180.0f);
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSunImageRad"),
+                std::max(0.0f, water.sun_image_deg) * 3.14159265358979f / 180.0f);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, cap_color_tex_);
@@ -308,6 +390,7 @@ void WaterRenderer::DrawUnderwaterMedium(const WaterSurface& water, const Camera
                                          unsigned int fbo_hdr,
                                          unsigned int color_tex, unsigned int scene_depth_tex,
                                          unsigned int env_cube,
+                                         const DirectionalLight* sun,
                                          const float view_proj[16]) {
     CHECK(shader_mgr_ != nullptr) << "WaterRenderer::Init 未调用";
     CHECK_GT(fbo_w, 0);
@@ -339,16 +422,9 @@ void WaterRenderer::DrawUnderwaterMedium(const WaterSurface& water, const Camera
                        1, GL_FALSE, inv_vp);
     glUniform3f(shader_mgr_->GetUniform(prog_medium_, "uCameraPos"),
                 cam.position.x(), cam.position.y(), cam.position.z());
-    glUniform3f(shader_mgr_->GetUniform(prog_medium_, "uAbsorption"),
-                std::max(0.0f, water.absorption.x()),
-                std::max(0.0f, water.absorption.y()),
-                std::max(0.0f, water.absorption.z()));
-    glUniform3f(shader_mgr_->GetUniform(prog_medium_, "uScatter"),
-                std::max(0.0f, water.scatter.x()),
-                std::max(0.0f, water.scatter.y()),
-                std::max(0.0f, water.scatter.z()));
-    glUniform1f(shader_mgr_->GetUniform(prog_medium_, "uScatterScale"),
-                std::max(0.0f, water.scatter_scale));
+    const SunUnderwater sun_u = sun ? ComputeSunUnderwater(*sun) : SunUnderwater{};
+    UploadMediumAndLights(*shader_mgr_, prog_medium_, water, sun_u);
+    glUniform1f(shader_mgr_->GetUniform(prog_medium_, "uLevel"), water.level);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, cap_color_tex_);
