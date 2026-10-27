@@ -53,7 +53,10 @@
         //（任一折叠/展开都会带动下方那个随之上/下移）。
         const float brush_h = DrawBrushPanel(cmds, w);
         const float tint_h = DrawTintPanel(cmds, w, brush_h);
-        DrawRelaxPanel(cmds, w, brush_h + kPanelSpacing + tint_h);
+        const float tint_palette_h = DrawTintPalettePanel(
+            cmds, w, brush_h + kPanelSpacing + tint_h);
+        DrawRelaxPanel(cmds, w,
+                       brush_h + kPanelSpacing + tint_h + kPanelSpacing + tint_palette_h);
         DrawSkinPanel(cmds, w, h);
         DrawHoleFillPanel(cmds, w, h);
         DrawMotionPanel(cmds, h);
@@ -89,9 +92,6 @@
             brush_.active() ? "画笔：激活中（点击结束）" : "画笔：点击激活";
         if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
             brush_.Toggle();
-            if (brush_.active()) {
-                tint_paint_active_ = false;  // 同一鼠标左键：选区画笔与 tint 涂抹互斥
-            }
         }
         row_y += step_y;
 
@@ -114,23 +114,23 @@
         return af.height;
     }
 
-    // ---- 顶部中间（画笔面板下方）：顶点 Tint 覆盖（可折叠）----
+    // ---- 顶部中间（画笔面板下方）：顶点 Tint 覆盖（一键刷选区，可折叠）----
     //
-    // 「顶点配置覆盖」编辑：选一个 byte id（0 = 不换色，1/2 = 两个调色板通道）→ 在衣服上
-    // 用画笔涂抹，把涂到的顶点写成该 id。染白（让 baseColor 变白）不在这里做 —— 建模侧做。
+    // 「顶点配置覆盖」编辑：**复用 3D 画笔的选区**。先在画笔面板激活并涂点，再点这里的
+    // 三个按钮之一：Tint 1 / Tint 2 / 清除（id=0）。不做独立涂抹模式（无画笔圆、无第二个半径）。
+    // 染白（让 baseColor 变白）不在这里做 —— 建模侧做。
     //
-    // 半径与 3D 画笔共用（同一个 px 半径 = 屏幕上同样大的圆）；两种涂抹互斥。
-    // 标题栏：顶点 Tint 覆盖（2 通道）。
-    // 展开内容行：按钮(1) + id下拉(1) + 半径(1) + 显示分区(1) + 调色板(5) + 状态(1) = 10。
+    // 标题栏：顶点 Tint 覆盖（刷选区）。
+    // 展开内容行：三按钮(1) + 状态(1) = 2。
     // above_h = 上方画笔面板的本帧总高（用于定位）。
-    // 返回本帧面板总高（供下方松弛度面板定位）。
+    // 返回本帧面板总高（供下方调色板面板定位）。
     float DrawTintPanel(jpov::RenderCommandList* cmds, float win_w, float above_h) {
         const float panel_w  = kPanelWidth;  // 固定宽（像素）
         const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);  // 顶部居中
         const float panel_y = kPanelMargin + above_h + kPanelSpacing;
-        constexpr int kContentRows = 10;
+        constexpr int kContentRows = 2;
         const AccordionFrame af = BeginAccordionPanel(
-            cmds, panel_x, panel_y, panel_w, "顶点 Tint 覆盖（2 通道）",
+            cmds, panel_x, panel_y, panel_w, "顶点 Tint 覆盖（刷选区）",
             &tint_panel_open_, kContentRows);
         if (!af.expanded) {
             return af.height;
@@ -142,44 +142,66 @@
         const float kRowH = kPanelRowH;
         float row_y = frame.row_y;
 
-        const char* btn = tint_paint_active_
-                              ? "Tint 涂抹：进行中（点击结束）"
-                              : "Tint 涂抹：点击开始";
-        if (ui_.Button(btn, jpov::UiRect{{left, row_y}, {row_w, kRowH}})) {
-            SetTintPaintActive(!tint_paint_active_);
+        // 三按钮并排：Tint 1 / Tint 2 / 清除（0）。一键刷当前选区。
+        constexpr float kBtnGap = 8.0f;
+        const float btn_w = (row_w - kBtnGap * 2.0f) / 3.0f;
+        const char* const labels[3] = {"刷 Tint 1", "刷 Tint 2", "清除 (0)"};
+        const uint8_t ids[3] = {1, 2, 0};
+        for (int k = 0; k < 3; ++k) {
+            const jpov::UiRect r{
+                {left + static_cast<float>(k) * (btn_w + kBtnGap), row_y},
+                {btn_w, kRowH}};
+            if (ui_.Button(labels[k], r)) {
+                ApplyTintToSelection(ids[k]);
+            }
         }
         row_y += step_y;
 
-        // id 选择：0 = 不换色；1/2 = 两个调色板通道（Combo 下标 == id）。
-        static const std::vector<const char*> kTintIdItems = {
-            "0 · 不换色", "1 · Tint 1", "2 · Tint 2"};
-        ui_.Combo("涂抹 id（byte）", &tint_paint_id_ui_, kTintIdItems,
-                  jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
+        // 状态：选区点数 / 上一次刷的结果 / 提示。
+        std::string status = tint_msg_;
+        if (status.empty()) {
+            status = brush_.HasSelection()
+                         ? Format("当前选区 %zu 点：点上面按钮一键刷", brush_.selected_count())
+                         : std::string("先在「3D 画笔」面板激活并涂出选区");
+        }
+        const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
+        cmds->DrawText(status,
+                       /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
+                       kFontSize, kForeground,
+                       jpov::TextAlignment::kTopLeft, kViewerFontAlias);
+        return af.height;
+    }
 
-        // 半径与 3D 画笔共用：屏幕上「涂多大」是同一件事，不给第二个旋钮。
-        ui_.SliderFloat("画笔半径 (px)", brush_.radius_px_mutable(),
-                        jpov::UiRect{{left, row_y}, {row_w, kRowH}},
-                        BrushTool::kMinRadiusPx, BrushTool::kMaxRadiusPx,
-                        /*decimal_places*/ 0);
-        row_y += step_y;
+    // ---- 顶部中间（tint 刷色面板下方）：Tint 调色 / 显示（可折叠）----
+    //
+    // 与「刷选区」面板**分开**（Danis 2026-10-27）：这里只调两个通道的颜色乘数 + 开关 +
+    // 显示分区；刷哪个通道由上面那三个按钮决定。
+    // 展开内容行：调色板(5) + 显示 tint 分区(1) = 6。
+    float DrawTintPalettePanel(jpov::RenderCommandList* cmds, float win_w,
+                               float above_h) {
+        const float panel_w  = kPanelWidth;
+        const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);
+        const float panel_y = kPanelMargin + above_h + kPanelSpacing;
+        constexpr int kContentRows = 6;
+        const AccordionFrame af = BeginAccordionPanel(
+            cmds, panel_x, panel_y, panel_w, "Tint 调色 / 显示",
+            &tint_palette_panel_open_, kContentRows);
+        if (!af.expanded) {
+            return af.height;
+        }
+        const PanelFrame& frame = af.frame;
+        const float left = frame.left;
+        const float row_w = frame.row_w;
+        const float step_y = frame.step_y;
+        const float kRowH = kPanelRowH;
+        float row_y = frame.row_y;
 
-        ui_.Checkbox("显示 tint 分区（按调色板色画点）", &show_tint_field_,
-                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
-        row_y += step_y;
-
-        // 两个通道的 RGB 调色板 + 开关（与 model viewer 同一份控件）。
         const int palette_rows = jpov::DrawBaseTintPalette(
             ui_, &tint_ui_, jpov::UiRect{{left, row_y}, {row_w, kRowH}}, step_y);
         row_y += step_y * static_cast<float>(palette_rows);
 
-        if (!tint_msg_.empty()) {
-            const jpov::Color kForeground{0.92f, 0.93f, 0.95f, 1.0f};
-            cmds->DrawText(tint_msg_,
-                           /*pos*/ {left, row_y + (kRowH - kFontSize) * 0.5f},
-                           kFontSize, kForeground,
-                           jpov::TextAlignment::kTopLeft, kViewerFontAlias);
-        }
+        ui_.Checkbox("显示 tint 分区（按调色板色画点）", &show_tint_field_,
+                     jpov::UiRect{{left, row_y}, {row_w, kRowH}});
         return af.height;
     }
 
@@ -250,16 +272,11 @@
     void ProcessBrush(const jpov::InputSnapshot& input,
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) {
-        // 生命周期：ESC 结束（选区画笔与 tint 涂抹都结束）。
-        if (input.GetKey(jpov::KeyCode::Escape).IsClick()) {
-            if (tint_paint_active_) {
-                tint_paint_active_ = false;
-            }
-            if (brush_.active()) {
-                brush_.SetActive(false);
-            }
+        // 生命周期：ESC 结束。
+        if (brush_.active() && input.GetKey(jpov::KeyCode::Escape).IsClick()) {
+            brush_.SetActive(false);
         }
-        if (!brush_.active() && !tint_paint_active_) {
+        if (!brush_.active()) {
             return;
         }
 
@@ -279,32 +296,23 @@
         // 涂抹：仅非 UI、视口内、左键 drag/click（drag 用帧末鼠标位置，靠 60Hz 连续）。
         if (!over_ui && in_view && (input.left.IsDrag() || input.left.IsClick())) {
             const CameraRay ray = RayFromPixel(basis, mx, my);
-            if (tint_paint_active_) {
-                // 顶点配置覆盖：把锥内顶点写成当前 id（0 = 清除）。
-                PaintTintAlongRay(ray, basis, h);
-            } else {
-                const size_t prims =
-                    std::min(cloth_current_.size(), brush_.primitive_count());
-                for (size_t i = 0; i < prims; ++i) {
-                    brush_.PaintAlongRay(i, cloth_current_[i].mesh.positions,
-                                         ray.origin, ray.dir, brush_.radius_px(), h,
-                                         basis.tan_half_fov);
-                }
+            const size_t prims =
+                std::min(cloth_current_.size(), brush_.primitive_count());
+            for (size_t i = 0; i < prims; ++i) {
+                brush_.PaintAlongRay(i, cloth_current_[i].mesh.positions, ray.origin,
+                                     ray.dir, brush_.radius_px(), h,
+                                     basis.tan_half_fov);
             }
         }
 
-        // 画笔圆：鼠标非 UI 且在视口内时显示（选区=淡黄；tint=淡蓝，便于区分模式）。
+        // 画笔圆（淡黄半透明）：鼠标非 UI 且在视口内时显示。
         if (!over_ui && in_view) {
-            const jpov::Color kBrushCircle = tint_paint_active_
-                ? jpov::Color{0.55f, 0.85f, 1.0f, 0.30f}
-                : jpov::Color{1.0f, 0.95f, 0.55f, 0.30f};
+            const jpov::Color kBrushCircle{1.0f, 0.95f, 0.55f, 0.30f};
             cmds->DrawCircle(/*center*/ {mx, my}, brush_.radius_px(), kBrushCircle);
         }
 
-        // 顶点标记（2px 淡黄方块）：只有选区画笔激活时才画。
-        if (brush_.active()) {
-            DrawBrushMarkers(basis, cmds);
-        }
+        // 顶点标记（2px 淡黄方块）：激活态下始终画选中点。
+        DrawBrushMarkers(basis, cmds);
     }
 
     // 把选中顶点投影到屏幕，用 2px 淡黄方块标记（相机后方 / 越界跳过）。

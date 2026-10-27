@@ -35,10 +35,12 @@ uniform 数，**不需要改顶点布局**。
 ## 3. 工具侧
 
 **clothing tool**（`tools/jpov/clothing/`）
-- 新面板「顶点 Tint 覆盖（2 通道）」：Tint 涂抹开始/结束、id 下拉（0/1/2）、画笔半径（与 3D 画笔共用）、
-  「显示 tint 分区」、两个 RGB 调色板 + enable、状态行。
-- 进入涂抹时若 mesh 没有 `kBaseTint`，**一次性**补全 0 并重新注册 GPU mesh（之后只 `UpdateMesh`）。
-- 涂抹写入 `cloth_current_[i].mesh.base_tint` 并立即推 GPU；保存 glb 时写 `_JPOV_TINT`。
+- 面板「顶点 Tint 覆盖（刷选区）」：**复用 3D 画笔的选区**，三个按钮 **刷 Tint 1 / 刷 Tint 2 / 清除 (0)**
+  一键把选区内顶点刷成对应 id（无独立涂抹模式、无第二个画笔半径）。
+- 面板「Tint 调色 / 显示」：两个 RGB 调色板 + enable + 「显示 tint 分区」；与刷色面板**分开**
+  （2026-10-27 Danis：调色/显示 和 刷颜色 不要挤在一个面板）。
+- 点刷色按钮时若 mesh 没有 `kBaseTint`，**一次性**补全 0 并重新注册 GPU mesh（之后只 `UpdateMesh`）。
+- 写 `cloth_current_[i].mesh.base_tint` 并立即推 GPU；保存 glb 时写 `_JPOV_TINT`。
 - **不做染白**：baseColor 贴图由建模侧留白/涂白（白 × 用户色 = 用户色）。
 
 **model viewer**（`tools/jpov/demo/viewer_app.h`）
@@ -58,4 +60,4 @@ uniform 数，**不需要改顶点布局**。
 
 - `jpov_object3d_tint_test`（GPU 像素校验）：id0 白 / id1 红 / id2 绿 / id1+disabled 与 id0 逐通道相同。
 - `jpov_gltf_saver_test.RoundTripBaseTintAttribute`：`_JPOV_TINT` 写→读回逐顶点相等。
-- `brush_tool_test`：涂抹只改锥内顶点、同值重复涂返回 0（驱动 GPU 重传的判据）、id=0 清除。
+- `brush_tool_test`：一键刷选区只改选中顶点、同值重复刷返回 0（驱动 GPU 重传的判据）、id=0 清除。

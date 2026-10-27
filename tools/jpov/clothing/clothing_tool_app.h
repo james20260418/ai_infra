@@ -212,15 +212,11 @@ public:
 
     // ══════════════ 顶点 base tint 覆盖（MVP：2 个通道）══════════════
     //
-    // 「顶点配置覆盖」编辑：选一个 byte id（0 = 不换色，1/2 = 两个调色板通道），
-    // 用 3D 画笔在衣服上涂抹 → 把**涂到的顶点**的 `MeshData::base_tint` 写成该 id。
-    // 染白不在这里做（Danis：建模时涂白更自然）——本工具只写 id，引擎做一次乘法。
-    //
-    // 与 3D 画笔的关系：两种涂抹**互斥**（同一鼠标左键），进入 tint 涂抹会结束选区画笔。
-    // 半径沿用画笔半径（屏幕上「涂多大」是同一件事，不给第二个旋钮）。
+    // 「顶点配置覆盖」编辑：**复用 3D 画笔的选区**——画笔激活态下涂出的点，点 tint 面板里的
+    // 三个按钮之一（Tint 1 / Tint 2 / 清除）一键刷到这些顶点上（0 = 不换色）。
+    // 不再有独立的 tint 涂抹模式（避免多一个画笔态/圆环，2026-10-27 Danis）。
+    // 染白不在这里做（建模时涂白更自然）——本工具只写 id，引擎做一次乘法。
     jpov::BaseTint tint_ui_{true};   // 调色板（白 = 恒等；默认打开，改色才看得出）
-    bool tint_paint_active_ = false; // tint 涂抹激活态
-    int tint_paint_id_ui_ = 1;       // 当前 id（0..kNumBaseTintColors）
     bool show_tint_field_ = false;   // 用 2D 像素显示各顶点 id（A/B 通道色）
     std::string tint_msg_;           // 面板状态提示
 
@@ -229,7 +225,8 @@ public:
     //    true = 展开（标题栏 + 内容行），false = 折叠（仅标题栏）。
     //    默认全部折叠（2026-10-14 Danis：开启工具时默认收起）。──
     bool brush_panel_open_    = false;  // 顶部中间：3D 画笔
-    bool tint_panel_open_     = false;  // 顶部中间：顶点 tint 覆盖（画笔下方）
+    bool tint_panel_open_     = false;  // 顶部中间：顶点 tint 覆盖（一键刷选区）
+    bool tint_palette_panel_open_ = false;  // 顶部中间：Tint 调色/显示（与刷色面板分开）
     bool relax_panel_open_    = false;  // 顶部中间：布料 LAG 松弛度
     bool right_panel_open_    = false;  // 右上：仿真动力学
     bool skin_panel_open_     = false;  // 右下：软布自动蒙皮
@@ -1310,20 +1307,6 @@ private:
 
     // ==================== 顶点 base tint 覆盖（MVP：2 通道）====================
 
-    // 进入/退出 tint 涂抹。进入前先把 GPU mesh 换成带 kBaseTint 的版本（一次性重建 VAO），
-    // 之后涂抹只需 UpdateMesh；进入 tint 涂抹会结束 3D 选区画笔（同一鼠标左键不能两用）。
-    void SetTintPaintActive(bool on) {
-        if (on) {
-            if (cloth_current_.empty()) {
-                tint_msg_ = "衣服几何尚未就绪";
-                return;
-            }
-            EnsureClothTintAttribute();
-            brush_.SetActive(false);
-        }
-        tint_paint_active_ = on;
-    }
-
     // 保证每个衣服 primitive 的 CPU/GPU mesh 都带 kBaseTint（没有就补全 0 并重注册）。
     //
     // 为什么不在载入时无条件加：没用到 tint 的资产不该多背一个顶点属性 / glb 字段。
@@ -1364,31 +1347,47 @@ private:
         }
     }
 
-    // 把画笔圆锥内顶点的 tint id 覆盖成 tint_paint_id_ui_，并把改动的 primitive 推上 GPU。
-    // 返回是否有 primitive 发生变化。
-    bool PaintTintAlongRay(const CameraRay& ray, const CameraBasis& basis,
-                           float screen_h) {
-        CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
-        const uint8_t id = static_cast<uint8_t>(tint_paint_id_ui_);
-        bool changed_any = false;
+    // 把**当前 3D 画笔选区**的顶点一键刷成 tint id（0 = 清除）。
+    //
+    // 选区是画笔的生命周期产物（结束画笔即清空）⇒ 必须先在「3D 画笔」面板激活并涂点，
+    // 再回来点这三个按钮。没有选区时只给提示，不做任何副作用。
+    // 进入前按需补 kBaseTint（第一次用时一次性重注册 GPU mesh），之后只 UpdateMesh。
+    void ApplyTintToSelection(uint8_t id) {
+        CHECK_LE(static_cast<int>(id), jpov::kNumBaseTintColors);
+        if (cloth_current_.empty()) {
+            tint_msg_ = "衣服几何尚未就绪";
+            return;
+        }
+        if (!brush_.active() || !brush_.HasSelection()) {
+            tint_msg_ = "请先用顶部「3D 画笔」涂出选区，再点这里一键刷";
+            return;
+        }
+        EnsureClothTintAttribute();
+        size_t selected_total = 0;
+        size_t changed_total = 0;
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
-            jpov::MeshData& m = cloth_current_[i].mesh;
-            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
+            if (i >= brush_.primitive_count()) {
                 continue;
             }
-            const size_t changed = AssignByteInBrush(
-                m.positions, ray.origin, ray.dir, brush_.radius_px(), screen_h,
-                basis.tan_half_fov, id, &m.base_tint);
+            const std::vector<uint32_t>& sel = brush_.selected(i);
+            if (sel.empty()) {
+                continue;
+            }
+            selected_total += sel.size();
+            jpov::MeshData& m = cloth_current_[i].mesh;
+            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
+                continue;   // EnsureClothTintAttribute 之后不该发生
+            }
+            const size_t changed = AssignByteToVertices(sel, id, &m.base_tint);
             if (changed == 0) {
                 continue;
             }
             UpdateMesh(cloth_.primitives[i].mesh_id, m);
-            changed_any = true;
+            changed_total += changed;
         }
-        if (changed_any) {
-            tint_msg_ = Format("涂抹中：id = %d（0 = 不换色）", static_cast<int>(id));
-        }
-        return changed_any;
+        tint_msg_ = Format("选区 %zu 顶点 → id=%d（0=不换色）；本次变更 %zu 顶点",
+                           selected_total, static_cast<int>(id), changed_total);
+        LOG(INFO) << tint_msg_;
     }
 
     // 用 2D 像素显示各顶点的 tint id（id 1/2 用对应调色板色；id 0 不画）。
