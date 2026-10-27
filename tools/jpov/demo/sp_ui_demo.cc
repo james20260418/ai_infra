@@ -360,7 +360,7 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < times.size(); ++i) {
             app.SetTimeSeconds(times[i]);
             char path[1024];
-            std::snprintf(path, sizeof(path), "%s/sp_ui_t%03zu_t%.2fs.png",
+            std::snprintf(path, sizeof(path), "%s/sp_ui_t%03zu_t%.4fs.png",
                           capture_dir.c_str(), i, times[i]);
             app.RunOnce(input, winfo, path);
             LOG(INFO) << "capture: " << path;
