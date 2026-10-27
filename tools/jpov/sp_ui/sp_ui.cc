@@ -66,6 +66,15 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     CHECK_GE(frame_dt_ms, 0.0f) << "SpUi frame_dt_ms must be >= 0";
     input_ = &input;
     theme_ = theme;
+    // 缩放：所有「长度」类主题字段同步乘倍率（计数字段如 plate_tiling/tiles 不乘）。
+    // 这样控件 box 放大后，字号/内边距/行高/圆角/线宽/材质尺度仍然互相匹配。
+    theme_.font_size *= ui_scale_;
+    theme_.padding_px *= ui_scale_;
+    theme_.spacing_px *= ui_scale_;
+    theme_.corner_radius_px *= ui_scale_;
+    theme_.border_width_px *= ui_scale_;
+    theme_.plate_border_fade *= ui_scale_;
+    theme_.plate_material_px *= ui_scale_;
     width_ = width;
     height_ = height;
     frame_dt_ms_ = frame_dt_ms;
@@ -81,6 +90,18 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     strips_.clear();
     popup_fill_rects_.clear();
     popup_texts_.clear();
+}
+
+void SpUi::SetUiScale(float scale) {
+    CHECK_GT(scale, 0.0f) << "SpUi::SetUiScale 需要 scale > 0，收到 " << scale;
+    ui_scale_ = scale;
+}
+
+SpRect SpUi::Scaled(const SpRect& r) const {
+    if (ui_scale_ == 1.0f) {
+        return r;
+    }
+    return SpRect{r.pos * ui_scale_, r.size * ui_scale_};
 }
 
 void SpUi::End() {
@@ -135,7 +156,7 @@ void SpUi::Text(const char* label, const SpRect& box, bool stretch_w,
         return;  // 空标签不画。
     }
     // 规格化 box（负尺寸 clamp 0），越界/零尺寸则跳过。
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return;
     }
@@ -162,7 +183,7 @@ void SpUi::Text(const char* label, const SpRect& box, bool stretch_w,
 
 void SpUi::ColorSwatch(const char* /*label*/, const Color& color,
                      const SpRect& box, bool stretch_w, bool stretch_h) {
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return;  // 越界/零尺寸跳过。
     }
@@ -191,12 +212,12 @@ void SpUi::ColorSwatch(const char* /*label*/, const Color& color,
 void SpUi::Plate(const SpRect& box, Color fill, float radius, bool textured) {
     // 装饰板材：只是公开的 PushPlateInternal —— 同一份材质/剖面、同一个缓冲、同一个顺序。
     // 边框颜色给 fill 自身（看不见边），符合旧版「背景矩形只填色不描边」的观感。
-    PushPlateInternal(box, fill, fill, radius, textured);
+    PushPlateInternal(Scaled(box), fill, fill, radius, textured);
 }
 
 bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
                 bool stretch_h) {
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不命中。
     }
@@ -284,7 +305,7 @@ bool SpUi::Checkbox(const char* label, bool* value, const SpRect& box,
                  bool stretch_w, bool stretch_h) {
     // 状态外置：value 必须由调用方提供（本接口不跨帧记忆）。
     CHECK(value != nullptr) << "Checkbox value pointer must not be null";
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不命中。
     }
@@ -395,7 +416,7 @@ bool SpUi::SliderFloat(const char* label, float* value, const SpRect& box,
     const int decimals = std::min(decimal_places, 10);
     const float range = max - min;
 
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不命中。
     }
@@ -662,7 +683,7 @@ bool SpUi::InputText(const char* label, char* buffer, size_t buffer_size,
     CHECK(buffer != nullptr) << "InputText buffer must not be null";
     CHECK_GE(buffer_size, 2u) << "InputText requires buffer_size >= 2 "
                               << "(1 char + null terminator), got " << buffer_size;
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不聚焦、不写值。
     }
@@ -925,7 +946,7 @@ bool SpUi::Combo(const char* label, int* selected,
                bool stretch_w, bool stretch_h) {
     // selected 为 in/out，合法范围 [0, items.size()-1]（任务验收备注）。
     CHECK(selected != nullptr) << "Combo selected pointer must not be null";
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return false;  // 越界/零尺寸：不画、不展开、不改值。
     }
@@ -1114,7 +1135,7 @@ bool SpUi::AccordionHeader(const char* label, bool* open, const SpRect& box,
                          bool stretch_w, bool stretch_h) {
     // 状态外置：展开态由调用方跨帧持有（本接口不跨帧记忆）。
     CHECK(open != nullptr) << "AccordionHeader open pointer must not be null";
-    const SpRect raw = SanitizeBox(box);
+    const SpRect raw = SanitizeBox(Scaled(box));
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return *open;  // 越界/零尺寸：不画、不命中，照常回传展开态。
     }
@@ -1326,10 +1347,13 @@ void SpUi::PushPopupPlate(const SpRect& r, Color fill, Color border,
     if (theme_.plate_material_px > 0.0f) {
         c.tiling = {std::max(box.size.x() / theme_.plate_material_px, 1e-4f),
                     std::max(box.size.y() / theme_.plate_material_px, 1e-4f)};
+        // 与 PushPlateInternal 同一套锚定（见那里的注释）。
+        c.scroll = {-box.pos.x() / theme_.plate_material_px,
+                    -box.pos.y() / theme_.plate_material_px};
     } else {
         c.tiling = theme_.plate_tiling;
+        c.scroll = {0.0f, 0.0f};
     }
-    c.scroll = {0.0f, 0.0f};
     c.time_seconds = time_seconds_;
     c.flipbook_fps = theme_.plate_flipbook_fps;
     c.tiles_x = theme_.plate_tiles_x;
@@ -1397,10 +1421,16 @@ void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
     if (theme_.plate_material_px > 0.0f) {
         c.tiling = {std::max(box.size.x() / theme_.plate_material_px, 1e-4f),
                     std::max(box.size.y() / theme_.plate_material_px, 1e-4f)};
+        // 把 UV 锚到**屏幕原点**而不是本块板材的左上角：
+        // uv01 = (screen − pos)/size，乘 tiling 后 = (screen − pos)/material_px，
+        // 再减去 pos/material_px 就变成 screen/material_px ⇒ 整屏是一整块连续石板，
+        // 相邻板材（背景/卡片/控件）之间石纹接得上、同尺寸控件不长得一模一样。
+        c.scroll = {-box.pos.x() / theme_.plate_material_px,
+                    -box.pos.y() / theme_.plate_material_px};
     } else {
         c.tiling = theme_.plate_tiling;
+        c.scroll = {0.0f, 0.0f};
     }
-    c.scroll = {0.0f, 0.0f};
 
     // 翻书：时间来自 Begin（零点调用方定），帧率/图集来自主题。
     c.time_seconds = time_seconds_;

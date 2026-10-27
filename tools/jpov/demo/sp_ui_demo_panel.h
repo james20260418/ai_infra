@@ -115,6 +115,10 @@ struct SpDemoState {
     // ---- 全局控件 ----
     float gain = 5.0f;         // 增益滑条 [0, 10]
     bool enable = true;        // 使能复选框
+    // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。
+    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
+    // 调用方要不要推进那个秒数，引擎侧依然不取自己的时钟。
+    bool anim_play = true;
     int profile = 1;           // 运行模式 Combo 选中 index
     int view_mode = 0;         // 显示模式 Combo 选中 index（第二个下拉，同屏）
     char name[32] = "";        // 电机命名输入框
@@ -216,8 +220,7 @@ inline void DrawMotorCard(SpUi& ui, RenderCommandList* cmd, SpDemoState& st, int
     // 卡片底（静态矩形，全宽；区分 3 份）。
     // sp_ui：走 `ui.Plate` 而不是 cmd->DrawFillRect —— 装饰底也吃主题的材质/剖面（同源）。
     // 颜色取自主题（不硬编码），否则换主题只会换一半。
-    ui.Plate(SpRect{box.pos, box.size}, ui.theme().background, 4.0f,
-             /*textured=*/false);
+    ui.Plate(SpRect{box.pos, box.size}, ui.theme().background, 4.0f);
     // 标题。
     ui.Text(title,
             SpRect{{box.pos.x() + kUiDemoPad, box.pos.y() + 4.0f},
@@ -264,13 +267,15 @@ inline void DrawSpUIDemoPanel(SpUi& ui, RenderCommandList* cmd, SpDemoState& st)
     // ---- 静态背景（先画，控件后画叠在上层）----
     // 全窗口底板：整套界面坐在这块板材上（旧 ui 是窗口 clear 色 + 零散矩形，
     // 没有「面板本体」）。sp_ui 加这一层，主题换材质时整块面板一起变。
+    // Danis 2026-10-27：背景也要材质（不要平色）。平铺重复靠 plate_material_px
+    // 控制密度 —— 背景面积大，格子数自然多，纹路尺度不会跟着被拉大。
     ui.Plate(SpRect{{0.0f, 0.0f}, {kSpUiDemoWidth, kSpUiDemoHeight}},
-             ui.theme().background, 0.0f, /*textured=*/false);
+             ui.theme().background, 0.0f);
 
     // 实时 Log 底框（右列矩形）。颜色取主题（不硬编码，换主题不再只换一半）。
     ui.Plate(SpRect{{kUiDemoRightX, kUiDemoRightTop},
                     {kUiDemoRightW, kUiDemoRightBottom - kUiDemoRightTop}},
-             ui.theme().background, 4.0f, /*textured=*/false);
+             ui.theme().background, 4.0f);
 
     // ---- 标题 ----
     ui.Text("JPOV 即时模式 UI 调试台",
@@ -289,6 +294,14 @@ inline void DrawSpUIDemoPanel(SpUi& ui, RenderCommandList* cmd, SpDemoState& st)
     // 使能复选框。
     if (ui.Checkbox("使能 Enable", &st.enable, GlobalRow(1, 160.0f))) {
         st.log.Append(st.time_s, "使能切换为 %s", st.enable ? "开" : "关");
+    }
+
+    // 材质翻书的时间驱动开关（与使能同排，靠右）。
+    // 不复用 GlobalRow —— 那从左边距 16 起刻，这里要排在「使能」右边。
+    const SpRect anim_box{{
+        kUiDemoPad + 168.0f, kUiDemoGlobalY + 34.0f}, {190.0f, 26.0f}};
+    if (ui.Checkbox("时间驱动 Anim", &st.anim_play, anim_box)) {
+        st.log.Append(st.time_s, "时间驱动→%s", st.anim_play ? "走" : "停");
     }
 
     // 运行模式 Combo。

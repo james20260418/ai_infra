@@ -85,7 +85,8 @@ struct PlateOptions {
     float material_px = 200.0f;  // 材质图集一格对应的屏幕像素（0 = 关闭，用 tiling 字面值）
     float flipbook_fps = 6.0f;   // 翻书帧率（0 = 静态）
     bool no_texture = false;  // 强制纯色（用于与旧 ui 逐像素对照）
-    bool light = true;        // true = 大理石浅色主题（材质为主角）；false = 旧 ui 深色配色
+    bool light = true;        // true = 大理石主题；false = 旧 ui 深色配色
+    float scale = 1.5f;       // 整体 UI 缩放（1.5 = 线框、字号、内边距全部× 1.5）
 };
 
 class SpUiDemoApp : public JPOV {
@@ -104,10 +105,15 @@ public:
         ui_.SetTextMeasure(&SpUiDemoApp::DemoTextWidth, this);
     }
 
+    // 整体 UI 缩放（布局坐标 → 设备像素）。需在 RunOnce/Run 之前设。
+    void SetUiScale(float scale) { ui_.SetUiScale(scale); }
+
     void SetMarbleTexture(uint32_t tex) { marble_tex_ = tex; }
     void SetPlateOptions(const PlateOptions& opt) { plate_opt_ = opt; }
     // 翻书时间（秒）。零点与步长由调用方定 —— RunOnce/交互都由这里写。
     void SetTimeSeconds(float t) { time_s_ = t; }
+    // 交互模式下是否自己推进时间（拍摄模式恒 false：每张图的时间由 --times 指定）。
+    void SetAutoAdvance(bool on) { auto_advance_ = on; }
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -134,7 +140,7 @@ public:
             theme.accent = {0.58f, 0.60f, 0.63f, 1.0f};      // 悬停（亮一档的石头）
             theme.selected = {0.28f, 0.31f, 0.36f, 1.0f};    // 按下（沉下去的深石）
             theme.hover = {0.42f, 0.43f, 0.45f, 1.0f};       // 控件默认底（中暗石）
-            theme.border = {0.90f, 0.91f, 0.94f, 1.0f};      // 边框（银白）
+            theme.border = {0.62f, 0.63f, 0.66f, 1.0f};      // 边框（银灰；不取 0.9 是为了不爆白）
             theme.disabled = {0.45f, 0.45f, 0.47f, 1.0f};
         }
         theme.font_alias = kDemoFontAlias;
@@ -152,14 +158,23 @@ public:
 
         // 帧时钟：log 时间戳 + 键盘 hold 阈值（固定 30fps 帧周期，与 target_fps 一致）。
         st_.frame = static_cast<int>(frame_count);
-        st_.time_s = static_cast<double>(time_s_);
         const float frame_dt_ms = 1000.0f / 30.0f;
+
+        // 材质时间：只有「时间驱动开关打开 + 交互模式」才自走。
+        // 暂停 → 把当前秒数原封不动传给 Begin，即定格在当前帧（不是回到第 0 帧）。
+        if (auto_advance_ && st_.anim_play) {
+            time_s_ += frame_dt_ms / 1000.0f;
+        }
+        st_.time_s = static_cast<double>(time_s_);
 
         // 即时模式：每帧 Begin → 画整台 → End → Emit。
         // 第 5 个参数（frame_dt_ms）只影响键盘 hold 重复；
         // 第 6 个参数（time_seconds）只喂材质翻书 —— 引擎不取自己的时钟。
-        ui_.Begin(input, theme, jpov::sp_ui::kSpUiDemoWidth,
-                  jpov::sp_ui::kSpUiDemoHeight, frame_dt_ms, time_s_);
+        // 视口/窗口尺寸乘同一个 scale：布局坐标仍是 1280×720 那一套。
+        ui_.Begin(input, theme,
+                  jpov::sp_ui::kSpUiDemoWidth * plate_opt_.scale,
+                  jpov::sp_ui::kSpUiDemoHeight * plate_opt_.scale,
+                  frame_dt_ms, time_s_);
         jpov::sp_ui::DrawSpUIDemoPanel(ui_, cmds, st_);
         ui_.End();
         ui_.Emit(cmds);
@@ -171,6 +186,7 @@ private:
     uint32_t marble_tex_ = 0;
     PlateOptions plate_opt_;
     float time_s_ = 0.0f;
+    bool auto_advance_ = false;
 };
 
 void PrintUsage() {
@@ -184,6 +200,7 @@ void PrintUsage() {
         "  --border <px>        边框带宽（默认 3）\n"
         "  --radius <px>        圆角半径（默认 6）\n"
         "  --material-px <px>   材质图集一格对应的屏幕像素（默认 200；0 = 关闭）\n"
+        "  --scale <n>          整体 UI 缩放（默认 1.5，窗口同步放大）\n"
         "  --fps <n>            翻书帧率（默认 6；0 = 静态材质）\n"
         "  --dark               用旧 ui 的深色配色（默认是浅色大理石主题）\n"
         "  --no-texture         强制纯色板材（与旧 ui 逐像素对照用）\n");
@@ -242,6 +259,9 @@ int main(int argc, char** argv) {
             opt.material_px = std::strtof(argv[++i], nullptr);
         } else if (a == "--fps" && has_next) {
             opt.flipbook_fps = std::strtof(argv[++i], nullptr);
+        } else if (a == "--scale" && has_next) {
+            opt.scale = std::strtof(argv[++i], nullptr);
+            CHECK_GT(opt.scale, 0.0f) << "--scale 必须 > 0";
         } else if (a == "--dark") {
             opt.light = false;
         } else if (a == "--no-texture") {
@@ -253,8 +273,9 @@ int main(int argc, char** argv) {
 
     JPOV::Config cfg;
     cfg.title = "JPOV — sp_ui 板材调试台";
-    cfg.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth);
-    cfg.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight);
+    // 窗口 = 布局尺寸 × 缩放。布局仍按 1280×720 写，整体放大后线框/字号一起变粗。
+    cfg.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
+    cfg.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
     cfg.target_fps = 30;
     // 显式声明字体（路径相对 exe，由 build 脚本同构拷贝）。
     cfg.fonts = {
@@ -266,6 +287,7 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
     app.SetPlateOptions(opt);
+    app.SetUiScale(opt.scale);
 
     // 材质：平铺必须 GL_REPEAT；**不开 mipmap** —— UI 是 1:1 像素，而 fract 平铺在
     // 接缝处导数不连续，自动选 LOD 会挑到最粗 mip 并在接缝上糊一条线
@@ -286,8 +308,8 @@ int main(int argc, char** argv) {
         const std::string cmd = "mkdir -p '" + capture_dir + "'";
         CHECK_EQ(std::system(cmd.c_str()), 0) << "创建输出目录失败：" << capture_dir;
         jpov::WindowInfo winfo;
-        winfo.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth);
-        winfo.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight);
+        winfo.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
+        winfo.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
         jpov::InputSnapshot input{};
         for (size_t i = 0; i < times.size(); ++i) {
             app.SetTimeSeconds(times[i]);
@@ -298,6 +320,8 @@ int main(int argc, char** argv) {
             LOG(INFO) << "capture: " << path;
         }
     } else {
+        // 交互：材质时间自走（面板上的「时间驱动」复选框控制启停）。
+        app.SetAutoAdvance(true);
         app.Run();
     }
 

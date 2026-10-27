@@ -300,6 +300,15 @@ public:
     // 避免把颜色硬编码进面板（那样换主题只换了一半）。
     const SpTheme& theme() const { return theme_; }
 
+    // ---- 全局 UI 缩放 ----
+    // 所有控件的 box、字号、内边距、圆角、边框带宽、材质尺度 **同步** 乘这个系数：
+    // 调用方仍用原来的布局坐标写面板，只是整体变大/变小（线框跟着变粗）。
+    // 命中测试用的是缩放后的 box，与绘制同源 ⇒ 缩放不会错位。
+    // 视口尺寸（Begin 的 width/height）也需要调用方乘同一个系数。
+    // Pre-condition: scale > 0
+    void SetUiScale(float scale);
+    float ui_scale() const { return ui_scale_; }
+
     // ---- 查询 ----
     static bool Hit(const SpRect& r, float x, float y, const InputSnapshot& in);
 
@@ -334,6 +343,10 @@ public:
     bool OutsideViewport(const SpRect& r) const;
 
 private:
+    // 把调用方坐标（布局空间）换成设备像素：box × ui_scale_。
+    // 所有公开控件的 box 入口都只过这一个函数，保证“绘制与命中共源”。
+    SpRect Scaled(const SpRect& r) const;
+
     // 内容感知行高：文本 + 内边距推算控件高度。
     // 首版固定近似（glyph 平均高度 + 内边距），后续接入字体度量 API。
     float RowHeight() const;
@@ -373,8 +386,7 @@ private:
     // 逐字符累加前缀宽度，取与 x 最接近的字符边界。用于“点哪插哪”。
     int CaretIndexForX(const char* text, size_t len, float x) const;
 
-    // 布局解析（C1）：根据 stretch 开关把给定 box 解析成控件实际占用的矩形。
-    //   - stretch 方向非拉伸时，用 ideal（控件理想尺寸）在该方向收缩。
+    // 布局解析（C1）：根据 stretch 开关把给定 box 解析成控件实际占用的矩形。    //   - stretch 方向非拉伸时，用 ideal（控件理想尺寸）在该方向收缩。
     //     ideal.w/h 为负表示该方向不可收缩（始终保持 box 尺寸）。
     //   - 非拉伸方向在 box 内居中（水平 + 垂直）；不提供贴左/贴右 anchor。
     // return：控件实际绘制的 SpRect（已 clamp 到 box 内）。
@@ -494,6 +506,8 @@ private:
     float frame_dt_ms_ = 0.0f;
     // 本帧材质翻书时间（秒），Begin 设置；零点由调用方自定（见 Begin 注释）。
     float time_seconds_ = 0.0f;
+    // 全局 UI 缩放（SetUiScale 设置，默认 1）。布局坐标 → 设备像素的单一倍率。
+    float ui_scale_ = 1.0f;
     // 键盘 hold 重复跨帧累积：按键被持续按住的总时长（毫秒）。
     // 每帧 AdvanceKeyHold 更新，key 释放（None/Click）时清零。
     // 下标 = KeyCode 数值，与 InputSnapshot::keys 对齐。

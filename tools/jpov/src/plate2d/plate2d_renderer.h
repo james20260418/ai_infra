@@ -10,6 +10,9 @@
 //   - 边框带、渐变消失带、材质平铺/翻书全部只是对同一个标量 d 做加减 ⇒ **零额外几何、
 //     零额外 draw call、不会在交接处裂开**。
 //
+// 边框也有材质：材质只采样一次，填充区与边框带共用同一个值，边框只是 tint 不同、
+// 再叠上剖面明暗（否则边框是一圈纯色塑料，跟石板接不上）。
+//
 // 坐标：屏幕空间像素（原点左上角），与其它 2D 命令一致。距离场用 gl_FragCoord 现算
 // （见 kFs 的 ScreenPos），所以 d 天然是「像素单位」，fwidth(d) 就是像素足迹。
 //
@@ -121,8 +124,7 @@ vec2 ScreenPos() {
 
 // 材质采样：先 fract 平铺，再（可选）取 flipbook cell。
 // 注意顺序 —— 先除 tiles 再 fract 会把平铺周期和 cell 周期搅在一起（known_issue §8.2）。
-vec3 SampleMaterial(vec2 uv01) {
-    vec2 uv = fract(uv01 * uTiling + uScroll);
+vec3 SampleMaterial(vec2 uv01) {    vec2 uv = fract(uv01 * uTiling + uScroll);
     if (uFlipbook == 0) {
         return texture(uTex, uv).rgb;
     }
@@ -163,16 +165,18 @@ void main() {
     float cov_inner = Coverage(d + uBorderWidth, px);
 
     // ---- 填充（材质 × tint）----
-    vec3 fill_rgb = uFillColor.rgb;
-    float fill_a = uFillColor.a;
+    // 材质只采样一次，边框带与填充共用同一个 mat：
+    // 边框不是“一圈白塑料”，而是同一块石板上的材质，只是 tint 不同 + 剖面明暗。
+    vec3 mat = vec3(1.0);
     if (uHasTex == 1) {
-        vec2 uv01 = (screen - uMin) / uSize;      // 板材自身的 0..1 参数
-        vec3 mat = SampleMaterial(uv01);
-        fill_rgb *= mat;
+        mat = SampleMaterial((screen - uMin) / uSize);  // 板材自身的 0..1 参数
     }
+    vec3 fill_rgb = uFillColor.rgb * mat;
+    float fill_a = uFillColor.a;
 
-    // ---- 边框带（剖面明暗）----
-    vec3 edge_rgb = uBorderColor.rgb;
+    // ---- 边框带（同样上材质，叠剖面明暗）----
+    vec3 edge_mat = (uHasTex == 1) ? mat : vec3(1.0);
+    vec3 edge_rgb = uBorderColor.rgb * edge_mat;
     float edge_fade = 1.0;
     if (uBorderWidth > 0.0) {
         // t: 0 = 外沿，1 = 内沿
@@ -186,8 +190,10 @@ void main() {
         vec3 L = normalize(vec3(-0.45, 0.70, 0.55));   // 左上偏前来光
         float lambert = max(dot(n, L), 0.0);
         float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
-        // 0.45 底 + 0.85 漫反射 + 0.9 高光：bump=0 时只剩常量底（平面带）。
-        edge_rgb = uBorderColor.rgb * (0.45 + 0.85 * lambert) + vec3(spec * 0.9);
+        // 0.45 底 + 0.85 漫反射：bump=0 时只剩常量底（平面带）。
+        // 高光也乘材质（否则粗糙区域的金属高光会凭空亮起来）。
+        edge_rgb = uBorderColor.rgb * edge_mat * (0.45 + 0.85 * lambert)
+                 + vec3(spec * 0.9) * edge_mat;
         // 渐变消失带：靠近内沿 alpha 收到 0 —— 边框淡入填充，没有硬交接。
         if (uBorderFade > 0.0) {
             edge_fade = clamp((1.0 - t) * uBorderWidth / uBorderFade, 0.0, 1.0);

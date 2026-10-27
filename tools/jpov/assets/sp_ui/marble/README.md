@@ -121,5 +121,12 @@ Catmull-Rom 是**逐像素仿射**组合，而仿射组合保持可平铺性 ⇒
 3. **材质尺度**：`SpTheme::plate_material_px` 表示「一格图集对应多少屏幕像素」，
    逐块按尺寸反算 tiling ⇒ 整屏纹理密度一致。字面 `plate_tiling` 会把同一格拉满
    一块大面板（纹路被放大到糊）。
-4. **颜色**：`fill_color` 是乘到材质上的 tint。材质本身中性偏白，
+4. **颜色**：`fill_color` 是乘到材质上的 tint；`border_color` 同样是 tint
+   （边框带也采样同一张材质，不是一圈纯色塑料）。材质本身中性偏白，
    所以「多种颜色」只需要改 tint，不需要多套材质。
+5. **UV 锚定屏幕原点**：`SpTheme::plate_material_px > 0` 时，sp_ui 逐块算
+   `tiling = size / material_px` 且 `scroll = −pos / material_px`
+   （因为 `uv01 × tiling = (screen − pos)/material_px`，减掉 `pos/material_px`
+   就是 `screen/material_px`）。效果：整屏是一整块连续石纹 —— 背景/卡片/控件之间
+   纹路接得上，同尺寸控件不会长得一模一样。不锚定的话每块板材都从自己的左上角
+   重新铺，3 个电机卡片会是三张相同的石头。
