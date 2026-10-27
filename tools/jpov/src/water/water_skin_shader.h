@@ -105,6 +105,10 @@ uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"�
 uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
 uniform float uWaveLengthM;      // 主波长（米）
 uniform float uWaveDirRad;       // 传播方向（世界 XZ 平面，弧度）
+// 远距离带限方式（对比/教学用；见 WaveNormal 的注释）：
+//   0 = 不过滤（aliasing 基线）  1 = 硬关八度 + 归一化  2 = 逐八度 sinc 带限（IQ）
+//   3 = 2 + 丢失的斜率方差 → 反射模糊 + 太阳高光增宽（LEAN 思路）
+uniform int   uWaveFilterMode;
 // 透射侧 = **帧缓冲里已经画好的东西**（也就是这个 pass 正在混合的背景）：
 // 固定管线 alpha 混合天然给出 out = tirColor·R + 背景·(1−R)，不需要抓帧、不需要探针。
 // ⭐ 这一点决定了"水上物体能不能透过水面看到"：透射的是**真实场景**（人、桌子、天空），
@@ -148,7 +152,8 @@ float ZView(float d) {
 //     fadeᵢ = 1 − smoothstep(λᵢ/6, λᵢ/3, footprint)
 //   于是远处先丢掉细波、保留大浪 —— 和法线贴图 mip 一个道理，只是发生在程序化域。
 //   丢掉一部分八度后按**存活权重之和**归一化，所以"波幅滑条 = 最大斜率"在任何距离都成立。
-vec3 WaveNormal(vec3 p) {
+vec3 WaveNormal(vec3 p, out float slope_var) {
+    slope_var = 0.0;
     if (uWaveSlopeRad <= 1.0e-5) {
         return vec3(0.0, 1.0, 0.0);
     }
@@ -156,7 +161,6 @@ vec3 WaveNormal(vec3 p) {
     float footprint = length(fwidth(p.xz));
 
     // 7 个八度：方向/波长都取不成比例的值（整齐的组合会拍出"华夫饼"点阵 + 摩尔纹）。
-    // 波长跨度 0.37λ … 5λ ⇒ 细节在近处，远处还剩大尺度起伏。
     const int   kCount = 7;
     const float kAng[kCount]    = float[kCount](0.00, 1.13, 2.41, 3.63, 5.02, 0.72, 4.31);
     const float kLamMul[kCount] = float[kCount](1.00, 0.63, 1.57, 0.37, 2.31, 5.00, 0.49);
@@ -167,27 +171,46 @@ vec3 WaveNormal(vec3 p) {
     float wsum = 0.0;
     for (int i = 0; i < kCount; ++i) {
         float lam = max(uWaveLengthM * kLamMul[i], 0.02);
-        float keep = 1.0 - smoothstep(0.17 * lam, 0.33 * lam, footprint);
-        if (keep <= 0.0) {
-            continue;                       // 这个波长在屏幕上已经亚像素了 ⇒ 丢掉
+        // ── 三种带限方式（对比用）──
+        //   box 滤波一个余弦 = 振幅 × sinc(π·Δ/λ)（IQ "band limiting"）；
+        //   硬关八度是它的粗略近似；不过滤就是 aliasing 基线。
+        float keep = 1.0;
+        if (uWaveFilterMode == 1) {
+            keep = (footprint < 0.25 * lam) ? 1.0 : 0.0;                 // 硬切
+        } else if (uWaveFilterMode >= 2) {
+            float x = 3.14159265359 * footprint / lam;                   // sinc 带限
+            keep = (x < 1.0e-4) ? 1.0 : sin(x) / x;
+            keep = max(keep, 0.0);
+        }
+        if (keep <= 1.0e-5) {
+            // 该八度被滤掉：把它的**斜率方差**留给高光/反射（LEAN 思路：能量不凭空消失）
+            slope_var += (kWeight[i] * uWaveSlopeRad) * (kWeight[i] * uWaveSlopeRad) * 0.5;
+            continue;
         }
         float w = kWeight[i] * keep;
+        if (keep < 1.0) {
+            slope_var += (kWeight[i] * uWaveSlopeRad) * (kWeight[i] * uWaveSlopeRad) *
+                         (1.0 - keep * keep) * 0.5;
+        }
         float a = uWaveDirRad + kAng[i];
         vec2 d = vec2(cos(a), sin(a));
         float k = 6.28318530718 / lam;
-        // 深水色散：短波跑得快（ω ∝ 1/√λ）⇒ 各八度相位推进不同，不会"整片平移"。
-        float omega = inversesqrt(kLamMul[i]);
+        float omega = inversesqrt(kLamMul[i]);        // 深水色散 ω ∝ 1/√λ
         grad += d * (w * cos(k * dot(d, xz) + omega * uWavePhase));
         wsum += w;
     }
     if (wsum <= 1.0e-5) {
-        return vec3(0.0, 1.0, 0.0);         // 全都低于 Nyquist（极远/极掠射）
+        return vec3(0.0, 1.0, 0.0);
     }
-    grad /= wsum;                            // 按存活权重归一化 ⇒ 振幅与距离无关
+    // 模式 0/1：按存活权重归一化（"波幅=最大斜率"与距离无关）；
+    // 模式 2/3：sinc 已经把能量按物理衰减掉了，**不再归一化**（否则等于取消带限）。
+    if (uWaveFilterMode <= 1) {
+        grad /= wsum;
+    }
 
     float slope = length(grad);
     if (slope > 1.0e-6) {
-        grad *= min(uWaveSlopeRad, slope) / slope;   // 限幅：最大斜率就是 uWaveSlopeRad
+        grad *= min(uWaveSlopeRad, slope) / slope;
     } else {
         grad = vec2(0.0);
     }
@@ -202,7 +225,8 @@ void main() {
         discard;
     }
 
-    vec3 N = WaveNormal(vWorld);                       // 波浪扰过的法线（几何仍是平面）
+    float wave_slope_var = 0.0;                        // 被滤掉的八度留下的斜率方差
+    vec3 N = WaveNormal(vWorld, wave_slope_var);        // 波浪扰过的法线（几何仍是平面）
     vec3 V = normalize(uCamPos - vWorld);
     float cos_i = clamp(abs(dot(N, V)), 1.0e-4, 1.0); // 与法线夹角（双面）
 
@@ -234,7 +258,13 @@ void main() {
         if (uUseSkyRefl == 1) {
             if (uHasEnvCube == 1) {
                 // 镜面天光：反射方向采样天空探针（法线被波纹扰动 ⇒ 反光随涟漪碎开）。
-                sky = textureLod(uEnvCube, reflect(-V, N), 0.0).rgb * uSkyScale;
+                // 模式 3：滤掉的八度对应的斜率方差 = 该处已"看不见的粗糙度" ⇒ 用它抬 mip，
+                // 让远处反光变钝（而不是变成一块硬镜面）。
+                float lod = (uWaveFilterMode == 3)
+                                ? clamp(sqrt(wave_slope_var) / max(uWaveSlopeRad, 1e-3) * 5.0,
+                                        0.0, 5.0)
+                                : 0.0;
+                sky = textureLod(uEnvCube, reflect(-V, N), lod).rgb * uSkyScale;
             } else {
                 sky = uRimColor;      // 没有探针：退回常量色（旧行为）
             }
@@ -247,7 +277,12 @@ void main() {
             // 能量守恒的 Blinn-Phong 归一化：裸 pow(nh, n) 的峰值只有 1，用它算太阳
             // （辐照度量级 ~3）会得到"几乎看不见的小暗点"——真实太阳是**辐亮度**极高、
             // 角半径极小的光源，归一化因子 (n+8)/8π 补的就是这个峰值增益。
+            // 模式 3：把丢掉的斜率方差并进高光波瓣（LEAN：方差 → 更宽的高光，能量不丢）。
             float shin = max(uSunShininess, 1.0);
+            if (uWaveFilterMode == 3) {
+                shin = shin / (1.0 + 60.0 * wave_slope_var / max(uWaveSlopeRad, 1e-3));
+                shin = max(shin, 2.0);
+            }
             vec3 H = normalize(V + uSunDir);
             float nh = max(dot(N, H), 0.0);
             sun = uSunColor * F * pow(nh, shin) * ((shin + 8.0) / 25.1327412);

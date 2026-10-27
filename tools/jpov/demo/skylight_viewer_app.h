@@ -120,6 +120,8 @@ public:
     bool water_use_sky_refl_ = true;      // 镜面天光
     bool water_use_transmit_ = true;      // 水下透射
     bool water_use_sun_glint_ = true;     // 太阳高光
+    // 远距离波浪带限方式（0/1/2/3，见 shader 注释）。面板给个下拉做对比。
+    int water_wave_filter_mode_ = 3;
 
     // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
     // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
@@ -272,6 +274,7 @@ public:
             wp.use_transmission   = water_use_transmit_;
             wp.use_sun_glint      = water_use_sun_glint_;
             wp.sky_scale          = 1.0f;
+            wp.wave_filter_mode   = water_wave_filter_mode_;
             // 水下视角：临界角外用地色补齐。必须取**天穹下半球的填色**（辐亮度量级，
             // 近黑的 0.05/0.06/0.08）—— 不能用 AmbientTricolor()[2]（那是环境光量级、
             // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
@@ -432,7 +435,16 @@ private:
                             0.05f, 20.0f, 2);
             ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(10.0f),
                             0.0f, 360.0f, 0);
-            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(11.0f));
+            // 远距离带限方式（对比/教学用）：下拉直接切换，四种实现见 shader 的 WaveNormal。
+            static const std::vector<const char*> kWaveFilterNames = {
+                "不过滤（aliasing 基线）",
+                "硬关八度（有硬切缝）",
+                "逐八度 sinc 带限",
+                "sinc + 方差转粗糙度（推荐）",
+            };
+            ui_.Combo("远距带限", &water_wave_filter_mode_, kWaveFilterNames,
+                      water_row(11.0f));
+            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(12.0f));
             return;
         }
 

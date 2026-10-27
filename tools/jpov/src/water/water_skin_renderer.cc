@@ -145,6 +145,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 std::max(params.wave_length_m, 0.01f));
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveDirRad"),
                 params.wave_dir_deg * kDeg2Rad);
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveFilterMode"),
+                std::max(0, std::min(params.wave_filter_mode, 3)));
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);

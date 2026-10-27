@@ -66,6 +66,9 @@ struct WaterSkinParams {
     bool use_sun_glint = true;        // 太阳高光（Blinn-Phong 单瓣 × F）
     float sky_scale = 1.0f;           // 天光反射量 [0,1]
     float sun_shininess = 1500.0f;    // 高光幂次（越大越尖）
+    // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
+    //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ） 3 = sinc+方差转粗糙度
+    int wave_filter_mode = 3;
 };
 
 class WaterSkinRenderer {

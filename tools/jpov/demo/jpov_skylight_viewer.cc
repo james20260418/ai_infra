@@ -293,6 +293,7 @@ int RunCaptureWater(const std::string& out_dir) {
         int sky_refl = 0;
         int transmit = 0;
         int sun_glint = 0;
+        int filter_mode = -1;
         // 相机方位角（度）。默认 45°；太阳高光要"相机与太阳关于竖直面对称"
         // （H = V+L 竖直 ⇒ N=up 才能对上），所以太阳在方位 40° 时相机要在 ~220°。
         float theta_deg = 45.0f;
@@ -336,12 +337,21 @@ int RunCaptureWater(const std::string& out_dir) {
         {"props_eye_nosun", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2},
         // 同机位两个相位：用来量"远处到底还有没有波纹"（近/中/远三条带分别比）。
         {"props_eye_phaseB", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
+        // 四种"远距离带限"对比（同机位同相位，只换过滤方式）：
+        //   0 不过滤（aliasing 基线）/ 1 硬关八度+归一化 / 2 逐八度 sinc / 3 sinc+方差转粗糙度
+        {"filter0_alias", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 0, 45.0f},
+        {"filter1_hard", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 1, 45.0f},
+        {"filter2_sinc", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 2, 45.0f},
+        {"filter3_lean", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 45.0f},
+        // 太阳高光机位下同样四种（看高光波瓣被方差拉宽的效果）。
+        {"filtersun0_alias", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 0, 220.0f},
+        {"filtersun3_lean", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 220.0f},
         // 太阳高光的机位：相机在**太阳方位**上、俯视 45°（镜像几何 V≈L ⇒ 高光落在画面中心）。
         // 顺带证明"高光不是恒亮的"：换机位它就该消失（那才是菲涅耳反射该有的行为）。
-        {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 220.0f},
-        {"props_eye_sunpath_off", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2, 220.0f},
+        {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, -1, 220.0f},
+        {"props_eye_sunpath_off", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2, -1, 220.0f},
         // 关掉波纹的太阳高光：应当收成一个**很尖的亮点**（波浪在的时候是被打碎的亮片）。
-        {"props_eye_sunpath_nowave", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0, 220.0f},
+        {"props_eye_sunpath_nowave", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0, -1, 220.0f},
         // 判"透射到底透的是什么"：n=1（界面消失）应当 ≈ 完全不画水面（= 原样场景）。
         {"props_under_wide_n100", -0.083, 12.0, true, true, false, 6.0f, 1.00f, 0.0f, std::nullopt},
         {"props_under_wide_nowater", -0.083, 12.0, true, false, false, 6.0f, 0.0f, 0.0f, std::nullopt},
@@ -358,6 +368,9 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_wave_phase_ = s.wave_phase;
         app.water_wave_slope_deg_ = s.wave_slope_deg.value_or(10.0f);
         app.water_min_transmission_ = s.min_transmission;
+        if (s.filter_mode >= 0) {
+            app.water_wave_filter_mode_ = s.filter_mode;
+        }
         app.water_use_sky_refl_  = (s.sky_refl != 2);
         app.water_use_transmit_  = (s.transmit != 2);
         app.water_use_sun_glint_ = (s.sun_glint != 2);
