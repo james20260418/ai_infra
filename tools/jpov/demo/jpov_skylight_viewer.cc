@@ -321,6 +321,13 @@ int RunCaptureWater(const std::string& out_dir) {
     app.deg_.sun_elev_deg = 45.0f;
     app.deg_.sun_azim_deg = 40.0f;
 
+    // 对照：同一机位切"纯皮 / 含体积"，用来确认"把水皮搬到 froxel 之后"本身是零差异的
+    // （这个场景没有雾，两版应当逐字节相同；有雾的差异见 water_with_fog）。
+    app.view_target_ = jpov::Vec3f(0.0f, 9.0f, 0.0f);   // 与 water_camera_under_lookup 同机位
+    app.water_.include_volume = true;
+    shoot("water_camera_under_lookup_vol");
+    app.water_.include_volume = false;
+
     // 对照：把水面当成**理想镜面**（RMS 斜率 0）⇒ 临界角处是纯物理硬边。
     // 两张图并排就能看出"过渡宽度"到底来自哪：不是调参，是界面粗糙度。
     app.water_.surface_slope_rms_deg = 0.0f;

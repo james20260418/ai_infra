@@ -113,6 +113,8 @@ public:
     jpov::WaterSurface water_ = [] {
         jpov::WaterSurface w;
         w.level = kWaterLevelDefault;
+        // 默认**纯水皮**（不消光）：先把界面光学单独看对，体积再另外接（froxel）。
+        w.include_volume = false;
         return w;
     }();
 
@@ -372,8 +374,7 @@ private:
                         0.0f, 1.2f, 3);
         ui_.SliderFloat("吸收 σa 蓝 (1/m)", &water_.absorption.z(), row(1, 13),
                         0.0f, 1.2f, 3);
-        ui_.SliderFloat("散射 σs (1/m)", &water_.scattering.x(), row(1, 14),
-                        0.0f, 0.5f, 3);
+        ui_.Checkbox("含水体积(吸收+散射)", &water_.include_volume, row(1, 14));
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));

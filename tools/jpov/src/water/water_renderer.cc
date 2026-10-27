@@ -294,6 +294,7 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                                 unsigned int color_tex, unsigned int scene_depth_tex,
                                 unsigned int env_cube, float env_max_lod,
                                 const DirectionalLight* sun,
+                                const float tir_color[3],
                                 const float view_proj[16]) {
     CHECK(shader_mgr_ != nullptr) << "WaterRenderer::Init 未调用";
     CHECK_GT(fbo_w, 0);
@@ -354,6 +355,11 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 std::max(0.0f, water.surface_slope_rms_deg) * 3.14159265358979f / 180.0f);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSunImageRad"),
                 std::max(0.0f, water.sun_image_deg) * 3.14159265358979f / 180.0f);
+    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uIncludeVolume"),
+                water.include_volume ? 1 : 0);
+    // 纯皮模式的 TIR 色 = skylight 地色（由调用方经 sun_ground_color 传入；默认深灰）。
+    glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uTirColor"),
+                tir_color[0], tir_color[1], tir_color[2]);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, cap_color_tex_);

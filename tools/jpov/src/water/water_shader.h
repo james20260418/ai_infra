@@ -130,6 +130,8 @@ uniform float     uRoughness;
 uniform float     uAirToWaterGain;  // (n_w/n_a)² = 1.777（辐亮度守恒 L/n²）
 uniform float     uSlopeRmsRad;     // 水面 RMS 斜率（水面不平 ⇒ 临界角被卷积开）
 uniform float     uSunImageRad;     // 日盘角展宽（弧度）——只用于"太阳的折射像"
+uniform int       uIncludeVolume;   // 0 = 纯水皮（不算吸收/内散射）
+uniform vec3      uTirColor;        // 临界角外的全内反射色（纯皮模式：skylight 地色）
 uniform int       uCamUnderwater;
 )glsl") + kWaterScatterGlsl + R"glsl(
 // 用抓帧深度反推「相机 → 该像素背景」的距离（米）。
@@ -219,25 +221,36 @@ void main() {
             win = uAirToWaterGain * textureLod(uEnvCube, normalize(vec3(rh.x, 0.06, rh.z)), lod).rgb
                 * uSkyScale;
         }
-        // 锥外：全内反射 —— 看到的是水下环境。近似为"半无限深水体的渐近散射辐亮度"
-        // σs·L/σt（比"常数色"有依据：它随天光与介质参数变化）。镜面方向取反射方向。
-        vec3 sig_t = uSigmaA + uSigmaS;
+        // 锥外：全内反射 —— 看到的是水下环境。
+        //   · 完整模式：近似成"半无限深水体的渐近散射辐亮度" σs·L/σt（随天光与介质变化）
+        //   · 纯皮模式：直接用 skylight 的地色（开了全局水以后，地色没有第二个消费者；
+        //     物理上它就是探针在镜像方向（下半球）给出的值）
         vec3 rh_refl = reflect(-V, -N);
-        vec3 refl = uSigmaS * SkyIllumRadiance() * AmbMod(rh_refl.y, uPhaseGAmb)
-                  / max(sig_t, vec3(1.0e-4));
+        vec3 refl = uTirColor;
+        if (uIncludeVolume == 1) {
+            vec3 sig_t_v = uSigmaA + uSigmaS;
+            refl = uSigmaS * SkyIllumRadiance() * AmbMod(rh_refl.y, uPhaseGAmb)
+                 / max(sig_t_v, vec3(1.0e-4));
+        }
         color = Rs * refl + (1.0 - Rs) * win;
     } else {
         // ── 从水上往下看：吸收 + 内散射（闭式积分）+ 界面反射 ──
         vec3 bg = texture(uSceneColor, uv).rgb;      // 水下物体（按空气光照渲出）
-        float d_surf = length(world - uCameraPos);
-        float d_bg   = SceneDistance(uv);
-        float L      = max(d_bg - d_surf, 0.0);      // 水下段长度
-        vec3 sig_t   = uSigmaA + uSigmaS;
-        vec3 T       = exp(-sig_t * L);
-        // 入水点就在水面 ⇒ z0 = 0；视线 y 分量 = rd.y（俯视 < 0）
-        vec3 insc    = InScatter(rd.y, 0.0, L, cos_sun);
-        // 物体的辐亮度与内散射都是"水中的辐亮度"，出射到空气要除以 n²。
-        vec3 under   = (bg * T + insc) / uAirToWaterGain;
+        vec3 under;
+        if (uIncludeVolume == 0) {
+            // 纯水皮：完全不消光 —— 背景原样透过，只做 n² 换算（L/n² 守恒）。
+            under = bg / uAirToWaterGain;
+        } else {
+            float d_surf = length(world - uCameraPos);
+            float d_bg   = SceneDistance(uv);
+            float L      = max(d_bg - d_surf, 0.0);    // 水下段长度
+            vec3 sig_t   = uSigmaA + uSigmaS;
+            vec3 T       = exp(-sig_t * L);
+            // 入水点就在水面 ⇒ z0 = 0；视线 y 分量 = rd.y（俯视 < 0）
+            vec3 insc    = InScatter(rd.y, 0.0, L, cos_sun);
+            // 物体的辐亮度与内散射都是"水中的辐亮度"，出射到空气要除以 n²。
+            under = (bg * T + insc) / uAirToWaterGain;
+        }
 
         float cos_t = clamp(dot(N, V), 0.0, 1.0);
         float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_t, 5.0);

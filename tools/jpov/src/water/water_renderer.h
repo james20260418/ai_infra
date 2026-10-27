@@ -62,6 +62,7 @@ public:
                      unsigned int color_tex, unsigned int scene_depth_tex,
                      unsigned int env_cube, float env_max_lod,
                      const DirectionalLight* sun,
+                     const float tir_color[3],   // 纯皮模式的 TIR 色（skylight 地色）
                      const float view_proj[16]);
 
     // ---- ② 整屏介质 pass（仅相机在水下时调用）----

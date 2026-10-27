@@ -1737,32 +1737,6 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
-        // ---- 第 1.5 步：全局水面（不透明 3D 之后、三个 WBO pass 之前）----
-        //
-        // 位置是硬的：
-        //   · 不能再早 —— 要吸收"水面之下的内容"，那些内容必须已经画完；
-        //   · 不能再晚 —— 粒子/体积火/条带都靠 MRT#1 做手动作深度测试，水面必须先把自己
-        //     的深度写进去，它们才知道被水挡住（代价：水下那些效果会被剔掉，见 water_types.h）。
-        //
-        // 水面内部会先 blit 一份 color + MRT 深度到自己的抓帧副本（采样反馈环），
-        // 再对副本采样做逐通道吸收 —— 那一份副本正是将来加折射要复用的基础设施。
-        if (cmds.water.has_value()) {
-            glEnable(GL_DEPTH_TEST);
-            glDepthMask(GL_TRUE);
-            glDepthFunc(GL_LESS);
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_BACK);
-            water_renderer_.DrawSurface(
-                *cmds.water, cam, fbo_3d_w, fbo_3d_h,
-                fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
-                sky_env_tex_,
-                static_cast<float>(std::log2(static_cast<double>(kSkyEnvCubeSize))),
-                eff_sun.has_value() ? &*eff_sun : nullptr,
-                mvp_);
-            glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-        }
-
         // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
@@ -1957,18 +1931,28 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glEnable(GL_DEPTH_TEST);
                 glDepthMask(GL_TRUE);
                 glDepthFunc(GL_LESS);
+                // 纯皮模式的 TIR 色 = skylight 地色（"彻底消费 skylight"：开了全局水以后，
+                // 地色没有第二个消费者；物理上它就是探针在镜像方向（下半球）给的值）。
+                const float tir_color[3] = {
+                    cmds.sky.has_value() ? cmds.sky->ground_color.r : 0.05f,
+                    cmds.sky.has_value() ? cmds.sky->ground_color.g : 0.06f,
+                    cmds.sky.has_value() ? cmds.sky->ground_color.b : 0.08f,
+                };
                 water_renderer_.DrawSurface(
                     *cmds.water, cam, fbo_3d_w, fbo_3d_h,
                     fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
                     sky_env_tex_,
                     static_cast<float>(std::log2(static_cast<double>(kSkyEnvCubeSize))),
                     eff_sun.has_value() ? &*eff_sun : nullptr,
+                    tir_color,
                     mvp_);
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
                 // 相机在水下：整屏介质**在水皮之后**（水皮自己也要被水吸收）。
-                if (WaterRenderer::IsCameraUnderwater(*cmds.water, cam)) {
+                // 纯皮模式（include_volume=false）下没有介质，整段跳过。
+                if (cmds.water->include_volume &&
+                    WaterRenderer::IsCameraUnderwater(*cmds.water, cam)) {
                     water_renderer_.DrawUnderwaterMedium(
                         *cmds.water, cam, fbo_3d_w, fbo_3d_h,
                         fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
