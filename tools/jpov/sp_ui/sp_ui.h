@@ -108,6 +108,7 @@
 
 #include "geom/common/vec.h"
 
+#include "tools/jpov/interface/flipbook.h"
 #include "tools/jpov/interface/input_snapshot.h"
 #include "tools/jpov/interface/pbr_material.h"
 #include "tools/jpov/interface/render_command.h"
@@ -396,7 +397,7 @@ private:
     // 走参数而不是临时改主题 —— 隐式改成员状态会让后面所有控件也跟着变。
     void PushPlateInternal(const SpRect& r, Color fill, Color border,
                            float radius, bool fill_textured,
-                           bool border_textured = true);
+                           bool border_textured);
     // 由主题字段造一层材质（fill / border 共用同一套规则）。
     // textured = false 时该层退回纯色（不采样纹理；图集/帧率仍保留，不影响其它层）。
     PlateLayer MakeLayer(const SpRect& box_device, bool is_border,
