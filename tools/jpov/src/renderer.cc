@@ -1881,7 +1881,8 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
                 water_renderer_.DrawUnderwaterMedium(
                     *cmds.water, cam, fbo_3d_w, fbo_3d_h,
-                    fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_, mvp_);
+                    fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
+                    sky_env_tex_, mvp_);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

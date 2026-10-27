@@ -267,6 +267,8 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 std::max(0.0f, water.scatter_scale));
     glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uCamUnderwater"),
                 IsCameraUnderwater(water, cam) ? 1 : 0);
+    // 空气→水的辐亮度增益 (n_w/n_a)²：水下看到的天空要 ×1.777（Snell 窗"刺眼"的物理来源）。
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uAirToWaterGain"), 1.333f * 1.333f);
     // 水面 RMS 斜率（度 → 弧度）。0 = 理想镜面（TIR 硬边）。
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSlopeRmsRad"),
                 std::max(0.0f, water.surface_slope_rms_deg) * 3.14159265358979f / 180.0f);
@@ -305,6 +307,7 @@ void WaterRenderer::DrawUnderwaterMedium(const WaterSurface& water, const Camera
                                          int fbo_w, int fbo_h,
                                          unsigned int fbo_hdr,
                                          unsigned int color_tex, unsigned int scene_depth_tex,
+                                         unsigned int env_cube,
                                          const float view_proj[16]) {
     CHECK(shader_mgr_ != nullptr) << "WaterRenderer::Init 未调用";
     CHECK_GT(fbo_w, 0);
@@ -312,6 +315,7 @@ void WaterRenderer::DrawUnderwaterMedium(const WaterSurface& water, const Camera
     CHECK_NE(fbo_hdr, 0u);
     CHECK_NE(color_tex, 0u);
     CHECK_NE(scene_depth_tex, 0u);
+    CHECK_NE(env_cube, 0u) << "水下介质的内散射需要天光探针";
 
     Capture(fbo_w, fbo_h, fbo_hdr);
 
@@ -352,11 +356,18 @@ void WaterRenderer::DrawUnderwaterMedium(const WaterSurface& water, const Camera
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, cap_depth_tex_);
     glUniform1i(shader_mgr_->GetUniform(prog_medium_, "uSceneDepth"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, env_cube);
+    glUniform1i(shader_mgr_->GetUniform(prog_medium_, "uEnvCube"), 2);
+    glUniform1f(shader_mgr_->GetUniform(prog_medium_, "uSkyScale"),
+                std::max(0.0f, water.sky_scale));
 
     glBindVertexArray(fs_vao_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);

@@ -66,10 +66,12 @@ public:
     // ---- ② 整屏介质 pass（仅相机在水下时调用）----
     // 前置：所有 3D 内容（含水下看到的水面本身）已画完；fbo_hdr 是目标。
     // 后置：同 DrawSurface。
+    // env_cube：天光探针（内散射要按"上方漫射光"缩放，否则夜里水也发光）。
     void DrawUnderwaterMedium(const WaterSurface& water, const Camera& cam,
                               int fbo_w, int fbo_h,
                               unsigned int fbo_hdr,
                               unsigned int color_tex, unsigned int scene_depth_tex,
+                              unsigned int env_cube,
                               const float view_proj[16]);
 
 private:

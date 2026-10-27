@@ -72,8 +72,17 @@ uniform float     uF0;            // 正入射反射率
 uniform float     uRoughness;     // 反射 mip 粗糙度
 
 uniform vec3      uAbsorption;    // 1/米
-uniform vec3      uScatter;
+uniform vec3      uScatter;        // 水体散射反照率（无量纲，乘下面的天空照明）
 uniform float     uScatterScale;
+// 天空照明（上半球平均辐亮度）：水体**内散射**必须跟它走 —— 否则夜里水也会发光。
+// 这一项就是"远处天空漫射光把浅层水点亮"的那个量。由下面的 SkyIllum() 从探针现算。
+vec3 SkyIllum() {
+    // mip=5（128² → 4×4/面）：+Y 面在这个 mip 覆盖 ±45°，正是"上方漫射光"的粗糙平均。
+    return textureLod(uEnvCube, vec3(0.0, 1.0, 0.0), 5.0).rgb * uSkyScale;
+}
+// 空气→水的辐亮度增益：(n_water/n_air)² = 1.777。
+// 辐亮度守恒是 L/n² = const ⇒ 水下看到的天空 = 天空辐亮度 × 1.777（Snell 窗之所以"刺眼"）。
+uniform float     uAirToWaterGain;
 // 水面 RMS 斜率（弧度）。0 = 理想镜面（TIR 硬边）；见 WaterSurface::surface_slope_rms_deg。
 uniform float     uSlopeRmsRad;
 
@@ -133,52 +142,66 @@ void main() {
     if (uCamUnderwater == 1) {
         // ── 从水下往上看：全内反射 + Snell 窗 ──
         // 入射角按 |dot(N,V)| 取（法线朝上、相机在下 ⇒ dot < 0）。
-        // ── 从水下往上看：全内反射（TIR）+ Snell 窗 ──
+        // ── 从水下往上看：Snell 窗 + 全内反射（TIR）──
         //
-        // 纯解析的界面在临界角处是**一根硬线**（R 在 0.5° 内从 1 掉到 0.4），
-        // 而真实水面从来没有绝对平的时候：微观起伏会把临界角抹开一大圈。
-        // 所以这里不做"精确 Fresnel 硬切"，而是按**角度**做一个宽过渡带：
-        //   外带 = 全内反射（映水下环境）；内带 = Snell 窗（透过水面看天）；
-        //   中间 = 两者按 smoothstep 混合 —— 这就是肉眼看到的那种"渐变的水面线"。
+        // 物理要素（2026-10-27 联网核对，之前漏了两条）：
+        //   ① 辐亮度守恒 L/n² = const ⇒ 水下看到的天空 = 天空辐亮度 × (1.333)² = 1.777
+        //      （这就是真实 Snell 窗"刺眼"的来源）；
+        //   ② 窗口**边缘是暗的**：边缘对应掠射入射（θ_air→90°），透射率 T→0，
+        //      所以亮度在锥边缘收敛到 0（不是我上一版的"亮环"）；
+        //   ③ 锥外 = 全内反射：看到的是水下环境（这里近似成水体内散射）。
         //
-        // 几何量：sinθc = n2/n1 = 1/1.333 ⇒ cosθc = 0.6614。
-        const float kCosCrit = 0.6614;
-        // 过渡带半宽 = 水面斜率分布的投影：cos 空间的宽度 ≈ sinθc · σ（一阶近似）。
-        // σ = 0 时退化成严格物理硬边（smoothstep 两端相等会退化，故单独走 step 分支）。
-        float soft = 0.75 * max(uSlopeRmsRad, 0.0);
+        // 界面反射率 R 用未极化的精确 Fresnel；临界角附近再用**水面 RMS 斜率**把台阶
+        // 抹开（真实水面不平 ⇒ 斜率分布对 R 做卷积；σ=0 时退化为纯物理硬边）。
         float ci = clamp(abs(dot(N, V)), 1.0e-4, 1.0);
-        float t = (soft > 1.0e-4)
-                    ? smoothstep(kCosCrit - soft, kCosCrit + soft, ci)
-                    : step(kCosCrit, ci);          // 理想镜面：TIR 硬边
-
-        // 反射侧：探针下半球（地色）当"水下环境"的低频替身，再掺水体散射色并提亮一点
-        //（不这样它会是死黑，整片"水做的天花板"读成一个洞）。
-        vec3 refl = textureLod(uEnvCube, reflect(-V, -N), 0.35 * uEnvMaxLod).rgb * uSkyScale;
-        refl = mix(uScatter * uScatterScale * 1.6, refl, 0.45);
-
-        // 窗口侧的两种采样：
-        //   · 临界角内：真实折射方向（整片天空被压进 97°  的锥里，边缘亮、中心蓝）；
-        //   · 临界角外（过渡带里还没有折射解）：用地平线方向的天空色 —— 保证过渡带
-        //     从"暗的水面"平滑升到"亮的天"，而不是掉回黑色。
-        vec3 rd = refract(-V, -N, 1.333);
-        vec3 win;
-        if (dot(rd, rd) > 1.0e-8) {
-            win = textureLod(uEnvCube, normalize(rd), roughness * uEnvMaxLod).rgb * uSkyScale;
+        const float kEta = 1.333;                       // n_water / n_air
+        const float kCosCrit = 0.6614;                  // cosθc，sinθc = 1/1.333
+        float sin2t = kEta * kEta * (1.0 - ci * ci);    // sin²θt
+        float R;
+        if (sin2t >= 1.0) {
+            R = 1.0;                                    // 全内反射
         } else {
-            vec3 rh = reflect(-V, -N);
-            win = textureLod(uEnvCube, normalize(vec3(rh.x, 0.03, rh.z)),
-                             roughness * uEnvMaxLod).rgb * uSkyScale;
+            float ct = sqrt(1.0 - sin2t);
+            float rs = (kEta * ci - ct) / (kEta * ci + ct);
+            float rp = (kEta * ct - ci) / (kEta * ct + ci);
+            R = 0.5 * (rs * rs + rp * rp);
         }
-        color = mix(refl, win, t);
+        float soft = 0.75 * max(uSlopeRmsRad, 0.0);
+        float Rs = (soft > 1.0e-4)
+                     ? mix(R, 1.0, 1.0 - smoothstep(kCosCrit - soft, kCosCrit + soft, ci))
+                     : R;
+
+        // 透射侧：整个天空被压进 97.2° 锥 + n² 增益。
+        vec3 win;
+        float lod = roughness * uEnvMaxLod;
+        if (sin2t < 1.0) {
+            vec3 rd = refract(-V, -N, kEta);
+            win = uAirToWaterGain * textureLod(uEnvCube, normalize(rd), lod).rgb * uSkyScale;
+        } else {
+            // 粗糙界面在临界角附近仍会有少量"透过"的抽样：用地平线方向的天空当代表。
+            vec3 rh = reflect(-V, -N);
+            win = uAirToWaterGain *
+                  textureLod(uEnvCube, normalize(vec3(rh.x, 0.06, rh.z)), lod).rgb * uSkyScale;
+        }
+
+        // 反射侧（锥外）：看到的是水下环境 —— 近似为水体内散射（随天光强度走）。
+        vec3 refl = uScatter * uScatterScale * SkyIllum();
+
+        color = Rs * refl + (1.0 - Rs) * win;
     } else {
         // ── 从水上往下看：反射 + 逐通道吸收背景 ──
-        vec3 bg = texture(uSceneColor, uv).rgb;
+        // 背景是"水下物体按空气光照渲出来的辐亮度"。光从水出射到空气时，
+        // 辐亮度守恒式是 L/n² = const ⇒ 出射后再乘 1/n² = 0.5625（这是"水下物体
+        // 看起来更暗"的物理来源之一，另一半是吸收）。
+        vec3 bg = texture(uSceneColor, uv).rgb / uAirToWaterGain;
         float d_surf = length(world - uCameraPos);
         float d_bg   = SceneDistance(uv);
         float L      = max(d_bg - d_surf, 0.0);      // 水下段的视线长度（米）
 
         vec3 T = exp(-uAbsorption * L);
-        vec3 under = bg * T + uScatter * uScatterScale * (1.0 - T);
+        // 内散射 = 散射反照率 × 天空照明（不是常数色：夜里必须跟着变暗）
+        vec3 in_scatter = uScatter * uScatterScale * SkyIllum();
+        vec3 under = bg * T + in_scatter * (1.0 - T);
 
         float cos_t = clamp(dot(N, V), 0.0, 1.0);
         float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_t, 5.0);
@@ -228,9 +251,12 @@ uniform vec3      uCameraPos;
 uniform sampler2D uSrcColor;
 uniform sampler2D uSceneDepth;
 
-uniform vec3      uAbsorption;
-uniform vec3      uScatter;
-uniform float     uScatterScale;
+uniform vec3        uAbsorption;
+uniform vec3        uScatter;
+uniform float       uScatterScale;
+// 天空照明（上半球平均辐亮度）：浅层水被上方漫射光照亮，夜里必须跟着变暗。
+uniform samplerCube uEnvCube;
+uniform float       uSkyScale;
 
 void main() {
     vec2 uv = gl_FragCoord.xy / uResolution;
@@ -242,7 +268,10 @@ void main() {
     float dist = length(pw.xyz / pw.w - uCameraPos);
 
     vec3 T = exp(-uAbsorption * dist);
-    FragColor = vec4(c * T + uScatter * uScatterScale * (1.0 - T), 1.0);
+    // mip=5：+Y 面覆盖 ±45°，是"上方漫射光"的粗糙平均（与水面 FS 同一口径）。
+    vec3 sky_illum = textureLod(uEnvCube, vec3(0.0, 1.0, 0.0), 5.0).rgb * uSkyScale;
+    vec3 in_scatter = uScatter * uScatterScale * sky_illum;
+    FragColor = vec4(c * T + in_scatter * (1.0 - T), 1.0);
 }
 )glsl";
 
