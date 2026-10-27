@@ -14,14 +14,20 @@
 //     color= mix(body_color, rim_color, F)
 //     F    = f0 + (1 − f0)·(1 − cosθ)^power        （Schlick，θ 与向上法线的夹角）
 //   ── 相机在水下（抬头看水面）──
-//     界面反射率 R(θ) = **精确未极化 Fresnel（水→空气）**，临界角 θc = asin(1/ior) ≈ 48.6°：
+//     界面反射率 R 仍是**精确未极化 Fresnel（水→空气）**，临界角 θc = asin(1/ior) ≈ 48.6°：
 //       θ ≥ θc ⇒ R = 1（全内反射）⇒ 整片是"地色"（水面变成一面暗镜）
-//       θ <  θc ⇒ 0.02 ≤ R < 1，窗内按**折射方向**采天空探针，乘 n² 辐亮度增益
-//     合成：color = skyProbe(refract) · (n_w/n_a)² · (1−R) + tirColor · R，**α = 1**
-//     （水下抬头时水面就是该方向最近的面 ⇒ 整片替换；近似点见文件末尾）
-//     "折射方向"这一步就是 Snell 窗的全部观感来源：整个 0..90° 的天空被压进 0..48.6°，
-//     于是**地平线正好压在锥的边缘**、云和太阳被挤到边上去。少了它，窗内只是"原样天空"
-//     被一个圆切开 —— 看着不像从水下看外面。
+//       θ <  θc ⇒ 0.02 ≤ R < 1，窗内采天空探针（按表面斜率**轻带偏**方向）× n²
+//     合成：color = skyProbe(tiltedDir) · (n_w/n_a)² · (1−R) + tirColor · R，**α = 1**
+//
+// ⚠️ **不做折射**（Danis 2026-10-27 定：按"简单游戏引擎"的做法）。
+//    之前用 refract() 把整个 0..90° 天空压进 0..48.6° 锥（物理正确，但观感"很怪"，
+//    而且任何在此基础上采"水上几何"的屏幕空间做法都必然在锥缘拉条）。现在改为：
+//    天空按**视线方向 + 表面斜率**采样（法线扰动的查找），只保留 Fresnel/TIR 这个界面权重。
+//    代价（已知）：窗内的天不会被压扁、地平线不会贴在锥缘 —— 换来的是干净、可调、可控。
+
+// ⭐ 波浪 = **只扰法线，不动几何**（Danis：先看波纹，几何起伏以后再说）。
+//    法线扰动同时喂三个消费者：① Fresnel/TIR 的权重（窗缘随波纹起伏）、
+//    ② 水下窗内天空的查找方向（天光随波纹晃动）、③ 水上视角的玻璃边反。
 //     水面不平（surface_slope_rms_deg > 0）时对**精确 R**做 5 抽头斜率分布平均（不是把 R
 //     往 1 推 —— 那会把过渡带整体往窗内偏，窗内出现一片灰）。
 //
@@ -41,7 +47,7 @@
 // 已知边界（本版有意不做）：
 //   * 没有吸收/散射（水下物体只是被一层淡色膜按 α 混掉，不随深度变蓝）；
 //   * 没有反射探针（rim_color 是常量，不是天空 cubemap）；
-//   * 没有波浪（quad 是纯平面，没有逐顶点位移）。
+//   * 波浪**只扰法线、不位移几何**（Danis 定：先看波纹，几何起伏以后再说）。
 
 #ifndef JPOV_SRC_WATER_WATER_SKIN_SHADER_H_
 #define JPOV_SRC_WATER_WATER_SKIN_SHADER_H_
@@ -81,7 +87,11 @@ uniform float uF0;               // 正入射反射率（水 ≈ 0.02）
 uniform float uPower;            // Schlick 指数（物理值 5）
 uniform vec3  uTirColor;         // 水下视角：临界角外的全内反射色（“地色”，建议 = SkyCommand::ground_color）
 uniform float uIor;              // 水的折射率（水→空气临界角 = asin(1/ior)）
-uniform float uSlopeRmsRad;      // 水面 RMS 斜率（弧度）；0 = 理想镜面（临界角是硬边）
+// ── 波浪（法线扰动）──
+uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"调相位"就是挪它）
+uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
+uniform float uWaveLengthM;      // 主波长（米）
+uniform float uWaveDirRad;       // 传播方向（世界 XZ 平面，弧度）
 uniform samplerCube uEnvCube;    // 天空探针（大气色，不含日月盘；下半球=地色）
 uniform int   uHasEnvCube;       // 0 = 没有探针（退化：不做折射采样）
 
@@ -99,25 +109,6 @@ float FresnelFromWater(float cos_i, float eta) {
     return 0.5 * (rs * rs + rp * rp);
 }
 
-// 粗糙界面 = 把**精确 R** 对斜率分布做平均（不是把 R 往 1 推：后者会把过渡带整体
-// 往窗内偏 ~6°，窗内出现一大片灰）。5 抽头，高斯权重；slope ≈ 0 时退化为精确单点。
-float FresnelFromWaterSoft(float cos_i, float eta, float slope_rms) {
-    if (slope_rms <= 1.0e-4) {
-        return FresnelFromWater(cos_i, eta);
-    }
-    float theta = acos(clamp(cos_i, -1.0, 1.0));
-    float sum_r = 0.0;
-    float sum_w = 0.0;
-    for (int i = -2; i <= 2; ++i) {
-        float fi = float(i);
-        float th = clamp(theta + fi * 0.5 * slope_rms, 0.0, 1.5533);   // < π/2
-        float wgt = exp(-2.0 * fi * fi);
-        sum_r += wgt * FresnelFromWater(cos(th), eta);
-        sum_w += wgt;
-    }
-    return sum_r / sum_w;
-}
-
 // 窗口深度 → 视空间距离（与 strip pass 的 ZView 同一份公式）。
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
@@ -129,6 +120,59 @@ float ZView(float d) {
     return (2.0 * uNear * uFar) / denom;
 }
 
+// 波浪法线（解析，**不位移几何**）：
+//   h(p) = Σ Aᵢ·sin(kᵢ·dᵢ·p + wᵢ·φ)，法线 = normalize(-∇h, 1)。
+//   5 组方向/波长互不成谐波的正弦叠加（3 组会看出规则"点阵"）；合成后再**限幅**到
+//   uWaveSlopeRad（保证"波幅滑条"的物理含义是"最大斜率"，不是"随便一个乘数"）。
+//
+// 远处必须淡出：10 km² 的水面在 1 km 处一个像素覆盖米级面积，解析波就是一片闪烁噪点。
+// 判据用像素足迹（fwidth）⇒ 远景收敛回镜面，正是真实远海的观感。
+vec3 WaveNormal(vec3 p) {
+    if (uWaveSlopeRad <= 1.0e-5) {
+        return vec3(0.0, 1.0, 0.0);
+    }
+    // 抗锯齿：波浪是逐像素解析算的、没有 mip ⇒ 频率超过像素 Nyquist 就变闪烁/摩尔纹。
+    // 判据用**该像素在水面上的足迹**（fwidth(world.xz)）而不是"到相机的距离"：
+    // 掠射角下足迹长得极快，距离判据会漏（实测水面远处出现同心圆摩尔纹）。
+    // 足迹 > λ/6 开始淡出、> λ/3 完全平滑（远海本来就该收敛成镜面）。
+    float lam = max(uWaveLengthM, 0.05);
+    float footprint = length(fwidth(p.xz));
+    float fade = 1.0 - smoothstep(0.17 * lam, 0.33 * lam, footprint);
+    if (fade <= 0.0) {
+        return vec3(0.0, 1.0, 0.0);
+    }
+
+    // 5 组方向/波长互不成谐波的正弦（+ 深水色散 ω ∝ 1/√λ）：
+    //   少了会出现规则网格/摩尔纹（实测 3 组就是一张"点阵"），多了没必要。
+    //   权重之和 = 1 ⇒ 合成斜率的上界仍是 uWaveSlopeRad（"波幅"滑条含义稳定）。
+    const int   kCount = 5;
+    // 方向/波长都取**不成比例**的值（不用 0/45/90 那种整齐角度）：整齐的组合会在水面上
+    // 拍出"华夫饼"式的规则点阵，远看变成摩尔纹（实测 3 组整齐方向就是这个观感）。
+    const float kAng[kCount]     = float[kCount](0.00, 1.13, 2.41, 3.63, 5.02);
+    const float kLamMul[kCount]  = float[kCount](1.00, 0.63, 1.57, 0.37, 2.31);
+    const float kWeight[kCount]  = float[kCount](0.30, 0.25, 0.19, 0.15, 0.11);
+
+    vec2 xz = p.xz;
+    vec2 grad = vec2(0.0);
+    for (int i = 0; i < kCount; ++i) {
+        float a = uWaveDirRad + kAng[i];
+        vec2 d = vec2(cos(a), sin(a));
+        float lam = max(uWaveLengthM * kLamMul[i], 0.02);
+        float k = 6.28318530718 / lam;
+        // 色散：短波跑得快（ω ∝ 1/√λ），相位推进因此各不同 —— 波纹不会"整片平移"。
+        float w = inversesqrt(kLamMul[i]);
+        grad += d * (kWeight[i] * cos(k * dot(d, xz) + w * uWavePhase));
+    }
+
+    float slope = length(grad);
+    if (slope > 1.0e-6) {
+        grad *= min(uWaveSlopeRad, slope * fade) / slope;   // 限幅 + 足迹淡出
+    } else {
+        grad = vec2(0.0);
+    }
+    return normalize(vec3(-grad.x, 1.0, -grad.y));
+}
+
 void main() {
     // 手动深度测试：水面在这块不透明几何后面就整片丢弃（否则水会盖到挡在它前面的东西上）。
     float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
@@ -137,43 +181,28 @@ void main() {
         discard;
     }
 
-    vec3 N = vec3(0.0, 1.0, 0.0);                      // 水面法线（本版无波浪）
+    vec3 N = WaveNormal(vWorld);                       // 波浪扰过的法线（几何仍是平面）
     vec3 V = normalize(uCamPos - vWorld);
-    float cos_i = clamp(abs(V.y), 1.0e-4, 1.0);       // = |N·V|，双面
+    float cos_i = clamp(abs(dot(N, V)), 1.0e-4, 1.0); // 与法线夹角（双面）
 
     vec3 color;
     float alpha;
     if (uCamPos.y < uLevelY) {
         // ── 水下抬头看水面 ──
-        // R 由精确 Fresnel 给（含 TIR）；窗内按**折射方向**采天空并乘 n²，
-        // 窗外整片给地色（全内反射看到的是水下环境，本版用地色代表）。
-        float R = FresnelFromWaterSoft(cos_i, uIor, uSlopeRmsRad);
+        // R = 精确 Fresnel（含 TIR）作用于**扰动后的法线** ⇒ 窗缘随波纹起伏；
+        // 窗内天空按"视线方向 + 表面斜率"采样（不折射，见文件头），窗外整片地色。
+        float R = FresnelFromWater(cos_i, uIor);
         if (uHasEnvCube == 1) {
-            // refract(I, N, eta)：I = 入射方向（-V，从相机指向水面），
-            // N 必须指向入射侧（相机在水下 ⇒ -N），eta = n_水 / n_空气 = uIor。
-            //
-            // ⚠️ 两个坑（都实测踩过）：
-            //   ① 采 mip 必须用 **lod 0**（镜面水）。拿 uEnvMaxLod（=log2(128)=7）当 lod
-            //      会采到 1×1 的那一级 ⇒ 整个窗变成一个**常量色**（没有渐变、看着像贴纸）。
-            //   ② TIR 时 GLSL 的 refract() 返回 0 向量，normalize(0) = NaN，NaN 乘 (1−R)=0
-            //      仍是 NaN ⇒ 整片像素未定义。所以 TIR 侧改用水平方向的天色（= 窗缘收敛值），
-            //      让 R→1 的路上颜色连续。
-            vec3 rdir;
-            if (uIor * uIor * (1.0 - cos_i * cos_i) < 1.0) {
-                rdir = normalize(refract(-V, -N, uIor));
-            } else {
-                rdir = normalize(vec3(-V.x, 0.0, -V.z));
-            }
-            // 窗内看到的是**折射方向上的天空探针**（= 整个上半球被压进锥里）。
-            // 水上几何不做折射像：屏幕空间折射在锥缘处压缩趋于无穷 ⇒ 必然拉条/涂抹
-            // （实测就是"糊成一片黏在窗边"），所以这里只采探针。
+            // 查找方向 = 视线方向被表面斜率**带偏**（法线扰动式查找）。
+            // 斜率 8° ⇒ 天光晃 ~8°，足以看出波纹；但它不会像 refract 那样把天空压进锥里。
+            vec3 rdir = normalize(-V + vec3(N.x, 0.0, N.z));
             vec3 seen = textureLod(uEnvCube, rdir, 0.0).rgb;
             // 水面就是该方向最近的面 ⇒ 直接替换（不再与背景 alpha 混合）。
             color = mix(seen * AirToWaterGain(), uTirColor, clamp(R, 0.0, 1.0));
             alpha = 1.0;
         } else {
-            // 没探针（关掉了环境镜面）：退回"背景透射 + 地色"的近似 —— 窗内看到的
-            // 是**没被折射压缩**的天，观感不对，但至少不会伪造出假天空。
+            // 没有探针（关掉了环境镜面）：退回纯 alpha 混合 —— 窗内看到的是**背景本身**
+            // （= 该方向已经画好的天空），窗外地色。没有波纹查找，但也不会造假。
             color = uTirColor;
             alpha = clamp(R, 0.0, 1.0);
         }

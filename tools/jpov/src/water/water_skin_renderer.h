@@ -46,11 +46,18 @@ struct WaterSkinParams {
     //    不要用天光推导的 AmbientTricolor()[2]（那是"环境光量级"、还被均值归一过 ⇒
     //    填充色比窗内的天空还亮，画面上会变成一圈亮灰雾，与真实"窗外是暗镜"相反）。
     Color tir_color{0.05f, 0.06f, 0.08f, 1.0f};
-    // 水的折射率：临界角 = asin(1 / ior) ≈ 48.6°（1.333）。改它 = 改 Snell 窗的大小。
+    // 水的折射率：临界角 = asin(1 / ior) ≈ 48.6°（1.333）。只用于 Fresnel/TIR 的界面权重
+    // （**不做折射查找**，见 water_skin_shader.h 的说明）。
     float ior = 1.333f;
-    // 水面 RMS 斜率（度）：> 0 时把**精确 Fresnel** 对斜率分布做平均 ⇒ 临界角从硬边变
-    // 渐变带（浪越大窗边越糊）。0 = 理想镜面（物理硬边）。
-    float surface_slope_rms_deg = 0.0f;
+
+    // ── 波浪：**只扰法线，不动几何** ──
+    // 相位（弧度）：调用方自己推进时钟（引擎不取自己的时间，"调相位"= 改它）。
+    float wave_phase = 0.0f;
+    // 最大斜率（度）——"波幅"的真实物理含义。0 = 完全平静（法线恒为 +Y）。
+    float wave_slope_deg = 10.0f;
+    // 主波长（米）与传播方向（世界 XZ 平面，度）。
+    float wave_length_m = 0.5f;
+    float wave_dir_deg = 30.0f;
 };
 
 class WaterSkinRenderer {

@@ -107,9 +107,13 @@ public:
     // 水面用 strip 平铺版还是新水皮 pass（对照用）。默认 false = 走新 pass。
     void SetWaterUseStrip(bool on) { water_use_strip_ = on; }
 
-    // 水面的 RMS 斜率（度）：影响**水下**看水面时临界角那条边是硬边还是渐变带。
-    // 0 = 理想镜面（物理硬边）。只为拍图/试手暴露，不进面板。
-    void SetWaterSlopeRmsDeg(float deg) { water_slope_rms_deg_ = deg; }
+    // 波浪参数（面板滑条也写这几个字段；headless 拍摄可直接设）。
+    // 相位是**弧度**，调用方自己推进（引擎不取时钟 ⇒ 出图可复现）。
+    float water_wave_phase_ = 0.0f;
+    float water_wave_slope_deg_ = 10.0f;   // 最大斜率（度）= 波幅
+    float water_wave_length_m_ = 0.5f;     // 主波长（米）：水下 1 m 处只看得到 ~1.5 m 内的水面，
+                                           // 所以波长要**亚米级**才有"整片涟漪"的观感
+    float water_wave_dir_deg_ = 30.0f;     // 传播方向（度）
 
     // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
     // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
@@ -264,8 +268,11 @@ public:
             // 近黑的 0.05/0.06/0.08）—— 不能用 AmbientTricolor()[2]（那是环境光量级、
             // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
             wp.tir_color     = nl.sky.ground_color;
-            wp.surface_slope_rms_deg = water_slope_rms_deg_;
             wp.ior           = water_ior_;
+            wp.wave_phase    = water_wave_phase_;
+            wp.wave_slope_deg = water_wave_slope_deg_;
+            wp.wave_length_m = water_wave_length_m_;
+            wp.wave_dir_deg  = water_wave_dir_deg_;
             SetWaterSkin(wp);
         } else {
             SetWaterSkin(std::nullopt);
@@ -388,14 +395,25 @@ private:
             scene_ = static_cast<SceneKind>(scene_index);
         }
 
-        // 水面场景：**本阶段只有下拉 + 一个对照开关 + 一行提示**，天光/雾/环境镜面那些控件全部不画。
+        // 水面场景：**只留水面自己的控件**（场景下拉 + 对照开关 + 四个波浪滑条 + 提示），
+        // 天光/雾/环境镜面那些控件一律不画。
         if (water_scene) {
+            auto water_row = [&](float i) {
+                return jpov::UiRect{{kColX[0], 16.0f + i * (kRowH + kSpacing)},
+                                    {kFullWidth, kRowH}};
+            };
             ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
-                         jpov::UiRect{{kColX[0], 16.0f + kRowH + kSpacing},
-                                      {kFullWidth, kRowH}});
-            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉",
-                     jpov::UiRect{{kColX[0], 16.0f + 2.0f * (kRowH + kSpacing)},
-                                  {kFullWidth, kRowH}});
+                         water_row(1.0f));
+            // 波浪只扰法线（几何仍是平面）：相位滑条就是"让水纹动起来"的那根。
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(2.0f),
+                            0.0f, 6.2831853f, 2);
+            ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
+                            water_row(3.0f), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(4.0f),
+                            0.05f, 20.0f, 2);
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(5.0f),
+                            0.0f, 360.0f, 0);
+            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(6.0f));
             return;
         }
 
@@ -455,7 +473,7 @@ private:
     SceneKind scene_ = SceneKind::kModel;   // 默认模型场景（原行为）
     bool show_water_ = true;                // 水面场景是否画水皮（headless A/B 用）
     bool water_use_strip_ = false;          // 水面用 strip 平铺版（对照）；false = 新水皮 pass
-    float water_slope_rms_deg_ = 0.0f;      // 水面 RMS 斜率（度）：只影响水下看水面的临界角过渡
+    // 波浪状态见上方的 water_wave_* 公开字段
     float water_ior_ = 1.333f;              // 水的折射率（1.0 = 关掉折射，A/B 用）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）

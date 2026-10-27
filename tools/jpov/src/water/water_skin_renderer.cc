@@ -106,8 +106,14 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 params.tir_color.g, params.tir_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uIor"), params.ior);
     constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
-    glUniform1f(shader_mgr.GetUniform(prog, "uSlopeRmsRad"),
-                std::max(params.surface_slope_rms_deg, 0.0f) * kDeg2Rad);
+    // 波浪（只扰法线）：相位原样传，斜率/方向由度换弧度，波长夹到 >0。
+    glUniform1f(shader_mgr.GetUniform(prog, "uWavePhase"), params.wave_phase);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveSlopeRad"),
+                std::max(params.wave_slope_deg, 0.0f) * kDeg2Rad);
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveLengthM"),
+                std::max(params.wave_length_m, 0.01f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveDirRad"),
+                params.wave_dir_deg * kDeg2Rad);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);

@@ -281,8 +281,11 @@ int RunCaptureWater(const std::string& out_dir) {
         // 相机注视点的 y（米）；nullopt = 默认原点。水下抬头看水面时必须抬高，
         // 否则视线一直是水平的，而 Snell 窗在**头顶**（正上方 ±48.6°）。
         std::optional<float> target_y;
-        // 水的折射率；0 = 用默认 1.333。1.0 = 关掉折射（A/B：窗内退化成一刀切的原样天空）。
+        // 水的折射率；0 = 用默认 1.333。
         float ior = 0.0f;
+        // 波浪相位（弧度）；nullopt 的斜率 = 用 app 默认（10°），显式 0 = 关掉波纹。
+        float wave_phase = 0.0f;
+        std::optional<float> wave_slope_deg;
     };
     const Shot shots[] = {
         {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
@@ -298,9 +301,17 @@ int RunCaptureWater(const std::string& out_dir) {
         {"props_under_up", -0.083, 12.0, true, true, false, 40.0f, 0.0f},
         // 同机位关掉折射（ior=1）—— 窗内变回"一刀切的原样天空"，用来对照折射到底改了什么。
         {"props_under_up_noref", -0.083, 12.0, true, true, false, 40.0f, 1.0f},
-        // 水下平视偏上（视线 ~30°）：**水上的人/桌子也在画面里** —— 验收"水上几何的折射像"
-        // （屏幕空间折射 march 需要物体在屏幕上，太高/太低的角度都取不到）。
+        // 水下平视偏上（视线 ~30°）：水上的人/桌子和窗同屏，用来看水面/窗缘的整体形状。
         {"props_under_wide", -0.083, 12.0, true, true, false, 6.0f, 0.0f},
+        // 水纹（法线扰动）：同一机位三个相位 —— 相位滑条就是让这三张之间过渡的那根。
+        {"props_under_wave_p0", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt},
+        {"props_under_wave_p1", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 1.6f, std::nullopt},
+        {"props_under_wave_p2", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 3.2f, std::nullopt},
+        // 关掉波纹的对照（法线恒为 +Y）——"这一屏的涟漪到底是不是波纹给的"由它来判。
+        {"props_under_nowave", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, 0.0f},
+        // 水上视角：有水纹 / 无水纹。
+        {"props_eye_wave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
+        {"props_eye_nowave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f},
         {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
@@ -311,6 +322,8 @@ int RunCaptureWater(const std::string& out_dir) {
         app.SetShowWater(s.water_skin);
         app.SetWaterUseStrip(s.use_strip);
         app.SetWaterIor(s.ior > 0.0f ? s.ior : 1.333f);
+        app.water_wave_phase_ = s.wave_phase;
+        app.water_wave_slope_deg_ = s.wave_slope_deg.value_or(10.0f);
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
         app.view_.theta = 3.14159265358979323846 / 4.0;
