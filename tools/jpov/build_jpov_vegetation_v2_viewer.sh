@@ -51,12 +51,10 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 
 # 范本拓扑：由 export_vegetation_shape.py 从 Blender/Sapling 导出。
 # 入库是为了让人 clone 下来就能跑（同时充当扫管的回归输入）。
-# willow* = 小苗（442/597 卡，验拓扑与叶卡）；oak/pine/fir_low = 真树（1.8k~4.7k 卡，
-# 验风力/实例化的观感用，见 samples/README.md）。
 echo ""
 echo "==> 4. 拷贝范本拓扑到 shapes/"
 mkdir -p "$OUTPUT_DIR/shapes"
-for f in willow.pbtxt willow_two_types.pbtxt oak_low.pbtxt pine_low.pbtxt fir_low.pbtxt; do
+for f in willow.pbtxt willow_two_types.pbtxt; do
     if [ -f "$TOOL_DIR/samples/$f" ]; then
         cp -v "$TOOL_DIR/samples/$f" "$OUTPUT_DIR/shapes/$f"
     else

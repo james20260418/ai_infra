@@ -14,10 +14,6 @@
 
 \* 本机实测（Linux 容器、单线程）。耗时**按枝数平方**增长，原因见下面「已知问题」。
 
-> 三棵树的**入库形式**在 `../samples/`：`oak_low / pine_low / fir_low.pbtxt`（导出时
-> `export.per_seg` 分别调成 2 / 8 / 1 以控体积，规模与上表不同）。要看风力/实例化观感
-> 直接用那三份，不必重新生成。来源与烘焙说明见 `../samples/README.md`。
-
 ```bash
 # 从仓库根：配置 -> shape.pbtxt
 python3 tools/jpov/tools/vegetation_tool_v2/generate_shape.py \
