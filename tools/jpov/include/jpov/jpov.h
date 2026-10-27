@@ -112,16 +112,28 @@ public:
 
     // RunOnce: 单帧执行 + 截图输出
     //
-    // 模拟一帧的完整流程：OneIteration → RunOnceInternal → SaveScreenshot
-    // 输出图片为窗口尺寸（win_w × win_h），模拟 Present 到窗口后的视觉效果。
+    // 模拟一帧的完整流程：OneIteration(frame_count) → RunOnceInternal →
+    // SaveScreenshot。输出图片为窗口尺寸（win_w × win_h），模拟 Present 到窗口后
+    // 的视觉效果。
     //
-    // input       — input: 模拟的输入快照
+    // frame_count  — input: 本帧的**帧号**，原样传给 OneIteration。多帧仿真时由
+    //                调用方递增（0,1,2,…）⇒ OneIteration 可以据此自计时/自推进，
+    //                不必再外接一个时钟。交互模式（Run）里对应真实的帧计数。
+    // input       — input: 模拟的输入快照（可完全伪造，见 input_snapshot.h 的编码）
     // winfo       — input: 模拟的窗口信息（宽度/高度决定截图尺寸）
     // out_png_path — output: 截图保存路径
     //
     // Pre-condition: Init() 已调用
+    // Pre-condition: frame_count >= 0
     // Pre-condition: winfo.width > 0 && winfo.height > 0
     // Pre-condition: out_png_path 非空
+    void RunOnce(int64_t frame_count, const jpov::InputSnapshot& input,
+                 const jpov::WindowInfo& winfo,
+                 const char* out_png_path);
+
+    // 便利重载：等价于 RunOnce(0, input, winfo, out_png_path)（单帧快照场景）。
+    // 需要「多帧仿真/自计时」时请用带 frame_count 的版本，否则 OneIteration 里
+    // 拿到的帧号永远是 0。
     void RunOnce(const jpov::InputSnapshot& input,
                  const jpov::WindowInfo& winfo,
                  const char* out_png_path);

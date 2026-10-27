@@ -444,7 +444,8 @@ int main(int argc, char** argv) {
             app.SetTimeSeconds(static_cast<float>(i) / 30.0f);
             char path[1024];
             std::snprintf(path, sizeof(path), "%s/script_f%02zu.png", dir.c_str(), i);
-            app.RunOnce(in, winfo, path);
+            // 带帧号：OneIteration 里 st_.frame 会真的递增（RunOnce 的便利重载恒传 0）。
+            app.RunOnce(static_cast<int64_t>(i), in, winfo, path);
             const int now_log = app.log_count();
             LOG(INFO) << "frame " << i << " mouse=(" << sf.mouse_x << ","
                       << sf.mouse_y << ") left=" << static_cast<int>(sf.left)
@@ -466,7 +467,7 @@ int main(int argc, char** argv) {
             char path[1024];
             std::snprintf(path, sizeof(path), "%s/sp_ui_t%03zu_t%.4fs.png",
                           capture_dir.c_str(), i, times[i]);
-            app.RunOnce(input, winfo, path);
+            app.RunOnce(static_cast<int64_t>(i), input, winfo, path);
             LOG(INFO) << "capture: " << path;
         }
     } else {

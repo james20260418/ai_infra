@@ -16,11 +16,14 @@
 #include "jpov.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <tuple>
 #include <glog/logging.h>
 
 #ifndef _WIN32
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -91,21 +94,81 @@ void JPOV::Init() {
             }
             started_xvfb_ = false;
         } else {
-            LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
-            int pid = fork();
-            if (pid == 0) {
-                // 子进程：启动 Xvfb
-                execlp("Xvfb", "Xvfb", ":99", "-ac", "-screen", "0", "1280x720x24",
-                       "-noreset", "+extension", "GLX", "+iglx", nullptr);
-                _exit(1);
+            LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb";
+            // 这是 CI（只有 llvmpipe）里的标准路径：**每个进程自己起一个 Xvfb**。
+            //
+            // 为什么不再固定 :99：多个 GL 测试并行时会抢同一个 display —— 抢输的
+            // Xvfb 打一行 "Fatal server error" 就退出，测试只能靠「连上已经存在的
+            // 那一个」侥幸通过（日志噪音 + 偶发失败）。
+            //
+            // 做法：从 `100 + pid % 100` 起逐个试，Xvfb 用 `-displayfd` 在**就绪时**
+            // 回传 display 号。若该 display 已被占用，Xvfb 会在 exec 后立刻退出 ⇒
+            // 管道读到 EOF ⇒ 换下一个号重试。pid 取模让并发进程起点不同。
+            std::string display;
+            for (int attempt = 0; attempt < 8 && display.empty(); ++attempt) {
+                const int want = 100 + (static_cast<int>(getpid()) % 100) + attempt;
+                const std::string candidate = ":" + std::to_string(want);
+
+                int pipe_fds[2] = {-1, -1};
+                CHECK_EQ(pipe(pipe_fds), 0) << "pipe() failed when launching Xvfb";
+                char fd_arg[16];
+                std::snprintf(fd_arg, sizeof(fd_arg), "%d", pipe_fds[1]);
+                const int pid = fork();
+                if (pid == 0) {
+                    // 子进程：只留写端（留着读端会让父进程等不到 EOF）。
+                    close(pipe_fds[0]);
+                    execlp("Xvfb", "Xvfb", candidate.c_str(), "-displayfd", fd_arg,
+                           "-ac", "-screen", "0", "1280x720x24", "-noreset",
+                           "+extension", "GLX", "+iglx", nullptr);
+                    _exit(1);
+                }
+                CHECK_GT(pid, 0) << "fork() failed";
+                close(pipe_fds[1]);
+
+                // 等它回传 display 号（就绪才写）；最多 5 秒。
+                std::string num;
+                struct pollfd pfd_read;
+                pfd_read.fd = pipe_fds[0];
+                pfd_read.events = POLLIN;
+                pfd_read.revents = 0;
+                if (poll(&pfd_read, 1, 5000) > 0) {
+                    char buf[32] = {0};
+                    const ssize_t n = read(pipe_fds[0], buf, sizeof(buf) - 1);
+                    for (ssize_t i = 0; i < n; ++i) {
+                        if (buf[i] >= '0' && buf[i] <= '9') {
+                            num.push_back(buf[i]);
+                        } else {
+                            break;   // Xvfb 写的是 "<num>\n"
+                        }
+                    }
+                }
+                close(pipe_fds[0]);
+
+                if (num.empty()) {
+                    // 占用/没装 Xvfb：回收子进程，换下一个 display 号重试。
+                    int status = 0;
+                    waitpid(pid, &status, 0);
+                    LOG(WARNING) << "Xvfb " << candidate
+                                 << " 未就绪（可能被占用或未安装），换下一个";
+                    continue;
+                }
+                xvfb_pid_ = pid;
+                display = ":" + num;
             }
-            CHECK_GT(pid, 0) << "fork() failed";
-            xvfb_pid_ = pid;
-            // 设置 DISPLAY 环境变量，让 glfwInit 连到这个 display
-            setenv("DISPLAY", ":99", 1);
-            sleep(1);
+
+            if (display.empty()) {
+                LOG(FATAL) << "Xvfb 连试 8 个 display 都无法启动 —— "
+                              "检查系统是否装了 Xvfb（CI 也走这条路）";
+            }
+            setenv("DISPLAY", display.c_str(), 1);
+            LOG(INFO) << "JPOV: Xvfb 已就绪，DISPLAY=" << display;
             if (!glfwInit()) {
-                LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
+                // -displayfd 语义是「就绪才写」，理论上不用等；给一次 1s 重试兜底。
+                sleep(1);
+                if (!glfwInit()) {
+                    LOG(FATAL) << "glfwInit() still failed after Xvfb launch (DISPLAY="
+                               << display << ")";
+                }
             }
             started_xvfb_ = true;
         }
@@ -387,21 +450,28 @@ void JPOV::Run() {
     LOG(INFO) << "JPOV::Run() — exiting (" << frame << " frames)";
 }
 
-void JPOV::RunOnce(const jpov::InputSnapshot& input,
+void JPOV::RunOnce(int64_t frame_count, const jpov::InputSnapshot& input,
                     const jpov::WindowInfo& winfo,
                     const char* out_png_path) {
     CHECK(initialized_);
+    CHECK_GE(frame_count, 0);
     CHECK_GT(winfo.width, 0);
     CHECK_GT(winfo.height, 0);
     CHECK(out_png_path != nullptr);
 
     // 1. 核心渲染（与 Run() 完全一致）
-    RunOnceInternal(0, input, winfo);
+    RunOnceInternal(frame_count, input, winfo);
 
     // 2. 保存窗口尺寸截图
     int win_w = static_cast<int>(winfo.width);
     int win_h = static_cast<int>(winfo.height);
     renderer_->SaveScreenshot(win_w, win_h, out_png_path);
+}
+
+void JPOV::RunOnce(const jpov::InputSnapshot& input,
+                    const jpov::WindowInfo& winfo,
+                    const char* out_png_path) {
+    RunOnce(/*frame_count=*/0, input, winfo, out_png_path);
 }
 
 // ========== 输入采集 ==========
