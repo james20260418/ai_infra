@@ -191,9 +191,15 @@ bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY /
     --capture output/shots/try --times 0,0.4 --wave sine   # headless 出图
 ```
 
-gold 测试钉住的机理（每条都有负向验证）：文字落在自己控件上（scale 1.0/1.5）、
-缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、
-时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入。
+测试分两层，**CPU 层管不了着色器**，两层都要在：
+
+| 目标 | 层次 | 钉住什么 |
+|---|---|---|
+| `//tools/jpov/test/sp_ui:sp_ui_gold_test` | 纯 CPU（无 GL） | 文字落在自己控件上（scale 1.0/1.5）、缩放处处同步、两层材质独立（含色样“纯色填充 + 纹理边框”形态）、屏幕锚定 UV、时间即数据、`ResolveFlipbookFrame` 的 wrap、退化输入 |
+| `//tools/jpov/test/plate2d:plate2d_gold_test` | **GPU 像素**（llvmpipe 即可，无需 DISPLAY） | 图集**行序**（帧 0 在左上角）、`fps=0` 的图集静止在第 0 格且整块均匀、两层材质各自采样、边框带取自己的图集 |
+
+两个 GPU 侧的坑（行序倒置 / fps=0 整张显示）CPU 测试一律看不见，都是真出过的 bug，
+现在各有一条断言兜住（负向验证写在测试文件头）。
 
 ---
 
