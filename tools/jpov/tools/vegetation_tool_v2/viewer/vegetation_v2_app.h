@@ -61,6 +61,17 @@ struct CliArgs {
   // **shape_path 找不到时这就是"纯 glb 查看模式"**：没有原材料态、不能烘焙、
   // 面板上不出现「回到原材料态」，相机按 glb 包围盒自动取景。
   std::string glb_path;
+  // ── 森林模式（glb 展示态，2026-10-27）──
+  //   同 mesh 摆 5×5 = 25 份，逐实例风参数（相位随机、其余由滑条统一给），
+  //   用来验收「逐实例属性」——单株看不出锁相，一片林子才看得出。
+  bool forest = false;            // 启动即进森林模式
+  float forest_spacing = 0.0f;    // 树间距（米）；0 = 按 glb 水平尺寸自动
+  float wind_phase_span = 2.0f;   // 逐实例相位随机的跨度（秒）
+  float wind_amp_scale = 1.0f;    // 逐实例摆幅倍数（统一值）
+  float wind_freq_scale = 1.0f;   // 逐实例频率倍数（统一值）
+  float wind_gust_phase = 0.0f;   // 逐实例阵风相位偏移（周期比例 [0,1)）
+  float wind_dir_jitter = 0.0f;   // 逐实例风向抖动 ±（度）
+
   bool wind_off = false;       // 关掉 wind（A/B 用）
   float wind_time = -1.0f;     // >=0 = 钉住风时间（headless 确定性出图）
   float wind_amp = -1.0f;      // >=0 = 覆盖 pivot 振幅（A/B 用）

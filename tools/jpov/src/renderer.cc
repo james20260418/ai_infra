@@ -2140,7 +2140,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                     tile_index_tex_, instanced_object_model_buf_,
-                    instanced_object_blow_buf_, instanced_object_tint0_buf_,
+                    instanced_object_wind_dir_blow_buf_,
+                    instanced_object_wind_params_buf_, instanced_object_tint0_buf_,
                     instanced_object_tint1_buf_, instanced_object_tint_enabled_buf_);
                 break;
             }
@@ -2394,7 +2395,7 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
                 io, mesh_mgr_, texture_mgr_, shader_mgr_,
                 shadow_vp_[c], shadow_depth_vp_[c], InstancedShadowProg(),
                 InstancedShadowProgCutout(), instanced_object_model_buf_,
-                instanced_object_blow_buf_);
+                instanced_object_wind_dir_blow_buf_, instanced_object_wind_params_buf_);
         }
         // 蒙皮实例同样从光空间画深度（skinned shadow program）。
         for (const auto& s : cmds.skinned_mesh) {
@@ -2541,7 +2542,7 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
             io, mesh_mgr_, texture_mgr_, mvp,
             PickInstancedProg(), PickInstancedCutoutProg(),
             &pick_table_instanced_, instanced_object_model_buf_,
-            instanced_object_blow_buf_);
+            instanced_object_wind_dir_blow_buf_, instanced_object_wind_params_buf_);
     }
 
     // ---- 窗口像素坐标 → 3D FBO 像素（GL 左下原点）----
@@ -2717,7 +2718,7 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
             io, mesh_mgr_, texture_mgr_, mvp,
             HighlightInstancedProg(), HighlightInstancedCutoutProg(),
             nullptr, instanced_object_model_buf_,
-            instanced_object_blow_buf_);
+            instanced_object_wind_dir_blow_buf_, instanced_object_wind_params_buf_);
     }
     glActiveTexture(GL_TEXTURE0);
 

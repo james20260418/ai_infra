@@ -82,9 +82,12 @@ void BuildModelMatrix(const Vec3f& center,
 
 }  // namespace
 
-// 上传本批实例的风参数（主 / 阴影 / 拾取·高亮 三条路径共用）。
+// 上传本批实例的风**场**参数（主 / 阴影 / 拾取·高亮 三条路径共用）。
 //   返回 true = 本批**真的吹风**（有 WindCommand 且 mesh 带关节表）⇒ 调用方还需上传
-//   并挂载「吹倒比例」缓冲（loc11）。false = VS 里 uWindEnabled=0，整段跳过。
+//   并挂载两个逐实例缓冲（loc11 风向+吹倒、loc15 相位/摆幅/频率/阵风相位）。
+//   false = VS 里 uWindEnabled=0，整段跳过（零开销）。
+//   风向**不走 uniform**：逐实例属性 aInstWindDirBlow.xyz 是唯一来源（host 侧把
+//   「没给 wind_direction 的实例」解析成命令风向，见 UploadInstanceWindAttrs）。
 // Pre-condition: prog 已 glUseProgram；mesh != nullptr。
 bool UploadInstancedWindUniforms(unsigned int prog, const InstancedObjectCommand& cmd,
                                  const GPUMesh* mesh) {
@@ -97,8 +100,6 @@ bool UploadInstancedWindUniforms(unsigned int prog, const InstancedObjectCommand
     glUniform1f(glGetUniformLocation(prog, "uWindTime"), w.time);
     glUniform1f(glGetUniformLocation(prog, "uWindAmplitude"), w.amplitude);
     glUniform1f(glGetUniformLocation(prog, "uWindFrequency"), w.frequency);
-    glUniform3f(glGetUniformLocation(prog, "uWindDirection"),
-                w.direction.x(), w.direction.y(), w.direction.z());
     glUniform1f(glGetUniformLocation(prog, "uWindTurbAmp"), w.turb_amplitude);
     glUniform1f(glGetUniformLocation(prog, "uWindTurbFreq"), w.turb_frequency);
     glUniform1f(glGetUniformLocation(prog, "uWindGustFreq"), w.gust_frequency);
@@ -119,17 +120,44 @@ bool UploadInstancedWindUniforms(unsigned int prog, const InstancedObjectCommand
     return true;
 }
 
-// 把逐实例「吹倒比例」上传进 loc11 缓冲。
-// Pre-condition: instance_blow_buf 的 spec = instanced_object::kBlowAwayAttrSpec。
-void UploadBlowAwayRatios(const InstancedObjectCommand& cmd,
-                          InstanceBuffer* instance_blow_buf) {
-    std::vector<float> blow(cmd.instances.size());
-    for (size_t k = 0; k < cmd.instances.size(); ++k) {
-        CHECK_GE(cmd.instances[k].blow_away_ratio, 0.0f)
-            << "吹倒比例不能为负（实例 " << k << "）";
-        blow[k] = cmd.instances[k].blow_away_ratio;
+// 把逐实例风参数上传进两个缓冲（主 / 阴影 / 拾取·高亮 三处都要调，否则"树动影不动"）。
+//   loc11（kWindDirBlowAttrSpec）：(风向.xyz, 吹倒比例)
+//   loc15（kWindParamsAttrSpec）： (相位秒, 摆幅倍数, 频率倍数, 阵风相位)
+// 风向解析：实例给了 wind_direction 就用它，否则用本命令 WindCommand::direction。
+// Pre-condition: cmd.wind 有值（调用前已由 UploadInstancedWindUniforms 判定 wind_on）。
+// Pre-condition: 两个 buf 的 spec 分别是 kWindDirBlowAttrSpec / kWindParamsAttrSpec；
+//                size 与 instances 等长。
+void UploadInstanceWindAttrs(const InstancedObjectCommand& cmd,
+                             InstanceBuffer* instance_wind_dir_blow_buf,
+                             InstanceBuffer* instance_wind_params_buf) {
+    CHECK(cmd.wind.has_value()) << "UploadInstanceWindAttrs: 本命令没有 wind";
+    const Vec3f& cmd_dir = cmd.wind->direction;
+    const size_t n = cmd.instances.size();
+    std::vector<float> dir_blow(n * 4);
+    std::vector<float> params(n * 4);
+    for (size_t k = 0; k < n; ++k) {
+        const InstanceState& inst = cmd.instances[k];
+        const Vec3f dir = inst.wind_direction.value_or(cmd_dir);
+        const float len = std::sqrt(dir.x() * dir.x() + dir.y() * dir.y() +
+                                    dir.z() * dir.z());
+        // 方向必须是单位向量：长度当强度用会被静默吃掉（强度请走 wind_amp_scale）。
+        CHECK(std::fabs(len - 1.0f) <= 1.0e-3f)
+            << "InstanceState::wind_direction 必须是单位向量（实例 " << k
+            << "，长度=" << len << "）";
+        CHECK_GE(inst.blow_away_ratio, 0.0f) << "吹倒比例不能为负（实例 " << k << "）";
+        CHECK_GE(inst.wind_amp_scale, 0.0f) << "摆幅倍数不能为负（实例 " << k << "）";
+        CHECK_GT(inst.wind_freq_scale, 0.0f) << "频率倍数必须 > 0（实例 " << k << "）";
+        dir_blow[k * 4 + 0] = dir.x();
+        dir_blow[k * 4 + 1] = dir.y();
+        dir_blow[k * 4 + 2] = dir.z();
+        dir_blow[k * 4 + 3] = inst.blow_away_ratio;
+        params[k * 4 + 0] = inst.wind_phase;
+        params[k * 4 + 1] = inst.wind_amp_scale;
+        params[k * 4 + 2] = inst.wind_freq_scale;
+        params[k * 4 + 3] = inst.wind_gust_phase;
     }
-    instance_blow_buf->Upload(blow);
+    instance_wind_dir_blow_buf->Upload(dir_blow);
+    instance_wind_params_buf->Upload(params);
 }
 
 // 把逐实例 tint 调色板上传进 loc12/13/14 缓冲（颜色分量 clamp 到 [0,1]）。
@@ -344,7 +372,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
                                                    unsigned int prog_full_cutout,
                                                    unsigned int tile_index_tex,
                                                    InstanceBuffer& instance_model_buf,
-                                                   InstanceBuffer& instance_blow_buf,
+                                                   InstanceBuffer& instance_wind_dir_blow_buf,
+                                                   InstanceBuffer& instance_wind_params_buf,
                                                    InstanceBuffer& instance_tint0_buf,
                                                    InstanceBuffer& instance_tint1_buf,
                                                    InstanceBuffer& instance_tint_enabled_buf) {
@@ -502,7 +531,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
     // 植被风：本批共享风场 uniform；有风时再上传逐实例吹倒比例（loc11）。
     const bool wind_on = UploadInstancedWindUniforms(selected_prog, cmd, mesh);
     if (wind_on) {
-        UploadBlowAwayRatios(cmd, &instance_blow_buf);
+        UploadInstanceWindAttrs(cmd, &instance_wind_dir_blow_buf,
+                                &instance_wind_params_buf);
     }
 
     // 逐实例 tint：只要本批有实例打开就上传/挂载三份属性；全部关闭时**整段跳过**
@@ -525,7 +555,8 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
         // + tint 调色板（loc12..14，仅本批有实例启用时）。
         std::vector<const InstanceBuffer*> binds = {&instance_model_buf};
         if (wind_on) {
-            binds.push_back(&instance_blow_buf);
+            binds.push_back(&instance_wind_dir_blow_buf);
+            binds.push_back(&instance_wind_params_buf);
         }
         if (tint_on) {
             binds.push_back(&instance_tint0_buf);
@@ -564,7 +595,8 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
                                                          unsigned int shadow_prog,
                                                          unsigned int shadow_prog_cutout,
                                                          InstanceBuffer& instance_model_buf,
-                                                         InstanceBuffer& instance_blow_buf) {
+                                                         InstanceBuffer& instance_wind_dir_blow_buf,
+                                                         InstanceBuffer& instance_wind_params_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawInstancedObjectShadow: mesh_id " << cmd.mesh_id
                            << " 未注册";
@@ -622,14 +654,16 @@ void InstancedObjectRenderer::DrawInstancedObjectShadow(const InstancedObjectCom
     // 植被风：影子/拾取必须与主 pass 同形变（否则树动影不动、点中的是未吹歪的位置）。
     const bool wind_on = UploadInstancedWindUniforms(sp, cmd, mesh);
     if (wind_on) {
-        UploadBlowAwayRatios(cmd, &instance_blow_buf);
+        UploadInstanceWindAttrs(cmd, &instance_wind_dir_blow_buf,
+                                &instance_wind_params_buf);
     }
 
     const GLsizei n_inst = static_cast<GLsizei>(n);
     {
         std::vector<const InstanceBuffer*> binds = {&instance_model_buf};
         if (wind_on) {
-            binds.push_back(&instance_blow_buf);
+            binds.push_back(&instance_wind_dir_blow_buf);
+            binds.push_back(&instance_wind_params_buf);
         }
         InstanceBufferBinding bind(mesh->vao, binds);
         glBindVertexArray(mesh->vao);
@@ -655,7 +689,8 @@ void InstancedObjectRenderer::DrawInstancedObjectSelected(const InstancedObjectC
                                                          unsigned int prog_cutout,
                                                          std::vector<uint32_t>* pick_id_map,
                                                          InstanceBuffer& instance_model_buf,
-                                                         InstanceBuffer& instance_blow_buf) {
+                                                         InstanceBuffer& instance_wind_dir_blow_buf,
+                                                         InstanceBuffer& instance_wind_params_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawInstancedObjectSelected: mesh_id " << cmd.mesh_id << " 未注册";
     CHECK_GT(mesh->vao, 0u);
@@ -719,14 +754,16 @@ void InstancedObjectRenderer::DrawInstancedObjectSelected(const InstancedObjectC
     // 植被风：影子/拾取必须与主 pass 同形变（否则树动影不动、点中的是未吹歪的位置）。
     const bool wind_on = UploadInstancedWindUniforms(sp, cmd, mesh);
     if (wind_on) {
-        UploadBlowAwayRatios(cmd, &instance_blow_buf);
+        UploadInstanceWindAttrs(cmd, &instance_wind_dir_blow_buf,
+                                &instance_wind_params_buf);
     }
 
     const GLsizei n_inst = static_cast<GLsizei>(n);
     {
         std::vector<const InstanceBuffer*> binds = {&instance_model_buf};
         if (wind_on) {
-            binds.push_back(&instance_blow_buf);
+            binds.push_back(&instance_wind_dir_blow_buf);
+            binds.push_back(&instance_wind_params_buf);
         }
         InstanceBufferBinding bind(mesh->vao, binds);
         glBindVertexArray(mesh->vao);

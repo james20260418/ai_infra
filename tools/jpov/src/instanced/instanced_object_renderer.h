@@ -28,10 +28,10 @@
 //   InstancedObjectRenderer::UploadAmbient(shader_mgr, prog, prog_full, ambient);
 //   InstancedObjectRenderer::DrawInstancedObject(cmd, cmds, mesh_mgr, texture_mgr, shader_mgr,
 //       view_proj, prog, prog_full, prog_cutout, prog_full_cutout, tile_index_tex,
-//       instance_model_buf, instance_blow_buf);
+//       instance_model_buf, instance_wind_dir_blow_buf, instance_wind_params_buf);
 //   InstancedObjectRenderer::DrawInstancedObjectShadow(cmd, mesh_mgr, texture_mgr, shader_mgr,
 //       shadow_vp, depth_vp, shadow_prog, shadow_prog_cutout,
-//       instance_model_buf, instance_blow_buf);
+//       instance_model_buf, instance_wind_dir_blow_buf, instance_wind_params_buf);
 
 #ifndef JPOV_INSTANCED_OBJECT_RENDERER_H_
 #define JPOV_INSTANCED_OBJECT_RENDERER_H_
@@ -69,22 +69,30 @@ public:
     // kMeshVs3dPBRInstanced: 实例版顶点着色器（无 UV/tangent）。
     //   输出与 Object3DRenderer::kMeshVs3dPBR 逐字一致，但摆放走 per-instance attribute
     //   （loc7..10）而非 uModel；裁剪走 uniform uViewProj = proj*view。
-    // ---- 植被风（实例路径）：单关节刚性链 + 逐实例吹倒 ----
+    // ---- 植被风（实例路径）：单关节刚性链 + 逐实例风参数 ----
     //   顶点属性：loc6 vec4 = (joint_id, phase, base tint id, 预留)。
     //     joint_id = 该顶点所属刚性段在关节表里的下标（烘焙期按拓扑定，唯一且无歧义，
     //     同一枝同一环共享 ⇒ 环内不会被切开）；phase = 链外湍流的逐顶点连续相位。
+    //   逐实例属性（两个 vec4，见 instanced_object_attrs.h）：
+    //     loc11 = (风向.xyz 世界系单位向量, 吹倒比例)
+    //     loc15 = (相位偏移 秒, 摆幅倍数, 频率倍数, 阵风相位偏移 周期比例)
     //   路径长 L（吹倒权重）= 由关节链在 VS 里现算，不占顶点属性。
     //   ⚠️ 吹倒是**逐关节**的 DC 角度（dθ = blow·ds/H·(L/H)^(n−2)），整段刚性、
     //      不产生剪切；逐顶点平移/旋转会把细长三角形拉成薄片。
+    //   ⚠️ 风向是**逐实例常量**：关节链递推（qpos 沿父链平移 + 角度继承）只在「全链
+    //      同一旋转轴」下成立，逐关节风向会让公式失效（不同轴的旋转不可交换）。
     inline static const std::string kWindBlowGlsl = R"glsl(
-layout(location = 11) in float aInstBlowAway;   // 逐实例：吹倒比例（0 = 不吹）
+// 逐实例风（loc11/loc15）：风向 + 吹倒比例、相位/摆幅/频率/阵风相位。
+//   默认值（host 侧填）必须是逐位无操作：相位 0、摆幅 1、频率 1、阵风相位 0
+//   ⇒ 不填这些字段的命令出图与「只有逐命令风」时逐像素相同（gold 靠这个守）。
+layout(location = 11) in vec4 aInstWindDirBlow;  // xyz = 风向（世界系单位向量），w = 吹倒比例
+layout(location = 15) in vec4 aInstWindParams;   // x=相位秒 y=摆幅倍数 z=频率倍数 w=阵风相位
 // loc6 统一 vec4（顶点属性）：(joint_id, phase, base tint id, 预留)。
 layout(location = 6) in vec4 aFlex;
 uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
-uniform vec3  uWindDirection;    // 世界系（单位向量）
 uniform int   uWindJointCount;
 uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
@@ -133,9 +141,11 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
         float lev = clamp(t1.x, 0.0, 3.0);
         float sof = clamp(t1.z, 0.0, 1.0);
         // 风：θ_j = amp·sin(...)；吹倒：dθ = blow · ds/H · (Lacc/H)^(n−2)（整段刚性）
-        float fr = uWindFrequency * (1.0 + 1.6 * lev);
-        float amp = uWindAmplitude * kWindPivotGain * (0.15 * lev);
-        float pjw = fr * (uWindTime + t1.y);
+        //   逐实例：摆幅倍数（.y）乘角度、频率倍数（.z）乘各 level 的分档频率、
+        //   相位偏移（.x，秒）加在时间上 —— 三者默认 1/1/0 时与原式**逐位相同**。
+        float fr = uWindFrequency * aInstWindParams.z * (1.0 + 1.6 * lev);
+        float amp = uWindAmplitude * aInstWindParams.y * kWindPivotGain * (0.15 * lev);
+        float pjw = fr * (uWindTime + aInstWindParams.x + t1.y);
         pjw -= floor(pjw);
         float th = amp * sin(6.28318531 * pjw);
         if (have_par == 0) {
@@ -156,18 +166,19 @@ vec3 JpovApplyJoint(int j0, vec3 p, inout vec3 wn, mat4 model,
     p = qpos + WindRotVecAxis(p - own0.xyz, axis, A);
     wn = WindRotVecAxis(wn, axis, A);
 
-    // 链外平动湍流（逐顶点相位；幅度取本关节 soft/lev）
+    // 链外平动湍流（逐顶点相位 + 逐实例相位；幅度取本关节 soft/lev）
+    //   gust_phase（.w）只加在阵风包络上：让同一时刻有的株在阵风峰值、有的在谷值。
     float lev0 = clamp(own1.x, 0.0, 3.0);
     float sof0 = clamp(own1.z, 0.0, 1.0);
-    float tph = uWindTime + aFlex.y;
-    float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+    float tph = uWindTime + aInstWindParams.x + aFlex.y;
+    float tfq = uWindTurbFreq * aInstWindParams.z * (1.0 + kTurbLevF * lev0);
     float tpj = tfq * tph;
     tpj -= floor(tpj);
-    float gph = uWindGustFreq * tph;
+    float gph = uWindGustFreq * tph + aInstWindParams.w;
     gph -= floor(gph);
     float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
     float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
-    float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+    float tamp = uWindTurbAmp * aInstWindParams.y * sof0 * (0.5 + 0.5 * lev0) * gust;
     vec3 tdir = normalize(axis * 0.6 + ref_n * 0.7
                           + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
     p += tdir * (tamp * sin(6.28318531 * tpj));
@@ -177,7 +188,8 @@ vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
     if (uWindEnabled != 1 || uWindJointCount <= 0) {
         return p;
     }
-    vec3 wdir_w = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+    // 风向来自**逐实例**属性（host 侧已解析默认值 = 命令风向，并 CHECK 过单位长度）。
+    vec3 wdir_w = normalize(aInstWindDirBlow.xyz + vec3(1e-6, 0.0, 0.0));
     vec3 wdir = JpovWindDirModel(model, wdir_w);
     vec3 axis_w = cross(vec3(0.0, 1.0, 0.0), wdir_w);
     float al = length(axis_w);
@@ -194,9 +206,9 @@ vec3 JpovApplyWind(vec3 p, inout vec3 wn, mat4 model) {
     //   path_len = 关节表预存的 cum + 顶点到自己枢轴的距离（都只依赖静止几何）
     //   ⇒ 沿枝单调增加，不会在关节处跳变。
     //   量级：d = ratio · L · (L/H)^(n−1)（梢部 = ratio·H）。
-    if (aInstBlowAway > 0.0 && uBlowAwayRefLength > 1.0e-6 && path_len > 0.0) {
+    if (aInstWindDirBlow.w > 0.0 && uBlowAwayRefLength > 1.0e-6 && path_len > 0.0) {
         float t = clamp(path_len / uBlowAwayRefLength, 0.0, 4.0);
-        p0 += hdir * (aInstBlowAway * path_len *
+        p0 += hdir * (aInstWindDirBlow.w * path_len *
                       pow(max(t, 1.0e-6), uBlowAwayExponent - 1.0));
     }
     return p0;
@@ -1033,7 +1045,8 @@ void main() {
                                     unsigned int prog_full_cutout,
                                     unsigned int tile_index_tex,
                                     InstanceBuffer& instance_model_buf,
-                                    InstanceBuffer& instance_blow_buf,
+                                    InstanceBuffer& instance_wind_dir_blow_buf,
+                                    InstanceBuffer& instance_wind_params_buf,
                                     InstanceBuffer& instance_tint0_buf,
                                     InstanceBuffer& instance_tint1_buf,
                                     InstanceBuffer& instance_tint_enabled_buf);
@@ -1052,7 +1065,8 @@ void main() {
                                           unsigned int shadow_prog,
                                           unsigned int shadow_prog_cutout,
                                           InstanceBuffer& instance_model_buf,
-                                          InstanceBuffer& instance_blow_buf);
+                                          InstanceBuffer& instance_wind_dir_blow_buf,
+                                          InstanceBuffer& instance_wind_params_buf);
 
     // ---- DrawInstancedObjectSelected ----
     // 拾取（color-ID）pass：把一条 InstancedObjectCommand 画进 pick FBO，只写 render_internal_id。
@@ -1069,7 +1083,8 @@ void main() {
                                            unsigned int prog_cutout,
                                            std::vector<uint32_t>* pick_id_map /*output*/,
                                            InstanceBuffer& instance_model_buf,
-                                           InstanceBuffer& instance_blow_buf);
+                                           InstanceBuffer& instance_wind_dir_blow_buf,
+                                           InstanceBuffer& instance_wind_params_buf);
 };
 
 }  // namespace jpov

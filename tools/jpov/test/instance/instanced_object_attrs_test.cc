@@ -56,6 +56,34 @@ int main(int argc, char** argv) {
     CHECK_EQ(io_attrs::kModelAttrSpec.slot_count, 4);
     CHECK_EQ(io_attrs::kModelAttrSpec.slot_components, 4);
     CHECK_EQ(io_attrs::kModelAttrSpec.stride_floats, 16);
+
+    // ---- 4b) 锚定：逐实例风两个 vec4 的位置（2026-10-27）----
+    //   风向与吹倒比例合在 loc11 的一个 vec4 里、其余四项在 loc15 —— 这两条是
+    //   GLSL 侧 `layout(location=…)` 的**唯一约定**，偏一格就是静默读错数据。
+    CHECK_EQ(io_attrs::kWindDirBlowAttrSpec.base_loc, 11u);
+    CHECK_EQ(io_attrs::kWindDirBlowAttrSpec.slot_count, 1);
+    CHECK_EQ(io_attrs::kWindDirBlowAttrSpec.slot_components, 4);
+    CHECK_EQ(io_attrs::kWindDirBlowAttrSpec.stride_floats, 4);
+    CHECK(!io_attrs::kWindDirBlowAttrSpec.integer_view)
+        << "风向+吹倒是 float 视图（integer_view 会让 shader 读到整数位模式）";
+    CHECK_EQ(io_attrs::kWindParamsAttrSpec.base_loc, 15u);
+    CHECK_EQ(io_attrs::kWindParamsAttrSpec.slot_count, 1);
+    CHECK_EQ(io_attrs::kWindParamsAttrSpec.slot_components, 4);
+    CHECK_EQ(io_attrs::kWindParamsAttrSpec.stride_floats, 4);
+    CHECK(!io_attrs::kWindParamsAttrSpec.integer_view);
+    // loc15 与蒙皮路径的 aInstPosLag 编号相同（互斥 program，允许）。但**静态路径内部**
+    // 只允许一个 spec 占它 —— 这里真的去数一遍：把 kActiveAttrSpecs 里覆盖 loc15 的
+    // spec 数量数出来，必须正好 1 个。（不是拿常量跟字面量自比：那只能测到 base_loc 变没变，
+    // 测不到"有没有别的 spec 也爬进 loc15"。）
+    int loc15_users = 0;
+    for (int i = 0; i < kActiveCount; ++i) {
+        const InstanceAttrSpec& s = io_attrs::kActiveAttrSpecs[i];
+        const unsigned int end = s.base_loc + static_cast<unsigned int>(s.slot_count);
+        if (s.base_loc <= 15u && 15u < end) {
+            ++loc15_users;
+        }
+    }
+    CHECK_EQ(loc15_users, 1) << "loc15 必须正好被 1 个 per-instance spec 使用（静态路径内部）";
     LOG(INFO) << "OK: 静态实例布局自洽（spec 合法 / 不重叠 / 不侵占顶点槽）";
 
     // ---- 5) 负向参照：谓词必须拒绝非法输入，否则上面的正向断言全是恒真 ----

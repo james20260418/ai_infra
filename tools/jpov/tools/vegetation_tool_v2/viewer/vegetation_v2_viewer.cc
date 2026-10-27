@@ -28,6 +28,10 @@
 //   --glb-only                                               强制纯 glb 查看模式（即使 shape 存在也不加载；
 //                                                            无原材料态：不能烘焙、不能回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
+//   --forest / --forest-spacing <米>                          5×5 森林模式（同 mesh 25 份，逐实例风参数）
+//   --wind-phase-span <秒> / --wind-amp-scale <倍数>          逐实例相位随机跨度 / 摆幅倍数
+//   --wind-freq-scale <倍数> / --wind-gust-phase <周期比例>   逐实例频率倍数 / 阵风相位偏移
+//   --wind-dir-jitter <度>                                    逐实例风向抖动 ±（0 = 全批同一风向）
 
 #include <cstdio>
 #include <cstdlib>
@@ -108,6 +112,25 @@ CliArgs ParseCli(int argc, char** argv) {
       a.wind_blow = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--wind-blow-exp" && has_val) {
       a.wind_blow_exp = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--forest") {
+      a.forest = true;
+    } else if (arg == "--forest-spacing" && has_val) {
+      a.forest_spacing = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.forest_spacing, 0.0f) << "--forest-spacing 不能为负（0 = 自动）";
+    } else if (arg == "--wind-phase-span" && has_val) {
+      a.wind_phase_span = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.wind_phase_span, 0.0f) << "--wind-phase-span 不能为负";
+    } else if (arg == "--wind-amp-scale" && has_val) {
+      a.wind_amp_scale = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.wind_amp_scale, 0.0f) << "--wind-amp-scale 不能为负";
+    } else if (arg == "--wind-freq-scale" && has_val) {
+      a.wind_freq_scale = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GT(a.wind_freq_scale, 0.0f) << "--wind-freq-scale 必须 > 0";
+    } else if (arg == "--wind-gust-phase" && has_val) {
+      a.wind_gust_phase = static_cast<float>(std::atof(argv[++i]));
+    } else if (arg == "--wind-dir-jitter" && has_val) {
+      a.wind_dir_jitter = static_cast<float>(std::atof(argv[++i]));
+      CHECK_GE(a.wind_dir_jitter, 0.0f) << "--wind-dir-jitter 不能为负";
     } else if (arg == "--no-hud") {
       a.hide_hud = true;
     } else if (arg == "--no-bark") {

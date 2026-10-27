@@ -402,7 +402,10 @@ public:
     //   与蒙皮路径**彻底解耦**（各自的 buffer + 各自的 spec），使其布局可独立演进
     //   （如植被的 per-instance 颜色 / 摆动相位），不被蒙皮布局重排拖累。
     InstanceBuffer instanced_object_model_buf_{instanced_object::kModelAttrSpec};  // loc7..10 = mat4
-    InstanceBuffer instanced_object_blow_buf_{instanced_object::kBlowAwayAttrSpec};  // loc11 = 吹倒比例
+    // 逐实例风：loc11 = (风向.xyz, 吹倒比例)、loc15 = (相位, 摆幅倍数, 频率倍数, 阵风相位)。
+    InstanceBuffer instanced_object_wind_dir_blow_buf_{
+        instanced_object::kWindDirBlowAttrSpec};
+    InstanceBuffer instanced_object_wind_params_buf_{instanced_object::kWindParamsAttrSpec};
     // 逐实例 tint 调色板（loc12/13 = vec3 颜色，loc14 = 0/1 开关）；全批关闭时不挂载。
     InstanceBuffer instanced_object_tint0_buf_{instanced_object::kTint0AttrSpec};
     InstanceBuffer instanced_object_tint1_buf_{instanced_object::kTint1AttrSpec};

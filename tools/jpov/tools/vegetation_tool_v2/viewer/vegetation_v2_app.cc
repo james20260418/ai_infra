@@ -185,6 +185,19 @@ void AppendUvBox(const Shape& shape, const jpov::vegetation::LeafCard& card, dou
   }
 }
 
+// 0..1 的确定性伪随机（同一 index 恒定 ⇒ 出图可复现，gold/验收都能重复）。
+//   用 splitmix32 风格的整数混合：只要 index/salt 变，低位就不会退化成等差数列
+//   （`sin(index)*43758` 那种写法在连续 index 上会成片聚簇，看起来像"没随机"）。
+float Hash01(uint32_t index, uint32_t salt) {
+  uint32_t h = index * 0x9E3779B1u + salt * 0x85EBCA77u;
+  h ^= h >> 16;
+  h *= 0x7FEB352Du;
+  h ^= h >> 15;
+  h *= 0x846CA68Bu;
+  h ^= h >> 16;
+  return static_cast<float>(h & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+}
+
 class VegetationV2App : public JPOV {
  public:
   using JPOV::JPOV;
@@ -231,6 +244,16 @@ class VegetationV2App : public JPOV {
   float wind_time_scale_ = 1.0f;
   float wind_blow_ratio_ = 0.0f;   // 吹歪比例（0 = 关；随指数变量纲，是观感参数）
   float wind_blow_exp_ = 2.0f;     // 吹歪指数 n（1 = 线性，2 = 梢部加速）
+  // 森林模式（glb 展示态）：同 mesh 摆 5×5，逐实例风参数。单株看不出「锁相」，
+  // 一片林子才看得出逐实例相位/摆幅有没有生效。
+  bool forest_on_ = false;
+  float forest_spacing_ = 0.0f;    // 树间距（米）；0 = 按 glb 水平尺寸自动
+  float forest_saved_radius_ = 0.0f;  // 开森林前的单株取景半径（关掉时还原）
+  float wind_phase_span_ = 2.0f;   // 逐实例相位随机的跨度（秒）
+  float wind_amp_scale_ = 1.0f;    // 逐实例摆幅倍数（统一值，滑条控）
+  float wind_freq_scale_ = 1.0f;   // 逐实例频率倍数（统一值，滑条控）
+  float wind_gust_phase_ = 0.0f;   // 逐实例阵风相位偏移（周期比例，统一值）
+  float wind_dir_jitter_deg_ = 0.0f;  // 逐实例风向抖动 ±°（0 = 全批同一风向）
   float scene_height_ = 1.0f;      // 参考高度 H（米）：shape/glb 的 Y 向包围盒高
   bool wind_paused_ = false;
   float wind_time_ = 0.0f;        // 秒；由帧号推（确定性）
@@ -509,6 +532,13 @@ class VegetationV2App : public JPOV {
       wind_paused_ = true;
       wind_time_ = args.wind_time;
     }
+    // 逐实例风参数（森林模式验收用）：默认 0/1/1/0 = 逐位无操作。
+    forest_spacing_ = args.forest_spacing;
+    wind_phase_span_ = args.wind_phase_span;
+    wind_amp_scale_ = args.wind_amp_scale;
+    wind_freq_scale_ = args.wind_freq_scale;
+    wind_gust_phase_ = args.wind_gust_phase;
+    wind_dir_jitter_deg_ = args.wind_dir_jitter;
     // v 方向补偿必须在生成 mesh 之前确定：UV 是扫管时烘进去的，不是 shader 里改的。
     // 0 = 自动（只对 --bark 有意义）：没有 bark 时必须落回 1.0，
     // 否则 SweepBranches 会因 uv_v_scale<=0 直接 abort。
@@ -845,6 +875,99 @@ class VegetationV2App : public JPOV {
     return w;
   }
 
+  // ---- 森林模式（5×5 = 25 份同 mesh，逐实例风参数）----
+  //
+  // 为什么要它：逐实例相位/摆幅「在单株上看不出来」—— 一份实例无论如何都只是它自己。
+  // 摆成一片林子，锁相（整片一起晃）与去相位（错落）一眼可分，这是逐实例属性的验收场景。
+  //
+  // 间距：0 = 自动（取 glb 水平尺寸的 1.15 倍，让树冠不相交）；手动给则**原样用**。
+  //   自动分支上限 8.5 米：地面 quad 只有 40×40 米（skylight_scene.h 的 kGroundHalf=20），
+  //   4 格间距 = 8.5 → 最外一排占地 ±17 米，留 3 米边；再大就有树"站在地面外面"。
+  //   手动值不夹：用户显式给 12 米 = 他就是要看超出地面的效果，别替他决定。
+  float ForestSpacing() const {
+    if (forest_spacing_ > 0.0f) {
+      return forest_spacing_;
+    }
+    const float w = glb_.bounds_valid ? std::max(glb_.bounds_max[0] - glb_.bounds_min[0],
+                                                 glb_.bounds_max[2] - glb_.bounds_min[2])
+                                      : scene_height_;
+    return std::clamp(1.15f * w, 0.5f, 8.5f);
+  }
+
+  // 25 份实例：栅格摆放 + 逐实例风参数。
+  //   相位：每实例在 [0, wind_phase_span_) 秒内随机（**森林模式的默认行为**）。
+  //   风向：滑条风向 ± 逐实例抖动（0 = 全批同一风向 = 只走命令默认值）。
+  //   摆幅/频率/阵风相位：统一用滑条值（逐实例字段，但验收时先看"同一参数下相位去相关"）。
+  std::vector<jpov::InstanceState> MakeForestInstances() const {
+    const float spacing = ForestSpacing();
+    const float az = wind_azimuth_deg_ * 3.14159265358979323846f / 180.0f;
+    std::vector<jpov::InstanceState> instances;
+    instances.reserve(25);
+    for (int iz = 0; iz < 5; ++iz) {
+      for (int ix = 0; ix < 5; ++ix) {
+        const uint32_t k = static_cast<uint32_t>(iz * 5 + ix);
+        jpov::InstanceState st;
+        st.transform.center = {static_cast<float>(ix - 2) * spacing, ground_y_,
+                               static_cast<float>(iz - 2) * spacing};
+        st.transform.up = {0.0f, 1.0f, 0.0f};
+        st.transform.front = {0.0f, 0.0f, 1.0f};
+        st.transform.scale = 1.0f;
+        st.wind_phase = Hash01(k, /*salt*/1) * wind_phase_span_;
+        st.wind_amp_scale = wind_amp_scale_;
+        st.wind_freq_scale = wind_freq_scale_;
+        st.wind_gust_phase = wind_gust_phase_;
+        // 抖动为 0 时不写 wind_direction（留 nullopt = 沿用命令风向，语义最直白）。
+        if (wind_dir_jitter_deg_ > 0.0f) {
+          const float jitter = (Hash01(k, /*salt*/2) - 0.5f) * 2.0f * wind_dir_jitter_deg_;
+          const float jazz = az + jitter * 3.14159265358979323846f / 180.0f;
+          st.wind_direction = jpov::Vec3f{std::cos(jazz), 0.0f, std::sin(jazz)};
+        }
+        instances.push_back(st);
+      }
+    }
+    return instances;
+  }
+
+  // 森林整体的包围盒（用于开关森林时重新取景）。栅格对称 ⇒ 用 ±2 格外扩即可。
+  double ForestFitRadius() const {
+    const float spacing = ForestSpacing();
+    const float cx = glb_.bounds_valid ? 0.5f * (glb_.bounds_min[0] + glb_.bounds_max[0]) : 0.0f;
+    const float cz = glb_.bounds_valid ? 0.5f * (glb_.bounds_min[2] + glb_.bounds_max[2]) : 0.0f;
+    const float hx = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[0] - glb_.bounds_min[0]) : 0.5f;
+    const float hz = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[2] - glb_.bounds_min[2]) : 0.5f;
+    const float ymin = glb_.bounds_valid ? glb_.bounds_min[1] : 0.0f;
+    const float ymax = glb_.bounds_valid ? glb_.bounds_max[1] : scene_height_;
+    const float ext = 2.0f * spacing;
+    const float bmin[3] = {cx - ext - hx, ymin, cz - ext - hz};
+    const float bmax[3] = {cx + ext + hx, ymax, cz + ext + hz};
+    return jpov_viewer::ViewConfig::FitRadius(bmin, bmax, 60.0);
+  }
+
+  // 打开/关闭森林：顺手把相机拉到「能看全一片林子」的距离（关掉时还原单株距离）。
+  //   不这么做的话，用户勾上 checkbox 只会看到正中那一株的特写，会以为功能没生效。
+  void SetForest(bool on) {
+    if (forest_on_ == on) {
+      return;
+    }
+    forest_on_ = on;
+    if (mode_ != Mode::kGlb || !glb_loaded_) {
+      return;
+    }
+    // `--cam_r` 显式钉住相机时**不许改 R**：出图/对比必须可复现
+    //   （否则「同一组参数，只在森林开关上不同」的两张图会连取景都不一样）。
+    if (args_radius_ > 0.0f) {
+      return;
+    }
+    if (on) {
+      forest_saved_radius_ = view_.R;
+      view_.R = ForestFitRadius();
+    } else if (forest_saved_radius_ > 0.0) {
+      view_.R = forest_saved_radius_;
+    }
+    LOG(INFO) << (on ? "森林模式：5×5（逐实例相位随机）" : "单株模式")
+              << "，相机 R = " << view_.R;
+  }
+
   void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
     if (type_index < debug_card_mesh_.size() && debug_card_mesh_[type_index] != 0) {
       cmds->DrawObject3D(debug_card_mesh_[type_index], card_box_mat_, {0.0f, 0.0f, 0.0f},
@@ -996,13 +1119,24 @@ class VegetationV2App : public JPOV {
                        {0.0f, 0.0f, 1.0f});
 
     if (mode_ == Mode::kGlb && glb_loaded_) {
-      // glb 展示态：整份产物一次画出（树干 + 叶卡两个 primitive），带风。
       std::optional<jpov::WindCommand> wind;
       if (wind_on_) {
         wind = MakeWind();
       }
-      cmds->DrawGltfObject(glb_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
-                           /*scale=*/1.0f, /*highlight=*/false, /*picking_id=*/0, wind);
+      if (forest_on_) {
+        // 森林：同 mesh 摆 25 份（**实例路径**）—— 逐实例相位/摆幅/风向在这里生效。
+        //   每个 primitive 一条命令（同 mesh_id 是 instanced draw 的前提）。
+        const std::vector<jpov::InstanceState> instances = MakeForestInstances();
+        for (const jpov::GltfPrimitive& prim : glb_.primitives) {
+          cmds->DrawInstancedObject(prim.mesh_id, prim.material, instances,
+                                    /*highlight=*/false, wind);
+        }
+      } else {
+        // glb 展示态（单株）：整份产物一次画出（树干 + 叶卡两个 primitive），带风。
+        cmds->DrawGltfObject(glb_, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+                             {0.0f, 0.0f, 1.0f},
+                             /*scale=*/1.0f, /*highlight=*/false, /*picking_id=*/0, wind);
+      }
     }
     for (size_t i = 0; mode_ == Mode::kRaw && i < branch_mesh_.size(); ++i) {
       if (branch_level_[i] > max_level_) {
@@ -1121,8 +1255,9 @@ class VegetationV2App : public JPOV {
           }
         });
       } else {
-        // 风调试（glb 展示态）：参考 v1 wind viewer，精简到 10 行、近似方形。
-        panel(xl, &yl, "风调试", &wind_panel_open_, 12,
+        // 风调试（glb 展示态）。下半 7 行 = **逐实例**风参数（森林模式验收用）：
+        //   相位固定为「森林模式下逐实例随机」，其余四项是统一值（滑条控）。
+        panel(xl, &yl, "风调试", &wind_panel_open_, 19,
               [&](int i, const jpov::UiRect& r) {
                 if (i == 0) {
                   ui_.Checkbox("启用风", &wind_on_, r);
@@ -1146,8 +1281,24 @@ class VegetationV2App : public JPOV {
                   ui_.SliderFloat("吹歪指数 n", &wind_blow_exp_, r, 1.0f, 4.0f, 1);
                 } else if (i == 10) {
                   ui_.SliderFloat("时间缩放", &wind_time_scale_, r, 0.0f, 2.0f, 2);
-                } else {
+                } else if (i == 11) {
                   ui_.Checkbox("暂停", &wind_paused_, r);
+                } else if (i == 12) {
+                  bool on = forest_on_;
+                  ui_.Checkbox("森林 5×5（逐实例相位）", &on, r);
+                  SetForest(on);   // SetForest 内部做「没变化就返回」，跟着调相机
+                } else if (i == 13) {
+                  ui_.SliderFloat("树间距 m（0=自动）", &forest_spacing_, r, 0.0f, 12.0f, 2);
+                } else if (i == 14) {
+                  ui_.SliderFloat("相位跨度 s", &wind_phase_span_, r, 0.0f, 8.0f, 2);
+                } else if (i == 15) {
+                  ui_.SliderFloat("摆幅倍数", &wind_amp_scale_, r, 0.0f, 2.0f, 2);
+                } else if (i == 16) {
+                  ui_.SliderFloat("频率倍数", &wind_freq_scale_, r, 0.2f, 2.0f, 2);
+                } else if (i == 17) {
+                  ui_.SliderFloat("阵风相位", &wind_gust_phase_, r, 0.0f, 1.0f, 2);
+                } else {
+                  ui_.SliderFloat("风向抖动 ±°", &wind_dir_jitter_deg_, r, 0.0f, 180.0f, 0);
                 }
               });
       }
@@ -1270,6 +1421,9 @@ int RunViewer(const CliArgs& args) {
       return 1;
     }
   }
+  // 森林模式要在 glb 载入**之后**开：取景半径要用 glb 的包围盒算。
+  // 交互模式下 args.forest 只是初始值，面板里的 checkbox 随时可切换。
+  app.SetForest(args.forest);
 
   if (!args.capture) {
     app.Run();

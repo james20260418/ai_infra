@@ -288,6 +288,15 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `--no-wind` / `--wind-time <s>` | 关风 / 钉住风时间（A/B、可复现出图） |
 | `--wind-amp <f>` / `--wind-turb <f>` | 覆盖 pivot 振幅 / 平动湍流幅度（A/B） |
 | `--wind-blow <f>` / `--wind-blow-exp <f>` | 覆盖**吹歪**比例 / 指数（0 = 关） |
+| `--forest` / `--forest-spacing <m>` | **5×5 森林模式**：同 mesh 摆 25 份，逐实例相位随机（间距 0 = 自动） |
+| `--wind-phase-span <s>` | 逐实例相位随机跨度（秒；0 = 25 份完全锁相，可直接对比） |
+| `--wind-amp-scale <f>` / `--wind-freq-scale <f>` | 逐实例摆幅倍数 / 频率倍数（统一值，面板也有滑条） |
+| `--wind-gust-phase <f>` / `--wind-dir-jitter <deg>` | 逐实例阵风相位偏移（周期比例）/ 风向抖动 ±（度） |
+
+> **森林模式是逐实例属性的验收场景**：单株上无论如何都看不出"锁相"，
+> 摆成 5×5 才看得出 25 份是不是在**各晃各的**。左边「风调试」面板下半部分是这些
+> 逐实例参数（相位固定随机，其余滑条控）。
+> 例：`--glb tree.glb --forest --wind-time 0.8 --cam_r 16 --no-hud --capture shots/forest`
 
 交互：左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）；
 `[` `]` 调最大层级、`P` 打印相机、`H` 打印叶卡帮助（各 type 的 `anchor_mode` / 推荐宽高比）。
