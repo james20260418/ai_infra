@@ -67,6 +67,10 @@ public:
     jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
     jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
     std::vector<jpov::SkinnedInstanceState> person_instances_;
+    // 蓝人的装配参数（装配时由主程序填入）：水面场景要另摆一份"站在桌上"的人，
+    // 复用同一份 mesh / 骨架 / 身高归一结果，避免两处各算一套 scale 而分叉。
+    float person_scale_ = 1.0f;
+    float person_asset_min_y_ = 0.0f;   // 资产局部包围盒 min.y（脚底对齐用）
 
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
@@ -84,8 +88,41 @@ public:
         models_.push_back({std::move(obj), center, up, front, scale});
     }
 
+    // ── 场景切换 ──
+    //   kBoxes：原有的三方块（低反/高光/金属）+ 地面 —— 验收天光/材质；
+    //   kWater：水面打底场景（水下大 box + 桌子 + 桌上的人 + 全局水面）—— 验收水。
+    enum class SceneKind { kBoxes = 0, kWater = 1 };
+    void SetScene(SceneKind kind) { scene_ = kind; }
+
+    // ── 水面场景资源（Init 后由主程序装配一次）──
+    uint32_t sea_box_mesh_ = 0;              // 水下大 box（6×3×6）
+    jpov::PBRMaterial sea_box_mat_;          // 深灰石
+    jpov::PBRMaterial sea_floor_mat_;        // 海底沙色（复用 ground_mesh_）
+    std::vector<ModelSlot> water_models_;    // 水面场景专用模型（桌子）
+    // 桌上的人：与三方块场景共用同一份蒙皮 mesh / 骨架，只是另存一组摆放。
+    std::vector<jpov::SkinnedInstanceState> water_person_instances_;
+    void AddWaterModel(jpov::GltfObject obj, jpov::Vec3f center,
+                       jpov::Vec3f up, jpov::Vec3f front, float scale = 1.0f) {
+        water_models_.push_back({std::move(obj), center, up, front, scale});
+    }
+
+    // 水面开关（headless A/B 用：false = 完全不设 water 命令，验证"关水零回归"）。
+    void SetShowWater(bool show) { show_water_ = show; }
+
+    // 水面参数（水位 / 吸收 / 反射…）。level 由面板滑条改，其余走默认值 + 少量滑条。
+    jpov::WaterSurface water_ = [] {
+        jpov::WaterSurface w;
+        w.level = kWaterLevelDefault;
+        // 主浪方向与场景无关，给一个斜向；振幅默认 0（第一版不做波浪）。
+        w.wave_dir = {1.0f, 0.0f, 0.35f};
+        return w;
+    }();
+
     // ── 视角：沿用 ViewConfig（y-up 球面角 + 右键拖拽/滚轮缩放）──
     jpov_viewer::ViewConfig view_;
+    // 相机注视点覆盖（默认空 = ViewConfig::Target() 原点）。仅 headless 拍摄用，
+    // 交互面板不暴露（水面场景"水下抬头"需要把目标点抬到水面之上）。
+    std::optional<jpov::Vec3f> view_target_;
 
     // ── 天光自由度（跨帧持有；天光与光照全由它们推导）──
     // 滑条值 → SkyCommand 字段的编码见 skylight_scene.h 的 SkyDegrees。
@@ -141,9 +178,12 @@ public:
                                     static_cast<int>(winfo.height));
         }
 
-        // 相机由 view_ 推导（同 model viewer；target=原点）。
+        // 相机由 view_ 推导（同 model viewer；默认 target=原点）。
+        // view_target_ 可覆盖（水面场景"水下抬头看水面"需要把目标抬到水面之上）。
         cmds->camera.position = view_.Position();
-        cmds->camera.target   = jpov_viewer::ViewConfig::Target();
+        cmds->camera.target   = view_target_.has_value()
+                                    ? *view_target_
+                                    : jpov_viewer::ViewConfig::Target();
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
@@ -192,9 +232,11 @@ public:
             cmds->elevation_fog = ef;
         }
 
-        // 场景：灰色地面 + 三方块（低反/高光/金属）。
+        // 场景：三方块（默认）或水面打底场景。
         // show_scene_=false 时整组跳过（headless 拍纯天空用）。
-        if (show_scene_) {
+        if (show_scene_ && scene_ == SceneKind::kWater) {
+            DrawWaterScene(cmds);
+        } else if (show_scene_) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
@@ -217,6 +259,11 @@ public:
             }
         }
 
+        // 全局水面：只有水面场景才给（三方块场景保持零回归 —— 不设 water 就零开销）。
+        if (show_scene_ && scene_ == SceneKind::kWater && show_water_) {
+            cmds->DrawWater(water_);
+        }
+
         // 光照面板（仅交互窗口；headless 拍摄是纯 3D 截图）。
         if (show_panel_) {
             DrawLightPanel(input);
@@ -226,6 +273,29 @@ public:
     }
 
 private:
+    // 水面打底场景：海底 + 水下大 box + 桌上的人 + （由调用方追加的）全局水面。
+    void DrawWaterScene(jpov::RenderCommandList* cmds) {
+        // 海底：复用 40×40 地面 mesh，换沙色材质（水面之外的部分保持原来的灰地语义）。
+        cmds->DrawObject3D(ground_mesh_, sea_floor_mat_,
+                           /*center*/ {0.0f, 0.0f, 0.0f},
+                           /*up*/     {0.0f, 1.0f, 0.0f},
+                           /*front*/  {0.0f, 0.0f, 1.0f});
+        // 水下大 box（顶面 y=3）。
+        cmds->DrawObject3D(sea_box_mesh_, sea_box_mat_,
+                           /*center*/ SeaBoxCenter(),
+                           /*up*/     {0.0f, 1.0f, 0.0f},
+                           /*front*/  {0.0f, 0.0f, 1.0f});
+        // 桌子（摆在 box 顶面）。
+        for (const ModelSlot& m : water_models_) {
+            cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+        }
+        // 桌上的人（与三方块场景同一份 mesh / 骨架，这里只有 1 个实例）。
+        if (person_mesh_ != 0 && !water_person_instances_.empty()) {
+            cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
+                                       person_material_, water_person_instances_);
+        }
+    }
+
     static float AppTextWidth(const char* text, float font_size,
                               const char* /*font_alias*/, void* userdata) {
         SkylightApp* app = static_cast<SkylightApp*>(userdata);
@@ -248,7 +318,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 11;
+        const int   kRows    = 15;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -279,6 +349,30 @@ private:
         ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
                         0.0f, 1.0f, 2);
 
+        // ── 左列下半（11~14）：水面场景 ──
+        {
+            bool water_scene = (scene_ == SceneKind::kWater);
+            if (ui_.Checkbox("场景: 水面打底 (关=三方块)", &water_scene, row(0, 11))) {
+                scene_ = water_scene ? SceneKind::kWater : SceneKind::kBoxes;
+            }
+        }
+        ui_.SliderFloat("水位 m", &water_.level, row(0, 12),
+                        kWaterLevelMin, kWaterLevelMax, 2);
+        ui_.SliderFloat("波浪幅度 m (0=平水面)", &water_.wave_amplitude,
+                        row(0, 13), 0.0f, 8.0f, 2);
+        ui_.SliderFloat("天光反射量 [0,1]", &water_.sky_scale, row(0, 14),
+                        0.0f, 1.0f, 2);
+
+        // ── 右列下半（11~14）：水体光学（吸收逐通道 + 散射强度）──
+        ui_.SliderFloat("吸收 σ 红 (1/m)", &water_.absorption.x(), row(1, 11),
+                        0.0f, 1.2f, 3);
+        ui_.SliderFloat("吸收 σ 绿 (1/m)", &water_.absorption.y(), row(1, 12),
+                        0.0f, 1.2f, 3);
+        ui_.SliderFloat("吸收 σ 蓝 (1/m)", &water_.absorption.z(), row(1, 13),
+                        0.0f, 1.2f, 3);
+        ui_.SliderFloat("散射强度", &water_.scatter_scale, row(1, 14),
+                        0.0f, 3.0f, 2);
+
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
         ui_.SliderFloat("起雾距离 m", &deg_.elev_fog_start, row(1, 1), 0.0f, 2000.0f, 2);
@@ -302,6 +396,8 @@ private:
 
     bool show_panel_ = true;
     bool show_scene_ = true;
+    SceneKind scene_ = SceneKind::kBoxes;
+    bool show_water_ = true;
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）

@@ -122,6 +122,8 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
     CHECK_GT(asset_h, 1.0e-6f) << "蓝人资产 Y 向高度≈0: " << kMaleModelPath;
     const float scale = jpov_skylight::kPersonTargetHeight / asset_h;
     const float min_y = obj.bounds_min[1];
+    app.person_scale_ = scale;
+    app.person_asset_min_y_ = min_y;
 
     app.person_mesh_     = obj.primitives[0].mesh_id;
     app.person_material_ = obj.primitives[0].material;
@@ -161,6 +163,157 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
               << " skeleton_id=" << app.person_skeleton_id_
               << " bones=" << type.bone_count()
               << " asset_h=" << asset_h << " scale=" << scale;
+}
+
+// 水面场景的静态资源：水下大 box（6×3×6）+ 海底/box 材质。
+// 海底复用 InstallScene 已注册的 ground_mesh_（40×40），只换材质。
+void InstallWaterScene(jpov_skylight::SkylightApp& app) {
+    app.sea_box_mesh_ = app.RegisterMesh(jpov::MeshData::MakeBox(
+        /*front_half_width=*/jpov_skylight::kSeaBoxHalfXZ,
+        /*up_half_width=*/jpov_skylight::kSeaBoxHalfY,
+        /*left_half_width=*/jpov_skylight::kSeaBoxHalfXZ));
+    app.sea_box_mat_   = jpov_skylight::SeaBoxMaterial();
+    app.sea_floor_mat_ = jpov_skylight::SeaFloorMaterial();
+}
+
+// 水面场景：桌子摆在 box 顶面（用资产包围盒 min.y 把**底面**对齐到顶面，
+// 不假设资产原点在桌面底部 —— Tripo/家具导出两种都见过）。
+void InstallWaterTable(jpov_skylight::SkylightApp& app) {
+    jpov::GltfObject table = app.LoadGltf(kTableModelPath);
+    CHECK(!table.empty()) << "LoadGltf failed: " << kTableModelPath;
+    float scale = 1.0f;
+    float min_y = 0.0f;
+    if (table.bounds_valid) {
+        const float h = table.bounds_max[1] - table.bounds_min[1];
+        if (h > 1.0e-6f) {
+            scale = jpov_skylight::kSeaTableHeight / h;
+        }
+        min_y = table.bounds_min[1];
+    }
+    app.AddWaterModel(std::move(table),
+                      /*center*/ {0.0f, jpov_skylight::kSeaBoxTopY - scale * min_y, 0.0f},
+                      /*up*/ {0, 1, 0}, /*front*/ {0, 0, 1}, scale);
+}
+
+// 水面场景：一个人站在桌面上（脚 = box 顶 + 桌高）。复用 InstallPerson 装配好的
+// 同一份蒙皮 mesh / 骨架，只多一组摆放 —— 不多加载一次资产。
+void InstallWaterPerson(jpov_skylight::SkylightApp& app) {
+    CHECK_NE(app.person_mesh_, 0u) << "水面场景的站台人需要先 InstallPerson";
+    CHECK_NE(app.person_skeleton_id_, 0u) << "水面场景的站台人需要先 InstallPerson";
+    jpov::SkinnedInstanceState inst;
+    inst.transform.center = {0.0f,
+                             jpov_skylight::kSeaPersonFeetY
+                                 - app.person_scale_ * app.person_asset_min_y_,
+                             0.0f};
+    inst.transform.up    = {0.0f, 1.0f, 0.0f};
+    inst.transform.front = {0.0f, 0.0f, 1.0f};
+    inst.transform.scale = app.person_scale_;
+    inst.pose_a = 0;   // 唯一一帧 = identity = T-pose
+    inst.pose_b = 0;
+    inst.ratio  = 0.0f;
+    app.water_person_instances_.clear();
+    app.water_person_instances_.push_back(inst);
+}
+
+// headless 拍摄：水面打底场景（W1）—— 固定机位，逐档扫水位 / 水下机位 / 波浪底座。
+int RunCaptureWater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面查看（headless capture）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);        // ground_mesh_（当海底用）+ 基础材质
+    InstallPerson(app);       // 蓝人 mesh + 骨架（水面场景复用）
+    InstallWaterScene(app);   // 水下大 box
+    InstallWaterTable(app);   // 桌上的桌子
+    InstallWaterPerson(app);  // 桌上的人
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kWater);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    auto shoot = [&](const char* name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture: " << path;
+    };
+
+    // 固定天光：正午偏侧光（水面反射与水下散射都能看清）。
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+
+    // 机位：斜前方俯视（相机在水面之上，y ≈ 4.7 m）。
+    auto set_above_camera = [&]() {
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = 0.30;
+        app.view_.theta = 3.14159265358979323846 / 4.0;
+        app.view_.R     = 16.0;
+    };
+
+    // ── 1. 关水 / 开水（同一机位）：验证"水面确实在起作用"，也是零回归的对照 ──
+    set_above_camera();
+    app.SetShowWater(false);
+    shoot("water_off");
+    app.SetShowWater(true);
+    shoot("water_on");
+
+    // ── 2. 水位扫档：水线切在 box 不同高度 ⇒ 水下遮蔽强度随深度变化 ──
+    for (float lv : {1.0f, 2.0f, 3.0f, 4.5f}) {
+        app.water_.level = lv;
+        char name[64];
+        std::snprintf(name, sizeof(name), "water_level_%02d",
+                      static_cast<int>(lv * 10.0f + 0.5f));
+        shoot(name);
+    }
+    app.water_.level = jpov_skylight::kWaterLevelDefault;
+    shoot("water_level_default");
+
+    // ── 2b. 低太阳：验证水面反射**跟随天光**（探针每帧重渲，不是上一帧的残留）──
+    app.deg_.sun_elev_deg = 6.0f;
+    app.deg_.sun_azim_deg = 250.0f;   // 光源放到相机正前方偏低 ⇒ 天光/天色都变
+    shoot("water_sun_low");
+    app.deg_.sun_elev_deg = 45.0f;
+    app.deg_.sun_azim_deg = 40.0f;
+
+    // ── 3. 相机沉到水下（y ≈ 1.4 m < 水位 2.6 m）：整屏介质 + 抬头看水面 ──
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.09;                    // y = R·sinφ ≈ 1.44 m（水下）
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 16.0;
+    shoot("water_camera_under");
+    // 抬头看水面：机位仍在水下，但把注视点抬到水面之上（否则永远只看见海底）。
+    app.view_target_ = jpov::Vec3f(0.0f, 9.0f, 0.0f);
+    shoot("water_camera_under_lookup");
+    app.view_target_.reset();
+
+    // ── 4. 高浪（底座验证）：wave_amplitude 4 m，看轮廓/遮挡/反射是否随浪起伏 ──
+    // 高浪档：机位抬高拉远（y ≈ 7 m），水位 3 m + 振幅 2 m ⇒ 浪谷 1 m 仍在海床（y=0）之上，
+    // 且相机稳稳在水面之上（否则会变成"从水下看浪"，看不出轮廓）。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.32;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 22.0;
+    app.water_.level = 3.0f;
+    app.water_.wave_amplitude = 2.0f;
+    app.water_.wave_length = 26.0f;
+    app.water_.wave_time = 3.0f;
+    shoot("water_wave_high");
+    app.water_.wave_amplitude = 0.0f;
+
+    app.Finalize();
+    return 0;
 }
 
 // headless 拍摄：按硬编码的一组场景出图，写到 out_dir。
@@ -434,6 +587,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string smaa_out_dir;
     std::string env_out_dir;
+    std::string water_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -442,9 +596,14 @@ int main(int argc, char** argv) {
             smaa_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
             env_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
+            water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!water_out_dir.empty()) {
+        return RunCaptureWater(water_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
@@ -480,6 +639,9 @@ int main(int argc, char** argv) {
     InstallScene(app);
     InstallModels(app);
     InstallPerson(app);
+    InstallWaterScene(app);
+    InstallWaterTable(app);
+    InstallWaterPerson(app);
 
     // ── 初始视角：三方块斜前方，R=6 使三块（总宽 ~4.2m）完整入画。──
     app.view_ = jpov_viewer::DefaultView();

@@ -605,6 +605,7 @@ Renderer::~Renderer() {
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
+    water_renderer_.Finalize();
     smaa_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
@@ -1324,6 +1325,7 @@ void Renderer::Init(
     particle_renderer_.Init(&shader_mgr_);
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
+    water_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
@@ -1421,7 +1423,7 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 一个物体都没有”的场景（如天光查看器的纯天空截图）会整块跳过 3D 渲染，
     // 只剩下清屏色，天空永远画不出来。
     bool has_3d = cmds.sky.has_value() || !cmds.particles.empty() ||
-                  !cmds.volume_fires.empty();
+                  !cmds.volume_fires.empty() || cmds.water.has_value();
     for (const auto& [type, idx] : cmds.order) {
         (void)idx;
         if (type == DrawCommandType::kTriangle3D ||
@@ -1443,6 +1445,10 @@ void Renderer::Render(const RenderCommandList& cmds,
     // 放在里面会让“设了 env 却没设 sky 且没有 3D 命令”的帧静默通过。
     CHECK(!cmds.env_specular.has_value() || cmds.sky.has_value())
         << "env_specular 需要 cmds.sky（环境镜面的光源就是天光）";
+    // 水面的反射源同样是天光 cubemap：没有 sky 就无反射可采。宁可 crash，也不静默
+    // 退化成"一片死黑的镜子"。
+    CHECK(!cmds.water.has_value() || cmds.sky.has_value())
+        << "water 需要 cmds.sky（水面反射源 = 天光 cubemap）";
 
     if (has_3d) {
         // ---- 保存并设置 3D 所需 GL 状态 ----
@@ -1475,6 +1481,8 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
+        CHECK(!cmds.water.has_value() || use_hdr)
+            << "water 需要 tone_mapping=true（水面在线性 HDR 域合成，且依赖 MRT 场景深度）";
         CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
             << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
                "tone map 之前）；否则会静默失效";
@@ -1545,6 +1553,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             //
             // ⚠️ 区间校验要放在 `> 0` 门**之前**：放到门内的话 `CHECK_GE(...,0)` 恒真，
             //    形同虚设（负值被外层的 `>0` 默默滤掉，用户永远收不到报错）。
+            bool env_cube_built = false;
             if (cmds.env_specular.has_value()) {
                 CHECK_GE(cmds.env_specular->sky_scale, 0.0f)
                     << "EnvSpecular::sky_scale 必须 >= 0";
@@ -1554,7 +1563,18 @@ void Renderer::Render(const RenderCommandList& cmds,
                     EnsureSkyEnvCube(kSkyEnvCubeSize);
                     SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
                                                 sky_env_tex_, sky_env_fbo_, shader_mgr_);
+                    env_cube_built = true;
                 }
+            }
+
+            // 水面的反射源就是同一张天空 cubemap —— 即使没开 env_specular 也要建
+            //（水自己消费探针，与材质侧的 IBL 镜面是两条独立的消费路径）。
+            // ⚠️ **每帧都要重渲**（太阳/浊度会动）：判"贴图存在与否"会把上一帧的探针
+            //    当成这一帧的，水面反射会跟着太阳一起卡住。故用本帧是否已建过的标志。
+            if (cmds.water.has_value() && !env_cube_built) {
+                EnsureSkyEnvCube(kSkyEnvCubeSize);
+                SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
+                                            sky_env_tex_, sky_env_fbo_, shader_mgr_);
             }
 
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
@@ -1717,6 +1737,31 @@ void Renderer::Render(const RenderCommandList& cmds,
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
 
+        // ---- 第 1.5 步：全局水面（不透明 3D 之后、三个 WBO pass 之前）----
+        //
+        // 位置是硬的：
+        //   · 不能再早 —— 要吸收"水面之下的内容"，那些内容必须已经画完；
+        //   · 不能再晚 —— 粒子/体积火/条带都靠 MRT#1 做手动作深度测试，水面必须先把自己
+        //     的深度写进去，它们才知道被水挡住（代价：水下那些效果会被剔掉，见 water_types.h）。
+        //
+        // 水面内部会先 blit 一份 color + MRT 深度到自己的抓帧副本（采样反馈环），
+        // 再对副本采样做逐通道吸收 —— 那一份副本正是将来加折射要复用的基础设施。
+        if (cmds.water.has_value()) {
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            water_renderer_.DrawSurface(
+                *cmds.water, cam, fbo_3d_w, fbo_3d_h,
+                fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
+                sky_env_tex_,
+                static_cast<float>(std::log2(static_cast<double>(kSkyEnvCubeSize))),
+                mvp_);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+        }
+
         // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
         glDisable(GL_DEPTH_TEST);
@@ -1824,6 +1869,19 @@ void Renderer::Render(const RenderCommandList& cmds,
                 strip_renderer_.Composite(fbo_3d_w, fbo_3d_h);
                 const GLenum mrt_bufs_s[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_s);
+            }
+
+            // ── 水下整屏介质（相机沉到水下）—— 所有 3D 内容之后、雾之前 ──
+            //    整条视线都在水里 ⇒ 对已成画面做一次逐通道吸收 + 散射。
+            //    放在这里而不是水面 pass 里面：水下时**粒子/火/条带也在水里**，它们也要被吸收；
+            //    水面自己的颜色同样要被吸收（从水下看水面 = 隔着水看）。
+            if (cmds.water.has_value() &&
+                WaterRenderer::IsCameraUnderwater(*cmds.water, cam)) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                water_renderer_.DrawUnderwaterMedium(
+                    *cmds.water, cam, fbo_3d_w, fbo_3d_h,
+                    fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_, mvp_);
             }
 
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：

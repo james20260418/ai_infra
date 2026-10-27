@@ -1,0 +1,105 @@
+// JPOV WaterRenderer —— 全局水面（水/海）
+//
+// 两个 pass，都与三大 renderer / 粒子 / 体积火 / 条带**平级**（独立子渲染器）：
+//
+//   ① DrawSurface  —— 水面网格本身（极坐标 LOD 网格，相机为中心）
+//        · 反射：天光 cubemap 探针（第一版唯一反射源）
+//        · 透射：抓帧副本 + 逐通道 Beer-Lambert 吸收/散射（这就是"水下遮蔽感"）
+//        · 写 **MRT 双附件**（颜色 + 场景深度）+ 写硬件深度
+//          ⇒ 后面的粒子/火/条带按场景深度做手动作深度测试时，才知道被水面挡住；
+//          ⇒ 雾按 MRT 深度作用，远景水面才会融进地平线。
+//
+//   ② DrawUnderwaterMedium —— 相机沉到水下时的**整屏介质**
+//        · 整条视线都在水里 ⇒ 对已成画面做一次逐通道吸收 + 散射
+//        · 位置：所有 3D 内容之后、雾之前（见 Renderer::Render）
+//
+// ⚠️ 采样反馈环：两个 pass 都要读"已经有了的画面"，但写的目标正是同一个 HDR FBO
+//   ⇒ 必须先 `Capture()` 把 color + MRT 深度 blit 到自己的副本，再对副本采样。
+//   （这也是后面加折射时唯一还要复用的基础设施：折射采样 uv 会偏移，天然需要副本。）
+//
+// 形态选择（Danis 2026-10-27 问的"三个光栅化方案"）：
+//   ① 全屏射线求交：零几何、零 LOD，但**只有法线没有轮廓** ⇒ 做不出高浪；
+//   ② 均匀大网格：能位移，但要铺到远平面就得海量顶点（近处还不够密）；
+//   ③ **极坐标 / 相机为中心的 LOD 环形网格（本文件采用）**：近密远疏、一圈顶点覆盖到
+//      远平面、顶点数固定 ⇒ **能撑起高高的海浪**（真实轮廓 + 真实深度）。
+//   本版 wave_amplitude 默认 0（严格平水面），但位移/法线链路已经接好。
+
+#ifndef JPOV_SRC_WATER_WATER_RENDERER_H_
+#define JPOV_SRC_WATER_WATER_RENDERER_H_
+
+#include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/render_command.h"   // WaterSurface
+#include "tools/jpov/src/shader_manager.h"
+
+namespace jpov {
+
+class WaterRenderer {
+public:
+    WaterRenderer() = default;
+    ~WaterRenderer() = default;   // 不在这里释放 GL：必须显式 Finalize（见 SOUL 对称生命周期）
+
+    WaterRenderer(const WaterRenderer&) = delete;
+    WaterRenderer& operator=(const WaterRenderer&) = delete;
+
+    // 初始化（编译 program + 建网格 + 建抓帧 FBO）。必须在 GL context 存活时调用。
+    void Init(ShaderManager* shader_mgr);
+
+    // 释放全部 GL 资源。可重复调用。
+    void Finalize();
+
+    // 相机是否在水面之下（决定水面 shader 走"从下看"分支、以及要不要跑整屏介质）。
+    static bool IsCameraUnderwater(const WaterSurface& water, const Camera& cam);
+
+    // ---- ① 水面 pass ----
+    // 前置：调用方已把 HDR FBO 画好（不透明 3D 全部完成）；fbo_hdr 是目标 FBO，
+    //       color_tex / scene_depth_tex 是它的附件 0 / 1（本函数内部会 blit 成副本）。
+    // 后置：GL 状态恢复到调用前（enable / depth / viewport），FBO 绑定**不保证**。
+    // view_proj：相机 Proj*View（列主序 16 float，与主 3D pass 同一份 —— 水面必须和
+    //            场景用同一套投影，否则深度/命中判断会错位）。
+    void DrawSurface(const WaterSurface& water, const Camera& cam,
+                     int fbo_w, int fbo_h,
+                     unsigned int fbo_hdr,
+                     unsigned int color_tex, unsigned int scene_depth_tex,
+                     unsigned int env_cube, float env_max_lod,
+                     const float view_proj[16]);
+
+    // ---- ② 整屏介质 pass（仅相机在水下时调用）----
+    // 前置：所有 3D 内容（含水下看到的水面本身）已画完；fbo_hdr 是目标。
+    // 后置：同 DrawSurface。
+    void DrawUnderwaterMedium(const WaterSurface& water, const Camera& cam,
+                              int fbo_w, int fbo_h,
+                              unsigned int fbo_hdr,
+                              unsigned int color_tex, unsigned int scene_depth_tex,
+                              const float view_proj[16]);
+
+private:
+    // 极坐标 LOD 网格（一次性生成；顶点是**相机为中心的局部 XZ**，VS 里加相机位置）。
+    void EnsureMesh();
+    // 抓帧副本 FBO（颜色 RGBA16F + 场景深度 R32F），尺寸变化时重建。
+    void EnsureCapture(int w, int h);
+    void DestroyCapture();
+    // 把 fbo_hdr 的附件 0 / 1 blit 到抓帧副本。
+    void Capture(int w, int h, unsigned int fbo_hdr);
+
+    unsigned int prog_surface_ = 0;   // ShaderManager 缓存的 program id（0 = 未用）
+    unsigned int prog_medium_ = 0;
+
+    unsigned int vao_ = 0;            // 水面网格
+    unsigned int vbo_ = 0;
+    unsigned int ebo_ = 0;
+    int index_count_ = 0;
+
+    unsigned int fs_vao_ = 0;         // 全屏三角形用的空 VAO（core profile 必需）
+
+    unsigned int cap_fbo_ = 0;        // 抓帧副本
+    unsigned int cap_color_tex_ = 0;
+    unsigned int cap_depth_tex_ = 0;
+    int cap_w_ = 0;
+    int cap_h_ = 0;
+
+    ShaderManager* shader_mgr_ = nullptr;
+};
+
+}  // namespace jpov
+
+#endif  // JPOV_SRC_WATER_WATER_RENDERER_H_
