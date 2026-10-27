@@ -1427,11 +1427,7 @@ void Renderer::CompileShaders() {
     SolidProg();
     TextProg();
     ImageProg();
-    // 注意：**不预编译 PlateProg()**。init 期一次性编译所有 shader 会让「某个 pass
-    // 的着色器在本机 Mesa 上编不过」直接 FATAL 掉**每一个** app —— 一次新特性的
-    // 着色器问题就会让全仓库的 GPU 测试集体挂掉，且报错指向 Init 而非那个 pass。
-    // 这类 program 一律走懒编译（首次用到时编，ShaderManager 缓存），
-    // 失败只影响真正用它的那条路径。
+    PlateProg();
     Solid3DProg();
     Text3DProg();
     DrawObject3DProg();

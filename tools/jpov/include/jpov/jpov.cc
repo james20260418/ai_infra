@@ -16,14 +16,11 @@
 #include "jpov.h"
 
 #include <algorithm>
-#include <cstdio>
-#include <string>
 #include <cstdlib>
 #include <tuple>
 #include <glog/logging.h>
 
 #ifndef _WIN32
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -94,70 +91,21 @@ void JPOV::Init() {
             }
             started_xvfb_ = false;
         } else {
-            LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb";
-            // 这是 CI（只有 llvmpipe）里的标准路径：**每个进程自己起一个 Xvfb**。
-            //
-            // 为什么不再固定 :99：多个 GL 测试并行时会抢同一个 display —— 抢输的
-            // Xvfb 打一行 "Fatal server error" 就退出，测试只能靠「连上已经存在的
-            // 那一个」侥幸通过（日志噪音 + 偶发失败）。
-            //
-            // 就绪判定用「socket 文件出现 + 子进程还活着」，**不用 `-displayfd`**：
-            // 那个方案要求父进程一直握着管道读端，一旦关闭，Xvfb 后续写 display 号
-            // 会失败并**自行退出**（实测报 "Cannot write display number to fd N"
-            // 然后 glfwInit 失败）。
-            std::string display;
-            for (int attempt = 0; attempt < 8 && display.empty(); ++attempt) {
-                const int want = 100 + (static_cast<int>(getpid()) % 100) + attempt;
-                const std::string candidate = ":" + std::to_string(want);
-                const std::string sock = "/tmp/.X11-unix/X" + std::to_string(want);
-
-                const int pid = fork();
-                if (pid == 0) {
-                    execlp("Xvfb", "Xvfb", candidate.c_str(), "-ac", "-screen",
-                           "0", "1280x720x24", "-noreset", "+extension", "GLX",
-                           "+iglx", nullptr);
-                    _exit(1);
-                }
-                CHECK_GT(pid, 0) << "fork() failed";
-
-                // 等 socket 出现（就绪信号）；最多 3 秒。
-                bool ready = false;
-                for (int i = 0; i < 300 && !ready; ++i) {
-                    struct stat st;
-                    if (stat(sock.c_str(), &st) == 0 && S_ISSOCK(st.st_mode)) {
-                        ready = true;
-                        break;
-                    }
-                    usleep(10 * 1000);
-                }
-                // socket 可能是上一次的残留 ⇒ 还要确认子进程没退出。
-                int status = 0;
-                const pid_t reaped = waitpid(pid, &status, WNOHANG);
-                if (!ready || reaped == pid) {
-                    if (reaped != pid) {
-                        kill(pid, SIGTERM);
-                        waitpid(pid, &status, 0);
-                    }
-                    LOG(WARNING) << "Xvfb " << candidate
-                                 << " 未就绪（可能被占用或未安装），换下一个";
-                    continue;
-                }
-                xvfb_pid_ = pid;
-                display = candidate;
+            LOG(WARNING) << "glfwInit() failed — attempting to start Xvfb on :99";
+            int pid = fork();
+            if (pid == 0) {
+                // 子进程：启动 Xvfb
+                execlp("Xvfb", "Xvfb", ":99", "-ac", "-screen", "0", "1280x720x24",
+                       "-noreset", "+extension", "GLX", "+iglx", nullptr);
+                _exit(1);
             }
-
-            if (display.empty()) {
-                LOG(FATAL) << "Xvfb 连试 8 个 display 都无法启动 —— "
-                              "检查系统是否装了 Xvfb（CI 也走这条路）";
-            }
-            setenv("DISPLAY", display.c_str(), 1);
-            LOG(INFO) << "JPOV: Xvfb 已就绪，DISPLAY=" << display;
+            CHECK_GT(pid, 0) << "fork() failed";
+            xvfb_pid_ = pid;
+            // 设置 DISPLAY 环境变量，让 glfwInit 连到这个 display
+            setenv("DISPLAY", ":99", 1);
+            sleep(1);
             if (!glfwInit()) {
-                sleep(1);
-                if (!glfwInit()) {
-                    LOG(FATAL) << "glfwInit() still failed after Xvfb launch (DISPLAY="
-                               << display << ")";
-                }
+                LOG(FATAL) << "glfwInit() still failed after Xvfb launch";
             }
             started_xvfb_ = true;
         }
