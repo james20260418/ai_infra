@@ -63,10 +63,12 @@ CliArgs ParseCli(int argc, char** argv) {
       }
     } else if (arg == "--cam_phi" && has_val) {
       a.phi_deg = std::atof(argv[++i]);
+      a.phi_pinned = true;
     } else if (arg == "--cam_theta" && has_val) {
       a.theta_deg = std::atof(argv[++i]);
     } else if (arg == "--cam_r" && has_val) {
       a.radius = std::atof(argv[++i]);
+      a.radius_pinned = true;
       CHECK_GT(a.radius, 0.0) << "--cam_r 必须 > 0";
     } else if (arg == "--leaf" && has_val) {
       a.leaf_path = argv[++i];
@@ -137,6 +139,7 @@ CliArgs ParseCli(int argc, char** argv) {
       a.hide_bark = true;
     } else if (arg == "--cam-target-y" && has_val) {
       a.cam_target_y = static_cast<float>(std::atof(argv[++i]));
+      a.target_y_pinned = true;
     } else if (arg == "--ground-y" && has_val) {
       a.ground_y = static_cast<float>(std::atof(argv[++i]));
     } else if (arg == "--max-level" && has_val) {

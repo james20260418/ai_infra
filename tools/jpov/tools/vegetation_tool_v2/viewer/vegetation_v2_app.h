@@ -26,6 +26,12 @@ struct CliArgs {
   double phi_deg = 12.0;
   double theta_deg = 35.0;
   double radius = 0.0;   // 0 = 自动
+  // 显式钉住相机的标志（只有命令行真的给了才置位）：森林模式会**自动**改成
+  // 「看全一片林子」的构图，但那必须让位给出图/对比时的显式 --cam_phi / --cam_r /
+  // --cam-target-y（否则同一组参数出图不可复现）。
+  bool phi_pinned = false;
+  bool radius_pinned = false;
+  bool target_y_pinned = false;
   int max_level = 99;
   float ground_y = 0.0f;
   float cam_target_y = 0.0f;   // 相机注视点高度（看树冠/叶卡细节用）

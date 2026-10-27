@@ -249,6 +249,12 @@ class VegetationV2App : public JPOV {
   bool forest_on_ = false;
   float forest_spacing_ = 0.0f;    // 树间距（米）；0 = 按 glb 水平尺寸自动
   float forest_saved_radius_ = 0.0f;  // 开森林前的单株取景半径（关掉时还原）
+  float forest_saved_target_y_ = 0.0f;  // 同上，注视点高度
+  double forest_saved_phi_ = 0.0;       // 同上，相机仰角
+  // 三个「命令行是否显式钉住相机」的开关（森林自动取景只在没钉时生效）。
+  bool pin_phi_ = false;
+  bool pin_radius_ = false;
+  bool pin_target_y_ = false;
   float wind_phase_span_ = 2.0f;   // 逐实例相位随机的跨度（秒）
   float wind_amp_scale_ = 1.0f;    // 逐实例摆幅倍数（统一值，滑条控）
   float wind_freq_scale_ = 1.0f;   // 逐实例频率倍数（统一值，滑条控）
@@ -557,6 +563,9 @@ class VegetationV2App : public JPOV {
     }
     show_panel_ = !args.capture || args.show_panel;   // headless 默认不画面板
     cam_target_y_ = args.cam_target_y;
+    pin_phi_ = args.phi_pinned;
+    pin_radius_ = args.radius_pinned;
+    pin_target_y_ = args.target_y_pinned;
     // 没有字体图集时画文字会 CHECK 崩（font_renderer 只跳过 2D，3D 标签仍会查 alias）。
     // 统一在这里关掉：headless 出图 / CI sandbox 都不需要文字。
     // **面板也是文字**（标题/滑条标签）⇒ 没字体时必须连面板一起关，否则
@@ -928,23 +937,44 @@ class VegetationV2App : public JPOV {
     return instances;
   }
 
-  // 森林整体的包围盒（用于开关森林时重新取景）。栅格对称 ⇒ 用 ±2 格外扩即可。
+  // 森林取景半径（开关森林时改相机用）。
+  //
+  // ⚠️ 不能直接用 `ViewConfig::FitRadius`（垂直 60° + 包围盒**对角距**）：
+  //   5×5 是"横着铺开"的方阵，实测 oak（10 m 宽、8.5 m 间距）会被算成 R≈73 ——
+  //   整片林子只剩屏幕中间一小块，等于什么都没看见。两个原因叠加：
+  //   ① 对角距把"水平方向的广"当成"垂直方向的高"来要视场；
+  //   ② 16:9 的水平视场比垂直大得多（60° → 91.5°），横向其实更宽松。
+  //   所以这里按两个方向分别算、取大者：横向用半对角 + 水平视场，纵向用树高 + 垂直视场。
   double ForestFitRadius() const {
     const float spacing = ForestSpacing();
-    const float cx = glb_.bounds_valid ? 0.5f * (glb_.bounds_min[0] + glb_.bounds_max[0]) : 0.0f;
-    const float cz = glb_.bounds_valid ? 0.5f * (glb_.bounds_min[2] + glb_.bounds_max[2]) : 0.0f;
     const float hx = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[0] - glb_.bounds_min[0]) : 0.5f;
     const float hz = glb_.bounds_valid ? 0.5f * (glb_.bounds_max[2] - glb_.bounds_min[2]) : 0.5f;
-    const float ymin = glb_.bounds_valid ? glb_.bounds_min[1] : 0.0f;
     const float ymax = glb_.bounds_valid ? glb_.bounds_max[1] : scene_height_;
-    const float ext = 2.0f * spacing;
-    const float bmin[3] = {cx - ext - hx, ymin, cz - ext - hz};
-    const float bmax[3] = {cx + ext + hx, ymax, cz + ext + hz};
-    return jpov_viewer::ViewConfig::FitRadius(bmin, bmax, 60.0);
+    const float ext = 2.0f * spacing;   // 栅格对称：中心到最外一棵的距离
+    const double half_x = static_cast<double>(ext + hx);
+    const double half_z = static_cast<double>(ext + hz);
+    constexpr double kVfovDeg = 60.0;   // 与相机 fov 一致
+    const double tan_v = std::tan(0.5 * kVfovDeg * 3.14159265358979323846 / 180.0);
+    const double tan_h = tan_v * (static_cast<double>(kViewerWidth) / kViewerHeight);
+    const double r_h = std::sqrt(half_x * half_x + half_z * half_z) / tan_h;
+    // 纵向：相机注视 y=0，树顶在 ymax（地面 quad 的 y 也在同一平面），所以要装下 ymax。
+    const double r_v = (ymax > 0.0f ? static_cast<double>(ymax) : 1.0) / tan_v;
+    // 0.8 的系数是实测标定的：公式给 30 m，实测 oak 5×5 @phi22 在 24 m 构图最好
+    // （再远就成"树墙"）。别调大 —— 大树冠资产另说，但那时 r_h 本身也会变大。
+    return std::clamp(0.8 * std::max(r_h, r_v), jpov_viewer::ViewConfig::kRMin,
+                      jpov_viewer::ViewConfig::kRMax);
   }
 
-  // 打开/关闭森林：顺手把相机拉到「能看全一片林子」的距离（关掉时还原单株距离）。
-  //   不这么做的话，用户勾上 checkbox 只会看到正中那一株的特写，会以为功能没生效。
+  // 打开/关闭森林：把相机切到「看全一片林子」的构图预设（关掉时还原单株的那套）。
+  //
+  // 预设为什么是这三样（实测 oak 5×5 调出来的）：
+  //   · R：按方阵半对角 + 水平视场算（见 ForestFitRadius）。只改 R 不改别的是不够的：
+  //     默认注视点在地面 y=0，整片林子会挤成"一条树墙 + 大半屏天空"。
+  //   · 注视点抬到 45% 树高：树垂直居中，树干和树冠都在画面里。
+  //   · 仰角 22°：默认 12° 太平，树冠互相糊成一片，数不出 25 棵；30° 又太俯，
+  //     画面上半的树把下半遮住。22° 能同时看到"成排的阵列"和每棵树各自的弯法。
+  //   ⚠️ `--cam_phi` / `--cam_r` / `--cam-target-y` 只要显式给了，对应项就**一律不动**
+  //      （出图/对比必须可复现：否则"同一组参数、只差森林开关"的两张图连取景都不一样）。
   void SetForest(bool on) {
     if (forest_on_ == on) {
       return;
@@ -953,19 +983,33 @@ class VegetationV2App : public JPOV {
     if (mode_ != Mode::kGlb || !glb_loaded_) {
       return;
     }
-    // `--cam_r` 显式钉住相机时**不许改 R**：出图/对比必须可复现
-    //   （否则「同一组参数，只在森林开关上不同」的两张图会连取景都不一样）。
-    if (args_radius_ > 0.0f) {
-      return;
-    }
     if (on) {
       forest_saved_radius_ = view_.R;
-      view_.R = ForestFitRadius();
-    } else if (forest_saved_radius_ > 0.0) {
-      view_.R = forest_saved_radius_;
+      forest_saved_target_y_ = cam_target_y_;
+      forest_saved_phi_ = view_.phi;
+      if (!pin_radius_) {
+        view_.R = ForestFitRadius();
+      }
+      if (!pin_target_y_) {
+        cam_target_y_ = 0.45f * scene_height_;
+      }
+      if (!pin_phi_) {
+        view_.phi = 22.0 * 3.14159265358979323846 / 180.0;
+      }
+    } else {
+      if (!pin_radius_ && forest_saved_radius_ > 0.0) {
+        view_.R = forest_saved_radius_;
+      }
+      if (!pin_target_y_) {
+        cam_target_y_ = forest_saved_target_y_;
+      }
+      if (!pin_phi_ && forest_saved_phi_ > 0.0) {
+        view_.phi = forest_saved_phi_;
+      }
     }
     LOG(INFO) << (on ? "森林模式：5×5（逐实例相位随机）" : "单株模式")
-              << "，相机 R = " << view_.R;
+              << "，相机 R = " << view_.R << " target_y = " << cam_target_y_
+              << " phi = " << (view_.phi * 180.0 / 3.14159265358979323846) << "°";
   }
 
   void DrawLeafDebugForType(size_t type_index, jpov::RenderCommandList* cmds) {
