@@ -35,6 +35,22 @@ cc_test(
 )
 
 # ============================================================================
+# 像素校验 — 逐实例 base tint（静态实例路径：InstanceState::base_tint → loc12..14）
+# ============================================================================
+cc_test(
+    name = "jpov_instanced_tint_test",
+    srcs = ["jpov_instanced_tint_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# ============================================================================
 # 像素校验 — 顶点 base tint（object3d：loc6 vec4 → flat varying → FS 调色板乘法）
 # ============================================================================
 cc_test(

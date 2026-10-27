@@ -64,7 +64,7 @@ struct InstanceAttrSpec {
 //
 //   顶点属性（每顶点，来自 GPUMesh，见 mesh_manager.h）：
 //     0 aPos  1 aNormal  2 aTexCoord  3 aJoint  4 aWeight  5 aTangent
-//     6 aRelax（vec2: lag_ratio, max_lag）★ 本次从实例首槽腾出，改作顶点属性
+//     6 aFlex（vec4: lag_ratio, max_lag, base tint 索引, 预留）★ 从实例首槽腾出的顶点属性
 //   实例属性（divisor=1）：
 //     7..10  aInstModel      mat4（4×vec4，列主序）                  stride 16 float
 //     11     aInstPoseIds    vec2：pose.a / pose.b（平坦 texel 起点）         stride 2 float
@@ -88,9 +88,9 @@ inline constexpr InstanceAttrSpec kInstanceModelAttrSpec{/*base_loc*/ 7,  /*slot
 inline constexpr InstanceAttrSpec kInstancePoseIdsAttrSpec{/*base_loc*/ 11, /*slot_count*/ 1,
                                                            /*slot_components*/ 2, /*stride*/ 2};
 // 杂项：uint8 视图（16 byte 严丝合缝），loc12。
-//   byte0 = ratio(pose) /255；byte1 = **保留**（原 ratio_lag；pose-lag 机制已移除）；
+//   byte0 = ratio(pose) /255；byte1 = base tint 开关（0=不做乘法，1=做）；
 //   byte2..9 = thick[0..7]，编码 0.01 + v/255 × 2.49 → [0.01,2.5]，步长 ~0.0097；
-//   byte10..12 = color0(RGB888)；byte13..15 = color1(RGB888)。
+//   byte10..12 = 逐实例 tint color0(RGB888)；byte13..15 = color1(RGB888)。
 //   位序/偏移的单一来源见 docs/jpov_instance_attr_lag_design.md §6.3。
 inline constexpr InstanceAttrSpec kInstanceMiscAttrSpec{/*base_loc*/ 12, /*slot_count*/ 1,
                                                         /*slot_components*/ 4, /*stride*/ 4,
@@ -121,16 +121,28 @@ inline constexpr InstanceAttrSpec kInstancePosLagAttrSpec{/*base_loc*/ 15, /*slo
 
 // --- loc12（aInstMisc）uint8 视图的 byte 偏移（单一来源）---
 inline constexpr int kMiscByteRatio = 0;  // ratio(pose) /255
-// byte1 保留（原 ratio_lag；pose-lag 机制已移除）—— 未用到具体偏移，故不设命名常量。
+inline constexpr int kMiscByteTintEnabled = 1;  // base tint 开关：0/1（原 ratio_lag 槽）
 inline constexpr int kMiscByteThickBase = 2;  // thick[0..7]   占 byte 2..9
-inline constexpr int kMiscByteColor0   = 10;  // color0 RGB888 占 byte 10..12
-inline constexpr int kMiscByteColor1   = 13;  // color1 RGB888 占 byte 13..15
+inline constexpr int kMiscByteColor0   = 10;  // 逐实例 color0 RGB888 占 byte 10..12
+inline constexpr int kMiscByteColor1   = 13;  // 逐实例 color1 RGB888 占 byte 13..15
 
 // thick 量化区间（[0.01, 2.5]，256 级，绝对步长 ~0.0097）。
 //   ⚠️ 1.0 不能精确表示（最近值 101/255 → 0.9960）；默认全 1.0 时由 host 开关
 //   uThicknessEnabled=0 **整段跳过** ⇒ 逐字节零回归，不靠“乘单位元”。
 inline constexpr float kThickMin = 0.01f;
 inline constexpr float kThickMax = 2.5f;
+
+// tint 颜色分量 float → uint8（[0,1] 外 clamp；RGB888 量化误差 ≤ 1/255）。
+//   与 shader 的 `float(byte)/255.0` 对应；蒙皮路径用它，静态实例路径直接传 float。
+inline uint8_t EncodeTintColor8(float c) {
+    const float t = (c < 0.0f) ? 0.0f : ((c > 1.0f) ? 1.0f : c);
+    return static_cast<uint8_t>(t * 255.0f + 0.5f);
+}
+
+// tint 颜色分量 uint8 → float（与 shader 解码逐位一致；主要供单测/调试）。
+inline float DecodeTintColor8(uint8_t v) {
+    return static_cast<float>(v) / 255.0f;
+}
 
 // thick float → uint8（越界 clamp；步长 ~0.0097）。
 inline uint8_t EncodeThickness(float mu) {

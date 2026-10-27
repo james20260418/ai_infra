@@ -108,8 +108,10 @@ struct PBRMaterial {
     //   着色：base_color_final = baseColor_texel.rgb × base_tint.color[id-1]
     //   ⚠️ 调色板只是「颜色查表」：**mesh 必须带 kBaseTint 的逐顶点 id 才会生效**；
     //      没有 id 的 mesh 即使设了 enabled/颜色也不会有任何变化（这是设计，不是 bug）。
-    //   适用路径：**无 per-instance 颜色通道**的 Object3D / GltfObject 绘制（本 MVP）。
-    //   蒙皮 / 实例路径暂未接入（见 tools/jpov/docs/jpov_base_tint_design.md）。
+    //   适用路径：**object3d**（DrawObject3D / DrawGltfObject）。
+    //   静态实例 / 蒙皮路径**不用这份**：它们读各自的逐实例 state
+    //   （`InstanceState::base_tint` / `SkinnedInstanceState::base_tint`），
+    //   这样同一批实例可以各用不同颜色。
     BaseTint base_tint;
 
     // metallic / roughness: scalar or texture

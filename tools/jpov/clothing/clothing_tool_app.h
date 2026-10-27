@@ -739,6 +739,9 @@ public:
                 // pos_lag = tracker(整体平动) 的滞后量，VS 按 _JPOV_RELAX 松弛度 mix → 松的部分拖尾。
                 jpov::SkinnedInstanceState cloth_inst = motion_inst;
                 cloth_inst.pos_lag = cloth_pos_lag;  // 平动滞后（pose lag 机制已移除）
+                // 逐实例 tint：蒙皮路径读的是实例 state 的调色板（材质上的那份不参与），
+                // 让「lag 检测」时裙子仍按 Tint1/2 上色。
+                cloth_inst.base_tint = tint_ui_;
                 for (const jpov::GltfPrimitive& prim : cloth_.primitives) {
                     cmds->DrawMeshWithSkeleton(prim.mesh_id, body_skel_id_,
                                                prim.material, {cloth_inst});

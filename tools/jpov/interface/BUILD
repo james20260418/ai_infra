@@ -134,6 +134,8 @@ cc_library(
     hdrs = ["skeleton_types.h"],
     visibility = ["//visibility:public"],
     deps = [
+        # BaseTint（逐实例调色板）定义在 pbr_material.h。
+        ":pbr_material",
         "//geom/common:quaternion",
         "//geom/common:vec",
         "//geom/math:mat4",
