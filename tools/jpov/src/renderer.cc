@@ -600,7 +600,6 @@ Renderer::~Renderer() {
     DestroyHighlightFBO();
     DestroyBloomChain();
     DestroySkyColorFBO();
-    DestroyWaterSceneCopy();
     DestroySkyEnvCube();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
@@ -718,49 +717,6 @@ void Renderer::DestroySkyColorFBO() {
     }
     sky_w_ = 0;
     sky_h_ = 0;
-}
-
-void Renderer::EnsureWaterSceneCopy(int w, int h) {
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    if (water_copy_fbo_ != 0 && water_copy_w_ == w && water_copy_h_ == h) {
-        return;
-    }
-    DestroyWaterSceneCopy();
-    // 格式必须与 fbo_hdr_ 的颜色附件一致（RGBA16F）才能 glBlitFramebuffer 直接拷。
-    glGenTextures(1, &water_copy_tex_);
-    glBindTexture(GL_TEXTURE_2D, water_copy_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    glGenFramebuffers(1, &water_copy_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, water_copy_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           water_copy_tex_, 0);
-    const GLenum bufs[1] = {GL_COLOR_ATTACHMENT0};
-    glDrawBuffers(1, bufs);
-    CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
-        << "EnsureWaterSceneCopy: FBO 不完整";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    water_copy_w_ = w;
-    water_copy_h_ = h;
-}
-
-void Renderer::DestroyWaterSceneCopy() {
-    if (water_copy_fbo_) {
-        glDeleteFramebuffers(1, &water_copy_fbo_);
-        water_copy_fbo_ = 0;
-    }
-    if (water_copy_tex_) {
-        glDeleteTextures(1, &water_copy_tex_);
-        water_copy_tex_ = 0;
-    }
-    water_copy_w_ = 0;
-    water_copy_h_ = 0;
 }
 
 void Renderer::EnsureSkyEnvCube(int size) {
@@ -1946,14 +1902,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             //    ⚠️ 实验期：开关/参数直连 Renderer（SetWaterSkin），不读 cmds。
             if (water_skin_.has_value()) {
                 CHECK(use_hdr) << "水皮需要 tone_mapping=true（HDR/MRT 场景深度）";
-                // 先把颜色附件 0 拷一份：水下折射要查"水面上方那个像素是什么颜色"，
-                // 而本 pass 正在写这张附件 —— 直接采就是反馈环（结果未定义）。
-                EnsureWaterSceneCopy(fbo_3d_w, fbo_3d_h);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_hdr_);
-                glReadBuffer(GL_COLOR_ATTACHMENT0);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, water_copy_fbo_);
-                glBlitFramebuffer(0, 0, fbo_3d_w, fbo_3d_h, 0, 0, fbo_3d_w, fbo_3d_h,
-                                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 glViewport(0, 0, fbo_3d_w, fbo_3d_h);
                 const GLenum ws_draw_buf[1] = {GL_COLOR_ATTACHMENT0};
@@ -1964,8 +1912,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 // 水下"折射采样 + n² 增益"全靠它；没有就传 0（FS 退化成纯 alpha 混合）。
                 const unsigned int sky_cube = (sky_env_tex_ != 0) ? sky_env_tex_ : 0u;
                 water_skin_renderer_.Draw(*water_skin_, cam, mvp_, hdr_scene_depth_tex,
-                                          sky_cube, water_copy_tex_, fbo_3d_w, fbo_3d_h,
-                                          shader_mgr_);
+                                          sky_cube, fbo_3d_w, fbo_3d_h, shader_mgr_);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ws[2] = {GL_COLOR_ATTACHMENT0,

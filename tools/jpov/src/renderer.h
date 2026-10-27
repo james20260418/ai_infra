@@ -230,11 +230,6 @@ private:
     // 「大气色天空」离屏 FBO（远景仰角雾的收敛色用；单独一趟天空绘制，不含日月盘/光晕）。
     void EnsureSkyColorFBO(int w, int h);
     void DestroySkyColorFBO();
-    // 水皮 pass 用的"抓帧拷贝"（RGB16F，颜色附件 0 的副本）。水下折射要查"水面上方
-    // 某像素是什么颜色"，而该 pass 正在写这张颜色附件 ⇒ 必须先拷一份再采样
-    // （否则就是采样↔写入的反馈环，结果未定义）。
-    void EnsureWaterSceneCopy(int w, int h);
-    void DestroyWaterSceneCopy();
 
     // ---- 环境镜面（IBL specular）的天空 cubemap ----
     // Renderer 每帧在 cmds.env_specular 有值时把天空渲成一张 size²的 cubemap
@@ -288,8 +283,6 @@ private:
     // 供远景仰角雾当收敛色。为何不用 MRT 附件：GL 规范里「某 shader 未写该颜色附件」
     // 其内容是未定义的，会被之后画的几何 shader 写成垃圾（实测 NaN）。
     unsigned int sky_fbo_ = 0, sky_tex_ = 0;
-    unsigned int water_copy_fbo_ = 0, water_copy_tex_ = 0;
-    int water_copy_w_ = 0, water_copy_h_ = 0;
     int sky_w_ = 0, sky_h_ = 0;
 
     // 环境镜面的天空 cubemap（RGBA16F + mip 链）+ 只挂一个颜色附件的逐面 FBO。

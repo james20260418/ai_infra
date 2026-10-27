@@ -68,15 +68,12 @@ public:
     //                       附件（否则形成采样↔写入的反馈环）。
     //   sky_env_cube      : 天空探针 cubemap（大气色、不含日月盘；下半球=地色）。
     //                       0 = 没有探针 ⇒ 水下分支退化成"背景透射 + 地色"（不做折射采样）。
-    //   scene_color_tex   : 本 pass 之前 HDR 颜色附件的**拷贝**（RGB16F）。
-    //                       水下折射对"水上几何"做屏幕空间查找用；0 = 只采天空探针。
     //   width / height    : 3D FBO 尺寸（把 gl_FragCoord 换成 [0,1] uv）。
     // Pre-condition: params.half_extent_m > 0；scene_depth_tex != 0。
     // 返回后 GL_BLEND / GL_DEPTH_TEST / GL_CULL_FACE 均为关（与 3D pass 结束后的状态一致）。
     void Draw(const WaterSkinParams& params, const Camera& cam, const float view_proj[16],
               unsigned int scene_depth_tex, unsigned int sky_env_cube,
-              unsigned int scene_color_tex, int width, int height,
-              ShaderManager& shader_mgr);
+              int width, int height, ShaderManager& shader_mgr);
 
 private:
     unsigned int vao_ = 0;
