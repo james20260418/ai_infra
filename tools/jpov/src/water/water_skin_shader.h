@@ -9,10 +9,13 @@
 // 也不需要自己的 FBO（与 horizon_fog / froxel 同一套"就地合成"的写法）。
 //
 // 两种观察方向（用 uCamPos.y 与 uLevelY 自己判，不靠第二个开关）：
-//   ── 相机在水上 ──
-//     α    = mix(body_alpha, 1, F)     // 正对视线看得穿，掠射处收敛成亮带
-//     color= mix(body_color, rim_color, F)
-//     F    = f0 + (1 − f0)·(1 − cosθ)^power        （Schlick，θ 与向上法线的夹角）
+//   ── 相机在水上：镜面天光 + 水下透射 + 太阳高光（三项默认开）──
+//     F = Schlick（f0 = ((n−1)/(n+1))²，与水下**同一个 n**）
+//     out = bg·(1−B)(1−F) + body·B·(1−F) + skyReflect·F + sunSpec
+//     用一次 alpha 混合表达：α = 1−(1−B)(1−F)，color = (body·B·(1−F) + sky·F + sun)/α
+//     · 镜面天光 = 天空探针按 reflect(−V, N) 采样（N 被波纹扰动 ⇒ 反光碎成亮片）
+//     · 水下透射 = 薄膜 + 背景本身（关掉 ⇒ α=1，水面变成不透明的本体色）
+//     · 太阳高光 = Blinn-Phong 单瓣 × F（近处暗、远处掠射亮 = 真实的"太阳路"）
 //   ── 相机在水下（抬头看水面）──
 //     界面反射率 R 仍是**精确未极化 Fresnel（水→空气）**，临界角 θc = asin(1/ior) ≈ 48.6°：
 //       θ ≥ θc ⇒ R = 1（全内反射）⇒ 整片是"地色"（水面变成一面暗镜）
@@ -84,11 +87,19 @@ uniform float uLevelY;           // 水面世界高度（米）—— 判相机�
 uniform vec3  uBodyColor;        // 本体色（线性 HDR）
 uniform float uBodyAlpha;        // 正对视线时的覆盖率 [0,1]
 uniform vec3  uRimColor;         // 掠射处的反射色（线性 HDR）
-uniform float uF0;               // 正入射反射率（水 ≈ 0.02）
-uniform float uPower;            // Schlick 指数（物理值 5）
 uniform vec3  uTirColor;         // 水下视角：临界角外的全内反射色（“地色”，建议 = SkyCommand::ground_color）
 uniform float uIor;              // 水的折射率（水→空气临界角 = asin(1/ior)）；=1 时界面消失
 uniform float uMinTransmission;  // 强制透射下限 [0,1]：R 被夹到 ≤ 1−它（实验用，非物理）
+// ── 水上视角的三项（默认全开）──
+uniform samplerCube uEnvCube;    // 天空探针（大气色；镜面天光用）
+uniform int   uHasEnvCube;       // 0 = 没有探针 ⇒ 镜面天光退回常量 rim 色
+uniform float uSkyScale;         // 天光反射量 [0,1]
+uniform int   uUseSkyRefl;       // 1 = 镜面天光
+uniform int   uUseTransmit;      // 1 = 水下透射（关掉 = 水面变成不透明的本体色）
+uniform int   uUseSun;           // 1 = 太阳高光
+uniform vec3  uSunDir;           // 指向太阳的世界方向（单位向量）
+uniform vec3  uSunColor;         // 太阳直射色（线性 HDR，已乘 intensity）
+uniform float uSunShininess;     // Blinn-Phong 幂次（越大越尖）
 // ── 波浪（法线扰动）──
 uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"调相位"就是挪它）
 uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
@@ -98,6 +109,13 @@ uniform float uWaveDirRad;       // 传播方向（世界 XZ 平面，弧度）
 // 固定管线 alpha 混合天然给出 out = tirColor·R + 背景·(1−R)，不需要抓帧、不需要探针。
 // ⭐ 这一点决定了"水上物体能不能透过水面看到"：透射的是**真实场景**（人、桌子、天空），
 //    不是"只含天空的探针" —— 后者在 n→1 时也看不到人（2026-10-27 Danis 抓到）。
+// 空气→水 的界面反射率（Schlick）：f0 由**同一个 n**推出来，所以 n 滑条同时管水上/水下。
+float FresnelAirToWater(float cos_i, float n) {
+    float f0 = (n - 1.0) / (n + 1.0);
+    f0 = f0 * f0;
+    return f0 + (1.0 - f0) * pow(1.0 - clamp(cos_i, 0.0, 1.0), 5.0);
+}
+
 float FresnelFromWater(float cos_i, float eta) {
     float sin2t = eta * eta * (1.0 - cos_i * cos_i);
     if (sin2t >= 1.0) {
@@ -198,10 +216,44 @@ void main() {
         color = uTirColor;
         alpha = clamp(R, 0.0, 1.0);
     } else {
-        // ── 水上俯视/平视 ──
-        float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_i, uPower);
-        color = mix(uBodyColor, uRimColor, F);
-        alpha = clamp(mix(uBodyAlpha, 1.0, F), 0.0, 1.0);
+        // ── 水上视角：镜面天光 + 水下透射 + 太阳高光 ──
+        //
+        // 三层 over 合成（背景 = 已经画好的水下场景）：
+        //   ① 薄膜 B（本体色）+ ② 界面反射 F（天光）+ ③ 太阳高光（加法）
+        // 展开：out = bg·(1−B)(1−F) + body·B·(1−F) + sky·F + sun
+        // 固定管线只给 out = bg·(1−α) + color·α，所以：
+        //   α = 1 − (1−B)(1−F)   （关掉"水下透射"时 α = 1：水面变成不透明本体色）
+        //   color = (body·B·(1−F) + sky·F + sun) / α
+        float F = FresnelAirToWater(cos_i, uIor);
+        float B = clamp(uBodyAlpha, 0.0, 1.0);
+
+        vec3 sky = vec3(0.0);
+        if (uUseSkyRefl == 1) {
+            if (uHasEnvCube == 1) {
+                // 镜面天光：反射方向采样天空探针（法线被波纹扰动 ⇒ 反光随涟漪碎开）。
+                sky = textureLod(uEnvCube, reflect(-V, N), 0.0).rgb * uSkyScale;
+            } else {
+                sky = uRimColor;      // 没有探针：退回常量色（旧行为）
+            }
+        }
+
+        vec3 sun = vec3(0.0);
+        if (uUseSun == 1 && uSunColor != vec3(0.0)) {
+            // Blinn-Phong 单瓣：H = normalize(V + L)。乘 F 是必须的 —— 太阳在水面上的
+            // 高光本身就是菲涅耳反射，所以近处暗、远处（掠射）那条"太阳路"才亮。
+            // 能量守恒的 Blinn-Phong 归一化：裸 pow(nh, n) 的峰值只有 1，用它算太阳
+            // （辐照度量级 ~3）会得到"几乎看不见的小暗点"——真实太阳是**辐亮度**极高、
+            // 角半径极小的光源，归一化因子 (n+8)/8π 补的就是这个峰值增益。
+            float shin = max(uSunShininess, 1.0);
+            vec3 H = normalize(V + uSunDir);
+            float nh = max(dot(N, H), 0.0);
+            sun = uSunColor * F * pow(nh, shin) * ((shin + 8.0) / 25.1327412);
+        }
+
+        bool transmit = (uUseTransmit == 1);
+        alpha = transmit ? clamp(1.0 - (1.0 - B) * (1.0 - F), 0.0, 1.0) : 1.0;
+        vec3 under = transmit ? uBodyColor * (B * (1.0 - F)) : uBodyColor;
+        color = (under + sky * F + sun) / max(alpha, 1.0e-4);
     }
     FragColor = vec4(color, alpha);
 }

@@ -18,6 +18,7 @@
 
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"   // Color
+#include "tools/jpov/interface/render_command.h" // DirectionalLight
 #include "tools/jpov/src/shader_manager.h"
 
 namespace jpov {
@@ -33,9 +34,6 @@ struct WaterSkinParams {
     // 本体色 + 正对视线时的覆盖率：α = 0.10 ⇒ 一眼看穿，只有一层很淡的色偏。
     Color body_color{0.62f, 0.80f, 0.86f, 1.0f};
     float body_alpha = 0.10f;
-    // 菲涅耳（Schlick）：f0 = 0.02 是水的正入射反射率；power = 5 是物理指数。
-    float fresnel_f0 = 0.02f;
-    float fresnel_power = 5.0f;
     // 掠射处收敛到的反射色（本版是常量，不采天空 cubemap）。
     Color rim_color{0.80f, 0.90f, 1.00f, 1.0f};
 
@@ -61,6 +59,13 @@ struct WaterSkinParams {
     // 主波长（米）与传播方向（世界 XZ 平面，度）。
     float wave_length_m = 0.5f;
     float wave_dir_deg = 30.0f;
+
+    // ── 水上视角的三项（默认全开；关掉任一项就是 A/B 用）──
+    bool use_sky_reflection = true;   // 镜面天光（天空探针按反射方向采样）
+    bool use_transmission = true;     // 水下透射（关 ⇒ 水面变成不透明的本体色）
+    bool use_sun_glint = true;        // 太阳高光（Blinn-Phong 单瓣 × F）
+    float sky_scale = 1.0f;           // 天光反射量 [0,1]
+    float sun_shininess = 1500.0f;    // 高光幂次（越大越尖）
 };
 
 class WaterSkinRenderer {
@@ -76,11 +81,14 @@ public:
     //   view_proj         : 相机 Proj*View（列主序 16 float）。
     //   scene_depth_tex   : MRT#1 场景深度（R32F 单采样）。必须**不**是当前 draw FBO 的
     //                       附件（否则形成采样↔写入的反馈环）。
+    //   sky_env_cube      : 天空探针 cubemap（镜面天光用）。0 = 没有探针 ⇒ 退回常量 rim 色。
+    //   sun               : 平行光（太阳/月亮）；nullopt = 不画太阳高光。
     //   width / height    : 3D FBO 尺寸（把 gl_FragCoord 换成 [0,1] uv）。
     // Pre-condition: params.half_extent_m > 0；scene_depth_tex != 0。
     // 返回后 GL_BLEND / GL_DEPTH_TEST / GL_CULL_FACE 均为关（与 3D pass 结束后的状态一致）。
     void Draw(const WaterSkinParams& params, const Camera& cam, const float view_proj[16],
-              unsigned int scene_depth_tex, int width, int height,
+              unsigned int scene_depth_tex, unsigned int sky_env_cube,
+              const DirectionalLight* sun, int width, int height,
               ShaderManager& shader_mgr);
 
 private:

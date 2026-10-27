@@ -288,6 +288,14 @@ int RunCaptureWater(const std::string& out_dir) {
         std::optional<float> wave_slope_deg;
         // 强制透射下限（0 = 物理）。n 用上面的 ior 字段（0 = 默认 1.333）。
         float min_transmission = 0.0f;
+        // 水上三项的 A/B（默认全开）：0 = 不覆盖，1 = 开，2 = 关。
+        // 用 int 而不是 bool 是为了让"没写"和"显式关"能区分。
+        int sky_refl = 0;
+        int transmit = 0;
+        int sun_glint = 0;
+        // 相机方位角（度）。默认 45°；太阳高光要"相机与太阳关于竖直面对称"
+        // （H = V+L 竖直 ⇒ N=up 才能对上），所以太阳在方位 40° 时相机要在 ~220°。
+        float theta_deg = 45.0f;
     };
     const Shot shots[] = {
         {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
@@ -321,6 +329,17 @@ int RunCaptureWater(const std::string& out_dir) {
         // 最小透射滑条：物理 n 下强制留 20% / 50% 透射 ⇒ 灰区漏出天空。
         {"props_under_t20", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.20f},
         {"props_under_t50", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.50f},
+        // 水上三项 A/B（同一机位 = 水上视角）：全开 / 分别关掉一项。
+        {"props_eye_3on", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt},
+        {"props_eye_nosky", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 2, 0, 0},
+        {"props_eye_notrans", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 2, 0},
+        {"props_eye_nosun", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2},
+        // 太阳高光的机位：相机在**太阳方位**上、俯视 45°（镜像几何 V≈L ⇒ 高光落在画面中心）。
+        // 顺带证明"高光不是恒亮的"：换机位它就该消失（那才是菲涅耳反射该有的行为）。
+        {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 220.0f},
+        {"props_eye_sunpath_off", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2, 220.0f},
+        // 关掉波纹的太阳高光：应当收成一个**很尖的亮点**（波浪在的时候是被打碎的亮片）。
+        {"props_eye_sunpath_nowave", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0, 220.0f},
         // 判"透射到底透的是什么"：n=1（界面消失）应当 ≈ 完全不画水面（= 原样场景）。
         {"props_under_wide_n100", -0.083, 12.0, true, true, false, 6.0f, 1.00f, 0.0f, std::nullopt},
         {"props_under_wide_nowater", -0.083, 12.0, true, false, false, 6.0f, 0.0f, 0.0f, std::nullopt},
@@ -337,9 +356,13 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_wave_phase_ = s.wave_phase;
         app.water_wave_slope_deg_ = s.wave_slope_deg.value_or(10.0f);
         app.water_min_transmission_ = s.min_transmission;
+        app.water_use_sky_refl_  = (s.sky_refl != 2);
+        app.water_use_transmit_  = (s.transmit != 2);
+        app.water_use_sun_glint_ = (s.sun_glint != 2);
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
-        app.view_.theta = 3.14159265358979323846 / 4.0;
+        app.view_.theta = static_cast<double>(s.theta_deg) *
+                          3.14159265358979323846 / 180.0;
         app.view_.R     = s.R;
         if (s.target_y.has_value()) {
             app.view_target_ = jpov::Vec3f(0.0f, *s.target_y, 0.0f);

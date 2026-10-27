@@ -30,6 +30,8 @@ namespace {
 // 本 pass 是独立 pass（不透明 3D + 粒子/雾/条带之后），与 strip pass 同样的划分：
 // 单元 0 = 场景深度。pass-local，不占 texture_units.h 的跨 pass 区间。
 constexpr int kSceneDepthUnit = 0;
+// 天空探针（镜面天光）。pass-local，与 scene depth 不冲突。
+constexpr int kSkyCubeUnit = 1;
 
 }  // namespace
 
@@ -68,6 +70,7 @@ void WaterSkinRenderer::Finalize() {
 
 void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                              const float view_proj[16], unsigned int scene_depth_tex,
+                             unsigned int sky_env_cube, const DirectionalLight* sun,
                              int width, int height, ShaderManager& shader_mgr) {
     CHECK_GT(params.half_extent_m, 0.0f) << "WaterSkinRenderer: half_extent_m 必须 > 0";
     CHECK_NE(scene_depth_tex, 0u) << "WaterSkinRenderer: 缺少场景深度纹理";
@@ -95,8 +98,6 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glUniform1f(shader_mgr.GetUniform(prog, "uBodyAlpha"), params.body_alpha);
     glUniform3f(shader_mgr.GetUniform(prog, "uRimColor"), params.rim_color.r,
                 params.rim_color.g, params.rim_color.b);
-    glUniform1f(shader_mgr.GetUniform(prog, "uF0"), params.fresnel_f0);
-    glUniform1f(shader_mgr.GetUniform(prog, "uPower"), params.fresnel_power);
     // 水下视角（Snell 窗 / 全内反射）：临界角外的
     // 全内反射看到的是水下环境，用地色代表。
     glUniform3f(shader_mgr.GetUniform(prog, "uTirColor"), params.tir_color.r,
@@ -104,6 +105,37 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glUniform1f(shader_mgr.GetUniform(prog, "uIor"), params.ior);
     glUniform1f(shader_mgr.GetUniform(prog, "uMinTransmission"),
                 std::max(0.0f, std::min(params.min_transmission, 1.0f)));
+
+    // ── 水上三项 ──
+    glUniform1i(shader_mgr.GetUniform(prog, "uUseSkyRefl"),
+                params.use_sky_reflection ? 1 : 0);
+    glUniform1i(shader_mgr.GetUniform(prog, "uUseTransmit"),
+                params.use_transmission ? 1 : 0);
+    glUniform1i(shader_mgr.GetUniform(prog, "uUseSun"),
+                (params.use_sun_glint && sun != nullptr) ? 1 : 0);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSkyScale"), params.sky_scale);
+    glUniform1f(shader_mgr.GetUniform(prog, "uSunShininess"), params.sun_shininess);
+    if (sun != nullptr) {
+        // DirectionalLight::direction 是**光传播方向**（从太阳射向场景）⇒ 指向太阳要取反。
+        const Vec3f to_sun = Vec3f{-sun->direction.x(), -sun->direction.y(),
+                                   -sun->direction.z()};
+        const float len = to_sun.Norm();
+        const Vec3f dir = (len > 1e-6f) ? Vec3f{to_sun.x() / len, to_sun.y() / len,
+                                                 to_sun.z() / len}
+                                        : Vec3f{0.0f, 1.0f, 0.0f};
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"), dir.x(), dir.y(), dir.z());
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"),
+                    sun->color.r * sun->intensity, sun->color.g * sun->intensity,
+                    sun->color.b * sun->intensity);
+    } else {
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"), 0.0f, 1.0f, 0.0f);
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"), 0.0f, 0.0f, 0.0f);
+    }
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_cube);
+    glUniform1i(shader_mgr.GetUniform(prog, "uEnvCube"), kSkyCubeUnit);
+    glUniform1i(shader_mgr.GetUniform(prog, "uHasEnvCube"), sky_env_cube != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0);
     constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
     // 波浪（只扰法线）：相位原样传，斜率/方向由度换弧度，波长夹到 >0。
     glUniform1f(shader_mgr.GetUniform(prog, "uWavePhase"), params.wave_phase);
@@ -135,6 +167,9 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 

@@ -288,6 +288,7 @@ cc_library(
         ":shader_manager",
         "//tools/jpov/interface:camera",
         "//tools/jpov/interface:pbr_material",
+        "//tools/jpov/interface:render_command",   # DirectionalLight（太阳高光）
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

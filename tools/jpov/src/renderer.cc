@@ -1908,7 +1908,10 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(1, ws_draw_buf);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
+                // 镜面天光需要天空探针（本帧渲了 env_specular 才有）；太阳高光用主平行光。
+                const unsigned int sky_cube = (sky_env_tex_ != 0) ? sky_env_tex_ : 0u;
                 water_skin_renderer_.Draw(*water_skin_, cam, mvp_, hdr_scene_depth_tex,
+                                          sky_cube, eff_sun ? &*eff_sun : nullptr,
                                           fbo_3d_w, fbo_3d_h, shader_mgr_);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);

@@ -116,6 +116,10 @@ public:
     float water_wave_dir_deg_ = 30.0f;     // 传播方向（度）
     // 强制透射下限 [0,1]（实验旋钮，非物理）：>0 时灰区（TIR）也会漏出天空。
     float water_min_transmission_ = 0.0f;
+    // 水上视角的三项（默认全开；关掉任一项就是 A/B）。
+    bool water_use_sky_refl_ = true;      // 镜面天光
+    bool water_use_transmit_ = true;      // 水下透射
+    bool water_use_sun_glint_ = true;     // 太阳高光
 
     // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
     // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
@@ -263,9 +267,11 @@ public:
             wp.half_extent_m = 0.5f * WaterQuadSideM();
             wp.body_color    = body;
             wp.body_alpha    = body.a;
-            wp.fresnel_f0    = fr.f0;
-            wp.fresnel_power = fr.power;
             wp.rim_color     = {fr.rim_color.x(), fr.rim_color.y(), fr.rim_color.z(), 1.0f};
+            wp.use_sky_reflection = water_use_sky_refl_;
+            wp.use_transmission   = water_use_transmit_;
+            wp.use_sun_glint      = water_use_sun_glint_;
+            wp.sky_scale          = 1.0f;
             // 水下视角：临界角外用地色补齐。必须取**天穹下半球的填色**（辐亮度量级，
             // 近黑的 0.05/0.06/0.08）—— 不能用 AmbientTricolor()[2]（那是环境光量级、
             // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
@@ -408,21 +414,25 @@ private:
             ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
                          water_row(1.0f));
             // 波浪只扰法线（几何仍是平面）：相位滑条就是"让水纹动起来"的那根。
+            // 水上视角三项（默认全开）：关掉任一项就能看出它贡献了什么。
+            ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(2.0f));
+            ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(3.0f));
+            ui_.Checkbox("太阳高光（Blinn-Phong×F）", &water_use_sun_glint_, water_row(4.0f));
             // 界面权重：n 从 1.333 往 1 拉 ⇒ 临界角推向 90°、R 整体下降 ⇒ 灰区逐渐变回透射。
-            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(2.0f),
+            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(5.0f),
                             1.0f, 1.6f, 3);
             // 实验旋钮：强制保留一部分透射（TIR 区也不再是"全反射"）。
             ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
-                            water_row(3.0f), 0.0f, 1.0f, 2);
-            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(4.0f),
+                            water_row(6.0f), 0.0f, 1.0f, 2);
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(7.0f),
                             0.0f, 6.2831853f, 2);
             ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
-                            water_row(5.0f), 0.0f, 20.0f, 1);
-            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(6.0f),
+                            water_row(8.0f), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(9.0f),
                             0.05f, 20.0f, 2);
-            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(7.0f),
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(10.0f),
                             0.0f, 360.0f, 0);
-            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(8.0f));
+            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(11.0f));
             return;
         }
 
