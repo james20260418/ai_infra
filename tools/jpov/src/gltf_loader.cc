@@ -145,9 +145,19 @@ bool ReadUint8Accessor(const tinygltf::Model& model, int accessor_index,
     const size_t count = acc.count;
     const size_t byte_stride =
         view.byteStride > 0 ? view.byteStride : 1;
-    const size_t begin = view.byteOffset + acc.byteOffset;
-    if (begin + (count > 0 ? (count - 1) * byte_stride + 1 : 0) > buf.data.size()) {
+    // 边界检查避开 size_t 溢出：先分两步定位起点，再用除法判断最后一个元素是否越界
+    //（(count-1)*byte_stride 在大 count/stride 下会溢出成小值，直接相加会放过越界读）。
+    if (view.byteOffset > buf.data.size() ||
+        acc.byteOffset > buf.data.size() - view.byteOffset) {
         return false;
+    }
+    const size_t begin = view.byteOffset + acc.byteOffset;
+    if (count > 0) {
+        const size_t avail = buf.data.size() - begin;
+        if (avail == 0 || byte_stride == 0 ||
+            count - 1 > (avail - 1) / byte_stride) {
+            return false;
+        }
     }
     const unsigned char* src = buf.data.data() + begin;
     out->resize(count);

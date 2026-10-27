@@ -193,6 +193,12 @@ public:
     // cloth_current_ 只是「当前几何快照」，供保存 glb（main 线程按值取走）。
     std::vector<jpov::GltfSaveMesh> cloth_current_;     // 当前态（显示 / 保存用）
 
+    // 被替换下来的旧 GPU mesh id（延迟到**下一帧开头**再 Release）。
+    // 为什么：面板按钮在 OneIteration 的**后半段**执行，而本帧的 DrawGltfObject 命令已经
+    // 记录了旧 mesh_id；立刻 Release 会让渲染阶段查到「未注册」而崩（或撞 id 复用）。
+    // 下一帧开始时上一帧已渲染完，才真正释放。
+    std::vector<uint32_t> stale_cloth_mesh_ids_;
+
     // 各步长 / 系数（供步进按钮使用；用户可在面板里用输入框改，提交时 clamp）。
     float trans_step_[3] = {kDefaultTransStep, kDefaultTransStep, kDefaultTransStep};
     float rot_step_[3]   = {kDefaultRotStep, kDefaultRotStep, kDefaultRotStep};
@@ -586,6 +592,9 @@ public:
                       const jpov::WindowInfo& winfo,
                       jpov::RenderCommandList* cmds) override {
         (void)frame_count;
+        // 上一帧替换下来的旧 GPU mesh 现在才释放（本帧的 Draw 命令还没构建，安全）。
+        ReleaseStaleClothMeshes();
+
         // 3D FBO 跟随窗口尺寸（见文件头坐标空间说明）：scene 按窗口分辨率渲染，
         // resize 时不拉伸。注意这与「2D 面板用的 winfo」是**同一个本帧窗口尺寸**，
         // 而不是某个固定常量。
@@ -1309,51 +1318,54 @@ private:
 
     // ==================== 顶点 base tint 覆盖（MVP：2 通道）====================
 
-    // 保证每个衣服 primitive 的 CPU/GPU mesh 都带 kBaseTint（没有就补全 0 并重注册）。
+    // 用新数据替换第 i 个 primitive 的 GPU mesh：先注册新的、把旧 id 记入延迟释放表。
+    // Pre-condition: i < cloth_.primitives.size()。
+    void ReplaceClothMesh(size_t i, const jpov::MeshData& m) {
+        CHECK_LT(i, cloth_.primitives.size());
+        const uint32_t old_id = cloth_.primitives[i].mesh_id;
+        cloth_.primitives[i].mesh_id = RegisterMesh(m);
+        stale_cloth_mesh_ids_.push_back(old_id);
+    }
+
+    // 释放上一帧替换下来的旧 mesh（在 OneIteration 开头调用；此时上一帧已渲染完）。
+    void ReleaseStaleClothMeshes() {
+        for (uint32_t id : stale_cloth_mesh_ids_) {
+            ReleaseMesh(id);
+        }
+        stale_cloth_mesh_ids_.clear();
+    }
+
+    // 保证**第 i 个**衣服 primitive 的 CPU/GPU mesh 带 kBaseTint（没有就补全 0 并重注册）。
     //
-    // 为什么不在载入时无条件加：没用到 tint 的资产不该多背一个顶点属性 / glb 字段。
+    // 为什么按 primitive 做：只有**选区真的落到**这个 primitive 上才需要加属性；给没涂到的
+    // primitive 也加会让保存的 glb 多出一份全 0 的 `_JPOV_TINT`（无意义的数据/带宽）。
     // 为什么必须重注册：MeshManager::UpdateMesh 要求 flags 与注册时一致（VBO 布局不能变）。
-    void EnsureClothTintAttribute() {
-        if (cloth_current_.empty()) {
+    // Pre-condition: i < cloth_current_.size() == cloth_.primitives.size()。
+    void EnsureClothTintAttributeForPrimitive(size_t i) {
+        CHECK_LT(i, cloth_current_.size());
+        CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
+        jpov::MeshData& m = cloth_current_[i].mesh;
+        if (jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
             return;
         }
-        CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
-        // 先与仿真状态对齐（仿真器只持有几何；这一步的 flags 仍是旧集合，UpdateMesh 合法）。
-        if (!sims_.empty()) {
-            SyncSimsToCloth();
-        }
-        size_t added_prims = 0;
-        size_t added_verts = 0;
-        for (size_t i = 0; i < cloth_current_.size(); ++i) {
-            jpov::MeshData& m = cloth_current_[i].mesh;
-            if (jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
-                continue;
-            }
-            m.base_tint.assign(m.positions.size(), 0);
-            m.flags = static_cast<jpov::MeshVertexFlags>(
-                static_cast<uint8_t>(m.flags) |
-                static_cast<uint8_t>(jpov::MeshVertexFlags::kBaseTint));
-            m.Validate();
-            // 换一份带 tint 属性的 GPU mesh（旧的无 tint 版本释放掉）。
-            ReleaseMesh(cloth_.primitives[i].mesh_id);
-            cloth_.primitives[i].mesh_id = RegisterMesh(m);
-            added_prims += 1;
-            added_verts += m.positions.size();
-        }
-        if (added_prims > 0) {
-            tint_msg_ = Format("已启用 tint 顶点属性：%zu 个 primitive / %zu 顶点（全部初始 id=0）",
-                               added_prims, added_verts);
-            LOG(INFO) << tint_msg_;
-        } else if (tint_msg_.empty()) {
-            tint_msg_ = "顶点已带 tint 属性（可直接涂抹）";
-        }
+        m.base_tint.assign(m.positions.size(), 0);
+        m.flags = static_cast<jpov::MeshVertexFlags>(
+            static_cast<uint8_t>(m.flags) |
+            static_cast<uint8_t>(jpov::MeshVertexFlags::kBaseTint));
+        m.Validate();
+        ReplaceClothMesh(i, m);
+        LOG(INFO) << "primitive " << i << "：已启用 tint 顶点属性（"
+                  << m.positions.size() << " 顶点，初始 id=0）";
     }
 
     // 把**当前 3D 画笔选区**的顶点一键刷成 tint id（0 = 清除）。
     //
     // 选区是画笔的生命周期产物（结束画笔即清空）⇒ 必须先在「3D 画笔」面板激活并涂点，
     // 再回来点这三个按钮。没有选区时只给提示，不做任何副作用。
-    // 进入前按需补 kBaseTint（第一次用时一次性重注册 GPU mesh），之后只 UpdateMesh。
+    //
+    // 数据变更只落在**选区非空的 primitive**：第一次给某个 primitive 刷 id>0 时按需补
+    // `kBaseTint`（一次性重注册 GPU mesh），之后只 UpdateMesh；**清除**不会给还没 tint
+    // 数据的 mesh 凭空加一份全 0 属性。
     void ApplyTintToSelection(uint8_t id) {
         CHECK_LE(static_cast<int>(id), jpov::kNumBaseTintColors);
         if (cloth_current_.empty()) {
@@ -1364,7 +1376,21 @@ private:
             tint_msg_ = "请先用顶部「3D 画笔」涂出选区，再点这里一键刷";
             return;
         }
-        EnsureClothTintAttribute();
+        // 清除（id=0）且当前根本没有任何 tint 数据 → 无操作，也不新增属性。
+        if (id == 0) {
+            bool any_tint = false;
+            for (const jpov::GltfSaveMesh& c : cloth_current_) {
+                if (jpov::MeshHasFlag(c.mesh.flags, jpov::MeshVertexFlags::kBaseTint)) {
+                    any_tint = true;
+                    break;
+                }
+            }
+            if (!any_tint) {
+                tint_msg_ = "当前没有 tint 数据（无需清除）";
+                return;
+            }
+        }
+
         size_t selected_total = 0;
         size_t changed_total = 0;
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
@@ -1376,10 +1402,15 @@ private:
                 continue;
             }
             selected_total += sel.size();
-            jpov::MeshData& m = cloth_current_[i].mesh;
-            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
-                continue;   // EnsureClothTintAttribute 之后不该发生
+            // 清除只处理**已经有 tint 属性**的 primitive；刷 id>0 时才按需补属性。
+            if (!jpov::MeshHasFlag(cloth_current_[i].mesh.flags,
+                                   jpov::MeshVertexFlags::kBaseTint)) {
+                if (id == 0) {
+                    continue;
+                }
+                EnsureClothTintAttributeForPrimitive(i);
             }
+            jpov::MeshData& m = cloth_current_[i].mesh;
             const size_t changed = AssignByteToVertices(sel, id, &m.base_tint);
             if (changed == 0) {
                 continue;
@@ -1393,7 +1424,7 @@ private:
     }
 
     // 用 2D 像素显示各顶点的 tint id（id 1/2 用对应调色板色；id 0 不画）。
-    // 供涂抹时核对「哪些点被标了」，与松弛度场同款显示方式。
+    // 供「一键刷选区」后核对哪些点被标了，与松弛度场同款显示方式。
     void DrawTintField(const jpov::WindowInfo& winfo,
                        jpov::RenderCommandList* cmds) {
         if (!show_tint_field_ || cloth_current_.empty()) {
@@ -1767,12 +1798,12 @@ private:
             max_body_dist_m = std::max(max_body_dist_m, s.max_body_distance_m);
         }
         sim_running_ = false;
-        // 衣服几何现在带上 JOINTS/WEIGHTS（kJoints）→ 换成**可蒙皮**的 GPU mesh：先释放原
-        // 静态 mesh，再用带骨几何重注册。静止外观不变；摆动测试时按骨架蒙皮绘制。
+        // 衣服几何现在带上 JOINTS/WEIGHTS（kJoints）→ 换成**可蒙皮**的 GPU mesh：
+        // 先注册带骨几何、把旧 id 记入延迟释放表（本帧已构建的 Draw 命令仍引用旧 id）。
+        // 静止外观不变；摆动测试时按骨架蒙皮绘制。
         // （骨架注册表无释放接口，故这里只换 mesh，不重建骨架。）
         for (size_t i = 0; i < cloth_.size(); ++i) {
-            ReleaseMesh(cloth_.primitives[i].mesh_id);
-            cloth_.primitives[i].mesh_id = RegisterMesh(cloth_current_[i].mesh);
+            ReplaceClothMesh(i, cloth_current_[i].mesh);
         }
         skin_msg_ = Format(
             "已蒙皮 %zu 顶点 / 种子 %zu（非种子 %zu, max %.1f mm）/ 焊接 %s %zu / 生长 %zu 轮",

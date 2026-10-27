@@ -44,8 +44,8 @@ extern const Color kColorTransparent;
 // 着色器按 **flat（provoking vertex）** 读索引 ⇒ 一个三角形整体归属一个色。
 //
 // 为什么是 2：MVP 只开放两个调色板通道（对应 2×RGB 滑条 + 2 个 flat varying）。
-// 顶点属性本身是完整 uint8（0..255 的值空间），扩通道数时只需扩本常量与 shader 的
-// uniform 数组，不需要改顶点布局。
+// 顶点属性本身是完整 uint8（0..255 的值空间）。扩通道数时本常量、`BaseTint::color[]`、
+// object3d FS 的 uniform/分支三处要一起改；**顶点布局不用动**（id 仍是 loc6.z 的一个 float）。
 inline constexpr int kNumBaseTintColors = 2;
 
 // base tint 调色板（**运行期参数，不是资产数据**）。
@@ -106,6 +106,8 @@ struct PBRMaterial {
 
     // 顶点 base tint 调色板（见上方 BaseTint 注释）。
     //   着色：base_color_final = baseColor_texel.rgb × base_tint.color[id-1]
+    //   ⚠️ 调色板只是「颜色查表」：**mesh 必须带 kBaseTint 的逐顶点 id 才会生效**；
+    //      没有 id 的 mesh 即使设了 enabled/颜色也不会有任何变化（这是设计，不是 bug）。
     //   适用路径：**无 per-instance 颜色通道**的 Object3D / GltfObject 绘制（本 MVP）。
     //   蒙皮 / 实例路径暂未接入（见 tools/jpov/docs/jpov_base_tint_design.md）。
     BaseTint base_tint;

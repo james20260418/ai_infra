@@ -52,10 +52,15 @@ public:
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
     jpov::PBRMaterial ground_mat_;   // 高粗糙灰色地面材质
 
-    // ── 当前视角 view_：交互（右键 drag/滚轮实时改）与 headless 拍摄（外部
+    // ── 当前视角 view_：交互（右键 drag/滚轮/中键纵向 pan 实时改）与 headless 拍摄（外部
     // 赋固定角/逐帧扫角）共用的“单一事实源”。拍摄模式不改 OneIteration，只
     // 在帧间改 view_（见 viewer_capture.h）——保证交互所见即拍摄所得，zero 分叉。
     ViewConfig view_;                // 见 view_config.h（y-up 球面角相机）
+
+    // 中键纵向 pan 的注视点 Y 偏移（世界米）。相机 position 与 target **同步**平移该量
+    // （朝向不变 ⇒ 纯平移）；与 clothing tool 同款，半屏 = 1m。
+    // 只影响交互相机；headless 拍摄不改它（view_ 与偏移分离，拍摄代码无需知道）。
+    float cam_target_y_ = 0.0f;
 
     // ── 光照滑条状态（跨帧持有；交互面板 UI_ 在下方）。色温/强度全由 sky 推导。
     float elev_deg_  = 90.0f;        // 太阳仰角（度 [0,90]）
@@ -110,11 +115,18 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+
+            // 中键纵向 pan：注视点（连同相机位置）同步升降，朝向不变。
+            // 半屏 = 1m（见 VerticalPanDeltaY）；与右键旋转可在同一帧共存。
+            if (input.middle.IsDrag()) {
+                cam_target_y_ += VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
-        // ── 相机：由 view_ 推导 ──
-        cmds->camera.position = view_.Position();
-        cmds->camera.target   = ViewConfig::Target();  // (0,0,0)
+        // ── 相机：由 view_ 推导（叠加中键 pan 的注视点 Y 偏移）──
+        const CameraPlacement cam = MakePannedCamera(view_, cam_target_y_);
+        cmds->camera.position = cam.position;
+        cmds->camera.target   = cam.target;
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;

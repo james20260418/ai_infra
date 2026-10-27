@@ -182,7 +182,8 @@
         const float panel_w  = kPanelWidth;
         const float panel_x = std::max((win_w - panel_w) * 0.5f, kPanelMargin);
         const float panel_y = kPanelMargin + above_h + kPanelSpacing;
-        constexpr int kContentRows = 6;
+        // 行数 = 调色板行数（单一来源）+ 1 行「显示 tint 分区」；通道数变了自动跟随。
+        constexpr int kContentRows = jpov::kBaseTintPaletteRows + 1;
         const AccordionFrame af = BeginAccordionPanel(
             cmds, panel_x, panel_y, panel_w, "Tint 调色 / 显示",
             &tint_palette_panel_open_, kContentRows);

@@ -62,7 +62,7 @@ enum class MeshVertexFlags : uint8_t {
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
     kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
-    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6）
+    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6 .xy）
     kBaseTint = 1 << 7,  // base tint 分区（base_tint：每顶点 uint8 索引）；与 kRelax/kWind **可共存**
 };
 
@@ -118,6 +118,8 @@ struct MeshData {
     //   (lag_ratio, max_lag, tint, 0) 或 (joint_id, phase, tint, 0)。
     // 渲染约定：着色器按 **flat（provoking vertex）** 读 ⇒ 一个三角形整体归属一个色；
     //   画笔在三角形边界上可能左右不一致，边界由 provoking vertex 决定（MVP 接受）。
+    // 消费路径：目前只有 **object3d**（DrawObject3D / DrawGltfObject）着色器读它；
+    //   蒙皮 / 静态实例路径暂未接入（mesh 可以同时带 kJoints + kBaseTint，只是后者不生效）。
     std::vector<uint8_t> base_tint;
 
     // 植被风标注（逐顶点；kWind 时非空）—— **只存 2 个数**，把此桩“次级运动槽”用到最省：

@@ -39,7 +39,8 @@ uniform 数，**不需要改顶点布局**。
   一键把选区内顶点刷成对应 id（无独立涂抹模式、无第二个画笔半径）。
 - 面板「Tint 调色 / 显示」：两个 RGB 调色板 + enable + 「显示 tint 分区」；与刷色面板**分开**
   （2026-10-27 Danis：调色/显示 和 刷颜色 不要挤在一个面板）。
-- 点刷色按钮时若 mesh 没有 `kBaseTint`，**一次性**补全 0 并重新注册 GPU mesh（之后只 `UpdateMesh`）。
+- 点刷色按钮时，只对**选区非空**的 primitive 按需补 `kBaseTint`（一次性重注册 GPU mesh，
+  之后只 `UpdateMesh`）；「清除」不会给还没有 tint 数据的 mesh 凭空加一份全 0 属性。
 - 写 `cloth_current_[i].mesh.base_tint` 并立即推 GPU；保存 glb 时写 `_JPOV_TINT`。
 - **不做染白**：baseColor 贴图由建模侧留白/涂白（白 × 用户色 = 用户色）。
 

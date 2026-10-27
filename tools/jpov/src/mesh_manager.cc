@@ -273,8 +273,9 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
     //     - kBaseTint（仅 tint）：(0, 0, base_tint 索引, 0)
     //   ⇒ .z 恒为 tint 索引（0 = 不换色）；kRelax/kWind 可与 kBaseTint 共存。
     //   属性缺失时该槽在本 VAO 上保持 disabled，读到的 aFlex 为默认值 (0,0,0,1)。
-    //   ⚠️ 三份 VS 里 `aFlex` 一律声明成 vec4：GL 允许 shader 读少于 buffer 的分量数，
-    //   但反过来（buffer 只给 2 个、shader 读 .z）会读到常量 0 —— tint 会静默失效。
+    //   ⚠️ object3d 的三份 VS（主/完整/阴影）里 `aFlex` 一律声明成 vec4：GL 允许 shader
+    //   读少于 buffer 的分量数，但反过来（buffer 只给 2 个、shader 读 .z）会读到常量 0
+    //   —— tint 会静默失效。
     if (MeshHasFlag(data.flags, MeshVertexFlags::kRelax) ||
         MeshHasFlag(data.flags, MeshVertexFlags::kWind) ||
         MeshHasFlag(data.flags, MeshVertexFlags::kBaseTint)) {
@@ -384,9 +385,9 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
         glDeleteVertexArrays(1, &mesh->vao);
     }
     // 收集所有非 0 VBO + EBO 一次性 delete。
-    // 属性 VBO 最多 8 个（pos/normal/uv/joint/weight/tangent/relax/wind）
-    // + 1 个 EBO = 9；relax 与 wind 互斥，实际 ≤8。
-    static constexpr int kMaxBuffers = 9;
+    // 属性 VBO 最多 7 个（pos/normal/uv/joint/weight/tangent/aux） + 1 个 EBO = 8。
+    // （aux 一个槽同时服务 relax/wind/tint，见文件头布局表。）
+    static constexpr int kMaxBuffers = 8;
     unsigned int buffers[kMaxBuffers];
     int n = 0;
     if (mesh->vbo_positions) {
