@@ -155,7 +155,8 @@ vec3 SampleLayer(sampler2D tex, vec2 uv01, vec2 tiling, vec2 scroll,
     float f0 = floor(frame);
     vec2 cell_px = tex_size / vec2(float(tiles.x), float(tiles.y));
     // 半像素内缩：否则双线性会在 cell 边界取到邻居帧的边缘 texel（known_issue §8.1）。
-    vec2 uv_local = uv * (cell_px - 2.0) + 1.0;
+    // max(...,1.0) 是防御：格宽 <2 纹素时 (cell_px-2) 会变负 ⇒ 采样整个反过来。
+    vec2 uv_local = uv * max(cell_px - 2.0, vec2(1.0)) + 1.0;
     float col0 = mod(f0, float(tiles.x));
     float row0 = floor(f0 / float(tiles.x));
     vec2 origin0 = vec2(col0, row0) * cell_px;

@@ -24,6 +24,7 @@
 // 5) 时间 → 帧号：**GPU 不取时钟**。调用方给「秒」（零点自定），这里只做乘法：
 //    `frame = time_seconds * fps`，再 wrap 到 `[0, frame_count)`。
 //    这样同一份命令 + 同一秒数必然产出同一张图（gold 可复现）。
+//    `fps = 0` 表示**这个图集不动**（静止在第 0 帧），不等于「整张图是一帧」。
 //
 // 6) 帧间混合：用**分数**帧号，`mix(cell(floor(f)), cell(mod(floor(f)+1, N)), frac(f))`。
 //    末帧回绕到首帧。分数帧号同时给了「慢动作插值」，不必靠加帧数。
@@ -67,8 +68,13 @@ struct FlipbookDesc {
     // 总帧数（= 网格格数）。
     int frame_count() const { return tiles_x * tiles_y; }
 
-    // 是否按帧裁切（fps > 0 且格数 > 1）。
-    bool IsAnimated() const { return fps > 0.0f && frame_count() > 1; }
+    // 这张图是不是**图集**（格数 > 1）⇒ 采样时必须裁 cell。
+    // 注意：**裁 cell 与“会不会动”是两件事** —— 4x4 图集即使 fps = 0 也必须裁到
+    // 第 0 格（否则整张 4x4 图会当作一幅图显示，屏幕上看到 16 个缩小的自己）。
+    bool IsAtlas() const { return frame_count() > 1; }
+
+    // 时间会不会推进（fps > 0 且是图集）。仅描述语义/自检，不决定裁不裁。
+    bool IsAnimated() const { return fps > 0.0f && IsAtlas(); }
 
     // Pre-condition: tiles_x >= 1；tiles_y >= 1；fps >= 0；fps > 0 时需有限值
     void Validate() const {
@@ -81,8 +87,13 @@ struct FlipbookDesc {
 
 // 把「秒」换成 `[0, frame_count)` 的**分数**帧号（与着色器同一套语义）。
 //
-// 返回 false = 这张图集不走翻书（静态，整张图当一帧），调用方应关闭裁 UV 分支；
-// 返回 true 时 *out_frame 已写入分数帧号。
+// 返回值 = **要不要裁 cell**（= `desc.IsAtlas()`）。
+//   * 返回 false（tiles 1x1）：整张图就是一帧，调用方应关闭裁 UV 分支，帧号恒 0。
+//   * 返回 true：`*out_frame` 是分数帧号；`fps == 0` 时它是 0（**静止在第 0 帧**，
+//     仍然是裁好的单格，不是整张图集）。
+//
+// ⚠️ 早期版本把「裁 cell」和「会不会动」合成一个判断（fps=0 就不裁），结果
+// 4x4 图集配 fps=0 会在屏幕上显示 16 个缩小的自己。这一版把两件事分开。
 //
 // Pre-condition: out_frame != nullptr；desc 已 Validate
 inline bool ResolveFlipbookFrame(const FlipbookDesc& desc, float time_seconds,
@@ -90,9 +101,13 @@ inline bool ResolveFlipbookFrame(const FlipbookDesc& desc, float time_seconds,
     CHECK(out_frame != nullptr) << "ResolveFlipbookFrame: out_frame 不能为空";
     CHECK(std::isfinite(time_seconds))
         << "ResolveFlipbookFrame: time_seconds 必须是有限值";
-    if (!desc.IsAnimated()) {
+    if (!desc.IsAtlas()) {
         *out_frame = 0.0f;
         return false;
+    }
+    if (desc.fps <= 0.0f) {
+        *out_frame = 0.0f;   // 图集但不动：静止在第 0 帧
+        return true;
     }
     const float total = static_cast<float>(desc.frame_count());
     const float f = time_seconds * desc.fps;

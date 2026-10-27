@@ -75,6 +75,18 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
         << "SpTheme.plate_tiling.x 必须 > 0（用 plate_material_px 时本字段不参与）";
     CHECK_GT(theme.plate_tiling.y(), 0.0f)
         << "SpTheme.plate_tiling.y 必须 > 0（用 plate_material_px 时本字段不参与）";
+    // 图集字段也在这里自检：否则配错了要等 Emit 时由渲染层 CHECK，报错指向 DrawPlate，
+    // 用户根本看不出是自己把 theme 填错了。
+    CHECK_GE(theme.plate_tiles_x, 1) << "SpTheme.plate_tiles_x 必须 >= 1";
+    CHECK_GE(theme.plate_tiles_y, 1) << "SpTheme.plate_tiles_y 必须 >= 1";
+    CHECK_GE(theme.plate_border_tiles_x, 1)
+        << "SpTheme.plate_border_tiles_x 必须 >= 1";
+    CHECK_GE(theme.plate_border_tiles_y, 1)
+        << "SpTheme.plate_border_tiles_y 必须 >= 1";
+    CHECK_GE(theme.plate_flipbook_fps, 0.0f)
+        << "SpTheme.plate_flipbook_fps 必须 >= 0";
+    CHECK_GE(theme.plate_border_flipbook_fps, 0.0f)
+        << "SpTheme.plate_border_flipbook_fps 必须 >= 0";
     input_ = &input;
     theme_ = theme;
     // 缩放：所有「长度」类主题字段同步乘倍率（计数字段如 plate_tiling/tiles 不乘）。

@@ -325,6 +325,15 @@ int main(int argc, char** argv) {
         {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
     };
 
+    // 参数合理性提示（不拦：UI 层会把 fade clamp 到 border 内，但用户会以为没生效）
+    if (opt.fade > 0.0f && opt.fade > opt.border) {
+        LOG(WARNING) << "--fade (" << opt.fade << ") 大于 --border (" << opt.border
+                     << ")，渐变带会被 clamp 到边框宽度内 —— 看不出渐变是正常的";
+    }
+    if (opt.flipbook_fps == 0.0f) {
+        LOG(INFO) << "--fps 0：材质静止在第 0 帧（图集仍会裁 cell）";
+    }
+
     SpUiDemoApp app(cfg);
     app.Init();
     app.InstallTextMeasure();

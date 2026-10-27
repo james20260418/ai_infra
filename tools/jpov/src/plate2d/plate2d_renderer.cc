@@ -87,9 +87,26 @@ void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
                                      << layer.texture_id << " 没有 GL 纹理";
         }
         // 帧号：时间由调用方给（秒），fps 由各层自己给 —— 所以两层可以不同速。
+        // 返回值是「要不要裁 cell」（图集就算 fps=0 也要裁到第 0 格）。
         out.flipbook = out.has_tex &&
                        ResolveFlipbookFrame(layer.flipbook, cmd.time_seconds,
                                             &out.frame);
+        if (out.flipbook) {
+            // cell 至少要 2 个纹素宽才能做「半像素内缩」（uv*(cell-2)+1 的系数非负）。
+            // 更小的格子会让内缩公式反号 ⇒ 采到乱七八糟的 texel，且**不会报错**。
+            const float cell_w =
+                static_cast<float>(out.tex_w) / layer.flipbook.tiles_x;
+            const float cell_h =
+                static_cast<float>(out.tex_h) / layer.flipbook.tiles_y;
+            CHECK_GE(cell_w, 2.0f)
+                << "Plate2D: 图集格宽只有 " << cell_w << " 纹素（纹理 " << out.tex_w
+                << " / " << layer.flipbook.tiles_x
+                << " 列）—— 至少要 2，否则半像素内缩会反号";
+            CHECK_GE(cell_h, 2.0f)
+                << "Plate2D: 图集格高只有 " << cell_h << " 纹素（纹理 " << out.tex_h
+                << " / " << layer.flipbook.tiles_y
+                << " 行）—— 至少要 2，否则半像素内缩会反号";
+        }
         return out;
     };
     const ResolvedLayer fill = resolve(cmd.fill);

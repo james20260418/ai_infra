@@ -291,36 +291,54 @@ void CheckTimeIsData() {
     LOG(INFO) << "[PASS] time_seconds 原样进命令，且分数帧号随之间变化";
 }
 
-// ---- 6. FlipbookDesc / ResolveFlipbookFrame 的 wrap 语义 ----
+// ---- 6. FlipbookDesc / ResolveFlipbookFrame ----
+//
+// 两条独立语义，**不能合并判断**（早期版本合并过：4x4 图集配 fps=0 会整张显示，
+// 屏幕上出现 16 个缩小的自己 —— 那是真 bug）：
+//   裁 cell  ←→ tiles 是否 > 1
+//   会不会动 ←→ fps 是否 > 0
 void CheckFlipbookWrap() {
     const jpov::FlipbookDesc fb{4, 4, 6.0f};   // 16 帧 / 6fps ⇒ 一圈 16/6 秒
     CHECK_EQ(fb.frame_count(), 16);
+    CHECK(fb.IsAtlas());
     CHECK(fb.IsAnimated());
 
     float frame = -1.0f;
-    // fps=0 = 静态（整张图一帧）：返回 false、帧号归零。
-    const jpov::FlipbookDesc still{4, 4, 0.0f};
-    CHECK(!jpov::ResolveFlipbookFrame(still, 3.0f, &frame));
-    CHECK(std::fabs((frame) - (0.0f)) < (1e-6f));
 
-    // 一圈回到起点：t = 16/6 与 t = 0 必须给出同一帧号。
+    // ① 图集 + fps=0：**仍然要裁 cell**，只是静止在第 0 帧。
+    const jpov::FlipbookDesc still_atlas{4, 4, 0.0f};
+    CHECK(still_atlas.IsAtlas()) << "4x4 是图集（与帧率无关）";
+    CHECK(!still_atlas.IsAnimated()) << "fps=0 时不动";
+    CHECK(jpov::ResolveFlipbookFrame(still_atlas, 3.0f, &frame))
+        << "图集必须裁 cell —— 不裁就会把整张 4x4 当一幅图显示";
+    CHECK(std::fabs(frame) < 1e-6f) << "静止图集应固定在第 0 帧";
+
+    // ② 单张图（tiles 1x1）：不裁 cell，帧号恒 0（fps 有意义与否都不裁）。
+    for (float fps : {0.0f, 6.0f}) {
+        const jpov::FlipbookDesc single{1, 1, fps};
+        CHECK(!single.IsAtlas());
+        CHECK(!jpov::ResolveFlipbookFrame(single, 3.0f, &frame))
+            << "1x1 不是图集，不该裁 cell";
+        CHECK(std::fabs(frame) < 1e-6f);
+    }
+
+    // ③ 一圈回到起点：t = 16/6 与 t = 0 必须给出同一帧号。
     float a = 0.0f;
     float b = 0.0f;
     CHECK(jpov::ResolveFlipbookFrame(fb, 0.0f, &a));
     CHECK(jpov::ResolveFlipbookFrame(fb, 16.0f / 6.0f, &b));
-    CHECK(std::fabs((b) - (a)) < (1e-3f)) << "整圈之后帧号没回到起点（循环会跳）";
+    CHECK(std::fabs(b - a) < 1e-3f) << "整圈之后帧号没回到起点（循环会跳）";
 
-    // 帧号恒在 [0, frame_count)。
+    // ④ 帧号恒在 [0, frame_count)，负时间也落在区间内（调用方拿它做倒放）。
     for (float t = -5.0f; t <= 5.0f; t += 0.13f) {
         CHECK(jpov::ResolveFlipbookFrame(fb, t, &frame));
         CHECK_GE(frame, 0.0f) << "t=" << t;
         CHECK_LT(frame, 16.0f) << "t=" << t;
     }
-    // 负时间也要落进区间（调用方拿它做倒放）。
     CHECK(jpov::ResolveFlipbookFrame(fb, -0.5f, &frame));
     CHECK_GE(frame, 0.0f);
     CHECK_LT(frame, 16.0f);
-    LOG(INFO) << "[PASS] flipbook 帧号：静态归零 / 整圈闭合 / 恒在 [0,N) / 负时间可用";
+    LOG(INFO) << "[PASS] flipbook：裁 cell 与动画分离 / 整圈闭合 / 恒在 [0,N) / 负时间可用";
 }
 
 // ---- 7. 多纹理板材（MultiPlate）----
