@@ -379,13 +379,9 @@ void UploadObjectWindUniforms(unsigned int prog, const Object3DCommand& cmd,
     glActiveTexture(GL_TEXTURE0);
 }
 
-// DrawObject3D / DrawObject3DBlend 共用的「材质 + 光照 uniform 绑定、纹理绑定、绘制」。
+// DrawObject3D 共用的「材质 + 光照 uniform 绑定、纹理绑定、绘制」。
 // 调用方负责：已 glUseProgram(selected_prog)、已建好 model / mvp_final。
-//   blend=true 时额外上传 uAlpha（= base_color.a）并绑 scene_depth 到 uGlassSceneDepth，
-//   供透明 pass 的 blend 变体 FS 手动作深度测试。其余与不透明路径**完全共用**
-//  （同一份 kMeshFs3dPBR 源，仅 blend 宏改变输出与末尾分支）。
-// Pre-condition: selected_prog 已激活（glUseProgram）；mesh != nullptr；
-//                blend=false -> scene_depth_tex 忽略；blend=true -> scene_depth_tex != 0。
+// Pre-condition: selected_prog 已激活（glUseProgram）；mesh != nullptr。
 void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                                  const RenderCommandList& cmds,
                                  const GPUMesh* mesh,
@@ -393,9 +389,7 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                                  const float mvp_final[16],
                                  const float model[16],
                                  unsigned int selected_prog,
-                                 unsigned int tile_index_tex,
-                                 bool blend,
-                                 unsigned int scene_depth_tex) {
+                                 unsigned int tile_index_tex) {
     CHECK(mesh != nullptr);
 
     const bool any_tex =
@@ -532,18 +526,6 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
     } else {
         glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 0);
         glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
-    }
-
-    // 透明混合：常值 alpha + 不透明场景深度（blend 变体 FS 手动作深度测试用）。
-    if (blend) {
-        CHECK_NE(scene_depth_tex, 0u)
-            << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
-        glUniform1f(glGetUniformLocation(selected_prog, "uAlpha"),
-                    cmd.material.base_color.a);
-        glActiveTexture(GL_TEXTURE0 + kTexUnitGlassSceneDepth);
-        glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uGlassSceneDepth"),
-                    kTexUnitGlassSceneDepth);
     }
 
     glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
@@ -908,70 +890,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     }
 
     DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
-                                selected_prog, tile_index_tex,
-                                /*blend=*/false, /*scene_depth_tex=*/0u);
-
-    glPopAttrib();
-}
-
-// ==================== DrawObject3DBlend ====================
-
-void Object3DRenderer::DrawObject3DBlend(const Object3DCommand& cmd,
-                                         const RenderCommandList& cmds,
-                                         MeshManager& mesh_mgr,
-                                         TextureManager& texture_mgr,
-                                         ShaderManager& shader_mgr,
-                                         const float mvp[16],
-                                         unsigned int prog_blend,
-                                         unsigned int prog_full_blend,
-                                         unsigned int tile_index_tex,
-                                         unsigned int scene_depth_tex) {
-    (void)shader_mgr;   // 与 DrawObject3D 一致：uniform 走 glGetUniformLocation，不经 shader_mgr
-    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawObject3DBlend: mesh_id " << cmd.mesh_id
-                           << " 未注册（DrawObject3DBlend 前需先 RegisterMesh）";
-    CHECK_GT(mesh->vao, 0u);
-    CHECK_NE(scene_depth_tex, 0u)
-        << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
-
-    const float up_len =
-        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
-    const float fr_len =
-        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
-    CHECK_GT(up_len, 1e-8f) << "DrawObject3DBlend: up 向量不能为零";
-    CHECK_GT(fr_len, 1e-8f) << "DrawObject3DBlend: front 向量不能为零";
-
-    float model[16];
-    float mvp_final[16];
-    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
-    Mat4Mul(mvp, model, mvp_final);
-
-    const bool any_tex =
-        (cmd.material.base_color_tex != 0) ||
-        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
-        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
-        (cmd.material.emissive_tex != 0) ||
-        (cmd.material.ao_tex != 0) ||
-        (cmd.material.normal_tex != 0);
-
-    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-        << "DrawObject3DBlend: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
-
-    glPushAttrib(GL_ENABLE_BIT);
-    // 双面：透明薄片（玻璃墙 / 塑料片）通常需双面参与 WBO 才有「有厚度」的观感。
-    // 单面材质则确保背面剔除（此 pass 无深度缓冲，剔除由光栅器完成）。
-    if (cmd.material.double_sided) {
-        glDisable(GL_CULL_FACE);
-    } else {
-        glEnable(GL_CULL_FACE);
-    }
-
-    const unsigned int selected_prog = any_tex ? prog_full_blend : prog_blend;
-    glUseProgram(selected_prog);
-
-    DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
-                                selected_prog, tile_index_tex,
-                                /*blend=*/true, scene_depth_tex);
+                                selected_prog, tile_index_tex);
 
     glPopAttrib();
 }

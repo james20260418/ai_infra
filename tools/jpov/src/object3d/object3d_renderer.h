@@ -49,9 +49,6 @@ public:
     //       {kMeshVs3dPBR, kMeshFs3dPBR})
     //   shader_mgr.GetOrCreate("draw_object3d_pbr_full",
     //       {kMeshVs3dPBRFull, kMeshFs3dPBR})
-    //   // kBlend 透明变体（Renderer::DrawObject3DProgBlend）：
-    //   shader_mgr.GetOrCreate("draw_object3d_pbr_blend",
-    //       {kMeshVs3dPBR, kMeshFs3dPBR, {"JPOV_ALPHA_BLEND"}})
     //
     // 三份 VS 的风相关 GLSL **共用同一份**（拼装在 object3d_renderer.cc 顶部，
     // 用 `头部 + 风块 + 尾部`）。以前是三段逐字拷贝、靠注释提醒"改一处同步三处"，
@@ -133,26 +130,12 @@ in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
 flat in int vTintIndex;
-#ifdef JPOV_ALPHA_BLEND
-// 透明混合变体（kBlend）的输出 —— 加权混合 OIT（Weighted Blended OIT）的两个累加器，
-// 由独立的透明 pass（Renderer::DrawTransparentPass）画进离屏「玻璃 FBO」（无深度缓冲）：
-//   accum  (RGBA16F)：blend (ONE, ONE)          —— 累加 预乘色×权重 与 α×权重；
-//   reveal (R16F)   ：blend (ZERO, ONE_MINUS_SRC_COLOR) —— reveal *= (1−α)。
-// 之后由体积雾合成 pass 解算成 (预乘色, 透射率) 并与雾一起按深度积分合成。
-// ⚠️ 三个输出必须**全部写出**：玻璃 FBO 的 draw buffer 声明了 3 个附件，未写附件的
-//   GL 内容**未定义**；若 depth 不写，composite 读它算 z_g/ell_g 会读到垃圾 →
-//   雾与玻璃遮挡合成错位（llvmpipe 下表现为逐帧 tile 闪烁）。
-layout(location = 0) out vec4 FragAccum;
-layout(location = 1) out float FragReveal;
-layout(location = 2) out float FragDepthAccum;   // R32F：Σ z_view×α×权重（代表深度）
-#else
 layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度 ∈ [0,1]，1.0=远平面/背景）。
 // 不用 varying 传线性深度（llvmpipe 对超大三角形的 varying 插值会退化成 0，实测）；
 // gl_FragCoord.z 由光栅器算出，可靠。输出作 vec4 + alpha=1：3D pass 全局开着
 // alpha 混合，标量 float 输出的缺失 alpha 被 Mesa 当 0 → 写入被丢弃（Blend 实测）。
 layout(location = 1) out vec4 FragSceneDepth;
-#endif
 
 struct Light {
     vec3 position;
@@ -176,11 +159,7 @@ uniform int   uHasBaseColorTex;
 uniform int  uTintEnabled;
 uniform vec3 uTintColor0;
 uniform vec3 uTintColor1;
-// alpha test 阈值（仅 cutout program 使用；不透明 program 未引用 → location = -1）。
 uniform float uAlphaCutoff;
-// 透明混合（仅 blend program 引用）：常值 alpha = material.base_color.a；采样 baseColor
-// 贴图时再乘其 alpha。非 blend program 不含该 uniform -> location = -1，上传无害。
-uniform float uAlpha;
 uniform float uMetallic;
 uniform sampler2D uMetallicTex;
 uniform int   uHasMetallicTex;
@@ -198,9 +177,6 @@ uniform int   uHasNormalTex;
 uniform float uNormalScale;
 
 uniform sampler2D uTileLightIndices;
-// 透明混合（仅 blend program 引用）：不透明场景深度纹理（来自 MRT#1，值 = gl_FragCoord.z）。
-// 透明 pass 无深度缓冲 -> 在 FS 里手动作深度测试，丢弃被不透明场景遮挡的玻璃片元。
-uniform sampler2D uGlassSceneDepth;
 // uTileCulling=1（默认）：片元经 tile 索引纹理只算本 tile 命中的光源（16×16 tile culling）。
 // uTileCulling=0：关闭 tile culling，片元遍历全部点光源（经典前向光照，无 tile 分界线伪影）。
 uniform int uTileCulling;
@@ -506,26 +482,6 @@ float computeSunShadow(vec3 world_pos, vec3 N, vec3 L, float frag_dist) {
     return mix(1.0, shadow, fade);
 }
 
-#ifdef JPOV_ALPHA_BLEND
-// Weighted Blended OIT 权重函数（McGuire & Bavoil 2013, JCGT 2(2)）。
-//   weight = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)
-// 前半「颜色因子」：亮/不透明片元权重大、暗且稀薄片元权重小（防颜色污染 / firefly）；
-// 后半「深度因子」：近处 z 权重高、远处急速下降（更接近真实 over 的遮挡行为）。
-// z 用视空间距离（米）；本函数不含 α 因子（α 在累加时单独乘，见 main 末尾）。
-//@WBO_WEIGHT_BEGIN
-float WeightWbo(float z, float a, vec3 c) {
-    float mx = max(max(c.r, c.g), c.b);
-    float w = max(min(1.0, mx * a), a);
-    // ⚠️ 原论文的 200 是「世界单位尺度」调参：JPOV 场景以米计、玻璃多在 1~30m，
-    // 用 200 会让 (z/200)^4 ≪ 1e-5 地板 → 权重恒为常数 → 丧失「近处优先」→
-    // 两层透明体（如红墙 × 绿人）前后不分、颜色一样（WBO order-blind）。
-    // 改用 ~5m 尺度（可按场景调），使米级深度段内产生真实的近远权重差。
-    float df = clamp(0.03 / (1e-5 + pow(z / 5.0, 4.0)), 1e-2, 3e3);
-    return w * df;
-}
-//@WBO_WEIGHT_END
-#endif
-
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
@@ -631,17 +587,6 @@ void accumulateOneLight(int li, vec3 N, vec3 V, vec3 world_pos,
 }
 )glsl") + kEnvSpecularGlsl + R"glsl(
 void main() {
-#ifdef JPOV_ALPHA_BLEND
-    // ★ 早退（overdraw 优化）：本像素被不透明场景遮挡的玻璃片元直接丢弃。
-    //   只依赖 gl_FragCoord.z + 场景深度纹理，放在 FS 最前 → 省掉后面整套 PBR 计算。
-    //  （uGlassSceneDepth 存不透明 gl_FragCoord.z；1.0 = 背景；微偏置防同深度抖动。）
-    {
-        float scene_depth = texelFetch(uGlassSceneDepth, ivec2(gl_FragCoord.xy), 0).r;
-        if (gl_FragCoord.z > scene_depth + 1e-6) {
-            discard;
-        }
-    }
-#endif
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
@@ -779,20 +724,8 @@ void main() {
 
     vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular
                 + EnvSpecularTerm(N, V, roughness, metallic, base_color) * ao + emissive;
-#ifdef JPOV_ALPHA_BLEND
-    // ── 加权混合 OIT（Weighted Blended OIT）──
-    // （被不透明遮挡的玻璃已在 main 开头早退丢弃，此处只需算权重/写入。）
-    // alpha = base_color.a（常值）× 贴图 alpha（有贴图时）。
-    float alpha = clamp(uAlpha * base_texel.a, 0.0, 1.0);
-    float z_view = length(uCameraPos - vWorldPos);
-    float w = WeightWbo(z_view, alpha, result);
-    FragAccum = vec4(result * alpha, alpha) * w;   // 预乘色 × 权重（累加）
-    FragReveal = alpha;                            // reveal *= (1−α)（由混合函数完成）
-    FragDepthAccum = z_view * alpha * w;           // 代表深度累加（z_g = 本值 / accum.a）
-#else
     FragColor = vec4(result, 1.0);
     FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
-#endif
 }
 )glsl";
 
@@ -899,29 +832,6 @@ void main() {
                              unsigned int prog_cutout,
                              unsigned int prog_full_cutout,
                              unsigned int tile_index_tex);
-
-    // ---- DrawObject3DBlend ----
-    // 透明混合 pass：把一条 alpha_mode==kBlend 的 Object3DCommand 以**加权混合 OIT**
-    //（Weighted Blended OIT, McGuire & Bavoil 2013）画进调用方当前绑定的「玻璃 FBO」
-    //（MRT：accum RGBA16F(loc0) + reveal R16F(loc1)，**无深度缓冲**）。
-    // 选 blend 变体 program（JPOV_ALPHA_BLEND，FS 输出改为 FragAccum/FragReveal）。
-    // 与 DrawObject3D 共用材质/光照 uniform 绑定；额外：
-    //   · 上传 uAlpha = material.base_color.a；
-    //   · 绑定 scene_depth_tex 到 uGlassSceneDepth，FS 内手动作深度测试（丢弃被不透明遮挡者）。
-    // 各附件的 blend func / FBO 绑定 / viewport 由调用方（Renderer::DrawTransparentPass）设置，
-    // 本函数不改变它们（仅 glPushAttrib(GL_ENABLE_BIT) 兜双面剔除开关）。
-    // Pre-condition: scene_depth_tex ≠ 0（不透明场景深度，值 = gl_FragCoord.z）；
-    //   调用方已绑定玻璃 FBO、**关掉 GL_DEPTH_TEST**、并设好 per-attachment blend func。
-    static void DrawObject3DBlend(const Object3DCommand& cmd,
-                                  const RenderCommandList& cmds,
-                                  MeshManager& mesh_mgr,
-                                  TextureManager& texture_mgr,
-                                  ShaderManager& shader_mgr,
-                                  const float mvp[16],
-                                  unsigned int prog_blend,
-                                  unsigned int prog_full_blend,
-                                  unsigned int tile_index_tex,
-                                  unsigned int scene_depth_tex);
 
     // ---- DrawObject3DShadow ----
     // 阴影 pass：用深度专用 shader（kShadowVs + kShadowFs）把一个 Object3D

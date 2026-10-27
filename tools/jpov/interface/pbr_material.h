@@ -67,16 +67,13 @@ struct BaseTint {
 //   kOpaque：不透明（默认）。alpha 通道被忽略。
 //   kMask  ：alpha test（cutout）——采样 baseColor 贴图的 alpha，低于 alpha_cutoff
 //            的片元直接 discard。不排序、写深度，与阴影 / picking 兼容。
-//   kBlend ：半透明混合（无折射「塑料片 / 玻璃片」）——片元**不进主 3D FBO**，
-//            改由独立的透明 pass 以 **加权混合 OIT（Weighted Blended OIT）** 渲进
-//            离屏 accum/reveal 缓冲，再由体积雾合成 pass 与雾一起按深度积分合成
-//            （见 docs/jpov_transparent_glass_design.md）。语义：
-//              · alpha = base_color.a（无贴图）或 base_color.a * 贴图 alpha（有色贴图）；
-//              · **不写主 FBO 颜色**、不写场景深度、不投阴影（玻璃不产生不透明影）；
-//              · 半透明不参与 picking / highlight（本版）。
-//            与 kMask 一样**另起 program 变体**（宏 JPOV_ALPHA_BLEND），使不透明 program
-//            不含 blend 分支（不降级实心物体的 early-Z 深度快路径）。
-enum class AlphaMode : uint8_t { kOpaque, kMask, kBlend };
+//
+// 半透明内容**不走本枚举**：引擎只保留一条半透明路径 —— Strip3D（`TranslucentStripBatch`，
+// 加权混合 OIT）。原先的 `kBlend`（object3d 玻璃 pass + 玻璃 FBO + 与雾按深度积分）已于
+// 2026-10-27 整体移除，理由：条带的「廉价玻璃」已覆盖同一批观感，而玻璃 pass 需要一套
+// 独立的 program 变体 / FBO / 深度积分链路，维护成本与收益不匹配。
+// 详细来龙去脉见 docs/jpov_transparent_glass_design.md（保留作历史记录）。
+enum class AlphaMode : uint8_t { kOpaque, kMask };
 
 struct PBRMaterial {
     // 便利构造：纯色材质（无纹理/法线/emissive/AO）。

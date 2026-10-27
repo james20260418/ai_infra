@@ -21,6 +21,8 @@
 #176 的玻璃走的是 object3d 的 `AlphaMode::kBlend` 子模式：材质级、1× 玻璃 FBO、
 还要和 froxel 雾按深度积分 —— 每多一种透明形态都要改主渲染链路的 pass 编排，
 而那条路径的 pixel 已经被 gold 锁死。
+（**2026-10-27 更新**：条带上线后，`kBlend` 那条路径被判定「维护成本 > 收益」并整体移除，
+半透明只剩本文这一条路径 —— 见 `jpov_transparent_glass_design.md §9`。）
 
 本设计要覆盖的四类东西（玻璃幕、拖尾、光环）都是**薄片/带状、不受光**的几何，
 用不上 PBR / shadow / skinning / tile light。所以正确做法是**独立 primitive + 独立 WBO 目标**：
@@ -201,9 +203,9 @@ COLOR2  add     RGBA16F   Σ(c·a·gain)
 | 粒子 | `ParticleRenderer::wbo_fbo_` | 1/2 | 不透明 3D 之后 |
 | 体积火 | `VolumeFireRenderer::wbo_fbo_` | 1× | 粒子之后 |
 | **条带（本设计）** | `StripRenderer::wbo_fbo_` | 1× | 体积火之后 |
-| 玻璃 #176 | `Renderer::glass_fbo_` | 1× | froxel 雾合成内 |
+| ~~玻璃 #176~~ | ~~`Renderer::glass_fbo_`~~ | — | 已于 2026-10-27 移除 |
 
-固定顺序：**粒子 → 体积火 → 条带 → 远景雾 → froxel 雾/玻璃**。
+固定顺序：**粒子 → 体积火 → 条带 → 远景雾 → froxel 雾**。
 
 理由：条带是最靠前的「手工效果层」，且要让它继续被雾按场景深度作用
 （合成在雾 pass 之前，雾读的仍是该像素的不透明场景深度）。
@@ -375,8 +377,9 @@ struct TranslucentStripBatch {
    （同时防「根本没生效」和「整屏都变了」）。
 5. **负向**：`left.size() != right.size()` 必须 crash（death test）。
 
-> 另：WBO 权重函数的文本契约测试（`test/wbo:wbo_weight_contract_test`）已随配套 WBO 重构落地，
-> 条带沿用同一份权重，无需额外测试。
+> 另：条带沿用 `kWboWeightGlsl` 那一份权重，无需额外测试。
+> （原 `test/wbo:wbo_weight_contract_test` 比的是「玻璃 shader 的内联副本 vs 权威副本」，
+> 玻璃移除后已一并删除。）
 
 ## 13. 与现有代码的关系（2026-10-20 重构后已更新）
 
@@ -386,9 +389,9 @@ struct TranslucentStripBatch {
 - **体积火的死 depth 附件已删**（`FragDepth` 输出 + 第三附件 + num/den 累积一并移除），gold 逐字节不变；
 - 槽位约定定为 `0=accum / 1=reveal / 2=additive / 3=depth`。
 
-**未迁移（有意）**：
-- 玻璃 FBO 仍由 `Renderer` 手写：它要把 `FragDepthAccum` 挪到槽位 3，且现有 gold 只有
-  「8×8 块平均差 ≤ 30」太松，迁移前得先收紧到逐字节。见 `jpov_wbo_target.md §5`。
+**已移除**：
+- 玻璃 FBO（`Renderer::glass_fbo_`）随 object3d 的 `kBlend` 一栈于 2026-10-27 删除，
+  「迁移到 `WboTarget` 槽位 3」这件事不再存在。见 `jpov_wbo_target.md §5`。
 
 **条带接入时（新增内容）**：
 
