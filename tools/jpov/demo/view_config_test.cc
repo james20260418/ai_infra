@@ -160,6 +160,26 @@ void TestVerticalPanDeltaY() {
     LOG(INFO) << "OK TestVerticalPanDeltaY";
 }
 
+void TestMakePannedCamera() {
+    jpov_viewer::ViewConfig v = jpov_viewer::DefaultView();
+    const jpov_viewer::CameraPlacement base = jpov_viewer::MakePannedCamera(v, 0.0f);
+    const jpov_viewer::CameraPlacement pan =
+        jpov_viewer::MakePannedCamera(v, /*target_y_offset*/ 1.5f);
+    // 两边**同时**加同一个偏移（只加一边 = 悄悄变成俯仰，必须能测出来）。
+    ExpectNear(pan.position.y(), base.position.y() + 1.5f, 1e-6, "position.y");
+    ExpectNear(pan.target.y(), base.target.y() + 1.5f, 1e-6, "target.y");
+    ExpectNear(pan.position.x(), base.position.x(), 1e-6, "position.x 不变");
+    ExpectNear(pan.position.z(), base.position.z(), 1e-6, "position.z 不变");
+    ExpectNear(pan.target.x(), base.target.x(), 1e-6, "target.x 不变");
+    // 视线方向（target−position）不因 pan 改变。
+    ExpectVecNear(pan.target - pan.position, base.target - base.position, 1e-6f);
+    // 负偏移方向也要对（中键上下拖）。
+    const jpov_viewer::CameraPlacement neg =
+        jpov_viewer::MakePannedCamera(v, /*target_y_offset*/ -0.5f);
+    ExpectNear(neg.target.y(), base.target.y() - 0.5f, 1e-6, "target.y 负偏移");
+    LOG(INFO) << "OK TestMakePannedCamera";
+}
+
 void TestMakeNoonLighting() {
     const jpov_viewer::NoonLighting nl = jpov_viewer::MakeNoonLighting();
     // 太阳光传播方向 (0,-1,-1)。
@@ -210,6 +230,7 @@ int main() {
     TestRClampAndZoom();
     TestFitRadius();
     TestVerticalPanDeltaY();
+    TestMakePannedCamera();
     TestMakeNoonLighting();
     TestGroundQuad();
     LOG(INFO) << "全部 ViewConfig 单测通过";

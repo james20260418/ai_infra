@@ -132,6 +132,7 @@ in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
+flat in int vTintIndex;
 #ifdef JPOV_ALPHA_BLEND
 // 透明混合变体（kBlend）的输出 —— 加权混合 OIT（Weighted Blended OIT）的两个累加器，
 // 由独立的透明 pass（Renderer::DrawTransparentPass）画进离屏「玻璃 FBO」（无深度缓冲）：
@@ -169,6 +170,12 @@ uniform float uCameraNear;   // 相机近平面距离（级联 0 的 near，级�
 uniform vec3  uBaseColor;
 uniform sampler2D uBaseColorTex;
 uniform int   uHasBaseColorTex;
+// 顶点 base tint（见 interface/pbr_material.h 的 BaseTint）：
+//   uTintEnabled == 0 ⇒ 完全不参与运算（开关保护）；
+//   vTintIndex == 0   ⇒ 该片元不换色；1 / 2 → uTintColor0 / uTintColor1。
+uniform int  uTintEnabled;
+uniform vec3 uTintColor0;
+uniform vec3 uTintColor1;
 // alpha test 阈值（仅 cutout program 使用；不透明 program 未引用 → location = -1）。
 uniform float uAlphaCutoff;
 // 透明混合（仅 blend program 引用）：常值 alpha = material.base_color.a；采样 baseColor
@@ -659,6 +666,18 @@ void main() {
         ? texture(uBaseColorTex, vTexCoord)
         : vec4(uBaseColor, 1.0);
     vec3 base_color = base_texel.rgb;
+
+    // 顶点 base tint：只乘 baseColor（金属度/粗糙度/法线/AO 不受影响）。
+    //   · uTintEnabled==0 时整段跳过（不乘、不算）；
+    //   · id 0 = 不换色；1/2 = 两个用户调色板通道（>2 按最后一档兜底，MeshData::Validate
+    //     与 glTF loader 已保证不会出现）。
+    if (uTintEnabled == 1) {
+        if (vTintIndex == 1) {
+            base_color *= uTintColor0;
+        } else if (vTintIndex >= 2) {
+            base_color *= uTintColor1;
+        }
+    }
 
 #ifdef JPOV_ALPHA_CUTOUT
     // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。

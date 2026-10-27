@@ -37,11 +37,14 @@ struct GPUMesh {
     unsigned int vbo_joints = 0;    // 0 = 无骨骼关节属性（预留）
     unsigned int vbo_weights = 0;   // 0 = 无骨骼权重属性（预留）
     unsigned int vbo_tangents = 0;  // 0 = 无切线属性（法线映射 TBN）
-    unsigned int vbo_relax = 0;     // 0 = 无布料 LAG 松弛度属性（loc6，vec2: lag_ratio, max_lag）
-    // 0 = 无植被风属性（loc6，vec2: joint_id, phase；与 vbo_relax 互斥）。
-    //   joint_id = 该顶点所属刚性段在关节表里的下标；phase = 链外湍流的逐顶点相位。
+    // 0 = 无「次级顶点属性」（loc6，vec4）。该槽由三个特性**共享**，格式固定 4 float：
+    //   · kRelax   ：(lag_ratio, max_lag, base_tint 索引, 0)     —— 布料 LAG 松弛度
+    //   · kWind    ：(joint_id, phase, base_tint 索引, 0)        —— 植被风刚性段 + 湍流相位
+    //   · kBaseTint：(0, 0, base_tint 索引, 0)                   —— 仅 tint 分区
+    //   ⇒ .z 恒为 base tint 索引（0 = 不换色），.w 预留；kRelax 与 kWind 仍互斥（同占 .xy）。
+    //   joint_id = 该顶点所属刚性段在关节表里的下标；phase = 链外湍流的逐顶点相位；
     //   路径长 L（吹倒权重）由 VS 沿关节链现算，不占顶点属性。
-    unsigned int vbo_wind = 0;
+    unsigned int vbo_aux = 0;
     // 植被风关节表纹理（RGBA32F，2N×1：texel(2j)=(pivot.xyz,parent)、
     // texel(2j+1)=(level,phase,soft,到根的链长 cum)）。
     // 0 = 无关节表（该 mesh 不走枢轴式风）。VS 用 texelFetch(uWindJointTex, ivec2(...), 0) 取。

@@ -10,6 +10,8 @@
 //   即每顶点至多被 4 个关节影响。
 // - 布料 LAG 副运动（kRelax）：每顶点一对 (lag_ratio, max_lag)，用于蒙皮 VS 里对
 //   「当前 pose」与「滞后 pose」的混合比例 + 位移限幅（见 docs/jpov_instance_attr_lag_design.md）。
+// - 顶点 base tint 分区（kBaseTint）：每顶点一个 uint8 索引（0 = 不换色，1..N = 用第 i 号
+//   用户色乘 baseColor）。可与 kRelax / kWind **同时存在**（共用 loc6 的 .z）。
 // - GPUMesh（CPU → GPU 上传后的句柄）在 gpumesh.h 中定义，
 //   本文件只关心 CPU 侧数据。
 //
@@ -35,6 +37,7 @@
 
 #include <glog/logging.h>
 #include "geom/common/vec.h"
+#include "tools/jpov/interface/pbr_material.h"  // kNumBaseTintColors（tint 索引空间单一来源）
 
 namespace jpov {
 
@@ -59,7 +62,8 @@ enum class MeshVertexFlags : uint8_t {
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
     kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
-    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6）
+    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6 .xy）
+    kBaseTint = 1 << 7,  // base tint 分区（base_tint：每顶点 uint8 索引）；与 kRelax/kWind **可共存**
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
@@ -105,6 +109,18 @@ struct MeshData {
     //   .y = max_lag  ≥ 0    ：该顶点相对当前 pose 的最大允许位移（模型系，米；逐顶点限幅）。
     // 见 docs/jpov_instance_attr_lag_design.md §4.1 / §4.4。
     std::vector<Vec2f> relaxations;
+
+    // base tint 分区标注（逐顶点 uint8；kBaseTint 时非空）：
+    //   0 = 该顶点不参与换色；i ∈ [1, kNumBaseTintColors] = 用第 i 号用户色乘 baseColor。
+    // 语义：工具（clothing tool 的 tint 画笔）把涂到的顶点标成某个 id；baseColor 贴图应由
+    //   建模侧**涂白**或留白（白 × 用户色 = 用户色），引擎只做一次乘法、不改其它 PBR 通道。
+    // GPU：与 kRelax/kWind 共用 loc6 vec4 的 **.z**（见 mesh_manager.cc 的布局表）：
+    //   (lag_ratio, max_lag, tint, 0) 或 (joint_id, phase, tint, 0)。
+    // 渲染约定：着色器按 **flat（provoking vertex）** 读 ⇒ 一个三角形整体归属一个色；
+    //   画笔在三角形边界上可能左右不一致，边界由 provoking vertex 决定（MVP 接受）。
+    // 消费路径：目前只有 **object3d**（DrawObject3D / DrawGltfObject）着色器读它；
+    //   蒙皮 / 静态实例路径暂未接入（mesh 可以同时带 kJoints + kBaseTint，只是后者不生效）。
+    std::vector<uint8_t> base_tint;
 
     // 植被风标注（逐顶点；kWind 时非空）—— **只存 2 个数**，把此桩“次级运动槽”用到最省：
     //   .x = joint_id ∈ [0, wind_joints.size())：该顶点所属关节在关节表中的下标；
@@ -218,6 +234,18 @@ inline void MeshData::Validate() const {
         CHECK_EQ(relaxations.size(), vcount)
             << "MeshData::Validate: relaxations.size() != positions.size()";
     }
+    // base tint：逐顶点 uint8 索引，值域 0..kNumBaseTintColors（0 = 不换色）。
+    //   越界 id 会让片元着色器取不到调色板（静默不变色），故必须在注册时崩。
+    if (!base_tint.empty()) {
+        CHECK_EQ(base_tint.size(), vcount)
+            << "MeshData::Validate: base_tint.size() != positions.size()";
+        for (size_t i = 0; i < base_tint.size(); ++i) {
+            CHECK_LE(static_cast<int>(base_tint[i]), kNumBaseTintColors)
+                << "MeshData::Validate: base_tint[" << i << "] = "
+                << static_cast<int>(base_tint[i]) << " 越界（合法 0.."
+                << kNumBaseTintColors << "，0 = 不换色）";
+        }
+    }
     // 植被风：逐顶点 (joint_id, phase) 须与顶点数对齐；有关节下标就一定要有表。
     if (!wind_link.empty()) {
         CHECK_EQ(wind_link.size(), vcount)
@@ -279,6 +307,14 @@ inline void MeshData::Validate() const {
             << "MeshData::Validate: 未声明 kRelax 但 relaxations 非空";
     }
 
+    if (MeshHasFlag(flags, MeshVertexFlags::kBaseTint)) {
+        CHECK_EQ(base_tint.size(), vcount)
+            << "MeshData::Validate: flags 声明 kBaseTint 但 base_tint 长度不一致或缺数据";
+    } else {
+        CHECK(base_tint.empty())
+            << "MeshData::Validate: 未声明 kBaseTint 但 base_tint 非空";
+    }
+
     if (MeshHasFlag(flags, MeshVertexFlags::kWind)) {
         CHECK_EQ(wind_link.size(), vcount)
             << "MeshData::Validate: flags 声明 kWind 但 wind_link 长度不一致或缺数据";
@@ -315,10 +351,11 @@ inline void MeshData::Validate() const {
             << "MeshData::Validate: wind_joints[" << i << "].soft 必须落在 [0,1]";
     }
 
-    // kRelax 与 kWind **互斥**：二者同占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
+    // kRelax 与 kWind **互斥**：二者同占顶点 loc6 的 .x/.y（次级运动通道），不能同一 mesh
+    // 同时声明。kBaseTint 只占 .z ⇒ 与两者都可共存（风树也能换色 = 四季变色）。
     CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
             MeshHasFlag(flags, MeshVertexFlags::kWind)))
-        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
+        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6 的 .x/.y），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
     // kWind 与 kJoints **互斥**：两条特性走的是两套互不组合的顶点着色器

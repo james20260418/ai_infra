@@ -17,10 +17,12 @@
 #ifndef JPOV_DEMO_VIEWER_APP_H_
 #define JPOV_DEMO_VIEWER_APP_H_
 
+#include <algorithm>
 #include <string>
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/view_config.h"
+#include "tools/jpov/interface/tint_ui.h"
 #include "tools/jpov/interface/ui.h"
 
 namespace jpov_viewer {
@@ -50,10 +52,15 @@ public:
     uint32_t ground_mesh_ = 0;       // 300×300 地面 quad 的 GPU handle
     jpov::PBRMaterial ground_mat_;   // 高粗糙灰色地面材质
 
-    // ── 当前视角 view_：交互（右键 drag/滚轮实时改）与 headless 拍摄（外部
+    // ── 当前视角 view_：交互（右键 drag/滚轮/中键纵向 pan 实时改）与 headless 拍摄（外部
     // 赋固定角/逐帧扫角）共用的“单一事实源”。拍摄模式不改 OneIteration，只
     // 在帧间改 view_（见 viewer_capture.h）——保证交互所见即拍摄所得，zero 分叉。
     ViewConfig view_;                // 见 view_config.h（y-up 球面角相机）
+
+    // 中键纵向 pan 的注视点 Y 偏移（世界米）。相机 position 与 target **同步**平移该量
+    // （朝向不变 ⇒ 纯平移）；与 clothing tool 同款，半屏 = 1m。
+    // 只影响交互相机；headless 拍摄不改它（view_ 与偏移分离，拍摄代码无需知道）。
+    float cam_target_y_ = 0.0f;
 
     // ── 光照滑条状态（跨帧持有；交互面板 UI_ 在下方）。色温/强度全由 sky 推导。
     float elev_deg_  = 90.0f;        // 太阳仰角（度 [0,90]）
@@ -61,6 +68,11 @@ public:
     float daylight_season_r_  = 1.0f;         // 季节 R 色温乘子 [0.5,2.0]
     float ground_y_  = -3.0f;        // 地面高度 [-3,+3]
     float model_scale_ = 1.0f;       // 模型整体缩放 [0.1,20]
+
+    // 顶点 base tint 的调色板（**运行期**参数；glb 里只存逐顶点 id）。
+    // 默认打开、默认红/绿：加载带 tint 的 glb 立刻能看出分区；两个通道都可随时改色。
+    jpov::BaseTint tint_ui_{true, {{1.0f, 0.0f, 0.0f, 1.0f},
+                                   {0.0f, 1.0f, 0.0f, 1.0f}}};
 
     // 装配交互程序（可选）：注入真实字体文本测量回调（供 UI 内部用）。
     // 仅在 main 建 app 后、Init() 后调用一次；拍摄 headless 模式同样需要，
@@ -103,11 +115,18 @@ public:
             ApplyInput(&view_, dx, dy, scroll,
                        static_cast<int>(winfo.width),
                        static_cast<int>(winfo.height));
+
+            // 中键纵向 pan：注视点（连同相机位置）同步升降，朝向不变。
+            // 半屏 = 1m（见 VerticalPanDeltaY）；与右键旋转可在同一帧共存。
+            if (input.middle.IsDrag()) {
+                cam_target_y_ += VerticalPanDeltaY(input.mouse_dy, winfo.height);
+            }
         }
 
-        // ── 相机：由 view_ 推导 ──
-        cmds->camera.position = view_.Position();
-        cmds->camera.target   = ViewConfig::Target();  // (0,0,0)
+        // ── 相机：由 view_ 推导（叠加中键 pan 的注视点 Y 偏移）──
+        const CameraPlacement cam = MakePannedCamera(view_, cam_target_y_);
+        cmds->camera.position = cam.position;
+        cmds->camera.target   = cam.target;
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
@@ -131,6 +150,11 @@ public:
                            /*center*/ {0.0f, 0.0f, 0.0f},
                            /*up*/     {0.0f, 1.0f, 0.0f},
                            /*front*/  {0.0f, 0.0f, 1.0f});
+        // 调色板是查看器的**运行期**参数（glb 只存逐顶点 id）：每帧写进各 primitive 材质。
+        // DrawGltfObject 内部按 primitive 展开成 Object3DCommand，材质从这里拷过去。
+        for (jpov::GltfPrimitive& prim : gltf_.primitives) {
+            prim.material.base_tint = tint_ui_;
+        }
         cmds->DrawGltfObject(gltf_,
                              /*center*/ {0.0f, 0.0f, 0.0f},
                              /*up*/     {0.0f, 1.0f, 0.0f},
@@ -167,12 +191,16 @@ private:
         const float frame_dt_ms = 1000.0f / kViewerFps;
         ui_.Begin(input, theme, w, h, frame_dt_ms);
 
-        const float kSliderWidth = 0.5f * w;   // 半屏宽
+        // 两列：左 = 原有光照/场景滑条（6 行）；右 = base tint 调色板（5 行）。
+        const float kPanelWidth = std::min(0.88f * w, 1040.0f);
+        const float kColumnGap  = 28.0f;
+        const float kColumnW    = (kPanelWidth - kColumnGap) * 0.5f;
         const float kRowH    = 30.0f;
         const float kSpacing = 12.0f;
         const float kBottom  = 20.0f;
-        const float left     = (w - kSliderWidth) * 0.5f;
+        const float left     = (w - kPanelWidth) * 0.5f;
         const float top      = h - kBottom - (6.0f * kRowH + 5.0f * kSpacing);
+        const float kSliderWidth = kColumnW;   // 左列宽
 
         // 太阳仰角直接用度（0~90 覆盖日出→正午全部标定工况），0 位小数。
         ui_.SliderFloat("太阳仰角 °", &elev_deg_,
@@ -202,6 +230,13 @@ private:
         ui_.Checkbox("显示场景深度", &visualize_scene_depth_,
                      jpov::UiRect{{left, top + 5.0f * (kRowH + kSpacing)},
                                   {kSliderWidth, kRowH}});
+
+        // 右列：顶点 base tint 的两个 RGB 调色板 + 开关。
+        // 作用对象 = 被查看 glTF 的逐顶点 tint id（见 interface/mesh.h 的 kBaseTint）。
+        jpov::DrawBaseTintPalette(
+            ui_, &tint_ui_,
+            jpov::UiRect{{left + kColumnW + kColumnGap, top}, {kColumnW, kRowH}},
+            kRowH + kSpacing);
     }
 
     bool show_panel_ = true;              // 是否画交互光照面板（headless=false）
