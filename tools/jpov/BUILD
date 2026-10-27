@@ -159,11 +159,40 @@ cc_library(
 )
 
 cc_library(
+    name = "skylight_water_quad",
+    hdrs = ["demo/skylight_water_quad.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:strip_types",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# 水面 quad 的 CPU 几何/材质单测（锁「无缝无重叠的 10 km² 平铺」+「玻璃覆盖集」）。
+cc_test(
+    name = "skylight_water_quad_test",
+    srcs = ["demo/skylight_water_quad_test.cc"],
+    deps = [
+        ":skylight_water_quad",
+        "@glog_static//:glog",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_library(
     name = "skylight_viewer_app",
     hdrs = ["demo/skylight_viewer_app.h"],
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov:skylight_scene",
+        "//tools/jpov:skylight_water_quad",
         "//tools/jpov:view_config",
         "//tools/jpov:viewer_app",
         "//tools/jpov/include/jpov:jpov",

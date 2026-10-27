@@ -163,6 +163,99 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
               << " asset_h=" << asset_h << " scale=" << scale;
 }
 
+// headless 拍摄：水面场景（strip 平铺的 10 km² 玻璃 quad）。
+// 用法：jpov_skylight_viewer --capture-water <out_dir>
+//
+// 出图（同一套天光，只换机位 / 场景）：
+//   water_eye_level   —— 眼高（y≈1.5 m）看出去：近处看得穿、远处被 fresnel 抬亮；
+//   water_grazing     —— 更低（y≈0.5 m）：全身掠射，验收「水面收敛成一条亮带」；
+//   water_mid_air     —— y≈25 m 俯视：看清水面是**一整块**平铺的面（无接缝/无洞）；
+//   water_high        —— y≈1.5 km 高空斜视：验收 10 km² 的尺度与远端边界；
+//   model_scene       —— 切回模型场景（证明模型场景仍在、与水面互斥）。
+int RunCaptureWater(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — 水面（strip 玻璃 quad）headless capture";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);    // 纯 3D 截图（无面板）
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kWater);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    auto shoot = [&](const char* name) {
+        const std::string path = out_dir + "/" + name + ".png";
+        app.RunOnce(input, winfo, path.c_str());
+        LOG(INFO) << "capture: " << path;
+    };
+
+    // 固定天光：正午侧光（水面的 fresnel 亮带与天光颜色都能看清）。
+    app.deg_.turbidity       = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg    = 45.0f;
+    app.deg_.sun_azim_deg    = 40.0f;
+
+    // 机位表：phi 是仰角（弧度）、R 是到原点的距离。注意 headless 直接赋值
+    // ⇒ **不受 ViewConfig::kRMax(300 m) 限制**（滚轮才会 clamp）。
+    struct Shot {
+        const char* name;
+        double phi;
+        double R;
+        bool water = true;
+    };
+    const Shot shots[] = {
+        {"water_eye_level", 0.06, 25.0},
+        {"water_grazing", 0.02, 25.0},
+        {"water_mid_air", 0.10, 250.0},
+        {"water_high", 0.62, 2600.0},
+        // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
+        {"model_scene", 0.25, 9.5, /*water=*/false},
+    };
+    for (const Shot& s : shots) {
+        app.SetScene(s.water ? jpov_skylight::SkylightApp::SceneKind::kWater
+                             : jpov_skylight::SkylightApp::SceneKind::kModel);
+        app.view_ = jpov_viewer::DefaultView();
+        app.view_.phi   = s.phi;
+        app.view_.theta = 3.14159265358979323846 / 4.0;
+        app.view_.R     = s.R;
+        shoot(s.name);
+    }
+
+    // 面板形态（交互窗口的真实观感）：水面场景只应剩「场景」下拉 + 一行提示，
+    // 模型场景仍是原来的满屏滑条 —— 两张对照图就是这条需求的验收工件。
+    app.SetShowPanel(true);
+    app.InstallTextMeasure();
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kWater);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.06;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 25.0;
+    shoot("water_ui");
+    app.SetScene(jpov_skylight::SkylightApp::SceneKind::kModel);
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.25;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 9.5;
+    shoot("model_ui");
+    app.SetShowPanel(false);
+
+    app.Finalize();
+    return 0;
+}
+
 // headless 拍摄：按硬编码的一组场景出图，写到 out_dir。
 // 这是交付验收用的确定性通路——不入 UI、不依赖交互。
 int RunCapture(const std::string& out_dir) {
@@ -434,6 +527,7 @@ int main(int argc, char** argv) {
     std::string out_dir;
     std::string smaa_out_dir;
     std::string env_out_dir;
+    std::string water_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -442,9 +536,14 @@ int main(int argc, char** argv) {
             smaa_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
             env_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-water") == 0 && i + 1 < argc) {
+            water_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
+    }
+    if (!water_out_dir.empty()) {
+        return RunCaptureWater(water_out_dir);
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);

@@ -23,6 +23,13 @@
 //
 // 视角变换沿用 model viewer 的 ViewConfig（y-up 球面角相机 + 右键拖拽/滚轮缩放），
 // 保证两个查看器手感一致；默认相机放在三方块斜前方，一眼看全三块。
+//
+// ── 场景（面板顶部的「场景」下拉，2026-10-27 加）──
+//   ① 模型场景：三方块 + 地面 + 桌子/橡树 + 三个 T-pose 蓝人（验收天光/材质/受光）；
+//   ② 水面场景：一块 **strip 平铺出来的 10 km² 玻璃 quad**（见 skylight_water_quad.h）。
+//      切到水面后**面板只留场景下拉 + 一行操作提示** —— 天光那一堆滑条在这个阶段
+//      对水面没有意义，占屏反而看不清效果。
+//   两个场景**互斥**：水面场景不画模型几何，模型场景不画水面。
 
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
@@ -32,6 +39,7 @@
 
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/demo/skylight_scene.h"
+#include "tools/jpov/demo/skylight_water_quad.h"
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/demo/viewer_app.h"   // 复用 kViewerWidth/Height/Fps/FontAlias
 #include "tools/jpov/interface/ui.h"
@@ -83,6 +91,10 @@ public:
                   jpov::Vec3f up, jpov::Vec3f front, float scale = 1.0f) {
         models_.push_back({std::move(obj), center, up, front, scale});
     }
+
+    // ── 场景切换（面板下拉；两个场景几何互斥）──
+    enum class SceneKind { kModel = 0, kWater = 1 };
+    void SetScene(SceneKind kind) { scene_ = kind; }
 
     // ── 视角：沿用 ViewConfig（y-up 球面角 + 右键拖拽/滚轮缩放）──
     jpov_viewer::ViewConfig view_;
@@ -142,12 +154,15 @@ public:
         }
 
         // 相机由 view_ 推导（同 model viewer；target=原点）。
+        // 远裁剪面按场景给：水面是一块 10 km² 的大平面（对角 ~4.5 km），
+        // 用模型场景的 1000 m 会把水面远端切掉、露出背景天空；模型场景保持原值（零回归）。
+        const bool water_scene = (scene_ == SceneKind::kWater);
         cmds->camera.position = view_.Position();
         cmds->camera.target   = jpov_viewer::ViewConfig::Target();
         cmds->camera.up       = {0.0f, 1.0f, 0.0f};
         cmds->camera.fov      = 60.0f;
         cmds->camera.near     = 0.05f;
-        cmds->camera.far      = 1000.0f;
+        cmds->camera.far      = water_scene ? kWaterSceneFarM : 1000.0f;
 
         // 天光 + 光照：全由五个自由度推导——sky 走 CreateDefaultSkyCommand，
         // 主平行光（白天太阳/夜间月亮）与 ambient 全由该 sky 推导（含夜色项）；
@@ -192,9 +207,12 @@ public:
             cmds->elevation_fog = ef;
         }
 
-        // 场景：灰色地面 + 三方块（低反/高光/金属）。
-        // show_scene_=false 时整组跳过（headless 拍纯天空用）。
-        if (show_scene_) {
+        // 场景：模型场景（灰色地面 + 三方块 + 桌子/橡树 + 蓝人）或水面场景（10 km² 玻璃 quad）。
+        // show_scene_=false 时两个场景都跳过（headless 拍纯天空用）。
+        if (show_scene_ && water_scene) {
+            // 整块水面 = **一次** draw call（16 条 Strip32 平铺）。
+            cmds->DrawStrip32Batch(MakeWaterQuadBatch());
+        } else if (show_scene_) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
@@ -233,7 +251,8 @@ private:
                                      /*text=*/text ? text : "", font_size);
     }
 
-    // 光照面板（两列）：左列 = 五个天光自由度 + 三色 ambient 开关；右列 = 远景仰角雾
+    // 光照面板：顶部 = 场景下拉（模型 / 水面）；模型场景下面是两列天光滑条，
+    // 左列 = 五个天光自由度 + 三色 ambient 开关；右列 = 远景仰角雾
     // （开关 + 几何滑条 + 雾色色块）。雾色由天光推导，色块可目视核对“天光 → 雾色”的推理链。
     void DrawLightPanel(const jpov::InputSnapshot& input) {
         const float w = static_cast<float>(kViewerWidth);
@@ -245,6 +264,7 @@ private:
 
         const float kColW    = 0.45f * w;
         const float kColX[2] = {0.025f * w, 0.515f * w};
+        const float kColGap  = kColX[1] - kColX[0] - kColW;
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
@@ -257,6 +277,30 @@ private:
             return jpov::UiRect{{kColX[col], top + static_cast<float>(i) * (kRowH + kSpacing)},
                                 {kColW, kRowH}};
         };
+
+        // ── 场景下拉（两个场景的入口）──
+        //   模型场景：贴在滑条网格正上方（网格位置对既有拍摄机位是常量，不动）；
+        //   水面场景：网格整组不画，下拉挑到左上角 —— 屏幕上只剩这一个控件，
+        //             不再被十余行天光滑条遮住水面。
+        //   ⚠️ 下拉的 box 在两场景间不同 ⇒ 切换那一帧会收起展开态（这是我们要的）。
+        const bool water_scene = (scene_ == SceneKind::kWater);
+        const float kFullWidth = 2.0f * kColW + kColGap;
+        const jpov::UiRect combo_box =
+            water_scene
+                ? jpov::UiRect{{kColX[0], 16.0f}, {kFullWidth, kRowH}}
+                : jpov::UiRect{{kColX[0], top - (kRowH + kSpacing)}, {kFullWidth, kRowH}};
+        int scene_index = static_cast<int>(scene_);
+        if (ui_.Combo("场景", &scene_index, SceneNames(), combo_box)) {
+            scene_ = static_cast<SceneKind>(scene_index);
+        }
+
+        // 水面场景：**本阶段只有下拉 + 一行提示**，天光/雾/环境镜面那些控件全部不画。
+        if (water_scene) {
+            ui_.Text("水面 = strip 平铺 10 km² 玻璃 quad  右键拖动=绕行 滚轮=推拉",
+                     jpov::UiRect{{kColX[0], 16.0f + kRowH + kSpacing},
+                                  {kFullWidth, kRowH}});
+            return;
+        }
 
         // ── 左列：天光自由度 ──
         ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 0),
@@ -300,8 +344,18 @@ private:
         }
     }
 
+    // 面板下拉的选项顺序必须与 SceneKind 的枚举值一致（下标 = 枚举值）。
+    static const std::vector<const char*>& SceneNames() {
+        static const std::vector<const char*> kNames = {
+            "模型场景（方块/桌子/橡树/蓝人）",
+            "水面（strip 玻璃 quad 10 km²）",
+        };
+        return kNames;
+    }
+
     bool show_panel_ = true;
     bool show_scene_ = true;
+    SceneKind scene_ = SceneKind::kModel;   // 默认模型场景（原行为）
     bool tricolor_ambient_ = false;   // 三色环境光开关（默认关=原单色，零回归）
     bool env_specular_on_ = true;     // 环境镜面开关（默认开：本 PR 的主交付）
     float env_specular_scale_ = 1.0f; // 天光消费量 [0,1]（1 = 全部消费天光）
