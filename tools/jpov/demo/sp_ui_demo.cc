@@ -88,6 +88,7 @@ struct PlateOptions {
     bool light = true;        // true = 大理石主题；false = 旧 ui 深色配色
     float scale = 1.5f;       // 整体 UI 缩放（1.5 = 线框、字号、内边距全部× 1.5）
     int wave = 1;             // 水波方式（对应 SpDemoState::wave_mode）
+    bool script = false;      // true = 跑「伪造输入 + 多帧输出」的脚本回放
 };
 
 class SpUiDemoApp : public JPOV {
@@ -127,6 +128,8 @@ public:
     void SetTimeSeconds(float t) { time_s_ = t; }
     // 交互模式下是否自己推进时间（拍摄模式恒 false：每张图的时间由 --times 指定）。
     void SetAutoAdvance(bool on) { auto_advance_ = on; }
+    // 实时 log 条数：脚本回放时用来判定「点击真的进了业务逻辑」。
+    int log_count() const { return st_.log.Count(); }
 
     void OneIteration(int64_t frame_count,
                       const jpov::InputSnapshot& input,
@@ -232,7 +235,44 @@ void PrintUsage() {
         "  --fps <n>            翻书帧率（默认 6；0 = 静态材质）\n"
         "  --wave <mode>        水波方式：dissolve|sine|ripple|noise（默认 sine）\n"
         "  --dark               用旧 ui 的深色配色（默认是浅色大理石主题）\n"
-        "  --no-texture         强制纯色板材（与旧 ui 逐像素对照用）\n");
+        "  --no-texture         强制纯色板材（与旧 ui 逐像素对照用）\n"
+        "  --script             脚本回放：用伪造的 InputSnapshot 驱动交互，逐帧出图\n"
+        "                       （悬停→按下→松开点「重置」，每帧一张 PNG，\n"
+        "                        并打印每帧的 log 条数以证明点击进了业务逻辑）\n");
+}
+
+// 脚本回放的一帧：伪造的 InputSnapshot 关键字段。
+//
+// 为什么要**手工编码** raw：RunOnce 不走窗口事件循环，`FlushMouseButton`（把
+// 「按下/移动/释放」结算成 Click/Hold/Drag）不会被执行 —— 谁来喂输入，谁就负责
+// 按 input_snapshot.h 的编码写：-2 = Hold（按下未移动）、-1 = Drag（按下且移动过）、
+// 0 = None、1..8 = 本帧 Click 次数（同时要填该键的 *_clicks 池）。
+struct ScriptFrame {
+    float mouse_x = 0.0f;
+    float mouse_y = 0.0f;
+    int8_t left = 0;       // MouseState::raw
+    bool emit_click = false;  // true → left_clicks[0] 填本帧位置（left 应为 >=1）
+};
+
+// 把 "重置" 按钮走一遍「悬停 → 按下 → 松开」的最小交互脚本。
+// 坐标是**设备像素**（按 scale 缩放后的窗口坐标），面板布局见 sp_ui_demo_panel.h。
+std::vector<ScriptFrame> MakeResetClickScript(float scale, float mouse_out_x,
+                                             float mouse_out_y) {
+    // 「重置」按钮布局 (16,274) 尺寸 (120,30) → 缩放后中心点。
+    const float cx = (16.0f + 120.0f * 0.5f) * scale;
+    const float cy = (274.0f + 30.0f * 0.5f) * scale;
+    std::vector<ScriptFrame> out;
+    // 0) 鼠标在空白处
+    out.push_back({mouse_out_x, mouse_out_y, 0, false});
+    // 1) 悬停到按钮上（Hover 态）
+    out.push_back({cx, cy, 0, false});
+    // 2) 左键按下（Hold；未移动 ⇒ 不算 Drag）
+    out.push_back({cx, cy, -2, false});
+    // 3) 松开 → Click（1 次，位置 = 按钮内）
+    out.push_back({cx, cy, 1, true});
+    // 4) 移开并回到 None（松开后的静止帧）
+    out.push_back({mouse_out_x, mouse_out_y, 0, false});
+    return out;
 }
 
 // 把 "a,b,c" 解析成浮点列表。解析失败 → 空列表（调用方 CHECK）。
@@ -304,6 +344,8 @@ int main(int argc, char** argv) {
             } else {
                 LOG(FATAL) << "--wave 只接受 dissolve|sine|ripple|noise，收到 " << v;
             }
+        } else if (a == "--script") {
+            opt.script = true;
         } else if (a == "--dark") {
             opt.light = false;
         } else if (a == "--no-texture") {
@@ -372,7 +414,46 @@ int main(int argc, char** argv) {
         app.SetWaveTextures(ids);
     }
 
-    if (!capture_dir.empty()) {
+    if (opt.script) {
+        // ---- 伪造输入 + 多帧输出（单帧仿真）----
+        // 每帧：换一份 InputSnapshot → RunOnce → 一张 PNG。
+        // RunOnce 内部固定把 frame_count 传 0，所以**帧号/时间由调用方自己推进**
+        // （这里每帧 +1/30 秒喂材质）。
+        const std::string dir = capture_dir.empty() ? "output/shots/sp_ui_script"
+                                                    : capture_dir;
+        const std::string mk = "mkdir -p '" + dir + "'";
+        CHECK_EQ(std::system(mk.c_str()), 0) << "创建输出目录失败：" << dir;
+
+        jpov::WindowInfo winfo;
+        winfo.width = static_cast<int>(jpov::sp_ui::kSpUiDemoWidth * opt.scale);
+        winfo.height = static_cast<int>(jpov::sp_ui::kSpUiDemoHeight * opt.scale);
+        const std::vector<ScriptFrame> script = MakeResetClickScript(
+            opt.scale, /*mouse_out_x=*/winfo.width * 0.75f,
+            /*mouse_out_y=*/winfo.height * 0.75f);
+
+        int prev_log = app.log_count();
+        for (size_t i = 0; i < script.size(); ++i) {
+            const ScriptFrame& sf = script[i];
+            jpov::InputSnapshot in{};
+            in.mouse_x = sf.mouse_x;
+            in.mouse_y = sf.mouse_y;
+            in.left.raw = sf.left;
+            if (sf.emit_click) {
+                in.left_clicks[0] = {sf.mouse_x, sf.mouse_y, 0.5f};
+            }
+            app.SetTimeSeconds(static_cast<float>(i) / 30.0f);
+            char path[1024];
+            std::snprintf(path, sizeof(path), "%s/script_f%02zu.png", dir.c_str(), i);
+            app.RunOnce(in, winfo, path);
+            const int now_log = app.log_count();
+            LOG(INFO) << "frame " << i << " mouse=(" << sf.mouse_x << ","
+                      << sf.mouse_y << ") left=" << static_cast<int>(sf.left)
+                      << " log=" << now_log
+                      << (now_log > prev_log ? "  ← 新增 log（点击进了逻辑）" : "")
+                      << "  -> " << path;
+            prev_log = now_log;
+        }
+    } else if (!capture_dir.empty()) {
         // headless：每个时间点一张。时间轴固定 ⇒ 同一命令产出同一张图。
         const std::string cmd = "mkdir -p '" + capture_dir + "'";
         CHECK_EQ(std::system(cmd.c_str()), 0) << "创建输出目录失败：" << capture_dir;

@@ -183,6 +183,9 @@ bool ResolveFlipbookFrame(const FlipbookDesc&, float time_seconds, float* out_fr
 ```bash
 bazel test //tools/jpov/test/sp_ui:sp_ui_gold_test      # 纯 CPU，无窗口
 bazel run   //tools/jpov:jpov_sp_ui_demo                # 交互（需 DISPLAY / WSLg）
+# 伪造输入 + 多帧输出（单帧仿真）：悬停→按下→松开点「重置」，每帧一张 PNG，
+# 并打印每帧 log 条数 —— 看到 log 从 0 变 1 就说明点击真的进了业务逻辑。
+./output/jpov_sp_ui_demo/jpov_sp_ui_demo --script --capture output/shots/sp_ui/script
 ./tools/jpov/build_jpov_sp_ui_demo.sh                   # 出 Linux + Windows 产物
 ./output/jpov_sp_ui_demo/jpov_sp_ui_demo \
     --capture output/shots/try --times 0,0.4 --wave sine   # headless 出图
