@@ -84,217 +84,83 @@ vec3 InScatter(float omega_y, float z0, float len, float cos_sun) {
 }
 )glsl";
 
-// ---- 1) 顶点：全屏三角形 ----
+// ---- 1) 顶点：一块**水平巨大 quad**（10 km，跟随相机 XZ）----
 //
-// 水是一个**解析平面** `y = uLevel`：不需要任何几何。全屏三角 + 片元里逐像素
-// 射线求交即可（见 FS）。结构性好处：没有网格 ⇒ 没有中心洞、环间距、远场折角、
-// 远平面裁出来的曲线；地平线是真地平线（t 夹到 max_distance 后淡出到天光色）。
+// Danis 2026-10-27 定的实验版本：不用全屏射线求交，就用一块真实的四边形。
+// 好处是深度由光栅器给出（early-Z 正常、不需要 gl_FragDepth），坏处是它**有边界**
+// （远平面会把它切掉，见 FS 里的距离淡出）。
 //
-// 可插拔点（将来做巨浪时只换这里）：命中点/法线现在是「解析平面 + 向上法线」。
+// 6 个顶点由 gl_VertexID 生成，无 VBO；中心 = (相机 x, 水面高度 level, 相机 z)。
 static constexpr const char* kWaterVs = R"glsl(
 #version 330 core
+uniform mat4  uViewProj;
+uniform vec3  uCenter;      // (cam.x, level, cam.z)
+uniform float uHalfSize;    // 半边长（米）
+
+out vec3 vWorld;
+
 void main() {
-    vec2 pos;
+    vec2 c;
     if (gl_VertexID == 0) {
-        pos = vec2(-1.0, -1.0);
+        c = vec2(-1.0, -1.0);
     } else if (gl_VertexID == 1) {
-        pos = vec2(3.0, -1.0);
+        c = vec2( 1.0, -1.0);
+    } else if (gl_VertexID == 2) {
+        c = vec2(-1.0,  1.0);
+    } else if (gl_VertexID == 3) {
+        c = vec2(-1.0,  1.0);
+    } else if (gl_VertexID == 4) {
+        c = vec2( 1.0, -1.0);
     } else {
-        pos = vec2(-1.0, 3.0);
+        c = vec2( 1.0,  1.0);
     }
-    gl_Position = vec4(pos, 1.0, 1.0);
+    vec3 world = vec3(uCenter.x + c.x * uHalfSize,
+                      uCenter.y,
+                      uCenter.z + c.y * uHalfSize);
+    vWorld = world;
+    gl_Position = uViewProj * vec4(world, 1.0);
 }
 )glsl";
 
-// ---- 2) 水面片元 ----
-inline const std::string kWaterSurfaceFs =
-    std::string(R"glsl(
+// ---- 2) 水面片元：**只做天光反射**（水皮第一版）----
+//
+// 输出 (天空反射色, alpha = F)：配合 GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA
+//   out = sky(reflect)·F + dst·(1−F)
+// 也就是"反射叠加在已有画面上、剩下的透过去"，不做吸收、不做折射、不做 TIR。
+static constexpr const char* kWaterSurfaceFs = R"glsl(
 #version 330 core
 
+in vec3 vWorld;
+
 layout(location = 0) out vec4 FragColor;
-// MRT #1：场景深度（gl_FragCoord.z）。水面必须写它，否则该像素的"场景深度"未定义，
-// 会让后面的雾/粒子软深度读到垃圾。
 layout(location = 1) out vec4 FragSceneDepth;
 
-uniform vec2      uResolution;
-uniform mat4      uInvVP;
-uniform mat4      uViewProj;
-uniform vec3      uCameraPos;
-uniform float     uLevel;
-uniform float     uMaxDistance;   // 水面最远可见距离（米）—— 超过就淡出到地平线天光色
-uniform sampler2D uSceneColor;    // 抓帧：颜色
-uniform sampler2D uSceneDepth;    // 抓帧：MRT 场景深度（R32F，值 = gl_FragCoord.z）
-uniform float     uEnvMaxLod;
-uniform float     uF0;
-uniform float     uRoughness;
-uniform float     uAirToWaterGain;  // (n_w/n_a)² = 1.777（辐亮度守恒 L/n²）
-uniform float     uSlopeRmsRad;     // 水面 RMS 斜率（水面不平 ⇒ 临界角被卷积开）
-uniform float     uSunImageRad;     // 日盘角展宽（弧度）——只用于"太阳的折射像"
-uniform int       uIncludeVolume;   // 0 = 纯水皮（不算吸收/内散射）
-uniform vec3      uTirColor;        // 临界角外的全内反射色（纯皮模式：skylight 地色）
-uniform int       uCamUnderwater;
-)glsl") + kWaterScatterGlsl + R"glsl(
-// 用抓帧深度反推「相机 → 该像素背景」的距离（米）。
-float SceneDistance(vec2 uv) {
-    float w = texture(uSceneDepth, uv).r;
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pw = uInvVP * vec4(ndc, w * 2.0 - 1.0, 1.0);
-    return length(pw.xyz / pw.w - uCameraPos);
-}
-
-// 地平线方向的天光色（远端淡出用）。
-// ⚠️ 必须用低 mip：cubemap 的 ±X/±Z 面在最高 mip 只有 1×1 texel，那个值平均了
-//    "上半天空 + 下半地色" ⇒ 采出来是暗色，会在地平线压出一条 1 px 暗线（实测 Δ=70）。
-vec3 HorizonSky(vec3 dir) {
-    vec3 h = normalize(vec3(dir.x, 0.04, dir.z));
-    return textureLod(uEnvCube, h, 2.0).rgb * uSkyScale;
-}
+uniform vec3        uCameraPos;
+uniform samplerCube uEnvCube;
+uniform float       uEnvMaxLod;
+uniform float       uSkyScale;
+uniform float       uF0;
+uniform float       uRoughness;
+uniform float       uFarDistance;   // 远平面距离（做 quad 边缘淡出用）
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec3 N = vec3(0.0, 1.0, 0.0);
+    vec3 V = normalize(uCameraPos - vWorld);
 
-    // ── 命中点：每像素射线 ∩ 平面 y = uLevel ──
-    vec2 ndc = uv * 2.0 - 1.0;
-    vec4 pn = uInvVP * vec4(ndc, -1.0, 1.0);
-    vec4 pf = uInvVP * vec4(ndc,  1.0, 1.0);
-    vec3 rd = normalize(pf.xyz / pf.w - pn.xyz / pn.w);
-    if (abs(rd.y) < 1.0e-6) {
-        discard;
-    }
-    float t_hit = (uLevel - uCameraPos.y) / rd.y;
-    if (t_hit <= 0.0) {
-        discard;                          // 水面在相机背后（上半屏几乎全是这条）
-    }
-    float t = min(t_hit, uMaxDistance);   // 贴地平线的射线 t→∞，夹住后淡出
-    vec3 world = uCameraPos + rd * t;
+    // Schlick 菲涅尔：正入射 2%（IOR 1.333），掠射 → 1。
+    float cos_t = clamp(dot(N, V), 0.0, 1.0);
+    float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_t, 5.0);
 
-    // 深度：写 gl_FragDepth + MRT#1（两者同值）。
-    vec4 clip = uViewProj * vec4(world, 1.0);
-    float ndc_z = clip.z / max(abs(clip.w), 1.0e-9) * sign(clip.w);
-    float depth = clamp(ndc_z * 0.5 + 0.5, 0.0, 1.0);
-    gl_FragDepth = depth;
-    FragSceneDepth = vec4(depth, 0.0, 0.0, 1.0);
+    // 天光反射（探针按 roughness → mip 做模糊）。
+    vec3 refl = textureLod(uEnvCube, reflect(-V, N),
+                           clamp(uRoughness, 0.0, 1.0) * uEnvMaxLod).rgb * uSkyScale;
 
-    vec3 N = vec3(0.0, 1.0, 0.0);         // 本版水面法线恒向上（无波浪）
-    vec3 V = normalize(uCameraPos - world);
-    float cos_sun = dot(uSunDirWater, -rd);
+    // quad 会被远平面裁掉 ⇒ 用距离淡出把边界藏掉（否则地平线附近一条硬边）。
+    float dist = length(vWorld - uCameraPos);
+    float fade = 1.0 - smoothstep(0.80 * uFarDistance, uFarDistance, dist);
 
-    vec3 color;
-    if (uCamUnderwater == 1) {
-        // ── 从水下往上看：Snell 窗（×n² 增益）+ 全内反射 ──
-        // 界面反射率用精确 Fresnel（未极化）；临界角附近用 RMS 斜率把台阶抹开。
-        float ci = clamp(abs(dot(N, V)), 1.0e-4, 1.0);
-        const float kEta = 1.333;
-        const float kCosCrit = 0.6614;
-        float sin2t = kEta * kEta * (1.0 - ci * ci);
-        float R;
-        if (sin2t >= 1.0) {
-            R = 1.0;                       // 全内反射
-        } else {
-            float ct = sqrt(1.0 - sin2t);
-            float rs = (kEta * ci - ct) / (kEta * ci + ct);
-            float rp = (kEta * ct - ci) / (kEta * ct + ci);
-            R = 0.5 * (rs * rs + rp * rp);
-        }
-        // 粗糙界面 = 把精确 Fresnel **对斜率分布做平均**，不是把 R 往 1 推。
-        // （旧写法 mix(R,1,smoothstep) 会把过渡带整体往窗内偏 ~6°，窗内出现一大片灰。）
-        // 5 抽头 1D 斜率分布（±σ），高斯权重；σ=0 时退化为精确单点。
-        float Rs = R;
-        float sg = max(uSlopeRmsRad, 1.0e-3);
-        if (uSlopeRmsRad > 1.0e-4) {
-            float theta = acos(ci);
-            float sum_r = 0.0;
-            float sum_w = 0.0;
-            for (int i = -2; i <= 2; ++i) {
-                float fi = float(i);
-                float th = clamp(theta + fi * 0.5 * sg, 0.0, 1.55);
-                float wgt = exp(-2.0 * fi * fi);
-                float c = cos(th);
-                // 同一条精确 Fresnel（含 TIR 分支），只是换了入射角
-                float s2 = kEta * kEta * (1.0 - c * c);
-                float r_i;
-                if (s2 >= 1.0) {
-                    r_i = 1.0;
-                } else {
-                    float ct_i = sqrt(1.0 - s2);
-                    float rs_i = (kEta * c - ct_i) / (kEta * c + ct_i);
-                    float rp_i = (kEta * ct_i - c) / (kEta * ct_i + c);
-                    r_i = 0.5 * (rs_i * rs_i + rp_i * rp_i);
-                }
-                sum_r += wgt * r_i;
-                sum_w += wgt;
-            }
-            Rs = sum_r / sum_w;
-        }
-        // 窗口内：整片天空被压进 97.2° 锥 + 辐亮度 ×n²（Snell 窗"刺眼"的来源）。
-        vec3 win;
-        float lod = clamp(uRoughness, 0.0, 1.0) * uEnvMaxLod;
-        if (sin2t < 1.0) {
-            vec3 rdir = normalize(refract(-V, -N, kEta));
-            win = uAirToWaterGain * textureLod(uEnvCube, rdir, lod).rgb * uSkyScale;
-            // 太阳的**折射像**（透射，不是界面镜面高光 —— 界面高光另算）。
-            // 天光探针按设计不含日盘（避免与直射光照双计），所以这里单独补：
-            //   角展宽 = 日盘展宽（高频微起伏把日盘抹开，见 WaterSurface::sun_image_deg）；
-            //   峰值辐亮度 = E_sun / (π·σ²)（保证 ∫L dω = E_sun，能量守恒）。
-            float sigma = max(uSunImageRad, 0.0047);   // 下限 = 太阳自身角半径
-            float cos_a = clamp(dot(rdir, -uSunDirWater), -1.0, 1.0);
-            float ang2 = 2.0 * (1.0 - cos_a);          // ≈ θ²
-            float img = exp(-ang2 / (sigma * sigma));
-            win += uSunIrradiance * uAirToWaterGain * (img / (kWPi * sigma * sigma));
-        } else {
-            // 粗糙界面在临界角附近仍有少量透过：用地平线方向的天空当代表。
-            vec3 rh = reflect(-V, -N);
-            win = uAirToWaterGain * textureLod(uEnvCube, normalize(vec3(rh.x, 0.06, rh.z)), lod).rgb
-                * uSkyScale;
-        }
-        // 锥外：全内反射 —— 看到的是水下环境。
-        //   · 完整模式：近似成"半无限深水体的渐近散射辐亮度" σs·L/σt（随天光与介质变化）
-        //   · 纯皮模式：直接用 skylight 的地色（开了全局水以后，地色没有第二个消费者；
-        //     物理上它就是探针在镜像方向（下半球）给出的值）
-        vec3 rh_refl = reflect(-V, -N);
-        vec3 refl = uTirColor;
-        if (uIncludeVolume == 1) {
-            vec3 sig_t_v = uSigmaA + uSigmaS;
-            refl = uSigmaS * SkyIllumRadiance() * AmbMod(rh_refl.y, uPhaseGAmb)
-                 / max(sig_t_v, vec3(1.0e-4));
-        }
-        color = Rs * refl + (1.0 - Rs) * win;
-    } else {
-        // ── 从水上往下看：吸收 + 内散射（闭式积分）+ 界面反射 ──
-        vec3 bg = texture(uSceneColor, uv).rgb;      // 水下物体（按空气光照渲出）
-        vec3 under;
-        if (uIncludeVolume == 0) {
-            // 纯水皮：完全不消光 —— 背景原样透过，只做 n² 换算（L/n² 守恒）。
-            under = bg / uAirToWaterGain;
-        } else {
-            float d_surf = length(world - uCameraPos);
-            float d_bg   = SceneDistance(uv);
-            float L      = max(d_bg - d_surf, 0.0);    // 水下段长度
-            vec3 sig_t   = uSigmaA + uSigmaS;
-            vec3 T       = exp(-sig_t * L);
-            // 入水点就在水面 ⇒ z0 = 0；视线 y 分量 = rd.y（俯视 < 0）
-            vec3 insc    = InScatter(rd.y, 0.0, L, cos_sun);
-            // 物体的辐亮度与内散射都是"水中的辐亮度"，出射到空气要除以 n²。
-            under = (bg * T + insc) / uAirToWaterGain;
-        }
-
-        float cos_t = clamp(dot(N, V), 0.0, 1.0);
-        float F = uF0 + (1.0 - uF0) * pow(1.0 - cos_t, 5.0);
-        vec3 refl = textureLod(uEnvCube, reflect(-V, N),
-                               clamp(uRoughness, 0.0, 1.0) * uEnvMaxLod).rgb * uSkyScale;
-        color = under * (1.0 - F) + refl * F;
-    }
-
-    // 远端淡出：贴地平线的水面收敛到**该像素已经画好的那个颜色**（抓帧副本）。
-    //
-    // 为什么不是"地平线天光色"：水皮现在跑在雾/其它 effect **之后**，背景可能已经被
-    // 远景雾染过。收敛到探针色会和"已经渲染出的天空"对不上，地平线出现硬缝 + 暗带
-    // （实测：开远景雾后 72% 像素变化，缝和暗带都出现）。收敛到抓帧色则天然连续：
-    // 边缘处水面 == 原本就在那儿的像素。
-    float far_fade = smoothstep(0.75 * uMaxDistance, uMaxDistance, t);
-    color = mix(color, texture(uSceneColor, uv).rgb, far_fade);
-
-    FragColor = vec4(color, 1.0);
+    FragColor = vec4(refl, F * fade);
+    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 

@@ -188,7 +188,7 @@ namespace jpov {
 void WaterRenderer::Init(ShaderManager* shader_mgr) {
     CHECK(shader_mgr != nullptr);
     shader_mgr_ = shader_mgr;
-    prog_surface_ = shader_mgr_->GetOrCreate("water_surface", {kWaterVs, kWaterSurfaceFs.c_str()});
+    prog_surface_ = shader_mgr_->GetOrCreate("water_surface", {kWaterVs, kWaterSurfaceFs});
     prog_medium_ = shader_mgr_->GetOrCreate("water_medium", {kWaterMediumVs, kWaterMediumFs.c_str()});
 
     // 全屏三角形用的空 VAO（core profile 下没有绑 VAO 的 draw 非法）。两个 pass 共用。
@@ -288,6 +288,14 @@ void WaterRenderer::Capture(int w, int h, unsigned int fbo_hdr) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// ---- 水皮（quad 版，2026-10-27 实验）----
+//
+// 一块 10 km 的水平 quad，跟随相机 XZ；**只做天光反射**：
+//   out = sky(reflect)·F + dst·(1−F)      （GL_SRC_ALPHA / ONE_MINUS_SRC_ALPHA）
+// 不做吸收、不做折射、不做 TIR、不写场景深度（MRT#1 在本趟只开颜色附件）。
+//
+// 与全屏射线版的区别：深度由光栅器给出（early-Z 正常、不需要 gl_FragDepth），
+// 但 quad 有边界 —— 远平面会把它切掉，所以 FS 里按距离淡出，避免一条硬边。
 void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                                 int fbo_w, int fbo_h,
                                 unsigned int fbo_hdr,
@@ -300,93 +308,57 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
     CHECK_GT(fbo_w, 0);
     CHECK_GT(fbo_h, 0);
     CHECK_NE(fbo_hdr, 0u);
-    CHECK_NE(color_tex, 0u);
-    CHECK_NE(scene_depth_tex, 0u);
-    CHECK_NE(env_cube, 0u) << "水面反射需要天光 cubemap（Renderer 应先建探针）";
-
-    Capture(fbo_w, fbo_h, fbo_hdr);
-
-    float inv_vp[16];
-    InvertMat4(view_proj, inv_vp);
+    CHECK_NE(env_cube, 0u) << "水面反射需要天光 cubemap";
+    (void)color_tex;
+    (void)scene_depth_tex;
+    (void)sun;
+    (void)tir_color;
 
     glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_VIEWPORT_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
-    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
+    // 只写颜色附件 0：水皮本趟不碰场景深度（写了会与 alpha 混合打架）。
+    const GLenum one_buf[1] = {GL_COLOR_ATTACHMENT0};
+    glDrawBuffers(1, one_buf);
     glViewport(0, 0, fbo_w, fbo_h);
 
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);      // 被"水面之前"的不透明物体正确遮挡
+    glDepthMask(GL_FALSE);        // 半透明层：不写深度
     glDepthFunc(GL_LESS);
-    glDisable(GL_CULL_FACE);      // 从水下往上看时看到的是背面
-    glDisable(GL_BLEND);          // 颜色已在 shader 里算好（含背景吸收）
+    glDisable(GL_CULL_FACE);      // 巨大 quad 的绕序不必纠结
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(prog_surface_);
     glUniformMatrix4fv(shader_mgr_->GetUniform(prog_surface_, "uViewProj"),
                        1, GL_FALSE, view_proj);
-    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_surface_, "uInvVP"),
-                       1, GL_FALSE, inv_vp);
-    glUniform2f(shader_mgr_->GetUniform(prog_surface_, "uResolution"),
-                static_cast<float>(fbo_w), static_cast<float>(fbo_h));
+    const float half_size = 5000.0f;   // 10 km 边长
+    glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uCenter"),
+                cam.position.x(), water.level, cam.position.z());
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uHalfSize"), half_size);
     glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uCameraPos"),
                 cam.position.x(), cam.position.y(), cam.position.z());
-    // 平面求交 + 远端淡出：uLevel 由调用方给（水面高度），max_distance 取远平面的 95%
-    //（贴地平线的射线 t→∞，夹住后淡出到地平线天光色，所以永远不会有硬边）。
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uLevel"), water.level);
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uMaxDistance"),
-                std::max(1.0f, cam.far * 0.95f));
-    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_surface_, "uViewProj"),
-                       1, GL_FALSE, view_proj);
-
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uEnvMaxLod"), env_max_lod);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSkyScale"),
                 std::max(0.0f, water.sky_scale));
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uF0"), water.f0);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uRoughness"), water.roughness);
-    // 介质 + 两条光源（与介质 pass 共用同一份上传代码）
-    const SunUnderwater sun_u = sun ? ComputeSunUnderwater(*sun) : SunUnderwater{};
-    UploadMediumAndLights(*shader_mgr_, prog_surface_, water, sun_u);
-    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uCamUnderwater"),
-                IsCameraUnderwater(water, cam) ? 1 : 0);
-    // 空气→水的辐亮度增益 (n_w/n_a)²：水下看到的天空要 ×1.777（Snell 窗"刺眼"的物理来源）。
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uAirToWaterGain"), 1.333f * 1.333f);
-    // 水面 RMS 斜率（度 → 弧度）。0 = 理想镜面（TIR 硬边）。
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSlopeRmsRad"),
-                std::max(0.0f, water.surface_slope_rms_deg) * 3.14159265358979f / 180.0f);
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSunImageRad"),
-                std::max(0.0f, water.sun_image_deg) * 3.14159265358979f / 180.0f);
-    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uIncludeVolume"),
-                water.include_volume ? 1 : 0);
-    // 纯皮模式的 TIR 色 = skylight 地色（由调用方经 sun_ground_color 传入；默认深灰）。
-    glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uTirColor"),
-                tir_color[0], tir_color[1], tir_color[2]);
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uFarDistance"),
+                std::max(1.0f, cam.far));
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, cap_color_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uSceneColor"), 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, cap_depth_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uSceneDepth"), 1);
-    glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_CUBE_MAP, env_cube);
-    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uEnvCube"), 2);
+    glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uEnvCube"), 0);
 
-    // 全屏三角：命中点由 FS 逐像素解出来。
-    // ⚠️ 本 pass 写 gl_FragDepth ⇒ 这一趟 early-Z 失效（必须等求交结果才能判深度）；
-    //    它是独立 pass，本来就要为每个水面像素跑完整 FS，故实际损失可忽略。
     glBindVertexArray(fs_vao_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     glUseProgram(0);
 
-    // 复原 draw buffer（后面还有 3D pass / 雾会写 MRT 双附件）。
+    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
     glPopAttrib();
 }
