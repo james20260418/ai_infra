@@ -140,34 +140,40 @@ void main() {
     if (uCamUnderwater == 1) {
         // ── 从水下往上看：全内反射 + Snell 窗 ──
         // 入射角按 |dot(N,V)| 取（法线朝上、相机在下 ⇒ dot < 0）。
-        // 水→空气界面：n1 = 1.333（水）、n2 = 1.0（空气）。
-        // 用**未极化的精确 Fresnel**（不是 Schlick）：它在临界角处自然升到 1，
-        // 于是"全内反射"就是同一条连续曲线的末端 —— 不会再出现一圈硬边界。
-        // （此前用 smoothstep(st) 近似，实测读成一圈"LED 环" + 中间一个洞。）
+        // ── 从水下往上看：全内反射（TIR）+ Snell 窗 ──
+        //
+        // 纯解析的界面在临界角处是**一根硬线**（R 在 0.5° 内从 1 掉到 0.4），
+        // 而真实水面从来没有绝对平的时候：微观起伏会把临界角抹开一大圈。
+        // 所以这里不做"精确 Fresnel 硬切"，而是按**角度**做一个宽过渡带：
+        //   外带 = 全内反射（映水下环境）；内带 = Snell 窗（透过水面看天）；
+        //   中间 = 两者按 smoothstep 混合 —— 这就是肉眼看到的那种"渐变的水面线"。
+        //
+        // 几何量：sinθc = n2/n1 = 1/1.333 ⇒ cosθc = 0.6614。
+        const float kCosCrit = 0.6614;
+        // 过渡带半宽（cos 空间）。0.12 ≈ 视角 ±9°，对应屏幕上几十像素的渐变。
+        const float kSoft = 0.12;
         float ci = clamp(abs(dot(N, V)), 1.0e-4, 1.0);
-        float si = sqrt(max(0.0, 1.0 - ci * ci));
-        const float kEta = 1.333;                    // n_water / n_air
-        float sin2t = kEta * kEta * (1.0 - ci * ci); // = sin²θt
-        float R;
-        if (sin2t >= 1.0) {
-            R = 1.0;                                 // 全内反射
-        } else {
-            float ct = sqrt(1.0 - sin2t);            // cosθt
-            float rs = (kEta * ci - ct) / (kEta * ci + ct);
-            float rp = (kEta * ct - ci) / (kEta * ct + ci);
-            R = 0.5 * (rs * rs + rp * rp);
-        }
-        // 反射侧：探针下半球（地色）当"水下环境"的低频替身，再掺水体散射色，
-        // 否则整片"水做的天花板"会读成死黑。
+        float t = smoothstep(kCosCrit - kSoft, kCosCrit + kSoft, ci);   // 0=TIR, 1=窗口
+
+        // 反射侧：探针下半球（地色）当"水下环境"的低频替身，再掺水体散射色并提亮一点
+        //（不这样它会是死黑，整片"水做的天花板"读成一个洞）。
         vec3 refl = textureLod(uEnvCube, reflect(-V, -N), 0.35 * uEnvMaxLod).rgb * uSkyScale;
-        refl = mix(uScatter * uScatterScale, refl, 0.55);
-        // 折射侧（仅在临界角内有效）：透过水面看到的天空。
-        vec3 win = refl;
-        if (sin2t < 1.0) {
-            vec3 rd = refract(-V, -N, kEta);
+        refl = mix(uScatter * uScatterScale * 1.6, refl, 0.45);
+
+        // 窗口侧的两种采样：
+        //   · 临界角内：真实折射方向（整片天空被压进 97°  的锥里，边缘亮、中心蓝）；
+        //   · 临界角外（过渡带里还没有折射解）：用地平线方向的天空色 —— 保证过渡带
+        //     从"暗的水面"平滑升到"亮的天"，而不是掉回黑色。
+        vec3 rd = refract(-V, -N, 1.333);
+        vec3 win;
+        if (dot(rd, rd) > 1.0e-8) {
             win = textureLod(uEnvCube, normalize(rd), roughness * uEnvMaxLod).rgb * uSkyScale;
+        } else {
+            vec3 rh = reflect(-V, -N);
+            win = textureLod(uEnvCube, normalize(vec3(rh.x, 0.03, rh.z)),
+                             roughness * uEnvMaxLod).rgb * uSkyScale;
         }
-        color = refl * R + win * (1.0 - R);
+        color = mix(refl, win, t);
     } else {
         // ── 从水上往下看：反射 + 逐通道吸收背景 ──
         vec3 bg = texture(uSceneColor, uv).rgb;
