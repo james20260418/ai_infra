@@ -16,3 +16,20 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# sp_ui 多帧回放测试（GPU / llvmpipe）：伪造 InputSnapshot 驱动「悬停→按下→松开→拖拽」，
+# 逐帧出 PNG 并断言三态亮度关系 + 业务回调/值变化。这是单帧仿真的 CI 样板。
+cc_test(
+    name = "sp_ui_replay_test",
+    srcs = ["sp_ui_replay_test.cc"],
+    deps = [
+        "//third_party/stb:stb_image",
+        "//tools/common:utils",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/sp_ui:sp_ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
