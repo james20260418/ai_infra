@@ -36,6 +36,8 @@ uniform float uWaveAmp;
 uniform float uWaveLength;
 uniform vec2  uWaveDir;      // 已归一化的水平方向
 uniform float uWaveTime;
+uniform float uWaveFadeStart;   // 水平距离（米）内 = 全幅
+uniform float uWaveFadeEnd;     // 超过这里 = 完全不位移（网格已经太稀，位移只会变成折角）
 
 out vec3 vWorld;
 out vec3 vNormal;
@@ -49,6 +51,11 @@ void main() {
     vec2  grad = vec2(0.0);
 
     if (uWaveAmp > 0.0) {
+        // ⚠️ 按到相机的水平距离淡出：极坐标网格越远越稀，远处再位移只会得到
+        //    「大三角面 + 硬折边」。真实海浪在几百米外本来就小于一个像素，
+        //    淡到 0 既省钱也不损观感。
+        float fade = 1.0 - smoothstep(uWaveFadeStart, uWaveFadeEnd,
+                                      length(aXZ));
         for (int i = 0; i < 3; ++i) {
             float fi = float(i);
             // 方向旋开：0° / +40° / −40°
@@ -59,7 +66,7 @@ void main() {
                             uWaveDir.x * sa + uWaveDir.y * ca);
             float len = uWaveLength / (1.0 + 0.6 * fi);      // 波长递减
             float k = kTau / max(len, 0.001);
-            float amp = uWaveAmp / (1.0 + 1.2 * fi);         // 振幅递减
+            float amp = fade * uWaveAmp / (1.0 + 1.2 * fi);  // 振幅递减 + 距离淡出
             float phase = k * dot(dir, p) - sqrt(kG * k) * uWaveTime + fi * 1.7;
             height += amp * sin(phase);
             grad   += amp * k * cos(phase) * dir;            // d(height)/d(xz)
@@ -133,18 +140,34 @@ void main() {
     if (uCamUnderwater == 1) {
         // ── 从水下往上看：全内反射 + Snell 窗 ──
         // 入射角按 |dot(N,V)| 取（法线朝上、相机在下 ⇒ dot < 0）。
-        float ci = clamp(abs(dot(N, V)), 0.0, 1.0);
+        // 水→空气界面：n1 = 1.333（水）、n2 = 1.0（空气）。
+        // 用**未极化的精确 Fresnel**（不是 Schlick）：它在临界角处自然升到 1，
+        // 于是"全内反射"就是同一条连续曲线的末端 —— 不会再出现一圈硬边界。
+        // （此前用 smoothstep(st) 近似，实测读成一圈"LED 环" + 中间一个洞。）
+        float ci = clamp(abs(dot(N, V)), 1.0e-4, 1.0);
         float si = sqrt(max(0.0, 1.0 - ci * ci));
-        float st = 1.333 * si;                       // 水→空气：sinθt = 1.333·sinθi
-        // 全内反射侧：探针下半球是地色（≈水下环境的低频替身），再叠一点水体散射色，
-        // 否则整片"水做的天花板"会读成一块死黑（实测：直接采样探针看着像个洞）。
+        const float kEta = 1.333;                    // n_water / n_air
+        float sin2t = kEta * kEta * (1.0 - ci * ci); // = sin²θt
+        float R;
+        if (sin2t >= 1.0) {
+            R = 1.0;                                 // 全内反射
+        } else {
+            float ct = sqrt(1.0 - sin2t);            // cosθt
+            float rs = (kEta * ci - ct) / (kEta * ci + ct);
+            float rp = (kEta * ct - ci) / (kEta * ct + ci);
+            R = 0.5 * (rs * rs + rp * rp);
+        }
+        // 反射侧：探针下半球（地色）当"水下环境"的低频替身，再掺水体散射色，
+        // 否则整片"水做的天花板"会读成死黑。
         vec3 refl = textureLod(uEnvCube, reflect(-V, -N), 0.35 * uEnvMaxLod).rgb * uSkyScale;
         refl = mix(uScatter * uScatterScale, refl, 0.55);
-        // 窗口边沿软化：sinθt 过 1 的那一圈是锐利边界，硬切会出现一圈"LED 环"。
-        float window = 1.0 - smoothstep(0.95, 1.0, st);
-        vec3 refr_dir = refract(-V, -N, 1.333);      // 折射进空气 = 透过水面看天
-        vec3 win = textureLod(uEnvCube, normalize(refr_dir), roughness * uEnvMaxLod).rgb * uSkyScale;
-        color = mix(refl, win, window);
+        // 折射侧（仅在临界角内有效）：透过水面看到的天空。
+        vec3 win = refl;
+        if (sin2t < 1.0) {
+            vec3 rd = refract(-V, -N, kEta);
+            win = textureLod(uEnvCube, normalize(rd), roughness * uEnvMaxLod).rgb * uSkyScale;
+        }
+        color = refl * R + win * (1.0 - R);
     } else {
         // ── 从水上往下看：反射 + 逐通道吸收背景 ──
         vec3 bg = texture(uSceneColor, uv).rgb;

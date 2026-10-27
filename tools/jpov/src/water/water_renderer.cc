@@ -44,12 +44,23 @@
 namespace {
 
 // 极坐标 LOD 网格参数。
-//   · 圈数 / 段数固定 ⇒ 顶点数固定（≈ 4.7k），近处密、远处疏；
-//   · 最外圈 900 m：相机在水面 2 m 高时，外圈相对真地平线的下沉角 ≈ 0.13°（≈ 2 px，
-//     交给远景雾吃掉）。相机 far 比 900 小时会被远平面裁掉（无副作用）。
-constexpr int kRings = 48;
+//
+// 结构 = 「近场幂律环」+「远场几何环」，中心**没有洞**：
+//   · 第 0 圈半径 = 0（96 个顶点重合在相机正下方）⇒ 与第 1 圈之间自动退化成
+//     "扇形"（每个四边形里两个三角形退化为零面积）。**曾经写成内半径 0.35 m，
+//     相机贴近水面（水位 ≈ 相机高度）时那个洞会在屏幕上张成一个巨大的缺口，
+//     直接从水里看到海床**（2026-10-27 Danis 报的"漏出大量 box"）。
+//   · 近场 0 → kNearRadius 用幂律（r = R·(i/N)^1.6）：中心密（间距 ~0.5 m）、
+//     外沿疏（~5.7 m）—— 这个间距决定了**能表示多短的浪**（≥ 4~6 个采样/波长）。
+//   · 远场 kNearRadius → kOuterRadius 用几何级数：这段只负责铺到地平线，浪幅已被
+//     VS 里的距离淡出压到 0（否则 30 m 间距的四边形会把浪画成折角多边形）。
+//   · 最外圈 900 m：相机在水面 2 m 高时，外圈相对真地平线下沉 ≈ 0.13°（≈ 2 px，
+//     交给远景雾吃掉）；相机 far 比 900 小时会被远平面裁掉（无副作用）。
+constexpr int kNearRings = 56;
+constexpr int kFarRings = 12;
+constexpr int kRings = kNearRings + kFarRings;
 constexpr int kSegments = 96;
-constexpr float kInnerRadius = 0.35f;
+constexpr float kNearRadius = 200.0f;
 constexpr float kOuterRadius = 900.0f;
 
 // 4x4 列主序求逆（Gauss-Jordan + 部分主元）。只用于把 NDC 反投影回世界算距离，
@@ -158,8 +169,15 @@ void WaterRenderer::EnsureMesh() {
     std::vector<float> verts;
     verts.reserve(static_cast<size_t>(vert_count) * 2);
     for (int i = 0; i <= kRings; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(kRings);
-        const float r = kInnerRadius * std::pow(kOuterRadius / kInnerRadius, t);
+        float r = 0.0f;
+        if (i <= kNearRings) {
+            const float t = static_cast<float>(i) / static_cast<float>(kNearRings);
+            r = kNearRadius * std::pow(t, 1.6f);          // 幂律：中心密、外沿疏
+        } else {
+            const float t = static_cast<float>(i - kNearRings)
+                          / static_cast<float>(kFarRings);
+            r = kNearRadius * std::pow(kOuterRadius / kNearRadius, t);
+        }
         for (int j = 0; j < kSegments; ++j) {
             const float ang = static_cast<float>(j) * 6.28318530718f
                             / static_cast<float>(kSegments);
@@ -336,6 +354,16 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 std::max(0.001f, water.wave_length));
     glUniform2f(shader_mgr_->GetUniform(prog_surface_, "uWaveDir"), wnx, wnz);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveTime"), water.wave_time);
+    // 波浪距离淡出：远场环间距 ~5.7 m 起、迅速变粗，位移在那里只会变成折角多边形。
+    // 取 3λ ~ 7λ（并夹到 [40,150] / [90,210]）：保证淡出结束时仍有 ≥4 个采样/波长。
+    {
+        const float lam = std::max(0.001f, water.wave_length);
+        const float fade_start = std::clamp(3.0f * lam, 40.0f, 150.0f);
+        const float fade_end = std::max(fade_start + 1.0f,
+                                        std::clamp(7.0f * lam, 90.0f, 210.0f));
+        glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveFadeStart"), fade_start);
+        glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveFadeEnd"), fade_end);
+    }
 
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uEnvMaxLod"), env_max_lod);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSkyScale"),
