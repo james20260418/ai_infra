@@ -183,7 +183,8 @@ Plate 用屏幕坐标算 UV（uv.y 向下），而 PNG 第一行就在 v=0 ⇒ �
 > 格式的**唯一权威描述**在 `tools/jpov/interface/flipbook.h`（`FlipbookDesc` +
 > `ResolveFlipbookFrame()`，含 8 条格式约定）。下面是使用侧要点：
 
-0. **图集必须给 fps > 0**：`fps = 0` 的定义是「整张图就是一帧」，4×4 图集会整张当一幅图显示。
+0. **图集必须给 `tiles > 1×1`**：这是「要不要裁 cell」的唯一判据。`fps = 0` 只是「不动」
+   （静止在第 0 帧），**不会**把 4×4 图集整张当一幅图。要单张图就写 `tiles = 1×1`。
 1. **纹理注册**：`repeat = true`（要平铺）、`mipmap = false`
    —— UI 是 1:1 像素，而 `fract` 平铺在接缝处导数不连续，自动选 LOD 会挑到最粗
    mip，在每条接缝上糊一条线（`tools/jpov/known_issue.md` §8.2）。

@@ -40,6 +40,7 @@ using jpov::RenderCommandList;
 using jpov::sp_ui::SpDemoState;
 using jpov::sp_ui::SpRect;
 using jpov::sp_ui::SpTheme;
+using jpov::PlateLayer;
 using jpov::sp_ui::SpUi;
 
 // 测试用的两个「纹理 id」—— 只需要非 0 且不同，CPU 侧不解析真纹理。
@@ -375,6 +376,40 @@ void CheckMultiPlate() {
     LOG(INFO) << "[PASS] MultiPlate：两层图集/帧率/密度互不污染";
 }
 
+// ---- 7b. MakeLayerFor 的密度与缩放无关 ----
+//
+// material_px 是**布局单位**，实现里是 dev.size / (material_px × scale)，
+// 两边的 scale 应当约掉 ⇒ 同一块布局 box、不同 ui_scale，tiling 必须**相同**。
+// 写错（漏乘或重复乘）会让 1.5 倍面板上的纹理密度突然变 2.25 倍 / 0.44 倍。
+void CheckLayerForScaleInvariance() {
+    const SpRect box{{120.0f, 60.0f}, {300.0f, 120.0f}};
+    float tiling[2] = {0.0f, 0.0f};
+    float scroll[2] = {0.0f, 0.0f};
+    const float scales[2] = {1.0f, 1.5f};
+    for (int i = 0; i < 2; ++i) {
+        SpUi ui;
+        ui.SetUiScale(scales[i]);
+        jpov::InputSnapshot input{};
+        ui.Begin(input, MakeTheme(), 1280.0f * scales[i], 720.0f * scales[i],
+                 0.0f, 0.0f);
+        const PlateLayer l = ui.MakeLayerFor(box, kCoreTex, /*material_px=*/150.0f,
+                                             {4, 4, 6.0f});
+        tiling[i] = l.tiling.x();
+        scroll[i] = l.scroll.x();
+        ui.End();
+    }
+    CHECK(std::fabs(tiling[0] - tiling[1]) < 1e-4f)
+        << "密度随缩放变了（应约掉）：scale1.0 tiling=" << tiling[0]
+        << "，scale1.5 tiling=" << tiling[1];
+    CHECK(std::fabs(tiling[0] - 300.0f / 150.0f) < 1e-4f)
+        << "密度算错：期望 2.0，实际 " << tiling[0];
+    // 屏幕锚定同理：scroll = −pos/material_px，与缩放无关。
+    CHECK(std::fabs(scroll[0] - (-120.0f / 150.0f)) < 1e-4f);
+    CHECK(std::fabs(scroll[0] - scroll[1]) < 1e-4f)
+        << "屏幕锚定的 scroll 随缩放变了";
+    LOG(INFO) << "[PASS] MakeLayerFor：密度/锚定与 ui_scale 无关";
+}
+
 // ---- 8. 退化输入 ----
 void CheckDegenerateInputs() {
     SpUi ui;
@@ -408,6 +443,7 @@ int main() {
     CheckTimeIsData();
     CheckFlipbookWrap();
     CheckMultiPlate();
+    CheckLayerForScaleInvariance();
     CheckDegenerateInputs();
     LOG(INFO) << "===== sp_ui gold 全部通过 =====";
     return 0;

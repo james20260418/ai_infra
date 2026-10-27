@@ -158,7 +158,7 @@ struct SpTheme {
     // 打开后**整屏纹理密度一致**（大面板看到多格、小控件看到少格，纹路尺度连续），
     // 而字面 tiling 会把同一张 cell 拉充满一块大面板 → 纹理被放大到糊。
     float plate_material_px = 0.0f;
-    // flipbook：0 = 静态（整张图当一帧）。
+    // flipbook 帧率：0 = 静止在第 0 帧（图集仍会裁 cell，不会整张显示）。
     // 与粒子同一套约定：帧号由 time_seconds × fps 算，时间由调用方给。
     float plate_flipbook_fps = 0.0f;
     int plate_tiles_x = 1;
@@ -336,8 +336,16 @@ public:
     // 画一块多纹理板材（不参与命中）。时间轴用本帧的 time_seconds。
     void MultiPlate(const SpRect& box, const SpPlateSkin& skin);
 
-    // 本帧主题（拷贝）。供面板/装饰自己构造板材时取同一套配色与材质，
+    // 本帧主题。供面板/装饰自己构造板材时取同一套配色与材质，
     // 避免把颜色硬编码进面板（那样换主题只换了一半）。
+    //
+    // ⚠️ 返回的是**已缩放**的主题：`font_size / padding_px / spacing_px /
+    // corner_radius_px / border_width_px / plate_border_fade / plate_material_px(*)`
+    // 都已经是**设备像素**（Begin 里乘过 ui_scale_）。
+    //   * 拿颜色 → 随便用；
+    //   * 拿长度喂给公开 API（`Plate(box, fill, radius)` 之类**会再乘 ui_scale_**）
+    //     ⇒ 会二次缩放。要么自己除回 ui_scale_，要么别用这些字段当布局长度。
+    // （`plate_material_px` 例外地仍是「屏幕像素/格」的语义：设备像素，正常用。）
     const SpTheme& theme() const { return theme_; }
 
     // ---- 全局 UI 缩放 ----

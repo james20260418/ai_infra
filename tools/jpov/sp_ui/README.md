@@ -156,7 +156,8 @@ bool ResolveFlipbookFrame(const FlipbookDesc&, float time_seconds, float* out_fr
 必须记住的几条（详见该文件头的 8 条约定）：
 
 1. 图集 = `tiles_x × tiles_y` 网格、**行主序、帧 0 在图片左上角**。
-2. **`fps = 0` 的含义是「整张图就是一帧」** ⇒ 图集纹理必须给 `fps > 0`。
+2. **裁 cell 与「会不会动」是两件事**：`tiles > 1×1` ⇒ 裁 cell；`fps = 0` ⇒ 静止在第 0 帧
+   （不是「整张图一帧」；要单张图就写 `tiles = 1×1`）。
 3. 纹理注册用 `repeat = true`、**`mipmap = false`**（UI 是 1:1 像素；平铺接缝处导数断，开 mip 会糊一条线）。
 4. 时间由调用方给（秒），引擎不取自己的时钟 ⇒ 同一命令 + 同一秒数 = 同一张图（gold 可复现）。
 5. 循环闭合的判据：`t = N/fps` 与 `t = 0` **逐像素相同**。

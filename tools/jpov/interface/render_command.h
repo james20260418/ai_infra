@@ -376,7 +376,7 @@ struct PlateLayer {
     uint32_t texture_id = 0;            // 0 = 纯色
     Vec2f tiling = {1.0f, 1.0f};        // 每边平铺次数（各分量 > 0）
     Vec2f scroll = {0.0f, 0.0f};        // UV 平移（单位 = 一整张图）
-    FlipbookDesc flipbook;              // 图集网格 + 帧率（fps = 0 = 静态整图）
+    FlipbookDesc flipbook;              // 图集网格 + 帧率（fps = 0 = 静止在第 0 帧）
 };
 
 // 2D 板材（渲染分辨率空间，像素坐标，原点左上角）

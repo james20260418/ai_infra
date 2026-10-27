@@ -62,8 +62,8 @@ namespace jpov {
 struct FlipbookDesc {
     int tiles_x = 1;    // 列数（>= 1）
     int tiles_y = 1;    // 行数（>= 1）
-    float fps = 0.0f;   // 播放帧率（帧/秒）。0 = 静态（**整张图当一帧**，不裁 UV）
-                        // ⚠️ 所以图集纹理必须给 fps > 0：否则 4x4 图集会整张当作一幅图显示。
+    float fps = 0.0f;   // 播放帧率（帧/秒）。0 = **不动**（图集仍然裁 cell，静止在第 0 帧）
+                        // 「整张图就是一帧」是 tiles_x = tiles_y = 1，不是 fps = 0。
 
     // 总帧数（= 网格格数）。
     int frame_count() const { return tiles_x * tiles_y; }
