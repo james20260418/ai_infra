@@ -163,6 +163,18 @@ struct SpTheme {
     int plate_tiles_x = 1;
     int plate_tiles_y = 1;
 
+    // ---- 板材：**边框带**自己的材质（可与填充层完全不同）----
+    // 0 = 纯色边框（不采样纹理）。非 0 时必须是已注册的纹理 id。
+    // 为什么要分开：Danis 2026-10-27「box 核心一个 flipbook，box 边界另一个 flipbook」——
+    // 边框想用另一条更慢的金属流、或纯色边框 + 纹理填充，都只需要改这里。
+    uint32_t plate_border_texture_id = 0;
+    // 边框层的密度（屏幕像素 / 一格 cell）。0 = 跟随 plate_material_px。
+    float plate_border_material_px = 0.0f;
+    // 边框层的翻书帧率（与填充层**独立**，所以两层的动画速度可以不同）。
+    float plate_border_flipbook_fps = 0.0f;
+    int plate_border_tiles_x = 1;
+    int plate_border_tiles_y = 1;
+
     // ---- 板材：边框剖面（上一轮讨论的两个边框选项，是同一份数据的两端）----
     // 0 = 平面带（只有常量底）；1 = 完整圆管剖面（假 3D 银色边）。
     float plate_border_bump = 0.0f;
@@ -296,6 +308,31 @@ public:
     //   静下来反而让控件上的纹路更突出，也更不抢文字。
     void Plate(const SpRect& box, Color fill, float radius, bool textured = true);
 
+    // ---- 多纹理板材（演示/自定义控件用）----
+    //
+    // 核心与边界各自一套材质，**可以各自动自己的 flipbook**（不同图集/帧率/密度）。
+    // 不参与命中、不写任何状态 —— 要交互请用现成控件。
+    struct SpPlateSkin {
+        PlateLayer fill;            // 核心层
+        PlateLayer border;          // 边界层
+        Color fill_tint = kColorWhite;
+        Color border_tint = kColorWhite;
+        float radius = 0.0f;
+        float border_width = 0.0f;
+        float border_bump = 0.0f;
+        float border_fade = 0.0f;
+    };
+
+    // 按主题的「密度 + 屏幕锚定」规则造一层材质（供上面的 SpPlateSkin 用）。
+    // tex: 已注册纹理 id（0 = 纯色）；material_px: 屏幕像素/格（0 = 用 tiling 字面值）；
+    // fb: 图集格式（见 interface/flipbook.h）。
+    // box: **布局坐标**（内部会缩放到设备像素后再反算密度）。
+    PlateLayer MakeLayerFor(const SpRect& box, uint32_t tex, float material_px,
+                            const FlipbookDesc& fb) const;
+
+    // 画一块多纹理板材（不参与命中）。时间轴用本帧的 time_seconds。
+    void MultiPlate(const SpRect& box, const SpPlateSkin& skin);
+
     // 本帧主题（拷贝）。供面板/装饰自己构造板材时取同一套配色与材质，
     // 避免把颜色硬编码进面板（那样换主题只换了一半）。
     const SpTheme& theme() const { return theme_; }
@@ -356,7 +393,12 @@ private:
     // PushPlate 的实际实现：textured=false 时这次不采样材质（纯色填充）。
     // 走参数而不是临时改主题 —— 隐式改成员状态会让后面所有控件也跟着变。
     void PushPlateInternal(const SpRect& r, Color fill, Color border,
-                           float radius, bool textured);
+                           float radius, bool fill_textured,
+                           bool border_textured = true);
+    // 由主题字段造一层材质（fill / border 共用同一套规则）。
+    // textured = false 时该层退回纯色（不采样纹理；图集/帧率仍保留，不影响其它层）。
+    PlateLayer MakeLayer(const SpRect& box_device, bool is_border,
+                         bool textured) const;
     void PushText(const char* s, const SpRect& box);
     // 与公开的 Text() 同语义，但 box 已是**设备像素**（不再过 Scaled）。
     // 控件内部把 box 缩过一次后必须调这个：调公开的 Text() 会二次缩放

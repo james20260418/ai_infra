@@ -218,11 +218,15 @@ void RenderCommandList::DrawPlate(const Plate2DCommand& plate) {
     CHECK_LE(plate.border_fade, plate.border_width)
         << "Plate2D border_fade " << plate.border_fade
         << " 超过 border_width " << plate.border_width;
-    CHECK_GT(plate.tiling.x(), 0.0f) << "Plate2D tiling.x 必须 > 0";
-    CHECK_GT(plate.tiling.y(), 0.0f) << "Plate2D tiling.y 必须 > 0";
-    CHECK_GE(plate.tiles_x, 1) << "Plate2D tiles_x 必须 >= 1";
-    CHECK_GE(plate.tiles_y, 1) << "Plate2D tiles_y 必须 >= 1";
-    CHECK_GE(plate.flipbook_fps, 0.0f) << "Plate2D flipbook_fps 必须 >= 0";
+    // 两层材质各自校验（图集格式约定见 flipbook.h）。
+    plate.fill.flipbook.Validate();
+    plate.border.flipbook.Validate();
+    CHECK_GT(plate.fill.tiling.x(), 0.0f) << "Plate2D fill.tiling.x 必须 > 0";
+    CHECK_GT(plate.fill.tiling.y(), 0.0f) << "Plate2D fill.tiling.y 必须 > 0";
+    CHECK_GT(plate.border.tiling.x(), 0.0f) << "Plate2D border.tiling.x 必须 > 0";
+    CHECK_GT(plate.border.tiling.y(), 0.0f) << "Plate2D border.tiling.y 必须 > 0";
+    CHECK(std::isfinite(plate.time_seconds))
+        << "Plate2D time_seconds 必须是有限值";
 
     int idx = static_cast<int>(plate2d.size());
     plate2d.push_back(plate);

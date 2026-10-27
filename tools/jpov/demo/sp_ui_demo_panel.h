@@ -118,6 +118,10 @@ struct SpDemoState {
     // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
     // 调用方要不要推进那个秒数，引擎侧依然不取自己的时钟。
     bool anim_play = true;
+    // 多纹理板材演示用的两个纹理 id（由 app 在 Begin 前填；0 = 纯色）。
+    // core = 核心层图集，rim = 边界层图集 —— 演示「核心一个 flipbook、边界另一个」。
+    uint32_t showcase_core_tex = 0;
+    uint32_t showcase_rim_tex = 0;
     // 材质水波方式：0 = 关键帧溶解（旧）/ 1 = 正弦波 / 2 = 涟漪 / 3 = 噪声流。
     // 四种图集都是 4x4 / 16 帧，只是生成方式不同（见 assets/sp_ui/marble/README.md）。
     int wave_mode = 1;
@@ -171,6 +175,14 @@ inline constexpr float kUiDemoMotorCardH = 120.0f;
 inline constexpr float kUiDemoMotorCardGap = 12.0f;
 inline constexpr float kUiDemoMotorCardW =
     (kUiDemoLeftW - 2.0f * kUiDemoMotorCardGap) / 3.0f;  // ≈ 173
+
+// 多纹理板材展示区（电机卡片下方）。
+inline constexpr float kUiDemoShowcaseHeaderY = 448.0f;
+inline constexpr float kUiDemoShowcaseY = 476.0f;
+inline constexpr float kSpUiDemoShowcaseH = 96.0f;
+inline constexpr float kSpUiDemoShowcaseW =
+    (kUiDemoLeftW - 2.0f * kUiDemoMotorCardGap) / 3.0f;
+
 
 // ============================================================================
 // 布局辅助（在面板绘制之前定义，供其使用）
@@ -372,6 +384,57 @@ inline void DrawSpUIDemoPanel(SpUi& ui, RenderCommandList* cmd, SpDemoState& st)
     ui.Text("电机组（同一子面板 ×3）",
             SpRect{{kUiDemoPad, kUiDemoMotorHeaderY}, {360.0f, kUiDemoSectionH}});
     DrawMotors(ui, cmd, st);
+
+    // ---- 多纹理板材（核心 / 边界各一套 flipbook）----
+    // Danis 2026-10-27：Plate 必须支持「box 核心一个 flipbook、box 边界另一个」。
+    // 这里三块板就是三种组合，肉眼能直接对照：
+    //   ① 核心 + 边界 两层不同图集、不同帧率
+    //   ② 核心纯色 + 边界纹理（= 色样的语义）
+    //   ③ 核心纹理 + 边界纯色
+    ui.Text("多纹理板材（核心/边界可各自动 flipbook）",
+            SpRect{{kUiDemoPad, kUiDemoShowcaseHeaderY},
+                   {kUiDemoLeftW, kUiDemoSectionH}});
+    {
+        struct Combo {
+            const char* label;
+            bool core_tex;
+            bool rim_tex;
+            float core_fps;
+            float rim_fps;
+        };
+        const Combo combos[3] = {
+            {"双纹理 4/9fps", true, true, 4.0f, 9.0f},
+            {"纯色核心+纹理边", false, true, 0.0f, 7.0f},
+            {"纹理核心+纯色边", true, false, 5.0f, 0.0f},
+        };
+        for (int i = 0; i < 3; ++i) {
+            const SpRect box{
+                {kUiDemoPad + static_cast<float>(i) *
+                                  (kSpUiDemoShowcaseW + kUiDemoMotorCardGap),
+                 kUiDemoShowcaseY},
+                {kSpUiDemoShowcaseW, kSpUiDemoShowcaseH}};
+            SpUi::SpPlateSkin skin;
+            skin.fill = ui.MakeLayerFor(
+                box, combos[i].core_tex ? st.showcase_core_tex : 0u,
+                /*material_px=*/160.0f,
+                FlipbookDesc{4, 4, combos[i].core_fps});
+            skin.border = ui.MakeLayerFor(
+                box, combos[i].rim_tex ? st.showcase_rim_tex : 0u,
+                /*material_px=*/90.0f,
+                FlipbookDesc{4, 4, combos[i].rim_fps});
+            // 核心 tint 偏冷、边界 tint 偏亮，便于看清两层分工。
+            skin.fill_tint = {0.34f, 0.36f, 0.40f, 1.0f};
+            skin.border_tint = {0.86f, 0.87f, 0.90f, 1.0f};
+            skin.radius = 10.0f;
+            skin.border_width = 6.0f;
+            skin.border_bump = 1.0f;
+            skin.border_fade = 0.0f;
+            ui.MultiPlate(box, skin);
+            ui.Text(combos[i].label,
+                    SpRect{{box.pos.x(), box.pos.y() + box.size.y() + 2.0f},
+                           {box.size.x(), 18.0f}});
+        }
+    }
 
     // ---- 实时 Log 输出框 ----
     ui.Text("实时日志",

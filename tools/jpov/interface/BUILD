@@ -83,7 +83,10 @@ cc_library(
 cc_library(
     name = "render_command",
     srcs = ["render_command.cc"],
-    hdrs = ["render_command.h"],
+    hdrs = [
+        "flipbook.h",
+        "render_command.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",

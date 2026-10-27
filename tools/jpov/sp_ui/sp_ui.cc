@@ -51,6 +51,11 @@ SpTheme SpTheme::Default(float font_size) {
     t.plate_flipbook_fps = 0.0f;
     t.plate_tiles_x = 1;
     t.plate_tiles_y = 1;
+    t.plate_border_texture_id = 0;      // 0 = 纯色边框（不隐式继承 fill 的材质）
+    t.plate_border_material_px = 0.0f;  // 0 = 跟随 plate_material_px
+    t.plate_border_flipbook_fps = 0.0f;
+    t.plate_border_tiles_x = 1;
+    t.plate_border_tiles_y = 1;
     t.plate_border_bump = 0.0f;
     t.plate_border_fade = 0.0f;
     return t;
@@ -75,6 +80,7 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     theme_.border_width_px *= ui_scale_;
     theme_.plate_border_fade *= ui_scale_;
     theme_.plate_material_px *= ui_scale_;
+    theme_.plate_border_material_px *= ui_scale_;
     width_ = width;
     height_ = height;
     frame_dt_ms_ = frame_dt_ms;
@@ -213,14 +219,16 @@ void SpUi::ColorSwatch(const char* /*label*/, const Color& color,
          b.pos.y() + (b.size.y() - side) * 0.5f},
         {side, side},
     };
-    // PushPlate 内部会做越界剔除、零面积跳过、圆角 clamp。
-    PushPlate(square, color, theme_.border, theme_.corner_radius_px);
+    // 色样是“颜色取值本身”，**本体必须是纯色**（否则看不出它代表哪个颜色）；
+    // 但边框照旧上材质（Danis 2026-10-27）。所以只关 fill 层的纹理。
+    PushPlateInternal(square, color, theme_.border, theme_.corner_radius_px,
+                      /*fill_textured=*/false, /*border_textured=*/true);
 }
 
 void SpUi::Plate(const SpRect& box, Color fill, float radius, bool textured) {
     // 装饰板材：只是公开的 PushPlateInternal —— 同一份材质/剖面、同一个缓冲、同一个顺序。
     // 边框颜色给 fill 自身（看不见边），符合旧版「背景矩形只填色不描边」的观感。
-    PushPlateInternal(Scaled(box), fill, fill, radius, textured);
+    PushPlateInternal(Scaled(box), fill, fill, radius, textured, textured);
 }
 
 bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
@@ -1338,7 +1346,7 @@ void SpUi::PushPopupPlate(const SpRect& r, Color fill, Color border,
     }
     const float half_min = std::min(box.size.x(), box.size.y()) * 0.5f;
     const float safe_radius = std::clamp(radius, 0.0f, half_min);
-    // 与 PushPlate 同一套 clamp 理由（见该函数注释）。
+    // 与 PushPlateInternal 同一套 clamp 理由（见该函数注释）。
     const float safe_border =
         std::clamp(theme_.border_width_px, 0.0f, half_min);
 
@@ -1346,26 +1354,14 @@ void SpUi::PushPopupPlate(const SpRect& r, Color fill, Color border,
     c.pos = box.pos;
     c.size = box.size;
     c.radius = safe_radius;
+    c.fill = MakeLayer(box, /*is_border=*/false, /*textured=*/true);
+    c.border = MakeLayer(box, /*is_border=*/true, /*textured=*/true);
+    c.fill_color = fill;
     c.border_color = border;
     c.border_width = safe_border;
     c.border_bump = std::clamp(theme_.plate_border_bump, 0.0f, 1.0f);
     c.border_fade = std::clamp(theme_.plate_border_fade, 0.0f, c.border_width);
-    c.fill_color = fill;
-    c.texture_id = theme_.plate_texture_id;
-    if (theme_.plate_material_px > 0.0f) {
-        c.tiling = {std::max(box.size.x() / theme_.plate_material_px, 1e-4f),
-                    std::max(box.size.y() / theme_.plate_material_px, 1e-4f)};
-        // 与 PushPlateInternal 同一套锚定（见那里的注释）。
-        c.scroll = {-box.pos.x() / theme_.plate_material_px,
-                    -box.pos.y() / theme_.plate_material_px};
-    } else {
-        c.tiling = theme_.plate_tiling;
-        c.scroll = {0.0f, 0.0f};
-    }
     c.time_seconds = time_seconds_;
-    c.flipbook_fps = theme_.plate_flipbook_fps;
-    c.tiles_x = theme_.plate_tiles_x;
-    c.tiles_y = theme_.plate_tiles_y;
     popup_fill_rects_.push_back(c);
 }
 
@@ -1386,12 +1382,93 @@ void SpUi::PushPopupLabelText(const char* s, float left, float cy, Color color) 
 
 // ==================== 内部绘制原语 ====================
 
+// 由主题字段造一层材质：密度 + 屏幕锚定 + 图集/帧率。
+//
+// 两层（fill / border）用同一套规则，只是字段来源不同 —— border 的密度/帧率
+// 各自独立（0 表示「跟随 fill 的密度」），所以「核心一个 flipbook、边界另一个」
+// 只是两个字段的差别，不需要第二套绘制路径。
+PlateLayer SpUi::MakeLayer(const SpRect& box, bool is_border,
+                           bool textured) const {
+    PlateLayer l;
+    l.texture_id = textured
+                       ? (is_border ? theme_.plate_border_texture_id
+                                    : theme_.plate_texture_id)
+                       : 0u;
+    l.flipbook = is_border
+                     ? FlipbookDesc{theme_.plate_border_tiles_x,
+                                    theme_.plate_border_tiles_y,
+                                    theme_.plate_border_flipbook_fps}
+                     : FlipbookDesc{theme_.plate_tiles_x, theme_.plate_tiles_y,
+                                    theme_.plate_flipbook_fps};
+
+    // 密度：border 未单独指定就跟 fill 走（避免两处配置打架）。
+    const float material_px =
+        is_border && theme_.plate_border_material_px > 0.0f
+            ? theme_.plate_border_material_px
+            : theme_.plate_material_px;
+    if (material_px > 0.0f) {
+        l.tiling = {std::max(box.size.x() / material_px, 1e-4f),
+                    std::max(box.size.y() / material_px, 1e-4f)};
+        // UV 锚到屏幕原点（uv01 × tiling = (screen − pos)/material_px，
+        // 再减 pos/material_px ⇒ screen/material_px）：整屏一整块连续材质，
+        // 相邻板材接得上、同尺寸控件不会长得一模一样。
+        l.scroll = {-box.pos.x() / material_px, -box.pos.y() / material_px};
+    } else {
+        l.tiling = theme_.plate_tiling;
+        l.scroll = {0.0f, 0.0f};
+    }
+    return l;
+}
+
+PlateLayer SpUi::MakeLayerFor(const SpRect& box, uint32_t tex,
+                              float material_px,
+                              const FlipbookDesc& fb) const {
+    const SpRect dev = Scaled(box);
+    PlateLayer l;
+    l.texture_id = tex;
+    l.flipbook = fb;
+    if (material_px > 0.0f) {
+        const float px = material_px * ui_scale_;   // material_px 是布局单位
+        l.tiling = {std::max(dev.size.x() / px, 1e-4f),
+                    std::max(dev.size.y() / px, 1e-4f)};
+        l.scroll = {-dev.pos.x() / px, -dev.pos.y() / px};
+    } else {
+        l.tiling = theme_.plate_tiling;
+        l.scroll = {0.0f, 0.0f};
+    }
+    return l;
+}
+
+void SpUi::MultiPlate(const SpRect& box, const SpPlateSkin& skin) {
+    const SpRect dev = SanitizeBox(Scaled(box));
+    if (dev.size.x() <= 0.0f || dev.size.y() <= 0.0f || OutsideViewport(dev)) {
+        return;
+    }
+    const float half_min = std::min(dev.size.x(), dev.size.y()) * 0.5f;
+
+    Plate2DCommand c;
+    c.pos = dev.pos;
+    c.size = dev.size;
+    c.radius = std::clamp(skin.radius * ui_scale_, 0.0f, half_min);
+    c.fill = skin.fill;
+    c.fill_color = skin.fill_tint;
+    c.border = skin.border;
+    c.border_color = skin.border_tint;
+    c.border_width = std::clamp(skin.border_width * ui_scale_, 0.0f, half_min);
+    c.border_bump = std::clamp(skin.border_bump, 0.0f, 1.0f);
+    c.border_fade = std::clamp(skin.border_fade * ui_scale_, 0.0f, c.border_width);
+    c.time_seconds = time_seconds_;
+    fill_rects_.push_back(c);
+}
+
 void SpUi::PushPlate(const SpRect& r, Color fill, Color border, float radius) {
-    PushPlateInternal(r, fill, border, radius, /*textured=*/true);
+    PushPlateInternal(r, fill, border, radius, /*fill_textured=*/true,
+                      /*border_textured=*/true);
 }
 
 void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
-                             float radius, bool textured) {
+                             float radius, bool fill_textured,
+                             bool border_textured) {
     // 规格化 box（负尺寸 clamp 0），圆角 clamp 到合法上限。
     // 注：UI 侧的 clamp 是有意的 —— 控件 box 由调用方的布局算出来，可能任意小；
     //   而 `Plate2DCommand`/渲染层对越界参数是 CHECK 崩的（不静默 clamp），
@@ -1414,37 +1491,17 @@ void SpUi::PushPlateInternal(const SpRect& r, Color fill, Color border,
     c.size = box.size;
     c.radius = safe_radius;
 
-    // 边框：颜色/带宽来自控件状态与主题，剖面曲率/渐变带来自主题。
+    // 两层材质：填充区（底色 tint）+ 边框带（各自的图集/帧率/密度）。
+    // 色样这类「本体必须是纯色」的控件只把 fill 层关掉，边框照旧上纹理。
+    c.fill = MakeLayer(box, /*is_border=*/false, fill_textured);
+    c.border = MakeLayer(box, /*is_border=*/true, border_textured);
+    c.fill_color = fill;
     c.border_color = border;
     c.border_width = safe_border;
     c.border_bump = std::clamp(theme_.plate_border_bump, 0.0f, 1.0f);
     c.border_fade =
         std::clamp(theme_.plate_border_fade, 0.0f, c.border_width);
-
-    // 填充：底色作为 tint 乘到材质上（材质本身是中性的白大理石）——
-    // 所以“多种颜色靠 tint 撑”只需要改 fill_color，不需要多套材质。
-    c.fill_color = fill;
-    c.texture_id = textured ? theme_.plate_texture_id : 0u;
-    // 平铺：开了物理尺度就按本块尺寸反算（整屏密度一致），否则用字面值。
-    if (theme_.plate_material_px > 0.0f) {
-        c.tiling = {std::max(box.size.x() / theme_.plate_material_px, 1e-4f),
-                    std::max(box.size.y() / theme_.plate_material_px, 1e-4f)};
-        // 把 UV 锚到**屏幕原点**而不是本块板材的左上角：
-        // uv01 = (screen − pos)/size，乘 tiling 后 = (screen − pos)/material_px，
-        // 再减去 pos/material_px 就变成 screen/material_px ⇒ 整屏是一整块连续石板，
-        // 相邻板材（背景/卡片/控件）之间石纹接得上、同尺寸控件不长得一模一样。
-        c.scroll = {-box.pos.x() / theme_.plate_material_px,
-                    -box.pos.y() / theme_.plate_material_px};
-    } else {
-        c.tiling = theme_.plate_tiling;
-        c.scroll = {0.0f, 0.0f};
-    }
-
-    // 翻书：时间来自 Begin（零点调用方定），帧率/图集来自主题。
     c.time_seconds = time_seconds_;
-    c.flipbook_fps = theme_.plate_flipbook_fps;
-    c.tiles_x = theme_.plate_tiles_x;
-    c.tiles_y = theme_.plate_tiles_y;
     fill_rects_.push_back(c);
 }
 

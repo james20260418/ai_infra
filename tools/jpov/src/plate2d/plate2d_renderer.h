@@ -100,15 +100,26 @@ uniform float uBorderWidth;   // 边框带宽（像素，0 = 无边框）
 uniform float uBorderBump;    // [0,1] 剖面曲率：0 = 平面带，1 = 圆管
 uniform float uBorderFade;    // 渐变消失带宽（像素，从内沿向外衰减到 0）
 
-uniform int uHasTex;          // 1 = 用材质
-uniform sampler2D uTex;
-uniform vec2 uTiling;         // 每边平铺次数
-uniform vec2 uScroll;         // UV 平移（单位 = 一整张图）
-uniform vec2 uTexSize;        // 纹理像素尺寸（cell 内缩要用）
-uniform int uFlipbook;        // 1 = 按帧号裁 cell
-uniform int uTilesX;
-uniform int uTilesY;
-uniform float uFrame;         // 分数帧号（CPU 由 time*fps 算出）
+// ---- 两层材质（填充区 / 边框带各一套，Danis：核心一个 flipbook、边界另一个）----
+// 每层：是否有纹理、图集网格、平铺/平移、纹理尺寸、分数帧号。
+// 单元号显式写死（0 = 填充、1 = 边框）：2D pass 内部按号绑，不与 3D 主链路共享。
+uniform int uFillHasTex;
+uniform sampler2D uFillTex;
+uniform ivec2 uFillTiles;     // 图集列/行
+uniform vec2 uFillTiling;
+uniform vec2 uFillScroll;
+uniform vec2 uFillTexSize;
+uniform int uFillFlipbook;    // 1 = 按帧号裁 cell
+uniform float uFillFrame;     // 分数帧号（CPU 由 time*fps 算出）
+
+uniform int uBorderHasTex;
+uniform sampler2D uBorderTex;
+uniform ivec2 uBorderTiles;
+uniform vec2 uBorderTiling;
+uniform vec2 uBorderScroll;
+uniform vec2 uBorderTexSize;
+uniform int uBorderFlipbook;
+uniform float uBorderFrame;
 
 // 圆角矩形有向距离：<0 内部，>0 外部，单位=像素。
 float SdRoundBox(vec2 p, vec2 b, float r) {
@@ -129,27 +140,33 @@ vec2 ScreenPos() {
 
 // 材质采样：先 fract 平铺，再（可选）取 flipbook cell。
 // 注意顺序 —— 先除 tiles 再 fract 会把平铺周期和 cell 周期搅在一起（known_issue §8.2）。
-vec3 SampleMaterial(vec2 uv01) {    vec2 uv = fract(uv01 * uTiling + uScroll);
-    if (uFlipbook == 0) {
-        return texture(uTex, uv).rgb;
+// 一层材质采样：先 fract 平铺，再（可选）取 flipbook cell。
+// 注意顺序 —— 先除 tiles 再 fract 会把平铺周期和 cell 周期搅在一起（known_issue §8.2）。
+//
+// uv01 是板材自身的 0..1 参数；行序**不翻转**（本 pass 的 uv.y = 0 在板材顶部，
+// 与「PNG 第一行 = v=0」同向，再翻就整体倒置 —— 见 known_issue §8.4）。
+vec3 SampleLayer(sampler2D tex, vec2 uv01, vec2 tiling, vec2 scroll,
+                 vec2 tex_size, ivec2 tiles, int flipbook_on, float frame) {
+    vec2 uv = fract(uv01 * tiling + scroll);
+    if (flipbook_on == 0) {
+        return texture(tex, uv).rgb;
     }
-    float total = float(uTilesX * uTilesY);
-    float f0 = floor(uFrame);
-    vec2 cell_px = uTexSize / vec2(float(uTilesX), float(uTilesY));
+    float total = float(tiles.x * tiles.y);
+    float f0 = floor(frame);
+    vec2 cell_px = tex_size / vec2(float(tiles.x), float(tiles.y));
     // 半像素内缩：否则双线性会在 cell 边界取到邻居帧的边缘 texel（known_issue §8.1）。
     vec2 uv_local = uv * (cell_px - 2.0) + 1.0;
-    float col0 = mod(f0, float(uTilesX));
-    float row0 = floor(f0 / float(uTilesX));
-    // 行号翻转：图集帧 0 在图片左上角，而 GL 纹理 v 向上。
+    float col0 = mod(f0, float(tiles.x));
+    float row0 = floor(f0 / float(tiles.x));
     vec2 origin0 = vec2(col0, row0) * cell_px;
-    vec3 c0 = texture(uTex, (uv_local + origin0) / uTexSize).rgb;
+    vec3 c0 = texture(tex, (uv_local + origin0) / tex_size).rgb;
     // 相邻帧混合（分数帧号），末帧回绕到首帧 ⇒ 循环连续。
     float f1 = mod(f0 + 1.0, total);
-    float col1 = mod(f1, float(uTilesX));
-    float row1 = floor(f1 / float(uTilesX));
+    float col1 = mod(f1, float(tiles.x));
+    float row1 = floor(f1 / float(tiles.x));
     vec2 origin1 = vec2(col1, row1) * cell_px;
-    vec3 c1 = texture(uTex, (uv_local + origin1) / uTexSize).rgb;
-    return mix(c0, c1, uFrame - f0);
+    vec3 c1 = texture(tex, (uv_local + origin1) / tex_size).rgb;
+    return mix(c0, c1, frame - f0);
 }
 
 void main() {
@@ -169,18 +186,26 @@ void main() {
     }
     float cov_inner = Coverage(d + uBorderWidth, px);
 
+    vec2 uv01 = (screen - uMin) / uSize;   // 板材自身的 0..1 参数
+
     // ---- 填充（材质 × tint）----
-    // 材质只采样一次，边框带与填充共用同一个 mat：
-    // 边框不是“一圈白塑料”，而是同一块石板上的材质，只是 tint 不同 + 剖面明暗。
-    vec3 mat = vec3(1.0);
-    if (uHasTex == 1) {
-        mat = SampleMaterial((screen - uMin) / uSize);  // 板材自身的 0..1 参数
+    // 两层材质**各自采样**：核心与边界可以是完全不同的图集（含各自帧率）。
+    vec3 fill_mat = vec3(1.0);
+    if (uFillHasTex == 1) {
+        fill_mat = SampleLayer(uFillTex, uv01, uFillTiling, uFillScroll,
+                               uFillTexSize, uFillTiles, uFillFlipbook,
+                               uFillFrame);
     }
-    vec3 fill_rgb = uFillColor.rgb * mat;
+    vec3 fill_rgb = uFillColor.rgb * fill_mat;
     float fill_a = uFillColor.a;
 
-    // ---- 边框带（同样上材质，叠剖面明暗）----
-    vec3 edge_mat = (uHasTex == 1) ? mat : vec3(1.0);
+    // ---- 边框带（自带材质 + 剖面明暗）----
+    vec3 edge_mat = vec3(1.0);
+    if (uBorderHasTex == 1) {
+        edge_mat = SampleLayer(uBorderTex, uv01, uBorderTiling, uBorderScroll,
+                               uBorderTexSize, uBorderTiles, uBorderFlipbook,
+                               uBorderFrame);
+    }
     vec3 edge_rgb = uBorderColor.rgb * edge_mat;
     float edge_fade = 1.0;
     if (uBorderWidth > 0.0) {

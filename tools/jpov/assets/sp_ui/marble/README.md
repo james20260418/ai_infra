@@ -180,6 +180,10 @@ Plate 用屏幕坐标算 UV（uv.y 向下），而 PNG 第一行就在 v=0 ⇒ �
 
 ## 引擎侧采样约定（消费者必须遵守）
 
+> 格式的**唯一权威描述**在 `tools/jpov/interface/flipbook.h`（`FlipbookDesc` +
+> `ResolveFlipbookFrame()`，含 8 条格式约定）。下面是使用侧要点：
+
+0. **图集必须给 fps > 0**：`fps = 0` 的定义是「整张图就是一帧」，4×4 图集会整张当一幅图显示。
 1. **纹理注册**：`repeat = true`（要平铺）、`mipmap = false`
    —— UI 是 1:1 像素，而 `fract` 平铺在接缝处导数不连续，自动选 LOD 会挑到最粗
    mip，在每条接缝上糊一条线（`tools/jpov/known_issue.md` §8.2）。

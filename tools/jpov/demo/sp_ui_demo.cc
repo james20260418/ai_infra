@@ -165,10 +165,21 @@ public:
             plate_opt_.no_texture ? 0u : wave_tex_[st_.wave_mode & 3];
         theme.plate_material_px = plate_opt_.material_px;
         theme.plate_flipbook_fps = plate_opt_.flipbook_fps;
+        // 边框层：默认与填充同一张图集，但**密度更高、帧率更低**（独立两层）。
+        // 想换成完全不同的图集就改 plate_border_texture_id。
+        theme.plate_border_texture_id = theme.plate_texture_id;
+        theme.plate_border_material_px = plate_opt_.material_px * 0.6f;
+        theme.plate_border_flipbook_fps = plate_opt_.flipbook_fps * 0.5f;
+        theme.plate_border_tiles_x = 4;
+        theme.plate_border_tiles_y = 4;
         theme.plate_tiles_x = 4;   // 图集 4x4（见 assets/sp_ui/marble/README.md）
         theme.plate_tiles_y = 4;
         theme.plate_border_bump = plate_opt_.bump;
         theme.plate_border_fade = plate_opt_.fade;
+
+        // 多纹理展示区用哪两张图集（核心 / 边界各一张）。
+        st_.showcase_core_tex = wave_tex_[2];   // 涟漪
+        st_.showcase_rim_tex = wave_tex_[1];    // 正弦波
 
         // 帧时钟：log 时间戳 + 键盘 hold 阈值（固定 30fps 帧周期，与 target_fps 一致）。
         st_.frame = static_cast<int>(frame_count);

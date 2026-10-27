@@ -8,6 +8,8 @@
 #include "tools/jpov/src/plate2d/plate2d_renderer.h"
 
 #include <algorithm>
+#include <cmath>
+#include <string>
 
 // GL 头文件必须在 MinGW #define 之前（同 primitives2d_renderer.cc）。
 #include <GL/gl.h>
@@ -26,9 +28,11 @@
 
 namespace jpov {
 
-// 本 pass 独占的纹理单元。2D pass 内部所有 program（DrawImage2D / 本 pass）一律用 0 号，
+// 本 pass 独占的纹理单元。2D pass 内部所有 program（DrawImage2D / 本 pass）一律从 0 起绑，
 // 不参与 3D 主链路的 `src/texture_units.h` 分配表（该表适用范围见其顶部注释：仅 3D 主链路）。
-constexpr int kTexUnitPlate2D = 0;
+// 板材要两层材质 ⇒ 占 0 / 1。
+constexpr int kTexUnitPlateFill = 0;
+constexpr int kTexUnitPlateBorder = 1;
 
 void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
                                   unsigned int stream_vbo, unsigned int prog,
@@ -49,40 +53,47 @@ void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
     CHECK_LE(cmd.border_fade, cmd.border_width)
         << "Plate2D border_fade " << cmd.border_fade << " 超过 border_width "
         << cmd.border_width;
-    CHECK_GT(cmd.tiling.x(), 0.0f) << "Plate2D tiling.x 必须 > 0";
-    CHECK_GT(cmd.tiling.y(), 0.0f) << "Plate2D tiling.y 必须 > 0";
-    CHECK_GE(cmd.tiles_x, 1) << "Plate2D tiles_x 必须 >= 1";
-    CHECK_GE(cmd.tiles_y, 1) << "Plate2D tiles_y 必须 >= 1";
-    CHECK_GE(cmd.flipbook_fps, 0.0f) << "Plate2D flipbook_fps 必须 >= 0";
+    // 两层材质各自校验（图集格式约定见 interface/flipbook.h）。
+    cmd.fill.flipbook.Validate();
+    cmd.border.flipbook.Validate();
+    CHECK_GT(cmd.fill.tiling.x(), 0.0f) << "Plate2D fill.tiling.x 必须 > 0";
+    CHECK_GT(cmd.fill.tiling.y(), 0.0f) << "Plate2D fill.tiling.y 必须 > 0";
+    CHECK_GT(cmd.border.tiling.x(), 0.0f) << "Plate2D border.tiling.x 必须 > 0";
+    CHECK_GT(cmd.border.tiling.y(), 0.0f) << "Plate2D border.tiling.y 必须 > 0";
+    CHECK(std::isfinite(cmd.time_seconds))
+        << "Plate2D time_seconds 必须是有限值";
 
-    // 纹理：仅 texture_id != 0 时解析（纯色板材不需要纹理）。
-    int tex_w = 0;
-    int tex_h = 0;
-    unsigned int gl_tex = 0;
-    const bool has_tex = cmd.texture_id != 0;
-    if (has_tex) {
-        const bool found = texture_mgr.GetSize(cmd.texture_id, &tex_w, &tex_h);
-        CHECK(found) << "DrawPlate2D: texture_id=" << cmd.texture_id << " 未注册";
-        CHECK_GT(tex_w, 0);
-        CHECK_GT(tex_h, 0);
-        gl_tex = texture_mgr.GetGLTexture(cmd.texture_id);
-        CHECK_NE(gl_tex, 0u) << "DrawPlate2D: texture_id=" << cmd.texture_id
-                             << " 没有 GL 纹理";
-    }
-
-    // 分数帧号：时间由调用方给（秒），帧率由调用方给；这里只做乘法。
-    // flipbook_fps == 0 视为静态（不裁 UV），此时 uFlipbook=0。
-    const bool flipbook = has_tex && cmd.flipbook_fps > 0.0f;
-    float frame = 0.0f;
-    if (flipbook) {
-        const float total = static_cast<float>(cmd.tiles_x * cmd.tiles_y);
-        const float f = cmd.time_seconds * cmd.flipbook_fps;
-        // 归一化到 [0,total) 后取分数帧号；末帧回绕由着色器 mod 处理。
-        frame = f - total * std::floor(f / total);
-        if (frame >= total) {
-            frame = total - 1.0f;
+    // 两层纹理各自解析（texture_id == 0 = 纯色，不采样）。
+    struct ResolvedLayer {
+        bool has_tex = false;
+        unsigned int gl_tex = 0;
+        int tex_w = 0;
+        int tex_h = 0;
+        bool flipbook = false;
+        float frame = 0.0f;
+    };
+    auto resolve = [&](const PlateLayer& layer) {
+        ResolvedLayer out;
+        out.has_tex = layer.texture_id != 0;
+        if (out.has_tex) {
+            const bool found =
+                texture_mgr.GetSize(layer.texture_id, &out.tex_w, &out.tex_h);
+            CHECK(found) << "DrawPlate2D: texture_id=" << layer.texture_id
+                         << " 未注册";
+            CHECK_GT(out.tex_w, 0);
+            CHECK_GT(out.tex_h, 0);
+            out.gl_tex = texture_mgr.GetGLTexture(layer.texture_id);
+            CHECK_NE(out.gl_tex, 0u) << "DrawPlate2D: texture_id="
+                                     << layer.texture_id << " 没有 GL 纹理";
         }
-    }
+        // 帧号：时间由调用方给（秒），fps 由各层自己给 —— 所以两层可以不同速。
+        out.flipbook = out.has_tex &&
+                       ResolveFlipbookFrame(layer.flipbook, cmd.time_seconds,
+                                            &out.frame);
+        return out;
+    };
+    const ResolvedLayer fill = resolve(cmd.fill);
+    const ResolvedLayer border = resolve(cmd.border);
 
     // 覆盖整块板材的 quad（屏幕像素）。两个三角形，只带位置属性。
     const float x0 = cmd.pos.x();
@@ -116,22 +127,34 @@ void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
     glUniform1f(glGetUniformLocation(prog, "uBorderBump"), cmd.border_bump);
     glUniform1f(glGetUniformLocation(prog, "uBorderFade"), cmd.border_fade);
 
-    glUniform1i(glGetUniformLocation(prog, "uHasTex"), has_tex ? 1 : 0);
-    glUniform1i(glGetUniformLocation(prog, "uFlipbook"), flipbook ? 1 : 0);
-    glUniform2f(glGetUniformLocation(prog, "uTiling"),
-                cmd.tiling.x(), cmd.tiling.y());
-    glUniform2f(glGetUniformLocation(prog, "uScroll"),
-                cmd.scroll.x(), cmd.scroll.y());
-    glUniform2f(glGetUniformLocation(prog, "uTexSize"),
-                static_cast<float>(tex_w), static_cast<float>(tex_h));
-    glUniform1i(glGetUniformLocation(prog, "uTilesX"), cmd.tiles_x);
-    glUniform1i(glGetUniformLocation(prog, "uTilesY"), cmd.tiles_y);
-    glUniform1f(glGetUniformLocation(prog, "uFrame"), frame);
-    // 纹理单元号显式写死（strip 那轮的教训：sampler 单元号一旦靠下标推导，中间插入
-    // 别的纹理就会整块静默无输出）。0 号单元在本 pass 里没有别人用。
-    glUniform1i(glGetUniformLocation(prog, "uTex"), kTexUnitPlate2D);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitPlate2D);
-    glBindTexture(GL_TEXTURE_2D, gl_tex);
+    auto upload_layer = [&](const char* prefix, const ResolvedLayer& l,
+                            const PlateLayer& layout) {
+        const std::string p(prefix);
+        glUniform1i(glGetUniformLocation(prog, (p + "HasTex").c_str()),
+                    l.has_tex ? 1 : 0);
+        glUniform1i(glGetUniformLocation(prog, (p + "Flipbook").c_str()),
+                    l.flipbook ? 1 : 0);
+        glUniform2i(glGetUniformLocation(prog, (p + "Tiles").c_str()),
+                    layout.flipbook.tiles_x, layout.flipbook.tiles_y);
+        glUniform2f(glGetUniformLocation(prog, (p + "Tiling").c_str()),
+                    layout.tiling.x(), layout.tiling.y());
+        glUniform2f(glGetUniformLocation(prog, (p + "Scroll").c_str()),
+                    layout.scroll.x(), layout.scroll.y());
+        glUniform2f(glGetUniformLocation(prog, (p + "TexSize").c_str()),
+                    static_cast<float>(l.tex_w), static_cast<float>(l.tex_h));
+        glUniform1f(glGetUniformLocation(prog, (p + "Frame").c_str()), l.frame);
+    };
+    upload_layer("uFill", fill, cmd.fill);
+    upload_layer("uBorder", border, cmd.border);
+
+    // 纹理单元号显式写死：0 = 填充层、1 = 边框层。2D pass 内部所有 program 一律从
+    // 0 起绑（见 texture_units.h 顶部：那张表只适用于 3D 主链路）。
+    glUniform1i(glGetUniformLocation(prog, "uFillTex"), kTexUnitPlateFill);
+    glUniform1i(glGetUniformLocation(prog, "uBorderTex"), kTexUnitPlateBorder);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPlateFill);
+    glBindTexture(GL_TEXTURE_2D, fill.gl_tex);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPlateBorder);
+    glBindTexture(GL_TEXTURE_2D, border.gl_tex);
     glActiveTexture(GL_TEXTURE0);
 
     // 预乘 alpha 混合，退出时恢复 2D 默认（见 .h 顶部说明）。
@@ -146,7 +169,9 @@ void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glActiveTexture(GL_TEXTURE0 + kTexUnitPlate2D);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPlateFill);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0 + kTexUnitPlateBorder);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
