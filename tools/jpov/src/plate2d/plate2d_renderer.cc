@@ -134,8 +134,9 @@ void Plate2DRenderer::DrawPlate2D(const Plate2DCommand& cmd,
                     l.has_tex ? 1 : 0);
         glUniform1i(glGetUniformLocation(prog, (p + "Flipbook").c_str()),
                     l.flipbook ? 1 : 0);
-        glUniform2i(glGetUniformLocation(prog, (p + "Tiles").c_str()),
-                    layout.flipbook.tiles_x, layout.flipbook.tiles_y);
+        glUniform2f(glGetUniformLocation(prog, (p + "Tiles").c_str()),
+                    static_cast<float>(layout.flipbook.tiles_x),
+                    static_cast<float>(layout.flipbook.tiles_y));
         glUniform2f(glGetUniformLocation(prog, (p + "Tiling").c_str()),
                     layout.tiling.x(), layout.tiling.y());
         glUniform2f(glGetUniformLocation(prog, (p + "Scroll").c_str()),

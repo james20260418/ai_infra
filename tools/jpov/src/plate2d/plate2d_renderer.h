@@ -105,7 +105,7 @@ uniform float uBorderFade;    // 渐变消失带宽（像素，从内沿向外�
 // 单元号显式写死（0 = 填充、1 = 边框）：2D pass 内部按号绑，不与 3D 主链路共享。
 uniform int uFillHasTex;
 uniform sampler2D uFillTex;
-uniform ivec2 uFillTiles;     // 图集列/行
+uniform vec2 uFillTiles;      // 图集列/行（浮点传：MinGW 的 GL 头没有 glUniform2i）
 uniform vec2 uFillTiling;
 uniform vec2 uFillScroll;
 uniform vec2 uFillTexSize;
@@ -114,7 +114,7 @@ uniform float uFillFrame;     // 分数帧号（CPU 由 time*fps 算出）
 
 uniform int uBorderHasTex;
 uniform sampler2D uBorderTex;
-uniform ivec2 uBorderTiles;
+uniform vec2 uBorderTiles;
 uniform vec2 uBorderTiling;
 uniform vec2 uBorderScroll;
 uniform vec2 uBorderTexSize;
@@ -146,7 +146,7 @@ vec2 ScreenPos() {
 // uv01 是板材自身的 0..1 参数；行序**不翻转**（本 pass 的 uv.y = 0 在板材顶部，
 // 与「PNG 第一行 = v=0」同向，再翻就整体倒置 —— 见 known_issue §8.4）。
 vec3 SampleLayer(sampler2D tex, vec2 uv01, vec2 tiling, vec2 scroll,
-                 vec2 tex_size, ivec2 tiles, int flipbook_on, float frame) {
+                 vec2 tex_size, vec2 tiles, int flipbook_on, float frame) {
     vec2 uv = fract(uv01 * tiling + scroll);
     if (flipbook_on == 0) {
         return texture(tex, uv).rgb;

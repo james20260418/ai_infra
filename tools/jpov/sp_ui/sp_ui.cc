@@ -69,6 +69,12 @@ void SpUi::Begin(const InputSnapshot& input, const SpTheme& theme,
     CHECK_GE(width, 0.0f) << "SpUi viewport width must be >= 0";
     CHECK_GE(height, 0.0f) << "SpUi viewport height must be >= 0";
     CHECK_GE(frame_dt_ms, 0.0f) << "SpUi frame_dt_ms must be >= 0";
+    // 主题自检在这里做一次（而不是等 Emit 时由渲染层 CHECK）：
+    // 否则报错信息会指向 DrawPlate，用户根本看不出是自己把 plate_tiling 配成 0 了。
+    CHECK_GT(theme.plate_tiling.x(), 0.0f)
+        << "SpTheme.plate_tiling.x 必须 > 0（用 plate_material_px 时本字段不参与）";
+    CHECK_GT(theme.plate_tiling.y(), 0.0f)
+        << "SpTheme.plate_tiling.y 必须 > 0（用 plate_material_px 时本字段不参与）";
     input_ = &input;
     theme_ = theme;
     // 缩放：所有「长度」类主题字段同步乘倍率（计数字段如 plate_tiling/tiles 不乘）。
