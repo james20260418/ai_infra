@@ -1872,22 +1872,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(2, mrt_bufs_s);
             }
 
-            // ── 水下整屏介质（相机沉到水下）—— 所有 3D 内容之后、雾之前 ──
-            //    整条视线都在水里 ⇒ 对已成画面做一次逐通道吸收 + 散射。
-            //    放在这里而不是水面 pass 里面：水下时**粒子/火/条带也在水里**，它们也要被吸收；
-            //    水面自己的颜色同样要被吸收（从水下看水面 = 隔着水看）。
-            if (cmds.water.has_value() &&
-                WaterRenderer::IsCameraUnderwater(*cmds.water, cam)) {
-                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-                water_renderer_.DrawUnderwaterMedium(
-                    *cmds.water, cam, fbo_3d_w, fbo_3d_h,
-                    fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
-                    sky_env_tex_,
-                    eff_sun.has_value() ? &*eff_sun : nullptr,
-                    mvp_);
-            }
-
             // ── 远景仰角雾（空气透视）—— 「其它 3D 渲染之后、HDR 后处理之前」：
             //    用 alpha 混合**就地**叠进已有的 3D HDR FBO（不持有自己的 FBO），
             //    只读 MRT#1 场景深度 + 大气色天空纹理。必须在线性 HDR 域、tone map 之前加。
@@ -1952,6 +1936,48 @@ void Renderer::Render(const RenderCommandList& cmds,
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
                                                GL_COLOR_ATTACHMENT1};
                 glDrawBuffers(2, mrt_bufs_ff);
+            }
+
+            // ── 水皮 pass（2026-10-27 定：放在 froxel 合成**之后**）──
+            //
+            // 为什么在这儿：水皮透射的就是"体积算完之后、水面之下的那个颜色"。
+            // 放在 froxel 之后 ⇒ 它就是"拿已经合成好的画面当背景"做界面运算：
+            //   ① 抓帧（color + MRT 深度）
+            //   ② 水下段：沿**折射后**的射线做逐通道吸收 + 内散射（当前用解析 box 雾冒充体积）
+            //   ③ 水面：F·天光(mirror) + (1−F)·水下背景/n²
+            //   ④ 从下往上看：Snell 窗（×n²）+ 临界角外全内反射（取 skylight 地色）
+            //
+            // 位置带来的两个已知取舍：
+            //   · ✅ 水面之下的粒子/火/条带**进了背景**，会被衰减/染色（不再被深度剔掉）；
+            //   · ❌ 反过来，水面之上、相机与水面之间的效果也会被一起衰减（要根治得给透明
+            //        效果写"最近层深度"，是另一张 RT 的事）。
+            if (cmds.water.has_value()) {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                glEnable(GL_DEPTH_TEST);
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);
+                water_renderer_.DrawSurface(
+                    *cmds.water, cam, fbo_3d_w, fbo_3d_h,
+                    fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
+                    sky_env_tex_,
+                    static_cast<float>(std::log2(static_cast<double>(kSkyEnvCubeSize))),
+                    eff_sun.has_value() ? &*eff_sun : nullptr,
+                    mvp_);
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+
+                // 相机在水下：整屏介质**在水皮之后**（水皮自己也要被水吸收）。
+                if (WaterRenderer::IsCameraUnderwater(*cmds.water, cam)) {
+                    water_renderer_.DrawUnderwaterMedium(
+                        *cmds.water, cam, fbo_3d_w, fbo_3d_h,
+                        fbo_hdr_, color_tex_hdr_, scene_depth_tex_hdr_,
+                        sky_env_tex_,
+                        eff_sun.has_value() ? &*eff_sun : nullptr,
+                        mvp_);
+                    glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                    glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                }
             }
 
             // ── 高亮 pass —— 3D 内容全部画完后统一叠加。

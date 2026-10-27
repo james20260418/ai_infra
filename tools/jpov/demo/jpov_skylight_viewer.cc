@@ -280,6 +280,20 @@ int RunCaptureWater(const std::string& out_dir) {
     app.water_.level = jpov_skylight::kWaterLevelDefault;
     shoot("water_level_default");
 
+    // ── 2a. 雾 + 水皮的顺序：水皮在 froxel/远景雾**之后**合成 ──
+    //    没有雾时"水皮在前/在后"是逐字节等价的（这一版实测 max diff = 0），
+    //    所以必须**开着雾**才看得出新架构的差别：水皮吃的是"雾算完之后的那个背景"。
+    set_above_camera();
+    app.deg_.elev_fog_on = true;
+    app.deg_.elev_fog_start = 30.0f;
+    app.deg_.elev_fog_full = 220.0f;
+    app.deg_.elev_fog_density = 2.2f;
+    shoot("water_with_fog");
+    app.SetShowWater(false);
+    shoot("water_with_fog_no_water");
+    app.SetShowWater(true);
+    app.deg_.elev_fog_on = false;
+
     // ── 2b. 低太阳：验证水面反射**跟随天光**（探针每帧重渲，不是上一帧的残留）──
     app.deg_.sun_elev_deg = 6.0f;
     app.deg_.sun_azim_deg = 250.0f;   // 光源放到相机正前方偏低 ⇒ 天光/天色都变

@@ -246,9 +246,14 @@ void main() {
         color = under * (1.0 - F) + refl * F;
     }
 
-    // 远端淡出：贴地平线的水面收敛到「地平线天光色」。
+    // 远端淡出：贴地平线的水面收敛到**该像素已经画好的那个颜色**（抓帧副本）。
+    //
+    // 为什么不是"地平线天光色"：水皮现在跑在雾/其它 effect **之后**，背景可能已经被
+    // 远景雾染过。收敛到探针色会和"已经渲染出的天空"对不上，地平线出现硬缝 + 暗带
+    // （实测：开远景雾后 72% 像素变化，缝和暗带都出现）。收敛到抓帧色则天然连续：
+    // 边缘处水面 == 原本就在那儿的像素。
     float far_fade = smoothstep(0.75 * uMaxDistance, uMaxDistance, t);
-    color = mix(color, HorizonSky(rd), far_fade);
+    color = mix(color, texture(uSceneColor, uv).rgb, far_fade);
 
     FragColor = vec4(color, 1.0);
 }
