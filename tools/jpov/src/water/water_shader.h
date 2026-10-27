@@ -196,10 +196,36 @@ void main() {
             float rp = (kEta * ct - ci) / (kEta * ct + ci);
             R = 0.5 * (rs * rs + rp * rp);
         }
-        float soft = 0.75 * max(uSlopeRmsRad, 0.0);
-        float Rs = (soft > 1.0e-4)
-                     ? mix(R, 1.0, 1.0 - smoothstep(kCosCrit - soft, kCosCrit + soft, ci))
-                     : R;
+        // 粗糙界面 = 把精确 Fresnel **对斜率分布做平均**，不是把 R 往 1 推。
+        // （旧写法 mix(R,1,smoothstep) 会把过渡带整体往窗内偏 ~6°，窗内出现一大片灰。）
+        // 5 抽头 1D 斜率分布（±σ），高斯权重；σ=0 时退化为精确单点。
+        float Rs = R;
+        float sg = max(uSlopeRmsRad, 1.0e-3);
+        if (uSlopeRmsRad > 1.0e-4) {
+            float theta = acos(ci);
+            float sum_r = 0.0;
+            float sum_w = 0.0;
+            for (int i = -2; i <= 2; ++i) {
+                float fi = float(i);
+                float th = clamp(theta + fi * 0.5 * sg, 0.0, 1.55);
+                float wgt = exp(-2.0 * fi * fi);
+                float c = cos(th);
+                // 同一条精确 Fresnel（含 TIR 分支），只是换了入射角
+                float s2 = kEta * kEta * (1.0 - c * c);
+                float r_i;
+                if (s2 >= 1.0) {
+                    r_i = 1.0;
+                } else {
+                    float ct_i = sqrt(1.0 - s2);
+                    float rs_i = (kEta * c - ct_i) / (kEta * c + ct_i);
+                    float rp_i = (kEta * ct_i - c) / (kEta * ct_i + c);
+                    r_i = 0.5 * (rs_i * rs_i + rp_i * rp_i);
+                }
+                sum_r += wgt * r_i;
+                sum_w += wgt;
+            }
+            Rs = sum_r / sum_w;
+        }
         // 窗口内：整片天空被压进 97.2° 锥 + 辐亮度 ×n²（Snell 窗"刺眼"的来源）。
         vec3 win;
         float lod = clamp(uRoughness, 0.0, 1.0) * uEnvMaxLod;

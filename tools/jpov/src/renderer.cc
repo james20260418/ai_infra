@@ -1532,8 +1532,11 @@ void Renderer::Render(const RenderCommandList& cmds,
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
 
+            // 开了全局水面 ⇒ 下半球被水盖住，地色不可见；而水皮远端淡出收敛到抓帧色，
+            // 若背景在地平线附近还是地色，就会露出一圈地色环（相机抬高时非常明显）。
             SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kFull,
+                                 /*fill_ground_sky=*/cmds.water.has_value());
 
             // 另画一份「大气色」天空到独立纹理（不含日月盘/光晕），供远景仰角雾当收敛色。
             // 单独一趟而非 MRT 附属附件：GL 规范里「shader 未写该颜色附件」其内容是未定义的，

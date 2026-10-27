@@ -112,7 +112,8 @@ namespace jpov {
 
 void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
                           const Camera& cam, int fbo_w, int fbo_h,
-                          ShaderManager& shader_mgr, SkyOutput output) {
+                          ShaderManager& shader_mgr, SkyOutput output,
+                          bool fill_ground_sky) {
     // ---- 构建 相机 逆(Proj*View) ----
     const float aspect = static_cast<float>(fbo_w) / static_cast<float>(std::max(fbo_h,1));
     const float fov_rad = cam.fov * 3.14159265358979323846f / 180.0f;
@@ -154,6 +155,7 @@ void SkyRenderer::DrawSky(const SkyCommand& sky_cmd,
     glUniform1f(shader_mgr.GetUniform(prog, "uIntensity"), sky_cmd.intensity);
     glUniform3f(shader_mgr.GetUniform(prog, "uGroundColor"),
                 sky_cmd.ground_color.r, sky_cmd.ground_color.g, sky_cmd.ground_color.b);
+    glUniform1i(shader_mgr.GetUniform(prog, "uFillGroundSky"), fill_ground_sky ? 1 : 0);
     glUniform3f(shader_mgr.GetUniform(prog, "uNightZenith"),
                 sky_cmd.night_zenith_color.r,
                 sky_cmd.night_zenith_color.g,

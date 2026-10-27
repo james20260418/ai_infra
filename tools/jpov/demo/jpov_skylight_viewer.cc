@@ -280,6 +280,17 @@ int RunCaptureWater(const std::string& out_dir) {
     app.water_.level = jpov_skylight::kWaterLevelDefault;
     shoot("water_level_default");
 
+    // ── 2z. 拉远（相机高、视线平）：验证地平线附近**没有一圈地色** ──
+    //     地色环的成因：水皮远端淡出收敛到抓帧色，而天空背景在地平线下方画的是地色。
+    //     修法是"开了水就把天空的下半球也画成地平线天光"（fill_ground_sky）。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.42;
+    app.view_.theta = 3.14159265358979323846 / 4.0;
+    app.view_.R     = 120.0;
+    shoot("water_far_view");
+    app.view_.R     = 300.0;
+    shoot("water_far_view_far");
+
     // ── 2a. 雾 + 水皮的顺序：水皮在 froxel/远景雾**之后**合成 ──
     //    没有雾时"水皮在前/在后"是逐字节等价的（这一版实测 max diff = 0），
     //    所以必须**开着雾**才看得出新架构的差别：水皮吃的是"雾算完之后的那个背景"。
@@ -320,6 +331,12 @@ int RunCaptureWater(const std::string& out_dir) {
     shoot("water_camera_under_sun_behind");
     app.deg_.sun_elev_deg = 45.0f;
     app.deg_.sun_azim_deg = 40.0f;
+
+    // 诊断：**几乎正上方**（仰角 ~70°）再看一次 —— Snell 窗的"大小"是几何决定的：
+    // 仰角越低，画面里 TIR 区占比越大（25° 仰角时窗只占上方 ~14°）。
+    app.view_target_ = jpov::Vec3f(0.0f, 44.0f, 0.0f);
+    shoot("water_camera_under_up");
+    app.view_target_ = jpov::Vec3f(0.0f, 9.0f, 0.0f);
 
     // 对照：同一机位切"纯皮 / 含体积"，用来确认"把水皮搬到 froxel 之后"本身是零差异的
     // （这个场景没有雾，两版应当逐字节相同；有雾的差异见 water_with_fog）。

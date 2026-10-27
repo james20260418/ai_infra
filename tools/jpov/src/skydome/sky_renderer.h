@@ -81,6 +81,7 @@ uniform vec3  uDaylightSeason; // 季节色温乘子（**只染太阳能通道**
 uniform vec3  uMoonSeason;    // 月亮色温乘子（**只染月盘 + 月光**；血月）
 uniform float uIntensity;     // 天光亮度标量
 uniform vec3  uGroundColor;   // 地平线以下地色
+uniform int   uFillGroundSky; // 1 = 地平线以下也画地平线天光（开全局水时用）
 uniform vec3  uNightZenith;   // 夜空底色：天顶方向（线性 HDR；全 0 = 关闭夜色）
 uniform vec3  uNightHorizon;  // 夜空底色：地平线方向（线性 HDR；全 0 = 关闭夜色）
 uniform float uSunRadius;     // 太阳盘角半径（弧度，~0.0047~0.015；≤0 不画）
@@ -377,7 +378,12 @@ void main() {
 
 
     vec3 sky;
-    if (dir.y < 0.0) {
+    // uFillGroundSky == 1：地平线以下也走大气模型（Preetham 内部会把方向夹到地平线上方，
+    // 所以拿到的是"地平线天光色"）。
+    // 什么时候用：**开了全局水**的时候 —— 水面把下半球全盖住了，地色根本没有可见的消费者；
+    // 而水皮的"远端淡出"是收敛到抓帧色的，若抓帧里地平线下方是地色，就会在地平线附近
+    // 露出一圈地色环（实测：相机抬高后非常明显）。
+    if (dir.y < 0.0 && uFillGroundSky == 0) {
         // ── 地平线以下：纯色地色（避免天空倒影感），不采样大气模型 ──
         // 地色既非散射日光也非月亮，不受任何 season 乘子。
         sky = uGroundColor;
@@ -466,10 +472,14 @@ void main() {
     // Pre-condition: cam.up 非零、target != position
     //   output: 本趟画什么（见 SkyOutput）。kAtmoOnly = 只出大气色（不含日月盘/光晕），
     //           供远景仰角雾当收敛色；kEnvProbe = 环境反射探针（不含盘/晕，下半球用地色）。
+    //   fill_ground_sky: true ⇒ 地平线以下也画地平线天光（不画 uGroundColor）。
+    //                     **开了全局水面时必须传 true**：下半球被水面盖住，地色不可见，
+    //                     而水皮远端淡出收敛到抓帧色，会露一圈地色环。
     static void DrawSky(const SkyCommand& sky_cmd,
                         const Camera& cam, int fbo_w, int fbo_h,
                         ShaderManager& shader_mgr,
-                        SkyOutput output = SkyOutput::kFull);
+                        SkyOutput output = SkyOutput::kFull,
+                        bool fill_ground_sky = false);
 
     // ---- DrawSkyEnvCube ----
     // 把程序化天光渲进一张**立方体贴图**（环境镜面 IBL 的反射源）。
