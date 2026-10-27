@@ -3,7 +3,7 @@
 // 定位（Danis 2026-10-14 定）：用户给出粒子的 flipbook + 一票信息（ParticleRenderCommand），
 // 本渲染器把结果画进 **WBO 半透明累积纹理**（覆盖集 accum/reveal + 加法集 add），
 // 供后续**合成并交给 froxel**。
-// 与内置 object3d 透明（#176，1× 玻璃 FBO）**共用同一套 McGuire WBO 代数**。
+// 与条带 / 体积火**共用同一套 McGuire WBO 代数**（权重函数只有 `kWboWeightGlsl` 一份）。
 //
 // ⭐ 为什么要 WBO + 分级：半透明 overdraw 在 sprite 栈内**无解**（透明不写深度 → early-Z 失效）。
 //   对策：① 渲进**低分辨率**目标（成本∝res²）——本版先做 **1/2**；② WBO 顺序无关（免排序）。
@@ -17,7 +17,7 @@
 //     att1 reveal  : α                  （blend ZERO,ONE_MINUS_SRC_COLOR）
 //     att2 additive: 色·α（真加法时）    （blend ONE,ONE）
 //   （att3 是深度槽，本渲染器不申请；槽位定义见 src/wbo/wbo_target.h）
-//   WeightWbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)（同 #176），
+//   WeightWbo = max(min(1, maxRGB·α), α) · clamp(0.03/(1e-5+(z/5)^4), 1e-2, 3e3)，
 //   文本来自 src/wbo/wbo_shader.h 的 kWboWeightGlsl（唯一权威副本）。
 //   （曾有 depth 附件 = z_view·α·w，但 Composite 从未采样它 —— 纯带宽浪费，已删。）
 //

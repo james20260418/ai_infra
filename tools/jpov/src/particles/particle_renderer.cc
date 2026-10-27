@@ -32,7 +32,7 @@ namespace jpov {
 
 namespace {
 
-// 粒子 WBO pass 是独立 pass（不透明 3D 之后），单元 0 空闲（同 #176 的惯例）。
+// 粒子 WBO pass 是独立 pass（不透明 3D 之后），单元 0 空闲（与条带 / 体积火一致）。
 constexpr int kSceneDepthUnit = 0;
 constexpr int kParticleTexUnit = 1;
 
