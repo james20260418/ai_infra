@@ -88,9 +88,14 @@ float SceneDistance(vec2 uv) {
 }
 
 // 地平线方向的天光色（远端淡出用；与反射探针同源，保证"海天相接"无接缝）。
+//
+// ⚠️ 必须用**低 mip（2~3）**、不能取 uEnvMaxLod：cubemap 的 ±X/±Z 面在最高 mip
+//    是 1×1，那一个 texel 平均了"上半天空 + 下半地色" ⇒ 采出来是暗色，
+//    在地平线上就会留下一条 1 px 的暗线（实测 y=168 那行比邻居暗 70）。
+//    另外把方向抬到 +Y 一点点（0.04），避免正好压在天空/地色的分界上。
 vec3 HorizonSky(vec3 dir) {
-    vec3 h = normalize(vec3(dir.x, 0.02, dir.z));
-    return textureLod(uEnvCube, h, uEnvMaxLod).rgb * uSkyScale;
+    vec3 h = normalize(vec3(dir.x, 0.04, dir.z));
+    return textureLod(uEnvCube, h, 2.0).rgb * uSkyScale;
 }
 
 void main() {
