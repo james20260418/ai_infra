@@ -181,7 +181,9 @@ const std::string& Vs3dPBRText() {
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（布局见 MeshManager 注释）：
+//   (lag_ratio 或 joint_id, max_lag 或 phase, base tint 索引, 预留)
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -189,6 +191,8 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+// base tint 索引：flat（provoking vertex）⇒ 一个三角形整体归属一个 id。
+flat out int vTintIndex;
 #ifdef JPOV_PICK
 uniform int uPickIdBase;
 flat out uint vPickId;
@@ -202,6 +206,7 @@ void main() {
     vWorldNormal = wn;
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -218,7 +223,8 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（布局见 MeshManager 注释）。
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -226,6 +232,8 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+// base tint 索引：flat（provoking vertex）⇒ 一个三角形整体归属一个 id。
+flat out int vTintIndex;
 #ifdef JPOV_PICK
 uniform int uPickIdBase;
 flat out uint vPickId;
@@ -240,6 +248,7 @@ void main() {
     vWorldNormal = wn;
     vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -253,7 +262,8 @@ const std::string& ShadowVsText() {
     static const std::string text = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec2 aFlex;   // 植被风：(joint_id, phase)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（阴影只需要风：.xy；.z 的 tint 不影响几何）。
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -406,6 +416,17 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
                 cmd.material.base_color.b);
+    // 顶点 base tint 调色板（逐物体）：关掉时 FS 整段跳过乘法。
+    glUniform1i(glGetUniformLocation(selected_prog, "uTintEnabled"),
+                cmd.material.base_tint.enabled ? 1 : 0);
+    glUniform3f(glGetUniformLocation(selected_prog, "uTintColor0"),
+                cmd.material.base_tint.color[0].r,
+                cmd.material.base_tint.color[0].g,
+                cmd.material.base_tint.color[0].b);
+    glUniform3f(glGetUniformLocation(selected_prog, "uTintColor1"),
+                cmd.material.base_tint.color[1].r,
+                cmd.material.base_tint.color[1].g,
+                cmd.material.base_tint.color[1].b);
     glUniform1f(glGetUniformLocation(selected_prog, "uMetallic"), cmd.material.metallic);
     glUniform1f(glGetUniformLocation(selected_prog, "uRoughness"), cmd.material.roughness);
     glUniform3f(glGetUniformLocation(selected_prog, "uEmissive"),

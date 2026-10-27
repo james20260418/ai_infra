@@ -16,6 +16,8 @@
 //   - TEXCOORD_1 → FLOAT VEC2：植被风的逐顶点 `(joint_id, phase)`（loader 读成
 //     `MeshData::wind_link`）。joint_id 必须**按拓扑定准**（同枝同环共享一个关节）：
 //     渲染侧不再做任何"最近关节/权重"推断，存进去什么就吹什么。
+//   - _JPOV_TINT → UNSIGNED_BYTE SCALAR：顶点 base tint 索引（0 = 不换色，
+//     1..kNumBaseTintColors = 调色板通道；loader 读成 `MeshData::base_tint`）。
 //   - JOINTS_0 → UNSIGNED_SHORT VEC4（glTF 规范 JOINTS_0 允许 ushort；loader 读 int 侧无碍）
 //   - WEIGHTS_0 → FLOAT VEC4
 //   - indices → UNSIGNED_INT SCALAR（triangle list）

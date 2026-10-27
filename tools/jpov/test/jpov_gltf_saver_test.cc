@@ -192,6 +192,40 @@ TEST(GltfSaverTest, RoundTripRelaxAttribute) {
     std::remove(path.c_str());
 }
 
+// ==================== 1c. _JPOV_TINT（顶点 base tint 索引）写→读回 ====================
+
+TEST(GltfSaverTest, RoundTripBaseTintAttribute) {
+    MeshData m = MakeTriMesh(1.0f);
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) |
+        static_cast<uint8_t>(MeshVertexFlags::kBaseTint));
+    // 0 = 不换色，1/2 = 两个调色板通道；dump 三个值覆盖全部合法 id。
+    m.base_tint = {0, 1, 2};
+    m.Validate();
+
+    GltfSaveAsset asset;
+    asset.name = "base_tint";
+    asset.meshes.push_back(GltfSaveMesh{m, GltfMaterialInfo{}});
+
+    const std::string path = TmpPath("base_tint");
+    std::remove(path.c_str());
+    ASSERT_TRUE(WriteGlb(asset, path)) << "WriteGlb 应成功";
+
+    Collect c;
+    ASSERT_TRUE(LoadGltfScene(path, CollectCb, &c)) << "写出的 glb 应能读回";
+    ASSERT_EQ(c.meshes.size(), 1u);
+    const MeshData& got = c.meshes[0];
+    ASSERT_TRUE(MeshHasFlag(got.flags, MeshVertexFlags::kBaseTint))
+        << "读回的 mesh 应带 kBaseTint（_JPOV_TINT 未往返）";
+    ASSERT_EQ(got.base_tint.size(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(got.base_tint[i], m.base_tint[i]) << "第 " << i << " 顶点 tint id 不一致";
+    }
+    // 索引是整数 id：若被当成归一化 ubyte 读回（/255），值会变成 0/1/255 之类。
+    EXPECT_EQ(static_cast<int>(got.base_tint[2]), 2);
+    std::remove(path.c_str());
+}
+
 // 坐坐标映射互逆：save → load → save → load 两次结果应逐位一致
 // （若 saver 漏做逆映射，每次往返会多转 90°，此测试立刻挂）。
 TEST(GltfSaverTest, RoundTripIsStableAcrossTwoCycles) {

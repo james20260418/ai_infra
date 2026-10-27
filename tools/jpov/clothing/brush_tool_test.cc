@@ -195,6 +195,40 @@ TEST(BrushToolTest, EnsurePrimitivesGrowsAndKeepsExisting) {
     EXPECT_EQ(b.primitive_count(), 3u);
 }
 
+// ==================== tint 分区涂抹（覆盖赋值） ====================
+
+TEST(BrushToolTest, AssignByteInBrushOverwritesOnlyInsideCone) {
+    const CameraBasis c = FixedBasis();
+    const CameraRay ray = RayFromPixel(c, 640.0f, 360.0f);  // 中心，dir=-Z
+    // 深度 5 处：中心点（命中）+ 侧向偏移 3m（远在画笔圆外）。
+    const std::vector<Vec3f> pts = {
+        {0.0f, 0.0f, 0.0f},
+        {3.0f, 0.0f, 0.0f},
+    };
+    std::vector<uint8_t> ids = {0, 0};
+
+    // 半径 100px @ depth 5：世界半径 = 100·2·tan30°·5/720 ≈ 0.80m
+    // （中心点 0m 命中；3m 远离）。全部改成 id=2。
+    const size_t changed = AssignByteInBrush(pts, ray.origin, ray.dir, /*radius_px=*/100.0f,
+                                             /*screen_h=*/720.0f, c.tan_half_fov,
+                                             /*id=*/2, &ids);
+    EXPECT_EQ(changed, 1u);
+    EXPECT_EQ(static_cast<int>(ids[0]), 2);
+    EXPECT_EQ(static_cast<int>(ids[1]), 0) << "锥外顶点不该被改";
+
+    // 再涂同一个 id：没有值变化 → 返回 0（驱动每帧重传 GPU 的判据）。
+    EXPECT_EQ(AssignByteInBrush(pts, ray.origin, ray.dir, 100.0f, 720.0f,
+                                c.tan_half_fov, /*id=*/2, &ids),
+              0u);
+
+    // id=0 = 清除：锥内改回 0，锥外保持不变。
+    EXPECT_EQ(AssignByteInBrush(pts, ray.origin, ray.dir, 100.0f, 720.0f,
+                                c.tan_half_fov, /*id=*/0, &ids),
+              1u);
+    EXPECT_EQ(static_cast<int>(ids[0]), 0);
+    EXPECT_EQ(static_cast<int>(ids[1]), 0);
+}
+
 }  // namespace
 }  // namespace clothing
 }  // namespace jpov

@@ -36,6 +36,32 @@ extern const Color kColorWhite;
 extern const Color kColorBlack;
 extern const Color kColorTransparent;
 
+// 顶点 base tint 分区的用户可选颜色数（**MVP = 2**）。
+//
+// 语义：`MeshData::base_tint` 逐顶点存一个 uint8 索引，取值 0..kNumBaseTintColors：
+//   0               = 该顶点不参与换色（保持 baseColor 贴图原色）
+//   1..kNum...      = 用 `BaseTint::color[i-1]` 乘 baseColor
+// 着色器按 **flat（provoking vertex）** 读索引 ⇒ 一个三角形整体归属一个色。
+//
+// 为什么是 2：MVP 只开放两个调色板通道（对应 2×RGB 滑条 + 2 个 flat varying）。
+// 顶点属性本身是完整 uint8（0..255 的值空间），扩通道数时只需扩本常量与 shader 的
+// uniform 数组，不需要改顶点布局。
+inline constexpr int kNumBaseTintColors = 2;
+
+// base tint 调色板（**运行期参数，不是资产数据**）。
+//
+// enabled == false ⇒ 片元着色器**完全不做这次乘法**（开关保护，A/B 用）。
+// enabled == true 且颜色全白（默认）⇒ 乘法恒等，观感与不开完全一致。
+//
+// 默认 `enabled = false`：引擎默认零额外成本、也不改变任何既有画面的语义；
+// 需要该功能的工具（model viewer / clothing tool）显式把它打开。
+struct BaseTint {
+    bool enabled = false;
+    // 索引 i 对应顶点 tint id = i + 1。默认白 = 乘性恒等。
+    Color color[kNumBaseTintColors] = {{1.0f, 1.0f, 1.0f, 1.0f},
+                                       {1.0f, 1.0f, 1.0f, 1.0f}};
+};
+
 // 材质透明模式。
 //   kOpaque：不透明（默认）。alpha 通道被忽略。
 //   kMask  ：alpha test（cutout）——采样 baseColor 贴图的 alpha，低于 alpha_cutoff
@@ -76,6 +102,12 @@ struct PBRMaterial {
     // baseColor: 常值 fallback（base_color_tex ≠ 0 时走纹理采样）
     Color base_color;
     uint32_t base_color_tex = 0;
+
+    // 顶点 base tint 调色板（见上方 BaseTint 注释）。
+    //   着色：base_color_final = baseColor_texel.rgb × base_tint.color[id-1]
+    //   适用路径：**无 per-instance 颜色通道**的 Object3D / GltfObject 绘制（本 MVP）。
+    //   蒙皮 / 实例路径暂未接入（见 tools/jpov/docs/jpov_base_tint_design.md）。
+    BaseTint base_tint;
 
     // metallic / roughness: scalar or texture
     float metallic = 0.0f;

@@ -231,6 +231,18 @@ json WritePrimitive(const MeshData& mesh, BinBuilder* bin, json* accessors,
             add_accessor("VEC2", 5126, vcount, o.first, o.second, false);
     }
 
+    // 顶点 base tint 分区（**自定义语义** _JPOV_TINT，UNSIGNED_BYTE SCALAR = 逐顶点 id）—— 有才写。
+    //   0 = 不换色；1..kNumBaseTintColors = 调色板通道。glTF 规范允许自定义属性
+    //   （必须以下划线开头）；不认识的应用忽略即可，对通用资产无害。
+    if (MeshHasFlag(mesh.flags, MeshVertexFlags::kBaseTint)) {
+        CHECK_EQ(mesh.base_tint.size(), vcount)
+            << "WritePrimitive: kBaseTint 但 base_tint 顶点数不符";
+        const size_t n = mesh.base_tint.size() * sizeof(uint8_t);
+        const size_t off = bin->Append(mesh.base_tint.data(), n);
+        attributes["_JPOV_TINT"] =
+            add_accessor("SCALAR", 5121, vcount, off, n, false);
+    }
+
     // indices (uint scalar) —— 有才写；无则非索引绘制（loader 支持）
     json primitive = {{"attributes", attributes}, {"mode", 4}};   // 4 = triangles
     if (!mesh.indices.empty()) {

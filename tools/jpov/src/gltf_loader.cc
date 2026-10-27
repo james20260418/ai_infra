@@ -116,6 +116,47 @@ bool ReadFloatAccessor(const tinygltf::Model& model,
     return true;
 }
 
+// 从 tinygltf accessor 读取 **UNSIGNED_BYTE SCALAR** 顶点属性（逐顶点一个字节），
+// 用于 `_JPOV_TINT`（base tint 索引）。返回 false = 类型不符 / 不可读。
+//
+// 与 ReadFloatAccessor 分开的原因：后者把 UNSIGNED_BYTE **归一化**成 v/255
+//（那是 COLOR_0 的语义），而 tint 索引是**整数 id**，不能除 255。
+bool ReadUint8Accessor(const tinygltf::Model& model, int accessor_index,
+                       std::vector<uint8_t>* out) {
+    if (accessor_index < 0 ||
+        accessor_index >= static_cast<int>(model.accessors.size())) {
+        return false;
+    }
+    const tinygltf::Accessor& acc = model.accessors[accessor_index];
+    if (acc.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
+        acc.type != TINYGLTF_TYPE_SCALAR) {
+        return false;
+    }
+    if (acc.bufferView < 0 ||
+        acc.bufferView >= static_cast<int>(model.bufferViews.size())) {
+        return false;
+    }
+    const tinygltf::BufferView& view = model.bufferViews[acc.bufferView];
+    if (view.buffer < 0 ||
+        view.buffer >= static_cast<int>(model.buffers.size())) {
+        return false;
+    }
+    const tinygltf::Buffer& buf = model.buffers[view.buffer];
+    const size_t count = acc.count;
+    const size_t byte_stride =
+        view.byteStride > 0 ? view.byteStride : 1;
+    const size_t begin = view.byteOffset + acc.byteOffset;
+    if (begin + (count > 0 ? (count - 1) * byte_stride + 1 : 0) > buf.data.size()) {
+        return false;
+    }
+    const unsigned char* src = buf.data.data() + begin;
+    out->resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        (*out)[i] = src[i * byte_stride];
+    }
+    return true;
+}
+
 // 从 tinygltf accessor 读取 JOINTS_0 关节索引（每顶点 4 个 int, 4-bone 蒙皮）到
 // MeshData.joint_indices。
 //
@@ -543,6 +584,24 @@ bool ParsePrimitive(const tinygltf::Model& model,
         } else {
             LOG(WARNING) << "LoadGltf: _JPOV_RELAX 存在但类型/长度不符（顶点数 "
                          << vcount << "），忽略该属性";
+        }
+    }
+
+    // _JPOV_TINT —— 顶点 base tint 分区（**自定义语义**，UNSIGNED_BYTE SCALAR = 逐顶点 id）。
+    //   0 = 不换色；1..kNumBaseTintColors = 用对应调色板通道乘 baseColor。
+    //   长度 != vcount 视为坏资产，忽略该属性（不致命；与 _JPOV_RELAX 同口径）。
+    auto tint_it = prim.attributes.find("_JPOV_TINT");
+    if (tint_it != prim.attributes.end()) {
+        std::vector<uint8_t> tint;
+        if (ReadUint8Accessor(model, tint_it->second, &tint) &&
+            tint.size() == vcount) {
+            out_mesh->base_tint = std::move(tint);
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kBaseTint));
+        } else {
+            LOG(WARNING) << "LoadGltf: _JPOV_TINT 存在但类型/长度不符（顶点数 "
+                         << vcount << "；需 UNSIGNED_BYTE SCALAR），忽略该属性";
         }
     }
 

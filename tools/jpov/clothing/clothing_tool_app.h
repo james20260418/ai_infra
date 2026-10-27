@@ -136,6 +136,7 @@
 #include "tools/jpov/demo/view_config.h"
 #include "tools/jpov/include/jpov/jpov.h"
 #include "tools/jpov/interface/skeleton_types.h"
+#include "tools/jpov/interface/tint_ui.h"
 #include "tools/jpov/interface/ui.h"
 #include "tools/jpov/soft_mesh_simulator/soft_mesh_simulator.h"
 #include "tools/jpov/src/gltf_loader.h"
@@ -209,11 +210,26 @@ public:
     BrushTool brush_;
     std::vector<jpov::UiRect> panel_rects_;
 
+    // ══════════════ 顶点 base tint 覆盖（MVP：2 个通道）══════════════
+    //
+    // 「顶点配置覆盖」编辑：选一个 byte id（0 = 不换色，1/2 = 两个调色板通道），
+    // 用 3D 画笔在衣服上涂抹 → 把**涂到的顶点**的 `MeshData::base_tint` 写成该 id。
+    // 染白不在这里做（Danis：建模时涂白更自然）——本工具只写 id，引擎做一次乘法。
+    //
+    // 与 3D 画笔的关系：两种涂抹**互斥**（同一鼠标左键），进入 tint 涂抹会结束选区画笔。
+    // 半径沿用画笔半径（屏幕上「涂多大」是同一件事，不给第二个旋钮）。
+    jpov::BaseTint tint_ui_{true};   // 调色板（白 = 恒等；默认打开，改色才看得出）
+    bool tint_paint_active_ = false; // tint 涂抹激活态
+    int tint_paint_id_ui_ = 1;       // 当前 id（0..kNumBaseTintColors）
+    bool show_tint_field_ = false;   // 用 2D 像素显示各顶点 id（A/B 通道色）
+    std::string tint_msg_;           // 面板状态提示
+
     // ── 面板折叠（Accordion）展开态（2026-10-14 Danis：除「平移/旋转/保存 glb」面板外，
     //    其余面板一律可折叠；折叠时只显示面板标题栏）。状态外置，跨帧由本工具持有：
     //    true = 展开（标题栏 + 内容行），false = 折叠（仅标题栏）。
     //    默认全部折叠（2026-10-14 Danis：开启工具时默认收起）。──
     bool brush_panel_open_    = false;  // 顶部中间：3D 画笔
+    bool tint_panel_open_     = false;  // 顶部中间：顶点 tint 覆盖（画笔下方）
     bool relax_panel_open_    = false;  // 顶部中间：布料 LAG 松弛度
     bool right_panel_open_    = false;  // 右上：仿真动力学
     bool skin_panel_open_     = false;  // 右下：软布自动蒙皮
@@ -701,6 +717,12 @@ public:
                                      /*front*/  {0.0f, 0.0f, 1.0f});
             }
         }
+        // tint 调色板是**运行期**参数（glb 只存逐顶点 id）：每帧写进衣服各 primitive 材质。
+        // 注意：MVP 只有 object3d 着色器消费 tint；随机摆动开启（走蒙皮路径）时暂不生效。
+        for (jpov::GltfPrimitive& prim : cloth_.primitives) {
+            prim.material.base_tint = tint_ui_;
+        }
+
         // 衣服：静态绘制用恒等放置（顶点已含变换 / 仿真形变）；摆动测试 + 衣服带蒙皮时用
         // **同一骨架 + 同一实例状态**画（⇒ 与人体逐帧同步跟随）。未蒙皮则不动（静态绘制）。
         if (show_cloth_) {
@@ -726,6 +748,9 @@ public:
 
         // 松弛度场（蓝→红 2D 像素；松弛度面板开关）。画在面板之下。
         DrawRelaxField(winfo, cmds);
+
+        // tint 分区（2D 像素；tint 面板开关）。同样画在面板之下。
+        DrawTintField(winfo, cmds);
 
         // ── 面板（仅交互窗口；headless 是纯 3D 截图）──
         if (show_panel_) {
@@ -772,8 +797,19 @@ private:
         size_t relax_prims = 0;
         size_t relax_verts = 0;
         float loaded_max_lag = 0.0f;
+        size_t tint_prims = 0;
+        size_t tint_verts = 0;
         for (size_t i = 0; i < cloth_current_.size(); ++i) {
             const jpov::MeshData& m = cloth_current_[i].mesh;
+            if (jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint) &&
+                m.base_tint.size() == m.positions.size()) {
+                ++tint_prims;
+                for (uint8_t id : m.base_tint) {
+                    if (id != 0) {
+                        ++tint_verts;
+                    }
+                }
+            }
             if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kRelax) ||
                 m.relaxations.size() != m.positions.size()) {
                 continue;
@@ -797,6 +833,13 @@ private:
                 "载入的 glb 已含松弛度（%zu primitive / %zu 顶点）：勾选「显示松弛度场」即可查看",
                 relax_prims, relax_verts);
             LOG(INFO) << relax_msg_;
+        }
+        if (tint_prims > 0) {
+            tint_msg_ = Format(
+                "载入的 glb 已含 tint 分区（%zu primitive / %zu 个非 0 顶点）："
+                "调色板改色即可查看，勾「显示 tint 分区」看归属",
+                tint_prims, tint_verts);
+            LOG(INFO) << tint_msg_;
         }
     }
 
@@ -936,6 +979,15 @@ private:
                 m.flags = static_cast<jpov::MeshVertexFlags>(
                     static_cast<uint8_t>(m.flags) |
                     static_cast<uint8_t>(jpov::MeshVertexFlags::kJoints));
+            }
+            // 同理保住 tint 分区（仿真器只持有几何）：丢了会与已注册 GPU mesh 的 flags
+            // 不一致（UpdateMesh CHECK 崩），或静默把已涂好的 id 清零。
+            if (jpov::MeshHasFlag(prev.flags, jpov::MeshVertexFlags::kBaseTint) &&
+                prev.base_tint.size() == m.positions.size()) {
+                m.base_tint = prev.base_tint;
+                m.flags = static_cast<jpov::MeshVertexFlags>(
+                    static_cast<uint8_t>(m.flags) |
+                    static_cast<uint8_t>(jpov::MeshVertexFlags::kBaseTint));
             }
             // 顶点被物理改过 / 被即时变换过 → 法线须重算，否则着色停留在旧姿态。
             RecomputeVertexNormals(&m);
@@ -1252,6 +1304,127 @@ private:
                 cmds->DrawRect(
                     /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
                     /*size*/ {kMarkSize, kMarkSize}, jpov::Color{c.x(), c.y(), c.z(), 1.0f});
+            }
+        }
+    }
+
+    // ==================== 顶点 base tint 覆盖（MVP：2 通道）====================
+
+    // 进入/退出 tint 涂抹。进入前先把 GPU mesh 换成带 kBaseTint 的版本（一次性重建 VAO），
+    // 之后涂抹只需 UpdateMesh；进入 tint 涂抹会结束 3D 选区画笔（同一鼠标左键不能两用）。
+    void SetTintPaintActive(bool on) {
+        if (on) {
+            if (cloth_current_.empty()) {
+                tint_msg_ = "衣服几何尚未就绪";
+                return;
+            }
+            EnsureClothTintAttribute();
+            brush_.SetActive(false);
+        }
+        tint_paint_active_ = on;
+    }
+
+    // 保证每个衣服 primitive 的 CPU/GPU mesh 都带 kBaseTint（没有就补全 0 并重注册）。
+    //
+    // 为什么不在载入时无条件加：没用到 tint 的资产不该多背一个顶点属性 / glb 字段。
+    // 为什么必须重注册：MeshManager::UpdateMesh 要求 flags 与注册时一致（VBO 布局不能变）。
+    void EnsureClothTintAttribute() {
+        if (cloth_current_.empty()) {
+            return;
+        }
+        CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
+        // 先与仿真状态对齐（仿真器只持有几何；这一步的 flags 仍是旧集合，UpdateMesh 合法）。
+        if (!sims_.empty()) {
+            SyncSimsToCloth();
+        }
+        size_t added_prims = 0;
+        size_t added_verts = 0;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            jpov::MeshData& m = cloth_current_[i].mesh;
+            if (jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
+                continue;
+            }
+            m.base_tint.assign(m.positions.size(), 0);
+            m.flags = static_cast<jpov::MeshVertexFlags>(
+                static_cast<uint8_t>(m.flags) |
+                static_cast<uint8_t>(jpov::MeshVertexFlags::kBaseTint));
+            m.Validate();
+            // 换一份带 tint 属性的 GPU mesh（旧的无 tint 版本释放掉）。
+            ReleaseMesh(cloth_.primitives[i].mesh_id);
+            cloth_.primitives[i].mesh_id = RegisterMesh(m);
+            added_prims += 1;
+            added_verts += m.positions.size();
+        }
+        if (added_prims > 0) {
+            tint_msg_ = Format("已启用 tint 顶点属性：%zu 个 primitive / %zu 顶点（全部初始 id=0）",
+                               added_prims, added_verts);
+            LOG(INFO) << tint_msg_;
+        } else if (tint_msg_.empty()) {
+            tint_msg_ = "顶点已带 tint 属性（可直接涂抹）";
+        }
+    }
+
+    // 把画笔圆锥内顶点的 tint id 覆盖成 tint_paint_id_ui_，并把改动的 primitive 推上 GPU。
+    // 返回是否有 primitive 发生变化。
+    bool PaintTintAlongRay(const CameraRay& ray, const CameraBasis& basis,
+                           float screen_h) {
+        CHECK_EQ(cloth_current_.size(), cloth_.primitives.size());
+        const uint8_t id = static_cast<uint8_t>(tint_paint_id_ui_);
+        bool changed_any = false;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            jpov::MeshData& m = cloth_current_[i].mesh;
+            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint)) {
+                continue;
+            }
+            const size_t changed = AssignByteInBrush(
+                m.positions, ray.origin, ray.dir, brush_.radius_px(), screen_h,
+                basis.tan_half_fov, id, &m.base_tint);
+            if (changed == 0) {
+                continue;
+            }
+            UpdateMesh(cloth_.primitives[i].mesh_id, m);
+            changed_any = true;
+        }
+        if (changed_any) {
+            tint_msg_ = Format("涂抹中：id = %d（0 = 不换色）", static_cast<int>(id));
+        }
+        return changed_any;
+    }
+
+    // 用 2D 像素显示各顶点的 tint id（id 1/2 用对应调色板色；id 0 不画）。
+    // 供涂抹时核对「哪些点被标了」，与松弛度场同款显示方式。
+    void DrawTintField(const jpov::WindowInfo& winfo,
+                       jpov::RenderCommandList* cmds) {
+        if (!show_tint_field_ || cloth_current_.empty()) {
+            return;
+        }
+        const jpov::Vec3f target = CameraTarget();
+        const CameraBasis basis =
+            MakeCameraBasis(view_.Position() + target, target,
+                            /*world_up*/ {0.0f, 1.0f, 0.0f}, kCameraFovDeg,
+                            winfo.width, winfo.height);
+        const float kMarkSize = 2.0f;
+        for (size_t i = 0; i < cloth_current_.size(); ++i) {
+            const jpov::MeshData& m = cloth_current_[i].mesh;
+            if (!jpov::MeshHasFlag(m.flags, jpov::MeshVertexFlags::kBaseTint) ||
+                m.base_tint.size() != m.positions.size()) {
+                continue;
+            }
+            for (size_t v = 0; v < m.base_tint.size(); ++v) {
+                if (m.base_tint[v] == 0) {
+                    continue;
+                }
+                float px = 0.0f;
+                float py = 0.0f;
+                if (!ProjectToScreen(basis, m.positions[v], &px, &py, nullptr)) {
+                    continue;
+                }
+                const int channel = std::min(
+                    static_cast<int>(m.base_tint[v]) - 1, jpov::kNumBaseTintColors - 1);
+                const jpov::Color c = tint_ui_.color[channel];
+                cmds->DrawRect(
+                    /*pos*/ {px - kMarkSize * 0.5f, py - kMarkSize * 0.5f},
+                    /*size*/ {kMarkSize, kMarkSize}, c);
             }
         }
     }

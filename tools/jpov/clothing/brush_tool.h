@@ -61,6 +61,31 @@ inline bool VertexInBrush(const Vec3f& v, const Vec3f& ray_o, const Vec3f& ray_d
     return perp <= world_r;
 }
 
+// 把落在画笔锥内的顶点批量赋成一个 uint8 值（tint 分区涂抹用）。
+//
+// 与「选区」的区别：语义是**覆盖赋值**（含改回 0 = 清除），不是只增不减的集合。
+// 返回本次**值发生变化**的顶点数（已等于 id 的不计）。
+// Pre-condition: values->size() == positions.size()；radius_px>0、screen_h>0、tan_half_fov>0。
+inline size_t AssignByteInBrush(const std::vector<Vec3f>& positions,
+                                const Vec3f& ray_o, const Vec3f& ray_d,
+                                float radius_px, float screen_h, double tan_half_fov,
+                                uint8_t id, std::vector<uint8_t>* values /*inout*/) {
+    CHECK(values != nullptr);
+    CHECK_EQ(values->size(), positions.size());
+    size_t changed = 0;
+    for (size_t i = 0; i < positions.size(); ++i) {
+        if ((*values)[i] == id) {
+            continue;
+        }
+        if (VertexInBrush(positions[i], ray_o, ray_d, radius_px, screen_h,
+                          tan_half_fov)) {
+            (*values)[i] = id;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
 // 3D 画笔（选区）工具。状态 = 激活态 + 半径（像素）+ 选区（各 primitive 的顶点 index）。
 //
 // 选区按 primitive 分组（衣服是多 primitive glTF）；每组内 index **升序去重**（确定性）。

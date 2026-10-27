@@ -264,40 +264,48 @@ GPUMesh MeshManager::CreateGLMesh(const MeshData& data) {
                               sizeof(Vec3f), reinterpret_cast<const void*>(0));
     }
 
-    // ---- 次级运动槽（可选，location 6，vec2）----
-    //   ★ loc6 是本 PR 从「per-instance 首槽」腾出来给**顶点属性**的槽位（见
+    // ---- 次级顶点属性槽（可选，location 6，vec4）----
+    //   ★ loc6 是从「per-instance 首槽」腾出来给**顶点属性**的槽位（见
     //   instance_buffer.h 的实例布局表：model 已从 6..9 挪到 7..10）。
-    //   该槽由两个**互斥**特性共用（MeshData::Validate 保证不会同时声明）：
-    //     - kRelax（布料）：vec2(lag_ratio, max_lag)
-    //     - kWind （植被）：vec2(joint_id, phase)
-    //   属性缺失时该槽在本 VAO 上保持 disabled，读到的 aFlex 为默认值。
-    if (MeshHasFlag(data.flags, MeshVertexFlags::kRelax)) {
-        glGenBuffers(1, &mesh.vbo_relax);
-        CHECK_NE(mesh.vbo_relax, 0u);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_relax);
+    //   三个特性共用这一个槽，布局固定 vec4（MeshData::Validate 保证 kRelax/kWind 互斥）：
+    //     - kRelax   （布料）：(lag_ratio, max_lag, base_tint 索引, 0)
+    //     - kWind    （植被）：(joint_id,  phase,    base_tint 索引, 0)
+    //     - kBaseTint（仅 tint）：(0, 0, base_tint 索引, 0)
+    //   ⇒ .z 恒为 tint 索引（0 = 不换色）；kRelax/kWind 可与 kBaseTint 共存。
+    //   属性缺失时该槽在本 VAO 上保持 disabled，读到的 aFlex 为默认值 (0,0,0,1)。
+    //   ⚠️ 三份 VS 里 `aFlex` 一律声明成 vec4：GL 允许 shader 读少于 buffer 的分量数，
+    //   但反过来（buffer 只给 2 个、shader 读 .z）会读到常量 0 —— tint 会静默失效。
+    if (MeshHasFlag(data.flags, MeshVertexFlags::kRelax) ||
+        MeshHasFlag(data.flags, MeshVertexFlags::kWind) ||
+        MeshHasFlag(data.flags, MeshVertexFlags::kBaseTint)) {
+        CHECK(!(MeshHasFlag(data.flags, MeshVertexFlags::kRelax) &&
+                MeshHasFlag(data.flags, MeshVertexFlags::kWind)))
+            << "MeshManager: kRelax 与 kWind 互斥（MeshData::Validate 应已拦下）";
+        const size_t vn = data.positions.size();
+        std::vector<float> aux(vn * 4, 0.0f);
+        for (size_t i = 0; i < vn; ++i) {
+            if (!data.relaxations.empty()) {
+                aux[i * 4 + 0] = data.relaxations[i].x();   // lag_ratio
+                aux[i * 4 + 1] = data.relaxations[i].y();   // max_lag（米）
+            }
+            if (!data.wind_link.empty()) {
+                aux[i * 4 + 0] = data.wind_link[i].x();     // joint_id
+                aux[i * 4 + 1] = data.wind_link[i].y();     // phase
+            }
+            if (!data.base_tint.empty()) {
+                // 索引以 float 上传：VS 统一按 float 读，再取整成 int 经 flat varying 传给 FS。
+                aux[i * 4 + 2] = static_cast<float>(data.base_tint[i]);
+            }
+        }
+        glGenBuffers(1, &mesh.vbo_aux);
+        CHECK_NE(mesh.vbo_aux, 0u);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_aux);
         glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(data.relaxations.size() * sizeof(Vec2f)),
-                     data.relaxations.data(), GL_STATIC_DRAW);
+                     static_cast<GLsizeiptr>(aux.size() * sizeof(float)),
+                     aux.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
-                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
-    }
-    if (MeshHasFlag(data.flags, MeshVertexFlags::kWind)) {
-        // 2 float/顶点：(joint_id, phase)，与 MeshData::wind_link 逐分量一一对应。
-        // 载入期**不做任何推断**：joint_id 由烘焙端按拓扑定死（同一枝同一环共享一个关节，
-        // 分叉处的连续过渡靠"环共享关节"而不是靠空间插值）。路径长 L（吹倒权重）由 VS
-        // 沿关节链现算，不占顶点属性。
-        CHECK_EQ(data.wind_link.size(), data.positions.size())
-            << "MeshManager: kWind 但 wind_link 顶点数不符（MeshData::Validate 应已拦下）";
-        glGenBuffers(1, &mesh.vbo_wind);
-        CHECK_NE(mesh.vbo_wind, 0u);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo_wind);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(data.wind_link.size() * sizeof(Vec2f)),
-                     data.wind_link.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE,
-                              sizeof(Vec2f), reinterpret_cast<const void*>(0));
+        glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE,
+                              sizeof(float) * 4, reinterpret_cast<const void*>(0));
     }
 
     // ---- 植被风关节表纹理（可选，RGBA32F，2N×1：每关节 2 texel）----
@@ -399,11 +407,8 @@ void MeshManager::DestroyGLMesh(GPUMesh* mesh /*inout*/) {
     if (mesh->vbo_tangents) {
         buffers[n++] = mesh->vbo_tangents;
     }
-    if (mesh->vbo_relax) {
-        buffers[n++] = mesh->vbo_relax;
-    }
-    if (mesh->vbo_wind) {
-        buffers[n++] = mesh->vbo_wind;
+    if (mesh->vbo_aux) {
+        buffers[n++] = mesh->vbo_aux;
     }
     if (mesh->ebo) {
         buffers[n++] = mesh->ebo;

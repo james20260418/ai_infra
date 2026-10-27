@@ -35,6 +35,22 @@ cc_test(
 )
 
 # ============================================================================
+# 像素校验 — 顶点 base tint（object3d：loc6 vec4 → flat varying → FS 调色板乘法）
+# ============================================================================
+cc_test(
+    name = "jpov_object3d_tint_test",
+    srcs = ["jpov_object3d_tint_test.cc"],
+    deps = [
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/common:utils",
+        "//third_party/stb:stb_image",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+# ============================================================================
 # Gold Image — PBR Metallic+Roughness 纹理映射验证
 # ============================================================================
 cc_binary(
