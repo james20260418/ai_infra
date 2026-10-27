@@ -256,8 +256,10 @@ public:
             wp.fresnel_f0    = fr.f0;
             wp.fresnel_power = fr.power;
             wp.rim_color     = {fr.rim_color.x(), fr.rim_color.y(), fr.rim_color.z(), 1.0f};
-            // 水下视角：临界角外用**天光的地色**补齐（与天光同源，不另配一份颜色）。
-            wp.tir_color     = nl.sky.AmbientTricolor()[2];
+            // 水下视角：临界角外用地色补齐。必须取**天穹下半球的填色**（辐亮度量级，
+            // 近黑的 0.05/0.06/0.08）—— 不能用 AmbientTricolor()[2]（那是环境光量级、
+            // 还被均值归一过，填充出来比窗内的天空还亮，画面上是反的）。
+            wp.tir_color     = nl.sky.ground_color;
             wp.surface_slope_rms_deg = water_slope_rms_deg_;
             SetWaterSkin(wp);
         } else {

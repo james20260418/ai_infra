@@ -1908,8 +1908,11 @@ void Renderer::Render(const RenderCommandList& cmds,
                 glDrawBuffers(1, ws_draw_buf);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, 0, 0);
+                // 天空探针：只有本帧渲了环境镜面（env_specular）的 cubemap 才能用 ——
+                // 水下"折射采样 + n² 增益"全靠它；没有就传 0（FS 退化成纯 alpha 混合）。
+                const unsigned int sky_cube = (sky_env_tex_ != 0) ? sky_env_tex_ : 0u;
                 water_skin_renderer_.Draw(*water_skin_, cam, mvp_, hdr_scene_depth_tex,
-                                          fbo_3d_w, fbo_3d_h, shader_mgr_);
+                                          sky_cube, fbo_3d_w, fbo_3d_h, shader_mgr_);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ws[2] = {GL_COLOR_ATTACHMENT0,
