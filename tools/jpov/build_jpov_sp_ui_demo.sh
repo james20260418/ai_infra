@@ -50,7 +50,7 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 
 echo "==> 5. 拷贝材质纹理到 output/jpov_sp_ui_demo/textures/"
 mkdir -p "$OUTPUT_DIR/textures"
-cp -v "$MARBLE_DIR/plate_marble_flipbook_4x4.png" "$OUTPUT_DIR/textures/"
+cp -v "$MARBLE_DIR"/plate_*_4x4.png "$OUTPUT_DIR/textures/"
 
 ls -lh "$OUTPUT_DIR/" "$OUTPUT_DIR/fonts/" "$OUTPUT_DIR/textures/"
 

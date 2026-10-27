@@ -152,11 +152,19 @@ void SpUi::Emit(RenderCommandList* cmd /*output*/) {
 
 void SpUi::Text(const char* label, const SpRect& box, bool stretch_w,
               bool stretch_h) {
+    // 公开入口：布局坐标 → 设备像素（只在这里过了一次 Scaled）。
+    TextInternal(label, Scaled(box), stretch_w, stretch_h);
+}
+
+void SpUi::TextInternal(const char* label, const SpRect& box, bool stretch_w,
+                        bool stretch_h) {
     if (label == nullptr || label[0] == '\0') {
         return;  // 空标签不画。
     }
     // 规格化 box（负尺寸 clamp 0），越界/零尺寸则跳过。
-    const SpRect raw = SanitizeBox(Scaled(box));
+    // 注：box 已是设备像素 —— 控件内部复用时绝不能调公开的 Text()，
+    // 那会把已经缩过的 box 再缩一次（句柄/文字整体飞出去）。
+    const SpRect raw = SanitizeBox(box);
     if (raw.size.x() <= 0.0f || raw.size.y() <= 0.0f) {
         return;
     }
@@ -281,7 +289,7 @@ bool SpUi::Button(const char* label, const SpRect& box, bool stretch_w,
                     : (hovered ? theme_.accent : theme_.hover);
     PushPlate(b, fill, theme_.border, theme_.corner_radius_px);
     // 文本：原字号、box 中心对齐（复用 Text 的居中语义）。
-    Text(label, b);
+    TextInternal(label, b, /*stretch_w=*/true, /*stretch_h=*/true);
 
     // 点击返回 true（S2.4）：本帧左键有 Click 事件，且释放位置落在按钮 box 内
     // → 一次性事件（仅当帧返回 true，不存在跨帧记忆）。

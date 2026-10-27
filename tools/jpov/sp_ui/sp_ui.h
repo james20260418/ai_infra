@@ -358,6 +358,11 @@ private:
     void PushPlateInternal(const SpRect& r, Color fill, Color border,
                            float radius, bool textured);
     void PushText(const char* s, const SpRect& box);
+    // 与公开的 Text() 同语义，但 box 已是**设备像素**（不再过 Scaled）。
+    // 控件内部把 box 缩过一次后必须调这个：调公开的 Text() 会二次缩放
+    // （表现：文字位置飞到右下，倍率 = scale²）。
+    void TextInternal(const char* label, const SpRect& box_scaled,
+                      bool stretch_w, bool stretch_h);
     // 2D 折线（勾选标记等），首帧折线缓冲，Emit 时追加到外部列表。
     void PushPolyline(const std::vector<Vec2f>& vertices, Color color,
                       float line_width);

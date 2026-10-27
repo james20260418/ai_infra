@@ -115,10 +115,12 @@ struct SpDemoState {
     // ---- 全局控件 ----
     float gain = 5.0f;         // 增益滑条 [0, 10]
     bool enable = true;        // 使能复选框
-    // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。
-    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
+    // 材质 flipbook 的时间驱动开关（true = 翻书走，false = 定格在当前帧）。    // 时间本身仍由调用方给（SpUi::Begin 的 time_seconds）—— 这个开关只决定
     // 调用方要不要推进那个秒数，引擎侧依然不取自己的时钟。
     bool anim_play = true;
+    // 材质水波方式：0 = 关键帧溶解（旧）/ 1 = 正弦波 / 2 = 涟漪 / 3 = 噪声流。
+    // 四种图集都是 4x4 / 16 帧，只是生成方式不同（见 assets/sp_ui/marble/README.md）。
+    int wave_mode = 1;
     int profile = 1;           // 运行模式 Combo 选中 index
     int view_mode = 0;         // 显示模式 Combo 选中 index（第二个下拉，同屏）
     char name[32] = "";        // 电机命名输入框
@@ -332,6 +334,21 @@ inline void DrawSpUIDemoPanel(SpUi& ui, RenderCommandList* cmd, SpDemoState& st)
     {
         SpRect box = GlobalRow(3, 360.0f);
         ui.InputText("输入电机名…", st.name, sizeof(st.name), box);
+    }
+
+    // 材质水波方式（3 选 1：正弦 / 涟漪 / 噪声，外加旧的溶解做法做对照）。
+    // 放在输入框右侧的空位，不占新行。
+    {
+        static const std::vector<const char*> kWaveModes = {
+            "溶解(旧)", "正弦波", "涟漪", "噪声流"};
+        const SpRect wave_box{{
+            kUiDemoPad + 372.0f, kUiDemoGlobalY + 3.0f * 34.0f},
+            {kUiDemoLeftW - 372.0f, kUiDemoControlH}};
+        const int before = st.wave_mode;
+        if (ui.Combo("水波", &st.wave_mode, kWaveModes, wave_box) &&
+            before != st.wave_mode) {
+            st.log.Append(st.time_s, "水波→%s", kWaveModes[st.wave_mode]);
+        }
     }
 
     // 色块（不可编辑，纯展示）+ 标注。

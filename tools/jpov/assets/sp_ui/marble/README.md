@@ -111,6 +111,53 @@ Catmull-Rom 是**逐像素仿射**组合，而仿射组合保持可平铺性 ⇒
 
 ---
 
+## 水波 flipbook（`make_wave_flipbook.py`）
+
+> 2026-10-27 Danis 反馈：关键帧交叉淡化的 flipbook「动起来了但是确实很丑」——
+> 那确实不是水在流，而是两个不同花纹在溶解。所以换成
+> **单张周期纹理 + 位移场扭曲**：同一块石头往复位移，特征在屏幕上滑与起伏。
+
+三种生成方式（`--method`，demo 面板上用「水波」下拉切换，也可 `--wave` 指定）：
+
+| method | 位移场 | 观感 |
+|--------|--------|------|
+| `sine`   | 4 个方向的正弦叠加（整数波数） | 规则水波，最柔和 |
+| `ripple` | 4 个中心的同心涟漪（环面距离） | 像水滴落在石面上，中心处最活跃 |
+| `noise`  | 两张静态周期值噪声按相位绕圈混合 | 无序流动，最像自然水面 |
+
+```bash
+python3 make_wave_flipbook.py --src marble_sync_01.png --method sine \
+  --out plate_wave_sine_4x4.png --amp 12 --wavelength 110
+python3 make_wave_flipbook.py --src marble_sync_01.png --method ripple \
+  --out plate_wave_ripple_4x4.png --amp 10 --wavelength 70
+python3 make_wave_flipbook.py --src marble_sync_01.png --method noise \
+  --out plate_wave_noise_4x4.png --amp 14 --wavelength 160
+```
+
+### 三个必须守住的约束
+
+1. **位移场必须空间周期**（否则平铺接缝会裂）：正弦用整数波数；涟漪用
+   **环面距离** `min(|Δ|, P−|Δ|)`；噪声用环绕整数格点。
+   只要 `d(x+P) = d(x)`，则 `warped(x+P) = tex(x+P+d) = tex(x+d)` ⇒ 变形后依然可平铺。
+2. **相位必须走整数圈**（否则播放会跳）：`phase = f/frames`，
+   第 `frames` 帧的位移场逐像素等于第 0 帧。
+3. **采样一律环绕双线性**（`sample_wrap`），否则边缘拉丝/黑边。
+
+### 量化（当前入库三张）
+
+| method | 帧间平均差 | 回环（末→首） | 引擎侧 t0 vs t0.8（1920×1080） |
+|--------|-----------|--------------|------------------------------|
+| sine   | 12.97 ~ 15.01 | 14.43 | 3.66 均值 / **10.6%** 像素 >8，最大 189 |
+| ripple | 10.57 ~ 11.82 | 11.14 | 3.20 / 8.5%，最大 153 |
+| noise  | 8.98 ~ 12.14  | 11.80 | 2.76 / 6.9%，最大 131 |
+
+回环差都落在区间中段（不是离群值）⇒ 循环连续；三种方式同一时刻互不相同
+（sine vs ripple / noise 的 t=0 平均差都是 3.81）。
+
+对比旧做法（关键帧交叉淡化）：帧间差 2.1~25.8 **不均匀**，观感是两种花纹互相淡入淡出。
+
+---
+
 ## 引擎侧采样约定（消费者必须遵守）
 
 1. **纹理注册**：`repeat = true`（要平铺）、`mipmap = false`

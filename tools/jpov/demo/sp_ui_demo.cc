@@ -54,15 +54,15 @@ std::string ExeDir() { return std::string(); }
 
 // 材质查找顺序：构建产物目录 → 可执行文件目录 → 仓库 assets。
 // 与 strip viewer 同一套约定（产物目录里由 build 脚本同构拷贝）。
-std::string ResolveMarbleTexture() {
+std::string ResolveMarbleTexture(const char* file_name) {
     const std::string d = ExeDir();
-    const char* rels[] = {
-        "textures/plate_marble_flipbook_4x4.png",
-        "plate_marble_flipbook_4x4.png",
-        "../assets/sp_ui/marble/plate_marble_flipbook_4x4.png",
+    const std::string rels[] = {
+        std::string("textures/") + file_name,
+        std::string(file_name),
+        std::string("../assets/sp_ui/marble/") + file_name,
     };
-    for (const char* r : rels) {
-        const std::string p = d.empty() ? std::string(r) : (d + "/" + r);
+    for (const std::string& r : rels) {
+        const std::string p = d.empty() ? r : (d + "/" + r);
         std::FILE* f = std::fopen(p.c_str(), "rb");
         if (f != nullptr) {
             std::fclose(f);
@@ -87,6 +87,7 @@ struct PlateOptions {
     bool no_texture = false;  // 强制纯色（用于与旧 ui 逐像素对照）
     bool light = true;        // true = 大理石主题；false = 旧 ui 深色配色
     float scale = 1.5f;       // 整体 UI 缩放（1.5 = 线框、字号、内边距全部× 1.5）
+    int wave = 1;             // 水波方式（对应 SpDemoState::wave_mode）
 };
 
 class SpUiDemoApp : public JPOV {
@@ -108,7 +109,19 @@ public:
     // 整体 UI 缩放（布局坐标 → 设备像素）。需在 RunOnce/Run 之前设。
     void SetUiScale(float scale) { ui_.SetUiScale(scale); }
 
-    void SetMarbleTexture(uint32_t tex) { marble_tex_ = tex; }
+    // 四种材质图集（下标 = SpDemoState::wave_mode）。0 无纹理。
+    void SetWaveTextures(const uint32_t tex[4]) {
+        for (int i = 0; i < 4; ++i) {
+            wave_tex_[i] = tex[i];
+        }
+    }
+    // 预选水波方式（命令行用；交互时面板上的下拉会盖它）。
+    // Pre-condition: mode ∈ [0,3]
+    void SetWaveMode(int mode) {
+        CHECK_GE(mode, 0) << "SetWaveMode: mode 必须 >= 0";
+        CHECK_LE(mode, 3) << "SetWaveMode: mode 必须 <= 3";
+        st_.wave_mode = mode;
+    }
     void SetPlateOptions(const PlateOptions& opt) { plate_opt_ = opt; }
     // 翻书时间（秒）。零点与步长由调用方定 —— RunOnce/交互都由这里写。
     void SetTimeSeconds(float t) { time_s_ = t; }
@@ -148,7 +161,8 @@ public:
         theme.border_width_px = plate_opt_.border;
 
         // 板材：一场材质 + 一个剖面。所有控件（含装饰底）都从这里取。
-        theme.plate_texture_id = plate_opt_.no_texture ? 0u : marble_tex_;
+        theme.plate_texture_id =
+            plate_opt_.no_texture ? 0u : wave_tex_[st_.wave_mode & 3];
         theme.plate_material_px = plate_opt_.material_px;
         theme.plate_flipbook_fps = plate_opt_.flipbook_fps;
         theme.plate_tiles_x = 4;   // 图集 4x4（见 assets/sp_ui/marble/README.md）
@@ -183,7 +197,7 @@ public:
 private:
     jpov::sp_ui::SpUi ui_;              // 跨帧持有（焦点/下拉展开/拖动状态）
     jpov::sp_ui::SpDemoState st_;       // 跨帧持有（全部控件状态 + 实时 log + 帧时钟）
-    uint32_t marble_tex_ = 0;
+    uint32_t wave_tex_[4] = {0, 0, 0, 0};
     PlateOptions plate_opt_;
     float time_s_ = 0.0f;
     bool auto_advance_ = false;
@@ -202,6 +216,7 @@ void PrintUsage() {
         "  --material-px <px>   材质图集一格对应的屏幕像素（默认 200；0 = 关闭）\n"
         "  --scale <n>          整体 UI 缩放（默认 1.5，窗口同步放大）\n"
         "  --fps <n>            翻书帧率（默认 6；0 = 静态材质）\n"
+        "  --wave <mode>        水波方式：dissolve|sine|ripple|noise（默认 sine）\n"
         "  --dark               用旧 ui 的深色配色（默认是浅色大理石主题）\n"
         "  --no-texture         强制纯色板材（与旧 ui 逐像素对照用）\n");
 }
@@ -262,6 +277,19 @@ int main(int argc, char** argv) {
         } else if (a == "--scale" && has_next) {
             opt.scale = std::strtof(argv[++i], nullptr);
             CHECK_GT(opt.scale, 0.0f) << "--scale 必须 > 0";
+        } else if (a == "--wave" && has_next) {
+            const std::string v = argv[++i];
+            if (v == "dissolve") {
+                opt.wave = 0;
+            } else if (v == "sine") {
+                opt.wave = 1;
+            } else if (v == "ripple") {
+                opt.wave = 2;
+            } else if (v == "noise") {
+                opt.wave = 3;
+            } else {
+                LOG(FATAL) << "--wave 只接受 dissolve|sine|ripple|noise，收到 " << v;
+            }
         } else if (a == "--dark") {
             opt.light = false;
         } else if (a == "--no-texture") {
@@ -288,19 +316,37 @@ int main(int argc, char** argv) {
     app.InstallTextMeasure();
     app.SetPlateOptions(opt);
     app.SetUiScale(opt.scale);
+    app.SetWaveMode(opt.wave);
 
     // 材质：平铺必须 GL_REPEAT；**不开 mipmap** —— UI 是 1:1 像素，而 fract 平铺在
     // 接缝处导数不连续，自动选 LOD 会挑到最粗 mip 并在接缝上糊一条线
     // （见 tools/jpov/known_issue.md §8.2）。
+    //
+    // 四张图集全部注册（每张都是 4x4 / 16 帧），面板上的「水波」下拉切它：
+    //   0 溶解(旧) = 5 张关键帧交叉淡化；1 正弦波 / 2 涟漪 / 3 噪声流 = 单张周期纹理做位移。
+    // 缺图不致命（对应选项会退化为纯色），但会 LOG(WARNING) 提醒。
     if (!opt.no_texture) {
-        const std::string tex_path = ResolveMarbleTexture();
-        CHECK(!tex_path.empty())
-            << "找不到大理石 flipbook 纹理（产物目录/textures 或仓库 assets/sp_ui/marble）";
+        static const char* const kAtlasFiles[4] = {
+            "plate_marble_flipbook_4x4.png",
+            "plate_wave_sine_4x4.png",
+            "plate_wave_ripple_4x4.png",
+            "plate_wave_noise_4x4.png",
+        };
         jpov::TextureOptions tex_opt;
         tex_opt.repeat = true;
         tex_opt.mipmap = false;
-        app.SetMarbleTexture(app.RegisterTexture(tex_path, tex_opt));
-        LOG(INFO) << "材质：" << tex_path;
+        uint32_t ids[4] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; ++i) {
+            const std::string p = ResolveMarbleTexture(kAtlasFiles[i]);
+            if (p.empty()) {
+                LOG(WARNING) << "找不到材质图集：" << kAtlasFiles[i]
+                             << "（该水波选项将退化为纯色）";
+                continue;
+            }
+            ids[i] = app.RegisterTexture(p, tex_opt);
+            LOG(INFO) << "材质[" << i << "] = " << p;
+        }
+        app.SetWaveTextures(ids);
     }
 
     if (!capture_dir.empty()) {
