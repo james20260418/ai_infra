@@ -113,8 +113,6 @@ public:
     jpov::WaterSurface water_ = [] {
         jpov::WaterSurface w;
         w.level = kWaterLevelDefault;
-        // 主浪方向与场景无关，给一个斜向；振幅默认 0（第一版不做波浪）。
-        w.wave_dir = {1.0f, 0.0f, 0.35f};
         return w;
     }();
 
@@ -358,8 +356,10 @@ private:
         }
         ui_.SliderFloat("水位 m", &water_.level, row(0, 12),
                         kWaterLevelMin, kWaterLevelMax, 2);
-        ui_.SliderFloat("波浪幅度 m (0=平水面)", &water_.wave_amplitude,
-                        row(0, 13), 0.0f, 8.0f, 2);
+        // 水面微起伏（RMS 斜率，度）：0 = 理想镜面（水下仰望时 Snell 窗是物理硬边）；
+        // 6 ≈ 微风（默认）；12 ≈ 有浪。只影响界面透射的过渡宽度，不改几何。
+        ui_.SliderFloat("水面斜率 RMS °", &water_.surface_slope_rms_deg,
+                        row(0, 13), 0.0f, 20.0f, 1);
         ui_.SliderFloat("天光反射量 [0,1]", &water_.sky_scale, row(0, 14),
                         0.0f, 1.0f, 2);
 

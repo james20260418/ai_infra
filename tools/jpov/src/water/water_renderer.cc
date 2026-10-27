@@ -43,26 +43,6 @@
 
 namespace {
 
-// 极坐标 LOD 网格参数。
-//
-// 结构 = 「近场幂律环」+「远场几何环」，中心**没有洞**：
-//   · 第 0 圈半径 = 0（96 个顶点重合在相机正下方）⇒ 与第 1 圈之间自动退化成
-//     "扇形"（每个四边形里两个三角形退化为零面积）。**曾经写成内半径 0.35 m，
-//     相机贴近水面（水位 ≈ 相机高度）时那个洞会在屏幕上张成一个巨大的缺口，
-//     直接从水里看到海床**（2026-10-27 Danis 报的"漏出大量 box"）。
-//   · 近场 0 → kNearRadius 用幂律（r = R·(i/N)^1.6）：中心密（间距 ~0.5 m）、
-//     外沿疏（~5.7 m）—— 这个间距决定了**能表示多短的浪**（≥ 4~6 个采样/波长）。
-//   · 远场 kNearRadius → kOuterRadius 用几何级数：这段只负责铺到地平线，浪幅已被
-//     VS 里的距离淡出压到 0（否则 30 m 间距的四边形会把浪画成折角多边形）。
-//   · 最外圈 900 m：相机在水面 2 m 高时，外圈相对真地平线下沉 ≈ 0.13°（≈ 2 px，
-//     交给远景雾吃掉）；相机 far 比 900 小时会被远平面裁掉（无副作用）。
-constexpr int kNearRings = 56;
-constexpr int kFarRings = 12;
-constexpr int kRings = kNearRings + kFarRings;
-constexpr int kSegments = 96;
-constexpr float kNearRadius = 200.0f;
-constexpr float kOuterRadius = 900.0f;
-
 // 4x4 列主序求逆（Gauss-Jordan + 部分主元）。只用于把 NDC 反投影回世界算距离，
 // 所以不追求性能（每帧一次，在 CPU）。
 void InvertMat4(const float m[16], float out[16]) {
@@ -124,9 +104,8 @@ void WaterRenderer::Init(ShaderManager* shader_mgr) {
     shader_mgr_ = shader_mgr;
     prog_surface_ = shader_mgr_->GetOrCreate("water_surface", {kWaterVs, kWaterSurfaceFs});
     prog_medium_ = shader_mgr_->GetOrCreate("water_medium", {kWaterMediumVs, kWaterMediumFs});
-    EnsureMesh();
 
-    // 全屏三角形用的空 VAO（core profile 下没有绑 VAO 的 draw 非法）。
+    // 全屏三角形用的空 VAO（core profile 下没有绑 VAO 的 draw 非法）。两个 pass 共用。
     if (fs_vao_ == 0) {
         glGenVertexArrays(1, &fs_vao_);
     }
@@ -134,23 +113,10 @@ void WaterRenderer::Init(ShaderManager* shader_mgr) {
 
 void WaterRenderer::Finalize() {
     DestroyCapture();
-    if (ebo_) {
-        glDeleteBuffers(1, &ebo_);
-        ebo_ = 0;
-    }
-    if (vbo_) {
-        glDeleteBuffers(1, &vbo_);
-        vbo_ = 0;
-    }
-    if (vao_) {
-        glDeleteVertexArrays(1, &vao_);
-        vao_ = 0;
-    }
     if (fs_vao_) {
         glDeleteVertexArrays(1, &fs_vao_);
         fs_vao_ = 0;
     }
-    index_count_ = 0;
     prog_surface_ = 0;
     prog_medium_ = 0;
     shader_mgr_ = nullptr;
@@ -159,71 +125,6 @@ void WaterRenderer::Finalize() {
 bool WaterRenderer::IsCameraUnderwater(const WaterSurface& water, const Camera& cam) {
     // 留 1 mm 余量：相机贴在水面时不要来回抖成"水上/水下"两种画面。
     return cam.position.y() < water.level - 1.0e-3f;
-}
-
-void WaterRenderer::EnsureMesh() {
-    if (vao_ != 0) {
-        return;
-    }
-    const int vert_count = (kRings + 1) * kSegments;
-    std::vector<float> verts;
-    verts.reserve(static_cast<size_t>(vert_count) * 2);
-    for (int i = 0; i <= kRings; ++i) {
-        float r = 0.0f;
-        if (i <= kNearRings) {
-            const float t = static_cast<float>(i) / static_cast<float>(kNearRings);
-            r = kNearRadius * std::pow(t, 1.6f);          // 幂律：中心密、外沿疏
-        } else {
-            const float t = static_cast<float>(i - kNearRings)
-                          / static_cast<float>(kFarRings);
-            r = kNearRadius * std::pow(kOuterRadius / kNearRadius, t);
-        }
-        for (int j = 0; j < kSegments; ++j) {
-            const float ang = static_cast<float>(j) * 6.28318530718f
-                            / static_cast<float>(kSegments);
-            verts.push_back(r * std::cos(ang));
-            verts.push_back(r * std::sin(ang));
-        }
-    }
-
-    std::vector<unsigned int> idx;
-    idx.reserve(static_cast<size_t>(kRings) * kSegments * 6);
-    for (int i = 0; i < kRings; ++i) {
-        for (int j = 0; j < kSegments; ++j) {
-            const int jn = (j + 1) % kSegments;
-            const unsigned int a = static_cast<unsigned int>(i * kSegments + j);
-            const unsigned int b = static_cast<unsigned int>(i * kSegments + jn);
-            const unsigned int c = static_cast<unsigned int>((i + 1) * kSegments + j);
-            const unsigned int d = static_cast<unsigned int>((i + 1) * kSegments + jn);
-            // (a,b,d) 与 (a,d,c)：从 +Y 俯视为逆时针（与 glFrontFace(GL_CCW) 一致）。
-            idx.push_back(a);
-            idx.push_back(b);
-            idx.push_back(d);
-            idx.push_back(a);
-            idx.push_back(d);
-            idx.push_back(c);
-        }
-    }
-    index_count_ = static_cast<int>(idx.size());
-
-    glGenVertexArrays(1, &vao_);
-    glBindVertexArray(vao_);
-    glGenBuffers(1, &vbo_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
-                          reinterpret_cast<void*>(0));
-    glGenBuffers(1, &ebo_);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(idx.size() * sizeof(unsigned int)),
-                 idx.data(), GL_STATIC_DRAW);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void WaterRenderer::EnsureCapture(int w, int h) {
@@ -341,29 +242,13 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
                 static_cast<float>(fbo_w), static_cast<float>(fbo_h));
     glUniform3f(shader_mgr_->GetUniform(prog_surface_, "uCameraPos"),
                 cam.position.x(), cam.position.y(), cam.position.z());
+    // 平面求交 + 远端淡出：uLevel 由调用方给（水面高度），max_distance 取远平面的 95%
+    //（贴地平线的射线 t→∞，夹住后淡出到地平线天光色，所以永远不会有硬边）。
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uLevel"), water.level);
-
-    // 波浪：方向归一化后传给 VS（非零即可，内部按 0/±40° 旋开）。
-    const float wl = std::sqrt(water.wave_dir.x() * water.wave_dir.x()
-                             + water.wave_dir.z() * water.wave_dir.z());
-    const float wnx = (wl > 1.0e-6f) ? water.wave_dir.x() / wl : 1.0f;
-    const float wnz = (wl > 1.0e-6f) ? water.wave_dir.z() / wl : 0.0f;
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveAmp"),
-                std::max(0.0f, water.wave_amplitude));
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveLength"),
-                std::max(0.001f, water.wave_length));
-    glUniform2f(shader_mgr_->GetUniform(prog_surface_, "uWaveDir"), wnx, wnz);
-    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveTime"), water.wave_time);
-    // 波浪距离淡出：远场环间距 ~5.7 m 起、迅速变粗，位移在那里只会变成折角多边形。
-    // 取 3λ ~ 7λ（并夹到 [40,150] / [90,210]）：保证淡出结束时仍有 ≥4 个采样/波长。
-    {
-        const float lam = std::max(0.001f, water.wave_length);
-        const float fade_start = std::clamp(3.0f * lam, 40.0f, 150.0f);
-        const float fade_end = std::max(fade_start + 1.0f,
-                                        std::clamp(7.0f * lam, 90.0f, 210.0f));
-        glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveFadeStart"), fade_start);
-        glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uWaveFadeEnd"), fade_end);
-    }
+    glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uMaxDistance"),
+                std::max(1.0f, cam.far * 0.95f));
+    glUniformMatrix4fv(shader_mgr_->GetUniform(prog_surface_, "uViewProj"),
+                       1, GL_FALSE, view_proj);
 
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uEnvMaxLod"), env_max_lod);
     glUniform1f(shader_mgr_->GetUniform(prog_surface_, "uSkyScale"),
@@ -396,8 +281,11 @@ void WaterRenderer::DrawSurface(const WaterSurface& water, const Camera& cam,
     glBindTexture(GL_TEXTURE_CUBE_MAP, env_cube);
     glUniform1i(shader_mgr_->GetUniform(prog_surface_, "uEnvCube"), 2);
 
-    glBindVertexArray(vao_);
-    glDrawElements(GL_TRIANGLES, index_count_, GL_UNSIGNED_INT, nullptr);
+    // 全屏三角：命中点由 FS 逐像素解出来。
+    // ⚠️ 本 pass 写 gl_FragDepth ⇒ 这一趟 early-Z 失效（必须等求交结果才能判深度）；
+    //    它是独立 pass，本来就要为每个水面像素跑完整 FS，故实际损失可忽略。
+    glBindVertexArray(fs_vao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 
     glActiveTexture(GL_TEXTURE2);

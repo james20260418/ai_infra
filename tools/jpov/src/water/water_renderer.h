@@ -2,7 +2,7 @@
 //
 // 两个 pass，都与三大 renderer / 粒子 / 体积火 / 条带**平级**（独立子渲染器）：
 //
-//   ① DrawSurface  —— 水面网格本身（极坐标 LOD 网格，相机为中心）
+//   ① DrawSurface  —— 水面本身（**全屏三角形 + 每像素射线求交**，无任何几何）
 //        · 反射：天光 cubemap 探针（第一版唯一反射源）
 //        · 透射：抓帧副本 + 逐通道 Beer-Lambert 吸收/散射（这就是"水下遮蔽感"）
 //        · 写 **MRT 双附件**（颜色 + 场景深度）+ 写硬件深度
@@ -17,12 +17,12 @@
 //   ⇒ 必须先 `Capture()` 把 color + MRT 深度 blit 到自己的副本，再对副本采样。
 //   （这也是后面加折射时唯一还要复用的基础设施：折射采样 uv 会偏移，天然需要副本。）
 //
-// 形态选择（Danis 2026-10-27 问的"三个光栅化方案"）：
-//   ① 全屏射线求交：零几何、零 LOD，但**只有法线没有轮廓** ⇒ 做不出高浪；
-//   ② 均匀大网格：能位移，但要铺到远平面就得海量顶点（近处还不够密）；
-//   ③ **极坐标 / 相机为中心的 LOD 环形网格（本文件采用）**：近密远疏、一圈顶点覆盖到
-//      远平面、顶点数固定 ⇒ **能撑起高高的海浪**（真实轮廓 + 真实深度）。
-//   本版 wave_amplitude 默认 0（严格平水面），但位移/法线链路已经接好。
+// 形态选择（2026-10-27 Danis 定）：**全屏 + 法线**，不要几何。
+//   水面在数学上就是 `y = level` 这个平面，命中点是解析解 ⇒ 几何一点用都没有；
+//   而任何"网格/quad"都有边界（远平面切平面 = 屏幕上的曲线、quad 直边、超大三角形
+//   的 varying 插值在 llvmpipe 上会退化），这些边界全是不必要的伪影来源。
+//   巨浪将来是**可插拔**的：只换「命中点 + 法线」这一段（网格光栅化 / 高度场迭代求交），
+//   菲涅耳、吸收、深度写入全部复用 —— 见 water_shader.h 顶部的"可插拔点"。
 
 #ifndef JPOV_SRC_WATER_WATER_RENDERER_H_
 #define JPOV_SRC_WATER_WATER_RENDERER_H_
@@ -73,8 +73,6 @@ public:
                               const float view_proj[16]);
 
 private:
-    // 极坐标 LOD 网格（一次性生成；顶点是**相机为中心的局部 XZ**，VS 里加相机位置）。
-    void EnsureMesh();
     // 抓帧副本 FBO（颜色 RGBA16F + 场景深度 R32F），尺寸变化时重建。
     void EnsureCapture(int w, int h);
     void DestroyCapture();
@@ -83,11 +81,6 @@ private:
 
     unsigned int prog_surface_ = 0;   // ShaderManager 缓存的 program id（0 = 未用）
     unsigned int prog_medium_ = 0;
-
-    unsigned int vao_ = 0;            // 水面网格
-    unsigned int vbo_ = 0;
-    unsigned int ebo_ = 0;
-    int index_count_ = 0;
 
     unsigned int fs_vao_ = 0;         // 全屏三角形用的空 VAO（core profile 必需）
 

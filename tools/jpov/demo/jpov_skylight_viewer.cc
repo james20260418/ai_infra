@@ -303,20 +303,6 @@ int RunCaptureWater(const std::string& out_dir) {
     app.water_.surface_slope_rms_deg = 6.0f;
     app.view_target_.reset();
 
-    // ── 4. 高浪（底座验证）：wave_amplitude 4 m，看轮廓/遮挡/反射是否随浪起伏 ──
-    // 高浪档：机位抬高拉远（y ≈ 7 m），水位 3 m + 振幅 2 m ⇒ 浪谷 1 m 仍在海床（y=0）之上，
-    // 且相机稳稳在水面之上（否则会变成"从水下看浪"，看不出轮廓）。
-    app.view_ = jpov_viewer::DefaultView();
-    app.view_.phi   = 0.32;
-    app.view_.theta = 3.14159265358979323846 / 4.0;
-    app.view_.R     = 22.0;
-    app.water_.level = 3.0f;
-    app.water_.wave_amplitude = 2.0f;
-    app.water_.wave_length = 26.0f;
-    app.water_.wave_time = 3.0f;
-    shoot("water_wave_high");
-    app.water_.wave_amplitude = 0.0f;
-
     app.Finalize();
     return 0;
 }

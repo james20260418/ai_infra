@@ -13,72 +13,28 @@
 
 namespace jpov {
 
-// ---- 1) 水面顶点着色器 ----
+// ---- 1) 水面顶点着色器（全屏三角形）----
 //
-// 输入 aXZ = 平面局部坐标（米，以相机 XZ 为原点；极坐标 LOD 网格生成器给出）。
-// 输出 vWorld / vNormal 供片元用。
+// 水是一个**解析平面** `y = uLevel`：不需要任何几何。全屏三角 + 片元里逐像素
+// 射线求交即可（见 FS）。这带来的结构性好处：
+//   · 没有网格 ⇒ 没有中心洞、没有环间距、没有远场折角、没有远平面裁出来的曲线；
+//   · 地平线是**真地平线**：射线越贴近水平，t 越大；FS 里把 t 夹到 max_distance
+//     并淡出到地平线天光色，「海天相接」就是无缝的。
 //
-// 波浪：三波正弦叠加（方向按 0 / ±40° 旋开、波长与振幅递减）。
-//   · 位移**只作用在 y**（不做 Gerstner 的水平挤压/尖峰），但法线是按**解析梯度**算的，
-//     所以光照/反射的抖动是对的，只是浪尖不够"卷"。Gerstner 的水平项留给下一版。
-//   · uWaveAmp == 0 时整段跳过（编译期外的运行期分支，代价 = 一次比较）。
-// 相位用**世界坐标**算 ⇒ 相机移动时浪形固定在世界里，不会"跟着相机游"。
+// 可插拔点（将来做巨浪时只换这里）：命中点/法线现在是「解析平面 + 向上法线」；
+// 换成「网格光栅化」或「对高度场迭代求交」时，FS 的菲涅耳/吸收/深度写入一行都不用改。
 static constexpr const char* kWaterVs = R"glsl(
 #version 330 core
-
-layout(location = 0) in vec2 aXZ;   // 平面局部坐标（相机为中心的 XZ，米）
-
-uniform mat4  uViewProj;
-uniform vec3  uCameraPos;
-uniform float uLevel;
-
-uniform float uWaveAmp;
-uniform float uWaveLength;
-uniform vec2  uWaveDir;      // 已归一化的水平方向
-uniform float uWaveTime;
-uniform float uWaveFadeStart;   // 水平距离（米）内 = 全幅
-uniform float uWaveFadeEnd;     // 超过这里 = 完全不位移（网格已经太稀，位移只会变成折角）
-
-out vec3 vWorld;
-out vec3 vNormal;
-
-const float kTau = 6.28318530717958647692;
-const float kG = 9.81;       // 重力加速度：深水色散 ω = sqrt(g·k)
-
 void main() {
-    vec2 p = aXZ + uCameraPos.xz;     // 世界 XZ
-    float height = 0.0;
-    vec2  grad = vec2(0.0);
-
-    if (uWaveAmp > 0.0) {
-        // ⚠️ 按到相机的水平距离淡出：极坐标网格越远越稀，远处再位移只会得到
-        //    「大三角面 + 硬折边」。真实海浪在几百米外本来就小于一个像素，
-        //    淡到 0 既省钱也不损观感。
-        float fade = 1.0 - smoothstep(uWaveFadeStart, uWaveFadeEnd,
-                                      length(aXZ));
-        for (int i = 0; i < 3; ++i) {
-            float fi = float(i);
-            // 方向旋开：0° / +40° / −40°
-            float ang = (i == 0) ? 0.0 : ((i == 1) ? 0.6981317 : -0.6981317);
-            float ca = cos(ang);
-            float sa = sin(ang);
-            vec2 dir = vec2(uWaveDir.x * ca - uWaveDir.y * sa,
-                            uWaveDir.x * sa + uWaveDir.y * ca);
-            float len = uWaveLength / (1.0 + 0.6 * fi);      // 波长递减
-            float k = kTau / max(len, 0.001);
-            float amp = fade * uWaveAmp / (1.0 + 1.2 * fi);  // 振幅递减 + 距离淡出
-            float phase = k * dot(dir, p) - sqrt(kG * k) * uWaveTime + fi * 1.7;
-            height += amp * sin(phase);
-            grad   += amp * k * cos(phase) * dir;            // d(height)/d(xz)
-        }
+    vec2 pos;
+    if (gl_VertexID == 0) {
+        pos = vec2(-1.0, -1.0);
+    } else if (gl_VertexID == 1) {
+        pos = vec2(3.0, -1.0);
+    } else {
+        pos = vec2(-1.0, 3.0);
     }
-
-    vec3 world = vec3(p.x, uLevel + height, p.y);
-    vWorld  = world;
-    // 法线 = normalize(-dh/dx, 1, -dh/dz)
-    vNormal = normalize(vec3(-grad.x, 1.0, -grad.y));
-
-    gl_Position = uViewProj * vec4(world, 1.0);
+    gl_Position = vec4(pos, 1.0, 1.0);
 }
 )glsl";
 
@@ -99,12 +55,12 @@ layout(location = 0) out vec4 FragColor;
 // 会让后面的雾/粒子软深度读到垃圾。
 layout(location = 1) out vec4 FragSceneDepth;
 
-in vec3 vWorld;
-in vec3 vNormal;
-
 uniform vec2      uResolution;    // HDR FBO 像素尺寸（与抓帧副本一致）
 uniform mat4      uInvVP;         // 主相机 逆(Proj*View)
+uniform mat4      uViewProj;      // 主相机 Proj*View（写 gl_FragDepth 用）
 uniform vec3      uCameraPos;
+uniform float     uLevel;         // 水面世界高度（y-up）
+uniform float     uMaxDistance;   // 水面最远可见距离（米）—— 超过就淡出到地平线天光色
 
 uniform sampler2D uSceneColor;    // 抓帧：颜色（RGBA16F）
 uniform sampler2D uSceneDepth;    // 抓帧：MRT 场景深度（R32F，值 = gl_FragCoord.z）
@@ -131,10 +87,40 @@ float SceneDistance(vec2 uv) {
     return length(pw.xyz / pw.w - uCameraPos);
 }
 
+// 地平线方向的天光色（远端淡出用；与反射探针同源，保证"海天相接"无接缝）。
+vec3 HorizonSky(vec3 dir) {
+    vec3 h = normalize(vec3(dir.x, 0.02, dir.z));
+    return textureLod(uEnvCube, h, uEnvMaxLod).rgb * uSkyScale;
+}
+
 void main() {
     vec2 uv = gl_FragCoord.xy / uResolution;
-    vec3 N = normalize(vNormal);
-    vec3 V = normalize(uCameraPos - vWorld);
+
+    // ── 命中点：每像素射线 ∩ 平面 y = uLevel（解析解，无需任何几何）──
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 pn = uInvVP * vec4(ndc, -1.0, 1.0);
+    vec4 pf = uInvVP * vec4(ndc,  1.0, 1.0);
+    vec3 rd = normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+    if (abs(rd.y) < 1.0e-6) {
+        discard;                       // 视线与水面平行
+    }
+    float t_hit = (uLevel - uCameraPos.y) / rd.y;
+    if (t_hit <= 0.0) {
+        discard;                       // 水面在相机背后（上半屏几乎全是这条）
+    }
+    // 夹到最远距离：贴地平线的射线 t→∞，夹住之后淡出到天光色，不会出现硬边。
+    float t = min(t_hit, uMaxDistance);
+    vec3 world = uCameraPos + rd * t;
+
+    // 深度：写 gl_FragDepth（硬件深度，后续 pass 靠它遮挡）+ MRT#1（场景深度契约）。
+    vec4 clip = uViewProj * vec4(world, 1.0);
+    float ndc_z = clip.z / max(abs(clip.w), 1.0e-9) * sign(clip.w);
+    float depth = clamp(ndc_z * 0.5 + 0.5, 0.0, 1.0);
+    gl_FragDepth = depth;
+    FragSceneDepth = vec4(depth, 0.0, 0.0, 1.0);
+
+    vec3 N = vec3(0.0, 1.0, 0.0);      // 本版水面法线恒向上（无波浪）
+    vec3 V = normalize(uCameraPos - world);
 
     vec3 color;
     float roughness = clamp(uRoughness, 0.0, 1.0);
@@ -182,7 +168,7 @@ void main() {
     } else {
         // ── 从水上往下看：反射 + 逐通道吸收背景 ──
         vec3 bg = texture(uSceneColor, uv).rgb;
-        float d_surf = length(vWorld - uCameraPos);
+        float d_surf = length(world - uCameraPos);
         float d_bg   = SceneDistance(uv);
         float L      = max(d_bg - d_surf, 0.0);      // 水下段的视线长度（米）
 
@@ -196,8 +182,11 @@ void main() {
         color = under * (1.0 - F) + refl * F;
     }
 
+    // 远端淡出：贴地平线的水面收敛到「地平线天光色」——把网格时代那条硬缝做掉。
+    float far_fade = smoothstep(0.75 * uMaxDistance, uMaxDistance, t);
+    color = mix(color, HorizonSky(rd), far_fade);
+
     FragColor = vec4(color, 1.0);
-    FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }
 )glsl";
 
