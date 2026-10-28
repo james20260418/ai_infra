@@ -9,6 +9,9 @@
 //   2) leaf gold（贴叶图 + 树皮）：alpha cutout + 覆盖率 mip 在 llvmpipe 下会落在
 //      几种离散状态（实测 8×8 ROI 均值差 0 ~ 27 跳）⇒ 只能宽阈值当烟雾报警。
 //      叶子整片消失 64、树皮掉了 46 会被抓住。
+//   3) pine_game gold（新生成的低配/游戏档资产，只看绿卡）：形状同 cards gold，
+//      但它跑的是 `samples/pine_game.vegshape` —— 枝条噪声 / 弯卡 / ring_count=3
+//      全烘在那份 .vegshape 里，前两张跑的是旧的 willow 范本，保护不到它们。
 //
 // gold 目录：tools/jpov/test/vegetation_v2/
 // 重新生成：bazel run //tools/jpov/test/vegetation_v2:jpov_vegetation_v2_gold_generator
@@ -29,6 +32,11 @@ namespace {
 // 几何锁：实测噪声 0（连续 6 次），给 0.5 留一点跨机器余量。
 constexpr double kCardsMaxRoiDiff = 0.5;
 constexpr int kCardsRoi = 8;
+
+// 游戏档资产也是纯色绿卡（同一套不透明盒子），所以同样用几何锁的严格阈值。
+// 能抓住：资产被误重生成（噪声/弯卡/环数变了）、.vegshape 读写错位、卡挂错枝。
+constexpr double kGameMaxRoiDiff = 0.5;
+constexpr int kGameRoi = 8;
 
 // 材质图不用 ROI 做主判据 —— 2026-10-22 实测：叶子 cutout 在 llvmpipe 下会**整块**
 // 落到另一种离散状态，同一份源码、同一个二进制，两次渲染 4×4 ROI 最大差就能到 124
@@ -56,7 +64,8 @@ constexpr int kPixelThreshold = 8;
 std::string GoldDir() { return jpov::GetTestDataDir() + "/vegetation_v2/"; }
 
 // 渲染 + 比对一张，返回是否通过（先把 gold 存在性、分辨率、非全黑都查掉）。
-// mode：0 = debug 绿卡、1 = 贴叶图 + 树皮、2 = glb 展示态（烘焙→载入→带风）。
+// mode：0 = debug 绿卡、1 = 贴叶图 + 树皮、2 = glb 展示态（烘焙→载入→带风）、
+//       3 = 游戏档资产的绿卡视图（samples/pine_game.vegshape）。
 // 判据（两项都要过）：
 //   roi        —— ROI 均值最大通道差上限（大范围亮度/颜色漂移）
 //   ratio      —— 显著变化像素占比上限（局部结构变化）；< 0 = 不看这一项
@@ -70,9 +79,14 @@ bool CheckOne(const char* gold_name, int mode, double max_diff_allowed, int roi,
     std::fclose(f);
   }
   const std::string rendered = outdir + gold_name;
-  const bool rendered_ok = (mode == 2)
-                               ? vegv2::goldtest::RenderGlbGolden(rendered)
-                               : vegv2::goldtest::RenderGolden(/*with_leaf=*/mode == 1, rendered);
+  bool rendered_ok = false;
+  if (mode == 2) {
+    rendered_ok = vegv2::goldtest::RenderGlbGolden(rendered);
+  } else if (mode == 3) {
+    rendered_ok = vegv2::goldtest::RenderGameShapeGolden(rendered);
+  } else {
+    rendered_ok = vegv2::goldtest::RenderGolden(/*with_leaf=*/mode == 1, rendered);
+  }
   CHECK(rendered_ok) << "gold 场景渲染失败";
 
   // 健全性：分辨率对、画面不是全黑（防「渲染全黑但均值差为 0」的假绿）。
@@ -140,9 +154,12 @@ int main() {
                                 kLeafMaxChangedRatio, outdir);
   const bool glb_ok = CheckOne(vegv2::goldtest::kGlbGold, /*mode=*/2,
                                kGlbMaxRoiDiff, kGlbRoi, kGlbMaxChangedRatio, outdir);
-  if (!cards_ok || !leaf_ok || !glb_ok) {
+  const bool game_ok = CheckOne(vegv2::goldtest::kGameGold, /*mode=*/3,
+                                kGameMaxRoiDiff, kGameRoi, /*max_changed_ratio=*/-1.0,
+                                outdir);
+  if (!cards_ok || !leaf_ok || !glb_ok || !game_ok) {
     return 1;
   }
-  LOG(INFO) << "GOLD COMPARE PASSED（cards + leaf + glb）";
+  LOG(INFO) << "GOLD COMPARE PASSED（cards + leaf + glb + pine_game）";
   return 0;
 }

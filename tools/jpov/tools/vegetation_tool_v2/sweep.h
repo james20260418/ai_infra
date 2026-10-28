@@ -81,6 +81,7 @@ struct CardFrame {
   Vec3d right;       // 单位向量，= cross(up, normal)
   double au = 0.5;   // 素材里贴到 anchor 的 u
   double av = 0.0;   // 素材里贴到 anchor 的 v
+  LeafBend bend;     // 叶面弯曲（来自所属 leaf type；全 0 = 平面）
 };
 
 // 把切线 t 对法线 n 做 Gram-Schmidt（去掉法线分量再归一化）。
@@ -97,11 +98,32 @@ Vec3d OrthogonalizeTangent(const Vec3d& t, const Vec3d& n, const Vec3d& fallback
 // 跑不起来，静默回退成 bottom_center 只会让"素材怎么都贴不上枝"变成玄学。
 CardFrame ComputeCardFrame(const Shape& shape, const LeafCard& card);
 
-// 叶卡：anchor + up + normal + height + width → 四边形（顶点 = 参考 quad 的四角）。
+// 叶卡：anchor + up + normal + height + width + bend → **面片网格**。
+//
+// 卡是解析式参数曲面（见 shape.h 的 LeafBend）：顶点位置与法线都由公式直接求值，
+// 不是「先摆四个角、再想办法弯」。所以：
+//   * 法线是解析偏导（不是面法线累加、也不是有限差分）⇒ 细分只影响轮廓，不影响光照；
+//   * 平面卡（bend 全 0）细分 1×1 = 4 顶点 / 2 三角形，与旧资产**逐字节一致**；
+//   * 弯曲卡细分 kBentCardSegments×kBentCardSegments = 2×2 ⇒ 9 顶点 / 8 三角形
+//     （实测 2 段 vs 4 段只有 0.37% 像素差 >1/255，顶点却省 2.8×）。
+// 顶点布局：每张卡 (seg+1)² 个顶点，先沿 u 后沿 v（下标 = i·(seg+1)+j，
+// u = j/seg、v = i/seg），卡片之间首尾相接、无共享顶点。
+//
 // 宽高都存在 shape 里（装配时算好），这里不做任何推导/拉伸。
 // 姿态与 UV 锚点由 ComputeCardFrame 统一决定（见上）；UV = 整格 (0,0)..(1,1)，
 // atlas 的格子子矩形由调用方再映射。
 MeshData BuildLeafCards(const Shape& shape);
+
+// 一张卡在网格里占多少个顶点（(seg+1)²）。消费方按「逐卡步进」遍历顶点时必须用它，
+// 不能假设恒等于 4 —— 弯曲卡的顶点数随 leaf type 的 bend 变。
+// Pre-condition: shape 已过 Validate（card.type 必须存在）。
+// 弯曲卡每条边的细分段数（平面卡恒为 1 段 = 4 顶点）。
+// 2 段 ⇒ (2+1)² = 9 顶点 / 8 三角形：实测 2 段 vs 4 段只有 0.37% 像素差 >1/255
+// （4 段 vs 12 段是 0.4%），但卡片顶点从 25 降到 9 —— 叶子是顶点开销的大头。
+// 消费方**必须**用 CardVertexCount() 逐卡步进，不能假设固定值。
+constexpr uint32_t kBentCardSegments = 2;
+
+uint32_t CardVertexCount(const Shape& shape, const LeafCard& card);
 
 }  // namespace vegetation
 }  // namespace jpov

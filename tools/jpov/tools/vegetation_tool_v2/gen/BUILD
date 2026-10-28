@@ -2,7 +2,7 @@
 #
 # 分工（详见 dump_sapling_curve.py 与 shape_builder.h 的文件头）：
 #   Blender 只负责把 Sapling 建出来的树倒成 .dump（曲线控制点 + 叶卡网格顶点）；
-#   采样 / 父枝 / 叶卡姿态 / 拓扑序 / 写 shape.pbtxt 全在这里。
+#   采样 / 父枝 / 叶卡姿态 / 拓扑序 / 写 shape.vegshape（或 --text）全在这里。
 #
 # 为什么搬：原 Python 版「给每条样条找父枝」是 O(枝数²·段数) 的三重循环，
 # fir 那棵树（4100 枝 / 68944 段）光这一步 119 s；换成稀疏栅格最近邻后是毫秒级。
@@ -89,4 +89,14 @@ cc_test(
         "@gtest//:gtest_main",
     ],
     copts = ["-std=c++20"],
+)
+
+# 资产格式互转：*.vegshape（二进制，标准）/ *.pbtxt（文本，只给人看）。
+cc_binary(
+    name = "shape_convert",
+    srcs = ["shape_convert.cc"],
+    deps = [
+        ":shape_text",
+        "//tools/jpov/tools/vegetation_tool_v2:shape",
+    ],
 )

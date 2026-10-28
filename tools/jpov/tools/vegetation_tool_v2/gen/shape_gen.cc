@@ -1,18 +1,19 @@
-// gen/shape_gen.cc — 生成配置 pbtxt → shape.pbtxt（C++ 侧，Blender 只负责倒数据）。
+// gen/shape_gen.cc — 生成配置 pbtxt → shape.vegshape（默认二进制；--text 出文本）。
 //
 //     configs/pine.pbtxt ──(本程序)──> blender -b --python dump_sapling_curve.py ──> .dump
 //                                                                                    │
-//                          shape.pbtxt  <── FormatShapeText <── BuildShape ◄──────────┘
+//                     shape.vegshape  <── 序列化 ◄──── BuildShape ◄─────────────────────┘
 //
 // 与 Python 版（generate_shape.py + export_vegetation_shape.py）的区别：
 //   * 采样 / 父枝 / 叶卡姿态 / 拓扑序全在 C++ 里，Blender 只做「把曲线和叶卡网格倒出来」；
 //   * 父枝查询从 O(枝数²) 的三重循环换成稀疏栅格最近邻（fir 那棵树 119s → 十几毫秒）。
 //
 // 用法：
-//   shape_gen --config configs/pine.pbtxt --out output/veg_shapes/pine.pbtxt
+//   shape_gen --config configs/pine.pbtxt --out output/veg_shapes/pine.vegshape
 //             [--blender /usr/bin/blender] [--keep-dump]
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -173,6 +174,53 @@ int Fail(const std::string& message) {
 
 }  // namespace
 
+// 生成配置 → 叶面弯曲系数。没写 = 0 = 平面卡（proto2 的字段存在性在这里不用查：
+// 三个系数本来就是「0 = 不弯」的合法值，不是「没填」的哨兵）。
+jpov::vegetation::LeafBend MakeLeafBend(const jpov::vegetation::ShapeExport& export_config) {
+  jpov::vegetation::LeafBend bend;
+  bend.along = export_config.leaf_bend_along();
+  bend.across = export_config.leaf_bend_across();
+  bend.crease = export_config.leaf_bend_crease();
+  return bend;
+}
+
+// 生成配置 → 枝条噪声参数。整块没写 = 全关（与没有这一层时逐字节一致）。
+jpov::vegetation::gen::NoiseOptions MakeNoiseOptions(
+    const jpov::vegetation::VegetationGenerateConfig& config) {
+  jpov::vegetation::gen::NoiseOptions noise;
+  if (!config.has_noise()) {
+    return noise;
+  }
+  const jpov::vegetation::ShapeNoise& source = config.noise();
+  noise.size_jitter.assign(source.size_jitter().begin(), source.size_jitter().end());
+  noise.bend_longitudinal.assign(source.bend_longitudinal().begin(),
+                                 source.bend_longitudinal().end());
+  noise.bend_lateral.assign(source.bend_lateral().begin(), source.bend_lateral().end());
+  noise.seed = config.has_tree() ? config.tree().seed() : 0;
+  return noise;
+}
+
+// 噪声幅度只接受 0..1：它们是「倍数波动」与「枝长比例」，量级写错（把厘米当比例）
+// 会得到一棵扭成麻花的树，而且在很远的地方才看得出来。
+bool ValidateNoise(const jpov::vegetation::ShapeNoise& noise, std::string* error) {
+  const std::pair<const char*, const google::protobuf::RepeatedField<float>*> tables[] = {
+    { "noise.size_jitter", &noise.size_jitter() },
+    { "noise.bend_longitudinal", &noise.bend_longitudinal() },
+    { "noise.bend_lateral", &noise.bend_lateral() },
+  };
+  for (const auto& [name, values] : tables) {
+    for (int i = 0; i < values->size(); ++i) {
+      const float value = values->Get(i);
+      if (!(value >= 0.0f) || value > 1.0f) {
+        *error = std::string(name) + "[" + std::to_string(i) + "] = " + std::to_string(value) +
+                 "，必须在 [0, 1]（0 = 关；1 = 极端）";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 int main(int argc, char** argv) {
   std::string config_path;
   std::string out_path;
@@ -180,6 +228,9 @@ int main(int argc, char** argv) {
   std::string dump_path;
   std::string dump_script = kDumpScript;
   bool keep_dump = false;
+  bool text_output = false;   // --text：写文本（默认按扩展名；资产标准是 .vegshape 二进制）
+  std::vector<uint32_t> ring_counts;   // 空 = 用 BuildOptions 的默认（16/12/8）
+  uint32_t per_seg_override = 0;       // 0 = 用配置里的 export.per_seg
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -195,9 +246,37 @@ int main(int argc, char** argv) {
       dump_script = argv[++i];
     } else if (arg == "--keep-dump") {
       keep_dump = true;
+    } else if (arg == "--text") {
+      text_output = true;   // 人工查看/diff 用；正式的资产一律 .vegshape
+    } else if (arg == "--per-seg" && i + 1 < argc) {
+      per_seg_override = static_cast<uint32_t>(std::atoi(argv[++i]));
+      if (per_seg_override == 0) {
+        return Fail("--per-seg 必须 > 0");
+      }
+    } else if (arg == "--ring-count" && i + 1 < argc) {
+      // 形如 "8,6,4"：下标 = 枝级，最后一项重复用到更深的级。
+      const std::string spec = argv[++i];
+      size_t begin = 0;
+      while (begin <= spec.size()) {
+        const size_t comma = spec.find(',', begin);
+        const std::string piece =
+            spec.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        if (piece.empty()) {
+          return Fail("--ring-count 里不能有空项：" + spec);
+        }
+        const int value = std::atoi(piece.c_str());
+        if (value < 3 || value > 64) {
+          return Fail("--ring-count 的每一项必须在 [3, 64]：" + piece);
+        }
+        ring_counts.push_back(static_cast<uint32_t>(value));
+        if (comma == std::string::npos) {
+          break;
+        }
+        begin = comma + 1;
+      }
     } else {
       return Fail("未知参数: " + arg +
-                  "\n用法: shape_gen --config <pbtxt> --out <shape.pbtxt> "
+                  "\n用法: shape_gen --config <config.pbtxt> --out <shape.vegshape> [--text] "
                   "[--blender <path>] [--dump <path>] [--dump-script <path>] [--keep-dump]");
     }
   }
@@ -241,6 +320,29 @@ int main(int argc, char** argv) {
   if (export_config.leaf_type_desc().empty()) {
     return Fail("export.leaf_type_desc 必填");
   }
+  // 弯曲系数是「卡的 height 倍数」，Validate 的上限也就是 1.0；写错量级（把厘米当比例）
+  // 会在很长一段时间里表现为「叶子被弯成麻花」，所以在这里先挡一次。
+  const jpov::vegetation::LeafBend bend = MakeLeafBend(export_config);
+  if (!(std::fabs(bend.along) <= 1.0) || !(std::fabs(bend.across) <= 1.0) ||
+      !(std::fabs(bend.crease) <= 1.0)) {
+    return Fail("export.leaf_bend_* 必须在 [-1, 1]（单位是卡的 height）");
+  }
+
+  // 环顶点数：3 = 三角管（细枝够用）、16 = 正圆。超出范围一定是把"半径"或"环数"填反了。
+  for (int i = 0; i < export_config.ring_count_size(); ++i) {
+    const uint32_t ring = export_config.ring_count(i);
+    if (ring < 3 || ring > 64) {
+      return Fail("export.ring_count[" + std::to_string(i) + "] = " + std::to_string(ring) +
+                  "，必须在 [3, 64]（一圈至少 3 个顶点；64 以上纯属浪费）");
+    }
+  }
+
+  if (config.has_noise()) {
+    std::string noise_error;
+    if (!ValidateNoise(config.noise(), &noise_error)) {
+      return Fail(noise_error);
+    }
+  }
 
   const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
   const std::vector<std::string> overrides = BuildOverrides(config.tree());
@@ -269,11 +371,21 @@ int main(int argc, char** argv) {
     return Fail("解析 dump 失败：" + error);
   }
   BuildOptions options;
-  options.per_seg = export_config.per_seg();
+  options.per_seg = per_seg_override != 0 ? per_seg_override : export_config.per_seg();
+  options.ring_counts.assign(export_config.ring_count().begin(),
+                             export_config.ring_count().end());
+  if (!ring_counts.empty()) {
+    options.ring_counts = ring_counts;   // 命令行优先级最高（临时试参数用）
+  }
+  if (options.ring_counts.empty()) {
+    options.ring_counts = { 16u, 12u, 8u };  // 与历史行为一致
+  }
   options.leaf_aspect = export_config.leaf_aspect();
   options.anchor_mode = export_config.anchor_mode();
   options.leaf_type_desc = export_config.leaf_type_desc();
   options.species = config.tree().preset();
+  options.leaf_bend = bend;
+  options.noise = MakeNoiseOptions(config);
 
   jpov::vegetation::Shape shape;
   BuildStats stats;
@@ -299,14 +411,27 @@ int main(int argc, char** argv) {
     return Fail("产物必须恰好有一个根枝，实际 " + std::to_string(roots) + " 个");
   }
 
-  const std::string text = FormatShapeText(shape);
-  {
+  // 资产标准格式 = `.vegshape`（二进制）；文本只用于人工查看/diff，--text 显式要才写。
+  const bool write_binary =
+      !text_output && jpov::vegetation::ShapeFileFormatFromPath(out_path) ==
+                          jpov::vegetation::ShapeFileFormat::kBinary;
+  if (write_binary) {
+    std::string write_error;
+    if (!jpov::vegetation::SaveShapeBinary(shape, out_path, &write_error)) {
+      return Fail(write_error);
+    }
+  } else {
+    const std::string text = FormatShapeText(shape);
     std::ofstream stream(out_path);
     if (!stream) {
       return Fail("写不了产物：" + out_path);
     }
     stream << text;
   }
+  const std::uintmax_t out_bytes = [&out_path] {
+    std::ifstream stream(out_path, std::ios::binary | std::ios::ate);
+    return stream ? static_cast<std::uintmax_t>(stream.tellg()) : 0u;
+  }();
   if (!keep_dump && dump_path.empty()) {
     std::remove(effective_dump.c_str());
   }
@@ -315,7 +440,7 @@ int main(int argc, char** argv) {
       std::chrono::steady_clock::now() - start;
   std::cout << "[gen] OK  " << stats.branches << " 枝 / " << stats.cards << " 卡 / "
             << (stats.mirrored_cards * 100 / std::max(1, stats.cards)) << "% 镜像 / "
-            << text.size() / 1000000.0 << " MB / " << elapsed.count() / 1000.0 << " s → "
+            << out_bytes / 1000000.0 << " MB / " << elapsed.count() / 1000.0 << " s → "
             << out_path << "\n";
   return 0;
 }

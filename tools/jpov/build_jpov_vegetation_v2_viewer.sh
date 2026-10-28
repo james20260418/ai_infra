@@ -54,7 +54,7 @@ cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts
 echo ""
 echo "==> 4. 拷贝范本拓扑到 shapes/"
 mkdir -p "$OUTPUT_DIR/shapes"
-for f in willow.pbtxt willow_two_types.pbtxt; do
+for f in willow.vegshape willow_two_types.vegshape; do
     if [ -f "$TOOL_DIR/samples/$f" ]; then
         cp -v "$TOOL_DIR/samples/$f" "$OUTPUT_DIR/shapes/$f"
     else
@@ -63,7 +63,7 @@ for f in willow.pbtxt willow_two_types.pbtxt; do
 done
 
 # 入库的样例烘焙产物（samples/*.glb）：用来试「纯 glb 查看模式」，不用先有 shape/素材。
-# 12 MB 左右，是 willow.pbtxt + bark001 + willow_leaf 的一份真实烘焙结果（带风链数据）。
+# 12.5 MB 左右，是 willow.vegshape + bark001 + willow_leaf 的一份真实烘焙结果（带风链数据）。
 echo ""
 echo "==> 4c. 拷贝样例 glb 到 samples/"
 mkdir -p "$OUTPUT_DIR/samples"
@@ -109,11 +109,11 @@ echo "    cd $OUTPUT_DIR"
 echo "    ./jpov_vegetation_v2_viewer                          # 只渲染 shape（不贴树皮/叶图）"
 echo "    ./jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 \\"
 echo "        --bark bark/bark001                              # 完整组合：shape + 树皮 + 叶卡"
-echo "    （shape 省略时默认 shapes/willow.pbtxt；双叶型范本 --shape shapes/willow_two_types.pbtxt --leaf2 leaf/willow_leaf_flip.png）"
+echo "    （shape 省略时默认 shapes/willow.vegshape；双叶型范本 --shape shapes/willow_two_types.vegshape --leaf2 leaf/willow_leaf_flip.png）"
 echo ""
 echo "  烘焙一份 glb，再（纯查看模式）打开它："
 echo "    ./jpov_vegetation_v2_viewer --bake output/veg.glb \\"
-echo "        --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --leaf-black 30 \\"
+echo "        --shape shapes/willow.vegshape --leaf leaf/willow_leaf.png --leaf-black 30 \\"
 echo "        --bark bark/bark001"
 echo "    ./jpov_vegetation_v2_viewer --glb output/veg.glb --glb-only   # 左下角是风调试面板"
 echo "    （懒得到处找素材：入库的样例产物 ./jpov_vegetation_v2_viewer --glb samples/willow_baked.glb --glb-only）"

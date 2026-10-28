@@ -12,11 +12,11 @@
 //   jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001
 //   jpov_vegetation_v2_viewer --capture shots/full --leaf ... --bark ...   # 无窗口出三张图
 //
-//   --shape <pbtxt>      拓扑（省略 = shapes/willow.pbtxt）
+//   --shape <path>       拓扑（.vegshape 二进制 / .pbtxt 文本；省略 = shapes/willow.vegshape）
 //   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
 //   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
 //   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
-//   --curl / --leaf-normal / --normal-scale / --uv-vscale   法线与 UV 相关强度
+//   --leaf-normal / --normal-scale / --uv-vscale             法线与 UV 相关强度
 //   --cam_phi/--cam_theta/--cam_r / --cam-target-y           视角（度/度/米/米）
 //   --max-level <n> / --only-type <n>                        只画前 n 层 / 只画某类叶卡
 //   --no-leaf / --no-bark / --no-hud                         关叶图（看 debug 绿卡）/ 关树皮 / 关 HUD
@@ -29,6 +29,7 @@
 //                                                            无原材料态：不能烘焙、不能回退）
 //   --no-wind / --wind-time <秒>                              关风 / 钉住风时间（A/B、出图可复现）
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,9 +72,6 @@ CliArgs ParseCli(int argc, char** argv) {
     } else if (arg == "--leaf-black" && has_val) {
       a.leaf_black = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_black, 0.0f) << "--leaf-black 不能为负";
-    } else if (arg == "--curl" && has_val) {
-      a.leaf_curl = static_cast<float>(std::atof(argv[++i]));
-      CHECK_GE(a.leaf_curl, 0.0f) << "--curl 不能为负";
     } else if (arg == "--leaf-normal" && has_val) {
       a.leaf_normal = static_cast<float>(std::atof(argv[++i]));
       CHECK_GE(a.leaf_normal, 0.0f) << "--leaf-normal 不能为负（0 = 关掉法线贴图）";
@@ -123,11 +121,11 @@ CliArgs ParseCli(int argc, char** argv) {
       LOG(WARNING) << "未知参数: " << arg << "（已忽略）";
     }
   }
-  // shape 有默认值（打包目录里的 shapes/willow.pbtxt），叶卡/树皮默认**空**——
+  // shape 有默认值（打包目录里的 shapes/willow.vegshape），叶卡/树皮默认**空**——
   // 不给就只渲染拓扑（树干棕色 + debug 叶卡），这是「组合查看器」的底座：
   // 用户提供 shape / bark / leaf 三样，给几样渲染几样。
   if (a.shape_path.empty()) {
-    a.shape_path = "shapes/willow.pbtxt";
+    a.shape_path = "shapes/willow.vegshape";
     LOG(INFO) << "未给 --shape，用默认范本: " << a.shape_path;
   }
   // **纯 glb 查看模式**：给了 --glb 就不强求 shape（"别人发我一个 glb，我只想看看"）。
@@ -135,10 +133,10 @@ CliArgs ParseCli(int argc, char** argv) {
   if (!std::ifstream(a.shape_path).good()) {
     if (a.glb_path.empty()) {
       LOG(FATAL) << "读不到 shape: " << a.shape_path
-                 << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
+                 << "\n用法: jpov_vegetation_v2_viewer [--shape <path.vegshape>]"
                  << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
                  << "\n    或只看一个 glb: jpov_vegetation_v2_viewer --glb <path.glb>"
-                 << "\n  --shape 省略时用 shapes/willow.pbtxt（打包目录内）"
+                 << "\n  --shape 省略时用 shapes/willow.vegshape（打包目录内）"
                  << "\n  --bark / --leaf 省略 = 只渲染 shape（不贴树皮/叶图）";
     }
     LOG(WARNING) << "读不到 shape（" << a.shape_path << "）→ 纯 glb 查看模式："

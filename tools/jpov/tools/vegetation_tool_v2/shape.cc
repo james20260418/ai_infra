@@ -2,6 +2,7 @@
 
 #include "tools/jpov/tools/vegetation_tool_v2/shape.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -171,6 +172,98 @@ uint32_t Branch::EffectiveRingCount() const {
   return 0;
 }
 
+ShapeFileFormat ShapeFileFormatFromPath(const std::string& path) {
+  // 只认扩展名：`.vegshape` = 二进制资产；其它（.pbtxt/.txt/无后缀）= 文本。
+  // 不猜内容 —— 猜错一次就是"看起来能读、其实是乱码"的隐性故障。
+  const std::size_t dot = path.find_last_of('.');
+  if (dot != std::string::npos) {
+    std::string ext = path.substr(dot);
+    for (char& c : ext) {  // 扩展名大小写不敏感：只认一种拼写会让 .Vegshape 变成文本，太脆
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (ext == ".vegshape") {
+      return ShapeFileFormat::kBinary;
+    }
+  }
+  return ShapeFileFormat::kText;
+}
+
+ShapeProto ToProto(const Shape& shape) {
+  ShapeProto proto;
+  proto.set_version(shape.version);
+  proto.set_description(shape.description);
+
+  for (const Branch& branch : shape.branches) {
+    BranchProto* b = proto.add_branches();
+    b->set_id(branch.id);
+    b->set_parent(branch.parent);
+    b->set_level(branch.level);
+    b->set_ring_count(branch.ring_count);
+    b->set_seam_index(branch.seam_index);
+    for (const BranchSample& sample : branch.samples) {
+      BranchSampleProto* s = b->add_samples();
+      s->mutable_position()->set_x(sample.position.x);
+      s->mutable_position()->set_y(sample.position.y);
+      s->mutable_position()->set_z(sample.position.z);
+      s->set_radius(sample.radius);
+      s->set_tilt(sample.tilt);
+      for (const ProfilePoint& point : sample.profile) {
+        ProfilePointProto* p = s->add_profile();
+        p->set_x(point.x);
+        p->set_y(point.y);
+      }
+    }
+  }
+
+  for (const LeafType& type : shape.leaf_types) {
+    LeafTypeProto* t = proto.add_leaf_types();
+    t->set_type(type.type);
+    t->set_description(type.description);
+    t->set_anchor_mode(type.anchor_mode);
+    t->mutable_bend()->set_along(type.bend.along);
+    t->mutable_bend()->set_across(type.bend.across);
+    t->mutable_bend()->set_crease(type.bend.crease);
+  }
+
+  for (const LeafCard& card : shape.cards) {
+    LeafCardProto* c = proto.add_cards();
+    c->mutable_anchor()->set_x(card.anchor.x);
+    c->mutable_anchor()->set_y(card.anchor.y);
+    c->mutable_anchor()->set_z(card.anchor.z);
+    c->mutable_up()->set_x(card.up.x);
+    c->mutable_up()->set_y(card.up.y);
+    c->mutable_up()->set_z(card.up.z);
+    c->mutable_normal()->set_x(card.normal.x);
+    c->mutable_normal()->set_y(card.normal.y);
+    c->mutable_normal()->set_z(card.normal.z);
+    c->set_height(card.height);
+    c->set_width(card.width);
+    c->set_type(card.type);
+    c->set_branch(card.branch);
+    c->set_s(card.s);
+  }
+  return proto;
+}
+
+bool SaveShapeBinary(const Shape& shape, const std::string& path, std::string* error) {
+  const std::string bytes = ToProto(shape).SerializeAsString();
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    if (error != nullptr) {
+      *error = "写不了文件: " + path;
+    }
+    return false;
+  }
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!out) {
+    if (error != nullptr) {
+      *error = "写入失败: " + path;
+    }
+    return false;
+  }
+  return true;
+}
+
 Shape FromProto(const ShapeProto& proto) {
   Shape shape;
   shape.version = proto.version();
@@ -205,6 +298,9 @@ Shape FromProto(const ShapeProto& proto) {
     type.type = t.type();
     type.description = t.description();
     type.anchor_mode = t.anchor_mode();
+    type.bend.along = t.bend().along();
+    type.bend.across = t.bend().across();
+    type.bend.crease = t.bend().crease();
     shape.leaf_types.push_back(std::move(type));
   }
 
@@ -235,14 +331,20 @@ bool LoadShapeFile(const std::string& path, Shape* out, std::string* error) {
   if (out == nullptr) {
     return fail("LoadShapeFile: out 不能为空");
   }
-  std::ifstream in(path);
+  std::ifstream in(path, std::ios::binary);
   if (!in) {
     return fail("打不开 shape 文件: " + path);
   }
   std::stringstream ss;
   ss << in.rdbuf();
+  const std::string bytes = ss.str();
   ShapeProto proto;
-  if (!google::protobuf::TextFormat::ParseFromString(ss.str(), &proto)) {
+  if (ShapeFileFormatFromPath(path) == ShapeFileFormat::kBinary) {
+    if (!proto.ParseFromString(bytes)) {
+      return fail("解析二进制 shape 失败（.vegshape 应为 ShapeProto 的 protobuf 二进制；" +
+                  std::string("若是文本资产请改名 .pbtxt 或用 shape_convert 转换）: ") + path);
+    }
+  } else if (!google::protobuf::TextFormat::ParseFromString(bytes, &proto)) {
     return fail("解析 ShapeProto 文本失败（字段名/括号与 proto/shape.proto 对不上？）: " + path);
   }
   *out = FromProto(proto);
@@ -349,6 +451,15 @@ bool Validate(const Shape& shape, std::string* error) {
       return fail(Format("leaf_type %u: anchor_mode \"%s\" 非法"
                          "（只接受 bottom_left/bottom_center/bottom_right/top_center）",
                          t.type, t.anchor_mode.c_str()));
+    }
+    // 弯曲系数的量纲是「卡的 height 倍数」。|系数| > 1 等于叶子弯过自己一整张卡，
+    // 位置/法线都没意义了（还会让卡横穿枝条），所以直接判非法而不是无害忽略。
+    const LeafBend& bend = t.bend;
+    if (!(std::fabs(bend.along) <= 1.0) || !(std::fabs(bend.across) <= 1.0) ||
+        !(std::fabs(bend.crease) <= 1.0)) {
+      return fail(Format("leaf_type %u: bend 系数超范围（along=%g across=%g crease=%g，"
+                         "允许 [-1, 1]，单位是 card.height）",
+                         t.type, bend.along, bend.across, bend.crease));
     }
   }
 

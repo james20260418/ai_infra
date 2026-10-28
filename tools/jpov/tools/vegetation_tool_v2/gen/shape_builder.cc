@@ -201,6 +201,49 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
         (static_cast<double>(match->segment) + match->t) / std::max(1, segment_count);
   }
 
+  // 兜底：破环。
+  // 父枝是用「起点最近的折线」判的，采样一稀（低配 per_seg=1~2）时，某根枝的起点
+  // 可能离它自己**后代**的近路折线更近 ⇒ 父子关系成环（A 的父是 B、B 的父是 A），
+  // 拓扑序写不出来，整棵树直接失败（报「枝 N 的父枝排在它后面」）。
+  // 处理：把环上的枝重新问一次「最近的其他折线」（**排除自己**）；命中的若还是
+  // 当前父枝（环没解开）或压根没有其他折线，就把这根枝挂到根枝上。
+  //
+  // ⚠️ 排除的必须是**自己**而不是当前父枝：查询点就是这根枝自己的起点，到自己的
+  // 距离恒为 0；不排除自己就永远命中自己，这个「换一个父亲」的分支等于没写。
+  for (int pass = 0; pass < 4; ++pass) {
+    bool repaired = false;
+    for (int i = 0; i < count; ++i) {
+      // 沿父链往上走，看会不会回到自己。
+      int current = i;
+      int steps = 0;
+      while (current >= 0 && steps <= count && !(current == i && steps > 0)) {
+        current = hierarchy.parent[static_cast<std::size_t>(current)];
+        ++steps;
+      }
+      if (!(current == i && steps > 0)) {
+        continue;  // 没有环
+      }
+      const int parent = hierarchy.parent[static_cast<std::size_t>(i)];
+      // 最近的其他折线（排除自己）；它还是当前父枝就说明环没解开，走下面的兜底。
+      const std::optional<jpov::util::NearestPointMatcher3d<double>::Match> retry =
+          matcher.Query(ToGeom(polys[i].points[0]), i);
+      if (retry.has_value() && retry->polyline >= 0 && retry->polyline != parent &&
+          retry->polyline != i) {
+        hierarchy.parent[static_cast<std::size_t>(i)] = retry->polyline;
+        const int segment_count = static_cast<int>(polys[retry->polyline].points.size()) - 1;
+        hierarchy.attach[static_cast<std::size_t>(i)] =
+            (static_cast<double>(retry->segment) + retry->t) / std::max(1, segment_count);
+      } else {
+        hierarchy.parent[static_cast<std::size_t>(i)] = root;  // 最后兜底：挂到根枝
+        hierarchy.attach[static_cast<std::size_t>(i)] = 1.0;
+      }
+      repaired = true;
+    }
+    if (!repaired) {
+      break;  // 已经没有环了（正常情况下第一轮就清干净）
+    }
+  }
+
   // 层数：BFS 从根往下走；父枝是「延续」（附着点几乎在末端）时层数不变，分叉才 +1。
   std::vector<std::vector<int>> children(static_cast<std::size_t>(count));
   for (int i = 0; i < count; ++i) {
@@ -330,6 +373,395 @@ double DistanceToPolyline(const Vec3d& point, const SampledPolyline& polyline, d
   return best;
 }
 
+// ----------------------------- 枝条噪声 -----------------------------
+// 对应 generate.proto 的 ShapeNoise：尺寸抖动 + 纵向/横向弯度。
+//
+// 全部在资产坐标系（+Y up）里施加，按拓扑序处理（父枝一定先于子枝）：
+//   1) 把枝根挪到「已经噪声过的父枝」上 —— 子枝必须跟着父枝走，否则父枝一弯，
+//      子枝的根就悬在半空；
+//   2) 以枝根为中心整体缩放：长度与半径乘同一个因子（整体变大/变小，不是被拉长）；
+//   3) 沿枝加两个方向的弯曲位移，位移在两端恒为 0（枝根不动 ⇒ 接缝不裂；
+//      枝梢不动 ⇒ 末梢叶子不飘）。
+// 结果直接写回折线；下游取叶卡 anchor、生成管子时读到的就是歪好的几何。
+constexpr double kPi = 3.14159265358979323846;
+
+// 一个采样点的姿态旋转（叶卡跟着枝走用）：把「噪声前的切线」转到「噪声后的切线」。
+struct SampleRotation {
+  Vec3d axis{ 0.0, 1.0, 0.0 };
+  double angle = 0.0;  // 弧度；0 = 不变
+};
+
+// splitmix64：稳定、与平台无关。同 seed + 同枝 + 同用途 ⇒ 同一个数。
+uint64_t MixHash(uint64_t x) {
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+// [-1, 1) 的确定性随机数。salt 区分用途（尺寸因子 / 弯曲相位……）。
+double UnitFromHash(int64_t seed, int branch, uint64_t salt) {
+  const uint64_t mixed =
+      MixHash(static_cast<uint64_t>(seed) ^ MixHash(static_cast<uint64_t>(branch + 1) * salt));
+  return static_cast<double>(mixed >> 11) * (1.0 / 4503599627370496.0) - 1.0;
+}
+
+// 取某一级的值；数组短了 = 该级不启用；负值按 0 处理（语义上只有 0..1）。
+double LevelValue(const std::vector<float>& values, std::size_t level) {
+  if (level >= values.size()) {
+    return 0.0;
+  }
+  return std::max(0.0, static_cast<double>(values[level]));
+}
+
+Vec3d RotateAroundAxis(const Vec3d& v, const Vec3d& axis, double angle) {
+  if (angle == 0.0) {
+    return v;
+  }
+  const Vec3d k = Normalize(axis);
+  const double c = std::cos(angle);
+  const double s = std::sin(angle);
+  return Add(Add(Mul(v, c), Mul(Cross(k, v), s)), Mul(k, Dot(k, v) * (1.0 - c)));
+}
+
+// 子枝挂到父枝上的位置：**用参数保存**，不是保存坐标。
+// 父枝被拉长/弯走之后，按同一个参数重新求点，子枝才会跟着父枝走；
+// 若改用「离父枝最近的点」，直的主干上点根本不会动（参数变了、位置没变）。
+struct Attachment {
+  bool valid = false;
+  std::size_t segment = 0;  // 父枝折线的第几段
+  double t = 0.0;           // 段内参数 [0,1]
+};
+
+Attachment FindAttachment(const Vec3d& point, const SampledPolyline& polyline) {
+  Attachment best;
+  if (polyline.points.size() < 2) {
+    return best;
+  }
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k + 1 < polyline.points.size(); ++k) {
+    const Vec3d a = polyline.points[k];
+    const Vec3d ab = Sub(polyline.points[k + 1], a);
+    const double length_sqr = LenSqr(ab);
+    double t = 0.0;
+    if (length_sqr > 0.0) {
+      t = std::clamp(Dot(Sub(point, a), ab) / length_sqr, 0.0, 1.0);
+    }
+    const double distance = Len(Sub(point, Add(a, Mul(ab, t))));
+    if (distance < best_distance) {
+      best_distance = distance;
+      best.valid = true;
+      best.segment = k;
+      best.t = t;
+    }
+  }
+  return best;
+}
+
+Vec3d EvaluatePolyline(const SampledPolyline& polyline, const Attachment& attachment) {
+  if (polyline.points.empty()) {
+    return Vec3d{ 0.0, 0.0, 0.0 };
+  }
+  const std::size_t segment =
+      std::min(attachment.segment, polyline.points.size() - (polyline.points.size() > 1 ? 2 : 1));
+  const Vec3d& a = polyline.points[segment];
+  if (segment + 1 >= polyline.points.size()) {
+    return a;
+  }
+  return Add(a, Mul(Sub(polyline.points[segment + 1], a), attachment.t));
+}
+
+std::vector<Vec3d> PolylineTangents(const std::vector<Vec3d>& points) {
+  std::vector<Vec3d> tangents(points.size(), Vec3d{ 0.0, 1.0, 0.0 });
+  for (std::size_t k = 0; k < points.size(); ++k) {
+    if (points.size() < 2) {
+      break;
+    }
+    const Vec3d delta = (k + 1 < points.size()) ? Sub(points[k + 1], points[k])
+                                                : Sub(points[k], points[k - 1]);
+    tangents[k] = Normalize(delta);
+  }
+  return tangents;
+}
+
+std::vector<double> NormalizedArclength(const std::vector<Vec3d>& points) {
+  std::vector<double> cumulative(points.size(), 0.0);
+  for (std::size_t k = 1; k < points.size(); ++k) {
+    cumulative[k] = cumulative[k - 1] + Len(Sub(points[k], points[k - 1]));
+  }
+  const double total = cumulative.empty() ? 0.0 : cumulative.back();
+  if (total > 0.0) {
+    for (double& value : cumulative) {
+      value /= total;
+    }
+  }
+  return cumulative;
+}
+
+// ----------------------------- 枝条噪声（按「链」施加）-----------------------------
+//
+// Sapling 会把**同一根管子**切成好几段样条（后一段的起点就是前一段的终点，
+// 附着参数 attach ≈ 1）。这些「延续样条」不是新枝，只是同一根枝的分段表示。
+//
+// 所以噪声必须按「链」施加，不能按单根样条：
+//   * 尺寸因子逐样条不同 ⇒ 接头处粗细突变（实测 oak 218/565 个延续接头的半径比
+//     偏离 1 超过 5%，肉眼就是「后一级没对准前一级」）；
+//   * 弯曲逐样条各来一个大 S ⇒ 每个接头都是一道折角。
+// 一条链共享：同一个缩放因子、同一个弯曲相位、同一段弧长参数化、同一个链根。
+
+struct Chain {
+  std::size_t level = 0;            // 噪声参数按链首的枝级取
+  double length = 0.0;              // 干净几何上的链总长（米）
+  Vec3d root{ 0.0, 0.0, 0.0 };      // 链首放置后的根点（缩放/弯曲之前）
+  Vec3d offset{ 0.0, 0.0, 0.0 };    // 整条链的平移（链首贴到父枝的实际位移）
+  Vec3d longitudinal{ 0.0, 1.0, 0.0 };
+  Vec3d lateral{ 1.0, 0.0, 0.0 };
+  double factor = 1.0;
+  double radius_scale = 1.0;   // 接头半径修正（分叉处子链不许比父枝粗），整条链共享
+  double phase = 0.0;
+  double amplitude_longitudinal = 0.0;
+  double amplitude_lateral = 0.0;
+};
+
+double PolylineLength(const std::vector<Vec3d>& points) {
+  double total = 0.0;
+  for (std::size_t k = 1; k < points.size(); ++k) {
+    total += Len(Sub(points[k], points[k - 1]));
+  }
+  return total;
+}
+
+// 父枝在挂接点处的半径（用来保证分叉处子枝不比父枝粗）。
+double EvaluateRadius(const SampledPolyline& polyline, const Attachment& attachment) {
+  if (polyline.radii.empty()) {
+    return 0.0;
+  }
+  const std::size_t segment = std::min(attachment.segment, polyline.radii.size() - 1);
+  const double r0 = polyline.radii[segment];
+  const double r1 = polyline.radii[std::min(segment + 1, polyline.radii.size() - 1)];
+  return r0 + (r1 - r0) * attachment.t;
+}
+
+// 位移：d(t) = 系数 · 链长 · sin(2π(t + φ)) · sin²(πt)，t = 链内归一化弧长。
+// sin² 窗口让整条链两端位移为 0（链根不离开父枝、链梢叶子不飘）。
+// 注意 t 是**链**参数而不是单根样条的参数：延续接头两侧用同一个 t，位移相同，
+// 接头处既不错位也不会出现折角。
+void ApplyBendToChain(const Chain& chain, const std::vector<double>& chain_offsets,
+                      SampledPolyline* polyline) {
+  if (polyline->points.size() < 2 || chain.length <= 0.0) {
+    return;
+  }
+  const double amplitude_length = chain.length * chain.factor;
+  for (std::size_t k = 0; k < polyline->points.size(); ++k) {
+    const double t = std::clamp(chain_offsets[k] / chain.length, 0.0, 1.0);
+    const double envelope = std::sin(kPi * t);
+    const double wave = std::sin(2.0 * kPi * (t + chain.phase));
+    const double displacement = wave * envelope * envelope;
+    polyline->points[k] =
+        Add(polyline->points[k],
+            Add(Mul(chain.longitudinal, chain.amplitude_longitudinal * amplitude_length *
+                                            displacement),
+                Mul(chain.lateral, chain.amplitude_lateral * amplitude_length * displacement)));
+  }
+}
+
+// 按拓扑序施加噪声。链在**干净几何**上先切好（父枝归属、挂接参数都不受噪声影响）。
+void ApplyBranchNoise(const NoiseOptions& noise, const Hierarchy& hierarchy,
+                      const std::vector<int>& order, std::vector<SampledPolyline>* polys,
+                      std::vector<std::vector<SampleRotation>>* rotations) {
+  const std::size_t count = polys->size();
+  rotations->assign(count, {});
+
+  // 1) 干净几何上的挂接参数（父枝还没被动过）。
+  std::vector<Attachment> attachments(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const int parent = hierarchy.parent[i];
+    if (parent >= 0 && static_cast<std::size_t>(parent) < count && !(*polys)[i].points.empty()) {
+      attachments[i] = FindAttachment((*polys)[i].points.front(), (*polys)[parent]);
+    }
+  }
+
+  // 2) 分链 + 弧长参数化（都在干净几何上做，缩放是均匀的 ⇒ 归一化参数不变）。
+  std::vector<int> chain_of(count, -1);
+  std::vector<std::vector<double>> chain_offsets(count);
+  std::vector<Chain> chains(count);
+  for (const int i : order) {
+    const int parent = hierarchy.parent[i];
+    // 「延续」= 同一根管子的下一段，必须共享缩放因子/推移/弯曲参数。
+    //
+    // 判据不能只看 attach：attach 是按段数归一化的，采样一稀（低配 per_seg=2）
+    // 真延续段会算成 0.93 之类；也不能只看"起点==父枝终点"—— Sapling 切段时
+    // 两端会差几毫米。这里同时用三条，命中任一即是同一根管子：
+    //   * attach 接近 1；
+    //   * 起点落在父枝**末端** 2cm 内、且半径与父枝末端相差 < 2%。
+    //     ⚠️ 必须是「父枝末端」而不是「父枝任意处」：同一根枝分叉出的两根子枝
+    //     起点相同、半径也可能相同，按"离中心线近 + 半径同值"会把**兄弟枝**并成一条链，
+    //     链长翻倍 ⇒ 弯度幅度跟着翻倍，整棵树会被推歪（实测 oak bbox 从 ±5m 涨到 12m）。
+    bool same_tube = false;
+    if (parent >= 0 && !(*polys)[i].points.empty() && !(*polys)[i].radii.empty() &&
+        !(*polys)[parent].points.empty() && !(*polys)[parent].radii.empty()) {
+      const double parent_radius = (*polys)[parent].radii.back();
+      const double child_radius = (*polys)[i].radii.front();
+      const double offset = Len(Sub((*polys)[i].points.front(), (*polys)[parent].points.back()));
+      const bool radius_matches = parent_radius > 0.0 && child_radius > 0.0 &&
+                                  std::fabs(child_radius / parent_radius - 1.0) < 0.02;
+      same_tube = offset < 0.02 && radius_matches;
+    }
+    bool continuation =
+        parent >= 0 && (hierarchy.attach[i] > kContinuationAttach || same_tube);
+    // 父枝必须先被处理（拓扑序）。兜底：万一顺序异常，退回「当新链处理」，
+    // 绝不让 chain_of[parent] = -1 拿去索引（那是越界写，会毁掉整棵树）。
+    if (continuation && chain_of[parent] < 0) {
+      continuation = false;
+    }
+    const int head = continuation ? chain_of[parent] : i;
+    chain_of[i] = head;
+    Chain& chain = chains[head];
+    if (!continuation) {
+      chain.level = static_cast<std::size_t>(std::max(0, hierarchy.level[i]));
+      chain.length = 0.0;
+    }
+    const std::vector<Vec3d>& points = (*polys)[i].points;
+    chain_offsets[i].assign(points.size(), 0.0);
+    double local = 0.0;
+    for (std::size_t k = 0; k < points.size(); ++k) {
+      if (k > 0) {
+        local += Len(Sub(points[k], points[k - 1]));
+      }
+      chain_offsets[i][k] = chain.length + local;
+    }
+    chain.length += local;
+  }
+
+  // 3) 每条链一份参数：因子/相位由 (seed, 链首编号) 派生；方向由链首切线给出。
+  const Vec3d world_up{ 0.0, 1.0, 0.0 };
+  for (const int i : order) {
+    if (chain_of[i] != i) {
+      continue;
+    }
+    Chain& chain = chains[i];
+    const double jitter = LevelValue(noise.size_jitter, chain.level);
+    chain.factor = 1.0;
+    if (jitter > 0.0) {
+      chain.factor =
+          std::max(0.2, 1.0 + UnitFromHash(noise.seed, i, 0x9E3779B1u) * jitter);
+    }
+    chain.amplitude_longitudinal = LevelValue(noise.bend_longitudinal, chain.level);
+    chain.amplitude_lateral = LevelValue(noise.bend_lateral, chain.level);
+    chain.phase = 0.5 * (UnitFromHash(noise.seed, i, 0x85EBCA6Bu) + 1.0);
+
+    const std::vector<Vec3d>& points = (*polys)[i].points;
+    if (points.size() < 2) {
+      continue;
+    }
+    const Vec3d tangent = Normalize(Sub(points[1], points[0]));
+    Vec3d longitudinal = Sub(world_up, Mul(tangent, Dot(world_up, tangent)));
+    if (Len(longitudinal) < 0.01) {
+      // 枝几乎竖直时「世界竖直方向的投影」退化，改用 +Z 的同一投影。
+      const Vec3d forward{ 0.0, 0.0, 1.0 };
+      longitudinal = Sub(forward, Mul(tangent, Dot(forward, tangent)));
+    }
+    if (Len(longitudinal) < 1e-9) {
+      longitudinal = Vec3d{ 1.0, 0.0, 0.0 };
+    }
+    chain.longitudinal = Normalize(longitudinal);
+    chain.lateral = Normalize(Cross(tangent, chain.longitudinal));
+  }
+
+  // 4) 逐样条施加（父枝先于子枝，所以链首总能拿到已噪声的父枝位置）。
+  for (const int i : order) {
+    SampledPolyline& polyline = (*polys)[i];
+    if (polyline.points.size() < 2) {
+      continue;
+    }
+    const std::vector<Vec3d> tangents_before = PolylineTangents(polyline.points);
+    Chain& chain = chains[chain_of[i]];
+    const bool is_head = chain_of[i] == i;
+    const bool has_parent = attachments[i].valid;
+
+    // 4.1 平移：整条链共用同一个位移。
+    //     * 链首是分叉：根点按**同一个挂接参数**贴到已噪声的父枝上，位移由它算出来；
+    //     * 延续段：**必须同样平移**（它只是同一根管子的下一段，起点就是父枝的终点）。
+    //       漏掉这一步就是「父枝挪了 1m、下一段还在原地」—— 实测 109/702 根枝脱开，
+    //       最大 1.12m，肉眼正是「后一级没对准前一级」。
+    if (is_head) {
+      if (has_parent) {
+        const int parent = hierarchy.parent[i];
+        const Vec3d old_root = polyline.points.front();
+        const Vec3d new_root = EvaluatePolyline((*polys)[parent], attachments[i]);
+        chain.offset = Sub(new_root, old_root);
+      } else {
+        chain.offset = Vec3d{ 0.0, 0.0, 0.0 };
+      }
+      for (Vec3d& point : polyline.points) {
+        point = Add(point, chain.offset);
+      }
+      chain.root = polyline.points.front();
+    } else if (chain.offset.x != 0.0 || chain.offset.y != 0.0 || chain.offset.z != 0.0) {
+      for (Vec3d& point : polyline.points) {
+        point = Add(point, chain.offset);
+      }
+    }
+
+
+    // 4.2 尺寸：整条链按**链根**缩放（长度与半径乘同一个因子）。
+    if (chain.factor != 1.0) {
+      for (Vec3d& point : polyline.points) {
+        point = Add(chain.root, Mul(Sub(point, chain.root), chain.factor));
+      }
+      for (double& radius : polyline.radii) {
+        radius *= chain.factor;
+      }
+    }
+
+    // 4.3 分叉接头：子链根不许比父枝还粗（原本 Sapling 保证 ≤ 父枝，抖动会破坏它）。
+    //     修正量挂在**链**上、整条链一起乘 —— 只压链首那一段的话，接头另一侧
+    //     （延续段）没被压，半径比就从 1.00 变成 1.22，肉眼又是一道台阶。
+    if (is_head && has_parent) {
+      const int parent = hierarchy.parent[i];
+      const double parent_radius = EvaluateRadius((*polys)[parent], attachments[i]);
+      const double root_radius = polyline.radii.empty() ? 0.0 : polyline.radii.front();
+      const double limit = 0.95 * parent_radius;
+      if (parent_radius > 0.0 && root_radius > limit && root_radius > 0.0) {
+        chain.radius_scale = limit / root_radius;
+      }
+    }
+    if (chain.radius_scale != 1.0) {
+      for (double& radius : polyline.radii) {
+        radius *= chain.radius_scale;
+      }
+    }
+
+    // 4.4 弯度：按链的弧长参数化（延续接头两侧 t 相同 ⇒ 位移相同，不会折角）。
+    if (chain.amplitude_longitudinal != 0.0 || chain.amplitude_lateral != 0.0) {
+      ApplyBendToChain(chain, chain_offsets[i], &polyline);
+    }
+
+    // 4.5 姿态旋转表：把「噪声前的切线」转到「噪声后的切线」（最短弧），给叶卡用。
+    const std::vector<Vec3d> tangents_after = PolylineTangents(polyline.points);
+    std::vector<SampleRotation>& branch_rotations = (*rotations)[i];
+    branch_rotations.resize(polyline.points.size());
+    for (std::size_t k = 0; k < branch_rotations.size(); ++k) {
+      const Vec3d& before = tangents_before[k];
+      const Vec3d& after = tangents_after[k];
+      const double cosine = std::clamp(Dot(before, after), -1.0, 1.0);
+      const double angle = std::acos(cosine);
+      if (angle < 1e-9) {
+        branch_rotations[k] = SampleRotation{};
+        continue;
+      }
+      Vec3d axis = Cross(before, after);
+      if (Len(axis) < 1e-9) {
+        axis = Cross(before, Vec3d{ 0.0, 1.0, 0.0 });
+        if (Len(axis) < 1e-9) {
+          axis = Cross(before, Vec3d{ 1.0, 0.0, 0.0 });
+        }
+      }
+      branch_rotations[k] = SampleRotation{ Normalize(axis), angle };
+    }
+  }
+}
+
 // 镜像手性的素材必须左右翻转，锚角也跟着左右换。
 std::string MirroredAnchorMode(const std::string& mode) {
   if (mode == "bottom_left") {
@@ -381,6 +813,12 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
   // ---- 层级 + 拓扑序 ----
   const Hierarchy hierarchy = BuildHierarchy(polys);
   const std::vector<int> order = TopologicalOrder(hierarchy.parent);
+
+  // ---- 枝条噪声（只改 polys_up：层级已经在干净几何上算好，避免噪声改变父枝归属）----
+  std::vector<std::vector<SampleRotation>> sample_rotations;
+  if (options.noise.Enabled()) {
+    ApplyBranchNoise(options.noise, hierarchy, order, &polys_up, &sample_rotations);
+  }
   std::vector<int> new_id(hierarchy.parent.size(), -1);
   for (std::size_t position = 0; position < order.size(); ++position) {
     new_id[static_cast<std::size_t>(order[position])] = static_cast<int>(position);
@@ -446,14 +884,14 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
       const bool which = Len(Sub(mid_a, anchor)) < Len(Sub(mid_b, anchor)) ? 0 : 1;
       const Vec3d root_mid = which == 0 ? mid_a : mid_b;
       const Vec3d tip_mid = which == 0 ? mid_b : mid_a;
-      const Vec3d up = Normalize(Sub(tip_mid, root_mid));
+      Vec3d up = Normalize(Sub(tip_mid, root_mid));
       const double height = Len(Sub(tip_mid, root_mid));
       if (height <= kMinCardHeight) {
         continue;
       }
       const Vec3d width_vec =
           which == 0 ? Sub(quad.corner[1], quad.corner[0]) : Sub(quad.corner[3], quad.corner[2]);
-      const Vec3d normal = Normalize(Cross(width_vec, up));
+      Vec3d normal = Normalize(Cross(width_vec, up));
 
       BuiltCard card;
       card.anchor = anchor;
@@ -480,6 +918,22 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
         const Vec3d u_dir = Sub(quad.corner[u_max], quad.corner[u_min]);
         const Vec3d right = Cross(up, normal);
         card.mirrored = Dot(Normalize(u_dir), right) < 0.0;
+      }
+
+      // 叶卡姿态跟着枝走：枝被弯了，卡片也要绕连接点转到新的切线方向上，
+      // 否则叶子仍朝着弯曲前的方向，粗枝上会明显穿进树干。
+      // 注意必须在上面的手性判定**之后**做旋转：手性比的是素材自身的 +u
+      // 与世界 right 的关系，用未旋转的姿态才和 Blender 里看到的一致。
+      if (static_cast<std::size_t>(branch) < sample_rotations.size()) {
+        const std::vector<SampleRotation>& branch_rotations =
+            sample_rotations[static_cast<std::size_t>(branch)];
+        if (static_cast<std::size_t>(local) < branch_rotations.size()) {
+          const SampleRotation& rotation = branch_rotations[static_cast<std::size_t>(local)];
+          if (rotation.angle != 0.0) {
+            up = RotateAroundAxis(up, rotation.axis, rotation.angle);
+            normal = RotateAroundAxis(normal, rotation.axis, rotation.angle);
+          }
+        }
       }
 
       // anchor 合同：必须落在所属枝条上（距离 ≤ 该处半径 + 容差）。
@@ -525,7 +979,14 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
                         : new_id[static_cast<std::size_t>(
                               hierarchy.parent[static_cast<std::size_t>(source)])];
     branch.level = static_cast<uint32_t>(hierarchy.level[static_cast<std::size_t>(source)]);
-    branch.ring_count = branch.level == 0 ? 16u : (branch.level == 1 ? 12u : 8u);
+    {
+      const std::vector<uint32_t>& rings = options.ring_counts;
+      const std::size_t level = static_cast<std::size_t>(branch.level);
+      const uint32_t ring = rings.empty()
+                                ? 8u
+                                : rings[std::min(level, rings.size() - 1)];
+      branch.ring_count = std::max(3u, ring);
+    }
     branch.seam_index = 0;
     branch.samples.reserve(polyline.points.size());
     for (std::size_t k = 0; k < polyline.points.size(); ++k) {
@@ -554,6 +1015,7 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.type = 0;
     type.description = options.leaf_type_desc;
     type.anchor_mode = options.anchor_mode;
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
   if (mirrored_count > 0) {
@@ -564,6 +1026,8 @@ bool BuildShape(const SaplingDump& dump, const BuildOptions& options, Shape* out
     type.description = options.leaf_type_desc + "（镜像手性：素材左右翻转后使用，根部在格子 " +
                        mode + " 角）";
     type.anchor_mode = mode;
+    // 弯曲与手性无关：s 是到中脉线的距离（左右对称），镜像不用翻符号。
+    type.bend = options.leaf_bend;
     out->leaf_types.push_back(type);
   }
 

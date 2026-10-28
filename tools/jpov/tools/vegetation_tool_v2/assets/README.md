@@ -2,7 +2,7 @@
 
 「组合查看器」的用法：**给几样渲染几样**。
 
-- `shape`（`.pbtxt`）：必需，但省略时用打包目录里的 `shapes/willow.pbtxt`
+- `shape`（`.vegshape`，二进制资产）：必需，但省略时用打包目录里的 `shapes/willow.vegshape`；要看文本用 `gen/shape_convert`
 - `bark/`：树皮材质目录，省略 = 树干按 level 上棕色
 - `leaf/`：叶卡贴图（黑底 = 透明），省略 = 只画 debug 绿卡（纯拓扑视图）
 
