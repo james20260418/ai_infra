@@ -58,7 +58,8 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 渲染结果与「shape + glb」逐像素一致（同一机位实测 0 差异），只是少了回退能力。
 
 **不用自己烘也能试**：仓库里带了一份烘焙产物
-`samples/willow_baked.glb`（12.9 MB，692 关节 / 树干 40837 v / 叶卡 11050 v，内嵌树皮+叶卡贴图）。
+`samples/willow_baked.glb`（12.5 MB，692 关节 / 树干 40837 v / 叶卡 3978 v（442 张 × 9 顶点/弯卡），
+内嵌树皮+叶卡贴图）。
 
 ```bash
 cd tools/jpov && ./build_jpov_vegetation_v2_viewer.sh
@@ -74,7 +75,7 @@ cd output/jpov_vegetation_v2_viewer
     --bark bark/bark001 --normal-scale 0.75
 ```
 
-> 两份产物应当**逐字节相同**（md5 `231cacc203e15e53fc9e4c9dc654ad82`）。
+> 两份产物应当**逐字节相同**（md5 `93b0ac1ffe756a4493874593875a7efa`）。
 > 若你的 md5 不同：先确认上面命令的参数一字不差（风/关节参数走面板默认值），
 > 再确认 `AI_INFRA` 版本一致 —— 烘焙结果对几何与参数都很敏感。
 
@@ -273,8 +274,9 @@ cd output/jpov_vegetation_v2_viewer
 噪声结果直接烘进 shape 的采样点（位置/半径），**资产里没有噪声参数**；
 同 `tree.seed` + 同参数 ⇒ 逐字节相同的树。
 
-⚠️ 只有 C++ 版（`gen/shape_gen`）实现 `noise` 与 `export.leaf_bend_*`；
-`generate_shape.py` 是历史对照基准，遇到这两块会忽略（不报错），别拿它出正式资产。
+⚠️ 只有 C++ 版（`gen/shape_gen`）实现 `noise`、`export.leaf_bend_*` 与 `export.ring_count`；
+`generate_shape.py` 是历史对照基准 —— 这三块它**全部忽略**（不报错，环数写死 16/12/8、
+不带弯曲、不加噪声），所以拿它跑 `configs/low|game/` 会得到一棵完全不同的树，别拿它出正式资产。
 
 ### 顶点预算 & 低配档（`configs/low/`）
 
@@ -440,7 +442,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `configs/` | 入库的生成配置：`pine.pbtxt` / `oak.pbtxt` / `fir.pbtxt`（见其 README） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
-| `samples/` | 范本拓扑（**全部 `.vegshape` 二进制**）：`willow`（183 枝/442 卡）、`willow_two_types`（215 枝/597 卡/2 type）；**入库档位**：`{pine,oak,fir}_low`（约 5 万顶点、带噪声，主力档）与 `{pine,oak,fir}_game`（约 5000 三角形）；**`willow_baked.glb`（13 MB，烘焙产物，见下）** |
+| `samples/` | 范本拓扑（**全部 `.vegshape` 二进制**）：`willow`（183 枝/442 卡）、`willow_two_types`（215 枝/597 卡/2 type）；**入库档位**：`{pine,oak,fir}_low`（约 5 万顶点、带噪声，主力档）与 `{pine,oak,fir}_game`（约 5000 三角形）；**`willow_baked.glb`（12.5 MB，烘焙产物，见下）** |
 | `docs/vegetation_asset_format.md` | **格式规范**：约定、扫管、UV、叶卡、装配、校验、验收、版本 |
 | `bake/bake_options.h` | 烘焙参数/统计（baker 与关节构造共用，避免循环 include） |
 | `bake/vegetation_glb_joints.{h,cc}` | **关节构造**（GL-free 纯几何）：抽稀 / soft / 父子链 / 相位场；烘焙与单测共用 |
