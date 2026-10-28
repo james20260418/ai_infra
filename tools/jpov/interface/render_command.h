@@ -767,7 +767,8 @@ struct SmaaConfig {
 //
 // ── 范围（重要）──
 //   接两条路径：**object3d**（DrawObject3D / DrawGltfObject）与**静态实例**
-//   （DrawInstancedObject，逐实例吹倒比例见 InstanceState::blow_away_ratio）。
+//   （DrawInstancedObject，逐实例风参数见 InstanceState：风向 / 相位 / 摆幅 / 频率 /
+//   阵风相位 / 吹倒比例）。
 //   **蒙皮路径本版不动**。
 //   只有带风数据的 mesh（`MeshData.flags` 含 `kWind`）会被位移；以 **mesh 的关节表是否非空**
 //   为闸（`uWindJointCount>0`）—— 无表 mesh（如地面）完全不受影响。
@@ -779,9 +780,11 @@ struct SmaaConfig {
 //       路径长 L（吹倒权重）由 VS 沿关节链现算，不占顶点属性。
 //   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
 //       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
-//   · **本物体自己的风参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
-//       **每个 Object3DCommand 自带一份** —— 不同树/不同物体可以吹不同的风（方向、
-//       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
+//   · **风场参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
+//       **每个命令自带一份**（Object3DCommand 逐物体、InstancedObjectCommand 逐批）——
+//       不同树/不同物体可以吹不同的风；不存在「全场景一份风」的全局命令。
+//   · **逐实例风参数**（仅实例路径；`InstanceState`）：风向 / 相位 / 摆幅倍数 /
+//       频率倍数 / 阵风相位 / 吹倒比例。同 mesh 的 N 份实例靠它区分（否则整片林子锁相）。
 //
 // ── 位移公式（枢轴链 + 链外平动湍流）──
 //   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死；单关节，无混合）：
@@ -799,6 +802,13 @@ struct WindCommand {
     float amplitude = 1.0f;    // 枢轴风振幅（转角尺度）
     float frequency = 1.0f;    // 基频（Hz）
     // 风向：**单位向量**（世界空间）。只管方向；风强度由 amplitude 表达。
+    //   方向可以带 Y 分量（仰角），但本版引擎里仰角**只影响链外湍流的方向**：
+    //     · 枢轴摆动：axis = normalize(up × dir)，归一化后倾角与倒向都与仰角无关
+    //       （倒向恒 = 水平分量的方向）；
+    //     · 吹倒：方向显式取水平分量（`vec3(dir.x, 0, dir.z)`），仰角不参与。
+    //   即「仰角 30°」与「仰角 0°」的差别只体现在湍流抖动方向上，不是升力。
+    //   （曾经注释写成「带仰角的风向只影响摇摆轴」，那是错的 —— 归一化把仰角吃掉了。）
+    //   ⚠️ 实例路径上本字段是**逐实例风向的默认值**（InstanceState::wind_direction）。
     Vec3f direction = {1.0f, 0.0f, 0.0f};
     // ---- 链外「平动湍流」（逐顶点）：独立参数 ----
     float turb_amplitude = 0.0f;   // 平动湍流幅度（模型单位；0 = 关闭）
@@ -1866,14 +1876,61 @@ struct InstanceState {
     //   `render_internal_id = 本命令 base + gl_InstanceID`，再把 internal id 映射回本值（见拾取实现）。
     uint32_t picking_id = 0;
 
-    // 风吹倒伏比例（逐实例；loc11）。**平移**（不是角度）——角度会被关节的 soft
-    //   继承模型干扰（软枝不跟风）；平移与 soft 无关。
+    // ---- 逐实例风参数（2026-10-27）----
+    // 只在**本命令带 `wind`** 且 mesh 带 `kWind`（烘焙过关节表）时上传；否则整段不挂
+    // GPU 属性、VS 整段跳过（零开销）。GPU 侧打包成两个 vec4（见
+    // src/instanced/instanced_object_attrs.h）：
+    //   loc11 = (wind_direction.xyz, blow_away_ratio)
+    //   loc15 = (wind_phase, wind_amp_scale, wind_freq_scale, wind_gust_phase_cycles)
+    // 「逐实例 × 逐命令」的分工：时间 / 阵风频率 / 湍流频率 / 吹倒指数 / 参考高度 H
+    //   是**风场本身**的属性，留在 WindCommand（逐命令）；下面 6 项是「这一株怎么受风」。
+    // ⚠️ 风向是**逐实例常量**（不同实例各给各的风向没问题）；约束只在**一条关节链内部**
+    //   必须同一份 —— 关节链的递推只在「全链同一旋转轴」下成立（不同轴的旋转不可交换）。
+    //   所以不要试图做成**逐关节**风向（那需要逐关节四元数，另一个量级）。
+
+    // 风向（世界系**单位向量**；可带 Y 分量）。
+    //   nullopt（默认）= 沿用本命令 `WindCommand::direction`（常见情形：一片林子共享
+    //   同一股风，只有相位/强度逐株不同）。
+    //   ⚠️ 给了就必须是单位向量（渲染端 CHECK 长度 ≈ 1，容差 1e-3）；强度请用
+    //   `wind_amp_scale` 表达，**不要**用长度当强度（隐式语义）。
+    //   ⚠️ 风向的 Y 分量（仰角）在本版引擎里**只影响链外湍流方向**：枢轴旋转轴
+    //   `axis = normalize(up × dir)` 归一化后，倾角与倒向都与仰角无关（倒向恒沿水平分量）。
+    //   详见 WindCommand::direction。
+    std::optional<Vec3f> wind_direction;
+
+    // 风吹倒伏比例。**平移**（不是角度）——角度会被关节的 soft 继承模型干扰
+    //   （软枝不跟风）；平移与 soft 无关。
     //   本实例每个顶点的位移：
     //     d = blow_away_ratio × L × (L/H)^(n−1)        // n = WindCommand::blow_away_exponent
     //   L = 该顶点到 root 的父链总长度（VS 现算，静止几何 ⇒ 沿枝单调），
     //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
     //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
     float blow_away_ratio = 0.0f;
+
+    // 相位偏移（**秒**）：把本实例的整条风时间轴平移 τ —— 三角项变成 sin(2π f (t + τ))。
+    //   枢轴摆动、链外湍流、阵风包络三处同时生效（同一个 τ = 「这株比那株晚/早受风」）。
+    //   同 mesh 的 N 份实例给不同 τ ⇒ 整片林子不再锁相。
+    //   量纲是**时间**而非「周期比例」：与关节表/逐顶点烘焙的相位场（同样是秒）一致。
+    //   典型取值：一片林子在 [0, 1/基频] 内随机；0（默认）= 与命令时间同相。
+    float wind_phase = 0.0f;
+
+    // 摆幅倍数（无量纲，默认 1 = 原样）：乘在枢轴摆角与链外湍流幅度上。
+    //   物理含义 = 这一株的**受风强度 / 刚度倒数**（矮壮树 0.6、细高树 1.4）。
+    //   ≥0；0 = 这一株完全不摇（但仍可被 blow_away_ratio 压弯）。0 与 1 都没有哨兵语义。
+    float wind_amp_scale = 1.0f;
+
+    // 频率倍数（无量纲，默认 1 = 原样）：乘在枢轴各 level 的频率与链外湍流频率上。
+    //   物理含义 = 摆动快慢（细枝抖得快）。必须 > 0（渲染端 CHECK）。
+    float wind_freq_scale = 1.0f;
+
+    // 阵风包络的相位偏移（**周期比例**，[0,1)，名字里的 cycles 就是量纲）：只加在阵风
+    //   包络的相位上 `sin(2π(f_gust·t + wind_gust_phase_cycles))`，与 wind_phase 独立。
+    //   ⚠️ 与 `wind_phase` **量纲不同**（那是秒、这是整周期的小数部分）—— 名字里带
+    //   `_cycles` 就是为了不再靠注释区分。
+    //   用途：让整片林子的阵风错峰 —— 同一时刻有的株在峰值、有的在谷值
+    //   （只用 wind_phase 的话阵风与摆动绑死，全场仍会一起起伏）。
+    //   0（默认）= 与命令的阵风相位一致；取值按周期比例取小数部分（1.0 等价于 0）。
+    float wind_gust_phase_cycles = 0.0f;
 
     // ---- 逐实例 base tint 调色板（可选）----
     // 与 `PBRMaterial::base_tint` 同构（enable + 2×RGB），但**逐实例**：同一批实例可各用
@@ -1892,12 +1949,13 @@ struct InstanceState {
 struct InstancedObjectCommand {
     uint32_t mesh_id;      // 已注册的 GPU mesh 句柄（全批共享）
     PBRMaterial material;  // 该网格的 PBR 材质（同 Object3DCommand.material 语义）
-    std::vector<InstanceState> instances;  // 每实例一份状态（摆放 + 拾取 id + 吹倒比例）
+    std::vector<InstanceState> instances;  // 每实例一份状态（摆放 + 拾取 id + 风参数）
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。
     //   要单独高亮某几株 → 调用方把它们拆成另一条命令（额外一次 draw call，成本可见）。
     bool highlight = false;
-    // 植被风（逐命令）：同批实例共享同一个风场（时间 / 风向 / 振幅 / 频率…）。
-    //   每实例的**吹倒比例**另在 InstanceState::blow_away_ratio（逐实例）。
+    // 植被风（逐命令）：本批共享的**风场**（时间 / 阵风频率 / 湍流频率 / 吹倒指数 /
+    //   参考高度）。`direction` 是逐实例风向的**默认值**（实例没给 wind_direction 时用它）。
+    //   逐实例的相位 / 摆幅 / 频率 / 阵风相位 / 风向 / 吹倒比例见 InstanceState。
     //   无值 = 整条命令不吹风（VS 整段跳过，零开销）。
     std::optional<WindCommand> wind;
 };

@@ -15,6 +15,12 @@
 
 #include "jpov.h"
 
+// GL 枚举/函数原型：**MinGW 的 <GL/gl.h> 只到 1.1**，`GL_MAX_VERTEX_ATTRIBS` 等
+// 都在 <GL/glext.h> 里。下面的 GL 信息日志要用它，所以两平台都显式带上
+// （与 volume_fire_renderer.cc 同款；缺这个在 --config=windows 下编译失败）。
+#include <GL/gl.h>
+#include <GL/glext.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <tuple>
@@ -157,6 +163,22 @@ void JPOV::Init() {
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
+    // 打印实际拿到的 GL 实现：**这是"卡不卡"的第一信息**。WSLg / 容器里很容易
+    // 静默落到 llvmpipe（纯软件光栅）—— 此时再优化 shader 也只能改善一部分，
+    // 真正的差别在有没有硬件光栅。看到 "llvmpipe" 就说明是软件在跑。
+    const GLubyte* gl_renderer = glGetString(GL_RENDERER);
+    const GLubyte* gl_version = glGetString(GL_VERSION);
+    const GLubyte* gl_vendor = glGetString(GL_VENDOR);
+    LOG(INFO) << "GL: renderer=" << (gl_renderer ? reinterpret_cast<const char*>(gl_renderer)
+                                                 : "?")
+              << " | vendor=" << (gl_vendor ? reinterpret_cast<const char*>(gl_vendor) : "?")
+              << " | version=" << (gl_version ? reinterpret_cast<const char*>(gl_version) : "?")
+              << " | max_vertex_attribs="
+              << [] {
+                     GLint n = 0;
+                     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &n);
+                     return n;
+                 }();
 }
 
 void JPOV::Finalize() {

@@ -58,7 +58,7 @@ uniform int   uWindEnabled;
 uniform float uWindTime;
 uniform float uWindAmplitude;
 uniform float uWindFrequency;
-uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
+uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）。仰角只影响链外湍流方向
 uniform int   uWindJointCount;   // 关节表条目数（0 = 无表 → 不动）
 uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
@@ -133,6 +133,9 @@ vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
     vec3 wn = n_in;
     if (uWindEnabled == 1 && uWindJointCount > 0) {
         vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
+        // 摇摆轴 = up × dir，再归一化。⚠️ 归一化把仰角吃掉了：倾角幅度与「倒向」
+        //   （= normalize(cross(axis, up)) = 风向的水平分量方向）都与仰角无关，
+        //   所以「仰角 30° 的风」与「仰角 0° 的风」只在湍流方向上有差别。
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
@@ -161,7 +164,9 @@ vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
         p += tdir * (tamp * sin(6.28318531 * tpj));
         // 吹歪：整体向风向压弯（越靠梢位移越大）。path_len 见上面（关节表 cum + 本段距离）。
         //   方向取**水平分量**（与 instanced 路径、与 WindCommand 的文档一致）：
-        //   带仰角的风向只影响摇摆轴/湍流，不该把整株往上抬。
+        //   吹倒是「被压弯」不是「被托起」，所以仰角不参与 —— 带仰角的风向在本引擎里
+        //   **只影响链外湍流的方向**（枢轴轴 normalize(up×dir) 归一化后，倾角与倒向
+        //   都与仰角无关，见下方 axis 段），不该把整株往上抬。
         vec3 hw = vec3(wdir.x, 0.0, wdir.z);
         vec3 hdir = (length(hw) > 1.0e-5) ? normalize(hw) : vec3(1.0, 0.0, 0.0);
         if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && path_len > 0.0) {

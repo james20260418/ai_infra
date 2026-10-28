@@ -26,7 +26,12 @@ v1 的 Blender/wind_bake.py 已归档），随资产走。
 - 风参数挂在**命令上**：`Object3DCommand::wind` / `InstancedObjectCommand::wind`
   （都是 `std::optional<WindCommand>`），**逐物体/逐批**：同场景两棵树可以有各自的风向 /
   相位 / 强度。**不存在「全场景一份风」的全局命令**（这正是它没有放进 `RenderCommandList`
-  的原因）。实例路径另加逐实例 `InstanceState::blow_away_ratio`。
+  的原因）。
+- **实例路径再往下切一层**（2026-10-27）：除命令上的风场参数外，每个 `InstanceState`
+  还带 6 个逐实例风参数 —— 风向、相位、摆幅倍数、频率倍数、阵风相位、吹倒比例
+  （GPU：`loc11 = (风向.xyz, 吹倒比例)`、`loc15 = (相位, 摆幅, 频率, 阵风相位)`）。
+  没有这一层时，同 mesh 的 N 份实例**完全锁相**（同一个动画的 N 份副本），
+  一片林子会整体齐步晃 —— 这是"千树千面"最主要的缺口，不是细节。见 §8.1。
 - 生效闸 = **两个条件同时满足**：命令里设了 `wind` 且 mesh 带 `MeshVertexFlags::kWind`
   （渲染时体现为 `uWindJointCount > 0`）。无风数据的 mesh（地面、石头、人）加不加 `wind`
   都完全不受影响 ⇒ **未使用 = 零开销、零回归**。
@@ -38,7 +43,7 @@ v1 的 Blender/wind_bake.py 已归档），随资产走。
 
 | attribute | 内容 | 语义 |
 |---|---|---|
-| `loc6 = vec2` | `(joint_id, phase)` | joint_id = 该顶点所属刚性段在关节表里的下标（唯一、无歧义）；phase = 连续相位场 `[0,1)` |
+| `loc6 = vec2` | `(joint_id, phase)` | joint_id = 该顶点所属刚性段在关节表里的下标（唯一、无歧义）；phase = 连续相位场 `[0,1)`（**直接加到时间上**，即"亚秒级时间偏移"） |
 
 - **为什么只需要一个关节**：joint_id 由烘焙端按**拓扑**直接定（同一枝的同一采样环共享一个
   关节），分叉处的连续过渡靠「环共享关节」保证，不靠空间插值。v1 那套「空间最近的两个关节 +
@@ -147,6 +152,31 @@ tdir = normalize(0.6·axis + 0.7·up + 0.4·wdir)     // 斜上，不在风向�
 shader 常数（`object3d_renderer.h`）：`kWindPivotGain = 0.4`、`kMaxWindChain = 16`、
 `kTurbLevF = 0.5`、`kTurbGustP = 4.0`。
 
+### 5.1 逐实例风参数（`InstanceState`，2026-10-27）
+
+`WindCommand` 描述的是**风场**（时间、阵风频率、湍流频率、吹倒指数、参考高度 H）；
+下面这些描述的是**"这一株怎么受风"**，所以放在逐实例：
+
+| 字段 | 默认 | 量纲 / 值域 | 物理定义 |
+|---|---|---|---|
+| `wind_direction` | nullopt | 世界系**单位向量**（可带 Y） | 逐实例风向；nullopt = 沿用命令风向（渲染端 `CHECK` 长度≈1） |
+| `wind_phase` | 0 | **秒**（可负） | 整条风时间轴平移 τ：`sin(2π f (t + τ))`。摆动/湍流/阵风同时生效 |
+| `wind_amp_scale` | 1 | ≥0 | 受风强度 / 刚度倒数：乘在枢轴摆角与湍流幅度上（0 = 不摇但还能被压弯） |
+| `wind_freq_scale` | 1 | >0 | 摆动快慢：乘在枢轴各 level 分档频率与湍流频率上 |
+| `wind_gust_phase_cycles` | 0 | 周期比例 | **只**加在阵风包络相位上，让阵风的峰谷逐株错开（与 `wind_phase` 独立） |
+| `blow_away_ratio` | 0 | ≥0 | 吹倒（静态压弯）比例，见 §8 |
+
+- 三处三角项（枢轴 θ、湍流、阵风）都吃 `wind_phase`；`wind_gust_phase_cycles` 只吃阵风 ——
+  否则「阵风到达」与「摆动相位」会被绑死，全场仍会一起起伏。
+- 默认值（0 / 1 / 1 / 0 / nullopt）在数学上是**逐位无操作**：不填这些字段的命令，
+  出图与逐实例属性存在之前**逐像素相同**（现有 gold 即为此把关）。
+- ⚠️ **风向只能逐实例，不能逐关节**：关节链递推
+  `qpos = qpos + R(axis, A_parent)·(pivot_j − pivot_parent)` 只在"全链同一旋转轴"下成立
+  （不同轴的旋转不可交换，也谈不上合成一个 `A`）。要逐关节风向 = 换逐关节四元数，另一个量级。
+- 仰角（风向的 Y 分量）在本版**只影响链外湍流方向**：枢轴轴是 `normalize(up × dir)`，
+  归一化把仰角吃掉了（倾角与倒向都与仰角无关，倒向恒 = 水平分量）；吹倒方向显式取水平分量。
+  这是**有意保留的现状**（2026-10-27 Danis 定：3D 风向不做）。
+
 ## 6. 实现要点 / 踩过的坑
 
 1. **父关节哨兵解码**：`int(floor(w + 0.5))`。GLSL `int()` 向零截断会把 `-0.5` 解成 `0`
@@ -204,9 +234,38 @@ v2 烘焙按拓扑直接定归属后，一个顶点只属于一个刚性段，�
    - 0 = 不吹（默认）；查看器滑条上限 0.5。
    - L 由关节链现算（只依赖静止几何）⇒ 沿枝单调、不会在关节处出现台阶。
 
-三条 pass（主 / 阴影 / 拾取·高亮）共用 `UploadInstancedWindUniforms()` + 同一份
-`kWindBlowGlsl`（std::string 拼接，三个实例 VS 共享，不是三份手抄）⇒ 影子和拾取
-与本体同形变。无 `WindCommand` 或无关节表时 `uWindEnabled=0`，整段跳过、不挂 loc11。
+三条 pass（主 / 阴影 / 拾取·高亮）共用 `UploadInstancedWindUniforms()` +
+`UploadInstanceWindAttrs()` + 同一份 `kWindBlowGlsl`（std::string 拼接，三个实例 VS
+共享，不是三份手抄）⇒ 影子和拾取与本体同形变。无 `WindCommand` 或无关节表时
+`uWindEnabled=0`，整段跳过、不挂 loc11/loc15。
+
+### 8.1 逐实例风属性（2026-10-27）
+
+**问题**：只有命令级风场时，同 mesh 的 N 份实例在任意时刻的关节角度**逐位相同** ——
+一片林子是"同一个动画的 N 份副本，只是各自 yaw 不同"。逐实例 `blow_away_ratio` 只给
+"这株弯多少"，给不了"这株怎么弯 / 什么时候弯"。
+
+**布局**（详见 `src/instanced/instanced_object_attrs.h`）：
+
+| slot | 内容 | 说明 |
+|---|---|---|
+| `loc11` vec4 | `(风向.xyz, 吹倒比例)` | 风向与吹倒比例合一个 vec4：原来吹倒独占 loc11 的 1 个 float，16 个属性槽是硬地板，不浪费 |
+| `loc15` vec4 | `(相位秒, 摆幅倍数, 频率倍数, 阵风相位)` | 默认 0/1/1/0 = 逐位无操作 |
+
+- 风向**不再走 uniform**：`aInstWindDirBlow.xyz` 是唯一来源；host 侧在上传时把
+  "没给 `wind_direction` 的实例"解析成命令风向并 `CHECK` 单位长度 ⇒ shader 里没有
+  "有没有逐实例风向"的分支。
+- 剩下的空槽只有 `loc3` / `loc4`。再加逐实例字段前先想清楚：真需要 8~16 个 float 时，
+  正确解法是**参数纹理**（`texelFetch(uInstParams, ivec2(gl_InstanceID,0), 0)`，
+  关节表与 strip 平滑 pass 都是这个模式），而不是继续挤 attribute 槽。
+- **验收**：`test/object3d/jpov_instanced_wind_test.cc`（GPU 像素）——
+  两根同 mesh 柱子，只改右侧实例的相位/摆幅/风向/频率，断言
+  「**右半有足量像素变化** + **左半逐字节不变**」。左侧不变这一半排除"其实是整批生效"；
+  同参两帧还必须逐字节相同（确定性）。负向验证：把 `aInstWindParams.x` 从相位里去掉，
+  相位那一条立刻掉到 0 像素差异。
+- **查看器**：vegetation v2 查看器的 glb 展示态有「森林 5×5」复选框
+  （`--forest`），25 份实例的相位在 `[0, --wind-phase-span)` 秒内随机，
+  摆幅/频率/阵风相位/风向抖动仍由滑条控制。
 
 验证：`--capture-blow`（钉住风时间，只扫 0 / 0.1 / 0.25 / 0.5 四档）；四档差异像素
 59k → 66k → 78k，倾斜方向与风向一致；`instanced_object_attrs_test` 与
