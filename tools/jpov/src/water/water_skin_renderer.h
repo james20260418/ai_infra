@@ -95,6 +95,11 @@ struct WaterSkinParams {
     float sun_halo_aspect = 1.0f;         // 水平/垂直 = aspect（<1 = 竖长，>1 = 横长）
     // 晕的**方向**：日盘可见方向（低仰角时 != 真实 sun_dir，见 SkyCommand::SunDiscDirection）。
     Vec3f sun_halo_dir{0.0f, 1.0f, 0.0f};
+    // 高光的方向：也取**可见盘方向**（白天=日盘 / 夜晚=月盘，见 ActiveDiscDirection）。
+    // 理由：低仰角时盘被 discDirRemap 提前压向地平线，若高光改用真实方向，
+    //   水面上的"太阳路"会跑到盘的上方，看起来像一圈无源的光晕。
+    bool has_glint_dir = false;
+    Vec3f glint_dir{0.0f, 1.0f, 0.0f};
     // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
     //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ）
     //   3 = sinc + 方差转粗糙度    4 = **法线 flipbook 纹理 + 硬件 mip**

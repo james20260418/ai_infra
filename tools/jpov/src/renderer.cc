@@ -1166,8 +1166,9 @@ void Renderer::RenderReflectionPass(const RenderCommandList& cmds, int width, in
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         SkyRenderer::DrawSky(*cmds.sky, mcam, w, h, shader_mgr_,
-                             (sky_output == 1) ? SkyRenderer::SkyOutput::kAtmoOnly
-                                               : SkyRenderer::SkyOutput::kFull);
+                             (sky_output == 3) ? SkyRenderer::SkyOutput::kEnvReflect
+                             : (sky_output == 1) ? SkyRenderer::SkyOutput::kAtmoOnly
+                                                 : SkyRenderer::SkyOutput::kFull);
     }
 
     glEnable(GL_DEPTH_TEST);
@@ -1723,8 +1724,9 @@ void Renderer::Render(const RenderCommandList& cmds,
         refl_valid_ = false;
         if (water_skin_.has_value() && water_skin_->reflection_mode != 0) {
             CHECK(use_hdr) << "平面反射需要 tone_mapping=true（HDR 倒影目标）";
+            // 反射模式 2（B）= kEnvReflect：大气 + 月盘/月晕（不含日盘）
             RenderReflectionPass(cmds, fbo_3d_w, fbo_3d_h, water_skin_->level_y,
-                                 (water_skin_->reflection_mode == 2) ? 1 : 0);
+                                 (water_skin_->reflection_mode == 2) ? 3 : 0);
             // RenderReflectionPass 改了 FBO / viewport / 绕序 ⇒ 恢复主 pass 的上下文。
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
@@ -2154,19 +2156,30 @@ void Renderer::Render(const RenderCommandList& cmds,
                     // 晕的强度跟**太阳直射光**的标定同步（同一束光散射出来的）：
                     //   SunGlowIntensityScale() = 当前 DNI 透过率 / 天顶 DNI 透过率
                     //   ⇒ 日落时晕跟着暗，不会"天黑了还挂一圈亮晕"。
-                    const float glow_scale = cmds.sky->SunGlowIntensityScale();
-                    Color gc = cmds.sky->SunGlowColor();
+                    const float glow_scale = cmds.sky->ActiveGlowIntensityScale();
+                    Color gc = cmds.sky->ActiveGlowColor();
                     ws.sun_glow_color = Color{gc.r * glow_scale, gc.g * glow_scale,
                                               gc.b * glow_scale, 1.0f};
                     ws.sun_glow_sigma_rad = cmds.sky->sun_radius * 2.0f;  // 与 discGlow 同款
                     ws.sun_disc_radius_rad = cmds.sky->sun_radius;
                     // 晕跟着**盘**走（低仰角时盘比真实方向更早压向地平线）——
                     // 用 SkyCommand::SunDiscDirection()，与 sky shader 的 discDirRemap 同源。
-                    ws.sun_halo_dir = cmds.sky->SunDiscDirection();
+                    const Vec3f active_disc = cmds.sky->ActiveDiscDirection();
+                    ws.sun_halo_dir = active_disc;
+                    // 高光也跟着"看得见的那个盘"（否则低太阳时太阳路与盘错开）。
+                    ws.has_glint_dir = true;
+                    ws.glint_dir = active_disc;
                 }
                 // 反射模式 A：倒影天空是 kFull（盘 + 晕都在）⇒ 解析太阳项与解析日晕
                 //   都要关掉，否则同一颗太阳会在水面里出现两次。
                 if (ws.reflection_mode == 1) {
+                    ws.use_sun_glint = false;
+                    ws.sun_glow_color = Color{0.0f, 0.0f, 0.0f, 1.0f};
+                }
+                // 夜间（主光源=月亮）：倒影里已经带**月盘 + 月晕**（kEnvReflect）⇒
+                //   解析高光/解析晕都关掉，否则月光会被算两次（而且解析瓣在这里本来就
+                //   没有物理依据 —— 月盘是个可镜像的小光源）。
+                if (cmds.sky.has_value() && cmds.sky->sun_dir.Unit().y() < 0.0f) {
                     ws.use_sun_glint = false;
                     ws.sun_glow_color = Color{0.0f, 0.0f, 0.0f, 1.0f};
                 }

@@ -1301,6 +1301,66 @@ struct SkyCommand {
         return DniFactorFromElevDeg(elev_deg) / ref;
     }
 
+    // 月盘的**可见方向**（与 SunDiscDirection 同义，用 moon_set_* 重映射）。
+    Vec3f MoonDiscDirection() const {
+        const Vec3f d = moon_dir.Unit();
+        const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
+        const float rad2deg = 180.0f / static_cast<float>(M_PI);
+        float elev_deg = elev * rad2deg;
+        if (elev_deg < moon_set_start_angle) {
+            elev_deg = moon_set_start_angle +
+                       moon_set_angle_ratio * (elev_deg - moon_set_start_angle);
+        }
+        const float disc_elev = elev_deg / rad2deg;
+        const float sy = std::sin(disc_elev);
+        const float sh = std::sqrt(std::max(1.0f - sy * sy, 0.0f));
+        const float hlen = std::sqrt(d.x() * d.x() + d.z() * d.z());
+        if (hlen > 1.0e-6f) {
+            return Vec3f{d.x() / hlen * sh, sy, d.z() / hlen * sh};
+        }
+        return Vec3f{0.0f, sy, 0.0f};
+    }
+
+    // 当前**主天体**（白天=太阳 / 夜晚=月亮）的可见盘方向。
+    // 判据与 App 切主平行光的判据一致：sun_dir.y >= 0 用太阳，否则用月亮。
+    // 水面/水皮的"太阳高光"用这个方向 ⇒ 高光始终落在**你眼睛看到的那个盘**下面
+    // （低仰角时盘被 discDirRemap 提前压向地平线，真实方向会让高光与盘错开）。
+    Vec3f ActiveDiscDirection() const {
+        return (sun_dir.Unit().y() >= 0.0f) ? SunDiscDirection() : MoonDiscDirection();
+    }
+
+    // 月晕的峰值色（与 sky 的 moon_glow_contrib 同源：月盘色 × moon_glow × moon_season × intensity）。
+    Color MoonGlowColor() const {
+        if (moon_glow <= 0.0f || moon_radius <= 0.0f || moon_brightness <= 0.0f) {
+            return Color{0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        const Color body = ColorTempToLinear(4100.0f);   // 与 shader 的 moon_body_color 同温
+        return Color{body.r * moon_glow * moon_season.r * intensity,
+                     body.g * moon_glow * moon_season.g * intensity,
+                     body.b * moon_glow * moon_season.b * intensity,
+                     1.0f};
+    }
+
+    // 当前主天体的晕色（白天=日晕 / 夜晚=月晕）。
+    // ⚠️ 日晕额外乘 **daylight 门**（`clamp((sun_dir.y − 0.03)/0.10, 0, 1)`，与 sky 同式）：
+    //    sky shader 里日晕是加在 `mix(0, solar, daylight)` **之后**的，日落后仍会漏出一圈
+    //    日晕（那是 sky 侧的既有行为）；水皮这边按"太阳已经下去了就没有日晕"处理，
+    //    避免夜里海面出现一圈无源的暖色晕（2026-10-28 Danis 报的夜间亮斑来源之一）。
+    Color ActiveGlowColor() const {
+        const Vec3f d = sun_dir.Unit();
+        if (d.y() >= 0.0f) {
+            const float daylight = std::clamp((d.y() - 0.03f) / 0.10f, 0.0f, 1.0f);
+            Color c = SunGlowColor();
+            return Color{c.r * daylight, c.g * daylight, c.b * daylight, 1.0f};
+        }
+        return MoonGlowColor();
+    }
+
+    // 当前主天体晕的强度比例（与直射光同源衰减）。
+    float ActiveGlowIntensityScale() const {
+        return SunGlowIntensityScale();   // DNI 透过率比对日月都适用（同一层大气）
+    }
+
     // 太阳"晕"（大气 Mie 前向散射辉光）的**峰值色** —— 与 sky shader 里
     // `sun_glow_contrib = sun_body_color × uSunGlow` 逐项同源：
     //   = ColorTempToLinear(仰角色温) × sun_glow × daylight_season × intensity

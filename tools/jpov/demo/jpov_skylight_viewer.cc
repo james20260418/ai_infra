@@ -441,6 +441,30 @@ int RunCaptureWater(const std::string& out_dir) {
          .halo_size = 4.0f, .halo_aspect = 3.0f},
         {.name = "halo_tall",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
          .halo_size = 4.0f, .halo_aspect = 0.3f},
+        // ── 日落 / 夜间（2026-10-28 Danis 报：日落时太阳方向海面仍有晕；夜里没有倒影；
+        //    月亮升起处海面多出一簇亮斑）──
+        {.name = "dusk_m10_p",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = -10.0f},
+        {.name = "dusk_m10_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -10.0f},
+        {.name = "dusk_m30_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -30.0f},
+        {.name = "night_m60_b", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -60.0f},
+        {.name = "night_m60_p", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = -60.0f},
+        // 面向月亮（月亮在反日点 = 方位 40°）
+        {.name = "night_moon_b", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -40.0f},
+        {.name = "night_moon_p", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 0, .sun_elev_deg = -40.0f},
+        // 分解 A/B：夜间/日落里那些亮斑到底是"太阳高光"还是"日晕"
+        {.name = "night_moon_nosun", .phi = 0.30, .R = 12.0, .sun_glint = 2,
+         .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -40.0f},
+        {.name = "night_moon_nohalo", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f,
+         .refl = 2, .halo_size = 0.2f, .sun_elev_deg = -40.0f},
+        {.name = "sunset_0_nosun", .phi = 0.30, .R = 12.0, .sun_glint = 2,
+         .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = 2.0f},
+        {.name = "sunset_0_nohalo", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f,
+         .refl = 2, .halo_size = 0.2f, .sun_elev_deg = 2.0f},
+        // 月亮低仰角（月升/月落时才有"月光路"，高月亮在浅视角下几何上不可能反射）
+        {.name = "moonlow_b", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -6.0f},
+        {.name = "moonlow_p", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 0, .sun_elev_deg = -6.0f},
+        {.name = "sunset_0_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = 2.0f},
+        {.name = "sunset_0_p",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = 2.0f},
         {"water_high", 0.62, 2600.0},                                  // 无限平面的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},

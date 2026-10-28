@@ -436,8 +436,14 @@ void main() {
     //   与完整天空路径里 `sky *= uIntensity` 对地色的缩放一致）——金属球下半部
     //   应该反射地面而不是地平线色。
     vec3 sky_env = (dir.y >= 0.0) ? sky_atmo : (uGroundColor * uIntensity);
+    // kEnvReflect（3）= 平面反射用的"可镜像天空"：大气色 + **月盘/月晕**，
+    //   但**不含日盘/日晕**（日盘的能量在直射平行光里，水皮用解析高光表达；
+    //   再放进倒影就是双计）。夜里月盘很暗、又不是主光源，直接镜像它最自然 ——
+    //   水面上的月光就是"月盘的镜面像"，不需要解析瓣。
+    vec3 sky_reflect = sky_atmo + (moon_contrib + moon_glow_contrib) * uMoonSeason * uIntensity;
     vec3 out_color = (uSkyOutput == 1) ? sky_atmo
                    : (uSkyOutput == 2) ? sky_env
+                   : (uSkyOutput == 3) ? sky_reflect
                    : sky;
     FragColor = vec4(out_color, 1.0);
     FragSceneDepth = vec4(1.0, 0.0, 0.0, 1.0);
@@ -449,6 +455,7 @@ void main() {
         kFull = 0,      // 完整天空：含日月盘/光晕（背景垫底用）
         kAtmoOnly = 1,  // 只出大气色：不含盘/晕，且下半球也用地平线色（远景雾收敛色用）
         kEnvProbe = 2,  // 环境反射探针：不含盘/晕，下半球用**地色**（IBL 镜面用）
+        kEnvReflect = 3, // 平面反射用：大气色 + **月盘/月晕**（不含日盘/日晕，见 shader 注释）
     };
 
     // ---- DrawSky ----

@@ -171,7 +171,13 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 params.sun_halo_dir.y(), params.sun_halo_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uLeanGain"),
                 params.use_lean_glint ? std::max(params.lean_gain, 0.0f) : 0.0f);
-    if (sun != nullptr) {
+    if (params.has_glint_dir) {
+        const Vec3f g = params.glint_dir;
+        const float gl = g.Norm();
+        const Vec3f gd = (gl > 1.0e-6f) ? Vec3f{g.x() / gl, g.y() / gl, g.z() / gl}
+                                       : Vec3f{0.0f, 1.0f, 0.0f};
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"), gd.x(), gd.y(), gd.z());
+    } else if (sun != nullptr) {
         // DirectionalLight::direction 是**光传播方向**（从太阳射向场景）⇒ 指向太阳要取反。
         const Vec3f to_sun = Vec3f{-sun->direction.x(), -sun->direction.y(),
                                    -sun->direction.z()};
