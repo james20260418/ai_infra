@@ -22,10 +22,12 @@
 #ifndef JPOV_SKELETON_RENDERER_H_
 #define JPOV_SKELETON_RENDERER_H_
 
+#include <string>
 #include <vector>
 
 #include "tools/jpov/interface/render_command.h"
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/mesh_manager.h"
 #include "tools/jpov/src/shader_manager.h"
@@ -73,13 +75,20 @@ void main() {
     //   仅服务蒙皮 program（kSkinnedVs + 本 FS），故无点光源/tile culling 分支：
     //   光照 = 太阳平行光（含 CSM 阴影）+ 全局环境光，两者均为无衰减的全局量。
     //   uHas*Tex 标志控制各通道走纹理采样还是常值 fallback。
-    static constexpr const char* kMeshFs3dPBR = R"glsl(
+    //   ⚠️ 类型是 std::string：源文由「字面量 + 共享片段 kEnvSpecularGlsl + 字面量」拼成
+    //（环境镜面那段三份 PBR 片元共用，各自拷贝必然分叉，见 src/env_specular.h）。
+    inline static const std::string kMeshFs3dPBR = std::string(R"glsl(
 #version 330 core
 
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
 in vec2 vTexCoord;
 in vec3 vWorldTangent;
+// 逐实例 tint（flat）：颜色来自实例 state 的 BaseTint（misc RGB888），id 来自顶点 loc6.z。
+flat in vec3 vInstTint0;
+flat in vec3 vInstTint1;
+flat in int vTintEnabled;
+flat in int vTintIndex;
 layout(location = 0) out vec4 FragColor;
 // MRT #1：场景深度 = gl_FragCoord.z（窗口空间 NDC 深度）。vec4 + alpha=1 保证混合恒等写入。
 layout(location = 1) out vec4 FragSceneDepth;
@@ -433,7 +442,7 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
     float NdotL = max(dot(N, L), 0.0);
     return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
 }
-
+)glsl") + kEnvSpecularGlsl + R"glsl(
 void main() {
     vec3 N = normalize(vWorldNormal);
     vec3 V = normalize(uCameraPos - vWorldPos);
@@ -459,6 +468,15 @@ void main() {
         ? texture(uBaseColorTex, vTexCoord)
         : vec4(uBaseColor, 1.0);
     vec3 base_color = base_texel.rgb;
+
+    // 逐实例 base tint：只乘 baseColor；id 0 不换色，1/2 用本实例自己的调色板。
+    if (vTintEnabled == 1) {
+        if (vTintIndex == 1) {
+            base_color *= vInstTint0;
+        } else if (vTintIndex >= 2) {
+            base_color *= vInstTint1;
+        }
+    }
 
 #ifdef JPOV_ALPHA_CUTOUT
     // alpha test（cutout）：baseColor 贴图 alpha < 阈值的片元丢弃。
@@ -527,7 +545,8 @@ void main() {
         }
     }
 
-    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular + emissive;
+    vec3 result = ambient * base_color * ao / PI + total_diffuse + total_specular
+                + EnvSpecularTerm(N, V, roughness, metallic, base_color) * ao + emissive;
     FragColor = vec4(result, 1.0);
     FragSceneDepth = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 }

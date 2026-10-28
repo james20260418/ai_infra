@@ -99,3 +99,24 @@ cc_test(
     linkstatic = 1,
     target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
 )
+
+# 退化输入的 GPU 端探针（headless）：零面积退化必须一个像素都不改、有面积的退化不许污染
+# 整帧、同批的正常条带仍然可见。见文件头的三类断言说明。
+cc_test(
+    name = "strip_degenerate_test",
+    srcs = ["strip_degenerate.cc"],
+    data = [
+        "//tools/jpov:strip_gold_assets",
+    ],
+    deps = [
+        "//third_party/stb:stb_image",
+        "//tools/jpov:strip_viewer_app",
+        "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/test:test_utils",
+        "//tools/common:utils",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+    target_compatible_with = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)

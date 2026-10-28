@@ -324,36 +324,6 @@ uniform vec3  uSunDir;         // 光传播方向（从太阳指向场景）
 uniform float uSunPhaseG;
 uniform float uSunGain;
 
-// ── CSM 阴影（与 object3d 同一套资源；**原始单次采样，无 PCF**）──
-uniform int   uCascadeCount;
-uniform float uCascadeRanges[5];
-uniform sampler2D uShadowMap[5];
-uniform mat4  uShadowVP[5];
-uniform mat4  uShadowDepthVP[5];
-uniform float uShadowTexelWorld[5];
-uniform float uShadowBiasCascade[5];
-uniform int   uShadowBiasOverride;
-uniform float uShadowFadeStart;
-uniform float uShadowFadeEnd;
-
-out vec4 oColor;   // (τ, S.rgb)
-
-// 单级联单次采样（无 PCF）。因 GLSL 330 禁动态 sampler 索引，调用处按常量索引展开。
-float CsmTap(sampler2D smap, mat4 vp, mat4 dvp, float texelW,
-             float biasVal, int biasOv, vec3 wp) {
-    vec4 lsp = vp * vec4(wp, 1.0);
-    vec3 ndc = lsp.xyz / lsp.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return 1.0;                        // 不在该级联覆盖内 ⇒ 视为受照
-    }
-    vec4 dpos = dvp * vec4(wp, 1.0);
-    float cur = dpos.z / dpos.w;
-    float tw = (biasOv != 0) ? biasVal : texelW;
-    cur -= max(0.01, 1.5 * tw);            // 雾无表面法线 ⇒ 用 tanθ=1 的保守深度偏置
-    return (cur <= texture(smap, uv).r) ? 1.0 : 0.0;
-}
-
 // Henyey-Greenstein 散射相位（相对光→视线方向）。mu=1 = 朝光源看（前向散射）。
 float HgPhase(float mu, float g) {
     g = clamp(g, 0.0, 0.95);
@@ -366,39 +336,7 @@ float SunPhase(vec3 rd) {
     return uSunGain * HgPhase(clamp(dot(rd, -uSunDir), -1.0, 1.0), uSunPhaseG);
 }
 
-// 原始 CSM（单次采样，无 PCF）：按采样点到相机的距离选主级联，末尾按 fade 淡出。
-float CsmShadow(vec3 wp, float dist) {
-    if (uHasSun == 0 || uCascadeCount <= 0) {
-        return 1.0;
-    }
-    int c = uCascadeCount - 1;
-    for (int i = 0; i < 5; ++i) {
-        if (i < uCascadeCount && dist <= uCascadeRanges[i]) {
-            c = i;
-            break;
-        }
-    }
-    float s;
-    if (c == 0) {
-        s = CsmTap(uShadowMap[0], uShadowVP[0], uShadowDepthVP[0], uShadowTexelWorld[0],
-                   uShadowBiasCascade[0], uShadowBiasOverride, wp);
-    } else if (c == 1) {
-        s = CsmTap(uShadowMap[1], uShadowVP[1], uShadowDepthVP[1], uShadowTexelWorld[1],
-                   uShadowBiasCascade[1], uShadowBiasOverride, wp);
-    } else if (c == 2) {
-        s = CsmTap(uShadowMap[2], uShadowVP[2], uShadowDepthVP[2], uShadowTexelWorld[2],
-                   uShadowBiasCascade[2], uShadowBiasOverride, wp);
-    } else if (c == 3) {
-        s = CsmTap(uShadowMap[3], uShadowVP[3], uShadowDepthVP[3], uShadowTexelWorld[3],
-                   uShadowBiasCascade[3], uShadowBiasOverride, wp);
-    } else {
-        s = CsmTap(uShadowMap[4], uShadowVP[4], uShadowDepthVP[4], uShadowTexelWorld[4],
-                   uShadowBiasCascade[4], uShadowBiasOverride, wp);
-    }
-    float fade = 1.0 - clamp((dist - uShadowFadeStart)
-                             / max(uShadowFadeEnd - uShadowFadeStart, 1e-5), 0.0, 1.0);
-    return mix(1.0, s, fade);
-}
+out vec4 oColor;   // (τ, S.rgb)
 
 void main() {
     ivec2 frag = ivec2(gl_FragCoord.xy);
@@ -488,7 +426,7 @@ void main() {
         //    + 本 tile 点光源（×相位）。──
         vec3 Llight = uAmbientColor * uAmbientIntensity;
         if (uHasSun != 0) {
-            float sh = CsmShadow(p, length(p - ro));
+            float sh = CsmShadow(p, length(p - ro), uHasSun);
             Llight += uSunColor * uSunIntensity * SunPhase(rd) * sh;
         }
         for (int k2 = 0; k2 < nl; ++k2) {
@@ -651,12 +589,6 @@ uniform float uZScale;     // = uNz / ln(uZFar/uZNear)（CPU 预算）
 uniform int   uGridCols;   // Nxy 单元列数
 uniform int   uGridRows;   // Nxy 单元行数
 
-// ── 透明玻璃层（WBO 结果；uHasGlass==0 时不采）──
-uniform int       uHasGlass;
-uniform sampler2D uGlassAccum;   // RGBA16F: Σ(预乘色×w, α×w)
-uniform sampler2D uGlassReveal;  // R16F   : Π(1−α) = 透射率
-uniform sampler2D uGlassDepth;   // R32F   : Σ(z_view×α×w) = 代表深度×Σαw
-
 out vec4 oColor;   // (S.rgb, T)；配合 GL_ONE/GL_SRC_ALPHA：out = S + dst·T
 
 // 读某 tile 的 scatter 列在「位置 ℓ（= Nz·ln(z/near)/ln(far/near)）」处的 (τ, S)。
@@ -721,40 +653,13 @@ void main() {
     float z_op = length(pw.xyz / pw.w - ro);
     float ell_op = DepthToEll(z_op);
 
-    // 透明玻璃层（可选）：解算 WBO → (Cg 预乘, Tg) + 代表深度 ℓ_g。
-    // 无玻璃（accum.a≈0）→ Cg=0, Tg=1, ℓ_g=ℓ_op（退化为全雾路径，零回归）。
-    vec3  Cg = vec3(0.0);
-    float Tg = 1.0;
-    float ell_g = ell_op;
-    if (uHasGlass == 1) {
-        vec4 accum = texture(uGlassAccum, uv);
-        if (accum.a > 1e-8) {
-            float reveal = texture(uGlassReveal, uv).r;
-            float z_g = texture(uGlassDepth, uv).r / accum.a;
-            vec3 Cavg = accum.rgb / accum.a;   // 加权平均色
-            Cg = Cavg * (1.0 - reveal);        // 预乘：out = Cg + Tg·behind
-            Tg = clamp(reveal, 0.0, 1.0);
-            ell_g = DepthToEll(z_g);
-        }
-    }
-    ell_g = min(ell_g, ell_op);   // 代表深度不超过不透明场景深度
-
-    // 两处采样：front = 雾(0→z_g)；op = 雾(0→z_op)。
-    float tau_f, tau_op;
-    vec3  S_f,   S_op;
-    SampleFogBilinear(gl_FragCoord.xy, ell_g,  tau_f, S_f);
-    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
-
-    // front-to-back： 雾(0→zg) → 玻璃 → 雾(zg→zop) → 背景(dst)
-    //   out.rgb = S_f + Tf·Cg + Tg·(S_op − S_f)   （Tf=exp(−tau_f)）
-    //   out.a   = Tg·T_op                          （T_op=exp(−tau_op)，Tg=玻璃透射率）
-    // （推导：Tf·Tg·S_b = Tg·(S_op−S_f)；Tf·Tg·Tb = Tg·T_op。无玻璃时退化为 (S, T)。）
+    // 全雾路径：雾(0→z_op) 累积 (S_op, T_op)，再与背景就地合成。
+    //   out.rgb = S_op；out.a = T_op
     // GL_ONE/GL_SRC_ALPHA：final = out.rgb + dst·out.a。
-    float Tf  = exp(-tau_f);
-    float Top = exp(-tau_op);
-    vec3 rgb = S_f + Tf * Cg + Tg * (S_op - S_f);
-    float a  = Tg * Top;
-    oColor = vec4(rgb, a);
+    float tau_op;
+    vec3  S_op;
+    SampleFogBilinear(gl_FragCoord.xy, ell_op, tau_op, S_op);
+    oColor = vec4(S_op, exp(-tau_op));
 }
 )glsl";
 

@@ -25,6 +25,7 @@ void RenderCommandList::Clear() {
     fillrect2d.clear();
     arc2d.clear();
     image2d.clear();
+    plate2d.clear();
     object3d.clear();
     instanced_object.clear();
     skinned_mesh.clear();
@@ -32,6 +33,10 @@ void RenderCommandList::Clear() {
     point_lights.clear();
     point_fogs.clear();
     object_use_default_color = false;
+    translucent_strip4s.clear();
+    translucent_strip8s.clear();
+    translucent_strips.clear();
+    translucent_strip32s.clear();
     order.clear();
     // 注意：camera.fbo_3d_width_/height_ 不清零
 }
@@ -194,6 +199,40 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
     order.emplace_back(DrawCommandType::kImage2D, idx);
 }
 
+void RenderCommandList::DrawPlate(const Plate2DCommand& plate) {
+    // 非法输入直接崩（不静默 clamp）：clamp 会让美术以为参数生效了而实际没生效，
+    // 那是“为什么这个圆角看起来是 8 而不是 16”那类两天查不出来的 bug。
+    CHECK_GT(plate.size.x(), 0.0f) << "Plate2D size.x 必须 > 0";
+    CHECK_GT(plate.size.y(), 0.0f) << "Plate2D size.y 必须 > 0";
+    const float half_min = std::min(plate.size.x(), plate.size.y()) * 0.5f;
+    CHECK_GE(plate.radius, 0.0f) << "Plate2D radius 必须 >= 0";
+    CHECK_LE(plate.radius, half_min)
+        << "Plate2D radius " << plate.radius << " 超过短边一半 " << half_min;
+    CHECK_GE(plate.border_width, 0.0f) << "Plate2D border_width 必须 >= 0";
+    CHECK_LE(plate.border_width, half_min)
+        << "Plate2D border_width " << plate.border_width << " 超过短边一半 "
+        << half_min;
+    CHECK_GE(plate.border_bump, 0.0f) << "Plate2D border_bump 必须 >= 0";
+    CHECK_LE(plate.border_bump, 1.0f) << "Plate2D border_bump 必须 <= 1";
+    CHECK_GE(plate.border_fade, 0.0f) << "Plate2D border_fade 必须 >= 0";
+    CHECK_LE(plate.border_fade, plate.border_width)
+        << "Plate2D border_fade " << plate.border_fade
+        << " 超过 border_width " << plate.border_width;
+    // 两层材质各自校验（图集格式约定见 flipbook.h）。
+    plate.fill.flipbook.Validate();
+    plate.border.flipbook.Validate();
+    CHECK_GT(plate.fill.tiling.x(), 0.0f) << "Plate2D fill.tiling.x 必须 > 0";
+    CHECK_GT(plate.fill.tiling.y(), 0.0f) << "Plate2D fill.tiling.y 必须 > 0";
+    CHECK_GT(plate.border.tiling.x(), 0.0f) << "Plate2D border.tiling.x 必须 > 0";
+    CHECK_GT(plate.border.tiling.y(), 0.0f) << "Plate2D border.tiling.y 必须 > 0";
+    CHECK(std::isfinite(plate.time_seconds))
+        << "Plate2D time_seconds 必须是有限值";
+
+    int idx = static_cast<int>(plate2d.size());
+    plate2d.push_back(plate);
+    order.emplace_back(DrawCommandType::kPlate2D, idx);
+}
+
 void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       const Vec3f& center,
                                       const Vec3f& up, const Vec3f& front,
@@ -245,9 +284,24 @@ void RenderCommandList::DrawVolumeFire(VolumeFireCommand cmd) {
     volume_fires.push_back(std::move(cmd));
 }
 
-void RenderCommandList::DrawTranslucentStrips(TranslucentStripBatch cmd) {
-    CHECK(!cmd.strips.empty()) << "DrawTranslucentStrips: strips 不能为空";
+void RenderCommandList::DrawStrip16Batch(TranslucentStrip16Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip16Batch: strips 不能为空";
     translucent_strips.push_back(std::move(cmd));
+}
+
+void RenderCommandList::DrawStrip4Batch(TranslucentStrip4Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip4Batch: strips 不能为空";
+    translucent_strip4s.push_back(std::move(cmd));
+}
+
+void RenderCommandList::DrawStrip8Batch(TranslucentStrip8Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip8Batch: strips 不能为空";
+    translucent_strip8s.push_back(std::move(cmd));
+}
+
+void RenderCommandList::DrawStrip32Batch(TranslucentStrip32Batch cmd) {
+    CHECK(!cmd.strips.empty()) << "DrawStrip32Batch: strips 不能为空";
+    translucent_strip32s.push_back(std::move(cmd));
 }
 
 void RenderCommandList::DrawGltfObject(const GltfObject& obj,

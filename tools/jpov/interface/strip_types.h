@@ -81,6 +81,33 @@ enum class StripInterpolation {
 // 每条带的采样点数（= 段数 + 1）。改这个值 = 改所有素材的「格数」约定，不要随意动。
 inline constexpr int kStripSampleCount = 16;
 
+// ── 采样数档位：4 / 8 / 16 / 32 ──────────────────────────────────────────
+//
+// 采样数**不是精度开关**，而是拓扑选择：它决定「沿长度方向能用几个点描述形状」。
+// 四档的**像素语义完全相同**（同一套 FS：逐点颜色 / 纹理 / 剖面 / 边反 / 天光），
+// 差别只在 CPU 端采样密度与拓扑常量（顶点数 = 2×采样数，段数 = 采样数−1，
+// per-instance 行宽 = 采样数 + 9 个剖面 knot）。
+//
+//   | 档位 | 段数 | 顶点/条 | 索引/条 | 行宽 texel | 典型用途 |
+//   |------|------|---------|---------|-----------|---------|
+//   | 4    | 3    | 8       | 18      | 13        | 雨丝、辅助线、道路标线（大量、单条短、本来就直） |
+//   | 8    | 7    | 16      | 42      | 17        | 中短拖尾、光束、简单弧线 |
+//   | 16   | 15   | 32      | 90      | 25        | 默认主力：普通拖尾、波带、闭合圆环 |
+//   | 32   | 31   | 64      | 186     | 41        | 长而弯的东西（大回环、飘带、需要极致顺滑的边缘） |
+//
+// 接口层是**四条并列命令**（DrawStrip4Batch / 8 / 16 / 32），不是「一个命令 + 参数」：
+// 数组长度是编译期常量 ⇒ 用户按固定 stride memcpy/存盘不会踩「按 32 分配只用 4」，
+// 传错档位在编译期就报。这条链路里**不用模板**（模板参数会一路渗透到渲染器 / 数据纹理 /
+// 索引缓冲，任何一处实例化不对都是链接期或运行期的灾难）。
+inline constexpr int kStrip4SampleCount = 4;
+inline constexpr int kStrip8SampleCount = 8;
+inline constexpr int kStrip32SampleCount = 32;
+inline constexpr int kStrip4Quads = kStrip4SampleCount - 1;
+inline constexpr int kStrip8Quads = kStrip8SampleCount - 1;
+inline constexpr int kStrip32Quads = kStrip32SampleCount - 1;
+// 所有档位里最大的采样数（内部缓冲/计算暂存按它分配）。
+inline constexpr int kStripMaxSampleCount = kStrip32SampleCount;
+
 // 宽度（v）方向剖面的 knot 数：knots[k] 是 v = k/8 处的乘子（8 段 / 9 个 knot）。
 inline constexpr int kStripProfileKnots = 9;
 
@@ -122,7 +149,7 @@ struct Strip16 {
     // **逐点 RGBA**（下标 = 第几列，与 left/right 对齐）：
     //   rgb = 线性 HDR 颜色乘子：与纹理色、fresnel 边反色相乘。
     //         **允许 > 1**（scene-referred）：加法集（发光）靠它拿到 bloom / tone map
-    //         的 HDR 余量 —— 不需要额外的「增益」旋钮（见 TranslucentStripBatch 的说明）。
+    //         的 HDR 余量 —— 不需要额外的「增益」旋钮（见 TranslucentStrip16Batch 的说明）。
     //   a   = 沿长度（u）方向的不透明度乘子（不是纹理 alpha）：最终 α 还要 × 纹理 α
     //         × 宽度剖面。拖尾淡出就写这里（头 1 → 尾 0）。范围 [0,1]。
     // 默认 = 白 + 不透明（乘法单位元，见 kDefaultStripPointColors）。
@@ -151,6 +178,96 @@ static_assert(std::is_trivially_copyable_v<Strip16>,
               "Strip16 必须可整块 memcpy（用户会按序列批量处理）");
 static_assert(std::is_standard_layout_v<Strip16>,
               "Strip16 必须是 standard layout");
+
+// 逐点颜色的默认值（4 点版）：同样是恒等乘子，理由见 kDefaultStripPointColors。
+inline constexpr std::array<Color, kStrip4SampleCount> kDefaultStrip4PointColors = [] {
+    std::array<Color, kStrip4SampleCount> out{};
+    for (int i = 0; i < kStrip4SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+// 4 采样点的条带。**与 Strip16 语义逐字相同**，只有列数不同：
+//   下标 i 同时表示 left[i] / right[i] / point_color[i]；只有前 point_count 列参与绘制，
+//   其余列塌缩到最后一个有效点（零面积 quad，不产生片元）。
+//   宽度剖面仍是 9 个 knot —— 它在**片元**里求值，与采样数无关（4 点的条带照样能软边）。
+//
+// 为什么单独一个类型而不是「Strip16 + 采样数字段」：
+//   ① 数组长度是编译期常量 ⇒ 用户按固定 stride memcpy/存盘时不会踩到「按 16 分配只用 4」；
+//   ② 类型本身就是接口处的意图声明（`DrawStrip4Batch` 只收 Strip4，传错编译期就报）。
+//   之前那版用模板把两者合一，模板参数一路渗透到渲染器/数据纹理/索引缓冲，
+//   任何一处实例化不对都是链接期或运行期的灾难 —— 这条链路里**不用模板**。
+struct Strip4 {
+    std::array<Vec3f, kStrip4SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip4SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip4SampleCount> point_color = kDefaultStrip4PointColors;
+    // 宽度（v）方向的 alpha 剖面：与 Strip16 完全同一份语义/同一组 knot 数。
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    // 有效点数，必须显式给 [2, kStrip4SampleCount]（同 Strip16：不设默认值）。
+    uint32_t point_count = 0;
+};
+
+// 固定字节数（96 + 64 + 36 + 4 = 200）。
+static_assert(sizeof(Strip4) == 2 * kStrip4SampleCount * sizeof(Vec3f) +
+                                    kStrip4SampleCount * sizeof(Color) +
+                                    kStripProfileKnots * sizeof(float) +
+                                    sizeof(uint32_t),
+              "Strip4 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip4>, "Strip4 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip4>, "Strip4 必须是 standard layout");
+
+// 其余两档（8 / 32）与 Strip4 **逐字相同的布局**，只是数组长度不同：
+// 语义/塌缩规则/剖面 knot 数全部一致，唯一区别是「长度方向能放几个控制点」。
+// 三个类型（4/8/32）是刻意分开写的：每个档位一个类型 = 接口处的意图声明，
+// 也是让数组长度保持编译期常量（见上面 kStrip4SampleCount 处的说明）。
+inline constexpr std::array<Color, kStrip8SampleCount> kDefaultStrip8PointColors = [] {
+    std::array<Color, kStrip8SampleCount> out{};
+    for (int i = 0; i < kStrip8SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+struct Strip8 {
+    std::array<Vec3f, kStrip8SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip8SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip8SampleCount> point_color = kDefaultStrip8PointColors;
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    uint32_t point_count = 0;                      // [2, kStrip8SampleCount]
+};
+
+static_assert(sizeof(Strip8) == 2 * kStrip8SampleCount * sizeof(Vec3f) +
+                                    kStrip8SampleCount * sizeof(Color) +
+                                    kStripProfileKnots * sizeof(float) +
+                                    sizeof(uint32_t),
+              "Strip8 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip8>, "Strip8 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip8>, "Strip8 必须是 standard layout");
+
+inline constexpr std::array<Color, kStrip32SampleCount> kDefaultStrip32PointColors = [] {
+    std::array<Color, kStrip32SampleCount> out{};
+    for (int i = 0; i < kStrip32SampleCount; ++i) {
+        out[static_cast<size_t>(i)] = Color{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+    return out;
+}();
+
+struct Strip32 {
+    std::array<Vec3f, kStrip32SampleCount> left;    // 左轨（纹理 v = 1）
+    std::array<Vec3f, kStrip32SampleCount> right;   // 右轨（纹理 v = 0）
+    std::array<Color, kStrip32SampleCount> point_color = kDefaultStrip32PointColors;
+    std::array<float, kStripProfileKnots> width_profile = kFlatWidthProfile;
+    uint32_t point_count = 0;                       // [2, kStrip32SampleCount]
+};
+
+static_assert(sizeof(Strip32) == 2 * kStrip32SampleCount * sizeof(Vec3f) +
+                                     kStrip32SampleCount * sizeof(Color) +
+                                     kStripProfileKnots * sizeof(float) +
+                                     sizeof(uint32_t),
+              "Strip32 的布局变了（别偷偷加字段：用户会按固定 stride memcpy）");
+static_assert(std::is_trivially_copyable_v<Strip32>, "Strip32 必须可整块 memcpy");
+static_assert(std::is_standard_layout_v<Strip32>, "Strip32 必须是 standard layout");
 
 // 混合集合（对应 WBO 的两套附件）。**这是一个 batch 的物理材质属性**，不是开关：
 // 选错 = 东西的物理行为错了，而不只是"差点颜色"。
@@ -220,6 +337,59 @@ struct StripFresnel {
     Vec3f rim_color{0.85f, 0.93f, 1.0f};
 };
 
+// 条带「消费天光」—— **覆盖集（over）专用**，批次级参数。
+//
+// 为什么需要它：到这一版为止条带是**完全不受光**的 —— 逐点颜色就是最终色，与天光 / 太阳
+// 无关。玻璃缸、雾里的薄膜这类东西一旦放进真实光照场景，亮度就会不对。
+//
+// 公式（与雾的合成**同构**，逐片元）：
+//   C = point_color.rgb · tex.rgb                     // ① 自发光 / 表面色（语义与不开光照时相同）
+//     + injection · skylight(N)                       // ② 被吸收的背景光按**天光**补注入
+//   skylight(N) = tricolor_lerp(N.y) · ambient_scale  // 上→天、水平→天际线、下→地（N.y 分段线性）
+//               + sun_color · sun_intensity · |N·L| · csm  // 薄片双面：两侧都吃太阳
+//                                                  ↑ CSM 阴影因子 [0,1]
+//   α = 覆盖率链（不变）
+//   L_out = α·C + (1−α)·L_bg                          // WBO over 合成（与雾的 L·(1−α)+L_fog·α 同构）
+//
+// **太阳项吃 CSM 阴影，且与天光同一个开关**：有 `sky_light` 就采样引擎的级联阴影贴图调制太阳项，
+// **没有独立的阴影开关**；天光项（ambient）不乘阴影 —— 环境光不该被直射光的影子遮住。
+// 条带自身**不参与**阴影生成（不写 shadow map）：那需要给半透明片单开一次 shadow pass，
+// 收益与代价不成比例。采样是**单级联单次采样**（无 PCF，与 fire_fog 同一份实现）。
+//
+// 三个关键约定：
+//   * **注入量自然随不透明度缩放**（C 随后要乘 α）⇒ 越不透明补得越多、越透补得越少，
+//     就是雾里的 `L_fog·α`；所以**没有**单独的「吸收系数」参数（有它会与 α 双重计数）。
+//   * `point_color.rgb` 的语义**不变**：以前它是最终色，开天光后它是「自发光 + 表面色」，
+//     天光是**新增**的一项 —— 不想要自发光就把逐点颜色调暗。
+//   * 只允许覆盖集：加法集本身就是发光介质（其注入量已是 色·α），再叠天光会让 HDR 语义混乱
+//     ⇒ `ValidateStripBatch` 对 `kEmissive + sky_light` 直接 CHECK 崩。
+//
+// 代价 / 性能：渲染器为「开天光」多编译一套 program（折线、平滑各一，Init 时各编译一次）。
+// **不开天光的批仍走原来那两个 program**：空实现被编译器内联消掉，画面由 gold 逐字节不变
+// 反向证明；指令数没有做反汇编核对（见设计文档 §19.13）。太阳项在 `sun_intensity == 0`
+// 时整段跳过，不吃 shadow map 采样。
+struct StripSkyLight {
+    // 天光三色，顺序**固定** [天(zenith), 天际线(horizon), 地(ground)]。
+    // 默认值 = 中性白天天空，**只用于快速试手**；正式使用请显式给（通常就是
+    // `SkyCommand::AmbientTricolor()`），否则「缸壁亮不亮」跟场景天光会脱节。
+    // （与 AmbientLight::tricolor 同约定；通常直接取 `SkyCommand::AmbientTricolor()`）。
+    // 每项是线性 HDR 颜色；下标含义不能对调。
+    std::array<Color, 3> tricolor = {Color{0.45f, 0.58f, 0.85f, 1.0f},
+                                     Color{0.75f, 0.82f, 0.92f, 1.0f},
+                                     Color{0.16f, 0.15f, 0.13f, 1.0f}};
+    // 天光整体亮度倍率（≈ `AmbientLight::intensity`；只缩放天光，不碰太阳）。
+    float ambient_scale = 1.0f;
+    // 太阳方向：**指向太阳**的世界空间单位向量（与 `SkyCommand::sun_dir` 同义）。
+    Vec3f sun_direction{0.0f, 1.0f, 0.0f};
+    // 太阳直射色（线性 HDR）。通常取 `SkyCommand::SunDirectionalColor()`。
+    Vec3f sun_color{1.0f, 1.0f, 1.0f};
+    // 太阳直射强度；0 = 无直射（只吃天光）。通常取 `SunDirectionalIntensity()`。
+    float sun_intensity = 0.0f;
+    // 吸收→注入比例（0..1）：0 = 纯吸收（条带只遮挡、自己不亮），1 = 吸收多少补多少。
+    // 它表达的是**物理比例**，不是亮度旋钮 —— 想要更亮就放大 tricolor / ambient_scale。
+    float injection = 1.0f;
+};
+
 // ── 一条条带的最终像素（本节是**唯一权威**，FS 与设计文档都以它为准）──
 //
 // 逐片元输入：(u, v) 由几何插值得到；(rgb, alpha_pt) 由逐点颜色按 u 采样得到
@@ -229,6 +399,8 @@ struct StripFresnel {
 //
 //   color = point_color(u).rgb                    （逐点颜色，允许 HDR）
 //         × texture(uTex, uv).rgb                 （有纹理时）
+//         → [sky_light] color += injection · skylight(N)   （仅覆盖集，见 StripSkyLight）
+//         → [fresnel]   color = mix(color, rim_color, F)
 //
 //   a     = point_color(u).a                      （逐点纵向不透明度）
 //         × texture.a                             （有纹理时）
@@ -245,14 +417,18 @@ struct StripFresnel {
 //     kCoverage: accum += color·a·w 、reveal = a        （解析后 over 合成）
 //     kEmissive: add   += color·a·fade                  （直接求和，不衰减背景）
 //
-// 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（fresnel / profile /
-// 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
+// 全部乘子都在**线性 HDR、tone map 之前**；顺序里不可交换的那几步（sky_light / fresnel /
+// profile / 裁形 AA / soft depth）按上面写死，改顺序就是改观感，必须同步本文档。
 //
 // 一批条带：**同一次 draw call** 画完，因此以下参数整批共享。
 //
 // 为什么共享而不是 per-strip：draw call 的边界就是「材质/状态边界」。
 // 想给不同条带不同纹理/混合集合 → 发多个 batch（每个 batch 一次 draw）。
-struct TranslucentStripBatch {
+//
+// 这一层**与采样点数无关**（纹理/混合集合/软深度/插值方式/边反/天光都是材质属性），
+// 所以它被两种批类型共用：`TranslucentStrip16Batch`（Strip16）与 `TranslucentStrip4Batch`
+// （Strip4）。批类型只差「装哪一种条带」——这正是接口层的多态：两条命令，两个类型。
+struct StripBatchStyle {
     // 纹理（TextureManager id）。0 = 不采样纹理，颜色完全由逐点颜色决定。
     uint32_t texture_id = 0;
 
@@ -271,9 +447,32 @@ struct TranslucentStripBatch {
     // 菲涅耳（见 StripFresnel）。nullopt = 关闭 —— 画面逐字节等于没有这个功能。
     std::optional<StripFresnel> fresnel;
 
+    // 天光消费（见 StripSkyLight）。nullopt = 关闭 —— 走原来那两个 program，
+    // **指令数与画面逐字节等于没有这个功能**。只允许 `blend == kCoverage`。
+    std::optional<StripSkyLight> sky_light;
+
+};
+
+// 16 采样点的批：一条带 = 32 顶点 / 15 段。
+struct TranslucentStrip16Batch : StripBatchStyle {
     // 本批条带（非空才画）。每条带的颜色/不透明度/宽度剖面都在 Strip16 里 ——
     // 同一批里每条拖尾颜色不同、边缘软硬不同，都不需要拆成多个 draw call。
     std::vector<Strip16> strips;
+};
+
+// 4 采样点的批：一条带 = 8 顶点 / 3 段。
+struct TranslucentStrip4Batch : StripBatchStyle {
+    std::vector<Strip4> strips;
+};
+
+// 8 采样点的批：一条带 = 16 顶点 / 7 段。
+struct TranslucentStrip8Batch : StripBatchStyle {
+    std::vector<Strip8> strips;
+};
+
+// 32 采样点的批：一条带 = 64 顶点 / 31 段。
+struct TranslucentStrip32Batch : StripBatchStyle {
+    std::vector<Strip32> strips;
 };
 
 // 纯色批：texture_id 给 0，再把每条带的逐点颜色全填成同一个值

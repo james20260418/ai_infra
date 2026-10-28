@@ -42,6 +42,7 @@
 #include <glog/logging.h>
 
 #include "tools/jpov/src/fire_fog/fire_fog_lower.h"
+#include "tools/jpov/src/csm_shadow_glsl.h"
 #include "tools/jpov/src/fire_fog/fire_fog_shader.h"
 
 namespace {
@@ -117,6 +118,7 @@ bool Mat4Invert(const float m[16], float out[16]) {
 std::string AssembleFragmentShader(const char* body) {
     std::string s = "#version 330 core\n";
     s += jpov::kFireFogCommonGlsl;
+    s += jpov::kCsmSingleTapGlsl;   // CSM 采样唯一一份实现（与 strip 共用）
     s += body;
     return s;
 }
@@ -456,12 +458,10 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
                            int viewport_h,
                            unsigned int scene_depth_tex,
                            const FireFogParams& params,
-                           const FireFogLighting& light,
-                           const FireFogGlass* glass) {
+                           const FireFogLighting& light) {
     CHECK(shader_mgr_ != nullptr) << "FireFogRenderer::Init 未调用";
-    const bool has_glass = (glass != nullptr && glass->valid());
-    if (fogs.empty() && !has_glass) {
-        return;   // 零开销：无雾且无玻璃
+    if (fogs.empty()) {
+        return;   // 零开销：无雾体
     }
     CHECK_GT(viewport_w, 0);
     CHECK_GT(viewport_h, 0);
@@ -818,22 +818,6 @@ void FireFogRenderer::Draw(const std::vector<PointFog>& fogs,
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uNz"), params.nz);
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uBlockSide"), sblock);
     glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uTilePx"), params.tile_px);
-
-    // ── 透明玻璃层（可选）：解算 WBO 结果，交 composite 与雾一起按深度合成 ──
-    //   uHasGlass=0 时三个玻璃 sampler 不采样（绑哑元纹理避免未定义绑定）。
-    //   composite 仅在 uHasGlass==1 时读它们。
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uHasGlass"),
-                has_glass ? 1 : 0);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, has_glass ? glass->accum_tex : dummy_depth_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uGlassAccum"), 2);
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, has_glass ? glass->reveal_tex : dummy_depth_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uGlassReveal"), 3);
-    glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, has_glass ? glass->depth_tex : dummy_depth_tex_);
-    glUniform1i(shader_mgr_->GetUniform(prog_composite_, "uGlassDepth"), 4);
-    glActiveTexture(GL_TEXTURE0);
 
     // 就地混合：out = S + dst·T（S=源累积亮度、T=透射率）。无雾像素 → 恒等。
     glEnable(GL_BLEND);

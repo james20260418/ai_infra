@@ -82,7 +82,8 @@ C = ∫ T(t) · σ(t) · c(t) dt          T(t) = exp(−∫₀ᵗ σ ds)
 ### 4.1 目标数据流
 
 ```
-opaque 3D  ──►  玻璃 WBO pass  ──►  [raymarch 体积火：写 1 个薄层]  ──►  WBO resolve  ──►  froxel/后处理
+opaque 3D  ──►  [raymarch 体积火：写 1 个薄层]  ──►  WBO resolve  ──►  froxel/后处理
+                （原「玻璃 WBO pass」已于 2026-10-27 移除，见 jpov_transparent_glass_design.md §9）
                  (accum/reveal/depth)      (accum/reveal/depth)
 ```
 
@@ -216,14 +217,14 @@ froxel 联编（`jpov_froxel_design.md` §2.3）继续吃这个代表深度即�
 | 环节 | 对 TAB 做什么 | 合法性 |
 |---|---|---|
 | BeginFrame | 不涉及（不透明进 HDR FBO，MRT: 色+场景深度） | — |
-| **玻璃 pass**（`DrawTransparentPass`） | **写** 玻璃 TAB（accum/reveal/depth）| ✅ 标准 WBO |
+| ~~玻璃 pass~~（`DrawTransparentPass`） | ~~写玻璃 TAB~~ | 已于 2026-10-27 **移除**（见 `jpov_transparent_glass_design.md §9`） |
 | **粒子 pass**（`ParticleRenderer`） | 自持 **1/2 分辨率** TAB(+`add`)，Begin/Draw/Composite | ✅ 同代数 + 加法独立通道 |
 | **体积火 pass**（`VolumeFireRenderer`） | 自持 TAB；raymarch 输出 `(L,α,z)` 作**薄层**写入；Composite | ✅ 单层（权重抵消）；见 §4 |
-| **froxel**（`fire_fog`） | **读** 玻璃 TAB（含 `depth`）作“透明层”，与雾按深度联合积分 | ✅ 用 `z_g` 切段；见 §14 |
+| **froxel**（`fire_fog`） | 只读场景深度（MRT#1）；**不再**读任何透明层（玻璃已移除） | ✅ 纯全雾路径 |
 | resolve / Composite | 解析 TAB → 预乘 over 进 HDR | ✅ |
 
-**结论**：TAB 是**同一种缓冲**的三处实例（玻璃=全分辨率、粒子=1/2、体积火=自持）；**froxel 绑定的是玻璃那一份**。
-命名统一后，代码里 `glass_*` / `FireFogGlass` 等**旧标识符建议后续重命名**为 `transparency_*`（本 PR 先**文档定名**，不做强行大改以免污染 diff）。
+**结论**：TAB 是**同一种缓冲**的两处实例（粒子=1/2、体积火=自持、条带=1×）；
+玻璃那一份（以及 `FireFogGlass` 与 froxel 的「按 `z_g` 切段」积分）已于 2026-10-27 随玻璃 pass 一并删除。
 
 ## 13. 实现（MVP）
 
@@ -259,7 +260,7 @@ froxel 联编（`jpov_froxel_design.md` §2.3）继续吃这个代表深度即�
 
 ## 14. 与 froxel（后处理）的绑定
 
-- froxel（`fire_fog`）通过 `FireFogGlass{accum_tex,reveal_tex,depth_tex}` 读**玻璃 TAB**，用 `z_g = depth / accum.a` 把像素切成 `雾(0→z_g) → 玻璃 → 雾(z_g→z_op) → 背景`。
+- （历史）froxel 曾通过 `FireFogGlass{accum_tex,reveal_tex,depth_tex}` 读玻璃 TAB，用 `z_g = depth / accum.a` 把像素切成 `雾(0→z_g) → 玻璃 → 雾(z_g→z_op) → 背景`；玻璃移除后这条路径已删除。
 - **体积火当前不直接进 froxel**：它自持 TAB、Composite over 进 HDR **之后**才被后续雾影响（即“火整体在雾里”）。
 - 要“**体积火与雾/玻璃前后穿插**” → 走 §4/§5 的**多薄层切片 → MBOIT** 路线（那时才需要把体积的 `T(z)` 分布交给 froxel/OIT）。
 - ⚠️ 代表深度（§6）：TAB 的 `depth` 仅供下游（froxel / SSR / DoF / TAA）取一个代表深度；它**不是**逐像素精确深度。

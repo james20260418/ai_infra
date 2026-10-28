@@ -116,6 +116,57 @@ bool ReadFloatAccessor(const tinygltf::Model& model,
     return true;
 }
 
+// 从 tinygltf accessor 读取 **UNSIGNED_BYTE SCALAR** 顶点属性（逐顶点一个字节），
+// 用于 `_JPOV_TINT`（base tint 索引）。返回 false = 类型不符 / 不可读。
+//
+// 与 ReadFloatAccessor 分开的原因：后者把 UNSIGNED_BYTE **归一化**成 v/255
+//（那是 COLOR_0 的语义），而 tint 索引是**整数 id**，不能除 255。
+bool ReadUint8Accessor(const tinygltf::Model& model, int accessor_index,
+                       std::vector<uint8_t>* out) {
+    if (accessor_index < 0 ||
+        accessor_index >= static_cast<int>(model.accessors.size())) {
+        return false;
+    }
+    const tinygltf::Accessor& acc = model.accessors[accessor_index];
+    if (acc.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
+        acc.type != TINYGLTF_TYPE_SCALAR) {
+        return false;
+    }
+    if (acc.bufferView < 0 ||
+        acc.bufferView >= static_cast<int>(model.bufferViews.size())) {
+        return false;
+    }
+    const tinygltf::BufferView& view = model.bufferViews[acc.bufferView];
+    if (view.buffer < 0 ||
+        view.buffer >= static_cast<int>(model.buffers.size())) {
+        return false;
+    }
+    const tinygltf::Buffer& buf = model.buffers[view.buffer];
+    const size_t count = acc.count;
+    const size_t byte_stride =
+        view.byteStride > 0 ? view.byteStride : 1;
+    // 边界检查避开 size_t 溢出：先分两步定位起点，再用除法判断最后一个元素是否越界
+    //（(count-1)*byte_stride 在大 count/stride 下会溢出成小值，直接相加会放过越界读）。
+    if (view.byteOffset > buf.data.size() ||
+        acc.byteOffset > buf.data.size() - view.byteOffset) {
+        return false;
+    }
+    const size_t begin = view.byteOffset + acc.byteOffset;
+    if (count > 0) {
+        const size_t avail = buf.data.size() - begin;
+        if (avail == 0 || byte_stride == 0 ||
+            count - 1 > (avail - 1) / byte_stride) {
+            return false;
+        }
+    }
+    const unsigned char* src = buf.data.data() + begin;
+    out->resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        (*out)[i] = src[i * byte_stride];
+    }
+    return true;
+}
+
 // 从 tinygltf accessor 读取 JOINTS_0 关节索引（每顶点 4 个 int, 4-bone 蒙皮）到
 // MeshData.joint_indices。
 //
@@ -546,9 +597,28 @@ bool ParsePrimitive(const tinygltf::Model& model,
         }
     }
 
+    // _JPOV_TINT —— 顶点 base tint 分区（**自定义语义**，UNSIGNED_BYTE SCALAR = 逐顶点 id）。
+    //   0 = 不换色；1..kNumBaseTintColors = 用对应调色板通道乘 baseColor。
+    //   长度 != vcount 视为坏资产，忽略该属性（不致命；与 _JPOV_RELAX 同口径）。
+    auto tint_it = prim.attributes.find("_JPOV_TINT");
+    if (tint_it != prim.attributes.end()) {
+        std::vector<uint8_t> tint;
+        if (ReadUint8Accessor(model, tint_it->second, &tint) &&
+            tint.size() == vcount) {
+            out_mesh->base_tint = std::move(tint);
+            out_mesh->flags = static_cast<MeshVertexFlags>(
+                static_cast<uint8_t>(out_mesh->flags) |
+                static_cast<uint8_t>(MeshVertexFlags::kBaseTint));
+        } else {
+            LOG(WARNING) << "LoadGltf: _JPOV_TINT 存在但类型/长度不符（顶点数 "
+                         << vcount << "；需 UNSIGNED_BYTE SCALAR），忽略该属性";
+        }
+    }
+
     // ---- 植被风（项目约定语义，单个 UV 层）----
     //   本版把风信息**只压进 loc6 的 vec2**：(joint_id, phase)。烘焙端（tools/vegetation/
-    //   build_tree.py --bake-wind → wind_bake.py）写一个额外 UV 层 "Wind"（→ glTF TEXCOORD_1）：
+    //   legacy/vegetation/wind_bake.py；现役为 vegetation_tool_v2/bake/）写一个额外 UV 层
+    //   "Wind"（→ glTF TEXCOORD_1）：
     //     .x = joint_id（该顶点所属关节在关节表中的下标）；
     //     .y = phase   （逐顶点连续相位场 [0,1) 秒，供热流用）。
     //   关节表本身见下（node extras jpov_wind_joints）。

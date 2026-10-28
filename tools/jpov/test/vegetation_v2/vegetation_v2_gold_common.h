@@ -86,7 +86,7 @@ constexpr int kHeight = 720;
 constexpr const char* kCardsGold = "vegetation_v2_cards_1280x720.png";
 constexpr const char* kLeafGold = "vegetation_v2_leaf_1280x720.png";
 // glb 展示态（烘焙 → 重新载入 → 带风渲染）。锁住整条烘焙链路：
-// 关节表 / 逐顶点 (joint,phase) / 内嵌贴图 / 两关节混合 / 吹歪。
+// 关节表 / 逐顶点 (joint,phase) / 内嵌贴图 / 单关节刚性链 / 吹歪。
 constexpr const char* kGlbGold = "vegetation_v2_glb_1280x720.png";
 
 // 风时间（秒）：**必须钉住**，否则每帧累加导致两次渲染必不相同。
@@ -143,7 +143,7 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
 //
 // 为什么不 in-process 烘焙：gold 必须等于用户看到的那张图。烘焙也用**同一个查看器
 // 二进制**的 `--bake`（与用户在面板上点「烘焙 glb」走同一份代码），所以整条链——
-// 关节构造 → 写 glb → 重新载入 → 两关节混合蒙皮 → 风/吹歪——都在基准图里。
+// 关节构造 → 写 glb → 重新载入 → 单关节刚性链变形 → 风/吹歪——都在基准图里。
 //
 // 确定性：风时间用 `--wind-time` 钉住（否则每帧累加），实测同一二进制多次渲染 md5 相同。
 inline bool RenderGlbGolden(const std::string& out_png) {

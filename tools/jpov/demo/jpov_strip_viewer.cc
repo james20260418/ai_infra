@@ -76,6 +76,9 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     app.SetShowPanel(false);
     app.Init();
     app.Setup(texture_path);
+    // 玻璃缸场景的橡树在**首帧之前**加载（帧中上传 GL 资源会撞 1282）。
+    // 只有拍摄表里用到它时才加载，gold 的 8 张图完全不付这份成本。
+    app.PrepareTankScene();
 
     jpov::WindowInfo winfo;
     winfo.width = jpov_viewer::kViewerWidth;
@@ -90,32 +93,37 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
     };
 
     // 一张图的完整开关；默认值 = 交互模式的初始状态（只写差异，读起来就是"这张在测什么"）。
-    // 每一行都**完整**覆盖所有开关（不靠上一张的残留状态）：漏还原一个开关会把后面所有图静默污染。
+    //
+    // 每张先选场景（见 StripViewerApp::SelectScene），再写「与场景默认不同的开关」。
+    // 玻璃圆环（ring）不在任何场景里，它的 fresnel/环几何代码仍由 gold 覆盖。
     struct Shot {
         const char* name;
-        bool show_strips = true;     // false = 不发条带命令（A/B 对照）
-        bool ribbons = true;         // 三条带（波/螺旋/弧）
-        bool ring = true;            // 玻璃圆环（四组点 → 四条带）
-        bool use_texture = true;     // false = 纯色（不看纹理）
-        bool texture_mipmap = false; // 纹理 mipmap（只在 use_texture 时有意义）
-        bool soft_edges = true;      // 宽度剖面：柔边 / 硬边（圆环不受它影响，见 EmitRingBatch）
-        bool arc_additive = false;   // 弧形改走加法集（发光拖尾）
-        bool soft_depth = false;     // 条带与几何相交处软过渡
-        bool smooth = false;         // false = 折线 pass；true = 平滑 pass（kSmooth）
-        bool fresnel = true;         // 菲涅耳边反开关
-        int fresnel_preset = 0;      // kFresnelPresets 下标（fresnel=false 时不生效）
-        bool ring_at_origin = false; // 圆环挪到原点：只看圆环时居中
-        bool boxes = true;           // 背景参考方块（只看圆环时关掉，免得透过玻璃挡住环体）
-        bool jet = true;             // 火箭射流（加法集 + HDR 增益 + 逐点颜色）
-        float jet_gain = 3.0f;       // 射流 HDR 增益
-        bool bloom = true;           // 辉光（HDR 高亮够亮才看得出来）
-        float camera_r = jpov_strip::kViewDefaults.R;
+        int scene = 0;   // 0 = box+三条带 / 1 = 射流 / 2 = 玻璃缸+树
+        // 其余全部是**可选覆盖**：只写「与场景预设不同」的开关（不写 = 用场景预设）。
+        // 用 optional 而不是带默认值的 bool：场景自己会写一遍可见性开关，如果这里再写一遍
+        // 「缺省 true」，就会把场景预设覆盖掉（第一版就踩了：射流场景里三条带和方块又冒出来）。
+        std::optional<bool> show_strips;
+        std::optional<bool> ribbons;
+        std::optional<bool> use_texture;
+        std::optional<bool> texture_mipmap;
+        std::optional<bool> soft_edges;
+        std::optional<bool> arc_additive;
+        std::optional<bool> soft_depth;
+        std::optional<bool> smooth;
+        std::optional<bool> fresnel;
+        std::optional<bool> bloom;
+        std::optional<float> jet_gain;
+        std::optional<float> camera_r;
+        // 玻璃缸场景
+        std::optional<bool> tank_skylight;
+        std::optional<float> sun_elev_deg;
+        std::optional<float> tank_injection;
+        // 采样对比场景
+        std::optional<float> sampling_z;
     };
     const float kZoomR = 2.6f;   // 拉近：16 段的折角/轮廓只有近距离才看得清
-    const float kRingR = 3.6f;   // 只看圆环时的机位（充满画面又不贴脸）
-    // 注意 10~50 是**折线 pass** 的基线（M1~M3 的特性验收）；viewer 交互模式的默认
-    // 现在是平滑 pass（80 / 200 / 220 是平滑版本），折线仍可用面板切回来做 A/B。
     const Shot kShots[] = {
+        // ── 场景 ①：box + 三条带（条带本体 / 纹理 / 剖面 / 加法集 / 软深度）──
         {.name = "10_default"},
         {.name = "15_no_strips", .show_strips = false},
         {.name = "20_solid", .use_texture = false},
@@ -126,96 +134,69 @@ int RunCapture(const std::string& out_dir, const std::string& texture_path) {
         {.name = "65_zoom_hard", .soft_edges = false, .camera_r = kZoomR},
         // 平滑 pass：同一组视角/开关，只换 style（与 60/65/10 一一对应）。
         {.name = "70_smooth_zoom_soft", .smooth = true, .camera_r = kZoomR},
-        {.name = "75_smooth_zoom_hard", .soft_edges = false, .smooth = true,
-         .camera_r = kZoomR},
+        {.name = "75_smooth_zoom_hard", .soft_edges = false, .smooth = true, .camera_r = kZoomR},
         {.name = "80_smooth_default", .smooth = true},
-        // 圆环 + 菲涅耳：只看圆环（隐藏三条带、圆环居中），逐个预设出图对比。
-        // 100 是"没有边反"的基线：同一机位下的淡蓝薄膜，后面每张只差 fresnel 参数。
-        {.name = "100_ring_no_fresnel", .ribbons = false, .fresnel = false,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        {.name = "110_fresnel_physical", .ribbons = false, .fresnel_preset = 0,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        {.name = "120_fresnel_plastic", .ribbons = false, .fresnel_preset = 1,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        {.name = "130_fresnel_thick", .ribbons = false, .fresnel_preset = 2,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        {.name = "140_fresnel_mirror", .ribbons = false, .fresnel_preset = 3,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        {.name = "150_fresnel_narrow", .ribbons = false, .fresnel_preset = 4,
-         .ring_at_origin = true, .boxes = false, .camera_r = kRingR},
-        // 平滑 pass 的解析法线（无折面）vs 折线 pass 的导数法线（逐折面亮带）
-        {.name = "160_fresnel_polyline_near", .ribbons = false, .fresnel_preset = 0,
-         .ring_at_origin = true, .boxes = false, .camera_r = 2.4f},
-        {.name = "170_fresnel_smooth_near", .ribbons = false, .smooth = true,
-         .fresnel_preset = 0, .ring_at_origin = true, .boxes = false, .camera_r = 2.4f},
-        // 默认场景（三条带 + 圆环同屏）：看边反在完整场景里的观感。
-        {.name = "180_scene_with_ring"},
-        {.name = "185_scene_smooth_ring", .smooth = true},
-        // 射流：同时验「加法集 HDR 增益 + 逐点颜色（白→红）+ 中心实两侧虚剖面」。
-        // 200 平滑 / 205 折线是同一机位的 style A/B（射流没有大折角，差别主要在软边上）。
-        {.name = "200_jet_smooth", .ribbons = false, .ring = false, .smooth = true},
-        {.name = "205_jet_polyline", .ribbons = false, .ring = false},
-        {.name = "210_jet_no_bloom", .ribbons = false, .ring = false, .smooth = true,
-         .bloom = false},
-        {.name = "215_jet_gain8", .ribbons = false, .ring = false, .smooth = true,
-         .jet_gain = 8.0f},
-        {.name = "220_scene_with_jet", .smooth = true},
-        // 远机位纹理 A/B（只留三条带、关掉圆环/射流/方块，免得抢眼）：
-        // 同一机位下「mip 关 ↔ 开」，看远处细纹理的闪烁 vs 模糊。
-        // 两张图都**不进 gold**：这是给人看的对比，不是回归门禁。
-        {.name = "300_far_tex_no_mip", .ring = false, .smooth = true,
-         .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
-        {.name = "305_far_tex_mip", .ring = false, .texture_mipmap = true, .smooth = true,
-         .fresnel = false, .boxes = false, .jet = false, .camera_r = 14.0f},
+        // 远机位纹理 A/B：mip 关 ↔ 开（看远处细纹理的闪烁 vs 模糊）。不入 gold。
+        {.name = "300_far_tex_no_mip", .smooth = true, .camera_r = 14.0f},
+        {.name = "305_far_tex_mip", .texture_mipmap = true, .smooth = true,
+         .camera_r = 14.0f},
+
+        // ── 场景 ②：射流（加法集 HDR + 逐点颜色 + 中心实两侧虚剖面 + bloom）──
+        {.name = "200_jet_smooth", .scene = 1, .smooth = true},
+        {.name = "205_jet_polyline", .scene = 1, .smooth = false},
+        {.name = "210_jet_no_bloom", .scene = 1, .smooth = true, .bloom = false},
+        {.name = "215_jet_gain8", .scene = 1, .smooth = true, .jet_gain = 8.0f},
+
+        // ── 场景 ③：玻璃缸 + 树（天光消费）──
+        {.name = "400_tank_unlit", .scene = 2, .tank_skylight = false},
+        {.name = "405_tank_skylit", .scene = 2},
+        {.name = "410_tank_skylit_lowsun", .scene = 2, .sun_elev_deg = 8.0f},
+        {.name = "415_tank_skylit_night", .scene = 2, .sun_elev_deg = -8.0f},
+        {.name = "420_tank_skylit_inj40", .scene = 2, .tank_injection = 0.40f},
+        // 边反 A/B（原来由玻璃圆环承担，现在缸壁同样吃 StripFresnel）
+        {.name = "430_tank_no_fresnel", .scene = 2, .fresnel = false},
+        {.name = "435_tank_fresnel", .scene = 2, .fresnel = true},
+
+        // ── 场景 ④：采样对比（4/8/16/32 四档沿 Z 排开，同曲线同材质）──
+        {.name = "500_sampling_rows", .scene = 3},
+        {.name = "505_sampling_zoom", .scene = 3, .camera_r = 4.2f},
+        {.name = "510_sampling_smooth", .scene = 3, .smooth = true},
+        // 整体 Z 平移（面板滑条 ±5m）：证明「凑近看某一档」这条路真的动了。
+        {.name = "515_sampling_zshift", .scene = 3, .sampling_z = 2.5f},
     };
     for (const Shot& shot : kShots) {
-        CHECK(shot.fresnel_preset >= 0 && shot.fresnel_preset < jpov_strip::kFresnelPresetCount)
-            << "拍摄表的 fresnel_preset 越界: " << shot.fresnel_preset;
-        app.show_strips_ = shot.show_strips;
-        app.vis_ = jpov_strip::RibbonVisibility{shot.ribbons, shot.ribbons, shot.ribbons};
-        app.ring_visible_ = shot.ring;
-        app.boxes_visible_ = shot.boxes;
-        app.jet_visible_ = shot.jet;
-        app.jet_gain_ = shot.jet_gain;
-        app.bloom_ = shot.bloom;
-        app.use_texture_ = shot.use_texture;
-        app.texture_mipmap_ = shot.texture_mipmap;
-        app.soft_edges_ = shot.soft_edges;
-        app.arc_additive_ = shot.arc_additive;
-        app.soft_depth_ = shot.soft_depth;
-        app.smooth_strips_ = shot.smooth;
-        // 圆环的平滑开关独立：拍摄表里沿用同一个 shot.smooth，
-        // 于是 100~150 仍是折线、160/170 才是圆环的折线 vs 平滑对照。
-        app.ring_smooth_ = shot.smooth;
-        app.fresnel_enabled_ = shot.fresnel;
-        app.fresnel_preset_ = shot.fresnel_preset;
-        app.fresnel_ = jpov_strip::kFresnelPresets[shot.fresnel_preset].params;
-        app.ring_shape_ = jpov_strip::MakeSceneRingShape();
-        if (shot.ring_at_origin) {
-            app.ring_shape_.center_x = 0.0f;
-            app.ring_shape_.center_z = 0.0f;
-            // 抬到参考方块之上（方块顶 0.995）：居中看圆环时不想让方块从环体里穿过去。
-            app.ring_shape_.center_y = 1.75f;
+        // 先选场景（写可见性开关 + 该场景的默认视角），再应用**显式覆盖**。
+        app.SelectScene(shot.scene);
+        if (shot.show_strips) { app.show_strips_ = *shot.show_strips; }
+        if (shot.ribbons) {
+            app.vis_ = jpov_strip::RibbonVisibility{*shot.ribbons, *shot.ribbons, *shot.ribbons};
         }
-        app.view_.R = shot.camera_r;
+        if (shot.use_texture) { app.use_texture_ = *shot.use_texture; }
+        if (shot.texture_mipmap) { app.texture_mipmap_ = *shot.texture_mipmap; }
+        if (shot.soft_edges) { app.soft_edges_ = *shot.soft_edges; }
+        if (shot.arc_additive) { app.arc_additive_ = *shot.arc_additive; }
+        if (shot.soft_depth) { app.soft_depth_ = *shot.soft_depth; }
+        if (shot.smooth) { app.smooth_strips_ = *shot.smooth; }
+        if (shot.fresnel) { app.fresnel_enabled_ = *shot.fresnel; }
+        if (shot.bloom) { app.bloom_ = *shot.bloom; }
+        if (shot.jet_gain) { app.jet_gain_ = *shot.jet_gain; }
+        if (shot.camera_r) { app.view_.R = *shot.camera_r; }
+        if (shot.tank_skylight) { app.tank_skylight_ = *shot.tank_skylight; }
+        if (shot.sun_elev_deg) { app.deg_.sun_elev_deg = *shot.sun_elev_deg; }
+        if (shot.tank_injection) { app.tank_injection_ = *shot.tank_injection; }
+        if (shot.sampling_z) { app.sampling_z_shift_ = *shot.sampling_z; }
         shoot(shot.name);
     }
 
-    // 面板单独一张（HUD 文案能证明当前是哪个 pass / 哪套 fresnel 参数）：字体必须先量好。
+    // 面板：每个场景各拍一张（证明「参数随场景动态出现」+ 底板读得清）。
     app.SetShowPanel(true);
     app.InstallTextMeasure();
-    app.smooth_strips_ = false;
-    app.ring_smooth_ = true;
-    app.vis_ = jpov_strip::RibbonVisibility{};
-    app.ring_visible_ = true;
-    app.fresnel_enabled_ = true;
-    app.fresnel_preset_ = 0;
-    app.ring_shape_ = jpov_strip::MakeSceneRingShape();
-    app.jet_visible_ = true;
-    app.jet_gain_ = 3.0f;
-    app.bloom_ = true;
-    app.view_.R = jpov_strip::kViewDefaults.R;
-    shoot("99_panel");
+    for (int scene = 0; scene < jpov_strip::StripViewerApp::kSceneCount; ++scene) {
+        app.SelectScene(scene);       // 可见性开关由场景写，这里只改机位
+        app.view_.theta = 0.45;
+        const std::string name = std::string("98_panel_") + std::to_string(scene);
+        shoot(name.c_str());
+    }
 
     app.Finalize();
     return 0;
@@ -256,6 +237,9 @@ int main(int argc, char** argv) {
     app.Init();
     app.InstallTextMeasure();
     app.Setup(texture_path);
+    // 交互模式同理：必须在 Run() 之前加载（面板上的勾选只是开关，不负责加载）。
+    // 代价 = 启动时多一次 4k glb 解压/上传（约 1s）；换来勾选「显示玻璃缸」零延迟。
+    app.PrepareTankScene();
     jpov_strip::ApplyDefaultView(&app);
     app.Run();
     app.Finalize();

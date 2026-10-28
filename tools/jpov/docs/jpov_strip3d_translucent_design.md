@@ -21,6 +21,8 @@
 #176 的玻璃走的是 object3d 的 `AlphaMode::kBlend` 子模式：材质级、1× 玻璃 FBO、
 还要和 froxel 雾按深度积分 —— 每多一种透明形态都要改主渲染链路的 pass 编排，
 而那条路径的 pixel 已经被 gold 锁死。
+（**2026-10-27 更新**：条带上线后，`kBlend` 那条路径被判定「维护成本 > 收益」并整体移除，
+半透明只剩本文这一条路径 —— 见 `jpov_transparent_glass_design.md §9`。）
 
 本设计要覆盖的四类东西（玻璃幕、拖尾、光环）都是**薄片/带状、不受光**的几何，
 用不上 PBR / shadow / skinning / tile light。所以正确做法是**独立 primitive + 独立 WBO 目标**：
@@ -201,9 +203,9 @@ COLOR2  add     RGBA16F   Σ(c·a·gain)
 | 粒子 | `ParticleRenderer::wbo_fbo_` | 1/2 | 不透明 3D 之后 |
 | 体积火 | `VolumeFireRenderer::wbo_fbo_` | 1× | 粒子之后 |
 | **条带（本设计）** | `StripRenderer::wbo_fbo_` | 1× | 体积火之后 |
-| 玻璃 #176 | `Renderer::glass_fbo_` | 1× | froxel 雾合成内 |
+| ~~玻璃 #176~~ | ~~`Renderer::glass_fbo_`~~ | — | 已于 2026-10-27 移除 |
 
-固定顺序：**粒子 → 体积火 → 条带 → 远景雾 → froxel 雾/玻璃**。
+固定顺序：**粒子 → 体积火 → 条带 → 远景雾 → froxel 雾**。
 
 理由：条带是最靠前的「手工效果层」，且要让它继续被雾按场景深度作用
 （合成在雾 pass 之前，雾读的仍是该像素的不透明场景深度）。
@@ -375,8 +377,9 @@ struct TranslucentStripBatch {
    （同时防「根本没生效」和「整屏都变了」）。
 5. **负向**：`left.size() != right.size()` 必须 crash（death test）。
 
-> 另：WBO 权重函数的文本契约测试（`test/wbo:wbo_weight_contract_test`）已随配套 WBO 重构落地，
-> 条带沿用同一份权重，无需额外测试。
+> 另：条带沿用 `kWboWeightGlsl` 那一份权重，无需额外测试。
+> （原 `test/wbo:wbo_weight_contract_test` 比的是「玻璃 shader 的内联副本 vs 权威副本」，
+> 玻璃移除后已一并删除。）
 
 ## 13. 与现有代码的关系（2026-10-20 重构后已更新）
 
@@ -386,9 +389,9 @@ struct TranslucentStripBatch {
 - **体积火的死 depth 附件已删**（`FragDepth` 输出 + 第三附件 + num/den 累积一并移除），gold 逐字节不变；
 - 槽位约定定为 `0=accum / 1=reveal / 2=additive / 3=depth`。
 
-**未迁移（有意）**：
-- 玻璃 FBO 仍由 `Renderer` 手写：它要把 `FragDepthAccum` 挪到槽位 3，且现有 gold 只有
-  「8×8 块平均差 ≤ 30」太松，迁移前得先收紧到逐字节。见 `jpov_wbo_target.md §5`。
+**已移除**：
+- 玻璃 FBO（`Renderer::glass_fbo_`）随 object3d 的 `kBlend` 一栈于 2026-10-27 删除，
+  「迁移到 `WboTarget` 槽位 3」这件事不再存在。见 `jpov_wbo_target.md §5`。
 
 **条带接入时（新增内容）**：
 
@@ -1093,3 +1096,298 @@ else                   { falloff = pow(edge, uFresnelPower); }
 - 三个 strip 测试**并行**跑会抢 Xvfb `:99`（`Server is already active for display 99` →
   `XIO: fatal IO error 22`）⇒ `strip_scene_gold_test` 会无故失败。本地/CI 用
   `--local_test_jobs=1` 即可复现为绿。
+
+### 19.13 条带消费天光（over 型玻璃/薄膜）—— 两套 program + 与雾同构的注入（2026-10-25）
+
+Danis 2026-10-25 定：「这个 over 型 strip 消费天光即可，此处和雾的公式应该是类似的：
+① 有个吸收光的项转化为注入；② strip 本身也可以自发光。然后有一点特殊：我希望这个开启
+光照消费的情况**不影响原本 pass 的效率**，这个开关控制。」
+
+**模型（逐片元，接口权威见 `interface/strip_types.h:StripSkyLight`）**
+
+```
+C = point_color.rgb · tex.rgb                 // ② 自发光/表面色 —— 语义与不开光照时**完全相同**
+  + injection · skylight(N)                   // ① 被吸收的背景光按天光补注入
+skylight(N) = tricolor_lerp(N.y) · ambient_scale      // 上→天顶、水平→天际线、下→地
+            + sun_color · sun_intensity · |N·L|       // 薄片双面：两侧都吃太阳
+α = 覆盖率链（一点没改）
+L_out = α·C + (1−α)·L_bg                      // WBO over 合成
+```
+
+- **与雾同构**：雾是 `L_scene·(1−α) + L_fog·α`，这里 `L_fog` 换成了「天光 + 自发光」。
+- **注入量天然随不透明度缩放**（`C` 随后乘 α）⇒ 越厚/越不透明的材料补得越多，越透的补得越少，
+  所以**没有**单独的「吸收系数」：有它会和 α 双重计数。`injection` 的物理含义是**散射率**
+  （薄玻璃几个百分点，乳白/磨砂可以接近 1）。
+- **不许用在加法集**：加法集本身即发光介质（注入量 = 色·α），再叠一套账会让 HDR 语义分裂
+  ⇒ `ValidateStripBatch` 直接 CHECK 崩（不静默忽略）。
+- 法线 N 与 fresnel **共用**：折线 pass 用屏幕导数（折面），平滑 pass 用解析法线 `dS × H`。
+  太阳项取 `|N·L|`（单层双面片，与 fresnel 用 `|N·V|` 同一理由）。
+
+**「不影响原本 pass 的效率」怎么做到的**
+
+- 渲染器现在有 **4 个 program**：`strip_wbo_draw` / `strip_wbo_draw_lit` /
+  `strip_wbo_smooth` / `strip_wbo_smooth_lit`。**主函数只有一份**，两套变体只差
+  `ApplySkyLight()` 的定义：关态是**空函数**（编译器内联成空，指令数零变化），
+  开态才是真注入 ⇒ 不会出现「两份 main 悄悄漂移」。
+- 不用 uniform 分支：那会在每个片元上多一次分支 + 常驻寄存器，而这套东西只对少数批有意义。
+- 证据：8 张 scene gold + 2 张老 gold **全部逐字节不变**（都走关态），40/40 单测绿。
+  「指令数不变」是编译器内联空函数后的推断，**没有做 shader 反汇编核对**——
+  严格成立的证据只有「画面逐字节相同」。
+- 代价：多编译两个 program（Init 时一次）；开天光的批多 8 个 uniform（只在开时上传）。
+
+**验收场景：橡树 + 开口玻璃缸（Danis 指定）**
+
+- 树 = fire-fog viewer 同款 `models/tripo_oak_4k.glb`（归一化到 6m）。
+- 缸 = `MakeStripRing` 的**底面 + 内外立壁**（顶面丢掉 ⇒ 开口缸，树冠从上面冒出来），
+  当前尺寸：外半径 2.32m / 壁厚 0.04m / 高 4.32m / 中心高 2.16m（见 §19.15 的 -20%）。
+  缸壁一条批（3 条带），平滑 pass + fresnel。
+- 天光参数**与场景里的地面/方块同源**（同一份 `MakeSkyLighting` 的 `SkyCommand`）：
+  `AmbientTricolor()` / `AmbientIntensity()` / `sun_dir` / `SunDirectionalColor()` /
+  `SunDirectionalIntensity()`。
+- 拍摄五张（**不入 gold**，它们要 4k 贴图 + 大模型，做门禁太重）：
+  `400_tank_unlit`（关）、`405_tank_skylit`（开，散射率 0.20，太阳 34°）、
+  `420_tank_skylit_inj40`（同开关 0.40 —— 用来定「玻璃 vs 乳白」该给多少）、
+  `410_..._lowsun`（8°）、`415_..._night`（−8°）。
+  实测整帧均值（**缸缩到 -20% 之后重测**，1280×720）：400 = (134,149,168) →
+  405 = (143,156,176) → 420（散射率 0.40）= (147,160,179)；410（太阳 8°）= (124,127,126)；
+  415（夜，−8°）= (46,46,51)（缸壁变暗而不是发光）。
+  缸壁本身：顶部/朝阳侧更亮、底部/背阴侧更暗，且树始终看得见。
+  CSM 的实际权重（临时把 `uHasCsm` 强置 0 重拍同一组）：405 差异 **1.96% 像素、最大 60/255**，
+  410 **1.56%、最大 59/255**，形状是树枝/叶片的软块状剪影；400（不消费天光）**逐像素 0 差异**
+  —— 反向证明「不开天光就完全不采 shadow map」。
+- **坑**：glb 必须在**首帧之前**加载（`PrepareTankScene()`）。在 `OneIteration` 里懒加载会撞
+  `GL error after mesh upload, code=1282` —— 那时绑定状态属于上一帧的 pass。
+  也刻意**不在 `Setup` 里自动加载**：gold 的 8 张图不用这个场景，不该替它付 4k glb 的代价。
+
+**已知限制（都是有意的）**
+
+- ~~不采阴影~~（**已由 §19.15 补上：太阳项乘 CSM，天光项不乘**）。条带**自身**仍不投影
+  （不写 shadow map，需要给半透明片单开一次 shadow pass）。
+- 天光是**方向无关的近似**（三色 × 法线 y + 太阳项），不是 IBL：没有环境遮蔽、没有
+  方向性漫反射积分，也没有反射方向采样（那属于功能缺口 ④-2，需要 env 图或解析天空）。
+- 缸壁在夜里会显得「偏实」：夜色 ambient 很小但非零，而 α 不变 ⇒ 反差变小，属预期。
+
+### 19.14 viewer 场景化 + 左下角面板（2026-10-25）
+
+Danis：「现在的 viewer 有点不好操作了，仿照 particle viewer 那样，用下拉菜单控制数个场景：
+① box + 旋转三条带；② 射流单独一个场景；③ 玻璃缸 + 树；原来的玻璃缸不要了。注意每个场景下
+参数选项要根据场景是否用到动态改变 UI，UI 整体放左下角，黑色半透明底板装一下。」
+
+**三个场景（`StripViewerApp::Scene`）**
+
+| 场景 | 内容 | 参数（面板只列这些） |
+|---|---|---|
+| ① `kRibbons` | 地面 + 四块参考方块 + 三条带 | 使用纹理 / mipmap / 不透明度 / 条带宽度 / 柔边剖面 / 条带平滑 / 弧形用加法集 / 软深度(+距离) / 波带振幅 / 螺旋转数 / 弧形开角 / 弧形朝向 / 显示波带·螺旋·弧形 / 形状动画 / 自动绕行 / 显示参考方块 / SMAA |
+| ② `kJet` | 射流（加法集 + HDR + bloom） | 射流 HDR 增益 / 条带平滑 / Bloom / SMAA |
+| ③ `kTank` | 橡树 + 开口玻璃缸（sky_light） | 缸壁消费天光 / 天光注入比例 / 缸壁不透明度 / 缸体半径 / 缸体高度 / SMAA |
+
+- **场景只是「一组可见性预设」**：`SelectScene()` 写一次开关（顺带给该场景一个合适机位），
+  之后各开关仍可单独调。**gold 与 `--capture` 直接设开关、不经过场景** ⇒ 8 张 scene gold
+  与这轮 UI 改动完全无关（41/41 仍然绿，逐字节不变）。
+- **动态 UI 有两层**：① 只列当前场景用得到的参数；② 按值裁剪（关纹理 → 不显示 mipmap；
+  关软深度 → 不显示距离）。行数 > 14 时同一条底板内自动分两列（保证 720 高放得下）。
+- **底板**：`cmds->DrawFillRect(...)`，黑色 alpha 0.55 + 1px 白 10% 边框 + 10px 圆角，
+  左下角锚定（16px 边距）。必须先于 `ui_.Emit(cmds)` 进命令表才会画在控件下面
+  （2D 指令按 `cmds.order` 顺序绘制）。底部一行提示「右键拖动=绕行 滚轮=推拉」+「重置」。
+- **旧玻璃圆环（ring）**：从所有场景移除，也不再进面板；但**代码与字段保留** ——
+  `strip_scene_gold.cc` 仍用它锁 fresnel（预设 2=厚玻璃）、环几何、折线/平滑两条 pass。
+  拍摄表里原来 100~185（圆环 + 五个边反预设）随之删除，边反 A/B 改由缸壁承担（430/435）。
+
+**拍摄表变化**：`10~80`（场景①）、`200~215`（场景②）、`400~435`（场景③，含缸壁边反 A/B）、
+`300/305`（远机位 mip A/B）、`98_panel_0/1/2`（三个场景各一张，证明参数随场景变）。
+一共 27 张。
+
+**改造时踩到的两个真 bug（都已修，值得记一下）**
+
+1. **射流被「三条带 A/B」开关管着**：`EmitJetBatch` 原来写在 `EmitStripBatches()` 里，而那个
+   函数只在 `show_strips_` 为真时调用。场景② 把 `show_strips_` 置 false（射流场景不该有
+   三条带）⇒ 射流一条都画不出来，拍出来只剩地面。修法：射流提到 `OneIteration` 里独立发，
+   谁都不再隐式管着它。
+2. **拍摄表的「缺省 true」会覆盖场景预设**：第一版 `Shot` 用带默认值的 bool（`show_strips=true`、
+   `ribbons=true`…），循环里无条件写回 ⇒ 场景② 里三条带和方块又冒出来。改成
+   **全部可选覆盖**（`std::optional`，不写 = 用场景预设），并在注释里写明原因。
+3. **太阳仰角跨张残留**：`SelectScene()` 只重置场景自己的参数，天光（仰角/方位/浑浊度）是
+   三个场景共享的面板参数，没人重置 ⇒ `415_..._night`（−8°）之后拍的 `420`（散射率 0.40）、
+   `430/435`（缸壁边反 A/B）**全都是夜景**，均值从 (147,160,179) 掉到 (48,48,52)，
+   看上去像「乳白缸变黑了」。修法：`SelectScene()` 连天光一起回默认（切场景 = 干净起点）。
+
+### 19.15 条带消费 CSM 阴影（2026-10-25，与天光同一个开关）
+
+Danis 提问 + 定调：「这个光照的 CSM 消费了吗？…我理解还是要的，而且条带本身或许应该也参与 CSM
+的生成？但这个做起来太笨重…先不搞。本次要求 CSM 被 over 类型 strip 消费，开关和天光消费一起，
+这俩绑定。」
+
+**之前的状态（回答那个提问）**：§19.13 的天光消费**只吃 CSM 之外的项** —— 三色天光 + 太阳
+`|N·L|`，完全没有采样 shadow map。所以玻璃缸在树的影子里也照样亮，文档里也把「不采阴影」
+列成已知限制。
+
+**现在的做法**
+
+```
+skylight(N) = tricolor_lerp(N.y)·ambient_scale            // 环境光，**不乘**阴影
+            + sun_color·sun_intensity·|N·L|·CSM(worldPos, dist)   // 直射光，乘阴影
+```
+- **没有独立的阴影开关**：`sky_light` 有值就采样 CSM（开关绑定，Danis 要求）。
+- 复用主链路**同一套资源**：`StripRenderer::Draw` 新增 `const StripCsmShadow* csm`
+  （由 Renderer 在按下条带 pass 时填：`cmds.sun` + `shadow_fbos_` + 各级联 VP/深度 VP/单纹素边长
+  + `ShadowConfig`）。shadow map 绑在 `kTexUnitShadowMapBase`（7..11）——与主链路同段，
+  因为本 pass 与 object3d 不同时活跃（和 tile/材质同一约定）。
+- **单级联单次采样、无 PCF**，按片元到相机距离选级联，末尾按 `fade_start/end` 淡出 ——
+  与 fire_fog 的雾体阴影**同一套写法与理由**：条带是薄片、片元多，PCF 的 9~64 次采样换不来
+  可见收益；而且 shadow map 是按**不透明几何**生成的，对半透明片做精细 PCF 没有物理意义。
+  因此阴影边缘是「软块状」而非清晰（这是**取舍**，不是 bug）。
+- 深度偏置用 **tanθ=1 的保守值**（`max(0.01, 1.5·texelW)`），理由同雾：薄片法线与阴影深度轴
+  经常近乎正交，按 N·L 推导会低估偏置 → 自阴影 acne。
+- 没有太阳 / 没有级联 ⇒ `uHasCsm = 0`，太阳项退化为完全受照（不崩、不改颜色语义）。
+
+**成本**：开天光的批每 draw 多 5 张纹理绑定 + ~12 个 uniform；每片元多 1 次纹理采样
+（`CsmTap`）+ 2 次 mat4×vec4（`uShadowVP` / `uShadowDepthVP`）+ 一次级联选择循环。
+`sun_intensity == 0`（纯天光 / 入夜）时整段太阳项跳过 ⇒ 没有额外采样。
+**不开天光的批仍然是原来那两个 program** —— 10 张 gold 逐字节不变、41/41 单测绿。
+实现上 CSM 采样只有一份（`src/csm_shadow_glsl.h`，与 fire_fog 共用），避免两处漂移。
+
+**验收（缸景）**：405/410 里树在缸壁内侧投出**可见的软影**，朝阳侧亮、背阴侧暗；
+400（不开天光）没有任何阴影。缸的默认尺寸同时按 Danis 要求**整体缩小 20%**
+（半径 2.90→2.32、高 5.40→4.32、壁厚 0.05→0.04、中心高 2.70→2.16，比例不变、底面仍在 y=0）。
+
+**仍未做（Danis 明确先不搞）**：条带**自身**参与 CSM 生成（写 shadow map）。要做都得给半透明
+片单开一次 shadow pass（或用 alpha-tested 变体），笨重且和「条带是 effect pass」的定位冲突。
+
+### 20. 采样数多态化：4 / 8 / 16 / 32 四档并列（2026-10-26）
+
+需求（Danis）：「16 这个采样数的多态化，draw call 命令上直接体现在接口上（就是
+`DrawStrip16Batch` 这种），上次模板类的实现给搞崩了……这次只做 Strip4，和 Strip16 并列。
+验收用 strip viewer 的新场景做采样对比，Strip4 三个实例、Strip16 也三个实例，纵向错开。」
+随后追加：「补齐 8、32 这两个实现；上下错开不是我的本意，我本意是**沿 Z 轴**
+（y-up 里的 z）错开，**四种配置同屏、精度逐渐变高**，再加个滑条让整体沿 Z 平移 ±5m 便于切换观察。」
+
+**四档 = 四种拓扑，不是四个精度档**
+
+| 档位 | 段数 | 顶点/条 | 索引/条 | 行宽 texel | 典型用途 |
+|---|---|---|---|---|---|
+| 4  | 3  | 8  | 18  | 13 | 雨丝、辅助线、道路标线（数量多、单条短、本来就直） |
+| 8  | 7  | 16 | 42  | 17 | 中短拖尾、光束、简单弧线 |
+| 16 | 15 | 32 | 90  | 25 | 默认主力：普通拖尾、波带、闭合圆环 |
+| 32 | 31 | 64 | 186 | 41 | 长而弯的东西（大回环、飘带、需要极致顺滑的边缘） |
+
+**接口层：四条并列命令、四个类型（不是模板）**
+
+| | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| 条带类型 | `Strip4`（200 B） | `Strip8`（296 B） | `Strip16`（680 B） | `Strip32`（1304 B） |
+| 批类型 | `TranslucentStrip4Batch` | `TranslucentStrip8Batch` | `TranslucentStrip16Batch` | `TranslucentStrip32Batch` |
+| 命令 | `DrawStrip4Batch` | `DrawStrip8Batch` | `DrawStrip16Batch` | `DrawStrip32Batch` |
+
+- 为什么不用模板：模板参数会一路渗透到渲染器、数据纹理、索引缓冲、后处理，
+  任何一处实例化不对都是链接期/运行期的灾难（上一版就是这么崩的）。这里改成
+  **运行期多态**：`StripSamplesView`（左/右轨 + 逐点颜色 + 剖面 + 点数 + 容量）+ `StripLayout`
+  （采样数 / 段数 / 顶点数 / 索引数 / 行宽），两者都是普通 POD。
+- 批级材质抽成 `StripBatchStyle` 并让四个批类型继承它：`batch.blend` / `batch.sky_light`
+  这些字段在四档上写法完全一样，校验也只有一份（`ValidateStripStyle` + `ValidateStripSamples`）。
+- `StripLayoutSlotOf(samples)` 把采样数映射到资源槽位（0..3）；非法采样数返回 -1，
+  调用方 CHECK 崩 —— 不静默画错档位。
+
+**实现：一套 CPU 数学 + 一份 GLSL**
+
+- CPU（`strip_geometry.h`）：`ViewOf(Strip4|8|16|32)` → `StripSamplesView`；
+  `ExpandStripVertices(view, layout, …)` / `ComputeSmoothStrip(view, layout, …)` /
+  `AppendSmoothStripData(view, layout, …, row_stride_floats, …)` /
+  `AppendSmoothStripVertices(view, layout, …)`。四档老签名都保留薄重载（调用点不用改）。
+- 平滑暂存 `SmoothStripCompute` 按**最大档**（32 列）分配，四档共用：只有前 `layout.samples` 项有效。
+- GLSL **只有一份**（没有为每档编译一套 program）：原先写死的 15/25/16/32 换成
+  4 个 uniform（`uPointColorScale/Bias`、`uProfileScale/Bias`）与 `uVerticesPerStrip`，
+  值由 `StripLayout` 现算 —— 16 点档与旧常量逐位等价（gold 逐像素不变，≤1/255）。
+- 资源：per-instance 纹理按档位各一张（行宽 13/17/25/41，列坐标必须按本档行宽归一化）、
+  索引缓冲各一条（18/42/90/186 索引，顶点基址 = 2×采样数），VAO/VBO 共用；
+  平滑 pass 的控制点数据纹理四档共用一张（行跨距按最大档 512 float，小档位行尾补 0）。
+
+**踩到的真坑：索引类数值绝不能走浮点**
+
+`vStripId`（= 本条带的 per-instance 数据行号）最初写成 `float(gl_VertexID) * (1/32)`。
+在 llvmpipe 上浮点除法会给出「**略大于整数**」的结果（如 1.0000001）⇒ `AppearanceRow()`
+落在两行之间 ⇒ 硬件双线性把**相邻两条带**的颜色与剖面混起来：画面表现是「颜色变淡发灰、
+条纹变糊」，既不崩也不报错，gold 直接差 134/255。修法：行号一路用 **int**
+（VS 里 `gl_VertexID / uVerticesPerStrip` 整数除法 + `flat out int`；平滑 pass 的
+`aStripId` 属性同样 `int(aStripId + 0.5)`）。
+
+**验收场景（viewer 场景④「采样对比」）**
+
+- 四条**同样的曲线**（波 / 螺旋 / 弧）、同一份材质（纹理 + 柔边剖面 + 同样的逐条带浓度），
+  只换采样密度：4 / 8 / 16 / 32 各一批（一批 3 条、各一次 draw call）。
+- 排布沿 **Z 轴**（y-up 里的深度轴）等距排开、**精度递增**（4 最近 → 32 最远，
+  间距 `sampling_row_gap` 面板可调）；面板另有 **「整体 Z 平移 m」滑条（−5…+5）**，
+  把四排一起挪，方便在同一机位下凑近看某一档。
+- 为什么每档都是 3 条：draw call 数只与**批数**有关、与条带数无关，一批多条才看得出这一点；
+  而且每条带在四档里各有一个对照，避免把「单条带的差异」误当成材质差异。
+- 拍摄：`500_sampling_rows`（全景）/ `505_sampling_zoom`（近机位）/ `510_sampling_smooth`
+  （四档都走 Hermite）/ `515_sampling_zshift`（整体 Z +2.5m，证明滑条真的在动）。
+  四张都**不进 gold**（图形对比是给人看的，不是回归门禁）。
+- A/B 证明「每一排确实来自它自己的命令」：临时去掉 `DrawStrip4Batch` 重拍，
+  只有 4 点档那一排区域的像素变化。
+
+**性能口径（不要夸大）**
+
+- 顶点/索引随档位线性变化（一条带 8/16/32/64 顶点、18/42/90/186 索引）。
+- **片元成本四档相同**：都走同一份 FS，per-fragment 一样 ⇒ 4 点档**不会**减少片元数
+  （覆盖的像素一样多）。省的是顶点数据带宽与顶点着色，价值在**顶点瓶颈**场景
+  （数量多、单条短：雨丝、辅助线、道路标线），不是「画得更快」。
+  反过来说，32 点档也不便宜：一条带 64 顶点，几千条时顶点/索引量是 4 点档的 8 倍。
+- 没做 frame-time 基准 —— 上面是结构上的必然，不编数字。
+
+### 21. 退化输入（几何数值退化）—— 会不会除零 / 出 NaN
+
+Danis 的问题：「万一 JPOV 用户输入了奇异的数值，JPOV 该不会崩溃吧？NaN 和 Inf 我们可以约定
+用户不会犯傻（render command proto 化时能证据实锤），但**像重叠点这类输入**，会不会让
+renderer 或者内部除以 0？」→ 本节是对**整条 strip 链路**的一遍清扫结果。
+
+**先说结论**
+
+1. **能"合法但退化"的几何（重叠点 / 零宽 / 亚微米段 / 折返 / 沙漏 / 远坐标）不会崩，
+   也不会产生 NaN。** 结构上的原因很硬：这些退化在屏幕上都是**零面积**（四边形的两条边
+   重合成一条线）⇒ 光栅化阶段就没有片元 ⇒ FS 里那些除法根本不会被执行。
+   GPU 端探针实测：把九种退化条带画进画面，**零面积的三类改变 0 个像素**。
+2. 能光栅化出来的退化（沙漏、楔形尖端、折返）确实会走到 FS 的除法，但**每个除法后面都
+   跟着守卫或 clamp**（见下表），所以结果是有限值 —— 要么被裁掉（落到条带轮廓之外），
+   要么画出一条极细的正常条带。
+3. **真正找到并修掉的除零点在"相机"上，不在几何上**：`ZView()` 的
+   `2·near·far / ((far+near) − ndc·(far−near))`，当用户给 `near = 0` 或 `near ≈ far` 时
+   分母会趋近 0（恰在远平面时是 0/0 = NaN）。NaN 一旦写进 1× WBO 就会顺着 composite
+   铺满全屏 —— 这是"一层膜把整张画面拖黑"的典型事故。已在 strip / particles / volume_fire
+   三处**同一段函数**上加了守卫（正常相机下分支永不进入 ⇒ 三者的 gold 全部逐像素不变）。
+
+**逐点清单（strip 链路里所有除法/归一化）**
+
+| 位置 | 表达式 | 退化时靠什么扛住 |
+|---|---|---|
+| `strip_geometry.h` 列 u | `col / layout.quads` | 布局由断言保证 `quads = samples−1 ≥ 3` |
+| `ComputeSmoothStrip` 外扩 | `margin / min_half` | `min_half` 只在 `|h| > 1e-5` 的列里取；全零宽时保持 1e30 ⇒ 回落 `scale = 1` |
+| 同上（单位外法向） | `lh * (1/len)` | `len < 1e-5 ⇒ continue`（该段没有"外侧"） |
+| 平滑 FS 段内参数 | `(D·dS) / max(dS·dS, 1e-8)` | 守卫 + 后面 `tStar = clamp(...)` |
+| 平滑 FS 宽度参数 | `(D·Pv) / max(Pv·Pv, 1e-8)` | 守卫（Pv = 2·Hh，零宽列会让它 → 0） |
+| 平滑 FS 段号 | `(seg + tStar) / uSegCount` | `uSegCount = quads ≥ 3`（uniform 由 layout 给） |
+| 平滑 FS 裁形 AA | `min(v*, 1−v*) / fwidth(v*)` | `fwidth` 有 `max(..., 1e-5)` 地板 |
+| 折线 VS 行号 | `gl_VertexID / uVerticesPerStrip` | **整数除法**（浮点会给"略大于整数"，见 §20）+ CPU 侧 CHECK > 0 |
+| per-instance 行号 | `(row + 0.5) / rows` | `rows = max(int(uAppearanceRows), 1)` |
+| 菲涅耳 | `inversesqrt(d2)` / `inversesqrt(n2)` | `d2 > 1e-12` / `n2 > 1e-12` 分支，否则退化到固定值 |
+| 天光 | `inversesqrt(n2)` | 同上 |
+| 深度线性化 | `2·near·far / ((far+near) − ndc·(far−near))` | **本次新增守卫**：`!(|denom| > 1e-6)` ⇒ 返回 `max(near, 1e-4)` |
+| WBO 解析 | `accum.rgb / accum.a` | `accum.a ≤ 1e-7` ⇒ 直接输出 0（原有守卫） |
+
+**测试（都是可证伪的，不是恒真断言）**
+
+- `strip_degenerate_test`（新，GPU 端，headless）：同机位渲四张图 —— 对照（不发条带）/
+  零面积退化 / 有面积退化 / 有面积退化 + 一条正常条带。断言：
+  ① 零面积那批**改变 0 个像素**；② 有面积那批**条带区域之外逐像素相同**（这是 NaN 的
+  探测器：NaN 泄漏会铺满全屏）；③ 同批的正常条带仍然可见（差异像素数严格变大且 > 500）。
+- `strip_geometry_test` 的 `StripDegenerate.*`（CPU 端，GL-free）：九种退化配方 + "两点重合"
+  + "零宽回落 scale=1" + "圆环壁厚 1e-7"，判据统一是**每个输出都是有限值**、外扩倍数落在
+  `[1, 8]`。
+
+**已知不做 / 边界**
+
+- NaN/Inf 输入不做处理：按约定由 render command proto 化时拦掉（本层只保证"有限值进去 ⇒
+  有限值出来"）。
+- 坐标量级失控（例如 1e30 米）不会被拒绝；外扩量会被 `kSmoothMaxWidenScale = 8` 截断，
+  极端细尖仍可能缺一条亚像素（既有已知限制，与本轮无关）。
+- 退化几何**不报错**是刻意的：零宽 = 一条线、重合点 = 零长度段，都是合法表达手段，
+  在 `ValidateStripBatch` 里拒绝它们等于把用户的合法几何判成非法。

@@ -19,9 +19,11 @@
 // 3D 文本的像素/米 换算（PixelsPerMeterAt）：纯函数，选字形光栅化精度用。
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
+#include "tools/jpov/src/env_specular.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
+#include "tools/jpov/src/plate2d/plate2d_renderer.h"
 #include "tools/common/utils.h"
 
 #include <GLFW/glfw3.h>
@@ -59,6 +61,12 @@
 namespace {
 
 using jpov::Vec3f;
+
+// 环境镜面（IBL）天空 cubemap 的面边长（像素）。
+// 6×128² ≈ 10 万像素，相对于一个全屏天空 pass（~200 万）不到 5%。
+// 为什么不再大：天空是极低频渐变，128² 已足够；再大只会多花 Preetham 的逐像素计算。
+// 为什么不再小：mip 链要能表达粗糙度上的模糊（128 → 8 级 mip）。
+constexpr int kSkyEnvCubeSize = 128;
 
 // 窗口坐标 → NDC 标准化设备坐标
 // 原点在窗口左上角，x→右，y→下
@@ -593,7 +601,7 @@ Renderer::~Renderer() {
     DestroyHighlightFBO();
     DestroyBloomChain();
     DestroySkyColorFBO();
-    DestroyGlassFBO();
+    DestroySkyEnvCube();
     fire_fog_renderer_.Finalize();
     particle_renderer_.Finalize();
     volume_fire_renderer_.Finalize();
@@ -676,139 +684,6 @@ void Renderer::DestroyHDRFBO() {
     fbo_hdr_h_ = 0;
 }
 
-// ==================== 透明玻璃 FBO（Weighted Blended OIT） ====================
-
-void Renderer::EnsureGlassFBO(int w, int h) {
-    if (glass_fbo_ != 0 && glass_w_ == w && glass_h_ == h) {
-        return;
-    }
-    CHECK_GT(w, 0);
-    CHECK_GT(h, 0);
-    CHECK_LE(w, kMaxFboDim);
-    CHECK_LE(h, kMaxFboDim);
-    DestroyGlassFBO();
-
-    glGenTextures(1, &glass_accum_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_accum_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_reveal_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_reveal_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenTextures(1, &glass_depth_tex_);
-    glBindTexture(GL_TEXTURE_2D, glass_depth_tex_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &glass_fbo_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           glass_accum_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
-                           glass_reveal_tex_, 0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
-                           glass_depth_tex_, 0);
-    {
-        const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                                GL_COLOR_ATTACHMENT2};
-        glDrawBuffers(3, bufs);
-    }
-    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
-        << "Glass FBO incomplete";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glass_w_ = w;
-    glass_h_ = h;
-}
-
-void Renderer::DestroyGlassFBO() {
-    if (glass_fbo_) {
-        glDeleteFramebuffers(1, &glass_fbo_);
-        glass_fbo_ = 0;
-    }
-    if (glass_accum_tex_) { glDeleteTextures(1, &glass_accum_tex_); glass_accum_tex_ = 0; }
-    if (glass_reveal_tex_) { glDeleteTextures(1, &glass_reveal_tex_); glass_reveal_tex_ = 0; }
-    if (glass_depth_tex_) { glDeleteTextures(1, &glass_depth_tex_); glass_depth_tex_ = 0; }
-    glass_w_ = 0;
-    glass_h_ = 0;
-}
-
-void Renderer::ClearGlassFBO() {
-    CHECK(glass_fbo_ != 0) << "ClearGlassFBO: EnsureGlassFBO 未调用";
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    // accum=(0,0,0,0) / reveal=(1,0,0,0) / depth=(0,0,0,0)
-    const GLfloat clear_accum[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_reveal[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_depth[4]  = {0.0f, 0.0f, 0.0f, 0.0f};
-    glClearBufferfv(GL_COLOR, 0, clear_accum);
-    glClearBufferfv(GL_COLOR, 1, clear_reveal);
-    glClearBufferfv(GL_COLOR, 2, clear_depth);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-bool Renderer::HasBlendObjects(const RenderCommandList& cmds) {
-    for (const Object3DCommand& o : cmds.object3d) {
-        if (o.material.alpha_mode == AlphaMode::kBlend) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void Renderer::DrawTransparentPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
-                                   unsigned int scene_depth_tex) {
-    if (!HasBlendObjects(cmds)) {
-        return;
-    }
-    CHECK(glass_fbo_ != 0) << "DrawTransparentPass: EnsureGlassFBO 未调用";
-    CHECK_NE(scene_depth_tex, 0u)
-        << "DrawTransparentPass: scene_depth_tex 不能为 0";
-    CHECK_GT(fbo_w, 0);
-    CHECK_GT(fbo_h, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, glass_fbo_);
-    glViewport(0, 0, fbo_w, fbo_h);
-
-    // 无深度缓冲：关深度测试（在 FS 里用 scene_depth_tex 手动作深度测试，见 blend 变体）。
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendEquation(GL_FUNC_ADD);
-    glBlendFunci(0, GL_ONE, GL_ONE);                    // accum += 预乘色×w
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // reveal *= (1−α)
-    glBlendFunci(2, GL_ONE, GL_ONE);                    // depth += z_view×α×w
-
-    const unsigned int prog_blend = DrawObject3DProgBlend();
-    const unsigned int prog_full_blend = DrawObject3DProgFullBlend();
-    for (const Object3DCommand& cmd : cmds.object3d) {
-        if (cmd.material.alpha_mode != AlphaMode::kBlend) {
-            continue;
-        }
-        Object3DRenderer::DrawObject3DBlend(cmd, cmds, mesh_mgr_, texture_mgr_,
-            shader_mgr_, mvp_, prog_blend, prog_full_blend,
-            tile_index_tex_, scene_depth_tex);
-    }
-
-    // 复原 GL 状态：blend func/equation 属 GL_COLOR_BUFFER_BIT，不在 glPushAttrib(GL_ENABLE_BIT)
-    // 里，必须显式回写（对三个 draw buffer 都回写，抹平透趟用过的非常规混合）。
-    glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendFunci(2, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendEquation(GL_FUNC_ADD);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 void Renderer::EnsureSkyColorFBO(int w, int h) {
     if (sky_fbo_ != 0 && sky_w_ == w && sky_h_ == h) {
         return;
@@ -842,6 +717,47 @@ void Renderer::DestroySkyColorFBO() {
     }
     sky_w_ = 0;
     sky_h_ = 0;
+}
+
+void Renderer::EnsureSkyEnvCube(int size) {
+    CHECK_GE(size, 1);
+    if (sky_env_tex_ != 0 && sky_env_size_ == size) {
+        return;
+    }
+    DestroySkyEnvCube();
+    glGenTextures(1, &sky_env_tex_);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_tex_);
+    for (int face = 0; face < 6; ++face) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA16F,
+                     size, size, 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
+    // mip 链：粗糙度→mip 级的「廉价预滤波」（见 src/env_specular.h）。
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glGenFramebuffers(1, &sky_env_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, sky_env_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_CUBE_MAP_POSITIVE_X, sky_env_tex_, 0);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE)
+        << "Sky env cubemap FBO incomplete";
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sky_env_size_ = size;
+}
+
+void Renderer::DestroySkyEnvCube() {
+    if (sky_env_fbo_) {
+        glDeleteFramebuffers(1, &sky_env_fbo_);
+        sky_env_fbo_ = 0;
+    }
+    if (sky_env_tex_) {
+        glDeleteTextures(1, &sky_env_tex_);
+        sky_env_tex_ = 0;
+    }
+    sky_env_size_ = 0;
 }
 
 
@@ -1088,6 +1004,11 @@ unsigned int Renderer::ImageProg() {
     return shader_mgr_.GetOrCreate("image", {kTexVs, kImageFs});
 }
 
+unsigned int Renderer::PlateProg() {
+    return shader_mgr_.GetOrCreate("plate2d",
+        {Plate2DRenderer::kVs, Plate2DRenderer::kFs});
+}
+
 unsigned int Renderer::Solid3DProg() {
     return shader_mgr_.GetOrCreate("solid3d", {Primitives3DRenderer::kVs3d, Primitives3DRenderer::kFs3d});
 }
@@ -1104,7 +1025,7 @@ unsigned int Renderer::Text3DProg() {
 // location 2/5 导致部分 GL 实现异常。所有材质通道走 uHas*Tex=0 常值 fallback。
 unsigned int Renderer::DrawObject3DProg() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // DrawObject3D PBR shader — 完整版（mesh 含 kUV+kTangent 时使用）。
@@ -1112,7 +1033,7 @@ unsigned int Renderer::DrawObject3DProg() {
 // 支持纹理采样（baseColor/metallic/roughness/emissive/AO）和 TBN 法线映射。
 unsigned int Renderer::DrawObject3DProgFull() {
     return shader_mgr_.GetOrCreate("draw_object3d_pbr_full",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR});
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）变体：与上面两同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（FS 里含 discard）。
@@ -1121,68 +1042,52 @@ unsigned int Renderer::DrawObject3DProgFull() {
 unsigned int Renderer::DrawObject3DProgCutout() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_cutout",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawObject3DProgFullCutout() {
     return shader_mgr_.GetOrCreate(
         "draw_object3d_pbr_full_cutout",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR,
+        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
-}
-
-// 透明混合（kBlend）变体：与两基础版同源，多一个 JPOV_ALPHA_BLEND 宏（FS 输出改为
-// FragAccum/FragReveal + 手动作深度测试 + WBO 权重）。供透明 pass（玻璃）使用。
-unsigned int Renderer::DrawObject3DProgBlend() {
-    return shader_mgr_.GetOrCreate(
-        "draw_object3d_pbr_blend",
-        {Object3DRenderer::kMeshVs3dPBR, Object3DRenderer::kMeshFs3dPBR,
-         {"JPOV_ALPHA_BLEND"}});
-}
-
-unsigned int Renderer::DrawObject3DProgFullBlend() {
-    return shader_mgr_.GetOrCreate(
-        "draw_object3d_pbr_full_blend",
-        {Object3DRenderer::kMeshVs3dPBRFull, Object3DRenderer::kMeshFs3dPBR,
-         {"JPOV_ALPHA_BLEND"}});
 }
 
 // 静态批量实例 program（摆放走 per-instance attribute，见 InstancedObjectRenderer::kMeshVs3dPBR*Instanced）。
 unsigned int Renderer::DrawInstancedObjectProg() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str()});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFull() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR});
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）实例变体：同源，仅多一个 JPOV_ALPHA_CUTOUT 宏（含 discard）。
 unsigned int Renderer::DrawInstancedObjectProgCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 unsigned int Renderer::DrawInstancedObjectProgFullCutout() {
     return shader_mgr_.GetOrCreate("draw_instanced_object_pbr_full_cutout",
-        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR,
+        {InstancedObjectRenderer::kMeshVs3dPBRFullInstanced.c_str(), InstancedObjectRenderer::kMeshFs3dPBR.c_str(),
          {"JPOV_ALPHA_CUTOUT"}});
 }
 
 // 蒙皮渲染 program：蒙皮 VS(kSkinnedVs) + 复用 object3d PBR 片元(kMeshFs3dPBR，同光照)。
 unsigned int Renderer::SkinnedMeshProg() {
     return shader_mgr_.GetOrCreate("skinned_mesh",
-        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR});
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR.c_str()});
 }
 
 // alpha-test（cutout）蒙皮变体：与 SkinnedMeshProg 同源，仅多一个 JPOV_ALPHA_CUTOUT 宏
 //（FS 里含 discard）。与 object3d 同理单独成 program，避免不透明 program 含 discard 而降级 early-Z。
 unsigned int Renderer::SkinnedMeshProgCutout() {
     return shader_mgr_.GetOrCreate("skinned_mesh_cutout",
-        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR, {"JPOV_ALPHA_CUTOUT"}});
+        {kSkinnedVs, SkeletonRenderer::kMeshFs3dPBR.c_str(), {"JPOV_ALPHA_CUTOUT"}});
 }
 
 // 蒙皮阴影 program：蒙皮阴影 VS(kSkinnedShadowVs) + 复用对象3D片元(kShadowFs，只写线性深度)。
@@ -1372,6 +1277,7 @@ void Renderer::CompileShaders() {
     SolidProg();
     TextProg();
     ImageProg();
+    PlateProg();
     Solid3DProg();
     Text3DProg();
     DrawObject3DProg();
@@ -1439,6 +1345,62 @@ void Renderer::BeginFrame(int render_w, int render_h) {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
+namespace {
+
+// 四档条带批（4/8/16/32）共用同一套批级字段（StripBatchStyle），但类型不同 ⇒ 没法塞进
+// 同一个容器。这里把「本帧有没有需要加法集 / 需要 CSM 的批」的四次扫描收成两个函数，
+// 渲染主流程里就只剩一行判断（否则主流程里会出现 8 段几乎逐字相同的循环）。
+bool StripBatchesNeedAdditive(const RenderCommandList& cmds) {
+    for (const TranslucentStrip4Batch& b : cmds.translucent_strip4s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip8Batch& b : cmds.translucent_strip8s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip16Batch& b : cmds.translucent_strips) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip32Batch& b : cmds.translucent_strip32s) {
+        if (b.blend == StripBlend::kEmissive) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 天光消费（= 要采 CSM）同理：四档任一有 sky_light 就得准备阴影资源。
+bool StripBatchesNeedCsm(const RenderCommandList& cmds) {
+    for (const TranslucentStrip4Batch& b : cmds.translucent_strip4s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip8Batch& b : cmds.translucent_strip8s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip16Batch& b : cmds.translucent_strips) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    for (const TranslucentStrip32Batch& b : cmds.translucent_strip32s) {
+        if (b.sky_light.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 void Renderer::Render(const RenderCommandList& cmds,
                        const WindowInfo& winfo) {
     glEnable(GL_BLEND);
@@ -1481,6 +1443,14 @@ void Renderer::Render(const RenderCommandList& cmds,
         }
     }
 
+    // env_specular 的反射源是天空：没有 sky 就没镜面可反射。宁可 crash 也不静默
+    // 退化成“金属块是黑的”——后者要查代码才能回答。
+    //
+    // 放在 has_3d 之前：本检查是**接口契约**，与“本帧恰好有没有 3D 物体”无关；
+    // 放在里面会让“设了 env 却没设 sky 且没有 3D 命令”的帧静默通过。
+    CHECK(!cmds.env_specular.has_value() || cmds.sky.has_value())
+        << "env_specular 需要 cmds.sky（环境镜面的光源就是天光）";
+
     if (has_3d) {
         // ---- 保存并设置 3D 所需 GL 状态 ----
         // 用 glPushAttrib 批保存所有受影响的 GL 状态位。
@@ -1512,11 +1482,6 @@ void Renderer::Render(const RenderCommandList& cmds,
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
         //                     后续由统一 tone map pass 压缩到 LDR。
         const bool use_hdr = cmds.tone_mapping;
-        // 半透明玻璃（kBlend）需要 WBO 浮点累加缓冲 + 体积雾合成 pass，仅在 HDR 路径支持。
-        const bool has_glass = HasBlendObjects(cmds);
-        CHECK(!has_glass || use_hdr)
-            << "alpha_mode==kBlend（透明玻璃）需要 tone_mapping=true（HDR 路径，"
-               "玻璃 FBO + 雾合成）；请开启 tone_mapping 或改用 kOpaque/kMask";
         CHECK(!cmds.elevation_fog.has_value() || !cmds.elevation_fog->enabled || use_hdr)
             << "elevation_fog 需要 tone_mapping=true（该雾在线性 HDR 域合成，"
                "tone map 之前）；否则会静默失效";
@@ -1576,7 +1541,29 @@ void Renderer::Render(const RenderCommandList& cmds,
             glBindFramebuffer(GL_FRAMEBUFFER, sky_fbo_);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
             SkyRenderer::DrawSky(*cmds.sky, cmds.camera, fbo_3d_w, fbo_3d_h,
-                                 shader_mgr_, /*atmo_only=*/true);
+                                 shader_mgr_, SkyRenderer::SkyOutput::kAtmoOnly);
+
+            // 环境镜面（IBL）的反射源：把天空渲成一张小 cubemap。
+            // 本块内做是因为此处深度测试已关、且已处“画天空”的上下文；
+            // 返回后已解绑 FBO（见 DrawSkyEnvCube 的后置条件），所以下面必须重绑主 3D 目标。
+            //
+            // sky_scale == 0 时不建：视觉上等价关闭，但“等价”不应该偷偷花代价——
+            // 用户的 toggle 拨到 0 就应该真是零成本（不渲染探针、不上传、shader 里 return 0）。
+            //
+            // ⚠️ 区间校验要放在 `> 0` 门**之前**：放到门内的话 `CHECK_GE(...,0)` 恒真，
+            //    形同虚设（负值被外层的 `>0` 默默滤掉，用户永远收不到报错）。
+            if (cmds.env_specular.has_value()) {
+                CHECK_GE(cmds.env_specular->sky_scale, 0.0f)
+                    << "EnvSpecular::sky_scale 必须 >= 0";
+                CHECK_LE(cmds.env_specular->sky_scale, 1.0f)
+                    << "EnvSpecular::sky_scale 必须 <= 1";
+                if (cmds.env_specular->sky_scale > 0.0f) {
+                    EnsureSkyEnvCube(kSkyEnvCubeSize);
+                    SkyRenderer::DrawSkyEnvCube(*cmds.sky, kSkyEnvCubeSize,
+                                                sky_env_tex_, sky_env_fbo_, shader_mgr_);
+                }
+            }
+
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
 
@@ -1605,9 +1592,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             // cutout 变体 program 同源，也需光照 uniform。
             Object3DRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
-            // blend 变体 program 同源，也需光照 uniform（透明 pass 用）。
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend());
             // 实例 program 同源，也需光照 uniform。
             InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
@@ -1634,11 +1618,6 @@ void Renderer::Render(const RenderCommandList& cmds,
             // cutout 变体 program 同源，也需 sun/阴影 uniform。
             Object3DRenderer::UploadSunData(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
-                shadow_fbos_, shadow_vp_, shadow_depth_vp_,
-                shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
-            // blend 变体 program 同源，也需 sun/阴影 uniform。
-            Object3DRenderer::UploadSunData(shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(),
                 shadow_fbos_, shadow_vp_, shadow_depth_vp_,
                 shadow_texel_world_, shadow_cfg_, cmds.shadow_pcf, eff_sun);
             // 实例 program 同源，也需 sun/阴影 uniform。
@@ -1674,9 +1653,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                 DrawObject3DProg(), DrawObject3DProgFull(), ambient);
             Object3DRenderer::UploadAmbient(shader_mgr_,
                 DrawObject3DProgCutout(), DrawObject3DProgFullCutout(), ambient);
-            // blend 变体 program 同源，也需 ambient uniform。
-            Object3DRenderer::UploadAmbient(shader_mgr_,
-                DrawObject3DProgBlend(), DrawObject3DProgFullBlend(), ambient);
             // 实例 program 同源，也需 ambient uniform。
             InstancedObjectRenderer::UploadAmbient(shader_mgr_,
                 DrawInstancedObjectProg(), DrawInstancedObjectProgFull(), ambient);
@@ -1689,6 +1665,42 @@ void Renderer::Render(const RenderCommandList& cmds,
                 SkinnedMeshProg(), ambient);
             SkeletonRenderer::UploadAmbient(shader_mgr_,
                 SkinnedMeshProgCutout(), ambient);
+        }
+
+        // 环境镜面（IBL specular）uniform。
+        //
+        // ⚠️ **只要本帧有会用到该 program 的命令就必须上传**（无论开没开）：
+        //   uniform 是 program 状态，上一帧开着而本帧不传 → 继续用旧的（可能已销毁的）cubemap。
+        //   未开时传 enabled=false，shader 里直接 return 0（零成本）。
+        //
+        // 分组与上面的 UploadAmbient **逐行对应**（同一批 PBR 变体）。分组不是为了好看：
+        // Draw*Prog() 是 GetOrCreate（首次调用即编译），多传一个组会白白把该组的 shader
+        // 编出来 —— 没有蒙皮命令的场景不该为了镜面去编译蒙皮 program。
+        const float env_scale =
+            cmds.env_specular.has_value() ? cmds.env_specular->sky_scale : 0.0f;
+        const bool env_on = env_scale > 0.0f;
+        // env_on 为真意味着本帧已在上面建过探针（同一份 sky_scale 条件）⇒ cube 非 0。
+        CHECK(!env_on || sky_env_tex_ != 0u)
+            << "env specular 已开启但没有天空 cubemap（建探针的条件与这里必须一致）";
+        const float env_max_lod = static_cast<float>(
+            std::log2(static_cast<double>(kSkyEnvCubeSize)));
+        const unsigned int env_cube = env_on ? sky_env_tex_ : 0u;
+        if (!cmds.object3d.empty() || !cmds.instanced_object.empty()) {
+            const unsigned int progs[] = {
+                DrawObject3DProg(), DrawObject3DProgFull(),
+                DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+            };
+            for (unsigned int prog : progs) {
+                UploadEnvSpecular(shader_mgr_, prog, env_cube, env_max_lod, env_scale, env_on);
+            }
+        }
+        if (!cmds.skinned_mesh.empty()) {
+            UploadEnvSpecular(shader_mgr_, SkinnedMeshProg(),
+                              env_cube, env_max_lod, env_scale, env_on);
+            UploadEnvSpecular(shader_mgr_, SkinnedMeshProgCutout(),
+                              env_cube, env_max_lod, env_scale, env_on);
         }
 
         // 拾取（color-ID）pass：仅在用户发起了 pick 查询时才跑。
@@ -1730,27 +1742,12 @@ void Renderer::Render(const RenderCommandList& cmds,
             unsigned int hdr_input_tex = color_tex_hdr_;
             unsigned int hdr_scene_depth_tex = scene_depth_tex_hdr_;
 
-            // 是否运行体积雾合成：有雾、或有透明玻璃（玻璃需与雾一起按深度合成）。
-            const bool run_fog = !cmds.point_fogs.empty() || has_glass;
-            // 透明玻璃 pass：把 kBlend 物体以 WBO 画进玻璃 FBO。无玻璃时也清空
-            //（提供恒等层 —— accum.a=0/reveal=1，composite 退化为全雾路径）。
-            // 只有**真有 kBlend 物体**时才建/清玻璃 FBO 并跑透明 pass。
-            // 无玻璃（纯雾）时 glass_input 保持无效 → fire_fog 的 has_glass=false →
-            // uHasGlass=0 → composite 不回读玻璃纹理 ⇒ 三张全屏浮点纹理的每帧 clear
-            // 与采样全免（run_fog 仍可因雾为真）。
-            FireFogGlass glass_input;
-            if (run_fog && has_glass) {
-                EnsureGlassFBO(fbo_3d_w, fbo_3d_h);
-                ClearGlassFBO();
-                DrawTransparentPass(cmds, fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex);
-                glass_input.accum_tex = glass_accum_tex_;
-                glass_input.reveal_tex = glass_reveal_tex_;
-                glass_input.depth_tex = glass_depth_tex_;
-            }
+            // 是否运行体积雾合成：本帧有点状雾体才跑（零雾体时整段不来）。
+            const bool run_fog = !cmds.point_fogs.empty();
 
-            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与 glass 同套 WBO 代数。
-            //    先把粒子画进 1/2 WBO FBO（accum/reveal/depth），再解析 over 合成进 HDR；
-            //    随后雾/玻璃按既有路径在 HDR 上继续（粒子会一起被雾/玻璃影响）。
+            // ── 广告牌粒子（WBO 分级纹理，1/2 分辨率）—— 与条带/体积火同套 WBO 代数。
+            //    先把粒子画进 1/2 WBO FBO（accum/reveal/additive），再解析 over 合成进 HDR；
+            //    随后雾体按既有路径在 HDR 上继续（粒子会一起被雾影响）。
             if (!cmds.particles.empty()) {
                 CHECK(use_hdr) << "粒子需要 tone_mapping=true（HDR/MRT 场景深度）";
                 particle_renderer_.Begin(fbo_3d_w, fbo_3d_h);
@@ -1784,20 +1781,48 @@ void Renderer::Render(const RenderCommandList& cmds,
 
             // ── 半透明条带（1× WBO 覆盖集）—— 层序：粒子 → 体积火 → **条带** → 远景雾。
             //    与体积火不共 FBO：火权重恒 1、条带用 WeightWbo，混一个 accum 会被权重尺度偏置。
-            if (!cmds.translucent_strips.empty()) {
+            const bool has_strip_batches =
+                !cmds.translucent_strip4s.empty() || !cmds.translucent_strip8s.empty() ||
+                !cmds.translucent_strips.empty() || !cmds.translucent_strip32s.empty();
+            if (has_strip_batches) {
                 CHECK(use_hdr) << "半透明条带需要 tone_mapping=true（HDR/MRT 场景深度）";
                 // 加法集附件按需申请：本帧有 kEmissive 批才建 att2。
-                bool strips_need_additive = false;
-                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
-                    if (sc.blend == StripBlend::kEmissive) {
-                        strips_need_additive = true;
-                        break;
+                const bool strips_need_additive = StripBatchesNeedAdditive(cmds);
+                strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
+                // CSM 资源：只有「本帧有开天光的条带批」时才整理这份拷贝（几个 POD + ≤5 个
+                // 纹理 id）。条带只是 effect pass，不该反过来持有阴影资源；这里直接喂给
+                // StripRenderer::Draw（与 fire_fog 的 FireFogLighting 同一模式）。
+                const bool strips_need_csm = StripBatchesNeedCsm(cmds);
+                StripCsmShadow strips_csm;
+                if (strips_need_csm && cmds.sun.has_value() && !shadow_fbos_.empty()) {
+                    strips_csm.sun = cmds.sun;
+                    strips_csm.cfg = shadow_cfg_;
+                    strips_csm.fbos = shadow_fbos_;
+                    for (int c = 0; c < ShadowConfig::kMaxCascades; ++c) {
+                        std::memcpy(strips_csm.vp[c], shadow_vp_[c], sizeof(strips_csm.vp[c]));
+                        std::memcpy(strips_csm.depth_vp[c], shadow_depth_vp_[c],
+                                    sizeof(strips_csm.depth_vp[c]));
+                        strips_csm.texel_world[c] = shadow_texel_world_[c];
                     }
                 }
-                strip_renderer_.Begin(fbo_3d_w, fbo_3d_h, strips_need_additive);
-                for (const TranslucentStripBatch& sc : cmds.translucent_strips) {
-                    strip_renderer_.Draw(sc, texture_mgr_, cmds.camera, mvp_,
-                                         hdr_scene_depth_tex, fbo_3d_w, fbo_3d_h);
+                // 四种采样数各走自己的命令；跨队列顺序无意义
+                //（覆盖集是 accum 加 / reveal 乘，加法集是纯求和，集合内部与顺序无关）。
+                const StripCsmShadow* csm_ptr = strips_csm.IsValid() ? &strips_csm : nullptr;
+                for (const TranslucentStrip4Batch& sc : cmds.translucent_strip4s) {
+                    strip_renderer_.Draw4(sc, texture_mgr_, cmds.camera, mvp_,
+                                          hdr_scene_depth_tex, csm_ptr, fbo_3d_w, fbo_3d_h);
+                }
+                for (const TranslucentStrip8Batch& sc : cmds.translucent_strip8s) {
+                    strip_renderer_.Draw8(sc, texture_mgr_, cmds.camera, mvp_,
+                                          hdr_scene_depth_tex, csm_ptr, fbo_3d_w, fbo_3d_h);
+                }
+                for (const TranslucentStrip16Batch& sc : cmds.translucent_strips) {
+                    strip_renderer_.Draw16(sc, texture_mgr_, cmds.camera, mvp_,
+                                           hdr_scene_depth_tex, csm_ptr, fbo_3d_w, fbo_3d_h);
+                }
+                for (const TranslucentStrip32Batch& sc : cmds.translucent_strip32s) {
+                    strip_renderer_.Draw32(sc, texture_mgr_, cmds.camera, mvp_,
+                                           hdr_scene_depth_tex, csm_ptr, fbo_3d_w, fbo_3d_h);
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
                 // 只写颜色附件：MRT#1（场景深度）本 pass 不碰，不摘会与采样形成反馈环。
@@ -1866,7 +1891,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                 }
                 fire_fog_renderer_.Draw(cmds.point_fogs, cmds.point_lights, cam, mvp_,
                                         fbo_3d_w, fbo_3d_h, hdr_scene_depth_tex,
-                                        ff_params, ff_light, &glass_input);
+                                        ff_params, ff_light);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ff[2] = {GL_COLOR_ATTACHMENT0,
@@ -2045,6 +2070,14 @@ void Renderer::Render(const RenderCommandList& cmds,
                 Primitives2DRenderer::DrawImage2D(cmds.image2d[idx], stream_vbo_, ImageProg(), texture_mgr_, fbo_w_, fbo_h_);
                 break;
             }
+            case DrawCommandType::kPlate2D: {
+                CHECK_GE(idx, 0);
+                CHECK_LT(idx, static_cast<int>(cmds.plate2d.size()));
+                Plate2DRenderer::DrawPlate2D(cmds.plate2d[idx], stream_vbo_,
+                                             PlateProg(), texture_mgr_,
+                                             fbo_w_, fbo_h_);
+                break;
+            }
             default:
                 break;
         }
@@ -2102,12 +2135,6 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                 CHECK_LT(idx, static_cast<int>(cmds.object3d.size()));
                 const Object3DCommand& obj = cmds.object3d[idx];
 
-                // 半透明玻璃（kBlend）不进主 3D pass（不写主 FBO / 不写场景深度）；
-                // 由 Render() 的透明 pass（DrawTransparentPass）单独以 WBO 渲进玻璃 FBO。
-                if (obj.material.alpha_mode == AlphaMode::kBlend) {
-                    break;
-                }
-
                 // 3D 内容绘制保持纯净：高亮由独立的 DrawHighlightPass 在 3D 内容全部
                 // 画完后统一叠加（见 Render()）。此处不掺任何 stencil 状态，DrawObject3D
                 // 只负责本体着色。
@@ -2128,7 +2155,8 @@ void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_
                     DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
                     DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
                     tile_index_tex_, instanced_object_model_buf_,
-                    instanced_object_blow_buf_);
+                    instanced_object_blow_buf_, instanced_object_tint0_buf_,
+                    instanced_object_tint1_buf_, instanced_object_tint_enabled_buf_);
                 break;
             }
             case DrawCommandType::kSkinnedMesh: {
@@ -2371,10 +2399,6 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         for (const auto& o : cmds.object3d) {
-            // 半透明玻璃（kBlend）不参与不透明阴影 pass（不投实心影）。
-            if (o.material.alpha_mode == AlphaMode::kBlend) {
-                continue;
-            }
             Object3DRenderer::DrawObject3DShadow(o, mesh_mgr_, texture_mgr_, shader_mgr_,
                                                  shadow_vp_[c], shadow_depth_vp_[c],
                                                  shadow_prog, shadow_prog_cutout);
@@ -2501,7 +2525,6 @@ void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo
     // ---- 三大 renderer 各画各的（各写自己的 id 段），共享同一张 pick FBO ----
     for (const auto& o : cmds.object3d) {
         if (o.picking_id == 0) continue;   // 不可拾取物体不参与
-        if (o.material.alpha_mode == AlphaMode::kBlend) continue;  // 半透明玻璃不参与拾取（本版）
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
                                               PickObject3DProg(), PickObject3DCutoutProg(),
                                               &pick_table_object3d_);
@@ -2688,7 +2711,6 @@ unsigned int Renderer::DrawHighlightPass(const RenderCommandList& cmds,
     Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp);
     for (const auto& o : cmds.object3d) {
         if (!o.highlight) continue;
-        if (o.material.alpha_mode == AlphaMode::kBlend) continue;  // 半透明玻璃不参与高亮（本版）
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp,
             HighlightObject3DProg(), HighlightObject3DCutoutProg(), nullptr);
     }

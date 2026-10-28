@@ -6,7 +6,7 @@
 #   ./make_bark_material.sh <src_dir> <out_dir>
 #
 #   <src_dir>  含 Bark001_1K-JPG_{Color,NormalGL,Roughness}.jpg 的目录
-#              （tools/vegetation/fetch_textures.sh 下下来的就是）
+#              （legacy/vegetation/fetch_textures.sh 下下来的就是）
 #   <out_dir>  产物目录，viewer 用 --bark <out_dir> 直接吃
 #
 # 产物（文件名固定，viewer 硬编码）：

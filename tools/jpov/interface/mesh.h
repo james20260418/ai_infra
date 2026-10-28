@@ -10,6 +10,8 @@
 //   即每顶点至多被 4 个关节影响。
 // - 布料 LAG 副运动（kRelax）：每顶点一对 (lag_ratio, max_lag)，用于蒙皮 VS 里对
 //   「当前 pose」与「滞后 pose」的混合比例 + 位移限幅（见 docs/jpov_instance_attr_lag_design.md）。
+// - 顶点 base tint 分区（kBaseTint）：每顶点一个 uint8 索引（0 = 不换色，1..N = 用第 i 号
+//   用户色乘 baseColor）。可与 kRelax / kWind **同时存在**（共用 loc6 的 .z）。
 // - GPUMesh（CPU → GPU 上传后的句柄）在 gpumesh.h 中定义，
 //   本文件只关心 CPU 侧数据。
 //
@@ -30,10 +32,12 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <glog/logging.h>
 #include "geom/common/vec.h"
+#include "tools/jpov/interface/pbr_material.h"  // kNumBaseTintColors（tint 索引空间单一来源）
 
 namespace jpov {
 
@@ -58,13 +62,25 @@ enum class MeshVertexFlags : uint8_t {
     kJoints   = 1 << 3,  // 骨骼蒙皮（joint_indices + joint_weights）
     kTangent  = 1 << 4,  // 切线（法线映射 TBN 用，需 kNormal + kUV）
     kRelax    = 1 << 5,  // 布料 LAG 副运动（relaxations：每顶点 (lag_ratio, max_lag)）
-    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6）
+    kWind     = 1 << 6,  // 植被风（wind_link：每顶点 (joint_id, phase)）；**与 kRelax 互斥**（同占 loc6 .xy）
+    kBaseTint = 1 << 7,  // base tint 分区（base_tint：每顶点 uint8 索引）；与 kRelax/kWind **可共存**
 };
 
 // 位掩码按位运算辅助：判断 flags 是否包含某属性。
 // 用法：HasFlag(mesh.flags, MeshVertexFlags::kNormal)
 inline bool MeshHasFlag(MeshVertexFlags flags, MeshVertexFlags flag) {
     return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(flag)) != 0;
+}
+
+// 有限性判据（**刻意不用 <cmath> 的 std::isfinite**）。
+//
+// 为什么：mesh.h 被大量 TU 间接包含。一旦这里 include <cmath>，MinGW 上 <math.h>
+// 会在 TU 定义 _USE_MATH_DEFINES 之前就被锁死（include guard），随后 math_util.h /
+// render_command.h 里的 M_PI/M_PI_2 全部“未定义” —— 2026-10-26 的 Windows CI 就是这么挂的。
+// <limits> 不拉 <math.h>，且判据不依赖浮点运算（-ffast-math 下 `v-v==0` 会被优化掉）。
+inline bool WindScalarIsFinite(float v) {
+    return v == v && v != std::numeric_limits<float>::infinity() &&
+           v != -std::numeric_limits<float>::infinity();
 }
 
 // ==================== CPU 侧网格数据 ====================
@@ -93,6 +109,20 @@ struct MeshData {
     //   .y = max_lag  ≥ 0    ：该顶点相对当前 pose 的最大允许位移（模型系，米；逐顶点限幅）。
     // 见 docs/jpov_instance_attr_lag_design.md §4.1 / §4.4。
     std::vector<Vec2f> relaxations;
+
+    // base tint 分区标注（逐顶点 uint8；kBaseTint 时非空）：
+    //   0 = 该顶点不参与换色；i ∈ [1, kNumBaseTintColors] = 用第 i 号用户色乘 baseColor。
+    // 语义：工具（clothing tool 的 tint 画笔）把涂到的顶点标成某个 id；baseColor 贴图应由
+    //   建模侧**涂白**或留白（白 × 用户色 = 用户色），引擎只做一次乘法、不改其它 PBR 通道。
+    // GPU：与 kRelax/kWind 共用 loc6 vec4 的 **.z**（见 mesh_manager.cc 的布局表）：
+    //   (lag_ratio, max_lag, tint, 0) 或 (joint_id, phase, tint, 0)。
+    // 渲染约定：着色器按 **flat（provoking vertex）** 读 ⇒ 一个三角形整体归属一个色；
+    //   画笔在三角形边界上可能左右不一致，边界由 provoking vertex 决定（MVP 接受）。
+    // 消费路径：三条 3D 路径都读它（索引来自 loc6.z）：
+    //   · object3d：颜色用 `PBRMaterial::base_tint`（逐物体）；
+    //   · 静态实例：颜色用 `InstanceState::base_tint`（逐实例）；
+    //   · 蒙皮：颜色用 `SkinnedInstanceState::base_tint`（逐实例）。
+    std::vector<uint8_t> base_tint;
 
     // 植被风标注（逐顶点；kWind 时非空）—— **只存 2 个数**，把此桩“次级运动槽”用到最省：
     //   .x = joint_id ∈ [0, wind_joints.size())：该顶点所属关节在关节表中的下标；
@@ -206,6 +236,18 @@ inline void MeshData::Validate() const {
         CHECK_EQ(relaxations.size(), vcount)
             << "MeshData::Validate: relaxations.size() != positions.size()";
     }
+    // base tint：逐顶点 uint8 索引，值域 0..kNumBaseTintColors（0 = 不换色）。
+    //   越界 id 会让片元着色器取不到调色板（静默不变色），故必须在注册时崩。
+    if (!base_tint.empty()) {
+        CHECK_EQ(base_tint.size(), vcount)
+            << "MeshData::Validate: base_tint.size() != positions.size()";
+        for (size_t i = 0; i < base_tint.size(); ++i) {
+            CHECK_LE(static_cast<int>(base_tint[i]), kNumBaseTintColors)
+                << "MeshData::Validate: base_tint[" << i << "] = "
+                << static_cast<int>(base_tint[i]) << " 越界（合法 0.."
+                << kNumBaseTintColors << "，0 = 不换色）";
+        }
+    }
     // 植被风：逐顶点 (joint_id, phase) 须与顶点数对齐；有关节下标就一定要有表。
     if (!wind_link.empty()) {
         CHECK_EQ(wind_link.size(), vcount)
@@ -267,6 +309,14 @@ inline void MeshData::Validate() const {
             << "MeshData::Validate: 未声明 kRelax 但 relaxations 非空";
     }
 
+    if (MeshHasFlag(flags, MeshVertexFlags::kBaseTint)) {
+        CHECK_EQ(base_tint.size(), vcount)
+            << "MeshData::Validate: flags 声明 kBaseTint 但 base_tint 长度不一致或缺数据";
+    } else {
+        CHECK(base_tint.empty())
+            << "MeshData::Validate: 未声明 kBaseTint 但 base_tint 非空";
+    }
+
     if (MeshHasFlag(flags, MeshVertexFlags::kWind)) {
         CHECK_EQ(wind_link.size(), vcount)
             << "MeshData::Validate: flags 声明 kWind 但 wind_link 长度不一致或缺数据";
@@ -274,18 +324,49 @@ inline void MeshData::Validate() const {
         CHECK(wind_link.empty())
             << "MeshData::Validate: 未声明 kWind 但 wind_link 非空";
     }
-    // kRelax 与 kWind **互斥**：二者同占顶点 loc6（次级运动通道），不能同一 mesh 同时声明。
+    // 关节表内容：**引擎会拿它算数**（载入期算 cum 链长、VS 逐 texelFetch），
+    // 所以非法值必须在注册时就崩，而不是渲染出畸形结果。
+    //   · pivot 必须是有限数（NaN/Inf 会污染整条链的 qpos 和 L）；
+    //   · parent 必须是 -1 或表内下标（越界会让 VS 的链走进垃圾 texel）；
+    //   · level ≥ 0（θ 的增益按 level 分档，负数等于反向拧）、soft ∈ [0,1]。
+    // phase 只查有限性：引擎对它只做 floor 取圈，任何有限值都合法。
+    for (size_t i = 0; i < wind_joints.size(); ++i) {
+        const WindJoint& j = wind_joints[i];
+        for (int a = 0; a < 3; ++a) {
+            CHECK(WindScalarIsFinite(j.pivot[a]))
+                << "MeshData::Validate: wind_joints[" << i << "].pivot 非有限数";
+        }
+        // parent 用 float 存（资产 7 float/关节）但语义是下标：先按范围兜住（NaN/±Inf
+        // 在这里必然为假），再确认是整数值 —— 否则“3.7 这种值”在 VS 里会四舍五入到 4。
+        CHECK(j.parent >= -1.0f && j.parent < static_cast<float>(wind_joints.size()))
+            << "MeshData::Validate: wind_joints[" << i << "].parent = " << j.parent
+            << " 越出关节表（合法值：-1 或 [0, " << wind_joints.size() << ")）";
+        const int parent = static_cast<int>(j.parent);   // 已被上式夹进 [-1, N) ⇒ 转换安全
+        CHECK(j.parent == static_cast<float>(parent))
+            << "MeshData::Validate: wind_joints[" << i << "].parent 必须是整数（-1 = 根），当前 "
+            << j.parent;
+        CHECK(WindScalarIsFinite(j.level) && j.level >= 0.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].level 必须是非负有限数";
+        CHECK(WindScalarIsFinite(j.phase))
+            << "MeshData::Validate: wind_joints[" << i << "].phase 非有限数";
+        CHECK(WindScalarIsFinite(j.soft) && j.soft >= 0.0f && j.soft <= 1.0f)
+            << "MeshData::Validate: wind_joints[" << i << "].soft 必须落在 [0,1]";
+    }
+
+    // kRelax 与 kWind **互斥**：二者同占顶点 loc6 的 .x/.y（次级运动通道），不能同一 mesh
+    // 同时声明。kBaseTint 只占 .z ⇒ 与两者都可共存（风树也能换色 = 四季变色）。
     CHECK(!(MeshHasFlag(flags, MeshVertexFlags::kRelax) &&
             MeshHasFlag(flags, MeshVertexFlags::kWind)))
-        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6），不能同时声明";
+        << "MeshData::Validate: kRelax 与 kWind 互斥（同占 loc6 的 .x/.y），不能同时声明";
 
     const bool joints_declared = MeshHasFlag(flags, MeshVertexFlags::kJoints);
-    // kWind 与 kJoints **互斥**：两者抢同一组顶点属性槽（loc3：蒙皮 `aJoint` vs
-    // 风的两关节权重 `aWindW`）。VAO 里只能绑一个，绑定顺序错了就是「权静默错位」——
-    // 看到的是模型变形怪异，而不是报错。这一条以前只写在 mesh_manager.cc 的注释里
-    // （「植被 mesh 不会被蒙皮路径绘制」），属于靠约定守着；放到 Validate 才是硬约束。
+    // kWind 与 kJoints **互斥**：两条特性走的是两套互不组合的顶点着色器
+    // （风 VS 只做关节链刚体变换、蒙皮 VS 只做骨骼查表），一个 mesh 同时声明等于
+    // 「哪条路径画它，另一半特性就静默消失」——看到的是变形怪异而不是报错。
+    // （2026-10-26 前这里是 loc3 属性槽冲突；顶点风改成 (joint_id, phase) 后 loc3 已释放，
+    //   互斥的理由变成「渲染路径只能选一条」，约束本身保留。）
     CHECK(!(joints_declared && MeshHasFlag(flags, MeshVertexFlags::kWind)))
-        << "MeshData::Validate: kWind 与 kJoints 互斥（同占 loc3：aWindW vs aJoint）";
+        << "MeshData::Validate: kWind 与 kJoints 互斥（风 VS 与蒙皮 VS 不组合）";
     if (joints_declared) {
         // 5. 骨骼 flag 时 joint_indices / joint_weights 必须成对存在且对齐
         CHECK_EQ(joint_indices.size(), vcount)

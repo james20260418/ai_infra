@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -188,6 +189,40 @@ TEST(GltfSaverTest, RoundTripRelaxAttribute) {
         EXPECT_NEAR(got.relaxations[i].x(), m.relaxations[i].x(), 1e-6f);
         EXPECT_NEAR(got.relaxations[i].y(), m.relaxations[i].y(), 1e-6f);
     }
+    std::remove(path.c_str());
+}
+
+// ==================== 1c. _JPOV_TINT（顶点 base tint 索引）写→读回 ====================
+
+TEST(GltfSaverTest, RoundTripBaseTintAttribute) {
+    MeshData m = MakeTriMesh(1.0f);
+    m.flags = static_cast<MeshVertexFlags>(
+        static_cast<uint8_t>(m.flags) |
+        static_cast<uint8_t>(MeshVertexFlags::kBaseTint));
+    // 0 = 不换色，1/2 = 两个调色板通道；dump 三个值覆盖全部合法 id。
+    m.base_tint = {0, 1, 2};
+    m.Validate();
+
+    GltfSaveAsset asset;
+    asset.name = "base_tint";
+    asset.meshes.push_back(GltfSaveMesh{m, GltfMaterialInfo{}});
+
+    const std::string path = TmpPath("base_tint");
+    std::remove(path.c_str());
+    ASSERT_TRUE(WriteGlb(asset, path)) << "WriteGlb 应成功";
+
+    Collect c;
+    ASSERT_TRUE(LoadGltfScene(path, CollectCb, &c)) << "写出的 glb 应能读回";
+    ASSERT_EQ(c.meshes.size(), 1u);
+    const MeshData& got = c.meshes[0];
+    ASSERT_TRUE(MeshHasFlag(got.flags, MeshVertexFlags::kBaseTint))
+        << "读回的 mesh 应带 kBaseTint（_JPOV_TINT 未往返）";
+    ASSERT_EQ(got.base_tint.size(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(got.base_tint[i], m.base_tint[i]) << "第 " << i << " 顶点 tint id 不一致";
+    }
+    // 索引是整数 id：若被当成归一化 ubyte 读回（/255），值会变成 0/1/255 之类。
+    EXPECT_EQ(static_cast<int>(got.base_tint[2]), 2);
     std::remove(path.c_str());
 }
 
@@ -393,8 +428,8 @@ TEST(GltfSaverTest, WrittenInverseBindAccessorCountMatchesBones) {
 
 // ==================== 4. 负面 ====================
 
-// 风（kWind）与蒙皮（kJoints）互斥：两者抢 loc3（aWindW vs aJoint），
-// 同时声明会让「权重绑到哪个属性」取决于绑定顺序 —— 静默错位，必须当场崩。
+// 风（kWind）与蒙皮（kJoints）互斥：两条特性走两套互不组合的 VS，
+// 同时声明会让「哪条路径画它，另一半特性就静默消失」——必须当场崩。
 TEST(GltfSaverTest, WindAndSkinFlagsAreMutuallyExclusive) {
     MeshData m = MakeQuadSkinnedMesh();
     MeshData::WindJoint j{};
@@ -420,6 +455,37 @@ TEST(GltfSaverTest, WindWithoutSkinValidates) {
         static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints) |
         static_cast<uint8_t>(MeshVertexFlags::kWind));
     m.Validate();   // 不崩即通过
+}
+
+// 关节表内容：引擎会拿它算数（载入期 cum 链长；VS 逐 texelFetch），非法值必须当场崩。
+// 三条各挑一个"看起来能过、跑起来静默出错"的配方。
+TEST(GltfSaverTest, WindJointParentOutOfRangeDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = 3.0f;   // 表里只有 1 个关节，parent 指向不存在的下标
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "parent");
+}
+
+TEST(GltfSaverTest, WindJointNonFinitePivotDies) {
+    MeshData m = MakeQuadSkinnedMesh();
+    MeshData::WindJoint j{};
+    j.parent = -1.0f;
+    j.pivot[1] = std::numeric_limits<float>::quiet_NaN();   // NaN 会污染整条链
+    m.wind_joints = {j};
+    m.wind_link.assign(m.positions.size(), Vec2f{0.0f, 0.5f});
+    m.joint_indices.clear();
+    m.joint_weights.clear();
+    m.flags = static_cast<MeshVertexFlags>(
+        (static_cast<uint8_t>(m.flags) & ~static_cast<uint8_t>(MeshVertexFlags::kJoints)) |
+        static_cast<uint8_t>(MeshVertexFlags::kWind));
+    EXPECT_DEATH(m.Validate(), "pivot");
 }
 
 TEST(GltfSaverTest, EmptyAssetCrashes) {

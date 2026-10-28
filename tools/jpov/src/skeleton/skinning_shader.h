@@ -52,8 +52,9 @@ namespace jpov {
 // 「真 instanced draw」的关键：实例间的差异必须走 **per-instance attribute**（divisor=1），
 // 不能走逐实例 uniform —— 后者必须逐实例一次 draw（N 实例 = N 次 draw call）。
 // 布局（2026-10-10 「loc 重排」后定稿，loc0..15 用满）：
-//   顶点属性：0 aPos 1 aNormal 2 aTexCoord 3 aJoint 4 aWeight 5 aTangent 6 aRelax(vec2)
-//   实例属性：7..10 aInstModel | 11 aInstPoseIds(vec4) | 12 aInstMisc(uvec4)
+//   顶点属性：0 aPos 1 aNormal 2 aTexCoord 3 aJoint 4 aWeight 5 aTangent
+//             6 aFlex(vec4：lag_ratio, max_lag, base tint id, 预留)
+//   实例属性：7..10 aInstModel | 11 aInstPoseIds(vec2) | 12 aInstMisc(uvec4)
 //             13 aInstPartial(uvec4) | 14 aInstPartialLag(uvec4) | 15 aInstPosLag(uvec4)
 //   布局的**唯一约定点**在 src/instance_buffer.h（kInstance*AttrSpec + 位打包 codec）；
 //   实例数据由渲染器持有的 InstanceBuffer 承载（属于「这次 draw」，不属于 mesh）。
@@ -84,10 +85,10 @@ layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
 
 uniform mat4 uViewProj;   // proj*view（每帧一张，全批共享）；世界→裁剪。model 走 aInstModel。
-// 布料 LAG 松弛度（per-**vertex**，divisor=0）：vec2(lag_ratio, max_lag)。
-//   ★ 本次把 loc6 从「per-instance 首槽」腾给顶点属性（model 已挪到 7..10）。
-//   当前**未消费**（LAG 的 mix / 限幅留作后续实现），仅声明以固定 layout。
-layout(location = 6) in vec2 aRelax;
+// 布料 LAG 松弛度 + base tint id（per-**vertex**，divisor=0）：loc6 统一 vec4。
+//   .x = lag_ratio，.y = max_lag，.z = base tint 索引（0=不换色，1/2=通道），.w 预留。
+//   ★ loc6 是从「per-instance 首槽」腾给顶点属性的（model 已挪到 7..10）。
+layout(location = 6) in vec4 aFlex;
 // per-instance 摆放矩阵（location 7..10 拆成 4 列；divisor=1，每实例推进一步）。
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
@@ -98,8 +99,8 @@ layout(location = 10) in vec4 aInstCol3;
 //   ⚠️ 统一 float（而非 IPointer）：见 instance_buffer.h kInstancePoseIdsAttrSpec 注释。
 layout(location = 11) in vec2 aInstPoseIds;
 // per-instance 杂项（divisor=1）：uvec4 = 16 byte 位视图（uint8）。
-//   byte0=ratio(pose)/255，byte1=保留，byte2..9=thick[0..7]（0.01+v/255*2.49），
-//   byte10..12=color0(RGB888)，byte13..15=color1(RGB888)。
+//   byte0=ratio(pose)/255，byte1=base tint 开关(0/1)，byte2..9=thick[0..7]
+//   （0.01+v/255*2.49），byte10..12=逐实例 color0(RGB888)，byte13..15=color1(RGB888)。
 //   解包见 MiscRatio / ThicknessOfChannel；偏移单一来源 instance_buffer.h。
 layout(location = 12) in uvec4 aInstMisc;
 // per-instance 部位额外旋转（pose，divisor=1）：2 个**模型系**四元数（xyzw）→ 8 个 half
@@ -135,7 +136,7 @@ uniform sampler2D uPartialBind;
 // 每通道 1 texel（RGBA32F，尺寸 kNumPartialRotation × 1）：(p_c.xyz, j_c 骨号)；未用 = 骨号 -1。
 uniform sampler2D uPartialChannel;
 // LAG 开关：0 = 本网格不带 kRelax（host **未 Attach** loc14/15）→ 整段跳过（**逐字节零回归**）；
-//   1 = 网格带 kRelax（松弛度场）→ 读 loc14/15 做「滞后姿势」第二遍蒙皮 + 按 aRelax mix。
+//   1 = 网格带 kRelax（松弛度场）→ 读 loc14/15 做「滞后姿势」第二遍蒙皮 + 按 aFlex.x（松弛度）mix。
 //   host 每 draw 依据 MeshHasFlag(kRelax) 置（见 SkeletonRenderer::DrawSkinnedMesh）。
 uniform int uLagEnabled;
 
@@ -143,6 +144,11 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+// 逐实例 tint：颜色来自 loc12 misc 的 RGB888；id 来自顶点 loc6.z（flat）。
+flat out vec3 vInstTint0;
+flat out vec3 vInstTint1;
+flat out int vTintEnabled;
+flat out int vTintIndex;
 #ifdef JPOV_PICK
 uniform int uPickIdBase;
 flat out uint vPickId;
@@ -182,6 +188,23 @@ void LoadDualQuatAt(int pose_col, int bone, out vec4 q, out vec4 t) {
 // pose 插值权重 ratio（来自 loc12 aInstMisc 的 byte0）。range [0,1]。
 float MiscRatio() {
     return float(aInstMisc.x & 0xFFu) / 255.0;
+}
+
+// 逐实例 tint（loc12 misc 的 byte1 + byte10..15；偏移单一来源 instance_buffer.h）。
+//   byte1 = 0/1 开关；color0 = byte10..12（.z 的高 16 位 + .w 的低 8 位）；
+//   color1 = byte13..15（.w 的高 24 位）。
+int MiscTintEnabled() {
+    return int((aInstMisc.x >> 8) & 0xFFu);
+}
+vec3 MiscTintColor0() {
+    return vec3(float((aInstMisc.z >> 16) & 0xFFu),
+                float((aInstMisc.z >> 24) & 0xFFu),
+                float(aInstMisc.w & 0xFFu)) / 255.0;
+}
+vec3 MiscTintColor1() {
+    return vec3(float((aInstMisc.w >> 8) & 0xFFu),
+                float((aInstMisc.w >> 16) & 0xFFu),
+                float((aInstMisc.w >> 24) & 0xFFu)) / 255.0;
 }
 
 // 本实例这一帧第 bone 根骨的对偶四元数：在 pose_a/pose_b（loc11）间按 ratio（loc12 byte0）NLERP。
@@ -538,8 +561,8 @@ void main() {
             lp = sp; ln2 = sn; lt = st;
         }
         lp += UnpackPosLag();                       // 位置滞后：模型系小偏移（设计 §6.6）
-        float relax = clamp(aRelax.x, 0.0, 1.0);    // 逐顶点松弛度（loc6 .x）
-        float maxlen = aRelax.y;                    // max_lag（loc6 .y）位移限幅（§4.4）
+        float relax = clamp(aFlex.x, 0.0, 1.0);     // 逐顶点松弛度（loc6 .x）
+        float maxlen = aFlex.y;                     // max_lag（loc6 .y）位移限幅（§4.4）
         vec3 delta = lp - sp;
         if (maxlen > 0.0) {
             delta = clamp(delta, vec3(-maxlen), vec3(maxlen));
@@ -557,6 +580,16 @@ void main() {
     vWorldNormal = normalize(mat3(transpose(inverse(inst_model))) * sn);
     vWorldTangent = normalize(mat3(transpose(inverse(inst_model))) * st);
     vTexCoord = aTexCoord;
+    vTintEnabled = MiscTintEnabled();
+    // 默认（未开 tint）不解码颜色：省 6 次 byte 提取 + 除法；FS 也不会用。
+    if (vTintEnabled == 1) {
+        vInstTint0 = MiscTintColor0();
+        vInstTint1 = MiscTintColor1();
+    } else {
+        vInstTint0 = vec3(0.0);
+        vInstTint1 = vec3(0.0);
+    }
+    vTintIndex = int(aFlex.z + 0.5);
     // 裁剪坐标 = (proj*view) * inst_model * 骨架空间顶点 = uViewProj * world。
     gl_Position = uViewProj * world;
 #ifdef JPOV_PICK
@@ -588,8 +621,8 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in ivec4 aJoint;
 layout(location = 4) in vec4 aWeight;
 layout(location = 5) in vec3 aTangent;
-// 逐顶点松弛度 (lag_ratio, max_lag)（loc6；LAG mix 用，同主 pass）。
-layout(location = 6) in vec2 aRelax;
+// 逐顶点松弛度 + tint id（loc6 统一 vec4；阴影只用 .x/.y，tint 不影响几何）。
+layout(location = 6) in vec4 aFlex;
 // per-instance 摆放矩阵（同主 pass：location 7..10 拆 4 列，divisor=1）。
 layout(location = 7) in vec4 aInstCol0;
 layout(location = 8) in vec4 aInstCol1;
@@ -908,8 +941,8 @@ void main() {
             lp = sp;  // 无 partial ⇒ 滞后 = 当前（只差 pos_lag）⇒ 省第二遍蒙皮
         }
         lp += UnpackPosLagS();
-        float relax = clamp(aRelax.x, 0.0, 1.0);
-        float maxlen = aRelax.y;
+        float relax = clamp(aFlex.x, 0.0, 1.0);
+        float maxlen = aFlex.y;
         vec3 delta = lp - sp;
         if (maxlen > 0.0) {
             delta = clamp(delta, vec3(-maxlen), vec3(maxlen));

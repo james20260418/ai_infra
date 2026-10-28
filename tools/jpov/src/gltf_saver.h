@@ -14,8 +14,10 @@
 // 顶点属性写入约定（与 loader 读回对称）：
 //   - POSITION / NORMAL / TEXCOORD_0 → FLOAT（VEC3/VEC3/VEC2）
 //   - TEXCOORD_1 → FLOAT VEC2：植被风的逐顶点 `(joint_id, phase)`（loader 读成
-//     `MeshData::wind_link`）。**两关节混合的 j1/权重不入 glb** —— 载入期由
-//     `MeshManager` 按「最近两个关节 + 1/d 权重」现算（见 mesh_manager.cc）。
+//     `MeshData::wind_link`）。joint_id 必须**按拓扑定准**（同枝同环共享一个关节）：
+//     渲染侧不再做任何"最近关节/权重"推断，存进去什么就吹什么。
+//   - _JPOV_TINT → UNSIGNED_BYTE SCALAR：顶点 base tint 索引（0 = 不换色，
+//     1..kNumBaseTintColors = 调色板通道；loader 读成 `MeshData::base_tint`）。
 //   - JOINTS_0 → UNSIGNED_SHORT VEC4（glTF 规范 JOINTS_0 允许 ushort；loader 读 int 侧无碍）
 //   - WEIGHTS_0 → FLOAT VEC4
 //   - indices → UNSIGNED_INT SCALAR（triangle list）
@@ -24,8 +26,8 @@
 // ⚠️ **node extras 契约：`jpov_wind_joints`**（植被风关节表）
 //   布局：`float[7 × N]`，每个关节 7 个 float = `[pivot.x, pivot.y, pivot.z, parent,
 //   level, phase, soft]`；`parent = -1` 表示根。
-//   写入方：本保存器（`MeshData::wind_joints` → extras）、以及**仓库外的平行实现**
-//   `tools/vegetation/wind_bake.py` + `build_tree.py`（Python 侧自己写 JSON）。
+//   写入方：本保存器（`MeshData::wind_joints` → extras）、以及已归档的 v1 实现
+//   `tools/jpov/legacy/vegetation/wind_bake.py` + `build_tree.py`（Python 侧自己写 JSON）。
 //   读取方：`gltf_loader.cc` → `MeshData::wind_joints`（读不到就告警并清空风数据）。
 //   ⇒ 这是**跨语言、跨工具的隐式契约**：改字段顺序/数量会让老资产静默变形成垃圾，
 //     必须同时改 loader、并提供旧布局的兼容分支。想加字段就往后追（8 float/关节），

@@ -61,6 +61,7 @@ cc_library(
     deps = [
         "//tools/jpov:view_config",
         "//tools/jpov/include/jpov:jpov",
+        "//tools/jpov/interface:tint_ui",
         "//tools/jpov/interface:ui",
     ],
     copts = ["-std=c++20"],
@@ -300,6 +301,49 @@ cc_binary(
 )
 
 # ============================================================================
+# sp_ui — SDF 板材版 UI（与大理石材质的演示台）
+# 面板从 ui_demo_panel.h 复制而来，控件动线相同，只把底板换成 Plate。
+# ============================================================================
+
+cc_library(
+    name = "sp_ui_demo_panel",
+    hdrs = ["demo/sp_ui_demo_panel.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:render_command",
+        "//tools/jpov/sp_ui:sp_ui",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_binary(
+    name = "jpov_sp_ui_demo",
+    srcs = ["demo/sp_ui_demo.cc"],
+    deps = [
+        "//tools/jpov:sp_ui_demo_panel",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_binary(
+    name = "jpov_sp_ui_demo.exe",
+    srcs = ["demo/sp_ui_demo.cc"],
+    deps = [
+        "//tools/jpov:sp_ui_demo_panel",
+        "//tools/jpov/include/jpov:jpov",
+    ],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ============================================================================
 # 示例：Screenshot Demo — 绘制后保存 PNG 截图
 # ============================================================================
 cc_binary(
@@ -494,55 +538,15 @@ cc_library(
 cc_binary(
     name = "jpov_strip_viewer",
     srcs = ["demo/jpov_strip_viewer.cc"],
+    # 玻璃缸场景（sky_light 验收）用的橡树：让 `bazel run` 也能找到资源。
+    # 不在 strip_viewer_app 库里，避免给 gold test 拖进一个 4k 模型。
+    data = ["//tools/jpov/assets/models:oak_tripo_negative_data"],
     deps = [
         ":strip_viewer_app",
         ":skylight_scene",
         ":view_config",
         "//tools/jpov/include/jpov:jpov",
         "@glog_static//:glog",
-    ],
-    target_compatible_with = [
-        "@platforms//os:linux",
-        "@platforms//cpu:x86_64",
-    ],
-)
-
-# ============================================================================
-# 植被查看器（vegetation viewer）— 植物生成链路的最后环节工具。
-# 装载已生成的植物 GLB（--glb <path>），在标准天光（昼夜可调）下观察 + 出图；
-# 光照复用 skylight_scene 的 SkyDegrees/MakeSkyLighting；SMAA 默认开。不含风。
-# ============================================================================
-cc_library(
-    name = "vegetation_viewer_app",
-    hdrs = ["demo/vegetation_viewer_app.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//tools/jpov:skylight_scene",
-        "//tools/jpov:view_config",
-        "//tools/jpov:viewer_app",
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:ui",
-        "//tools/common:utils",
-    ],
-    copts = ["-std=c++20"],
-)
-
-cc_binary(
-    name = "jpov_vegetation_viewer",
-    srcs = [
-        "demo/jpov_vegetation_viewer.cc",
-        "demo/vegetation_mesh_export.cc",
-        "demo/vegetation_mesh_export.h",
-    ],
-    deps = [
-        "//tools/jpov:vegetation_viewer_app",
-        "//tools/jpov:skylight_scene",
-        "//tools/jpov:view_config",
-        "//tools/jpov/include/jpov:jpov",
-        "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:wind_deform",
-        "//tools/jpov/src:gltf_loader",
-        "//tools/common:utils",
     ],
     target_compatible_with = [
         "@platforms//os:linux",

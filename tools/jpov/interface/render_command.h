@@ -34,6 +34,7 @@
 #include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/flipbook.h"
 #include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/interface/volume_fire_types.h"
@@ -92,6 +93,9 @@ enum class DrawCommandType : uint8_t {
                         //      CPU 三角化后以三角形列表渲染）
     kImage2D,           // 2D 图片（屏幕空间，像素坐标，
                         //      GPU 纹理采样 + 矩形面片）
+    kPlate2D,           // 2D 板材（屏幕空间，像素坐标，
+                        //      SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，
+                        //      见 Plate2DCommand / src/plate2d）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
     kInstancedObject,   // 3D 静态模型批量实例（世界空间，instancing）
@@ -359,6 +363,67 @@ struct FillRect2DCommand {
     float radius;
 };
 
+// 一块板材的**一层材质**（填充区 或 边框带 各用一层）。
+//
+// `texture_id == 0` = 纯色（不采样纹理，直接用该层的 tint）；
+// `texture_id != 0 && flipbook.fps > 0` = 按帧裁 UV 的翻书（格式约定见
+// `tools/jpov/interface/flipbook.h`）。
+//
+// 为什么平铺/翻书参数逐层而不是整块共享：Danis 2026-10-27 要「核心一个 flipbook、
+// 边界另一个 flipbook」——两层的图集、帧率、密度都可以不同（例如核心是水波、
+// 边界是另一条更慢的金属流）。时间轴仍是整块共享（同一个 time_seconds）。
+struct PlateLayer {
+    uint32_t texture_id = 0;            // 0 = 纯色
+    Vec2f tiling = {1.0f, 1.0f};        // 每边平铺次数（各分量 > 0）
+    Vec2f scroll = {0.0f, 0.0f};        // UV 平移（单位 = 一整张图）
+    FlipbookDesc flipbook;              // 图集网格 + 帧率（fps = 0 = 静止在第 0 帧）
+};
+
+// 2D 板材（渲染分辨率空间，像素坐标，原点左上角）
+//
+// 一块 UI 底板：圆角矩形轮廓在**片元里用解析距离场**求（不 CPU 三角化），
+// 因此任意尺寸/圆角都有 1px 解析抗锯齿；边框带、渐变消失带、材质平铺/翻书
+// 全部只是对同一个距离 d 做加减 ⇒ 零额外几何、零额外 draw call、交接处不裂。
+// 实现与着色器见 src/plate2d/plate2d_renderer.h。
+//
+// 混合：输出**预乘 alpha**，渲染器内部临时切到 (ONE, ONE_MINUS_SRC_ALPHA)，
+// 退出时恢复 2D 默认 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)。
+//
+// Pre-condition: size 各分量 > 0
+// Pre-condition: radius ∈ [0, min(size)/2]
+// Pre-condition: border_width ∈ [0, min(size)/2]；border_bump ∈ [0,1]；
+//                border_fade ∈ [0, border_width]
+// Pre-condition: fill / border 各层的 tiling > 0、flipbook 已 Validate、
+//                texture_id == 0 或已注册
+struct Plate2DCommand {
+    Vec2f pos;
+    Vec2f size;
+
+    // 圆角半径（像素）。等于 min(size)/2 时退化成胶囊。
+    float radius = 0.0f;
+
+    // ---- 填充区（外轮廓向内 border_width 以内）----
+    // 默认色用字面量而不是 jpov::kColorWhite：后者定义在 src/renderer.cc，
+    // 默认成员初始化会 odr-use 它 ⇒ 任何只依赖本头文件的 CPU 侧程序都得链渲染器。
+    Color fill_color = {1.0f, 1.0f, 1.0f, 1.0f};   // tint（无纹理时即本体色）
+    PlateLayer fill;
+
+    // ---- 边框带（从外轮廓向内 border_width 像素）----
+    Color border_color = {1.0f, 1.0f, 1.0f, 1.0f};  // 边框基色（剖面在其上做明暗）
+    PlateLayer border;
+    float border_width = 0.0f;         // 0 = 无边框
+    // 剖面曲率 [0,1]：0 = 平面带（只有常量底，无明暗），1 = 完整圆管剖面（假 3D 银色边）。
+    float border_bump = 0.0f;
+    // 渐变消失带宽（像素，[0, border_width]）：靠近内沿 alpha 收到 0，边淡入填充。
+    // 0 = 实心边。
+    float border_fade = 0.0f;
+
+    // ---- 时间轴（两块层共享）----
+    // **GPU 不取时钟**：时间由调用方给（秒，零点调用方自定），各层各自的 fps
+    // 决定自己的帧号。见 flipbook.h 的格式约定 §5。
+    float time_seconds = 0.0f;
+};
+
 // 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
 //
 // center:       圆心位置（像素坐标，原点在左上角）
@@ -573,6 +638,35 @@ struct AmbientLight {
     std::optional<std::array<Color, 3>> tricolor = std::nullopt;
 };
 
+// ==================== 环境镜面反射（IBL 的镜面项）====================
+//
+// PBR 的镜面项由**两半**组成，缺一不可：
+//   ① 直射高光 —— 点光源/太阳的 GGX 项，一直都有（`total_specular`）；
+//   ② 环境镜面 —— 材质对**周围环境**的镜像反射，本结构补的就是这一半。
+//
+// 为什么必须补：metallic=1 的材质没有漫反射，它的“颜色”**完全来自**环境反射。
+// 只有①时，金属除了太阳打出的那一小块高光以外无处取光，呈暗黑块状
+//（demo/skylight_scene.h 的 index 2 那条注释「无漫反射，纯环境反射」描述的正是
+// 这一项 —— 而管线此前从未实现过它）。
+//
+// 光源就是 SkyCommand（**不是**另一份独立配置，避免同一物理量出现两个来源）：
+// Renderer 每帧把天空渲成一张 128² 的 cubemap（6 个面；**只含大气色，不含日月盘/
+// 光晕** —— 日月的直射已由①给出，重复叠加会两倍亮），片元按 `reflect(-V, N)` 采样，
+// 并用 mip 级近似粗糙度带来的模糊。
+//
+// Pre-condition: 本帧必须设置 `cmds.sky`（环境镜面的光就是天光，没有天光就没有反射源）。
+//   缺失时 Renderer 直接 LOG(FATAL)，不静默退化 —— 静默会让“为什么金属是黑的”
+//   这个问题重新变成一个要查代码才能回答的问题。
+struct EnvSpecular {
+    // 天光消费量 [0,1]：1 = 全部消费天光（物理值），0 = 完全不消费（**完全关闭**：
+    // Renderer 不渲探针、不上传 uniform，与未设置该字段等价；不代表“等价但照旧付费”）。
+    //
+    // **全局**旋钮，不是 per-object：per-obstacle 的“这个物体能看见多少天光”
+    //（墙角的金属该暗、开阔处的该亮）计划由更强的体素光场接管，本版不做。
+    // 因此这里只有一个标量，没有任何 per-command 字段。
+    float sky_scale = 1.0f;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -671,14 +765,18 @@ struct SmaaConfig {
 // 无状态程序化风：位移在**顶点着色器**里算（非物理解算、非 CPU 模拟）。见
 // docs/jpov_vegetation_wind_design.md。
 //
-// ── 本版范围（重要）──
-//   **只接 object3d 路径**（DrawObject3D / DrawGltfObject）。instanced / 蒙皮路径**本版不动**。
+// ── 范围（重要）──
+//   接两条路径：**object3d**（DrawObject3D / DrawGltfObject）与**静态实例**
+//   （DrawInstancedObject，逐实例吹倒比例见 InstanceState::blow_away_ratio）。
+//   **蒙皮路径本版不动**。
 //   只有带风数据的 mesh（`MeshData.flags` 含 `kWind`）会被位移；以 **mesh 的关节表是否非空**
 //   为闸（`uWindJointCount>0`）—— 无表 mesh（如地面）完全不受影响。
 //
 // ── 数据（三处，各管一段）──
 //   · **逐顶点 loc6 = vec2(joint_id, phase)**（mesh 带 kWind 时；由 TEXCOORD_1 读入）：
-//       joint_id = 该顶点所属关节在关节表中的下标；phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//       joint_id = 该顶点所属**唯一**关节在关节表中的下标（烘焙期按拓扑定，不靠空间推断）；
+//       phase = 逐顶点连续相位场 [0,1)（湍流用）。
+//       路径长 L（吹倒权重）由 VS 沿关节链现算，不占顶点属性。
 //   · **关节表**（每 mesh 一张 RGBA32F 2N×1 纹理，texelFetch）：每关节 7 float ——
 //       texel(2j)=(pivot.xyz, parent)、texel(2j+1)=(level, phase, soft, 0)。
 //   · **本物体自己的风参数**（下列字段）：时间/振幅/频率/风向/湍流/阵风。
@@ -686,7 +784,7 @@ struct SmaaConfig {
 //       相位、强度各自独立）；不存在「全场景一份风」的全局命令。
 //
 // ── 位移公式（枢轴链 + 链外平动湍流）──
-//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死）：
+//   由顶点的 joint_id 沿 parent 链向根递推（每段刚体、保长、接头焊死；单关节，无混合）：
 //     q_j = q_parent + R(A_parent)·(pivot_j − pivot_parent)     // 位置：完整继承
 //     A_j = θ_j + (1 − soft_j)·A_parent                         // 朝向：按 (1−soft) 打折
 //     p'  = q_own + R(A_own)·(p − pivot_own)
@@ -710,7 +808,7 @@ struct WindCommand {
     float gust_strength  = 0.7f;   // 阵风强度 [0,1]；0 = 关掉起伏
     // ---- 吹歪（blow-away，曲线位移）----
     // 位移 = blow_ratio × L × (L / blow_ref_length)^(exponent−1)，沿**水平风向**。
-    //   L = 该顶点到根的父链总长度（MeshManager 载入期算好，loc6.z）。
+    //   L = 该顶点到根的父链总长度（VS 沿关节表父链现算，不占顶点属性）。
     //   与枢轴风/湍流**独立叠加**：枢轴风保长、吹歪是纯平移（像整株被风压弯）。
     //   blow_ratio 的量纲随指数变（1/m^(n−1)），只是观感参数，不是物理量。
     //   0 = 关闭（默认），非零时才有 uniform 上传开销。
@@ -1772,10 +1870,19 @@ struct InstanceState {
     //   继承模型干扰（软枝不跟风）；平移与 soft 无关。
     //   本实例每个顶点的位移：
     //     d = blow_away_ratio × L × (L/H)^(n−1)        // n = WindCommand::blow_away_exponent
-    //   L = 该顶点到 root 的父链总长度（载入期算好并在网格上平滑），
+    //   L = 该顶点到 root 的父链总长度（VS 现算，静止几何 ⇒ 沿枝单调），
     //   H = 模型系包围盒高，方向 = 风向量的**水平分量**（世界系 → 模型系）。
     //   0 = 不吹（默认，零开销）；上界由调用方自定（查看器给到 0.5）。
     float blow_away_ratio = 0.0f;
+
+    // ---- 逐实例 base tint 调色板（可选）----
+    // 与 `PBRMaterial::base_tint` 同构（enable + 2×RGB），但**逐实例**：同一批实例可各用
+    // 不同颜色（植被四季 / 人群衣服分色）。
+    //   · enabled=false（默认）= 本实例不做 tint 乘法（即使 mesh 有 kBaseTint id）；
+    //   · enabled=true 时，mesh 的逐顶点 id 1/2 分别乘 color[0]/color[1]；id 0 不受影响。
+    //   · 颜色分量按 [0,1] 处理（渲染端 clamp；见 instance_buffer.h / attrs 注释）。
+    // ⚠️ 只有 mesh 带 `kBaseTint` 逐顶点 id 时才有效；本字段不改变几何/其它 PBR 通道。
+    BaseTint base_tint;
 };
 
 // Pre-condition: mesh_id 已注册未释放；instances 非空（空 = 不画）。
@@ -1824,6 +1931,7 @@ struct SkinnedMeshCommand {
     std::vector<SkinnedInstanceState> instances;  // 这批实例。每实例 {pose_a,pose_b,ratio} 在
                              // SkinnedInstanceState(见 skeleton_types.h)，pose 须同属 skeleton_id。
                              // 若 rest mesh 带 kRelax，实例还可给 pos_lag / partial_rotations_lag（LAG）。
+                             // 逐实例 tint 走 `SkinnedInstanceState::base_tint`（不看 material.base_tint）。
     PBRMaterial material;    // 该蒙皮网格的材质（同 Object3DCommand.material 语义；M1 用于
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
@@ -1967,6 +2075,7 @@ struct RenderCommandList {
     std::vector<Strip2DCommand> strip2d;
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
+    std::vector<Plate2DCommand> plate2d;
     std::vector<Object3DCommand> object3d;
     // 3D 静态批量实例命令（世界空间, instancing）。存一批 per-instance 摆放，渲染时归成一次
     // instanced draw。同 mesh 才能同批（见 InstancedObjectCommand）。
@@ -1987,8 +2096,17 @@ struct RenderCommandList {
 
     // 半透明条带批（世界空间）。每条命令 = 一批「同材质」条带，**一次 draw call**。
     // 在体积火之后、远景雾之前渲染：写 1× WBO 覆盖集再 over 合成进 HDR。
-    // 见 TranslucentStripBatch / docs/jpov_strip3d_translucent_design.md。
-    std::vector<TranslucentStripBatch> translucent_strips;
+    // 见 docs/jpov_strip3d_translucent_design.md。
+    //
+    // 两种采样数各一条队列，**不是一个队列 + 变体**：
+    //   * 数据类型（Strip16 / Strip4）与命令（DrawStrip16Batch / DrawStrip4Batch）在接口处
+    //     就分开，传错在编译期就报；渲染器内部按各自的拓扑批量上传 + 一次 draw。
+    //   * 两条队列之间**顺序无意义**：覆盖集是 accum 加 / reveal 乘，加法集是纯求和，
+    //     集合内部本来就与顺序无关（见 strip_types.h 的 StripBlend 说明）。
+    std::vector<TranslucentStrip4Batch> translucent_strip4s;      // 4  采样点（8 顶点/条）
+    std::vector<TranslucentStrip8Batch> translucent_strip8s;      // 8  采样点（16 顶点/条）
+    std::vector<TranslucentStrip16Batch> translucent_strips;      // 16 采样点（32 顶点/条）
+    std::vector<TranslucentStrip32Batch> translucent_strip32s;    // 32 采样点（64 顶点/条）
     // TODO(2026-09-06): 若按 body slot 把肉体/装备拆多份 mesh → 每份一个 SkinnedMeshCommand
     //    即可（同 mesh 才能同批 instancing）；该池只在此层存“同 mesh+skeleton 批”。
     //    高/低模 LOD 各一份 mesh=各一份命令(still 一次 batch instanced draw)，归用户可见性层切。
@@ -2037,6 +2155,12 @@ struct RenderCommandList {
     // 全局环境光。未设置时使用默认值（中性灰白 × 0.4），后续可由 SkyCommand
     // 自动推导。有值时按用户给定的颜色/强度照亮物体背阳面（无方向、无影子）。
     std::optional<AmbientLight> ambient;
+
+    // 环境镜面反射（IBL specular）：未设置时**零开销零回归**（不渲 cubemap、
+    // shader 里 uEnvEnabled=0 直接返回 0）。设置后所有 PBR 材质（静态 / 实例 / 蒙皮）
+    // 默认消费天光 —— 见 EnvSpecular 与 docs/jpov_env_specular_design.md。
+    // Pre-condition: 设置时必须同时设置 sky（否则 Renderer LOG(FATAL)）。
+    std::optional<EnvSpecular> env_specular;
 
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
@@ -2281,6 +2405,12 @@ struct RenderCommandList {
                    const Vec2f& size,
                    const Color& tint = kColorWhite);
 
+    // 2D 板材（渲染分辨率空间，像素坐标）
+    //
+    // SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，一块板材一次 draw call。
+    // 字段语义与 Pre-condition 见 Plate2DCommand。
+    void DrawPlate(const Plate2DCommand& plate);
+
     // ---- 3D 静态模型 ----------------
 
     // 3D 静态模型（世界空间，参与深度测试）
@@ -2402,10 +2532,18 @@ struct RenderCommandList {
     // Pre-condition: cmd.volume_id != 0。
     void DrawVolumeFire(VolumeFireCommand cmd);
 
-    // DrawTranslucentStrips：追加一批半透明条带（见 TranslucentStripBatch）。
+    // DrawStrip16Batch：追加一批 16 采样点的半透明条带（见 TranslucentStrip16Batch）。
     // 只是把命令推入 translucent_strips 列表；整批在条带 pass 里**一次 draw call** 画完。
     // Pre-condition: cmd.strips 非空。
-    void DrawTranslucentStrips(TranslucentStripBatch cmd);
+    void DrawStrip16Batch(TranslucentStrip16Batch cmd);
+
+    // DrawStrip4Batch / 8 / 32：与 DrawStrip16Batch **并列的四条命令**，不是同一个命令的参数 ——
+    // 采样数属于「这是哪种拓扑」，是接口层语义，不该藏在运行期字段里。
+    // （条带顶点数 = 2×采样数：4→8 / 8→16 / 16→32 / 32→64。）
+    // Pre-condition: cmd.strips 非空。
+    void DrawStrip4Batch(TranslucentStrip4Batch cmd);
+    void DrawStrip8Batch(TranslucentStrip8Batch cmd);
+    void DrawStrip32Batch(TranslucentStrip32Batch cmd);
 };
 
 }  // namespace jpov

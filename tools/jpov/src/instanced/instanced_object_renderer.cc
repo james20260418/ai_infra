@@ -132,6 +132,34 @@ void UploadBlowAwayRatios(const InstancedObjectCommand& cmd,
     instance_blow_buf->Upload(blow);
 }
 
+// 把逐实例 tint 调色板上传进 loc12/13/14 缓冲（颜色分量 clamp 到 [0,1]）。
+// Pre-condition: 三个 buf 的 spec 分别是 kTint0/kTint1/kTintEnabledAttrSpec。
+void UploadInstanceTints(const InstancedObjectCommand& cmd,
+                         InstanceBuffer* tint0_buf, InstanceBuffer* tint1_buf,
+                         InstanceBuffer* enabled_buf) {
+    const size_t n = cmd.instances.size();
+    std::vector<float> tint0(n * 3);
+    std::vector<float> tint1(n * 3);
+    std::vector<float> enabled(n);
+    for (size_t k = 0; k < n; ++k) {
+        const BaseTint& t = cmd.instances[k].base_tint;
+        const float rgb0[3] = {t.color[0].r, t.color[0].g, t.color[0].b};
+        const float rgb1[3] = {t.color[1].r, t.color[1].g, t.color[1].b};
+        for (int c = 0; c < 3; ++c) {
+            CHECK(std::isfinite(rgb0[c])) << "实例 " << k << " tint color0 非有限值";
+            CHECK(std::isfinite(rgb1[c])) << "实例 " << k << " tint color1 非有限值";
+            tint0[k * 3 + static_cast<size_t>(c)] =
+                std::clamp(rgb0[c], 0.0f, 1.0f);
+            tint1[k * 3 + static_cast<size_t>(c)] =
+                std::clamp(rgb1[c], 0.0f, 1.0f);
+        }
+        enabled[k] = t.enabled ? 1.0f : 0.0f;
+    }
+    tint0_buf->Upload(tint0);
+    tint1_buf->Upload(tint1);
+    enabled_buf->Upload(enabled);
+}
+
 // ==================== UploadLightData ====================
 
 void InstancedObjectRenderer::UploadLightData(const RenderCommandList& cmds,
@@ -316,7 +344,10 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
                                                    unsigned int prog_full_cutout,
                                                    unsigned int tile_index_tex,
                                                    InstanceBuffer& instance_model_buf,
-                                                   InstanceBuffer& instance_blow_buf) {
+                                                   InstanceBuffer& instance_blow_buf,
+                                                   InstanceBuffer& instance_tint0_buf,
+                                                   InstanceBuffer& instance_tint1_buf,
+                                                   InstanceBuffer& instance_tint_enabled_buf) {
     const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
     CHECK(mesh != nullptr) << "DrawInstancedObject: mesh_id " << cmd.mesh_id
                            << " 未注册（DrawInstancedObject 前需先 RegisterMesh）";
@@ -474,12 +505,32 @@ void InstancedObjectRenderer::DrawInstancedObject(const InstancedObjectCommand& 
         UploadBlowAwayRatios(cmd, &instance_blow_buf);
     }
 
+    // 逐实例 tint：只要本批有实例打开就上传/挂载三份属性；全部关闭时**整段跳过**
+    // （shader 读到默认值 enabled=0，零 CPU/带宽开销）。
+    bool tint_on = false;
+    for (const InstanceState& inst : cmd.instances) {
+        if (inst.base_tint.enabled) {
+            tint_on = true;
+            break;
+        }
+    }
+    if (tint_on) {
+        UploadInstanceTints(cmd, &instance_tint0_buf, &instance_tint1_buf,
+                            &instance_tint_enabled_buf);
+    }
+
     const GLsizei n_inst = static_cast<GLsizei>(n);
     {
-        // RAII 配对挂载 per-instance 矩阵（loc7..10）+ 吹倒比例（loc11，仅吹风时）。
+        // RAII 配对挂载 per-instance 矩阵（loc7..10）+ 吹倒比例（loc11，仅吹风时）
+        // + tint 调色板（loc12..14，仅本批有实例启用时）。
         std::vector<const InstanceBuffer*> binds = {&instance_model_buf};
         if (wind_on) {
             binds.push_back(&instance_blow_buf);
+        }
+        if (tint_on) {
+            binds.push_back(&instance_tint0_buf);
+            binds.push_back(&instance_tint1_buf);
+            binds.push_back(&instance_tint_enabled_buf);
         }
         InstanceBufferBinding bind(mesh->vao, binds);
         glBindVertexArray(mesh->vao);

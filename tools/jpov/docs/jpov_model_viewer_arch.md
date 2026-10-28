@@ -19,7 +19,7 @@
 | 光照 | SkyCommand 正午，太阳方向 (0,-1,-1)，sky 推导平行光+ambient | `MakeNoonLighting()` | ✅ 复用 sun_path 模式，ambient=0.3 |
 | glTF 路径 | 产物第一参数给定（相对/绝对） | `FirstNonFlagArg()` | ✅ 符合 |
 | 帧率 | 60 fps | `cfg.target_fps=60` | ✅ 符合 |
-| 交互 | 右键 drag 视角 + 滚轮 zoom（R） | `ApplyInput()` | ✅ 公式与需求一致（见 §4） |
+| 交互 | 右键 drag 视角 + 滚轮 zoom（R）+ 中键纵向 pan | `ApplyInput()` / `VerticalPanDeltaY()` | ✅ 公式与需求一致（见 §4） |
 | AI 自查 | `--four_views`：headless 渲染 4 角度，输出 front/up/left/perspective 到同级目录，不弹窗 | `RunFourViews()` | ✅ 符合（见 §5） |
 
 **总体判断**：复用分支的 7 个文件（1 架构文档 / 1 header / 2 demo / 1 测试 / 1 BUILD / 1 sh）
@@ -94,6 +94,8 @@ position.z = R * cos(phi) * cos(theta)
   故取负）
 - 滚轮每格 R ×√2（放大）或 ×/√2（缩小）；R clamp [0.1, 300]。
   注意：同帧多格 scroll 要按格数连乘倍率，而非当作单格。
+- 中键纵向 drag = 纯平移：`cam_target_y_ += mouse_dy * 2 / window_h`（半屏 = 1m）；
+  相机 `position` 与 `target` **同时**加该 Y 偏移（朝向不变）。与 clothing tool 同款。
 
 默认初始视角：`(1,1,1)→(0,1,0)` 精确复现为 `{phi=0, theta=π/4, R=√2}`。
 

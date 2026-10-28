@@ -60,13 +60,13 @@ uniform float uWindAmplitude;
 uniform float uWindFrequency;
 uniform vec3  uWindDirection;    // 风向（单位向量；世界空间）
 uniform int   uWindJointCount;   // 关节表条目数（0 = 无表 → 不动）
-uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,0)
+uniform sampler2D uWindJointTex; // RGBA32F 2N×1：texel(2j)=(pivot.xyz,parent)；texel(2j+1)=(level,phase,soft,到根的链长)
 uniform float uWindTurbAmp;
 uniform float uWindTurbFreq;
 uniform float uWindGustFreq;
 uniform float uWindGustStr;
 // 吹歪（blow-away）：纯平移，沿水平风向；与枢轴风/湍流独立叠加。
-//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（loc6.z，载入期平滑）。
+//   位移 = ratio × L × (L/H)^(n−1)，L = 顶点到根的父链长度（由关节链现算，不占顶点属性）。
 uniform float uWindBlowRatio;
 uniform float uWindBlowExponent;
 uniform float uWindBlowRefLength;
@@ -79,7 +79,9 @@ vec3 WindRotVecAxis(vec3 v, vec3 axis, float th) {
     float s = sin(th);
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
-vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
+// 单个关节的刚性链变换。own0 = 该关节的 texel(2j)（pivot.xyz, parent），由调用方取好传进来
+//   —— 调用方算吹倒权重时也要用同一个 texel，传参比各取一次省一次 fetch。
+vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis, vec4 own0) {
     // 刚性链（硬↔软，单轴角度）：q_j=q_parent+R(A_parent)(pivot_j−pivot_parent)；
     // A_j=θ_j+(1−s_j)·A_parent；p'=q_own+R(A_own)(p−pivot_own)。
     int chain[kMaxWindChain];
@@ -120,7 +122,6 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
         pp = t0.xyz;
         Ap = A;
     }
-    vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * jstart, 0), 0);
     n_in = WindRotVecAxis(n_in, axis, A);
     return qpos + WindRotVecAxis(p_in - own0.xyz, axis, A);
 }
@@ -130,55 +131,44 @@ vec3 ObjectWindApplyJoint(int jstart, vec3 p_in, inout vec3 n_in, vec3 axis) {
 vec3 ObjectWindDisplace(vec3 p_in, inout vec3 n_in) {
     vec3 p = p_in;
     vec3 wn = n_in;
-if (uWindEnabled == 1 && uWindJointCount > 0) {
+    if (uWindEnabled == 1 && uWindJointCount > 0) {
         vec3 wdir = normalize(uWindDirection + vec3(1e-6, 0.0, 0.0));
         vec3 axis = cross(vec3(0.0, 1.0, 0.0), wdir);
         float al = length(axis);
         axis = (al > 1e-5) ? axis / al : vec3(1.0, 0.0, 0.0);
+        // 单关节：顶点只属于一个刚性段（joint_id 是烘焙期按拓扑直接算出来的，
+        // 没有"最近的两个关节"这种歧义）。同一枝的同一环共享关节 ⇒ 环内不会被切开。
         int j0 = clamp(int(floor(aFlex.x + 0.5)), 0, uWindJointCount - 1);
-        // 两关节混合（与 instanced 路径同一套语义）：单关节硬指派会在链接边界把相邻顶点
-        // 劈到两条链上 —— 管子被拉成薄片（"撕皮"）。MeshManager 载入时已按「最近两个关节 +
-        // 1/d 权重 + 5mm 焊接」算好 j0/j1/w（loc6.xyz=..., loc3=权重），这里按权重 lerp。
-        int j1 = clamp(int(floor(aFlex.w + 0.5)), 0, uWindJointCount - 1);
-        float wblend1 = clamp(aWindW.y, 0.0, 1.0);
-        {
-            vec3 p_rest = p;
-            vec3 n_rest = wn;
-            vec3 n_j0 = n_rest;
-            vec3 p_j0 = ObjectWindApplyJoint(j0, p_rest, n_j0, axis);
-            if (j1 == j0 || wblend1 <= 0.0) {
-                p = p_j0;
-                wn = n_j0;
-            } else {
-                vec3 n_j1 = n_rest;
-                vec3 p_j1 = ObjectWindApplyJoint(j1, p_rest, n_j1, axis);
-                p = mix(p_j0, p_j1, wblend1);
-                wn = normalize(mix(n_j0, n_j1, wblend1));
-            }
-        }
+        vec4 own0 = texelFetch(uWindJointTex, ivec2(2 * j0, 0), 0);
         vec4 own1 = texelFetch(uWindJointTex, ivec2(2 * j0 + 1, 0), 0);
-            // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
-            float lev0 = clamp(own1.x, 0.0, 3.0);
-            float sof0 = clamp(own1.z, 0.0, 1.0);
-            float tph = uWindTime + aFlex.y;
-            float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
-            float tpj = tfq * tph;
-            tpj -= floor(tpj);
-            float gph = uWindGustFreq * tph;
-            gph -= floor(gph);
-            float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
-            float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
-            float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
-            vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
-                                  + wdir * 0.4 + vec3(1e-4, 0.0, 1e-4));
-            p += tdir * (tamp * sin(6.28318531 * tpj));
-            // 吹歪：整体向风向压弯（越靠梢位移越大）。L 来自 loc6.z（不是逐关节量，
-            // 所以空间连续，不会在关节处出现台阶）。
-            if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && aFlex.z > 0.0) {
-                float ty = clamp(aFlex.z / uWindBlowRefLength, 0.0, 4.0);
-                p += wdir * (uWindBlowRatio * aFlex.z *
-                             pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
-            }
+        // 到根的链长 = 关节表里预存的 cum（逐关节量）+ 顶点到自己枢轴的距离。
+        float path_len = own1.w + length(p - own0.xyz);
+        p = ObjectWindApplyJoint(j0, p, wn, axis, own0);
+        // 链外平动湍流：相位取逐顶点连续场 aFlex.y；幅度掩膜取关节 soft·(0.5+0.5·level)。
+        float lev0 = clamp(own1.x, 0.0, 3.0);
+        float sof0 = clamp(own1.z, 0.0, 1.0);
+        float tph = uWindTime + aFlex.y;
+        float tfq = uWindTurbFreq * (1.0 + kTurbLevF * lev0);
+        float tpj = tfq * tph;
+        tpj -= floor(tpj);
+        float gph = uWindGustFreq * tph;
+        gph -= floor(gph);
+        float burst = pow(max(0.0, 0.5 + 0.5 * sin(6.28318531 * gph)), kTurbGustP);
+        float gust = mix(1.0, burst, clamp(uWindGustStr, 0.0, 1.0));
+        float tamp = uWindTurbAmp * sof0 * (0.5 + 0.5 * lev0) * gust;
+        vec3 tdir = normalize(axis * 0.6 + vec3(0.0, 0.7, 0.0)
+                              + wdir * 0.4 + vec3(1.0e-4, 0.0, 1.0e-4));
+        p += tdir * (tamp * sin(6.28318531 * tpj));
+        // 吹歪：整体向风向压弯（越靠梢位移越大）。path_len 见上面（关节表 cum + 本段距离）。
+        //   方向取**水平分量**（与 instanced 路径、与 WindCommand 的文档一致）：
+        //   带仰角的风向只影响摇摆轴/湍流，不该把整株往上抬。
+        vec3 hw = vec3(wdir.x, 0.0, wdir.z);
+        vec3 hdir = (length(hw) > 1.0e-5) ? normalize(hw) : vec3(1.0, 0.0, 0.0);
+        if (uWindBlowRatio > 0.0 && uWindBlowRefLength > 1.0e-6 && path_len > 0.0) {
+            float ty = clamp(path_len / uWindBlowRefLength, 0.0, 4.0);
+            p += hdir * (uWindBlowRatio * path_len *
+                         pow(max(ty, 1.0e-6), uWindBlowExponent - 1.0));
+        }
     }
     n_in = wn;
     return p;
@@ -191,8 +181,9 @@ const std::string& Vs3dPBRText() {
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（布局见 MeshManager 注释）：
+//   (lag_ratio 或 joint_id, max_lag 或 phase, base tint 索引, 预留)
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -200,6 +191,8 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+// base tint 索引：flat（provoking vertex）⇒ 一个三角形整体归属一个 id。
+flat out int vTintIndex;
 #ifdef JPOV_PICK
 uniform int uPickIdBase;
 flat out uint vPickId;
@@ -213,6 +206,7 @@ void main() {
     vWorldNormal = wn;
     vTexCoord = vec2(0.0);
     vWorldTangent = vec3(0.0);
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -229,8 +223,8 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aTangent;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（布局见 MeshManager 注释）。
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -238,6 +232,8 @@ out vec3 vWorldPos;
 out vec3 vWorldNormal;
 out vec2 vTexCoord;
 out vec3 vWorldTangent;
+// base tint 索引：flat（provoking vertex）⇒ 一个三角形整体归属一个 id。
+flat out int vTintIndex;
 #ifdef JPOV_PICK
 uniform int uPickIdBase;
 flat out uint vPickId;
@@ -252,6 +248,7 @@ void main() {
     vWorldNormal = wn;
     vWorldTangent = normalize(nrm * aTangent);
     vTexCoord = aTexCoord;
+    vTintIndex = int(aFlex.z + 0.5);
     gl_Position = uMVP * vec4(p, 1.0);
 #ifdef JPOV_PICK
     vPickId = uint(uPickIdBase) + uint(gl_InstanceID);
@@ -265,8 +262,8 @@ const std::string& ShadowVsText() {
     static const std::string text = std::string(R"glsl(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 6) in vec4 aFlex;   // 植被风：(j0, phase, L, j1)；非风 mesh 时恒 (0,0,0,0)
-layout(location = 3) in vec2 aWindW;  // 植被风：两关节混合权重 (w0,w1)；非风 mesh 时恒 (0,0)
+// loc6 统一按 vec4 读（阴影只需要风：.xy；.z 的 tint 不影响几何）。
+layout(location = 6) in vec4 aFlex;
 uniform mat4 uShadowMVP;
 uniform mat4 uShadowDepthMVP;
 )glsl") + kObjectWindGlsl + R"glsl(
@@ -382,13 +379,9 @@ void UploadObjectWindUniforms(unsigned int prog, const Object3DCommand& cmd,
     glActiveTexture(GL_TEXTURE0);
 }
 
-// DrawObject3D / DrawObject3DBlend 共用的「材质 + 光照 uniform 绑定、纹理绑定、绘制」。
+// DrawObject3D 共用的「材质 + 光照 uniform 绑定、纹理绑定、绘制」。
 // 调用方负责：已 glUseProgram(selected_prog)、已建好 model / mvp_final。
-//   blend=true 时额外上传 uAlpha（= base_color.a）并绑 scene_depth 到 uGlassSceneDepth，
-//   供透明 pass 的 blend 变体 FS 手动作深度测试。其余与不透明路径**完全共用**
-//  （同一份 kMeshFs3dPBR 源，仅 blend 宏改变输出与末尾分支）。
-// Pre-condition: selected_prog 已激活（glUseProgram）；mesh != nullptr；
-//                blend=false -> scene_depth_tex 忽略；blend=true -> scene_depth_tex != 0。
+// Pre-condition: selected_prog 已激活（glUseProgram）；mesh != nullptr。
 void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                                  const RenderCommandList& cmds,
                                  const GPUMesh* mesh,
@@ -396,9 +389,7 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
                                  const float mvp_final[16],
                                  const float model[16],
                                  unsigned int selected_prog,
-                                 unsigned int tile_index_tex,
-                                 bool blend,
-                                 unsigned int scene_depth_tex) {
+                                 unsigned int tile_index_tex) {
     CHECK(mesh != nullptr);
 
     const bool any_tex =
@@ -419,6 +410,17 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
     glUniform3f(glGetUniformLocation(selected_prog, "uBaseColor"),
                 cmd.material.base_color.r, cmd.material.base_color.g,
                 cmd.material.base_color.b);
+    // 顶点 base tint 调色板（逐物体）：关掉时 FS 整段跳过乘法。
+    glUniform1i(glGetUniformLocation(selected_prog, "uTintEnabled"),
+                cmd.material.base_tint.enabled ? 1 : 0);
+    glUniform3f(glGetUniformLocation(selected_prog, "uTintColor0"),
+                cmd.material.base_tint.color[0].r,
+                cmd.material.base_tint.color[0].g,
+                cmd.material.base_tint.color[0].b);
+    glUniform3f(glGetUniformLocation(selected_prog, "uTintColor1"),
+                cmd.material.base_tint.color[1].r,
+                cmd.material.base_tint.color[1].g,
+                cmd.material.base_tint.color[1].b);
     glUniform1f(glGetUniformLocation(selected_prog, "uMetallic"), cmd.material.metallic);
     glUniform1f(glGetUniformLocation(selected_prog, "uRoughness"), cmd.material.roughness);
     glUniform3f(glGetUniformLocation(selected_prog, "uEmissive"),
@@ -524,18 +526,6 @@ void DrawObject3DMaterialAndDraw(const Object3DCommand& cmd,
     } else {
         glUniform1i(glGetUniformLocation(selected_prog, "uHasNormalTex"), 0);
         glUniform1f(glGetUniformLocation(selected_prog, "uNormalScale"), 1.0f);
-    }
-
-    // 透明混合：常值 alpha + 不透明场景深度（blend 变体 FS 手动作深度测试用）。
-    if (blend) {
-        CHECK_NE(scene_depth_tex, 0u)
-            << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
-        glUniform1f(glGetUniformLocation(selected_prog, "uAlpha"),
-                    cmd.material.base_color.a);
-        glActiveTexture(GL_TEXTURE0 + kTexUnitGlassSceneDepth);
-        glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
-        glUniform1i(glGetUniformLocation(selected_prog, "uGlassSceneDepth"),
-                    kTexUnitGlassSceneDepth);
     }
 
     glActiveTexture(GL_TEXTURE0 + kTexUnitTileLightIndex);
@@ -900,70 +890,7 @@ void Object3DRenderer::DrawObject3D(const Object3DCommand& cmd,
     }
 
     DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
-                                selected_prog, tile_index_tex,
-                                /*blend=*/false, /*scene_depth_tex=*/0u);
-
-    glPopAttrib();
-}
-
-// ==================== DrawObject3DBlend ====================
-
-void Object3DRenderer::DrawObject3DBlend(const Object3DCommand& cmd,
-                                         const RenderCommandList& cmds,
-                                         MeshManager& mesh_mgr,
-                                         TextureManager& texture_mgr,
-                                         ShaderManager& shader_mgr,
-                                         const float mvp[16],
-                                         unsigned int prog_blend,
-                                         unsigned int prog_full_blend,
-                                         unsigned int tile_index_tex,
-                                         unsigned int scene_depth_tex) {
-    (void)shader_mgr;   // 与 DrawObject3D 一致：uniform 走 glGetUniformLocation，不经 shader_mgr
-    const GPUMesh* mesh = mesh_mgr.GetMesh(cmd.mesh_id);
-    CHECK(mesh != nullptr) << "DrawObject3DBlend: mesh_id " << cmd.mesh_id
-                           << " 未注册（DrawObject3DBlend 前需先 RegisterMesh）";
-    CHECK_GT(mesh->vao, 0u);
-    CHECK_NE(scene_depth_tex, 0u)
-        << "DrawObject3DBlend: scene_depth_tex 不能为 0（透明 pass 需要不透明场景深度）";
-
-    const float up_len =
-        std::sqrt(cmd.up.x()*cmd.up.x() + cmd.up.y()*cmd.up.y() + cmd.up.z()*cmd.up.z());
-    const float fr_len =
-        std::sqrt(cmd.front.x()*cmd.front.x() + cmd.front.y()*cmd.front.y() + cmd.front.z()*cmd.front.z());
-    CHECK_GT(up_len, 1e-8f) << "DrawObject3DBlend: up 向量不能为零";
-    CHECK_GT(fr_len, 1e-8f) << "DrawObject3DBlend: front 向量不能为零";
-
-    float model[16];
-    float mvp_final[16];
-    BuildModelMatrix(cmd.center, cmd.up, cmd.front, cmd.scale, model);
-    Mat4Mul(mvp, model, mvp_final);
-
-    const bool any_tex =
-        (cmd.material.base_color_tex != 0) ||
-        (cmd.material.has_metallic_tex && cmd.material.metallic_tex != 0) ||
-        (cmd.material.has_roughness_tex && cmd.material.roughness_tex != 0) ||
-        (cmd.material.emissive_tex != 0) ||
-        (cmd.material.ao_tex != 0) ||
-        (cmd.material.normal_tex != 0);
-
-    CHECK(MeshHasFlag(mesh->flags, MeshVertexFlags::kNormal))
-        << "DrawObject3DBlend: mesh_id=" << cmd.mesh_id << " 需要 kNormal 属性";
-
-    glPushAttrib(GL_ENABLE_BIT);
-    // 双面：透明薄片（玻璃墙 / 塑料片）通常需双面参与 WBO 才有「有厚度」的观感。
-    // 单面材质则确保背面剔除（此 pass 无深度缓冲，剔除由光栅器完成）。
-    if (cmd.material.double_sided) {
-        glDisable(GL_CULL_FACE);
-    } else {
-        glEnable(GL_CULL_FACE);
-    }
-
-    const unsigned int selected_prog = any_tex ? prog_full_blend : prog_blend;
-    glUseProgram(selected_prog);
-
-    DrawObject3DMaterialAndDraw(cmd, cmds, mesh, texture_mgr, mvp_final, model,
-                                selected_prog, tile_index_tex,
-                                /*blend=*/true, scene_depth_tex);
+                                selected_prog, tile_index_tex);
 
     glPopAttrib();
 }

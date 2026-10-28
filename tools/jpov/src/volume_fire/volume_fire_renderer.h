@@ -1,10 +1,10 @@
-// JPOV VolumeFireRenderer —— 逐像素 raymarch 体积火 → 写进 WBO 透明纹理（与粒子/玻璃同套代数）
+// JPOV VolumeFireRenderer —— 逐像素 raymarch 体积火 → 写进 WBO 透明纹理（与粒子/条带同套代数）
 //
 // 定位（tools/jpov/docs/jpov_volumetric_fire_design.md）：
 //   把一团 `.jpovvol`（R=density / G=temperature[K]）沿视线做**体渲染积分**，输出
 //   `(预乘发射 L, 透射率 1−α)`，作为**一个薄层**写进本渲染器自持的
 //   WBO 缓冲（accum/reveal），再 Composite 解析 over 到当前目标（HDR）。
-//   与 ParticleRenderer / #176 透明玻璃共用同一套 McGuire WBO 代数。
+//   与 ParticleRenderer / 条带共用同一套 McGuire WBO 代数。
 //
 // 画法：画该团的世界 AABB **盒**（8 角由 gl_VertexID 生成；**剔除正面** → 每像素恰好
 //   光栅化一个盒面 → FS 只跑一次）。FS：从像素反构世界光线 → 与盒求交 [t_near,t_far] →
@@ -158,7 +158,16 @@ vec4 SampleVol(vec3 p) {
 // 窗口深度 [0,1] → 视空间深度（正，米）。
 float ZView(float d) {
     float ndc = 2.0 * d - 1.0;
-    return (2.0 * uNear * uFar) / ((uFar + uNear) - ndc * (uFar - uNear));
+    float denom = (uFar + uNear) - ndc * (uFar - uNear);
+    // 退化相机守卫（near = 0 / near ≈ far）：分母趋 0 时这一步就是 0/0 = NaN，
+    // 而 NaN 一旦写进 WBO 或 HDR 目标会顺着后处理污染**整帧**（这一层只是膜，
+    // 没有道理把整张画面拖黑）。正常相机下 |denom| ≥ ~2·near（默认 0.05 ⇒ 0.1），
+    // 这个分支永不进入 ⇒ 正常输入的结果逐位不变。
+    // 用 `!(x > eps)` 而不是 `x < eps`：前者同时把 NaN 拦下来。
+    if (!(abs(denom) > 1e-6)) {
+        return max(uNear, 1e-4);
+    }
+    return (2.0 * uNear * uFar) / denom;
 }
 
 void main() {

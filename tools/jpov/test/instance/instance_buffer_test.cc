@@ -105,7 +105,15 @@ int main(int argc, char** argv) {
             CHECK_LE(std::abs(jpov::HalfBitsToFloat(lo) - src[k * 2 + 0]), 1e-3f);
             CHECK_LE(std::abs(jpov::HalfBitsToFloat(hi) - src[k * 2 + 1]), 1e-3f);
         }
-        LOG(INFO) << "OK: 位打包 codec 往返（thick / half / PackHalf8）";
+        // tint RGB888：往返误差 ≤ 1/255；越界分量 clamp 到 [0,1]。
+        for (float v : {0.0f, 0.25f, 0.5f, 1.0f}) {
+            const float back = jpov::DecodeTintColor8(jpov::EncodeTintColor8(v));
+            CHECK_LE(std::abs(back - v), 1.0f / 255.0f + 1e-6f)
+                << "tint 颜色往返误差过大: " << v << " -> " << back;
+        }
+        CHECK_EQ(jpov::EncodeTintColor8(-0.5f), 0u);
+        CHECK_EQ(jpov::EncodeTintColor8(1.5f), 255u);
+        LOG(INFO) << "OK: 位打包 codec 往返（thick / half / PackHalf8 / tint RGB888）";
     }
 
     JPOV::Config cfg;

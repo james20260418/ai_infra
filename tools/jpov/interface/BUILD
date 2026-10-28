@@ -83,7 +83,10 @@ cc_library(
 cc_library(
     name = "render_command",
     srcs = ["render_command.cc"],
-    hdrs = ["render_command.h"],
+    hdrs = [
+        "flipbook.h",
+        "render_command.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":camera",
@@ -134,6 +137,8 @@ cc_library(
     hdrs = ["skeleton_types.h"],
     visibility = ["//visibility:public"],
     deps = [
+        # BaseTint（逐实例调色板）定义在 pbr_material.h。
+        ":pbr_material",
         "//geom/common:quaternion",
         "//geom/common:vec",
         "//geom/math:mat4",
@@ -445,20 +450,13 @@ cc_library(
 )
 
 # MeshData — CPU 侧网格数据定义（顶点属性位掩码 + 逐属性数组 + 校验）
-# WindDeform — 植被风的 CPU 参考实现（GL-free）：逐顶点 L（含焊接+平滑）与离线变形。
-cc_library(
-    name = "wind_deform",
-    hdrs = ["wind_deform.h"],
-    visibility = ["//visibility:public"],
-    deps = [":mesh"],
-    copts = ["-std=c++20"],
-)
-
 cc_library(
     name = "mesh",
     hdrs = ["mesh.h"],
     visibility = ["//visibility:public"],
     deps = [
+        # kNumBaseTintColors（tint 索引空间）单一定义在 pbr_material.h。
+        ":pbr_material",
         "//geom/common:vec",
         "@glog_static//:glog",
     ],
@@ -487,6 +485,19 @@ cc_library(
         ":pbr_material",
         ":render_command",
         "//geom/common:vec",
+        "@glog_static//:glog",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# base tint 调色板 UI（两个通道 RGB + 开关）：model viewer 与 clothing tool 共用。
+cc_library(
+    name = "tint_ui",
+    hdrs = ["tint_ui.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pbr_material",
+        ":ui",
         "@glog_static//:glog",
     ],
     copts = ["-std=c++20"],

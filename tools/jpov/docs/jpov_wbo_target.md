@@ -16,7 +16,7 @@
 |---|---|---|---|
 | `ParticleRenderer` | 1/2 | accum RGBA16F / reveal R16F / additive RGBA16F | LINEAR |
 | `VolumeFireRenderer` | 1× | accum RGBA16F / reveal R16F / **depth R32F（死）** | LINEAR / NEAREST |
-| `Renderer` 玻璃（#176） | 1× | accum RGBA16F / reveal R16F / depth R32F（活） | NEAREST |
+| ~~`Renderer` 玻璃（#176）~~ | 1× | ~~accum / reveal / depth~~ | 已于 2026-10-27 **移除** |
 
 每个使用者各自手写这四件事：
 
@@ -51,7 +51,7 @@ src/wbo/
 | 0 | accum | RGBA16F | 恒有 |
 | 1 | reveal | R16F | 恒有 |
 | 2 | additive（加法集） | RGBA16F | 粒子（以及将来的条带发光） |
-| 3 | depth（代表深度） | R32F | 玻璃（迁移后） |
+| 3 | depth（代表深度） | R32F | **当前无使用者**（玻璃一栈已移除；留槽位是给将来的「带深度合成」层） |
 
 未申请的槽位在 `glDrawBuffers` 里是 `GL_NONE`：FS 里对应 `location` 的写入被丢弃（合法），
 所以同一个 FS 源码可以复用到不同附件组合的目标上。
@@ -62,37 +62,25 @@ src/wbo/
 2. **用 `BindForDraw()` / `EndDraw()` 包住绘制**，不要自己写 blend func。`EndDraw()` 会把四个槽位的
    blend 都回写成引擎默认的 `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`。
 3. **权重只从 `kWboWeightGlsl` 注入**（`std::string(head) + kWboWeightGlsl + tail`），不要复制函数体。
-4. **解析用 `kWboCompositeFs`**。唯一合法的例外是玻璃 —— 它的解析必须和 froxel 雾按深度积分
-   （`fire_fog_shader.h`），不能用通用的 over 解析。
+4. **解析用 `kWboCompositeFs`**（覆盖集 over + 加法集求和）。
 5. **同一个目标内所有使用者必须用同一个权重函数。** 加权平均是 `Σw_k c_k / Σw_k`，
    混入两套权重尺度会把平均色整体偏置 —— 这是 "条带不要和体积火共用 FBO" 的原因
    （体积火权重恒 1，条带用深度权重）。
 6. **1× 层用 `linear_filter=false`**（NEAREST，省带宽且 1× 上插值没有意义）；
    低分辨率层用 `true`（要靠 LINEAR 上采样）。
-7. **跨目标的层序必须显式写死**（粒子 → 体积火 → 条带 → 雾/玻璃），不靠调用顺序。
+7. **跨目标的层序必须显式写死**（粒子 → 体积火 → 条带 → 雾），不靠调用顺序。
    WBO 只保证**同一目标内**的顺序无关；两个目标之间的合成是有序的。
 
 ## 4. 契约测试
 
-`//tools/jpov/test/wbo:wbo_weight_contract_test`
+（**已删除**：`test/wbo:wbo_weight_contract_test` 钉的是「`object3d_renderer.h` 里玻璃 shader 的
+内联权重副本 vs `wbo_shader.h` 的权威副本」。2026-10-27 玻璃一栈移除后内联副本不复存在，
+权重实现只剩一份，文本契约也就没有可比的第二方了。）
 
-**为什么**：`object3d_renderer.h` 的 PBR shader 里还有一份内联的权重函数（玻璃 `kBlend` 变体用）。
-那份 shader 是单个大字符串，注入需要拆串，本次不动。于是用**文本契约**把它钉住：
+## 5. 剩余状态
 
-- 两段 `//@WBO_WEIGHT_BEGIN` .. `//@WBO_WEIGHT_END` 之间的代码，去注释 + 归一化空白后必须逐字相同；
-- 缺标记、块过短、比较器退化成恒等比较，都会红（**测试自己也要能红**）。
-
-只读字符串，不需要 GL context，跑得比 gold 快得多。
-
-## 5. 未完成（下一步）
-
-**玻璃 FBO 仍是 `Renderer` 手写**（`glass_fbo_` / `glass_accum_tex_` / `glass_reveal_tex_` /
-`glass_depth_tex_` + `EnsureGlassFBO` / `ClearGlassFBO` / `DestroyGlassFBO`）。迁移前置条件：
-
-1. 把玻璃 shader 的 `FragDepthAccum` 从 `location = 2` 移到 **3**（本版槽位表里 2 让给加法集）；
-2. 玻璃的 gold 目前是「8×8 块平均色差 ≤ 30」，太松 —— 先收紧到逐字节，否则迁移改坏了也测不出来。
-
-玻璃的 composite 保持在 `fire_fog`（它要和雾按深度积分），不适用共享解析 —— 这是**有意**的例外。
+四个使用者里三个走 `WboTarget`（粒子 / 体积火 / 条带），槽位 3（代表深度）当前空置。
+玻璃那一份手写 FBO 已随玻璃 pass 一起删除，不再有「两套槽位布局」的问题。
 
 ## 6. 验证
 

@@ -17,6 +17,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//tools/jpov/interface:pbr_material",
         "//tools/jpov/interface:skeleton_types",
         "//geom/common:quaternion",
         "//geom/math:dual_quat",
@@ -43,6 +44,7 @@ cc_library(
     deps = [
         "//tools/jpov/src:instance_buffer",
         "//tools/jpov/src:texture_units",
+        "//tools/jpov/src:env_specular",
         "//tools/jpov/src:mesh_manager",
         "//tools/jpov/src:shader_manager",
         "//tools/jpov/src:texture_manager",

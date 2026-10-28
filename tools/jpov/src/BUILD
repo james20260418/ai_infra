@@ -18,6 +18,27 @@ cc_library(
     linkstatic = 1,
 )
 
+# EnvSpecular — 环境镜面（IBL specular）的共享 GLSL 片段 + uniform 上传。
+# 三份 PBR 片元（object3d / instanced / skinned）共用同一段 GLSL，避免各自拷贝分叉。
+cc_library(
+    name = "env_specular",
+    srcs = ["env_specular.cc"],
+    hdrs = ["env_specular.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        ":texture_units",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # CoverageMipmap — 覆盖率保持的 alpha mip 链生成（GL-free、header-only 纯函数）。
 # 供 TextureManager 生成 alpha cutout 贴图的 mip 链（防远景叶卡变稀/消失）。
 cc_library(
@@ -81,7 +102,6 @@ cc_library(
         "//tools/jpov/interface:gpumesh",
         "//tools/jpov/interface:id_allocator",
         "//tools/jpov/interface:mesh",
-        "//tools/jpov/interface:wind_deform",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [
@@ -98,6 +118,13 @@ cc_library(
 cc_library(
     name = "texture_units",
     hdrs = ["texture_units.h"],
+    visibility = ["//visibility:public"],
+)
+
+# CSM 阴影的 GLSL 共享件（单级联单次采样，无 PCF）：雾与条带同一份实现。
+cc_library(
+    name = "csm_shadow_glsl",
+    hdrs = ["csm_shadow_glsl.h"],
     visibility = ["//visibility:public"],
 )
 
@@ -272,6 +299,7 @@ cc_library(
     deps = [
         ":font_renderer",
         ":primitives2d_renderer",
+        ":plate2d_renderer",
         ":mesh_manager",
         ":object3d_renderer",
         ":instanced_renderer",
@@ -281,6 +309,7 @@ cc_library(
         ":shader_manager",
         ":sky_renderer",
         ":horizon_fog_renderer",
+        ":env_specular",
         "//tools/jpov/src/fire_fog:fire_fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",
@@ -344,6 +373,7 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",
@@ -383,6 +413,7 @@ cc_library(
         ":shader_manager",
         ":texture_manager",
         ":texture_units",
+        ":env_specular",
         "//tools/jpov/interface:render_command",
         "//tools/jpov/interface:camera",
         "@glog_static//:glog",
@@ -421,6 +452,27 @@ cc_library(
     name = "primitives2d_renderer",
     srcs = ["primitives2d/primitives2d_renderer.cc"],
     hdrs = ["primitives2d/primitives2d_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":texture_manager",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# Plate2DRenderer — SDF 支配的 2D 板材（圆角矩形 + 边框剖面 + 材质平铺/翻书）
+# 一份着色器、一块 quad，形状/边框/材质全在片元里算。见 src/plate2d/plate2d_renderer.h。
+cc_library(
+    name = "plate2d_renderer",
+    srcs = ["plate2d/plate2d_renderer.cc"],
+    hdrs = ["plate2d/plate2d_renderer.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":texture_manager",
