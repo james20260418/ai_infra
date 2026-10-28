@@ -303,11 +303,15 @@ void main() {
             // 能量守恒的 Blinn-Phong 归一化：裸 pow(nh, n) 的峰值只有 1，用它算太阳
             // （辐照度量级 ~3）会得到"几乎看不见的小暗点"——真实太阳是**辐亮度**极高、
             // 角半径极小的光源，归一化因子 (n+8)/8π 补的就是这个峰值增益。
-            // 模式 3：把丢掉的斜率方差并进高光波瓣（LEAN：方差 → 更宽的高光，能量不丢）。
+            // 模式 3：把**带限丢掉的斜率方差**并进高光波瓣（LEAN 的核心一步）。
+            //   Blinn-Phong 波瓣的等价斜率方差：σ₀² = 2/(n+2)  （半宽²）
+            //   高斯方差可加 ⇒ σ² = σ₀² + var_lost
+            //   再换回指数：n_eff = 2/σ² − 2
+            // 效果：远处波瓣变宽（高光扩散成太阳路），而不是"变软消失"。
             float shin = max(uSunShininess, 1.0);
             if (uWaveFilterMode == 3) {
-                shin = shin / (1.0 + 60.0 * wave_slope_var / max(uWaveSlopeRad, 1e-3));
-                shin = max(shin, 2.0);
+                float sigma2 = 2.0 / (shin + 2.0) + max(wave_slope_var, 0.0);
+                shin = max(2.0 / max(sigma2, 1.0e-6) - 2.0, 2.0);
             }
             vec3 H = normalize(V + uSunDir);
             float nh = max(dot(N, H), 0.0);

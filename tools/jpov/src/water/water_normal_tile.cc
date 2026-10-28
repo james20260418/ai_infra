@@ -4,6 +4,7 @@
 
 #include "tools/jpov/src/water/water_normal_tile.h"
 
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -48,6 +49,7 @@ constexpr int kOctaveCount = static_cast<int>(sizeof(kOctaves) / sizeof(kOctaves
 }  // namespace
 
 WaterNormalTile BuildWaterNormalTile(int size, int frames, float tile_m) {
+    const auto t0 = std::chrono::steady_clock::now();
     CHECK_GT(size, 0);
     CHECK_GT(frames, 0);
     CHECK_GT(tile_m, 0.0f);
@@ -120,8 +122,11 @@ WaterNormalTile BuildWaterNormalTile(int size, int frames, float tile_m) {
 #endif
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
     LOG(INFO) << "water normal tile: " << size << "² × " << frames
-              << " frames, tile=" << tile_m << " m, baked max slope=" << max_slope;
+              << " frames, tile=" << tile_m << " m, baked max slope=" << max_slope
+              << ", bake " << ms << " ms";
     return tile;
 }
 
