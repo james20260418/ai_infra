@@ -90,16 +90,23 @@ WaterNormalTile BuildWaterNormalTile(int size, int frames, float tile_m) {
         }
     }
 
-    // 2) 归一化到 [-1,1] 并编码进 RGBA8：RG = 斜率（0.5 偏移），B = 1（预留方差/AO），A = 1。
+    // 2) 归一化到 [-1,1] 并编码进 RGBA8：
+    //      RG = 斜率一阶矩（0.5 偏移）、B = 二阶矩 E[|s|²]（归一化域）、A = 255 预留。
     //    归一化是**必须**的：滑条控制的是"最大斜率"，纹理只提供"形状"。
+    //    二阶矩**必须**线性存（不是方差）—— 方差不可平均，二阶矩可以，
+    //    这就是 LEAN 能靠硬件 mip 工作、而不必自己算过滤核的原因。
     std::vector<unsigned char> texels(pixels_per_frame * static_cast<size_t>(frames) * 4u);
     const float inv = 1.0f / max_slope;
+    auto to_byte = [](float v) {
+        return static_cast<unsigned char>(std::min(std::max(v, 0.0f), 1.0f) * 255.0f + 0.5f);
+    };
     for (size_t k = 0; k < pixels_per_frame * static_cast<size_t>(frames); ++k) {
         const float nx = slope_x[k] * inv;                 // [-1,1]
         const float nz = slope_z[k] * inv;
-        texels[k * 4 + 0] = static_cast<unsigned char>((nx * 0.5f + 0.5f) * 255.0f + 0.5f);
-        texels[k * 4 + 1] = static_cast<unsigned char>((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
-        texels[k * 4 + 2] = 255;
+        const float m2 = nx * nx + nz * nz;                // 二阶矩（归一化域，<= 1）
+        texels[k * 4 + 0] = to_byte(nx * 0.5f + 0.5f);
+        texels[k * 4 + 1] = to_byte(nz * 0.5f + 0.5f);
+        texels[k * 4 + 2] = to_byte(m2);
         texels[k * 4 + 3] = 255;
     }
 

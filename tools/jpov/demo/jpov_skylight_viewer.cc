@@ -297,6 +297,12 @@ int RunCaptureWater(const std::string& out_dir) {
         // 相机方位角（度）。默认 45°；太阳高光要"相机与太阳关于竖直面对称"
         // （H = V+L 竖直 ⇒ N=up 才能对上），所以太阳在方位 40° 时相机要在 ~220°。
         float theta_deg = 45.0f;
+        // LEAN 高光补偿 A/B：0 = 不覆盖（用面板默认 = 开）、1 = 强制开、2 = 强制关。
+        int lean = 0;
+        float lean_gain = 1.0f;
+        // 天光仰角/方位角覆盖（水面观感 90% 来自太阳，验收要能当场扫）。
+        std::optional<float> sun_elev_deg;
+        std::optional<float> sun_azim_deg;
     };
     const Shot shots[] = {
         {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
@@ -357,7 +363,28 @@ int RunCaptureWater(const std::string& out_dir) {
         // 判"透射到底透的是什么"：n=1（界面消失）应当 ≈ 完全不画水面（= 原样场景）。
         {"props_under_wide_n100", -0.083, 12.0, true, true, false, 6.0f, 1.00f, 0.0f, std::nullopt},
         {"props_under_wide_nowater", -0.083, 12.0, true, false, false, 6.0f, 0.0f, 0.0f, std::nullopt},
-        {"water_high", 0.62, 2600.0},                                  // 10 km² 的尺度
+        // ── LEAN 高光补偿 A/B（同机位同相位，只切补偿）──
+        //   太阳机位：远处那条"太阳路"由被 mip 平均掉的斜率方差撑开；
+        //   关掉它高光会塌成一个小亮点 + 远处整片死平。
+        {.name = "leansun_on",  .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
+         .theta_deg = 220.0f, .lean = 1},
+        {.name = "leansun_off", .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
+         .theta_deg = 220.0f, .lean = 2},
+        {.name = "leansun_gain3", .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
+         .theta_deg = 220.0f, .lean = 1, .lean_gain = 3.0f},
+        // 水面视角的 LEAN A/B（看"远处反光是否变钝而不是变平"）。
+        {.name = "lean_eye_on",  .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 1},
+        {.name = "lean_eye_off", .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 2},
+        // ── 天光仰角扫描（太阳机位）：高光随仰角的走向 ──
+        {.name = "sun_elev15", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .sun_elev_deg = 15.0f},
+        {.name = "sun_elev30", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .sun_elev_deg = 30.0f},
+        {.name = "sun_elev60", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .sun_elev_deg = 60.0f},
+        {.name = "sun_elev80", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .sun_elev_deg = 80.0f},
+        {"water_high", 0.62, 2600.0},                                  // 无限平面的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
     };
@@ -376,6 +403,10 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_use_sky_refl_  = (s.sky_refl != 2);
         app.water_use_transmit_  = (s.transmit != 2);
         app.water_use_sun_glint_ = (s.sun_glint != 2);
+        app.water_lean_glint_    = (s.lean != 2);
+        app.water_lean_gain_     = s.lean_gain;
+        app.deg_.sun_elev_deg    = s.sun_elev_deg.value_or(45.0f);
+        app.deg_.sun_azim_deg    = s.sun_azim_deg.value_or(40.0f);
         app.view_ = jpov_viewer::DefaultView();
         app.view_.phi   = s.phi;
         app.view_.theta = static_cast<double>(s.theta_deg) *

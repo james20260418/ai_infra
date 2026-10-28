@@ -12,9 +12,13 @@
 //     （直接平均归一化法线是错的 —— 见 LEAN/LEADR 那套）；
 //   * mip 链交给 glGenerateMipmap，采样用 LINEAR_MIPMAP_LINEAR + 各向异性。
 //
+// 通道约定（LEAN / LEADR 的一阶 + 二阶矩）：
+//   RG = 斜率的一阶矩（归一化到 [-1,1]，0.5 偏移）
+//   B  = **二阶矩** E[|s|²]（归一化域，[0,1]）—— 线性可平均，所以 mip 之后仍然有效；
+//        运行时用 `E[|s|²] − |E[s]|²` 现算"被 mip 平均掉的斜率方差"，
+//        喂给太阳高光波瓣与天光探针 mip（water_skin_shader.h 的 LEAN 补偿）。
+//   A  = 预留（255）
 // 已知简化（写清楚，别当 bug）：
-//   * B/A 通道暂时只填 1.0 —— 真正的 LEADR 要在 B/A 里存**斜率方差**，让远处高光变宽；
-//     本版只做"纹理 + mip"，方差留给解析路径（water_skin_shader.h 的 mode 3）。
 //   * 单张 tile 会重复：远处能看出周期性。工程上要叠 2~3 个不同尺度/方向的 tile。
 
 #ifndef JPOV_SRC_WATER_WATER_NORMAL_TILE_H_

@@ -135,7 +135,7 @@ public:
     // ⚠️ 这**不是**正式接口：水皮还没收进 RenderCommandList（见
     //    src/water/water_skin_renderer.h）。观感定下来后应改成 `cmds->DrawWater(...)`，
     //    并把这个方法删掉 —— 否则"水皮参数从哪儿来"会有两处来源。
-    // Pre-condition: Init() 已调用；params.half_extent_m > 0（非法值在渲染时 CHECK 崩）。
+    // Pre-condition: Init() 已调用；scene_depth_tex 必须可用（HDR/MRT 场景深度）。
     void SetWaterSkin(std::optional<jpov::WaterSkinParams> params);
 
     // 测量文本以指定字号的绘制宽度（像素），语义与 DrawText2D 的布局推进

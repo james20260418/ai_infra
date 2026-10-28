@@ -1,7 +1,15 @@
 // JPOV 水皮（water skin）pass —— GLSL
 //
-// 一块**水平正方形的 quad**（边长由 uniform 缩放，默认 10 km²）+ 解析式菲涅耳。
+// **无限大的水平平面**（y = uLevelY）+ 解析式菲涅耳。
 // 位置：froxel（点状雾）合成**之后**、高亮 / tone map 之前（见 Renderer::Render）。
+//
+// ⭐ 为什么是"无限平面"而不是一块有限 quad（2026-10-28 Danis 提的问题）：
+//   有限 quad 不管多大，屏幕上都会在**它的远端边界**与**真地平线**之间留出一条缝 ——
+//   那条缝里画的是天球下半球的 ground 色（看得到"一片陆地"），而物理上那里就是海。
+//   而"覆盖到真地平线"用几何是做不到的：视线越接近水平，交点距离 → ∞
+//   （眼高 1.5 m 时地平线在 4.4 km；眼高 1.5 km 时在 138 km）。
+//   ⇒ 正解是**不打几何**：全屏三角形 + 在 FS 里解"视线 ∩ 平面"，
+//     每个朝下的方向都有交点，天然覆盖到地平线（只受浮点精度限制）。
 //
 // 透射（本版刻意最简单）：**固定管线 alpha 混合**
 //     out = water_color·α + dst·(1 − α)
@@ -45,12 +53,25 @@
 //   * 全内反射区是常量地色，不是"水下环境的真实镜像"（那需要平面反射）。
 //
 // 深度：HDR 目标**没有深度附件**（场景深度由 MRT#1 逐片元写入），所以这里手动比：
-//   场景深度 z 与水面自身 z 都用相机 near/far 线性化（与 strip pass 的 ZView 同一份公式），
-//   水面比不透明场景**远**超过 2 cm 就丢弃 —— 水皮不能盖到挡在它前面的东西上。
+//   命中点到相机的**视轴距离**（= t·(dir·fwd)）与 MRT#1 场景深度都用相机 near/far 线性化
+//   （与 strip pass 的 ZView 同一份公式），水面比不透明场景**远**超过 2 cm 就丢弃
+//   —— 水皮不能盖到挡在它前面的东西上。
+//   ✱ 唯一例外：命中点在**远裁剪面之外**（t → ∞，即贴近地平线那一带）时不做深度比较。
+//     那里只有天空（天空是最远的背景），水必须盖住它的 ground 色；判深度会把那条
+//     地色带重新放出来（这正是 2026-10-28 修的那个问题）。
+//
+// ⭐ 太阳高光 = **日盘的解析像**（不采纹理）：
+//   光源是主平行光（颜色 × 强度 = 太阳辐亮度），高光就是"日盘在表面斜率分布下的镜面
+//   反射"，用能量守恒的 Blinn-Phong 单瓣表达。天空探针（SkyOutput::kEnvProbe）**故意
+//   不含日月盘** —— 否则与这里的高光双计。所以"日盘高光"在画面上的表现是**太阳路**
+//   （被波浪打碎的亮带），而不是探针里的一张小圆盘；这也是 UE/Unity 水面的做法
+//   （探针只给环境色，直接光的高光单独算）。
+//   已知边界：波瓣宽度由 n 与斜率方差决定，**不**再叠日盘角半径（太阳 0.27°，
+//   对 n=1500 的 2° 量级波瓣是零头）。
 //
 // 已知边界（本版有意不做）：
 //   * 没有吸收/散射（水下物体只是被一层淡色膜按 α 混掉，不随深度变蓝）；
-//   * 没有反射探针（rim_color 是常量，不是天空 cubemap）；
+//   * 镜面天光优先用天空 cubemap 探针；探针不存在时才退回常量 rim_color；
 //   * 波浪**只扰法线、不位移几何**（Danis 定：先看波纹，几何起伏以后再说）。
 
 #ifndef JPOV_SRC_WATER_WATER_SKIN_SHADER_H_
@@ -58,24 +79,23 @@
 
 namespace jpov {
 
-// quad 的局部坐标在 ±1（x/z），由 uHalfExtent / uLevelY 展开成世界空间的正方形。
+// 全屏三角形（顶点坐标由 gl_VertexID 生成，不需要顶点缓冲）。
+// vNdc = 该顶点在 NDC 的位置（−1..1），光栅化线性插值 ⇒ FS 拿到逐像素 NDC。
 inline constexpr const char* kWaterSkinVs = R"glsl(
 #version 330 core
-layout(location = 0) in vec3 aPos;   // x,z ∈ {-1,+1}，y = 0
-uniform mat4  uVP;
-uniform float uHalfExtent;           // 正方形半边长（米）
-uniform float uLevelY;               // 水面世界高度（米）
-out vec3 vWorld;
+out vec2 vNdc;
 void main() {
-    vec3 p = vec3(aPos.x * uHalfExtent, uLevelY, aPos.z * uHalfExtent);
-    vWorld = p;
-    gl_Position = uVP * vec4(p, 1.0);
+    // 三个顶点盖住整个裁剪空间：(-1,-1) (3,-1) (-1,3)。
+    vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0,
+                  (gl_VertexID == 2) ? 3.0 : -1.0);
+    vNdc = p;
+    gl_Position = vec4(p, 0.0, 1.0);
 }
 )glsl";
 
 inline constexpr const char* kWaterSkinFs = R"glsl(
 #version 330 core
-in vec3 vWorld;
+in vec2 vNdc;
 out vec4 FragColor;
 
 uniform sampler2D uSceneDepth;   // MRT#1 场景深度（gl_FragCoord.z，1.0 = 背景/远平面）
@@ -83,6 +103,12 @@ uniform vec2  uViewport;         // 3D FBO 尺寸（把 gl_FragCoord 换成 [0,1
 uniform float uNear;
 uniform float uFar;
 uniform vec3  uCamPos;           // 相机世界位置
+// 相机基（把逐像素 NDC 换成世界射线）：不传逆 VP，省一次 4×4 求逆，也更好读。
+uniform vec3  uCamFwd;           // 视线方向（单位）
+uniform vec3  uCamRight;         // 右（单位，已正交化）
+uniform vec3  uCamUp;            // 上（单位，已正交化）
+uniform float uTanHalfFov;       // tan(fov/2)（垂直视野，度→弧度后取半）
+uniform float uAspect;           // 宽/高
 uniform float uLevelY;           // 水面世界高度（米）—— 判相机在水上/水下用
 uniform vec3  uBodyColor;        // 本体色（线性 HDR）
 uniform float uBodyAlpha;        // 正对视线时的覆盖率 [0,1]
@@ -100,6 +126,9 @@ uniform int   uUseSun;           // 1 = 太阳高光
 uniform vec3  uSunDir;           // 指向太阳的世界方向（单位向量）
 uniform vec3  uSunColor;         // 太阳直射色（线性 HDR，已乘 intensity）
 uniform float uSunShininess;     // Blinn-Phong 幂次（越大越尖）
+// LEAN 高光补偿：把**带限丢掉的斜率方差**并进太阳高光波瓣（波瓣变宽、峰值下降、
+// 能量不凭空消失）。0 = 关（远处高光会"变软消失"）；1 = 物理量；>1 = 观感加强。
+uniform float uLeanGain;
 // ── 波浪（法线扰动）──
 uniform float uWavePhase;        // 相位（弧度；调用方自己推进，"调相位"就是挪它）
 uniform float uWaveSlopeRad;     // 最大斜率（弧度）—— 扰动的强度；0 = 完全平静
@@ -165,15 +194,19 @@ vec3 WaveNormal(vec3 p, out float slope_var) {
     // ── 模式 4：直接采**法线 flipbook 纹理**（硬件 mip + 各向异性）──
     //   这就是"法线也是纹理"那条路：烘焙时保证空间可平铺 + 时间整数圈，运行时只是
     //   一个 texture() 调用，带限/各向异性全交给 GPU。不需要 FFT。
-    //   与解析路径的区别：mip 平均的是**斜率**（线性可平均）⇒ 远处斜率趋于 0（变平），
-    //   丢失的方差没人补（这就是 LEADR 要存 B/A 的原因）。
+    //   与解析路径的区别：mip 平均的是**斜率**（线性可平均）⇒ 远处斜率趋于 0（变平）。
+    //   LEAN 的补法：图集在 B 通道多存一个**二阶矩** E[|s|²]（线性可平均），于是
+    //   任意 mip 级别上都能现算"被平均掉的方差" = E[|s|²] − |E[s]|²，喂给高光/探针。
+    //   （这就是 LEAN / LEADR 存一阶+二阶矩的出发点；只存斜率就必须靠"mip 级别"猜方差。）
     if (uWaveFilterMode == 4 && uHasWaveTile == 1 && uWaveTileFrames > 0) {
         float frame = uWavePhase / 6.28318530718 * float(uWaveTileFrames);
         frame = mod(floor(frame), float(uWaveTileFrames));
         vec2 uv = p.xz / max(uWaveTileM, 0.05);
         vec4 s = texture(uWaveTile, vec3(uv, frame));
-        vec2 grad = (s.rg * 2.0 - 1.0) * uWaveSlopeRad;
-        slope_var = 0.0;
+        vec2 g = s.rg * 2.0 - 1.0;            // 归一化斜率（烘焙时按 max_slope 归一）
+        vec2 grad = g * uWaveSlopeRad;
+        // 方差是**归一化域**的量，最后乘回斜率尺度²（= 弧度²）。
+        slope_var = max(s.b - dot(g, g), 0.0) * uWaveSlopeRad * uWaveSlopeRad;
         float slope = length(grad);
         if (slope > 1.0e-6) {
             grad *= min(uWaveSlopeRad, slope) / slope;
@@ -244,17 +277,42 @@ vec3 WaveNormal(vec3 p, out float slope_var) {
 }
 
 void main() {
-    // 手动深度测试：水面在这块不透明几何后面就整片丢弃（否则水会盖到挡在它前面的东西上）。
-    float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
-    float z = ZView(gl_FragCoord.z);
-    if (z > scene_z + 0.02) {
+    // ── 逐像素视线 ∩ 水平平面（无限平面，没有几何边界）──
+    vec3 dir = normalize(uCamFwd
+                         + vNdc.x * uTanHalfFov * uAspect * uCamRight
+                         + vNdc.y * uTanHalfFov * uCamUp);
+    // 交点在**前方**才算命中：dir.y 与 (levelY − camY) 同号（水上朝下 / 水下朝上）。
+    //   |dir.y| 极小时射线与水面平行 = 地平线本身，交给天空（否则 t → ∞ 出 NaN）。
+    float dy = uLevelY - uCamPos.y;
+    if (abs(dir.y) < 1.0e-7) {
         discard;
     }
+    float t = dy / dir.y;
+    if (!(t > 0.0)) {
+        discard;
+    }
+    vec3 world = uCamPos + dir * t;
+
+    // 手动深度测试：水面在这块不透明几何后面就整片丢弃（否则水会盖到挡在它前面的东西上）。
+    //   ✱ 命中点**在远裁剪面之外**时一律不丢：那里只有天空（天空是最远的背景），
+    //     水应该盖住它的 ground 色 —— 否则地平线附近（t → ∞）会重新漏出一条地色带。
+    //     视轴方向距离 = t·(dir·fwd)，与 ZView() 同一量纲。
+    float dist_view = t * dot(dir, uCamFwd);
+    if (dist_view <= uFar) {
+        float scene_z = ZView(texture(uSceneDepth, gl_FragCoord.xy / uViewport).r);
+        if (dist_view > scene_z + 0.02) {
+            discard;
+        }
+    }
+
+    // 波浪查找点：把交点距离夹到远裁剪面（20 km 外的波纹早已被带限抹平，
+    // 但世界坐标无界会让图集 uv / sin() 参数精度崩掉）。
+    vec3 wave_pos = uCamPos + dir * min(t, uFar);
 
     float wave_slope_var = 0.0;                        // 被滤掉的八度留下的斜率方差
-    vec3 N = WaveNormal(vWorld, wave_slope_var);        // 波浪扰过的法线（几何仍是平面）
-    vec3 V = normalize(uCamPos - vWorld);
-    float cos_i = clamp(abs(dot(N, V)), 1.0e-4, 1.0); // 与法线夹角（双面）
+    vec3 N = WaveNormal(wave_pos, wave_slope_var);      // 波浪扰过的法线（几何仍是平面）
+    vec3 V = -dir;                                     // 水面 → 相机（单位向量）
+    float cos_i = clamp(abs(dot(N, V)), 1.0e-4, 1.0);  // 与法线夹角（双面）
 
     vec3 color;
     float alpha;
@@ -280,14 +338,17 @@ void main() {
         float F = FresnelAirToWater(cos_i, uIor);
         float B = clamp(uBodyAlpha, 0.0, 1.0);
 
+        // LEAN：带限/硬件 mip 平均掉的斜率方差 = 该处已"看不见的粗糙度"。
+        //   uLeanGain = 0 ⇒ lean_var = 0 ⇒ 逐字节回到旧行为（两个消费者都退回原路径）。
+        float lean_var = max(wave_slope_var, 0.0) * max(uLeanGain, 0.0);
+
         vec3 sky = vec3(0.0);
         if (uUseSkyRefl == 1) {
             if (uHasEnvCube == 1) {
                 // 镜面天光：反射方向采样天空探针（法线被波纹扰动 ⇒ 反光随涟漪碎开）。
-                // 模式 3：滤掉的八度对应的斜率方差 = 该处已"看不见的粗糙度" ⇒ 用它抬 mip，
-                // 让远处反光变钝（而不是变成一块硬镜面）。
-                float lod = (uWaveFilterMode == 3)
-                                ? clamp(sqrt(wave_slope_var) / max(uWaveSlopeRad, 1e-3) * 5.0,
+                // LEAN：用它抬探针 mip，让远处反光变钝（而不是变成一块硬镜面）。
+                float lod = (lean_var > 1.0e-9)
+                                ? clamp(sqrt(lean_var) / max(uWaveSlopeRad, 1e-3) * 5.0,
                                         0.0, 5.0)
                                 : 0.0;
                 sky = textureLod(uEnvCube, reflect(-V, N), lod).rgb * uSkyScale;
@@ -303,14 +364,14 @@ void main() {
             // 能量守恒的 Blinn-Phong 归一化：裸 pow(nh, n) 的峰值只有 1，用它算太阳
             // （辐照度量级 ~3）会得到"几乎看不见的小暗点"——真实太阳是**辐亮度**极高、
             // 角半径极小的光源，归一化因子 (n+8)/8π 补的就是这个峰值增益。
-            // 模式 3：把**带限丢掉的斜率方差**并进高光波瓣（LEAN 的核心一步）。
+            // LEAN：把**带限丢掉的斜率方差**并进高光波瓣（LEAN 的核心一步）。
             //   Blinn-Phong 波瓣的等价斜率方差：σ₀² = 2/(n+2)  （半宽²）
             //   高斯方差可加 ⇒ σ² = σ₀² + var_lost
             //   再换回指数：n_eff = 2/σ² − 2
             // 效果：远处波瓣变宽（高光扩散成太阳路），而不是"变软消失"。
             float shin = max(uSunShininess, 1.0);
-            if (uWaveFilterMode == 3) {
-                float sigma2 = 2.0 / (shin + 2.0) + max(wave_slope_var, 0.0);
+            if (lean_var > 1.0e-9) {
+                float sigma2 = 2.0 / (shin + 2.0) + lean_var;
                 shin = max(2.0 / max(sigma2, 1.0e-6) - 2.0, 2.0);
             }
             vec3 H = normalize(V + uSunDir);

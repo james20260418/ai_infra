@@ -85,7 +85,7 @@ struct Renderer {
     // ⚠️ 这**不是**正式接口：水皮还没收进 RenderCommandList（见 water_skin_renderer.h）。
     //    demo 每帧直接调它，想关就把 nullopt 传进来。观感定下来之后应改成
     //    `cmds->DrawWater(...)`，并把这个口子删掉（否则"参数从哪儿来"会有两处来源）。
-    // Pre-condition: Init() 已调用；params.half_extent_m > 0（非法值在 Draw 时 CHECK 崩）。
+    // Pre-condition: Init() 已调用；scene_depth_tex 必须可用（HDR/MRT 场景深度）。
     void SetWaterSkin(std::optional<WaterSkinParams> params) { water_skin_ = params; }
 
     // 上一次拾取查询的结果（方法甲：渲染时填入 last_pick_，下帧读取）。

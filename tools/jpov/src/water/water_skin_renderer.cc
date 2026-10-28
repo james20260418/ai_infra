@@ -8,6 +8,7 @@
 #include <GL/glext.h>
 
 #include <algorithm>
+#include <cmath>
 #ifdef _WIN32
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
 #define GLOG_NO_ABBREVIATED_SEVERITIES
@@ -40,35 +41,23 @@ constexpr int kWaveTileUnit = 2;
 void WaterSkinRenderer::Init() {
     CHECK_EQ(vao_, 0u) << "WaterSkinRenderer::Init 重复调用";
 
-    // 局部坐标的正方形（x,z ∈ ±1，y = 0）：世界尺寸与高度由 uniform 展开，
-    // 所以改水面大小/水位不需要重传顶点缓冲。
-    constexpr float kVerts[] = {
-        -1.0f, 0.0f, -1.0f,
-         1.0f, 0.0f, -1.0f,
-        -1.0f, 0.0f,  1.0f,
-         1.0f, 0.0f,  1.0f,
-    };
+    // 全屏三角形：顶点坐标由 gl_VertexID 在 VS 里生成，**不需要顶点缓冲**，
+    // 只要一个空 VAO（core profile 不允许 client-side 数组，也不允许无 VAO 绘制）。
+    // 位置由"逐像素视线 ∩ 水平平面"算出来 ⇒ 水面**没有几何边界**（覆盖到地平线）。
     glGenVertexArrays(1, &vao_);
-    glGenBuffers(1, &vbo_);
-    glBindVertexArray(vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(kVerts), kVerts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(0);
     glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // 波浪法线 flipbook：256² × 8 帧 × 16 m tile（~4.2 MB + mip）。
-    // 256²/16 m = 6.25 cm/texel，够表现厘米级涟漪；帧数 8 时相位一圈 = 8 帧。
-    wave_tile_ = BuildWaterNormalTile(/*size=*/256, /*frames=*/8, /*tile_m=*/16.0f);
+    // 波浪法线 flipbook（256² × 8 帧 × 16 m tile）**不在这里烘**：
+    // 256²/16 m = 6.25 cm/texel 够表现厘米级涟漪，但烘焙 ~60-90 ms + 4.2 MB ——
+    // 不用水面的 app 一分钱都不该花（Builder 在首次 Draw 里做，见下）。
+    //
+    // ⚠️ 另一个更硬的理由：这个烘焙**会改变其它 pass 的逐像素结果**（实测同一份
+    //    fillrect/roundrect 2D gold 出图差 ±1/255、5.5k 像素）——在 Init 里烘
+    //    等于让"从来没画过水面"的场景也吃到这个副作用。懒烘之后 2D gold 逐字节复原。
 }
 
 void WaterSkinRenderer::Finalize() {
     ReleaseWaterNormalTile(&wave_tile_);
-    if (vbo_ != 0) {
-        glDeleteBuffers(1, &vbo_);
-        vbo_ = 0;
-    }
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
@@ -76,23 +65,24 @@ void WaterSkinRenderer::Finalize() {
 }
 
 void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
-                             const float view_proj[16], unsigned int scene_depth_tex,
-                             unsigned int sky_env_cube, const DirectionalLight* sun,
-                             int width, int height, ShaderManager& shader_mgr) {
-    CHECK_GT(params.half_extent_m, 0.0f) << "WaterSkinRenderer: half_extent_m 必须 > 0";
+                             unsigned int scene_depth_tex, unsigned int sky_env_cube,
+                             const DirectionalLight* sun, int width, int height,
+                             ShaderManager& shader_mgr) {
     CHECK_NE(scene_depth_tex, 0u) << "WaterSkinRenderer: 缺少场景深度纹理";
     CHECK_NE(vao_, 0u) << "WaterSkinRenderer: 未 Init()";
     CHECK_GT(width, 0);
     CHECK_GT(height, 0);
 
+    // 波浪法线 flipbook：首次真正画水面时才烘（见 Init 的说明）。
+    if (wave_tile_.tex == 0) {
+        wave_tile_ = BuildWaterNormalTile(/*size=*/256, /*frames=*/8, /*tile_m=*/16.0f);
+    }
+
     const unsigned int prog = shader_mgr.GetOrCreate("water_skin",
                                                      {kWaterSkinVs, kWaterSkinFs});
     glUseProgram(prog);
 
-    glUniformMatrix4fv(shader_mgr.GetUniform(prog, "uVP"), 1, GL_FALSE, view_proj);
-    glUniform1f(shader_mgr.GetUniform(prog, "uHalfExtent"), params.half_extent_m);
-    // uLevelY 由 VS（展开 quad 高度）与 FS（判相机在水上/水下）**共用**：同一个 program
-    // 里同名 uniform 只需上传一次，两个阶段都能读到。
+    // 无限平面不需要 VP 矩阵：射线由相机基 + NDC 直接算（见 FS）。
     glUniform1f(shader_mgr.GetUniform(prog, "uLevelY"), params.level_y);
     glUniform2f(shader_mgr.GetUniform(prog, "uViewport"), static_cast<float>(width),
                 static_cast<float>(height));
@@ -100,6 +90,37 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glUniform1f(shader_mgr.GetUniform(prog, "uFar"), cam.far);
     glUniform3f(shader_mgr.GetUniform(prog, "uCamPos"), cam.position.x(),
                 cam.position.y(), cam.position.z());
+    {
+        // 相机基（与 Primitives3DRenderer::BuildMVP 的 lookAt 同一套约定）：
+        //   fwd = normalize(target − position)，right = normalize(cross(fwd, up))，
+        //   up' = cross(right, fwd)。
+        // 逐像素方向 = fwd + (ndc.x·tanHalf·aspect)·right + (ndc.y·tanHalf)·up'。
+        const Vec3f fwd_raw = Vec3f{cam.target.x() - cam.position.x(),
+                                    cam.target.y() - cam.position.y(),
+                                    cam.target.z() - cam.position.z()};
+        const float fwd_len = fwd_raw.Norm();
+        CHECK_GT(fwd_len, 1.0e-6f) << "WaterSkinRenderer: 相机 target 与 position 重合";
+        const Vec3f fwd{fwd_raw.x() / fwd_len, fwd_raw.y() / fwd_len, fwd_raw.z() / fwd_len};
+        Vec3f right{fwd.y() * cam.up.z() - fwd.z() * cam.up.y(),
+                    fwd.z() * cam.up.x() - fwd.x() * cam.up.z(),
+                    fwd.x() * cam.up.y() - fwd.y() * cam.up.x()};
+        const float right_len = right.Norm();
+        CHECK_GT(right_len, 1.0e-6f) << "WaterSkinRenderer: 相机 up 与视线平行";
+        right = Vec3f{right.x() / right_len, right.y() / right_len, right.z() / right_len};
+        // up' = right × fwd（**不是** fwd × right —— 那个顺序得到的是 −up，
+        // 会让整张水面的上下方向翻转：屏幕上半（应朝天）被当成朝下求交）。
+        const Vec3f up{right.y() * fwd.z() - right.z() * fwd.y(),
+                       right.z() * fwd.x() - right.x() * fwd.z(),
+                       right.x() * fwd.y() - right.y() * fwd.x()};
+        glUniform3f(shader_mgr.GetUniform(prog, "uCamFwd"), fwd.x(), fwd.y(), fwd.z());
+        glUniform3f(shader_mgr.GetUniform(prog, "uCamRight"), right.x(), right.y(), right.z());
+        glUniform3f(shader_mgr.GetUniform(prog, "uCamUp"), up.x(), up.y(), up.z());
+        constexpr float kDeg2RadCam = 3.14159265358979323846f / 180.0f;
+        glUniform1f(shader_mgr.GetUniform(prog, "uTanHalfFov"),
+                    std::tan(0.5f * cam.fov * kDeg2RadCam));
+        glUniform1f(shader_mgr.GetUniform(prog, "uAspect"),
+                    static_cast<float>(width) / static_cast<float>(height));
+    }
     glUniform3f(shader_mgr.GetUniform(prog, "uBodyColor"), params.body_color.r,
                 params.body_color.g, params.body_color.b);
     glUniform1f(shader_mgr.GetUniform(prog, "uBodyAlpha"), params.body_alpha);
@@ -122,6 +143,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 (params.use_sun_glint && sun != nullptr) ? 1 : 0);
     glUniform1f(shader_mgr.GetUniform(prog, "uSkyScale"), params.sky_scale);
     glUniform1f(shader_mgr.GetUniform(prog, "uSunShininess"), params.sun_shininess);
+    glUniform1f(shader_mgr.GetUniform(prog, "uLeanGain"),
+                params.use_lean_glint ? std::max(params.lean_gain, 0.0f) : 0.0f);
     if (sun != nullptr) {
         // DirectionalLight::direction 是**光传播方向**（从太阳射向场景）⇒ 指向太阳要取反。
         const Vec3f to_sun = Vec3f{-sun->direction.x(), -sun->direction.y(),
@@ -177,7 +200,7 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glBindVertexArray(vao_);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 3);   // 全屏三角形（顶点由 gl_VertexID 生成）
     glBindVertexArray(0);
 
     // 复原成「3D pass 结束后的状态」：调用方随后是 highlight / bloom / tone map，自设状态。

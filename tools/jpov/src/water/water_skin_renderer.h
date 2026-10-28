@@ -1,7 +1,9 @@
 // JPOV WaterSkinRenderer — 水皮子渲染器（froxel 之后的一次独立 pass）
 //
-// 角色：把「水面」画成一块**水平正方形 quad**（默认 10 km²，与 strip 平铺版的尺寸一致），
+// 角色：把「水面」画成一块**无限大的水平平面**（y = level_y），逐像素解"视线 ∩ 平面"，
 // 与帧缓冲里已有的不透明场景做**简单 alpha 混合**（透射 = out = water·α + dst·(1−α)）。
+// 全屏三角形 + 不需要顶点缓冲：平面没有几何边界 ⇒ 一直覆盖到真地平线
+// （有限 quad 会在"远端边界 ↔ 地平线"之间漏出天球下半球的 ground 色）。
 // 与 SkyRenderer / HorizonFogRenderer / FireFogRenderer 在 renderer 层面平级。
 //
 // 调用时机（见 Renderer::Render）：froxel（点状雾）合成之后、highlight / tone map 之前。
@@ -26,12 +28,10 @@ namespace jpov {
 
 // 水皮的**实验期参数**（直连 Renderer，暂不进 RenderCommandList）。
 //
-// 这里刻意只有"表面光学"的旋钮：几何永远是 y = level_y 的正方形平面。
-// 没有字段带隐式特殊值 —— half_extent_m 必须 > 0（为 0 时 Draw 会 CHECK 崩），
+// 这里刻意只有"表面光学"的旋钮：几何永远是 y = level_y 的**无限平面**（没有尺寸参数）。
 // 想关掉水皮就把整个 optional 设成 nullopt（JPOV::SetWaterSkin(std::nullopt)）。
 struct WaterSkinParams {
     float level_y = 0.0f;         // 水面世界高度（米，y-up）
-    float half_extent_m = 0.0f;   // 正方形半边长（米），必须 > 0
     // 本体色 + 正对视线时的覆盖率：α = 0.10 ⇒ 一眼看穿，只有一层很淡的色偏。
     Color body_color{0.62f, 0.80f, 0.86f, 1.0f};
     float body_alpha = 0.10f;
@@ -67,40 +67,44 @@ struct WaterSkinParams {
     bool use_sun_glint = true;        // 太阳高光（Blinn-Phong 单瓣 × F）
     float sky_scale = 1.0f;           // 天光反射量 [0,1]
     float sun_shininess = 1500.0f;    // 高光幂次（越大越尖）
+    // ── LEAN 高光补偿（2026-10-28 Danis 要的）──
+    // 带限/硬件 mip 会把斜率**平均掉** ⇒ 远处水面变平、太阳高光变软消失。
+    // LEAN 的补法是把"丢掉的斜率方差"并进高光波瓣（峰值降、宽度升、能量守恒），
+    // 同时用它抬天光探针的 mip（远处反光变钝，不是变成硬镜面）。
+    bool use_lean_glint = true;       // false ⇒ 逐字节回到"无补偿"的旧行为
+    float lean_gain = 1.0f;           // 方差增益：1 = 物理量；>1 = 观感加强；0 = 等于关
     // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
     //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ）
     //   3 = sinc + 方差转粗糙度    4 = **法线 flipbook 纹理 + 硬件 mip**
-    int wave_filter_mode = 3;
+    int wave_filter_mode = 4;   // 面板只暴露 4（0..3 是带限对比/教学用的历史模式）
     // 模式 4 的瓦片边长（米）：一张 tile 覆盖多大世界范围。
     float wave_tile_m = 16.0f;
 };
 
 class WaterSkinRenderer {
 public:
-    // Init: 建 quad 的 VAO/VBO（局部 ±1 的正方形，展开由 uniform 做）。
+    // Init: 建一个空 VAO（全屏三角形的顶点由 gl_VertexID 生成，不需要顶点缓冲）。
     // Pre-condition: 已创建 GL context；Finalize 后不可再次 Draw（可重新 Init）。
     void Init();
     void Finalize();
 
     // Draw: 把水皮混合到**当前绑定的 FBO**（调用方负责绑定 FBO / viewport / draw buffer）。
-    //   params            : 水面高度、半边长、表面光学参数。
-    //   cam               : 相机（取位置与 near/far 做深度线性化）。
-    //   view_proj         : 相机 Proj*View（列主序 16 float）。
+    //   params            : 水面高度、表面光学参数。
+    //   cam               : 相机（位置/朝向/fov/near-far：射线生成 + 深度线性化都用它）。
     //   scene_depth_tex   : MRT#1 场景深度（R32F 单采样）。必须**不**是当前 draw FBO 的
     //                       附件（否则形成采样↔写入的反馈环）。
     //   sky_env_cube      : 天空探针 cubemap（镜面天光用）。0 = 没有探针 ⇒ 退回常量 rim 色。
     //   sun               : 平行光（太阳/月亮）；nullopt = 不画太阳高光。
     //   width / height    : 3D FBO 尺寸（把 gl_FragCoord 换成 [0,1] uv）。
-    // Pre-condition: params.half_extent_m > 0；scene_depth_tex != 0。
+    // Pre-condition: scene_depth_tex != 0；相机的 target != position、up 不与视线平行。
     // 返回后 GL_BLEND / GL_DEPTH_TEST / GL_CULL_FACE 均为关（与 3D pass 结束后的状态一致）。
-    void Draw(const WaterSkinParams& params, const Camera& cam, const float view_proj[16],
+    void Draw(const WaterSkinParams& params, const Camera& cam,
               unsigned int scene_depth_tex, unsigned int sky_env_cube,
               const DirectionalLight* sun, int width, int height,
               ShaderManager& shader_mgr);
 
 private:
-    unsigned int vao_ = 0;
-    unsigned int vbo_ = 0;
+    unsigned int vao_ = 0;   // 空 VAO（仅用来满足 core profile 的绘制要求）
     // 波浪法线 flipbook 图集（Init 时烘一次；模式 4 用，其它模式也建好备用 —— 建一次
     // 约 1~2 s/256²×8 帧，留在 Init 里不占每帧成本）。
     WaterNormalTile wave_tile_;

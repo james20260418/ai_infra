@@ -26,7 +26,8 @@
 //
 // ── 场景（面板顶部的「场景」下拉，2026-10-27 加）──
 //   ① 模型场景：三方块 + 地面 + 桌子/橡树 + 三个 T-pose 蓝人（验收天光/材质/受光）；
-//   ② 水面场景：一块 **strip 平铺出来的 10 km² 玻璃 quad**（见 skylight_water_quad.h）。
+//   ② 水面场景：**无限大的水平水面**（逐像素解"视线 ∩ 平面"，见 src/water/），
+//      另有 strip 平铺的 10 km² 玻璃 quad 作 A/B 对照（见 skylight_water_quad.h）。
 //      切到水面后**面板只留场景下拉 + 一行操作提示** —— 天光那一堆滑条在这个阶段
 //      对水面没有意义，占屏反而看不清效果。
 //   两个场景**互斥**：水面场景不画模型几何，模型场景不画水面。
@@ -120,8 +121,11 @@ public:
     bool water_use_sky_refl_ = true;      // 镜面天光
     bool water_use_transmit_ = true;      // 水下透射
     bool water_use_sun_glint_ = true;     // 太阳高光
+    bool water_lean_glint_ = true;        // LEAN 高光补偿（方差 → 波瓣 + 探针 mip）
+    float water_lean_gain_ = 1.0f;        // LEAN 方差增益 [0,4]（1 = 物理量）
     // 远距离波浪带限方式（0/1/2/3，见 shader 注释）。面板给个下拉做对比。
-    int water_wave_filter_mode_ = 3;
+    // 面板只暴露模式 4（法线 flipbook 纹理）；0..3 是带限对比用的历史模式，仅 capture 用。
+    int water_wave_filter_mode_ = 4;
 
     // 水的折射率。1.333 = 物理水；**1.0 = 关掉折射**（A/B 用：窗内会退化成一刀切的原样天空，
     // 顺带 n² 增益也变成 1）。只为拍图暴露，不进面板。
@@ -202,7 +206,7 @@ public:
         }
 
         // 相机由 view_ 推导（同 model viewer；target=原点）。
-        // 远裁剪面按场景给：水面是一块 10 km² 的大平面（对角 ~4.5 km），
+        // 远裁剪面按场景给：水面是无限平面（只有天空要画在它后面），
         // 用模型场景的 1000 m 会把水面远端切掉、露出背景天空；模型场景保持原值（零回归）。
         const bool water_scene = (scene_ == SceneKind::kWater);
         cmds->camera.position = view_.Position();
@@ -265,14 +269,15 @@ public:
             const jpov::Color body = WaterGlassBodyColor();
             const jpov::StripFresnel fr = WaterGlassFresnel();
             jpov::WaterSkinParams wp;
-            wp.level_y       = kWaterPlaneY;
-            wp.half_extent_m = 0.5f * WaterQuadSideM();
+            wp.level_y       = kWaterPlaneY;   // 无限平面：没有尺寸参数（几何边界不存在）
             wp.body_color    = body;
             wp.body_alpha    = body.a;
             wp.rim_color     = {fr.rim_color.x(), fr.rim_color.y(), fr.rim_color.z(), 1.0f};
             wp.use_sky_reflection = water_use_sky_refl_;
             wp.use_transmission   = water_use_transmit_;
             wp.use_sun_glint      = water_use_sun_glint_;
+            wp.use_lean_glint     = water_lean_glint_;
+            wp.lean_gain          = water_lean_gain_;
             wp.sky_scale          = 1.0f;
             wp.wave_filter_mode   = water_wave_filter_mode_;
             // 水下视角：临界角外用地色补齐。必须取**天穹下半球的填色**（辐亮度量级，
@@ -325,7 +330,7 @@ public:
     }
 
 private:
-    // 水面场景：水下大 box + 小 box + 桌子 + 桌上的人，最后是水皮本身（strip 平铺的 10 km² quad）。
+    // 水面场景：水下大 box + 小 box + 桌子 + 桌上的人；水皮本身由 Renderer 的独立 pass 画。
     //
     // 为什么水皮**最后**画：水皮是半透明 pass（覆盖集），它要盖在已经画好的不透明几何上；
     // 条带 pass 本来就在不透明之后，这里放在最后只是让代码读起来与物理顺序一致。
@@ -414,38 +419,39 @@ private:
                 return jpov::UiRect{{kColX[0], 16.0f + i * (kRowH + kSpacing)},
                                     {kFullWidth, kRowH}};
             };
-            ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
-                         water_row(1.0f));
-            // 波浪只扰法线（几何仍是平面）：相位滑条就是"让水纹动起来"的那根。
+            // 天光两根：水面观感 90% 来自太阳，仰角/方位角必须能当场拨（2026-10-28 Danis 要）。
+            ui_.SliderFloat("天光仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                            water_row(1.0f), -90.0f, 90.0f, 0);
+            ui_.SliderFloat("天光方位角 °", &deg_.sun_azim_deg, water_row(2.0f),
+                            0.0f, 360.0f, 0);
+            // LEAN 高光补偿：带限/mip 把斜率平均掉 ⇒ 远处高光会"变软消失"；
+            // 补偿 = 把丢掉的斜率方差并进波瓣（变宽、变钝、能量守恒）。
+            ui_.Checkbox("LEAN 高光补偿（方差→波瓣+探针 mip）", &water_lean_glint_,
+                         water_row(3.0f));
+            ui_.SliderFloat("LEAN 补偿增益 [0,4]", &water_lean_gain_, water_row(4.0f),
+                            0.0f, 4.0f, 2);
             // 水上视角三项（默认全开）：关掉任一项就能看出它贡献了什么。
-            ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(2.0f));
-            ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(3.0f));
-            ui_.Checkbox("太阳高光（Blinn-Phong×F）", &water_use_sun_glint_, water_row(4.0f));
+            ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(5.0f));
+            ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(6.0f));
+            ui_.Checkbox("太阳高光（Blinn-Phong×F）", &water_use_sun_glint_, water_row(7.0f));
             // 界面权重：n 从 1.333 往 1 拉 ⇒ 临界角推向 90°、R 整体下降 ⇒ 灰区逐渐变回透射。
-            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(5.0f),
+            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(8.0f),
                             1.0f, 1.6f, 3);
-            // 实验旋钮：强制保留一部分透射（TIR 区也不再是"全反射"）。
-            ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
-                            water_row(6.0f), 0.0f, 1.0f, 2);
-            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(7.0f),
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(9.0f),
                             0.0f, 6.2831853f, 2);
             ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
-                            water_row(8.0f), 0.0f, 20.0f, 1);
-            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(9.0f),
+                            water_row(10.0f), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(11.0f),
                             0.05f, 20.0f, 2);
-            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(10.0f),
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(12.0f),
                             0.0f, 360.0f, 0);
-            // 远距离带限方式（对比/教学用）：下拉直接切换，四种实现见 shader 的 WaveNormal。
-            static const std::vector<const char*> kWaveFilterNames = {
-                "不过滤（aliasing 基线）",
-                "硬关八度（有硬切缝）",
-                "逐八度 sinc 带限",
-                "sinc + 方差转粗糙度（推荐）",
-                "法线 flipbook 纹理 + 硬件 mip",
-            };
-            ui_.Combo("远距带限", &water_wave_filter_mode_, kWaveFilterNames,
-                      water_row(11.0f));
-            ui_.Text("水面 = 10 km² quad  右键拖动=绕行 滚轮=推拉", water_row(12.0f));
+            ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
+                            water_row(13.0f), 0.0f, 1.0f, 2);
+            // 两块实现的 A/B：strip 平铺版是有限 quad（老路径），关 = 新水皮 pass（无限平面）。
+            ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
+                         water_row(14.0f));
+            ui_.Text("水面 = 无限平面（逐像素求交，覆盖到地平线）  右键拖动=绕行", 
+                     water_row(15.0f));
             return;
         }
 
@@ -495,7 +501,7 @@ private:
     static const std::vector<const char*>& SceneNames() {
         static const std::vector<const char*> kNames = {
             "模型场景（方块/桌子/橡树/蓝人）",
-            "水面（strip 玻璃 quad 10 km²）",
+            "水面（无限平面 + 波浪法线）",
         };
         return kNames;
     }

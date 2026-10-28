@@ -1895,7 +1895,8 @@ void Renderer::Render(const RenderCommandList& cmds,
             }
 
             // ── 水皮（water skin）—— froxel（点状雾）之后的**一次独立 pass**：
-            //    画一块水平正方形 quad（默认 10 km²），与水之前的帧缓冲颜色做
+            //    逐像素解"视线 ∩ 水平平面"（**无限平面**，没有几何边界 ⇒ 一直盖到地平线），
+            //    与水之前的帧缓冲颜色做
             //    **简单 alpha 混合**（out = water·α + dst·(1−α)）= 本版的水面透射。
             //    与 fog 两条 pass 同一写法（就地合成，不持有自己的 FBO）：只写颜色
             //    附件 0，绘制期间摘下附件 1（场景深度），避免采样↔写入的反馈环。
@@ -1910,7 +1911,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                                        GL_TEXTURE_2D, 0, 0);
                 // 镜面天光需要天空探针（本帧渲了 env_specular 才有）；太阳高光用主平行光。
                 const unsigned int sky_cube = (sky_env_tex_ != 0) ? sky_env_tex_ : 0u;
-                water_skin_renderer_.Draw(*water_skin_, cam, mvp_, hdr_scene_depth_tex,
+                water_skin_renderer_.Draw(*water_skin_, cam, hdr_scene_depth_tex,
                                           sky_cube, eff_sun ? &*eff_sun : nullptr,
                                           fbo_3d_w, fbo_3d_h, shader_mgr_);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
