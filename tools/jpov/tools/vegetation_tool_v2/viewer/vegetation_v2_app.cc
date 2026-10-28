@@ -64,59 +64,6 @@ constexpr float kCardThickness = 0.02f;  // 盒子厚度（米）：只是为了
 // 由 alpha 生成切线空间法线贴图：alpha 当高度场 → 模糊 → 中央差分。
 // green = +v（OpenGL 约定，与引擎 B = cross(N,T) 一致）；图像 y 向下，所以要取反。
 
-// A：顶点法线球面化。卡片本来 4 个顶点法线全等于面法线 → 整卡一个亮度（纸片感）。
-// 按格内 uv 把法线往「叶片中心鼓起」的方向掰：角上法线向外张，中央仍朝面外。
-// k = 0 时逐位等价于原平面法线（零回归）。
-void BendCardNormals(jpov::MeshData* md, float k) {
-  // 注意：jpov::MeshData.positions 是 vector<Vec3f>，size() 已经是顶点数。
-  const size_t nverts = md->positions.size();
-  for (size_t v = 0; v + 3 < nverts; v += 4) {
-    const jpov::Vec3f& p0 = md->positions[v + 0];
-    const jpov::Vec3f& p1 = md->positions[v + 1];
-    const jpov::Vec3f& p3 = md->positions[v + 3];
-    jpov::Vec3f right = p1 - p0;
-    jpov::Vec3f up = p3 - p0;
-    const float rl = std::sqrt(right.x() * right.x() + right.y() * right.y() +
-                               right.z() * right.z());
-    const float ul = std::sqrt(up.x() * up.x() + up.y() * up.y() + up.z() * up.z());
-    if (rl < 1e-9f || ul < 1e-9f) continue;
-    right = right * (1.0f / rl);
-    up = up * (1.0f / ul);
-    jpov::Vec3f n{right.y() * up.z() - right.z() * up.y(),
-                  right.z() * up.x() - right.x() * up.z(),
-                  right.x() * up.y() - right.y() * up.x()};
-    const float nl = std::sqrt(n.x() * n.x() + n.y() * n.y() + n.z() * n.z());
-    if (nl < 1e-9f) continue;
-    n = n * (1.0f / nl);
-
-    for (size_t i = 0; i < 4; ++i) {
-      const jpov::Vec2f& uv = md->uvs[v + i];
-      const float u = uv.x();
-      const float w = uv.y();
-      jpov::Vec3f bent = n + right * ((2.0f * u - 1.0f) * k) + up * ((2.0f * w - 1.0f) * k);
-      const float bl = std::sqrt(bent.x() * bent.x() + bent.y() * bent.y() +
-                                 bent.z() * bent.z());
-      if (bl < 1e-9f) continue;
-      const jpov::Vec3f nb = bent * (1.0f / bl);
-      md->normals[v + i] = nb;
-
-      // 切线必须跟着重建：法线弯了而切线还是平面 +u，T·N ≠ 0，shader 里
-      // `B = normalize(cross(N, T)); TBN` 会被斜切 ⇒ 法线贴图的方向与强度都不对
-      // （curl 默认 0.5 时卡角最大偏离 ~26°，T·N 可达 0.45）。
-      // 做法：去掉切线在法线上的分量再归一化；退化（切线几乎平行法线）时退回卡片 +u。
-      if (v + i < md->tangents.size()) {
-        const jpov::Vec3f t = md->tangents[v + i];
-        const jpov::vegetation::Vec3d o = jpov::vegetation::OrthogonalizeTangent(
-            jpov::vegetation::Vec3d{t.x(), t.y(), t.z()},
-            jpov::vegetation::Vec3d{nb.x(), nb.y(), nb.z()},
-            jpov::vegetation::Vec3d{right.x(), right.y(), right.z()});
-        md->tangents[v + i] = jpov::Vec3f{static_cast<float>(o.x), static_cast<float>(o.y),
-                                          static_cast<float>(o.z)};
-      }
-    }
-  }
-}
-
 namespace {
 
 // 层级 → 棕色（level 0 最深）。超过 5 层饱和，避免深树整片发白。
@@ -287,13 +234,12 @@ class VegetationV2App : public JPOV {
   bool show_leaf_ = true;   // 关掉 → 回到 shape debug 的绿色盒子
   bool show_labels_ = true; // debug 视图里的 UV 文字标签
   float leaf_aspect_ = 1.0f;          // 单张图 = 一格 → 宽/高
-  float curl_ = 0.5f;                 // A：顶点法线球面化（面板可调）
-  float curl_applied_ = -1.0f;        // 上次烘进 mesh 的值（变了才 UpdateMesh）
+  // 叶面弯曲**没有**滑条：弯曲存在 shape 的 leaf type 里，查看器只负责把它画出来。
+  // 面板是看资产的地方，不是调生成参数的地方 —— 否则预览与最终资产会变成两套真相。
   float leaf_normal_scale_ = 1.0f;    // B：法线贴图强度（面板可调）
   float leaf_black_ = 12.0f;
   std::vector<jpov::PBRMaterial> leaf_mat_;
   std::vector<uint32_t> leaf_mesh_;               // 每 type 一个 mesh
-  std::vector<jpov::MeshData> leaf_mesh_base_;    // 平法线基准（curl 变化时重算）
   // 逐层棕色材质缓存：每帧给 183 根枝各造一个 PBRMaterial 纯属浪费。
   std::vector<jpov::PBRMaterial> level_mats_;
   jpov_viewer::ViewConfig view_;
@@ -431,20 +377,25 @@ class VegetationV2App : public JPOV {
     out->double_sided = true;
   }
 
-  // 叶卡：每个 leaf type 一份材质（type 0 用 --leaf，type 1 用 --leaf2，缺省回退）。
+  // 叶卡：每个 leaf type 一份材质 + 一份网格（type 0 用 --leaf，type 1 用 --leaf2，缺省回退）。
+  //
+  // 叶面弯曲早就烘在**几何**里了（BuildLeafCards 按解析式求位置/法线/切线），
+  // 这里只做「shape 网格 → 引擎网格」的搬运。以前这里是「先摆平面 quad、再把法线
+  // 球面化」的 hack —— 法线弯了、几何仍是平的，而且烘焙器不认那套法线 ⇒ 预览与
+  // glb 资产不是同一个东西。现在两边走同一条 BuildLeafCards。
   void BuildLeafScene(const CliArgs& args) {
     leaf_black_ = args.leaf_black;
     leaf_normal_scale_ = args.leaf_normal;
-    curl_ = args.leaf_curl;
     has_leaf_ = true;
 
     leaf_mat_.assign(kMaxCardTypes, jpov::PBRMaterial());
     leaf_mesh_.assign(kMaxCardTypes, 0);
-    leaf_mesh_base_.assign(kMaxCardTypes, jpov::MeshData());
 
     for (int t = 0; t < kMaxCardTypes; ++t) {
-      Shape subset = shape_;
-      subset.cards.clear();
+      // 子集只保留「这一类卡」：卡网格只需要 cards + leaf_types，枝干（占 99% 内存）
+      // 留在 shape_ 里就够了（烘焙/重建网格都直接读 shape_）。
+      Shape subset;
+      subset.leaf_types = shape_.leaf_types;
       for (const auto& c : shape_.cards) {
         if (static_cast<int>(c.type % kMaxCardTypes) == t) {
           subset.cards.push_back(c);
@@ -463,45 +414,40 @@ class VegetationV2App : public JPOV {
       LoadLeafMaterial(path, &leaf_mat_[t]);
       LOG(INFO) << "leaf type " << t << " ← " << path << "（" << subset.cards.size() << " 卡）";
 
-      const MeshData src = jpov::vegetation::BuildLeafCards(subset);
-      jpov::MeshData md;
-      md.flags = static_cast<jpov::MeshVertexFlags>(
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kUV) |
-          static_cast<uint8_t>(jpov::MeshVertexFlags::kTangent));
-      const size_t nverts = src.positions.size() / 3;
-      for (size_t v = 0; v < nverts; ++v) {
-        md.positions.push_back(jpov::Vec3f{src.positions[v * 3], src.positions[v * 3 + 1],
-                                           src.positions[v * 3 + 2]});
-        md.normals.push_back(jpov::Vec3f{src.normals[v * 3], src.normals[v * 3 + 1],
-                                         src.normals[v * 3 + 2]});
-        md.uvs.push_back(jpov::Vec2f{src.uvs[v * 2], src.uvs[v * 2 + 1]});
-        const size_t c0 = v - (v % 4);
-        const jpov::Vec3f d = md.positions[c0 + 1] - md.positions[c0];
-        const float len = std::sqrt(d.x() * d.x() + d.y() * d.y() + d.z() * d.z());
-        const float inv = (len > 1e-9f) ? 1.0f / len : 0.0f;
-        md.tangents.push_back(jpov::Vec3f{d.x() * inv, d.y() * inv, d.z() * inv});
-      }
-      md.indices = src.indices;
-      leaf_mesh_base_[t] = md;
-
-      jpov::MeshData bent = md;
-      BendCardNormals(&bent, curl_);
-      leaf_mesh_[t] = RegisterMesh(bent);
+      leaf_mesh_[t] = RegisterMesh(ToEngineLeafMesh(jpov::vegetation::BuildLeafCards(subset)));
     }
-    curl_applied_ = curl_;
-    LOG(INFO) << "叶卡材质就绪：curl = " << curl_ << "，法线强度 = " << leaf_normal_scale_;
+    for (const LeafType& t : shape_.leaf_types) {
+      LOG(INFO) << "leaf type " << t.type << " 弯曲（来自资产）：along=" << t.bend.along
+                << " across=" << t.bend.across << " crease=" << t.bend.crease;
+    }
+    LOG(INFO) << "叶卡材质就绪，法线强度 = " << leaf_normal_scale_;
   }
 
-  void ApplyCurl() {
-    for (size_t t = 0; t < leaf_mesh_.size(); ++t) {
-      if (leaf_mesh_[t] == 0) continue;
-      jpov::MeshData bent = leaf_mesh_base_[t];
-      BendCardNormals(&bent, curl_);
-      UpdateMesh(leaf_mesh_[t], bent);
+  // shape 网格 → 引擎网格：只搬数据，几何早就是最终形态（含弯曲）。
+  jpov::MeshData ToEngineLeafMesh(const MeshData& src) const {
+    jpov::MeshData md;
+    md.flags = static_cast<jpov::MeshVertexFlags>(
+        static_cast<uint8_t>(jpov::MeshVertexFlags::kPosition) |
+        static_cast<uint8_t>(jpov::MeshVertexFlags::kNormal) |
+        static_cast<uint8_t>(jpov::MeshVertexFlags::kUV) |
+        static_cast<uint8_t>(jpov::MeshVertexFlags::kTangent));
+    const size_t nverts = src.positions.size() / 3;
+    md.positions.reserve(nverts);
+    md.normals.reserve(nverts);
+    md.uvs.reserve(nverts);
+    md.tangents.reserve(nverts);
+    for (size_t v = 0; v < nverts; ++v) {
+      md.positions.push_back(jpov::Vec3f{src.positions[v * 3], src.positions[v * 3 + 1],
+                                         src.positions[v * 3 + 2]});
+      md.normals.push_back(jpov::Vec3f{src.normals[v * 3], src.normals[v * 3 + 1],
+                                       src.normals[v * 3 + 2]});
+      md.uvs.push_back(jpov::Vec2f{src.uvs[v * 2], src.uvs[v * 2 + 1]});
+      // 切线是解析的 ∂P/∂u（弯曲卡的切线不再等于「卡片 +u 边」，差分近似会把曲率吃进去）。
+      md.tangents.push_back(jpov::Vec3f{src.tangents[v * 3], src.tangents[v * 3 + 1],
+                                        src.tangents[v * 3 + 2]});
     }
-    curl_applied_ = curl_;
+    md.indices = src.indices;
+    return md;
   }
 
   // 与 shape **无关**的公共状态（纯 glb 查看模式也要有）：材质/烘焙命令行的继承、
@@ -510,6 +456,13 @@ class VegetationV2App : public JPOV {
   // 为什么单独一层：`--glb` 可以不配 `--shape`（纯查看模式），那条路径没有 shape、没有
   // 扫管/叶卡，但仍然要能调风、要能画面板、要继承 --normal-scale 之类的参数。
   void ApplyCommonArgs(const CliArgs& args) {
+    if (args.hide_hud) {
+      // HUD 与叶卡 UV 标签都是 2D 文字覆盖层；gold 要的是纯 3D 画面 ⇒ 一个开关全关。
+      // 必须放在这里（两条建场景路径都经过）：只在原材料态关的话，纯 glb 查看模式
+      // 仍会画出相机 HUD，而 glb gold 正好走那条路。
+      show_hud_ = false;
+      show_labels_ = false;
+    }
     normal_scale_ = args.normal_scale;
     args_uv_vscale_ = args.uv_vscale;
     args_radius_ = static_cast<float>(args.radius);
@@ -744,7 +697,12 @@ class VegetationV2App : public JPOV {
     }
     if (args.hide_leaf) show_leaf_ = false;
     if (args.hide_bark) show_bark_ = false;
-    if (args.hide_hud) show_hud_ = false;
+    if (args.hide_hud) {
+      // HUD 是 2D 文字覆盖层，叶卡上的 UV 标签也是 —— gold 比对要的是纯 3D 画面，
+      // 一个开关全关掉（以前只有 HUD，标签靠"没字体"顺带关掉；字体补上后必须显式关）。
+      show_hud_ = false;
+      show_labels_ = false;
+    }
     LOG(INFO) << "shape: " << shape_.branches.size() << " 枝 / " << shape_.cards.size()
               << " 卡 | " << CamString();
   }
@@ -1125,14 +1083,8 @@ class VegetationV2App : public JPOV {
       wind_time_ += (1.0f / kViewerFps) * wind_time_scale_;
     }
     (void)frame_count;
-    // 面板滑条改的是「呈现」参数：curl 要重烘顶点法线，法线强度是材质常量。
+    // 叶卡唯一可调的呈现参数是法线强度（材质常量）；弯曲来自资产，不在这里改。
     if (has_leaf_) {
-      // 精确比较是安全的：Ui::SliderFloat 只在拖动/点击时写 *value，
-      // 空闲帧只做 *value = clamp(*value)（同值写回，位模式不变），不会产生浮点噪声。
-      // 拖动期间本来就是每帧重烘（实时预览），epsilon 也省不掉这笔开销。
-      if (curl_ != curl_applied_) {
-        ApplyCurl();
-      }
       for (auto& m : leaf_mat_) {
         m.normal_scale = leaf_normal_scale_;
       }
@@ -1296,7 +1248,7 @@ class VegetationV2App : public JPOV {
             });
 
       if (raw) {
-        panel(xl, &yl, "叶卡", &leaf_panel_open_, 6, [&](int i, const jpov::UiRect& r) {
+        panel(xl, &yl, "叶卡", &leaf_panel_open_, 5, [&](int i, const jpov::UiRect& r) {
           if (i == 0) {
             ui_.Checkbox("显示全部叶子", &show_all_card_types_, r);
           } else if (i == 1) {
@@ -1320,8 +1272,6 @@ class VegetationV2App : public JPOV {
             ui_.Checkbox("叶卡贴图", &show_leaf_, r);
           } else if (i == 3) {
             ui_.Checkbox("叶卡标签", &show_labels_, r);
-          } else if (i == 4) {
-            ui_.SliderFloat("叶法线球面化", &curl_, r, 0.0f, 2.0f, 2);
           } else {
             ui_.SliderFloat("叶法线强度", &leaf_normal_scale_, r, 0.0f, 3.0f, 2);
           }
@@ -1459,15 +1409,32 @@ int RunViewer(const CliArgs& args) {
   }
   // 字体只用来画 HUD 和 debug 标签。缺字体不该让整个查看器崩掉（CI / 无字体环境）：
   // 有就注册，没有就降级成「不画文字」，由 app 自己把 HUD/标签关掉。
-  const JPOV::FontEntry kWantFonts[] = {
-      {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
-      {"fonts/DejaVuSans.ttf", 0, jpov::kFontBuiltinLatin},
+  // 字体要按顺序找几个位置：从仓库根跑（字体在 tools/jpov/fonts）和从 output 目录跑
+  // （JPOV 会把字体复制到那里）都得找到 —— 否则 HUD 静默消失，截图里就没有相机参数，
+  // 排查「树干对齐」这类问题就没了依据。
+  const struct {
+    const char* label;
+    bool cjk;
+    const char* candidates[3];
+  } kWantFonts[] = {
+      {"fonts/NotoSansCJK-Regular.ttc", true,
+       {"fonts/NotoSansCJK-Regular.ttc", "tools/jpov/fonts/NotoSansCJK-Regular.ttc", nullptr}},
+      {"fonts/DejaVuSans.ttf", false,
+       {"fonts/DejaVuSans.ttf", "tools/jpov/fonts/DejaVuSans.ttf", nullptr}},
   };
-  for (const JPOV::FontEntry& f : kWantFonts) {
-    if (std::ifstream(f.path).good()) {
-      cfg.fonts.push_back(f);
-    } else {
-      LOG(WARNING) << "缺字体（跳过，不画文字）: " << f.path;
+  for (const auto& want : kWantFonts) {
+    bool found = false;
+    for (const char* candidate : want.candidates) {
+      if (candidate == nullptr || !std::ifstream(candidate).good()) {
+        continue;
+      }
+      cfg.fonts.push_back({candidate, 0,
+                           want.cjk ? jpov::kFontBuiltinCJK : jpov::kFontBuiltinLatin});
+      found = true;
+      break;
+    }
+    if (!found) {
+      LOG(WARNING) << "缺字体（跳过，不画文字）: " << want.label;
     }
   }
 

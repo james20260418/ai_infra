@@ -33,6 +33,12 @@ cc_proto_library(
     deps = [":generate_proto_src"],
 )
 
+# 入库的 shape 资产（samples/*.vegshape）：shape_test 用它跑「每份资产都还能读」的冒烟测试。
+filegroup(
+    name = "sample_shapes",
+    srcs = glob(["samples/*.vegshape"]),
+)
+
 # 入库的生成配置（输入数据，不是构建产物）。
 filegroup(
     name = "generate_configs",
@@ -50,7 +56,16 @@ cc_library(
 cc_test(
     name = "shape_test",
     srcs = ["shape_test.cc"],
-    deps = [":shape"],
+    data = [
+        # 入库资产：冒烟测试要逐份 load 一遍（坏了要有人知道）。
+        ":sample_shapes",
+    ],
+    deps = [
+        ":shape",
+        # 文本序列化（FormatShapeText）：文件往返测试要拿它跟二进制对拍，
+        # 钉住「文本是资产格式的另一半，必须可逆」。
+        "//tools/jpov/tools/vegetation_tool_v2/gen:shape_text",
+    ],
 )
 
 # 扫管：Shape -> 网格 + UV。
@@ -129,7 +144,7 @@ cc_library(
 )
 
 # 植物组合查看器：给我 shape / bark / leaf，我把植物画出来。
-#   * shape 省略 → 打包目录里的 shapes/willow.pbtxt
+#   * shape 省略 → 打包目录里的 shapes/willow.vegshape
 #   * bark / leaf 省略 → 只渲染拓扑（树干按 level 上棕色 + debug 绿卡）
 #
 # 场景 + 渲染在 cc_library(vegetation_v2_app) 里**只编译一次**（.h 只有接口 + CliArgs）：
@@ -182,7 +197,10 @@ filegroup(
         "assets/bark/bark001/normal.png",
         "assets/bark/bark001/roughness.png",
         "assets/leaf/willow_leaf.png",
-        "samples/willow.pbtxt",
+        "samples/willow.vegshape",
+        # 游戏档资产：它的 gold（vegetation_v2_pine_game_*）要跑这份 .vegshape ——
+        # 噪声 / 弯卡 / ring_count=3 全烘在几何里，willow 范本保护不到。
+        "samples/pine_game.vegshape",
     ],
 )
 

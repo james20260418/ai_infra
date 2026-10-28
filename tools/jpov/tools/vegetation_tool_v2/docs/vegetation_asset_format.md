@@ -2,6 +2,11 @@
 
 > 位置：`tools/jpov/tools/vegetation_tool_v2/`
 > 状态：设计定稿（2026-10-20），实现见同目录 `proto/shape.proto` / `shape.h`。
+>
+> **文件格式（2026-10-26 约定）**：资产一律存**二进制 `.vegshape`**（本文 proto 的
+> protobuf wire format）；文本 `.pbtxt` 只用于人工查看/diff，用 `gen/shape_convert` 互转
+> （`vegshape → pbtxt → vegshape` 逐字节可逆：文本里每个 double 都是**最短可逆表示**，
+> 不是 `%.6g` 那种会丢精度的写法）。下面讲的是**字段语义**，与编码无关。
 
 ---
 

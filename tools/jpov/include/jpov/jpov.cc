@@ -409,21 +409,28 @@ void JPOV::Run() {
     LOG(INFO) << "JPOV::Run() — exiting (" << frame << " frames)";
 }
 
-void JPOV::RunOnce(const jpov::InputSnapshot& input,
+void JPOV::RunOnce(int64_t frame_count, const jpov::InputSnapshot& input,
                     const jpov::WindowInfo& winfo,
                     const char* out_png_path) {
     CHECK(initialized_);
+    CHECK_GE(frame_count, 0);
     CHECK_GT(winfo.width, 0);
     CHECK_GT(winfo.height, 0);
     CHECK(out_png_path != nullptr);
 
     // 1. 核心渲染（与 Run() 完全一致）
-    RunOnceInternal(0, input, winfo);
+    RunOnceInternal(frame_count, input, winfo);
 
     // 2. 保存窗口尺寸截图
     int win_w = static_cast<int>(winfo.width);
     int win_h = static_cast<int>(winfo.height);
     renderer_->SaveScreenshot(win_w, win_h, out_png_path);
+}
+
+void JPOV::RunOnce(const jpov::InputSnapshot& input,
+                    const jpov::WindowInfo& winfo,
+                    const char* out_png_path) {
+    RunOnce(/*frame_count=*/0, input, winfo, out_png_path);
 }
 
 // ========== 输入采集 ==========

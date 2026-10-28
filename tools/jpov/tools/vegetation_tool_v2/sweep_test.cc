@@ -5,9 +5,11 @@
 //   * v 沿枝单调、且 dv/ds = 1/tile（非方贴图时再乘 uv_v_scale）
 //   * 每圈的 u 恰好覆盖 [0,1]（一圈一张图，接缝在 u=1 处闭合）
 //   * 子枝入口 v 从父枝出口接续（接口处没有横向重复线）
-//   * 叶卡：4 顶点 / 2 三角形 / UV 四角 / 宽度来自材质
+//   * 叶卡：平面 4 顶点 / 2 三角形 / UV 四角 / 宽度来自材质；弯曲卡 (kBentCardSegments+1)² 顶点，
+//            anchor 恒不动、法线与切线严格正交、细分只影响轮廓
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -301,34 +303,6 @@ void TestJunctionVContinuity() {
 //   1) (au, av) 与 AnchorModeToUv 一致（4 种 mode 全覆盖）；
 //   2) (right, up, normal) 是右手系单位正交基 —— 三处调用方（真实叶卡 / 绿卡 / 标签）
 //      全靠它，任何一处算错都会让叶子整体错位或翻面。
-// OrthogonalizeTangent：curl（法线球面化）之后重建切线用的正交化。
-// 钉住三件事：结果与法线正交、单位长、退化输入走 fallback（不产生 NaN/零向量）。
-void TestOrthogonalizeTangent() {
-  const Vec3d n{0.0, 0.0, 1.0};
-  {
-    // 切线带法线分量（curl 后的典型状态）⇒ 正交化后 T·N == 0 且仍是单位向量
-    const Vec3d t = OrthogonalizeTangent(Vec3d{1.0, 0.0, 0.45}, n, Vec3d{1.0, 0.0, 0.0});
-    const double dot = t.x * n.x + t.y * n.y + t.z * n.z;
-    const double len = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
-    Expect(Near(dot, 0.0, 1e-12), "正交化后 T·N 必须为 0");
-    Expect(Near(len, 1.0, 1e-12), "正交化后切线必须是单位向量");
-    Expect(t.x > 0.99 && std::fabs(t.y) < 1e-12, "正交化只能去掉法线分量，不能改变方向");
-  }
-  {
-    // 退化：切线平行法线 ⇒ 用 fallback，而不是 0 向量/NaN
-    const Vec3d fb{0.0, 1.0, 0.0};
-    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 2.0}, n, fb);
-    Expect(Near(t.x, fb.x, 1e-12) && Near(t.y, fb.y, 1e-12) && Near(t.z, fb.z, 1e-12),
-           "切线平行法线时必须返回 fallback");
-  }
-  {
-    // 零切线同样走 fallback
-    const Vec3d fb{0.0, 1.0, 0.0};
-    const Vec3d t = OrthogonalizeTangent(Vec3d{0.0, 0.0, 0.0}, n, fb);
-    Expect(Near(t.y, 1.0, 1e-12), "零切线必须返回 fallback");
-  }
-}
-
 void TestCardFrame() {
   Shape shape = StraightBranch(2, 0.1, 1.0, 8);
   LeafType type;
@@ -382,40 +356,73 @@ void TestCardFrame() {
   }
 }
 
-void TestLeafCards() {
+// 造一张卡的 shape（anchor 落在竖直枝上，up = +Y，normal = +Z）。
+Shape MakeCardShape(const char* mode, const LeafBend& bend, LeafCard* card /*output*/) {
   Shape shape = StraightBranch(2, 0.1, 1.0, 8);
   LeafType type;
   type.type = 0;
   type.description = "测试叶";
-  type.anchor_mode = "bottom_center";
+  type.anchor_mode = mode;
+  type.bend = bend;
   shape.leaf_types.push_back(type);
 
-  const double width = 0.1;   // 现在存在 shape 里（装配时 = height × 格子宽/高）
+  LeafCard c;
+  c.anchor = Vec3d{0.0, 1.0, 0.0};
+  c.up = Vec3d{0, 1, 0};
+  c.normal = Vec3d{0, 0, 1};
+  c.height = 0.2;
+  c.width = 0.1;   // 存在 shape 里（装配时 = height × 格子宽/高）
+  c.type = 0;
+  c.branch = 0;
+  c.s = 0.5;
+  shape.cards.push_back(c);
+  *card = c;
+  return shape;
+}
 
+// 按 UV 找顶点（顶点布局 = i·(seg+1)+j、u = j/seg、v = i/seg 的**唯一**判据，
+// 消费方按步进遍历顶点时全靠它）。找不到返回 UINT32_MAX。
+uint32_t FindVertexByUv(const MeshData& mesh, double u, double v, double eps) {
+  for (uint32_t i = 0; i < mesh.VertexCount(); ++i) {
+    const P2 uv = GetUV(mesh, i);
+    if (Near(uv.u, u, eps) && Near(uv.v, v, eps)) {
+      return i;
+    }
+  }
+  return UINT32_MAX;
+}
+
+double Dot3(const P3& a, const P3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+P3 Cross3(const P3& a, const P3& b) {
+  return P3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+P3 Sub3(const P3& a, const P3& b) { return P3{a.x - b.x, a.y - b.y, a.z - b.z}; }
+
+// 平面卡（bend 全 0）必须与旧资产**逐字节一致**：4 顶点 / 2 三角形 / 四角 UV /
+// 尺寸只由 width/height 决定 / 法线全等于面法线。
+void TestLeafCards() {
+  const LeafBend flat;   // 全 0
   LeafCard card;
-  card.anchor = Vec3d{0.0, 1.0, 0.0};
-  card.up = Vec3d{0, 1, 0};
-  card.normal = Vec3d{0, 0, 1};
-  card.height = 0.2;
-  card.width = width;
-  card.type = 0;
-  card.branch = 0;
-  card.s = 0.5;
-  shape.cards.push_back(card);
-  // 顶点顺序固定：0=(u0,v0) 1=(u1,v0) 2=(u1,v1) 3=(u0,v1)。用双线性插值算
-  // 「参数 (au, av) 处的世界坐标」，再要求它等于 anchor —— 这才是 anchor 的定义。
+  Shape shape = MakeCardShape("bottom_center", flat, &card);
+  const double width = card.width;
+
+  // 顶点布局：下标 = i·(seg+1)+j，u = j/seg、v = i/seg（planar 时 seg = 1）。
+  // 于是 0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)。用双线性插值算「参数 (au, av) 处的世界坐标」，
+  // 再要求它等于 anchor —— 这才是 anchor 的定义。
   const auto point_at = [](const MeshData& m, double u, double v) {
-    const P3 c0 = GetPos(m, 0);
-    const P3 c1 = GetPos(m, 1);
-    const P3 c2 = GetPos(m, 2);
-    const P3 c3 = GetPos(m, 3);
+    const P3 c00 = GetPos(m, 0);
+    const P3 c10 = GetPos(m, 1);
+    const P3 c01 = GetPos(m, 2);
+    const P3 c11 = GetPos(m, 3);
     const double w00 = (1 - u) * (1 - v);
     const double w10 = u * (1 - v);
-    const double w11 = u * v;
     const double w01 = (1 - u) * v;
-    return P3{c0.x * w00 + c1.x * w10 + c2.x * w11 + c3.x * w01,
-              c0.y * w00 + c1.y * w10 + c2.y * w11 + c3.y * w01,
-              c0.z * w00 + c1.z * w10 + c2.z * w11 + c3.z * w01};
+    const double w11 = u * v;
+    return P3{c00.x * w00 + c10.x * w10 + c01.x * w01 + c11.x * w11,
+              c00.y * w00 + c10.y * w10 + c01.y * w01 + c11.y * w11,
+              c00.z * w00 + c10.z * w10 + c01.z * w01 + c11.z * w11};
   };
 
   const struct {
@@ -430,8 +437,9 @@ void TestLeafCards() {
   for (const auto& c : kCases) {
     shape.leaf_types[0].anchor_mode = c.mode;
     const MeshData mesh = BuildLeafCards(shape);
-    Expect(mesh.VertexCount() == 4, "一张卡应 4 个顶点");
-    Expect(mesh.TriangleCount() == 2, "一张卡应 2 个三角形");
+    Expect(mesh.VertexCount() == 4, "平面卡应 4 个顶点（与旧资产逐字节一致）");
+    Expect(mesh.TriangleCount() == 2, "平面卡应 2 个三角形");
+    Expect(mesh.tangents.size() == 4 * 3, "平面卡也要出切线（解析 ∂P/∂u）");
 
     const P3 root = point_at(mesh, c.u, c.v);
     Expect(Near(root.x, card.anchor.x, 1e-6) && Near(root.y, card.anchor.y, 1e-6) &&
@@ -447,18 +455,200 @@ void TestLeafCards() {
       max_x = std::fmax(max_x, p.x);
       min_y = std::fmin(min_y, p.y);
       max_y = std::fmax(max_y, p.y);
+      // 平面卡：法线全等于 +normal（card.normal = +Z），切线 = +X
+      Expect(Near(mesh.normals[v * 3 + 2], 1.0, 1e-6), "平面卡法线必须是 +Z");
+      Expect(Near(mesh.tangents[v * 3 + 0], 1.0, 1e-6), "平面卡切线必须是 +X（∂P/∂u）");
     }
     Expect(Near(max_x - min_x, width, 1e-6), "宽度必须来自材质");
     Expect(Near(max_y - min_y, card.height, 1e-6), "高度必须沿 up 且等于 card.height");
 
-    // UV 四角（格内 [0,1]；atlas 的格子子矩形由调用方再映射）
-    const float expected_uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    // UV = 整格四角（atlas 的格子子矩形由调用方再映射）：下标 → (u, v)
+    const double expected_uv[4][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
     for (uint32_t v = 0; v < 4; ++v) {
       const P2 uv = GetUV(mesh, v);
       Expect(Near(uv.u, expected_uv[v][0], 1e-6) && Near(uv.v, expected_uv[v][1], 1e-6),
              "叶卡 UV 必须是整格四角");
     }
   }
+}
+
+// 弯曲卡：细分 / UV 网格 / anchor 不动 / 解析法线与切线正交。
+void TestBentCardGeometry() {
+  LeafBend bend;
+  bend.along = 0.3;
+  bend.across = 0.2;
+  bend.crease = 0.25;
+
+  const struct {
+    const char* mode;
+    double u;
+    double v;
+  } kCases[] = {{"bottom_left", 0.0, 0.0},
+                {"bottom_center", 0.5, 0.0},
+                {"bottom_right", 1.0, 0.0},
+                {"top_center", 0.5, 1.0}};
+
+  for (const auto& c : kCases) {
+    LeafCard card;
+    Shape shape = MakeCardShape(c.mode, bend, &card);
+    const MeshData mesh = BuildLeafCards(shape);
+
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    Expect(mesh.VertexCount() == kStride * kStride,
+           std::string(c.mode) + "：弯曲卡应有 (段数+1)² 个顶点");
+    Expect(mesh.TriangleCount() == kSeg * kSeg * 2,
+           std::string(c.mode) + "：弯曲卡应有 段数²×2 个三角形");
+
+    // 顶点布局与 UV：下标 = i·stride + j，u = j/段数、v = i/段数
+    for (uint32_t i = 0; i <= kSeg; ++i) {
+      for (uint32_t j = 0; j <= kSeg; ++j) {
+        const uint32_t v = i * kStride + j;
+        const P2 uv = GetUV(mesh, v);
+        Expect(Near(uv.u, static_cast<double>(j) / kSeg, 1e-6) &&
+                   Near(uv.v, static_cast<double>(i) / kSeg, 1e-6),
+               std::string(c.mode) + "：顶点下标 → UV 必须是网格布局");
+      }
+    }
+
+    // anchor 点**恒不动**（z(anchor) ≡ 0）：弯曲是绕 anchor 长的，叶柄不能脱枝。
+    const uint32_t anchor_vertex = FindVertexByUv(mesh, c.u, c.v, 1e-6);
+    Expect(anchor_vertex != UINT32_MAX, std::string(c.mode) + "：弯曲卡里找不到 anchor 顶点");
+    if (anchor_vertex != UINT32_MAX) {
+      const P3 p = GetPos(mesh, anchor_vertex);
+      Expect(Near(p.x, card.anchor.x, 1e-6) && Near(p.y, card.anchor.y, 1e-6) &&
+                 Near(p.z, card.anchor.z, 1e-6),
+             std::string(c.mode) + "：弯曲后 anchor 顶点必须仍在 anchor 上");
+    }
+
+    // 解析法线：单位长 + 与解析切线严格正交（差分/面法线累加做不到 1e-12 这么干净）
+    double worst_perp = 0.0;
+    double worst_len = 0.0;
+    for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+      const P3 n{mesh.normals[v * 3], mesh.normals[v * 3 + 1], mesh.normals[v * 3 + 2]};
+      const P3 t{mesh.tangents[v * 3], mesh.tangents[v * 3 + 1], mesh.tangents[v * 3 + 2]};
+      worst_len = std::fmax(worst_len, std::fabs(std::sqrt(Dot3(n, n)) - 1.0));
+      worst_perp = std::fmax(worst_perp, std::fabs(Dot3(n, t)));
+    }
+    Expect(worst_len < 1e-6, std::string(c.mode) + "：法线必须是单位向量");
+    Expect(worst_perp < 1e-6,
+           std::string(c.mode) + "：解析法线与解析切线必须正交（T·N == 0）");
+
+    // 解析法线**方向**：与「同一张曲面上相邻网格点的中心差分」一致（内部顶点）。
+    // 中心差分只有 O(h²) 精度（h = 1/4、弯曲量 3~6cm），实测最差 2.45°（对角长轴
+    // 那两种 anchor_mode）；所以这里给 4° 余量 —— 它只负责抓粗错（轴搞反、符号反、
+    // 法线漏了某项），精确性由上面「z 值 = 解析公式」的断言保证。
+    double worst_angle_deg = 0.0;
+    for (uint32_t i = 1; i + 1 <= kSeg; ++i) {
+      for (uint32_t j = 1; j + 1 <= kSeg; ++j) {
+        const P3 du = Sub3(GetPos(mesh, i * kStride + j + 1),
+                           GetPos(mesh, i * kStride + j - 1));
+        const P3 dv = Sub3(GetPos(mesh, (i + 1) * kStride + j),
+                           GetPos(mesh, (i - 1) * kStride + j));
+        const P3 fd = Cross3(du, dv);
+        const double len = std::sqrt(Dot3(fd, fd));
+        const uint32_t v = i * kStride + j;
+        const P3 n{mesh.normals[v * 3], mesh.normals[v * 3 + 1], mesh.normals[v * 3 + 2]};
+        const double cos_angle = Dot3(fd, n) / len;
+        const double angle_deg =
+            std::acos(std::fmax(-1.0, std::fmin(1.0, cos_angle))) * 180.0 / kPi;
+        worst_angle_deg = std::fmax(worst_angle_deg, angle_deg);
+      }
+    }
+    Expect(worst_angle_deg < 4.0,
+           std::string(c.mode) + "：解析法线必须与曲面的中心差分法线一致（实测 " +
+               std::to_string(worst_angle_deg) + "°）");
+  }
+}
+
+// 弯曲的方向语义：along > 0 ⇒ 叶尖朝 +normal 翘；across/crease > 0 ⇒ 两缘朝 +normal 抬，
+// 且中脉线（s = 0）上不抬。用 anchor_mode = bottom_center（叶柄在底边中点、
+// 长轴 = +v、中脉 = u = 0.5）最直观。
+void TestBentCardDirections() {
+  LeafCard card;
+
+  {
+    LeafBend bend;
+    bend.along = 0.3;   // 只要长轴项
+    Shape shape = MakeCardShape("bottom_center", bend, &card);
+    const MeshData mesh = BuildLeafCards(shape);
+    // 叶柄行（v = 0）仍贴着 anchor 高度；叶尖行（v = 1）整体沿 +Z 抬起 0.3 × height
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    const double tip_z = mesh.positions[(kSeg * kStride + kSeg / 2) * 3 + 2];   // v=1, u=0.5
+    Expect(Near(tip_z, 0.3 * card.height, 1e-6), "along>0：叶尖应朝 +normal 抬起 0.3×height");
+    for (uint32_t j = 0; j <= kSeg; ++j) {
+      Expect(Near(mesh.positions[j * 3 + 2], 0.0, 1e-9), "along 项不能让叶柄一侧离开卡面");
+    }
+  }
+
+  {
+    LeafBend bend;
+    bend.across = 0.2;   // 只要杯状项
+    Shape shape = MakeCardShape("bottom_center", bend, &card);
+    const MeshData mesh = BuildLeafCards(shape);
+    // 中脉（u = 0.5）不动；两缘（u = 0 / 1）抬高 0.2 × height
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    for (uint32_t i = 0; i <= kSeg; ++i) {
+      const double mid = mesh.positions[(i * kStride + kSeg / 2) * 3 + 2];
+      const double left = mesh.positions[(i * kStride + 0) * 3 + 2];
+      const double right = mesh.positions[(i * kStride + kSeg) * 3 + 2];
+      Expect(Near(mid, 0.0, 1e-9), "across 项：中脉线必须停在卡面上");
+      Expect(Near(left, 0.2 * card.height, 1e-6) && Near(right, 0.2 * card.height, 1e-6),
+             "across>0：两缘应朝 +normal 抬高 0.2×height");
+    }
+  }
+
+  {
+    LeafBend bend;
+    bend.crease = 0.25;   // 只要中脉折痕项
+    Shape shape = MakeCardShape("bottom_center", bend, &card);
+    const MeshData mesh = BuildLeafCards(shape);
+    // ridge(0) = 0 ⇒ 中脉不动；ridge(1) = sqrt(1 + 0.25²) − 0.25 ≈ 0.7806
+    const double ridge_edge = std::sqrt(1.0 + 0.25 * 0.25) - 0.25;
+    constexpr uint32_t kSeg = kBentCardSegments;
+    constexpr uint32_t kStride = kSeg + 1;
+    const double edge_z = mesh.positions[(0 * kStride + kSeg) * 3 + 2];
+    Expect(Near(edge_z, 0.25 * ridge_edge * card.height, 1e-6),
+           "crease 项的边缘抬升 = crease × height × ridge(1)");
+    Expect(Near(mesh.positions[((kSeg / 2) * kStride + kSeg / 2) * 3 + 2], 0.0, 1e-9),
+           "crease 项不能抬中脉");
+  }
+}
+
+// CardVertexCount：消费方（烘焙器逐卡步进顶点、风绑定）必须靠它，不能假设恒等于 4。
+void TestCardVertexCount() {
+  LeafBend bent;
+  bent.crease = 0.1;
+  LeafCard card;
+
+  Shape flat_shape = MakeCardShape("bottom_left", LeafBend(), &card);
+  Expect(CardVertexCount(flat_shape, flat_shape.cards[0]) == 4,
+         "平面卡 CardVertexCount 必须是 4");
+
+  Shape bent_shape = MakeCardShape("bottom_left", bent, &card);
+  constexpr uint32_t kBentVertices = (kBentCardSegments + 1) * (kBentCardSegments + 1);
+  Expect(CardVertexCount(bent_shape, bent_shape.cards[0]) == kBentVertices,
+         "弯曲卡 CardVertexCount 必须是 (段数+1)²");
+  Expect(BuildLeafCards(bent_shape).VertexCount() == kBentVertices,
+         "CardVertexCount 必须与 BuildLeafCards 的实际顶点数一致");
+}
+
+// 确定性：同一份 shape 两次构建必须逐字节相同（gold / 资产可复现的前提）。
+void TestBendDeterministic() {
+  LeafBend bend;
+  bend.along = -0.25;
+  bend.across = 0.15;
+  bend.crease = 0.2;
+  LeafCard card;
+  Shape shape = MakeCardShape("top_center", bend, &card);
+
+  const MeshData a = BuildLeafCards(shape);
+  const MeshData b = BuildLeafCards(shape);
+  Expect(a.positions == b.positions && a.normals == b.normals && a.uvs == b.uvs &&
+             a.tangents == b.tangents && a.indices == b.indices,
+         "同一份 shape 两次 BuildLeafCards 必须完全一致");
 }
 
 }  // namespace
@@ -471,9 +661,12 @@ int main() {
   jpov::vegetation::TestUvVScale();
   jpov::vegetation::TestNonCircularProfile();
   jpov::vegetation::TestJunctionVContinuity();
-  jpov::vegetation::TestOrthogonalizeTangent();
   jpov::vegetation::TestCardFrame();
   jpov::vegetation::TestLeafCards();
+  jpov::vegetation::TestBentCardGeometry();
+  jpov::vegetation::TestBentCardDirections();
+  jpov::vegetation::TestCardVertexCount();
+  jpov::vegetation::TestBendDeterministic();
   if (jpov::vegetation::g_failures != 0) {
     std::printf("%d failure(s)\n", jpov::vegetation::g_failures);
     return 1;

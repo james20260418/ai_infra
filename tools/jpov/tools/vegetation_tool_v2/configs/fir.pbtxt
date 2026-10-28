@@ -25,10 +25,22 @@ tree {
   leafScale: 0.55
 }
 
+noise {
+  # 杉树枝最密、侧枝最软：弯度按级递增（越细的枝越容易弯）。
+  # 主干保持很直（0.03 = 18m 干只偏 54cm），否则塔形轮廓会歪掉。
+  size_jitter: [0.10, 0.18, 0.16, 0.12]
+  bend_longitudinal: [0.03, 0.07, 0.11, 0.12]
+  bend_lateral: [0.015, 0.04, 0.08, 0.10]
+}
+
 export {
   per_seg: 8
   # 针叶：卡明显瘦长。
   leaf_aspect: 0.4
   anchor_mode: "bottom_left"
   leaf_type_desc: "杉针簇"
+  # 针叶比松针还细长：弯曲幅度再小一点，避免细卡片卷成筒。
+  leaf_bend_along: -0.06
+  leaf_bend_across: 0.04
+  leaf_bend_crease: 0.03
 }

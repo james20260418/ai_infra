@@ -1,3 +1,7 @@
+#
+# ⚠️ 2026-10-26 起：资产标准格式是二进制 `.vegshape`（ShapeProto 的 protobuf 二进制）。
+#   本脚本产出的文本只作对照/调试；正式产物请用 gen/shape_gen（默认写 .vegshape），
+#   或用 gen/shape_convert 把文本转成 .vegshape。
 """把 Blender 里的一棵树导出成 ShapeProto 的**文本格式**（pb.txt）。
 
 拓扑格式见 docs/vegetation_asset_format.md；proto 定义见 proto/shape.proto。

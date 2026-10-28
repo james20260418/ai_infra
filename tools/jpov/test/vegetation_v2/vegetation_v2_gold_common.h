@@ -109,7 +109,7 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   //    它跟着默认值漂移就等于失去报警能力。
   //    `--uv-vscale 0.5` = 树皮 albedo 512x1024 的自动值（宽/高），钉住以免改自动公式时漂移。
   std::string cmd = "'" + ViewerBinary() + "'";
-  cmd += " --shape '" + dir + "/samples/willow.pbtxt'";
+  cmd += " --shape '" + dir + "/samples/willow.vegshape'";
   cmd += " --bark '" + dir + "/assets/bark/bark001'";
   cmd += " --normal-scale 0.75 --uv-vscale 0.5";
   if (with_leaf) {
@@ -139,6 +139,52 @@ inline bool RenderGolden(bool with_leaf, const std::string& out_png) {
   return true;
 }
 
+// 第三张基准：**新生成的低配/游戏档资产**（`samples/pine_game.vegshape`）。
+//
+// 为什么单独要一张：cards / leaf / glb 三张都跑 `willow.vegshape`（旧 Python 范本，
+// 平面卡、无噪声、默认环数）。而本目录里另外 6 份 `.vegshape` 是 `shape_gen` 新长出来的
+// ——枝条噪声、叶卡弯曲、按级环数**全部烘在几何里**，没有任何一张图看着它们；
+// 资产被误改/重生成错了也不会有人发现。
+//
+// 选 `pine_game` 的理由：最小的一份新资产（62 枝 / 468 卡 / 5.1k 三角），但它同时用到
+// 噪声 + 弯卡 + `ring_count: 3`（三棱管），是新链路里被踩得最全的一份，出图只要 ~1 s。
+// 用 debug 绿卡视图（不贴叶图）⇒ 不透明纯色盒子，llvmpipe 下逐字节确定，可以上严格阈值。
+constexpr const char* kGameGold = "vegetation_v2_pine_game_1280x720.png";
+
+// 跑一遍游戏档资产的 gold 场景（绿卡视图，机位把整棵树放进画面）。
+//
+// ⚠️ 机位是**构图的一部分**：改 `--cam_*` / 换资产 = 换基准图，必须重出。
+inline bool RenderGameShapeGolden(const std::string& out_png) {
+  const std::string dir = SampleAssetDir();
+  const std::string shot_dir = out_png + ".shots";
+  std::system(("rm -rf '" + shot_dir + "'").c_str());
+
+  std::string cmd = "'" + ViewerBinary() + "'";
+  cmd += " --shape '" + dir + "/samples/pine_game.vegshape'";
+  cmd += " --no-leaf";   // debug 绿卡：不贴叶图 ⇒ 画面逐字节确定
+  // 树高 13.5 m（y 0..13.5）、水平半径 ~4 m：R=20 + target y=6.5 刚好上下留白，
+  // 再近就切树冠（试过 R=12：树顶直接出画）。
+  cmd += " --cam_phi 10 --cam_theta 25 --cam_r 20 --cam-target-y 6.5";
+  cmd += " --no-hud";
+  cmd += " --capture '" + shot_dir + "'";
+  cmd += " > /dev/null 2>&1";
+
+  const int rc = std::system(cmd.c_str());
+  if (rc != 0) {
+    LOG(ERROR) << "查看器返回 " << rc << "：" << cmd;
+    return false;
+  }
+  const std::string front = shot_dir + "/veg_v2_front.png";
+  const int cp = std::system(("cp '" + front + "' '" + out_png + "'").c_str());
+  if (cp != 0) {
+    LOG(ERROR) << "没拿到 front 图: " << front;
+    return false;
+  }
+  std::system(("rm -rf '" + shot_dir + "'").c_str());
+  LOG(INFO) << "游戏档 gold 场景已渲染（绿卡视图）: " << out_png;
+  return true;
+}
+
 // 跑一遍 **glb 展示态** gold：先烘焙一份 glb，再用查看器 `--glb` 载入并出图。
 //
 // 为什么不 in-process 烘焙：gold 必须等于用户看到的那张图。烘焙也用**同一个查看器
@@ -154,7 +200,7 @@ inline bool RenderGlbGolden(const std::string& out_png) {
 
   // 1) 烘焙（与面板默认参数一致：normal-scale 0.75、uv 自动=0.5、叶黑阈 30）。
   std::string bake = "'" + ViewerBinary() + "'";
-  bake += " --shape '" + dir + "/samples/willow.pbtxt'";
+  bake += " --shape '" + dir + "/samples/willow.vegshape'";
   bake += " --bark '" + dir + "/assets/bark/bark001'";
   bake += " --leaf '" + dir + "/assets/leaf/willow_leaf.png' --leaf-black 30";
   bake += " --normal-scale 0.75 --uv-vscale 0.5";
@@ -178,7 +224,7 @@ inline bool RenderGlbGolden(const std::string& out_png) {
   const std::string wind = std::to_string(kGlbWindTime);
   std::string cmd = "'" + ViewerBinary() + "'";
   // **故意不给 --shape**：gold 走「纯 glb 查看模式」（runfiles 的 cwd 里没有
-  // shapes/willow.pbtxt，缺 shape 即进入该模式）。这样这张 gold 同时守住了
+  // shapes/willow.vegshape，缺 shape 即进入该模式）。这样这张 gold 同时守住了
   // 「只拿一个 glb 也能打开」这条路径 —— 它与"shape + glb"渲染逐像素一致（实测 0 差异）。
   cmd += " --glb '" + glb + "'";
   cmd += " --wind-time " + wind;

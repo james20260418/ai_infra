@@ -25,6 +25,7 @@ void RenderCommandList::Clear() {
     fillrect2d.clear();
     arc2d.clear();
     image2d.clear();
+    plate2d.clear();
     object3d.clear();
     instanced_object.clear();
     skinned_mesh.clear();
@@ -196,6 +197,40 @@ void RenderCommandList::DrawImage(uint32_t texture_id, const Vec2f& pos,
     int idx = static_cast<int>(image2d.size());
     image2d.push_back({texture_id, pos, size, tint});
     order.emplace_back(DrawCommandType::kImage2D, idx);
+}
+
+void RenderCommandList::DrawPlate(const Plate2DCommand& plate) {
+    // 非法输入直接崩（不静默 clamp）：clamp 会让美术以为参数生效了而实际没生效，
+    // 那是“为什么这个圆角看起来是 8 而不是 16”那类两天查不出来的 bug。
+    CHECK_GT(plate.size.x(), 0.0f) << "Plate2D size.x 必须 > 0";
+    CHECK_GT(plate.size.y(), 0.0f) << "Plate2D size.y 必须 > 0";
+    const float half_min = std::min(plate.size.x(), plate.size.y()) * 0.5f;
+    CHECK_GE(plate.radius, 0.0f) << "Plate2D radius 必须 >= 0";
+    CHECK_LE(plate.radius, half_min)
+        << "Plate2D radius " << plate.radius << " 超过短边一半 " << half_min;
+    CHECK_GE(plate.border_width, 0.0f) << "Plate2D border_width 必须 >= 0";
+    CHECK_LE(plate.border_width, half_min)
+        << "Plate2D border_width " << plate.border_width << " 超过短边一半 "
+        << half_min;
+    CHECK_GE(plate.border_bump, 0.0f) << "Plate2D border_bump 必须 >= 0";
+    CHECK_LE(plate.border_bump, 1.0f) << "Plate2D border_bump 必须 <= 1";
+    CHECK_GE(plate.border_fade, 0.0f) << "Plate2D border_fade 必须 >= 0";
+    CHECK_LE(plate.border_fade, plate.border_width)
+        << "Plate2D border_fade " << plate.border_fade
+        << " 超过 border_width " << plate.border_width;
+    // 两层材质各自校验（图集格式约定见 flipbook.h）。
+    plate.fill.flipbook.Validate();
+    plate.border.flipbook.Validate();
+    CHECK_GT(plate.fill.tiling.x(), 0.0f) << "Plate2D fill.tiling.x 必须 > 0";
+    CHECK_GT(plate.fill.tiling.y(), 0.0f) << "Plate2D fill.tiling.y 必须 > 0";
+    CHECK_GT(plate.border.tiling.x(), 0.0f) << "Plate2D border.tiling.x 必须 > 0";
+    CHECK_GT(plate.border.tiling.y(), 0.0f) << "Plate2D border.tiling.y 必须 > 0";
+    CHECK(std::isfinite(plate.time_seconds))
+        << "Plate2D time_seconds 必须是有限值";
+
+    int idx = static_cast<int>(plate2d.size());
+    plate2d.push_back(plate);
+    order.emplace_back(DrawCommandType::kPlate2D, idx);
 }
 
 void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,

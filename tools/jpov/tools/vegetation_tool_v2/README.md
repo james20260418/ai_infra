@@ -7,7 +7,7 @@
 
 | 状态 | 在画什么 | 用途 |
 |---|---|---|
-| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡 quad） | 调拓扑/素材；叶卡可用 debug 绿卡看对齐 |
+| **原材料态** | 现搭的 shape/bark/leaf（逐枝扫管 + 叶卡**曲面**） | 看资产：拓扑、叶卡曲面、噪声后的枝干；叶卡可用 debug 绿卡看对齐 |
 | **glb 展示态** | 刚烘焙出来的 `.glb`（树干 + 叶卡两个 primitive，带风链数据） | 看最终资产：树皮贴图、叶卡 alpha、**风**（左下「风调试」面板） |
 
 烘焙产物是一份**自洽 .glb**：几何 + 内嵌贴图（树皮 albedo/normal/ORM、叶卡 albedo/normal）
@@ -15,14 +15,14 @@
 每关节 `pivot.xyz/parent/level/phase/soft`）。引擎 `LoadGltf` 读回即可直接吹风。
 
 ```
-shape.pbtxt ──┐
+shape.vegshape ─┐
 bark/        ──┼─→ jpov_vegetation_v2_viewer ─→ 交互窗口 / 三张 capture PNG
 leaf.png     ──┘
 ```
 
 | 输入 | 必需 | 省略时 |
 |---|---|---|
-| `shape` = ShapeProto 文本（`.pbtxt`） | 有默认值 | 用打包目录里的 `shapes/willow.pbtxt` |
+| `shape` = **二进制资产**（`.vegshape`，ShapeProto 的 protobuf 二进制） | 有默认值 | 用打包目录里的 `shapes/willow.vegshape`；要看文本用 `shape_convert` |
 | `bark` = `albedo.png` + `normal.png`(GL) + `roughness.png` | 否 | 树干按 level 上棕色 |
 | `leaf` = 一张黑底叶片图（整图 = 一格） | 否 | 只画 debug 绿卡（纯拓扑视图） |
 
@@ -43,7 +43,7 @@ xvfb-run -a ./jpov_vegetation_v2_viewer --capture shots/full \
 
 # 烘焙一份 glb（不开窗口，CI 可用）→ 再直接打开它看风
 ./jpov_vegetation_v2_viewer --bake output/veg.glb \
-    --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --bark bark/bark001
+    --shape shapes/willow.vegshape --leaf leaf/willow_leaf.png --bark bark/bark001
 ./jpov_vegetation_v2_viewer --glb output/veg.glb            # 交互：左下角风调试面板
 
 # 纯 glb 查看模式：**没有 shape 也能开**（别人发来一个 glb，只想看看它长什么样）
@@ -53,12 +53,13 @@ cd anywhere && ./jpov_vegetation_v2_viewer --glb some.glb
 ```
 
 **纯 glb 查看模式**（2026-10-22 加）：`--glb-only`，或给了 `--glb` 且 **shape 文件找不到**
-（默认的 `shapes/willow.pbtxt` 也不在 cwd）时只开 glb 展示态 —— 有地面、有风、有风调试面板，**没有**原材料态：面板上不会出现
+（默认的 `shapes/willow.vegshape` 也不在 cwd）时只开 glb 展示态 —— 有地面、有风、有风调试面板，**没有**原材料态：面板上不会出现
 「回到原材料态」，也不能烘焙（两者都需要 shape）。相机默认按 glb 包围盒自动取景。
 渲染结果与「shape + glb」逐像素一致（同一机位实测 0 差异），只是少了回退能力。
 
 **不用自己烘也能试**：仓库里带了一份烘焙产物
-`samples/willow_baked.glb`（12 MB，692 关节 / 树干 40837 v / 叶卡 1768 v，内嵌树皮+叶卡贴图）。
+`samples/willow_baked.glb`（12.5 MB，692 关节 / 树干 40837 v / 叶卡 3978 v（442 张 × 9 顶点/弯卡），
+内嵌树皮+叶卡贴图）。
 
 ```bash
 cd tools/jpov && ./build_jpov_vegetation_v2_viewer.sh
@@ -70,11 +71,11 @@ cd output/jpov_vegetation_v2_viewer
 
 ```bash
 ./jpov_vegetation_v2_viewer --bake output/veg.glb \
-    --shape shapes/willow.pbtxt --leaf leaf/willow_leaf.png --leaf-black 30 \
+    --shape shapes/willow.vegshape --leaf leaf/willow_leaf.png --leaf-black 30 \
     --bark bark/bark001 --normal-scale 0.75
 ```
 
-> 两份产物应当**逐字节相同**（md5 `e1a6a06f71fec3f49e8f2728bb4abb79`）。
+> 两份产物应当**逐字节相同**（md5 `93b0ac1ffe756a4493874593875a7efa`）。
 > 若你的 md5 不同：先确认上面命令的参数一字不差（风/关节参数走面板默认值），
 > 再确认 `AI_INFRA` 版本一致 —— 烘焙结果对几何与参数都很敏感。
 
@@ -84,18 +85,18 @@ cd output/jpov_vegetation_v2_viewer
 
 ## 从配置生成 shape（Blender 侧）
 
-上文那些 `.pbtxt` 是用 Blender + Sapling 离线长出来的。两条路，**产物等价**：
+上文那些资产是用 Blender + Sapling 离线长出来的。两条路，**产物等价**：
 
 | 路径 | 入口 | 说明 | fir（4100 枝） |
 |---|---|---|---|
-| **C++（推荐）** | `gen/shape_gen` | Blender 只把曲线/叶卡网格倒成 `.dump`；采样、父枝、叶卡姿态、拓扑序、写 pbtxt 全在 C++ | **1.5 s** |
+| **C++（推荐）** | `gen/shape_gen` | Blender 只把曲线/叶卡网格倒成 `.dump`；采样、父枝、叶卡姿态、拓扑序、写 `.vegshape` 全在 C++ | **1.5 s** |
 | Python（对照基准） | `generate_shape.py` | 原实现，留作对拍/回归基准 | 132 s |
 
 ```bash
-# C++：配置 -> shape.pbtxt（Blender 只负责倒数据）
+# C++：配置 -> shape.vegshape（Blender 只负责倒数据）
 ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
     --config tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
-    --out output/veg_shapes/pine.pbtxt
+    --out output/veg_shapes/pine.vegshape
 
 # 只看配置有没有写对（不跑 Blender）
 bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
@@ -104,7 +105,7 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 | 层 | 位置 | 说明 |
 |---|---|---|
 | 配置（**输入**） | `configs/*.pbtxt`，schema 见 `proto/generate.proto` | 每个字段都写了含义/单位/效果预期；没写的字段 = 用预设自带值（proto2 optional 的存在性） |
-| C++ 入口 | `gen/shape_gen.cc` | 读配置 → 调 Blender → 建 shape → 自检（唯一根 + 拓扑序）→ 写 pbtxt |
+| C++ 入口 | `gen/shape_gen.cc` | 读配置 → 调 Blender → 建 shape → 自检（唯一根 + 拓扑序）→ 写 `.vegshape`（`--text` 可写文本） |
 | C++ 几何 | `gen/shape_builder.cc` | 采样 / 父枝（`tools/util` 的稀疏栅格最近邻）/ 叶卡姿态 / anchor 合同 |
 | Blender 侧 | `dump_sapling_curve.py` | **只做序列化**：建树 + 把曲线控制点和叶卡网格倒成 `.dump`，不做任何几何决策 |
 
@@ -113,13 +114,15 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
   （dump 解析的容错边界 + 合成 dump 的父枝/层数/环数/叶卡姿态/拓扑序/anchor）。
 - 与 Python 产物的差异：几何逐行一致（实测 93424 行里 0 处结构不同，最大数值差 1e-6 量级），
   唯一例外是「卡片正好骑在枝上」时根/梢方向在数学上无定义，约 1% 的卡在两种浮点精度下取反。
+  另外 C++ 侧会多写一段 `leaf_types.bend`（叶面弯曲，见 docs §4.5）——Python 基准没实现它，
+  所以配置里写了 `export.leaf_bend_*` 时两边产物在这一段上有差异，其余行不受影响。
 - 生成配置的取舍与已知缺陷见 [`configs/README.md`](configs/README.md)。
 
 ## 工具总览
 
 | 工具 | 输入 | 输出 | 职责 |
 |---|---|---|---|
-| `gen/shape_gen` | 生成配置（`configs/*.pbtxt`） | `shape.pbtxt` | 建**拓扑**：调 Blender 倒数据 → C++ 采样/父枝/叶卡姿态/拓扑序 |
+| `gen/shape_gen` | 生成配置（`configs/*.pbtxt`） | `shape.vegshape` | 建**拓扑**：调 Blender 倒数据 → C++ 采样/父枝/叶卡姿态/拓扑序 |
 | `leaf_card/jpov_leaf_card` | 生图的叶子（黑底） | 合规叶卡（+ 镜像版） | **叶卡**：根点识别 / 旋转对齐 / 裁到锚点 |
 | `make_generated_bark.sh` | 生图的树皮 | `albedo/normal/roughness.png` | **树皮**：无缝化 + 派生法线/粗糙度 |
 | `jpov_vegetation_v2_viewer` | shape + bark + leaf | 窗口 / `--capture` 出图 | **验收**：人眼 + gold |
@@ -128,12 +131,47 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 
 ---
 
+## 0. 资产格式：`.vegshape`（二进制）+ 转换工具
+
+**约定（2026-10-26 定）：植被拓扑资产一律存二进制 `.vegshape`**（ShapeProto 的 protobuf
+wire format，`shape.proto` 里的 `ShapeProto`）。文本 `.pbtxt` **只用于人工查看 / diff / review**，
+仓库里不放文本资产。
+
+理由很实际：三棵树的文本是 1.2~1.4 MB，二进制后 0.5~0.7 MB（**约 1/3**），
+而且加载不用解析文本。
+
+**文本是「可逆的一半」，不是「大概能看的另一半」**：`FormatShapeText` 写每个 double 都用
+**最短的可逆表示**（从 1 位有效数字往上试，第一个「读回来仍是同一个 double」的写法），
+所以二进制 → 文本 → 二进制**逐字节相同**（形状测试 `TestShapeTextIsLossless` 钉住，含 `-0`
+的符号）。第一版偷懒沿用 Python 的 `%.6g`（6 位有效数字），实测 `0.25691019529015585`
+被写成 `0.256910`、读回来是另一个 double —— 那就是「diff 里看到的数和资产里的数不是一个数」。
+常见的短数字（`0.25691` / `1.5` / `-0.08`）仍然短，只有真需要更多位才变长。
+
+格式**由扩展名决定**：`.vegshape` → 二进制，其它（`.pbtxt`/`.txt`）→ 文本。一条规则，不猜内容。
+
+```bash
+# 二进制 → 文本（看 / diff / review）
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_convert \
+    --in tools/jpov/tools/vegetation_tool_v2/samples/oak_low.vegshape --out /tmp/oak_low.pbtxt
+
+# 文本 → 二进制（改完转回去；顺便打印枝/卡/顶点/三角形）
+./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_convert \
+    --in /tmp/oak_low.pbtxt --out /tmp/oak_low.vegshape --stats
+```
+
+- 转换一定过一遍 `LoadShapeFile` 的校验（拓扑、半径、anchor 合同），坏资产转不出去；
+- 8 份入库资产实测「`vegshape → pbtxt → vegshape` **逐字节相同**」（数值一点没丢）；
+  六个 `shape_gen` 档位（`{pine,oak,fir}_{low,game}`）同样可逆。
+- 两个旧 Python 范本（`willow` / `willow_two_types`）的文本与 `shape_gen` 的写法差在缩进
+  （卡片字段 4→2 空格），数值一致；把它们的文本再转回二进制与入库 `.vegshape` **0 字节差异**。
+- `--format text|binary` 可强制格式，但正常不需要（看扩展名就够）。
+
 ## 1. `shape_gen` —— 生成拓扑
 
 ```bash
 ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
     --config tools/jpov/tools/vegetation_tool_v2/configs/pine.pbtxt \
-    --out output/veg_shapes/pine.pbtxt
+    --out output/veg_shapes/pine.vegshape
 ```
 
 | 参数 | 说明 |
@@ -142,6 +180,8 @@ bazel run //tools/jpov/tools/vegetation_tool_v2/gen:shape_gen -- --help
 | `--out` | 产物路径；临时 `.dump` 默认写 `<out>.dump` 并在成功后删除 |
 | `--blender` | blender 可执行文件（默认 PATH 里的；镜像自带 4.0.2） |
 | `--dump <path>` / `--keep-dump` | 保留中间 dump（排查 Blender 侧问题时用） |
+| `--per-seg <n>` | 覆盖配置里的 `export.per_seg`（每段贝塞尔的采样点数） |
+| `--ring-count 8,6,4` | 临时覆盖每级枝的**环顶点数**（正式的写在配置 `export.ring_count`；命令行优先，试参数用） |
 
 输出末尾一行是摘要：`枝数 / 卡数 / 镜像卡比例 / 体积 / 耗时`。
 **失败即退出码非 0**：配置写错（带行号）、Blender 失败、产物拓扑序不合法，都不会落盘半成品。
@@ -206,7 +246,7 @@ leaf_aspect = 1.180               ← 直接填进生成配置的 export.leaf_as
 
 ```bash
 cd output/jpov_vegetation_v2_viewer
-./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.pbtxt \
+./jpov_vegetation_v2_viewer --shape ../veg_shapes/pine.vegshape \
     --bark /tmp/bark_gen --leaf /tmp/leaf.png --leaf2 /tmp/leaf_flip.png --leaf-black 32
 ```
 
@@ -220,6 +260,94 @@ cd output/jpov_vegetation_v2_viewer
 > 每个环节的命令和判据都在上面。下面是一份可以直接照做的清单。
 
 **① 选预设、写配置**（`configs/*.pbtxt` 抄最像的一份）
+### 枝条噪声（`noise`）—— 让树别那么整齐
+
+`configs/*.pbtxt` 里的 `noise` 块对应 `proto/generate.proto` 的 `ShapeNoise`：
+
+| 字段 | 在树上看到的效果 | 建议值 |
+|---|---|---|
+| `size_jitter` | 每根枝整体放大/缩小（长度与半径乘同一个倍数），同级的枝不再一样长一样粗 | 0.1~0.2 |
+| `bend_longitudinal` | 中段朝「上下/前后」鼓出：竖直主干弓背，水平侧枝上翘/下垂 | 主干 0.03~0.08 / 侧枝 0.05~0.15 |
+| `bend_lateral` | 中段朝侧向扭（俯视图里的左右摆动，正视图几乎看不出） | 0.02~0.10 |
+
+三个字段都是**按枝级**的数组（下标 0 = 主干），写 0 或数组写短 = 该级不抖。
+噪声结果直接烘进 shape 的采样点（位置/半径），**资产里没有噪声参数**；
+同 `tree.seed` + 同参数 ⇒ 逐字节相同的树。
+
+⚠️ 只有 C++ 版（`gen/shape_gen`）实现 `noise`、`export.leaf_bend_*` 与 `export.ring_count`；
+`generate_shape.py` 是历史对照基准 —— 这三块它**全部忽略**（不报错，环数写死 16/12/8、
+不带弯曲、不加噪声），所以拿它跑 `configs/low|game/` 会得到一棵完全不同的树，别拿它出正式资产。
+
+### 顶点预算 & 低配档（`configs/low/`）
+
+一棵树的顶点 = **枝管**（采样点数 × 环顶点数）+ **叶卡**（平面卡 4 / 弯曲卡 9 顶点，
+见 `sweep.h` 的 `kBentCardSegments`）。实测口径：
+
+| 树 | 高配（`configs/`） | 低配（`configs/low/`） |
+|---|---|---|
+| pine | 管 69k + 卡 48k = **117k** | 管 35k + 卡 16k = **51k** |
+| oak | 管 152k + 卡 193k = **345k** | 管 21k + 卡 33k = **54k** |
+| fir | 管 606k + 卡 114k = **720k** | 管 11k + 卡 46k = **57k** |
+
+低配档只动四个旋钮，树形（预设、seed、分枝角度、噪声）完全不变：
+
+| 旋钮 | 作用 | pine | oak | fir |
+|---|---|---|---|---|
+| `leaves` | 每根末级枝的叶片上限（卡数是顶点大头） | 55 → 18 | 200 → 36 | 12 → 22 |
+| `leafScale` | 叶片尺寸（用更少更大的叶子补覆盖率） | 0.42 → 0.80 | 0.42 → 0.85 | 0.55 → 0.95 |
+| `per_seg` | 每段贝塞尔的采样点 | 8 | 8 → 2 | 8 → **1** |
+| `export.ring_count` | 每级环顶点数 | 16,12,8 → 8,6,4 | 同左 | 16,12,8 → 6,4,4,4 |
+
+⚠️ fir 还把 `levels` 4 → 3：它 4100 根枝，管面本身就 60 万顶点，不降级怎么都进不了 6 万。
+其余两棵结构完全没动（枝数 331 / 703 与高配一致）。
+
+⚠️ **别为了省顶点去调小 `curveRes`**：采样变稀会让「父枝归属」的最近邻查询认错父亲
+（实测 pine 直接报「枝 187 的父枝排在它后面」，成环），树的结构会坏掉。
+降采样用 `per_seg`，它不改变贝塞尔骨架。
+
+### 游戏档（`configs/game/`）—— 每棵约 5000 三角形
+
+低配小游戏里"玩家会走近的英雄树"大概是 5k~15k 三角形。这一档把三棵树压到 **约 5.1k~5.3k**：
+
+| 树 | 三角形 | 其中枝管 / 叶卡 | 顶点 | 枝 | 卡 |
+|---|---|---|---|---|---|
+| pine_game | 5,118 | 1,374 / 3,744 | 5,085 | 62 | 468 |
+| oak_game | 5,274 | 3,018 / 2,256 | 4,452 | 135 | 282 |
+| fir_game | 5,216 | 1,848 / 3,368 | 5,019 | 102 | 421 |
+
+手段（在低配档基础上继续降）：`levels 2`（砍掉细枝层）、`per_seg 1`、`ring 3,3,3`、
+`leaves` 调回 16~20、`leafScale` 放大到 2.2~2.6 —— **卡少十倍就只能靠"更少更大的叶簇"撑体积**，
+这是低模树的标准做法（远看有体积、近看是纸片）。
+
+⚠️ 这一档砍掉了一级分枝，松树/杉树会偏"长毛的柱子"。要保树形就保 `levels 3`，
+代价是三角数涨到 ~7.5k（仍远低于低配档的 5.7 万）。
+
+生成：
+
+```bash
+gen/shape_gen --config configs/game/pine.pbtxt --out output/veg_shapes/pine_game.vegshape
+gen/shape_gen --config configs/game/oak.pbtxt  --out output/veg_shapes/oak_game.vegshape
+gen/shape_gen --config configs/game/fir.pbtxt  --out output/veg_shapes/fir_game.vegshape
+```
+
+生成低配档（**采样密度与环数都在配置里**，命令行不用给任何参数）：
+
+```bash
+# pine: 50.6k 顶点
+gen/shape_gen --config configs/low/pine.pbtxt --out output/veg_shapes/pine_low.vegshape
+# oak:  53.6k
+gen/shape_gen --config configs/low/oak.pbtxt  --out output/veg_shapes/oak_low.vegshape
+# fir:  57.2k
+gen/shape_gen --config configs/low/fir.pbtxt  --out output/veg_shapes/fir_low.vegshape
+```
+
+六份入库资产（`samples/*_{low,game}.vegshape`）就是用这些命令生成的（枝数/卡数/三角形
+在 `samples/` 的说明里）。⚠️ **逐字节可复现的前提是同一个 Blender 版本**：几何来自 Blender
+倒出的曲线，跨版本浮点会有 1e-6 量级的差（实测 Blender 4.0.2 重跑 ⇒ 字节不同、但转成文本
+完全一致）。另外这六份资产历史上是「先出文本、再转二进制」的（`%.6g` 时代），
+所以它们比 `shape_gen` 现在直接写出的二进制少几位有效数字 —— 数值等价，要严格逐字节
+对齐就按上面的命令重出一遍（重出后 gold 需要一起刷新）。
+
 钉住：`preset`、`scale`、`seed`、`levels`、`branches`、`leaves`、`leafScale`。
 最常踩的两个坑：`baseSize` 是"第一根侧枝出现的高度**比例**"（不是尺寸，>1 会把枝挤到树顶）；
 角度字段一律写**度**，长 4 的数组下标 = 枝级。
@@ -227,7 +355,7 @@ cd output/jpov_vegetation_v2_viewer
 **② 出拓扑**
 
 ```bash
-gen/shape_gen --config configs/mytree.pbtxt --out output/veg_shapes/mytree.pbtxt
+gen/shape_gen --config configs/mytree.pbtxt --out output/veg_shapes/mytree.vegshape
 ```
 看摘要里的枝数/卡数是否合理；不满意就改 ① 的 `seed / branches / leaves` 再来一次（1 秒级）。
 
@@ -256,7 +384,9 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 
 **⑥ 收敛**
 叶卡角度/缩放不对 → 回 ③ 调提示词（构图问题）或 ④ 换 `--anchor`（几何问题）；
-枝形不对 → 回 ① 调参数。**不要**在查看器里"凑"——查看器没有可调项，它只负责如实呈现。
+枝形不对 → 回 ① 调参数（含 `noise` 块）。查看器**只负责显示**：面板里能调的是
+呈现参数（法线强度、地面高度、层级、风），**叶面弯曲与枝条噪声都不在面板里** ——
+它们是资产的一部分，改就改配置重新生成，否则预览和最终资产会变成两套真相。
 
 ### 几条硬规矩
 
@@ -269,12 +399,12 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 
 | 参数 | 说明 |
 |---|---|
-| `--shape <pbtxt>` | 拓扑；省略 = `shapes/willow.pbtxt`。**给了 `--glb` 时可省略/允许缺失**（纯 glb 查看模式） |
+| `--shape <vegshape>` | 拓扑（二进制资产；文本按扩展名也认）；省略 = `shapes/willow.vegshape`。**给了 `--glb` 时可省略/允许缺失**（纯 glb 查看模式） |
 | `--glb <glb>` / `--glb-only` | 直接进 glb 展示态；`--glb-only` = 强制纯查看（不加载 shape，不能烘焙/回退） |
 | `--bark <dir>` | 树皮材质目录；省略 = level 棕色 |
 | `--leaf <png>` / `--leaf2 <png>` | 叶卡素材；`leaf2` 给**镜像手性**的 leaf type 1。少给 `leaf2` 会 WARNING 回退 |
 | `--leaf-black <f>` | 黑底阈值（见上） |
-| `--curl <f>` | 顶点法线球面化强度 A（0 = 平面法线） |
+| `--leaf-bend <a,b,c>` | 叶面弯曲覆盖：`along`(叶尖翘/垂) `,across`(叶面杯) `,crease`(中脉折痕)，单位 = 卡高；省略 = 用 shape 里 `leaf_types.bend` 的值 |
 | `--leaf-normal <f>` | 由 alpha 生成的法线贴图强度 B（0 = 关） |
 | `--normal-scale <f>` | 树皮法线强度（默认 1.5） |
 | `--cam_phi/--cam_theta/--cam_r` | 视角（度、度、米；`cam_r=0` = 自动取景） |
@@ -306,13 +436,13 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | 路径 | 内容 |
 |---|---|
 | `proto/shape.proto` | 资产格式（序列化边界）；`shape.h/.cc` 是运行时结构 + `Validate` + `LoadShapeFile` |
-| `sweep.h/.cc` | 扫管（几何 + UV）与 `BuildLeafCards` / `ComputeCardFrame`（**anchor + anchor_mode → 姿态与 UV 的唯一实现**） |
+| `sweep.h/.cc` | 扫管（几何 + UV）与 `BuildLeafCards` / `ComputeCardFrame` / `CardVertexCount`（**anchor + anchor_mode → 姿态与 UV 的唯一实现**；叶卡弯曲也在这里按解析式求位置/法线/切线） |
 | `viewer/` | `vegetation_v2_app.h` = 库接口（`RunViewer`）；`.cc` = 场景/渲染/交互；`vegetation_v2_viewer.cc` = 只有 CLI |
 | `bake/` | **GLB 烘焙器**：shape(+bark+leaf) → 自洽 .glb（关节表 + 逐顶点 `(joint_id, phase)` + 内嵌贴图） |
 | `leaf_texture.h/.cc` | 叶卡贴图 CPU 流水线（黑底→alpha / 法线 / PNG 编解码）——查看器与烘焙共用同一份像素 |
 | `export_vegetation_shape.py` | **旧** Python 导出链（Blender 侧 python）：Sapling 曲线 → `ShapeProto` 文本；已由 `gen/` 的 C++ 实现取代，保留作对拍基准 |
 | `dump_sapling_curve.py` | Blender 侧**只倒数据**：建树 + 曲线控制点 / 叶卡网格 → `.dump`（几何决策全在 `gen/`） |
-| `gen/` | **导出链 C++ 实现**：`sapling_dump` 解析、`shape_builder` 建 shape、`shape_text` 写 pbtxt、`shape_gen` 入口 |
+| `gen/` | **导出链 C++ 实现**：`sapling_dump` 解析、`shape_builder` 建 shape、`shape_text` 写文本（仅人工查看）、`shape_gen` 入口、`shape_convert` 文本⇄二进制 |
 | `leaf_card/` | **叶卡归一化**：生图 → 合规素材（根点识别 / 旋转 / 对齐裁剪）+ `leaf_card_spec.h`（生图合同） |
 | `make_generated_bark.sh` | 生图树皮 → albedo(无缝)+normal+roughness（串起 `texture_tool` 的两个工具） |
 | `proto/generate.proto` | **生成配置**的 schema（喂给 Sapling 的参数，逐字段写明含义/单位/效果） |
@@ -321,7 +451,7 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `configs/` | 入库的生成配置：`pine.pbtxt` / `oak.pbtxt` / `fir.pbtxt`（见其 README） |
 | `make_bark_material.sh` | ambientCG JPG → 查看器认的 `albedo/normal/roughness.png` |
 | `assets/` | 入库样例：`leaf/willow_leaf{,_flip}.png`、`bark/bark001/`（见其 README） |
-| `samples/` | 范本拓扑：`willow.pbtxt`（183 枝/442 卡/1 type）、`willow_two_types.pbtxt`（215 枝/597 卡/2 type，另一棵树）；**`willow_baked.glb`（12 MB，入库的烘焙产物，见下）** |
+| `samples/` | 范本拓扑（**全部 `.vegshape` 二进制**）：`willow`（183 枝/442 卡）、`willow_two_types`（215 枝/597 卡/2 type）；**入库档位**：`{pine,oak,fir}_low`（约 5 万顶点、带噪声，主力档）与 `{pine,oak,fir}_game`（约 5000 三角形）；**`willow_baked.glb`（12.5 MB，烘焙产物，见下）** |
 | `docs/vegetation_asset_format.md` | **格式规范**：约定、扫管、UV、叶卡、装配、校验、验收、版本 |
 | `bake/bake_options.h` | 烘焙参数/统计（baker 与关节构造共用，避免循环 include） |
 | `bake/vegetation_glb_joints.{h,cc}` | **关节构造**（GL-free 纯几何）：抽稀 / soft / 父子链 / 相位场；烘焙与单测共用 |

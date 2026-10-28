@@ -34,6 +34,7 @@
 #include "geom/math/piecewise_linear_function.h"
 
 #include "tools/jpov/interface/camera.h"
+#include "tools/jpov/interface/flipbook.h"
 #include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/interface/volume_fire_types.h"
@@ -92,6 +93,9 @@ enum class DrawCommandType : uint8_t {
                         //      CPU 三角化后以三角形列表渲染）
     kImage2D,           // 2D 图片（屏幕空间，像素坐标，
                         //      GPU 纹理采样 + 矩形面片）
+    kPlate2D,           // 2D 板材（屏幕空间，像素坐标，
+                        //      SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，
+                        //      见 Plate2DCommand / src/plate2d）
     kObject3D,          // 3D 静态模型（世界空间）
                         //      GPU mesh + 纹理 + 平移 center + 旋转 up/front
     kInstancedObject,   // 3D 静态模型批量实例（世界空间，instancing）
@@ -357,6 +361,67 @@ struct FillRect2DCommand {
     Color border_color;
     float border_width;
     float radius;
+};
+
+// 一块板材的**一层材质**（填充区 或 边框带 各用一层）。
+//
+// `texture_id == 0` = 纯色（不采样纹理，直接用该层的 tint）；
+// `texture_id != 0 && flipbook.fps > 0` = 按帧裁 UV 的翻书（格式约定见
+// `tools/jpov/interface/flipbook.h`）。
+//
+// 为什么平铺/翻书参数逐层而不是整块共享：Danis 2026-10-27 要「核心一个 flipbook、
+// 边界另一个 flipbook」——两层的图集、帧率、密度都可以不同（例如核心是水波、
+// 边界是另一条更慢的金属流）。时间轴仍是整块共享（同一个 time_seconds）。
+struct PlateLayer {
+    uint32_t texture_id = 0;            // 0 = 纯色
+    Vec2f tiling = {1.0f, 1.0f};        // 每边平铺次数（各分量 > 0）
+    Vec2f scroll = {0.0f, 0.0f};        // UV 平移（单位 = 一整张图）
+    FlipbookDesc flipbook;              // 图集网格 + 帧率（fps = 0 = 静止在第 0 帧）
+};
+
+// 2D 板材（渲染分辨率空间，像素坐标，原点左上角）
+//
+// 一块 UI 底板：圆角矩形轮廓在**片元里用解析距离场**求（不 CPU 三角化），
+// 因此任意尺寸/圆角都有 1px 解析抗锯齿；边框带、渐变消失带、材质平铺/翻书
+// 全部只是对同一个距离 d 做加减 ⇒ 零额外几何、零额外 draw call、交接处不裂。
+// 实现与着色器见 src/plate2d/plate2d_renderer.h。
+//
+// 混合：输出**预乘 alpha**，渲染器内部临时切到 (ONE, ONE_MINUS_SRC_ALPHA)，
+// 退出时恢复 2D 默认 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)。
+//
+// Pre-condition: size 各分量 > 0
+// Pre-condition: radius ∈ [0, min(size)/2]
+// Pre-condition: border_width ∈ [0, min(size)/2]；border_bump ∈ [0,1]；
+//                border_fade ∈ [0, border_width]
+// Pre-condition: fill / border 各层的 tiling > 0、flipbook 已 Validate、
+//                texture_id == 0 或已注册
+struct Plate2DCommand {
+    Vec2f pos;
+    Vec2f size;
+
+    // 圆角半径（像素）。等于 min(size)/2 时退化成胶囊。
+    float radius = 0.0f;
+
+    // ---- 填充区（外轮廓向内 border_width 以内）----
+    // 默认色用字面量而不是 jpov::kColorWhite：后者定义在 src/renderer.cc，
+    // 默认成员初始化会 odr-use 它 ⇒ 任何只依赖本头文件的 CPU 侧程序都得链渲染器。
+    Color fill_color = {1.0f, 1.0f, 1.0f, 1.0f};   // tint（无纹理时即本体色）
+    PlateLayer fill;
+
+    // ---- 边框带（从外轮廓向内 border_width 像素）----
+    Color border_color = {1.0f, 1.0f, 1.0f, 1.0f};  // 边框基色（剖面在其上做明暗）
+    PlateLayer border;
+    float border_width = 0.0f;         // 0 = 无边框
+    // 剖面曲率 [0,1]：0 = 平面带（只有常量底，无明暗），1 = 完整圆管剖面（假 3D 银色边）。
+    float border_bump = 0.0f;
+    // 渐变消失带宽（像素，[0, border_width]）：靠近内沿 alpha 收到 0，边淡入填充。
+    // 0 = 实心边。
+    float border_fade = 0.0f;
+
+    // ---- 时间轴（两块层共享）----
+    // **GPU 不取时钟**：时间由调用方给（秒，零点调用方自定），各层各自的 fps
+    // 决定自己的帧号。见 flipbook.h 的格式约定 §5。
+    float time_seconds = 0.0f;
 };
 
 // 2D 圆弧/扇形（渲染分辨率空间，像素坐标）
@@ -2068,6 +2133,7 @@ struct RenderCommandList {
     std::vector<Strip2DCommand> strip2d;
     std::vector<Arc2DCommand> arc2d;
     std::vector<Image2DCommand> image2d;
+    std::vector<Plate2DCommand> plate2d;
     std::vector<Object3DCommand> object3d;
     // 3D 静态批量实例命令（世界空间, instancing）。存一批 per-instance 摆放，渲染时归成一次
     // instanced draw。同 mesh 才能同批（见 InstancedObjectCommand）。
@@ -2396,6 +2462,12 @@ struct RenderCommandList {
     void DrawImage(uint32_t texture_id, const Vec2f& pos,
                    const Vec2f& size,
                    const Color& tint = kColorWhite);
+
+    // 2D 板材（渲染分辨率空间，像素坐标）
+    //
+    // SDF 圆角矩形 + 边框剖面 + 材质平铺/翻书，一块板材一次 draw call。
+    // 字段语义与 Pre-condition 见 Plate2DCommand。
+    void DrawPlate(const Plate2DCommand& plate);
 
     // ---- 3D 静态模型 ----------------
 

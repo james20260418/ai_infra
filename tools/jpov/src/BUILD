@@ -299,6 +299,7 @@ cc_library(
     deps = [
         ":font_renderer",
         ":primitives2d_renderer",
+        ":plate2d_renderer",
         ":mesh_manager",
         ":object3d_renderer",
         ":instanced_renderer",
@@ -451,6 +452,27 @@ cc_library(
     name = "primitives2d_renderer",
     srcs = ["primitives2d/primitives2d_renderer.cc"],
     hdrs = ["primitives2d/primitives2d_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":texture_manager",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# Plate2DRenderer — SDF 支配的 2D 板材（圆角矩形 + 边框剖面 + 材质平铺/翻书）
+# 一份着色器、一块 quad，形状/边框/材质全在片元里算。见 src/plate2d/plate2d_renderer.h。
+cc_library(
+    name = "plate2d_renderer",
+    srcs = ["plate2d/plate2d_renderer.cc"],
+    hdrs = ["plate2d/plate2d_renderer.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":texture_manager",
