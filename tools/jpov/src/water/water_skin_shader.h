@@ -23,7 +23,8 @@
 //     用一次 alpha 混合表达：α = 1−(1−B)(1−F)，color = (body·B·(1−F) + sky·F + sun)/α
 //     · 镜面天光 = 天空探针按 reflect(−V, N) 采样（N 被波纹扰动 ⇒ 反光碎成亮片）
 //     · 水下透射 = 薄膜 + 背景本身（关掉 ⇒ α=1，水面变成不透明的本体色）
-//     · 太阳高光 = Blinn-Phong 单瓣 × F（近处暗、远处掠射亮 = 真实的"太阳路"）
+//     · 太阳高光 = **GGX 微表面**（粗糙度 = 被 mip 平均掉的斜率方差 + 日盘角半径）：
+//       近处是碎亮片、远处摊成一条柔和的太阳路，掠射处由 Smith 可见性压住不爆白。
 //   ── 相机在水下（抬头看水面）──
 //     界面反射率 R 仍是**精确未极化 Fresnel（水→空气）**，临界角 θc = asin(1/ior) ≈ 48.6°：
 //       θ ≥ θc ⇒ R = 1（全内反射）⇒ 整片是"地色"（水面变成一面暗镜）
@@ -62,12 +63,13 @@
 //
 // ⭐ 太阳高光 = **日盘的解析像**（不采纹理）：
 //   光源是主平行光（颜色 × 强度 = 太阳辐亮度），高光就是"日盘在表面斜率分布下的镜面
-//   反射"，用能量守恒的 Blinn-Phong 单瓣表达。天空探针（SkyOutput::kEnvProbe）**故意
+//   反射"，用 GGX 微表面表达（波瓣宽度 = 未解析的斜率方差 + 日盘角半径）。天空探针（SkyOutput::kEnvProbe）**故意
 //   不含日月盘** —— 否则与这里的高光双计。所以"日盘高光"在画面上的表现是**太阳路**
 //   （被波浪打碎的亮带），而不是探针里的一张小圆盘；这也是 UE/Unity 水面的做法
 //   （探针只给环境色，直接光的高光单独算）。
-//   已知边界：波瓣宽度由 n 与斜率方差决定，**不**再叠日盘角半径（太阳 0.27°，
-//   对 n=1500 的 2° 量级波瓣是零头）。
+//   "日晕" = GGX 的 tan⁻⁴ 长尾 + 抬高的 mip/方差（远处波瓣变宽 ⇒ 像晕一样摊开）；
+//   天空里那层 Preetham 米氏辉光**不在**探针里（kEnvProbe 不含盘/晕），所以太阳的
+//   像全部来自这一项 —— 想让它更"糊"就把 LEAN 补偿增益往上拉。
 //
 // 已知边界（本版有意不做）：
 //   * 没有吸收/散射（水下物体只是被一层淡色膜按 α 混掉，不随深度变蓝）；
@@ -125,7 +127,6 @@ uniform int   uUseTransmit;      // 1 = 水下透射（关掉 = 水面变成不�
 uniform int   uUseSun;           // 1 = 太阳高光
 uniform vec3  uSunDir;           // 指向太阳的世界方向（单位向量）
 uniform vec3  uSunColor;         // 太阳直射色（线性 HDR，已乘 intensity）
-uniform float uSunShininess;     // Blinn-Phong 幂次（越大越尖）
 // LEAN 高光补偿：把**带限丢掉的斜率方差**并进太阳高光波瓣（波瓣变宽、峰值下降、
 // 能量不凭空消失）。0 = 关（远处高光会"变软消失"）；1 = 物理量；>1 = 观感加强。
 uniform float uLeanGain;
@@ -351,7 +352,16 @@ void main() {
                                 ? clamp(sqrt(lean_var) / max(uWaveSlopeRad, 1e-3) * 5.0,
                                         0.0, 5.0)
                                 : 0.0;
-                sky = textureLod(uEnvCube, reflect(-V, N), lod).rgb * uSkyScale;
+                // ⚠️ 反射方向**不许掉到地平线以下**。探针（kEnvProbe）的下半球是
+                //    "地色"（给金属块反射陆地用的）；而开阔海面在掠射处看到的"下面"
+                //    其实是更远的海面 —— 它的辐亮度 ≈ 地平线天光，不是暗地色。
+                //    不夹的话，波纹把掠射反射方向按过地平线 ⇒ 天际线内侧出现一圈
+                //    发黑的边（2026-10-28 Danis 抓到的"黑边 + 逐渐过渡为 ground 色"）。
+                //    1° 的余量让采样点稳稳留在上半球，不被 128² 探针的 texel
+                //    （≈2.8°）与 mip 过滤重新混回地色。
+                vec3 rd = reflect(-V, N);
+                rd.y = max(rd.y, 0.0175);
+                sky = textureLod(uEnvCube, normalize(rd), lod).rgb * uSkyScale;
             } else {
                 sky = uRimColor;      // 没有探针：退回常量色（旧行为）
             }
@@ -359,24 +369,36 @@ void main() {
 
         vec3 sun = vec3(0.0);
         if (uUseSun == 1 && uSunColor != vec3(0.0)) {
-            // Blinn-Phong 单瓣：H = normalize(V + L)。乘 F 是必须的 —— 太阳在水面上的
-            // 高光本身就是菲涅耳反射，所以近处暗、远处（掠射）那条"太阳路"才亮。
-            // 能量守恒的 Blinn-Phong 归一化：裸 pow(nh, n) 的峰值只有 1，用它算太阳
-            // （辐照度量级 ~3）会得到"几乎看不见的小暗点"——真实太阳是**辐亮度**极高、
-            // 角半径极小的光源，归一化因子 (n+8)/8π 补的就是这个峰值增益。
-            // LEAN：把**带限丢掉的斜率方差**并进高光波瓣（LEAN 的核心一步）。
-            //   Blinn-Phong 波瓣的等价斜率方差：σ₀² = 2/(n+2)  （半宽²）
-            //   高斯方差可加 ⇒ σ² = σ₀² + var_lost
-            //   再换回指数：n_eff = 2/σ² − 2
-            // 效果：远处波瓣变宽（高光扩散成太阳路），而不是"变软消失"。
-            float shin = max(uSunShininess, 1.0);
-            if (lean_var > 1.0e-9) {
-                float sigma2 = 2.0 / (shin + 2.0) + lean_var;
-                shin = max(2.0 / max(sigma2, 1.0e-6) - 2.0, 2.0);
-            }
+            // ── 太阳高光 = **GGX 微表面**（2026-10-28 换掉 Blinn-Phong 单瓣）──
+            // 旧做法的毛病（Danis："是一个竖直的条，只考虑了日盘没考虑日晕"）：
+            //   n=1500 是**人造指数**，波瓣形状与视线/距离无关 ⇒ 近处远处一样宽、
+            //   边缘硬、没有太阳路该有的透视结构（近处碎、远处糊），也没有日晕。
+            // 现在：
+            //   α² = 被带限/mip 平均掉的斜率方差（就是 LEAN 存二阶矩要还原的那个量，
+            //        乘 LEAN 补偿增益）+ 日盘自身角半径²
+            //   D  = GGX；V = Smith-GGX 可见性；F = 空气→水 Fresnel（按半程向量）
+            //   L  = E_sun · D·V·F·(n·l)
+            // 物理含义：α 随距离变大 ⇒ 远处太阳路摊平成一片、近处是碎亮片；
+            //   V 在掠射处→0，抑制地平线爆白；日盘角半径给波瓣一个**下限**
+            //   （高光永远不会比真实日盘更锐 —— 这也正是"日盘"的采样口径）。
+            // 日晕：探针（kEnvProbe）按设计不含日盘/日晕，所以太阳的像**全部**由这一项
+            //   给出；GGX 的长尾（tan⁻⁴）就是"晕"的那一段 —— 见 shader 顶部的说明。
+            const float kSunAngRad = 0.00465;              // 太阳角半径 ≈ 0.266°
+            float alpha2 = max(wave_slope_var * max(uLeanGain, 0.0) +
+                               kSunAngRad * kSunAngRad, 1.0e-8);
             vec3 H = normalize(V + uSunDir);
-            float nh = max(dot(N, H), 0.0);
-            sun = uSunColor * F * pow(nh, shin) * ((shin + 8.0) / 25.1327412);
+            float nh = max(dot(N, H), 1.0e-4);
+            float nv = max(dot(N, V), 1.0e-3);
+            float nl = max(dot(N, uSunDir), 0.0);
+            float nh2 = nh * nh;
+            float tan2 = max(1.0 - nh2, 0.0) / nh2;
+            float dd = alpha2 + tan2;
+            float D = alpha2 / (3.14159265359 * nh2 * nh2 * dd * dd);
+            float gv = nl * sqrt(nv * nv * (1.0 - alpha2) + alpha2);
+            float gl = nv * sqrt(nl * nl * (1.0 - alpha2) + alpha2);
+            float Vvis = (gv + gl > 1.0e-6) ? 0.5 / (gv + gl) : 0.0;
+            float Fh = FresnelAirToWater(clamp(dot(V, H), 0.0, 1.0), uIor);
+            sun = uSunColor * (D * Vvis * Fh * nl);
         }
 
         bool transmit = (uUseTransmit == 1);

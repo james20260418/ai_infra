@@ -66,7 +66,8 @@ struct WaterSkinParams {
     bool use_transmission = true;     // 水下透射（关 ⇒ 水面变成不透明的本体色）
     bool use_sun_glint = true;        // 太阳高光（Blinn-Phong 单瓣 × F）
     float sky_scale = 1.0f;           // 天光反射量 [0,1]
-    float sun_shininess = 1500.0f;    // 高光幂次（越大越尖）
+    // 太阳高光的波瓣形状**不**再靠人工指数：GGX 的 α² = 未解析斜率方差 + 日盘角半径²。
+    // 想去掉"高光太尖/太糊"就调 wave_slope_deg（物理量）或 lean_gain（补偿增益）。
     // ── LEAN 高光补偿（2026-10-28 Danis 要的）──
     // 带限/硬件 mip 会把斜率**平均掉** ⇒ 远处水面变平、太阳高光变软消失。
     // LEAN 的补法是把"丢掉的斜率方差"并进高光波瓣（峰值降、宽度升、能量守恒），
