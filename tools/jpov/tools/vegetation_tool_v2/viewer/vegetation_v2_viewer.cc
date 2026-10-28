@@ -12,7 +12,7 @@
 //   jpov_vegetation_v2_viewer --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001
 //   jpov_vegetation_v2_viewer --capture shots/full --leaf ... --bark ...   # 无窗口出三张图
 //
-//   --shape <pbtxt>      拓扑（省略 = shapes/willow.vegshape）
+//   --shape <path>       拓扑（.vegshape 二进制 / .pbtxt 文本；省略 = shapes/willow.vegshape）
 //   --bark <dir>         树皮材质目录（省略 = 树干按 level 上棕色）
 //   --leaf/--leaf2 <png> 叶卡素材；leaf2 给镜像手性的 leaf type 1（省略回退 leaf）
 //   --leaf-black <f>     黑底素材阈值，软过档 [0.5t, 1.5t]（样例素材给 30）
@@ -133,7 +133,7 @@ CliArgs ParseCli(int argc, char** argv) {
   if (!std::ifstream(a.shape_path).good()) {
     if (a.glb_path.empty()) {
       LOG(FATAL) << "读不到 shape: " << a.shape_path
-                 << "\n用法: jpov_vegetation_v2_viewer [--shape <path.pbtxt>]"
+                 << "\n用法: jpov_vegetation_v2_viewer [--shape <path.vegshape>]"
                  << " [--bark <dir>] [--leaf <png>] [--leaf2 <png>]"
                  << "\n    或只看一个 glb: jpov_vegetation_v2_viewer --glb <path.glb>"
                  << "\n  --shape 省略时用 shapes/willow.vegshape（打包目录内）"
