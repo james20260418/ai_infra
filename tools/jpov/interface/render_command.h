@@ -1267,6 +1267,30 @@ struct SkyCommand {
                      1.0f};
     }
 
+    // 太阳"晕"（大气 Mie 前向散射辉光）的**峰值色** —— 与 sky shader 里
+    // `sun_glow_contrib = sun_body_color × uSunGlow` 逐项同源：
+    //   = ColorTempToLinear(仰角色温) × sun_glow × daylight_season × intensity
+    // 注意（照抄 shader 现状，别在这里"顺手修正"）：
+    //   * 晕**不**乘 Beer-Lambert 衰减、**不**乘 daylight 门（shader 里它是加在
+    //     `mix(0, solar, daylight)` 之后的）；
+    //   * 盘与晕的分工：盘的能量在**主平行光**里（PBR/水面的直射高光），
+    //     本函数只给"晕"这一份散射光 —— 谁同时用两者就会双计。
+    // 用途：水皮按反射方向补日晕（天空探针 kEnvProbe 按设计不含盘/晕）。
+    Color SunGlowColor() const {
+        if (sun_glow <= 0.0f || sun_radius <= 0.0f || sun_brightness <= 0.0f) {
+            return Color{0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        const Vec3f d = sun_dir.Unit();
+        const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
+        const float kelvin = 2000.0f + (5600.0f - 2000.0f) *
+            std::clamp(elev / 0.3f, 0.0f, 1.0f);
+        const Color body = ColorTempToLinear(kelvin);
+        return Color{body.r * sun_glow * daylight_season.r * intensity,
+                     body.g * sun_glow * daylight_season.g * intensity,
+                     body.b * sun_glow * daylight_season.b * intensity,
+                     1.0f};
+    }
+
     // 归一化 daylight_season 为“纯色温偏置”的缩放因数：三通道同乘 1/avg，使乘子的
     // 三通道平均 = 1，只改变 RGB 的**相对**比例 → 只偏色温、不增减光强。
     // 用法：color × daylight_season × DaylightSeasonTintScale()；中性 (1,1,1) → scale=1。

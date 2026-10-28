@@ -123,6 +123,10 @@ public:
     bool water_use_sun_glint_ = true;     // 太阳高光
     bool water_lean_glint_ = true;        // LEAN 高光补偿（方差 → 波瓣 + 探针 mip）
     float water_lean_gain_ = 1.0f;        // LEAN 方差增益 [0,4]（1 = 物理量）
+    // 辉光：真实照片里太阳路周圍那圈"晕"有一大半是**相机/眼睛的眩光**（bloom），
+    // 不是大气散射（后者是 sky 的 discGlow，已在水皮里单独补过，量级差 3 个数量级）。
+    // 水面场景默认开，因为它直接决定"太阳路像不像照片"。
+    bool water_bloom_ = true;
     // 远距离波浪带限方式（0/1/2/3，见 shader 注释）。面板给个下拉做对比。
     // 面板只暴露模式 4（法线 flipbook 纹理）；0..3 是带限对比用的历史模式，仅 capture 用。
     int water_wave_filter_mode_ = 4;
@@ -291,6 +295,16 @@ public:
             wp.wave_length_m = water_wave_length_m_;
             wp.wave_dir_deg  = water_wave_dir_deg_;
             SetWaterSkin(wp);
+            if (water_bloom_) {
+                // threshold 1.5：只有太阳路/高光这种 HDR 远超 1 的地方起辉，
+                // 天光本体（~0.5）与水色不起雾。levels 3 = 柔和但不过分宽。
+                jpov::BloomConfig bc;
+                bc.enabled = true;
+                bc.intensity = 0.35f;
+                bc.threshold = 1.5f;
+                bc.levels = 3;
+                cmds->bloom = bc;
+            }
         } else {
             SetWaterSkin(std::nullopt);
         }
@@ -434,24 +448,25 @@ private:
             ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(4.0f));
             ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(5.0f));
             ui_.Checkbox("太阳高光（GGX×F）", &water_use_sun_glint_, water_row(6.0f));
+            ui_.Checkbox("Bloom 辉光（太阳路的晕）", &water_bloom_, water_row(7.0f));
             // 界面权重：n 从 1.333 往 1 拉 ⇒ 临界角推向 90°、R 整体下降 ⇒ 灰区逐渐变回透射。
-            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(7.0f),
+            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(8.0f),
                             1.0f, 1.6f, 3);
-            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(8.0f),
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(9.0f),
                             0.0f, 6.2831853f, 2);
             ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
-                            water_row(9.0f), 0.0f, 20.0f, 1);
-            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(10.0f),
+                            water_row(10.0f), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(11.0f),
                             0.05f, 20.0f, 2);
-            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(11.0f),
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(12.0f),
                             0.0f, 360.0f, 0);
             ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
-                            water_row(12.0f), 0.0f, 1.0f, 2);
+                            water_row(13.0f), 0.0f, 1.0f, 2);
             // 两块实现的 A/B：strip 平铺版是有限 quad（老路径），关 = 新水皮 pass（无限平面）。
             ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
-                         water_row(13.0f));
+                         water_row(14.0f));
             ui_.Text("水面 = 无限平面（逐像素求交，覆盖到地平线）  右键拖动=绕行",
-                     water_row(14.0f));
+                     water_row(15.0f));
             return;
         }
 

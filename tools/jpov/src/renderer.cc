@@ -1911,7 +1911,16 @@ void Renderer::Render(const RenderCommandList& cmds,
                                        GL_TEXTURE_2D, 0, 0);
                 // 镜面天光需要天空探针（本帧渲了 env_specular 才有）；太阳高光用主平行光。
                 const unsigned int sky_cube = (sky_env_tex_ != 0) ? sky_env_tex_ : 0u;
-                water_skin_renderer_.Draw(*water_skin_, cam, hdr_scene_depth_tex,
+                // 日晕（太阳的 Mie 前向散射）由**天光自己**推导，不走 App 参数：
+                //   探针（kEnvProbe）按设计不含盘/晕 ⇒ 水面里那份"晕"只能在这里补，
+                //   否则"水面反射的天空"和"看见的天空"不是同一个天。
+                WaterSkinParams ws = *water_skin_;
+                if (cmds.sky.has_value()) {
+                    ws.sun_glow_color     = cmds.sky->SunGlowColor();
+                    ws.sun_glow_sigma_rad = cmds.sky->sun_radius * 2.0f;  // 与 discGlow 同款
+                    ws.sun_disc_radius_rad = cmds.sky->sun_radius;
+                }
+                water_skin_renderer_.Draw(ws, cam, hdr_scene_depth_tex,
                                           sky_cube, eff_sun ? &*eff_sun : nullptr,
                                           fbo_3d_w, fbo_3d_h, shader_mgr_);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,

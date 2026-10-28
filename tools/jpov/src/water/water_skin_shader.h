@@ -126,6 +126,14 @@ uniform int   uUseSkyRefl;       // 1 = 镜面天光
 uniform int   uUseTransmit;      // 1 = 水下透射（关掉 = 水面变成不透明的本体色）
 uniform int   uUseSun;           // 1 = 太阳高光
 uniform vec3  uSunDir;           // 指向太阳的世界方向（单位向量）
+// 日晕（太阳的 Mie 前向散射辉光）—— 与 sky_renderer 的 discGlow() **同款公式**：
+//   峰值色 = 太阳盘色温色 × sun_glow × season × intensity（由 Renderer 从 SkyCommand 推）
+//   σ      = 2 × 盘角半径；从盘边（ang > 盘半径）开始算
+// 为什么单独一项：天空探针（kEnvProbe）按设计不含盘/晕 ⇒ 水面里根本没有"晕"；
+//   而日盘的能量已经在主平行光里（GGX 的 E_sun），所以这里**只补晕、不再加盘**（防双计）。
+uniform vec3  uSunGlowColor;
+uniform float uSunGlowSigma;     // 晕的 σ（弧度）
+uniform float uSunDiscRadius;    // 盘角半径（弧度）：晕从盘边开始
 uniform vec3  uSunColor;         // 太阳直射色（线性 HDR，已乘 intensity）
 // LEAN 高光补偿：把**带限丢掉的斜率方差**并进太阳高光波瓣（波瓣变宽、峰值下降、
 // 能量不凭空消失）。0 = 关（远处高光会"变软消失"）；1 = 物理量；>1 = 观感加强。
@@ -361,7 +369,17 @@ void main() {
                 //    （≈2.8°）与 mip 过滤重新混回地色。
                 vec3 rd = reflect(-V, N);
                 rd.y = max(rd.y, 0.0175);
-                sky = textureLod(uEnvCube, normalize(rd), lod).rgb * uSkyScale;
+                rd = normalize(rd);
+                sky = textureLod(uEnvCube, rd, lod).rgb * uSkyScale;
+                // 日晕：与 sky 同款 exp 晕（见 uSunGlowColor 的说明），
+                //   σ 用"未解析斜率方差"加宽 = 把晕与波面斜率分布做卷积
+                //   （与 GGX 的 α² 一个口径，LEAN 增益同样作用在这上面）。
+                if (uSunGlowColor != vec3(0.0)) {
+                    float ang = acos(clamp(dot(rd, uSunDir), -1.0, 1.0));
+                    float d = max(ang - uSunDiscRadius, 0.0);
+                    float sig2 = uSunGlowSigma * uSunGlowSigma + lean_var;
+                    sky += uSunGlowColor * exp(-d * d / (2.0 * sig2)) * uSkyScale;
+                }
             } else {
                 sky = uRimColor;      // 没有探针：退回常量色（旧行为）
             }

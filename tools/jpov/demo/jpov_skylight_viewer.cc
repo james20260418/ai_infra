@@ -300,6 +300,8 @@ int RunCaptureWater(const std::string& out_dir) {
         // LEAN 高光补偿 A/B：0 = 不覆盖（用面板默认 = 开）、1 = 强制开、2 = 强制关。
         int lean = 0;
         float lean_gain = 1.0f;
+        // 辉光 A/B：0 = 不覆盖（用面板默认 = 开）、1 = 开、2 = 关。
+        int bloom = 0;
         // 天光仰角/方位角覆盖（水面观感 90% 来自太阳，验收要能当场扫）。
         std::optional<float> sun_elev_deg;
         std::optional<float> sun_azim_deg;
@@ -374,6 +376,9 @@ int RunCaptureWater(const std::string& out_dir) {
          .theta_deg = 220.0f, .lean = 1, .lean_gain = 3.0f},
         // 水面视角的 LEAN A/B（看"远处反光是否变钝而不是变平"）。
         {.name = "lean_eye_on",  .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 1},
+        // Bloom A/B（太阳路的"晕"）：开 / 关，同机位同相位。
+        {.name = "leansun_bloom", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .bloom = 1},
+        {.name = "leansun_nobloom", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .bloom = 2},
         {.name = "lean_eye_off", .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 2},
         // ── 天光仰角扫描（太阳机位）：高光随仰角的走向 ──
         {.name = "sun_elev15", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
@@ -405,6 +410,7 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_use_sun_glint_ = (s.sun_glint != 2);
         app.water_lean_glint_    = (s.lean != 2);
         app.water_lean_gain_     = s.lean_gain;
+        app.water_bloom_         = (s.bloom != 2);
         app.deg_.sun_elev_deg    = s.sun_elev_deg.value_or(45.0f);
         app.deg_.sun_azim_deg    = s.sun_azim_deg.value_or(40.0f);
         app.view_ = jpov_viewer::DefaultView();

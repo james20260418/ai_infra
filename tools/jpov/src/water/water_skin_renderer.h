@@ -74,6 +74,13 @@ struct WaterSkinParams {
     // 同时用它抬天光探针的 mip（远处反光变钝，不是变成硬镜面）。
     bool use_lean_glint = true;       // false ⇒ 逐字节回到"无补偿"的旧行为
     float lean_gain = 1.0f;           // 方差增益：1 = 物理量；>1 = 观感加强；0 = 等于关
+    // ── 日晕（太阳的 Mie 前向散射辉光）──
+    // 由 Renderer 从 SkyCommand 直接推导后**覆盖**（与 sky 的 discGlow() 同款公式），
+    // 调用方不用管：sun_glow_color = 盘色温色 × sun_glow × season × intensity。
+    // 全 0 ⇒ 不画日晕（与"天空里也没有晕"一致）。日盘本身**不**在这里（它在平行光里）。
+    Color sun_glow_color{0.0f, 0.0f, 0.0f, 1.0f};
+    float sun_glow_sigma_rad = 0.0188f;   // σ = 2 × 盘半径（sky 的 discGlow width=2.0）
+    float sun_disc_radius_rad = 0.0094f;  // 盘角半径（晕从盘边开始）
     // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
     //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ）
     //   3 = sinc + 方差转粗糙度    4 = **法线 flipbook 纹理 + 硬件 mip**
