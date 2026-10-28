@@ -35,6 +35,8 @@
 #ifndef JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 #define JPOV_DEMO_SKYLIGHT_VIEWER_APP_H_
 
+#include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -347,6 +349,10 @@ public:
             ui_.End();
             ui_.Emit(cmds);
         }
+
+        // **相机 HUD**：始终画（含 headless 截图），右上角。用途 = 报"哪个视角"时
+        // 直接把屏幕上的数字念出来（Danis 2026-10-28 要求：日晕在特定视角有马赛克）。
+        DrawCameraHud(input, cmds);
     }
 
 private:
@@ -387,6 +393,74 @@ private:
         SkylightApp* app = static_cast<SkylightApp*>(userdata);
         return app->MeasureTextWidth(/*alias=*/std::string(),
                                      /*text=*/text ? text : "", font_size);
+    }
+
+    // 相机 / 天光 HUD（右上角，始终可见）
+    //
+    // 为什么需要它：报缺陷时"某个视角"无法复现 —— 把 φ/θ/R、相机高、目标点、
+    // 天光方位与**可见盘**仰角直接印在屏幕上，截图自带上下文。
+    void DrawCameraHud(const jpov::InputSnapshot& input,
+                       jpov::RenderCommandList* cmds) {
+        jpov::UiTheme theme = jpov::UiTheme::Default(kHudFontSize);
+        theme.font_alias = kViewerFontAlias;
+        const float w = static_cast<float>(kViewerWidth);
+        const float h = static_cast<float>(kViewerHeight);
+        ui_.Begin(input, theme, w, h, 1000.0f / kViewerFps);
+
+        constexpr double kRad2Deg = 180.0 / 3.14159265358979323846;
+        const jpov::Vec3f cam = view_.Position();
+        const jpov::Vec3f tgt = view_target_.has_value()
+                                    ? *view_target_ : jpov_viewer::ViewConfig::Target();
+        const SkyLighting hud_light = MakeSkyLighting(deg_, tricolor_ambient_);
+        const jpov::SkyCommand& sk = hud_light.sky;
+        const jpov::Vec3f sun_d = sk.sun_dir.Unit();
+        const jpov::Vec3f disc_d = sk.ActiveDiscDirection();
+        const bool sun_active = (sun_d.y() >= 0.0f);
+        auto elev_of = [](const jpov::Vec3f& d) {
+            return static_cast<float>(std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+                                      57.29577951308232f);
+        };
+        auto azim_of = [](const jpov::Vec3f& d) {
+            return static_cast<float>(std::atan2(d.x(), d.z()) * 57.29577951308232f);
+        };
+
+        char line[8][192];
+        std::snprintf(line[0], sizeof(line[0]), "相机 仰角 %+.1f°   方位 %+.1f°",
+                      view_.phi * kRad2Deg,
+                      std::fmod(view_.theta * kRad2Deg, 360.0));
+        std::snprintf(line[1], sizeof(line[1]), "距离 R %.2f m   相机高 y %+.2f m",
+                      view_.R, cam.y());
+        std::snprintf(line[2], sizeof(line[2]), "目标 (%.2f, %.2f, %.2f)   FOV %.0f°",
+                      tgt.x(), tgt.y(), tgt.z(), 60.0);
+        std::snprintf(line[3], sizeof(line[3]), "天光 仰角 %+.1f° 方位 %+.1f°（%s）",
+                      deg_.sun_elev_deg, deg_.sun_azim_deg,
+                      sun_active ? "太阳" : "月亮");
+        std::snprintf(line[4], sizeof(line[4]),
+                      "可见盘 仰角 %+.1f° 方位 %+.1f°（重映射后）",
+                      elev_of(disc_d), azim_of(disc_d));
+        std::snprintf(line[5], sizeof(line[5]),
+                      "水面：平面反射(B)  日晕 size %.2f aspect %.2f  LEAN %.1f%s",
+                      static_cast<double>(water_halo_size_),
+                      static_cast<double>(water_halo_aspect_),
+                      static_cast<double>(water_lean_gain_),
+                      water_bloom_ ? "  Bloom" : "");
+
+        const float kRowH = 20.0f;
+        const float kBoxW = 470.0f;
+        const float x = w - kBoxW - 10.0f;
+        // 位置避开面板：水面场景的面板占上方 16 行（y≈16..480）⇒ HUD 放 y≈500；
+        // 模型场景的面板贴底（y≈350..704）⇒ HUD 放 y≈8。两者都不重叠。
+        const float top = show_panel_
+                              ? ((scene_ == SceneKind::kWater) ? h - 6.0f * kRowH - 12.0f
+                                                              : 8.0f)
+                              : 8.0f;
+        for (int i = 0; i < 6; ++i) {
+            ui_.Text(line[i], jpov::UiRect{{x, top + static_cast<float>(i) * kRowH},
+                                           {kBoxW, kRowH}});
+        }
+        (void)h;
+        ui_.End();
+        ui_.Emit(cmds);
     }
 
     // 光照面板：顶部 = 场景下拉（模型 / 水面）；模型场景下面是两列天光滑条，
@@ -531,6 +605,7 @@ private:
     jpov::Ui ui_;
 
     static constexpr float kSliderFontSize = 15.0f;
+    static constexpr float kHudFontSize = 14.0f;
 };
 
 }  // namespace jpov_skylight
