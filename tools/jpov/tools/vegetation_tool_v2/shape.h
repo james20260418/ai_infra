@@ -102,14 +102,15 @@ inline bool IsValidAnchorMode(const std::string& mode) {
 }
 
 // 叶面弯曲参数（无量纲，位移单位 = 卡的 height）。语义见 proto/shape.proto 的
-// LeafBendProto 注释；求值实现只有一份（sweep.cc 的 EvaluateCardSurface）。
+// LeafBendProto 注释；求值实现只有一份（sweep.cc 匿名命名空间里的 CardEvaluator）。
 struct LeafBend {
   double along = 0.0;   // 长轴抛物线：>0 叶尖朝 +normal 翘，<0 下垂
   double across = 0.0;  // 横轴杯状：>0 两缘朝 +normal 卷
   double crease = 0.0;  // 中脉折痕（圆角 V）：>0 两缘相对中脉抬起
 
   // 三个都是 0（默认）⇒ 平面卡。BuildLeafCards 据此决定细分：
-  // 平面 1×1（4 顶点，与旧资产逐字节一致），弯曲 4×4。
+  // 平面 1×1（4 顶点，与旧资产逐字节一致），弯曲 kBentCardSegments×kBentCardSegments
+  // （见 sweep.h；当前是 2×2 = 9 顶点 / 8 三角形）。
   bool IsFlat() const { return along == 0.0 && across == 0.0 && crease == 0.0; }
 };
 

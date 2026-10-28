@@ -10,7 +10,7 @@
 # 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/pine.pbtxt \
-#     --out output/veg_shapes/pine_low.pbtxt
+#     --out output/veg_shapes/pine_low.vegshape
 
 # 松树（Pine）—— 塔形冠 + 裸露主干 + 轮生侧枝。
 #

@@ -205,7 +205,11 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
   // 父枝是用「起点最近的折线」判的，采样一稀（低配 per_seg=1~2）时，某根枝的起点
   // 可能离它自己**后代**的近路折线更近 ⇒ 父子关系成环（A 的父是 B、B 的父是 A），
   // 拓扑序写不出来，整棵树直接失败（报「枝 N 的父枝排在它后面」）。
-  // 处理：把环上的枝重新问一次「最近的其他折线」（排除当前父枝）；实在找不到就挂到根枝。
+  // 处理：把环上的枝重新问一次「最近的其他折线」（**排除自己**）；命中的若还是
+  // 当前父枝（环没解开）或压根没有其他折线，就把这根枝挂到根枝上。
+  //
+  // ⚠️ 排除的必须是**自己**而不是当前父枝：查询点就是这根枝自己的起点，到自己的
+  // 距离恒为 0；不排除自己就永远命中自己，这个「换一个父亲」的分支等于没写。
   for (int pass = 0; pass < 4; ++pass) {
     bool repaired = false;
     for (int i = 0; i < count; ++i) {
@@ -220,10 +224,11 @@ Hierarchy BuildHierarchy(const std::vector<SampledPolyline>& polys) {
         continue;  // 没有环
       }
       const int parent = hierarchy.parent[static_cast<std::size_t>(i)];
-      // 先试「第二近」的折线（排除当前父枝）。
+      // 最近的其他折线（排除自己）；它还是当前父枝就说明环没解开，走下面的兜底。
       const std::optional<jpov::util::NearestPointMatcher3d<double>::Match> retry =
-          matcher.Query(ToGeom(polys[i].points[0]), parent);
-      if (retry.has_value() && retry->polyline != i) {
+          matcher.Query(ToGeom(polys[i].points[0]), i);
+      if (retry.has_value() && retry->polyline >= 0 && retry->polyline != parent &&
+          retry->polyline != i) {
         hierarchy.parent[static_cast<std::size_t>(i)] = retry->polyline;
         const int segment_count = static_cast<int>(polys[retry->polyline].points.size()) - 1;
         hierarchy.attach[static_cast<std::size_t>(i)] =

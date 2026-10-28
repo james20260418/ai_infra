@@ -10,7 +10,7 @@
 # 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/fir.pbtxt \
-#     --out output/veg_shapes/fir_low.pbtxt
+#     --out output/veg_shapes/fir_low.vegshape
 
 # 杉树（Fir）—— 塔形、下垂枝、四级分枝。
 #

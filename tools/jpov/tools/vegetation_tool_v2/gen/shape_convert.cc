@@ -52,7 +52,10 @@ std::string HumanSize(std::uintmax_t bytes) {
   return std::string(buffer);
 }
 
-// 统计口径与 README 一致：管面顶点 = 采样点 × 环数；叶卡顶点 = 卡数 × 9（弯曲卡 2 段）。
+// 统计口径与 README 一致：管面顶点 = 采样点 × 环数；
+// 叶卡顶点 = 卡数 × (kBentCardSegments+1)² = 卡数 × 9（弯曲卡 2 段）。
+// ⚠️ 平面卡（leaf type 的 bend 全 0）实际只占 4 顶点 / 2 三角形，这里按 9 / 8 计
+// 会高估；要精确值就看 BuildLeafCards 的实际顶点数（viewer 的日志里有）。
 void PrintStats(const Shape& shape) {
   std::uint64_t tube_vertices = 0;
   std::uint64_t tube_triangles = 0;

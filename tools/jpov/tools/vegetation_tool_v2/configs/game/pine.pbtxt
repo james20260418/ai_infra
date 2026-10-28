@@ -8,7 +8,7 @@
 #
 # 生成（只读配置，无命令行参数）：
 #   gen/shape_gen --config configs/game/pine.pbtxt \
-#       --out output/veg_shapes/pine_game.pbtxt
+#       --out output/veg_shapes/pine_game.vegshape
 #
 # 松树（Pine）—— 塔形冠 + 裸露主干 + 轮生侧枝。
 #

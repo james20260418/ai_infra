@@ -114,12 +114,13 @@ inline std::string SampleAssetDir() {
 
 // 从 v2 素材烘一份只有树干的 .glb（带关节表 + 逐顶点 (joint_id, phase)）。
 //
-// Pre-condition: `sample_dir` 下有 samples/willow.pbtxt；`glb_path` 的父目录已存在。
+// Pre-condition: `sample_dir` 下有 samples/willow.vegshape（二进制资产，PR #224 起
+// 仓库不再放文本 .pbtxt）；`glb_path` 的父目录已存在。
 // 返回 false 时 *error 写原因（不 crash：调用方自己决定怎么报）。
 inline bool BakeSamplePlant(const std::string& sample_dir, const std::string& glb_path,
                            std::string* error) {
     jpov::vegetation::Shape shape;
-    if (!jpov::vegetation::LoadShapeFile(sample_dir + "/samples/willow.pbtxt", &shape,
+    if (!jpov::vegetation::LoadShapeFile(sample_dir + "/samples/willow.vegshape", &shape,
                                          error)) {
         return false;
     }

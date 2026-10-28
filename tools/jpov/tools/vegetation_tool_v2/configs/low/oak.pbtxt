@@ -10,7 +10,7 @@
 # 生成（只读配置，无命令行参数）：
 #   ./bazel-bin/tools/jpov/tools/vegetation_tool_v2/gen/shape_gen \
 #     --config tools/jpov/tools/vegetation_tool_v2/configs/low/oak.pbtxt \
-#     --out output/veg_shapes/oak_low.pbtxt
+#     --out output/veg_shapes/oak_low.vegshape
 
 # 橡树（Oak）—— 宽冠阔叶树。Sapling 没有 oak 预设，这份是从 small_maple 改出来的。
 #
