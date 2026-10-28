@@ -108,7 +108,12 @@ uniform float uWaveDirRad;       // 传播方向（世界 XZ 平面，弧度）
 // 远距离带限方式（对比/教学用；见 WaveNormal 的注释）：
 //   0 = 不过滤（aliasing 基线）  1 = 硬关八度 + 归一化  2 = 逐八度 sinc 带限（IQ）
 //   3 = 2 + 丢失的斜率方差 → 反射模糊 + 太阳高光增宽（LEAN 思路）
-uniform int   uWaveFilterMode;
+uniform int   uWaveFilterMode;   // 见 WaveNormal 末尾的 0..4 说明
+// 模式 4：波浪法线 flipbook 图集（GL_TEXTURE_2D_ARRAY，每层一帧、各自带 mip 链）
+uniform sampler2DArray uWaveTile;
+uniform int   uHasWaveTile;      // 0 = 图集没建好（退回解析路径）
+uniform float uWaveTileM;        // 一张 tile 覆盖多少米
+uniform int   uWaveTileFrames;   // flipbook 帧数
 // 透射侧 = **帧缓冲里已经画好的东西**（也就是这个 pass 正在混合的背景）：
 // 固定管线 alpha 混合天然给出 out = tirColor·R + 背景·(1−R)，不需要抓帧、不需要探针。
 // ⭐ 这一点决定了"水上物体能不能透过水面看到"：透射的是**真实场景**（人、桌子、天空），
@@ -157,6 +162,27 @@ vec3 WaveNormal(vec3 p, out float slope_var) {
     if (uWaveSlopeRad <= 1.0e-5) {
         return vec3(0.0, 1.0, 0.0);
     }
+    // ── 模式 4：直接采**法线 flipbook 纹理**（硬件 mip + 各向异性）──
+    //   这就是"法线也是纹理"那条路：烘焙时保证空间可平铺 + 时间整数圈，运行时只是
+    //   一个 texture() 调用，带限/各向异性全交给 GPU。不需要 FFT。
+    //   与解析路径的区别：mip 平均的是**斜率**（线性可平均）⇒ 远处斜率趋于 0（变平），
+    //   丢失的方差没人补（这就是 LEADR 要存 B/A 的原因）。
+    if (uWaveFilterMode == 4 && uHasWaveTile == 1 && uWaveTileFrames > 0) {
+        float frame = uWavePhase / 6.28318530718 * float(uWaveTileFrames);
+        frame = mod(floor(frame), float(uWaveTileFrames));
+        vec2 uv = p.xz / max(uWaveTileM, 0.05);
+        vec4 s = texture(uWaveTile, vec3(uv, frame));
+        vec2 grad = (s.rg * 2.0 - 1.0) * uWaveSlopeRad;
+        slope_var = 0.0;
+        float slope = length(grad);
+        if (slope > 1.0e-6) {
+            grad *= min(uWaveSlopeRad, slope) / slope;
+        } else {
+            grad = vec2(0.0);
+        }
+        return normalize(vec3(-grad.x, 1.0, -grad.y));
+    }
+
     // 像素在**水面**上的足迹（掠射角下长得极快，所以不能用"到相机的距离"代替）。
     float footprint = length(fwidth(p.xz));
 

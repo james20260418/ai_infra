@@ -344,8 +344,10 @@ int RunCaptureWater(const std::string& out_dir) {
         {"filter2_sinc", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 2, 45.0f},
         {"filter3_lean", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 45.0f},
         // 太阳高光机位下同样四种（看高光波瓣被方差拉宽的效果）。
+        {"filter4_tile", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 4, 45.0f},
         {"filtersun0_alias", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 0, 220.0f},
         {"filtersun3_lean", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 220.0f},
+        {"filtersun4_tile", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 4, 220.0f},
         // 太阳高光的机位：相机在**太阳方位**上、俯视 45°（镜像几何 V≈L ⇒ 高光落在画面中心）。
         // 顺带证明"高光不是恒亮的"：换机位它就该消失（那才是菲涅耳反射该有的行为）。
         {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, -1, 220.0f},

@@ -19,6 +19,7 @@
 #include "tools/jpov/interface/camera.h"
 #include "tools/jpov/interface/pbr_material.h"   // Color
 #include "tools/jpov/interface/render_command.h" // DirectionalLight
+#include "tools/jpov/src/water/water_normal_tile.h" 
 #include "tools/jpov/src/shader_manager.h"
 
 namespace jpov {
@@ -67,8 +68,11 @@ struct WaterSkinParams {
     float sky_scale = 1.0f;           // 天光反射量 [0,1]
     float sun_shininess = 1500.0f;    // 高光幂次（越大越尖）
     // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
-    //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ） 3 = sinc+方差转粗糙度
+    //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ）
+    //   3 = sinc + 方差转粗糙度    4 = **法线 flipbook 纹理 + 硬件 mip**
     int wave_filter_mode = 3;
+    // 模式 4 的瓦片边长（米）：一张 tile 覆盖多大世界范围。
+    float wave_tile_m = 16.0f;
 };
 
 class WaterSkinRenderer {
@@ -97,6 +101,9 @@ public:
 private:
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;
+    // 波浪法线 flipbook 图集（Init 时烘一次；模式 4 用，其它模式也建好备用 —— 建一次
+    // 约 1~2 s/256²×8 帧，留在 Init 里不占每帧成本）。
+    WaterNormalTile wave_tile_;
 };
 
 }  // namespace jpov

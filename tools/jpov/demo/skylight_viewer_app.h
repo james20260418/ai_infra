@@ -441,6 +441,7 @@ private:
                 "硬关八度（有硬切缝）",
                 "逐八度 sinc 带限",
                 "sinc + 方差转粗糙度（推荐）",
+                "法线 flipbook 纹理 + 硬件 mip",
             };
             ui_.Combo("远距带限", &water_wave_filter_mode_, kWaveFilterNames,
                       water_row(11.0f));

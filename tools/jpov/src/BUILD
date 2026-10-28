@@ -277,11 +277,16 @@ cc_library(
 # 实验期直连 Renderer（不进 RenderCommandList，见 water_skin_renderer.h）。
 cc_library(
     name = "water_skin_renderer",
-    srcs = ["water/water_skin_renderer.cc"],
+    srcs = [
+        "water/water_skin_renderer.cc",
+        "water/water_normal_tile.cc",
+    ],
     hdrs = [
         "water/water_skin_renderer.h",
         # 水皮的着色器（与 renderer 平级，前缀 water_skin_）
         "water/water_skin_shader.h",
+        # 波浪法线 flipbook 图集（CPU 烘 + GPU 纹理数组）
+        "water/water_normal_tile.h",
     ],
     visibility = ["//visibility:public"],
     deps = [

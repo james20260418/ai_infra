@@ -32,6 +32,8 @@ namespace {
 constexpr int kSceneDepthUnit = 0;
 // 天空探针（镜面天光）。pass-local，与 scene depth 不冲突。
 constexpr int kSkyCubeUnit = 1;
+// 波浪法线 flipbook 图集（模式 4）。pass-local。
+constexpr int kWaveTileUnit = 2;
 
 }  // namespace
 
@@ -55,9 +57,14 @@ void WaterSkinRenderer::Init() {
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // 波浪法线 flipbook：256² × 8 帧 × 16 m tile（~4.2 MB + mip）。
+    // 256²/16 m = 6.25 cm/texel，够表现厘米级涟漪；帧数 8 时相位一圈 = 8 帧。
+    wave_tile_ = BuildWaterNormalTile(/*size=*/256, /*frames=*/8, /*tile_m=*/16.0f);
 }
 
 void WaterSkinRenderer::Finalize() {
+    ReleaseWaterNormalTile(&wave_tile_);
     if (vbo_ != 0) {
         glDeleteBuffers(1, &vbo_);
         vbo_ = 0;
@@ -146,7 +153,16 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glUniform1f(shader_mgr.GetUniform(prog, "uWaveDirRad"),
                 params.wave_dir_deg * kDeg2Rad);
     glUniform1i(shader_mgr.GetUniform(prog, "uWaveFilterMode"),
-                std::max(0, std::min(params.wave_filter_mode, 3)));
+                std::max(0, std::min(params.wave_filter_mode, 4)));
+    // 模式 4：把烘好的法线图集挂上去（单元 2，pass-local）。
+    glUniform1f(shader_mgr.GetUniform(prog, "uWaveTileM"),
+                std::max(params.wave_tile_m, 0.05f));
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveTileFrames"), wave_tile_.frames);
+    glUniform1i(shader_mgr.GetUniform(prog, "uHasWaveTile"), wave_tile_.tex != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, wave_tile_.tex);
+    glUniform1i(shader_mgr.GetUniform(prog, "uWaveTile"), kWaveTileUnit);
+    glActiveTexture(GL_TEXTURE0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
@@ -169,6 +185,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     glActiveTexture(GL_TEXTURE0);
