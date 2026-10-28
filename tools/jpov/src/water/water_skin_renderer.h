@@ -74,6 +74,15 @@ struct WaterSkinParams {
     // 同时用它抬天光探针的 mip（远处反光变钝，不是变成硬镜面）。
     bool use_lean_glint = true;       // false ⇒ 逐字节回到"无补偿"的旧行为
     float lean_gain = 1.0f;           // 方差增益：1 = 物理量；>1 = 观感加强；0 = 等于关
+    // ── 镜面反射的来源（实验，2026-10-28）──
+    //   0 = 天空探针（128² cube，原行为）
+    //   1 = 平面反射 A：倒影带日月盘（kFull）⇒ 解析太阳项被强制关闭（防双计）
+    //   2 = 平面反射 B：倒影不含盘（kAtmoOnly）⇒ 解析太阳项 + 日晕照旧
+    int reflection_mode = 0;
+    // 波浪扰动倒影 UV 的强度（NDC 单位）。平面反射只能做"投影 + 扰动"这个近似，
+    // 0 = 不扰动（纯平镜面）。实验中由滑条/常量给。
+    float refl_distort = 0.02f;
+
     // ── 日晕（太阳的 Mie 前向散射辉光）──
     // 由 Renderer 从 SkyCommand 直接推导后**覆盖**（与 sky 的 discGlow() 同款公式），
     // 调用方不用管：sun_glow_color = 盘色温色 × sun_glow × season × intensity。
@@ -87,6 +96,14 @@ struct WaterSkinParams {
     int wave_filter_mode = 4;   // 面板只暴露 4（0..3 是带限对比/教学用的历史模式）
     // 模式 4 的瓦片边长（米）：一张 tile 覆盖多大世界范围。
     float wave_tile_m = 16.0f;
+};
+
+// 平面反射的输入（由 Renderer 每帧填）：
+//    texture = 倒影目标的颜色纹理（0 = 本帧没渲倒影 ⇒ 退回探针）
+//    vp      = 镜像相机的 VP（把水面世界点投影成倒影贴图 uv；平面镜面下两者精确对应）
+struct WaterSkinReflection {
+    unsigned int texture = 0;
+    float vp[16] = {0};
 };
 
 class WaterSkinRenderer {
@@ -109,10 +126,14 @@ public:
     void Draw(const WaterSkinParams& params, const Camera& cam,
               unsigned int scene_depth_tex, unsigned int sky_env_cube,
               const DirectionalLight* sun, int width, int height,
-              ShaderManager& shader_mgr);
+              ShaderManager& shader_mgr, const WaterSkinReflection& refl);
 
 private:
     unsigned int vao_ = 0;   // 空 VAO（仅用来满足 core profile 的绘制要求）
+    // 1×1 黑贴图：没有倒影时挂在 uReflTex 上。**必须**挂一张完整纹理 ——
+    // 让 sampler 指向一个没有纹理的单元，某些驱动在 draw 时会报 GL_INVALID_OPERATION
+    // （实测 llvmpipe：1282）。
+    unsigned int refl_dummy_tex_ = 0;
     // 波浪法线 flipbook 图集（Init 时烘一次；模式 4 用，其它模式也建好备用 —— 建一次
     // 约 1~2 s/256²×8 帧，留在 Init 里不占每帧成本）。
     WaterNormalTile wave_tile_;

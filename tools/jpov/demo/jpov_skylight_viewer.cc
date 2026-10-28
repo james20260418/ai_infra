@@ -302,6 +302,9 @@ int RunCaptureWater(const std::string& out_dir) {
         float lean_gain = 1.0f;
         // 辉光 A/B：0 = 不覆盖（用面板默认 = 开）、1 = 开、2 = 关。
         int bloom = 0;
+        // 镜面反射来源：-1 = 不覆盖（面板默认 = 探针）、0 = 探针、1 = 平面反射 A、2 = 平面反射 B
+        int refl = -1;
+        float refl_distort = -1.0f;   // <0 = 不覆盖（app 默认）
         // 天光仰角/方位角覆盖（水面观感 90% 来自太阳，验收要能当场扫）。
         std::optional<float> sun_elev_deg;
         std::optional<float> sun_azim_deg;
@@ -389,6 +392,24 @@ int RunCaptureWater(const std::string& out_dir) {
          .sun_elev_deg = 60.0f},
         {.name = "sun_elev80", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
          .sun_elev_deg = 80.0f},
+        // ── 平面反射 A/B/C（实验）：同一机位只换"镜面从哪来" ──
+        //   probe = 128² 天空探针（原行为）
+        //   A     = 平面反射，倒影天空 kFull（**带日盘/日晕**）⇒ 解析太阳项关闭
+        //   B     = 平面反射，倒影天空 kAtmoOnly（不含盘）⇒ 保留解析太阳 + 解析日晕
+        {.name = "refl_probe_sun", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 0},
+        {.name = "refl_A_sun",     .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1},
+        {.name = "refl_A_sun_d15", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1,
+         .refl_distort = 0.15f},
+        {.name = "refl_A_sun_d35", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1,
+         .refl_distort = 0.35f},
+        {.name = "refl_B_sun",     .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 2},
+        // 眼高机位（有桌子和人）：看倒影里到底有没有**物体**。
+        {.name = "refl_probe_eye", .phi = 0.30, .R = 12.0, .refl = 0},
+        {.name = "refl_A_eye",     .phi = 0.30, .R = 12.0, .refl = 1},
+        {.name = "refl_B_eye",     .phi = 0.30, .R = 12.0, .refl = 2},
+        // 掠射机位：看水平线附近的稳定性（平面反射的已知弱项）。
+        {.name = "refl_A_grazing", .phi = 0.10, .R = 14.0, .refl = 1},
+        {.name = "refl_B_grazing", .phi = 0.10, .R = 14.0, .refl = 2},
         {"water_high", 0.62, 2600.0},                                  // 无限平面的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
@@ -410,7 +431,13 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_use_sun_glint_ = (s.sun_glint != 2);
         app.water_lean_glint_    = (s.lean != 2);
         app.water_lean_gain_     = s.lean_gain;
-        app.water_bloom_         = (s.bloom != 2);
+        if (s.bloom != 0) { app.water_bloom_ = (s.bloom != 2); }
+        if (s.refl >= 0) {
+            app.water_refl_mode_ = s.refl;
+        }
+        if (s.refl_distort >= 0.0f) {
+            app.water_refl_distort_ = s.refl_distort;
+        }
         app.deg_.sun_elev_deg    = s.sun_elev_deg.value_or(45.0f);
         app.deg_.sun_azim_deg    = s.sun_azim_deg.value_or(40.0f);
         app.view_ = jpov_viewer::DefaultView();

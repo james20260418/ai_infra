@@ -120,6 +120,15 @@ uniform float uIor;              // 水的折射率（水→空气临界角 = as
 uniform float uMinTransmission;  // 强制透射下限 [0,1]：R 被夹到 ≤ 1−它（实验用，非物理）
 // ── 水上视角的三项（默认全开）──
 uniform samplerCube uEnvCube;    // 天空探针（大气色；镜面天光用）
+// ── 平面反射（实验，2026-10-28）──
+// 倒影 = 用**镜像相机**把不透明场景再画一遍的颜色纹理（含物体、含天空）。
+// 采样是**精确**的：平面镜面下，"eye → P → 反射光线" 与 "镜像 eye → P" 是同一条直线，
+// 所以把水面点 P 用镜像相机的 VP 投影出来的 uv 就是对的位置（平水面零误差）。
+// 有波浪时只能"投影 + 按斜率扰动 uv"（平面反射做不了真卷积），这是这条路的固有近似。
+uniform sampler2D uReflTex;
+uniform mat4  uReflVP;           // 镜像相机的 VP（Proj*View）
+uniform int   uUseReflTex;       // 1 = 用倒影贴图；0 = 用天空探针
+uniform float uReflDistort;      // 波形扰动强度（NDC）
 uniform int   uHasEnvCube;       // 0 = 没有探针 ⇒ 镜面天光退回常量 rim 色
 uniform float uSkyScale;         // 天光反射量 [0,1]
 uniform int   uUseSkyRefl;       // 1 = 镜面天光
@@ -370,7 +379,16 @@ void main() {
                 vec3 rd = reflect(-V, N);
                 rd.y = max(rd.y, 0.0175);
                 rd = normalize(rd);
-                sky = textureLod(uEnvCube, rd, lod).rgb * uSkyScale;
+                if (uUseReflTex == 1) {
+                    // 平面反射：水面点投影 + 斜率扰动（见 uReflTex 的说明）
+                    vec4 rc = uReflVP * vec4(world, 1.0);
+                    vec2 ruv = rc.xy / max(rc.w, 1.0e-6) * 0.5 + 0.5;
+                    ruv += vec2(N.x, N.z) * uReflDistort;
+                    ruv = clamp(ruv, vec2(0.002), vec2(0.998));
+                    sky = textureLod(uReflTex, ruv, lod).rgb * uSkyScale;
+                } else {
+                    sky = textureLod(uEnvCube, rd, lod).rgb * uSkyScale;
+                }
                 // 日晕：与 sky 同款 exp 晕（见 uSunGlowColor 的说明），
                 //   σ 用"未解析斜率方差"加宽 = 把晕与波面斜率分布做卷积
                 //   （与 GGX 的 α² 一个口径，LEAN 增益同样作用在这上面）。

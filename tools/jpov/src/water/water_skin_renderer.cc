@@ -35,6 +35,8 @@ constexpr int kSceneDepthUnit = 0;
 constexpr int kSkyCubeUnit = 1;
 // 波浪法线 flipbook 图集（模式 4）。pass-local。
 constexpr int kWaveTileUnit = 2;
+// 平面反射的倒影颜色（实验）。pass-local。
+constexpr int kReflTexUnit = 3;
 
 }  // namespace
 
@@ -47,6 +49,15 @@ void WaterSkinRenderer::Init() {
     glGenVertexArrays(1, &vao_);
     glBindVertexArray(0);
 
+    // 1×1 黑纹理（见 refl_dummy_tex_ 的说明）。
+    const unsigned char kDummy[4] = {0, 0, 0, 255};
+    glGenTextures(1, &refl_dummy_tex_);
+    glBindTexture(GL_TEXTURE_2D, refl_dummy_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, kDummy);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     // 波浪法线 flipbook（256² × 8 帧 × 16 m tile）**不在这里烘**：
     // 256²/16 m = 6.25 cm/texel 够表现厘米级涟漪，但烘焙 ~60-90 ms + 4.2 MB ——
     // 不用水面的 app 一分钱都不该花（Builder 在首次 Draw 里做，见下）。
@@ -58,6 +69,10 @@ void WaterSkinRenderer::Init() {
 
 void WaterSkinRenderer::Finalize() {
     ReleaseWaterNormalTile(&wave_tile_);
+    if (refl_dummy_tex_ != 0) {
+        glDeleteTextures(1, &refl_dummy_tex_);
+        refl_dummy_tex_ = 0;
+    }
     if (vao_ != 0) {
         glDeleteVertexArrays(1, &vao_);
         vao_ = 0;
@@ -67,7 +82,7 @@ void WaterSkinRenderer::Finalize() {
 void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                              unsigned int scene_depth_tex, unsigned int sky_env_cube,
                              const DirectionalLight* sun, int width, int height,
-                             ShaderManager& shader_mgr) {
+                             ShaderManager& shader_mgr, const WaterSkinReflection& refl) {
     CHECK_NE(scene_depth_tex, 0u) << "WaterSkinRenderer: 缺少场景深度纹理";
     CHECK_NE(vao_, 0u) << "WaterSkinRenderer: 未 Init()";
     CHECK_GT(width, 0);
@@ -196,6 +211,16 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
     glUniform1i(shader_mgr.GetUniform(prog, "uSceneDepth"), kSceneDepthUnit);
 
+    // ── 平面反射（实验）：倒影贴图 + 镜像相机 VP ──
+    glUniform1i(shader_mgr.GetUniform(prog, "uUseReflTex"),
+                (refl.texture != 0) ? 1 : 0);
+    glUniformMatrix4fv(shader_mgr.GetUniform(prog, "uReflVP"), 1, GL_FALSE, refl.vp);
+    glUniform1f(shader_mgr.GetUniform(prog, "uReflDistort"),
+                std::max(params.refl_distort, 0.0f));
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, (refl.texture != 0) ? refl.texture : refl_dummy_tex_);
+    glUniform1i(shader_mgr.GetUniform(prog, "uReflTex"), kReflTexUnit);
+
 
     // 简易透射 = 固定管线 alpha 混合，dst 就是帧缓冲里已有的场景颜色。
     // 深度测试关闭：HDR 目标没有深度附件，FS 里手动比 MRT#1 场景深度。
@@ -213,6 +238,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
     glActiveTexture(GL_TEXTURE1);

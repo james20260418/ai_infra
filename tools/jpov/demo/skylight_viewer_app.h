@@ -127,6 +127,9 @@ public:
     // 不是大气散射（后者是 sky 的 discGlow，已在水皮里单独补过，量级差 3 个数量级）。
     // 水面场景默认开，因为它直接决定"太阳路像不像照片"。
     bool water_bloom_ = true;
+    // 镜面反射来源（实验 A/B）：0 = 天空探针 / 1 = 平面反射带盘（A）/ 2 = 平面反射不含盘（B）
+    int water_refl_mode_ = 0;
+    float water_refl_distort_ = 0.02f;    // 波浪扰动倒影 uv 的强度（NDC）
     // 远距离波浪带限方式（0/1/2/3，见 shader 注释）。面板给个下拉做对比。
     // 面板只暴露模式 4（法线 flipbook 纹理）；0..3 是带限对比用的历史模式，仅 capture 用。
     int water_wave_filter_mode_ = 4;
@@ -280,6 +283,8 @@ public:
             wp.use_sky_reflection = water_use_sky_refl_;
             wp.use_transmission   = water_use_transmit_;
             wp.use_sun_glint      = water_use_sun_glint_;
+            wp.reflection_mode    = water_refl_mode_;
+            wp.refl_distort       = water_refl_distort_;
             wp.use_lean_glint     = water_lean_glint_;
             wp.lean_gain          = water_lean_gain_;
             wp.sky_scale          = 1.0f;
@@ -462,9 +467,14 @@ private:
                             0.0f, 360.0f, 0);
             ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
                             water_row(13.0f), 0.0f, 1.0f, 2);
-            // 两块实现的 A/B：strip 平铺版是有限 quad（老路径），关 = 新水皮 pass（无限平面）。
-            ui_.Checkbox("水面用 strip 平铺版（关 = 新水皮 pass）", &water_use_strip_,
-                         water_row(14.0f));
+            // 镜面反射来源（实验 A/B）：探针 / 平面反射带盘 / 平面反射不含盘
+            static const std::vector<const char*> kReflNames = {
+                "天空探针（128²，原行为）",
+                "平面反射 A：倒影带日盘（关解析太阳）",
+                "平面反射 B：倒影不含盘（保留解析太阳+晕）",
+            };
+            ui_.Combo("镜面反射来源（实验）", &water_refl_mode_, kReflNames,
+                      water_row(14.0f));
             ui_.Text("水面 = 无限平面（逐像素求交，覆盖到地平线）  右键拖动=绕行",
                      water_row(15.0f));
             return;

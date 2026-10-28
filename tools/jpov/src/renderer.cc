@@ -6,6 +6,7 @@
 #include "tools/jpov/src/renderer.h"
 
 #include <algorithm>
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -987,6 +988,217 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     fbo_hdr_h_ = height;
 }
 
+// ---- 平面反射（实验，2026-10-28）----
+
+void Renderer::EnsureReflectionFBO(int width, int height) {
+    if (fbo_refl_w_ == width && fbo_refl_h_ == height && fbo_refl_) return;
+    CHECK_GT(width, 0);
+    CHECK_GT(height, 0);
+    CHECK_LE(width, kMaxFboDim);
+    CHECK_LE(height, kMaxFboDim);
+    DestroyReflectionFBO();
+
+    glGenTextures(1, &color_tex_refl_);
+    glBindTexture(GL_TEXTURE_2D, color_tex_refl_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenTextures(1, &depth_tex_refl_);
+    glBindTexture(GL_TEXTURE_2D, depth_tex_refl_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // MRT#1（场景深度）：与主 HDR FBO 同格式 —— 不透明 pass 的 shader 会**无条件**
+    // 写这个附件，缺了它就是"未定义写入"，宁可多一张 4 字节/像素的纹理。
+    glGenTextures(1, &scene_depth_tex_refl_);
+    glBindTexture(GL_TEXTURE_2D, scene_depth_tex_refl_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0,
+                 GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &fbo_refl_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_refl_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           color_tex_refl_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
+                           scene_depth_tex_refl_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                           depth_tex_refl_, 0);
+    {
+        const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(2, bufs);
+    }
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    CHECK_EQ(status, GL_FRAMEBUFFER_COMPLETE) << "反射 FBO failed, status=" << status;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    fbo_refl_w_ = width;
+    fbo_refl_h_ = height;
+}
+
+void Renderer::DestroyReflectionFBO() {
+    if (fbo_refl_ != 0) { glDeleteFramebuffers(1, &fbo_refl_); fbo_refl_ = 0; }
+    if (color_tex_refl_ != 0) { glDeleteTextures(1, &color_tex_refl_); color_tex_refl_ = 0; }
+    if (depth_tex_refl_ != 0) { glDeleteTextures(1, &depth_tex_refl_); depth_tex_refl_ = 0; }
+    if (scene_depth_tex_refl_ != 0) {
+        glDeleteTextures(1, &scene_depth_tex_refl_);
+        scene_depth_tex_refl_ = 0;
+    }
+    fbo_refl_w_ = 0;
+    fbo_refl_h_ = 0;
+}
+
+namespace {
+
+// 透视投影（列主序，OpenGL 右手系）。与 Primitives3DRenderer::BuildPerspProj 同一套约定。
+void BuildPerspProjLocal(float fov_rad, float aspect, float near_, float far_, float out[16]) {
+    for (int i = 0; i < 16; ++i) out[i] = 0.0f;
+    const float f = 1.0f / std::tan(0.5f * fov_rad);
+    out[0]  = f / aspect;
+    out[5]  = f;
+    out[10] = (far_ + near_) / (near_ - far_);
+    out[11] = -1.0f;
+    out[14] = (2.0f * far_ * near_) / (near_ - far_);
+}
+
+// 斜近裁剪面（Lengyel 2005）：把投影的 near 平面换成任意视空间平面 c（保留 c·v ≥ 0 一侧），
+// 远平面仍映射到 z=w。用于平面反射 —— 不这么干，水下的盒子会出现在倒影里
+// （镜像相机在水下、水面就在它眼前，普通"垂直于视线的 near 平面"挡不住斜向的几何）。
+//
+// 推导（列主序、v_clip = P·v_view）：
+//   原投影  z_clip = A·z_v + B,  w_clip = −z_v
+//   新投影  z'_clip = α·(c·v) − w_clip
+//     · 在裁剪面上 c·v=0 ⇒ z'=−w' （正好落在近平面边界）
+//     · 在远平面中心 v=(0,0,−far,1) ⇒ α = 2·far / (c·v) ⇒ z'=2far−far=far=w' ✓
+//   ⇒ 投影矩阵第 3 行（r=2：m[2],m[6],m[10],m[14]）= α·c − (0,0,−1,0)
+void ApplyObliqueClipPlane(float proj[16], const float c[4], float far_) {
+    const float cdot_far = c[2] * (-far_) + c[3];   // c·(0,0,−far,1)
+    // 裁剪面与远平面平行/退化时不改（否则除零）：退回普通投影，宁可漏一点几何。
+    if (!(std::fabs(cdot_far) > 1.0e-6f)) return;
+    const float alpha = 2.0f * far_ / cdot_far;
+    proj[2]  = alpha * c[0];
+    proj[6]  = alpha * c[1];
+    proj[10] = alpha * c[2] + 1.0f;
+    proj[14] = alpha * c[3];
+}
+
+}  // namespace
+
+void Renderer::RenderReflectionPass(const RenderCommandList& cmds, int width, int height,
+                                    float level_y, int sky_output) {
+    // 尺寸从调用方传：HDR 路径下 fbo_3d_w_ 是 0（那是 LDR 的 Ensure3DFBO 才写的成员）。
+    const int w = width;
+    const int h = height;
+    if (w <= 0 || h <= 0) return;
+    EnsureReflectionFBO(w, h);
+
+    // ── 镜像相机：位置/目标关于 y=level_y 反射，up 的 y 取反 ──
+    const Camera& src = cmds.camera;
+    Camera mcam = src;
+    mcam.position = Vec3f{src.position.x(), 2.0f * level_y - src.position.y(),
+                          src.position.z()};
+    mcam.target = Vec3f{src.target.x(), 2.0f * level_y - src.target.y(), src.target.z()};
+    mcam.up = Vec3f{src.up.x(), -src.up.y(), src.up.z()};
+
+    // ── 视空间裁剪面：世界 y ≥ level_y ⇒ n_v = (side.y, upv.y, −fwd.y) 等 ──
+    // 直接几何换算（不走矩阵转置，避免和 BuildLookAt 的转置存储打交道）：
+    //   view 映射 p → (side·(p−eye), upv·(p−eye), −fwd·(p−eye))
+    Vec3f fwd = mcam.target - mcam.position;
+    const float fl = fwd.Norm();
+    if (fl < 1e-8f) fwd = Vec3f{0.0f, 0.0f, -1.0f};
+    else fwd = Vec3f{fwd.x() / fl, fwd.y() / fl, fwd.z() / fl};
+    Vec3f side{fwd.y() * mcam.up.z() - fwd.z() * mcam.up.y(),
+               fwd.z() * mcam.up.x() - fwd.x() * mcam.up.z(),
+               fwd.x() * mcam.up.y() - fwd.y() * mcam.up.x()};
+    const float sl = side.Norm();
+    if (sl < 1e-8f) side = Vec3f{1.0f, 0.0f, 0.0f};
+    else side = Vec3f{side.x() / sl, side.y() / sl, side.z() / sl};
+    const Vec3f upv{side.y() * fwd.z() - side.z() * fwd.y(),
+                    side.z() * fwd.x() - side.x() * fwd.z(),
+                    side.x() * fwd.y() - side.y() * fwd.x()};
+    // 平面 n_w=(0,1,0), d_w=−level ⇒ n_v = (side.y, upv.y, −fwd.y)，d_v = −n_v·p0_v
+    const float cn[3] = {side.y(), upv.y(), -fwd.y()};
+    const Vec3f p0{0.0f, level_y, 0.0f};
+    const Vec3f d0 = p0 - mcam.position;
+    const float p0v[3] = {side.x() * d0.x() + side.y() * d0.y() + side.z() * d0.z(),
+                          upv.x() * d0.x() + upv.y() * d0.y() + upv.z() * d0.z(),
+                          -(fwd.x() * d0.x() + fwd.y() * d0.y() + fwd.z() * d0.z())};
+    const float cplane[4] = {cn[0], cn[1], cn[2],
+                             -(cn[0] * p0v[0] + cn[1] * p0v[1] + cn[2] * p0v[2])};
+
+    // ── MVP：透视（斜近裁剪面）× 镜像相机的 lookAt ──
+    float proj[16];
+    BuildPerspProjLocal(mcam.fov * 3.14159265358979323846f / 180.0f,
+                        static_cast<float>(w) / static_cast<float>(h),
+                        mcam.near, mcam.far, proj);
+    ApplyObliqueClipPlane(proj, cplane, mcam.far);
+    float view[16];
+    BuildLookAt(mcam.position, mcam.target, mcam.up, view);
+    float mvp[16];
+    RendererMat4Mul(proj, view, mvp);
+
+    // ── 画一遍：清 → 天空 → 不透明 3D ──
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_refl_);
+    glViewport(0, 0, w, h);
+    const GLfloat clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    glClearBufferfv(GL_COLOR, 0, clear_color);
+    const GLfloat clear_depth1[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    glClearBufferfv(GL_COLOR, 1, clear_depth1);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    if (cmds.sky.has_value()) {
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        SkyRenderer::DrawSky(*cmds.sky, mcam, w, h, shader_mgr_,
+                             (sky_output == 1) ? SkyRenderer::SkyOutput::kAtmoOnly
+                                               : SkyRenderer::SkyOutput::kFull);
+    }
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    // 镜像 ⇒ 三角形绕序反转，剔除方向也要翻，否则物体只剩背面。
+    glFrontFace(GL_CW);
+
+    // 不透明内容的命令表：换相机、关掉 tile culling（tile 索引是按主相机建的，
+    // 用镜像投影去查会错位；实验中走"遍历全部光源"的路径）。
+    RenderCommandList mirror_cmds = cmds;
+    mirror_cmds.camera = mcam;
+    mirror_cmds.tile_culling = false;
+    mirror_cmds.pick.enabled = false;
+    if (!cmds.object_use_default_color &&
+        (!cmds.object3d.empty() || !cmds.instanced_object.empty())) {
+        Object3DRenderer::UploadLightData(mirror_cmds, shader_mgr_,
+            DrawObject3DProg(), DrawObject3DProgFull());
+        Object3DRenderer::UploadLightData(mirror_cmds, shader_mgr_,
+            DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
+        InstancedObjectRenderer::UploadLightData(mirror_cmds, shader_mgr_,
+            DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
+        InstancedObjectRenderer::UploadLightData(mirror_cmds, shader_mgr_,
+            DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout());
+    }
+    Draw3DCommands(mirror_cmds, w, h, mvp);
+
+    glFrontFace(GL_CCW);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    std::memcpy(refl_mvp_, mvp, sizeof(float) * 16);
+    refl_valid_ = true;
+}
+
 // ---- Shader program 访问器 ----
 // 通过 ShaderManager 按名字获取。GetOrCreate 幂等：首次调用编译+缓存，
 // 后续直接返回缓存的 program，因此可在 Init 和每次 draw 时安全调用。
@@ -1472,6 +1684,7 @@ void Renderer::Render(const RenderCommandList& cmds,
             DrawShadowPass(cmds, *eff_sun);
         }
 
+
         // ---- 第一步：选渲染目标 FBO 并绘制所有 3D 指令 ----
         // tone_mapping=false：走原 RGBA8 3D FBO（旧行为，字节兼容，零回归）。
         // tone_mapping=true ：走 HDR FBO（RGBA16F 浮点），存下 >1 的 HDR 亮度，
@@ -1495,6 +1708,24 @@ void Renderer::Render(const RenderCommandList& cmds,
         }
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
         glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+
+        // ---- 第 0.9 步：平面反射（实验，2026-10-28）----
+        // 在**主 pass 之前**用镜像相机把"不透明 3D + 天空"再画一遍到独立 FBO；
+        // 水皮按"水面点投影 + 法线扰动"采样它 ⇒ 倒影里有物体、有日盘/日晕，
+        // 且不受 128² 天空探针的分辨率限制（探针仍留给材质 IBL）。
+        //   1（A）：倒影天空 = kFull（带日月盘）⇒ 水皮的解析太阳项关闭（防双计）
+        //   2（B）：倒影天空 = kAtmoOnly（不带盘）⇒ 解析太阳项保留
+        //   0    ：不渲倒影（走探针，原行为）
+        refl_valid_ = false;
+        if (water_skin_.has_value() && water_skin_->reflection_mode != 0) {
+            CHECK(use_hdr) << "平面反射需要 tone_mapping=true（HDR 倒影目标）";
+            RenderReflectionPass(cmds, fbo_3d_w, fbo_3d_h, water_skin_->level_y,
+                                 (water_skin_->reflection_mode == 2) ? 1 : 0);
+            // RenderReflectionPass 改了 FBO / viewport / 绕序 ⇒ 恢复主 pass 的上下文。
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            glFrontFace(GL_CCW);
+        }
 
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_TRUE);
@@ -1920,9 +2151,22 @@ void Renderer::Render(const RenderCommandList& cmds,
                     ws.sun_glow_sigma_rad = cmds.sky->sun_radius * 2.0f;  // 与 discGlow 同款
                     ws.sun_disc_radius_rad = cmds.sky->sun_radius;
                 }
+                // 反射模式 A：倒影天空是 kFull（盘 + 晕都在）⇒ 解析太阳项与解析日晕
+                //   都要关掉，否则同一颗太阳会在水面里出现两次。
+                if (ws.reflection_mode == 1) {
+                    ws.use_sun_glint = false;
+                    ws.sun_glow_color = Color{0.0f, 0.0f, 0.0f, 1.0f};
+                }
+                WaterSkinReflection refl;
+                if (ws.reflection_mode != 0 && refl_valid_) {
+                    refl.texture = color_tex_refl_;
+                    std::memcpy(refl.vp, refl_mvp_, sizeof(refl.vp));
+                } else {
+                    std::memset(refl.vp, 0, sizeof(refl.vp));
+                }
                 water_skin_renderer_.Draw(ws, cam, hdr_scene_depth_tex,
                                           sky_cube, eff_sun ? &*eff_sun : nullptr,
-                                          fbo_3d_w, fbo_3d_h, shader_mgr_);
+                                          fbo_3d_w, fbo_3d_h, shader_mgr_, refl);
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
                                        GL_TEXTURE_2D, scene_depth_tex_hdr_, 0);
                 const GLenum mrt_bufs_ws[2] = {GL_COLOR_ATTACHMENT0,
@@ -2107,9 +2351,14 @@ void Renderer::Render(const RenderCommandList& cmds,
     }
 }
 
-void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h) {
+void Renderer::Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                              const float* mvp_override) {
     // 先用当前 Camera 计算 MVP（View * Proj，不含 Model）
-    Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
+    if (mvp_override != nullptr) {
+        std::memcpy(mvp_, mvp_override, sizeof(float) * 16);
+    } else {
+        Primitives3DRenderer::BuildMVP(cmds.camera, fbo_w, fbo_h, mvp_);
+    }
 
     // 遍历 order，绘制 3D 指令
     for (const auto& [type, idx] : cmds.order) {
@@ -2941,6 +3190,9 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
     // SMAA、以及**所有 2D/UI 绘制**都依赖 `GL_BLEND` 已开（文字/半透明面板靠 alpha 混合）。
     // 后果不是"UI 被辉光处理"，而是**UI 文字的 alpha 被忽略** → 每个字形四边形整块写成
     // 不透明纯白 → 面板看起来糊成一坨白块（"UI 也被辉光了"）。
+    // 记住 push 时的 FBO：pop 必须配同一个（见函数末尾的说明）。
+    GLint bloom_push_fbo_ = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &bloom_push_fbo_);
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -3015,11 +3267,18 @@ unsigned int Renderer::DrawBloomPass(const RenderCommandList& cmds,
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // ⚠️ `glPushAttrib(GL_COLOR_BUFFER_BIT)` 存的是**当前 FBO 的 draw buffer 列表**
+    //    （本 pass 进入时是 HDR FBO：COL0+COL1）。`glPopAttrib()` 必须配合同一个 FBO
+    //    —— 若先绑回默认帧缓冲再 pop，就会把 "COLOR_ATTACHMENT0/1" 还原到默认 FBO 上，
+    //    驱动报 `GL_INVALID_OPERATION in glDrawBuffers(unsupported buffer
+    //    GL_COLOR_ATTACHMENT0)`（1282）。这个错以前没人发现，因为 bloom 只在粒子
+    //    viewer 里开过；水面场景一开 bloom 就暴露了（2026-10-28）。
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(0);
-    glPopAttrib();   // 还原 enable / blend / depth-mask（见函数开头的说明）
+    glBindFramebuffer(GL_FRAMEBUFFER, bloom_push_fbo_);
+    glPopAttrib();   // 还原 enable / blend / depth-mask / draw buffers（见上）
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     // 返回加回辉光后的 HDR 纹理，作为 tone map 输入。
     return bloom_work_tex_;

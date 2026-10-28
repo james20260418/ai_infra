@@ -157,6 +157,15 @@ private:
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
 
+    // ── 平面反射（实验，2026-10-28）──
+    // 与 HDR FBO 同格式同尺寸的一张离屏目标：颜色 RGBA16F + MRT 场景深度 R32F + 深度 24。
+    // 水面按"镜像相机再画一遍不透明内容"取反射色（见 RenderReflectionPass）。
+    unsigned int fbo_refl_ = 0, color_tex_refl_ = 0, depth_tex_refl_ = 0;
+    unsigned int scene_depth_tex_refl_ = 0;
+    int fbo_refl_w_ = 0, fbo_refl_h_ = 0;
+    float refl_mvp_[16] = {0};      // 镜像相机的 VP（水皮用它把水面点投到倒影贴图）
+    bool refl_valid_ = false;       // 本帧是否真的渲了倒影（否则水皮退回探针）
+
     // ── 透明累积缓冲（TAB, Transparency Accumulation Buffer）──
     // 「TAB」= 一次 OIT 用的多附件透明累积缓冲（accum/reveal/additive），被粒子 / 体积火 /
     // 条带共用同一套代数（命名与各环节合法性见 docs/jpov_volumetric_fire_design.md §11–§12）。
@@ -192,7 +201,20 @@ private:
     void DestroyShadowFBO();
     void CompileShaders();
     void CreateStreamVBO();
-    void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h);
+    // mvp_override：非空时用调用方算好的 VP（平面反射要用"斜近裁剪面"的投影，
+    // 不能用 BuildMVP 的常规投影重建）。空 = 原行为（自己 BuildMVP）。
+    void Draw3DCommands(const RenderCommandList& cmds, int fbo_w, int fbo_h,
+                        const float* mvp_override = nullptr);
+
+    // ---- 平面反射（实验）----
+    void EnsureReflectionFBO(int w, int h);
+    void DestroyReflectionFBO();
+    // 用镜像相机把"不透明 3D + 天空"再画一遍到 fbo_refl_。
+    //   level_y     : 水面世界高度（镜像平面）
+    //   sky_output  : 0=kFull（倒影带日月盘，A 组）/ 1=kAtmoOnly（不含盘，B 组）
+    // 近裁剪面被改成**水面本身**（斜近裁剪面），水下几何因此不会漏进倒影。
+    void RenderReflectionPass(const RenderCommandList& cmds, int width, int height,
+                              float level_y, int sky_output);
     void DrawShadowPass(const RenderCommandList& cmds, const DirectionalLight& sun);
 
     // 拾取：color-ID pass。cmds.pick.enabled 时，把 picking_id>0 的物体用
