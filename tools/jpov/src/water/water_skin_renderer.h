@@ -90,6 +90,11 @@ struct WaterSkinParams {
     Color sun_glow_color{0.0f, 0.0f, 0.0f, 1.0f};
     float sun_glow_sigma_rad = 0.0188f;   // σ = 2 × 盘半径（sky 的 discGlow width=2.0）
     float sun_disc_radius_rad = 0.0094f;  // 盘角半径（晕从盘边开始）
+    // 晕的**形状**：σ 再乘 size_scale；水平/垂直各用 σ×aspect / σ 两个轴 ⇒"长宽"可分别调。
+    float sun_halo_size = 1.0f;           // 整体大小 [0.2, 8]
+    float sun_halo_aspect = 1.0f;         // 水平/垂直 = aspect（<1 = 竖长，>1 = 横长）
+    // 晕的**方向**：日盘可见方向（低仰角时 != 真实 sun_dir，见 SkyCommand::SunDiscDirection）。
+    Vec3f sun_halo_dir{0.0f, 1.0f, 0.0f};
     // 远距离波浪带限方式（对比/教学用，见 water_skin_shader.h 的 WaveNormal）：
     //   0 = 不过滤（aliasing 基线） 1 = 硬关八度+归一化 2 = 逐八度 sinc（IQ）
     //   3 = sinc + 方差转粗糙度    4 = **法线 flipbook 纹理 + 硬件 mip**

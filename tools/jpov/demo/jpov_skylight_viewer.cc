@@ -304,6 +304,8 @@ int RunCaptureWater(const std::string& out_dir) {
         int bloom = 0;
         // 镜面反射来源：-1 = 不覆盖（面板默认 = 探针）、0 = 探针、1 = 平面反射 A、2 = 平面反射 B
         int refl = -1;
+        float halo_size = -1.0f;     // <0 = 不覆盖
+        float halo_aspect = -1.0f;
         float refl_distort = -1.0f;   // <0 = 不覆盖（app 默认）
         // 天光仰角/方位角覆盖（水面观感 90% 来自太阳，验收要能当场扫）。
         std::optional<float> sun_elev_deg;
@@ -410,6 +412,35 @@ int RunCaptureWater(const std::string& out_dir) {
         // 掠射机位：看水平线附近的稳定性（平面反射的已知弱项）。
         {.name = "refl_A_grazing", .phi = 0.10, .R = 14.0, .refl = 1},
         {.name = "refl_B_grazing", .phi = 0.10, .R = 14.0, .refl = 2},
+        {.name = "sweep_b_40", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2},
+        {.name = "sweep_b_80", .phi = 0.30, .R = 12.0, .theta_deg = 80.0f, .refl = 2},
+        {.name = "sweep_b_120", .phi = 0.30, .R = 12.0, .theta_deg = 120.0f, .refl = 2},
+        {.name = "sweep_b_160", .phi = 0.30, .R = 12.0, .theta_deg = 160.0f, .refl = 2},
+        {.name = "sweep_b_200", .phi = 0.30, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "sweep_b_240", .phi = 0.30, .R = 12.0, .theta_deg = 240.0f, .refl = 2},
+        {.name = "sweep_b_280", .phi = 0.30, .R = 12.0, .theta_deg = 280.0f, .refl = 2},
+        {.name = "sweep_b_320", .phi = 0.30, .R = 12.0, .theta_deg = 320.0f, .refl = 2},
+        {.name = "sweep_b_360", .phi = 0.30, .R = 12.0, .theta_deg = 360.0f, .refl = 2},
+        {.name = "swb_1", .phi = 0.2f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "swb_3", .phi = 0.45f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "swb_5", .phi = 0.8f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "swb_7", .phi = 1.2f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "seq_1", .phi = 0.30, .R = 12.0, .theta_deg = 192.0f, .refl = 2},
+        {.name = "seq_3", .phi = 0.30, .R = 12.0, .theta_deg = 196.0f, .refl = 2},
+        {.name = "seq_5", .phi = 0.30, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
+        {.name = "seq_7", .phi = 0.30, .R = 12.0, .theta_deg = 204.0f, .refl = 2},
+        {.name = "seq_9", .phi = 0.30, .R = 12.0, .theta_deg = 208.0f, .refl = 2},
+        {.name = "seq_11", .phi = 0.30, .R = 12.0, .theta_deg = 212.0f, .refl = 2},
+        // 朝向验证：左右各一根彩色柱（红=+X、蓝=−X），看倒影是否与本体同侧
+        // ── 日晕参数 A/B（同机位；size / aspect 是 Danis 要的"长宽"）──
+        //   掠射机位（F≈1）才看得见晕；size=1/aspect=1 是默认（σ=2×盘半径）。
+        {.name = "halo_def",   .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2},
+        {.name = "halo_size4", .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
+         .halo_size = 4.0f},
+        {.name = "halo_wide",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
+         .halo_size = 4.0f, .halo_aspect = 3.0f},
+        {.name = "halo_tall",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
+         .halo_size = 4.0f, .halo_aspect = 0.3f},
         {"water_high", 0.62, 2600.0},                                  // 无限平面的尺度
         // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
@@ -438,6 +469,8 @@ int RunCaptureWater(const std::string& out_dir) {
         if (s.refl_distort >= 0.0f) {
             app.water_refl_distort_ = s.refl_distort;
         }
+        if (s.halo_size > 0.0f) { app.water_halo_size_ = s.halo_size; }
+        if (s.halo_aspect > 0.0f) { app.water_halo_aspect_ = s.halo_aspect; }
         app.deg_.sun_elev_deg    = s.sun_elev_deg.value_or(45.0f);
         app.deg_.sun_azim_deg    = s.sun_azim_deg.value_or(40.0f);
         app.view_ = jpov_viewer::DefaultView();

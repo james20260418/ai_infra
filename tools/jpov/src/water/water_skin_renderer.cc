@@ -163,6 +163,12 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 std::max(params.sun_glow_sigma_rad, 1.0e-5f));
     glUniform1f(shader_mgr.GetUniform(prog, "uSunDiscRadius"),
                 std::max(params.sun_disc_radius_rad, 0.0f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uHaloSize"),
+                std::max(params.sun_halo_size, 0.05f));
+    glUniform1f(shader_mgr.GetUniform(prog, "uHaloAspect"),
+                std::max(params.sun_halo_aspect, 0.05f));
+    glUniform3f(shader_mgr.GetUniform(prog, "uSunHaloDir"), params.sun_halo_dir.x(),
+                params.sun_halo_dir.y(), params.sun_halo_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uLeanGain"),
                 params.use_lean_glint ? std::max(params.lean_gain, 0.0f) : 0.0f);
     if (sun != nullptr) {

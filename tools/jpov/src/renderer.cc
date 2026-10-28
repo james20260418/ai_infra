@@ -1107,6 +1107,10 @@ void Renderer::RenderReflectionPass(const RenderCommandList& cmds, int width, in
     // ── 镜像相机：位置/目标关于 y=level_y 反射，up 的 y 取反 ──
     const Camera& src = cmds.camera;
     Camera mcam = src;
+    // ⭐ 倒影相机必须**比主相机看得更宽**：镜子能看到主视野之外的物体（比如侧后方的东西
+    //    映在脚前的水面上）。用和主相机一样的 FOV，那些物体会在"越过主视野边界"的瞬间
+    //    从倒影里消失（R 突变）。放宽 1.5×（上限 160°）后，这个边界被推到几乎看不到。
+    mcam.fov = std::min(160.0f, src.fov * 1.5f);
     mcam.position = Vec3f{src.position.x(), 2.0f * level_y - src.position.y(),
                           src.position.z()};
     mcam.target = Vec3f{src.target.x(), 2.0f * level_y - src.target.y(), src.target.z()};
@@ -2147,9 +2151,18 @@ void Renderer::Render(const RenderCommandList& cmds,
                 //   否则"水面反射的天空"和"看见的天空"不是同一个天。
                 WaterSkinParams ws = *water_skin_;
                 if (cmds.sky.has_value()) {
-                    ws.sun_glow_color     = cmds.sky->SunGlowColor();
+                    // 晕的强度跟**太阳直射光**的标定同步（同一束光散射出来的）：
+                    //   SunGlowIntensityScale() = 当前 DNI 透过率 / 天顶 DNI 透过率
+                    //   ⇒ 日落时晕跟着暗，不会"天黑了还挂一圈亮晕"。
+                    const float glow_scale = cmds.sky->SunGlowIntensityScale();
+                    Color gc = cmds.sky->SunGlowColor();
+                    ws.sun_glow_color = Color{gc.r * glow_scale, gc.g * glow_scale,
+                                              gc.b * glow_scale, 1.0f};
                     ws.sun_glow_sigma_rad = cmds.sky->sun_radius * 2.0f;  // 与 discGlow 同款
                     ws.sun_disc_radius_rad = cmds.sky->sun_radius;
+                    // 晕跟着**盘**走（低仰角时盘比真实方向更早压向地平线）——
+                    // 用 SkyCommand::SunDiscDirection()，与 sky shader 的 discDirRemap 同源。
+                    ws.sun_halo_dir = cmds.sky->SunDiscDirection();
                 }
                 // 反射模式 A：倒影天空是 kFull（盘 + 晕都在）⇒ 解析太阳项与解析日晕
                 //   都要关掉，否则同一颗太阳会在水面里出现两次。

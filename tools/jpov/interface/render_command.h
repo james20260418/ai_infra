@@ -1267,6 +1267,40 @@ struct SkyCommand {
                      1.0f};
     }
 
+    // 日盘的**可见方向**（= 天光 shader 里 discDirRemap 的结果）。
+    // 低仰角时盘会比真实方向更早压向地平线（sun_set_angle / sun_set_angle_ratio），
+    // 太阳的"晕"跟着盘走 —— 否则日落后"光已沉下去、晕还挂在天上"（Danis 2026-10-28 抓到）。
+    Vec3f SunDiscDirection() const {
+        const Vec3f d = sun_dir.Unit();
+        const float elev = std::asin(std::clamp(d.y(), -1.0f, 1.0f));
+        const float rad2deg = 180.0f / static_cast<float>(M_PI);
+        float elev_deg = elev * rad2deg;
+        if (elev_deg < sun_set_start_angle) {
+            elev_deg = sun_set_start_angle +
+                       sun_set_angle_ratio * (elev_deg - sun_set_start_angle);
+        }
+        const float disc_elev = elev_deg / rad2deg;
+        const float sy = std::sin(disc_elev);
+        const float sh = std::sqrt(std::max(1.0f - sy * sy, 0.0f));
+        const float hlen = std::sqrt(d.x() * d.x() + d.z() * d.z());
+        if (hlen > 1.0e-6f) {
+            return Vec3f{d.x() / hlen * sh, sy, d.z() / hlen * sh};
+        }
+        return Vec3f{0.0f, sy, 0.0f};
+    }
+
+    // 太阳"晕"强度相对**天顶正午**的比例 = 直射光 DNI 的透过率比。
+    // 依据：太阳多亮是**标定过**的（SunDirectionalIntensity = midday × DNI factor × 浊度衰减），
+    // 晕是由同一束直射日光散射出来的 ⇒ 用它同步衰减，日落时晕跟着暗下去（同一束物理光）。
+    float SunGlowIntensityScale() const {
+        const Vec3f d = sun_dir.Unit();
+        const float elev_deg = std::asin(std::clamp(d.y(), -1.0f, 1.0f)) *
+                               (180.0f / static_cast<float>(M_PI));
+        const float ref = DniFactorFromElevDeg(90.0f);
+        if (!(ref > 1.0e-6f)) return 0.0f;
+        return DniFactorFromElevDeg(elev_deg) / ref;
+    }
+
     // 太阳"晕"（大气 Mie 前向散射辉光）的**峰值色** —— 与 sky shader 里
     // `sun_glow_contrib = sun_body_color × uSunGlow` 逐项同源：
     //   = ColorTempToLinear(仰角色温) × sun_glow × daylight_season × intensity

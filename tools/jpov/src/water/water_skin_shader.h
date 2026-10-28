@@ -143,6 +143,9 @@ uniform vec3  uSunDir;           // 指向太阳的世界方向（单位向量�
 uniform vec3  uSunGlowColor;
 uniform float uSunGlowSigma;     // 晕的 σ（弧度）
 uniform float uSunDiscRadius;    // 盘角半径（弧度）：晕从盘边开始
+uniform vec3  uSunHaloDir;       // **日盘可见方向**（低仰角时 != uSunDir，跟 sky 的盘同步）
+uniform float uHaloSize;         // 晕整体大小倍数
+uniform float uHaloAspect;       // 水平/垂直（<1 竖长，>1 横长）
 uniform vec3  uSunColor;         // 太阳直射色（线性 HDR，已乘 intensity）
 // LEAN 高光补偿：把**带限丢掉的斜率方差**并进太阳高光波瓣（波瓣变宽、峰值下降、
 // 能量不凭空消失）。0 = 关（远处高光会"变软消失"）；1 = 物理量；>1 = 观感加强。
@@ -384,8 +387,16 @@ void main() {
                     vec4 rc = uReflVP * vec4(world, 1.0);
                     vec2 ruv = rc.xy / max(rc.w, 1.0e-6) * 0.5 + 0.5;
                     ruv += vec2(N.x, N.z) * uReflDistort;
-                    ruv = clamp(ruv, vec2(0.002), vec2(0.998));
-                    sky = textureLod(uReflTex, ruv, lod).rgb * uSkyScale;
+                    // ⭐ 覆盖度：倒影贴图**拍不到**的地方（投影出界 / 贴边）不能用 clamp 硬拽边
+                    //    上的像素 —— 那会让物体的倒影在"离开倒影相机视野"的瞬间整块消失
+                    //    （T 是菲涅耳渐变、R 却是硬切，2026-10-28 Danis 抓到的突变）。
+                    //    做法：按到边框的距离平滑淡回**探针**，两边都是连续函数。
+                    vec2 edge = min(ruv, vec2(1.0) - ruv);
+                    float cov = smoothstep(0.0, 0.06, min(edge.x, edge.y));
+                    vec3 refl = textureLod(uReflTex, clamp(ruv, vec2(0.002), vec2(0.998)),
+                                           lod).rgb;
+                    vec3 probe = textureLod(uEnvCube, rd, lod).rgb;
+                    sky = mix(probe, refl, cov) * uSkyScale;
                 } else {
                     sky = textureLod(uEnvCube, rd, lod).rgb * uSkyScale;
                 }
@@ -393,10 +404,25 @@ void main() {
                 //   σ 用"未解析斜率方差"加宽 = 把晕与波面斜率分布做卷积
                 //   （与 GGX 的 α² 一个口径，LEAN 增益同样作用在这上面）。
                 if (uSunGlowColor != vec3(0.0)) {
-                    float ang = acos(clamp(dot(rd, uSunDir), -1.0, 1.0));
-                    float d = max(ang - uSunDiscRadius, 0.0);
-                    float sig2 = uSunGlowSigma * uSunGlowSigma + lean_var;
-                    sky += uSunGlowColor * exp(-d * d / (2.0 * sig2)) * uSkyScale;
+                    // 角域各向异性：在"以日盘方向为极轴"的切平面里分解水平/垂直偏移。
+                    vec3 hd = normalize(uSunHaloDir);
+                    vec3 up_ref = (abs(hd.y) > 0.98) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+                    vec3 ht = normalize(cross(hd, up_ref));       // 水平轴（东西向）
+                    vec3 hb = cross(hd, ht);                       // 垂直轴（上下向）
+                    vec3 dv = rd - hd * dot(rd, hd);               // 垂直于极轴的偏移
+                    float ang_h = dot(dv, ht);
+                    float ang_v = dot(dv, hb);
+                    float sig0 = uSunGlowSigma * uHaloSize;
+                    float sig_h = sig0 * uHaloAspect;
+                    float sig_v = sig0;
+                    float sig_h2 = sig_h * sig_h + lean_var;
+                    float sig_v2 = sig_v * sig_v + lean_var;
+                    // 盘边的扣除按径向角算（各向异性下沿椭圆近似为"径向 - 盘半径"）
+                    float ang = acos(clamp(dot(rd, hd), -1.0, 1.0));
+                    float k = max(ang - uSunDiscRadius, 0.0) / max(ang, 1.0e-5);
+                    float e = exp(-(ang_h * ang_h * k * k) / (2.0 * sig_h2)
+                                  -(ang_v * ang_v * k * k) / (2.0 * sig_v2));
+                    sky += uSunGlowColor * e * uSkyScale;
                 }
             } else {
                 sky = uRimColor;      // 没有探针：退回常量色（旧行为）

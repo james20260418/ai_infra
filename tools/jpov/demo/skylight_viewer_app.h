@@ -127,6 +127,8 @@ public:
     // 不是大气散射（后者是 sky 的 discGlow，已在水皮里单独补过，量级差 3 个数量级）。
     // 水面场景默认开，因为它直接决定"太阳路像不像照片"。
     bool water_bloom_ = true;
+    float water_halo_size_ = 1.0f;        // 日晕整体大小倍数
+    float water_halo_aspect_ = 1.0f;      // 日晕 水平/垂直
     // 镜面反射来源（实验 A/B）：0 = 天空探针 / 1 = 平面反射带盘（A）/ 2 = 平面反射不含盘（B）
     int water_refl_mode_ = 0;
     float water_refl_distort_ = 0.02f;    // 波浪扰动倒影 uv 的强度（NDC）
@@ -284,6 +286,8 @@ public:
             wp.use_transmission   = water_use_transmit_;
             wp.use_sun_glint      = water_use_sun_glint_;
             wp.reflection_mode    = water_refl_mode_;
+            wp.sun_halo_size      = water_halo_size_;
+            wp.sun_halo_aspect    = water_halo_aspect_;
             wp.refl_distort       = water_refl_distort_;
             wp.use_lean_glint     = water_lean_glint_;
             wp.lean_gain          = water_lean_gain_;
@@ -439,34 +443,26 @@ private:
                                     {kFullWidth, kRowH}};
             };
             // 天光仰角：水面观感 90% 来自太阳，这一根必须能当场拨。
-            // 方位角**不上面板**（Danis 2026-10-28：简单 UI 就够）—— 高光要落进画面时
-            // 用 capture 的 theta_deg / sun_azim 组合，交互时不折腾它。
-            ui_.SliderFloat("天光仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
-                            water_row(1.0f), -90.0f, 90.0f, 0);
-            // LEAN 高光补偿：带限/mip 把斜率平均掉 ⇒ 远处高光会"变软消失"；
-            // 补偿 = 把丢掉的斜率方差并进 GGX 的 α²（波瓣变宽、变钝、能量守恒）。
-            ui_.Checkbox("LEAN 高光补偿（方差→波瓣+探针 mip）", &water_lean_glint_,
-                         water_row(2.0f));
-            ui_.SliderFloat("LEAN 补偿增益 [0,4]", &water_lean_gain_, water_row(3.0f),
-                            0.0f, 4.0f, 2);
-            // 水上视角三项（默认全开）：关掉任一项就能看出它贡献了什么。
-            ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(4.0f));
-            ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(5.0f));
-            ui_.Checkbox("太阳高光（GGX×F）", &water_use_sun_glint_, water_row(6.0f));
-            ui_.Checkbox("Bloom 辉光（太阳路的晕）", &water_bloom_, water_row(7.0f));
-            // 界面权重：n 从 1.333 往 1 拉 ⇒ 临界角推向 90°、R 整体下降 ⇒ 灰区逐渐变回透射。
-            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(8.0f),
-                            1.0f, 1.6f, 3);
-            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(9.0f),
-                            0.0f, 6.2831853f, 2);
-            ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_,
-                            water_row(10.0f), 0.0f, 20.0f, 1);
-            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(11.0f),
-                            0.05f, 20.0f, 2);
-            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(12.0f),
-                            0.0f, 360.0f, 0);
-            ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_,
-                            water_row(13.0f), 0.0f, 1.0f, 2);
+            // 方位角**不上面板**（Danis 2026-10-28：简单 UI 就够）。
+            ui_.SliderFloat("天光仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg, water_row(1), -90.0f, 90.0f, 0);
+            // LEAN 高光补偿：带限/mip 把斜率平均掉 ⇒ 远处高光会"变软消失"。
+            ui_.Checkbox("LEAN 高光补偿（方差→波瓣+探针 mip）", &water_lean_glint_, water_row(2));
+            ui_.SliderFloat("LEAN 补偿增益 [0,4]", &water_lean_gain_, water_row(3), 0.0f, 4.0f, 2);
+            // 水上视角三项（默认全开）。
+            ui_.Checkbox("镜面天光（反射探针）", &water_use_sky_refl_, water_row(4));
+            ui_.Checkbox("水下透射（关=不透明本体色）", &water_use_transmit_, water_row(5));
+            ui_.Checkbox("太阳高光（GGX×F）", &water_use_sun_glint_, water_row(6));
+            // 日晕形状：大小 × 长宽比（<1 竖长 / >1 横长），与 sky 的 discGlow 同一套公式。
+            ui_.SliderFloat("日晕 大小 [0.2,8]", &water_halo_size_, water_row(7), 0.2f, 8.0f, 2);
+            ui_.SliderFloat("日晕 长宽比 [0.2,5]", &water_halo_aspect_, water_row(8), 0.2f, 5.0f, 2);
+            ui_.Checkbox("Bloom 辉光（太阳路的晕）", &water_bloom_, water_row(9));
+            // 界面权重。
+            ui_.SliderFloat("水 n（折射率，1=空气）", &water_ior_, water_row(10), 1.0f, 1.6f, 3);
+            ui_.SliderFloat("水纹相位 rad", &water_wave_phase_, water_row(11), 0.0f, 6.2831853f, 2);
+            ui_.SliderFloat("水纹波幅 °(最大斜率)", &water_wave_slope_deg_, water_row(12), 0.0f, 20.0f, 1);
+            ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(13), 0.05f, 20.0f, 2);
+            ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(14), 0.0f, 360.0f, 0);
+            ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_, water_row(15), 0.0f, 1.0f, 2);
             // 镜面反射来源（实验 A/B）：探针 / 平面反射带盘 / 平面反射不含盘
             static const std::vector<const char*> kReflNames = {
                 "天空探针（128²，原行为）",
@@ -474,9 +470,9 @@ private:
                 "平面反射 B：倒影不含盘（保留解析太阳+晕）",
             };
             ui_.Combo("镜面反射来源（实验）", &water_refl_mode_, kReflNames,
-                      water_row(14.0f));
+                      water_row(16.0f));
             ui_.Text("水面 = 无限平面（逐像素求交，覆盖到地平线）  右键拖动=绕行",
-                     water_row(15.0f));
+                     water_row(17.0f));
             return;
         }
 
