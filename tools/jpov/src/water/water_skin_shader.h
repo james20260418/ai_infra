@@ -403,8 +403,21 @@ void main() {
                     //    做法：按到边框的距离平滑淡回**探针**，两边都是连续函数。
                     vec2 edge = min(ruv, vec2(1.0) - ruv);
                     float cov = smoothstep(0.0, 0.06, min(edge.x, edge.y));
-                    vec3 refl = textureLod(uReflTex, clamp(ruv, vec2(0.002), vec2(0.998)),
-                                           lod).rgb;
+                    // ⭐ 抗马赛克：倒影是**场景图**，一个像素在它上面可能跨几十个 texel
+                    //    （掠射 + 斜率扰动）⇒ 单点采样必然马赛克，且相位一动就"一闪一闪"、
+                    //    高光能量不守恒（2026-10-28 Danis 报的现象）。
+                    //    做法：用 `fwidth(ruv)` 拿到像素足迹，做 4 抽头旋转网格（= 手动 box）；
+                    //    LEAN 的粗糙度 lod 换算成 uv 偏移后并进同一个足迹。
+                    //    （不用 mip 链：llvmpipe 上 RGBA16F + glGenerateMipmap 会把整帧画黑。）
+                    vec2 texel = 1.0 / vec2(textureSize(uReflTex, 0));
+                    vec2 rough = texel * (exp2(lod) - 1.0) * 0.5;   // 粗糙度要的额外模糊
+                    vec2 off = max(fwidth(ruv), rough) * 0.5;
+                    vec2 ru = clamp(ruv, vec2(0.002), vec2(0.998));
+                    vec3 refl = 0.25 * (
+                        texture(uReflTex, clamp(ru + vec2( off.x,  off.y), vec2(0.002), vec2(0.998))).rgb +
+                        texture(uReflTex, clamp(ru + vec2(-off.x,  off.y), vec2(0.002), vec2(0.998))).rgb +
+                        texture(uReflTex, clamp(ru + vec2( off.x, -off.y), vec2(0.002), vec2(0.998))).rgb +
+                        texture(uReflTex, clamp(ru + vec2(-off.x, -off.y), vec2(0.002), vec2(0.998))).rgb);
                     vec3 probe = textureLod(uEnvCube, rd, lod).rgb;
                     sky = mix(probe, refl, cov) * uSkyScale;
                 } else {

@@ -355,6 +355,22 @@ int RunCaptureWater(const std::string& out_dir) {
          .sun_elev_deg = -6.0f},
         {.name = "night_high_moon", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f,
          .sun_elev_deg = -40.0f},
+        // ── Danis 14:32 报点复现（HUD 给出：φ=+7.1° θ=−112.5° R=9.5；φ=+19.8° θ=+65.8° R=4.75）──
+        {.name = "rep1", .phi = 0.1239, .R = 9.5, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "rep1_noglint", .phi = 0.1239, .R = 9.5, .sun_glint = 2,
+         .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "rep2", .phi = 0.3456, .R = 4.75, .theta_deg = 65.8f, .sun_elev_deg = 3.5f},
+        {.name = "rep2_noglint", .phi = 0.3456, .R = 4.75, .sun_glint = 2,
+         .theta_deg = 65.8f, .sun_elev_deg = 3.5f},
+        // 相位扫描（同一机位，验"高光能量是否守恒/是否闪"）
+        {.name = "ph0", .phi = 0.1239, .R = 9.5, .wave_phase = 0.00f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph1", .phi = 0.1239, .R = 9.5, .wave_phase = 0.04f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph2", .phi = 0.1239, .R = 9.5, .wave_phase = 0.08f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph3", .phi = 0.1239, .R = 9.5, .wave_phase = 0.12f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph4", .phi = 0.1239, .R = 9.5, .wave_phase = 0.16f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph5", .phi = 0.1239, .R = 9.5, .wave_phase = 0.20f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph6", .phi = 0.1239, .R = 9.5, .wave_phase = 0.24f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
+        {.name = "ph7", .phi = 0.1239, .R = 9.5, .wave_phase = 0.28f, .theta_deg = -112.5f, .sun_elev_deg = 6.9f},
         // 尺度（无限平面）
         {"water_high", 0.62, 2600.0},
         // 模型场景（水面场景互斥的对照）

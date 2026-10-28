@@ -932,6 +932,9 @@ void Renderer::EnsureHDRFBO(int width, int height) {
     glBindTexture(GL_TEXTURE_2D, color_tex_hdr_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
                  GL_RGBA, GL_FLOAT, nullptr);
+    // ⭐ 倒影是**全分辨率场景图**，用"投影 + 斜率扰动"采样时一个像素可能跨几十个 texel
+    //    ⇒ 必须有 mip 链，否则就是马赛克/闪烁（2026-10-28 Danis 报的"日晕处有马赛克 +
+    //    拖相位时一闪一闪、高光能量不守恒"，根因都是这个采样 aliasing）。
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
