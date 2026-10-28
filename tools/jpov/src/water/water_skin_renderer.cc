@@ -171,6 +171,17 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                 params.sun_halo_dir.y(), params.sun_halo_dir.z());
     glUniform1f(shader_mgr.GetUniform(prog, "uLeanGain"),
                 params.use_lean_glint ? std::max(params.lean_gain, 0.0f) : 0.0f);
+    // ⚠️ 方向与颜色必须**分开**处理：方向可能来自"可见盘"（has_glint_dir），
+    //    但**能量永远来自平行光**。曾经把颜色写在 `else if` 分支里 ⇒ B 路线下
+    //    uSunColor 一直是 0 ⇒ 解析高光整项失效（2026-10-28 Danis 一眼看出来：
+    //    "B 下的解析高光没了"）。
+    if (sun == nullptr) {
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"), 0.0f, 0.0f, 0.0f);
+    } else {
+        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"),
+                    sun->color.r * sun->intensity, sun->color.g * sun->intensity,
+                    sun->color.b * sun->intensity);
+    }
     if (params.has_glint_dir) {
         const Vec3f g = params.glint_dir;
         const float gl = g.Norm();
@@ -186,12 +197,8 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
                                                  to_sun.z() / len}
                                         : Vec3f{0.0f, 1.0f, 0.0f};
         glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"), dir.x(), dir.y(), dir.z());
-        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"),
-                    sun->color.r * sun->intensity, sun->color.g * sun->intensity,
-                    sun->color.b * sun->intensity);
     } else {
         glUniform3f(shader_mgr.GetUniform(prog, "uSunDir"), 0.0f, 1.0f, 0.0f);
-        glUniform3f(shader_mgr.GetUniform(prog, "uSunColor"), 0.0f, 0.0f, 0.0f);
     }
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, sky_env_cube);
