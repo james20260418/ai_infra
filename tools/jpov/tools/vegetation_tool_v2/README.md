@@ -441,6 +441,16 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 >
 > 想对比「锁相 vs 去相位」：同上加 `--wind-phase-span 0`（25 份完全同相）。
 > 软件光栅下卡就先 `--shadow-cascades 1`（或 `--forest-grid 3`）。
+>
+> **密集森林用游戏档**（`{oak,pine,fir}_game.vegshape`，约 5000 三角/棵 ⇒ 25 棵才 12 万三角）：
+> ```bash
+> ./jpov_vegetation_v2_viewer --shape shapes/oak_game.vegshape --leaf leaf/willow_leaf.png \
+>     --leaf-black 30 --bark bark/bark001 --bake shots/oak_game.glb
+> ./jpov_vegetation_v2_viewer --glb shots/oak_game.glb --forest --forest-grid 4 --forest-spacing 11
+> ```
+> ⚠️ 间距 0 = 自动（1.15 × 水平尺寸、上限 8.5 m）。**叶冠比包围盒更宽，自动值一定偏挤**
+> —— 实测 oak_game 5×5 自动间距会糊成一片树墙，`--forest-spacing 11` 才数得清每棵。
+> 地面 quad 是 40×40 m：`(N-1)/2 × 间距 ≲ 18 m` 以内树心都还站在地面上。
 
 交互：左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）；
 `[` `]` 调最大层级、`P` 打印相机、`H` 打印叶卡帮助（各 type 的 `anchor_mode` / 推荐宽高比）。
