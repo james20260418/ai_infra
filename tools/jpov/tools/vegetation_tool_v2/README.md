@@ -404,7 +404,6 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `--bark <dir>` | 树皮材质目录；省略 = level 棕色 |
 | `--leaf <png>` / `--leaf2 <png>` | 叶卡素材；`leaf2` 给**镜像手性**的 leaf type 1。少给 `leaf2` 会 WARNING 回退 |
 | `--leaf-black <f>` | 黑底阈值（见上） |
-| `--leaf-bend <a,b,c>` | 叶面弯曲覆盖：`along`(叶尖翘/垂) `,across`(叶面杯) `,crease`(中脉折痕)，单位 = 卡高；省略 = 用 shape 里 `leaf_types.bend` 的值 |
 | `--leaf-normal <f>` | 由 alpha 生成的法线贴图强度 B（0 = 关） |
 | `--normal-scale <f>` | 树皮法线强度（默认 1.5） |
 | `--cam_phi/--cam_theta/--cam_r` | 视角（度、度、米；`cam_r=0` = 自动取景） |
@@ -422,11 +421,26 @@ viewer --shape ... --bark out/bark --leaf out/leaf.png --leaf2 out/leaf_flip.png
 | `--wind-phase-span <s>` | 逐实例相位随机跨度（秒；0 = 25 份完全锁相，可直接对比） |
 | `--wind-amp-scale <f>` / `--wind-freq-scale <f>` | 逐实例摆幅倍数 / 频率倍数（统一值，面板也有滑条） |
 | `--wind-gust-phase <f>` / `--wind-dir-jitter <deg>` | 逐实例阵风相位偏移（周期比例）/ 风向抖动 ±（度） |
+| `--forest-grid <N>` | 森林边长 N×N（默认 5 = 25 棵；1..9，卡顿时先降到 3） |
+| `--shadow-cascades <1..5>` | CSM 级联数（默认 5）。**每一级都要把场景重画一遍**，是这类场景第一性能旋钮（见 `known_issue.md` 1.4） |
+| `--ground-y <f>` | 地面平面高度（米，默认 0） |
 
 > **森林模式是逐实例属性的验收场景**：单株上无论如何都看不出"锁相"，
 > 摆成 5×5 才看得出 25 份是不是在**各晃各的**。左边「风调试」面板下半部分是这些
 > 逐实例参数（相位固定随机，其余滑条控）。
-> 例：`--glb tree.glb --forest --wind-time 0.8 --cam_r 16 --no-hud --capture shots/forest`
+>
+> 森林模式跑的是 **glb**（实例路径），所以先烘一份真树（打包目录里已带 `shapes/oak_low.vegshape`）：
+>
+> ```bash
+> ./jpov_vegetation_v2_viewer --shape shapes/oak_low.vegshape \
+>     --leaf leaf/willow_leaf.png --leaf-black 30 --bark bark/bark001 \
+>     --bake shots/oak.glb
+> ./jpov_vegetation_v2_viewer --glb shots/oak.glb --forest \
+>     --wind-time 0.8 --no-hud --capture shots/forest
+> ```
+>
+> 想对比「锁相 vs 去相位」：同上加 `--wind-phase-span 0`（25 份完全同相）。
+> 软件光栅下卡就先 `--shadow-cascades 1`（或 `--forest-grid 3`）。
 
 交互：左键拖 = 转视角 / 滚轮 = 推拉 / 中键上下拖 = 平移注视点（半屏 = 1m）；
 `[` `]` 调最大层级、`P` 打印相机、`H` 打印叶卡帮助（各 type 的 `anchor_mode` / 推荐宽高比）。

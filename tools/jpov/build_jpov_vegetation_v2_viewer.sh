@@ -49,16 +49,22 @@ mkdir -p "$OUTPUT_DIR/fonts"
 cp -v "$PROJECT_DIR/tools/jpov/fonts/DejaVuSans.ttf"          "$OUTPUT_DIR/fonts/"
 cp -v "$PROJECT_DIR/tools/jpov/fonts/NotoSansCJK-Regular.ttc" "$OUTPUT_DIR/fonts/"
 
-# 范本拓扑：由 export_vegetation_shape.py 从 Blender/Sapling 导出。
-# 入库是为了让人 clone 下来就能跑（同时充当扫管的回归输入）。
+# 范本拓扑：由 gen/shape_gen（或旧的 export_vegetation_shape.py）从 Blender/Sapling 导出，
+# 一律入库成二进制 `.vegshape`。入库是为了让人 clone 下来就能跑（同时充当扫管的回归输入）。
+#
+#   willow*            = 小苗（442 / 597 卡）：验拓扑与叶卡摆放
+#   {oak,pine,fir}_low = 真树（1.8k ~ 4.7k 卡，5 万顶点档）：风力/森林模式这类
+#                        「树冠越大越明显」的观感必须用它们（PR #224 入库）
+#   烘焙产物不入库（每棵 ~18 MB），除了 willow_baked.glb 那份「纯 glb 查看」样例。
 echo ""
 echo "==> 4. 拷贝范本拓扑到 shapes/"
 mkdir -p "$OUTPUT_DIR/shapes"
-for f in willow.vegshape willow_two_types.vegshape; do
+for f in willow.vegshape willow_two_types.vegshape \
+         oak_low.vegshape pine_low.vegshape fir_low.vegshape; do
     if [ -f "$TOOL_DIR/samples/$f" ]; then
         cp -v "$TOOL_DIR/samples/$f" "$OUTPUT_DIR/shapes/$f"
     else
-        echo "WARNING: 缺 $TOOL_DIR/samples/$f（先跑 export_vegetation_shape.py）"
+        echo "WARNING: 缺 $TOOL_DIR/samples/$f（先跑 gen/shape_gen 或 export_vegetation_shape.py）"
     fi
 done
 
