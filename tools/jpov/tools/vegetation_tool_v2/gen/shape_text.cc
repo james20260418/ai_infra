@@ -1,6 +1,8 @@
 #include "tools/jpov/tools/vegetation_tool_v2/gen/shape_text.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace jpov {
@@ -8,10 +10,33 @@ namespace vegetation {
 namespace gen {
 namespace {
 
-// 与 Python 版一致：6 位有效数字。
+// 数字 → 文本：**最短的可逆表示**（round-trip exact）。
+//
+// 为什么不能用 %.6g：文本是资产格式的另一半（`shape_convert` 把 `.vegshape` 转出来给人改，
+// 改完再转回去），6 位有效数字会把 double 砍掉 —— 二进制 → 文本 → 二进制就不再逐字节相同
+// （实测 0.25691019529015585 被写成 0.256910，读回来是另一个 double）。
+// 「文本只用来查看」不等于「文本可以丢精度」：丢精度以后 diff 里看到的数和资产里的数不是
+// 同一个数，review 改参数都会被骗。
+//
+// 做法：从 1 位有效数字往上试，第一个「读回来仍是同一个 double」的写法就是最短可逆表示。
+// 好处是常见的短数字（0.25691 / 1.5 / -0.08）仍然又短又好读，只有真需要更多位才变长；
+// 代价是每个数最多 17 次 snprintf+strtod（转换工具本来就是离线一次性跑）。
+// 注意 -0 会写成 "-0"（负零的符号对法线/手性判定有意义，不能丢）。
 std::string FormatNumber(double value) {
   char buffer[64];
-  std::snprintf(buffer, sizeof(buffer), "%.6g", value);
+  if (!std::isfinite(value)) {
+    // inf / -inf / nan：protobuf 文本格式要的就是这三个小写拼写。
+    std::snprintf(buffer, sizeof(buffer), "%.17g", value);
+    return buffer;
+  }
+  for (int precision = 1; precision <= 17; ++precision) {
+    std::snprintf(buffer, sizeof(buffer), "%.*g", precision, value);
+    if (std::strtod(buffer, nullptr) == value) {
+      return buffer;
+    }
+  }
+  // 理论上到不了这里（%.17g 对 IEEE double 一定可逆），留作兜底。
+  std::snprintf(buffer, sizeof(buffer), "%.17g", value);
   return buffer;
 }
 

@@ -42,8 +42,6 @@ namespace vegv2 {
 constexpr int kViewerWidth = 1280;
 constexpr int kViewerHeight = 720;
 constexpr float kViewerFps = 60.0f;
-using jpov::vegetation::Branch;
-using jpov::vegetation::BranchSample;
 using jpov::vegetation::LeafCard;
 using jpov::vegetation::LeafType;
 using jpov::vegetation::MeshData;
@@ -210,9 +208,6 @@ class VegetationV2App : public JPOV {
   float leaf_black_ = 12.0f;
   std::vector<jpov::PBRMaterial> leaf_mat_;
   std::vector<uint32_t> leaf_mesh_;               // 每 type 一个 mesh
-  // 每个 type 的卡子集（重建网格用：面板改弯曲参数时要重算顶点）。
-  // 和 leaf_mesh_ 同下标；空的 = 该 type 没有卡。
-  std::vector<Shape> leaf_subset_;
   // 逐层棕色材质缓存：每帧给 183 根枝各造一个 PBRMaterial 纯属浪费。
   std::vector<jpov::PBRMaterial> level_mats_;
   jpov_viewer::ViewConfig view_;
@@ -247,48 +242,13 @@ class VegetationV2App : public JPOV {
   float args_uv_vscale_ = 0.0f;  // --uv-vscale（0 = 自动）
   jpov_skylight::SkyDegrees deg_;
 
-  // 相机 HUD：**给截图用** —— 报出复现这张图需要的全部数字（角度、距离、相机位置、
-  // 注视点、地面高度），以及资产里树根的位置。对齐类问题（树干没站在原点、树根浮空、
-  // 树干整体偏移）看这两行就能判断是数据错还是相机错。
   std::string CamString() const {
-    char buf[320];
-    const jpov::Vec3f position = view_.Position();
+    char buf[160];
     std::snprintf(buf, sizeof(buf),
-                  "cam phi=%.1f theta=%.1f R=%.2f | pos(%.2f, %.2f, %.2f) -> "
-                  "target(%.2f, %.2f, %.2f) | ground_y=%.2f | level<=%d types=%s",
+                  "cam phi=%.1f theta=%.1f R=%.2f | level<=%d types=%s",
                   view_.phi * 180.0 / 3.14159265358979323846,
-                  view_.theta * 180.0 / 3.14159265358979323846, view_.R, position.x(),
-                  position.y() + cam_target_y_, position.z(), 0.0f, cam_target_y_, ground_y_,
-                  max_level_,
+                  view_.theta * 180.0 / 3.14159265358979323846, view_.R, max_level_,
                   show_all_card_types_ ? "all" : std::to_string(type_filter_).c_str());
-    return std::string(buf);
-  }
-
-  // 第二行：资产侧的关键数字（树根位置 + 包围盒 + 文件名）。
-  // 树干"对齐"出问题时，先看根枝起点是不是 (0,0,0)、包围盒是不是关于原点对称。
-  std::string AssetString() const {
-    if (!has_shape_ || shape_.branches.empty() ||
-        shape_.branches.front().samples.empty()) {
-      return std::string("asset: (无 shape)");
-    }
-    const Branch& root = shape_.branches.front();
-    const Vec3d& base = root.samples.front().position;
-    double low[3] = {base.x, base.y, base.z};
-    double high[3] = {base.x, base.y, base.z};
-    for (const Branch& branch : shape_.branches) {
-      for (const BranchSample& sample : branch.samples) {
-        const double values[3] = {sample.position.x, sample.position.y, sample.position.z};
-        for (int axis = 0; axis < 3; ++axis) {
-          low[axis] = std::min(low[axis], values[axis]);
-          high[axis] = std::max(high[axis], values[axis]);
-        }
-      }
-    }
-    char buf[320];
-    std::snprintf(buf, sizeof(buf),
-                  "root(%.3f, %.3f, %.3f) | bbox x[%.2f, %.2f] y[%.2f, %.2f] z[%.2f, %.2f] | %s",
-                  base.x, base.y, base.z, low[0], high[0], low[1], high[1], low[2], high[2],
-                  shape_path_.empty() ? "(shape)" : shape_path_.c_str());
     return std::string(buf);
   }
 
@@ -398,7 +358,6 @@ class VegetationV2App : public JPOV {
 
     leaf_mat_.assign(kMaxCardTypes, jpov::PBRMaterial());
     leaf_mesh_.assign(kMaxCardTypes, 0);
-    leaf_subset_.assign(kMaxCardTypes, Shape());
 
     for (int t = 0; t < kMaxCardTypes; ++t) {
       // 子集只保留「这一类卡」：卡网格只需要 cards + leaf_types，枝干（占 99% 内存）
@@ -423,7 +382,6 @@ class VegetationV2App : public JPOV {
       LoadLeafMaterial(path, &leaf_mat_[t]);
       LOG(INFO) << "leaf type " << t << " ← " << path << "（" << subset.cards.size() << " 卡）";
 
-      leaf_subset_[t] = subset;
       leaf_mesh_[t] = RegisterMesh(ToEngineLeafMesh(jpov::vegetation::BuildLeafCards(subset)));
     }
     for (const LeafType& t : shape_.leaf_types) {
@@ -1026,18 +984,7 @@ class VegetationV2App : public JPOV {
     // 左上角相机 HUD。headless 且没配字体（gold test）时关掉：文字要 CJK 图集，
     // 没有图集就只剩「Known font alias: none」的 CHECK 崩溃，而 gold 保护的是 3D 观感。
     if (show_hud_) {
-      // 两行：第一行相机（复现截图用），第二行资产（判断"对齐"是数据问题还是相机问题）。
-      // 深色描边由 DrawText 自己不做，所以用两遍绘制：先暗色偏移 1px 当描边，再画白字。
-      // 天空是浅色时纯白字看不见 —— 这是 HUD 唯一的呈现要求。
-      const jpov::Color shadow{0.0f, 0.0f, 0.0f, 0.85f};
-      const jpov::Color ink{1.0f, 1.0f, 1.0f, 1.0f};
-      cmds->DrawText(CamString(), {9.0f, 9.0f}, 18.0f, shadow,
-                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
-      cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, ink,
-                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
-      cmds->DrawText(AssetString(), {9.0f, 31.0f}, 16.0f, shadow,
-                     jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
-      cmds->DrawText(AssetString(), {8.0f, 30.0f}, 16.0f, ink,
+      cmds->DrawText(CamString(), {8.0f, 8.0f}, 18.0f, jpov::Color{1.0f, 1.0f, 1.0f, 1.0f},
                      jpov::TextAlignment::kTopLeft, jpov::kFontBuiltinCJK);
     }
 

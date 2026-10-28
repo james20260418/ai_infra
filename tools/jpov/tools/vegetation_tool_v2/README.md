@@ -137,7 +137,14 @@ wire format，`shape.proto` 里的 `ShapeProto`）。文本 `.pbtxt` **只用于
 仓库里不放文本资产。
 
 理由很实际：三棵树的文本是 1.2~1.4 MB，二进制后 0.5~0.7 MB（**约 1/3**），
-而且加载不用解析文本、不会有 `%.6g` 之类的格式漂移。
+而且加载不用解析文本。
+
+**文本是「可逆的一半」，不是「大概能看的另一半」**：`FormatShapeText` 写每个 double 都用
+**最短的可逆表示**（从 1 位有效数字往上试，第一个「读回来仍是同一个 double」的写法），
+所以二进制 → 文本 → 二进制**逐字节相同**（形状测试 `TestShapeTextIsLossless` 钉住，含 `-0`
+的符号）。第一版偷懒沿用 Python 的 `%.6g`（6 位有效数字），实测 `0.25691019529015585`
+被写成 `0.256910`、读回来是另一个 double —— 那就是「diff 里看到的数和资产里的数不是一个数」。
+常见的短数字（`0.25691` / `1.5` / `-0.08`）仍然短，只有真需要更多位才变长。
 
 格式**由扩展名决定**：`.vegshape` → 二进制，其它（`.pbtxt`/`.txt`）→ 文本。一条规则，不猜内容。
 
@@ -152,10 +159,10 @@ wire format，`shape.proto` 里的 `ShapeProto`）。文本 `.pbtxt` **只用于
 ```
 
 - 转换一定过一遍 `LoadShapeFile` 的校验（拓扑、半径、anchor 合同），坏资产转不出去；
-- 六个 `shape_gen` 产出的档位（`{pine,oak,fir}_{low,game}`）实测 `pbtxt → vegshape → pbtxt`
-  **逐字节相同**；两个旧 Python 范本（`willow` / `willow_two_types`）差在格式而不是数值：
-  `-0` 的符号被文本写出成 `0`、卡片字段缩进 4→2 空格 —— 把这些文本再转回二进制，
-  与入库的 `.vegshape` **逐字节一致（0 字节差异）**，即数据一点没丢。
+- 8 份入库资产实测「`vegshape → pbtxt → vegshape` **逐字节相同**」（数值一点没丢）；
+  六个 `shape_gen` 档位（`{pine,oak,fir}_{low,game}`）同样可逆。
+- 两个旧 Python 范本（`willow` / `willow_two_types`）的文本与 `shape_gen` 的写法差在缩进
+  （卡片字段 4→2 空格），数值一致；把它们的文本再转回二进制与入库 `.vegshape` **0 字节差异**。
 - `--format text|binary` 可强制格式，但正常不需要（看扩展名就够）。
 
 ## 1. `shape_gen` —— 生成拓扑
@@ -332,8 +339,12 @@ gen/shape_gen --config configs/low/oak.pbtxt  --out output/veg_shapes/oak_low.ve
 gen/shape_gen --config configs/low/fir.pbtxt  --out output/veg_shapes/fir_low.vegshape
 ```
 
-三份入库资产（`samples/*_{low,game}.vegshape`）就是用这些命令生成的：
-**同配置重跑 ⇒ 逐字节相同**（oak_low md5 `8e336879…`）。
+六份入库资产（`samples/*_{low,game}.vegshape`）就是用这些命令生成的（枝数/卡数/三角形
+在 `samples/` 的说明里）。⚠️ **逐字节可复现的前提是同一个 Blender 版本**：几何来自 Blender
+倒出的曲线，跨版本浮点会有 1e-6 量级的差（实测 Blender 4.0.2 重跑 ⇒ 字节不同、但转成文本
+完全一致）。另外这六份资产历史上是「先出文本、再转二进制」的（`%.6g` 时代），
+所以它们比 `shape_gen` 现在直接写出的二进制少几位有效数字 —— 数值等价，要严格逐字节
+对齐就按上面的命令重出一遍（重出后 gold 需要一起刷新）。
 
 钉住：`preset`、`scale`、`seed`、`levels`、`branches`、`leaves`、`leafScale`。
 最常踩的两个坑：`baseSize` 是"第一根侧枝出现的高度**比例**"（不是尺寸，>1 会把枝挤到树顶）；
