@@ -350,9 +350,13 @@ public:
             ui_.Emit(cmds);
         }
 
-        // **相机 HUD**：始终画（含 headless 截图），右上角。用途 = 报"哪个视角"时
-        // 直接把屏幕上的数字念出来（Danis 2026-10-28 要求：日晕在特定视角有马赛克）。
-        DrawCameraHud(input, cmds);
+        // **相机 HUD**：始终画（含 headless 截图），用途 = 报"哪个视角"时直接把屏幕上
+        // 的数字念出来（Danis 2026-10-28 要求：日晕在特定视角有马赛克）。
+        // ⚠️ 没注册字体时**跳过**：JPOV 不提供隐式默认字体，画 CJK 文本会 FATAL
+        //    （gold 测试用的 App 不带字体，2026-10-28 被这条打到过 pcf_shadow_gold_test）。
+        if (!GetConfig().fonts.empty()) {
+            DrawCameraHud(input, cmds);
+        }
     }
 
 private:

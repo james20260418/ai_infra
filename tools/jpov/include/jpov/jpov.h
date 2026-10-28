@@ -373,6 +373,12 @@ private:
     FrameEvents frame_;
     double frame_start_time_ = 0.0;
     Config config_;
+public:
+    // 只读访问本实例的 Config（字体表/尺寸等）。
+    // 用途：派生 App 需要判断"有没有注册字体"（没字体时画 UI 文本会 FATAL）——
+    // gold 测试用的 App 通常不带字体，UI 必须自己跳过而不是崩。
+    const Config& GetConfig() const { return config_; }
+private:
     GLFWwindow* window_ = nullptr;
     std::unique_ptr<jpov::Renderer> renderer_;
     pid_t xvfb_pid_    = 0;
