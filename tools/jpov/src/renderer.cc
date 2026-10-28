@@ -1179,6 +1179,24 @@ void Renderer::RenderReflectionPass(const RenderCommandList& cmds, int width, in
     // 镜像 ⇒ 三角形绕序反转，剔除方向也要翻，否则物体只剩背面。
     glFrontFace(GL_CW);
 
+    // ⚠️ env_specular（IBL 的 cubemap）是**主 pass 里**才建的（天空块中），本 pass 在它
+    //    之前 ⇒ 第 1 帧采样的是"还没有的 cubemap"，驱动报 GL_INVALID_OPERATION(1282)。
+    //    这里先把 env 关掉（反射里的物体少一层环境镜面，肉眼几乎无差），
+    //    主 pass 随后会按真值重新上传 —— 顺序上天然不冲突。
+    {
+        const unsigned int progs[] = {
+            DrawObject3DProg(), DrawObject3DProgFull(),
+            DrawObject3DProgCutout(), DrawObject3DProgFullCutout(),
+            DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+            DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+        };
+        for (unsigned int prog : progs) {
+            UploadEnvSpecular(shader_mgr_, prog, 0u, 0.0f, 1.0f, false);
+        }
+        UploadEnvSpecular(shader_mgr_, SkinnedMeshProg(), 0u, 0.0f, 1.0f, false);
+        UploadEnvSpecular(shader_mgr_, SkinnedMeshProgCutout(), 0u, 0.0f, 1.0f, false);
+    }
+
     // 不透明内容的命令表：换相机、关掉 tile culling（tile 索引是按主相机建的，
     // 用镜像投影去查会错位；实验中走"遍历全部光源"的路径）。
     RenderCommandList mirror_cmds = cmds;
@@ -1722,11 +1740,11 @@ void Renderer::Render(const RenderCommandList& cmds,
         //   2（B）：倒影天空 = kAtmoOnly（不带盘）⇒ 解析太阳项保留
         //   0    ：不渲倒影（走探针，原行为）
         refl_valid_ = false;
-        if (water_skin_.has_value() && water_skin_->reflection_mode != 0) {
+        if (water_skin_.has_value()) {
             CHECK(use_hdr) << "平面反射需要 tone_mapping=true（HDR 倒影目标）";
-            // 反射模式 2（B）= kEnvReflect：大气 + 月盘/月晕（不含日盘）
-            RenderReflectionPass(cmds, fbo_3d_w, fbo_3d_h, water_skin_->level_y,
-                                 (water_skin_->reflection_mode == 2) ? 3 : 0);
+            // 倒影天空 = kEnvReflect：大气色 + 月盘/月晕、**不含日盘/日晕**
+            //   （日盘的能量在平行光里，由水皮的解析 GGX 表达；放进倒影就双计）。
+            RenderReflectionPass(cmds, fbo_3d_w, fbo_3d_h, water_skin_->level_y, 3);
             // RenderReflectionPass 改了 FBO / viewport / 绕序 ⇒ 恢复主 pass 的上下文。
             glBindFramebuffer(GL_FRAMEBUFFER, fbo_3d_target);
             glViewport(0, 0, fbo_3d_w, fbo_3d_h);
@@ -2170,12 +2188,6 @@ void Renderer::Render(const RenderCommandList& cmds,
                     ws.has_glint_dir = true;
                     ws.glint_dir = active_disc;
                 }
-                // 反射模式 A：倒影天空是 kFull（盘 + 晕都在）⇒ 解析太阳项与解析日晕
-                //   都要关掉，否则同一颗太阳会在水面里出现两次。
-                if (ws.reflection_mode == 1) {
-                    ws.use_sun_glint = false;
-                    ws.sun_glow_color = Color{0.0f, 0.0f, 0.0f, 1.0f};
-                }
                 // 夜间（主光源=月亮）：倒影里已经带**月盘 + 月晕**（kEnvReflect）⇒
                 //   解析高光/解析晕都关掉，否则月光会被算两次（而且解析瓣在这里本来就
                 //   没有物理依据 —— 月盘是个可镜像的小光源）。
@@ -2184,7 +2196,7 @@ void Renderer::Render(const RenderCommandList& cmds,
                     ws.sun_glow_color = Color{0.0f, 0.0f, 0.0f, 1.0f};
                 }
                 WaterSkinReflection refl;
-                if (ws.reflection_mode != 0 && refl_valid_) {
+                if (refl_valid_) {
                     refl.texture = color_tex_refl_;
                     std::memcpy(refl.vp, refl_mvp_, sizeof(refl.vp));
                 } else {

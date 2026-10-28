@@ -129,8 +129,6 @@ public:
     bool water_bloom_ = true;
     float water_halo_size_ = 1.0f;        // 日晕整体大小倍数
     float water_halo_aspect_ = 1.0f;      // 日晕 水平/垂直
-    // 镜面反射来源（实验 A/B）：0 = 天空探针 / 1 = 平面反射带盘（A）/ 2 = 平面反射不含盘（B）
-    int water_refl_mode_ = 0;
     float water_refl_distort_ = 0.02f;    // 波浪扰动倒影 uv 的强度（NDC）
     // 远距离波浪带限方式（0/1/2/3，见 shader 注释）。面板给个下拉做对比。
     // 面板只暴露模式 4（法线 flipbook 纹理）；0..3 是带限对比用的历史模式，仅 capture 用。
@@ -285,7 +283,6 @@ public:
             wp.use_sky_reflection = water_use_sky_refl_;
             wp.use_transmission   = water_use_transmit_;
             wp.use_sun_glint      = water_use_sun_glint_;
-            wp.reflection_mode    = water_refl_mode_;
             wp.sun_halo_size      = water_halo_size_;
             wp.sun_halo_aspect    = water_halo_aspect_;
             wp.refl_distort       = water_refl_distort_;
@@ -463,16 +460,8 @@ private:
             ui_.SliderFloat("水纹波长 m", &water_wave_length_m_, water_row(13), 0.05f, 20.0f, 2);
             ui_.SliderFloat("水纹方向 °", &water_wave_dir_deg_, water_row(14), 0.0f, 360.0f, 0);
             ui_.SliderFloat("最小透射 [0,1]（实验）", &water_min_transmission_, water_row(15), 0.0f, 1.0f, 2);
-            // 镜面反射来源（实验 A/B）：探针 / 平面反射带盘 / 平面反射不含盘
-            static const std::vector<const char*> kReflNames = {
-                "天空探针（128²，原行为）",
-                "平面反射 A：倒影带日盘（关解析太阳）",
-                "平面反射 B：倒影不含盘（保留解析太阳+晕）",
-            };
-            ui_.Combo("镜面反射来源（实验）", &water_refl_mode_, kReflNames,
-                      water_row(16.0f));
-            ui_.Text("水面 = 无限平面（逐像素求交，覆盖到地平线）  右键拖动=绕行",
-                     water_row(17.0f));
+            ui_.Text("水面 = 无限平面 + 平面反射（B 定案）  右键拖动=绕行",
+                     water_row(16.0f));
             return;
         }
 

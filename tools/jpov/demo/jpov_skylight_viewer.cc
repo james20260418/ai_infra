@@ -302,8 +302,6 @@ int RunCaptureWater(const std::string& out_dir) {
         float lean_gain = 1.0f;
         // 辉光 A/B：0 = 不覆盖（用面板默认 = 开）、1 = 开、2 = 关。
         int bloom = 0;
-        // 镜面反射来源：-1 = 不覆盖（面板默认 = 探针）、0 = 探针、1 = 平面反射 A、2 = 平面反射 B
-        int refl = -1;
         float halo_size = -1.0f;     // <0 = 不覆盖
         float halo_aspect = -1.0f;
         float refl_distort = -1.0f;   // <0 = 不覆盖（app 默认）
@@ -312,161 +310,54 @@ int RunCaptureWater(const std::string& out_dir) {
         std::optional<float> sun_azim_deg;
     };
     const Shot shots[] = {
-        {"props_eye", 0.30, 12.0},                                     // 眼高俯视（新 pass）
-        {"props_eye_strip", 0.30, 12.0, true, true, /*use_strip=*/true},// 同机位 strip 版
-        {"props_eye_nowater", 0.30, 12.0, true, /*water_skin=*/false},
-        {"props_top", 0.70, 10.0},                                     // 陡俯视（正对水下）
-        {"props_top_nowater", 0.70, 10.0, true, /*water_skin=*/false},
-        {"props_grazing", 0.10, 14.0},                                 // 掠射（水线切在桌腿上）
-        // 水下抬头：相机 y = −1.0（R·sinφ），视线抬到 ~48° / ~74°
-        //   ring：视线切过临界角 ⇒ 窗内（透射）与窗外（地色）同屏；
-        //   up  ：视线更接近竖直 ⇒ 以窗内透射为主。
+        // ── 交付验收机位（2026-10-28 定案：平面反射 B + 解析太阳/日晕 + Bloom）──
+        // 眼高 / 俯视 / 掠射 / 水下抬头：基本观感
+        {"props_eye", 0.30, 12.0},
+        {"props_top", 0.70, 10.0},
+        {"props_grazing", 0.10, 14.0},
         {"props_under_ring", -0.083, 12.0, true, true, false, 12.0f, 0.0f},
         {"props_under_up", -0.083, 12.0, true, true, false, 40.0f, 0.0f},
-        // 同机位关掉折射（ior=1）—— 窗内变回"一刀切的原样天空"，用来对照折射到底改了什么。
-        {"props_under_up_noref", -0.083, 12.0, true, true, false, 40.0f, 1.0f},
-        // 水下平视偏上（视线 ~30°）：水上的人/桌子和窗同屏，用来看水面/窗缘的整体形状。
         {"props_under_wide", -0.083, 12.0, true, true, false, 6.0f, 0.0f},
-        // 水纹（法线扰动）：同一机位三个相位 —— 相位滑条就是让这三张之间过渡的那根。
-        {"props_under_wave_p0", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt},
-        {"props_under_wave_p1", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 1.6f, std::nullopt},
-        {"props_under_wave_p2", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 3.2f, std::nullopt},
-        // 关掉波纹的对照（法线恒为 +Y）——"这一屏的涟漪到底是不是波纹给的"由它来判。
-        {"props_under_nowave", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, 0.0f},
-        // 水上视角：有水纹 / 无水纹。
-        {"props_eye_wave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
-        {"props_eye_nowave", 0.30, 12.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f},
-        // n 滑条：1.333（物理水）→ 1.20 → 1.05 → 1.00（界面消失，全部透射）。
-        {"props_under_n120", -0.083, 12.0, true, true, false, 12.0f, 1.20f, 0.0f, std::nullopt},
-        {"props_under_n105", -0.083, 12.0, true, true, false, 12.0f, 1.05f, 0.0f, std::nullopt},
-        {"props_under_n100", -0.083, 12.0, true, true, false, 12.0f, 1.00f, 0.0f, std::nullopt},
-        // 最小透射滑条：物理 n 下强制留 20% / 50% 透射 ⇒ 灰区漏出天空。
-        {"props_under_t20", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.20f},
-        {"props_under_t50", -0.083, 12.0, true, true, false, 12.0f, 0.0f, 0.0f, std::nullopt, 0.50f},
-        // 水上三项 A/B（同一机位 = 水上视角）：全开 / 分别关掉一项。
-        {"props_eye_3on", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt},
-        {"props_eye_nosky", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 2, 0, 0},
-        {"props_eye_notrans", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 2, 0},
-        {"props_eye_nosun", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2},
-        // 同机位两个相位：用来量"远处到底还有没有波纹"（近/中/远三条带分别比）。
-        {"props_eye_phaseB", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 1.6f, std::nullopt},
-        // 四种"远距离带限"对比（同机位同相位，只换过滤方式）：
-        //   0 不过滤（aliasing 基线）/ 1 硬关八度+归一化 / 2 逐八度 sinc / 3 sinc+方差转粗糙度
-        {"filter0_alias", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 0, 45.0f},
-        {"filter1_hard", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 1, 45.0f},
-        {"filter2_sinc", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 2, 45.0f},
-        {"filter3_lean", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 45.0f},
-        // 太阳高光机位下同样四种（看高光波瓣被方差拉宽的效果）。
-        {"filter4_tile", 0.42, 11.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 4, 45.0f},
-        {"filtersun0_alias", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 0, 220.0f},
-        {"filtersun3_lean", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 3, 220.0f},
-        {"filtersun4_tile", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, 4, 220.0f},
-        // 太阳高光的机位：相机在**太阳方位**上、俯视 45°（镜像几何 V≈L ⇒ 高光落在画面中心）。
-        // 顺带证明"高光不是恒亮的"：换机位它就该消失（那才是菲涅耳反射该有的行为）。
-        {"props_eye_sunpath", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 0, -1, 220.0f},
-        {"props_eye_sunpath_off", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, std::nullopt, 0.0f, 0, 0, 2, -1, 220.0f},
-        // 关掉波纹的太阳高光：应当收成一个**很尖的亮点**（波浪在的时候是被打碎的亮片）。
-        {"props_eye_sunpath_nowave", 0.785, 10.0, true, true, false, std::nullopt, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0, -1, 220.0f},
-        // 判"透射到底透的是什么"：n=1（界面消失）应当 ≈ 完全不画水面（= 原样场景）。
-        {"props_under_wide_n100", -0.083, 12.0, true, true, false, 6.0f, 1.00f, 0.0f, std::nullopt},
-        {"props_under_wide_nowater", -0.083, 12.0, true, false, false, 6.0f, 0.0f, 0.0f, std::nullopt},
-        // ── LEAN 高光补偿 A/B（同机位同相位，只切补偿）──
-        //   太阳机位：远处那条"太阳路"由被 mip 平均掉的斜率方差撑开；
-        //   关掉它高光会塌成一个小亮点 + 远处整片死平。
-        {.name = "leansun_on",  .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
-         .theta_deg = 220.0f, .lean = 1},
-        {.name = "leansun_off", .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
-         .theta_deg = 220.0f, .lean = 2},
-        {.name = "leansun_gain3", .phi = 0.785, .R = 10.0, .wave_phase = 0.0f,
-         .theta_deg = 220.0f, .lean = 1, .lean_gain = 3.0f},
-        // 水面视角的 LEAN A/B（看"远处反光是否变钝而不是变平"）。
-        {.name = "lean_eye_on",  .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 1},
-        // Bloom A/B（太阳路的"晕"）：开 / 关，同机位同相位。
-        {.name = "leansun_bloom", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .bloom = 1},
-        {.name = "leansun_nobloom", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .bloom = 2},
-        {.name = "lean_eye_off", .phi = 0.42, .R = 11.0, .wave_phase = 1.6f, .lean = 2},
-        // ── 天光仰角扫描（太阳机位）：高光随仰角的走向 ──
+        // 对照：不画水皮（看水到底贡献了什么）
+        {"props_eye_nowater", 0.30, 12.0, true, false},
+        // 水纹相位三连（看动画是否连续、有没有定格感）
+        {.name = "waves_f0", .phi = 0.42, .R = 11.0, .wave_phase = 0.00f},
+        {.name = "waves_f1", .phi = 0.42, .R = 11.0, .wave_phase = 0.05f},
+        {.name = "waves_f2", .phi = 0.42, .R = 11.0, .wave_phase = 0.10f},
+        {.name = "waves_f3", .phi = 0.42, .R = 11.0, .wave_phase = 0.15f},
+        {.name = "waves_f4", .phi = 0.42, .R = 11.0, .wave_phase = 0.20f},
+        {.name = "waves_f5", .phi = 0.42, .R = 11.0, .wave_phase = 0.25f},
+        // 太阳机位：太阳路（GGX）+ LEAN 补偿 A/B + 日晕大小/长宽比
+        {.name = "sun_path",   .phi = 0.785, .R = 10.0, .theta_deg = 220.0f},
+        {.name = "sun_path_lean_off", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .lean = 2},
+        {.name = "sun_path_lean3", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .lean = 1, .lean_gain = 3.0f},
+        {.name = "sun_path_nobloom", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
+         .bloom = 2},
+        {.name = "halo_size4", .phi = 0.10, .R = 14.0, .theta_deg = 220.0f,
+         .halo_size = 4.0f},
+        {.name = "halo_wide",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f,
+         .halo_size = 4.0f, .halo_aspect = 3.0f},
+        {.name = "halo_tall",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f,
+         .halo_size = 4.0f, .halo_aspect = 0.3f},
+        // 天光仰角扫（水面观感 90% 来自太阳）
         {.name = "sun_elev15", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
          .sun_elev_deg = 15.0f},
-        {.name = "sun_elev30", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
-         .sun_elev_deg = 30.0f},
-        {.name = "sun_elev60", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
-         .sun_elev_deg = 60.0f},
         {.name = "sun_elev80", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f,
          .sun_elev_deg = 80.0f},
-        // ── 平面反射 A/B/C（实验）：同一机位只换"镜面从哪来" ──
-        //   probe = 128² 天空探针（原行为）
-        //   A     = 平面反射，倒影天空 kFull（**带日盘/日晕**）⇒ 解析太阳项关闭
-        //   B     = 平面反射，倒影天空 kAtmoOnly（不含盘）⇒ 保留解析太阳 + 解析日晕
-        {.name = "refl_probe_sun", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 0},
-        {.name = "refl_A_sun",     .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1},
-        {.name = "refl_A_sun_d15", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1,
-         .refl_distort = 0.15f},
-        {.name = "refl_A_sun_d35", .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 1,
-         .refl_distort = 0.35f},
-        {.name = "refl_B_sun",     .phi = 0.785, .R = 10.0, .theta_deg = 220.0f, .refl = 2},
-        // 眼高机位（有桌子和人）：看倒影里到底有没有**物体**。
-        {.name = "refl_probe_eye", .phi = 0.30, .R = 12.0, .refl = 0},
-        {.name = "refl_A_eye",     .phi = 0.30, .R = 12.0, .refl = 1},
-        {.name = "refl_B_eye",     .phi = 0.30, .R = 12.0, .refl = 2},
-        // 掠射机位：看水平线附近的稳定性（平面反射的已知弱项）。
-        {.name = "refl_A_grazing", .phi = 0.10, .R = 14.0, .refl = 1},
-        {.name = "refl_B_grazing", .phi = 0.10, .R = 14.0, .refl = 2},
-        {.name = "sweep_b_40", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2},
-        {.name = "sweep_b_80", .phi = 0.30, .R = 12.0, .theta_deg = 80.0f, .refl = 2},
-        {.name = "sweep_b_120", .phi = 0.30, .R = 12.0, .theta_deg = 120.0f, .refl = 2},
-        {.name = "sweep_b_160", .phi = 0.30, .R = 12.0, .theta_deg = 160.0f, .refl = 2},
-        {.name = "sweep_b_200", .phi = 0.30, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "sweep_b_240", .phi = 0.30, .R = 12.0, .theta_deg = 240.0f, .refl = 2},
-        {.name = "sweep_b_280", .phi = 0.30, .R = 12.0, .theta_deg = 280.0f, .refl = 2},
-        {.name = "sweep_b_320", .phi = 0.30, .R = 12.0, .theta_deg = 320.0f, .refl = 2},
-        {.name = "sweep_b_360", .phi = 0.30, .R = 12.0, .theta_deg = 360.0f, .refl = 2},
-        {.name = "swb_1", .phi = 0.2f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "swb_3", .phi = 0.45f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "swb_5", .phi = 0.8f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "swb_7", .phi = 1.2f, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "seq_1", .phi = 0.30, .R = 12.0, .theta_deg = 192.0f, .refl = 2},
-        {.name = "seq_3", .phi = 0.30, .R = 12.0, .theta_deg = 196.0f, .refl = 2},
-        {.name = "seq_5", .phi = 0.30, .R = 12.0, .theta_deg = 200.0f, .refl = 2},
-        {.name = "seq_7", .phi = 0.30, .R = 12.0, .theta_deg = 204.0f, .refl = 2},
-        {.name = "seq_9", .phi = 0.30, .R = 12.0, .theta_deg = 208.0f, .refl = 2},
-        {.name = "seq_11", .phi = 0.30, .R = 12.0, .theta_deg = 212.0f, .refl = 2},
-        // 朝向验证：左右各一根彩色柱（红=+X、蓝=−X），看倒影是否与本体同侧
-        // ── 日晕参数 A/B（同机位；size / aspect 是 Danis 要的"长宽"）──
-        //   掠射机位（F≈1）才看得见晕；size=1/aspect=1 是默认（σ=2×盘半径）。
-        {.name = "halo_def",   .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2},
-        {.name = "halo_size4", .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
-         .halo_size = 4.0f},
-        {.name = "halo_wide",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
-         .halo_size = 4.0f, .halo_aspect = 3.0f},
-        {.name = "halo_tall",  .phi = 0.10, .R = 14.0, .theta_deg = 220.0f, .refl = 2,
-         .halo_size = 4.0f, .halo_aspect = 0.3f},
-        // ── 日落 / 夜间（2026-10-28 Danis 报：日落时太阳方向海面仍有晕；夜里没有倒影；
-        //    月亮升起处海面多出一簇亮斑）──
-        {.name = "dusk_m10_p",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = -10.0f},
-        {.name = "dusk_m10_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -10.0f},
-        {.name = "dusk_m30_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -30.0f},
-        {.name = "night_m60_b", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = -60.0f},
-        {.name = "night_m60_p", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = -60.0f},
-        // 面向月亮（月亮在反日点 = 方位 40°）
-        {.name = "night_moon_b", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -40.0f},
-        {.name = "night_moon_p", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 0, .sun_elev_deg = -40.0f},
-        // 分解 A/B：夜间/日落里那些亮斑到底是"太阳高光"还是"日晕"
-        {.name = "night_moon_nosun", .phi = 0.30, .R = 12.0, .sun_glint = 2,
-         .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -40.0f},
-        {.name = "night_moon_nohalo", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f,
-         .refl = 2, .halo_size = 0.2f, .sun_elev_deg = -40.0f},
-        {.name = "sunset_0_nosun", .phi = 0.30, .R = 12.0, .sun_glint = 2,
-         .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = 2.0f},
-        {.name = "sunset_0_nohalo", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f,
-         .refl = 2, .halo_size = 0.2f, .sun_elev_deg = 2.0f},
-        // 月亮低仰角（月升/月落时才有"月光路"，高月亮在浅视角下几何上不可能反射）
-        {.name = "moonlow_b", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 2, .sun_elev_deg = -6.0f},
-        {.name = "moonlow_p", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f, .refl = 0, .sun_elev_deg = -6.0f},
-        {.name = "sunset_0_b",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 2, .sun_elev_deg = 2.0f},
-        {.name = "sunset_0_p",  .phi = 0.30, .R = 12.0, .theta_deg = 220.0f, .refl = 0, .sun_elev_deg = 2.0f},
-        {"water_high", 0.62, 2600.0},                                  // 无限平面的尺度
-        // 模型场景（回到默认机位）：证明「模型场景」还在，且与水面互斥。
+        // 日落 / 夜间（月盘在倒影里；高光/晕跟可见盘走）
+        {.name = "sunset_0", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f,
+         .sun_elev_deg = 2.0f},
+        {.name = "dusk_m10", .phi = 0.30, .R = 12.0, .theta_deg = 220.0f,
+         .sun_elev_deg = -10.0f},
+        {.name = "moonlow", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f,
+         .sun_elev_deg = -6.0f},
+        {.name = "night_high_moon", .phi = 0.30, .R = 12.0, .theta_deg = 40.0f,
+         .sun_elev_deg = -40.0f},
+        // 尺度（无限平面）
+        {"water_high", 0.62, 2600.0},
+        // 模型场景（水面场景互斥的对照）
         {"model_scene", 0.25, 9.5, /*water_scene=*/false},
     };
     for (const Shot& s : shots) {
@@ -487,9 +378,6 @@ int RunCaptureWater(const std::string& out_dir) {
         app.water_lean_glint_    = (s.lean != 2);
         app.water_lean_gain_     = s.lean_gain;
         if (s.bloom != 0) { app.water_bloom_ = (s.bloom != 2); }
-        if (s.refl >= 0) {
-            app.water_refl_mode_ = s.refl;
-        }
         if (s.refl_distort >= 0.0f) {
             app.water_refl_distort_ = s.refl_distort;
         }

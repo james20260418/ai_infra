@@ -58,7 +58,7 @@ void WaterSkinRenderer::Init() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // 波浪法线 flipbook（256² × 8 帧 × 16 m tile）**不在这里烘**：
+    // 波浪法线 flipbook（256² × **32** 帧 × 16 m tile）**不在这里烘**：
     // 256²/16 m = 6.25 cm/texel 够表现厘米级涟漪，但烘焙 ~60-90 ms + 4.2 MB ——
     // 不用水面的 app 一分钱都不该花（Builder 在首次 Draw 里做，见下）。
     //
@@ -90,7 +90,9 @@ void WaterSkinRenderer::Draw(const WaterSkinParams& params, const Camera& cam,
 
     // 波浪法线 flipbook：首次真正画水面时才烘（见 Init 的说明）。
     if (wave_tile_.tex == 0) {
-        wave_tile_ = BuildWaterNormalTile(/*size=*/256, /*frames=*/8, /*tile_m=*/16.0f);
+        // 32 帧：最快的八度是 cycles=7 ⇒ 每帧只推进 0.22 圈（8 帧时是 0.875 圈，
+        // 已经贴着 Nyquist ⇒ 时间上必然"翻页"）。配合 shader 的帧间插值，动画连续。
+        wave_tile_ = BuildWaterNormalTile(/*size=*/256, /*frames=*/32, /*tile_m=*/16.0f);
     }
 
     const unsigned int prog = shader_mgr.GetOrCreate("water_skin",

@@ -21,7 +21,8 @@
 //     F = Schlick（f0 = ((n−1)/(n+1))²，与水下**同一个 n**）
 //     out = bg·(1−B)(1−F) + body·B·(1−F) + skyReflect·F + sunSpec
 //     用一次 alpha 混合表达：α = 1−(1−B)(1−F)，color = (body·B·(1−F) + sky·F + sun)/α
-//     · 镜面天光 = 天空探针按 reflect(−V, N) 采样（N 被波纹扰动 ⇒ 反光碎成亮片）
+//     · 镜面 = **平面反射**（2026-10-28 定案）：倒影贴图（含物体 + 天空）按
+//       "水面点投影 + 斜率扰动" 采样；投影出界处按覆盖度淡回天空探针（连续，不硬切）
 //     · 水下透射 = 薄膜 + 背景本身（关掉 ⇒ α=1，水面变成不透明的本体色）
 //     · 太阳高光 = **GGX 微表面**（粗糙度 = 被 mip 平均掉的斜率方差 + 日盘角半径）：
 //       近处是碎亮片、远处摊成一条柔和的太阳路，掠射处由 Smith 可见性压住不爆白。
@@ -73,7 +74,8 @@
 //
 // 已知边界（本版有意不做）：
 //   * 没有吸收/散射（水下物体只是被一层淡色膜按 α 混掉，不随深度变蓝）；
-//   * 镜面天光优先用天空 cubemap 探针；探针不存在时才退回常量 rim_color；
+//   * 倒影只含**不透明 3D + 天空**（粒子/体积火/条带/froxel 雾还没进去）；
+//     天空探针只在倒影采样不可用时当淡出目标，探针也不存在才退回常量 rim_color；
 //   * 波浪**只扰法线、不位移几何**（Danis 定：先看波纹，几何起伏以后再说）。
 
 #ifndef JPOV_SRC_WATER_WATER_SKIN_SHADER_H_
@@ -127,7 +129,7 @@ uniform samplerCube uEnvCube;    // 天空探针（大气色；镜面天光用�
 // 有波浪时只能"投影 + 按斜率扰动 uv"（平面反射做不了真卷积），这是这条路的固有近似。
 uniform sampler2D uReflTex;
 uniform mat4  uReflVP;           // 镜像相机的 VP（Proj*View）
-uniform int   uUseReflTex;       // 1 = 用倒影贴图；0 = 用天空探针
+uniform int   uUseReflTex;       // 1 = 用倒影贴图（正常路径）；0 = 退回天空探针
 uniform float uReflDistort;      // 波形扰动强度（NDC）
 uniform int   uHasEnvCube;       // 0 = 没有探针 ⇒ 镜面天光退回常量 rim 色
 uniform float uSkyScale;         // 天光反射量 [0,1]
@@ -220,10 +222,18 @@ vec3 WaveNormal(vec3 p, out float slope_var) {
     //   任意 mip 级别上都能现算"被平均掉的方差" = E[|s|²] − |E[s]|²，喂给高光/探针。
     //   （这就是 LEAN / LEADR 存一阶+二阶矩的出发点；只存斜率就必须靠"mip 级别"猜方差。）
     if (uWaveFilterMode == 4 && uHasWaveTile == 1 && uWaveTileFrames > 0) {
-        float frame = uWavePhase / 6.28318530718 * float(uWaveTileFrames);
-        frame = mod(floor(frame), float(uWaveTileFrames));
+        // ⭐ 时间方向**插值**（不能直取最近帧）：直取 = 定格动画（8 帧时肉眼就是
+        //    "一张一张翻"，2026-10-28 Danis 报的"定格感"）。这里在相邻两帧之间按小数
+        //    相位线性插值 —— 斜率与二阶矩都是**线性可平均**的量，插值物理上成立
+        //    （这也正是把斜率存进纹理、而不是存归一化法线的另一个好处）。
+        float fpos = uWavePhase / 6.28318530718 * float(uWaveTileFrames);
+        float fbase = floor(fpos);
+        float ffrac = fpos - fbase;
+        int i0 = int(mod(fbase, float(uWaveTileFrames)));
+        int i1 = int(mod(fbase + 1.0, float(uWaveTileFrames)));
         vec2 uv = p.xz / max(uWaveTileM, 0.05);
-        vec4 s = texture(uWaveTile, vec3(uv, frame));
+        vec4 s = mix(texture(uWaveTile, vec3(uv, float(i0))),
+                     texture(uWaveTile, vec3(uv, float(i1))), ffrac);
         vec2 g = s.rg * 2.0 - 1.0;            // 归一化斜率（烘焙时按 max_slope 归一）
         vec2 grad = g * uWaveSlopeRad;
         // 方差是**归一化域**的量，最后乘回斜率尺度²（= 弧度²）。

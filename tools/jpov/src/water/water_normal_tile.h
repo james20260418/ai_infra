@@ -35,7 +35,7 @@ struct WaterNormalTile {
 
 // 生成并上传。参数都带单位：
 //   size      : 每层边长（建议 128~512）
-//   frames    : flipbook 帧数（4~16）
+//   frames    : flipbook 帧数（建议 32：最快八度 cycles=7 ⇒ 每帧 0.22 圈，不进 Nyquist）
 //   tile_m    : 一张 tile 覆盖多少米（决定最细波长；建议 8~32 m）
 // Pre-condition: 已创建 GL context；size > 0、frames > 0、tile_m > 0。
 // 返回的纹理：RGBA8、REPEAT、三线性 + （有扩展时）各向异性 8×。
