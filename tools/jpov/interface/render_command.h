@@ -38,6 +38,7 @@
 #include "tools/jpov/interface/particle_types.h"
 #include "tools/jpov/interface/strip_types.h"
 #include "tools/jpov/interface/volume_fire_types.h"
+#include "tools/jpov/interface/water_types.h"
 #include "tools/jpov/interface/pbr_material.h"
 // 骨架蒙皮(command 引用 SkinnedInstanceState / skeleton_id)。GL-free：仅类型,不含 GPU 细节。
 #include "tools/jpov/interface/skeleton_types.h"
@@ -2194,6 +2195,18 @@ struct RenderCommandList {
     // 未设置 / enabled=false 时零开销。**需要 tone_mapping=true**，否则 CHECK 报错。
     std::optional<ElevationFogConfig> elevation_fog;
 
+    // 全局水面（水/海）。有值且 level 合法时，在**不透明 3D 之后、三个 WBO pass（粒子 /
+    // 体积火 / 条带）之前**画一片向四周无限延伸的水平面：
+    //   · 反射：天光 cubemap 探针（第一版唯一反射源，见 EnvSpecular / SkyOutput::kEnvProbe）；
+    //   · 透射：水面之下的内容按 Beer-Lambert **逐通道**吸收 + 散射（= 水下遮蔽感）。
+    // 相机沉到水下时，同一个 water 还会额外触发一次**整屏介质** pass（位置在所有 3D 内容
+    // 之后、雾之前），把整条视线上的水都算进去。
+    // 未设置时零开销零回归（不建抓帧 FBO、不跑 pass、不渲探针）。
+    // Pre-condition: 设置时必须同时设置 sky（反射源就是天光 cubemap）。
+    // Pre-condition: 需要 tone_mapping=true（在线性 HDR 域合成，且依赖 MRT 场景深度）。
+    // 语义与参数见 interface/water_types.h；链路与取舍见 src/water/water_renderer.h。
+    std::optional<WaterSurface> water;
+
     // 场景深度可视化开关（调试，默认 false）。
     //   HDR 3D pass 用 MRT 把「场景深度」写进第二颜色附件（R32F，值 = gl_FragCoord.z
     //   ∈ [0,1]，1.0=远平面/背景）。本开关为 true 时，统一 tone map pass 把该深度图
@@ -2531,6 +2544,11 @@ struct RenderCommandList {
     // 只是把命令推入 volume_fires 列表；在不透明 3D 之后由体积 pass 渲染。
     // Pre-condition: cmd.volume_id != 0。
     void DrawVolumeFire(VolumeFireCommand cmd);
+
+    // DrawWater：设置全局水面（一帧最多一片，见 interface/water_types.h）。
+    // 覆盖式语义：后调用覆盖先调用（水面是**全局单例**，不是可累加的图元）。
+    // Pre-condition: level 有限（nan/inf 直接 crash，不静默退化成"没有水"）。
+    void DrawWater(const WaterSurface& water);
 
     // DrawStrip16Batch：追加一批 16 采样点的半透明条带（见 TranslucentStrip16Batch）。
     // 只是把命令推入 translucent_strips 列表；整批在条带 pass 里**一次 draw call** 画完。

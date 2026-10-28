@@ -279,6 +279,11 @@ void RenderCommandList::DrawParticles(ParticleRenderCommand cmd) {
     particles.push_back(std::move(cmd));
 }
 
+void RenderCommandList::DrawWater(const WaterSurface& water) {
+    CHECK(std::isfinite(water.level)) << "DrawWater: water.level 必须是有限值";
+    this->water = water;
+}
+
 void RenderCommandList::DrawVolumeFire(VolumeFireCommand cmd) {
     CHECK_NE(cmd.volume_id, 0u) << "DrawVolumeFire: volume_id 不能为 0";
     volume_fires.push_back(std::move(cmd));

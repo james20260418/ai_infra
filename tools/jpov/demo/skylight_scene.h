@@ -130,6 +130,51 @@ inline jpov::PBRMaterial GroundMaterial() {
         /*roughness*/ 1.0f);
 }
 
+// ============================================================================
+// 水面场景（W1「水面打底」）—— 一片全局水面 + 一个水下大 box + 桌上的蓝人
+// ============================================================================
+//
+// 目的：给"水面"一个**有纵深参照**的最小场景，一眼验收三件事：
+//   ① 从水上往下看：box/桌子在水下的部分按深度褪色、散射成水色（水下遮蔽感）；
+//   ② 水位滑条上下扫时，物体被水线"切开"的位置跟着动（水位是逐帧参数）；
+//   ③ 相机沉到水下：整屏被水吸收/散射（水下遮蔽感），抬头能看到水面。
+//
+// 几何布局（y-up）：
+//   海底 = 40×40 地面（复用 MakeGroundQuad，y = 0）
+//   大 box  = 6(X) × 3(Y) × 6(Z)，底面贴海底 ⇒ 顶面 y = 3
+//   桌子    = 放在 box 顶面（高 0.75 m，glTF 资产，见 demo 主程序）
+//   蓝人    = 站在桌面（脚 = box 顶 + 0.75）
+//
+// 水面默认水位 2.60 m：box 绝大部分在水下、顶面刚露出水线一点点，桌子与人在水上 ——
+// 水线正好切在"最该看清的接缝"上。
+inline constexpr float kSeaBoxHalfXZ = 3.0f;    // box 占地 6×6
+inline constexpr float kSeaBoxHalfY  = 1.5f;    // box 高 3 m
+inline constexpr float kSeaBoxTopY   = kSeaBoxHalfY * 2.0f;   // = 3.0
+inline constexpr float kSeaTableHeight = 0.75f;               // 桌面高（米）
+inline constexpr float kSeaPersonFeetY = kSeaBoxTopY + kSeaTableHeight;
+
+inline constexpr float kWaterLevelDefault = 2.60f;
+inline constexpr float kWaterLevelMin     = 0.20f;
+inline constexpr float kWaterLevelMax     = 8.00f;
+
+inline jpov::Vec3f SeaBoxCenter() { return {0.0f, kSeaBoxHalfY, 0.0f}; }
+
+// 水下大 box 的材质：深灰石、粗糙（让"水下的它"更多靠吸收色而不是自身高光说话）。
+inline jpov::PBRMaterial SeaBoxMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.30f, 0.31f, 0.33f, 1.0f},
+        /*metallic*/ 0.0f,
+        /*roughness*/ 0.85f);
+}
+
+// 海底材质：偏沙色（水下的沙地最能看出红光先被吸收）。
+inline jpov::PBRMaterial SeaFloorMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.52f, 0.47f, 0.36f, 1.0f},
+        /*metallic*/ 0.0f,
+        /*roughness*/ 1.0f);
+}
+
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //
 // turbidity：大气浊度 [0, 8]，默认 2（清澈）。
