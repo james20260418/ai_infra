@@ -289,7 +289,7 @@ inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels, float thick
 }
 
 // 段长不足 4 px 时判据次数会按 ≈ 1 + 1/L 放大（相邻 lane 重复判同一格）。
-// 只用于 LOG(WARNING)：JPOV 不负责拦住"浪费的配置"，只负责让人看见。
+// **只用于文档/单测**：渲染器不据此告警（画面完全相同，不值得占一行日志）。
 inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
     return d.slab_pixels < 4.0f;
 }

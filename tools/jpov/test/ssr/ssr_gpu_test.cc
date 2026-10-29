@@ -571,6 +571,38 @@ TEST(SsrGpu, DegenerateInputsAreFinite) {
     EXPECT_EQ(bad2, 0);
 }
 
+// ⑦ 预算填多大都不会挂、也不会改画面（2026-10-29 Danis 提出的"别加没用的保险"）
+//
+// 段尾是 `end = min(start + L, ray.exit)`，而 ray.exit ≤ 屏幕对角线（裁剪后）⇒ DDA 走到段尾
+// 就 return ⇒ **循环次数自限**，与 uStepsPerLane 这个上限无关。所以不需要"把预算钳到对角线"
+// 这种保险，也不需要为它打 warning。这条测试就是那句论断的凭据：预算 1000 与 1000000
+// （都远大于 96×64 的对角线 ≈ 115）必须产出**逐字节相同**的画面，且跑得完。
+TEST(SsrGpu, HugeBudgetIsHarmless) {
+    const Scene sc = MakeScene(/*two_layers=*/true);
+    Fixture modest;
+    modest.Setup(sc, /*tile=*/1, /*max_ray_pixels=*/1000);
+    const SsrOutputs& a = modest.ssr.Render(modest.in);
+    const std::vector<float> rad_a = ReadTexFloat(a.radiance_tex, kWidth, kHeight, GL_RGBA);
+
+    Fixture huge;
+    huge.Setup(sc, /*tile=*/1, /*max_ray_pixels=*/1000000);
+    const SsrOutputs& b = huge.ssr.Render(huge.in);
+    const std::vector<float> rad_b = ReadTexFloat(b.radiance_tex, kWidth, kHeight, GL_RGBA);
+
+    int bad = 0;
+    int diff = 0;
+    for (size_t i = 0; i < rad_b.size(); ++i) {
+        if (!std::isfinite(rad_b[i])) {
+            ++bad;
+        }
+        if (rad_a[i] != rad_b[i]) {
+            ++diff;
+        }
+    }
+    EXPECT_EQ(bad, 0) << "超大预算产出了 NaN/inf";
+    EXPECT_EQ(diff, 0) << "预算超过屏幕对角线竟然改了画面（" << diff << " 个分量不同）";
+}
+
 // ⑥ 决定论：同输入跑两次逐字节相同
 TEST(SsrGpu, Deterministic) {
     Fixture f;

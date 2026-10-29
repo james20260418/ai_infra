@@ -185,8 +185,9 @@ struct SsrInputs {
     float max_distance_m = 0.0f;  // > 0
     // 屏幕空间射线长度上限（**像素**）：覆盖率与成本是同一个数。
     //   覆盖 = min(max_ray_pixels, 屏幕对角线)（精确 —— 裁剪后不可能更长）；
-    //   成本 ≤ 1.414·该值 + T² 次判据。超过对角线时只 LOG(WARNING) 一次并按对角线算
-    //   （语义等价；但不砍的话，一个手滑的大值会变成十万次循环的 shader）。
+    //   成本 ≤ 1.414·该值 + T² 次判据。
+    // 填超过对角线**不会更慢也不会出错**（段尾被 ray.exit 截住，循环次数自限），
+    // 只是没有额外收益；模块对此**不告警**（见 Render 里的说明）。
     // 它与分辨率的关系：单位是**像素**，所以高分辨率下同一个数值看到的世界距离更近。
     //   要观感一致就由调用方按 `fraction × 屏幕高` 给（与 §9.3 用 θ_px 折算厚度同一套
     //   逻辑，模块不替你缩放）。建议 0.15~0.35 × 屏幕高度。
@@ -203,10 +204,9 @@ struct SsrInputs {
     //       T=1 任意 · T=2 需 ≥16 · T=4 需 ≥64 · T=8 需 ≥256
     //     例：1/8 分辨率 + T=8 + max_ray_pixels=40 ⇒ L=0.625 px、判据次数 ×2.67；
     //     同参数 T=2 ⇒ L=10 px、冗余 1.1×。
-    //   · **这不是错误，不拦**：JPOV 不负责"保证用户不做出浪费的配置"，只负责让他一眼看见
-    //     自己在浪费。所以违反时 LOG(WARNING) **每次配置变化只打一条**（不是每帧刷屏），
-    //     措辞给出两个数字 + 该怎么改，不 FATAL。真正的 FATAL 只留给会炸的：
-    //     忘设参数、非法枚举、超纹理尺寸 / 超显存。
+    //   · **这不是错误，也不告警**：JPOV 不负责"保证用户不做出浪费的配置"。搭配规则只在
+    //     这段注释里给出（要查的人会来查）。真正的 FATAL 只留给会炸的：忘设参数、
+    //     非法枚举、超纹理尺寸 / 超显存。
     //   · 默认 2：正好一个 quad 服务一个镜面像素（SIMD 粒度天然对齐），显存 4×。
     int tile_size = 2;
 
@@ -292,8 +292,8 @@ public:
     //     且 (W·T)(H·T)·4B ≤ kMaxSliceBytes；
     //   · color/depth/normal 都不是本模块自己的 radiance_tex / hit_s_tex
     //     （契约 6：不许形成反馈环）。
-    //   · 段长 L = max_ray_pixels / T² < 4 px ⇒ **不失败**，只在配置变化时 LOG(WARNING)
-    //     一条（每秒一帧一条的那种刷屏比不提示更糟，会淹掉真正的错误）。
+    //   · 段长 L = max_ray_pixels / T² < 4 px 只是慢（判据次数 ×(1+1/L)）：不失败、
+    //     **也不告警** —— 画面完全相同，不该占日志。
     const SsrOutputs& Render(const SsrInputs& in);
 
 private:
@@ -320,9 +320,6 @@ private:
     int tile_ = 0;                              // 当前 slice / 输出目标对应的 tile 边长
     bool debug_ = false;                        // 当前输出目标是否带调试附件
     int max_texture_size_ = 0;                  // Init 时查的 GL_MAX_TEXTURE_SIZE
-    // 上一次"段长过短"告警的配置：只在配置变化时再打一条，避免每帧刷屏。
-    int warned_tile_ = 0;
-    int warned_max_ray_pixels_ = 0;
     bool initialized_ = false;
 };
 

@@ -3,7 +3,7 @@
 > 日期：2026-10-29 ｜ 状态：**已实现（PR #241）** ｜ 决策人：Danis
 >
 > 实现：`src/ssr/{ssr_math.h,ssr_shader.h,ssr_renderer.h,ssr_renderer.cc}`；
-> 测试：`test/ssr/{ssr_math_test.cc,ssr_gpu_test.cc}`（8 + 6 组，全绿）。
+> 测试：`test/ssr/{ssr_math_test.cc,ssr_gpu_test.cc}`（8 + 7 组，全绿）。
 > 本文件与实现同步维护：接口以 `src/ssr/ssr_renderer.h` 为准，算式以 `ssr_math.h` 为准。
 >
 > 关联：
@@ -275,11 +275,14 @@ UNKNOWN  : 出屏 / 出视锥 / 起点贴边   → a = 0
   取值 `{1,2,4,8}`。
 - 代价：slice 缓冲 `(W·T)×(H·T)` 的 R32F（T² 倍显存）+ T² 倍 fragment 数。
 - 组合规则 `T² ≤ max_ray_pixels / 4`（段长 ≥ 4 px，否则相邻 lane 重复判同一格，冗余 ≈ 1+1/L）。
-  违反时只 `LOG(WARNING)` 一条：**JPOV 不负责拦「浪费的配置」，只负责让人看见**。
+  **只写在这里，运行时既不告警也不失败**（2026-10-29 Danis 定：warning 没人看，画面不变的事
+  不该占日志；真正会炸的才 FATAL）。
 - 等价性有测试兜着：`tile=1/2/4/8` 的 **radiance 逐字节相同**（调试用的 hit_s 是格内中点，
   会随段边界挪动，但只要还在同一格，取色就不变 —— 测试对它只卡 2 px 上界）。
-- 预算超过屏幕对角线时按对角线算（裁剪后不可能更长，语义等价）：否则一个手滑的
-  `max_ray_pixels=100000` 会变成十四万次循环的 shader。
+- 预算填多大都**不会更慢也不会出错**：段尾是 `end = min(start + L, ray.exit)`，而
+  `ray.exit ≤ 屏幕对角线`（裁剪后），DDA 走到段尾就 return ⇒ 循环次数自限，与
+  `max_ray_pixels` 无关（`test/ssr:ssr_gpu_test` 的 `HugeBudgetIsHarmless`：
+  预算 1000 与 1000000 逐字节相同、7 ms 跑完）。所以不需要"钳到对角线"这类保险。
 
 **为什么取 min 不用多级 2×2 金字塔**（算过，别再算）：T=8 时一趟 64 次 `texelFetch` 是
 8 行 × 每行 32 B 连续（L1 命中，真实只有 8 条缓存行、1 个 fragment）；三级金字塔要 3 趟、
@@ -486,6 +489,8 @@ SSR 的全部输入就是三张纹理 —— 造一张假的深度图就能喂�
 4. `CoverageStates` —— 全天空 ⇒ `a=0` 且 `reason=kTooShort`；全命中 ⇒ `a=1` 且颜色非黑。
 5. `DegenerateInputsAreFinite` —— `near≈0` / 法线越界 / `max_ray_pixels=4`：输出无 NaN。
 6. `Deterministic` —— 同输入跑两次逐字节相同。
+7. `HugeBudgetIsHarmless` —— `max_ray_pixels` 填 1000000（≫ 屏幕对角线）与填 1000 逐字节相同，
+   证明循环自限（也证明"不要为它加保险/告警"这条判断是对的）。
 
 ### 11.3 不做什么
 
