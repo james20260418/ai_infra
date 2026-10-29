@@ -21,8 +21,6 @@
 #define GL_GLEXT_PROTOTYPES
 
 #include <cmath>
-#include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -45,6 +43,7 @@ using jpov::ssr::ClipRayLength;
 using jpov::ssr::DeriveParams;
 using jpov::ssr::DerivedParams;
 using jpov::ssr::kNoHit;
+using jpov::ssr::HasDepthData;
 using jpov::ssr::MarchSlabs;
 using jpov::ssr::OffsetRayOrigin;
 using jpov::ssr::ReconstructNormal;
@@ -103,7 +102,7 @@ struct Scene {
 
 // 均匀深度 + 地板法线（ny=0.95 ⇒ N 几乎贴着屏幕法向，反射射线几乎贴着地面飞）。
 // 后半张图（y ≥ h/2）深度更远 ⇒ 射线能多飞一段才命中，覆盖长路径。
-Scene MakeScene(bool two_layers, float ny = 0.95f) {
+Scene MakeScene(bool two_layers, float ny = 0.95f, int sky_rows = 0) {
     Scene sc;
     sc.window_depth.resize(static_cast<size_t>(kWidth) * kHeight);
     sc.normal_xy.resize(static_cast<size_t>(kWidth) * kHeight * 2);
@@ -117,8 +116,12 @@ Scene MakeScene(bool two_layers, float ny = 0.95f) {
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
             const size_t i = static_cast<size_t>(y) * kWidth + x;
-            const float d = (two_layers && y >= kHeight / 2) ? 200.0f : 20.0f;
-            sc.window_depth[i] = window_depth_of(d);
+            if (sky_rows > 0 && y >= kHeight - sky_rows) {
+                sc.window_depth[i] = 1.0f;   // 天空：无深度数据（清空值）
+            } else {
+                const float d = (two_layers && y >= kHeight / 2) ? 200.0f : 20.0f;
+                sc.window_depth[i] = window_depth_of(d);
+            }
             sc.normal_xy[i * 2 + 0] = 0.0f;
             sc.normal_xy[i * 2 + 1] = ny;
             // 颜色 = 格号的可逆编码（+1 / N+1 是为了让 (0,0) 也不是纯黑，
@@ -189,6 +192,11 @@ struct CpuResult {
 CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& derived,
                         float max_distance_m) {
     const size_t i = static_cast<size_t>(py) * kWidth + px;
+    CpuResult out;
+    // 与着色器同一条规则：没有深度数据 ⇒ 不发射线、a=0（ssr_math.h::HasDepthData）。
+    if (!HasDepthData(sc.window_depth[i])) {
+        return out;
+    }
     const float d_surf = jpov::ssr::DepthFromWindowDepth(sc.window_depth[i], kNear, kFar);
     const Vec3 n = ReconstructNormal(sc.normal_xy[i * 2 + 0], sc.normal_xy[i * 2 + 1]);
     Vec3 p = ViewPointAtUv((px + 0.5f) / kWidth, (py + 0.5f) / kHeight, d_surf, kTanHalf, kAspect);
@@ -196,7 +204,6 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
     p = OffsetRayOrigin(p, n, d_surf);
     const float len = ClipRayLength(p, r, kNear, kFar, max_distance_m);
     ScreenRay ray;
-    CpuResult out;
     if (!BuildScreenRay(p, r, len, kTanHalf, kAspect, kWidth, kHeight, &ray)) {
         return out;
     }
@@ -273,7 +280,8 @@ TEST(SsrGpu, MatchesCpuReference) {
     for (int tile : {1, 2, 4, 8}) {
         for (bool two_layers : {false, true}) {
             Fixture f;
-            f.Setup(MakeScene(two_layers), tile, 160);
+            // 顶部 8 行是天空 ⇒ 对拍也覆盖"无深度数据"这条分支（真实场景里必然出现）。
+            f.Setup(MakeScene(two_layers, /*ny=*/0.95f, /*sky_rows=*/8), tile, 160);
             f.in.debug_reason = true;   // 要 hit_s 才能对拍 s
             const SsrOutputs& out = f.ssr.Render(f.in);
             ASSERT_NE(out.radiance_tex, 0u);
@@ -284,6 +292,8 @@ TEST(SsrGpu, MatchesCpuReference) {
 
             const std::vector<float> hit_s = ReadTexFloat(out.hit_s_tex, kWidth, kHeight, GL_RED);
 
+            int sky_pixels = 0;
+            int sky_with_alpha = 0;
             int compared = 0;
             int hit_mismatch = 0;
             int cell_mismatch = 0;
@@ -295,6 +305,12 @@ TEST(SsrGpu, MatchesCpuReference) {
                     const CpuResult cpu = MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m);
                     const bool gpu_hit = rad[i * 4 + 3] > 0.5f;
                     ++compared;
+                    if (!HasDepthData(f.scene.window_depth[i])) {
+                        ++sky_pixels;
+                        if (gpu_hit) {
+                            ++sky_with_alpha;
+                        }
+                    }
                     if (cpu.hit != gpu_hit) {
                         ++hit_mismatch;
                         if (hit_mismatch < 4) {
@@ -331,6 +347,8 @@ TEST(SsrGpu, MatchesCpuReference) {
                 }
             }
             EXPECT_GT(compared, 5000);
+            EXPECT_GT(sky_pixels, 300) << "场景里没有天空像素 ⇒ HasDepthData 那条分支没被覆盖";
+            EXPECT_EQ(sky_with_alpha, 0) << "天空像素（无深度数据）必须是 a=0";
             EXPECT_EQ(hit_mismatch, 0) << "tile=" << tile
                                        << "：CPU 与 GPU 的命中/未命中判定不一致"
                                           "（着色器与 ssr_math.h 走样了）";
@@ -449,13 +467,20 @@ TEST(SsrGpu, TileIsOnlyPerformance) {
         EXPECT_EQ(diff_px, 0) << "tile=" << tile
                               << " 与 tile=1 的 radiance 有 " << diff_px
                               << " 个像素不同（tile 不该改变画面）";
-        int diff_s = 0;
+        // hit_s **不**要求逐字节相同：s 是"命中格内的中点"，段边界一变中点就会动；
+        // 但它必须落在**同一格**里（颜色因此不变，上面那条才是契约）。这里只卡上界。
+        int far_s = 0;
         for (size_t i = 0; i < hit_s.size(); ++i) {
-            if (std::memcmp(&hit_s[i], &ref_s[i], sizeof(float)) != 0) {
-                ++diff_s;
+            const bool a_hit = hit_s[i] < kNoHit;
+            const bool b_hit = ref_s[i] < kNoHit;
+            if (a_hit != b_hit) {
+                ++far_s;
+            } else if (a_hit && std::fabs(hit_s[i] - ref_s[i]) > 2.0f) {
+                ++far_s;
             }
         }
-        EXPECT_EQ(diff_s, 0) << "tile=" << tile << " 的 hit_s 与 tile=1 不同（" << diff_s << " 像素）";
+        EXPECT_EQ(far_s, 0) << "tile=" << tile << " 的 hit_s 与 tile=1 相差超过 2 px（"
+                            << far_s << " 像素）—— 中点可以挪，但不能换格";
     }
 }
 

@@ -61,6 +61,11 @@ struct SsrRay {
     bool exits;
 };
 
+// 该像素有没有深度数据（1.0 = 清空值 = 天空）。ssr_math.h::HasDepthData
+bool SsrHasDepth(float depth) {
+    return depth < 1.0;
+}
+
 // 窗口深度 → 视距（米）。ssr_math.h::DepthFromWindowDepth（含 NaN 守卫）。
 float SsrZView(float depth) {
     float ndc = 2.0 * depth - 1.0;
@@ -188,7 +193,7 @@ void main() {
     FragS = uSentinel;
 
     // 远平面（清空值）：没有深度数据，不发射线。天空占屏的场景里这一步最省。
-    if (texelFetch(uDepth, mir, 0).r >= 1.0) {
+    if (!SsrHasDepth(texelFetch(uDepth, mir, 0).r)) {
         return;
     }
     SsrRay ray;
@@ -301,7 +306,7 @@ void main() {
     float hit_s = uSentinel;
 
     bool have_hit = best < uSentinel * 0.5;
-    if (texelFetch(uDepth, mir, 0).r >= 1.0) {
+    if (!SsrHasDepth(texelFetch(uDepth, mir, 0).r)) {
         reason = 3u;                       // 无深度数据（天空/背景）
     } else {
         SsrRay ray;

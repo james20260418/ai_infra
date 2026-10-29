@@ -79,6 +79,13 @@ inline float DepthFromWindowDepth(float depth, float near_plane, float far_plane
     return (2.0f * near_plane * far_plane) / denom;
 }
 
+// 该像素有没有深度数据。窗口深度 1.0 = 远平面清空值 ⇒ 天空/背景，**不发射线**。
+//
+// 为什么把这句收成函数：着色器与 CPU 参考必须用同一条规则。少了它，天空像素上两边就会
+// 分叉 —— 射线从 far 朝远处走，而"柱子"也在 far（z=far, T=c·far），区间必然重叠 ⇒
+// CPU 报命中、GPU 报 a=0。这种分叉只在有天空的场景里出现（也就是真实场景里必然出现）。
+inline bool HasDepthData(float window_depth) { return window_depth < 1.0f; }
+
 // 像素中心 uv（∈(0,1)）→ 视空间点，给定该点的视距 d。
 //   dir = vec3(n.x·aspect·tan_half, n.y·tan_half, −1)，n = 2·uv − 1
 //   P = dir · d  ⇒ P.z = −d
@@ -267,6 +274,8 @@ struct DerivedParams {
     float thickness_coefficient = 0.0f;
 };
 
+// Pre-condition: tile_size ∈ {1,2,4,8}、max_ray_pixels > 0、height > 0
+//（校验放在 SsrRenderer::Render —— 这里不重复 CHECK，免得 GL-free 头文件依赖 glog）。
 inline DerivedParams DeriveParams(int tile_size, int max_ray_pixels, float thickness_pixels,
                                   float tan_half_fov_y, int height) {
     DerivedParams d;

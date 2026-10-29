@@ -249,20 +249,37 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
         << "slice 缓冲 " << (slice_texels * 4) / (1024 * 1024) << " MB 超上限 "
         << kMaxSliceBytes / (1024 * 1024) << " MB（W·T×H·T 个 R32F）";
 
-    const ssr::DerivedParams derived =
-        ssr::DeriveParams(in.tile_size, in.max_ray_pixels, in.thickness_pixels,
-                          in.tan_half_fov_y, in.height);
+    // 预算上限：裁剪之后能走的路**不可能超过屏幕对角线**（enter/exit 都在矩形内），
+    // 所以再把预算砍到对角线 —— 语义完全等价，但把 shader 的循环上界收住。
+    // 少了这一条，一个手滑的 max_ray_pixels=100000 会变成 14 万次循环的 shader（挂死）。
+    const int diagonal = static_cast<int>(
+        std::ceil(std::sqrt(static_cast<double>(in.width) * in.width +
+                            static_cast<double>(in.height) * in.height)));
+    const int ray_pixels = std::min(in.max_ray_pixels, diagonal);
+    const ssr::DerivedParams derived = ssr::DeriveParams(
+        in.tile_size, ray_pixels, in.thickness_pixels, in.tan_half_fov_y, in.height);
 
-    // 段长 < 4 px ⇒ 相邻 lane 重复判同一格（判据次数 ×(1+1/L)）。只是浪费，**不失败**；
-    // 且**只在配置变化时打一条** —— 每帧刷屏会把真错误淹掉。
-    if (ssr::SlabTooShortForEfficiency(derived)) {
+    // ── 两种"浪费的配置"共用一条告警通道 ──
+    // 都不是错误，**不失败**：JPOV 不负责拦住浪费的配置，只负责让人一眼看见。
+    // 去重键是 (tile, max_ray_pixels)：同一套配置只打一次，避免每帧刷屏把真错误淹掉。
+    // 两条判断必须**在同一个 if 里**——分成两个 if 会互相把 warned_* 覆盖掉，后一条永远打不出来。
+    const bool over_screen = ray_pixels != in.max_ray_pixels;
+    const bool slab_short = ssr::SlabTooShortForEfficiency(derived);
+    if (over_screen || slab_short) {
         if (in.tile_size != warned_tile_ || in.max_ray_pixels != warned_max_ray_pixels_) {
-            LOG(WARNING) << "SSR: 段长只有 " << derived.slab_pixels << " px（tile=" << in.tile_size
-                         << ", max_ray_pixels=" << in.max_ray_pixels
-                         << "）⇒ 相邻 lane 会重复判同一格，判据次数约 ×"
-                         << (1.0f + 1.0f / std::max(1.0e-6f, derived.slab_pixels))
-                         << "。口诀：tile² ≤ max_ray_pixels/4（T=1 任意 / 2 需 16 / 4 需 64 /"
-                            " 8 需 256）";
+            if (over_screen) {
+                LOG(WARNING) << "SSR: max_ray_pixels=" << in.max_ray_pixels
+                             << " 超过屏幕对角线 " << diagonal
+                             << " px，已按对角线计（裁剪后不可能更长，语义等价）";
+            }
+            if (slab_short) {
+                LOG(WARNING) << "SSR: 段长只有 " << derived.slab_pixels << " px（tile="
+                             << in.tile_size << ", max_ray_pixels=" << in.max_ray_pixels
+                             << "）⇒ 相邻 lane 会重复判同一格，判据次数约 ×"
+                             << (1.0f + 1.0f / std::max(1.0e-6f, derived.slab_pixels))
+                             << "。口诀：tile² ≤ max_ray_pixels/4（T=1 任意 / 2 需 16 /"
+                                " 4 需 64 / 8 需 256）";
+            }
             warned_tile_ = in.tile_size;
             warned_max_ray_pixels_ = in.max_ray_pixels;
         }
@@ -288,12 +305,14 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     GLint prev_blend = 0;
     GLint prev_depth = 0;
     GLint prev_cull = 0;
+    GLint prev_scissor = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
     prev_blend = glIsEnabled(GL_BLEND);
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
     prev_cull = glIsEnabled(GL_CULL_FACE);
+    prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
     GLint prev_bind[kTexUnitSize] = {0, 0, 0, 0};
     for (int u = 0; u < kTexUnitSize; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
@@ -307,6 +326,7 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);   // 调用方开着 scissor 会把全屏 pass 裁成一小块
 
     // ── ① march：(W·T)×(H·T)，每 texel 一个 lane ──
     glBindFramebuffer(GL_FRAMEBUFFER, slice_fbo_);
@@ -390,6 +410,9 @@ const SsrOutputs& SsrRenderer::Render(const SsrInputs& in) {
     }
     if (prev_cull != 0) {
         glEnable(GL_CULL_FACE);
+    }
+    if (prev_scissor != 0) {
+        glEnable(GL_SCISSOR_TEST);
     }
 
     return outputs_;
