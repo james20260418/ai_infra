@@ -194,8 +194,14 @@ struct SsrInputs {
     //   · T 只决定"同一笔预算切成几份并发跑"：**不改变覆盖、不改变输出，只改耗时**。
     //     代价是 slice 缓冲 (W·T)×(H·T) R32F ⇒ T² 倍显存 + T² 倍 fragment 数。
     //   · 组合规则：段长 L = max_ray_pixels / T²，建议 L ≥ 4 px（冗余 ≈ 1 + 1/L）。
+    //     **快速口诀：T² ≤ max_ray_pixels / 4（单位 px）**
+    //       T=1 任意 · T=2 需 ≥16 · T=4 需 ≥64 · T=8 需 ≥256
     //     例：1/8 分辨率 + T=8 + max_ray_pixels=40 ⇒ L=0.625 px、判据次数 ×2.67；
-    //     同参数 T=2 ⇒ L=10 px、冗余 1.1×。违反只 LOG(WARNING)（是性能选择不是语义错误）。
+    //     同参数 T=2 ⇒ L=10 px、冗余 1.1×。
+    //   · **这不是错误，不拦**：JPOV 不负责"保证用户不做出浪费的配置"，只负责让他一眼看见
+    //     自己在浪费。所以违反时 LOG(WARNING) **每次配置变化只打一条**（不是每帧刷屏），
+    //     措辞给出两个数字 + 该怎么改，不 FATAL。真正的 FATAL 只留给会炸的：
+    //     忘设参数、非法枚举、超纹理尺寸 / 超显存。
     //   · 默认 2：正好一个 quad 服务一个镜面像素（SIMD 粒度天然对齐），显存 4×。
     int tile_size = 2;
 
@@ -281,7 +287,8 @@ public:
     //     且 (W·T)(H·T)·4B ≤ kMaxSliceBytes；
     //   · color/depth/normal 都不是本模块自己的 radiance_tex / hit_s_tex
     //     （契约 6：不许形成反馈环）。
-    //   · 段长 L = max_ray_pixels / T² < 4 px 时**只** LOG(WARNING)，不失败。
+    //   · 段长 L = max_ray_pixels / T² < 4 px ⇒ **不失败**，只在配置变化时 LOG(WARNING)
+    //     一条（每秒一帧一条的那种刷屏比不提示更糟，会淹掉真正的错误）。
     const SsrOutputs& Render(const SsrInputs& in);
 
 private:
