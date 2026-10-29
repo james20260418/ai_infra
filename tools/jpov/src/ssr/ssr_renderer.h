@@ -4,7 +4,7 @@
 //       括号里的 §x.y 就是章节号 —— 改接口之前先读那一节，别重新论证一遍。
 //
 // ★ 本文件当前是**接口定义**（只有声明，没有实现）：给需求者 review 用。
-//   实现（GLSL / FBO / 金字塔 / DDA）按 §16 的顺序另开 commit。
+//   实现（GLSL / FBO / 分段并行的 DDA）按 §16 的顺序另开 commit。
 //
 // ───────────────────────────────────────────────────────────────────────────
 // 定位
@@ -26,7 +26,20 @@
 //     射线在这一格里的「视深区间」 与 这一格柱子的 [z, z+T] 有重叠吗？
 //
 // 有 ⇒ 命中，取那一格的颜色（最近邻，不插值）；没有 ⇒ 前进一格。
-// 三行判据、**不解任何方程**（§5.1）。挡在浪费步数前面的是一张 min 金字塔（§5.5）。
+// 三行判据、**不解任何方程**（§5.1）。
+//
+// ── 并行化（2026-10-29 Danis 定，**替代** §5.5 的 min 金字塔）──
+// 把这条射线按**屏幕弧长**切成 T² 段等长段（每段 L = max_ray_pixels / T² px），
+// 一段一个 lane 同时跑：第 k 段的 lane 从 σ = k·L 起自己走 DDA，报「本段最早的命中」——
+// 记成**命中格内的中点** s_mid = ½(s_enter + s_exit)。T² 个 lane 的结果取 min，就是整条
+// 射线的碰撞位置。中点保证从 s 反推的 uv **一定落在那个命中格内**，而柱内颜色处处相同
+// ⇒ s 的截断误差不影响取色（这也是"取 min 能成立"的真正前提）。
+//   · 格子是**原子单位**（1 px），所以每段不要短于约 4 px，否则相邻 lane 重复判同一格
+//     （冗余 ≈ 1 + 1/L）。不是"并行不了"，是"切不出半个格子"。
+//   · 每段步数上限取对角线最坏情况 ceil(1.414·L)+1 ⇒ 每段都走得完、绝不半路截断，
+//     覆盖 = T²·L = max_ray_pixels（精确），每像素判据次数 ≤ 1.414·max_ray_pixels + T²
+//     （**与场景几何无关**，全屏一致）。
+//   · 没有层级、没有分支树、没有每帧建的金字塔 ⇒ 帧成本可解析，gold 不会被性能调优带崩。
 //
 // ───────────────────────────────────────────────────────────────────────────
 // 契约（实现时逐条照抄，§2.1）
@@ -39,8 +52,8 @@
 //     否则「环境镜面项」会出现第二份实现（改一处、另一处不动的那种 bug）。
 //  5. **决定论**：同输入同输出，逐字节。无历史、无抖动、无时序、无随机、无上采样。
 //  6. **不改输入、不读自身输出**：同一 pass 内读写同一张颜色纹理 = 反馈环。
-//  7. **成本可解析界定**：O(log 屏幕长度) 次金字塔采样 + 常数次叶层操作，
-//     硬上界 max_steps。**步数只影响性能与覆盖率，不影响正确性**（§5.5）。
+//  7. **成本可解析界定**：≤ 1.414·max_ray_pixels + T² 次格子判据 + T² 次归约取样，
+//     与场景几何无关。tile_size 只改**并发粒度**，不改输出（tile=1/2/4/8 逐像素相同）。
 //
 // ───────────────────────────────────────────────────────────────────────────
 // 管线位置（§14，三条硬约束违反任何一条都会出难查的 bug）
@@ -119,7 +132,7 @@ namespace jpov {
 //
 // 全部只读。所有字段的初值都是 0/0.0/false，**0 一律表示「未设置」**：Render 直接 LOG(FATAL)，
 // 不做任何"猜一个合理值"的兜底（漏设参数应该立刻炸，而不是悄悄换个观感）。
-// 唯一的例外是 debug_reason（false = 关闭，本就是合法状态）。
+// 例外只有两个：debug_reason（false = 关闭）与 tile_size（= 2，并发粒度，不影响画面）。
 struct SsrInputs {
     // ---- 纹理（尺寸都必须等于 width×height，Render 会校验）----
 
@@ -168,10 +181,23 @@ struct SsrInputs {
     // 射线长度上限（米）。建议 = far_plane；超过 far 的部分没有任何深度数据，
     // 内部再与 far_plane 取 min（此处传大一点不会出错，只是无效）。
     float max_distance_m = 0.0f;  // > 0
-    // 叶层逐格判定的硬上界（含金字塔下探）。只影响性能与覆盖率，不影响正确性（§5.5）。
-    // 建议 64。每次格子推进或每次金字塔探测各计 1。
-    // 耗尽 ⇒ 按「不知道」处理（a = 0），不是"猜一个近似的"。
-    int max_steps = 0;  // > 0
+    // 屏幕空间射线长度上限（**像素**）：覆盖率与成本是同一个数。
+    //   覆盖 = max_ray_pixels（精确）；成本 ≤ 1.414·max_ray_pixels + T² 次判据。
+    // 它与分辨率的关系：单位是**像素**，所以高分辨率下同一个数值看到的世界距离更近。
+    //   要观感一致就由调用方按 `fraction × 屏幕高` 给（与 §9.3 用 θ_px 折算厚度同一套
+    //   逻辑，模块不替你缩放）。建议 0.15~0.35 × 屏幕高度。
+    int max_ray_pixels = 0;  // > 0
+
+    // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}，K = T² ∈ {1,4,16,64}。
+    //   · T 必须**偶数且为 2 的幂**（T=1 除外）：否则一个 2×2 quad 会跨 tile，
+    //     隐式 LOD / fwidth 立刻出错。T=8 的 tile 恰是 16 个完整 quad，安全。
+    //   · T 只决定"同一笔预算切成几份并发跑"：**不改变覆盖、不改变输出，只改耗时**。
+    //     代价是 slice 缓冲 (W·T)×(H·T) R32F ⇒ T² 倍显存 + T² 倍 fragment 数。
+    //   · 组合规则：段长 L = max_ray_pixels / T²，建议 L ≥ 4 px（冗余 ≈ 1 + 1/L）。
+    //     例：1/8 分辨率 + T=8 + max_ray_pixels=40 ⇒ L=0.625 px、判据次数 ×2.67；
+    //     同参数 T=2 ⇒ L=10 px、冗余 1.1×。违反只 LOG(WARNING)（是性能选择不是语义错误）。
+    //   · 默认 2：正好一个 quad 服务一个镜面像素（SIMD 粒度天然对齐），显存 4×。
+    int tile_size = 2;
 
     // 仅测试/调试：true 时额外写 reason_tex（见 SsrResult）。**不参与计算**，
     // 关掉时对 radiance_tex 零影响（gold 用 radiance，三态用它，§11.2-5）。
@@ -191,6 +217,11 @@ struct SsrOutputs {
     // R8UI（仅 debug_reason == true 时非 0）：每像素写一个 SsrResult 的数值。
     // 供 §11.2-5 的"A 三态"测试断言分类，不进任何生产路径。
     unsigned int reason_tex = 0;
+
+    // R32F（仅 debug_reason == true 时非 0）：每像素写整条射线的碰撞位置 s（像素弧长，
+    // 无命中写哨兵 +1e30）。§11.2-3 的"命中格与解析解一致"最自然的断言对象就是它
+    // （靠颜色反推很脆）；它同时是 tile 等价性测试的直接证据：s 相同 ⇒ 命中格相同。
+    unsigned int hit_s_tex = 0;
 };
 
 // 像素级结算结果。**只用于调试/测试**（写进 reason_tex），不参与渲染（§5.4）。
@@ -202,8 +233,8 @@ enum class SsrResult : std::uint8_t {
     kSky = 1,
     // 射线出屏 / 出视锥 / 起点贴边 ⇒ A = 0（显式：没有数据，不是"没有东西"）
     kOffscreen = 2,
-    // 可用射线长度 ≈ 0（起点已在 far 平面）或 max_steps 耗尽 ⇒ A = 0
-    // （耗尽算"不知道"而不是"没命中"，所以 max_steps 不改正确性只改覆盖率）
+    // 可用射线长度 ≈ 0（起点已在 far 平面）或超出 max_ray_pixels 预算 ⇒ A = 0
+    // （超预算算"不知道"而不是"没命中"：覆盖率掉、正确性不掉）
     kTooShort = 3,
 };
 
@@ -220,9 +251,10 @@ enum class SsrResult : std::uint8_t {
 //     跨 pass 分配表（那张表管的是"同时活跃"的 3D 主链路资源，见其文件头）。
 class SsrRenderer {
 public:
-    // 与 Renderer::kMaxFboDim 一致。此处不 include renderer.h（避免依赖倒置），
-    // 改大小时两边一起改 —— Render 里对 width/height 做硬校验。
-    static constexpr int kMaxDim = 4096;
+    // slice 缓冲的字节上限（(W·T)(H·T) 个 R32F）。超了直接 FATAL 并把算出来的数字打出来，
+    // 让用户看到"是 tile 太大还是分辨率太高"，而不是事后对着 "framebuffer incomplete" 猜。
+    // 纹理边长上限**不写死常量**：Init 时查 GL_MAX_TEXTURE_SIZE（那是驱动属性，不是我们的选择）。
+    static constexpr long long kMaxSliceBytes = 512LL << 20;
 
     SsrRenderer();
     ~SsrRenderer();
@@ -230,7 +262,7 @@ public:
     SsrRenderer(const SsrRenderer&) = delete;
     SsrRenderer& operator=(const SsrRenderer&) = delete;
 
-    // 编译 SSR program（全屏 VS + 单 FS）与金字塔下采样 program。
+    // 编译两趟 program（march / resolve），tile 变体用 ShaderSource::defines 区分。
     // Pre-condition: GL context 已激活（Renderer::Init 内调用）。
     // 可重复调用（先内部 Finalize 再重建）。
     void Init(ShaderManager* shader_mgr);
@@ -242,34 +274,33 @@ public:
     //
     // Pre-condition（任一不满足 ⇒ LOG(FATAL)，不静默退化）：
     //   · 已 Init；三张输入纹理都 ≠ 0，且实际尺寸 == width×height；
-    //   · 0 < width,height ≤ kMaxDim；near_plane > 0；far_plane > near_plane；
-    //   · tan_half_fov_y > 0；aspect > 0；thickness_pixels > 0；min_thickness_m > 0；
-    //   · max_distance_m > 0；max_steps > 0；
-    //   · color_tex / depth_tex / normal_tex 都不是本模块自己的 radiance_tex
+    //   · 0 < width,height；near_plane > 0；far_plane > near_plane；tan_half_fov_y > 0；
+    //     aspect > 0；thickness_pixels > 0；min_thickness_m > 0；max_ray_pixels > 0；
+    //   · tile_size ∈ {1,2,4,8}；
+    //   · width·tile、height·tile 都不超 GL_MAX_TEXTURE_SIZE（Init 时查一次），
+    //     且 (W·T)(H·T)·4B ≤ kMaxSliceBytes；
+    //   · color/depth/normal 都不是本模块自己的 radiance_tex / hit_s_tex
     //     （契约 6：不许形成反馈环）。
+    //   · 段长 L = max_ray_pixels / T² < 4 px 时**只** LOG(WARNING)，不失败。
     const SsrOutputs& Render(const SsrInputs& in);
 
 private:
-    // 输出的 radiance（+ 可选 reason）FBO，尺寸变化时重建。幂等。
-    // debug_reason 开关变化也算「需要重建」（多/少一个附件），但那是测试路径，不在热路径上。
-    void EnsureTargets(int w, int h);
+    // slice 目标与输出目标（radiance [+ reason / hit_s]）。尺寸或 tile 变化时重建。幂等。
+    // debug_reason 开关变化也算「需要重建」（多/少附件）—— 测试路径，不在热路径上。
+    // **Render 内零分配**：热路径上只有 viewport / 绑定 / draw。
+    void EnsureTargets(int w, int h, int tile);
     void DestroyTargets();
-
-    // 每帧从 depth_tex 重建 min 金字塔（level 0 = 深度本身；逐级 2×2 取 **min**）。
-    // 存的是**米**（d = ZView(gl_FragCoord.z)），不是 z_ndc —— 跳过比较要跟 T 同量纲。
-    // 为什么要每帧重建：深度每帧都变；重建是 O(N)（总纹素 ≈ 4/3 N），一次全屏 pass 的量级。
-    // 为什么只有 min：§5.5 里 95% 的跳过来自"射线整段在块前方"，max-mip 收益次要（后续再加）。
-    void BuildDepthPyramid(int w, int h);
 
     ShaderManager* shader_mgr_ = nullptr;
 
-    unsigned int prog_ssr_ = 0;       // 全屏 VS + march FS
-    unsigned int prog_pyramid_ = 0;   // 全屏 VS + 2×2 min 下采样 FS
+    // program 按 tile 取变体（T 是编译期常量，用 ShaderSource::defines 出 TILE=1/2/4/8；
+    // ShaderManager 按名字缓存，tag 里带 T）。C++ 侧只有一条代码路径。
+    unsigned int prog_march_ = 0;     // 全屏 VS + 单段 march FS（画 (W·T)×(H·T)）
+    unsigned int prog_resolve_ = 0;   // 全屏 VS + T² 取 min / 取色 FS（画 W×H）
 
-    unsigned int fbo_ = 0;            // 输出 FBO（挂 radiance_tex [+ reason_tex]）
-    unsigned int pyramid_fbo_ = 0;    // 金字塔的临时 FBO（逐级 glFramebufferTexture2D）
-    unsigned int pyramid_tex_ = 0;    // R32F，单张纹理带完整 mip 链（level 0 = 深度副本）
-    int pyramid_levels_ = 0;
+    unsigned int slice_fbo_ = 0;      // march 的目标（挂 slice_tex_）
+    unsigned int slice_tex_ = 0;      // R32F，(W·T)×(H·T)；每 texel = 一个 lane 的 s_mid
+    unsigned int fbo_ = 0;            // resolve 的目标（挂 radiance [+ reason / hit_s]）
 
     SsrOutputs outputs_;
     int width_ = 0;
@@ -304,32 +335,45 @@ private:
 //      （w = 1/d 对屏幕位置是仿射的 ⇒ 裁剪后端点上的 w 直接按比例算，精确）
 //      之后任何 σ 处：w(σ) = mix(w0, w1, σ / S)，d(σ) = 1 / w(σ)
 //
-// ④ 起点格跳过（见文件头"待确认"）：DDA 的第一次前进就走到起点格的出格点。
-//    起点格**永不参与判定**，否则射线会在自己的柱子里立刻命中自己。
+// ③ 屏幕参数化 + 矩形裁剪（σ = 像素弧长）
+//      s0 = 起点像素坐标；s1 = 把 P + R·rayLen 投回屏幕；
+//      矩形裁剪到 [0,W]×[0,H]，同时按**同一个**裁剪参数把 (w0, w1) 一起夹紧
+//      （w = 1/d 对屏幕位置是仿射的 ⇒ 裁剪后端点上的 w 直接按比例算，精确）
+//      之后任何 σ 处：w(σ) = mix(w0, w1, σ / S)，d(σ) = 1 / w(σ)
+//      **先裁剪再切段**：否则出屏的那些段白跑，还占着 lane。
 //
-// ⑤ 逐格判据（§5.1，整个 march 的核心，三行）
-//      (w_in, w_out) ← 射线在本格内的 σ 区间端点
+// ④ 切段（lane 的工作分配）
+//      L = max_ray_pixels / T²；lane k 覆盖 σ ∈ [k·L, (k+1)·L)；
+//      起点像素 = s0 + ê·(k·L)，w(k·L) 用同一份仿射式（精确，不用累加）
+//      · lane 起点在屏外、或 k·L ≥ S ⇒ 直接写哨兵 s = +1e30（空转只有一条比较）
+//      · **起点格跳过只对 lane 0 有意义**（其余 lane 的起点不在反射体表面上）；
+//        lane 0 的 DDA 从起点格的**出格点**开始、起点格永不参与判定，否则射线会在
+//        自己的柱子里立刻命中自己（见文件头"待确认"）。
+//
+// ⑤ 段内 DDA（每格三行判据，§5.1 —— 整个 march 的核心）
+//      (w_in, w_out) ← 射线在本格内的 σ 区间端点（段内 w 单调 ⇒ 端点即极值）
 //      d_lo = 1 / max(w_in, w_out);  d_hi = 1 / min(w_in, w_out)
 //      z, T ← 本格深度与厚度（T = max(c·z, min_thickness_m)，用**本格**的 z）
-//      if (d_hi < z)      continue;      // 整段在柱子前方（最常见，水面 95% 的跳过）
+//      if (d_hi < z)      continue;      // 整段在柱子前方（水面最常见）
 //      if (d_lo > z + T)  continue;      // 整段在柱子后方（穿过去了）
-//      hit ⇒ color(cell)（最近邻，不插值，与"柱内颜色处处相同"一致）, a = 1, reason = kHit
+//      hit ⇒ s_mid = ½(s_enter + s_exit)   // **命中格内**的中点，写 slice_tex_ 后 return
+//      步数上限 = ceil(1.414·L) + 1（对角线最坏情况）⇒ 满段永远走得完、绝不半路截断；
+//      提前返回只发生在命中时。
 //
 //    等价写法（省掉每格除法，实现时可用）：判据整体搬到 w 空间 ——
 //      [w_lo, w_hi] ∩ [1/(z+T), 1/z] ≠ ∅，且 T = c·z ⇒ 下界 = w/(1+c)。
 //    注意：min_thickness_m 生效时这个化简不成立，需回退到 d 空间那三行。
 //
-// ⑥ min 金字塔跳过（§5.5）
-//      在 level L 上取射线穿过本块的 σ 区间 [σa, σb]（w 线性 ⇒ 端点即极值）
-//      d_hi = 1 / min(w(σa), w(σb))       // 射线在这段里的**最远**视深
-//      if (d_hi < block_min_d) ⇒ 整段都在块前方 ⇒ 直接跳到 σb（一次跳过 2^L 格）
-//      否则下沉一级；level 0 上逐格判 ⑤，未命中就前进一格并重新从高层尝试
-//      起始层 = min(最高层, ceil(log2(射线屏幕长度)))，避免短射线白跑高层
-//      成本 O(log 屏幕长度)，且被 max_steps 硬兜住
+// ⑥ resolve（1:1 一趟，取 min 与取色合在一起）
+//      s = min(T² 个 texelFetch)                  // T 行 × 每行 T 个连续纹素，L1 友好
+//      s ≥ 哨兵 ⇒ a = 0；kSky / kOffscreen 由"是否曾出屏"区分，写进 reason
+//      否则 pos = s0 + ê·s ⇒ uv = floor(pos) ⇒ texelFetch(color) ⇒ 写 (color, a = 1)
+//      ⚠️ 这一趟**本来就要存在**（s → 命中格 → 颜色），min 塞进来 pass 数 +0；边际成本
+//         是 T² 次取样，而 march 本身要 ~1.4·max_ray_pixels 次 ⇒ 4%(T=4) / 15%(T=8)。
+//         所以不要为它建 mip 链、也不要指望 textureGather（GLSL 4.00 才有）。
 //
-// ⑦ 写出
-//      命中 ⇒ vec4(color, 1)；kSky / kOffscreen / kTooShort ⇒ vec4(0,0,0,0)
-//      debug_reason ⇒ 额外写 reason_tex（R8UI，值为 SsrResult）
+// ⑦ 调试（不额外开 pass，全部顺手写在 ⑥ 里）
+//      reason_tex ← SsrResult；hit_s_tex ← s
 //
 // ── 数值卫生（写代码时逐条问自己）─────────────────────────────────────────
 //  · **永远**不要在 d 空间做插值，只在 w = 1/d 空间插值（§3.1）。
@@ -340,8 +384,14 @@ private:
 //    GLSL 330 没有 textureGather（那是 4.00），2×2 下采样用 4 次 texelFetch。
 //  · 浮点行号/列号不能用来选纹理行（llvmpipe 上 float(id)/N 会略大于整数 ⇒ 双线性
 //    混到相邻行）。本模块只用整数坐标取格，天然规避。
-//  · 金字塔尺寸取 ceil(w/2^L)：奇数尺寸时块覆盖的叶子数不齐，DDA 用"块的真实像素范围"
-//    而不是"块下标 × 2^L"来推 σ 区间，否则边界会多算/漏算一格。
+//  · **镜面像素的 uv 必须用 tile 中心**：uv = (floor(gl_FragCoord.xy / T) + 0.5) / (W,H)；
+//    写成 gl_FragCoord.xy / (T·W) 会把采样点整体偏 (T−1)/(2T) px ⇒ 倒影平移 + 边缘一圈
+//    脏边，而且症状看着完全像别的问题。
+//  · tile 边长 T **必须是偶数且为 2 的幂**：2×2 quad 若跨 tile，同一 quad 的 4 个 lane
+//    会属于两个镜面像素 ⇒ 隐式 LOD / fwidth 立刻出错（本模块不用导数，但 T=3/6 这类值
+//    一律禁掉，别给将来留坑）。
+//  · 哨兵用 +1e30 而不是 inf：inf 参与 min 是合法的，但写进 R32F 再读回来时某些驱动
+//    会把 inf 规整掉；1e30 在 R32F 里可精确表示，且远大于任何合理 s。
 
 }  // namespace jpov
 
