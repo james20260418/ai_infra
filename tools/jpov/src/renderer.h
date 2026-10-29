@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
+#include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
 #include "tools/jpov/src/instanced/instanced_object_attrs.h"
 #include "tools/jpov/src/instanced/instanced_object_renderer.h"
@@ -57,6 +59,17 @@ struct Renderer {
               const ShadowConfig& shadow_cfg);
     void BeginFrame(int render_w, int render_h);
     void Render(const RenderCommandList& cmds, const WindowInfo& winfo);
+
+    // 把 debug HUD 文本画到**主 FBO 的最上层**（必须在 Render() 之后调用）。
+    //
+    // 用内置 8x8 点阵字体（不依赖 app 注册的 TTF），纯白色，左上角起排、'\n' 换行。
+    // 之所以单独一个方法而不是一条渲染指令：debug HUD 是引擎自身状态的可视化，
+    // 不该混进用户的 RenderCommandList（见 interface/debug_info.h 的说明）。
+    // 画在 Render() 之后 ⇒ 落在 fbo_ 上 ⇒ Present / SaveScreenshot 都会带上它。
+    //
+    // Pre-condition: Init() 已调用；当前绑定的是主 FBO（Render() 返回后的状态）
+    void DrawDebugOverlay(std::string_view text, int glyph_scale);
+
     void Present(GLFWwindow* window, int window_width, int window_height);
     void SaveScreenshot(int win_w, int win_h, const char* path);
     void SaveScreenshotToBuffer(int win_w, int win_h, std::vector<uint8_t>* out_pixels);
@@ -384,6 +397,8 @@ public:
 
     TextureManager texture_mgr_;
     FontRenderer font_renderer_;
+    // debug HUD 的内置点阵字体渲染器（自带 128x48 GL_R8 图集，与 FontRenderer 无关）。
+    DebugOverlayRenderer debug_overlay_renderer_;
     MeshManager mesh_mgr_;
 
     // per-instance 数据缓冲（Instanced draw 用）。分两组、互不复用：

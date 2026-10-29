@@ -8,6 +8,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tools/jpov/src:renderer",
+        "//tools/jpov/src:gpu_info_query",
+        "//tools/jpov/interface:debug_info",
         "//tools/jpov/interface:input_snapshot",
         "//tools/jpov/interface:gltf_object",
         "//tools/jpov/interface:mesh",

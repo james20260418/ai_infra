@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/input_snapshot.h"
+#include "tools/jpov/interface/debug_info.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/interface/mesh.h"
@@ -86,6 +87,20 @@ public:
         // 全局阴影配置（CSM）。默认 = ShadowConfig::Default()（开放世界通用）。
         // 无 sun 时该配置不生效；有 sun 时按此切分级联、每段渲染独立 shadow map。
         jpov::ShadowConfig shadow;
+
+        // 左上角 debug HUD（硬件信息 / 相机机位 / 分辨率 / 帧号 / fps）的**初始可见性**。
+        //   false（默认）：启动时关闭，运行中按 `~` 打开。
+        //   true：启动即可见（适合 CI 截图 / 想一打开就看到硬件的场景）。
+        // `~` 是**引擎保留键**：切换它，且应用在 InputSnapshot 里看不到这次按键。
+        // ⚠️ 代价（有意为之）：文本框（ui.cc / sp_ui.cc）因此不能再输入 '`' / '~'。
+        // HUD 用内置 8x8 ASCII 点阵字体绘制（纯白、左上角），**不依赖** fonts 列表
+        // —— 零字体注册的 app 也能显示。
+        bool        debug_overlay = false;
+
+        // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
+        // Pre-condition: 1 <= debug_overlay_scale <= 8（越界 Init() 会 CHECK 失败）
+        // 4K / 高 DPI 屏上文字过小时调大它。
+        int         debug_overlay_scale = 1;
     };
 
     explicit JPOV(Config cfg);
@@ -323,6 +338,22 @@ public:
     // 未发起过 pick 查询时返回初始状态（hit=false, picking_id=0）。
     const jpov::PickResult& last_pick() const { return renderer_->last_pick(); }
 
+    // ---- Debug 信息 ----
+
+    // 引擎持有的 debug 状态快照（硬件信息 / 本帧相机 / 分辨率 / 帧号 / fps）。
+    //
+    // 更新时机：Init() 填 gpu（此后不变）；每帧 RunOnceInternal 填其余字段。
+    // 用途：app 想在 UI 里显示“当前用哪块 GPU”时直接读它，无需自己写
+    // glGetString（也无需自己解析软件光栅器名字）。
+    const jpov::DebugInfo& debug() const { return debug_; }
+
+    // 左上角 debug HUD 当前是否可见（`~` 切换；初值 = Config::debug_overlay）。
+    bool is_debug_overlay_visible() const { return debug_overlay_visible_; }
+
+    // 程序设置 debug HUD 可见性（与按 `~` 等价；Config::debug_overlay 只是初值）。
+    // 用途：想把 HUD 写进截图/录像的自动化、或者给 app 自己的“设置”项接一个开关。
+    void SetDebugOverlayVisible(bool visible) { debug_overlay_visible_ = visible; }
+
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //
@@ -372,6 +403,14 @@ private:
     Config config_;
     GLFWwindow* window_ = nullptr;
     std::unique_ptr<jpov::Renderer> renderer_;
+
+    // ---- Debug HUD 状态 ----
+    // DebugInfo 是**引擎自己的一份状态**（不是渲染指令）：Init 填 gpu，每帧填相机/fps。
+    jpov::DebugInfo debug_;
+    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay，运行时由 `~` 切换。
+    bool debug_overlay_visible_ = false;
+    // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
+    double last_frame_time_ = 0.0;
     pid_t xvfb_pid_    = 0;
     bool  started_xvfb_ = false;
     bool  initialized_  = false;

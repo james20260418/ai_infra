@@ -290,6 +290,47 @@ cc_library(
 )
 
 # Renderer — GL FBO + 动态分辨率渲染核心
+# GPU/驱动信息查询（需要 active GL context）—— 数据结构在 interface/gpu_info.h，
+# 这里只放 GL 侧采样，保证 interface 层不 include 任何 GL 头。
+cc_library(
+    name = "gpu_info_query",
+    srcs = ["gpu_info_query.cc"],
+    hdrs = ["gpu_info_query.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:gpu_info",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# debug HUD 的内置 8x8 点阵字体绘制（自带 GL_R8 图集，零外部字体文件依赖）。
+cc_library(
+    name = "debug_overlay_renderer",
+    srcs = ["debug_overlay/debug_overlay_renderer.cc"],
+    hdrs = [
+        "debug_overlay/debug_overlay_renderer.h",
+        "debug_overlay/debug_font8x8.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 cc_library(
     name = "renderer",
     srcs = ["renderer.cc"],
@@ -297,6 +338,7 @@ cc_library(
     data = ["//tools/jpov/fonts:all_fonts"],
     visibility = ["//visibility:public"],
     deps = [
+        ":debug_overlay_renderer",
         ":font_renderer",
         ":primitives2d_renderer",
         ":plate2d_renderer",

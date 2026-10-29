@@ -15,16 +15,13 @@
 
 #include "jpov.h"
 
-// GL 枚举/函数原型：**MinGW 的 <GL/gl.h> 只到 1.1**，`GL_MAX_VERTEX_ATTRIBS` 等
-// 都在 <GL/glext.h> 里。下面的 GL 信息日志要用它，所以两平台都显式带上
-// （与 volume_fire_renderer.cc 同款；缺这个在 --config=windows 下编译失败）。
-#include <GL/gl.h>
-#include <GL/glext.h>
-
 #include <algorithm>
 #include <cstdlib>
 #include <tuple>
 #include <glog/logging.h>
+
+#include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
+#include "tools/jpov/src/gpu_info_query.h"
 
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -69,7 +66,10 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 // ========== 生命周期 ==========
 
 JPOV::JPOV(Config cfg)
-    : config_(cfg), window_(nullptr), initialized_(false) {}
+    : config_(cfg),
+      window_(nullptr),
+      debug_overlay_visible_(cfg.debug_overlay),
+      initialized_(false) {}
 
 JPOV::~JPOV() {
     if (initialized_) {
@@ -157,28 +157,29 @@ void JPOV::Init() {
     // 仅加载 TrueType outline (.ttf/.ttc) 字体。
     const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {};
 
+    // 字形放大倍数的合法区间由内置点阵字体决定（1 = 8x8 原生，上限 8 倍）。
+    CHECK_GE(config_.debug_overlay_scale, jpov::DebugOverlayRenderer::kGlyphScaleMin)
+        << "Config::debug_overlay_scale 太小";
+    CHECK_LE(config_.debug_overlay_scale, jpov::DebugOverlayRenderer::kGlyphScaleMax)
+        << "Config::debug_overlay_scale 太大";
+
     renderer_ = std::make_unique<jpov::Renderer>();
     renderer_->Init(font_tuples, kDefaultFonts, config_.shadow);
+
+    // 采一次 GPU/驱动信息，存成引擎自己的状态（此后不变）。
+    // 这是**“卡不卡”的第一信息**：WSLg / 容器里很容易静默落到 llvmpipe（纯软
+    // 光栅）—— 此时再优化 shader 也只能改善一部分，真正的差别在有没有硬件光栅。
+    // kind == kCpuRaster 就是软件在跑。
+    debug_.gpu = jpov::QueryGpuInfo();
 
     initialized_ = true;
     LOG(INFO) << "JPOV::Init() — " << (config_.headless ? "headless" : "windowed")
               << " " << win_w << "x" << win_h;
-    // 打印实际拿到的 GL 实现：**这是"卡不卡"的第一信息**。WSLg / 容器里很容易
-    // 静默落到 llvmpipe（纯软件光栅）—— 此时再优化 shader 也只能改善一部分，
-    // 真正的差别在有没有硬件光栅。看到 "llvmpipe" 就说明是软件在跑。
-    const GLubyte* gl_renderer = glGetString(GL_RENDERER);
-    const GLubyte* gl_version = glGetString(GL_VERSION);
-    const GLubyte* gl_vendor = glGetString(GL_VENDOR);
-    LOG(INFO) << "GL: renderer=" << (gl_renderer ? reinterpret_cast<const char*>(gl_renderer)
-                                                 : "?")
-              << " | vendor=" << (gl_vendor ? reinterpret_cast<const char*>(gl_vendor) : "?")
-              << " | version=" << (gl_version ? reinterpret_cast<const char*>(gl_version) : "?")
-              << " | max_vertex_attribs="
-              << [] {
-                     GLint n = 0;
-                     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &n);
-                     return n;
-                 }();
+    LOG(INFO) << "GL: " << jpov::GpuKindName(debug_.gpu.kind)
+              << " | renderer=" << (debug_.gpu.renderer.empty() ? "?" : debug_.gpu.renderer)
+              << " | vendor=" << (debug_.gpu.vendor.empty() ? "?" : debug_.gpu.vendor)
+              << " | version=" << (debug_.gpu.version.empty() ? "?" : debug_.gpu.version)
+              << " | max_vertex_attribs=" << debug_.gpu.max_vertex_attribs;
 }
 
 void JPOV::Finalize() {
@@ -353,10 +354,32 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     jpov::RenderCommandList cmds;
     OneIteration(frame_count, input, winfo, &cmds);
 
+    // ---- 更新 debug 状态（引擎自己的状态，不进 RenderCommandList）----
+    debug_.camera      = cmds.camera;
+    debug_.width       = winfo.width;
+    debug_.height      = winfo.height;
+    debug_.frame_count = frame_count;
+    {
+        // 瞬时 fps = 1 / 相邻两帧的墙钟间隔（含渲染耗时，因此是真帧率）。
+        // 首帧没有上一帧参照 ⇒ 保持 0。
+        const double now = glfwGetTime();
+        if (last_frame_time_ > 0.0) {
+            const double dt = now - last_frame_time_;
+            debug_.fps = (dt > 0.0) ? static_cast<float>(1.0 / dt) : 0.0f;
+        }
+        last_frame_time_ = now;
+    }
+
     renderer_->BeginFrame(
         static_cast<int>(winfo.width),
         static_cast<int>(winfo.height));
     renderer_->Render(cmds, winfo);
+
+    // ---- debug HUD：必须在 Render() 之后画（落在主 FBO 最上层，
+    //      Present 与 SaveScreenshot 都会带上它）----
+    if (debug_overlay_visible_) {
+        renderer_->DrawDebugOverlay(debug_.DebugString(), config_.debug_overlay_scale);
+    }
 }
 
 // ========== 运行模式 ==========
@@ -569,6 +592,19 @@ void JPOV::HandleKey(int key, int, int action, int mods) {
     if (key < 0 || key >= jpov::kMaxKeyCode) {
         return;
     }
+
+    // `~`（美式键盘的 grave accent 键，96）是**引擎保留键**：切换左上角 debug HUD。
+    // 在这里 return，不再写进 keys_ —— 即应用在 InputSnapshot 里**看不到**这次按键。
+    // 只在按下时切换（REPEAT 不重复切）。
+    //
+    // ⚠️ 代价（有意为之，不是遗忘）：ui.cc / sp_ui.cc 的文本框靠 KeyCode::GraveAccent
+    // 输入 '`' 与 '~'，引擎接管后**文本框就再也输不了这两个字符**。这与 Quake
+    // 系控制台键的传统一致；若将来某个 app 必须文本输入反引号，需另给一个开关。
+    if (key == static_cast<int>(jpov::KeyCode::GraveAccent) && action == GLFW_PRESS) {
+        debug_overlay_visible_ = !debug_overlay_visible_;
+        return;
+    }
+
     KeyButtonState& k = keys_[key];
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
         if (!k.is_down) {

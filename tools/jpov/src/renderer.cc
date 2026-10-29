@@ -607,6 +607,7 @@ Renderer::~Renderer() {
     volume_fire_renderer_.Finalize();
     strip_renderer_.Finalize();
     smaa_renderer_.Finalize();
+    debug_overlay_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
@@ -1334,6 +1335,13 @@ void Renderer::Init(
     smaa_renderer_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
+    debug_overlay_renderer_.Init();
+}
+
+void Renderer::DrawDebugOverlay(std::string_view text, int glyph_scale) {
+    CHECK_GT(fbo_w_, 0) << "DrawDebugOverlay: 主 FBO 未建立（Render() 未调用？）";
+    debug_overlay_renderer_.Draw(text, stream_vbo_, TextProg(), fbo_w_, fbo_h_,
+                                 glyph_scale);
 }
 
 
