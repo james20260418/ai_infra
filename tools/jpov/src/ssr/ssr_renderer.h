@@ -376,8 +376,18 @@ private:
 //      s ≥ 哨兵 ⇒ a = 0；kSky / kOffscreen 由"是否曾出屏"区分，写进 reason
 //      否则 pos = s0 + ê·s ⇒ uv = floor(pos) ⇒ texelFetch(color) ⇒ 写 (color, a = 1)
 //      ⚠️ 这一趟**本来就要存在**（s → 命中格 → 颜色），min 塞进来 pass 数 +0；边际成本
-//         是 T² 次取样，而 march 本身要 ~1.4·max_ray_pixels 次 ⇒ 4%(T=4) / 15%(T=8)。
-//         所以不要为它建 mip 链、也不要指望 textureGather（GLSL 4.00 才有）。
+//         是 T² 次取样，而 march 本身要 ~1.4·max_ray_pixels 次 ⇒ 4%(T=4) / 18%(T=8)。
+//
+//      ★ 为什么**不**做多级 2×2 金字塔（2026-10-29 算过，别再算一遍）：
+//        T=8 时「一趟 64 fetch」vs「8×8→4×4→2×2→1×1 三级」：
+//          方案        fetch指令  写纹素  fragment数  128B行(读写)  pass
+//          一趟 64          64       1        1          8 + 1        1
+//          三级金字塔       12       3       21         14 + 7        3
+//        64 次 fetch 是 8 行 × 每行 32B 连续（L1 命中），真实只有 8 条缓存行；金字塔每级
+//        都要把上一级的**新缓冲**再读回来（已出 cache）⇒ 行数反而更多，且 fragment 数是
+//        21 倍、pass 数 3 倍。两者的输出**逐字节相同**（min 精确且可结合），纯性能取舍。
+//        只有两种情况值得重访：T ≥ 16（256 纹素），或升到 GLSL 4.x 用 textureGather
+//        （一次取 2×2，T=8 从 64 次变 16 次 fetch，仍是一趟）。
 //
 // ⑦ 调试（不额外开 pass，全部顺手写在 ⑥ 里）
 //      reason_tex ← SsrResult；hit_s_tex ← s
