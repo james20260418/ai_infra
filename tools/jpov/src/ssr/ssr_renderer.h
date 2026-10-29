@@ -36,7 +36,7 @@
 // ⇒ s 的截断误差不影响取色（这也是"取 min 能成立"的真正前提）。
 //   · 格子是**原子单位**（1 px），所以每段不要短于约 4 px，否则相邻 lane 重复判同一格
 //     （冗余 ≈ 1 + 1/L）。不是"并行不了"，是"切不出半个格子"。
-//   · 每段步数上限取对角线最坏情况 ceil(1.414·L)+1 ⇒ 每段都走得完、绝不半路截断，
+//   · 每段步数上限取对角线最坏情况 ceil(1.414·L)+3 ⇒ 每段都走得完、绝不半路截断，
 //     覆盖 = T²·L = max_ray_pixels（精确），每像素判据次数 ≤ 1.414·max_ray_pixels + T²
 //     （**与场景几何无关**，全屏一致）。
 //   · 没有层级、没有分支树、没有每帧建的金字塔 ⇒ 帧成本可解析，gold 不会被性能调优带崩。
@@ -144,7 +144,8 @@ struct SsrInputs {
     // 必须是**与 color_tex 同一次光栅化**写出的那张，逐像素 1:1 对齐。
     unsigned int depth_tex = 0;
 
-    // 反射体的**视空间**法线，只读 .xy（RG16F 或 RGBA16F 均可，多余分量忽略）。
+    // 反射体的**视空间**法线，只读 .xy（任意浮点格式：RG16F / RG32F / RGBA16F 都行，
+    // 多余分量忽略）。fp16 的量化误差对渲染无影响，但 CPU/GPU 对拍时两边必须同值。
     //   · z 由 sqrt(1 − x² − y²) 重建，取 z ≥ 0（**朝相机**）。
     //   · 为什么不用深度求导：水面要的是**波浪扰动后**的法线，深度求导只能得到几何面的法线。
     //   · 非反射体像素的内容无定义（本版没有 mask，见 §2.2，模块照样为它发射线，
@@ -251,8 +252,8 @@ enum class SsrResult : std::uint8_t {
 // 不启用 SSR 时（Renderer 侧没有调用它）本类完全不被触碰：零开销、零回归。
 //
 // GL 侧约定：
-//   · Render 自己绑 FBO / 设 viewport（(0,0,width,height)），返回前**恢复调用前的
-//     FBO 与 viewport**；结束时混合/深度测试/剔除全部关闭（与 3D pass 后的状态一致）。
+//   · Render 自己绑 FBO / 设 viewport，返回前**完整恢复调用前的状态**：FBO、viewport、
+//     program、unit 0..3 的纹理绑定、混合/深度/剔除开关。调用方不需要自己收拾。
 //   · 本模块是 post-process pass，纹理单元**从 0 起自己绑**，不进 texture_units.h 的
 //     跨 pass 分配表（那张表管的是"同时活跃"的 3D 主链路资源，见其文件头）。
 class SsrRenderer {
@@ -292,18 +293,18 @@ public:
     const SsrOutputs& Render(const SsrInputs& in);
 
 private:
-    // slice 目标与输出目标（radiance [+ reason / hit_s]）。尺寸或 tile 变化时重建。幂等。
-    // debug_reason 开关变化也算「需要重建」（多/少附件）—— 测试路径，不在热路径上。
+    // slice 目标与输出目标（radiance [+ reason / hit_s]）。尺寸 / tile / debug 变化时重建。
     // **Render 内零分配**：热路径上只有 viewport / 绑定 / draw。
-    void EnsureTargets(int w, int h, int tile);
+    void EnsureTargets(int w, int h, int tile, bool debug);
     void DestroyTargets();
 
     ShaderManager* shader_mgr_ = nullptr;
 
     // program 按 tile 取变体（T 是编译期常量，用 ShaderSource::defines 出 TILE=1/2/4/8；
     // ShaderManager 按名字缓存，tag 里带 T）。C++ 侧只有一条代码路径。
-    unsigned int prog_march_ = 0;     // 全屏 VS + 单段 march FS（画 (W·T)×(H·T)）
-    unsigned int prog_resolve_ = 0;   // 全屏 VS + T² 取 min / 取色 FS（画 W×H）
+    unsigned int prog_march_ = 0;        // 全屏 VS + 单段 march FS（画 (W·T)×(H·T)）
+    unsigned int prog_resolve_ = 0;      // 全屏 VS + T² 取 min / 取色 FS（画 W×H）
+    unsigned int prog_resolve_debug_ = 0;  // 同上 + SSR_DEBUG（多写 reason / hit_s 两个附件）
 
     unsigned int slice_fbo_ = 0;      // march 的目标（挂 slice_tex_）
     unsigned int slice_tex_ = 0;      // R32F，(W·T)×(H·T)；每 texel = 一个 lane 的 s_mid
@@ -312,6 +313,13 @@ private:
     SsrOutputs outputs_;
     int width_ = 0;
     int height_ = 0;
+    int tile_ = 0;                              // 当前 slice / 输出目标对应的 tile 边长
+    bool debug_ = false;                        // 当前输出目标是否带调试附件
+    int max_texture_size_ = 0;                  // Init 时查的 GL_MAX_TEXTURE_SIZE
+    // 上一次"段长过短"告警的配置：只在配置变化时再打一条，避免每帧刷屏。
+    int warned_tile_ = 0;
+    int warned_max_ray_pixels_ = 0;
+    bool initialized_ = false;
 };
 
 // ==================== 实现时的算法骨架（按这个顺序写 FS，别跳步）====================
@@ -364,7 +372,7 @@ private:
 //      if (d_hi < z)      continue;      // 整段在柱子前方（水面最常见）
 //      if (d_lo > z + T)  continue;      // 整段在柱子后方（穿过去了）
 //      hit ⇒ s_mid = ½(s_enter + s_exit)   // **命中格内**的中点，写 slice_tex_ 后 return
-//      步数上限 = ceil(1.414·L) + 1（对角线最坏情况）⇒ 满段永远走得完、绝不半路截断；
+//      步数上限 = ceil(1.414·L) + 3（对角线最坏情况）⇒ 满段永远走得完、绝不半路截断；
 //      提前返回只发生在命中时。
 //
 //    等价写法（省掉每格除法，实现时可用）：判据整体搬到 w 空间 ——
