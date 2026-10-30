@@ -19,6 +19,40 @@
 
 namespace jpov {
 
+// 文本的版面尺寸（**GL-free 纯计算**，可以在不建 GL context 的测试里直接验证）。
+//
+// 为什么要单独拎出来：Draw() 里"量内容 → 定黑底 → 生成顶点"三步，第一步错了
+// （例如把"空内容就不画"的判断插进了 for 循环的分支里）在绝大多数输入上照样
+// 出图，只有"首行为空、后面有字"时整块不画 —— 这种 bug 只有纯函数单测抓得住。
+struct OverlayExtent {
+    int max_cols = 0;     // 最宽一行的字符数（非 ASCII 的每个字节也算一格）
+    int line_count = 1;   // 物理行数（'\n' 分隔）
+
+    // 没有任何要画的字符（空串、"\n"、"\n\n" 这种）。
+    bool IsEmpty() const { return max_cols == 0; }
+};
+
+// 数行宽/行数。与 Draw() 的第 2 遍用**同一套前进量规则**：每个字节占一格。
+inline OverlayExtent MeasureOverlayExtent(std::string_view text) {
+    OverlayExtent e;
+    int cols = 0;
+    for (const char ch : text) {
+        if (ch == '\n') {
+            if (cols > e.max_cols) {
+                e.max_cols = cols;
+            }
+            cols = 0;
+            ++e.line_count;
+            continue;
+        }
+        ++cols;
+    }
+    if (cols > e.max_cols) {
+        e.max_cols = cols;
+    }
+    return e;
+}
+
 class DebugOverlayRenderer {
 public:
     DebugOverlayRenderer() = default;

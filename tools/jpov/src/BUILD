@@ -310,6 +310,18 @@ cc_library(
     linkstatic = 1,
 )
 
+# 只要**头**的一个 target：MeasureOverlayExtent() / 字模表都是 GL-free 的纯数据/纯函数，
+# 让纯 CPU 单测（test/debug_overlay:overlay_extent_test）能不链 GL 也不链 glog 地验证它们。
+cc_library(
+    name = "debug_overlay_headers",
+    hdrs = [
+        "debug_overlay/debug_overlay_renderer.h",
+        "debug_overlay/debug_font8x8.h",
+    ],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
 # debug HUD 的内置 8x8 点阵字体绘制（自带 GL_R8 图集，零外部字体文件依赖）。
 cc_library(
     name = "debug_overlay_renderer",
@@ -320,6 +332,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":debug_overlay_headers",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [

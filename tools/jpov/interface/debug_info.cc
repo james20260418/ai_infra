@@ -20,7 +20,7 @@ constexpr int kContinuationIndent = 5;
 //   2. 只有单词本身比一整行还长时才硬切；
 //   3. 续行带挂缩进（原前导空格 + kContinuationIndent），所以续行可用宽度更小。
 //
-// Pre-condition: max_chars > kContinuationIndent（否则会给不出任何可用宽度）
+// Pre-condition: max_chars >= 2（每轮至少要能吃掉 1 个字符，否则不前进）
 std::vector<std::string> WrapLine(const std::string& line, int max_chars) {
     const std::size_t width = static_cast<std::size_t>(max_chars);
     if (line.size() <= width) {
@@ -91,8 +91,8 @@ std::string DebugInfo::DebugString() const {
     lines.emplace_back(buf);
 
     // ---- 硬件（GpuInfo）：一个字段一行 ----
-    // 为什么拆行而不是 "vendor X | GL Y" 合并：合并行在最坏情况下是两个 56 字符
-    // 字段相加，必然超过 500px；拆行后每个字段独占一行，长度只受单字段上限约束。
+    // 一个字段一行（而不是 "vendor X | GL Y" 这种合并行）：字段之间不再互相挤占
+    // 宽度预算，超长的那一个自己折行，短的那些不受影响。
     lines.emplace_back(std::string("GPU  ") + GpuKindName(gpu.kind));
     // 原始字符串**不截断**：超长就靠 WrapLine 折行，信息一个字符都不丢。
     lines.emplace_back("     " + (gpu.renderer.empty() ? std::string("(unavailable)")

@@ -317,6 +317,17 @@ int main() {
         LOG(INFO) << "[PASS] 黑底把场景压到 x0.45（实测 " << static_cast<int>(on1.px[o])
                   << " 期望 " << want_r << "）";
 
+        // 正向：贴边内侧必须**确实**被压暗（否则"黑底比内容窄"也能混过去 ——
+        // 只断言"边界外没变"是单向的，panel 小了照样过）。
+        const std::size_t o_r = 1 * static_cast<std::size_t>(on1.w) * 4 +
+                                (panel_w - 2) * 4;
+        CHECK_LE(std::abs(static_cast<int>(on1.px[o_r + 0]) - want_r), 2)
+            << "黑底比内容窄（右边缘内侧 x=" << (panel_w - 2) << " 没被压暗，实测 "
+            << static_cast<int>(on1.px[o_r + 0]) << "）";
+        const std::size_t o_b = static_cast<std::size_t>(panel_h - 2) * on1.w * 4 + 4;
+        CHECK_LE(std::abs(static_cast<int>(on1.px[o_b + 0]) - want_r), 2)
+            << "黑底比内容矮（下边缘内侧 y=" << (panel_h - 2) << " 没被压暗）";
+
         // 面板右边/下边 2px 之外必须还是**原样**的场景色 ⇒ 黑底贴内容，不是拉满窗口。
         const int outside_x = panel_w + 2;
         const int outside_y = panel_h + 2;

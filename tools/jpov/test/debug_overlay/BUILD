@@ -12,6 +12,17 @@ cc_test(
     copts = ["-std=c++20"],
 )
 
+# 版面测量纯函数单测（零 GL）：首行为空/多字节/行尾换行这些形状都靠它钉住。
+cc_test(
+    name = "overlay_extent_test",
+    srcs = ["overlay_extent_test.cc"],
+    deps = [
+        "//tools/jpov/src:debug_overlay_headers",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
 # Debug HUD GPU 像素测试：在**零字体注册**的 app 上验证内置点阵字体照样画出来、
 # 落在左上角、且污染不到 HUD 之外的像素。
 # target_compatible_with 与其他 GPU 测试一致：只在 Linux x86_64（CI 是 llvmpipe）跑。

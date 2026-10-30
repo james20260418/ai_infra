@@ -111,10 +111,16 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     CHECK_GT(fbo_h, 0);
     CHECK_GE(glyph_scale, kGlyphScaleMin);
     CHECK_LE(glyph_scale, kGlyphScaleMax);
-    CHECK_LE(text.size(), static_cast<std::size_t>(kMaxTextChars));
-
     if (text.empty()) {
         return;
+    }
+    // ⚠️ 内容的主要来源是 GL 驱动字符串（`GL_RENDERER` 之类），长度**不由我们决定**。
+    // 超长时**截断后照画**（+ 一次告警），不是 CHECK 崩掉：外部数据不该让引擎 abort。
+    if (text.size() > static_cast<std::size_t>(kMaxTextChars)) {
+        LOG_FIRST_N(WARNING, 1) << "DrawDebugOverlay: 文本 " << text.size()
+                                << " 字符超过上限 " << kMaxTextChars
+                                << "，只画前 " << kMaxTextChars << " 个";
+        text = text.substr(0, static_cast<std::size_t>(kMaxTextChars));
     }
 
     const int glyph_w = kDebugFontGlyphW * glyph_scale;
@@ -123,27 +129,12 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     const int line_h = (kDebugFontGlyphH + kLineGapPx) * glyph_scale;
 
     // ---- 第 1 遍：量内容（黑底必须贴内容，所以不能边画字边定尺寸）----
-    int cols = 0;
-    int max_cols = 0;
-    int line_count = 1;
-    for (const char ch : text) {
-        if (ch == '\n') {
-            max_cols = std::max(max_cols, cols);
+    const OverlayExtent extent = MeasureOverlayExtent(text);
+    const int max_cols = extent.max_cols;
+    const int line_count = extent.line_count;
 
-    // 全是换行/空行：没有内容也就没有面板（旧实现在这里 return，行为保持一致）。
-    if (max_cols == 0) {
-        return;
-    }
-            cols = 0;
-            ++line_count;
-            continue;
-        }
-        ++cols;   // 非法字符也占一格（与第 2 遍的前进量一致）
-    }
-    max_cols = std::max(max_cols, cols);
-
-    // 全是换行/空行：没有内容也就没有面板（旧实现在这里 return，行为保持一致）。
-    if (max_cols == 0) {
+    // 全是换行/空行：没有内容也就没有面板。
+    if (extent.IsEmpty()) {
         return;
     }
 
