@@ -7,31 +7,72 @@
 namespace jpov {
 namespace {
 
-// 截断一条 GL 原始字符串到 kMaxGlFieldChars 个字符（**含**结尾的 "..."）。
-// 空串原样返回（不变成 "..."）。
-std::string LimitGlField(const std::string& s) {
-    const std::size_t max_chars =
-        static_cast<std::size_t>(DebugInfo::kMaxGlFieldChars);
-    if (s.size() <= max_chars) {
-        return s;
-    }
-    return s.substr(0, max_chars - 3) + "...";
-}
+// 续行缩进：在原行前导空格之后再加 kContinuationIndent 个空格，形成挂缩进。
+// 例（宽 61）：
+//   "     GL 4.5 (Compatibility Profile) Mesa"
+//   "         25.2.8-0ubuntu0.24.04.4"
+constexpr int kContinuationIndent = 5;
 
-// 行级硬护栏：无论上面怎么拼，**最终交给点阵字体画的每一行**都不超过
-// kMaxLineChars（= 500px 预算）。这条在数字特别大时会真的触发
-// （例如远平面 100000.00、或世界坐标上万），此时宁可切掉尾巴也不让 HUD 撑出屏幕。
-std::string ClampLine(std::string line) {
-    const std::size_t max_chars =
-        static_cast<std::size_t>(DebugInfo::kMaxLineChars);
-    if (line.size() <= max_chars) {
-        return line;
+// 把一行按宽度软换行 —— **不丢字符**（"..." 会把真信息藏掉）。
+//
+// 规则：
+//   1. 优先在最后一个空格处断开（不把单词切成两半）；
+//   2. 只有单词本身比一整行还长时才硬切；
+//   3. 续行带挂缩进（原前导空格 + kContinuationIndent），所以续行可用宽度更小。
+//
+// Pre-condition: max_chars > kContinuationIndent（否则会给不出任何可用宽度）
+std::vector<std::string> WrapLine(const std::string& line, int max_chars) {
+    const std::size_t width = static_cast<std::size_t>(max_chars);
+    if (line.size() <= width) {
+        return {line};
     }
-    return line.substr(0, max_chars - 3) + "...";
+
+    std::size_t indent_len = 0;
+    while (indent_len < line.size() && line[indent_len] == ' ') {
+        ++indent_len;
+    }
+    const std::string continuation_prefix(indent_len + kContinuationIndent, ' ');
+
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    std::string prefix;   // 首行不额外加缩进
+
+    while (pos < line.size()) {
+        const std::string& head = out.empty() ? prefix : continuation_prefix;
+        const std::size_t avail = width - head.size();
+        if (line.size() - pos <= avail) {
+            out.push_back(head + line.substr(pos));
+            break;
+        }
+        // 在 [pos, pos+avail] 内找最后一个空格（不能用它开头的空格当断点）。
+        std::size_t cut = std::string::npos;
+        for (std::size_t i = pos + avail; i > pos; --i) {
+            if (line[i] == ' ') {
+                cut = i;
+                break;
+            }
+        }
+        if (cut == std::string::npos) {
+            cut = pos + avail;   // 单词比一行还长：硬切
+        }
+        std::string chunk = line.substr(pos, cut - pos);
+        // 去掉断点处的尾部空格（下一行开头的空格也跳掉），避免白吃预算。
+        while (!chunk.empty() && chunk.back() == ' ') {
+            chunk.pop_back();
+        }
+        out.push_back(head + chunk);
+        pos = cut;
+        while (pos < line.size() && line[pos] == ' ') {
+            ++pos;
+        }
+    }
+    if (out.empty()) {
+        out.push_back(line);
+    }
+    return out;
 }
 
 }  // namespace
-
 std::string DebugInfo::DebugString() const {
     char buf[512];
     std::vector<std::string> lines;
@@ -46,16 +87,13 @@ std::string DebugInfo::DebugString() const {
     // 为什么拆行而不是 "vendor X | GL Y" 合并：合并行在最坏情况下是两个 56 字符
     // 字段相加，必然超过 500px；拆行后每个字段独占一行，长度只受单字段上限约束。
     lines.emplace_back(std::string("GPU  ") + GpuKindName(gpu.kind));
+    // 原始字符串**不截断**：超长就靠 WrapLine 折行，信息一个字符都不丢。
     lines.emplace_back("     " + (gpu.renderer.empty() ? std::string("(unavailable)")
-                                                        : LimitGlField(gpu.renderer)));
-    lines.emplace_back("     vendor " +
-                       (gpu.vendor.empty() ? std::string("?") : LimitGlField(gpu.vendor)));
-    lines.emplace_back("     GL " + (gpu.version.empty()
-                                         ? std::string("?")
-                                         : LimitGlField(gpu.version)));
-    lines.emplace_back(
-        "     glsl " +
-        (gpu.glsl_version.empty() ? std::string("?") : LimitGlField(gpu.glsl_version)));
+                                                        : gpu.renderer));
+    lines.emplace_back("     vendor " + (gpu.vendor.empty() ? std::string("?") : gpu.vendor));
+    lines.emplace_back("     GL " + (gpu.version.empty() ? std::string("?") : gpu.version));
+    lines.emplace_back("     glsl " +
+                       (gpu.glsl_version.empty() ? std::string("?") : gpu.glsl_version));
 
     std::snprintf(buf, sizeof(buf), "     max_tex %d max_attribs %d max_color_attach %d",
                   gpu.max_texture_size, gpu.max_vertex_attribs, gpu.max_color_attachments);
@@ -73,11 +111,15 @@ std::string DebugInfo::DebugString() const {
     lines.emplace_back(buf);
 
     std::string out;
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        if (i != 0) {
-            out += '\n';
+    bool first = true;
+    for (const std::string& logical : lines) {
+        for (const std::string& physical : WrapLine(logical, kMaxLineChars)) {
+            if (!first) {
+                out += '\n';
+            }
+            out += physical;
+            first = false;
         }
-        out += ClampLine(lines[i]);
     }
     return out;
 }

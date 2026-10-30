@@ -9,7 +9,7 @@
 //   1. 默认构造：kind=unknown、分辨率 0x0、帧 0、fps 0 都能被格式化出来，不崩
 //   2. 字段确实进了文本（renderer/vendor/version/camera 的数值都能在输出里找到）
 //   3. 纯 ASCII 且无 '\t'/'\r'，末尾不带换行
-//   4. 超长 GL 字符串被截断到 kMaxGlFieldChars + "..."，且截断后的整行长度有界
+//   4. 超长 GL 字符串**换行而不截断**（一个字符都不许丢），且每行长度有界
 //   5. 空 GL 字符串显示占位符（不出现空白的 "vendor  |" 这种断裂格式）
 
 #include <cstdint>
@@ -108,15 +108,24 @@ TEST(DebugInfo, NoTrailingNewlineAndNoControlChars) {
     EXPECT_GE(lines, 6) << "期望多行 HUD；实际：\n" << s;
 }
 
-TEST(DebugInfo, LongGlStringIsTruncated) {
+TEST(DebugInfo, LongGlStringWrapsWithoutLosingChars) {
     jpov::DebugInfo info;
-    info.gpu.renderer = std::string(500, 'R');   // 远超 kMaxGlFieldChars
+    const std::string blob(500, 'R');   // 远超一行
+    info.gpu.renderer = blob;
     const std::string s = info.DebugString();
 
-    EXPECT_NE(s.find("..."), std::string::npos) << "超长字段应带截断标记；实际：\n" << s;
-    EXPECT_EQ(s.find(std::string(500, 'R')), std::string::npos)
-        << "完整 500 字符原串不该原样出现";
-    // 有界：任何一行都不该超过「前缀 + 截断上限 + 边角」太多
+    // 1) 不截断：500 个 R 一个都不能少（"..." 会掩盖真信息，已废弃）。
+    EXPECT_EQ(s.find("..."), std::string::npos) << "不该再出现截断标记；实际：\n" << s;
+    std::size_t r_count = 0;
+    for (const char ch : s) {
+        if (ch == 'R') {
+            ++r_count;
+        }
+    }
+    EXPECT_EQ(r_count, blob.size()) << "换行过程丢了字符（" << r_count << "/"
+                                     << blob.size() << "）：\n" << s;
+
+    // 2) 每行仍受宽度契约约束。
     std::size_t line_len = 0;
     for (const char ch : s) {
         if (ch == '\n') {
@@ -124,10 +133,49 @@ TEST(DebugInfo, LongGlStringIsTruncated) {
             continue;
         }
         ++line_len;
-        EXPECT_LE(line_len,
-                  static_cast<std::size_t>(jpov::DebugInfo::kMaxLineChars))
+        EXPECT_LE(line_len, static_cast<std::size_t>(jpov::DebugInfo::kMaxLineChars))
             << "单行过长，HUD 会被撑出屏幕";
     }
+}
+
+// 换行必须发生在空格处（不把单词切两半），并给续行挂缩进。
+TEST(DebugInfo, LongDriverStringWrapsAtSpacesWithHangingIndent) {
+    jpov::DebugInfo info;
+    // 57 字符、含空格：一整行放不下（61 - 5 缩进 - 3 "GL " = 53 可用）
+    info.gpu.version = "4.5 (Compatibility Profile) Mesa 25.2.8-0ubuntu0.24.04.4";
+
+    const std::string s = info.DebugString();
+    std::vector<std::string> lines;
+    std::string cur;
+    for (const char ch : s) {
+        if (ch == '\n') {
+            lines.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        cur += ch;
+    }
+    lines.push_back(cur);
+
+    // 找以 "     GL " 开头的那条，它后面必须紧跟至少一条续行。
+    std::size_t idx = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].rfind("     GL ", 0) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    ASSERT_LT(idx, lines.size()) << "没找到 GL 行；实际：\n" << s;
+    ASSERT_LT(idx + 1, lines.size()) << "这条 GL 行应该被折成两行；实际：\n" << s;
+
+    // 续行 = 5(原缩进) + 5(挂缩进) 个空格开头。
+    EXPECT_EQ(lines[idx + 1].rfind("          ", 0), 0u)
+        << "续行缺挂缩进：[" << lines[idx + 1] << "]";
+    // 断点落在空格处：两段拼回来必须等于原串（只多一个空格）。
+    const std::string merged = lines[idx].substr(8) + " " + lines[idx + 1].substr(10);
+    EXPECT_EQ(merged, info.gpu.version)
+        << "换行没有在空格处断开（把单词切两半了）：\n" << merged << "\nvs\n"
+        << info.gpu.version;
 }
 
 // 宽度契约（= 「debug 文字固定 500px」）：**每一条 GL 字段都撑到上限 + 世界坐标
