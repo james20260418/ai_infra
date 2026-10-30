@@ -21,6 +21,7 @@
 #include "tools/jpov/src/volume_fire/volume_fire_renderer.h"
 #include "tools/jpov/src/volume_manager.h"
 #include "tools/jpov/src/smaa/smaa_renderer.h"
+#include "tools/jpov/src/ssr/ssr_integration.h"
 #include "tools/jpov/src/font2d/font_renderer.h"
 #include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
 #include "tools/jpov/src/instance_buffer.h"
@@ -156,6 +157,13 @@ private:
     //   EnsureShadowFBO 的 2026-08-17 踩坑注释）——直接把场景深度当普通颜色附件写出，
     //   供后续 pass（体积雾深度裁剪 / 软粒子 / DOF）用普通 texture() 采样，绕开该坑。
     //   每个写入本 FBO 的 3D shader 都必须写该附件（否则其像素深度未定义）。
+    // SSR 的属性目标（全分辨率 RGBA16F：.xy 视空间法线，.a mask）。只在开了 SSR 时才建；
+    // 深度附件**复用 HDR FBO 的 depth 纹理**（只读它做 LEQUAL 测试，不写）。
+    unsigned int ssr_attr_fbo_ = 0, ssr_attr_tex_ = 0;
+    int ssr_attr_w_ = 0, ssr_attr_h_ = 0;
+    unsigned int ssr_attr_depth_tex_ = 0;   // 缓存当时挂的深度纹理句柄（变了要重建 FBO）
+    SsrIntegration ssr_integration_;
+
     unsigned int fbo_hdr_ = 0, color_tex_hdr_ = 0, depth_tex_hdr_ = 0;
     unsigned int scene_depth_tex_hdr_ = 0;   // MRT #1（普通单采样 R32F 纹理）
     int fbo_hdr_w_ = 0, fbo_hdr_h_ = 0;
@@ -187,6 +195,10 @@ private:
     void EnsureOutputFBO(int w, int h);
     void Ensure3DFBO(int w, int h);
     void EnsureHDRFBO(int w, int h);
+    // SSR 属性 pass 的目标（全分辨率 + 复用 HDR 的深度附件）。尺寸/深度句柄变化时重建。
+    void EnsureSsrAttrFBO(int w, int h);
+    // 只把 ssr_reflector 的物体再画一遍，写视空间法线 + mask（LEQUAL 深度测试）。
+    void DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h);
     void EnsureShadowFBO(const ShadowConfig& cfg);
     void DestroyFBO();
     void DestroyOutputFBO();

@@ -239,7 +239,8 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                                       float scale,
                                       bool highlight,
                                       uint32_t picking_id,
-                                      const std::optional<WindCommand>& wind) {
+                                      const std::optional<WindCommand>& wind,
+                                      bool ssr_reflector) {
     CHECK_GT(mesh_id, 0u);
     // 纹理着色要求 mesh 含 UV，运行期在 Renderer 中校验（此处不知 mesh flags）。
     int idx = static_cast<int>(object3d.size());
@@ -253,6 +254,7 @@ void RenderCommandList::DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
     cmd.picking_id = picking_id;
     cmd.highlight = highlight;
     cmd.wind = wind;
+    cmd.ssr_reflector = ssr_reflector;
     object3d.push_back(cmd);
     order.emplace_back(DrawCommandType::kObject3D, idx);
 }

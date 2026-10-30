@@ -676,6 +676,18 @@ void Renderer::DestroyHDRFBO() {
         if (depth_tex_hdr_) {
             glDeleteTextures(1, &depth_tex_hdr_);
         }
+        // SSR 属性 FBO 复用这里的深度纹理当附件，必须一起销毁（否则下次重建会挂旧句柄）。
+        if (ssr_attr_fbo_ != 0) {
+            glDeleteFramebuffers(1, &ssr_attr_fbo_);
+            ssr_attr_fbo_ = 0;
+        }
+        if (ssr_attr_tex_ != 0) {
+            glDeleteTextures(1, &ssr_attr_tex_);
+            ssr_attr_tex_ = 0;
+        }
+        ssr_attr_w_ = 0;
+        ssr_attr_h_ = 0;
+        ssr_attr_depth_tex_ = 0;
         fbo_hdr_ = 0;
         color_tex_hdr_ = 0;
         scene_depth_tex_hdr_ = 0;
@@ -1333,6 +1345,7 @@ void Renderer::Init(
     volume_fire_renderer_.Init(&shader_mgr_);
     strip_renderer_.Init(&shader_mgr_);
     smaa_renderer_.Init(&shader_mgr_);
+    ssr_integration_.Init(&shader_mgr_);
     CreateStreamVBO();
     font_renderer_.Init(font_entries, default_fonts);
     debug_overlay_renderer_.Init();
@@ -1731,6 +1744,39 @@ void Renderer::Render(const RenderCommandList& cmds,
 
         // 用 3D FBO 尺寸计算 MVP
         Draw3DCommands(cmds, fbo_3d_w, fbo_3d_h);
+
+        // SSR：**不透明 3D 画完、半透明之前**，用屏幕数据替换环境镜面项。
+        // 放这里而不是更后面，是因为它要"没有雾、没有半透明"的颜色（见 SsrConfig 注释）。
+        if (cmds.ssr.has_value() && cmds.ssr->enabled) {
+            if (!env_on) {
+                LOG(FATAL) << "开启 SSR 时必须同时开 env_specular：SSR 是替换那一项的估计器，"
+                              "没有 env 就没有可替换的对象（也会让金属直接发黑）";
+            }
+            // 注意用 Render 的**局部** fbo_3d_w/h（成员 fbo_3d_w_ 只在 LDR 路径赋值）。
+            DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h);
+            SsrPassInputs ssi;
+            ssi.hdr_color_tex = color_tex_hdr_;
+            ssi.scene_depth_tex = scene_depth_tex_hdr_;
+            ssi.attr_tex = ssr_attr_tex_;
+            ssi.full_w = fbo_3d_w;
+            ssi.full_h = fbo_3d_h;
+            ssi.near_plane = cmds.camera.near;
+            ssi.far_plane = cmds.camera.far;
+            ssi.tan_half_fov_y = std::tan(0.5f * cmds.camera.fov * 3.14159265358979323846f / 180.0f);
+            ssi.aspect = static_cast<float>(fbo_3d_w) / static_cast<float>(fbo_3d_h);
+            ssi.env_cube_tex = env_cube;
+            ssi.env_max_lod = env_max_lod;
+            ssi.env_sky_scale = env_scale;
+            ssi.env_enabled = env_on;
+            ssi.cfg = *cmds.ssr;
+            ssr_integration_.Render(ssi, fbo_hdr_);
+            // Render 内恢复了调用前的 FBO/viewport，但主 pass 后续假设"3D FBO 已绑"，
+            // 这里重新绑定一次（draw buffer 也恢复成 MRT 两附件）。
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+            const GLenum mrt[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+            glDrawBuffers(2, mrt);
+        }
 
         // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
         glDisable(GL_CULL_FACE);
@@ -2443,6 +2489,115 @@ void Renderer::DrawShadowPass(const RenderCommandList& cmds, const DirectionalLi
 
 // 拾取（color-ID）pass。cmds.pick.enabled 时调用：把所有 picking_id>0 的物体
 // 用纯色 ID shader 画进一个自管理的小 RGBA8 FBO（带 depth，resolve 前景），
+void Renderer::EnsureSsrAttrFBO(int w, int h) {
+    if (ssr_attr_fbo_ != 0 && ssr_attr_w_ == w && ssr_attr_h_ == h &&
+        ssr_attr_depth_tex_ == depth_tex_hdr_) {
+        return;
+    }
+    if (ssr_attr_fbo_ != 0) {
+        glDeleteFramebuffers(1, &ssr_attr_fbo_);
+        ssr_attr_fbo_ = 0;
+    }
+    if (ssr_attr_tex_ != 0) {
+        glDeleteTextures(1, &ssr_attr_tex_);
+        ssr_attr_tex_ = 0;
+    }
+    CHECK_NE(depth_tex_hdr_, 0u) << "SSR 属性 pass 复用 HDR FBO 的深度纹理，它还没建";
+
+    glGenTextures(1, &ssr_attr_tex_);
+    glBindTexture(GL_TEXTURE_2D, ssr_attr_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &ssr_attr_fbo_);
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, ssr_attr_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssr_attr_tex_, 0);
+    // 深度附件**复用** HDR FBO 的那张深度纹理：只读它做 LEQUAL 测试（glDepthMask(GL_FALSE)），
+    // 所以属性 pass 只会写"真正可见的反射体表面"，不会把被挡住的背面也写进去。
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex_hdr_, 0);
+    const GLenum buf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &buf);
+    CHECK_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE))
+        << "SSR 属性 FBO 不完整（" << w << "×" << h << "）";
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+
+    ssr_attr_w_ = w;
+    ssr_attr_h_ = h;
+    ssr_attr_depth_tex_ = depth_tex_hdr_;
+}
+
+void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
+    bool any_reflector = false;
+    for (const Object3DCommand& o : cmds.object3d) {
+        if (o.ssr_reflector) {
+            any_reflector = true;
+            break;
+        }
+    }
+    if (!any_reflector) {
+        return;   // 没有反射体：连 FBO 都不建
+    }
+    EnsureSsrAttrFBO(w, h);
+
+    GLint prev_fbo = 0;
+    GLint prev_viewport[4] = {0, 0, 0, 0};
+    GLint prev_program = 0;
+    GLint prev_depth_mask = GL_TRUE;
+    GLint prev_depth_func = GL_LESS;
+    const GLint prev_depth_test = glIsEnabled(GL_DEPTH_TEST);
+    const GLint prev_blend = glIsEnabled(GL_BLEND);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, prev_viewport);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_program);
+    glGetIntegerv(GL_DEPTH_WRITEMASK, &prev_depth_mask);
+    glGetIntegerv(GL_DEPTH_FUNC, &prev_depth_func);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, ssr_attr_fbo_);
+    glViewport(0, 0, w, h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);   // 只测不写：HDR 的深度缓冲必须保持原样给后面的 pass 用
+
+    // 世界 → 视空间（mat3）：属性纹理里存的是**视空间**法线（SSR 的约定，见 ssr_renderer.h）。
+    float view[16];
+    BuildLookAt(cmds.camera.position, cmds.camera.target, cmds.camera.up, view);
+    const float world_to_view[9] = {view[0], view[1], view[2], view[4], view[5],
+                                    view[6], view[8], view[9], view[10]};
+
+    const unsigned int prog = ssr_integration_.attr_program();
+    glUseProgram(prog);
+    glUniformMatrix3fv(glGetUniformLocation(prog, "uWorldToView"), 1, GL_FALSE, world_to_view);
+    for (const Object3DCommand& o : cmds.object3d) {
+        if (!o.ssr_reflector) {
+            continue;
+        }
+        // 与主 pass 用同一个 mvp（含 model），只换 FS：写 (法线.xy, 0, mask=1)。
+        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_, prog, prog,
+                                               /*pick_id_map=*/nullptr);
+    }
+
+    glDepthMask(static_cast<GLboolean>(prev_depth_mask));
+    glDepthFunc(static_cast<GLenum>(prev_depth_func));
+    if (prev_depth_test == 0) {
+        glDisable(GL_DEPTH_TEST);
+    }
+    if (prev_blend != 0) {
+        glEnable(GL_BLEND);
+    }
+    glUseProgram(static_cast<GLuint>(prev_program));
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+    glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+}
+
 // 读回光标像素解码成 picking_id → last_pick_。
 void Renderer::DrawPickingPass(const RenderCommandList& cmds, int fbo_w, int fbo_h,
                                float vp_x, float vp_y, float vp_w, float vp_h) {
