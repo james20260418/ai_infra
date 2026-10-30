@@ -50,6 +50,8 @@ constexpr int kTexUnitCount = 6;
 
 // 降采样：全分辨率 (color, depth, attr) → SSR 分辨率 (color, depth, normal)。
 // 2×2 里挑**窗口深度最小**的那个 texel 代表整组 —— 三张图必须取自同一个 texel。
+// 法线附件的 .z 必须一起带下去（= 1 表示该 texel 有法线数据，SSR 的命中面朝向判据用它）；
+// 只传 .xy 的话，模块里只能把"没有法线"当成"平面朝相机" ⇒ 朝向判据在遮挡物上失效。
 constexpr const char* kSsrDownsampleFs = R"glsl(
 #version 330 core
 uniform sampler2D uColor;
@@ -60,7 +62,7 @@ uniform int   uScale;      // 1 = 直通；2 = 2×2 选一
 
 layout(location = 0) out vec4  FragColor;
 layout(location = 1) out float FragDepth;
-layout(location = 2) out vec2  FragNormal;
+layout(location = 2) out vec3  FragNormal;
 
 void main() {
     ivec2 q = ivec2(gl_FragCoord.xy);
@@ -80,7 +82,8 @@ void main() {
     }
     FragColor  = texelFetch(uColor, best, 0);
     FragDepth  = best_z;
-    FragNormal = texelFetch(uAttr, best, 0).xy;
+    vec4 attr  = texelFetch(uAttr, best, 0);
+    FragNormal = vec3(attr.xy, attr.z);   // .xy 视空间法线，.z = 有法线数据
 }
 )glsl";
 
@@ -317,7 +320,8 @@ void SsrIntegration::EnsureTargets(int w, int h, int ssr_w, int ssr_h, bool cove
     };
     make_tex(&down_color_tex_, GL_RGBA16F, GL_RGBA, ssr_w, ssr_h);
     make_tex(&down_depth_tex_, GL_R32F, GL_RED, ssr_w, ssr_h);
-    make_tex(&down_normal_tex_, GL_RG16F, GL_RG, ssr_w, ssr_h);
+    // RGBA（不是 RG）：.z = 该 texel 有法线数据，朝向判据要用
+    make_tex(&down_normal_tex_, GL_RGBA16F, GL_RGBA, ssr_w, ssr_h);
 
     glGenFramebuffers(1, &down_fbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, down_fbo_);

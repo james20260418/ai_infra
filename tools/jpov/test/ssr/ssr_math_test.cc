@@ -35,6 +35,7 @@ using jpov::ssr::ClipRayLength;
 using jpov::ssr::DepthFromWindowDepth;
 using jpov::ssr::DeriveParams;
 using jpov::ssr::DerivedParams;
+using jpov::ssr::HitFacesRay;
 using jpov::ssr::kNoHit;
 using jpov::ssr::MarchSegment;
 using jpov::ssr::MarchSlabs;
@@ -505,6 +506,86 @@ TEST(SsrMath, MinPicksEarliest) {
 }
 
 // ───────────────────────── 7. 派生参数 ─────────────────────────
+
+// ───────────────────────── 7. 命中面朝向（背面命中不算）─────────────────────────
+//
+// 2026-10-30 Danis 实拍发现：体素柱/桌子这种厚物体，镜子里的射线是从它**背面**穿过去的，
+// 旧判据却把**正面**（带高光）的像素当结果 ⇒ 倒影里桌子底下也在发光。
+//
+// 本测试用一个手搭的场景把两类命中分开（不经过相机反构，屏幕空间可控）：
+//   rows  0..39  无几何（空格子，穿过去）
+//   rows 40..59  “桌子顶面” z=20 m，法线**朝上** ⇒ 射线从下往上穿 ⇒ R·N > 0 ⇒ 必须拒
+//   rows 60..79  无几何
+//   rows 80..    “墙” z=20 m，法线**朝相机** ⇒ 射线扎进去 ⇒ R·N < 0 ⇒ 必须命中
+// 三件事一起钉：① 旧行为确实先撞桌子（bug 的存在性）；② 加了朝向判据后跳过桌子、
+// 命中后面的墙；③ 把墙的法线翻过来也必须拒（防"总是接受"的恒真式实现）。
+ScreenRay MakeSyntheticRay() {
+    ScreenRay ray;
+    ray.s0 = Vec2{100.0f, 20.0f};
+    ray.dir = Vec2{0.0f, 1.0f};
+    ray.dir3 = Normalize(Vec3{0.0f, 0.35f, -0.94f});   // 向上 + 远离相机
+    ray.span = 100.0f;
+    ray.w0 = 1.0f / 20.0f;
+    ray.w1 = 1.0f / 24.0f;   // 视深 20 m → 24 m，对 σ 线性（w = 1/d）
+    ray.sigma_enter = 0.0f;
+    ray.sigma_exit = 100.0f;
+    ray.exits_screen = false;
+    return ray;
+}
+
+TEST(SsrMath, BackfaceHitRejected) {
+    const ScreenRay ray = MakeSyntheticRay();
+    // c = 0.18 ⇒ T = 3.6 m（z=20）⇒ 射线在桌子/墙那两段确实落在柱体带内，
+    // 所以"能不能命中"完全取决于朝向判据，不是厚度在挡。
+    const float kThicknessC = 0.18f;
+    const float kMinThickness = 1.0e-4f;
+
+    auto depth_at = [](int /*x*/, int y) -> float {
+        if (y >= 40 && y < 60) {
+            return 20.0f;   // 桌子顶面
+        }
+        if (y >= 80 && y < 120) {
+            return 20.0f;   // 墙
+        }
+        return jpov::ssr::kEmptyCell;
+    };
+    auto facing = [](int /*x*/, int y, const Vec3& d) -> bool {
+        if (y >= 40 && y < 60) {
+            return HitFacesRay(d, Vec3{0.0f, 1.0f, 0.0f});   // 法线朝上
+        }
+        if (y >= 80) {
+            return HitFacesRay(d, Vec3{0.0f, 0.0f, 1.0f});   // 法线朝相机
+        }
+        return true;
+    };
+
+    // ① 旧行为（不判朝向）：先撞上桌子顶面 —— 这就是那个 bug。
+    int old_x = -1;
+    int old_y = -1;
+    const float s_old = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+                                      &old_x, &old_y);
+    ASSERT_LT(s_old, kNoHit) << "旧判据应该在桌子段命中（否则本测试没造出 bug 场景）";
+    EXPECT_GE(old_y, 40);
+    EXPECT_LT(old_y, 60);
+
+    // ② 加朝向判据：桌子段被跳过 ⇒ 命中后面的墙。
+    int new_x = -1;
+    int new_y = -1;
+    const float s_new = MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180,
+                                      &new_x, &new_y, facing);
+    ASSERT_LT(s_new, kNoHit) << "墙是正面命中，不应被一起拒掉";
+    EXPECT_GE(new_y, 80) << "背面命中（桌子顶面）没被跳过";
+    EXPECT_GT(s_new, s_old) << "新命中必须比旧命中更远（跳到桌子后面去了）";
+
+    // ③ 防恒真：把墙的法线翻到背面 ⇒ 整条射线应该无命中。
+    auto facing_flipped = [](int /*x*/, int /*y*/, const Vec3& d) -> bool {
+        return HitFacesRay(d, Vec3{0.0f, 0.0f, -1.0f});
+    };
+    EXPECT_GE(MarchWholeRay(ray, kThicknessC, kMinThickness, 200, depth_at, 320, 180, nullptr,
+                            nullptr, facing_flipped),
+              kNoHit)
+        << "法线翻过来仍能命中 ⇒ 朝向判据是恒真的";
+}
 
 TEST(SsrMath, DerivedParams) {
     const Cam cam;
