@@ -89,17 +89,30 @@ public:
         jpov::ShadowConfig shadow;
 
         // 左上角 debug HUD（硬件信息 / 相机机位 / 分辨率 / 帧号 / fps）的**初始可见性**。
-        //   false（默认）：启动时关闭，运行中按 `~` 打开。
-        //   true：启动即可见（适合 CI 截图 / 想一打开就看到硬件的场景）。
-        // `~` 是**引擎保留键**：切换它，且应用在 InputSnapshot 里看不到这次按键。
-        // ⚠️ 代价（有意为之）：文本框（ui.cc / sp_ui.cc）因此不能再输入 '`' / '~'。
+        //   true（默认）：**常驻**。这是引擎的既有约定之一 —— 任何 app 一跑起来就能
+        //                 看到自己跑在什么 GPU 上、多少 fps；不想看的人按 F3 收起，
+        //                 或者在自己 app 的 Config 里显式设 false。
+        //   false：启动时关闭（运行中按 F3 仍可打开）。
+        // ⚠️ 与 headless 的关系（**唯一一处例外，写在这里不是静默行为**）：
+        //    headless=true 时初值恒为 false。headless 的产物是截图，而截图会被
+        //    逐像素对比，叠 9 行 HUD 会让所有既有 gold 变成非确定。headless 下
+        //    想看 HUD 请显式调 SetDebugOverlayVisible(true)。
+        // `F3` 是**引擎保留键**：切换它，且应用在 InputSnapshot 里看不到这次按键。
+        // 选 F3 而不是 Quake 系的 `~`：`~` 会把 grave accent 从 InputSnapshot 里
+        // 吞掉，文本框（ui.cc / sp_ui.cc）就再也输不了 '`' / '~'；功能键没有这个
+        // 代价，也符合「类似 Minecraft 的独立游戏」(docs/jpov_engine_integration.md:3)
+        // 的惯例（F3 = debug 面板）。
         // HUD 用内置 8x8 ASCII 点阵字体绘制（纯白、左上角），**不依赖** fonts 列表
-        // —— 零字体注册的 app 也能显示。
-        bool        debug_overlay = false;
+        // —— 零字体注册的 app 也能显示。宽度契约见 jpov::DebugInfo::kMaxLineChars
+        // （单行 <= 500px，与窗口宽度无关；窗口更窄时右侧被裁，不会崩也不会缩字）。
+        bool        debug_overlay = true;
 
         // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
+        // 默认 1 = **固定 8 物理像素字高**，这已是「还能看清」的下限（点阵字体
+        // 再小就得换 5x7 字模，中文更不可能），同时也是能塞下最多信息的档位。
         // Pre-condition: 1 <= debug_overlay_scale <= 8（越界 Init() 会 CHECK 失败）
-        // 4K / 高 DPI 屏上文字过小时调大它。
+        // ⚠️ 8 物理像素在 200% 缩放的屏上只有 4 个逻辑像素 ⇒ 会看不清。
+        //    这种机器请设 2（或后续由调用方按 glfwGetWindowContentScale() 决定）。
         int         debug_overlay_scale = 1;
     };
 
@@ -347,10 +360,11 @@ public:
     // glGetString（也无需自己解析软件光栅器名字）。
     const jpov::DebugInfo& debug() const { return debug_; }
 
-    // 左上角 debug HUD 当前是否可见（`~` 切换；初值 = Config::debug_overlay）。
+    // 左上角 debug HUD 当前是否可见（F3 切换；初值 = Config::debug_overlay）。
     bool is_debug_overlay_visible() const { return debug_overlay_visible_; }
 
-    // 程序设置 debug HUD 可见性（与按 `~` 等价；Config::debug_overlay 只是初值）。
+    // 程序设置 debug HUD 可见性（与按 F3 等价；Config::debug_overlay 只是初值）。
+    // 典型用法：CI 逐像素对比前 SetDebugOverlayVisible(false)，让截图里没有 HUD。
     // 用途：想把 HUD 写进截图/录像的自动化、或者给 app 自己的“设置”项接一个开关。
     void SetDebugOverlayVisible(bool visible) { debug_overlay_visible_ = visible; }
 
@@ -407,7 +421,8 @@ private:
     // ---- Debug HUD 状态 ----
     // DebugInfo 是**引擎自己的一份状态**（不是渲染指令）：Init 填 gpu，每帧填相机/fps。
     jpov::DebugInfo debug_;
-    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay，运行时由 `~` 切换。
+    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay（默认 true），
+    // 运行时由 F3 切换。
     bool debug_overlay_visible_ = false;
     // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
     double last_frame_time_ = 0.0;

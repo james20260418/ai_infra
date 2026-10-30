@@ -321,11 +321,17 @@ int main() {
     // 「Finalize() 之后同一进程可以再次 Init()」这条文档口头承诺确实成立。
     {
         JPOV::Config cfg2 = cfg;
-        cfg2.debug_overlay = true;          // 直接用初值打开（不靠按键）
+        cfg2.debug_overlay = true;          // 请求"常驻"
         cfg2.debug_overlay_scale = 2;
         OverlayTestApp app2(cfg2);
         app2.Init();
-        // 放大 2 倍后最长一行约 50 字符 x 16px = 800px ⇒ 窗口要比前面宽，
+        // headless ⇒ 初值强制 false（见 Config::debug_overlay 文档）：
+        // 否则所有 headless gold 截图都会被这 9 行 HUD 污染。要看得显式打开。
+        CHECK(!app2.is_debug_overlay_visible())
+            << "headless 下 debug_overlay 初值必须为 false";
+        LOG(INFO) << "[PASS] headless 下 HUD 初值关闭（gold 截图不会被污染）";
+        app2.SetDebugOverlayVisible(true);
+        // 放大 2 倍后最长一行 61 字符 x 16px = 976px ⇒ 窗口要比前面宽，
         // 否则文字会被视口裁掉（那是设计行为，但会让比对无法进行）。
         jpov::WindowInfo winfo_big;
         winfo_big.width = 1600.0f;

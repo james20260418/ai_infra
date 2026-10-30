@@ -98,7 +98,7 @@ TEST(DebugInfo, NoTrailingNewlineAndNoControlChars) {
     EXPECT_NE(s.back(), '\n') << "末尾不该带换行（调用方按行切分更省事）";
     EXPECT_EQ(s.find('\r'), std::string::npos);
     EXPECT_EQ(s.find('\t'), std::string::npos);
-    // 多行：至少 6 行（第一行 + 硬件 4 行 + 相机 2 行 = 7 行）
+    // 多行：至少 6 行（第一行 + 硬件 6 行 + 相机 2 行 = 9 行）
     int lines = 1;
     for (const char ch : s) {
         if (ch == '\n') {
@@ -125,9 +125,49 @@ TEST(DebugInfo, LongGlStringIsTruncated) {
         }
         ++line_len;
         EXPECT_LE(line_len,
-                  static_cast<std::size_t>(jpov::DebugInfo::kMaxGlFieldChars) + 32)
+                  static_cast<std::size_t>(jpov::DebugInfo::kMaxLineChars))
             << "单行过长，HUD 会被撑出屏幕";
     }
+}
+
+// 宽度契约（= 「debug 文字固定 500px」）：**每一条 GL 字段都撑到上限 + 世界坐标
+// 上万 + 远平面 100000** 这种最坏组合下，单行仍然 <= kMaxLineChars。
+// 这是唯一能保证「HUD 占地确定」的断言 —— 光靠"截断字段"管不住 snprintf 出来的
+// 数字宽度（一度以为 5 空格缩进 + 56 字符就够了，实测 -12345.67 会顶破）。
+TEST(DebugInfo, EveryLineFitsWidthContractEvenInWorstCase) {
+    jpov::DebugInfo info;
+    info.gpu.renderer = std::string(500, 'R');
+    info.gpu.vendor = std::string(500, 'V');
+    info.gpu.version = std::string(500, 'G');
+    info.gpu.glsl_version = std::string(500, 'S');
+    info.gpu.max_texture_size = 1073741824;
+    info.gpu.max_vertex_attribs = 123456789;
+    info.gpu.max_color_attachments = 987654321;
+    info.camera.position = {-99999.99f, -88888.88f, -77777.77f};
+    info.camera.target = {99999.99f, 88888.88f, 77777.77f};
+    info.camera.up = {-1.0f, 0.5f, -0.5f};
+    info.camera.fov = 179.9f;
+    info.camera.near = 0.01f;
+    info.camera.far = 100000.0f;
+    info.width = 4294967295.0f;
+    info.height = 4294967295.0f;
+    info.frame_count = 9223372036854775807LL;
+    info.fps = 9999.9f;
+
+    const std::string s = info.DebugString();
+    std::size_t line_len = 0;
+    int line_no = 0;
+    for (const char ch : s) {
+        if (ch == '\n') {
+            ++line_no;
+            line_len = 0;
+            continue;
+        }
+        ++line_len;
+        EXPECT_LE(line_len, static_cast<std::size_t>(jpov::DebugInfo::kMaxLineChars))
+            << "第 " << line_no << " 行超过 kMaxLineChars（= 500px 预算）：\n" << s;
+    }
+    EXPECT_TRUE(IsRenderableAscii(s)) << s;
 }
 
 TEST(DebugInfo, EmptyGlStringsUsePlaceholder) {
@@ -136,8 +176,9 @@ TEST(DebugInfo, EmptyGlStringsUsePlaceholder) {
 
     EXPECT_NE(s.find("(unavailable)"), std::string::npos)
         << "renderer 为空应显示占位符；实际：\n" << s;
-    // 不该出现 "vendor  | GL ?" 之外的断裂（占位符为 "?"）
-    EXPECT_NE(s.find("vendor ? | GL ?"), std::string::npos) << "实际：\n" << s;
+    // 占位符为 "?"：一个 GL 字段一行，空串不产生断裂格式
+    EXPECT_NE(s.find("vendor ?"), std::string::npos) << "实际：\n" << s;
+    EXPECT_NE(s.find("GL ?"), std::string::npos) << "实际：\n" << s;
 }
 
 }  // namespace

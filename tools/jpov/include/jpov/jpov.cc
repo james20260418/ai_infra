@@ -68,7 +68,11 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 JPOV::JPOV(Config cfg)
     : config_(cfg),
       window_(nullptr),
-      debug_overlay_visible_(cfg.debug_overlay),
+      // HUD 是给「有窗口可看的人」的：**headless 下初值为 false**。
+      // 理由：headless 的产物是截图，而截图会被逐像素对比（gold / A-B 差异），
+      // 在图上叠 9 行 HUD 会让所有既有 gold 立刻变成非确定。要看就显式调
+      // SetDebugOverlayVisible(true)（debug_overlay 测试正是这么做）。
+      debug_overlay_visible_(cfg.debug_overlay && !cfg.headless),
       initialized_(false) {}
 
 JPOV::~JPOV() {
@@ -593,14 +597,15 @@ void JPOV::HandleKey(int key, int, int action, int mods) {
         return;
     }
 
-    // `~`（美式键盘的 grave accent 键，96）是**引擎保留键**：切换左上角 debug HUD。
+    // `F3` 是**引擎保留键**：切换左上角 debug HUD。
     // 在这里 return，不再写进 keys_ —— 即应用在 InputSnapshot 里**看不到**这次按键。
     // 只在按下时切换（REPEAT 不重复切）。
     //
-    // ⚠️ 代价（有意为之，不是遗忘）：ui.cc / sp_ui.cc 的文本框靠 KeyCode::GraveAccent
-    // 输入 '`' 与 '~'，引擎接管后**文本框就再也输不了这两个字符**。这与 Quake
-    // 系控制台键的传统一致；若将来某个 app 必须文本输入反引号，需另给一个开关。
-    if (key == static_cast<int>(jpov::KeyCode::GraveAccent) && action == GLFW_PRESS) {
+    // 为什么不是 Quake 系的 `~`：那个键会把 grave accent 从 InputSnapshot 里吞掉，
+    // ui.cc / sp_ui.cc 的文本框**就再也输不了 '`' 和 '~'**（原先的实现在 PR #242 里
+    // 就是这个代价）。功能键不进任何文本输入路径，代价为零；F3 = debug 面板也是
+    // 「类似 Minecraft 的独立游戏」这个目标体量的通行惯例。
+    if (key == static_cast<int>(jpov::KeyCode::F3) && action == GLFW_PRESS) {
         debug_overlay_visible_ = !debug_overlay_visible_;
         return;
     }
