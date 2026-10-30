@@ -27,6 +27,12 @@ namespace ssr {
 // 且远大于任何合理 s（像素）。**不要用 inf** —— 某些驱动把它规整掉。
 constexpr float kNoHit = 1.0e30f;
 
+// `depth_at(x,y)` 返回这个值 = 该格**没有几何**（窗口深度是清空值 1.0，天空/背景）。
+// 语义是"这里没有柱子"，march 直接穿过去 —— **不是**"far 处有一堵墙"。
+// 反例（2026-10-30 实拍踩到）：把天空格当成 z=far、T=c·far 的柱子 ⇒ 掠射射线在 near-horizon
+// 处扫到它 ⇒ 返回天空像素的颜色、A=1 ⇒ 画面上出现一大片假的高光带。
+constexpr float kEmptyCell = -1.0f;
+
 // ─────────────────────────── 极简向量（本文件不依赖 geom）───────────────────────────
 // 只有这个 header 用到，且必须能在没有 glog/protobuf 的最小环境里编译（CPU 单测）。
 
@@ -357,6 +363,22 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             break;   // 退化（浮点抖动）—— 别在这里死循环
         }
         const float z_cell = depth_at(cx, cy);
+        if (!(z_cell > 0.0f)) {
+            // 空格子（天空/无深度数据）：这里没有柱子，穿过去（见 kEmptyCell 的注释）。
+            // ⚠️ 别在这里 return —— 屏内天空后面还可能有几何。
+            if (sigma_out >= sigma_end) {
+                break;
+            }
+            sigma = sigma_out;
+            if (tmax_x < tmax_y) {
+                cx += ray.dir.x > 0.0f ? 1 : -1;
+                tmax_x += tdelta_x;
+            } else {
+                cy += ray.dir.y > 0.0f ? 1 : -1;
+                tmax_y += tdelta_y;
+            }
+            continue;
+        }
         const float thickness = CellThickness(z_cell, thickness_coefficient, min_thickness_m);
         if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), z_cell, thickness)) {
             if (hit_x != nullptr) {
