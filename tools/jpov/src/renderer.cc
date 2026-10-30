@@ -2519,7 +2519,7 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, ssr_attr_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssr_attr_tex_, 0);
     // 深度附件**复用** HDR FBO 的那张深度纹理：只读它做 LEQUAL 测试（glDepthMask(GL_FALSE)），
-    // 所以属性 pass 只会写"真正可见的反射体表面"，不会把被挡住的背面也写进去。
+    // 所以属性 pass 只会写"真正可见的那一层表面"，不会把被挡住的背面也写进去。
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex_hdr_, 0);
     const GLenum buf = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &buf);
@@ -2576,11 +2576,18 @@ void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     const unsigned int prog = ssr_integration_.attr_program();
     glUseProgram(prog);
     glUniformMatrix3fv(glGetUniformLocation(prog, "uWorldToView"), 1, GL_FALSE, world_to_view);
+    // 2026-10-30 起本 pass 画**所有** object3d（不只反射体）：SSR 的命中面朝向判据需要
+    // **遮挡物**的视空间法线（桌子/柱子不是反射体，但射线会撞到它们），而 .a 只用来告诉
+    // 合成层"这一格要不要叠 SSR"。
+    const GLint loc_is_reflector = glGetUniformLocation(prog, "uAttrIsReflector");
+    float last_is_reflector = -1.0f;   // 无效值：保证第一件物体一定上传一次
     for (const Object3DCommand& o : cmds.object3d) {
-        if (!o.ssr_reflector) {
-            continue;
+        const float is_reflector = o.ssr_reflector ? 1.0f : 0.0f;
+        if (is_reflector != last_is_reflector) {
+            glUniform1f(loc_is_reflector, is_reflector);
+            last_is_reflector = is_reflector;
         }
-        // 与主 pass 用同一个 mvp（含 model），只换 FS：写 (法线.xy, 0, mask=1)。
+        // 与主 pass 用同一个 mvp（含 model），只换 FS：写 (法线.xy, 1, 是否反射体)。
         Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_, prog, prog,
                                                /*pick_id_map=*/nullptr);
     }

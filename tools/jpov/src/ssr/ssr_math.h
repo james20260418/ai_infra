@@ -144,6 +144,7 @@ inline float ClipRayLength(const Vec3& p, const Vec3& r, float near_plane, float
 struct ScreenRay {
     Vec2 s0;              // 起点像素坐标（未裁剪）
     Vec2 dir;             // 单位方向（像素空间）
+    Vec3 dir3;            // **视空间**单位方向（朝向判据用；与 dir 是同一条光线的两种表达）
     float span = 0.0f;    // 未裁剪线段长度 S（像素）
     float w0 = 0.0f;      // σ = 0 处的 1/d
     float w1 = 0.0f;      // σ = span 处的 1/d
@@ -189,6 +190,7 @@ inline bool BuildScreenRay(const Vec3& p, const Vec3& r, float ray_len_m,
         return false;   // 长度退化：整条射线在屏幕上是一个点，没有可采样的格
     }
     out->dir = delta * (1.0f / out->span);
+    out->dir3 = Normalize(r);   // 朝向判据用（着色器里同一行）
 
     // 矩形裁剪（Liang–Barsky），结果用 σ 表示（像素弧长）。
     float t0 = 0.0f;
@@ -262,6 +264,27 @@ inline bool CellHit(float w_in, float w_out, float z_cell, float thickness) {
     return true;
 }
 
+// 命中面朝向判据（ssr_shader.h::SsrHitFacing 的 CPU 版）。
+//
+//   R·N < 0 ⇒ 射线**扎进**这个面 = 合法的正面命中；
+//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中。
+//
+// 为什么必须有它：深度缓冲里只有"相机看得见的那一面"的颜色与法线。镜子往上看桌子
+// 底面/柱体背面时，屏幕空间里没有那些面的像素，以前的判据会拿**正面**的颜色当结果
+// ⇒ 倒影里桌子底下也在发光（2026-10-30 Danis 实拍发现）。
+// Pre-condition：ray_dir 与 hit_normal 在同一空间（视空间），且 hit_normal 朝相机。
+inline bool HitFacesRay(const Vec3& ray_dir, const Vec3& hit_normal) {
+    return Dot(ray_dir, hit_normal) < 0.0f;
+}
+
+// 默认朝向判据：恒真。语义 = "这一格没有法线数据，不判方向" —— 保持引入朝向判据
+// 之前的行为（老调用点/老测试因此逐字不变）。
+struct AcceptAllFacing {
+    bool operator()(int /*cell_x*/, int /*cell_y*/, const Vec3& /*ray_dir*/) const {
+        return true;
+    }
+};
+
 // ─────────────────────────── ④ 派生参数 ───────────────────────────
 
 // tile 与预算 → 每段长度 / 每段步数 / 厚度系数。**唯一一份算式**（Renderer 与测试共用）。
@@ -312,10 +335,15 @@ inline bool SlabTooShortForEfficiency(const DerivedParams& d) {
 // 反射体上，不该跳。
 //
 // depth_at(x, y) → 该格的视距（米）。越界时由调用方保证不会发生（这里仍防御性 break）。
-template <typename DepthFn>
+//
+// facing(cell_x, cell_y, ray_dir) → 该格能不能算命中（默认恒真 = 不判朝向）。
+//   **命中但朝向不对（背面命中）不算命中，继续 march** —— 射线应该穿过那个物体，
+//   而不是把它的正面颜色当结果（ssr_math.h::HitFacesRay 的来龙去脉）。
+template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int max_cells,
                    bool skip_first_cell, float thickness_coefficient, float min_thickness_m,
-                   DepthFn&& depth_at, int width, int height, int* hit_x, int* hit_y) {
+                   DepthFn&& depth_at, int width, int height, int* hit_x = nullptr,
+                   int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
     const Vec2 pos = PosAt(ray, sigma_start);
     int cx = static_cast<int>(std::floor(pos.x));
     int cy = static_cast<int>(std::floor(pos.y));
@@ -380,7 +408,8 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
             continue;
         }
         const float thickness = CellThickness(z_cell, thickness_coefficient, min_thickness_m);
-        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), z_cell, thickness)) {
+        if (CellHit(WAt(ray, sigma), WAt(ray, sigma_out), z_cell, thickness) &&
+            facing(cx, cy, ray.dir3)) {
             if (hit_x != nullptr) {
                 *hit_x = cx;
             }
@@ -405,22 +434,23 @@ float MarchSegment(const ScreenRay& ray, float sigma_start, float sigma_end, int
 }
 
 // 单线程版：整条射线一条 DDA 走到底（"K=1"的语义，也是等价性测试的对照）。
-template <typename DepthFn>
+template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchWholeRay(const ScreenRay& ray, float thickness_coefficient, float min_thickness_m,
                     int max_cells, DepthFn&& depth_at, int width, int height,
-                    int* hit_x = nullptr, int* hit_y = nullptr) {
+                    int* hit_x = nullptr, int* hit_y = nullptr,
+                    FacingFn facing = FacingFn{}) {
     const bool skip = ray.sigma_enter <= 0.0f;
     return MarchSegment(ray, ray.sigma_enter, ray.sigma_exit, max_cells, skip,
                         thickness_coefficient, min_thickness_m, depth_at, width, height,
-                        hit_x, hit_y);
+                        hit_x, hit_y, facing);
 }
 
 // 分段并行版（CPU 模拟 GPU 的 T² 个 lane）：每段等长 L，各自报本段最早命中，取 min。
 // **必须与 MarchWholeRay 给出同一个 s** —— 这是 GPU 侧"分段 + min"能成立的全部依据。
-template <typename DepthFn>
+template <typename DepthFn, typename FacingFn = AcceptAllFacing>
 float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickness_m,
                  DepthFn&& depth_at, int width, int height, int* hit_x = nullptr,
-                 int* hit_y = nullptr) {
+                 int* hit_y = nullptr, FacingFn facing = FacingFn{}) {
     float best = kNoHit;
     int best_x = -1;
     int best_y = -1;
@@ -438,7 +468,7 @@ float MarchSlabs(const ScreenRay& ray, const DerivedParams& d, float min_thickne
         int cy = -1;
         const float s = MarchSegment(ray, start, end, d.steps_per_lane, start <= 0.0f,
                                      d.thickness_coefficient, min_thickness_m, depth_at,
-                                     width, height, &cx, &cy);
+                                     width, height, &cx, &cy, facing);
         if (s < best) {
             best = s;
             best_x = cx;
