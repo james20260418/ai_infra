@@ -13,7 +13,8 @@
 // 见 src/debug_overlay/debug_font8x8.h。
 //
 // 行长契约：**每行 <= kMaxLineChars 个字符**。8x8 点阵字体的前进量就是 8 像素，
-// 所以 kMaxLineChars = 500 / 8 = 62 ⇒ 单行最宽 496 像素（加左上角 8px 留白 = 504）。
+// 所以一行的像素宽 = 字符数 x 8。面板（半透明黑底）宽度 = 8(左留白) + 行宽 + 4(右留白)，
+// 于是 kMaxLineChars = 61 ⇒ 8 + 488 + 4 = **500px**，正好是约定的上限。
 // 这条契约让 HUD 在任何窗口宽度下都有确定的占地，也是 kMaxGlFieldChars 存在的
 // 唯一理由 —— 驱动字符串长度不受我们控制。
 
@@ -74,17 +75,16 @@ struct DebugInfo {
     std::string DebugString() const;
 
     // 单条 GL 字段（含 "..." 在内的最终长度）上限。推导：
-    //   kMaxLineChars(62) - 缩进(5) = 57，取 56 留一位余量。
-    // 56 字符 x 8px = 448px，加 5 空格缩进 40px = 488px，仍 < 500px 预算。
+    //   kMaxLineChars(61) - 缩进(5) = 56，正好取 56。
     //
     // 为什么是 56 而不是随手写大：真实驱动里最长的常见串
     // "4.5 (Core Profile) Mesa 23.0.4" 只有 29 字符，56 有一倍余量；
     // 而旧值 96 会让「vendor | GL 版本」合并行到 216 字符 ≈ 1728px，直接飞出屏幕。
     static constexpr int kMaxGlFieldChars = 56;
 
-    // 单行字符数上限 = 500px / 8px。HUD 的宽度契约就是这一条数字：
-    // 所有行长（标签 + 缩进 + 截断后的字段）都必须满足它。
-    static constexpr int kMaxLineChars = 62;
+    // 单行字符数上限。HUD 的宽度契约就是这一条数字：所有行长（标签 + 缩进 +
+    // 截断后的字段）都必须满足它。61 = (500 - 8 - 4) / 8。
+    static constexpr int kMaxLineChars = 61;
 };
 
 }  // namespace jpov

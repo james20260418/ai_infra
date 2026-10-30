@@ -36,7 +36,13 @@ public:
     // 释放图集纹理。可重复调用（未 Init 也安全）。与 Init() 对称。
     void Finalize();
 
-    // 把多行文本画到**当前绑定的 FBO** 的左上角，纯白色。
+    // 把多行文本画到**当前绑定的 FBO** 的左上角：先铺一层半透明黑底（见
+    // kBackdropAlpha），再画纯白色文字。黑底是常驻 HUD 的必要条件 —— 纯白字
+    // 直接压在天空/浅地板上根本看不清。
+    //
+    // 黑底尺寸**贴内容**（= 8px 左留白 + 最长行宽 + 4px 右边距，行数决定高度），
+    // 不是固定 500px：固定宽会在左上角常驻一块大黑砖，挡住 app 自己的面板。
+    // 宽度上限由 DebugInfo::kMaxLineChars 保证（61 字符 x 8px + 8 + 4 = 500px）。
     //
     // 参数：
     //   text        —— ASCII 文本，'\n' 换行。区间外的字符（非 32..126）画成空白，
@@ -78,6 +84,19 @@ private:
     // 左上角留白与行距（未缩放像素；行距 = 字高 + 3 像素空隙）。
     static constexpr int kPadPx = 8;
     static constexpr int kLineGapPx = 3;
+
+    // 黑底在文字右侧/下方的额外留白（像素，不随 scale 变，与 kPadPx 同理）。
+    // 加上左边的 kPadPx 后，最长行 61 字符时黑底正好 8 + 488 + 4 = 500px。
+    static constexpr int kBackdropPadPx = 4;
+
+    // 黑底不透明度。0.55 = 白字在上面仍是 255 纯白（文字 alpha=1），
+    // 而场景色被压到 45%，足够压住天空/浅色地板。调它的人只能在一个地方改。
+    static constexpr float kBackdropAlpha = 0.55f;
+
+    // 图集里保留给「纯色填充」的那一格（不需要真实字形：8x8 全 255）。
+    // 95 个字形占 0..94，96 格图集剩最后一格 —— Init() 把它填满白色，
+    // Draw() 用它的格中心 uv 铺黑底。这样黑底不用第二套 shader。
+    static constexpr int kSolidCellIndex = kAtlasCols * kAtlasRows - 1;
 
     unsigned int atlas_tex_ = 0;
 };

@@ -36,7 +36,7 @@ namespace {
 constexpr int kWidth = 640;
 constexpr int kHeight = 360;
 
-// HUD 的文本区上界（6~7 行 x 11px/行 + 8px 上边距 ≈ 85px，留足余量取 150）。
+// HUD 区域上界：9 行 x 11px/行 + 8px 上边距 + 4px 下留白 = 108px，留足余量取 150。
 constexpr int kBandBottom = 150;
 
 // 场景底色（与 HUD 的纯白形成明确区分）。
@@ -280,6 +280,57 @@ int main() {
     CHECK_LT(min_y, 30) << "第一行应在最上方（y=" << min_y << "）";
     LOG(INFO) << "[PASS] HUD 在左上角：首个白像素 = (" << min_x << ", " << min_y << ")";
 
+    // ---- 2b. 半透明黑底：贴内容、压暗场景、不越界 ----
+    {
+        const std::string dbg_hud = app.debug().DebugString();
+        int max_cols = 0;
+        int cols = 0;
+        int lines = 1;
+        for (const char ch : dbg_hud) {
+            if (ch == '\n') {
+                max_cols = std::max(max_cols, cols);
+                cols = 0;
+                ++lines;
+                continue;
+            }
+            ++cols;
+        }
+        max_cols = std::max(max_cols, cols);
+        const int panel_w = 8 + max_cols * 8 + 4;
+        const int panel_h = 8 + (lines - 1) * 11 + 8 + 4;
+        CHECK_LE(panel_w, 500) << "黑底宽度超过 500px 预算（" << panel_w
+                               << "），行长契约被破坏";
+
+        // 面板内、文字行间隙（y=1）的像素 = 场景色 x (1 - 0.55)。
+        const float keep = 1.0f - 0.55f;
+        const int want_r = static_cast<int>(std::lround(kSceneR * keep * 255.0f));
+        const int want_g = static_cast<int>(std::lround(kSceneG * keep * 255.0f));
+        const int want_b = static_cast<int>(std::lround(kSceneB * keep * 255.0f));
+        const std::size_t o = 1 * static_cast<std::size_t>(on1.w) * 4 + 1 * 4;
+        CHECK_LE(std::abs(static_cast<int>(on1.px[o + 0]) - want_r), 2)
+            << "黑底没压暗 R（got " << static_cast<int>(on1.px[o + 0]) << " want "
+            << want_r << "）";
+        CHECK_LE(std::abs(static_cast<int>(on1.px[o + 1]) - want_g), 2)
+            << "黑底没压暗 G";
+        CHECK_LE(std::abs(static_cast<int>(on1.px[o + 2]) - want_b), 2)
+            << "黑底没压暗 B";
+        LOG(INFO) << "[PASS] 黑底把场景压到 x0.45（实测 " << static_cast<int>(on1.px[o])
+                  << " 期望 " << want_r << "）";
+
+        // 面板右边/下边 2px 之外必须还是**原样**的场景色 ⇒ 黑底贴内容，不是拉满窗口。
+        const int outside_x = panel_w + 2;
+        const int outside_y = panel_h + 2;
+        CHECK_LT(outside_x, on1.w) << "窗口太窄，无法验证黑底右边界";
+        CHECK_LT(outside_y, on1.h) << "窗口太矮，无法验证黑底下边界";
+        const std::size_t ox = 1 * static_cast<std::size_t>(on1.w) * 4 + outside_x * 4;
+        CHECK_EQ(on1.px[ox + 0], base.px[ox + 0])
+            << "黑底宽于内容（x=" << outside_x << " 被压暗了）";
+        const std::size_t oy = static_cast<std::size_t>(outside_y) * on1.w * 4 + 4;
+        CHECK_EQ(on1.px[oy + 0], base.px[oy + 0])
+            << "黑底高过内容（y=" << outside_y << " 被压暗了）";
+        LOG(INFO) << "[PASS] 黑底贴内容：panel = " << panel_w << "x" << panel_h;
+    }
+
     // ---- 2b. 逐字比对：渲染出来的字形必须与 DebugString() 完全一致 ----
     // 这是最硬的一条：同时钉死字形下标、前进量、行高、图集 v 方向。
     const std::string expected_text = app.debug().DebugString();
@@ -322,6 +373,8 @@ int main() {
     {
         JPOV::Config cfg2 = cfg;
         cfg2.debug_overlay = true;          // 请求"常驻"
+        // 显式关掉 DPI 跟随，测试才与跑在什么屏上无关（1x / 2x 屏结果一致）。
+        cfg2.debug_overlay_scale_follow_dpi = false;
         cfg2.debug_overlay_scale = 2;
         OverlayTestApp app2(cfg2);
         app2.Init();
@@ -330,6 +383,8 @@ int main() {
         CHECK(!app2.is_debug_overlay_visible())
             << "headless 下 debug_overlay 初值必须为 false";
         LOG(INFO) << "[PASS] headless 下 HUD 初值关闭（gold 截图不会被污染）";
+        CHECK_EQ(app2.debug_overlay_effective_scale(), 2)
+            << "follow_dpi=false 时生效字号必须等于 Config::debug_overlay_scale";
         app2.SetDebugOverlayVisible(true);
         // 放大 2 倍后最长一行 61 字符 x 16px = 976px ⇒ 窗口要比前面宽，
         // 否则文字会被视口裁掉（那是设计行为，但会让比对无法进行）。

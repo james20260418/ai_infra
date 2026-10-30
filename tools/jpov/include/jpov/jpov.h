@@ -108,12 +108,21 @@ public:
         bool        debug_overlay = true;
 
         // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
-        // 默认 1 = **固定 8 物理像素字高**，这已是「还能看清」的下限（点阵字体
-        // 再小就得换 5x7 字模，中文更不可能），同时也是能塞下最多信息的档位。
+        // 1 是「还能看清」的下限（点阵字体再小就得换 5x7 字模，中文更不可能），
+        // 同时也是能塞下最多信息的档位。
+        //
+        // 默认值配合 debug_overlay_scale_follow_dpi：屏缩放 100% ⇒ 1，200% ⇒ 2。
+        // 这个字段只在 follow_dpi = false 时生效（作为显式覆盖值）。
         // Pre-condition: 1 <= debug_overlay_scale <= 8（越界 Init() 会 CHECK 失败）
-        // ⚠️ 8 物理像素在 200% 缩放的屏上只有 4 个逻辑像素 ⇒ 会看不清。
-        //    这种机器请设 2（或后续由调用方按 glfwGetWindowContentScale() 决定）。
         int         debug_overlay_scale = 1;
+
+        // 是否让 debug HUD 的字号跟随窗口的 DPI 缩放（glfwGetWindowContentScale）。
+        //   true（默认）：100% 屏 = 8 物理像素（现状），200% 屏 = 16 物理像素，
+        //                 也就是「看起来」一直是 8 逻辑像素 —— 视觉大小不随 DPI 变。
+        //   false：严格用 debug_overlay_scale 的整数值（老行为）。
+        // 为什么需要它：8 物理像素在 200% 缩放的屏上只有 4 个逻辑像素，会看不清；
+        // 而「固定物理像素」在混合 DPI 环境下永远照顾不到两头。
+        bool        debug_overlay_scale_follow_dpi = true;
     };
 
     explicit JPOV(Config cfg);
@@ -360,6 +369,10 @@ public:
     // glGetString（也无需自己解析软件光栅器名字）。
     const jpov::DebugInfo& debug() const { return debug_; }
 
+    // 左上角 debug HUD 实际使用的字形放大倍数（Init 时定：跟随 DPI 或取
+    // Config::debug_overlay_scale）。headless 的 Xvfb / 普通 100% 屏上通常 = 1。
+    int debug_overlay_effective_scale() const { return debug_overlay_scale_; }
+
     // 左上角 debug HUD 当前是否可见（F3 切换；初值 = Config::debug_overlay）。
     bool is_debug_overlay_visible() const { return debug_overlay_visible_; }
 
@@ -421,6 +434,10 @@ private:
     // ---- Debug HUD 状态 ----
     // DebugInfo 是**引擎自己的一份状态**（不是渲染指令）：Init 填 gpu，每帧填相机/fps。
     jpov::DebugInfo debug_;
+    // debug HUD 实际生效的字形放大倍数。Init() 里定一次（DPI 在这之后不会变：
+    // GLFW 不做运行中 DPI 迁移，换屏也不会回调）。绘制用它，不直接读 Config。
+    int debug_overlay_scale_ = 1;
+
     // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay（默认 true），
     // 运行时由 F3 切换。
     bool debug_overlay_visible_ = false;

@@ -162,10 +162,27 @@ void JPOV::Init() {
     const std::vector<std::tuple<const char*, int, const char*>> kDefaultFonts = {};
 
     // 字形放大倍数的合法区间由内置点阵字体决定（1 = 8x8 原生，上限 8 倍）。
+    // 注意：follow_dpi = true 时这个字段只是"万一要覆盖"的备用值，仍然校验。
     CHECK_GE(config_.debug_overlay_scale, jpov::DebugOverlayRenderer::kGlyphScaleMin)
         << "Config::debug_overlay_scale 太小";
     CHECK_LE(config_.debug_overlay_scale, jpov::DebugOverlayRenderer::kGlyphScaleMax)
         << "Config::debug_overlay_scale 太大";
+
+    // debug HUD 实际字号：默认跟随窗口 DPI 缩放（Windows 200% / macOS Retina 上
+    // content scale = 2）。这样"看起来"永远是 8 逻辑像素 —— 100% 屏结果与固定
+    // 8 物理像素完全一致，200% 屏才不会缩成 4 个逻辑像素看不清。
+    // 注意这是 Init 时的快照：GLFW 不做运行中 DPI 迁移，运行期不会变。
+    debug_overlay_scale_ = config_.debug_overlay_scale;
+    if (config_.debug_overlay_scale_follow_dpi) {
+        float sx = 1.0f;
+        float sy = 1.0f;
+        glfwGetWindowContentScale(window_, &sx, &sy);
+        const float dpi_scale = std::max(sx, sy);
+        int rounded = static_cast<int>(dpi_scale + 0.5f);   // 四舍五入，1.5 -> 2
+        rounded = std::max(rounded, jpov::DebugOverlayRenderer::kGlyphScaleMin);
+        rounded = std::min(rounded, jpov::DebugOverlayRenderer::kGlyphScaleMax);
+        debug_overlay_scale_ = rounded;
+    }
 
     renderer_ = std::make_unique<jpov::Renderer>();
     renderer_->Init(font_tuples, kDefaultFonts, config_.shadow);
@@ -382,7 +399,7 @@ void JPOV::RunOnceInternal(int64_t frame_count,
     // ---- debug HUD：必须在 Render() 之后画（落在主 FBO 最上层，
     //      Present 与 SaveScreenshot 都会带上它）----
     if (debug_overlay_visible_) {
-        renderer_->DrawDebugOverlay(debug_.DebugString(), config_.debug_overlay_scale);
+        renderer_->DrawDebugOverlay(debug_.DebugString(), debug_overlay_scale_);
     }
 }
 

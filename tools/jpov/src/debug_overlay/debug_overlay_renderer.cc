@@ -4,6 +4,7 @@
 
 #include "tools/jpov/src/debug_overlay/debug_overlay_renderer.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -42,8 +43,9 @@ DebugOverlayRenderer::~DebugOverlayRenderer() {
 }
 
 void DebugOverlayRenderer::Init() {
-    CHECK_LE(kGlyphCount, kAtlasCols * kAtlasRows)
-        << "点阵字形数超过图集格数";
+    // 必须**严格**小于：最后一格（kSolidCellIndex）要留下来当纯色填充块。
+    CHECK_LT(kGlyphCount, kAtlasCols * kAtlasRows)
+        << "点阵字形数占满图集，没有格子留给黑底填充";
 
     Finalize();   // 允许重复 Init
 
@@ -61,6 +63,19 @@ void DebugOverlayRenderer::Init() {
                     const int py = cell_y + row;
                     pixels[static_cast<std::size_t>(py) * kAtlasW + px] = 255;
                 }
+            }
+        }
+    }
+
+    // 最后一格填满 255：Draw() 铺黑底时按格中心采样，等价于一个纯色 texel。
+    {
+        const int cell_x = (kSolidCellIndex % kAtlasCols) * kDebugFontGlyphW;
+        const int cell_y = (kSolidCellIndex / kAtlasCols) * kDebugFontGlyphH;
+        for (int row = 0; row < kDebugFontGlyphH; ++row) {
+            for (int col = 0; col < kDebugFontGlyphW; ++col) {
+                const int px = cell_x + col;
+                const int py = cell_y + row;
+                pixels[static_cast<std::size_t>(py) * kAtlasW + px] = 255;
             }
         }
     }
@@ -102,14 +117,64 @@ void DebugOverlayRenderer::Draw(std::string_view text,
         return;
     }
 
-    // ---- CPU 端生成顶点：左上角起排，'\n' 换行 ----
     const int glyph_w = kDebugFontGlyphW * glyph_scale;
     const int glyph_h = kDebugFontGlyphH * glyph_scale;
     const int advance = glyph_w;
     const int line_h = (kDebugFontGlyphH + kLineGapPx) * glyph_scale;
 
-    std::vector<float> verts;
-    verts.reserve(text.size() * kVerticesPerGlyph * kFloatsPerVertex);
+    // ---- 第 1 遍：量内容（黑底必须贴内容，所以不能边画字边定尺寸）----
+    int cols = 0;
+    int max_cols = 0;
+    int line_count = 1;
+    for (const char ch : text) {
+        if (ch == '\n') {
+            max_cols = std::max(max_cols, cols);
+            cols = 0;
+            ++line_count;
+            continue;
+        }
+        ++cols;   // 非法字符也占一格（与第 2 遍的前进量一致）
+    }
+    max_cols = std::max(max_cols, cols);
+
+    // 黑底：左 kPadPx、右/下 kBackdropPadPx。宽度由最长行决定，**不**按窗口宽。
+    const float panel_w =
+        static_cast<float>(kPadPx + max_cols * advance + kBackdropPadPx);
+    const float panel_h = static_cast<float>(kPadPx + (line_count - 1) * line_h +
+                                             glyph_h + kBackdropPadPx);
+
+    // ---- 第 2 遍：生成顶点 ----
+    // 黑底和文字用同一个 program，但 uColor 不同（黑 0.55 / 白 1.0），
+    // 所以分两次上传、两次 draw。两次都走 shared stream VBO，开销可忽略。
+    std::vector<float> backdrop_verts;
+    backdrop_verts.reserve(kVerticesPerGlyph * kFloatsPerVertex);
+    {
+        // 图集最后一格是实心白（Init() 填的）：按格中心采样 = 纯色 texel。
+        const float u =
+            (static_cast<float>((kSolidCellIndex % kAtlasCols) * kDebugFontGlyphW) +
+             static_cast<float>(kDebugFontGlyphW) * 0.5f) /
+            static_cast<float>(kAtlasW);
+        const float v =
+            (static_cast<float>((kSolidCellIndex / kAtlasCols) * kDebugFontGlyphH) +
+             static_cast<float>(kDebugFontGlyphH) * 0.5f) /
+            static_cast<float>(kAtlasH);
+        const float quad[kVerticesPerGlyph][kFloatsPerVertex] = {
+            {0.0f, 0.0f, u, v},
+            {panel_w, 0.0f, u, v},
+            {panel_w, panel_h, u, v},
+            {0.0f, 0.0f, u, v},
+            {panel_w, panel_h, u, v},
+            {0.0f, panel_h, u, v},
+        };
+        for (int vtx = 0; vtx < kVerticesPerGlyph; ++vtx) {
+            for (int f = 0; f < kFloatsPerVertex; ++f) {
+                backdrop_verts.push_back(quad[vtx][f]);
+            }
+        }
+    }
+
+    std::vector<float> text_verts;
+    text_verts.reserve(text.size() * kVerticesPerGlyph * kFloatsPerVertex);
 
     int pen_x = kPadPx;
     int pen_y = kPadPx;
@@ -150,18 +215,13 @@ void DebugOverlayRenderer::Draw(std::string_view text,
             {x1, y1, u1, v1},
             {x0, y1, u0, v1},
         };
-        for (int v = 0; v < kVerticesPerGlyph; ++v) {
+        for (int vtx = 0; vtx < kVerticesPerGlyph; ++vtx) {
             for (int f = 0; f < kFloatsPerVertex; ++f) {
-                verts.push_back(quad[v][f]);
+                text_verts.push_back(quad[vtx][f]);
             }
         }
 
         pen_x += advance;
-    }
-
-    if (verts.empty()) {
-        // 全是换行/非法字符：没有可画的字形。
-        return;
     }
 
     // ---- 上传 + 绘制（GL 状态交给 push/pop 还原）----
@@ -173,18 +233,12 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     glUseProgram(text_prog);
     glUniform2f(glGetUniformLocation(text_prog, "uFboSize"),
                 static_cast<float>(fbo_w), static_cast<float>(fbo_h));
-    // 白色，全不透明：调试文本按需求固定白字（alpha 交给点阵覆盖度决定）。
-    glUniform4f(glGetUniformLocation(text_prog, "uColor"), 1.0f, 1.0f, 1.0f, 1.0f);
     glUniform1i(glGetUniformLocation(text_prog, "uTexture"), 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_tex_);
 
     glBindBuffer(GL_ARRAY_BUFFER, stream_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-
     constexpr int kStride = kFloatsPerVertex * static_cast<int>(sizeof(float));
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, kStride, (void*)0);
@@ -192,8 +246,24 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, kStride,
                           (void*)(2 * sizeof(float)));
 
+    // ---- (1) 黑底：纯黑、alpha = kBackdropAlpha ----
+    glUniform4f(glGetUniformLocation(text_prog, "uColor"), 0.0f, 0.0f, 0.0f,
+                kBackdropAlpha);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(backdrop_verts.size() * sizeof(float)),
+                 backdrop_verts.data(), GL_DYNAMIC_DRAW);
     glDrawArrays(GL_TRIANGLES, 0,
-                 static_cast<GLsizei>(verts.size()) / kFloatsPerVertex);
+                 static_cast<GLsizei>(backdrop_verts.size()) / kFloatsPerVertex);
+
+    // ---- (2) 文字：白色、全不透明（alpha 交给点阵覆盖度决定）----
+    if (!text_verts.empty()) {
+        glUniform4f(glGetUniformLocation(text_prog, "uColor"), 1.0f, 1.0f, 1.0f, 1.0f);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(text_verts.size() * sizeof(float)),
+                     text_verts.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0,
+                     static_cast<GLsizei>(text_verts.size()) / kFloatsPerVertex);
+    }
 
     const GLenum draw_err = glGetError();
     if (draw_err != GL_NO_ERROR) {
