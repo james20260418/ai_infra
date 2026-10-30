@@ -433,7 +433,7 @@ private:
     // GLFW 不做运行中 DPI 迁移，换屏也不会回调）。绘制用它，不直接读 Config。
     int debug_overlay_scale_ = 1;
 
-    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay（默认 true），
+    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay（默认 false），
     // 运行时由 F3 切换。
     bool debug_overlay_visible_ = false;
     // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。

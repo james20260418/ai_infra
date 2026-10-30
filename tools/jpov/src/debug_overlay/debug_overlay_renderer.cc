@@ -129,6 +129,11 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     for (const char ch : text) {
         if (ch == '\n') {
             max_cols = std::max(max_cols, cols);
+
+    // 全是换行/空行：没有内容也就没有面板（旧实现在这里 return，行为保持一致）。
+    if (max_cols == 0) {
+        return;
+    }
             cols = 0;
             ++line_count;
             continue;
@@ -136,6 +141,11 @@ void DebugOverlayRenderer::Draw(std::string_view text,
         ++cols;   // 非法字符也占一格（与第 2 遍的前进量一致）
     }
     max_cols = std::max(max_cols, cols);
+
+    // 全是换行/空行：没有内容也就没有面板（旧实现在这里 return，行为保持一致）。
+    if (max_cols == 0) {
+        return;
+    }
 
     // 黑底：左 kPadPx、右/下 kBackdropPadPx。宽度由最长行决定，**不**按窗口宽。
     const float panel_w =
@@ -224,8 +234,22 @@ void DebugOverlayRenderer::Draw(std::string_view text,
         pen_x += advance;
     }
 
-    // ---- 上传 + 绘制（GL 状态交给 push/pop 还原）----
-    glPushAttrib(GL_ENABLE_BIT);
+    // ---- 上传 + 绘制 ----
+    //
+    // 三样状态我们自己改、自己还原（glPushAttrib(GL_ENABLE_BIT) 只管 enable 位，
+    // **管不到混合因子和 active texture unit**）：
+    //   * enable 位（混合/深度测试）—— push/pop(GL_ENABLE_BIT)
+    //   * glBlendFunc 因子            —— push/pop(GL_COLOR_BUFFER_BIT)
+    //   * glActiveTexture 单元        —— 手动查/还原（attrib 栈没有这一项）
+    // 为什么 blend func 不自己查/还原：要精确还原 RGB 与 alpha 可能不同的因子就得
+    // glBlendFuncSeparate，而 MinGW 的 gl_loader 里没有它（--config=windows 会链接失败）。
+    // GL_COLOR_BUFFER_BIT 这一段 GL 1.1 就有，两个平台都稳。
+    // HUD 是每帧最后一个绘制动作，漏还原今天不会立刻出问题（后面的 pass 都自带
+    // 状态设置），但"上游状态我保证不动"这条契约必须是真的，不能靠下游侥幸。
+    GLint prev_active_tex = GL_TEXTURE0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
+
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
@@ -273,6 +297,7 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     glPopAttrib();
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(static_cast<GLenum>(prev_active_tex));
 }
 
 }  // namespace jpov

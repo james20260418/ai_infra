@@ -615,9 +615,9 @@ void JPOV::HandleKey(int key, int, int action, int mods) {
     // 只在按下时切换（REPEAT 不重复切）。
     //
     // 为什么不是 Quake 系的 `~`：那个键会把 grave accent 从 InputSnapshot 里吞掉，
-    // ui.cc / sp_ui.cc 的文本框**就再也输不了 '`' 和 '~'**（原先的实现在 PR #242 里
-    // 就是这个代价）。功能键不进任何文本输入路径，代价为零；F3 = debug 面板也是
-    // 「类似 Minecraft 的独立游戏」这个目标体量的通行惯例。
+    // ui.cc / sp_ui.cc 的文本框**就再也输不了 '`' 和 '~'**。功能键不进任何文本
+    // 输入路径，代价为零；F3 = debug 面板也是「类似 Minecraft 的独立游戏」
+    // 这个目标体量的通行惯例。
     if (key == static_cast<int>(jpov::KeyCode::F3) && action == GLFW_PRESS) {
         debug_overlay_visible_ = !debug_overlay_visible_;
         return;

@@ -31,7 +31,14 @@ std::vector<std::string> WrapLine(const std::string& line, int max_chars) {
     while (indent_len < line.size() && line[indent_len] == ' ') {
         ++indent_len;
     }
-    const std::string continuation_prefix(indent_len + kContinuationIndent, ' ');
+    // 续行缩进最多占半行宽：缩进比可用宽度还大时 avail 会算出 0 甚至下溢，
+    // 循环就永远前进不了（死循环）。我们的行前导空格 <= 5，这条护栏只在
+    // 将来有人往 DebugString 里塞怪格式时才会真的生效。
+    std::size_t cont_indent = indent_len + static_cast<std::size_t>(kContinuationIndent);
+    if (cont_indent > width / 2) {
+        cont_indent = width / 2;
+    }
+    const std::string continuation_prefix(cont_indent, ' ');
 
     std::vector<std::string> out;
     std::size_t pos = 0;
