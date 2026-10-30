@@ -54,6 +54,9 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.mat_high_   = jpov_skylight::MaterialHighGloss();
     app.mat_metal_  = jpov_skylight::MaterialMetal();
     app.mat_ground_ = jpov_skylight::GroundMaterial();
+    app.mat_mirror_ = jpov_skylight::MirrorMaterial();
+    app.mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
+    app.BuildClutter(/*count=*/24);
 }
 
 // 额外模型（桌子 / 高模橡树）的**相对路径**（相对 exe 所在目录）。
@@ -428,12 +431,78 @@ int RunCaptureEnv(const std::string& out_dir) {
 
 }  // namespace
 
+// SSR A/B 拍摄：固定机位/光照，同一个"地表大镜子 + 上方随机模型"场景，出四张图：
+//   ssr_off.png        (a) 只有环境镜面（今天的样子）——SSR 不能比它差
+//   ssr_on_1x.png      (b) SSR 全分辨率 1:1 ——**质量基准**
+//   ssr_on_half.png    (c) SSR 半分辨率 1:2 + A 预乘双边升采样 —— 本次方案
+//   ssr_coverage.png   (d) A 覆盖率灰度（看洞/漏在哪）
+// 用法：jpov_skylight_viewer --capture-ssr <out_dir>
+int RunCaptureSsr(const std::string& out_dir) {
+    JPOV::Config cfg;
+    cfg.title = "JPOV — SSR A/B（headless）";
+    cfg.width  = jpov_skylight::kViewerWidth;
+    cfg.height = jpov_skylight::kViewerHeight;
+    cfg.headless = true;
+    cfg.fonts = {
+        {"fonts/NotoSansCJK-Regular.ttc", 0, jpov::kFontBuiltinCJK},
+        {"fonts/DejaVuSans.ttf",            0, jpov::kFontBuiltinLatin},
+    };
+
+    jpov_skylight::SkylightApp app(cfg);
+    app.SetShowPanel(false);
+    app.Init();
+    InstallScene(app);
+    InstallModels(app);
+    InstallPerson(app);
+
+    jpov::WindowInfo winfo;
+    winfo.width  = jpov_skylight::kViewerWidth;
+    winfo.height = jpov_skylight::kViewerHeight;
+    jpov::InputSnapshot input{};
+
+    // 场景 1 = 镜面地板（200×200 m）+ 24 个随机方块 + 桌子/橡树。
+    app.scene_index_ = 1;
+    app.SetEnvSpecular(true, 1.0f);
+    app.deg_.turbidity = jpov_skylight::kTurbidityDef;
+    app.deg_.daylight_season = 0.0f;
+    app.deg_.sun_elev_deg = 35.0f;
+    app.deg_.sun_azim_deg = 60.0f;
+    // 低角度相机：掠射最能暴露自交/厚度/漏光。目标点固定在原点（镜面中心）。
+    app.view_ = jpov_viewer::DefaultView();
+    app.view_.phi   = 0.21;   // ≈12°
+    app.view_.theta = 0.6;
+    app.view_.R     = 45.0;
+
+    // (a) 关 SSR
+    app.SetSsr(false);
+    app.RunOnce(input, winfo, (out_dir + "/ssr_off.png").c_str());
+
+    // (b) 1:1（质量基准）
+    app.SetSsr(true);
+    app.ssr_scale_ = 1.0f;
+    app.ssr_debug_ = 0;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_on_1x.png").c_str());
+
+    // (c) 1:2 + 升采样
+    app.ssr_scale_ = 0.5f;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_on_half.png").c_str());
+
+    // (d) A 覆盖率（1:2）
+    app.ssr_debug_ = 1;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_coverage.png").c_str());
+
+    LOG(INFO) << "SSR A/B captured to " << out_dir;
+    app.Finalize();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ── headless 拍摄分支：--capture <out_dir> ──
     // 用法：jpov_skylight_viewer --capture /tmp/sky_out
     std::string out_dir;
     std::string smaa_out_dir;
     std::string env_out_dir;
+    std::string ssr_out_dir;
     float smaa_threshold = 0.1f;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
@@ -442,12 +511,17 @@ int main(int argc, char** argv) {
             smaa_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--capture-env") == 0 && i + 1 < argc) {
             env_out_dir = argv[i + 1];
+        } else if (std::strcmp(argv[i], "--capture-ssr") == 0 && i + 1 < argc) {
+            ssr_out_dir = argv[i + 1];
         } else if (std::strcmp(argv[i], "--smaa-threshold") == 0 && i + 1 < argc) {
             smaa_threshold = std::strtof(argv[i + 1], nullptr);
         }
     }
     if (!env_out_dir.empty()) {
         return RunCaptureEnv(env_out_dir);
+    }
+    if (!ssr_out_dir.empty()) {
+        return RunCaptureSsr(ssr_out_dir);
     }
     if (!smaa_out_dir.empty()) {
         return RunCaptureSmaa(smaa_out_dir, smaa_threshold);

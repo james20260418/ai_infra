@@ -667,6 +667,56 @@ struct EnvSpecular {
     float sky_scale = 1.0f;
 };
 
+// ==================== 屏幕空间反射（SSR）====================
+//
+// **SSR 不是加一项，是替换 EnvSpecular 那一项的估计器**（见 docs/jpov_ssr_v2_design.md）：
+//   有屏幕数据的地方用它算出来的辐亮度，没有的地方原样退回 EnvSpecularTerm ⇒
+//   A=0 时画面与"没开 SSR"**逐字节相同**（单调改进，不引入新的失败模式）。
+//
+// 管线位置：不透明 3D 之后、半透明（strip/粒子/雾）之前。内部四步：
+//   属性 pass（只画 ssr_reflector 的物体，写视空间法线）→ 降采样（2×2 选点）→
+//   SsrRenderer（半分辨率）→ 合成（A 预乘双边升采样 + 替换环境镜面项）。
+//
+// Pre-condition: 必须同时设置 `env_specular`（SSR 需要那张天空 cubemap 来算"被替换掉的
+//   那一份"；没有 env 时光照模型本身就缺一半，SSR 无从替换）。
+struct SsrConfig {
+    // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
+    bool enabled = false;
+
+    // SSR 相对 3D 分辨率的分辨率倍率：1.0 / 0.5 / 0.25（其它值直接 FATAL）。
+    // 这是**唯一的成本旋钮**：成本 ∝ 面积，画面损失只是反射的锐度。
+    float resolution_scale = 0.5f;
+
+    // 厚度：T = max(N_px · θ_px · d, min_thickness_m)，单位是 **SSR 像素**（θ_px 按 SSR 分辨率算）。
+    // 半分辨率下同一个 N_px 对应的世界厚度会自动翻倍（见设计文档 §9.3），观感基本一致。
+    float thickness_pixels = 6.0f;
+    float min_thickness_m = 1.0e-4f;
+
+    // 射线长度上限：米（物理）与 **SSR 像素**（屏幕预算 = 覆盖范围 = 成本）。
+    float max_distance_m = 1000.0f;
+    int max_ray_pixels = 220;
+
+    // 每镜面像素切几条 lane：tile 边长 T ∈ {1,2,4,8}（只改并发粒度，不改画面）。
+    // 搭配口诀：T² ≤ max_ray_pixels/4。
+    int tile_size = 2;
+
+    // 升采样的值域项（跨表面拒绝）：
+    //   |Δ(1/z)| / (1/z) > upsample_depth_tolerance ⇒ 不采该邻居
+    //   dot(N_hi, N_lo)  < upsample_normal_dot      ⇒ 不采该邻居
+    float upsample_depth_tolerance = 0.05f;
+    float upsample_normal_dot = 0.9f;
+
+    // 反射层材质（本版**全场景一套**，见 ssr_integration.h 的"已知限制"）。
+    // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换。
+    Vec3f base_color = {0.02f, 0.02f, 0.02f};
+    float metallic = 1.0f;
+    float roughness = 0.02f;
+    float ao = 1.0f;
+
+    // 调试：0 = 正常；1 = 输出 A 覆盖率灰度（看洞/漏在哪）；2 = 直通（只出 hdr 副本）。
+    int debug_coverage = 0;
+};
+
 // 色彩分级（ASC-CDL 风格，per-channel）。作用于 tone map **之前**的 HDR 值。
 // 这是“光影塑造”环节（scene-referred）：
 //   out = pow(max(v * slope + offset, 0), power)
@@ -1846,6 +1896,13 @@ struct Object3DCommand {
     //   不同风向/相位/强度。仅当 mesh 带 kWind（烘焙过风数据）时生效；无风数据的
     //   mesh 设了也无效。未设（默认）= 本物体零风、零开销。见 WindCommand。
     std::optional<WindCommand> wind;
+
+    // 是否是 SSR 的**反射体**（镜面地板 / 金属球…）。为 true 时：
+    //   · 属性 pass 会把它再画一遍（写视空间法线 + mask），供 SSR 用；
+    //   · 合成阶段只在这些像素上替换环境镜面项。
+    // 未设置 RenderCommandList::ssr 时该字段零意义（属性 pass 不跑）。
+    // Pre-condition: mesh 必须带法线（kNormal）。
+    bool ssr_reflector = false;
 };
 
 // 3D 静态模型的**批量实例**（世界空间，instancing）—— 同一 mesh 摆 N 份。
@@ -2220,6 +2277,12 @@ struct RenderCommandList {
     // Pre-condition: 设置时必须同时设置 sky（否则 Renderer LOG(FATAL)）。
     std::optional<EnvSpecular> env_specular;
 
+    // 屏幕空间反射（SSR）：有值且 enabled 时，在不透明 3D 之后、半透明之前插入
+    //   「属性 pass → 降采样 → SSR → 合成」四步，用屏幕数据替换环境镜面项。
+    // 未设置 / enabled=false ⇒ 一次都不跑，零开销零回归。
+    // Pre-condition: 必须同时设置 env_specular（合成要重算并替换那一项）。
+    std::optional<SsrConfig> ssr;
+
     // 天球背景。有值时在 3D 物体之前绘制 HDR 环境贴图作为背景，
     // 姿态由 sun.direction 定死（无 sun 时用 HDRI 原方向）。
     std::optional<SkyCommand> sky;
@@ -2511,13 +2574,16 @@ struct RenderCommandList {
     // Pre-condition: up 与 front 均非零向量，且不平行
     // 参数顺序刻意：把常用/先设的放前（scale 在 highlight/picking_id 前），
     // 最不常用的 picking_id 放最后。调用处按 cpp-dev-rules 约定加 /*形参名=*/ 注释避免错传。
+    // ssr_reflector：本物体是否是 SSR 的反射体（见 Object3DCommand::ssr_reflector）。
+    // 未设置 RenderCommandList::ssr 时该参数无意义。
     void DrawObject3D(uint32_t mesh_id, const PBRMaterial& mat,
                       const Vec3f& center,
                       const Vec3f& up, const Vec3f& front,
                       float scale = 1.0f,
                       bool highlight = false,
                       uint32_t picking_id = 0,
-                      const std::optional<WindCommand>& wind = std::nullopt);
+                      const std::optional<WindCommand>& wind = std::nullopt,
+                      bool ssr_reflector = false);
 
     // 3D 静态模型的**批量实例**绘制（世界空间，instancing）。
     //
