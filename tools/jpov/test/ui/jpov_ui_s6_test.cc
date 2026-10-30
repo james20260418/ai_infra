@@ -17,6 +17,7 @@
 // 本测试是纯 CPU 的指令层比对（gold 指令），不渲染、无窗口（headless）。
 // 点击通过 InputSnapshot.left.raw + left_clicks 模拟。
 
+#include <cmath>
 #include <vector>
 
 #include <glog/logging.h>
@@ -373,6 +374,67 @@ public:
         LOG(INFO) << "[PASS] Combo 越界/零尺寸 → 0 指令、不改 selected";
     }
 
+    // 贴底自动向上展开（2026-10-30 Danis：「下拉菜单不要放下面，一旦下拉会出屏幕」）：
+    // 视口 640×360、框贴底（y=320..344），3 个选项 × 行高 28 = 84 高。
+    // 下方只剩 16、上方 320 → 必须向上展开：列表顶 = 320-84 = 236。
+    // 断言三件事：① 列表矩形在框上方；② 点击【框下方】不再命中任何选项（旧实现
+    // 那块区域是列表前半截，会误选）；③ 点击上方的第 2 行能选中 index=2
+    // （证明命中测试与绘制用的是同一个 list_top）。
+    static void TestFlipUpNearBottom() {
+        const UiTheme theme = UiTheme::Default(16.0f);
+        const UiRect box{{10.0f, 320.0f}, {200.0f, 24.0f}};
+        const std::vector<const char*> items = {"apple", "banana", "cherry"};
+        const float row_h = 28.0f;                    // font 16 + 12
+        const float flipped_top = 320.0f - 3.0f * row_h;  // 236
+        Ui ui;
+        int sel = 0;
+        // 帧1：点框内展开。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(110.0f, 332.0f), theme, 640.0f, 360.0f);
+            ui.Combo("label", &sel, items, box);
+            ui.End();
+            ui.Emit(&cmd);
+            // 找列表底板（宽 200、高 84 的那条 FillRect）。
+            bool found = false;
+            for (const FillRect2DCommand& r : cmd.fillrect2d) {
+                if (std::abs(r.size.x() - 200.0f) < 0.01f &&
+                    std::abs(r.size.y() - 3.0f * row_h) < 0.01f) {
+                    // 向上展开（底边贴框顶）才会落在 flipped_top。
+                    CHECK_NEAR(r.pos.y(), flipped_top, 0.01f);
+                    found = true;
+                }
+            }
+            CHECK(found) << "展开态应画出下拉列表底板";
+        }
+        // 帧2：点带框正下方（y=352，旧实现这里属列表前半截）→ 只关不选值。
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 352.0f), theme, 640.0f, 360.0f);
+            CHECK(!ui.Combo("label", &sel, items, box))
+                << "框下方已无列表，点它不应选中任何项";
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK_EQ(sel, 0) << "selected 不应改变";
+        }
+        // 帧3：重新展开，点上方的第 2 行（236 + 2*28 + 14 = 306）→ 选中 index=2。
+        {
+            ui.Begin(MakeClickInput(110.0f, 332.0f), theme, 640.0f, 360.0f);
+            ui.Combo("label", &sel, items, box);
+            ui.End();
+        }
+        {
+            RenderCommandList cmd;
+            ui.Begin(MakeClickInput(50.0f, 306.0f), theme, 640.0f, 360.0f);
+            const bool changed = ui.Combo("label", &sel, items, box);
+            ui.End();
+            ui.Emit(&cmd);
+            CHECK(changed) << "点击上方选项行应选值";
+            CHECK_EQ(sel, 2) << "向上展开后命中测试应与绘制一致";
+        }
+        LOG(INFO) << "[PASS] Combo 贴底自动向上展开：列表在框上方、命中一致";
+    }
+
     // 弹出层验证（C3）：展开态下，下拉列表的容器 + 每行 + 选项文本
     // 必须在 cmd.order 里排在所有普通指令之后（即最后画、盖住其它控件）。
     // 这证明 Combo 下拉不会被更晚的普通控件（矩形/文本）遮挡。
@@ -607,6 +669,7 @@ public:
         TestGoldOpenClose();
         TestValueClampAndEmpty();
         TestOffscreenCombo();
+        TestFlipUpNearBottom();
         TestPopupDrawsLast();
         TestDropdownHover();
         TestTwoCombosIsolation();
