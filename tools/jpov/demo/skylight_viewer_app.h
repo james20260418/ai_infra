@@ -343,34 +343,16 @@ private:
                                 {kColW, kRowH}};
         };
 
-        // ── 左列：天光自由度 ──
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 0),
-                        kTurbidityMin, kTurbidityMax, 1);
-        ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
-                        row(0, 1), -1.0f, 1.0f, 2);
-        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
-                        row(0, 2), -90.0f, 90.0f, 0);
-        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 3), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 4), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 5), 0.0f, 1.0f, 2);
-        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 6));
-        // SMAA 后处理抗锯齿：与右侧“远景仰角雾”并列，单独对比开关 + 阈值（敏感度）。
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 7));
-        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 8),
-                        0.02f, 0.5f, 2);
-        // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
-        // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
-        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 9));
-        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
-                        0.0f, 1.0f, 2);
-
-        // ── 左列 11..13：场景下拉 + SSR 总闸 / 调试视图 ──
+        // ── 左列 0..2：场景下拉 + SSR 总闸 / 调试视图 ──
+        // 放在列首（2026-10-30 Danis：「下拉菜单不要放下面，一旦下拉会出屏幕」）：
+        // Ui::Combo 的下拉列表恒朝下展开（框底 = 列表顶），贴底的行一展开就出屏；
+        // 列首下方空间充足，两个下拉都能完整展开。
         {
             const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
                                                      "场景1 镜面地板+随机模型",
                                                      "场景2 只天空"};
             int sel = scene_index_;
-            if (ui_.Combo("场景", &sel, scenes, row(0, 11))) {
+            if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
                 scene_index_ = sel;
                 if (sel == 1) {
                     // 切到镜面场景给一台低角度相机：掠射最能暴露自交/厚度问题。
@@ -379,14 +361,35 @@ private:
                     view_.R = 45.0;
                 }
             }
-            ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 12));
+            ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
             const std::vector<const char*> dbg = {"SSR 调试：关", "SSR 调试：A 覆盖率",
                                                   "SSR 调试：直通（无 SSR）"};
             int dsel = ssr_debug_;
-            if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 13))) {
+            if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
                 ssr_debug_ = dsel;
             }
         }
+
+        // ── 左列 3..13：天光自由度 ──
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 3),
+                        kTurbidityMin, kTurbidityMax, 1);
+        ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
+                        row(0, 4), -1.0f, 1.0f, 2);
+        ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
+                        row(0, 5), -90.0f, 90.0f, 0);
+        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 6), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 7), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 8), 0.0f, 1.0f, 2);
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 9));
+        // SMAA 后处理抗锯齿：与右侧“远景仰角雾”并列，单独对比开关 + 阈值（敏感度）。
+        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 10));
+        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 11),
+                        0.02f, 0.5f, 2);
+        // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
+        // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
+        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 12));
+        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
+                        0.0f, 1.0f, 2);
 
         // ── 右列：远景仰角雾 ──
         ui_.Checkbox("远景仰角雾 (空气透视)", &deg_.elev_fog_on, row(1, 0));
