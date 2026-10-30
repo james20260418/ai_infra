@@ -209,6 +209,9 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
     }
     auto depth_at = [&](int x, int y) -> float {
         const size_t k = static_cast<size_t>(y) * kWidth + x;
+        if (!HasDepthData(sc.window_depth[k])) {
+            return jpov::ssr::kEmptyCell;   // 天空格没有柱子（与着色器同一条规则）
+        }
         return jpov::ssr::DepthFromWindowDepth(sc.window_depth[k], kNear, kFar);
     };
     int cx = -1;

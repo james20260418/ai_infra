@@ -256,7 +256,24 @@ void main() {
         if (!(sigma_out > sigma)) {
             return;
         }
-        float z = SsrZView(texelFetch(uDepth, cell, 0).r);
+        // 空格子（天空/无深度数据）没有柱子：穿过去，**不要**当成 far 处的墙。
+        // 见 ssr_math.h::kEmptyCell 的反例（掠射时会在近地平线造出一大片假高光）。
+        float win = texelFetch(uDepth, cell, 0).r;
+        if (!SsrHasDepth(win)) {
+            if (sigma_out >= end) {
+                return;
+            }
+            sigma = sigma_out;
+            if (tmx < tmy) {
+                cell.x += (ray.dir.x > 0.0) ? 1 : -1;
+                tmx += tdx;
+            } else {
+                cell.y += (ray.dir.y > 0.0) ? 1 : -1;
+                tmy += tdy;
+            }
+            continue;
+        }
+        float z = SsrZView(win);
         float thickness = max(uThicknessC * z, uMinThickness);
         if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), z, thickness)) {
             FragS = 0.5 * (sigma + sigma_out);
@@ -331,6 +348,37 @@ void main() {
     FragReason = reason;
     FragHitS = hit_s;
 #endif
+}
+)glsl";
+
+// ── 属性 pass（接入层用；不属于模块契约）──
+// 只画反射体：输出视空间法线 .xy 与 mask(.a=1)。**不写材质**（本版合成层用一套 uniform，
+// 见 ssr_integration.h 的"已知限制"）。
+//
+// 法线在 VS 里算完再传：`mat3(uModel)` 把物体法线转到世界，`uWorldToView` 再转到视空间。
+// 两个矩阵都是 per-object / per-frame 的 uniform，由 Renderer 上传。
+inline constexpr const char* kSsrAttrVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat3 uWorldToView;
+out vec2 vNormalXY;
+void main() {
+    vec3 n_world = normalize(mat3(uModel) * aNormal);
+    vec3 n_view = uWorldToView * n_world;
+    vNormalXY = normalize(n_view).xy;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+inline constexpr const char* kSsrAttrFs = R"glsl(
+#version 330 core
+in vec2 vNormalXY;
+out vec4 FragAttr;   // .xy = 视空间法线；.z 预留（roughness）；.a = mask
+void main() {
+    FragAttr = vec4(vNormalXY, 0.0, 1.0);
 }
 )glsl";
 
