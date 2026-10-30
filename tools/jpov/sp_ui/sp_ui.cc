@@ -1022,9 +1022,16 @@ bool SpUi::Combo(const char* label, int* selected,
     const float ar = b.pos.x() + b.size.x() - pad - arrow_w;  // 箭头右上 x
     const float ay = cy - arrow_h * 0.5f;
 
-    // 下拉列表：组合框正下方，宽度=框宽，行数=选项数。
-    const float list_top = b.pos.y() + b.size.y();
+    // 下拉列表：宽度=框宽，行数=选项数。默认画在组合框正下方，**下方装不下
+    // 且上方更宽裕时改为向上展开**（同 interface/ui.cc，屏幕底部附近的下拉
+    // 不会一展开就伸出屏幕外）。判据只用本帧几何，同一 box 每帧结果相同。
     const float list_h = static_cast<float>(size) * row_h;
+    const float below_top = b.pos.y() + b.size.y();
+    const float below_space = height_ - below_top;  // 框底 → 屏幕下沿
+    const float above_space = b.pos.y();            // 屏幕上沿 → 框顶
+    const float list_top = (list_h > below_space && above_space > below_space)
+                               ? b.pos.y() - list_h   // 向上展开（列表底边贴框顶）
+                               : below_top;           // 向下展开（默认）
 
     // ---- 交互（S6.2）：展开/收起 + 选值 + 点外部关闭 ----
     bool changed = false;   // 本帧是否发生了选项切换（返回值）。
