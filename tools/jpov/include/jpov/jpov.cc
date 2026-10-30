@@ -68,11 +68,7 @@ void JPOV::OnKey(GLFWwindow* window, int key, int scancode, int action, int mods
 JPOV::JPOV(Config cfg)
     : config_(cfg),
       window_(nullptr),
-      // HUD 是给「有窗口可看的人」的：**headless 下初值为 false**。
-      // 理由：headless 的产物是截图，而截图会被逐像素对比（gold / A-B 差异），
-      // 在图上叠 9 行 HUD 会让所有既有 gold 立刻变成非确定。要看就显式调
-      // SetDebugOverlayVisible(true)（debug_overlay 测试正是这么做）。
-      debug_overlay_visible_(cfg.debug_overlay && !cfg.headless),
+      debug_overlay_visible_(cfg.debug_overlay),
       initialized_(false) {}
 
 JPOV::~JPOV() {

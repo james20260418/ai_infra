@@ -2,8 +2,8 @@
 //
 // 定位：**引擎持有的一份状态**，不是渲染指令。JPOV 在每帧的 RunOnceInternal 里
 // 就地更新它（帧号 / 分辨率 / fps / 本帧相机），Init 时填一次硬件信息；
-// 显示与否由 `JPOV::Config::debug_overlay`（初始值，**默认为开**）+ `F3`
-//（运行时临时收起）决定。
+// 显示与否由 `JPOV::Config::debug_overlay`（初始值，**默认为关**）+ `F3`
+//（运行时开关）决定。
 //
 // 为什么不走 RenderCommandList：debug HUD 必须在**所有** app 上都可用，包括完全
 // 不写绘制指令的 app；而且它是引擎自身状态的可视化，混进用户的指令列表会污染

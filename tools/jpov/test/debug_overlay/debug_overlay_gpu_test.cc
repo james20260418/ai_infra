@@ -378,14 +378,13 @@ int main() {
         cfg2.debug_overlay_scale = 2;
         OverlayTestApp app2(cfg2);
         app2.Init();
-        // headless ⇒ 初值强制 false（见 Config::debug_overlay 文档）：
-        // 否则所有 headless gold 截图都会被这 9 行 HUD 污染。要看得显式打开。
-        CHECK(!app2.is_debug_overlay_visible())
-            << "headless 下 debug_overlay 初值必须为 false";
-        LOG(INFO) << "[PASS] headless 下 HUD 初值关闭（gold 截图不会被污染）";
+        // headless 也可以显式打开（截图里要带硬件/机位时就这么用）；
+        // 默认关是为了不污染 gold —— 见 Config::debug_overlay 的文档。
+        CHECK(app2.is_debug_overlay_visible())
+            << "cfg.debug_overlay = true 时 Init 后应当可见（headless 不再特殊对待）";
         CHECK_EQ(app2.debug_overlay_effective_scale(), 2)
             << "follow_dpi=false 时生效字号必须等于 Config::debug_overlay_scale";
-        app2.SetDebugOverlayVisible(true);
+        LOG(INFO) << "[PASS] cfg.debug_overlay = true 生效（headless 也照画）";
         // 放大 2 倍后最长一行 61 字符 x 16px = 976px ⇒ 窗口要比前面宽，
         // 否则文字会被视口裁掉（那是设计行为，但会让比对无法进行）。
         jpov::WindowInfo winfo_big;

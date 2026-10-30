@@ -89,23 +89,18 @@ public:
         jpov::ShadowConfig shadow;
 
         // 左上角 debug HUD（硬件信息 / 相机机位 / 分辨率 / 帧号 / fps）的**初始可见性**。
-        //   true（默认）：**常驻**。这是引擎的既有约定之一 —— 任何 app 一跑起来就能
-        //                 看到自己跑在什么 GPU 上、多少 fps；不想看的人按 F3 收起，
-        //                 或者在自己 app 的 Config 里显式设 false。
-        //   false：启动时关闭（运行中按 F3 仍可打开）。
-        // ⚠️ 与 headless 的关系（**唯一一处例外，写在这里不是静默行为**）：
-        //    headless=true 时初值恒为 false。headless 的产物是截图，而截图会被
-        //    逐像素对比，叠 9 行 HUD 会让所有既有 gold 变成非确定。headless 下
-        //    想看 HUD 请显式调 SetDebugOverlayVisible(true)。
+        //   false（默认）：启动时不显示，按 F3 打开。
+        //   true：启动即显示（想在 CI 截图里带上硬件/机位信息时用得上）。
         // `F3` 是**引擎保留键**：切换它，且应用在 InputSnapshot 里看不到这次按键。
         // 选 F3 而不是 Quake 系的 `~`：`~` 会把 grave accent 从 InputSnapshot 里
         // 吞掉，文本框（ui.cc / sp_ui.cc）就再也输不了 '`' / '~'；功能键没有这个
         // 代价，也符合「类似 Minecraft 的独立游戏」(docs/jpov_engine_integration.md:3)
         // 的惯例（F3 = debug 面板）。
-        // HUD 用内置 8x8 ASCII 点阵字体绘制（纯白、左上角），**不依赖** fonts 列表
-        // —— 零字体注册的 app 也能显示。宽度契约见 jpov::DebugInfo::kMaxLineChars
-        // （单行 <= 500px，与窗口宽度无关；窗口更窄时右侧被裁，不会崩也不会缩字）。
-        bool        debug_overlay = true;
+        // HUD 用内置 8x8 ASCII 点阵字体绘制（白字 + 55% 黑底、左上角），**不依赖**
+        // fonts 列表 —— 零字体注册的 app 也能显示。宽度契约见
+        // jpov::DebugInfo::kMaxLineChars（单行 <= 500px，与窗口宽度无关；
+        // 窗口更窄时右侧被裁，不会崩也不会缩字）。
+        bool        debug_overlay = false;
 
         // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
         // 1 是「还能看清」的下限（点阵字体再小就得换 5x7 字模，中文更不可能），
