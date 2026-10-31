@@ -403,6 +403,22 @@ void main() {
 }
 )glsl";
 
+// 蒙皮网格的属性 FS（2026-10-31）：与 kSsrAttrVs 同一套输出，但 VS 复用
+// **蒙皮 VS 本身**（kSkinnedVs，它已经输出 vWorldNormal）——不再抄一份蒙皮代码。
+// 所以这里把世界法线转到视空间（uWorldToView 由 Renderer 每趟上传一次）。
+// 曲面（人体）的法线逐顶点不同，正是"曲面镜面"这条用例要测的东西。
+inline constexpr const char* kSsrAttrSkinnedFs = R"glsl(
+#version 330 core
+in vec3 vWorldNormal;
+uniform mat3  uWorldToView;
+uniform float uAttrIsReflector;
+out vec4 FragAttr;
+void main() {
+    vec3 n_view = normalize(uWorldToView * normalize(vWorldNormal));
+    FragAttr = vec4(n_view.xy, 1.0, uAttrIsReflector);
+}
+)glsl";
+
 inline constexpr const char* kSsrAttrFs = R"glsl(
 #version 330 core
 in vec2 vNormalXY;

@@ -326,7 +326,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     uint32_t mesh_id, uint32_t skeleton_id,
     const jpov::PBRMaterial& material,
     std::vector<SkinnedInstanceState> instances,
-    bool highlight) {
+    bool highlight, bool ssr_reflector) {
     CHECK_GT(mesh_id, 0u) << "DrawMeshWithSkeleton: mesh_id 必须 > 0";
     CHECK_GT(skeleton_id, 0u) << "DrawMeshWithSkeleton: skeleton_id 必须 > 0"
         << "（先经 JPOV::RegisterSkeleton(SkeletonType, poses) 创建骨架拿到 id）";
@@ -338,6 +338,7 @@ void RenderCommandList::DrawMeshWithSkeleton(
     cmd.material = material;                 // 蒙皮网格材质（同 Object3DCommand.material）
     cmd.instances = std::move(instances);  // 每实例自己的插值 pose(pose_a/pose_b/ratio)在 instances 里(见 skeleton_types.h)
     cmd.highlight = highlight;
+    cmd.ssr_reflector = ssr_reflector;
     skinned_mesh.push_back(cmd);
     order.emplace_back(DrawCommandType::kSkinnedMesh, idx);
 }

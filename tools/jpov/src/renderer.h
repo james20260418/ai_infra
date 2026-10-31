@@ -197,8 +197,10 @@ private:
     void EnsureHDRFBO(int w, int h);
     // SSR 属性 pass 的目标（全分辨率 + 复用 HDR 的深度附件）。尺寸/深度句柄变化时重建。
     void EnsureSsrAttrFBO(int w, int h);
-    // 只把 ssr_reflector 的物体再画一遍，写视空间法线 + mask（LEQUAL 深度测试）。
-    void DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h);
+    // 把 ssr_reflector 的物体（以及遮挡物的法线）再画一遍，写视空间法线 + mask
+    // （LEQUAL 深度测试）。返回 false = 本帧**一个反射体都没有**（连 FBO 都没建）
+    // ⇒ 调用方必须把整条 SSR 链路跳过，见函数注释。
+    bool DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h);
     void EnsureShadowFBO(const ShadowConfig& cfg);
     void DestroyFBO();
     void DestroyOutputFBO();

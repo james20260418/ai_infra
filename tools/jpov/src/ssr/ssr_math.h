@@ -277,6 +277,40 @@ inline bool HitFacesRay(const Vec3& ray_dir, const Vec3& hit_normal) {
     return Dot(ray_dir, hit_normal) < 0.0f;
 }
 
+// ─────────── ⑥ 升采样的深度值域判据（composite；ssr_integration.cc 里同一份算式）───────────
+//
+// 场景：低分辨率 A/rgb 升到全分辨率时，要用「本像素的 1/z」与「低分格子的 1/z」比一次，
+// 拒绝跨表面（剪影）的邻格。**固定百分比的直接比较在掠射下必然误判**：
+// 地平线附近同一个平面相邻两行的深度比可以是 1.2～2 倍，远超 5% 的容差 ⇒ 2×2 里除了
+// 「贡献了最小深度」的那一行，其余行整行被拒 ⇒ **周期 = 降采样倍率的横向条纹**
+// （实测 1:2 → period 2 / 1:4 → period 4 / 1:1 无条纹；2026-10-31 Danis 实拍）。
+//
+// 修法的依据只有一条：**1/z_view 在任何平面上对屏幕坐标是仿射的**（射影几何：平面
+// n·X = c ⇒ 1/z 是 (x_ndc, y_ndc) 的线性函数）。于是「低分格子应有的 w」可以用
+// 「本像素 w + 屏幕梯度·偏移」**预测**出来，平面上残差恒 ≈ 0：
+//
+//   低分深度取的是**格内最近**（min 窗口深度 = max w）⇒ 预测值要取该格范围内的最大 w
+//   （仿射函数在方形格上的极值在角上）：pred = w_hi + g·dp + ½·(scale−1)·(|gx|+|gy|)
+//
+//   ⚠️ 扩展量是 (scale−1) 而不是 scale：降采样取的是**各 texel 中心**的最小值，
+//      1:1 时格子就是一个 texel ⇒ 扩展量必须恰好为 0（否则 1:1 被推歪，变成回归）。
+//
+// 判据：|w_lo − pred| ≤ tol·pred。平面 ⇒ 过；剪影（block 里是另一个表面）⇒ 拒。
+//
+// 单位：w = 1/米；gw_* = 每像素的 Δw；dpx/dpy = 本像素中心到低分 texel 中心的**全分辨率像素**偏移。
+inline float UpsamplePredictedW(float w_hi, float gw_x, float gw_y, float dpx, float dpy,
+                                int scale) {
+    const float expand =
+        0.5f * static_cast<float>(scale - 1) * (std::fabs(gw_x) + std::fabs(gw_y));
+    return w_hi + gw_x * dpx + gw_y * dpy + expand;
+}
+
+inline bool UpsampleDepthAccept(float w_hi, float gw_x, float gw_y, float dpx, float dpy,
+                                float w_lo, int scale, float tol) {
+    const float pred = UpsamplePredictedW(w_hi, gw_x, gw_y, dpx, dpy, scale);
+    return std::fabs(w_lo - pred) <= tol * std::max(std::fabs(pred), 1.0e-6f);
+}
+
 // 默认朝向判据：恒真。语义 = "这一格没有法线数据，不判方向" —— 保持引入朝向判据
 // 之前的行为（老调用点/老测试因此逐字不变）。
 struct AcceptAllFacing {

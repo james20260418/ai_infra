@@ -59,6 +59,7 @@ public:
     jpov::PBRMaterial mat_ground_;       // 灰色地面
     jpov::PBRMaterial mat_mirror_;       // 镜面地板（metallic=1, roughness=0.02）—— SSR 场景
     jpov::PBRMaterial mat_clutter_;      // 镜子上方随机模型（粗糙灰）
+    jpov::PBRMaterial mat_mirror_skin_;  // 镜面皮肤（曲面 SSR 反射体：人）
 
     // ── 蓝人（mixamo_male）：同一份蒙皮 mesh + 骨架，每个方块顶面各一个 T-pose 实例 ──
     // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
@@ -69,6 +70,39 @@ public:
     jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
     jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
     std::vector<jpov::SkinnedInstanceState> person_instances_;
+    // 镜面皮肤的蓝人（2026-10-31）：4 个随机站在镜面地板上的实例，**ssr_reflector=true**
+    // ⇒ 属性 pass 会给它们写视空间法线（曲面），用来测"曲面上的 SSR 贴不贴"。
+    std::vector<jpov::SkinnedInstanceState> person_mirror_instances_;
+    float person_scale_ = 1.0f;     // InstallPerson 算出的归一缩放（镜面人复用）
+    float person_min_y_ = 0.0f;     // 资产包围盒 min.y（脚点对齐用）
+
+    // 4 个随机摆放：极坐标 r∈[4,14]、随机朝向；固定种子 ⇒ 每次拍摄同一个场景。
+    void BuildMirrorPeople(int count = 4, uint32_t seed = 20261031u) {
+        person_mirror_instances_.clear();
+        uint32_t st = seed;
+        auto rnd = [&st]() {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            return static_cast<float>(st & 0xFFFFFFu) / static_cast<float>(0x1000000);
+        };
+        for (int i = 0; i < count; ++i) {
+            const float ang = rnd() * 6.2831853f;
+            const float r = 4.0f + rnd() * 10.0f;
+            const float yaw = rnd() * 6.2831853f;
+            jpov::SkinnedInstanceState inst;
+            inst.transform.center = {r * std::cos(ang),
+                                     -person_scale_ * person_min_y_,
+                                     r * std::sin(ang)};
+            inst.transform.up = {0.0f, 1.0f, 0.0f};
+            inst.transform.front = {std::sin(yaw), 0.0f, std::cos(yaw)};
+            inst.transform.scale = person_scale_;
+            inst.pose_a = 0;
+            inst.pose_b = 0;
+            inst.ratio = 0.0f;
+            person_mirror_instances_.push_back(inst);
+        }
+    }
 
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
@@ -162,7 +196,9 @@ public:
     // 只对 ssr_reflector 的物体生效（镜面地板）；**必须同时开环境镜面**（合成要重算并替换
     // 那一项，没有 env 就没有可替换的对象）。关掉时整条链路零开销。
     bool  ssr_on_ = false;
-    float ssr_scale_ = 0.5f;        // 1.0 / 0.5 / 0.25
+    float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
+    int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
+    int   ssr_depth_mode_ = 0;      // 0 = 软权 1/(rel+ε)+真剪影硬拒；1 = 不判深度（Unity 式）
     float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
     int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
     float ssr_roughness_ = 0.02f;   // 反射层材质（本版全场景一套）
@@ -260,6 +296,13 @@ public:
                 cmds->DrawObject3D(box_mesh_, mat_clutter_, c.center,
                                    {0.0f, 1.0f, 0.0f}, c.front, c.scale);
             }
+            // 镜面皮肤的蓝人（**曲面**反射体）：单独一条命令（材质不同），带 ssr_reflector。
+            // 4 个随机站位，固定种子；属性 pass 会为它们写逐顶点（曲面）视空间法线。
+            if (person_mesh_ != 0 && !person_mirror_instances_.empty()) {
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_, mat_mirror_skin_,
+                                           person_mirror_instances_, /*highlight=*/false,
+                                           /*ssr_reflector=*/true);
+            }
             // 桌子/橡树也放上来：它们在镜面里的倒影比方块更"有内容"。
             for (const ModelSlot& m : models_) {
                 cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
@@ -298,6 +341,7 @@ public:
             sc.roughness = ssr_roughness_;
             sc.base_color = {0.03f, 0.03f, 0.03f};
             sc.metallic = 1.0f;
+            sc.upsample_depth_mode = ssr_depth_mode_;
             sc.debug_coverage = ssr_debug_;
             cmds->ssr = sc;
         }
@@ -333,7 +377,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 15;
+        const int   kRows    = 16;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -404,11 +448,18 @@ private:
 
         // ── 右列 9..12：SSR 的分辨率 / 厚度 / 预算 / 粗糙度 ──
         {
-            const std::vector<const char*> scales = {"SSR 分辨率 1:1", "SSR 分辨率 1:2",
-                                                     "SSR 分辨率 1:4"};
-            int si = (ssr_scale_ == 1.0f) ? 0 : ((ssr_scale_ == 0.5f) ? 1 : 2);
-            if (ui_.Combo("SSR 分辨率", &si, scales, row(1, 9))) {
-                ssr_scale_ = (si == 0) ? 1.0f : ((si == 1) ? 0.5f : 0.25f);
+            // 降采样倍率滑条 N（1..4）：分辨率 = 1/N。N=3 也能跑（整数格 + 加权，不要求 2 的幂）。
+            float n_f = static_cast<float>(ssr_downscale_n_);
+            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 9), 1.0f, 4.0f, 0)) {
+                ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
+                ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
+                ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
+            }
+            const std::vector<const char*> depth_modes = {"升采样深度：软权 1/(rel+ε)",
+                                                          "升采样深度：不判（Unity 式）"};
+            int dm = ssr_depth_mode_;
+            if (ui_.Combo("升采样深度判据", &dm, depth_modes, row(1, 13))) {
+                ssr_depth_mode_ = dm;
             }
             ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 10), 1.0f, 24.0f, 1);
             float mrp = static_cast<float>(ssr_max_ray_px_);

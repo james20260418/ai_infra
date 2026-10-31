@@ -1753,29 +1753,32 @@ void Renderer::Render(const RenderCommandList& cmds,
                               "没有 env 就没有可替换的对象（也会让金属直接发黑）";
             }
             // 注意用 Render 的**局部** fbo_3d_w/h（成员 fbo_3d_w_ 只在 LDR 路径赋值）。
-            DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h);
-            SsrPassInputs ssi;
-            ssi.hdr_color_tex = color_tex_hdr_;
-            ssi.scene_depth_tex = scene_depth_tex_hdr_;
-            ssi.attr_tex = ssr_attr_tex_;
-            ssi.full_w = fbo_3d_w;
-            ssi.full_h = fbo_3d_h;
-            ssi.near_plane = cmds.camera.near;
-            ssi.far_plane = cmds.camera.far;
-            ssi.tan_half_fov_y = std::tan(0.5f * cmds.camera.fov * 3.14159265358979323846f / 180.0f);
-            ssi.aspect = static_cast<float>(fbo_3d_w) / static_cast<float>(fbo_3d_h);
-            ssi.env_cube_tex = env_cube;
-            ssi.env_max_lod = env_max_lod;
-            ssi.env_sky_scale = env_scale;
-            ssi.env_enabled = env_on;
-            ssi.cfg = *cmds.ssr;
-            ssr_integration_.Render(ssi, fbo_hdr_);
-            // Render 内恢复了调用前的 FBO/viewport，但主 pass 后续假设"3D FBO 已绑"，
-            // 这里重新绑定一次（draw buffer 也恢复成 MRT 两附件）。
-            glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
-            glViewport(0, 0, fbo_3d_w, fbo_3d_h);
-            const GLenum mrt[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-            glDrawBuffers(2, mrt);
+            // 返回 false = 本帧一个 ssr_reflector 都没有 ⇒ 属性纹理不存在/是旧帧残留，
+            // 整条链路（属性 pass / 降采样 / 模块 / 合成）一起跳过（见该函数注释）。
+            if (DrawSsrAttrPass(cmds, fbo_3d_w, fbo_3d_h)) {
+                SsrPassInputs ssi;
+                ssi.hdr_color_tex = color_tex_hdr_;
+                ssi.scene_depth_tex = scene_depth_tex_hdr_;
+                ssi.attr_tex = ssr_attr_tex_;
+                ssi.full_w = fbo_3d_w;
+                ssi.full_h = fbo_3d_h;
+                ssi.near_plane = cmds.camera.near;
+                ssi.far_plane = cmds.camera.far;
+                ssi.tan_half_fov_y = std::tan(0.5f * cmds.camera.fov * 3.14159265358979323846f / 180.0f);
+                ssi.aspect = static_cast<float>(fbo_3d_w) / static_cast<float>(fbo_3d_h);
+                ssi.env_cube_tex = env_cube;
+                ssi.env_max_lod = env_max_lod;
+                ssi.env_sky_scale = env_scale;
+                ssi.env_enabled = env_on;
+                ssi.cfg = *cmds.ssr;
+                ssr_integration_.Render(ssi, fbo_hdr_);
+                // Render 内恢复了调用前的 FBO/viewport，但主 pass 后续假设"3D FBO 已绑"，
+                // 这里重新绑定一次（draw buffer 也恢复成 MRT 两附件）。
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr_);
+                glViewport(0, 0, fbo_3d_w, fbo_3d_h);
+                const GLenum mrt[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                glDrawBuffers(2, mrt);
+            }
         }
 
         // ---- 第二步：选后处理输入 + 按 flag 决定 tone map 或直接 blit 到主 FBO ----
@@ -2532,7 +2535,7 @@ void Renderer::EnsureSsrAttrFBO(int w, int h) {
     ssr_attr_depth_tex_ = depth_tex_hdr_;
 }
 
-void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
+bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     bool any_reflector = false;
     for (const Object3DCommand& o : cmds.object3d) {
         if (o.ssr_reflector) {
@@ -2540,8 +2543,23 @@ void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
             break;
         }
     }
+    // 蒙皮反射体（曲面镜面：镜面皮肤的人）也算 —— 2026-10-31 起属性 pass 覆盖蒙皮。
     if (!any_reflector) {
-        return;   // 没有反射体：连 FBO 都不建
+        for (const SkinnedMeshCommand& sm : cmds.skinned_mesh) {
+            if (sm.ssr_reflector) {
+                any_reflector = true;
+                break;
+            }
+        }
+    }
+    if (!any_reflector) {
+        // 本帧没有反射体（场景 0/2，或用户刚把镜面地板关掉）：**整条 SSR 链路必须一起
+        // 跳过**，不能只跳过这一趟。否则：
+        //   · 首帧：ssr_attr_tex_ 还是 0 ⇒ SsrIntegration::Render 的
+        //     CHECK_NE(in.attr_tex, 0u) 直接 FATAL（开 SSR 切场景就崩）；
+        //   · 非首帧：属性纹理是上一帧的残留 ⇒ 合成层按旧的反射体 mask 叠 SSR，
+        //     把上一帧的倒影贴在别的地方。
+        return false;
     }
     EnsureSsrAttrFBO(w, h);
 
@@ -2592,6 +2610,31 @@ void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
                                                /*pick_id_map=*/nullptr);
     }
 
+    // ── 蒙皮反射体（曲面）──
+    // VS 复用蒙皮主 pass 的 kSkinnedVs（已输出 vWorldNormal），只换 FS ⇒ 法线来自**真实
+    // 的曲面**，不再是"每件一套平面"。仍然只测不写深度 ⇒ 只写可见的那一层。
+    if (!cmds.skinned_mesh.empty()) {
+        const unsigned int prog_sk = ssr_integration_.attr_skinned_program();
+        glUseProgram(prog_sk);
+        glUniformMatrix3fv(glGetUniformLocation(prog_sk, "uWorldToView"), 1, GL_FALSE,
+                           world_to_view);
+        const GLint loc_sk_reflector = glGetUniformLocation(prog_sk, "uAttrIsReflector");
+        for (const SkinnedMeshCommand& sm : cmds.skinned_mesh) {
+            if (!sm.ssr_reflector) {
+                continue;
+            }
+            SkeletonManager* skel = GetSkeleton(sm.skeleton_id);
+            CHECK(skel != nullptr) << "SSR 属性 pass: skeleton_id " << sm.skeleton_id
+                                   << " 未注册";
+            glUniform1f(loc_sk_reflector, 1.0f);
+            SkeletonRenderer::DrawSkinnedMesh(
+                sm, cmds, mesh_mgr_, texture_mgr_, shader_mgr_, mvp_, prog_sk, prog_sk,
+                skel->gpu_handles(), skel->pose_count(), instance_model_buf_,
+                instance_pose_ids_buf_, instance_misc_buf_, instance_partial_buf_,
+                instance_partial_lag_buf_, instance_pos_lag_buf_);
+        }
+    }
+
     glDepthMask(static_cast<GLboolean>(prev_depth_mask));
     glDepthFunc(static_cast<GLenum>(prev_depth_func));
     if (prev_depth_test == 0) {
@@ -2603,6 +2646,7 @@ void Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     glUseProgram(static_cast<GLuint>(prev_program));
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
     glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
+    return true;
 }
 
 // 读回光标像素解码成 picking_id → last_pick_。

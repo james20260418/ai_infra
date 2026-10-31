@@ -140,6 +140,18 @@ inline jpov::PBRMaterial MirrorMaterial() {
         /*roughness*/ 0.02f);
 }
 
+// 镜面皮肤的蓝人（2026-10-31）：曲面的 SSR 反射体（"铬人"）。
+//
+// ⚠️ 底色必须**亮**：金属没有漫反射，`F0 = mix(0.04, base_color, metallic)` 就是底色本身
+// —— 底色 0.02 的金属只反射 2%，看起来就是一团黑（第一版踩过：人形是纯黑剪影，地面倒影
+// 反而看得见）。铬的 F0 ≈ 0.85~0.95。
+inline jpov::PBRMaterial MirrorSkinMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.90f, 0.90f, 0.92f, 1.0f},
+        /*metallic*/ 1.0f,
+        /*roughness*/ 0.02f);
+}
+
 // 镜子上的模型：粗糙灰（用来验证"被反射的东西本身不该发亮"）。
 inline jpov::PBRMaterial MirrorClutterMaterial() {
     return jpov::PBRMaterial::SolidColorMR(

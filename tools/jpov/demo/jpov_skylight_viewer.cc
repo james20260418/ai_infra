@@ -56,6 +56,7 @@ void InstallScene(jpov_skylight::SkylightApp& app) {
     app.mat_ground_ = jpov_skylight::GroundMaterial();
     app.mat_mirror_ = jpov_skylight::MirrorMaterial();
     app.mat_clutter_ = jpov_skylight::MirrorClutterMaterial();
+    app.mat_mirror_skin_ = jpov_skylight::MirrorSkinMaterial();
     app.BuildClutter(/*count=*/24);
 }
 
@@ -158,6 +159,11 @@ void InstallPerson(jpov_skylight::SkylightApp& app) {
         inst.ratio  = 0.0f;
         app.person_instances_.push_back(inst);
     }
+    // 镜面皮肤的蓝人（曲面 SSR 反射体）：复用同一份缩放/脚点，随机摆 4 个。
+    app.person_scale_ = scale;
+    app.person_min_y_ = min_y;
+    app.BuildMirrorPeople(/*count=*/4);
+
     app.person_gltf_ = std::move(obj);   // 资源保活（释放走 Finalize）
 
     LOG(INFO) << "blue-man assembled: mesh_id=" << app.person_mesh_
@@ -490,6 +496,31 @@ int RunCaptureSsr(const std::string& out_dir) {
     // (d) A 覆盖率（1:2）
     app.ssr_debug_ = 1;
     app.RunOnce(input, winfo, (out_dir + "/ssr_coverage.png").c_str());
+
+    // (d2) 1:3（N=3 不是 2 的幂，验证这条通路也成立）
+    app.ssr_debug_ = 0;
+    app.ssr_scale_ = 1.0f / 3.0f;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_on_third.png").c_str());
+    app.ssr_scale_ = 0.5f;
+
+    // (e)(f) 升采样的**深度项**两种口径（其它参数完全相同）：
+    //   soft  = 软权 1/(rel+ε) + 真剪影硬拒（默认）
+    //   unity = 不判深度（Unity postprocessing 的 SSR 做法：深度只用于 march）
+    app.ssr_debug_ = 0;
+    app.ssr_depth_mode_ = 0;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_half_soft.png").c_str());
+    app.ssr_depth_mode_ = 1;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_half_unity.png").c_str());
+
+    // (g)(h) **掠射**机位（R=45 m、离地 0.042 m）：横向条纹就是在这里暴露的。
+    //   两种深度口径各一张 —— 这是判断"升采样深度项要不要"的关键对照。
+    app.view_.R = 45.0;
+    app.view_.phi = std::asin(0.042 / 45.0);
+    app.view_.theta = 0.0;
+    app.ssr_depth_mode_ = 0;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_soft.png").c_str());
+    app.ssr_depth_mode_ = 1;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_graze_unity.png").c_str());
 
     LOG(INFO) << "SSR A/B captured to " << out_dir;
     app.Finalize();
