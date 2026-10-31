@@ -12,6 +12,7 @@
 #include <GLFW/glfw3.h>
 
 #include "tools/jpov/interface/input_snapshot.h"
+#include "tools/jpov/interface/debug_info.h"
 #include "tools/jpov/interface/gltf_object.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/interface/mesh.h"
@@ -86,6 +87,37 @@ public:
         // 全局阴影配置（CSM）。默认 = ShadowConfig::Default()（开放世界通用）。
         // 无 sun 时该配置不生效；有 sun 时按此切分级联、每段渲染独立 shadow map。
         jpov::ShadowConfig shadow;
+
+        // 左上角 debug HUD（硬件信息 / 相机机位 / 分辨率 / 帧号 / fps）的**初始可见性**。
+        //   false（默认）：启动时不显示，按 F3 打开。
+        //   true：启动即显示（想在 CI 截图里带上硬件/机位信息时用得上）。
+        // `F3` 是**引擎保留键**：切换它，且应用在 InputSnapshot 里看不到这次按键。
+        // 选 F3 而不是 Quake 系的 `~`：`~` 会把 grave accent 从 InputSnapshot 里
+        // 吞掉，文本框（ui.cc / sp_ui.cc）就再也输不了 '`' / '~'；功能键没有这个
+        // 代价，也符合「类似 Minecraft 的独立游戏」(docs/jpov_engine_integration.md:3)
+        // 的惯例（F3 = debug 面板）。
+        // HUD 用内置 8x8 ASCII 点阵字体绘制（白字 + 55% 黑底、左上角），**不依赖**
+        // fonts 列表 —— 零字体注册的 app 也能显示。宽度契约见
+        // jpov::DebugInfo::kMaxLineChars（单行 <= 500px，与窗口宽度无关；
+        // 窗口更窄时右侧被裁，不会崩也不会缩字）。
+        bool        debug_overlay = false;
+
+        // debug HUD 的字形放大倍数（整数倍字节点阵缩放，1 = 8x8 原生像素）。
+        // 1 是「还能看清」的下限（点阵字体再小就得换 5x7 字模，中文更不可能），
+        // 同时也是能塞下最多信息的档位。
+        //
+        // 默认值配合 debug_overlay_scale_follow_dpi：屏缩放 100% ⇒ 1，200% ⇒ 2。
+        // 这个字段只在 follow_dpi = false 时生效（作为显式覆盖值）。
+        // Pre-condition: 1 <= debug_overlay_scale <= 8（越界 Init() 会 CHECK 失败）
+        int         debug_overlay_scale = 1;
+
+        // 是否让 debug HUD 的字号跟随窗口的 DPI 缩放（glfwGetWindowContentScale）。
+        //   true（默认）：100% 屏 = 8 物理像素（现状），200% 屏 = 16 物理像素，
+        //                 也就是「看起来」一直是 8 逻辑像素 —— 视觉大小不随 DPI 变。
+        //   false：严格用 debug_overlay_scale 的整数值（老行为）。
+        // 为什么需要它：8 物理像素在 200% 缩放的屏上只有 4 个逻辑像素，会看不清；
+        // 而「固定物理像素」在混合 DPI 环境下永远照顾不到两头。
+        bool        debug_overlay_scale_follow_dpi = true;
     };
 
     explicit JPOV(Config cfg);
@@ -323,6 +355,27 @@ public:
     // 未发起过 pick 查询时返回初始状态（hit=false, picking_id=0）。
     const jpov::PickResult& last_pick() const { return renderer_->last_pick(); }
 
+    // ---- Debug 信息 ----
+
+    // 引擎持有的 debug 状态快照（硬件信息 / 本帧相机 / 分辨率 / 帧号 / fps）。
+    //
+    // 更新时机：Init() 填 gpu（此后不变）；每帧 RunOnceInternal 填其余字段。
+    // 用途：app 想在 UI 里显示“当前用哪块 GPU”时直接读它，无需自己写
+    // glGetString（也无需自己解析软件光栅器名字）。
+    const jpov::DebugInfo& debug() const { return debug_; }
+
+    // 左上角 debug HUD 实际使用的字形放大倍数（Init 时定：跟随 DPI 或取
+    // Config::debug_overlay_scale）。headless 的 Xvfb / 普通 100% 屏上通常 = 1。
+    int debug_overlay_effective_scale() const { return debug_overlay_scale_; }
+
+    // 左上角 debug HUD 当前是否可见（F3 切换；初值 = Config::debug_overlay）。
+    bool is_debug_overlay_visible() const { return debug_overlay_visible_; }
+
+    // 程序设置 debug HUD 可见性（与按 F3 等价；Config::debug_overlay 只是初值）。
+    // 典型用法：CI 逐像素对比前 SetDebugOverlayVisible(false)，让截图里没有 HUD。
+    // 用途：想把 HUD 写进截图/录像的自动化、或者给 app 自己的“设置”项接一个开关。
+    void SetDebugOverlayVisible(bool visible) { debug_overlay_visible_ = visible; }
+
 private:
     // ---- 核心渲染步骤（Run 和 RunOnce 共享） ----
     //
@@ -372,6 +425,19 @@ private:
     Config config_;
     GLFWwindow* window_ = nullptr;
     std::unique_ptr<jpov::Renderer> renderer_;
+
+    // ---- Debug HUD 状态 ----
+    // DebugInfo 是**引擎自己的一份状态**（不是渲染指令）：Init 填 gpu，每帧填相机/fps。
+    jpov::DebugInfo debug_;
+    // debug HUD 实际生效的字形放大倍数。Init() 里定一次（DPI 在这之后不会变：
+    // GLFW 不做运行中 DPI 迁移，换屏也不会回调）。绘制用它，不直接读 Config。
+    int debug_overlay_scale_ = 1;
+
+    // 是否显示左上角 debug HUD。初值来自 Config::debug_overlay（默认 false），
+    // 运行时由 F3 切换。
+    bool debug_overlay_visible_ = false;
+    // 上一帧的墙钟时刻（glfwGetTime），用来算瞬时 fps；0 = 还没有上一帧。
+    double last_frame_time_ = 0.0;
     pid_t xvfb_pid_    = 0;
     bool  started_xvfb_ = false;
     bool  initialized_  = false;

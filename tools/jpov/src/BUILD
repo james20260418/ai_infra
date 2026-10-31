@@ -290,6 +290,60 @@ cc_library(
 )
 
 # Renderer — GL FBO + 动态分辨率渲染核心
+# GPU/驱动信息查询（需要 active GL context）—— 数据结构在 interface/gpu_info.h，
+# 这里只放 GL 侧采样，保证 interface 层不 include 任何 GL 头。
+cc_library(
+    name = "gpu_info_query",
+    srcs = ["gpu_info_query.cc"],
+    hdrs = ["gpu_info_query.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/jpov/interface:gpu_info",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+# 只要**头**的一个 target：MeasureOverlayExtent() / 字模表都是 GL-free 的纯数据/纯函数，
+# 让纯 CPU 单测（test/debug_overlay:overlay_extent_test）能不链 GL 也不链 glog 地验证它们。
+cc_library(
+    name = "debug_overlay_headers",
+    hdrs = [
+        "debug_overlay/debug_overlay_renderer.h",
+        "debug_overlay/debug_font8x8.h",
+    ],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+)
+
+# debug HUD 的内置 8x8 点阵字体绘制（自带 GL_R8 图集，零外部字体文件依赖）。
+cc_library(
+    name = "debug_overlay_renderer",
+    srcs = ["debug_overlay/debug_overlay_renderer.cc"],
+    hdrs = [
+        "debug_overlay/debug_overlay_renderer.h",
+        "debug_overlay/debug_font8x8.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":debug_overlay_headers",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 cc_library(
     name = "renderer",
     srcs = ["renderer.cc"],
@@ -297,6 +351,7 @@ cc_library(
     data = ["//tools/jpov/fonts:all_fonts"],
     visibility = ["//visibility:public"],
     deps = [
+        ":debug_overlay_renderer",
         ":font_renderer",
         ":primitives2d_renderer",
         ":plate2d_renderer",

@@ -426,6 +426,41 @@ cc_library(
     ],
 )
 
+# GpuInfo — 当前渲染所用硬件/驱动的只读快照（纯数据，不 include 任何 GL 头）。
+# GL 侧的采样在 //tools/jpov/src:gpu_info_query。
+cc_library(
+    name = "gpu_info",
+    srcs = ["gpu_info.cc"],
+    hdrs = ["gpu_info.h"],
+    visibility = ["//visibility:public"],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
+cc_test(
+    name = "gpu_info_test",
+    srcs = ["gpu_info_test.cc"],
+    deps = [
+        ":gpu_info",
+        "@gtest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+# DebugInfo — 引擎级 debug 状态快照（~ 键 HUD 的内容）+ DebugString()。
+cc_library(
+    name = "debug_info",
+    srcs = ["debug_info.cc"],
+    hdrs = ["debug_info.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":camera",
+        ":gpu_info",
+    ],
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # Text3DUtil — 3D 文本的像素/米 换算（纯函数，GL-free，可单测）
 # 见 text3d_util.h：PixelsPerMeterAt(anchor, camera, fbo_h)。
 cc_library(
