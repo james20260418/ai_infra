@@ -130,6 +130,36 @@ inline jpov::PBRMaterial GroundMaterial() {
         /*roughness*/ 1.0f);
 }
 
+// SSR 验收场景用的材质：**大镜子**（metallic=1、roughness≈0）。
+// 颜色压很暗：纯金属没有漫反射，画面亮度几乎全来自环境/SSR 反射，
+// 这样"倒影对不对"一眼可见（底色不会盖住反射）。
+inline jpov::PBRMaterial MirrorMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.03f, 0.03f, 0.03f, 1.0f},
+        /*metallic*/ 1.0f,
+        /*roughness*/ 0.02f);
+}
+
+// 镜面皮肤的蓝人（2026-10-31）：曲面的 SSR 反射体（"铬人"）。
+//
+// ⚠️ 底色必须**亮**：金属没有漫反射，`F0 = mix(0.04, base_color, metallic)` 就是底色本身
+// —— 底色 0.02 的金属只反射 2%，看起来就是一团黑（第一版踩过：人形是纯黑剪影，地面倒影
+// 反而看得见）。铬的 F0 ≈ 0.85~0.95。
+inline jpov::PBRMaterial MirrorSkinMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.90f, 0.90f, 0.92f, 1.0f},
+        /*metallic*/ 1.0f,
+        /*roughness*/ 0.02f);
+}
+
+// 镜子上的模型：粗糙灰（用来验证"被反射的东西本身不该发亮"）。
+inline jpov::PBRMaterial MirrorClutterMaterial() {
+    return jpov::PBRMaterial::SolidColorMR(
+        /*color*/ {0.55f, 0.52f, 0.48f, 1.0f},
+        /*metallic*/ 0.0f,
+        /*roughness*/ 0.6f);
+}
+
 // ── 自由度的取值范围与编码（面板与拍摄共用，单一出处）──
 //
 // turbidity：大气浊度 [0, 8]，默认 2（清澈）。

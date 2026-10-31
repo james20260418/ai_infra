@@ -107,12 +107,19 @@ std::string DebugInfo::DebugString() const {
     lines.emplace_back(buf);
 
     // ---- 相机机位（相机 HUD 的正式版本）----
-    std::snprintf(buf, sizeof(buf), "CAM  pos (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f)",
+    // ⭐ 数值用 **%.9g**（float 的 round-trip 精度：9 位有效数字足以让任何 float 原样
+    //    打回），不再用 %.2f —— 调试时要能用这行把相机**原样复现**（Danis 2026-10-31：
+    //    “把这个 cam 小数点精度增加到 float 精度”）。%.2f 会把 0.04214537 打成 0.04，
+    //    掠射角下这点差别就是“能不能复现那个条纹”的差别。
+    //    %.9g 不带多余的尾零（1.25 仍是 "1.25"），行超长时由 WrapLine 折行。
+    std::snprintf(buf, sizeof(buf),
+                  "CAM  pos (%.9g, %.9g, %.9g) -> (%.9g, %.9g, %.9g)",
                   camera.position.x(), camera.position.y(), camera.position.z(),
                   camera.target.x(), camera.target.y(), camera.target.z());
     lines.emplace_back(buf);
 
-    std::snprintf(buf, sizeof(buf), "     up (%.2f, %.2f, %.2f) fov %.1f near %.2f far %.2f",
+    std::snprintf(buf, sizeof(buf),
+                  "     up (%.9g, %.9g, %.9g) fov %.9g near %.9g far %.9g",
                   camera.up.x(), camera.up.y(), camera.up.z(), camera.fov,
                   camera.near, camera.far);
     lines.emplace_back(buf);

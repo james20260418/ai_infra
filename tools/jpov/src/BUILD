@@ -365,6 +365,7 @@ cc_library(
         ":sky_renderer",
         ":horizon_fog_renderer",
         ":env_specular",
+        "//tools/jpov/src/ssr:ssr_integration",
         "//tools/jpov/src/fire_fog:fire_fog_renderer",
         "//tools/jpov/src/particles:particle_renderer",
         "//tools/jpov/src/volume_fire:volume_fire_renderer",

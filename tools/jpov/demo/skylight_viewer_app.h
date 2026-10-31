@@ -57,6 +57,9 @@ public:
     jpov::PBRMaterial mat_high_;         // 高光（rough=0.05, metal=0）
     jpov::PBRMaterial mat_metal_;        // 金属（metal=1, rough=0.15）
     jpov::PBRMaterial mat_ground_;       // 灰色地面
+    jpov::PBRMaterial mat_mirror_;       // 镜面地板（metallic=1, roughness=0.02）—— SSR 场景
+    jpov::PBRMaterial mat_clutter_;      // 镜子上方随机模型（粗糙灰）
+    jpov::PBRMaterial mat_mirror_skin_;  // 镜面皮肤（曲面 SSR 反射体：人）
 
     // ── 蓝人（mixamo_male）：同一份蒙皮 mesh + 骨架，每个方块顶面各一个 T-pose 实例 ──
     // person_mesh_ / person_skeleton_id_ 为 0（未装配）时整段跳过 → 不带人场景零回归。
@@ -67,6 +70,39 @@ public:
     jpov::PBRMaterial person_material_;  // 蒙皮网格的 PBR 材质
     jpov::GltfObject person_gltf_;       // 资源保活（同 models_ 的所有权约定）
     std::vector<jpov::SkinnedInstanceState> person_instances_;
+    // 镜面皮肤的蓝人（2026-10-31）：4 个随机站在镜面地板上的实例，**ssr_reflector=true**
+    // ⇒ 属性 pass 会给它们写视空间法线（曲面），用来测"曲面上的 SSR 贴不贴"。
+    std::vector<jpov::SkinnedInstanceState> person_mirror_instances_;
+    float person_scale_ = 1.0f;     // InstallPerson 算出的归一缩放（镜面人复用）
+    float person_min_y_ = 0.0f;     // 资产包围盒 min.y（脚点对齐用）
+
+    // 4 个随机摆放：极坐标 r∈[4,14]、随机朝向；固定种子 ⇒ 每次拍摄同一个场景。
+    void BuildMirrorPeople(int count = 4, uint32_t seed = 20261031u) {
+        person_mirror_instances_.clear();
+        uint32_t st = seed;
+        auto rnd = [&st]() {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            return static_cast<float>(st & 0xFFFFFFu) / static_cast<float>(0x1000000);
+        };
+        for (int i = 0; i < count; ++i) {
+            const float ang = rnd() * 6.2831853f;
+            const float r = 4.0f + rnd() * 10.0f;
+            const float yaw = rnd() * 6.2831853f;
+            jpov::SkinnedInstanceState inst;
+            inst.transform.center = {r * std::cos(ang),
+                                     -person_scale_ * person_min_y_,
+                                     r * std::sin(ang)};
+            inst.transform.up = {0.0f, 1.0f, 0.0f};
+            inst.transform.front = {std::sin(yaw), 0.0f, std::cos(yaw)};
+            inst.transform.scale = person_scale_;
+            inst.pose_a = 0;
+            inst.pose_b = 0;
+            inst.ratio = 0.0f;
+            person_mirror_instances_.push_back(inst);
+        }
+    }
 
     // ── 额外模型（桌子 / 高模橡树）：用来看“物体受光”，供标定夜色 ambient ──
     // 每个 Slot = 一个 glTF + 世界摆放（center/up/front/scale），由主程序装载后 AddModel。
@@ -118,6 +154,56 @@ public:
     // 是否绘制场景几何（三方块 + 地面）。headless 拍“天空本身”时置 false，
     // 排除方块遮挡与受光干扰，只留天光背景。
     void SetShowScene(bool show) { show_scene_ = show; }
+
+    // ── 场景下拉（见面板“场景”）────────────────────────────────────────────
+    //   0 = 标定场：灰地面 + 三方块 + 桌子/橡树 + 蓝人（原有）
+    //   1 = **镜面地板 + 随机模型**：SSR 的验收场景（地表大镜子，上方随机摆方块/模型）
+    //   2 = 只天空：不画任何几何（headless 拍天光用）
+    int scene_index_ = 0;
+    // 镜面地板这一场景里随机摆放的方块（固定种子，装配一次；不逐帧随机）。
+    struct Clutter {
+        jpov::Vec3f center;
+        jpov::Vec3f front;
+        float scale = 1.0f;
+    };
+    std::vector<Clutter> clutter_;
+
+    // 固定种子生成 N 个"散布在镜子上方"的方块：极坐标 r∈[5,30]、随机朝向/大小。
+    // 用固定种子是刻意的：SSR 的验收图要能重拍对比，场景不能每帧变。
+    void BuildClutter(int count, uint32_t seed = 20261030u) {
+        clutter_.clear();
+        uint32_t s = seed;
+        auto rnd = [&s]() {   // xorshift32：不引 <random>，且跨平台逐位一致
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            return static_cast<float>(s & 0xFFFFFFu) / static_cast<float>(0x1000000);
+        };
+        for (int i = 0; i < count; ++i) {
+            const float ang = rnd() * 6.2831853f;
+            const float r = 5.0f + rnd() * 25.0f;
+            const float sc = 0.5f + rnd() * 3.0f;
+            const float yaw = rnd() * 6.2831853f;
+            Clutter c;
+            c.center = {r * std::cos(ang), 0.5f * sc, r * std::sin(ang)};
+            c.front = {std::sin(yaw), 0.0f, std::cos(yaw)};
+            c.scale = sc;
+            clutter_.push_back(c);
+        }
+    }
+
+    // ── SSR（屏幕空间反射）──────────────────────────────────────────────
+    // 只对 ssr_reflector 的物体生效（镜面地板）；**必须同时开环境镜面**（合成要重算并替换
+    // 那一项，没有 env 就没有可替换的对象）。关掉时整条链路零开销。
+    bool  ssr_on_ = false;
+    float ssr_scale_ = 0.5f;        // = 1/N，N = 1..4（面板滑条给的是 N）
+    int   ssr_downscale_n_ = 2;     // 面板滑条：降采样倍率 N（1 = 不降采样）
+    int   ssr_depth_mode_ = 0;      // 0 = 软权 1/(rel+ε)+真剪影硬拒；1 = 不判深度（Unity 式）
+    float ssr_thickness_px_ = 6.0f; // N_px（SSR 像素）
+    int   ssr_max_ray_px_ = 220;    // 屏幕空间射线预算（SSR 像素）
+    float ssr_roughness_ = 0.02f;   // 反射层材质（本版全场景一套）
+    int   ssr_debug_ = 0;           // 0 正常 / 1 A 覆盖率 / 2 直通
+    void SetSsr(bool on) { ssr_on_ = on; }
 
     // ⭐ 唯一渲染体：交互 Run 循环 与 headless 拍摄共用（zero 分叉）。
     void OneIteration(int64_t frame_count, const jpov::InputSnapshot& input,
@@ -192,9 +278,36 @@ public:
             cmds->elevation_fog = ef;
         }
 
-        // 场景：灰色地面 + 三方块（低反/高光/金属）。
-        // show_scene_=false 时整组跳过（headless 拍纯天空用）。
-        if (show_scene_) {
+        // 场景（下拉）：
+        //   0 标定场：灰地面 + 三方块（低反/高光/金属）+ 桌子/橡树 + 蓝人
+        //   1 镜面地板 + 随机模型：SSR 的验收场景（地板是 ssr_reflector）
+        //   2 只天空：不画几何（headless 拍天光）
+        const bool draw_scene = show_scene_ && scene_index_ != 2;
+        if (draw_scene && scene_index_ == 1) {
+            // 镜面地板：ground_mesh_ 是 40×40 的 quad（顶点 y=0），scale=5 ⇒ 200×200 m。
+            // ssr_reflector=true 时属性 pass 会把它再画一遍写视空间法线。
+            cmds->DrawObject3D(ground_mesh_, mat_mirror_,
+                               /*center*/ {0.0f, 0.0f, 0.0f},
+                               /*up*/     {0.0f, 1.0f, 0.0f},
+                               /*front*/  {0.0f, 0.0f, 1.0f},
+                               /*scale*/ 5.0f, /*highlight*/ false, /*picking_id*/ 0,
+                               /*wind*/ std::nullopt, /*ssr_reflector*/ true);
+            for (const Clutter& c : clutter_) {
+                cmds->DrawObject3D(box_mesh_, mat_clutter_, c.center,
+                                   {0.0f, 1.0f, 0.0f}, c.front, c.scale);
+            }
+            // 镜面皮肤的蓝人（**曲面**反射体）：单独一条命令（材质不同），带 ssr_reflector。
+            // 4 个随机站位，固定种子；属性 pass 会为它们写逐顶点（曲面）视空间法线。
+            if (person_mesh_ != 0 && !person_mirror_instances_.empty()) {
+                cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_, mat_mirror_skin_,
+                                           person_mirror_instances_, /*highlight=*/false,
+                                           /*ssr_reflector=*/true);
+            }
+            // 桌子/橡树也放上来：它们在镜面里的倒影比方块更"有内容"。
+            for (const ModelSlot& m : models_) {
+                cmds->DrawGltfObject(m.obj, m.center, m.up, m.front, m.scale);
+            }
+        } else if (draw_scene) {
             cmds->DrawObject3D(ground_mesh_, mat_ground_,
                                /*center*/ {0.0f, 0.0f, 0.0f},
                                /*up*/     {0.0f, 1.0f, 0.0f},
@@ -215,6 +328,22 @@ public:
                 cmds->DrawMeshWithSkeleton(person_mesh_, person_skeleton_id_,
                                            person_material_, person_instances_);
             }
+        }
+
+        // SSR：把配置交给 Renderer（属性 pass / 降采样 / 模块 / 合成都在那边）。
+        // 必须同时开环境镜面 —— 没有 env 就没有"可替换的那一项"（Renderer 会 FATAL）。
+        if (ssr_on_ && env_specular_on_) {
+            jpov::SsrConfig sc;
+            sc.enabled = true;
+            sc.resolution_scale = ssr_scale_;
+            sc.thickness_pixels = ssr_thickness_px_;
+            sc.max_ray_pixels = ssr_max_ray_px_;
+            sc.roughness = ssr_roughness_;
+            sc.base_color = {0.03f, 0.03f, 0.03f};
+            sc.metallic = 1.0f;
+            sc.upsample_depth_mode = ssr_depth_mode_;
+            sc.debug_coverage = ssr_debug_;
+            cmds->ssr = sc;
         }
 
         // 光照面板（仅交互窗口；headless 拍摄是纯 3D 截图）。
@@ -248,7 +377,7 @@ private:
         const float kRowH    = 24.0f;
         const float kSpacing = 5.0f;
         const float kBottom  = 16.0f;
-        const int   kRows    = 11;
+        const int   kRows    = 16;
         const float top      = h - kBottom
                              - (static_cast<float>(kRows) * kRowH
                                 + static_cast<float>(kRows - 1) * kSpacing);
@@ -258,25 +387,52 @@ private:
                                 {kColW, kRowH}};
         };
 
-        // ── 左列：天光自由度 ──
-        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 0),
+        // ── 左列 0..2：场景下拉 + SSR 总闸 / 调试视图 ──
+        // 放在列首（2026-10-30 Danis：「下拉菜单不要放下面，一旦下拉会出屏幕」）：
+        // Ui::Combo 的下拉列表恒朝下展开（框底 = 列表顶），贴底的行一展开就出屏；
+        // 列首下方空间充足，两个下拉都能完整展开。
+        {
+            const std::vector<const char*> scenes = {"场景0 标定场（方块+人）",
+                                                     "场景1 镜面地板+随机模型",
+                                                     "场景2 只天空"};
+            int sel = scene_index_;
+            if (ui_.Combo("场景", &sel, scenes, row(0, 0))) {
+                scene_index_ = sel;
+                if (sel == 1) {
+                    // 切到镜面场景给一台低角度相机：掠射最能暴露自交/厚度问题。
+                    view_.phi = 0.21;   // ≈12° 仰角
+                    view_.theta = 0.0;
+                    view_.R = 45.0;
+                }
+            }
+            ui_.Checkbox("SSR 屏幕空间反射", &ssr_on_, row(0, 1));
+            const std::vector<const char*> dbg = {"SSR 调试：关", "SSR 调试：A 覆盖率",
+                                                  "SSR 调试：直通（无 SSR）"};
+            int dsel = ssr_debug_;
+            if (ui_.Combo("SSR 调试", &dsel, dbg, row(0, 2))) {
+                ssr_debug_ = dsel;
+            }
+        }
+
+        // ── 左列 3..13：天光自由度 ──
+        ui_.SliderFloat("浊度 turb", &deg_.turbidity, row(0, 3),
                         kTurbidityMin, kTurbidityMax, 1);
         ui_.SliderFloat("季节色温 日光 (左蓝偏..右红偏)", &deg_.daylight_season,
-                        row(0, 1), -1.0f, 1.0f, 2);
+                        row(0, 4), -1.0f, 1.0f, 2);
         ui_.SliderFloat("天体仰角 ° (负=月光/正=日光)", &deg_.sun_elev_deg,
-                        row(0, 2), -90.0f, 90.0f, 0);
-        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 3), 0.0f, 360.0f, 0);
-        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 4), 0.0f, 1.0f, 2);
-        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 5), 0.0f, 1.0f, 2);
-        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 6));
+                        row(0, 5), -90.0f, 90.0f, 0);
+        ui_.SliderFloat("天体方位角 °", &deg_.sun_azim_deg, row(0, 6), 0.0f, 360.0f, 0);
+        ui_.SliderFloat("月色变红 (血月)", &deg_.moon_red, row(0, 7), 0.0f, 1.0f, 2);
+        ui_.SliderFloat("夜空偏蓝 (梦幻夜)", &deg_.night_blue, row(0, 8), 0.0f, 1.0f, 2);
+        ui_.Checkbox("三色环境光 (天/天际线/地)", &tricolor_ambient_, row(0, 9));
         // SMAA 后处理抗锯齿：与右侧“远景仰角雾”并列，单独对比开关 + 阈值（敏感度）。
-        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 7));
-        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 8),
+        ui_.Checkbox("SMAA 抗锯齿", &smaa_on_, row(0, 10));
+        ui_.SliderFloat("SMAA 阈值 (小=更敏感)", &smaa_threshold_, row(0, 11),
                         0.02f, 0.5f, 2);
         // 环境镜面（IBL specular）：验收工件是金属块（index 2）。
         // 关 = 只有直射高光（发黑）；开 = 能看见天光渐变与地色被映上去。
-        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 9));
-        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 10),
+        ui_.Checkbox("环境镜面 (天光反射)", &env_specular_on_, row(0, 12));
+        ui_.SliderFloat("天光消费量 [0,1]", &env_specular_scale_, row(0, 13),
                         0.0f, 1.0f, 2);
 
         // ── 右列：远景仰角雾 ──
@@ -289,6 +445,29 @@ private:
         ui_.SliderFloat("雾色增益", &deg_.elev_fog_gain, row(1, 6), 0.0f, 5.0f, 2);
         // 收敛色：true=跟随该方向天空色（推荐，与天无缝）；false=用推导常量色（受“雾色增益”影响）。
         ui_.Checkbox("雾色跟随天空", &deg_.elev_fog_use_sky, row(1, 7));
+
+        // ── 右列 9..12：SSR 的分辨率 / 厚度 / 预算 / 粗糙度 ──
+        {
+            // 降采样倍率滑条 N（1..4）：分辨率 = 1/N。N=3 也能跑（整数格 + 加权，不要求 2 的幂）。
+            float n_f = static_cast<float>(ssr_downscale_n_);
+            if (ui_.SliderFloat("SSR 降采样倍率 1:N", &n_f, row(1, 9), 1.0f, 4.0f, 0)) {
+                ssr_downscale_n_ = static_cast<int>(std::lround(n_f));
+                ssr_downscale_n_ = std::max(1, std::min(4, ssr_downscale_n_));
+                ssr_scale_ = 1.0f / static_cast<float>(ssr_downscale_n_);
+            }
+            const std::vector<const char*> depth_modes = {"升采样深度：软权 1/(rel+ε)",
+                                                          "升采样深度：不判（Unity 式）"};
+            int dm = ssr_depth_mode_;
+            if (ui_.Combo("升采样深度判据", &dm, depth_modes, row(1, 13))) {
+                ssr_depth_mode_ = dm;
+            }
+            ui_.SliderFloat("SSR 厚度 N_px", &ssr_thickness_px_, row(1, 10), 1.0f, 24.0f, 1);
+            float mrp = static_cast<float>(ssr_max_ray_px_);
+            if (ui_.SliderFloat("SSR 射线预算 px", &mrp, row(1, 11), 40.0f, 800.0f, 0)) {
+                ssr_max_ray_px_ = static_cast<int>(mrp);
+            }
+            ui_.SliderFloat("SSR 反射体 roughness", &ssr_roughness_, row(1, 12), 0.0f, 0.4f, 3);
+        }
         // 色块 = 天光推导的地平线天光色 × 增益（“跟随天空”时实际收敛色是逐方向天空色）。
         {
             const jpov::Color fc = MakeSkyLighting(deg_, tricolor_ambient_)

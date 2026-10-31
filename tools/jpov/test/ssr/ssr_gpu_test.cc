@@ -98,6 +98,12 @@ struct Scene {
     std::vector<float> window_depth;   // R32F：gl_FragCoord.z
     std::vector<float> normal_xy;      // RG16F：视空间法线 .xy
     std::vector<float> color;          // RGBA16F：R=x/W, G=y/H, B=0.25（按格可反查）
+    // 可选：非空 ⇒ 法线附件改成 RGBA32F，.z = 1 表示该 texel 有法线数据（朝向判据用）。
+    // 空 = 整张 .z = 0 ⇒ 朝向判据不生效（与加判据之前的行为一致）。
+    std::vector<float> attr_z;
+    // 可选：测试自用的"这个像素属于哪个面"标记（**不上传**，只用于圈定断言范围）。
+    //   0=天空 1=地板（反射体） 2=桌子顶面（法线朝上） 3=墙（法线朝相机）
+    std::vector<int> kind;
 };
 
 // 均匀深度 + 地板法线（ny=0.95 ⇒ N 几乎贴着屏幕法向，反射射线几乎贴着地面飞）。
@@ -189,8 +195,9 @@ struct CpuResult {
 };
 
 // 逐个像素算 CPU 参考；depth_field 用窗口深度反算视距，与 GPU 完全同源。
+// use_facing = true 时把命中面朝向判据也带上（attr_z ≥ 0.5 的格才判）。
 CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& derived,
-                        float max_distance_m) {
+                        float max_distance_m, bool use_facing = false) {
     const size_t i = static_cast<size_t>(py) * kWidth + px;
     CpuResult out;
     // 与着色器同一条规则：没有深度数据 ⇒ 不发射线、a=0（ssr_math.h::HasDepthData）。
@@ -209,11 +216,25 @@ CpuResult MarchPixelCpu(const Scene& sc, int px, int py, const DerivedParams& de
     }
     auto depth_at = [&](int x, int y) -> float {
         const size_t k = static_cast<size_t>(y) * kWidth + x;
+        if (!HasDepthData(sc.window_depth[k])) {
+            return jpov::ssr::kEmptyCell;   // 天空格没有柱子（与着色器同一条规则）
+        }
         return jpov::ssr::DepthFromWindowDepth(sc.window_depth[k], kNear, kFar);
     };
     int cx = -1;
     int cy = -1;
-    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy);
+    auto facing = [&](int x, int y, const Vec3& d) -> bool {
+        if (!use_facing) {
+            return true;
+        }
+        const size_t k = static_cast<size_t>(y) * kWidth + x;
+        if (sc.attr_z.empty() || sc.attr_z[k] < 0.5f) {
+            return true;   // 没有法线数据：不判方向（与着色器 attr.z < 0.5 一致）
+        }
+        const Vec3 n = ReconstructNormal(sc.normal_xy[k * 2 + 0], sc.normal_xy[k * 2 + 1]);
+        return jpov::ssr::HitFacesRay(d, n);
+    };
+    const float s = MarchSlabs(ray, derived, 1.0e-4f, depth_at, kWidth, kHeight, &cx, &cy, facing);
     if (s < kNoHit) {
         out.hit = true;
         out.s = s;
@@ -241,7 +262,25 @@ struct Fixture {
         // 法线用 RG32F（**不是** RG16F）：fp16 会把 ny=0.95 量化成 0.95019，
         // CPU 参考拿到的却是 0.95 —— 逐像素对拍时这点差异会在柱子边缘把命中格推走一格。
         // 真实管线用 fp16 也没问题（模块只做归一化与反射），只是**对拍**必须两边同值。
-        normal_tex = UploadFloatTexture(scene.normal_xy, kWidth, kHeight, GL_RG32F, GL_RG);
+        // 场景带了 attr_z ⇒ 用 RGBA32F：.z = 1 表示该 texel 有法线数据（朝向判据用）。
+        // 2026-10-31 起属性纹理语义：**rgb = 完整三维视空间法线**，a = 掩码编码
+        // （1 反射体 / 0.5 有法线 / 0 无数据）。不再用 .xy + 重建 z。
+        //   · nz 由 xy 现算（与 CPU 参考的 ReconstructNormal 一致）；
+        //   · 老用例没有 attr_z ⇒ 语义是"这一格**不判朝向**"（当时靠 .z=0 表达），
+        //     新编码用 a<0.25 表达；法线 xyz 仍然照写（射线构造要用，不能是 NaN）。
+        {
+            std::vector<float> rgba(static_cast<size_t>(kWidth) * kHeight * 4, 0.0f);
+            for (size_t i = 0; i < static_cast<size_t>(kWidth) * kHeight; ++i) {
+                const float nx = scene.normal_xy[i * 2 + 0];
+                const float ny = scene.normal_xy[i * 2 + 1];
+                const bool judge_facing = !scene.attr_z.empty() && scene.attr_z[i] >= 0.5f;
+                rgba[i * 4 + 0] = nx;
+                rgba[i * 4 + 1] = ny;
+                rgba[i * 4 + 2] = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+                rgba[i * 4 + 3] = judge_facing ? 1.0f : 0.0f;
+            }
+            normal_tex = UploadFloatTexture(rgba, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
+        }
         color_tex = UploadFloatTexture(scene.color, kWidth, kHeight, GL_RGBA16F, GL_RGBA);
         ssr.Init(&shader_mgr);
         in.color_tex = color_tex;
@@ -617,6 +656,147 @@ TEST(SsrGpu, Deterministic) {
     EXPECT_EQ(std::memcmp(rad_a.data(), rad_b.data(), rad_a.size() * sizeof(float)), 0)
         << "同一帧跑两次结果不同（决定论被破坏）";
     EXPECT_EQ(std::memcmp(s_a.data(), s_b.data(), s_a.size() * sizeof(float)), 0);
+}
+
+// ⑦ 命中面朝向：背面命中（射线从物体背后穿过去）必须不算命中
+//
+// 2026-10-30 Danis 实拍发现：体素柱/桌子这种厚物体，镜子里的射线从它**背面**穿过去，
+// 旧判据却把**正面**（带高光）的像素当结果 ⇒ 倒影里桌子底下也在发光。
+//
+// 场景（屏幕空间直给，y=0 在底部）：
+//   0..23   地板：d=12，法线 (0,0.95)（掠射反射体，射线往上且远离相机）
+//   24..39  空（无深度数据）——射线穿过去
+//   40..55  “桌子顶面”：d=20，法线 (0,1)（朝上）
+//           ⇒ 地板射线的视深在这一带恰好是 20 出头（比存下的桌面**更远**，差 < T）
+//           ⇒ 旧判据命中这一格，但 R·N ≈ +0.57 > 0 = 从底面穿出 ⇒ 必须拒
+//   56..63  “墙”：d=20，法线 (0,0)（朝相机）⇒ R·N < 0 ⇒ 正面命中 ⇒ 必须中
+//
+// 四条断言：① GPU 与 CPU（带朝向判据）逐像素一致（命中/未命中 + 命中格）；
+//   ② 负向：CPU 不判朝向时确实在桌子带命中（这个场景真能造出 bug）；
+//   ③ 正向：带判据后命中桌子带的像素数归 0；
+//   ④ 防过严：带判据后仍有像素命中到墙那一段（不是把一切都拒了）。
+constexpr int kFacingFloorRows = 24;    // 地板占 y ∈ [0,24)
+constexpr int kFacingTableBegin = 40;   // 桌子带开始
+constexpr int kFacingTableEnd = 56;     // 桌子带结束，墙从这行开始
+constexpr float kFacingFloorDepth = 12.0f;
+constexpr float kFacingTableDepth = 20.0f;
+
+Scene MakeFacingScene() {
+    Scene sc;
+    sc.window_depth.assign(static_cast<size_t>(kWidth) * kHeight, 1.0f);
+    sc.normal_xy.assign(static_cast<size_t>(kWidth) * kHeight * 2, 0.0f);
+    sc.color.assign(static_cast<size_t>(kWidth) * kHeight * 4, 0.0f);
+    sc.attr_z.assign(static_cast<size_t>(kWidth) * kHeight, 0.0f);
+    sc.kind.assign(static_cast<size_t>(kWidth) * kHeight, 0);
+    auto window_depth_of = [](float d) {
+        const float ndc = ((kFar + kNear) - 2.0f * kNear * kFar / d) / (kFar - kNear);
+        return 0.5f * ndc + 0.5f;
+    };
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            float d = 0.0f;
+            float ny = 0.0f;
+            int kind = 0;
+            if (y < kFacingFloorRows) {
+                d = kFacingFloorDepth;
+                ny = 0.95f;                       // 地板：掠射反射体，法线朝上
+                kind = 1;
+            } else if (y >= kFacingTableBegin && y < kFacingTableEnd) {
+                d = kFacingTableDepth;
+                ny = 1.0f;                        // 桌子顶面：法线朝上
+                kind = 2;
+            } else if (y >= kFacingTableEnd) {
+                d = kFacingTableDepth;
+                kind = 3;                         // 墙：法线朝相机（xy=0 ⇒ N=(0,0,1)）
+            }
+            sc.kind[i] = kind;
+            sc.window_depth[i] = (kind != 0) ? window_depth_of(d) : 1.0f;   // 1.0 = 无深度
+            sc.normal_xy[i * 2 + 0] = 0.0f;
+            sc.normal_xy[i * 2 + 1] = ny;
+            sc.attr_z[i] = (kind != 0) ? 1.0f : 0.0f;
+            sc.color[i * 4 + 0] = static_cast<float>(x + 1) / (kWidth + 1);
+            sc.color[i * 4 + 1] = static_cast<float>(y + 1) / (kHeight + 1);
+            sc.color[i * 4 + 2] = 0.25f;
+            sc.color[i * 4 + 3] = 1.0f;
+        }
+    }
+    return sc;
+}
+
+TEST(SsrGpu, BackfaceHitsRejected) {
+    Fixture f;
+    f.Setup(MakeFacingScene(), /*tile=*/4, /*max_ray_pixels=*/160);
+    f.in.debug_reason = true;
+    const SsrOutputs& out = f.ssr.Render(f.in);
+    ASSERT_NE(out.radiance_tex, 0u);
+
+    const DerivedParams derived =
+        DeriveParams(f.in.tile_size, f.in.max_ray_pixels, f.in.thickness_pixels, kTanHalf, kHeight);
+    const std::vector<float> rad = ReadTexFloat(out.radiance_tex, kWidth, kHeight, GL_RGBA);
+
+    int hit_mismatch = 0;
+    int cell_mismatch = 0;
+    int old_hits_in_table = 0;      // 负向：不判朝向时从地板撞在桌子带的像素
+    int facing_hits_in_table = 0;   // 正向：判朝向后仍撞在桌子带的像素（应为 0）
+    int facing_hits_in_wall = 0;    // 防过严：判朝向后仍命中墙的像素
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            const size_t i = static_cast<size_t>(y) * kWidth + x;
+            const CpuResult old_cpu =
+                MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/false);
+            const CpuResult cpu =
+                MarchPixelCpu(f.scene, x, y, derived, f.in.max_distance_m, /*use_facing=*/true);
+            const bool gpu_hit = rad[i * 4 + 3] > 0.5f;
+
+            // 只统计"地板像素射出去的射线"：桌子/墙自己的像素也会发射线（那属于它们自己的
+            // 镜面，跟这条 bug 无关）。
+            if (f.scene.kind[i] == 1) {
+                if (old_cpu.hit && f.scene.kind[static_cast<size_t>(old_cpu.cell_y) * kWidth +
+                                                 old_cpu.cell_x] == 2) {
+                    ++old_hits_in_table;
+                }
+                if (cpu.hit) {
+                    const int hit_kind =
+                        f.scene.kind[static_cast<size_t>(cpu.cell_y) * kWidth + cpu.cell_x];
+                    if (hit_kind == 2) {
+                        ++facing_hits_in_table;
+                    } else if (hit_kind == 3) {
+                        ++facing_hits_in_wall;
+                    }
+                }
+            }
+
+            if (cpu.hit != gpu_hit) {
+                ++hit_mismatch;
+                if (hit_mismatch < 4) {
+                    ADD_FAILURE() << "像素(" << x << "," << y << ") CPU hit=" << cpu.hit
+                                  << " GPU a=" << rad[i * 4 + 3];
+                }
+                continue;
+            }
+            if (!gpu_hit) {
+                continue;
+            }
+            // 命中 ⇒ 颜色必须是命中格的那一格颜色（R/G 编码了格号，可反查）。
+            const int cell_x = static_cast<int>(std::lround(rad[i * 4 + 0] * (kWidth + 1))) - 1;
+            const int cell_y = static_cast<int>(std::lround(rad[i * 4 + 1] * (kHeight + 1))) - 1;
+            if (cell_x != cpu.cell_x || cell_y != cpu.cell_y) {
+                ++cell_mismatch;
+                if (cell_mismatch < 4) {
+                    ADD_FAILURE() << "像素(" << x << "," << y << ") CPU 命中格 (" << cpu.cell_x
+                                  << "," << cpu.cell_y << ") GPU 取到 (" << cell_x << ","
+                                  << cell_y << ")";
+                }
+            }
+        }
+    }
+    EXPECT_EQ(hit_mismatch, 0) << "CPU（带朝向判据）与 GPU 命中不一致";
+    EXPECT_EQ(cell_mismatch, 0) << "CPU（带朝向判据）与 GPU 命中格不一致";
+    EXPECT_GT(old_hits_in_table, 20)
+        << "不判朝向时没在桌子带命中 ⇒ 这个场景造不出那个 bug，测试没意义";
+    EXPECT_EQ(facing_hits_in_table, 0) << "背面命中（射线从桌面下方穿出）竟然还算命中";
+    EXPECT_GT(facing_hits_in_wall, 0) << "朝向判据把墙的正面命中一起拒掉了（判太严）";
 }
 
 }  // namespace

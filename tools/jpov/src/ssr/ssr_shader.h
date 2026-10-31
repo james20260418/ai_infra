@@ -53,6 +53,7 @@ uniform int   uStepsPerLane;  // 每段步数上限（含 +3 余量，DDA 到段
 struct SsrRay {
     vec2 s0;
     vec2 dir;
+    vec3 d3;          // 视空间单位方向（朝向判据用；ssr_math.h::ScreenRay::dir3）
     float span;
     float w0;
     float w1;
@@ -64,6 +65,17 @@ struct SsrRay {
 // 该像素有没有深度数据（1.0 = 清空值 = 天空）。ssr_math.h::HasDepthData
 bool SsrHasDepth(float depth) {
     return depth < 1.0;
+}
+
+// 法线：属性纹理存**完整三维视空间法线**（rgb），这里只归一化。
+//
+// ⚠️ 2026-10-31 根因（掠射倒影"抬高一米 / 两层 / 红移 / 压扁"）：以前只存 .xy、z 用
+// `sqrt(1−x²−y²)` 重建 —— 这个式子在**极点附近病态**。掠射时地面法线 ny→1，fp16 把
+// 1.0 存成 0.999512（实测 16×16 邻域 256/256 像素），重建出 z = 0.0312 ⇒ 法线凭空偏
+// **1.79°** ⇒ 反射方向偏 **3.6°**，而真实掠射角只有 1.3°（放大近 3 倍）⇒ 倒影射线被抬高
+// 约 1 米、命中错像素。存三分量后单分量 fp16 误差 5e-4 ⇒ 方向误差 ~0.03°（差 60 倍）。
+vec3 SsrNormalOf(vec4 attr) {
+    return normalize(attr.xyz);
 }
 
 // 窗口深度 → 视距（米）。ssr_math.h::DepthFromWindowDepth（含 NaN 守卫）。
@@ -99,6 +111,25 @@ bool SsrCellHit(float w_in, float w_out, float z_cell, float thickness) {
     return true;
 }
 
+// 命中面朝向判据（2026-10-30 第一档）。ssr_math.h::HitFacesRay
+//
+//   R·N < 0 ⇒ 射线**扎进**命中面 = 合法的正面命中；
+//   R·N ≥ 0 ⇒ 射线是从这个面的背面/内部穿出来的 ⇒ 不算命中，继续 march。
+//
+// 为什么必须有它：深度缓冲里只有"相机看得见的那一面"的颜色与法线。镜子往上看桌子
+// 底面 / 柱体背面时，屏幕空间里没有那些面的像素，旧判据会把**桌面顶面的高光**当结果
+// ⇒ 倒影里桌子底下也在发光。
+//
+// attr.a ≥ 0.25 ⇒ 这一格有视空间法线（属性 pass 画过几何）。没有数据（天空 / 未纳入
+// 属性 pass 的几何）时不判、维持旧行为（见 ssr_renderer.h "已知边界"）。
+bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
+    vec4 attr = texelFetch(uNormal, cell, 0);
+    if (attr.a < 0.25) {          // .a = 掩码编码：1 反射体 / 0.5 有法线非反射体 / 0 无数据
+        return true;              // 没有法线数据 ⇒ 不判方向（维持引入判据之前的行为）
+    }
+    return dot(ray_dir, SsrNormalOf(attr)) < 0.0;
+}
+
 // mir = 镜面像素下标。返回 false = 射线出屏/退化（ssr_math.h::BuildScreenRay）。
 //
 // ⚠️ 采样点用 **tile 中心** uv = (mir + 0.5) / uRes，**不是** gl_FragCoord/uTile/uRes：
@@ -107,9 +138,7 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     float depth = texelFetch(uDepth, mir, 0).r;
     float d_surf = SsrZView(depth);
 
-    vec2 n2 = texelFetch(uNormal, mir, 0).xy;
-    vec3 N = vec3(n2, sqrt(max(0.0, 1.0 - dot(n2, n2))));
-    N = normalize(N);   // xy 长度可能 > 1（法线贴图越界），不归一化会把 R 拉长
+    vec3 N = SsrNormalOf(texelFetch(uNormal, mir, 0));
 
     vec2 uv = (vec2(mir) + 0.5) / uRes;
     vec2 ndc = uv * 2.0 - 1.0;
@@ -139,6 +168,7 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     ray.s0 = s0;
     ray.w0 = 1.0 / d0;
     ray.w1 = 1.0 / d1;
+    ray.d3 = normalize(R);   // 朝向判据用（ssr_math.h::BuildScreenRay 同一行）
 
     vec2 delta = s1 - s0;
     ray.span = length(delta);
@@ -256,9 +286,28 @@ void main() {
         if (!(sigma_out > sigma)) {
             return;
         }
-        float z = SsrZView(texelFetch(uDepth, cell, 0).r);
+        // 空格子（天空/无深度数据）没有柱子：穿过去，**不要**当成 far 处的墙。
+        // 见 ssr_math.h::kEmptyCell 的反例（掠射时会在近地平线造出一大片假高光）。
+        float win = texelFetch(uDepth, cell, 0).r;
+        if (!SsrHasDepth(win)) {
+            if (sigma_out >= end) {
+                return;
+            }
+            sigma = sigma_out;
+            if (tmx < tmy) {
+                cell.x += (ray.dir.x > 0.0) ? 1 : -1;
+                tmx += tdx;
+            } else {
+                cell.y += (ray.dir.y > 0.0) ? 1 : -1;
+                tmy += tdy;
+            }
+            continue;
+        }
+        float z = SsrZView(win);
         float thickness = max(uThicknessC * z, uMinThickness);
-        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), z, thickness)) {
+        // 命中 + 朝向都对才算：背面命中（射线从面背后穿出）不是命中，继续 march。
+        if (SsrCellHit(SsrWAt(ray, sigma), SsrWAt(ray, sigma_out), z, thickness) &&
+            SsrHitFacing(ray.d3, cell)) {
             FragS = 0.5 * (sigma + sigma_out);
             return;
         }
@@ -331,6 +380,57 @@ void main() {
     FragReason = reason;
     FragHitS = hit_s;
 #endif
+}
+)glsl";
+
+// ── 属性 pass（接入层用；不属于模块契约）──
+// 画**所有** object3d（不只反射体）：SSR 的命中面朝向判据需要**遮挡物**的视空间法线，
+// 而遮挡物不是反射体。只测不写深度 ⇒ 仍然只写"真正可见的那一层"。
+// 输出：.xy = 视空间法线；.z = 1（本格有法线数据）；.a = 是否反射体（合成层只对 .a=1
+// 的像素叠 SSR）。**不写材质**（本版合成层用一套 uniform，见 ssr_integration.h 的"已知限制"）。
+//
+// 法线在 VS 里算完再传：`mat3(uModel)` 把物体法线转到世界，`uWorldToView` 再转到视空间。
+// 两个矩阵都是 per-object / per-frame 的 uniform，由 Renderer 上传。
+inline constexpr const char* kSsrAttrVs = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat3 uWorldToView;
+out vec3 vNormalView;     // **完整三维**视空间法线（不再只给 .xy）
+void main() {
+    vec3 n_world = normalize(mat3(uModel) * aNormal);
+    vNormalView = normalize(uWorldToView * n_world);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)glsl";
+
+// 蒙皮网格的属性 FS（2026-10-31）：与 kSsrAttrVs 同一套输出，但 VS 复用
+// **蒙皮 VS 本身**（kSkinnedVs，它已经输出 vWorldNormal）——不再抄一份蒙皮代码。
+// 所以这里把世界法线转到视空间（uWorldToView 由 Renderer 每趟上传一次）。
+// 曲面（人体）的法线逐顶点不同，正是"曲面镜面"这条用例要测的东西。
+inline constexpr const char* kSsrAttrSkinnedFs = R"glsl(
+#version 330 core
+in vec3 vWorldNormal;
+uniform mat3  uWorldToView;
+uniform float uAttrIsReflector;
+out vec4 FragAttr;
+void main() {
+    vec3 n_view = normalize(uWorldToView * normalize(vWorldNormal));
+    FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);   // 同 kSsrAttrFs
+}
+)glsl";
+
+inline constexpr const char* kSsrAttrFs = R"glsl(
+#version 330 core
+in vec3 vNormalView;
+uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
+// rgb = **完整三维视空间法线**（不再只存 .xy 重建 z，见 SsrNormalOf 的注释）；
+// a   = 掩码编码：1.0 = 反射体，0.5 = 有法线但不反射，0 = 无数据（未绘制/清屏）
+out vec4 FragAttr;
+void main() {
+    FragAttr = vec4(vNormalView, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);
 }
 )glsl";
 
