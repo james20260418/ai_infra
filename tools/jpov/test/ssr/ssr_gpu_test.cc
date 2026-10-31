@@ -263,16 +263,21 @@ struct Fixture {
         // CPU 参考拿到的却是 0.95 —— 逐像素对拍时这点差异会在柱子边缘把命中格推走一格。
         // 真实管线用 fp16 也没问题（模块只做归一化与反射），只是**对拍**必须两边同值。
         // 场景带了 attr_z ⇒ 用 RGBA32F：.z = 1 表示该 texel 有法线数据（朝向判据用）。
-        if (scene.attr_z.empty()) {
-            normal_tex =
-                UploadFloatTexture(scene.normal_xy, kWidth, kHeight, GL_RG32F, GL_RG);
-        } else {
+        // 2026-10-31 起属性纹理语义：**rgb = 完整三维视空间法线**，a = 掩码编码
+        // （1 反射体 / 0.5 有法线 / 0 无数据）。不再用 .xy + 重建 z。
+        //   · nz 由 xy 现算（与 CPU 参考的 ReconstructNormal 一致）；
+        //   · 老用例没有 attr_z ⇒ 语义是"这一格**不判朝向**"（当时靠 .z=0 表达），
+        //     新编码用 a<0.25 表达；法线 xyz 仍然照写（射线构造要用，不能是 NaN）。
+        {
             std::vector<float> rgba(static_cast<size_t>(kWidth) * kHeight * 4, 0.0f);
             for (size_t i = 0; i < static_cast<size_t>(kWidth) * kHeight; ++i) {
-                rgba[i * 4 + 0] = scene.normal_xy[i * 2 + 0];
-                rgba[i * 4 + 1] = scene.normal_xy[i * 2 + 1];
-                rgba[i * 4 + 2] = scene.attr_z[i];
-                rgba[i * 4 + 3] = 1.0f;
+                const float nx = scene.normal_xy[i * 2 + 0];
+                const float ny = scene.normal_xy[i * 2 + 1];
+                const bool judge_facing = !scene.attr_z.empty() && scene.attr_z[i] >= 0.5f;
+                rgba[i * 4 + 0] = nx;
+                rgba[i * 4 + 1] = ny;
+                rgba[i * 4 + 2] = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+                rgba[i * 4 + 3] = judge_facing ? 1.0f : 0.0f;
             }
             normal_tex = UploadFloatTexture(rgba, kWidth, kHeight, GL_RGBA32F, GL_RGBA);
         }

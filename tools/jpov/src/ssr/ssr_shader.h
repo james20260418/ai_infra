@@ -67,10 +67,15 @@ bool SsrHasDepth(float depth) {
     return depth < 1.0;
 }
 
-// 法线重建（只存了 .xy）：z = sqrt(max(0, 1 − x² − y²))，再归一化一次。
-// ssr_math.h::ReconstructNormal（归一化不能省：|N|>1 会把 reflect 的结果一起拉长）。
-vec3 SsrReconstructNormal(vec2 n2) {
-    return normalize(vec3(n2, sqrt(max(0.0, 1.0 - dot(n2, n2)))));
+// 法线：属性纹理存**完整三维视空间法线**（rgb），这里只归一化。
+//
+// ⚠️ 2026-10-31 根因（掠射倒影"抬高一米 / 两层 / 红移 / 压扁"）：以前只存 .xy、z 用
+// `sqrt(1−x²−y²)` 重建 —— 这个式子在**极点附近病态**。掠射时地面法线 ny→1，fp16 把
+// 1.0 存成 0.999512（实测 16×16 邻域 256/256 像素），重建出 z = 0.0312 ⇒ 法线凭空偏
+// **1.79°** ⇒ 反射方向偏 **3.6°**，而真实掠射角只有 1.3°（放大近 3 倍）⇒ 倒影射线被抬高
+// 约 1 米、命中错像素。存三分量后单分量 fp16 误差 5e-4 ⇒ 方向误差 ~0.03°（差 60 倍）。
+vec3 SsrNormalOf(vec4 attr) {
+    return normalize(attr.xyz);
 }
 
 // 窗口深度 → 视距（米）。ssr_math.h::DepthFromWindowDepth（含 NaN 守卫）。
@@ -115,14 +120,14 @@ bool SsrCellHit(float w_in, float w_out, float z_cell, float thickness) {
 // 底面 / 柱体背面时，屏幕空间里没有那些面的像素，旧判据会把**桌面顶面的高光**当结果
 // ⇒ 倒影里桌子底下也在发光。
 //
-// attr.z = 1 ⇒ 这一格有视空间法线（属性 pass 画过几何）。没有数据（天空 / 未纳入
+// attr.a ≥ 0.25 ⇒ 这一格有视空间法线（属性 pass 画过几何）。没有数据（天空 / 未纳入
 // 属性 pass 的几何）时不判、维持旧行为（见 ssr_renderer.h "已知边界"）。
 bool SsrHitFacing(vec3 ray_dir, ivec2 cell) {
     vec4 attr = texelFetch(uNormal, cell, 0);
-    if (attr.z < 0.5) {
-        return true;
+    if (attr.a < 0.25) {          // .a = 掩码编码：1 反射体 / 0.5 有法线非反射体 / 0 无数据
+        return true;              // 没有法线数据 ⇒ 不判方向（维持引入判据之前的行为）
     }
-    return dot(ray_dir, SsrReconstructNormal(attr.xy)) < 0.0;
+    return dot(ray_dir, SsrNormalOf(attr)) < 0.0;
 }
 
 // mir = 镜面像素下标。返回 false = 射线出屏/退化（ssr_math.h::BuildScreenRay）。
@@ -133,8 +138,7 @@ bool SsrBuildRay(ivec2 mir, out SsrRay ray) {
     float depth = texelFetch(uDepth, mir, 0).r;
     float d_surf = SsrZView(depth);
 
-    vec2 n2 = texelFetch(uNormal, mir, 0).xy;
-    vec3 N = SsrReconstructNormal(n2);   // xy 长度可能 > 1（法线贴图越界）⇒ 归一化在里
+    vec3 N = SsrNormalOf(texelFetch(uNormal, mir, 0));
 
     vec2 uv = (vec2(mir) + 0.5) / uRes;
     vec2 ndc = uv * 2.0 - 1.0;
@@ -394,11 +398,10 @@ layout(location = 1) in vec3 aNormal;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform mat3 uWorldToView;
-out vec2 vNormalXY;
+out vec3 vNormalView;     // **完整三维**视空间法线（不再只给 .xy）
 void main() {
     vec3 n_world = normalize(mat3(uModel) * aNormal);
-    vec3 n_view = uWorldToView * n_world;
-    vNormalXY = normalize(n_view).xy;
+    vNormalView = normalize(uWorldToView * n_world);
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )glsl";
@@ -415,17 +418,19 @@ uniform float uAttrIsReflector;
 out vec4 FragAttr;
 void main() {
     vec3 n_view = normalize(uWorldToView * normalize(vWorldNormal));
-    FragAttr = vec4(n_view.xy, 1.0, uAttrIsReflector);
+    FragAttr = vec4(n_view, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);   // 同 kSsrAttrFs
 }
 )glsl";
 
 inline constexpr const char* kSsrAttrFs = R"glsl(
 #version 330 core
-in vec2 vNormalXY;
+in vec3 vNormalView;
 uniform float uAttrIsReflector;   // 1 = 反射体（per-object uniform）
-out vec4 FragAttr;   // .xy = 视空间法线；.z = 1（有法线数据）；.a = 是否反射体
+// rgb = **完整三维视空间法线**（不再只存 .xy 重建 z，见 SsrNormalOf 的注释）；
+// a   = 掩码编码：1.0 = 反射体，0.5 = 有法线但不反射，0 = 无数据（未绘制/清屏）
+out vec4 FragAttr;
 void main() {
-    FragAttr = vec4(vNormalXY, 1.0, uAttrIsReflector);
+    FragAttr = vec4(vNormalView, (uAttrIsReflector > 0.5) ? 1.0 : 0.5);
 }
 )glsl";
 

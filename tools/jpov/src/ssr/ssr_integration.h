@@ -100,7 +100,7 @@ private:
     unsigned int down_fbo_ = 0;
     unsigned int down_color_tex_ = 0;    // RGBA16F @ SSR 分辨率
     unsigned int down_depth_tex_ = 0;    // R32F
-    unsigned int down_normal_tex_ = 0;   // RGBA16F（.xy 视空间法线，.z = 1 有法线数据）
+    unsigned int down_normal_tex_ = 0;   // RGBA16F（rgb = 三维视空间法线，a = 掩码编码）
     unsigned int dst_fbo_ = 0;           // 合成的目标（外部传入，仅记录用于恢复）
 
     SsrRenderer ssr_;
