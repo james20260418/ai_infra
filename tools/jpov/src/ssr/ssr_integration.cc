@@ -63,7 +63,7 @@ uniform int   uScale;      // 1 = 直通；2 = 2×2 选一
 
 layout(location = 0) out vec4  FragColor;
 layout(location = 1) out float FragDepth;
-layout(location = 2) out vec3  FragNormal;
+layout(location = 2) out vec4  FragNormal;   // rgb = 三维视空间法线；a = 掩码编码
 
 void main() {
     ivec2 q = ivec2(gl_FragCoord.xy);
@@ -84,7 +84,7 @@ void main() {
     FragColor  = texelFetch(uColor, best, 0);
     FragDepth  = best_z;
     vec4 attr  = texelFetch(uAttr, best, 0);
-    FragNormal = vec3(attr.xy, attr.z);   // .xy 视空间法线，.z = 有法线数据
+    FragNormal = attr;   // rgb = 三维视空间法线（不再重建 z），a = 掩码编码
 }
 )glsl";
 
@@ -95,7 +95,7 @@ void main() {
 // A = 0 ⇒ 差值恒为 0 ⇒ 与"没接 SSR"时逐字节相同（单调改进）。
 constexpr const char* kSsrCompositeFs = R"glsl(
 uniform sampler2D uHdrCopy;     // 全分辨率 HDR 副本
-uniform sampler2D uAttr;        // 全分辨率（.xy 视空间法线，.a mask）
+uniform sampler2D uAttr;        // 全分辨率（rgb = 三维视空间法线，a = 掩码编码）
 uniform sampler2D uSceneDepth;  // 全分辨率 R32F
 uniform sampler2D uSsr;         // SSR 分辨率 RGBA16F（rgb 辐亮度，a 覆盖率）
 uniform sampler2D uDownDepth;   // SSR 分辨率 R32F
@@ -129,8 +129,14 @@ float ZView(float depth) {
     return (2.0 * uNear * uFar) / denom;
 }
 
+// 属性纹理语义（2026-10-31 起）：rgb = **完整三维视空间法线**，a = 1 反射体 / 0.5 有法线 /
+// 0 无数据。不再用 sqrt(1−x²−y²) 重建 z —— 该式在极点（法线≈视轴）附近病态：fp16 把
+// 1.0 存成 0.999512 会凭空造出 1.79° 倾斜，掠射下把倒影射线抬高约 1 米（根因见 ssr_shader.h）。
 vec3 NormalFromAttr(vec4 attr) {
-    return normalize(vec3(attr.xy, sqrt(max(0.0, 1.0 - dot(attr.xy, attr.xy)))));
+    return normalize(attr.xyz);
+}
+float MaskFromAttr(vec4 attr) {
+    return (attr.a > 0.75) ? 1.0 : 0.0;
 }
 
 // 该 texel 有没有深度数据（1.0 = 清空值 = 天空）。与 ssr_math.h::HasDepthData 同一条规则。
@@ -182,7 +188,7 @@ void main() {
     ivec2 ip = ivec2(gl_FragCoord.xy);
     vec3 hdr = texelFetch(uHdrCopy, ip, 0).rgb;
     vec4 attr = texelFetch(uAttr, ip, 0);
-    float mask = attr.a;
+    float mask = MaskFromAttr(attr);
 
     // ── A 预乘双边上采样 ──
     // 空间：2×2 双线性权（低分辨率像素为单位）；值域：1/z 相对差 + 法线夹角。
