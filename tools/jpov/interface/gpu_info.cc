@@ -13,15 +13,24 @@ namespace {
 //   llvmpipe        —— Mesa 的多线程 CPU 光栅器（WSL / 容器里最常见）
 //   softpipe        —— Mesa 的参考实现 CPU 光栅器
 //   swrast          —— Mesa 老的软件光栅器
+//   mesa offscreen  —— Mesa 的 EGL surfaceless / OSMesa 平台（无窗口的 CI 里常见）
 //   software rasterizer / software renderer —— Apple 的软件渲染器（"Apple Software Renderer"）
+//   swiftshader     —— Google 的 CPU 光栅器（Chrome/ANGLE、云 VM、远程桌面里很常见；
+//                      串形如 "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))"）
 //   gdi generic     —— Windows 无显卡驱动时的 Microsoft 软件 GL（GL 1.1）
 //   microsoft basic render —— Windows 的软件 D3D 适配器（转译到 GL 时偶见）
+//
+// ⚠️ 漏一个名字的代价是**不对称**的：漏掉的软件光栅器会被归到 kHardware，
+// 于是 HUD 在"最需要它说实话"的场合（云 VM / 远程桌面 / CI）说"hardware"，
+// 以 kCpuRaster 为准的门禁也会放行。所以新增软件光栅器名字时**必须同时补测试**。
 constexpr const char* kSoftwareRendererNames[] = {
     "llvmpipe",
     "softpipe",
     "swrast",
+    "mesa offscreen",
     "software rasterizer",
     "software renderer",
+    "swiftshader",
     "gdi generic",
     "microsoft basic render",
 };

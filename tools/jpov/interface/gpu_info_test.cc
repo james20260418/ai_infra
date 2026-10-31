@@ -47,6 +47,26 @@ TEST(ClassifyGpuRenderer, WindowsSoftwareFallbacksAreDetected) {
               jpov::GpuKind::kCpuRaster);
 }
 
+// SwiftShader = Google 的 CPU 光栅器。云 VM / 远程桌面 / Chrome(ANGLE) 上是
+// **最常见**的"其实在 CPU 上跑"的场景，漏掉它等于这套分类在最需要它的时候说反话。
+TEST(ClassifyGpuRenderer, SwiftShaderIsCpuRaster) {
+    EXPECT_EQ(jpov::ClassifyGpuRenderer("Google SwiftShader"),
+              jpov::GpuKind::kCpuRaster);
+    EXPECT_EQ(jpov::ClassifyGpuRenderer(
+                  "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) "
+                  "(0x0000C0DE)), SwiftShader driver)"),
+              jpov::GpuKind::kCpuRaster);
+    // 大小写不敏感（Vulkan 的 deviceName 常见全小写）。
+    EXPECT_EQ(jpov::ClassifyGpuRenderer("swiftshader device"),
+              jpov::GpuKind::kCpuRaster);
+}
+
+// 无窗口的 CI 走 EGL surfaceless/OSMesa 时，GL_RENDERER 是 "Mesa OffScreen"。
+TEST(ClassifyGpuRenderer, MesaOffScreenIsCpuRaster) {
+    EXPECT_EQ(jpov::ClassifyGpuRenderer("Mesa OffScreen"),
+              jpov::GpuKind::kCpuRaster);
+}
+
 TEST(ClassifyGpuRenderer, RealGpusAreHardware) {
     // 关键的反向断言：命中软件黑名单**不能**误伤真硬件。
     EXPECT_EQ(jpov::ClassifyGpuRenderer("NVIDIA GeForce RTX 4060/PCIe/SSE2"),

@@ -1,4 +1,4 @@
-// JPOV debug HUD GPU 像素测试 —— 锁住「按 ~ 的左上角 HUD」真的画出来了
+// JPOV debug HUD GPU 像素测试 —— 锁住「F3 的左上角 HUD」真的画出来了
 //
 // 这个测试针对的核心风险是「静默什么都不画」：
 //   * HUD 用**内置点阵字体**，不走 FontRenderer；如果没有字体就静默 skip
@@ -36,8 +36,10 @@ namespace {
 constexpr int kWidth = 640;
 constexpr int kHeight = 360;
 
-// HUD 区域上界：9 行 x 11px/行 + 8px 上边距 + 4px 下留白 = 108px，留足余量取 150。
-constexpr int kBandBottom = 150;
+// "HUD 关闭时左上角区域零纯白"这条断言用的探针上界。**故意写宽**（150 > 任何
+// 真实的 HUD 高度）：这条与文本无关，只是确认场景里没有白色像素混进来。
+// HUD 打开之后的区域断言一律用 main() 里按文本现算的 band_bottom —— 见那里的注释。
+constexpr int kTopProbeBottom = 150;
 
 // 场景底色（与 HUD 的纯白形成明确区分）。
 constexpr float kSceneR = 0.2f;
@@ -223,6 +225,12 @@ int main() {
     JPOV::Config cfg;
     cfg.title = "Debug Overlay Test";
     cfg.headless = true;
+    // 字号必须与"跑在哪块屏上"无关：下面的断言全按 1 倍写（8px 字宽、11px 行高、
+    // 面板 <= 500px）。不能依赖 follow_dpi 的默认值 —— 200% 缩放的机器
+    // （Windows / Wayland）上 content scale = 2，HUD 会变成 16px 字宽，
+    // panel_w <= 500 会直接假红。测试只验证"字形/布局正确"，不验证 DPI 跟随。
+    cfg.debug_overlay_scale_follow_dpi = false;
+    cfg.debug_overlay_scale = 1;
     // cfg.fonts 刻意留空：**一个字体都不注册**。内置点阵字体必须照样能画。
     CHECK(cfg.fonts.empty());
 
@@ -247,7 +255,7 @@ int main() {
     const Image base = LoadRgba(base_path);
     CHECK_EQ(base.w, kWidth);
     CHECK_EQ(base.h, kHeight);
-    CHECK_EQ(CountWhiteInBand(base, 0, kBandBottom), 0)
+    CHECK_EQ(CountWhiteInBand(base, 0, kTopProbeBottom), 0)
         << "关掉 HUD 时不该有任何纯白像素（场景底色是 0.2/0.3/0.4）";
     LOG(INFO) << "[PASS] 关闭态：HUD 区域零纯白像素";
 
@@ -266,14 +274,36 @@ int main() {
     app.RunOnce(/*frame_count=*/1, input, winfo, on1_path.c_str());
     const Image on1 = LoadRgba(on1_path);
 
-    const int white_on1 = CountWhiteInBand(on1, 0, kBandBottom);
+    // HUD 的高度**按实际文本现算**，不写死：驱动串长度因机器而异（LLVMpipe 的
+    // GL_VERSION 这里就已经折成 2 行），换台机器多折一行，写死的 band 就会把
+    // HUD 的下半截当成"HUD 之外"，让这条断言莫名其妙变红。
+    // 版面规则与渲染器一致：8(pad) + (行数-1)*11 + 8(字高) + 4(下留白)。
+    const std::string hud_text = app.debug().DebugString();
+    int hud_max_cols = 0;
+    int hud_cols = 0;
+    int hud_lines = 1;
+    for (const char ch : hud_text) {
+        if (ch == '\n') {
+            hud_max_cols = std::max(hud_max_cols, hud_cols);
+            hud_cols = 0;
+            ++hud_lines;
+            continue;
+        }
+        ++hud_cols;
+    }
+    hud_max_cols = std::max(hud_max_cols, hud_cols);
+    const int panel_w = 8 + hud_max_cols * 8 + 4;
+    const int panel_h = 8 + (hud_lines - 1) * 11 + 8 + 4;
+    const int band_bottom = panel_h + 8;   // HUD 下边界 + 8px 余量
+
+    const int white_on1 = CountWhiteInBand(on1, 0, band_bottom);
     CHECK_GT(white_on1, 200) << "HUD 开着却几乎没画出白色文字（实际 = " << white_on1
                              << " 个纯白像素）";
     LOG(INFO) << "[PASS] 打开态：band 内纯白像素 = " << white_on1;
 
     int min_x = 0;
     int min_y = 0;
-    CHECK(FindFirstWhite(on1, 0, kBandBottom, &min_x, &min_y));
+    CHECK(FindFirstWhite(on1, 0, band_bottom, &min_x, &min_y));
     CHECK_GE(min_x, 8) << "文字不该贴到左边缘（pad=8）";
     CHECK_LT(min_x, 40) << "第一个字应在最左侧（x=" << min_x << "）";
     CHECK_GE(min_y, 8) << "文字不该贴到上边缘（pad=8）";
@@ -282,22 +312,6 @@ int main() {
 
     // ---- 2b. 半透明黑底：贴内容、压暗场景、不越界 ----
     {
-        const std::string dbg_hud = app.debug().DebugString();
-        int max_cols = 0;
-        int cols = 0;
-        int lines = 1;
-        for (const char ch : dbg_hud) {
-            if (ch == '\n') {
-                max_cols = std::max(max_cols, cols);
-                cols = 0;
-                ++lines;
-                continue;
-            }
-            ++cols;
-        }
-        max_cols = std::max(max_cols, cols);
-        const int panel_w = 8 + max_cols * 8 + 4;
-        const int panel_h = 8 + (lines - 1) * 11 + 8 + 4;
         CHECK_LE(panel_w, 500) << "黑底宽度超过 500px 预算（" << panel_w
                                << "），行长契约被破坏";
 
@@ -342,15 +356,15 @@ int main() {
         LOG(INFO) << "[PASS] 黑底贴内容：panel = " << panel_w << "x" << panel_h;
     }
 
-    // ---- 2b. 逐字比对：渲染出来的字形必须与 DebugString() 完全一致 ----
+    // ---- 2c. 逐字比对：渲染出来的字形必须与 DebugString() 完全一致 ----
     // 这是最硬的一条：同时钉死字形下标、前进量、行高、图集 v 方向。
-    const std::string expected_text = app.debug().DebugString();
+    const std::string& expected_text = hud_text;
     const std::string mismatch = VerifyOverlayText(on1, expected_text, 1);
     CHECK(mismatch.empty()) << mismatch << "\n期望文本：\n" << expected_text;
     LOG(INFO) << "[PASS] 逐字比对通过（" << expected_text.size() << " 字符）";
 
     // ---- 3. HUD 之外一个像素都不能动 ----
-    const int diff_outside = CountDiffInBand(base, on1, kBandBottom, kHeight);
+    const int diff_outside = CountDiffInBand(base, on1, band_bottom, kHeight);
     CHECK_EQ(diff_outside, 0) << "HUD 区域之外有 " << diff_outside
                               << " 个像素被改动（说明 overlay 漏到了全屏）";
     LOG(INFO) << "[PASS] HUD 之外逐字节相同";
@@ -360,10 +374,10 @@ int main() {
     app.RunOnce(/*frame_count=*/2, input, winfo, on2_path.c_str());
     const Image on2 = LoadRgba(on2_path);
 
-    const int diff_cam = CountDiffInBand(on1, on2, 0, kBandBottom);
+    const int diff_cam = CountDiffInBand(on1, on2, 0, band_bottom);
     CHECK_GT(diff_cam, 50) << "相机机位变了但 HUD 像素几乎没变（实际 = " << diff_cam
                            << "）—— HUD 没反映 DebugInfo 状态";
-    CHECK_EQ(CountDiffInBand(on1, on2, kBandBottom, kHeight), 0)
+    CHECK_EQ(CountDiffInBand(on1, on2, band_bottom, kHeight), 0)
         << "改相机不该影响 HUD 之外的像素";
     LOG(INFO) << "[PASS] 相机机位进 HUD：band 内变化像素 = " << diff_cam;
 

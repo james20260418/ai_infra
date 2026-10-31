@@ -86,14 +86,19 @@ public:
     //   fbo_w/h     —— 当前 FBO 像素尺寸（≥ 1）；同时决定 uFboSize。
     //   glyph_scale —— 字形放大倍数（整数字节缩放，1 = 8x8 原生像素）。
     //
-    // GL 状态前置要求（调用方负责）：FBO 已绑定、glViewport(0,0,fbo_w,fbo_h)。
-    // 内部会自己开混合（SRC_ALPHA / ONE_MINUS_SRC_ALPHA）、关深度测试，
-    // 并用 glPushAttrib(GL_ENABLE_BIT) 恢复，不污染调用方的状态。
+    // GL 状态：调用方负责「FBO 已绑定 + glViewport(0,0,fbo_w,fbo_h)」。
+    // 内部自己开混合（SRC_ALPHA / ONE_MINUS_SRC_ALPHA）、关深度测试，并**还原**：
+    //   * enable 位 / 混合因子 —— glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
+    //   * glActiveTexture 单元 —— 手动查/还原（attrib 栈里没有这一项）
+    //   * GL_ARRAY_BUFFER、unit 0 的 GL_TEXTURE_2D 绑定 —— 解绑
+    // **不还原**（与 FontRenderer::DrawText2D 同一约定）：当前 program、顶点属性
+    // 数组的启用位/指针（attrib 0/1 指向共享 stream VBO）—— 逐项查/还原不值当。
+    // 所以本方法必须是**本帧最后一个绘制动作**（JPOV 里正是 Render() 之后）。
     //
     // Pre-condition: Init() 已调用（否则 CHECK 失败）
     // Pre-condition: fbo_w > 0 && fbo_h > 0
     // Pre-condition: glyph_scale ∈ [kGlyphScaleMin, kGlyphScaleMax]
-    // Pre-condition: text.size() <= kMaxTextChars
+    // text 长度**不是**前置条件：超过 kMaxTextChars 时截断后照画（见实现）。
     void Draw(std::string_view text,
               unsigned int stream_vbo,
               unsigned int text_prog,
@@ -104,8 +109,15 @@ public:
     static constexpr int kGlyphScaleMin = 1;
     static constexpr int kGlyphScaleMax = 8;
 
-    // 文本长度上限（字符数）。5000 字符 ≈ 30000 顶点，远小于共享 stream VBO 容量，
-    // 也远超任何 debug HUD 的实际需要；设上限是为了不越界写共享 VBO。
+    // 文本长度上限（按字节算的字符数）。
+    //
+    // **实际只可能被 GL 驱动字符串碰到**：DebugInfo 里除 renderer / vendor /
+    // version / glsl 四条外部串之外全是定长格式（分辨率/帧号/fps + 相机 6 个数），
+    // 最坏情况也就几百字符 —— 相机/帧率这些我们自己的字段不可能把文本撑到 5000。
+    //
+    // 存在的理由只是给"长度不由我们决定"的数据兜一个内存/耗时上界：
+    // 5000 字符 ≈ 30000 顶点 ≈ 0.5 MB 顶点数据。注意共享 stream VBO 是每次
+    // glBufferData 现传现扩容的，**没有"越界写"这回事**（初始容量不是上限）。
     static constexpr int kMaxTextChars = 5000;
 
 private:

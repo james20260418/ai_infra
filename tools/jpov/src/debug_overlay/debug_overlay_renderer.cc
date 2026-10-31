@@ -114,8 +114,9 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     if (text.empty()) {
         return;
     }
-    // ⚠️ 内容的主要来源是 GL 驱动字符串（`GL_RENDERER` 之类），长度**不由我们决定**。
-    // 超长时**截断后照画**（+ 一次告警），不是 CHECK 崩掉：外部数据不该让引擎 abort。
+    // ⚠️ 只有 GL 驱动字符串（`GL_RENDERER` 之类）长度**不由我们决定**：DebugInfo
+    // 其余部分都是定长格式，塞不到上限。超长时**截断后照画**（+ 一次告警），
+    // 不是 CHECK 崩掉：外部数据不该让引擎 abort。
     if (text.size() > static_cast<std::size_t>(kMaxTextChars)) {
         LOG_FIRST_N(WARNING, 1) << "DrawDebugOverlay: 文本 " << text.size()
                                 << " 字符超过上限 " << kMaxTextChars
@@ -235,8 +236,9 @@ void DebugOverlayRenderer::Draw(std::string_view text,
     // 为什么 blend func 不自己查/还原：要精确还原 RGB 与 alpha 可能不同的因子就得
     // glBlendFuncSeparate，而 MinGW 的 gl_loader 里没有它（--config=windows 会链接失败）。
     // GL_COLOR_BUFFER_BIT 这一段 GL 1.1 就有，两个平台都稳。
-    // HUD 是每帧最后一个绘制动作，漏还原今天不会立刻出问题（后面的 pass 都自带
-    // 状态设置），但"上游状态我保证不动"这条契约必须是真的，不能靠下游侥幸。
+    // 仍然**不还原** program / 顶点属性启用位（attrib 0/1 指向共享 stream VBO）：
+    // 逐项查/还原的代价不值当，FontRenderer::DrawText2D 也是同一约定。所以 HUD
+    // 必须是本帧最后一个绘制动作 —— JPOV 在 Render() 之后画，靠调用顺序保证。
     GLint prev_active_tex = GL_TEXTURE0;
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active_tex);
 
