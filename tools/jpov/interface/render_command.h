@@ -683,8 +683,10 @@ struct SsrConfig {
     // 开总闸。false = 整条链路（属性 pass / 降采样 / SSR / 合成）一次都不跑，零开销。
     bool enabled = false;
 
-    // SSR 相对 3D 分辨率的分辨率倍率：1.0 / 0.5 / 0.25（其它值直接 FATAL）。
+    // SSR 的**降采样倍率**（1/N）：N ∈ {1,2,3,4}，用 resolution_scale = 1/N 表达
+    // （1.0 / 0.5 / 0.3333 / 0.25，其它值直接 FATAL）。
     // 这是**唯一的成本旋钮**：成本 ∝ 面积，画面损失只是反射的锐度。
+    // N=3 不是 2 的幂：降采样与升采样都是"整数格 + 双线性/加权"，与 2 的幂无关。
     float resolution_scale = 0.5f;
 
     // 厚度：T = max(N_px · θ_px · d, min_thickness_m)，单位是 **SSR 像素**（θ_px 按 SSR 分辨率算）。
@@ -700,11 +702,30 @@ struct SsrConfig {
     // 搭配口诀：T² ≤ max_ray_pixels/4。
     int tile_size = 2;
 
-    // 升采样的值域项（跨表面拒绝）：
-    //   |Δ(1/z)| / (1/z) > upsample_depth_tolerance ⇒ 不采该邻居
-    //   dot(N_hi, N_lo)  < upsample_normal_dot      ⇒ 不采该邻居
-    float upsample_depth_tolerance = 0.05f;
-    float upsample_normal_dot = 0.9f;
+    // ── 升采样的值域项（2026-10-31 改成**连续软权**，见 docs 与像素对照）──
+    //
+    // 旧版是两个**硬阈值**（超了直接权重 0）。硬阈值在阈值附近必然跳变：只要画面里
+    // 存在跨阈值的连续梯度（掠射最典型），就会沿等值线整行/整片现形 —— 实测就是
+    // "周期 = 降采样倍率的横向条纹" 与 "贴地平线 8/27 行黑带"。
+    // 业界两份可查源码的实现都是**软权 + 下限**：
+    //   · INSIDE（Playdead, loopit.dk rendering_inside.pdf p.39）：w = 1/(|Δdepth| + 1e-5)，
+    //     作者原话"bad pixels still contribute, just a lot less"
+    //   · Unity postprocessing v1 的 SSR（Mara/McGuire 版）：法线用 clamp(dot,0,1)、
+    //     粗糙度用 1−|Δr|^0.25，且 `a = max(a, 0.001)` 保证分母不为 0；**完全不判深度**
+    //
+    // 所以这里给两个模式，面板可切，用来看差别：
+    //   0 = 软权：rel 相对残差 → wr = 1/(rel + soft_scale)，rel > hard_cut 才硬拒
+    //   1 = 不判深度（Unity 式）：深度只用于 march，升采样只看法线（软）+ 下限
+    int upsample_depth_mode = 0;
+
+    // upsample_depth_tolerance：**软权尺度**（rel 等于它时权重约减半），不再是硬阈值。
+    float upsample_depth_tolerance = 0.02f;
+
+    // rel 超过它 ⇒ 硬拒。数量级不同的深度差只能是"真跨表面"（剪影），留着它挡串色。
+    float upsample_hard_cut = 0.5f;
+
+    // 权重下限（相对空间权）：保证 Σw > 0，永不出现"整片黑"的孔洞。
+    float upsample_weight_floor = 1.0e-3f;
 
     // 反射层材质（本版**全场景一套**，见 ssr_integration.h 的"已知限制"）。
     // 合成时用它与 env_specular 的 cubemap 重算"3D pass 已经加过的那一份"以便替换。
@@ -2051,6 +2072,9 @@ struct SkinnedMeshCommand {
                              // 带 baseColor 纹理等的贴图蒙皮渲染）。
     // 高亮：**整批**是否绘制高亮描边（per-command，非逐实例）。语义同 Object3DCommand.highlight。
     bool highlight = false;
+    // 是否是 SSR 的反射体（2026-10-31）：蒙皮网格也能被屏幕空间反射（曲面镜面测试用）。
+    // 为 true 时属性 pass 会把它再画一遍（视空间法线 + mask），合成层才在这些像素上叠 SSR。
+    bool ssr_reflector = false;
 };
 
 // 高亮纯色边框的全局样式（全场景统一）。
@@ -2640,11 +2664,13 @@ struct RenderCommandList {
     //   tools/jpov/docs/jpov_instance_attr_lag_design.md）。
     //
     // Pre-condition: mesh_id / skeleton_id 均已注册未释放；instances 非空。
+    // ssr_reflector：本批蒙皮是否是 SSR 的反射体（见 SkinnedMeshCommand::ssr_reflector）。
     void DrawMeshWithSkeleton(uint32_t mesh_id,
                               uint32_t skeleton_id,
                               const jpov::PBRMaterial& material,
                               std::vector<SkinnedInstanceState> instances,
-                              bool highlight = false);
+                              bool highlight = false,
+                              bool ssr_reflector = false);
 
     // DrawParticles：追加一批广告牌粒子（见 ParticleRenderCommand）。
     // 只是把命令推入 particles 列表；粒子在 3D 不透明内容之后的独立 pass 渲染。

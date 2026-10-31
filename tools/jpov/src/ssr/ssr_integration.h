@@ -75,7 +75,10 @@ public:
     void Render(const SsrPassInputs& in, unsigned int dst_fbo);
 
     // 属性 pass 的 program（Renderer 用自己的 draw 路径调它，见 DrawSsrAttrPass）。
+    //   attr_program()        ：object3d（kSsrAttrVs + kSsrAttrFs）
+    //   attr_skinned_program()：蒙皮（复用 kSkinnedVs + kSsrAttrSkinnedFs，曲面镜面用）
     unsigned int attr_program() const { return prog_attr_; }
+    unsigned int attr_skinned_program() const { return prog_attr_skinned_; }
 
     // 最近一次 SSR 的分辨率（供 HUD / 测试读数）。
     int ssr_width() const { return ssr_w_; }
@@ -88,6 +91,7 @@ private:
     ShaderManager* shader_mgr_ = nullptr;
 
     unsigned int prog_attr_ = 0;         // 属性 pass（Renderer 用；这里只管编译）
+    unsigned int prog_attr_skinned_ = 0; // 属性 pass 的蒙皮变体（VS 复用 kSkinnedVs）
     unsigned int prog_downsample_ = 0;   // 全分辨率 → SSR 分辨率（选点）
     unsigned int prog_composite_ = 0;    // 升采样 + 替换环境镜面项
 

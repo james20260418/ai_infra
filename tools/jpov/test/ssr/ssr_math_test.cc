@@ -41,6 +41,7 @@ using jpov::ssr::MarchSegment;
 using jpov::ssr::MarchSlabs;
 using jpov::ssr::MarchWholeRay;
 using jpov::ssr::PosAt;
+using jpov::ssr::UpsampleDepthAccept;
 using jpov::ssr::ReconstructNormal;
 using jpov::ssr::ReflectDir;
 using jpov::ssr::ScreenRay;
@@ -657,6 +658,67 @@ TEST(SsrMath, DegenerateInputs) {
         ScreenRay ray2;
         EXPECT_FALSE(BuildScreenRay(p_far, r_far, 10.0f, cam.tan_half, cam.aspect, cam.width,
                                     cam.height, &ray2));
+    }
+}
+
+
+// ───────── 升采样的深度值域判据（2026-10-31 掠射横向条纹的根因/回归）─────────
+//
+// 背景：低分 A 升到全分辨率时要拒绝"跨表面"的邻格。旧判据 =「本像素 w 与低分格子的 w
+// 比固定百分比 5%」。**掠射平面上这条必然误判**：地平线附近同一平面相邻两行的深度比
+// 就有 1.2 倍以上 ⇒ 每 scale 行里只有"贡献了最小深度"的那一行活着
+// ⇒ 实拍得到 period = 降采样倍率的横向条纹（1:2 → 2、1:4 → 4、1:1 无）。
+
+// 修法：1/z 在任何平面上对屏幕坐标**仿射** ⇒ 用「本像素 w + 屏幕梯度·偏移」预测格子
+// 应有的 w（且要取格内**最大** w，因为降采样取 min 深度），再比残差。
+TEST(SsrMath, UpsampleGrazingPlaneAcceptedAtEveryRow) {
+    // 掠射平面：w 对屏幕行仿射（射影几何恒等式）。相邻行相对变化 ≈24% ≫ 5% 容差。
+    const float w0 = 0.1389f;   // 行 0 的 1/z
+    const float b = 0.0335f;    // 每像素 Δw（向下行更近 ⇒ w 变大）
+    auto w_of = [&](int row) { return w0 + b * static_cast<float>(row); };
+
+    for (int scale : {2, 4}) {
+        for (int r0 = 0; r0 < 8; ++r0) {
+            // 低分格子的值 = 格内**最近**（min 深度 = max w）
+            float w_lo = 0.0f;
+            for (int i = 0; i < scale; ++i) {
+                w_lo = std::max(w_lo, w_of(r0 + i));
+            }
+            for (int r = r0; r < r0 + scale; ++r) {
+                const float w_hi = w_of(r);
+                // 本像素中心 → 低分 texel 中心的偏移（单位：全分辨率像素）
+                const float dp = (static_cast<float>(r0) + 0.5f * static_cast<float>(scale)) -
+                                 (static_cast<float>(r) + 0.5f);
+                EXPECT_TRUE(UpsampleDepthAccept(w_hi, /*gw_x=*/0.0f, /*gw_y=*/b, /*dpx=*/0.0f,
+                                                dp, w_lo, scale, 0.05f))
+                    << "掠射平面 scale=" << scale << " r0=" << r0 << " r=" << r << " 被误拒";
+                // 负向对照：**除了贡献最小深度的那一行**，旧判据（不比梯度）在这里必须拒 ——
+                // 这正是「每 scale 行只活一行」的来源。最近那一行 w_lo == w_hi，旧判据本来就过，
+                // 所以只对 w_hi < w_lo 的行断言。
+                if (w_hi < w_lo) {
+                    EXPECT_GT(std::fabs(w_lo - w_hi) / w_hi, 0.05f)
+                        << "旧判据在 scale=" << scale << " r=" << r << " 竟然通过 ⇒ 场景不够掠射";
+                }
+            }
+        }
+    }
+}
+
+TEST(SsrMath, UpsampleSilhouetteRejected) {
+    // 低分格子取到了**另一个表面**（w 大 250 倍）⇒ 必须拒。这正是深度值域项存在的理由，
+    // 修法不能把它一起废掉。
+    EXPECT_FALSE(UpsampleDepthAccept(0.002f, 0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 2, 0.05f));
+    // 同表面、无梯度 ⇒ 过。
+    EXPECT_TRUE(UpsampleDepthAccept(0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 2, 0.05f));
+}
+
+TEST(SsrMath, UpsampleScaleOneIsIdenticalToOldRule) {
+    // 1:1 时 dpx=dpy=0 且扩展量 (scale−1)=0 ⇒ 判据与旧规则**逐位等价**（1:1 不许有行为变化）。
+    const float w_hi = 0.2f;
+    for (float w_lo : {0.05f, 0.19f, 0.2f, 0.21f, 0.5f}) {
+        const bool old_ok = std::fabs(w_hi - w_lo) / w_hi <= 0.05f;
+        const bool new_ok = UpsampleDepthAccept(w_hi, 0.0f, 0.0f, 0.0f, 0.0f, w_lo, 1, 0.05f);
+        EXPECT_EQ(old_ok, new_ok) << "w_lo=" << w_lo;
     }
 }
 

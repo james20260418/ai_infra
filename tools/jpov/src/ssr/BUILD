@@ -21,6 +21,8 @@ cc_library(
         "//tools/jpov/interface:render_command",
         "//tools/jpov/src:env_specular",
         "//tools/jpov/src:shader_manager",
+        # 蒙皮属性 pass 复用主 pass 的 kSkinnedVs（不抄蒙皮代码）
+        "//tools/jpov/src/skeleton:skeleton",
         "@glog_static//:glog",
     ] + select({
         "@platforms//os:windows": [
