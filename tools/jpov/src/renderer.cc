@@ -20,6 +20,7 @@
 #include "tools/jpov/interface/text3d_util.h"
 #include "tools/jpov/src/gltf_loader.h"
 #include "tools/jpov/src/env_specular.h"
+#include "tools/jpov/src/lights_texture.h"
 #include "tools/jpov/src/fire_fog/fire_fog_renderer.h"
 #include "tools/jpov/src/horizon_fog/horizon_fog_renderer.h"
 #include "tools/jpov/src/orm_unpack.h"
@@ -609,6 +610,7 @@ Renderer::~Renderer() {
     smaa_renderer_.Finalize();
     debug_overlay_renderer_.Finalize();
     if (tile_index_tex_) { glDeleteTextures(1, &tile_index_tex_); tile_index_tex_ = 0; }
+    if (light_data_tex_) { glDeleteTextures(1, &light_data_tex_); light_data_tex_ = 0; }
     if (pick_fbo_) {
         glDeleteFramebuffers(1, &pick_fbo_);
         glDeleteTextures(1, &pick_tex_);
@@ -1595,16 +1597,23 @@ void Renderer::Render(const RenderCommandList& cmds,
         //     tile_culling=false 时跳过，shader 走全光源遍历（无分界线）。
         if (!cmds.object_use_default_color &&
             (!cmds.object3d.empty() || !cmds.instanced_object.empty())) {
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProg(), DrawObject3DProgFull());
-            // cutout 变体 program 同源，也需光照 uniform。
-            Object3DRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawObject3DProgCutout(), DrawObject3DProgFullCutout());
-            // 实例 program 同源，也需光照 uniform。
-            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawInstancedObjectProg(), DrawInstancedObjectProgFull());
-            InstancedObjectRenderer::UploadLightData(cmds, shader_mgr_,
-                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout());
+            // 光源数据走**数据纹理**（见 src/lights_texture.h）：每盏灯 9 个 float 曾放在
+            // `uniform Light uLights[255]` 里，NVIDIA 的打包下独占 1020 个常量寄存器，
+            // 而片元级上限只有 1024 → 真卡上 error C6020 直接链接失败。
+            // 现在：更新纹理一次，再给每个 PBR program 绑一次采样器单元 + 光源数。
+            EnsureLightDataTexture(&light_data_tex_);
+            UploadLightDataTexture(cmds, light_data_tex_);
+            const int light_count = ClampedPointLightCount(cmds);
+            const unsigned int lit_programs[] = {
+                DrawObject3DProg(),        DrawObject3DProgFull(),
+                DrawObject3DProgCutout(),  DrawObject3DProgFullCutout(),
+                DrawInstancedObjectProg(), DrawInstancedObjectProgFull(),
+                DrawInstancedObjectProgCutout(), DrawInstancedObjectProgFullCutout(),
+            };
+            for (unsigned int lit_prog : lit_programs) {
+                BindLightDataTexture(&shader_mgr_, lit_prog, light_data_tex_,
+                                     light_count, cmds.tile_culling);
+            }
             if (cmds.tile_culling) {
                 Object3DRenderer::EnsureTileLighting(fbo_3d_w, fbo_3d_h,
                     &tile_index_tex_, &tile_grid_w_, &tile_grid_h_,

@@ -121,6 +121,29 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# 点光源数据纹理（RGBA32F，255 列 × 3 行）—— 三份 PBR 片元共享。
+# 为什么不用 `uniform Light uLights[255]`：NVIDIA 片元级常量寄存器只有 1024 个 vec4，
+# 255 盏灯要 1020 个 → error C6020 链接失败（2026-11-01 Windows 真卡）。详见头文件。
+cc_library(
+    name = "lights_texture",
+    srcs = ["lights_texture.cc"],
+    hdrs = ["lights_texture.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shader_manager",
+        ":texture_units",
+        "//tools/jpov/interface:render_command",
+        "@glog_static//:glog",
+    ] + select({
+        "@platforms//os:windows": [
+            "//third_party/gl_loader-mingw:gl_loader",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = ["-std=c++20"],
+    linkstatic = 1,
+)
+
 # CSM 阴影的 GLSL 共享件（单级联单次采样，无 PCF）：雾与条带同一份实现。
 cc_library(
     name = "csm_shadow_glsl",
@@ -359,6 +382,7 @@ cc_library(
         ":object3d_renderer",
         ":instanced_renderer",
         ":instanced_object_attrs",
+        ":lights_texture",
         ":primitives3d_renderer",
         "//tools/jpov/src/skeleton:skeleton_renderer",
         ":shader_manager",
