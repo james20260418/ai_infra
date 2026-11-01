@@ -2629,20 +2629,34 @@ bool Renderer::DrawSsrAttrPass(const RenderCommandList& cmds, int w, int h) {
     // 丢掉的透明区域也写一遍法线（深度 LEQUAL 会放行更近的片元），把那片不存在的几何
     // 写进朝向判据的输入里（2026-11-01）。
     const unsigned int prog_cutout = ssr_integration_.attr_cutout_program();
-    glUniformMatrix3fv(glGetUniformLocation(prog_cutout, "uWorldToView"), 1, GL_FALSE,
-                       world_to_view);
-    const GLint loc_is_reflector = glGetUniformLocation(prog, "uAttrIsReflector");
-    const GLint loc_is_reflector_cutout = glGetUniformLocation(prog_cutout, "uAttrIsReflector");
+    // uniform location 只在 Init 后查一次就够（每帧每物体查一次 glGetUniformLocation
+    // 是驱动里的字符串查找，物体多时很贵）。uWorldToView 每帧只变一次 ⇒ 两个 program 各传一次。
+    const unsigned int attr_progs[2] = {prog, prog_cutout};
+    GLint loc_world_to_view[2] = {0, 0};
+    GLint loc_is_reflector[2] = {0, 0};
+    for (int i = 0; i < 2; ++i) {
+        loc_world_to_view[i] = glGetUniformLocation(attr_progs[i], "uWorldToView");
+        loc_is_reflector[i] = glGetUniformLocation(attr_progs[i], "uAttrIsReflector");
+        glUseProgram(attr_progs[i]);
+        glUniformMatrix3fv(loc_world_to_view[i], 1, GL_FALSE, world_to_view);
+    }
+    int cur_prog = -1;
+    float last_is_reflector[2] = {-1.0f, -1.0f};   // 无效值：保证第一件物体一定上传一次
     for (const Object3DCommand& o : cmds.object3d) {
         const bool cutout = (o.material.alpha_mode == AlphaMode::kMask);
-        const unsigned int target = cutout ? prog_cutout : prog;
+        const int which = cutout ? 1 : 0;
+        if (which != cur_prog) {
+            glUseProgram(attr_progs[which]);
+            cur_prog = which;
+        }
         const float is_reflector = o.ssr_reflector ? 1.0f : 0.0f;
-        glUseProgram(target);
-        glUniformMatrix3fv(glGetUniformLocation(target, "uWorldToView"), 1, GL_FALSE,
-                           world_to_view);
-        glUniform1f(cutout ? loc_is_reflector_cutout : loc_is_reflector, is_reflector);
+        if (is_reflector != last_is_reflector[which]) {
+            glUniform1f(loc_is_reflector[which], is_reflector);
+            last_is_reflector[which] = is_reflector;
+        }
         // 与主 pass 用同一个 mvp（含 model），只换 FS：写法线 + 掩码。
-        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_, target, target,
+        Object3DRenderer::DrawObject3DSelected(o, mesh_mgr_, texture_mgr_, mvp_,
+                                               attr_progs[which], attr_progs[which],
                                                /*pick_id_map=*/nullptr);
     }
 

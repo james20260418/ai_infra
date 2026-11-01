@@ -58,7 +58,7 @@ uniform float uRangeDepthRatio;    // **软权尺度**：rel 等于它时权重�
 uniform float uHardCut;            // rel 超过它 ⇒ 硬拒（数量级不同 = 真跨表面/剪影）
 uniform float uWeightFloor;        // 权重下限（相对空间权）⇒ Σw 永不为 0，不出孔洞
 uniform int   uDepthMode;          // 0 = 软权；1 = 不判深度（Unity 官方 SSR 的做法）
-uniform int   uCoverageDebug;      // 1 = 只输出覆盖率灰度
+uniform int   uCoverageDebug;      // 1 = A 覆盖率灰度；2 = 直通；3 = SSR 辐亮度；4 = ray_ratio
 
 layout(location = 0) out vec4 FragColor;
 
@@ -163,8 +163,11 @@ void main() {
             float ws = (i == 0 ? 1.0 - t.x : t.x) * (j == 0 ? 1.0 - t.y : t.y);
 
             float z_lo = ZView(texelFetch(uDownDepth, q, 0).r);
-            vec2 n2_lo = texelFetch(uDownNormal, q, 0).xy;
-            vec3 n_lo = NormalFromAttr(vec4(n2_lo, 0.0, 0.0));
+            // ⚠️ 必须读**完整三维**法线：属性纹理自 2026-10-31 起存 rgb = 视空间法线。
+            //    以前这里只取 .xy 并把 z 补 0（当时的约定是"z 由 sqrt 重建"），改存三分量后
+            //    那段没跟着改 ⇒ 升采样的法线值域项拿的是 (x,y,0) 这个**平面内**的假法线，
+            //    斜面上 dot(n_hi,n_lo) 系统性偏小 ⇒ 边缘权重被压、倒影边缘变暗/出洞。
+            vec3 n_lo = NormalFromAttr(texelFetch(uDownNormal, q, 0));
             float w_lo = 1.0 / max(z_lo, 1.0e-4);
 
             // ── 值域项：**连续软权**（2026-10-31 从硬 0/1 改过来）──
@@ -222,6 +225,14 @@ void main() {
         FragColor = vec4(ssr_L * A, 1.0);
         return;
     }
+    // 调试档 4：ray_ratio（预算占用率）灰度图。命中越接近预算上限越亮 ——
+    // 用来目视确认"提前结束的射线不会被误判成快到极限"。
+    if (uCoverageDebug == 4) {
+        ivec2 q0c = clamp(q0, ivec2(0), ivec2(uSsrRes) - 1);
+        FragColor = vec4(vec3(texelFetch(uSsr, q0c, 0).a), 1.0);
+        return;
+    }
+
     if (mask < 0.5 || uCoverageDebug == 2) {
         FragColor = vec4(hdr, 1.0);
         return;
@@ -237,27 +248,14 @@ void main() {
     vec3 weight = F0 * AB.x + AB.y;
     vec3 env_term = EnvSpecularTerm(n_hi, V, uRoughness, uMetallic, uBaseColor);
 
-    // TEMP 调试：5 = 只加 SSR 不扣环境；6 = 只扣环境不加 SSR（定位红蓝饱和来自哪一半）
-    if (uCoverageDebug == 5) {
-        FragColor = vec4(hdr + mask * A * uAo * (ssr_L * weight), 1.0);
-        return;
-    }
-    if (uCoverageDebug == 6) {
-        FragColor = vec4(hdr - mask * A * uAo * env_term, 1.0);
-        return;
-    }
-    // TEMP 实验：把环境项按通道钳到 hdr 以下，避免 hdr − env < 0（负通道 → tone map 归零
-    // ⇒ 单通道饱和成纯红/纯蓝）。
-    vec3 env_clamped = min(env_term, hdr);
-    vec3 out_rgb = hdr + mask * A * uAo * (ssr_L * weight - env_clamped);
+    // 注意：本式**不做**逐通道钳位。单材质（SsrConfig 一套 F0/roughness）碰到"同屏不同
+    // 材质"时，hdr − env_term 可能出现负通道（tone map 后表现为纯红/纯蓝饱和）。
+    // 那是已知限制（见 ssr_fusion.h），正确修法是 F0/roughness 进属性纹理，而不是在这里
+    // 把 env_term 钳到 hdr 以下（那会改变能量、掩盖问题）。
+    vec3 out_rgb = hdr + mask * A * uAo * (ssr_L * weight - env_term);
     FragColor = vec4(out_rgb, 1.0);
 }
 )glsl";
-
-void UploadEnvSpecularWrap(ShaderManager& mgr, unsigned int prog, unsigned int cube, float max_lod,
-                           float sky_scale, bool enabled) {
-    UploadEnvSpecular(mgr, prog, cube, max_lod, sky_scale, enabled);
-}
 
 }  // namespace
 
@@ -302,8 +300,11 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     GLint prev_viewport[4] = {0, 0, 0, 0};
     GLint prev_active = 0;
     GLint prev_prog = 0;
+    GLint prev_draw_buffer = GL_COLOR_ATTACHMENT0;
     GLint prev_blend = 0;
     GLint prev_depth = 0;
+    GLint prev_cull = 0;
+    GLint prev_scissor = 0;
     GLint prev_bind[kTexUnitCount] = {0, 0, 0, 0, 0, 0};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
@@ -311,6 +312,8 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
     prev_blend = glIsEnabled(GL_BLEND);
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
+    prev_cull = glIsEnabled(GL_CULL_FACE);
+    prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
     for (int u = 0; u < kTexUnitCount; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind[u]);
@@ -320,6 +323,15 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glViewport(0, 0, in.full_w, in.full_h);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);     // 全屏三角形
+    glDisable(GL_SCISSOR_TEST);  // 调用方开着 scissor 会把全屏 pass 裁成一小块
+    // ⚠️ 目标 FBO 是 MRT 的（附件0 = HDR 颜色，附件1 = 场景深度）。本 pass 的 FS 只有
+    //    一个输出（location 0）—— 若把两个附件都当 draw buffer，**附件1 的内容会变成
+    //    未定义**（GL 规范：没有对应输出的 draw buffer 值是 undefined）。而场景深度 MRT
+    //    后面还在被远景雾/其它后处理读 ⇒ 开 SSR 时雾会读到垃圾深度。
+    //    所以这里只画附件0，并在返回前恢复调用方的 draw buffer 设置。
+    glGetIntegerv(GL_DRAW_BUFFER, &prev_draw_buffer);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glUseProgram(prog_);
 
     glActiveTexture(GL_TEXTURE0 + kTexUnitIn0);
@@ -371,6 +383,7 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
 
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
+    glDrawBuffer(static_cast<GLenum>(prev_draw_buffer));
     glUseProgram(static_cast<GLuint>(prev_prog));
     for (int u = 0; u < kTexUnitCount; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
@@ -381,6 +394,8 @@ void SsrFusion::Run(const SsrFusionInputs& in) {
     glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
     if (prev_blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     if (prev_depth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (prev_cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (prev_scissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
 }
 
 }  // namespace jpov

@@ -159,6 +159,8 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     GLint prev_prog = 0;
     GLint prev_blend = 0;
     GLint prev_depth = 0;
+    GLint prev_cull = 0;
+    GLint prev_scissor = 0;
     GLint prev_bind[kTexUnitCount] = {0, 0, 0};
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
     glGetIntegerv(GL_VIEWPORT, prev_viewport);
@@ -166,6 +168,8 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
     prev_blend = glIsEnabled(GL_BLEND);
     prev_depth = glIsEnabled(GL_DEPTH_TEST);
+    prev_cull = glIsEnabled(GL_CULL_FACE);
+    prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
     for (int u = 0; u < kTexUnitCount; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_bind[u]);
@@ -177,6 +181,8 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     glViewport(0, 0, w, h);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);     // 全屏三角形：不能被剔除
+    glDisable(GL_SCISSOR_TEST);  // 调用方开着 scissor 会把全屏 pass 裁成一小块
     glUseProgram(prog_);
 
     glActiveTexture(GL_TEXTURE0 + kTexUnitColor);
@@ -198,6 +204,8 @@ void SsrDownsample::Run(unsigned int full_color_tex, unsigned int full_depth_tex
     glUseProgram(static_cast<GLuint>(prev_prog));
     if (prev_blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     if (prev_depth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (prev_cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (prev_scissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
     for (int u = 0; u < kTexUnitCount; ++u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prev_bind[u]));

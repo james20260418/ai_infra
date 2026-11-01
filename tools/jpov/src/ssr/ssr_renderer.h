@@ -12,7 +12,8 @@
 // 一个**全屏后处理子渲染器**，与 SmaaRenderer / HorizonFogRenderer 平级。
 //
 //   in : 本帧已经画完的**不透明** HDR 颜色 + 场景深度 + 反射体法线 + 相机 + 一个厚度系数
-//   out: 每像素一条「镜面方向上看到的颜色」+ 一个二值覆盖率 A ∈ {0,1}
+//   out: 每像素「镜面方向上看到的颜色」+ ray_ratio + 类型（命中/天空/出屏/预算耗尽）；
+//        覆盖率 A 由 type == kHit 派生（不再单独占通道）
 //
 // 它**不知道材质、不读环境探针、不做平滑、不写 HDR**——那些全都属于 composite（§7/§8）。
 // 这条边界是刻意的：模块只报事实（命中 / 拿不到），处置权归消费端。
@@ -235,8 +236,9 @@ struct SsrInputs {
     //   · 默认 2：正好一个 quad 服务一个镜面像素（SIMD 粒度天然对齐），显存 4×。
     int tile_size = 2;
 
-    // 仅测试/调试：true 时额外写 reason_tex（见 SsrResult）。**不参与计算**，
-    // 关掉时对 radiance_tex 零影响（gold 用 radiance，三态用它，§11.2-5）。
+    // 仅测试/调试：true 时额外写 hit_s_tex（命中位置 s）。**不参与计算**，
+    // 关掉时对 radiance_tex / type_tex 零影响。
+    // （type_tex 现在**总是**输出，不再需要这个开关来打开分类图。）
     bool debug_reason = false;
 };
 
@@ -258,8 +260,8 @@ struct SsrOutputs {
     //   kHit 之外的取值 = "为什么没有可用结果"，供融合层选择 fallback（env / sky / 跳过）。
     unsigned int type_tex = 0;
 
-    // R8UI（仅 debug_reason == true 时非 0）：与 type_tex 同值的调试副本。
-    // 保留它是为了让既有测试（§11.2-5 的"A 三态"）不用改断言目标。
+    // **type_tex 的别名**（同一张纹理、同一个句柄）：为兼容既有测试的字段名而保留，
+    // 不要当成"第二份数据"，也不要单独释放（DestroyTargets 里已注明）。
     unsigned int reason_tex = 0;
 
     // R32F（仅 debug_reason == true 时非 0）：每像素写整条射线的碰撞位置 s（像素弧长，
@@ -435,7 +437,7 @@ private:
 //        （一次取 2×2，T=8 从 64 次变 16 次 fetch，仍是一趟）。
 //
 // ⑦ 调试（不额外开 pass，全部顺手写在 ⑥ 里）
-//      reason_tex ← SsrResult；hit_s_tex ← s
+//      type_tex ← SsrResult（总是输出）；hit_s_tex ← s（仅 debug_reason）
 //
 // ── 数值卫生（写代码时逐条问自己）─────────────────────────────────────────
 //  · **永远**不要在 d 空间做插值，只在 w = 1/d 空间插值（§3.1）。

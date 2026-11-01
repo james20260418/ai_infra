@@ -497,7 +497,12 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.ssr_debug_ = 1;
     app.RunOnce(input, winfo, (out_dir + "/ssr_coverage.png").c_str());
 
-    // (d2) 1:3（N=3 不是 2 的幂，验证这条通路也成立）
+    // (d2) ray_ratio 视图（预算占用率）：验证新输出通道的口径
+    app.ssr_debug_ = 4;
+    app.RunOnce(input, winfo, (out_dir + "/ssr_ratio.png").c_str());
+    app.ssr_debug_ = 0;
+
+    // (d3) 1:3（N=3 不是 2 的幂，验证这条通路也成立）
     app.ssr_debug_ = 0;
     app.ssr_scale_ = 1.0f / 3.0f;
     app.RunOnce(input, winfo, (out_dir + "/ssr_on_third.png").c_str());
@@ -522,6 +527,16 @@ int RunCaptureSsr(const std::string& out_dir) {
     app.ssr_depth_mode_ = 1;
     app.RunOnce(input, winfo, (out_dir + "/ssr_graze_unity.png").c_str());
 
+
+    // (i)(j) 远景仰角雾 × SSR：雾用 **MRT#1 场景深度**，而 SSR 合成是往同一个 FBO 的颜色
+    //   附件上画的 —— 这一组用来确认 SSR 不会破坏 MRT#1（雾在开 SSR / 关 SSR 下必须一致）。
+    app.deg_.elev_fog_on = true;
+    app.SetSsr(false);
+    app.RunOnce(input, winfo, (out_dir + "/ssr_fog_off.png").c_str());
+    app.SetSsr(true);
+    app.RunOnce(input, winfo, (out_dir + "/ssr_fog_on.png").c_str());
+    app.deg_.elev_fog_on = false;
+    app.SetSsr(false);
 
     LOG(INFO) << "SSR A/B captured to " << out_dir;
     app.Finalize();
